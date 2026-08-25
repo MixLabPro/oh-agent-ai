@@ -438,8 +438,8 @@
   "use strict";
 
   // ─── 配置 ──────────────────────────────────────────────────────────────
-  // macOS 用户的默认 home。Linux/Windows 用户请覆盖：
-  //   <script>window.SKILL_VITALS_STATE_HOME = '/home/you/.skill-vitals/state';</script>
+  // macOS 用户的默认 home。Linux/Windows 用户请在 script 标签里覆盖：
+  //   window.SKILL_VITALS_STATE_HOME = '/home/you/.skill-vitals/state';
   // 浏览器无法把 ~ 展开成 $HOME；硬编码是合理的——绝大多数用户在 macOS。
   var STATE_HOME_DEFAULT = "/Users/Admin/.skill-vitals/state";
 
@@ -592,6 +592,26 @@
     document.getElementById("source-label").textContent =
       home + "/" + mode + ".json";
     document.title = "Skill Vitals · " + mode + " · M4";
+
+    // ── 数据加载三段式 ──────────────────────────────────────────
+    // 1. **inline 优先** — calendar CLI 在渲染时已经把 JSON 写到
+    //    `<script type="application/json" id="skill-vitals-data">` 里,
+    //    这是唯一一条不需要网络/CORS 的路径,**保证 file:// 双击也能渲染**。
+    // 2. fetch 备选 — 浏览器从 http:// 自托管站点拉 JSON。
+    // 3. file picker 兜底 — fetch 也失败时,用户手动选文件。
+    // 三段全失败 → 显示 empty state,不假装成功。
+    var inline = document.getElementById("skill-vitals-data");
+    if (inline && inline.textContent.trim()) {
+      try {
+        var data = JSON.parse(inline.textContent);
+        setStatus("已加载 inline 数据（" + mode + ".json）");
+        render(mode, data);
+        return;  // 成功就不走 fetch/file picker 了
+      } catch (e) {
+        setStatus("inline JSON 解析失败：" + e.message, true);
+        // 退到 fetch
+      }
+    }
 
     setStatus("尝试 fetch " + url + " …");
     tryFetch(url).then(function(data) {

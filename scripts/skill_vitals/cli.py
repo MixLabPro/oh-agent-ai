@@ -540,18 +540,34 @@ def _main():
             print("calendar template not found at %s (run M4 first)" % template,
                   file=sys.stderr)
             sys.exit(2)
-        out = Path(args.output)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
-        # 同时把 state 文件 cp 到同目录 .json —— 不要求用户起静态服务，
-        # 双击 HTML 就能 fetch 到本地文件（file:// 协议）。
         src_name = "month.json" if args.source == "month" else "today.json"
         src = state_module.state_dir() / src_name
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        # 模板第一段 <!-- M4 TEMPLATE_BEGIN --> ... <!-- M4 TEMPLATE_END -->
+        # 包住所有内容。我们把数据 JSON 注入到 <head> 里一个独立 <script>
+        # 块,渲染时 JS 优先读 window.__SKILL_VITALS_DATA__,没有再退到 fetch
+        # + file picker。这样 file:// 双击 HTML 也能渲染（无 fetch / 无 CORS）。
+        html = template.read_text(encoding="utf-8")
         if src.is_file():
-            (out.parent / src_name).write_text(src.read_text(encoding="utf-8"),
-                                              encoding="utf-8")
-            print("rendered: %s (%d bytes, data: %s)" % (out, out.stat().st_size, src))
+            json_text = src.read_text(encoding="utf-8")
+            # JSON 里可能含 </script> —— 必须转义,否则浏览器解析到这就崩
+            json_text_safe = (json_text
+                              .replace("</script", "<\\/script")
+                              .replace("<!--", "<\\!--"))
+            inject = ("<script id=\"skill-vitals-data\" type=\"application/json\">"
+                      + json_text_safe + "</script>")
+            html = html.replace("</head>", inject + "\n</head>", 1)
+            out.write_text(html, encoding="utf-8")
+            # 同时把 state 文件 cp 到同目录,作为 fetch fallback 的副本。
+            (out.parent / src_name).write_text(json_text, encoding="utf-8")
+            print("rendered: %s (%d bytes, data inline + %s)"
+                  % (out, out.stat().st_size, src))
         else:
+            # 无数据：HTML 仍然渲染,JS 检测到 __SKILL_VITALS_DATA__ 缺失
+            # → 显示「无数据」empty state,而不是凭空编一个空 calendar。
+            out.write_text(html, encoding="utf-8")
             print("rendered: %s (no %s yet — calendar will show empty state)"
                   % (out, src_name))
         return
