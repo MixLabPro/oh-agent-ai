@@ -1,0 +1,33 @@
+{
+  "_doc": "价目表按供应商分层。解析顺序：providers[该请求的 provider].models[模型] → 找不到则回落 fallback_provider 的同名模型（并在输出里标 pricing_basis=fallback，展示层必须说明「按原厂报价估算」）→ 再找不到才算未计价。单位：元/百万 token。off_peak 是常规价，peak 是高峰价（北京时间周一至周五 9-12、14-18，周末全天按 off_peak）。",
+  "fallback_provider": "deepseek-official",
+  "providers": {
+    "deepseek-official": {
+      "label": "DeepSeek 原厂",
+      "models": {
+        "deepseek-v4-flash": {
+          "input_uncached": { "off_peak": 1.5, "peak": 3.0 },
+          "input_cached": { "off_peak": 0.05, "peak": 0.10 },
+          "output": { "off_peak": 4.5, "peak": 9.0 }
+        },
+        "deepseek-v4-pro": {
+          "input_uncached": { "off_peak": 4.5, "peak": 9.0 },
+          "input_cached": { "off_peak": 0.15, "peak": 0.30 },
+          "output": { "off_peak": 13.5, "peak": 27.0 }
+        }
+      }
+    },
+    "shengsuanyun": {
+      "label": "胜算云",
+      "_note": "取自胜算云 DeepSeek-V4-Pro-0813 供应商页。该页列了两条上游线路，输入/输出价完全相同，只有缓存读取价差 3 倍：DeepSeek 线路 0.15/0.30，Ali 线路 0.45/0.90。日志里只记录到 provider=shengsuanyun，看不出实际走了哪条，这里按 DeepSeek 线路配置——若确认常走 Ali，把 input_cached 改成 0.45/0.90 即可，其余不用动。",
+      "models": {
+        "deepseek-v4-pro": {
+          "input_uncached": { "off_peak": 4.5, "peak": 9.0 },
+          "input_cached": { "off_peak": 0.15, "peak": 0.30 },
+          "output": { "off_peak": 13.5, "peak": 27.0 }
+        }
+      }
+    }
+  },
+  "cache_write_per_million": 0
+}

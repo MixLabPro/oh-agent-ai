@@ -1,0 +1,285 @@
+name: Package and publish ClawHub skill
+
+on:
+  push:
+    branches: [main]
+    tags: ["skill-v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "ClawHub version (for example 1.0.3)"
+        required: false
+        type: string
+      publish:
+        description: "Publish the package to ClawHub"
+        required: true
+        default: false
+        type: boolean
+      changelog:
+        description: "Release notes; defaults to the latest commit subject"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build minimal ClawHub package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="dist/skill-vitals"
+          mkdir -p "$package_dir/scripts" "$package_dir/references" "$package_dir/agents"
+          cp SKILL.md README.md LICENSE "$package_dir/"
+          cp scripts/scan.py scripts/probe_logs.py "$package_dir/scripts/"
+          cp -R scripts/skill_vitals "$package_dir/scripts/skill_vitals"
+          find "$package_dir/scripts/skill_vitals" -type f \
+            \( -name '*.pyc' -o -name '*.pyo' \) -delete
+          find "$package_dir/scripts/skill_vitals" -type d \
+            -name '__pycache__' -prune -exec rm -rf -- {} +
+
+          python_package="$package_dir/scripts/skill_vitals"
+          unexpected_dir="$(find "$python_package" -mindepth 1 -type d \
+            ! -path "$python_package/adapters" -print -quit)"
+          if [ -n "$unexpected_dir" ]; then
+            echo "Unexpected directory in Python package: $unexpected_dir" >&2
+            exit 1
+          fi
+
+          mapfile -t package_files < <(
+            cd "$python_package"
+            find . -type f -printf '%P\n' | sort
+          )
+          for path in "${package_files[@]}"; do
+            case "$path" in
+              __init__.py|cli.py|compat.py|util.py|frontmatter.py|security.py|discovery.py|inventory.py|report.py|analysis.py|overlap.py|doctor.py|explain.py|lifecycle.py|redact.py|snapshots.py|diff.py|behavior.py|trajectory.py|usage.py|cost.py|compaction.py|waste.py|subagent.py|skill.py|duration.py|pricing.json|adapters/__init__.py|adapters/claude.py|adapters/codex.py|adapters/openclaw.py|adapters/workbuddy.py|adapters/hermes.py|adapters/dsh.py)
+                ;;
+              *)
+                echo "Unexpected file in Python package: $path" >&2
+                exit 1
+                ;;
+            esac
+          done
+          cp references/guide.zh-CN.md references/hosts.md references/judgment.md \
+            "$package_dir/references/"
+          cp agents/openai.yaml "$package_dir/agents/"
+
+          required="LICENSE README.md SKILL.md agents/openai.yaml references/guide.zh-CN.md references/hosts.md references/judgment.md scripts/probe_logs.py scripts/scan.py scripts/skill_vitals/__init__.py"
+          for path in $required; do
+            if [ ! -f "$package_dir/$path" ]; then
+              echo "Required package file is missing: $path" >&2
+              exit 1
+            fi
+          done
+
+          forbidden="$(find "$package_dir" \( \
+            -type f \( -name '*.pyc' -o -name '*.pyo' \) -o \
+            -type d -name '__pycache__' \) -print -quit)"
+          if [ -n "$forbidden" ]; then
+            echo "Python cache or bytecode leaked into the package: $forbidden" >&2
+            exit 1
+          fi
+
+          # SKILL.md routes the agent to references/ on demand. A link that
+          # resolves in the repository but names a file the package does not
+          # ship fails only for ClawHub users, and only at the moment the agent
+          # tries to read it. Check the links against the built package.
+          python - "$package_dir" <<'PY'
+          import re, sys
+          from pathlib import Path
+          package = Path(sys.argv[1])
+          text = (package / "SKILL.md").read_text(encoding="utf-8")
+          links = sorted({m.group(1).strip() for m in
+                          re.finditer(r"\[[^\]]*\]\((?!https?:)([^)#]+)\)", text)})
+          missing = [link for link in links if not (package / link).is_file()]
+          if missing:
+              print("SKILL.md links missing from the package: %s" % missing,
+                    file=sys.stderr)
+              raise SystemExit(1)
+          print("SKILL.md links resolve in the package: %s" % links)
+          PY
+
+          # Run from the artifact itself, with no repository path available to
+          # Python. This catches missing modules before upload or publication.
+          # Runtime probes are disabled: this gate tests that the package is
+          # complete, not that hosts are installed on the runner.
+          (
+            cd "$package_dir"
+            export SKILL_VITALS_DISABLE_CODEX_RUNTIME=1
+            export SKILL_VITALS_DISABLE_OPENCLAW_RUNTIME=1
+            export SKILL_VITALS_DISABLE_WORKBUDDY_BUILTINS=1
+            env -u PYTHONPATH python -I scripts/scan.py --version
+            env -u PYTHONPATH python -I scripts/scan.py --help >/dev/null
+
+            # An isolated home keeps the runner's own state out of the gate and
+            # makes these runs reproducible.
+            packaged_scan="$PWD/scripts/scan.py"
+            smoke_home="$(mktemp -d)"
+            mkdir -p "$smoke_home/.claude/skills/smoke" "$smoke_home/workdir"
+            printf -- '---\nname: smoke\ndescription: packaged artifact smoke test\n---\n\nBody.\n' \
+              > "$smoke_home/.claude/skills/smoke/SKILL.md"
+            (
+              cd "$smoke_home/workdir"
+              for command in "doctor --no-snapshot" "list" "--json -"; do
+                # Report each command by name. A gate whose only evidence is the
+                # absence of an error cannot be told apart from a gate that
+                # silently ran nothing -- the exact failure verify.yml refuses
+                # to tolerate for the differential job.
+                lines="$(
+                  HOME="$smoke_home" env -u PYTHONPATH \
+                    python -I "$packaged_scan" $command | wc -l
+                )"
+                if [ "$lines" -lt 1 ]; then
+                  echo "Packaged artifact produced no output: scan.py $command" >&2
+                  exit 1
+                fi
+                echo "packaged smoke ok: scan.py $command ($lines lines)"
+              done
+            )
+            rm -rf "$smoke_home"
+          )
+
+          (cd dist && zip -qr skill-vitals-clawhub.zip skill-vitals)
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-vitals-clawhub-${{ github.sha }}
+          path: dist/skill-vitals-clawhub.zip
+          if-no-files-found: error
+
+      - name: Resolve release metadata
+        id: release
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          set -euo pipefail
+          version="$INPUT_VERSION"
+          if [[ "$GITHUB_REF" == refs/tags/skill-v* ]]; then
+            version="${GITHUB_REF_NAME#skill-v}"
+          fi
+          changelog="$INPUT_CHANGELOG"
+          if [ -z "$changelog" ] && [[ "$GITHUB_REF" == refs/tags/skill-v* ]]; then
+            # checkout@v4 fetches the tagged commit but may omit the annotated
+            # tag object in a shallow checkout. Fetch it explicitly so release
+            # notes do not silently fall back to the commit subject.
+            git fetch --force origin \
+              "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+            changelog="$(git for-each-ref --format='%(contents)' "refs/tags/$GITHUB_REF_NAME")"
+          fi
+          if [ -z "$changelog" ]; then
+            changelog="$(git log -1 --pretty=%B)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # changelog 可能是多行（默认取 commit 完整正文）。GITHUB_OUTPUT 的
+          # 多行值必须用分隔符语法，直接 `echo "k=$v"` 遇到换行就会报
+          # `Invalid format`，整个 job 挂掉 —— 实际发生过：一条带正文的
+          # commit 就足以让打包失败。分隔符取一个正文里不可能出现的串。
+          delimiter="ghadelim_$(date +%s)_$RANDOM"
+          {
+            echo "changelog<<$delimiter"
+            echo "$changelog"
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish to ClawHub
+        if: startsWith(github.ref, 'refs/tags/skill-v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        shell: bash
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_CHANGELOG: ${{ steps.release.outputs.changelog }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CLAWHUB_TOKEN" ]; then
+            echo "Repository secret CLAWHUB_TOKEN is required for publishing." >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "A valid release version is required; got '$RELEASE_VERSION'." >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_CHANGELOG" =~ [A-Za-z] ]] || ! printf '%s' "$RELEASE_CHANGELOG" | grep -qP '[\x{4e00}-\x{9fff}]'; then
+            echo "Release notes must contain both English and Chinese." >&2
+            exit 1
+          fi
+          # The published version and the version the CLI reports must be the
+          # same string. They drifted once: ClawHub took its version from the
+          # tag while __version__ sat at 0.1.0 for six releases, so every bug
+          # report cited a version that matched no release. Publishing is the
+          # last point where this is still cheap to catch.
+          cli_version="$(
+            cd dist/skill-vitals
+            env -u PYTHONPATH python -I scripts/scan.py --version
+          )"
+          cli_version="${cli_version##* }"
+          if [ "$cli_version" != "$RELEASE_VERSION" ]; then
+            echo "Version mismatch: the tag publishes '$RELEASE_VERSION' but the" >&2
+            echo "packaged CLI reports '$cli_version'. Update __version__ in" >&2
+            echo "scripts/skill_vitals/__init__.py to match the tag." >&2
+            exit 1
+          fi
+          # clawhub 0.23.3 stores authentication in its local config; merely
+          # exporting CLAWHUB_TOKEN does not make `skill publish` logged in.
+          npx --yes clawhub@0.23.3 auth login --token "$CLAWHUB_TOKEN"
+          # The registry search matches the slug and the display name, not the
+          # description. Every category query ("skill audit", "context budget")
+          # therefore missed this skill entirely while its description covered
+          # all of those words. The slug stays put -- it is the install command
+          # users already have -- so the searchable half is the display name.
+          publish_result="$(npx --yes clawhub@0.23.3 skill publish dist/skill-vitals \
+            --slug skill-vitals \
+            --name "Skill Vitals — Skill Audit" \
+            --topics "Skill Management,Context Management,Security Audits,Cost Optimization,Developer Tools" \
+            --owner MixLabPro \
+            --version "$RELEASE_VERSION" \
+            --changelog "$RELEASE_CHANGELOG" \
+            --tags latest \
+            --source-repo "https://github.com/${GITHUB_REPOSITORY}" \
+            --source-commit "$GITHUB_SHA" \
+            --source-ref "${GITHUB_REF_NAME}" \
+            --source-path . \
+            --json)"
+          printf '%s\n' "$publish_result"
+
+          # A successful upload can still mean pending-publication while
+          # ClawHub runs security checks. Do not paint the release green until
+          # the exact version is public, has a generated card, and passes the
+          # registry's verification gate.
+          verified=false
+          for attempt in $(seq 1 60); do
+            if npx --yes clawhub@0.23.3 skill verify skill-vitals \
+                --version "$RELEASE_VERSION" > clawhub-verify.json 2>&1; then
+              cat clawhub-verify.json
+              verified=true
+              break
+            fi
+            if [ "$attempt" -lt 60 ]; then
+              echo "ClawHub publication pending ($attempt/60); retrying in 30s."
+              sleep 30
+            fi
+          done
+          if [ "$verified" != true ]; then
+            cat clawhub-verify.json >&2
+            echo "ClawHub did not publish and verify version $RELEASE_VERSION within 30 minutes." >&2
+            exit 1
+          fi
+
+          # The asynchronous publication path does not always move `latest`
+          # even when `--tags latest` was included in the upload request.
+          npx --yes clawhub@0.23.3 skill tag skill-vitals \
+            "$RELEASE_VERSION" --tag latest --yes
+          npx --yes clawhub@0.23.3 inspect skill-vitals --json \
+            > /tmp/clawhub-latest.json
+          jq -e --arg version "$RELEASE_VERSION" \
+            '.skill.tags.latest == $version and .latestVersion.version == $version' \
+            /tmp/clawhub-latest.json

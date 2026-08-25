@@ -1,0 +1,478 @@
+"""会话级成本折叠 —— 把 usage 事件按当时活跃的模型分桶。
+
+与 behavior.py（SV601–610 风险规则）是两条正交的审计维度：风险规则输出
+finding 列表，这里输出 `{"by_model": {model: 四桶}, "sequence": [模型激活序列]}`。
+
+折叠语义与 DSH token-meter（packages/llm/token-meter/src/usage-projection.ts
+的 tokenUsageProjectionDefinition）完全一致，并已用真实日志对账：各桶之和
+== tokenUsage 投影累计值（94997694 会话 180577354/498735/712320/0 逐字节
+一致）。这里是 Python 平行实现，单一真相源是
+`crates/skill-vitals-core/src/usage.rs`；差分防护在 core 的 parity 测试与
+`tests/test_cli_matrix.py` 的双实现逐字节比较。
+
+三个关键语义（为什么这样实现，对应共性缺陷）：
+- **按模型分桶**：request/header 的 config.model 会在会话中途变化（真实日志
+  出现过 pro → flash → pro），`tokenUsage` 投影只有全会话累计、没有模型维度
+  ——拿一个模型价算整段账会错 3 倍（flash 与 pro 输入价差 3 倍）。
+- **同 (turn, step) 去重**：usage chunk 先到、assistant/message 后到是同一
+  step 的两份 sample，只计最后一份；替换时从**原归属模型**减掉旧值——否则
+  双计会让分桶之和超过真实累计。
+- **无活跃模型归 unknown**：老日志无 request/header 时宁缺勿造，落进
+  `"unknown"` 桶由展示层标「未计价」，绝不臆造一个模型。
+
+每个桶除四个全量字段外还带四个 peak_* 子字段——落在北京高峰时段（**周一至
+周五** 9–12、14–18 点；周末全天为空闲）的部分，由触发这份贡献的事件自己的
+time 字段判定。这让展示层能算
+出真实发生的费用（按每笔请求实际的时段计价），而不是「给空闲价和高峰价两个
+数，猜不出实际该按哪个算」的区间估算——旧注释说「累计桶无法重建每笔请求的
+时刻」，那是折叠时把 time 直接扔掉的自我实现，不是数据不存在。
+"""
+
+import json
+
+from .util import est_tokens, post_fork
+
+
+_EMPTY_BUCKET = {
+    "uncached_input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "peak_uncached_input_tokens": 0,
+    "peak_output_tokens": 0,
+    "peak_cache_read_tokens": 0,
+    "peak_cache_write_tokens": 0,
+}
+
+_BEIJING_OFFSET_SECS = 8 * 3600
+
+
+def _beijing_hour(time_ms):
+    """Unix ms → 北京时间小时数 [0,24)。中国自 1991 年起全境固定 UTC+8、无夏
+    令时，这是精确换算。"""
+    secs = time_ms // 1000 + _BEIJING_OFFSET_SECS
+    return (secs % 86400) // 3600
+
+
+def _beijing_weekday(time_ms):
+    """Unix ms → 北京时间星期几（周一=0 … 周日=6）。
+
+    1970-01-01 是星期四（以周一=0 计即 3），所以 `(天数 + 3) % 7`。用纯整数算，
+    不引日期库——Python 的 // 和 % 对负数本身就是向下取整/取正余数，1970 年
+    之前的负时间戳也对。
+    """
+    secs = time_ms // 1000 + _BEIJING_OFFSET_SECS
+    return (secs // 86400 + 3) % 7
+
+
+def _is_peak_slot(time_ms):
+    """高峰时段：北京时间**周一至周五**的 9–12 点、14–18 点（左闭右开）。
+    其余一切时间（含周六周日全天）都是空闲时段，空闲价 = 高峰价的一半。
+
+    **周末那一条以前漏了**，代价是精确的 2 倍：真实账单对照（2026-08-23 周日
+    14:45 那次会话）我们算 ¥1.0308372、官方收 ¥0.5154186，正好 ×2.0000——
+    29 次请求的 token 数逐位吻合，只有时段判错。而且这条从来没被真实账单验证
+    过：上一次对账的会话跑在 21–22 点，全程落在空闲时段，走的根本不是这个
+    分支，所以碰巧对上了。
+    """
+    if _beijing_weekday(time_ms) > 4:
+        return False  # 周六(5)、周日(6) 全天空闲
+    hour = _beijing_hour(time_ms)
+    return (9 <= hour < 12) or (14 <= hour < 18)
+
+
+def _is_peak(event):
+    """事件是否落在高峰时段。缺 time（老日志/畸形事件）保守按空闲算——峰值
+    单价更高，宁可少算费用也不要凭空安一个「高峰」时刻上去（不臆造）。"""
+    time_ms = event.get("time")
+    if not isinstance(time_ms, int) or isinstance(time_ms, bool):
+        return False
+    return _is_peak_slot(time_ms)
+
+
+def _int_or_none(v):
+    """缺字段/布尔返回 None；真整数原样返回（token 数不会为负/浮点）。"""
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+# usage sample 的四个字段名（日志里的 camelCase），顺序与 _BASE_KEYS 对齐。
+#: 同一模型名在一次会话里被两家供应商服务过时的标记。故意用一个不可能是
+#: 真实供应商名的字符串：它不会命中 priced_providers 白名单，于是自动落进
+#: 「不计价」——不需要计价方再认一个特殊分支。
+AMBIGUOUS_PROVIDER = "__ambiguous__"
+
+_SAMPLE_FIELDS = ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens")
+
+
+def _buckets_from(usage, seen=None):
+    """usage sample → 四桶。字段映射与 token-meter `bucketsFrom` 完全一致
+    （reasoning 已含在 outputTokens，不重复计）。
+
+    缺字段仍按 0 累加——这是**求和**的正确语义，且四桶之和必须与 DSH 的
+    `tokenUsage` 逐字节相等（已对账的不变量，不能动）。但「求和按 0」不等于
+    「测到了 0」：`seen` 收集**真正出现过**的字段名，由 `token_by_model` 折成
+    `unreported_fields`，让展示层能写「未上报」而不是「0」。
+
+    这条区分是有实测依据的：真实会话（session-e4b0be69）的 1398 个 usage 样本
+    （720 条 assistant/chunk + 678 条 assistant/message）里 `cacheWriteTokens`
+    **一次都没出现过**，`cacheReadTokens` 出现 1348 次。（早先这条注释写的是
+    「679 个样本」——那个数只数了 assistant/message 一种类型，漏了
+    assistant/chunk；发现于事后核对真实日志时，已更正。）原来
+    `or 0` 把「宿主根本不报这个字段」和「宿主报了 0」合并成同一个 0，UI 于是
+    显示「缓存写 0」——一个被伪造出来的测量值。这与 CLAUDE.md 的纪律直接冲突：
+    缺列的报告有用，编造列的报告没用（host 能力缺失时降级、绝不臆造）。
+    """
+    if seen is not None:
+        for name in _SAMPLE_FIELDS:
+            if _int_or_none(usage.get(name)) is not None:
+                seen.add(name)
+    return {
+        "uncached_input_tokens": _int_or_none(usage.get("inputTokens")) or 0,
+        "output_tokens": _int_or_none(usage.get("outputTokens")) or 0,
+        "cache_read_tokens": _int_or_none(usage.get("cacheReadTokens")) or 0,
+        "cache_write_tokens": _int_or_none(usage.get("cacheWriteTokens")) or 0,
+    }
+
+
+_BASE_KEYS = ("uncached_input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+_PEAK_KEYS = ("peak_uncached_input_tokens", "peak_output_tokens", "peak_cache_read_tokens", "peak_cache_write_tokens")
+
+
+def _add_buckets(by_model, model, buckets, sign, peak):
+    """分桶相加。`sign=-1` 用于替换语义（从原归属模型减掉旧值）。`peak` 决定
+    这份贡献是否也叠进 peak_* 子桶——四个基础桶始终是全量（空闲+高峰），
+    peak_* 只是其中高峰时段的子集，off-peak 由展示层用 全量 − peak 推出。"""
+    cur = by_model.setdefault(model, dict(_EMPTY_BUCKET))
+    for key in _BASE_KEYS:
+        cur[key] = cur[key] + sign * buckets[key]
+    if peak:
+        for base_key, peak_key in zip(_BASE_KEYS, _PEAK_KEYS):
+            cur[peak_key] = cur[peak_key] + sign * buckets[base_key]
+
+
+def _usage_sample(event, etype, data):
+    """usage 事件 → (turn, step, usage)；非 usage 或畸形返回 None。
+
+    `token_by_model` 与 `request_metrics` **共用**这一个提取器（Rust 侧同名
+    `usage_sample` 亦然）——两者的去重语义必须一致，各写一遍迟早分叉。
+    """
+    if etype == "assistant/chunk":
+        chunk = data.get("chunk")
+        if not isinstance(chunk, dict) or chunk.get("type") != "usage":
+            return None
+        turn, step, usage = data.get("turn"), data.get("step"), chunk.get("usage")
+    elif etype == "assistant/message":
+        if "usage" not in data:
+            return None
+        turn, step, usage = data.get("turn"), data.get("step"), data.get("usage")
+    else:
+        return None
+    if (_int_or_none(turn) is None or _int_or_none(step) is None
+            or not isinstance(usage, dict)):
+        return None
+    return turn, step, usage
+
+
+def _opt_int(usage, key):
+    """usage sample 的单个字段：在场取值，缺席取 None。
+
+    与 `_buckets_from` 的「缺字段按 0」是**两种正确语义**：那边在求和（四桶之和
+    必须与 DSH tokenUsage 逐字节相等），求和里缺项当 0 是对的；这里是逐请求的
+    测量值，缺项落 0 就是把「宿主没报」伪造成「测到 0」。
+    """
+    return _int_or_none(usage.get(key))
+
+
+def request_metrics(events):
+    """逐请求指标（PRD §9.3 RequestMetric）。Rust 平行实现见 `usage.rs`。
+
+    与 `token_by_model` 是**同一个 fold 的两个出口**：那边把每个样本折进按模型
+    的总数，这里保留每次请求自己的一行。会话健康时间线上的每个点都来自它。
+    不变量：逐请求四桶之和 == token_by_model 四桶之和（两侧都有测试钉死）。
+
+    三条诚实性约定（与本仓「缺列不编列」同一条纪律）：
+    - 缺字段落 None（JSON null）不落 0；
+    - `context_tokens` 只在两个加数都在场时才非空——真实会话 687 个请求点里
+      13 个缺 cacheReadTokens，这些点该在图上留缺口，而不是拿部分和凑一个偏低值；
+    - **不输出逐请求的 `compacted` 布尔列**：压缩事件类型已确认（见 `compaction.py`），
+      但它独立于请求，不该硬塞成每行一个 True/False；真正的压缩视图是
+      `compaction_events()` 单独的输出。
+    """
+    # 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
+    # branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
+    # 对同一笔钱/同一批行为重复计数（见 util.fork_boundary 的实测数据）。
+    events = post_fork(events)
+    out = []
+    active = None
+    window = None
+    last_key = None  # 同 (turn, step) 去重
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type")
+        data = event.get("data")
+
+        if etype == "request/header":
+            if isinstance(data, dict):
+                header = data.get("header")
+                if isinstance(header, dict):
+                    config = header.get("config")
+                    if isinstance(config, dict) and isinstance(config.get("model"), str):
+                        active = config["model"]
+            continue
+        if etype == "request/context":
+            # 缺 contextWindow 时保留上一次的值——一次畸形事件不该让后面所有
+            # 请求都失去分母。真实日志里它一个会话只出现 5 次（每次模型切换各
+            # 一次），所以只能沿用最近值，不能按请求去找。
+            if isinstance(data, dict):
+                w = _int_or_none(data.get("contextWindow"))
+                if w is not None:
+                    window = w
+            continue
+
+        if not isinstance(data, dict):
+            continue
+        sample = _usage_sample(event, etype, data)
+        if sample is None:
+            continue
+        turn, step, usage = sample
+
+        uncached = _opt_int(usage, "inputTokens")
+        cache_read = _opt_int(usage, "cacheReadTokens")
+        context_tokens = (uncached + cache_read
+                          if uncached is not None and cache_read is not None else None)
+
+        row = {
+            "request_seq": 0,  # 去重后统一回填
+            "seq": _int_or_none(event.get("seq")),
+            "time": _int_or_none(event.get("time")),
+            "turn": _int_or_none(turn),
+            "step": _int_or_none(step),
+            "model": active if active is not None else "unknown",
+            "context_window": window,
+            "context_tokens": context_tokens,
+            "uncached_input_tokens": uncached,
+            "output_tokens": _opt_int(usage, "outputTokens"),
+            "cache_read_tokens": cache_read,
+            "cache_write_tokens": _opt_int(usage, "cacheWriteTokens"),
+            # 这笔请求是否落在北京高峰时段。**规则留在这里，价格留给调用方**：
+            # 展示层要画逐请求费用曲线就必须知道每笔按高峰价还是空闲价算，
+            # 让浏览器自己重算一遍 _is_peak 就是这条规则的第四份拷贝。
+            # 时间戳缺失时为 None——不是 False（"没测到"不等于"不在高峰"）。
+            "is_peak": _is_peak(event) if _int_or_none(event.get("time")) is not None else None,
+        }
+
+        if last_key == (turn, step) and out:
+            out[-1] = row  # 后到者覆盖（与 token_by_model 的替换语义一致）
+        else:
+            out.append(row)
+            last_key = (turn, step)
+
+    # request_seq 在去重之后才有意义：它是「第几个请求点」，不是「第几个样本」。
+    for i, row in enumerate(out):
+        row["request_seq"] = i + 1
+    return out
+
+
+def context_composition(events):
+    """常驻上下文构成（PRD FR-04a）。Rust 平行实现见 `usage.rs`。
+
+    返回**每次请求都要重发的那段前缀**的分类估算：
+
+        system_tokens   ← request/header.data.header.system
+        tools_tokens    ← request/header.data.header.tools（序列化后）
+        catalog_tokens  ← source.kind == "skill-catalog" 的 entries[].name + description
+        catalog_names   ← 上面那份的逐条拆分 [{"name", "tokens"}]（T1，不带 description
+                          原文——FR-SK-09 要求导出不含未脱敏内容，进投影的东西迟早流
+                          进导出，逐 skill「目录 Token」只需要这个数）
+
+    **这三个数与 request_metrics 的 context_tokens 不是同一个估算器，不能相加
+    相等。** 真实会话实测：首次请求的常驻前缀 est_tokens = 10,830，而 provider
+    报的 uncached + cacheRead = 13,959，差的 3,129 是首条用户消息与消息封套开销。
+    所以本函数只给常驻部分的分类与 estimator 标注；剩下多少由展示层自己减，且
+    差额必须标成「未分类」而不是某个具体类别——否则就是把估算误差伪装成测量结果。
+
+    缺源事件时给 None（JSON null）而不是 0：「日志里没有 skill-catalog 事件」与
+    「发布了一个空目录」是两回事。与 unreported_fields 是同一条纪律。
+
+    「最近一次发布覆盖前一次」——目录与 request/header 都会在会话中途重发
+    （模型切换），当前状态是最后那次，不是历次累加。
+    """
+    # 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
+    # branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
+    # 对同一笔钱/同一批行为重复计数（见 util.fork_boundary 的实测数据）。
+    events = post_fork(events)
+    system = tools = catalog = entries = names = None
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+
+        if event.get("type") == "request/header":
+            header = data.get("header")
+            if isinstance(header, dict):
+                if isinstance(header.get("system"), str):
+                    system = est_tokens(header["system"])
+                if header.get("tools") is not None:
+                    # 模型看到的就是这份 JSON —— 分隔符须与 Rust serde_json 一致
+                    text = json.dumps(header["tools"], ensure_ascii=False,
+                                      separators=(",", ":"))
+                    tools = est_tokens(text)
+            continue
+
+        # 技能目录挂在多种事件的 data.source 上（不是专用事件类型）
+        source = data.get("source")
+        if not isinstance(source, dict) or source.get("kind") != "skill-catalog":
+            continue
+        items = source.get("entries")
+        if not isinstance(items, list):
+            continue
+        total = 0
+        this_names = []
+        for entry in items:
+            name = entry.get("name") or "" if isinstance(entry, dict) else ""
+            desc = entry.get("description") or "" if isinstance(entry, dict) else ""
+            tokens = est_tokens(f"{name}{desc}")
+            total += tokens
+            this_names.append({"name": name, "tokens": tokens})
+        catalog = total
+        entries = len(items)
+        names = this_names
+
+    if system is None and tools is None and catalog is None:
+        resident_total = None  # 三项全缺时不拿 0 当合计
+    else:
+        resident_total = (system or 0) + (tools or 0) + (catalog or 0)
+
+    return {
+        "system_tokens": system,
+        "tools_tokens": tools,
+        "catalog_tokens": catalog,
+        "catalog_entries": entries,
+        "catalog_names": names,
+        "resident_total": resident_total,
+        # 展示层据此标注「估算」，且不得把它与 provider 的 context_tokens 直接
+        # 相减后当作精确的分类结果。
+        "estimator": "est_tokens",
+    }
+
+
+def token_by_model(events):
+    """事件流 → `{"by_model": {...}, "sequence": [...]}`。
+
+    纯函数、确定性：同一事件流重放结果逐字节一致（与 Rust core 对齐）。
+    非 object 条目跳过；request/header 设活跃模型（sequence 相邻去重，保留
+    「切回」信息）；assistant/chunk（usage 型）与 assistant/message（带
+    usage）折进当前模型；缺 turn/step 或 usage 非 object 的 usage 事件跳过；
+    无 request/header 时归 `"unknown"` 桶。
+    """
+    # 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
+    # branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
+    # 对同一笔钱/同一批行为重复计数（见 util.fork_boundary 的实测数据）。
+    events = post_fork(events)
+    by_model = {}
+    # 模型名 → 供应商（冲突或未上报时为 None）。与 by_model 并列而不是把两者
+    # 拼成复合键：展示层要按 (供应商, 模型) 拆行，拼成一个字符串反而要再拆开。
+    providers = {}
+    last = None  # (turn, step, buckets, model, peak) —— 同 step 去重槽
+    active = None
+    sequence = []
+    seen_fields = set()   # 真正出现过的 usage 字段名（见 _buckets_from 的注释）
+    samples = 0           # usage 样本计数——0 个样本时不对「未上报」下任何断言
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type")
+        if etype == "request/header":
+            data = event.get("data")
+            model = None
+            provider = None
+            if isinstance(data, dict):
+                header = data.get("header")
+                if isinstance(header, dict):
+                    config = header.get("config")
+                    if isinstance(config, dict):
+                        model = config.get("model")
+                        provider = config.get("provider")
+            if not isinstance(model, str):
+                continue
+            # 供应商与模型是**两个维度**：真实会话里同一份日志既有
+            # provider=deepseek-official 的 flash，也有 provider=shengsuanyun 的
+            # pro——两家的价目表不同，只按模型名计价会把一家的用量按另一家的价
+            # 算（实测把胜算云的 3.5M token 按 DeepSeek 官方价算出了 ¥1.66）。
+            #
+            # 三种取值必须分开，否则会把「老日志没这个字段」和「两家都服务过
+            # 这个模型」混为一谈：
+            #   - None       = 所有 header 都没上报 provider（老日志）→ 计价方
+            #                  沿用默认表，保持既有行为；
+            #   - "…"        = 唯一确定的供应商 → 按白名单判断能不能计价；
+            #   - AMBIGUOUS  = 同一模型名被两家服务过 → 我们无法判断哪些 token
+            #                  属于哪家，猜一个等于替用户编一次归属，拒绝计价。
+            if not isinstance(provider, str):
+                provider = None
+            if model not in providers:
+                providers[model] = provider
+            elif providers[model] != AMBIGUOUS_PROVIDER and providers[model] != provider:
+                providers[model] = AMBIGUOUS_PROVIDER
+            if active != model:
+                sequence.append(model)
+            active = model
+            continue
+
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        sample = _usage_sample(event, etype, data)
+        if sample is None:
+            continue
+        turn, step, usage = sample
+        samples += 1
+        buckets = _buckets_from(usage, seen_fields)
+        model = active if active is not None else "unknown"
+        peak = _is_peak(event)
+        if last is not None and last[0] == turn and last[1] == step:
+            if last[2] == buckets and last[4] == peak:
+                continue
+            _add_buckets(by_model, last[3], last[2], -1, last[4])
+            _add_buckets(by_model, model, buckets, 1, peak)
+            last = (turn, step, buckets, model, peak)
+        else:
+            _add_buckets(by_model, model, buckets, 1, peak)
+            last = (turn, step, buckets, model, peak)
+
+    # 一个样本都没有时返回空列表：没有数据就不做「宿主不报这个字段」的断言，
+    # 与 host 能力缺失时「缺列而不是编列」是同一条纪律。
+    unreported = [f for f in _SAMPLE_FIELDS if f not in seen_fields] if samples else []
+    return {"by_model": by_model, "providers": providers,
+            "sequence": sequence, "unreported_fields": unreported}
+
+
+def pre_fork_usage(events):
+    """分叉前那段被排除掉的用量——**只为把话说清楚而存在**。
+
+    主输出已经把分叉前的事件滤掉了（审计回答的是「这个会话干了什么」），但金额
+    会因此显著变小（实测 ¥1113.66 → ¥433.30）。不给出被排除的量，用户会以为
+    数据坏了。
+
+    返回 None 表示这个会话根本没有分叉——不是返回一个全零的结构，「没分叉」和
+    「分叉了但上游没花钱」是两回事。
+
+    Rust 平行实现见 `crates/skill-vitals-core/src/usage.rs::pre_fork_usage`。
+    """
+    from .util import fork_boundary
+    b = fork_boundary(events)
+    if b is None:
+        return None
+    before = [e for e in events if isinstance(e.get("seq"), int) and e["seq"] < b]
+    if not before:
+        return None
+    # 不能直接调 token_by_model —— 它自己会先 post_fork 把这批全滤掉。
+    # 追加一个哨兵边界，让内部的 post_fork 认为「分叉在最开头」，从而全量保留。
+    out = token_by_model([{"type": "session/end-seed", "seq": -1, "data": {}}] + before)
+    out["boundary_seq"] = b
+    return out

@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    // DOM：客户端代码要碰 document/window/WebAssembly。
+    // jsx=react：AuditView 那一族是 .tsx，不设这个的话 tsc 直接在语法层就报错，
+    // 这条曾经让整个类型门恒红 62 条——门一直红就等于没有门。
+    "lib": ["ES2022", "DOM"],
+    "jsx": "react",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*"]
+}

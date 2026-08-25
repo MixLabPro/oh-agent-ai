@@ -1,0 +1,18 @@
+[package]
+name = "skill-vitals-core"
+version = "1.3.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Pure computation core shared by the skill-vitals CLI and its wasm build"
+repository = "https://github.com/MixLabPro/agent-vitals"
+license = "MIT"
+
+[lib]
+name = "skill_vitals_core"
+path = "src/lib.rs"
+
+[dependencies]
+regex = "1"
+# preserve_order 不是可选项：与二进制侧同一理由 —— findings 的键序必须与
+# Python/CLI 逐字节一致，wasm 侧若用默认 BTreeMap 排序键会破坏差分护栏。
+serde_json = { version = "1", features = ["preserve_order"] }

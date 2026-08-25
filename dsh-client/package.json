@@ -1,0 +1,63 @@
+{
+  "name": "dsh-skill-vitals-audit",
+  "description": "Out-of-tree DSH audit plugin: host projections (behaviorFindings + tokenByModel) + Web '审计' tab.",
+  "version": "0.1.5",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.cjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.cjs",
+    "cordis.patch.yml",
+    "skill_vitals_wasm.js",
+    "skill_vitals_wasm_bg.wasm",
+    "pricing.json",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-client-runtime": "*",
+    "@deepseek-ai/dsh-client-ui-conversation": "*",
+    "@deepseek-ai/dsh-client-ui-slots": "*",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-client-ui-conversation": "*",
+    "@types/node": "^22.20.1",
+    "@types/react": "~18.3.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "build": "tsup",
+    "check": "tsc --noEmit",
+    "verify": "node scripts/verify.mjs",
+    "verify:host": "node scripts/verify-host.mjs",
+    "verify:render": "node scripts/verify-render.mjs",
+    "test": "npm run check && npm run build && npm run verify && npm run verify:host && npm run verify:timeline && npm run verify:export && npm run verify:render",
+    "verify:timeline": "node scripts/verify-timeline.mjs",
+    "verify:export": "node scripts/verify-export.mjs"
+  },
+  "license": "MIT"
+}

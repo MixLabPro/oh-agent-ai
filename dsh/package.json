@@ -1,0 +1,39 @@
+{
+  "name": "dsh-skill-vitals",
+  "version": "1.3.0",
+  "description": "Skill Vitals as a DeepSeek Harness profile bundle: audits installed Agent Skills across hosts. Ships the skill instructions only — the scanner runs from PATH or a repo checkout, never from a bundled copy.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "SKILL.md",
+    "README.md"
+  ],
+  "keywords": [
+    "skill-vitals",
+    "skill",
+    "audit",
+    "dsh-plugin",
+    "deepseek-harness"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MixLabPro/agent-vitals.git",
+    "directory": "dsh"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

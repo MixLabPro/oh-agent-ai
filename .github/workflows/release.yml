@@ -1,0 +1,114 @@
+name: Release binary
+
+# 发布 Rust 单二进制（RUST_PORT_PLAN.md Release gates 第 5 条）：
+# Windows / macOS / Linux 的产物**不依赖 Python**，一个文件即可运行。
+#
+# 触发：推送 skill-v* tag。产物用 gh CLI 附到同名 GitHub Release。
+# 只用 first-party actions 与已验收的 rust-toolchain（verify.yml 同款），
+# 不给「审计供应链风险」的工具引入新的第三方 action。
+
+on:
+  push:
+    tags: ["skill-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: skill-vitals-linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            asset: skill-vitals-linux-arm64
+            cross_linker: aarch64-linux-gnu-gcc
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: skill-vitals-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: skill-vitals-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: skill-vitals-windows-x86_64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross linker (aarch64-linux)
+        if: matrix.cross_linker != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross_linker }}
+
+      # 冒烟：证明产物脱离 Python 能跑。这不是「没报错」就过 ——
+      # --version 只证明能加载，跑一次真扫描才证明二进制完整。
+      - name: Smoke test (no Python)
+        run: |
+          BIN="target/${{ matrix.target }}/release/skill-vitals${{ runner.os == 'Windows' && '.exe' || '' }}"
+          "$BIN" --version
+          tmpdir="$(mktemp -d)"
+          mkdir -p "$tmpdir/.claude/skills/smoke"
+          printf -- '---\nname: smoke\ndescription: packaged artifact smoke test\n---\n\nBody.\n' \
+            > "$tmpdir/.claude/skills/smoke/SKILL.md"
+          printf '{"enabledPlugins": {}}' > "$tmpdir/.claude.json"
+          HOME="$tmpdir" "$BIN" --host claude-code --no-snapshot --json - > /dev/null
+        shell: bash
+
+      - name: Package
+        shell: bash
+        run: |
+          cd "target/${{ matrix.target }}/release"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            zip "${{ matrix.asset }}.zip" "skill-vitals.exe"
+          else
+            tar -czf "${{ matrix.asset }}.tar.gz" skill-vitals
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            target/${{ matrix.target }}/release/${{ matrix.asset }}.tar.gz
+            target/${{ matrix.target }}/release/${{ matrix.asset }}.zip
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish release and attach binaries
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd dist
+          # download-artifact 每个产物一个子目录，先拍平
+          find . -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} . \;
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            || true
+          gh release upload "$GITHUB_REF_NAME" ./*.tar.gz ./*.zip --clobber

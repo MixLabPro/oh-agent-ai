@@ -1,0 +1,173 @@
+name: Verify
+
+# 这条流水线的存在理由，写在 ENGINEERING §6.7 的反面：
+#
+#   **绝对不做**：同时维护 Python scan.py 与 Rust CLI 两套扫描器。
+#   两套实现必然发散，而发散处就是那 12 条不变量。
+#
+# 现阶段我们**明知故犯**：main 以 Python 为主，Rust 在 refactor/rust-port
+# 上追平，等稳定了再合。这是分阶段收敛的取舍，但它只有在发散被**当天**
+# 发现时才成立 —— 否则就退化成那条规则警告的情形。
+#
+# 所以这里的核心不是「跑测试」，是 differential 那个 job：
+# 两个实现跑同一份 golden，不一致就红。
+
+on:
+  push:
+    branches: [main, "refactor/**", "merge/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 0. 这个分支上有没有 Rust ────────────────────────────
+  #
+  # 探测**必须是独立 job**，不能是 job 内的第一个 step。
+  #
+  # 早先的写法是每个 job 自己探一次，再给每个 step 挂 `if:`。结果在纯
+  # Python 的 main 上，「Rust 单元测试」和「双实现差分」一个 step 都没
+  # 执行，却双双报 success —— checks 页面上「没跑」与「跑过且通过」长得
+  # 一模一样。这正是本仓库自己禁掉的东西（ARCHITECTURE §3.1 的
+  # null ≠ 0，「缺一列的报告有价值，编一列的没有」）：一个绿勾在声称
+  # 两个实现比对过，而它一次都没比。
+  #
+  # 挂在 job 级的 `if:` 会让 GitHub 把整个 job 标成灰色 Skipped，
+  # 与 Success 在视觉上可区分。
+  probe:
+    name: 探测 Rust
+    runs-on: ubuntu-latest
+    outputs:
+      has_cargo: ${{ steps.p.outputs.has_cargo }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: p
+        run: echo "has_cargo=$([ -f Cargo.toml ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+
+  # ── 1. Python 侧：oracle 本身必须是绿的 ──────────────────
+  python:
+    name: Python 套件
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9" # 仓库声明支持 3.8+，按下限跑
+      - name: 安装 hypothesis（属性测试的可选依赖）
+        run: pip install hypothesis
+      - name: 全套测试
+        run: python -m unittest discover tests -v
+      - name: golden 比对（Python 实现）
+        run: python tests/golden_runner.py
+
+  # ── 2. Rust 侧 ───────────────────────────────────────────
+  rust:
+    name: Rust 单元测试
+    runs-on: ubuntu-latest
+    # 没有 Cargo.toml 的分支（比如纯 Python 的 main）整个 job 跳过，
+    # 在 checks 页面显示为灰色 Skipped —— 不是绿色 Success。
+    needs: probe
+    if: needs.probe.outputs.has_cargo == 'yes'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --release
+      - name: clippy（扫描路径上不得有 unwrap —— ENGINEERING §4.5）
+        run: cargo clippy --release --all-targets -- -D warnings
+
+  # ── 3. 差分：本流水线的重点 ──────────────────────────────
+  differential:
+    name: 双实现差分
+    runs-on: ubuntu-latest
+    needs: probe
+    if: needs.probe.outputs.has_cargo == 'yes'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 构建
+        run: cargo build --release
+
+      # golden 是提交进仓库的快照。两个实现都必须与它逐字节一致 ——
+      # 一致性是三方的，不是两两的：Python↔golden、Rust↔golden。
+      - name: golden 比对（Python）
+        run: python tests/golden_runner.py --diff
+      - name: golden 比对（Rust）
+        env:
+          # 必须是绝对路径：golden_runner 把扫描器的 cwd 设成语料目录，
+          # 相对路径在那里解析不到（本地一直用 $PWD/... 所以没撞上）。
+          SKILL_VITALS_BIN: ${{ github.workspace }}/target/release/skill-vitals
+        run: python tests/golden_runner.py --diff
+
+      # 集成套件本身就是语言无关的（ENGINEERING §1.4）：
+      # 唯一与实现绑定的就是这个环境变量。
+      - name: 集成套件指向二进制
+        env:
+          # 必须是绝对路径：golden_runner 把扫描器的 cwd 设成语料目录，
+          # 相对路径在那里解析不到（本地一直用 $PWD/... 所以没撞上）。
+          SKILL_VITALS_BIN: ${{ github.workspace }}/target/release/skill-vitals
+        run: |
+          pip install hypothesis
+          python -m unittest discover tests
+
+      # 假宿主：验运行时适配器的**成功路径**。
+      # 没有这一条，Codex/OpenClaw 的子进程链路在 CI 上永远测不到。
+      - name: 假宿主成功路径（双实现）
+        run: |
+          python -m unittest tests.test_host_stubs
+          SKILL_VITALS_BIN="$GITHUB_WORKSPACE/target/release/skill-vitals" \
+            python -m unittest tests.test_host_stubs
+
+  # ── 4. 降级：畸形语料不得中断扫描（ENGINEERING §4.5）─────
+  degradation:
+    name: 畸形语料不中断扫描
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      # CI 常以 root 跑，chmod 000 对 root 无效，那条用例会自动跳过。
+      # 其余畸形输入（截断 frontmatter、非 UTF-8、空文件）照常覆盖。
+      - name: 降级用例
+        run: python -m unittest tests.test_degradation -v
+
+  # ── 5. 语料可复现性 ─────────────────────────────────────
+  # golden 的价值全部建立在「同一份代码在任何机器上产出同样字节」之上。
+  # 这一条在**另一个操作系统**上再跑一遍：macOS 与 Linux 的文件系统顺序、
+  # ctime 语义、路径大小写都不同，能对上才说明隔离真的做到了。
+  reproducible:
+    name: 跨平台可复现
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: golden 比对（macOS）
+        run: python tests/golden_runner.py --diff
+
+  windows:
+    name: Windows 隔离与可复现
+    runs-on: windows-latest
+    env:
+      # Python 3.9 on Windows otherwise decodes subprocess output with the
+      # active ANSI code page, while the CLI deliberately emits UTF-8.
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: 全套测试
+        run: python -m unittest discover tests -v
+      - name: golden 比对（Windows）
+        run: python tests/golden_runner.py --diff
