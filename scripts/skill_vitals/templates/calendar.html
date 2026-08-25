@@ -920,7 +920,7 @@
       var b = (payload.buckets || {})[h] || zeroBucket();
       var c = costOf(b);
       html =
-        '<div class="tip-title">' + h + ":00 时段</div>' +
+        '<div class="tip-title">' + h + ":00 时段</div>" +
         row("uncached input", n(b.uncached_input_tokens||0)) +
         row("output", n(b.output_tokens||0)) +
         row("cache read", n(b.cache_read_tokens||0)) +
