@@ -610,7 +610,25 @@
     if (inline && inline.textContent.trim()) {
       try {
         var data = JSON.parse(inline.textContent);
-        setStatus("已加载 inline 数据（" + mode + ".json）");
+        // inline 数据的实际 schema 未必等于 URL 决定的 mode——`calendar
+        // --output` 渲染时用 `--source {today,month}` 决定塞哪份 JSON，
+        // 默认 `--source=month`。页面在没有 `?file=` 的默认 "today"
+        // 模式下打开时，如果直接相信 URL 决定的 mode 去 render(mode,
+        // data)，会拿 month 的 {days:...} 当 today 的 {buckets:...}
+        // 硬渲染——两边字段名不同，读出来全是 undefined，整张热力图
+        // 全灰、"今日总 TOKEN" 显示 0，却不报任何错，看着像「今天真的
+        // 没用量」而不是「渲染的文件根本不是今天的数据」。与下面文件
+        // 选择器分支的「智能推断 mode」用同一条判定，两条路径必须一致。
+        var inferred = (data && data.days && !data.buckets) ? "month" : "today";
+        if (inferred !== mode) {
+          mode = inferred;
+          document.getElementById("link-today").classList.toggle("active", mode === "today");
+          document.getElementById("link-month").classList.toggle("active", mode === "month");
+          document.getElementById("source-label").textContent = home + "/" + mode + ".json";
+          document.title = "Skill Vitals · " + mode + " · M4";
+        }
+        setStatus("已加载 inline 数据（" + mode + ".json" +
+                  (inferred !== getMode() ? "，按 schema 推断" : "") + "）");
         render(mode, data);
         return;  // 成功就不走 fetch/file picker 了
       } catch (e) {
