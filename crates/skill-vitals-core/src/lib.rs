@@ -9,6 +9,7 @@
 pub mod behavior;
 pub mod compaction;
 pub mod duration;
+pub mod evidence;
 pub mod skill;
 pub mod subagent;
 pub mod waste;
