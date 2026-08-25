@@ -36,6 +36,7 @@ import skill_vitals.security as security_module
 from skill_vitals.snapshots import SNAPSHOT_KEEP, diff_against, latest_snapshot, render_diff, render_snapshot
 from skill_vitals import state as state_module
 from skill_vitals import usage as usage_module
+from skill_vitals import budget as budget_module
 
 # Windows services and CI runners may expose cp1252 consoles. Reports and
 # diagnostics are bilingual, so make redirected and interactive output stable.
@@ -263,6 +264,26 @@ def _main():
                          help="list = show files; clean = remove (with --yes)")
     p_state.add_argument("--yes", action="store_true",
                          help="Skip the confirmation prompt for 'state clean'")
+    # ──── M6: 预算告警 ──────────────────────────────────────────
+    # show / set / enable / disable / snooze —— 五种动作覆盖 spec §5.5
+    p_budget = sub.add_parser("budget",
+                              help="Inspect or modify the budget alert thresholds")
+    p_budget.add_argument("action", choices=("show", "set", "enable", "disable",
+                                             "snooze", "unsnooze"),
+                          help="show = current; set = change a field; "
+                               "enable/disable = toggle; snooze = silence for Nh")
+    p_budget.add_argument("--daily", type=float, default=argparse.SUPPRESS,
+                          help="Set daily_cny (元)")
+    p_budget.add_argument("--weekly", type=float, default=argparse.SUPPRESS,
+                          help="Set weekly_cny")
+    p_budget.add_argument("--monthly", type=float, default=argparse.SUPPRESS,
+                          help="Set monthly_cny")
+    p_budget.add_argument("--peak-share-max", type=float, default=argparse.SUPPRESS,
+                          help="Set peak_share_max (0.0–1.0)")
+    p_budget.add_argument("--hours", type=float, default=argparse.SUPPRESS,
+                          help="snooze duration in hours")
+    p_budget.add_argument("--json", action="store_true",
+                          help="Emit alert as JSON (for xbar tick)")
     # --fail-on / --ignore 对 behavior 同样有意义（闸门），但 --new-only 没有——
     # 一份会话日志是单次取证输入，没有「相对上次的新增发现」。这里显式补上
     # 前两个，让它们在子命令前后两个位置都能解析（对齐 Rust 的 global=true）。
@@ -559,6 +580,86 @@ def _main():
             for lf in lock_files:
                 lf.unlink()
             print("removed %d files" % len(files))
+            return
+
+    # ──── M6 budget 子命令 ──────────────────────────────────────
+    if getattr(args, "cmd", None) == "budget":
+        if args.action == "show":
+            alert = budget_module.evaluate()
+            if args.json:
+                print(json.dumps(alert, ensure_ascii=False, indent=2,
+                                 default=str))
+            else:
+                cfg = budget_module.load_config()
+                print("enabled:           %s" % cfg["enabled"])
+                print("daily_cny:         %s" % cfg["daily_cny"])
+                print("weekly_cny:        %s" % cfg["weekly_cny"])
+                print("monthly_cny:       %s" % cfg["monthly_cny"])
+                print("peak_share_max:    %s" % cfg["peak_share_max"])
+                print("adaptive_floor:    %s" % cfg["adaptive_floor"])
+                print("adaptive_window:   %s days" % cfg["adaptive_window_days"])
+                print("adaptive_multiplier: %s" % cfg["adaptive_multiplier"])
+                print()
+                print("─── today ───")
+                print("today_cost:        %s" %
+                      ("¥%.2f" % alert["today_cost"] if alert["today_cost"] is not None
+                       else "(no data)"))
+                print("effective_daily:   ¥%.2f (adaptive_floor_applied=%s)" %
+                      (alert["effective_daily_budget"],
+                       alert["adaptive_floor_applied"]))
+                print("ratio:             %s" %
+                      ("%.1f%%" % (alert["ratio"] * 100) if alert["ratio"] is not None
+                       else "(no data)"))
+                print("peak_share:        %s" %
+                      ("%.1f%%" % (alert["peak_share"] * 100)
+                       if alert["peak_share"] is not None else "(no data)"))
+                print("alert level:       %s" % alert["level"])
+                if alert["snoozed_until"]:
+                    print("snoozed_until:     %s" % alert["snoozed_until"])
+                if alert["reasons"]:
+                    print()
+                    print("reasons:")
+                    for r in alert["reasons"]:
+                        print("  • %s" % r)
+            return
+        if args.action == "set":
+            changes = {}
+            if hasattr(args, "daily"):
+                changes["daily_cny"] = args.daily
+            if hasattr(args, "weekly"):
+                changes["weekly_cny"] = args.weekly
+            if hasattr(args, "monthly"):
+                changes["monthly_cny"] = args.monthly
+            if hasattr(args, "peak_share_max"):
+                changes["peak_share_max"] = args.peak_share_max
+            if not changes:
+                print("no changes specified (use --daily/--weekly/...)", file=sys.stderr)
+                sys.exit(2)
+            budget_module.write_config(changes)
+            print("wrote %s to %s" % (changes, budget_module._config_path()))
+            return
+        if args.action == "enable":
+            budget_module.write_config({"enabled": True})
+            print("budget enabled")
+            return
+        if args.action == "disable":
+            budget_module.write_config({"enabled": False})
+            print("budget disabled")
+            return
+        if args.action == "snooze":
+            hours = getattr(args, "hours", None)
+            if not hours or hours <= 0:
+                print("--hours must be positive", file=sys.stderr)
+                sys.exit(2)
+            from datetime import datetime as _dt, timedelta
+            until = (_dt.now(budget_module._BEIJING)
+                     + timedelta(hours=hours)).isoformat()
+            budget_module.set_snooze(until, reason="cli")
+            print("snoozed until %s" % until)
+            return
+        if args.action == "unsnooze":
+            budget_module.clear_snooze()
+            print("snooze cleared")
             return
 
     zombie_age = args.zombie_age
