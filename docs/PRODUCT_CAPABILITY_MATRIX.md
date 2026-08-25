@@ -2,6 +2,11 @@
 
 Reports must distinguish measured facts, estimates, and unavailable data.
 
+Scope: **install-time** capabilities. The runtime (session-log) matrix — tool
+calls, usage, approvals, durations, per host — is §13 of
+[RUNTIME_EVIDENCE_CONTRACT.md](./RUNTIME_EVIDENCE_CONTRACT.md), and its
+reporting vocabulary extends the one below.
+
 | Capability | Claude Code | Codex | OpenClaw | Hermes | WorkBuddy |
 |---|---|---|---|---|---|
 | Filesystem inventory | Yes | Fallback | Yes, per instance | Yes | Yes |

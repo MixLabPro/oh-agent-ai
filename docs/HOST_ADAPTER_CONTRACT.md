@@ -2,6 +2,12 @@
 
 Status: required contract for the Python oracle and the planned Rust CLI.
 
+Scope: the **install-time** layer — does a skill exist, is it enabled, is it
+loaded. The runtime counterpart (what the agent did, what it cost, how long it
+took) is [RUNTIME_EVIDENCE_CONTRACT.md](./RUNTIME_EVIDENCE_CONTRACT.md), which
+extends the capability model here with two further axes (fidelity and
+provenance).
+
 This document supersedes host assumptions that treat a discovered `SKILL.md` as
 proof that a skill is enabled or loaded. Every host adapter must preserve the
 source of its evidence and uncertainty.

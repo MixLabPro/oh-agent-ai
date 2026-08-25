@@ -175,7 +175,7 @@ P1.5    外部模型层
 └── fix <name>
 
 v1.x
-├── watch                       两种模式，见 §5.8
+├── watch                       三种模式，见 §5.8（`--oneline` 常驻形态见 §5.8.4）
 ├── policy
 └── report
 ```
@@ -503,27 +503,149 @@ v0.1 输出 `Routing accuracy 75%`，是在声称「我知道 Agent 会选哪个
   在宿主内运行。
 ```
 
-## 5.8 `watch` 有两种模式，不能写死成 fs watcher
+## 5.8 `watch` 有三种模式，不能写死成 fs watcher
 
-`watch` 排在 v1.x，此处只锁定一件事：**监听对象由宿主决定，不是一个实现。**
+`watch` 排在 v1.x。这里锁定两件事：**监听对象由宿主决定**，且 **B、C 两种模式
+共用一个游标、是一份实现**。
 
-| | 无运行时记录的宿主 | 有运行时记录的宿主（dsh） |
-|---|---|---|
-| 监听什么 | skill 目录的文件系统事件 | 会话事件流（append-only） |
-| 每次事件 | 重扫全库 | 移动游标读增量 |
-| 能看到 | 文件变了 | 目录重发（带确切条目）· skill 被调用 · **这一轮因发现不完整整个目录未发布** |
-| 成本 | fs watcher + 重扫 | 一个游标 |
-| 噪声 | 每次文件触碰 | 宿主按 digest 去重后才有事件 |
+| | **A** 无运行时记录的宿主 | **B** 目录发布（dsh） | **C** 运行时度量 |
+|---|---|---|---|
+| 监听什么 | skill 目录的文件系统事件 | 会话事件流（append-only） | **同一条**会话事件流 |
+| 每次事件 | 重扫全库 | 移动游标读增量 | 移动游标读增量 |
+| 消费的 Signal | —（走 fs，不经 Signal 层） | `SkillInvocations` + 目录发布 | `Usage` · `ContextWindow` · `ToolCalls` · `Compaction` |
+| 能看到 | 文件变了 | 目录重发（带确切条目）· skill 被调用 · **这一轮因发现不完整整个目录未发布** | 这次会话烧了多少 · 上下文还剩多少 · 刚做了该拦的事 · 刚被压缩掉多少 |
+| 成本 | fs watcher + 重扫 | 一个游标 | 同一个游标 |
+| 噪声 | 每次文件触碰 | 宿主按 digest 去重后才有事件 | 逐事件，需自己节流 |
+
+B 列第四行是这条区分最初的价值所在：「这一轮目录整个没发布」在磁盘上永远看不
+出来，而它恰好是 dsh 上最难查的失效模式。
+
+> ENGINEERING §1.5 里「`watch` 资源占用被实际抱怨」这条重新迁移的触发条件，
+> 只对 A 列成立。B / C 的 watch 是一个日志游标，不构成性能论据。
+
+### 5.8.1 C 列是后加的，而且它和 B 是同一份实现
+
+本节原本只有 A、B 两列——写它的时候行为审计 / 成本折叠 / 时长审计**还不存在**，
+所以两列问的都是同一个问题：「我的 skill 到底加载了没有」。B 列只是换了个更好的
+观测点（用运行时证据回答装机层的问题，即 `evidence_recency: log`）。
+
+C 列问的是另一件事：**现在在烧什么、该不该拦**。
+
+但 C **不是第三个实现**。在
+[RUNTIME_EVIDENCE_CONTRACT](./RUNTIME_EVIDENCE_CONTRACT.md) 的 Signal 模型下，
+B 和 C 是**同一条 `locate` + 同一个游标 + 同一个 `extract`**，区别只在规则声明的
+`requires`。写 §5.8 的时候没有这层抽象，只能把两种用途描述成两种实现；现在
+C 可以直接以 `requires` 的差异接进去。
+
+### 5.8.2 不要监听宿主已经在监听的东西
 
 在 dsh 上用 fs watcher 是**重复劳动**：DSH 的 `skill-filesystem` 自己就在监听目录，
 变更触发 `skills/change`，`tool-skill` 在目录内容 digest 变化时重发并落库。
 去监听同一批目录，等于更差地重算宿主已经算过并记下来的结论。
 
-右列第三行是这条区分的价值所在：「这一轮目录整个没发布」在磁盘上永远看不出来，
-而它恰好是 dsh 上最难查的失效模式。
+> **未决**：这条对 Claude Code / Codex 是否同样成立尚未核实。两者都有 skill 热
+> 加载，若它们同样自己监听并留下记录，A 列的适用宿主会比本节假设的更少。落地
+> A 列之前先查这一条。
 
-> ENGINEERING §1.5 里「`watch` 资源占用被实际抱怨」这条重新迁移的触发条件，
-> 只对左列成立。右列的 watch 是一个日志游标，不构成性能论据。
+### 5.8.3 硬前提：折叠必须可从 turn 边界续
+
+实测本机日志规模：
+
+```text
+Codex 最大单份 rollout      200 MB
+Claude Code 当前会话         33 MB
+DSH 全部会话合计              52 MB（单份最大 8.5 MB，且为 .zstd）
+```
+
+**每 tick 全量重解析不可行。增量游标 + 可续折叠是硬需求，不是优化项。**
+约束写在 [RUNTIME_EVIDENCE_CONTRACT §10.2](./RUNTIME_EVIDENCE_CONTRACT.md)。
+
+> 顺带记一个现存缺口：本机 DSH 会话全是 `session.jsonl.zstd`，而 `src/dsh.rs`
+> 明说「只认裸文本 `.jsonl`，zstd 解压是上游的事」——**今天读不了这台机器上的
+> 任何 DSH 会话**。与 watch 无关，但 watch 会先撞上它。
+
+### 5.8.4 常驻形态：状态文件是核心资产，服务器不是
+
+xbar / SwiftBar 的执行模型是「每 N 秒**执行一次**脚本、抓 stdout 渲染菜单」，
+脚本跑完就退出。**常驻的是 xbar，不是我们。** 三条推论：
+
+1. **游标状态必须落盘**（状态文件），不能存在进程内存里。
+2. 想要 HTTP 服务就得**真养一个 daemon**：端口冲突、PID 文件、崩溃残留、开机
+   自启、tick 脚本每次「探测-或-拉起」。这是另一档承诺。
+3. 而 xbar 菜单项本身就能点击执行命令 → 生成 HTML → `open`。**零端口、零
+   daemon、零认证问题。**
+
+「每次点击都要重新解析 33 MB」这个反对意见不成立：tick 脚本为了出状态栏那一行，
+本来就在维护增量状态；HTML 生成读**那份已折好的状态**，不重解析原始日志。
+
+**落地顺序：**
+
+1. tick 脚本 + 状态文件 + 一行状态栏（`skill-vitals watch --oneline`）
+2. 菜单项 → 生成 HTML → 打开（见 §5.9）
+3. **确实出现「需要一个自己会动的页面」的场景时**，才加服务器 —— 那时状态文件
+   已经在了，加服务器是纯增量
+
+若最终要加服务器，安全底线不可省：**只绑 `127.0.0.1` · 随机端口 · URL 携带一次性
+token · 校验 `Origin`**。它暴露的是执行过的命令、绝对路径、evidence 原文，本机
+任意进程可读、CORS 一松浏览器页面也能 fetch。这是 §8 Local First 之外的**新增
+攻击面**，不是顺手就能加的东西。
+
+> **边界**：常驻的本地 HTTP 服务仍在**纯读**这一侧；往用户的 agent 配置里装
+> hook 不是。后者是产品定位的改变（RUNTIME_EVIDENCE_CONTRACT §14.8.3），要单独
+> 决定，不要因为「反正已经有常驻进程了」顺手越过去。
+
+---
+
+## 5.9 审计视图的投递方式：DSH 那个 tab 是特例，不是模型
+
+`dsh-client` 的审计 tab 在浏览器里，唯一原因是 **DSH 自己有 web UI 和双面插件
+架构**。Codex / Claude Code / WorkBuddy 都没有可供第三方渲染的位置——Codex 的
+插件清单声明的是 `skills` / `mcp_servers` / `apps` / `hooks`，其余 `display_name`
+`logo` `brand_color` 是市场列表元数据，**没有 webview / panel / custom view 扩展点**。
+
+所以不该按「给每个宿主做一个 tab」规划。
+
+### 5.9.1 客户端那 5,597 行本来就是宿主无关的
+
+`dsh-client/src/client/` 全部 5,597 行代码，对 DSH 的依赖**只有一处，而且是
+`import type`**（编译期消失）：
+
+```ts
+export function AuditView({ useProjection }: ConvViewProps) {
+```
+
+整个审计 tab 的对外接口就是**一个函数**，消费 15 个投影：
+
+```text
+behaviorFindings · tokenUsage · tokenByModel · costReport · requestMetrics
+contextComposition · compactionEvents · structuralWaste · subagentSpawns
+skillAudit · skillAttribution · durationAudit · sessionCwd · loopCosts · preForkUsage
+```
+
+全部走 `useProjection?.('name')`——**注意可选链**：缺哪个投影就是 `undefined`，
+组件已经逐投影降级。也就是说，运行时契约里的 coverage 模型，**UI 层其实已经
+实现了**：拿不到 `durationAudit` 的宿主传 `undefined` 即可，组件一行不用改。
+
+### 5.9.2 四种投递方式
+
+| 方案 | 怎么用 | 复用那 5,597 行 | 代价 |
+|---|---|---|---|
+| **静态 HTML 导出** | `skill-vitals audit --html`，双击打开 | **全部** | 数据是快照，不实时；零服务器 |
+| 本地 serve | `skill-vitals serve` → localhost | 全部 | 要 daemon（§5.8.4） |
+| TUI | `skill-vitals audit --tui` | **0**，渲染需重写 | 不用浏览器，契合终端用户 |
+| 宿主插件 tab | 仅 dsh 可行 | 全部 | 其他宿主**无此扩展点** |
+
+**默认选静态 HTML 导出**：复用最大、零常驻、一个文件可直接转发，且**宿主无关**——
+同一个生成器同时服务 Codex / Claude Code / WorkBuddy，不是「为 Codex 做一个」。
+
+两条落地约束：
+
+1. **`ExportPayload` 不能直接驱动 UI。** 它是扁平化的**摘要报告**（给人和机器读），
+   不是 UI 的状态。静态 HTML 要内嵌的是上面那 15 个投影的原始形状。两份载荷
+   **并存，不要合并**。
+2. **`HostHidden` 规则在这里更严**（RUNTIME_EVIDENCE_CONTRACT §3.2）。静态 HTML
+   天生是要转发的，而 Codex 的 `SecurityRiskScore` 会落进 rollout。默认排除、
+   且把「排除了什么」写在页面上。
 
 ---
 
