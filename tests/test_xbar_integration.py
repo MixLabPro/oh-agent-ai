@@ -121,6 +121,25 @@ class TestRotateToday(unittest.TestCase):
             self.assertEqual(today["buckets"]["14"]["uncached_input_tokens"],
                              100, "数据保持不动")
 
+    def test_rotate_accepts_string_now(self):
+        """rotate_today(now=<'YYYY-MM-DD' str>) 不应 AttributeError。
+
+        之前把 `.isoformat()` 套在整个三元表达式外层——str 分支下对字符串
+        调 `.isoformat()` 直接崩；此前测试只喂过 datetime,没测到这条路径。
+        """
+        with _IsolatedHome():
+            sd = state.state_dir()
+            state._atomic_write(sd / "today.json", {
+                "date": "2026-08-25",
+                "buckets": {"14": {"uncached_input_tokens": 100}},
+                "schema_version": "1.0.0",
+                "generated_at": "2026-08-25T14:00:00Z",
+            })
+            result = state.rotate_today(now="2026-08-26")
+            self.assertEqual(result, "2026-08-25")
+            today = json.loads((sd / "today.json").read_text())
+            self.assertEqual(today["date"], "2026-08-26")
+
     def test_merge_today_triggers_rotate_first(self):
         """merge_today 入口应自动 rotate(无 --no-rotate flag)。"""
         with _IsolatedHome():
@@ -192,6 +211,47 @@ class TestXbarSmokeOutput(unittest.TestCase):
             # 含 '---' 分隔的下拉
             self.assertIn("---", r.stdout,
                           "xbar 必须输出下拉分隔符 '---'")
+
+    def test_menu_bar_hides_decimals_above_100_cny(self):
+        """菜单栏金额 ≥¥100 时应隐藏小数(yuan_compact)。
+
+        M8 提交声称加了 yuan_compact() 修「菜单栏太长」,但函数定义后
+        从未在 prefix 拼接处被调用——prefix 仍然拼的是未压缩的
+        `menu_yuan`,¥1172.57 这类大额从没被压缩过,commit message 里的
+        修复其实没生效。这条测试钉住「已接线」这件事,不只是钉住函数
+        自身的输出。
+        """
+        with _IsolatedHome() as h:
+            sd = state.state_dir()
+            state._atomic_write(sd / "oneline.json", {
+                "schema_version": "1.0.0",
+                "generated_at": "2026-08-26T00:00:00Z",
+                "cost_cny": 1172.57,
+            })
+            # today.json 的桶要折算出 >= ¥100、且触发 >100% 告警(BUDGET_DAILY_CNY=30)
+            state._atomic_write(sd / "today.json", {
+                "schema_version": "1.0.0",
+                "date": "2026-08-26",
+                "buckets": {"10": {
+                    "uncached_input_tokens": 100_000_000,
+                    "output_tokens": 0, "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                }},
+                "generated_at": "2026-08-26T10:00:00Z",
+            })
+            script = Path(__file__).resolve().parent.parent / \
+                "contrib" / "xbar" / "skill-vitals.5m.sh"
+            r = subprocess.run(["bash", str(script)],
+                               capture_output=True, text=True,
+                               env={**os.environ, "SKILL_VITALS_HOME": str(sd.parent)},
+                               timeout=10)
+            self.assertEqual(r.returncode, 0,
+                             f"xbar exit {r.returncode}: {r.stderr}")
+            menu_line = r.stdout.split("\n")[0]
+            self.assertNotIn(".", menu_line,
+                             f"金额 >= ¥100 时菜单栏不应含小数点: {menu_line!r}")
 
 
 if __name__ == "__main__":

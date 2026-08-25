@@ -583,6 +583,10 @@ fn civil_date_from_days(days: i64) -> String {
 ///   "unreported_fields": [...]
 /// }
 /// ```
+/// 同 (turn, step) 去重槽：(turn, step, date, hour, 4 基础桶, is_peak)。
+/// clippy::type_complexity 要求命名 —— 裸元组类型超过它的复杂度阈值。
+type HourBucketDedupSlot = (i64, i64, Option<String>, Option<i32>, [i64; 4], bool);
+
 pub fn hour_buckets(events: &[Value]) -> Value {
     // 只看分叉之后的事件——见 token_by_model 的同条注释
     let events = &crate::util::post_fork(events)[..];
@@ -595,7 +599,7 @@ pub fn hour_buckets(events: &[Value]) -> Value {
     let mut buckets_map: std::collections::HashMap<(Option<String>, Option<i32>), [i64; 8]> =
         std::collections::HashMap::new();
 
-    let mut last: Option<(i64, i64, Option<String>, Option<i32>, [i64; 4], bool)> = None;
+    let mut last: Option<HourBucketDedupSlot> = None;
     let mut seen: [bool; 4] = [false; 4];
     let mut samples: u64 = 0;
 

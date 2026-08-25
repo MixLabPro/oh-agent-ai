@@ -222,8 +222,16 @@ def rotate_today(now=None):
     明确的小决策点,见 M8 评估说明。
     """
     path = state_dir() / "today.json"
-    today_bj = _today_key() if now is None else (
-        (now if isinstance(now, str) else _to_bj_date(now)).isoformat())
+    # `now` 三种输入:None → 当前系统时间;str → 已是 'YYYY-MM-DD',直接用;
+    # datetime → _to_bj_date() 折算成 date 对象再 isoformat()。之前误把
+    # `.isoformat()` 套在整个三元表达式外层,str 分支下对字符串调
+    # `.isoformat()` 会直接 AttributeError——测试只喂过 datetime,没测到。
+    if now is None:
+        today_bj = _today_key()
+    elif isinstance(now, str):
+        today_bj = now
+    else:
+        today_bj = _to_bj_date(now).isoformat()
     with _locked(path):
         existing = _read(path) or {}
         old_date = existing.get("date")

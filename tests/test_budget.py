@@ -229,6 +229,26 @@ class TestSnooze(unittest.TestCase):
             # 过期 snooze → 不压制告警
             self.assertIsNone(r["snoozed_until"])
 
+    def test_snooze_accepts_naive_iso_string(self):
+        """set_snooze(<裸 ISO,无 tzinfo>) 不应在 evaluate() 里炸 TypeError。
+
+        之前 _read_snooze / set_snooze 都直接存 datetime.fromisoformat()
+        的结果——传入裸字符串时得到 naive datetime,写入 / 读出都不报错,
+        但 evaluate() 拿 tz-aware 的 `now` 跟它比较(`now >= snoozed_until`)
+        会抛 "can't compare offset-naive and offset-aware datetimes"。
+        真实 CLI 路径(cli.py::snooze)只喂 tz-aware 字符串,所以这条从没
+        被测试踩到过。
+        """
+        with _IsolatedHome():
+            naive = (datetime.now(budget._BEIJING) + timedelta(hours=1)) \
+                .replace(tzinfo=None).isoformat()
+            budget.set_snooze(naive)
+            got = budget._read_snooze()
+            self.assertIsNotNone(got.tzinfo, "读回的 snoozed_until 必须是 tz-aware")
+            # 不崩才是这条测试的重点 —— evaluate() 内部拿 tz-aware `now`
+            # 跟 snoozed_until 比较,naive/aware 混用之前会在这里炸。
+            budget.evaluate(now=datetime.now(budget._BEIJING))
+
     def test_clear_snooze_removes_file(self):
         with _IsolatedHome():
             future = (datetime.now(budget._BEIJING) + timedelta(hours=1)).isoformat()

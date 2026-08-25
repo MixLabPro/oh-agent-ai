@@ -196,16 +196,6 @@ else
     menu_pct=0
 fi
 
-case "$menu_pct" in
-    "")           menu_yuan="¥?"; prefix="💰${menu_yuan}" ;;
-    *)
-        if   [ "$menu_pct" -gt 100 ]; then prefix="🚨${menu_yuan}"
-        elif [ "$menu_pct" -ge 80  ]; then prefix="⚠️${menu_yuan}"
-        else                                prefix="💰${menu_yuan}"
-        fi
-        ;;
-esac
-
 # 紧凑格式:金额 ≥ ¥100 隐藏小数,让菜单栏不挤。状态 emoji 后不加空格 —
 # xbar 渲染时会保留,我们节省 4 个字符 ≈ 节省 32px。
 yuan_compact() {
@@ -215,10 +205,9 @@ yuan_compact() {
         *)
             # awk 走整数部分;>=100 时只显示整数
             local int_part=$(awk "BEGIN { printf \"%d\", $v }" 2>/dev/null || echo "")
-            local abs=$(awk "BEGIN { v = $v; if (v < 0) v = -v; print v }" 2>/dev/null || echo "0")
             if [ -n "$int_part" ]; then
                 local int_abs=$(awk "BEGIN { v = $int_part; if (v < 0) v = -v; print v }" 2>/dev/null || echo "0")
-                if [ "${int_abs%.*}" -ge 100 ] 2>/dev/null || [ "$int_abs" -ge 100 ] 2>/dev/null; then
+                if [ "$int_abs" -ge 100 ] 2>/dev/null; then
                     echo "¥${int_part}"
                 else
                     echo "¥${v}"
@@ -229,6 +218,20 @@ yuan_compact() {
             ;;
     esac
 }
+
+# menu_yuan 已含 "¥" 前缀（format_cny 产出），yuan_compact 需要裸数值 ——
+# 剥掉前缀再传入，否则 awk 对 "¥12.30" 求值恒为 0，紧凑判定失效。
+menu_yuan_compact=$(yuan_compact "${menu_yuan#¥}")
+
+case "$menu_pct" in
+    "")           menu_yuan="¥?"; prefix="💰${menu_yuan}" ;;
+    *)
+        if   [ "$menu_pct" -gt 100 ]; then prefix="🚨${menu_yuan_compact}"
+        elif [ "$menu_pct" -ge 80  ]; then prefix="⚠️${menu_yuan_compact}"
+        else                                prefix="💰${menu_yuan_compact}"
+        fi
+        ;;
+esac
 
 echo "$prefix"
 

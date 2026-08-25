@@ -473,9 +473,16 @@ def _read_snooze():
     if not s:
         return None
     try:
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        # 兼容手写 / 旧版本写入的裸时间戳 —— 没有 tzinfo 就没法跟
+        # evaluate() 里 tz-aware 的 `now` 比较(TypeError: can't compare
+        # offset-naive and offset-aware datetimes)。本模块统一按北京时间
+        # 解释裸时间戳,与 state.py 的 _BEIJING 常量同一约定。
+        dt = dt.replace(tzinfo=_BEIJING)
+    return dt
 
 
 def set_snooze(until_iso, reason="user-set"):
@@ -484,6 +491,9 @@ def set_snooze(until_iso, reason="user-set"):
     """
     # 验证 ISO8601 —— 与 datetime.fromisoformat 同样的解析路径,失败即抛
     parsed = datetime.fromisoformat(until_iso)
+    if parsed.tzinfo is None:
+        # 裸时间戳按北京时间解释 —— 见 _read_snooze 同一条注释。
+        parsed = parsed.replace(tzinfo=_BEIJING)
     p = _budget_state_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = {
