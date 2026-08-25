@@ -45,6 +45,12 @@ pub struct Audit {
     /// 的原始 JSONL，`hook/*` 本来就在 `EXECUTION_EVENT_TYPES` 里，这里立即
     /// 可用——两条链路的能力边界不同，不是疏漏。
     pub duration: Value,
+    /// v1.x.x：按 (date, hour) 折叠的 token 桶（成本日历的数据源）。
+    /// 与 `usage` / `requests` 同源：共用 `usage_events` 与 `is_peak_slot`
+    /// 判定 —— 三处不变量由 `tests/test_characterization.py::TestHourBuckets`
+    /// + `crates/skill-vitals-core/src/usage.rs` 的 8 个 Rust 测试钉死。
+    /// oneline 子命令把这个字段写到 state 文件,日历 HTML 读它画热力图。
+    pub hour_buckets: Value,
 }
 
 /// 读会话日志 → 执行事件 + 成本账事件 → (findings, usage, requests, context, compaction, waste)（端到端入口）。
@@ -91,5 +97,6 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
         "approvals": skill_vitals_core::duration::approval_latencies(&events),
         "hooks": skill_vitals_core::duration::hook_executions(&events),
     });
-    Some(Audit { findings, usage, requests: requests_val, context, compaction, waste, pre_fork, subagents, skill, duration })
+    let hour_buckets = skill_vitals_core::usage::hour_buckets(&usage_events);
+    Some(Audit { findings, usage, requests: requests_val, context, compaction, waste, pre_fork, subagents, skill, duration, hour_buckets })
 }

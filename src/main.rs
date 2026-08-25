@@ -492,6 +492,7 @@ fn main() {
                 "subagents": &audit.subagents,
                 "skill": &audit.skill,
                 "duration": &audit.duration,
+                "hour_buckets": &audit.hour_buckets,
             })).unwrap_or_default();
             if path == &PathBuf::from("-") {
                 println!("{text}");
