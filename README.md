@@ -74,9 +74,32 @@ model), and (2) the adapter that reshapes DSH's own event vocabulary
 (`tool/call`, `turn/start`, …) into the shape the core expects. Claude Code,
 Codex, OpenClaw, Hermes, and WorkBuddy get the install-time layer only today —
 not because the rules can't apply to them, but because nobody has written their
-adapter yet, and not every host even persists a session log to adapt from.
-Same division of labor as the install-time side: one core, one adapter per
-host. See [`docs/DSH_INTEGRATION.md`](docs/DSH_INTEGRATION.md) and
+adapter yet. Same division of labor as the install-time side: one core, one
+adapter per host.
+
+**Three places an agent's behaviour can be recorded, and only one is
+retroactive.** A host may write a durable session log, export OpenTelemetry, or
+fire hooks that a tool can subscribe to. Telemetry and hooks only ever cover
+sessions that ran *after* somebody configured them — they cannot answer "what
+did that session do yesterday". A session log can be read after the agent has
+exited, on a machine that was never instrumented, with nothing installed in
+advance. That is the question this tool exists to answer, and it is why the
+runtime layer reads logs.
+
+It is also why some signals are structurally out of reach rather than merely
+unimplemented. Codex, for example, deliberately keeps approval requests and
+sandbox outcomes **out** of its rollout file and exports them over OpenTelemetry
+instead; no amount of log parsing recovers them. Getting them would mean either
+requiring users to have configured a collector beforehand, or installing hooks —
+and the hook that sees permission decisions in Claude Code is one whose *output
+decides whether the tool call runs*, which would make an audit tool a
+participant in the behaviour it audits. This project does not do that.
+
+What each host actually records has been surveyed against upstream source code
+and first-party logs — including which cells will stay `unavailable` and why.
+See [`docs/RUNTIME_EVIDENCE_CONTRACT.md`](docs/RUNTIME_EVIDENCE_CONTRACT.md)
+for the per-host matrix and the rules an adapter has to satisfy, plus
+[`docs/DSH_INTEGRATION.md`](docs/DSH_INTEGRATION.md) and
 [`docs/AGENT_BEHAVIOR_AUDIT.md`](docs/AGENT_BEHAVIOR_AUDIT.md).
 
 ## What it checks at install time
@@ -146,12 +169,29 @@ available everywhere:
 | **Loaded-vs-disk determination** | | `enabledPlugins` | app-server | eligible runtime catalog | manifest + welcome mode | filesystem only | session log + registry snapshot |
 | **Scope / dependencies** | | partial | runtime metadata | runtime eligibility metadata | package metadata | unavailable | registry snapshot |
 | **Trigger data** (2.5) | | `skillUsage` | unavailable | unavailable | unavailable | unavailable | session log |
-| **Runtime behavior audit** | | unavailable — no adapter written | unavailable — no adapter written | unavailable — no adapter written | unavailable — no adapter written | unavailable — no adapter written | ✅ live audit tab + `behavior`/`duration-audit` CLI |
+| **Runtime behavior audit** | | surveyed, not built † | surveyed, not built † | not surveyed | surveyed, not built † | not surveyed | ✅ live audit tab + `behavior`/`duration-audit` CLI |
 
-"Unavailable — no adapter written" is not "impossible": the rule engine takes
-any JSON event array in the right shape (see "What it checks at runtime"
-above); nobody has written the log-format adapter for these hosts yet, and
-some of them may not persist a session log to adapt from at all.
+`†` **"Surveyed, not built"** means the host's evidence has been read against
+upstream source code and real logs, and the adapter has not been written. No
+runtime checks run on these hosts today. What the survey found:
+
+- **Claude Code** — a JSONL message *tree* (not an event stream): tool calls,
+  per-request token usage, and turn durations are all there; approval and
+  sandbox decisions are recorded nowhere in it.
+- **Codex** — two mutually incompatible rollout formats (`Legacy` and
+  `Paginated`) that the file does not identify, so the shape has to be probed.
+  `Paginated` is the richer one, carrying argv, exit codes and per-command
+  durations. Approvals and hooks are excluded from the file by upstream design.
+- **WorkBuddy** — no conversation transcript, but three separate stores: session
+  metadata in SQLite, a hash-chained security-decision log (the only durable
+  approval record on any host surveyed), and an OpenTelemetry-shaped span tree
+  with tool names, durations and statuses.
+- **OpenClaw / Hermes** — no instance was available on the audited machine, so
+  their runtime surfaces are simply unknown. They are recorded as unknown rather
+  than guessed at.
+
+Full matrix, with the source line behind each `unavailable`, in
+[`docs/RUNTIME_EVIDENCE_CONTRACT.md`](docs/RUNTIME_EVIDENCE_CONTRACT.md).
 
 OpenClaw additionally uses `openclaw skills list --eligible --json` to verify
 per-instance eligibility and model visibility, including workspace, plugin, and
@@ -562,9 +602,26 @@ Harness 专属的是：①**实时交互审计 tab**（需要宿主能把会话�
 DSH 的 `sessionProjections` 机制）；②**适配器**（把 DSH 自己的事件命名法
 `tool/call`/`turn/start`/... 折算成 core 认的形状）。Claude Code、Codex、
 OpenClaw、Hermes、WorkBuddy 现在只有装机层——不是规则用不上它们，是还没人给
-它们写适配器，而且不是每个宿主都会把会话日志持久化下来给你适配。跟装机层的
-分工是同一个模式：一套 core，每个宿主各自一份适配代码。见
-[`docs/DSH_INTEGRATION.md`](docs/DSH_INTEGRATION.md) 与
+它们写适配器。跟装机层的分工是同一个模式：一套 core，每个宿主各自一份适配代码。
+
+**Agent 的行为有三个地方可能被记下来，其中只有一个是可回溯的。** 宿主可能写
+持久化会话日志、可能导出 OpenTelemetry、也可能提供 hook 让工具订阅。遥测和
+hook 只覆盖「配好之后」跑的会话——它们回答不了「昨天那次会话干了什么」。而
+会话日志可以在 agent 退出之后、在一台从未做过任何埋点的机器上、不需要提前
+安装任何东西就读出来。这正是本工具存在的意义，**也是运行时层选择读日志的
+原因**。
+
+这同时解释了为什么有些信号是**结构性拿不到**而不只是「还没做」。比如 Codex
+刻意把审批请求和沙箱结果**排除在** rollout 文件之外、改走 OpenTelemetry 导出，
+再怎么解析日志也变不出来。想拿到它们，要么要求用户事先配好 collector，要么装
+hook——而在 Claude Code 上能看见权限决策的那个 hook，**它的输出决定这次工具
+调用放不放行**，装上去就意味着审计工具成了它所审计行为的参与者。本项目不做
+这件事。
+
+每个宿主到底记了什么，已经对着上游源码和一手日志逐项核过——包括哪些格子会
+永久保持 `unavailable` 及其原因。逐宿主矩阵与适配器必须满足的规则见
+[`docs/RUNTIME_EVIDENCE_CONTRACT.md`](docs/RUNTIME_EVIDENCE_CONTRACT.md)，
+另见 [`docs/DSH_INTEGRATION.md`](docs/DSH_INTEGRATION.md) 与
 [`docs/AGENT_BEHAVIOR_AUDIT.md`](docs/AGENT_BEHAVIOR_AUDIT.md)。
 
 ## 装机层：七项检查
@@ -607,11 +664,24 @@ OpenClaw、Hermes、WorkBuddy 现在只有装机层——不是规则用不上�
 | **描述预算**（2.1） | | 可配置估算 | 官方 2% / 8k fallback 估算 | 可配置上限 | 未获取 | 未获取 | 未获取（SV004 逐条截断） |
 | **加载 vs 磁盘判定** | | `enabledPlugins` | app-server | eligible runtime catalog | manifest + welcome mode | 仅文件系统 | 会话日志 + 注册表快照 |
 | **触发数据**（2.5） | | `skillUsage` | 未获取 | 未获取 | 未获取 | 未获取 | 会话日志 |
-| **运行时行为审计** | | 未获取——没写适配器 | 未获取——没写适配器 | 未获取——没写适配器 | 未获取——没写适配器 | 未获取——没写适配器 | ✅ 实时审计 tab + `behavior`/`duration-audit` CLI |
+| **运行时行为审计** | | 已勘察，未实现 † | 已勘察，未实现 † | 未勘察 | 已勘察，未实现 † | 未勘察 | ✅ 实时审计 tab + `behavior`/`duration-audit` CLI |
 
-"未获取——没写适配器"不等于"做不到"：规则引擎吃的是任意形状对的 JSON 事件数组
-（见上面"运行时层：现在检查什么"），只是还没人给这些宿主写日志格式适配器，
-其中有几个宿主本身也未必会把会话日志持久化下来给你适配。
+`†` **「已勘察，未实现」**的意思是：该宿主的证据已经对着上游源码和真实日志逐项
+核过，但适配器还没写。**这些宿主上今天不跑任何运行时检查。** 勘察结果：
+
+- **Claude Code** —— JSONL 的**消息树**（不是事件流）：工具调用、逐请求 token
+  用量、turn 时长都有；审批与沙箱决策在里面**一条都没有**。
+- **Codex** —— 两种互不兼容的 rollout 格式（`Legacy` / `Paginated`），而**文件
+  本身不声明自己是哪种**，只能靠探测。`Paginated` 是更丰富的那种，带 argv、
+  退出码和逐命令耗时。审批与 hook 被上游设计**明确排除**在文件之外。
+- **WorkBuddy** —— 没有对话 transcript，但有三个独立存储：SQLite 里的会话
+  元数据、一份哈希链安全决策日志（**所有已勘察宿主中唯一可回溯的审批记录**）、
+  以及一个 OpenTelemetry 形状的 span 树（含工具名、耗时、成败）。
+- **OpenClaw / Hermes** —— 被审计的机器上没有安装实例，运行时证据面**未知**。
+  记为未知，而不是猜一个。
+
+完整矩阵（每个 `unavailable` 都附上游源码出处）见
+[`docs/RUNTIME_EVIDENCE_CONTRACT.md`](docs/RUNTIME_EVIDENCE_CONTRACT.md)。
 
 OpenClaw 会额外调用 `openclaw skills list --eligible --json`，按实例核验
 workspace、插件和 npm 内置 Skills 的 eligibility 与模型可见性；命令失败或超时
