@@ -35,7 +35,7 @@ _spec.loader.exec_module(scan)
 sys.path.insert(0, str(ROOT / "scripts"))
 from skill_vitals.util import split_lines  # noqa: E402
 from skill_vitals.util import fork_boundary, post_fork  # noqa: E402
-from skill_vitals.usage import context_composition, request_metrics, token_by_model  # noqa: E402
+from skill_vitals.usage import context_composition, hour_buckets, request_metrics, token_by_model  # noqa: E402
 from skill_vitals.compaction import compaction_events  # noqa: E402
 from skill_vitals.waste import detect_duplicate_tool_results, detect_failure_run_waste, detect_structural_waste  # noqa: E402
 from skill_vitals.util import est_tokens  # noqa: E402
@@ -1691,6 +1691,266 @@ class TestRequestMetrics(unittest.TestCase):
         ])
         self.assertIsNone(rows[0]["context_window"], "不臆造 128K 之类的默认值")
         self.assertEqual(rows[0]["context_tokens"], 15, "分子照常可算")
+
+
+class TestHourBuckets(unittest.TestCase):
+    """`hour_buckets` 的 Python 侧锚点 —— Rust `usage.rs::hour_buckets`
+    平行实现要对齐的目标。
+
+    与 `TestRequestMetricsByteForByteRust` 同一种锁步策略：双方各钉一份
+    输出（不是一边钉一边跟着跑），任一侧动了都会红。
+    """
+
+    # 北京时间戳对照表（全部 2026 年；周二 = 工作日分支）：
+    #   06:30 = 早空闲，9-12/14-18 之外；周末判定走 _beijing_weekday 分支
+    #   09:30 = 早高峰，14:30 = 下午高峰
+    #   23:50 → 00:10 = 跨午夜（落到不同日期）
+    #   14:30 周六 = 工作日 14 点是高峰，周六全天空闲——专门验这一条规则
+    TUE_PEAK_1430 = 1787639400000      # 周二 14:30 北京（下午高峰）
+    TUE_PEAK_0930 = 1787621400000      # 周二 09:30 北京（早高峰）
+    TUE_OFFPEAK_0630 = 1787610600000   # 周二 06:30 北京（早空闲）
+    TUE_LATE_NIGHT_2350 = 1787673000000  # 周二 23:50 北京
+    WED_JUST_AFTER_0010 = 1787674200000  # 周三 00:10 北京（跨午夜）
+    SAT_1430 = 1787985000000           # 周六 14:30 北京（高峰小时但周末空闲）
+
+    def test_empty_input_returns_empty_buckets(self):
+        """没有事件就不臆造 bucket——与 CLAUDE.md「缺列不编列」同条纪律。"""
+        out = hour_buckets([])
+        self.assertEqual(out["buckets"], [])
+        self.assertEqual(out["schema_version"], 1)
+        self.assertEqual(out["tz_name"], "Asia/Shanghai (UTC+8 fixed, no DST)")
+        self.assertEqual(out["tz_offset_hours"], 8)
+        self.assertEqual(out["unreported_fields"], [])
+
+    def test_single_peak_sample_populates_both_base_and_peak(self):
+        """一笔高峰请求：4 基础桶 + 4 peak_* 子桶都该有值，is_peak=true。"""
+        events = [
+            {"type": "request/header", "seq": 1, "time": self.TUE_PEAK_1430,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            {"type": "assistant/chunk", "seq": 2, "time": self.TUE_PEAK_1430,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000, "outputTokens": 200,
+                                "cacheReadTokens": 300, "cacheWriteTokens": 50}}}},
+        ]
+        out = hour_buckets(events)
+        self.assertEqual(len(out["buckets"]), 1)
+        b = out["buckets"][0]
+        self.assertEqual(b["date"], "2026-08-25")
+        self.assertEqual(b["hour"], 14)
+        self.assertTrue(b["is_peak"])
+        self.assertEqual(b["uncached_input_tokens"], 1000)
+        self.assertEqual(b["output_tokens"], 200)
+        self.assertEqual(b["cache_read_tokens"], 300)
+        self.assertEqual(b["cache_write_tokens"], 50)
+        # peak_* 子桶等于基础桶（这笔请求本身就是高峰）
+        self.assertEqual(b["peak_uncached_input_tokens"], 1000)
+        self.assertEqual(b["peak_output_tokens"], 200)
+        self.assertEqual(b["peak_cache_read_tokens"], 300)
+        self.assertEqual(b["peak_cache_write_tokens"], 50)
+        self.assertEqual(out["unreported_fields"], [])
+
+    def test_off_peak_sample_does_not_populate_peak_subbuckets(self):
+        """一笔空闲请求：基础桶有数、peak_* 全 0、is_peak=false。"""
+        events = [
+            {"type": "request/header", "seq": 1, "time": self.TUE_OFFPEAK_0630,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            {"type": "assistant/chunk", "seq": 2, "time": self.TUE_OFFPEAK_0630,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 500, "outputTokens": 100}}}},
+        ]
+        out = hour_buckets(events)
+        b = out["buckets"][0]
+        self.assertEqual(b["hour"], 6)
+        self.assertFalse(b["is_peak"])
+        self.assertEqual(b["uncached_input_tokens"], 500)
+        self.assertEqual(b["output_tokens"], 100)
+        # 空闲时段 → peak_* 子桶全 0
+        self.assertEqual(b["peak_uncached_input_tokens"], 0)
+        self.assertEqual(b["peak_output_tokens"], 0)
+        self.assertEqual(b["peak_cache_read_tokens"], 0)
+        self.assertEqual(b["peak_cache_write_tokens"], 0)
+
+    def test_weekend_peak_hour_is_off_peak(self):
+        """**周六下午 14 点也是空闲**——漏过这条规则按真实账单对照会精确
+        ×2（见 usage.py::_is_peak_slot 的注释，2026-08-23 周日 14:45 那次
+        会话被错算了 ¥1.0308372 应收 ¥0.5154186）。"""
+        events = [
+            {"type": "request/header", "seq": 1, "time": self.SAT_1430,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            {"type": "assistant/chunk", "seq": 2, "time": self.SAT_1430,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000, "outputTokens": 200}}}},
+        ]
+        out = hour_buckets(events)
+        b = out["buckets"][0]
+        self.assertEqual(b["date"], "2026-08-29")
+        self.assertEqual(b["hour"], 14)
+        self.assertFalse(b["is_peak"], "周六全天 = 空闲")
+        self.assertEqual(b["peak_uncached_input_tokens"], 0)
+        self.assertEqual(b["peak_output_tokens"], 0)
+
+    def test_cross_midnight_events_keep_their_own_date(self):
+        """跨午夜的事件按各自 event.time 归属，不归到 session 开始的日期。
+
+        真实日志里一个会话从 23:50 跑到 00:10，00:10 的样本必须属于「第二天」
+        而不是「session 那天」——日历渲染时 23 点和 0 点属于两个不同单元格。
+        """
+        # 北京 23:30 (UTC 15:30) + 0:30 (UTC 16:30 同日) → 同一 UTC 日但
+        # 跨午夜；为更明确改用相差日期：23:50 北京 → 次日 00:10 北京。
+        # 2026-08-25 23:50 北京 = 2026-08-25 15:50 UTC = 1787641800 秒
+        # 2026-08-26 00:10 北京 = 2026-08-25 16:10 UTC = 1787643000 秒
+        ts_late_night = self.TUE_LATE_NIGHT_2350  # 8/25 23:50 北京
+        ts_just_after = self.WED_JUST_AFTER_0010  # 8/26 00:10 北京
+        events = [
+            {"type": "request/header", "seq": 1, "time": ts_late_night,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            {"type": "assistant/chunk", "seq": 2, "time": ts_late_night,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 100, "outputTokens": 10}}}},
+            {"type": "assistant/chunk", "seq": 3, "time": ts_just_after,
+             "data": {"turn": 2, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 200, "outputTokens": 20}}}},
+        ]
+        out = hour_buckets(events)
+        self.assertEqual(len(out["buckets"]), 2)
+        # 按 (date, hour) 排序
+        self.assertEqual(out["buckets"][0]["date"], "2026-08-25")
+        self.assertEqual(out["buckets"][0]["hour"], 23)
+        self.assertEqual(out["buckets"][0]["uncached_input_tokens"], 100)
+        self.assertEqual(out["buckets"][1]["date"], "2026-08-26")
+        self.assertEqual(out["buckets"][1]["hour"], 0)
+        self.assertEqual(out["buckets"][1]["uncached_input_tokens"], 200)
+
+    def test_same_step_dedup_replaces_previous_contribution(self):
+        """同 (turn, step) 后到者覆盖前到者——与 token_by_model 的替换语义一致。
+
+        0 折 / 跨小时替换两种情形都验：折叠必须反映最终归属，而不是简单累加。
+        """
+        # 周二 14 点发 chunk，**15 点**发 message 覆盖（同一 step、跨小时）
+        ts_14 = self.TUE_PEAK_1430
+        ts_15 = self.TUE_PEAK_1430 + 3600 * 1000  # +1h
+        events = [
+            {"type": "request/header", "seq": 1, "time": ts_14,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            # chunk 先到（14 点）→ 14 点桶 +1000
+            {"type": "assistant/chunk", "seq": 2, "time": ts_14,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000, "outputTokens": 100}}}},
+            # message 后到（15 点）→ 15 点桶 +1200，14 点桶 -1000
+            {"type": "assistant/message", "seq": 3, "time": ts_15,
+             "data": {"turn": 1, "step": 1,
+                      "usage": {"inputTokens": 1200, "outputTokens": 120}}},
+        ]
+        out = hour_buckets(events)
+        self.assertEqual(len(out["buckets"]), 2)
+        # 14 点桶 = 0（chunk 的贡献被 message 替换走了）
+        b14 = next(b for b in out["buckets"] if b["hour"] == 14)
+        self.assertEqual(b14["uncached_input_tokens"], 0)
+        self.assertEqual(b14["output_tokens"], 0)
+        # 15 点桶 = message 的值（1200 / 120）
+        b15 = next(b for b in out["buckets"] if b["hour"] == 15)
+        self.assertEqual(b15["uncached_input_tokens"], 1200)
+        self.assertEqual(b15["output_tokens"], 120)
+
+    def test_missing_time_bucketed_as_unknown(self):
+        """time 缺失的样本落 ("unknown", None) 桶，**不**进任何 (date, hour) 桶。
+
+        否则下游做「过去 7 天合计」会把这些样本算成 1970-01-01 那一桶——
+        真实数据可能因此凭空多出几万 token / 几百块钱。
+        """
+        events = [
+            {"type": "request/header", "seq": 1, "time": 1001,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            # time 缺失
+            {"type": "assistant/chunk", "seq": 2,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 500, "outputTokens": 50}}}},
+        ]
+        out = hour_buckets(events)
+        self.assertEqual(len(out["buckets"]), 1)
+        b = out["buckets"][0]
+        self.assertIsNone(b["date"])
+        self.assertIsNone(b["hour"])
+        self.assertIsNone(b["is_peak"])
+        self.assertEqual(b["uncached_input_tokens"], 500)
+        # 「unknown」桶沉底：calendar 渲染时直接过滤掉它，不参与每日合计
+
+    def test_no_active_model_still_buckets(self):
+        """无 request/header 的样本也能正常折叠——与 token_by_model 的
+        'unknown' 模型桶是同一种降级：日志里没有归属信息就让它归「时间未知」，
+        而不是拒绝整段 fold。"""
+        events = [
+            {"type": "assistant/chunk", "seq": 1, "time": self.TUE_PEAK_1430,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 700, "outputTokens": 70}}}},
+        ]
+        out = hour_buckets(events)
+        self.assertEqual(len(out["buckets"]), 1)
+        self.assertEqual(out["buckets"][0]["uncached_input_tokens"], 700)
+
+    def test_reconciles_with_token_by_model(self):
+        """同源不变量：所有 bucket 的 4 基础桶之和 == token_by_model 的 4 桶之和。
+
+        证明 hour_buckets 与 token_by_model 共用同一套去重 / 折叠逻辑——
+        任何一处改了同 (turn, step) 处理而另两处没改，对账立刻红。
+        """
+        events = [
+            {"type": "request/header", "seq": 1, "time": self.TUE_PEAK_1430,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            # 同 (1,1) → 只算后到
+            {"type": "assistant/chunk", "seq": 2, "time": self.TUE_PEAK_1430,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000, "outputTokens": 200,
+                                "cacheReadTokens": 300, "cacheWriteTokens": 0}}}},
+            {"type": "assistant/message", "seq": 3, "time": self.TUE_PEAK_1430 + 1,
+             "data": {"turn": 1, "step": 1,
+                      "usage": {"inputTokens": 1200, "outputTokens": 250,
+                                "cacheReadTokens": 300, "cacheWriteTokens": 0}}},
+            # 切到空闲时段
+            {"type": "assistant/chunk", "seq": 4, "time": self.TUE_OFFPEAK_0630,
+             "data": {"turn": 2, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 500, "outputTokens": 50}}}},
+        ]
+        hb = hour_buckets(events)
+        tm = token_by_model(events)
+        for key in ("uncached_input_tokens", "output_tokens",
+                    "cache_read_tokens", "cache_write_tokens"):
+            hour_total = sum(b[key] for b in hb["buckets"])
+            model_total = sum(m[key] for m in tm["by_model"].values())
+            self.assertEqual(
+                hour_total, model_total,
+                f"{key}: hour_buckets 之和 ({hour_total}) 必须等于 "
+                f"token_by_model 按模型聚合 ({model_total})")
+
+    def test_unreported_fields_only_when_samples_present(self):
+        """0 个样本时不输出「未上报字段」——与 token_by_model 同条纪律
+        （一个样本都没有就不下任何关于 host 能力的断言）。"""
+        # 只有 request/header，没有任何 usage 样本
+        out = hour_buckets([
+            {"type": "request/header", "seq": 1, "time": 1000,
+             "data": {"header": {"config": {"model": "pro"}}}},
+        ])
+        self.assertEqual(out["buckets"], [])
+        self.assertEqual(out["unreported_fields"], [])
+
+    def test_missing_field_is_null_not_zero(self):
+        """缺字段落 None / 0 桶里没值——与 _buckets_from 同条纪律
+        （host 没报 ≠ 测到 0；calendar 渲染时缺字段的格子不画假数据）。"""
+        events = [
+            {"type": "request/header", "seq": 1, "time": self.TUE_PEAK_1430,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            # 缺 cacheReadTokens / cacheWriteTokens
+            {"type": "assistant/chunk", "seq": 2, "time": self.TUE_PEAK_1430,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 100, "outputTokens": 10}}}},
+        ]
+        out = hour_buckets(events)
+        b = out["buckets"][0]
+        self.assertEqual(b["uncached_input_tokens"], 100)
+        # unreported_fields 标记宿主真的没报这两个字段——calendar 渲染时
+        # 据此决定要不要画「缓存读 / 写 0」这种会误导的数字
+        self.assertIn("cacheReadTokens", out["unreported_fields"])
+        self.assertIn("cacheWriteTokens", out["unreported_fields"])
 
 
 if __name__ == "__main__":

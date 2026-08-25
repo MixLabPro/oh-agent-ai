@@ -34,6 +34,9 @@ import skill_vitals.redact as redact_module
 from skill_vitals.report import build_report
 import skill_vitals.security as security_module
 from skill_vitals.snapshots import SNAPSHOT_KEEP, diff_against, latest_snapshot, render_diff, render_snapshot
+from skill_vitals import state as state_module
+from skill_vitals import usage as usage_module
+from skill_vitals import budget as budget_module
 
 # Windows services and CI runners may expose cp1252 consoles. Reports and
 # diagnostics are bilingual, so make redirected and interactive output stable.
@@ -235,6 +238,52 @@ def _main():
                                 "(tool calls / turns / steps / approvals / hooks)")
     p_dur.add_argument("session_log", help="Path to the DSH session JSONL log (file or directory)")
     p_dur.add_argument("--json", help="Write duration audit JSON to FILE; use - for stdout")
+    # ──── M3: 跨会话聚合层（v1.x.x）── 三个新子命令 ─────────────────
+    # oneline：单次审计 → oneline.json（覆盖）+ today.json / month.json（合并累加）。
+    # 与 behavior 复用同一份 audit_session_log，但额外调 hour_buckets 把折叠
+    # 结果写进 state 文件。xbar tick 直接读 oneline.json 不重算 cost —— 重算
+    # 两份就两份可能不一致（见 cost.py 顶部 peak/off-peak 计价分支）。
+    p_oneline = sub.add_parser("oneline",
+                               help="Fold one session audit into the persisted state files")
+    p_oneline.add_argument("session_log",
+                           help="Path to the DSH session JSONL log")
+    p_oneline.add_argument("--no-merge", action="store_true",
+                           help="Skip today.json / month.json merge (write oneline.json only)")
+    # calendar：把 month.json / today.json 渲染成单文件 HTML。模板来自
+    # scripts/skill_vitals/templates/calendar.html（inline CSS/JS，无外链）。
+    # 这里只做 copy + （可选）inline JSON，不重做 schema。
+    p_cal = sub.add_parser("calendar",
+                           help="Render the cost calendar HTML from persisted state")
+    p_cal.add_argument("--source", choices=("month", "today"), default="month",
+                       help="Which state file to render (default: month)")
+    p_cal.add_argument("--output", "-o", required=True,
+                       help="Destination HTML path")
+    # state：列出 / 清理 state 目录。不接受 --json/--host 等扫描期参数。
+    p_state = sub.add_parser("state", help="Inspect or clean the persisted state directory")
+    p_state.add_argument("action", choices=("list", "clean"),
+                         help="list = show files; clean = remove (with --yes)")
+    p_state.add_argument("--yes", action="store_true",
+                         help="Skip the confirmation prompt for 'state clean'")
+    # ──── M6: 预算告警 ──────────────────────────────────────────
+    # show / set / enable / disable / snooze —— 五种动作覆盖 spec §5.5
+    p_budget = sub.add_parser("budget",
+                              help="Inspect or modify the budget alert thresholds")
+    p_budget.add_argument("action", choices=("show", "set", "enable", "disable",
+                                             "snooze", "unsnooze"),
+                          help="show = current; set = change a field; "
+                               "enable/disable = toggle; snooze = silence for Nh")
+    p_budget.add_argument("--daily", type=float, default=argparse.SUPPRESS,
+                          help="Set daily_cny (元)")
+    p_budget.add_argument("--weekly", type=float, default=argparse.SUPPRESS,
+                          help="Set weekly_cny")
+    p_budget.add_argument("--monthly", type=float, default=argparse.SUPPRESS,
+                          help="Set monthly_cny")
+    p_budget.add_argument("--peak-share-max", type=float, default=argparse.SUPPRESS,
+                          help="Set peak_share_max (0.0–1.0)")
+    p_budget.add_argument("--hours", type=float, default=argparse.SUPPRESS,
+                          help="snooze duration in hours")
+    p_budget.add_argument("--json", action="store_true",
+                          help="Emit alert as JSON (for xbar tick)")
     # --fail-on / --ignore 对 behavior 同样有意义（闸门），但 --new-only 没有——
     # 一份会话日志是单次取证输入，没有「相对上次的新增发现」。这里显式补上
     # 前两个，让它们在子命令前后两个位置都能解析（对齐 Rust 的 global=true）。
@@ -383,6 +432,253 @@ def _main():
                 name = row["tool_name"] or "(unknown)"
                 print("  %s — %dms (%s)" % (name, row["duration_ms"], row["load_status"]))
         return
+
+    # ──── M3 oneline handler ──────────────────────────────────────
+    # 与 behavior 同源（同一个 audit_session_log），但**额外**把 hour_buckets
+    # 折进 today.json / month.json。审计成本：每会话多跑一次 hour_buckets 折叠
+    # （纯函数、与 token_by_model 同采样路径，无额外 I/O）。
+    if getattr(args, "cmd", None) == "oneline":
+        audit = behavior_module.audit_session_log(args.session_log)
+        if audit is None:
+            print("session log unavailable: unreadable, malformed, or schema mismatch",
+                  file=sys.stderr)
+            sys.exit(2)
+        findings, usage, requests, ctx, compaction, waste, pre_fork, subagents, skill, duration = audit
+        pricing = cost_module.load_pricing()
+        cost = cost_module.cost_report(usage, pricing)
+        if cost is None:
+            print("warning: cost_report returned None (no usage samples to price)",
+                  file=sys.stderr)
+            cost = {"total": 0, "peak_total": 0, "unpriced_tokens": 0,
+                    "currency": "CNY"}
+        # hour_buckets 复用 token_by_model 的同 step 去重 + peak/off-peak 判定。
+        # 与 token_by_model 的不变量已由 tests/test_characterization.py::TestHourBuckets
+        # 钉死 —— 两边加起来必须字节相等。
+        # 这里再读一次 events 列表（audit_session_log 自己内部读了一次）——
+        # 双读换「不破坏 audit_session_log 签名」的简洁性，且 oneline 是
+        # 5min tick 而非实时路径，多读一次 JSONL 的成本可忽略。
+        from skill_vitals.adapters.dsh import read_session_log
+        session = read_session_log(args.session_log)
+        events = (session or {}).get("usage_events") or []
+        hb = usage_module.hour_buckets(events)
+        # 把 cost / hb 折成「一行摘要」。**不要**塞 findings / requests 全文——
+        # oneline.json 是 xbar 5min tick 读的，塞多了每次都序列化浪费。
+        # tokens_total 必须与 hour_buckets 的 4 桶之和**逐字节相等**
+        # (tests/test_cli_m3::TestUsageHourBucketsReconcile 钉死)——
+        # 所以这里取 4 桶全量,与 token_by_model 同源。
+        tokens_total = sum(
+            m["uncached_input_tokens"] + m["output_tokens"]
+            + m["cache_read_tokens"] + m["cache_write_tokens"]
+            for m in usage["by_model"].values())
+        tokens_peak = sum(
+            m["peak_uncached_input_tokens"] + m["peak_output_tokens"]
+            + m["peak_cache_read_tokens"] + m["peak_cache_write_tokens"]
+            for m in usage["by_model"].values())
+        # session_id / duration_ms：日志 schema 没显式字段时用文件名 + None
+        # 兜底 ——「没数据」与「数据为 0」是两回事（CLAUDE.md §缺列不编列）。
+        session_id = Path(args.session_log).stem
+        duration_ms = None
+        for ev in events:
+            if isinstance(ev, dict) and ev.get("type") == "session/end":
+                end = ev.get("time")
+                if isinstance(end, int) and isinstance(duration_ms, type(None)):
+                    duration_ms = end
+                    break
+        max_sev = "none"
+        sev_rank = {"critical": 4, "warning": 3, "info": 2}
+        for f in findings:
+            r = sev_rank.get(f.get("severity"), 0)
+            if r > sev_rank.get(max_sev, 0):
+                max_sev = f["severity"]
+        summary = {
+            "session_id": session_id,
+            "session_log": str(args.session_log),
+            "duration_ms": duration_ms,
+            "model": (list(usage["by_model"].keys()) or ["unknown"])[0],
+            "tokens_total": tokens_total,
+            "tokens_peak": tokens_peak,
+            "cost_cny": cost["total"],
+            "cost_peak_cny": cost["peak_total"],
+            "unpriced_tokens": cost["unpriced_tokens"],
+            "findings_total": len(findings),
+            "findings_max_severity": max_sev,
+            "hour_buckets_summary": {
+                "bucket_count": len(hb["buckets"]),
+                "min_date": (hb["buckets"][0]["date"]
+                             if hb["buckets"] else None),
+                "max_date": (hb["buckets"][-1]["date"]
+                             if hb["buckets"] else None),
+                "tz_name": hb["tz_name"],
+            },
+        }
+        p_oneline = state_module.write_oneline(summary)
+        if not args.no_merge:
+            state_module.merge_today(hb)
+            state_module.merge_month(hb)
+        # 不管 --no-merge 与否都 append 历史 —— xbar「最近 5 次审计」要靠这个
+        state_module.append_session_history(summary)
+        # 人读输出 —— 让没装 xbar 的用户在终端也能看一眼「这一会话花了多少」。
+        print("session:    %s" % summary["session_id"])
+        print("duration:   %s ms" % (summary["duration_ms"] or "?"))
+        print("model:      %s" % summary["model"])
+        print("tokens:     %s (peak %s)" % (summary["tokens_total"], summary["tokens_peak"]))
+        print("cost:       ¥%.4f (peak ¥%.4f)" % (summary["cost_cny"], summary["cost_peak_cny"]))
+        if summary["unpriced_tokens"]:
+            print("unpriced:   %d tokens (model not in pricing.json)"
+                  % summary["unpriced_tokens"])
+        print("findings:   %d (max severity: %s)"
+              % (summary["findings_total"], summary["findings_max_severity"]))
+        print("state:      %s" % p_oneline)
+        return
+
+    # ──── M3 calendar handler ─────────────────────────────────────
+    # 模板在 scripts/skill_vitals/templates/calendar.html（M4 产出）。
+    # 这里只做 copy + （如启用 --inline-json）把 state 文件内容 inline 进
+    # `<script id="data">…</script>` 块；否则 HTML 用 fetch() 读，用户
+    # 需要起静态服务。
+    if getattr(args, "cmd", None) == "calendar":
+        template = Path(__file__).resolve().parent / "templates" / "calendar.html"
+        if not template.is_file():
+            print("calendar template not found at %s (run M4 first)" % template,
+                  file=sys.stderr)
+            sys.exit(2)
+        src_name = "month.json" if args.source == "month" else "today.json"
+        src = state_module.state_dir() / src_name
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        # 模板第一段 <!-- M4 TEMPLATE_BEGIN --> ... <!-- M4 TEMPLATE_END -->
+        # 包住所有内容。我们把数据 JSON 注入到 <head> 里一个独立 <script>
+        # 块,渲染时 JS 优先读 window.__SKILL_VITALS_DATA__,没有再退到 fetch
+        # + file picker。这样 file:// 双击 HTML 也能渲染（无 fetch / 无 CORS）。
+        html = template.read_text(encoding="utf-8")
+        if src.is_file():
+            json_text = src.read_text(encoding="utf-8")
+            # JSON 里可能含 </script> —— 必须转义,否则浏览器解析到这就崩
+            json_text_safe = (json_text
+                              .replace("</script", "<\\/script")
+                              .replace("<!--", "<\\!--"))
+            inject = ("<script id=\"skill-vitals-data\" type=\"application/json\">"
+                      + json_text_safe + "</script>")
+            html = html.replace("</head>", inject + "\n</head>", 1)
+            out.write_text(html, encoding="utf-8")
+            # 同时把 state 文件 cp 到同目录,作为 fetch fallback 的副本。
+            (out.parent / src_name).write_text(json_text, encoding="utf-8")
+            print("rendered: %s (%d bytes, data inline + %s)"
+                  % (out, out.stat().st_size, src))
+        else:
+            # 无数据：HTML 仍然渲染,JS 检测到 __SKILL_VITALS_DATA__ 缺失
+            # → 显示「无数据」empty state,而不是凭空编一个空 calendar。
+            out.write_text(html, encoding="utf-8")
+            print("rendered: %s (no %s yet — calendar will show empty state)"
+                  % (out, src_name))
+        return
+
+    # ──── M3 state list / clean ───────────────────────────────────
+    if getattr(args, "cmd", None) == "state":
+        files = state_module.list_state_files()
+        if args.action == "list":
+            if not files:
+                print("(empty)")
+                return
+            for f in files:
+                size = f.stat().st_size
+                mtime = f.stat().st_mtime
+                print("%-40s %6d B  mtime=%d" % (f.name, size, int(mtime)))
+            return
+        if args.action == "clean":
+            # 顺带扫掉 .lock sidecar（_locked 留下的，与 .json 一一对应）
+            lock_files = list(state_module.state_dir().glob("*.json.lock"))
+            if not args.yes:
+                print("refusing without --yes; %d files would be removed" % len(files),
+                      file=sys.stderr)
+                sys.exit(2)
+            for f in files:
+                f.unlink()
+            for lf in lock_files:
+                lf.unlink()
+            print("removed %d files" % len(files))
+            return
+
+    # ──── M6 budget 子命令 ──────────────────────────────────────
+    if getattr(args, "cmd", None) == "budget":
+        if args.action == "show":
+            alert = budget_module.evaluate()
+            if args.json:
+                print(json.dumps(alert, ensure_ascii=False, indent=2,
+                                 default=str))
+            else:
+                cfg = budget_module.load_config()
+                print("enabled:           %s" % cfg["enabled"])
+                print("daily_cny:         %s" % cfg["daily_cny"])
+                print("weekly_cny:        %s" % cfg["weekly_cny"])
+                print("monthly_cny:       %s" % cfg["monthly_cny"])
+                print("peak_share_max:    %s" % cfg["peak_share_max"])
+                print("adaptive_floor:    %s" % cfg["adaptive_floor"])
+                print("adaptive_window:   %s days" % cfg["adaptive_window_days"])
+                print("adaptive_multiplier: %s" % cfg["adaptive_multiplier"])
+                print()
+                print("─── today ───")
+                print("today_cost:        %s" %
+                      ("¥%.2f" % alert["today_cost"] if alert["today_cost"] is not None
+                       else "(no data)"))
+                print("effective_daily:   ¥%.2f (adaptive_floor_applied=%s)" %
+                      (alert["effective_daily_budget"],
+                       alert["adaptive_floor_applied"]))
+                print("ratio:             %s" %
+                      ("%.1f%%" % (alert["ratio"] * 100) if alert["ratio"] is not None
+                       else "(no data)"))
+                print("peak_share:        %s" %
+                      ("%.1f%%" % (alert["peak_share"] * 100)
+                       if alert["peak_share"] is not None else "(no data)"))
+                print("alert level:       %s" % alert["level"])
+                if alert["snoozed_until"]:
+                    print("snoozed_until:     %s" % alert["snoozed_until"])
+                if alert["reasons"]:
+                    print()
+                    print("reasons:")
+                    for r in alert["reasons"]:
+                        print("  • %s" % r)
+            return
+        if args.action == "set":
+            changes = {}
+            if hasattr(args, "daily"):
+                changes["daily_cny"] = args.daily
+            if hasattr(args, "weekly"):
+                changes["weekly_cny"] = args.weekly
+            if hasattr(args, "monthly"):
+                changes["monthly_cny"] = args.monthly
+            if hasattr(args, "peak_share_max"):
+                changes["peak_share_max"] = args.peak_share_max
+            if not changes:
+                print("no changes specified (use --daily/--weekly/...)", file=sys.stderr)
+                sys.exit(2)
+            budget_module.write_config(changes)
+            print("wrote %s to %s" % (changes, budget_module._config_path()))
+            return
+        if args.action == "enable":
+            budget_module.write_config({"enabled": True})
+            print("budget enabled")
+            return
+        if args.action == "disable":
+            budget_module.write_config({"enabled": False})
+            print("budget disabled")
+            return
+        if args.action == "snooze":
+            hours = getattr(args, "hours", None)
+            if not hours or hours <= 0:
+                print("--hours must be positive", file=sys.stderr)
+                sys.exit(2)
+            from datetime import datetime as _dt, timedelta
+            until = (_dt.now(budget_module._BEIJING)
+                     + timedelta(hours=hours)).isoformat()
+            budget_module.set_snooze(until, reason="cli")
+            print("snoozed until %s" % until)
+            return
+        if args.action == "unsnooze":
+            budget_module.clear_snooze()
+            print("snooze cleared")
+            return
 
     zombie_age = args.zombie_age
     budget = args.budget

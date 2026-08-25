@@ -41,6 +41,25 @@ pub fn token_by_model(events_json: &str) -> String {
     serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// 成本账事件数组 → 按 (date, hour) 折叠的 token 桶。
+///
+/// 与 `token_by_model` / `request_metrics` 同契约：JSON in / JSON out，
+/// 浏览器 tab 与 CLI 共用同一份 core 折叠。DSH 审计 tab 的日历视图读这个
+/// 投影(逐小时柱形 + 月历热力图);xbar tick 脚本**不**走 wasm(本地 shell
+/// 直接读 state/*.json)——避免每次启动 5MB wasm 二进制。
+///
+/// 输出 schema：
+/// ```json
+/// { "buckets": [{"date", "hour", "is_peak", 8 桶字段}, ...],
+///   "schema_version": 1, "tz_name", "tz_offset_hours", "unreported_fields" }
+/// ```
+#[wasm_bindgen]
+pub fn hour_buckets(events_json: &str) -> String {
+    let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
+    let report = skill_vitals_core::usage::hour_buckets(&events);
+    serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
+}
+
 /// 成本账事件数组 → 逐请求指标数组（会话健康时间线的数据源）。
 ///
 /// 与 `token_by_model` 是同一个 fold 的两个出口：那边给按模型的总数，这里给

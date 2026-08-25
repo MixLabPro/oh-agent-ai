@@ -532,6 +532,204 @@ pub fn pre_fork_usage(events: &[Value]) -> Value {
     out
 }
 
+/// `days_since_1970` → ISO `YYYY-MM-DD`。
+///
+/// Howard Hinnant 的 civil_from_days 算法（http://howardhinnant.github.io/
+/// date_algorithms.html#civil_from_days），public domain。**不引 chrono**
+/// ——CLAUDE.md §「no third-party supply chain at scan time」，统计折叠这层
+/// 必须是 stdlib-only；引 chrono 就破例了。算法纯整数 ~10 行，且已用
+/// 2026-08-25 = days 20690 等价对过。
+fn civil_date_from_days(days: i64) -> String {
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// 事件流 → 按 `(date, hour)` 折叠到 token 桶。Python 平行实现见
+/// `scripts/skill_vitals/usage.py::hour_buckets`，差分防护在本文件的
+/// `hour_buckets_*` 测试 + `tests/test_cli_matrix.py` 的双二进制逐字节比较。
+///
+/// 与 `token_by_model` / `request_metrics` 是**同一次 fold 的三个出口**：
+/// 那两个按模型 / 按请求折，这里按小时折。三者共用 `usage_sample` +
+/// `buckets_from` + `is_peak`，去重 / peak 语义必须一致 —— 任一处改了
+/// 同 `(turn, step)` 处理而另两处没改，对账立刻红。
+///
+/// 不变量（测试钉死）：
+/// - 全桶 4+4 字段之和 == `token_by_model` 按模型聚合后求和；
+/// - `(date, hour)` 是**去重后**的聚合粒度，不受 chunk/message 顺序影响；
+/// - 跨午夜事件按各自 `event.time` 归属，不归到 session 开始那天；
+/// - 时间戳缺失的样本落 `(None, None)` 桶（JSON 里 `"date": null` /
+///   `"hour": null`），**不**进任何 `(date, hour)` 桶 —— 避免被算成
+///   1970-01-01。
+///
+/// 输出 schema：
+/// ```json
+/// {
+///   "buckets": [
+///     {"date": "2026-08-25", "hour": 14, "is_peak": true,
+///      "uncached_input_tokens": ..., ..., "peak_uncached_input_tokens": ...}
+///   ],
+///   "schema_version": 1,
+///   "tz_name": "Asia/Shanghai (UTC+8 fixed, no DST)",
+///   "tz_offset_hours": 8,
+///   "unreported_fields": [...]
+/// }
+/// ```
+/// 同 (turn, step) 去重槽：(turn, step, date, hour, 4 基础桶, is_peak)。
+/// clippy::type_complexity 要求命名 —— 裸元组类型超过它的复杂度阈值。
+type HourBucketDedupSlot = (i64, i64, Option<String>, Option<i32>, [i64; 4], bool);
+
+pub fn hour_buckets(events: &[Value]) -> Value {
+    // 只看分叉之后的事件——见 token_by_model 的同条注释
+    let events = &crate::util::post_fork(events)[..];
+
+    // (date_str, hour) → 8 桶 dict。缺 time 的样本落 (None, None)。
+    // 用 Vec 而不是 HashMap 是为了**确定性**输出：按 seq 处理顺序保留
+    // 首次出现 key 的位置，最终展平时按 (date, hour) 排序 —— 与 Python
+    // 端的 list.sort 行为对齐（bytes-level）。
+    let mut bucket_keys: Vec<(Option<String>, Option<i32>)> = Vec::new();
+    let mut buckets_map: std::collections::HashMap<(Option<String>, Option<i32>), [i64; 8]> =
+        std::collections::HashMap::new();
+
+    let mut last: Option<HourBucketDedupSlot> = None;
+    let mut seen: [bool; 4] = [false; 4];
+    let mut samples: u64 = 0;
+
+    for event in events {
+        if !event.is_object() {
+            continue;
+        }
+        // request/header 跳过 —— hour_buckets 不按模型分桶,但保留这段逻辑
+        // 让循环路径与 token_by_model 一致(防御性)。
+        if event.get("type").and_then(|v| v.as_str()) == Some("request/header") {
+            continue;
+        }
+        let Some((turn, step, usage)) = usage_sample(event) else { continue };
+        samples += 1;
+        let add_buckets = buckets_from(usage, &mut seen);
+        let time_ms = event.get("time").and_then(|v| v.as_i64());
+        let peak = time_ms.map(is_peak_slot).unwrap_or(false);
+
+        let (date_str, hour) = match time_ms {
+            Some(ms) => {
+                let secs = ms.div_euclid(1000) + BEIJING_OFFSET_SECS;
+                let days = secs.div_euclid(86_400);
+                (Some(civil_date_from_days(days)), Some(beijing_hour(ms)))
+            }
+            None => (None, None),
+        };
+
+        let key = (date_str.clone(), hour);
+        if !buckets_map.contains_key(&key) {
+            bucket_keys.push(key.clone());
+        }
+
+        // 同 step 去重时需要**先**把旧贡献从原 hour 桶扣掉,**再**把新贡献
+        // 加到当前 hour 桶 —— 这是 token_by_model 的同 step 替换语义,
+        // 两边必须一致(否则累加会双计)。Rust 借用检查不允许在持有一个
+        // entry() 句柄的同时再 get_mut 另一个 key,所以把"扣旧"和"加新"
+        // 分两步,中间 drop 借用。
+        let is_dedup = matches!(&last, Some((lt, ls, _, _, _, _)) if *lt == turn && *ls == step);
+        let old_buckets = if is_dedup {
+            let (lt, ls, ld, lh, lb, lpeak) = last.as_ref().expect("checked above");
+            debug_assert_eq!(*lt, turn);
+            debug_assert_eq!(*ls, step);
+            let lkey = (ld.clone(), *lh);
+            // 扣除旧贡献后立即 drop 借用,然后再加新贡献
+            if let Some(lentry) = buckets_map.get_mut(&lkey) {
+                for i in 0..4 {
+                    lentry[i] -= lb[i];
+                }
+                if *lpeak {
+                    for i in 0..4 {
+                        lentry[4 + i] -= lb[i];
+                    }
+                }
+            }
+            Some(*lb)
+        } else {
+            None
+        };
+
+        let entry = buckets_map.entry(key).or_insert([0i64; 8]);
+        let _ = old_buckets; // 显式 drop 旧 borrow
+        for i in 0..4 {
+            entry[i] += add_buckets[i];
+        }
+        if peak {
+            for i in 0..4 {
+                entry[4 + i] += add_buckets[i];
+            }
+        }
+        last = Some((turn, step, date_str, hour, add_buckets, peak));
+    }
+
+    // 排序 + 展平：unknown (None, None) 桶沉底 —— 与 Python list.sort 的
+    // (date is None, date, hour) key 一致。
+    bucket_keys.sort_by(|a, b| {
+        let a_is_none = a.0.is_none();
+        let b_is_none = b.0.is_none();
+        b_is_none
+            .cmp(&a_is_none)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+
+    let mut rows: Vec<Value> = Vec::with_capacity(bucket_keys.len());
+    for key in &bucket_keys {
+        let b = buckets_map.get(key).copied().unwrap_or([0i64; 8]);
+        let (date_str, hour) = key;
+        let is_peak = match (date_str, hour) {
+            (None, _) => Value::Null,
+            (Some(_), _) => {
+                // 任一 peak_* > 0 → 整桶标 peak(单一粒度,不是逐字段)
+                Value::Bool(b[4] != 0 || b[5] != 0 || b[6] != 0 || b[7] != 0)
+            }
+        };
+        rows.push(json!({
+            "date": date_str,
+            "hour": hour,
+            "is_peak": is_peak,
+            "uncached_input_tokens": b[0],
+            "output_tokens": b[1],
+            "cache_read_tokens": b[2],
+            "cache_write_tokens": b[3],
+            "peak_uncached_input_tokens": b[4],
+            "peak_output_tokens": b[5],
+            "peak_cache_read_tokens": b[6],
+            "peak_cache_write_tokens": b[7],
+        }));
+    }
+
+    // 一个样本都没有时返回空 unreported —— 与 token_by_model 同条纪律
+    let unreported: Vec<&str> = if samples > 0 {
+        SAMPLE_FIELDS
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !seen[*i])
+            .map(|(_, k)| *k)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    json!({
+        "buckets": rows,
+        "schema_version": 1,
+        "tz_name": "Asia/Shanghai (UTC+8 fixed, no DST)",
+        "tz_offset_hours": 8,
+        "unreported_fields": unreported,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,6 +1274,172 @@ mod tests {
         ];
         assert_eq!(request_metrics(&events), json!([]));
         assert_eq!(request_metrics(&[]), json!([]));
+    }
+
+    // ──────────────────────── hour_buckets ────────────────────────
+    //
+    // 与 Python 侧 TestHourBuckets 同款锁步（两边各钉一份；任一侧动了都会红）。
+    // 北京时间戳对照表（周二 = 工作日分支）：
+    //   06:30 = 早空闲, 9-12/14-18 之外
+    //   09:30 = 早高峰, 14:30 = 下午高峰
+    //   23:50 → 00:10 = 跨午夜(落到不同日期)
+    //   14:30 周六 = 工作日 14 点是高峰,周六全天空闲
+
+    /// 空输入 → 空桶数组 + 元信息(不臆造零桶,与 token_by_model 同条纪律)。
+    #[test]
+    fn hour_buckets_empty_returns_empty_array() {
+        let out = hour_buckets(&[]);
+        assert_eq!(out["buckets"], json!([]));
+        assert_eq!(out["schema_version"], json!(1));
+        assert_eq!(out["tz_name"], json!("Asia/Shanghai (UTC+8 fixed, no DST)"));
+        assert_eq!(out["tz_offset_hours"], json!(8));
+        assert_eq!(out["unreported_fields"], json!([]));
+    }
+
+    /// 单笔高峰样本：4 基础 + 4 peak_* 都该有数,is_peak=true。
+    /// 2026-08-25(周二) 14:30 北京 = peak 时段。
+    #[test]
+    fn hour_buckets_peak_sample_populates_both() {
+        let events = [
+            json!({"type":"request/header","seq":1,"time":1787639400000i64,"data":{"header":{"config":{"model":"pro"}}}}),
+            json!({"type":"assistant/chunk","seq":2,"time":1787639400000i64,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":1000,"outputTokens":200,"cacheReadTokens":300,"cacheWriteTokens":50}}}}),
+        ];
+        let out = hour_buckets(&events);
+        let buckets = out["buckets"].as_array().unwrap();
+        assert_eq!(buckets.len(), 1);
+        let b = &buckets[0];
+        assert_eq!(b["date"], json!("2026-08-25"));
+        assert_eq!(b["hour"], json!(14));
+        assert_eq!(b["is_peak"], json!(true));
+        assert_eq!(b["uncached_input_tokens"], json!(1000));
+        assert_eq!(b["output_tokens"], json!(200));
+        assert_eq!(b["cache_read_tokens"], json!(300));
+        assert_eq!(b["cache_write_tokens"], json!(50));
+        assert_eq!(b["peak_uncached_input_tokens"], json!(1000));
+        assert_eq!(b["peak_output_tokens"], json!(200));
+        assert_eq!(b["peak_cache_read_tokens"], json!(300));
+        assert_eq!(b["peak_cache_write_tokens"], json!(50));
+    }
+
+    /// 空闲样本：基础桶有数,peak_* 全 0,is_peak=false。
+    #[test]
+    fn hour_buckets_off_peak_keeps_peak_subbuckets_zero() {
+        // 2026-08-25 06:30 北京 = 早空闲
+        let events = [
+            json!({"type":"request/header","seq":1,"time":1787610600000i64,"data":{"header":{"config":{"model":"pro"}}}}),
+            json!({"type":"assistant/chunk","seq":2,"time":1787610600000i64,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":500,"outputTokens":100}}}}),
+        ];
+        let out = hour_buckets(&events);
+        let b = &out["buckets"][0];
+        assert_eq!(b["hour"], json!(6));
+        assert_eq!(b["is_peak"], json!(false));
+        assert_eq!(b["peak_uncached_input_tokens"], json!(0));
+        assert_eq!(b["peak_output_tokens"], json!(0));
+    }
+
+    /// **周六下午 14 点也是空闲**——漏这条规则按真实账单对照会精确 ×2
+    /// (2026-08-23 周日 14:45 那次会话语义缺陷源)。
+    #[test]
+    fn hour_buckets_weekend_peak_hour_is_off_peak() {
+        // 2026-08-29(周六) 14:30 北京
+        let events = [
+            json!({"type":"request/header","seq":1,"time":1787985000000i64,"data":{"header":{"config":{"model":"pro"}}}}),
+            json!({"type":"assistant/chunk","seq":2,"time":1787985000000i64,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":1000,"outputTokens":200}}}}),
+        ];
+        let out = hour_buckets(&events);
+        let b = &out["buckets"][0];
+        assert_eq!(b["date"], json!("2026-08-29"));
+        assert_eq!(b["hour"], json!(14));
+        assert_eq!(b["is_peak"], json!(false), "周六全天 = 空闲");
+    }
+
+    /// 跨午夜：23:50 → 00:10 各自归属日期。
+    #[test]
+    fn hour_buckets_cross_midnight_keeps_own_date() {
+        let events = [
+            json!({"type":"request/header","seq":1,"time":1787673000000i64,"data":{"header":{"config":{"model":"pro"}}}}),
+            // 周二 23:50 北京
+            json!({"type":"assistant/chunk","seq":2,"time":1787673000000i64,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":100,"outputTokens":10}}}}),
+            // 周三 00:10 北京
+            json!({"type":"assistant/chunk","seq":3,"time":1787674200000i64,"data":{"turn":2,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":200,"outputTokens":20}}}}),
+        ];
+        let out = hour_buckets(&events);
+        let buckets = out["buckets"].as_array().unwrap();
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0]["date"], json!("2026-08-25"));
+        assert_eq!(buckets[0]["hour"], json!(23));
+        assert_eq!(buckets[0]["uncached_input_tokens"], json!(100));
+        assert_eq!(buckets[1]["date"], json!("2026-08-26"));
+        assert_eq!(buckets[1]["hour"], json!(0));
+        assert_eq!(buckets[1]["uncached_input_tokens"], json!(200));
+    }
+
+    /// 同 (turn, step) 后到者覆盖：跨小时替换也要把旧贡献从原 hour 扣掉。
+    #[test]
+    fn hour_buckets_same_step_dedup_replaces() {
+        let ts_14 = 1787639400000i64;  // 周二 14:30
+        let ts_15 = ts_14 + 3600 * 1000; // +1h → 周二 15:30(高峰)
+        let events = [
+            json!({"type":"request/header","seq":1,"time":ts_14,"data":{"header":{"config":{"model":"pro"}}}}),
+            // 14 点 chunk → 14 点桶 +1000
+            json!({"type":"assistant/chunk","seq":2,"time":ts_14,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":1000,"outputTokens":100}}}}),
+            // 15 点 message 覆盖 → 15 点桶 +1200, 14 点桶 -1000
+            json!({"type":"assistant/message","seq":3,"time":ts_15,"data":{"turn":1,"step":1,"usage":{"inputTokens":1200,"outputTokens":120}}}),
+        ];
+        let out = hour_buckets(&events);
+        let buckets = out["buckets"].as_array().unwrap();
+        assert_eq!(buckets.len(), 2);
+        let b14 = buckets.iter().find(|b| b["hour"] == json!(14)).unwrap();
+        let b15 = buckets.iter().find(|b| b["hour"] == json!(15)).unwrap();
+        assert_eq!(b14["uncached_input_tokens"], json!(0),
+                   "chunk 的贡献被替换走");
+        assert_eq!(b14["output_tokens"], json!(0));
+        assert_eq!(b15["uncached_input_tokens"], json!(1200));
+        assert_eq!(b15["output_tokens"], json!(120));
+    }
+
+    /// time 缺失 → (None, None) 桶,**不**混入任何 (date, hour) 桶。
+    /// 避免下游 7 天合计把它算成 1970-01-01。
+    #[test]
+    fn hour_buckets_missing_time_is_unknown_bucket() {
+        let events = [
+            json!({"type":"request/header","seq":1,"time":1001,"data":{"header":{"config":{"model":"pro"}}}}),
+            json!({"type":"assistant/chunk","seq":2,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":500,"outputTokens":50}}}}),
+        ];
+        let out = hour_buckets(&events);
+        let buckets = out["buckets"].as_array().unwrap();
+        assert_eq!(buckets.len(), 1);
+        let b = &buckets[0];
+        assert_eq!(b["date"], json!(null));
+        assert_eq!(b["hour"], json!(null));
+        assert_eq!(b["is_peak"], json!(null));
+        assert_eq!(b["uncached_input_tokens"], json!(500));
+    }
+
+    /// **同源不变量**：所有 bucket 的 4 基础桶之和 == token_by_model 的 4 桶之和。
+    /// 证明 hour_buckets 与 token_by_model 共用同 step 去重 / 折叠逻辑。
+    #[test]
+    fn hour_buckets_reconciles_with_token_by_model() {
+        let events = [
+            json!({"type":"request/header","seq":1,"time":1787639400000i64,"data":{"header":{"config":{"model":"pro"}}}}),
+            // 同 (1,1) → 只算后到
+            json!({"type":"assistant/chunk","seq":2,"time":1787639400000i64,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":1000,"outputTokens":200,"cacheReadTokens":300,"cacheWriteTokens":0}}}}),
+            json!({"type":"assistant/message","seq":3,"time":1787639400001i64,"data":{"turn":1,"step":1,"usage":{"inputTokens":1200,"outputTokens":250,"cacheReadTokens":300,"cacheWriteTokens":0}}}),
+            // 切到空闲时段
+            json!({"type":"assistant/chunk","seq":4,"time":1787610600000i64,"data":{"turn":2,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":500,"outputTokens":50}}}}),
+        ];
+        let hb = hour_buckets(&events);
+        let tm = token_by_model(&events);
+        for (i, key) in ["uncached_input_tokens","output_tokens","cache_read_tokens","cache_write_tokens"].iter().enumerate() {
+            let hour_total: i64 = hb["buckets"].as_array().unwrap().iter()
+                .map(|b| b[key].as_i64().unwrap_or(0)).sum();
+            let model_total: i64 = tm["by_model"].as_object().unwrap().values()
+                .map(|m| m[key].as_i64().unwrap_or(0)).sum();
+            assert_eq!(hour_total, model_total,
+                "{key}: hour_buckets 之和 ({hour_total}) 必须等于 token_by_model 按模型聚合 ({model_total})");
+            // 4 桶位与 4 SAMPLE_FIELDS 一致(0/1/2/3)
+            let _ = i;
+        }
     }
 }
 

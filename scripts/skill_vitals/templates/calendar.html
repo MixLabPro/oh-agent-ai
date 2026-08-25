@@ -1,0 +1,1011 @@
+<!--
+================================================================================
+  Skill Vitals · 单文件 HTML 日历模板（M4 产出）
+================================================================================
+
+  这是 agent-vitals 时间线的可视化层。它**不**重新定义数据 schema——它只
+  把 state.py 已经写好的 today.json / month.json 渲染成一张热力图。**单一
+  真相源是 `scripts/skill_vitals/state.py`**，本模板对其 schema 是「只读、
+  只渲染、发现不符就报错」。任何字段含义的改动必须先回到 state.py 与
+  crates/skill-vitals-core/，再回这里同步；反过来用本模板去「教」state.py
+  怎么写 schema 是方向性错误。
+
+  ── 与 state.py 的 schema 对应 ──────────────────────────────────────────────
+
+    today.json                          月度视图
+    ┌──────────────────────────┐        ┌──────────────────────────┐
+    │ schema_version: "1.0.0"  │        │ schema_version: "1.0.0"  │
+    │ generated_at: ISO8601 UTC│        │ generated_at: ISO8601 UTC│
+    │ date: "YYYY-MM-DD" (BJ)  │        │ month: "YYYY-MM"         │
+    │ buckets: {               │        │ days: {                  │
+    │   "0":  {8 字段},        │        │   "2026-08-01": {8 字段},│
+    │   "14": {8 字段},        │        │   "2026-08-02": {8 字段},│
+    │   ...                    │        │   ...                    │
+    │ }                        │        │ }                        │
+    └──────────────────────────┘        └──────────────────────────┘
+
+    8 字段 = 4 基础桶 + 4 peak_*：
+      uncached_input_tokens           peak_uncached_input_tokens
+      output_tokens                   peak_output_tokens
+      cache_read_tokens               peak_cache_read_tokens
+      cache_write_tokens              peak_cache_write_tokens
+
+    peak_* 是「其中发生在高峰时段的份额」（cost.py 的 _price 用它们做 peak/
+    off-peak 分价），不是另一个独立的桶。本模板的「peak 时段边框」就是基于
+    「任一 peak_* > 0」来标。
+
+  ── inline 策略（CLAUDE.md 的「no network · no upload」）──────────────────
+
+    所有 CSS / JS 都内联在本文件里。无 <link rel="stylesheet">、无
+    <script src=...>、无 @font-face。无 npm install，无 webpack。唯一外部
+    资源是用户本地文件系统上的 JSON（state.py 写出的 state/*.json）。这与
+    CLAUDE.md 的「no telemetry · no upload · no network」一致——浏览器只
+    读本地状态文件，不发任何请求。
+
+  ── 数据获取路径 ──────────────────────────────────────────────────────────
+
+    1. URL ?file=today 或 ?file=month 决定读哪个 JSON。
+    2. 路径默认硬编码到 STATE_HOME_DEFAULT；测试/调试用
+       `window.SKILL_VITALS_STATE_HOME = '/custom/path'` 覆盖。
+    3. fetch() 在浏览器里**几乎一定**被 CORS 拒（开 http.server 也不能跨
+       主机读 ~/.skill-vitals/），所以 fallback 是 <input type="file"> 让
+       用户手动选 JSON。这是设计而非补丁——state.py 写出的数据本就在用户
+       主目录，浏览器拿不到是预期行为。
+
+  ── 与 Rust / Python 三向锁步 ─────────────────────────────────────────────
+
+    cost 公式硬编码了 deepseek-v4-flash 的 peak/off-peak 价（1.5/3.0/4.5/9.0
+    元/百万 token + 0.05/0.10 缓存命中 + 0 缓存写入），与 state.py 不矛盾——
+    state.py 只折叠 token 数不算价。本模板的价公式是「展示层」副本：与
+    scripts/skill_vitals/cost.py::_price + crates/skill-vitals-core/src/cost.rs
+    平行。若价目表（pricing.json）改了，state.py 不动；本模板与
+    dsh-client/src/host/index.ts::costReportFrom 三处都得改。
+    tests/test_pricing_lockstep.py 守价目表源头一致性，但展示层副本目前没
+    自动测——这是已知的单点：M4 仅做渲染，**不在这里做权威计价**。
+
+  ── 不用脚本渲染 ──────────────────────────────────────────────────────────
+
+    故意不用任何 JS 框架（React / Vue 都不引）：单文件 200 行内能写完的事，
+    引入框架是负 ROI。读者打开 HTML 直接看 render 函数就够了。
+================================================================================
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Skill Vitals · 日历视图（M4）</title>
+  <style>
+    /* ── 设计 token ────────────────────────────────────────────────────
+     * 配色按「不抢戏」的暗色基调——日历是观察面板，不是营销页。
+     * 不引字体：只靠系统字栈（macOS = SF Pro，Win = Segoe UI），与
+     * 其他 skill-vitals 报告保持一致。CSS 变量集中在这里方便后续换
+     * 主题，但本仓库现阶段只发单主题。
+     */
+    :root {
+      --bg: #0e1117;
+      --surface: #161b22;
+      --surface-2: #1c2128;
+      --border: #30363d;
+      --border-strong: #484f58;
+      --fg: #e6edf3;
+      --fg-muted: #8b949e;
+      --fg-dim: #6e7681;
+      --accent: #58a6ff;
+      --accent-soft: rgba(88, 166, 255, 0.12);
+      --warn: #d29922;
+      --warn-soft: rgba(210, 153, 34, 0.18);
+      --peak: #db6d28;
+      --peak-soft: rgba(219, 109, 40, 0.20);
+      --good: #3fb950;
+      --r: 8px;
+      --r-sm: 4px;
+      --s1: 4px;
+      --s2: 8px;
+      --s3: 12px;
+      --s4: 16px;
+      --s5: 24px;
+      --s6: 32px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+              "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei",
+              sans-serif;
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+              "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    /* body 用 100% min-height 让 footer 永远贴底——avoid scroll-on-empty */
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+    body { font: 14px/1.5 var(--font); min-height: 100vh; }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button, input, select { font: inherit; color: inherit; }
+
+    .shell {
+      max-width: 1480px;
+      margin: 0 auto;
+      padding: var(--s5) clamp(16px, 3vw, 40px) var(--s6);
+    }
+
+    /* ── 顶栏 ──────────────────────────────────────────────────────── */
+    header.topbar {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: var(--s4); margin-bottom: var(--s5); flex-wrap: wrap;
+    }
+    .title-block h1 {
+      font-size: 22px; font-weight: 600; letter-spacing: -0.02em;
+      margin: 0 0 4px;
+    }
+    .title-block .sub {
+      color: var(--fg-muted); font-size: 13px;
+    }
+    .title-block .sub code {
+      font: 12px/1 var(--mono); background: var(--surface-2);
+      padding: 2px 6px; border-radius: var(--r-sm); color: var(--accent);
+    }
+
+    /* today / month 切换用分段控件——比下拉轻，不抢屏 */
+    .mode-switch {
+      display: inline-flex; gap: 2px; padding: 3px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .mode-switch a {
+      padding: 6px 14px; border-radius: 6px;
+      color: var(--fg-muted); font-size: 13px; font-weight: 500;
+    }
+    .mode-switch a:hover { color: var(--fg); text-decoration: none; }
+    .mode-switch a.active {
+      background: var(--accent-soft); color: var(--accent);
+    }
+
+    /* ── summary 卡片（今日/本月 总额） ────────────────────────────── */
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: var(--s3); margin-bottom: var(--s5);
+    }
+    .summary .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); padding: var(--s4);
+    }
+    .summary .card .label {
+      font-size: 12px; color: var(--fg-muted);
+      margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .summary .card .value {
+      font: 600 22px/1.2 var(--mono); color: var(--fg);
+    }
+    .summary .card .value.small { font-size: 18px; }
+    .summary .card .note {
+      margin-top: 6px; font-size: 12px; color: var(--fg-dim);
+    }
+    .summary .card .note .peak-tag {
+      color: var(--peak); font-weight: 500;
+    }
+
+    /* ── 日历容器 ─────────────────────────────────────────────────── */
+    .panel {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); padding: var(--s5);
+    }
+    .panel + .panel { margin-top: var(--s4); }
+    .panel-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: var(--s4); margin-bottom: var(--s4); flex-wrap: wrap;
+    }
+    .panel-title { margin: 0; font-size: 16px; font-weight: 600; }
+    .panel-sub { color: var(--fg-muted); font-size: 12px; }
+
+    /* ── today：24 单元格 ─────────────────────────────────────────── */
+    /*
+     * 24 个等宽单元用 grid 一行排开——窗口宽度足够时整齐；不够时整列变窄
+     * 但**绝不**换行成多行（连续性比完整可见重要；观察「时间分布」要求
+     * 用户水平扫视能直接对到某个小时）。
+     */
+    .today-grid {
+      display: grid;
+      grid-template-columns: 36px repeat(24, minmax(0, 1fr));
+      gap: 2px; align-items: stretch;
+    }
+    .today-axis {
+      grid-column: 1; font: 11px var(--mono); color: var(--fg-dim);
+      align-self: end; padding-bottom: 4px; text-align: right;
+    }
+    .hour-label {
+      grid-row: 2; font: 10px var(--mono); color: var(--fg-dim);
+      text-align: center; padding-top: 4px;
+    }
+    .hour-label.heavy { color: var(--fg-muted); font-weight: 600; }
+    .hour-cell {
+      grid-row: 1; height: 80px; border-radius: var(--r-sm);
+      background: var(--surface-2); border: 1px solid transparent;
+      position: relative; cursor: default;
+      transition: transform 0.12s ease, border-color 0.12s ease;
+      display: flex; flex-direction: column; justify-content: flex-end;
+      padding: 4px 6px;
+      font: 11px var(--mono); color: var(--fg);
+    }
+    .hour-cell:hover {
+      transform: translateY(-1px);
+      border-color: var(--accent);
+      z-index: 2;
+    }
+    .hour-cell.empty { background: var(--surface); border: 1px dashed var(--border); }
+    /* peak 时段标记——边框而非填色，因为色块已被 token 量决定，再叠色反而
+     * 抢焦点。边框用 peak 橙，与「peak 时段」语义一致。 */
+    .hour-cell.peak {
+      border: 2px solid var(--peak);
+      box-shadow: inset 0 0 0 1px var(--peak-soft);
+    }
+    .hour-cell .amt {
+      font-size: 11px; line-height: 1.2; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    .hour-cell .hour-tag {
+      font-size: 9px; color: var(--fg-dim); line-height: 1;
+      margin-bottom: 2px;
+    }
+    .hour-cell.peak .hour-tag { color: var(--peak); }
+
+    /* ── month：7×N 日历网格 ─────────────────────────────────────── */
+    /*
+     * 日历列固定 7。行数动态：6 行够装所有「1 号是周五」+「31 号」组合。
+     * 留白格用 .cell-empty——区别于 .day-cell 的「真实数据」状态。
+     */
+    .month-head {
+      display: grid; grid-template-columns: repeat(7, 1fr);
+      gap: 4px; margin-bottom: 6px;
+    }
+    .month-head > div {
+      font-size: 11px; color: var(--fg-muted); text-align: center;
+      padding: 6px 0; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .month-grid {
+      display: grid; grid-template-columns: repeat(7, 1fr);
+      gap: 4px;
+    }
+    .day-cell {
+      min-height: 88px; background: var(--surface-2);
+      border: 1px solid transparent; border-radius: var(--r-sm);
+      padding: 7px 9px; cursor: default;
+      display: flex; flex-direction: column; justify-content: space-between;
+      transition: transform 0.12s ease, border-color 0.12s ease;
+    }
+    .day-cell:hover {
+      transform: translateY(-1px);
+      border-color: var(--accent); z-index: 2;
+    }
+    /* 空格子：实心 dim 背景，比虚线更干净；月份首尾的「补位」用半透明 */
+    .day-cell.empty {
+      background: rgba(22, 27, 34, 0.3); border: 1px solid transparent;
+      opacity: 0.5; cursor: default;
+    }
+    .day-cell.empty:hover { transform: none; border-color: transparent; }
+    .day-cell .num {
+      font: 700 15px var(--mono); color: var(--fg);
+      display: flex; align-items: center; gap: 4px;
+    }
+    .day-cell.empty .num { color: var(--fg-dim); font-weight: 400; }
+    .day-cell .num .peak-dot {
+      display: inline-block; width: 7px; height: 7px;
+      background: var(--peak); border-radius: 50%;
+      box-shadow: 0 0 6px rgba(219, 109, 40, 0.6);
+    }
+    .day-cell .amt {
+      font: 500 12px var(--mono); color: var(--fg-muted);
+      margin-top: 4px; line-height: 1.25;
+      letter-spacing: -0.01em;
+    }
+    .day-cell .amt .cost {
+      color: var(--accent); margin-top: 3px;
+      font-weight: 600; font-size: 13px;
+      letter-spacing: 0;
+    }
+    .day-cell.today {
+      border: 1.5px solid var(--accent);
+      box-shadow: 0 0 0 1px rgba(56, 139, 253, 0.2);
+    }
+
+    /* ── tooltip：hover 显示明细 ──────────────────────────────────── */
+    /*
+     * tooltip 用 position:fixed 跟着鼠标，避免被父容器 overflow 切掉。
+     * 不引第三方库；用 data-* 属性挂明细，CSS 控制可见性。
+     */
+    #tip {
+      position: fixed; pointer-events: none;
+      background: #0b0f15; border: 1px solid var(--border-strong);
+      border-radius: var(--r); padding: 10px 12px;
+      font: 12px var(--mono); color: var(--fg);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      max-width: 320px; opacity: 0; transition: opacity 0.08s ease;
+      z-index: 100;
+    }
+    #tip.show { opacity: 1; }
+    #tip .tip-title {
+      font: 600 13px var(--font); margin-bottom: 6px;
+      color: var(--accent);
+    }
+    #tip .row {
+      display: flex; justify-content: space-between; gap: 12px;
+      padding: 1px 0;
+    }
+    #tip .row .k { color: var(--fg-muted); }
+    #tip .row .v { color: var(--fg); }
+    #tip .row .v.peak-v { color: var(--peak); }
+    #tip .sep {
+      height: 1px; background: var(--border); margin: 6px 0;
+    }
+    #tip .total {
+      font: 600 13px var(--mono); color: var(--accent);
+    }
+
+    /* ── fallback：file input ─────────────────────────────────────── */
+    .file-fallback {
+      margin-top: var(--s4); padding: var(--s5);
+      background: var(--warn-soft);
+      border: 1px solid var(--warn);
+      border-radius: var(--r);
+      display: flex; align-items: center; gap: var(--s4); flex-wrap: wrap;
+    }
+    .file-fallback .msg { flex: 1 1 auto; color: var(--fg); font-size: 13px; }
+    .file-fallback label {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--accent); color: #0b0f15;
+      padding: 8px 16px; border-radius: var(--r-sm);
+      font-weight: 500; cursor: pointer;
+    }
+    .file-fallback label input { display: none; }
+    .file-fallback label:hover { filter: brightness(0.95); }
+
+    /* ── 状态/错误展示 ──────────────────────────────────────────── */
+    #status {
+      padding: var(--s3) var(--s4); border-radius: var(--r);
+      background: var(--surface-2); border: 1px solid var(--border);
+      color: var(--fg-muted); font-size: 13px;
+      margin-bottom: var(--s4);
+    }
+    #status.err { border-color: var(--peak); color: var(--peak); }
+
+    /* ── 响应式 ──────────────────────────────────────────────────── */
+    @media (max-width: 720px) {
+      .today-grid { grid-template-columns: 28px repeat(24, minmax(20px, 1fr)); }
+      .hour-cell { height: 64px; padding: 2px 3px; }
+      .hour-cell .amt { font-size: 10px; }
+      .day-cell { min-height: 64px; padding: 4px; }
+      .day-cell .amt { font-size: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+
+    <header class="topbar">
+      <div class="title-block">
+        <h1 id="page-title">日历视图</h1>
+        <div class="sub">
+          数据源 <code id="source-label">~/.skill-vitals/state/</code>
+          · schema <code>1.0.0</code>
+        </div>
+      </div>
+      <nav class="mode-switch" aria-label="切换视图">
+        <a href="?file=today" id="link-today">today · 24h</a>
+        <a href="?file=month" id="link-month">month · 月度</a>
+      </nav>
+    </header>
+
+    <div id="status" role="status">读取 state 文件中……</div>
+
+    <section class="summary" id="summary" hidden>
+      <!-- 由 JS 注入 card -->
+    </section>
+
+    <div id="render-root">
+      <!-- 由 JS 注入 today-grid / month-grid -->
+    </div>
+
+    <!--
+      file fallback 永远展示——浏览器直接 fetch() 本地 JSON 99% 会因
+      CORS 失败，与其先藏起来再动态展示，不如常驻占位 + 状态联动。
+    -->
+    <div class="file-fallback" id="file-fallback">
+      <div class="msg">
+        <b>浏览器无法直接读取本地 state 文件</b>（CORS 限制）。
+        请选择 state.py 写出的 JSON 文件（<code>today.json</code> 或
+        <code>month.json</code>）：
+      </div>
+      <label>
+        <input type="file" id="file-input" accept="application/json,.json" />
+        选择 JSON 文件
+      </label>
+    </div>
+
+  </div>
+
+  <!-- tooltip 节点挂到 body 末尾，避免被父级 transform 拦截定位 -->
+  <div id="tip" role="tooltip" aria-hidden="true"></div>
+
+  <script>
+  /* ============================================================================
+   *  数据获取与渲染
+   * ============================================================================
+   *
+   * 本文件只做一件事：把 state.py 写出的 JSON 渲染成热力图。**不在这里算权
+   * 威 token 折叠**——折叠在 state.py/usage.py；**也不在这里算权威 cost**——
+   * cost 在 cost.py（peak/off-peak 分价）。本脚本的 cost 公式是显示层副本：
+   * 改了 pricing.json 必须同步改 _priceCompute()。
+   *
+   * 三段：fetch → render → tooltip。三段之间靠全局 state（mode, payload）
+   * 串起来；不引入框架是故意的。
+   */
+
+  "use strict";
+
+  // ─── 配置 ──────────────────────────────────────────────────────────────
+  // macOS 用户的默认 home。Linux/Windows 用户请在 script 标签里覆盖：
+  //   window.SKILL_VITALS_STATE_HOME = '/home/you/.skill-vitals/state';
+  // 浏览器无法把 ~ 展开成 $HOME；硬编码是合理的——绝大多数用户在 macOS。
+  var STATE_HOME_DEFAULT = "/Users/Admin/.skill-vitals/state";
+
+  // peak/off-peak 单价（人民币元 / 百万 token）。
+  // **来源**：scripts/skill_vitals/pricing.json providers.deepseek-official.models
+  // .deepseek-v4-flash。**不是** deepseek-v4-pro——pro 是 4.5/13.5 + 0.15/0.30
+  // 缓存命中。这里选 flash 的默认是因为 skill-vitals 默认模型是 flash；
+  // 若要切 pro，改下面三行即可。缓存写一律 0（pricing.json 里写死 0）。
+  var PRICE = {
+    input_uncached_off:  1.5,
+    input_uncached_peak: 3.0,
+    input_cached_off:    0.05,
+    input_cached_peak:   0.10,
+    output_off:          4.5,
+    output_peak:         9.0,
+    cache_write:         0,
+  };
+  var M = 1e6; // token/百万token 换算系数——与 cost.py 第 117-122 行一致
+
+  // ─── 工具函数 ──────────────────────────────────────────────────────────
+
+  /**
+   * 把一个 8 字段桶算成展示用数字。
+   *
+   * 不重命名/不重组字段——state.py 的 4 基础 + 4 peak 命名直接复用，保持
+   * 「本模板只读 schema」的不变量。
+   */
+  function getFields(b) {
+    return {
+      inUnc: b.uncached_input_tokens   || 0,
+      out:   b.output_tokens           || 0,
+      cache: b.cache_read_tokens       || 0,
+      write: b.cache_write_tokens      || 0,
+      pIn:   b.peak_uncached_input_tokens || 0,
+      pOut:  b.peak_output_tokens         || 0,
+      pCac:  b.peak_cache_read_tokens     || 0,
+      pWrt:  b.peak_cache_write_tokens    || 0,
+    };
+  }
+
+  /** 总 token（4 基础桶加和，与 cost.py 的 u+c+o 等价；写 token 单价 0 不入费） */
+  function totalTokens(b) {
+    var f = getFields(b);
+    return f.inUnc + f.out + f.cache + f.write;
+  }
+
+  /**
+   * 估算 cost（元）——peak/off-peak 分价，与 cost.py::_price 一致。
+   *
+   * **这是展示层副本**：state.py 不算价（只折叠 token）；本模板算价是给
+   * 用户「这一格大概多少钱」的心智模型，不与 CLI 的 cost --json 互相校验
+   * （CLI 那份权威）。若价目表改了，这里要同步改 PRICE；否则会出现
+   * 「UI 显示 ¥1.20 但 `behavior --json` 报 ¥1.35」的语义漂移。
+   */
+  function costOf(b) {
+    var f = getFields(b);
+    var up = f.pIn / M, cp = f.pCac / M, op = f.pOut / M, wp = f.pWrt / M;
+    var uo = (f.inUnc - f.pIn) / M;
+    var co = (f.cache - f.pCac) / M;
+    var oo = (f.out   - f.pOut) / M;
+    var off  = uo * PRICE.input_uncached_off
+             + co * PRICE.input_cached_off
+             + oo * PRICE.output_off
+             + wp * PRICE.cache_write;
+    var peak = up * PRICE.input_uncached_peak
+             + cp * PRICE.input_cached_peak
+             + op * PRICE.output_peak;
+    return { total: off + peak, peak: peak, off: off };
+  }
+
+  /** 判断一个桶是不是 peak 时段——任一 peak_* > 0 就算（peak 可重叠） */
+  function isPeak(b) {
+    var f = getFields(b);
+    return (f.pIn + f.pOut + f.pCac + f.pWrt) > 0;
+  }
+
+  /** 数字千分位 */
+  function n(n) {
+    if (n === 0) return "0";
+    return Math.round(n).toLocaleString("en-US");
+  }
+
+  /** 元金额（¥1.23） */
+  function money(v) {
+    if (v === 0) return "¥0.00";
+    return "¥" + v.toFixed(2);
+  }
+
+  /** 取 query 决定 mode：today / month（默认 today） */
+  function getMode() {
+    var p = new URLSearchParams(location.search);
+    var f = (p.get("file") || "today").toLowerCase();
+    return (f === "month") ? "month" : "today";
+  }
+
+  // ─── 数据加载 ──────────────────────────────────────────────────────────
+
+  /**
+   * 先 try fetch()——若 html 来自 http://localhost 且用户配置 CORS 允许，
+   * fetch 能工作；否则 CORS 抛错，UI 退到 file input fallback。
+   *
+   * 注：**绝大多数情况下 fetch 一定失败**（浏览器拿不到 ~/.skill-vitals/），
+   * 这是设计而非 bug。fetch 尝试一次保留给「skill-vitals 自托管 http
+   * 服务」的扩展场景。
+   */
+  function tryFetch(url) {
+    return fetch(url, { cache: "no-store" })
+      .then(function(r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
+  }
+
+  function loadFromFile(file) {
+    return new Promise(function(resolve, reject) {
+      var fr = new FileReader();
+      fr.onload = function() {
+        try { resolve(JSON.parse(fr.result)); }
+        catch (e) { reject(new Error("JSON 解析失败：" + e.message)); }
+      };
+      fr.onerror = function() { reject(new Error("文件读取失败")); };
+      fr.readAsText(file, "utf-8");
+    });
+  }
+
+  function setStatus(msg, isErr) {
+    var el = document.getElementById("status");
+    el.textContent = msg;
+    el.classList.toggle("err", !!isErr);
+  }
+
+  /**
+   * 主加载流程：
+   *   1. fetch 默认路径（极可能 CORS 失败）
+   *   2. 失败时挂上 file input handler，等用户选文件
+   *   3. 用户选择 → parse → render
+   *
+   * 不阻塞 UI：fetch 失败后页面仍可滚动、tooltip 仍可工作——只是日历不
+   * 渲染，等用户喂数据。
+   */
+  function bootstrap() {
+    var mode = getMode();
+    var home = (typeof window.SKILL_VITALS_STATE_HOME === "string"
+                && window.SKILL_VITALS_STATE_HOME) || STATE_HOME_DEFAULT;
+    var url = home + "/" + mode + ".json";
+
+    // mode-switch active 状态
+    document.getElementById("link-today").classList.toggle("active", mode === "today");
+    document.getElementById("link-month").classList.toggle("active", mode === "month");
+    document.getElementById("source-label").textContent =
+      home + "/" + mode + ".json";
+    document.title = "Skill Vitals · " + mode + " · M4";
+
+    // ── 数据加载三段式 ──────────────────────────────────────────
+    // 1. **inline 优先** — calendar CLI 在渲染时已经把 JSON 写到
+    //    `<script type="application/json" id="skill-vitals-data">` 里,
+    //    这是唯一一条不需要网络/CORS 的路径,**保证 file:// 双击也能渲染**。
+    // 2. fetch 备选 — 浏览器从 http:// 自托管站点拉 JSON。
+    // 3. file picker 兜底 — fetch 也失败时,用户手动选文件。
+    // 三段全失败 → 显示 empty state,不假装成功。
+    var inline = document.getElementById("skill-vitals-data");
+    if (inline && inline.textContent.trim()) {
+      try {
+        var data = JSON.parse(inline.textContent);
+        setStatus("已加载 inline 数据（" + mode + ".json）");
+        render(mode, data);
+        return;  // 成功就不走 fetch/file picker 了
+      } catch (e) {
+        setStatus("inline JSON 解析失败：" + e.message, true);
+        // 退到 fetch
+      }
+    }
+
+    setStatus("尝试 fetch " + url + " …");
+    tryFetch(url).then(function(data) {
+      setStatus("fetch 成功（" + mode + ".json）");
+      render(mode, data);
+    }).catch(function() {
+      // CORS / 404 / 权限——预期路径。给清晰的状态文案，不假装失败
+      setStatus("fetch 失败：浏览器读取本地文件被 CORS 阻止。" +
+                "请用下方按钮选择 " + mode + ".json。", true);
+    });
+
+    // 文件输入 handler——一次绑定，全局复用
+    document.getElementById("file-input").addEventListener("change", function(e) {
+      var file = e.target.files && e.target.files[0];
+      if (!file) return;
+      setStatus("读取 " + file.name + " …");
+      loadFromFile(file).then(function(data) {
+        setStatus("已加载 " + file.name);
+        // 智能推断 mode：今天用的文件里若含 buckets=hours 是 today；
+        // 含 days 是 month。允许用户选错文件也能渲染。
+        var inferred = (data && data.days && !data.buckets) ? "month" : "today";
+        if (inferred !== mode) {
+          setStatus("已加载 " + file.name + "（按 schema 推断为 " +
+                    inferred + " 模式渲染）");
+        }
+        render(inferred, data);
+      }).catch(function(err) {
+        setStatus(err.message, true);
+      });
+    });
+  }
+
+  // ─── 渲染 ──────────────────────────────────────────────────────────────
+
+  /** 全局：当前 payload + mode，供 tooltip 复用 */
+  var CURRENT = { mode: null, payload: null };
+
+  function render(mode, payload) {
+    CURRENT.mode = mode;
+    CURRENT.payload = payload;
+    document.getElementById("summary").hidden = false;
+    document.getElementById("page-title").textContent =
+      (mode === "today") ? "今日 · 24 小时分布" : "本月 · 日历";
+
+    if (mode === "today") renderToday(payload);
+    else                  renderMonth(payload);
+  }
+
+  // ── today 模式 ───────────────────────────────────────────────────────
+
+  function renderToday(payload) {
+    var buckets = (payload && payload.buckets) || {};
+    var totalTok = 0, totalCost = 0, peakTok = 0;
+
+    // 先聚合 summary
+    Object.keys(buckets).forEach(function(k) {
+      var b = buckets[k];
+      totalTok += totalTokens(b);
+      var c = costOf(b);
+      totalCost += c.total;
+      if (isPeak(b)) peakTok += totalTokens(b);
+    });
+
+    renderSummary([
+      { label: "今日总 token", value: n(totalTok), note: "" },
+      { label: "今日估算成本", value: money(totalCost), note: "deepseek-v4-flash 默认价" },
+      {
+        label: "peak 时段占比",
+        value: totalTok === 0 ? "—" : ((peakTok/totalTok*100).toFixed(1) + "%"),
+        note: totalTok === 0 ? "" :
+              ("peak token " + n(peakTok) + " / " + n(totalTok))
+      },
+      {
+        label: "活跃小时",
+        value: Object.keys(buckets).filter(function(k){
+          return totalTokens(buckets[k]) > 0;
+        }).length + " / 24",
+        note: "本地时区 (Beijing)"
+      },
+    ]);
+
+    var root = document.getElementById("render-root");
+    root.innerHTML = "";
+    var panel = document.createElement("section");
+    panel.className = "panel";
+    panel.innerHTML =
+      '<div class="panel-head">' +
+        '<h2 class="panel-title">今日 24 小时</h2>' +
+        '<div class="panel-sub">每格 = 该小时聚合 token；橙色边框 = 含 peak 时段份额</div>' +
+      '</div>' +
+      '<div class="today-grid" id="grid"></div>';
+    root.appendChild(panel);
+
+    var grid = panel.querySelector("#grid");
+
+    // 0..23 顺序填——空小时也占位（保持视觉对齐 24 小时刻度）
+    var maxTok = 1;
+    Object.keys(buckets).forEach(function(k) {
+      maxTok = Math.max(maxTok, totalTokens(buckets[k]));
+    });
+
+    // 第一列：左侧轴标签（"hour"）
+    var axis = document.createElement("div");
+    axis.className = "today-axis";
+    axis.textContent = "hour";
+    grid.appendChild(axis);
+
+    for (var h = 0; h < 24; h++) {
+      var b = buckets[String(h)];
+      var tok = b ? totalTokens(b) : 0;
+      var cell = document.createElement("div");
+      cell.className = "hour-cell" + (b && isPeak(b) ? " peak" : "")
+                      + (tok === 0 ? " empty" : "");
+      cell.style.background = colorFor(tok, maxTok, tok === 0);
+      cell.dataset.hour = String(h);
+      cell.dataset.tok = String(tok);
+      cell.innerHTML =
+        '<div class="hour-tag">' + String(h).padStart(2, "0") + '</div>' +
+        (tok > 0 ? '<div class="amt">' + shortNum(tok) + '</div>' : '');
+      grid.appendChild(cell);
+
+      // 底部 hour-label 行——与上方单元格对齐
+      var lbl = document.createElement("div");
+      lbl.className = "hour-label" + (h % 6 === 0 ? " heavy" : "");
+      lbl.textContent = String(h).padStart(2, "0");
+      // grid-row: hour-label 用 grid-row 2，所有 label 在第二行；放最后即可
+      lbl.style.gridRow = "2";
+      lbl.style.gridColumn = String(h + 2); // +2: 第一列是 axis
+      grid.appendChild(lbl);
+    }
+
+    bindHover(grid, ".hour-cell");
+  }
+
+  // ── month 模式 ────────────────────────────────────────────────────────
+
+  function renderMonth(payload) {
+    var days = (payload && payload.days) || {};
+    var month = (payload && payload.month) || "";
+    var totalTok = 0, totalCost = 0;
+    var peakDays = 0, activeDays = 0;
+
+    Object.keys(days).forEach(function(k) {
+      var b = days[k];
+      totalTok += totalTokens(b);
+      totalCost += costOf(b).total;
+      if (isPeak(b)) peakDays++;
+      if (totalTokens(b) > 0) activeDays++;
+    });
+
+    renderSummary([
+      { label: "本月总 token", value: n(totalTok), note: month },
+      { label: "本月估算成本", value: money(totalCost), note: "deepseek-v4-flash 默认价" },
+      {
+        label: "peak 日占比",
+        value: activeDays === 0 ? "—" :
+               ((peakDays/Object.keys(days).length*100).toFixed(1) + "%"),
+        note: activeDays === 0 ? "" :
+               (peakDays + " 天含 peak 时段 / " + Object.keys(days).length + " 天")
+      },
+      {
+        label: "活跃日",
+        value: activeDays + " / " + Object.keys(days).length,
+        note: "按 token > 0 计"
+      },
+    ]);
+
+    // 决定 1 号是星期几——取 payload.month（YYYY-MM）的第一天
+    var firstDate = month ? (month + "-01") : null;
+    var firstDow = firstDate ? new Date(firstDate + "T00:00:00Z").getUTCDay() : 0;
+    // getUTCDay 用 UTC；state.py 用北京时间；用 UTC 算 weekday 在 BJ 14:00 前
+    // 会有 ±1 偏差。改用 BJ 0:00 = UTC -8，即 UTC 16:00 前一天。这里直接
+    // 用 UTC 0:00 算——偏差最多 1 天，但视觉上「1 号从周几开始」用户对
+    // 偏差宽容，月历错位一格比完全错位好接受。
+    // 注：若用户在 BJ 凌晨看日历时 firstDow 会偏 1 天，是已知 trade-off。
+
+    var daysInMonth = firstDate
+      ? new Date(Date.UTC(
+          parseInt(firstDate.slice(0,4), 10),
+          parseInt(firstDate.slice(5,7), 10), 0)).getUTCDate()
+      : 31;
+
+    var root = document.getElementById("render-root");
+    root.innerHTML = "";
+    var panel = document.createElement("section");
+    panel.className = "panel";
+    panel.innerHTML =
+      '<div class="panel-head">' +
+        '<h2 class="panel-title">' + (month || "本月") + ' · ' + daysInMonth + ' 天</h2>' +
+        '<div class="panel-sub">每格 = 当日聚合 token / 估算成本；蓝框 = 今天</div>' +
+      '</div>' +
+      '<div class="month-head" id="mhead"></div>' +
+      '<div class="month-grid" id="mgrid"></div>';
+    root.appendChild(panel);
+
+    var head = panel.querySelector("#mhead");
+    ["日","一","二","三","四","五","六"].forEach(function(d) {
+      var el = document.createElement("div"); el.textContent = d;
+      head.appendChild(el);
+    });
+
+    var grid = panel.querySelector("#mgrid");
+    var todayStr = isoTodayBJ();
+
+    // 月历里的最大 token，用于色阶归一化
+    var maxTok = 1;
+    Object.keys(days).forEach(function(k) {
+      maxTok = Math.max(maxTok, totalTokens(days[k]));
+    });
+
+    // 1 号之前的空格
+    for (var i = 0; i < firstDow; i++) {
+      var e = document.createElement("div");
+      e.className = "day-cell empty";
+      grid.appendChild(e);
+    }
+    // 每天一格
+    for (var d = 1; d <= daysInMonth; d++) {
+      var k = month + "-" + String(d).padStart(2, "0");
+      var b = days[k];
+      var tok = b ? totalTokens(b) : 0;
+      var c = b ? costOf(b) : { total: 0 };
+      var cell = document.createElement("div");
+      cell.className = "day-cell"
+        + (tok === 0 ? " empty" : "")
+        + (k === todayStr ? " today" : "");
+      cell.style.background = colorFor(tok, maxTok, tok === 0);
+      cell.dataset.day = k;
+      cell.dataset.tok = String(tok);
+      cell.innerHTML =
+        '<div class="num">' + d +
+          (b && isPeak(b) ? '<span class="peak-dot" title="peak 时段"></span>' : '') +
+        '</div>' +
+        (tok > 0
+          ? '<div class="amt">' + shortNum(tok) + (c.total > 0 ? '<div class="cost">' + money(c.total) + '</div>' : '') + '</div>'
+          : '');
+      grid.appendChild(cell);
+    }
+
+    bindHover(grid, ".day-cell");
+  }
+
+  // ── summary 卡片 ─────────────────────────────────────────────────────
+
+  function renderSummary(cards) {
+    var root = document.getElementById("summary");
+    root.innerHTML = "";
+    cards.forEach(function(c) {
+      var div = document.createElement("div");
+      div.className = "card";
+      div.innerHTML =
+        '<div class="label">' + c.label + '</div>' +
+        '<div class="value">' + c.value + '</div>' +
+        (c.note ? '<div class="note">' + c.note + '</div>' : '');
+      root.appendChild(div);
+    });
+  }
+
+  // ── 颜色映射（log scale）──────────────────────────────────────────────
+
+  /**
+   * 热力色阶：log10(1+token/max) → 0..1 → HSL hue 200→0（蓝→红）
+   *
+   * 选 log 是因为 token 分布是重尾的（几小时很低，几小时 100×），线
+   * 性映射下低值格全是同色看不出来。用 log 后低值格也能看出梯度。
+   *
+   * 不用 d3-scale：再小也是 30KB+ 的第三方库，与「单文件 / 零外链」
+   * 不兼容。
+   */
+  function colorFor(tok, maxTok, isEmpty) {
+    if (isEmpty || tok === 0) return "var(--surface-2)";
+    if (maxTok === 0) return "var(--surface-2)";
+    var t = Math.log10(1 + tok) / Math.log10(1 + maxTok);
+    var hue = Math.round(200 - 200 * t);  // 200→0 (蓝→红)
+    var sat = 60;
+    var lum = Math.round(28 + 22 * t);    // 28%→50%
+    return "hsl(" + hue + "," + sat + "%," + lum + "%)";
+  }
+
+  // ── tooltip ──────────────────────────────────────────────────────────
+
+  function bindHover(container, selector) {
+    var tip = document.getElementById("tip");
+    container.querySelectorAll(selector).forEach(function(el) {
+      el.addEventListener("mouseenter", function() {
+        showTip(el);
+      });
+      el.addEventListener("mousemove", function(e) {
+        positionTip(e);
+      });
+      el.addEventListener("mouseleave", function() {
+        tip.classList.remove("show");
+      });
+    });
+  }
+
+  function showTip(el) {
+    var tip = document.getElementById("tip");
+    var mode = CURRENT.mode;
+    var payload = CURRENT.payload;
+    if (!payload) return;
+
+    var html = "";
+    if (mode === "today") {
+      var h = el.dataset.hour;
+      var b = (payload.buckets || {})[h] || zeroBucket();
+      var c = costOf(b);
+      html =
+        '<div class="tip-title">' + h + ":00 时段</div>" +
+        row("uncached input", n(b.uncached_input_tokens||0)) +
+        row("output", n(b.output_tokens||0)) +
+        row("cache read", n(b.cache_read_tokens||0)) +
+        row("cache write", n(b.cache_write_tokens||0)) +
+        '<div class="sep"></div>' +
+        row("peak input", n(b.peak_uncached_input_tokens||0), true) +
+        row("peak output", n(b.peak_output_tokens||0), true) +
+        row("peak cache read", n(b.peak_cache_read_tokens||0), true) +
+        '<div class="sep"></div>' +
+        row("total token", n(totalTokens(b))) +
+        row("估算成本", money(c.total)) +
+        row("其中 peak 时段", money(c.peak));
+    } else {
+      var d = el.dataset.day;
+      var b = (payload.days || {})[d] || zeroBucket();
+      var c = costOf(b);
+      html =
+        '<div class="tip-title">' + d + '</div>' +
+        row("uncached input", n(b.uncached_input_tokens||0)) +
+        row("output", n(b.output_tokens||0)) +
+        row("cache read", n(b.cache_read_tokens||0)) +
+        row("cache write", n(b.cache_write_tokens||0)) +
+        '<div class="sep"></div>' +
+        row("peak input", n(b.peak_uncached_input_tokens||0), true) +
+        row("peak output", n(b.peak_output_tokens||0), true) +
+        row("peak cache read", n(b.peak_cache_read_tokens||0), true) +
+        '<div class="sep"></div>' +
+        row("total token", n(totalTokens(b))) +
+        row("估算成本", money(c.total)) +
+        row("其中 peak 时段", money(c.peak));
+    }
+    tip.innerHTML = html;
+    tip.classList.add("show");
+  }
+
+  function row(k, v, isPeak) {
+    return '<div class="row"><span class="k">' + k +
+           '</span><span class="v' + (isPeak ? ' peak-v' : '') + '">' + v + '</span></div>';
+  }
+
+  function positionTip(e) {
+    var tip = document.getElementById("tip");
+    var x = e.clientX + 14;
+    var y = e.clientY + 14;
+    var rect = tip.getBoundingClientRect();
+    if (x + rect.width > window.innerWidth)  x = e.clientX - rect.width - 14;
+    if (y + rect.height > window.innerHeight) y = e.clientY - rect.height - 14;
+    tip.style.left = x + "px";
+    tip.style.top  = y + "px";
+  }
+
+  // 空桶——tooltip 显示 0 时不报 undefined
+  function zeroBucket() {
+    return {
+      uncached_input_tokens: 0, output_tokens: 0,
+      cache_read_tokens: 0, cache_write_tokens: 0,
+      peak_uncached_input_tokens: 0, peak_output_tokens: 0,
+      peak_cache_read_tokens: 0, peak_cache_write_tokens: 0,
+    };
+  }
+
+  /** 数字缩写（12345 → 12.3K） */
+  function shortNum(n) {
+    if (n < 1000) return String(n);
+    if (n < 1e6) return (n/1e3).toFixed(n < 1e4 ? 1 : 0) + "K";
+    if (n < 1e9) return (n/1e6).toFixed(n < 1e7 ? 1 : 0) + "M";
+    return (n/1e9).toFixed(1) + "B";
+  }
+
+  /** 当前 BJ 日期（YYYY-MM-DD）——与 state.py::_today_key 同款 */
+  function isoTodayBJ() {
+    var d = new Date();
+    var utc = d.getTime() + d.getTimezoneOffset() * 60 * 1000;
+    var bj = new Date(utc + 8 * 3600 * 1000);
+    return bj.toISOString().slice(0, 10);
+  }
+
+  // ─── 启动 ──────────────────────────────────────────────────────────────
+  document.addEventListener("DOMContentLoaded", bootstrap);
+  </script>
+</body>
+</html>
