@@ -7,9 +7,10 @@
 - `skill-vitals.5m.sh` — 菜单栏显示**今日累计 token cost vs 日预算**，下拉给
   本次会话 / 当日 / 当月 + 「刷新 / 打开 state」入口。
 
-数据源是 `state.py` 写出的三个 JSON（`$SKILL_VITALS_HOME/state/` 或
-`~/.skill-vitals/state/`）—— `oneline.json` / `today.json` / `month.json`。脚本
-**只读不写**，缺文件时显示空菜单栏（`💤 -`），不抛错、不 daemon、不走网络。
+数据源是 `state.py` 写出的四个 JSON（`$SKILL_VITALS_HOME/state/` 或
+`~/.skill-vitals/state/`）—— `oneline.json` / `today.json` / `month.json` /
+`alert.json`。脚本**只读不写**，缺文件时显示空菜单栏（`💤 -`），不抛错、
+不 daemon、不走网络。
 
 ## 安装
 
@@ -30,10 +31,23 @@ xbar / SwiftBar 会**自动发现**该目录下所有可执行脚本，无需重
 
 ## 预算档位
 
-脚本顶部两个常量，`BUDGET_DAILY_CNY=30` / `BUDGET_MONTHLY_CNY=500`。M6 预算
-模块上线后会从配置文件读，这里先硬编码 → 用户改这两个数即可临时调整。
+颜色/百分比唯一来自 `alert.json`（`skill-vitals budget evaluate()` 的落盘
+结果，`oneline` 命令末尾自动写）——脚本自己不算阈值，改预算用
+`skill-vitals budget set --daily 50` 之类的命令，改完下一次 `oneline`
+跑完菜单栏就跟着变，不用碰这个脚本。
 
-- 菜单栏 `< 80%` → 💰 / `80–100%` → ⚠️ / `> 100%` → 🚨
+- `ok` / `near` → 💰　`warn` → ⚠️　`over` → 🚨　`snoozed` → 🔕
+- `budget.enabled = false` → 💰 且下拉写「预算告警：已关闭」，不显示百分比
+- 还没跑过一次新版 `oneline`（`alert.json` 不存在）→ 只显示本次会话花费，
+  不带颜色判定，不臆造一个百分比出来
+
+`effective_daily_budget`（日预算的自适应 floor 结果）和 `monthly_cny`
+（月预算）都是 `alert.json` 里的字段，随 `config.toml [budget]` 或
+`budget set` 实时变化。
+
+> 已经装过旧版脚本？安装是一次性 `cp`，不是符号链接——仓库里的脚本更新
+> 不会自动同步到已安装的副本，改完要重新执行下面的安装步骤（或
+> `bash scripts/install_swiftbar.sh`）才会生效。
 
 ## 依赖
 

@@ -167,6 +167,15 @@ class TestRotateToday(unittest.TestCase):
             self.assertEqual(today["buckets"]["10"]["uncached_input_tokens"], 100)
 
 
+def _run_xbar(sd):
+    script = Path(__file__).resolve().parent.parent / \
+        "contrib" / "xbar" / "skill-vitals.5m.sh"
+    return subprocess.run(["bash", str(script)],
+                          capture_output=True, text=True,
+                          env={**os.environ, "SKILL_VITALS_HOME": str(sd.parent)},
+                          timeout=10)
+
+
 class TestXbarSmokeOutput(unittest.TestCase):
     """xbar 脚本 smoke 测试 — 防 M8 「本地没更新」类 bug 再次发生。"""
 
@@ -219,7 +228,8 @@ class TestXbarSmokeOutput(unittest.TestCase):
         从未在 prefix 拼接处被调用——prefix 仍然拼的是未压缩的
         `menu_yuan`,¥1172.57 这类大额从没被压缩过,commit message 里的
         修复其实没生效。这条测试钉住「已接线」这件事,不只是钉住函数
-        自身的输出。
+        自身的输出。菜单栏数字现在来自 alert.json(见下面几条 wiring
+        测试),不是本地重算的 today.json 折算。
         """
         with _IsolatedHome() as h:
             sd = state.state_dir()
@@ -228,30 +238,110 @@ class TestXbarSmokeOutput(unittest.TestCase):
                 "generated_at": "2026-08-26T00:00:00Z",
                 "cost_cny": 1172.57,
             })
-            # today.json 的桶要折算出 >= ¥100、且触发 >100% 告警(BUDGET_DAILY_CNY=30)
-            state._atomic_write(sd / "today.json", {
+            state._atomic_write(sd / "alert.json", {
                 "schema_version": "1.0.0",
-                "date": "2026-08-26",
-                "buckets": {"10": {
-                    "uncached_input_tokens": 100_000_000,
-                    "output_tokens": 0, "cache_read_tokens": 0,
-                    "cache_write_tokens": 0,
-                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-                }},
-                "generated_at": "2026-08-26T10:00:00Z",
+                "level": "over",
+                "ratio": 1.5,
+                "today_cost": 1172.57,
+                "effective_daily_budget": 30.0,
+                "month_cost": 2000.0,
+                "monthly_cny": 500.0,
+                "snoozed_until": None,
             })
-            script = Path(__file__).resolve().parent.parent / \
-                "contrib" / "xbar" / "skill-vitals.5m.sh"
-            r = subprocess.run(["bash", str(script)],
-                               capture_output=True, text=True,
-                               env={**os.environ, "SKILL_VITALS_HOME": str(sd.parent)},
-                               timeout=10)
+            r = _run_xbar(sd)
             self.assertEqual(r.returncode, 0,
                              f"xbar exit {r.returncode}: {r.stderr}")
             menu_line = r.stdout.split("\n")[0]
             self.assertNotIn(".", menu_line,
                              f"金额 >= ¥100 时菜单栏不应含小数点: {menu_line!r}")
+
+
+class TestXbarBudgetWiring(unittest.TestCase):
+    """xbar 菜单栏的预算颜色/百分比必须来自 budget.evaluate() 的落盘结果
+    (alert.json),不能自己在 bash 里硬编码阈值重算一遍。
+
+    之前(v1.0.0)xbar 完全绕开 budget.py:菜单栏硬编码 BUDGET_DAILY_CNY=30 /
+    BUDGET_MONTHLY_CNY=500,用户 `budget set --daily 50` 改的配置、
+    adaptive floor、snooze、peak_share_max 反博弈——一条都不反映到菜单栏,
+    `budget show` 里全对,菜单栏上全错。这组测试钉住 alert.json 才是唯一
+    权威来源。
+    """
+
+    def _write_min_oneline(self, sd, cost=5.0):
+        state._atomic_write(sd / "oneline.json", {
+            "schema_version": "1.0.0",
+            "generated_at": "2026-08-26T00:00:00Z",
+            "cost_cny": cost,
+        })
+
+    def test_over_budget_shows_alarm_emoji(self):
+        with _IsolatedHome() as h:
+            sd = state.state_dir()
+            self._write_min_oneline(sd)
+            state._atomic_write(sd / "alert.json", {
+                "level": "over", "ratio": 1.5, "today_cost": 45.0,
+                "effective_daily_budget": 30.0, "month_cost": 100.0,
+                "monthly_cny": 500.0, "snoozed_until": None,
+            })
+            r = _run_xbar(sd)
+            self.assertTrue(r.stdout.startswith("🚨"), r.stdout)
+
+    def test_snoozed_shows_mute_emoji_and_dropdown_note(self):
+        with _IsolatedHome() as h:
+            sd = state.state_dir()
+            self._write_min_oneline(sd)
+            state._atomic_write(sd / "alert.json", {
+                "level": "snoozed", "ratio": 1.5, "today_cost": 45.0,
+                "effective_daily_budget": 30.0, "month_cost": 100.0,
+                "monthly_cny": 500.0,
+                "snoozed_until": "2026-08-26T18:00:00+08:00",
+            })
+            r = _run_xbar(sd)
+            self.assertTrue(r.stdout.startswith("🔕"), r.stdout)
+            self.assertIn("2026-08-26T18:00:00+08:00", r.stdout)
+
+    def test_effective_daily_budget_reflects_user_config_not_hardcoded_30(self):
+        """用户把 daily_cny 改成 80(或 adaptive floor 算出别的数)时,
+        下拉的「今日累计 X / Y」里的 Y 必须是那个数,不是写死的 ¥30.00。
+        """
+        with _IsolatedHome() as h:
+            sd = state.state_dir()
+            self._write_min_oneline(sd)
+            state._atomic_write(sd / "alert.json", {
+                "level": "near", "ratio": 0.75, "today_cost": 60.0,
+                "effective_daily_budget": 80.0, "month_cost": None,
+                "monthly_cny": 500.0, "snoozed_until": None,
+            })
+            r = _run_xbar(sd)
+            self.assertIn("¥80.00", r.stdout)
+            self.assertNotIn("¥30.00", r.stdout)
+
+    def test_disabled_budget_shows_plain_money_bag_and_no_percent(self):
+        with _IsolatedHome() as h:
+            sd = state.state_dir()
+            self._write_min_oneline(sd, cost=1.23)
+            state._atomic_write(sd / "alert.json", {
+                "level": "disabled", "ratio": None, "today_cost": None,
+                "effective_daily_budget": 30.0, "month_cost": None,
+                "monthly_cny": 500.0, "snoozed_until": None,
+            })
+            r = _run_xbar(sd)
+            self.assertTrue(r.stdout.startswith("💰"), r.stdout)
+            self.assertNotIn("%", r.stdout.split("\n")[0])
+            self.assertIn("已关闭", r.stdout)
+
+    def test_missing_alert_json_falls_back_to_session_cost_without_color(self):
+        """还没跑过一次新版 oneline(alert.json 不存在)时,不臆造预算
+        百分比——只显示本次会话花费,菜单栏用 💰(不是 🚨/⚠️,那样会在
+        没有任何预算判定依据的情况下暗示"正常")。
+        """
+        with _IsolatedHome() as h:
+            sd = state.state_dir()
+            self._write_min_oneline(sd, cost=1.23)
+            self.assertFalse((sd / "alert.json").exists())
+            r = _run_xbar(sd)
+            self.assertTrue(r.stdout.startswith("💰¥1.23"), r.stdout)
+            self.assertIn("等预算数据", r.stdout)
 
 
 if __name__ == "__main__":

@@ -384,6 +384,7 @@ def evaluate(now=None):
             "reasons": [],
             "snoozed_until": None,
             "effective_daily_budget": float(budget.get("daily_cny", 30.0)),
+            "monthly_cny": float(budget.get("monthly_cny", DEFAULT_BUDGET["monthly_cny"])),
             "adaptive_floor_applied": False,
             "today_cost": None,
             "today_peak_cost": None,
@@ -443,6 +444,11 @@ def evaluate(now=None):
         "reasons": reasons,
         "snoozed_until": (snoozed_until.isoformat() if snoozed_until else None),
         "effective_daily_budget": eff,
+        # 用户配置的月预算原样透出 —— xbar「本月累计 X / Y」那一行需要它。
+        # 之前 xbar 自己硬编码 ¥500,budget.json/config.toml 改了月预算
+        # 也不生效;月预算目前没有自适应 floor（只有日预算有,spec §5.2）,
+        # 所以这里直接给 user_set,不需要另算一个 floor_applied。
+        "monthly_cny": float(budget.get("monthly_cny", DEFAULT_BUDGET["monthly_cny"])),
         "adaptive_floor_applied": floor_applied,
         "today_cost": today["total"] if today else None,
         "today_peak_cost": today["peak_total"] if today else None,

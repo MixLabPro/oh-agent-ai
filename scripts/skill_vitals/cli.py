@@ -517,6 +517,12 @@ def _main():
             state_module.merge_month(hb)
         # 不管 --no-merge 与否都 append 历史 —— xbar「最近 5 次审计」要靠这个
         state_module.append_session_history(summary)
+        # 顺手把 budget.evaluate() 落盘成 alert.json —— xbar 之前完全绕开
+        # budget.py，自己在 bash 里硬编码阈值重算一遍百分比，用户改的
+        # daily_cny / adaptive floor / snooze 全部对菜单栏不生效。
+        # today.json / month.json 已经 merge 完，evaluate() 读的是最新状态。
+        alert = budget_module.evaluate()
+        state_module.write_alert(alert)
         # 人读输出 —— 让没装 xbar 的用户在终端也能看一眼「这一会话花了多少」。
         print("session:    %s" % summary["session_id"])
         print("duration:   %s ms" % (summary["duration_ms"] or "?"))
@@ -528,6 +534,8 @@ def _main():
                   % summary["unpriced_tokens"])
         print("findings:   %d (max severity: %s)"
               % (summary["findings_total"], summary["findings_max_severity"]))
+        if alert["level"] != "disabled":
+            print("budget:     %s" % alert["level"])
         print("state:      %s" % p_oneline)
         return
 

@@ -161,6 +161,35 @@ def read_oneline():
     return _read(state_dir() / "oneline.json")
 
 
+# ────────────────────────── alert.json ──────────────────────────
+
+
+def write_alert(alert: dict) -> Path:
+    """把 `budget.evaluate()` 的结果写到 alert.json —— xbar tick 直接读。
+
+    在这之前 xbar 完全不知道 `budget.py` 的存在：菜单栏自己在 bash 里硬编码
+    `BUDGET_DAILY_CNY=30` / `BUDGET_MONTHLY_CNY=500` 重新算一遍百分比，用户
+    通过 `budget set --daily 50` 改的配置、adaptive floor、snooze、
+    peak_share_max 反博弈——一条都不会反映到菜单栏上（`budget show` 里全对，
+    菜单栏上全错）。写这份文件让 oneline 触发时顺手把**同一个**
+    `budget.evaluate()` 结果落盘，xbar 变成纯只读消费者，不用重新实现一遍
+    阈值 / 自适应 / snooze 逻辑（也不需要知道 repo 装在哪里去 shell 出
+    python——它只读 state 文件）。
+
+    调用时机：与 oneline.json 一样，`oneline` 命令末尾（见 cli.py）。
+    """
+    path = state_dir() / "alert.json"
+    data = dict(alert)
+    data["schema_version"] = SCHEMA_VERSION
+    data["generated_at"] = _now_iso()
+    _atomic_write(path, data)
+    return path
+
+
+def read_alert():
+    return _read(state_dir() / "alert.json")
+
+
 # ────────────────────────── today.json / month.json ──────────────
 
 
