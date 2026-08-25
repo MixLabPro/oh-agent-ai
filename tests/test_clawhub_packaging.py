@@ -32,9 +32,10 @@ ALLOWED_PACKAGE_FILES = {
         "adapters/__init__.py", "adapters/claude.py", "adapters/codex.py",
         "adapters/openclaw.py", "adapters/workbuddy.py", "adapters/hermes.py",
         "adapters/dsh.py",
+        "templates/calendar.html",
     )
 }
-ALLOWED_PACKAGE_DIRS = {Path("adapters")}
+ALLOWED_PACKAGE_DIRS = {Path("adapters"), Path("templates")}
 
 
 def _ignore_python_cache(_directory, names):
