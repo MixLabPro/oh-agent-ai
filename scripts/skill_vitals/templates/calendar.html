@@ -270,7 +270,7 @@
     .day-cell {
       min-height: 88px; background: var(--surface-2);
       border: 1px solid transparent; border-radius: var(--r-sm);
-      padding: 6px 8px; cursor: default;
+      padding: 7px 9px; cursor: default;
       display: flex; flex-direction: column; justify-content: space-between;
       transition: transform 0.12s ease, border-color 0.12s ease;
     }
@@ -278,29 +278,35 @@
       transform: translateY(-1px);
       border-color: var(--accent); z-index: 2;
     }
+    /* 空格子：实心 dim 背景，比虚线更干净；月份首尾的「补位」用半透明 */
     .day-cell.empty {
-      background: transparent; border: 1px dashed var(--border);
-      cursor: default;
+      background: rgba(22, 27, 34, 0.3); border: 1px solid transparent;
+      opacity: 0.5; cursor: default;
     }
-    .day-cell.empty:hover { transform: none; border-color: var(--border); }
+    .day-cell.empty:hover { transform: none; border-color: transparent; }
     .day-cell .num {
-      font: 600 13px var(--mono); color: var(--fg);
+      font: 700 15px var(--mono); color: var(--fg);
+      display: flex; align-items: center; gap: 4px;
     }
-    .day-cell.empty .num { color: var(--fg-dim); }
+    .day-cell.empty .num { color: var(--fg-dim); font-weight: 400; }
     .day-cell .num .peak-dot {
-      display: inline-block; width: 5px; height: 5px;
+      display: inline-block; width: 7px; height: 7px;
       background: var(--peak); border-radius: 50%;
-      margin-left: 4px; vertical-align: middle;
+      box-shadow: 0 0 6px rgba(219, 109, 40, 0.6);
     }
     .day-cell .amt {
-      font: 11px var(--mono); color: var(--fg-muted);
-      margin-top: 4px; line-height: 1.2;
+      font: 500 12px var(--mono); color: var(--fg-muted);
+      margin-top: 4px; line-height: 1.25;
+      letter-spacing: -0.01em;
     }
     .day-cell .amt .cost {
-      color: var(--accent); margin-top: 2px;
+      color: var(--accent); margin-top: 3px;
+      font-weight: 600; font-size: 13px;
+      letter-spacing: 0;
     }
     .day-cell.today {
-      border: 1px solid var(--accent);
+      border: 1.5px solid var(--accent);
+      box-shadow: 0 0 0 1px rgba(56, 139, 253, 0.2);
     }
 
     /* ── tooltip：hover 显示明细 ──────────────────────────────────── */
