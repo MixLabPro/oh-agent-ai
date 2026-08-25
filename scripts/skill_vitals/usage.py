@@ -29,8 +29,11 @@ time 字段判定。这让展示层能算
 """
 
 import json
+from datetime import date, timedelta
 
 from .util import est_tokens, post_fork
+
+_EPOCH_DATE = date(1970, 1, 1)
 
 
 _EMPTY_BUCKET = {
@@ -450,6 +453,143 @@ def token_by_model(events):
     unreported = [f for f in _SAMPLE_FIELDS if f not in seen_fields] if samples else []
     return {"by_model": by_model, "providers": providers,
             "sequence": sequence, "unreported_fields": unreported}
+
+
+def _hour_key(time_ms):
+    """time_ms → (date_str, hour) in Asia/Shanghai。
+
+    纯整数算 + `date(1970,1,1) + timedelta` 拼出 ISO 日期，避开本地时区陷阱：
+    `datetime.fromtimestamp` 会按 **本地** 时区算，机器在 UTC+0 跑就把 14 点
+    写成 06 点——日历直接错一天。**整差 = 北京时间天数**（已加 8 小时偏移），
+    用 timedelta 推进到日期对象，跨时区一致。
+
+    `secs % 86400 // 3600` 是北京时间的小时数（0–23）。
+    """
+    secs = time_ms // 1000 + _BEIJING_OFFSET_SECS
+    days = secs // 86400
+    d = _EPOCH_DATE + timedelta(days=days)
+    return d.isoformat(), (secs % 86400) // 3600
+
+
+def _fold_hour_bucket(buckets_map, time_ms, add_buckets, peak, sign):
+    """按 (date, hour) 累加/扣除一份 4 桶贡献。`sign=-1` 用于同 (turn, step)
+    去重时回滚旧值——见 `token_by_model` 的同 step 替换语义，那边怎么写这边
+    怎么写，否则两边的逐请求 vs 逐小时会出现不可解释的偏差。
+
+    time_ms 缺场时落进 ("unknown", None) 这一个特殊键——保留数据但**不让它
+    混进实际时间桶**，否则下游做「过去 7 天合计」会把时间戳缺失的样本算成
+    1970-01-01。`is_peak` 同步置 None（缺 time ≠ 在空闲时段，与 `_is_peak`
+    的保守 fallback 是同一条纪律：未测到不如实给空）。
+    """
+    if time_ms is None:
+        key = (None, None)
+        bucket_peak = None
+    else:
+        key = _hour_key(time_ms)
+        bucket_peak = peak
+    cur = buckets_map.setdefault(key, dict(_EMPTY_BUCKET))
+    for k in _BASE_KEYS:
+        cur[k] = cur[k] + sign * add_buckets[k]
+    if bucket_peak:
+        for base_key, peak_key in zip(_BASE_KEYS, _PEAK_KEYS):
+            cur[peak_key] = cur[peak_key] + sign * add_buckets[base_key]
+
+
+def hour_buckets(events):
+    """事件流 → 按 (date, hour) 折叠到 token 桶。Rust 平行实现见
+    `crates/skill-vitals-core/src/usage.rs::hour_buckets`。
+
+    与 `token_by_model` 是**同一次 fold 的第三个出口**：那边按模型折、
+    `request_metrics` 按请求点折、这里按小时折。共用 `_usage_sample` +
+    `_buckets_from` + `_is_peak`，三处去重/peak 语义必须一致——任何一处
+    改了去重而另两处没改，三方对账立刻红。
+
+    不变量（测试钉死）：
+    - 全桶 4+4 字段之和 == `token_by_model` 按模型聚合后求和（按同一份 events）；
+    - (date, hour) 是**去重后**的聚合粒度，不受 chunk/message 顺序影响；
+    - 跨午夜事件按各自 `event.time` 归属，不归到 session 开始那天——
+      真实日志单会话跨 23:50→00:10 时归属各自时间，不是「session 那天」；
+    - 时间戳缺失的样本落 `("unknown", None)` 桶，**不**进入日历。
+
+    输出结构：
+        {
+          "buckets": [
+            {"date": "2026-08-25", "hour": 14, "is_peak": true,
+             "uncached_input_tokens": ..., ..., "peak_uncached_input_tokens": ...},
+            ...
+          ],
+          "schema_version": 1,
+          "tz_name": "Asia/Shanghai (UTC+8 fixed, no DST)",
+          "tz_offset_hours": 8,
+          "unreported_fields": [...],
+        }
+
+    `is_peak` 在每条 bucket 上保留而不是从外部用 date+hour 重算——
+    让调用方决定怎么画日历（颜色条/阈值提示线）时不必重新实现一遍
+    北京时间规则（与 `request_metrics` 的 `is_peak` 列是同一条设计）。
+    """
+    # 只看分叉之后的事件——见 token_by_model 的同条注释
+    events = post_fork(events)
+    buckets_map = {}  # (date_str, hour) → bucket dict
+    last = None  # (turn, step, time_ms, add_buckets, peak) —— 同 step 去重槽
+    seen_fields = set()
+    samples = 0
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type")
+        # request/header 在这里**只用于触发 _usage_sample 的提取路径**——
+        # hour_bucket 不按模型分桶，但跳过 header 会让去重槽丢失上下文
+        # （chunk/message 之前必须有 header 才能识别 active model），与
+        # token_by_model 行为对齐
+        if etype == "request/header":
+            continue
+        if not isinstance(event.get("data"), dict):
+            continue
+        sample = _usage_sample(event, etype, event["data"])
+        if sample is None:
+            continue
+        turn, step, usage = sample
+        samples += 1
+        add_buckets = _buckets_from(usage, seen_fields)
+        time_ms = _int_or_none(event.get("time"))
+        peak = _is_peak(event) if time_ms is not None else None
+
+        if last is not None and last[0] == turn and last[1] == step:
+            # 同 step：先扣掉旧归属，再把新归属加到当前 hour 桶
+            _fold_hour_bucket(buckets_map, last[2], last[3], last[4], -1)
+            _fold_hour_bucket(buckets_map, time_ms, add_buckets, peak, 1)
+            last = (turn, step, time_ms, add_buckets, peak)
+        else:
+            _fold_hour_bucket(buckets_map, time_ms, add_buckets, peak, 1)
+            last = (turn, step, time_ms, add_buckets, peak)
+
+    # 展平成列表 + 按 (date, hour) 排序 + 每条带上 is_peak 标签
+    # 时间缺失的桶 (date=None, hour=None) 一律沉到最后；calendar 渲染时再过滤掉它们
+    rows = []
+    for (date_str, hour), b in buckets_map.items():
+        if date_str is None:
+            is_peak = None
+        else:
+            sample_peak = b["peak_uncached_input_tokens"] or b["peak_output_tokens"] \
+                or b["peak_cache_read_tokens"] or b["peak_cache_write_tokens"]
+            is_peak = bool(sample_peak)
+        rows.append({"date": date_str, "hour": hour, "is_peak": is_peak, **b})
+    rows.sort(key=lambda r: (
+        r["date"] is None,  # 缺时间的桶沉底
+        r["date"],
+        r["hour"] if r["hour"] is not None else -1,
+    ))
+
+    unreported = [f for f in _SAMPLE_FIELDS if f not in seen_fields] if samples else []
+    return {
+        "buckets": rows,
+        "schema_version": 1,
+        "tz_name": "Asia/Shanghai (UTC+8 fixed, no DST)",
+        "tz_offset_hours": 8,
+        "unreported_fields": unreported,
+    }
 
 
 def pre_fork_usage(events):
