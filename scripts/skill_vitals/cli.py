@@ -550,36 +550,50 @@ def _main():
             print("calendar template not found at %s (run M4 first)" % template,
                   file=sys.stderr)
             sys.exit(2)
-        src_name = "month.json" if args.source == "month" else "today.json"
-        src = state_module.state_dir() / src_name
         out = Path(args.output)
         out.parent.mkdir(parents=True, exist_ok=True)
 
-        # 模板第一段 <!-- M4 TEMPLATE_BEGIN --> ... <!-- M4 TEMPLATE_END -->
-        # 包住所有内容。我们把数据 JSON 注入到 <head> 里一个独立 <script>
-        # 块,渲染时 JS 优先读 window.__SKILL_VITALS_DATA__,没有再退到 fetch
-        # + file picker。这样 file:// 双击 HTML 也能渲染（无 fetch / 无 CORS）。
+        # 两个 tab（today / month）都内联进同一个文件，各自一个
+        # `<script id="skill-vitals-data-{mode}">` 块——之前只内联
+        # `--source` 选中的那一份,点另一个 tab 只是换个 `?file=` 重新
+        # 加载同一份静态 HTML,内联数据没变,不是「点了没反应」就是被误判
+        # 成另一种 schema 硬渲染出一张空图（真实 bug，用户点 today tab
+        # 复现过）。**每个 mode 独立判断有没有数据**——today.json 不存在
+        # 就不内联那个块，那个 tab 落到 JS 的 empty-state，不影响 month
+        # 那个块正常渲染,反之亦然。
         html = template.read_text(encoding="utf-8")
-        if src.is_file():
+        embedded = []
+        for mode, src_name in (("today", "today.json"), ("month", "month.json")):
+            src = state_module.state_dir() / src_name
+            if not src.is_file():
+                continue
             json_text = src.read_text(encoding="utf-8")
             # JSON 里可能含 </script> —— 必须转义,否则浏览器解析到这就崩
             json_text_safe = (json_text
                               .replace("</script", "<\\/script")
                               .replace("<!--", "<\\!--"))
-            inject = ("<script id=\"skill-vitals-data\" type=\"application/json\">"
-                      + json_text_safe + "</script>")
+            inject = ("<script id=\"skill-vitals-data-%s\" type=\"application/json\">"
+                       % mode + json_text_safe + "</script>")
             html = html.replace("</head>", inject + "\n</head>", 1)
-            out.write_text(html, encoding="utf-8")
             # 同时把 state 文件 cp 到同目录,作为 fetch fallback 的副本。
             (out.parent / src_name).write_text(json_text, encoding="utf-8")
-            print("rendered: %s (%d bytes, data inline + %s)"
-                  % (out, out.stat().st_size, src))
+            embedded.append(mode)
+        # --source 决定「没有 ?file= 时默认显示哪个 tab」——之前这个默认值
+        # 硬编码在模板 JS 里恒为 "today",与 --source 默认值 "month" 互相
+        # 打架,是同一个 bug 的另一半。
+        html = html.replace(
+            "</head>",
+            "<script>window.SKILL_VITALS_DEFAULT_MODE = %r;</script>\n</head>"
+            % args.source, 1)
+        out.write_text(html, encoding="utf-8")
+        if embedded:
+            print("rendered: %s (%d bytes, inline: %s, default tab: %s)"
+                  % (out, out.stat().st_size, "+".join(embedded), args.source))
         else:
-            # 无数据：HTML 仍然渲染,JS 检测到 __SKILL_VITALS_DATA__ 缺失
-            # → 显示「无数据」empty state,而不是凭空编一个空 calendar。
-            out.write_text(html, encoding="utf-8")
-            print("rendered: %s (no %s yet — calendar will show empty state)"
-                  % (out, src_name))
+            # 两份都没有：HTML 仍然渲染,JS 检测到内联数据缺失 → 显示
+            # 「无数据」empty state,而不是凭空编一个空 calendar。
+            print("rendered: %s (no today.json/month.json yet — "
+                  "calendar will show empty state)" % out)
         return
 
     # ──── M3 state list / clean ───────────────────────────────────

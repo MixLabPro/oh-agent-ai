@@ -44,7 +44,12 @@
 
   ── 数据获取路径 ──────────────────────────────────────────────────────────
 
-    1. URL ?file=today 或 ?file=month 决定读哪个 JSON。
+    1. URL ?file=today 或 ?file=month 决定读哪个 JSON；没有 ?file= 时用
+       `calendar --source` 注入的 `window.SKILL_VITALS_DEFAULT_MODE`
+       （不注入则兜底 "today"）——两个 tab 各自的内联数据都在文件里
+       （`calendar --output` 会把 today.json / month.json 都塞进去，
+       只要那份 state 文件在磁盘上存在），所以点哪个 tab 都能看到
+       真实数据，不是只有 --source 选中的那个能看。
     2. 路径默认硬编码到 STATE_HOME_DEFAULT；测试/调试用
        `window.SKILL_VITALS_STATE_HOME = '/custom/path'` 覆盖。
     3. fetch() 在浏览器里**几乎一定**被 CORS 拒（开 http.server 也不能跨
@@ -534,10 +539,15 @@
     return "¥" + v.toFixed(2);
   }
 
-  /** 取 query 决定 mode：today / month（默认 today） */
+  /** 取 query 决定 mode：today / month。没有 `?file=` 时用
+   * `calendar --source` 注入的 `window.SKILL_VITALS_DEFAULT_MODE`
+   * （CLI 不注入时兜底 "today"）——两者必须一致，否则默认打开的 tab
+   * 和 CLI 生成时说好要展示的 tab 对不上。 */
   function getMode() {
     var p = new URLSearchParams(location.search);
-    var f = (p.get("file") || "today").toLowerCase();
+    var fallback = (typeof window.SKILL_VITALS_DEFAULT_MODE === "string"
+                    && window.SKILL_VITALS_DEFAULT_MODE) || "today";
+    var f = (p.get("file") || fallback).toLowerCase();
     return (f === "month") ? "month" : "today";
   }
 
@@ -600,35 +610,41 @@
     document.title = "Skill Vitals · " + mode + " · M4";
 
     // ── 数据加载三段式 ──────────────────────────────────────────
-    // 1. **inline 优先** — calendar CLI 在渲染时已经把 JSON 写到
-    //    `<script type="application/json" id="skill-vitals-data">` 里,
-    //    这是唯一一条不需要网络/CORS 的路径,**保证 file:// 双击也能渲染**。
+    // 1. **inline 优先** — calendar CLI 在渲染时把 today.json / month.json
+    //    分别写进各自的 `<script id="skill-vitals-data-today|month">`
+    //    （只内联磁盘上真的存在的那份），这是唯一一条不需要网络/CORS 的
+    //    路径,**保证 file:// 双击也能渲染**,而且两个 tab 都点得动——
+    //    旧版本只内联 `--source` 选中的一份塞进通用 id,点另一个 tab 只是
+    //    换个 `?file=` 重新加载同一份静态 HTML,内联数据没变,不是「点了
+    //    没反应」就是被硬套上错的 schema 渲染出一张空图。
     // 2. fetch 备选 — 浏览器从 http:// 自托管站点拉 JSON。
     // 3. file picker 兜底 — fetch 也失败时,用户手动选文件。
     // 三段全失败 → 显示 empty state,不假装成功。
-    var inline = document.getElementById("skill-vitals-data");
-    if (inline && inline.textContent.trim()) {
+    var inline = document.getElementById("skill-vitals-data-" + mode);
+    var legacyInline = null;
+    if (!inline) {
+      // 兼容旧版 CLI 生成的文件（只有一个通用 id,没有按 mode 拆分）——
+      // 那种文件的内联数据 schema 未必等于 URL 决定的 mode,需要按数据
+      // 形状推断一次,与下面文件选择器分支的「智能推断 mode」用同一条
+      // 判定，两条路径必须一致。
+      legacyInline = document.getElementById("skill-vitals-data");
+    }
+    var activeInline = inline || legacyInline;
+    if (activeInline && activeInline.textContent.trim()) {
       try {
-        var data = JSON.parse(inline.textContent);
-        // inline 数据的实际 schema 未必等于 URL 决定的 mode——`calendar
-        // --output` 渲染时用 `--source {today,month}` 决定塞哪份 JSON，
-        // 默认 `--source=month`。页面在没有 `?file=` 的默认 "today"
-        // 模式下打开时，如果直接相信 URL 决定的 mode 去 render(mode,
-        // data)，会拿 month 的 {days:...} 当 today 的 {buckets:...}
-        // 硬渲染——两边字段名不同，读出来全是 undefined，整张热力图
-        // 全灰、"今日总 TOKEN" 显示 0，却不报任何错，看着像「今天真的
-        // 没用量」而不是「渲染的文件根本不是今天的数据」。与下面文件
-        // 选择器分支的「智能推断 mode」用同一条判定，两条路径必须一致。
-        var inferred = (data && data.days && !data.buckets) ? "month" : "today";
-        if (inferred !== mode) {
-          mode = inferred;
-          document.getElementById("link-today").classList.toggle("active", mode === "today");
-          document.getElementById("link-month").classList.toggle("active", mode === "month");
-          document.getElementById("source-label").textContent = home + "/" + mode + ".json";
-          document.title = "Skill Vitals · " + mode + " · M4";
+        var data = JSON.parse(activeInline.textContent);
+        if (legacyInline) {
+          var inferred = (data && data.days && !data.buckets) ? "month" : "today";
+          if (inferred !== mode) {
+            mode = inferred;
+            document.getElementById("link-today").classList.toggle("active", mode === "today");
+            document.getElementById("link-month").classList.toggle("active", mode === "month");
+            document.getElementById("source-label").textContent = home + "/" + mode + ".json";
+            document.title = "Skill Vitals · " + mode + " · M4";
+          }
         }
         setStatus("已加载 inline 数据（" + mode + ".json" +
-                  (inferred !== getMode() ? "，按 schema 推断" : "") + "）");
+                  (legacyInline ? "，旧格式按 schema 推断" : "") + "）");
         render(mode, data);
         return;  // 成功就不走 fetch/file picker 了
       } catch (e) {
