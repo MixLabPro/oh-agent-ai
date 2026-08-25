@@ -203,14 +203,100 @@ def _merge_buckets(existing, new_buckets, key_field):
     return existing
 
 
+def rotate_today(now=None):
+    """如果 today.json 的 date 字段 != 当前 BJ 日期,把当前桶搬到
+    month.days[<old_date>],然后清空 today.json。
+
+    这是修 #1 误报的关键 — 不 rotate 的话,38 个 session 的累积
+    数据会一直被当成「今天」算 cost,显示 ¥1172/¥30 = 3908% 这种
+    假告警。
+
+    调用时机: 每次 merge_today 开头先调一次 rotate_today(now),
+    跨 BJ 0:00 时自动滚动。now=None → 用当前系统时间。
+
+    跨日时不丢失数据 — 所有桶累加到 month.days[<old_date>],与
+    merge_month 的逻辑对称。
+
+    跨月不特殊处理 — month.json.days 已累积所有历史日,跨月不
+    切分(年视图需要的话再加 month-archive.jsonl)。这是 spec 没
+    明确的小决策点,见 M8 评估说明。
+    """
+    path = state_dir() / "today.json"
+    today_bj = _today_key() if now is None else (
+        (now if isinstance(now, str) else _to_bj_date(now)).isoformat())
+    with _locked(path):
+        existing = _read(path) or {}
+        old_date = existing.get("date")
+        if old_date and old_date != today_bj:
+            # 把旧 today.json 的桶搬到 month.days[<old_date>]
+            old_buckets = existing.get("buckets") or {}
+            if old_buckets:
+                _move_today_to_month(old_date, old_buckets)
+            # 清空 today.json,留下 schema_version 和新 date
+            existing = {
+                "schema_version": SCHEMA_VERSION,
+                "date": today_bj,
+                "buckets": {},
+                "generated_at": _now_iso(),
+                "rotated_from": old_date,  # 留个 audit 痕迹
+            }
+            _atomic_write(path, existing)
+            return old_date  # 告诉调用方发生过 rotate
+    return None
+
+
+def _to_bj_date(dt):
+    """datetime → BJ ISO date (YYYY-MM-DD)。接受 datetime 或 None。"""
+    from datetime import datetime as _dt
+    if isinstance(dt, str):
+        # ISO 字符串直接取前 10 位
+        return dt[:10]
+    secs = int(dt.timestamp()) + 8 * 3600  # BJ = UTC+8 fixed, no DST
+    days = secs // 86400
+    from datetime import date, timedelta
+    return date(1970, 1, 1) + timedelta(days=days)
+
+
+def _move_today_to_month(date_str, buckets):
+    """把 today.json 旧桶搬到 month.json.days[<date_str>]。在锁内调用。
+
+    复用 merge_buckets 的累加逻辑 —— 同一日期的桶可能月视图已经有数据,
+    这里累加而不是覆盖。
+    """
+    month_path = state_dir() / "month.json"
+    month = _read(month_path) or {}
+    # 把 hour-bucket 转成 day-bucket:把所有 hour 桶合并成一个
+    # 字段名一致的 dict,key_field 改 'date',buckets 列表只一条
+    day_bucket = {
+        "date": date_str,
+        "hour": None,
+        "is_peak": None,
+    }
+    for fld in ("uncached_input_tokens", "output_tokens",
+                "cache_read_tokens", "cache_write_tokens",
+                "peak_uncached_input_tokens", "peak_output_tokens",
+                "peak_cache_read_tokens", "peak_cache_write_tokens"):
+        day_bucket[fld] = sum(b.get(fld) or 0 for b in buckets.values())
+    month["days"] = _merge_buckets(
+        month.get("days"), [day_bucket], key_field="date")
+    month["schema_version"] = SCHEMA_VERSION
+    month["generated_at"] = _now_iso()
+    month["month"] = date_str[:7]
+    _atomic_write(month_path, month)
+
+
 def merge_today(hour_buckets_result) -> Path:
     """把 hour_buckets 的所有 (date, hour) 桶合并到 today.json。
 
     锁住同一 `<state_dir>/.lock`，read-modify-write 期间不让其他
     tick 进来 —— 否则两个并发审计可能各读一份、各写一份，后者覆盖
     前者的累加。
+
+    **跨日自动 rotate** — 调用 rotate_today() 先处理跨日累积。
+    这是修「¥1172/¥30 = 3908% 假告警」的关键。
     """
     path = state_dir() / "today.json"
+    rotate_today()  # 跨 BJ 0:00 自动滚动
     with _locked(path):
         existing = _read(path) or {}
         existing["buckets"] = _merge_buckets(
@@ -239,6 +325,60 @@ def merge_month(hour_buckets_result) -> Path:
 
 
 # ────────────────────────── 列出 / 清理 ──────────────────────────
+
+
+def append_session_history(summary):
+    """追加一行到 sessions.jsonl —— xbar 显示「最近 5 次审计」用。
+
+    追加(append-only)+ fcntl 锁,确保多个并发 oneline 不会丢行。
+    sessions.jsonl **不** rotate 也没事 —— 月增 ~100 行,几年才上 MB。
+
+    summary 是 oneline 的那一份 dict(见 cli.py::oneline handler),
+    至少含 session_id / tokens_total / cost_cny / model。
+    自动补 generated_at(ISO8601)——不依赖调用方记得塞。
+    """
+    path = state_dir() / "sessions.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # 自动补 generated_at — xbar 的 hhmm 解析靠它
+    payload = dict(summary)
+    payload.setdefault("generated_at", _now_iso())
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        line = json.dumps(payload, ensure_ascii=False, default=str)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def recent_sessions(limit=5):
+    """返回最近 N 条 session 摘要(从 sessions.jsonl tail)。
+
+    xbar tick 5min 一次,只读最后 N 行就够了 —— 比读整个文件快。
+    """
+    path = state_dir() / "sessions.jsonl"
+    if not path.is_file():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    out = []
+    for ln in lines[-limit:]:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            out.append(json.loads(ln))
+        except json.JSONDecodeError:
+            continue  # 坏行跳过,不阻塞整份读取
+    return out
 
 
 def list_state_files():

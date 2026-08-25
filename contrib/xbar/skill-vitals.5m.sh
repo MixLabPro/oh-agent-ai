@@ -197,14 +197,38 @@ else
 fi
 
 case "$menu_pct" in
-    "")           menu_yuan="¥?"; prefix="💰 ${menu_yuan}" ;;
+    "")           menu_yuan="¥?"; prefix="💰${menu_yuan}" ;;
     *)
-        if   [ "$menu_pct" -gt 100 ]; then prefix="🚨 ${menu_yuan}"
-        elif [ "$menu_pct" -ge 80  ]; then prefix="⚠️ ${menu_yuan}"
-        else                                prefix="💰 ${menu_yuan}"
+        if   [ "$menu_pct" -gt 100 ]; then prefix="🚨${menu_yuan}"
+        elif [ "$menu_pct" -ge 80  ]; then prefix="⚠️${menu_yuan}"
+        else                                prefix="💰${menu_yuan}"
         fi
         ;;
 esac
+
+# 紧凑格式:金额 ≥ ¥100 隐藏小数,让菜单栏不挤。状态 emoji 后不加空格 —
+# xbar 渲染时会保留,我们节省 4 个字符 ≈ 节省 32px。
+yuan_compact() {
+    local v="$1"
+    case "$v" in
+        ""|"null") echo "¥?" ;;
+        *)
+            # awk 走整数部分;>=100 时只显示整数
+            local int_part=$(awk "BEGIN { printf \"%d\", $v }" 2>/dev/null || echo "")
+            local abs=$(awk "BEGIN { v = $v; if (v < 0) v = -v; print v }" 2>/dev/null || echo "0")
+            if [ -n "$int_part" ]; then
+                local int_abs=$(awk "BEGIN { v = $int_part; if (v < 0) v = -v; print v }" 2>/dev/null || echo "0")
+                if [ "${int_abs%.*}" -ge 100 ] 2>/dev/null || [ "$int_abs" -ge 100 ] 2>/dev/null; then
+                    echo "¥${int_part}"
+                else
+                    echo "¥${v}"
+                fi
+            else
+                echo "¥${v}"
+            fi
+            ;;
+    esac
+}
 
 echo "$prefix"
 
@@ -242,22 +266,40 @@ fi
 
 echo "---"
 
-# 3c. 最近一次审计（oneline.json 的「最后一行」语义 —— state.py 不保存历史
-# 快照缓冲区，最近 N 次的概念需要 M6 之后再加。当前只展示最近一次。）
-if [ -n "$start_iso" ]; then
-    # ISO8601 → HH:MM。本机：BSD `date -j -f`（macOS 默认）；
-    # Linux：GNU `date -d`。两条都试，失败回 "-"，不抛错（set -e 不能
-    # 让一次日期解析把整个 tick 弄崩）。
-    hhmm_short="${start_iso%.*}"  # 去掉小数秒，date -f 对其更宽容
-    hhmm=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$hhmm_short" "+%H:%M" 2>/dev/null \
-                   || date -d "$start_iso" "+%H:%M" 2>/dev/null \
-                   || echo "-")
-    # findings 切符号：>0 → ⚠️ ；0 → ✓
-    case "$findings_total" in
-        ""|"0"|"null") mark="✓" ;;
-        *)             mark="⚠️" ;;
-    esac
-    echo "${mark} ${hhmm}  ${cost_yuan}  ${model_short}"
+# 3c. 最近 N 次审计 — 读 sessions.jsonl 尾部 (state.py 追加日志)。
+# 之前 oneline 只显示「最近一次」,M8 起 sessions.jsonl 保留历史,
+# xbar 用 tail -N 拿最近 5 条。文件不存在 → 「尚无审计」降级文案。
+SESSIONS_FILE="$STATE_DIR/sessions.jsonl"
+if [ -f "$SESSIONS_FILE" ] && [ -s "$SESSIONS_FILE" ]; then
+    # tail -5 → 5 行 JSONL,逐行用 python3 解析(避免 jq 缺场时连不上)
+    tail -n 5 "$SESSIONS_FILE" | python3 -c "
+import json, sys, datetime
+for ln in sys.stdin:
+    ln = ln.strip()
+    if not ln: continue
+    try:
+        s = json.loads(ln)
+    except Exception:
+        continue
+    iso = s.get('generated_at') or s.get('session_end') or ''
+    hhmm = '-'
+    if iso:
+        try:
+            dt = datetime.datetime.fromisoformat(iso.replace('Z','+00:00'))
+            hhmm = dt.strftime('%H:%M')
+        except Exception:
+            pass
+    cost = s.get('cost_cny')
+    cost_str = '-'
+    if cost is not None:
+        cost = float(cost)
+        cost_str = ('%.2f' % cost) if cost < 100 else ('%d' % round(cost))
+        cost_str = '¥' + cost_str
+    findings = s.get('findings_total') or 0
+    mark = '✓' if int(findings) == 0 else '⚠️'
+    model = (s.get('model') or '?').split('/')[-1]
+    print('%s %s  %s  %s' % (mark, hhmm, cost_str, model))
+"
 else
     echo "尚无审计"
 fi

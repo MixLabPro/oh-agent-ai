@@ -515,6 +515,8 @@ def _main():
         if not args.no_merge:
             state_module.merge_today(hb)
             state_module.merge_month(hb)
+        # 不管 --no-merge 与否都 append 历史 —— xbar「最近 5 次审计」要靠这个
+        state_module.append_session_history(summary)
         # 人读输出 —— 让没装 xbar 的用户在终端也能看一眼「这一会话花了多少」。
         print("session:    %s" % summary["session_id"])
         print("duration:   %s ms" % (summary["duration_ms"] or "?"))
