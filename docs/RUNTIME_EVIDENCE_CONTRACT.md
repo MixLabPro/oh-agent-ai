@@ -112,6 +112,8 @@ pub enum Signal {
     SkillInvocations,
     Hooks,
     FileMutations,
+    UserPrompts,       // genuine human turns
+    UserCorrections,   // §3.2 — always Estimated, never Measured
 }
 ```
 
@@ -133,7 +135,29 @@ approval events at all. Claude Code's `permission-mode` records are the same
 class. Any rule whose `requires` list contains only Policy and Occurrence signals
 runs on hosts that have no approval events whatsoever, which is most of them.
 
-### 3.2 Visibility
+### 3.2 One signal is subjective, and that is the point
+
+Every signal above answers a question about what the *system* did. `SV611`–`SV614`
+are built on them and are correspondingly objective: a repeated tool signature, a
+turn whose action sequence recurs, a run of failing results, a run of denials.
+
+None of them can measure **the user's own verdict that the run was going wrong**.
+That verdict is often the earliest and strongest indicator, and it leaves a trace
+in the log: the user stops the agent and says "no, not like that".
+
+`UserCorrections` names it. It is derived from `UserPrompts` plus
+`TurnBoundaries` — a human turn arriving shortly after the agent stopped and
+reading as a course-correction rather than a new task — and it is therefore
+**always `Provenance::Estimated`, never `Measured`.** Keyword and time-window
+heuristics are exactly the sort of thing §10.1 governs: it may support a finding,
+it may never withdraw one, and its absence proves nothing.
+
+Recording it separately (rather than folding it into the objective detectors)
+keeps two things from being confused: *the system misbehaved* and *the user
+thought the system misbehaved*. Both are worth reporting. They are not the same
+claim and must not be summed into one score.
+
+### 3.3 Visibility
 
 A signal carries a visibility marker, because a host may durably record data it
 deliberately withholds from its own users.
@@ -492,29 +516,33 @@ incompatible vocabularies** (§4).
 
 | Signal | DSH | Codex (Legacy) | Codex (Paginated) | Claude Code | WorkBuddy |
 |---|---|---|---|---|---|
-| ToolCalls | measured | measured | measured (**argv + cwd + exit code + output**) | measured | measured (`span.name`) § / lossy in audit-log |
-| ToolResults | measured (6 error codes) | measured | measured | measured (different error vocabulary) | measured (`span.status` + `span.error`) § |
-| TurnBoundaries | measured | measured (`task_started`/`task_complete`) | measured | **derived** (+ `system/turn_duration`) | derived (one trace = one run) § |
+| ToolCalls | measured | measured | measured (**argv + cwd + exit code + output**) | measured | measured (`span.name`) ※ / lossy in audit-log |
+| ToolResults | measured (6 error codes) | measured | measured | measured (different error vocabulary) | measured (`span.status` + `span.error`) ※ |
+| TurnBoundaries | measured | measured (`task_started`/`task_complete`) | measured | **derived** (+ `system/turn_duration`) | derived (one trace = one run) ※ |
 | StepBoundaries | measured | unavailable | unavailable | derived | unavailable |
-| Usage (per request) | measured (4 buckets) | measured (6 buckets) | measured | measured (4 + thinking) | unverified (`generation` spans exist; per-span tokens unchecked) § |
+| Usage (per request) | measured (4 buckets) | measured (6 buckets) | measured | measured (4 + thinking) | unverified (`generation` spans exist; per-span tokens unchecked) ※ |
 | UsageAggregate | derivable | derivable | derivable | derivable | measured (credits) |
 | ContextWindow | measured | measured (`model_context_window`) | measured | unavailable | unavailable |
-| ApprovalDecisions | measured | unavailable in rollout ‡ | partial (`FileChangeItem.auto_approved`) ‡ | unavailable in transcript ‡ | **measured** (hash-chained) |
+| ApprovalDecisions | measured | unavailable in rollout ‡ | partial (`FileChangeItem.auto_approved`) ‡ | **partial** — denials only, derived+lossy ¶ | **measured** (hash-chained) |
 | ApprovalPolicy | measured (`sandbox/mode`) | **measured** (`ThreadSettingsSnapshot`) | same | measured (`permission-mode`) | measured (`sessions.permission_mode`) |
 | SandboxModes | measured | unavailable | unavailable | unavailable | measured |
 | NetworkAccess | unavailable | unavailable | unavailable | unavailable | **measured** |
 | Compaction | measured (+ shadowed tokens) | measured (+ `replacement_history`) | measured | lossy (`compact_boundary`, no volume) | unavailable |
-| SubagentSpawns | measured | measured | measured (**+ parent→child link**) | measured (`isSidechain` / `Task`) | measured (`type:'agent'` + `parentId` tree) § |
+| SubagentSpawns | measured | measured | measured (**+ parent→child link**) | measured (`isSidechain` / `Task`) | measured (`type:'agent'` + `parentId` tree) ※ |
 | SkillInvocations | measured | **derived** (not persisted; §14.3) | derived | derived (`Skill` tool call) | unavailable |
 | Hooks | measured | **unavailable — not persisted by design** | **measured** (`HookPromptItem`) | lossy (`stop_hook_summary`) | unavailable |
 | FileMutations | measured | lossy (`patch_apply_end` only) | **measured** (`FileChangeItem` + status) | derived (from tool calls) | measured (`file-history/`) |
-| Tool-call duration | measured | **unavailable** (no begin/end pair) | **measured** (`CommandExecutionItem.duration`) | derived | **measured** (`span.duration`) § |
+| Tool-call duration | measured | **unavailable** (no begin/end pair) | **measured** (`CommandExecutionItem.duration`) | derived | **measured** (`span.duration`) ※ |
 | Workspace root | `cwd` | `turn_context.workspace_roots` | same | `cwd` | `sessions.cwd` |
 | Storage medium | JSONL | JSONL | JSONL | JSONL | SQLite + JSONL + **span-tree JSON** + blobs |
 | Process liveness | unavailable | unavailable | unavailable | unavailable | partial (`workerPid`, `status:"running"`) — see §16.1 |
 
-`§` — from `~/.workbuddy/traces/` (§14.6), found only on a second pass. Cells
-marked `§` are read off a sampled span schema and have **not** been reconciled
+`¶` — recoverable from the Claude Code transcript **without a hook**, by
+matching marker strings in tool-result text (§14.5). Denials only: grants leave
+no trace, so **SV614c (dangerous mode repeatedly *granted*) stays `unavailable`**.
+
+`※` — from `~/.workbuddy/traces/` (§14.6), found only on a second pass. Cells
+marked `※` are read off a sampled span schema and have **not** been reconciled
 against a full corpus.
 
 `‡` — **session-log surface only.** Codex and Claude Code both emit approval and
@@ -637,6 +665,27 @@ Measured against a 14,575-line transcript. Structure is a message tree
 - Skills: `Skill` tool calls.
 - Approvals and sandbox: no records. `permission-mode` entries are Policy-class
   only.
+
+**Two friction signals are recoverable without a hook, by string marker.** The
+CLI writes recognisable text into the transcript, and `Tencent/teamai-cli`
+(§14.9) extracts both from it:
+
+```text
+user interrupt   entry text starts with  "[Request interrupted by user"
+user rejection   tool_result contains    "The tool use was rejected"
+                                      or "doesn't want to proceed with this tool use"
+```
+
+This is what moves Claude Code's `ApprovalDecisions` cell from `unavailable` to
+`partial`, and it needs no hook and no configuration — it is retroactive like the
+rest of surface 1.
+
+**But it is a UI string, not an API contract.** It carries no version, no schema,
+and no compatibility promise; a wording change breaks it silently, and it is
+English-only. Mark it `Derived` + `Lossy`, keep the matched strings in one named
+constant rather than inline, and add a fixture that fails when a real corpus
+stops matching. Denials only — a *granted* permission leaves no marker at all,
+which is why SV614c stays unavailable regardless.
 
 **Usage must be deduplicated per assistant message.** One turn spans many JSONL
 lines and Claude Code repeats the same `message.usage` object on every
@@ -862,7 +911,7 @@ signals**.
 
 | Signal | Hosts with it in the log |
 |---|---|
-| ApprovalDecisions | DSH, WorkBuddy |
+| ApprovalDecisions | DSH, WorkBuddy, Claude Code (denials only, §14.5) |
 | SandboxModes | DSH, WorkBuddy |
 | NetworkAccess | WorkBuddy only |
 | Tool-call duration | DSH, Codex (Paginated) |
@@ -1075,6 +1124,45 @@ rejects 0" — indistinguishable from a genuinely clean session. This is invaria
 12 and §10's three-state output violated four times, by a competent shipping
 tool, in exactly the place this contract predicts. It is the strongest available
 argument for making the distinction a type rather than a convention.
+
+#### Friction gating — an alerting design worth copying
+
+Its Stop hook decides whether a session was *worth interrupting the user about*,
+which is a different question from whether findings exist:
+
+```text
+Layer 1 (≈1ms)  toolCount < BASE_THRESHOLD            → exit
+Layer 2 (lazy)  score = f(interrupt, toolReject, correction, toolError)
+                score < SMART_THRESHOLD               → exit
+Hard gate       toolCount < BASE_THRESHOLD (=15)      → exit, whatever the score
+                → emit ONE hint, listing only the non-zero signals
+```
+
+Four properties, all of which this product currently lacks — `doctor` reports
+whatever it finds, every time it is run:
+
+1. **A long, smooth session does not qualify.** Many tool calls with no friction
+   is success, not a subject. The gate is "did the user have to fight", not "is
+   there data".
+2. **A hard gate independent of the score.** A one-command session the user
+   rejected scores high and is still not worth reporting. Severity alone is not
+   a reason to interrupt.
+3. **Only the signals that actually fired are named.** No zero rows.
+4. **At most one hint per session**, via a persisted `hinted` flag, so a cache
+   hit on a later Stop does not re-emit.
+
+The scoring itself is coarse — four weighted counters — and is *weaker* than
+SV611–SV614, which carry thresholds, evidence and `run_end_seq` ranges. The part
+worth taking is the gate, not the score.
+
+**Scope boundary.** teamai-cli's purpose is to capture team knowledge; a
+`/teamai-share-learnings` skill writes a summary to a shared repo. Adopting that
+flow wholesale would turn this product into a knowledge base, which
+[PRODUCT §2.2](./PRODUCT.md) excludes. What transfers is the *trigger*, not the
+*action*: at end of session, if SV611–SV614 fired, say so once. See
+[PRODUCT §5.8.5](./PRODUCT.md) — and note that this needs no hook at all, because
+a `watch` tick observing the log stop growing reaches the same moment without
+writing anything into the user's configuration.
 
 #### Practices worth adopting
 
