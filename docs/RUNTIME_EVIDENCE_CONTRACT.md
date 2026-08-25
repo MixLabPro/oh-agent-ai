@@ -288,6 +288,31 @@ pub struct UsageBuckets(BTreeMap<BucketId, Observed<i64>>);
 
 A bucket the source did not establish is **absent**, never `0`.
 
+**And the same bucket name can mean different things.** This is sharper than
+differing bucket sets, because it produces no error and no missing field — only
+a number that is quietly too large.
+
+In OpenAI-protocol responses, `input_tokens` **already includes** the cached
+portion; in Anthropic-protocol responses it excludes it. Summing `input_tokens`
+across providers without normalising counts cache reads twice. `cc-switch`
+(§14.10) hit this and stores the answer per row:
+
+```sql
+input_token_semantics INTEGER NOT NULL DEFAULT 0   -- proxy_request_logs
+```
+
+The rule that follows:
+
+> **A `BucketId` names a measurement convention, not just a field.** Two hosts
+> may only share a `BucketId` when they share the convention. When they do not,
+> the adapter either normalises to one convention and records that it did, or
+> emits distinct `BucketId`s — never a silent merge.
+
+The same trap exists in reverse: a protocol may not report a bucket *separately*
+even though the underlying quantity is non-zero. OpenAI-style responses carry no
+cache-**creation** figure at all, so a naive adapter records `0`. That is the
+invariant-12 violation again, and the correct value is absent.
+
 ### 8.3 The day-bucketing timezone belongs to the price table
 
 `is_peak_slot` in `usage.rs` hardcodes Beijing time. That is correct *for
@@ -431,7 +456,7 @@ pub struct SourceAttempt {
     pub available:  bool,
     pub error:      Option<String>,
     /// The span this source actually covers. Never assume it equals the
-    /// report window: surfaces 2 and 3 begin when they were configured (§14.8.5).
+    /// report window: surfaces 2 and 3 begin when they were configured (§14.8.6).
     pub observed_span: Option<TimeSpan>,
 }
 ```
@@ -727,17 +752,25 @@ A runtime adapter is a subsystem, not a file. Plan accordingly.
 
 ### 14.8 Evidence surfaces beyond the session log
 
-The matrix in §13 surveys **durable session logs only**. There are at least two
+The matrix in §13 surveys **durable session logs only**. There are at least three
 other surfaces, and they carry different signals with different preconditions.
 
-| # | Surface | Retroactive | Precondition | Schema |
-|---|---|---|---|---|
-| 1 | Session log | **yes** — readable after the agent exits | none | host-defined, N of them |
-| 2 | OTel export | no | exporter configured *before* the session | semi-standard |
-| 3 | Self-installed hook | no | hook installed *before* the session | **ours, one of them** |
+| # | Surface | Retroactive | Precondition | Position | Schema |
+|---|---|---|---|---|---|
+| 1 | Session log | **yes** — readable after the agent exits | none | outside | host-defined, N of them |
+| 2 | OTel export | no | exporter configured *before* the session | outside | semi-standard |
+| 3 | Self-installed hook | no | hook installed *before* the session | **in the decision path** | ours, one of them |
+| 4 | Reverse proxy | no | the agent's base URL repointed at us | **in the data path** | ours, one of them |
 
-Only surface 1 answers the question this product exists to answer. The other two
-are additive, never substitutes.
+Only surface 1 answers the question this product exists to answer, and only
+surface 1 requires nothing of the user before the session it reports on. The
+others are additive, never substitutes.
+
+The `Position` column is the one that decides what this product may do. Surfaces
+1 and 2 observe from outside. Surface 3 puts our code where a decision is made
+(§14.8.4). Surface 4 puts our code where the traffic flows (§14.8.5). Both of
+the latter are out of bounds here, for the same reason stated in different
+strengths.
 
 #### 14.8.1 Opt-in telemetry
 
@@ -841,9 +874,9 @@ transient control-plane decisions are the first thing its designers drop —
 
 The consequence: **for approval and sandbox coverage on Claude Code and Codex,
 the log route is permanently closed.** Not expensive — closed, by upstream
-design. Surface 2 or 3 is the only route, and surface 2 has a stricter
-precondition (a configured collector) than surface 3 (a hook the tool installs
-itself).
+design. Only surfaces 2–4 remain: surface 2 has a stricter precondition (a
+configured collector) than surface 3 (a hook the tool installs itself), and
+surface 4 is excluded outright (§14.8.5). None of the three is retroactive.
 
 So surface 3 should be treated as a likely future requirement, not a rejected
 alternative. What that costs is a change in what the product *is* — skill-vitals
@@ -857,7 +890,7 @@ is that taking it later must not need a rewrite:
 3. A `Finding` records the surface it came from. Two surfaces do not carry the
    same trust or the same time span, and a report that merges them without
    saying so is the §7 double-counting hazard in a new costume.
-4. §14.8.5 — the ragged left edge — must be enforced from the first surface-3
+4. §14.8.6 — the ragged left edge — must be enforced from the first surface-3
    adapter, not retrofitted.
 
 #### 14.8.4 Claude Code's hook surface, and one rule it forces
@@ -906,7 +939,46 @@ Consequences, binding:
    stays `unavailable`** on Claude Code. Report it as such; do not approximate it
    from denials.
 
-#### 14.8.5 Mixed surfaces have a ragged left edge
+#### 14.8.5 The reverse-proxy surface, and the rule it extends
+
+`cc-switch` (§14.10) obtains usage by **being the proxy**: the agent's base URL
+is repointed at it, every request passes through, and it writes its own
+`proxy_request_logs` table. The data that yields is strictly better than any log:
+
+```sql
+latency_ms, first_token_ms, duration_ms, status_code, is_streaming,
+error_message, input_tokens … cache_creation_tokens, total_cost_usd
+```
+
+`latency_ms`, `first_token_ms`, `status_code` and `is_streaming` appear in **no
+session log on any host surveyed here**. They are only observable from the wire.
+
+This surface is nevertheless out of bounds for this product, and the reason is
+the same one as §14.8.4 at a higher strength:
+
+| Surface | Where our code sits | Failure blast radius |
+|---|---|---|
+| Hook (`PermissionRequest`) | in the **decision** path | one tool call allowed or blocked wrongly |
+| **Reverse proxy** | in the **data** path | **the agent stops working** |
+
+If the proxy is down, slow, mangles a model name, or mis-handles a streaming
+response, the agent it audits fails. An audit tool that can take down its subject
+is not an audit tool.
+
+For `cc-switch` this is not a defect — being in the path *is* its function; it is
+a switcher, and routing is the product. The distinction to keep is therefore
+about role, not about technique:
+
+> **A tool may sit in the traffic path when routing is what the user asked it to
+> do. A tool that was asked only to observe may not.**
+
+One consequence worth recording rather than regretting: `latency_ms` and
+`first_token_ms` are **permanently unavailable** to this product on every host.
+They are not unimplemented; they are unobservable from where we stand. Report
+them as `unavailable(not observable from a log)`, alongside process liveness
+(§16.1).
+
+#### 14.8.6 Mixed surfaces have a ragged left edge
 
 Surface 1 covers all retained history. Surfaces 2 and 3 cover only the period
 since someone configured them. A report drawing on both therefore has a
@@ -1012,6 +1084,65 @@ argument for making the distinction a type rather than a convention.
 - **The pointer/detail split** — see §14.8.2.
 - **Per-assistant-message usage dedup** — see §14.5.
 
+### 14.10 Prior art — `cc-switch`
+
+[`farion1231/cc-switch`](https://github.com/farion1231/cc-switch) is a Tauri app
+managing Claude Code / Codex / Gemini CLI / OpenCode / OpenClaw / Hermes — again
+close to this product's host list. It answers "quota" and "usage" by two
+completely separate paths, and neither resembles surface 1.
+
+**Quota — a sandboxed JavaScript plugin.** Each provider's quota query is a
+user-supplied script run in an embedded QuickJS runtime
+(`src-tauri/src/usage_script.rs`), in three phases with network I/O held by Rust:
+
+```text
+① JS evaluates  → RequestConfig { url, method, headers }   (JS has no network)
+② Rust          → send_http_request(&config)
+③ JS (fresh ctx)→ config.extractor(response) → normalised result
+```
+
+Limits are set before `eval`: 5 s interrupt deadline, 16 MiB memory, 256 KiB
+stack; secrets are template-substituted rather than written into the script; both
+`base_url` and the resolved request URL must be HTTPS unless loopback. The stated
+reason is that scripts arrive from deeplinks and imports — untrusted input.
+
+This is a third answer to "N heterogeneous providers": CodexBar compiles 69
+strategies, teamai-cli asserts one convention over 33 hosts, cc-switch **ships an
+interpreter and makes provider support data**.
+
+**Usage — it is the proxy.** See §14.8.5.
+
+#### Three practices worth adopting
+
+1. **Store the measurement convention next to the measurement.**
+   `proxy_request_logs.input_token_semantics` records, per row, whether
+   `input_tokens` was cache-inclusive. Adopted as a rule in §8.2.
+2. **Three-state availability that propagates through aggregation.**
+   `getCacheWriteAvailability(appTypes) → "ok" | "partial" | "na"`, with the
+   comment that a protocol reporting no cache-creation figure means the UI
+   "should label it as N/A rather than 0". Aggregating across app types with
+   mixed coverage degrades to `partial`. This is §4 and §5 independently
+   derived — the **third** convergence on invariant 12 after CodexBar's
+   `CostUsageTokenMix` and this repo's own rule.
+3. **Credential state is not a boolean.** `SubscriptionQuota` separates
+   `credentialStatus: valid | expired | not_found | parse_error` from `success`,
+   and carries `queriedAt` — the time coordinate a probe-class answer requires
+   (`HOST_ADAPTER_CONTRACT`'s `evidence_recency: probe`). `tiers[]` is a list,
+   because a plan has several windows, not one number.
+
+#### One judgment worth copying
+
+`claude-desktop` traffic is folded into `claude` for display, with the reason
+recorded: a separate bucket "would only ever show a partial number and mislead
+users into reading it as the Desktop's full usage."
+
+> **When a category can only ever be partially covered, omitting the category is
+> more honest than showing a partial figure under its name.**
+
+That is §4.1 (window is not coverage) applied to a dimension rather than a time
+range, and it is the correct default for any host whose adapter can see only part
+of a signal.
+
 ---
 
 ## 15. Reporting language
@@ -1035,7 +1166,7 @@ Prohibited phrasings:
   measured breakdown.
 - Do not describe a lossy non-match as evidence of absence.
 - Do not state one time window for a report whose signals come from surfaces
-  with different observed spans (§14.8.5).
+  with different observed spans (§14.8.6).
 
 ---
 
@@ -1066,6 +1197,12 @@ rather than inferring liveness from a truncated log.
 trace and `status: "running"` on spans that never completed — process-level
 liveness is *in the durable record* there, so the cell is `partial` rather than
 `unavailable` (§13, §14.6).
+
+**Wire-level timing is the other permanent gap.** `latency_ms`, `first_token_ms`,
+`is_streaming` and HTTP status codes are observable only from the traffic path
+(§14.8.5), which this product does not occupy. No host writes them to a log.
+Report `unavailable(not observable from a log)` — they are unobservable from
+where we stand, not unimplemented.
 
 > This asymmetry is worth keeping in view when comparing vocabularies: 16 signals
 > read unevenly from logs is a **larger vocabulary over a raggeder matrix** than
