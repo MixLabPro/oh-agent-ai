@@ -28,7 +28,7 @@ ALLOWED_PACKAGE_FILES = {
         "analysis.py", "overlap.py", "doctor.py", "explain.py",
         "lifecycle.py", "redact.py", "snapshots.py", "diff.py", "behavior.py",
         "usage.py", "cost.py", "trajectory.py", "compaction.py", "waste.py", "subagent.py", "skill.py",
-        "duration.py", "pricing.json",
+        "duration.py", "pricing.json", "state.py",
         "adapters/__init__.py", "adapters/claude.py", "adapters/codex.py",
         "adapters/openclaw.py", "adapters/workbuddy.py", "adapters/hermes.py",
         "adapters/dsh.py",
