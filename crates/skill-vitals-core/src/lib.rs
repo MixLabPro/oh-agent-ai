@@ -8,6 +8,7 @@
 
 pub mod behavior;
 pub mod compaction;
+pub mod dsh_evidence;
 pub mod duration;
 pub mod evidence;
 pub mod skill;

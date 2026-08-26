@@ -56,18 +56,33 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     if session.get("degraded").and_then(|v| v.as_str()).is_some() {
         return None;
     }
-    let events: Vec<Value> = session
+    // P2（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：先把已经抽好的事件数组
+    // 折成 evidence::CanonicalSession + 原始事件的捆绑（core::dsh_evidence），
+    // 再反向投影回下面这套老形状——纯粹为了证明新模型不丢任何行为
+    // （goldens/differential 必须字节不变）。CanonicalSession 本身这里还
+    // 没有消费者，P3 迁移规则读 Signal 之后这个反向投影就删掉。
+    let execution_events: Vec<Value> = session
         .get("execution_events")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let usage_events: Vec<Value> = session
+    let usage_events_raw: Vec<Value> = session
         .get("usage_events")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    let cwd_raw: Option<String> = session.get("cwd").and_then(|v| v.as_str()).map(str::to_owned);
+    let session_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let dsh_evidence = skill_vitals_core::dsh_evidence::build_dsh_evidence(
+        execution_events, usage_events_raw, cwd_raw, session_id,
+    );
+    let (events, usage_events, cwd_owned) = skill_vitals_core::dsh_evidence::reverse_project(&dsh_evidence);
     // 工作区根来自 session header 的 cwd；缺失时 None → SV605 退化为纯绝对路径启发式。
-    let cwd = session.get("cwd").and_then(|v| v.as_str());
+    let cwd = cwd_owned.as_deref();
     // 单事件规则（SV601–610）在前、轨迹级检测（SV611–614）追加在后，字节序稳定。
     let mut findings = match_behavior(&events, cwd);
     findings.extend(skill_vitals_core::trajectory::match_trajectory(&events));
