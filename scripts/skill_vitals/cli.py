@@ -653,6 +653,15 @@ def _main():
                 print("peak_share:        %s" %
                       ("%.1f%%" % (alert["peak_share"] * 100)
                        if alert["peak_share"] is not None else "(no data)"))
+                print()
+                print("─── month ───")
+                print("month_cost:        %s" %
+                      ("¥%.2f" % alert["month_cost"] if alert["month_cost"] is not None
+                       else "(no data)"))
+                print("month_ratio:       %s" %
+                      ("%.1f%%" % (alert["month_ratio"] * 100)
+                       if alert["month_ratio"] is not None else "(no data)"))
+                print()
                 print("alert level:       %s" % alert["level"])
                 if alert["snoozed_until"]:
                     print("snoozed_until:     %s" % alert["snoozed_until"])

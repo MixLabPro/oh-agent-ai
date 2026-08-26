@@ -355,8 +355,19 @@ def _alert_level(ratio, warn_at=None):
     return "ok"
 
 
+# 用于比较两个 level 谁更严重 —— 月预算升级只升不降(见 evaluate() 里的
+# 用法):今天花得少不该把月预算已经报警的级别压回去,反过来今天报警了
+# 也不该被"月预算还好"盖掉。
+_LEVEL_SEVERITY = {"ok": 0, "near": 1, "warn": 2, "over": 3}
+
+
 def evaluate(now=None):
     """今日 / 本月 / peak_share 三维度 → alert dict (见 spec §5.3)。
+
+    `level` 由三路输入取最严重的一个：today ratio、peak_share 反博弈、
+    month ratio——之前只有前两路参与判定,月预算配了却从不影响 level
+    （`monthly_cny` 只用来算 xbar 显示的百分比），会出现「本月超支
+    200%，今天花得少，菜单栏还是绿的」这种误导。
 
     返回结构:
       {
@@ -364,6 +375,7 @@ def evaluate(now=None):
         "ratio": 0.747 | None,
         "peak_share": 0.633 | None,
         "peak_over": True | False,
+        "month_ratio": 1.98 | None,
         "reasons": [...],
         "snoozed_until": "..." | None,
         "effective_daily_budget": 30.0,
@@ -385,6 +397,7 @@ def evaluate(now=None):
             "snoozed_until": None,
             "effective_daily_budget": float(budget.get("daily_cny", 30.0)),
             "monthly_cny": float(budget.get("monthly_cny", DEFAULT_BUDGET["monthly_cny"])),
+            "month_ratio": None,
             "adaptive_floor_applied": False,
             "today_cost": None,
             "today_peak_cost": None,
@@ -400,11 +413,13 @@ def evaluate(now=None):
     today = compute_today_cost()
     month = compute_month_cost()
     eff, floor_applied = effective_daily_budget(budget)
+    monthly_cny = float(budget.get("monthly_cny", DEFAULT_BUDGET["monthly_cny"]))
 
     reasons = []
     ratio = None
     peak_share = None
     peak_over = False
+    month_ratio = None
 
     if today is not None and today["total"] > 0:
         ratio = today["total"] / eff if eff > 0 else None
@@ -423,14 +438,31 @@ def evaluate(now=None):
     elif today is None:
         reasons.append("no today.json yet (run `behavior <log>` to start tracking)")
 
+    # 月预算：之前只把 month_cost/monthly_cny 算出来给 xbar 显示,从没真的
+    # 参与过 level 判定——用户月预算超了几倍,只要今天花得少,菜单栏照样
+    # 显示绿色 💰(实测过:198% 月超支,level 仍是 "ok")。这里用跟 today
+    # 同一套 _alert_level 阈值算一遍月度的,下面跟 today 那边的结论取更
+    # 严重的那个,不是简单覆盖。
+    if month is not None and month["total"] > 0 and monthly_cny > 0:
+        month_ratio = month["total"] / monthly_cny
+        reasons.append("month at %d%% of monthly budget (¥%.2f / ¥%.2f)" %
+                       (round(month_ratio * 100), month["total"], monthly_cny))
+
     warn_at = float(budget.get("warn_at_ratio", DEFAULT_BUDGET["warn_at_ratio"]))
     if ratio is None:
-        level = "ok"  # 无数据 = 无告警,符合 CLAUDE.md 缺列不编列
+        level = "ok"  # 无当日数据 = 当日无告警,符合 CLAUDE.md 缺列不编列
     else:
         level = _alert_level(ratio, warn_at=warn_at)
         if peak_over and level != "over":
             # peak 超标强制升级一档(spec §5.4)
             level = "warn" if level == "near" else "over"
+
+    if month_ratio is not None:
+        # 只升级,不降级——today 那边已经判出的 warn/over 不会被"月预算
+        # 还好"压回去,月预算严重超标时也不会被"今天花得少"盖过去。
+        month_level = _alert_level(month_ratio, warn_at=warn_at)
+        if _LEVEL_SEVERITY[month_level] > _LEVEL_SEVERITY[level]:
+            level = month_level
 
     if snoozed_until and level in ("warn", "over"):
         # 只压制 warn/over —— near 仍可见(spec 不写但符合 snooze 习惯用法)
@@ -448,7 +480,8 @@ def evaluate(now=None):
         # 之前 xbar 自己硬编码 ¥500,budget.json/config.toml 改了月预算
         # 也不生效;月预算目前没有自适应 floor（只有日预算有,spec §5.2）,
         # 所以这里直接给 user_set,不需要另算一个 floor_applied。
-        "monthly_cny": float(budget.get("monthly_cny", DEFAULT_BUDGET["monthly_cny"])),
+        "monthly_cny": monthly_cny,
+        "month_ratio": month_ratio,
         "adaptive_floor_applied": floor_applied,
         "today_cost": today["total"] if today else None,
         "today_peak_cost": today["peak_total"] if today else None,

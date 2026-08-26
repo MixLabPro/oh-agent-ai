@@ -204,6 +204,69 @@ class TestEvaluate(unittest.TestCase):
             self.assertEqual(r["level"], "ok")
             self.assertLess(r["today_cost"], 30.0)
 
+    def test_month_over_budget_escalates_level_even_when_today_is_fine(self):
+        """月预算超支必须真的影响 level —— 之前 monthly_cny 只用来算 xbar
+        显示的百分比，从不参与 level 判定：实测过「本月 198% 超支，
+        今天花得少，菜单栏仍是绿色 ok」这种误导。这条测试钉住月度超支
+        必须把 level 升到至少 'over'（>= 100% 用跟 today 同一套阈值）。
+        """
+        with _IsolatedHome():
+            sd = state.state_dir()
+            # 没有 today.json —— ratio=None，level 起点是 "ok"；
+            # month.json 里一天的花费远超默认 monthly_cny=600。
+            state._atomic_write(sd / "month.json", {
+                "days": {"2026-08-01": {
+                    "uncached_input_tokens": 500_000_000,
+                    "output_tokens": 0, "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                }},
+                "schema_version": "1.0.0",
+                "month": "2026-08",
+                "generated_at": datetime.now(budget._BEIJING).isoformat(),
+            })
+            r = budget.evaluate()
+            self.assertGreater(r["month_ratio"], 1.0)
+            self.assertEqual(r["level"], "over",
+                             "月预算超支必须把 level 升到 over，不能被"
+                             "「今天没数据」的 ok 盖住")
+            self.assertTrue(any("month at" in reason for reason in r["reasons"]))
+
+    def test_today_over_budget_not_downgraded_by_fine_month(self):
+        """月预算正常时，不该把 today 那边已经判出的 over 压回去
+        （升级只单向：谁更严重听谁的，不是"最后算的那个赢"）。
+        """
+        with _IsolatedHome():
+            sd = state.state_dir()
+            state._atomic_write(sd / "month.json", {
+                "days": {"2026-08-01": {
+                    "uncached_input_tokens": 1_000,
+                    "output_tokens": 0, "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                }},
+                "schema_version": "1.0.0",
+                "month": "2026-08",
+                "generated_at": datetime.now(budget._BEIJING).isoformat(),
+            })
+            state._atomic_write(sd / "today.json", {
+                "buckets": {"14": {
+                    "uncached_input_tokens": 30_000_000,
+                    "output_tokens": 0, "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                }},
+                "schema_version": "1.0.0",
+                "date": datetime.now(budget._BEIJING).date().isoformat(),
+                "generated_at": datetime.now(budget._BEIJING).isoformat(),
+            })
+            r = budget.evaluate()
+            self.assertLess(r["month_ratio"], 0.1)
+            self.assertEqual(r["level"], "over")
+
 
 class TestSnooze(unittest.TestCase):
     def test_snooze_round_trip(self):
