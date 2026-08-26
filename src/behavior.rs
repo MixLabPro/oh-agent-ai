@@ -9,7 +9,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-pub use skill_vitals_core::behavior::{behavior_gate, match_behavior};
+pub use skill_vitals_core::behavior::{behavior_gate, match_behavior, rule_outcomes, rule_outcomes_json};
 
 /// 一份会话的行为审计结果：风险 findings + 按模型分桶的 token 报告（两条正交
 /// 的审计维度）。成本由 CLI 显示层（`cost.rs`）用 pricing.json 折算。
@@ -45,6 +45,11 @@ pub struct Audit {
     /// 的原始 JSONL，`hook/*` 本来就在 `EXECUTION_EVENT_TYPES` 里，这里立即
     /// 可用——两条链路的能力边界不同，不是疏漏。
     pub duration: Value,
+    /// P3 group①（docs/RUNTIME_EVIDENCE_CONTRACT.md §10）：SV601–610 每条规则
+    /// 的三态结果——`findings`（命中了几条）/ `measured_zero`（测了，零命中）/
+    /// `unavailable`（这份日志根本没有该规则依赖的信号，不是"测了是零"）。
+    /// **新增、只加不改**：`findings` 字段本身的产出逻辑完全没变。
+    pub rule_outcomes: Value,
 }
 
 /// 读会话日志 → 执行事件 + 成本账事件 → (findings, usage, requests, context, compaction, waste)（端到端入口）。
@@ -86,6 +91,21 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     // 单事件规则（SV601–610）在前、轨迹级检测（SV611–614）追加在后，字节序稳定。
     let mut findings = match_behavior(&events, cwd);
     findings.extend(skill_vitals_core::trajectory::match_trajectory(&events));
+    // P3 group①：SV601–610 每条规则的 requires 对着 coverage 一查——但
+    // `dsh_evidence.canonical.coverage` 是从**分叉前**的 execution_events 算的
+    // （build_dsh_evidence 在 post_fork 过滤之前调用，服务于 compaction/
+    // subagent/skill/duration 等本来就该看到完整历史的消费者，不能改）。
+    // findings 只算分叉之后（match_behavior 内部会 post_fork）——如果一个
+    // signal 的证据全部落在分叉前，直接复用 dsh_evidence 的 coverage 会把
+    // 本该 Unavailable 的规则误判成 MeasuredZero。单独用 post_fork 之后的
+    // 事件重新算一份 coverage,只喂给 rule_outcomes,不影响 events/
+    // dsh_evidence 本身（post_fork 是幂等的，见 util.rs 注释，这里是"只为了
+    // 拿 coverage 而已"的第二次调用，不是改变已有语义）。
+    let post_fork_events = skill_vitals_core::util::post_fork(&events);
+    let post_fork_evidence = skill_vitals_core::dsh_evidence::build_dsh_evidence(
+        post_fork_events, Vec::new(), None, String::new(),
+    );
+    let rule_outcomes_val = rule_outcomes_json(&rule_outcomes(&findings, &post_fork_evidence.canonical.coverage));
     // 三个消费者共用 usage_events（各取所需，不认识的事件类型自然跳过）：
     // token_by_model 按模型分桶、request_metrics 保留逐请求分辨率、
     // context_composition 从 header.system/tools 与 skill-catalog 载体算常驻前缀。
@@ -106,5 +126,8 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
         "approvals": skill_vitals_core::duration::approval_latencies(&events),
         "hooks": skill_vitals_core::duration::hook_executions(&events),
     });
-    Some(Audit { findings, usage, requests: requests_val, context, compaction, waste, pre_fork, subagents, skill, duration })
+    Some(Audit {
+        findings, usage, requests: requests_val, context, compaction, waste, pre_fork, subagents,
+        skill, duration, rule_outcomes: rule_outcomes_val,
+    })
 }

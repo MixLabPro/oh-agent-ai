@@ -32,6 +32,8 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
+use crate::evidence::{Coverage, Fidelity, RuleOutcome, RuleSpec, Signal};
+
 /// 证据片段截断长度（字符数，非字节）。与 Python 侧一致。
 const EVIDENCE_MAX_CHARS: usize = 200;
 
@@ -389,6 +391,95 @@ fn rules() -> &'static [BehaviorRule] {
     })
 }
 
+/// P3 group①（docs/RUNTIME_EVIDENCE_CONTRACT.md §10）：SV601–610 对 `Signal`
+/// 的依赖声明。从每条 `detect_svNNN` **实际读什么事件类型**倒推出来——不是从
+/// §13 矩阵的列名猜的：SV604/605 表面上像该对应 `FileMutations`，但它们真正
+/// 读的是 `tool/call`，所以 `requires` 是 `ToolCalls`。SV610 是唯一横跨两个
+/// 事件族的规则：单靠 `sandbox/mode` 就能出一条 finding，所以
+/// `ApprovalDecisions` 只是 `enhances`，不是 `requires`。
+fn rule_specs() -> &'static [RuleSpec] {
+    static SPECS: OnceLock<Vec<RuleSpec>> = OnceLock::new();
+    SPECS.get_or_init(|| {
+        vec![
+            RuleSpec { code: "SV601", requires: &[Signal::ToolCalls], enhances: &[], min_fidelity: Fidelity::Full },
+            RuleSpec { code: "SV602", requires: &[Signal::ToolCalls], enhances: &[], min_fidelity: Fidelity::Full },
+            RuleSpec { code: "SV603", requires: &[Signal::ToolCalls], enhances: &[], min_fidelity: Fidelity::Full },
+            RuleSpec { code: "SV604", requires: &[Signal::ToolCalls], enhances: &[], min_fidelity: Fidelity::Full },
+            RuleSpec { code: "SV605", requires: &[Signal::ToolCalls], enhances: &[], min_fidelity: Fidelity::Full },
+            RuleSpec { code: "SV606", requires: &[Signal::ToolCalls], enhances: &[], min_fidelity: Fidelity::Full },
+            RuleSpec { code: "SV607", requires: &[Signal::ToolResults], enhances: &[], min_fidelity: Fidelity::Full },
+            RuleSpec { code: "SV608", requires: &[Signal::ToolResults], enhances: &[], min_fidelity: Fidelity::Full },
+            RuleSpec { code: "SV609", requires: &[Signal::ApprovalDecisions], enhances: &[], min_fidelity: Fidelity::Full },
+            RuleSpec {
+                code: "SV610",
+                requires: &[Signal::SandboxModes],
+                enhances: &[Signal::ApprovalDecisions],
+                min_fidelity: Fidelity::Full,
+            },
+        ]
+    })
+}
+
+/// `findings`（已经算好、不改）+ `coverage` → 每条规则的 `RuleOutcome`
+/// （§10 的三态契约：N findings / measured-zero / unavailable）。这是**只读**
+/// 的派生计算——不改变 `findings` 本身怎么产出，也不重新跑一遍 `detect_svNNN`。
+///
+/// 一个 `requires` 里的信号在这份会话里全零覆盖 → `Unavailable`（"没证据"，
+/// 不是"测了是零"）；否则该规则在 `findings` 里一条都没出现 → `MeasuredZero`；
+/// 否则 → `Findings`（该规则命中的那些 finding）。
+pub fn rule_outcomes(findings: &[Value], coverage: &Coverage) -> Vec<(&'static str, RuleOutcome)> {
+    rule_specs()
+        .iter()
+        .map(|spec| {
+            let missing: Vec<Signal> = spec
+                .requires
+                .iter()
+                .filter(|s| coverage.get(**s).total() == 0)
+                .copied()
+                .collect();
+            let outcome = if !missing.is_empty() {
+                RuleOutcome::Unavailable {
+                    missing,
+                    reason: "no evidence for required signal(s) in this session".to_string(),
+                }
+            } else {
+                let matched: Vec<Value> = findings
+                    .iter()
+                    .filter(|f| f.get("rule").and_then(|v| v.as_str()) == Some(spec.code))
+                    .cloned()
+                    .collect();
+                if matched.is_empty() {
+                    RuleOutcome::MeasuredZero
+                } else {
+                    RuleOutcome::Findings(matched)
+                }
+            };
+            (spec.code, outcome)
+        })
+        .collect()
+}
+
+/// `rule_outcomes()` 的结果 → `--json` 输出用的 JSON 形状。`RuleOutcome` 不是
+/// serde 类型（§10 的类型定义里没有 derive Serialize），展示层自己转一道。
+pub fn rule_outcomes_json(outcomes: &[(&'static str, RuleOutcome)]) -> Value {
+    let mut map = Map::new();
+    for (code, outcome) in outcomes {
+        let entry = match outcome {
+            RuleOutcome::Findings(items) => json!({"status": "findings", "count": items.len()}),
+            RuleOutcome::MeasuredZero => json!({"status": "measured_zero"}),
+            RuleOutcome::Unavailable { missing, reason } => json!({
+                "status": "unavailable",
+                // Signal 的 Debug 输出就是它的变体名（ToolCalls 等）——不必再写
+                // 一张手工映射表去重复这份信息。
+                "missing": missing.iter().map(|s| format!("{s:?}")).collect::<Vec<_>>(),
+                "reason": reason,
+            }),
+        };
+        map.insert((*code).to_string(), entry);
+    }
+    Value::Object(map)
+}
+
 /// 遍历事件流，命中即产出一条 Behavior Finding（§5.3 规则引擎层的字段）。
 ///
 /// 纯函数、确定性：同一事件流重放结果逐字节一致。非 object 的条目跳过；
@@ -478,8 +569,16 @@ pub fn behavior_gate(findings: &[Value], fail_on: &str, ignore: &str) -> i32 {
 mod tests {
     use super::*;
 
+    use crate::evidence::CoverageCounts;
+
     fn ev(etype: &str, seq: i64, time: i64, data: Value) -> Value {
         json!({"type": etype, "seq": seq, "time": time, "data": data})
+    }
+
+    fn measured_coverage(signal: Signal, count: u64) -> Coverage {
+        let mut cov = Coverage::new();
+        cov.set(signal, CoverageCounts { measured: count, ..Default::default() });
+        cov
     }
 
     fn tool_call(name: &str, arguments: &str, seq: i64) -> Value {
@@ -816,6 +915,81 @@ mod tests {
             "turn": null, "step": null, "call_id": null,
             "evidence_recency": "log", "run_end_seq": null
         }]));
+    }
+
+    /// P3 group①：requires 里的信号全零覆盖 → Unavailable，不是"测了是零"的假 []。
+    /// 十条规则各自的 requires 信号覆盖为零时都该拿到 Unavailable，不能有漏网的。
+    #[test]
+    fn each_rule_is_unavailable_when_its_required_signal_has_zero_coverage() {
+        let empty = Coverage::new();
+        for (code, missing_signal) in [
+            ("SV601", Signal::ToolCalls), ("SV602", Signal::ToolCalls),
+            ("SV603", Signal::ToolCalls), ("SV604", Signal::ToolCalls),
+            ("SV605", Signal::ToolCalls), ("SV606", Signal::ToolCalls),
+            ("SV607", Signal::ToolResults), ("SV608", Signal::ToolResults),
+            ("SV609", Signal::ApprovalDecisions), ("SV610", Signal::SandboxModes),
+        ] {
+            let outcomes = rule_outcomes(&[], &empty);
+            let (found_code, outcome) = outcomes.iter().find(|(c, _)| *c == code).unwrap();
+            assert_eq!(*found_code, code);
+            match outcome {
+                RuleOutcome::Unavailable { missing, .. } => {
+                    assert!(missing.contains(&missing_signal),
+                        "{code} 应该因为缺 {missing_signal:?} 判 unavailable，实际 missing={missing:?}");
+                }
+                _ => panic!("{code} 在零覆盖时应该是 Unavailable，实际是别的分支"),
+            }
+        }
+    }
+
+    #[test]
+    fn measured_zero_is_distinct_from_unavailable_for_the_same_rule() {
+        // ToolCalls 有覆盖(测过)，但 findings 里没有 SV601 的条目 → MeasuredZero，
+        // 不是 Unavailable——这正是这条机制存在的意义:能分清"测了是零"和"没法测"。
+        let cov = measured_coverage(Signal::ToolCalls, 5);
+        let outcomes = rule_outcomes(&[], &cov);
+        let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV601").unwrap();
+        assert!(matches!(outcome, RuleOutcome::MeasuredZero), "有覆盖、零命中该是 MeasuredZero");
+    }
+
+    #[test]
+    fn findings_outcome_carries_the_matching_findings_for_that_rule_only() {
+        let cov = measured_coverage(Signal::ToolCalls, 1);
+        let findings = vec![json!({"rule": "SV601", "severity": "critical"})];
+        let outcomes = rule_outcomes(&findings, &cov);
+        let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV601").unwrap();
+        match outcome {
+            RuleOutcome::Findings(items) => assert_eq!(items.len(), 1),
+            _ => panic!("SV601 有一条命中，应该是 Findings"),
+        }
+        // 其余规则(比如 SV602)一条 finding 都没被这条 SV601 的记录带偏。
+        let cov_all = measured_coverage(Signal::ToolCalls, 1);
+        let (_, sv602_outcome) = rule_outcomes(&findings, &cov_all).into_iter().find(|(c, _)| *c == "SV602").unwrap();
+        assert!(matches!(sv602_outcome, RuleOutcome::MeasuredZero),
+            "SV601 的 finding 不该被算进 SV602 的 outcome");
+    }
+
+    #[test]
+    fn sv610_treats_approval_decisions_as_enhances_not_requires() {
+        // 只有 SandboxModes 覆盖、ApprovalDecisions 全零——SV610 仍应可用
+        // (sandbox/mode 单独就能出一条 finding)，不是 Unavailable。
+        let cov = measured_coverage(Signal::SandboxModes, 1);
+        let outcomes = rule_outcomes(&[], &cov);
+        let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV610").unwrap();
+        assert!(matches!(outcome, RuleOutcome::MeasuredZero),
+            "SandboxModes 有覆盖时 SV610 不该因为 ApprovalDecisions 缺覆盖变成 Unavailable");
+    }
+
+    #[test]
+    fn rule_outcomes_json_shape_for_each_status() {
+        let cov = measured_coverage(Signal::ToolCalls, 1);
+        let findings = vec![json!({"rule": "SV601"})];
+        let json_val = rule_outcomes_json(&rule_outcomes(&findings, &cov));
+        assert_eq!(json_val["SV601"], json!({"status": "findings", "count": 1}));
+        assert_eq!(json_val["SV602"], json!({"status": "measured_zero"}));
+        let unavailable = &json_val["SV609"];
+        assert_eq!(unavailable["status"], json!("unavailable"));
+        assert_eq!(unavailable["missing"], json!(["ApprovalDecisions"]));
     }
 
     #[test]

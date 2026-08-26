@@ -39,7 +39,7 @@ from skill_vitals.usage import context_composition, hour_buckets, request_metric
 from skill_vitals.compaction import compaction_events  # noqa: E402
 from skill_vitals.waste import detect_duplicate_tool_results, detect_failure_run_waste, detect_structural_waste  # noqa: E402
 from skill_vitals.util import est_tokens  # noqa: E402
-from skill_vitals.behavior import match_behavior  # noqa: E402
+from skill_vitals.behavior import match_behavior, rule_outcomes  # noqa: E402
 from skill_vitals.trajectory import match_trajectory  # noqa: E402
 from skill_vitals.skill import skill_invocations  # noqa: E402
 from skill_vitals.duration import (  # noqa: E402
@@ -707,6 +707,52 @@ class TestFindingCoords(unittest.TestCase):
         self.assertTrue(traj, "fixture 应至少产出一条 SV611")
         behav = match_behavior(self._events())
         self.assertEqual(list(traj[0].keys()), list(behav[0].keys()))
+
+
+class TestRuleOutcomes(unittest.TestCase):
+    """P3 group①（docs/RUNTIME_EVIDENCE_CONTRACT.md §10）：SV601–610 的三态
+    结果。Rust 侧 `behavior.rs::rule_outcomes` 的测试对齐——同一批断言。"""
+
+    def _ev(self, etype, seq, data):
+        return {"type": etype, "seq": seq, "time": 1000 + seq, "data": data}
+
+    def test_each_rule_is_unavailable_when_its_required_signal_has_zero_coverage(self):
+        outcomes = rule_outcomes([], [])
+        expected_missing = {
+            "SV601": "ToolCalls", "SV602": "ToolCalls", "SV603": "ToolCalls",
+            "SV604": "ToolCalls", "SV605": "ToolCalls", "SV606": "ToolCalls",
+            "SV607": "ToolResults", "SV608": "ToolResults",
+            "SV609": "ApprovalDecisions", "SV610": "SandboxModes",
+        }
+        for code, signal in expected_missing.items():
+            self.assertEqual(outcomes[code]["status"], "unavailable")
+            self.assertIn(signal, outcomes[code]["missing"])
+
+    def test_measured_zero_is_distinct_from_unavailable_for_the_same_rule(self):
+        events = [self._ev("tool/call", 1, {"name": "bash", "arguments": "echo hi"})]
+        outcomes = rule_outcomes([], events)
+        self.assertEqual(outcomes["SV601"], {"status": "measured_zero"})
+
+    def test_findings_outcome_carries_the_count_for_that_rule_only(self):
+        events = [self._ev("tool/call", 1, {"name": "bash", "arguments": "rm -rf /x"})]
+        findings = [{"rule": "SV601", "severity": "critical"}]
+        outcomes = rule_outcomes(findings, events)
+        self.assertEqual(outcomes["SV601"], {"status": "findings", "count": 1})
+        # SV601 的 finding 不该被算进 SV602 的 outcome。
+        self.assertEqual(outcomes["SV602"], {"status": "measured_zero"})
+
+    def test_sv610_treats_approval_decisions_as_enhances_not_requires(self):
+        events = [self._ev("sandbox/mode", 1, {"mode": "danger-full-access"})]
+        outcomes = rule_outcomes([], events)
+        self.assertEqual(outcomes["SV610"], {"status": "measured_zero"},
+                         "SandboxModes 有覆盖时 SV610 不该因为 ApprovalDecisions 缺覆盖变成 unavailable")
+
+    def test_approval_asked_alone_counts_toward_approval_decisions(self):
+        """回归测试：只问过(approval/asked)、没等到 approval/decided——
+        与 Rust dsh_evidence.rs 这次一起修的同一个 bug 对齐。"""
+        events = [self._ev("approval/asked", 1, {"id": "a1", "toolName": "bash"})]
+        outcomes = rule_outcomes([], events)
+        self.assertEqual(outcomes["SV609"], {"status": "measured_zero"})
 
 
 class TestContextComposition(unittest.TestCase):

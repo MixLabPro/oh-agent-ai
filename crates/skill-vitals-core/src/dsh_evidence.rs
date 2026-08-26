@@ -80,7 +80,14 @@ fn derive_coverage(execution_events: &[Value], usage_events: &[Value]) -> (Signa
     add(&mut signals, &mut coverage, Signal::ToolResults, measured(count_types(execution_events, &["tool/result"])));
     add(&mut signals, &mut coverage, Signal::TurnBoundaries, measured(count_types(execution_events, &["turn/start", "turn/end"])));
     add(&mut signals, &mut coverage, Signal::StepBoundaries, measured(count_types(execution_events, &["step/start", "step/end"])));
-    add(&mut signals, &mut coverage, Signal::ApprovalDecisions, measured(count_types(execution_events, &["approval/decided"])));
+    // approval/asked 和 approval/decided 是同一个「问了 → 给了结果」生命周期
+    // 的两端——P3 group① 发现的真 bug：这里之前只数 decided,漏了 asked,
+    // 导致一个只问过、还没等到 approval/decided 就结束的会话(真实存在,
+    // 比如会话中途中断)被判定成 ApprovalDecisions 全零覆盖(unavailable),
+    // 但日志里明明有 approval/asked 这条证据。
+    add(&mut signals, &mut coverage, Signal::ApprovalDecisions, measured(count_types(
+        execution_events, &["approval/asked", "approval/decided"],
+    )));
     // ApprovalPolicy 和 SandboxModes 目前都只能从 `sandbox/mode` 反推——DSH
     // 日志里没有把"策略"和"当前模式"分成两类事件,§13 对这两行给的都是
     // measured,共用同一个计数源如实反映这一点,不是重复计错。
@@ -215,6 +222,16 @@ mod tests {
         assert!(!evidence.canonical.signals.contains(Signal::Hooks),
             "没有 hook/* 事件时 Hooks 不应进 SignalSet");
         assert_eq!(evidence.canonical.coverage.get(Signal::Hooks), CoverageCounts::default());
+    }
+
+    #[test]
+    fn approval_asked_counts_toward_approval_decisions_signal() {
+        // 回归测试:P3 group① 发现——只问过(approval/asked)但会话在等到
+        // approval/decided 之前就结束,之前会被错判成 ApprovalDecisions
+        // 全零覆盖(unavailable),明明日志里有证据。
+        let evidence = build_dsh_evidence(vec![ev("approval/asked")], vec![], None, "s1".to_string());
+        assert_eq!(evidence.canonical.coverage.get(Signal::ApprovalDecisions).measured, 1);
+        assert!(evidence.canonical.signals.contains(Signal::ApprovalDecisions));
     }
 
     #[test]

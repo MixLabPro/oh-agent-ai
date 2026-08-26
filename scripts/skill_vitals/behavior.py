@@ -342,6 +342,77 @@ RULES = [
 ]
 
 
+# P3 group①（docs/RUNTIME_EVIDENCE_CONTRACT.md §10）：SV601–610 对信号的
+# 依赖声明。从每条 `_detect_svNNN` **实际读什么事件类型**倒推出来——不是从
+# §13 矩阵的列名猜的：SV604/605 表面上像该对应 FileMutations，但它们真正读
+# 的是 tool/call，所以是 ToolCalls。SV610 单靠 sandbox/mode 就能出一条
+# finding，所以 ApprovalDecisions 只是 enhances，不是 requires（不在
+# requires 元组里就是 enhances——本文件不做完整 19 信号的 Coverage 模型，
+# 只镜像 Rust crates/skill-vitals-core/src/dsh_evidence.rs 里这四个信号）。
+# 与 Rust behavior.rs::rule_specs 逐条对齐，改一边要改另一边。
+RULE_REQUIRES = {
+    "SV601": ("ToolCalls",), "SV602": ("ToolCalls",), "SV603": ("ToolCalls",),
+    "SV604": ("ToolCalls",), "SV605": ("ToolCalls",), "SV606": ("ToolCalls",),
+    "SV607": ("ToolResults",), "SV608": ("ToolResults",),
+    "SV609": ("ApprovalDecisions",), "SV610": ("SandboxModes",),
+}
+
+# 事件 type → 计入哪个信号的覆盖计数。approval/asked 和 approval/decided 是
+# 同一个"问了→给了结果"生命周期的两端，都算 ApprovalDecisions 的证据——与
+# Rust dsh_evidence.rs 这次一起修的 bug 对齐（之前 Rust 那边只数了 decided，
+# 漏了 asked）。
+_SIGNAL_EVENT_TYPES = {
+    "ToolCalls": TOOL_CALL_TYPES,
+    "ToolResults": ("tool/result",),
+    "ApprovalDecisions": ("approval/asked", "approval/decided"),
+    "SandboxModes": ("sandbox/mode",),
+}
+
+
+def _signal_coverage(events):
+    """事件流 → SV601–610 用到的四个信号各自的证据计数（镜像 Rust
+    dsh_evidence.rs::derive_coverage，只取这四个信号，不是完整 19 个）。"""
+    counts = {name: 0 for name in _SIGNAL_EVENT_TYPES}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type")
+        for name, types in _SIGNAL_EVENT_TYPES.items():
+            if etype in types:
+                counts[name] += 1
+    return counts
+
+
+def rule_outcomes(findings, events):
+    """`findings`（已经算好、不改）+ `events` → 每条规则的三态结果
+    （§10：N findings / measured-zero / unavailable），JSON-ready 字典。
+    与 Rust `behavior.rs::rule_outcomes` + `rule_outcomes_json` 逐字节对齐。
+
+    `events` 必须是**分叉之后**的事件（调用方负责先 `post_fork`）——覆盖率
+    不能算进分叉前的历史,否则一个信号的证据全部落在分叉前会被误判成"有
+    覆盖",而 findings 从这些分叉前事件里从来没被计过数（match_behavior 内部
+    自己会 post_fork，但覆盖率是这里单独算的，两边必须用同一批"审计范围内"
+    的事件，不能算错口径）。
+    """
+    coverage = _signal_coverage(events)
+    by_rule = {}
+    for code, requires in RULE_REQUIRES.items():
+        missing = [s for s in requires if coverage.get(s, 0) == 0]
+        if missing:
+            by_rule[code] = {
+                "status": "unavailable",
+                "missing": missing,
+                "reason": "no evidence for required signal(s) in this session",
+            }
+            continue
+        matched = [f for f in findings if f.get("rule") == code]
+        if matched:
+            by_rule[code] = {"status": "findings", "count": len(matched)}
+        else:
+            by_rule[code] = {"status": "measured_zero"}
+    return by_rule
+
+
 def match_behavior(events, workspace_root=None):
     """遍历事件流，命中即产出一条 Behavior Finding（§5.3 规则引擎层的字段）。
 
@@ -459,7 +530,13 @@ def audit_session_log(path):
         "approvals": approval_latencies(events),
         "hooks": hook_executions(events),
     }
-    return (findings, usage, requests, context, compaction, waste, pre_fork, subagents, skill, duration)
+    # P3 group①：覆盖率必须算在分叉之后的事件上——match_behavior 内部自己会
+    # post_fork，这里单独再 post_fork 一次（幂等，见 util.post_fork）算覆盖率，
+    # 不能直接用 events（分叉前）算，否则证据全部落在分叉前的信号会被误判成
+    # "有覆盖"。与 Rust src/behavior.rs 那边同一个理由、同一个修法。
+    outcomes = rule_outcomes(findings, post_fork(events))
+    return (findings, usage, requests, context, compaction, waste, pre_fork, subagents, skill,
+            duration, outcomes)
 
 
 # 行为审计的闸门阈值语义，与 doctor.gate() 一致：critical/warning/info 三级，

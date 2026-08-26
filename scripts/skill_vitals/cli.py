@@ -457,14 +457,14 @@ def _main():
             print("session log unavailable: unreadable, malformed, or schema mismatch",
                   file=sys.stderr)
             sys.exit(2)
-        findings, usage, requests, context, compaction, waste, pre_fork, subagents, skill, duration = audit
+        (findings, usage, requests, context, compaction, waste, pre_fork, subagents, skill,
+         duration, rule_outcomes) = audit
         if args.json:
-            # `--json` 输出十二个键（这行注释原来写"九个"，早就跟实际字段数
-            # 脱节了——subagents/skill/duration 陆续加进来时没人回头改这一句，
-            # 这次顺手改成准确的数字，跟 Rust 侧 main.rs 那处同样的漂移一起改）。
-            # 三份用量数据是同一批事件的三种分辨率，不是重复：usage 按模型汇总
-            # （成本），requests 保留逐请求时间序列（上下文占用曲线的数据源），
-            # context 是常驻前缀的分类估算。
+            # `--json` 输出十三个键（rule_outcomes 是 P3 group① 新加的，纯
+            # 附加字段——findings 本身的产出逻辑完全没变，见 behavior.py 的
+            # rule_outcomes() 文档）。三份用量数据是同一批事件的三种分辨率，
+            # 不是重复：usage 按模型汇总（成本），requests 保留逐请求时间
+            # 序列（上下文占用曲线的数据源），context 是常驻前缀的分类估算。
             #
             # cost 不是 audit 六键之一——它读的是 usage × pricing.json，是 usage
             # 上的一次派生计算（cost.py 顶部注释：纯展示层）。cost_report 是
@@ -487,7 +487,8 @@ def _main():
                                "cost": cost, "pre_fork": pre_fork,
                                "pre_fork_cost": pre_fork_cost,
                                "subagents": subagents,
-                               "skill": skill, "duration": duration},
+                               "skill": skill, "duration": duration,
+                               "rule_outcomes": rule_outcomes},
                               ensure_ascii=False, indent=2)
             if args.json == "-":
                 print(text)
@@ -560,7 +561,8 @@ def _main():
             print("session log unavailable: unreadable, malformed, or schema mismatch",
                   file=sys.stderr)
             sys.exit(2)
-        findings, usage, requests, ctx, compaction, waste, pre_fork, subagents, skill, duration = audit
+        (findings, usage, requests, ctx, compaction, waste, pre_fork, subagents, skill,
+         duration, _rule_outcomes) = audit
         pricing = cost_module.load_pricing()
         cost = cost_module.cost_report(usage, pricing)
         if cost is None:

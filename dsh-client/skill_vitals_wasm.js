@@ -128,6 +128,41 @@ export function duration_audit(events_json) {
 }
 
 /**
+ * 成本账事件数组 → 按 (date, hour) 折叠的 token 桶。
+ *
+ * 与 `token_by_model` / `request_metrics` 同契约：JSON in / JSON out，
+ * 浏览器 tab 与 CLI 共用同一份 core 折叠。DSH 审计 tab 的日历视图读这个
+ * 投影(逐小时柱形 + 月历热力图);xbar tick 脚本**不**走 wasm(本地 shell
+ * 直接读 state/*.json)——避免每次启动 5MB wasm 二进制。
+ *
+ * 输出 schema：
+ * ```json
+ * { "buckets": [{"date", "hour", "is_peak", 8 桶字段}, ...],
+ *   "schema_version": 1, "tz_name", "tz_offset_hours", "unreported_fields" }
+ * ```
+ * @param {string} events_json
+ * @returns {string}
+ */
+export function hour_buckets(events_json) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(events_json, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.hour_buckets(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred2_0 = r0;
+        deferred2_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export3(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * 成本账事件数组 → 逐请求指标数组（会话健康时间线的数据源）。
  *
  * 与 `token_by_model` 是同一个 fold 的两个出口：那边给按模型的总数，这里给

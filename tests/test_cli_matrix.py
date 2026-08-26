@@ -312,7 +312,18 @@ class CliMatrix(unittest.TestCase):
         report = json.loads(out)
         self.assertEqual(list(report.keys()),
                          ["findings", "usage", "requests", "context", "compaction", "waste",
-                          "cost", "pre_fork", "pre_fork_cost", "subagents", "skill", "duration"])
+                          "cost", "pre_fork", "pre_fork_cost", "subagents", "skill", "duration",
+                          "rule_outcomes"])
+        # P3 group①：这份日志只有 tool/call（ToolCalls 有覆盖，SV601-606 测过），
+        # 没有 tool/result/approval/sandbox（SV607-610 的 requires 全零覆盖，
+        # 该是 unavailable，不是假装"测了是零"）。both() 已经保证 py==rs 逐
+        # 字节一致，这里额外钉住具体语义不会被悄悄改错。
+        self.assertEqual(report["rule_outcomes"]["SV601"], {"status": "measured_zero"})
+        self.assertEqual(report["rule_outcomes"]["SV605"],
+                         {"status": "findings", "count": 2})
+        for code in ("SV607", "SV608", "SV609", "SV610"):
+            self.assertEqual(report["rule_outcomes"][code]["status"], "unavailable",
+                             "%s 没有任何依赖信号的证据，应该是 unavailable" % code)
         # 没分叉 → 两个都是 None，**不是全零的 cost_report**。「没分叉」和
         # 「分叉了但上游没花钱」是两回事，展示层要能分开说。
         self.assertIsNone(report["pre_fork"])
@@ -732,7 +743,8 @@ class CliMatrix(unittest.TestCase):
         report = json.loads(out)
         self.assertEqual(list(report.keys()),
                          ["findings", "usage", "requests", "context", "compaction", "waste",
-                          "cost", "pre_fork", "pre_fork_cost", "subagents", "skill", "duration"])
+                          "cost", "pre_fork", "pre_fork_cost", "subagents", "skill", "duration",
+                          "rule_outcomes"])
 
     def test_behavior_trajectory_findings(self):
         """轨迹级检测器（SV611–614）在 behavior.jsonl 上全部命中。
