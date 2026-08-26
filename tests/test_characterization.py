@@ -40,8 +40,10 @@ from skill_vitals.usage import (  # noqa: E402
 )
 from skill_vitals.compaction import compaction_events  # noqa: E402
 from skill_vitals.waste import detect_duplicate_tool_results, detect_failure_run_waste, detect_structural_waste  # noqa: E402
-from skill_vitals.util import est_tokens  # noqa: E402
-from skill_vitals.behavior import match_behavior, rule_outcomes  # noqa: E402
+from skill_vitals.util import est_tokens, signal_coverage  # noqa: E402
+from skill_vitals.behavior import (  # noqa: E402
+    match_behavior, rule_outcomes, array_signal_status, waste_coverage,
+)
 from skill_vitals.trajectory import match_trajectory  # noqa: E402
 from skill_vitals.skill import skill_invocations  # noqa: E402
 from skill_vitals.duration import (  # noqa: E402
@@ -784,6 +786,50 @@ class TestRuleOutcomes(unittest.TestCase):
         findings = [{"rule": "SV611", "severity": "warning"}]
         outcomes = rule_outcomes(findings, events)
         self.assertEqual(outcomes["SV611"], {"status": "findings", "count": 1})
+
+
+class TestGroup5Coverage(unittest.TestCase):
+    """P3 group⑤：skill/subagent/compaction/waste 各自的信号覆盖。Rust 侧
+    `behavior.rs::array_signal_status`/`waste_coverage` 的测试对齐。"""
+
+    def _ev(self, etype, seq, data):
+        return {"type": etype, "seq": seq, "time": 1000 + seq, "data": data}
+
+    def test_array_signal_status_unavailable_when_zero_coverage(self):
+        status = array_signal_status(0, "SkillInvocations", {})
+        self.assertEqual(status["status"], "unavailable")
+        self.assertEqual(status["missing"], ["SkillInvocations"])
+
+    def test_array_signal_status_distinguishes_measured_zero_from_measured(self):
+        cov = {"SubagentSpawns": 2}
+        self.assertEqual(array_signal_status(0, "SubagentSpawns", cov), {"status": "measured_zero"})
+        self.assertEqual(array_signal_status(1, "SubagentSpawns", cov),
+                         {"status": "measured", "count": 1})
+
+    def test_waste_coverage_unavailable_only_when_both_signals_missing(self):
+        self.assertEqual(waste_coverage([], {})["status"], "unavailable")
+        cov = {"ToolResults": 1}
+        self.assertEqual(waste_coverage([], cov), {"status": "measured_zero"})
+        self.assertEqual(waste_coverage([{"a": 1}], cov), {"status": "measured", "count": 1})
+
+    def test_subagent_spawns_counted_precisely_not_by_session_header_proxy(self):
+        """回归测试：之前用"有没有 session 头"判 SubagentSpawns 覆盖率——
+        任何真实会话都有头，等于永远"有覆盖"。现在直接数
+        tool/call name=="subagent"。"""
+        no_subagent = [self._ev("session", 0, {}), self._ev("tool/call", 1, {"name": "bash"})]
+        self.assertEqual(signal_coverage(no_subagent)["SubagentSpawns"], 0)
+
+        with_subagent = [self._ev("session", 0, {}), self._ev("tool/call", 1, {"name": "subagent"})]
+        self.assertEqual(signal_coverage(with_subagent)["SubagentSpawns"], 1)
+
+    def test_skill_invocations_counts_user_message_and_tool_call_name_skill(self):
+        events = [
+            self._ev("session", 0, {}),
+            self._ev("user/message", 1, {"source": {"kind": "skill-invocation", "name": "b"}}),
+            self._ev("tool/call", 2, {"name": "skill"}),
+            self._ev("tool/call", 3, {"name": "bash"}),
+        ]
+        self.assertEqual(signal_coverage(events)["SkillInvocations"], 2)
 
 
 class TestUsageSignalStatus(unittest.TestCase):

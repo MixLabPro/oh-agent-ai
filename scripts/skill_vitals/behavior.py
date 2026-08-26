@@ -403,6 +403,39 @@ def rule_outcomes(findings, events):
     return by_rule
 
 
+def array_signal_status(count, signal, coverage):
+    """P3 group⑤（docs/RUNTIME_EVIDENCE_CONTRACT.md §17，skill / subagent /
+    compaction）：与 Rust `behavior.rs::array_signal_status` 逐字节对齐。
+    `count` 由调用方算好——`skill_invocations`/`subagent_spawns` 是裸数组，
+    但 `compaction_events` 是 `{"compactions": [...], "prunes": [...], ...}`
+    嵌套形状，硬套"当作裸数组数长度"会永远数出 0，这里不对输出 introspect
+    形状。"""
+    if coverage.get(signal, 0) == 0:
+        return {
+            "status": "unavailable",
+            "missing": [signal],
+            "reason": "no evidence for required signal(s) in this session",
+        }
+    if count == 0:
+        return {"status": "measured_zero"}
+    return {"status": "measured", "count": count}
+
+
+def waste_coverage(waste, coverage):
+    """P3 group⑤：`waste`（FR-04b 结构性浪费）不依赖单一信号——两个检测器
+    都是从 ToolCalls/ToolResults 里挑异常模式，任一有证据就不是完全测不了
+    （跟 SV613/614 同一种 OR 语义）。"""
+    if coverage.get("ToolCalls", 0) == 0 and coverage.get("ToolResults", 0) == 0:
+        return {
+            "status": "unavailable",
+            "missing": ["ToolCalls", "ToolResults"],
+            "reason": "no evidence for required signal(s) in this session",
+        }
+    if not waste:
+        return {"status": "measured_zero"}
+    return {"status": "measured", "count": len(waste)}
+
+
 def match_behavior(events, workspace_root=None):
     """遍历事件流，命中即产出一条 Behavior Finding（§5.3 规则引擎层的字段）。
 
@@ -533,8 +566,17 @@ def audit_session_log(path):
     # P3 group③：duration_coverage 用同一份 post_fork(events)——跟
     # rule_outcomes 同源（execution 事件派生的信号）。
     dur_coverage = duration_coverage(duration, post_fork(events))
+    # P3 group⑤：skill/subagent/compaction 各自对着单一信号判三态；waste 是
+    # ToolCalls/ToolResults 任一有证据即可。都用同一份 post_fork(events)。
+    cov = signal_coverage(post_fork(events))
+    skill_coverage = array_signal_status(len(skill), "SkillInvocations", cov)
+    subagents_coverage = array_signal_status(len(subagents), "SubagentSpawns", cov)
+    compaction_count = len(compaction.get("compactions") or []) + len(compaction.get("prunes") or [])
+    compaction_coverage = array_signal_status(compaction_count, "Compaction", cov)
+    waste_cov = waste_coverage(waste, cov)
     return (findings, usage, requests, context, compaction, waste, pre_fork, subagents, skill,
-            duration, outcomes, usage_coverage, dur_coverage)
+            duration, outcomes, usage_coverage, dur_coverage, skill_coverage, subagents_coverage,
+            compaction_coverage, waste_cov)
 
 
 # 行为审计的闸门阈值语义，与 doctor.gate() 一致：critical/warning/info 三级，

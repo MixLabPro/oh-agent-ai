@@ -9,7 +9,11 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-pub use skill_vitals_core::behavior::{behavior_gate, match_behavior, rule_outcomes, rule_outcomes_json};
+pub use skill_vitals_core::behavior::{
+    array_signal_status, behavior_gate, match_behavior, rule_outcomes, rule_outcomes_json,
+    waste_coverage,
+};
+use skill_vitals_core::evidence::Signal;
 
 /// 一份会话的行为审计结果：风险 findings + 按模型分桶的 token 报告（两条正交
 /// 的审计维度）。成本由 CLI 显示层（`cost.rs`）用 pricing.json 折算。
@@ -62,6 +66,14 @@ pub struct Audit {
     /// 事件但配不成对"（measured_zero）。只加不改，五个 duration.rs 函数的
     /// 配对逻辑完全没变。
     pub duration_coverage: Value,
+    /// P3 group⑤（docs/RUNTIME_EVIDENCE_CONTRACT.md §17，skill / subagent /
+    /// compaction / waste）：`skill`/`subagents`/`compaction` 各自对着一个
+    /// 单一信号（SkillInvocations/SubagentSpawns/Compaction）判三态；
+    /// `waste` 依赖 ToolCalls 或 ToolResults 任一有证据（OR，同 SV613/614）。
+    pub skill_coverage: Value,
+    pub subagents_coverage: Value,
+    pub compaction_coverage: Value,
+    pub waste_coverage: Value,
 }
 
 /// 读会话日志 → 执行事件 + 成本账事件 → (findings, usage, requests, context, compaction, waste)（端到端入口）。
@@ -149,9 +161,27 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     let duration_coverage_val = skill_vitals_core::duration::duration_coverage(
         &duration, &post_fork_evidence.canonical.coverage,
     );
+    // P3 group⑤：skill/subagent/compaction 各自对着单一信号判三态；waste
+    // 是 ToolCalls/ToolResults 任一有证据即可（同 SV613/614 的 OR 语义）。
+    // 都用 post_fork_evidence 的 coverage——跟 rule_outcomes/duration_coverage
+    // 同源、同一个"审计范围内"的理由。
+    let cov = &post_fork_evidence.canonical.coverage;
+    let skill_count = skill.as_array().map_or(0, |a| a.len());
+    let subagents_count = subagents.as_array().map_or(0, |a| a.len());
+    // compaction_events 是 {"compactions": [...], "prunes": [...], ...}
+    // 嵌套形状，不是裸数组——两个子数组的长度和才是"这份日志有多少条压缩
+    // 相关记录"，`.as_array()` 对一个 object 会拿到 None。
+    let compaction_count = compaction.get("compactions").and_then(|v| v.as_array()).map_or(0, |a| a.len())
+        + compaction.get("prunes").and_then(|v| v.as_array()).map_or(0, |a| a.len());
+    let skill_coverage_val = array_signal_status(skill_count, Signal::SkillInvocations, cov);
+    let subagents_coverage_val = array_signal_status(subagents_count, Signal::SubagentSpawns, cov);
+    let compaction_coverage_val = array_signal_status(compaction_count, Signal::Compaction, cov);
+    let waste_coverage_val = waste_coverage(&waste, cov);
     Some(Audit {
         findings, usage, requests: requests_val, context, compaction, waste, pre_fork, subagents,
         skill, duration, rule_outcomes: rule_outcomes_val, usage_coverage: usage_coverage_val,
-        duration_coverage: duration_coverage_val,
+        duration_coverage: duration_coverage_val, skill_coverage: skill_coverage_val,
+        subagents_coverage: subagents_coverage_val, compaction_coverage: compaction_coverage_val,
+        waste_coverage: waste_coverage_val,
     })
 }

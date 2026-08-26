@@ -99,18 +99,41 @@ fn derive_coverage(execution_events: &[Value], usage_events: &[Value]) -> (Signa
     )));
     add(&mut signals, &mut coverage, Signal::Hooks, measured(count_types(execution_events, &["hook/invoked", "hook/result"])));
 
-    // SubagentSpawns / SkillInvocations 不是按 type 白名单能数出来的独立
-    // 事件——前者要看 session header 的 parentSession/子会话关联
-    // （`subagent.rs::subagent_spawns` 的判定逻辑），后者挂在 user/message
-    // 的 data.source.kind 上（`skill.rs::skill_invocations`）。P2 不重新
-    // 实现这两条判定（避免出现第二份、可能跑偏的探测规则,P3 迁移规则时
-    // 直接把这两个函数的产出接进 Signal model 才是正确位置）。这里只用
-    // 「本会话是否有 session 头」做一个保守的存在性下界,标 Derived 而不是
-    // Measured——它不是真的从这些事件"测出"子代理/技能调用数,只是知道
-    // "这份日志有结构,值得看"。
-    let has_session_header = count_types(execution_events, &["session"]) > 0;
-    add(&mut signals, &mut coverage, Signal::SubagentSpawns, if has_session_header { derived(1) } else { CoverageCounts::default() });
-    add(&mut signals, &mut coverage, Signal::SkillInvocations, if has_session_header { derived(1) } else { CoverageCounts::default() });
+    // SubagentSpawns / SkillInvocations 曾经只用「本会话有没有 session
+    // 头」做覆盖率下界——P3 group⑤落地：直接数真正驱动这两个函数的字段，
+    // 不是重新实现 subagent.rs/skill.rs 的完整判定逻辑（那两个函数还要
+    // 从 tool/result 文本里抠 UUID、按 callId 配对——覆盖率只需要知道"有
+    // 没有这类证据"，不需要精确复刻最终计数）。
+    //
+    // tool/call name=="subagent" 是 subagent.rs 判定子代理启动的唯一入口
+    // （`subagent.rs` 模块注释：父日志的 tool/call name=subagent → 配
+    // tool/result 文本 "started subagent <uuid>"，这里只数前半段，够回答
+    // "这份日志里有没有派过子代理"）。
+    let subagent_calls = execution_events
+        .iter()
+        .filter(|e| {
+            e.get("type").and_then(|v| v.as_str()) == Some("tool/call")
+                && e.pointer("/data/name").and_then(|v| v.as_str()) == Some("subagent")
+        })
+        .count() as u64;
+    add(&mut signals, &mut coverage, Signal::SubagentSpawns, measured(subagent_calls));
+
+    // SkillInvocations 有两条独立路径（skill.rs 模块注释）：explicit 挂在
+    // user/message 上——dsh.rs 只在 data.source.kind=="skill-invocation"
+    // 时才把 user/message 塞进 execution_events（普通 user/message 不会
+    // 出现在这里，见 dsh.rs 的过滤逻辑与它自己的测试），所以这里出现的
+    // user/message 天生就是 skill-invocation 载体，数它不需要再判一次
+    // source.kind。model_selected 挂在 tool/call name=="skill" 上。
+    let skill_related = execution_events
+        .iter()
+        .filter(|e| {
+            let etype = e.get("type").and_then(|v| v.as_str());
+            etype == Some("user/message")
+                || (etype == Some("tool/call")
+                    && e.pointer("/data/name").and_then(|v| v.as_str()) == Some("skill"))
+        })
+        .count() as u64;
+    add(&mut signals, &mut coverage, Signal::SkillInvocations, measured(skill_related));
 
     // FileMutations：DSH 没有独立的 file/write 事件类型（不在 dsh.rs 的
     // EXECUTION_EVENT_TYPES 白名单里）。§13 判它 measured 是因为可以从
@@ -214,6 +237,39 @@ mod tests {
         assert_eq!(cov.get(Signal::ToolResults).measured, 1);
         assert!(evidence.canonical.signals.contains(Signal::ToolCalls));
         assert!(evidence.canonical.signals.contains(Signal::ToolResults));
+    }
+
+    #[test]
+    fn subagent_spawns_counted_precisely_not_by_session_header_proxy() {
+        // 回归测试：P3 group⑤ 之前用"有没有 session 头"这个粗代理判
+        // SubagentSpawns 覆盖率——任何真实会话都有头，等于永远"有覆盖"，
+        // 测不出"这份日志真的一次子代理都没派过"。现在直接数
+        // tool/call name=="subagent"。
+        let no_subagent = vec![ev("session"), ev("tool/call")];
+        let evidence = build_dsh_evidence(no_subagent, vec![], None, "s1".to_string());
+        assert!(!evidence.canonical.signals.contains(Signal::SubagentSpawns),
+            "有 session 头但没有 tool/call name==subagent，不该判 SubagentSpawns 有覆盖");
+
+        let with_subagent = vec![
+            ev("session"),
+            json!({"type": "tool/call", "seq": 1, "time": 1, "data": {"name": "subagent"}}),
+        ];
+        let evidence2 = build_dsh_evidence(with_subagent, vec![], None, "s1".to_string());
+        assert_eq!(evidence2.canonical.coverage.get(Signal::SubagentSpawns).measured, 1);
+    }
+
+    #[test]
+    fn skill_invocations_counts_user_message_and_tool_call_name_skill() {
+        let events = vec![
+            ev("session"),
+            json!({"type": "user/message", "seq": 1, "time": 1,
+                   "data": {"source": {"kind": "skill-invocation", "name": "b"}}}),
+            json!({"type": "tool/call", "seq": 2, "time": 2, "data": {"name": "skill"}}),
+            json!({"type": "tool/call", "seq": 3, "time": 3, "data": {"name": "bash"}}),
+        ];
+        let evidence = build_dsh_evidence(events, vec![], None, "s1".to_string());
+        assert_eq!(evidence.canonical.coverage.get(Signal::SkillInvocations).measured, 2,
+            "user/message(载体) + tool/call name==skill 各算一次，bash 那条不算");
     }
 
     #[test]

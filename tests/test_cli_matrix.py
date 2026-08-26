@@ -313,10 +313,16 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(list(report.keys()),
                          ["findings", "usage", "requests", "context", "compaction", "waste",
                           "cost", "pre_fork", "pre_fork_cost", "subagents", "skill", "duration",
-                          "rule_outcomes", "usage_coverage", "duration_coverage"])
+                          "rule_outcomes", "usage_coverage", "duration_coverage", "skill_coverage",
+                          "subagents_coverage", "compaction_coverage", "waste_coverage"])
         # P3 group②：这份日志完全没有 usage_events → Usage 信号零覆盖，
         # 该是 unavailable。
         self.assertEqual(report["usage_coverage"]["status"], "unavailable")
+        # P3 group⑤：没有 user/message、subagent 调用、compaction 事件 →
+        # 三路都 unavailable；waste 依赖 ToolCalls(有覆盖) → measured_zero。
+        for key in ("skill_coverage", "subagents_coverage", "compaction_coverage"):
+            self.assertEqual(report[key]["status"], "unavailable")
+        self.assertEqual(report["waste_coverage"]["status"], "measured_zero")
         # P3 group③：3 条 tool/call 没有 callId → ToolCalls 有覆盖但折出空
         # 数组 → measured_zero；没有 turn/step/approval/hook → unavailable。
         self.assertEqual(report["duration_coverage"]["tool_calls"]["status"], "measured_zero")
@@ -752,7 +758,8 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(list(report.keys()),
                          ["findings", "usage", "requests", "context", "compaction", "waste",
                           "cost", "pre_fork", "pre_fork_cost", "subagents", "skill", "duration",
-                          "rule_outcomes", "usage_coverage", "duration_coverage"])
+                          "rule_outcomes", "usage_coverage", "duration_coverage", "skill_coverage",
+                          "subagents_coverage", "compaction_coverage", "waste_coverage"])
 
     def test_behavior_trajectory_findings(self):
         """轨迹级检测器（SV611–614）在 behavior.jsonl 上全部命中。

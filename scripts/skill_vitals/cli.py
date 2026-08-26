@@ -458,14 +458,17 @@ def _main():
                   file=sys.stderr)
             sys.exit(2)
         (findings, usage, requests, context, compaction, waste, pre_fork, subagents, skill,
-         duration, rule_outcomes, usage_coverage, duration_coverage) = audit
+         duration, rule_outcomes, usage_coverage, duration_coverage, skill_coverage,
+         subagents_coverage, compaction_coverage, waste_coverage) = audit
         if args.json:
-            # `--json` 输出十五个键（rule_outcomes/usage_coverage/
-            # duration_coverage 是 P3 group①②③新加的，都是纯附加字段——
-            # findings/usage/duration 本身的产出逻辑完全没变，见 behavior.py
-            # 的对应文档）。三份用量数据是同一批事件的三种分辨率，不是重复：
-            # usage 按模型汇总（成本），requests 保留逐请求时间序列（上下文
-            # 占用曲线的数据源），context 是常驻前缀的分类估算。
+            # `--json` 输出十九个键（rule_outcomes/usage_coverage/
+            # duration_coverage/skill_coverage/subagents_coverage/
+            # compaction_coverage/waste_coverage 是 P3 group①-⑤新加的，都是
+            # 纯附加字段——findings/usage/duration 等本身的产出逻辑完全没变，
+            # 见 behavior.py 的对应文档）。三份用量数据是同一批事件的三种
+            # 分辨率，不是重复：usage 按模型汇总（成本），requests 保留逐
+            # 请求时间序列（上下文占用曲线的数据源），context 是常驻前缀的
+            # 分类估算。
             #
             # cost 不是 audit 六键之一——它读的是 usage × pricing.json，是 usage
             # 上的一次派生计算（cost.py 顶部注释：纯展示层）。cost_report 是
@@ -491,7 +494,11 @@ def _main():
                                "skill": skill, "duration": duration,
                                "rule_outcomes": rule_outcomes,
                                "usage_coverage": usage_coverage,
-                               "duration_coverage": duration_coverage},
+                               "duration_coverage": duration_coverage,
+                               "skill_coverage": skill_coverage,
+                               "subagents_coverage": subagents_coverage,
+                               "compaction_coverage": compaction_coverage,
+                               "waste_coverage": waste_coverage},
                               ensure_ascii=False, indent=2)
             if args.json == "-":
                 print(text)
@@ -565,7 +572,8 @@ def _main():
                   file=sys.stderr)
             sys.exit(2)
         (findings, usage, requests, ctx, compaction, waste, pre_fork, subagents, skill,
-         duration, _rule_outcomes, _usage_coverage, _duration_coverage) = audit
+         duration, _rule_outcomes, _usage_coverage, _duration_coverage, _skill_coverage,
+         _subagents_coverage, _compaction_coverage, _waste_coverage) = audit
         pricing = cost_module.load_pricing()
         cost = cost_module.cost_report(usage, pricing)
         if cost is None:

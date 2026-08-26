@@ -1310,7 +1310,7 @@ behaviour is the golden corpus, and the golden corpus speaks only DSH.
 | **P0** | This document, plus the §13 matrix as a checked-in baseline | Matrix committed; it *is* the test baseline |
 | **P1 ✅** | `evidence` module in `skill-vitals-core`: `CanonicalSession`, `Signal`, `Observed<T>`, `Provenance`, `CoverageCounts`, `RuleSpec`, `RuleOutcome` | Zero behaviour change — nothing consumes it yet. Landed in `crates/skill-vitals-core/src/evidence.rs`: all §2–§12 types plus `AggregateProvenance::for_window`, `CoverageCounts`/`Coverage` ratios, and the §12 no-host-identifier self-check, 12 unit tests. 15/15 goldens byte-identical before/after (nothing calls it yet) |
 | **P2 ✅** | `crates/skill-vitals-core/src/dsh_evidence.rs`: a plain function (`build_dsh_evidence`, **not a trait** — see `CanonicalSession`'s own doc comment and `ARCHITECTURE.md` §4.2) that folds `src/dsh.rs`'s already-extracted `execution_events`/`usage_events` into a `CanonicalSession` (Signal/Coverage counted per §13's DSH column; the 3 rows §13 doesn't cover — `SandboxPolicy`/`UserPrompts`/`UserCorrections` — are left `Unavailable`, not fabricated), bundled with the raw events (`CanonicalSession` alone has no event-payload field); plus `reverse_project`, a temporary bridge back to today's `behavior.rs` input shape | **Byte-identical `behavior --json` output**, proven three ways: `cargo test` (154 core + 137 binary), `SKILL_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (the real Python↔Rust differential — `golden/*.json` covers the unrelated `scan` command, not this), and a manual before/after diff on `fixtures/dsh/behavior.jsonl`. `reverse_project` is deleted when P3 completes |
-| **P3 (①②③④ ✅ · ⑤ pending)** | Migrate rules one family per PR: read Signals, declare `requires`, goldens unchanged. Order: ① command/path (SV601–610) ② cost fold ③ duration ④ trajectory ⑤ skill / subagent / compaction / waste | See §17.1a for what actually landed per group. `reverse_project` stays until all 5 groups complete |
+| **P3 ✅ (all 5 groups)** | Migrate rules one family per PR: read Signals, declare `requires`, goldens unchanged. Order: ① command/path (SV601–610) ② cost fold ③ duration ④ trajectory ⑤ skill / subagent / compaction / waste | See §17.1a for what actually landed per group. `reverse_project` is retained (not deleted) — see note at the end of §17.1a |
 | **P4** | Codex adapter | Chosen second not for coverage breadth — §14.1 shows it lacks tool-call duration, approvals, and hooks — but because it is the only host that emits **two incompatible formats without declaring which**. If the model absorbs both Codex modes without structural change, it is sound |
 | **P4.5** | Schema-drift sentinel for `RolloutItem` (§14.4) | CI fails on upstream persistence-policy change |
 | **P5** | Claude Code adapter | First real use of `Provenance::Derived` (turn boundaries) and `Linearization` (message tree) |
@@ -1382,7 +1382,42 @@ a legitimate `MeasuredZero` ("turns exist, genuinely zero tool calls to
 loop"), not `Unavailable` — so SV612's `requires` is `TurnBoundaries` alone,
 with `ToolCalls` as `enhances`, mirroring SV610's pattern from group ①.
 
-All four groups verified the same way: `cargo test`, `cargo clippy -D
+**⑤ skill / subagent / compaction / waste ✅**: `skill_invocations`/
+`subagent_spawns`/`compaction_events` each gate on one signal
+(`SkillInvocations`/`SubagentSpawns`/`Compaction`); `waste` gates on
+`ToolCalls` OR `ToolResults` (same OR pattern as SV613/614/group③'s waste
+analogue). One real fix made along the way, not just plumbing: P2's
+`dsh_evidence.rs` had approximated `SubagentSpawns`/`SkillInvocations`
+coverage as "does this session have *any* header at all" (always true, so
+effectively always "covered" — exactly the P2 comment's own TODO: "P3 迁移
+规则时直接把这两个函数的产出接进 Signal model 才是正确位置"). Replaced
+with precise counting: `SubagentSpawns` = `tool/call` events with
+`data.name == "subagent"`; `SkillInvocations` = `user/message` events
+(guaranteed to only be skill-invocation carriers by construction — `dsh.rs`
+never lets a plain `user/message` into `execution_events`) plus `tool/call`
+with `data.name == "skill"`. Also caught before it shipped: `compaction_events`
+returns a nested `{compactions, prunes, ...}` object, not a bare array —
+treating it like one would have silently reported `measured_zero` always,
+regardless of real content.
+
+**Note on `reverse_project` (not deleted, contrary to the original P2 row's
+"deleted when P3 completes")**: all 5 groups land coverage/outcome
+annotations *alongside* the existing `findings`/`usage`/`duration`/etc.
+outputs — `detect_svNNN`, `token_by_model`, the duration pairing functions,
+and `skill_invocations`/`subagent_spawns`/`compaction_events`/`waste`
+detectors all still consume the legacy raw-event shape that `reverse_project`
+reconstructs, not `CanonicalSession`/`Signal`-typed data directly. Every
+group here chose the smaller, safer interpretation of "read Signals" (an
+additive coverage check reusing already-computed output) over rewriting the
+detection internals to iterate `Signal`-typed structures — the existing test
+suite (hit/miss tests, byte-for-byte parity tests, CLI differentials) pins
+the current event-consuming implementations directly, and rewriting them
+was judged out of proportion to the value for a single-host (DSH) system.
+Consequently `reverse_project` is retained; deleting it would require a
+genuinely different, larger effort (rewriting the detectors themselves), not
+covered by this P3 pass.
+
+All five groups verified the same way: `cargo test`, `cargo clippy -D
 warnings`, full Python suite, `SKILL_VITALS_BIN=<rust> python3 -m unittest
 tests.test_cli_matrix` (byte-identical new keys both languages), wasm
 rebuilt + `dsh-client`'s full `npm test` (including `verify-host.mjs`) green

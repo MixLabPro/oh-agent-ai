@@ -517,6 +517,54 @@ pub fn rule_outcomes_json(outcomes: &[(&'static str, RuleOutcome)]) -> Value {
     Value::Object(map)
 }
 
+/// P3 group⑤（docs/RUNTIME_EVIDENCE_CONTRACT.md §17，skill / subagent /
+/// compaction / waste）：一路数组输出（`skill_invocations`/`subagent_spawns`/
+/// `compaction_events` 各自一个）对着单一信号的覆盖判三态——跟
+/// `duration::duration_coverage` 同一种情况：`[]` 现在能分清"没有这类
+/// 事件"（unavailable）还是"有事件但没命中"（measured_zero）。
+/// `count` 是调用方算好的"这份输出里有多少条记录"——不在这里对 `Value`
+/// introspect 形状：`skill_invocations`/`subagent_spawns` 是裸数组，但
+/// `compaction_events` 是 `{"compactions": [...], "prunes": [...], ...}`
+/// 嵌套形状，硬套"当作裸数组数长度"会永远数出 0（真 bug，写这个函数时
+/// 差点犯——`compaction.as_array()` 对一个 object 返回 `None`）。
+pub fn array_signal_status(count: usize, signal: Signal, coverage: &Coverage) -> Value {
+    if coverage.get(signal).total() == 0 {
+        return json!({
+            "status": "unavailable",
+            "missing": [format!("{signal:?}")],
+            "reason": "no evidence for required signal(s) in this session",
+        });
+    }
+    if count == 0 {
+        json!({"status": "measured_zero"})
+    } else {
+        json!({"status": "measured", "count": count})
+    }
+}
+
+/// P3 group⑤：`waste`（FR-04b 结构性浪费）不依赖单一信号——
+/// `detect_duplicate_tool_results`/`detect_failure_run_waste` 都是从
+/// ToolCalls/ToolResults 里挑异常模式，两个信号任一有证据这条就不是完全
+/// 测不了（跟 SV613/614 同一种 OR 语义，见 `OR_REQUIRES_CODES`），不是
+/// `array_signal_status` 那种单信号情况，所以单独写。
+pub fn waste_coverage(waste: &Value, coverage: &Coverage) -> Value {
+    let tool_calls = coverage.get(Signal::ToolCalls).total();
+    let tool_results = coverage.get(Signal::ToolResults).total();
+    if tool_calls == 0 && tool_results == 0 {
+        return json!({
+            "status": "unavailable",
+            "missing": ["ToolCalls", "ToolResults"],
+            "reason": "no evidence for required signal(s) in this session",
+        });
+    }
+    let count = waste.as_array().map_or(0, |a| a.len());
+    if count == 0 {
+        json!({"status": "measured_zero"})
+    } else {
+        json!({"status": "measured", "count": count})
+    }
+}
+
 /// 遍历事件流，命中即产出一条 Behavior Finding（§5.3 规则引擎层的字段）。
 ///
 /// 纯函数、确定性：同一事件流重放结果逐字节一致。非 object 的条目跳过；
@@ -1097,6 +1145,34 @@ mod tests {
         let unavailable = &json_val["SV609"];
         assert_eq!(unavailable["status"], json!("unavailable"));
         assert_eq!(unavailable["missing"], json!(["ApprovalDecisions"]));
+    }
+
+    #[test]
+    fn array_signal_status_unavailable_when_signal_has_zero_coverage() {
+        let cov = Coverage::new();
+        let status = array_signal_status(0, Signal::SkillInvocations, &cov);
+        assert_eq!(status["status"], json!("unavailable"));
+        assert_eq!(status["missing"], json!(["SkillInvocations"]));
+    }
+
+    #[test]
+    fn array_signal_status_distinguishes_measured_zero_from_measured() {
+        let cov = measured_coverage(Signal::SubagentSpawns, 2);
+        assert_eq!(array_signal_status(0, Signal::SubagentSpawns, &cov),
+                   json!({"status": "measured_zero"}));
+        assert_eq!(array_signal_status(1, Signal::SubagentSpawns, &cov),
+                   json!({"status": "measured", "count": 1}));
+    }
+
+    #[test]
+    fn waste_coverage_is_unavailable_only_when_both_toolcalls_and_toolresults_are_missing() {
+        let empty = Coverage::new();
+        assert_eq!(waste_coverage(&json!([]), &empty)["status"], json!("unavailable"));
+
+        let cov = measured_coverage(Signal::ToolResults, 1);
+        assert_eq!(waste_coverage(&json!([]), &cov), json!({"status": "measured_zero"}),
+                   "只有 ToolResults 有覆盖时 waste 不该判 unavailable");
+        assert_eq!(waste_coverage(&json!([{"a": 1}]), &cov), json!({"status": "measured", "count": 1}));
     }
 
     #[test]

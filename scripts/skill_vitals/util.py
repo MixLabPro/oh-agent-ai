@@ -22,18 +22,39 @@ SIGNAL_EVENT_TYPES = {
     "TurnBoundaries": ("turn/start", "turn/end"),
     "StepBoundaries": ("step/start", "step/end"),
     "Hooks": ("hook/invoked", "hook/result"),
+    "Compaction": ("compaction/start", "compaction/summary", "compaction/end", "compaction/prune"),
+}
+
+# SubagentSpawns / SkillInvocations 不是按 type 白名单能数出来的独立事件——
+# 前者要看 tool/call 的 data.name=="subagent"（subagent.rs 判定子代理启动
+# 的唯一入口），后者是两条独立路径的并集：explicit 挂在 user/message 上
+# （dsh.rs 只在 data.source.kind=="skill-invocation" 时才把 user/message
+# 塞进 execution_events，普通 user/message 不会出现在这里，数它不需要再判
+# 一次 source.kind）、model_selected 挂在 tool/call name=="skill" 上。
+# 只镜像"有没有这类证据"，不重新实现 subagent.py/skill.py 的完整判定逻辑
+# （那两个还要从 tool/result 文本里抠 UUID、按 callId 配对）。与 Rust
+# dsh_evidence.rs 这次一起改的逻辑逐字节对齐。
+_FIELD_BASED_SIGNALS = {
+    "SubagentSpawns": lambda e: e.get("type") == "tool/call" and (e.get("data") or {}).get("name") == "subagent",
+    "SkillInvocations": lambda e: e.get("type") == "user/message" or (
+        e.get("type") == "tool/call" and (e.get("data") or {}).get("name") == "skill"),
 }
 
 
 def signal_coverage(events):
     """事件流 → 各信号的证据计数（镜像 Rust
-    dsh_evidence.rs::derive_coverage，只取 `SIGNAL_EVENT_TYPES` 里这几个，
-    不是完整 19 个）。调用方负责先 `post_fork`——覆盖率不能算进分叉前的
-    历史,否则一个信号的证据全部落在分叉前会被误判成"有覆盖"。"""
+    dsh_evidence.rs::derive_coverage，只取 `SIGNAL_EVENT_TYPES` 里这几个 +
+    `_FIELD_BASED_SIGNALS`，不是完整 19 个）。调用方负责先 `post_fork`——
+    覆盖率不能算进分叉前的历史,否则一个信号的证据全部落在分叉前会被误判
+    成"有覆盖"。"""
     counts = {name: 0 for name in SIGNAL_EVENT_TYPES}
+    counts.update({name: 0 for name in _FIELD_BASED_SIGNALS})
     for event in events:
         if not isinstance(event, dict):
             continue
+        for name, predicate in _FIELD_BASED_SIGNALS.items():
+            if predicate(event):
+                counts[name] += 1
         etype = event.get("type")
         for name, types in SIGNAL_EVENT_TYPES.items():
             if etype in types:
