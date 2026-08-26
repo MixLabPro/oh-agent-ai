@@ -7,6 +7,7 @@ state 文件存在 + 关键字段存在 + 数字与单 session 审计可对账�
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -183,6 +184,43 @@ class TestCalendarCli(unittest.TestCase):
                                    "模板应该有几 KB,不是空文件")
                 # 同目录应 cp 一份 today.json
                 self.assertTrue((Path(td) / "today.json").is_file())
+
+    def test_calendar_inlines_accurate_per_model_cost(self):
+        """日历页内联数据必须带上按真实模型精算的 cost/accurate_cost 字段——
+        不能只让 budget show/xbar 菜单栏精确、日历页还留在 flash-only 近似
+        （fixtures/dsh/behavior.jsonl 混了 flash 和 pro,两者价差 3 倍,足以
+        暴露这个字段缺失）。sidecar 副本（file picker fallback 用）必须保持
+        state 文件原始字节，不带这个额外字段——那份要跟 state.py 的 schema
+        契约字面一致。"""
+        with _TmpHome() as h:
+            r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with tempfile.TemporaryDirectory() as td:
+                out = Path(td) / "cal.html"
+                r = _run(["calendar", "--source", "today", "-o", str(out)], env=h.env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                html = out.read_text(encoding="utf-8")
+
+                m = re.search(
+                    r'<script id="skill-vitals-data-today"[^>]*>(.*?)</script>',
+                    html, re.DOTALL)
+                self.assertIsNotNone(m, "today 内联数据块必须存在")
+                inlined = json.loads(m.group(1))
+                self.assertIn("accurate_cost", inlined,
+                              "today 视图应该有顶层 accurate_cost 字段")
+                self.assertGreater(inlined["accurate_cost"]["total"], 0)
+
+                pricing = cost_module.load_pricing()
+                expected = cost_module.cost_report(
+                    {"by_model": inlined["by_model"]}, pricing)
+                self.assertAlmostEqual(
+                    inlined["accurate_cost"]["total"], expected["total"], places=6,
+                    msg="日历内联的精算总价必须与 cost_report 直接算出来的一致")
+
+                # sidecar 副本必须是原始字节——不带 accurate_cost
+                sidecar = json.loads((Path(td) / "today.json").read_text())
+                self.assertNotIn("accurate_cost", sidecar,
+                                  "sidecar 是 state.py 契约文件，不该带展示层附加字段")
 
 
 class TestUsageHourBucketsReconcile(unittest.TestCase):

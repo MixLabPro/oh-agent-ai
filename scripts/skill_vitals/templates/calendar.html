@@ -61,12 +61,17 @@
 
     cost 公式硬编码了 deepseek-v4-flash 的 peak/off-peak 价（1.5/3.0/4.5/9.0
     元/百万 token + 0.05/0.10 缓存命中 + 0 缓存写入），与 state.py 不矛盾——
-    state.py 只折叠 token 数不算价。本模板的价公式是「展示层」副本：与
+    state.py 只折叠 token 数不算价。**这是 fallback 近似,不是权威路径**：
+    `_render_calendar_html`（cli.py）在内联数据时,会用真正的
+    `cost.py::cost_report` 给带 `by_model` 字段的桶/日子（见 state.py 的
+    `merge_today`/`merge_month`）精算一份 `cost`/`accurate_cost` 一并塞进
+    JSON——JS 这份硬编码公式只在那个字段不存在时（这个功能上线前的旧
+    数据）才会被用到。若价目表（pricing.json）改了，精算路径自动跟着走；
+    只有这份 fallback 公式需要手动同步（与
     scripts/skill_vitals/cost.py::_price + crates/skill-vitals-core/src/cost.rs
-    平行。若价目表（pricing.json）改了，state.py 不动；本模板与
-    dsh-client/src/host/index.ts::costReportFrom 三处都得改。
-    tests/test_pricing_lockstep.py 守价目表源头一致性，但展示层副本目前没
-    自动测——这是已知的单点：M4 仅做渲染，**不在这里做权威计价**。
+    + dsh-client/src/host/index.ts::costReportFrom 平行）。
+    tests/test_pricing_lockstep.py 守价目表源头一致性，fallback 副本目前没
+    自动测——这是已知的单点，接受它只是「大致近似」。
 
   ── 不用脚本渲染 ──────────────────────────────────────────────────────────
 
@@ -498,14 +503,21 @@
   }
 
   /**
-   * 估算 cost（元）——peak/off-peak 分价，与 cost.py::_price 一致。
+   * 桶/日子的 cost（元）。
    *
-   * **这是展示层副本**：state.py 不算价（只折叠 token）；本模板算价是给
-   * 用户「这一格大概多少钱」的心智模型，不与 CLI 的 cost --json 互相校验
-   * （CLI 那份权威）。若价目表改了，这里要同步改 PRICE；否则会出现
-   * 「UI 显示 ¥1.20 但 `behavior --json` 报 ¥1.35」的语义漂移。
+   * **优先用服务端精算的 `b.cost`**——`_render_calendar_html`（cli.py）
+   * 内联数据时,对带 `by_model` 字段的日子已经用真正的 `cost.py::cost_
+   * report` 按实际模型算过一遍价,直接读它就不会跟 `budget show`/xbar
+   * 菜单栏的数字对不上。**只有 `b.cost` 不存在时**（这个功能上线前的
+   * 旧数据,没有 by_model）才退回下面这份 deepseek-v4-flash 单价近似——
+   * 那是「大致近似」，不是权威值，pro 模型的日子会被低估到 1/3，用户
+   * 已经在别处（budget show/菜单栏）看得到精确数字了。
    */
   function costOf(b) {
+    if (b.cost && typeof b.cost.total === "number") {
+      var peak = b.cost.peak_total || 0;
+      return { total: b.cost.total, peak: peak, off: b.cost.total - peak };
+    }
     var f = getFields(b);
     var up = f.pIn / M, cp = f.pCac / M, op = f.pOut / M, wp = f.pWrt / M;
     var uo = (f.inUnc - f.pIn) / M;
@@ -706,18 +718,25 @@
     var buckets = (payload && payload.buckets) || {};
     var totalTok = 0, totalCost = 0, peakTok = 0;
 
-    // 先聚合 summary
+    // 先聚合 summary。today.json 的 by_model 是整天一个总量,没法按小时
+    // 拆分精算,所以精确总额（payload.accurate_cost,见 cli.py::
+    // _augment_calendar_cost）只覆盖「今日估算成本」这一张卡片；per-hour
+    // 小时格子/tooltip 仍用 costOf() 的近似公式——不假装有数据不具备的
+    // 精度。
+    var hasAccurateTotal = payload && payload.accurate_cost
+      && typeof payload.accurate_cost.total === "number";
     Object.keys(buckets).forEach(function(k) {
       var b = buckets[k];
       totalTok += totalTokens(b);
-      var c = costOf(b);
-      totalCost += c.total;
+      if (!hasAccurateTotal) totalCost += costOf(b).total;
       if (isPeak(b)) peakTok += totalTokens(b);
     });
+    if (hasAccurateTotal) totalCost = payload.accurate_cost.total;
 
     renderSummary([
       { label: "今日总 token", value: n(totalTok), note: "" },
-      { label: "今日估算成本", value: money(totalCost), note: "deepseek-v4-flash 默认价" },
+      { label: "今日估算成本", value: money(totalCost),
+        note: hasAccurateTotal ? "按实际模型精算" : "deepseek-v4-flash 默认价（近似）" },
       {
         label: "peak 时段占比",
         value: totalTok === 0 ? "—" : ((peakTok/totalTok*100).toFixed(1) + "%"),
@@ -793,18 +812,27 @@
     var month = (payload && payload.month) || "";
     var totalTok = 0, totalCost = 0;
     var peakDays = 0, activeDays = 0;
+    // 逐天判断精算/近似——有的月份新旧数据并存(这个功能上线前的历史日
+    // 没有 by_model,退回近似;上线后的日子精算),costOf() 已经按每天各自
+    // 有没有 b.cost 决定,这里只汇总一下用什么措辞标注给用户看。
+    var anyApprox = false, anyExact = false;
 
     Object.keys(days).forEach(function(k) {
       var b = days[k];
       totalTok += totalTokens(b);
       totalCost += costOf(b).total;
+      if (b.cost && typeof b.cost.total === "number") anyExact = true;
+      else if (totalTokens(b) > 0) anyApprox = true;
       if (isPeak(b)) peakDays++;
       if (totalTokens(b) > 0) activeDays++;
     });
+    var costNote = !anyExact ? "deepseek-v4-flash 默认价（近似）"
+                 : !anyApprox ? "按实际模型精算"
+                 : "部分按模型精算，历史日为近似";
 
     renderSummary([
       { label: "本月总 token", value: n(totalTok), note: month },
-      { label: "本月估算成本", value: money(totalCost), note: "deepseek-v4-flash 默认价" },
+      { label: "本月估算成本", value: money(totalCost), note: costNote },
       {
         label: "peak 日占比",
         value: activeDays === 0 ? "—" :

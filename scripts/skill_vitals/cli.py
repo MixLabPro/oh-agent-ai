@@ -141,6 +141,15 @@ def _render_calendar_html(output_path, default_source="month"):
     `default_source` 决定「没有 `?file=` 时默认显示哪个 tab」，通过注入
     `window.SKILL_VITALS_DEFAULT_MODE` 传给模板 JS。
 
+    内联进 `<script>` 的 JSON 不是 state 文件的原始字节——`_augment_
+    calendar_cost` 会先给有 `by_model` 的桶/日子塞一个按真实模型精算的
+    `cost` 字段（复用 `cost.py::cost_report`，不是模板自己那份
+    deepseek-v4-flash 近似），让日历页的数字能和 `budget show`/xbar
+    菜单栏对上，而不是各算各的（这正是之前那次「UI 显示 ¥1.20 但
+    behavior --json 报 ¥1.35」类漂移的根因）。写到 sidecar 副本（file
+    picker fallback 用）的还是原始字节，不带这个额外字段——那份要跟
+    state.py 的 schema 契约保持字面一致。
+
     返回 `(embedded_modes, output_path)`；`embedded_modes` 为空列表表示
     两份 state 文件都不存在，HTML 仍会写出，JS 会显示空态而不是报错。
     """
@@ -152,14 +161,23 @@ def _render_calendar_html(output_path, default_source="month"):
     out.parent.mkdir(parents=True, exist_ok=True)
 
     html = template.read_text(encoding="utf-8")
+    pricing = cost_module.load_pricing()
     embedded = []
     for mode, src_name in (("today", "today.json"), ("month", "month.json")):
         src = state_module.state_dir() / src_name
         if not src.is_file():
             continue
         json_text = src.read_text(encoding="utf-8")
+        embed_text = json_text
+        try:
+            data = json.loads(json_text)
+        except (json.JSONDecodeError, ValueError):
+            data = None
+        if isinstance(data, dict):
+            _augment_calendar_cost(mode, data, pricing)
+            embed_text = json.dumps(data)
         # JSON 里可能含 </script> —— 必须转义,否则浏览器解析到这就崩
-        json_text_safe = (json_text
+        json_text_safe = (embed_text
                           .replace("</script", "<\\/script")
                           .replace("<!--", "<\\!--"))
         inject = ("<script id=\"skill-vitals-data-%s\" type=\"application/json\">"
@@ -167,7 +185,8 @@ def _render_calendar_html(output_path, default_source="month"):
         html = html.replace("</head>", inject + "\n</head>", 1)
         # 同时把 state 文件 cp 到同目录,作为 fetch fallback 的副本——除非
         # 输出目录本来就是 state 目录本身(oneline 自动刷新的场景),那样
-        # 会变成把文件写到自己头上,纯浪费一次 I/O。
+        # 会变成把文件写到自己头上,纯浪费一次 I/O。sidecar 写的是**原始**
+        # json_text,不是带精算 cost 字段的 embed_text——见上面文档。
         sidecar = out.parent / src_name
         if sidecar.resolve() != src.resolve():
             sidecar.write_text(json_text, encoding="utf-8")
@@ -178,6 +197,47 @@ def _render_calendar_html(output_path, default_source="month"):
         % default_source, 1)
     out.write_text(html, encoding="utf-8")
     return embedded, out
+
+
+def _augment_calendar_cost(mode, data, pricing):
+    """给日历模板的内联数据塞一个按真实模型精算的 cost 字段。
+
+    模板自己那份 `costOf()` 是硬编码 deepseek-v4-flash 单价的近似（见
+    calendar.html 头部注释），pro 模型的日子会被低估到 1/3——与
+    budget.py 之前那个 bug（已在 `_price_by_model` 修过）同一个根因。
+    这里直接复用 `cost.py::cost_report`（唯一算价格的地方），不在这
+    再写一份算术，也不在 JS 里再写一份——JS 侧的公式继续留着，只是
+    降级成「没有精算数据时的近似兜底」，不是权威路径。
+
+    today.json 的 `by_model` 是**整天一个总量**，没有按小时拆分——没法
+    给 24 个小时格子分别精算，所以只在顶层塞一个 `accurate_cost` 供
+    summary 卡片用；per-hour 小时格子/tooltip 仍走旧近似，不假装有
+    数据实际不具备的精度。month.json 的 `by_model` 是**逐日**的,可以
+    给每一天单独精算,直接覆盖那一天的近似值。
+    """
+    if mode == "today":
+        by_model = data.get("by_model")
+        if by_model:
+            report = cost_module.cost_report({"by_model": by_model}, pricing)
+            if report is not None:
+                data["accurate_cost"] = {
+                    "total": report["total"],
+                    "peak_total": report["peak_total"],
+                }
+    else:
+        days = data.get("days")
+        if isinstance(days, dict):
+            for day in days.values():
+                if not isinstance(day, dict):
+                    continue
+                by_model = day.get("by_model")
+                if by_model:
+                    report = cost_module.cost_report({"by_model": by_model}, pricing)
+                    if report is not None:
+                        day["cost"] = {
+                            "total": report["total"],
+                            "peak_total": report["peak_total"],
+                        }
 
 
 def main():
