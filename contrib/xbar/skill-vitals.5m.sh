@@ -297,6 +297,16 @@ fi
 echo "---"
 
 # 3d. 操作 —— shell= 是 xbar 解析参数，参数化打开。
+# 日历 HTML 由 `oneline` 命令末尾顺手刷新到 $STATE_DIR/calendar.html
+# （固定路径，见 cli.py::_render_calendar_html）——本脚本只读不写，不
+# 知道 repo 装在哪里也没关系，直接 open 这个文件。还没跑过一次新版
+# oneline 时文件不存在，菜单项退化成一行不可点的提示，而不是点了报错。
+CALENDAR_FILE="$STATE_DIR/calendar.html"
+if [ -f "$CALENDAR_FILE" ]; then
+    echo "打开日历 | shell=/usr/bin/open \"$CALENDAR_FILE\""
+else
+    echo "打开日历：等预算数据（跑一次 oneline 后可用）"
+fi
 echo "刷新 (5m)"
 echo "打开 state 目录 | shell=/usr/bin/open \"$STATE_DIR\""
 echo "打开 docs | shell=/usr/bin/open \"https://github.com/anthropics/skill-vitals\""

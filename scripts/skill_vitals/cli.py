@@ -123,6 +123,63 @@ def _doctor_gate(out, args, auto_snapshot, baseline):
     return code
 
 
+def _render_calendar_html(output_path, default_source="month"):
+    """把 today.json / month.json 渲染成单文件日历 HTML，写到 output_path。
+
+    `calendar` 子命令与 `oneline`（每次跑完顺手刷新
+    `$STATE_DIR/calendar.html`，给 xbar「打开日历」菜单项用）共用同一份
+    逻辑——两处各写一份，字段名/转义稍有出入就会一个能打开一个打不开，
+    多一份要维护的复制代码。
+
+    两个 tab（today / month）都内联进同一个文件，各自一个
+    `<script id="skill-vitals-data-{mode}">` 块——只内联 `--source`
+    选中的那一份会导致点另一个 tab 没反应或被误判成另一种 schema 硬渲染
+    出一张空图（真实 bug，用户点 today tab 复现过）。**每个 mode 独立
+    判断有没有数据**——today.json 不存在就不内联那个块，那个 tab 落到
+    JS 的 empty-state，不影响 month 那个块正常渲染，反之亦然。
+
+    `default_source` 决定「没有 `?file=` 时默认显示哪个 tab」，通过注入
+    `window.SKILL_VITALS_DEFAULT_MODE` 传给模板 JS。
+
+    返回 `(embedded_modes, output_path)`；`embedded_modes` 为空列表表示
+    两份 state 文件都不存在，HTML 仍会写出，JS 会显示空态而不是报错。
+    """
+    template = Path(__file__).resolve().parent / "templates" / "calendar.html"
+    if not template.is_file():
+        raise FileNotFoundError(
+            "calendar template not found at %s (run M4 first)" % template)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    html = template.read_text(encoding="utf-8")
+    embedded = []
+    for mode, src_name in (("today", "today.json"), ("month", "month.json")):
+        src = state_module.state_dir() / src_name
+        if not src.is_file():
+            continue
+        json_text = src.read_text(encoding="utf-8")
+        # JSON 里可能含 </script> —— 必须转义,否则浏览器解析到这就崩
+        json_text_safe = (json_text
+                          .replace("</script", "<\\/script")
+                          .replace("<!--", "<\\!--"))
+        inject = ("<script id=\"skill-vitals-data-%s\" type=\"application/json\">"
+                   % mode + json_text_safe + "</script>")
+        html = html.replace("</head>", inject + "\n</head>", 1)
+        # 同时把 state 文件 cp 到同目录,作为 fetch fallback 的副本——除非
+        # 输出目录本来就是 state 目录本身(oneline 自动刷新的场景),那样
+        # 会变成把文件写到自己头上,纯浪费一次 I/O。
+        sidecar = out.parent / src_name
+        if sidecar.resolve() != src.resolve():
+            sidecar.write_text(json_text, encoding="utf-8")
+        embedded.append(mode)
+    html = html.replace(
+        "</head>",
+        "<script>window.SKILL_VITALS_DEFAULT_MODE = %r;</script>\n</head>"
+        % default_source, 1)
+    out.write_text(html, encoding="utf-8")
+    return embedded, out
+
+
 def main():
     """入口。**未捕获异常必须以 2 退出，不是 1。**
 
@@ -523,6 +580,16 @@ def _main():
         # today.json / month.json 已经 merge 完，evaluate() 读的是最新状态。
         alert = budget_module.evaluate()
         state_module.write_alert(alert)
+        # 顺手把日历 HTML 刷新到 $STATE_DIR/calendar.html —— xbar「打开
+        # 日历」菜单项直接 open 这个固定路径,不需要知道 repo 装在哪里
+        # （已安装的 xbar 副本本来就跟 repo 断了联系）。渲染失败(模板缺失
+        # 之类)只警告,不中断审计主路径——calendar.html 是展示层产物,
+        # 不是审计结果的一部分。
+        try:
+            _render_calendar_html(state_module.state_dir() / "calendar.html",
+                                  default_source="month")
+        except Exception as e:
+            print("warning: failed to refresh calendar.html: %s" % e, file=sys.stderr)
         # 人读输出 —— 让没装 xbar 的用户在终端也能看一眼「这一会话花了多少」。
         print("session:    %s" % summary["session_id"])
         print("duration:   %s ms" % (summary["duration_ms"] or "?"))
@@ -540,52 +607,15 @@ def _main():
         return
 
     # ──── M3 calendar handler ─────────────────────────────────────
-    # 模板在 scripts/skill_vitals/templates/calendar.html（M4 产出）。
-    # 这里只做 copy + （如启用 --inline-json）把 state 文件内容 inline 进
-    # `<script id="data">…</script>` 块；否则 HTML 用 fetch() 读，用户
-    # 需要起静态服务。
+    # 渲染逻辑在 _render_calendar_html()——oneline 每次跑完也会调它把
+    # $STATE_DIR/calendar.html 刷新一遍，供 xbar「打开日历」菜单项用，
+    # 两处共用同一份逻辑，不各写一份互相不一致。
     if getattr(args, "cmd", None) == "calendar":
-        template = Path(__file__).resolve().parent / "templates" / "calendar.html"
-        if not template.is_file():
-            print("calendar template not found at %s (run M4 first)" % template,
-                  file=sys.stderr)
+        try:
+            embedded, out = _render_calendar_html(args.output, default_source=args.source)
+        except FileNotFoundError as e:
+            print(str(e), file=sys.stderr)
             sys.exit(2)
-        out = Path(args.output)
-        out.parent.mkdir(parents=True, exist_ok=True)
-
-        # 两个 tab（today / month）都内联进同一个文件，各自一个
-        # `<script id="skill-vitals-data-{mode}">` 块——之前只内联
-        # `--source` 选中的那一份,点另一个 tab 只是换个 `?file=` 重新
-        # 加载同一份静态 HTML,内联数据没变,不是「点了没反应」就是被误判
-        # 成另一种 schema 硬渲染出一张空图（真实 bug，用户点 today tab
-        # 复现过）。**每个 mode 独立判断有没有数据**——today.json 不存在
-        # 就不内联那个块，那个 tab 落到 JS 的 empty-state，不影响 month
-        # 那个块正常渲染,反之亦然。
-        html = template.read_text(encoding="utf-8")
-        embedded = []
-        for mode, src_name in (("today", "today.json"), ("month", "month.json")):
-            src = state_module.state_dir() / src_name
-            if not src.is_file():
-                continue
-            json_text = src.read_text(encoding="utf-8")
-            # JSON 里可能含 </script> —— 必须转义,否则浏览器解析到这就崩
-            json_text_safe = (json_text
-                              .replace("</script", "<\\/script")
-                              .replace("<!--", "<\\!--"))
-            inject = ("<script id=\"skill-vitals-data-%s\" type=\"application/json\">"
-                       % mode + json_text_safe + "</script>")
-            html = html.replace("</head>", inject + "\n</head>", 1)
-            # 同时把 state 文件 cp 到同目录,作为 fetch fallback 的副本。
-            (out.parent / src_name).write_text(json_text, encoding="utf-8")
-            embedded.append(mode)
-        # --source 决定「没有 ?file= 时默认显示哪个 tab」——之前这个默认值
-        # 硬编码在模板 JS 里恒为 "today",与 --source 默认值 "month" 互相
-        # 打架,是同一个 bug 的另一半。
-        html = html.replace(
-            "</head>",
-            "<script>window.SKILL_VITALS_DEFAULT_MODE = %r;</script>\n</head>"
-            % args.source, 1)
-        out.write_text(html, encoding="utf-8")
         if embedded:
             print("rendered: %s (%d bytes, inline: %s, default tab: %s)"
                   % (out, out.stat().st_size, "+".join(embedded), args.source))

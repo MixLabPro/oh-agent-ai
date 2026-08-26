@@ -5,12 +5,17 @@
 文件名后缀 `.5m.sh` → 每 5 分钟触发一次。本目录只放一个脚本：
 
 - `skill-vitals.5m.sh` — 菜单栏显示**今日累计 token cost vs 日预算**，下拉给
-  本次会话 / 当日 / 当月 + 「刷新 / 打开 state」入口。
+  本次会话 / 当日 / 当月 + 「刷新 / 打开 state / 打开日历」入口。
 
-数据源是 `state.py` 写出的四个 JSON（`$SKILL_VITALS_HOME/state/` 或
+数据源是 `state.py` 写出的五个文件（`$SKILL_VITALS_HOME/state/` 或
 `~/.skill-vitals/state/`）—— `oneline.json` / `today.json` / `month.json` /
-`alert.json`。脚本**只读不写**，缺文件时显示空菜单栏（`💤 -`），不抛错、
-不 daemon、不走网络。
+`alert.json` / `calendar.html`。脚本**只读不写**，缺文件时显示空菜单栏
+（`💤 -`），不抛错、不 daemon、不走网络。
+
+下拉里的「打开日历」用 `open` 打开 `calendar.html`（本地文件，双 tab 内嵌
+today/month 两份数据，离线可看）。这个文件由 `oneline` 命令在每次结算末尾
+自动刷新——不需要手动生成；`calendar.html` 还不存在时（一次新版 `oneline`
+都没跑过），这一行显示成提示文字而不是可点链接。
 
 ## 安装
 
