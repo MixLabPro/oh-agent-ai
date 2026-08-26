@@ -364,6 +364,27 @@ def context_composition(events):
     }
 
 
+def usage_signal_status(usage_events):
+    """P3 group②（docs/RUNTIME_EVIDENCE_CONTRACT.md §17，cost fold）：
+    `token_by_model`/`request_metrics`/`context_composition`/
+    `cost.cost_report` 这族函数依赖同一个信号——"这份日志里有没有 usage
+    证据"。**不新造一套裁决逻辑**：这族函数早就有自己的"不编造"纪律
+    （零样本时 `by_model` 是 `{}`、`unreported_fields` 是 `[]`、
+    `cost_report` 直接返回 `None`），这里只是把它正式挂到 Signal 词汇上，
+    给跨规则族的一致性检查用。与 Rust `usage.rs::usage_signal_status`
+    逐字节对齐——调用方必须传**分叉之后**的 usage_events（`post_fork` 一次，
+    `token_by_model` 自己内部也会再 post_fork 一次，幂等，不重复计数）。
+    """
+    count = len(usage_events)
+    if count == 0:
+        return {
+            "status": "unavailable",
+            "missing": ["Usage"],
+            "reason": "no evidence for required signal(s) in this session",
+        }
+    return {"status": "measured", "sample_count": count}
+
+
 def token_by_model(events):
     """事件流 → `{"by_model": {...}, "sequence": [...]}`。
 

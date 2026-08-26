@@ -35,7 +35,9 @@ _spec.loader.exec_module(scan)
 sys.path.insert(0, str(ROOT / "scripts"))
 from skill_vitals.util import split_lines  # noqa: E402
 from skill_vitals.util import fork_boundary, post_fork  # noqa: E402
-from skill_vitals.usage import context_composition, hour_buckets, request_metrics, token_by_model  # noqa: E402
+from skill_vitals.usage import (  # noqa: E402
+    context_composition, hour_buckets, request_metrics, token_by_model, usage_signal_status,
+)
 from skill_vitals.compaction import compaction_events  # noqa: E402
 from skill_vitals.waste import detect_duplicate_tool_results, detect_failure_run_waste, detect_structural_waste  # noqa: E402
 from skill_vitals.util import est_tokens  # noqa: E402
@@ -753,6 +755,20 @@ class TestRuleOutcomes(unittest.TestCase):
         events = [self._ev("approval/asked", 1, {"id": "a1", "toolName": "bash"})]
         outcomes = rule_outcomes([], events)
         self.assertEqual(outcomes["SV609"], {"status": "measured_zero"})
+
+
+class TestUsageSignalStatus(unittest.TestCase):
+    """P3 group②：cost fold 家族共用的 Usage 信号可用性。Rust
+    `usage.rs::usage_signal_status` 的测试对齐——同一批断言。"""
+
+    def test_unavailable_when_zero_usage_events(self):
+        self.assertEqual(usage_signal_status([]),
+                         {"status": "unavailable", "missing": ["Usage"],
+                          "reason": "no evidence for required signal(s) in this session"})
+
+    def test_measured_when_usage_events_present(self):
+        self.assertEqual(usage_signal_status([{"a": 1}, {"a": 2}, {"a": 3}]),
+                         {"status": "measured", "sample_count": 3})
 
 
 class TestContextComposition(unittest.TestCase):

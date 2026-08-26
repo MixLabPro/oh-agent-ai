@@ -50,6 +50,12 @@ pub struct Audit {
     /// `unavailable`（这份日志根本没有该规则依赖的信号，不是"测了是零"）。
     /// **新增、只加不改**：`findings` 字段本身的产出逻辑完全没变。
     pub rule_outcomes: Value,
+    /// P3 group②（docs/RUNTIME_EVIDENCE_CONTRACT.md §17，cost fold）：
+    /// `usage`/`requests`/`context`/`cost` 这族输出共用同一个信号
+    /// （`Signal::Usage`）——这里不是新裁决，是把这族函数早就有的
+    /// "零样本不编造" 纪律（`unreported_fields`、`cost_report` 返回
+    /// `None`）正式挂到 Signal 词汇上，供跨规则族的一致性检查用。
+    pub usage_coverage: Value,
 }
 
 /// 读会话日志 → 执行事件 + 成本账事件 → (findings, usage, requests, context, compaction, waste)（端到端入口）。
@@ -101,11 +107,17 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     // 事件重新算一份 coverage,只喂给 rule_outcomes,不影响 events/
     // dsh_evidence 本身（post_fork 是幂等的，见 util.rs 注释，这里是"只为了
     // 拿 coverage 而已"的第二次调用，不是改变已有语义）。
+    // P3 group②：usage_events 也要 post_fork 之后再算 coverage，跟
+    // token_by_model/request_metrics/context_composition 自己内部 post_fork
+    // 的口径对齐——同一份 dsh_evidence 顺带服务 rule_outcomes（执行事件）和
+    // usage_coverage（用量事件），两路证据都是"审计范围内"的，不是分叉前的。
     let post_fork_events = skill_vitals_core::util::post_fork(&events);
+    let post_fork_usage_events = skill_vitals_core::util::post_fork(&usage_events);
     let post_fork_evidence = skill_vitals_core::dsh_evidence::build_dsh_evidence(
-        post_fork_events, Vec::new(), None, String::new(),
+        post_fork_events, post_fork_usage_events, None, String::new(),
     );
     let rule_outcomes_val = rule_outcomes_json(&rule_outcomes(&findings, &post_fork_evidence.canonical.coverage));
+    let usage_coverage_val = skill_vitals_core::usage::usage_signal_status(&post_fork_evidence.canonical.coverage);
     // 三个消费者共用 usage_events（各取所需，不认识的事件类型自然跳过）：
     // token_by_model 按模型分桶、request_metrics 保留逐请求分辨率、
     // context_composition 从 header.system/tools 与 skill-catalog 载体算常驻前缀。
@@ -128,6 +140,6 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     });
     Some(Audit {
         findings, usage, requests: requests_val, context, compaction, waste, pre_fork, subagents,
-        skill, duration, rule_outcomes: rule_outcomes_val,
+        skill, duration, rule_outcomes: rule_outcomes_val, usage_coverage: usage_coverage_val,
     })
 }

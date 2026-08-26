@@ -493,6 +493,7 @@ fn main() {
                 "skill": &audit.skill,
                 "duration": &audit.duration,
                 "rule_outcomes": &audit.rule_outcomes,
+                "usage_coverage": &audit.usage_coverage,
             })).unwrap_or_default();
             if path == &PathBuf::from("-") {
                 println!("{text}");

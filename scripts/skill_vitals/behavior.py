@@ -489,7 +489,9 @@ def audit_session_log(path):
     from .trajectory import match_trajectory
     from .compaction import compaction_events
     from .waste import detect_structural_waste
-    from .usage import context_composition, request_metrics, token_by_model, pre_fork_usage
+    from .usage import (
+        context_composition, request_metrics, token_by_model, pre_fork_usage, usage_signal_status,
+    )
     from .subagent import subagent_spawns
     from .skill import skill_invocations
     from .duration import (
@@ -535,8 +537,10 @@ def audit_session_log(path):
     # 不能直接用 events（分叉前）算，否则证据全部落在分叉前的信号会被误判成
     # "有覆盖"。与 Rust src/behavior.rs 那边同一个理由、同一个修法。
     outcomes = rule_outcomes(findings, post_fork(events))
+    # P3 group②：同样道理，usage_coverage 也要用分叉之后的 usage_events。
+    usage_coverage = usage_signal_status(post_fork(usage_events))
     return (findings, usage, requests, context, compaction, waste, pre_fork, subagents, skill,
-            duration, outcomes)
+            duration, outcomes, usage_coverage)
 
 
 # 行为审计的闸门阈值语义，与 doctor.gate() 一致：critical/warning/info 三级，

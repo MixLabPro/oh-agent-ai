@@ -31,6 +31,8 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::evidence::{Coverage, Signal};
+
 /// 同一模型名在一次会话里被两家供应商服务过时的标记。故意用一个不可能是
 /// 真实供应商名的字符串：它不会命中 `priced_providers` 白名单，于是自动
 /// 落进「不计价」——不需要计价方再认一个特殊分支。
@@ -174,6 +176,30 @@ fn usage_sample(event: &Value) -> Option<(i64, i64, &Value)> {
     let (Some(turn), Some(step)) = (turn, step) else { return None };
     let (Some(turn), Some(step)) = (turn.as_i64(), step.as_i64()) else { return None };
     Some((turn, step, usage?))
+}
+
+/// P3 group②（docs/RUNTIME_EVIDENCE_CONTRACT.md §17，cost fold）：这族函数
+/// （`token_by_model`/`request_metrics`/`context_composition`/
+/// `src/cost.rs::cost_report`）依赖 `Signal::Usage`。**不新造一套裁决逻辑**——
+/// 这族函数从很早就有自己的一套"不编造"纪律：零样本时 `by_model` 是 `{}`、
+/// `unreported_fields` 是 `[]`（不对"宿主不报某字段"下断言）、
+/// `cost_report` 直接返回 `None`。这些早就是 §10 三态契约里
+/// "measured-zero vs unavailable" 的实现，只是没有挂 `Signal` 这个词汇。
+/// 这个函数把两者正式挂钩，给 §17.1 "coverage-matrix golden" 这类跨规则族
+/// 的一致性检查用——**这里没有第三个"findings"态**：cost fold 不产出
+/// 离散的 finding，只有"有没有 Usage 证据"这一件事，"有证据但折出空结果"
+/// 在这族函数里是同一个条件（零样本 ⇔ 零覆盖），不是两个可分的状态。
+pub fn usage_signal_status(coverage: &Coverage) -> Value {
+    let counts = coverage.get(Signal::Usage);
+    if counts.total() == 0 {
+        json!({
+            "status": "unavailable",
+            "missing": ["Usage"],
+            "reason": "no evidence for required signal(s) in this session",
+        })
+    } else {
+        json!({"status": "measured", "sample_count": counts.total()})
+    }
 }
 
 /// 事件流 → `{"by_model": {...}, "sequence": [...]}`。
@@ -733,6 +759,23 @@ pub fn hour_buckets(events: &[Value]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evidence::CoverageCounts;
+
+    #[test]
+    fn usage_signal_status_unavailable_when_usage_signal_has_zero_coverage() {
+        let cov = Coverage::new();
+        let status = usage_signal_status(&cov);
+        assert_eq!(status["status"], json!("unavailable"));
+        assert_eq!(status["missing"], json!(["Usage"]));
+    }
+
+    #[test]
+    fn usage_signal_status_measured_when_usage_signal_has_coverage() {
+        let mut cov = Coverage::new();
+        cov.set(Signal::Usage, CoverageCounts { measured: 3, ..Default::default() });
+        let status = usage_signal_status(&cov);
+        assert_eq!(status, json!({"status": "measured", "sample_count": 3}));
+    }
 
     /// 同 (turn, step) 的 usage chunk 先到、message 后到：只计 message，不双计。
     #[test]

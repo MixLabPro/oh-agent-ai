@@ -1310,11 +1310,48 @@ behaviour is the golden corpus, and the golden corpus speaks only DSH.
 | **P0** | This document, plus the §13 matrix as a checked-in baseline | Matrix committed; it *is* the test baseline |
 | **P1 ✅** | `evidence` module in `skill-vitals-core`: `CanonicalSession`, `Signal`, `Observed<T>`, `Provenance`, `CoverageCounts`, `RuleSpec`, `RuleOutcome` | Zero behaviour change — nothing consumes it yet. Landed in `crates/skill-vitals-core/src/evidence.rs`: all §2–§12 types plus `AggregateProvenance::for_window`, `CoverageCounts`/`Coverage` ratios, and the §12 no-host-identifier self-check, 12 unit tests. 15/15 goldens byte-identical before/after (nothing calls it yet) |
 | **P2 ✅** | `crates/skill-vitals-core/src/dsh_evidence.rs`: a plain function (`build_dsh_evidence`, **not a trait** — see `CanonicalSession`'s own doc comment and `ARCHITECTURE.md` §4.2) that folds `src/dsh.rs`'s already-extracted `execution_events`/`usage_events` into a `CanonicalSession` (Signal/Coverage counted per §13's DSH column; the 3 rows §13 doesn't cover — `SandboxPolicy`/`UserPrompts`/`UserCorrections` — are left `Unavailable`, not fabricated), bundled with the raw events (`CanonicalSession` alone has no event-payload field); plus `reverse_project`, a temporary bridge back to today's `behavior.rs` input shape | **Byte-identical `behavior --json` output**, proven three ways: `cargo test` (154 core + 137 binary), `SKILL_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (the real Python↔Rust differential — `golden/*.json` covers the unrelated `scan` command, not this), and a manual before/after diff on `fixtures/dsh/behavior.jsonl`. `reverse_project` is deleted when P3 completes |
-| **P3 (① ✅ ②③④⑤ pending)** | Migrate rules one family per PR: read Signals, declare `requires`, goldens unchanged. Order: **① command/path (SV601–610) ✅** ② cost fold ③ duration ④ trajectory ⑤ skill / subagent / compaction / waste | ① landed: `RuleSpec` for all 10 rules in `behavior.rs` (`crates/skill-vitals-core` + Python mirror); a new pure `rule_outcomes()`/`rule_outcomes_json()` derives `Findings`/`MeasuredZero`/`Unavailable` per rule from `findings` + `Coverage` — additive only, `detect_svNNN` untouched, `findings` byte-identical. Exposed as a new, additive `rule_outcomes` key in `--json` (sanctioned by this repo's "字段只增不删不改语义" policy). Fixed a real P2 bug along the way: `dsh_evidence.rs` never counted `approval/asked` toward `ApprovalDecisions` coverage. Also fixed: coverage for `rule_outcomes` must be computed from **post-fork** events, not the pre-fork `execution_events` `dsh_evidence`'s `CanonicalSession` carries for other consumers — otherwise a signal whose only evidence is pre-fork history reads as "covered" when the actual audited findings never saw it. Verified: `cargo test` (160 core + 137 binary), `cargo clippy -D warnings`, full Python suite, `SKILL_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (byte-identical `rule_outcomes` both languages), wasm rebuilt + `dsh-client`'s full `npm test` (including `verify-host.mjs`) green against the new binary. `reverse_project` stays until all 5 groups land |
+| **P3 (① ② ✅ · ③④⑤ pending)** | Migrate rules one family per PR: read Signals, declare `requires`, goldens unchanged. Order: ① command/path (SV601–610) ② cost fold ③ duration ④ trajectory ⑤ skill / subagent / compaction / waste | See §17.2 for what actually landed per group. `reverse_project` stays until all 5 groups complete |
 | **P4** | Codex adapter | Chosen second not for coverage breadth — §14.1 shows it lacks tool-call duration, approvals, and hooks — but because it is the only host that emits **two incompatible formats without declaring which**. If the model absorbs both Codex modes without structural change, it is sound |
 | **P4.5** | Schema-drift sentinel for `RolloutItem` (§14.4) | CI fails on upstream persistence-policy change |
 | **P5** | Claude Code adapter | First real use of `Provenance::Derived` (turn boundaries) and `Linearization` (message tree) |
 | **P6** | WorkBuddy adapter | First real use of `unavailable`, `LossKind::Hashed`, `Cost::Credits`, and non-JSONL I/O. **Last not because it is hardest, but because it is the strongest falsifier**: if `CanonicalSession` has quietly become a synonym for "event stream" during P1–P5, WorkBuddy exposes it immediately |
+
+### 17.1a P3 group log
+
+**① command/path (SV601–610) ✅**: `RuleSpec` declared for all 10 rules in
+`behavior.rs` (`crates/skill-vitals-core` + Python mirror); a new pure
+`rule_outcomes()`/`rule_outcomes_json()` derives `Findings`/`MeasuredZero`/
+`Unavailable` per rule from `findings` + `Coverage` — additive only,
+`detect_svNNN` untouched, `findings` byte-identical. Exposed as a new,
+additive `rule_outcomes` key in `--json` (sanctioned by this repo's "字段只
+增不删不改语义" policy). Fixed two real bugs found in the process: (1)
+`dsh_evidence.rs` never counted `approval/asked` toward `ApprovalDecisions`
+coverage; (2) coverage for `rule_outcomes` must be computed from **post-fork**
+events, not the pre-fork `execution_events` `dsh_evidence`'s `CanonicalSession`
+carries for other consumers — otherwise a signal whose only evidence is
+pre-fork history reads as "covered" when the audited findings never saw it.
+
+**② cost fold ✅**: unlike SV601–610, this family (`token_by_model`/
+`request_metrics`/`context_composition`/`cost_report`) already had its own
+anti-fabrication discipline predating the evidence model —
+`unreported_fields`, `by_model == {}` on zero samples, `cost_report`
+returning `None` — which *is* the §10 three-state contract, just not
+expressed in `Signal` vocabulary. No `RuleOutcome`/`RuleSpec` reuse here:
+those types are shaped for finding-producing rules (`Vec<Finding>`), and a
+fold doesn't produce discrete findings — for this family "has evidence but
+folds to nothing" and "has no evidence at all" are the same condition (zero
+samples ⇔ zero `Signal::Usage` coverage), so there's no `MeasuredZero` state
+distinct from `Unavailable` to add. Added one small new pure function,
+`usage_signal_status(coverage) -> {"status": "measured"|"unavailable", ...}`,
+formally connecting the existing behavior to `Signal::Usage`, exposed as a
+new additive `usage_coverage` key in `--json`. Coverage computed from
+post-fork `usage_events`, same reasoning as group ①'s fix.
+
+Both verified: `cargo test`, `cargo clippy -D warnings`, full Python suite,
+`SKILL_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (byte-
+identical new keys both languages), wasm rebuilt + `dsh-client`'s full
+`npm test` (including `verify-host.mjs`) green against the new binary each
+time.
 
 ### 17.1 Tests
 
