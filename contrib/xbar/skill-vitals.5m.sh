@@ -296,17 +296,19 @@ fi
 
 echo "---"
 
-# 3d. 操作 —— shell= 是 xbar 解析参数，参数化打开。
+# 3d. 操作 —— shell= 只认可执行文件本身，参数必须走 param1=/param2=/...
+# （直接把带引号的路径拼在 shell= 后面不会被当成参数，open 会零参数静默
+# 退出，点了没反应——这是本文件之前的真实 bug，见 fix 提交）。
 # 日历 HTML 由 `oneline` 命令末尾顺手刷新到 $STATE_DIR/calendar.html
 # （固定路径，见 cli.py::_render_calendar_html）——本脚本只读不写，不
 # 知道 repo 装在哪里也没关系，直接 open 这个文件。还没跑过一次新版
 # oneline 时文件不存在，菜单项退化成一行不可点的提示，而不是点了报错。
 CALENDAR_FILE="$STATE_DIR/calendar.html"
 if [ -f "$CALENDAR_FILE" ]; then
-    echo "打开日历 | shell=/usr/bin/open \"$CALENDAR_FILE\""
+    echo "打开日历 | shell=/usr/bin/open param1=\"$CALENDAR_FILE\" terminal=false"
 else
     echo "打开日历：等预算数据（跑一次 oneline 后可用）"
 fi
 echo "刷新 (5m)"
-echo "打开 state 目录 | shell=/usr/bin/open \"$STATE_DIR\""
-echo "打开 docs | shell=/usr/bin/open \"https://github.com/anthropics/skill-vitals\""
+echo "打开 state 目录 | shell=/usr/bin/open param1=\"$STATE_DIR\" terminal=false"
+echo "打开 docs | shell=/usr/bin/open param1=\"https://github.com/anthropics/skill-vitals\" terminal=false"
