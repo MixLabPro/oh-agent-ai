@@ -232,6 +232,30 @@ def _merge_buckets(existing, new_buckets, key_field):
     return existing
 
 
+def _merge_model_buckets(existing, by_model):
+    """把 `token_by_model()` 的 `by_model` 折进 existing,按模型名累加 8 字段。
+
+    不能复用 `_merge_buckets` —— 那边 `nb.get("date") is None` 的跳过逻辑
+    是给 hour_buckets 行(缺时间戳的样本不进日历)准备的;按模型的行根本
+    没有 `date` 字段,套用会把每一行都当成"时间缺失"整批跳过。
+    """
+    if existing is None:
+        existing = {}
+    for model, b in (by_model or {}).items():
+        cur = existing.setdefault(str(model), {
+            "uncached_input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+        })
+        for fld in ("uncached_input_tokens", "output_tokens",
+                    "cache_read_tokens", "cache_write_tokens",
+                    "peak_uncached_input_tokens", "peak_output_tokens",
+                    "peak_cache_read_tokens", "peak_cache_write_tokens"):
+            cur[fld] = cur.get(fld, 0) + (b.get(fld) or 0)
+    return existing
+
+
 def rotate_today(now=None):
     """如果 today.json 的 date 字段 != 当前 BJ 日期,把当前桶搬到
     month.days[<old_date>],然后清空 today.json。
@@ -267,8 +291,9 @@ def rotate_today(now=None):
         if old_date and old_date != today_bj:
             # 把旧 today.json 的桶搬到 month.days[<old_date>]
             old_buckets = existing.get("buckets") or {}
-            if old_buckets:
-                _move_today_to_month(old_date, old_buckets)
+            old_by_model = existing.get("by_model") or {}
+            if old_buckets or old_by_model:
+                _move_today_to_month(old_date, old_buckets, old_by_model)
             # 清空 today.json,留下 schema_version 和新 date
             existing = {
                 "schema_version": SCHEMA_VERSION,
@@ -294,11 +319,14 @@ def _to_bj_date(dt):
     return date(1970, 1, 1) + timedelta(days=days)
 
 
-def _move_today_to_month(date_str, buckets):
+def _move_today_to_month(date_str, buckets, by_model=None):
     """把 today.json 旧桶搬到 month.json.days[<date_str>]。在锁内调用。
 
     复用 merge_buckets 的累加逻辑 —— 同一日期的桶可能月视图已经有数据,
-    这里累加而不是覆盖。
+    这里累加而不是覆盖。`by_model`(today.json 顶层的按模型累计,见
+    `_merge_model_buckets`)一并搬到 month.days[<date_str>].by_model ——
+    否则跨天 rotate 会把当天的按模型明细丢光,7 日均价只能退回旧的
+    单模型近似。
     """
     month_path = state_dir() / "month.json"
     month = _read(month_path) or {}
@@ -316,13 +344,16 @@ def _move_today_to_month(date_str, buckets):
         day_bucket[fld] = sum(b.get(fld) or 0 for b in buckets.values())
     month["days"] = _merge_buckets(
         month.get("days"), [day_bucket], key_field="date")
+    if by_model:
+        day = month["days"][date_str]
+        day["by_model"] = _merge_model_buckets(day.get("by_model"), by_model)
     month["schema_version"] = SCHEMA_VERSION
     month["generated_at"] = _now_iso()
     month["month"] = date_str[:7]
     _atomic_write(month_path, month)
 
 
-def merge_today(hour_buckets_result) -> Path:
+def merge_today(hour_buckets_result, by_model=None) -> Path:
     """把 hour_buckets 的所有 (date, hour) 桶合并到 today.json。
 
     锁住同一 `<state_dir>/.lock`，read-modify-write 期间不让其他
@@ -331,6 +362,11 @@ def merge_today(hour_buckets_result) -> Path:
 
     **跨日自动 rotate** — 调用 rotate_today() 先处理跨日累积。
     这是修「¥1172/¥30 = 3908% 假告警」的关键。
+
+    `by_model`(可选,`token_by_model()` 的 `by_model` 字段)累加进
+    `today.json["by_model"]` —— 与 (date, hour) 桶是**并列的新字段**,
+    不是替换,budget.py 按模型精确定价时读它,旧的 (date, hour) 桶继续
+    只服务日历热力图,互不影响。
     """
     path = state_dir() / "today.json"
     rotate_today()  # 跨 BJ 0:00 自动滚动
@@ -339,6 +375,9 @@ def merge_today(hour_buckets_result) -> Path:
         existing["buckets"] = _merge_buckets(
             existing.get("buckets"), hour_buckets_result.get("buckets", []),
             key_field="hour")
+        if by_model:
+            existing["by_model"] = _merge_model_buckets(
+                existing.get("by_model"), by_model)
         existing["schema_version"] = SCHEMA_VERSION
         existing["generated_at"] = _now_iso()
         existing["date"] = _today_key()
@@ -346,14 +385,29 @@ def merge_today(hour_buckets_result) -> Path:
     return path
 
 
-def merge_month(hour_buckets_result) -> Path:
-    """把 hour_buckets 的所有桶合并到 month.json（按日期折叠）。"""
+def merge_month(hour_buckets_result, by_model=None) -> Path:
+    """把 hour_buckets 的所有桶合并到 month.json（按日期折叠）。
+
+    `by_model` 同 `merge_today` —— 累加进当天(`_today_key()`)
+    `days[<date>].by_model`,与 rotate 时 `_move_today_to_month` 搬运
+    历史日的 by_model 是同一份数据形状,budget.py 两处都能按模型定价。
+    """
     path = state_dir() / "month.json"
     with _locked(path):
         existing = _read(path) or {}
         existing["days"] = _merge_buckets(
             existing.get("days"), hour_buckets_result.get("buckets", []),
             key_field="date")
+        if by_model:
+            day_key = _today_key()
+            day = existing["days"].setdefault(day_key, {
+                "uncached_input_tokens": 0, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            })
+            day["by_model"] = _merge_model_buckets(
+                day.get("by_model"), by_model)
         existing["schema_version"] = SCHEMA_VERSION
         existing["generated_at"] = _now_iso()
         existing["month"] = _today_key()[:7]  # 'YYYY-MM'

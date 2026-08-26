@@ -17,6 +17,10 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "scan.py"
 
+sys.path.insert(0, str(ROOT / "scripts"))
+from skill_vitals import budget as budget_module  # noqa: E402
+from skill_vitals import cost as cost_module  # noqa: E402
+
 
 def _run(args, env=None):
     """跑一次 scan.py 子命令，返回 (returncode, stdout, stderr)。"""
@@ -87,6 +91,49 @@ class TestOnelineCli(unittest.TestCase):
             self.assertEqual(len(bucket_values), 1, "同一时间只应有 1 个 hour 桶")
             # 单次 input_tokens 是 1.7M,累加后应是 3.4M
             self.assertEqual(bucket_values[0]["uncached_input_tokens"], 1700000 * 2)
+
+
+class TestOnelinePerModelPricing(unittest.TestCase):
+    """端到端:oneline 落盘的 by_model 要真的驱动 budget.py 的定价——
+    不是写了字段但没人读。fixtures/dsh/behavior.jsonl 里混了
+    deepseek-v4-flash 和 deepseek-v4-pro 两个模型的事件。"""
+
+    def test_today_by_model_populated_and_alert_uses_accurate_price(self):
+        with _TmpHome() as h:
+            r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            sd = Path(h.tmp) / "state"
+            today = json.loads((sd / "today.json").read_text())
+            by_model = today.get("by_model")
+            self.assertTrue(by_model, "oneline 应该把 usage['by_model'] 写进 today.json")
+            self.assertIn("deepseek/deepseek-v4-flash", by_model)
+            self.assertIn("deepseek/deepseek-v4-pro-0813", by_model)
+
+            with mock.patch.dict(os.environ, h.env, clear=False):
+                accurate = budget_module.compute_today_cost()
+                pricing = cost_module.load_pricing()
+                # 旧近似:把同样的桶(不分模型)硬按 fallback 模型算一遍——
+                # 应该跟精确定价的结果不一样,证明确实在用 by_model 路径,
+                # 不是悄悄退回了 fallback。
+                flat_bucket = {
+                    "uncached_input_tokens": sum(
+                        m["uncached_input_tokens"] for m in by_model.values()),
+                    "output_tokens": sum(m["output_tokens"] for m in by_model.values()),
+                    "cache_read_tokens": sum(m["cache_read_tokens"] for m in by_model.values()),
+                    "cache_write_tokens": sum(m["cache_write_tokens"] for m in by_model.values()),
+                    "peak_uncached_input_tokens": sum(
+                        m["peak_uncached_input_tokens"] for m in by_model.values()),
+                    "peak_output_tokens": sum(
+                        m["peak_output_tokens"] for m in by_model.values()),
+                    "peak_cache_read_tokens": sum(
+                        m["peak_cache_read_tokens"] for m in by_model.values()),
+                    "peak_cache_write_tokens": sum(
+                        m["peak_cache_write_tokens"] for m in by_model.values()),
+                }
+                old_approx = budget_module._bucket_cost(flat_bucket, pricing)
+            self.assertNotAlmostEqual(
+                accurate["total"], old_approx["total"], places=4,
+                msg="behavior.jsonl 混了 pro,精确定价不应等于旧的 flash-only 近似")
 
 
 class TestStateCli(unittest.TestCase):

@@ -570,8 +570,11 @@ def _main():
         }
         p_oneline = state_module.write_oneline(summary)
         if not args.no_merge:
-            state_module.merge_today(hb)
-            state_module.merge_month(hb)
+            # usage["by_model"] 与 hb 是同一次 audit_session_log 里出来的,
+            # 顺带存进 today.json/month.json —— budget.py 按模型精确定价
+            # 靠它,而不是永远假设 fallback 模型。
+            state_module.merge_today(hb, by_model=usage["by_model"])
+            state_module.merge_month(hb, by_model=usage["by_model"])
         # 不管 --no-merge 与否都 append 历史 —— xbar「最近 5 次审计」要靠这个
         state_module.append_session_history(summary)
         # 顺手把 budget.evaluate() 落盘成 alert.json —— xbar 之前完全绕开

@@ -166,6 +166,44 @@ class TestMergeToday(unittest.TestCase):
             self.assertEqual(buckets["14"]["output_tokens"], 150)
             self.assertEqual(buckets["15"]["uncached_input_tokens"], 200)
 
+    def test_merge_today_accumulates_by_model_across_calls(self):
+        """by_model 是与 (date, hour) 桶并列的新字段——两次 audit 同一
+        模型 → 该模型 8 字段累加；不同模型互不影响。"""
+        with _IsolatedHome():
+            state.merge_today({"buckets": []}, by_model={
+                "deepseek-v4-flash": {
+                    "uncached_input_tokens": 1000, "output_tokens": 100,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+            })
+            state.merge_today({"buckets": []}, by_model={
+                "deepseek-v4-flash": {
+                    "uncached_input_tokens": 500, "output_tokens": 50,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+                "deepseek-v4-pro": {
+                    "uncached_input_tokens": 10, "output_tokens": 1,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+            })
+            today = json.loads((state.state_dir() / "today.json").read_text())
+            by_model = today["by_model"]
+            self.assertEqual(by_model["deepseek-v4-flash"]["uncached_input_tokens"], 1500)
+            self.assertEqual(by_model["deepseek-v4-pro"]["uncached_input_tokens"], 10)
+            # 旧的 (date, hour) 桶字段不受影响——两个字段并列存在
+            self.assertIn("buckets", today)
+
+    def test_merge_today_without_by_model_leaves_field_absent(self):
+        """不传 by_model(旧调用方/legacy 数据) 不应凭空造出这个 key——
+        budget.py 用 `data.get("by_model")` 判断是否有精确数据。"""
+        with _IsolatedHome():
+            state.merge_today({"buckets": []})
+            today = json.loads((state.state_dir() / "today.json").read_text())
+            self.assertNotIn("by_model", today)
+
     def test_merge_today_skips_unknown_date_buckets(self):
         """time 缺失的 (date=None) 样本不参与日历累计 —— 否则会被算成
         1970-01-01，凭空多出几万 token / 几百块。"""
@@ -208,6 +246,52 @@ class TestMergeMonth(unittest.TestCase):
             self.assertEqual(days["2026-08-25"]["uncached_input_tokens"], 300,
                              "同一天两个 hour 累加")
             self.assertEqual(days["2026-08-26"]["uncached_input_tokens"], 50)
+
+    def test_merge_month_by_model_attributed_to_today(self):
+        """by_model 没有时间戳(整个 session 一次性的聚合)——按
+        _today_key() 归到当天，与 rotate 时历史日的 by_model 是同一份
+        数据形状。"""
+        with _IsolatedHome():
+            today_str = state._today_key()
+            state.merge_month({"buckets": []}, by_model={
+                "deepseek-v4-pro": {
+                    "uncached_input_tokens": 100, "output_tokens": 10,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+            })
+            month = json.loads((state.state_dir() / "month.json").read_text())
+            day = month["days"][today_str]
+            self.assertEqual(day["by_model"]["deepseek-v4-pro"]["uncached_input_tokens"], 100)
+
+
+class TestMergeModelBuckets(unittest.TestCase):
+    def test_accumulates_across_calls_per_model(self):
+        existing = state._merge_model_buckets(None, {
+            "deepseek-v4-flash": {
+                "uncached_input_tokens": 100, "output_tokens": 10,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+        })
+        existing = state._merge_model_buckets(existing, {
+            "deepseek-v4-flash": {
+                "uncached_input_tokens": 50, "output_tokens": 5,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+            "deepseek-v4-pro": {
+                "uncached_input_tokens": 1, "output_tokens": 1,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+        })
+        self.assertEqual(existing["deepseek-v4-flash"]["uncached_input_tokens"], 150)
+        self.assertEqual(existing["deepseek-v4-pro"]["uncached_input_tokens"], 1)
+
+    def test_empty_by_model_is_noop(self):
+        self.assertEqual(state._merge_model_buckets({"a": 1}, {}), {"a": 1})
+        self.assertEqual(state._merge_model_buckets(None, None), {})
 
 
 class TestLock(unittest.TestCase):

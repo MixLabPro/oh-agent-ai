@@ -103,6 +103,34 @@ class TestRotateToday(unittest.TestCase):
             self.assertEqual(month["days"]["2026-08-25"]["uncached_input_tokens"],
                              1_000_000)
 
+    def test_rotate_moves_by_model_to_month(self):
+        """rotate 不能只搬 (date, hour) 桶——today.json 顶层的 by_model
+        (按模型精确定价的数据源)也要跟着搬,否则跨天之后 budget.py 只能
+        对昨天退回 fallback 模型近似。"""
+        with _IsolatedHome():
+            sd = state.state_dir()
+            state._atomic_write(sd / "today.json", {
+                "date": "2026-08-25",
+                "buckets": {},
+                "by_model": {
+                    "deepseek-v4-pro": {
+                        "uncached_input_tokens": 1_000_000, "output_tokens": 0,
+                        "cache_read_tokens": 0, "cache_write_tokens": 0,
+                        "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                        "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                    },
+                },
+                "schema_version": "1.0.0",
+                "generated_at": "2026-08-25T14:00:00Z",
+            })
+            from datetime import datetime, timezone, timedelta
+            fake_now = datetime(2026, 8, 26, 0, 30, 0, tzinfo=timezone(timedelta(hours=8)))
+            state.rotate_today(now=fake_now)
+            month = json.loads((sd / "month.json").read_text())
+            self.assertEqual(
+                month["days"]["2026-08-25"]["by_model"]["deepseek-v4-pro"]["uncached_input_tokens"],
+                1_000_000, "rotate 应把 today.json 的 by_model 搬到 month.days[<旧日期>].by_model")
+
     def test_no_rotate_when_same_date(self):
         """同一天再次 rotate → 不动数据(返回 None)。"""
         with _IsolatedHome():

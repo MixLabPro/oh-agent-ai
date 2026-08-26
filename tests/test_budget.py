@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from skill_vitals import budget
 from skill_vitals import state
+from skill_vitals import cost as cost_module
 
 
 class _IsolatedHome:
@@ -356,6 +357,101 @@ class TestPeakShare(unittest.TestCase):
             self.assertTrue(r["peak_over"],
                             "peak_share=100%% > 50%% 应触发 peak_over; got %r"
                             % r.get("peak_share"))
+
+
+class TestPerModelPricing(unittest.TestCase):
+    """budget.py 按 `by_model`(见 state.merge_today/merge_month)精确定价,
+    不再永远假设 fallback 模型(deepseek-v4-flash)——pro 是 flash 的 3 倍价,
+    旧逻辑会把 pro 用量系统性低估到 1/3。"""
+
+    @staticmethod
+    def _flat_bucket(uncached=0):
+        return {
+            "uncached_input_tokens": uncached, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+        }
+
+    def test_pro_model_priced_three_times_flash_for_same_tokens(self):
+        with _IsolatedHome():
+            sd = state.state_dir()
+            state._atomic_write(sd / "today.json", {
+                "buckets": {},
+                "by_model": {"deepseek-v4-pro": self._flat_bucket(1_000_000)},
+                "schema_version": "1.0.0",
+            })
+            pro_cost = budget.compute_today_cost()
+            state._atomic_write(sd / "today.json", {
+                "buckets": {},
+                "by_model": {"deepseek-v4-flash": self._flat_bucket(1_000_000)},
+                "schema_version": "1.0.0",
+            })
+            flash_cost = budget.compute_today_cost()
+            self.assertGreater(flash_cost["total"], 0)
+            self.assertAlmostEqual(pro_cost["total"], flash_cost["total"] * 3, places=6,
+                                    msg="pricing.json 里 pro 应是 flash 的 3 倍价，"
+                                        "旧的 _bucket_cost fallback 会把这两者算成一样")
+
+    def test_mixed_model_day_blends_correctly(self):
+        with _IsolatedHome():
+            sd = state.state_dir()
+            state._atomic_write(sd / "today.json", {
+                "buckets": {},
+                "by_model": {
+                    "deepseek-v4-flash": self._flat_bucket(1_000_000),
+                    "deepseek-v4-pro": self._flat_bucket(1_000_000),
+                },
+                "schema_version": "1.0.0",
+            })
+            mixed = budget.compute_today_cost()
+            state._atomic_write(sd / "today.json", {
+                "buckets": {},
+                "by_model": {"deepseek-v4-flash": self._flat_bucket(1_000_000)},
+                "schema_version": "1.0.0",
+            })
+            flash_only = budget.compute_today_cost()
+            # mixed = 1x flash + 3x flash(冒充 pro) = 4x flash_only
+            self.assertAlmostEqual(mixed["total"], flash_only["total"] * 4, places=6)
+
+    def test_legacy_today_without_by_model_falls_back_to_bucket_cost(self):
+        """老数据(这个功能上线前写的 today.json,没有 by_model 字段)必须
+        退回原来的 fallback 近似——不能因为字段缺场崩掉或者悄悄返回 0。"""
+        with _IsolatedHome():
+            sd = state.state_dir()
+            bucket = self._flat_bucket(1_000_000)
+            state._atomic_write(sd / "today.json", {
+                "buckets": {"14": bucket},
+                "schema_version": "1.0.0",
+            })
+            legacy_cost = budget.compute_today_cost()
+            pricing = cost_module.load_pricing()
+            expected = budget._bucket_cost(bucket, pricing)
+            self.assertAlmostEqual(legacy_cost["total"], expected["total"], places=6)
+
+    def test_month_cost_blends_days_with_and_without_by_model(self):
+        """同一个月里,新数据(有 by_model)精确定价、老数据(没有,这个
+        功能上线前的历史日)退回近似——两种精度的日子共存是预期行为,
+        不是 bug,不需要回填历史。"""
+        with _IsolatedHome():
+            sd = state.state_dir()
+            legacy_bucket = self._flat_bucket(1_000_000)
+            state._atomic_write(sd / "month.json", {
+                "days": {
+                    "2026-08-01": legacy_bucket,  # 老数据：没有 by_model
+                    "2026-08-02": {
+                        **TestPerModelPricing._flat_bucket(0),
+                        "by_model": {"deepseek-v4-pro": self._flat_bucket(1_000_000)},
+                    },
+                },
+                "schema_version": "1.0.0",
+            })
+            total = budget.compute_month_cost()
+            pricing = cost_module.load_pricing()
+            expected_legacy = budget._bucket_cost(legacy_bucket, pricing)["total"]
+            expected_pro = budget._price_by_model(
+                {"deepseek-v4-pro": self._flat_bucket(1_000_000)}, pricing)["total"]
+            self.assertAlmostEqual(total["total"], expected_legacy + expected_pro, places=6)
 
 
 if __name__ == "__main__":

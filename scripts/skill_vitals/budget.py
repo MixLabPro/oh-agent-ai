@@ -180,11 +180,13 @@ def write_config(budget_dict):
 
 
 def _bucket_cost(b, pricing):
-    """单条 hour/day 桶 → 总价 + 高峰份额价。
+    """单条 hour/day 桶 → 总价 + 高峰份额价。**legacy 兜底路径**——只在
+    today.json/month.json 没有 `by_model` 字段(这个功能上线前写的旧数据)
+    时才用。真实路径见 `_price_by_model`,按实际模型精确定价。
 
-    today.json / month.json 不带模型信息(state.py 合并时已丢) —— 这里走
-    pricing.json 里**默认 fallback 模型**（通常是 flash）按桶内 4 桶
-    + 4 peak_* 字段算总价。peak 占比 = peak_cost / total_cost。
+    这条桶不带模型信息 —— 这里走 pricing.json 里**默认 fallback 模型**
+    （通常是 flash）按桶内 4 桶 + 4 peak_* 字段算总价，pro 模型的日子会
+    被系统性低估(pro 是 flash 的 3 倍价)。peak 占比 = peak_cost / total_cost。
     复用 cost.py::_price 的算术式但绕过模型解析(否则 unknown 模型会被
     标 unpriced,得 0 → peak_share undefined)。
     """
@@ -230,11 +232,28 @@ def _bucket_cost(b, pricing):
     return {"total": total, "peak_total": peak}
 
 
+def _price_by_model(by_model, pricing):
+    """`token_by_model()` 的 `by_model` 字段 → 真实总价。直接复用
+    `cost.py::cost_report` —— 那是唯一算价格的地方,这里**不**再写一遍
+    算术。provider 不传:`_resolve_card` 在 provider 缺场时本就回落到
+    pricing.json 的 fallback_provider,按模型名匹配价格卡,这个仓库目前
+    只有一家供应商,回落结果与「真上报了 provider」一致。
+    """
+    report = cost_module.cost_report({"by_model": by_model}, pricing)
+    if report is None:
+        return {"total": 0.0, "peak_total": 0.0}
+    return {"total": report["total"], "peak_total": report["peak_total"]}
+
+
 def compute_today_cost():
     """today.json → 当日 cost (元) + peak 拆分。
 
     today.json 缺场返回 None —— 与 CLAUDE.md §「缺列不编列」一致。
     浏览器 tab 渲染时显示「尚无数据」,**不**编 0。
+
+    优先用顶层 `by_model`(这个功能上线后的新数据,见 `state.merge_today`)
+    按实际模型精确定价;没有就说明是老数据,退回 `_bucket_cost` 的
+    fallback 模型近似 —— 不报错,不重算历史,自然随数据滚动淘汰。
     """
     p = state.state_dir() / "today.json"
     if not p.is_file():
@@ -243,10 +262,13 @@ def compute_today_cost():
         data = json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    by_model = data.get("by_model") or {}
     buckets = data.get("buckets") or {}
-    if not buckets:
+    if not buckets and not by_model:
         return None
     pricing = cost_module.load_pricing()
+    if by_model:
+        return _price_by_model(by_model, pricing)
     total = 0.0
     peak = 0.0
     for b in buckets.values():
@@ -257,7 +279,12 @@ def compute_today_cost():
 
 
 def compute_month_cost():
-    """month.json → 当月 cost。与 compute_today_cost 同种「缺列 None」语义。"""
+    """month.json → 当月 cost。与 compute_today_cost 同种「缺列 None」语义。
+
+    逐日判断:该日有 `by_model`(见 `state.merge_month`/rotate 搬运)就
+    精确定价,没有(rotate 之前的历史日)就退回旧的 fallback 近似 ——
+    同一个月里新旧两种精度的日子并存是预期行为,不是 bug。
+    """
     p = state.state_dir() / "month.json"
     if not p.is_file():
         return None
@@ -271,8 +298,10 @@ def compute_month_cost():
     pricing = cost_module.load_pricing()
     total = 0.0
     peak = 0.0
-    for b in days.values():
-        c = _bucket_cost(b, pricing)
+    for day in days.values():
+        by_model = day.get("by_model") or {}
+        c = (_price_by_model(by_model, pricing) if by_model
+             else _bucket_cost(day, pricing))
         total += c.get("total", 0.0)
         peak += c.get("peak_total", 0.0)
     return {"total": total, "peak_total": peak}
@@ -283,6 +312,7 @@ def compute_7d_avg_daily():
 
     从 month.json 取最近 N 天的「日总和」算术平均。N < 7 时按现有天数
     平均 —— 「窗口不足」**不**报错，按已有数据降级（host 能力缺失纪律）。
+    逐日精确/近似定价的选择与 compute_month_cost 相同。
     """
     p = state.state_dir() / "month.json"
     if not p.is_file():
@@ -301,7 +331,9 @@ def compute_7d_avg_daily():
     for offset in range(7):
         d = (today_bj - timedelta(days=offset)).isoformat()
         if d in days:
-            c = _bucket_cost(days[d], pricing)
+            by_model = days[d].get("by_model") or {}
+            c = (_price_by_model(by_model, pricing) if by_model
+                 else _bucket_cost(days[d], pricing))
             total += c.get("total", 0.0)
             n += 1
     if n == 0:
