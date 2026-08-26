@@ -405,6 +405,49 @@ ok('costReport.series：时间戳缺失时该笔不计价（不猜单价），pr
   if (st.seed !== 4) fail(`seedLength 没能活过 apply（state.seed=${st.seed}）——apply 的 return 必须展开原 state`)
   ok('seedLength 捕获活过每一次 apply（return 展开原 state，不是裸对象字面量）')
 
+  // ③b **seedLength 延迟解出，不能在第一次 apply 时锁死。**真实会话是活的：
+  //    session/created 触发那一刻分叉边界可能还没被 DSH 解出来（header 里没有
+  //    seedLength），要等某次 compaction/reseed 定位之后才会在后续 session/event
+  //    里补上。旧写法 `state.seed !== undefined ? 不动 : 现在补` 只在第一次
+  //    apply 时补一次——如果这一次恰好落在解出之前，state.seed 被永久锁成
+  //    null，哪怕 header 后来补上了正确值也再读不到。真实会话 session-e4b0be69
+  //    复盘：DSH 原生 UI 顶部显示 5 个子代理，本插件的 subagentSpawns 算出 19
+  //    个（未过滤的原始计数）——根因就是它的第一次 apply（第一个 tool/call）
+  //    落在 seedLength 解出之前。
+  {
+    const UPSTREAM_AGENT = 'aaaaaaaa-0000-0000-0000-000000000000'
+    const POSTFORK_AGENT = 'bbbbbbbb-0000-0000-0000-000000000000'
+    const evLateSeed = [
+      { type: 'tool/call', seq: 1, time: 1000, data: { callId: 'c1', name: 'subagent', arguments: '{"description":"upstream"}' } },
+      {
+        type: 'tool/result', seq: 2, time: 1010,
+        data: { message: { source: { kind: 'tool', callId: 'c1' }, content: [{ type: 'tool-result', content: [{ type: 'text', text: `started subagent ${UPSTREAM_AGENT}` }] }] } },
+      },
+      // 分叉边界 = 3，但直到这条事件抵达前 header 才补上 seedLength——subagentSpawns
+      // 的 state 已经在 seq 1 那次 apply 里被建过了。
+      { type: 'tool/call', seq: 3, time: 1020, data: { callId: 'c2', name: 'subagent', arguments: '{"description":"post-fork"}' } },
+      {
+        type: 'tool/result', seq: 4, time: 1030,
+        data: { message: { source: { kind: 'tool', callId: 'c2' }, content: [{ type: 'tool-result', content: [{ type: 'text', text: `started subagent ${POSTFORK_AGENT}` }] }] } },
+      },
+    ]
+    const ssDef = defs['subagentSpawns']
+    if (!ssDef) fail('subagentSpawns projection was not registered')
+    const sessLate = { id: 'late-seed-' + Math.random(), header: { cwd: '/w' }, events: [] }
+    for (const h of createdHooks) h.handler(sessLate) // 此刻 seedLength 未知
+    let sLate = ssDef.init()
+    for (const e of evLateSeed) {
+      if (e.seq === 3) sessLate.header = { cwd: '/w', seedLength: 3 } // 现在才解出
+      for (const h of hooks) h.handler(sessLate, e)
+      sLate = ssDef.apply(sLate, e)
+    }
+    const vLate = ssDef.view(sLate)
+    if (vLate.spawns.length !== 1 || vLate.spawns[0].agent_id !== POSTFORK_AGENT) {
+      fail(`seedLength 延迟解出后应只保留分叉后那 1 条子代理调用（agent_id=${POSTFORK_AGENT}），实际 ${vLate.spawns.length} 条：${JSON.stringify(vLate.spawns)}——说明 seed 在解出之前的那次 apply 被锁死，没能在后面刷新`)
+    }
+    ok('seedLength 延迟解出：state.seed 每次 apply 都重新读取而非只在第一次锁定，header 补上正确值后仍能正确过滤累积事件（19 vs 5 子代理数不对齐的根因回归）')
+  }
+
   // ④ preForkUsage：主口径滤掉的那一段要能**单独**折出来，用于在展开详情里
   //    解释"上方数字为什么变小了"。它与 tokenByModel 恰好互补——同一批事件，
   //    一个取边界之后、一个取边界之前，两边加起来才是日志里的全量。

@@ -456,14 +456,23 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   })
 
   // 分叉边界不是一个事件类型，是日志头的一个数（见 seedBySession 的注释）。
-  // 每个投影在第一次 apply 时把它记进自己的 state，view() 再合成一个规整形状
-  // 的 `{type:'session', data:{seedLength}}` 塞到事件数组最前面喂给 wasm——
-  // core 的 post_fork 认的就是它。
+  // 每次 apply 都从 seedBySession 重新读，view() 再合成一个规整形状的
+  // `{type:'session', data:{seedLength}}` 塞到事件数组最前面喂给 wasm——core
+  // 的 post_fork 认的就是它。
+  // 不能只在第一次 apply 时记一次就锁死：真实会话 e4b0be69 复盘证明了这点——
+  // seedLength 是「本轮重种从哪开始」，实时会话里可能在头几个事件之后才被
+  // DSH 解出来。若某个投影（比如 subagentSpawns，只对 tool/call·tool/result
+  // 起反应）第一次 apply 恰好落在这个解出时刻之前，旧写法会把 state.seed
+  // 永久锁成 null，post_fork 从此对这个投影形同虚设——19 个子代理（原始未过
+  // 滤）就是这样冒出来的，跟 CLI 读静态文件一次性拿到已解出的 header 算出的
+  // 5 个对不上。view() 是按需读的，重新读不产生额外代价，也不影响已经推进
+  // state.events 里的历史事件——过滤发生在 view() 用最新 seed 喂给 wasm 那
+  // 一刻，不是 apply() 累积事件那一刻。
   // 泛型而不是 any：它给 state 挂上 seed，类型上必须体现出来，否则各个 view
   // 里读 state.seed 全是 TS2339——而 seed 正是分叉过滤的关键字段，恰恰最不该
   // 失去类型保护（真机上就因为 apply 返回裸对象字面量把它丢过一次）。
   const withSeed = <T extends object>(state: T): Seeded<T> =>
-    (state as Seeded<T>).seed !== undefined || activeSessionId === null
+    activeSessionId === null
       ? (state as Seeded<T>)
       : { ...state, seed: seedBySession.get(activeSessionId) ?? null }
   const seeded = (seed: number | null | undefined, events: any[]) =>
