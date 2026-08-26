@@ -25,6 +25,13 @@
 # 跑过一次新版 oneline，或 budget.enabled=false）时**不臆造预算百分比**，
 # 退化成只显示本次会话花费、不带颜色判定。
 #
+# v1.2.0：每次 tick 顺手跑一次 dsh_autosync.py（见该文件顶部注释：不用
+# hook——DSH 没有会话结束类的钩子，docs/PRODUCT.md §5.8.4/5.8.5 也明确
+# 拒绝了往用户 agent 配置里装 hook 这条路——改用"文件停止增长 5 分钟即
+# 视为会话结束"这个纯读信号，正好复用这个 tick 本身的节奏）。缺
+# python3/zstandard，或脚本本身不存在（开发中的源文件、没跑过
+# install_swiftbar.sh 重装）时静默跳过，不影响菜单栏正常渲染。
+#
 # 安装：
 #   1. cp contrib/xbar/skill-vitals.5m.sh "$HOME/Library/Application Support/xbar/plugins/"
 #   2. chmod +x "$HOME/Library/Application Support/xbar/plugins/skill-vitals.5m.sh"
@@ -40,6 +47,17 @@ set -euo pipefail
 STATE_DIR="${SKILL_VITALS_HOME:-$HOME/.skill-vitals}/state"
 ONELINE_FILE="$STATE_DIR/oneline.json"
 ALERT_FILE="$STATE_DIR/alert.json"
+
+# __SKILL_VITALS_SCRIPTS_DIR__ 在 install_swiftbar.sh 安装时会被替换成
+# 仓库 scripts/ 目录的绝对路径——已安装的副本因此能找到 dsh_autosync.py，
+# 不需要用户额外配置环境变量（本文件是 cp 出去的独立副本，装完就不知道
+# 自己来自哪个 repo checkout）。开发时直接跑这份未替换的源文件，
+# DSH_AUTOSYNC 解析出字面量占位符路径、文件天然不存在，下面直接跳过。
+SKILL_VITALS_SCRIPTS_DIR="__SKILL_VITALS_SCRIPTS_DIR__"
+DSH_AUTOSYNC="$SKILL_VITALS_SCRIPTS_DIR/dsh_autosync.py"
+if command -v python3 >/dev/null 2>&1 && [ -f "$DSH_AUTOSYNC" ]; then
+    python3 "$DSH_AUTOSYNC" >/dev/null 2>&1 || true
+fi
 
 # ────────────────────────── 工具函数 ──────────────────────────
 

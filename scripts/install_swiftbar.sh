@@ -94,6 +94,11 @@ fi
 # ── 安装脚本 ──────────────────────────────────────────────
 mkdir -p "$PLUGIN_DIR"
 cp "$SCRIPT_SRC" "$PLUGIN_DIR/skill-vitals.5m.sh"
+# 把占位符换成这次安装时的仓库 scripts/ 绝对路径——装完的副本不知道自己
+# 是从哪个 checkout cp 出来的，dsh_autosync.py 的自动发现全靠这一步烙进去。
+# `|` 定界符：REPO_ROOT 是路径，可能含 `/`，用 `/` 当 sed 定界符会自己打架。
+sed -i '' "s|__SKILL_VITALS_SCRIPTS_DIR__|$REPO_ROOT/scripts|" \
+    "$PLUGIN_DIR/skill-vitals.5m.sh"
 chmod +x "$PLUGIN_DIR/skill-vitals.5m.sh"
 
 echo "✓ 已安装到 $PLUGIN_DIR/skill-vitals.5m.sh"
@@ -107,7 +112,11 @@ echo "2. 如果这是自定义目录,Preferences → Plugin Folder 改成:"
 echo "   $PLUGIN_DIR"
 echo "3. 菜单栏右上角会出现 💰 / ⚠️ / 🚨 + ¥金额"
 echo
-echo "要触发一次真实数据:"
+echo "真实数据现在会自动同步：每次 5 分钟 tick 会检查 ~/.dsh/sessions/ 下"
+echo "有没有停止增长（≥5 分钟没变化）且还没同步过的会话，自动跑一次"
+echo "oneline——不用再手动找日志、手动解压。这一步需要 zstandard："
+echo "  pip install zstandard"
+echo "没装的话自动同步会跳过（打印提示，不影响菜单栏），可以照样手动跑："
 echo "  SKILL_VITALS_HOME=$HOME/.skill-vitals python3 scripts/scan.py oneline <your-dsh-session-log>"
 echo
 echo "要卸载:"

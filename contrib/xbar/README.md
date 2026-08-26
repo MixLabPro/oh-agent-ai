@@ -17,12 +17,33 @@ today/month 两份数据，离线可看）。这个文件由 `oneline` 命令在
 自动刷新——不需要手动生成；`calendar.html` 还不存在时（一次新版 `oneline`
 都没跑过），这一行显示成提示文字而不是可点链接。
 
+真实数据现在会**自动同步**：每次 tick 顺手跑一次 `scripts/dsh_autosync.py`
+——发现 `~/.dsh/sessions/` 下有会话文件连续 5 分钟没再增长（还没同步过）就
+自动解压、跑一次 `oneline`。不用 hook（DSH 没有会话结束类的钩子，见
+`docs/PRODUCT.md` §5.8.4/5.8.5 关于为什么不往用户 agent 配置里装 hook 的
+说明），也不新建 daemon——就是复用这个 tick 本身。需要 `pip install
+zstandard` 才能解压 `.zstd` 日志；没装就跳过（打印提示，不影响菜单栏），
+可以照样手动跑 `oneline`。**只装一次，不增量同步**——同一份会话内容喂
+`oneline` 两次会累加两次，所以每个会话稳定之后只同步恰好一次。
+
 ## 安装
 
 > ⚠️ Git 不能保留 `+x` 模式 —— clone 后第一次使用**必须手动 chmod**。
 
+**推荐用安装脚本**（会把 `dsh_autosync.py` 的绝对路径烙进已安装的副本里，
+自动同步才找得到它）：
+
 ```bash
-# xbar 插件目录
+bash scripts/install_swiftbar.sh                 # 自动探测 SwiftBar/xbar
+bash scripts/install_swiftbar.sh ~/custom/dir    # 自定义插件目录
+```
+
+也可以手动 `cp`，但那样装出来的副本不知道仓库 checkout 在哪，自动同步会
+静默跳过（不报错，就是不干活）——除非你自己把脚本里
+`SKILL_VITALS_SCRIPTS_DIR="__SKILL_VITALS_SCRIPTS_DIR__"` 那行的占位符
+手动换成 `<repo>/scripts` 的绝对路径：
+
+```bash
 PLUGIN_DIR="$HOME/Library/Application Support/xbar/plugins"
 # SwiftBar 用这一行替换上面那行：
 #   PLUGIN_DIR="$HOME/Library/Application Support/SwiftBar/plugins"
@@ -59,6 +80,11 @@ xbar / SwiftBar 会**自动发现**该目录下所有可执行脚本，无需重
 - `bash`（脚本本体）
 - `python3`（**唯一硬依赖**；jq 不在 PATH 时降级到 `python3 -c` 一行解析）
 - 可选 `jq`（存在则走 jq，缺失自动回落到 python3）
+- 可选 `zstandard`（`pip install zstandard`）——只有自动同步 `.zstd` 会话
+  日志需要它，缺场时自动同步跳过，菜单栏渲染本身不受影响
 
-**不调用网络**（`curl` / `wget` 都禁）。**不安装任何包**。**不修改任何
-state 文件**。
+**不调用网络**（`curl` / `wget` 都禁）。**不安装任何包**（`zstandard` 是
+可选依赖，脚本自己从不安装它）。脚本本体只读不写——但每个 tick 会顺手跑
+一次 `dsh_autosync.py`，那个子进程在发现"会话已停止增长"时**会**写
+state 文件（等价于用户自己手动跑了一次 `oneline`），这不是本脚本自己在
+写，行为详见上面"自动同步"一节。
