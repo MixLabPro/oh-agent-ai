@@ -494,6 +494,7 @@ fn main() {
                 "duration": &audit.duration,
                 "rule_outcomes": &audit.rule_outcomes,
                 "usage_coverage": &audit.usage_coverage,
+                "duration_coverage": &audit.duration_coverage,
             })).unwrap_or_default();
             if path == &PathBuf::from("-") {
                 println!("{text}");

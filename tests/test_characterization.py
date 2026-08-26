@@ -46,6 +46,7 @@ from skill_vitals.trajectory import match_trajectory  # noqa: E402
 from skill_vitals.skill import skill_invocations  # noqa: E402
 from skill_vitals.duration import (  # noqa: E402
     tool_call_durations, turn_durations, step_durations, approval_latencies, hook_executions,
+    duration_coverage,
 )
 
 
@@ -1639,6 +1640,41 @@ class TestHookExecutions(unittest.TestCase):
         out = hook_executions([])
         self.assertEqual(out["executions"], [])
         self.assertEqual(out["decision_counts"], {})
+
+
+class TestDurationCoverage(unittest.TestCase):
+    """P3 group③：五路执行时长审计各自的信号覆盖。Rust 侧
+    `duration.rs::duration_coverage` 的测试对齐——同一批断言。"""
+
+    def _empty_duration(self):
+        return {"tool_calls": [], "turns": [], "steps": [], "approvals": [],
+                "hooks": {"executions": [], "decision_counts": {}}}
+
+    def test_unavailable_for_every_signal_on_empty_session(self):
+        out = duration_coverage(self._empty_duration(), [])
+        for key in ("tool_calls", "turns", "steps", "approvals", "hooks"):
+            self.assertEqual(out[key]["status"], "unavailable", "%s 零覆盖应该 unavailable" % key)
+
+    def test_distinguishes_measured_zero_from_unavailable(self):
+        # ToolCalls 有覆盖(有 tool/call 事件)但 tool_call_durations 折出空
+        # 数组(没有 callId)→ measured_zero，不是 unavailable。
+        events = [{"type": "tool/call", "seq": 1, "time": 1000, "data": {"name": "bash"}}]
+        out = duration_coverage(self._empty_duration(), events)
+        self.assertEqual(out["tool_calls"]["status"], "measured_zero")
+        self.assertEqual(out["turns"]["status"], "unavailable")
+
+    def test_measured_with_count_for_populated_arrays_and_nested_hooks(self):
+        duration = {
+            "tool_calls": [{"a": 1}, {"a": 2}], "turns": [], "steps": [], "approvals": [],
+            "hooks": {"executions": [{"a": 1}], "decision_counts": {"pass": 1}},
+        }
+        events = [
+            {"type": "tool/call", "seq": 1, "time": 1000, "data": {"name": "bash"}},
+            {"type": "hook/result", "seq": 2, "time": 1001, "data": {"handlerId": "h1"}},
+        ]
+        out = duration_coverage(duration, events)
+        self.assertEqual(out["tool_calls"], {"status": "measured", "count": 2})
+        self.assertEqual(out["hooks"], {"status": "measured", "count": 1})
 
 
 class TestRequestMetrics(unittest.TestCase):

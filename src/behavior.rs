@@ -56,6 +56,12 @@ pub struct Audit {
     /// "零样本不编造" 纪律（`unreported_fields`、`cost_report` 返回
     /// `None`）正式挂到 Signal 词汇上，供跨规则族的一致性检查用。
     pub usage_coverage: Value,
+    /// P3 group③（docs/RUNTIME_EVIDENCE_CONTRACT.md §17，duration）：五路
+    /// 时长审计（tool_calls/turns/steps/approvals/hooks）各自的信号覆盖——
+    /// 空数组现在能分清是"这份日志没有这类事件"（unavailable）还是"有这类
+    /// 事件但配不成对"（measured_zero）。只加不改，五个 duration.rs 函数的
+    /// 配对逻辑完全没变。
+    pub duration_coverage: Value,
 }
 
 /// 读会话日志 → 执行事件 + 成本账事件 → (findings, usage, requests, context, compaction, waste)（端到端入口）。
@@ -138,8 +144,14 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
         "approvals": skill_vitals_core::duration::approval_latencies(&events),
         "hooks": skill_vitals_core::duration::hook_executions(&events),
     });
+    // P3 group③：五路时长审计各自的信号覆盖——用同一份 post_fork_evidence 的
+    // coverage（execution 事件派生的信号，跟 rule_outcomes 同源）。
+    let duration_coverage_val = skill_vitals_core::duration::duration_coverage(
+        &duration, &post_fork_evidence.canonical.coverage,
+    );
     Some(Audit {
         findings, usage, requests: requests_val, context, compaction, waste, pre_fork, subagents,
         skill, duration, rule_outcomes: rule_outcomes_val, usage_coverage: usage_coverage_val,
+        duration_coverage: duration_coverage_val,
     })
 }

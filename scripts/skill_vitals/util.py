@@ -3,6 +3,43 @@
 import hashlib
 import json
 
+# 危险命令可能藏在 run_code 桥接出的嵌套子调用里，规则须一并匹配——与
+# behavior.py 的 TOOL_CALL_TYPES 是同一份常量，这里独立定义一份（不 import
+# behavior.py：那边才该反过来 import 这里，避免循环依赖）。
+_TOOL_CALL_TYPES = ("tool/call", "tool/code-dispatch-start", "tool/code-dispatch")
+
+# 事件 type → 计入哪个信号的覆盖计数。与 Rust
+# crates/skill-vitals-core/src/dsh_evidence.rs::derive_coverage 对齐，只镜像
+# 目前 P3 各 group 实际用到的信号（不是完整 19 个）。approval/asked 和
+# approval/decided 是同一个"问了→给了结果"生命周期的两端，都算
+# ApprovalDecisions 的证据——与 Rust 那边这次一起修的 bug 对齐（之前只数了
+# decided，漏了 asked）。
+SIGNAL_EVENT_TYPES = {
+    "ToolCalls": _TOOL_CALL_TYPES,
+    "ToolResults": ("tool/result",),
+    "ApprovalDecisions": ("approval/asked", "approval/decided"),
+    "SandboxModes": ("sandbox/mode",),
+    "TurnBoundaries": ("turn/start", "turn/end"),
+    "StepBoundaries": ("step/start", "step/end"),
+    "Hooks": ("hook/invoked", "hook/result"),
+}
+
+
+def signal_coverage(events):
+    """事件流 → 各信号的证据计数（镜像 Rust
+    dsh_evidence.rs::derive_coverage，只取 `SIGNAL_EVENT_TYPES` 里这几个，
+    不是完整 19 个）。调用方负责先 `post_fork`——覆盖率不能算进分叉前的
+    历史,否则一个信号的证据全部落在分叉前会被误判成"有覆盖"。"""
+    counts = {name: 0 for name in SIGNAL_EVENT_TYPES}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type")
+        for name, types in SIGNAL_EVENT_TYPES.items():
+            if etype in types:
+                counts[name] += 1
+    return counts
+
 
 def run_id(report) -> str:
     """报告内容的短哈希 —— 用来证明这份报告背后真的跑过一次扫描。

@@ -20,7 +20,7 @@ D1）—— 把 `skill.py` 里"`callId` 配对 `tool/call`↔`tool/result`、算
 重新扫一遍 `turn/start`・`step/start` 边界。
 """
 from .trajectory import _coord_map
-from .util import post_fork
+from .util import post_fork, signal_coverage
 
 
 def _tool_result_failed(data):
@@ -441,3 +441,35 @@ def hook_executions(events):
         "executions": rows,
         "decision_counts": dict(sorted(decision_counts.items())),
     }
+
+
+# P3 group③（docs/RUNTIME_EVIDENCE_CONTRACT.md §17，duration）：五路各自
+# 依赖的信号。与 Rust `duration.rs::duration_coverage` 逐字节对齐。
+_DURATION_SIGNALS = {
+    "tool_calls": "ToolCalls", "turns": "TurnBoundaries", "steps": "StepBoundaries",
+    "approvals": "ApprovalDecisions", "hooks": "Hooks",
+}
+
+
+def duration_coverage(duration, events):
+    """五路执行时长审计各自的信号覆盖——空数组现在能分清是"这份日志没有
+    这类事件"（unavailable）还是"有这类事件但配不成对"（measured_zero）。
+    只加不改，五个函数各自的配对逻辑完全没变。`events` 必须是**分叉之后**
+    的（调用方负责先 `post_fork`），与 `rule_outcomes` 同一个理由。
+    """
+    coverage = signal_coverage(events)
+    out = {}
+    for key, signal in _DURATION_SIGNALS.items():
+        if coverage.get(signal, 0) == 0:
+            out[key] = {
+                "status": "unavailable",
+                "missing": [signal],
+                "reason": "no evidence for required signal(s) in this session",
+            }
+            continue
+        # hooks 是嵌套形状 {"executions": [...], "decision_counts": {...}}，
+        # 其余四路是裸数组。
+        records = duration[key]["executions"] if key == "hooks" else duration[key]
+        out[key] = ({"status": "measured", "count": len(records)} if records
+                    else {"status": "measured_zero"})
+    return out

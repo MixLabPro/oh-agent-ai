@@ -19,6 +19,8 @@
 
 use serde_json::{json, Value};
 
+use crate::evidence::{Coverage, Signal};
+
 /// `tool/result` 是否报告了失败——同 `skill.rs::tool_result_failed`，两种独立
 /// 信号都要看，缺一不可：顶层 `data.error`（六码基础设施错误）与
 /// `data.message.content[].isError`（工具自己报告的语义失败）。
@@ -480,6 +482,55 @@ pub fn hook_executions(events: &[Value]) -> Value {
         "executions": rows,
         "decision_counts": decision_counts,
     })
+}
+
+/// P3 group③（docs/RUNTIME_EVIDENCE_CONTRACT.md §17，duration）：五路执行
+/// 时长审计各自依赖一个信号——`tool_calls`→`ToolCalls`、`turns`→
+/// `TurnBoundaries`、`steps`→`StepBoundaries`、`approvals`→
+/// `ApprovalDecisions`、`hooks`→`Hooks`。跟 group①（SV601-610）同一种情况:
+/// 五路输出目前都是数组,`[]` 既可能是"这份日志没有这类事件"(该
+/// unavailable),也可能是"有这类事件但配不成对"(真的 measured-zero,比如
+/// tool_call_durations 里没有 callId 的调用整条跳过)——这两者现在混在
+/// 一起看不出来。这里不改五个函数各自的配对逻辑,只是对着已经算好的
+/// `duration` JSON + coverage 补一层判断,只加不改。
+pub fn duration_coverage(duration: &Value, coverage: &Coverage) -> Value {
+    const SPECS: [(&str, Signal); 5] = [
+        ("tool_calls", Signal::ToolCalls),
+        ("turns", Signal::TurnBoundaries),
+        ("steps", Signal::StepBoundaries),
+        ("approvals", Signal::ApprovalDecisions),
+        ("hooks", Signal::Hooks),
+    ];
+    let mut map = serde_json::Map::new();
+    for (key, signal) in SPECS {
+        let total = coverage.get(signal).total();
+        let entry = if total == 0 {
+            json!({
+                "status": "unavailable",
+                "missing": [format!("{signal:?}")],
+                "reason": "no evidence for required signal(s) in this session",
+            })
+        } else {
+            // hooks 是嵌套形状 {"executions": [...], "decision_counts": {...}}，
+            // 其余四路是裸数组——记录数从各自的形状里取，不能一律当裸数组处理。
+            let count = if key == "hooks" {
+                duration
+                    .get(key)
+                    .and_then(|v| v.get("executions"))
+                    .and_then(|v| v.as_array())
+                    .map_or(0, |a| a.len())
+            } else {
+                duration.get(key).and_then(|v| v.as_array()).map_or(0, |a| a.len())
+            };
+            if count == 0 {
+                json!({"status": "measured_zero"})
+            } else {
+                json!({"status": "measured", "count": count})
+            }
+        };
+        map.insert(key.to_string(), entry);
+    }
+    Value::Object(map)
 }
 
 #[cfg(test)]
@@ -956,5 +1007,43 @@ mod tests {
             serde_json::to_string(&hook_executions(&events)).unwrap(),
             r#"{"executions":[{"handler_id":"h1","point":"PreToolUse","decision":"pass","duration_ms":12,"turn":1,"seq":9,"missing_fields":[]},{"handler_id":"h2","point":null,"decision":"deny","duration_ms":null,"turn":1,"seq":15,"missing_fields":["point","duration_ms"]}],"decision_counts":{"deny":1,"pass":1}}"#
         );
+    }
+
+    #[test]
+    fn duration_coverage_is_unavailable_for_every_signal_on_empty_session() {
+        let duration = json!({"tool_calls": [], "turns": [], "steps": [], "approvals": [],
+                               "hooks": {"executions": [], "decision_counts": {}}});
+        let cov = Coverage::new();
+        let out = duration_coverage(&duration, &cov);
+        for key in ["tool_calls", "turns", "steps", "approvals", "hooks"] {
+            assert_eq!(out[key]["status"], json!("unavailable"), "{key} 零覆盖应该 unavailable");
+        }
+    }
+
+    #[test]
+    fn duration_coverage_distinguishes_measured_zero_from_unavailable() {
+        // ToolCalls 有覆盖但 tool_call_durations 折出空数组(比如全没 callId)
+        // → measured_zero,不是 unavailable。
+        let duration = json!({"tool_calls": [], "turns": [], "steps": [], "approvals": [],
+                               "hooks": {"executions": [], "decision_counts": {}}});
+        let mut cov = Coverage::new();
+        cov.set(Signal::ToolCalls, crate::evidence::CoverageCounts { measured: 3, ..Default::default() });
+        let out = duration_coverage(&duration, &cov);
+        assert_eq!(out["tool_calls"]["status"], json!("measured_zero"));
+        assert_eq!(out["turns"]["status"], json!("unavailable"));
+    }
+
+    #[test]
+    fn duration_coverage_measured_with_count_for_populated_arrays_and_nested_hooks() {
+        let duration = json!({
+            "tool_calls": [{"a": 1}, {"a": 2}], "turns": [], "steps": [], "approvals": [],
+            "hooks": {"executions": [{"a": 1}], "decision_counts": {"pass": 1}},
+        });
+        let mut cov = Coverage::new();
+        cov.set(Signal::ToolCalls, crate::evidence::CoverageCounts { measured: 2, ..Default::default() });
+        cov.set(Signal::Hooks, crate::evidence::CoverageCounts { measured: 1, ..Default::default() });
+        let out = duration_coverage(&duration, &cov);
+        assert_eq!(out["tool_calls"], json!({"status": "measured", "count": 2}));
+        assert_eq!(out["hooks"], json!({"status": "measured", "count": 1}));
     }
 }

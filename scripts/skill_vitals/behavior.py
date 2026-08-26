@@ -25,7 +25,7 @@ deepseek-harness `packages/core/session/src/types.ts` 及各插件 package 的
   JSON 字符串」不一致，本模块对这两种事件把对象拍平成字符串叶子再匹配。
 """
 
-from .util import post_fork
+from .util import post_fork, signal_coverage
 import re
 
 # 与 Rust `src/behavior.rs` 逐字节一致 —— 改动须两边同步。
@@ -357,32 +357,6 @@ RULE_REQUIRES = {
     "SV609": ("ApprovalDecisions",), "SV610": ("SandboxModes",),
 }
 
-# 事件 type → 计入哪个信号的覆盖计数。approval/asked 和 approval/decided 是
-# 同一个"问了→给了结果"生命周期的两端，都算 ApprovalDecisions 的证据——与
-# Rust dsh_evidence.rs 这次一起修的 bug 对齐（之前 Rust 那边只数了 decided，
-# 漏了 asked）。
-_SIGNAL_EVENT_TYPES = {
-    "ToolCalls": TOOL_CALL_TYPES,
-    "ToolResults": ("tool/result",),
-    "ApprovalDecisions": ("approval/asked", "approval/decided"),
-    "SandboxModes": ("sandbox/mode",),
-}
-
-
-def _signal_coverage(events):
-    """事件流 → SV601–610 用到的四个信号各自的证据计数（镜像 Rust
-    dsh_evidence.rs::derive_coverage，只取这四个信号，不是完整 19 个）。"""
-    counts = {name: 0 for name in _SIGNAL_EVENT_TYPES}
-    for event in events:
-        if not isinstance(event, dict):
-            continue
-        etype = event.get("type")
-        for name, types in _SIGNAL_EVENT_TYPES.items():
-            if etype in types:
-                counts[name] += 1
-    return counts
-
-
 def rule_outcomes(findings, events):
     """`findings`（已经算好、不改）+ `events` → 每条规则的三态结果
     （§10：N findings / measured-zero / unavailable），JSON-ready 字典。
@@ -394,7 +368,7 @@ def rule_outcomes(findings, events):
     自己会 post_fork，但覆盖率是这里单独算的，两边必须用同一批"审计范围内"
     的事件，不能算错口径）。
     """
-    coverage = _signal_coverage(events)
+    coverage = signal_coverage(events)
     by_rule = {}
     for code, requires in RULE_REQUIRES.items():
         missing = [s for s in requires if coverage.get(s, 0) == 0]
@@ -496,6 +470,7 @@ def audit_session_log(path):
     from .skill import skill_invocations
     from .duration import (
         tool_call_durations, turn_durations, step_durations, approval_latencies, hook_executions,
+        duration_coverage,
     )
     session = dsh.read_session_log(path)
     if session["degraded"]:
@@ -539,8 +514,11 @@ def audit_session_log(path):
     outcomes = rule_outcomes(findings, post_fork(events))
     # P3 group②：同样道理，usage_coverage 也要用分叉之后的 usage_events。
     usage_coverage = usage_signal_status(post_fork(usage_events))
+    # P3 group③：duration_coverage 用同一份 post_fork(events)——跟
+    # rule_outcomes 同源（execution 事件派生的信号）。
+    dur_coverage = duration_coverage(duration, post_fork(events))
     return (findings, usage, requests, context, compaction, waste, pre_fork, subagents, skill,
-            duration, outcomes, usage_coverage)
+            duration, outcomes, usage_coverage, dur_coverage)
 
 
 # 行为审计的闸门阈值语义，与 doctor.gate() 一致：critical/warning/info 三级，
