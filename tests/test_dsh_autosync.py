@@ -165,6 +165,47 @@ class TestSyncOnceStabilityGate(unittest.TestCase):
             self.assertFalse(list(tracked.values())[0]["synced"])
 
 
+class TestStaleSessionsNeverAutoSynced(unittest.TestCase):
+    """回归测试——真机踩过：第一次跑这个脚本时，38 个跨 Aug 14-23 的历史
+    session 一次性被判定"已经稳定"，全部同步进了 today.json，把当天预算
+    显示炸成 283%。`oneline`/`merge_today` 不校验日志日期是否真的是今天
+    （这是既有测试钉死的行为），所以拦截必须在这里做。"""
+
+    def test_stale_mtime_is_never_synced_even_after_stability_window(self):
+        with _IsolatedHome(), tempfile.TemporaryDirectory() as dsh_tmp:
+            dsh_home = Path(dsh_tmp)
+            p = _write_session(dsh_home, content='{"type":"session"}\n')
+            old_mtime = time.time() - 10 * 86400  # 10 天前
+            os.utime(p, (old_mtime, old_mtime))
+
+            with mock.patch("dsh_autosync.subprocess.run") as run:
+                dsh_autosync.sync_once(now=1000.0, dsh_home=dsh_home, stability_window=300)
+                n = dsh_autosync.sync_once(now=1301.0, dsh_home=dsh_home, stability_window=300)
+                # 再跑一次,确认"标记过期跳过"之后也不会回头重新判断/重试。
+                dsh_autosync.sync_once(now=99999.0, dsh_home=dsh_home, stability_window=300)
+                run.assert_not_called()
+            self.assertEqual(n, 0)
+            tracked = dsh_autosync._read_tracked()
+            self.assertFalse(tracked[str(p)]["synced"])
+            self.assertTrue(tracked[str(p)]["skipped_stale"],
+                             "过期 session 应该被标记 skipped_stale，不是无限重试")
+
+    def test_todays_mtime_syncs_normally(self):
+        """对照组：mtime 是今天的正常同步——防止上面那条测试靠"永远拦"
+        碰巧通过。"""
+        with _IsolatedHome(), tempfile.TemporaryDirectory() as dsh_tmp:
+            dsh_home = Path(dsh_tmp)
+            _write_session(dsh_home, content='{"type":"session"}\n')
+
+            def fake_run(cmd, capture_output, text):
+                return mock.Mock(returncode=0, stderr="")
+
+            with mock.patch("dsh_autosync.subprocess.run", side_effect=fake_run):
+                dsh_autosync.sync_once(now=1000.0, dsh_home=dsh_home, stability_window=300)
+                n = dsh_autosync.sync_once(now=1301.0, dsh_home=dsh_home, stability_window=300)
+            self.assertEqual(n, 1)
+
+
 class TestMultiFrameZstdDecompression(unittest.TestCase):
     def test_decompresses_full_content_not_just_first_frame(self):
         """回归测试：这整个功能存在的理由——.decompress() 只解第一帧，

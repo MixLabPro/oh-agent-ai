@@ -33,6 +33,16 @@ session 去重——同一份日志内容喂两次会累加两次（这是既有
 `stream_reader()` 读到 EOF 才是完整的 258228 字节 / 324 行。dsh-client
 （TypeScript 那边）踩过同一个坑，见 `dsh-client/src/host/index.ts` 里
 `readZstdFrames()` 的注释。
+
+**为什么只同步 mtime 是"今天"的 session**：真机踩过——第一次跑这个脚本
+时机器上有 38 个横跨 Aug 14–23 的历史 session 一次性被判定"已经稳定"，
+全部同步进了 today.json，把当天预算显示炸成 283%。根因是 `oneline`/
+`merge_today` 从来不校验日志里的日期是否真的是"今天"（既有测试钉死的
+行为——`merge_today` 信任调用方，fixtures 也是拿历史日期直接喂），过去
+没出问题只是因为 `oneline` 一直是人手动、当天跑。改 `merge_today` 自己
+会连带打碎那些既有测试；正确的修法是在这里拦：只同步 mtime 落在今天
+（北京时间）的会话，见 `_is_from_today`。更早的历史 session 永远标记
+`skipped_stale`，宁可不自动处理，也不要把陈年消费错记成"今天"。
 """
 
 import argparse
@@ -41,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -83,6 +94,22 @@ def _discover_session_logs(dsh_home: Path):
                 if p.is_file():
                     found.append(p)
     return found
+
+
+def _is_from_today(mtime: float) -> bool:
+    """会话文件的 mtime 落在北京时间的今天吗？
+
+    真机验证过这条检查为什么**必须**存在：第一次跑这个脚本时，机器上有
+    38 个横跨 Aug 14–23 的历史 session 一次性被判定"已经稳定"，全部同步
+    进了 today.json——`oneline`/`merge_today` 从来没有校验过日志里的日期
+    是否真的是"今天"（这是既有测试钉死的行为：`merge_today` 信任调用方,
+    fixtures 里也是拿历史日期直接喂），过去之所以没出过问题，是因为
+    `oneline` 一直只被人手动、当天跑。自动化把这条隐含前提打破了——补的
+    不是 `merge_today` 自己（改它会连带打碎那些既有 fixture 测试），而是
+    在这里拦住：**只同步 mtime 落在今天的会话**,更早的历史 session 宁可
+    一直不同步，也不要被套上"今天"这个错误的日期。"""
+    mtime_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
+    return state_module._to_bj_date(mtime_dt).isoformat() == state_module._today_key()
 
 
 def _autosync_state_path() -> Path:
@@ -182,11 +209,11 @@ def sync_once(now=None, dsh_home=None, stability_window=STABILITY_WINDOW_SECONDS
                              "first_seen_stable_at": now}
             continue
 
-        if prev.get("synced"):
+        if prev.get("synced") or prev.get("skipped_stale"):
             if prev.get("mtime") == mtime and prev.get("size") == size:
-                continue  # 快路径：没变化，已经同步过，跳过（不解压、不 stat 之外的任何工作）
-            # 同步之后文件又变了（罕见——比如路径被复用）：保守起见重新
-            # 计时，不假装没看见新增内容，也不盲目再同步一次旧的判定。
+                continue  # 快路径：没变化，已经处理过（同步了或判定过期跳过），跳过
+            # 之后文件又变了（罕见——比如路径被复用）：保守起见重新计时，
+            # 不假装没看见新增内容，也不盲目沿用旧的判定。
             tracked[key] = {"mtime": mtime, "size": size, "synced": False,
                              "first_seen_stable_at": now}
             continue
@@ -194,6 +221,18 @@ def sync_once(now=None, dsh_home=None, stability_window=STABILITY_WINDOW_SECONDS
         if prev.get("mtime") == mtime and prev.get("size") == size:
             first_seen = prev.get("first_seen_stable_at")
             if first_seen is not None and (now - first_seen) >= stability_window:
+                if not _is_from_today(mtime):
+                    # 这份日志不是今天产生的——`oneline`/`merge_today` 没有
+                    # 校验日期的能力，硬跑只会把历史消费错记成"今天"（见
+                    # `_is_from_today` 的文档注释，真机踩过）。标记跳过，
+                    # 不再每轮重新判断这同一份文件。
+                    print("dsh_autosync: %s predates today, skipping "
+                          "auto-sync (run oneline manually if you want a "
+                          "historical backfill)" % path, file=sys.stderr)
+                    tracked[key] = {"mtime": mtime, "size": size, "synced": False,
+                                     "first_seen_stable_at": first_seen,
+                                     "skipped_stale": True}
+                    continue
                 text, err = _read_session_text(path)
                 if err is not None:
                     print("dsh_autosync: skip %s: %s" % (path, err), file=sys.stderr)
