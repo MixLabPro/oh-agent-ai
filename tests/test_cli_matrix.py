@@ -775,6 +775,12 @@ class CliMatrix(unittest.TestCase):
         self.assertTrue(all("进度停滞" in f["evidence"] for f in stall))
         perm = [f for f in report["findings"] if f["rule"] == "SV614"]
         self.assertTrue(all("权限异常" in f["evidence"] for f in perm))
+        # P3 group④：behavior.jsonl 命中全部 14 条规则 → rule_outcomes 里
+        # SV611-614 应该都是 findings(有真实计数)，不是 unavailable/
+        # measured_zero。both() 已经保证 py==rs 逐字节一致。
+        for r in ("SV611", "SV612", "SV613", "SV614"):
+            self.assertEqual(report["rule_outcomes"][r]["status"], "findings",
+                             "%s 在 behavior.jsonl 上应该命中" % r)
 
     def test_behavior_duration_json(self):
         """--json 的第十二个键：duration（D11 执行时长审计）。

@@ -355,7 +355,22 @@ RULE_REQUIRES = {
     "SV604": ("ToolCalls",), "SV605": ("ToolCalls",), "SV606": ("ToolCalls",),
     "SV607": ("ToolResults",), "SV608": ("ToolResults",),
     "SV609": ("ApprovalDecisions",), "SV610": ("SandboxModes",),
+    # P3 group④（trajectory，SV611–614）。SV611 只读 tool/call。SV612 只
+    # 依赖 TurnBoundaries——ToolCalls 全零时每个 turn 签名列表都是空，如实
+    # measured-zero("有 turn 结构但确实没有工具调用可循环"是真测出来的结
+    # 论，不是缺证据)；但 TurnBoundaries 全零时连 turn 都分不出来，判断不
+    # 了有没有循环，才是 unavailable。SV613/614 各自两个子判定读不同信
+    # 号，任一有证据规则就不是完全测不了——这两条的语义是"至少一个"，见
+    # 下面 `_OR_REQUIRES_CODES`，不是这个字典能表达的"全部都要"。
+    "SV611": ("ToolCalls",), "SV612": ("TurnBoundaries",),
+    "SV613": ("TurnBoundaries", "ToolResults"),
+    "SV614": ("ApprovalDecisions", "SandboxModes"),
 }
+
+# requires 是"至少一个信号有证据"（OR）而不是"全部都要"（AND）的规则码。
+# 与 Rust behavior.rs::OR_REQUIRES_CODES 逐字节对齐。
+_OR_REQUIRES_CODES = ("SV613", "SV614")
+
 
 def rule_outcomes(findings, events):
     """`findings`（已经算好、不改）+ `events` → 每条规则的三态结果
@@ -372,7 +387,8 @@ def rule_outcomes(findings, events):
     by_rule = {}
     for code, requires in RULE_REQUIRES.items():
         missing = [s for s in requires if coverage.get(s, 0) == 0]
-        if missing:
+        is_unavailable = (len(missing) == len(requires)) if code in _OR_REQUIRES_CODES else bool(missing)
+        if is_unavailable:
             by_rule[code] = {
                 "status": "unavailable",
                 "missing": missing,

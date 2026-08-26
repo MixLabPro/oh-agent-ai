@@ -416,9 +416,41 @@ fn rule_specs() -> &'static [RuleSpec] {
                 enhances: &[Signal::ApprovalDecisions],
                 min_fidelity: Fidelity::Full,
             },
+            // P3 group④（trajectory，SV611–614）：SV611 只读 tool/call（同
+            // group①的 SV601-603/606）。SV612 只依赖 TurnBoundaries——
+            // ToolCalls 全零时 detect_loop 每个 turn 签名列表都是空，如实
+            // MeasuredZero（"有 turn 结构但确实没有工具调用可循环"是一个真
+            // 测出来的结论，不是缺证据）；但 TurnBoundaries 全零时连 turn
+            // 都分不出来，整段事件流退化成一个不可分割的伪 turn，判断不了
+            // 有没有循环，才是 Unavailable。SV613（(a) turn/end 错误连续
+            // (b) tool/result 连续失败）与 SV614（(a) 同调用反复审批
+            // (b) 连续拒绝 (c) 危险模式反复授予）各自的子判定共享一个规则码
+            // 但读不同的信号——两个子判定**任一**有证据，规则就不是完全测
+            // 不了，所以这两条的 requires 是"至少一个"而不是"全部"，见下面
+            // `rule_outcomes` 里 `OR_REQUIRES_CODES` 的特殊处理。
+            RuleSpec { code: "SV611", requires: &[Signal::ToolCalls], enhances: &[], min_fidelity: Fidelity::Full },
+            RuleSpec { code: "SV612", requires: &[Signal::TurnBoundaries], enhances: &[Signal::ToolCalls], min_fidelity: Fidelity::Full },
+            RuleSpec {
+                code: "SV613",
+                requires: &[Signal::TurnBoundaries, Signal::ToolResults],
+                enhances: &[],
+                min_fidelity: Fidelity::Full,
+            },
+            RuleSpec {
+                code: "SV614",
+                requires: &[Signal::ApprovalDecisions, Signal::SandboxModes],
+                enhances: &[],
+                min_fidelity: Fidelity::Full,
+            },
         ]
     })
 }
+
+/// `requires` 是"至少一个信号有证据"（OR），不是"全部都要"（AND）的规则码。
+/// SV613/614 各自的子判定读不同信号、任一有证据规则就不是完全测不了；
+/// SV601-612 都是单信号 requires（或 SV612 的"缺了就真测不了"那一个），
+/// AND/OR 在单元素列表上等价，不受影响。
+const OR_REQUIRES_CODES: [&str; 2] = ["SV613", "SV614"];
 
 /// `findings`（已经算好、不改）+ `coverage` → 每条规则的 `RuleOutcome`
 /// （§10 的三态契约：N findings / measured-zero / unavailable）。这是**只读**
@@ -437,7 +469,12 @@ pub fn rule_outcomes(findings: &[Value], coverage: &Coverage) -> Vec<(&'static s
                 .filter(|s| coverage.get(**s).total() == 0)
                 .copied()
                 .collect();
-            let outcome = if !missing.is_empty() {
+            let is_unavailable = if OR_REQUIRES_CODES.contains(&spec.code) {
+                !spec.requires.is_empty() && missing.len() == spec.requires.len()
+            } else {
+                !missing.is_empty()
+            };
+            let outcome = if is_unavailable {
                 RuleOutcome::Unavailable {
                     missing,
                     reason: "no evidence for required signal(s) in this session".to_string(),
@@ -928,6 +965,7 @@ mod tests {
             ("SV605", Signal::ToolCalls), ("SV606", Signal::ToolCalls),
             ("SV607", Signal::ToolResults), ("SV608", Signal::ToolResults),
             ("SV609", Signal::ApprovalDecisions), ("SV610", Signal::SandboxModes),
+            ("SV611", Signal::ToolCalls), ("SV612", Signal::TurnBoundaries),
         ] {
             let outcomes = rule_outcomes(&[], &empty);
             let (found_code, outcome) = outcomes.iter().find(|(c, _)| *c == code).unwrap();
@@ -978,6 +1016,75 @@ mod tests {
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV610").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero),
             "SandboxModes 有覆盖时 SV610 不该因为 ApprovalDecisions 缺覆盖变成 Unavailable");
+    }
+
+    #[test]
+    fn sv612_treats_toolcalls_as_enhances_not_requires() {
+        // TurnBoundaries 有覆盖、ToolCalls 全零——真测出来的结论是"有 turn
+        // 结构但没有工具调用可循环",是 MeasuredZero，不是 Unavailable。
+        let cov = measured_coverage(Signal::TurnBoundaries, 1);
+        let outcomes = rule_outcomes(&[], &cov);
+        let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV612").unwrap();
+        assert!(matches!(outcome, RuleOutcome::MeasuredZero),
+            "TurnBoundaries 有覆盖时 SV612 不该因为 ToolCalls 缺覆盖变成 Unavailable");
+    }
+
+    /// P3 group④：SV613/614 的 requires 是"至少一个信号有证据"（OR）——
+    /// 两个子判定分别读不同信号，任一有证据规则就不是完全测不了。
+    #[test]
+    fn sv613_and_sv614_are_unavailable_only_when_all_their_signals_are_missing() {
+        let empty = Coverage::new();
+        for code in ["SV613", "SV614"] {
+            let outcomes = rule_outcomes(&[], &empty);
+            let (_, outcome) = outcomes.iter().find(|(c, _)| *c == code).unwrap();
+            assert!(matches!(outcome, RuleOutcome::Unavailable { .. }),
+                "{code} 两个信号都全零覆盖时应该 Unavailable");
+        }
+    }
+
+    #[test]
+    fn sv613_is_available_when_only_one_of_its_two_signals_has_coverage() {
+        // 只有 ToolResults 有覆盖(TurnBoundaries 全零)——613b(连续工具失败)
+        // 那半边测得了，规则不该整体判 Unavailable。
+        let cov = measured_coverage(Signal::ToolResults, 1);
+        let outcomes = rule_outcomes(&[], &cov);
+        let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV613").unwrap();
+        assert!(matches!(outcome, RuleOutcome::MeasuredZero),
+            "ToolResults 有覆盖时 SV613 不该因为 TurnBoundaries 缺覆盖变成 Unavailable");
+
+        // 反过来:只有 TurnBoundaries 有覆盖——613a(连续 error turn)测得了。
+        let cov2 = measured_coverage(Signal::TurnBoundaries, 1);
+        let outcomes2 = rule_outcomes(&[], &cov2);
+        let (_, outcome2) = outcomes2.iter().find(|(c, _)| *c == "SV613").unwrap();
+        assert!(matches!(outcome2, RuleOutcome::MeasuredZero));
+    }
+
+    #[test]
+    fn sv614_is_available_when_only_one_of_its_two_signals_has_coverage() {
+        let cov = measured_coverage(Signal::SandboxModes, 1);
+        let outcomes = rule_outcomes(&[], &cov);
+        let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV614").unwrap();
+        assert!(matches!(outcome, RuleOutcome::MeasuredZero),
+            "SandboxModes 有覆盖时 SV614 不该因为 ApprovalDecisions 缺覆盖变成 Unavailable");
+    }
+
+    #[test]
+    fn sv611_through_sv614_findings_are_picked_up_by_rule_outcomes() {
+        // rule_outcomes 喂的是 findings(SV601-610) + trajectory findings
+        // (SV611-614) 合并之后的数组——这条测试确认 SV611-614 真的被
+        // rule_specs() 认得，不是只声明了规格却匹配不到 finding。
+        let cov = {
+            let mut c = Coverage::new();
+            c.set(Signal::ToolCalls, CoverageCounts { measured: 1, ..Default::default() });
+            c
+        };
+        let findings = vec![json!({"rule": "SV611", "severity": "warning"})];
+        let outcomes = rule_outcomes(&findings, &cov);
+        let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV611").unwrap();
+        match outcome {
+            RuleOutcome::Findings(items) => assert_eq!(items.len(), 1),
+            _ => panic!("SV611 有一条命中，应该是 Findings"),
+        }
     }
 
     #[test]

@@ -726,10 +726,14 @@ class TestRuleOutcomes(unittest.TestCase):
             "SV604": "ToolCalls", "SV605": "ToolCalls", "SV606": "ToolCalls",
             "SV607": "ToolResults", "SV608": "ToolResults",
             "SV609": "ApprovalDecisions", "SV610": "SandboxModes",
+            "SV611": "ToolCalls", "SV612": "TurnBoundaries",
         }
         for code, signal in expected_missing.items():
             self.assertEqual(outcomes[code]["status"], "unavailable")
             self.assertIn(signal, outcomes[code]["missing"])
+        # SV613/614 是"至少一个"语义——两个信号都全零覆盖时才 unavailable。
+        for code in ("SV613", "SV614"):
+            self.assertEqual(outcomes[code]["status"], "unavailable")
 
     def test_measured_zero_is_distinct_from_unavailable_for_the_same_rule(self):
         events = [self._ev("tool/call", 1, {"name": "bash", "arguments": "echo hi"})]
@@ -756,6 +760,30 @@ class TestRuleOutcomes(unittest.TestCase):
         events = [self._ev("approval/asked", 1, {"id": "a1", "toolName": "bash"})]
         outcomes = rule_outcomes([], events)
         self.assertEqual(outcomes["SV609"], {"status": "measured_zero"})
+
+    def test_sv612_treats_toolcalls_as_enhances_not_requires(self):
+        events = [self._ev("turn/start", 1, {"turn": 1})]
+        outcomes = rule_outcomes([], events)
+        self.assertEqual(outcomes["SV612"], {"status": "measured_zero"},
+                         "TurnBoundaries 有覆盖时 SV612 不该因为 ToolCalls 缺覆盖变成 unavailable")
+
+    def test_sv613_is_available_when_only_one_of_its_two_signals_has_coverage(self):
+        events = [self._ev("tool/result", 1, {})]
+        outcomes = rule_outcomes([], events)
+        self.assertEqual(outcomes["SV613"], {"status": "measured_zero"},
+                         "ToolResults 有覆盖时 SV613 不该因为 TurnBoundaries 缺覆盖变成 unavailable")
+
+    def test_sv614_is_available_when_only_one_of_its_two_signals_has_coverage(self):
+        events = [self._ev("sandbox/mode", 1, {"mode": "danger-full-access"})]
+        outcomes = rule_outcomes([], events)
+        self.assertEqual(outcomes["SV614"], {"status": "measured_zero"},
+                         "SandboxModes 有覆盖时 SV614 不该因为 ApprovalDecisions 缺覆盖变成 unavailable")
+
+    def test_sv611_through_sv614_findings_are_picked_up(self):
+        events = [self._ev("tool/call", 1, {"name": "bash", "arguments": "ls"})]
+        findings = [{"rule": "SV611", "severity": "warning"}]
+        outcomes = rule_outcomes(findings, events)
+        self.assertEqual(outcomes["SV611"], {"status": "findings", "count": 1})
 
 
 class TestUsageSignalStatus(unittest.TestCase):

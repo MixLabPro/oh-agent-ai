@@ -1310,7 +1310,7 @@ behaviour is the golden corpus, and the golden corpus speaks only DSH.
 | **P0** | This document, plus the §13 matrix as a checked-in baseline | Matrix committed; it *is* the test baseline |
 | **P1 ✅** | `evidence` module in `skill-vitals-core`: `CanonicalSession`, `Signal`, `Observed<T>`, `Provenance`, `CoverageCounts`, `RuleSpec`, `RuleOutcome` | Zero behaviour change — nothing consumes it yet. Landed in `crates/skill-vitals-core/src/evidence.rs`: all §2–§12 types plus `AggregateProvenance::for_window`, `CoverageCounts`/`Coverage` ratios, and the §12 no-host-identifier self-check, 12 unit tests. 15/15 goldens byte-identical before/after (nothing calls it yet) |
 | **P2 ✅** | `crates/skill-vitals-core/src/dsh_evidence.rs`: a plain function (`build_dsh_evidence`, **not a trait** — see `CanonicalSession`'s own doc comment and `ARCHITECTURE.md` §4.2) that folds `src/dsh.rs`'s already-extracted `execution_events`/`usage_events` into a `CanonicalSession` (Signal/Coverage counted per §13's DSH column; the 3 rows §13 doesn't cover — `SandboxPolicy`/`UserPrompts`/`UserCorrections` — are left `Unavailable`, not fabricated), bundled with the raw events (`CanonicalSession` alone has no event-payload field); plus `reverse_project`, a temporary bridge back to today's `behavior.rs` input shape | **Byte-identical `behavior --json` output**, proven three ways: `cargo test` (154 core + 137 binary), `SKILL_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (the real Python↔Rust differential — `golden/*.json` covers the unrelated `scan` command, not this), and a manual before/after diff on `fixtures/dsh/behavior.jsonl`. `reverse_project` is deleted when P3 completes |
-| **P3 (①②③ ✅ · ④⑤ pending)** | Migrate rules one family per PR: read Signals, declare `requires`, goldens unchanged. Order: ① command/path (SV601–610) ② cost fold ③ duration ④ trajectory ⑤ skill / subagent / compaction / waste | See §17.1a for what actually landed per group. `reverse_project` stays until all 5 groups complete |
+| **P3 (①②③④ ✅ · ⑤ pending)** | Migrate rules one family per PR: read Signals, declare `requires`, goldens unchanged. Order: ① command/path (SV601–610) ② cost fold ③ duration ④ trajectory ⑤ skill / subagent / compaction / waste | See §17.1a for what actually landed per group. `reverse_project` stays until all 5 groups complete |
 | **P4** | Codex adapter | Chosen second not for coverage breadth — §14.1 shows it lacks tool-call duration, approvals, and hooks — but because it is the only host that emits **two incompatible formats without declaring which**. If the model absorbs both Codex modes without structural change, it is sound |
 | **P4.5** | Schema-drift sentinel for `RolloutItem` (§14.4) | CI fails on upstream persistence-policy change |
 | **P5** | Claude Code adapter | First real use of `Provenance::Derived` (turn boundaries) and `Linearization` (message tree) |
@@ -1363,7 +1363,26 @@ used so far, since group ③ needed 3 more (`TurnBoundaries`/`StepBoundaries`/
 `Hooks`) and duplicating the dict a second time would have let the two
 copies drift.
 
-All three groups verified the same way: `cargo test`, `cargo clippy -D
+**④ trajectory (SV611–614) ✅**: unlike ②③, this family produces discrete
+rule-coded findings exactly like group ①, so it reuses the *same*
+`rule_specs()`/`rule_outcomes()` engine from group ① — 4 new `RuleSpec`
+entries, no new function. The one real design wrinkle: SV613 and SV614 each
+have **2–3 independent sub-checks sharing one rule code** (SV613:
+`turn/end` error runs *or* consecutive `tool/result` failures; SV614: same
+`callId` repeated approval, consecutive rejections, *or* repeated
+`danger-full-access` grants) — each sub-check reads a different signal, and
+any one having evidence means the rule isn't fully unmeasurable. So for
+these two codes only, `requires` means "at least one of these" (OR) rather
+than "all of these" (AND) — encoded as a small `OR_REQUIRES_CODES` list
+consulted in `rule_outcomes`, not a change to `RuleSpec`'s shape (which stays
+a plain `&[Signal]`; AND/OR is indistinguishable on single-element lists, so
+groups ①–③'s existing specs are unaffected). Also found while reasoning
+through SV612: `ToolCalls` being absent while `TurnBoundaries` is present is
+a legitimate `MeasuredZero` ("turns exist, genuinely zero tool calls to
+loop"), not `Unavailable` — so SV612's `requires` is `TurnBoundaries` alone,
+with `ToolCalls` as `enhances`, mirroring SV610's pattern from group ①.
+
+All four groups verified the same way: `cargo test`, `cargo clippy -D
 warnings`, full Python suite, `SKILL_VITALS_BIN=<rust> python3 -m unittest
 tests.test_cli_matrix` (byte-identical new keys both languages), wasm
 rebuilt + `dsh-client`'s full `npm test` (including `verify-host.mjs`) green
