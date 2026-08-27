@@ -645,6 +645,19 @@
     if (activeInline && activeInline.textContent.trim()) {
       try {
         var data = JSON.parse(activeInline.textContent);
+        // today.json 判定为陈旧（date 字段不是真实今天）时,cli.py 内联的
+        // 不是真数据,是一个哨兵——今天还没有新会话,不是"读不到文件"。
+        // 必须在这里拦下来,单独给清晰文案,不能落进下面 legacy-inline
+        // 的 schema 推断（{stale:true} 没有 days/buckets 字段,会被误判）,
+        // 也不能落空让代码继续往 fetch 走——那条路径在 file:// 下几乎
+        // 必然撞 CORS,把"今天还没数据"这个正常状态显示成一句吓人的
+        // 网络错误。
+        if (data && data.stale) {
+          setStatus("今天还没有新的 DSH 会话（上一条记录停在 " +
+                    (data.stale_date || "更早") + "），暂无数据。");
+          render("today", { buckets: {} });
+          return;
+        }
         if (legacyInline) {
           var inferred = (data && data.days && !data.buckets) ? "month" : "today";
           if (inferred !== mode) {

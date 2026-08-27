@@ -299,13 +299,22 @@ class TestCalendarCli(unittest.TestCase):
         """`today.json` 的 `date` 字段一旦落后于真实当前日期,日历「今天」
         tab 必须当成没有数据处理,不能把陈旧的一整天热力图画出来标成"今天"。
 
-        真机回归：`rotate_today()` 只在 `merge_today()` 开头被调用——今天
-        一次 DSH 会话都没跑时 today.json 会原封不动停在最后一次有会话的
-        那天。之前只在 `budget.compute_today_cost()`（菜单栏）修过这个
-        校验,日历渲染是另一个读者,同一个 bug 换个入口又出现了一次：
-        2026-08-27 当天没用过 DSH，日历「今天 24 小时」tab 仍然画出
-        08-26 的完整 24 小时热力图（还能看出这个 bug——真正的"今天"不
-        可能有 24 小时数据，一天还没过完）。
+        真机回归链条（两轮才修完）：
+        1. `rotate_today()` 只在 `merge_today()` 开头被调用——今天一次 DSH
+           会话都没跑时 today.json 会原封不动停在最后一次有会话的那天。
+           之前只在 `budget.compute_today_cost()`（菜单栏）修过这个校验,
+           日历渲染是另一个读者，同一个 bug 换个入口又出现了一次：
+           2026-08-27 当天没用过 DSH，日历「今天 24 小时」tab 仍然画出
+           08-26 的完整 24 小时热力图（真正的"今天"不可能有 24 小时数据，
+           一天还没过完，这个矛盾本身就是发现这个 bug 的线索）。
+        2. 第一版修法是「陈旧就整个不内联」——但 JS 找不到
+           `skill-vitals-data-today` 这个 script 标签时,会当成"不确定
+           有没有文件"走 fetch() 兜底,在 file:// 打开时必然撞 CORS,
+           弹出一句让人费解的"读取本地文件被 CORS 阻止"（真实复现：之前
+           today.json 几乎总有数据可内联，这条 fetch 分支很少被走到，这
+           次改动第一次把它暴露出来）。现在改成内联一个显式的
+           `{"stale": true, "stale_date": ...}` 哨兵，JS 认出它就直接
+           显示"今天还没有数据"，不再往 fetch/file-picker 那条分支走。
         """
         with _TmpHome() as h:
             r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
@@ -324,12 +333,17 @@ class TestCalendarCli(unittest.TestCase):
                 m = re.search(
                     r'<script id="skill-vitals-data-today"[^>]*>(.*?)</script>',
                     html, re.DOTALL)
-                self.assertIsNone(
-                    m, "陈旧的 today.json 不该被内联进日历,应该跟"
-                       "'today.json 不存在'走同一条 empty-state 分支")
-                # sidecar 仍然照写——那是原始文件的副本，不是"今天该显示
-                # 什么"的判断
-                self.assertTrue((Path(td) / "today.json").is_file())
+                self.assertIsNotNone(
+                    m, "必须内联一个哨兵——不能让 JS 落入'找不到 script 标签'"
+                       "那条会触发 fetch()/CORS 报错的分支")
+                sentinel = json.loads(m.group(1))
+                self.assertTrue(sentinel.get("stale"),
+                                "陈旧数据必须显式标 stale,不能悄悄传成真数据")
+                self.assertEqual(sentinel.get("stale_date"), "2020-01-01")
+                # sidecar 仍然照写真实原始字节——那是原始文件的副本，
+                # 不是"今天该显示什么"的判断，跟哨兵是两回事
+                sidecar = json.loads((Path(td) / "today.json").read_text())
+                self.assertEqual(sidecar["date"], "2020-01-01")
 
 
 class TestAugmentCalendarCostCoverage(unittest.TestCase):

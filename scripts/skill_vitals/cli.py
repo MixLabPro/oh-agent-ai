@@ -193,6 +193,19 @@ def _render_calendar_html(output_path, default_source="month"):
                 sidecar = out.parent / src_name
                 if sidecar.resolve() != src.resolve():
                     sidecar.write_text(json_text, encoding="utf-8")
+                # 不能就此 continue（跳过整个 inject）——那样 JS 找不到
+                # `skill-vitals-data-today` 这个 script 标签，会误判成
+                # 「没内联，试试 fetch」，在 file:// 打开时必然撞上 CORS，
+                # 弹出一句让人费解的"读取本地文件被 CORS 阻止"（真实
+                # 复现：之前 today.json 几乎总有数据可内联，这条 fetch
+                # 兜底路径很少被走到，这次改动第一次把它暴露出来）。
+                # 改成内联一个显式的 stale 哨兵，让 JS 立刻识别出「这不是
+                # 没数据，是数据被判定过期而不展示」，直接给清晰文案，
+                # 不再往 fetch/file-picker 那条「不确定有没有文件」的分支走。
+                stale_text = json.dumps({"stale": True, "stale_date": data["date"]})
+                inject = ("<script id=\"skill-vitals-data-today\" "
+                          "type=\"application/json\">" + stale_text + "</script>")
+                html = html.replace("</head>", inject + "\n</head>", 1)
                 continue
             _augment_calendar_cost(mode, data, pricing)
             embed_text = json.dumps(data)
