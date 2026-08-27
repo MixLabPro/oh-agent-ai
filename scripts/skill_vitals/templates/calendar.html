@@ -798,6 +798,18 @@
       cell.className = "hour-cell" + (b && isPeak(b) ? " peak" : "")
                       + (tok === 0 ? " empty" : "");
       cell.style.background = colorFor(tok, maxTok, tok === 0);
+      // 必须显式指定列，不能靠 CSS Grid 自动排布——`.hour-cell` 只在
+      // CSS 里定了 grid-row:1，没定 grid-column，于是浏览器的自动排布
+      // 算法会先把它（先出现在 DOM 里，且是"行确定、列不确定"这一类）
+      // 从第 1 列开始摆，而 `.today-axis` 的列虽然固定是 1，但它是"列
+      // 确定、行不确定"那一类，排布顺序上反而排在 cell 后面——于是
+      // hour-cell(h) 占了第 h+1 列，比下面 hour-label(h) 用的 h+2 整整
+      // 少 1，效果是每根柱子都画在它自己刻度标签的左边一格：柱子上真实
+      // 是 07 点的数据，视觉上却对到 06 那一列的位置下方（真机复现：
+      // 北京时间下午查看，条形图却在 21、22 点有数据，一部分就是这个
+      // 偏移让人以为柱子在更早的位置）。显式指定成跟 label 同一条公式，
+      // 让两者锁死对齐，不再依赖自动排布算法的处理顺序。
+      cell.style.gridColumn = String(h + 2); // +2: 第一列是 axis，与下面 label 用同一条公式
       cell.dataset.hour = String(h);
       cell.dataset.tok = String(tok);
       cell.innerHTML =

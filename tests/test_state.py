@@ -136,11 +136,18 @@ class TestOneline(unittest.TestCase):
 
 class TestMergeToday(unittest.TestCase):
     def test_merge_today_accumulates_across_calls(self):
-        """两次 audit 同一小时 → 该小时 8 字段全部累加。"""
+        """两次 audit 同一小时 → 该小时 8 字段全部累加。
+
+        用 `state._today_key()` 而不是硬编码年月日——`merge_today` 现在
+        按 date 过滤（只留真正发生在今天的桶，见该函数文档），硬编码一个
+        固定日期迟早会随日历前进变成"不是今天"，那时这条测试会因为桶
+        被过滤成空而失败,而不是它本来要测的"同一小时累加"。
+        """
         with _IsolatedHome():
+            d = state._today_key()
             # 第 1 次：14 点 +1000 input
             state.merge_today({"buckets": [
-                {"date": "2026-08-25", "hour": 14, "is_peak": True,
+                {"date": d, "hour": 14, "is_peak": True,
                  "uncached_input_tokens": 1000, "output_tokens": 100,
                  "cache_read_tokens": 0, "cache_write_tokens": 0,
                  "peak_uncached_input_tokens": 1000, "peak_output_tokens": 100,
@@ -148,12 +155,12 @@ class TestMergeToday(unittest.TestCase):
             ]})
             # 第 2 次：14 点 +500 input，15 点 +200 input
             state.merge_today({"buckets": [
-                {"date": "2026-08-25", "hour": 14, "is_peak": True,
+                {"date": d, "hour": 14, "is_peak": True,
                  "uncached_input_tokens": 500, "output_tokens": 50,
                  "cache_read_tokens": 0, "cache_write_tokens": 0,
                  "peak_uncached_input_tokens": 500, "peak_output_tokens": 50,
                  "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
-                {"date": "2026-08-25", "hour": 15, "is_peak": True,
+                {"date": d, "hour": 15, "is_peak": True,
                  "uncached_input_tokens": 200, "output_tokens": 20,
                  "cache_read_tokens": 0, "cache_write_tokens": 0,
                  "peak_uncached_input_tokens": 200, "peak_output_tokens": 20,
@@ -165,6 +172,97 @@ class TestMergeToday(unittest.TestCase):
             self.assertEqual(buckets["14"]["uncached_input_tokens"], 1500)
             self.assertEqual(buckets["14"]["output_tokens"], 150)
             self.assertEqual(buckets["15"]["uncached_input_tokens"], 200)
+
+    def test_merge_today_drops_buckets_from_other_dates(self):
+        """`hour_buckets` 里不属于今天的桶必须被滤掉，不能靠 hour 数字
+        碰巧撞上就被塞进 today.json。
+
+        回归（真机复现）：`_merge_buckets(..., key_field="hour")` 只看
+        几点，完全不看日期——回填/审计任意一份日志时，只要它的事件落在
+        21、22 点（不管哪一天的 21、22 点），都会被合并进 today.json 的
+        21/22 点格子。真实结果：北京时间下午 3 点查看日历，"今天 24 小时"
+        热力图里却有 21 点、22 点的数据——物理上不可能，一天还没过完。
+        """
+        with _IsolatedHome():
+            other_day = "2020-01-01"
+            self.assertNotEqual(other_day, state._today_key())
+            state.merge_today({"buckets": [
+                {"date": other_day, "hour": 21, "is_peak": False,
+                 "uncached_input_tokens": 999999, "output_tokens": 0,
+                 "cache_read_tokens": 0, "cache_write_tokens": 0,
+                 "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                 "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+            ]})
+            today = json.loads((state.state_dir() / "today.json").read_text())
+            self.assertEqual(today.get("buckets", {}), {},
+                             "不属于今天的桶不该出现在 today.json 里,"
+                             "不管它的 hour 数字是几点")
+
+    def test_merge_today_keeps_only_the_matching_hour_when_mixed(self):
+        """同一次调用里既有今天的桶又有别的日期的桶——只留今天那部分,
+        不是整批全收或整批全丢。"""
+        with _IsolatedHome():
+            d = state._today_key()
+            state.merge_today({"buckets": [
+                {"date": d, "hour": 9, "is_peak": False,
+                 "uncached_input_tokens": 100, "output_tokens": 0,
+                 "cache_read_tokens": 0, "cache_write_tokens": 0,
+                 "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                 "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+                {"date": "2020-01-01", "hour": 21, "is_peak": False,
+                 "uncached_input_tokens": 999999, "output_tokens": 0,
+                 "cache_read_tokens": 0, "cache_write_tokens": 0,
+                 "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                 "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+            ]})
+            today = json.loads((state.state_dir() / "today.json").read_text())
+            buckets = today["buckets"]
+            self.assertEqual(list(buckets.keys()), ["9"])
+            self.assertEqual(buckets["9"]["uncached_input_tokens"], 100)
+
+    def test_merge_today_drops_by_model_when_session_has_no_today_bucket(self):
+        """`by_model` 没有逐小时的日期信息，但如果这份 session **确实有**
+        带日期的 hour 桶、而且没有一个是今天，就是实锤证据证明这整段
+        session 不是今天的，`by_model` 也该跳过——不能只滤桶不滤钱。
+
+        真机复现：一个只在 2026-08-23/08-26 有真实活动的 session 被
+        oneline 审计后，today.json 的 `by_model` 整段被记了进去，「今日
+        估算成本」显示 ¥1.54，而当天（08-27）一次 DSH 会话都还没跑。
+        """
+        with _IsolatedHome():
+            state.merge_today({"buckets": [
+                {"date": "2020-01-01", "hour": 10, "is_peak": False,
+                 "uncached_input_tokens": 100, "output_tokens": 0,
+                 "cache_read_tokens": 0, "cache_write_tokens": 0,
+                 "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                 "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+            ]}, by_model={
+                "deepseek-v4-pro": {
+                    "uncached_input_tokens": 999999, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+            })
+            today = json.loads((state.state_dir() / "today.json").read_text())
+            self.assertNotIn("by_model", today,
+                             "session 没有一个今天的桶时,by_model 不该被计进今天")
+
+    def test_merge_today_keeps_by_model_when_no_dated_evidence_either_way(self):
+        """没有任何带日期的桶（比如 hour_buckets 传了空列表）时,不能主动
+        认定"这不是今天"——没有实锤证据时保留 by_model,是"heuristics
+        sort, they never acquit"同一条纪律：宁可维持旧行为,也不能靠
+        缺席的证据去认定一件事。"""
+        with _IsolatedHome():
+            state.merge_today({"buckets": []}, by_model={
+                "deepseek-v4-pro": {
+                    "uncached_input_tokens": 100, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+            })
+            today = json.loads((state.state_dir() / "today.json").read_text())
+            self.assertIn("by_model", today)
+            self.assertEqual(today["by_model"]["deepseek-v4-pro"]["uncached_input_tokens"], 100)
 
     def test_merge_today_accumulates_by_model_across_calls(self):
         """by_model 是与 (date, hour) 桶并列的新字段——两次 audit 同一

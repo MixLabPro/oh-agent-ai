@@ -418,7 +418,7 @@ def _to_bj_date(dt):
 
 
 def merge_today(hour_buckets_result, by_model=None) -> Path:
-    """把 hour_buckets 的所有 (date, hour) 桶合并到 today.json。
+    """把 hour_buckets 里**属于今天**的 (date, hour) 桶合并到 today.json。
 
     锁住同一 `<state_dir>/.lock`，read-modify-write 期间不让其他
     tick 进来 —— 否则两个并发审计可能各读一份、各写一份，后者覆盖
@@ -427,24 +427,51 @@ def merge_today(hour_buckets_result, by_model=None) -> Path:
     **跨日自动 rotate** — 调用 rotate_today() 先处理跨日累积。
     这是修「¥1172/¥30 = 3908% 假告警」的关键。
 
+    **必须按 date 过滤，不能只按 hour 折叠**——`_merge_buckets(...,
+    key_field="hour")` 完全不看 `date` 字段，只看几点。一次 oneline 审计
+    的是任意一份日志（`dsh_autosync.py` 的 skip 提示明确建议"回填历史
+    日志用 oneline"），如果那份日志的事件恰好落在 21、22 点，不管是哪
+    一天的 21、22 点，都会被塞进 today.json 的 21/22 点格子——真机复现：
+    北京时间 15:10 查看日历，"今天 24 小时"热力图里却有 21 点、22 点的
+    数据，物理上不可能（一天还没过完）。这里先把不属于今天的桶滤掉，
+    今天.json 就只剩下真的发生在今天的小时。
+
     `by_model`(可选,`token_by_model()` 的 `by_model` 字段)累加进
     `today.json["by_model"]` —— 与 (date, hour) 桶是**并列的新字段**,
     不是替换,budget.py 按模型精确定价时读它,旧的 (date, hour) 桶继续
     只服务日历热力图,互不影响。
+
+    **`by_model` 没有逐小时的日期信息，不能像上面的桶那样精确按 date
+    过滤——但完全不管会重蹈同一个坑。** 真机复现：一个只在 08-23/08-26
+    有真实活动的 session 被 oneline 审计后，today.json 的 `by_model`
+    整段被记了进去，「今日估算成本」显示 ¥1.54，而当天（08-27）其实
+    一次 DSH 会话都还没跑。这里用一个不完美但安全的判据：如果这份
+    session **有**带日期的 hour 桶、而且**没有一个**是今天，就说明有
+    实锤证据证明这整段 session 不是今天的，`by_model` 一并跳过。反过来，
+    没有任何带日期的桶（比如所有样本都缺时间戳）时**保留**原行为——
+    宁可像过去一样可能收进不该收的账，也不能反过来把真today的数据（只
+    是恰好没测到时间戳）误判成"不是今天"而丢掉，这不对称是有意的
+    （见 CLAUDE.md「heuristics sort, they never acquit」同一条纪律：
+    没有实锤证据时不能主动认定）。
     """
     path = state_dir() / "today.json"
     rotate_today()  # 跨 BJ 0:00 自动滚动
+    today_key = _today_key()
     with _locked(path):
         existing = _read(path) or {}
+        all_buckets = hour_buckets_result.get("buckets", [])
+        dated_buckets = [b for b in all_buckets if b.get("date")]
+        todays_buckets = [b for b in dated_buckets if b["date"] == today_key]
+        if by_model and dated_buckets and not todays_buckets:
+            by_model = None
         existing["buckets"] = _merge_buckets(
-            existing.get("buckets"), hour_buckets_result.get("buckets", []),
-            key_field="hour")
+            existing.get("buckets"), todays_buckets, key_field="hour")
         if by_model:
             existing["by_model"] = _merge_model_buckets(
                 existing.get("by_model"), by_model)
         existing["schema_version"] = SCHEMA_VERSION
         existing["generated_at"] = _now_iso()
-        existing["date"] = _today_key()
+        existing["date"] = today_key
         _atomic_write(path, existing)
     return path
 

@@ -48,6 +48,48 @@ class _TmpHome:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
+def _write_today_dated_log(path, input_tokens=1700000, output_tokens=100,
+                           model="deepseek-v4-flash"):
+    """写一份事件时间戳为**真实当前时刻**的最小 DSH 会话日志。
+
+    `fixtures/dsh/behavior.jsonl` 是固定历史日期（2025-06-15，为了
+    golden/差分测试可复现）——`merge_today` 现在会把不属于今天的桶滤掉
+    （见 state.py::merge_today 的文档：真机复现过"下午 3 点看到 21、22
+    点数据"的重复计费类 bug），用那份固定夹具测"today.json 是否正确
+    累加今天的数据"这件事本身就不成立了，需要一份时间戳货真价实是
+    "现在"的日志。
+    """
+    _write_today_dated_multi_model_log(path, [(model, input_tokens, output_tokens)])
+
+
+def _write_today_dated_multi_model_log(path, models):
+    """同 `_write_today_dated_log`，但 `models` 是
+    `[(model, input_tokens, output_tokens), ...]`——用于需要验证"混了
+    多个模型、按模型精确定价"这类场景（`fixtures/dsh/behavior.jsonl`
+    原本就是为此设计的，但它固定在 2025-06-15，不能再用来测
+    today.json 的路径,见上面 `_write_today_dated_log` 的说明）。
+    """
+    import time
+    now_ms = int(time.time() * 1000)
+    lines = [
+        {"type": "session", "version": 0, "id": "sess-today-dated",
+         "createdAt": now_ms, "cwd": "/tmp", "delegationDepth": 0},
+    ]
+    seq = 1
+    for model, input_tokens, output_tokens in models:
+        lines.append({"type": "request/header", "seq": seq, "time": now_ms,
+                      "data": {"header": {"config": {"model": model}}}})
+        seq += 1
+        lines.append({"type": "assistant/chunk", "seq": seq, "time": now_ms,
+                      "data": {"turn": seq, "step": 1, "chunk": {"type": "usage",
+                               "usage": {"inputTokens": input_tokens,
+                                         "outputTokens": output_tokens}}}})
+        seq += 1
+    with open(path, "w", encoding="utf-8") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+
+
 class TestOnelineCli(unittest.TestCase):
     def test_oneline_writes_three_state_files(self):
         """一次 oneline 应该产生 oneline.json + today.json + month.json。"""
@@ -82,10 +124,12 @@ class TestOnelineCli(unittest.TestCase):
             self.assertFalse((sd / "month.json").is_file())
 
     def test_oneline_today_accumulates_across_runs(self):
-        """两次 oneline 同一会话 → today.json 桶内累加。"""
+        """两次 oneline 同一份"今天"的会话 → today.json 桶内累加。"""
         with _TmpHome() as h:
+            log = Path(h.tmp) / "today.jsonl"
+            _write_today_dated_log(log)
             for _ in range(2):
-                r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+                r = _run(["oneline", str(log)], env=h.env)
                 self.assertEqual(r.returncode, 0, r.stderr)
             today = json.loads((Path(h.tmp) / "state" / "today.json").read_text())
             # 累加后某个 hour 桶的非零 token 数 = 单次的两倍（同一会话跑两遍）
@@ -94,15 +138,36 @@ class TestOnelineCli(unittest.TestCase):
             # 单次 input_tokens 是 1.7M,累加后应是 3.4M
             self.assertEqual(bucket_values[0]["uncached_input_tokens"], 1700000 * 2)
 
+    def test_oneline_on_historical_log_does_not_pollute_todays_hour_buckets(self):
+        """回归：审计一份**历史日期**的日志（`fixtures/dsh/behavior.jsonl`
+        固定在 2025-06-15）不该往 today.json 的 (hour) 桶里塞任何数据——
+        真机复现过的 bug：`merge_today` 曾经只按"几点"合并、完全不看
+        日期，回填任意一份日志只要事件落在 21、22 点就会被塞进
+        today.json 的 21/22 点格子，北京时间下午查看却看到"今天"有
+        21、22 点的数据（一天还没过完，物理上不可能）。"""
+        with _TmpHome() as h:
+            r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            today = json.loads((Path(h.tmp) / "state" / "today.json").read_text())
+            self.assertEqual(today.get("buckets", {}), {},
+                             "2025-06-15 的日志不该出现在 today.json 的任何 hour 桶里")
+
 
 class TestOnelinePerModelPricing(unittest.TestCase):
     """端到端:oneline 落盘的 by_model 要真的驱动 budget.py 的定价——
-    不是写了字段但没人读。fixtures/dsh/behavior.jsonl 里混了
-    deepseek-v4-flash 和 deepseek-v4-pro 两个模型的事件。"""
+    不是写了字段但没人读。用今天日期的日志混两个模型（不能再用
+    `fixtures/dsh/behavior.jsonl`——它固定在 2025-06-15，`merge_today`
+    现在会把没有今天证据的 session 的 by_model 一并跳过,见
+    state.py::merge_today 的文档）。"""
 
     def test_today_by_model_populated_and_alert_uses_accurate_price(self):
         with _TmpHome() as h:
-            r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+            log = Path(h.tmp) / "today.jsonl"
+            _write_today_dated_multi_model_log(log, [
+                ("deepseek/deepseek-v4-flash", 500000, 100),
+                ("deepseek/deepseek-v4-pro-0813", 300000, 50),
+            ])
+            r = _run(["oneline", str(log)], env=h.env)
             self.assertEqual(r.returncode, 0, r.stderr)
             sd = Path(h.tmp) / "state"
             today = json.loads((sd / "today.json").read_text())
@@ -261,12 +326,19 @@ class TestCalendarCli(unittest.TestCase):
     def test_calendar_inlines_accurate_per_model_cost(self):
         """日历页内联数据必须带上按真实模型精算的 cost/accurate_cost 字段——
         不能只让 budget show/xbar 菜单栏精确、日历页还留在 flash-only 近似
-        （fixtures/dsh/behavior.jsonl 混了 flash 和 pro,两者价差 3 倍,足以
-        暴露这个字段缺失）。sidecar 副本（file picker fallback 用）必须保持
-        state 文件原始字节，不带这个额外字段——那份要跟 state.py 的 schema
-        契约字面一致。"""
+        （混了 flash 和 pro,两者价差 3 倍,足以暴露这个字段缺失）。用今天
+        日期的日志（不能再用 `fixtures/dsh/behavior.jsonl`——它固定在
+        2025-06-15，`merge_today` 现在会把没有今天证据的 session 的
+        by_model 一并跳过，见 state.py::merge_today 的文档）。sidecar
+        副本（file picker fallback 用）必须保持 state 文件原始字节，
+        不带这个额外字段——那份要跟 state.py 的 schema 契约字面一致。"""
         with _TmpHome() as h:
-            r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+            log = Path(h.tmp) / "today.jsonl"
+            _write_today_dated_multi_model_log(log, [
+                ("deepseek/deepseek-v4-flash", 500000, 100),
+                ("deepseek/deepseek-v4-pro-0813", 300000, 50),
+            ])
+            r = _run(["oneline", str(log)], env=h.env)
             self.assertEqual(r.returncode, 0, r.stderr)
             with tempfile.TemporaryDirectory() as td:
                 out = Path(td) / "cal.html"
@@ -421,11 +493,19 @@ class TestUsageHourBucketsReconcile(unittest.TestCase):
 
     与 token_by_model / hour_buckets 的不变量是同一回事 —— M3 通过 oneline
     把 hour_buckets 暴露到 state 文件,这条对账必须仍然成立。
+
+    **前提是这份日志的事件真的发生在今天**——`merge_today` 现在会把不
+    属于今天的桶滤掉（见 state.py::merge_today 的文档），所以这里不能再
+    用固定历史日期的 `fixtures/dsh/behavior.jsonl`，得用一份时间戳是
+    "现在"的日志，见 `_write_today_dated_log`。
     """
 
     def test_oneline_hour_buckets_match_token_by_model(self):
         with _TmpHome() as h:
-            _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+            log = Path(h.tmp) / "today.jsonl"
+            _write_today_dated_log(log)
+            r = _run(["oneline", str(log)], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
             today = json.loads((Path(h.tmp) / "state" / "today.json").read_text())
             oneline = json.loads((Path(h.tmp) / "state" / "oneline.json").read_text())
             # today.json 所有 hour 桶的 4 基础桶（input + output + cache_read
