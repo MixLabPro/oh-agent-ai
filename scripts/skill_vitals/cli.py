@@ -174,6 +174,26 @@ def _render_calendar_html(output_path, default_source="month"):
         except (json.JSONDecodeError, ValueError):
             data = None
         if isinstance(data, dict):
+            # today.json 的 `date` 必须真的是今天——同一个 bug 之前只在
+            # budget.compute_today_cost() 修过（菜单栏），这里是**另一个
+            # 读者**：`rotate_today()` 只在 merge_today() 开头被调用，今天
+            # 一次 DSH 会话都没跑时 today.json 会原封不动停在最后一次有
+            # 会话的那天。不校验的话,日历「今天 24 小时」tab 会把昨天的
+            # 24 小时桶原样画出来,标成"今天"——真机复现：2026-08-27 当天
+            # 没用过 DSH，日历仍在展示 08-26 的热力图。
+            #
+            # 处理方式与「today.json 不存在」完全一致（见本函数文档：
+            # 「today.json 不存在就不内联那个块」）——陈旧数据在这个
+            # 意义上就是「没有今天的数据」，跳过 embed，交给 JS 已有的
+            # empty-state 分支，不需要新的前端逻辑。sidecar 仍然照写：
+            # 那是「原始状态文件的副本」，不是「今天视图该显示什么」的
+            # 判断，file picker fallback 场景下把原始文件递给用户没有错。
+            if (mode == "today" and data.get("date")
+                    and data["date"] != state_module._today_key()):
+                sidecar = out.parent / src_name
+                if sidecar.resolve() != src.resolve():
+                    sidecar.write_text(json_text, encoding="utf-8")
+                continue
             _augment_calendar_cost(mode, data, pricing)
             embed_text = json.dumps(data)
         # JSON 里可能含 </script> —— 必须转义,否则浏览器解析到这就崩

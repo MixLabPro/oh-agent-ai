@@ -295,6 +295,42 @@ class TestCalendarCli(unittest.TestCase):
                 self.assertNotIn("accurate_cost", sidecar,
                                   "sidecar 是 state.py 契约文件，不该带展示层附加字段")
 
+    def test_calendar_does_not_embed_stale_today_as_todays_data(self):
+        """`today.json` 的 `date` 字段一旦落后于真实当前日期,日历「今天」
+        tab 必须当成没有数据处理,不能把陈旧的一整天热力图画出来标成"今天"。
+
+        真机回归：`rotate_today()` 只在 `merge_today()` 开头被调用——今天
+        一次 DSH 会话都没跑时 today.json 会原封不动停在最后一次有会话的
+        那天。之前只在 `budget.compute_today_cost()`（菜单栏）修过这个
+        校验,日历渲染是另一个读者,同一个 bug 换个入口又出现了一次：
+        2026-08-27 当天没用过 DSH，日历「今天 24 小时」tab 仍然画出
+        08-26 的完整 24 小时热力图（还能看出这个 bug——真正的"今天"不
+        可能有 24 小时数据，一天还没过完）。
+        """
+        with _TmpHome() as h:
+            r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            today_path = Path(h.tmp) / "state" / "today.json"
+            today = json.loads(today_path.read_text())
+            # 手动把 date 改成"昨天"，模拟"今天还没跑过任何 DSH 会话"
+            today["date"] = "2020-01-01"
+            today_path.write_text(json.dumps(today))
+
+            with tempfile.TemporaryDirectory() as td:
+                out = Path(td) / "cal.html"
+                r = _run(["calendar", "--source", "today", "-o", str(out)], env=h.env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                html = out.read_text(encoding="utf-8")
+                m = re.search(
+                    r'<script id="skill-vitals-data-today"[^>]*>(.*?)</script>',
+                    html, re.DOTALL)
+                self.assertIsNone(
+                    m, "陈旧的 today.json 不该被内联进日历,应该跟"
+                       "'today.json 不存在'走同一条 empty-state 分支")
+                # sidecar 仍然照写——那是原始文件的副本，不是"今天该显示
+                # 什么"的判断
+                self.assertTrue((Path(td) / "today.json").is_file())
+
 
 class TestAugmentCalendarCostCoverage(unittest.TestCase):
     """`_augment_calendar_cost` 必须校验 `by_model` 覆盖率,不能只看「存不存在」。
