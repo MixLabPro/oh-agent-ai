@@ -20,6 +20,7 @@ SCRIPT = ROOT / "scripts" / "scan.py"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from skill_vitals import budget as budget_module  # noqa: E402
+from skill_vitals import cli as cli_module  # noqa: E402
 from skill_vitals import cost as cost_module  # noqa: E402
 
 
@@ -136,6 +137,39 @@ class TestOnelinePerModelPricing(unittest.TestCase):
                 accurate["total"], old_approx["total"], places=4,
                 msg="behavior.jsonl 混了 pro,精确定价不应等于旧的 flash-only 近似")
 
+    def test_month_by_model_attributed_to_the_log_own_date_not_today(self):
+        """回归：`fixtures/dsh/behavior.jsonl` 的事件全部发生在 2025-06-15
+        （固定历史日期，永远不等于跑测试那天，也永远不等于当前自然月）。
+        老实现把 `oneline` 喂进的 `by_model` 一律记进 `_today_key()`，回填
+        这份历史日志会把 by_model 错记成"今天"——真实 2026-08 的 month.json
+        因此漏记了没有落到回填当天的部分（月度精算成本一度偏差 4 倍）。
+
+        2025-06 不是当前自然月，`merge_month` 会把它迁进
+        `month-archive.json`（见 state.py 的跨月归档设计）——这条测试因此
+        直接检查归档文件，而不是 month.json。"""
+        with _TmpHome() as h:
+            r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            month = json.loads((Path(h.tmp) / "state" / "month.json").read_text())
+            self.assertNotIn("2025-06-15", month.get("days", {}),
+                             "历史月的数据不该留在只保存当前月的 month.json 里")
+
+            archive = json.loads(
+                (Path(h.tmp) / "state" / "month-archive.json").read_text())
+            day = archive["months"]["2025-06"]["days"]["2025-06-15"]
+            by_model = day.get("by_model")
+            self.assertTrue(by_model, "历史日期桶应该带 by_model,不是只有 4 基础桶")
+            self.assertIn("deepseek/deepseek-v4-flash", by_model)
+            self.assertIn("deepseek/deepseek-v4-pro-0813", by_model)
+
+            import datetime
+            today_str = datetime.datetime.now(
+                datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d")
+            if today_str in month["days"]:
+                self.assertNotIn(
+                    "by_model", month["days"][today_str],
+                    "2025-06-15 的历史日志不应该把 by_model 记到'今天'头上")
+
 
 class TestStateCli(unittest.TestCase):
     def test_state_list_empty(self):
@@ -167,6 +201,45 @@ class TestStateCli(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             r2 = _run(["state", "list"], env=h.env)
             self.assertEqual(r2.stdout.strip(), "(empty)")
+
+    def test_state_months_lists_current_and_archived(self):
+        """`fixtures/dsh/behavior.jsonl` 的事件全在 2025-06-15——不是当前
+        自然月，`oneline` 之后应该被归档，`state months` 能查到它。"""
+        with _TmpHome() as h:
+            r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            r = _run(["state", "months"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("2025-06", r.stdout.split())
+
+    def test_state_months_empty_says_no_data(self):
+        with _TmpHome() as h:
+            r = _run(["state", "months"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.strip(), "(no data)")
+
+
+class TestBudgetShowMonth(unittest.TestCase):
+    """`budget show --month YYYY-MM` —— 查询特定月份，不受当前月限制。"""
+
+    def test_query_archived_month_by_flag(self):
+        with _TmpHome() as h:
+            r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            r = _run(["budget", "show", "--month", "2025-06", "--json"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            out = json.loads(r.stdout)
+            self.assertEqual(out["month"], "2025-06")
+            self.assertIsNotNone(out["cost"])
+            self.assertGreater(out["cost"]["total"], 0)
+
+    def test_query_month_with_no_data_reports_none_not_zero(self):
+        """缺数据必须报 None（缺列不编列），不能编一个 0 出来。"""
+        with _TmpHome() as h:
+            r = _run(["budget", "show", "--month", "1999-01", "--json"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            out = json.loads(r.stdout)
+            self.assertIsNone(out["cost"])
 
 
 class TestCalendarCli(unittest.TestCase):
@@ -221,6 +294,76 @@ class TestCalendarCli(unittest.TestCase):
                 sidecar = json.loads((Path(td) / "today.json").read_text())
                 self.assertNotIn("accurate_cost", sidecar,
                                   "sidecar 是 state.py 契约文件，不该带展示层附加字段")
+
+
+class TestAugmentCalendarCostCoverage(unittest.TestCase):
+    """`_augment_calendar_cost` 必须校验 `by_model` 覆盖率,不能只看「存不存在」。
+
+    回归：8 月账目里,`by_model` 只覆盖了当天 0.7%~32.5% 的 token（跨零点
+    会话只把切到那一天的一部分记了下来），老实现只要 `by_model` 存在就
+    整天标「精算」、用它算出的总价直接报出去——剩下 67%~99% 的 token
+    静默消失，月度成本因此漏算了 4 倍。"""
+
+    def _flat_bucket(self, **overrides):
+        b = {f: 0 for f in cost_module.DAY_BUCKET_FIELDS}
+        b.update(overrides)
+        return b
+
+    def test_full_coverage_is_marked_exact(self):
+        """by_model 之和 == 当天总量 → pricing_basis 'exact',coverage 1.0,
+        total 与直接调用 cost_report 一致（不含任何 fallback 补齐）。"""
+        pricing = cost_module.load_pricing()
+        by_model = {"deepseek-v4-flash": self._flat_bucket(
+            uncached_input_tokens=1_000_000, output_tokens=100_000)}
+        day = self._flat_bucket(uncached_input_tokens=1_000_000, output_tokens=100_000)
+        day["by_model"] = by_model
+        data = {"days": {"2026-08-17": day}}
+
+        cli_module._augment_calendar_cost("month", data, pricing)
+
+        cost = data["days"]["2026-08-17"]["cost"]
+        self.assertEqual(cost["pricing_basis"], "exact")
+        self.assertEqual(cost["coverage"], 1.0)
+        expected = cost_module.cost_report({"by_model": by_model}, pricing)
+        self.assertAlmostEqual(cost["total"], expected["total"], places=9)
+
+    def test_partial_coverage_tops_up_with_fallback_price_not_silently_dropped(self):
+        """by_model 只覆盖当天一部分 token → pricing_basis 'partial',
+        coverage < 1,total 必须严格大于「只按覆盖部分算」的价格——证明
+        没覆盖的那部分token 真的被计价了,不是凭空消失。"""
+        pricing = cost_module.load_pricing()
+        covered = 1_000_000       # by_model 里记着的（比如 pro）
+        uncovered = 9_000_000     # 当天总量比 by_model 多出来的部分（未归属）
+        by_model = {"deepseek-v4-pro": self._flat_bucket(uncached_input_tokens=covered)}
+        day = self._flat_bucket(uncached_input_tokens=covered + uncovered)
+        day["by_model"] = by_model
+        data = {"days": {"2026-08-17": day}}
+
+        cli_module._augment_calendar_cost("month", data, pricing)
+
+        cost = data["days"]["2026-08-17"]["cost"]
+        self.assertEqual(cost["pricing_basis"], "partial")
+        self.assertAlmostEqual(cost["coverage"], covered / (covered + uncovered), places=9)
+
+        covered_only = cost_module.cost_report({"by_model": by_model}, pricing)
+        self.assertGreater(
+            cost["total"], covered_only["total"],
+            "未覆盖的 9M token 必须被 fallback 价补齐进 total,不能悄悄消失")
+
+        top_up = cost_module.fallback_price(
+            self._flat_bucket(uncached_input_tokens=uncovered), pricing)
+        self.assertAlmostEqual(
+            cost["total"], covered_only["total"] + top_up["total"], places=9,
+            msg="total 必须恰好等于「精算部分 + fallback 补齐部分」,不多不少")
+
+    def test_zero_by_model_leaves_day_untouched(self):
+        """没有 by_model 的日子（老数据/纯近似日）不该被这个函数动——
+        continue 分支,不产生 cost 字段,calendar.html 走 JS 近似兜底。"""
+        pricing = cost_module.load_pricing()
+        day = self._flat_bucket(uncached_input_tokens=100)
+        data = {"days": {"2026-08-01": day}}
+        cli_module._augment_calendar_cost("month", data, pricing)
+        self.assertNotIn("cost", data["days"]["2026-08-01"])
 
 
 class TestUsageHourBucketsReconcile(unittest.TestCase):

@@ -1,22 +1,32 @@
 """状态文件 I/O —— xbar / 日历 / 预算告警的共享持久层。
 
-三个状态文件，三种写入语义：
+四个状态文件，四种写入语义：
 
-  oneline.json   单次审计的「最后一行」快照。xbar / SwiftBar tick 脚本
-                 每 5 分钟跑一次 `behavior <log>`，把结果原地覆盖到这里。
-                 不是历史，是**当前**。多个客户端（tray、CLI）都从这里
-                 读，避免各自重算 cost / peak —— 重算两份就两份可能
-                 不一致（见 cost.py 的 peak/off-peak 计价分支）。
+  oneline.json      单次审计的「最后一行」快照。xbar / SwiftBar tick 脚本
+                    每 5 分钟跑一次 `behavior <log>`，把结果原地覆盖到这里。
+                    不是历史，是**当前**。多个客户端（tray、CLI）都从这里
+                    读，避免各自重算 cost / peak —— 重算两份就两份可能
+                    不一致（见 cost.py 的 peak/off-peak 计价分支）。
 
-  today.json     当日 24 小时桶的累计聚合。每次审计**合并**到对应的小
-                 时桶（同一小时多次会话累加），而不是覆盖 —— 日历要看
-                 的是「今天到目前为止」，不是「最近一次会话」。
+  today.json        当日 24 小时桶的累计聚合。每次审计**合并**到对应的小
+                    时桶（同一小时多次会话累加），而不是覆盖 —— 日历要看
+                    的是「今天到目前为止」，不是「最近一次会话」。
 
-  month.json     当月逐日聚合。每天最多 31 条（YYYY-MM-DD → 4+4 token
-                 桶），跨月滚动 —— 上月的存档在 month-archive.jsonl
-                 追加一份后清空。
+  month.json        **只保存当前自然月**逐日聚合（YYYY-MM-DD → 4+4 token
+                    桶 + 可选 by_model）。`merge_month` 每次调用先把不属于
+                    当前月的日子迁进 month-archive.json（见下），再落新
+                    数据——这是 2026-08 那次「本月成本」在跨月后悄悄变成
+                    「有史以来成本」的事故修复，见 `merge_month` 文档注释。
 
-三件事共用同一把锁：`fcntl.flock` on `<state_dir>/.lock`。POSIX rename
+  month-archive.json 跨月归档，`{"months": {"YYYY-MM": {"days": {...}}}}`。
+                    读写不直接碰这个文件——用 `read_month(month=None)` 查
+                    （当前月读 month.json，历史月读这里）、`list_months()`
+                    列出有数据的月份、`_archive_days()`/`merge_month` 写。
+                    逐日**替换**而不是累加（迁移幂等），但对已归档月份的
+                    **回填**是累加（新证据不能覆盖已有数据）——两条路径的
+                    区别见 `merge_month` 与 `_archive_days` 各自的注释。
+
+四件事共用同一把锁：`fcntl.flock` on `<state_dir>/.lock`。POSIX rename
 原子，所以「写 tmp → rename」不需要锁保护；锁是给「read-modify-write」
 合并场景防两个并发审计互相覆盖的。
 
@@ -204,6 +214,82 @@ def _today_key(time_ms=None):
     return (date(1970, 1, 1) + timedelta(days=days)).isoformat()
 
 
+def _month_key(date_str=None):
+    """Beijing 'YYYY-MM'。`date_str` 为 'YYYY-MM-DD' 时取它的月份,否则用今天。
+
+    **当前月一律按真实时间算,不读 `month.json` 的 `month` 字段**——那个字段
+    是写入时刻盖的戳,跨月之后它和 `days` 里的实际内容本来就会不一致
+    （真实事故：9 月的 month.json 里还留着 8 月的日子,`month` 却写着
+    "2026-09",按它过滤等于什么都没过滤）。
+    """
+    if date_str:
+        return str(date_str)[:7]
+    return datetime.now(_BEIJING).date().isoformat()[:7]
+
+
+def archive_path() -> Path:
+    """跨月归档文件。
+
+    形状是 `{"2026-08": {"days": {...}, "archived_at": ...}, ...}` 而不是
+    JSONL：归档要能**按月合并**（同一个月可能分几次落进来——先跨月迁移一
+    批,之后又回填一批历史日志),append-only 的 JSONL 要么重复累加要么得
+    在读侧做 last-wins 折叠,两种都比一个按月键的 dict 更容易出错。体积上
+    也不需要 JSONL：一年 12 个月 × 31 天 ≈ 75KB,永远不会大到要流式读。
+    """
+    return state_dir() / "month-archive.json"
+
+
+def _archive_days(days_by_date):
+    """把若干「日桶」写进归档,**逐日替换**而不是累加。在调用方的锁内调用。
+
+    为什么是替换：`month.json` 里某一天的记录**就是那一天的完整累计**
+    （`merge_month` 一直往里加）。把它搬进归档时替换掉归档里的同一天,
+    这个操作是**幂等**的——写完归档、还没来得及从 month.json 删掉就崩溃,
+    下次重跑得到完全一样的结果,不会把那天算两遍。累加则不幂等,崩一次就
+    多算一次（这正是 `rotate_today` 曾经犯的错,见那边的注释）。
+
+    代价：调用方必须保证同一天**只存在于一个文件里**——`merge_month` 通过
+    「先迁移旧月、再落新数据」的顺序保证这一点,见那边的注释。
+    """
+    if not days_by_date:
+        return
+    p = archive_path()
+    archive = _read(p) or {}
+    months = archive.setdefault("months", {})
+    for date_str, day in days_by_date.items():
+        entry = months.setdefault(_month_key(date_str), {"days": {}})
+        entry["days"][date_str] = day        # 逐日替换 —— 幂等
+        entry["archived_at"] = _now_iso()
+    archive["schema_version"] = SCHEMA_VERSION
+    _atomic_write(p, archive)
+
+
+def read_month(month=None):
+    """读某一个自然月的 `{"month": "YYYY-MM", "days": {...}}`。
+
+    `month=None` → 当前真实月（读 `month.json`）；历史月读归档。
+    月份不存在时返回 `None` —— 与「缺列不编列」一致,不返回一个空壳让
+    调用方误以为"那个月花了 0 元"。
+    """
+    target = month or _month_key()
+    if target == _month_key():
+        data = _read(state_dir() / "month.json") or {}
+        days = {d: b for d, b in (data.get("days") or {}).items()
+                if _month_key(d) == target}
+        return {"month": target, "days": days} if days else None
+    archive = _read(archive_path()) or {}
+    entry = (archive.get("months") or {}).get(target)
+    return {"month": target, "days": entry["days"]} if entry and entry.get("days") else None
+
+
+def list_months():
+    """有数据的自然月,升序。当前月 + 归档里的所有月份。"""
+    months = set((_read(archive_path()) or {}).get("months") or {})
+    for d in (_read(state_dir() / "month.json") or {}).get("days") or {}:
+        months.add(_month_key(d))
+    return sorted(months)
+
+
 def _merge_buckets(existing, new_buckets, key_field):
     """把 new_buckets 折进 existing[key_field] → 8 token 字段。
 
@@ -257,8 +343,7 @@ def _merge_model_buckets(existing, by_model):
 
 
 def rotate_today(now=None):
-    """如果 today.json 的 date 字段 != 当前 BJ 日期,把当前桶搬到
-    month.days[<old_date>],然后清空 today.json。
+    """如果 today.json 的 date 字段 != 当前 BJ 日期,**清空** today.json。
 
     这是修 #1 误报的关键 — 不 rotate 的话,38 个 session 的累积
     数据会一直被当成「今天」算 cost,显示 ¥1172/¥30 = 3908% 这种
@@ -267,8 +352,23 @@ def rotate_today(now=None):
     调用时机: 每次 merge_today 开头先调一次 rotate_today(now),
     跨 BJ 0:00 时自动滚动。now=None → 用当前系统时间。
 
-    跨日时不丢失数据 — 所有桶累加到 month.days[<old_date>],与
-    merge_month 的逻辑对称。
+    **旧数据不在这里搬进 month.json——那会重复计数。** 这里曾经调
+    `_move_today_to_month()` 把旧桶累加进 `month.days[<old_date>]`，
+    注释说「与 merge_month 的逻辑对称」；但唯一的生产调用方
+    （`cli.py` 的 oneline）对同一份 hour_buckets **同时**调
+    `merge_today` 和 `merge_month`，而 `merge_month` 已经按每个桶
+    自带的 `date` 字段把它们记进 month.json 了。于是每跨一天，
+    昨天的量就被再加一遍——实测 2026-08 的 month.json 每一天都正好
+    是真实值的 3 倍（rotate 一遍 + merge_month 一遍 + 额外手跑
+    oneline 一遍），月度成本因此从 ¥1733 虚增到 ¥2386。
+
+    旧测试没发现是因为它们都直接手写 today.json、month.json 是空的，
+    重复相加看起来就等于正确值；真实路径下 month.json 里**已经有**
+    同一批数据。
+
+    **不变量：month.json 里每个 token 只能被记一次，归属它自己的
+    日期，由 `merge_month` 独家负责。** rotate 只做「把 today.json
+    这个当日累加器清零，换上新日期」这一件事。
 
     跨月不特殊处理 — month.json.days 已累积所有历史日,跨月不
     切分(年视图需要的话再加 month-archive.jsonl)。这是 spec 没
@@ -289,11 +389,9 @@ def rotate_today(now=None):
         existing = _read(path) or {}
         old_date = existing.get("date")
         if old_date and old_date != today_bj:
-            # 把旧 today.json 的桶搬到 month.days[<old_date>]
-            old_buckets = existing.get("buckets") or {}
-            old_by_model = existing.get("by_model") or {}
-            if old_buckets or old_by_model:
-                _move_today_to_month(old_date, old_buckets, old_by_model)
+            # **不搬进 month.json**——merge_month 已经按各桶自己的 date
+            # 记过一遍了，再搬一次就是重复计数（见本函数文档注释里的
+            # 3 倍虚增实测）。这里只清空当日累加器。
             # 清空 today.json,留下 schema_version 和新 date
             existing = {
                 "schema_version": SCHEMA_VERSION,
@@ -317,40 +415,6 @@ def _to_bj_date(dt):
     days = secs // 86400
     from datetime import date, timedelta
     return date(1970, 1, 1) + timedelta(days=days)
-
-
-def _move_today_to_month(date_str, buckets, by_model=None):
-    """把 today.json 旧桶搬到 month.json.days[<date_str>]。在锁内调用。
-
-    复用 merge_buckets 的累加逻辑 —— 同一日期的桶可能月视图已经有数据,
-    这里累加而不是覆盖。`by_model`(today.json 顶层的按模型累计,见
-    `_merge_model_buckets`)一并搬到 month.days[<date_str>].by_model ——
-    否则跨天 rotate 会把当天的按模型明细丢光,7 日均价只能退回旧的
-    单模型近似。
-    """
-    month_path = state_dir() / "month.json"
-    month = _read(month_path) or {}
-    # 把 hour-bucket 转成 day-bucket:把所有 hour 桶合并成一个
-    # 字段名一致的 dict,key_field 改 'date',buckets 列表只一条
-    day_bucket = {
-        "date": date_str,
-        "hour": None,
-        "is_peak": None,
-    }
-    for fld in ("uncached_input_tokens", "output_tokens",
-                "cache_read_tokens", "cache_write_tokens",
-                "peak_uncached_input_tokens", "peak_output_tokens",
-                "peak_cache_read_tokens", "peak_cache_write_tokens"):
-        day_bucket[fld] = sum(b.get(fld) or 0 for b in buckets.values())
-    month["days"] = _merge_buckets(
-        month.get("days"), [day_bucket], key_field="date")
-    if by_model:
-        day = month["days"][date_str]
-        day["by_model"] = _merge_model_buckets(day.get("by_model"), by_model)
-    month["schema_version"] = SCHEMA_VERSION
-    month["generated_at"] = _now_iso()
-    month["month"] = date_str[:7]
-    _atomic_write(month_path, month)
 
 
 def merge_today(hour_buckets_result, by_model=None) -> Path:
@@ -385,32 +449,96 @@ def merge_today(hour_buckets_result, by_model=None) -> Path:
     return path
 
 
-def merge_month(hour_buckets_result, by_model=None) -> Path:
+def merge_month(hour_buckets_result, by_date_model=None) -> Path:
     """把 hour_buckets 的所有桶合并到 month.json（按日期折叠）。
 
-    `by_model` 同 `merge_today` —— 累加进当天(`_today_key()`)
-    `days[<date>].by_model`,与 rotate 时 `_move_today_to_month` 搬运
-    历史日的 by_model 是同一份数据形状,budget.py 两处都能按模型定价。
+    `by_date_model`: `{date_str: {model: 八桶}}`（见
+    `usage.py::token_by_date_model`）——**不是**整段 session 一次性的
+    `by_model`。历史上这里收的是后者，一律写进 `_today_key()`（今天）,
+    对「审计一份刚结束的当天会话」这个唯一被测过的场景凑巧是对的（那时
+    "今天" 就是会话真实发生的那天），但对「回填历史日志」（
+    `dsh_autosync.py` 的 skip 提示明确建议的用法：「run oneline manually
+    if you want a historical backfill」）或跨零点的长会话就是错的——
+    真实 case：`session-e4b0be69` 横跨 4 天，整段 by_model 被记成回填当天，
+    月度精算成本因此漏记了没落在该日的部分（8月账目一度因此偏差 4 倍）。
+    现在按 `by_date_model` 自带的日期直接归位，回填哪天都不会记错。
+
+    **month.json 里每个 token 只被记一次，且只由这个函数负责。**
+    `rotate_today` 曾经也往 month.json 里搬一份（`_move_today_to_month`，
+    已删除），与这里重复计数——见 `rotate_today` 的文档注释。
+
+    **month.json 只保存「当前自然月」**，跨月的日子迁进
+    `month-archive.json`（见 `archive_path`）。过去 `days` 无限累积、
+    `month` 字段只是写入时刻盖的戳，而所有读者都不按月过滤——9 月 1 日
+    起「本月成本」实际会变成「有史以来成本」（实测一个含 8 月两天 + 9 月
+    一天的 month.json 报出 201 倍的金额）。
+
+    **两个文件之间的顺序是有意的：先迁旧月、再落新数据。**
+    ① 迁移用逐日**替换**（`_archive_days`），因此幂等——写完归档还没删
+    month.json 就崩溃时，重跑得到同样结果，不会重复计数；
+    ② 迁移在前保证「一天只存在于一个文件里」：迁完之后本次的新数据才按
+    各自的月份分流，历史月的部分直接累加进归档，不会再回到 month.json，
+    也就不会出现「同一天一半在归档一半在 month.json」。
     """
     path = state_dir() / "month.json"
     with _locked(path):
         existing = _read(path) or {}
-        existing["days"] = _merge_buckets(
-            existing.get("days"), hour_buckets_result.get("buckets", []),
-            key_field="date")
-        if by_model:
-            day_key = _today_key()
-            day = existing["days"].setdefault(day_key, {
+        current = _month_key()
+
+        # ① 先把 month.json 里不属于当前月的日子迁进归档（幂等，见上）
+        stale = {d: b for d, b in (existing.get("days") or {}).items()
+                 if _month_key(d) != current}
+        if stale:
+            _archive_days(stale)
+            existing["days"] = {d: b for d, b in existing["days"].items()
+                                if _month_key(d) == current}
+
+        # ② 再落本次的新数据，按各自日期所属的月份分流
+        merged = _merge_buckets({}, hour_buckets_result.get("buckets", []),
+                                key_field="date")
+        for date_key, by_model in (by_date_model or {}).items():
+            if not by_model:
+                continue
+            day = merged.setdefault(date_key, {
                 "uncached_input_tokens": 0, "output_tokens": 0,
                 "cache_read_tokens": 0, "cache_write_tokens": 0,
                 "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
                 "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
             })
-            day["by_model"] = _merge_model_buckets(
-                day.get("by_model"), by_model)
+            day["by_model"] = _merge_model_buckets(day.get("by_model"), by_model)
+
+        cur_days = {d: b for d, b in merged.items() if _month_key(d) == current}
+        old_days = {d: b for d, b in merged.items() if _month_key(d) != current}
+
+        existing["days"] = _merge_buckets(
+            existing.get("days"),
+            [dict(b, date=d) for d, b in cur_days.items()],
+            key_field="date")
+        for d, b in cur_days.items():
+            if b.get("by_model"):
+                existing["days"][d]["by_model"] = _merge_model_buckets(
+                    existing["days"][d].get("by_model"), b["by_model"])
+
+        if old_days:
+            # 历史月的回填：累加进归档里已有的那一天，而不是替换——这里的
+            # 输入是「本次新测到的量」，不是那一天的完整累计。
+            archive = _read(archive_path()) or {}
+            months = archive.get("months") or {}
+            rebuilt = {}
+            for d, b in old_days.items():
+                prev = ((months.get(_month_key(d)) or {}).get("days") or {}).get(d)
+                acc = _merge_buckets({}, [dict(prev or {}, date=d)], key_field="date") \
+                    if prev else {}
+                acc = _merge_buckets(acc, [dict(b, date=d)], key_field="date")
+                if b.get("by_model") or (prev or {}).get("by_model"):
+                    acc[d]["by_model"] = _merge_model_buckets(
+                        (prev or {}).get("by_model"), b.get("by_model") or {})
+                rebuilt[d] = acc[d]
+            _archive_days(rebuilt)
+
         existing["schema_version"] = SCHEMA_VERSION
         existing["generated_at"] = _now_iso()
-        existing["month"] = _today_key()[:7]  # 'YYYY-MM'
+        existing["month"] = current
         _atomic_write(path, existing)
     return path
 

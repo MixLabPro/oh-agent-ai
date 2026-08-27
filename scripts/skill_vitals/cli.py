@@ -205,15 +205,18 @@ def _augment_calendar_cost(mode, data, pricing):
     模板自己那份 `costOf()` 是硬编码 deepseek-v4-flash 单价的近似（见
     calendar.html 头部注释），pro 模型的日子会被低估到 1/3——与
     budget.py 之前那个 bug（已在 `_price_by_model` 修过）同一个根因。
-    这里直接复用 `cost.py::cost_report`（唯一算价格的地方），不在这
-    再写一份算术，也不在 JS 里再写一份——JS 侧的公式继续留着，只是
-    降级成「没有精算数据时的近似兜底」，不是权威路径。
+    覆盖率校验/补齐的算术在 `cost.py::priced_day`（唯一入口，`budget.py`
+    的 month/7d-average 也调它，避免三处各写一份判断，见该函数文档）。
 
     today.json 的 `by_model` 是**整天一个总量**，没有按小时拆分——没法
     给 24 个小时格子分别精算，所以只在顶层塞一个 `accurate_cost` 供
     summary 卡片用；per-hour 小时格子/tooltip 仍走旧近似，不假装有
-    数据实际不具备的精度。month.json 的 `by_model` 是**逐日**的,可以
-    给每一天单独精算,直接覆盖那一天的近似值。
+    数据实际不具备的精度。today.json 的 by_model 与 (date,hour) 桶永远
+    同一次 `merge_today` 调用写入、折自同一份 events（`TestUsageHourBucketsReconcile`
+    钉死了这个不变量），结构上不可能出现 `priced_day` 要防的「部分覆盖」
+    （若真出现，覆盖多于顶层也只会被 `priced_day` 判成 exact，不会漏算），
+    所以这里直接用 `cost_report`，不必再走 `priced_day` 的覆盖率分支。
+    month.json 的 `by_model` 是**逐日**的，可以给每一天单独精算。
     """
     if mode == "today":
         by_model = data.get("by_model")
@@ -230,14 +233,9 @@ def _augment_calendar_cost(mode, data, pricing):
             for day in days.values():
                 if not isinstance(day, dict):
                     continue
-                by_model = day.get("by_model")
-                if by_model:
-                    report = cost_module.cost_report({"by_model": by_model}, pricing)
-                    if report is not None:
-                        day["cost"] = {
-                            "total": report["total"],
-                            "peak_total": report["peak_total"],
-                        }
+                priced = cost_module.priced_day(day, pricing)
+                if priced is not None:
+                    day["cost"] = priced
 
 
 def main():
@@ -375,10 +373,12 @@ def _main():
                        help="Which state file to render (default: month)")
     p_cal.add_argument("--output", "-o", required=True,
                        help="Destination HTML path")
-    # state：列出 / 清理 state 目录。不接受 --json/--host 等扫描期参数。
+    # state：列出 / 清理 state 目录，或列出有数据的自然月。不接受
+    # --json/--host 等扫描期参数。
     p_state = sub.add_parser("state", help="Inspect or clean the persisted state directory")
-    p_state.add_argument("action", choices=("list", "clean"),
-                         help="list = show files; clean = remove (with --yes)")
+    p_state.add_argument("action", choices=("list", "clean", "months"),
+                         help="list = show files; clean = remove (with --yes); "
+                              "months = list months with data (current + archived)")
     p_state.add_argument("--yes", action="store_true",
                          help="Skip the confirmation prompt for 'state clean'")
     # ──── M6: 预算告警 ──────────────────────────────────────────
@@ -401,6 +401,10 @@ def _main():
                           help="snooze duration in hours")
     p_budget.add_argument("--json", action="store_true",
                           help="Emit alert as JSON (for xbar tick)")
+    p_budget.add_argument("--month", default=None,
+                          help="show only: query a specific month ('YYYY-MM') "
+                               "instead of the current one — reads month.json "
+                               "for the current month, month-archive.json otherwise")
     # --fail-on / --ignore 对 behavior 同样有意义（闸门），但 --new-only 没有——
     # 一份会话日志是单次取证输入，没有「相对上次的新增发现」。这里显式补上
     # 前两个，让它们在子命令前后两个位置都能解析（对齐 Rust 的 global=true）。
@@ -646,8 +650,16 @@ def _main():
             # usage["by_model"] 与 hb 是同一次 audit_session_log 里出来的,
             # 顺带存进 today.json/month.json —— budget.py 按模型精确定价
             # 靠它,而不是永远假设 fallback 模型。
+            #
+            # today.json 用整段 usage["by_model"]（无日期维）——这是 today.json
+            # 一贯的语义:它只代表"今天"这一个桶,不需要按日拆。month.json 不
+            # 一样:一次 oneline 可能是回填历史日志，也可能喂进一个跨零点的
+            # 长会话，这两种情况都不能把 by_model 整段扣到"今天"头上（见
+            # state.merge_month 的文档注释），所以这里单独再算一份按
+            # (date, model) 折的版本传给它。
             state_module.merge_today(hb, by_model=usage["by_model"])
-            state_module.merge_month(hb, by_model=usage["by_model"])
+            by_date_model = usage_module.token_by_date_model(events)
+            state_module.merge_month(hb, by_date_model=by_date_model)
         # 不管 --no-merge 与否都 append 历史 —— xbar「最近 5 次审计」要靠这个
         state_module.append_session_history(summary)
         # 顺手把 budget.evaluate() 落盘成 alert.json —— xbar 之前完全绕开
@@ -702,8 +714,16 @@ def _main():
                   "calendar will show empty state)" % out)
         return
 
-    # ──── M3 state list / clean ───────────────────────────────────
+    # ──── M3 state list / clean / months ───────────────────────────
     if getattr(args, "cmd", None) == "state":
+        if args.action == "months":
+            months = state_module.list_months()
+            if not months:
+                print("(no data)")
+                return
+            for m in months:
+                print(m)
+            return
         files = state_module.list_state_files()
         if args.action == "list":
             if not files:
@@ -730,6 +750,26 @@ def _main():
 
     # ──── M6 budget 子命令 ──────────────────────────────────────
     if getattr(args, "cmd", None) == "budget":
+        if args.action == "show" and getattr(args, "month", None):
+            # 查历史/指定月份——不是「现在花了多少」，跟阈值/告警无关，
+            # 不走 evaluate()（那是当前月+当天的实时判断），直接问
+            # compute_month_cost(month)。
+            result = budget_module.compute_month_cost(args.month)
+            if result is None:
+                if args.json:
+                    print(json.dumps({"month": args.month, "cost": None},
+                                     ensure_ascii=False))
+                else:
+                    print("(no data for %s)" % args.month)
+                return
+            if args.json:
+                print(json.dumps({"month": args.month, "cost": result},
+                                 ensure_ascii=False, indent=2))
+            else:
+                print("month:      %s" % args.month)
+                print("cost:       ¥%.2f (peak ¥%.2f)" %
+                      (result["total"], result["peak_total"]))
+            return
         if args.action == "show":
             alert = budget_module.evaluate()
             if args.json:

@@ -812,21 +812,33 @@
     var month = (payload && payload.month) || "";
     var totalTok = 0, totalCost = 0;
     var peakDays = 0, activeDays = 0;
-    // 逐天判断精算/近似——有的月份新旧数据并存(这个功能上线前的历史日
-    // 没有 by_model,退回近似;上线后的日子精算),costOf() 已经按每天各自
-    // 有没有 b.cost 决定,这里只汇总一下用什么措辞标注给用户看。
-    var anyApprox = false, anyExact = false;
+    // 逐天判断精算/部分精算/近似——有的月份新旧数据并存(这个功能上线前的
+    // 历史日没有 by_model,退回近似;上线后的日子精算),costOf() 已经按
+    // 每天各自有没有 b.cost 决定总价(部分覆盖的那一截已经在服务端用
+    // fallback 价补齐,不是漏算),这里只汇总一下用什么措辞标注给用户看。
+    //
+    // `pricing_basis === "partial"`：由 cli.py::_augment_calendar_cost
+    // 在 by_model 只覆盖当天一部分 token 时打上（例如一个跨零点的会话
+    // 只把某一天的切片记了下来）——总价已经是「精算部分 + fallback 补齐
+    // 部分」，不是偏低的数字，但不该被措辞说成"按实际模型精算"，否则用户
+    // 会以为整天都是精确价。
+    var anyApprox = false, anyExact = false, anyPartial = false;
 
     Object.keys(days).forEach(function(k) {
       var b = days[k];
       totalTok += totalTokens(b);
       totalCost += costOf(b).total;
-      if (b.cost && typeof b.cost.total === "number") anyExact = true;
-      else if (totalTokens(b) > 0) anyApprox = true;
+      if (b.cost && typeof b.cost.total === "number") {
+        if (b.cost.pricing_basis === "partial") anyPartial = true;
+        else anyExact = true;
+      } else if (totalTokens(b) > 0) {
+        anyApprox = true;
+      }
       if (isPeak(b)) peakDays++;
       if (totalTokens(b) > 0) activeDays++;
     });
-    var costNote = !anyExact ? "deepseek-v4-flash 默认价（近似）"
+    var costNote = anyPartial ? "部分日期按模型精算+近似补齐（会话跨日切片未全覆盖）"
+                 : !anyExact ? "deepseek-v4-flash 默认价（近似）"
                  : !anyApprox ? "按实际模型精算"
                  : "部分按模型精算，历史日为近似";
 
@@ -1018,7 +1030,10 @@
         '<div class="sep"></div>' +
         row("total token", n(totalTokens(b))) +
         row("估算成本", money(c.total)) +
-        row("其中 peak 时段", money(c.peak));
+        row("其中 peak 时段", money(c.peak)) +
+        (b.cost && b.cost.pricing_basis === "partial"
+          ? row("覆盖率", (b.cost.coverage * 100).toFixed(1) + "%（部分近似补齐）")
+          : "");
     }
     tip.innerHTML = html;
     tip.classList.add("show");

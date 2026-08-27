@@ -66,70 +66,93 @@ class TestSessionsJsonl(unittest.TestCase):
 class TestRotateToday(unittest.TestCase):
     """today.json 跨日清零 invariant(防 M8: 累积 ¥1172 假告警)。"""
 
-    def test_rotate_moves_buckets_to_month(self):
+    def test_rotate_clears_today_without_touching_month(self):
+        """**rotate 只清空 today.json，绝不往 month.json 里加东西。**
+
+        回归（真实事故）：rotate 过去会把旧 today.json 的桶累加进
+        `month.days[<旧日期>]`，但唯一的生产调用方 `cli.py` 的 oneline
+        对同一份 hour_buckets **同时**调 merge_today 和 merge_month，
+        月账早就由 merge_month 记过一遍了。于是每跨一天就重复计一次——
+        实测 2026-08 的 month.json 每天正好是真实值的 3 倍，月度成本从
+        ¥1733 虚增到 ¥2386。
+
+        旧测试写死 today.json 后直接 rotate、month.json 是空的，重复相加
+        看起来正好等于正确值,所以一直没红。**这条测试专门先把 month.json
+        预置成「merge_month 已经记过」的真实状态**，rotate 之后数字必须
+        纹丝不动。
+        """
         with _IsolatedHome():
             sd = state.state_dir()
-            # 手动写一份「昨天」的 today.json
+            bucket = {
+                "uncached_input_tokens": 1_000_000,
+                "output_tokens": 0, "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0,
+                "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0,
+                "peak_cache_write_tokens": 0,
+            }
             state._atomic_write(sd / "today.json", {
                 "date": "2026-08-25",
-                "buckets": {"14": {
-                    "uncached_input_tokens": 1_000_000,
-                    "output_tokens": 0, "cache_read_tokens": 0,
-                    "cache_write_tokens": 0,
-                    "peak_uncached_input_tokens": 0,
-                    "peak_output_tokens": 0,
-                    "peak_cache_read_tokens": 0,
-                    "peak_cache_write_tokens": 0,
-                }},
+                "buckets": {"14": dict(bucket)},
+                "by_model": {"deepseek-v4-pro": dict(bucket)},
                 "schema_version": "1.0.0",
                 "generated_at": "2026-08-25T14:00:00Z",
             })
-            # 模拟「今天」(BJ 2026-08-26) 触发 rotate
+            # 关键：预置 month.json —— 模拟 oneline 当天已经调过 merge_month，
+            # 这 1M token 已经记在账上了（旧测试缺的就是这一步）。
+            state._atomic_write(sd / "month.json", {
+                "days": {"2026-08-25": dict(bucket,
+                                            by_model={"deepseek-v4-pro": dict(bucket)})},
+                "schema_version": "1.0.0",
+                "month": "2026-08",
+                "generated_at": "2026-08-25T14:00:00Z",
+            })
+
             from datetime import datetime, timezone, timedelta
             fake_now = datetime(2026, 8, 26, 0, 30, 0, tzinfo=timezone(timedelta(hours=8)))
             result = state.rotate_today(now=fake_now)
             self.assertEqual(result, "2026-08-25", "rotate 应该返回旧日期")
 
-            # today.json 应该被清空,date 字段更新
+            # today.json 被清空,date 更新
             today = json.loads((sd / "today.json").read_text())
             self.assertEqual(today["date"], "2026-08-26")
             self.assertEqual(today["buckets"], {})
             self.assertEqual(today.get("rotated_from"), "2026-08-25")
 
-            # month.json.days[<8/25>] 应该收到那 1M input
-            month = json.loads((sd / "month.json").read_text())
-            self.assertIn("2026-08-25", month["days"],
-                          "rotate 应把旧桶搬到 month.days[<旧日期>]")
-            self.assertEqual(month["days"]["2026-08-25"]["uncached_input_tokens"],
-                             1_000_000)
-
-    def test_rotate_moves_by_model_to_month(self):
-        """rotate 不能只搬 (date, hour) 桶——today.json 顶层的 by_model
-        (按模型精确定价的数据源)也要跟着搬,否则跨天之后 budget.py 只能
-        对昨天退回 fallback 模型近似。"""
-        with _IsolatedHome():
-            sd = state.state_dir()
-            state._atomic_write(sd / "today.json", {
-                "date": "2026-08-25",
-                "buckets": {},
-                "by_model": {
-                    "deepseek-v4-pro": {
-                        "uncached_input_tokens": 1_000_000, "output_tokens": 0,
-                        "cache_read_tokens": 0, "cache_write_tokens": 0,
-                        "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-                        "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-                    },
-                },
-                "schema_version": "1.0.0",
-                "generated_at": "2026-08-25T14:00:00Z",
-            })
-            from datetime import datetime, timezone, timedelta
-            fake_now = datetime(2026, 8, 26, 0, 30, 0, tzinfo=timezone(timedelta(hours=8)))
-            state.rotate_today(now=fake_now)
+            # month.json 必须**完全不变**——1M 就是 1M，不是 2M
             month = json.loads((sd / "month.json").read_text())
             self.assertEqual(
+                month["days"]["2026-08-25"]["uncached_input_tokens"], 1_000_000,
+                "rotate 不能把 merge_month 已经记过的量再加一遍（3 倍虚增的根因）")
+            self.assertEqual(
                 month["days"]["2026-08-25"]["by_model"]["deepseek-v4-pro"]["uncached_input_tokens"],
-                1_000_000, "rotate 应把 today.json 的 by_model 搬到 month.days[<旧日期>].by_model")
+                1_000_000, "by_model 同样不能被 rotate 重复累加")
+
+    def test_oneline_style_merge_then_rotate_counts_each_token_once(self):
+        """端到端不变量：**month.json 里每个 token 只能被记一次。**
+
+        走真实调用顺序（merge_today + merge_month，然后跨日 rotate），
+        而不是手写状态文件——上一条测试证明「rotate 不加」，这条证明
+        真实路径下总量确实等于真实发生量。"""
+        with _IsolatedHome():
+            sd = state.state_dir()
+            hb = {"buckets": [{
+                "date": "2026-08-25", "hour": 14, "is_peak": False,
+                "uncached_input_tokens": 1_000_000, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            }]}
+            with mock.patch.object(state, "_today_key", return_value="2026-08-25"):
+                state.merge_today(hb)          # cli.py oneline 的调用顺序
+                state.merge_month(hb)
+            state.rotate_today(now="2026-08-26")   # 第二天，触发 rotate
+
+            month = json.loads((sd / "month.json").read_text())
+            self.assertEqual(
+                month["days"]["2026-08-25"]["uncached_input_tokens"], 1_000_000,
+                "真实只发生 1M token，跨日之后 month.json 里也必须只有 1M")
 
     def test_no_rotate_when_same_date(self):
         """同一天再次 rotate → 不动数据(返回 None)。"""

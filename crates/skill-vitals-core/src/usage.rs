@@ -756,6 +756,129 @@ pub fn hour_buckets(events: &[Value]) -> Value {
     })
 }
 
+type DateModelDedupSlot = (i64, i64, Option<String>, String, [i64; 4], bool);
+
+/// `token_by_model` 的模型维 × `hour_buckets` 的日期维 → `{date: {model: 八桶}}`。
+///
+/// **为什么这是第三个出口，而不是让调用方自己拼**：日历按天展示、DSH 审计
+/// 按 session 展示，两者是**同一份用量的两个投影**，同一个月的 token 总数与
+/// 成本必须相等。按 session 折用 `token_by_model`（无日期维），按天折用
+/// `hour_buckets`（无模型维）——可是「某天花了多少钱」需要**同时**有日期和
+/// 模型（pro 与 flash 差 3 倍价），两个投影各缺一半，拼不出来。过去的做法是
+/// 把整段 session 的 `by_model` 记到「今天」，跨零点的会话和历史回填因此都
+/// 记错日子（实测 2026-08 的月度成本因此偏差 4 倍）。
+///
+/// 去重语义（同 `(turn, step)` 先扣旧归属再加新归属）与 `token_by_model` /
+/// `hour_buckets` **逐字节一致**——三个出口共用 `usage_sample` + `buckets_from`
+/// + `is_peak`，任何一处改了去重而另两处没改，对账立刻红。
+///
+/// 时间戳缺失的样本**不产生日期桶**（与 `hour_buckets` 把它们落进
+/// `(None, None)`、日历渲染时滤掉是同一条纪律：未知时间不能算进任何一天）。
+/// 因此本函数的总量 = `token_by_model` 的总量 − 无时间戳样本的量；语料里
+/// 全部样本都带 time 时两者精确相等，这正是对账测试断言的形式。
+pub fn token_by_date_model(events: &[Value]) -> Value {
+    // 只看分叉之后的事件——见 token_by_model 的同条注释
+    let events = &crate::util::post_fork(events)[..];
+
+    // 输出顺序必须确定：date 升序、模型按首次出现顺序。用 BTreeMap 管日期
+    // （天然有序），模型侧用 Vec 记首现顺序 —— 与 Python 端 dict 的插入序
+    // 一致，两侧 JSON 才能逐字节相同。
+    let mut day_model_keys: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut acc: std::collections::HashMap<(String, String), [i64; 8]> =
+        std::collections::HashMap::new();
+
+    let mut active: Option<String> = None;
+    let mut last: Option<DateModelDedupSlot> = None;
+    let mut seen: [bool; 4] = [false; 4];
+
+    for event in events {
+        if !event.is_object() {
+            continue;
+        }
+        if event.get("type").and_then(|v| v.as_str()) == Some("request/header") {
+            if let Some(model) = event
+                .pointer("/data/header/config/model")
+                .and_then(|v| v.as_str())
+            {
+                active = Some(model.to_string());
+            }
+            continue;
+        }
+        let Some((turn, step, usage)) = usage_sample(event) else { continue };
+        let add = buckets_from(usage, &mut seen);
+        let time_ms = event.get("time").and_then(|v| v.as_i64());
+        let date_str = time_ms.map(|ms| {
+            let secs = ms.div_euclid(1000) + BEIJING_OFFSET_SECS;
+            civil_date_from_days(secs.div_euclid(86_400))
+        });
+        let peak = time_ms.map(is_peak_slot).unwrap_or(false);
+        let model = active.clone().unwrap_or_else(|| "unknown".to_string());
+
+        // 同 step 去重：先把旧归属从它自己的 (date, model) 桶扣掉。借用检查
+        // 不允许同时持两个 entry 句柄，所以扣旧/加新分两步（与 hour_buckets
+        // 里同一处的处理方式一致）。
+        if matches!(&last, Some((lt, ls, _, _, _, _)) if *lt == turn && *ls == step) {
+            let (_, _, ld, lmodel, lb, lpeak) = last.as_ref().expect("checked above");
+            if let Some(ldate) = ld {
+                if let Some(entry) = acc.get_mut(&(ldate.clone(), lmodel.clone())) {
+                    for i in 0..4 {
+                        entry[i] -= lb[i];
+                    }
+                    if *lpeak {
+                        for i in 0..4 {
+                            entry[4 + i] -= lb[i];
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(d) = &date_str {
+            let models = day_model_keys.entry(d.clone()).or_default();
+            if !models.iter().any(|m| m == &model) {
+                models.push(model.clone());
+            }
+            let entry = acc.entry((d.clone(), model.clone())).or_insert([0i64; 8]);
+            for i in 0..4 {
+                entry[i] += add[i];
+            }
+            if peak {
+                for i in 0..4 {
+                    entry[4 + i] += add[i];
+                }
+            }
+        }
+        last = Some((turn, step, date_str, model, add, peak));
+    }
+
+    let mut out = serde_json::Map::new();
+    for (date_str, models) in &day_model_keys {
+        let mut day = serde_json::Map::new();
+        for model in models {
+            let b = acc
+                .get(&(date_str.clone(), model.clone()))
+                .copied()
+                .unwrap_or([0i64; 8]);
+            day.insert(
+                model.clone(),
+                json!({
+                    "uncached_input_tokens": b[0],
+                    "output_tokens": b[1],
+                    "cache_read_tokens": b[2],
+                    "cache_write_tokens": b[3],
+                    "peak_uncached_input_tokens": b[4],
+                    "peak_output_tokens": b[5],
+                    "peak_cache_read_tokens": b[6],
+                    "peak_cache_write_tokens": b[7],
+                }),
+            );
+        }
+        out.insert(date_str.clone(), Value::Object(day));
+    }
+    Value::Object(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1483,6 +1606,172 @@ mod tests {
             // 4 桶位与 4 SAMPLE_FIELDS 一致(0/1/2/3)
             let _ = i;
         }
+    }
+
+    /// 事件流：跨零点 + 中途换模型 + 同 (turn,step) 跨日替换。
+    /// 三个出口的对账测试共用它，保证断言的是同一份"难"输入。
+    fn reconcile_fixture() -> Vec<Value> {
+        vec![
+            json!({"type":"request/header","seq":1,"time":1787673000000i64,"data":{"header":{"config":{"model":"pro"}}}}),
+            // 8/25 23:50
+            json!({"type":"assistant/chunk","seq":2,"time":1787673000000i64,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":1000,"outputTokens":100,"cacheReadTokens":50,"cacheWriteTokens":0}}}}),
+            // 同 (1,1) 但落到 8/26 00:10 —— 必须把 8/25 的贡献扣掉再记到 8/26
+            json!({"type":"assistant/message","seq":3,"time":1787674200000i64,"data":{"turn":1,"step":1,"usage":{"inputTokens":1200,"outputTokens":120,"cacheReadTokens":60,"cacheWriteTokens":0}}}),
+            // 换模型，仍在 8/26
+            json!({"type":"request/header","seq":4,"time":1787674200000i64,"data":{"header":{"config":{"model":"flash"}}}}),
+            json!({"type":"assistant/chunk","seq":5,"time":1787674200000i64,"data":{"turn":2,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":500,"outputTokens":50}}}}),
+        ]
+    }
+
+    /// **日历（按天）与 DSH 审计（按 session）必须算出同一个总量。**
+    ///
+    /// 这两者是同一份用量的两个投影，不是两个各自算钱的地方：DSH 插件按
+    /// session 折（`token_by_model`），日历按时间折（`token_by_date_model`）。
+    /// 过去没有任何东西强制它们相等——真实事故里日历报 ¥2386 而按 session
+    /// 重算是 ¥1733，靠人工对账才发现。这条测试就是那条缺失的不变量。
+    ///
+    /// 全部样本都带 time 时两者必须**精确相等**（无时间戳样本按设计只会
+    /// 出现在 `token_by_model` 一侧，见 `token_by_date_model` 的文档注释）。
+    #[test]
+    fn token_by_date_model_reconciles_with_token_by_model() {
+        let events = reconcile_fixture();
+        let by_date = token_by_date_model(&events);
+        let by_model = token_by_model(&events);
+
+        for key in [
+            "uncached_input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+        ] {
+            let date_total: i64 = by_date
+                .as_object()
+                .unwrap()
+                .values()
+                .flat_map(|day| day.as_object().unwrap().values())
+                .map(|b| b[key].as_i64().unwrap_or(0))
+                .sum();
+            let model_total: i64 = by_model["by_model"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|m| m[key].as_i64().unwrap_or(0))
+                .sum();
+            assert_eq!(
+                date_total, model_total,
+                "{key}: 按天折 ({date_total}) 必须等于按 session 折 ({model_total})\
+                 ——日历与 DSH 审计是同一份用量的两个投影"
+            );
+        }
+    }
+
+    /// 三个出口两两对账：`hour_buckets`（只有日期维）与
+    /// `token_by_date_model`（日期×模型）在总量上也必须一致——否则日历的
+    /// 热力图格子和它自己的成本数字会对不上。
+    #[test]
+    fn token_by_date_model_reconciles_with_hour_buckets_per_date() {
+        let events = reconcile_fixture();
+        let by_date = token_by_date_model(&events);
+        let hb = hour_buckets(&events);
+
+        for key in [
+            "uncached_input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+        ] {
+            // 逐日对账，不只是总量——总量相等但分配到错误日期是这次真实
+            // 事故的形态（by_model 被整段记到"今天"），只查总和会漏掉。
+            for (date_str, day) in by_date.as_object().unwrap() {
+                let date_total: i64 = day
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .map(|b| b[key].as_i64().unwrap_or(0))
+                    .sum();
+                let hour_total: i64 = hb["buckets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|b| b["date"].as_str() == Some(date_str.as_str()))
+                    .map(|b| b[key].as_i64().unwrap_or(0))
+                    .sum();
+                assert_eq!(
+                    date_total, hour_total,
+                    "{date_str} {key}: 按 (日期,模型) 折 ({date_total}) 必须等于 \
+                     hour_buckets 该日之和 ({hour_total})"
+                );
+            }
+        }
+    }
+
+    /// 跨零点的同 (turn, step) 替换必须把旧日期的贡献扣干净——否则一笔请求
+    /// 会同时算进两天，正是"总量对但分配错"的那类 bug。
+    #[test]
+    fn token_by_date_model_cross_midnight_replacement_debits_the_old_date() {
+        let events = reconcile_fixture();
+        let out = token_by_date_model(&events);
+        // seq 2 的 1000 已被 seq 3 替换走 → 8/25 归零
+        assert_eq!(
+            out["2026-08-25"]["pro"]["uncached_input_tokens"]
+                .as_i64()
+                .unwrap(),
+            0,
+            "被替换掉的旧日期贡献必须扣光"
+        );
+        assert_eq!(
+            out["2026-08-26"]["pro"]["uncached_input_tokens"]
+                .as_i64()
+                .unwrap(),
+            1200
+        );
+        assert_eq!(
+            out["2026-08-26"]["flash"]["uncached_input_tokens"]
+                .as_i64()
+                .unwrap(),
+            500
+        );
+    }
+
+    /// Python `json.dumps(token_by_date_model(events), ensure_ascii=False,
+    /// separators=(",", ":"))` 的逐字节对照——键序（日期升序、模型按首现
+    /// 顺序）、值全部一致。期望串在 Python 侧生成后硬编码于此，任何一侧
+    /// 改了折叠语义或输出顺序这里立刻红。
+    ///
+    /// **这条测试是这次架构修正的落点**：日历（按天）和 DSH 审计（按
+    /// session）是同一个能力的两个投影，此前按天那一维只有 Python 一份
+    /// 实现、掉在双实现差分之外；状态栏要接 Rust-Tauri，这一维必须和其他
+    /// 折叠一样受差分保护。
+    #[test]
+    fn token_by_date_model_python_rust_byte_for_byte_parity() {
+        let events = reconcile_fixture();
+        let out = token_by_date_model(&events);
+        assert_eq!(
+            serde_json::to_string(&out).unwrap(),
+            r#"{"2026-08-25":{"pro":{"uncached_input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},"2026-08-26":{"pro":{"uncached_input_tokens":1200,"output_tokens":120,"cache_read_tokens":60,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},"flash":{"uncached_input_tokens":500,"output_tokens":50,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}}}"#
+        );
+    }
+
+    /// 无时间戳的样本不产生日期桶（与 `hour_buckets` 的 (None,None) 桶
+    /// 被日历滤掉是同一条纪律）——**这是上面那条精确相等的唯一例外来源**，
+    /// 显式钉住，免得以后有人"顺手"把它归到某一天。
+    #[test]
+    fn token_by_date_model_drops_untimed_samples() {
+        let events = [
+            json!({"type":"request/header","seq":1,"time":1001,"data":{"header":{"config":{"model":"pro"}}}}),
+            json!({"type":"assistant/chunk","seq":2,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":500,"outputTokens":50}}}}),
+        ];
+        let out = token_by_date_model(&events);
+        assert!(
+            out.as_object().unwrap().is_empty(),
+            "无时间戳样本不能被塞进任何一天"
+        );
+        // 但 token_by_model 仍然记着它 —— 两者的差额只能来自这里
+        let tm = token_by_model(&events);
+        assert_eq!(
+            tm["by_model"]["pro"]["uncached_input_tokens"].as_i64().unwrap(),
+            500
+        );
     }
 }
 

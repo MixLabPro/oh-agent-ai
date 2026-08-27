@@ -476,6 +476,89 @@ def token_by_model(events):
             "sequence": sequence, "unreported_fields": unreported}
 
 
+def token_by_date_model(events):
+    """`token_by_model` 的模型维 × `hour_buckets` 的日期维 —— `{date: {model: 八桶}}`。
+
+    单一真相源是 `crates/skill-vitals-core/src/usage.rs::token_by_date_model`，
+    这里是 Python 平行实现，由该文件的
+    `token_by_date_model_python_rust_byte_for_byte_parity` 逐字节看守（键序：
+    日期升序、模型按首现顺序）。
+
+    **它属于 core 而不是"只给 Python 状态层用的辅助函数"**：日历（按天）和
+    DSH 审计（按 session）是同一个审计能力的两个投影，同月 token 总数与成本
+    必须相等；按天这一维一旦掉出双实现差分，两个投影就能各自漂移而无人发现
+    （真实事故：日历报 ¥2386，按 session 重算是 ¥1733）。状态栏后续接
+    Rust-Tauri 也要用同一份折叠，不能是 Python 私有的第二套。
+
+    **为什么 `token_by_model` 本身不够**：它按模型累加整个 session 的用量，
+    完全不留时间戳；一个跨零点的 session 被喂进 `merge_month` 时,过去唯一的
+    办法是把 by_model 整体归到调用方那一天（`_today_key()`）——这在「回填历史
+    日志」场景下会把钱记错日子（真实 case：`session-e4b0be69` 横跨 4 天，
+    整段 by_model 被记成回填当天,月度精算成本因此漏记了未落到该日的部分）。
+
+    这里改成**逐事件**判日期（复用 `_hour_key`，与 `hour_buckets` 同一条时区
+    规则），跨午夜的 session 天然按各自 `event.time` 分到正确的日期，不需要
+    对同一个 session 是否跨天做特殊判断。去重语义（同 (turn, step) 先扣旧
+    归属再加新归属）与 `token_by_model` 逐字节一致——否则这份数据与
+    `token_by_model`/`hour_buckets` 的「总和必须相等」不变量就会各算各的。
+
+    时间戳缺失的样本不产生日期桶（与 `hour_buckets` 同一条纪律：未知时间
+    不能算进任何一天，否则会被 1970-01-01 污染或凭空当成「今天」）。
+    """
+    events = post_fork(events)
+    by_date_model = {}
+    active = None
+    last = None  # (turn, step, date, model, buckets, peak)
+
+    def fold(date_str, model, buckets, peak, sign):
+        if date_str is None:
+            return
+        day = by_date_model.setdefault(date_str, {})
+        cur = day.setdefault(model, dict(_EMPTY_BUCKET))
+        for k in _BASE_KEYS:
+            cur[k] = cur[k] + sign * buckets[k]
+        if peak:
+            for base_key, peak_key in zip(_BASE_KEYS, _PEAK_KEYS):
+                cur[peak_key] = cur[peak_key] + sign * buckets[base_key]
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type")
+        if etype == "request/header":
+            data = event.get("data")
+            model = None
+            if isinstance(data, dict):
+                header = data.get("header")
+                if isinstance(header, dict):
+                    config = header.get("config")
+                    if isinstance(config, dict):
+                        model = config.get("model")
+            if isinstance(model, str):
+                active = model
+            continue
+        if not isinstance(event.get("data"), dict):
+            continue
+        sample = _usage_sample(event, etype, event["data"])
+        if sample is None:
+            continue
+        turn, step, usage = sample
+        buckets = _buckets_from(usage, set())
+        time_ms = _int_or_none(event.get("time"))
+        date_str = _hour_key(time_ms)[0] if time_ms is not None else None
+        peak = _is_peak(event) if time_ms is not None else None
+        model = active if active is not None else "unknown"
+
+        if last is not None and last[0] == turn and last[1] == step:
+            fold(last[2], last[3], last[4], last[5], -1)
+            fold(date_str, model, buckets, peak, 1)
+        else:
+            fold(date_str, model, buckets, peak, 1)
+        last = (turn, step, date_str, model, buckets, peak)
+
+    return by_date_model
+
+
 def _hour_key(time_ms):
     """time_ms → (date_str, hour) in Asia/Shanghai。
 

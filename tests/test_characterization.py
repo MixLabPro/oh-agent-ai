@@ -36,7 +36,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from skill_vitals.util import split_lines  # noqa: E402
 from skill_vitals.util import fork_boundary, post_fork  # noqa: E402
 from skill_vitals.usage import (  # noqa: E402
-    context_composition, hour_buckets, request_metrics, token_by_model, usage_signal_status,
+    context_composition, hour_buckets, request_metrics, token_by_date_model,
+    token_by_model, usage_signal_status,
 )
 from skill_vitals.compaction import compaction_events  # noqa: E402
 from skill_vitals.waste import detect_duplicate_tool_results, detect_failure_run_waste, detect_structural_waste  # noqa: E402
@@ -2123,6 +2124,167 @@ class TestHourBuckets(unittest.TestCase):
         # 据此决定要不要画「缓存读 / 写 0」这种会误导的数字
         self.assertIn("cacheReadTokens", out["unreported_fields"])
         self.assertIn("cacheWriteTokens", out["unreported_fields"])
+
+
+class TestTokenByDateModel(unittest.TestCase):
+    """`token_by_date_model` —— `token_by_model` 的模型维 × `hour_buckets`
+    的日期维。Rust 侧 `usage.rs::token_by_date_model` 是单一真相源，那边的
+    `token_by_date_model_python_rust_byte_for_byte_parity` 逐字节看守两份
+    实现。时间戳常量直接照抄 `TestHourBuckets`（不继承它——继承会让
+    unittest 把父类那批 hour_buckets 专属测试在这个类名下重跑一遍），两者
+    共享同一条时区/高峰规则，用同一批固定时间戳能直接对照。"""
+
+    TUE_PEAK_1430 = TestHourBuckets.TUE_PEAK_1430
+    TUE_OFFPEAK_0630 = TestHourBuckets.TUE_OFFPEAK_0630
+    TUE_LATE_NIGHT_2350 = TestHourBuckets.TUE_LATE_NIGHT_2350
+    WED_JUST_AFTER_0010 = TestHourBuckets.WED_JUST_AFTER_0010
+
+    def test_python_rust_byte_for_byte_parity(self):
+        """与 Rust `usage.rs` 里同名测试硬编码的**同一个**期望串对照。
+
+        两侧各自钉一份、不是一边跟着另一边跑——任一实现改了折叠语义或
+        输出顺序（日期升序 / 模型首现顺序），两边有一边会红。
+        """
+        events = [
+            {"type": "request/header", "seq": 1, "time": self.TUE_LATE_NIGHT_2350,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            {"type": "assistant/chunk", "seq": 2, "time": self.TUE_LATE_NIGHT_2350,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000, "outputTokens": 100,
+                                "cacheReadTokens": 50, "cacheWriteTokens": 0}}}},
+            {"type": "assistant/message", "seq": 3, "time": self.WED_JUST_AFTER_0010,
+             "data": {"turn": 1, "step": 1,
+                      "usage": {"inputTokens": 1200, "outputTokens": 120,
+                                "cacheReadTokens": 60, "cacheWriteTokens": 0}}},
+            {"type": "request/header", "seq": 4, "time": self.WED_JUST_AFTER_0010,
+             "data": {"header": {"config": {"model": "flash"}}}},
+            {"type": "assistant/chunk", "seq": 5, "time": self.WED_JUST_AFTER_0010,
+             "data": {"turn": 2, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 500, "outputTokens": 50}}}},
+        ]
+        self.assertEqual(
+            json.dumps(token_by_date_model(events), ensure_ascii=False,
+                       separators=(",", ":")),
+            '{"2026-08-25":{"pro":{"uncached_input_tokens":0,"output_tokens":0,'
+            '"cache_read_tokens":0,"cache_write_tokens":0,'
+            '"peak_uncached_input_tokens":0,"peak_output_tokens":0,'
+            '"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},'
+            '"2026-08-26":{"pro":{"uncached_input_tokens":1200,"output_tokens":120,'
+            '"cache_read_tokens":60,"cache_write_tokens":0,'
+            '"peak_uncached_input_tokens":0,"peak_output_tokens":0,'
+            '"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},'
+            '"flash":{"uncached_input_tokens":500,"output_tokens":50,'
+            '"cache_read_tokens":0,"cache_write_tokens":0,'
+            '"peak_uncached_input_tokens":0,"peak_output_tokens":0,'
+            '"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}}}')
+
+    def test_reconciles_with_hour_buckets_and_token_by_model(self):
+        """同源不变量：按 (date, model) 折的四桶之和，必须同时等于
+        `hour_buckets` 的四桶之和与 `token_by_model` 的四桶之和——三者是
+        同一份 usage 事件的三种切法，任何一种切法漏计/多计都会在这里露出来。
+        """
+        events = [
+            {"type": "request/header", "seq": 1, "time": self.TUE_PEAK_1430,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            {"type": "assistant/chunk", "seq": 2, "time": self.TUE_PEAK_1430,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000, "outputTokens": 200,
+                                "cacheReadTokens": 300, "cacheWriteTokens": 50}}}},
+            {"type": "request/header", "seq": 3, "time": self.TUE_OFFPEAK_0630,
+             "data": {"header": {"config": {"model": "flash"}}}},
+            {"type": "assistant/chunk", "seq": 4, "time": self.TUE_OFFPEAK_0630,
+             "data": {"turn": 2, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 500, "outputTokens": 100}}}},
+        ]
+
+        def total4(bucket):
+            return (bucket["uncached_input_tokens"] + bucket["output_tokens"]
+                    + bucket["cache_read_tokens"] + bucket["cache_write_tokens"])
+
+        hb_total = sum(total4(b) for b in hour_buckets(events)["buckets"])
+        tbm_total = sum(total4(b) for b in token_by_model(events)["by_model"].values())
+        bdm_total = sum(total4(b) for day in token_by_date_model(events).values()
+                        for b in day.values())
+        self.assertEqual(hb_total, tbm_total)
+        self.assertEqual(bdm_total, tbm_total)
+
+    def test_splits_by_model_within_the_same_date(self):
+        """同一天两个模型各自归桶,不混成一个'unknown'或互相覆盖。"""
+        events = [
+            {"type": "request/header", "seq": 1, "time": self.TUE_PEAK_1430,
+             "data": {"header": {"config": {"model": "deepseek-v4-pro"}}}},
+            {"type": "assistant/chunk", "seq": 2, "time": self.TUE_PEAK_1430,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000, "outputTokens": 100}}}},
+            {"type": "request/header", "seq": 3, "time": self.TUE_OFFPEAK_0630,
+             "data": {"header": {"config": {"model": "deepseek-v4-flash"}}}},
+            {"type": "assistant/chunk", "seq": 4, "time": self.TUE_OFFPEAK_0630,
+             "data": {"turn": 2, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 500, "outputTokens": 50}}}},
+        ]
+        out = token_by_date_model(events)
+        self.assertEqual(list(out.keys()), ["2026-08-25"])
+        day = out["2026-08-25"]
+        self.assertEqual(day["deepseek-v4-pro"]["uncached_input_tokens"], 1000)
+        self.assertEqual(day["deepseek-v4-flash"]["uncached_input_tokens"], 500)
+
+    def test_cross_midnight_session_splits_by_model_into_two_dates(self):
+        """跨零点的会话：同一个模型在两天各自归桶——这正是 state.merge_month
+        文档注释里 `session-e4b0be69` 那类真实回归的最小复现:整段 by_model
+        绝不能被压扁成一天。"""
+        events = [
+            {"type": "request/header", "seq": 1, "time": self.TUE_LATE_NIGHT_2350,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            {"type": "assistant/chunk", "seq": 2, "time": self.TUE_LATE_NIGHT_2350,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 100, "outputTokens": 10}}}},
+            {"type": "assistant/chunk", "seq": 3, "time": self.WED_JUST_AFTER_0010,
+             "data": {"turn": 2, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 200, "outputTokens": 20}}}},
+        ]
+        out = token_by_date_model(events)
+        self.assertEqual(sorted(out.keys()), ["2026-08-25", "2026-08-26"])
+        self.assertEqual(out["2026-08-25"]["pro"]["uncached_input_tokens"], 100)
+        self.assertEqual(out["2026-08-26"]["pro"]["uncached_input_tokens"], 200)
+
+    def test_same_step_dedup_replaces_previous_date_contribution(self):
+        """同 (turn, step) 后到者覆盖前到者，即使覆盖跨了日期边界——与
+        `hour_buckets`/`token_by_model` 的替换语义一致（同一笔请求不能
+        既算进旧日期又算进新日期）。"""
+        events = [
+            {"type": "request/header", "seq": 1, "time": self.TUE_LATE_NIGHT_2350,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            {"type": "assistant/chunk", "seq": 2, "time": self.TUE_LATE_NIGHT_2350,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000, "outputTokens": 100}}}},
+            # message 后到，落到第二天，同 (turn, step) → 应扣掉前一天的贡献
+            {"type": "assistant/message", "seq": 3, "time": self.WED_JUST_AFTER_0010,
+             "data": {"turn": 1, "step": 1,
+                      "usage": {"inputTokens": 1200, "outputTokens": 120}}},
+        ]
+        out = token_by_date_model(events)
+        # 与 hour_buckets/token_by_model 同一条约定：被替换扣光的桶留在
+        # 结果里但归零，不是把 key 整个删掉（hour_buckets 自己的
+        # test_same_step_dedup_replaces_previous_contribution 断言的也是
+        # 「桶里的值是 0」，不是「桶不存在」）。
+        self.assertEqual(out["2026-08-25"]["pro"]["uncached_input_tokens"], 0,
+                          "旧日期的贡献应该被替换扣光")
+        self.assertEqual(out["2026-08-26"]["pro"]["uncached_input_tokens"], 1200)
+
+    def test_missing_time_produces_no_date_bucket(self):
+        """time 缺失的样本不进任何日期桶——与 hour_buckets 同一条纪律，
+        否则历史回填会把这些样本记进 `_today_key()` 或 1970-01-01。"""
+        events = [
+            {"type": "request/header", "seq": 1, "time": 1001,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            {"type": "assistant/chunk", "seq": 2,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 500, "outputTokens": 50}}}},
+        ]
+        self.assertEqual(token_by_date_model(events), {})
+
+    def test_empty_input_returns_empty_dict(self):
+        self.assertEqual(token_by_date_model([]), {})
 
 
 if __name__ == "__main__":

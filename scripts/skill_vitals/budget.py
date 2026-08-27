@@ -262,6 +262,25 @@ def compute_today_cost():
         data = json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+
+    # **today.json 里的 date 必须真的是今天,否则这份数据不是「今天的花费」。**
+    # `rotate_today()` 只在 `merge_today()` 开头被调用——也就是说只有"今天
+    # 真的跑过一次审计"时才会翻页。今天一次 DSH 会话都没开的话,today.json
+    # 会**原封不动停在最后一次有会话的那天**,而这里过去从不校验 date,
+    # 于是把昨天的花费当成今天的报出去（真机实测：2026-08-27 当天没用过
+    # DSH，菜单栏/alert.json 仍报 today_cost ¥3.09 —— 那是 08-26 的账）。
+    #
+    # 返回 None 而不是 0：与 CLAUDE.md §「缺列不编列」一致。状态文件里
+    # 没有今天的记录，说明的是"没有今天的数据"，不是"测到今天花了 0 元"
+    # ——真要断言 0 得先证明今天确实跑过审计且用量为零。`evaluate()` 已经
+    # 有「没有 today.json」的分支，这里复用它。
+    #
+    # 不在这里顺手 rotate：rotate 会写盘，而这是一条纯读路径（xbar 每 5
+    # 分钟 tick 都会调它）；让读路径产生写副作用，会把"看一眼预算"变成
+    # 一次状态迁移。翻页仍然由下一次真实审计的 `merge_today()` 负责。
+    if data.get("date") and data["date"] != state._today_key():
+        return None
+
     by_model = data.get("by_model") or {}
     buckets = data.get("buckets") or {}
     if not buckets and not by_model:
@@ -278,30 +297,29 @@ def compute_today_cost():
     return {"total": total, "peak_total": peak}
 
 
-def compute_month_cost():
-    """month.json → 当月 cost。与 compute_today_cost 同种「缺列 None」语义。
+def compute_month_cost(month=None):
+    """某个自然月 → cost。与 compute_today_cost 同种「缺列 None」语义。
 
-    逐日判断:该日有 `by_model`(见 `state.merge_month`/rotate 搬运)就
-    精确定价,没有(rotate 之前的历史日)就退回旧的 fallback 近似 ——
-    同一个月里新旧两种精度的日子并存是预期行为,不是 bug。
+    `month=None` → 当前真实自然月；传 "YYYY-MM" 查历史月（`state.read_month`
+    按需读归档）。**不再直接读 `month.json` 的整个 `days`**——那曾经是
+    「本月成本」变成「有史以来成本」的根因：`merge_month` 从不清理旧月份，
+    `month.json` 的 `month` 字段只是写入时刻盖的戳，跨月后两者就对不上
+    （真实回归：一个含 8 月两天 + 9 月一天的 month.json，被当成 9 月账
+    直接求和，报出 201 倍的金额）。`state.read_month` 已经把「当前月」和
+    「历史月」的边界处理掉，这里只管拿到手的这批日子怎么定价。
+
+    逐日定价的判断在 `cost_module.priced_day`（唯一入口，覆盖率校验也在
+    那——见该函数文档）；它返回 `None` 时说明这天没有 `by_model`，退回旧
+    的 fallback 近似——同一个月里新旧两种精度的日子并存是预期行为,不是 bug。
     """
-    p = state.state_dir() / "month.json"
-    if not p.is_file():
-        return None
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    days = data.get("days") or {}
-    if not days:
+    result = state.read_month(month)
+    if result is None:
         return None
     pricing = cost_module.load_pricing()
     total = 0.0
     peak = 0.0
-    for day in days.values():
-        by_model = day.get("by_model") or {}
-        c = (_price_by_model(by_model, pricing) if by_model
-             else _bucket_cost(day, pricing))
+    for day in result["days"].values():
+        c = cost_module.priced_day(day, pricing) or _bucket_cost(day, pricing)
         total += c.get("total", 0.0)
         peak += c.get("peak_total", 0.0)
     return {"total": total, "peak_total": peak}
@@ -310,20 +328,19 @@ def compute_month_cost():
 def compute_7d_avg_daily():
     """近 7 天日均 cost —— 自适应阈值的输入。
 
-    从 month.json 取最近 N 天的「日总和」算术平均。N < 7 时按现有天数
+    从当前自然月取最近 N 天的「日总和」算术平均。N < 7 时按现有天数
     平均 —— 「窗口不足」**不**报错，按已有数据降级（host 能力缺失纪律）。
-    逐日精确/近似定价的选择与 compute_month_cost 相同。
+
+    **只查当前自然月**：7 天窗口理论上可能跨月初（比如 3 号往前推 7 天到
+    上月 25 号），但 `state.read_month()` 不传参数只返回当前月——这是已知
+    的窗口收窄，不是本次要解决的问题（当前月刚开始的头几天，日均样本本来
+    就少，`n < 7` 分支已经在正确处理"数据不够"）。逐日定价的判断与
+    `compute_month_cost` 相同，见 `cost_module.priced_day`。
     """
-    p = state.state_dir() / "month.json"
-    if not p.is_file():
+    result = state.read_month()
+    if result is None:
         return None
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    days = data.get("days") or {}
-    if not days:
-        return None
+    days = result["days"]
     pricing = cost_module.load_pricing()
     today_bj = datetime.now(_BEIJING).date()
     total = 0.0
@@ -331,9 +348,7 @@ def compute_7d_avg_daily():
     for offset in range(7):
         d = (today_bj - timedelta(days=offset)).isoformat()
         if d in days:
-            by_model = days[d].get("by_model") or {}
-            c = (_price_by_model(by_model, pricing) if by_model
-                 else _bucket_cost(days[d], pricing))
+            c = cost_module.priced_day(days[d], pricing) or _bucket_cost(days[d], pricing)
             total += c.get("total", 0.0)
             n += 1
     if n == 0:

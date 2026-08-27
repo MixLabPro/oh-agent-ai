@@ -222,20 +222,29 @@ class TestMergeToday(unittest.TestCase):
 
 class TestMergeMonth(unittest.TestCase):
     def test_merge_month_groups_by_date(self):
-        """month.json 按日期折叠（同一天 0–23 点累加成一个日期桶）。"""
+        """month.json 按日期折叠（同一天 0–23 点累加成一个日期桶）。
+
+        用**当前自然月**的第 1/2 天而不是硬编码的历史日期——`merge_month`
+        现在只把当前月的日子留在 month.json（见跨月归档设计），硬编码一个
+        固定年月的日期迟早会随日历前进而"过期"变成历史月，那时这条测试会
+        默默开始走归档分支而不是它本来要测的（date,hour)折叠。第 1/2 天
+        保证永远存在、永远同月，不用处理"这个月有没有 30 号"。
+        """
         with _IsolatedHome():
+            m = state._month_key()
+            d1, d2 = f"{m}-01", f"{m}-02"
             state.merge_month({"buckets": [
-                {"date": "2026-08-25", "hour": 14, "is_peak": True,
+                {"date": d1, "hour": 14, "is_peak": True,
                  "uncached_input_tokens": 100, "output_tokens": 0,
                  "cache_read_tokens": 0, "cache_write_tokens": 0,
                  "peak_uncached_input_tokens": 100, "peak_output_tokens": 0,
                  "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
-                {"date": "2026-08-25", "hour": 15, "is_peak": True,
+                {"date": d1, "hour": 15, "is_peak": True,
                  "uncached_input_tokens": 200, "output_tokens": 0,
                  "cache_read_tokens": 0, "cache_write_tokens": 0,
                  "peak_uncached_input_tokens": 200, "peak_output_tokens": 0,
                  "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
-                {"date": "2026-08-26", "hour": 9, "is_peak": True,
+                {"date": d2, "hour": 9, "is_peak": True,
                  "uncached_input_tokens": 50, "output_tokens": 0,
                  "cache_read_tokens": 0, "cache_write_tokens": 0,
                  "peak_uncached_input_tokens": 50, "peak_output_tokens": 0,
@@ -243,26 +252,191 @@ class TestMergeMonth(unittest.TestCase):
             ]})
             month = json.loads((state.state_dir() / "month.json").read_text())
             days = month["days"]
-            self.assertEqual(days["2026-08-25"]["uncached_input_tokens"], 300,
+            self.assertEqual(days[d1]["uncached_input_tokens"], 300,
                              "同一天两个 hour 累加")
-            self.assertEqual(days["2026-08-26"]["uncached_input_tokens"], 50)
+            self.assertEqual(days[d2]["uncached_input_tokens"], 50)
 
-    def test_merge_month_by_model_attributed_to_today(self):
-        """by_model 没有时间戳(整个 session 一次性的聚合)——按
-        _today_key() 归到当天，与 rotate 时历史日的 by_model 是同一份
-        数据形状。"""
+    def test_merge_month_by_date_model_attributed_to_its_own_date(self):
+        """`by_date_model` 按自己携带的日期落位——不是 `_today_key()`。
+
+        回归:老实现把 by_model 一律记进「今天」，回填历史日志时会把钱
+        记错日子（真实 case：`session-e4b0be69` 横跨 4 天，整段 by_model
+        被记成回填当天，月度精算成本因此漏记了没落在该日的部分，2026-08
+        账目一度偏差 4 倍）。这里显式用一个**不等于**今天的历史日期，
+        证明数据落在它自己的日期上，不受调用时间影响。"""
         with _IsolatedHome():
-            today_str = state._today_key()
-            state.merge_month({"buckets": []}, by_model={
-                "deepseek-v4-pro": {
-                    "uncached_input_tokens": 100, "output_tokens": 10,
-                    "cache_read_tokens": 0, "cache_write_tokens": 0,
-                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+            historical = "2020-01-01"
+            self.assertNotEqual(historical, state._today_key())
+            state.merge_month({"buckets": []}, by_date_model={
+                historical: {
+                    "deepseek-v4-pro": {
+                        "uncached_input_tokens": 100, "output_tokens": 10,
+                        "cache_read_tokens": 0, "cache_write_tokens": 0,
+                        "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                        "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+                },
             })
             month = json.loads((state.state_dir() / "month.json").read_text())
-            day = month["days"][today_str]
-            self.assertEqual(day["by_model"]["deepseek-v4-pro"]["uncached_input_tokens"], 100)
+            self.assertNotIn(state._today_key(), month["days"],
+                              "历史回填不应该凭空造出'今天'这个日期桶")
+            # 2020-01 不是当前自然月 → 落进归档而不是 month.json
+            # （month.json 只保存当前月，见 merge_month 文档注释）
+            self.assertNotIn(historical, month.get("days", {}),
+                              "历史月的数据不该留在只保存当前月的 month.json 里")
+            day = state.read_month("2020-01")["days"][historical]
+            self.assertEqual(day["by_model"]["deepseek-v4-pro"]["uncached_input_tokens"], 100,
+                              "按日期归位这条语义不变，只是历史月落到归档里")
+
+    def test_merge_month_by_date_model_spans_multiple_dates(self):
+        """一次 `merge_month` 调用可以同时落多个日期的 by_model——跨零点
+        的长会话折叠出的 `by_date_model` 天然是多日期的，不需要多次调用。
+
+        用当前自然月的第 1/2 天，原因同 `test_merge_month_groups_by_date`。
+        """
+        with _IsolatedHome():
+            m = state._month_key()
+            d1, d2 = f"{m}-01", f"{m}-02"
+            state.merge_month({"buckets": []}, by_date_model={
+                d1: {
+                    "deepseek-v4-pro": {
+                        "uncached_input_tokens": 100, "output_tokens": 0,
+                        "cache_read_tokens": 0, "cache_write_tokens": 0,
+                        "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                        "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+                },
+                d2: {
+                    "deepseek-v4-flash": {
+                        "uncached_input_tokens": 200, "output_tokens": 0,
+                        "cache_read_tokens": 0, "cache_write_tokens": 0,
+                        "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                        "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+                },
+            })
+            month = json.loads((state.state_dir() / "month.json").read_text())
+            self.assertEqual(
+                month["days"][d1]["by_model"]["deepseek-v4-pro"]["uncached_input_tokens"], 100)
+            self.assertEqual(
+                month["days"][d2]["by_model"]["deepseek-v4-flash"]["uncached_input_tokens"], 200)
+
+
+class TestMergeMonthArchive(unittest.TestCase):
+    """跨月归档：`month.json` 只留当前自然月，旧月迁进 `month-archive.json`。
+
+    回归：`merge_month` 从不清理旧月份、所有读者也不按月过滤时，跨月后
+    "本月成本"会变成"有史以来成本"（真实测算：一个含 8 月两天 + 9 月一天
+    的 month.json，被当 9 月账目直接求和，报出 201 倍的金额）。
+    """
+
+    @staticmethod
+    def _bucket(u):
+        return {"uncached_input_tokens": u, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0}
+
+    def test_stale_month_moves_to_archive_on_next_merge(self):
+        """month.json 里躺着一个不属于当前月的日子——下一次 merge_month
+        （不管这次落的数据是哪天的）必须先把它搬进归档，不能留在
+        month.json 里跟当前月的数据混在一起。"""
+        with _IsolatedHome():
+            stale_month = "2020-01"
+            state._atomic_write(state.state_dir() / "month.json", {
+                "days": {f"{stale_month}-15": self._bucket(1_000_000)},
+                "month": stale_month, "schema_version": "1.0.0",
+            })
+            m = state._month_key()
+            state.merge_month({"buckets": [
+                {"date": f"{m}-01", "hour": 0, "is_peak": False,
+                 **self._bucket(500)},
+            ]})
+            month = json.loads((state.state_dir() / "month.json").read_text())
+            self.assertNotIn(f"{stale_month}-15", month["days"],
+                             "旧月的日子不该继续留在 month.json 里")
+            self.assertEqual(month["days"][f"{m}-01"]["uncached_input_tokens"], 500)
+            self.assertEqual(month["month"], m)
+
+            archived = state.read_month(stale_month)
+            self.assertIsNotNone(archived, "旧月的数据应该能在归档里查到")
+            self.assertEqual(
+                archived["days"][f"{stale_month}-15"]["uncached_input_tokens"],
+                1_000_000, "搬迁不能丢数据")
+
+    def test_migration_to_archive_is_idempotent(self):
+        """归档迁移用逐日**替换**，不是累加——多次触发迁移（比如崩溃后重跑）
+        同一天的数据必须还是原样，不会被算成两倍。"""
+        with _IsolatedHome():
+            stale_month = "2020-01"
+            state._atomic_write(state.state_dir() / "month.json", {
+                "days": {f"{stale_month}-15": self._bucket(1_000_000)},
+                "month": stale_month, "schema_version": "1.0.0",
+            })
+            m = state._month_key()
+            hb = {"buckets": [{"date": f"{m}-01", "hour": 0, "is_peak": False,
+                               **self._bucket(1)}]}
+            state.merge_month(hb)   # 触发第一次迁移
+            # 手动把同一个旧月的日子塞回 month.json，模拟"迁移完但没删干净
+            # 又跑了一次"的场景
+            existing = json.loads((state.state_dir() / "month.json").read_text())
+            existing.setdefault("days", {})[f"{stale_month}-15"] = self._bucket(1_000_000)
+            state._atomic_write(state.state_dir() / "month.json", existing)
+            state.merge_month(hb)   # 触发第二次迁移
+
+            archived = state.read_month(stale_month)
+            self.assertEqual(
+                archived["days"][f"{stale_month}-15"]["uncached_input_tokens"],
+                1_000_000, "重复迁移同一天必须是替换，不是累加成 2,000,000")
+
+    def test_backfill_into_an_already_archived_month_accumulates(self):
+        """回填一份历史日志、目标日期在**已经归档**的旧月里——这不是"迁移"
+        （迁移是搬运已有数据），是"新证据"，必须累加进归档里那一天已有的
+        量，而不是替换掉它（否则回填会抹掉之前搬过去的真实数据）。"""
+        with _IsolatedHome():
+            stale_month = "2020-01"
+            # 先归档一批
+            state._atomic_write(state.state_dir() / "month.json", {
+                "days": {f"{stale_month}-15": self._bucket(1_000_000)},
+                "month": stale_month, "schema_version": "1.0.0",
+            })
+            m = state._month_key()
+            state.merge_month({"buckets": [
+                {"date": f"{m}-01", "hour": 0, "is_peak": False, **self._bucket(1)},
+            ]})
+            # 再对同一个已归档的历史日期做一次回填（比如翻出更早的日志）
+            state.merge_month({"buckets": [
+                {"date": f"{stale_month}-15", "hour": 5, "is_peak": False,
+                 **self._bucket(200_000)},
+            ]})
+            archived = state.read_month(stale_month)
+            self.assertEqual(
+                archived["days"][f"{stale_month}-15"]["uncached_input_tokens"],
+                1_200_000, "回填历史月应该累加，不是覆盖掉已归档的数据")
+
+    def test_read_month_current_reads_month_json(self):
+        with _IsolatedHome():
+            m = state._month_key()
+            state.merge_month({"buckets": [
+                {"date": f"{m}-03", "hour": 0, "is_peak": False, **self._bucket(42)},
+            ]})
+            result = state.read_month()   # 不传参数 → 当前月
+            self.assertEqual(result["month"], m)
+            self.assertEqual(result["days"][f"{m}-03"]["uncached_input_tokens"], 42)
+
+    def test_read_month_missing_returns_none(self):
+        """查一个完全没有数据的月份——缺列不编列，不返回空壳。"""
+        with _IsolatedHome():
+            self.assertIsNone(state.read_month("1999-01"))
+
+    def test_list_months_includes_current_and_archived(self):
+        with _IsolatedHome():
+            m = state._month_key()
+            state.merge_month({"buckets": [
+                {"date": f"{m}-01", "hour": 0, "is_peak": False, **self._bucket(1)},
+            ]})
+            state._atomic_write(state.state_dir() / "month-archive.json", {
+                "months": {"2020-01": {"days": {"2020-01-15": self._bucket(1)}}},
+                "schema_version": "1.0.0",
+            })
+            self.assertEqual(state.list_months(), sorted(["2020-01", m]))
 
 
 class TestMergeModelBuckets(unittest.TestCase):

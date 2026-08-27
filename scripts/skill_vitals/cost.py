@@ -131,6 +131,94 @@ def _price(buckets, model_key, provider_key, pricing):
     return {"total": off + peak, "peak": peak, "cache_read_cost": cache_read_cost}
 
 
+def fallback_price(buckets, pricing):
+    """给一份**没有模型归属**的原始 8 桶按 fallback 模型估个价——`cost_report`
+    需要知道"这些 token 是哪个模型"，这里是它唯一的退路，不是另一条计价规则。
+
+    只服务 `cli.py::_augment_calendar_cost` 的"日历某天 by_model 覆盖不全"
+    分支（见该函数文档），不在 `src/cost.rs` 的 lockstep/差分范围内——
+    `calendar` 从来不是 Rust 二进制的子命令，没有 `test_cli_matrix.py` 会
+    校验一份 Rust 镜像。calendar.html 的 JS 端已经有一份同语义的硬编码
+    近似（`PRICE` 表），这里是它在 Python 侧、直接从 `pricing.json` 读数的
+    对应实现，两者近似逻辑一致但不是同一份代码——JS 没有服务端 fetch 能力
+    读不到 pricing.json，这是已知、记录在案的限制（见 calendar.html 头部
+    注释），不是这里要解决的问题。
+    """
+    fb_provider = pricing.get("fallback_provider")
+    return _price(buckets, "deepseek-v4-flash", fb_provider, pricing)
+
+
+DAY_BUCKET_FIELDS = (
+    "uncached_input_tokens", "output_tokens",
+    "cache_read_tokens", "cache_write_tokens",
+    "peak_uncached_input_tokens", "peak_output_tokens",
+    "peak_cache_read_tokens", "peak_cache_write_tokens",
+)
+
+
+def _sum_by_model(by_model):
+    """`by_model` 里每个模型的 8 桶按字段相加，折成一份跟 day/today 顶层
+    同形状的 8 桶——用来跟顶层的「真实总量」对账覆盖率。"""
+    total = {f: 0 for f in DAY_BUCKET_FIELDS}
+    for buckets in by_model.values():
+        for f in DAY_BUCKET_FIELDS:
+            total[f] += buckets.get(f, 0) or 0
+    return total
+
+
+def priced_day(day, pricing):
+    """一份「日桶」（`state.py` month.json/today.json 里那种 8 基础字段 +
+    可选 `by_model`）→ `{total, peak_total, pricing_basis, coverage}`，或
+    `None`（没有 by_model——调用方自己决定退回哪种近似）。
+
+    **唯一的覆盖率校验入口**——`cli.py` 的日历、`budget.py` 的
+    month/7d-average 三处过去各写一份「有没有 by_model 就……」，日历那份
+    修过覆盖率之后，budget.py 那两份还在裸用 `by_model`，同一份
+    `month.json` 因此在两个投影上报出不同的钱（¥4.50 vs ¥18.00）。三处
+    都改调这一个函数，覆盖率的判断只写一次，不会有第四个地方重新引入
+    同一个 bug。
+
+    **必须校验覆盖率，不能只看「有没有 by_model」**（真实回归：8 月账目
+    一度因为从不校验覆盖率，把只覆盖当天 0.7%~32.5% token 的 by_model
+    当成"精算"直接报出去，剩下 67%~99% 的 token 静默消失）。做法：把
+    `by_model` 折成跟 `day` 同形状的一份总量，与 `day` 做减法算出"没有
+    模型归属的剩余 token"——不是 0 就说明这一天的 `by_model` 只覆盖了
+    部分时段（例如一个跨零点的会话只把某一天的切片记了下来），剩余部分
+    按 `fallback_price` 补齐，标 `pricing_basis: "partial"`，不假装是
+    `"exact"`。
+    """
+    by_model = day.get("by_model") or {}
+    if not by_model:
+        return None
+    report = cost_report({"by_model": by_model}, pricing)
+    if report is None:
+        return None
+    covered = _sum_by_model(by_model)
+    day_total = sum(day.get(f, 0) or 0 for f in DAY_BUCKET_FIELDS)
+    covered_total = sum(covered.values())
+    remainder_total = max(0, day_total - covered_total)
+    if remainder_total == 0:
+        return {
+            "total": report["total"],
+            "peak_total": report["peak_total"],
+            "pricing_basis": "exact",
+            "coverage": 1.0,
+        }
+    remainder = {
+        f: max(0, (day.get(f, 0) or 0) - covered[f])
+        for f in DAY_BUCKET_FIELDS
+    }
+    top_up = fallback_price(remainder, pricing)
+    return {
+        "total": report["total"] + top_up["total"],
+        "peak_total": report["peak_total"] + top_up["peak"],
+        "pricing_basis": "partial",
+        # day_total 为 0 时 remainder_total 必是 0，已被上面的分支短路——
+        # 到这里 day_total 必然 > 0，除法安全。
+        "coverage": covered_total / day_total,
+    }
+
+
 def cost_report(usage, pricing):
     """usage 报告 × 价格表 → 结构化成本数据。**这是唯一算价格的地方**——
     `cost_block`（人读文本）与 `--json` 的 `cost` 键都从这里取数，不是两处

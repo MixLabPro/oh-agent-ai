@@ -19,6 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from skill_vitals import budget
+from skill_vitals import cli as cli_module
 from skill_vitals import state
 from skill_vitals import cost as cost_module
 
@@ -432,19 +433,27 @@ class TestPerModelPricing(unittest.TestCase):
     def test_month_cost_blends_days_with_and_without_by_model(self):
         """同一个月里,新数据(有 by_model)精确定价、老数据(没有,这个
         功能上线前的历史日)退回近似——两种精度的日子共存是预期行为,
-        不是 bug,不需要回填历史。"""
+        不是 bug,不需要回填历史。
+
+        用当前自然月的第 1/2 天而不是硬编码年月——`compute_month_cost`
+        现在只读当前自然月（见跨月归档设计），硬编码日期会随日历前进
+        变成历史月，`read_month()` 就会把它们过滤掉，这条测试会开始
+        对着一个空月断言,而不是它本来要测的「新旧数据混算」。
+        """
         with _IsolatedHome():
             sd = state.state_dir()
+            m = state._month_key()
+            d1, d2 = f"{m}-01", f"{m}-02"
             legacy_bucket = self._flat_bucket(1_000_000)
             state._atomic_write(sd / "month.json", {
                 "days": {
-                    "2026-08-01": legacy_bucket,  # 老数据：没有 by_model
-                    "2026-08-02": {
+                    d1: legacy_bucket,  # 老数据：没有 by_model
+                    d2: {
                         **TestPerModelPricing._flat_bucket(0),
                         "by_model": {"deepseek-v4-pro": self._flat_bucket(1_000_000)},
                     },
                 },
-                "schema_version": "1.0.0",
+                "month": m, "schema_version": "1.0.0",
             })
             total = budget.compute_month_cost()
             pricing = cost_module.load_pricing()
@@ -452,6 +461,116 @@ class TestPerModelPricing(unittest.TestCase):
             expected_pro = budget._price_by_model(
                 {"deepseek-v4-pro": self._flat_bucket(1_000_000)}, pricing)["total"]
             self.assertAlmostEqual(total["total"], expected_legacy + expected_pro, places=6)
+
+    def test_month_cost_tops_up_partial_by_model_coverage(self):
+        """`by_model` 只覆盖当天一部分 token 时,不能只算覆盖的那部分。
+
+        回归：日历那侧修过这个覆盖率校验（`cost.priced_day`）之后，
+        `compute_month_cost`/`compute_7d_avg_daily` 还在裸用 `by_model`，
+        同一份 month.json 因此在两个投影上报出不同的钱（¥4.50 vs
+        ¥18.00）——两处现在都改调 `priced_day`，这条测试钉住 budget.py
+        这一侧不再漏算。
+        """
+        with _IsolatedHome():
+            sd = state.state_dir()
+            m = state._month_key()
+            d1 = f"{m}-01"
+            day = self._flat_bucket(10_000_000)     # 当天真实 10M token
+            day["by_model"] = {"deepseek-v4-pro": self._flat_bucket(1_000_000)}  # 只覆盖 1M
+            state._atomic_write(sd / "month.json", {
+                "days": {d1: day}, "month": m, "schema_version": "1.0.0",
+            })
+            got = budget.compute_month_cost()["total"]
+            pricing = cost_module.load_pricing()
+            covered = budget._price_by_model(
+                {"deepseek-v4-pro": self._flat_bucket(1_000_000)}, pricing)["total"]
+            self.assertGreater(
+                got, covered,
+                "未覆盖的 9M token 必须被补齐进 total,不能悄悄消失（这天真实"
+                "只有 10%% token 被精确定价，其余不能算作 0）")
+
+    def test_month_and_calendar_agree_on_the_same_partial_coverage_day(self):
+        """同一份 month.json，菜单栏（budget.compute_month_cost）与日历
+        （cli._augment_calendar_cost）必须给出同一个数字——这两者是同一个
+        审计能力的两个投影，此前只修日历一侧，把两个投影拉开了
+        （¥4.50 vs ¥18.00），这条测试就是那条缺失的对账不变量。"""
+        with _IsolatedHome():
+            sd = state.state_dir()
+            m = state._month_key()
+            d1 = f"{m}-17"
+            day = self._flat_bucket(10_000_000)
+            day["by_model"] = {"deepseek-v4-pro": self._flat_bucket(1_000_000)}
+            state._atomic_write(sd / "month.json", {
+                "days": {d1: day}, "month": m, "schema_version": "1.0.0",
+            })
+            pricing = cost_module.load_pricing()
+
+            menu_bar = budget.compute_month_cost()["total"]
+            calendar_data = {"days": {d1: dict(day)}}
+            cli_module._augment_calendar_cost("month", calendar_data, pricing)
+            calendar = sum(d["cost"]["total"] for d in calendar_data["days"].values())
+
+            self.assertAlmostEqual(menu_bar, calendar, places=6,
+                                   msg="菜单栏与日历对同一份 month.json 必须算出同一个数")
+
+
+class TestTodayCostRejectsStaleFile(unittest.TestCase):
+    """`compute_today_cost()` 必须校验 today.json 的 `date` 真的是今天。
+
+    真机事故：`rotate_today()` 只在 `merge_today()` 开头被调用，所以
+    「今天一次 DSH 会话都没跑」时 today.json 会原封不动停在最后一次有
+    会话的那天。`compute_today_cost()` 过去从不看 date 字段，于是把昨天
+    的花费当成今天的报给菜单栏/alert.json——2026-08-27 当天没用过 DSH，
+    仍显示 today_cost ¥3.09（那是 08-26 的账）。
+    """
+
+    @staticmethod
+    def _bucket(uncached):
+        return {
+            "uncached_input_tokens": uncached, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+        }
+
+    def test_stale_date_returns_none_not_yesterdays_cost(self):
+        with _IsolatedHome():
+            state._atomic_write(state.state_dir() / "today.json", {
+                "date": "2020-01-01",          # 绝不可能是今天
+                "buckets": {},
+                "by_model": {"deepseek-v4-pro": self._bucket(1_000_000)},
+                "schema_version": "1.0.0",
+            })
+            self.assertIsNone(
+                budget.compute_today_cost(),
+                "today.json 的日期不是今天时必须返回 None(缺列不编列),"
+                "不能把那天的花费当成今天的")
+
+    def test_current_date_is_still_counted(self):
+        """今天的数据当然要照算——守卫不能把正常路径一起挡掉。"""
+        with _IsolatedHome():
+            state._atomic_write(state.state_dir() / "today.json", {
+                "date": state._today_key(),
+                "buckets": {},
+                "by_model": {"deepseek-v4-pro": self._bucket(1_000_000)},
+                "schema_version": "1.0.0",
+            })
+            cost = budget.compute_today_cost()
+            self.assertIsNotNone(cost)
+            self.assertGreater(cost["total"], 0)
+
+    def test_missing_date_field_is_still_counted(self):
+        """没有 date 字段的老数据保持既有行为(照算)——这条守卫只针对
+        「明确写了一个不是今天的日期」，不把老 schema 一起判死。"""
+        with _IsolatedHome():
+            state._atomic_write(state.state_dir() / "today.json", {
+                "buckets": {},
+                "by_model": {"deepseek-v4-pro": self._bucket(1_000_000)},
+                "schema_version": "1.0.0",
+            })
+            cost = budget.compute_today_cost()
+            self.assertIsNotNone(cost)
+            self.assertGreater(cost["total"], 0)
 
 
 if __name__ == "__main__":

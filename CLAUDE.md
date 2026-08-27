@@ -237,7 +237,51 @@ catches Python↔Rust drift; the wasm↔CLI drift is caught only by re-running t
 against the same fixtures, so verify that manually. The **trajectory detectors** (`trajectory.rs` ↔ `trajectory.py` ↔ wasm `audit_events` 合并 ↔ dsh 提取的 `turn/start·step/start·turn/end·step/end` 边界信号) are the same lockstep. The **cost fold** (`usage.rs` ↔
 `usage.py` ↔ wasm `token_by_model` ↔ dsh adapter `usage_events`) is the same three-way
 lockstep; its reconciliation invariant — bucket sums must equal DSH's `tokenUsage` — is
-checked against a real session log in the CLI's `behavior` output. The DeepSeek **price
+checked against a real session log in the CLI's `behavior` output.
+
+**The same fold has a third projection, and it is load-bearing: `token_by_date_model`
+(`usage.rs` ↔ `usage.py`).** The calendar and the DSH audit tab are not two features that
+happen to both compute money — they are **one audit capability projected along two axes**:
+the tab slices by session (`token_by_model`), the calendar slices by time
+(`token_by_date_model`), and *the monthly token total and cost of the two must be equal*.
+Nothing enforced that until 2026-08, when the calendar reported ¥2386 for a month whose
+per-session recomputation was ¥1733 — found by hand, not by a test. The guards now are
+`usage.rs::token_by_date_model_reconciles_with_token_by_model` (exact equality; the only
+legitimate difference is untimed samples, which the date axis drops by design and which is
+pinned by its own test) and a byte-for-byte Python↔Rust parity test on both sides. Do not
+"simplify" the date axis into a Python-only helper: it fell outside the differential once
+already, and the menu-bar work (Rust-Tauri) consumes this same fold.
+
+Consequently the **M3 state layer** (`state.py`'s `merge_today`/`merge_month`/
+`rotate_today`/`read_month`/`list_months`, `budget.py`, `cli.py`'s `oneline`/`calendar`) is
+the one place in this repo that accumulates *across* invocations, and its invariants are not
+input→output but **cross-call**: every token lands in `month.json` exactly once
+(`merge_month` owns that write — `rotate_today` must never also add, which is what silently
+tripled 2026-08), a backfilled log attributes to *its own* date rather than `_today_key()`,
+and a day whose `by_model` covers only part of its tokens must be labelled `partial`, never
+priced as if exact — that check lives in exactly one place, `cost.py::priced_day`, because
+the day it existed only inside the calendar's renderer, the calendar and the budget menu-bar
+projection (same `month.json`, same month) silently disagreed with each other on the price of
+that day. Tests here must start from *already-populated* state; every one of these bugs
+survived a green suite because the tests began from an empty state directory — including one
+introduced *while fixing another*: `priced_day` was added for the calendar and left
+`budget.py` un-migrated for a turn, which a cross-projection-agreement test (`budget.py`'s
+`test_month_and_calendar_agree_on_the_same_partial_coverage_day`) now pins directly, rather
+than relying on each call site being individually correct.
+
+`month.json` holds **only the current calendar month**; `merge_month` migrates any date that
+has rolled out of it into `month-archive.json` (keyed `{"YYYY-MM": {"days": {...}}}`) before
+writing new data, so that no reader of `month.json` needs to filter by date to get "this
+month's" figure right — before this, nothing filtered, and a month.json carrying a couple of
+leftover August rows reported a September total 201× too high. The migration write is a
+per-day *replacement* (idempotent — crashing mid-migration and retrying re-copies the same
+day, never doubles it); a *backfill* into an already-archived month is a per-day
+*accumulation* instead, because that call is new evidence, not a re-run of the same migration.
+Query a historical month with `state.read_month("YYYY-MM")` /
+`skill-vitals budget show --month YYYY-MM`; `state.list_months()` /
+`skill-vitals state months` enumerates what has data. The computation (`token_by_date_model`,
+`priced_day`) is in the core crate / `cost.py` precisely so the Tauri menu bar and any future
+month-query surface reuse it rather than growing a fourth copy. The DeepSeek **price
 table** lives only in `scripts/skill_vitals/pricing.json` (CLI 两侧读它；`dsh-client/
 pricing.json` 是 build 时复制出的运行时份，宿主 `costReport` 投影读它；`styles/index.ts`
 另内嵌一份仅供展示用的模型短名副本——三处由 `tests/test_pricing_lockstep.py` 守）;
