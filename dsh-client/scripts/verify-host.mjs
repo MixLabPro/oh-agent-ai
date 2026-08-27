@@ -225,6 +225,61 @@ if (peakBucket.uncached_input_tokens !== 150 || peakBucket.peak_uncached_input_t
 ok('tokenByModel splits peak_* from an event\'s own time (Beijing 10:00 peak vs 20:00 off-peak)')
 
 // ---------------------------------------------------------------------------
+// compaction/summary 的 token 必须能穿过**投影层的 apply 白名单**进 wasm。
+//
+// 真机回归（用户发现"今天做了一次 compact，日历却是 0"）：DSH 的
+// compaction/summary 带真实 usage（实测 inputTokens 462 / outputTokens 3520 /
+// cacheReadTokens 245760）且自带 model/provider，但"哪些事件带 usage"这条
+// 判断在本文件里被复制了 8 遍（tokenByModel/costReport/loopCosts/preForkUsage/
+// requestMetrics/structuralWaste/skillAudit/skillAttribution）。于是即便 core
+// 的 usage_sample 修好了，审计 tab **依然是 0**——事件在 apply() 里就被丢了，
+// 压根没进 state.events，wasm 永远看不到它。
+//
+// 这条断言走的是**真实投影链路**（apply → view → wasm），不是直接调 wasm，
+// 钉的正是那个盲区：白名单漏放行一个类型，core 再对也白搭。
+{
+  const compaction = {
+    type: 'compaction/summary', seq: 10, time: 1704074400000,
+    data: {
+      compactionId: 'c-1', sourceCommandId: 'cmd-1',
+      model: 'deepseek-v4-flash', provider: 'deepseek-official',
+      usage: { inputTokens: 462, outputTokens: 3520, cacheReadTokens: 245760 },
+    },
+  }
+  let st = tb.init()
+  // 先来一条别的模型的 header——compaction 必须用**它自己的** model，
+  // 不能沿用"当前激活模型"（真实实测：会话主体 pro，compaction 走 flash，
+  // 两者是不同的供应商价目表，记错就按错误单价计费）。
+  st = tb.apply(st, { type: 'request/header', seq: 9, data: { header: { config: { model: 'deepseek-v4-pro', provider: 'shengsuanyun' } } } })
+  st = tb.apply(st, compaction)
+  const v = tb.view(st)
+  const flash = v.by_model['deepseek-v4-flash']
+  if (!flash) {
+    fail(`compaction/summary 的 usage 没进 tokenByModel——apply 白名单大概率把它丢了（by_model=${JSON.stringify(v.by_model)}）`)
+  }
+  if (flash.uncached_input_tokens !== 462 || flash.output_tokens !== 3520 || flash.cache_read_tokens !== 245760) {
+    fail(`compaction usage 数值不对: ${JSON.stringify(flash)}`)
+  }
+  if (v.by_model['deepseek-v4-pro']) {
+    fail('compaction 被错记进"当前激活模型" pro——必须用它自己的 model/provider')
+  }
+  if (v.providers['deepseek-v4-flash'] !== 'deepseek-official') {
+    fail(`compaction 的 provider 归属错了: ${JSON.stringify(v.providers)}`)
+  }
+  ok('compaction/summary 的 usage 穿过 apply 白名单进入 wasm，并按它自带的 model/provider 归属')
+
+  // 残差哨兵：core 新增的 unaccounted_usage 字段必须一路透传到投影输出，
+  // 且在正常语料上为空（非空 = 有钱没算进去）。
+  if (!Array.isArray(v.unaccounted_usage)) {
+    fail(`tokenByModel 输出缺少 unaccounted_usage 数组: ${JSON.stringify(Object.keys(v))}`)
+  }
+  if (v.unaccounted_usage.length !== 0) {
+    fail(`不该有漏算: ${JSON.stringify(v.unaccounted_usage)}`)
+  }
+  ok('tokenByModel 透传残差哨兵 unaccounted_usage（正常语料上为空）')
+}
+
+// ---------------------------------------------------------------------------
 // costReport: 宿主原生算钱（此前是 AuditView.tsx 自己拿 tokenByModel 的输出
 // 算一遍，内嵌一份 PRICING 副本）。复用上面那批 pro→flash events——同一批
 // usage 数据，costReport 是它的另一个派生视图，价格来自 dsh-client/pricing.json

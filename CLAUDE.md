@@ -239,6 +239,35 @@ against the same fixtures, so verify that manually. The **trajectory detectors**
 lockstep; its reconciliation invariant — bucket sums must equal DSH's `tokenUsage` — is
 checked against a real session log in the CLI's `behavior` output.
 
+**"Which events carry usage" is one predicate, and it was duplicated twelve times.** It
+lives in `usage.rs::usage_sample` (the authority), mirrored in `usage.py::_usage_sample`,
+and gated *earlier* by the DSH adapter (`dsh.rs`/`dsh.py::is_usage_event`) and *earlier
+still* by eight `apply()` filters in `dsh-client/src/host/index.ts` (now collapsed into one
+`carriesUsage()` helper). Each layer runs before the next, so **fixing the authority alone
+fixes nothing** — an event dropped by the adapter never reaches the fold, and one dropped by
+a projection's `apply()` never reaches wasm. That is exactly how `compaction/summary`'s real
+token spend (it carries `data.usage` *and* its own `model`/`provider`, which differ from the
+session's active model) went uncounted everywhere: it failed the type whitelist, and it has
+no `turn`/`step` because compaction is command-triggered, not part of any turn
+(`compaction_identity()` hashes `compactionId` into negative space to give it a dedup slot;
+`request_metrics` reports its turn/step as `null` so that internal identity never leaks out
+as a plausible-looking turn number).
+
+The durable defense is not a longer whitelist but a **residual sentinel**: every fold reports
+`unaccounted_usage` — events it did *not* consume whose payload nonetheless contains the very
+token field names it knows how to read. It is the dual of `unreported_fields` ("the host never
+reported this field" vs. "the host reported tokens and we failed to catch them"), and in the
+evidence model it is `Signal::Usage`'s `unmetered` count — `evidence.rs` predicted this bug
+verbatim: *adapters must not inflate their own coverage by not counting what they cannot read*.
+Because of the layering, the sentinel is useless unless the layers above it are **permissive**:
+adapter and projection filters keep anything usage-*shaped* (`usage_shaped_tokens` /
+`looksUsageShaped`), while pricing stays strict (`usage_sample` only). Wide in, narrow out —
+the machine finds, a human classifies. Never merge those two paths: structural detection alone
+would double-count, since one logical charge appears in several events (that is what the
+`(turn, step)` replacement dedup exists for). The sentinel initially reported *zero* gaps —
+a false negative caused by the adapter filter sitting above it; treat a clean sentinel as
+meaningful only once every layer above it is permissive.
+
 **The same fold has a third projection, and it is load-bearing: `token_by_date_model`
 (`usage.rs` ↔ `usage.py`).** The calendar and the DSH audit tab are not two features that
 happen to both compute money — they are **one audit capability projected along two axes**:

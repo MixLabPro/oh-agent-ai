@@ -370,6 +370,53 @@ function subagentUsage(agentId: string): SubUsage {
   }
 }
 
+/**
+ * 「这条事件带 usage 吗」——**投影层唯一的判据**，8 个投影的 `apply()`
+ * 全部调它，不再各写一份。
+ *
+ * 为什么必须只有一份：这条判断原本在本文件里被复制了 8 遍（tokenByModel /
+ * costReport / loopCosts / preForkUsage / requestMetrics / structuralWaste /
+ * skillAudit / skillAttribution），加上 core 的 `usage_sample`、DSH adapter
+ * 两侧的 `is_usage_event`，全仓一共 12 份按事件类型名硬编码的白名单。
+ * 真实后果：`compaction/summary` 带真实 usage（实测
+ * `{inputTokens:462, outputTokens:3520, cacheReadTokens:245760}`），core 修好
+ * 之后审计 tab **依然是 0**——因为事件在这一层的 `apply()` 里就被丢了，
+ * 压根没进 `state.events`，wasm 永远看不到它。
+ *
+ * 判据与 core/adapter 保持同一套语义：三种精确类型 + 结构兜底。兜底是
+ * 「宽进」——多留几条事件只多占内存，而漏留一条就是静默少算钱；真正的
+ * 计价仍然只走 core `usage_sample` 的显式白名单（「严出」），所以宽进
+ * 不会导致双计。
+ */
+const USAGE_SAMPLE_FIELDS = [
+  'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens',
+] as const
+const SHAPE_SCAN_MAX_DEPTH = 6
+const SHAPE_SCAN_MAX_ITEMS = 32
+
+/** 结构兜底：payload 里有我们**认得的** token 字段名吗（有界递归）。 */
+function looksUsageShaped(node: any, depth = 0): boolean {
+  if (depth > SHAPE_SCAN_MAX_DEPTH || node === null || typeof node !== 'object') return false
+  if (Array.isArray(node)) {
+    return node.slice(0, SHAPE_SCAN_MAX_ITEMS).some((v) => looksUsageShaped(v, depth + 1))
+  }
+  for (const [key, value] of Object.entries(node)) {
+    if ((USAGE_SAMPLE_FIELDS as readonly string[]).includes(key) && typeof value === 'number') {
+      return true
+    }
+    if (looksUsageShaped(value, depth + 1)) return true
+  }
+  return false
+}
+
+function carriesUsage(event: { type: string; data?: any }): boolean {
+  if (event.type === 'assistant/message' && event.data?.usage !== undefined) return true
+  if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage') return true
+  if (event.type === 'compaction/summary'
+    && event.data?.usage !== null && typeof event.data?.usage === 'object') return true
+  return looksUsageShaped(event.data)
+}
+
 // Event types the behavior rules (SV601–SV614) consume.
 const RELEVANT_TYPES = new Set([
   'tool/call',
@@ -557,6 +604,15 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
       // cacheWriteTokens 一次都不出现——展示层据此写「未上报」而不是「0」，
       // 否则就是把「宿主不报」伪造成「测到了 0」（core 的 usage.rs 有详述）。
       unreported_fields: z.array(z.string()),
+      // 残差哨兵（core `usage.rs::usage_shaped_tokens`）：宿主报了 token、
+      // 但我们的显式白名单没接住的事件。是 `unreported_fields` 的对偶——
+      // 后者说"宿主从没报过这个字段"，前者说"宿主报了，我们没接住"。
+      // 非空就说明有钱没算进去，展示层应当据此提示而不是静默。
+      unaccounted_usage: z.array(z.object({
+        type: z.string(),
+        count: z.number(),
+        tokens_seen: z.number(),
+      })),
     }),
     init: () => ({ events: [] as any[] }),
     apply(state: Seeded<{ events: any[] }>, event: { type: string; data?: any }) {
@@ -564,10 +620,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
       if (event.type === 'request/header') {
         return { ...state, events: [...state.events, event] }
       }
-      if (event.type === 'assistant/message' && event.data?.usage !== undefined) {
-        return { ...state, events: [...state.events, event] }
-      }
-      if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage') {
+      if (carriesUsage(event)) {
         return { ...state, events: [...state.events, event] }
       }
       return state
@@ -623,10 +676,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
       if (event.type === 'request/header' || event.type === 'request/context') {
         return { ...state, events: [...state.events, event] }
       }
-      if (event.type === 'assistant/message' && event.data?.usage !== undefined) {
-        return { ...state, events: [...state.events, event] }
-      }
-      if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage') {
+      if (carriesUsage(event)) {
         return { ...state, events: [...state.events, event] }
       }
       return state
@@ -676,8 +726,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
       // （对齐区间用）——两个白名单的并集，缺一个都拼不出结果。
       if (RELEVANT_TYPES.has(event.type)
         || event.type === 'request/header' || event.type === 'request/context'
-        || (event.type === 'assistant/message' && event.data?.usage !== undefined)
-        || (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage')) {
+        || carriesUsage(event)) {
         return { ...state, events: [...state.events, event] }
       }
       return state
@@ -728,10 +777,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
       if (event.type === 'request/header' || event.type === 'request/context') {
         return { ...state, events: [...state.events, event] }
       }
-      if (event.type === 'assistant/message' && event.data?.usage !== undefined) {
-        return { ...state, events: [...state.events, event] }
-      }
-      if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage') {
+      if (carriesUsage(event)) {
         return { ...state, events: [...state.events, event] }
       }
       return state
@@ -894,10 +940,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
       if (event.type === 'request/header' || event.type === 'request/context') {
         return { ...state, events: [...state.events, event] }
       }
-      if (event.type === 'assistant/message' && event.data?.usage !== undefined) {
-        return { ...state, events: [...state.events, event] }
-      }
-      if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage') {
+      if (carriesUsage(event)) {
         return { ...state, events: [...state.events, event] }
       }
       return state
@@ -1069,9 +1112,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
       }
       if (event.type === 'request/header' || event.type === 'request/context') {
         next = { ...next, usageEvents: [...next.usageEvents, event] }
-      } else if (event.type === 'assistant/message' && event.data?.usage !== undefined) {
-        next = { ...next, usageEvents: [...next.usageEvents, event] }
-      } else if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage') {
+      } else if (carriesUsage(event)) {
         next = { ...next, usageEvents: [...next.usageEvents, event] }
       }
       return next
@@ -1179,9 +1220,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
       }
       if (event.type === 'request/header' || event.type === 'request/context') {
         next = { ...next, usageEvents: [...next.usageEvents, event] }
-      } else if (event.type === 'assistant/message' && event.data?.usage !== undefined) {
-        next = { ...next, usageEvents: [...next.usageEvents, event] }
-      } else if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage') {
+      } else if (carriesUsage(event)) {
         next = { ...next, usageEvents: [...next.usageEvents, event] }
       }
       return next
@@ -1298,8 +1337,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
       const isSkillInvocation = event.data?.source?.kind === 'skill-invocation'
       if (RELEVANT_TYPES.has(event.type) || isSkillInvocation
         || event.type === 'request/header' || event.type === 'request/context'
-        || (event.type === 'assistant/message' && event.data?.usage !== undefined)
-        || (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage')) {
+        || carriesUsage(event)) {
         return { ...state, events: [...state.events, event] }
       }
       return state
