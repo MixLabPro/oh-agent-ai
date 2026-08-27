@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 
+from ..usage import usage_shaped_tokens
 from ..util import split_lines
 
 # DSH 自述 SESSION_FORMAT_VERSION 恒为 0、不作兼容承诺；不相符即降级。
@@ -248,9 +249,10 @@ def read_session_log(path):
 def _is_usage_event(event, etype):
     """成本与上下文折叠需要的事件。Rust 平行实现见 `src/dsh.rs::is_usage_event`。
 
-    名字沿用 usage，但覆盖面已扩到三个消费者：token_by_model（按模型分桶）、
-    request_metrics（逐请求时间序列）、context_composition（常驻上下文构成）。
-    三者共用同一个数组，各取所需，不认识的事件类型自然跳过。
+    名字沿用 usage，但覆盖面已扩到四个消费者：token_by_model（按模型分桶）、
+    request_metrics（逐请求时间序列）、context_composition（常驻上下文构成）、
+    hour_buckets/token_by_date_model（按时间分桶）。这四者共用同一个数组，
+    各取所需，不认识的事件类型自然跳过。
 
     - request/header —— 模型标识，**以及** header.system / header.tools。
       reshape 保留整个 data，所以 FR-04a 要的系统提示词与工具定义不用另抽一路。
@@ -259,7 +261,17 @@ def _is_usage_event(event, etype):
     - 承载技能目录的事件 —— 目录**不是专用事件类型**，挂在 user/message /
       agent/inbox/spliced 等多种事件的 data.source 上，所以按 data.source.kind
       判断而不是 type 白名单。真实会话只有 3 次发布。
-    - usage 样本 —— assistant/chunk 的 usage 型、带 usage 的 assistant/message。
+    - usage 样本 —— assistant/chunk 的 usage 型、带 usage 的 assistant/message、
+      带 usage 的 compaction/summary（`usage.py::_usage_sample` 认识的三种）。
+
+    **兜底：结构看起来带 usage 的事件，即使类型不在上面这份名单里，也保留**
+    （`usage_shaped_tokens`——判据是"payload 里有我们认得的 token 字段名"，
+    与折叠层的残差哨兵是**同一个函数**）。这是这层过滤本身曾经漏钱的直接
+    教训：`compaction/summary` 在这一步就被挡在外面，`token_by_model` 那边
+    的哨兵因此从来看不到它，报出"0 处漏算"这个假阴性——真实语料扫描了很久
+    才靠人工翻原始日志才发现。宽进（这里）、严出（真正计价只走
+    `_usage_sample` 的显式白名单）——机器负责发现，人负责归类，两条路径
+    不能合并成一条，否则同一笔用量在多个事件里重复出现时会被双计。
 
     非 usage chunk（文本流）与无 usage 的 message 仍不保留——体积控制。
     """
@@ -270,7 +282,7 @@ def _is_usage_event(event, etype):
     source = data.get("source") if isinstance(data, dict) else None
     if isinstance(source, dict) and source.get("kind") == "skill-catalog":
         return True
-    # 分叉边界同样要进 usage_events：三个消费者各自 post_fork，看不到边界就
+    # 分叉边界同样要进 usage_events：四个消费者各自 post_fork，看不到边界就
     # 滤不掉上游会话的用量（见 util.fork_boundary 的实测数据）。
     if etype == "session":
         return True
@@ -280,10 +292,17 @@ def _is_usage_event(event, etype):
         return False
     if etype == "assistant/chunk":
         chunk = data.get("chunk")
-        return isinstance(chunk, dict) and chunk.get("type") == "usage"
-    if etype == "assistant/message":
-        return "usage" in data
-    return False
+        if isinstance(chunk, dict) and chunk.get("type") == "usage":
+            return True
+    elif etype == "assistant/message":
+        if "usage" in data:
+            return True
+    elif etype == "compaction/summary":
+        if isinstance(data.get("usage"), dict):
+            return True
+    # 兜底：结构看着像 usage 但类型不认识——留给折叠层的残差哨兵去报警，
+    # 不在这里悄悄丢掉（见函数文档）。
+    return usage_shaped_tokens(data) is not None
 
 
 def read_session_evidence(env=None):

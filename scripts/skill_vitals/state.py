@@ -436,21 +436,24 @@ def merge_today(hour_buckets_result, by_model=None) -> Path:
     数据，物理上不可能（一天还没过完）。这里先把不属于今天的桶滤掉，
     今天.json 就只剩下真的发生在今天的小时。
 
-    `by_model`(可选,`token_by_model()` 的 `by_model` 字段)累加进
-    `today.json["by_model"]` —— 与 (date, hour) 桶是**并列的新字段**,
-    不是替换,budget.py 按模型精确定价时读它,旧的 (date, hour) 桶继续
-    只服务日历热力图,互不影响。
+    `by_model`(可选)累加进 `today.json["by_model"]` —— 与 (date, hour) 桶是
+    **并列的新字段**,不是替换,budget.py 按模型精确定价时读它,旧的
+    (date, hour) 桶继续只服务日历热力图,互不影响。
 
-    **`by_model` 没有逐小时的日期信息，不能像上面的桶那样精确按 date
-    过滤——但完全不管会重蹈同一个坑。** 真机复现：一个只在 08-23/08-26
-    有真实活动的 session 被 oneline 审计后，today.json 的 `by_model`
-    整段被记了进去，「今日估算成本」显示 ¥1.54，而当天（08-27）其实
-    一次 DSH 会话都还没跑。这里用一个不完美但安全的判据：如果这份
-    session **有**带日期的 hour 桶、而且**没有一个**是今天，就说明有
-    实锤证据证明这整段 session 不是今天的，`by_model` 一并跳过。反过来，
-    没有任何带日期的桶（比如所有样本都缺时间戳）时**保留**原行为——
-    宁可像过去一样可能收进不该收的账，也不能反过来把真today的数据（只
-    是恰好没测到时间戳）误判成"不是今天"而丢掉，这不对称是有意的
+    **调用方必须传"已经按今天切好片"的那一份**，也就是
+    `usage.token_by_date_model(events)[今天]`，而不是整段
+    `token_by_model(events)["by_model"]`。真机复现过后者的后果：一个跨
+    08-23/08-26/08-27 三天的长会话（中途 compact）被审计后，hour 桶被这
+    里正确过滤成只剩今天的 245,760 token，而整段 by_model 是
+    17,596,160——同一个 today.json 里两个字段差 70 倍，「今日估算成本」
+    （读 by_model）于是报出整段会话的钱。`cli.py` 的 oneline 已按此调用。
+
+    下面那道 `dated_buckets and not todays_buckets → 丢弃 by_model` 是
+    **兜底**，不是主防线：它只能挡"整段都不是今天"，挡不住"整段里只有
+    一部分是今天"（上面那个 70 倍就是后者）。留着是防未来有调用方忘了
+    切片；真正的正确性来自调用方传对数据。没有任何带日期的桶时**保留**
+    by_model——宁可像过去一样可能收进不该收的账，也不能把真today的数据
+    （只是恰好没测到时间戳）误判成"不是今天"而丢掉，这不对称是有意的
     （见 CLAUDE.md「heuristics sort, they never acquit」同一条纪律：
     没有实锤证据时不能主动认定）。
     """

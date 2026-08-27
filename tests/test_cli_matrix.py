@@ -350,8 +350,11 @@ class CliMatrix(unittest.TestCase):
         # 无 usage 事件 → usage 报告是空的 by_model + 空 sequence（不臆造）；
         # unreported_fields 同样为空——0 个样本时不对「宿主不报某字段」下断言
         # （与「host 能力缺失时降级、不臆造」同一条纪律，见 usage.py 的注释）。
+        # unaccounted_usage 同样为空——残差哨兵（见 usage.py::usage_shaped_tokens）
+        # 也没在这份日志里发现漏算。
         self.assertEqual(report["usage"],
-                         {"by_model": {}, "providers": {}, "sequence": [], "unreported_fields": []})
+                         {"by_model": {}, "providers": {}, "sequence": [], "unreported_fields": [],
+                          "unaccounted_usage": []})
         # 无可分桶的桶 → cost 是 None，不是全零结构（没有数据就是没有）。
         self.assertIsNone(report["cost"])
 

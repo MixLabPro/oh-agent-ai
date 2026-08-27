@@ -137,8 +137,77 @@ def _buckets_from(usage, seen=None):
     }
 
 
+#: 残差哨兵递归深度上限。真实 payload 里 usage 最深出现在 `data.usage.*`
+#: （2 层）；给到 6 层是留余量，同时避免在 `compaction/summary.rawOutput`
+#: 这类大对象上无界递归。
+_SHAPE_SCAN_MAX_DEPTH = 6
+#: 单个列表最多看前 N 个元素——同上，防止在长文本块数组上退化。
+_SHAPE_SCAN_MAX_ITEMS = 32
+
+
+def usage_shaped_tokens(node, depth=0):
+    """在一份 payload 里找**我们认识的** usage 字段，返回它们的和；没有则 None。
+
+    这是「残差哨兵」的判据。它故意只认 `_SAMPLE_FIELDS` 这四个名字——就是
+    折叠自己会读的那四个。所以它回答的问题非常精确：
+
+        「这条事件的 payload 里有我们**认得**的 token 字段，
+          但它没被 `_usage_sample` 接住。」
+
+    而不是宽泛的「这看起来像某种用量」——后者会在 `maxTokens`、
+    `shadowedTokenCount`、`model_context_window` 这类**配置/统计**字段上误报，
+    把哨兵变成没人看的噪音。
+
+    **哨兵只用于「留候选 + 报警」，绝不用于计价。** 同一笔用量会在多个事件
+    里重复出现（`assistant/chunk` 先报一次、`assistant/message` 再报最终值，
+    这正是 `(turn, step)` 去重在解决的问题），把结构识别的结果直接算进钱里
+    就是双计。计价必须走 `_usage_sample` 那条显式注册的路径——机器负责
+    **发现**，人负责**归类**。
+
+    真实来由：DSH 的 `compaction/summary` 带 `data.usage`（实测
+    `{inputTokens:462, outputTokens:3520, cacheReadTokens:245760}`）且自带
+    `model`/`provider`，但因为 ① 不在 `_usage_sample` 的类型白名单里、
+    ② 没有 `turn`/`step`（compaction 由命令触发，不属于任何 turn），
+    被静默丢弃——用户在菜单栏上肉眼发现"今天有消耗但日历是 0"才暴露。
+    """
+    if depth > _SHAPE_SCAN_MAX_DEPTH:
+        return None
+    total = None
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _SAMPLE_FIELDS:
+                n = _int_or_none(value)
+                if n is not None:
+                    total = (total or 0) + n
+                    continue
+            sub = usage_shaped_tokens(value, depth + 1)
+            if sub is not None:
+                total = (total or 0) + sub
+    elif isinstance(node, list):
+        for value in node[:_SHAPE_SCAN_MAX_ITEMS]:
+            sub = usage_shaped_tokens(value, depth + 1)
+            if sub is not None:
+                total = (total or 0) + sub
+    return total
+
+
 _BASE_KEYS = ("uncached_input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 _PEAK_KEYS = ("peak_uncached_input_tokens", "peak_output_tokens", "peak_cache_read_tokens", "peak_cache_write_tokens")
+
+
+def _record_provider(providers, model, provider):
+    """登记"这个模型名这次是哪家供应商服务的"，处理三种取值——
+    见 `token_by_model` 里这段逻辑原本的详细注释（`request/header` 分支）。
+    抽成函数是因为 `compaction/summary` 现在也会带自己的 model/provider，
+    需要跟 `request/header` 走同一套"未上报 vs 唯一供应商 vs 两家服务过
+    同一模型名"的判定，两处各写一份迟早分叉。
+    """
+    if not isinstance(provider, str):
+        provider = None
+    if model not in providers:
+        providers[model] = provider
+    elif providers[model] != AMBIGUOUS_PROVIDER and providers[model] != provider:
+        providers[model] = AMBIGUOUS_PROVIDER
 
 
 def _add_buckets(by_model, model, buckets, sign, peak):
@@ -153,27 +222,85 @@ def _add_buckets(by_model, model, buckets, sign, peak):
             cur[peak_key] = cur[peak_key] + sign * buckets[base_key]
 
 
-def _usage_sample(event, etype, data):
-    """usage 事件 → (turn, step, usage)；非 usage 或畸形返回 None。
+#: compaction 的 (turn, step) 命名空间——真实 turn 永远非负，这里全部取负数，
+#: 结构上不可能撞真实 turn/step。
+_COMPACTION_STEP = 0
 
-    `token_by_model` 与 `request_metrics` **共用**这一个提取器（Rust 侧同名
-    `usage_sample` 亦然）——两者的去重语义必须一致，各写一遍迟早分叉。
+
+def _compaction_identity(compaction_id):
+    """把 `compactionId` 映射成一个跟真实 turn 不冲突的负数——当 compaction
+    的 `(turn, step)` 去重身份。
+
+    compaction **不属于任何 turn**（`compaction/start` 里 `"turn": null`，
+    由 `sourceCommandId` 触发，不是某一轮对话的产物），伪造一个 turn 号会
+    跟真实样本抢 `(turn, step)` 去重槽。但去重槽本身是 `(int, int)` 形状，
+    改成第三种"独立 id"类型要牵动 `token_by_model`/`hour_buckets`/
+    `request_metrics`/`token_by_date_model` 四处的 dedup slot 定义,以及
+    Rust 平行实现——用哈希把 `compactionId` 稳定映射进负数空间,不用改
+    任何一处的 slot 类型,是这四处改动量最小、且行为完全正确的做法。
+
+    用哈希而不是自增计数器：本函数是无状态纯函数,不能维护跨调用计数器;
+    哈希对同一个 `compactionId` 总产出同一个值，这正是去重需要的性质——
+    真实撞见过一次 compaction 被 fork 复制进 4 个会话文件,4 份 summary
+    落进同一个槽,`(turn,step)` 相同、`buckets` 相同，`token_by_model`
+    的"值相同就跳过"分支会正确地只算一次（`post_fork` 已经会滤掉大多数
+    这类副本，这里是双保险，不依赖 post_fork 覆盖所有场景）。
+
+    缺 `compactionId`（不应该发生，但宁可退化也不崩）时退化成一个固定值,
+    此时同一会话里的多次 compaction 会互相覆盖只保留最后一次——比崩溃或
+    静默丢弃这一个样本更好，且极端情况在真实语料里没出现过。
+    """
+    if not isinstance(compaction_id, str) or not compaction_id:
+        return -1
+    import hashlib
+    digest = hashlib.sha256(compaction_id.encode("utf-8")).hexdigest()
+    return -1 - (int(digest[:8], 16) % (2 ** 30))
+
+
+def _usage_sample(event, etype, data):
+    """usage 事件 → (turn, step, usage, model_override)；非 usage 或畸形返回 None。
+
+    `model_override` 是 `(model, provider)` 或 `None`——大多数事件类型没有
+    自己的模型信息，沿用调用方从 `request/header` 追踪的"当前激活模型"
+    （返回 `None`）；`compaction/summary` 是例外，它自带 `data.model`/
+    `data.provider`（真实实测：会话主体用 pro/flash 混合，但 compaction
+    走的是 `deepseek-v4-flash`/`deepseek-official`，跟当时激活的模型
+    不是同一个）——不能落进"当前激活模型"，那会把这笔钱记错供应商/模型，
+    价格算错。
+
+    `token_by_model` / `request_metrics` / `token_by_date_model` /
+    `hour_buckets` **共用**这一个提取器（Rust 侧同名 `usage_sample` 亦然）
+    ——四者的去重语义必须一致，各写一遍迟早分叉。这也是新增
+    `compaction/summary` 只改这一处、四个消费者自动生效的原因。
     """
     if etype == "assistant/chunk":
         chunk = data.get("chunk")
         if not isinstance(chunk, dict) or chunk.get("type") != "usage":
             return None
         turn, step, usage = data.get("turn"), data.get("step"), chunk.get("usage")
+        model_override = None
     elif etype == "assistant/message":
         if "usage" not in data:
             return None
         turn, step, usage = data.get("turn"), data.get("step"), data.get("usage")
+        model_override = None
+    elif etype == "compaction/summary":
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        turn = _compaction_identity(data.get("compactionId"))
+        step = _COMPACTION_STEP
+        model = data.get("model")
+        model_override = (
+            model if isinstance(model, str) else None,
+            data.get("provider") if isinstance(data.get("provider"), str) else None,
+        )
     else:
         return None
     if (_int_or_none(turn) is None or _int_or_none(step) is None
             or not isinstance(usage, dict)):
         return None
-    return turn, step, usage
+    return turn, step, usage, model_override
 
 
 def _opt_int(usage, key):
@@ -239,7 +366,12 @@ def request_metrics(events):
         sample = _usage_sample(event, etype, data)
         if sample is None:
             continue
-        turn, step, usage = sample
+        turn, step, usage, model_override = sample
+        # compaction 的 (turn, step) 是内部去重用的哈希身份（见
+        # `_compaction_identity`），不是真实存在的 turn 号——报给调用方的
+        # 这一行必须诚实写 None，不能把去重实现细节泄漏成一个看起来像
+        # 真实 turn 的负数（缺列不编列，这里是同一条纪律）。
+        is_compaction = etype == "compaction/summary"
 
         uncached = _opt_int(usage, "inputTokens")
         cache_read = _opt_int(usage, "cacheReadTokens")
@@ -250,9 +382,10 @@ def request_metrics(events):
             "request_seq": 0,  # 去重后统一回填
             "seq": _int_or_none(event.get("seq")),
             "time": _int_or_none(event.get("time")),
-            "turn": _int_or_none(turn),
-            "step": _int_or_none(step),
-            "model": active if active is not None else "unknown",
+            "turn": None if is_compaction else _int_or_none(turn),
+            "step": None if is_compaction else _int_or_none(step),
+            "model": (model_override[0] if model_override and model_override[0]
+                      else (active if active is not None else "unknown")),
             "context_window": window,
             "context_tokens": context_tokens,
             "uncached_input_tokens": uncached,
@@ -407,6 +540,7 @@ def token_by_model(events):
     sequence = []
     seen_fields = set()   # 真正出现过的 usage 字段名（见 _buckets_from 的注释）
     samples = 0           # usage 样本计数——0 个样本时不对「未上报」下任何断言
+    unaccounted = {}      # 残差哨兵：类型 → {count, tokens_seen}（见 usage_shaped_tokens）
 
     for event in events:
         if not isinstance(event, dict):
@@ -437,12 +571,7 @@ def token_by_model(events):
             #   - "…"        = 唯一确定的供应商 → 按白名单判断能不能计价；
             #   - AMBIGUOUS  = 同一模型名被两家服务过 → 我们无法判断哪些 token
             #                  属于哪家，猜一个等于替用户编一次归属，拒绝计价。
-            if not isinstance(provider, str):
-                provider = None
-            if model not in providers:
-                providers[model] = provider
-            elif providers[model] != AMBIGUOUS_PROVIDER and providers[model] != provider:
-                providers[model] = AMBIGUOUS_PROVIDER
+            _record_provider(providers, model, provider)
             if active != model:
                 sequence.append(model)
             active = model
@@ -453,11 +582,29 @@ def token_by_model(events):
             continue
         sample = _usage_sample(event, etype, data)
         if sample is None:
+            # 残差哨兵：这条事件没被接住，但 payload 里有我们认得的 token
+            # 字段 → 记下来。见 `usage_shaped_tokens` 的文档：哨兵只报警，
+            # 不计价，归类由人来做。
+            seen_tokens = usage_shaped_tokens(data)
+            if seen_tokens is not None:
+                entry = unaccounted.setdefault(
+                    etype if isinstance(etype, str) else "(unknown)",
+                    {"count": 0, "tokens_seen": 0})
+                entry["count"] += 1
+                entry["tokens_seen"] += seen_tokens
             continue
-        turn, step, usage = sample
+        turn, step, usage, model_override = sample
         samples += 1
         buckets = _buckets_from(usage, seen_fields)
-        model = active if active is not None else "unknown"
+        if model_override and model_override[0]:
+            # 这份样本自带模型归属（目前只有 compaction/summary）——不能
+            # 沿用"当前激活模型"，那是给对话轮次用的追踪状态，compaction
+            # 走的往往是另一个模型/供应商（真实实测：会话主体 pro/flash
+            # 混合，compaction 用的是 deepseek-v4-flash/deepseek-official）。
+            model = model_override[0]
+            _record_provider(providers, model, model_override[1])
+        else:
+            model = active if active is not None else "unknown"
         peak = _is_peak(event)
         if last is not None and last[0] == turn and last[1] == step:
             if last[2] == buckets and last[4] == peak:
@@ -472,8 +619,18 @@ def token_by_model(events):
     # 一个样本都没有时返回空列表：没有数据就不做「宿主不报这个字段」的断言，
     # 与 host 能力缺失时「缺列而不是编列」是同一条纪律。
     unreported = [f for f in _SAMPLE_FIELDS if f not in seen_fields] if samples else []
+    # `unaccounted_usage` 是 `unreported_fields` 的**对偶**：后者说「宿主
+    # 从没报过这个字段」，前者说「宿主报了 token，但我们没接住」。在证据
+    # 模型里它就是 `Signal::Usage` 的 `unmetered` 计数——`evidence.rs` 的
+    # 那句注释精确预言了这个 bug：「适配器不能靠"读不到就不算"来偷偷刷高
+    # 自己的覆盖率」。按类型名排序保证确定性输出（Rust 侧用 BTreeMap 对齐）。
+    unaccounted_usage = [
+        {"type": t, "count": v["count"], "tokens_seen": v["tokens_seen"]}
+        for t, v in sorted(unaccounted.items())
+    ]
     return {"by_model": by_model, "providers": providers,
-            "sequence": sequence, "unreported_fields": unreported}
+            "sequence": sequence, "unreported_fields": unreported,
+            "unaccounted_usage": unaccounted_usage}
 
 
 def token_by_date_model(events):
@@ -542,12 +699,15 @@ def token_by_date_model(events):
         sample = _usage_sample(event, etype, event["data"])
         if sample is None:
             continue
-        turn, step, usage = sample
+        turn, step, usage, model_override = sample
         buckets = _buckets_from(usage, set())
         time_ms = _int_or_none(event.get("time"))
         date_str = _hour_key(time_ms)[0] if time_ms is not None else None
         peak = _is_peak(event) if time_ms is not None else None
-        model = active if active is not None else "unknown"
+        # 同 token_by_model：自带模型归属的样本（目前只有 compaction/summary）
+        # 不沿用"当前激活模型"。
+        model = (model_override[0] if model_override and model_override[0]
+                 else (active if active is not None else "unknown"))
 
         if last is not None and last[0] == turn and last[1] == step:
             fold(last[2], last[3], last[4], last[5], -1)
@@ -654,7 +814,7 @@ def hour_buckets(events):
         sample = _usage_sample(event, etype, event["data"])
         if sample is None:
             continue
-        turn, step, usage = sample
+        turn, step, usage, _model_override = sample  # hour_buckets 不按模型分桶
         samples += 1
         add_buckets = _buckets_from(usage, seen_fields)
         time_ms = _int_or_none(event.get("time"))

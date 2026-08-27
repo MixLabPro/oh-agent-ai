@@ -680,18 +680,24 @@ def _main():
         }
         p_oneline = state_module.write_oneline(summary)
         if not args.no_merge:
-            # usage["by_model"] 与 hb 是同一次 audit_session_log 里出来的,
-            # 顺带存进 today.json/month.json —— budget.py 按模型精确定价
-            # 靠它,而不是永远假设 fallback 模型。
+            # **两个状态文件都喂按 (date, model) 折的那一份**，不是整段
+            # `usage["by_model"]`。
             #
-            # today.json 用整段 usage["by_model"]（无日期维）——这是 today.json
-            # 一贯的语义:它只代表"今天"这一个桶,不需要按日拆。month.json 不
-            # 一样:一次 oneline 可能是回填历史日志，也可能喂进一个跨零点的
-            # 长会话，这两种情况都不能把 by_model 整段扣到"今天"头上（见
-            # state.merge_month 的文档注释），所以这里单独再算一份按
-            # (date, model) 折的版本传给它。
-            state_module.merge_today(hb, by_model=usage["by_model"])
+            # 曾经 today.json 收的是整段 by_model，理由写着"today.json 只
+            # 代表今天这一个桶，不需要按日拆"——那个推理有个隐含前提：
+            # 「喂进来的 session 整段都发生在今天」。真实数据不满足：一个
+            # session 可以跨 08-23/08-26/08-27 三天（长会话 + 中途 compact），
+            # 于是 hour 桶被正确过滤成只剩今天的 245,760 token，而 by_model
+            # 仍是整段的 17,596,160——同一个 today.json 里两个字段差 70 倍，
+            # 「今日估算成本」（读 by_model）因此报出整段会话的钱。
+            #
+            # 现在 `token_by_date_model` 能给出精确的当日切片，直接取
+            # `[今天]` 那一份；没有今天的数据时是 None，`merge_today` 照
+            # 既有语义不写 by_model 字段。month.json 拿整份多日 dict，各
+            # 日期各自归位（见 state.merge_month 的文档注释）。
             by_date_model = usage_module.token_by_date_model(events)
+            state_module.merge_today(
+                hb, by_model=by_date_model.get(state_module._today_key()))
             state_module.merge_month(hb, by_date_model=by_date_model)
         # 不管 --no-merge 与否都 append 历史 —— xbar「最近 5 次审计」要靠这个
         state_module.append_session_history(summary)

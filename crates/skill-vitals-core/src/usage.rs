@@ -112,6 +112,23 @@ fn is_peak(event: &Value) -> bool {
     }
 }
 
+/// 登记"这个模型名这次是哪家供应商服务的"——三种取值（缺场/唯一确定/
+/// 两家服务过同一模型名→AMBIGUOUS）的判定见 `token_by_model` 里
+/// `request/header` 分支原本的详细注释。抽成函数是因为 `compaction/summary`
+/// 现在也带自己的 model/provider，需要走同一套判定，两处各写一份迟早分叉。
+fn record_provider(providers: &mut Map<String, Value>, model: &str, provider: Option<&str>) {
+    match providers.get(model) {
+        None => {
+            providers.insert(model.to_string(), provider.map(|p| json!(p)).unwrap_or(Value::Null));
+        }
+        Some(prev) => {
+            if prev.as_str() != Some(AMBIGUOUS_PROVIDER) && prev.as_str() != provider {
+                providers.insert(model.to_string(), json!(AMBIGUOUS_PROVIDER));
+            }
+        }
+    }
+}
+
 /// 分桶相加。`sign=-1` 用于替换语义（从原归属模型减掉旧值）。`peak` 决定这份
 /// 贡献是否也叠进 `peak_*` 子桶——四个基础桶始终是全量（空闲+高峰），
 /// `peak_*` 只是其中高峰时段的子集，off-peak 由展示层用 全量 − peak 推出，
@@ -152,30 +169,129 @@ fn add_buckets(by_model: &mut Map<String, Value>, model: &str, b: [i64; 4], sign
     }
 }
 
-/// usage 事件 → (turn, step, usage)。非 usage 事件返回 None。
+/// 残差哨兵递归深度/列表元素上限——与 Python `usage_shaped_tokens` 同一组
+/// 数字，理由见那边的文档：给到 6 层是留余量，同时避免在
+/// `compaction/summary.rawOutput` 这类大对象上无界递归。
+const SHAPE_SCAN_MAX_DEPTH: u8 = 6;
+const SHAPE_SCAN_MAX_ITEMS: usize = 32;
+
+/// 在一份 payload 里找**我们认识的** usage 字段，返回它们的和；没有则 `None`。
+///
+/// Python 平行实现 `usage.py::usage_shaped_tokens` 有完整的设计说明——这是
+/// 「残差哨兵」的判据，只认 `SAMPLE_FIELDS` 这四个名字（就是折叠自己会读的
+/// 那四个），故意不做宽泛的"看起来像某种用量"匹配，否则会在 `maxTokens`、
+/// `shadowedTokenCount` 这类配置/统计字段上误报。**只用于留候选 + 报警，
+/// 绝不用于计价**——计价必须走 `usage_sample` 的显式白名单，机器负责发现，
+/// 人负责归类。
+///
+/// `pub`——`src/dsh.rs` 的 `is_usage_event`（DSH adapter 的"哪些事件保留进
+/// usage_events"过滤器）需要用**同一个**判据做"结构看着像 usage 就留下"
+/// 的宽进兜底，不能在 adapter 层再实现一份（那正是这次漏算 bug 的成因：
+/// adapter 层的白名单比折叠层的白名单更早生效，折叠层的哨兵因此永远看
+/// 不到被 adapter 挡在外面的事件）。
+pub fn usage_shaped_tokens(node: &Value, depth: u8) -> Option<i64> {
+    if depth > SHAPE_SCAN_MAX_DEPTH {
+        return None;
+    }
+    let mut total: Option<i64> = None;
+    match node {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if SAMPLE_FIELDS.contains(&key.as_str()) {
+                    if let Some(n) = value.as_i64() {
+                        total = Some(total.unwrap_or(0) + n);
+                        continue;
+                    }
+                }
+                if let Some(sub) = usage_shaped_tokens(value, depth + 1) {
+                    total = Some(total.unwrap_or(0) + sub);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for value in items.iter().take(SHAPE_SCAN_MAX_ITEMS) {
+                if let Some(sub) = usage_shaped_tokens(value, depth + 1) {
+                    total = Some(total.unwrap_or(0) + sub);
+                }
+            }
+        }
+        _ => {}
+    }
+    total
+}
+
+/// 把 `compactionId` 映射成一个跟真实 turn 不冲突的负数——当 compaction 的
+/// `(turn, step)` 去重身份。Python 平行实现 `_compaction_identity` 有完整的
+/// 设计说明（compaction 不属于任何 turn，伪造一个会跟真实样本抢 dedup 槽）。
+///
+/// 用 FNV-1a 而不是密码学哈希：这个值只用作进程内的 dedup 身份，从不写进
+/// 任何输出（`request_metrics` 对应行的 turn/step 显式置 null），不需要
+/// 跨语言字节相同，也不需要抗碰撞到密码学强度——避免给这个 core crate
+/// （wasm 也要编译）新增依赖。
+fn compaction_identity(compaction_id: Option<&str>) -> (i64, i64) {
+    const STEP: i64 = 0;
+    match compaction_id {
+        Some(id) if !id.is_empty() => {
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in id.as_bytes() {
+                hash ^= *b as u64;
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            (-1 - ((hash % (1u64 << 30)) as i64), STEP)
+        }
+        _ => (-1, STEP),
+    }
+}
+
+/// 一份样本自带的模型归属——`(model, provider)`，两者各自可能缺场。
+/// 目前只有 `compaction/summary` 会产出 `Some`，见 `usage_sample` 文档。
+type ModelOverride = Option<(Option<String>, Option<String>)>;
+/// `usage_sample` 的返回类型——`(turn, step, usage, model_override)`。
+type UsageSample<'a> = (i64, i64, &'a Value, ModelOverride);
+
+/// usage 事件 → (turn, step, usage, model_override)。非 usage 事件返回 None。
+///
+/// `model_override` 是 `Some((model, provider))`——大多数事件类型没有自己的
+/// 模型信息，调用方沿用从 `request/header` 追踪的"当前激活模型"（`None`）；
+/// `compaction/summary` 例外，它自带 `data.model`/`data.provider`（真实实测：
+/// 会话主体用 pro/flash 混合，但 compaction 走的是
+/// `deepseek-v4-flash`/`deepseek-official`，跟当时激活的模型不是同一个）
+/// ——不能落进"当前激活模型"，那会把这笔钱记错供应商/模型。
 ///
 /// `assistant/chunk` 仅当 `data.chunk.type == "usage"`；`assistant/message`
-/// 仅当 `data.usage` 存在；缺 turn/step 视为畸形 usage 事件，跳过。
-fn usage_sample(event: &Value) -> Option<(i64, i64, &Value)> {
+/// 仅当 `data.usage` 存在；`compaction/summary` 仅当 `data.usage` 是对象
+/// （没有 turn/step，用 `compaction_identity` 代替）；缺 turn/step 视为畸形
+/// usage 事件，跳过。
+fn usage_sample(event: &Value) -> Option<UsageSample<'_>> {
     let etype = event.get("type").and_then(|v| v.as_str())?;
     let data = event.get("data").and_then(|v| v.as_object())?;
-    let (turn, step, usage) = if etype == "assistant/chunk" {
+    if etype == "assistant/chunk" {
         let chunk = data.get("chunk").and_then(|v| v.as_object())?;
         if chunk.get("type").and_then(|v| v.as_str()) != Some("usage") {
             return None;
         }
-        (data.get("turn"), data.get("step"), chunk.get("usage"))
-    } else if etype == "assistant/message" {
+        let turn = data.get("turn").and_then(|v| v.as_i64())?;
+        let step = data.get("step").and_then(|v| v.as_i64())?;
+        let usage = chunk.get("usage")?;
+        return Some((turn, step, usage, None));
+    }
+    if etype == "assistant/message" {
         if !data.contains_key("usage") {
             return None;
         }
-        (data.get("turn"), data.get("step"), data.get("usage"))
-    } else {
-        return None;
-    };
-    let (Some(turn), Some(step)) = (turn, step) else { return None };
-    let (Some(turn), Some(step)) = (turn.as_i64(), step.as_i64()) else { return None };
-    Some((turn, step, usage?))
+        let turn = data.get("turn").and_then(|v| v.as_i64())?;
+        let step = data.get("step").and_then(|v| v.as_i64())?;
+        let usage = data.get("usage")?;
+        return Some((turn, step, usage, None));
+    }
+    if etype == "compaction/summary" {
+        let usage = data.get("usage").filter(|v| v.is_object())?;
+        let (turn, step) = compaction_identity(data.get("compactionId").and_then(|v| v.as_str()));
+        let model = data.get("model").and_then(|v| v.as_str()).map(String::from);
+        let provider = data.get("provider").and_then(|v| v.as_str()).map(String::from);
+        return Some((turn, step, usage, Some((model, provider))));
+    }
+    None
 }
 
 /// P3 group②（docs/RUNTIME_EVIDENCE_CONTRACT.md §17，cost fold）：这族函数
@@ -221,6 +337,11 @@ pub fn token_by_model(events: &[Value]) -> Value {
     let mut sequence: Vec<String> = Vec::new();
     let mut seen: [bool; 4] = [false; 4]; // 真正出现过的 usage 字段（见 buckets_from）
     let mut samples: u64 = 0; // 0 个样本时不对「未上报」下任何断言
+    // 残差哨兵：类型 → (条数, 漏算 token)（见 usage_shaped_tokens）。用
+    // BTreeMap 而不是 HashMap——输出按类型名排序，与 Python 的
+    // `sorted(unaccounted.items())` 对齐，保证确定性。
+    let mut unaccounted: std::collections::BTreeMap<String, (u64, i64)> =
+        std::collections::BTreeMap::new();
 
     for event in events {
         if !event.is_object() {
@@ -246,29 +367,37 @@ pub fn token_by_model(events: &[Value]) -> Value {
             let provider = event
                 .pointer("/data/header/config/provider")
                 .and_then(|v| v.as_str());
-            match providers.get(model) {
-                None => {
-                    providers.insert(
-                        model.to_string(),
-                        provider.map(|p| json!(p)).unwrap_or(Value::Null),
-                    );
-                }
-                Some(prev) => {
-                    if prev.as_str() != Some(AMBIGUOUS_PROVIDER) && prev.as_str() != provider {
-                        providers.insert(model.to_string(), json!(AMBIGUOUS_PROVIDER));
-                    }
-                }
-            }
+            record_provider(&mut providers, model, provider);
             if active.as_deref() != Some(model) {
                 sequence.push(model.to_string());
             }
             active = Some(model.to_string());
             continue;
         }
-        let Some((turn, step, usage)) = usage_sample(event) else { continue };
+        let Some((turn, step, usage, model_override)) = usage_sample(event) else {
+            // 残差哨兵：这条事件没被接住，但 payload 里有我们认得的 token
+            // 字段 → 记下来。见 `usage_shaped_tokens` 的文档：哨兵只报警，
+            // 不计价，归类由人来做。
+            if let Some(data) = event.get("data") {
+                if let Some(tokens_seen) = usage_shaped_tokens(data, 0) {
+                    let etype = event.get("type").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+                    let entry = unaccounted.entry(etype.to_string()).or_insert((0u64, 0i64));
+                    entry.0 += 1;
+                    entry.1 += tokens_seen;
+                }
+            }
+            continue;
+        };
         samples += 1;
         let buckets = buckets_from(usage, &mut seen);
-        let model = active.clone().unwrap_or_else(|| "unknown".to_string());
+        let model = if let Some((Some(m), provider)) = &model_override {
+            // 这份样本自带模型归属（目前只有 compaction/summary）——不能
+            // 沿用"当前激活模型"，见 `usage_sample` 文档。
+            record_provider(&mut providers, m, provider.as_deref());
+            m.clone()
+        } else {
+            active.clone().unwrap_or_else(|| "unknown".to_string())
+        };
         let peak = is_peak(event);
         match &last {
             Some((lt, ls, lb, lmodel, lpeak)) if *lt == turn && *ls == step => {
@@ -293,11 +422,24 @@ pub fn token_by_model(events: &[Value]) -> Value {
         Vec::new()
     };
 
+    // `unaccounted_usage` 是 `unreported_fields` 的**对偶**：后者说「宿主
+    // 从没报过这个字段」，前者说「宿主报了 token，但我们没接住」。在证据
+    // 模型里它就是 `Signal::Usage` 的 `unmetered` 计数——`evidence.rs` 的
+    // 那句注释精确预言了这个 bug：「适配器不能靠"读不到就不算"来偷偷刷高
+    // 自己的覆盖率」。
+    let unaccounted_usage: Vec<Value> = unaccounted
+        .iter()
+        .map(|(t, (count, tokens_seen))| {
+            json!({"type": t, "count": count, "tokens_seen": tokens_seen})
+        })
+        .collect();
+
     json!({
         "by_model": Value::Object(by_model),
         "providers": Value::Object(providers),
         "sequence": sequence,
         "unreported_fields": unreported,
+        "unaccounted_usage": unaccounted_usage,
     })
 }
 
@@ -374,7 +516,13 @@ pub fn request_metrics(events: &[Value]) -> Value {
             _ => {}
         }
 
-        let Some((turn, step, usage)) = usage_sample(event) else { continue };
+        let Some((turn, step, usage, model_override)) = usage_sample(event) else { continue };
+        // compaction 的 (turn, step) 是内部去重用的哈希身份（见
+        // `compaction_identity`），不是真实存在的 turn 号——报给调用方的
+        // 这一行必须诚实写 null，不能把去重实现细节泄漏成一个看起来像
+        // 真实 turn 的负数。
+        let is_compaction =
+            event.get("type").and_then(|v| v.as_str()) == Some("compaction/summary");
 
         let uncached = opt_i64(usage, "inputTokens");
         let cache_read = opt_i64(usage, "cacheReadTokens");
@@ -388,9 +536,12 @@ pub fn request_metrics(events: &[Value]) -> Value {
             "request_seq": 0i64, // 去重后统一回填，见下
             "seq": or_null(event.get("seq").and_then(|v| v.as_i64())),
             "time": or_null(event.get("time").and_then(|v| v.as_i64())),
-            "turn": turn,
-            "step": step,
-            "model": active.clone().unwrap_or_else(|| "unknown".to_string()),
+            "turn": if is_compaction { Value::Null } else { json!(turn) },
+            "step": if is_compaction { Value::Null } else { json!(step) },
+            "model": match &model_override {
+                Some((Some(m), _)) => m.clone(),
+                _ => active.clone().unwrap_or_else(|| "unknown".to_string()),
+            },
             "context_window": or_null(window),
             "context_tokens": or_null(context_tokens),
             "uncached_input_tokens": or_null(uncached),
@@ -638,7 +789,7 @@ pub fn hour_buckets(events: &[Value]) -> Value {
         if event.get("type").and_then(|v| v.as_str()) == Some("request/header") {
             continue;
         }
-        let Some((turn, step, usage)) = usage_sample(event) else { continue };
+        let Some((turn, step, usage, _model_override)) = usage_sample(event) else { continue };
         samples += 1;
         let add_buckets = buckets_from(usage, &mut seen);
         let time_ms = event.get("time").and_then(|v| v.as_i64());
@@ -805,7 +956,7 @@ pub fn token_by_date_model(events: &[Value]) -> Value {
             }
             continue;
         }
-        let Some((turn, step, usage)) = usage_sample(event) else { continue };
+        let Some((turn, step, usage, model_override)) = usage_sample(event) else { continue };
         let add = buckets_from(usage, &mut seen);
         let time_ms = event.get("time").and_then(|v| v.as_i64());
         let date_str = time_ms.map(|ms| {
@@ -813,7 +964,12 @@ pub fn token_by_date_model(events: &[Value]) -> Value {
             civil_date_from_days(secs.div_euclid(86_400))
         });
         let peak = time_ms.map(is_peak_slot).unwrap_or(false);
-        let model = active.clone().unwrap_or_else(|| "unknown".to_string());
+        // 同 token_by_model：自带模型归属的样本（目前只有 compaction/summary）
+        // 不沿用"当前激活模型"。
+        let model = match &model_override {
+            Some((Some(m), _)) => m.clone(),
+            _ => active.clone().unwrap_or_else(|| "unknown".to_string()),
+        };
 
         // 同 step 去重：先把旧归属从它自己的 (date, model) 桶扣掉。借用检查
         // 不允许同时持两个 entry 句柄，所以扣旧/加新分两步（与 hour_buckets
@@ -982,7 +1138,151 @@ mod tests {
         let out = token_by_model(&events);
         // unreported_fields 为空：一个 usage 样本都没有，就不对「宿主不报某字段」
         // 下断言——没有数据时不做判断，与 host 能力缺失时「缺列不编列」同一条纪律。
-        assert_eq!(out, json!({"by_model": {}, "providers": {}, "sequence": [], "unreported_fields": []}));
+        //
+        // 但 seq:1 那条**残差哨兵能看到**：它有真实的 `inputTokens:7`，只是
+        // 缺 turn/step 没法进正式折叠——这正是哨兵存在的意义（见
+        // `usage_shaped_tokens` 文档）：以前这种事件会无声消失，现在会在
+        // `unaccounted_usage` 里报出来，即使它"看起来"是认识的类型。
+        assert_eq!(out, json!({
+            "by_model": {}, "providers": {}, "sequence": [], "unreported_fields": [],
+            "unaccounted_usage": [{"type": "assistant/chunk", "count": 1, "tokens_seen": 7}],
+        }));
+    }
+
+    #[test]
+    fn usage_shaped_tokens_finds_nested_fields() {
+        let node = json!({"data": {"usage": {"inputTokens": 100, "outputTokens": 20}}});
+        assert_eq!(usage_shaped_tokens(&node, 0), Some(120));
+    }
+
+    #[test]
+    fn usage_shaped_tokens_ignores_unknown_field_names() {
+        // maxTokens/shadowedTokenCount 不在 SAMPLE_FIELDS 里——不能把配置/
+        // 统计字段误当成用量，否则哨兵会在每条 compaction/start 上假报警。
+        let node = json!({"maxTokens": 8192, "shadowedTokenCount": 12345});
+        assert_eq!(usage_shaped_tokens(&node, 0), None);
+    }
+
+    #[test]
+    fn usage_shaped_tokens_bare_scalar_is_none() {
+        assert_eq!(usage_shaped_tokens(&json!("just a string"), 0), None);
+        assert_eq!(usage_shaped_tokens(&json!(42), 0), None);
+        assert_eq!(usage_shaped_tokens(&Value::Null, 0), None);
+    }
+
+    fn compaction_event(compaction_id: Option<&str>) -> Value {
+        json!({
+            "type": "compaction/summary", "seq": 1, "time": 1_787_813_784_275i64,
+            "data": {
+                "compactionId": compaction_id,
+                "sourceCommandId": "cmd-1",
+                "model": "deepseek-v4-flash",
+                "provider": "deepseek-official",
+                "usage": {"inputTokens": 462, "outputTokens": 3520, "cacheReadTokens": 245760},
+            },
+        })
+    }
+
+    /// 真实回归：DSH 的 `compaction/summary` 带真实 usage（实测这份数字：
+    /// inputTokens 462 / outputTokens 3520 / cacheReadTokens 245760）且自带
+    /// model/provider，但没有 turn/step（compaction 由 `sourceCommandId`
+    /// 触发，不属于任何 turn），过去被 `usage_sample` 的类型白名单和
+    /// turn/step 校验双重挡在外面，用户在菜单栏上肉眼发现"今天有消耗但
+    /// 日历是 0"才暴露。
+    #[test]
+    fn token_by_model_counts_compaction_usage() {
+        let events = [compaction_event(Some("c1"))];
+        let out = token_by_model(&events);
+        assert_eq!(out["unaccounted_usage"], json!([]));
+        assert_eq!(out["by_model"]["deepseek-v4-flash"]["uncached_input_tokens"], json!(462));
+        assert_eq!(out["by_model"]["deepseek-v4-flash"]["output_tokens"], json!(3520));
+        assert_eq!(out["by_model"]["deepseek-v4-flash"]["cache_read_tokens"], json!(245760));
+    }
+
+    /// compaction 自带 model/provider，不能沿用 request/header 追踪的
+    /// "当前激活模型"——真实实测：会话主体用 pro，compaction 走的是
+    /// flash/deepseek-official，两者是不同的供应商价目表。
+    #[test]
+    fn compaction_model_overrides_currently_active_model() {
+        let events = [
+            json!({"type":"request/header","seq":0,"time":1,
+                   "data":{"header":{"config":{"model":"deepseek-v4-pro","provider":"shengsuanyun"}}}}),
+            compaction_event(Some("c1")),
+        ];
+        let out = token_by_model(&events);
+        let by_model = out["by_model"].as_object().unwrap();
+        assert_eq!(by_model.keys().collect::<Vec<_>>(), vec!["deepseek-v4-flash"],
+            "compaction 不该被记进'当前激活'的 pro,必须用它自己的 flash");
+        assert_eq!(out["providers"]["deepseek-v4-flash"], json!("deepseek-official"));
+        assert_eq!(out["providers"]["deepseek-v4-pro"], json!("shengsuanyun"));
+    }
+
+    /// 同一个 compactionId 出现两次（真实撞见过：一次 compaction 被 fork
+    /// 复制进 4 个会话文件）——"同 (turn,step) 值相同则跳过"分支应该只算
+    /// 一次，不是两次。
+    #[test]
+    fn same_compaction_id_deduped_across_fork_copies() {
+        let ev = compaction_event(Some("same-id"));
+        let mut ev2 = ev.clone();
+        ev2["seq"] = json!(2);
+        let out = token_by_model(&[ev, ev2]);
+        assert_eq!(out["by_model"]["deepseek-v4-flash"]["uncached_input_tokens"], json!(462),
+            "同一个 compactionId 重复出现，token 不能翻倍");
+    }
+
+    /// 不同 compactionId 必须落进独立的去重槽——不能因为哈希映射到同一个
+    /// 身份而互相覆盖，导致只剩最后一次的量。
+    #[test]
+    fn different_compaction_ids_do_not_collide() {
+        let mut ev1 = compaction_event(Some("id-1"));
+        ev1["data"]["usage"]["inputTokens"] = json!(100);
+        let mut ev2 = compaction_event(Some("id-2"));
+        ev2["data"]["usage"]["inputTokens"] = json!(200);
+        let out = token_by_model(&[ev1, ev2]);
+        assert_eq!(out["by_model"]["deepseek-v4-flash"]["uncached_input_tokens"], json!(300),
+            "两次不同的 compaction 都应该被计入，不能互相覆盖");
+    }
+
+    #[test]
+    fn missing_compaction_id_does_not_crash() {
+        let out = token_by_model(&[compaction_event(None)]);
+        assert!(out["by_model"]["deepseek-v4-flash"].is_object());
+    }
+
+    /// compaction 的 (turn, step) 是内部去重用的哈希身份，不是真实存在的
+    /// turn 号——报给调用方的行必须诚实写 null，不能把去重实现细节泄漏成
+    /// 一个看起来像真实 turn 的负数。
+    #[test]
+    fn request_metrics_reports_turn_and_step_as_null_for_compaction() {
+        let rows = request_metrics(&[compaction_event(Some("c1"))]);
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["turn"], Value::Null);
+        assert_eq!(rows[0]["step"], Value::Null);
+        assert_eq!(rows[0]["model"], json!("deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn token_by_date_model_attributes_compaction_to_its_own_date_and_model() {
+        let out = token_by_date_model(&[compaction_event(Some("c1"))]);
+        // 1787813784275 ms → 2026-08-27（北京时间），与真实那次 compact 一致。
+        assert_eq!(out["2026-08-27"]["deepseek-v4-flash"]["uncached_input_tokens"], json!(462));
+    }
+
+    /// `compaction/start`/`compaction/end` 没有 usage 字段——不该被
+    /// `usage_sample` 接住，也不该触发哨兵（它们的 payload 里根本没有
+    /// `SAMPLE_FIELDS` 那四个名字）。
+    #[test]
+    fn compaction_start_and_end_without_usage_are_not_accounted_or_sentinelled() {
+        let events = [
+            json!({"type":"compaction/start","seq":1,"time":1,
+                   "data":{"compactionId":"c1","sourceCommandId":"cmd-1"}}),
+            json!({"type":"compaction/end","seq":2,"time":2,
+                   "data":{"compactionId":"c1","sourceCommandId":"cmd-1"}}),
+        ];
+        let out = token_by_model(&events);
+        assert_eq!(out["by_model"], json!({}));
+        assert_eq!(out["unaccounted_usage"], json!([]));
     }
 
     /// Python `json.dumps(token_by_model(events), ensure_ascii=False, separators=(",", ":"))`
@@ -1006,7 +1306,7 @@ mod tests {
         // 落在 [8,9) 点，不在任何高峰区间，peak_* 全 0。
         assert_eq!(
             serde_json::to_string(&out).unwrap(),
-            r#"{"by_model":{"deepseek/deepseek-v4-pro-0813":{"uncached_input_tokens":1900,"output_tokens":250,"cache_read_tokens":320,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},"deepseek/deepseek-v4-flash":{"uncached_input_tokens":500,"output_tokens":50,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},"providers":{"deepseek/deepseek-v4-pro-0813":null,"deepseek/deepseek-v4-flash":null},"sequence":["deepseek/deepseek-v4-pro-0813","deepseek/deepseek-v4-flash","deepseek/deepseek-v4-pro-0813"],"unreported_fields":["cacheWriteTokens"]}"#
+            r#"{"by_model":{"deepseek/deepseek-v4-pro-0813":{"uncached_input_tokens":1900,"output_tokens":250,"cache_read_tokens":320,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},"deepseek/deepseek-v4-flash":{"uncached_input_tokens":500,"output_tokens":50,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},"providers":{"deepseek/deepseek-v4-pro-0813":null,"deepseek/deepseek-v4-flash":null},"sequence":["deepseek/deepseek-v4-pro-0813","deepseek/deepseek-v4-flash","deepseek/deepseek-v4-pro-0813"],"unreported_fields":["cacheWriteTokens"],"unaccounted_usage":[]}"#
         );
     }
 

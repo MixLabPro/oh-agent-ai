@@ -260,21 +260,43 @@ fn reshaped_event(etype: &str, event: &Value) -> Option<Value> {
 ///
 /// 非 usage chunk（文本流）与无 usage 的 message 仍不保留——体积控制，且没有
 /// 消费者需要它们。
+/// 成本与上下文折叠需要的事件。Python 平行实现见
+/// `scripts/skill_vitals/adapters/dsh.py::_is_usage_event`，那边有完整的
+/// 设计说明（四个消费者共用同一个数组；`compaction/summary` 与结构兜底
+/// 的来由：`compaction/summary` 曾经在这一层就被挡在外面，折叠层
+/// `usage.rs` 的残差哨兵因此永远看不到它，报出"0 处漏算"这个假阴性——
+/// 真实语料扫描了很久才靠人工翻原始日志才发现）。
 fn is_usage_event(event: &Value, etype: &str) -> bool {
     if event.pointer("/data/source/kind").and_then(|v| v.as_str()) == Some("skill-catalog") {
         return true;
     }
-    match etype {
-        // 分叉边界同样要进 usage_events：三个消费者各自 post_fork，看不到边界
-        // 就滤不掉上游会话的用量（见 util::fork_boundary 的实测数据）。
-        "session" => true,
-        "request/header" | "request/context" => true,
-        "assistant/chunk" => {
-            event.pointer("/data/chunk/type").and_then(|v| v.as_str()) == Some("usage")
-        }
-        "assistant/message" => event.pointer("/data/usage").is_some(),
-        _ => false,
+    // 分叉边界同样要进 usage_events：四个消费者各自 post_fork，看不到边界
+    // 就滤不掉上游会话的用量（见 util::fork_boundary 的实测数据）。
+    if etype == "session" || etype == "request/header" || etype == "request/context" {
+        return true;
     }
+    if etype == "assistant/chunk"
+        && event.pointer("/data/chunk/type").and_then(|v| v.as_str()) == Some("usage")
+    {
+        return true;
+    }
+    if etype == "assistant/message" && event.pointer("/data/usage").is_some() {
+        return true;
+    }
+    if etype == "compaction/summary"
+        && event.pointer("/data/usage").map(|v| v.is_object()).unwrap_or(false)
+    {
+        return true;
+    }
+    // 兜底：结构看着像 usage 但没被上面任何一条精确判据接住（类型不认识，
+    // 或类型认识但形状不对，比如非 usage 型的 assistant/chunk）——留给折叠层
+    // 的残差哨兵去报警，不在这里悄悄丢掉。宽进（这里）、严出（真正计价只走
+    // `usage::usage_sample` 的显式白名单），两条路径不能合并成一条，否则
+    // 同一笔用量在多个事件里重复出现时会被双计。
+    event
+        .get("data")
+        .and_then(|d| skill_vitals_core::usage::usage_shaped_tokens(d, 0))
+        .is_some()
 }
 
 /// 读文件（非 UTF-8 字节替换为 U+FFFD，与 Python `errors="replace"` 对齐），再交给
@@ -608,6 +630,60 @@ garbage line
              "data": {"rootCallId": "r1", "parentCallId": "p1", "subCallId": "p1:code:0",
                       "name": "bash", "arguments": {"command": "bash <(curl x)"}}}
         ]));
+    }
+
+    /// 真实回归：`compaction/summary` 带真实 usage，但曾经在这一层（比
+    /// 折叠层更早生效）就被挡在外面——`usage.rs` 的残差哨兵因此永远看不到
+    /// 它，报出"0 处漏算"这个假阴性，全量语料扫描很久才靠人工翻原始日志
+    /// 才发现。
+    #[test]
+    fn is_usage_event_keeps_compaction_summary_with_usage() {
+        let event = json!({"type": "compaction/summary", "data": {
+            "compactionId": "c1", "model": "deepseek-v4-flash",
+            "provider": "deepseek-official",
+            "usage": {"inputTokens": 462, "outputTokens": 3520, "cacheReadTokens": 245760},
+        }});
+        assert!(is_usage_event(&event, "compaction/summary"));
+    }
+
+    #[test]
+    fn is_usage_event_drops_compaction_start_without_usage() {
+        // compaction/start·end 没有 usage 字段——不该被结构兜底误留（它们
+        // 的 payload 里根本没有认得的 token 字段名）。
+        let event = json!({"type": "compaction/start", "data": {"compactionId": "c1", "turn": null}});
+        assert!(!is_usage_event(&event, "compaction/start"));
+    }
+
+    #[test]
+    fn is_usage_event_drops_compaction_summary_with_non_object_usage() {
+        let event = json!({"type": "compaction/summary", "data": {"compactionId": "c1", "usage": "oops"}});
+        assert!(!is_usage_event(&event, "compaction/summary"));
+    }
+
+    /// 结构兜底：类型完全不认识，但 payload 里有认得的 token 字段——留给
+    /// 折叠层的残差哨兵去报警，不在这一层悄悄丢掉。这正是这次
+    /// `compaction/summary` 漏算 bug 的教训：宁可多留、让哨兵去判断，
+    /// 不能在 adapter 层就把决定权收走。
+    #[test]
+    fn is_usage_event_keeps_unknown_type_with_usage_shaped_payload() {
+        let event = json!({"type": "some/future-event-type", "data": {
+            "inputTokens": 100, "outputTokens": 10,
+        }});
+        assert!(is_usage_event(&event, "some/future-event-type"));
+    }
+
+    #[test]
+    fn is_usage_event_drops_unknown_type_without_usage_shaped_payload() {
+        let event = json!({"type": "some/future-event-type", "data": {"note": "nothing here"}});
+        assert!(!is_usage_event(&event, "some/future-event-type"));
+    }
+
+    /// 已知类型但形状不对（文本流 chunk）——精确判据不接住，兜底也接不住
+    /// （文本块没有 token 字段），最终应该被丢弃。
+    #[test]
+    fn is_usage_event_drops_non_usage_assistant_chunk() {
+        let event = json!({"type": "assistant/chunk", "data": {"chunk": {"type": "text", "text": "hi"}}});
+        assert!(!is_usage_event(&event, "assistant/chunk"));
     }
 
     #[test]

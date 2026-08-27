@@ -138,6 +138,54 @@ class TestOnelineCli(unittest.TestCase):
             # 单次 input_tokens 是 1.7M,累加后应是 3.4M
             self.assertEqual(bucket_values[0]["uncached_input_tokens"], 1700000 * 2)
 
+    def test_oneline_today_by_model_is_sliced_to_today_not_whole_session(self):
+        """跨天的长会话：today.json 的 `by_model` 必须只含**今天那一片**，
+        不能是整段会话的量。
+
+        真机回归：一个跨 2026-08-23/08-26/08-27 三天的会话（中途 compact）
+        被审计后，hour 桶被 `merge_today` 正确过滤成只剩今天的 245,760
+        token，而 `by_model` 收的是整段 `token_by_model` 的 17,596,160——
+        同一个 today.json 里两个字段差 70 倍，「今日估算成本」（读
+        by_model）于是报出整段会话的钱。修法是调用方改传
+        `token_by_date_model(events)[今天]` 的精确切片。
+
+        不变量：**by_model 四桶之和 == hour 桶四桶之和**（两个字段都只
+        代表今天，必须对得上）。
+        """
+        with _TmpHome() as h:
+            log = Path(h.tmp) / "spanning.jsonl"
+            now_ms = int(__import__("time").time() * 1000)
+            day_ms = 86_400_000
+            lines = [
+                {"type": "session", "version": 0, "id": "s",
+                 "createdAt": now_ms - 2 * day_ms, "cwd": "/tmp", "delegationDepth": 0},
+                {"type": "request/header", "seq": 1, "time": now_ms - 2 * day_ms,
+                 "data": {"header": {"config": {"model": "deepseek-v4-flash"}}}},
+                # 两天前的一大笔——不该出现在 today.json 的任何字段里
+                {"type": "assistant/chunk", "seq": 2, "time": now_ms - 2 * day_ms,
+                 "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                          "usage": {"inputTokens": 9_000_000, "outputTokens": 1000}}}},
+                # 今天的一小笔
+                {"type": "assistant/chunk", "seq": 3, "time": now_ms,
+                 "data": {"turn": 2, "step": 1, "chunk": {"type": "usage",
+                          "usage": {"inputTokens": 462, "outputTokens": 3520}}}},
+            ]
+            log.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+            r = _run(["oneline", str(log)], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            today = json.loads((Path(h.tmp) / "state" / "today.json").read_text())
+
+            F = ("uncached_input_tokens", "output_tokens",
+                 "cache_read_tokens", "cache_write_tokens")
+            hour_total = sum(b[f] for b in today["buckets"].values() for f in F)
+            model_total = sum(m[f] for m in today["by_model"].values() for f in F)
+            self.assertEqual(hour_total, 462 + 3520,
+                             "hour 桶应该只有今天那一笔")
+            self.assertEqual(model_total, hour_total,
+                             "by_model 必须与 hour 桶对得上——两个字段都只代表今天，"
+                             "不能一个是今天、另一个是整段会话")
+
     def test_oneline_on_historical_log_does_not_pollute_todays_hour_buckets(self):
         """回归：审计一份**历史日期**的日志（`fixtures/dsh/behavior.jsonl`
         固定在 2025-06-15）不该往 today.json 的 (hour) 桶里塞任何数据——

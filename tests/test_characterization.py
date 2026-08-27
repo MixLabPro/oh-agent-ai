@@ -37,7 +37,7 @@ from skill_vitals.util import split_lines  # noqa: E402
 from skill_vitals.util import fork_boundary, post_fork  # noqa: E402
 from skill_vitals.usage import (  # noqa: E402
     context_composition, hour_buckets, request_metrics, token_by_date_model,
-    token_by_model, usage_signal_status,
+    token_by_model, usage_signal_status, usage_shaped_tokens,
 )
 from skill_vitals.compaction import compaction_events  # noqa: E402
 from skill_vitals.waste import detect_duplicate_tool_results, detect_failure_run_waste, detect_structural_waste  # noqa: E402
@@ -2285,6 +2285,152 @@ class TestTokenByDateModel(unittest.TestCase):
 
     def test_empty_input_returns_empty_dict(self):
         self.assertEqual(token_by_date_model([]), {})
+
+
+class TestUsageShapedTokens(unittest.TestCase):
+    """`usage_shaped_tokens` —— 残差哨兵的判据。只认 `_SAMPLE_FIELDS` 四个
+    名字，故意不做宽泛匹配（否则会在 `maxTokens`/`shadowedTokenCount` 这类
+    配置字段上误报）。Rust 侧 `usage.rs::usage_shaped_tokens` 是平行实现，
+    差分由 `TestCompactionUsage` 里的 `token_by_model`/`_is_usage_event`
+    集成测试间接看守（哨兵本身不进任何 `--json` 输出，没有独立的
+    byte-for-byte 串可钉）。
+    """
+
+    def test_finds_nested_usage_fields(self):
+        node = {"data": {"usage": {"inputTokens": 100, "outputTokens": 20}}}
+        self.assertEqual(usage_shaped_tokens(node), 120)
+
+    def test_returns_none_when_no_known_field_present(self):
+        # `maxTokens`/`shadowedTokenCount` 不在 _SAMPLE_FIELDS 里——不能把
+        # 配置/统计字段误当成用量，否则哨兵会在每条 compaction/start 上
+        # 假报警。
+        node = {"maxTokens": 8192, "shadowedTokenCount": 12345}
+        self.assertIsNone(usage_shaped_tokens(node))
+
+    def test_sums_multiple_occurrences_across_the_tree(self):
+        node = {"a": {"inputTokens": 10}, "b": [{"outputTokens": 5}, {"cacheReadTokens": 3}]}
+        self.assertEqual(usage_shaped_tokens(node), 18)
+
+    def test_ignores_non_integer_values(self):
+        # 畸形/字符串值不参与求和，也不让整个扫描崩溃。
+        node = {"inputTokens": "not-a-number", "outputTokens": 7}
+        self.assertEqual(usage_shaped_tokens(node), 7)
+
+    def test_bare_scalar_returns_none(self):
+        self.assertIsNone(usage_shaped_tokens("just a string"))
+        self.assertIsNone(usage_shaped_tokens(42))
+        self.assertIsNone(usage_shaped_tokens(None))
+
+
+class TestCompactionUsage(unittest.TestCase):
+    """`compaction/summary` 的 usage 提取——真实回归：DSH 的
+    `compaction/summary` 带 `data.usage`（实测
+    `{inputTokens:462, outputTokens:3520, cacheReadTokens:245760}`）且自带
+    `model`/`provider`，但因为 ① 不在 `_usage_sample` 的类型白名单里、
+    ② 没有 `turn`/`step`（compaction 由 `sourceCommandId` 触发，不属于任何
+    turn），被静默丢弃——用户在菜单栏上肉眼发现"今天有消耗但日历是 0"
+    才暴露。全量扫描 38 个真实会话文件，唯一的漏算就是这个类型
+    （2 条,853,309 token，已按 post_fork 去重上游副本）。
+    """
+
+    def _compaction_event(self, compaction_id, input_tokens=462, output_tokens=3520,
+                          cache_read=245760, model="deepseek-v4-flash",
+                          provider="deepseek-official", time_ms=1787813784275):
+        return {
+            "type": "compaction/summary", "seq": 1, "time": time_ms,
+            "data": {
+                "compactionId": compaction_id,
+                "sourceCommandId": "cmd-1",
+                "model": model, "provider": provider,
+                "usage": {"inputTokens": input_tokens, "outputTokens": output_tokens,
+                          "cacheReadTokens": cache_read},
+            },
+        }
+
+    def test_token_by_model_counts_compaction_usage(self):
+        events = [self._compaction_event("c1")]
+        out = token_by_model(events)
+        self.assertEqual(out["unaccounted_usage"], [],
+                         "compaction/summary 现在应该被 _usage_sample 直接接住")
+        self.assertIn("deepseek-v4-flash", out["by_model"])
+        b = out["by_model"]["deepseek-v4-flash"]
+        self.assertEqual(b["uncached_input_tokens"], 462)
+        self.assertEqual(b["output_tokens"], 3520)
+        self.assertEqual(b["cache_read_tokens"], 245760)
+
+    def test_compaction_model_overrides_currently_active_model(self):
+        """compaction 自带 model/provider，不能沿用 request/header 追踪的
+        "当前激活模型"——真实实测：会话主体用 pro，compaction 走的是
+        flash/deepseek-official，两者是不同的供应商价目表。"""
+        events = [
+            {"type": "request/header", "seq": 0, "time": 1,
+             "data": {"header": {"config": {"model": "deepseek-v4-pro",
+                                             "provider": "shengsuanyun"}}}},
+            self._compaction_event("c1", model="deepseek-v4-flash",
+                                   provider="deepseek-official"),
+        ]
+        out = token_by_model(events)
+        self.assertEqual(set(out["by_model"].keys()), {"deepseek-v4-flash"},
+                         "compaction 不该被记进'当前激活'的 pro,必须用它自己的 flash")
+        self.assertEqual(out["providers"]["deepseek-v4-flash"], "deepseek-official")
+        self.assertEqual(out["providers"]["deepseek-v4-pro"], "shengsuanyun")
+
+    def test_same_compaction_id_deduped_across_fork_copies(self):
+        """同一个 compactionId 出现两次（真实撞见过：一次 compaction 被 fork
+        复制进 4 个会话文件）——`token_by_model` 的"同 (turn,step) 值相同则
+        跳过"分支应该只算一次，不是两次。"""
+        ev = self._compaction_event("same-id")
+        out = token_by_model([ev, dict(ev, seq=2)])
+        self.assertEqual(out["by_model"]["deepseek-v4-flash"]["uncached_input_tokens"], 462,
+                         "同一个 compactionId 重复出现，token 不能翻倍")
+
+    def test_different_compaction_ids_do_not_collide(self):
+        """不同 compactionId 必须落进独立的去重槽——不能因为都映射到同一个
+        身份而互相覆盖，导致只剩最后一次的量。"""
+        events = [
+            self._compaction_event("id-1", input_tokens=100),
+            self._compaction_event("id-2", input_tokens=200),
+        ]
+        out = token_by_model(events)
+        self.assertEqual(out["by_model"]["deepseek-v4-flash"]["uncached_input_tokens"], 300,
+                         "两次不同的 compaction 都应该被计入，不能互相覆盖")
+
+    def test_missing_compaction_id_does_not_crash(self):
+        """缺 compactionId 时退化但不崩——极端情况，真实语料没出现过。"""
+        events = [self._compaction_event(None)]
+        out = token_by_model(events)
+        self.assertIn("deepseek-v4-flash", out["by_model"])
+
+    def test_request_metrics_reports_turn_and_step_as_none_for_compaction(self):
+        """compaction 的 (turn, step) 是内部去重用的哈希身份，不是真实存在的
+        turn 号——报给调用方的行必须诚实写 None，不能把去重实现细节泄漏成
+        一个看起来像真实 turn 的负数。"""
+        rows = request_metrics([self._compaction_event("c1")])
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["turn"])
+        self.assertIsNone(rows[0]["step"])
+        self.assertEqual(rows[0]["model"], "deepseek-v4-flash")
+
+    def test_token_by_date_model_attributes_compaction_to_its_own_date_and_model(self):
+        out = token_by_date_model([self._compaction_event("c1", time_ms=1787813784275)])
+        # 1787813784275 ms → 2026-08-27（北京时间），与真实那次 compact 一致。
+        self.assertIn("2026-08-27", out)
+        self.assertEqual(
+            out["2026-08-27"]["deepseek-v4-flash"]["uncached_input_tokens"], 462)
+
+    def test_missing_usage_field_is_not_accounted_but_is_sentinelled(self):
+        """`compaction/start`/`compaction/end` 没有 usage 字段——不该被
+        `_usage_sample` 接住,也不该触发哨兵(它们的 payload 里根本没有
+        `_SAMPLE_FIELDS` 那四个名字)。"""
+        events = [
+            {"type": "compaction/start", "seq": 1, "time": 1,
+             "data": {"compactionId": "c1", "sourceCommandId": "cmd-1"}},
+            {"type": "compaction/end", "seq": 2, "time": 2,
+             "data": {"compactionId": "c1", "sourceCommandId": "cmd-1"}},
+        ]
+        out = token_by_model(events)
+        self.assertEqual(out["by_model"], {})
+        self.assertEqual(out["unaccounted_usage"], [])
 
 
 if __name__ == "__main__":
