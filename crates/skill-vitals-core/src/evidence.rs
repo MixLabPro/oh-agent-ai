@@ -258,12 +258,34 @@ pub struct DecimalAmount {
     pub scale: u8,
 }
 
+/// 订阅配额消耗的一个窗口——一个订阅套餐可能同时挂多个互不重叠的窗口
+/// （例如一个 7 天滚动窗口叠一个更短的突发窗口），§14.10 cc-switch 的
+/// `tiers[]` 就是因为拍扁成一个数字而丢了"到底哪个窗口先撞线"，所以这里
+/// 用 `Vec<QuotaWindow>` 而不是单个百分比。
+#[derive(Clone, Debug)]
+pub struct QuotaWindow {
+    /// 套餐档位的原始字符串（如某宿主上会读到 `"plus"`）——不同宿主的叫法
+    /// 互不通用，不结构化成枚举。
+    pub plan: String,
+    pub used_percent: f64,
+    pub window_minutes: u32,
+    pub resets_at_ms: i64,
+}
+
 /// 不同单位的花费**不可比较**——不同币种不相加不排名；WorkBuddy 计的是
 /// credits，不是 token，不能先换算成 token 再定价。
+///
+/// `Quota` 是第三种、既不是 `Money` 也不是 `Credits` 的花费：某些宿主的
+/// 订阅账户按请求返回一个"这次用了多少配额"的百分比，相对一个会清零的
+/// 滚动窗口，从头到尾没有美元单价，也不是可攒可花的余额（`has_credits`
+/// 恒为 false）。把它硬塞进 `Money` 是编造一个不存在的单价；塞进 `Credits`
+/// 则混淆了"计量单位是余额"和"计量单位是配额百分比"这两件事——两者都会让
+/// `Cost` 的读者误判"这次请求值多少钱"这个问题其实无法回答。
 #[derive(Clone, Debug)]
 pub enum Cost {
     Money { amount: DecimalAmount, currency: CurrencyCode },
     Credits(f64),
+    Quota(Vec<QuotaWindow>),
     Unavailable(Reason),
 }
 
@@ -490,6 +512,17 @@ mod tests {
     #[test]
     fn linearization_default_is_leaf_path() {
         assert_eq!(Linearization::default(), Linearization::LeafPath);
+    }
+
+    #[test]
+    fn cost_quota_holds_multiple_windows_not_one_flattened_number() {
+        let cost = Cost::Quota(vec![
+            QuotaWindow { plan: "plus".into(), used_percent: 19.0, window_minutes: 10080, resets_at_ms: 1_787_846_539_000 },
+            QuotaWindow { plan: "plus".into(), used_percent: 42.0, window_minutes: 300, resets_at_ms: 1_787_800_000_000 },
+        ]);
+        let Cost::Quota(windows) = cost else { panic!("expected Cost::Quota") };
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[1].window_minutes, 300);
     }
 
     /// §12："这条规则有一个测试：断言共享类型层里没有任何标识符含宿主名。"

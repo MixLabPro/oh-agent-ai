@@ -288,7 +288,15 @@ declaration.
 pub enum Cost {
     Money   { amount: Decimal, currency: CurrencyCode },
     Credits (f64),
+    Quota   (Vec<QuotaWindow>),
     Unavailable (Reason),
+}
+
+pub struct QuotaWindow {
+    pub plan: String,
+    pub used_percent: f64,
+    pub window_minutes: u32,
+    pub resets_at_ms: i64,
 }
 ```
 
@@ -296,6 +304,24 @@ Amounts in different currencies are **never added and never ranked against each
 other** — not summed into a total, not sorted into one leaderboard. WorkBuddy
 meters credits (`session_usage.credit_json`), which are not tokens; credits must
 not be converted into tokens and then priced.
+
+**`Quota` is a third, distinct kind of cost, not a variant of `Credits`.**
+Confirmed against a real 47-session Codex corpus: every `token_count` event
+carries `rate_limits: { plan_type, primary: { used_percent, window_minutes,
+resets_at }, credits: { has_credits, unlimited, balance } }`. On a subscription
+account (`plan_type: "plus"` in 100% of the sampled sessions) `credits.has_credits`
+is always `false` — there is no metered balance and no per-token dollar price to
+report at all, only a percentage consumed against a rolling window that resets.
+Reporting that as `Money` invents a unit price OpenAI does not publish; reporting
+it as `Credits` conflates "spendable balance" with "quota percentage," which
+silently misleads a reader who assumes `Credits(f64)` is summable the way a
+balance is. `QuotaWindow` is a `Vec`, not one flattened number, because a plan
+can carry more than one window at once (Codex's own `primary`/`secondary`
+split — e.g. a weekly window plus a shorter burst window); collapsing that to a
+single percentage is exactly the mistake §14.10 flags in `cc-switch`'s
+`tiers[]` note. This field is unaffected by `ThreadHistoryMode` — `token_count`
+is emitted in both Codex vocabularies (§13), so `Quota` costs are available
+before the rest of the P4 Codex adapter's format-shape work lands.
 
 ### 8.2 Bucket sets are per host
 
