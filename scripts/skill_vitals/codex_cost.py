@@ -10,11 +10,31 @@
 套 Codex 壳。价格表 `codex_pricing.json` 独立于 `pricing.json`。
 """
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .codex_usage import CODEX_TOKEN_FIELDS
 
 _CODEX_PRICING_PATH = Path(__file__).parent / "codex_pricing.json"
+
+# 北京时区（UTC+8）。与 `state.py` 的 `_BEIJING` 同口径：本仓库「当前月/今天」统一
+# 按北京时间定，codex-cost 的默认月与 DSH month.json 的月份在月初/月末才不会打架。
+_BEIJING = timezone(timedelta(hours=8))
+
+
+def current_month_beijing():
+    """北京时区（UTC+8）当前自然月 → `YYYY-MM`。与 Rust 侧
+    `codex_cost.rs::current_month_beijing`（Hinnant civil-from-days）必须产出同一
+    字符串——差分测试交叉断言，两侧任一漂移都会红。"""
+    return datetime.now(_BEIJING).strftime("%Y-%m")
+
+
+def today_beijing():
+    """北京时区（UTC+8）今天 → `YYYY-MM-DD`。与 Rust 侧 `today_beijing` 对齐。
+    作为 `--today` 的过滤键与输出契约的 `today` 字段。报告内的每日桶是 UTC 日
+    （`codex_date_of`），「今天」用它去匹配——跨 UTC/北京日界线的几小时落进相邻
+    桶，这是既有 UTC 分桶属性，诚实标注、不臆造。"""
+    return datetime.now(_BEIJING).date().isoformat()
 
 
 def load_codex_pricing():

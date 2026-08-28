@@ -413,6 +413,53 @@ pub fn render_codex_cost(out: &Value) -> String {
     parts.concat()
 }
 
+// ── 默认月 / 今天（北京时区）───────────────────────────────────────────────
+// `codex-cost` 不带 `--month` 时默认展示**当前自然月**（2026-08 用户要求 dashboard
+// 默认 = 本月）。「当前月/今天」口径与 DSH state 层一致（`state.py` 的 `_BEIJING`，
+// `datetime.now(timezone(timedelta(hours=8)))`）——本仓库统一按北京时间定「现在」，
+// 两个引擎的月度视图在月初/月末才不会打架。报告内的**每日桶**仍是事件时间戳的
+// UTC 日（`codex_date_of` 的既有语义），所以「今天」用北京日期字符串去匹配 UTC 日
+// 桶——跨 UTC/北京日界线的几小时会落进相邻桶，这是既有 UTC 分桶属性，诚实标注、
+// 不臆造（Python 侧同口径，差分交叉断言两侧一致）。
+// 不引入 chrono（CLI 保持最小依赖）；用 Howard Hinnant 的 civil-from-days 算法从
+// Unix 秒算公历日期。1970 之后秒数非负、`+8h` 后天数非负，era 的 floor == 截断，
+// 无需负数分支（仍用 div_euclid 保险）。
+fn civil_from_unix_secs(secs: i64, offset_secs: i64) -> (i64, u32, u32) {
+    let days = (secs + offset_secs).div_euclid(86400);
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32)
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 北京时区（UTC+8）当前自然月 → `YYYY-MM`。Python 侧 `codex_cost.py` 的
+/// `current_month_beijing` 必须产出同一字符串（差分交叉断言）。
+pub fn current_month_beijing() -> String {
+    let (y, m, _d) = civil_from_unix_secs(now_unix_secs(), 8 * 3600);
+    format!("{:04}-{:02}", y, m)
+}
+
+/// 北京时区（UTC+8）今天 → `YYYY-MM-DD`。Python 侧 `today_beijing` 必须产出同一
+/// 字符串。作为 `--today` 的过滤键与输出契约的 `today` 字段（dashboard 高亮今天）。
+pub fn today_beijing() -> String {
+    let (y, m, d) = civil_from_unix_secs(now_unix_secs(), 8 * 3600);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,5 +817,49 @@ mod tests {
         let text2 = render_codex_cost(&out2);
         assert!(text2.contains("total cost: $1"));
         assert!(!text2.contains("按量标价"));
+    }
+
+    #[test]
+    fn civil_from_unix_secs_matches_python_oracle() {
+        // 已知 epoch → 北京日期。期望值用 Python `datetime.fromtimestamp(s, UTC+8)`
+        // 核对（2026-08-29 现场算的，含闰日、月末、北京午夜边界前 1 秒）。
+        let cases: [(i64, &str); 11] = [
+            (0, "1970-01-01"),
+            (86400, "1970-01-02"),
+            (951782400, "2000-02-29"),   // 闰日
+            (1585584000, "2020-03-31"),
+            (1725000000, "2024-08-30"),
+            (1725245370, "2024-09-02"),
+            (1767196799, "2025-12-31"),  // 北京 2026-01-01 00:00 前 1 秒
+            (1767196800, "2026-01-01"),  // 北京 2026-01-01 00:00
+            (1767225600, "2026-01-01"),
+            (1787866858, "2026-08-28"),  // 用户的 5h resets_at
+            (1788453658, "2026-09-04"),  // 用户的 7d resets_at
+        ];
+        for (secs, want) in cases {
+            let (y, m, d) = civil_from_unix_secs(secs, 8 * 3600);
+            assert_eq!(
+                format!("{y:04}-{m:02}-{d:02}"),
+                want,
+                "civil_from_unix_secs({secs}) 应与 Python oracle 一致"
+            );
+        }
+    }
+
+    #[test]
+    fn current_month_and_today_are_well_formed() {
+        let m = current_month_beijing();
+        assert!(
+            m.len() == 7 && m.as_bytes()[4] == b'-' && m[..4].parse::<i32>().is_ok()
+                && m[5..].parse::<u32>().map(|v| (1..=12).contains(&v)).unwrap_or(false),
+            "current_month_beijing() = {m:?} 必须是 YYYY-MM"
+        );
+        let d = today_beijing();
+        assert!(
+            d.len() == 10 && d.as_bytes()[4] == b'-' && d.as_bytes()[7] == b'-',
+            "today_beijing() = {d:?} 必须是 YYYY-MM-DD"
+        );
+        // 同一天：today 的月份前缀必须等于 current_month。
+        assert_eq!(&d[..7], m.as_str());
     }
 }

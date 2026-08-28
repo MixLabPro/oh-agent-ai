@@ -15,7 +15,8 @@
 
     {
       host: "codex",  currency: "USD",
-      month: "2026-08" | null,              // null = 全部月份（未传 --month）
+      month: "2026-08" | null,              // null = 全部月份（--month all）；缺省 = 当前自然月（北京）
+      today: "2026-08-29",                  // 北京时区今天 YYYY-MM-DD；热力图高亮「今」格
       total_cost_usd: 123.45,               // 所有已计价模型的 USD 费用
       total_tokens: {                       // 5 桶全局总量
         uncached_input_tokens, output_tokens, cached_input_tokens,
@@ -255,6 +256,15 @@
     .day-cell.empty .num { color: var(--fg-dim); font-weight: 400; }
     .day-cell .amt { font: 500 12px var(--mono); color: var(--fg-muted); }
     .day-cell .amt .cost { color: var(--accent); font-weight: 600; }
+    /* 今天的格子：accent 描边 + 右上角「今」徽标。服务端注入的 today 字段是唯一
+       来源——JS 不自取 Date.now()（那样跨日会与北京口径漂移，且 file:// 无时钟源）。 */
+    .day-cell.today { border: 1px solid var(--accent); }
+    .day-cell.today .today-mark {
+      position: absolute; top: 2px; right: 2px;
+      font: 700 9px var(--mono); color: var(--bg); background: var(--accent);
+      border-radius: 3px; padding: 1px 3px;
+    }
+    .day-cell { position: relative; }
 
     /* ── 状态 / 警告 ─────────────────────────────────────────────── */
     #status {
@@ -466,6 +476,9 @@
   function setStatus(msg, isErr) {
     var el = document.getElementById("status");
     el.textContent = msg;
+    // 必须重新显示：render() 开头把 #status 置 hidden，空折叠路径调到这里时若只
+    // 改文案不解除隐藏，用户就只看到全零卡片而不知道「今天没有可计价 token」。
+    el.hidden = false;
     el.classList.toggle("err", !!isErr);
   }
 
@@ -680,6 +693,16 @@
     // 周对齐排，月份切换插一行月标题。
     var first = parseISO(days[0].date);
     var last = parseISO(days[days.length - 1].date);
+    // 网格延长到今天：默认本月视图下「今天」可能尚无数据（月初几天），但用户
+    // 要看到今天的格子（高亮/空态）。**只在今天与末日同月时延长**——`--month
+    // 2026-07` 的视图不能把下一整个月拖进来（会违背过滤语义）。
+    if (DATA.today) {
+      var tToday = parseISO(DATA.today);
+      var lastMonth = isoOf(last).slice(0, 7);
+      if (tToday.getTime() > last.getTime() && DATA.today.slice(0, 7) === lastMonth) {
+        last = tToday;
+      }
+    }
 
     // 首日前的对齐空格（dow = 0 是周日，与 WEEKDAYS 表头一致）
     var row = [];
@@ -733,13 +756,17 @@
   function makeDayCell(dateObj, key, day, maxCost) {
     var cell = document.createElement("div");
     var dayNum = dateObj.getUTCDate();
+    var isToday = DATA.today === key;
     if (!day) {
       cell.className = "day-cell empty";
+      if (isToday) cell.className += " today";
       cell.innerHTML = '<div class="num">' + dayNum + '</div>';
+      if (isToday) cell.innerHTML += '<span class="today-mark">今</span>';
       return cell;
     }
     var hasCost = day.cost_usd > 0;
     cell.className = "day-cell";
+    if (isToday) cell.className += " today";
     cell.style.background = colorFor(day.cost_usd, maxCost, hasCost);
     cell.dataset.date = key;
     cell.dataset.cost = String(day.cost_usd);
@@ -749,6 +776,7 @@
       '<div class="amt">' + shortNum(day.tokens) +
         (hasCost ? '<div class="cost">' + fmtUsd(day.cost_usd) + '</div>' : '') +
       '</div>';
+    if (isToday) cell.innerHTML += '<span class="today-mark">今</span>';
     return cell;
   }
 

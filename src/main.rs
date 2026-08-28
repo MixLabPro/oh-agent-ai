@@ -368,9 +368,12 @@ enum Cmd {
     /// Stateless single call: scan all rollouts (live + archived) → fold
     /// last_token_usage → price against codex_pricing.json (USD) → text/JSON/HTML.
     CodexCost {
-        /// Restrict the report to one calendar month
+        /// Restrict the report to one calendar month; `all` = every month
         #[arg(long = "month")]
         month: Option<String>,
+        /// Today only; default (no flags) is the current calendar month
+        #[arg(long = "today", conflicts_with = "month")]
+        today: bool,
         /// Write the report JSON to FILE; use - for stdout
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
@@ -878,7 +881,13 @@ fn main() {
     // merge_folds——merge 只读 fold 的 by_model 字段，拿它折回去是空模型轴），
     // 保证 days 与 per_model 对得上；unaccounted 无日期归属，跨月份保留（数据
     // 质量哨兵，不参与归月）。
-    if let Some(Cmd::CodexCost { month, rows_json, html }) = &args.cmd {
+    if let Some(Cmd::CodexCost {
+        month,
+        today,
+        rows_json,
+        html,
+    }) = &args.cmd
+    {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default();
@@ -896,8 +905,23 @@ fn main() {
         let mut by_date_model = merged["by_date_model"].clone();
         let mut by_model = merged["by_model"].clone();
         let unaccounted = merged["unaccounted"].clone();
-        let month = month.clone();
-        if let Some(m) = &month {
+        // 月份解析（北京口径，与 Python `cli.py` 同源）：默认 = 当前自然月；
+        // `--today` = 今天（过滤键是完整 YYYY-MM-DD，month 标签取今天所属月）；
+        // `--month all` = 全部月份；其余 = 指定月。filter_key=None 即不过滤。
+        let (filter_key, month_out): (Option<String>, Option<String>) = if *today {
+            let t = codex_cost::today_beijing();
+            (Some(t.clone()), Some(t[..7].to_string()))
+        } else {
+            match month.as_deref() {
+                Some("all") => (None, None),
+                Some(m) => (Some(m.to_string()), Some(m.to_string())),
+                None => {
+                    let cur = codex_cost::current_month_beijing();
+                    (Some(cur.clone()), Some(cur))
+                }
+            }
+        };
+        if let Some(m) = &filter_key {
             // 过滤日期轴（BTreeMap 升序 -> 保持升序），再重算 by_model。
             let mut filtered = serde_json::Map::new();
             if let Some(bd) = by_date_model.as_object() {
@@ -943,8 +967,9 @@ fn main() {
         out.insert("currency".into(), json!("USD"));
         out.insert(
             "month".into(),
-            month.clone().map(Value::from).unwrap_or(Value::Null),
+            month_out.clone().map(Value::from).unwrap_or(Value::Null),
         );
+        out.insert("today".into(), json!(codex_cost::today_beijing()));
         if let Some(rep) = report.as_object() {
             for (k, v) in rep {
                 out.insert(k.clone(), v.clone());

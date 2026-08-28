@@ -519,7 +519,12 @@ def _main():
                                   help="Price Codex rollout token usage (USD) "
                                        "into a per-model / per-day cost report")
     p_codex_cost.add_argument("--month", metavar="YYYY-MM", default=None,
-                              help="Restrict the report to one calendar month")
+                              help="Restrict the report to one calendar month; "
+                                   "'all' = every month. Default (no flags) is the "
+                                   "current calendar month")
+    p_codex_cost.add_argument("--today", action="store_true",
+                              help="Restrict the report to today only (mutually "
+                                   "exclusive with --month)")
     p_codex_cost.add_argument("--json", metavar="FILE",
                               help="Write the report JSON to FILE; use - for stdout")
     p_codex_cost.add_argument("--html", metavar="FILE",
@@ -819,10 +824,31 @@ def _main():
         by_date_model = merged["by_date_model"]
         by_model = merged["by_model"]
         unaccounted = merged["unaccounted"]
-        month = args.month
-        if month:
+        # `--today` 与 `--month` 互斥（Rust 侧 clap conflicts_with 同款；保持两侧
+        # 对非法输入一致地报错，而不是今天静默赢）。
+        if args.today and args.month:
+            print("error: the argument '--today' cannot be used with '--month'",
+                  file=sys.stderr)
+            sys.exit(2)
+        # 月份解析（北京口径，与 Rust `main.rs` 同源）：默认 = 当前自然月；
+        # `--today` = 今天（过滤键是完整 YYYY-MM-DD，month 标签取今天所属月）；
+        # `--month all` = 全部月份；其余 = 指定月。filter_key=None 即不过滤。
+        if args.today:
+            filter_key = codex_cost_module.today_beijing()
+            month_out = filter_key[:7]
+        elif args.month == "all":
+            filter_key = None
+            month_out = None
+        elif args.month:
+            filter_key = args.month
+            month_out = args.month
+        else:
+            cur = codex_cost_module.current_month_beijing()
+            filter_key = cur
+            month_out = cur
+        if filter_key:
             by_date_model = {d: bd for d, bd in by_date_model.items()
-                             if d.startswith(month)}
+                             if d.startswith(filter_key)}
             # 重算模型轴：merge 的 by_model 只读 fold 的 by_model 字段，不读
             # by_date_model——拿 merge 折回去得到的是空模型轴（真实 defect：
             # --month 整份报告静默变全零）。codex_by_model_from_dates 把过滤后
@@ -835,15 +861,18 @@ def _main():
         if report is None:
             # 空折叠：没有任何 token 可计价。给一个全零的结构而不是 None——
             # 调用方要的是「没有数据」而不是「崩了」，且 host/currency/month
-            # 包装是固定契约。
+            # 包装是固定契约。**unaccounted/plan 必须透传**——它们是 fold 的
+            # 数据质量哨兵与配额快照，无日期归属、不随月过滤（Rust 侧同款透传；
+            # `--today` 命中空日时若只留 []，差分当场红，真实 defect）。
             report = {
                 "total_cost_usd": 0,
                 "total_tokens": {f: 0 for f in codex_usage_module.CODEX_TOKEN_FIELDS},
                 "per_model": {}, "days": [], "unpriced_tokens": 0,
-                "unaccounted_usage": [],
+                "unaccounted_usage": unaccounted,
                 "plan": plan,
             }
-        out = {"host": "codex", "currency": "USD", "month": month}
+        out = {"host": "codex", "currency": "USD", "month": month_out,
+               "today": codex_cost_module.today_beijing()}
         out.update(report)
         wrote = False
         if args.json:

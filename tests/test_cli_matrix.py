@@ -1047,11 +1047,12 @@ class CliMatrix(unittest.TestCase):
         shutil.copy(cost_fx / "rollout-terra.jsonl", arch / "rollout-terra.jsonl")
 
     def test_codex_cost_differential(self):
-        """`codex-cost --json -`（全量）与 `--month 2026-08`：py==rs 逐字节（both()
+        """`codex-cost --month all`（全量）与 `--month 2026-08`：py==rs 逐字节（both()
         兜底），且金额等于手算值——sol 两桶（0.6325 + LC 4.425）+ terra 0.3885 +
-        luna 0.0897 = 5.5357；月过滤后 terra/luna 出局 → 5.0575。"""
+        luna 0.0897 = 5.5357；月过滤后 terra/luna 出局 → 5.0575。缺省（不传月）=
+        当前自然月（北京口径），不再是全量——全量要显式 `--month all`。"""
         self._codex_cost_roots()
-        code, out, err = self.both("codex-cost", "--json", "-")
+        code, out, err = self.both("codex-cost", "--month", "all", "--json", "-")
         self.assertEqual(code, 0)
         report = json.loads(out)
         self.assertEqual(report["host"], "codex")
@@ -1092,8 +1093,11 @@ class CliMatrix(unittest.TestCase):
         从过滤后的日期桶重算，days 与 per_model 永远对得上。
         """
         self._codex_cost_roots()
-        for extra in ((), ("--month", "2026-08"), ("--month", "2026-07")):
-            with self.subTest(month=extra[1] if extra else None):
+        # () 已不再是「全量」——缺省现在是当前自然月，改用显式 --month all 才等价
+        # 于旧的无过滤路径（守恒断言与具体哪个月无关，但要确定性）。
+        for extra in (("--month", "all"), ("--month", "2026-08"),
+                      ("--month", "2026-07")):
+            with self.subTest(month=extra[1]):
                 code, out, err = self.both("codex-cost", *extra, "--json", "-")
                 self.assertEqual(code, 0)
                 report = json.loads(out)
@@ -1101,6 +1105,44 @@ class CliMatrix(unittest.TestCase):
                     report["total_cost_usd"],
                     sum(d["cost_usd"] for d in report["days"]), places=9,
                     msg="sum(days) != total_cost_usd（month=%r）" % (extra,))
+
+    def test_codex_cost_default_month_and_today_fields(self):
+        """缺省（不传月）= 当前自然月（北京口径，与 DSH state.py 的 _BEIJING 一致），
+        `today` 字段 = 北京今天。断言解析语义而非 fixture 内容：month/today 是北京
+        口径的正确字符串、days 只落在 month 内。py==rs 逐字节（both() 兜底，含
+        today 字段）。"""
+        from datetime import datetime, timedelta, timezone
+        beijing = timezone(timedelta(hours=8))
+        now = datetime.now(beijing)
+        ref_month = now.strftime("%Y-%m")
+        ref_today = now.date().isoformat()
+        self._codex_cost_roots()
+        code, out, err = self.both("codex-cost", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["month"], ref_month)
+        self.assertEqual(report["today"], ref_today)
+        for d in report["days"]:
+            self.assertTrue(d["date"].startswith(ref_month),
+                            "default 是本月视图，days 不应越界: %s" % d["date"])
+
+    def test_codex_cost_today_filter(self):
+        """`--today`：过滤键 = 今天（北京 YYYY-MM-DD），month 标签 = 今天所属月；
+        days 里不会出现今天以外的日期。py==rs 逐字节（both() 兜底）。"""
+        from datetime import datetime, timedelta, timezone
+        beijing = timezone(timedelta(hours=8))
+        now = datetime.now(beijing)
+        ref_today = now.date().isoformat()
+        ref_month = now.strftime("%Y-%m")
+        self._codex_cost_roots()
+        code, out, err = self.both("codex-cost", "--today", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["today"], ref_today)
+        self.assertEqual(report["month"], ref_month)
+        for d in report["days"]:
+            self.assertEqual(d["date"], ref_today,
+                             "--today 只应命中今天: %s" % d["date"])
 
     def test_codex_evidence_title_lookup(self):
         """`session_index.jsonl` 标题 join 差分（py==rs 逐字节，both() 兜底）：

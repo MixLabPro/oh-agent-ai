@@ -152,6 +152,9 @@ longContext，见 `scripts/skill_vitals/codex_cost.py` ↔ `src/codex_cost.rs`�
   推进 `observed_at`、不抹限额（fold 与 merge 同语义，Py↔Rust 两侧，见
   `codex_usage.rs` 的 `combine_plan`）。订阅套餐时仪表盘把美元重标价成「按量标价」
   （账单 = 套餐固定费），而不是伪造一个余额数字。
+- **视图语义（2026-08）**：缺省 = 当前自然月（北京口径，与 DSH state 层一致），
+  `--today` = 只看今天（过滤键 = 北京 YYYY-MM-DD），`--month all` = 全部月份，
+  全量不再是缺省。输出契约带 `today` 字段，仪表盘热力图用它高亮「今」格。
 
 注意 `speed` 对 **DSH** 仍是「别加」：DSH 没有 `service_tier` 事件（实测 35,411
 事件零命中），快档是不同模型（`deepseek-v4-flash`），价差已被模型名捕获。
