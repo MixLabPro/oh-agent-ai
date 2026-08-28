@@ -1337,7 +1337,7 @@ behaviour is the golden corpus, and the golden corpus speaks only DSH.
 | **P1 ✅** | `evidence` module in `skill-vitals-core`: `CanonicalSession`, `Signal`, `Observed<T>`, `Provenance`, `CoverageCounts`, `RuleSpec`, `RuleOutcome` | Zero behaviour change — nothing consumes it yet. Landed in `crates/skill-vitals-core/src/evidence.rs`: all §2–§12 types plus `AggregateProvenance::for_window`, `CoverageCounts`/`Coverage` ratios, and the §12 no-host-identifier self-check, 12 unit tests. 15/15 goldens byte-identical before/after (nothing calls it yet) |
 | **P2 ✅** | `crates/skill-vitals-core/src/dsh_evidence.rs`: a plain function (`build_dsh_evidence`, **not a trait** — see `CanonicalSession`'s own doc comment and `ARCHITECTURE.md` §4.2) that folds `src/dsh.rs`'s already-extracted `execution_events`/`usage_events` into a `CanonicalSession` (Signal/Coverage counted per §13's DSH column; the 3 rows §13 doesn't cover — `SandboxPolicy`/`UserPrompts`/`UserCorrections` — are left `Unavailable`, not fabricated), bundled with the raw events (`CanonicalSession` alone has no event-payload field); plus `reverse_project`, a temporary bridge back to today's `behavior.rs` input shape | **Byte-identical `behavior --json` output**, proven three ways: `cargo test` (154 core + 137 binary), `SKILL_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (the real Python↔Rust differential — `golden/*.json` covers the unrelated `scan` command, not this), and a manual before/after diff on `fixtures/dsh/behavior.jsonl`. `reverse_project` is deleted when P3 completes |
 | **P3 ✅ (all 5 groups)** | Migrate rules one family per PR: read Signals, declare `requires`, goldens unchanged. Order: ① command/path (SV601–610) ② cost fold ③ duration ④ trajectory ⑤ skill / subagent / compaction / waste | See §17.1a for what actually landed per group. `reverse_project` is retained (not deleted) — see note at the end of §17.1a |
-| **P4** | Codex adapter | Chosen second not for coverage breadth — §14.1 shows it lacks tool-call duration, approvals, and hooks — but because it is the only host that emits **two incompatible formats without declaring which**. If the model absorbs both Codex modes without structural change, it is sound |
+| **P4 ✅** | Codex adapter | Chosen second not for coverage breadth — §14.1 shows it lacks tool-call duration, approvals, and hooks — but because it is the only host that emits **two incompatible formats without declaring which**. If the model absorbs both Codex modes without structural change, it is sound. See §17.1c for what actually landed: **sound — zero structural change to the shared type layer** (`shared_type_layer_has_no_host_identifiers_in_code` stayed green throughout; §13's Codex Legacy + Paginated columns are absorbed by one flat type→Signal table in `derive_coverage`) |
 | **P4.5** | Schema-drift sentinel for `RolloutItem` (§14.4) | CI fails on upstream persistence-policy change |
 | **P5** | Claude Code adapter | First real use of `Provenance::Derived` (turn boundaries) and `Linearization` (message tree) |
 | **P6** | WorkBuddy adapter | First real use of `unavailable`, `LossKind::Hashed`, `Cost::Credits`, and non-JSONL I/O. **Last not because it is hardest, but because it is the strongest falsifier**: if `CanonicalSession` has quietly become a synonym for "event stream" during P1–P5, WorkBuddy exposes it immediately |
@@ -1448,6 +1448,65 @@ warnings`, full Python suite, `SKILL_VITALS_BIN=<rust> python3 -m unittest
 tests.test_cli_matrix` (byte-identical new keys both languages), wasm
 rebuilt + `dsh-client`'s full `npm test` (including `verify-host.mjs`) green
 against the new binary each time.
+
+### 17.1c P4 group log
+
+**P4 ✅** — the acceptance word was "sound": the shared type layer
+(`CanonicalSession`/`Coverage`/`RuleSpec`, host-neutral since P1) had to absorb
+Codex's **two incompatible formats without declaring which** — with zero
+structural change. It did: `shared_type_layer_has_no_host_identifiers_in_code`
+stayed green throughout, and no shared type in `evidence.rs` was touched.
+
+What landed, one new module per layer of the five-stage pipeline (§4.2):
+
+- **locate/shape/extract** — `src/codex_session.rs` ↔
+  `scripts/skill_vitals/adapters/codex_session.py`: read the JSONL, pull
+  provenance (`session_id` with §14.4 id back-fill, `history_mode`,
+  `cli_version`, `model` + `workspace_roots` from the latest non-empty
+  `turn_context`), keep every record in `items`. **No version gate** — §14.4:
+  Codex evolves behind compatibility shims and declares no version, so degrade
+  by existence probing only (empty → `missing-header`, non-JSON line →
+  `non-json`, unreadable → `file-missing`), never by a `SESSION_FORMAT_VERSION`
+  check that would misclassify a new record type as corruption.
+- **derive/coverage** — `crates/skill-vitals-core/src/codex_evidence.rs` ↔
+  `scripts/skill_vitals/codex_evidence.py`: **one flat type→Signal table**
+  (never a per-mode fork — real Paginated rollouts carry `task_started`/
+  `task_complete`, so mixed streams must just work). Both §13 Codex columns
+  live in the same table. `UsageAggregate` and `SkillInvocations` are
+  `derived(1)` markers — §14.3 says do NOT port Codex's own skill-invocation
+  heuristic, so it is marked Derived with an offline-inference-may-disagree
+  note instead of being re-implemented. The six unavailable signals
+  (`StepBoundaries`/`SandboxModes`/`SandboxPolicy`/`NetworkAccess`/
+  `UserPrompts`/`UserCorrections`) are left at zero and never inserted into the
+  `SignalSet` — the "zero = absent, don't fabricate" rule.
+- **`attempts`, first adapter to populate it** — unknown top-level `type`,
+  unknown `item.type`, or unknown `response_item.type` values are skipped and
+  recorded as `SourceAttempt { source_id: "codex.rollout.jsonl", kind:
+  LogFile, surface: SessionLog, available: false, error: … }` (§14.4
+  "skipped and recorded in attempts, never treated as corruption"). Real
+  corpus: 0 attempts.
+- **CLI** — `codex-evidence <rollout.jsonl> [--json]` subcommand (both
+  implementations), emitting `{host, session_id, history_mode, cli_version,
+  model, workspace_roots, signals, coverage (all 19 keys), attempts, notes}`.
+  No detectors run against Codex (the deferred detector-decoupling P3 named);
+  this is the observable "sound" proof, not findings.
+- **wasm deliberately untouched** — `audit_events` only ever returns `findings`
+  (`match_behavior` + `match_trajectory`); P4 touches neither, so
+  `skill-vitals-wasm`/`dsh-client` need no rebuild.
+
+Verified: `cargo test` (202 binary + core, incl. `codex_evidence.rs` +
+`codex_session.rs` unit tests), `cargo clippy -D warnings`, full Python suite
+(705, incl. 17 new characterization tests pinning the pure functions and the
+ClawHub packaging allowlist now admitting the two new modules), and
+`SKILL_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (73
+tests, incl. the new `test_codex_evidence_legacy`/`_paginated` byte-for-byte
+differentials). Manual: `codex-evidence` on real rollouts of **both** modes —
+Legacy (`0.147.0-alpha.1.2`: 10 signals, `Compaction` measured, `FileMutations`
+all `lossy` from `patch_apply_end`) and Paginated (`0.149.0-alpha.4.1`:
+9 signals, 0 attempts, mixed-stream `TurnBoundaries` measured) — byte-identical
+Python↔Rust on both. Fixtures under `fixtures/codex/` are synthetic and
+self-verifying (`build_codex_fixture.py` re-asserts the exact §13 coverage on
+every build), so the mapping table can't silently drift.
 
 ### 17.1 Tests
 

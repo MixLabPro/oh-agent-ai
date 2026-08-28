@@ -24,6 +24,7 @@ from pathlib import Path
 
 from skill_vitals import __version__
 from skill_vitals import behavior as behavior_module
+from skill_vitals import codex_evidence as codex_evidence_module
 from skill_vitals import cost as cost_module
 from skill_vitals.doctor import _doctor_snapshot, diagnose, render_doctor, render_gate
 from skill_vitals.explain import render_explain
@@ -293,6 +294,56 @@ def main():
         sys.exit(2)
 
 
+def _dash(v):
+    """`codex-evidence` 人读呈现的空值占位：None / 非字符串 → 长破折号（与
+    Rust `render_codex_evidence` 的 `dash` 闭包同一语义——JSON null 和缺键在
+    Python 里都读成 None，在 Rust 里都是 `Some(_)` → "—"，结果一致）。"""
+    return v if isinstance(v, str) else "—"
+
+
+def _render_codex_evidence(out):
+    """`codex-evidence` 的人读呈现——从 `codex_evidence_json` 输出的同一个
+    dict 上读（形状唯一来源），Rust 侧 `main.rs::render_codex_evidence` 逐字节
+    对齐这一份。19 个全零的 unavailable 信号不在人读视图里制造噪音，JSON 里
+    才是全量。"""
+    roots = out.get("workspace_roots")
+    roots_text = ", ".join(r for r in roots if isinstance(r, str)) if isinstance(roots, list) else ""
+    signals = [s for s in (out.get("signals") or []) if isinstance(s, str)]
+
+    parts = []
+    parts.append("host: codex\n")
+    parts.append("session: %s\n" % _dash(out.get("session_id")))
+    parts.append("history_mode: %s\n" % _dash(out.get("history_mode")))
+    parts.append("cli_version: %s\n" % _dash(out.get("cli_version")))
+    parts.append("model: %s\n" % _dash(out.get("model")))
+    parts.append("workspace_roots: %s\n" % (roots_text or "—"))
+    parts.append("signals: %s\n" % ", ".join(signals))
+    parts.append("\n")
+    cov = out.get("coverage")
+    if isinstance(cov, dict):
+        for name in signals:
+            c = cov.get(name)
+            if not isinstance(c, dict):
+                continue
+            m = c.get("measured")
+            m = m if isinstance(m, int) and not isinstance(m, bool) else 0
+            d = c.get("derived")
+            d = d if isinstance(d, int) and not isinstance(d, bool) else 0
+            l = c.get("lossy")
+            l = l if isinstance(l, int) and not isinstance(l, bool) else 0
+            u = c.get("unmetered")
+            u = u if isinstance(u, int) and not isinstance(u, bool) else 0
+            parts.append("  %-20s measured=%d derived=%d lossy=%d unmetered=%d\n"
+                         % (name, m, d, l, u))
+    parts.append("\n")
+    attempts = out.get("attempts")
+    notes = out.get("notes")
+    parts.append("attempts: %d    notes: %d\n" %
+                 (len(attempts) if isinstance(attempts, list) else 0,
+                  len(notes) if isinstance(notes, list) else 0))
+    return "".join(parts)
+
+
 def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", action="version",
@@ -386,6 +437,17 @@ def _main():
                                 "(tool calls / turns / steps / approvals / hooks)")
     p_dur.add_argument("session_log", help="Path to the DSH session JSONL log (file or directory)")
     p_dur.add_argument("--json", help="Write duration audit JSON to FILE; use - for stdout")
+    # P4（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：Codex rollout → CanonicalSession
+    # 的 "sound" 证明。输出 §13 coverage，不是 findings——Codex 还没有 SV601–614
+    # 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--host
+    # codex` 是安装时探针的表面，与这个子命令无关（命名冲突见
+    # adapters/codex_session.py 顶部注释）。
+    p_codex = sub.add_parser("codex-evidence",
+                             help="Audit a Codex rollout log into a CanonicalSession "
+                                  "with §13 coverage (P4 'sound' proof)")
+    p_codex.add_argument("session_log",
+                         help="Path to the Codex rollout JSONL log")
+    p_codex.add_argument("--json", help="Write coverage JSON to FILE; use - for stdout")
     # ──── M3: 跨会话聚合层（v1.x.x）── 三个新子命令 ─────────────────
     # oneline：单次审计 → oneline.json（覆盖）+ today.json / month.json（合并累加）。
     # 与 behavior 复用同一份 audit_session_log，但额外调 hour_buckets 把折叠
@@ -596,6 +658,47 @@ def _main():
             for row in timed[:5]:
                 name = row["tool_name"] or "(unknown)"
                 print("  %s — %dms (%s)" % (name, row["duration_ms"], row["load_status"]))
+        return
+
+    # P4（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：Codex rollout → CanonicalSession
+    # 的 "sound" 证明。输出 §13 coverage，不是 findings——Codex 还没有 SV601–614
+    # 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--host
+    # codex` 是安装时探针的表面，与这个子命令无关（命名冲突见
+    # adapters/codex_session.py 顶部注释）。与 Rust 侧 main.rs 的 CodexEvidence
+    # 子命令同一种结构（独立子命令 + --json 输出同一份 core 结果 + 人读呈现）。
+    if getattr(args, "cmd", None) == "codex-evidence":
+        from skill_vitals.adapters import codex_session
+        parsed = codex_session.read_codex_session_log(args.session_log)
+        if isinstance(parsed.get("degraded"), str):
+            print("session log unavailable: unreadable, malformed, or empty",
+                  file=sys.stderr)
+            sys.exit(2)
+        items = parsed["items"] or []
+        session_id = parsed.get("session_id")
+        if session_id is None:
+            # §14.4 back-fill：session_meta 缺席时退回文件名，保证 session 永远
+            # 可指认（与 behavior 的 dsh session_id 同款兜底）。
+            session_id = Path(args.session_log).stem
+        evidence = codex_evidence_module.build_codex_evidence(
+            items, session_id, parsed.get("history_mode"),
+            parsed.get("cli_version"), parsed.get("workspace_roots") or [],
+            parsed.get("model"))
+        if args.json:
+            text = json.dumps(codex_evidence_module.codex_evidence_json(evidence),
+                              ensure_ascii=False, indent=2)
+            if args.json == "-":
+                print(text)
+            else:
+                try:
+                    Path(args.json).write_text(text, encoding="utf-8")
+                except OSError:
+                    print("failed to write %s" % args.json, file=sys.stderr)
+                    sys.exit(2)
+                print("Wrote %s: %d signals" % (args.json,
+                                                len(evidence["canonical"]["signals"])))
+            return
+        print(_render_codex_evidence(
+            codex_evidence_module.codex_evidence_json(evidence)), end="")
         return
 
     # ──── M3 oneline handler ──────────────────────────────────────

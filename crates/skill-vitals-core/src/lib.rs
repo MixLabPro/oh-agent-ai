@@ -7,6 +7,7 @@
 //! never read a file.
 
 pub mod behavior;
+pub mod codex_evidence;
 pub mod compaction;
 pub mod dsh_evidence;
 pub mod duration;

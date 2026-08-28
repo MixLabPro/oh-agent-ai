@@ -12,6 +12,7 @@
 mod analysis;
 mod behavior;
 mod codex;
+mod codex_session;
 mod cost;
 mod openclaw;
 mod overlap;
@@ -343,6 +344,19 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Audit a Codex rollout log into a CanonicalSession with §13 coverage
+    /// (P4 "sound" proof — Legacy + Paginated fold into the shared 19-signal model).
+    ///
+    /// Emits coverage JSON, not findings: Codex has no SV601-614 detectors yet
+    /// (detector decoupling is the deferred later phase). `--host codex` is the
+    /// install-time probe surface and is unrelated to this subcommand.
+    CodexEvidence {
+        /// Path to the Codex rollout JSONL log (file or directory)
+        session_log: PathBuf,
+        /// Write coverage JSON to FILE; use - for stdout
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+    },
 }
 
 /// 探测「扫描器自身所在的 skill 目录」。
@@ -433,6 +447,65 @@ pub(crate) fn b(v: &Value, k: &str) -> bool {
 }
 pub(crate) fn chars(v: &Value, k: &str) -> usize {
     v.get(k).and_then(|x| x.as_str()).map_or(0, |x| x.chars().count())
+}
+
+/// `codex-evidence` 的人读呈现——从 `codex_evidence_json` 输出的同一个 Value
+/// 上读（形状唯一来源），Python 侧 `cli.py` 的 codex-evidence handler 逐字节
+/// 对齐这一份。
+fn render_codex_evidence(out: &Value) -> String {
+    let dash = |v: Option<&Value>| match v {
+        Some(Value::String(s)) => s.clone(),
+        Some(_) => "—".to_string(),
+        None => "—".to_string(),
+    };
+    let roots: String = out
+        .get("workspace_roots")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "—".to_string());
+    let signals: Vec<&str> = out
+        .get("signals")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut s = String::new();
+    s.push_str(&format!("host: {}\n", dash(Some(&Value::String("codex".into())))));
+    s.push_str(&format!("session: {}\n", dash(out.get("session_id"))));
+    s.push_str(&format!("history_mode: {}\n", dash(out.get("history_mode"))));
+    s.push_str(&format!("cli_version: {}\n", dash(out.get("cli_version"))));
+    s.push_str(&format!("model: {}\n", dash(out.get("model"))));
+    s.push_str(&format!("workspace_roots: {roots}\n"));
+    s.push_str(&format!("signals: {}\n", signals.join(", ")));
+    s.push('\n');
+    // 逐条列出「有覆盖」的信号（也就是 signals 数组里的那些）——19 个全零的
+    // unavailable 信号不在人读视图里制造噪音，JSON 里才是全量。
+    if let Some(cov) = out.get("coverage").and_then(|v| v.as_object()) {
+        for name in &signals {
+            if let Some(c) = cov.get(*name) {
+                let (m, d, l, u) = (
+                    c.get("measured").and_then(|v| v.as_u64()).unwrap_or(0),
+                    c.get("derived").and_then(|v| v.as_u64()).unwrap_or(0),
+                    c.get("lossy").and_then(|v| v.as_u64()).unwrap_or(0),
+                    c.get("unmetered").and_then(|v| v.as_u64()).unwrap_or(0),
+                );
+                s.push_str(&format!("  {name:<20} measured={m} derived={d} lossy={l} unmetered={u}\n"));
+            }
+        }
+    }
+    s.push('\n');
+    s.push_str(&format!(
+        "attempts: {}    notes: {}\n",
+        out.get("attempts").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        out.get("notes").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+    ));
+    s
 }
 
 fn main() {
@@ -633,6 +706,67 @@ fn main() {
                 println!("  {name} — {ms}ms ({status})");
             }
         }
+        return;
+    }
+
+    // P4（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：Codex rollout → CanonicalSession
+    // 的 "sound" 证明。输出 §13 coverage，不是 findings——Codex 还没有 SV601–614
+    // 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--host codex`
+    // 是安装时探针的表面，与这个子命令无关（命名冲突见 codex_session.rs 顶部注释）。
+    if let Some(Cmd::CodexEvidence { session_log, rows_json }) = &args.cmd {
+        let parsed = codex_session::read_codex_session_log(session_log);
+        if parsed.get("degraded").and_then(|v| v.as_str()).is_some() {
+            eprintln!("session log unavailable: unreadable, malformed, or empty");
+            std::process::exit(2);
+        }
+        let items: Vec<Value> = parsed
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let session_id = parsed
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            // §14.4 back-fill：session_meta 缺席时退回文件名，保证 session 永远
+            // 可指认（与 behavior 的 dsh session_id 同款兜底）。
+            .unwrap_or_else(|| {
+                session_log
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string()
+            });
+        let history_mode = parsed.get("history_mode").and_then(|v| v.as_str()).map(str::to_owned);
+        let cli_version = parsed.get("cli_version").and_then(|v| v.as_str()).map(str::to_owned);
+        let model = parsed.get("model").and_then(|v| v.as_str()).map(str::to_owned);
+        let workspace_roots: Vec<String> = parsed
+            .get("workspace_roots")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|r| r.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default();
+        let evidence = skill_vitals_core::codex_evidence::build_codex_evidence(
+            items, session_id, history_mode, cli_version, workspace_roots, model,
+        );
+        if let Some(path) = rows_json {
+            let out = skill_vitals_core::codex_evidence::codex_evidence_json(&evidence);
+            let text = serde_json::to_string_pretty(&out).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                let n = out
+                    .get("signals")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                println!("Wrote {}: {} signals", path.display(), n);
+            }
+            return;
+        }
+        print!("{}", render_codex_evidence(&skill_vitals_core::codex_evidence::codex_evidence_json(&evidence)));
         return;
     }
 

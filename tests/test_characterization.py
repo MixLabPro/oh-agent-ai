@@ -51,6 +51,8 @@ from skill_vitals.duration import (  # noqa: E402
     tool_call_durations, turn_durations, step_durations, approval_latencies, hook_executions,
     duration_coverage,
 )
+from skill_vitals.codex_evidence import codex_evidence_json, derive_coverage  # noqa: E402
+from skill_vitals.adapters.codex_session import parse_codex_session_log  # noqa: E402
 
 
 class TestEstTokens(unittest.TestCase):
@@ -2556,3 +2558,261 @@ class TestPeakSlotWeekday(unittest.TestCase):
             ms = int((dt - datetime.datetime(1970, 1, 1)).total_seconds()) * 1000 - BJ * 1000
             ref = datetime.datetime.utcfromtimestamp(ms / 1000 + BJ).weekday()
             self.assertEqual(_beijing_weekday(ms), ref, "%d 年算错" % year)
+
+
+# ──────────────────────────── P4 Codex ────────────────────────────
+# 这些期望值对应 Rust 侧 `codex_session.rs` / `codex_evidence.rs` 的
+# `#[cfg(test)]`，两边的数字必须一致（差分门 both() 兜底的是子命令输出，
+# 这里是纯函数层的逐个数字钉死）。
+
+def _cx_meta(mode="legacy", cli="0.146.0", sid="s1"):
+    return {"type": "session_meta", "timestamp": "2026-07-25T11:19:35Z",
+            "payload": {"session_id": sid, "id": sid, "history_mode": mode,
+                        "cli_version": cli}}
+
+
+def _cx_turn(model="gpt-5.6-sol", roots=("/repo",)):
+    return {"type": "turn_context", "timestamp": "2026-07-25T11:19:36Z",
+            "payload": {"model": model, "workspace_roots": list(roots),
+                        "approval_policy": "on-request"}}
+
+
+def _cx_event(event_type, extra=None):
+    payload = {"type": event_type, "turn_id": "t1"}
+    if extra:
+        payload.update(extra)
+    return {"type": "event_msg", "timestamp": 0, "payload": payload}
+
+
+def _cx_item(item):
+    return {"type": "event_msg", "timestamp": 0,
+            "payload": {"type": "item_completed", "turn_id": "t1", "item": item}}
+
+
+def _cx_response(response_type):
+    return {"type": "response_item", "timestamp": 0, "payload": {"type": response_type}}
+
+
+class TestCodexSessionParse(unittest.TestCase):
+    """`parse_codex_session_log` 的 provenance 抽取——字段路径来自真实语料
+    （session_meta 的 model 恒 null，model 只从 turn_context 取）。"""
+
+    def test_provenance_from_meta_and_turn(self):
+        text = "\n".join(json.dumps(x) for x in [
+            _cx_meta("legacy", "0.146.0-alpha.3.1", "s1"),
+            _cx_turn("gpt-5.6-sol", ("/repo",)),
+            _cx_event("task_started"),
+            {"type": "future_record", "timestamp": 0, "payload": {}},
+        ]) + "\n"
+        parsed = parse_codex_session_log(text)
+        self.assertEqual(parsed["session_id"], "s1")
+        self.assertEqual(parsed["history_mode"], "legacy")
+        self.assertEqual(parsed["cli_version"], "0.146.0-alpha.3.1")
+        self.assertEqual(parsed["model"], "gpt-5.6-sol")
+        self.assertEqual(parsed["workspace_roots"], ["/repo"])
+        self.assertFalse(parsed["degraded"])
+        # 未知记录类型原样保留，解析器不判损坏（derive_coverage 才认）。
+        self.assertEqual(len(parsed["items"]), 4)
+        self.assertEqual(parsed["items"][3]["type"], "future_record")
+
+    def test_model_and_roots_take_latest_turn_context(self):
+        text = "\n".join(json.dumps(x) for x in [
+            _cx_meta("paginated", "0.149.0-alpha.4", "s1"),
+            _cx_turn("gpt-5.6-sol", ("/old",)),
+            _cx_turn("gpt-5.6-pro", ("/repo", "/data")),
+        ]) + "\n"
+        parsed = parse_codex_session_log(text)
+        self.assertEqual(parsed["model"], "gpt-5.6-pro")
+        self.assertEqual(parsed["workspace_roots"], ["/repo", "/data"])
+        self.assertEqual(parsed["history_mode"], "paginated")
+
+    def test_empty_is_missing_header(self):
+        parsed = parse_codex_session_log("")
+        self.assertEqual(parsed["degraded"], "missing-header")
+        self.assertIsNone(parsed["items"], "降级时 items 必须保持 None，不是空列表")
+
+    def test_non_json_mid_file_degrades_not_zero(self):
+        # 必须逐行拼——`"garbage line"` 经 json.dumps 会变成合法 JSON 字符串，
+        # 只有裸行 `garbage line` 才会让 json.loads 抛错触发降级。
+        text = (json.dumps(_cx_meta()) + "\n" + json.dumps(_cx_event("task_started"))
+                + "\n" + "garbage line\n")
+        parsed = parse_codex_session_log(text)
+        self.assertEqual(parsed["degraded"], "non-json")
+        self.assertIsNone(parsed["items"])
+
+    def test_no_session_meta_is_not_corruption(self):
+        # §14.4：只靠存在性探测降级。有行、可解析、但没有 session_meta 不算
+        # 损坏——provenance 如实给 None，items 照常收。
+        parsed = parse_codex_session_log(json.dumps(_cx_event("task_started")) + "\n")
+        self.assertFalse(parsed["degraded"])
+        self.assertIsNone(parsed["session_id"])
+        self.assertEqual(len(parsed["items"]), 1)
+
+    def test_session_id_backfills_from_id_when_session_id_missing(self):
+        meta = _cx_meta()
+        del meta["payload"]["session_id"]
+        parsed = parse_codex_session_log(json.dumps(meta) + "\n")
+        self.assertEqual(parsed["session_id"], "s1")
+
+    def test_session_meta_wholesale_overwrites_on_repeat(self):
+        # Rust 是整体替换：后一条 session_meta 缺 history_mode 会把前一条的
+        # 值重置成 None——Python 的 `payload.get(...) or ...` 惯用写法会漏掉
+        # 这个语义，必须显式判 isinstance。
+        meta2 = _cx_meta()
+        del meta2["payload"]["history_mode"]
+        text = "\n".join(json.dumps(x) for x in [_cx_meta("legacy"), meta2]) + "\n"
+        parsed = parse_codex_session_log(text)
+        self.assertIsNone(parsed["history_mode"])
+
+
+class TestCodexCoverage(unittest.TestCase):
+    """`derive_coverage` 的映射表——逐条对应 §13 的 Codex 两列。每个期望值
+    都是数字，不是范围（Rust `codex_evidence.rs` 的 `#[cfg(test)]` 钉同一批）。"""
+
+    def _signals(self, items):
+        signals, coverage, _unknown = derive_coverage(items)
+        return signals, coverage
+
+    def test_legacy_vocabulary_counts(self):
+        items = [
+            _cx_event("task_started"),
+            _cx_event("mcp_tool_call_end"),
+            _cx_event("web_search_end"),
+            _cx_response("custom_tool_call"),
+            _cx_response("custom_tool_call_output"),
+            _cx_event("patch_apply_end"),
+            _cx_event("context_compacted"),
+            _cx_event("sub_agent_activity"),
+            _cx_event("thread_settings_applied", {"thread_settings": {"approval_policy": "Never"}}),
+            _cx_event("token_count", {"info": {"model_context_window": 128000}}),
+            _cx_event("task_complete"),
+            _cx_turn(),  # turn_context 顶层也带 approval_policy
+        ]
+        signals, cov = self._signals(items)
+        self.assertEqual(cov["ToolCalls"]["measured"], 3)
+        self.assertEqual(cov["ToolResults"]["measured"], 1)
+        self.assertEqual(cov["TurnBoundaries"]["measured"], 2)
+        self.assertEqual(cov["FileMutations"]["lossy"], 1)
+        self.assertEqual(cov["FileMutations"]["measured"], 0, "patch_apply_end 只进 lossy 桶")
+        self.assertEqual(cov["Compaction"]["measured"], 1)
+        self.assertEqual(cov["SubagentSpawns"]["measured"], 1)
+        self.assertEqual(cov["ApprovalPolicy"]["measured"], 2, "thread_settings + turn_context")
+        self.assertEqual(cov["Usage"]["measured"], 1)
+        self.assertEqual(cov["ContextWindow"]["measured"], 1)
+        self.assertEqual(cov["UsageAggregate"]["derived"], 1)
+        self.assertEqual(cov["SkillInvocations"]["derived"], 1)
+        # Paginated-only 的信号全零、不进 signals：
+        self.assertEqual(cov["Hooks"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertNotIn("Hooks", signals)
+        self.assertEqual(cov["ApprovalDecisions"]["measured"], 0)
+
+    def test_paginated_vocabulary_counts(self):
+        items = [
+            _cx_item({"type": "CommandExecution", "duration": 1234, "stdout": "hi"}),
+            _cx_item({"type": "McpToolCall"}),
+            _cx_item({"type": "DynamicToolCall"}),
+            _cx_item({"type": "FileChange", "auto_approved": True}),
+            _cx_item({"type": "SubAgentActivity", "agent_thread_id": "a"}),
+            _cx_item({"type": "ContextCompaction"}),
+            _cx_item({"type": "HookPrompt"}),
+            _cx_response("function_call"),
+            _cx_response("function_call_output"),
+            _cx_turn("gpt-5.6-pro", ("/repo", "/data")),
+        ]
+        signals, cov = self._signals(items)
+        self.assertEqual(cov["ToolCalls"]["measured"], 4, "CommandExecution + Mcp + Dynamic + function_call")
+        self.assertEqual(cov["ToolResults"]["measured"], 2, "CommandExecution + function_call_output")
+        self.assertEqual(cov["FileMutations"]["measured"], 1, "FileChange 进 measured 桶，不是 lossy")
+        self.assertEqual(cov["ApprovalDecisions"]["measured"], 1, "FileChange.auto_approved")
+        self.assertEqual(cov["Hooks"]["measured"], 1)
+        self.assertEqual(cov["Compaction"]["measured"], 1)
+        self.assertEqual(cov["SubagentSpawns"]["measured"], 1)
+        self.assertIn("Hooks", signals)
+        self.assertIn("ApprovalDecisions", signals)
+
+    def test_file_change_without_auto_approved_is_not_approval_evidence(self):
+        # 真实语料里 FileChange 全都不带 auto_approved（n=60）——不能因此把
+        # ApprovalDecisions 误判成有覆盖。
+        items = [_cx_item({"type": "FileChange", "status": "applied"})]
+        signals, cov = self._signals(items)
+        self.assertEqual(cov["ApprovalDecisions"]["measured"], 0)
+        self.assertNotIn("ApprovalDecisions", signals)
+        self.assertEqual(cov["FileMutations"]["measured"], 1)
+
+    def test_unavailable_signals_are_zero_and_not_in_signal_set(self):
+        items = [_cx_event("token_count", {"info": {"model_context_window": 128000}})]
+        signals, cov = self._signals(items)
+        for name in ("StepBoundaries", "SandboxModes", "SandboxPolicy",
+                     "NetworkAccess", "UserPrompts", "UserCorrections"):
+            self.assertEqual(cov[name], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0},
+                             "%s 应 unavailable（全零、不进 signals）" % name)
+            self.assertNotIn(name, signals)
+
+    def test_unknown_types_are_reported_sorted_and_deduped(self):
+        items = [
+            _cx_event("brand_new_event"),
+            _cx_event("brand_new_event"),  # 去重
+            _cx_item({"type": "BrandNewItem"}),
+            _cx_response("brand_new_response"),
+            {"type": "totally_new_top_level", "timestamp": 0, "payload": {}},
+        ]
+        _signals, _cov, unknown = derive_coverage(items)
+        self.assertEqual(len(unknown), 4)
+        self.assertEqual(unknown, sorted(unknown), "报错按字典序排序，跨语言字节一致")
+        self.assertTrue(any("brand_new_event" in u for u in unknown))
+        self.assertTrue(any("BrandNewItem" in u for u in unknown))
+
+    def test_known_non_signal_items_are_not_unknown(self):
+        # agent_reasoning / user_message / world_state 是"认识但恰好不喂信号"的
+        # 高频条目——绝不能进 attempts。
+        items = [
+            _cx_event("agent_reasoning", {"content": "thinking"}),
+            _cx_event("user_message", {"content": "hi"}),
+            _cx_response("reasoning"),
+            {"type": "world_state", "timestamp": 0, "payload": {}},
+        ]
+        _signals, _cov, unknown = derive_coverage(items)
+        self.assertEqual(unknown, [])
+
+    def test_no_usage_evidence_leaves_usage_and_derived_markers_zero(self):
+        _signals, cov, _unknown = derive_coverage([_cx_event("task_started")])
+        self.assertEqual(cov["Usage"]["measured"], 0)
+        self.assertEqual(cov["UsageAggregate"]["derived"], 0)
+        self.assertEqual(cov["ContextWindow"]["measured"], 0)
+        self.assertEqual(cov["SkillInvocations"]["derived"], 0)
+
+
+class TestCodexEvidenceJson(unittest.TestCase):
+    """`codex_evidence_json` 的输出形状——19 个信号键全量、signals 按
+    ALL_SIGNALS 序、attempts/notes 序列化。与 Rust `codex_evidence_json`
+    同一个形状（差分门 both() 在子命令层再兜底一次字节相等）。"""
+
+    def _build(self, items):
+        from skill_vitals.codex_evidence import build_codex_evidence
+        evidence = build_codex_evidence(items, "s1", "legacy", "0.146.0",
+                                        ["/repo"], "gpt-5.6-sol")
+        return codex_evidence_json(evidence)
+
+    def test_all_19_signals_appear_in_coverage(self):
+        out = self._build([_cx_event("mcp_tool_call_end")])
+        self.assertEqual(out["host"], "codex")
+        self.assertEqual(out["session_id"], "s1")
+        self.assertEqual(out["history_mode"], "legacy")
+        self.assertEqual(len(out["coverage"]), 19)
+        self.assertEqual(out["coverage"]["ToolCalls"],
+                         {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0})
+
+    def test_derived_markers_serialize_with_presence_note(self):
+        out = self._build([_cx_item({"type": "CommandExecution", "duration": 1})])
+        self.assertIn("SkillInvocations", out["signals"])
+        self.assertEqual(out["coverage"]["SkillInvocations"]["derived"], 1)
+        self.assertEqual(len(out["notes"]), 1)
+        self.assertIn("detect_implicit_skill_invocation_for_command", out["notes"][0])
+
+    def test_unknown_types_serialize_as_attempts_not_notes(self):
+        out = self._build([_cx_event("brand_new_event")])
+        self.assertEqual(len(out["attempts"]), 1)
+        self.assertEqual(out["attempts"][0]["available"], False)
+        self.assertEqual(out["attempts"][0]["source_id"], "codex.rollout.jsonl")
+        self.assertIn("brand_new_event", out["attempts"][0]["error"])
+        self.assertEqual(out["notes"], [], "未知类型记 attempts，不记 notes")

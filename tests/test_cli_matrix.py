@@ -869,6 +869,121 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("No duration data found", out)
 
+    # ── P4: codex-evidence（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）────────
+    # 差分门 both() 兜底逐字节一致；这里另外断言 legacy vs paginated 的
+    # coverage **不同**（§17.1 "two rows, not one"）——这是 P4 "sound" 证明的
+    # 观察面：一个共享类型层吸收两种词表，不需要结构性改动。
+
+    def _codex_evidence(self, log):
+        code, out, err = self.both("codex-evidence", str(log), "--json", "-")
+        self.assertEqual(code, 0)
+        return json.loads(out)
+
+    def test_codex_evidence_legacy(self):
+        """Legacy rollout → §13 Legacy 列的覆盖：patch_apply_end 进 lossy 桶、
+        token_count 进 Usage + ContextWindow、Paginated-only 的 Hooks /
+        ApprovalDecisions 保持全零且不进 SignalSet。"""
+        report = self._codex_evidence(ROOT / "fixtures" / "codex" / "legacy.jsonl")
+        self.assertEqual(report["history_mode"], "legacy")
+        self.assertEqual(report["cli_version"], "0.146.0-alpha.3.1")
+        self.assertEqual(report["model"], "gpt-5.6-sol")
+        self.assertEqual(report["workspace_roots"], ["/Users/alice/repo"])
+        cov = report["coverage"]
+        self.assertEqual(cov["ToolCalls"], {"measured": 3, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["TurnBoundaries"], {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["FileMutations"], {"measured": 0, "derived": 0, "lossy": 1, "unmetered": 0},
+                         "Legacy 的 patch_apply_end 只进 lossy 桶")
+        self.assertEqual(cov["UsageAggregate"], {"measured": 0, "derived": 1, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["SkillInvocations"], {"measured": 0, "derived": 1, "lossy": 0, "unmetered": 0})
+        # Paginated-only 信号在 Legacy 里必须全零、不在 signals 里：
+        self.assertEqual(cov["Hooks"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["ApprovalDecisions"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertNotIn("Hooks", report["signals"])
+        self.assertEqual(report["attempts"], [], "认识的条目不记 attempts")
+        self.assertEqual(len(report["notes"]), 1, "SkillInvocations 是 derived，必须带 §14.3 说明")
+
+    def test_codex_evidence_paginated(self):
+        """Paginated rollout → §13 Paginated 列的覆盖：CommandExecution 同时喂
+        ToolCalls + ToolResults、FileChange.auto_approved 喂 ApprovalDecisions、
+        HookPrompt 喂 Hooks——这些是 Legacy 列给不了的。"""
+        report = self._codex_evidence(ROOT / "fixtures" / "codex" / "paginated.jsonl")
+        self.assertEqual(report["history_mode"], "paginated")
+        self.assertEqual(report["model"], "gpt-5.6-pro")
+        self.assertEqual(report["workspace_roots"], ["/Users/alice/repo", "/Users/alice/data"])
+        cov = report["coverage"]
+        self.assertEqual(cov["ToolCalls"], {"measured": 4, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["ToolResults"], {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["FileMutations"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0},
+                         "FileChange 进 measured 桶，不是 lossy")
+        self.assertEqual(cov["ApprovalDecisions"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["Hooks"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertIn("Hooks", report["signals"])
+        # Legacy-only 的 token_count/task_* 在 Paginated fixture 里没有：
+        self.assertEqual(cov["Usage"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["TurnBoundaries"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
+        # 两种 mode 的 coverage 必须不同（§17.1 "two rows, not one"）：
+        legacy = self._codex_evidence(ROOT / "fixtures" / "codex" / "legacy.jsonl")
+        self.assertNotEqual(legacy["signals"], report["signals"],
+                            "Legacy 与 Paginated 是 §13 的两列，coverage 必须不同")
+
+    def test_codex_evidence_unknown_types_land_in_attempts(self):
+        """§14.4：未知条目类型必须 "skipped and recorded in attempts, never
+        treated as corruption"——不能把整份日志判成畸形，退出码保持 0。"""
+        lines = [
+            {"timestamp": "2026-07-25T11:19:35Z", "type": "session_meta",
+             "payload": {"session_id": "s1", "id": "s1", "history_mode": "legacy",
+                         "cli_version": "0.146.0"}},
+            {"timestamp": "2026-07-25T11:19:36Z", "type": "event_msg",
+             "payload": {"type": "brand_new_event", "turn_id": "t1"}},
+            {"timestamp": "2026-07-25T11:19:37Z", "type": "event_msg",
+             "payload": {"type": "item_completed", "turn_id": "t1",
+                         "item": {"type": "BrandNewItem"}}},
+            {"timestamp": "2026-07-25T11:19:38Z", "type": "response_item",
+             "payload": {"type": "brand_new_response"}},
+            {"timestamp": "2026-07-25T11:19:39Z", "type": "totally_new_top_level",
+             "payload": {}},
+        ]
+        log = self.tmp / "unknown.jsonl"
+        log.write_text("\n".join(json.dumps(l) for l in lines) + "\n", encoding="utf-8")
+        report = self._codex_evidence(log)
+        self.assertEqual(len(report["attempts"]), 4)
+        errors = [a["error"] for a in report["attempts"]]
+        self.assertEqual(errors, sorted(errors), "attempts 报错按字典序排序，跨语言字节一致")
+        self.assertTrue(any("brand_new_event" in e for e in errors))
+        self.assertTrue(any("BrandNewItem" in e for e in errors))
+        self.assertTrue(any("brand_new_response" in e for e in errors))
+        self.assertTrue(any("totally_new_top_level" in e for e in errors))
+        self.assertTrue(all(not a["available"] for a in report["attempts"]))
+        self.assertEqual(report["session_id"], "s1", "日志没有被判成不可读")
+
+    def test_codex_evidence_human_output(self):
+        """人读格式差分（py==rs 逐字节，由 both() 兜底）：host/session 头 +
+        有覆盖信号的 coverage 行 + attempts/notes 计数。"""
+        log = ROOT / "fixtures" / "codex" / "legacy.jsonl"
+        code, out, err = self.both("codex-evidence", str(log))
+        self.assertEqual(code, 0)
+        self.assertIn("host: codex\n", out)
+        self.assertIn("history_mode: legacy\n", out)
+        self.assertIn("FileMutations        measured=0 derived=0 lossy=1 unmetered=0\n", out)
+        self.assertIn("attempts: 0    notes: 1\n", out)
+
+    def test_codex_evidence_missing_file_is_tool_error(self):
+        """文件缺失 → 两个实现都以 2 退出（工具错误，不是"有发现"），且 stderr
+        逐字节一致。这里不能走 both()——它把退出码 2 判成崩溃。"""
+        missing = self.tmp / "no-such-rollout.jsonl"
+        got = []
+        for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
+            r = subprocess.run(cmd + ["codex-evidence", str(missing), "--json", "-"],
+                               cwd=str(self.tmp / "workdir"),
+                               env=isolated_home_env(self.tmp),
+                               capture_output=True, text=True)
+            got.append((r.returncode, r.stdout, r.stderr))
+        self.assertEqual(got[0][0], got[1][0], "退出码不一致：py=%d rs=%d" % (got[0][0], got[1][0]))
+        self.assertEqual(got[0][0], 2, "缺失文件应当是工具错误（2）")
+        self.assertEqual(got[0][1], got[1][1], "stdout 不一致")
+        self.assertEqual(got[0][2], got[1][2], "stderr 不一致")
+        self.assertIn("session log unavailable", got[0][2])
+
     def test_bad_baseline_is_a_tool_error_in_both(self):
         """结构损坏的基线：Rust 曾静默把当前每个 skill 都报成新增。"""
         bad = self.tmp / "bad.json"
