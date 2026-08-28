@@ -152,8 +152,13 @@
     .panel-sub { color: var(--fg-muted); font-size: 12px; }
 
     /* ── 按模型明细表 ────────────────────────────────────────────── */
+    /* 窄屏下表格在容器内横向滚动，别把整页撑开（同 .heat-wrap 的模式——表是
+     * 10 列 nowrap，最小内容宽约 964px，~1016px 以下必然放不下；实测 900px
+     * 视口时整页 body 被撑到 1016px）。min-width 保证窄屏滚动而不是压扁列。 */
+    #model-table-root { overflow-x: auto; }
     table.model-table {
-      width: 100%; border-collapse: collapse; font: 13px var(--mono);
+      width: 100%; min-width: 720px; border-collapse: collapse;
+      font: 13px var(--mono);
     }
     table.model-table th, table.model-table td {
       padding: 8px 10px; text-align: right; white-space: nowrap;
