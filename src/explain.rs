@@ -184,9 +184,17 @@ pub fn funnel(sk: &Value, out: &Value, at_risk: &[String]) -> Vec<(String, Strin
     if !b(t, "available") {
         rows.push(("Triggered".into(), "unknown".into(), "this host does not expose trigger data".into()));
     } else if i(sk, "usage_count") > 0 {
-        rows.push(("Triggered".into(), "true".into(), format!(
-            "{} uses; most recent {}", i(sk, "usage_count"),
-            human_last_used(sk.get("last_used_days_ago").and_then(|v| v.as_f64())))));
+        // DSH 的 invoked/selected 只是名字列表、没有时间戳：有用过但不知新鲜度，
+        // 写「most recent never」就是自相矛盾。
+        let last = sk.get("last_used_days_ago").and_then(|v| v.as_f64());
+        if last.is_none() {
+            rows.push(("Triggered".into(), "true".into(), format!(
+                "{} uses; recency unknown", i(sk, "usage_count"))));
+        } else {
+            rows.push(("Triggered".into(), "true".into(), format!(
+                "{} uses; most recent {}", i(sk, "usage_count"),
+                human_last_used(last))));
+        }
     } else {
         let age = f(sk, "installed_days_ago");
         let gate = t.get("zombie_min_age_days").and_then(|v| v.as_i64()).unwrap_or(14);

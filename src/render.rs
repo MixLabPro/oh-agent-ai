@@ -80,6 +80,22 @@ pub fn human_last_used(days: Option<f64>) -> String {
     }
 }
 
+/// LAST USED 单元格文本：0 次是 never；有用过但没时间戳是 unknown。
+///
+/// DSH 的 invoked/selected 只是名字列表、没有时间戳，所以会出现「usage_count
+/// 非零但 last_used_days_ago 为 None」——此时写「never」就是自相矛盾（明明
+/// 用过却说从没被用过），写 unknown 才是诚实降级。Python 平行实现见
+/// `scripts/skill_vitals/lifecycle.py::last_used_text`。
+pub fn last_used_text(uses: i64, last: Option<f64>) -> String {
+    if uses == 0 {
+        return human_last_used(None);
+    }
+    match last {
+        None => "unknown".to_string(),
+        Some(_) => human_last_used(last),
+    }
+}
+
 pub struct ListOpts {
     pub unused: bool,
     pub shadowed: bool,
@@ -237,7 +253,7 @@ fn render_rows(out: &Value, o: &ListOpts, rows: &[Row]) -> String {
             r.status.unwrap_or("—"),
             r.uses.map(|v| v.to_string()).unwrap_or_else(|| "—".into()),
             if r.shown && trigger_available {
-                human_last_used(r.last)
+                last_used_text(r.uses.unwrap_or(0), r.last)
             } else {
                 "—".into()
             },
@@ -301,6 +317,16 @@ mod tests {
         // 有触发数但没时间戳：能说的只有「用过」
         let s = json!({"usage_count": 5});
         assert_eq!(lifecycle_status(&s, true, 14, 30), "occasional");
+    }
+
+    #[test]
+    fn last_used_cell_text_distinguishes_never_unknown_and_real() {
+        // 0 次 → never；有用过但没时间戳 → unknown（DSH 的 invoked/selected 只是
+        // 名字列表，此时写 never 就是自相矛盾）；有时间戳 → 人类可读的 ago。
+        assert_eq!(last_used_text(0, None), "never");
+        assert_eq!(last_used_text(0, Some(2.0)), "never"); // 0 次且带时间，仍按 0 次
+        assert_eq!(last_used_text(1, None), "unknown");
+        assert_eq!(last_used_text(1, Some(2.0)), "2d ago");
     }
 
     #[test]

@@ -125,6 +125,30 @@ def write_cost_log(base, name="cost.jsonl"):
     return p
 
 
+def write_dsh_session_log(base: Path, name="session.jsonl"):
+    """写一份带触发证据的 DSH 会话日志：目录发布 proj-only/shared-tool，随后
+    proj-only 被用户显式 `/<name>` 调用（invoked）、shared-tool 被模型自主选中
+    （selected）。host=dsh 的 per-skill usage_count 必须由这两个事件算出。
+    """
+    header = {"type": "session", "version": 0, "id": "s", "delegationDepth": 0}
+    events = [
+        {"type": "user/message", "seq": 1, "time": 1001,
+         "data": {"source": {"kind": "skill-catalog",
+                             "entries": [{"name": "proj-only", "description": "x"},
+                                         {"name": "shared-tool", "description": "y"}]}}},
+        # 用户显式 /proj-only → invoked
+        {"type": "user/message", "seq": 2, "time": 1002,
+         "data": {"source": {"kind": "skill-invocation", "name": "proj-only"}}},
+        # 模型自主 tool/call name="skill" → selected
+        {"type": "tool/call", "seq": 3, "time": 1003,
+         "data": {"name": "skill", "arguments": '{"name": "shared-tool"}'}},
+    ]
+    p = base / name
+    p.write_text(json.dumps(header) + "\n"
+                 + "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    return p
+
+
 @unittest.skipUnless(_BIN, "未设 SKILL_VITALS_BIN，跳过双实现比对")
 class CliMatrix(unittest.TestCase):
     """每个用例把同一条命令喂给两个实现，比 stdout / stderr / 退出码。"""
@@ -149,6 +173,11 @@ class CliMatrix(unittest.TestCase):
         for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
             env = isolated_home_env(self.tmp)
             env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("snap-" + tag))
+            # DSH 宿主扫描的会话日志证据走环境变量（golden_runner 同款注入）。
+            # 设了这个的用例是 DSH 扫描差分；没设的保持原样。
+            log = getattr(self, "dsh_session_log", None)
+            if log:
+                env["SKILL_VITALS_DSH_SESSION_LOG"] = str(log)
             r = subprocess.run(cmd + list(argv), cwd=str(self.tmp / "workdir"),
                                env=env, capture_output=True, text=True)
             got.append((r.returncode, _mask(r.stdout, self.tmp),
@@ -880,6 +909,71 @@ class CliMatrix(unittest.TestCase):
                     self.assertNotEqual(r.returncode, 2,
                                         "%s 工具自身出错：\n%s" % (tag, r.stderr))
                 self.assertEqual(codes[0], codes[1], "退出码不一致 host=%s" % h)
+
+
+class DshScanCountsSessionLogEvidence(CliMatrix):
+    """回归：host=dsh 的 per-skill usage_count 必须来自会话日志的 invoked+selected，
+    而不是 claude.json 的 skillUsage（那是另一个宿主——Claude Code——的账）。
+
+    缺陷原文：`explain proj-only --host dsh` 在会话日志明明记录了 proj-only 被
+    调用的情况下，报告里的 usage_count 仍是 0，漏斗打出
+    「STATUS NEVER TRIGGERED / zero lifetime triggers」——trigger_data 说用过、
+    skill 记录说没用，同一份报告自相矛盾。根因是 discovery 的 usage_count 只读
+    lookup_usage(claude.json)，从不看 dsh_evidence。
+
+    both() 保证 py==rs 逐字节（explain 的人读输出也进差分），这里再字面钉住
+    症状本身，防两个实现一起漂移。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        (self.tmp / "workdir").mkdir(parents=True, exist_ok=True)
+        # DSH 的项目 scope 根是 workdir/.dsh/skills（与 golden host-dsh-log 同款
+        # 布局）；会话日志里的目录/调用/选中都指向这两个 skill。
+        write_skill(self.tmp / "workdir" / ".dsh" / "skills", "proj-only",
+                    desc="project-scope skill the user invokes")
+        write_skill(self.tmp / "workdir" / ".dsh" / "skills", "shared-tool",
+                    desc="project-scope skill the model selects")
+        self.dsh_session_log = write_dsh_session_log(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_invoked_skill_is_not_never_triggered(self):
+        """会话日志证明 proj-only 被用户显式调用过，explain 就不得打 NEVER
+        TRIGGERED——这是缺陷的直接症状。"""
+        code, out, _ = self.both("explain", "proj-only", "--host", "dsh")
+        self.assertEqual(code, 0)
+        self.assertNotIn("NEVER TRIGGERED", out,
+                         "被调用的 skill 打成 NEVER TRIGGERED：\n%s" % out)
+        self.assertIn("✓ Triggered", out)
+        self.assertIn("1 uses; recency unknown", out)
+
+    def test_selected_skill_is_not_never_triggered(self):
+        """模型自主选中也算「用过」（never_triggered 是 never_selected ∩
+        never_invoked，两侧计数语义必须一致）。"""
+        code, out, _ = self.both("explain", "shared-tool", "--host", "dsh")
+        self.assertEqual(code, 0)
+        self.assertNotIn("NEVER TRIGGERED", out,
+                         "被模型选中的 skill 打成 NEVER TRIGGERED：\n%s" % out)
+        self.assertIn("✓ Triggered", out)
+
+    def test_usage_count_reflects_invoked_plus_selected(self):
+        """JSON 层面：usage_count = invoked + selected，last_used_days_ago 保持
+        None（invoked/selected 只是名字列表、没有时间戳，绝不伪造新鲜度）。"""
+        out_json = self.tmp / "scan.json"
+        code, _, _ = self.both("--host", "dsh", "--json", str(out_json))
+        self.assertEqual(code, 0)
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        by = {s["name"]: s for s in data["skills"]}
+        self.assertEqual(by["proj-only"]["usage_count"], 1)
+        self.assertEqual(by["shared-tool"]["usage_count"], 1)
+        self.assertIsNone(by["proj-only"]["last_used_days_ago"])
+        self.assertIsNone(by["shared-tool"]["last_used_days_ago"])
+        # 语料只有 proj-only/shared-tool 两个，且都被触发过一次——没有第三个
+        # skill 被凭空记一次（不变量 12：读不到就报读不到，不伪造 0 或非 0）
+        self.assertEqual(len([s for s in data["skills"]
+                              if s["usage_count"] > 0]), 2)
 
 
 if __name__ == "__main__":

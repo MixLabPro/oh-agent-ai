@@ -398,8 +398,9 @@ Rust 在 `src/inventory.rs`。模块移动不得改变下面四阶段的顺序�
 | 3. reconcile | 证据如何改写磁盘推断 | – | **additive** | **exclusive** | – | – | **historical** |
 | 4. facts | 报告里的自有字段 | `plugin_state` | `codex_runtime` | `openclaw_runtime` | `workbuddy_discovery` | – | `dsh_runtime` |
 
-`◇` dsh 一列是**设计，尚未实现**，排期见 [DSH_INTEGRATION.md](./DSH_INTEGRATION.md)。
-列在这里是因为它引入了 §4.1 的第三种 reconcile 语义，那条对既有宿主的表述也有影响。
+`◇` dsh 一列已实现：probe 用会话库 / 快照、reconcile 是 **historical**，见
+[DSH_INTEGRATION.md](./DSH_INTEGRATION.md) 与 §4.1 第三种语义。当初列在这里
+是因为它引入了 §4.1 的第三种 reconcile 语义，那条对既有宿主的表述也有影响。
 
 ## 4.1 reconcile 的两种语义，不能混
 
@@ -471,11 +472,15 @@ Last Used               ✓          –         –          –         –
 `*` 需运行时求证，探测失败时降为 `–`（**不是** `0`，见 §3.1）
 `†` 无可配置旋钮，用实测得到的回退值 8000
 
-**dsh 尚未列入上表**：适配器未实现，没有可声明的能力上限。实现后它的列会与
-其他宿主明显不同 —— `Description Budget` 恒为 `–`（DSH 无全局预算，改为逐条
-截断，是另一类发现），`Trigger Count` 与 `Last Used` 反而是 `✓`（会话库有精确
-记录，且能区分「用户显式调用」与「模型自主选中」，这是其他宿主都拿不到的一维）。
-详见 [DSH_INTEGRATION.md](./DSH_INTEGRATION.md)。
+dsh 已实现（见 [DSH_INTEGRATION.md](./DSH_INTEGRATION.md)），能力列与其他宿主
+明显不同 —— `Description Budget` 恒为 `–`（DSH 无全局预算，改为逐条截断，是
+另一类发现）；`Trigger Count` 为 `✓` 且多出一维：会话日志能区分「用户显式
+调用」（invoked）与「模型自主选中」（selected），这是其他宿主都拿不到的数据。
+`Last Used` 反而是 `–`：证据的 `invoked`/`selected` 只是名字列表、**不带时间戳**，
+`last_used_days_ago` 因此恒为 None——「有触发数但不知新鲜度」由 lifecycle 的
+occasional 表达，绝不伪造一个最近使用时间（与 §3.1「探测失败降为 – 而不是 0」
+同一条纪律）。将来想补全 Last Used，需让会话日志适配器在收集 invoked/selected
+时一并记录每条的时间。
 
 上表是**能力上限**，不是本次结果。每份报告都要打印这一次实际拿到了什么 ——
 `codex_runtime.available`、`openclaw_runtime[].available`、

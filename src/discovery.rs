@@ -587,6 +587,38 @@ pub fn scan_skill_dir(
     };
 
     let (hits, last_ms, matched_key) = lookup_usage(usage, &name, cls.namespace.as_deref());
+    // DSH 的触发证据不读 claude.json 的 skillUsage——那是另一个宿主（Claude Code）
+    // 的使用历史，与 DSH 的会话日志是两套账。日志里的 invoked（用户显式 `/<name>`）
+    // 与 selected（模型自主 tool/call 选中）才是本宿主的真实触发数。两者都算
+    // 「用过」：僵尸判定问的是「这个 skill 有没有产生过价值」，模型自主选中同样
+    // 说明它在起作用——analysis::trigger_dsh 的 never_triggered 正是
+    // never_selected ∩ never_invoked，两侧的计数语义必须一致。
+    //
+    // invoked/selected 只是名字列表、没有时间戳，所以 last_used_days_ago 保持
+    // None（「有触发数但不知新鲜度」由 lifecycle 的 occasional 表达，绝不伪造
+    // 最近使用时间）；usage_key_matched 同理为 None。
+    let (hits, last_ms, matched_key) = if host == "dsh"
+        && dsh_evidence.is_some_and(|ev| ev.get("degraded").and_then(|d| d.as_str()).is_none())
+    {
+        let count_trigger = |key: &str| {
+            dsh_evidence
+                .and_then(|ev| ev.get(key))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|x| x.as_str() == Some(name.as_str()))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        (
+            count_trigger("invoked") as i64 + count_trigger("selected") as i64,
+            None,
+            None,
+        )
+    } else {
+        (hits, last_ms, matched_key)
+    };
 
     // 装了多久。判定僵尸前必须看这个：装了一天的 skill 零触发说明不了任何事。
     let born = match (ctime_of(skill_dir), ctime_of(&md)) {

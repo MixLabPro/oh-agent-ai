@@ -9,7 +9,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::overlap::{overlap_pairs, OverlapOpts};
-use crate::render::{human_last_used, human_tokens, lifecycle_status, DEFAULT_DORMANT_DAYS};
+use crate::render::{human_tokens, last_used_text, lifecycle_status, DEFAULT_DORMANT_DAYS};
 use crate::util::{run_id, wrap};
 use crate::{b, f, i, s};
 
@@ -679,7 +679,8 @@ fn evidence_lines(d: &Value) -> Vec<String> {
             human_tokens(x.get("tier1_tokens").and_then(|v| v.as_i64())))).collect(),
         "SV202" => arr(&e, "skills").iter().take(5).map(|x| format!(
             "{}  {}  {} uses total", s(x, "name"),
-            human_last_used(x.get("last_used_days_ago").and_then(|v| v.as_f64())),
+            last_used_text(i(x, "usage_count"),
+                           x.get("last_used_days_ago").and_then(|v| v.as_f64())),
             i(x, "usage_count"))).collect(),
         "SV301" => arr(&e, "skills").iter().take(5).map(|x| format!(
             "{}  core {} / max {}  ({} lines)", s(x, "name"),

@@ -71,6 +71,21 @@ def human_last_used(days):
     return "%dd ago" % int(days)
 
 
+def last_used_text(uses, last):
+    """LAST USED 单元格文本：0 次是 never；有用过但没时间戳是 unknown。
+
+    DSH 的 invoked/selected 只是名字列表、没有时间戳，所以会出现「usage_count
+    非零但 last_used_days_ago 为 None」——此时写「never」就是自相矛盾（明明
+    用过却说从没被用过），写 unknown 才是诚实降级。Rust 平行实现见
+    `src/render.rs::last_used_text`。
+    """
+    if not uses:
+        return "never"
+    if last is None:
+        return "unknown"
+    return human_last_used(last)
+
+
 def render_list(out, args):
     """`list` 的呈现。回答「你到底看到了什么」。"""
     trigger_available = out["trigger_data"]["available"]
@@ -134,7 +149,7 @@ def render_list(out, args):
         print("%-*s  %-10s %-11s %6s  %-10s %7s %7s" % (
             w, r["name"], r["load"], r["status"] or "—",
             "—" if r["uses"] is None else r["uses"],
-            human_last_used(r["last"]) if (r["_shown"] and trigger_available) else "—",
+            last_used_text(r["uses"], r["last"]) if (r["_shown"] and trigger_available) else "—",
             human_tokens(r["core"]), human_tokens(r["max"])))
 
     loaded = sum(1 for r in rows if r["load"] == "loaded")

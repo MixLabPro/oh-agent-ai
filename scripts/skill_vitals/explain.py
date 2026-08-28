@@ -116,8 +116,15 @@ def funnel(s, out, budget_at_risk):
     if not t.get("available"):
         rows.append(("Triggered", "unknown", "this host does not expose trigger data"))
     elif (s.get("usage_count") or 0) > 0:
-        rows.append(("Triggered", "true", "%d uses; most recent %s"
-                     % (s["usage_count"], human_last_used(s.get("last_used_days_ago")))))
+        last = s.get("last_used_days_ago")
+        if last is None:
+            # DSH 的 invoked/selected 只是名字列表、没有时间戳：有用过但不知
+            # 新鲜度，写「most recent never」就是自相矛盾。
+            rows.append(("Triggered", "true", "%d uses; recency unknown"
+                         % s["usage_count"]))
+        else:
+            rows.append(("Triggered", "true", "%d uses; most recent %s"
+                         % (s["usage_count"], human_last_used(last))))
     else:
         age = s.get("installed_days_ago") or 0
         gate = t.get("zombie_min_age_days", ZOMBIE_MIN_AGE_DAYS)

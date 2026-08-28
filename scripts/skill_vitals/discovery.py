@@ -237,6 +237,24 @@ def scan_skill_dir(skill_dir: Path, host: str, enabled_plugins, usage, plugins_k
                 else:
                     loaded, reason = False, "dsh-not-in-catalog"
     hits, last_ms, matched_key = lookup_usage(usage, name, namespace)
+    if host == "dsh" and dsh_evidence and not dsh_evidence.get("degraded"):
+        # DSH 的触发证据不读 claude.json 的 skillUsage——那是另一个宿主（Claude
+        # Code）的使用历史，与 DSH 的会话日志是两套账。日志里的 invoked（用户
+        # 显式 `/<name>`）与 selected（模型自主 tool/call 选中）才是本宿主的真实
+        # 触发数。两者都算「用过」：僵尸判定问的是「这个 skill 有没有产生过价值」，
+        # 模型自主选中同样说明它在起作用——analysis._build_dsh_trigger 的
+        # never_triggered 正是 never_selected ∩ never_invoked，两侧的计数语义
+        # 必须一致，否则报告里 trigger_data 说「proj-only 用过一次」、skill 记录
+        # 却写「0 次」，explain 漏斗就自相矛盾。
+        #
+        # invoked/selected 只是名字列表、没有时间戳，所以 last_used_days_ago 保持
+        # None——「有触发数但不知新鲜度」由 lifecycle 的 occasional 表达，绝不伪造
+        # 一个最近使用时间；usage_key_matched 同理为 None，这里没有匹配 claude.json
+        # 的键。
+        hits = (dsh_evidence.get("invoked") or []).count(name) \
+            + (dsh_evidence.get("selected") or []).count(name)
+        last_ms = None
+        matched_key = None
 
     try:
         born = min(skill_dir.stat().st_ctime, skill_file.stat().st_ctime)

@@ -7,8 +7,8 @@ from . import __version__
 from .lifecycle import (
     DEFAULT_DORMANT_DAYS,
     ZOMBIE_MIN_AGE_DAYS,
-    human_last_used,
     human_tokens,
+    last_used_text,
     lifecycle_status,
 )
 from .overlap import DEFAULT_OVERLAP_MIN, overlap_pairs
@@ -575,7 +575,9 @@ def _doctor_evidence_lines(d):
             s["name"], s.get("installed_days_ago") or 0,
             human_tokens(s.get("tier1_tokens"))) for s in e["skills"][:5]]
     if code == "SV202":
-        return ["%s  %s  %d uses total" % (s["name"], human_last_used(s["last_used_days_ago"]),
+        return ["%s  %s  %d uses total" % (s["name"],
+                                      last_used_text(s["usage_count"],
+                                                     s["last_used_days_ago"]),
                                       s["usage_count"]) for s in e["skills"][:5]]
     if code == "SV301":
         return ["%s  core %s / max %s  (%d lines)" % (
