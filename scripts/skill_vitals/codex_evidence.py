@@ -348,17 +348,23 @@ def derive_coverage(items):
     return signals, coverage, unknown
 
 
-def build_codex_evidence(items, session_id, history_mode, cli_version,
+def build_codex_evidence(items, session_id, title, history_mode, cli_version,
                          workspace_roots, model):
     """条目数组 → evidence 字典（"derive → coverage" 两段；"locate → shape →
     extract" 留在 `adapters/codex_session.py`）。与 Rust
-    `build_codex_evidence` 对齐：返回 `{"canonical", "items", "history_mode",
-    "cli_version"}`，其中 `canonical` 是 `CanonicalSession` 的等价字典。
+    `build_codex_evidence` 对齐：返回 `{"canonical", "items", "title",
+    "history_mode", "cli_version"}`，其中 `canonical` 是 `CanonicalSession` 的
+    等价字典。
 
     这是**第一条真的把 `attempts` 填起来**的适配器（DSH 的 attempts 一直是空
     列表）：未知条目类型记成 `{available: False, error: "unknown … type: …"}`
     ——§14.4 说 Codex 只能靠 existence probing 降级，"skipped and recorded in
     attempts, never treated as corruption"。
+
+    `title` 是 `session_index.jsonl` 查出的 `thread_name`（**Codex 专属
+    provenance**，与 `history_mode`/`cli_version` 同位——放 evidence 顶层，
+    不放 `canonical`，§12 铁律「宿主专属字段不进共享类型层」）。`None` 表示
+    索引缺失或该 session 不在索引里，绝不编造。
     """
     signals, coverage, unknown = derive_coverage(items)
     attempts = [{
@@ -391,6 +397,7 @@ def build_codex_evidence(items, session_id, history_mode, cli_version,
         "notes": notes,
     }
     return {"canonical": canonical, "items": items,
+            "title": title,
             "history_mode": history_mode, "cli_version": cli_version}
 
 
@@ -432,6 +439,7 @@ def codex_evidence_json(evidence):
     return {
         "host": "codex",
         "session_id": canonical["meta"]["session_id"],
+        "title": evidence["title"],
         "history_mode": evidence["history_mode"],
         "cli_version": evidence["cli_version"],
         "workspace_roots": canonical["meta"]["workspace_roots"],

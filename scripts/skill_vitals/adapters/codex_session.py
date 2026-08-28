@@ -160,8 +160,8 @@ def read_codex_session_log(path):
 # cc-trace 研究 §B 的漏读：Codex 把会话归档进 archived_sessions 后，只扫 live
 # 会静默漏掉归档会话的用量/成本（漏扫=漏成本，同一类「静默少算」事故）。
 # `~/.codex/history` 不在这里（probe_logs.py 的 legacy 诊断里才有，且真实语料
-# 里该目录不存在）；`session_index.jsonl` 在上层、不在任何根里，标题索引是
-# 单独的后续工作。
+# 里该目录不存在）；`session_index.jsonl` 在上层、不在任何根里，标题索引由
+# `parse_session_index`/`read_session_index` 单独读——它不属于任何会话根。
 CODEX_SESSION_ROOTS = (
     ("live", "sessions"),
     ("archived", "archived_sessions"),
@@ -211,3 +211,57 @@ def codex_session_roots_report(home=None):
             "total_bytes": total_bytes,
         })
     return {"host": "codex", "roots": roots}
+
+
+def parse_session_index(text):
+    """纯解析：把 `session_index.jsonl` 折成 `{id: thread_name}` 映射。与 Rust
+    `codex_session.rs::parse_session_index` 对齐（同一份 dict，键序是插入序，
+    字节一致靠两次实现按同一次遍历填充）。
+
+    索引的 `id` 键 = **逻辑 `payload.session_id`**（不是 rollout 文件名 UUID
+    `payload.id`）——实测本机 51 份 rollout：`payload.session_id` 命中索引
+    47/51，`payload.id` 只命中 21/51（恰是「主会话 id==session_id」那 21 份）。
+    `parse_codex_session_log` 抽出的 `session_id` 字段就是标题 join 键。
+
+    **只读、单行失败跳过、升级失败不报错**（cc-trace 的 `title_index.rs` 同款）：
+    malformed / 缺 id 或 thread_name / 非 string / trim 后为空的标题行直接跳过，
+    **绝不 abort 整个索引**。同一 id 可有多条（rename 后带 `(2)` 后缀），
+    后写覆盖前写（last-write-wins）——append-only，后写=更新。
+    """
+    index = {}
+    for line in split_lines(text):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get("id")
+        title = entry.get("thread_name")
+        if not isinstance(sid, str) or not isinstance(title, str):
+            continue
+        title = title.strip()
+        if not title:
+            continue
+        index[sid] = title
+    return index
+
+
+def read_session_index(home=None):
+    """读 `home/.codex/session_index.jsonl`，交给纯解析。文件缺失/不可读 →
+    空映射（**存在性探测，绝不报错**——标题是加分项，不是准入项，同
+    `codex_session_roots_report` 的缺席铁律）。`home` 默认 `Path.home()`（尊重
+    `HOME`，测试用 `isolated_home_env` 注入）。Rust 由 main.rs 解析
+    `HOME`/`USERPROFILE` 传入同一路径。
+    """
+    if home is None:
+        home = Path.home()
+    home = Path(home)
+    path = home / ".codex" / "session_index.jsonl"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    return parse_session_index(text)

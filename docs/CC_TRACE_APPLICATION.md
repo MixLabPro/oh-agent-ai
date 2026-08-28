@@ -170,10 +170,16 @@ cc-trace 的 CompactView、UsageDailyChart、QuotaProgress、HeroUI 风格、紧
    已因此得到独立背书。
 2. **B 拆成两件**：`session_index` 标题索引是纯新增、随下一次 Codex 适配器迭代带上；
    `archived_sessions` 是**覆盖完整性修复**（漏扫归档会话 = 漏成本），建议优先于标题。
-   **✅ `archived_sessions` 已落地（2026-08-28）**：`codex_session_roots_report` 成为
-   Codex 会话根集合的单一事实来源（live + archived 一起报告，存在性探测），
-   `codex-evidence --roots` 列出两个根的存在/数量/字节；`probe_logs.py` 的
-   `CANDIDATE_DIRS` 同步补上。标题索引仍待做。
+   **✅ 两件都已落地（2026-08-28）**：
+   - `archived_sessions`：`codex_session_roots_report` 成为 Codex 会话根集合的单一事实
+     来源（live + archived 一起报告，存在性探测），`codex-evidence --roots` 列出两个根
+     的存在/数量/字节；`probe_logs.py` 的 `CANDIDATE_DIRS` 同步补上。
+   - 标题索引：`parse_session_index`/`read_session_index` 读 `~/.codex/session_index.jsonl`
+     建 `{逻辑 session_id → thread_name}` 映射（实测 session_id 命中 47/51，rollout 文件
+     名 UUID 只命中 21/51——join 键必须用逻辑 id），`codex-evidence <rollout>` 输出新增
+     `title` 维度（索引缺失/不在索引 → null，存在性探测）。join 键**不是** cc-trace 用的
+     `payload.id`——cc-trace 按文件名索引纯展示，我们按逻辑会话 id 才能覆盖被恢复的
+     rollout（28/51 是 resume）。
 3. **F（额度维）** 先做产品决策；若做，`docs/额度领域模型.md` 是唯一事实来源。
 4. **C/D/E** 各自独立，等菜单栏（消费 `token_by_date_model` 折叠的 Tauri 工作）落地时
    一并评估——它们本质上是同一个「菜单栏要显示准确花费」的问题。D 是三件事：

@@ -483,6 +483,7 @@ fn render_codex_evidence(out: &Value) -> String {
     let mut s = String::new();
     s.push_str(&format!("host: {}\n", dash(Some(&Value::String("codex".into())))));
     s.push_str(&format!("session: {}\n", dash(out.get("session_id"))));
+    s.push_str(&format!("title: {}\n", dash(out.get("title"))));
     s.push_str(&format!("history_mode: {}\n", dash(out.get("history_mode"))));
     s.push_str(&format!("cli_version: {}\n", dash(out.get("cli_version"))));
     s.push_str(&format!("model: {}\n", dash(out.get("model"))));
@@ -797,8 +798,15 @@ fn main() {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|r| r.as_str().map(str::to_owned)).collect())
             .unwrap_or_default();
+        // 标题从 ~/.codex/session_index.jsonl 查（索引缺失/不在索引 → None，存在性
+        // 探测，绝不报错）。`session_id` 这里还要移进 build，先借引用查表。
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        let session_index = codex_session::read_session_index(Path::new(&home));
+        let title = session_index.get(&session_id).cloned();
         let evidence = skill_vitals_core::codex_evidence::build_codex_evidence(
-            items, session_id, history_mode, cli_version, workspace_roots, model,
+            items, session_id, title, history_mode, cli_version, workspace_roots, model,
         );
         if let Some(path) = rows_json {
             let out = skill_vitals_core::codex_evidence::codex_evidence_json(&evidence);

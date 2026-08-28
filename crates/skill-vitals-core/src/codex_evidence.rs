@@ -36,11 +36,15 @@ use crate::evidence::{
 };
 
 /// Codex 适配器一次审计的产物：`CanonicalSession` + 它派生自的原始条目。
-/// `history_mode`/`cli_version` 是 provenance（`session_meta` 里读出来的），
-/// 只进报告不参与计数。
+/// `history_mode`/`cli_version`/`title` 是 provenance（`session_meta` 里读出来的
+/// 前两个；`title` 是 `~/.codex/session_index.jsonl` 查出的 `thread_name`），
+/// 只进报告不参与计数。`title` 是 **Codex 专属字段**，所以放 evidence 顶层而
+/// 不是 `CanonicalSession`（§12 铁律「宿主专属字段不进共享类型层」）——与
+/// `history_mode`/`cli_version` 同一个位置。
 pub struct CodexEvidence {
     pub canonical: CanonicalSession,
     pub items: Vec<Value>,
+    pub title: Option<String>,
     pub history_mode: Option<String>,
     pub cli_version: Option<String>,
 }
@@ -437,6 +441,7 @@ const ALL_SIGNALS: &[Signal] = &[
 pub fn build_codex_evidence(
     items: Vec<Value>,
     session_id: String,
+    title: Option<String>,
     history_mode: Option<String>,
     cli_version: Option<String>,
     workspace_roots: Vec<String>,
@@ -479,7 +484,7 @@ pub fn build_codex_evidence(
         attempts,
         notes,
     };
-    CodexEvidence { canonical, items, history_mode, cli_version }
+    CodexEvidence { canonical, items, title, history_mode, cli_version }
 }
 
 /// `CodexEvidence` → `codex-evidence --json` 的输出形状。`RuleOutcome` /
@@ -532,6 +537,7 @@ pub fn codex_evidence_json(evidence: &CodexEvidence) -> Value {
     serde_json::json!({
         "host": "codex",
         "session_id": evidence.canonical.meta.session_id,
+        "title": evidence.title,
         "history_mode": evidence.history_mode,
         "cli_version": evidence.cli_version,
         "workspace_roots": evidence.canonical.meta.workspace_roots,
@@ -580,8 +586,9 @@ mod tests {
     }
 
     fn build(items: Vec<Value>) -> CodexEvidence {
-        build_codex_evidence(items, "s1".into(), Some("legacy".into()), Some("0.146.0".into()),
-            vec!["/repo".into()], Some("gpt-5.3-codex".into()))
+        // title 在真实调用里由 session_index 查表注入；单测默认 None（无索引态）。
+        build_codex_evidence(items, "s1".into(), None, Some("legacy".into()),
+            Some("0.146.0".into()), vec!["/repo".into()], Some("gpt-5.3-codex".into()))
     }
 
     #[test]
@@ -728,11 +735,23 @@ mod tests {
     }
 
     #[test]
+    fn evidence_json_title_none_is_null_and_some_is_surfaced() {
+        // 无索引态 → title 是 null（存在性探测，绝不编造）；有索引 → thread_name。
+        let none = build(vec![]);
+        assert!(codex_evidence_json(&none)["title"].is_null());
+        let with_title = build_codex_evidence(
+            vec![], "s1".into(), Some("评估项目添加UI".into()), Some("legacy".into()),
+            Some("0.146.0".into()), vec!["/repo".into()], Some("gpt-5.3-codex".into()));
+        assert_eq!(codex_evidence_json(&with_title)["title"], "评估项目添加UI");
+    }
+
+    #[test]
     fn evidence_json_has_stable_shape_and_no_unknown_signal_keys() {
         let evidence = build(vec![legacy_item("mcp_tool_call_end", json!({}))]);
         let out = codex_evidence_json(&evidence);
         assert_eq!(out["host"], "codex");
         assert_eq!(out["session_id"], "s1");
+        assert!(out["title"].is_null(), "build() 默认无标题");
         assert_eq!(out["history_mode"], "legacy");
         assert_eq!(out["cli_version"], "0.146.0");
         assert_eq!(out["workspace_roots"], json!(["/repo"]));

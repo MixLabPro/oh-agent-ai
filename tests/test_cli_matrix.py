@@ -1028,6 +1028,42 @@ class CliMatrix(unittest.TestCase):
         self.assertIn("(absent)", out)
         self.assertIn("archived", out)
 
+    def test_codex_evidence_title_lookup(self):
+        """`session_index.jsonl` 标题 join 差分（py==rs 逐字节，both() 兜底）：
+        索引的 id 键 = **逻辑 session_id**（fixture 是 codex-legacy-0001，不是
+        rollout 文件名 UUID）；同 id 后写覆盖（last-write-wins）；malformed/空白
+        行跳过（cc-trace title_index 同款）。HOME 由 both() 注入 self.tmp。"""
+        (self.tmp / ".codex").mkdir(parents=True)
+        (self.tmp / ".codex" / "session_index.jsonl").write_text(
+            'not json\n'
+            '{"id":"codex-legacy-0001","thread_name":"旧标题"}\n'
+            '{"id":"codex-legacy-0001","thread_name":"  修复登录 模块  "}\n'
+            '{"id":"unrelated","thread_name":"别人的会话"}\n',
+            encoding="utf-8")
+        log = ROOT / "fixtures" / "codex" / "legacy.jsonl"
+
+        code, out, err = self.both("codex-evidence", str(log), "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["session_id"], "codex-legacy-0001")
+        self.assertEqual(report["title"], "修复登录 模块", "同 id 后写覆盖 + trim")
+
+        code, out, err = self.both("codex-evidence", str(log))
+        self.assertEqual(code, 0)
+        self.assertIn("title: 修复登录 模块\n", out, "人读视图带标题行")
+
+    def test_codex_evidence_title_absent_without_index(self):
+        """索引缺失（本机曾不存在）/ 会话不在索引 → title 是 null。存在性探测，
+        绝不编造、绝不报错（标题是加分项不是准入项）。"""
+        log = ROOT / "fixtures" / "codex" / "legacy.jsonl"
+        code, out, err = self.both("codex-evidence", str(log), "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertIsNone(report["title"])
+        code, out, err = self.both("codex-evidence", str(log))
+        self.assertEqual(code, 0)
+        self.assertIn("title: —\n", out)
+
     def test_bad_baseline_is_a_tool_error_in_both(self):
         """结构损坏的基线：Rust 曾静默把当前每个 skill 都报成新增。"""
         bad = self.tmp / "bad.json"

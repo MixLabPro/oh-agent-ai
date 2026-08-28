@@ -20,6 +20,7 @@
 //! 是 core `codex_evidence::derive_coverage` 的职责（它把未知类型记进
 //! `attempts`，§14.4 "skipped and recorded in attempts, never treated as
 //! corruption"）。解析器只负责「把 JSONL 逐行读进来 + 抽出 provenance 字段」。
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
@@ -189,6 +190,57 @@ pub fn codex_session_roots_report(home: &Path) -> Value {
         }));
     }
     json!({ "host": "codex", "roots": roots })
+}
+
+/// 纯解析：把 `session_index.jsonl` 折成 `{id: thread_name}` 映射。与 Python
+/// `scripts/skill_vitals/adapters/codex_session.py::parse_session_index` 对齐。
+///
+/// 索引的 `id` 键 = **逻辑 `payload.session_id`**（不是 rollout 文件名 UUID
+/// `payload.id`）——实测本机 51 份 rollout：`payload.session_id` 命中索引
+/// 47/51，`payload.id` 只命中 21/51（恰是「主会话 id==session_id」那 21 份）。
+/// `parse_codex_session_log` 抽出的 `session_id` 字段就是标题 join 键。
+///
+/// **只读、单行失败跳过、升级失败不报错**（cc-trace 的 `title_index.rs` 同款）：
+/// malformed / 缺 id 或 thread_name / 非 string / trim 后为空的标题行直接跳过，
+/// **绝不 abort 整个索引**。同一 id 可有多条（rename 后带 `(2)` 后缀），
+/// 后写覆盖前写（last-write-wins）——append-only，后写=更新。
+pub fn parse_session_index(text: &str) -> HashMap<String, String> {
+    let mut index = HashMap::new();
+    for line in split_lines(text) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let (Some(id), Some(title)) = (
+            entry.get("id").and_then(|v| v.as_str()),
+            entry.get("thread_name").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        let title = title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        index.insert(id.to_string(), title.to_string());
+    }
+    index
+}
+
+/// 读 `home/.codex/session_index.jsonl`，交给纯解析。文件缺失/不可读 → 空映射
+/// （**存在性探测，绝不报错**——标题是加分项，不是准入项，同
+/// `codex_session_roots_report` 的缺席铁律）。`home` 由 main.rs 从
+/// `HOME`/`USERPROFILE` 解析传入（Python 侧 `read_session_index(home=None)`
+/// 默认 `Path.home()`，同一路径）。
+pub fn read_session_index(home: &Path) -> HashMap<String, String> {
+    let bytes = match std::fs::read(home.join(".codex").join("session_index.jsonl")) {
+        Ok(b) => b,
+        Err(_) => return HashMap::new(),
+    };
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    parse_session_index(&text)
 }
 
 /// `codex-evidence` 子命令直接收路径参数（与 behavior/duration-audit 同款），不
@@ -381,7 +433,8 @@ mod tests {
     fn roots_report_ignores_non_jsonl_files() {
         // 根下的非 .jsonl 文件（.json、.txt 等）不计数。注意 `*.jsonl` 是后缀
         // 匹配，session_index.jsonl 这种也会被算进去——但标题索引在 sessions/
-        // 之外，不在任何根里，所以不会误计（它的问题由标题索引的后续工作处理）。
+        // 之外，不在任何根里，所以不会误计（标题索引由
+        // `parse_session_index`/`read_session_index` 单独读，不是根的一部分）。
         let home = temp_home("nonrollout");
         let live = home.join(".codex").join("sessions");
         std::fs::create_dir_all(&live).unwrap();
@@ -393,6 +446,66 @@ mod tests {
         let roots = v["roots"].as_array().unwrap();
         assert_eq!(roots[0]["file_count"], json!(1));
         assert_eq!(roots[0]["total_bytes"], json!(2));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn session_index_maps_id_to_trimmed_title() {
+        // 基础映射：id → 标题，标题 trim 掉首尾空白（cc-trace clean_title 同款）。
+        let text = "{\"id\":\"a\",\"thread_name\":\"  修复登录 模块  \"}\n\
+                    {\"id\":\"b\",\"thread_name\":\"分析项目\"}\n";
+        let index = parse_session_index(text);
+        assert_eq!(index.get("a").map(String::as_str), Some("修复登录 模块"));
+        assert_eq!(index.get("b").map(String::as_str), Some("分析项目"));
+        assert_eq!(index.len(), 2);
+    }
+
+    #[test]
+    fn session_index_last_write_wins_for_duplicate_id() {
+        // 同一 id 可有多条（rename 后带 `(2)` 后缀）；append-only，后写=更新。
+        let text = "{\"id\":\"a\",\"thread_name\":\"旧标题\"}\n\
+                    {\"id\":\"a\",\"thread_name\":\"新标题 (2)\"}\n";
+        let index = parse_session_index(text);
+        assert_eq!(index.get("a").map(String::as_str), Some("新标题 (2)"));
+        assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn session_index_skips_bad_lines_never_aborts() {
+        // 单行失败跳过、升级失败不报错（cc-trace title_index 同款）：malformed /
+        // 非 dict / 缺 id / 非 string / trim 后为空的标题行都不能 abort 整个索引。
+        let text = "not json\n\
+                    \"just a string\"\n\
+                    {\"thread_name\":\"没有 id\"}\n\
+                    {\"id\":42,\"thread_name\":\"id 非 string\"}\n\
+                    {\"id\":\"c\",\"thread_name\":42}\n\
+                    {\"id\":\"d\",\"thread_name\":\"   \"}\n\
+                    {\"id\":\"e\",\"thread_name\":\"有效\"}\n";
+        let index = parse_session_index(text);
+        assert_eq!(index.get("e").map(String::as_str), Some("有效"));
+        assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn read_session_index_missing_file_returns_empty_map() {
+        // 索引缺失是常态（本机曾不存在）——存在性探测，绝不报错。
+        let home = temp_home("noindex");
+        let index = read_session_index(&home);
+        assert!(index.is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn read_session_index_reads_file_under_dot_codex() {
+        let home = temp_home("readindex");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(
+            home.join(".codex").join("session_index.jsonl"),
+            "{\"id\":\"x\",\"thread_name\":\"标题\"}\n",
+        )
+        .unwrap();
+        let index = read_session_index(&home);
+        assert_eq!(index.get("x").map(String::as_str), Some("标题"));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

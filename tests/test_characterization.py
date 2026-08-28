@@ -53,7 +53,8 @@ from skill_vitals.duration import (  # noqa: E402
 )
 from skill_vitals.codex_evidence import codex_evidence_json, derive_coverage  # noqa: E402
 from skill_vitals.adapters.codex_session import (  # noqa: E402
-    codex_session_roots_report, parse_codex_session_log,
+    codex_session_roots_report, parse_codex_session_log, parse_session_index,
+    read_session_index,
 )
 
 
@@ -2789,9 +2790,9 @@ class TestCodexEvidenceJson(unittest.TestCase):
     ALL_SIGNALS 序、attempts/notes 序列化。与 Rust `codex_evidence_json`
     同一个形状（差分门 both() 在子命令层再兜底一次字节相等）。"""
 
-    def _build(self, items):
+    def _build(self, items, title=None):
         from skill_vitals.codex_evidence import build_codex_evidence
-        evidence = build_codex_evidence(items, "s1", "legacy", "0.146.0",
+        evidence = build_codex_evidence(items, "s1", title, "legacy", "0.146.0",
                                         ["/repo"], "gpt-5.6-sol")
         return codex_evidence_json(evidence)
 
@@ -2799,10 +2800,15 @@ class TestCodexEvidenceJson(unittest.TestCase):
         out = self._build([_cx_event("mcp_tool_call_end")])
         self.assertEqual(out["host"], "codex")
         self.assertEqual(out["session_id"], "s1")
+        self.assertIsNone(out["title"], "无索引态 → title 是 null，绝不编造")
         self.assertEqual(out["history_mode"], "legacy")
         self.assertEqual(len(out["coverage"]), 19)
         self.assertEqual(out["coverage"]["ToolCalls"],
                          {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0})
+
+    def test_title_from_index_is_surfaced(self):
+        out = self._build([], title="评估项目添加UI")
+        self.assertEqual(out["title"], "评估项目添加UI")
 
     def test_derived_markers_serialize_with_presence_note(self):
         out = self._build([_cx_item({"type": "CommandExecution", "duration": 1})])
@@ -2886,3 +2892,71 @@ class TestCodexSessionRoots(unittest.TestCase):
             self.assertEqual(report["roots"][0]["path"],
                              str(env_home / ".codex" / "sessions"))
             self.assertEqual(report["roots"][0]["exists"], False)
+
+
+class TestCodexSessionIndex(unittest.TestCase):
+    """`parse_session_index` / `read_session_index` 的精确值钉死——标题是 Codex
+    专属 provenance（`~/.codex/session_index.jsonl` 的 `thread_name`），join 键是
+    **逻辑 `payload.session_id`**（实测：session_id 命中索引 47/51，rollout
+    文件名 UUID `payload.id` 只命中 21/51）。与 Rust `codex_session.rs` 的
+    `#[cfg(test)]` 数字一致。"""
+
+    def test_maps_id_to_trimmed_title(self):
+        text = (
+            '{"id":"a","thread_name":"  修复登录 模块  "}\n'
+            '{"id":"b","thread_name":"分析项目"}\n'
+        )
+        index = parse_session_index(text)
+        self.assertEqual(index, {"a": "修复登录 模块", "b": "分析项目"})
+
+    def test_last_write_wins_for_duplicate_id(self):
+        # 同一 id 可有多条（rename 后带 `(2)` 后缀）；append-only，后写=更新。
+        text = (
+            '{"id":"a","thread_name":"旧标题"}\n'
+            '{"id":"a","thread_name":"新标题 (2)"}\n'
+        )
+        index = parse_session_index(text)
+        self.assertEqual(index, {"a": "新标题 (2)"})
+
+    def test_skips_bad_lines_never_aborts(self):
+        # 单行失败跳过、升级失败不报错（cc-trace title_index 同款）：malformed /
+        # 非 dict / 缺 id / 非 string / trim 后为空的标题行不能 abort 整个索引。
+        text = (
+            "not json\n"
+            '"just a string"\n'
+            '{"thread_name":"没有 id"}\n'
+            '{"id":42,"thread_name":"id 非 string"}\n'
+            '{"id":"c","thread_name":42}\n'
+            '{"id":"d","thread_name":"   "}\n'
+            '{"id":"e","thread_name":"有效"}\n'
+        )
+        index = parse_session_index(text)
+        self.assertEqual(index, {"e": "有效"})
+
+    def test_read_session_index_respects_home_and_missing_is_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            # 索引缺失是常态（本机曾不存在）——存在性探测，绝不报错。
+            self.assertEqual(read_session_index(home=home), {})
+            (home / ".codex").mkdir(parents=True)
+            (home / ".codex" / "session_index.jsonl").write_text(
+                '{"id":"x","thread_name":"标题"}\n', encoding="utf-8")
+            self.assertEqual(read_session_index(home=home), {"x": "标题"})
+
+    def test_read_session_index_defaults_to_home_env(self):
+        import os as _os
+        with tempfile.TemporaryDirectory() as tmp:
+            env_home = Path(tmp)
+            old = _os.environ.get("HOME")
+            _os.environ["HOME"] = str(env_home)
+            try:
+                self.assertEqual(read_session_index(), {})
+                (env_home / ".codex").mkdir(parents=True)
+                (env_home / ".codex" / "session_index.jsonl").write_text(
+                    '{"id":"y","thread_name":"评估项目添加UI"}\n', encoding="utf-8")
+                self.assertEqual(read_session_index(), {"y": "评估项目添加UI"})
+            finally:
+                if old is None:
+                    _os.environ.pop("HOME", None)
+                else:
+                    _os.environ["HOME"] = old

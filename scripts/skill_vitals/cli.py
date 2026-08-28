@@ -313,6 +313,7 @@ def _render_codex_evidence(out):
     parts = []
     parts.append("host: codex\n")
     parts.append("session: %s\n" % _dash(out.get("session_id")))
+    parts.append("title: %s\n" % _dash(out.get("title")))
     parts.append("history_mode: %s\n" % _dash(out.get("history_mode")))
     parts.append("cli_version: %s\n" % _dash(out.get("cli_version")))
     parts.append("model: %s\n" % _dash(out.get("model")))
@@ -729,8 +730,11 @@ def _main():
             # §14.4 back-fill：session_meta 缺席时退回文件名，保证 session 永远
             # 可指认（与 behavior 的 dsh session_id 同款兜底）。
             session_id = Path(args.session_log).stem
+        # 标题从 ~/.codex/session_index.jsonl 查（索引缺失/不在索引 → None，存在性
+        # 探测，绝不报错——与 read_session_index 的缺席铁律一致）。
+        title = codex_session.read_session_index().get(session_id)
         evidence = codex_evidence_module.build_codex_evidence(
-            items, session_id, parsed.get("history_mode"),
+            items, session_id, title, parsed.get("history_mode"),
             parsed.get("cli_version"), parsed.get("workspace_roots") or [],
             parsed.get("model"))
         if args.json:
