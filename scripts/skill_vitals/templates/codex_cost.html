@@ -1,0 +1,713 @@
+<!--
+================================================================================
+  Skill Vitals · Codex 成本仪表盘单文件模板（`codex-cost --html` 产出）
+================================================================================
+
+  这是 Codex 成本报告的可视化层。它**不**重新定义数据 schema——它只把
+  `codex_cost_report`（core `codex_usage` 折叠 + binary `codex_cost` 计价）已经
+  算好的结果渲染成卡片、明细表和热力图。**单一真相源是
+  `scripts/skill_vitals/codex_usage.py` + `codex_cost.py`（Rust 侧
+  crates/skill-vitals-core/src/codex_usage.rs + src/codex_cost.rs）**，本模板对其
+  schema 是「只读、只渲染、发现不符就报错」。任何字段含义的改动必须先回到
+  fold/计价两处，再回这里同步。
+
+  ── 数据契约（`--json` 输出的同一份 dict，由 CLI 注入）────────────────────────
+
+    {
+      host: "codex",  currency: "USD",
+      month: "2026-08" | null,              // null = 全部月份（未传 --month）
+      total_cost_usd: 123.45,               // 所有已计价模型的 USD 费用
+      total_tokens: {                       // 5 桶全局总量
+        uncached_input_tokens, output_tokens, cached_input_tokens,
+        cache_write_input_tokens, reasoning_output_tokens
+      },
+      per_model: {                          // 键序 = 折叠的模型首现序
+        "<model>": {
+          tokens: { 同上 5 桶 },
+          cost_usd: 12.34,
+          priced: true | false,             // false = 无价目（如 codex-auto-review）
+          speed: "standard"                 // 可能逗号连接多个（真实数据只有 standard）
+        }
+      },
+      days: [ { date: "2026-08-05", cost_usd: 1.23, tokens: 123456 }, ... ],  // 日期升序
+      unpriced_tokens: 0,                   // 无价目模型的 token 总量（诚实上报，不按 0 价冒充）
+      unaccounted_usage: [ { type, count, tokens_seen } ] | []   // 残差哨兵
+    }
+
+  **JS 不在这里算任何价格**——per_model/days 的 cost_usd 都是 server 已算好的
+  数，模板里再放一份价格公式就是第四份副本（同 calendar 的 fallback 教训）。JS
+  只做三件事：格式化数字、排热力色阶、画日历格子。
+
+  ── inline 策略（CLAUDE.md 的「no network · no upload」）──────────────────
+
+  所有 CSS / JS 都内联在本文件里。无 <link rel="stylesheet">、无 <script
+  src=...>、无 @font-face。文件里的所有数据来自 CLI 注入的
+  `<script id="skill-vitals-data-codex">` 块，浏览器不发任何请求。file:// 双击
+  即可渲染——这是唯一的数据路径，不需要 fetch / CORS。
+
+  ── 热力色阶 ────────────────────────────────────────────────────────────
+
+  token/费用分布是重尾的（一天很低、一天高几个数量级），线性映射会让低值格子
+  全是一种颜色看不出梯度，所以用 log10 压缩（同 calendar.html 的 colorFor）。
+================================================================================
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Skill Vitals · Codex 成本</title>
+  <style>
+    /* 与 calendar.html 同一套设计 token——成本仪表盘是观察面板，不抢戏 */
+    :root {
+      --bg: #0e1117;
+      --surface: #161b22;
+      --surface-2: #1c2128;
+      --border: #30363d;
+      --border-strong: #484f58;
+      --fg: #e6edf3;
+      --fg-muted: #8b949e;
+      --fg-dim: #6e7681;
+      --accent: #58a6ff;
+      --accent-soft: rgba(88, 166, 255, 0.12);
+      --warn: #d29922;
+      --warn-soft: rgba(210, 153, 34, 0.18);
+      --unpriced: #db6d28;
+      --unpriced-soft: rgba(219, 109, 40, 0.18);
+      --r: 8px;
+      --r-sm: 4px;
+      --s1: 4px;
+      --s2: 8px;
+      --s3: 12px;
+      --s4: 16px;
+      --s5: 24px;
+      --s6: 32px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+              "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei",
+              sans-serif;
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+              "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+    body { font: 14px/1.5 var(--font); min-height: 100vh; }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .shell {
+      max-width: 1480px;
+      margin: 0 auto;
+      padding: var(--s5) clamp(16px, 3vw, 40px) var(--s6);
+    }
+
+    header.topbar {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: var(--s4); margin-bottom: var(--s5); flex-wrap: wrap;
+    }
+    .title-block h1 {
+      font-size: 22px; font-weight: 600; letter-spacing: -0.02em;
+      margin: 0 0 4px;
+    }
+    .title-block .sub { color: var(--fg-muted); font-size: 13px; }
+    .title-block .sub code {
+      font: 12px/1 var(--mono); background: var(--surface-2);
+      padding: 2px 6px; border-radius: var(--r-sm); color: var(--accent);
+    }
+
+    /* ── summary 卡片 ─────────────────────────────────────────────── */
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: var(--s3); margin-bottom: var(--s5);
+    }
+    .summary .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); padding: var(--s4);
+    }
+    .summary .card .label {
+      font-size: 12px; color: var(--fg-muted);
+      margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .summary .card .value {
+      font: 600 22px/1.2 var(--mono); color: var(--fg);
+    }
+    .summary .card .value.small { font-size: 18px; }
+    .summary .card .note {
+      margin-top: 6px; font-size: 12px; color: var(--fg-dim);
+    }
+
+    /* ── 面板 ─────────────────────────────────────────────────────── */
+    .panel {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); padding: var(--s5);
+    }
+    .panel + .panel { margin-top: var(--s4); }
+    .panel-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: var(--s4); margin-bottom: var(--s4); flex-wrap: wrap;
+    }
+    .panel-title { margin: 0; font-size: 16px; font-weight: 600; }
+    .panel-sub { color: var(--fg-muted); font-size: 12px; }
+
+    /* ── 按模型明细表 ────────────────────────────────────────────── */
+    table.model-table {
+      width: 100%; border-collapse: collapse; font: 13px var(--mono);
+    }
+    table.model-table th, table.model-table td {
+      padding: 8px 10px; text-align: right; white-space: nowrap;
+      border-bottom: 1px solid var(--border);
+    }
+    table.model-table th {
+      font: 11px var(--font); color: var(--fg-muted); font-weight: 500;
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    table.model-table th:first-child, table.model-table td:first-child {
+      text-align: left;
+    }
+    table.model-table tbody tr:hover { background: rgba(88, 166, 255, 0.06); }
+    table.model-table td.model { font-weight: 600; color: var(--fg); }
+    table.model-table td.speed { color: var(--fg-muted); font-size: 12px; }
+    table.model-table td.cost { color: var(--accent); font-weight: 600; }
+    table.model-table td.unpriced { color: var(--unpriced); font-weight: 600; }
+    table.model-table tfoot td {
+      border-top: 2px solid var(--border-strong); font-weight: 600;
+    }
+
+    /* ── 每日热力图 ──────────────────────────────────────────────── */
+    /* 每周一行（.wrow = 7 列 grid），月份切换时插一行月标题——跨月份数据
+     * 也按真实日历排，不是简单地按序排条。 */
+    .heat-wrap { overflow-x: auto; }
+    .wrow {
+      display: grid; grid-template-columns: repeat(7, 1fr);
+      gap: 4px; margin-bottom: 4px;
+    }
+    .weekday-head { margin-top: var(--s3); margin-bottom: 6px; }
+    .weekday-head > div {
+      font-size: 11px; color: var(--fg-muted); text-align: center;
+      padding: 6px 0; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .month-title {
+      font: 600 13px var(--mono); color: var(--fg-muted);
+      margin: var(--s3) 0 8px;
+    }
+    .month-title:first-child { margin-top: 0; }
+    .day-cell {
+      min-height: 56px; background: var(--surface-2);
+      border: 1px solid transparent; border-radius: var(--r-sm);
+      padding: 6px 8px; cursor: default;
+      display: flex; flex-direction: column; justify-content: space-between;
+      transition: transform 0.12s ease, border-color 0.12s ease;
+    }
+    .day-cell:hover {
+      transform: translateY(-1px);
+      border-color: var(--accent); z-index: 2;
+    }
+    .day-cell.empty {
+      background: rgba(22, 27, 34, 0.3); border: 1px solid transparent;
+      opacity: 0.55; cursor: default;
+    }
+    .day-cell.empty:hover { transform: none; border-color: transparent; }
+    .day-cell.pad { background: transparent; border: none; cursor: default; }
+    .day-cell.pad:hover { transform: none; border-color: transparent; }
+    .day-cell .num { font: 700 13px var(--mono); color: var(--fg); }
+    .day-cell.empty .num { color: var(--fg-dim); font-weight: 400; }
+    .day-cell .amt { font: 500 12px var(--mono); color: var(--fg-muted); }
+    .day-cell .amt .cost { color: var(--accent); font-weight: 600; }
+
+    /* ── 状态 / 警告 ─────────────────────────────────────────────── */
+    #status {
+      padding: var(--s3) var(--s4); border-radius: var(--r);
+      background: var(--surface-2); border: 1px solid var(--border);
+      color: var(--fg-muted); font-size: 13px;
+      margin-bottom: var(--s4);
+    }
+    #status.err { border-color: var(--unpriced); color: var(--unpriced); }
+    .warn-banner {
+      margin-top: var(--s3); padding: var(--s3) var(--s4);
+      background: var(--warn-soft); border: 1px solid var(--warn);
+      border-radius: var(--r); color: var(--fg); font-size: 13px;
+    }
+    .unpriced-banner {
+      margin-top: var(--s3); padding: var(--s3) var(--s4);
+      background: var(--unpriced-soft); border: 1px solid var(--unpriced);
+      border-radius: var(--r); color: var(--fg); font-size: 13px;
+    }
+    .banner-note { color: var(--fg-dim); font-size: 12px; margin-top: 4px; }
+
+    /* ── tooltip ─────────────────────────────────────────────────── */
+    #tip {
+      position: fixed; pointer-events: none;
+      background: #0b0f15; border: 1px solid var(--border-strong);
+      border-radius: var(--r); padding: 10px 12px;
+      font: 12px var(--mono); color: var(--fg);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      max-width: 320px; opacity: 0; transition: opacity 0.08s ease;
+      z-index: 100;
+    }
+    #tip.show { opacity: 1; }
+    #tip .tip-title { font: 600 13px var(--font); margin-bottom: 6px; color: var(--accent); }
+    #tip .row { display: flex; justify-content: space-between; gap: 12px; padding: 1px 0; }
+    #tip .row .k { color: var(--fg-muted); }
+    #tip .row .v { color: var(--fg); }
+    #tip .sep { height: 1px; background: var(--border); margin: 6px 0; }
+
+    /* ── 响应式 ──────────────────────────────────────────────────── */
+    @media (max-width: 720px) {
+      .day-cell { min-height: 44px; padding: 4px; }
+      .day-cell .amt { font-size: 10px; }
+      table.model-table { font-size: 12px; }
+      table.model-table th, table.model-table td { padding: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="title-block">
+        <h1 id="page-title">Codex 成本</h1>
+        <div class="sub" id="sub-line">
+          host <code>codex</code> · currency <code>USD</code>
+        </div>
+      </div>
+    </header>
+
+    <div id="status" role="status">读取数据中……</div>
+
+    <section class="summary" id="summary" hidden>
+      <!-- 由 JS 注入 card -->
+    </section>
+
+    <section class="panel" id="model-panel" hidden>
+      <div class="panel-head">
+        <h2 class="panel-title">按模型明细</h2>
+        <div class="panel-sub">5 桶 token + USD 费用；无价目模型标 unpriced，token 计入 <code>unpriced_tokens</code></div>
+      </div>
+      <div id="model-table-root"></div>
+    </section>
+
+    <section class="panel" id="heat-panel" hidden>
+      <div class="panel-head">
+        <h2 class="panel-title">每日热力图</h2>
+        <div class="panel-sub">每格 = 当日总 cost（log 着色）· hover 看明细；无数据日留空</div>
+      </div>
+      <div class="heat-wrap">
+        <div class="wrow weekday-head" id="weekday-head"></div>
+        <div id="heatmap"></div>
+      </div>
+    </section>
+
+    <div id="extra"></div>
+  </div>
+
+  <div id="tip" role="tooltip" aria-hidden="true"></div>
+
+  <script>
+  /* ============================================================================
+   *  只渲染，不重算
+   *
+   *  本文件不折叠 token、不计算价格——per_model / days / total_cost_usd 全是
+   *  `codex_cost_report` 算好的数，这里只格式化、排色阶、画格子。三段：
+   *  load（读内联 JSON）→ render（卡片/表格/热力图）→ tooltip。
+   * ==========================================================================*/
+
+  "use strict";
+
+  var DATA = null;            // 解析后的 report dict
+  var TOKEN_FIELDS = [
+    "uncached_input_tokens", "output_tokens", "cached_input_tokens",
+    "cache_write_input_tokens", "reasoning_output_tokens"
+  ];
+
+  // ─── 数字 / 金额格式化（与 codex_cost.rs 的 format_number / format_usd 同 spec）──
+
+  function stripZero(s) {
+    s = s.replace(/0+$/, "").replace(/\.$/, "");
+    return s === "" ? "0" : s;
+  }
+  function formatNumber(n) {
+    if (n >= 1e9) return stripZero((n / 1e9).toFixed(1)) + "B";
+    if (n >= 1e6) return stripZero((n / 1e6).toFixed(1)) + "M";
+    if (n >= 1e3) return stripZero((n / 1e3).toFixed(1)) + "K";
+    return String(n);
+  }
+  function fmtUsd(v) {
+    if (v === 0) return "$0";
+    var s = (v >= 100) ? v.toFixed(1) : v.toFixed(2);
+    return "$" + stripZero(s);
+  }
+  function commas(n) { return Math.round(n).toLocaleString("en-US"); }
+  function shortNum(n) {
+    if (n < 1000) return String(n);
+    if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0) + "K";
+    if (n < 1e9) return (n / 1e6).toFixed(n < 1e7 ? 1 : 0) + "M";
+    return (n / 1e9).toFixed(1) + "B";
+  }
+  function sumTokens(tt) {
+    if (!tt) return 0;
+    return TOKEN_FIELDS.reduce(function(a, f) { return a + (tt[f] || 0); }, 0);
+  }
+
+  // ─── 数据加载 ────────────────────────────────────────────────────────────
+
+  function setStatus(msg, isErr) {
+    var el = document.getElementById("status");
+    el.textContent = msg;
+    el.classList.toggle("err", !!isErr);
+  }
+
+  function loadData() {
+    var el = document.getElementById("skill-vitals-data-codex");
+    if (!el || !el.textContent.trim()) {
+      setStatus("未找到内联数据（本文件应经 `skill-vitals codex-cost --html` 生成）", true);
+      return null;
+    }
+    try {
+      var d = JSON.parse(el.textContent);
+      if (typeof d.total_cost_usd !== "number" || typeof d.per_model !== "object") {
+        throw new Error("schema 不符：缺 total_cost_usd / per_model");
+      }
+      return d;
+    } catch (e) {
+      setStatus("内联 JSON 解析失败：" + e.message, true);
+      return null;
+    }
+  }
+
+  // ─── 渲染入口 ────────────────────────────────────────────────────────────
+
+  function render(d) {
+    DATA = d;
+    document.getElementById("status").hidden = true;
+
+    // 标题副行：host · currency · month（month 可能为 null = 全部月份）
+    var sub = "host <code>" + esc(d.host || "codex") + "</code>" +
+              " · currency <code>" + esc(d.currency || "USD") + "</code>";
+    if (d.month) sub += " · month <code>" + esc(d.month) + "</code>";
+    document.getElementById("sub-line").innerHTML = sub;
+    document.getElementById("page-title").textContent =
+      "Codex 成本" + (d.month ? " · " + d.month : "");
+
+    var hasData = Object.keys(d.per_model).length > 0 || d.days.length > 0;
+    if (!hasData) {
+      document.getElementById("summary").hidden = false;
+      renderSummary(d);
+      setStatus("暂无 token 可计价（空折叠）——最近没有可折叠的 rollout 会话。");
+      return;
+    }
+
+    document.getElementById("summary").hidden = false;
+    renderSummary(d);
+    document.getElementById("model-panel").hidden = false;
+    renderModelTable(d);
+    document.getElementById("heat-panel").hidden = false;
+    renderHeatmap(d);
+    renderExtra(d);
+  }
+
+  // ── summary 卡片 ───────────────────────────────────────────────────────
+
+  function renderSummary(d) {
+    var totalTok = sumTokens(d.total_tokens);
+    var modelNames = Object.keys(d.per_model);
+    var priced = 0;
+    modelNames.forEach(function(m) { if (d.per_model[m].priced) priced++; });
+    var activeDays = d.days.filter(function(x) { return x.tokens > 0; }).length;
+    var noteCost = d.month
+      ? ("USD · 已计价 " + priced + " / " + modelNames.length + " 模型")
+      : ("USD · 全部月份 · 已计价 " + priced + " / " + modelNames.length + " 模型");
+    var cards = [
+      { label: "总成本", value: fmtUsd(d.total_cost_usd), note: noteCost },
+      { label: "总 token", value: formatNumber(totalTok), note: "5 桶合计" },
+      { label: "模型数", value: String(modelNames.length),
+        note: priced + " 个已计价" },
+      { label: "有数据天数", value: activeDays + " / " + d.days.length,
+        note: "按 token > 0 计" },
+    ];
+    if (d.unpriced_tokens > 0) {
+      cards.push({
+        label: "未计价 token",
+        value: formatNumber(d.unpriced_tokens),
+        note: "无价目模型，成本不计入总额",
+      });
+    }
+    renderCards(cards);
+  }
+
+  function renderCards(cards) {
+    var root = document.getElementById("summary");
+    root.innerHTML = "";
+    cards.forEach(function(c) {
+      var div = document.createElement("div");
+      div.className = "card";
+      div.innerHTML =
+        '<div class="label">' + c.label + '</div>' +
+        '<div class="value">' + c.value + '</div>' +
+        (c.note ? '<div class="note">' + c.note + '</div>' : '');
+      root.appendChild(div);
+    });
+  }
+
+  // ── 按模型明细表 ───────────────────────────────────────────────────────
+
+  function renderModelTable(d) {
+    var root = document.getElementById("model-table-root");
+    var table = document.createElement("table");
+    table.className = "model-table";
+
+    var head = document.createElement("thead");
+    head.innerHTML =
+      "<tr>" +
+        "<th>模型</th><th>speed</th><th>uncached</th><th>cache read</th>" +
+        "<th>cache write</th><th>output</th><th>reasoning</th>" +
+        "<th>总 token</th><th>成本 (USD)</th><th>计价</th>" +
+      "</tr>";
+    table.appendChild(head);
+
+    var body = document.createElement("tbody");
+    var models = Object.keys(d.per_model);   // 折叠首现序，与 --json 一致
+    var totalCost = 0, totalUnc = 0, totalCac = 0, totalWrt = 0,
+        totalOut = 0, totalRea = 0, totalTok = 0;
+    models.forEach(function(m) {
+      var pm = d.per_model[m];
+      var t = pm.tokens || {};
+      var unc = t.uncached_input_tokens || 0, cac = t.cached_input_tokens || 0,
+          wrt = t.cache_write_input_tokens || 0, out = t.output_tokens || 0,
+          rea = t.reasoning_output_tokens || 0, tok = unc + cac + wrt + out + rea;
+      totalUnc += unc; totalCac += cac; totalWrt += wrt;
+      totalOut += out; totalRea += rea; totalTok += tok; totalCost += pm.cost_usd || 0;
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td class='model'>" + esc(m) + "</td>" +
+        "<td class='speed'>" + esc(pm.speed || "standard") + "</td>" +
+        "<td>" + formatNumber(unc) + "</td>" +
+        "<td>" + formatNumber(cac) + "</td>" +
+        "<td>" + formatNumber(wrt) + "</td>" +
+        "<td>" + formatNumber(out) + "</td>" +
+        "<td>" + formatNumber(rea) + "</td>" +
+        "<td>" + formatNumber(tok) + "</td>" +
+        (pm.priced
+          ? "<td class='cost'>" + fmtUsd(pm.cost_usd || 0) + "</td>" +
+            "<td>priced</td>"
+          : "<td class='unpriced'>—</td>" +
+            "<td class='unpriced'>unpriced</td>");
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+
+    var foot = document.createElement("tfoot");
+    var trf = document.createElement("tr");
+    trf.innerHTML =
+      "<td>合计</td><td></td>" +
+      "<td>" + formatNumber(totalUnc) + "</td>" +
+      "<td>" + formatNumber(totalCac) + "</td>" +
+      "<td>" + formatNumber(totalWrt) + "</td>" +
+      "<td>" + formatNumber(totalOut) + "</td>" +
+      "<td>" + formatNumber(totalRea) + "</td>" +
+      "<td>" + formatNumber(totalTok) + "</td>" +
+      "<td class='cost'>" + fmtUsd(totalCost) + "</td>" +
+      "<td>" + (d.unpriced_tokens > 0 ? "<span style='color:var(--unpriced)'>含 " +
+                formatNumber(d.unpriced_tokens) + " 未计价</span>" : "—") + "</td>";
+    foot.appendChild(trf);
+    table.appendChild(foot);
+
+    root.innerHTML = "";
+    root.appendChild(table);
+  }
+
+  // ── 每日热力图 ──────────────────────────────────────────────────────────
+
+  var WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
+
+  function renderHeatmap(d) {
+    var head = document.getElementById("weekday-head");
+    head.innerHTML = "";
+    WEEKDAYS.forEach(function(w) {
+      var el = document.createElement("div"); el.textContent = w;
+      head.appendChild(el);
+    });
+
+    var days = d.days;
+    var root = document.getElementById("heatmap");
+    root.innerHTML = "";
+    if (!days.length) { return; }
+
+    var byDate = {};
+    days.forEach(function(x) { byDate[x.date] = x; });
+
+    // 色阶归一化：用日期轴的最大日 cost（log scale，同 calendar.html）。
+    var maxCost = 1;
+    days.forEach(function(x) { if (x.cost_usd > maxCost) maxCost = x.cost_usd; });
+
+    // 从首日遍历到末日（含无数据日，保持真实日历连续性）——跨月份数据也按
+    // 周对齐排，月份切换插一行月标题。
+    var first = parseISO(days[0].date);
+    var last = parseISO(days[days.length - 1].date);
+
+    // 首日前的对齐空格（dow = 0 是周日，与 WEEKDAYS 表头一致）
+    var row = [];
+    for (var i = 0; i < first.getUTCDay(); i++) row.push(null);
+    var cur = first;
+    var curMonth = null;
+
+    function flushRow() {
+      while (row.length < 7) row.push(null);
+      var wrow = document.createElement("div");
+      wrow.className = "wrow";
+      row.forEach(function(cell) {
+        if (cell === null) {
+          var pad = document.createElement("div");
+          pad.className = "day-cell pad";
+          wrow.appendChild(pad);
+        } else {
+          wrow.appendChild(cell);
+        }
+      });
+      root.appendChild(wrow);
+      row = [];
+    }
+
+    while (cur.getTime() <= last.getTime()) {
+      var dow = cur.getUTCDay();
+      // 新一周（周日）且本行已有内容 → 换行
+      if (dow === 0 && row.length > 0) flushRow();
+
+      var key = isoOf(cur);
+      var m = key.slice(0, 7);
+      if (m !== curMonth) {
+        // 换月份：先把残行补满换掉，再插月标题（跨月份场景首日也可能在月中）
+        if (curMonth !== null && row.length > 0) flushRow();
+        curMonth = m;
+        var mt = document.createElement("div");
+        mt.className = "month-title";
+        mt.textContent = m;
+        root.appendChild(mt);
+      }
+      row.push(makeDayCell(cur, key, byDate[key], maxCost));
+      cur = addDays(cur, 1);
+    }
+    if (row.length) flushRow();
+
+    // 末日后无真实数据（days 数组最后一天就是末日）——不需要尾补位。
+
+    bindTooltip();
+  }
+
+  function makeDayCell(dateObj, key, day, maxCost) {
+    var cell = document.createElement("div");
+    var dayNum = dateObj.getUTCDate();
+    if (!day) {
+      cell.className = "day-cell empty";
+      cell.innerHTML = '<div class="num">' + dayNum + '</div>';
+      return cell;
+    }
+    var hasCost = day.cost_usd > 0;
+    cell.className = "day-cell";
+    cell.style.background = colorFor(day.cost_usd, maxCost, hasCost);
+    cell.dataset.date = key;
+    cell.dataset.cost = String(day.cost_usd);
+    cell.dataset.tokens = String(day.tokens);
+    cell.innerHTML =
+      '<div class="num">' + dayNum + '</div>' +
+      '<div class="amt">' + shortNum(day.tokens) +
+        (hasCost ? '<div class="cost">' + fmtUsd(day.cost_usd) + '</div>' : '') +
+      '</div>';
+    return cell;
+  }
+
+  /** log 色阶（蓝→红），与 calendar.html 同款：重尾分布线性映射会糊成一片 */
+  function colorFor(cost, maxCost, hasCost) {
+    if (!hasCost || cost <= 0 || maxCost <= 0) return "var(--surface-2)";
+    var t = Math.log10(1 + cost) / Math.log10(1 + maxCost);
+    var hue = Math.round(200 - 200 * t);
+    var lum = Math.round(28 + 22 * t);
+    return "hsl(" + hue + ",60%," + lum + "%)";
+  }
+
+  // ── tooltip ─────────────────────────────────────────────────────────────
+
+  function bindTooltip() {
+    var tip = document.getElementById("tip");
+    document.querySelectorAll("#heatmap .day-cell[data-date]").forEach(function(el) {
+      el.addEventListener("mouseenter", function() {
+        var date = el.dataset.date;
+        var cost = parseFloat(el.dataset.cost || "0");
+        var toks = parseInt(el.dataset.tokens || "0", 10);
+        tip.innerHTML =
+          '<div class="tip-title">' + date + '</div>' +
+          '<div class="row"><span class="k">总 token</span><span class="v">' +
+            commas(toks) + '</span></div>' +
+          '<div class="sep"></div>' +
+          '<div class="row"><span class="k">当日成本 (USD)</span><span class="v">' +
+            fmtUsd(cost) + '</span></div>';
+        tip.classList.add("show");
+      });
+      el.addEventListener("mousemove", function(e) { positionTip(e); });
+      el.addEventListener("mouseleave", function() { tip.classList.remove("show"); });
+    });
+  }
+
+  function positionTip(e) {
+    var tip = document.getElementById("tip");
+    var x = e.clientX + 14, y = e.clientY + 14;
+    var rect = tip.getBoundingClientRect();
+    if (x + rect.width > window.innerWidth)  x = e.clientX - rect.width - 14;
+    if (y + rect.height > window.innerHeight) y = e.clientY - rect.height - 14;
+    tip.style.left = x + "px";
+    tip.style.top  = y + "px";
+  }
+
+  // ── 附加：unpriced / unaccounted 说明 ────────────────────────────────────
+
+  function renderExtra(d) {
+    var extra = document.getElementById("extra");
+    var html = "";
+    if (d.unpriced_tokens > 0) {
+      html += '<div class="unpriced-banner">' +
+        '<b>unpriced：</b>' + formatNumber(d.unpriced_tokens) +
+        ' token 属于无价目模型（如 codex-auto-review），不计入总成本，' +
+        '在明细表里标 unpriced 诚实上报。' +
+        '</div>';
+    }
+    var ua = d.unaccounted_usage || [];
+    if (ua.length) {
+      var rows = ua.map(function(e) {
+        return formatNumber(e.count) + " × " + esc(e.type) +
+               "（看见 " + formatNumber(e.tokens_seen) + " tokens）";
+      }).join("<br>");
+      html += '<div class="warn-banner">' +
+        '<b>残差哨兵 unaccounted_usage：</b>' +
+        '折叠没接住这些 token_count 事件（事件序不合法，如 token_count 出现在 ' +
+        '首个 turn_context 之前）。这是数据质量信号，不是计费缺口——这些 token ' +
+        '从未进过任何模型桶。<div class="banner-note">' + rows + '</div>' +
+        '</div>';
+    }
+    extra.innerHTML = html;
+  }
+
+  // ── 工具 ────────────────────────────────────────────────────────────────
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function parseISO(s) {
+    var p = s.split("-");
+    return new Date(Date.UTC(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10)));
+  }
+  function isoOf(d) {
+    return d.toISOString().slice(0, 10);
+  }
+  function addDays(d, n) {
+    return new Date(d.getTime() + n * 86400000);
+  }
+
+  // ─── 启动 ────────────────────────────────────────────────────────────────
+  document.addEventListener("DOMContentLoaded", function() {
+    var d = loadData();
+    if (d) render(d);
+  });
+  </script>
+</body>
+</html>

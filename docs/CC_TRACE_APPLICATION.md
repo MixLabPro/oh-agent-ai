@@ -125,8 +125,27 @@ cc-trace 用**第三套独立实现**（不同于我们 Python+Rust 两套）解
 区分，`usage.rs:352,502` 已按模型分桶），价格表 `deepseek-official` 下 flash/pro 各自
 有条目，价差已被模型名捕获。cc-trace 的 `speed` 之所以存在，是因为 Claude Code 的
 Fast mode 用**同一个模型名**（opus）却按更高档计费，模型名区分不了才需要该字段。
-→ 真正要加 `speed` 的地方是未来做 **P5（Claude Code 适配器）** 时；Codex 侧等给
-Codex 做 cost fold 时一起处理（P4 明确不做成本折叠）。
+→ 真正要加 `speed` 的地方是未来做 **P5（Claude Code 适配器）** 时。
+
+**Codex 侧的成本折叠已落地（`skill-vitals codex-cost`，2026-08）**：给 Codex 做
+cost fold 不再等 P5——`codex-cost` 就是 Codex 的成本引擎（USD、5 桶 + speed 行 +
+longContext，见 `scripts/skill_vitals/codex_cost.py` ↔ `src/codex_cost.rs`）。上面
+三个缺口在 Codex 侧的落点：
+
+- **`speed`**：Codex 日志有 `service_tier`（`turn_context`/`thread_settings_applied`），
+  fold 保留 speed 游标，价格表 `codex_pricing.json` 里 `speed` 是**独立行**（fast 行
+  ×2 是 catalog 写死的，不是代码乘的）。实测真实语料 1345 处 `service_tier` 全为
+  `null` → 恒 `standard`，但解析路径完整（fast 行带 `longContextPriced:false`）。
+- **地域（`usInferenceMultiplierBps`）**：Codex 日志无地域字段，catalog 里全部 codex
+  条目 `usInferenceMultiplierBps == 10000`（=1.0×）→ 恒 Global，**不实现**（显式
+  out of scope，注释说明即可，不臆造地域归属）。
+- **`longContext`**：已补。`codex-cost` 按**单日聚合桶**的 `input_total` 判阈值
+  （272000 → input ×2、output ×1.5）——不是按 by_model 合并后的模型总桶（合并桶
+  会把「每天都没超窗」的多天小请求累加成假的大 input，凭空触发 LC，守恒测试当场
+  红，见 `codex_cost_report` 的 LC 粒度注释）。
+
+注意 `speed` 对 **DSH** 仍是「别加」：DSH 没有 `service_tier` 事件（实测 35,411
+事件零命中），快档是不同模型（`deepseek-v4-flash`），价差已被模型名捕获。
 
 **`effort` 同理不是计价维度（别加进成本引擎）。** 实测：DSH 38 份会话零 `effort`；
 Codex 的 `turn_context.payload.effort` 取值 `low`/`medium`/`high`；Claude Code 的

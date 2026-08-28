@@ -8,6 +8,7 @@
 
 pub mod behavior;
 pub mod codex_evidence;
+pub mod codex_usage;
 pub mod compaction;
 pub mod dsh_evidence;
 pub mod duration;

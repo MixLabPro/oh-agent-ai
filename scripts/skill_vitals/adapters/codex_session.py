@@ -213,6 +213,27 @@ def codex_session_roots_report(home=None):
     return {"host": "codex", "roots": roots}
 
 
+def codex_rollout_files(home=None):
+    """`codex-cost` 的输入枚举：两个会话根下所有 `rollout-*.jsonl`（live + archived）。
+
+    与 `codex_session_roots_report` 同一套根集合，但那是存在性报告（统计数量/
+    字节），这里给出**实际要折叠的文件**。**全局按路径字符串排序**（不是按根
+    分开排）：Rust 侧 `walkdir` 收集后 `to_string_lossy().cmp()` 也是全局排——
+    `archived_sessions/…` 按字母序排在 `sessions/…` 前，两侧保持一致，折叠的
+    merge 顺序（决定模型/速度首现序）才不会漂移。缺失的根 → 跳过（存在性探测，
+    绝不报错）。`home` 默认 `Path.home()`（尊重 `HOME`，测试用 `isolated_home_env`
+    注入）。"""
+    if home is None:
+        home = Path.home()
+    home = Path(home)
+    files = []
+    for _kind, rel in CODEX_SESSION_ROOTS:
+        root = home / ".codex" / rel
+        if root.is_dir():
+            files.extend(root.rglob("rollout-*.jsonl"))
+    return sorted((p for p in files if p.is_file()), key=str)
+
+
 def parse_session_index(text):
     """纯解析：把 `session_index.jsonl` 折成 `{id: thread_name}` 映射。与 Rust
     `codex_session.rs::parse_session_index` 对齐（同一份 dict，键序是插入序，

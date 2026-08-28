@@ -12,6 +12,7 @@
 mod analysis;
 mod behavior;
 mod codex;
+mod codex_cost;
 mod codex_session;
 mod cost;
 mod openclaw;
@@ -362,6 +363,21 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Price Codex rollout token usage (USD) into a per-model / per-day cost
+    /// report (cc-trace research §D landing, docs/CC_TRACE_APPLICATION.md §5 item 4).
+    /// Stateless single call: scan all rollouts (live + archived) → fold
+    /// last_token_usage → price against codex_pricing.json (USD) → text/JSON/HTML.
+    CodexCost {
+        /// Restrict the report to one calendar month
+        #[arg(long = "month")]
+        month: Option<String>,
+        /// Write the report JSON to FILE; use - for stdout
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+        /// Write a self-contained HTML dashboard to FILE
+        #[arg(long = "html")]
+        html: Option<PathBuf>,
+    },
 }
 
 /// 探测「扫描器自身所在的 skill 目录」。
@@ -537,6 +553,31 @@ fn render_codex_roots(out: &Value) -> String {
         }
     }
     s
+}
+
+/// `codex-cost --html`：把 report dict 渲染成单文件仪表盘。模板
+/// `scripts/skill_vitals/templates/codex_cost.html` 编译期内嵌（与 `cost.rs`
+/// 内嵌 pricing.json 同一模式），JSON 经 `</script`/`<!--` 转义后塞进
+/// `<script id="skill-vitals-data-codex">` 块。**JS 只渲染 server 已算好的
+/// per_model / days / total_cost_usd**——模板不内嵌价格表。与 Python
+/// `cli.py::_render_codex_cost_html` 同构（HTML 文件不参与差分，只需等价）。
+fn render_codex_cost_html(output_path: &Path, out: &Value) {
+    const TEMPLATE: &str = include_str!("../scripts/skill_vitals/templates/codex_cost.html");
+    let json_text = serde_json::to_string(out).unwrap_or_default();
+    let safe = json_text
+        .replace("</script", "<\\/script")
+        .replace("<!--", "<\\!--");
+    let inject = format!(
+        "<script id=\"skill-vitals-data-codex\" type=\"application/json\">{safe}</script>"
+    );
+    let html = TEMPLATE.replacen("</head>", &format!("{inject}\n</head>"), 1);
+    if let Some(parent) = output_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::write(output_path, html).is_err() {
+        eprintln!("failed to write {}", output_path.display());
+        std::process::exit(2);
+    }
 }
 
 fn main() {
@@ -827,6 +868,107 @@ fn main() {
             return;
         }
         print!("{}", render_codex_evidence(&skill_vitals_core::codex_evidence::codex_evidence_json(&evidence)));
+        return;
+    }
+
+    // Codex 成本折叠 + 计价（cc-trace 研究 §D 落地）。与 Python cli.py 的
+    // codex-cost handler 同一种结构。无状态单次调用：扫 rollout → 折叠 →
+    // 计价 → 文本/JSON/HTML 三路。`--month` 过滤日期轴后**重算** by_model
+    // （codex_by_model_from_dates 把过滤后的 by_date 求和折回模型轴，不是
+    // merge_folds——merge 只读 fold 的 by_model 字段，拿它折回去是空模型轴），
+    // 保证 days 与 per_model 对得上；unaccounted 无日期归属，跨月份保留（数据
+    // 质量哨兵，不参与归月）。
+    if let Some(Cmd::CodexCost { month, rows_json, html }) = &args.cmd {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        let mut folds: Vec<Value> = Vec::new();
+        for path in codex_session::codex_rollout_files(Path::new(&home)) {
+            let parsed = codex_session::read_codex_session_log(&path);
+            let items: Vec<Value> = parsed
+                .get("items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            folds.push(skill_vitals_core::codex_usage::codex_fold_file(&items));
+        }
+        let merged = skill_vitals_core::codex_usage::codex_merge_folds(&folds);
+        let mut by_date_model = merged["by_date_model"].clone();
+        let mut by_model = merged["by_model"].clone();
+        let unaccounted = merged["unaccounted"].clone();
+        let month = month.clone();
+        if let Some(m) = &month {
+            // 过滤日期轴（BTreeMap 升序 -> 保持升序），再重算 by_model。
+            let mut filtered = serde_json::Map::new();
+            if let Some(bd) = by_date_model.as_object() {
+                for (d, v) in bd {
+                    if d.starts_with(m.as_str()) {
+                        filtered.insert(d.clone(), v.clone());
+                    }
+                }
+            }
+            by_date_model = Value::Object(filtered);
+            // 重算模型轴：merge 的 by_model 只读 fold 的 by_model 字段，不读
+            // by_date_model——拿 merge 折回去得到的是空模型轴（真实 defect：
+            // --month 整份报告静默变全零）。codex_by_model_from_dates 把过滤后
+            // 的日期桶求和折回 by_model（守恒：sum(days) == total_cost_usd）。
+            by_model = skill_vitals_core::codex_usage::codex_by_model_from_dates(&by_date_model);
+        }
+        let pricing = codex_cost::load_codex_pricing();
+        let report = codex_cost::codex_cost_report(&by_date_model, &by_model, &unaccounted, &pricing);
+        let report = report.unwrap_or_else(|| {
+            // 空折叠：没有任何 token 可计价。给一个全零的结构而不是 None——
+            // 调用方要的是「没有数据」而不是「崩了」，且 host/currency/month
+            // 包装是固定契约。
+            let mut tt = serde_json::Map::new();
+            for f in skill_vitals_core::codex_usage::CODEX_TOKEN_FIELDS {
+                tt.insert(f.to_string(), json!(0));
+            }
+            serde_json::json!({
+                "total_cost_usd": 0,
+                "total_tokens": Value::Object(tt),
+                "per_model": Value::Object(serde_json::Map::new()),
+                "days": Value::Array(vec![]),
+                "unpriced_tokens": 0,
+                "unaccounted_usage": unaccounted,
+            })
+        });
+        // host/currency/month 是外层固定契约，report 的键在其后（键序是字节
+        // 一致的一部分，Python 侧 `{"host":...,"currency":...}.update(report)`
+        // 同序）。
+        let mut out = serde_json::Map::new();
+        out.insert("host".into(), json!("codex"));
+        out.insert("currency".into(), json!("USD"));
+        out.insert(
+            "month".into(),
+            month.clone().map(Value::from).unwrap_or(Value::Null),
+        );
+        if let Some(rep) = report.as_object() {
+            for (k, v) in rep {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        let out = Value::Object(out);
+        let mut wrote = false;
+        if let Some(path) = rows_json {
+            let text = serde_json::to_string_pretty(&out).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}", path.display());
+            }
+            wrote = true;
+        }
+        if let Some(path) = html {
+            render_codex_cost_html(path, &out);
+            wrote = true;
+        }
+        if !wrote {
+            print!("{}", codex_cost::render_codex_cost(&out));
+        }
         return;
     }
 

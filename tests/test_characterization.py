@@ -52,6 +52,13 @@ from skill_vitals.duration import (  # noqa: E402
     duration_coverage,
 )
 from skill_vitals.codex_evidence import codex_evidence_json, derive_coverage  # noqa: E402
+from skill_vitals.codex_usage import (  # noqa: E402
+    CODEX_TOKEN_FIELDS, codex_by_model_from_dates, codex_fold_file,
+    codex_merge_folds, codex_token_facts,
+)
+from skill_vitals.codex_cost import (  # noqa: E402
+    codex_cost_report, load_codex_pricing, render_codex_cost,
+)
 from skill_vitals.adapters.codex_session import (  # noqa: E402
     codex_session_roots_report, parse_codex_session_log, parse_session_index,
     read_session_index,
@@ -2960,3 +2967,208 @@ class TestCodexSessionIndex(unittest.TestCase):
                     _os.environ.pop("HOME", None)
                 else:
                     _os.environ["HOME"] = old
+
+
+class CodexCostCharacterization(unittest.TestCase):
+    """`codex-cost` 折叠/计价纯函数的精确值钉死。
+
+    这些数字对应 Rust 侧 `crates/skill-vitals-core/src/codex_usage.rs` 与
+    `src/codex_cost.rs` 的 `#[cfg(test)]` 钉同一批。夹具与手算期望见
+    `fixtures/codex/cost/README.md`。**一个值变 = 折叠/计价行为变**，不是
+    四舍五入——`cost_usd` 是 f64 原值（JSON 序列化两侧同最短表示，逐字节一致
+    靠的就是不在这里动它）。
+    """
+
+    FIXTURES = ROOT / "fixtures" / "codex" / "cost"
+
+    def _fold(self, name):
+        from skill_vitals.adapters.codex_session import parse_codex_session_log
+        text = (self.FIXTURES / name).read_text(encoding="utf-8")
+        return codex_fold_file(parse_codex_session_log(text)["items"])
+
+    def test_token_facts_derives_uncached_and_validates(self):
+        last = {
+            "input_tokens": 100, "output_tokens": 10,
+            "cached_input_tokens": 30, "cache_write_input_tokens": 5,
+            "reasoning_output_tokens": 3, "total_tokens": 110,
+        }
+        # 返回不可变元组（Rust `[i64; 5]` 的 Python 类比），断言类型也跟着对齐
+        self.assertEqual(codex_token_facts(last), (65, 10, 30, 5, 3))
+        # reasoning > output → None（无效，交给残差哨兵）
+        bad = {"input_tokens": 100, "output_tokens": 10, "reasoning_output_tokens": 12}
+        self.assertIsNone(codex_token_facts(bad))
+        # cached + cache_write > input → uncached 为负 → None
+        bad2 = {"input_tokens": 100, "output_tokens": 10, "cached_input_tokens": 200}
+        self.assertIsNone(codex_token_facts(bad2))
+        # 缺必填 input/output → None
+        self.assertIsNone(codex_token_facts({"output_tokens": 1}))
+        # 缺可选桶 → 缺省 0
+        self.assertEqual(codex_token_facts({"input_tokens": 100, "output_tokens": 10}),
+                         (100, 10, 0, 0, 0))
+
+    def test_fold_sol_dedup_unaccounted_and_lc(self):
+        """sol 夹具：去重两形态都跳过、两条 unaccounted、cache_write 进 5m 档、
+        longContext 桶按 input_total 触发。"""
+        f = self._fold("rollout-sol.jsonl")
+        bm = f["by_model"]["gpt-5.6-sol"]["standard"]
+        # uncached 派生：08-01 (50000) + 08-02 (120000)
+        self.assertEqual(bm["uncached_input_tokens"], 170000)
+        self.assertEqual(bm["output_tokens"], 70000)
+        self.assertEqual(bm["cached_input_tokens"], 190000)
+        self.assertEqual(bm["cache_write_input_tokens"], 40000)
+        self.assertEqual(bm["reasoning_output_tokens"], 8000)
+        # 去重 + `info: null` 跳过 → 只有 2 个真桶（08-01、08-02）。夹具里那条
+        # `info: null` 的 token_count（真实语料 08-19 形态）如果被误收进桶或误报
+        # unaccounted，这里的日期集合断言会当场红。
+        self.assertEqual(set(f["by_date_model"].keys()), {"2026-08-01", "2026-08-02"})
+        # 两条 unaccounted，type 升序（null-info 不增加第三条）
+        ua = f["unaccounted"]
+        self.assertEqual([u["type"] for u in ua],
+                         ["token_count_before_turn_context", "token_count_invalid_last_usage"])
+        self.assertEqual(ua[0], {"type": "token_count_before_turn_context", "count": 1, "tokens_seen": 1100})
+        self.assertEqual(ua[1], {"type": "token_count_invalid_last_usage", "count": 1, "tokens_seen": 670})
+
+    def test_fold_terra_switches_model_mid_file(self):
+        """terra 夹具：model 游标中途切换 → 同一天两个模型分桶。"""
+        f = self._fold("rollout-terra.jsonl")
+        self.assertEqual(set(f["by_date_model"].keys()), {"2026-07-15"})
+        day = f["by_date_model"]["2026-07-15"]
+        self.assertEqual(set(day.keys()), {"gpt-5.6-terra", "gpt-5.6-luna"})
+        terra = day["gpt-5.6-terra"]["standard"]
+        self.assertEqual([terra[k] for k in CODEX_TOKEN_FIELDS], [65000, 20000, 30000, 5000, 2000])
+        luna = day["gpt-5.6-luna"]["standard"]
+        self.assertEqual([luna[k] for k in CODEX_TOKEN_FIELDS], [130000, 50000, 60000, 10000, 5000])
+
+    def test_by_model_from_dates_reconciles_and_filters(self):
+        """`--month` 过滤日期轴后 by_model 重算（真实 defect：旧实现拿
+        codex_merge_folds 折回，merge 只读 fold 的 by_model 字段 → 空模型轴 →
+        整份月报告静默全零）。重算必须满足守恒：全部样本带日期时
+        `codex_by_model_from_dates(by_date_model) == by_model`（同一折叠的两投影），
+        月份过滤后等于对应日期桶之和，且无日期样本被按设计丢弃。"""
+        folds = [self._fold("rollout-sol.jsonl"),
+                 self._fold("rollout-terra.jsonl"),
+                 self._fold("rollout-unpriced.jsonl")]
+        merged = codex_merge_folds(folds)
+        # 无 untimed（三份夹具的 token_count 全带日期）→ 两投影逐字节相等
+        self.assertEqual(codex_by_model_from_dates(merged["by_date_model"]),
+                         merged["by_model"])
+        # --month 2026-08：terra/luna（07-15）出局，模型轴只剩 sol + auto-review
+        aug = {d: bd for d, bd in merged["by_date_model"].items()
+               if d.startswith("2026-08")}
+        recomputed = codex_by_model_from_dates(aug)
+        self.assertEqual(set(recomputed.keys()), {"gpt-5.6-sol", "codex-auto-review"})
+        self.assertEqual(recomputed["gpt-5.6-sol"]["standard"]["uncached_input_tokens"],
+                         50000 + 120000)
+        self.assertEqual(recomputed["codex-auto-review"]["standard"]["output_tokens"], 1000)
+        # 守恒：重算后的模型轴 == 过滤后日期桶之和（逐桶）
+        total = [0] * 5
+        for bd in aug.values():
+            for speeds in bd.values():
+                for bucket in speeds.values():
+                    for i, f in enumerate(CODEX_TOKEN_FIELDS):
+                        total[i] += bucket.get(f, 0)
+        self.assertEqual(
+            [recomputed["gpt-5.6-sol"]["standard"].get(f, 0) for f in CODEX_TOKEN_FIELDS],
+            [total[i] - recomputed["codex-auto-review"]["standard"].get(f, 0)
+             for i, f in enumerate(CODEX_TOKEN_FIELDS)])
+
+    def test_pricing_table_pins_sol_terra_luna(self):
+        """`codex_pricing.json` 三条主价的精确值（characterization 代替
+        test_pricing_lockstep——Codex 价目表无派生副本，钉源头就够了）。"""
+        entries = load_codex_pricing()["entries"]
+        by_prefix = {}
+        for e in entries:
+            if e.get("speed") == "standard":
+                by_prefix[e["modelPrefix"]] = e
+        sol = by_prefix["gpt-5.6-sol"]
+        self.assertEqual([sol[k] for k in ("uncachedInputUsdPerMTok", "cacheReadUsdPerMTok",
+                                           "cacheWrite5mUsdPerMTok", "cacheWrite1hUsdPerMTok",
+                                           "outputUsdPerMTok")],
+                         ["5", "0.5", "6.25", "10", "30"])
+        terra = by_prefix["gpt-5.6-terra"]
+        self.assertEqual([terra[k] for k in ("uncachedInputUsdPerMTok", "cacheReadUsdPerMTok",
+                                             "cacheWrite5mUsdPerMTok", "cacheWrite1hUsdPerMTok",
+                                             "outputUsdPerMTok")],
+                         ["2", "0.2", "2.5", "4", "12"])
+        luna = by_prefix["gpt-5.6-luna"]
+        self.assertEqual([luna[k] for k in ("uncachedInputUsdPerMTok", "cacheReadUsdPerMTok",
+                                            "cacheWrite5mUsdPerMTok", "cacheWrite1hUsdPerMTok",
+                                            "outputUsdPerMTok")],
+                         ["0.2", "0.02", "0.25", "0.4", "1.2"])
+        self.assertEqual(load_codex_pricing()["currency"], "USD")
+
+    def _merged_report(self):
+        folds = [self._fold("rollout-sol.jsonl"),
+                 self._fold("rollout-terra.jsonl"),
+                 self._fold("rollout-unpriced.jsonl")]
+        merged = codex_merge_folds(folds)
+        return codex_cost_report(merged["by_date_model"], merged["by_model"],
+                                 merged["unaccounted"], load_codex_pricing())
+
+    def test_cost_report_exact_usd_and_reconciles(self):
+        """合并三份夹具 → 精确 USD 价 + 守恒：sum(days.cost) == total_cost_usd。"""
+        report = self._merged_report()
+        self.assertAlmostEqual(report["total_cost_usd"], 5.5357, places=9)
+        tt = report["total_tokens"]
+        # 合并三份夹具按桶求和：sol(170000,70000,190000,40000,8000) +
+        # terra(65000,20000,30000,5000,2000) + luna(130000,50000,60000,10000,5000) +
+        # auto-review(5000,1000,0,0,0) → (370000,141000,280000,55000,15000)。
+        self.assertEqual([tt[k] for k in CODEX_TOKEN_FIELDS], [370000, 141000, 280000, 55000, 15000])
+        # per_model 首现序：sol → terra → luna → codex-auto-review
+        self.assertEqual(list(report["per_model"].keys()),
+                         ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "codex-auto-review"])
+        sol = report["per_model"]["gpt-5.6-sol"]
+        self.assertTrue(sol["priced"])
+        self.assertEqual(sol["speed"], "standard")
+        self.assertAlmostEqual(sol["cost_usd"], 5.0575, places=9)
+        self.assertAlmostEqual(report["per_model"]["gpt-5.6-terra"]["cost_usd"], 0.3885, places=9)
+        self.assertAlmostEqual(report["per_model"]["gpt-5.6-luna"]["cost_usd"], 0.0897, places=9)
+        # unpriced 模型诚实上报
+        review = report["per_model"]["codex-auto-review"]
+        self.assertFalse(review["priced"])
+        self.assertEqual(review["cost_usd"], 0.0)
+        self.assertEqual(report["unpriced_tokens"], 6000)
+        # 日期轴升序 + 守恒
+        days = report["days"]
+        self.assertEqual([d["date"] for d in days],
+                         ["2026-07-15", "2026-08-01", "2026-08-02", "2026-08-03"])
+        day_sum = sum(d["cost_usd"] for d in days)
+        self.assertAlmostEqual(day_sum, report["total_cost_usd"], places=9)
+        self.assertEqual(days[0]["tokens"], 377000)
+        self.assertEqual(days[2]["tokens"], 366000)
+
+    def test_cost_report_long_context_sample_exact(self):
+        """longContext 样例钉到小数：input_total 300000 > 272000 → input ×2、
+        output ×1.5（08-02 桶 = $4.425）。"""
+        f = self._fold("rollout-sol.jsonl")
+        report = codex_cost_report(
+            f["by_date_model"], f["by_model"], f["unaccounted"], load_codex_pricing())
+        d2 = next(d for d in report["days"] if d["date"] == "2026-08-02")
+        self.assertAlmostEqual(d2["cost_usd"], 4.425, places=9)
+        self.assertEqual(d2["tokens"], 366000)
+
+    def test_cost_report_none_when_nothing_to_price(self):
+        self.assertIsNone(codex_cost_report({}, {}, [], load_codex_pricing()))
+
+    def test_render_codex_cost_text(self):
+        """人读文本（CLI 无 --json/--html 时的输出）：与 Rust `render_codex_cost`
+        同 spec。数字来自 report，这里只钉格式。"""
+        report = self._merged_report()
+        out = {"host": "codex", "currency": "USD", "month": None}
+        out.update(report)
+        text = render_codex_cost(out)
+        self.assertIn("host: codex\n", text)
+        self.assertIn("currency: USD\n", text)
+        self.assertIn("total cost: $5.54 · total tokens: 861K\n", text)
+        self.assertIn("  gpt-5.6-sol  $5.06  (standard)\n", text)
+        self.assertIn("  codex-auto-review  unpriced  (standard)\n", text)
+        self.assertIn("另有 6K tokens 模型未计价\n", text)
+        self.assertIn("未接住 1 × token_count_before_turn_context（看见 1.1K tokens）\n", text)
+        self.assertIn("未接住 1 × token_count_invalid_last_usage（看见 670 tokens）\n", text)
+
+    def test_render_codex_cost_with_month_line(self):
+        report = self._merged_report()
+        out = {"host": "codex", "currency": "USD", "month": "2026-08"}
+        out.update(report)
+        text = render_codex_cost(out)
+        self.assertIn("month: 2026-08\n", text)

@@ -24,7 +24,9 @@ from pathlib import Path
 
 from skill_vitals import __version__
 from skill_vitals import behavior as behavior_module
+from skill_vitals import codex_cost as codex_cost_module
 from skill_vitals import codex_evidence as codex_evidence_module
+from skill_vitals import codex_usage as codex_usage_module
 from skill_vitals import cost as cost_module
 from skill_vitals.doctor import _doctor_snapshot, diagnose, render_doctor, render_gate
 from skill_vitals.explain import render_explain
@@ -370,6 +372,36 @@ def _render_codex_roots(report):
     return "".join(parts)
 
 
+def _render_codex_cost_html(output_path, data):
+    """把 `codex-cost` 的 report dict（`--json` 输出的同一份）渲染成单文件仪表盘。
+
+    镜像 `_render_calendar_html` 的注入模式：模板 `templates/codex_cost.html` 是
+    自包含单文件（内联 CSS/JS、零网络），JSON 经 `</script`/`<!--` 转义后塞进
+    `<script id="skill-vitals-data-codex">` 块。**JS 只渲染 server 已算好的
+    per_model / days / total_cost_usd**——模板不内嵌价格表，计价永远只有
+    `codex_cost_report` 一处（JS 里再放一份价格就是第四份副本，同 calendar 的
+    `_augment_calendar_cost` 想消灭的漂移）。Rust 侧 `render_codex_cost_html`
+    做同一件事（模板用 include_str 内嵌、注入逻辑同构；HTML 文件不参与差分，
+    只需两边产出等价可解析的页面）。
+    """
+    template = Path(__file__).resolve().parent / "templates" / "codex_cost.html"
+    if not template.is_file():
+        raise FileNotFoundError(
+            "codex_cost template not found at %s" % template)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    html = template.read_text(encoding="utf-8")
+    json_text = json.dumps(data, ensure_ascii=False)
+    # JSON 里可能含 </script> / <!-- —— 必须转义，否则浏览器解析到这就崩
+    # （与 _render_calendar_html 同一条铁律）。
+    json_text_safe = (json_text.replace("</script", "<\\/script")
+                      .replace("<!--", "<\\!--"))
+    inject = ("<script id=\"skill-vitals-data-codex\" type=\"application/json\">"
+              + json_text_safe + "</script>")
+    html = html.replace("</head>", inject + "\n</head>", 1)
+    out.write_text(html, encoding="utf-8")
+
+
 def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", action="version",
@@ -478,6 +510,20 @@ def _main():
                               "of auditing one log — archived_sessions existence is "
                               "probed, never an error")
     p_codex.add_argument("--json", help="Write coverage JSON to FILE; use - for stdout")
+    # cc-trace 研究 §D defer 的一块新能力（docs/CC_TRACE_APPLICATION.md §5 第 4 项）：
+    # Codex 成本折叠 + 仪表盘。与 codex-evidence 不同，这是**成本**审计——扫所有
+    # rollout（live + archived）的 last_token_usage 折叠成 5 桶 × 模型 × 日期，
+    # 按 codex_pricing.json（USD）计价。无状态单次调用，不落 month.json。
+    # 货币是 USD（cc-trace 价格表权威价，零汇率猜测），与 DSH 的 ¥ 区分。
+    p_codex_cost = sub.add_parser("codex-cost",
+                                  help="Price Codex rollout token usage (USD) "
+                                       "into a per-model / per-day cost report")
+    p_codex_cost.add_argument("--month", metavar="YYYY-MM", default=None,
+                              help="Restrict the report to one calendar month")
+    p_codex_cost.add_argument("--json", metavar="FILE",
+                              help="Write the report JSON to FILE; use - for stdout")
+    p_codex_cost.add_argument("--html", metavar="FILE",
+                              help="Write a self-contained HTML dashboard to FILE")
     # ──── M3: 跨会话聚合层（v1.x.x）── 三个新子命令 ─────────────────
     # oneline：单次审计 → oneline.json（覆盖）+ today.json / month.json（合并累加）。
     # 与 behavior 复用同一份 audit_session_log，但额外调 hour_buckets 把折叠
@@ -753,6 +799,68 @@ def _main():
             return
         print(_render_codex_evidence(
             codex_evidence_module.codex_evidence_json(evidence)), end="")
+        return
+
+    # Codex 成本折叠 + 计价（cc-trace 研究 §D 落地）。与 Rust 侧 main.rs 的
+    # CodexCost 子命令同一种结构。无状态单次调用：扫 rollout → 折叠 →
+    # 计价 → 文本/JSON/HTML 三路。`--month` 过滤日期轴后**重算** by_model
+    # （codex_by_model_from_dates 把过滤后的 by_date 求和折回模型轴，不是
+    # merge_folds——merge 只读 fold 的 by_model 字段，拿它折回去是空模型轴），
+    # 保证 days 与 per_model 对得上；unaccounted 无日期归属，跨月份保留（数据
+    # 质量哨兵，不参与归月）。
+    if getattr(args, "cmd", None) == "codex-cost":
+        from skill_vitals.adapters import codex_session
+        folds = []
+        for path in codex_session.codex_rollout_files():
+            parsed = codex_session.read_codex_session_log(path)
+            items = parsed["items"] if isinstance(parsed.get("items"), list) else []
+            folds.append(codex_usage_module.codex_fold_file(items))
+        merged = codex_usage_module.codex_merge_folds(folds)
+        by_date_model = merged["by_date_model"]
+        by_model = merged["by_model"]
+        unaccounted = merged["unaccounted"]
+        month = args.month
+        if month:
+            by_date_model = {d: bd for d, bd in by_date_model.items()
+                             if d.startswith(month)}
+            # 重算模型轴：merge 的 by_model 只读 fold 的 by_model 字段，不读
+            # by_date_model——拿 merge 折回去得到的是空模型轴（真实 defect：
+            # --month 整份报告静默变全零）。codex_by_model_from_dates 把过滤后
+            # 的日期桶求和折回 by_model（守恒：sum(days) == total_cost_usd）。
+            by_model = codex_usage_module.codex_by_model_from_dates(by_date_model)
+        pricing = codex_cost_module.load_codex_pricing()
+        report = codex_cost_module.codex_cost_report(
+            by_date_model, by_model, unaccounted, pricing)
+        if report is None:
+            # 空折叠：没有任何 token 可计价。给一个全零的结构而不是 None——
+            # 调用方要的是「没有数据」而不是「崩了」，且 host/currency/month
+            # 包装是固定契约。
+            report = {
+                "total_cost_usd": 0,
+                "total_tokens": {f: 0 for f in codex_usage_module.CODEX_TOKEN_FIELDS},
+                "per_model": {}, "days": [], "unpriced_tokens": 0,
+                "unaccounted_usage": [],
+            }
+        out = {"host": "codex", "currency": "USD", "month": month}
+        out.update(report)
+        wrote = False
+        if args.json:
+            text = json.dumps(out, ensure_ascii=False, indent=2)
+            if args.json == "-":
+                print(text)
+            else:
+                try:
+                    Path(args.json).write_text(text, encoding="utf-8")
+                except OSError:
+                    print("failed to write %s" % args.json, file=sys.stderr)
+                    sys.exit(2)
+                print("Wrote %s" % args.json)
+            wrote = True
+        if args.html:
+            _render_codex_cost_html(args.html, out)
+            wrote = True
+        if not wrote:
+            print(codex_cost_module.render_codex_cost(out), end="")
         return
 
     # ──── M3 oneline handler ──────────────────────────────────────

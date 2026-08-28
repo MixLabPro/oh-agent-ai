@@ -21,7 +21,7 @@
 //! `attempts`，§14.4 "skipped and recorded in attempts, never treated as
 //! corruption"）。解析器只负责「把 JSONL 逐行读进来 + 抽出 provenance 字段」。
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
@@ -190,6 +190,37 @@ pub fn codex_session_roots_report(home: &Path) -> Value {
         }));
     }
     json!({ "host": "codex", "roots": roots })
+}
+
+/// `codex-cost` 的输入枚举：两个会话根下所有 `rollout-*.jsonl`（live + archived）。
+///
+/// 与 `codex_session_roots_report` 同一套根集合，但那是存在性报告（统计数量/
+/// 字节），这里给出**实际要折叠的文件**。**全局按路径字符串排序**（不是按根
+/// 分开排）：`archived_sessions/…` 按字母序排在 `sessions/…` 前——Python 侧
+/// `codex_rollout_files` 用 `sorted(..., key=str)` 也是全局排，两侧一致，折叠的
+/// merge 顺序（决定模型/速度首现序）才不会漂移。缺失的根 → 跳过（存在性探测，
+/// 绝不报错）。
+pub fn codex_rollout_files(home: &Path) -> Vec<PathBuf> {
+    let entries: [(&str, &str); 2] = [("live", "sessions"), ("archived", "archived_sessions")];
+    let mut files: Vec<PathBuf> = Vec::new();
+    for (_kind, rel) in entries {
+        let root = home.join(".codex").join(rel);
+        if root.is_dir() {
+            files.extend(
+                walkdir::WalkDir::new(&root)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|e| e.file_type().is_file())
+                    .filter(|e| {
+                        let name = e.file_name().to_string_lossy();
+                        name.starts_with("rollout-") && name.ends_with(".jsonl")
+                    })
+                    .map(|e| e.into_path()),
+            );
+        }
+    }
+    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    files
 }
 
 /// 纯解析：把 `session_index.jsonl` 折成 `{id: thread_name}` 映射。与 Python

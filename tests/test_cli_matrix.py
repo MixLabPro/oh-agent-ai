@@ -1028,6 +1028,74 @@ class CliMatrix(unittest.TestCase):
         self.assertIn("(absent)", out)
         self.assertIn("archived", out)
 
+    # ── codex-cost（cc-trace 研究 §D：Codex 成本折叠 + 计价）─────────────
+    # 差分门 both() 兜底逐字节一致；这里额外断言**价**与**守恒**，防两个实现
+    # 一起漂移（LC 判定粒度与 month 过滤重算都是真实 defect，见 §D 与各函数注释）。
+
+    def _codex_cost_roots(self):
+        """把三份合成 rollout 夹具摆进 fake HOME 的 .codex 树：sol + unpriced 在
+        live（2026-08）、terra 在 archived（2026-07）。HOME 由 both() 注入
+        self.tmp，codex_rollout_files 全局按路径排序 → archived 先于 sessions，
+        模型首现序 = terra → luna → sol → codex-auto-review。"""
+        cost_fx = ROOT / "fixtures" / "codex" / "cost"
+        live = self.tmp / ".codex" / "sessions" / "2026" / "08"
+        arch = self.tmp / ".codex" / "archived_sessions" / "2026" / "07"
+        live.mkdir(parents=True, exist_ok=True)
+        arch.mkdir(parents=True, exist_ok=True)
+        shutil.copy(cost_fx / "rollout-sol.jsonl", live / "rollout-sol.jsonl")
+        shutil.copy(cost_fx / "rollout-unpriced.jsonl", live / "rollout-unpriced.jsonl")
+        shutil.copy(cost_fx / "rollout-terra.jsonl", arch / "rollout-terra.jsonl")
+
+    def test_codex_cost_differential(self):
+        """`codex-cost --json -`（全量）与 `--month 2026-08`：py==rs 逐字节（both()
+        兜底），且金额等于手算值——sol 两桶（0.6325 + LC 4.425）+ terra 0.3885 +
+        luna 0.0897 = 5.5357；月过滤后 terra/luna 出局 → 5.0575。"""
+        self._codex_cost_roots()
+        code, out, err = self.both("codex-cost", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["host"], "codex")
+        self.assertEqual(report["currency"], "USD")
+        # 归档会话必须先于 live（全局路径排序）→ 模型首现序钉住
+        self.assertEqual(list(report["per_model"].keys()),
+                         ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "codex-auto-review"])
+        self.assertAlmostEqual(report["total_cost_usd"], 5.5357, places=9)
+        self.assertAlmostEqual(report["per_model"]["gpt-5.6-sol"]["cost_usd"], 5.0575, places=9)
+        self.assertEqual(report["unpriced_tokens"], 6000)
+        # 残差哨兵跨月保留
+        self.assertEqual([u["type"] for u in report["unaccounted_usage"]],
+                         ["token_count_before_turn_context", "token_count_invalid_last_usage"])
+
+        code, out, err = self.both("codex-cost", "--month", "2026-08", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["month"], "2026-08")
+        self.assertAlmostEqual(report["total_cost_usd"], 5.0575, places=9)
+        self.assertEqual(list(report["per_model"].keys()),
+                         ["gpt-5.6-sol", "codex-auto-review"])
+        self.assertEqual(report["unpriced_tokens"], 6000,
+                         "auto-review 的 08-03 桶在月内，unpriced 不该被过滤掉")
+
+    def test_codex_cost_month_filter_reconciles(self):
+        """守恒：`sum(days.cost_usd) == total_cost_usd` 在**过滤前后**都精确成立。
+
+        这是真实 defect 的回归：`--month` 过滤日期轴后，旧实现拿 codex_merge_folds
+        折回 by_model——merge 只读 fold 的 `by_model` 字段、不读 by_date_model，
+        得到空模型轴，整份月报告静默变全零（per_model 空 + unpriced 0 → 返回 None
+        → 全零兜底），一个「看不见的错」。修后 by_model 由 codex_by_model_from_dates
+        从过滤后的日期桶重算，days 与 per_model 永远对得上。
+        """
+        self._codex_cost_roots()
+        for extra in ((), ("--month", "2026-08"), ("--month", "2026-07")):
+            with self.subTest(month=extra[1] if extra else None):
+                code, out, err = self.both("codex-cost", *extra, "--json", "-")
+                self.assertEqual(code, 0)
+                report = json.loads(out)
+                self.assertAlmostEqual(
+                    report["total_cost_usd"],
+                    sum(d["cost_usd"] for d in report["days"]), places=9,
+                    msg="sum(days) != total_cost_usd（month=%r）" % (extra,))
+
     def test_codex_evidence_title_lookup(self):
         """`session_index.jsonl` 标题 join 差分（py==rs 逐字节，both() 兜底）：
         索引的 id 键 = **逻辑 session_id**（fixture 是 codex-legacy-0001，不是

@@ -29,12 +29,13 @@ ALLOWED_PACKAGE_FILES = {
         "lifecycle.py", "redact.py", "snapshots.py", "diff.py", "behavior.py",
         "usage.py", "cost.py", "trajectory.py", "compaction.py", "waste.py", "subagent.py", "skill.py",
         "duration.py", "pricing.json", "state.py", "budget.py",
-        "codex_evidence.py",
+        "codex_evidence.py", "codex_usage.py", "codex_cost.py", "codex_pricing.json",
         "adapters/__init__.py", "adapters/claude.py", "adapters/codex.py",
         "adapters/codex_session.py",
         "adapters/openclaw.py", "adapters/workbuddy.py", "adapters/hermes.py",
         "adapters/dsh.py",
         "templates/calendar.html",
+        "templates/codex_cost.html",
     )
 }
 ALLOWED_PACKAGE_DIRS = {Path("adapters"), Path("templates")}
