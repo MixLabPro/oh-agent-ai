@@ -1065,6 +1065,12 @@ class CliMatrix(unittest.TestCase):
         # 残差哨兵跨月保留
         self.assertEqual([u["type"] for u in report["unaccounted_usage"]],
                          ["token_count_before_turn_context", "token_count_invalid_last_usage"])
+        # 配额快照：跨文件 merge 取 observed_at 最新（unpriced 08-03 的 77%，
+        # 不是 sol 08-02 的 67%）；observed_at 前进到 12:05 的降级快照但 limits
+        # 保留 77%（降级快照不抹配额条）。`both()` 已逐字节比过 py↔rs 的 plan 块。
+        self.assertEqual(report["plan"]["plan_type"], "plus")
+        self.assertAlmostEqual(report["plan"]["limits"]["primary"]["used_percent"], 77.0)
+        self.assertEqual(report["plan"]["observed_at"], "2026-08-03T12:05:00Z")
 
         code, out, err = self.both("codex-cost", "--month", "2026-08", "--json", "-")
         self.assertEqual(code, 0)

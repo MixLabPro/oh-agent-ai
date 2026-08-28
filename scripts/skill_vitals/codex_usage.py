@@ -73,6 +73,81 @@ def _total_signature(total):
     return tuple(parts)
 
 
+def _event_ts(event):
+    """事件的时间戳**原始字符串**（顶层 `timestamp` 回退 `payload.timestamp`）。
+    None = 无时间戳——配额快照没有可排序的 observed_at，就不更新（保持上一份）。"""
+    ts = event.get("timestamp")
+    if not isinstance(ts, str):
+        payload = event.get("payload")
+        if isinstance(payload, dict):
+            ts = payload.get("timestamp")
+    return ts if isinstance(ts, str) else None
+
+
+def _plan_from_rate_limits(rl, observed_at):
+    """`payload.rate_limits` → `plan` 块。`plan_type` 非空字符串才算有效
+    （`limit_id` 之类不构成套餐身份）；`primary`/`secondary` 只收
+    `{used_percent, window_minutes, resets_at}` 三字段、缺啥补啥、非法类型跳过该键；
+    `observed_at` 由调用方传事件时间戳。None = 无效 rate_limits——不更新配额快照。
+
+    `used_percent` 的真实值恒是 float（67.0），但 JSON 里整数也可能出现；先试
+    int 再试 float（与 Rust 侧 `as_i64` → `as_f64` 同序），否则两侧 `67` vs `67.0`
+    序列化不同（逐字节差分当场红）。"""
+    if not isinstance(rl, dict):
+        return None
+    pt = rl.get("plan_type")
+    if not isinstance(pt, str) or not pt:
+        return None
+    has_credits = False
+    credits = rl.get("credits")
+    if isinstance(credits, dict) and isinstance(credits.get("has_credits"), bool):
+        has_credits = credits["has_credits"]
+    limits = {}
+    for name in ("primary", "secondary"):
+        win = rl.get(name)
+        if not isinstance(win, dict):
+            continue
+        entry = {}
+        up = win.get("used_percent")
+        if isinstance(up, bool):
+            pass
+        elif isinstance(up, int):
+            entry["used_percent"] = up
+        elif isinstance(up, float):
+            entry["used_percent"] = up
+        wm = win.get("window_minutes")
+        if isinstance(wm, int) and not isinstance(wm, bool):
+            entry["window_minutes"] = wm
+        ra = win.get("resets_at")
+        if isinstance(ra, int) and not isinstance(ra, bool):
+            entry["resets_at"] = ra
+        if entry:
+            limits[name] = entry
+    plan = {"plan_type": pt, "has_credits": has_credits}
+    if limits:
+        plan["limits"] = limits
+    plan["observed_at"] = observed_at
+    return plan
+
+
+def _combine_plan(new_p, prev):
+    """把新事件的 plan 与上一次 plan 合并：**新事件没带 `limits`、上一次带了 →
+    把上一次的非空限额带过来**（降级快照 primary/secondary 全 null 不抹掉配额
+    条），canonical 键序重建 (plan_type, has_credits, limits, observed_at)。新事件
+    自带 limits 或上一次没有 → 原样返回。与 Rust 侧 `combine_plan` 逐字节对齐。"""
+    if not isinstance(new_p, dict) or "limits" in new_p:
+        return new_p
+    prev_limits = prev.get("limits") if isinstance(prev, dict) else None
+    if not isinstance(prev_limits, dict) or not prev_limits:
+        return new_p
+    return {
+        "plan_type": new_p["plan_type"],
+        "has_credits": new_p["has_credits"],
+        "limits": prev_limits,
+        "observed_at": new_p["observed_at"],
+    }
+
+
 def codex_date_of(event):
     """事件时间戳 → `YYYY-MM-DD` 前缀。顶层 `timestamp` 回退 `payload.timestamp`；
     不是 `YYYY-MM-DD` 开头 → None（未知时间，不编造日期）。"""
@@ -141,7 +216,12 @@ def _bump_unaccounted(unaccounted, ttype, total_tokens):
 
 def codex_fold_file(events):
     """单文件有序折叠：一份 rollout 的原始条目流 → `{by_date_model, by_model,
-    unaccounted}`。纯函数，不碰文件系统——I/O 在适配器层。
+    unaccounted, plan}`。纯函数，不碰文件系统——I/O 在适配器层。
+
+    `plan` = 最后看见的有效 rate_limits 快照（含 observed_at；没见过 → None，
+    序列化成 null）。配额状态**即使 info 为 null 也读**（真实语料里 info:null 的
+    事件仍带 rate_limits）。`limits` 是「最后看见的非空限额」——新事件的降级快照
+    （primary/secondary 全 null）不抹掉上一次的限额（见 `_combine_plan`）。
 
     输出顺序：日期升序、模型/速度按首现序、`unaccounted` 按 type 名升序。这些
     顺序是字节一致的一部分（Rust 侧 BTreeMap 排序、serde_json Map 插入序对齐）。
@@ -149,6 +229,7 @@ def codex_fold_file(events):
     model = None
     speed = "standard"
     last_total_sig = None
+    plan = None
     by_date_model = {}
     by_model = {}
     unaccounted = {}
@@ -176,6 +257,16 @@ def codex_fold_file(events):
                 if s is not None:
                     speed = s
             elif ptype == "token_count":
+                # 配额状态从 token_count 读——**即使 info 为 null 也读**（真实语料
+                # 里 info:null 的事件仍带 rate_limits，配额是独立于 token 计量的
+                # 状态）。plan_type/has_credits/observed_at 最后看见的赢（事件序即
+                # 时间序）；`limits` 走 _combine_plan 保留上一次非空限额——降级快照
+                # （primary/secondary 全 null，真实语料 08-27 出过）不该抹掉配额条。
+                ts = _event_ts(event)
+                if ts is not None:
+                    p = _plan_from_rate_limits(payload.get("rate_limits"), ts)
+                    if p is not None:
+                        plan = _combine_plan(p, plan)
                 info = payload.get("info")
                 if not isinstance(info, dict):
                     continue
@@ -218,7 +309,7 @@ def codex_fold_file(events):
         for t, v in sorted(unaccounted.items())
     ]
     return {"by_date_model": by_date_out, "by_model": by_model,
-            "unaccounted": unaccounted_out}
+            "unaccounted": unaccounted_out, "plan": plan}
 
 
 def codex_merge_folds(folds):
@@ -227,6 +318,10 @@ def codex_merge_folds(folds):
     顺序确定性（字节一致的一部分）：日期**全局升序**（先收集全部日期排序，再按序
     遍历——跨文件时插入序不可靠）；每个日期内的模型、速度按**跨文件首现序**（按
     folds 顺序）。`by_model` 按 folds 顺序。`unaccounted` 按 type 名升序求和。
+    `plan` 取 `observed_at` 最大者（各会话的配额快照不同，选「最新」的那个；平手
+    先见者赢——按 folds 顺序，确定性）；`limits` 单独取「最后看见的非空限额」——
+    最新快照是降级形态（primary/secondary 全 null）时不抹掉配额条（见
+    `_combine_plan`，与单文件折叠同一语义）。
     """
     all_dates = set()
     for fold in folds:
@@ -283,8 +378,26 @@ def codex_merge_folds(folds):
         {"type": t, "count": v["count"], "tokens_seen": v["tokens_seen"]}
         for t, v in sorted(unaccounted.items())
     ]
+    # plan_type/has_credits/observed_at 取 observed_at 最大者；`limits` 单独取
+    # 「最后看见的**非空**限额」（limits_plan 里带 limits 的那份）——与单文件折叠
+    # 同一语义：某文件的最后一次快照是降级形态（primary/secondary 全 null）时，
+    # 别把别的文件带来的配额条抹掉。最后 _combine_plan 把二者合一。
+    plan_out = None
+    limits_plan = None
+    for fold in folds:
+        p = fold.get("plan")
+        if not isinstance(p, dict):
+            continue
+        oa = p.get("observed_at", "")
+        if plan_out is None or oa > plan_out.get("observed_at", ""):
+            plan_out = p
+        if isinstance(p.get("limits"), dict):
+            if limits_plan is None or oa > limits_plan.get("observed_at", ""):
+                limits_plan = p
+    if plan_out is not None and limits_plan is not None:
+        plan_out = _combine_plan(plan_out, limits_plan)
     return {"by_date_model": by_date_out, "by_model": by_model,
-            "unaccounted": unaccounted_out}
+            "unaccounted": unaccounted_out, "plan": plan_out}
 
 
 def codex_by_model_from_dates(by_date_model):

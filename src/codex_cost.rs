@@ -161,8 +161,51 @@ fn tokens_object(t: &[i64; 5]) -> Value {
     Value::Object(obj)
 }
 
+/// 窗口分钟数 → 人读标签：300→`5h`、10080→`7d`，其余 → `Nmin`。py↔rs 同 spec，
+/// 文本渲染逐字节对齐（`codex_cost.py::_window_label` 镜像）。
+fn window_label(wm: i64) -> String {
+    match wm {
+        300 => "5h".to_string(),
+        10080 => "7d".to_string(),
+        _ => format!("{wm}min"),
+    }
+}
+
+/// `used_percent` → 人读百分比：固定 3 位小数去尾零（67.0 → 67、67.5 → 67.5）。
+/// **不用 Display**——它对小数会走最短表示，与 Python 的 `:g` 在大数/极小值上
+/// 分歧；`{:.3}` + 去尾零在两侧完全确定（`codex_cost.py::_pct_text` 镜像）。
+fn pct_text(up: f64) -> String {
+    let s = format!("{up:.3}");
+    let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
+    if s.is_empty() { "0".to_string() } else { s }
+}
+
+/// plan 块 → 人读一行（None = 无有效套餐，不打印）。数字只格式化不重算——
+/// `used_percent` 直接来自日志 rate_limits。与 `codex_cost.py::_plan_line` 逐字节
+/// 对齐。
+fn plan_line(plan: Option<&Value>) -> Option<String> {
+    let plan = plan?.as_object()?;
+    let pt = plan.get("plan_type").and_then(|v| v.as_str())?;
+    if pt.is_empty() {
+        return None;
+    }
+    let mut parts = vec![format!("{pt}（订阅套餐）")];
+    if let Some(limits) = plan.get("limits").and_then(|v| v.as_object()) {
+        for (_name, win) in limits {
+            let Some(win) = win.as_object() else { continue };
+            let Some(up) = win.get("used_percent").and_then(|v| v.as_f64()) else { continue };
+            let wm = win.get("window_minutes").and_then(|v| v.as_i64()).unwrap_or(0);
+            parts.push(format!("{} {}% 已用", window_label(wm), pct_text(up)));
+        }
+    }
+    Some(parts.join(" · "))
+}
+
 /// 折叠结果 × 价格表 → 结构化成本报告。**这是唯一算价格的地方**——人读文本、
 /// `--json`、`--html` 都从这里取数，不是三处各算一遍。
+///
+/// `plan` 是折叠出的配额快照（Value，可为 Null），原样透传到输出——报告不解释
+/// 它，展示层自己判「订阅 → 重标价」。
 ///
 /// `None` = 没有任何 token 可计价（空折叠：per_model 空、unpriced 0）。有未计价
 /// token 时返回 `Some`（total 0 + unpriced > 0 是「看见了、没价目」的诚实上报）。
@@ -182,6 +225,7 @@ pub fn codex_cost_report(
     by_date_model: &Value,
     by_model: &Value,
     unaccounted: &Value,
+    plan: &Value,
     pricing: &Value,
 ) -> Option<Value> {
     let entries = pricing
@@ -290,6 +334,7 @@ pub fn codex_cost_report(
         "days": Value::Array(days),
         "unpriced_tokens": unpriced,
         "unaccounted_usage": unaccounted.clone(),
+        "plan": plan.clone(),
     }))
 }
 
@@ -324,12 +369,19 @@ pub fn render_codex_cost(out: &Value) -> String {
         parts.push(format!("month: {m}\n"));
     }
     parts.push(format!("currency: {currency}\n"));
+    let plan_line = plan_line(out.get("plan"));
+    if let Some(pl) = &plan_line {
+        parts.push(format!("plan: {pl}\n"));
+    }
     // 5 桶人读只需一个总量；分桶明细在 --json 与仪表盘里。
     let mut all_tokens: i64 = 0;
     for f in skill_vitals_core::codex_usage::CODEX_TOKEN_FIELDS.iter() {
         all_tokens += tt.get(*f).and_then(|x| x.as_i64()).unwrap_or(0);
     }
-    let mut line = format!("total cost: {}", format_usd(total));
+    // 订阅套餐（plan 存在）时，per-token 美元是「按量标价」不是账单——账单 = 套餐
+    // 固定费。诚实标注，别让用户把标价当成实际支出。
+    let label = if plan_line.is_some() { "total cost (按量标价)" } else { "total cost" };
+    let mut line = format!("{label}: {}", format_usd(total));
     if all_tokens > 0 {
         line += &format!(" · total tokens: {}", format_number(all_tokens));
     }
@@ -501,7 +553,7 @@ mod tests {
             }
         });
         let pricing = load_codex_pricing();
-        let report = codex_cost_report(&by_date_model, &by_model, &json!([]), &pricing).unwrap();
+        let report = codex_cost_report(&by_date_model, &by_model, &json!([]), &json!(null), &pricing).unwrap();
         // by_date 之和 == by_model → 总价与 days 之和精确相等（守恒）。
         let total = report["total_cost_usd"].as_f64().unwrap();
         let mut day_sum = 0.0;
@@ -547,7 +599,7 @@ mod tests {
             "2026-08-02": { "gpt-5.6-sol": { "standard": day_bucket } },
         });
         let pricing = load_codex_pricing();
-        let report = codex_cost_report(&by_date_model, &by_model, &json!([]), &pricing).unwrap();
+        let report = codex_cost_report(&by_date_model, &by_model, &json!([]), &json!(null), &pricing).unwrap();
         let total = report["total_cost_usd"].as_f64().unwrap();
         let mut day_sum = 0.0;
         for d in report["days"].as_array().unwrap() {
@@ -585,7 +637,7 @@ mod tests {
             } } }
         });
         let pricing = load_codex_pricing();
-        let report = codex_cost_report(&by_date_model, &by_model, &json!([]), &pricing).unwrap();
+        let report = codex_cost_report(&by_date_model, &by_model, &json!([]), &json!(null), &pricing).unwrap();
         let total = report["total_cost_usd"].as_f64().unwrap();
         let day_sum = report["days"].as_array().unwrap()[0]["cost_usd"].as_f64().unwrap();
         // dated 2.05 + untimed 2.05 = 4.10；days 只有 2.05 → 差 2.05 == untimed 价。
@@ -607,7 +659,7 @@ mod tests {
             }
         });
         let pricing = load_codex_pricing();
-        let report = codex_cost_report(&json!({}), &by_model, &json!([]), &pricing).unwrap();
+        let report = codex_cost_report(&json!({}), &by_model, &json!([]), &json!(null), &pricing).unwrap();
         assert_eq!(report["total_cost_usd"], 0.0);
         assert_eq!(report["unpriced_tokens"], 5100);
         let pm = &report["per_model"]["codex-auto-review"];
@@ -617,7 +669,7 @@ mod tests {
     #[test]
     fn report_none_when_nothing_to_price() {
         let pricing = load_codex_pricing();
-        assert_eq!(codex_cost_report(&json!({}), &json!({}), &json!([]), &pricing), None);
+        assert_eq!(codex_cost_report(&json!({}), &json!({}), &json!([]), &json!(null), &pricing), None);
     }
 
     #[test]
@@ -628,5 +680,95 @@ mod tests {
         assert_eq!(format_usd(1234.0), "$1234");
         assert_eq!(format_usd(22.38), "$22.38");
         assert_eq!(format_usd(12.0), "$12");
+    }
+
+    #[test]
+    fn window_label_and_pct_text_are_deterministic() {
+        assert_eq!(window_label(300), "5h");
+        assert_eq!(window_label(10080), "7d");
+        assert_eq!(window_label(60), "60min");
+        // `:g`/Display 在大数/极小值上会分歧——`{:.3}`+去尾零两侧确定。
+        assert_eq!(pct_text(67.0), "67");
+        assert_eq!(pct_text(67.5), "67.5");
+        assert_eq!(pct_text(11.0), "11");
+        assert_eq!(pct_text(0.0), "0");
+    }
+
+    #[test]
+    fn plan_line_formats_subscription_and_limits() {
+        let plan = json!({
+            "plan_type": "plus",
+            "has_credits": false,
+            "limits": {
+                "primary": {"used_percent": 67.0, "window_minutes": 300, "resets_at": 1787858552},
+                "secondary": {"used_percent": 11.0, "window_minutes": 10080, "resets_at": 1788351817}
+            },
+            "observed_at": "2026-08-19T..."
+        });
+        assert_eq!(
+            plan_line(Some(&plan)),
+            Some("plus（订阅套餐） · 5h 67% 已用 · 7d 11% 已用".to_string())
+        );
+        // 无有效 plan_type → None（不打印）；null/缺键同款。
+        assert_eq!(plan_line(Some(&json!({"plan_type": ""}))), None);
+        assert_eq!(plan_line(Some(&json!(null))), None);
+        assert_eq!(plan_line(None), None);
+    }
+
+    #[test]
+    fn report_passes_plan_through() {
+        let by_model = json!({
+            "gpt-5.6-sol": {
+                "standard": {
+                    "uncached_input_tokens": 1000,
+                    "output_tokens": 500,
+                    "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                }
+            }
+        });
+        let plan = json!({"plan_type": "plus", "has_credits": false, "observed_at": "2026-08-19T..."});
+        let pricing = load_codex_pricing();
+        let report = codex_cost_report(&json!({}), &by_model, &json!([]), &plan, &pricing).unwrap();
+        // plan 原样透传，不解释。
+        assert_eq!(report["plan"], plan);
+        // 没有 plan 时 → null（而非缺失）。
+        let r2 = codex_cost_report(&json!({}), &by_model, &json!([]), &json!(null), &pricing).unwrap();
+        assert!(r2["plan"].is_null());
+    }
+
+    #[test]
+    fn render_relabels_total_as_按量标价_when_plan_present() {
+        let plan = json!({
+            "plan_type": "plus",
+            "limits": {"primary": {"used_percent": 67.0, "window_minutes": 300, "resets_at": 0}},
+            "observed_at": "2026-08-19T..."
+        });
+        let out = json!({
+            "host": "codex",
+            "currency": "USD",
+            "month": "2026-08",
+            "total_cost_usd": 5.54,
+            "total_tokens": {"uncached_input_tokens": 1000000, "output_tokens": 0,
+                             "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                             "reasoning_output_tokens": 0},
+            "per_model": {},
+            "plan": plan,
+        });
+        let text = render_codex_cost(&out);
+        assert!(text.contains("plan: plus（订阅套餐） · 5h 67% 已用"));
+        assert!(text.contains("total cost (按量标价): $5.54"));
+        // 无 plan → 旧标签。
+        let out2 = json!({
+            "host": "codex", "currency": "USD", "total_cost_usd": 1.0,
+            "total_tokens": {"uncached_input_tokens": 1000, "output_tokens": 0,
+                             "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                             "reasoning_output_tokens": 0},
+            "per_model": {}, "plan": null,
+        });
+        let text2 = render_codex_cost(&out2);
+        assert!(text2.contains("total cost: $1"));
+        assert!(!text2.contains("按量标价"));
     }
 }

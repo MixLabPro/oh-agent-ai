@@ -29,6 +29,12 @@ characterization 测试使用。
 - codex-auto-review：5000+1000 = 6000 tokens，priced:false，unpriced_tokens=6000。
 - unaccounted：`token_count_before_turn_context` ×1（tokens_seen 1100）、
   `token_count_invalid_last_usage` ×1（tokens_seen 670）。
+- plan（配额快照）：sol 08-02 事件带 plus 67%/11%（observed_at 08-02）、unpriced
+  08-03 事件带 plus 77%/9%（observed_at 08-03 12:00:01，全夹具最新）→ **跨文件
+  merge 取 08-03 的 77%**（observed_at 最大者赢）。unpriced 12:05 再加一个降级
+  快照（info:null + primary/secondary 全 null）——observed_at 前进到 12:05，但
+  **limits 保留 77%/9%**（降级快照不抹配额条）。terra 文件无 rate_limits → 其
+  fold 的 plan 是 None，merge 跳过。
 """
 
 import json
@@ -51,21 +57,29 @@ def tc(ts, model, service_tier=None):
     return {"timestamp": ts, "type": "turn_context", "payload": payload}
 
 
-def tkn_null(ts):
+def tkn_null(ts, rate_limits=None):
     """token_count 事件，但 `info` 是 JSON `null`（真实语料 2026-08-19 rollout 里
     出现过）——事件**没有任何 token 字段**，fold 必须跳过：不进桶、不进 unaccounted。
     曾让 Py↔Rust 分歧：Rust 把 `info: null` 当「有 info」继续读 last → 误报
-    `token_count_invalid_last_usage`；Python 的 `isinstance(info, dict)` 直接跳过。"""
+    `token_count_invalid_last_usage`；Python 的 `isinstance(info, dict)` 直接跳过。
+    rate_limits 可选：**info:null 的事件仍带 rate_limits**（配额独立于 token 计量，
+    这正是 fold「即使 info 为 null 也读配额」的理由）。"""
+    payload = {"type": "token_count", "info": None}
+    if rate_limits is not None:
+        payload["rate_limits"] = rate_limits
     return {
         "timestamp": ts,
         "type": "event_msg",
-        "payload": {"type": "token_count", "info": None},
+        "payload": payload,
     }
 
 
-def tkn(ts, total, last):
+def tkn(ts, total, last, rate_limits=None):
     """token_count 事件行。total/last 是 6 元组
-    (input, output, cached, cache_write, reasoning, total_tokens)。"""
+    (input, output, cached, cache_write, reasoning, total_tokens)。
+    rate_limits 缺省 None（不带配额状态）；传 dict 时原样放进 payload——
+    fold 从 token_count 读配额，**即使 info 为 null 也读**，所以配额附着在
+    有效桶事件上就能被折叠。"""
     def obj(t):
         (ti, to, tc, tw, tr, tt) = t
         return {
@@ -73,17 +87,45 @@ def tkn(ts, total, last):
             "cached_input_tokens": tc, "cache_write_input_tokens": tw,
             "reasoning_output_tokens": tr, "total_tokens": tt,
         }
+    payload = {
+        "type": "token_count",
+        "info": {
+            "total_token_usage": obj(total),
+            "last_token_usage": obj(last),
+            "model_context_window": 258400,
+        },
+    }
+    if rate_limits is not None:
+        payload["rate_limits"] = rate_limits
     return {
         "timestamp": ts,
         "type": "event_msg",
-        "payload": {
-            "type": "token_count",
-            "info": {
-                "total_token_usage": obj(total),
-                "last_token_usage": obj(last),
-                "model_context_window": 258400,
-            },
+        "payload": payload,
+    }
+
+
+# 真实 rate_limits 形态（2026-08 本机语料，plan_type="plus"）。fold 只读
+# plan_type / credits.has_credits / primary|secondary 的 used_percent 三字段，
+# 其余键（limit_id、unlimited 等）不碰——保留它们以保持「真实形状」。
+def rate_limits(plan_type, primary_pct, secondary_pct, primary_resets, secondary_resets):
+    return {
+        "limit_id": "codex:limit:" + plan_type,
+        "limit_name": "codex " + plan_type + " limit",
+        "plan_type": plan_type,
+        "credits": {"has_credits": False, "unlimited": False, "balance": 0},
+        "primary": {
+            "used_percent": primary_pct,
+            "window_minutes": 300,
+            "resets_at": primary_resets,
         },
+        "secondary": {
+            "used_percent": secondary_pct,
+            "window_minutes": 10080,
+            "resets_at": secondary_resets,
+        },
+        "individual_limit": None,
+        "spend_control_reached": False,
+        "rate_limit_reached_type": None,
     }
 
 
@@ -105,8 +147,10 @@ SOL_ROLLOUT = [
     tkn("2026-08-01T00:00:04Z", SOL_D1_TOTAL, (0, 0, 0, 0, 0, 0)),
     # 6. 新签名但 last 无效（reasoning 70 > output 60）→ unaccounted invalid
     tkn("2026-08-01T00:00:05Z", (600, 60, 0, 0, 70, 670), (600, 60, 0, 0, 70, 670)),
-    # 7. longContext：input_total 300000 > 272000 → input ×2、output ×1.5
-    tkn("2026-08-02T00:00:00Z", SOL_D2_TOTAL, SOL_D2_TOTAL),
+    # 7. longContext：input_total 300000 > 272000 → input ×2、output ×1.5；
+    #    同时带配额快照（plus，67%）。observed_at = 2026-08-02T00:00:00Z。
+    tkn("2026-08-02T00:00:00Z", SOL_D2_TOTAL, SOL_D2_TOTAL,
+        rate_limits("plus", 67.0, 11.0, 1787858552, 1788351817)),
 ]
 
 TERRA_ROLLOUT = [
@@ -123,7 +167,21 @@ TERRA_ROLLOUT = [
 
 UNPRICED_ROLLOUT = [
     tc("2026-08-03T12:00:00Z", "codex-auto-review"),
-    tkn("2026-08-03T12:00:01Z", (5000, 1000, 0, 0, 0, 6000), (5000, 1000, 0, 0, 0, 6000)),
+    # 全夹具里 observed_at 最新的事件（08-03 12:00:01Z > 08-02）→ merge 时这份
+    # 配额快照赢（77%）。与 sol 的 67% 不同，证明跨文件 merge 取的是最新快照。
+    tkn("2026-08-03T12:00:01Z", (5000, 1000, 0, 0, 0, 6000), (5000, 1000, 0, 0, 0, 6000),
+        rate_limits("plus", 77.0, 9.0, 1787900000, 1788351817)),
+    # 降级快照：info:null 且 primary/secondary 全 null（真实语料 2026-08-27 18:18
+    # 事件同款）——只有 plan_type + limit_id。这事件让 observed_at 前进到 12:05，
+    # 但 **limits 必须保留上一次的 77%/9%**（真实 defect：直接覆盖会抹掉配额条）。
+    tkn_null("2026-08-03T12:05:00Z", {
+        "limit_id": "premium",
+        "limit_name": None,
+        "plan_type": "plus",
+        "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
+        "primary": None,
+        "secondary": None,
+    }),
 ]
 
 FILES = {
@@ -180,6 +238,40 @@ def self_check():
     up_fold = _fold_file(UNPRICED_ROLLOUT)
     assert up_fold["by_model"]["codex-auto-review"]["standard"]["uncached_input_tokens"] == 5000
     assert up_fold["by_model"]["codex-auto-review"]["standard"]["output_tokens"] == 1000
+
+    # ── plan（配额快照）────────────────────────────────────────────────
+    # sol 08-02 事件的 rate_limits → 单文件最后看见的赢。
+    sol_plan = sol_fold["plan"]
+    assert sol_plan["plan_type"] == "plus", sol_plan
+    assert sol_plan["has_credits"] is False, sol_plan
+    # used_percent 保类型（真实语料是 float 67.0；整数也合法，别强转）。
+    assert sol_plan["limits"]["primary"]["used_percent"] == 67.0, sol_plan
+    assert sol_plan["limits"]["primary"]["window_minutes"] == 300, sol_plan
+    assert sol_plan["limits"]["primary"]["resets_at"] == 1787858552, sol_plan
+    assert sol_plan["limits"]["secondary"]["used_percent"] == 11.0, sol_plan
+    assert sol_plan["limits"]["secondary"]["window_minutes"] == 10080, sol_plan
+    assert sol_plan["observed_at"] == "2026-08-02T00:00:00Z", sol_plan
+
+    # unpriced 文件 plan：observed_at 前进到 12:05（降级快照），但 limits 保留
+    # 12:00:01 的 77%——降级快照不抹掉配额条（真实 defect 的回归）。
+    up_plan = up_fold["plan"]
+    assert up_plan["plan_type"] == "plus", up_plan
+    assert up_plan["observed_at"] == "2026-08-03T12:05:00Z", up_plan
+    assert up_plan["limits"]["primary"]["used_percent"] == 77.0, up_plan
+    assert up_plan["limits"]["primary"]["window_minutes"] == 300, up_plan
+    assert up_plan["limits"]["primary"]["resets_at"] == 1787900000, up_plan
+
+    # terra 无 rate_limits → plan None（merge 必须跳过，不被它污染）。
+    assert _fold_file(TERRA_ROLLOUT)["plan"] is None
+
+    # 跨文件 merge：observed_at 最大者赢（08-03 12:05 的 plus），limits 是最后
+    # 非空限额（77%）。
+    merged = codex_usage.codex_merge_folds([sol_fold, _fold_file(TERRA_ROLLOUT), up_fold])
+    mplan = merged["plan"]
+    assert mplan["plan_type"] == "plus", mplan
+    assert mplan["limits"]["primary"]["used_percent"] == 77.0, mplan
+    assert mplan["limits"]["secondary"]["used_percent"] == 9.0, mplan
+    assert mplan["observed_at"] == "2026-08-03T12:05:00Z", mplan
     print("self-check OK")
 
 

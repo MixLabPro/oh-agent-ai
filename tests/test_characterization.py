@@ -3103,7 +3103,8 @@ class CodexCostCharacterization(unittest.TestCase):
                  self._fold("rollout-unpriced.jsonl")]
         merged = codex_merge_folds(folds)
         return codex_cost_report(merged["by_date_model"], merged["by_model"],
-                                 merged["unaccounted"], load_codex_pricing())
+                                 merged["unaccounted"], merged["plan"],
+                                 load_codex_pricing())
 
     def test_cost_report_exact_usd_and_reconciles(self):
         """合并三份夹具 → 精确 USD 价 + 守恒：sum(days.cost) == total_cost_usd。"""
@@ -3142,29 +3143,122 @@ class CodexCostCharacterization(unittest.TestCase):
         output ×1.5（08-02 桶 = $4.425）。"""
         f = self._fold("rollout-sol.jsonl")
         report = codex_cost_report(
-            f["by_date_model"], f["by_model"], f["unaccounted"], load_codex_pricing())
+            f["by_date_model"], f["by_model"], f["unaccounted"], f["plan"],
+            load_codex_pricing())
         d2 = next(d for d in report["days"] if d["date"] == "2026-08-02")
         self.assertAlmostEqual(d2["cost_usd"], 4.425, places=9)
         self.assertEqual(d2["tokens"], 366000)
 
     def test_cost_report_none_when_nothing_to_price(self):
-        self.assertIsNone(codex_cost_report({}, {}, [], load_codex_pricing()))
+        self.assertIsNone(codex_cost_report({}, {}, [], None, load_codex_pricing()))
+
+    def test_cost_report_plan_passes_through(self):
+        """plan 原样透传（报告不解释它，展示层自己判「订阅 → 重标价」）；合并
+        取 observed_at 最新的快照（unpriced 08-03 的 77%，而不是 sol 08-02 的
+        67%）。unpriced 12:05 的降级快照（primary/secondary 全 null）让 observed_at
+        前进到 12:05，但 **limits 保留 77%/9%**——降级快照不抹掉配额条（真实
+        defect 回归：直接覆盖会让用户看配额的功能静默消失）。"""
+        report = self._merged_report()
+        plan = report["plan"]
+        self.assertEqual(plan["plan_type"], "plus")
+        self.assertIs(plan["has_credits"], False)
+        # used_percent 保类型（真实语料是 float；整数也合法，别强转成 float）。
+        self.assertIsInstance(plan["limits"]["primary"]["used_percent"], float)
+        self.assertEqual(plan["limits"]["primary"]["used_percent"], 77.0)
+        self.assertEqual(plan["limits"]["primary"]["window_minutes"], 300)
+        self.assertEqual(plan["limits"]["primary"]["resets_at"], 1787900000)
+        self.assertEqual(plan["limits"]["secondary"]["used_percent"], 9.0)
+        self.assertEqual(plan["limits"]["secondary"]["window_minutes"], 10080)
+        self.assertEqual(plan["observed_at"], "2026-08-03T12:05:00Z")
+        # 无 plan 的折叠 → null（不是缺键）。
+        f = self._fold("rollout-terra.jsonl")
+        r2 = codex_cost_report(f["by_date_model"], f["by_model"], f["unaccounted"],
+                               f["plan"], load_codex_pricing())
+        self.assertIsNone(r2["plan"])
+
+    def test_fold_null_limits_snapshot_keeps_last_known_limits(self):
+        """单文件折叠的 limits 保留语义（真实 defect 回归）：带限额的快照之后来
+        一个 primary/secondary 全 null 的降级快照（只有 plan_type + limit_id），
+        observed_at 前进但 **limits 保留上一次的**——「最后看见」直接覆盖会把配额
+        条抹掉。跨文件 merge 同一语义：B 的降级快照 observed_at 更晚时，limits
+        取 A 的。与 Rust 侧 `null_limits_snapshot_keeps_last_known_limits` /
+        `merge_keeps_limits_from_an_older_fold_when_latest_is_degraded` 钉同一批。"""
+        def tc(ts):
+            return {"timestamp": ts, "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol", "service_tier": None}}
+
+        with_limits = {"timestamp": "2026-08-27T14:22:51Z", "type": "event_msg",
+                       "payload": {"type": "token_count", "info": None,
+                                   "rate_limits": {
+                                       "plan_type": "plus",
+                                       "primary": {"used_percent": 2.0, "window_minutes": 300,
+                                                   "resets_at": 1787858552},
+                                       "secondary": {"used_percent": 1.0, "window_minutes": 10080,
+                                                     "resets_at": 1788351817}}}}
+        degraded = {"timestamp": "2026-08-27T18:18:02.963Z", "type": "event_msg",
+                    "payload": {"type": "token_count", "info": None,
+                                "rate_limits": {"limit_id": "premium", "plan_type": "plus",
+                                                "primary": None, "secondary": None}}}
+        out = codex_fold_file([tc("2026-08-27T14:00:00Z"), with_limits, degraded])
+        plan = out["plan"]
+        self.assertEqual(plan["observed_at"], "2026-08-27T18:18:02.963Z")  # observed_at 前进
+        self.assertEqual(plan["plan_type"], "plus")                        # plan_type 保持最新
+        self.assertEqual(plan["limits"]["primary"]["used_percent"], 2.0)   # limits 保留
+        self.assertEqual(plan["limits"]["primary"]["window_minutes"], 300)
+        self.assertEqual(plan["limits"]["secondary"]["used_percent"], 1.0)
+
+        # 跨文件：A 带限额（16:00）、B 降级（18:00，无 limits）→ plan_type/observed_at
+        # 取 B 的、limits 取 A 的。
+        fold_a = codex_fold_file([tc("2026-08-01T00:00:00Z"),
+                                  {"timestamp": "2026-08-01T16:00:00Z", "type": "event_msg",
+                                   "payload": {"type": "token_count", "info": None,
+                                               "rate_limits": {"plan_type": "plus",
+                                                               "primary": {"used_percent": 33.0,
+                                                                           "window_minutes": 300,
+                                                                           "resets_at": 3}}}}])
+        fold_b = codex_fold_file([tc("2026-08-01T00:00:00Z"),
+                                  {"timestamp": "2026-08-01T18:00:00Z", "type": "event_msg",
+                                   "payload": {"type": "token_count", "info": None,
+                                               "rate_limits": {"limit_id": "premium",
+                                                               "plan_type": "pro",
+                                                               "primary": None,
+                                                               "secondary": None}}}])
+        merged = codex_merge_folds([fold_a, fold_b])
+        self.assertEqual(merged["plan"]["observed_at"], "2026-08-01T18:00:00Z")
+        self.assertEqual(merged["plan"]["plan_type"], "pro")  # 最新的 plan_type
+        self.assertEqual(merged["plan"]["limits"]["primary"]["used_percent"], 33.0)  # A 的限额
 
     def test_render_codex_cost_text(self):
         """人读文本（CLI 无 --json/--html 时的输出）：与 Rust `render_codex_cost`
-        同 spec。数字来自 report，这里只钉格式。"""
+        同 spec。数字来自 report，这里只钉格式。夹具带配额（plus 订阅）→ 标价
+        重标 + plan 行。"""
         report = self._merged_report()
         out = {"host": "codex", "currency": "USD", "month": None}
         out.update(report)
         text = render_codex_cost(out)
         self.assertIn("host: codex\n", text)
         self.assertIn("currency: USD\n", text)
-        self.assertIn("total cost: $5.54 · total tokens: 861K\n", text)
+        self.assertIn("plan: plus（订阅套餐） · 5h 77% 已用 · 7d 9% 已用\n", text)
+        # 订阅套餐 → per-token 美元是标价不是账单
+        self.assertIn("total cost (按量标价): $5.54 · total tokens: 861K\n", text)
         self.assertIn("  gpt-5.6-sol  $5.06  (standard)\n", text)
         self.assertIn("  codex-auto-review  unpriced  (standard)\n", text)
         self.assertIn("另有 6K tokens 模型未计价\n", text)
         self.assertIn("未接住 1 × token_count_before_turn_context（看见 1.1K tokens）\n", text)
         self.assertIn("未接住 1 × token_count_invalid_last_usage（看见 670 tokens）\n", text)
+
+    def test_render_codex_cost_text_no_plan_keeps_old_label(self):
+        """无 plan（非订阅）→ 旧标签，不出现「按量标价」。terra 文件无
+        rate_limits → 折叠出的 plan 是 None，报告原样透传 None。"""
+        f = self._fold("rollout-terra.jsonl")
+        report = codex_cost_report(f["by_date_model"], f["by_model"], f["unaccounted"],
+                                   f["plan"], load_codex_pricing())
+        out = {"host": "codex", "currency": "USD", "month": None}
+        out.update(report)
+        text = render_codex_cost(out)
+        self.assertIn("total cost: $0.48 · total tokens: 377K\n", text)
+        self.assertNotIn("按量标价", text)
+        self.assertNotIn("plan:", text)
 
     def test_render_codex_cost_with_month_line(self):
         report = self._merged_report()

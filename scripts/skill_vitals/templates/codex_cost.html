@@ -31,7 +31,19 @@
       },
       days: [ { date: "2026-08-05", cost_usd: 1.23, tokens: 123456 }, ... ],  // 日期升序
       unpriced_tokens: 0,                   // 无价目模型的 token 总量（诚实上报，不按 0 价冒充）
-      unaccounted_usage: [ { type, count, tokens_seen } ] | []   // 残差哨兵
+      unaccounted_usage: [ { type, count, tokens_seen } ] | [],  // 残差哨兵
+      plan: {                               // 配额快照（null = 未见过有效 rate_limits）
+        plan_type: "plus",                  // 订阅套餐名（非空字符串才算有效）
+        has_credits: false,                 // 来自 credits.has_credits（缺省 false）
+        limits: {                           // 键序 = 折叠写入序（primary, secondary …）
+          "<primary|secondary>": {
+            used_percent: 67.0,             // int 或 float（折叠两侧类型一致）
+            window_minutes: 300,            // 300→5h, 10080→7d（展示层做标签）
+            resets_at: 1787858552           // Unix 秒；展示层 new Date(ts*1000)
+          }, ...
+        },
+        observed_at: "2026-08-19T..."       // 快照时间 = 最近一次事件时间戳
+      }
     }
 
   **JS 不在这里算任何价格**——per_model/days 的 cost_usd 都是 server 已算好的
@@ -150,6 +162,29 @@
     }
     .panel-title { margin: 0; font-size: 16px; font-weight: 600; }
     .panel-sub { color: var(--fg-muted); font-size: 12px; }
+
+    /* ── 配额条（订阅套餐的限速快照）────────────────────────────────── */
+    /* 只渲染日志里已算好的 used_percent / window / resets_at，JS 不算任何
+     * 新数。fill 宽度直接 = used_percent（>100 截断显示），颜色按占用档位
+     * 三色，不用连续色阶——配额是「还剩多少」的告警语义，不是分布图。 */
+    .quota-row + .quota-row { margin-top: var(--s4); }
+    .quota-row .q-head {
+      display: flex; justify-content: space-between; align-items: baseline;
+      gap: var(--s3); margin-bottom: 6px; font: 13px var(--mono);
+    }
+    .quota-row .q-label { color: var(--fg-muted); }
+    .quota-row .q-pct { font-weight: 600; }
+    .quota-bar {
+      height: 10px; border-radius: 5px; background: var(--surface-2);
+      border: 1px solid var(--border); overflow: hidden;
+    }
+    .quota-bar .q-fill {
+      height: 100%; border-radius: 4px;
+      transition: width 0.3s ease, background-color 0.3s ease;
+    }
+    .quota-row .q-reset {
+      margin-top: 4px; font: 11px var(--mono); color: var(--fg-dim);
+    }
 
     /* ── 按模型明细表 ────────────────────────────────────────────── */
     /* 窄屏下表格在容器内横向滚动，别把整页撑开（同 .heat-wrap 的模式——表是
@@ -284,6 +319,14 @@
       <!-- 由 JS 注入 card -->
     </section>
 
+    <section class="panel" id="quota-panel" hidden>
+      <div class="panel-head">
+        <h2 class="panel-title">配额</h2>
+        <div class="panel-sub" id="quota-sub">订阅套餐限速快照</div>
+      </div>
+      <div id="quota-rows"></div>
+    </section>
+
     <section class="panel" id="model-panel" hidden>
       <div class="panel-head">
         <h2 class="panel-title">按模型明细</h2>
@@ -354,6 +397,70 @@
     return TOKEN_FIELDS.reduce(function(a, f) { return a + (tt[f] || 0); }, 0);
   }
 
+  // ─── 订阅套餐 / 配额（plan 块）──────────────────────────────────────
+  // plan 是折叠出的当前配额快照（null = 未见过有效 rate_limits）。订阅套餐时
+  // 每-token 美元是「按量标价」不是账单——账单 = 套餐固定费。isSubscription 是
+  // 全部重标价的唯一开关（与 codex_cost.py 的 plan_line 同判定）。
+
+  function isSubscription(d) {
+    return !!(d && d.plan && typeof d.plan.plan_type === "string" && d.plan.plan_type);
+  }
+  /** 窗口分钟数 → 人读标签：300→5h、10080→7d、其余 Nmin（与 codex_cost.rs
+   *  window_label 同 spec，不猜未知窗口的语义）。 */
+  function windowLabel(wm) {
+    if (wm === 300) return "5h";
+    if (wm === 10080) return "7d";
+    return String(wm) + "min";
+  }
+  /** used_percent → 文本：固定 3 位小数去尾零（67.0 → 67、67.5 → 67.5）。
+   *  只格式化不重算——数字直接来自日志 rate_limits。 */
+  function pctText(up) {
+    var s = Number(up).toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+    return s === "" ? "0" : s;
+  }
+  /** Unix 秒 → 本地时区 `MM-DD HH:mm`（展示层做，数据层只存秒）。 */
+  function formatReset(ts) {
+    var d = new Date(ts * 1000);
+    function p(n) { return (n < 10 ? "0" : "") + n; }
+    return p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+           " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  /** 配额条颜色：占用越高越告警——<70% accent、70–90% warn、≥90% unpriced。
+   *  配额是「还剩多少」的告警语义，三档离散色比连续色阶更诚实。 */
+  function quotaColor(up) {
+    if (up >= 90) return "var(--unpriced)";
+    if (up >= 70) return "var(--warn)";
+    return "var(--accent)";
+  }
+
+  function renderQuota(d) {
+    var plan = d.plan;
+    var root = document.getElementById("quota-rows");
+    root.innerHTML = "";
+    if (!plan || !plan.limits) return;
+    Object.keys(plan.limits).forEach(function(name) {   // 键序 = 折叠写入序
+      var win = plan.limits[name];
+      if (!win || typeof win.used_percent !== "number") return;
+      var up = win.used_percent;
+      var bar = Math.min(up, 100);                      // >100 截断显示，不撑破条
+      var color = quotaColor(up);
+      var row = document.createElement("div");
+      row.className = "quota-row";
+      row.innerHTML =
+        '<div class="q-head">' +
+          '<span class="q-label">' + esc(name) + ' 窗口 · ' + windowLabel(win.window_minutes) + '</span>' +
+          '<span class="q-pct" style="color:' + color + '">' + pctText(up) + '% 已用</span>' +
+        '</div>' +
+        '<div class="quota-bar">' +
+          '<div class="q-fill" style="width:' + bar + '%;background:' + color + '"></div>' +
+        '</div>' +
+        (typeof win.resets_at === "number"
+          ? '<div class="q-reset">重置：' + formatReset(win.resets_at) + '</div>'
+          : '');
+      root.appendChild(row);
+    });
+  }
+
   // ─── 数据加载 ────────────────────────────────────────────────────────────
 
   function setStatus(msg, isErr) {
@@ -398,17 +505,34 @@
     if (!hasData) {
       document.getElementById("summary").hidden = false;
       renderSummary(d);
+      renderQuotaPanelIfSub(d);
       setStatus("暂无 token 可计价（空折叠）——最近没有可折叠的 rollout 会话。");
       return;
     }
 
     document.getElementById("summary").hidden = false;
     renderSummary(d);
+    renderQuotaPanelIfSub(d);
     document.getElementById("model-panel").hidden = false;
     renderModelTable(d);
     document.getElementById("heat-panel").hidden = false;
     renderHeatmap(d);
     renderExtra(d);
+  }
+
+  /** 订阅套餐时显示配额面板；非订阅（无有效 plan）不显示。配额与有没有可计价
+   *  token 无关——空折叠也可能带着配额快照（rate_limits 在 token_count 上，
+   *  即使那次 last_usage 无效）。 */
+  function renderQuotaPanelIfSub(d) {
+    if (!isSubscription(d)) return;
+    var panel = document.getElementById("quota-panel");
+    panel.hidden = false;
+    var qsub = document.getElementById("quota-sub");
+    var plan = d.plan;
+    qsub.textContent = "套餐 " + plan.plan_type +
+      (plan.observed_at ? " · 快照 @" + String(plan.observed_at).slice(0, 16) : "") +
+      " · 来自日志 rate_limits（零网络）";
+    renderQuota(d);
   }
 
   // ── summary 卡片 ───────────────────────────────────────────────────────
@@ -419,11 +543,17 @@
     var priced = 0;
     modelNames.forEach(function(m) { if (d.per_model[m].priced) priced++; });
     var activeDays = d.days.filter(function(x) { return x.tokens > 0; }).length;
+    var sub = isSubscription(d);
     var noteCost = d.month
       ? ("USD · 已计价 " + priced + " / " + modelNames.length + " 模型")
       : ("USD · 全部月份 · 已计价 " + priced + " / " + modelNames.length + " 模型");
+    if (sub) {
+      // 订阅套餐：per-token 美元是标价不是账单——账单 = 套餐固定费。诚实标注，
+      // 别让用户把标价当成实际支出。
+      noteCost += " · 账单 = " + d.plan.plan_type + " 套餐固定费";
+    }
     var cards = [
-      { label: "总成本", value: fmtUsd(d.total_cost_usd), note: noteCost },
+      { label: sub ? "按量标价" : "总成本", value: fmtUsd(d.total_cost_usd), note: noteCost },
       { label: "总 token", value: formatNumber(totalTok), note: "5 桶合计" },
       { label: "模型数", value: String(modelNames.length),
         note: priced + " 个已计价" },
@@ -460,13 +590,14 @@
     var root = document.getElementById("model-table-root");
     var table = document.createElement("table");
     table.className = "model-table";
+    var sub = isSubscription(d);
 
     var head = document.createElement("thead");
     head.innerHTML =
       "<tr>" +
         "<th>模型</th><th>speed</th><th>uncached</th><th>cache read</th>" +
         "<th>cache write</th><th>output</th><th>reasoning</th>" +
-        "<th>总 token</th><th>成本 (USD)</th><th>计价</th>" +
+        "<th>总 token</th><th>" + (sub ? "标价 (USD)" : "成本 (USD)") + "</th><th>计价</th>" +
       "</tr>";
     table.appendChild(head);
 
@@ -644,7 +775,8 @@
           '<div class="row"><span class="k">总 token</span><span class="v">' +
             commas(toks) + '</span></div>' +
           '<div class="sep"></div>' +
-          '<div class="row"><span class="k">当日成本 (USD)</span><span class="v">' +
+          '<div class="row"><span class="k">当日' + (isSubscription(DATA) ? "标价" : "成本") +
+            ' (USD)</span><span class="v">' +
             fmtUsd(cost) + '</span></div>';
         tip.classList.add("show");
       });

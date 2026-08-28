@@ -33,12 +33,26 @@
 //!   一天——与 `usage.rs::token_by_date_model` 对无时间样本同一条纪律）。因此
 //!   `sum(by_date_model) == by_model − 无日期样本的量`；全部带日期时两者精确相等，
 //!   这正是守恒测试断言的形式。
+//! - **plan / 配额状态来自 token_count 的 `rate_limits`**：`plan_type` /
+//!   `credits.has_credits` / `primary|secondary.{used_percent, window_minutes,
+//!   resets_at}`。**即使 `info` 为 null 也读**——真实语料里 info:null 的事件仍带
+//!   rate_limits，配额是独立于 token 计量的状态。`plan_type` 非空字符串才算有效
+//!   （否则该事件不更新配额快照）；`primary`/`secondary` 只收三字段、缺啥补啥。
+//!   `observed_at` = 事件时间戳（无时间戳不更新——merge 要靠它排序选「最新」）。
+//!   `plan_type`/`has_credits`/`observed_at` 单文件内**最后看见的赢**（事件序即时间
+//!   序），跨文件 `codex_merge_folds` 取 `observed_at` 最大者（平手先见者赢）。但
+//!   **`limits` 是「最后看见的**非空**限额」**——真实语料里出现过 primary/secondary
+//!   全 null 的降级快照（2026-08-27 18:18 事件，只有 plan_type + limit_id），若
+//!   「最后看见」直接覆盖，配额条会凭空消失（正是用户要的功能）。所以 limits 单独
+//!   一个游标：新事件没带限额时，保留上一次的非空限额（跨事件、跨文件都保留）。
+//!   输出 `plan: null` = 整份文件没见过有效 rate_limits。plan 是**当前状态快照**，
+//!   不是日期桶——`--month` 过滤不碰它。
 //!
 //! `codex_fold_file`（单文件有序流）与 `codex_merge_folds`（跨文件求和）都输出同一
-//! 形状：`{by_date_model, by_model, unaccounted}`。日期升序、模型/速度按首现序（与
-//! Python dict 的插入序对齐，两侧 JSON 逐字节相同靠的是这份一致）。Python 平行实现
-//! 见 `scripts/skill_vitals/codex_usage.py`，差分由 `tests/test_cli_matrix.py::both()`
-//! 与 characterization 钉死。
+//! 形状：`{by_date_model, by_model, unaccounted, plan}`。日期升序、模型/速度按首现序
+//! （与 Python dict 的插入序对齐，两侧 JSON 逐字节相同靠的是这份一致）。Python 平行
+//! 实现见 `scripts/skill_vitals/codex_usage.py`，差分由
+//! `tests/test_cli_matrix.py::both()` 与 characterization 钉死。
 
 use serde_json::{Map, Value, json};
 
@@ -101,6 +115,89 @@ fn codex_date_of(event: &Value) -> Option<String> {
         return None;
     }
     Some(ts[..10].to_string())
+}
+
+/// 事件的时间戳**原始字符串**（顶层 `timestamp` 回退 `payload.timestamp`）。None =
+/// 无时间戳——配额快照没有可排序的 observed_at，就不更新（保持上一份）。
+fn event_timestamp(event: &Value) -> Option<String> {
+    event
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.pointer("/payload/timestamp").and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
+}
+
+/// `payload.rate_limits` → `plan` 块。`plan_type` 非空字符串才算有效（`limit_id`
+/// 之类不构成套餐身份）；`primary`/`secondary` 只收 `{used_percent, window_minutes,
+/// resets_at}` 三字段、缺啥补啥、非法类型跳过该键；`observed_at` 由调用方传事件
+/// 时间戳。None = 无效 rate_limits（plan_type 缺失/空）——不更新配额快照。
+fn plan_from_rate_limits(rl: &Value, observed_at: &str) -> Option<Value> {
+    let rl = rl.as_object()?;
+    let plan_type = rl.get("plan_type").and_then(|v| v.as_str()).unwrap_or("");
+    if plan_type.is_empty() {
+        return None;
+    }
+    let mut has_credits = false;
+    if let Some(credits) = rl.get("credits").and_then(|v| v.as_object()) {
+        if let Some(hc) = credits.get("has_credits").and_then(|v| v.as_bool()) {
+            has_credits = hc;
+        }
+    }
+    let mut limits = Map::new();
+    for name in ["primary", "secondary"] {
+        let Some(win) = rl.get(name).and_then(|v| v.as_object()) else { continue };
+        let mut entry = Map::new();
+        if let Some(up) = win.get("used_percent") {
+            // used_percent 的真实值恒是 float（67.0），但 JSON 里整数也可能出现；
+            // 先试整数再试 float，与 Python 侧 `int → int / float → float` 同序，
+            // 否则两侧 `67` vs `67.0` 序列化不同（逐字节差分当场红）。
+            if let Some(i) = up.as_i64() {
+                entry.insert("used_percent".into(), json!(i));
+            } else if let Some(f) = up.as_f64() {
+                entry.insert("used_percent".into(), json!(f));
+            }
+        }
+        if let Some(wm) = win.get("window_minutes").and_then(|v| v.as_i64()) {
+            entry.insert("window_minutes".into(), json!(wm));
+        }
+        if let Some(ra) = win.get("resets_at").and_then(|v| v.as_i64()) {
+            entry.insert("resets_at".into(), json!(ra));
+        }
+        if !entry.is_empty() {
+            limits.insert(name.into(), Value::Object(entry));
+        }
+    }
+    let mut plan = Map::new();
+    plan.insert("plan_type".into(), json!(plan_type));
+    plan.insert("has_credits".into(), json!(has_credits));
+    if !limits.is_empty() {
+        plan.insert("limits".into(), Value::Object(limits));
+    }
+    plan.insert("observed_at".into(), json!(observed_at));
+    Some(Value::Object(plan))
+}
+
+/// 把新事件的 plan 与上一次 plan 合并：**新事件没带 `limits`、上一次带了 → 把上一次
+/// 的非空限额带过来**（降级快照不抹掉配额条），canonical 键序重建
+/// (plan_type, has_credits, limits, observed_at)。新事件自带 limits 或上一次没有 →
+/// 原样返回。纯函数，与 Python 侧 `codex_usage.py::_combine_plan` 逐字节对齐。
+fn combine_plan(new_p: &Value, prev: &Value) -> Value {
+    if new_p.get("limits").is_some() {
+        return new_p.clone();
+    }
+    let Some(prev_limits) = prev.get("limits") else { return new_p.clone() };
+    if prev_limits.is_null() {
+        return new_p.clone();
+    }
+    let plan_type = new_p.get("plan_type").cloned().unwrap_or(Value::Null);
+    let has_credits = new_p.get("has_credits").cloned().unwrap_or(Value::Null);
+    let observed_at = new_p.get("observed_at").cloned().unwrap_or(Value::Null);
+    let mut plan = Map::new();
+    plan.insert("plan_type".into(), plan_type);
+    plan.insert("has_credits".into(), has_credits);
+    plan.insert("limits".into(), prev_limits.clone());
+    plan.insert("observed_at".into(), observed_at);
+    Value::Object(plan)
 }
 
 /// `default|standard → standard`、`fast|priority → fast`，其余 → None（未知档位不猜，
@@ -184,6 +281,7 @@ pub fn codex_fold_file(events: &[Value]) -> Value {
     let mut model: Option<String> = None;
     let mut speed: &'static str = "standard";
     let mut last_total_sig: Option<(i64, i64, i64, i64, i64, i64)> = None;
+    let mut plan: Option<Value> = None;
     // 日期升序：BTreeMap；模型层 / 速度层用 serde_json Map 保插入序。
     let mut by_date_model: std::collections::BTreeMap<String, Map<String, Value>> =
         std::collections::BTreeMap::new();
@@ -223,6 +321,22 @@ pub fn codex_fold_file(events: &[Value]) -> Value {
                     }
                     "token_count" => {
                         let Some(payload) = payload else { continue };
+                        // 配额状态从 token_count 读——**即使 `info` 为 null 也读**
+                        // （真实语料里 info:null 的事件仍带 rate_limits，配额是独立
+                        // 于 token 计量的状态）。plan_type/has_credits/observed_at 最后
+                        // 看见的赢（事件序即时间序）；`limits` 走 combine_plan 保留
+                        // 上一次非空限额——降级快照（primary/secondary 全 null，真实
+                        // 语料 08-27 出过）不该抹掉配额条。
+                        if let Some(rl) = payload.get("rate_limits") {
+                            if let Some(ts) = event_timestamp(event) {
+                                if let Some(p) = plan_from_rate_limits(rl, &ts) {
+                                    plan = Some(match plan.take() {
+                                        Some(prev) => combine_plan(&p, &prev),
+                                        None => p,
+                                    });
+                                }
+                            }
+                        }
                         // `info` 必须真是对象：键存在但值为 `null`（真实语料 08-19 出过）
                         // 意味着这个事件**没有任何 token 字段**，不是「看见了没接住」，
                         // 不该进残差哨兵——Python 侧 `isinstance(info, dict)` 直接跳过，
@@ -284,6 +398,7 @@ pub fn codex_fold_file(events: &[Value]) -> Value {
         "by_date_model": Value::Object(date_out),
         "by_model": Value::Object(by_model),
         "unaccounted": Value::Array(unaccounted_out),
+        "plan": plan.unwrap_or(Value::Null),
     })
 }
 
@@ -293,6 +408,10 @@ pub fn codex_fold_file(events: &[Value]) -> Value {
 /// 日期排序，再按序遍历——跨文件时插入序不可靠：先 fold 的文件日期可能晚于后 fold
 /// 的）；每个日期内的模型、每个模型内的速度按**跨文件首现序**（按 folds 顺序遍历）。
 /// `by_model` 按 folds 顺序、模型/速度首现序。`unaccounted` 按 type 名升序求和。
+/// `plan` 取 `observed_at` 最大者（各会话的配额快照不同，选「最新」的那个；平手
+/// 先见者赢——按 folds 顺序，确定性）；`limits` 单独取「最后看见的非空限额」——
+/// 最新快照是降级形态（primary/secondary 全 null）时不抹掉配额条（见
+/// `combine_plan`，与单文件折叠同一语义）。
 pub fn codex_merge_folds(folds: &[Value]) -> Value {
     let mut all_dates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for fold in folds {
@@ -356,10 +475,54 @@ pub fn codex_merge_folds(folds: &[Value]) -> Value {
             json!({"type": t, "count": count, "tokens_seen": tokens_seen})
         })
         .collect();
+    // plan_type/has_credits/observed_at 取 observed_at 最大者；`limits` 单独取
+    // 「最后看见的**非空**限额」（limits_plan 里带 limits 的那份）——与单文件折叠
+    // 同一语义：某文件的最后一次快照是降级形态（primary/secondary 全 null）时，
+    // 别把别的文件带来的配额条抹掉。最后 combine_plan 把二者合一。
+    let mut plan_out: Option<Value> = None;
+    let mut limits_plan: Option<Value> = None;
+    for fold in folds {
+        let Some(p) = fold.get("plan") else { continue };
+        if p.is_null() {
+            continue;
+        }
+        let oa = p.get("observed_at").and_then(|v| v.as_str()).unwrap_or("");
+        let is_latest = match &plan_out {
+            None => true,
+            Some(cur) => {
+                let na = oa;
+                let oa_cur = cur.get("observed_at").and_then(|v| v.as_str()).unwrap_or("");
+                na > oa_cur
+            }
+        };
+        if is_latest {
+            plan_out = Some(p.clone());
+        }
+        if let Some(limits) = p.get("limits") {
+            if !limits.is_null() {
+                let limits_is_latest = match &limits_plan {
+                    None => true,
+                    Some(cur) => {
+                        let oa_cur = cur.get("observed_at").and_then(|v| v.as_str()).unwrap_or("");
+                        oa > oa_cur
+                    }
+                };
+                if limits_is_latest {
+                    limits_plan = Some(p.clone());
+                }
+            }
+        }
+    }
+    let plan_final = match (plan_out, limits_plan) {
+        (Some(p), Some(lp)) => Some(combine_plan(&p, &lp)),
+        (Some(p), None) => Some(p),
+        _ => None,
+    };
     json!({
         "by_date_model": Value::Object(by_date_out),
         "by_model": Value::Object(by_model),
         "unaccounted": Value::Array(unaccounted_out),
+        "plan": plan_final.unwrap_or(Value::Null),
     })
 }
 
@@ -632,6 +795,193 @@ mod tests {
         let out = codex_fold_file(&events);
         assert!(out["by_model"].as_object().unwrap().is_empty());
         assert!(out["unaccounted"].as_array().unwrap().is_empty());
+        // info:null 的事件虽带 rate_limits，但只有 limit_id（无 plan_type）→ 不是
+        // 有效套餐快照，plan 保持 null。
+        assert!(out["plan"].is_null());
+    }
+
+    #[test]
+    fn fold_file_tracks_plan_from_rate_limits() {
+        // 真实语料形态：token_count 的 payload.rate_limits 带 plan_type / credits /
+        // primary / secondary。plan 块 = 最后看见的有效快照（含 observed_at）。
+        let events = vec![
+            turn_context_line("gpt-5.6-sol", "2026-08-27T23:00:00Z"),
+            serde_json::json!({
+                "timestamp": "2026-08-27T23:29:09.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 100, "output_tokens": 10,
+                            "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                            "reasoning_output_tokens": 0, "total_tokens": 110,
+                        },
+                        "last_token_usage": {
+                            "input_tokens": 100, "output_tokens": 10,
+                            "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                            "reasoning_output_tokens": 0, "total_tokens": 110,
+                        },
+                    },
+                    "rate_limits": {
+                        "limit_id": "codex", "limit_name": null,
+                        "primary":   {"used_percent": 67.0, "window_minutes": 300,   "resets_at": 1787858552},
+                        "secondary": {"used_percent": 11.0, "window_minutes": 10080, "resets_at": 1788351817},
+                        "credits": {"has_credits": false, "unlimited": false, "balance": "0"},
+                        "individual_limit": null, "spend_control_reached": null,
+                        "plan_type": "plus", "rate_limit_reached_type": null,
+                    },
+                }
+            }),
+        ];
+        let out = codex_fold_file(&events);
+        let plan = out["plan"].as_object().unwrap();
+        assert_eq!(plan["plan_type"], "plus");
+        assert_eq!(plan["has_credits"], false);
+        assert_eq!(plan["observed_at"], "2026-08-27T23:29:09.000Z");
+        let p = plan["limits"]["primary"].as_object().unwrap();
+        assert_eq!(p["used_percent"], 67.0);
+        assert_eq!(p["window_minutes"], 300);
+        assert_eq!(p["resets_at"], 1787858552);
+        let s = plan["limits"]["secondary"].as_object().unwrap();
+        assert_eq!(s["used_percent"], 11.0);
+        assert_eq!(s["window_minutes"], 10080);
+        // token 本身照常折叠（plan 是独立状态，不影响桶）
+        assert_eq!(bucket_of(&out, "gpt-5.6-sol", "standard")["uncached_input_tokens"], json!(100));
+    }
+
+    #[test]
+    fn fold_file_plan_last_seen_wins_within_file() {
+        // 单文件内配额快照「最后看见的赢」：先 plus 后 pro，observed_at 更新。
+        let tc = |ts: &str| {
+            serde_json::json!({
+                "timestamp": ts,
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": null,
+                    "rate_limits": {"plan_type": "plus",
+                        "primary": {"used_percent": 10.0, "window_minutes": 300, "resets_at": 1}},
+                }
+            })
+        };
+        let events = vec![
+            turn_context_line("gpt-5.6-sol", "2026-08-01T00:00:00Z"),
+            tc("2026-08-01T00:00:01Z"),
+            serde_json::json!({
+                "timestamp": "2026-08-01T00:00:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": null,
+                    "rate_limits": {"plan_type": "pro",
+                        "primary": {"used_percent": 42.0, "window_minutes": 300, "resets_at": 2}},
+                }
+            }),
+        ];
+        let out = codex_fold_file(&events);
+        assert_eq!(out["plan"]["plan_type"], "pro");
+        assert_eq!(out["plan"]["observed_at"], "2026-08-01T00:00:02Z");
+        assert_eq!(out["plan"]["limits"]["primary"]["used_percent"], 42.0);
+    }
+
+    #[test]
+    fn merge_picks_plan_with_latest_observed_at() {
+        // 跨文件合并选「最新快照」：A 的 observed_at 晚于 B → 合并后是 A 的。
+        let fold_a = codex_fold_file(&[
+            turn_context_line("m1", "2026-08-01T00:00:00Z"),
+            serde_json::json!({
+                "timestamp": "2026-08-01T00:00:01Z",
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": null,
+                    "rate_limits": {"plan_type": "plus",
+                        "primary": {"used_percent": 90.0, "window_minutes": 300, "resets_at": 9}}},
+            }),
+        ]);
+        let fold_b = codex_fold_file(&[
+            turn_context_line("m1", "2026-08-05T00:00:00Z"),
+            serde_json::json!({
+                "timestamp": "2026-08-05T00:00:01Z",
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": null,
+                    "rate_limits": {"plan_type": "plus",
+                        "primary": {"used_percent": 20.0, "window_minutes": 300, "resets_at": 5}}},
+            }),
+        ]);
+        // fold 顺序打乱（B 先 A 后）也选 observed_at 最大者，不靠数组序。
+        let merged = codex_merge_folds(&[fold_b, fold_a]);
+        assert_eq!(merged["plan"]["observed_at"], "2026-08-05T00:00:01Z");
+        assert_eq!(merged["plan"]["limits"]["primary"]["used_percent"], 20.0);
+        // 没有 plan 的 fold 不干扰：全 null → plan null
+        let empty = codex_fold_file(&[turn_context_line("m1", "2026-08-01T00:00:00Z")]);
+        let merged2 = codex_merge_folds(&[empty]);
+        assert!(merged2["plan"].is_null());
+    }
+
+    #[test]
+    fn null_limits_snapshot_keeps_last_known_limits() {
+        // 真实 defect 回归（2026-08-27 18:18 事件）：带限额的快照之后来一个
+        // primary/secondary 全 null 的降级快照（只有 plan_type + limit_id），
+        // observed_at 前进但 **limits 保留上一次的**——「最后看见」直接覆盖会把
+        // 配额条抹掉，正是用户要的功能静默消失。
+        let with_limits = serde_json::json!({
+            "timestamp": "2026-08-27T14:22:51Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": null,
+                "rate_limits": {"plan_type": "plus",
+                    "primary":   {"used_percent": 2.0, "window_minutes": 300,   "resets_at": 1787858552},
+                    "secondary": {"used_percent": 1.0, "window_minutes": 10080, "resets_at": 1788351817}}},
+        });
+        let degraded = serde_json::json!({
+            "timestamp": "2026-08-27T18:18:02.963Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": null,
+                "rate_limits": {"limit_id": "premium", "plan_type": "plus",
+                    "primary": null, "secondary": null}},
+        });
+        let events = vec![
+            turn_context_line("gpt-5.6-sol", "2026-08-27T14:00:00Z"),
+            with_limits,
+            degraded,
+        ];
+        let out = codex_fold_file(&events);
+        let plan = out["plan"].as_object().unwrap();
+        assert_eq!(plan["observed_at"], "2026-08-27T18:18:02.963Z"); // observed_at 前进
+        assert_eq!(plan["plan_type"], "plus");                       // plan_type 保持最新
+        assert_eq!(plan["limits"]["primary"]["used_percent"], 2.0);  // limits 保留
+        assert_eq!(plan["limits"]["primary"]["window_minutes"], 300);
+        assert_eq!(plan["limits"]["secondary"]["used_percent"], 1.0);
+    }
+
+    #[test]
+    fn merge_keeps_limits_from_an_older_fold_when_latest_is_degraded() {
+        // 跨文件同一语义：A 带限额（observed_at 16:00），B 是降级快照
+        // （observed_at 18:00，无 limits）→ 合并后 plan_type/observed_at 取 B 的，
+        // limits 取 A 的。
+        let fold_a = codex_fold_file(&[
+            turn_context_line("m1", "2026-08-01T00:00:00Z"),
+            serde_json::json!({
+                "timestamp": "2026-08-01T16:00:00Z",
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": null,
+                    "rate_limits": {"plan_type": "plus",
+                        "primary": {"used_percent": 33.0, "window_minutes": 300, "resets_at": 3}}},
+            }),
+        ]);
+        let fold_b = codex_fold_file(&[
+            turn_context_line("m1", "2026-08-01T00:00:00Z"),
+            serde_json::json!({
+                "timestamp": "2026-08-01T18:00:00Z",
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": null,
+                    "rate_limits": {"limit_id": "premium", "plan_type": "pro",
+                        "primary": null, "secondary": null}},
+            }),
+        ]);
+        let merged = codex_merge_folds(&[fold_a, fold_b]);
+        assert_eq!(merged["plan"]["observed_at"], "2026-08-01T18:00:00Z");
+        assert_eq!(merged["plan"]["plan_type"], "pro");          // 最新的 plan_type
+        assert_eq!(merged["plan"]["limits"]["primary"]["used_percent"], 33.0); // A 的限额
     }
 
     #[test]

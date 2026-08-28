@@ -829,8 +829,9 @@ def _main():
             # 的日期桶求和折回 by_model（守恒：sum(days) == total_cost_usd）。
             by_model = codex_usage_module.codex_by_model_from_dates(by_date_model)
         pricing = codex_cost_module.load_codex_pricing()
+        plan = merged["plan"]
         report = codex_cost_module.codex_cost_report(
-            by_date_model, by_model, unaccounted, pricing)
+            by_date_model, by_model, unaccounted, plan, pricing)
         if report is None:
             # 空折叠：没有任何 token 可计价。给一个全零的结构而不是 None——
             # 调用方要的是「没有数据」而不是「崩了」，且 host/currency/month
@@ -840,6 +841,7 @@ def _main():
                 "total_tokens": {f: 0 for f in codex_usage_module.CODEX_TOKEN_FIELDS},
                 "per_model": {}, "days": [], "unpriced_tokens": 0,
                 "unaccounted_usage": [],
+                "plan": plan,
             }
         out = {"host": "codex", "currency": "USD", "month": month}
         out.update(report)

@@ -113,9 +113,52 @@ def _tokens_object(t):
     return dict(zip(CODEX_TOKEN_FIELDS, t))
 
 
-def codex_cost_report(by_date_model, by_model, unaccounted, pricing):
+def _window_label(wm):
+    """窗口分钟数 → 人读标签：300→`5h`、10080→`7d`，其余 → `Nmin`（不猜窗口
+    语义，未知窗口照实显示分钟数）。py↔rs 同 spec，文本渲染逐字节对齐。"""
+    if wm == 300:
+        return "5h"
+    if wm == 10080:
+        return "7d"
+    return "%smin" % wm
+
+
+def _pct_text(up):
+    """`used_percent` → 人读百分比：固定 3 位小数去尾零（67.0 → 67，67.5 →
+    67.5）。**不用 `:g`**——它对大数会转科学计数法，与 Rust 的 Display 分歧；
+    `:.3f` + 去尾零在两侧完全确定（Rust `pct_text` 同款）。"""
+    s = f"{up:.3f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+
+def _plan_line(plan):
+    """plan 块 → 人读一行（None = 无有效套餐，不打印）。数字只格式化不重算——
+    `used_percent` 直接来自日志 rate_limits。与 Rust 侧 `plan_line` 逐字节对齐。"""
+    if not isinstance(plan, dict):
+        return None
+    pt = plan.get("plan_type")
+    if not isinstance(pt, str) or not pt:
+        return None
+    parts = [pt + "（订阅套餐）"]
+    limits = plan.get("limits")
+    if isinstance(limits, dict):
+        for _name, win in limits.items():
+            if not isinstance(win, dict):
+                continue
+            up = win.get("used_percent")
+            if isinstance(up, bool) or not isinstance(up, (int, float)):
+                continue
+            parts.append("%s %s%% 已用" % (_window_label(win.get("window_minutes")),
+                                          _pct_text(up)))
+    return " · ".join(parts)
+
+
+def codex_cost_report(by_date_model, by_model, unaccounted, plan, pricing):
     """折叠结果 × 价格表 → 结构化成本报告。**这是唯一算价格的地方**——人读文本、
     `--json`、`--html` 都从这里取数，不是三处各算一遍。
+
+    `plan` 是折叠出的配额快照（dict 或 None），原样透传到输出——报告不解释它，
+    展示层自己判「订阅 → 重标价」。
 
     `None` = 没有任何 token 可计价（空折叠：per_model 空、unpriced 0）。有未计价
     token 时返回 dict（total 0 + unpriced > 0 是「看见了、没价目」的诚实上报）。
@@ -224,6 +267,7 @@ def codex_cost_report(by_date_model, by_model, unaccounted, pricing):
         "days": days,
         "unpriced_tokens": unpriced,
         "unaccounted_usage": unaccounted if isinstance(unaccounted, list) else [],
+        "plan": plan,
     }
 
 
@@ -246,12 +290,18 @@ def render_codex_cost(out):
     if isinstance(month, str):
         parts.append(f"month: {month}\n")
     parts.append(f"currency: {currency}\n")
+    plan_line = _plan_line(out.get("plan"))
+    if plan_line is not None:
+        parts.append(f"plan: {plan_line}\n")
     # 5 桶人读只需一个总量；分桶明细在 --json 与仪表盘里。
     all_tokens = sum(
         tt.get(f, 0) for f in CODEX_TOKEN_FIELDS
         if isinstance(tt.get(f), int) and not isinstance(tt.get(f), bool)
     )
-    line = f"total cost: {format_usd(total)}"
+    # 订阅套餐（plan 存在）时，per-token 美元是「按量标价」不是账单——账单 = 套餐
+    # 固定费。诚实标注，别让用户把标价当成实际支出。
+    label = "total cost (按量标价)" if plan_line is not None else "total cost"
+    line = f"{label}: {format_usd(total)}"
     if all_tokens > 0:
         line += f" · total tokens: {format_number(all_tokens)}"
     parts.append(line + "\n")

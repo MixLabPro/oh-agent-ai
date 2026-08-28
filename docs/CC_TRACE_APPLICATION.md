@@ -38,7 +38,7 @@ token 用量与费用**。映射：
 | `usage/model.rs::ScanFileState.offset_bytes` + 各 source cursor | M3 state 层 `merge_month`（整文件重读） | **cc-trace 已做字节偏移增量，我们还没有** |
 | `usage/pricing.rs` + `pricing-catalog.v1.json` + `pricing_remote.rs`（远程同步）+ `pricing_fingerprint` | `pricing.json` + build 时复制 + `test_pricing_lockstep.py` | 同一张价格表，两种维护策略 |
 | `usage/usage_db.rs`（SQLite） | `month.json` + `month-archive.json` | 同一「跨调用累计」职责 |
-| `providers/codex.rs`/`claude.rs`（额度接口 + 凭据） | `Cost::Quota` 变体（已定义、无活来源） | **cc-trace 补上的是我们缺的一维** |
+| `providers/codex.rs`/`claude.rs`（额度接口 + 凭据） | `Cost::Quota` 变体（已定义、无活来源）；`codex-cost` 的 `plan` 块已从日志 `rate_limits` 吃进限速窗口快照 | **account-side 余额仍是 cc-trace 补上我们缺的一维；window-side 已从日志落地（§F）** |
 | `contracts/usage.rs` | `token_by_model` / `token_by_date_model` / `cost_report` | 同一折叠的两种投影 |
 | `examples/usage_audit.rs` + `scripts/compare_usage.py` | `tests/` 的差分门 + golden | **cc-trace 自带一个现成的差分 oracle** |
 | Vue3 组件（UsageDailyChart/UsageModelTable/QuotaProgress/CompactView）+ HeroUI 视觉 | `docs/design/agent-vitals-menubar-concept-v1.png`（规划中的 Tauri 菜单栏） | 直接可借鉴的视觉/交互参考 |
@@ -143,6 +143,15 @@ longContext，见 `scripts/skill_vitals/codex_cost.py` ↔ `src/codex_cost.rs`�
   （272000 → input ×2、output ×1.5）——不是按 by_model 合并后的模型总桶（合并桶
   会把「每天都没超窗」的多天小请求累加成假的大 input，凭空触发 LC，守恒测试当场
   红，见 `codex_cost_report` 的 LC 粒度注释）。
+- **额度快照（`plan` 块，零网络，§F 的 log-side 一半落地）**：Codex 的 `token_count`
+  事件自带 `rate_limits`——**即使 `info` 为 null 也读**（真实语料里 info:null 的事件
+  仍带 rate_limits，配额是独立于 token 计量的状态）。折叠成 `plan` 快照
+  （`plan_type`/`has_credits`/`limits`/`observed_at`），跨文件 merge 取 `observed_at`
+  最新者；**`limits` 是「最后看见的非空限额」**——真实语料出过 primary/secondary 全
+  null 的降级快照（2026-08-27 18:18 事件），直接覆盖会抹掉配额条，所以降级快照只
+  推进 `observed_at`、不抹限额（fold 与 merge 同语义，Py↔Rust 两侧，见
+  `codex_usage.rs` 的 `combine_plan`）。订阅套餐时仪表盘把美元重标价成「按量标价」
+  （账单 = 套餐固定费），而不是伪造一个余额数字。
 
 注意 `speed` 对 **DSH** 仍是「别加」：DSH 没有 `service_tier` 事件（实测 35,411
 事件零命中），快档是不同模型（`deepseek-v4-flash`），价差已被模型名捕获。
@@ -162,14 +171,25 @@ cc-trace 给每条 entry 盖 `pricing_fingerprint`，价格目录一变就用 `R
 守「三处价格一致」，但已入库的历史 `month.json` 仍可能带着旧价格。引入指纹后，
 菜单栏/日历能检测价格表变化并对历史行重计价，不必等重建。低-中成本。
 
-### F. 额度维（product 边界决策，不是技术活）
+### F. 额度维（account-side 仍是产品决策；log-side 已落地一半）
 
-`Cost::Quota` 已定义但无活来源。cc-trace 的 `docs/额度领域模型.md` 是两个官方额度
-接口（Codex wham/usage、Claude oauth/usage）的 field-path 权威，凭据来源（auth.json、
-credentials.json、Keychain）与身份摘要方案全部现成。**但做不做是一步产品决策**：它把
-本产品从「审计你的技能 + 你的花费」扩展到「跟踪你的剩余额度」，且需要网络请求与凭据
-处理——与本仓库「scan 时零网络」的约束冲突，只能住在宿主侧（Tauri 菜单栏 /
-dsh-client host），不可能进 in-host skill。
+**log-side 一半已落地（`skill-vitals codex-cost` 的 `plan` 块，2026-08，零网络）**：
+Codex 的 `token_count` 事件自带 `rate_limits`，折叠直接读它（见 §D）——`plan_type`、
+`has_credits`（`credits.has_credits`）、`primary/secondary` 的 `used_percent`/
+`window_minutes`/`resets_at`、`observed_at`。这是**限速窗口的剩余情况**（如 5h/7d
+窗口已用百分比 + 重置时间 + 套餐身份），**不是**账号余额/配额——后者需要打官方
+wham/oauth 接口 + 凭据 + 网络，仍只能住宿主侧。因为 `plan_type` 现在来自日志，
+仪表盘对订阅套餐把每-token 美元诚实重标价成「按量标价」（账单 = 套餐固定费），
+而不臆造余额数字：`Cost::Quota` 变体依然没有活来源，我们不为凑维度去编一个。
+
+**剩下的 account-side 一半仍是产品决策**：cc-trace 的 `docs/额度领域模型.md` 是两个
+官方额度接口（Codex wham/usage、Claude oauth/usage）的 field-path 权威，凭据来源
+（auth.json、credentials.json、Keychain）与身份摘要方案全部现成。但做不做是一步产品
+决策：它把本产品从「审计你的技能 + 你的花费 + 你的窗口剩余」扩展到「跟踪你的账号
+余额」，需要网络请求与凭据处理——与本仓库「scan 时零网络」的约束冲突，只能住在宿主
+侧（Tauri 菜单栏 / dsh-client host），不可能进 in-host skill。若做，
+`docs/额度领域模型.md` 是唯一事实来源；`QuotaWindow`/`QuotaSnapshot` 的纪律照搬
+（未知窗口保留 `unknown`、`remainingPercent` clamp 0–100、身份 SHA-256 摘要落盘）。
 
 ### G. 菜单栏视觉/交互参考（免费）
 
@@ -181,7 +201,10 @@ cc-trace 的 CompactView、UsageDailyChart、QuotaProgress、HeroUI 风格、紧
 
 - 不把 cc-trace 的扫描器代码搬进来（不同项目、不同域模型，且没有行为审计）。
 - 不把本产品的技能审计/行为规则挂到 cc-trace 上——方向反了。
-- 不改 cc-trace 的账号额度实现进 in-host skill（零网络约束是铁律）。
+- 不改 cc-trace 的账号额度实现进 in-host skill（零网络约束是铁律）。**日志里的
+  `rate_limits` 快照不是账号实现**——`codex-cost` 的 `plan` 块只是读取会话日志本就
+  带着的字段（`plan_type`/`used_percent`/`window_minutes`/`resets_at`），零网络，
+  不碰凭据，也不臆造余额。
 
 ## 5. 推荐次序
 
@@ -199,7 +222,9 @@ cc-trace 的 CompactView、UsageDailyChart、QuotaProgress、HeroUI 风格、紧
      `title` 维度（索引缺失/不在索引 → null，存在性探测）。join 键**不是** cc-trace 用的
      `payload.id`——cc-trace 按文件名索引纯展示，我们按逻辑会话 id 才能覆盖被恢复的
      rollout（28/51 是 resume）。
-3. **F（额度维）** 先做产品决策；若做，`docs/额度领域模型.md` 是唯一事实来源。
+3. **F（额度维）**：log-side 一半（`plan` 快照 + 按量标价重标价）已随 `codex-cost`
+   落地，零网络、零凭据。account-side 一半（官方接口余额）先做产品决策；若做，
+   `docs/额度领域模型.md` 是唯一事实来源。
 4. **C/D/E** 各自独立，等菜单栏（消费 `token_by_date_model` 折叠的 Tauri 工作）落地时
    一并评估——它们本质上是同一个「菜单栏要显示准确花费」的问题。D 是三件事：
    `speed` 可从日志推导（最便宜）、地域与 longContext 是纯价格表扩展（次之）。

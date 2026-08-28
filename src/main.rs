@@ -915,7 +915,8 @@ fn main() {
             by_model = skill_vitals_core::codex_usage::codex_by_model_from_dates(&by_date_model);
         }
         let pricing = codex_cost::load_codex_pricing();
-        let report = codex_cost::codex_cost_report(&by_date_model, &by_model, &unaccounted, &pricing);
+        let plan = merged["plan"].clone();
+        let report = codex_cost::codex_cost_report(&by_date_model, &by_model, &unaccounted, &plan, &pricing);
         let report = report.unwrap_or_else(|| {
             // 空折叠：没有任何 token 可计价。给一个全零的结构而不是 None——
             // 调用方要的是「没有数据」而不是「崩了」，且 host/currency/month
@@ -931,6 +932,7 @@ fn main() {
                 "days": Value::Array(vec![]),
                 "unpriced_tokens": 0,
                 "unaccounted_usage": unaccounted,
+                "plan": plan,
             })
         });
         // host/currency/month 是外层固定契约，report 的键在其后（键序是字节
