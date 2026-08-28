@@ -344,6 +344,31 @@ def _render_codex_evidence(out):
     return "".join(parts)
 
 
+def _render_codex_roots(report):
+    """`codex-evidence --roots` 的人读呈现——从 `codex_session_roots_report` 的
+    同一个 dict 上读（形状唯一来源），Rust 侧 `main.rs::render_codex_roots`
+    逐字节对齐这一份。缺席的根不猜路径也不报错，只标 `(absent)`。"""
+    parts = ["host: codex\n"]
+    roots = report.get("roots")
+    if isinstance(roots, list):
+        for entry in roots:
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("kind")
+            path = entry.get("path")
+            if not isinstance(kind, str) or not isinstance(path, str):
+                continue
+            if entry.get("exists"):
+                fc = entry.get("file_count")
+                tb = entry.get("total_bytes")
+                fc = fc if isinstance(fc, int) and not isinstance(fc, bool) else 0
+                tb = tb if isinstance(tb, int) and not isinstance(tb, bool) else 0
+                parts.append("%-8s %s  (%d rollouts, %d bytes)\n" % (kind, path, fc, tb))
+            else:
+                parts.append("%-8s %s  (absent)\n" % (kind, path))
+    return "".join(parts)
+
+
 def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", action="version",
@@ -445,8 +470,12 @@ def _main():
     p_codex = sub.add_parser("codex-evidence",
                              help="Audit a Codex rollout log into a CanonicalSession "
                                   "with §13 coverage (P4 'sound' proof)")
-    p_codex.add_argument("session_log",
-                         help="Path to the Codex rollout JSONL log")
+    p_codex.add_argument("session_log", nargs="?",
+                         help="Path to the Codex rollout JSONL log (or use --roots)")
+    p_codex.add_argument("--roots", action="store_true",
+                         help="List the Codex session roots (live + archived) instead "
+                              "of auditing one log — archived_sessions existence is "
+                              "probed, never an error")
     p_codex.add_argument("--json", help="Write coverage JSON to FILE; use - for stdout")
     # ──── M3: 跨会话聚合层（v1.x.x）── 三个新子命令 ─────────────────
     # oneline：单次审计 → oneline.json（覆盖）+ today.json / month.json（合并累加）。
@@ -668,6 +697,27 @@ def _main():
     # 子命令同一种结构（独立子命令 + --json 输出同一份 core 结果 + 人读呈现）。
     if getattr(args, "cmd", None) == "codex-evidence":
         from skill_vitals.adapters import codex_session
+        if args.roots:
+            report = codex_session.codex_session_roots_report()
+            if args.json:
+                text = json.dumps(report, ensure_ascii=False, indent=2)
+                if args.json == "-":
+                    print(text)
+                else:
+                    try:
+                        Path(args.json).write_text(text, encoding="utf-8")
+                    except OSError:
+                        print("failed to write %s" % args.json, file=sys.stderr)
+                        sys.exit(2)
+                    print("Wrote %s" % args.json)
+            else:
+                print(_render_codex_roots(report), end="")
+            return
+        if not args.session_log:
+            # argparse 的 required 表达不了「session_log 或 --roots 二选一」，
+            # 只能在 handler 里手动挡。退出码 2 是 usage 错误（clap 的
+            # required_unless_present 在 Rust 侧做同一件事）。
+            ap.error("session_log is required unless --roots")
         parsed = codex_session.read_codex_session_log(args.session_log)
         if isinstance(parsed.get("degraded"), str):
             print("session log unavailable: unreadable, malformed, or empty",

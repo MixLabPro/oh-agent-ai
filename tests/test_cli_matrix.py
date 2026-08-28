@@ -984,6 +984,50 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(got[0][2], got[1][2], "stderr 不一致")
         self.assertIn("session log unavailable", got[0][2])
 
+    def test_codex_evidence_roots_both_roots_present(self):
+        """`--roots` 差分（py==rs 逐字节，both() 兜底）：live + archived 两个根
+        一起列出；HOME 由 both() 注入 self.tmp，报告读到的就是夹具里的根。"""
+        live = self.tmp / ".codex" / "sessions" / "2026" / "08"
+        arch = self.tmp / ".codex" / "archived_sessions"
+        live.mkdir(parents=True)
+        arch.mkdir(parents=True)
+        (live / "rollout-live.jsonl").write_text("{}\n", encoding="utf-8")
+        (arch / "rollout-arch.jsonl").write_text("abc", encoding="utf-8")
+
+        code, out, err = self.both("codex-evidence", "--roots", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["host"], "codex")
+        self.assertEqual([r["kind"] for r in report["roots"]], ["live", "archived"])
+        self.assertEqual(report["roots"][0]["exists"], True)
+        self.assertEqual(report["roots"][0]["file_count"], 1)
+        self.assertEqual(report["roots"][0]["total_bytes"], 3)  # "{}\n"
+        self.assertEqual(report["roots"][1]["exists"], True)
+        self.assertEqual(report["roots"][1]["file_count"], 1)
+        self.assertEqual(report["roots"][1]["total_bytes"], 3)  # "abc"
+
+    def test_codex_evidence_roots_absent_archive_zero_fills(self):
+        """archived_sessions 缺席 → exists=false + 零填充，两个实现都不报错；
+        人读视图标 `(absent)`。存在性探测，不猜路径也不当 0 条真数据。"""
+        (self.tmp / ".codex" / "sessions").mkdir(parents=True)
+        (self.tmp / ".codex" / "sessions" / "rollout-live.jsonl").write_text(
+            "{}\n", encoding="utf-8")
+
+        code, out, err = self.both("codex-evidence", "--roots", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["roots"][0]["exists"], True)
+        self.assertEqual(report["roots"][1]["kind"], "archived")
+        self.assertEqual(report["roots"][1]["exists"], False)
+        self.assertEqual(report["roots"][1]["file_count"], 0)
+        self.assertEqual(report["roots"][1]["total_bytes"], 0)
+
+        code, out, err = self.both("codex-evidence", "--roots")
+        self.assertEqual(code, 0)
+        self.assertIn("host: codex\n", out)
+        self.assertIn("(absent)", out)
+        self.assertIn("archived", out)
+
     def test_bad_baseline_is_a_tool_error_in_both(self):
         """结构损坏的基线：Rust 曾静默把当前每个 skill 都报成新增。"""
         bad = self.tmp / "bad.json"

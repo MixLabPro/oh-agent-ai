@@ -20,7 +20,7 @@ from pathlib import Path
 
 CANDIDATE_DIRS = {
     "claude-code": ["~/.claude/projects", "~/.claude/history"],
-    "codex": ["~/.codex/sessions", "~/.codex/history"],
+    "codex": ["~/.codex/sessions", "~/.codex/archived_sessions", "~/.codex/history"],
     "openclaw": ["~/.openclaw/agents"],
     "cc-switch": ["~/.cc-switch/sessions"],
 }

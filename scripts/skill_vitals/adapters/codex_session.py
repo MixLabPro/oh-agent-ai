@@ -8,10 +8,12 @@ extract" 三段（五段式流水线 locate → shape → extract → derive →
 （键序）一致，`tests/test_cli_matrix.py::both()` 的差分靠的就是这份一致。
 
 Codex 的 rollout 落盘在 `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl`，
-明文 append-only JSONL，每行一个 `{type, timestamp, payload}` 包络。**命名
-冲突警告**：`scripts/skill_vitals/adapters/codex.py` 是安装时的运行时探针
-适配器，跟这里完全无关；本模块是会话日志审计，叫 `codex_session`，不要互相
-复用。
+明文 append-only JSONL，每行一个 `{type, timestamp, payload}` 包络。会话被
+归档时会移到 `~/.codex/archived_sessions/`——两个根都在
+`codex_session_roots_report` 里报告，只认识 live 就是 cc-trace 研究 §B 的漏读
+（漏扫归档会话 = 漏成本）。**命名冲突警告**：
+`scripts/skill_vitals/adapters/codex.py` 是安装时的运行时探针适配器，跟这里
+完全无关；本模块是会话日志审计，叫 `codex_session`，不要互相复用。
 
 **没有版本闸。** DSH 的 `SESSION_FORMAT_VERSION` 是 adapter-private（`dsh.py`
 里那个 `EXPECTED_SESSION_FORMAT_VERSION`），§14.4 明确说 Codex 格式无版本、
@@ -152,3 +154,60 @@ def read_codex_session_log(path):
     except OSError:
         return _degraded("file-missing")
     return parse_codex_session_log(text)
+
+
+# Codex 会话根集合的单一事实来源。**必须两个一起报告**——只列 live 就是
+# cc-trace 研究 §B 的漏读：Codex 把会话归档进 archived_sessions 后，只扫 live
+# 会静默漏掉归档会话的用量/成本（漏扫=漏成本，同一类「静默少算」事故）。
+# `~/.codex/history` 不在这里（probe_logs.py 的 legacy 诊断里才有，且真实语料
+# 里该目录不存在）；`session_index.jsonl` 在上层、不在任何根里，标题索引是
+# 单独的后续工作。
+CODEX_SESSION_ROOTS = (
+    ("live", "sessions"),
+    ("archived", "archived_sessions"),
+)
+
+
+def _file_bytes(path):
+    try:
+        return path.stat().st_size
+    except OSError:
+        # 与 Rust 的 `metadata().ok().unwrap_or(0)` 同款：文件在枚举与 stat
+        # 之间消失时按 0 字节计，**不 abort 整个报告**。文件仍算进
+        # file_count（它确实被枚举到了）。
+        return 0
+
+
+def codex_session_roots_report(home=None):
+    """列出 Codex 会话根集合的确定性状形：每个根是否存在、rollout 数量、字节
+    总量。与 Rust `codex_session.rs::codex_session_roots_report` 逐字节对齐。
+
+    **存在性探测，绝不报错**：根目录不存在 → `exists=false` 且
+    file_count/total_bytes 归零，不猜路径、也不把缺席当成 0 条真数据（同
+    `parse_codex_session_log` 的降级铁律）。`home` 默认 `Path.home()`（尊重
+    `HOME` 环境变量，测试用 `isolated_home_env` 注入）。
+
+    键序是字节一致的一部分，不能重排：根对象 kind → path → exists →
+    file_count → total_bytes；外层 host → roots。
+    """
+    if home is None:
+        home = Path.home()
+    home = Path(home)
+    roots = []
+    for kind, rel in CODEX_SESSION_ROOTS:
+        root = home / ".codex" / rel
+        exists = root.is_dir()
+        file_count = 0
+        total_bytes = 0
+        if exists:
+            files = sorted(root.rglob("*.jsonl"), key=str)
+            file_count = len(files)
+            total_bytes = sum(_file_bytes(f) for f in files)
+        roots.append({
+            "kind": kind,
+            "path": str(root),
+            "exists": exists,
+            "file_count": file_count,
+            "total_bytes": total_bytes,
+        })
+    return {"host": "codex", "roots": roots}

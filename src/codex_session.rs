@@ -146,6 +146,51 @@ pub fn read_codex_session_log(path: &Path) -> Value {
     parse_codex_session_log(&text)
 }
 
+/// 列出 Codex 会话根集合的确定性状形：每个根是否存在、rollout 数量、字节总量。
+/// 与 Python `scripts/skill_vitals/adapters/codex_session.py::codex_session_roots_report`
+/// 逐字节对齐。
+///
+/// **存在性探测，绝不报错**：根目录不存在 → `exists=false` 且 file_count/
+/// total_bytes 归零，不猜路径、也不把缺席当成 0 条真数据。`home` 由调用方从
+/// `HOME`/`USERPROFILE` 解析（测试用 `isolated_home_env` 注入同一路径）。
+///
+/// 键序是字节一致的一部分，不能重排：根对象 kind → path → exists →
+/// file_count → total_bytes；外层 host → roots。
+pub fn codex_session_roots_report(home: &Path) -> Value {
+    let entries: [(&str, &str); 2] = [("live", "sessions"), ("archived", "archived_sessions")];
+    let mut roots = Vec::new();
+    for (kind, rel) in entries {
+        let root = home.join(".codex").join(rel);
+        let exists = root.is_dir();
+        let mut file_count = 0usize;
+        let mut total_bytes = 0u64;
+        if exists {
+            let mut files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(&root)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_file())
+                .filter(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
+                .map(|e| e.into_path())
+                .collect();
+            files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+            file_count = files.len();
+            for f in &files {
+                // 与 Python `_file_bytes` 同款：文件在枚举与 stat 之间消失时按
+                // 0 字节计，不 abort 整个报告；文件仍算进 file_count。
+                total_bytes += std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+            }
+        }
+        roots.push(json!({
+            "kind": kind,
+            "path": root.to_string_lossy().to_string(),
+            "exists": exists,
+            "file_count": file_count,
+            "total_bytes": total_bytes,
+        }));
+    }
+    json!({ "host": "codex", "roots": roots })
+}
+
 /// `codex-evidence` 子命令直接收路径参数（与 behavior/duration-audit 同款），不
 /// 走环境变量注入——`SKILL_VITALS_CODEX_SESSION_LOG` 的机制（DSH 那个
 /// `SKILL_VITALS_DSH_SESSION_LOG` 的对称物）等未来真有「按宿主自动发现会话日志」
@@ -255,5 +300,99 @@ mod tests {
         let v = read_codex_session_log(Path::new("/nonexistent-xyz/rollout.jsonl"));
         assert_eq!(v["degraded"], json!("file-missing"));
         assert_eq!(v["items"], Value::Null);
+    }
+
+    /// 每个测试独占一个临时目录，互不污染；用进程 id + 用例名保证唯一。
+    fn temp_home(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "sv-codex-roots-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        base
+    }
+
+    #[test]
+    fn roots_report_enumerates_live_and_archived() {
+        let home = temp_home("both");
+        let live = home.join(".codex").join("sessions").join("2026").join("08");
+        let arch = home.join(".codex").join("archived_sessions");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&arch).unwrap();
+        // 日期分层：rglob 递归必须穿过多层子目录（live 里就是 YYYY/MM/DD）。
+        std::fs::write(live.join("rollout-a.jsonl"), "{}").unwrap();
+        std::fs::write(live.join("rollout-b.jsonl"), "{}").unwrap();
+        std::fs::write(arch.join("rollout-c.jsonl"), "abc").unwrap();
+
+        let v = codex_session_roots_report(&home);
+        assert_eq!(v["host"], json!("codex"));
+        let roots = v["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0]["kind"], json!("live"));
+        assert_eq!(roots[0]["exists"], json!(true));
+        assert_eq!(roots[0]["file_count"], json!(2));
+        assert_eq!(roots[0]["total_bytes"], json!(4)); // "{}" × 2
+        assert_eq!(roots[1]["kind"], json!("archived"));
+        assert_eq!(roots[1]["exists"], json!(true));
+        assert_eq!(roots[1]["file_count"], json!(1));
+        assert_eq!(roots[1]["total_bytes"], json!(3)); // "abc"
+        // 键序（字节一致的一部分）：kind → path → exists → file_count →
+        // total_bytes。
+        assert_eq!(roots[0].as_object().unwrap().keys().collect::<Vec<_>>(),
+                   vec!["kind", "path", "exists", "file_count", "total_bytes"]);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn roots_report_absent_archive_zero_fills() {
+        // archived_sessions 缺席：存在性探测，绝不报错、不猜路径、也不把缺席
+        // 当成 0 条真数据（同 parse 的降级铁律）。
+        let home = temp_home("absent");
+        let live = home.join(".codex").join("sessions");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("rollout-a.jsonl"), "{}").unwrap();
+
+        let v = codex_session_roots_report(&home);
+        let roots = v["roots"].as_array().unwrap();
+        assert_eq!(roots[0]["exists"], json!(true));
+        assert_eq!(roots[0]["file_count"], json!(1));
+        assert_eq!(roots[1]["kind"], json!("archived"));
+        assert_eq!(roots[1]["exists"], json!(false));
+        assert_eq!(roots[1]["file_count"], json!(0));
+        assert_eq!(roots[1]["total_bytes"], json!(0));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn roots_report_empty_live_is_exists_not_error() {
+        // live 根存在但没有任何 rollout：exists=true + 0 文件，不是错误。
+        let home = temp_home("empty");
+        std::fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
+        let v = codex_session_roots_report(&home);
+        let roots = v["roots"].as_array().unwrap();
+        assert_eq!(roots[0]["exists"], json!(true));
+        assert_eq!(roots[0]["file_count"], json!(0));
+        assert_eq!(roots[0]["total_bytes"], json!(0));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn roots_report_ignores_non_jsonl_files() {
+        // 根下的非 .jsonl 文件（.json、.txt 等）不计数。注意 `*.jsonl` 是后缀
+        // 匹配，session_index.jsonl 这种也会被算进去——但标题索引在 sessions/
+        // 之外，不在任何根里，所以不会误计（它的问题由标题索引的后续工作处理）。
+        let home = temp_home("nonrollout");
+        let live = home.join(".codex").join("sessions");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("rollout-a.jsonl"), "{}").unwrap();
+        std::fs::write(live.join("meta.json"), "{}").unwrap();
+        std::fs::write(live.join("notes.txt"), "x").unwrap();
+
+        let v = codex_session_roots_report(&home);
+        let roots = v["roots"].as_array().unwrap();
+        assert_eq!(roots[0]["file_count"], json!(1));
+        assert_eq!(roots[0]["total_bytes"], json!(2));
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

@@ -52,7 +52,9 @@ from skill_vitals.duration import (  # noqa: E402
     duration_coverage,
 )
 from skill_vitals.codex_evidence import codex_evidence_json, derive_coverage  # noqa: E402
-from skill_vitals.adapters.codex_session import parse_codex_session_log  # noqa: E402
+from skill_vitals.adapters.codex_session import (  # noqa: E402
+    codex_session_roots_report, parse_codex_session_log,
+)
 
 
 class TestEstTokens(unittest.TestCase):
@@ -2816,3 +2818,71 @@ class TestCodexEvidenceJson(unittest.TestCase):
         self.assertEqual(out["attempts"][0]["source_id"], "codex.rollout.jsonl")
         self.assertIn("brand_new_event", out["attempts"][0]["error"])
         self.assertEqual(out["notes"], [], "未知类型记 attempts，不记 notes")
+
+
+class TestCodexSessionRoots(unittest.TestCase):
+    """`codex_session_roots_report` 的形状与键序——Python ↔ Rust 差分的基础。
+    根集合是「Codex 会话在哪」的唯一事实来源，live + archived 必须一起报告
+    （cc-trace 研究 §B：只扫 live 就是漏读归档会话 = 漏成本）。"""
+
+    def test_both_roots_report_shape_and_key_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            live = home / ".codex" / "sessions" / "2026" / "08"
+            arch = home / ".codex" / "archived_sessions"
+            live.mkdir(parents=True)
+            arch.mkdir(parents=True)
+            (live / "rollout-a.jsonl").write_text("{}\n", encoding="utf-8")
+            (live / "rollout-b.jsonl").write_text("{}\n", encoding="utf-8")
+            (arch / "rollout-c.jsonl").write_text("abc", encoding="utf-8")
+
+            report = codex_session_roots_report(home=home)
+            # 外层键序：host → roots（字节一致的一部分）。
+            self.assertEqual(list(report.keys()), ["host", "roots"])
+            self.assertEqual(report["host"], "codex")
+            self.assertEqual([r["kind"] for r in report["roots"]],
+                             ["live", "archived"])
+            # 根对象键序：kind → path → exists → file_count → total_bytes。
+            self.assertEqual(list(report["roots"][0].keys()),
+                             ["kind", "path", "exists", "file_count", "total_bytes"])
+            live_root = report["roots"][0]
+            self.assertEqual(live_root["exists"], True)
+            self.assertEqual(live_root["file_count"], 2)
+            self.assertEqual(live_root["total_bytes"], 6)  # "{}\n" × 2
+            arch_root = report["roots"][1]
+            self.assertEqual(arch_root["exists"], True)
+            self.assertEqual(arch_root["file_count"], 1)
+            self.assertEqual(arch_root["total_bytes"], 3)  # "abc"
+
+    def test_absent_archive_zero_fills(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            live = home / ".codex" / "sessions"
+            live.mkdir(parents=True)
+            (live / "rollout-a.jsonl").write_text("{}\n", encoding="utf-8")
+
+            report = codex_session_roots_report(home=home)
+            self.assertEqual(report["roots"][0]["exists"], True)
+            self.assertEqual(report["roots"][0]["file_count"], 1)
+            # 存在性探测：archived 缺席绝不报错、不猜路径、也不当 0 条真数据。
+            self.assertEqual(report["roots"][1]["exists"], False)
+            self.assertEqual(report["roots"][1]["file_count"], 0)
+            self.assertEqual(report["roots"][1]["total_bytes"], 0)
+
+    def test_default_home_respects_home_env(self):
+        # 默认走 Path.home()，即 $HOME——测试用 isolated_home_env 注入。
+        with tempfile.TemporaryDirectory() as tmp:
+            env_home = Path(tmp)
+            import os as _os
+            old = _os.environ.get("HOME")
+            _os.environ["HOME"] = str(env_home)
+            try:
+                report = codex_session_roots_report()
+            finally:
+                if old is None:
+                    _os.environ.pop("HOME", None)
+                else:
+                    _os.environ["HOME"] = old
+            self.assertEqual(report["roots"][0]["path"],
+                             str(env_home / ".codex" / "sessions"))
+            self.assertEqual(report["roots"][0]["exists"], False)

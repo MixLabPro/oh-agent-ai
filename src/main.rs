@@ -32,7 +32,7 @@ mod snapshot;
 mod util;
 mod workbuddy;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -351,8 +351,13 @@ enum Cmd {
     /// (detector decoupling is the deferred later phase). `--host codex` is the
     /// install-time probe surface and is unrelated to this subcommand.
     CodexEvidence {
-        /// Path to the Codex rollout JSONL log (file or directory)
-        session_log: PathBuf,
+        /// Path to the Codex rollout JSONL log (or use --roots)
+        #[arg(required_unless_present = "roots")]
+        session_log: Option<PathBuf>,
+        /// List the Codex session roots (live + archived) instead of auditing
+        /// one log — archived_sessions existence is probed, never an error
+        #[arg(long = "roots")]
+        roots: bool,
         /// Write coverage JSON to FILE; use - for stdout
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
@@ -505,6 +510,31 @@ fn render_codex_evidence(out: &Value) -> String {
         out.get("attempts").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
         out.get("notes").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
     ));
+    s
+}
+
+/// `codex-evidence --roots` 的人读呈现——从 `codex_session_roots_report` 的
+/// 同一个 Value 上读（形状唯一来源），Python 侧 `cli.py::_render_codex_roots`
+/// 逐字节对齐这一份。缺席的根不猜路径也不报错，只标 `(absent)`。
+fn render_codex_roots(out: &Value) -> String {
+    let mut s = String::from("host: codex\n");
+    if let Some(roots) = out.get("roots").and_then(|v| v.as_array()) {
+        for entry in roots {
+            let (Some(kind), Some(path)) = (
+                entry.get("kind").and_then(|v| v.as_str()),
+                entry.get("path").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            if entry.get("exists").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let fc = entry.get("file_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let tb = entry.get("total_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                s.push_str(&format!("{kind:<8} {path}  ({fc} rollouts, {tb} bytes)\n"));
+            } else {
+                s.push_str(&format!("{kind:<8} {path}  (absent)\n"));
+            }
+        }
+    }
     s
 }
 
@@ -713,7 +743,29 @@ fn main() {
     // 的 "sound" 证明。输出 §13 coverage，不是 findings——Codex 还没有 SV601–614
     // 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--host codex`
     // 是安装时探针的表面，与这个子命令无关（命名冲突见 codex_session.rs 顶部注释）。
-    if let Some(Cmd::CodexEvidence { session_log, rows_json }) = &args.cmd {
+    if let Some(Cmd::CodexEvidence { session_log, roots, rows_json }) = &args.cmd {
+        if *roots {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_default();
+            let report = codex_session::codex_session_roots_report(Path::new(&home));
+            if let Some(path) = rows_json {
+                let text = serde_json::to_string_pretty(&report).unwrap_or_default();
+                if path == &PathBuf::from("-") {
+                    println!("{text}");
+                } else if std::fs::write(path, &text).is_err() {
+                    eprintln!("failed to write {}", path.display());
+                    std::process::exit(2);
+                } else {
+                    println!("Wrote {}", path.display());
+                }
+            } else {
+                print!("{}", render_codex_roots(&report));
+            }
+            return;
+        }
+        // clap 的 required_unless_present 保证：roots=false 时 session_log 必在。
+        let session_log = session_log.as_ref().expect("session_log required unless --roots");
         let parsed = codex_session::read_codex_session_log(session_log);
         if parsed.get("degraded").and_then(|v| v.as_str()).is_some() {
             eprintln!("session log unavailable: unreadable, malformed, or empty");
