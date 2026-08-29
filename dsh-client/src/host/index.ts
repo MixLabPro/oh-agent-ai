@@ -518,10 +518,45 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   // 泛型而不是 any：它给 state 挂上 seed，类型上必须体现出来，否则各个 view
   // 里读 state.seed 全是 TS2339——而 seed 正是分叉过滤的关键字段，恰恰最不该
   // 失去类型保护（真机上就因为 apply 返回裸对象字面量把它丢过一次）。
-  const withSeed = <T extends object>(state: T): Seeded<T> =>
-    activeSessionId === null
-      ? (state as Seeded<T>)
-      : { ...state, seed: seedBySession.get(activeSessionId) ?? null }
+  // **就地刷新 seed、不换引用**（2026-08-29 真实会话 2a9175bc 卡死复盘）。
+  // 旧写法在 activeSessionId !== null 时返回 `{...state, seed}`——每次 apply 都是
+  // 新引用，DSH 注册表 drive() 的 `changed = !Object.is(next, state)` 因此恒 true，
+  // 把 13 个投影在**全部事件**上各自触发一次完整 view + 广播，O(N²) 风暴把宿主
+  // 单线程事件循环占满，control 流的 baseline/广播饿死，审计面板永远停在
+  // 「计算中…/不可用」。seed 只是一个 number|null，就地赋值后仍返回原引用：
+  // 无关事件 changed=false（不重算不广播），相关事件仍走 `{...state, events}`
+  // 返回新引用（changed=true）。seed 仍需**每次 apply 都刷新**——分叉边界可能在
+  // 头几个事件之后才被 DSH 解出来（e4b0be69 复盘），只在下一次相关事件才重读
+  // 就会锁死旧值；就地赋值不换引用，两全。
+  const withSeed = <T extends object>(state: T): Seeded<T> => {
+    if (activeSessionId !== null) {
+      (state as Seeded<T>).seed = seedBySession.get(activeSessionId) ?? null
+    }
+    return state as Seeded<T>
+  }
+  // ── DSH wire 契约翻译（2026-08-29 真实会话 2a9175bc「不可用/计算中」的
+  // **真正根因**；withSeed 风暴只是叠加的次要 bug）──────────────
+  // DSH 的 register()（session-projection 9127d7e8b7 "keep host state off wire"
+  // 起）要求 `{ stateSchema, wire: { viewSchema, view } }`：stateSchema 描述
+  // **折叠状态**（restore 时 `stateSchema.parse(row.val)` 校验缓存行），wire 才是
+  // 客户端可见的输出契约。snapshot()/drive()/viewCheckpoint() 全按
+  // `def.wire === undefined` 跳过，checkpoint() 却不过滤——这正是「缓存里有我们
+  // 的折叠态、面板却永远收不到值」这个矛盾的全部来源：之前 14 个投影用旧形状
+  // 顶层 `schema`/`view` 注册，sessionProjections 又是 any，DSH 收下定义却从不
+  // 发布它们，审计 tab 从接入真 DSH 起就没拿到过数据。standalone 测试全绿是
+  // mock harness 直接读 def.schema/def.view，绕过了 wire 语义，才没暴露。
+  //
+  // `stateSchema` 用 z.any()：折叠状态是 `{ events: any[], ... }`，本来就是无
+  // 校验的原始累积；z.any().parse 原样返回，restore 能拿到缓存行，也不引入新
+  // 的校验语义（哪天想校验状态形状，再给各投影补真正的 stateSchema）。
+  // `wire` 复用旧 `schema`/`view`：前者校验 view() 输出，后者就是输出函数——
+  // 与迁移前的行为逐字节一致，只是放到了 DSH 认的地方。
+  const register = (ctx: { sessionProjections: any }, def: any): (() => void) =>
+    ctx.sessionProjections.register({
+      ...def,
+      stateSchema: z.any(),
+      wire: { viewSchema: def.schema, view: def.view },
+    })
   const seeded = (seed: number | null | undefined, events: any[]) =>
     typeof seed === 'number' && seed > 0
       ? [{ type: 'session', seq: null, time: null, data: { seedLength: seed } }, ...events]
@@ -541,7 +576,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   // Finding[]"的消费者。cwd 的捕获方式跟 behaviorFindings 完全一样（同一份
   // cwdBySession，同一次 session/created·session/event 时机），只是不跟着
   // 事件流累积状态——重复这几行比强行共享状态更简单，也不产生新的耦合。
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'sessionCwd',
     schema: z.object({ cwd: z.string() }),
     init: () => ({ cwd: '' }),
@@ -558,7 +593,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   })
 
   // ── behaviorFindings projection ───────────────────────────────────────────
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'behaviorFindings',
     schema: findingSchema,
     init: () => ({ cwd: '', sessionId: '', events: [] as any[] }),
@@ -586,7 +621,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   })
 
   // ── tokenByModel projection ───────────────────────────────────────────────
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'tokenByModel',
     schema: z.object({
       by_model: z.record(z.object({
@@ -643,7 +678,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   // 派生视图，不是另一路数据；DSH 的 register() 要求每个 projection 自带独立
   // 折叠状态，两份 apply 逐字重复是这个框架下的正确做法（requestMetrics 的
   // 注释也说明了同一取舍）。
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'costReport',
     schema: z.object({
       currency: z.string().nullable(),
@@ -711,7 +746,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   // 的 finding 对象，是因为那份 schema 由 core 的 finding 形状决定（12 键，
   // 与 match_behavior 同构），这里的两个新字段是宿主算出来的衍生值，混进去
   // 会让"哪些键来自 core、哪些来自宿主"变得含糊。
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'loopCosts',
     schema: z.array(z.object({
       rule: z.string(),
@@ -757,7 +792,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   //
   // `forked: false` 表示这个会话根本没分叉——**不是返回一个全零的结构**，
   // 「没分叉」和「分叉了但上游没花钱」是两回事，展示层要能分开说。
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'preForkUsage',
     schema: z.object({
       forked: z.boolean(),
@@ -844,7 +879,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   // （子会话头里的 parentSession 不可靠，见 core subagent.rs 的模块注释）。
   //
   // apply 放行 tool/call + tool/result：调用给出 turn/描述，回执里才有子会话 id。
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'subagentSpawns',
     schema: z.object({
       spawns: z.array(z.object({
@@ -912,7 +947,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   // 与 tokenByModel 的 apply 唯一实质差异：**必须放行 request/context**。
   // 它携带 data.contextWindow，是上下文占用率分母的唯一来源（真实会话里一次
   // 会话只出现 5 次、每次模型切换各一次），此前没有任何 projection 捕获它。
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'requestMetrics',
     schema: z.object({
       requests: z.array(z.object({
@@ -967,7 +1002,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   // apply 的筛选与别处不同：技能目录**不是专用事件类型**，它挂在 user/message、
   // agent/inbox/spliced 等多种事件的 `data.source` 上（真实会话验证）。所以这里
   // 按 `data.source.kind` 判断，不能用 type 白名单——用白名单目录永远是 null。
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'contextComposition',
     schema: z.object({
       // 源事件从未出现时为 null，**不是 0**：「日志里没有 skill-catalog 事件」
@@ -1017,7 +1052,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   // turn 都会落成 null）。真实会话实测：10 次 prune 全部顺延到 turn 85（同一次
   // 爆发，合计 33,099 token），恰好是上下文峰值所在的那个 turn；完整压缩发生在
   // 两个 turn 之后的 turn 87——这条因果链正是这个 projection 存在的理由。
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'compactionEvents',
     schema: z.object({
       compactions: z.array(z.object({
@@ -1070,7 +1105,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   // 与 CLI 侧 `behavior.rs`（先算 requests 再传给 detect_structural_waste）
   // 是同一个调用顺序，不是又发明一套逻辑。
   const WASTE_EXEC_TYPES = new Set(['tool/call', 'tool/result'])
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'structuralWaste',
     schema: z.object({
       findings: z.array(z.object({
@@ -1174,7 +1209,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   // 只读一层：子会话自己派生的孙子代理不会被递归展开去审计它们的 Skill
   // 调用（`subagentUsage` 文档注释已说明是刻意的范围收窄，不是遗漏）。
   const SKILL_EXEC_TYPES = new Set(['tool/call', 'tool/result', 'turn/start', 'turn/end', 'step/start', 'step/end'])
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'skillAudit',
     schema: z.object({
       invocations: z.array(z.object({
@@ -1322,7 +1357,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
   // （derive 逻辑见 SkillSection.tsx）。findings/tool_calls 恒为真实计数
   // （0 是"测到了、真的是 0"，这两个字段的输入永远可测，不存在"测不出"这
   // 一态）；tokens/cost 沿用 `loopCostFor` 的 null-vs-0 纪律。
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'skillAttribution',
     schema: z.array(z.object({
       seq: z.number(),
@@ -1390,7 +1425,7 @@ export function apply(ctx: { on: (event: string, handler: (session: any) => void
     'tool/call', 'tool/result', 'turn/start', 'turn/end', 'step/start', 'step/end',
     'approval/asked', 'approval/decided',
   ])
-  ctx.sessionProjections.register({
+  register(ctx, {
     key: 'durationAudit',
     schema: z.object({
       tool_calls: z.array(z.object({
