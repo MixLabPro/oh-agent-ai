@@ -1,6 +1,6 @@
 # Runtime Evidence 收敛 Spec —— 让实现追上 §10
 
-> 状态：spec（待评审）。配套：`ARCHITECTURE.md` §10（结构）、
+> 状态：spec（部分已落地，2026-08 更新现状）。配套：`ARCHITECTURE.md` §10（结构）、
 > `RUNTIME_EVIDENCE_CONTRACT.md` §17（P1–P6 阶段记录）。本文是 §17 之后
 > 的第二轮落地：**不再是加新宿主适配器，而是把已有的 DSH + Codex 两条路径
 > 真正接到 `CanonicalSession` 上，兑现 §10.2「L2 是唯一收口」和 §10.5
@@ -22,21 +22,29 @@
 | P4.5 | `RolloutItem` schema-drift sentinel | ❌ 未做 |
 | P5/P6 | Claude Code / WorkBuddy 适配器 | ❌ 未做（本文不碰） |
 
-**P3 末尾那条 note 是本文的根因**：
+**P3 末尾那条 note 是本文的根因，但前提已部分失效（2026-08 修正）**：
 
 > 「detector 们仍消费 `reverse_project` 重建的原始事件，**不直接迭代
 > `CanonicalSession`/`Signal` 数据**……改写 detector 内部被判定为
 > *对单宿主（DSH）系统而言不成比例*，故 `reverse_project` 保留未删。」
 
-这句话在只有 DSH 一个宿主时成立。**现在 Codex 已经是第二宿主**，且它的 cost
-fold 已经写进 core（`codex_usage.rs`）却进不了 wasm、上不了审计 tab——正是
-「单宿主」这个前提失效的信号。本文要做的三件事，就是把当时「不成比例」的事，
+这句写于 P3 落地时。**现状已不同**：行为/轨迹两个规则族（behavior.rs SV601–610、
+trajectory.rs SV611–614）的 detector 已迁到直接吃 `&CanonicalSession`
+（`detect_sv601(&CanonicalSession)` 等，迭代 `s.turns.entries`/`s.tool_calls.entries`），
+`reverse_project` 现在只剩测试在调（`dsh_evidence.rs:566,575` 的 `#[cfg(test)]`）——
+「detector 们仍吃 reverse_project」已过时，但 reverse_project 本身没删（其余族
+的迁移未做完）。**现在 Codex 已经是第二宿主**，且它的 cost fold 已经写进 core
+（`codex_usage.rs`）却进不了 wasm、上不了审计 tab——正是「单宿主」这个前提
+失效的信号。本文要做的三件事，就是把当时「不成比例」的事，
 在第二宿主出现后变成「成比例」：
 
 1. **统一时间轴**：`BEIJING_OFFSET` 与「UTC→北京」各写了两份（DSH 用 epoch 毫秒、
    Codex 用 ISO 串），本应是一套。
-2. **DSH 词表清退到 L1**：core 里仍有 55 处硬编码 `"tool/call"`/`"approval/asked"`，
-   散布 9 个模块。§10.2 白纸黑字「L3 以上不许出现宿主词表」。
+2. **DSH 词表清退到 L1**：§10.2 白纸黑字「L3 以上不许出现宿主词表」。行为/轨迹
+   两族的生产 detector 已清干净（吃 `&CanonicalSession`，不再碰原始事件）；残余
+   硬编码在 `duration.rs`（8 处 `e.get("type")` 判等）与 `compaction.rs` 这类仍读
+   原始事件流的折叠，`skill/subagent/waste` 待核——`dsh_evidence.rs`（L2 适配器）
+   本身保留词表是职责所在，不在清退范围。
 3. **wasm 边界上移**：wasm 面 11 个函数全是 DSH、全吃原始事件
    （`audit_events(events, ws)`），Codex 折叠一个没导出。§10.5 要求
    `audit_session(canonical)`。
@@ -55,6 +63,12 @@ fold 已经写进 core（`codex_usage.rs`）却进不了 wasm、上不了审计 
 
 **依赖关系**：C 需要规则读 `Signal`（B 的产物）才能接 `audit_session(canonical)`；
 A 独立，但 A 先做能消掉 B/C 改动里会重复撞上的时区重复。
+
+**2026-08 进度**：B 的 detector 输入迁移在行为/轨迹两族已完成（detector 吃
+`&CanonicalSession`，`reverse_project` 仅测试在调），且门控修正 + 专门测试已实装
+§3 验收的 anti-fabrication 条目（见 §3）。A（timeaxis.rs）与 C（wasm
+`audit_session(canonical)` + tab 多宿主）均未动——C 仍是解锁 codex 上同一引擎
+的关键。
 
 ---
 
@@ -105,16 +119,23 @@ core 规则不再直接读宿主事件，改读 `Signal` 数据；删掉 `revers
 兑现 §10.2「L2 是唯一收口，L3 以上不许出现宿主词表」。
 
 ### 现状（已核实）
-55 处硬编码 DSH 词表，散布 9 个模块：
-`behavior.rs` / `compaction.rs` / `duration.rs` / `dsh_evidence.rs` /
-`subagent.rs` / `trajectory.rs` / `skill.rs` / `waste.rs` / `util.rs`。
+原始事件读法的 DSH 词表残余已从 55 处下降（行为/轨迹两族生产 detector 已清
+干净）。已核实的生产残余：
+- `duration.rs`：9 处 `e.get("type")` 判等（五路耗时折叠直接判原始事件）
+- `subagent.rs:65`：`e.get("type") == "tool/call"`
+- `compaction.rs`：`compaction_events` 直接读原始事件，词表是 `"compaction/*"`
+  命名空间（不在边界类型里，但同属「折叠读原始事件」）
+- `skill.rs` / `waste.rs` / `util.rs`：待核
+- `dsh_evidence.rs`（L2 适配器）保留词表是职责所在，不在清退范围
 
 典型：
+- `duration.rs:66` `e.get("type") != "tool/call"`
 - `subagent.rs:65` `e.get("type") == "tool/call"`
-- `trajectory.rs:397` `e.get("type") == "approval/asked"`
 
-这些 detector 目前吃的是 `reverse_project`（`dsh_evidence.rs:197`）从
-`CanonicalSession` 反投影回原始事件流的形状。
+行为/轨迹两族的 detector 已直接吃 `&CanonicalSession`（`detect_sv60x`/
+`detect_sv61x`，迭代五条 timeline）——阶段 B 的 detector 输入迁移**在这两族已
+完成**。残余的原始事件读者是 `duration.rs` 与 `compaction.rs` 的折叠，加上
+`skill/subagent/waste` 待核；`reverse_project` 只剩测试在调，删除收尾。
 
 ### 改动（这是三阶段里最重、风险最高的一步，必须分 PR、每 PR 一个规则族）
 
@@ -126,15 +147,15 @@ additive 的 coverage 注解，没动 detector）：
    `fn detect(&CanonicalSession) -> Vec<Finding>`（Signal 数据）。`CanonicalSession`
    里 `signals: SignalSet` + `coverage: Coverage` 已经有「哪些信号存在」，
    但**没有逐事件的 payload**——而 `SkillInvocations`/`SubagentSpawns` 这类
-   detector 需要读到具体的 `data.name`/`callId`。所以这一步会暴露一个当前
-   `CanonicalSession` **缺的东西：Signal 的逐事件明细（`Timeline<Observed<T>>`）**。
+   detector 需要读到具体的 `data.name`/`callId`。
 
-   ⚠️ 这是本阶段真正的设计决策点，不是机械搬移：`evidence.rs` 的
-   `CanonicalSession.signals` 现在是 `SignalSet`（只答「有没有」），而 detector
-   要「有哪些、每个长什么样」。**方案是扩 `CanonicalSession` 挂
-   `Timeline<Observed<T>>`（§10.2 图里本来就画了 `Signal → Timeline<Observed<T>>`，
-   只是 P1 落地时没实装这个字段）**，还是保留一个宿主无关的「规范化事件」
-   中间层让 detector 读——两者择一，先在这份 spec 评审时定，不拍脑袋。
+   ⚠️ 这个设计决策点**已在 2026-08 定案并落地**：选了「扩 `CanonicalSession`
+   挂 `Timeline<Observed<T>>`」——`evidence.rs` 的 `CanonicalSession` 现在带五条
+   timeline（`tool_calls`/`tool_results`/`approvals`/`sandbox_modes`/`turns`，
+   每条 `Timeline<Observed<T>>`，正是 §10.2 图里画过、P1 落地时没实装的字段），
+   行为/轨迹两族已按它迁移。**残余族（skill/subagent/compaction/waste）的
+   detector 仍吃原始事件——它们才是阶段 B 现在要动的主体。** compaction/duration
+   这类「折叠」要不要进 timeline 而不是另起中间层，是本步剩余的设计问题。
 
 2. **按族清退**，顺序（沿用 P3 已验证的顺序）：
    ① command/path（SV601–610）② cost fold ③ duration ④ trajectory ⑤
@@ -150,9 +171,13 @@ additive 的 coverage 注解，没动 detector）：
   `cargo test`、`AGENT_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix`
   （Python↔Rust 差分）、手动 `fixtures/dsh/behavior.jsonl` before/after diff。
 - **§10.4 三态落地为可观测**：`RuleOutcome` 从「additive 注解」变成「detector
-  真按 `requires ⊆ coverage` 决定跑不跑」。Claude Code/Codex 语料喂进去，
-  审批类规则必须报 `Unavailable`，**绝不允许安静报 `[]`**——这条要有专门测试
-  （§17.1 的 anti-fabrication assertion，从「应有」变「实装」）。
+  真按 `requires` 对应 timeline 非空与否决定跑不跑」。Claude Code/Codex 语料喂
+  进去，审批类规则必须报 `Unavailable`，**绝不允许安静报 `[]`**——这条的专门
+  测试**已实装（2026-08）**：`behavior.rs` 的
+  `empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero`，钉住
+  Codex 的常态形状「覆盖非零（`derive_coverage` 数事件）+ timeline 恒空 → 
+  Unavailable 而非 MeasuredZero」。§17.1 的 anti-fabrication assertion 至此
+  从「应有」变「实装」。
 - §12 测试 `shared_type_layer_has_no_host_identifiers_in_code` 全程绿（扩
   `CanonicalSession` 时尤其不能把宿主字段塞进共享层）。
 
