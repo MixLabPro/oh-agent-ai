@@ -44,6 +44,8 @@ references/                 # hosts.md (per-host evidence), judgment.md, guide.z
 docs/                       # design docs (ENGINEERING, DSH_INTEGRATION, AGENT_BEHAVIOR_AUDIT, …)
 dsh/                        # DSH-1 profile bundle (registers agent-vitals as a DSH skill)
 dsh-client/                 # dual-face audit plugin (host projection + wasm + client tab)
+src-tauri/                  # 菜单栏 app（Tauri 2，**独立 workspace**，不入根 default-members）：
+                            #   托盘 + 弹出面板展示 今日/本月/预算，计价全部委托 core::cost（不长第四份拷贝）
 fixtures/ + golden/         # test corpus + byte-for-byte scanner snapshots
 tests/                      # 28 Python test files（含分类守卫 tests/test_classification.py）
 .github/workflows/          # verify.yml, release.yml, package-clawhub.yml
@@ -203,37 +205,55 @@ pricing needs each request's own peak/off-peak verdict, a rule that lives in the
 and is exposed only through aggregates — reimplementing it in the browser would be a
 fourth copy.
 
-### Codex 没有行为检测器：根因是解析层的 schema 对齐，不是规则缺失
+### Codex 行为检测：2026-08 起原生填 timeline，SV 规则部分可跑
 
 Codex 会话解析（`adapters/codex_session.py`）对齐了**三套 schema 里的两套**：cost
 （`codex_usage.py` 的 5 桶读 `last_token_usage` + 按 `total_token_usage` 签名去重，
 `:9-15` 明写故意不同于 DSH 的 4 桶 + `(turn, step)` 去重）和 evidence（`codex_evidence.rs`
-的 19 信号覆盖计数）。它**从未合成 behavior 层唯一认识的边界事件流**——`turn/start`·
-`step/start`·`turn/end`·`step/end` + `seq`/`time`/`(turn, step, call_id)` 坐标
-（`trajectory.rs:118`）：`turn_id` 只做 latest-wins 元数据游标（`codex_session.py:116`），
-其余行原样透传（`:75`）。所以 `docs/RUNTIME_EVIDENCE_CONTRACT.md` 那句 "No detectors run
-against Codex"（deferred P3）是这个 gap 的**下游注脚，不是原因**。这也不是疏忽：契约 §1
-第一句就拒绝「把每个宿主翻译成 DSH 形状事件」这条 obvious design——宿主按「duratably
-记录哪些投影」分野，一个规范化流只能把「某宿主就是没有这些字段」表达成编造的零。
+的 19 信号覆盖计数）。behavior 层的历史分两段，都是被真机证据纠正的假结论：
 
-**`TurnBoundaries` 是撞车名**：evidence 侧（`codex_evidence.rs:263`，`task_started`/
-`task_complete` 即 bump measured）是覆盖**计数**；detector 侧（`trajectory.rs:223`，
-SV612/613 的 `requires`）是边界**事件流**的门槛。这正是「coverage 里 Codex 的
-TurnBoundaries 是绿的、behavior 层却一行不跑」的来源。
+- **曾以为「Codex wire 格式凑不齐 boundary-event payload、硬填即编造零、timeline 恒为
+  空」**——基于旧 fixture，被真实 rollout 推翻：Paginated 线格式其实能原生填满 4 条
+  timeline（approvals 除外）。`custom_tool_call{exec}` 与 `CommandExecution` 是同一逻辑
+  exec 的两份影子（`call_id` 与 item `id` 无 join key），以 `CommandExecution` 为主源、
+  跳过影子，否则双重计数会破坏 SV611 的重复检测。`sandbox_policy` 线格式漂移（真实对象
+  `{type}` vs 旧 fixture 字符串）两态都认——P4.5 RolloutItem schema-drift sentinel
+  （§14.4）早该抓到的 drift。
+- **门控一度读覆盖计数**（`s.coverage.get(**sig).total() == 0`）而 detector 主体读边界
+  事件流（`detect_sv612` 按 turn 分组迭代）。DSH 上两者同源；Codex 上分叉——
+  `derive_coverage` 把 `task_started` 等数成非零 measured、timeline 恒空（当时的真实
+  状态），读计数会让门控放行、主体空转，产出 **MeasuredZero** 而非诚实的 Unavailable
+  （`evidence.rs`「adapter 不得用读不到的东西刷覆盖」的镜像面）。现门控改读
+  `CanonicalSession::timeline_is_empty`（`evidence.rs`，requires 信号映射到对应 timeline
+  的非空性），单测
+  `empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero`
+  钉住「覆盖非零 + 时间线为空 → Unavailable」。
 
-**门控读 timeline 而非 coverage（2026-08 修正）**：前置门控一度读覆盖计数
-（`trajectory.rs` / `behavior.rs` 的 dispatcher，`s.coverage.get(**sig).total() == 0`），
-detector 主体读边界事件流（`detect_sv612` 按 turn 分组迭代）。DSH 上两者同源（同一事件流
-既计数又迭代，读法互换结果不变）；Codex 上分叉——`derive_coverage` 把 `task_started` 等
-数成非零 measured、timeline 却恒为空，读计数会让门控放行、主体空转，产出 **MeasuredZero**
-而非诚实的 Unavailable（`evidence.rs`「adapter 不得用读不到的东西刷覆盖」的镜像面）。现
-门控改读 `CanonicalSession::timeline_is_empty`（`evidence.rs`，requires 信号映射到对应
-timeline 的非空性），单测 `empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero`
-钉住「覆盖非零 + 时间线为空 → Unavailable」。**Codex timeline 因此保持空**——不是 adapter
-补字段就能对齐的：`turns` 缺数值 `turn`/`seq`（只有字符串 `turn_id`）、`tool_calls` 缺
-`args_text`、`tool_results` 缺字符串 `error_code`、`approvals`/`sandbox_modes` 缺
-asked/decided/mode，合成即编造零（§1 反编造）。结构对齐（5 个 key 在、值为空）由
-`tests/test_canonical_schema.py` 逐字段对账 Rust `CanonicalSession`。
+**`TurnBoundaries` 是撞车名**：evidence 侧（`codex_evidence.rs`，`task_started`/`task_complete`
+即 bump measured）是覆盖**计数**；detector 侧（`trajectory.rs`，SV612/613 的 `requires`）是
+边界**事件流**的门槛。这正是「coverage 里 Codex 的 TurnBoundaries 是绿的、behavior 层却
+一行不跑」的历史来源。
+
+**当前真值表**（`populate_codex_timelines` 填充，真值表单测钉住），按线格式分两栏：
+- **Paginated**（有 CommandExecution）：SV601/602/603（exec→bash，命中 rm/sudo/curl|sh 类）、
+  SV610（sandbox_policy→sandbox_modes，danger-full-access）、SV611/612/613
+  （tool_calls/turns/tool_results 非空）、SV614c（OR 门控：approvals 空但 sandbox 非空）
+  **可跑**；SV604/605/606（Codex 没有 write/edit/web_fetch 工具名）与 SV607/608
+  （`exit_code:N` 合成码 ∉ DSH 码集）诚实报 **MeasuredZero**；SV609 / SV614a-b（approvals 空）
+  报 **Unavailable**。
+- **Legacy**（无 CommandExecution——真实 7/25 的 679 次工具执行全是 `custom_tool_call`，它是
+  JS 沙箱工具、不一定是 shell）：`exec→bash` 只在能挖出字面量 `exec_command({cmd})` 的 input
+  上发生（quote-aware 提取，实测 187/679），apply_patch 等非 shell 不误报；custom_tool_call
+  路径不产 tool_results（无 exit/error 源），但 function_call_output 照常填（error 恒 null
+  → None），所以 SV607/608 与 SV613(b) 报 **MeasuredZero**（规则照跑零命中）；SV612 因
+  custom_tool_call 与 function_call 都无 turn_id、turn sig 恒空报 **MeasuredZero**；SV611 只
+  在挖出的 bash 子集上跑。
+
+`exec→bash`/`exit_code→error_code` 是 L2 适配器的宿主词表翻译（近似、可能误报）；「Codex
+根本没有的维度 → MeasuredZero 而非 Unavailable」是已知代价，name-aware 门控是后续项。结构
+对齐由 `tests/test_canonical_schema.py` 逐字段对账 Rust `CanonicalSession`；非空形状由
+`test_populated_timelines_are_native_and_structured` 钉住，Legacy 回退由
+`test_legacy_fallback_extracts_real_shell_cmds_only` 钉住。
 
 ## Six test layers, six different jobs
 
@@ -372,11 +392,15 @@ pricing.json` 是 build 时复制出的运行时份，宿主 `costReport` 投影
 另内嵌一份仅供展示用的模型短名副本——三处由 `tests/test_pricing_lockstep.py` 守）;
 prices are business data, not rules — they change without a golden `--update`. The
 **cost computation itself** (`cost_report`) is a fourth lockstep, one level up from the
-price table: `src/cost.rs` ↔ `scripts/agent_vitals/agent/cost.py` ↔ `dsh-client/src/host/
-index.ts::costReportFrom` all implement the same peak/off-peak-split pricing math over
-`{by_model, sequence}`; the CLI two-language parity is caught by `test_cli_matrix.py`'s
-`both()` differential, the TS mirror by `dsh-client/scripts/verify-host.mjs` asserting
-real numbers against the checked-in `pricing.json`.
+price table: `crates/agent-vitals-core/src/cost.rs` ↔ `scripts/agent_vitals/agent/cost.py`
+↔ `dsh-client/src/host/index.ts::costReportFrom` all implement the same
+peak/off-peak-split pricing math over `{by_model, sequence}`; the CLI two-language parity
+is caught by `test_cli_matrix.py`'s `both()` differential, the TS mirror by
+`dsh-client/scripts/verify-host.mjs` asserting real numbers against the checked-in
+`pricing.json`. (2026-08: cost 从二进制 `src/agent/cost.rs` 迁进 core crate —— preflight
+Phase 0-1 —— 二进制侧退成 `pub use` 薄封装；`priced_day` 一并进 core
+（`cost.rs::priced_day` ↔ `cost.py::priced_day`，`tests/test_cost_priced_day.py` 交叉锁定），
+Tauri 菜单栏与未来按月查询 surface 直接 `use agent_vitals_core::cost`，不长第四份拷贝。)
 
 Scan output must never be committed — `.gitignore` covers `skill-scan*.json`, `scan-*.json`,
 `*.scan.json`, and now also the npm `node_modules/` of `dsh/`/`dsh-client/`. The committed

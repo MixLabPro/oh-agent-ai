@@ -1,0 +1,26 @@
+[package]
+name = "agent-vitals-menubar"
+version = "0.1.0"
+edition = "2021"
+description = "agent-vitals 菜单栏：当日/本月成本与预算（Tauri 2）"
+
+# 独立 workspace：不混进根 workspace 的 default-members —— tauri 依赖树庞大，
+# 根 cargo build/test/clippy 的 144 测试与 CI 门禁不碰它。见 docs/PET_PREFLIGHT.md
+# §阶段 F（"独立 src-tauri 工程，不入 workspace default-members"）。它从根 workspace
+# 里 opt-out，用 [workspace] 空表声明自己是独立工作区。
+[workspace]
+
+[lib]
+name = "agent_vitals_menubar_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# 计价/聚合本体在 core —— 菜单栏不许长第四份拷贝（CLAUDE.md 的 cost 锁步）。本
+# crate 只调 core::cost 的纯函数，不放任何定价/覆盖率判断。
+agent-vitals-core = { path = "../crates/agent-vitals-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }

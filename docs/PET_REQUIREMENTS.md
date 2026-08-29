@@ -475,6 +475,61 @@ pub trait EventSource: Send + Sync {
 - 状态聚合涉及多源并发 + IPC，是 Tauri-specific
 - core 只提供 `PetState` enum 定义
 
+### ADR-009：Tauri 2（不是 1）
+
+**决策**：Tauri 2
+**理由**：
+- 新项目没理由用 1（koi-pond / EcoPaste 等参考实现是 1，petdex 不用 Tauri）
+- agent-vitals 长期维护，跟新版更省事
+- 权限模型差异 1-2 天能上手；系统托盘、浮窗能力两者内置、无差距
+**代价**：API 文档覆盖略薄于 1；`cargo tauri init` 生成的工程独立于 workspace
+  default-members（preflight §5.3）
+**验证**：`cargo tauri --version` 输出 2.x + 最小 hello-world 跑通
+
+### ADR-010：前端栈 = 纯 HTML/CSS/JS（不是框架）
+
+**决策**：前端零框架、零构建链，手写 HTML/CSS/JS
+**理由**：
+- Pet UI 只渲染一个 sprite + 状态气泡 + 偶尔拖动，框架优势用不上
+- 体积最小——对 menu bar app 和 Pet 浮窗都关键（petdex 自己也嫌 React 大）
+- 零依赖 = 无额外构建链 = 打包产物干净
+**2026-08 修订（TS→JS）**：原定「TypeScript」，但 Tauri 应用侧没有 tsc，而
+加一条 `tsc` 构建链恰好违背本条「无额外构建链」的核心理由；前端只渲染
+`read_overview` 返回的 JSON，TS 的类型安全在这里不换任何东西。类型边界由
+Rust 侧的 `#[derive(Serialize)]` 结构与 JS 侧显式字段对齐（lockstep 测试把
+形状钉死）。
+**代价**：状态管理靠手写（Pet 状态机本来就在 Tauri 后端，前端只是投影）
+
+### ADR-011：EventBus = `tokio::sync::broadcast(1024)`
+
+**决策**：`broadcast::channel(1024)` + 慢消费者 `RecvError::Lagged` 告警日志
+**理由**：
+- Tauri 本身基于 tokio runtime，零额外引入
+- 多消费者（Pet Tauri、watch CLI、未来 menu bar）天然支持
+- 1024 个未消费 Event 占内存可忽略；堆满意味着消费者卡死 1s+，应告警而非丢事件
+
+### ADR-012：去抖窗口默认 500ms
+
+**决策**：默认 500ms，`PET_DEBOUNCE_MS` env var 可调
+**理由**：
+- 用户肉眼难感知 <500ms 延迟
+- 抑制状态"闪动"足够，IPC 频率降一档（100ms 下高频事件 IPC 过多）
+
+### ADR-013：Event 时间戳双字段（`observed_at` + `at`）
+
+**决策**：`observed_at: SystemTime`（挂钟，持久化/跨调用比对）+ `at: Instant`
+（单调，去抖/状态机）
+**理由**：
+- `Instant` 不能持久化为绝对时间；`SystemTime` 不可靠做相对计时
+- 两个用途各取所长，避免为持久化硬塞单调时间戳
+
+### ADR-014：tail offset 5s 写盘
+
+**决策**：默认 5s 写盘间隔，`PET_OFFSET_FLUSH_MS` 可调
+**理由**：
+- 每次 append 立即写盘高频 IO；优雅退出写盘崩溃会丢事件
+- 5s 折中：崩溃最多丢 5 秒事件，对 Pet UX 无影响，IO 频率可接受
+
 ---
 
 ## 6. 实施分阶段

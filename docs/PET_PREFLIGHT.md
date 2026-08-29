@@ -372,10 +372,15 @@ src/pet.rs                  # pet 相关子命令（install/validate/list）
 ## 7. 开工检查清单（执行时打钩）
 
 ### 阶段 A：环境准备（半日）
-- [ ] 装 Tauri CLI（步骤 1.1）
-- [ ] 跑通 Tauri 2 hello-world（步骤 1.2 验证）
-- [ ] 抓 `boba` pet 包到 `~/.agent-vitals/pets/boba/`（步骤 1.4）
-- [ ] 写 ADR-009 / 010 / 011 / 012 / 013 / 014
+- [x] 装 Tauri CLI（步骤 1.1）—— `cargo install tauri-cli --version "^2.0"` → **tauri-cli 2.11.4**
+- [x] 跑通 Tauri 2 hello-world（步骤 1.2 验证）—— tauri-cli 2.11.4 就位；**菜单栏工程脚手架即 hello-world 验证**（2026-08-30 已跑通：`src-tauri/` 托盘 + 弹出面板，`cargo tauri build` 出 .app/.dmg，启动冒烟 6s 存活）
+- [x] 抓 `boba` pet 包到 `~/.agent-vitals/pets/boba/`（步骤 1.4）—— 实测 `pet.json` 含 `id` 字段（schema 多出的），`spritesheet.webp` 1536×2288 与 `spriteVersionNumber: 2` 吻合
+- [x] 写 ADR-009 / 010 / 011 / 012 / 013 / 014 —— 已进 `PET_REQUIREMENTS.md` §5
+
+> **dmg 打包的环境怪癖**：create-dmg 的 Finder AppleScript 美化步骤在本机
+> （无活动 GUI 会话/自动化权限）报 AppleEvent 超时 (-1712)。绕过：手动跑
+> `bundle_dmg.sh --skip-jenkins`（跳过 Finder 排版，产物仍含 app + Applications
+> 链接），或 `CI=true cargo tauri build` 让 tauri 自动加 `--skip-jenkins`。
 
 ### 阶段 B：host-events crate 起架（1 天）
 - [ ] 修改 workspace `Cargo.toml` 加新 crate
