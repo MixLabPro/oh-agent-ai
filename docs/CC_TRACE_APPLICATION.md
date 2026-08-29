@@ -155,6 +155,15 @@ longContext，见 `scripts/skill_vitals/codex_cost.py` ↔ `src/codex_cost.rs`�
 - **视图语义（2026-08）**：缺省 = 当前自然月（北京口径，与 DSH state 层一致），
   `--today` = 只看今天（过滤键 = 北京 YYYY-MM-DD），`--month all` = 全部月份，
   全量不再是缺省。输出契约带 `today` 字段，仪表盘热力图用它高亮「今」格。
+  配额条的显示格式对齐 **Codex UI**（`plan` 行与配额面板同 spec，Py↔Rust 逐字节
+  一致）：窗口标签 300→`5小时`/10080→`每周`，「剩余」= 100 − used、超限按 0 计，
+  重置时间挂北京时区（今天 → `HH:MM`，否则 → `M月D日 HH:MM`，实测与 Codex 的
+  「重置时间：10:03」「2026年9月4日 00:40」逐字对上）。行末附 `快照@{observed_at}`
+  （ISO 原样）——日志读到的是最后一次写盘时刻而 Codex UI 是实时，快照时间戳诚实
+  标注这种滞后（实测 5h 窗口日志 2% 已用 vs UI 5% 的差就来自这里，7d 窗口变化慢
+  所以两边一致）。日志 `session_meta` 带 IANA `timezone`（本机 `Asia/Shanghai`），
+  等于 UTC+8，是这套北京口径的交叉验证锚；通用 IANA→偏移（含夏令时）需 tz 库，
+  属零依赖 CLI 之外，非 UTC+8 机器是独立的后续任务。
 
 注意 `speed` 对 **DSH** 仍是「别加」：DSH 没有 `service_tier` 事件（实测 35,411
 事件零命中），快档是不同模型（`deepseek-v4-flash`），价差已被模型名捕获。

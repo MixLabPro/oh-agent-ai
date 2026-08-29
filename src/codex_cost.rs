@@ -161,12 +161,13 @@ fn tokens_object(t: &[i64; 5]) -> Value {
     Value::Object(obj)
 }
 
-/// 窗口分钟数 → 人读标签：300→`5h`、10080→`7d`，其余 → `Nmin`。py↔rs 同 spec，
-/// 文本渲染逐字节对齐（`codex_cost.py::_window_label` 镜像）。
+/// 窗口分钟数 → 人读标签：300→`5小时`、10080→`每周`、其余 → `Nmin`。与 Codex UI
+/// 同款（「5 小时使用限额 / 每周使用限额」）；未知窗口不猜语义，照实显示分钟数。
+/// py↔rs 同 spec，文本渲染逐字节对齐（`codex_cost.py::_window_label` 镜像）。
 fn window_label(wm: i64) -> String {
     match wm {
-        300 => "5h".to_string(),
-        10080 => "7d".to_string(),
+        300 => "5小时".to_string(),
+        10080 => "每周".to_string(),
         _ => format!("{wm}min"),
     }
 }
@@ -180,9 +181,30 @@ fn pct_text(up: f64) -> String {
     if s.is_empty() { "0".to_string() } else { s }
 }
 
+/// resets_at（Unix 秒）→ 北京时区人读重置时间：今天 → `HH:MM`，否则 →
+/// `M月D日 HH:MM`（与 Codex UI 同款：「5 小时使用限额 重置时间：10:03」vs
+/// 「每周使用限额 重置时间：2026年9月4日 00:40」）。`today` 参数化以便单测钉住
+/// 两个分支；生产路径传 `today_beijing()`。与 `codex_cost.py::_reset_beijing_text_at`
+/// 同 spec。数字来自 `civil_from_unix_secs` + 当天秒（不引入 chrono）。
+fn reset_beijing_text_at(resets_at: i64, today: &str) -> String {
+    let off = 8 * 3600;
+    let sod = (resets_at + off).rem_euclid(86400);
+    let (y, m, d) = civil_from_unix_secs(resets_at, off);
+    let hhmm = format!("{:02}:{:02}", sod / 3600, (sod % 3600) / 60);
+    let key = format!("{y:04}-{m:02}-{d:02}");
+    if key == today { hhmm } else { format!("{m}月{d}日 {hhmm}") }
+}
+
+fn reset_beijing_text(resets_at: i64) -> String {
+    reset_beijing_text_at(resets_at, &today_beijing())
+}
+
 /// plan 块 → 人读一行（None = 无有效套餐，不打印）。数字只格式化不重算——
-/// `used_percent` 直接来自日志 rate_limits。与 `codex_cost.py::_plan_line` 逐字节
-/// 对齐。
+/// `used_percent` 直接来自日志 rate_limits。**「剩余」= 100 − used**（Codex UI
+/// 显示剩余，超限按 0 计——没有负剩余这回事）；重置时间挂北京（今天 → `HH:MM`，
+/// 否则 → `M月D日 HH:MM`）。末尾附快照时间戳（ISO 原样）——日志读的是最后一次
+/// 写盘时刻，Codex UI 是实时，挂上时间戳诚实标注年龄（拿日志 2% 对 UI 5% 对不上
+/// 时看得见原因）。与 `codex_cost.py::_plan_line` 逐字节对齐。
 fn plan_line(plan: Option<&Value>) -> Option<String> {
     let plan = plan?.as_object()?;
     let pt = plan.get("plan_type").and_then(|v| v.as_str())?;
@@ -195,8 +217,16 @@ fn plan_line(plan: Option<&Value>) -> Option<String> {
             let Some(win) = win.as_object() else { continue };
             let Some(up) = win.get("used_percent").and_then(|v| v.as_f64()) else { continue };
             let wm = win.get("window_minutes").and_then(|v| v.as_i64()).unwrap_or(0);
-            parts.push(format!("{} {}% 已用", window_label(wm), pct_text(up)));
+            let remaining = (100.0 - up).max(0.0);
+            let mut piece = format!("{} 剩余{}%", window_label(wm), pct_text(remaining));
+            if let Some(resets) = win.get("resets_at").and_then(|v| v.as_i64()) {
+                piece.push_str(&format!("（重置 {}）", reset_beijing_text(resets)));
+            }
+            parts.push(piece);
         }
+    }
+    if let Some(obs) = plan.get("observed_at").and_then(|v| v.as_str()) {
+        parts.push(format!("快照@{obs}"));
     }
     Some(parts.join(" · "))
 }
@@ -731,14 +761,25 @@ mod tests {
 
     #[test]
     fn window_label_and_pct_text_are_deterministic() {
-        assert_eq!(window_label(300), "5h");
-        assert_eq!(window_label(10080), "7d");
+        assert_eq!(window_label(300), "5小时");
+        assert_eq!(window_label(10080), "每周");
         assert_eq!(window_label(60), "60min");
         // `:g`/Display 在大数/极小值上会分歧——`{:.3}`+去尾零两侧确定。
         assert_eq!(pct_text(67.0), "67");
         assert_eq!(pct_text(67.5), "67.5");
         assert_eq!(pct_text(11.0), "11");
         assert_eq!(pct_text(0.0), "0");
+    }
+
+    #[test]
+    fn reset_beijing_text_at_pins_both_branches() {
+        // 1787900000 → 2026-08-28 14:53 UTC+8；1788351817 → 2026-09-02 20:23
+        // UTC+8（与 codex_cost.py::_reset_beijing_text_at 同 spec）。「今天 → HH:MM、
+        // 否则 → M月D日 HH:MM」两个分支各钉一次，与运行当天无关。
+        assert_eq!(reset_beijing_text_at(1787900000, "2026-08-28"), "14:53");
+        assert_eq!(reset_beijing_text_at(1787900000, "2026-08-29"), "8月28日 14:53");
+        assert_eq!(reset_beijing_text_at(1788351817, "2026-09-02"), "20:23");
+        assert_eq!(reset_beijing_text_at(1788351817, "2026-09-03"), "9月2日 20:23");
     }
 
     #[test]
@@ -752,10 +793,13 @@ mod tests {
             },
             "observed_at": "2026-08-19T..."
         });
-        assert_eq!(
-            plan_line(Some(&plan)),
-            Some("plus（订阅套餐） · 5h 67% 已用 · 7d 11% 已用".to_string())
-        );
+        // 重置时间的「今天→HH:MM / 否则→M月D日」分支由 reset_beijing_text_at 单测
+        // 钉住；这里不硬编码日期文本（夹具 reset 落在 08-28/09-02，套件在 09-02 跑
+        // 时 secondary 恰是「今天」，硬编码日期会随运行日期漂）。钉格式+数字+快照。
+        let s = plan_line(Some(&plan)).unwrap();
+        assert!(s.starts_with("plus（订阅套餐） · 5小时 剩余33%"), "{s}");
+        assert!(s.contains("每周 剩余89%（重置"), "{s}");
+        assert!(s.contains("快照@2026-08-19T..."), "{s}");
         // 无有效 plan_type → None（不打印）；null/缺键同款。
         assert_eq!(plan_line(Some(&json!({"plan_type": ""}))), None);
         assert_eq!(plan_line(Some(&json!(null))), None);
@@ -804,7 +848,9 @@ mod tests {
             "plan": plan,
         });
         let text = render_codex_cost(&out);
-        assert!(text.contains("plan: plus（订阅套餐） · 5h 67% 已用"));
+        // 67% → 剩余 33%；重置文本今天分支由 reset_beijing_text_at 单测钉住。
+        assert!(text.contains("plan: plus（订阅套餐） · 5小时 剩余33%（重置"), "{text}");
+        assert!(text.contains("快照@2026-08-19T..."), "{text}");
         assert!(text.contains("total cost (按量标价): $5.54"));
         // 无 plan → 旧标签。
         let out2 = json!({

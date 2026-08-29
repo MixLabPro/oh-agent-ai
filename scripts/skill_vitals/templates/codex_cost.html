@@ -415,11 +415,12 @@
   function isSubscription(d) {
     return !!(d && d.plan && typeof d.plan.plan_type === "string" && d.plan.plan_type);
   }
-  /** 窗口分钟数 → 人读标签：300→5h、10080→7d、其余 Nmin（与 codex_cost.rs
-   *  window_label 同 spec，不猜未知窗口的语义）。 */
+  /** 窗口分钟数 → 人读标签：300→5小时、10080→每周、其余 Nmin（与 codex_cost.rs
+   *  window_label 同 spec，即 Codex UI 的「5 小时使用限额 / 每周使用限额」；
+   *  不猜未知窗口的语义）。 */
   function windowLabel(wm) {
-    if (wm === 300) return "5h";
-    if (wm === 10080) return "7d";
+    if (wm === 300) return "5小时";
+    if (wm === 10080) return "每周";
     return String(wm) + "min";
   }
   /** used_percent → 文本：固定 3 位小数去尾零（67.0 → 67、67.5 → 67.5）。
@@ -428,12 +429,17 @@
     var s = Number(up).toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
     return s === "" ? "0" : s;
   }
-  /** Unix 秒 → 本地时区 `MM-DD HH:mm`（展示层做，数据层只存秒）。 */
+  /** Unix 秒 → 北京时区（UTC+8 强制，与 report 的 today/month 同口径，不随浏览器
+   *  时区漂移）：今天 → `HH:MM`，否则 → `M月D日 HH:MM`。与文本渲染的
+   *  reset_beijing_text 同 rule，即 Codex UI 的「重置时间：10:03」vs「9月4日 00:40」。 */
   function formatReset(ts) {
-    var d = new Date(ts * 1000);
+    var d = new Date(ts * 1000 + 8 * 3600 * 1000);
     function p(n) { return (n < 10 ? "0" : "") + n; }
-    return p(d.getMonth() + 1) + "-" + p(d.getDate()) +
-           " " + p(d.getHours()) + ":" + p(d.getMinutes());
+    var hhmm = p(d.getUTCHours()) + ":" + p(d.getUTCMinutes());
+    var m = d.getUTCMonth() + 1, dd = d.getUTCDate();
+    var key = d.getUTCFullYear() + "-" + p(m) + "-" + p(dd);
+    if (DATA.today === key) return hhmm;
+    return m + "月" + dd + "日 " + hhmm;
   }
   /** 配额条颜色：占用越高越告警——<70% accent、70–90% warn、≥90% unpriced。
    *  配额是「还剩多少」的告警语义，三档离散色比连续色阶更诚实。 */
@@ -452,14 +458,15 @@
       var win = plan.limits[name];
       if (!win || typeof win.used_percent !== "number") return;
       var up = win.used_percent;
+      var remaining = Math.max(0, 100 - up);            // 剩余 = 100 − 占用（Codex UI 显示剩余）
       var bar = Math.min(up, 100);                      // >100 截断显示，不撑破条
-      var color = quotaColor(up);
+      var color = quotaColor(up);                       // 告警色仍按占用算（占得越多越红）
       var row = document.createElement("div");
       row.className = "quota-row";
       row.innerHTML =
         '<div class="q-head">' +
-          '<span class="q-label">' + esc(name) + ' 窗口 · ' + windowLabel(win.window_minutes) + '</span>' +
-          '<span class="q-pct" style="color:' + color + '">' + pctText(up) + '% 已用</span>' +
+          '<span class="q-label">' + windowLabel(win.window_minutes) + '</span>' +
+          '<span class="q-pct" style="color:' + color + '">剩余 ' + pctText(remaining) + '%</span>' +
         '</div>' +
         '<div class="quota-bar">' +
           '<div class="q-fill" style="width:' + bar + '%;background:' + color + '"></div>' +

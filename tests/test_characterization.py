@@ -58,6 +58,7 @@ from skill_vitals.codex_usage import (  # noqa: E402
 )
 from skill_vitals.codex_cost import (  # noqa: E402
     codex_cost_report, load_codex_pricing, render_codex_cost,
+    _reset_beijing_text_at,
 )
 from skill_vitals.adapters.codex_session import (  # noqa: E402
     codex_session_roots_report, parse_codex_session_log, parse_session_index,
@@ -3238,7 +3239,12 @@ class CodexCostCharacterization(unittest.TestCase):
         text = render_codex_cost(out)
         self.assertIn("host: codex\n", text)
         self.assertIn("currency: USD\n", text)
-        self.assertIn("plan: plus（订阅套餐） · 5h 77% 已用 · 7d 9% 已用\n", text)
+        # 「剩余」= 100 − used；重置时间今天分支由 _reset_beijing_text_at 单测钉住
+        #（夹具 resets_at 落在 08-28/09-02，套件在 09-02 跑时 secondary 恰是「今天」，
+        # 硬编码日期文本会随运行日期漂），这里钉格式+数字+快照时间戳。
+        self.assertIn("plan: plus（订阅套餐） · 5小时 剩余23%（重置", text)
+        self.assertIn("每周 剩余91%（重置", text)
+        self.assertIn("快照@2026-08-03T12:05:00Z\n", text)
         # 订阅套餐 → per-token 美元是标价不是账单
         self.assertIn("total cost (按量标价): $5.54 · total tokens: 861K\n", text)
         self.assertIn("  gpt-5.6-sol  $5.06  (standard)\n", text)
@@ -3246,6 +3252,15 @@ class CodexCostCharacterization(unittest.TestCase):
         self.assertIn("另有 6K tokens 模型未计价\n", text)
         self.assertIn("未接住 1 × token_count_before_turn_context（看见 1.1K tokens）\n", text)
         self.assertIn("未接住 1 × token_count_invalid_last_usage（看见 670 tokens）\n", text)
+
+    def test_reset_beijing_text_at_branches(self):
+        """重置时间「今天 → HH:MM / 否则 → M月D日 HH:MM」两个分支,`today` 参数化,
+        与运行当天无关。Rust `reset_beijing_text_at` 同 spec。"""
+        # 1787900000 → 2026-08-28 14:53 UTC+8；1788351817 → 2026-09-02 20:23 UTC+8
+        self.assertEqual(_reset_beijing_text_at(1787900000, "2026-08-28"), "14:53")
+        self.assertEqual(_reset_beijing_text_at(1787900000, "2026-08-29"), "8月28日 14:53")
+        self.assertEqual(_reset_beijing_text_at(1788351817, "2026-09-02"), "20:23")
+        self.assertEqual(_reset_beijing_text_at(1788351817, "2026-09-03"), "9月2日 20:23")
 
     def test_render_codex_cost_text_no_plan_keeps_old_label(self):
         """无 plan（非订阅）→ 旧标签，不出现「按量标价」。terra 文件无

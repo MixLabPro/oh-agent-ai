@@ -134,12 +134,15 @@ def _tokens_object(t):
 
 
 def _window_label(wm):
-    """窗口分钟数 → 人读标签：300→`5h`、10080→`7d`，其余 → `Nmin`（不猜窗口
-    语义，未知窗口照实显示分钟数）。py↔rs 同 spec，文本渲染逐字节对齐。"""
+    """窗口分钟数 → 人读标签：300→`5小时`、10080→`每周`、其余 → `Nmin`。与 Codex
+    UI 同款（「5 小时使用限额 / 每周使用限额」）；未知窗口不猜语义，照实显示分钟数。
+    py↔rs 同 spec，文本渲染逐字节对齐（Rust `window_label` 镜像）。"""
+    if isinstance(wm, bool) or not isinstance(wm, int):
+        wm = 0
     if wm == 300:
-        return "5h"
+        return "5小时"
     if wm == 10080:
-        return "7d"
+        return "每周"
     return "%smin" % wm
 
 
@@ -151,9 +154,27 @@ def _pct_text(up):
     return s if s else "0"
 
 
+def _reset_beijing_text_at(resets_at, today):
+    """resets_at（Unix 秒）→ 北京时区人读重置时间：今天 → `HH:MM`，否则 →
+    `M月D日 HH:MM`（与 Codex UI 同款：「重置时间：10:03」vs「2026年9月4日 00:40」）。
+    `today` 参数化以便单测钉住两个分支；生产路径传 `today_beijing()`。
+    Rust `reset_beijing_text_at` 镜像（同 spec，逐字节对齐）。"""
+    dt = datetime.fromtimestamp(resets_at, _BEIJING)
+    if dt.date().isoformat() == today:
+        return dt.strftime("%H:%M")
+    return "%s月%s日 %s" % (dt.month, dt.day, dt.strftime("%H:%M"))
+
+
+def _reset_beijing_text(resets_at):
+    return _reset_beijing_text_at(resets_at, today_beijing())
+
+
 def _plan_line(plan):
     """plan 块 → 人读一行（None = 无有效套餐，不打印）。数字只格式化不重算——
-    `used_percent` 直接来自日志 rate_limits。与 Rust 侧 `plan_line` 逐字节对齐。"""
+    `used_percent` 直接来自日志 rate_limits。**「剩余」= 100 − used**（Codex UI
+    显示剩余，超限按 0 计）；重置时间挂北京（今天 → `HH:MM`，否则 → `M月D日
+    HH:MM`）。末尾附快照时间戳（ISO 原样）标注日志滞后。与 Rust 侧 `plan_line`
+    逐字节对齐。"""
     if not isinstance(plan, dict):
         return None
     pt = plan.get("plan_type")
@@ -168,8 +189,16 @@ def _plan_line(plan):
             up = win.get("used_percent")
             if isinstance(up, bool) or not isinstance(up, (int, float)):
                 continue
-            parts.append("%s %s%% 已用" % (_window_label(win.get("window_minutes")),
-                                          _pct_text(up)))
+            remaining = max(0.0, 100.0 - up)
+            piece = "%s 剩余%s%%" % (_window_label(win.get("window_minutes")),
+                                     _pct_text(remaining))
+            resets = win.get("resets_at")
+            if isinstance(resets, (int, float)) and not isinstance(resets, bool):
+                piece += "（重置 %s）" % _reset_beijing_text(int(resets))
+            parts.append(piece)
+    obs = plan.get("observed_at")
+    if isinstance(obs, str) and obs:
+        parts.append("快照@" + obs)
     return " · ".join(parts)
 
 
