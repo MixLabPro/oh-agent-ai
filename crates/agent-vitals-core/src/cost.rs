@@ -1,0 +1,776 @@
+//! 成本计算 —— 把 usage 报告变成结构化费用，以及把日桶变成精确/部分计价的一天。
+//!
+//! 这里是 cost 计算在 core crate 里的单一实现（原来住在二进制 `src/agent/cost.rs`，
+//! preflight Phase 0-1 搬迁过来）：CLI 的 `cost_report`/`cost_block`、未来的 Tauri
+//! 菜单栏的 `priced_day`、以及任何"按月查钱"的 surface 都从这里取数，**不长第四份
+//! 拷贝**（CLAUDE.md「token_by_date_model/priced_day 在 core 里正是为了让 Tauri 菜单栏
+//! 复用」的落点）。与 `scripts/agent_vitals/agent/cost.py` 逐字节一致，由
+//! `tests/test_cli_matrix.py` 的 `both()` 差分看守。
+//!
+//! 价格表的单一真相源是 `scripts/agent_vitals/pricing.json`（这里 `include_str!`
+//! 内嵌、Python 侧读包内文件；`dsh-client/pricing.json` 是 build 时复制出的运行时份，
+//! lockstep 测试对齐）。缓存写入报价表没有行 → 按 0 计（不臆造价格）。高峰时段为
+//! 北京时间**周一至周五** 9–12、14–18 点，周末全天空闲；空闲价 = 高峰价的一半。
+
+use serde_json::{json, Value};
+
+const PRICING_JSON: &str = include_str!("../../../scripts/agent_vitals/pricing.json");
+
+pub fn load_pricing() -> Value {
+    serde_json::from_str(PRICING_JSON).unwrap_or_else(|_| Value::Object(Default::default()))
+}
+
+fn strip_zero(x: f64) -> String {
+    let s = format!("{:.1}", x);
+    if s.ends_with(".0") {
+        s[..s.len() - 2].to_string()
+    } else {
+        s
+    }
+}
+
+/// token 数 → 人类可读：226423948 → 226.4M。与 tab 的 formatNumber 同 spec。
+fn format_number(n: i64) -> String {
+    if n >= 1_000_000_000 {
+        return strip_zero(n as f64 / 1e9) + "B";
+    }
+    if n >= 1_000_000 {
+        return strip_zero(n as f64 / 1e6) + "M";
+    }
+    if n >= 1_000 {
+        return strip_zero(n as f64 / 1e3) + "K";
+    }
+    n.to_string()
+}
+
+/// 金额 → `¥774.7` / `¥22.38` / `¥6.73`。≥100 一位小数否则两位，去尾零。
+fn format_money(x: f64) -> String {
+    let s = if x >= 100.0 { format!("{:.1}", x) } else { format!("{:.2}", x) };
+    let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
+    format!("¥{}", s)
+}
+
+/// 某个供应商的模型表。找不到该供应商返回 None。
+fn models_of<'a>(pricing: &'a Value, provider: &str) -> Option<&'a serde_json::Map<String, Value>> {
+    pricing
+        .pointer(&format!("/providers/{provider}/models"))
+        .and_then(|v| v.as_object())
+}
+
+/// `deepseek/deepseek-v4-pro-0813` → 价格卡键 `deepseek-v4-pro`，在**指定供应商
+/// 的表里**匹配；匹配不上返回 None（不臆造）。
+fn norm_model_in(model: &str, cards: &serde_json::Map<String, Value>) -> Option<String> {
+    let seg = model.rsplit('/').next().unwrap_or(model);
+    for key in cards.keys() {
+        if seg == key || seg.starts_with(key.as_str()) {
+            return Some(key.clone());
+        }
+    }
+    None
+}
+
+/// 计价依据：用了这个供应商自己的报价，还是回落到原厂报价。
+/// **必须透出到展示层**——按别家的价估出来的数字，不说清楚就是在冒充实价。
+#[derive(Clone, Copy, PartialEq)]
+enum Basis {
+    Provider,
+    Fallback,
+    /// 同一模型在本会话里被多家供应商服务过，无法判断哪些 token 属于哪家。
+    /// 仍按原厂报价给一个估算（用户要的是"有个数"而不是一片空白），但**依据
+    /// 与 Fallback 不同**：那边是"这家没报价"，这边是"报价有、归属不明"，
+    /// 文案不能共用一句。
+    Ambiguous,
+}
+
+/// 解析出该 (供应商, 模型) 实际适用的价格卡。
+///
+/// 顺序：该供应商自己的表 → 回落到 `fallback_provider`（原厂）的同名模型 →
+/// 都没有才算未计价。**回落是有意的默认行为**：供应商没报价时给一个标注了
+/// 来源的估算，比什么都不给有用；但它必须带着 `Basis::Fallback` 一路传到
+/// 展示层，由展示层写明「按原厂报价估算」。
+fn resolve_card(model: &str, provider: Option<&str>, pricing: &Value) -> Option<(String, String, Basis)> {
+    // 归属不明：哨兵不是真实供应商名，查不到它的表，会一路掉到回落分支。
+    // 单独认出来是为了让展示层说对话——也顺带保证这个内部哨兵**永远不会**
+    // 被当成供应商名渲染给用户看。
+    let ambiguous = provider == Some(crate::usage::AMBIGUOUS_PROVIDER);
+    if let Some(p) = provider.filter(|_| !ambiguous) {
+        if let Some(cards) = models_of(pricing, p) {
+            if let Some(key) = norm_model_in(model, cards) {
+                return Some((key, p.to_string(), Basis::Provider));
+            }
+        }
+    }
+    let fb = pricing.get("fallback_provider").and_then(|v| v.as_str())?;
+    let cards = models_of(pricing, fb)?;
+    let key = norm_model_in(model, cards)?;
+    Some((key, fb.to_string(), if ambiguous { Basis::Ambiguous } else { Basis::Fallback }))
+}
+
+fn model_short(model: &str, pricing: &Value) -> String {
+    let fb = pricing.get("fallback_provider").and_then(|v| v.as_str()).unwrap_or("");
+    if let Some(cards) = models_of(pricing, fb) {
+        if let Some(key) = norm_model_in(model, cards) {
+            return key;
+        }
+    }
+    model.rsplit('/').next().unwrap_or(model).chars().take(24).collect()
+}
+
+fn get_i64(v: &Value, key: &str) -> i64 {
+    v.get(key).and_then(|x| x.as_i64()).unwrap_or(0)
+}
+
+/// 一个模型桶算出来的三个数：真实总价、其中高峰份额的价、其中缓存命中
+/// （cache_read）那部分单独的价——三者不是三个独立的桶，`cache_read_cost`
+/// 已经算在 `total` 里，是 `total` 内部的一个可见切面（想知道"缓存命中帮我
+/// 省了多少钱"得靠它，不是靠 total 单独一个数能看出来的）。
+#[derive(Clone, Copy)]
+struct Price {
+    total: f64,
+    peak: f64,
+    cache_read_cost: f64,
+}
+
+/// 把每种 token 类型拆成高峰份额（`peak_*`）和空闲份额（全量 − `peak_*`），
+/// 各按各自单价计价再相加——不是「全量按空闲价」和「全量按高峰价」两个
+/// 假设性区间。
+fn bucket_price(buckets: &Value, model_key: &str, provider_key: &str, pricing: &Value) -> Option<Price> {
+    let card = pricing.pointer(&format!("/providers/{provider_key}/models/{model_key}"))?;
+    let get = |key: &str| get_i64(buckets, key) as f64 / 1e6;
+    let u_peak = get("peak_uncached_input_tokens");
+    let c_peak = get("peak_cache_read_tokens");
+    let o_peak = get("peak_output_tokens");
+    let u_off = get("uncached_input_tokens") - u_peak;
+    let c_off = get("cache_read_tokens") - c_peak;
+    let o_off = get("output_tokens") - o_peak;
+    let rate = |path: &str| card.pointer(path).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let cache_read_cost = rate("/input_cached/off_peak") * c_off + rate("/input_cached/peak") * c_peak;
+    let off = rate("/input_uncached/off_peak") * u_off + rate("/input_cached/off_peak") * c_off
+        + rate("/output/off_peak") * o_off;
+    let peak = rate("/input_uncached/peak") * u_peak + rate("/input_cached/peak") * c_peak
+        + rate("/output/peak") * o_peak;
+    Some(Price { total: off + peak, peak, cache_read_cost })
+}
+
+/// usage 报告 × 价格表 → 结构化成本数据。**这是唯一算价格的地方**——
+/// `cost_block`（人读文本）与 `--json` 的 `cost` 键都从这里取数，不是两处
+/// 各算一遍再凑成两种格式。之前 `cost` 完全没有 JSON 出口：想拿这份数字只能
+/// 手写脚本重新调 `_price`/`load_pricing`，算一次就要重新验证一次是否用对了
+/// 价格表——现在报告数据里的 `cost` 字段和人读文本走的是同一次计算。
+///
+/// 无任何可分桶的桶且没有未计价 token 时返回 `None`（与 `cost_block` 的空
+/// 列表同一语义：没有数据就是没有，不摆一个全零的结构出来）。金额是未四舍
+/// 五入的原始浮点——舍入是格式化文本时才做的展示决定，结构化数据不预先舍。
+pub fn cost_report(usage: &Value, pricing: &Value) -> Option<Value> {
+    let by_model = usage.get("by_model").and_then(|v| v.as_object())?;
+    let providers = usage.get("providers").and_then(|v| v.as_object());
+    let mut total: f64 = 0.0;
+    let mut peak_total: f64 = 0.0;
+    let mut unpriced: i64 = 0;
+    let mut per_model = serde_json::Map::new();
+    for (model, buckets) in by_model {
+        // 价目表**按供应商分层**，不是按模型名一张表打天下。真实日志里
+        // provider=shengsuanyun 的 pro 和 provider=deepseek-official 的 flash
+        // 并存，两家报价不同（胜算云 DeepSeek 线路缓存读 0.15、Ali 线路 0.45）。
+        //
+        // 解析顺序见 resolve_card：该供应商自己的表 → 回落原厂 → 未计价。
+        // **回落是有意的默认**：供应商没报价时给一个标注了来源的估算，比什么
+        // 都不给有用；但依据必须一路传到展示层写明「按原厂报价估算」，否则就是
+        // 拿别家的价冒充实价。
+        //
+        // provider 为 Null（老日志没上报）或该模型没留下 header 时按 None 处理，
+        // resolve_card 自然回落到原厂——与老日志的既有行为一致。
+        let provider = providers
+            .and_then(|m| m.get(model))
+            .and_then(|v| v.as_str());
+        match resolve_card(model, provider, pricing) {
+            Some((key, provider_key, basis)) => {
+                if let Some(p) = bucket_price(buckets, &key, &provider_key, pricing) {
+                    total += p.total;
+                    peak_total += p.peak;
+                    per_model.insert(
+                        model.clone(),
+                        serde_json::json!({
+                            "short_name": model_short(model, pricing),
+                            // 供应商随每一行一起给出：同一会话可能横跨两家，
+                            // 只给模型名的话这张表跟任何一家的账单都对不上。
+                            // 归属不明时 provider 落 Null——`__ambiguous__` 是
+                            // 内部哨兵，绝不能作为供应商名渲染给用户看。
+                            "provider": if basis == Basis::Ambiguous {
+                                Value::Null
+                            } else {
+                                provider.map(Value::from).unwrap_or(Value::Null)
+                            },
+                            // 这一行是按谁的报价算的。非 provider 时展示层必须说明依据。
+                            "pricing_basis": match basis {
+                                Basis::Provider => "provider",
+                                Basis::Fallback => "fallback",
+                                Basis::Ambiguous => "ambiguous",
+                            },
+                            "priced_with": provider_key,
+                            "total": p.total,
+                            "peak": p.peak,
+                            "cache_read_cost": p.cache_read_cost,
+                        }),
+                    );
+                }
+            }
+            None => {
+                unpriced += get_i64(buckets, "uncached_input_tokens")
+                    + get_i64(buckets, "cache_read_tokens")
+                    + get_i64(buckets, "cache_write_tokens");
+            }
+        }
+    }
+    if per_model.is_empty() && unpriced == 0 {
+        return None;
+    }
+    Some(serde_json::json!({
+        "currency": "CNY",
+        "estimate_disclaimer": "估算值，不是账单",
+        "total": total,
+        "peak_total": peak_total,
+        "per_model": Value::Object(per_model),
+        "unpriced_tokens": unpriced,
+    }))
+}
+
+/// 日桶的 8 个基础字段（`state.py` month.json/today.json 的顶层形状）——
+/// 覆盖率对账与 remainder 计算都按这 8 个字段，一个不差。
+const DAY_BUCKET_FIELDS: [&str; 8] = [
+    "uncached_input_tokens", "output_tokens",
+    "cache_read_tokens", "cache_write_tokens",
+    "peak_uncached_input_tokens", "peak_output_tokens",
+    "peak_cache_read_tokens", "peak_cache_write_tokens",
+];
+
+/// `by_model` 里每个模型的 8 桶按字段相加，折成一份跟 day/today 顶层
+/// 同形状的 8 桶——用来跟顶层的「真实总量」对账覆盖率。
+fn sum_by_model(by_model: &serde_json::Map<String, Value>) -> Value {
+    let mut total = serde_json::Map::new();
+    for f in DAY_BUCKET_FIELDS {
+        let mut sum: i64 = 0;
+        for buckets in by_model.values() {
+            sum += get_i64(buckets, f);
+        }
+        total.insert(f.to_string(), json!(sum));
+    }
+    Value::Object(total)
+}
+
+/// 给一份**没有模型归属**的原始 8 桶按 fallback 模型估个价——`cost_report`
+/// 需要知道"这些 token 是哪个模型"，这里是它唯一的退路，不是另一条计价规则。
+///
+/// Python 侧（`cost.py::fallback_price`）实现里 `_price` 用
+/// `pricing["providers"][fb]["models"]["deepseek-v4-flash"]` 下标直取，缺卡直接
+/// KeyError 崩——真实 pricing.json 恒有这张卡，是「按约定存在」。Rust 侧沿用
+/// 本模块「缓存写入报价表没有行 → 按 0 计」的原则，缺卡返回全零价，不 panic。
+fn fallback_price(buckets: &Value, pricing: &Value) -> Price {
+    let fb = pricing.get("fallback_provider").and_then(|v| v.as_str()).unwrap_or("");
+    bucket_price(buckets, "deepseek-v4-flash", fb, pricing)
+        .unwrap_or(Price { total: 0.0, peak: 0.0, cache_read_cost: 0.0 })
+}
+
+/// 一份「日桶」（`state.py` month.json/today.json 里那种 8 基础字段 + 可选
+/// `by_model`）→ `{total, peak_total, pricing_basis, coverage}`，或 `None`
+/// （没有 by_model——调用方自己决定退回哪种近似）。
+///
+/// **唯一的覆盖率校验入口**——`cli.py` 的日历、`budget.py` 的 month/7d-average
+/// 三处过去各写一份「有没有 by_model 就……」，日历那份修过覆盖率之后，budget.py
+/// 那两份还在裸用 `by_model`，同一份 `month.json` 因此在两个投影上报出不同的钱
+/// （¥4.50 vs ¥18.00）。三处都改调这一个函数，覆盖率的判断只写一次，不会有第
+/// 四个地方重新引入同一个 bug。
+///
+/// **必须校验覆盖率，不能只看「有没有 by_model」**（真实回归：8 月账目一度因为
+/// 从不校验覆盖率，把只覆盖当天 0.7%~32.5% token 的 by_model 当成"精算"直接
+/// 报出去，剩下 67%~99% 的 token 静默消失）。做法：把 `by_model` 折成跟 `day`
+/// 同形状的一份总量，与 `day` 做减法算出"没有模型归属的剩余 token"——不是 0
+/// 就说明这一天的 `by_model` 只覆盖了部分时段（例如一个跨零点的会话只把某一天
+/// 的切片记了下来），剩余部分按 `fallback_price` 补齐，标 `pricing_basis:
+/// "partial"`，不假装是 `"exact"`。
+///
+/// Python 平行实现见 `cost.py::priced_day`——这里是同一函数的 Rust 锁步，
+/// 供 Tauri 菜单栏等 Rust surface 复用，不许在应用里长第二份。
+pub fn priced_day(day: &Value, pricing: &Value) -> Option<Value> {
+    let by_model = day.get("by_model").and_then(|v| v.as_object())?;
+    if by_model.is_empty() {
+        return None;
+    }
+    let report = cost_report(&json!({"by_model": by_model}), pricing)?;
+    let covered = sum_by_model(by_model);
+    let day_total: i64 = DAY_BUCKET_FIELDS.iter().map(|f| get_i64(day, f)).sum();
+    let covered_total: i64 = DAY_BUCKET_FIELDS.iter().map(|f| get_i64(&covered, f)).sum();
+    let remainder_total = (day_total - covered_total).max(0);
+    if remainder_total == 0 {
+        return Some(json!({
+            "total": report["total"],
+            "peak_total": report["peak_total"],
+            "pricing_basis": "exact",
+            "coverage": 1.0,
+        }));
+    }
+    let remainder = serde_json::json!({
+        "uncached_input_tokens": (get_i64(day, "uncached_input_tokens") - get_i64(&covered, "uncached_input_tokens")).max(0),
+        "output_tokens": (get_i64(day, "output_tokens") - get_i64(&covered, "output_tokens")).max(0),
+        "cache_read_tokens": (get_i64(day, "cache_read_tokens") - get_i64(&covered, "cache_read_tokens")).max(0),
+        "cache_write_tokens": (get_i64(day, "cache_write_tokens") - get_i64(&covered, "cache_write_tokens")).max(0),
+        "peak_uncached_input_tokens": (get_i64(day, "peak_uncached_input_tokens") - get_i64(&covered, "peak_uncached_input_tokens")).max(0),
+        "peak_output_tokens": (get_i64(day, "peak_output_tokens") - get_i64(&covered, "peak_output_tokens")).max(0),
+        "peak_cache_read_tokens": (get_i64(day, "peak_cache_read_tokens") - get_i64(&covered, "peak_cache_read_tokens")).max(0),
+        "peak_cache_write_tokens": (get_i64(day, "peak_cache_write_tokens") - get_i64(&covered, "peak_cache_write_tokens")).max(0),
+    });
+    let top_up = fallback_price(&remainder, pricing);
+    // day_total 为 0 时 remainder_total 必是 0，已被上面的分支短路——到这里
+    // day_total 必然 > 0，除法安全（与 cost.py 同一条推理）。
+    Some(json!({
+        "total": report["total"].as_f64().unwrap_or(0.0) + top_up.total,
+        "peak_total": report["peak_total"].as_f64().unwrap_or(0.0) + top_up.peak,
+        "pricing_basis": "partial",
+        "coverage": covered_total as f64 / day_total as f64,
+    }))
+}
+
+/// 单条 hour/day 桶 → 总价 + 高峰份额价。**legacy 兜底路径**——只在
+/// today.json/month.json 没有 `by_model` 字段（这个功能上线前写的旧数据）时
+/// 才用。真实路径见 `cost_report`，按实际模型精确定价。
+///
+/// 这条桶不带模型信息 —— 这里走 pricing.json 里默认 fallback 模型（通常是
+/// flash）按桶内 4 桶 + 4 peak_* 字段算总价，pro 模型的日子会被系统性低估
+/// （pro 是 flash 的 3 倍价）。peak 占比 = peak_total / total。与
+/// `budget.py::_bucket_cost` 逐字节一致（Tauri 菜单栏的月/日成本聚合要它在
+/// Rust 侧的同构实现，不然无 by_model 的旧日子在两套 surface 上报出两个数）。
+pub fn bucket_cost(buckets: &Value, pricing: &Value) -> Value {
+    // 取 fallback 模型：flash 优先（pro 比 flash 贵，预算按 flash 算更宽松，
+    // 留缓冲）；没有 flash 就取该供应商第一张卡；都没有 → 全零（不臆造价格）。
+    let Some(fb) = pricing.get("fallback_provider").and_then(|v| v.as_str()) else {
+        return json!({"total": 0.0, "peak_total": 0.0});
+    };
+    let Some(models) = models_of(pricing, fb) else {
+        return json!({"total": 0.0, "peak_total": 0.0});
+    };
+    let model_key = if models.contains_key("deepseek-v4-flash") {
+        "deepseek-v4-flash"
+    } else {
+        let Some(first) = models.keys().next() else {
+            return json!({"total": 0.0, "peak_total": 0.0});
+        };
+        first.as_str()
+    };
+    let Some(card) = pricing.pointer(&format!("/providers/{fb}/models/{model_key}")) else {
+        return json!({"total": 0.0, "peak_total": 0.0});
+    };
+    let peak_tokens = |bk: &str| get_i64(buckets, bk) as f64 / 1e6;
+    let rate = |ck: &str, rk: &str| {
+        card.pointer(&format!("/{ck}/{rk}")).and_then(|v| v.as_f64()).unwrap_or(0.0)
+    };
+    // 一个 token 类型的总成本 = 高峰份额×高峰价 + 空闲份额×空闲价。两套命名
+    // 不同（pricing 是简写、state 是 _tokens 后缀），分开传。
+    let cost_of = |card_key: &str, bucket_key: &str, peak_bucket_key: &str| {
+        let peak_rate = rate(card_key, "peak");
+        let off_rate = rate(card_key, "off_peak");
+        let peak = peak_tokens(peak_bucket_key);
+        let total = peak_tokens(bucket_key);
+        let off = total - peak;
+        peak * peak_rate + off * off_rate
+    };
+    let total = cost_of("input_uncached", "uncached_input_tokens", "peak_uncached_input_tokens")
+        + cost_of("input_cached", "cache_read_tokens", "peak_cache_read_tokens")
+        + cost_of("output", "output_tokens", "peak_output_tokens");
+    let peak = peak_tokens("peak_uncached_input_tokens") * rate("input_uncached", "peak")
+        + peak_tokens("peak_cache_read_tokens") * rate("input_cached", "peak")
+        + peak_tokens("peak_output_tokens") * rate("output", "peak");
+    json!({"total": total, "peak_total": peak})
+}
+
+/// 某个自然月的成本 —— `month.json`/归档里的 `days` map → `{total, peak_total}`。
+///
+/// 与 `budget.py::compute_month_cost` 的定价段逐字节一致（那边还负责读文件 +
+/// 月/归档边界，这里是纯计算）：逐日 `priced_day`（唯一覆盖率校验入口），它
+/// 返回 None 说明这天没有 `by_model`，退回 `bucket_cost` 的 fallback 近似——
+/// 同一个月里新旧两种精度的日子并存是预期行为，不是 bug。
+pub fn month_cost(days: &Value, pricing: &Value) -> Value {
+    let mut total = 0.0;
+    let mut peak = 0.0;
+    if let Some(map) = days.as_object() {
+        for day in map.values() {
+            if let Some(c) = priced_day(day, pricing) {
+                total += c["total"].as_f64().unwrap_or(0.0);
+                peak += c["peak_total"].as_f64().unwrap_or(0.0);
+            } else {
+                let c = bucket_cost(day, pricing);
+                total += c["total"].as_f64().unwrap_or(0.0);
+                peak += c["peak_total"].as_f64().unwrap_or(0.0);
+            }
+        }
+    }
+    json!({"total": total, "peak_total": peak})
+}
+
+/// today.json 的 data → 当日成本（元）+ peak 拆分，或 None（缺列不编列）。
+///
+/// 与 `budget.py::compute_today_cost` 的定价段逐字节一致（那边还负责读文件 +
+/// 北京日期键）。关键校验：**today.json 里的 date 必须真的是今天**——`rotate_today`
+/// 只在今天真的跑过一次审计时才翻页，否则 today.json 会原封不动停在最后有会话
+/// 的那天，不校验 date 就会把昨天的花费当今天的报出去（真机回归：2026-08-27
+/// 没用过 DSH，菜单栏/alert.json 仍报 ¥3.09 = 08-26 的账）。date 不符/缺场时
+/// 返回 None 而不是 0：没有今天的数据，不是"今天花了 0 元"。
+pub fn today_cost(data: &Value, pricing: &Value, today: &str) -> Option<Value> {
+    // today.json 里的 date 必须真的是今天（见上）；date 缺场的老数据不拦（继续走
+    // by_model/bucket 路径，与 Python 行为一致——`compute_today_cost` 只对"有 date
+    // 且不等于今天"返回 None）。
+    if let Some(d) = data.get("date").and_then(|v| v.as_str()) {
+        if d != today {
+            return None;
+        }
+    }
+    let by_model = data.get("by_model").and_then(|v| v.as_object());
+    let buckets = data.get("buckets").and_then(|v| v.as_object());
+    if by_model.map_or(true, |m| m.is_empty()) && buckets.map_or(true, |m| m.is_empty()) {
+        return None;
+    }
+    if let Some(bm) = by_model.filter(|m| !m.is_empty()) {
+        // 新数据：顶层 by_model 按实际模型精确定价。与 Python 一致——cost_report
+        // 对"全未计价"返回 None 时仍给 {0,0}（那边 `_price_by_model` 同样兜 0）。
+        return Some(match cost_report(&json!({"by_model": bm}), pricing) {
+            Some(r) => json!({
+                "total": r["total"], "peak_total": r["peak_total"]
+            }),
+            None => json!({"total": 0.0, "peak_total": 0.0}),
+        });
+    }
+    // 老数据：无 by_model，退回 _bucket_cost 逐桶求和。
+    let mut total = 0.0;
+    let mut peak = 0.0;
+    if let Some(bs) = buckets {
+        for b in bs.values() {
+            let c = bucket_cost(b, pricing);
+            total += c["total"].as_f64().unwrap_or(0.0);
+            peak += c["peak_total"].as_f64().unwrap_or(0.0);
+        }
+    }
+    Some(json!({"total": total, "peak_total": peak}))
+}
+
+/// usage 报告 → 成本行列表；无任何可分桶的桶时返回空列表（与 tab 空态同构，
+/// 不打印假的 ¥0 行）。纯格式化——数字来自 `cost_report`，这里不重算。
+pub fn cost_block(usage: &Value, pricing: &Value) -> Vec<String> {
+    let Some(report) = cost_report(usage, pricing) else { return vec![] };
+    let total = report["total"].as_f64().unwrap_or(0.0);
+    let peak_total = report["peak_total"].as_f64().unwrap_or(0.0);
+    let unpriced = report["unpriced_tokens"].as_i64().unwrap_or(0);
+    let per_model_map = report["per_model"].as_object().cloned().unwrap_or_default();
+
+    let seq: Vec<Value> = usage.get("sequence").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let mut line = format!("费用（估算）≈ {}", format_money(total));
+    if peak_total > 0.0 {
+        line += &format!("（其中高峰时段 {}）", format_money(peak_total));
+    }
+    if seq.len() == 1 {
+        if let Some(m) = seq[0].as_str() {
+            line += &format!(" · {}", model_short(m, pricing));
+        }
+    } else if seq.len() > 1 {
+        let names: Vec<String> = seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|m| model_short(m, pricing))
+            .collect();
+        line += &format!(" · 中途切换模型（{}）", names.join(" → "));
+    }
+    let mut rows = vec![line];
+    // per_model 的展示顺序必须跟 by_model 的原始遍历顺序一致——serde_json 开了
+    // preserve_order，Map 迭代序即插入序，与 Python dict 的插入序天然对齐。
+    if per_model_map.len() > 1 {
+        if let Some(by_model) = usage.get("by_model").and_then(|v| v.as_object()) {
+            for model in by_model.keys() {
+                if let Some(entry) = per_model_map.get(model) {
+                    let label = entry["short_name"].as_str().unwrap_or(model);
+                    let t = entry["total"].as_f64().unwrap_or(0.0);
+                    rows.push(format!("  {}  {}", label, format_money(t)));
+                }
+            }
+        }
+    }
+    if unpriced > 0 {
+        rows.push(format!("另有 {} tokens 模型未知未计价", format_number(unpriced)));
+    }
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 与 cost.py 对同一份真实 usage 报告的输出逐字节一致（差分由 cli_matrix 补）。
+    /// 桶里没有 peak_* 键（老形状/手写夹具）→ 缺省 0，全部按空闲价计——真实总价
+    /// 正好等于旧版本的「空闲」栏数字，高峰栏直接消失（peak_total == 0）。
+    #[test]
+    fn cost_block_real_session_report() {
+        let usage = serde_json::from_str(
+            r#"{"by_model":{"deepseek/deepseek-v4-pro-0813":{"uncached_input_tokens":165754353,"output_tokens":467981,"cache_read_tokens":642944,"cache_write_tokens":0},"deepseek/deepseek-v4-flash":{"uncached_input_tokens":14823001,"output_tokens":30754,"cache_read_tokens":69376,"cache_write_tokens":0}},"sequence":["deepseek/deepseek-v4-pro-0813","deepseek/deepseek-v4-flash","deepseek/deepseek-v4-pro-0813"]}"#,
+        ).unwrap();
+        let pricing = load_pricing();
+        let rows = cost_block(&usage, &pricing);
+        let expected: Vec<String> = [
+            "费用（估算）≈ ¥774.7 · 中途切换模型（deepseek-v4-pro → deepseek-v4-flash → deepseek-v4-pro）",
+            "  deepseek-v4-pro  ¥752.3",
+            "  deepseek-v4-flash  ¥22.38",
+        ].iter().map(|s| s.to_string()).collect();
+        assert_eq!(rows, expected);
+    }
+
+    /// 桶里带 peak_* 且非零：真实总价是「空闲份额×空闲价 + 高峰份额×高峰价」，
+    /// 不是全量分别乘两个价。全部输入都在高峰（peak_uncached_input_tokens ==
+    /// uncached_input_tokens）时，总价应等于全量按高峰价计——不多不少。
+    #[test]
+    fn cost_block_splits_peak_and_off_peak_shares() {
+        let usage = serde_json::from_str(
+            r#"{"by_model":{"deepseek-v4-pro":{"uncached_input_tokens":1000000,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":1000000,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},"sequence":["deepseek-v4-pro"]}"#,
+        ).unwrap();
+        let pricing = load_pricing();
+        let rows = cost_block(&usage, &pricing);
+        // 100 万输入 tokens 全落峰值 → 9.0 元/百万 tokens 高峰价，整份按高峰算。
+        assert_eq!(rows[0], "费用（估算）≈ ¥9（其中高峰时段 ¥9） · deepseek-v4-pro");
+    }
+
+    /// `cost_report` 是 `cost_block` 现在唯一的数字来源——这条钉住结构化输出
+    /// 本身，跟 `cost_block_real_session_report` 用同一份 usage，两条测试的
+    /// 数字必须能对上（¥774.7 = 752.3+22.38 四舍五入误差内）。
+    #[test]
+    fn cost_report_structured_shape() {
+        let usage = serde_json::from_str(
+            r#"{"by_model":{"deepseek/deepseek-v4-pro-0813":{"uncached_input_tokens":165754353,"output_tokens":467981,"cache_read_tokens":642944,"cache_write_tokens":0},"deepseek/deepseek-v4-flash":{"uncached_input_tokens":14823001,"output_tokens":30754,"cache_read_tokens":69376,"cache_write_tokens":0}},"sequence":["deepseek/deepseek-v4-pro-0813","deepseek/deepseek-v4-flash","deepseek/deepseek-v4-pro-0813"]}"#,
+        ).unwrap();
+        let pricing = load_pricing();
+        let report = cost_report(&usage, &pricing).expect("should have priceable data");
+        assert_eq!(report["currency"], "CNY");
+        assert_eq!(report["unpriced_tokens"], 0);
+        let total = report["total"].as_f64().unwrap();
+        assert!((total - 774.7).abs() < 0.05, "total should be ~774.7, got {total}");
+        let pro = &report["per_model"]["deepseek/deepseek-v4-pro-0813"];
+        assert_eq!(pro["short_name"], "deepseek-v4-pro");
+        assert!((pro["total"].as_f64().unwrap() - 752.3).abs() < 0.05);
+        // 642944 cache_read tokens，无 peak_* 键（老形状）→ 全部按空闲价
+        // 0.15/百万计：642944/1e6 * 0.15 ≈ 0.0964。
+        assert!((pro["cache_read_cost"].as_f64().unwrap() - 0.0964).abs() < 0.001);
+    }
+
+    /// cache_read_cost 是 total 内部的一个切面，不是另一个独立的桶——精确输入
+    /// （100 万 cache_read tokens，其余为 0）下，cache_read_cost 应该等于 total。
+    #[test]
+    fn cost_report_cache_read_cost_is_isolated_from_other_token_types() {
+        let usage = serde_json::json!({
+            "by_model": {"deepseek-v4-pro": {
+                "uncached_input_tokens": 0, "output_tokens": 0,
+                "cache_read_tokens": 1000000, "cache_write_tokens": 0,
+            }},
+            "sequence": ["deepseek-v4-pro"],
+        });
+        let pricing = load_pricing();
+        let report = cost_report(&usage, &pricing).unwrap();
+        let pro = &report["per_model"]["deepseek-v4-pro"];
+        // 100 万 cache_read tokens 全部空闲价：0.15 元/百万。
+        assert_eq!(pro["cache_read_cost"].as_f64().unwrap(), 0.15);
+        assert_eq!(pro["total"].as_f64().unwrap(), 0.15);
+    }
+
+    /// 没有任何可分桶的桶、也没有未计价 token → None，不是一个全零的结构。
+    #[test]
+    fn cost_report_none_when_nothing_to_price() {
+        let usage = serde_json::json!({"by_model": {}, "sequence": []});
+        let pricing = load_pricing();
+        assert_eq!(cost_report(&usage, &pricing), None);
+    }
+
+    /// 未知模型：不进 per_model，token 数进 unpriced_tokens，不臆造价格。
+    #[test]
+    fn cost_report_unknown_model_is_unpriced_not_zero_priced() {
+        let usage = serde_json::json!({
+            "by_model": {"some/unknown-model": {"uncached_input_tokens": 1000, "output_tokens": 10, "cache_read_tokens": 0, "cache_write_tokens": 0}},
+            "sequence": ["some/unknown-model"],
+        });
+        let pricing = load_pricing();
+        let report = cost_report(&usage, &pricing).unwrap();
+        assert_eq!(report["per_model"].as_object().unwrap().len(), 0);
+        assert_eq!(report["unpriced_tokens"], 1000);
+    }
+
+    #[test]
+    fn format_number_and_money_spec() {
+        assert_eq!(format_number(226423948), "226.4M");
+        assert_eq!(format_number(685754), "685.8K");
+        assert_eq!(format_number(50073856), "50.1M");
+        assert_eq!(format_number(999), "999");
+        assert_eq!(format_money(774.7), "¥774.7");
+        assert_eq!(format_money(1638.88), "¥1638.9");
+        assert_eq!(format_money(22.38), "¥22.38");
+        assert_eq!(format_money(12.0), "¥12");
+    }
+
+    /// `priced_day` 三态锁步：by_model 覆盖完整 → `exact` + coverage 1.0；
+    /// 覆盖不全 → `partial` + coverage <1（剩余按 fallback 价补齐）；无 by_model
+    /// → None。数字与 `cost.py::priced_day` 对同一份日桶的输出逐字节一致
+    /// （Python 侧 `tests/test_cost_priced_day.py` 用同一份夹具断言同一组数，
+    /// 交叉引用互守）。
+    #[test]
+    fn priced_day_exact_when_by_model_covers_all() {
+        let day = serde_json::json!({
+            "uncached_input_tokens": 1000000, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            "by_model": {"deepseek-v4-flash": {
+                "uncached_input_tokens": 1000000, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            }},
+        });
+        let pricing = load_pricing();
+        let out = priced_day(&day, &pricing).expect("by_model present");
+        assert_eq!(out["pricing_basis"], "exact");
+        assert_eq!(out["coverage"], 1.0);
+        // 100 万 uncached 全空闲：flash 空闲价 1.5 元/百万 → total 1.5。
+        assert!((out["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+        assert_eq!(out["peak_total"], 0.0);
+    }
+
+    /// 覆盖不全的那条真实回归：by_model 只覆盖了当天 100 万 token 里的 30 万，
+    /// 剩余 70 万按 fallback 价补齐、标 `partial`——不许把部分覆盖当成精算报出去。
+    #[test]
+    fn priced_day_partial_when_by_model_covers_only_part() {
+        let day = serde_json::json!({
+            "uncached_input_tokens": 1000000, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            "by_model": {"deepseek-v4-flash": {
+                "uncached_input_tokens": 300000, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            }},
+        });
+        let pricing = load_pricing();
+        let out = priced_day(&day, &pricing).expect("by_model present");
+        assert_eq!(out["pricing_basis"], "partial");
+        assert!((out["coverage"].as_f64().unwrap() - 0.3).abs() < 1e-9);
+        // 30 万按 flash 1.5 + 剩余 70 万按 fallback（deepseek-official 的 flash）
+        // 1.5 = 全量 1.5 元——fallback 落的就是 flash 这张卡，这里两个价相同。
+        assert!((out["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+    }
+
+    /// 无 by_model → None：调用方自己决定退回哪种近似，本函数不摆全零结构。
+    #[test]
+    fn priced_day_none_without_by_model() {
+        let day = serde_json::json!({
+            "uncached_input_tokens": 1000000, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+        });
+        let pricing = load_pricing();
+        assert_eq!(priced_day(&day, &pricing), None);
+    }
+
+    /// `bucket_cost`（legacy 兜底，无 by_model 的日子）：100 万 uncached 全空闲
+    /// 按 fallback flash 1.5 元/百万 → total 1.5。与 `budget.py::_bucket_cost`
+    /// 对同一份桶的输出一致。
+    #[test]
+    fn bucket_cost_prices_legacy_day_via_fallback_flash() {
+        let buckets = serde_json::json!({
+            "uncached_input_tokens": 1000000, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+        });
+        let pricing = load_pricing();
+        let out = bucket_cost(&buckets, &pricing);
+        assert!((out["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+        assert_eq!(out["peak_total"], 0.0);
+    }
+
+    /// `month_cost` 混合日：exact 日（by_model 覆盖完整，1M → 1.5）+ legacy 日
+    /// （无 by_model，2M → bucket_cost 3.0）→ total 4.5。逐日定价与
+    /// `budget.py::compute_month_cost` 同一套判断（priced_day or bucket_cost）。
+    #[test]
+    fn month_cost_sums_exact_and_legacy_days() {
+        let days = serde_json::json!({
+            "2026-08-01": {
+                "uncached_input_tokens": 1000000, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                "by_model": {"deepseek-v4-flash": {
+                    "uncached_input_tokens": 1000000, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                }},
+            },
+            "2026-08-02": {
+                "uncached_input_tokens": 2000000, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            },
+        });
+        let pricing = load_pricing();
+        let out = month_cost(&days, &pricing);
+        // exact 日 1.5 + legacy 日 3.0。
+        assert!((out["total"].as_f64().unwrap() - 4.5).abs() < 1e-9);
+        assert_eq!(out["peak_total"], 0.0);
+    }
+
+    /// `today_cost` 的 date 校验：today.json 停在昨天（真机回归：2026-08-27 没用
+    /// 过 DSH，仍报 08-26 的账）→ None，不是把昨天的花费当今天的报出去。
+    #[test]
+    fn today_cost_stale_date_is_none_not_wrong_number() {
+        let data = serde_json::json!({
+            "date": "2026-08-26",
+            "by_model": {"deepseek-v4-flash": {
+                "uncached_input_tokens": 1000000, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            }},
+        });
+        let pricing = load_pricing();
+        assert_eq!(today_cost(&data, &pricing, "2026-08-27"), None);
+    }
+
+    /// `today_cost` 新数据路径：顶层 by_model 按实际模型定价（1M flash 全空闲
+    /// → 1.5）。
+    #[test]
+    fn today_cost_prices_by_model_when_present() {
+        let data = serde_json::json!({
+            "date": "2026-08-27",
+            "by_model": {"deepseek-v4-flash": {
+                "uncached_input_tokens": 1000000, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            }},
+        });
+        let pricing = load_pricing();
+        let out = today_cost(&data, &pricing, "2026-08-27").expect("today data present");
+        assert!((out["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+    }
+
+    /// `today_cost` 老数据路径：无 by_model 的 buckets 逐桶 `bucket_cost` 求和。
+    #[test]
+    fn today_cost_falls_back_to_bucket_cost_without_by_model() {
+        let data = serde_json::json!({
+            "date": "2026-08-27",
+            "buckets": {"h:07": {
+                "uncached_input_tokens": 1000000, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            }},
+        });
+        let pricing = load_pricing();
+        let out = today_cost(&data, &pricing, "2026-08-27").expect("today data present");
+        assert!((out["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+    }
+}

@@ -4,7 +4,7 @@
 的 time 精确标出高峰时段）：这里只把 `{by_model, sequence}` × 价格表
 （`pricing.json`）变成一组字符串，off-peak 份额（全量 − peak）按空闲价、
 peak 份额按高峰价，加总成一个真实发生的费用——不再是「给空闲价和高峰价两个
-数，猜不出实际该按哪个算」的区间估算。与 `src/cost.rs` 逐字节一致，由
+数，猜不出实际该按哪个算」的区间估算。与 `crates/agent-vitals-core/src/cost.rs` 逐字节一致，由
 `tests/test_cli_matrix.py` 的 `both()` 差分看守。
 
 价格表的单一真相源是 `scripts/agent_vitals/pricing.json`（Rust 侧用
@@ -136,7 +136,8 @@ def fallback_price(buckets, pricing):
     需要知道"这些 token 是哪个模型"，这里是它唯一的退路，不是另一条计价规则。
 
     只服务 `cli.py::_augment_calendar_cost` 的"日历某天 by_model 覆盖不全"
-    分支（见该函数文档），不在 `src/cost.rs` 的 lockstep/差分范围内——
+    分支（见该函数文档），不在 `crates/agent-vitals-core/src/cost.rs` 的
+    lockstep/差分范围内——
     `calendar` 从来不是 Rust 二进制的子命令，没有 `test_cli_matrix.py` 会
     校验一份 Rust 镜像。calendar.html 的 JS 端已经有一份同语义的硬编码
     近似（`PRICE` 表），这里是它在 Python 侧、直接从 `pricing.json` 读数的
@@ -230,7 +231,7 @@ def cost_report(usage, pricing):
     同一语义：没有数据就是没有，不摆一个全零的结构出来）。金额是未四舍五入的
     原始浮点——舍入是格式化文本时才做的展示决定，结构化数据不预先舍。
 
-    Rust 平行实现见 `src/cost.rs::cost_report`。
+    Rust 平行实现见 `crates/agent-vitals-core/src/cost.rs::cost_report`。
     """
     by_model = (usage or {}).get("by_model") or {}
     if not by_model:
