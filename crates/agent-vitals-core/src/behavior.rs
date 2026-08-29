@@ -419,8 +419,9 @@ fn rule_specs() -> &'static [RuleSpec] {
 }
 
 /// family ①（SV601–610）**前置门控**的 dispatcher——先滤后调：`requires` 里
-/// 任一信号全零覆盖 → 直接 `Unavailable`、不跑检测器；否则跑检测器，命中 →
-/// `Findings`、零命中 → `MeasuredZero`。
+/// 任一信号对应的 timeline 为空 → 直接 `Unavailable`、不跑检测器；否则跑检测
+/// 器，命中 → `Findings`、零命中 → `MeasuredZero`。门控读 timeline 而非
+/// coverage（为什么，见 `CanonicalSession::timeline_is_empty`）。
 ///
 /// 这是 §10 三态契约从「后置标注」改成「前置门控」的核心：**unavailable 的
 /// 规则绝不报出 finding**。旧实现 `rule_outcomes` 在 `match_behavior` 跑满
@@ -434,10 +435,15 @@ pub fn match_behavior_canonical(s: &CanonicalSession) -> Vec<(&'static str, Rule
     FAMILY1_RULES
         .iter()
         .map(|rule| {
+            // 门控读 timeline 非空而非 coverage 计数：对 DSH 恒等价（coverage 与
+            // timeline 同源），但 Codex 上分叉——`derive_coverage` 数出非零
+            // measured、timeline 却恒为空（§1 反编造），读计数会让门控放行、
+            // 检测器在空时间线上空转产出 MeasuredZero。见
+            // `CanonicalSession::timeline_is_empty`。
             let missing: Vec<Signal> = rule
                 .requires
                 .iter()
-                .filter(|sig| s.coverage.get(**sig).total() == 0)
+                .filter(|sig| s.timeline_is_empty(**sig))
                 .copied()
                 .collect();
             if !missing.is_empty() {
@@ -976,10 +982,12 @@ mod tests {
         crate::trajectory::match_trajectory_canonical(&canonical_from(events))
     }
 
-    /// 覆盖计数可以手工盖（测三态门控用），时间线用适配器从事件建好——门控只看
-    /// `coverage`，检测器只看 timelines，两件事本来就是解耦的。旧
-    /// `trajectory_rule_outcomes(findings, cov)` 允许把 coverage 与 findings 分开
-    /// 喂；迁移到 canonical 后，这条测"某个信号有覆盖"的路径就要能手工设覆盖。
+    /// 覆盖计数可以手工盖（测三态门控用），时间线用适配器从事件建好。门控读
+    /// **timeline 非空**（`CanonicalSession::timeline_is_empty`），所以"测某个
+    /// 信号有证据"要同时满足两件事：事件把对应 timeline 填上 + coverage 手工盖
+    /// 成非零。旧 `trajectory_rule_outcomes(findings, cov)` 允许把 coverage 与
+    /// findings 分开喂；迁移到 canonical 后，这条测"某个信号有证据"的路径就
+    /// 要能手工设覆盖。
     fn canonical_with_coverage(events: Vec<Value>, coverage: Coverage) -> CanonicalSession {
         let mut c = crate::dsh_evidence::build_dsh_evidence(events, Vec::new(), None, "test".to_string()).canonical;
         c.coverage = coverage;
@@ -1069,8 +1077,13 @@ mod tests {
     fn sv612_treats_toolcalls_as_enhances_not_requires() {
         // TurnBoundaries 有覆盖、ToolCalls 全零——真测出来的结论是"有 turn
         // 结构但没有工具调用可循环",是 MeasuredZero，不是 Unavailable。
+        // 门控读 timeline 而非 coverage：turn/start 事件把 turns 填上，SV612
+        // 的 requires 才有证据（ToolCalls 只是 enhances，timeline 恒空也不该
+        // Unavailable）。coverage 盖回 TurnBoundaries 是为钉死「enhances 全零
+        // 不影响 availability」这一条。
         let cov = measured_coverage(Signal::TurnBoundaries, 1);
-        let outcomes = trajectory_outcomes_with(vec![], cov);
+        let outcomes =
+            trajectory_outcomes_with(vec![ev("turn/start", 1, 1001, json!({}))], cov);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV612").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero),
             "TurnBoundaries 有覆盖时 SV612 不该因为 ToolCalls 缺覆盖变成 Unavailable");
@@ -1092,27 +1105,58 @@ mod tests {
     #[test]
     fn sv613_is_available_when_only_one_of_its_two_signals_has_coverage() {
         // 只有 ToolResults 有覆盖(TurnBoundaries 全零)——613b(连续工具失败)
-        // 那半边测得了，规则不该整体判 Unavailable。
+        // 那半边测得了，规则不该整体判 Unavailable。tool/result 事件把
+        // tool_results 填上，OR 门控（TurnBoundaries 或 ToolResults 任一非空）
+        // 放行；单条结果凑不齐「连续失败」→ MeasuredZero。
         let cov = measured_coverage(Signal::ToolResults, 1);
-        let outcomes = trajectory_outcomes_with(vec![], cov);
+        let outcomes = trajectory_outcomes_with(vec![ev("tool/result", 1, 1001, json!({}))], cov);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV613").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero),
             "ToolResults 有覆盖时 SV613 不该因为 TurnBoundaries 缺覆盖变成 Unavailable");
 
         // 反过来:只有 TurnBoundaries 有覆盖——613a(连续 error turn)测得了。
         let cov2 = measured_coverage(Signal::TurnBoundaries, 1);
-        let outcomes2 = trajectory_outcomes_with(vec![], cov2);
+        let outcomes2 = trajectory_outcomes_with(vec![ev("turn/start", 1, 1001, json!({}))], cov2);
         let (_, outcome2) = outcomes2.iter().find(|(c, _)| *c == "SV613").unwrap();
         assert!(matches!(outcome2, RuleOutcome::MeasuredZero));
     }
 
     #[test]
     fn sv614_is_available_when_only_one_of_its_two_signals_has_coverage() {
+        // sandbox/mode 事件把 sandbox_modes 填上，OR 门控（ApprovalDecisions
+        // 或 SandboxModes 任一非空）放行；"normal" 不触发检测器 → MeasuredZero，
+        // 证明是"能测、测了是零"而不是"缺 ApprovalDecisions 证据测不了"。
         let cov = measured_coverage(Signal::SandboxModes, 1);
-        let outcomes = trajectory_outcomes_with(vec![], cov);
+        let outcomes =
+            trajectory_outcomes_with(vec![ev("sandbox/mode", 1, 1001, json!({"mode": "normal"}))], cov);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV614").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero),
             "SandboxModes 有覆盖时 SV614 不该因为 ApprovalDecisions 缺覆盖变成 Unavailable");
+    }
+
+    /// Codex 形状的门控：coverage 非零但 timeline 为空 → Unavailable，不是
+    /// MeasuredZero。`derive_coverage` 把 task_started/task_complete/mcp_tool_call_end
+    /// 数成非零 measured，timeline 却恒为空（§1 反编造，wire 格式凑不齐
+    /// observation payload）——门控读 coverage 会让 SV612/SV601 空转产出假零；
+    /// 读 timeline（`timeline_is_empty`）才诚实说"测不了"。这正是本次门控修正
+    /// 钉住的真实缺陷：同一 canonical，coverage 有数、无一条可消费观测。
+    #[test]
+    fn empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero() {
+        let mut s = canonical_from(vec![]);
+        s.coverage
+            .set(Signal::TurnBoundaries, CoverageCounts { measured: 2, ..Default::default() });
+        s.coverage
+            .set(Signal::ToolCalls, CoverageCounts { measured: 1, ..Default::default() });
+
+        let trajectory = crate::trajectory::match_trajectory_canonical(&s);
+        let (_, sv612) = trajectory.iter().find(|(c, _)| *c == "SV612").unwrap();
+        assert!(matches!(sv612, RuleOutcome::Unavailable { .. }),
+            "turn 覆盖非零但 turns timeline 为空：SV612 必须 Unavailable，不得 MeasuredZero");
+
+        let family1 = match_behavior_canonical(&s);
+        let (_, sv601) = family1.iter().find(|(c, _)| *c == "SV601").unwrap();
+        assert!(matches!(sv601, RuleOutcome::Unavailable { .. }),
+            "tool_calls 覆盖非零但 tool_calls timeline 为空：SV601 必须 Unavailable，不得 MeasuredZero");
     }
 
     #[test]

@@ -348,6 +348,32 @@ def derive_coverage(items):
     return signals, coverage, unknown
 
 
+# `evidence::CanonicalSession` 的五个 host-neutral timeline 字段（Rust 侧
+# `crates/agent-vitals-core/src/evidence.rs` 的 struct 字段集——形状对账测试
+# `tests/test_canonical_schema.py` 钉死两边一致，漏加一个字段这里就红）。
+# 共享类型层的文档化 schema，与 ALL_SIGNALS 同为显式清单。
+_TIMELINE_KEYS = (
+    "tool_calls",
+    "tool_results",
+    "approvals",
+    "sandbox_modes",
+    "turns",
+)
+
+
+def _empty_timelines():
+    """五个 timeline 的**唯一**构造器：任何 canonical 都从这里拿，不散落各处。
+
+    Codex 的 timeline 恒为空——不是 bug，是 §1 反编造的诚实结果：Codex wire
+    格式凑不齐 observation payload（`tool_calls` 缺 `args_text`、`tool_results`
+    缺字符串 `error_code`、`turns` 缺数值 `turn`/`seq`、`approvals` 缺
+    asked/decided、`sandbox_modes` 缺 `mode` 事件，只有 policy 字段）。硬填即
+    编造零。门控现在读 timeline 非空而非 coverage（`trajectory.rs` /
+    `behavior.rs` 的 `match_*_canonical`），所以空 timeline 会诚实出 Unavailable。
+    """
+    return {key: {"entries": []} for key in _TIMELINE_KEYS}
+
+
 def build_codex_evidence(items, session_id, title, history_mode, cli_version,
                          workspace_roots, model):
     """条目数组 → evidence 字典（"derive → coverage" 两段；"locate → shape →
@@ -395,6 +421,10 @@ def build_codex_evidence(items, session_id, title, history_mode, cli_version,
         "coverage": coverage,
         "attempts": attempts,
         "notes": notes,
+        # §11.5 五个 timeline 恒为空（反编造，见 `_empty_timelines`）——先前的
+        # 遗漏是**整个缺 key**，现在结构对齐：key 在、值为空，才是「能力缺失」
+        # 而不是「字段不存在」。
+        **_empty_timelines(),
     }
     return {"canonical": canonical, "items": items,
             "title": title,

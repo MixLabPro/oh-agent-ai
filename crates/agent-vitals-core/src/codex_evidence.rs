@@ -483,9 +483,15 @@ pub fn build_codex_evidence(
         coverage,
         attempts,
         notes,
-        // §11.5 timeline 目前只有 DSH 适配器在 populate（phase B 第一/二刀只迁了
-        // DSH 路径）；Codex 适配器不填——空时间线 + 全零覆盖，规则在它上面要么
-        // MeasuredZero 要么 Unavailable，不会读到一个伪造的非空时间线。
+        // §11.5 timeline 目前只有 DSH 适配器在 populate；Codex 不填。注意不是
+        // 「全零覆盖」——`derive_coverage` 把 task_started/task_complete/mcp_
+        // tool_call_end 等数成非零 measured。真正的原因：Codex wire 格式凑不齐
+        // observation payload（tool_calls 缺 args_text、tool_results 缺字符串
+        // error_code、turns 缺数值 turn/seq、approvals 缺 asked/decided、
+        // sandbox_modes 缺 mode 事件），硬填即编造零（§1 反编造），所以保持空。
+        // 正因为「覆盖非零 + 时间线为空」是 Codex 的常态，门控读 timeline 非空
+        // 而非 coverage 计数（`CanonicalSession::timeline_is_empty`）：读计数会
+        // 让规则空转产出 MeasuredZero，读 timeline 才诚实出 Unavailable。
         tool_calls: Timeline::new(),
         tool_results: Timeline::new(),
         approvals: Timeline::new(),

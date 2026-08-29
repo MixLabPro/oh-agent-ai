@@ -428,6 +428,33 @@ pub struct CanonicalSession {
     pub turns: Timeline<TurnObservation>,
 }
 
+impl CanonicalSession {
+    /// 门控的证据判定：某规则 `requires` 的信号，它要消费的证据到底在不在？
+    ///
+    /// 判定从「coverage 计数非零」改为「对应 timeline 非空」——两者对 DSH 恒
+    /// 等价（`dsh_evidence.rs` 里 `derive_coverage` 与 `populate_timelines` 由
+    /// 同一份 execution_events 派生，well-formed 下「覆盖非零 ⟺ timeline 非空」），
+    /// 但 Codex 上会分叉：`derive_coverage` 把 task_started/task_complete 数成
+    /// 非零 measured，timeline 却恒为空（§1 反编造，见 codex_evidence.rs）。读
+    /// 计数会让门控放行、检测器在空时间线上空转产出 `MeasuredZero`；读
+    /// timeline 才诚实出 `Unavailable`。
+    ///
+    /// 五条 require-able 信号各对应一条 timeline；其余信号没有可消费的
+    /// timeline，视为空（诚实 Unavailable——没有证据可读的规则不该跑，与
+    /// Codex 同理）。被 require 的信号落在这里的分支之外，属于契约违约，
+    /// 宁可太严（Unavailable）也不许太松（MeasuredZero）。
+    pub fn timeline_is_empty(&self, sig: Signal) -> bool {
+        match sig {
+            Signal::ToolCalls => self.tool_calls.entries.is_empty(),
+            Signal::ToolResults => self.tool_results.entries.is_empty(),
+            Signal::TurnBoundaries => self.turns.entries.is_empty(),
+            Signal::ApprovalDecisions => self.approvals.entries.is_empty(),
+            Signal::SandboxModes => self.sandbox_modes.entries.is_empty(),
+            _ => true,
+        }
+    }
+}
+
 pub struct SessionMeta {
     pub session_id: String,
     /// 通用的宿主标识符**值**（比如运行时取到的 `"codex"`）——存的是数据，

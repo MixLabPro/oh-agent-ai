@@ -203,6 +203,38 @@ pricing needs each request's own peak/off-peak verdict, a rule that lives in the
 and is exposed only through aggregates — reimplementing it in the browser would be a
 fourth copy.
 
+### Codex 没有行为检测器：根因是解析层的 schema 对齐，不是规则缺失
+
+Codex 会话解析（`adapters/codex_session.py`）对齐了**三套 schema 里的两套**：cost
+（`codex_usage.py` 的 5 桶读 `last_token_usage` + 按 `total_token_usage` 签名去重，
+`:9-15` 明写故意不同于 DSH 的 4 桶 + `(turn, step)` 去重）和 evidence（`codex_evidence.rs`
+的 19 信号覆盖计数）。它**从未合成 behavior 层唯一认识的边界事件流**——`turn/start`·
+`step/start`·`turn/end`·`step/end` + `seq`/`time`/`(turn, step, call_id)` 坐标
+（`trajectory.rs:118`）：`turn_id` 只做 latest-wins 元数据游标（`codex_session.py:116`），
+其余行原样透传（`:75`）。所以 `docs/RUNTIME_EVIDENCE_CONTRACT.md` 那句 "No detectors run
+against Codex"（deferred P3）是这个 gap 的**下游注脚，不是原因**。这也不是疏忽：契约 §1
+第一句就拒绝「把每个宿主翻译成 DSH 形状事件」这条 obvious design——宿主按「duratably
+记录哪些投影」分野，一个规范化流只能把「某宿主就是没有这些字段」表达成编造的零。
+
+**`TurnBoundaries` 是撞车名**：evidence 侧（`codex_evidence.rs:263`，`task_started`/
+`task_complete` 即 bump measured）是覆盖**计数**；detector 侧（`trajectory.rs:223`，
+SV612/613 的 `requires`）是边界**事件流**的门槛。这正是「coverage 里 Codex 的
+TurnBoundaries 是绿的、behavior 层却一行不跑」的来源。
+
+**门控读 timeline 而非 coverage（2026-08 修正）**：前置门控一度读覆盖计数
+（`trajectory.rs` / `behavior.rs` 的 dispatcher，`s.coverage.get(**sig).total() == 0`），
+detector 主体读边界事件流（`detect_sv612` 按 turn 分组迭代）。DSH 上两者同源（同一事件流
+既计数又迭代，读法互换结果不变）；Codex 上分叉——`derive_coverage` 把 `task_started` 等
+数成非零 measured、timeline 却恒为空，读计数会让门控放行、主体空转，产出 **MeasuredZero**
+而非诚实的 Unavailable（`evidence.rs`「adapter 不得用读不到的东西刷覆盖」的镜像面）。现
+门控改读 `CanonicalSession::timeline_is_empty`（`evidence.rs`，requires 信号映射到对应
+timeline 的非空性），单测 `empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero`
+钉住「覆盖非零 + 时间线为空 → Unavailable」。**Codex timeline 因此保持空**——不是 adapter
+补字段就能对齐的：`turns` 缺数值 `turn`/`seq`（只有字符串 `turn_id`）、`tool_calls` 缺
+`args_text`、`tool_results` 缺字符串 `error_code`、`approvals`/`sandbox_modes` 缺
+asked/decided/mode，合成即编造零（§1 反编造）。结构对齐（5 个 key 在、值为空）由
+`tests/test_canonical_schema.py` 逐字段对账 Rust `CanonicalSession`。
+
 ## Six test layers, six different jobs
 
 - `tests/test_regressions.py` — one case per **defect that actually shipped**.

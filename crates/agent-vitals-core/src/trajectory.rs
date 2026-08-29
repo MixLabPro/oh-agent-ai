@@ -155,9 +155,10 @@ pub fn match_trajectory(events: &[Value]) -> Vec<Value> {
 }
 
 /// family ④（trajectory，SV611–614）**前置门控**的 dispatcher——先滤后调，
-/// 镜像 `match_behavior_canonical`：`requires` 里任一信号全零覆盖 → 直接
-/// `Unavailable`、不跑检测器；否则跑检测器，命中 → `Findings`、零命中 →
-/// `MeasuredZero`。
+/// 镜像 `match_behavior_canonical`：`requires` 里任一信号对应的 timeline 为空
+/// → 直接 `Unavailable`、不跑检测器；否则跑检测器，命中 → `Findings`、零命中
+/// → `MeasuredZero`。门控读 timeline 而非 coverage（为什么，见
+/// `CanonicalSession::timeline_is_empty`）。
 ///
 /// SV613/614 的 `requires` 是「至少一个信号有证据」（OR），不是「全部都要」
 /// （AND）——两个子判定读不同信号、任一有证据规则就不是完全测不了，见
@@ -168,10 +169,15 @@ pub fn match_trajectory_canonical(s: &CanonicalSession) -> Vec<(&'static str, Ru
     TRAJECTORY_RULES
         .iter()
         .map(|rule| {
+            // 门控读 timeline 非空而非 coverage 计数：对 DSH 恒等价（coverage 与
+            // timeline 同源），但 Codex 上分叉——`derive_coverage` 数出非零
+            // measured、timeline 却恒为空（§1 反编造），读计数会让门控放行、
+            // 检测器在空时间线上空转产出 MeasuredZero。见
+            // `CanonicalSession::timeline_is_empty`。
             let missing: Vec<Signal> = rule
                 .requires
                 .iter()
-                .filter(|sig| s.coverage.get(**sig).total() == 0)
+                .filter(|sig| s.timeline_is_empty(**sig))
                 .copied()
                 .collect();
             let is_unavailable = if OR_REQUIRES_CODES.contains(&rule.code) {
