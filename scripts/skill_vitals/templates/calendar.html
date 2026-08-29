@@ -107,6 +107,8 @@
       --warn-soft: rgba(210, 153, 34, 0.18);
       --peak: #db6d28;
       --peak-soft: rgba(219, 109, 40, 0.20);
+      --unpriced: #db6d28;
+      --unpriced-soft: rgba(219, 109, 40, 0.18);
       --good: #3fb950;
       --r: 8px;
       --r-sm: 4px;
@@ -195,6 +197,21 @@
     .summary .card .note .peak-tag {
       color: var(--peak); font-weight: 500;
     }
+
+    /* ── 跨宿主今日总览（统一范式：今日所有 Agent 总花费 + 每宿主 mini 卡）── */
+    #overview { margin-bottom: var(--s5); }
+    .overview-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: var(--s3); margin-bottom: var(--s3); flex-wrap: wrap;
+    }
+    .overview-title { font: 600 16px var(--font); }
+    .overview-sub { color: var(--fg-muted); font-size: 12px; }
+    /* mini 卡是 <a>——卡片视觉要覆盖掉全局 a 的 accent 色，hover 描边提示可点 */
+    #overview-cards a.card {
+      color: var(--fg); text-decoration: none; display: block;
+      transition: border-color 0.12s ease;
+    }
+    #overview-cards a.card:hover { border-color: var(--accent); }
 
     /* ── 日历容器 ─────────────────────────────────────────────────── */
     .panel {
@@ -386,7 +403,122 @@
       .hour-cell .amt { font-size: 10px; }
       .day-cell { min-height: 64px; padding: 4px; }
       .day-cell .amt { font-size: 10px; }
+      #render-root.view-codex .day-cell { min-height: 44px; padding: 4px; }
+      #render-root.view-codex .day-cell .amt { font-size: 10px; }
+      #render-root.view-codex table.model-table { font-size: 12px; }
+      #render-root.view-codex table.model-table th,
+      #render-root.view-codex table.model-table td { padding: 6px; }
     }
+
+    /* ── 宿主 + 视图切换（统一范式：宿主注册制）────────────────────── */
+    /* host-switch 复用 mode-switch 的分段控件视觉；两段叠成一列，宿主在上、
+     * 视图在下。DSH 是 0 号模板，Codex 是 1 号宿主。 */
+    .switch-stack {
+      display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+    }
+    .host-switch a.active {
+      background: var(--accent-soft); color: var(--accent);
+    }
+    .panel-sub code {
+      font: 12px/1 var(--mono); background: var(--surface-2);
+      padding: 1px 5px; border-radius: var(--r-sm); color: var(--accent);
+    }
+
+    /* ── codex 宿主面板（作用域在 #render-root.view-codex 下）────────── */
+    /* 与 DSH 共用同款设计 token 与 .panel/.day-cell/#tip，但网格密度不同
+     * （codex 日格 56px vs DSH 88px）、且要多一套 model-table/quota 样式。
+     * 用宿主作用域类隔离，不污染 DSH 视图。 */
+    #render-root.view-codex table.model-table {
+      width: 100%; min-width: 720px; border-collapse: collapse;
+      font: 13px var(--mono);
+    }
+    #render-root.view-codex table.model-table th,
+    #render-root.view-codex table.model-table td {
+      padding: 8px 10px; text-align: right; white-space: nowrap;
+      border-bottom: 1px solid var(--border);
+    }
+    #render-root.view-codex table.model-table th {
+      font: 11px var(--font); color: var(--fg-muted); font-weight: 500;
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    #render-root.view-codex table.model-table th:first-child,
+    #render-root.view-codex table.model-table td:first-child { text-align: left; }
+    #render-root.view-codex table.model-table tbody tr:hover {
+      background: rgba(88, 166, 255, 0.06);
+    }
+    #render-root.view-codex table.model-table td.model { font-weight: 600; color: var(--fg); }
+    #render-root.view-codex table.model-table td.speed { color: var(--fg-muted); font-size: 12px; }
+    #render-root.view-codex table.model-table td.cost { color: var(--accent); font-weight: 600; }
+    #render-root.view-codex table.model-table td.unpriced { color: var(--unpriced); font-weight: 600; }
+    #render-root.view-codex table.model-table tfoot td {
+      border-top: 2px solid var(--border-strong); font-weight: 600;
+    }
+    #render-root.view-codex .model-table-root { overflow-x: auto; }
+
+    #render-root.view-codex .heat-wrap { overflow-x: auto; }
+    #render-root.view-codex .wrow {
+      display: grid; grid-template-columns: repeat(7, 1fr);
+      gap: 4px; margin-bottom: 4px;
+    }
+    #render-root.view-codex .weekday-head { margin-top: var(--s3); margin-bottom: 6px; }
+    #render-root.view-codex .weekday-head > div {
+      font-size: 11px; color: var(--fg-muted); text-align: center;
+      padding: 6px 0; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    #render-root.view-codex .month-title {
+      font: 600 13px var(--mono); color: var(--fg-muted);
+      margin: var(--s3) 0 8px;
+    }
+    #render-root.view-codex .month-title:first-child { margin-top: 0; }
+    /* codex 日格更紧凑（56px vs DSH 88px）+ today「今」徽标 */
+    #render-root.view-codex .day-cell {
+      min-height: 56px; padding: 6px 8px;
+    }
+    #render-root.view-codex .day-cell { position: relative; }
+    /* codex today 小时条复用共享 .today-grid/.hour-cell，但格子更紧凑（56px） */
+    #render-root.view-codex .hour-cell { height: 56px; }
+    #render-root.view-codex .day-cell .num { font-size: 13px; }
+    #render-root.view-codex .day-cell .amt { font-size: 12px; }
+    #render-root.view-codex .day-cell .amt .cost { font-size: 12px; }
+    #render-root.view-codex .day-cell.today { border: 1px solid var(--accent); }
+    #render-root.view-codex .day-cell.today .today-mark {
+      position: absolute; top: 2px; right: 2px;
+      font: 700 9px var(--mono); color: var(--bg); background: var(--accent);
+      border-radius: 3px; padding: 1px 3px;
+    }
+    #render-root.view-codex .day-cell.pad { background: transparent; border: none; cursor: default; }
+    #render-root.view-codex .day-cell.pad:hover { transform: none; border-color: transparent; }
+
+    #render-root.view-codex .quota-row + .quota-row { margin-top: var(--s4); }
+    #render-root.view-codex .quota-row .q-head {
+      display: flex; justify-content: space-between; align-items: baseline;
+      gap: var(--s3); margin-bottom: 6px; font: 13px var(--mono);
+    }
+    #render-root.view-codex .quota-row .q-label { color: var(--fg-muted); }
+    #render-root.view-codex .quota-row .q-pct { font-weight: 600; }
+    #render-root.view-codex .quota-bar {
+      height: 10px; border-radius: 5px; background: var(--surface-2);
+      border: 1px solid var(--border); overflow: hidden;
+    }
+    #render-root.view-codex .quota-bar .q-fill {
+      height: 100%; border-radius: 4px;
+      transition: width 0.3s ease, background-color 0.3s ease;
+    }
+    #render-root.view-codex .quota-row .q-reset {
+      margin-top: 4px; font: 11px var(--mono); color: var(--fg-dim);
+    }
+
+    .warn-banner {
+      margin-top: var(--s3); padding: var(--s3) var(--s4);
+      background: var(--warn-soft); border: 1px solid var(--warn);
+      border-radius: var(--r); color: var(--fg); font-size: 13px;
+    }
+    .unpriced-banner {
+      margin-top: var(--s3); padding: var(--s3) var(--s4);
+      background: var(--unpriced-soft); border: 1px solid var(--unpriced);
+      border-radius: var(--r); color: var(--fg); font-size: 13px;
+    }
+    .banner-note { color: var(--fg-dim); font-size: 12px; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -395,25 +527,40 @@
     <header class="topbar">
       <div class="title-block">
         <h1 id="page-title">日历视图</h1>
-        <div class="sub">
-          数据源 <code id="source-label">~/.skill-vitals/state/</code>
+        <div class="sub" id="sub-line">
+          数据源 <code>~/.skill-vitals/state/</code>
           · schema <code>1.0.0</code>
         </div>
       </div>
-      <nav class="mode-switch" aria-label="切换视图">
-        <a href="?file=today" id="link-today">today · 24h</a>
-        <a href="?file=month" id="link-month">month · 月度</a>
-      </nav>
+      <div class="switch-stack">
+        <nav class="mode-switch host-switch" aria-label="切换宿主">
+          <a href="?host=dsh" id="link-host-dsh">DSH</a>
+          <a href="?host=codex" id="link-host-codex">Codex</a>
+        </nav>
+        <nav class="mode-switch" id="mode-switch" aria-label="切换视图">
+          <!-- 由 JS 按当前宿主注入 -->
+        </nav>
+      </div>
     </header>
 
     <div id="status" role="status">读取 state 文件中……</div>
+
+    <section id="overview" hidden>
+      <div class="overview-head">
+        <span class="overview-title">跨宿主今日总览</span>
+        <span class="overview-sub">今日总 token（币种无关求和）· 各币种花费（不编汇率）· 点卡片跳该宿主 today</span>
+      </div>
+      <div class="summary" id="overview-cards">
+        <!-- 由 JS 注入聚合卡 -->
+      </div>
+    </section>
 
     <section class="summary" id="summary" hidden>
       <!-- 由 JS 注入 card -->
     </section>
 
     <div id="render-root">
-      <!-- 由 JS 注入 today-grid / month-grid -->
+      <!-- 由 JS 注入 today-grid / month-grid / codex 面板 -->
     </div>
 
     <!--
@@ -423,8 +570,9 @@
     <div class="file-fallback" id="file-fallback">
       <div class="msg">
         <b>浏览器无法直接读取本地 state 文件</b>（CORS 限制）。
-        请选择 state.py 写出的 JSON 文件（<code>today.json</code> 或
-        <code>month.json</code>）：
+        DSH 请选择 state.py 写出的 JSON 文件（<code>today.json</code> 或
+        <code>month.json</code>）；Codex 请选择 <code>codex-cost --json</code>
+        输出的报告：
       </div>
       <label>
         <input type="file" id="file-input" accept="application/json,.json" />
@@ -458,6 +606,10 @@
   //   window.SKILL_VITALS_STATE_HOME = '/home/you/.skill-vitals/state';
   // 浏览器无法把 ~ 展开成 $HOME；硬编码是合理的——绝大多数用户在 macOS。
   var STATE_HOME_DEFAULT = "/Users/Admin/.skill-vitals/state";
+  // 当前状态目录。bootstrap() 里按 window.SKILL_VITALS_STATE_HOME 覆盖——但覆盖
+  // 前先声明默认值：文件是 strict mode，直接在 bootstrap 里给未声明变量赋值会抛
+  // ReferenceError，整个加载流程断掉。声明 + 默认值让覆盖变成「改一个全局」。
+  var HOME = STATE_HOME_DEFAULT;
 
   // peak/off-peak 单价（人民币元 / 百万 token）。
   // **来源**：scripts/skill_vitals/pricing.json providers.deepseek-official.models
@@ -551,16 +703,207 @@
     return "¥" + v.toFixed(2);
   }
 
-  /** 取 query 决定 mode：today / month。没有 `?file=` 时用
-   * `calendar --source` 注入的 `window.SKILL_VITALS_DEFAULT_MODE`
-   * （CLI 不注入时兜底 "today"）——两者必须一致，否则默认打开的 tab
-   * 和 CLI 生成时说好要展示的 tab 对不上。 */
-  function getMode() {
+  // ── codex 宿主格式化（1 号宿主私有；与 src/codex_cost.rs 的 format_number /
+  //    format_usd 同 spec——JS 只格式化，不重算任何价）────────────────────
+  var TOKEN_FIELDS = [
+    "uncached_input_tokens", "output_tokens", "cached_input_tokens",
+    "cache_write_input_tokens", "reasoning_output_tokens"
+  ];
+
+  function stripZeroFmt(s) {
+    s = s.replace(/0+$/, "").replace(/\.$/, "");
+    return s === "" ? "0" : s;
+  }
+  function formatNumber(n) {
+    if (n >= 1e9) return stripZeroFmt((n / 1e9).toFixed(1)) + "B";
+    if (n >= 1e6) return stripZeroFmt((n / 1e6).toFixed(1)) + "M";
+    if (n >= 1e3) return stripZeroFmt((n / 1e3).toFixed(1)) + "K";
+    return String(n);
+  }
+  function fmtUsd(v) {
+    if (v === 0) return "$0";
+    var s = (v >= 100) ? v.toFixed(1) : v.toFixed(2);
+    return "$" + stripZeroFmt(s);
+  }
+  function commas(n) { return Math.round(n).toLocaleString("en-US"); }
+  function sumTokens(tt) {
+    if (!tt) return 0;
+    return TOKEN_FIELDS.reduce(function(a, f) { return a + (tt[f] || 0); }, 0);
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function parseISO(s) {
+    var p = s.split("-");
+    return new Date(Date.UTC(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10)));
+  }
+  function isoOf(d) { return d.toISOString().slice(0, 10); }
+  function addDays(d, n) { return new Date(d.getTime() + n * 86400000); }
+
+  /** codex 订阅判定：plan.plan_type 是非空字符串才算有效套餐。全部重标价（按量
+   *  标价 vs 账单）的唯一开关，与 codex_cost.py::plan_line 同判定。 */
+  function isSubscription(d) {
+    return !!(d && d.plan && typeof d.plan.plan_type === "string" && d.plan.plan_type);
+  }
+  /** 窗口分钟数 → 人读标签：300→5小时、10080→每周、其余 Nmin（Codex UI 同款） */
+  function windowLabel(wm) {
+    if (wm === 300) return "5小时";
+    if (wm === 10080) return "每周";
+    return String(wm) + "min";
+  }
+  /** used_percent → 文本：固定 3 位小数去尾零（67.0 → 67、67.5 → 67.5） */
+  function pctText(up) {
+    var s = Number(up).toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+    return s === "" ? "0" : s;
+  }
+  /** Unix 秒 → 北京时区（UTC+8 强制，与 report 的 today/month 同口径，不随浏览器
+   *  时区漂移）：今天 → `HH:MM`，否则 → `M月D日 HH:MM`。DATA.today 是唯一「今天」来源。 */
+  function formatReset(ts) {
+    var d = new Date(ts * 1000 + 8 * 3600 * 1000);
+    function p(n) { return (n < 10 ? "0" : "") + n; }
+    var hhmm = p(d.getUTCHours()) + ":" + p(d.getUTCMinutes());
+    var m = d.getUTCMonth() + 1, dd = d.getUTCDate();
+    var key = d.getUTCFullYear() + "-" + p(m) + "-" + p(dd);
+    if (DATA && DATA.today === key) return hhmm;
+    return m + "月" + dd + "日 " + hhmm;
+  }
+  /** 配额条颜色：占用越高越告警——<70% accent、70–90% warn、≥90% unpriced。
+   *  配额是「还剩多少」的告警语义，三档离散色比连续色阶更诚实。 */
+  function quotaColor(up) {
+    if (up >= 90) return "var(--unpriced)";
+    if (up >= 70) return "var(--warn)";
+    return "var(--accent)";
+  }
+  var WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
+
+  /** 宿主 + 视图路由（统一范式，见 docs/UNIFIED_COST_VIEW.md）：
+   *  `?host=` 选宿主，`?file=` 选该宿主的视图。没有 `?host=` 时用注入的
+   *  `window.SKILL_VITALS_DEFAULT_HOST`（默认 "dsh"）——保证 xbar「打开
+   *  日历」和 `calendar --source today` 与合并前的行为完全一致；没有
+   *  `?file=` 时用各宿主声明的 defaultMode（DSH 可被注入覆盖）。 */
+  function getHost() {
     var p = new URLSearchParams(location.search);
-    var fallback = (typeof window.SKILL_VITALS_DEFAULT_MODE === "string"
-                    && window.SKILL_VITALS_DEFAULT_MODE) || "today";
-    var f = (p.get("file") || fallback).toLowerCase();
-    return (f === "month") ? "month" : "today";
+    var fallback = (typeof window.SKILL_VITALS_DEFAULT_HOST === "string"
+                    && window.SKILL_VITALS_DEFAULT_HOST) || "dsh";
+    var h = (p.get("host") || fallback).toLowerCase();
+    return HOSTS[h] ? h : "dsh";
+  }
+  function getMode(host) {
+    var p = new URLSearchParams(location.search);
+    var cfg = HOSTS[host];
+    var def = cfg.defaultMode;
+    if (host === "dsh" && typeof window.SKILL_VITALS_DEFAULT_MODE === "string"
+        && window.SKILL_VITALS_DEFAULT_MODE) {
+      def = window.SKILL_VITALS_DEFAULT_MODE;
+    } else if (host === "codex") {
+      // codex 内联块的 default 字段驱动无 `?file=` 时的默认视图（codex-cost
+      // --html 按请求月/全部/今天写 month|all|today，统一看板写 month）。
+      var blk = document.getElementById("skill-vitals-data-codex");
+      if (blk && blk.textContent.trim()) {
+        try {
+          var d = JSON.parse(blk.textContent);
+          if (d && d.default && cfg.modes.indexOf(d.default) >= 0) def = d.default;
+        } catch (e) {}
+      }
+    }
+    var f = (p.get("file") || def).toLowerCase();
+    return cfg.modes.indexOf(f) >= 0 ? f : cfg.defaultMode;
+  }
+
+  // ─── 宿主注册表（统一范式） ─────────────────────────────────────────
+  // 每个宿主声明：label / 视图模式 / 默认视图 / 内联数据布局 / 渲染适配器。
+  // DSH 是 0 号模板（双块嵌入 + 既有渲染，tests/test_cli_m3 钉死）；Codex 是
+  // 1 号宿主（规范化单块 {views, default}）。新增宿主 = 往这里加一项，共享
+  // 核心不感知宿主字段。
+  var HOSTS = {
+    dsh: {
+      label: "DSH",
+      modes: ["today", "month"],
+      defaultMode: "month",
+      modeLabels: { today: "today · 24h", month: "month · 月度" },
+      render: renderDshView,
+      inlineData: dshInline,
+      fetchUrl: function(home, mode) { return home + "/" + mode + ".json"; },
+    },
+    codex: {
+      label: "Codex",
+      modes: ["today", "month", "all"],
+      defaultMode: "month",
+      modeLabels: { today: "today", month: "month · 月度", all: "all · 全部" },
+      render: renderCodexView,
+      inlineData: codexInline,
+      fetchUrl: null,   // codex 无状态文件，不 fetch
+    },
+  };
+
+  /** DSH 内联数据：双块 `skill-vitals-data-{mode}`（只内联磁盘上存在的那份），
+   * 兼容旧版单块 `skill-vitals-data`（按 schema 推断 mode）。返回：
+   *  {data} | {data, inferred, legacy} | {stale, stale_date} | {parseError} | null */
+  function dshInline(mode) {
+    var inline = document.getElementById("skill-vitals-data-" + mode);
+    var legacyInline = null;
+    if (!inline) {
+      // 兼容旧版 CLI 生成的文件（只有一个通用 id，没有按 mode 拆分）——
+      // 那种文件的内联数据 schema 未必等于 URL 决定的 mode，需要按数据形状
+      // 推断一次，与文件选择器分支的「智能推断 mode」用同一条判定。
+      legacyInline = document.getElementById("skill-vitals-data");
+    }
+    var activeInline = inline || legacyInline;
+    if (!activeInline || !activeInline.textContent.trim()) return null;
+    try {
+      var data = JSON.parse(activeInline.textContent);
+      if (data && data.stale) {
+        // today.json 判定为陈旧（date 字段不是真实今天）——今天还没有新会话，
+        // 不是"读不到文件"。返回哨兵给 bootstrap 拦下，给清晰文案。
+        return { stale: true, stale_date: data.stale_date };
+      }
+      if (legacyInline) {
+        var inferred = (data && data.days && !data.buckets) ? "month" : "today";
+        if (inferred !== mode) return { data: data, inferred: inferred, legacy: true };
+        return { data: data, legacy: true };
+      }
+      return { data: data };
+    } catch (e) {
+      return { parseError: e.message };
+    }
+  }
+
+  /** Codex 内联数据：规范化单块 `skill-vitals-data-codex`（{views, default}）。
+   * 无状态、无磁盘文件可 fetch——只有这一条数据通道。 */
+  function codexInline(mode) {
+    var el = document.getElementById("skill-vitals-data-codex");
+    if (!el || !el.textContent.trim()) return null;
+    try {
+      var d = JSON.parse(el.textContent);
+      var view = (d && d.views) ? d.views[mode] : null;
+      if (!view) return null;
+      return { data: view };
+    } catch (e) {
+      return { parseError: e.message };
+    }
+  }
+
+  /** 宿主/视图切换：host-switch active + 链接（保留当前 file，目标宿主不支持
+   * 就落其默认）；mode-switch 按当前宿主 modes 重建。 */
+  function buildNav(host, mode) {
+    ["dsh", "codex"].forEach(function(h) {
+      var a = document.getElementById("link-host-" + h);
+      a.classList.toggle("active", h === host);
+      var cfg = HOSTS[h];
+      var file = cfg.modes.indexOf(mode) >= 0 ? mode : cfg.defaultMode;
+      a.href = "?host=" + h + "&file=" + file;
+    });
+    var msw = document.getElementById("mode-switch");
+    msw.innerHTML = "";
+    HOSTS[host].modes.forEach(function(m) {
+      var a = document.createElement("a");
+      a.href = "?host=" + host + "&file=" + m;
+      a.id = "link-" + m;
+      a.textContent = HOSTS[host].modeLabels[m] || m;
+      a.className = (m === mode) ? "active" : "";
+      msw.appendChild(a);
+    });
   }
 
   // ─── 数据加载 ──────────────────────────────────────────────────────────
@@ -609,84 +952,76 @@
    * 渲染，等用户喂数据。
    */
   function bootstrap() {
-    var mode = getMode();
-    var home = (typeof window.SKILL_VITALS_STATE_HOME === "string"
-                && window.SKILL_VITALS_STATE_HOME) || STATE_HOME_DEFAULT;
-    var url = home + "/" + mode + ".json";
+    var host = getHost();
+    var cfg = HOSTS[host];
+    var mode = getMode(host);
+    HOME = (typeof window.SKILL_VITALS_STATE_HOME === "string"
+            && window.SKILL_VITALS_STATE_HOME) || STATE_HOME_DEFAULT;
+    var url = cfg.fetchUrl ? cfg.fetchUrl(HOME, mode) : null;
 
-    // mode-switch active 状态
-    document.getElementById("link-today").classList.toggle("active", mode === "today");
-    document.getElementById("link-month").classList.toggle("active", mode === "month");
-    document.getElementById("source-label").textContent =
-      home + "/" + mode + ".json";
-    document.title = "Skill Vitals · " + mode + " · M4";
+    // 宿主/视图切换 active 状态 + mode-switch 链接（按宿主 modes 注入）
+    buildNav(host, mode);
+    document.title = "Skill Vitals · " + cfg.label + " · " + mode + " · M4";
 
     // ── 数据加载三段式 ──────────────────────────────────────────
-    // 1. **inline 优先** — calendar CLI 在渲染时把 today.json / month.json
-    //    分别写进各自的 `<script id="skill-vitals-data-today|month">`
-    //    （只内联磁盘上真的存在的那份），这是唯一一条不需要网络/CORS 的
-    //    路径,**保证 file:// 双击也能渲染**,而且两个 tab 都点得动——
-    //    旧版本只内联 `--source` 选中的一份塞进通用 id,点另一个 tab 只是
-    //    换个 `?file=` 重新加载同一份静态 HTML,内联数据没变,不是「点了
-    //    没反应」就是被硬套上错的 schema 渲染出一张空图。
-    // 2. fetch 备选 — 浏览器从 http:// 自托管站点拉 JSON。
-    // 3. file picker 兜底 — fetch 也失败时,用户手动选文件。
+    // 1. **inline 优先** — calendar CLI 在渲染时把宿主数据内联进
+    //    `<script id="skill-vitals-data-…">`（DSH 双块 today|month，codex
+    //    单块 {views}），这是唯一一条不需要网络/CORS 的路径,**保证 file://
+    //    双击也能渲染**,而且每个 tab 都点得动。
+    // 2. fetch 备选 — 浏览器从 http:// 自托管站点拉 JSON（宿主声明了
+    //    fetchUrl 才走；codex 无状态文件，没有这一路）。
+    // 3. file picker 兜底 — fetch 也失败时,用户手动选文件（DSH state 文件
+    //    或 codex 报告 JSON）。
     // 三段全失败 → 显示 empty state,不假装成功。
-    var inline = document.getElementById("skill-vitals-data-" + mode);
-    var legacyInline = null;
-    if (!inline) {
-      // 兼容旧版 CLI 生成的文件（只有一个通用 id,没有按 mode 拆分）——
-      // 那种文件的内联数据 schema 未必等于 URL 决定的 mode,需要按数据
-      // 形状推断一次,与下面文件选择器分支的「智能推断 mode」用同一条
-      // 判定，两条路径必须一致。
-      legacyInline = document.getElementById("skill-vitals-data");
-    }
-    var activeInline = inline || legacyInline;
-    if (activeInline && activeInline.textContent.trim()) {
-      try {
-        var data = JSON.parse(activeInline.textContent);
-        // today.json 判定为陈旧（date 字段不是真实今天）时,cli.py 内联的
-        // 不是真数据,是一个哨兵——今天还没有新会话,不是"读不到文件"。
-        // 必须在这里拦下来,单独给清晰文案,不能落进下面 legacy-inline
-        // 的 schema 推断（{stale:true} 没有 days/buckets 字段,会被误判）,
-        // 也不能落空让代码继续往 fetch 走——那条路径在 file:// 下几乎
-        // 必然撞 CORS,把"今天还没数据"这个正常状态显示成一句吓人的
-        // 网络错误。
-        if (data && data.stale) {
-          setStatus("今天还没有新的 DSH 会话（上一条记录停在 " +
-                    (data.stale_date || "更早") + "），暂无数据。");
-          render("today", { buckets: {} });
-          return;
+    var loaded = cfg.inlineData(mode);
+    if (loaded && loaded.data) {
+      if (loaded.legacy) {
+        // 兼容旧版 CLI 生成的文件（只有一个通用 id,没有按 mode 拆分）——
+        // 按数据形状推断 mode（与文件选择器分支同一条判定）。
+        if (loaded.inferred && loaded.inferred !== mode) {
+          mode = loaded.inferred;
+          buildNav(host, mode);
+          document.title = "Skill Vitals · " + cfg.label + " · " + mode + " · M4";
         }
-        if (legacyInline) {
-          var inferred = (data && data.days && !data.buckets) ? "month" : "today";
-          if (inferred !== mode) {
-            mode = inferred;
-            document.getElementById("link-today").classList.toggle("active", mode === "today");
-            document.getElementById("link-month").classList.toggle("active", mode === "month");
-            document.getElementById("source-label").textContent = home + "/" + mode + ".json";
-            document.title = "Skill Vitals · " + mode + " · M4";
-          }
-        }
-        setStatus("已加载 inline 数据（" + mode + ".json" +
-                  (legacyInline ? "，旧格式按 schema 推断" : "") + "）");
-        render(mode, data);
-        return;  // 成功就不走 fetch/file picker 了
-      } catch (e) {
-        setStatus("inline JSON 解析失败：" + e.message, true);
-        // 退到 fetch
+        setStatus("已加载 inline 数据（旧格式按 schema 推断）");
+      } else {
+        setStatus("已加载 inline 数据（" + mode + ".json）");
       }
+      render(host, mode, loaded.data);
+      return;  // 成功就不走 fetch/file picker 了
+    }
+    if (loaded && loaded.stale) {
+      // today.json 判定为陈旧（date 字段不是真实今天）——今天还没有新会话,
+      // 不是"读不到文件"。必须拦在这里给清晰文案,不能落空继续往 fetch 走
+      // （那条路径在 file:// 下必然撞 CORS,把"今天还没数据"这个正常状态
+      // 显示成一句吓人的网络错误）。
+      setStatus("今天还没有新的 DSH 会话（上一条记录停在 " +
+                (loaded.stale_date || "更早") + "），暂无数据。");
+      render(host, mode, (host === "dsh" && mode === "today")
+                        ? { buckets: {} } : { days: {} });
+      return;
+    }
+    if (loaded && loaded.parseError) {
+      setStatus("inline JSON 解析失败：" + loaded.parseError, true);
+      // 退到 fetch
     }
 
-    setStatus("尝试 fetch " + url + " …");
-    tryFetch(url).then(function(data) {
-      setStatus("fetch 成功（" + mode + ".json）");
-      render(mode, data);
-    }).catch(function() {
-      // CORS / 404 / 权限——预期路径。给清晰的状态文案，不假装失败
-      setStatus("fetch 失败：浏览器读取本地文件被 CORS 阻止。" +
-                "请用下方按钮选择 " + mode + ".json。", true);
-    });
+    if (url) {
+      setStatus("尝试 fetch " + url + " …");
+      tryFetch(url).then(function(data) {
+        setStatus("fetch 成功（" + mode + ".json）");
+        render(host, mode, data);
+      }).catch(function() {
+        // CORS / 404 / 权限——预期路径。给清晰的状态文案，不假装失败
+        setStatus("fetch 失败：浏览器读取本地文件被 CORS 阻止。" +
+                  "请用下方按钮选择 " + mode + ".json。", true);
+      });
+    } else {
+      // 宿主没有可 fetch 的外部数据源（如 codex 无状态文件），又没有内联——
+      // 直接说明，不装模作样走网络。
+      setStatus("该宿主（" + cfg.label + "）没有可 fetch 的外部数据源，且本文件" +
+                "未内联其数据。请用 `skill-vitals calendar` 重新生成后打开。", true);
+    }
 
     // 文件输入 handler——一次绑定，全局复用
     document.getElementById("file-input").addEventListener("change", function(e) {
@@ -695,14 +1030,25 @@
       setStatus("读取 " + file.name + " …");
       loadFromFile(file).then(function(data) {
         setStatus("已加载 " + file.name);
-        // 智能推断 mode：今天用的文件里若含 buckets=hours 是 today；
-        // 含 days 是 month。允许用户选错文件也能渲染。
+        if (host === "codex") {
+          // codex 文件：统一单块 {views} 或单份报告 dict（codex-cost --json）
+          var view = (data && data.views) ? data.views[mode]
+                     : (data && data.total_cost_usd !== undefined ? data : null);
+          if (!view) {
+            setStatus("该文件不是 codex 成本报告（缺 views / total_cost_usd）", true);
+            return;
+          }
+          render(host, mode, view);
+          return;
+        }
+        // DSH state 文件：智能推断 mode（含 buckets=hours 是 today；含 days
+        // 是 month）。允许用户选错文件也能渲染。
         var inferred = (data && data.days && !data.buckets) ? "month" : "today";
         if (inferred !== mode) {
           setStatus("已加载 " + file.name + "（按 schema 推断为 " +
                     inferred + " 模式渲染）");
         }
-        render(inferred, data);
+        render(host, inferred, data);
       }).catch(function(err) {
         setStatus(err.message, true);
       });
@@ -711,21 +1057,34 @@
 
   // ─── 渲染 ──────────────────────────────────────────────────────────────
 
-  /** 全局：当前 payload + mode，供 tooltip 复用 */
-  var CURRENT = { mode: null, payload: null };
+  /** 全局：当前宿主 + 视图 + payload，供 DSH tooltip 复用 */
+  var CURRENT = { host: null, mode: null, payload: null };
 
-  function render(mode, payload) {
-    CURRENT.mode = mode;
-    CURRENT.payload = payload;
+  /** 渲染入口：按宿主注册表分发。先画跨宿主今日总览（best-effort，两宿主 today
+   *  数据都可能缺席），再调宿主的渲染适配器。#render-root 的 className 是宿主
+   *  作用域（`.view-codex` 下的 CSS 全是 codex 私有样式），DSH 用空串。 */
+  function render(host, mode, view) {
+    CURRENT = { host: host, mode: mode, payload: view };
+    var root = document.getElementById("render-root");
+    root.className = (host === "codex") ? "view-codex" : "";
     document.getElementById("summary").hidden = false;
-    document.getElementById("page-title").textContent =
-      (mode === "today") ? "今日 · 24 小时分布" : "本月 · 日历";
-
-    if (mode === "today") renderToday(payload);
-    else                  renderMonth(payload);
+    renderOverview(overviewData(host, mode, view));
+    HOSTS[host].render(host, mode, view);
   }
 
-  // ── today 模式 ───────────────────────────────────────────────────────
+  /** DSH 渲染适配器（0 号模板）：写 #sub-line，委托给既有 renderToday/
+   *  renderMonth——渲染逻辑一行不改，page-title 保持 M4 原串。 */
+  function renderDshView(host, mode, view) {
+    document.getElementById("sub-line").innerHTML =
+      '数据源 <code>~/.skill-vitals/state/</code>' +
+      ' · schema <code>1.0.0</code>';
+    document.getElementById("page-title").textContent =
+      (mode === "today") ? "今日 · 24 小时分布" : "本月 · 日历";
+    if (mode === "today") renderToday(view);
+    else                  renderMonth(view);
+  }
+
+  // ── today 模式（DSH）──────────────────────────────────────────────────
 
   function renderToday(payload) {
     var buckets = (payload && payload.buckets) || {};
@@ -957,6 +1316,509 @@
     }
 
     bindHover(grid, ".day-cell");
+  }
+
+  // ── codex 宿主渲染（1 号宿主适配器）──────────────────────────────────
+  // 数据契约 = codex-cost 报告的同一份 dict（views 的每个成员）。JS 只渲染
+  // server 已算好的 cost/tokens，不重算任何价。today 视图画小时条（hours 轴），
+  // month/all 画日热力图（days 轴）——与 DSH 同一结构（小时 → 天聚合）。
+
+  var DATA = null;   // codex 当前视图（formatReset 读 DATA.today）
+
+  function renderCodexView(host, mode, view) {
+    DATA = view;
+    document.getElementById("sub-line").innerHTML =
+      "host <code>codex</code> · currency <code>USD</code>" +
+      (view && view.month ? " · month <code>" + esc(view.month) + "</code>" : "");
+    document.getElementById("page-title").textContent =
+      "Codex 成本" + (view && view.month ? " · " + view.month : "");
+
+    var root = document.getElementById("render-root");
+    root.innerHTML = "";
+    var hasData = view && view.per_model &&
+                  (Object.keys(view.per_model).length > 0 ||
+                   (view.days && view.days.length > 0));
+    renderCodexSummary(view);
+    if (!hasData) {
+      // 空折叠：全零结构也照画（诚实标「没有可计价 token」），不假装成功。
+      var empty = mkPanel("Codex 成本", "空折叠");
+      empty.querySelector(".panel-body").appendChild(textNote(
+        "暂无 token 可计价（空折叠）——最近没有可折叠的 rollout 会话。"));
+      root.appendChild(empty);
+      setStatus("暂无 token 可计价（空折叠）");
+      return;
+    }
+
+    if (isSubscription(view)) {
+      var q = mkPanel("配额",
+        "订阅套餐限速快照 · 来自日志 rate_limits（零网络）");
+      renderCodexQuota(view, q);
+      root.appendChild(q);
+    }
+    var modelPanel = mkPanel("按模型明细",
+      "5 桶 token + USD 费用；无价目模型标 unpriced，token 计入 <code>unpriced_tokens</code>");
+    renderCodexModelTable(view, modelPanel);
+    root.appendChild(modelPanel);
+
+    if (mode === "today") {
+      var hourPanel = mkPanel("今日 24 小时",
+        "每格 = 该小时 cost（log 着色）· hover 看明细；无数据小时留空");
+      renderCodexHourStrip(view, hourPanel);
+      root.appendChild(hourPanel);
+    } else {
+      var heatPanel = mkPanel("每日热力图",
+        "每格 = 当日总 cost（log 着色）· hover 看明细；无数据日留空");
+      renderCodexHeatmap(view, heatPanel);
+      root.appendChild(heatPanel);
+    }
+    renderCodexExtra(view);
+  }
+
+  /** 面板骨架：.panel + .panel-head（title + sub）+ .panel-body。动态创建——
+   *  统一模板只有一个宿主在渲染，不能像 codex_cost.html 那样静态占位。 */
+  function mkPanel(title, sub) {
+    var panel = document.createElement("section");
+    panel.className = "panel";
+    panel.innerHTML =
+      '<div class="panel-head">' +
+        '<h2 class="panel-title">' + esc(title) + '</h2>' +
+        (sub ? '<div class="panel-sub">' + sub + '</div>' : '') +
+      '</div>' +
+      '<div class="panel-body"></div>';
+    return panel;
+  }
+
+  function textNote(text) {
+    var d = document.createElement("div");
+    d.textContent = text;
+    d.style.color = "var(--fg-muted)";
+    return d;
+  }
+
+  function renderCodexSummary(view) {
+    var d = view || {};
+    var totalTok = sumTokens(d.total_tokens);
+    var modelNames = Object.keys(d.per_model || {});
+    var priced = 0;
+    modelNames.forEach(function(m) { if (d.per_model[m].priced) priced++; });
+    var activeDays = (d.days || []).filter(function(x) { return x.tokens > 0; }).length;
+    var sub = isSubscription(d);
+    var noteCost = d.month
+      ? ("USD · 已计价 " + priced + " / " + modelNames.length + " 模型")
+      : ("USD · 全部月份 · 已计价 " + priced + " / " + modelNames.length + " 模型");
+    if (sub) {
+      // 订阅套餐：per-token 美元是标价不是账单——账单 = 套餐固定费。诚实标注。
+      noteCost += " · 账单 = " + d.plan.plan_type + " 套餐固定费";
+    }
+    var cards = [
+      { label: sub ? "按量标价" : "总成本", value: fmtUsd(d.total_cost_usd || 0), note: noteCost },
+      { label: "总 token", value: formatNumber(totalTok), note: "5 桶合计" },
+      { label: "模型数", value: String(modelNames.length), note: priced + " 个已计价" },
+      { label: "有数据天数", value: activeDays + " / " + (d.days ? d.days.length : 0),
+        note: "按 token > 0 计" },
+    ];
+    if (d.unpriced_tokens > 0) {
+      cards.push({ label: "未计价 token", value: formatNumber(d.unpriced_tokens),
+        note: "无价目模型，成本不计入总额" });
+    }
+    renderSummary(cards);
+  }
+
+  function renderCodexQuota(view, panel) {
+    var body = panel.querySelector(".panel-body");
+    var plan = view.plan;
+    if (!plan || !plan.limits) return;
+    Object.keys(plan.limits).forEach(function(name) {   // 键序 = 折叠写入序
+      var win = plan.limits[name];
+      if (!win || typeof win.used_percent !== "number") return;
+      var up = win.used_percent;
+      var remaining = Math.max(0, 100 - up);            // 剩余 = 100 − 占用
+      var bar = Math.min(up, 100);                      // >100 截断显示，不撑破条
+      var color = quotaColor(up);                       // 告警色仍按占用算
+      var row = document.createElement("div");
+      row.className = "quota-row";
+      row.innerHTML =
+        '<div class="q-head">' +
+          '<span class="q-label">' + windowLabel(win.window_minutes) + '</span>' +
+          '<span class="q-pct" style="color:' + color + '">剩余 ' + pctText(remaining) + '%</span>' +
+        '</div>' +
+        '<div class="quota-bar">' +
+          '<div class="q-fill" style="width:' + bar + '%;background:' + color + '"></div>' +
+        '</div>' +
+        (typeof win.resets_at === "number"
+          ? '<div class="q-reset">重置：' + formatReset(win.resets_at) + '</div>'
+          : '');
+      body.appendChild(row);
+    });
+  }
+
+  function renderCodexModelTable(view, panel) {
+    var body = panel.querySelector(".panel-body");
+    var d = view;
+    var table = document.createElement("table");
+    table.className = "model-table";
+    var sub = isSubscription(d);
+    var head = document.createElement("thead");
+    head.innerHTML =
+      "<tr>" +
+        "<th>模型</th><th>speed</th><th>uncached</th><th>cache read</th>" +
+        "<th>cache write</th><th>output</th><th>reasoning</th>" +
+        "<th>总 token</th><th>" + (sub ? "标价 (USD)" : "成本 (USD)") + "</th><th>计价</th>" +
+      "</tr>";
+    table.appendChild(head);
+    var bodyRows = document.createElement("tbody");
+    var models = Object.keys(d.per_model || {});   // 折叠首现序，与 --json 一致
+    var totalCost = 0, totalUnc = 0, totalCac = 0, totalWrt = 0,
+        totalOut = 0, totalRea = 0, totalTok = 0;
+    models.forEach(function(m) {
+      var pm = d.per_model[m];
+      var t = pm.tokens || {};
+      var unc = t.uncached_input_tokens || 0, cac = t.cached_input_tokens || 0,
+          wrt = t.cache_write_input_tokens || 0, out = t.output_tokens || 0,
+          rea = t.reasoning_output_tokens || 0, tok = unc + cac + wrt + out + rea;
+      totalUnc += unc; totalCac += cac; totalWrt += wrt;
+      totalOut += out; totalRea += rea; totalTok += tok; totalCost += pm.cost_usd || 0;
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td class='model'>" + esc(m) + "</td>" +
+        "<td class='speed'>" + esc(pm.speed || "standard") + "</td>" +
+        "<td>" + formatNumber(unc) + "</td>" +
+        "<td>" + formatNumber(cac) + "</td>" +
+        "<td>" + formatNumber(wrt) + "</td>" +
+        "<td>" + formatNumber(out) + "</td>" +
+        "<td>" + formatNumber(rea) + "</td>" +
+        "<td>" + formatNumber(tok) + "</td>" +
+        (pm.priced
+          ? "<td class='cost'>" + fmtUsd(pm.cost_usd || 0) + "</td>" +
+            "<td>priced</td>"
+          : "<td class='unpriced'>—</td>" +
+            "<td class='unpriced'>unpriced</td>");
+      bodyRows.appendChild(tr);
+    });
+    table.appendChild(bodyRows);
+    var foot = document.createElement("tfoot");
+    var trf = document.createElement("tr");
+    trf.innerHTML =
+      "<td>合计</td><td></td>" +
+      "<td>" + formatNumber(totalUnc) + "</td>" +
+      "<td>" + formatNumber(totalCac) + "</td>" +
+      "<td>" + formatNumber(totalWrt) + "</td>" +
+      "<td>" + formatNumber(totalOut) + "</td>" +
+      "<td>" + formatNumber(totalRea) + "</td>" +
+      "<td>" + formatNumber(totalTok) + "</td>" +
+      "<td class='cost'>" + fmtUsd(totalCost) + "</td>" +
+      "<td>" + (d.unpriced_tokens > 0 ? "<span style='color:var(--unpriced)'>含 " +
+                formatNumber(d.unpriced_tokens) + " 未计价</span>" : "—") + "</td>";
+    foot.appendChild(trf);
+    table.appendChild(foot);
+    // min-width:720px 的宽表套滚动容器（`.model-table-root`），窄窗不撑破面板
+    var wrap = document.createElement("div");
+    wrap.className = "model-table-root";
+    wrap.appendChild(table);
+    body.innerHTML = "";
+    body.appendChild(wrap);
+  }
+
+  // ── codex today 小时条 ─────────────────────────────────────────────────
+
+  function renderCodexHourStrip(view, panel) {
+    var body = panel.querySelector(".panel-body");
+    var hours = (view && view.hours) || [];
+    var byHour = {};
+    hours.forEach(function(h) { byHour[h.hour] = h; });
+    var today = view.today || "";
+    var maxCost = 1;
+    hours.forEach(function(h) { if (h.cost_usd > maxCost) maxCost = h.cost_usd; });
+
+    var grid = document.createElement("div");
+    grid.className = "today-grid";
+    var axis = document.createElement("div");
+    axis.className = "today-axis";
+    axis.textContent = "hour";
+    grid.appendChild(axis);
+    for (var hh = 0; hh < 24; hh++) {
+      var key = today + "T" + String(hh).padStart(2, "0");
+      var entry = byHour[key];
+      var has = !!(entry && entry.tokens > 0);
+      var cell = document.createElement("div");
+      cell.className = "hour-cell" + (has ? "" : " empty");
+      cell.style.gridRow = "1";
+      cell.style.gridColumn = String(hh + 2);   // +2: 第一列是 axis（与 DSH 同公式）
+      cell.style.background = colorFor(entry ? entry.cost_usd : 0, maxCost, !has);
+      cell.dataset.hour = key;
+      cell.dataset.tokens = entry ? String(entry.tokens) : "0";
+      cell.dataset.cost = entry ? String(entry.cost_usd) : "0";
+      cell.innerHTML =
+        '<div class="hour-tag">' + String(hh).padStart(2, "0") + '</div>' +
+        (has ? '<div class="amt">' + shortNum(entry.tokens) + '</div>' : '');
+      grid.appendChild(cell);
+      var lbl = document.createElement("div");
+      lbl.className = "hour-label" + (hh % 6 === 0 ? " heavy" : "");
+      lbl.textContent = String(hh).padStart(2, "0");
+      lbl.style.gridRow = "2";
+      lbl.style.gridColumn = String(hh + 2);
+      grid.appendChild(lbl);
+    }
+    body.appendChild(grid);
+    bindCodexTip(grid, ".hour-cell");
+  }
+
+  // ── codex 日热力图（month/all 视图）────────────────────────────────────
+
+  function renderCodexHeatmap(view, panel) {
+    var body = panel.querySelector(".panel-body");
+    var days = (view && view.days) || [];
+    if (!days.length) {
+      body.appendChild(textNote("该时间窗没有可渲染的日子。"));
+      return;
+    }
+    var head = document.createElement("div");
+    head.className = "wrow weekday-head";
+    WEEKDAYS.forEach(function(w) {
+      var el = document.createElement("div"); el.textContent = w; head.appendChild(el);
+    });
+    body.appendChild(head);
+    var root = document.createElement("div");
+    body.appendChild(root);
+
+    var byDate = {};
+    days.forEach(function(x) { byDate[x.date] = x; });
+    // 色阶归一化：用日期轴的最大日 cost（log scale，同 DSH colorFor）。
+    var maxCost = 1;
+    days.forEach(function(x) { if (x.cost_usd > maxCost) maxCost = x.cost_usd; });
+
+    // 从首日遍历到末日（含无数据日，保持真实日历连续性）——跨月份数据也按
+    // 周对齐排，月份切换插一行月标题。今天无数据时把网格延长到今天（只在今天
+    // 与末日同月时延长，`--month 2026-07` 的视图不能把下一整个月拖进来）。
+    var first = parseISO(days[0].date);
+    var last = parseISO(days[days.length - 1].date);
+    if (view.today) {
+      var tToday = parseISO(view.today);
+      var lastMonth = isoOf(last).slice(0, 7);
+      if (tToday.getTime() > last.getTime() && view.today.slice(0, 7) === lastMonth) {
+        last = tToday;
+      }
+    }
+    var row = [];
+    for (var i = 0; i < first.getUTCDay(); i++) row.push(null);
+    var cur = first;
+    var curMonth = null;
+    function flushRow() {
+      while (row.length < 7) row.push(null);
+      var wrow = document.createElement("div");
+      wrow.className = "wrow";
+      row.forEach(function(cell) {
+        if (cell === null) {
+          var pad = document.createElement("div");
+          pad.className = "day-cell pad";
+          wrow.appendChild(pad);
+        } else {
+          wrow.appendChild(cell);
+        }
+      });
+      root.appendChild(wrow);
+      row = [];
+    }
+    while (cur.getTime() <= last.getTime()) {
+      var dow = cur.getUTCDay();
+      if (dow === 0 && row.length > 0) flushRow();
+      var key = isoOf(cur);
+      var m = key.slice(0, 7);
+      if (m !== curMonth) {
+        if (curMonth !== null && row.length > 0) flushRow();
+        curMonth = m;
+        var mt = document.createElement("div");
+        mt.className = "month-title";
+        mt.textContent = m;
+        root.appendChild(mt);
+      }
+      row.push(makeCodexDayCell(cur, key, byDate[key], maxCost));
+      cur = addDays(cur, 1);
+    }
+    if (row.length) flushRow();
+    bindCodexTip(root, ".day-cell[data-date]");
+  }
+
+  function makeCodexDayCell(dateObj, key, day, maxCost) {
+    var cell = document.createElement("div");
+    var dayNum = dateObj.getUTCDate();
+    var isToday = DATA.today === key;
+    if (!day) {
+      cell.className = "day-cell empty";
+      if (isToday) cell.className += " today";
+      cell.innerHTML = '<div class="num">' + dayNum + '</div>';
+      if (isToday) cell.innerHTML += '<span class="today-mark">今</span>';
+      return cell;
+    }
+    var hasCost = day.cost_usd > 0;
+    cell.className = "day-cell";
+    if (isToday) cell.className += " today";
+    cell.style.background = colorFor(day.cost_usd, maxCost, hasCost);
+    cell.dataset.date = key;
+    cell.dataset.cost = String(day.cost_usd);
+    cell.dataset.tokens = String(day.tokens);
+    cell.innerHTML =
+      '<div class="num">' + dayNum + '</div>' +
+      '<div class="amt">' + shortNum(day.tokens) +
+        (hasCost ? '<div class="cost">' + fmtUsd(day.cost_usd) + '</div>' : '') +
+      '</div>';
+    if (isToday) cell.innerHTML += '<span class="today-mark">今</span>';
+    return cell;
+  }
+
+  /** codex 自己的 tooltip 绑定（hour 格 + day 格共用）——不碰 DSH 的 bindHover/
+   *  showTip，那套读 CURRENT.payload 是 DSH schema。 */
+  function bindCodexTip(container, selector) {
+    var tip = document.getElementById("tip");
+    container.querySelectorAll(selector).forEach(function(el) {
+      el.addEventListener("mouseenter", function() {
+        var title;
+        if (el.dataset.hour !== undefined) {
+          var hh = el.dataset.hour;   // YYYY-MM-DDTHH
+          title = hh.slice(5, 10) + " " + hh.slice(11) + ":00 时段";
+        } else {
+          title = el.dataset.date;
+        }
+        var toks = parseInt(el.dataset.tokens || "0", 10);
+        var cost = parseFloat(el.dataset.cost || "0");
+        tip.innerHTML =
+          '<div class="tip-title">' + title + '</div>' +
+          '<div class="row"><span class="k">总 token</span><span class="v">' +
+            commas(toks) + '</span></div>' +
+          '<div class="sep"></div>' +
+          '<div class="row"><span class="k">' + (isSubscription(DATA) ? "标价" : "成本") +
+            ' (USD)</span><span class="v">' + fmtUsd(cost) + '</span></div>';
+        tip.classList.add("show");
+      });
+      el.addEventListener("mousemove", function(e) { positionTip(e); });
+      el.addEventListener("mouseleave", function() { tip.classList.remove("show"); });
+    });
+  }
+
+  function renderCodexExtra(view) {
+    var root = document.getElementById("render-root");
+    var html = "";
+    if (view.unpriced_tokens > 0) {
+      html += '<div class="unpriced-banner">' +
+        '<b>unpriced：</b>' + formatNumber(view.unpriced_tokens) +
+        ' token 属于无价目模型（如 codex-auto-review），不计入总成本，' +
+        '在明细表里标 unpriced 诚实上报。' +
+        '</div>';
+    }
+    var ua = view.unaccounted_usage || [];
+    if (ua.length) {
+      var rows = ua.map(function(e) {
+        return formatNumber(e.count) + " × " + esc(e.type) +
+               "（看见 " + formatNumber(e.tokens_seen) + " tokens）";
+      }).join("<br>");
+      html += '<div class="warn-banner">' +
+        '<b>残差哨兵 unaccounted_usage：</b>' +
+        '折叠没接住这些 token_count 事件（事件序不合法，如 token_count 出现在 ' +
+        '首个 turn_context 之前）。这是数据质量信号，不是计费缺口——这些 token ' +
+        '从未进过任何模型桶。<div class="banner-note">' + rows + '</div>' +
+        '</div>';
+    }
+    if (html) {
+      var d = document.createElement("div");
+      d.innerHTML = html;
+      root.appendChild(d);
+    }
+  }
+
+  // ── 跨宿主今日总览 ─────────────────────────────────────────────────────
+  // 「今日所有 Agent 总花费 + 每宿主 mini 卡」是看板的第一层（见
+  // docs/UNIFIED_COST_VIEW.md）。数据 best-effort：当前视图（host, today）+
+  // 内联块。缺失的宿主就不出卡，不假装有数据。
+
+  function overviewData(host, mode, view) {
+    var items = [];
+    // DSH today：当前 (dsh, today) 直接用 view；否则读内联 today 块。
+    var dshToday = null;
+    if (host === "dsh" && mode === "today" && view) dshToday = view;
+    if (!dshToday) {
+      var blk = document.getElementById("skill-vitals-data-today");
+      if (blk && blk.textContent.trim()) {
+        try {
+          var d = JSON.parse(blk.textContent);
+          if (d && !d.stale) dshToday = d;
+        } catch (e) {}
+      }
+    }
+    if (dshToday) {
+      var tok = 0, cost = 0;
+      var buckets = dshToday.buckets || {};
+      Object.keys(buckets).forEach(function(k) { tok += totalTokens(buckets[k]); });
+      if (dshToday.accurate_cost && typeof dshToday.accurate_cost.total === "number") {
+        cost = dshToday.accurate_cost.total;
+      } else {
+        Object.keys(buckets).forEach(function(k) { cost += costOf(buckets[k]).total; });
+      }
+      items.push({ host: "dsh", label: "DSH", currency: "¥", tokens: tok, cost: cost });
+    }
+    // Codex today：当前 (codex, today) 直接用 view；否则读内联 codex 块。
+    var codexToday = null;
+    if (host === "codex" && mode === "today" && view) codexToday = view;
+    if (!codexToday) {
+      var cblk = document.getElementById("skill-vitals-data-codex");
+      if (cblk && cblk.textContent.trim()) {
+        try {
+          var c = JSON.parse(cblk.textContent);
+          if (c && c.views && c.views.today) codexToday = c.views.today;
+        } catch (e) {}
+      }
+    }
+    if (codexToday) {
+      items.push({ host: "codex", label: "Codex", currency: "$",
+                   tokens: sumTokens(codexToday.total_tokens),
+                   cost: codexToday.total_cost_usd || 0 });
+    }
+    return items;
+  }
+
+  function renderOverview(items) {
+    var root = document.getElementById("overview");
+    if (!items.length) { root.hidden = true; return; }
+    root.hidden = false;
+    var cards = document.getElementById("overview-cards");
+    cards.innerHTML = "";
+    // 跨宿主今日总 token：币种无关，直接求和。
+    var totalTok = 0;
+    items.forEach(function(x) { totalTok += x.tokens; });
+    cards.appendChild(cardEl("今日跨宿主总 token", shortNum(totalTok),
+      items.length + " 个宿主 · 币种无关求和"));
+    // 各币种今日花费——不编汇率，¥/$ 分列（币种不同的花费不强行相加）。
+    var byCur = {};
+    items.forEach(function(x) {
+      byCur[x.currency] = (byCur[x.currency] || 0) + x.cost;
+    });
+    Object.keys(byCur).forEach(function(cur) {
+      var hosts = items.filter(function(x) { return x.currency === cur; })
+                       .map(function(x) { return x.label; }).join(" / ");
+      cards.appendChild(cardEl("今日花费 " + cur,
+        cur === "¥" ? money(byCur[cur]) : fmtUsd(byCur[cur]),
+        hosts + " · 不编汇率，币种分开列"));
+    });
+    // 每宿主 mini 卡：点击跳该宿主 today。
+    items.forEach(function(x) {
+      var a = document.createElement("a");
+      a.className = "card";
+      a.href = "?host=" + x.host + "&file=today";
+      a.innerHTML =
+        '<div class="label">' + x.label + ' 今日</div>' +
+        '<div class="value small">' + (x.currency === "¥" ? money(x.cost) : fmtUsd(x.cost)) + '</div>' +
+        '<div class="note">' + shortNum(x.tokens) + ' tokens</div>';
+      cards.appendChild(a);
+    });
+  }
+
+  function cardEl(label, value, note) {
+    var div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML =
+      '<div class="label">' + label + '</div>' +
+      '<div class="value">' + value + '</div>' +
+      (note ? '<div class="note">' + note + '</div>' : '');
+    return div;
   }
 
   // ── summary 卡片 ─────────────────────────────────────────────────────

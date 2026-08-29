@@ -71,6 +71,31 @@ def state_dir() -> Path:
     return p
 
 
+def cache_dir() -> Path:
+    """派生缓存目录 —— 优先 `$SKILL_VITALS_HOME/cache/`，否则
+    `~/.skill-vitals/cache/`。
+
+    与 `state_dir()` 同基目录但独立子目录：这里放**可重建的派生 memo**
+    （如 codex 折叠快照，`codex_fold_merged` 整折叠缓存），不放用户可读的
+    M3 状态。state 目录的读者（`list_state_files`/`list_months`/doctor）不该
+    被缓存文件污染，所以两者严格分开；缓存坏了/被删 = 重建一次，绝不参与
+    正确性（codex 侧无状态、无跨调用累计的约束不因缓存改变——缓存是纯函数
+    的 memo，命中与否输出逐字节相同）。
+    """
+    base = os.environ.get("SKILL_VITALS_HOME")
+    if base:
+        p = Path(base) / "cache"
+    else:
+        p = Path.home() / ".skill-vitals" / "cache"
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        # 权限 / 只读文件系统 —— 缓存是性能优化不是正确性依赖，让调用方
+        # 决定要不要降级（codex_fold_merged 会捕获并直接重扫）。
+        raise OSError(f"cannot create cache dir {p}: {e}") from e
+    return p
+
+
 @contextlib.contextmanager
 def _locked(path: Path):
     """flock(LOCK_EX) 守护 read-modify-write。

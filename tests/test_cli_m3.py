@@ -36,11 +36,21 @@ def _run(args, env=None):
 
 
 class _TmpHome:
-    """每次测试一个临时 SKILL_VITALS_HOME —— 不污染真机 ~/.skill-vitals。"""
+    """每次测试一个临时 SKILL_VITALS_HOME + HOME —— 不污染真机 ~/.skill-vitals，
+    也不让 codex 会话扫描碰到真机 ~/.codex。
+
+    必须两个都隔离：`state_dir()` 走 `$SKILL_VITALS_HOME`，而
+    `codex_session.codex_rollout_files()` 走 `Path.home()`——之前只设
+    SKILL_VITALS_HOME，日历/oneline 每次刷新都去折叠真机全部 rollout
+    （≈600MB JSONL ≈38s），测试直接挂死（真实事故，2026-08-29）。设 HOME
+    后折叠落在空目录，秒回；codex 适配器注释明说「测试用 isolated_home_env
+    注入」。"""
 
     def __enter__(self):
         self.tmp = tempfile.mkdtemp(prefix="sv-cli-m3-")
-        self.env = {"SKILL_VITALS_HOME": self.tmp}
+        self.env = {"SKILL_VITALS_HOME": self.tmp,
+                    "HOME": self.tmp,
+                    "USERPROFILE": self.tmp}
         return self
 
     def __exit__(self, *args):
@@ -465,6 +475,73 @@ class TestCalendarCli(unittest.TestCase):
                 sidecar = json.loads((Path(td) / "today.json").read_text())
                 self.assertEqual(sidecar["date"], "2020-01-01")
 
+    def test_calendar_embeds_codex_three_view_blob(self):
+        """统一看板（docs/UNIFIED_COST_VIEW.md 的 1 号宿主契约）：calendar
+        生成的文件必须内联 `skill-vitals-data-codex` 规范单块 =
+        {host, currency, today, default, views:{today,month,all}}。每个 view
+        即一份 codex 成本报告（host/currency/month/total_cost_usd/per_model/
+        days/unaccounted_usage/plan；today 视图额外带 hours）。用**当前月**
+        打戳的 rollout 保证 month/all 非空；today 视图无数据但契约键不能缺
+        （JS 渲染按键存在性分派，缺键和空数据是两个分支）。
+        """
+        with _TmpHome() as h:
+            from datetime import datetime, timedelta, timezone
+            beijing = timezone(timedelta(hours=8))
+            month01 = datetime.now(beijing).strftime("%Y-%m-01")
+            ts = month01 + "T12:00:00Z"
+            live = Path(h.tmp) / ".codex" / "sessions" / "2026" / "08"
+            live.mkdir(parents=True)
+            events = [
+                {"timestamp": ts, "type": "turn_context",
+                 "payload": {"model": "gpt-5.6-sol"}},
+                {"timestamp": ts, "type": "event_msg", "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 100000, "output_tokens": 50000,
+                            "cached_input_tokens": 0,
+                            "cache_write_input_tokens": 0,
+                            "reasoning_output_tokens": 0, "total_tokens": 150000},
+                        "last_token_usage": {
+                            "input_tokens": 100000, "output_tokens": 50000,
+                            "cached_input_tokens": 0,
+                            "cache_write_input_tokens": 0,
+                            "reasoning_output_tokens": 0}}}},
+            ]
+            (live / "rollout-blob.jsonl").write_text(
+                "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+
+            r = _run(["oneline", "fixtures/dsh/behavior.jsonl"], env=h.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with tempfile.TemporaryDirectory() as td:
+                out = Path(td) / "cal.html"
+                r = _run(["calendar", "-o", str(out)], env=h.env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                html = out.read_text(encoding="utf-8")
+                m = re.search(
+                    r'<script id="skill-vitals-data-codex"[^>]*>(.*?)</script>',
+                    html, re.DOTALL)
+                self.assertIsNotNone(m, "统一看板必须内联 codex 1 号宿主数据块")
+                blob = json.loads(m.group(1))
+                self.assertEqual(blob["host"], "codex")
+                self.assertEqual(blob["currency"], "USD")
+                self.assertEqual(blob["default"], "month")
+                self.assertEqual(set(blob["views"].keys()), {"today", "month", "all"})
+                month_view = blob["views"]["month"]
+                for key in ("host", "currency", "month", "total_cost_usd",
+                            "total_tokens", "per_model", "days",
+                            "unpriced_tokens", "unaccounted_usage", "plan"):
+                    self.assertIn(key, month_view,
+                                  "month 视图缺契约键 %s" % key)
+                self.assertEqual(month_view["host"], "codex")
+                self.assertTrue(month_view["per_model"],
+                                "当前月打戳的 rollout 应产出非空模型轴")
+                self.assertTrue(month_view["days"],
+                                "当前月打戳的 rollout 应产出非空日轴")
+                # today 视图契约：want_hours=True → hours 键必须存在
+                #（无今天数据时为空列表，但键不能缺）。
+                self.assertIn("hours", blob["views"]["today"])
+
 
 class TestAugmentCalendarCostCoverage(unittest.TestCase):
     """`_augment_calendar_cost` 必须校验 `by_model` 覆盖率,不能只看「存不存在」。
@@ -565,6 +642,79 @@ class TestUsageHourBucketsReconcile(unittest.TestCase):
                 for b in today["buckets"].values())
             self.assertEqual(hour_total, oneline["tokens_total"],
                              "hour_buckets 4 桶累加 == oneline tokens_total")
+
+
+class TestCodexFoldCache(unittest.TestCase):
+    """codex 整折叠 memo（`$SKILL_VITALS_HOME/cache/codex-fold.json`）。
+
+    背景：codex 折叠的瓶颈是**解析**不是折叠（真机 51 份 rollout ≈600MB
+    JSONL ≈38s）——日历/oneline 每次刷新都重扫会砸穿 xbar tick（2026-08-29
+    测试挂死的根因之一）。缓存是纯 memo：签名 (path, size, mtime_ns) 全等则
+    命中、不等则重扫，命中与否输出逐字节相同（差分门不受影响）。
+    """
+
+    def test_cache_hit_skips_rescan_and_invalidation_rescans(self):
+        with _TmpHome() as h:
+            import shutil
+            from skill_vitals.adapters import codex_session
+            with mock.patch.dict(os.environ, h.env, clear=False):
+                live = Path(h.tmp) / ".codex" / "sessions" / "2026" / "08"
+                live.mkdir(parents=True)
+                shutil.copy2(ROOT / "fixtures" / "codex" / "cost" / "rollout-sol.jsonl",
+                             live / "rollout-sol.jsonl")
+
+                fold1 = cli_module.codex_fold_merged()
+                self.assertTrue(cli_module._codex_fold_cache_path().is_file(),
+                                "第一次折叠应写缓存")
+
+                # 命中：不再解析任何 rollout 文件
+                with mock.patch.object(
+                        codex_session, "read_codex_session_log",
+                        wraps=codex_session.read_codex_session_log) as read:
+                    fold2 = cli_module.codex_fold_merged()
+                    read.assert_not_called()
+                self.assertEqual(fold1, fold2, "缓存命中应返回同一份 fold")
+
+                # 签名失效（mtime 变）→ 重扫一次，结果不变
+                os.utime(live / "rollout-sol.jsonl", (1, 1))
+                with mock.patch.object(
+                        codex_session, "read_codex_session_log",
+                        wraps=codex_session.read_codex_session_log) as read:
+                    fold3 = cli_module.codex_fold_merged()
+                    self.assertEqual(read.call_count, 1,
+                                     "签名失效后必须重扫一次")
+                self.assertEqual(fold1, fold3)
+
+    def test_broken_cache_degrades_to_rescan(self):
+        """缓存文件写坏（崩溃留半文件）→ 读不出 → 当没有缓存重扫，不崩。"""
+        with _TmpHome() as h:
+            import shutil
+            with mock.patch.dict(os.environ, h.env, clear=False):
+                live = Path(h.tmp) / ".codex" / "sessions" / "2026" / "08"
+                live.mkdir(parents=True)
+                shutil.copy2(ROOT / "fixtures" / "codex" / "cost" / "rollout-sol.jsonl",
+                             live / "rollout-sol.jsonl")
+                fold1 = cli_module.codex_fold_merged()
+                # 把缓存写成非法 JSON（模拟崩溃残留）
+                cli_module._codex_fold_cache_path().write_text(
+                    '{"version": 1, "signature": ', encoding="utf-8")
+                fold2 = cli_module.codex_fold_merged()
+                self.assertEqual(fold1, fold2, "坏缓存应降级为重扫，结果一致")
+
+    def test_cache_outside_state_dir_does_not_pollute_state(self):
+        """缓存进 `$SKILL_VITALS_HOME/cache/`，不进 `state/`——state 目录的
+        读者（list_state_files / list_months / doctor）不该被缓存文件污染。"""
+        with _TmpHome() as h:
+            import shutil
+            with mock.patch.dict(os.environ, h.env, clear=False):
+                live = Path(h.tmp) / ".codex" / "sessions" / "2026" / "08"
+                live.mkdir(parents=True)
+                shutil.copy2(ROOT / "fixtures" / "codex" / "cost" / "rollout-sol.jsonl",
+                             live / "rollout-sol.jsonl")
+                cli_module.codex_fold_merged()
+                state_files = {p.name for p in Path(h.tmp).glob("state/*.json")}
+                self.assertNotIn("codex-fold.json", state_files)
+                self.assertTrue(cli_module._codex_fold_cache_path().is_file())
 
 
 if __name__ == "__main__":

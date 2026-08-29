@@ -558,22 +558,142 @@ fn render_codex_roots(out: &Value) -> String {
     s
 }
 
-/// `codex-cost --html`：把 report dict 渲染成单文件仪表盘。模板
-/// `scripts/skill_vitals/templates/codex_cost.html` 编译期内嵌（与 `cost.rs`
-/// 内嵌 pricing.json 同一模式），JSON 经 `</script`/`<!--` 转义后塞进
-/// `<script id="skill-vitals-data-codex">` 块。**JS 只渲染 server 已算好的
-/// per_model / days / total_cost_usd**——模板不内嵌价格表。与 Python
-/// `cli.py::_render_codex_cost_html` 同构（HTML 文件不参与差分，只需等价）。
-fn render_codex_cost_html(output_path: &Path, out: &Value) {
-    const TEMPLATE: &str = include_str!("../scripts/skill_vitals/templates/codex_cost.html");
-    let json_text = serde_json::to_string(out).unwrap_or_default();
+/// `codex-fold → 计价` 共享助手：从已折叠合并的 fold 出一个 `--json` 报告 dict
+/// （host/currency/month/today 外层包装 + report 键）。filter_key=None 不过滤
+/// （all 视图）；want_hours=True 时报告带 hours（today 视图小时热力图）。空折叠
+/// 给全零结构而不是 None——调用方要的是「没有数据」而不是「崩了」，且包装是
+/// 固定契约（unaccounted/plan 透传，无时间归属、不随月过滤）。与 Python
+/// `cli.py::codex_report_from_merged` 同构（差分看守字节一致）。
+fn codex_report_from_merged(
+    merged: &Value,
+    filter_key: Option<&str>,
+    month_out: Option<&str>,
+    want_hours: bool,
+) -> Value {
+    let mut by_hour_model = merged["by_hour_model"].clone();
+    let mut by_model = merged["by_model"].clone();
+    if let Some(m) = filter_key {
+        // 过滤小时轴（升序 -> 保持升序），再重算 by_model。小时键 `YYYY-MM-DDTHH`
+        // 用 startswith 匹配：月份前缀 `YYYY-MM` / 今天 `YYYY-MM-DD` 都成立。
+        let mut filtered = serde_json::Map::new();
+        if let Some(bh) = by_hour_model.as_object() {
+            for (h, v) in bh {
+                if h.starts_with(m) {
+                    filtered.insert(h.clone(), v.clone());
+                }
+            }
+        }
+        by_hour_model = Value::Object(filtered);
+        // 重算模型轴：merge 的 by_model 只读 fold 的 by_model 字段，不读
+        // by_hour_model——拿 merge 折回去得到的是空模型轴（真实 defect：
+        // --month 整份报告静默变全零）。
+        by_model =
+            skill_vitals_core::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
+    }
+    let pricing = codex_cost::load_codex_pricing();
+    let plan = merged["plan"].clone();
+    let report = codex_cost::codex_cost_report(
+        &by_hour_model,
+        &by_model,
+        &merged["unaccounted"],
+        &plan,
+        &pricing,
+        want_hours,
+    );
+    let report = report.unwrap_or_else(|| {
+        // 空折叠：全零结构（同 handler 注释——透传 unaccounted/plan）。
+        let mut tt = serde_json::Map::new();
+        for f in skill_vitals_core::codex_usage::CODEX_TOKEN_FIELDS {
+            tt.insert(f.to_string(), json!(0));
+        }
+        let mut base = serde_json::Map::new();
+        base.insert("total_cost_usd".into(), json!(0));
+        base.insert("total_tokens".into(), Value::Object(tt));
+        base.insert("per_model".into(), Value::Object(serde_json::Map::new()));
+        base.insert("days".into(), Value::Array(vec![]));
+        base.insert("unpriced_tokens".into(), json!(0));
+        base.insert("unaccounted_usage".into(), merged["unaccounted"].clone());
+        base.insert("plan".into(), plan);
+        if want_hours {
+            base.insert("hours".into(), Value::Array(vec![]));
+        }
+        Value::Object(base)
+    });
+    let mut out = serde_json::Map::new();
+    out.insert("host".into(), json!("codex"));
+    out.insert("currency".into(), json!("USD"));
+    out.insert(
+        "month".into(),
+        month_out.map(Value::from).unwrap_or(Value::Null),
+    );
+    out.insert("today".into(), json!(codex_cost::today_beijing()));
+    if let Some(rep) = report.as_object() {
+        for (k, v) in rep {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    Value::Object(out)
+}
+
+/// 统一看板内联的 codex 规范单块（docs/UNIFIED_COST_VIEW.md 的 1 号宿主契约）：
+/// {host, currency, today, default, views:{today,month,all}}。每个 view 即
+/// `codex_report_from_merged` 的一个报告。today 视图 want_hours=True；month
+/// 视图用调用方给的 month_key/month_out；all 视图不过滤。与 Python
+/// `cli.py::codex_calendar_blob` 同构。
+fn codex_calendar_blob(
+    merged: &Value,
+    month_key: Option<&str>,
+    month_out: Option<&str>,
+    default: &str,
+) -> Value {
+    let today = codex_cost::today_beijing();
+    let mut views = serde_json::Map::new();
+    views.insert(
+        "today".into(),
+        codex_report_from_merged(merged, Some(&today), Some(&today[..7]), true),
+    );
+    views.insert(
+        "month".into(),
+        codex_report_from_merged(merged, month_key, month_out, false),
+    );
+    views.insert(
+        "all".into(),
+        codex_report_from_merged(merged, None, None, false),
+    );
+    let mut blob = serde_json::Map::new();
+    blob.insert("host".into(), json!("codex"));
+    blob.insert("currency".into(), json!("USD"));
+    blob.insert("today".into(), json!(today));
+    blob.insert("default".into(), json!(default));
+    blob.insert("views".into(), Value::Object(views));
+    Value::Object(blob)
+}
+
+/// `codex-cost --html`：复用统一看板模板 calendar.html（退役独立 codex_cost.html，
+/// 一套视觉模板，见 docs/UNIFIED_COST_VIEW.md）。只内联 codex 规范单块 +
+/// `SKILL_VITALS_DEFAULT_HOST='codex'`（codex 视角的看板，不内联 DSH 块）。
+/// JSON 经 `</script`/`<!--` 转义。与 Python `cli.py::_render_codex_cost_html`
+/// 同构（HTML 文件不参与差分，只需等价可解析的页面）。
+fn render_codex_cost_html(
+    output_path: &Path,
+    merged: &Value,
+    month_key: Option<&str>,
+    month_out: Option<&str>,
+    default: &str,
+) {
+    const TEMPLATE: &str = include_str!("../scripts/skill_vitals/templates/calendar.html");
+    let blob = codex_calendar_blob(merged, month_key, month_out, default);
+    let json_text = serde_json::to_string(&blob).unwrap_or_default();
     let safe = json_text
         .replace("</script", "<\\/script")
         .replace("<!--", "<\\!--");
     let inject = format!(
         "<script id=\"skill-vitals-data-codex\" type=\"application/json\">{safe}</script>"
     );
-    let html = TEMPLATE.replacen("</head>", &format!("{inject}\n</head>"), 1);
+    let host_inject = "<script>window.SKILL_VITALS_DEFAULT_HOST = 'codex';</script>";
+    let html = TEMPLATE
+        .replacen("</head>", &format!("{inject}\n</head>"), 1)
+        .replacen("</head>", &format!("{host_inject}\n</head>"), 1);
     if let Some(parent) = output_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -876,11 +996,12 @@ fn main() {
 
     // Codex 成本折叠 + 计价（cc-trace 研究 §D 落地）。与 Python cli.py 的
     // codex-cost handler 同一种结构。无状态单次调用：扫 rollout → 折叠 →
-    // 计价 → 文本/JSON/HTML 三路。`--month` 过滤日期轴后**重算** by_model
-    // （codex_by_model_from_dates 把过滤后的 by_date 求和折回模型轴，不是
+    // 计价 → 文本/JSON/HTML 三路。时间轴是**小时桶**（统一多桶折叠契约，见
+    // docs/UNIFIED_COST_VIEW.md）。`--month` 过滤小时轴后**重算** by_model
+    // （codex_by_model_from_hours 把过滤后的小时求和折回模型轴，不是
     // merge_folds——merge 只读 fold 的 by_model 字段，拿它折回去是空模型轴），
-    // 保证 days 与 per_model 对得上；unaccounted 无日期归属，跨月份保留（数据
-    // 质量哨兵，不参与归月）。
+    // 保证 days 与 per_model 对得上；unaccounted 无时间归属，跨月份保留（数据
+    // 质量哨兵，不参与归月）。`--today` 时报告带 `hours`（小时热力图数据）。
     if let Some(Cmd::CodexCost {
         month,
         today,
@@ -902,9 +1023,6 @@ fn main() {
             folds.push(skill_vitals_core::codex_usage::codex_fold_file(&items));
         }
         let merged = skill_vitals_core::codex_usage::codex_merge_folds(&folds);
-        let mut by_date_model = merged["by_date_model"].clone();
-        let mut by_model = merged["by_model"].clone();
-        let unaccounted = merged["unaccounted"].clone();
         // 月份解析（北京口径，与 Python `cli.py` 同源）：默认 = 当前自然月；
         // `--today` = 今天（过滤键是完整 YYYY-MM-DD，month 标签取今天所属月）；
         // `--month all` = 全部月份；其余 = 指定月。filter_key=None 即不过滤。
@@ -921,61 +1039,12 @@ fn main() {
                 }
             }
         };
-        if let Some(m) = &filter_key {
-            // 过滤日期轴（BTreeMap 升序 -> 保持升序），再重算 by_model。
-            let mut filtered = serde_json::Map::new();
-            if let Some(bd) = by_date_model.as_object() {
-                for (d, v) in bd {
-                    if d.starts_with(m.as_str()) {
-                        filtered.insert(d.clone(), v.clone());
-                    }
-                }
-            }
-            by_date_model = Value::Object(filtered);
-            // 重算模型轴：merge 的 by_model 只读 fold 的 by_model 字段，不读
-            // by_date_model——拿 merge 折回去得到的是空模型轴（真实 defect：
-            // --month 整份报告静默变全零）。codex_by_model_from_dates 把过滤后
-            // 的日期桶求和折回 by_model（守恒：sum(days) == total_cost_usd）。
-            by_model = skill_vitals_core::codex_usage::codex_by_model_from_dates(&by_date_model);
-        }
-        let pricing = codex_cost::load_codex_pricing();
-        let plan = merged["plan"].clone();
-        let report = codex_cost::codex_cost_report(&by_date_model, &by_model, &unaccounted, &plan, &pricing);
-        let report = report.unwrap_or_else(|| {
-            // 空折叠：没有任何 token 可计价。给一个全零的结构而不是 None——
-            // 调用方要的是「没有数据」而不是「崩了」，且 host/currency/month
-            // 包装是固定契约。
-            let mut tt = serde_json::Map::new();
-            for f in skill_vitals_core::codex_usage::CODEX_TOKEN_FIELDS {
-                tt.insert(f.to_string(), json!(0));
-            }
-            serde_json::json!({
-                "total_cost_usd": 0,
-                "total_tokens": Value::Object(tt),
-                "per_model": Value::Object(serde_json::Map::new()),
-                "days": Value::Array(vec![]),
-                "unpriced_tokens": 0,
-                "unaccounted_usage": unaccounted,
-                "plan": plan,
-            })
-        });
-        // host/currency/month 是外层固定契约，report 的键在其后（键序是字节
-        // 一致的一部分，Python 侧 `{"host":...,"currency":...}.update(report)`
-        // 同序）。
-        let mut out = serde_json::Map::new();
-        out.insert("host".into(), json!("codex"));
-        out.insert("currency".into(), json!("USD"));
-        out.insert(
-            "month".into(),
-            month_out.clone().map(Value::from).unwrap_or(Value::Null),
-        );
-        out.insert("today".into(), json!(codex_cost::today_beijing()));
-        if let Some(rep) = report.as_object() {
-            for (k, v) in rep {
-                out.insert(k.clone(), v.clone());
-            }
-        }
-        let out = Value::Object(out);
+        // `--today` 时 want_hours=True：报告带 hours 键（today 视图渲染小时热力图）。
+        // 折叠→过滤→计价→包装全部走共享助手（与 `_render_codex_cost_html` 的
+        // 3 视图 blob 同一份逻辑，见 `codex_report_from_merged`）。
+        let want_hours = *today;
+        let out = codex_report_from_merged(
+            &merged, filter_key.as_deref(), month_out.as_deref(), want_hours);
         let mut wrote = false;
         if let Some(path) = rows_json {
             let text = serde_json::to_string_pretty(&out).unwrap_or_default();
@@ -990,7 +1059,13 @@ fn main() {
             wrote = true;
         }
         if let Some(path) = html {
-            render_codex_cost_html(path, &out);
+            // `--html` 复用统一看板模板（codex 视角）：default 随请求——请求月
+            // → "month"、全部 → "all"、今天 → "today"、无请求 → "month"。
+            let default_view = if *today { "today" }
+                else if month.as_deref() == Some("all") { "all" }
+                else { "month" };
+            render_codex_cost_html(
+                path, &merged, filter_key.as_deref(), month_out.as_deref(), default_view);
             wrote = true;
         }
         if !wrote {

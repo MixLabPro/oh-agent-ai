@@ -28,11 +28,16 @@
 //!   → 恒 standard，但折叠**保留** speed 解析并按 (model, speed) 分桶——真实数据不
 //!   命中 fast，命中就是未来的不同计费，不能静默并进 standard 桶（同「窄进宽出，
 //!   绝不静默漏算」纪律）。没看到 service_tier 时默认 standard（cc-trace 同款）。
-//! - **日期**：从事件的顶层 `timestamp`（回退 `payload.timestamp`）取 `YYYY-MM-DD`
-//!   前缀。无日期的事件仍折进 `by_model`，但**不产生日期桶**（未知时间不能算进任何
-//!   一天——与 `usage.rs::token_by_date_model` 对无时间样本同一条纪律）。因此
-//!   `sum(by_date_model) == by_model − 无日期样本的量`；全部带日期时两者精确相等，
-//!   这正是守恒测试断言的形式。
+//! - **时间轴（小时桶，统一多桶折叠契约）**：从事件的顶层 `timestamp`（回退
+//!   `payload.timestamp`）取 `YYYY-MM-DDTHH` 小时键——不是「codex 天生只有天」，是
+//!   统一范式要求补全小时桶（DSH 的 `token_by_date_model` 也是小时粒度，两个宿主
+//!   遵循同一套多桶逻辑：按时间切 = 小时 → 天 → 月，按 session 切 = `by_model`）。
+//!   无时间的事件仍折进 `by_model`，但**不产生小时桶**（未知时间不能算进任何一小时
+//!   ——与 `usage.rs::token_by_date_model` 对无时间样本同一条纪律）。因此
+//!   `sum(by_hour_model) == by_model − 无时间样本的量`；全部带时间时两者精确相等，
+//!   这正是守恒测试断言的形式。`codex_aggregate_hours` 把小时聚合回日期——hour
+//!   折叠 → date 聚合 → 按日计价是**必须的投影**，不是便利（longContext 判定粒度
+//!   锚定在单日聚合桶，见 `codex_cost.rs`）。
 //! - **plan / 配额状态来自 token_count 的 `rate_limits`**：`plan_type` /
 //!   `credits.has_credits` / `primary|secondary.{used_percent, window_minutes,
 //!   resets_at}`。**即使 `info` 为 null 也读**——真实语料里 info:null 的事件仍带
@@ -49,7 +54,7 @@
 //!   不是日期桶——`--month` 过滤不碰它。
 //!
 //! `codex_fold_file`（单文件有序流）与 `codex_merge_folds`（跨文件求和）都输出同一
-//! 形状：`{by_date_model, by_model, unaccounted, plan}`。日期升序、模型/速度按首现序
+//! 形状：`{by_hour_model, by_model, unaccounted, plan}`。小时升序、模型/速度按首现序
 //! （与 Python dict 的插入序对齐，两侧 JSON 逐字节相同靠的是这份一致）。Python 平行
 //! 实现见 `scripts/skill_vitals/codex_usage.py`，差分由
 //! `tests/test_cli_matrix.py::both()` 与 characterization 钉死。
@@ -97,24 +102,27 @@ fn total_signature(total: &Value) -> Option<(i64, i64, i64, i64, i64, i64)> {
     ))
 }
 
-/// 事件的时间戳 → `YYYY-MM-DD` 前缀。顶层 `timestamp` 回退 `payload.timestamp`；
-/// 不是 `YYYY-MM-DD` 开头的字符串 → None（未知时间，不编造日期）。
-fn codex_date_of(event: &Value) -> Option<String> {
+/// 事件的时间戳 → `YYYY-MM-DDTHH` 小时桶键（统一多桶折叠：时间轴小时粒度，与
+/// DSH `usage.rs::token_by_date_model` 同一条纪律）。顶层 `timestamp` 回退
+/// `payload.timestamp`；不是合法小时时间戳 → None（未知时间，不编造）。
+fn codex_hour_of(event: &Value) -> Option<String> {
     let ts = event
         .get("timestamp")
         .and_then(|v| v.as_str())
         .or_else(|| event.pointer("/payload/timestamp").and_then(|v| v.as_str()))?;
     let b = ts.as_bytes();
-    if b.len() < 10
+    if b.len() < 13
         || !b[..4].iter().all(|c| c.is_ascii_digit())
         || b[4] != b'-'
         || !b[5..7].iter().all(|c| c.is_ascii_digit())
         || b[7] != b'-'
         || !b[8..10].iter().all(|c| c.is_ascii_digit())
+        || b[10] != b'T'
+        || !b[11..13].iter().all(|c| c.is_ascii_digit())
     {
         return None;
     }
-    Some(ts[..10].to_string())
+    Some(ts[..13].to_string())
 }
 
 /// 事件的时间戳**原始字符串**（顶层 `timestamp` 回退 `payload.timestamp`）。None =
@@ -272,18 +280,18 @@ fn bump_unaccounted(
     e.1 += total_tokens;
 }
 
-/// 单文件有序折叠：把一份 rollout 的原始条目流折成 `{by_date_model, by_model,
-/// unaccounted}`。纯函数，不碰文件系统——I/O 在适配器层，这里只吃 `events`。
+/// 单文件有序折叠：把一份 rollout 的原始条目流折成 `{by_hour_model, by_model,
+/// unaccounted, plan}`。纯函数，不碰文件系统——I/O 在适配器层，这里只吃 `events`。
 ///
-/// 输出顺序：日期升序（BTreeMap）、模型/速度按首现序（Map 插入序）、`unaccounted`
+/// 输出顺序：小时升序（BTreeMap）、模型/速度按首现序（Map 插入序）、`unaccounted`
 /// 按 type 名升序。这些顺序是字节一致的一部分。
 pub fn codex_fold_file(events: &[Value]) -> Value {
     let mut model: Option<String> = None;
     let mut speed: &'static str = "standard";
     let mut last_total_sig: Option<(i64, i64, i64, i64, i64, i64)> = None;
     let mut plan: Option<Value> = None;
-    // 日期升序：BTreeMap；模型层 / 速度层用 serde_json Map 保插入序。
-    let mut by_date_model: std::collections::BTreeMap<String, Map<String, Value>> =
+    // 小时升序：BTreeMap；模型层 / 速度层用 serde_json Map 保插入序。
+    let mut by_hour_model: std::collections::BTreeMap<String, Map<String, Value>> =
         std::collections::BTreeMap::new();
     let mut by_model: Map<String, Value> = Map::new();
     let mut unaccounted: std::collections::BTreeMap<String, (i64, i64)> =
@@ -371,9 +379,9 @@ pub fn codex_fold_file(events: &[Value]) -> Value {
                             bump_unaccounted(&mut unaccounted, "token_count_before_turn_context", total_tokens);
                             continue;
                         };
-                        if let Some(d) = codex_date_of(event) {
-                            let date_map = by_date_model.entry(d).or_default();
-                            add_bucket(date_map, &m, speed, &facts);
+                        if let Some(h) = codex_hour_of(event) {
+                            let hour_map = by_hour_model.entry(h).or_default();
+                            add_bucket(hour_map, &m, speed, &facts);
                         }
                         add_bucket(&mut by_model, &m, speed, &facts);
                     }
@@ -384,9 +392,9 @@ pub fn codex_fold_file(events: &[Value]) -> Value {
         }
     }
 
-    let mut date_out = Map::new();
-    for (d, date_map) in by_date_model {
-        date_out.insert(d, Value::Object(date_map));
+    let mut hour_out = Map::new();
+    for (h, hour_map) in by_hour_model {
+        hour_out.insert(h, Value::Object(hour_map));
     }
     let unaccounted_out: Vec<Value> = unaccounted
         .iter()
@@ -395,7 +403,7 @@ pub fn codex_fold_file(events: &[Value]) -> Value {
         })
         .collect();
     json!({
-        "by_date_model": Value::Object(date_out),
+        "by_hour_model": Value::Object(hour_out),
         "by_model": Value::Object(by_model),
         "unaccounted": Value::Array(unaccounted_out),
         "plan": plan.unwrap_or(Value::Null),
@@ -404,40 +412,40 @@ pub fn codex_fold_file(events: &[Value]) -> Value {
 
 /// 跨文件合并：把多个 `codex_fold_file` 的结果逐桶求和。纯函数。
 ///
-/// 顺序确定性（字节一致的一部分）：`by_date_model` 的日期**全局升序**（先收集全部
-/// 日期排序，再按序遍历——跨文件时插入序不可靠：先 fold 的文件日期可能晚于后 fold
-/// 的）；每个日期内的模型、每个模型内的速度按**跨文件首现序**（按 folds 顺序遍历）。
+/// 顺序确定性（字节一致的一部分）：`by_hour_model` 的小时**全局升序**（先收集全部
+/// 小时排序，再按序遍历——跨文件时插入序不可靠：先 fold 的文件小时可能晚于后 fold
+/// 的）；每个小时内、每个模型内、速度按**跨文件首现序**（按 folds 顺序遍历）。
 /// `by_model` 按 folds 顺序、模型/速度首现序。`unaccounted` 按 type 名升序求和。
 /// `plan` 取 `observed_at` 最大者（各会话的配额快照不同，选「最新」的那个；平手
 /// 先见者赢——按 folds 顺序，确定性）；`limits` 单独取「最后看见的非空限额」——
 /// 最新快照是降级形态（primary/secondary 全 null）时不抹掉配额条（见
 /// `combine_plan`，与单文件折叠同一语义）。
 pub fn codex_merge_folds(folds: &[Value]) -> Value {
-    let mut all_dates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut all_hours: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for fold in folds {
-        if let Some(by_date) = fold.get("by_date_model").and_then(|v| v.as_object()) {
-            all_dates.extend(by_date.keys().cloned());
+        if let Some(by_hour) = fold.get("by_hour_model").and_then(|v| v.as_object()) {
+            all_hours.extend(by_hour.keys().cloned());
         }
     }
 
-    let mut by_date_out: Map<String, Value> = Map::new();
-    for d in &all_dates {
-        let mut date_map: Map<String, Value> = Map::new();
+    let mut by_hour_out: Map<String, Value> = Map::new();
+    for h in &all_hours {
+        let mut hour_map: Map<String, Value> = Map::new();
         for fold in folds {
-            let Some(by_date) = fold.get("by_date_model").and_then(|v| v.as_object()) else {
+            let Some(by_hour) = fold.get("by_hour_model").and_then(|v| v.as_object()) else {
                 continue;
             };
-            let Some(models) = by_date.get(d).and_then(|v| v.as_object()) else {
+            let Some(models) = by_hour.get(h).and_then(|v| v.as_object()) else {
                 continue;
             };
             for (m, speeds) in models {
                 let Some(speeds) = speeds.as_object() else { continue };
                 for (spd, bucket) in speeds {
-                    add_bucket(&mut date_map, m, spd, &bucket_to_array(bucket));
+                    add_bucket(&mut hour_map, m, spd, &bucket_to_array(bucket));
                 }
             }
         }
-        by_date_out.insert(d.clone(), Value::Object(date_map));
+        by_hour_out.insert(h.clone(), Value::Object(hour_map));
     }
 
     let mut by_model: Map<String, Value> = Map::new();
@@ -519,31 +527,73 @@ pub fn codex_merge_folds(folds: &[Value]) -> Value {
         _ => None,
     };
     json!({
-        "by_date_model": Value::Object(by_date_out),
+        "by_hour_model": Value::Object(by_hour_out),
         "by_model": Value::Object(by_model),
         "unaccounted": Value::Array(unaccounted_out),
         "plan": plan_final.unwrap_or(Value::Null),
     })
 }
 
-/// 日期轴投影 → 模型轴投影：`by_date_model`（{date:{model:{speed:桶}}}）逐桶求和
-/// 折回 `by_model`（{model:{speed:桶}}）。模型/速度按**跨日期首现序**（日期已升序，
-/// 逐日期插入即首现序），与 `codex_fold_file` 的模型轴同一约定。
+/// 时间轴小时桶 → 日期桶：`by_hour_model`（{hour:{model:{speed:桶}}}）逐小时求和
+/// 折回 `by_date_model`（{date:{model:{speed:桶}}}）。小时键 `YYYY-MM-DDTHH` 取前
+/// 10 位成日期；日期升序（BTreeMap，输入小时升序时与 Python 插入序一致）。
 ///
-/// 踩过的坑：`codex-cost --month` 过滤日期轴后，by_model 必须**重算**——过滤掉了
-/// 哪些日期，模型轴就必须同样丢掉那些 token，否则 per_model 里残留被过滤日期的
+/// **longContext 判定的粒度锚点**：`codex_cost_report` 按**单日聚合桶**判 LC
+/// （"这一次请求的上下文超窗"按日看），不按小时桶——小时桶拆开会把一日的大请求
+/// 摊薄成不触发的小桶（踩过的坑：合并桶又会让多日小请求累加成假超窗）。所以
+/// hour 折叠 → date 聚合 → 按日计价是必须的投影，不是可选的便利。
+pub fn codex_aggregate_hours(by_hour_model: &Value) -> Value {
+    let mut date_out: std::collections::BTreeMap<String, Map<String, Value>> =
+        std::collections::BTreeMap::new();
+    if let Some(bh) = by_hour_model.as_object() {
+        for (h, hour_map) in bh {
+            if h.len() < 10 {
+                continue;
+            }
+            let date = h[..10].to_string();
+            let Some(hour_map) = hour_map.as_object() else { continue };
+            let date_map = date_out.entry(date).or_default();
+            for (m, speeds) in hour_map {
+                let Some(speeds) = speeds.as_object() else { continue };
+                for (spd, bucket) in speeds {
+                    add_bucket(date_map, m, spd, &bucket_to_array(bucket));
+                }
+            }
+        }
+    }
+    let mut out = Map::new();
+    for (d, dm) in date_out {
+        out.insert(d, Value::Object(dm));
+    }
+    Value::Object(out)
+}
+
+/// 时间轴投影 → 模型轴投影：`by_hour_model`（{hour:{model:{speed:桶}}}）逐桶求和
+/// 折回 `by_model`（{model:{speed:桶}}）。模型/速度按**跨小时首现序**（小时已升序，
+/// 逐小时插入即首现序），与 `codex_fold_file` 的模型轴同一约定。
+///
+/// `prefix`（可选）按小时键前缀过滤：`--today` 传 `YYYY-MM-DD`、`--month` 传
+/// `YYYY-MM`（小时键 `YYYY-MM-DDTHH` 用 `starts_with` 匹配）。
+///
+/// 踩过的坑：`codex-cost --month` 过滤时间轴后，by_model 必须**重算**——过滤掉了
+/// 哪些小时，模型轴就必须同样丢掉那些 token，否则 per_model 里残留被过滤时间的
 /// 用量，days 与 per_model 对不上（守恒测试红）。一开始想当然拿 `codex_merge_folds`
-/// 把过滤后的 by_date_model "折回去"，但 merge 的 by_model **只读各 fold 的
-/// `by_model` 字段**、从不读 by_date_model，传 `{"by_model": {}}` 得到的是空模型轴
-/// ——整份月报告静默变全零（per_model 空 + unpriced 0 → 返回 None → 全零兜底），
-/// 一个「看不见的错」。重算不是新数据：`by_model == Σ 各日期桶`（同一折叠的两投影，
-/// usage.rs 日期轴守恒同款纪律），无日期样本没有日期桶、被月份过滤按设计丢弃。
-pub fn codex_by_model_from_dates(by_date_model: &Value) -> Value {
+/// 把过滤后的时间轴 "折回去"，但 merge 的 by_model **只读各 fold 的 `by_model`
+/// 字段**、从不读时间轴，传 `{"by_model": {}}` 得到的是空模型轴——整份月报告静默
+/// 变全零（per_model 空 + unpriced 0 → 返回 None → 全零兜底），一个「看不见的错」。
+/// 重算不是新数据：`by_model == Σ 各小时桶`（同一折叠的两投影，usage.rs 时间轴
+/// 守恒同款纪律），无时间样本没有小时桶、被过滤按设计丢弃。
+pub fn codex_by_model_from_hours(by_hour_model: &Value, prefix: Option<&str>) -> Value {
     let mut by_model: Map<String, Value> = Map::new();
-    if let Some(bd) = by_date_model.as_object() {
-        for (_date, date_map) in bd {
-            let Some(date_map) = date_map.as_object() else { continue };
-            for (m, speeds) in date_map {
+    if let Some(bh) = by_hour_model.as_object() {
+        for (h, hour_map) in bh {
+            if let Some(prefix) = prefix {
+                if !h.starts_with(prefix) {
+                    continue;
+                }
+            }
+            let Some(hour_map) = hour_map.as_object() else { continue };
+            for (m, speeds) in hour_map {
                 let Some(speeds) = speeds.as_object() else { continue };
                 for (spd, bucket) in speeds {
                     add_bucket(&mut by_model, m, spd, &bucket_to_array(bucket));
@@ -642,8 +692,8 @@ mod tests {
             ),
         ];
         let out = codex_fold_file(&events);
-        // by_date_model[date][model][speed] 的 5 桶
-        let sol_d5 = &out["by_date_model"]["2026-08-05"]["gpt-5.6-sol"]["standard"];
+        // by_hour_model[hour][model][speed] 的 5 桶（时间轴小时粒度）
+        let sol_d5 = &out["by_hour_model"]["2026-08-05T10"]["gpt-5.6-sol"]["standard"];
         // uncached = input − cached − cache_write（本样例 cache_write 恰为 0；
         // 用变量保留下「派生公式」的字面形状，而不是把 −0 折叠掉）。
         let cache_write = 0;
@@ -657,12 +707,11 @@ mod tests {
         assert_eq!(sol["output_tokens"], json!(242));
         let terra = bucket_of(&out, "gpt-5.6-terra", "standard");
         assert_eq!(terra["uncached_input_tokens"], json!(800));
-        // 守恒：by_date_model 各日期之和 == by_model
-        // 守恒：by_date_model 各日期之和 == by_model。两边各跑一遍 5 桶求和再比，
+        // 守恒：by_hour_model 各小时之和 == by_model。两边各跑一遍 5 桶求和再比，
         // 不拿模型名当字段名查。
         let by_model = out["by_model"].as_object().unwrap();
         let mut sum: std::collections::HashMap<&str, i64> = Default::default();
-        for date_map in out["by_date_model"].as_object().unwrap().values() {
+        for date_map in out["by_hour_model"].as_object().unwrap().values() {
             for speeds in date_map.as_object().unwrap().values() {
                 for bucket in speeds.as_object().unwrap().values() {
                     for (i, f) in CODEX_TOKEN_FIELDS.iter().enumerate() {
@@ -1015,8 +1064,8 @@ mod tests {
     }
 
     #[test]
-    fn fold_file_drops_untimed_from_date_but_keeps_by_model() {
-        // 无日期事件（timestamp 缺失/非 YYYY-MM-DD）：by_model 有、by_date_model 没有。
+    fn fold_file_drops_untimed_from_time_but_keeps_by_model() {
+        // 无时间事件（timestamp 缺失/非 YYYY-MM-DDTHH）：by_model 有、by_hour_model 没有。
         let mut e = token_count_line(
             "2026-08-05T10:00:01Z",
             (100, 10, 0, 0, 0, 110),
@@ -1025,7 +1074,7 @@ mod tests {
         e.as_object_mut().unwrap().remove("timestamp");
         let events = vec![turn_context_line("gpt-5.6-sol", "2026-08-05T10:00:00Z"), e];
         let out = codex_fold_file(&events);
-        assert!(out["by_date_model"].as_object().unwrap().is_empty());
+        assert!(out["by_hour_model"].as_object().unwrap().is_empty());
         let sol = bucket_of(&out, "gpt-5.6-sol", "standard");
         assert_eq!(sol["uncached_input_tokens"], json!(100));
     }
@@ -1038,19 +1087,19 @@ mod tests {
         let fb = codex_fold_file(&[turn_context_line("m1", "2026-08-01T00:00:00Z"),
             token_count_line("2026-08-01T00:00:01Z", (20, 2, 0, 0, 0, 22), (20, 2, 0, 0, 0, 22))]);
         let merged = codex_merge_folds(&[fa, fb]);
-        let dates: Vec<&str> = merged["by_date_model"].as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(dates, vec!["2026-08-01", "2026-08-05"]);
+        let hours: Vec<&str> = merged["by_hour_model"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(hours, vec!["2026-08-01T00", "2026-08-05T00"]);
         let bm = merged["by_model"]["m1"]["standard"].as_object().unwrap();
         assert_eq!(bm["uncached_input_tokens"], json!(30));
         assert_eq!(bm["output_tokens"], json!(3));
     }
 
     #[test]
-    fn by_model_from_dates_reprojects_and_reconciles() {
-        // 回归（真实 defect）：codex-cost --month 过滤日期轴后，旧代码拿
+    fn by_model_from_hours_reprojects_and_reconciles() {
+        // 回归（真实 defect）：codex-cost --month 过滤时间轴后，旧代码拿
         // codex_merge_folds 折回 by_model——但 merge 只读 fold 的 by_model 字段、
-        // 不读 by_date_model，得到空模型轴，整份月报告静默变全零。本测试钉住
-        // 重算：全部样本带日期时 by_model_from_dates == merge 的 by_model。
+        // 不读时间轴，得到空模型轴，整份月报告静默变全零。本测试钉住
+        // 重算：全部样本带时间时 by_model_from_hours == merge 的 by_model。
         let events = vec![
             turn_context_line("gpt-5.6-terra", "2026-07-15T09:00:00Z"),
             token_count_line("2026-07-15T09:00:01Z", (100, 20, 30, 5, 2, 155), (100, 20, 30, 5, 2, 155)),
@@ -1060,32 +1109,27 @@ mod tests {
             token_count_line("2026-08-01T00:00:01Z", (100, 10, 40, 10, 2, 160), (100, 10, 40, 10, 2, 160)),
         ];
         let fold = codex_fold_file(&events);
-        // 全部带日期 → 无 untimed → 两投影严格相等（键序也一致：跨日期首现序
+        // 全部带时间 → 无 untimed → 两投影严格相等（键序也一致：跨小时首现序
         // terra → luna → sol，与 merge 的 fold 首现序相同）。
-        let reproj = codex_by_model_from_dates(&fold["by_date_model"]);
+        let reproj = codex_by_model_from_hours(&fold["by_hour_model"], None);
         assert_eq!(reproj, fold["by_model"]);
         assert_eq!(
             reproj.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),
             vec!["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"],
         );
 
-        // 月份过滤后重算：只有 07 的 terra/luna（08 的 sol 被丢），模型轴随之缩小。
-        let mut filtered = serde_json::Map::new();
-        for (d, v) in fold["by_date_model"].as_object().unwrap() {
-            if d.starts_with("2026-07") {
-                filtered.insert(d.clone(), v.clone());
-            }
-        }
-        let jul = codex_by_model_from_dates(&Value::Object(filtered));
+        // 月份过滤后重算（prefix 过滤）：只有 07 的 terra/luna（08 的 sol 被丢），
+        // 模型轴随之缩小。
+        let jul = codex_by_model_from_hours(&fold["by_hour_model"], Some("2026-07"));
         assert_eq!(jul["gpt-5.6-terra"], fold["by_model"]["gpt-5.6-terra"]);
         assert_eq!(jul["gpt-5.6-luna"], fold["by_model"]["gpt-5.6-luna"]);
         assert!(jul.get("gpt-5.6-sol").is_none(), "过滤掉的日期必须从模型轴消失");
     }
 
     #[test]
-    fn by_model_from_dates_drops_untimed_samples() {
-        // 无日期样本（timestamp 缺失）只有 by_model 有、by_date_model 没有：
-        // 月份过滤重算时它按设计被丢弃（无日期可归月），不会出现在重算结果里。
+    fn by_model_from_hours_drops_untimed_samples() {
+        // 无时间样本（timestamp 缺失）只有 by_model 有、by_hour_model 没有：
+        // 过滤重算时它按设计被丢弃（无时间可归），不会出现在重算结果里。
         let mut e = token_count_line(
             "2026-08-05T10:00:01Z",
             (100, 10, 0, 0, 0, 110),
@@ -1097,8 +1141,55 @@ mod tests {
             e,
         ]);
         assert!(!fold["by_model"].as_object().unwrap().is_empty());
-        assert!(fold["by_date_model"].as_object().unwrap().is_empty());
-        let reproj = codex_by_model_from_dates(&fold["by_date_model"]);
+        assert!(fold["by_hour_model"].as_object().unwrap().is_empty());
+        let reproj = codex_by_model_from_hours(&fold["by_hour_model"], None);
         assert!(reproj.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn aggregate_hours_merges_to_dates_and_preserves_order() {
+        // 小时桶 → 日期桶：同一小时聚合、不同小时按日归并，日期升序。这是
+        // codex_cost_report 的 LC 判定粒度锚点（单日聚合桶判 longContext）。
+        let by_hour = json!({
+            "2026-08-05T10": {
+                "gpt-5.6-sol": {
+                    "standard": {
+                        "uncached_input_tokens": 100, "output_tokens": 10,
+                        "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "reasoning_output_tokens": 0,
+                    }
+                }
+            },
+            "2026-08-05T11": {
+                "gpt-5.6-sol": {
+                    "standard": {
+                        "uncached_input_tokens": 50, "output_tokens": 5,
+                        "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "reasoning_output_tokens": 0,
+                    }
+                }
+            },
+            "2026-08-06T09": {
+                "gpt-5.6-terra": {
+                    "standard": {
+                        "uncached_input_tokens": 200, "output_tokens": 20,
+                        "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "reasoning_output_tokens": 0,
+                    }
+                }
+            },
+        });
+        let agg = codex_aggregate_hours(&by_hour);
+        let obj = agg.as_object().unwrap();
+        // 日期升序：08-05 先于 08-06。
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["2026-08-05", "2026-08-06"]);
+        // 08-05 的两个小时桶合并：uncached 100+50=150。
+        let d5 = &obj["2026-08-05"]["gpt-5.6-sol"]["standard"];
+        assert_eq!(d5["uncached_input_tokens"], json!(150));
+        assert_eq!(d5["output_tokens"], json!(15));
+        // 非对象 / 空输入 → 空对象。
+        assert!(codex_aggregate_hours(&json!(null)).as_object().unwrap().is_empty());
+        assert!(codex_aggregate_hours(&json!({})).as_object().unwrap().is_empty());
     }
 }

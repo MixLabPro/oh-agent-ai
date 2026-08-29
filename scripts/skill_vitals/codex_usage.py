@@ -6,9 +6,12 @@
 `tests/test_cli_matrix.py::both("codex-cost", ...)` 差分看守：Py↔Rust 的 `--json` 输出
 必须一字不差。
 
-与 DSH `usage.py::token_by_model` 的区别（为什么不能复用）：DSH 的 4 桶 +
-peak/off-peak 按模型分桶，Codex 是 5 桶 + speed 分桶 + 按 `total_token_usage` 签名
-去重——线格式与计价维度都不同。这里是独立折叠，不是给成本引擎套壳。
+与 DSH `usage.rs::token_by_date_model` / `usage.py` 的区别（为什么不能复用）：
+DSH 的 4 桶 + peak/off-peak 按模型分桶，Codex 是 5 桶 + speed 分桶 + 按
+`total_token_usage` 签名去重——线格式与计价维度都不同。这里是独立折叠，不是给
+成本引擎套壳。**时间轴粒度与 DSH 同一纪律**（统一多桶折叠契约，见
+docs/UNIFIED_COST_VIEW.md）：`by_hour_model` 是小时桶——today 直接显示小时，
+month/all 由小时聚合成天。不是"codex 天生只有天"，是统一范式要求补全小时桶。
 """
 
 CODEX_TOKEN_FIELDS = [
@@ -148,21 +151,23 @@ def _combine_plan(new_p, prev):
     }
 
 
-def codex_date_of(event):
-    """事件时间戳 → `YYYY-MM-DD` 前缀。顶层 `timestamp` 回退 `payload.timestamp`；
-    不是 `YYYY-MM-DD` 开头 → None（未知时间，不编造日期）。"""
+def codex_hour_of(event):
+    """事件时间戳 → `YYYY-MM-DDTHH` 小时桶键（统一多桶折叠：时间轴小时粒度，与
+    DSH `usage.rs::token_by_date_model` 同一条纪律）。顶层 `timestamp` 回退
+    `payload.timestamp`；不是合法小时时间戳 → None（未知时间，不编造）。"""
     ts = event.get("timestamp")
     if not isinstance(ts, str):
         payload = event.get("payload")
         if isinstance(payload, dict):
             ts = payload.get("timestamp")
-    if not isinstance(ts, str) or len(ts) < 10:
+    if not isinstance(ts, str) or len(ts) < 13:
         return None
-    date, _, _ = ts[:10].partition("-")
-    # YYYY-MM-DD 结构校验（与 Rust 侧 `codex_date_of` 同一条判定）。
-    if not (date.isdigit() and ts[4] == "-" and ts[7] == "-"):
+    # YYYY-MM-DDTHH 结构校验（与 Rust 侧 `codex_hour_of` 同一条判定）。
+    if not (ts[4] == "-" and ts[7] == "-" and ts[10] == "T"
+            and ts[:4].isdigit() and ts[5:7].isdigit()
+            and ts[8:10].isdigit() and ts[11:13].isdigit()):
         return None
-    return ts[:10]
+    return ts[:13]
 
 
 def normalize_speed(tier):
@@ -215,7 +220,7 @@ def _bump_unaccounted(unaccounted, ttype, total_tokens):
 
 
 def codex_fold_file(events):
-    """单文件有序折叠：一份 rollout 的原始条目流 → `{by_date_model, by_model,
+    """单文件有序折叠：一份 rollout 的原始条目流 → `{by_hour_model, by_model,
     unaccounted, plan}`。纯函数，不碰文件系统——I/O 在适配器层。
 
     `plan` = 最后看见的有效 rate_limits 快照（含 observed_at；没见过 → None，
@@ -223,14 +228,14 @@ def codex_fold_file(events):
     事件仍带 rate_limits）。`limits` 是「最后看见的非空限额」——新事件的降级快照
     （primary/secondary 全 null）不抹掉上一次的限额（见 `_combine_plan`）。
 
-    输出顺序：日期升序、模型/速度按首现序、`unaccounted` 按 type 名升序。这些
+    输出顺序：小时升序、模型/速度按首现序、`unaccounted` 按 type 名升序。这些
     顺序是字节一致的一部分（Rust 侧 BTreeMap 排序、serde_json Map 插入序对齐）。
     """
     model = None
     speed = "standard"
     last_total_sig = None
     plan = None
-    by_date_model = {}
+    by_hour_model = {}
     by_model = {}
     unaccounted = {}
 
@@ -294,57 +299,57 @@ def codex_fold_file(events):
                     _bump_unaccounted(unaccounted, "token_count_before_turn_context",
                                       total_tokens)
                     continue
-                date = codex_date_of(event)
-                if date is not None:
-                    _add_bucket(by_date_model.setdefault(date, {}), model, speed, facts)
+                hour = codex_hour_of(event)
+                if hour is not None:
+                    _add_bucket(by_hour_model.setdefault(hour, {}), model, speed, facts)
                 _add_bucket(by_model, model, speed, facts)
 
-    # 日期升序：与 Rust 侧 BTreeMap 对齐（单文件里本是时间序，但排序保证任意
+    # 小时升序：与 Rust 侧 BTreeMap 对齐（单文件里本是时间序，但排序保证任意
     # 输入顺序下两侧仍逐字节一致）。
-    by_date_out = {}
-    for d in sorted(by_date_model):
-        by_date_out[d] = by_date_model[d]
+    by_hour_out = {}
+    for h in sorted(by_hour_model):
+        by_hour_out[h] = by_hour_model[h]
     unaccounted_out = [
         {"type": t, "count": v["count"], "tokens_seen": v["tokens_seen"]}
         for t, v in sorted(unaccounted.items())
     ]
-    return {"by_date_model": by_date_out, "by_model": by_model,
+    return {"by_hour_model": by_hour_out, "by_model": by_model,
             "unaccounted": unaccounted_out, "plan": plan}
 
 
 def codex_merge_folds(folds):
     """跨文件合并：多个 `codex_fold_file` 的结果逐桶求和。纯函数。
 
-    顺序确定性（字节一致的一部分）：日期**全局升序**（先收集全部日期排序，再按序
-    遍历——跨文件时插入序不可靠）；每个日期内的模型、速度按**跨文件首现序**（按
+    顺序确定性（字节一致的一部分）：小时**全局升序**（先收集全部小时排序，再按序
+    遍历——跨文件时插入序不可靠）；每个小时内的模型、速度按**跨文件首现序**（按
     folds 顺序）。`by_model` 按 folds 顺序。`unaccounted` 按 type 名升序求和。
     `plan` 取 `observed_at` 最大者（各会话的配额快照不同，选「最新」的那个；平手
     先见者赢——按 folds 顺序，确定性）；`limits` 单独取「最后看见的非空限额」——
     最新快照是降级形态（primary/secondary 全 null）时不抹掉配额条（见
     `_combine_plan`，与单文件折叠同一语义）。
     """
-    all_dates = set()
+    all_hours = set()
     for fold in folds:
-        bd = fold.get("by_date_model")
-        if isinstance(bd, dict):
-            all_dates.update(bd.keys())
+        bh = fold.get("by_hour_model")
+        if isinstance(bh, dict):
+            all_hours.update(bh.keys())
 
-    by_date_out = {}
-    for d in sorted(all_dates):
-        date_map = {}
+    by_hour_out = {}
+    for h in sorted(all_hours):
+        hour_map = {}
         for fold in folds:
-            bd = fold.get("by_date_model")
-            if not isinstance(bd, dict):
+            bh = fold.get("by_hour_model")
+            if not isinstance(bh, dict):
                 continue
-            models = bd.get(d)
+            models = bh.get(h)
             if not isinstance(models, dict):
                 continue
             for m, speeds in models.items():
                 if not isinstance(speeds, dict):
                     continue
                 for spd, bucket in speeds.items():
-                    _add_bucket(date_map, m, spd, _bucket_to_array(bucket))
-        by_date_out[d] = date_map
+                    _add_bucket(hour_map, m, spd, _bucket_to_array(bucket))
+        by_hour_out[h] = hour_map
 
     by_model = {}
     for fold in folds:
@@ -396,31 +401,62 @@ def codex_merge_folds(folds):
                 limits_plan = p
     if plan_out is not None and limits_plan is not None:
         plan_out = _combine_plan(plan_out, limits_plan)
-    return {"by_date_model": by_date_out, "by_model": by_model,
+    return {"by_hour_model": by_hour_out, "by_model": by_model,
             "unaccounted": unaccounted_out, "plan": plan_out}
 
 
-def codex_by_model_from_dates(by_date_model):
-    """日期轴投影 → 模型轴投影：`by_date_model`（{date:{model:{speed:桶}}}）逐桶
-    求和折回 `by_model`（{model:{speed:桶}}）。模型/速度按**跨日期首现序**（日期
-    已升序，逐日期插入即首现序），与 `codex_fold_file` 的模型轴同一约定。
+def codex_aggregate_hours(by_hour_model):
+    """时间轴小时桶 → 日期桶：`by_hour_model`（{hour:{model:{speed:桶}}}）逐小时
+    求和折回 `by_date_model`（{date:{model:{speed:桶}}}）。小时键 `YYYY-MM-DDTHH`
+    取前 10 位成日期；日期升序（小时已升序，逐小时插入即升序）。
 
-    踩过的坑：`codex-cost --month` 过滤日期轴后，by_model 必须**重算**——过滤掉了
-    哪些日期，模型轴就必须同样丢掉那些 token，否则 per_model 里残留被过滤日期的
-    用量，days 与 per_model 对不上（守恒测试红）。一开始想当然拿 `codex_merge_folds`
-    把过滤后的 by_date_model "折回去"，但 merge 的 by_model **只读各 fold 的
-    `by_model` 字段**、从不读 by_date_model，传 `{"by_model": {}}` 得到的是空模型轴
-    ——整份月报告静默变全零（per_model 空 + unpriced 0 → 返回 None → 全零兜底），
-    一个「看不见的错」。重算不是新数据：`by_model == Σ 各日期桶`（同一折叠的两投影，
-    usage.rs 日期轴守恒同款纪律），无日期样本没有日期桶、被月份过滤按设计丢弃。
+    **longContext 判定的粒度锚点**：`codex_cost_report` 按**单日聚合桶**判 LC
+    （"这一次请求的上下文超窗"按日看），不按小时桶——小时桶拆开会把一日的大请求
+    摊薄成不触发的小桶（踩过的坑：合并桶又会让多日小请求累加成假超窗）。所以
+    hour 折叠 → date 聚合 → 按日计价是必须的投影，不是可选的便利。
     """
     out = {}
-    if not isinstance(by_date_model, dict):
+    if not isinstance(by_hour_model, dict):
         return out
-    for _date, date_map in by_date_model.items():
-        if not isinstance(date_map, dict):
+    for h, hour_map in by_hour_model.items():
+        date = h[:10]
+        date_map = out.setdefault(date, {})
+        if not isinstance(hour_map, dict):
             continue
-        for m, speeds in date_map.items():
+        for m, speeds in hour_map.items():
+            if not isinstance(speeds, dict):
+                continue
+            for spd, bucket in speeds.items():
+                _add_bucket(date_map, m, spd, _bucket_to_array(bucket))
+    return out
+
+
+def codex_by_model_from_hours(by_hour_model, prefix=None):
+    """时间轴投影 → 模型轴投影：`by_hour_model`（{hour:{model:{speed:桶}}}）逐桶
+    求和折回 `by_model`（{model:{speed:桶}}）。模型/速度按**跨小时首现序**（小时
+    已升序，逐小时插入即首现序），与 `codex_fold_file` 的模型轴同一约定。
+
+    `prefix`（可选）按小时键前缀过滤：`--today` 传 `YYYY-MM-DD`、`--month` 传
+    `YYYY-MM`（小时键 `YYYY-MM-DDTHH` 用 `startswith` 匹配）。
+
+    踩过的坑：`codex-cost --month` 过滤时间轴后，by_model 必须**重算**——过滤掉了
+    哪些小时，模型轴就必须同样丢掉那些 token，否则 per_model 里残留被过滤时间的
+    用量，days 与 per_model 对不上（守恒测试红）。一开始想当然拿 `codex_merge_folds`
+    把过滤后的时间轴 "折回去"，但 merge 的 by_model **只读各 fold 的 `by_model`
+    字段**、从不读时间轴，传 `{"by_model": {}}` 得到的是空模型轴——整份月报告静默
+    变全零（per_model 空 + unpriced 0 → 返回 None → 全零兜底），一个「看不见的错」。
+    重算不是新数据：`by_model == Σ 各小时桶`（同一折叠的两投影，usage.rs 时间轴
+    守恒同款纪律），无时间样本没有小时桶、被过滤按设计丢弃。
+    """
+    out = {}
+    if not isinstance(by_hour_model, dict):
+        return out
+    for h, hour_map in by_hour_model.items():
+        if prefix is not None and not h.startswith(prefix):
+            continue
+        if not isinstance(hour_map, dict):
+            continue
+        for m, speeds in hour_map.items():
             if not isinstance(speeds, dict):
                 continue
             for spd, bucket in speeds.items():

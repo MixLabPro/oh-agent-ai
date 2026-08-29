@@ -218,22 +218,23 @@ def self_check():
     assert sol_bm["cache_write_input_tokens"] == 10000 + 30000, sol_bm
     assert sol_bm["output_tokens"] == 10000 + 60000, sol_bm
     assert sol_bm["reasoning_output_tokens"] == 2000 + 6000, sol_bm
-    # 去重：整段复读 + 清零复读都被跳过 → 只有 2 个真桶（08-01、08-02）
-    assert set(sol_fold["by_date_model"].keys()) == {"2026-08-01", "2026-08-02"}, sol_fold["by_date_model"]
+    # 去重：整段复读 + 清零复读都被跳过 → 只有 2 个真桶（08-01、08-02 各一小时）。
+    # 时间轴是小时桶（统一多桶折叠契约，见 docs/UNIFIED_COST_VIEW.md）。
+    assert set(sol_fold["by_hour_model"].keys()) == {"2026-08-01T00", "2026-08-02T00"}, sol_fold["by_hour_model"]
     # unaccounted 两条，type 升序
     ua = sol_fold["unaccounted"]
     assert [u["type"] for u in ua] == ["token_count_before_turn_context", "token_count_invalid_last_usage"], ua
     assert ua[0]["count"] == 1 and ua[0]["tokens_seen"] == 1100, ua
     assert ua[1]["count"] == 1 and ua[1]["tokens_seen"] == 670, ua
     # 计价：逐桶（含 longContext）
-    d1 = sol_fold["by_date_model"]["2026-08-01"]["gpt-5.6-sol"]["standard"]
-    d2 = sol_fold["by_date_model"]["2026-08-02"]["gpt-5.6-sol"]["standard"]
+    d1 = sol_fold["by_hour_model"]["2026-08-01T00"]["gpt-5.6-sol"]["standard"]
+    d2 = sol_fold["by_hour_model"]["2026-08-02T00"]["gpt-5.6-sol"]["standard"]
     _expect_cost(d1, 0.6325)
     _expect_cost(d2, 4.425)
 
     terra_fold = _fold_file(TERRA_ROLLOUT)
-    assert set(terra_fold["by_date_model"].keys()) == {"2026-07-15"}
-    assert set(terra_fold["by_date_model"]["2026-07-15"].keys()) == {"gpt-5.6-terra", "gpt-5.6-luna"}
+    assert set(terra_fold["by_hour_model"].keys()) == {"2026-07-15T09"}
+    assert set(terra_fold["by_hour_model"]["2026-07-15T09"].keys()) == {"gpt-5.6-terra", "gpt-5.6-luna"}
 
     up_fold = _fold_file(UNPRICED_ROLLOUT)
     assert up_fold["by_model"]["codex-auto-review"]["standard"]["uncached_input_tokens"] == 5000

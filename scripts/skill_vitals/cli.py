@@ -126,6 +126,161 @@ def _doctor_gate(out, args, auto_snapshot, baseline):
     return code
 
 
+def _codex_rollout_signature(files):
+    """rollout 文件清单 → 折叠缓存签名 `[(path, size, mtime_ns), ...]`。
+
+    排序保证确定性（`codex_rollout_files` 本身有序，但签名是独立契约）。
+    `st_mtime_ns` 纳秒级——内容被追加/替换必然改变（用 `touch -r` 伪造同
+    mtime 是对抗性的，不在折叠缓存的威胁模型里；真机复读同一文件靠
+    `codex_fold_file` 的 total 签名去重兜底，缓存只在文件**没变**时命中）。
+    签名用**list 而非 tuple**：JSON 序列化后 tuple 变 list，读回时
+    `tuple != list` 恒不等，缓存永远不会命中（上面这个 bug 就是那一步踩的）。
+    """
+    return [
+        [str(p), p.stat().st_size, p.stat().st_mtime_ns]
+        for p in sorted(files, key=lambda p: str(p))
+    ]
+
+
+def _codex_fold_cache_path():
+    """折叠缓存文件路径（`$SKILL_VITALS_HOME/cache/codex-fold.json`）。
+
+    `state.cache_dir()` 建目录失败（只读文件系统）会抛 —— 调用方捕获后
+    直接重扫，缓存是性能优化不是正确性依赖。
+    """
+    return state_module.cache_dir() / "codex-fold.json"
+
+
+def _read_codex_fold_cache(signature):
+    """读缓存：签名全等 + 能解析 → fold；否则 None（当没有缓存）。
+
+    JSON 解析失败（崩溃留下半文件）或字段缺失 → None → 重扫自愈。返回的
+    fold 与重扫结果逐字节相同（纯 memo），差分门不受命中与否影响。
+    """
+    path = _codex_fold_cache_path()
+    if not path.is_file():
+        return None
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if cached.get("version") != 1 or cached.get("signature") != signature:
+        return None
+    fold = cached.get("fold")
+    return fold if isinstance(fold, dict) else None
+
+
+def _write_codex_fold_cache(signature, merged):
+    """原子写折叠缓存：先写 `.tmp` 再 `os.replace`，崩溃留半文件 → 下次读
+    JSON 解析失败 → 当没有缓存重扫（自愈）。任何失败都吞掉——缓存写不进去
+    只意味着下次重扫，不改变输出。"""
+    path = _codex_fold_cache_path()
+    payload = json.dumps(
+        {"version": 1, "signature": signature, "fold": merged},
+        ensure_ascii=False)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def codex_fold_merged(use_cache=True):
+    """扫描所有 codex rollout（live + archived）→ 逐文件折叠 → 合并成一份 fold。
+
+    codex-cost handler 与 `_render_calendar_html`/`_render_codex_cost_html`
+    （统一看板）共用同一份——看板要出 3 个视图（today/month/all），折叠只跑
+    一遍。两处各写一遍就会有一处忘了「过滤后按模型重算」的 defect
+    （`codex_by_model_from_hours`，见 `codex_cost_report` 文档）。
+
+    瓶颈是**解析**不是折叠（真机 51 份 rollout ≈ 600MB JSONL ≈ 38s，单份
+    210MB 解析 16s、折叠 0.04s）——日历/oneline 每次刷新都重扫会砸穿 xbar
+    tick（`docs/UNIFIED_COST_VIEW.md` 的 `$STATE_DIR` 快照延迟项，现在兑现）。
+    这里做**整折叠 memo**：签名 = (path, size, mtime_ns) 全等则命中，不等则
+    重扫并原子覆写。纯 memo——命中与否输出逐字节相同，差分门不受影响。
+    """
+    from skill_vitals.adapters import codex_session
+    files = codex_session.codex_rollout_files()
+    if use_cache:
+        try:
+            sig = _codex_rollout_signature(files)
+            cached = _read_codex_fold_cache(sig)
+            if cached is not None:
+                return cached
+        except OSError:
+            # 目录建不出来/stat 失败 —— 当没有缓存，直接重扫。
+            sig = None
+    else:
+        sig = None
+    folds = []
+    for path in files:
+        parsed = codex_session.read_codex_session_log(path)
+        items = parsed["items"] if isinstance(parsed.get("items"), list) else []
+        folds.append(codex_usage_module.codex_fold_file(items))
+    merged = codex_usage_module.codex_merge_folds(folds)
+    if sig is not None:
+        _write_codex_fold_cache(sig, merged)
+    return merged
+
+
+def codex_report_from_merged(merged, filter_key, month_out, want_hours):
+    """从已折叠合并的 fold 出一个 `--json` 报告 dict（host/currency/month/today
+    外层包装 + report 键）。filter_key=None 不过滤（all 视图）；`--today` 时
+    want_hours=True（小时热力图数据）。空折叠给全零结构而不是 None——调用方
+    要的是「没有数据」而不是「崩了」，且包装是固定契约（unaccounted/plan
+    必须透传，它们无时间归属、不随月过滤）。
+    """
+    by_hour_model = merged["by_hour_model"]
+    by_model = merged["by_model"]
+    if filter_key:
+        by_hour_model = {h: bm for h, bm in by_hour_model.items()
+                         if h.startswith(filter_key)}
+        # 重算模型轴：merge 的 by_model 只读 fold 的 by_model 字段，不读
+        # by_hour_model——拿 merge 折回去得到的是空模型轴（真实 defect：
+        # --month 整份报告静默变全零）。codex_by_model_from_hours 把过滤后
+        # 的小时桶求和折回 by_model（守恒：sum(days) == total_cost_usd）。
+        by_model = codex_usage_module.codex_by_model_from_hours(by_hour_model)
+    pricing = codex_cost_module.load_codex_pricing()
+    report = codex_cost_module.codex_cost_report(
+        by_hour_model, by_model, merged["unaccounted"], merged["plan"],
+        pricing, want_hours=want_hours)
+    if report is None:
+        report = {
+            "total_cost_usd": 0,
+            "total_tokens": {f: 0 for f in codex_usage_module.CODEX_TOKEN_FIELDS},
+            "per_model": {}, "days": [], "unpriced_tokens": 0,
+            "unaccounted_usage": merged["unaccounted"],
+            "plan": merged["plan"],
+        }
+        if want_hours:
+            report["hours"] = []
+    out = {"host": "codex", "currency": "USD", "month": month_out,
+           "today": codex_cost_module.today_beijing()}
+    out.update(report)
+    return out
+
+
+def codex_calendar_blob(merged, month_key, month_out, default):
+    """统一看板内联的 codex 规范单块（docs/UNIFIED_COST_VIEW.md 的 1 号宿主
+    契约）：{host, currency, today, default, views:{today,month,all}}。每个 view
+    即 `codex_report_from_merged` 的一个报告。today 视图 want_hours=True；
+    month 视图用调用方给的 month_key/month_out（统一看板 = 当前月，codex-cost
+    --html = 请求月）；all 视图不过滤。default = 无 `?file=` 时打开的视图。
+    """
+    today = codex_cost_module.today_beijing()
+    views = {
+        "today": codex_report_from_merged(merged, today, today[:7], True),
+        "month": codex_report_from_merged(merged, month_key, month_out, False),
+        "all": codex_report_from_merged(merged, None, None, False),
+    }
+    return {"host": "codex", "currency": "USD", "today": today,
+            "default": default, "views": views}
+
+
 def _render_calendar_html(output_path, default_source="month"):
     """把 today.json / month.json 渲染成单文件日历 HTML，写到 output_path。
 
@@ -227,9 +382,34 @@ def _render_calendar_html(output_path, default_source="month"):
         if sidecar.resolve() != src.resolve():
             sidecar.write_text(json_text, encoding="utf-8")
         embedded.append(mode)
+    # ── codex 1 号宿主内联块（统一看板）─────────────────────────────────
+    # 规范化单块 {host, currency, today, default, views:{today,month,all}}
+    #（docs/UNIFIED_COST_VIEW.md）。与 DSH 双块并列内联，让跨宿主今日总览
+    # 一打开就有两张宿主卡。**扫描失败时降级**：不内联该块，codex host 落
+    # JS 的 empty-state，DSH 渲染不受影响（codex 只是新增宿主，不能拖垮
+    # 既有看板）。default="month"（当前月）——与 DSH 的 default_source 同构。
+    try:
+        codex_merged = codex_fold_merged()
+        codex_blob = codex_calendar_blob(
+            codex_merged,
+            codex_cost_module.current_month_beijing(),
+            codex_cost_module.current_month_beijing(),
+            "month")
+        codex_json = json.dumps(codex_blob, ensure_ascii=False)
+        codex_safe = (codex_json.replace("</script", "<\\/script")
+                      .replace("<!--", "<\\!--"))
+        codex_inject = ("<script id=\"skill-vitals-data-codex\" "
+                        "type=\"application/json\">" + codex_safe + "</script>")
+        html = html.replace("</head>", codex_inject + "\n</head>", 1)
+    except Exception:
+        # 降级路径：不内联 codex 块。不静默吞异常——至少标一句，不然真挂了
+        # 会被当成「用户今天没 codex 数据」，和「扫崩了」长得一样（同一原则
+        # 见 ARCHITECTURE §6.2 的退出码语义）。
+        sys.stderr.write("warning: codex 会话扫描失败，跳过 codex 视图内联\n")
     html = html.replace(
         "</head>",
-        "<script>window.SKILL_VITALS_DEFAULT_MODE = %r;</script>\n</head>"
+        "<script>window.SKILL_VITALS_DEFAULT_MODE = %r;</script>\n"
+        "<script>window.SKILL_VITALS_DEFAULT_HOST = 'dsh';</script>\n</head>"
         % default_source, 1)
     out.write_text(html, encoding="utf-8")
     return embedded, out
@@ -372,26 +552,29 @@ def _render_codex_roots(report):
     return "".join(parts)
 
 
-def _render_codex_cost_html(output_path, data):
-    """把 `codex-cost` 的 report dict（`--json` 输出的同一份）渲染成单文件仪表盘。
+def _render_codex_cost_html(output_path, merged, month_key, month_out, default):
+    """`codex-cost --html`：复用统一看板模板 calendar.html（退役独立
+    codex_cost.html——一套视觉模板，不是两套，见 docs/UNIFIED_COST_VIEW.md）。
 
-    镜像 `_render_calendar_html` 的注入模式：模板 `templates/codex_cost.html` 是
-    自包含单文件（内联 CSS/JS、零网络），JSON 经 `</script`/`<!--` 转义后塞进
-    `<script id="skill-vitals-data-codex">` 块。**JS 只渲染 server 已算好的
-    per_model / days / total_cost_usd**——模板不内嵌价格表，计价永远只有
+    只内联 codex 块 + `SKILL_VITALS_DEFAULT_HOST='codex'`，不内联 DSH 块
+    （codex-cost 是 codex 视角的看板；`_render_calendar_html` 才是跨宿主看板）。
+    块内视图用调用方给的 month_key/month_out（请求月 / 当前月 / all），
+    default 决定无 `?file=` 时打开的 tab。**JS 只渲染 server 已算好的
+    per_model / days / cost**——模板不内嵌价格表，计价永远只有
     `codex_cost_report` 一处（JS 里再放一份价格就是第四份副本，同 calendar 的
     `_augment_calendar_cost` 想消灭的漂移）。Rust 侧 `render_codex_cost_html`
     做同一件事（模板用 include_str 内嵌、注入逻辑同构；HTML 文件不参与差分，
     只需两边产出等价可解析的页面）。
     """
-    template = Path(__file__).resolve().parent / "templates" / "codex_cost.html"
+    template = Path(__file__).resolve().parent / "templates" / "calendar.html"
     if not template.is_file():
         raise FileNotFoundError(
-            "codex_cost template not found at %s" % template)
+            "calendar template not found at %s (run M4 first)" % template)
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     html = template.read_text(encoding="utf-8")
-    json_text = json.dumps(data, ensure_ascii=False)
+    blob = codex_calendar_blob(merged, month_key, month_out, default)
+    json_text = json.dumps(blob, ensure_ascii=False)
     # JSON 里可能含 </script> / <!-- —— 必须转义，否则浏览器解析到这就崩
     # （与 _render_calendar_html 同一条铁律）。
     json_text_safe = (json_text.replace("</script", "<\\/script")
@@ -399,6 +582,9 @@ def _render_codex_cost_html(output_path, data):
     inject = ("<script id=\"skill-vitals-data-codex\" type=\"application/json\">"
               + json_text_safe + "</script>")
     html = html.replace("</head>", inject + "\n</head>", 1)
+    html = html.replace(
+        "</head>",
+        "<script>window.SKILL_VITALS_DEFAULT_HOST = 'codex';</script>\n</head>", 1)
     out.write_text(html, encoding="utf-8")
 
 
@@ -808,22 +994,13 @@ def _main():
 
     # Codex 成本折叠 + 计价（cc-trace 研究 §D 落地）。与 Rust 侧 main.rs 的
     # CodexCost 子命令同一种结构。无状态单次调用：扫 rollout → 折叠 →
-    # 计价 → 文本/JSON/HTML 三路。`--month` 过滤日期轴后**重算** by_model
-    # （codex_by_model_from_dates 把过滤后的 by_date 求和折回模型轴，不是
+    # 计价 → 文本/JSON/HTML 三路。时间轴是**小时桶**（统一多桶折叠契约，见
+    # docs/UNIFIED_COST_VIEW.md）。`--month` 过滤小时轴后**重算** by_model
+    # （codex_by_model_from_hours 把过滤后的小时求和折回模型轴，不是
     # merge_folds——merge 只读 fold 的 by_model 字段，拿它折回去是空模型轴），
-    # 保证 days 与 per_model 对得上；unaccounted 无日期归属，跨月份保留（数据
-    # 质量哨兵，不参与归月）。
+    # 保证 days 与 per_model 对得上；unaccounted 无时间归属，跨月份保留（数据
+    # 质量哨兵，不参与归月）。`--today` 时报告带 `hours`（小时热力图数据）。
     if getattr(args, "cmd", None) == "codex-cost":
-        from skill_vitals.adapters import codex_session
-        folds = []
-        for path in codex_session.codex_rollout_files():
-            parsed = codex_session.read_codex_session_log(path)
-            items = parsed["items"] if isinstance(parsed.get("items"), list) else []
-            folds.append(codex_usage_module.codex_fold_file(items))
-        merged = codex_usage_module.codex_merge_folds(folds)
-        by_date_model = merged["by_date_model"]
-        by_model = merged["by_model"]
-        unaccounted = merged["unaccounted"]
         # `--today` 与 `--month` 互斥（Rust 侧 clap conflicts_with 同款；保持两侧
         # 对非法输入一致地报错，而不是今天静默赢）。
         if args.today and args.month:
@@ -846,34 +1023,9 @@ def _main():
             cur = codex_cost_module.current_month_beijing()
             filter_key = cur
             month_out = cur
-        if filter_key:
-            by_date_model = {d: bd for d, bd in by_date_model.items()
-                             if d.startswith(filter_key)}
-            # 重算模型轴：merge 的 by_model 只读 fold 的 by_model 字段，不读
-            # by_date_model——拿 merge 折回去得到的是空模型轴（真实 defect：
-            # --month 整份报告静默变全零）。codex_by_model_from_dates 把过滤后
-            # 的日期桶求和折回 by_model（守恒：sum(days) == total_cost_usd）。
-            by_model = codex_usage_module.codex_by_model_from_dates(by_date_model)
-        pricing = codex_cost_module.load_codex_pricing()
-        plan = merged["plan"]
-        report = codex_cost_module.codex_cost_report(
-            by_date_model, by_model, unaccounted, plan, pricing)
-        if report is None:
-            # 空折叠：没有任何 token 可计价。给一个全零的结构而不是 None——
-            # 调用方要的是「没有数据」而不是「崩了」，且 host/currency/month
-            # 包装是固定契约。**unaccounted/plan 必须透传**——它们是 fold 的
-            # 数据质量哨兵与配额快照，无日期归属、不随月过滤（Rust 侧同款透传；
-            # `--today` 命中空日时若只留 []，差分当场红，真实 defect）。
-            report = {
-                "total_cost_usd": 0,
-                "total_tokens": {f: 0 for f in codex_usage_module.CODEX_TOKEN_FIELDS},
-                "per_model": {}, "days": [], "unpriced_tokens": 0,
-                "unaccounted_usage": unaccounted,
-                "plan": plan,
-            }
-        out = {"host": "codex", "currency": "USD", "month": month_out,
-               "today": codex_cost_module.today_beijing()}
-        out.update(report)
+        merged = codex_fold_merged()
+        want_hours = bool(args.today)
+        out = codex_report_from_merged(merged, filter_key, month_out, want_hours)
         wrote = False
         if args.json:
             text = json.dumps(out, ensure_ascii=False, indent=2)
@@ -888,7 +1040,16 @@ def _main():
                 print("Wrote %s" % args.json)
             wrote = True
         if args.html:
-            _render_codex_cost_html(args.html, out)
+            # `--html` 复用统一看板模板（codex 视角）：default 随请求——请求月
+            # → "month"、全部 → "all"、今天 → "today"、无请求 → "month"。
+            if args.today:
+                default_view = "today"
+            elif args.month == "all":
+                default_view = "all"
+            else:
+                default_view = "month"
+            _render_codex_cost_html(args.html, merged,
+                                    filter_key, month_out, default_view)
             wrote = True
         if not wrote:
             print(codex_cost_module.render_codex_cost(out), end="")

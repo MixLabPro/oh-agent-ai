@@ -35,7 +35,6 @@ ALLOWED_PACKAGE_FILES = {
         "adapters/openclaw.py", "adapters/workbuddy.py", "adapters/hermes.py",
         "adapters/dsh.py",
         "templates/calendar.html",
-        "templates/codex_cost.html",
     )
 }
 ALLOWED_PACKAGE_DIRS = {Path("adapters"), Path("templates")}

@@ -53,8 +53,8 @@ from skill_vitals.duration import (  # noqa: E402
 )
 from skill_vitals.codex_evidence import codex_evidence_json, derive_coverage  # noqa: E402
 from skill_vitals.codex_usage import (  # noqa: E402
-    CODEX_TOKEN_FIELDS, codex_by_model_from_dates, codex_fold_file,
-    codex_merge_folds, codex_token_facts,
+    CODEX_TOKEN_FIELDS, codex_aggregate_hours, codex_by_model_from_hours,
+    codex_fold_file, codex_merge_folds, codex_token_facts,
 )
 from skill_vitals.codex_cost import (  # noqa: E402
     codex_cost_report, load_codex_pricing, render_codex_cost,
@@ -3018,10 +3018,10 @@ class CodexCostCharacterization(unittest.TestCase):
         self.assertEqual(bm["cached_input_tokens"], 190000)
         self.assertEqual(bm["cache_write_input_tokens"], 40000)
         self.assertEqual(bm["reasoning_output_tokens"], 8000)
-        # 去重 + `info: null` 跳过 → 只有 2 个真桶（08-01、08-02）。夹具里那条
-        # `info: null` 的 token_count（真实语料 08-19 形态）如果被误收进桶或误报
-        # unaccounted，这里的日期集合断言会当场红。
-        self.assertEqual(set(f["by_date_model"].keys()), {"2026-08-01", "2026-08-02"})
+        # 去重 + `info: null` 跳过 → 只有 2 个真桶（08-01、08-02 各一小时）。夹具里
+        # 那条 `info: null` 的 token_count（真实语料 08-19 形态）如果被误收进桶或误报
+        # unaccounted，这里的小时集合断言会当场红。时间轴是小时桶（统一多桶折叠契约）。
+        self.assertEqual(set(f["by_hour_model"].keys()), {"2026-08-01T00", "2026-08-02T00"})
         # 两条 unaccounted，type 升序（null-info 不增加第三条）
         ua = f["unaccounted"]
         self.assertEqual([u["type"] for u in ua],
@@ -3030,41 +3030,41 @@ class CodexCostCharacterization(unittest.TestCase):
         self.assertEqual(ua[1], {"type": "token_count_invalid_last_usage", "count": 1, "tokens_seen": 670})
 
     def test_fold_terra_switches_model_mid_file(self):
-        """terra 夹具：model 游标中途切换 → 同一天两个模型分桶。"""
+        """terra 夹具：model 游标中途切换 → 同一小时两个模型分桶。"""
         f = self._fold("rollout-terra.jsonl")
-        self.assertEqual(set(f["by_date_model"].keys()), {"2026-07-15"})
-        day = f["by_date_model"]["2026-07-15"]
-        self.assertEqual(set(day.keys()), {"gpt-5.6-terra", "gpt-5.6-luna"})
-        terra = day["gpt-5.6-terra"]["standard"]
+        self.assertEqual(set(f["by_hour_model"].keys()), {"2026-07-15T09"})
+        hour = f["by_hour_model"]["2026-07-15T09"]
+        self.assertEqual(set(hour.keys()), {"gpt-5.6-terra", "gpt-5.6-luna"})
+        terra = hour["gpt-5.6-terra"]["standard"]
         self.assertEqual([terra[k] for k in CODEX_TOKEN_FIELDS], [65000, 20000, 30000, 5000, 2000])
-        luna = day["gpt-5.6-luna"]["standard"]
+        luna = hour["gpt-5.6-luna"]["standard"]
         self.assertEqual([luna[k] for k in CODEX_TOKEN_FIELDS], [130000, 50000, 60000, 10000, 5000])
 
-    def test_by_model_from_dates_reconciles_and_filters(self):
-        """`--month` 过滤日期轴后 by_model 重算（真实 defect：旧实现拿
+    def test_by_model_from_hours_reconciles_and_filters(self):
+        """`--month` 过滤小时轴后 by_model 重算（真实 defect：旧实现拿
         codex_merge_folds 折回，merge 只读 fold 的 by_model 字段 → 空模型轴 →
-        整份月报告静默全零）。重算必须满足守恒：全部样本带日期时
-        `codex_by_model_from_dates(by_date_model) == by_model`（同一折叠的两投影），
-        月份过滤后等于对应日期桶之和，且无日期样本被按设计丢弃。"""
+        整份月报告静默全零）。重算必须满足守恒：全部样本带时间时
+        `codex_by_model_from_hours(by_hour_model) == by_model`（同一折叠的两投影），
+        月份过滤后等于对应小时桶之和，且无时间样本被按设计丢弃。"""
         folds = [self._fold("rollout-sol.jsonl"),
                  self._fold("rollout-terra.jsonl"),
                  self._fold("rollout-unpriced.jsonl")]
         merged = codex_merge_folds(folds)
-        # 无 untimed（三份夹具的 token_count 全带日期）→ 两投影逐字节相等
-        self.assertEqual(codex_by_model_from_dates(merged["by_date_model"]),
+        # 无 untimed（三份夹具的 token_count 全带时间）→ 两投影逐字节相等
+        self.assertEqual(codex_by_model_from_hours(merged["by_hour_model"]),
                          merged["by_model"])
         # --month 2026-08：terra/luna（07-15）出局，模型轴只剩 sol + auto-review
-        aug = {d: bd for d, bd in merged["by_date_model"].items()
-               if d.startswith("2026-08")}
-        recomputed = codex_by_model_from_dates(aug)
+        aug = {h: bm for h, bm in merged["by_hour_model"].items()
+               if h.startswith("2026-08")}
+        recomputed = codex_by_model_from_hours(aug)
         self.assertEqual(set(recomputed.keys()), {"gpt-5.6-sol", "codex-auto-review"})
         self.assertEqual(recomputed["gpt-5.6-sol"]["standard"]["uncached_input_tokens"],
                          50000 + 120000)
         self.assertEqual(recomputed["codex-auto-review"]["standard"]["output_tokens"], 1000)
-        # 守恒：重算后的模型轴 == 过滤后日期桶之和（逐桶）
+        # 守恒：重算后的模型轴 == 过滤后小时桶之和（逐桶）
         total = [0] * 5
-        for bd in aug.values():
-            for speeds in bd.values():
+        for bm in aug.values():
+            for speeds in bm.values():
                 for bucket in speeds.values():
                     for i, f in enumerate(CODEX_TOKEN_FIELDS):
                         total[i] += bucket.get(f, 0)
@@ -3098,14 +3098,14 @@ class CodexCostCharacterization(unittest.TestCase):
                          ["0.2", "0.02", "0.25", "0.4", "1.2"])
         self.assertEqual(load_codex_pricing()["currency"], "USD")
 
-    def _merged_report(self):
+    def _merged_report(self, want_hours=False):
         folds = [self._fold("rollout-sol.jsonl"),
                  self._fold("rollout-terra.jsonl"),
                  self._fold("rollout-unpriced.jsonl")]
         merged = codex_merge_folds(folds)
-        return codex_cost_report(merged["by_date_model"], merged["by_model"],
+        return codex_cost_report(merged["by_hour_model"], merged["by_model"],
                                  merged["unaccounted"], merged["plan"],
-                                 load_codex_pricing())
+                                 load_codex_pricing(), want_hours=want_hours)
 
     def test_cost_report_exact_usd_and_reconciles(self):
         """合并三份夹具 → 精确 USD 价 + 守恒：sum(days.cost) == total_cost_usd。"""
@@ -3139,12 +3139,39 @@ class CodexCostCharacterization(unittest.TestCase):
         self.assertEqual(days[0]["tokens"], 377000)
         self.assertEqual(days[2]["tokens"], 366000)
 
+    def test_cost_report_hours_reconciles_with_days(self):
+        """want_hours=True → 输出 `hours`（小时升序、键 `YYYY-MM-DDTHH`），且
+        `sum(hours.cost) == sum(days.cost) == total_cost_usd` 精确对账——LC 乘数
+        线性，按小时桶应用与按日聚合桶应用相等（统一多桶折叠契约的守恒）。每个
+        日期的小时价之和 == 该日价；08-02 单日聚合触发 longContext（input 300000
+        > 272000 → ×2/×1.5），小时价同样体现（= $4.425）。want_hours=False 时
+        无 `hours` 键——`--json --month` 的契约不包含它（月视图热力图用 days）。"""
+        report = self._merged_report(want_hours=True)
+        hours = report["hours"]
+        self.assertEqual([h["hour"] for h in hours],
+                         ["2026-07-15T09", "2026-08-01T00", "2026-08-02T00",
+                          "2026-08-03T12"])
+        hour_sum_by_date = {}
+        for h in hours:
+            d = h["hour"][:10]
+            hour_sum_by_date[d] = hour_sum_by_date.get(d, 0.0) + h["cost_usd"]
+        day_cost = {d["date"]: d["cost_usd"] for d in report["days"]}
+        self.assertEqual(set(hour_sum_by_date), set(day_cost))
+        for d, c in day_cost.items():
+            self.assertAlmostEqual(hour_sum_by_date.get(d, 0.0), c, places=9)
+        self.assertAlmostEqual(sum(h["cost_usd"] for h in hours),
+                               report["total_cost_usd"], places=9)
+        # 08-02 单日聚合 LC → 小时价 = 日价（$4.425，钉到小数）
+        self.assertAlmostEqual(hour_sum_by_date["2026-08-02"], 4.425, places=9)
+        # want_hours=False（月契约）→ 无 hours 键
+        self.assertNotIn("hours", self._merged_report())
+
     def test_cost_report_long_context_sample_exact(self):
         """longContext 样例钉到小数：input_total 300000 > 272000 → input ×2、
         output ×1.5（08-02 桶 = $4.425）。"""
         f = self._fold("rollout-sol.jsonl")
         report = codex_cost_report(
-            f["by_date_model"], f["by_model"], f["unaccounted"], f["plan"],
+            f["by_hour_model"], f["by_model"], f["unaccounted"], f["plan"],
             load_codex_pricing())
         d2 = next(d for d in report["days"] if d["date"] == "2026-08-02")
         self.assertAlmostEqual(d2["cost_usd"], 4.425, places=9)
@@ -3173,7 +3200,7 @@ class CodexCostCharacterization(unittest.TestCase):
         self.assertEqual(plan["observed_at"], "2026-08-03T12:05:00Z")
         # 无 plan 的折叠 → null（不是缺键）。
         f = self._fold("rollout-terra.jsonl")
-        r2 = codex_cost_report(f["by_date_model"], f["by_model"], f["unaccounted"],
+        r2 = codex_cost_report(f["by_hour_model"], f["by_model"], f["unaccounted"],
                                f["plan"], load_codex_pricing())
         self.assertIsNone(r2["plan"])
 
@@ -3266,7 +3293,7 @@ class CodexCostCharacterization(unittest.TestCase):
         """无 plan（非订阅）→ 旧标签，不出现「按量标价」。terra 文件无
         rate_limits → 折叠出的 plan 是 None，报告原样透传 None。"""
         f = self._fold("rollout-terra.jsonl")
-        report = codex_cost_report(f["by_date_model"], f["by_model"], f["unaccounted"],
+        report = codex_cost_report(f["by_hour_model"], f["by_model"], f["unaccounted"],
                                    f["plan"], load_codex_pricing())
         out = {"host": "codex", "currency": "USD", "month": None}
         out.update(report)

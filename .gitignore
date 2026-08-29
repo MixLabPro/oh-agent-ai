@@ -40,3 +40,6 @@ dsh-client/node_modules/
 dsh/node_modules/
 node_modules/
 lib/
+
+# Claude Code 会话 scratch（RESUME.md + worktrees 是嵌套 .git 的工作区副本）
+.claude/
