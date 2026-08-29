@@ -21,9 +21,244 @@
 //! 就删掉，连同 `behavior.rs` 里调用它、再把结果拆包成裸事件数组的桥接代码
 //! 一起删。
 
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
-use crate::evidence::{CanonicalSession, Coverage, CoverageCounts, SessionMeta, Signal, SignalSet};
+use crate::evidence::{
+    ApprovalAsked, ApprovalDecided, ApprovalObservation, CanonicalSession, Coverage,
+    CoverageCounts, SandboxModeObservation, SessionMeta, Signal, SignalSet, Timeline,
+    TimelineEntry, ToolCallObservation, ToolResultObservation,
+};
+
+// ────────────────────── extraction: DSH event shape → payload ──────────────────────
+// phase B 把这段「翻译」从 behavior.rs 挪到适配器——规则不再碰 DSH 的 JSON 事件
+// 形状，适配器负责把工具调用/结果/审批/沙箱事件翻译成 evidence.rs 的窄 payload
+// 存进 timeline。翻译是适配器段，匹配（正则）是规则段，两段分开住。
+
+/// 工具调用型事件（tool/call + code-dispatch*）的类型白名单——与 Python
+/// behavior.py 的 TOOL_CALL_TYPES 逐字节对齐。dangerous command 可能藏在
+/// run_code 桥接出的嵌套子调用里（§6.2 注），规则须一并匹配。
+pub(crate) const TOOL_CALL_TYPES: [&str; 3] = [
+    "tool/call",
+    "tool/code-dispatch-start",
+    "tool/code-dispatch",
+];
+
+/// 把 JSON 对象/数组拍平成字符串叶子（字典键排序）。与 Python `_flatten_strings`
+/// 逐字节对齐：code-dispatch 的 `arguments` 对象里的命令/路径/URL 都是字符串叶子。
+fn flatten_strings(value: &Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    fn walk(v: &Value, parts: &mut Vec<String>) {
+        match v {
+            Value::String(s) => parts.push(s.clone()),
+            Value::Array(arr) => {
+                for item in arr {
+                    walk(item, parts);
+                }
+            }
+            Value::Object(obj) => {
+                let mut keys: Vec<&String> = obj.keys().collect();
+                keys.sort();
+                for key in keys {
+                    walk(&obj[key], parts);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(value, &mut parts);
+    parts.join("\n")
+}
+
+/// 从 `data` 取出可搜索的参数文本：原始 JSON 字符串直接用；对象/数组拍平。
+fn args_text(data: &Map<String, Value>) -> String {
+    match data.get("arguments") {
+        Some(Value::String(s)) => s.clone(),
+        Some(v @ (Value::Object(_) | Value::Array(_))) => flatten_strings(v),
+        _ => String::new(),
+    }
+}
+
+/// 工具调用型事件 → (工具名, 参数文本)；否则 None。
+pub(crate) fn tool_invocation(event: &Value) -> Option<(&str, String)> {
+    let etype = event.get("type")?.as_str()?;
+    if !TOOL_CALL_TYPES.contains(&etype) {
+        return None;
+    }
+    let data = event.get("data")?.as_object()?;
+    let name = data.get("name")?.as_str()?;
+    Some((name, args_text(data)))
+}
+
+/// tool/result 的 error.code，不是 tool/result 或缺 error 时返回 None。
+fn result_code(event: &Value) -> Option<&str> {
+    if event.get("type")?.as_str()? != "tool/result" {
+        return None;
+    }
+    event.get("data")?.get("error")?.get("code")?.as_str()
+}
+
+/// 事件定位坐标 `(turn, step, call_id)`——时间线↔队列联动与「T31 · s2」显示的依据。
+///
+/// 三个字段在真实日志里的覆盖率**完全不同**（session-e4b0be69 实测）：
+///
+/// | 事件 | turn | step | callId |
+/// |---|---|---|---|
+/// | `tool/call` | 786/786 | 786/786 | 786/786 |
+/// | `tool/result` | 796/796 | 796/796 | **0/796** |
+/// | `approval/asked` | **0/2** | **0/2** | 2/2 |
+/// | `approval/decided` | 0 | 0 | 0（只有 `id` 回指 asked） |
+/// | `sandbox/mode` | 0 | 0 | 0 |
+///
+/// 所以**事件自带的优先**，缺的从 `turn/start` · `step/start` 顺延。顺延不是猜：
+/// 事件流按 `seq` 有序，`turn/start` 是权威边界，落在 `turn/start(N)` 与
+/// `turn/end(N)` 之间的事件就在 turn N 内——实测两对 approval 事件都落在 turn 9
+/// 内，与顺延结果一致。
+///
+/// `turn/end` 之后、下一个 `turn/start` 之前**清空**：落在任何 turn 之外的事件
+/// （真实日志里 `seq=1` 的 `sandbox/mode` 就在首个 turn 之前）诚实给 `null`，
+/// 不硬安一个刚结束的 turn 上去。同一条纪律：缺列不编列。
+#[derive(Default)]
+pub(crate) struct Coords {
+    turn: Option<i64>,
+    step: Option<i64>,
+}
+
+impl Coords {
+    /// 用边界事件推进状态。必须在 `resolve` 之前对同一事件调用。
+    pub(crate) fn observe(&mut self, event: &Value) {
+        let Some(etype) = event.get("type").and_then(|v| v.as_str()) else { return };
+        let field = |k: &str| event.pointer(&format!("/data/{k}")).and_then(|v| v.as_i64());
+        match etype {
+            "turn/start" => {
+                self.turn = field("turn");
+                self.step = None; // 新 turn 的 step 由 step/start 给出
+            }
+            "turn/end" => {
+                self.turn = None;
+                self.step = None;
+            }
+            "step/start" => {
+                if let Some(t) = field("turn") {
+                    self.turn = Some(t);
+                }
+                self.step = field("step");
+            }
+            "step/end" => self.step = None,
+            _ => {}
+        }
+    }
+
+    /// 求某事件的 `(turn, step, call_id)`：自带优先，否则用顺延值；都没有则 null。
+    pub(crate) fn resolve(&self, event: &Value) -> (Value, Value, Value) {
+        let own = |k: &str| event.pointer(&format!("/data/{k}")).and_then(|v| v.as_i64());
+        let to_json = |v: Option<i64>| v.map_or(Value::Null, |n| json!(n));
+        let call_id = event
+            .pointer("/data/callId")
+            .and_then(|v| v.as_str())
+            .map_or(Value::Null, |s| json!(s));
+        (
+            to_json(own("turn").or(self.turn)),
+            to_json(own("step").or(self.step)),
+            call_id,
+        )
+    }
+}
+
+// ────────────────────── populate: execution events → timelines ──────────────────────
+
+/// 跑一遍 `Coords`，把 execution_events 里的工具调用/结果/审批/沙箱事件翻译成
+/// 四个 host-neutral timeline（§11.5）。与旧 `match_behavior` 的迭代序一致：
+/// 边界事件先推进坐标、再对本事件取坐标，`ordinal` 就是「在传入数组里的下标」——
+/// flatten 用它重建 (event, rule) 字节序。
+pub(crate) fn populate_timelines(
+    execution_events: &[Value],
+    tool_calls: &mut Timeline<ToolCallObservation>,
+    tool_results: &mut Timeline<ToolResultObservation>,
+    approvals: &mut Timeline<ApprovalObservation>,
+    sandbox_modes: &mut Timeline<SandboxModeObservation>,
+) {
+    let mut coords = Coords::default();
+    for (ordinal, event) in execution_events.iter().enumerate() {
+        if !event.is_object() {
+            continue;
+        }
+        coords.observe(event);
+        let (turn, step, call_id) = coords.resolve(event);
+        let seq = event.get("seq").and_then(|v| v.as_i64());
+        let time = event.get("time").and_then(|v| v.as_i64());
+        match event.get("type").and_then(|v| v.as_str()) {
+            Some(t) if TOOL_CALL_TYPES.contains(&t) => {
+                if let Some((name, args_text)) = tool_invocation(event) {
+                    tool_calls.entries.push(make_entry(
+                        ToolCallObservation { name: name.to_string(), args_text },
+                        seq, time, turn, step, call_id, ordinal,
+                    ));
+                }
+            }
+            Some("tool/result") => {
+                tool_results.entries.push(make_entry(
+                    ToolResultObservation { error_code: result_code(event).map(str::to_owned) },
+                    seq, time, turn, step, call_id, ordinal,
+                ));
+            }
+            Some("approval/asked") => {
+                let asked = event.get("data").and_then(|v| v.as_object()).map(|d| ApprovalAsked {
+                    tool_name: d.get("toolName").and_then(|v| v.as_str()).map(str::to_owned),
+                    reason: d.get("reason").and_then(|v| v.as_str()).map(str::to_owned),
+                });
+                approvals.entries.push(make_entry(
+                    ApprovalObservation { asked, decided: None },
+                    seq, time, turn, step, call_id, ordinal,
+                ));
+            }
+            Some("approval/decided") => {
+                let decided = event
+                    .get("data")
+                    .and_then(|v| v.as_object())
+                    .and_then(|d| d.get("outcome").and_then(|v| v.as_str()))
+                    .map(|o| ApprovalDecided { outcome: o.to_string() });
+                approvals.entries.push(make_entry(
+                    ApprovalObservation { asked: None, decided },
+                    seq, time, turn, step, call_id, ordinal,
+                ));
+            }
+            Some("sandbox/mode") => {
+                let mode = event
+                    .get("data")
+                    .and_then(|v| v.as_object())
+                    .and_then(|d| d.get("mode").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                sandbox_modes.entries.push(make_entry(
+                    SandboxModeObservation { mode: mode.to_string() },
+                    seq, time, turn, step, call_id, ordinal,
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 按一次事件的坐标塞一条 timeline entry。`turn`/`step` 来自 `Coords` 顺延
+/// 解析后的 `Value`（自带优先、turn 外为 null）——转成 `Option<i64>` 存下。
+fn make_entry<T>(
+    observation: T,
+    seq: Option<i64>,
+    time: Option<i64>,
+    turn: Value,
+    step: Value,
+    call_id: Value,
+    ordinal: usize,
+) -> TimelineEntry<T> {
+    TimelineEntry {
+        observation,
+        seq,
+        time,
+        turn: turn.as_i64(),
+        step: step.as_i64(),
+        call_id: call_id.as_str().map(str::to_owned),
+        ordinal,
+    }
+}
 
 /// DSH 适配器一次审计的产物：`CanonicalSession` + 它派生自的原始事件。
 pub struct DshEvidence {
@@ -175,6 +410,21 @@ pub fn build_dsh_evidence(
     session_id: String,
 ) -> DshEvidence {
     let (signals, coverage) = derive_coverage(&execution_events, &usage_events);
+    let mut tool_calls = Timeline::new();
+    let mut tool_results = Timeline::new();
+    let mut approvals = Timeline::new();
+    let mut sandbox_modes = Timeline::new();
+    // phase B：时间线在适配器的「derive」段一并填充——phase A（旧 match_behavior）
+    // 里坐标顺延逻辑跑在规则引擎里，现在它是「翻译」的产物，先于规则存在。
+    // 传进来的 execution_events 是分叉后的，时间线自然只含审计范围内的分叉后
+    // 事件（audit_session_log 对 post_fork 后的 events 调用本函数）。
+    populate_timelines(
+        &execution_events,
+        &mut tool_calls,
+        &mut tool_results,
+        &mut approvals,
+        &mut sandbox_modes,
+    );
     let canonical = CanonicalSession {
         meta: SessionMeta {
             session_id,
@@ -187,6 +437,10 @@ pub fn build_dsh_evidence(
         coverage,
         attempts: Vec::new(),
         notes: Vec::new(),
+        tool_calls,
+        tool_results,
+        approvals,
+        sandbox_modes,
     };
     DshEvidence { canonical, execution_events, usage_events, cwd }
 }

@@ -32,13 +32,12 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use crate::evidence::{Coverage, Fidelity, RuleOutcome, RuleSpec, Signal};
+use crate::evidence::{
+    CanonicalSession, Coverage, Fidelity, RuleOutcome, RuleSpec, Signal, TimelineEntry,
+};
 
 /// 证据片段截断长度（字符数，非字节）。与 Python 侧一致。
 const EVIDENCE_MAX_CHARS: usize = 200;
-
-/// 危险命令可能藏在 run_code 桥接出的嵌套子调用里（§6.2 注），规则须一并匹配。
-const TOOL_CALL_TYPES: [&str; 3] = ["tool/call", "tool/code-dispatch-start", "tool/code-dispatch"];
 
 /// SV607 的拒绝/中止/不可用码集合（TOOL_TIMEOUT 归 SV608）。
 const DENIED_CODES: [&str; 5] = [
@@ -94,259 +93,232 @@ fn internal_ip_url_re() -> &'static Regex {
     })
 }
 
-/// 把 JSON 对象/数组拍平成字符串叶子（字典键排序）。与 Python `_flatten_strings`
-/// 逐字节对齐：code-dispatch 的 `arguments` 对象里的命令/路径/URL 都是字符串叶子。
-fn flatten_strings(value: &Value) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    fn walk(v: &Value, parts: &mut Vec<String>) {
-        match v {
-            Value::String(s) => parts.push(s.clone()),
-            Value::Array(arr) => {
-                for item in arr {
-                    walk(item, parts);
-                }
-            }
-            Value::Object(obj) => {
-                let mut keys: Vec<&String> = obj.keys().collect();
-                keys.sort();
-                for key in keys {
-                    walk(&obj[key], parts);
-                }
-            }
-            _ => {}
-        }
-    }
-    walk(value, &mut parts);
-    parts.join("\n")
-}
-
-/// 从 `data` 取出可搜索的参数文本：原始 JSON 字符串直接用；对象/数组拍平。
-fn args_text(data: &Map<String, Value>) -> String {
-    match data.get("arguments") {
-        Some(Value::String(s)) => s.clone(),
-        Some(v @ (Value::Object(_) | Value::Array(_))) => flatten_strings(v),
-        _ => String::new(),
-    }
-}
-
-/// 工具调用型事件（tool/call + code-dispatch*）→ (工具名, 参数文本)；否则 None。
-pub(crate) fn tool_invocation(event: &Value) -> Option<(&str, String)> {
-    let etype = event.get("type")?.as_str()?;
-    if !TOOL_CALL_TYPES.contains(&etype) {
-        return None;
-    }
-    let data = event.get("data")?.as_object()?;
-    let name = data.get("name")?.as_str()?;
-    Some((name, args_text(data)))
-}
-
 fn first_match(re: &Regex, text: &str) -> Option<String> {
     re.find(text).map(|m| m.as_str().to_string())
 }
 
-/// tool/result 的 error.code，不是 tool/result 或缺 error 时返回 None。
-fn result_code(event: &Value) -> Option<&str> {
-    if event.get("type")?.as_str()? != "tool/result" {
-        return None;
-    }
-    event.get("data")?.get("error")?.get("code")?.as_str()
-}
+// phase B：检测器不再吃裸 DSH 事件，而是遍历 `CanonicalSession` 的时间线
+// （`evidence.rs` §11.5 的 host-neutral payload）——规则引擎不再依赖任何宿主
+// 事件形状。坐标（turn/step/call_id）由适配器在 `populate_timelines` 里随
+// entry 存好，这里直接用。
+//
+// 每条检测器产出一条规则的 `RuleOutcome`（§10 三态）：命中 → `Findings`，
+// 跑了但零命中 → `MeasuredZero`；`Unavailable` 由 dispatcher（requires 前置
+// 门控）决定，检测器自己不管——先滤后调，unavailable 的规则根本不会跑到这里。
 
-fn detect_sv601(event: &Value, _ws: Option<&str>) -> Option<String> {
-    let (name, text) = tool_invocation(event)?;
-    if name != "bash" {
-        return None;
-    }
-    first_match(destructive_re(), &text)
-}
-
-fn detect_sv602(event: &Value, _ws: Option<&str>) -> Option<String> {
-    let (name, text) = tool_invocation(event)?;
-    if name != "bash" {
-        return None;
-    }
-    first_match(privilege_re(), &text)
-}
-
-fn detect_sv603(event: &Value, _ws: Option<&str>) -> Option<String> {
-    let (name, text) = tool_invocation(event)?;
-    if name != "bash" {
-        return None;
-    }
-    first_match(remote_exec_re(), &text)
-}
-
-fn detect_sv604(event: &Value, _ws: Option<&str>) -> Option<String> {
-    let (name, text) = tool_invocation(event)?;
-    if name != "write" && name != "edit" {
-        return None;
-    }
-    first_match(sensitive_path_re(), &text)
-}
-
-fn detect_sv605(event: &Value, ws: Option<&str>) -> Option<String> {
-    let (name, text) = tool_invocation(event)?;
-    if name != "write" && name != "edit" {
-        return None;
-    }
-    // 敏感目标（/etc/ 等）由 SV604 以 critical 负责，不重复报 warning —— 两条规则不重叠。
-    if sensitive_path_re().is_match(&text) {
-        return None;
-    }
-    let path = first_match(abs_path_re(), &text)?;
-    // 工作区感知（F1）：路径在工作区根下（按路径段边界比较）不算「工作区外写」。
-    // ws 未知/为空时退化为纯绝对路径启发式——宁可多报不误放。
-    if let Some(root) = ws.filter(|w| !w.is_empty()).map(|w| w.trim_end_matches('/')) {
-        if path == root || path.starts_with(&format!("{}/", root)) {
-            return None;
+fn detect_sv601(s: &CanonicalSession) -> RuleOutcome {
+    let mut findings = Vec::new();
+    for e in &s.tool_calls.entries {
+        if e.observation.name != "bash" {
+            continue;
+        }
+        if let Some(ev) = first_match(destructive_re(), &e.observation.args_text) {
+            findings.push(make_finding("SV601", "critical", "shell", Some("bash"), &ev, e));
         }
     }
-    Some(path)
+    outcome_from(findings)
 }
 
-fn detect_sv606(event: &Value, _ws: Option<&str>) -> Option<String> {
-    let (name, text) = tool_invocation(event)?;
-    if name != "web_fetch" {
-        return None;
+fn detect_sv602(s: &CanonicalSession) -> RuleOutcome {
+    let mut findings = Vec::new();
+    for e in &s.tool_calls.entries {
+        if e.observation.name != "bash" {
+            continue;
+        }
+        if let Some(ev) = first_match(privilege_re(), &e.observation.args_text) {
+            findings.push(make_finding("SV602", "warning", "shell", Some("bash"), &ev, e));
+        }
     }
-    first_match(internal_ip_url_re(), &text)
+    outcome_from(findings)
 }
 
-fn detect_sv607(event: &Value, _ws: Option<&str>) -> Option<String> {
-    let code = result_code(event)?;
-    if DENIED_CODES.contains(&code) {
-        Some(code.to_string())
+fn detect_sv603(s: &CanonicalSession) -> RuleOutcome {
+    let mut findings = Vec::new();
+    for e in &s.tool_calls.entries {
+        if e.observation.name != "bash" {
+            continue;
+        }
+        if let Some(ev) = first_match(remote_exec_re(), &e.observation.args_text) {
+            findings.push(make_finding("SV603", "critical", "shell", Some("bash"), &ev, e));
+        }
+    }
+    outcome_from(findings)
+}
+
+fn detect_sv604(s: &CanonicalSession) -> RuleOutcome {
+    let mut findings = Vec::new();
+    for e in &s.tool_calls.entries {
+        if e.observation.name != "write" && e.observation.name != "edit" {
+            continue;
+        }
+        if let Some(ev) = first_match(sensitive_path_re(), &e.observation.args_text) {
+            findings.push(make_finding(
+                "SV604", "critical", "sensitive-fs", Some(&e.observation.name), &ev, e,
+            ));
+        }
+    }
+    outcome_from(findings)
+}
+
+fn detect_sv605(s: &CanonicalSession) -> RuleOutcome {
+    // 工作区根来自 `meta.workspace_roots[0]`（适配器把 session header 的 cwd
+    // 塞进来）。空串/缺失 → 退化为纯绝对路径启发式——宁可多报不误放（与旧
+    // `ws.filter(|w| !w.is_empty())` 同语义）。
+    let root = s
+        .meta
+        .workspace_roots
+        .first()
+        .filter(|w| !w.is_empty())
+        .map(|w| w.trim_end_matches('/').to_string());
+    let mut findings = Vec::new();
+    for e in &s.tool_calls.entries {
+        if e.observation.name != "write" && e.observation.name != "edit" {
+            continue;
+        }
+        // 敏感目标（/etc/ 等）由 SV604 以 critical 负责，不重复报 warning —— 两条规则不重叠。
+        if sensitive_path_re().is_match(&e.observation.args_text) {
+            continue;
+        }
+        let Some(path) = first_match(abs_path_re(), &e.observation.args_text) else {
+            continue;
+        };
+        // 工作区感知（F1）：路径在工作区根下（按路径段边界比较）不算「工作区外写」。
+        if let Some(root) = &root {
+            if path == *root || path.starts_with(&format!("{}/", root)) {
+                continue;
+            }
+        }
+        findings.push(make_finding(
+            "SV605", "warning", "sensitive-fs", Some(&e.observation.name), &path, e,
+        ));
+    }
+    outcome_from(findings)
+}
+
+fn detect_sv606(s: &CanonicalSession) -> RuleOutcome {
+    let mut findings = Vec::new();
+    for e in &s.tool_calls.entries {
+        if e.observation.name != "web_fetch" {
+            continue;
+        }
+        if let Some(ev) = first_match(internal_ip_url_re(), &e.observation.args_text) {
+            findings.push(make_finding("SV606", "warning", "network", Some("web_fetch"), &ev, e));
+        }
+    }
+    outcome_from(findings)
+}
+
+fn detect_sv607(s: &CanonicalSession) -> RuleOutcome {
+    let mut findings = Vec::new();
+    for e in &s.tool_results.entries {
+        let Some(code) = e.observation.error_code.as_deref() else { continue };
+        if DENIED_CODES.contains(&code) {
+            findings.push(make_finding("SV607", "warning", "approval", None, code, e));
+        }
+    }
+    outcome_from(findings)
+}
+
+fn detect_sv608(s: &CanonicalSession) -> RuleOutcome {
+    let mut findings = Vec::new();
+    for e in &s.tool_results.entries {
+        let Some(code) = e.observation.error_code.as_deref() else { continue };
+        if code == "TOOL_TIMEOUT" {
+            findings.push(make_finding("SV608", "info", "approval", None, code, e));
+        }
+    }
+    outcome_from(findings)
+}
+
+fn detect_sv609(s: &CanonicalSession) -> RuleOutcome {
+    let mut findings = Vec::new();
+    for e in &s.approvals.entries {
+        let Some(asked) = &e.observation.asked else { continue };
+        let evidence = match &asked.reason {
+            Some(r) if !r.is_empty() => r.clone(),
+            _ => match &asked.tool_name {
+                Some(t) if !t.is_empty() => t.clone(),
+                _ => String::new(),
+            },
+        };
+        findings.push(make_finding(
+            "SV609",
+            "info",
+            "approval",
+            asked.tool_name.as_deref(),
+            &evidence,
+            e,
+        ));
+    }
+    outcome_from(findings)
+}
+
+fn detect_sv610(s: &CanonicalSession) -> RuleOutcome {
+    let mut findings = Vec::new();
+    for e in &s.sandbox_modes.entries {
+        if e.observation.mode == "danger-full-access" {
+            findings.push(make_finding(
+                "SV610", "warning", "approval", None, "danger-full-access", e,
+            ));
+        }
+    }
+    for e in &s.approvals.entries {
+        let Some(decided) = &e.observation.decided else { continue };
+        if decided.outcome == "allowed-once" {
+            findings.push(make_finding("SV610", "warning", "approval", None, "allowed-once", e));
+        }
+    }
+    outcome_from(findings)
+}
+
+/// 一锅 findings 的兜底：空 → MeasuredZero，否则 Findings。检测器都跑过、零命中
+/// 是「测了是零」，不是缺证据——缺证据由 dispatcher 前置门控判 Unavailable。
+fn outcome_from(findings: Vec<Value>) -> RuleOutcome {
+    if findings.is_empty() {
+        RuleOutcome::MeasuredZero
     } else {
-        None
+        RuleOutcome::Findings(findings)
     }
 }
 
-fn detect_sv608(event: &Value, _ws: Option<&str>) -> Option<String> {
-    let code = result_code(event)?;
-    if code == "TOOL_TIMEOUT" {
-        Some(code.to_string())
-    } else {
-        None
-    }
-}
+/// 私有排序键（`flatten` 重建 (event, rule) 字节序用的实现细节）：`make_finding`
+/// 塞进 finding，`flatten` 排序后剥掉——永不进最终输出。
+const ORD_KEY: &str = "__ord";
 
-fn detect_sv609(event: &Value, _ws: Option<&str>) -> Option<String> {
-    if event.get("type")?.as_str()? != "approval/asked" {
-        return None;
-    }
-    let data = event.get("data")?.as_object()?;
-    if let Some(reason) = data.get("reason").and_then(|v| v.as_str()) {
-        if !reason.is_empty() {
-            return Some(reason.to_string());
-        }
-    }
-    if let Some(tool_name) = data.get("toolName").and_then(|v| v.as_str()) {
-        if !tool_name.is_empty() {
-            return Some(tool_name.to_string());
-        }
-    }
-    Some(String::new())
-}
-
-fn detect_sv610(event: &Value, _ws: Option<&str>) -> Option<String> {
-    let etype = event.get("type")?.as_str()?;
-    let data = event.get("data")?.as_object()?;
-    if etype == "sandbox/mode" {
-        let mode = data.get("mode")?.as_str()?;
-        return (mode == "danger-full-access").then(|| mode.to_string());
-    }
-    if etype == "approval/decided" {
-        let outcome = data.get("outcome")?.as_str()?;
-        return (outcome == "allowed-once").then(|| outcome.to_string());
-    }
-    None
-}
-
-/// finding 的 tool_name：工具调用型取 data.name，approval/asked 取 data.toolName，
-/// 其余（tool/result、sandbox/mode、approval/decided）本层拿不到工具名 → None。
-fn tool_name(event: &Value) -> Option<&str> {
-    let etype = event.get("type")?.as_str()?;
-    let data = event.get("data")?.as_object()?;
-    if TOOL_CALL_TYPES.contains(&etype) {
-        return data.get("name")?.as_str();
-    }
-    if etype == "approval/asked" {
-        return data.get("toolName")?.as_str();
-    }
-    None
+/// 复刻旧 `match_behavior` 的 finding 12 键（键序一致），另加私有排序键
+/// `__ord`（flatten 用它重建 (event, rule) 字节序，然后剥掉，不进最终输出）。
+/// 坐标全部来自 timeline entry——适配器已经顺延定好。
+fn make_finding<T>(
+    rule: &'static str,
+    severity: &'static str,
+    category: &'static str,
+    tool_name: Option<&str>,
+    evidence: &str,
+    entry: &TimelineEntry<T>,
+) -> Value {
+    let to_json = |v: Option<i64>| v.map_or(Value::Null, |n| json!(n));
+    let mut f = json!({
+        "rule": rule,
+        "severity": severity,
+        "category": category,
+        "tool_name": tool_name.map_or(Value::Null, |t| json!(t)),
+        "evidence": normalize(evidence),
+        "seq": to_json(entry.seq),
+        "time": to_json(entry.time),
+        "turn": to_json(entry.turn),
+        "step": to_json(entry.step),
+        "call_id": entry.call_id.clone().map_or(Value::Null, |s| json!(s)),
+        "evidence_recency": "log",
+        "run_end_seq": null,
+    });
+    f[ORD_KEY] = json!(entry.ordinal);
+    f
 }
 
 pub(crate) fn int_or_none(value: Option<&Value>) -> Value {
     match value.and_then(|v| v.as_i64()) {
         Some(n) => json!(n),
         None => Value::Null,
-    }
-}
-
-/// 事件定位坐标 `(turn, step, call_id)`——时间线↔队列联动与「T31 · s2」显示的依据。
-///
-/// 三个字段在真实日志里的覆盖率**完全不同**（session-e4b0be69 实测）：
-///
-/// | 事件 | turn | step | callId |
-/// |---|---|---|---|
-/// | `tool/call` | 786/786 | 786/786 | 786/786 |
-/// | `tool/result` | 796/796 | 796/796 | **0/796** |
-/// | `approval/asked` | **0/2** | **0/2** | 2/2 |
-/// | `approval/decided` | 0 | 0 | 0（只有 `id` 回指 asked） |
-/// | `sandbox/mode` | 0 | 0 | 0 |
-///
-/// 所以**事件自带的优先**，缺的从 `turn/start` · `step/start` 顺延。顺延不是猜：
-/// 事件流按 `seq` 有序，`turn/start` 是权威边界，落在 `turn/start(N)` 与
-/// `turn/end(N)` 之间的事件就在 turn N 内——实测两对 approval 事件都落在 turn 9
-/// 内，与顺延结果一致。
-///
-/// `turn/end` 之后、下一个 `turn/start` 之前**清空**：落在任何 turn 之外的事件
-/// （真实日志里 `seq=1` 的 `sandbox/mode` 就在首个 turn 之前）诚实给 `null`，
-/// 不硬安一个刚结束的 turn 上去。同一条纪律：缺列不编列。
-#[derive(Default)]
-pub(crate) struct Coords {
-    turn: Option<i64>,
-    step: Option<i64>,
-}
-
-impl Coords {
-    /// 用边界事件推进状态。必须在 `resolve` 之前对同一事件调用。
-    pub(crate) fn observe(&mut self, event: &Value) {
-        let Some(etype) = event.get("type").and_then(|v| v.as_str()) else { return };
-        let field = |k: &str| event.pointer(&format!("/data/{k}")).and_then(|v| v.as_i64());
-        match etype {
-            "turn/start" => {
-                self.turn = field("turn");
-                self.step = None; // 新 turn 的 step 由 step/start 给出
-            }
-            "turn/end" => {
-                self.turn = None;
-                self.step = None;
-            }
-            "step/start" => {
-                if let Some(t) = field("turn") {
-                    self.turn = Some(t);
-                }
-                self.step = field("step");
-            }
-            "step/end" => self.step = None,
-            _ => {}
-        }
-    }
-
-    /// 求某事件的 `(turn, step, call_id)`：自带优先，否则用顺延值；都没有则 null。
-    pub(crate) fn resolve(&self, event: &Value) -> (Value, Value, Value) {
-        let own = |k: &str| event.pointer(&format!("/data/{k}")).and_then(|v| v.as_i64());
-        let to_json = |v: Option<i64>| v.map_or(Value::Null, |n| json!(n));
-        let call_id = event
-            .pointer("/data/callId")
-            .and_then(|v| v.as_str())
-            .map_or(Value::Null, |s| json!(s));
-        (
-            to_json(own("turn").or(self.turn)),
-            to_json(own("step").or(self.step)),
-            call_id,
-        )
     }
 }
 
@@ -358,38 +330,34 @@ pub(crate) fn normalize(text: &str) -> String {
         .collect()
 }
 
-pub struct BehaviorRule {
-    pub rule_id: &'static str,
-    pub severity: &'static str,
-    pub category: &'static str,
-    detect: fn(&Value, Option<&str>) -> Option<String>,
+/// phase B：family ① 规则表直接嵌 `requires`——dispatcher 前置门控读它，
+/// 不单独去 `rule_specs()` 里查（那是 trajectory 后置标注用的规格，两处语义
+/// 必须一致，有 lockstep 测试钉着）。`requires` 里任一信号全零覆盖 → 规则
+/// Unavailable、检测器根本不跑（先滤后调）。severity/category 沿用旧
+/// `rules()` 的三级 critical/warning/info。
+struct FamilyRule {
+    code: &'static str,
+    severity: &'static str,
+    category: &'static str,
+    requires: &'static [Signal],
+    detect: fn(&CanonicalSession) -> RuleOutcome,
 }
 
-impl BehaviorRule {
-    /// 单条规则的谓词（纯函数）：是否命中，不裁决。`match` 是保留字，故名 `matches`。
-    pub fn matches(&self, event: &Value) -> bool {
-        (self.detect)(event, None).is_some()
-    }
-}
-
-/// 规则表（SV601–SV610，§6.5 码表）。severity 沿用三级 critical/warning/info。
-fn rules() -> &'static [BehaviorRule] {
-    static RULES: OnceLock<Vec<BehaviorRule>> = OnceLock::new();
-    RULES.get_or_init(|| {
-        vec![
-            BehaviorRule { rule_id: "SV601", severity: "critical", category: "shell", detect: detect_sv601 },
-            BehaviorRule { rule_id: "SV602", severity: "warning", category: "shell", detect: detect_sv602 },
-            BehaviorRule { rule_id: "SV603", severity: "critical", category: "shell", detect: detect_sv603 },
-            BehaviorRule { rule_id: "SV604", severity: "critical", category: "sensitive-fs", detect: detect_sv604 },
-            BehaviorRule { rule_id: "SV605", severity: "warning", category: "sensitive-fs", detect: detect_sv605 },
-            BehaviorRule { rule_id: "SV606", severity: "warning", category: "network", detect: detect_sv606 },
-            BehaviorRule { rule_id: "SV607", severity: "warning", category: "approval", detect: detect_sv607 },
-            BehaviorRule { rule_id: "SV608", severity: "info", category: "approval", detect: detect_sv608 },
-            BehaviorRule { rule_id: "SV609", severity: "info", category: "approval", detect: detect_sv609 },
-            BehaviorRule { rule_id: "SV610", severity: "warning", category: "approval", detect: detect_sv610 },
-        ]
-    })
-}
+/// family ①（SV601–SV610，§6.5 码表）规则表。`requires` 必须与 `rule_specs()`
+/// 里同名规则的 `requires` 逐条一致——两处漂移会让「前置门控」和「后置标注」
+/// 对同一条规则给出不同的三态语义，静默破坏契约。
+const FAMILY1_RULES: &[FamilyRule] = &[
+    FamilyRule { code: "SV601", severity: "critical", category: "shell", requires: &[Signal::ToolCalls], detect: detect_sv601 },
+    FamilyRule { code: "SV602", severity: "warning", category: "shell", requires: &[Signal::ToolCalls], detect: detect_sv602 },
+    FamilyRule { code: "SV603", severity: "critical", category: "shell", requires: &[Signal::ToolCalls], detect: detect_sv603 },
+    FamilyRule { code: "SV604", severity: "critical", category: "sensitive-fs", requires: &[Signal::ToolCalls], detect: detect_sv604 },
+    FamilyRule { code: "SV605", severity: "warning", category: "sensitive-fs", requires: &[Signal::ToolCalls], detect: detect_sv605 },
+    FamilyRule { code: "SV606", severity: "warning", category: "network", requires: &[Signal::ToolCalls], detect: detect_sv606 },
+    FamilyRule { code: "SV607", severity: "warning", category: "approval", requires: &[Signal::ToolResults], detect: detect_sv607 },
+    FamilyRule { code: "SV608", severity: "info", category: "approval", requires: &[Signal::ToolResults], detect: detect_sv608 },
+    FamilyRule { code: "SV609", severity: "info", category: "approval", requires: &[Signal::ApprovalDecisions], detect: detect_sv609 },
+    FamilyRule { code: "SV610", severity: "warning", category: "approval", requires: &[Signal::SandboxModes], detect: detect_sv610 },
+];
 
 /// P3 group①（docs/RUNTIME_EVIDENCE_CONTRACT.md §10）：SV601–610 对 `Signal`
 /// 的依赖声明。从每条 `detect_svNNN` **实际读什么事件类型**倒推出来——不是从
@@ -426,8 +394,8 @@ fn rule_specs() -> &'static [RuleSpec] {
             // (b) tool/result 连续失败）与 SV614（(a) 同调用反复审批
             // (b) 连续拒绝 (c) 危险模式反复授予）各自的子判定共享一个规则码
             // 但读不同的信号——两个子判定**任一**有证据，规则就不是完全测
-            // 不了，所以这两条的 requires 是"至少一个"而不是"全部"，见下面
-            // `rule_outcomes` 里 `OR_REQUIRES_CODES` 的特殊处理。
+            // 不了，所以这两条的 requires 是"至少一个"而不是"全部"，见
+            // `OR_REQUIRES_CODES` 与 `trajectory_rule_outcomes` 里的 OR 处理。
             RuleSpec { code: "SV611", requires: &[Signal::ToolCalls], enhances: &[], min_fidelity: Fidelity::Full },
             RuleSpec { code: "SV612", requires: &[Signal::TurnBoundaries], enhances: &[Signal::ToolCalls], min_fidelity: Fidelity::Full },
             RuleSpec {
@@ -452,16 +420,22 @@ fn rule_specs() -> &'static [RuleSpec] {
 /// AND/OR 在单元素列表上等价，不受影响。
 const OR_REQUIRES_CODES: [&str; 2] = ["SV613", "SV614"];
 
-/// `findings`（已经算好、不改）+ `coverage` → 每条规则的 `RuleOutcome`
-/// （§10 的三态契约：N findings / measured-zero / unavailable）。这是**只读**
-/// 的派生计算——不改变 `findings` 本身怎么产出，也不重新跑一遍 `detect_svNNN`。
-///
-/// 一个 `requires` 里的信号在这份会话里全零覆盖 → `Unavailable`（"没证据"，
-/// 不是"测了是零"）；否则该规则在 `findings` 里一条都没出现 → `MeasuredZero`；
-/// 否则 → `Findings`（该规则命中的那些 finding）。
-pub fn rule_outcomes(findings: &[Value], coverage: &Coverage) -> Vec<(&'static str, RuleOutcome)> {
+/// family ④（trajectory，SV611–614）——第一刀不迁移到 CanonicalSession，
+/// `trajectory_rule_outcomes` 只对这四个码做**后置**标注；family ① 的
+/// 三态由 `match_behavior_canonical` 前置门控产出。
+const TRAJECTORY_CODES: [&str; 4] = ["SV611", "SV612", "SV613", "SV614"];
+
+/// family ④（trajectory，SV611–614）的**后置**三态标注——第一刀不动
+/// `match_trajectory`：它仍跑原始事件，这里对它的产出按 `requires ⊆ coverage`
+/// 补 outcome。逻辑与旧 `rule_outcomes` 的 SV611–614 段逐字节相同（SV613/614
+/// 是"至少一个信号有证据"的 OR 语义，见 `OR_REQUIRES_CODES`）。
+pub fn trajectory_rule_outcomes(
+    findings: &[Value],
+    coverage: &Coverage,
+) -> Vec<(&'static str, RuleOutcome)> {
     rule_specs()
         .iter()
+        .filter(|spec| TRAJECTORY_CODES.contains(&spec.code))
         .map(|spec| {
             let missing: Vec<Signal> = spec
                 .requires
@@ -496,8 +470,67 @@ pub fn rule_outcomes(findings: &[Value], coverage: &Coverage) -> Vec<(&'static s
         .collect()
 }
 
-/// `rule_outcomes()` 的结果 → `--json` 输出用的 JSON 形状。`RuleOutcome` 不是
-/// serde 类型（§10 的类型定义里没有 derive Serialize），展示层自己转一道。
+/// family ①（SV601–610）**前置门控**的 dispatcher——先滤后调：`requires` 里
+/// 任一信号全零覆盖 → 直接 `Unavailable`、不跑检测器；否则跑检测器，命中 →
+/// `Findings`、零命中 → `MeasuredZero`。
+///
+/// 这是 §10 三态契约从「后置标注」改成「前置门控」的核心：**unavailable 的
+/// 规则绝不报出 finding**。旧实现 `rule_outcomes` 在 `match_behavior` 跑满
+/// 所有检测器之后按 `requires ⊆ coverage` 逐条补 outcome，于是 SV610（横跨
+/// sandbox/mode + approval/decided 两族、requires 却只有 SandboxModes）在
+/// 「无 sandbox/mode、只有 allowed-once」的日志里既报出一条 finding 又被判
+/// unavailable——findings 数组与 rule_outcomes 自相矛盾。门控后检测器根本不
+/// 跑，那条 finding 不再泄漏（golden 语料里 SV610 恒 available，此分叉不在
+/// goldens，属有意的行为修正，回归测试钉住新语义）。
+pub fn match_behavior_canonical(s: &CanonicalSession) -> Vec<(&'static str, RuleOutcome)> {
+    FAMILY1_RULES
+        .iter()
+        .map(|rule| {
+            let missing: Vec<Signal> = rule
+                .requires
+                .iter()
+                .filter(|sig| s.coverage.get(**sig).total() == 0)
+                .copied()
+                .collect();
+            if !missing.is_empty() {
+                return (
+                    rule.code,
+                    RuleOutcome::Unavailable {
+                        missing,
+                        reason: "no evidence for required signal(s) in this session".to_string(),
+                    },
+                );
+            }
+            (rule.code, (rule.detect)(s))
+        })
+        .collect()
+}
+
+/// 把 family ① 的 outcomes 摊平成 findings 数组，重建旧 `match_behavior` 的
+/// (event, rule) 字节序：每条 finding 都带私有键 `__ord`（post_fork 执行流里
+/// 的 entry 下标），按它稳定排序——同事件的多次命中（dispatcher 按规则表序
+/// 产出、stable sort 不交换同键）保留旧序。排序后剥掉 `__ord`，返回的
+/// findings 与旧实现逐字节一致（SV610 分叉除外，见 `match_behavior_canonical`）。
+pub fn flatten(outcomes: &[(&'static str, RuleOutcome)]) -> Vec<Value> {
+    let mut items: Vec<Value> = outcomes
+        .iter()
+        .flat_map(|(_, outcome)| match outcome {
+            RuleOutcome::Findings(fs) => fs.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
+    items.sort_by_key(|f| f.get(ORD_KEY).and_then(|v| v.as_u64()).unwrap_or(u64::MAX));
+    for f in items.iter_mut() {
+        if let Some(obj) = f.as_object_mut() {
+            obj.remove(ORD_KEY);
+        }
+    }
+    items
+}
+
+/// `match_behavior_canonical`（family ①）+ `trajectory_rule_outcomes`
+/// （family ④）合并出的 outcomes → `--json` 输出用的 JSON 形状。`RuleOutcome`
+/// 不是 serde 类型（§10 的类型定义里没有 derive Serialize），展示层自己转一道。
 pub fn rule_outcomes_json(outcomes: &[(&'static str, RuleOutcome)]) -> Value {
     let mut map = Map::new();
     for (code, outcome) in outcomes {
@@ -565,7 +598,9 @@ pub fn waste_coverage(waste: &Value, coverage: &Coverage) -> Value {
     }
 }
 
-/// 遍历事件流，命中即产出一条 Behavior Finding（§5.3 规则引擎层的字段）。
+/// 兼容 shim：`wasm audit_events` 与差分测试继续调它。内部 = post_fork →
+/// 建 canonical（适配器填时间线）→ 前置门控 dispatch → flatten。产出与旧
+/// `match_behavior` 逐字节一致（SV610 分叉除外，见 `match_behavior_canonical`）。
 ///
 /// 纯函数、确定性：同一事件流重放结果逐字节一致。非 object 的条目跳过；
 /// 缺 seq/time 时以 null 落位，绝不伪造 0 次。
@@ -574,39 +609,13 @@ pub fn match_behavior(events: &[Value], workspace_root: Option<&str>) -> Vec<Val
     // branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
     // 对同一笔钱/同一批行为重复计数（见 util::fork_boundary 的实测数据）。
     let events = &crate::util::post_fork(events)[..];
-    let mut findings: Vec<Value> = Vec::new();
-    let mut coords = Coords::default();
-    for event in events {
-        if !event.is_object() {
-            continue;
-        }
-        // 边界事件（turn/step start·end）先推进坐标，再对本事件求值。
-        coords.observe(event);
-        for rule in rules() {
-            let Some(evidence) = (rule.detect)(event, workspace_root) else {
-                continue;
-            };
-            let tool = match tool_name(event) {
-                Some(name) => Value::String(name.to_string()),
-                None => Value::Null,
-            };
-            let (turn, step, call_id) = coords.resolve(event);
-            findings.push(json!({
-                "rule": rule.rule_id,
-                "severity": rule.severity,
-                "category": rule.category,
-                "tool_name": tool,
-                "evidence": normalize(&evidence),
-                "seq": int_or_none(event.get("seq")),
-                "time": int_or_none(event.get("time")),
-                "turn": turn,
-                "step": step,
-                "call_id": call_id,
-                "evidence_recency": "log", "run_end_seq": null,
-            }));
-        }
-    }
-    findings
+    let evidence = crate::dsh_evidence::build_dsh_evidence(
+        events.to_vec(),
+        Vec::new(),
+        workspace_root.map(str::to_owned),
+        String::new(),
+    );
+    flatten(&match_behavior_canonical(&evidence.canonical))
 }
 
 /// 行为审计的 CI 闸门：返回退出码 0（无达标发现）或 1（有）。与 Python
@@ -1002,22 +1011,47 @@ mod tests {
         }]));
     }
 
+    /// 事件流 → CanonicalSession（phase B 检测器的入口）。复用适配器
+    /// `build_dsh_evidence`——覆盖计数 + 时间线填充都是它干的，测试不用手拼
+    /// `CanonicalSession` 字面量（那是 adapter 的职责，测试只给事件）。
+    fn canonical_from(events: Vec<Value>) -> CanonicalSession {
+        crate::dsh_evidence::build_dsh_evidence(events, Vec::new(), None, "test".to_string()).canonical
+    }
+
+    /// family ① 的三态 = 前置门控 dispatcher 对 canonical 的产出。
+    fn family1_outcomes(events: Vec<Value>) -> Vec<(&'static str, RuleOutcome)> {
+        match_behavior_canonical(&canonical_from(events))
+    }
+
     /// P3 group①：requires 里的信号全零覆盖 → Unavailable，不是"测了是零"的假 []。
     /// 十条规则各自的 requires 信号覆盖为零时都该拿到 Unavailable，不能有漏网的。
+    /// family ① 由前置门控 dispatcher 产出，family ④ 由 trajectory_rule_outcomes
+    /// 产出——两边都要覆盖到。
     #[test]
     fn each_rule_is_unavailable_when_its_required_signal_has_zero_coverage() {
-        let empty = Coverage::new();
+        let family1 = family1_outcomes(vec![]);
         for (code, missing_signal) in [
             ("SV601", Signal::ToolCalls), ("SV602", Signal::ToolCalls),
             ("SV603", Signal::ToolCalls), ("SV604", Signal::ToolCalls),
             ("SV605", Signal::ToolCalls), ("SV606", Signal::ToolCalls),
             ("SV607", Signal::ToolResults), ("SV608", Signal::ToolResults),
             ("SV609", Signal::ApprovalDecisions), ("SV610", Signal::SandboxModes),
+        ] {
+            let (found_code, outcome) = family1.iter().find(|(c, _)| *c == code).unwrap();
+            assert_eq!(*found_code, code);
+            match outcome {
+                RuleOutcome::Unavailable { missing, .. } => {
+                    assert!(missing.contains(&missing_signal),
+                        "{code} 应该因为缺 {missing_signal:?} 判 unavailable，实际 missing={missing:?}");
+                }
+                _ => panic!("{code} 在零覆盖时应该是 Unavailable，实际是别的分支"),
+            }
+        }
+        let trajectory = trajectory_rule_outcomes(&[], &Coverage::new());
+        for (code, missing_signal) in [
             ("SV611", Signal::ToolCalls), ("SV612", Signal::TurnBoundaries),
         ] {
-            let outcomes = rule_outcomes(&[], &empty);
-            let (found_code, outcome) = outcomes.iter().find(|(c, _)| *c == code).unwrap();
-            assert_eq!(*found_code, code);
+            let (_, outcome) = trajectory.iter().find(|(c, _)| *c == code).unwrap();
             match outcome {
                 RuleOutcome::Unavailable { missing, .. } => {
                     assert!(missing.contains(&missing_signal),
@@ -1030,27 +1064,23 @@ mod tests {
 
     #[test]
     fn measured_zero_is_distinct_from_unavailable_for_the_same_rule() {
-        // ToolCalls 有覆盖(测过)，但 findings 里没有 SV601 的条目 → MeasuredZero，
-        // 不是 Unavailable——这正是这条机制存在的意义:能分清"测了是零"和"没法测"。
-        let cov = measured_coverage(Signal::ToolCalls, 5);
-        let outcomes = rule_outcomes(&[], &cov);
+        // ToolCalls 有覆盖(测过)、检测器跑了但没命中 → MeasuredZero，不是
+        // Unavailable——这正是这条机制存在的意义:能分清"测了是零"和"没法测"。
+        let outcomes = family1_outcomes(vec![tool_call("bash", r#"{"command":"ls"}"#, 1)]);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV601").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero), "有覆盖、零命中该是 MeasuredZero");
     }
 
     #[test]
     fn findings_outcome_carries_the_matching_findings_for_that_rule_only() {
-        let cov = measured_coverage(Signal::ToolCalls, 1);
-        let findings = vec![json!({"rule": "SV601", "severity": "critical"})];
-        let outcomes = rule_outcomes(&findings, &cov);
+        // 同一次 bash 调用命中 SV601（rm -rf）、不命中 SV602 → 各归各的。
+        let outcomes = family1_outcomes(vec![tool_call("bash", r#"{"command":"rm -rf /x"}"#, 1)]);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV601").unwrap();
         match outcome {
             RuleOutcome::Findings(items) => assert_eq!(items.len(), 1),
             _ => panic!("SV601 有一条命中，应该是 Findings"),
         }
-        // 其余规则(比如 SV602)一条 finding 都没被这条 SV601 的记录带偏。
-        let cov_all = measured_coverage(Signal::ToolCalls, 1);
-        let (_, sv602_outcome) = rule_outcomes(&findings, &cov_all).into_iter().find(|(c, _)| *c == "SV602").unwrap();
+        let (_, sv602_outcome) = outcomes.iter().find(|(c, _)| *c == "SV602").unwrap();
         assert!(matches!(sv602_outcome, RuleOutcome::MeasuredZero),
             "SV601 的 finding 不该被算进 SV602 的 outcome");
     }
@@ -1058,9 +1088,11 @@ mod tests {
     #[test]
     fn sv610_treats_approval_decisions_as_enhances_not_requires() {
         // 只有 SandboxModes 覆盖、ApprovalDecisions 全零——SV610 仍应可用
-        // (sandbox/mode 单独就能出一条 finding)，不是 Unavailable。
-        let cov = measured_coverage(Signal::SandboxModes, 1);
-        let outcomes = rule_outcomes(&[], &cov);
+        // (sandbox/mode 单独就能出一条 finding)，不是 Unavailable。用非触发 mode
+        // 让检测器跑完、零命中 → MeasuredZero，正好证明"能测、测了是零"而不是
+        // "缺 ApprovalDecisions 证据测不了"。
+        let outcomes =
+            family1_outcomes(vec![ev("sandbox/mode", 1, 1001, json!({"mode": "normal"}))]);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV610").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero),
             "SandboxModes 有覆盖时 SV610 不该因为 ApprovalDecisions 缺覆盖变成 Unavailable");
@@ -1071,7 +1103,7 @@ mod tests {
         // TurnBoundaries 有覆盖、ToolCalls 全零——真测出来的结论是"有 turn
         // 结构但没有工具调用可循环",是 MeasuredZero，不是 Unavailable。
         let cov = measured_coverage(Signal::TurnBoundaries, 1);
-        let outcomes = rule_outcomes(&[], &cov);
+        let outcomes = trajectory_rule_outcomes(&[], &cov);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV612").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero),
             "TurnBoundaries 有覆盖时 SV612 不该因为 ToolCalls 缺覆盖变成 Unavailable");
@@ -1082,8 +1114,8 @@ mod tests {
     #[test]
     fn sv613_and_sv614_are_unavailable_only_when_all_their_signals_are_missing() {
         let empty = Coverage::new();
+        let outcomes = trajectory_rule_outcomes(&[], &empty);
         for code in ["SV613", "SV614"] {
-            let outcomes = rule_outcomes(&[], &empty);
             let (_, outcome) = outcomes.iter().find(|(c, _)| *c == code).unwrap();
             assert!(matches!(outcome, RuleOutcome::Unavailable { .. }),
                 "{code} 两个信号都全零覆盖时应该 Unavailable");
@@ -1095,14 +1127,14 @@ mod tests {
         // 只有 ToolResults 有覆盖(TurnBoundaries 全零)——613b(连续工具失败)
         // 那半边测得了，规则不该整体判 Unavailable。
         let cov = measured_coverage(Signal::ToolResults, 1);
-        let outcomes = rule_outcomes(&[], &cov);
+        let outcomes = trajectory_rule_outcomes(&[], &cov);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV613").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero),
             "ToolResults 有覆盖时 SV613 不该因为 TurnBoundaries 缺覆盖变成 Unavailable");
 
         // 反过来:只有 TurnBoundaries 有覆盖——613a(连续 error turn)测得了。
         let cov2 = measured_coverage(Signal::TurnBoundaries, 1);
-        let outcomes2 = rule_outcomes(&[], &cov2);
+        let outcomes2 = trajectory_rule_outcomes(&[], &cov2);
         let (_, outcome2) = outcomes2.iter().find(|(c, _)| *c == "SV613").unwrap();
         assert!(matches!(outcome2, RuleOutcome::MeasuredZero));
     }
@@ -1110,24 +1142,23 @@ mod tests {
     #[test]
     fn sv614_is_available_when_only_one_of_its_two_signals_has_coverage() {
         let cov = measured_coverage(Signal::SandboxModes, 1);
-        let outcomes = rule_outcomes(&[], &cov);
+        let outcomes = trajectory_rule_outcomes(&[], &cov);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV614").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero),
             "SandboxModes 有覆盖时 SV614 不该因为 ApprovalDecisions 缺覆盖变成 Unavailable");
     }
 
     #[test]
-    fn sv611_through_sv614_findings_are_picked_up_by_rule_outcomes() {
-        // rule_outcomes 喂的是 findings(SV601-610) + trajectory findings
-        // (SV611-614) 合并之后的数组——这条测试确认 SV611-614 真的被
-        // rule_specs() 认得，不是只声明了规格却匹配不到 finding。
+    fn sv611_through_sv614_findings_are_picked_up_by_trajectory_rule_outcomes() {
+        // trajectory_rule_outcomes 喂的是 match_trajectory 的产出(SV611-614)——这条
+        // 测试确认 SV611-614 真的被 rule_specs() 认得，不是只声明了规格却匹配不到 finding。
         let cov = {
             let mut c = Coverage::new();
             c.set(Signal::ToolCalls, CoverageCounts { measured: 1, ..Default::default() });
             c
         };
         let findings = vec![json!({"rule": "SV611", "severity": "warning"})];
-        let outcomes = rule_outcomes(&findings, &cov);
+        let outcomes = trajectory_rule_outcomes(&findings, &cov);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV611").unwrap();
         match outcome {
             RuleOutcome::Findings(items) => assert_eq!(items.len(), 1),
@@ -1137,14 +1168,102 @@ mod tests {
 
     #[test]
     fn rule_outcomes_json_shape_for_each_status() {
-        let cov = measured_coverage(Signal::ToolCalls, 1);
-        let findings = vec![json!({"rule": "SV601"})];
-        let json_val = rule_outcomes_json(&rule_outcomes(&findings, &cov));
+        // family ①（canonical 门控）+ family ④（trajectory 后置）合并后才是
+        // `--json` 那份 14 键的 outcomes——三态各自落一个键。
+        let mut all = family1_outcomes(vec![tool_call("bash", r#"{"command":"rm -rf /x"}"#, 1)]);
+        let traj_cov = canonical_from(vec![tool_call("bash", r#"{"command":"ls"}"#, 1)]).coverage;
+        all.extend(trajectory_rule_outcomes(&[], &traj_cov));
+        let json_val = rule_outcomes_json(&all);
         assert_eq!(json_val["SV601"], json!({"status": "findings", "count": 1}));
         assert_eq!(json_val["SV602"], json!({"status": "measured_zero"}));
         let unavailable = &json_val["SV609"];
         assert_eq!(unavailable["status"], json!("unavailable"));
         assert_eq!(unavailable["missing"], json!(["ApprovalDecisions"]));
+    }
+
+    /// 分叉路径回归（这次重构的**唯一**有意的行为修正）：有 approval/decided
+    /// {allowed-once}、无 sandbox/mode——SV610 的 requires 只有 SandboxModes，
+    /// 前置门控下检测器不跑，`flatten` 出的 findings 必须**不含** SV610。
+    /// 旧实现先跑满检测器、后置标注，这条 allowed-once 会漏进 findings，与
+    /// rule_outcomes 判 unavailable 自相矛盾。golden 语料里 SV610 恒 available，
+    /// 此分叉不在 goldens，必须用回归测试钉住新语义。
+    #[test]
+    fn sv610_unavailable_rule_never_leaks_a_finding() {
+        let events = vec![
+            ev("turn/start", 1, 1001, json!({"turn": 1})),
+            ev("approval/decided", 2, 1002, json!({"id": "a1", "outcome": "allowed-once"})),
+            ev("turn/end", 3, 1003, json!({"turn": 1})),
+        ];
+        let evidence =
+            crate::dsh_evidence::build_dsh_evidence(events, Vec::new(), None, "test".to_string());
+        let outcomes = match_behavior_canonical(&evidence.canonical);
+        let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV610").unwrap();
+        match outcome {
+            RuleOutcome::Unavailable { missing, .. } => {
+                assert!(missing.contains(&Signal::SandboxModes),
+                    "无 sandbox/mode 时 SV610 缺的证据是 SandboxModes");
+            }
+            _ => panic!("无 sandbox/mode 时 SV610 必须 Unavailable，不能是别的分支"),
+        }
+        let findings = flatten(&outcomes);
+        assert!(findings.iter().all(|f| f.get("rule").and_then(|v| v.as_str()) != Some("SV610")),
+            "unavailable 的规则绝不报出 finding");
+    }
+
+    /// FAMILY1_RULES 的 requires 必须与 rule_specs 的 requires 逐条一致——前置门控
+    /// 和 trajectory 后置标注对同一条规则给出同一个三态语义，漂移会静默破坏契约。
+    #[test]
+    fn family1_requires_match_rule_specs_requires() {
+        for rule in FAMILY1_RULES {
+            let spec = rule_specs()
+                .iter()
+                .find(|s| s.code == rule.code)
+                .unwrap_or_else(|| panic!("{} 缺 rule_specs", rule.code));
+            assert_eq!(rule.requires, spec.requires,
+                "{} 在 FAMILY1_RULES 与 rule_specs 里的 requires 必须一致", rule.code);
+        }
+    }
+
+    /// flatten 的排序等价：一条 bash 调用同时命中 SV601+SV602——flatten 后
+    /// (event, rule) 序 = dispatcher 表序（SV601 在 SV602 前），且 `__ord` 键
+    /// 不泄漏。
+    #[test]
+    fn flatten_preserves_event_then_rule_order_without_leaking_ord_key() {
+        let outcomes = family1_outcomes(vec![tool_call("bash", r#"{"command":"sudo rm -rf /x"}"#, 1)]);
+        let findings = flatten(&outcomes);
+        assert_eq!(findings.len(), 2, "一条 bash 调用同时命中 SV601+SV602");
+        assert_eq!(findings[0]["rule"], json!("SV601"));
+        assert_eq!(findings[1]["rule"], json!("SV602"));
+        for f in &findings {
+            assert!(f.get("__ord").is_none(), "私有排序键不能泄漏进最终输出");
+        }
+    }
+
+    /// 时间线坐标等价：适配器 `populate_timelines` 用 Coords 给每条 entry 解
+    /// 出 turn/step/call_id/seq/ordinal——与旧 `match_behavior` 直接读裸事件
+    /// 时 `Coords.resolve` 出的坐标同一套（differential/goldens 已逐字节证明
+    /// findings 带出的坐标不变）。这里是更快的针对性钉子：坐标解析归适配器，
+    /// 规则层只读 payload，这一刀钉住分界，防止将来把坐标挪回规则层。
+    #[test]
+    fn timeline_entries_carry_resolved_coords() {
+        let events = vec![
+            ev("turn/start", 1, 1001, json!({"turn": 2})),
+            // 自带坐标优先于顺延值（turn 7，不是活跃的 2）。
+            ev("tool/call", 2, 1002, json!({"turn": 7, "step": 1, "callId": "c1",
+                                            "name": "bash", "arguments": "x"})),
+            // 无坐标的 approval/asked 从边界顺延 turn（不臆造 step/call_id）。
+            ev("approval/asked", 3, 1003, json!({"id": "a1", "toolName": "bash"})),
+            ev("turn/end", 4, 1004, json!({"turn": 2})),
+        ];
+        let canonical = canonical_from(events);
+        let tc = &canonical.tool_calls.entries[0];
+        assert_eq!((tc.turn, tc.step, tc.seq), (Some(7), Some(1), Some(2)));
+        assert_eq!(tc.call_id.as_deref(), Some("c1"));
+        assert_eq!(tc.ordinal, 1, "ordinal = 在 post_fork 执行流里的下标（turn/start=0、本事件=1），供 flatten 重建 (event, rule) 序");
+        let ap = &canonical.approvals.entries[0];
+        assert_eq!(ap.turn, Some(2), "无自带坐标的事件从 turn/start 顺延");
+        assert_eq!(ap.step, None, "没有 step/start 就没有 step，不臆造");
+        assert_eq!(ap.call_id, None, "没有自带 callId 就不填，不臆造");
     }
 
     #[test]

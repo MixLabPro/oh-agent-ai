@@ -416,6 +416,13 @@ pub struct CanonicalSession {
     pub coverage: Coverage,
     pub attempts: Vec<SourceAttempt>,
     pub notes: Vec<AdapterNote>,
+    // §11.5 timeline：逐事件观测的 host-neutral 投影——phase B 的规则引擎直接读
+    // 这四个字段，不再读裸宿主事件。适配器在「derive」段填充（见 dsh_evidence.rs
+    // 的 populate_timelines）。
+    pub tool_calls: Timeline<ToolCallObservation>,
+    pub tool_results: Timeline<ToolResultObservation>,
+    pub approvals: Timeline<ApprovalObservation>,
+    pub sandbox_modes: Timeline<SandboxModeObservation>,
 }
 
 pub struct SessionMeta {
@@ -427,6 +434,78 @@ pub struct SessionMeta {
     pub workspace_roots: Vec<String>,
     pub model: Option<String>,
     pub span: Option<TimeSpan>,
+}
+
+// ────────────────────────── §11.5 Timeline: host-neutral observations ──────────────────────────
+
+/// 规则引擎直接消费的逐事件投影——phase B 把 `detect_svNNN` 从读裸 DSH JSON
+/// 事件改读这里的窄 payload 后，规则不再依赖任何宿主事件形状（§12 的「不持有
+/// 宿主专属 payload」约束就落在这里：payload 字段名不含宿主名，DSH / Codex /
+/// WorkBuddy 各自适配器把自家事件翻译成这四个观察类型）。
+///
+/// 事件坐标（turn/step/call_id）在抽取时用 `Coords` 顺延定死、随 entry 存下来，
+/// 检测器不再需要自己跑坐标状态机——坐标是「翻译」的产物，不是「规则」的产物。
+#[derive(Clone, Debug)]
+pub struct ToolCallObservation {
+    pub name: String,
+    pub args_text: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolResultObservation {
+    pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApprovalAsked {
+    pub tool_name: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApprovalDecided {
+    pub outcome: String,
+}
+
+/// 一条审批事件只会是 asked 或 decided 的一端——放成两个 `Option` 而不是
+/// 两个独立 timeline，是为了让"审批生命周期"作为一个整体遍历（phase B 的
+/// SV610 同时读 sandbox/mode 与 approval/decided，保持同一时间轴）。
+#[derive(Clone, Debug)]
+pub struct ApprovalObservation {
+    pub asked: Option<ApprovalAsked>,
+    pub decided: Option<ApprovalDecided>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SandboxModeObservation {
+    pub mode: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct TimelineEntry<T> {
+    pub observation: T,
+    pub seq: Option<i64>,
+    pub time: Option<i64>,
+    pub turn: Option<i64>,
+    pub step: Option<i64>,
+    pub call_id: Option<String>,
+    /// 在 post_fork 执行流里的下标——只为 `flatten` 稳定排序重建 (event, rule)
+    /// 字节序，**不**进 finding JSON。
+    pub ordinal: usize,
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct Timeline<T> {
+    pub entries: Vec<TimelineEntry<T>>,
+}
+
+impl<T> Timeline<T> {
+    /// 空时间线。`derive(Default)` 会给 `Timeline<T>` 额外加一个 `T: Default`
+    /// 约束（`Default` 的派生对泛型参数是这么要求的），payload 类型不是
+    /// `Default` 的，所以适配器一律用这个构造器而不是 `Timeline::default()`。
+    pub fn new() -> Self {
+        Timeline { entries: Vec::new() }
+    }
 }
 
 // ────────────────────────── §12 acceptance test ──────────────────────────

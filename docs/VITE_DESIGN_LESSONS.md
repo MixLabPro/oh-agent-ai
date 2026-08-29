@@ -81,6 +81,17 @@ Vite 最大的架构动作是「一语言多目标，零同步成本」——这
 的理由；(c) 逼出 `CanonicalSession` 缺失的 `Timeline<Observed<T>>` 字段（spec 自己标注的
 「真正的设计决策点」）。
 
+> **✅ 已落地（2026-08）**：验收 = golden 逐字节不变 + 全测试绿（`cargo test` /
+> `clippy -D warnings` / 761 Python / `test_cli_matrix` 93 差分 / 15 goldens /
+> wasm 重建后 `dsh-client` verify-host 全过）。落地记录见
+> `RUNTIME_EVIDENCE_CONTRACT.md` §17.1a「Phase B」：family ①（SV601–610）已
+> 前置门控、10 条 detector 改吃 `CanonicalSession` 时间线（`fn(&CanonicalSession)
+> -> RuleOutcome`）、`match_behavior` 变 shim、`rule_outcomes` 拆成
+> `match_behavior_canonical` + `trajectory_rule_outcomes`。**唯一**有意的行为
+> 修正是 SV610 分叉（unavailable 的规则不再漏出 finding），带 Rust + Python
+> 双侧回归。`reverse_project` 仍在——family ④ 与 usage/duration 等模块还读老
+> 形状，上面 line 67-71 的预言（DSH 词表只剩 `derive_coverage` 一个家）还没到。
+
 ---
 
 ## 3. 吸收 ②：watch 增量重建的流水线形状

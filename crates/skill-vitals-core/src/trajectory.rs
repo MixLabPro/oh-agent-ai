@@ -18,7 +18,8 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-use crate::behavior::{int_or_none, normalize, tool_invocation};
+use crate::behavior::{int_or_none, normalize};
+use crate::dsh_evidence::tool_invocation;
 
 // ── 阈值常量（与 Python 镜像逐字节一致）─────────────────────────────────
 const MIN_REPEAT: usize = 3; // SV611 连续相同签名次数
@@ -95,7 +96,7 @@ fn finding(
 /// 载体找 turn/step——那类事件不像 `tool/call` 自带坐标，只能靠边界顺延。
 pub(crate) fn coord_map(events: &[Value]) -> std::collections::HashMap<i64, (Value, Value, Value)> {
     let mut map = std::collections::HashMap::new();
-    let mut coords = crate::behavior::Coords::default();
+    let mut coords = crate::dsh_evidence::Coords::default();
     for event in events {
         if !event.is_object() {
             continue;

@@ -43,7 +43,8 @@ from skill_vitals.compaction import compaction_events  # noqa: E402
 from skill_vitals.waste import detect_duplicate_tool_results, detect_failure_run_waste, detect_structural_waste  # noqa: E402
 from skill_vitals.util import est_tokens, signal_coverage  # noqa: E402
 from skill_vitals.behavior import (  # noqa: E402
-    match_behavior, rule_outcomes, array_signal_status, waste_coverage,
+    match_behavior, match_behavior_gated, trajectory_rule_outcomes, array_signal_status,
+    waste_coverage,
 )
 from skill_vitals.trajectory import match_trajectory  # noqa: E402
 from skill_vitals.skill import skill_invocations  # noqa: E402
@@ -729,14 +730,18 @@ class TestFindingCoords(unittest.TestCase):
 
 
 class TestRuleOutcomes(unittest.TestCase):
-    """P3 group①（docs/RUNTIME_EVIDENCE_CONTRACT.md §10）：SV601–610 的三态
-    结果。Rust 侧 `behavior.rs::rule_outcomes` 的测试对齐——同一批断言。"""
+    """P3 group①（docs/RUNTIME_EVIDENCE_CONTRACT.md §10）：14 条规则的三态结果。
+    family ①（SV601–610）走前置门控 `match_behavior_gated`，family ④（SV611–
+    614）走后置标注 `trajectory_rule_outcomes`。Rust 侧 `behavior.rs::
+    match_behavior_canonical` / `trajectory_rule_outcomes` 的测试对齐——同一批
+    断言。"""
 
     def _ev(self, etype, seq, data):
         return {"type": etype, "seq": seq, "time": 1000 + seq, "data": data}
 
     def test_each_rule_is_unavailable_when_its_required_signal_has_zero_coverage(self):
-        outcomes = rule_outcomes([], [])
+        _, family1 = match_behavior_gated([], None)
+        trajectory = trajectory_rule_outcomes([], [])
         expected_missing = {
             "SV601": "ToolCalls", "SV602": "ToolCalls", "SV603": "ToolCalls",
             "SV604": "ToolCalls", "SV605": "ToolCalls", "SV606": "ToolCalls",
@@ -745,61 +750,94 @@ class TestRuleOutcomes(unittest.TestCase):
             "SV611": "ToolCalls", "SV612": "TurnBoundaries",
         }
         for code, signal in expected_missing.items():
+            outcomes = family1 if code in family1 else trajectory
             self.assertEqual(outcomes[code]["status"], "unavailable")
             self.assertIn(signal, outcomes[code]["missing"])
         # SV613/614 是"至少一个"语义——两个信号都全零覆盖时才 unavailable。
         for code in ("SV613", "SV614"):
-            self.assertEqual(outcomes[code]["status"], "unavailable")
+            self.assertEqual(trajectory[code]["status"], "unavailable")
 
     def test_measured_zero_is_distinct_from_unavailable_for_the_same_rule(self):
         events = [self._ev("tool/call", 1, {"name": "bash", "arguments": "echo hi"})]
-        outcomes = rule_outcomes([], events)
-        self.assertEqual(outcomes["SV601"], {"status": "measured_zero"})
+        _, family1 = match_behavior_gated(events, None)
+        self.assertEqual(family1["SV601"], {"status": "measured_zero"})
 
     def test_findings_outcome_carries_the_count_for_that_rule_only(self):
+        # family ① 的三态从门控后的真实 findings 数——rm -rf 命中 SV601 不命中
+        # SV602，各归各的（不再手工喂 findings 数组，跟 Rust 侧同一批断言）。
         events = [self._ev("tool/call", 1, {"name": "bash", "arguments": "rm -rf /x"})]
-        findings = [{"rule": "SV601", "severity": "critical"}]
-        outcomes = rule_outcomes(findings, events)
-        self.assertEqual(outcomes["SV601"], {"status": "findings", "count": 1})
+        _, family1 = match_behavior_gated(events, None)
+        self.assertEqual(family1["SV601"], {"status": "findings", "count": 1})
         # SV601 的 finding 不该被算进 SV602 的 outcome。
-        self.assertEqual(outcomes["SV602"], {"status": "measured_zero"})
+        self.assertEqual(family1["SV602"], {"status": "measured_zero"})
 
     def test_sv610_treats_approval_decisions_as_enhances_not_requires(self):
-        events = [self._ev("sandbox/mode", 1, {"mode": "danger-full-access"})]
-        outcomes = rule_outcomes([], events)
-        self.assertEqual(outcomes["SV610"], {"status": "measured_zero"},
+        # 用非触发 mode 让检测器跑完、零命中 → measured_zero，正好证明"能测、
+        # 测了是零"而不是"缺 ApprovalDecisions 证据测不了"。danger-full-access
+        # 会真出一条 SV610 finding（Findings 分支），不是本测试要问的问题。
+        events = [self._ev("sandbox/mode", 1, {"mode": "normal"})]
+        _, family1 = match_behavior_gated(events, None)
+        self.assertEqual(family1["SV610"], {"status": "measured_zero"},
                          "SandboxModes 有覆盖时 SV610 不该因为 ApprovalDecisions 缺覆盖变成 unavailable")
 
     def test_approval_asked_alone_counts_toward_approval_decisions(self):
         """回归测试：只问过(approval/asked)、没等到 approval/decided——
-        与 Rust dsh_evidence.rs 这次一起修的同一个 bug 对齐。"""
+        与 Rust dsh_evidence.rs 这次一起修的同一个 bug 对齐。ApprovalDecisions
+        的证据包含 approval/asked，SV609 因此 available；SV609 对每次 asked
+        都产出一条 finding，所以是 findings 而不是 unavailable。"""
         events = [self._ev("approval/asked", 1, {"id": "a1", "toolName": "bash"})]
-        outcomes = rule_outcomes([], events)
-        self.assertEqual(outcomes["SV609"], {"status": "measured_zero"})
+        _, family1 = match_behavior_gated(events, None)
+        self.assertEqual(family1["SV609"]["status"], "findings",
+                         "approval/asked 覆盖了 ApprovalDecisions，SV609 不该 unavailable")
+        self.assertEqual(family1["SV609"]["count"], 1)
+
+    def test_sv610_unavailable_rule_never_leaks_a_finding(self):
+        """分叉路径回归（phase B 的**唯一**有意行为修正）：有 approval/decided
+        {allowed-once}、无 sandbox/mode——SV610 的 requires 只有 SandboxModes，
+        前置门控下检测器不跑，findings 必须不含 SV610。旧实现后置标注会漏出
+        这条 allowed-once，与 unavailable 自相矛盾。golden 语料里 SV610 恒
+        available，此分叉不在 goldens，必须用回归钉住新语义。"""
+        events = [
+            self._ev("turn/start", 1, {"turn": 1}),
+            self._ev("approval/decided", 2, {"id": "a1", "outcome": "allowed-once"}),
+            self._ev("turn/end", 3, {"turn": 1}),
+        ]
+        findings, family1 = match_behavior_gated(events, None)
+        self.assertNotIn("SV610", [f["rule"] for f in findings],
+                         "unavailable 的规则绝不报出 finding")
+        self.assertEqual(family1["SV610"]["status"], "unavailable")
+        self.assertIn("SandboxModes", family1["SV610"]["missing"])
 
     def test_sv612_treats_toolcalls_as_enhances_not_requires(self):
         events = [self._ev("turn/start", 1, {"turn": 1})]
-        outcomes = rule_outcomes([], events)
+        outcomes = trajectory_rule_outcomes([], events)
         self.assertEqual(outcomes["SV612"], {"status": "measured_zero"},
                          "TurnBoundaries 有覆盖时 SV612 不该因为 ToolCalls 缺覆盖变成 unavailable")
 
     def test_sv613_is_available_when_only_one_of_its_two_signals_has_coverage(self):
         events = [self._ev("tool/result", 1, {})]
-        outcomes = rule_outcomes([], events)
+        outcomes = trajectory_rule_outcomes([], events)
         self.assertEqual(outcomes["SV613"], {"status": "measured_zero"},
                          "ToolResults 有覆盖时 SV613 不该因为 TurnBoundaries 缺覆盖变成 unavailable")
 
     def test_sv614_is_available_when_only_one_of_its_two_signals_has_coverage(self):
-        events = [self._ev("sandbox/mode", 1, {"mode": "danger-full-access"})]
-        outcomes = rule_outcomes([], events)
+        events = [self._ev("sandbox/mode", 1, {"mode": "normal"})]
+        outcomes = trajectory_rule_outcomes([], events)
         self.assertEqual(outcomes["SV614"], {"status": "measured_zero"},
                          "SandboxModes 有覆盖时 SV614 不该因为 ApprovalDecisions 缺覆盖变成 unavailable")
 
     def test_sv611_through_sv614_findings_are_picked_up(self):
         events = [self._ev("tool/call", 1, {"name": "bash", "arguments": "ls"})]
         findings = [{"rule": "SV611", "severity": "warning"}]
-        outcomes = rule_outcomes(findings, events)
+        outcomes = trajectory_rule_outcomes(findings, events)
         self.assertEqual(outcomes["SV611"], {"status": "findings", "count": 1})
+
+    def test_match_behavior_still_returns_flat_findings(self):
+        """`match_behavior` 的薄封装契约不变：返回 findings 列表（门控后），
+        不自带三态。调用方要三态用 `match_behavior_gated`。"""
+        findings = match_behavior([self._ev("tool/call", 1, {"name": "bash", "arguments": "ls"})])
+        self.assertIsInstance(findings, list)
+        self.assertTrue(all(f["rule"].startswith("SV6") for f in findings))
 
 
 class TestGroup5Coverage(unittest.TestCase):

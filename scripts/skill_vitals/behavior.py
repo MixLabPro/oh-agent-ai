@@ -341,6 +341,12 @@ RULES = [
     BehaviorRule("SV610", "warning", "approval", _detect_sv610),
 ]
 
+# phase B 的族划分（与 Rust behavior.rs 对齐）：family ①（SV601–610，单事件
+# 规则）走前置门控 `match_behavior_gated`；family ④（SV611–614，轨迹级检测）
+# 照旧后置 `trajectory_rule_outcomes`。两族合并才是 14 键的 outcomes。
+_FAMILY1_CODES = tuple(r.rule_id for r in RULES)
+_TRAJECTORY_CODES = ("SV611", "SV612", "SV613", "SV614")
+
 
 # P3 group①（docs/RUNTIME_EVIDENCE_CONTRACT.md §10）：SV601–610 对信号的
 # 依赖声明。从每条 `_detect_svNNN` **实际读什么事件类型**倒推出来——不是从
@@ -372,20 +378,23 @@ RULE_REQUIRES = {
 _OR_REQUIRES_CODES = ("SV613", "SV614")
 
 
-def rule_outcomes(findings, events):
-    """`findings`（已经算好、不改）+ `events` → 每条规则的三态结果
-    （§10：N findings / measured-zero / unavailable），JSON-ready 字典。
-    与 Rust `behavior.rs::rule_outcomes` + `rule_outcomes_json` 逐字节对齐。
+def trajectory_rule_outcomes(findings, events):
+    """family ④（SV611–614）的三态结果（§10：N findings / measured-zero /
+    unavailable），后置标注——trajectory 检测（`match_trajectory`）照旧无条件
+    跑，`findings` 喂进来，对每条规则按 coverage 判三态。与 Rust
+    `behavior.rs::trajectory_rule_outcomes` + `rule_outcomes_json` 逐字节对齐。
+    family ① 的门控三态在 `match_behavior_gated`，这里只管 SV611–614。
 
     `events` 必须是**分叉之后**的事件（调用方负责先 `post_fork`）——覆盖率
     不能算进分叉前的历史,否则一个信号的证据全部落在分叉前会被误判成"有
-    覆盖",而 findings 从这些分叉前事件里从来没被计过数（match_behavior 内部
-    自己会 post_fork，但覆盖率是这里单独算的，两边必须用同一批"审计范围内"
-    的事件，不能算错口径）。
+    覆盖",而 findings 从这些分叉前事件里从来没被计过数（match_trajectory 不
+    post_fork，覆盖率是这里单独算的，必须用同一批"审计范围内"的事件）。
     """
     coverage = signal_coverage(events)
     by_rule = {}
     for code, requires in RULE_REQUIRES.items():
+        if code not in _TRAJECTORY_CODES:
+            continue
         missing = [s for s in requires if coverage.get(s, 0) == 0]
         is_unavailable = (len(missing) == len(requires)) if code in _OR_REQUIRES_CODES else bool(missing)
         if is_unavailable:
@@ -441,11 +450,47 @@ def match_behavior(events, workspace_root=None):
 
     纯函数、确定性：同一事件流重放结果逐字节一致。非 dict 的条目跳过；
     缺 seq/time 时以 null 落位，绝不伪造 0 次。
+
+    phase B（先滤后调）：requires 任一信号零覆盖的规则**不跑检测器**——
+    unavailable 的规则绝不出现在 findings 里。薄封装，等价
+    `match_behavior_gated(events, ws)[0]`；需要三态结果的调用方直接用后者。
     """
-    # 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
-    # branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
-    # 对同一笔钱/同一批行为重复计数（见 util.fork_boundary 的实测数据）。
+    return match_behavior_gated(events, workspace_root)[0]
+
+
+def match_behavior_gated(events, workspace_root=None):
+    """family ①（SV601–610）的门控产物：`(findings, outcomes)` 双面。
+
+    镜像 Rust `match_behavior_canonical` + `flatten`：前置门控 requires 任一
+    信号零覆盖 → Unavailable（不跑检测器）；available 的规则跑检测器，命中即
+    一条 finding。outcomes 与 findings **天然自洽**——unavailable 的规则绝不
+    会有 finding（旧实现先跑满检测器、后置标注，会漏出 unavailable 规则的
+    finding：见 `test_sv610_unavailable_rule_never_leaks_a_finding`）。
+
+    `events` 只审计分叉之后——从上游会话 branch 时抄进日志的那段历史属于上游
+    自己那份审计，在这里再算一遍就是对同一批行为重复计数（util.fork_boundary
+    的实测数据）。
+
+    返回：
+      findings  单事件规则（SV601–610）的 finding 列表，flatten 序
+      outcomes  SV601–610 的三态字典（键序 = RULES 表序）
+    """
+    # 只看分叉之后的事件（见上面 docstring）。post_fork 幂等，`audit_session_log`
+    # 已经传分叉后事件时这里是 no-op。
     events = post_fork(events)
+    coverage = signal_coverage(events)
+    # 前置门控：先算每条的 unavailable 判定，检测器只对 available 的规则跑。
+    unavailable = {}
+    for code, requires in RULE_REQUIRES.items():
+        if code not in _FAMILY1_CODES:
+            continue
+        missing = [s for s in requires if coverage.get(s, 0) == 0]
+        if missing:
+            unavailable[code] = {
+                "status": "unavailable",
+                "missing": missing,
+                "reason": "no evidence for required signal(s) in this session",
+            }
     findings = []
     coords = Coords()
     for event in events:
@@ -454,6 +499,8 @@ def match_behavior(events, workspace_root=None):
         # 边界事件（turn/step start·end）先推进坐标，再对本事件求值。
         coords.observe(event)
         for rule in RULES:
+            if rule.rule_id in unavailable:
+                continue
             evidence = rule._detect(event, workspace_root)
             if evidence is None:
                 continue
@@ -477,7 +524,22 @@ def match_behavior(events, workspace_root=None):
                 # share_the_same_key_order` 逐字节看守）。
                 "run_end_seq": None,
             })
-    return findings
+    # 按 RULES 表序（SV601..SV610）填三态：unavailable 的取上面门控结果，
+    # available 的按 findings 计数——键序必须 = RULES 表序，不能 unavailable
+    # 在前、available 在后，否则 outcomes 的键序跟 Rust rule_outcomes_json
+    # （SV601..SV614）不一致，差分测试逐字节红。
+    outcomes = {}
+    for rule in RULES:
+        code = rule.rule_id
+        if code in unavailable:
+            outcomes[code] = unavailable[code]
+            continue
+        matched = [f for f in findings if f.get("rule") == code]
+        if matched:
+            outcomes[code] = {"status": "findings", "count": len(matched)}
+        else:
+            outcomes[code] = {"status": "measured_zero"}
+    return findings, outcomes
 
 
 def audit_session_log(path):
@@ -526,9 +588,12 @@ def audit_session_log(path):
         return None
     # 工作区根来自 session header 的 cwd；缺失时 None → SV605 退化为纯绝对路径启发式。
     events = session["execution_events"] or []
-    # 单事件规则（SV601–610）在前、轨迹级检测（SV611–614）追加在后，字节序稳定。
-    findings = match_behavior(events, session.get("cwd"))
-    findings.extend(match_trajectory(events))
+    # 单事件规则（SV601–610）前置门控产出 findings + family ① 三态；轨迹级
+    # 检测（SV611–614）照旧后置、追加在后，字节序稳定。先滤后调——unavailable
+    # 的规则绝不出现在 findings 里（见 match_behavior_gated 的 SV610 分叉回归）。
+    findings, family1_outcomes = match_behavior_gated(events, session.get("cwd"))
+    trajectory_findings = match_trajectory(events)
+    findings.extend(trajectory_findings)
     # 三个消费者共用 usage_events（各取所需，不认识的事件类型自然跳过）
     usage_events = session["usage_events"] or []
     usage = token_by_model(usage_events)
@@ -556,19 +621,25 @@ def audit_session_log(path):
         "approvals": approval_latencies(events),
         "hooks": hook_executions(events),
     }
-    # P3 group①：覆盖率必须算在分叉之后的事件上——match_behavior 内部自己会
-    # post_fork，这里单独再 post_fork 一次（幂等，见 util.post_fork）算覆盖率，
-    # 不能直接用 events（分叉前）算，否则证据全部落在分叉前的信号会被误判成
-    # "有覆盖"。与 Rust src/behavior.rs 那边同一个理由、同一个修法。
-    outcomes = rule_outcomes(findings, post_fork(events))
+    # P3 group①：family ① 的门控三态已由 match_behavior_gated 算出（它内部用
+    # 分叉后的 coverage 判 unavailable）；family ④ 是后置标注，覆盖率必须算在
+    # 分叉之后的事件上——match_trajectory 不 post_fork，这里单独 post_fork 一次
+    # （幂等，见 util.post_fork）喂给 trajectory_rule_outcomes，不能直接用 events
+    # （分叉前）算，否则证据全部落在分叉前的信号会被误判成"有覆盖"。与 Rust
+    # src/behavior.rs 那边同一个理由、同一个修法。
+    pf = post_fork(events)
+    trajectory_outcomes = trajectory_rule_outcomes(trajectory_findings, pf)
+    # 键序 = family ①（SV601–610，RULES 表序）+ family ④（SV611–614）——
+    # 合并成一份 14 键的 outcomes，与 Rust rule_outcomes_json 同序。
+    outcomes = {**family1_outcomes, **trajectory_outcomes}
     # P3 group②：同样道理，usage_coverage 也要用分叉之后的 usage_events。
     usage_coverage = usage_signal_status(post_fork(usage_events))
-    # P3 group③：duration_coverage 用同一份 post_fork(events)——跟
-    # rule_outcomes 同源（execution 事件派生的信号）。
-    dur_coverage = duration_coverage(duration, post_fork(events))
+    # P3 group③：duration_coverage 用同一份 pf——跟 trajectory_outcomes 同源
+    # （execution 事件派生的信号）。
+    dur_coverage = duration_coverage(duration, pf)
     # P3 group⑤：skill/subagent/compaction 各自对着单一信号判三态；waste 是
-    # ToolCalls/ToolResults 任一有证据即可。都用同一份 post_fork(events)。
-    cov = signal_coverage(post_fork(events))
+    # ToolCalls/ToolResults 任一有证据即可。都用同一份 pf。
+    cov = signal_coverage(pf)
     skill_coverage = array_signal_status(len(skill), "SkillInvocations", cov)
     subagents_coverage = array_signal_status(len(subagents), "SubagentSpawns", cov)
     compaction_count = len(compaction.get("compactions") or []) + len(compaction.get("prunes") or [])

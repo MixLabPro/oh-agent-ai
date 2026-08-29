@@ -1357,6 +1357,34 @@ events, not the pre-fork `execution_events` `dsh_evidence`'s `CanonicalSession`
 carries for other consumers — otherwise a signal whose only evidence is
 pre-fork history reads as "covered" when the audited findings never saw it.
 
+**Phase B (Vite design lesson, filter-before-handler)**: P3's group ① was
+post-hoc annotation — `match_behavior` ran all 10 detectors unconditionally,
+then `rule_outcomes` "补" an outcome per rule from `findings` + `Coverage`.
+That order is the exact anti-pattern Vite's `filter-before-handler` warns
+against, and it had shipped a real bug: SV610 reads both `sandbox/mode` and
+`approval/decided`, but its `requires` is only `SandboxModes` — a session with
+`approval/decided{allowed-once}` and no `sandbox/mode` produced an SV610
+finding *and* an `unavailable` outcome for the same rule (findings array and
+`rule_outcomes` self-contradictory). The corpus couldn't catch it (5
+`sandbox/mode` events in the golden fixture make SV610 always available), so
+the fix carries a dedicated regression on both sides. Phase B changed family
+① to **pre-gate**: the dispatcher `match_behavior_canonical(&CanonicalSession)`
+checks `requires ⊆ coverage` *before* running the detector (missing → 
+`Unavailable`, detector never runs), and the 10 detectors were rewritten to
+iterate the adapter-populated timelines (`Timeline<T>` in `evidence.rs`
+§11.5) — signature `fn(&CanonicalSession) -> RuleOutcome`, reading
+`session.tool_calls`/`tool_results`/`approvals`/`sandbox_modes` instead of raw
+DSH events. `match_behavior(&[Value], ws)` is retained as a shim (wasm
+`audit_events` unchanged); `flatten()` reconstructs the old (event, rule)
+byte order via a private `__ord` key (stable sort by event ordinal, stripped
+before output). `rule_outcomes` was split: family ① comes from the gate,
+family ④ (SV611–614) stays post-hoc in `trajectory_rule_outcomes`. Golden /
+differential byte-identity is preserved (all family ① signals covered in the
+corpus); the *only* intended behavior change is the SV610 divergence fix. The
+binary also fixed a latent cwd bug alongside (post-fork canonical was built
+with `None` as workspace root, silently degrading SV605 to the absolute-path
+heuristic).
+
 **② cost fold ✅**: unlike SV601–610, this family (`token_by_model`/
 `request_metrics`/`context_composition`/`cost_report`) already had its own
 anti-fabrication discipline predating the evidence model —
@@ -1427,21 +1455,20 @@ treating it like one would have silently reported `measured_zero` always,
 regardless of real content.
 
 **Note on `reverse_project` (not deleted, contrary to the original P2 row's
-"deleted when P3 completes")**: all 5 groups land coverage/outcome
+"deleted when P3 completes")**: P3's five groups landed coverage/outcome
 annotations *alongside* the existing `findings`/`usage`/`duration`/etc.
 outputs — `detect_svNNN`, `token_by_model`, the duration pairing functions,
 and `skill_invocations`/`subagent_spawns`/`compaction_events`/`waste`
-detectors all still consume the legacy raw-event shape that `reverse_project`
-reconstructs, not `CanonicalSession`/`Signal`-typed data directly. Every
-group here chose the smaller, safer interpretation of "read Signals" (an
-additive coverage check reusing already-computed output) over rewriting the
-detection internals to iterate `Signal`-typed structures — the existing test
-suite (hit/miss tests, byte-for-byte parity tests, CLI differentials) pins
-the current event-consuming implementations directly, and rewriting them
-was judged out of proportion to the value for a single-host (DSH) system.
-Consequently `reverse_project` is retained; deleting it would require a
-genuinely different, larger effort (rewriting the detectors themselves), not
-covered by this P3 pass.
+detectors all consumed the legacy raw-event shape that `reverse_project`
+reconstructs, not `CanonicalSession`/`Signal`-typed data directly. Phase B
+narrowed that: family ① detectors (SV601–610) were rewritten to iterate
+`CanonicalSession`'s timelines, so their findings no longer touch the raw
+shape. But `reverse_project` is still retained — `match_trajectory`
+(SV611–614), `token_by_model`/`request_metrics`/`context_composition`,
+`compaction_events`, `detect_structural_waste`, `subagent_spawns`,
+`skill_invocations`, and the five duration pairing functions all still read
+the legacy shape. Deleting `reverse_project` waits for family ④ and the
+remaining signals to migrate, not for this pass.
 
 All five groups verified the same way: `cargo test`, `cargo clippy -D
 warnings`, full Python suite, `SKILL_VITALS_BIN=<rust> python3 -m unittest

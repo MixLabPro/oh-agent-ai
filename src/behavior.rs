@@ -10,8 +10,8 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 pub use skill_vitals_core::behavior::{
-    array_signal_status, behavior_gate, match_behavior, rule_outcomes, rule_outcomes_json,
-    waste_coverage,
+    array_signal_status, behavior_gate, flatten, match_behavior_canonical, rule_outcomes_json,
+    trajectory_rule_outcomes, waste_coverage,
 };
 use skill_vitals_core::evidence::Signal;
 
@@ -85,11 +85,11 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     if session.get("degraded").and_then(|v| v.as_str()).is_some() {
         return None;
     }
-    // P2（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：先把已经抽好的事件数组
-    // 折成 evidence::CanonicalSession + 原始事件的捆绑（core::dsh_evidence），
-    // 再反向投影回下面这套老形状——纯粹为了证明新模型不丢任何行为
-    // （goldens/differential 必须字节不变）。CanonicalSession 本身这里还
-    // 没有消费者，P3 迁移规则读 Signal 之后这个反向投影就删掉。
+    // P2（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：先把已经抽好的事件数组折成
+    // evidence::CanonicalSession（core::dsh_evidence），再反向投影回老形状的
+    // events/usage_events/cwd——下游 trajectory/usage/compaction/waste/
+    // subagent/skill/duration 全读老形状，只有 family ① 规则（SV601–610，
+    // phase B 先滤后调）读 canonical。两个面都必须字节不变。
     let execution_events: Vec<Value> = session
         .get("execution_events")
         .and_then(|v| v.as_array())
@@ -107,34 +107,39 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
         .unwrap_or("unknown")
         .to_string();
     let dsh_evidence = skill_vitals_core::dsh_evidence::build_dsh_evidence(
-        execution_events, usage_events_raw, cwd_raw, session_id,
+        execution_events, usage_events_raw, cwd_raw.clone(), session_id,
     );
-    let (events, usage_events, cwd_owned) = skill_vitals_core::dsh_evidence::reverse_project(&dsh_evidence);
-    // 工作区根来自 session header 的 cwd；缺失时 None → SV605 退化为纯绝对路径启发式。
-    let cwd = cwd_owned.as_deref();
-    // 单事件规则（SV601–610）在前、轨迹级检测（SV611–614）追加在后，字节序稳定。
-    let mut findings = match_behavior(&events, cwd);
-    findings.extend(skill_vitals_core::trajectory::match_trajectory(&events));
-    // P3 group①：SV601–610 每条规则的 requires 对着 coverage 一查——但
-    // `dsh_evidence.canonical.coverage` 是从**分叉前**的 execution_events 算的
-    // （build_dsh_evidence 在 post_fork 过滤之前调用，服务于 compaction/
-    // subagent/skill/duration 等本来就该看到完整历史的消费者，不能改）。
-    // findings 只算分叉之后（match_behavior 内部会 post_fork）——如果一个
-    // signal 的证据全部落在分叉前，直接复用 dsh_evidence 的 coverage 会把
-    // 本该 Unavailable 的规则误判成 MeasuredZero。单独用 post_fork 之后的
-    // 事件重新算一份 coverage,只喂给 rule_outcomes,不影响 events/
-    // dsh_evidence 本身（post_fork 是幂等的，见 util.rs 注释，这里是"只为了
-    // 拿 coverage 而已"的第二次调用，不是改变已有语义）。
-    // P3 group②：usage_events 也要 post_fork 之后再算 coverage，跟
-    // token_by_model/request_metrics/context_composition 自己内部 post_fork
-    // 的口径对齐——同一份 dsh_evidence 顺带服务 rule_outcomes（执行事件）和
-    // usage_coverage（用量事件），两路证据都是"审计范围内"的，不是分叉前的。
+    let (events, usage_events, _cwd_owned) = skill_vitals_core::dsh_evidence::reverse_project(&dsh_evidence);
+    // P3 group①：SV601–610 前置门控 + SV611–614 后置标注，三态都基于**分叉后**
+    // 的证据判——但 `dsh_evidence`（上面）是从分叉前的 execution_events 建的，
+    // 服务于 compaction/subagent/skill/duration 那些本来就该看到完整历史的
+    // 消费者，不能动。family ① 只看审计范围内（分叉后）的事件，所以这里用
+    // post_fork 重新 build 一份 canonical，供门控 + flatten + coverage 共用。
+    // post_fork 幂等（util.rs 注释），这第二次 build 只是"拿审计范围内证据"，
+    // 不改已有语义。
+    // **这份 canonical 的 workspace 根必须传真 cwd**——旧代码这里传 None，会让
+    // SV605 退化成纯绝对路径启发式，漏掉工作区内相对路径的写文件（cwd bug）；
+    // 门控 dispatcher 现在直接吃这份 canonical，SV605 的 workspace_root 判断
+    // 从此依赖这一行。
     let post_fork_events = skill_vitals_core::util::post_fork(&events);
     let post_fork_usage_events = skill_vitals_core::util::post_fork(&usage_events);
     let post_fork_evidence = skill_vitals_core::dsh_evidence::build_dsh_evidence(
-        post_fork_events, post_fork_usage_events, None, String::new(),
+        post_fork_events, post_fork_usage_events, cwd_raw.clone(), String::new(),
     );
-    let rule_outcomes_val = rule_outcomes_json(&rule_outcomes(&findings, &post_fork_evidence.canonical.coverage));
+    // 单事件规则（SV601–610）前置门控产出 findings；轨迹级检测（SV611–614）
+    // 追加在后。字节序稳定：flatten 用私有键 `__ord`（事件下标）重建
+    // (event, rule) 序，同事件多命中按 dispatcher 表序（stable sort）。
+    let family1_outcomes = match_behavior_canonical(&post_fork_evidence.canonical);
+    let trajectory_findings = skill_vitals_core::trajectory::match_trajectory(&events);
+    let trajectory_outcomes =
+        trajectory_rule_outcomes(&trajectory_findings, &post_fork_evidence.canonical.coverage);
+    let mut findings = flatten(&family1_outcomes);
+    findings.extend(trajectory_findings);
+    // 三态结果合并成一份 `--json` 的 outcomes：family ①（门控）在前、family ④
+    // （后置）在后，键序即 rule_specs 的 SV601..SV614。
+    let mut all_outcomes = family1_outcomes;
+    all_outcomes.extend(trajectory_outcomes);
+    let rule_outcomes_val = rule_outcomes_json(&all_outcomes);
     let usage_coverage_val = skill_vitals_core::usage::usage_signal_status(&post_fork_evidence.canonical.coverage);
     // 三个消费者共用 usage_events（各取所需，不认识的事件类型自然跳过）：
     // token_by_model 按模型分桶、request_metrics 保留逐请求分辨率、
