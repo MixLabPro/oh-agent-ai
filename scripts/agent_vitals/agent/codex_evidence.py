@@ -29,6 +29,8 @@ evidence 把 `canonical`（§12 规定不持有任何宿主专属 payload）和�
 原始条目捆在一起——将来把 SV 规则迁到 Codex 上时，规则引擎需要原始条目。
 """
 
+import re
+
 # 19 个 Signal 的声明序——与 Rust `codex_evidence.rs::ALL_SIGNALS` 同名同序。
 # `signals` 数组 / `coverage` 字典的输出顺序都靠这份显式表对齐，不靠 Python
 # 的任意 set 迭代序。
@@ -125,10 +127,10 @@ KNOWN_RESPONSE_TYPES = frozenset((
 ))
 
 # §13 没有 Codex 列 / 明确 unavailable 的信号——照 DSH 的规矩显式记全零
-# （不进 SignalSet），不能编一个非零数字出来。
+# （不进 SignalSet），不能编一个非零数字出来。SandboxModes 不在其中：2026-08
+# 确认 turn_context.sandbox_policy 持久化，已改 measured（见 derive_coverage）。
 _UNAVAILABLE_SIGNALS = (
     "StepBoundaries",
-    "SandboxModes",
     "SandboxPolicy",
     "NetworkAccess",
     "UserPrompts",
@@ -320,6 +322,12 @@ def derive_coverage(items):
             # thread_settings_applied 同源不同载体，数它的存在性即可。
             if "approval_policy" in payload:
                 _bump(coverage, "ApprovalPolicy", "measured")
+            # sandbox_policy 同源：真实线格式是对象 `{type}`、旧 fixture 是
+            # 字符串，两态都认。populate 侧把它填进 sandbox_modes timeline，
+            # 这里必须同步计数——coverage 与 timeline 同一来源，否则门控
+            # 读 timeline 非空而 coverage 全零，两条账对不上。
+            if _has_sandbox_policy(payload):
+                _bump(coverage, "SandboxModes", "measured")
         elif top == "compacted":
             _bump(coverage, "Compaction", "measured")
         # session_meta / world_state / inter_agent_communication_metadata 不喂
@@ -361,17 +369,339 @@ _TIMELINE_KEYS = (
 )
 
 
-def _empty_timelines():
-    """五个 timeline 的**唯一**构造器：任何 canonical 都从这里拿，不散落各处。
-
-    Codex 的 timeline 恒为空——不是 bug，是 §1 反编造的诚实结果：Codex wire
-    格式凑不齐 observation payload（`tool_calls` 缺 `args_text`、`tool_results`
-    缺字符串 `error_code`、`turns` 缺数值 `turn`/`seq`、`approvals` 缺
-    asked/decided、`sandbox_modes` 缺 `mode` 事件，只有 policy 字段）。硬填即
-    编造零。门控现在读 timeline 非空而非 coverage（`trajectory.rs` /
-    `behavior.rs` 的 `match_*_canonical`），所以空 timeline 会诚实出 Unavailable。
+def _has_sandbox_policy(payload):
+    """`turn_context.sandbox_policy` 的存在性判定（覆盖计数用，不取值）：真实线格式
+    是对象 `{type:"danger-full-access"}`，旧 fixture 是字符串 `"workspace-write"`，
+    两态都认。与 `_sandbox_policy_mode`（populate 取值）是同一个判定的两个读法。
     """
-    return {key: {"entries": []} for key in _TIMELINE_KEYS}
+    sp = payload.get("sandbox_policy")
+    if isinstance(sp, str):
+        return True
+    if isinstance(sp, dict):
+        return "type" in sp
+    return False
+
+
+def _sandbox_policy_mode(payload):
+    """取 `sandbox_policy` 的模式字符串：对象取 `.type`，字符串取自身，其他/缺失 None。"""
+    sp = payload.get("sandbox_policy")
+    if isinstance(sp, str):
+        return sp
+    if isinstance(sp, dict):
+        mode = sp.get("type")
+        return mode if isinstance(mode, str) else None
+    return None
+
+
+def _command_text(item):
+    """从 `CommandExecution.item.command` 数组抽命令文本：剥掉 `/bin/zsh -lc …` /
+    `bash -c …` 这类 shell 前缀（解释器 + 紧跟的 `-*` 标志段），剩下的 join 成串。
+    剥前缀是让 SV601-603 的正则在命令本体上匹配，不是把命令改掉。
+    """
+    command = item.get("command")
+    if not isinstance(command, list):
+        return ""
+    parts = [c for c in command if isinstance(c, str)]
+    if parts:
+        basename = parts[0].rsplit("/", 1)[-1]
+        if basename in ("zsh", "bash", "sh", "dash", "ksh"):
+            rest = parts[1:]
+            if rest and rest[0].startswith("-"):
+                rest = rest[1:]
+            parts = rest
+    return " ".join(parts)
+
+
+def _error_code_from(error):
+    """task_complete 的 `error` 对象 → 字符串错误码的防御性抽取。真实日志/fixture 全
+    是 null（本机 51 份语料无一份带非 null 的 task_complete.error），所以这只看做
+    结构保险：有 `codex_error_info.code` 用它的，否则退化成稳定标记 "error"——
+    宁可语义含糊也不能在这里抛异常或编造一个不存在的码。
+    """
+    if isinstance(error, str) and error:
+        return error
+    if isinstance(error, dict):
+        nested = error.get("codex_error_info")
+        if isinstance(nested, dict):
+            code = nested.get("code")
+            if isinstance(code, str):
+                return code
+        for key in ("code", "type"):
+            code = error.get(key)
+            if isinstance(code, str):
+                return code
+        return "error"
+    return "error"
+
+
+def _output_error_code(error):
+    """`function_call_output` 的 `error`（真实日志全 null）→ `error_code` 的稳定性标记：
+    非 null 即 "error"。SV613(b) 只判 `is_some()`，SV607/608 只认 DSH 码，
+    所以「有没有失败」这条轴是诚实的，具体码值不值得逐对象猜。
+    """
+    return None if error is None else "error"
+
+
+def _is_i64(value):
+    """`serde_json::as_i64` 的镜像：只认 int；bool 是 int 子类必须排除，
+    浮点（`128000.0` 之类）也一样挡在门外（Rust `as_i64` 对两者都返回 None）。"""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _timeline_entry(observation, seq, turn, call_id, ordinal):
+    """一条 timeline entry 的构造器。Codex 无 seq/step：`seq` 用 enumerate 序数当
+    合成 seq（`NativeId::Seq` 注释「适配器内部合成的序号」的正当用法），`time`/`step`
+    留 None（`started_at` 秒 vs DSH 毫秒的时间轴统一是 timeaxis 阶段的事）。
+    """
+    return {"observation": observation, "seq": seq, "time": None, "turn": turn,
+            "step": None, "call_id": call_id, "ordinal": ordinal}
+
+
+def _next_turn_ordinal(ordinals, turn_id):
+    """按 task_started 出现序给 turn_id 分配合成序数：见过的返回旧号，新的分配
+    `len(ordinals)`（保证 0,1,2,… 连续且按出现序递增）。
+    """
+    if turn_id in ordinals:
+        return ordinals[turn_id]
+    ordinal = len(ordinals)
+    ordinals[turn_id] = ordinal
+    return ordinal
+
+
+_EXEC_COMMAND_RE = re.compile(
+    r"""exec_command\(\s*\{\s*["']cmd["']\s*:\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')""",
+    re.S,
+)
+
+
+def _cmd_from_js_input(input_text):
+    """Legacy 回退：从 `custom_tool_call` 的 `input`（JS 片段）里挖真 shell 命令。
+
+    `custom_tool_call{name:"exec"}` 是 **JS 沙箱工具**，不是 shell——真实日志 7/25
+    的 679 次工具执行里，`input` 真跑的是 exec_command（474）、apply_patch（127）、
+    write_stdin（61）、view_image（23）、web__run（8）、image_gen（2）、
+    mcp__node_repl__js（1）。只有字面量 `exec_command({"cmd":"…"})` 才是 shell 命令，
+    翻译成 `bash` 有依据；其余（JS 动态拼 cmd / 非 shell 工具）诚实跳过——SV601-603
+    只认 `name=="bash"`，不会在 apply_patch 上误报。
+
+    quote-aware：值以 `"` 开就吃到匹配的 `"`（允许 `\\"`），以 `'` 开就吃到 `'`。
+    旧写法 `[^"']` 会在值内嵌的单引号处截断，把 `sed -n '1,240p' '…'` 截成
+    `sed -n ` 这种看着像命令的残片——args_text 必须取完整命令，正则得认全引号。
+    与 Rust `exec_command_cmd`（`codex_evidence.rs`）同一模式、同一组号。
+    """
+    m = _EXEC_COMMAND_RE.search(input_text)
+    if not m:
+        return None
+    # 二选一分支只有一个组参与匹配：双引号值落 group 1、单引号值落 group 2。
+    return m.group(1) if m.group(1) is not None else m.group(2)
+
+
+def _has_command_execution(items):
+    """整份 session 有没有 CommandExecution？populate 的线格式探测。
+
+    - 有（Paginated，真实 8/27：127 CommandExecution + 255 custom_tool_call）→
+      CommandExecution 是 tool_calls 主源，custom_tool_call 是它的影子（call_id
+      与 item.id 无 join key），跳过，否则双重计数破坏 SV611。
+    - 没有（Legacy，真实 7/25：0 item_completed，679 次工具执行全是
+      custom_tool_call）→ 回退到 `_cmd_from_js_input` 从 input JS 里挖真 shell 命令。
+
+    与 Rust `populate_codex_timelines` 开头的 `has_command_execution` 同逻辑。
+    """
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("type") != "item_completed":
+            continue
+        item_obj = payload.get("item")
+        if isinstance(item_obj, dict) and item_obj.get("type") == "CommandExecution":
+            return True
+    return False
+
+
+def _populate_codex_timelines(items):
+    """跑一遍 `items`，把 Codex 线格式翻译成五个 host-neutral timeline（§11.5）。
+    仿 Rust `populate_codex_timelines`（`crates/agent-vitals-core/src/codex_evidence.rs`）
+    的状态机写法，与它逐条对齐：
+    - `sandbox_modes`：顶层 turn_context 的 sandbox_policy（对象/字符串两态）→ 一条。
+    - `tool_calls`：`CommandExecution` → `name:"bash"` + 命令文本；`function_call` →
+      原生工具名 + arguments。`custom_tool_call` 看线格式：有 CommandExecution 时它是
+      影子、**跳过**（双重计数破坏 SV611）；没有（Legacy，7/25 实测）→ 回退到
+      `_cmd_from_js_input` 挖 `exec_command({cmd})` 真 shell 命令，挖不到的（apply_patch
+      等非 shell 工具、JS 动态拼 cmd）诚实跳过。
+    - `tool_results`：`CommandExecution` → `exit_code≠0` 时 `"exit_code:N"`；
+      `function_call_output` → `.error` 非 null 时 `"error"`。**跳过**
+      `custom_tool_call_output`（影子）；Legacy 回退的 **custom_tool_call 路径不填**——
+      同源 output.error 实测恒 null，无 exit/error 源，用 None 填充只是假装
+      MeasuredZero。规则最终结果看整份 session：function_call_output 路径照常填
+      tool_results（error 恒 null → None），所以真机 Legacy 的 SV607/608 是
+      MeasuredZero 不是 Unavailable（真值表见 build_codex_evidence 注释）。
+    - `turns`：task_started 开、task_complete 收，合成 turn 序数；turn 内
+      CommandExecution 的 (name, args_text) 进 `sig`（SV612 死循环检测的输入）。
+      `function_call` 无 turn_id，只进 tool_calls、不进任何 turn 的 sig。
+    - `approvals`：恒空——Codex 无 asked/decided 生命周期（approval_policy 是
+      策略不是审批事件），「故意空」的构造点，比传一个永不填充的参数更诚实。
+
+    `exec`→`bash` / `exit_code`→`error_code` 是 L2 适配器持有的宿主词表翻译；
+    诚实代价与真值表见 Rust `build_codex_evidence` 的注释（同一份，不另抄）。
+    """
+    tool_calls, tool_results, sandbox_modes, turns = [], [], [], []
+    turn_ordinals = {}
+    pending = {}
+    # 未关闭 turn 的开启序——EOF 兜底时按这个序 flush，保证 turns 输出顺序确定
+    # （dict 迭代序是插入序，但 HashMap 无序，这里显式留 open_order 与 Rust 对齐）。
+    open_order = []
+
+    # 线格式探测：整份 session 有没有 CommandExecution？决定 custom_tool_call 是
+    # 影子（跳过）还是主源（回退挖 cmd）。coverage 侧 custom_tool_call 本来就计
+    # ToolCalls measured（见 derive_coverage），回退是把 timeline 补到与覆盖一致。
+    has_command_execution = _has_command_execution(items)
+
+    for ordinal, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        seq = ordinal
+        inner = payload.get("type")
+        if not isinstance(inner, str):
+            inner = ""
+        top = item.get("type")
+        if not isinstance(top, str):
+            top = ""
+
+        if top == "turn_context":
+            mode = _sandbox_policy_mode(payload)
+            if mode is not None:
+                sandbox_modes.append(_timeline_entry(
+                    {"mode": mode}, seq, None, None, ordinal))
+        elif top == "event_msg" and inner == "task_started":
+            turn_id = payload.get("turn_id")
+            if not isinstance(turn_id, str):
+                turn_id = ""
+            turn = _next_turn_ordinal(turn_ordinals, turn_id)
+            open_order.append(turn_id)
+            pending[turn_id] = {
+                "turn": turn, "sig": [], "last_seq": seq,
+                "end_reason_kind": None, "end_error_code": None,
+                "end_seq": None, "end_time": None,
+            }
+        elif top == "event_msg" and inner == "task_complete":
+            turn_id = payload.get("turn_id")
+            if not isinstance(turn_id, str):
+                turn_id = ""
+            started_at = payload.get("started_at")
+            if not _is_i64(started_at):
+                started_at = None
+            error = payload.get("error")
+            p = pending.pop(turn_id, None)
+            if p is not None:
+                p["last_seq"] = seq
+                p["end_seq"] = seq
+                p["end_time"] = started_at
+                if error is not None:
+                    p["end_reason_kind"] = "error"
+                    p["end_error_code"] = _error_code_from(error)
+                turns.append(_timeline_entry(
+                    {
+                        "turn": p["turn"], "sig": p["sig"],
+                        "last_seq": p["last_seq"],
+                        "end_reason_kind": p["end_reason_kind"],
+                        "end_error_code": p["end_error_code"],
+                        "end_seq": p["end_seq"], "end_time": p["end_time"],
+                    },
+                    seq, p["turn"], None, ordinal))
+        elif top == "event_msg" and inner == "item_completed":
+            it = payload.get("item")
+            item_type = it.get("type") if isinstance(it, dict) else None
+            if item_type == "CommandExecution" and isinstance(it, dict):
+                name = "bash"  # exec → bash 翻译（L2 适配器宿主词表）
+                args = _command_text(it)
+                turn_id = payload.get("turn_id")
+                turn_coord = None
+                if isinstance(turn_id, str):
+                    turn_coord = turn_ordinals.get(turn_id)
+                call_id = it.get("id")
+                call_id = call_id if isinstance(call_id, str) else None
+                tool_calls.append(_timeline_entry(
+                    {"name": name, "args_text": args}, seq, turn_coord, call_id,
+                    ordinal))
+                # 结果：exit_code 非零 → 合成码 "exit_code:N"（SV613(b) 认 is_some，
+                # SV607/608 的 DSH 码集不会误报）；零 → None（成功）。
+                exit_code = it.get("exit_code")
+                if not _is_i64(exit_code):
+                    exit_code = None
+                error_code = None
+                if exit_code is not None and exit_code != 0:
+                    error_code = "exit_code:%s" % exit_code
+                tool_results.append(_timeline_entry(
+                    {"error_code": error_code}, seq, turn_coord, None, ordinal))
+                # 归属 turn 的 sig（按 payload.turn_id 直接归属，不依赖状态机：
+                # 该 turn 的 task_started 先到，pending 里必然在）。
+                if isinstance(turn_id, str) and turn_id in pending:
+                    pending[turn_id]["sig"].append((name, args))
+        elif top == "response_item" and inner == "custom_tool_call":
+            # Legacy 回退：有 CommandExecution 时这分支是影子、整支跳过（见上
+            # has_command_execution 注释）；没有时挖 input 里 exec_command({cmd})。
+            # 只挖得出真 shell 命令的才翻成 bash；**本路径不填 tool_results**——同源
+            # custom_tool_call_output.error 实测恒 null，无 exit/error 源，用 None
+            # 填充只是假装 MeasuredZero。规则最终结果看整份 session：function_call_
+            # output 路径照常填 tool_results（error 恒 null → None），所以真机 Legacy
+            # 的 SV607/608 是 MeasuredZero 不是 Unavailable（真值表见 build_codex_
+            # evidence 注释）；不进 turn sig（Legacy custom_tool_call 无 turn_id，
+            # 679/679 实测）。
+            if not has_command_execution:
+                input_text = payload.get("input")
+                input_text = input_text if isinstance(input_text, str) else ""
+                cmd = _cmd_from_js_input(input_text)
+                if cmd is not None:
+                    call_id = payload.get("call_id")
+                    call_id = call_id if isinstance(call_id, str) else None
+                    tool_calls.append(_timeline_entry(
+                        {"name": "bash", "args_text": cmd}, seq, None, call_id,
+                        ordinal))
+        elif top == "response_item" and inner == "function_call":
+            name = payload.get("name")
+            name = name if isinstance(name, str) else ""
+            args_text = payload.get("arguments")
+            args_text = args_text if isinstance(args_text, str) else ""
+            call_id = payload.get("call_id")
+            call_id = call_id if isinstance(call_id, str) else None
+            tool_calls.append(_timeline_entry(
+                {"name": name, "args_text": args_text}, seq, None, call_id,
+                ordinal))
+        elif top == "response_item" and inner == "function_call_output":
+            error_code = _output_error_code(payload.get("error"))
+            call_id = payload.get("call_id")
+            call_id = call_id if isinstance(call_id, str) else None
+            tool_results.append(_timeline_entry(
+                {"error_code": error_code}, seq, None, call_id, ordinal))
+
+    # EOF 兜底：未收到 task_complete 的 turn 也 push（end_* 为 None）——SV613(a)
+    # 跳过 end_seq == None 的 turn，这类 turn 只贡献 sig 给 SV612，语义与 DSH 的
+    # EOF 关闭一致。
+    for tid in open_order:
+        p = pending.pop(tid, None)
+        if p is not None:
+            turns.append(_timeline_entry(
+                {
+                    "turn": p["turn"], "sig": p["sig"], "last_seq": p["last_seq"],
+                    "end_reason_kind": None, "end_error_code": None,
+                    "end_seq": None, "end_time": None,
+                },
+                None, p["turn"], None, 0))
+
+    timelines = {
+        "tool_calls": tool_calls,
+        "tool_results": tool_results,
+        "approvals": [],
+        "sandbox_modes": sandbox_modes,
+        "turns": turns,
+    }
+    return {key: {"entries": timelines[key]} for key in _TIMELINE_KEYS}
 
 
 def build_codex_evidence(items, session_id, title, history_mode, cli_version,
@@ -421,10 +751,36 @@ def build_codex_evidence(items, session_id, title, history_mode, cli_version,
         "coverage": coverage,
         "attempts": attempts,
         "notes": notes,
-        # §11.5 五个 timeline 恒为空（反编造，见 `_empty_timelines`）——先前的
-        # 遗漏是**整个缺 key**，现在结构对齐：key 在、值为空，才是「能力缺失」
-        # 而不是「字段不存在」。
-        **_empty_timelines(),
+        # §11.5 timeline 原生填充（2026-08）：Codex 线格式能填满 4 条（approvals
+        # 除外），见 `_populate_codex_timelines`。上一轮「Codex wire 格式凑不齐
+        # payload、硬填即编造零、timeline 恒为空」的结论基于旧 fixture，被真实
+        # rollout 纠正。诚实真值表（喂 Codex canonical 后每条 SV 规则的结果）：
+        #
+        #   Paginated（CommandExecution 在）：
+        #     SV601/602/603 → 跑（exec→bash）       SV604/605/606 → MeasuredZero
+        #     SV607/608 → MeasuredZero（exit_code:N ∉ DSH 码集）
+        #     SV609 → Unavailable（approvals 空）    SV610 → 跑（danger-full-access）
+        #     SV611/612/613 → 跑                     SV614 → c 可发；a/b 空转（OR 门控）
+        #   Legacy（无 CommandExecution，真实 7/25 的 679 次 custom_tool_call）：
+        #     SV601/602/603 → 跑——只挖得出 exec_command({cmd}) 的翻 bash
+        #       （实测 187/679），apply_patch 等非 shell 不误报
+        #     SV604/605/606 → MeasuredZero            SV607/608 → MeasuredZero
+        #       （custom_tool_call 路径不产 tool_results，但 function_call_output
+        #       照常填、error 恒 null → None，规则照跑零命中）
+        #     SV609 → Unavailable                     SV610 → 跑
+        #     SV611 → 跑（只在挖出的 bash 子集上）    SV612 → MeasuredZero（custom_tool_call
+        #       与 function_call 都无 turn_id，turn sig 恒空被跳过）
+        #     SV613 → MeasuredZero（(a) 无 error turn；(b) tool_results 的 error_code
+        #       恒 None）    SV614 → c 可发；a/b 空转
+        #
+        # 一个已知的诚实性代价：populate tool_calls 本身就把 Paginated 的
+        # SV604-606/607-608 从 Unavailable 翻成 MeasuredZero——正是「门控读 timeline
+        # 而非 coverage」要保护的那类问题。`exec→bash` 救回 3 条 shell 规则，但
+        # write/edit/web_fetch、DSH 错误码这些 Codex 没有的维度只能 MeasuredZero
+        # （name-aware 门控是后续项）。Legacy 的另一半诚实性：挖不出的 non-cmd
+        # 调用不硬翻 bash（避免在 apply_patch 上误报 SV601），代价是 SV611 只覆盖
+        # shell 子集——宁缺勿假。
+        **_populate_codex_timelines(items),
     }
     return {"canonical": canonical, "items": items,
             "title": title,

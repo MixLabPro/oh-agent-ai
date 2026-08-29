@@ -436,9 +436,10 @@ pub fn match_behavior_canonical(s: &CanonicalSession) -> Vec<(&'static str, Rule
         .iter()
         .map(|rule| {
             // 门控读 timeline 非空而非 coverage 计数：对 DSH 恒等价（coverage 与
-            // timeline 同源），但 Codex 上分叉——`derive_coverage` 数出非零
-            // measured、timeline 却恒为空（§1 反编造），读计数会让门控放行、
-            // 检测器在空时间线上空转产出 MeasuredZero。见
+            // timeline 同源），但 Codex 上曾分叉——`derive_coverage` 数出非零
+            // measured、timeline 却为空（当时「恒为空」的假结论，2026-08 起原生
+            // 填满 4 条，只余 approvals 空），读计数会让门控放行、检测器在空
+            // 时间线上空转产出 MeasuredZero。见
             // `CanonicalSession::timeline_is_empty`。
             let missing: Vec<Signal> = rule
                 .requires
@@ -1134,12 +1135,14 @@ mod tests {
             "SandboxModes 有覆盖时 SV614 不该因为 ApprovalDecisions 缺覆盖变成 Unavailable");
     }
 
-    /// Codex 形状的门控：coverage 非零但 timeline 为空 → Unavailable，不是
-    /// MeasuredZero。`derive_coverage` 把 task_started/task_complete/mcp_tool_call_end
-    /// 数成非零 measured，timeline 却恒为空（§1 反编造，wire 格式凑不齐
-    /// observation payload）——门控读 coverage 会让 SV612/SV601 空转产出假零；
-    /// 读 timeline（`timeline_is_empty`）才诚实说"测不了"。这正是本次门控修正
-    /// 钉住的真实缺陷：同一 canonical，coverage 有数、无一条可消费观测。
+    /// 门控的形状不变量：coverage 非零但 timeline 为空 → Unavailable，不是
+    /// MeasuredZero。`derive_coverage` 把 task_started/task_complete/
+    /// mcp_tool_call_end 数成非零 measured，timeline 却为空——门控读 coverage
+    /// 会让 SV612/SV601 空转产出假零；读 timeline（`timeline_is_empty`）才诚实
+    /// 说"测不了"。这正是本次门控修正钉住的真实缺陷：同一 canonical，coverage
+    /// 有数、无一条可消费观测。Codex 的 approvals timeline 至今仍是这个形状
+    /// （覆盖非零但 approvals 空 → SV609 Unavailable，见 codex_evidence.rs 的
+    /// 真值表）——防御的不变量不是"Codex 恒为空"，而是"空就是空"。
     #[test]
     fn empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero() {
         let mut s = canonical_from(vec![]);

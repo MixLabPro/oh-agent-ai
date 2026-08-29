@@ -1478,6 +1478,20 @@ against the new binary each time.
 
 ### 17.1c P4 group log
 
+> **2026-08 update**: two statements below are superseded. (1) The "six
+> unavailable signals" are now **five** — `SandboxModes` went `measured` once the
+> real rollout showed `turn_context.sandbox_policy` persists (object `{type}` /
+> legacy string, both counted; it also feeds the `sandbox_modes` timeline).
+> (2) "No detectors run against Codex" is no longer true at the core level:
+> `populate_codex_timelines` natively fills 4 of 5 timelines (approvals excepted;
+> `CommandExecution` is the primary source, the `custom_tool_call` shadow is
+> skipped), so SV601-603/610/611-613/614c actually run with honest
+> `MeasuredZero`/`Unavailable` for the dimensions Codex lacks (see the truth
+> table in `codex_evidence.rs::build_codex_evidence`). A CLI/audit-tab consumer
+> (`codex behavior`) remains out of scope — the core-level truth-table test is
+> the proof. `codex-evidence --json` output shape is unchanged (timelines are
+> not serialized); only `SandboxModes` coverage flips zero→measured.
+
 **P4 ✅** — the acceptance word was "sound": the shared type layer
 (`CanonicalSession`/`Coverage`/`RuleSpec`, host-neutral since P1) had to absorb
 Codex's **two incompatible formats without declaring which** — with zero

@@ -175,9 +175,12 @@ additive 的 coverage 注解，没动 detector）：
   进去，审批类规则必须报 `Unavailable`，**绝不允许安静报 `[]`**——这条的专门
   测试**已实装（2026-08）**：`behavior.rs` 的
   `empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero`，钉住
-  Codex 的常态形状「覆盖非零（`derive_coverage` 数事件）+ timeline 恒空 → 
-  Unavailable 而非 MeasuredZero」。§17.1 的 anti-fabrication assertion 至此
-  从「应有」变「实装」。
+  「覆盖非零（`derive_coverage` 数事件）+ timeline 为空 → Unavailable 而非
+  MeasuredZero」这个**不变量**。2026-08 下半月 Codex 已原生填满 4 条 timeline
+  （`populate_codex_timelines`，见 codex_evidence.rs 真值表），「Codex timeline
+  恒空」不再是常态——防御的不变量是「空就是空」，而 Codex 的 approvals
+  timeline 至今仍是这个形状（覆盖非零但 approvals 空 → SV609 Unavailable）。
+  §17.1 的 anti-fabrication assertion 至此从「应有」变「实装」。
 - §12 测试 `shared_type_layer_has_no_host_identifiers_in_code` 全程绿（扩
   `CanonicalSession` 时尤其不能把宿主字段塞进共享层）。
 

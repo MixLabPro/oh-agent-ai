@@ -28,11 +28,16 @@
 //! 和它派生自的原始条目捆在一起——将来把 SV 规则迁到 Codex 上时，规则引擎
 //! 需要原始条目，跟 DSH 的 `DshEvidence` 同一个理由、同一个形状。
 
-use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+use regex::Regex;
+use serde_json::{Map, Value};
 
 use crate::evidence::{
-    AdapterNote, CanonicalSession, Coverage, CoverageCounts, SessionMeta, Signal, SignalSet,
-    SourceAttempt, SourceKind, Surface, Timeline,
+    AdapterNote, CanonicalSession, Coverage, CoverageCounts, SandboxModeObservation, SessionMeta,
+    Signal, SignalSet, SourceAttempt, SourceKind, Surface, Timeline, TimelineEntry,
+    ToolCallObservation, ToolResultObservation, TurnObservation,
 };
 
 /// Codex 适配器一次审计的产物：`CanonicalSession` + 它派生自的原始条目。
@@ -221,7 +226,7 @@ fn bump(coverage: &mut Coverage, signal: Signal, bucket: Bucket, n: u64) {
 /// | ContextWindow | event_msg:`token_count` 且 `payload.info.model_context_window` 在 | 两列 measured |
 /// | ApprovalDecisions | item:`FileChange` 且 `payload.item.auto_approved` 非空——§13 Paginated 列 "partial (`FileChangeItem.auto_approved`)"。本机语料 60 份 FileChange 全都没带这字段（见 codex-corpus-facts 记忆），所以真实语料大概率走不到这条；Legacy 列 unavailable（`policy.rs` 不持久化 ExecApprovalRequest） | 两列 unavailable/partial |
 /// | ApprovalPolicy | event_msg:`thread_settings_applied`（`payload.thread_settings.approval_policy`）; 顶层 `turn_context`（`payload.approval_policy`）——§14.2：两种 mode 都持久化策略 | 两列 measured |
-/// | SandboxModes | 无来源——`policy.rs` 不持久化 Guardian*/SafetyBuffering | 两列 unavailable |
+/// | SandboxModes | 顶层 `turn_context` 的 `payload.sandbox_policy`——真实线格式是对象 `{type:"danger-full-access"}`，旧 fixture 是字符串 `"workspace-write"`，两态都数（2026-08 从 unavailable 改 measured 时发现的线格式漂移，P4.5 sentinel 早该抓到） | 两列 measured |
 /// | SandboxPolicy | §13 矩阵没有 Codex 列——照 DSH 的规矩 unavailable，不编造 | — |
 /// | NetworkAccess | 无来源 | 两列 unavailable |
 /// | Compaction | event_msg:`context_compacted`; item:`ContextCompaction`; 顶层 `compacted`（带 `replacement_history`） | 两列 measured |
@@ -324,6 +329,13 @@ fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
                 if payload.get("approval_policy").is_some() {
                     bump(&mut coverage, Signal::ApprovalPolicy, Bucket::Measured, 1);
                 }
+                // sandbox_policy 同源：真实线格式是对象 `{type}`、旧 fixture 是
+                // 字符串，两态都认。populate 侧把它填进 sandbox_modes timeline，
+                // 这里必须同步计数——coverage 与 timeline 同一来源，否则门控
+                // 读 timeline 非空而 coverage 全零，两条账对不上。
+                if has_sandbox_policy(payload) {
+                    bump(&mut coverage, Signal::SandboxModes, Bucket::Measured, 1);
+                }
             }
             "compacted" => {
                 bump(&mut coverage, Signal::Compaction, Bucket::Measured, 1);
@@ -353,10 +365,10 @@ fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
     }
 
     // §13 没有 Codex 列 / 明确 unavailable 的信号——照 DSH 的规矩显式记全零
-    // （不进 SignalSet），不能编一个非零数字出来。
+    // （不进 SignalSet），不能编一个非零数字出来。SandboxModes 不在其中：2026-08
+    // 确认 turn_context.sandbox_policy 持久化，已改 measured（见上方映射表）。
     for signal in [
         Signal::StepBoundaries,
-        Signal::SandboxModes,
         Signal::SandboxPolicy,
         Signal::NetworkAccess,
         Signal::UserPrompts,
@@ -431,6 +443,396 @@ const ALL_SIGNALS: &[Signal] = &[
     Signal::UserCorrections,
 ];
 
+// ────────────────────── populate: Codex wire → five timelines ──────────────────────
+//
+// 2026-08 把 Codex 从「5 条 timeline 恒为空」改为「原生填充」。上一轮的结论
+// 「Codex wire 格式凑不齐 observation payload、硬填即编造零」基于旧 fixture，
+// 被真实 rollout 纠正：Paginated 线格式其实能原生填满 4 条 timeline（approvals
+// 除外）。映射规则见 `build_codex_evidence` 里那份逐条的诚实真值表。
+//
+// 两条翻译（L2 适配器持有宿主词表，共享类型层不碰）：
+// - `CommandExecution` → tool_calls `name:"bash"`（Codex 的 exec 翻译成 DSH 的
+//   bash）。`exec≠bash` 是语义近似——Codex 的 exec 不一定是 bash，但它是 shell
+//   执行，让 SV601/602/603 的 shell 规则能跑。代价：write/edit/web_fetch 这类
+//   Codex 根本没有的工具名永远不命中（诚实 MeasuredZero，见真值表）。
+// - `exit_code` → tool_results `error_code:"exit_code:N"`（N≠0 时）。合成码不在
+//   DSH 的 DENIED_CODES 里，所以 SV607/608 不会误报，但 `error_code.is_some()`
+//   让 SV613(b) 的「连续工具失败」能跑。
+//
+// **以 `CommandExecution` 为 tool_calls/tool_results 的主源，跳过
+// `custom_tool_call`/`custom_tool_call_output`**：真实日志里 7 次 exec =
+// 7 custom_tool_call + 7 CommandExecution + 7 output，同一逻辑 exec 的两份影子，
+// 但 `call_id`（`call_…`）与 item `id`（`exec_…`）不相等、无 join key。两份都填
+// 会双重计数、破坏 SV611 的连续重复检测。
+
+/// `turn_context.sandbox_policy` 的存在性判定（覆盖计数用，不取值）：真实线格式
+/// 是对象 `{type:"danger-full-access"}`，旧 fixture 是字符串 `"workspace-write"`，
+/// 两态都认。与 `sandbox_policy_mode`（populate 取值）是同一个判定的两个读法。
+fn has_sandbox_policy(payload: &Map<String, Value>) -> bool {
+    match payload.get("sandbox_policy") {
+        Some(Value::String(_)) => true,
+        Some(Value::Object(o)) => o.contains_key("type"),
+        _ => false,
+    }
+}
+
+/// 取 `sandbox_policy` 的模式字符串：对象取 `.type`，字符串取自身，其他/缺失 None。
+fn sandbox_policy_mode(payload: &Map<String, Value>) -> Option<String> {
+    match payload.get("sandbox_policy") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Object(o)) => o.get("type").and_then(|v| v.as_str()).map(str::to_owned),
+        _ => None,
+    }
+}
+
+/// 从 `CommandExecution.item.command` 数组抽命令文本：剥掉 `/bin/zsh -lc …` /
+/// `bash -c …` 这类 shell 前缀（解释器 + 紧跟的 `-*` 标志段），剩下的 join 成串。
+/// 剥前缀是让 SV601-603 的正则在命令本体上匹配，不是把命令改掉。
+fn command_text(item: &Map<String, Value>) -> String {
+    let Some(command) = item.get("command").and_then(|v| v.as_array()) else {
+        return String::new();
+    };
+    let mut parts: Vec<&str> = command.iter().filter_map(|v| v.as_str()).collect();
+    if let Some(first) = parts.first() {
+        let basename = first.rsplit('/').next().unwrap_or(first);
+        if matches!(basename, "zsh" | "bash" | "sh" | "dash" | "ksh") {
+            let mut rest = &parts[1..];
+            if rest.first().is_some_and(|f| f.starts_with('-')) {
+                rest = &rest[1..];
+            }
+            parts = rest.to_vec();
+        }
+    }
+    parts.join(" ")
+}
+
+/// task_complete 的 `error` 对象 → 字符串错误码的防御性抽取。真实日志/fixture 全
+/// 是 null（本机 51 份语料无一份带非 null 的 task_complete.error），所以这只看做
+/// 结构保险：有 `codex_error_info.code` 用它的，否则退化成稳定标记 "error"——
+/// 宁可语义含糊也不能在这里 panic 或编造一个不存在的码。
+fn error_code_from(error: &Value) -> Option<String> {
+    match error {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Object(o) => {
+            let nested = o.get("codex_error_info").and_then(|v| v.as_object());
+            nested
+                .and_then(|n| n.get("code"))
+                .or_else(|| o.get("code"))
+                .or_else(|| o.get("type"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .or_else(|| Some("error".to_string()))
+        }
+        _ => Some("error".to_string()),
+    }
+}
+
+/// `function_call_output` 的 `error`（真实日志全 null）→ `error_code` 的稳定性标记：
+/// 非 null 即 `Some("error")`。SV613(b) 只判 `is_some()`，SV607/608 只认 DSH 码，
+/// 所以「有没有失败」这条轴是诚实的，具体码值不值得逐对象猜。
+fn output_error_code(error: &Value) -> Option<String> {
+    match error {
+        Value::Null => None,
+        _ => Some("error".to_string()),
+    }
+}
+
+/// 一条 timeline entry 的构造器。Codex 无 seq/step：`seq` 用 enumerate 序数当合成
+/// seq（`NativeId::Seq` 注释「适配器内部合成的序号」的正当用法），`time`/`step`
+/// 留 None（`started_at` 秒 vs DSH 毫秒的时间轴统一是 timeaxis 阶段的事）。
+fn timeline_entry<T>(
+    observation: T,
+    seq: Option<i64>,
+    turn: Option<i64>,
+    call_id: Option<String>,
+    ordinal: usize,
+) -> TimelineEntry<T> {
+    TimelineEntry { observation, seq, time: None, turn, step: None, call_id, ordinal }
+}
+
+/// turn 生命周期 pass 的中间状态：task_started 开新 turn、turn 内 CommandExecution
+/// 追加 `sig`、task_complete 填 `end_*` 字段、EOF 兜底 push 进 turns。与 DSH 的
+/// `PendingTurn`（dsh_evidence.rs）同一个形状，但 Codex 的 turn 边界是
+/// task_started/task_complete（携带字符串 `turn_id`），turn 号是**合成序数**——
+/// Codex 没有数值 turn，只能按 task_started 出现序 0,1,2,… 编号（编造序数不是
+/// 编造零：序数只做会话内排序，不做任何「Codex 没记录的事」）。
+struct PendingCodexTurn {
+    turn: i64,
+    sig: Vec<(String, String)>,
+    last_seq: Option<i64>,
+    end_reason_kind: Option<String>,
+    end_error_code: Option<String>,
+    end_seq: Option<i64>,
+    end_time: Option<i64>,
+}
+
+/// 按 task_started 出现序给 turn_id 分配合成序数：见过的返回旧号，新的分配
+/// `map.len()`（保证 0,1,2,… 连续且按出现序递增）。
+fn next_turn_ordinal(map: &mut HashMap<String, i64>, turn_id: &str) -> i64 {
+    if let Some(&o) = map.get(turn_id) {
+        return o;
+    }
+    let o = map.len() as i64;
+    map.insert(turn_id.to_string(), o);
+    o
+}
+
+/// 跑一遍 `items`，把 Codex 线格式翻译成五个 host-neutral timeline（§11.5）。
+/// 仿 `dsh_evidence::populate_timelines` 的状态机写法，但输入是 Codex items：
+/// - `sandbox_modes`：顶层 turn_context 的 sandbox_policy（对象/字符串两态）→ 一条。
+/// - `tool_calls`：`CommandExecution` → `name:"bash"` + 命令文本；`function_call` →
+///   原生工具名 + arguments。**跳过** `custom_tool_call`（CommandExecution 影子）。
+/// - `tool_results`：`CommandExecution` → `exit_code≠0` 时 `"exit_code:N"`；
+///   `function_call_output` → `.error` 非 null 时 `"error"`。**跳过**
+///   `custom_tool_call_output`（影子）。
+/// - `turns`：task_started 开、task_complete 收，合成 turn 序数；turn 内
+///   CommandExecution 的 (name, args_text) 进 `sig`（SV612 死循环检测的输入）。
+///   `function_call` 无 turn_id，只进 tool_calls、不进任何 turn 的 sig。
+///
+/// Legacy 回退：从 `custom_tool_call` 的 `input`（JS 片段）里挖真 shell 命令。
+///
+/// `custom_tool_call{name:"exec"}` 是 **JS 沙箱工具**，不是 shell——真实日志 7/25
+/// 的 679 次工具执行里，`input` 真跑的是 exec_command（474）、apply_patch（127）、
+/// write_stdin（61）、view_image（23）、web__run（8）、image_gen（2）、
+/// mcp__node_repl__js（1）。只有字面量 `exec_command({"cmd":"…"})` 才是 shell 命令，
+/// 翻译成 `bash` 有依据；其余（JS 动态拼 cmd / 非 shell 工具）诚实跳过——SV601-603
+/// 只认 `name=="bash"`，不会在 apply_patch 上误报。
+///
+/// quote-aware：值以 `"` 开就吃到匹配的 `"`（允许 `\"`），以 `'` 开就吃到 `'`。
+/// 旧写法 `[^"']` 会在值内嵌的单引号处截断，把 `sed -n '1,240p' '…'` 截成
+/// `sed -n ` 这种看着像命令的残片——args_text 必须取完整命令，正则得认全引号。
+fn exec_command_cmd(input: &str) -> Option<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r#"exec_command\(\s*\{\s*["']cmd["']\s*:\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')"#)
+            .expect("valid exec_command({cmd}) regex")
+    });
+    let caps = re.captures(input)?;
+    // 二选一分支只有一个组参与匹配：双引号值落 group 1、单引号值落 group 2。
+    caps.get(1).or_else(|| caps.get(2)).map(|m| m.as_str().to_string())
+}
+
+/// `approvals` 不在参数里：Codex 无 asked/decided 生命周期（approval_policy 是
+/// 策略不是审批事件），approvals timeline 由 `build_codex_evidence` 直接构造为
+/// 空——一个「故意空」的构造点，比传一个永不填充的 `&mut` 参数更诚实。
+pub(crate) fn populate_codex_timelines(
+    items: &[Value],
+    tool_calls: &mut Timeline<ToolCallObservation>,
+    tool_results: &mut Timeline<ToolResultObservation>,
+    sandbox_modes: &mut Timeline<SandboxModeObservation>,
+    turns: &mut Timeline<TurnObservation>,
+) {
+    let mut turn_ordinals: HashMap<String, i64> = HashMap::new();
+    let mut pending: HashMap<String, PendingCodexTurn> = HashMap::new();
+    // 未关闭 turn 的开启序——EOF 兜底时按这个序 flush，保证 turns 输出顺序确定
+    // （HashMap 迭代序不定，不能直接遍历 pending）。
+    let mut open_order: Vec<String> = Vec::new();
+
+    // 线格式探测：整份 session 有没有 CommandExecution？
+    // - 有（Paginated，真实 8/27：127 CommandExecution + 255 custom_tool_call）→
+    //   CommandExecution 是 tool_calls 主源，custom_tool_call 是它的影子（call_id
+    //   与 item.id 无 join key），跳过，否则双重计数破坏 SV611。
+    // - 没有（Legacy，真实 7/25：0 item_completed，679 次工具执行全是
+    //   custom_tool_call）→ 回退到 `exec_command_cmd` 从 input JS 里挖真 shell 命令。
+    // coverage 侧 `custom_tool_call` 本来就计 ToolCalls measured（见 derive_coverage），
+    // 回退是把 timeline 补到与覆盖一致，不是凭空造信号。
+    let has_command_execution = items.iter().any(|item| {
+        let Some(payload) = item.get("payload").and_then(|v| v.as_object()) else {
+            return false;
+        };
+        payload.get("type").and_then(|v| v.as_str()) == Some("item_completed")
+            && payload
+                .get("item")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str())
+                == Some("CommandExecution")
+    });
+
+    for (ordinal, item) in items.iter().enumerate() {
+        let Some(payload) = item.get("payload").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let seq = ordinal as i64;
+        let inner = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match item.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "turn_context" => {
+                if let Some(mode) = sandbox_policy_mode(payload) {
+                    sandbox_modes.entries.push(timeline_entry(
+                        SandboxModeObservation { mode },
+                        Some(seq),
+                        None,
+                        None,
+                        ordinal,
+                    ));
+                }
+            }
+            "event_msg" if inner == "task_started" => {
+                let turn_id = payload.get("turn_id").and_then(|v| v.as_str()).unwrap_or("");
+                let turn = next_turn_ordinal(&mut turn_ordinals, turn_id);
+                open_order.push(turn_id.to_string());
+                pending.insert(
+                    turn_id.to_string(),
+                    PendingCodexTurn {
+                        turn,
+                        sig: Vec::new(),
+                        last_seq: Some(seq),
+                        end_reason_kind: None,
+                        end_error_code: None,
+                        end_seq: None,
+                        end_time: None,
+                    },
+                );
+            }
+            "event_msg" if inner == "task_complete" => {
+                let turn_id = payload.get("turn_id").and_then(|v| v.as_str()).unwrap_or("");
+                let started_at = payload.get("started_at").and_then(|v| v.as_i64());
+                let error = payload.get("error");
+                if let Some(mut p) = pending.remove(turn_id) {
+                    p.last_seq = Some(seq);
+                    p.end_seq = Some(seq);
+                    p.end_time = started_at;
+                    if let Some(e) = error {
+                        if !e.is_null() {
+                            p.end_reason_kind = Some("error".to_string());
+                            p.end_error_code = error_code_from(e);
+                        }
+                    }
+                    turns.entries.push(timeline_entry(
+                        TurnObservation {
+                            turn: p.turn,
+                            sig: p.sig,
+                            last_seq: p.last_seq,
+                            end_reason_kind: p.end_reason_kind,
+                            end_error_code: p.end_error_code,
+                            end_seq: p.end_seq,
+                            end_time: p.end_time,
+                        },
+                        Some(seq),
+                        Some(p.turn),
+                        None,
+                        ordinal,
+                    ));
+                }
+            }
+            "event_msg" if inner == "item_completed" => {
+                let item_type = payload
+                    .get("item")
+                    .and_then(|v| v.get("type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if item_type == "CommandExecution" {
+                    let Some(item) = payload.get("item").and_then(|v| v.as_object()) else {
+                        continue;
+                    };
+                    let name = "bash"; // exec → bash 翻译（L2 适配器宿主词表）
+                    let args = command_text(item);
+                    let turn_coord = payload
+                        .get("turn_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|tid| turn_ordinals.get(tid).copied());
+                    let call_id = item.get("id").and_then(|v| v.as_str()).map(str::to_owned);
+                    tool_calls.entries.push(timeline_entry(
+                        ToolCallObservation { name: name.to_string(), args_text: args.clone() },
+                        Some(seq),
+                        turn_coord,
+                        call_id.clone(),
+                        ordinal,
+                    ));
+                    // 结果：exit_code 非零 → 合成码 "exit_code:N"（SV613(b) 认 is_some，
+                    // SV607/608 的 DSH 码集不会误报）；零 → None（成功）。
+                    let exit_code = item.get("exit_code").and_then(|v| v.as_i64());
+                    let error_code = exit_code.and_then(|c| (c != 0).then(|| format!("exit_code:{c}")));
+                    tool_results.entries.push(timeline_entry(
+                        ToolResultObservation { error_code },
+                        Some(seq),
+                        turn_coord,
+                        None,
+                        ordinal,
+                    ));
+                    // 归属 turn 的 sig（按 payload.turn_id 直接归属，不依赖状态机：
+                    // 该 turn 的 task_started 先到，pending 里必然在）。
+                    if let Some(tid) = payload.get("turn_id").and_then(|v| v.as_str()) {
+                        if let Some(p) = pending.get_mut(tid) {
+                            p.sig.push((name.to_string(), args));
+                        }
+                    }
+                }
+            }
+            "response_item" if inner == "custom_tool_call" => {
+                // Legacy 回退：有 CommandExecution 时这分支是影子、整支跳过（见上
+                // has_command_execution 注释）；没有时挖 input 里 exec_command({cmd})。
+                // 只挖得出真 shell 命令的才翻成 bash；**本路径不填 tool_results**——
+                // 同源 custom_tool_call_output.error 实测恒 null，无 exit/error 源，
+                // 用 None 填充只是假装 MeasuredZero。规则最终结果看整份 session：
+                // function_call_output 路径照常填 tool_results（error 恒 null → None），
+                // 所以真机 Legacy 的 SV607/608 是 MeasuredZero 不是 Unavailable
+                // （真值表见 build_codex_evidence 注释）；不进 turn sig（Legacy
+                // custom_tool_call 无 turn_id，679/679 实测）。
+                if !has_command_execution {
+                    let input = payload.get("input").and_then(|v| v.as_str()).unwrap_or("");
+                    if let Some(cmd) = exec_command_cmd(input) {
+                        let call_id =
+                            payload.get("call_id").and_then(|v| v.as_str()).map(str::to_owned);
+                        tool_calls.entries.push(timeline_entry(
+                            ToolCallObservation { name: "bash".to_string(), args_text: cmd },
+                            Some(seq),
+                            None,
+                            call_id,
+                            ordinal,
+                        ));
+                    }
+                }
+            }
+            "response_item" if inner == "function_call" => {
+                let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let args_text = payload.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
+                tool_calls.entries.push(timeline_entry(
+                    ToolCallObservation { name: name.to_string(), args_text: args_text.to_string() },
+                    Some(seq),
+                    None,
+                    payload.get("call_id").and_then(|v| v.as_str()).map(str::to_owned),
+                    ordinal,
+                ));
+            }
+            "response_item" if inner == "function_call_output" => {
+                let error_code = payload
+                    .get("error")
+                    .and_then(output_error_code);
+                tool_results.entries.push(timeline_entry(
+                    ToolResultObservation { error_code },
+                    Some(seq),
+                    None,
+                    payload.get("call_id").and_then(|v| v.as_str()).map(str::to_owned),
+                    ordinal,
+                ));
+            }
+            _ => {}
+        }
+    }
+    // EOF 兜底：未收到 task_complete 的 turn 也 push（end_* 为 None）——SV613(a)
+    // 跳过 end_seq == None 的 turn，这类 turn 只贡献 sig 给 SV612，语义与 DSH 的
+    // EOF 关闭一致。
+    for tid in open_order {
+        if let Some(p) = pending.remove(&tid) {
+            turns.entries.push(timeline_entry(
+                TurnObservation {
+                    turn: p.turn,
+                    sig: p.sig,
+                    last_seq: p.last_seq,
+                    end_reason_kind: None,
+                    end_error_code: None,
+                    end_seq: None,
+                    end_time: None,
+                },
+                None,
+                Some(p.turn),
+                None,
+                0,
+            ));
+        }
+    }
+}
+
 /// 条目数组 → `CodexEvidence`。五段式流水线的 "derive → coverage" 两段；
 /// "locate → shape → extract" 留在 `src/codex_session.rs`。
 ///
@@ -471,6 +873,45 @@ pub fn build_codex_evidence(
         });
     }
 
+    // §11.5 timeline 原生填充（2026-08）：Codex 线格式能填满 4 条（approvals
+    // 除外），见 `populate_codex_timelines`。上一轮「Codex wire 格式凑不齐 payload、
+    // 硬填即编造零、timeline 恒为空」的结论基于旧 fixture，被真实 rollout 纠正。
+    // 诚实真值表（喂 Codex canonical 后每条 SV 规则的结果）：
+    //
+    // | 规则 | Paginated（CommandExecution 在） | Legacy（无 CommandExecution） |
+    // |---|---|---|
+    // | SV601/602/603 | 跑（exec→bash） | 跑——只挖得出 `exec_command({cmd})` 的
+    //   翻 bash（真实 7/25：679 次 custom_tool_call 里 187 次），apply_patch 等
+    //   非 shell 不误报 |
+    // | SV604/605/606 | MeasuredZero（无 write/edit/web_fetch） | MeasuredZero |
+    // | SV607/608 | MeasuredZero（`exit_code:N` ∉ DSH 码集） | MeasuredZero——
+    //   custom_tool_call 路径不产 tool_results，但 function_call_output 仍填
+    //   （error 恒 null → error_code None），真机 7/25 有 63 条，规则照跑零命中 |
+    // | SV609 | Unavailable（approvals 空） | Unavailable |
+    // | SV610 | 跑（sandbox_modes 非空） | 跑 |
+    // | SV611 | 跑（重复检测） | 跑——只在挖出的 bash 子集上 |
+    // | SV612 | 跑（turn sig） | MeasuredZero——custom_tool_call 与 function_call
+    //   都无 turn_id，turn sig 恒空被跳过 |
+    // | SV613 | 跑（a: error turn；b: exit_code） | MeasuredZero——(a) 无 error turn；
+    //   (b) tool_results 的 error_code 恒 None（custom_tool_call 无 exit/error 源、
+    //   function_call_output 的 error 也恒 null） |
+    // | SV614 | c 可发；a/b 空转 | 同左 |
+    //
+    // 一个已知的诚实性代价：populate tool_calls 本身就把 Paginated 的 SV604-606/
+    // 607-608 从 Unavailable 翻成 MeasuredZero——正是「门控读 timeline 而非
+    // coverage」要保护的那类问题。`exec→bash` 救回 3 条 shell 规则，但
+    // write/edit/web_fetch、DSH 错误码这些 Codex 没有的维度只能 MeasuredZero
+    // （name-aware 门控是后续项）。Legacy 的另一半诚实性：挖不出的 non-cmd 调用
+    // 不硬翻 bash（避免在 apply_patch 上误报 SV601），代价是 SV611 只覆盖
+    // shell 子集——宁缺勿假。
+    let mut tool_calls = Timeline::new();
+    let mut tool_results = Timeline::new();
+    let mut sandbox_modes = Timeline::new();
+    let mut turns = Timeline::new();
+    populate_codex_timelines(&items, &mut tool_calls, &mut tool_results, &mut sandbox_modes, &mut turns);
+    // approvals 保持空：Codex 无审批生命周期，诚实 Unavailable（见真值表 SV609）。
+    let approvals = Timeline::new();
+
     let canonical = CanonicalSession {
         meta: SessionMeta {
             session_id,
@@ -483,20 +924,11 @@ pub fn build_codex_evidence(
         coverage,
         attempts,
         notes,
-        // §11.5 timeline 目前只有 DSH 适配器在 populate；Codex 不填。注意不是
-        // 「全零覆盖」——`derive_coverage` 把 task_started/task_complete/mcp_
-        // tool_call_end 等数成非零 measured。真正的原因：Codex wire 格式凑不齐
-        // observation payload（tool_calls 缺 args_text、tool_results 缺字符串
-        // error_code、turns 缺数值 turn/seq、approvals 缺 asked/decided、
-        // sandbox_modes 缺 mode 事件），硬填即编造零（§1 反编造），所以保持空。
-        // 正因为「覆盖非零 + 时间线为空」是 Codex 的常态，门控读 timeline 非空
-        // 而非 coverage 计数（`CanonicalSession::timeline_is_empty`）：读计数会
-        // 让规则空转产出 MeasuredZero，读 timeline 才诚实出 Unavailable。
-        tool_calls: Timeline::new(),
-        tool_results: Timeline::new(),
-        approvals: Timeline::new(),
-        sandbox_modes: Timeline::new(),
-        turns: Timeline::new(),
+        tool_calls,
+        tool_results,
+        approvals,
+        sandbox_modes,
+        turns,
     };
     CodexEvidence { canonical, items, title, history_mode, cli_version }
 }
@@ -717,13 +1149,17 @@ mod tests {
     fn unavailable_signals_are_zero_and_not_in_signal_set() {
         let evidence = build(vec![token_count(true)]);
         for signal in [
-            Signal::StepBoundaries, Signal::SandboxModes, Signal::SandboxPolicy,
+            Signal::StepBoundaries, Signal::SandboxPolicy,
             Signal::NetworkAccess, Signal::UserPrompts, Signal::UserCorrections,
         ] {
             assert_eq!(evidence.canonical.coverage.get(signal), CoverageCounts::default(),
                 "{signal:?} 应 unavailable（全零、不进 SignalSet）");
             assert!(!evidence.canonical.signals.contains(signal));
         }
+        // SandboxModes 2026-08 从 unavailable 改 measured：有 turn_context.sandbox_policy
+        // 才算，没有则保持全零不进 SignalSet（token_count 不携带 sandbox_policy）。
+        assert_eq!(evidence.canonical.coverage.get(Signal::SandboxModes), CoverageCounts::default());
+        assert!(!evidence.canonical.signals.contains(Signal::SandboxModes));
     }
 
     #[test]
@@ -786,5 +1222,268 @@ mod tests {
         assert_eq!(evidence.canonical.coverage.get(Signal::Usage), CoverageCounts::default());
         assert_eq!(evidence.canonical.coverage.get(Signal::UsageAggregate), CoverageCounts::default());
         assert_eq!(evidence.canonical.coverage.get(Signal::ContextWindow), CoverageCounts::default());
+    }
+
+    /// 一份覆盖 populate 全部路径的 Codex items：两个 turn、每个 turn 一个
+    /// turn_context（sandbox_policy 对象形态）、CommandExecution（exec→bash +
+    /// 命令文本剥前缀 + exit_code→错误码）、function_call/function_call_output
+    /// （原生名 + .error）、task_started/task_complete（turn 序数 + end_*）。
+    fn populated_items() -> Vec<Value> {
+        vec![
+            json!({"type": "turn_context", "timestamp": 0, "payload": {
+                "sandbox_policy": {"type": "danger-full-access"}, "approval_policy": "never",
+                "turn_id": "t1"}}),
+            json!({"type": "event_msg", "timestamp": 0, "payload": {
+                "type": "task_started", "turn_id": "t1", "started_at": 100}}),
+            json!({"type": "event_msg", "timestamp": 0, "payload": {
+                "type": "item_completed", "turn_id": "t1", "item": {
+                    "type": "CommandExecution", "id": "exec-1",
+                    "command": ["/bin/zsh", "-lc", "rm -rf /tmp/x"], "exit_code": 0}}}),
+            json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "function_call", "name": "send_message",
+                "arguments": "{\"target\":\"/root\"}", "call_id": "call-1"}}),
+            json!({"type": "event_msg", "timestamp": 0, "payload": {
+                "type": "task_complete", "turn_id": "t1", "started_at": 100, "error": null}}),
+            json!({"type": "turn_context", "timestamp": 0, "payload": {
+                "sandbox_policy": {"type": "danger-full-access"}}}),
+            json!({"type": "event_msg", "timestamp": 0, "payload": {
+                "type": "task_started", "turn_id": "t2", "started_at": 200}}),
+            json!({"type": "event_msg", "timestamp": 0, "payload": {
+                "type": "item_completed", "turn_id": "t2", "item": {
+                    "type": "CommandExecution", "id": "exec-2",
+                    "command": ["echo", "boom"], "exit_code": 1}}}),
+            json!({"type": "event_msg", "timestamp": 0, "payload": {
+                "type": "item_completed", "turn_id": "t2", "item": {
+                    "type": "CommandExecution", "id": "exec-3",
+                    "command": ["echo", "boom"], "exit_code": 1}}}),
+            json!({"type": "event_msg", "timestamp": 0, "payload": {
+                "type": "item_completed", "turn_id": "t2", "item": {
+                    "type": "CommandExecution", "id": "exec-4",
+                    "command": ["echo", "boom"], "exit_code": 1}}}),
+            json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "function_call_output", "call_id": "call-1", "error": null}}),
+            json!({"type": "event_msg", "timestamp": 0, "payload": {
+                "type": "task_complete", "turn_id": "t2", "started_at": 200, "error": null}}),
+        ]
+    }
+
+    #[test]
+    fn populate_fills_four_timelines_natively() {
+        let evidence = build(populated_items());
+        let c = &evidence.canonical;
+
+        // sandbox_modes：两个 turn_context（对象形态）各一条。
+        assert_eq!(c.sandbox_modes.entries.len(), 2);
+        assert_eq!(c.sandbox_modes.entries[0].observation.mode, "danger-full-access");
+
+        // tool_calls：CommandExecution→bash 翻译 + function_call 原生名；
+        // custom_tool_call 影子不填（本数据无 shadow，见真值表测试的注释）。
+        let names: Vec<&str> =
+            c.tool_calls.entries.iter().map(|e| e.observation.name.as_str()).collect();
+        assert_eq!(names, vec!["bash", "send_message", "bash", "bash", "bash"]);
+        assert_eq!(c.tool_calls.entries[0].observation.args_text, "rm -rf /tmp/x",
+            "shell 前缀 /bin/zsh -lc 被剥掉，SV601-603 的正则在命令本体上匹配");
+        assert_eq!(c.tool_calls.entries[2].observation.args_text, "echo boom",
+            "无 shell 前缀的命令原样 join");
+        assert_eq!(c.tool_calls.entries[0].call_id.as_deref(), Some("exec-1"),
+            "call_id 用 item.id（Codex 无 call_id，CommandExecution 自带 id）");
+
+        // tool_results：exit_code≠0 → 合成码 exit_code:N；0 / output.error null → None。
+        let codes: Vec<Option<&str>> = c.tool_results.entries.iter()
+            .map(|e| e.observation.error_code.as_deref()).collect();
+        assert_eq!(codes, vec![None, Some("exit_code:1"), Some("exit_code:1"),
+                               Some("exit_code:1"), None]);
+
+        // turns：两个 turn，合成序数 0/1，sig 按 payload.turn_id 归属，end_* 来自
+        // task_complete（end_seq = task_complete 的合成 seq）。
+        assert_eq!(c.turns.entries.len(), 2);
+        assert_eq!(c.turns.entries[0].observation.turn, 0);
+        assert_eq!(c.turns.entries[0].observation.sig,
+                   vec![("bash".to_string(), "rm -rf /tmp/x".to_string())]);
+        assert_eq!(c.turns.entries[0].observation.end_seq, Some(4));
+        assert_eq!(c.turns.entries[1].observation.turn, 1);
+        assert_eq!(c.turns.entries[1].observation.sig.len(), 3);
+        assert_eq!(c.turns.entries[1].observation.end_seq, Some(11));
+        assert_eq!(c.turns.entries[1].observation.end_time, Some(200));
+
+        // approvals：Codex 无 asked/decided 生命周期，诚实保持空。
+        assert!(c.approvals.entries.is_empty());
+
+        // coverage lockstep：SandboxModes 计数与 sandbox_modes timeline 条数一致，
+        // 且进 SignalSet（覆盖与时间线同源，两条账不能对不上）。
+        assert_eq!(c.coverage.get(Signal::SandboxModes).measured, 2);
+        assert!(c.signals.contains(Signal::SandboxModes));
+    }
+
+    #[test]
+    fn empty_items_leave_all_timelines_empty() {
+        // 空输入 → 空 timeline：这是「结构对齐 + 反编造」的底线，不管 populate
+        // 逻辑怎么改都不能把空会话填出东西来。
+        let evidence = build(vec![]);
+        assert!(evidence.canonical.tool_calls.entries.is_empty());
+        assert!(evidence.canonical.tool_results.entries.is_empty());
+        assert!(evidence.canonical.approvals.entries.is_empty());
+        assert!(evidence.canonical.sandbox_modes.entries.is_empty());
+        assert!(evidence.canonical.turns.entries.is_empty());
+    }
+
+    #[test]
+    fn sandbox_policy_string_and_object_shapes_both_count() {
+        // 线格式漂移：真实日志是对象 `{type}`、旧 fixture 是字符串。两态都要数进
+        // SandboxModes 覆盖 + 填进 sandbox_modes timeline；无 sandbox_policy 的
+        // turn_context 不数。
+        let items = vec![
+            json!({"type": "turn_context", "timestamp": 0, "payload": {
+                "sandbox_policy": "workspace-write", "approval_policy": "on-request"}}),
+            json!({"type": "turn_context", "timestamp": 0, "payload": {
+                "sandbox_policy": {"type": "danger-full-access"}, "approval_policy": "never"}}),
+            json!({"type": "turn_context", "timestamp": 0, "payload": {
+                "approval_policy": "never"}}),
+        ];
+        let evidence = build(items);
+        assert_eq!(evidence.canonical.sandbox_modes.entries.len(), 2);
+        assert_eq!(evidence.canonical.sandbox_modes.entries[0].observation.mode, "workspace-write");
+        assert_eq!(evidence.canonical.sandbox_modes.entries[1].observation.mode, "danger-full-access");
+        assert_eq!(evidence.canonical.coverage.get(Signal::SandboxModes).measured, 2);
+        assert!(evidence.canonical.signals.contains(Signal::SandboxModes));
+    }
+
+    #[test]
+    fn task_complete_error_sets_end_reason_and_code() {
+        // task_complete.error 非 null → end_reason_kind="error" + end_error_code 防御性
+        // 抽取（真实日志全 null，这条是结构保险）。
+        let items = vec![
+            json!({"type": "event_msg", "timestamp": 0, "payload": {
+                "type": "task_started", "turn_id": "t1", "started_at": 100}}),
+            json!({"type": "event_msg", "timestamp": 0, "payload": {
+                "type": "task_complete", "turn_id": "t1", "started_at": 100,
+                "error": {"codex_error_info": {"code": "AGENT_PANICKED"}}}}),
+        ];
+        let evidence = build(items);
+        assert_eq!(evidence.canonical.turns.entries.len(), 1);
+        assert_eq!(evidence.canonical.turns.entries[0].observation.end_reason_kind.as_deref(),
+                   Some("error"));
+        assert_eq!(evidence.canonical.turns.entries[0].observation.end_error_code.as_deref(),
+                   Some("AGENT_PANICKED"));
+    }
+
+    /// 从 outcomes 数组里按码取一条 `RuleOutcome`（真值表断言的取数器）。显式
+    /// lifetime——闭包在这里推不出来，用模块级 fn 是干净的写法。
+    fn outcome<'a>(
+        outcomes: &'a [(&'static str, crate::evidence::RuleOutcome)],
+        code: &str,
+    ) -> &'a crate::evidence::RuleOutcome {
+        outcomes.iter().find(|(cc, _)| *cc == code).map(|(_, o)| o).expect("rule present")
+    }
+
+    #[test]
+    fn codex_canonical_runs_behavior_and_trajectory_rules() {
+        // 真值表（诚实结果，build_codex_evidence 注释里那张表的可测形态）：Codex
+        // 填了 4 条 timeline 后，SV 规则按门控真正跑起来。这是「解析对齐」的可测
+        // 证明——不需要 `codex behavior` CLI 消费者。
+        use crate::behavior::match_behavior_canonical;
+        use crate::trajectory::match_trajectory_canonical;
+
+        let evidence = build(populated_items());
+        let c = &evidence.canonical;
+        let behavior = match_behavior_canonical(c);
+        let trajectory = match_trajectory_canonical(c);
+
+        // SV601/602/603（exec→bash 翻译）：rm -rf 命中 SV601；无 sudo/curl|sh。
+        assert!(matches!(outcome(&behavior, "SV601"), crate::evidence::RuleOutcome::Findings(_)));
+        assert!(matches!(outcome(&behavior, "SV602"), crate::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&behavior, "SV603"), crate::evidence::RuleOutcome::MeasuredZero));
+        // SV604/605/606：Codex 没有 write/edit/web_fetch 工具，诚实 MeasuredZero。
+        assert!(matches!(outcome(&behavior, "SV604"), crate::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&behavior, "SV605"), crate::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&behavior, "SV606"), crate::evidence::RuleOutcome::MeasuredZero));
+        // SV607/608：exit_code:N 不在 DSH 错误码集里，诚实 MeasuredZero。
+        assert!(matches!(outcome(&behavior, "SV607"), crate::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&behavior, "SV608"), crate::evidence::RuleOutcome::MeasuredZero));
+        // SV609：approvals 空 → 门控 Unavailable（诚实能力缺失）。
+        assert!(matches!(outcome(&behavior, "SV609"),
+                         crate::evidence::RuleOutcome::Unavailable { .. }));
+        // SV610：sandbox_policy 翻译进 sandbox_modes → danger-full-access 命中。
+        assert!(matches!(outcome(&behavior, "SV610"), crate::evidence::RuleOutcome::Findings(_)));
+
+        // SV611：三连相同签名 (bash,"echo boom") 触发连续重复。
+        assert!(matches!(outcome(&trajectory, "SV611"),
+                         crate::evidence::RuleOutcome::Findings(_)));
+        // SV612：两 turn 的 sig 不同，不是死循环。
+        assert!(matches!(outcome(&trajectory, "SV612"), crate::evidence::RuleOutcome::MeasuredZero));
+        // SV613：三连 exit_code:1 触发工具级停滞。
+        assert!(matches!(outcome(&trajectory, "SV613"),
+                         crate::evidence::RuleOutcome::Findings(_)));
+        // SV614：OR 门控（approvals 空但 sandbox 非空）放行，两个 danger 授予触发 c。
+        assert!(matches!(outcome(&trajectory, "SV614"),
+                         crate::evidence::RuleOutcome::Findings(_)));
+    }
+
+    #[test]
+    fn populate_skips_custom_tool_call_shadow_entries() {
+        // 真实日志里 exec = custom_tool_call + CommandExecution + output 三份影子，
+        // call_id 与 item.id 无 join key。都填会双重计数、破坏 SV611。主源是
+        // CommandExecution，custom_tool_call/custom_tool_call_output 必须被跳过。
+        let items = vec![
+            json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "custom_tool_call", "name": "exec",
+                "input": "const r = await tools.exec_command({cmd:\"echo hi\"})",
+                "call_id": "call-x"}}),
+            json!({"type": "event_msg", "timestamp": 0, "payload": {
+                "type": "item_completed", "turn_id": "t1", "item": {
+                    "type": "CommandExecution", "id": "exec-x",
+                    "command": ["echo", "hi"], "exit_code": 0}}}),
+            json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "custom_tool_call_output", "call_id": "call-x",
+                "output": "hi", "error": null}}),
+        ];
+        let evidence = build(items);
+        // 只有 CommandExecution 一条进 tool_calls/tool_results——影子被跳过。
+        assert_eq!(evidence.canonical.tool_calls.entries.len(), 1);
+        assert_eq!(evidence.canonical.tool_calls.entries[0].observation.name, "bash");
+        assert_eq!(evidence.canonical.tool_results.entries.len(), 1);
+    }
+
+    #[test]
+    fn populate_legacy_fallback_extracts_real_shell_cmds_only() {
+        // Legacy 线格式（真实 7/25）：0 item_completed/CommandExecution，679 次工具
+        // 执行全是 custom_tool_call{name:"exec"}。但 "exec" 是 JS 沙箱工具——input
+        // 里真跑的不一定是 shell（apply_patch/write_stdin/view_image/web__run 都有）。
+        // 回退只把能提取到 exec_command({cmd}) 的翻成 bash（真 shell 命令）：
+        // - 双引号 cmd 值内嵌单引号不截断（quote-aware——旧 `[^"']` 会把
+        //   `sed -n '1,240p'` 截成 `sed -n ` 这种看着像命令的残片）；
+        // - apply_patch / JS 动态拼 cmd 的不进 tool_calls（SV601-603 只在 bash 上跑，
+        //   不会在 apply_patch 上误报）；
+        // - tool_results 恒空（Legacy 无 exit/error 源）、不进 turn sig（无 turn_id）。
+        let items = vec![
+            json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "custom_tool_call", "name": "exec", "call_id": "call-1",
+                "input": "const r = await tools.exec_command({\"cmd\":\"sed -n '1,240p' 'x'\"})"}}),
+            json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "custom_tool_call", "name": "exec", "call_id": "call-2",
+                "input": "const r = await tools.apply_patch({patch: '...'})"}}),
+            json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "custom_tool_call", "name": "exec", "call_id": "call-3",
+                "input": "const cmd = 'git log'; await tools.exec_command({cmd})"}}),
+            json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "custom_tool_call", "name": "exec", "call_id": "call-4",
+                "input": "await tools.exec_command({'cmd':'ls -la'})"}}),
+        ];
+        let evidence = build(items);
+        let calls = &evidence.canonical.tool_calls.entries;
+        assert_eq!(calls.len(), 2, "只挖得出真 shell 命令的才进 tool_calls");
+        assert_eq!(calls[0].observation.name, "bash");
+        assert_eq!(
+            calls[0].observation.args_text, "sed -n '1,240p' 'x'",
+            "双引号值内嵌单引号必须完整保留，不许截成 sed -n 残片"
+        );
+        assert_eq!(calls[0].call_id.as_deref(), Some("call-1"));
+        assert_eq!(calls[1].observation.name, "bash");
+        assert_eq!(calls[1].observation.args_text, "ls -la", "单引号 cmd 值同样提取");
+        assert_eq!(
+            evidence.canonical.tool_results.entries.len(), 0,
+            "Legacy 工具结果无 exit/error 源 → tool_results 保持空（诚实 Unavailable）"
+        );
+        assert_eq!(evidence.canonical.turns.entries.len(), 0);
     }
 }

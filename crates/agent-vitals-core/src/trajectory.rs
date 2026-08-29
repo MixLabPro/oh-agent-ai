@@ -170,9 +170,10 @@ pub fn match_trajectory_canonical(s: &CanonicalSession) -> Vec<(&'static str, Ru
         .iter()
         .map(|rule| {
             // 门控读 timeline 非空而非 coverage 计数：对 DSH 恒等价（coverage 与
-            // timeline 同源），但 Codex 上分叉——`derive_coverage` 数出非零
-            // measured、timeline 却恒为空（§1 反编造），读计数会让门控放行、
-            // 检测器在空时间线上空转产出 MeasuredZero。见
+            // timeline 同源），但 Codex 上曾分叉——`derive_coverage` 数出非零
+            // measured、timeline 却为空（当时「恒为空」的假结论，2026-08 起原生
+            // 填满 4 条，只余 approvals 空），读计数会让门控放行、检测器在空
+            // 时间线上空转产出 MeasuredZero。见
             // `CanonicalSession::timeline_is_empty`。
             let missing: Vec<Signal> = rule
                 .requires

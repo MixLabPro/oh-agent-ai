@@ -961,6 +961,12 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(cov["Hooks"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
         self.assertEqual(cov["ApprovalDecisions"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
         self.assertNotIn("Hooks", report["signals"])
+        # SandboxModes（2026-08 起 measured）：Legacy fixture 有一个
+        # turn_context.sandbox_policy（字符串形态 "workspace-write"）→ 计 1 且进
+        # signals。coverage 从全零翻到 1 是行为变化，差分 both() 保证两语言锁步。
+        self.assertEqual(cov["SandboxModes"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0},
+                         "Legacy 的 turn_context.sandbox_policy 必须计进 SandboxModes")
+        self.assertIn("SandboxModes", report["signals"])
         self.assertEqual(report["attempts"], [], "认识的条目不记 attempts")
         self.assertEqual(len(report["notes"]), 1, "SkillInvocations 是 derived，必须带 §14.3 说明")
 
@@ -980,6 +986,14 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(cov["ApprovalDecisions"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0})
         self.assertEqual(cov["Hooks"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0})
         self.assertIn("Hooks", report["signals"])
+        # SandboxModes（2026-08 起 measured）：Paginated fixture 有一个
+        # turn_context.sandbox_policy（字符串形态 "danger-full-access"）→ 计 1 且进
+        # signals。Legacy 与 Paginated 在这里同值（各有 1 个 turn_context），
+        # 但来源模式不同（字符串形态 vs 字符串形态——两 fixture 都没用真实的对象
+        # 形态；对象形态的填充由 `populate_codex_timelines` 单测钉住）。
+        self.assertEqual(cov["SandboxModes"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0},
+                         "Paginated 的 turn_context.sandbox_policy 必须计进 SandboxModes")
+        self.assertIn("SandboxModes", report["signals"])
         # Legacy-only 的 token_count/task_* 在 Paginated fixture 里没有：
         self.assertEqual(cov["Usage"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
         self.assertEqual(cov["TurnBoundaries"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})

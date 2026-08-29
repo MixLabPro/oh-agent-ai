@@ -435,9 +435,10 @@ impl CanonicalSession {
     /// 等价（`dsh_evidence.rs` 里 `derive_coverage` 与 `populate_timelines` 由
     /// 同一份 execution_events 派生，well-formed 下「覆盖非零 ⟺ timeline 非空」），
     /// 但 Codex 上会分叉：`derive_coverage` 把 task_started/task_complete 数成
-    /// 非零 measured，timeline 却恒为空（§1 反编造，见 codex_evidence.rs）。读
-    /// 计数会让门控放行、检测器在空时间线上空转产出 `MeasuredZero`；读
-    /// timeline 才诚实出 `Unavailable`。
+    /// 非零 measured，timeline 却为空（2026-08 前 Codex 恒为空；现在原生填满 4
+    /// 条、只余 approvals 空——approvals 就是本判定的活例子）。读计数会让门控
+    /// 放行、检测器在空时间线上空转产出 `MeasuredZero`；读 timeline 才诚实出
+    /// `Unavailable`。
     ///
     /// 五条 require-able 信号各对应一条 timeline；其余信号没有可消费的
     /// timeline，视为空（诚实 Unavailable——没有证据可读的规则不该跑，与
