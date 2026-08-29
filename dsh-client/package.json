@@ -54,8 +54,9 @@
     "check": "tsc --noEmit",
     "verify": "node scripts/verify.mjs",
     "verify:host": "node scripts/verify-host.mjs",
+    "verify:wire": "node scripts/verify-wire-contract.mjs",
     "verify:render": "node scripts/verify-render.mjs",
-    "test": "npm run check && npm run build && npm run verify && npm run verify:host && npm run verify:timeline && npm run verify:export && npm run verify:render",
+    "test": "npm run check && npm run build && npm run verify && npm run verify:host && npm run verify:wire && npm run verify:timeline && npm run verify:export && npm run verify:render",
     "verify:timeline": "node scripts/verify-timeline.mjs",
     "verify:export": "node scripts/verify-export.mjs"
   },
