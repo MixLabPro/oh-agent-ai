@@ -20,7 +20,7 @@ description —— 一个审计供应链风险的工具，自己落盘的那份�
 
 跑法：
     python3 -m unittest tests.test_snapshot -v
-    设 SKILL_VITALS_BIN 即整套指向 Rust 二进制（差分测试）。
+    设 AGENT_VITALS_BIN 即整套指向 Rust 二进制（差分测试）。
 """
 
 import json
@@ -37,7 +37,7 @@ from tests.env_helpers import isolated_home_env
 
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "scripts" / "scan.py"
-_BIN = os.environ.get("SKILL_VITALS_BIN")
+_BIN = os.environ.get("AGENT_VITALS_BIN")
 SCAN_CMD = [_BIN] if _BIN else [sys.executable, str(SCAN)]
 POSIX = os.name != "nt"
 
@@ -74,7 +74,7 @@ class SnapCase(unittest.TestCase):
 
     def run_cmd(self, *argv, expect=0, snapdir=None):
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(snapdir or self.snaps)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(snapdir or self.snaps)
         r = subprocess.run(SCAN_CMD + list(argv) + ["--host", "claude-code"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -356,7 +356,7 @@ class TestDefaultHostDoesNotCrash(SnapCase):
 
     def _bare(self, *argv, host="all"):
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         r = subprocess.run(SCAN_CMD + list(argv) + ["--host", host],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -390,7 +390,7 @@ class TestDefaultHostDoesNotCrash(SnapCase):
         base = sorted(self.snaps.glob("*.json"))[-1]
         out = self.tmp / "scan.json"
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         subprocess.run(SCAN_CMD + ["--host", "all", "--baseline", str(base),
                                    "--json", str(out), "--no-snapshot"],
                        cwd=str(self.tmp / "workdir"), env=env,
@@ -405,7 +405,7 @@ class TestDefaultHostDoesNotCrash(SnapCase):
         它把「这条证据里没带」说成「数过了，是零个」。
         """
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         out = self.tmp / "diag.json"
         # 把预算压到刚好落进 85–100% 区间，逼出 SV001（而不是 SV002）
         for budget in range(1, 400):
@@ -440,7 +440,7 @@ class TestBaselineMustLookLikeAScanReport(SnapCase):
         bad = self.tmp / "bad.json"
         bad.write_text(content, encoding="utf-8")
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         r = subprocess.run(SCAN_CMD + ["diff", str(bad), "--host", "all"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -457,7 +457,7 @@ class TestBaselineMustLookLikeAScanReport(SnapCase):
 
     def test_missing_baseline_is_also_a_tool_error(self):
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.tmp / "nope")
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / "nope")
         r = subprocess.run(SCAN_CMD + ["diff", "--host", "all"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -466,7 +466,7 @@ class TestBaselineMustLookLikeAScanReport(SnapCase):
     def test_a_good_baseline_still_works(self):
         """对照组：没有它，上面几条可以靠「diff 恒返回 2」通过。"""
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         subprocess.run(SCAN_CMD + ["snapshot", "--host", "all"],
                        cwd=str(self.tmp / "workdir"), env=env,
                        capture_output=True, text=True, check=True)

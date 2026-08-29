@@ -4,7 +4,7 @@
 // **不按 sessionId 隔离**，理由同 budget.ts：这是"提醒我这个数"式的个人偏好，
 // 不是针对某条具体证据的备注，用户没理由每换一个会话就重设一次。
 
-const SLOW_THRESHOLD_STORAGE_KEY = 'skill-vitals-audit:slow-threshold-ms:v1'
+const SLOW_THRESHOLD_STORAGE_KEY = 'agent-vitals-audit:slow-threshold-ms:v1'
 
 // 0 或负数没有意义，一律当作"未设置"处理。
 export function loadSlowThreshold(): number | null {

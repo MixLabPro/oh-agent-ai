@@ -75,7 +75,7 @@ pub struct Inventory {
     pub workbuddy: WorkBuddyFacts,
     /// DSH 会话日志证据（读一次后下传给 A4/A9）。None = 未设环境变量。
     pub dsh_evidence: Option<Value>,
-    /// 环境变量 `SKILL_VITALS_DSH_SESSION_LOG` 原始值，进报告里的 source 串。
+    /// 环境变量 `AGENT_VITALS_DSH_SESSION_LOG` 原始值，进报告里的 source 串。
     pub dsh_evidence_path: Option<String>,
     /// DSH 注册表快照（probe 证据，A11）。None = 未给 --runtime-json。
     /// A12 未完成前报告层暂不消费，故 allow dead_code —— 快照已在 discovery 的
@@ -111,7 +111,7 @@ pub fn take(sel: &Selection, home_n: &str, cfg: &HostConfig, ctx: &Ctx) -> Inven
         roots.push(("openclaw".to_string(), path, meta));
     }
     // WorkBuddy 的 builtin 包由 marketplace.json 选出，不是扫目录扫出来的。
-    let wb_off = disabled("SKILL_VITALS_DISABLE_WORKBUDDY_BUILTINS");
+    let wb_off = disabled("AGENT_VITALS_DISABLE_WORKBUDDY_BUILTINS");
     let wb_mode = if wb_off { None } else { workbuddy::read_welcome_mode(home_n) };
     let wb_disc = if wb_off {
         workbuddy::BuiltinDiscovery { roots: Vec::new(), orphaned_packages: Vec::new() }
@@ -169,8 +169,8 @@ pub fn take(sel: &Selection, home_n: &str, cfg: &HostConfig, ctx: &Ctx) -> Inven
     // ── 阶段 2：probe ───────────────────────────────────
     // Codex 的官方目录。只有它能回答「宿主真的看见了什么」，
     // 所以它的结论覆盖磁盘推断（runtime_verified）。
-    let codex_runtime = if disabled("SKILL_VITALS_DISABLE_CODEX_RUNTIME") {
-        codex_not_probed("disabled by SKILL_VITALS_DISABLE_CODEX_RUNTIME")
+    let codex_runtime = if disabled("AGENT_VITALS_DISABLE_CODEX_RUNTIME") {
+        codex_not_probed("disabled by AGENT_VITALS_DISABLE_CODEX_RUNTIME")
     } else if sel.host == "all" || sel.host == "codex" {
         codex::read_codex_runtime(
             &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -181,7 +181,7 @@ pub fn take(sel: &Selection, home_n: &str, cfg: &HostConfig, ctx: &Ctx) -> Inven
     };
     // OpenClaw 的权威清单：逐实例问一次。
     let mut openclaw_runtimes: Vec<openclaw::OpenClawRuntime> = Vec::new();
-    let openclaw_on = !disabled("SKILL_VITALS_DISABLE_OPENCLAW_RUNTIME")
+    let openclaw_on = !disabled("AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME")
         && (sel.host == "all" || sel.host == "openclaw");
     if openclaw_on {
         // 按实例根去重后排序：探测顺序会影响 openclaw_runtime 的输出次序

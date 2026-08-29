@@ -66,7 +66,7 @@ fn find_codex_executable() -> Option<PathBuf> {
 pub fn protocol_messages(cwd: &str) -> Vec<Value> {
     vec![
         json!({"method": "initialize", "id": 1, "params": {"clientInfo": {
-            "name": "skill-vitals", "title": "Skill Vitals", "version": "0.1.0"}}}),
+            "name": "agent-vitals", "title": "Agent Vitals", "version": "0.1.0"}}}),
         json!({"method": "initialized", "params": {}}),
         json!({"method": "skills/list", "id": 2, "params": {
             "cwds": [cwd], "forceReload": true}}),

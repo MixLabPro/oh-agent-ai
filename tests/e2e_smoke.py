@@ -7,7 +7,7 @@
 用法：
     python3 tests/e2e_smoke.py                       # 全跑（Python + Rust）
     python3 tests/e2e_smoke.py --skip-rust           # 只测 Python
-    SKILL_VITALS_HOME=/tmp/sv-e2e python3 tests/e2e_smoke.py
+    AGENT_VITALS_HOME=/tmp/sv-e2e python3 tests/e2e_smoke.py
 """
 
 import json
@@ -21,13 +21,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "scan.py"
 FIXTURE = ROOT / "fixtures" / "dsh" / "behavior.jsonl"
-RUST_BIN = ROOT / "target" / "release" / "skill-vitals"
+RUST_BIN = ROOT / "target" / "release" / "agent-vitals"
 
 
 def _home():
-    """每个 run 一个临时 $SKILL_VITALS_HOME,不污染真机 ~/.skill-vitals。"""
+    """每个 run 一个临时 $AGENT_VITALS_HOME,不污染真机 ~/.agent-vitals。"""
     tmp = tempfile.mkdtemp(prefix="sv-e2e-")
-    os.environ["SKILL_VITALS_HOME"] = tmp
+    os.environ["AGENT_VITALS_HOME"] = tmp
     return Path(tmp)
 
 
@@ -110,7 +110,7 @@ def m3_cli(home):
 
 def m4_html_renderable(home):
     _step("M4: HTML 模板可在浏览器渲染（语法检查）")
-    tpl = ROOT / "scripts" / "skill_vitals" / "templates" / "calendar.html"
+    tpl = ROOT / "scripts" / "agent_vitals" / "templates" / "calendar.html"
     _assert(tpl.is_file(), "templates/calendar.html 存在")
     text = tpl.read_text()
     # 零外链（CLAUDE.md §no third-party supply chain）
@@ -183,7 +183,7 @@ def m6_budget(home):
 
 def m7_xbar(home):
     _step("M7: xbar 脚本")
-    script = ROOT / "contrib" / "xbar" / "skill-vitals.5m.sh"
+    script = ROOT / "contrib" / "xbar" / "agent-vitals.5m.sh"
     _assert(script.is_file(), "xbar 脚本存在")
     # 无状态文件 → 输出 💤 -
     r = subprocess.run([str(script)], capture_output=True, text=True,
@@ -206,7 +206,7 @@ def main():
     skip_rust = "--skip-rust" in sys.argv
     print(f"e2e smoke test (skip_rust={skip_rust})")
     home = _home()
-    print(f"  SKILL_VITALS_HOME = {home}")
+    print(f"  AGENT_VITALS_HOME = {home}")
 
     try:
         m1_hour_buckets()

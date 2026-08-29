@@ -1,4 +1,4 @@
-# 需求文档：skill-vitals 成本日历 + xbar 状态栏 + 预算预警
+# 需求文档：agent-vitals 成本日历 + xbar 状态栏 + 预算预警
 
 > 状态：草案（待评审）
 > 关联文档：[PRODUCT.md](./PRODUCT.md) §5.8 watch / §7.3 Health Score / §9 成功指标 · [ARCHITECTURE.md](./ARCHITECTURE.md) §0.2 三种使用姿势 / §0.3 明确不做的 / §7 配置 / §8.1 Local First · [RUNTIME_EVIDENCE_CONTRACT.md](./RUNTIME_EVIDENCE_CONTRACT.md) §3 Signals / §4 Coverage
@@ -9,7 +9,7 @@
 
 ### 1.1 现状缺口
 
-skill-vitals 目前能回答「**这个**会话发生了什么、花了多少」，不能回答「**今天**怎么样、本周趋势如何、超预算了没」：
+agent-vitals 目前能回答「**这个**会话发生了什么、花了多少」，不能回答「**今天**怎么样、本周趋势如何、超预算了没」：
 
 | 缺失能力 | 用户视角的提问 |
 |---------|--------------|
@@ -62,7 +62,7 @@ cost_report { total, per_model, by_hour }
      │
      │  写入（自动）
      ▼
-~/.skill-vitals/state/
+~/.agent-vitals/state/
 ├── oneline.json        # 状态栏那一行的数据源
 ├── today.json          # 当日逐小时
 ├── month.json          # 当月逐日
@@ -89,7 +89,7 @@ cost_report { total, per_model, by_hour }
 写入是审计的**副产物**——用户跑一次审计，自动沉淀一份状态。
 
 ```
-用户跑一次 skill-vitals behavior <log>
+用户跑一次 agent-vitals behavior <log>
 ↓
 审计完毕
 ↓
@@ -101,7 +101,7 @@ cost_report { total, per_model, by_hour }
 ### 2.3 状态文件目录结构
 
 ```
-~/.skill-vitals/
+~/.agent-vitals/
 ├── config.toml          # 已有：用户配置（含 [budget] 节）
 ├── snapshots/           # 已有：装机报告，30 份滚动
 ├── state/               # 新增：行为审计副产品
@@ -244,14 +244,14 @@ cost_report { total, per_model, by_hour }
 ### 3.4 命令接口
 
 ```bash
-skill-vitals behavior <log>          # 现有命令，末尾自动写状态文件
-skill-vitals oneline                  # 新增：打印 oneline.json 摘要 + 渲染到 stdout
-skill-vitals oneline --write-state    # 等价于 behavior 末尾自动做的写入
-skill-vitals calendar                 # 新增：输出本月日历（终端 ASCII 版）
-skill-vitals calendar --html <path>   # 新增：输出静态 HTML 日历
-skill-vitals calendar --day 2026-08-25 # 查看某天详情
-skill-vitals calendar --week          # 本周视图
-skill-vitals calendar --month 2026-08 # 指定月份
+agent-vitals behavior <log>          # 现有命令，末尾自动写状态文件
+agent-vitals oneline                  # 新增：打印 oneline.json 摘要 + 渲染到 stdout
+agent-vitals oneline --write-state    # 等价于 behavior 末尾自动做的写入
+agent-vitals calendar                 # 新增：输出本月日历（终端 ASCII 版）
+agent-vitals calendar --html <path>   # 新增：输出静态 HTML 日历
+agent-vitals calendar --day 2026-08-25 # 查看某天详情
+agent-vitals calendar --week          # 本周视图
+agent-vitals calendar --month 2026-08 # 指定月份
 ```
 
 ### 3.5 静态 HTML 日历设计
@@ -260,7 +260,7 @@ skill-vitals calendar --month 2026-08 # 指定月份
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Skill Vitals · Cost Calendar · August 2026                  │
+│ Agent Vitals · Cost Calendar · August 2026                  │
 ├─────────────────────────────────────────────────────────────┤
 │ [< Aug] [Today] [Sep >]   · View: month / week / day        │
 ├─────────────────────────────────────────────────────────────┤
@@ -302,9 +302,9 @@ HTML 文件是**完全静态**——所有数据内嵌，不需服务器。
 
 ```bash
 # 用户流程
-skill-vitals calendar --html ~/.skill-vitals/calendar.html
-open ~/.skill-vitals/calendar.html   # macOS
-xdg-open ~/.skill-vitals/calendar.html  # Linux
+agent-vitals calendar --html ~/.agent-vitals/calendar.html
+open ~/.agent-vitals/calendar.html   # macOS
+xdg-open ~/.agent-vitals/calendar.html  # Linux
 ```
 
 **与 PRODUCT §5.9 决策一致**：静态 HTML 是默认投递方式，零端口零 daemon。
@@ -347,7 +347,7 @@ macOS 状态栏（xbar / SwiftBar）：
 ├ ↗ 打开本日 session 列表
 ├
 ├ ────── 设置 ──────
-├ ⚙ 调整预算 | href=skill-vitals budget set
+├ ⚙ 调整预算 | href=agent-vitals budget set
 ├ 🔕 静音 1 小时 | bash=...
 ├ 🔕 永久关闭预算告警 | bash=...
 ```
@@ -356,16 +356,16 @@ macOS 状态栏（xbar / SwiftBar）：
 
 ```bash
 #!/bin/bash
-# ~/.xbar/plugins/skill-vitals.5m.sh
+# ~/.xbar/plugins/agent-vitals.5m.sh
 # 每 5 分钟 tick 一次
-# <xbar.title>Skill Vitals</xbar.title>
+# <xbar.title>Agent Vitals</xbar.title>
 # <xbar.version>1.0</xbar.version>
 
 export PATH="$HOME/.local/bin:$PATH"
 
 # xbar 渲染：主菜单显示一行 + 颜色
 # xbar 期望 ≤ 1 秒返回
-exec skill-vitals oneline --xbar
+exec agent-vitals oneline --xbar
 ```
 
 ### 4.3 性能边界
@@ -400,7 +400,7 @@ xbar 通过 `| color=red` 等修饰符实现：
 | Linux | ArgBar / StatusBarX | v1.x.x 推迟 |
 | Windows | 不支持 | 不做 |
 
-**理由**：状态栏渲染是分平台工作——`skill-vitals oneline --xbar` 是 macOS 专属，但**底层状态文件层通用**。其他平台用户可以用 `skill-vitals calendar --html` + 浏览器 pinned tab 替代。
+**理由**：状态栏渲染是分平台工作——`agent-vitals oneline --xbar` 是 macOS 专属，但**底层状态文件层通用**。其他平台用户可以用 `agent-vitals calendar --html` + 浏览器 pinned tab 替代。
 
 ---
 
@@ -409,7 +409,7 @@ xbar 通过 `| color=red` 等修饰符实现：
 ### 5.1 预算模型
 
 ```toml
-# ~/.skill-vitals/config.toml（已有文件，加一节）
+# ~/.agent-vitals/config.toml（已有文件，加一节）
 
 [budget]
 enabled = true
@@ -495,18 +495,18 @@ else:
 ### 5.5 用户操作
 
 ```bash
-skill-vitals budget set --daily 50
-skill-vitals budget set --peak-share-max 0.7
-skill-vitals budget disable              # 暂时关闭
-skill-vitals budget enable               # 重新开启
-skill-vitals budget show                 # 查看当前配置
+agent-vitals budget set --daily 50
+agent-vitals budget set --peak-share-max 0.7
+agent-vitals budget disable              # 暂时关闭
+agent-vitals budget enable               # 重新开启
+agent-vitals budget show                 # 查看当前配置
 ```
 
 **snooze**（xbar 菜单点击触发）：
 
 ```bash
-skill-vitals budget snooze --hours 1     # 静默 1 小时
-skill-vitals budget snooze --until EOD   # 静默到今天结束
+agent-vitals budget snooze --hours 1     # 静默 1 小时
+agent-vitals budget snooze --until EOD   # 静默到今天结束
 ```
 
 snooze 状态持久化到 `budget.json`：
@@ -534,14 +534,14 @@ snooze 状态持久化到 `budget.json`：
 ARCHITECTURE §6 定义 `--fail-on` 退出码是装机层 CI 闸门：
 
 ```bash
-skill-vitals doctor --fail-on warning
+agent-vitals doctor --fail-on warning
 ```
 
 **预算告警与 CI 无关**——CI 是装机层的 "这次变更能不能合"，预算是行为层的"今天超没超"。两者**不交叉**。
 
 预算告警出现在：
 - xbar 状态栏
-- `skill-vitals oneline` CLI 输出
+- `agent-vitals oneline` CLI 输出
 - 日历 HTML 渲染
 
 **不**出现在：
@@ -557,13 +557,13 @@ skill-vitals doctor --fail-on warning
 
 | 任务 | 文件 | 行数 |
 |------|------|------|
-| `usage.py` 加 `hour_bucket` 折叠 | `scripts/skill_vitals/usage.py` | +40 |
-| `cost.py` 加 `per_hour` 输出 | `scripts/skill_vitals/cost.py` | +30 |
-| 平行 Rust 实现 | `crates/skill-vitals-core/src/usage.rs` + `cost.rs` | +60 |
-| 新增 `state.py`（写 oneline/today/month） | `scripts/skill_vitals/state.py`（新文件）| ~150 |
-| 新增 `cli.py` 子命令 `oneline` `calendar` | `scripts/skill_vitals/cli.py` | +50 |
+| `usage.py` 加 `hour_bucket` 折叠 | `scripts/agent_vitals/usage.py` | +40 |
+| `cost.py` 加 `per_hour` 输出 | `scripts/agent_vitals/cost.py` | +30 |
+| 平行 Rust 实现 | `crates/agent-vitals-core/src/usage.rs` + `cost.rs` | +60 |
+| 新增 `state.py`（写 oneline/today/month） | `scripts/agent_vitals/state.py`（新文件）| ~150 |
+| 新增 `cli.py` 子命令 `oneline` `calendar` | `scripts/agent_vitals/cli.py` | +50 |
 | 平行 Rust CLI | `src/main.rs` | +60 |
-| 静态 HTML 模板 | `scripts/skill_vitals/calendar_template.html` | ~200 |
+| 静态 HTML 模板 | `scripts/agent_vitals/calendar_template.html` | ~200 |
 | 测试 | `tests/test_state.py` `tests/test_calendar.py` | ~300 |
 | **合计** | | ~890 |
 
@@ -571,8 +571,8 @@ skill-vitals doctor --fail-on warning
 
 | 任务 | 文件 | 行数 |
 |------|------|------|
-| `oneline --xbar` 渲染模式 | `scripts/skill_vitals/cli.py` | +30 |
-| xbar 插件脚本（shell）| `contrib/xbar/skill-vitals.5m.sh` | ~20 |
+| `oneline --xbar` 渲染模式 | `scripts/agent_vitals/cli.py` | +30 |
+| xbar 插件脚本（shell）| `contrib/xbar/agent-vitals.5m.sh` | ~20 |
 | 文档 | `docs/XBAR_INTEGRATION.md`（新文件）| ~150 |
 | **合计** | | ~200 |
 
@@ -580,9 +580,9 @@ skill-vitals doctor --fail-on warning
 
 | 任务 | 文件 | 行数 |
 |------|------|------|
-| `budget.py` 加载 + 计算告警等级 | `scripts/skill_vitals/budget.py`（新文件）| ~150 |
-| `state.py` 加 budget 字段 | `scripts/skill_vitals/state.py` | +50 |
-| `cli.py` `budget` 子命令 | `scripts/skill_vitals/cli.py` | +80 |
+| `budget.py` 加载 + 计算告警等级 | `scripts/agent_vitals/budget.py`（新文件）| ~150 |
+| `state.py` 加 budget 字段 | `scripts/agent_vitals/state.py` | +50 |
+| `cli.py` `budget` 子命令 | `scripts/agent_vitals/cli.py` | +80 |
 | snooze 持久化 | `state.py` | +30 |
 | 配置文件 schema 文档 | `docs/CONFIG.md`（新文件）| ~200 |
 | 测试 | `tests/test_budget.py` | ~200 |
@@ -645,7 +645,7 @@ v1.x.3  ~710 行  (1 周)
 ### 8.1 v1.x.1 验收
 
 ```
-[ ] 跑一次 behavior <log> 后，~/.skill-vitals/state/oneline.json 存在
+[ ] 跑一次 behavior <log> 后，~/.agent-vitals/state/oneline.json 存在
 [ ] oneline.json 字段齐全，schema_version = "1.0"
 [ ] today.cost_cny 等于该 session 的 cost_report.total
 [ ] today.by_hour 折叠正确（每条 usage sample 按 event.time 分桶）
@@ -722,12 +722,12 @@ v1.x.3  ~710 行  (1 周)
 
 | 路径 | 用途 |
 |------|------|
-| `scripts/skill_vitals/state.py` | 新增：状态文件写入 |
-| `scripts/skill_vitals/budget.py` | 新增：预算加载与告警计算 |
-| `scripts/skill_vitals/calendar_template.html` | 新增：HTML 模板 |
-| `crates/skill-vitals-core/src/state.rs` | 新增：Rust 平行实现 |
-| `crates/skill-vitals-core/src/budget.rs` | 新增：Rust 平行实现 |
-| `contrib/xbar/skill-vitals.5m.sh` | 新增：xbar 插件 |
+| `scripts/agent_vitals/state.py` | 新增：状态文件写入 |
+| `scripts/agent_vitals/budget.py` | 新增：预算加载与告警计算 |
+| `scripts/agent_vitals/calendar_template.html` | 新增：HTML 模板 |
+| `crates/agent-vitals-core/src/state.rs` | 新增：Rust 平行实现 |
+| `crates/agent-vitals-core/src/budget.rs` | 新增：Rust 平行实现 |
+| `contrib/xbar/agent-vitals.5m.sh` | 新增：xbar 插件 |
 | `docs/XBAR_INTEGRATION.md` | 新增：xbar 集成文档 |
 | `docs/CONFIG.md` | 新增：完整 config.toml 文档 |
 | `tests/test_state.py` | 新增：状态文件测试 |

@@ -4,7 +4,7 @@
 //! 规则、零 I/O；计价（本文件）读 `codex_pricing.json`（`include_str!` 内嵌，Python
 //! 侧读包内文件）——价格是**业务数据**，不是规则，与 `src/cost.rs` 的 `pricing.json`
 //! 同一哲学，且没有 wasm 消费者，所以不进 core。Python 平行实现
-//! `scripts/skill_vitals/codex_cost.py`，由 `both("codex-cost", ...)` 逐字节看守。
+//! `scripts/agent_vitals/codex_cost.py`，由 `both("codex-cost", ...)` 逐字节看守。
 //!
 //! **计价铁律**（与 cc-trace 的公式逐条对齐，见 `codex_pricing.json` 的 `_doc`）：
 //!
@@ -38,7 +38,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
-const CODEX_PRICING_JSON: &str = include_str!("../scripts/skill_vitals/codex_pricing.json");
+const CODEX_PRICING_JSON: &str = include_str!("../scripts/agent_vitals/codex_pricing.json");
 
 pub fn load_codex_pricing() -> Value {
     serde_json::from_str(CODEX_PRICING_JSON).unwrap_or_else(|_| Value::Object(Default::default()))
@@ -176,7 +176,7 @@ fn price_bucket(bucket: &Value, entry: &Value, lc: Option<(f64, f64)>) -> f64 {
 /// 5 桶对象 → `[i64; 5]`（桶序与 `CODEX_TOKEN_FIELDS` 一致）。
 fn bucket_fields(bucket: &Value) -> [i64; 5] {
     let mut out = [0i64; 5];
-    for (i, f) in skill_vitals_core::codex_usage::CODEX_TOKEN_FIELDS.iter().enumerate() {
+    for (i, f) in agent_vitals_core::codex_usage::CODEX_TOKEN_FIELDS.iter().enumerate() {
         out[i] = get_i64(bucket, f);
     }
     out
@@ -184,7 +184,7 @@ fn bucket_fields(bucket: &Value) -> [i64; 5] {
 
 fn tokens_object(t: &[i64; 5]) -> Value {
     let mut obj = Map::new();
-    for (i, f) in skill_vitals_core::codex_usage::CODEX_TOKEN_FIELDS.iter().enumerate() {
+    for (i, f) in agent_vitals_core::codex_usage::CODEX_TOKEN_FIELDS.iter().enumerate() {
         obj.insert((*f).to_string(), json!(t[i]));
     }
     Value::Object(obj)
@@ -306,7 +306,7 @@ pub fn codex_cost_report(
     // 小时桶先按日聚合（`codex_aggregate_hours`），LC 判定粒度锚定在单日聚合桶；
     // 同时记下每个 (model, spd) 的「有日期份额」成本与 token，供 per_model 轴
     // 求 untimed 剩余用。by_date_model 键序 = 聚合的日期升序，days 保持升序。
-    let by_date_model = skill_vitals_core::codex_usage::codex_aggregate_hours(by_hour_model);
+    let by_date_model = agent_vitals_core::codex_usage::codex_aggregate_hours(by_hour_model);
     let mut dated_cost: HashMap<(String, String), f64> = HashMap::new(); // (model, spd) -> USD 费用（只含有价目桶）
     let mut dated_tokens: HashMap<(String, String), [i64; 5]> = HashMap::new(); // (model, spd) -> [5 桶]
     let mut days: Vec<Value> = Vec::new();
@@ -491,7 +491,7 @@ pub fn render_codex_cost(out: &Value) -> String {
     }
     // 5 桶人读只需一个总量；分桶明细在 --json 与仪表盘里。
     let mut all_tokens: i64 = 0;
-    for f in skill_vitals_core::codex_usage::CODEX_TOKEN_FIELDS.iter() {
+    for f in agent_vitals_core::codex_usage::CODEX_TOKEN_FIELDS.iter() {
         all_tokens += tt.get(*f).and_then(|x| x.as_i64()).unwrap_or(0);
     }
     // 订阅套餐（plan 存在）时，per-token 美元是「按量标价」不是账单——账单 = 套餐

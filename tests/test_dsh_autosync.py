@@ -34,7 +34,7 @@ import dsh_autosync
 class _IsolatedHome:
     def __enter__(self):
         self.tmp = tempfile.mkdtemp(prefix="sv-autosync-test-")
-        self.env = {"SKILL_VITALS_HOME": self.tmp}
+        self.env = {"AGENT_VITALS_HOME": self.tmp}
         self._p = mock.patch.dict(os.environ, self.env, clear=False)
         self._p.start()
         return self

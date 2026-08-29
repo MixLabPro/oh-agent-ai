@@ -19,13 +19,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from skill_vitals import state, budget  # noqa
+from agent_vitals import state, budget  # noqa
 
 
 class _IsolatedHome:
     def __enter__(self):
         self.tmp = tempfile.mkdtemp(prefix="sv-xbar-test-")
-        self.env = {"SKILL_VITALS_HOME": self.tmp}
+        self.env = {"AGENT_VITALS_HOME": self.tmp}
         self._p = mock.patch.dict(os.environ, self.env, clear=False)
         self._p.start()
         return self
@@ -204,7 +204,7 @@ class TestRotateToday(unittest.TestCase):
             fake_now = datetime(2026, 8, 26, 0, 30, 0, tzinfo=timezone(timedelta(hours=8)))
             # 直接调 merge_today,但 env 的 today key 已变 — 用 fake 时间模拟
             import os
-            os.environ["SKILL_VITALS_HOME"] = str(sd.parent)  # 但这不是 fake 时间
+            os.environ["AGENT_VITALS_HOME"] = str(sd.parent)  # 但这不是 fake 时间
             # 用 monkey-patch _today_key 返回 8/26
             with mock.patch.object(state, "_today_key",
                                   return_value="2026-08-26"):
@@ -220,10 +220,10 @@ class TestRotateToday(unittest.TestCase):
 
 def _run_xbar(sd):
     script = Path(__file__).resolve().parent.parent / \
-        "contrib" / "xbar" / "skill-vitals.5m.sh"
+        "contrib" / "xbar" / "agent-vitals.5m.sh"
     return subprocess.run(["bash", str(script)],
                           capture_output=True, text=True,
-                          env={**os.environ, "SKILL_VITALS_HOME": str(sd.parent)},
+                          env={**os.environ, "AGENT_VITALS_HOME": str(sd.parent)},
                           timeout=10)
 
 
@@ -232,7 +232,7 @@ class TestXbarSmokeOutput(unittest.TestCase):
 
     def test_xbar_outputs_menu_and_dropdown(self):
         """xbar 脚本至少要输出菜单栏一行 + 下拉(以 '---' 分隔)。"""
-        # 用 contrib/ 下的脚本,设 SKILL_VITALS_HOME 到一个临时 state dir
+        # 用 contrib/ 下的脚本,设 AGENT_VITALS_HOME 到一个临时 state dir
         with _IsolatedHome() as h:
             sd = state.state_dir()
             # 写一份最小 oneline.json 让 xbar 不显示 "¥?"
@@ -257,10 +257,10 @@ class TestXbarSmokeOutput(unittest.TestCase):
             })
             # 跑 xbar
             script = Path(__file__).resolve().parent.parent / \
-                "contrib" / "xbar" / "skill-vitals.5m.sh"
+                "contrib" / "xbar" / "agent-vitals.5m.sh"
             r = subprocess.run(["bash", str(script)],
                                capture_output=True, text=True,
-                               env={**os.environ, "SKILL_VITALS_HOME": str(sd.parent)},
+                               env={**os.environ, "AGENT_VITALS_HOME": str(sd.parent)},
                                timeout=10)
             self.assertEqual(r.returncode, 0,
                              f"xbar exit {r.returncode}: {r.stderr}")

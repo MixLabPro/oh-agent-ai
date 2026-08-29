@@ -1,4 +1,4 @@
-# Skill Vitals Audit — 整改问题清单
+# Agent Vitals Audit — 整改问题清单
 
 > 状态：待排期  
 > 整理日期：2026-08-22  

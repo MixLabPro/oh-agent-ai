@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键安装 skill-vitals 的 SwiftBar / xbar 菜单栏插件。
+# 一键安装 agent-vitals 的 SwiftBar / xbar 菜单栏插件。
 #
 # 用法：
 #   bash scripts/install_swiftbar.sh                # 默认路径
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SCRIPT_SRC="$REPO_ROOT/contrib/xbar/skill-vitals.5m.sh"
+SCRIPT_SRC="$REPO_ROOT/contrib/xbar/agent-vitals.5m.sh"
 
 if [[ ! -f "$SCRIPT_SRC" ]]; then
     echo "error: $SCRIPT_SRC 不存在" >&2
@@ -58,7 +58,7 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
         [[ -d "/Applications/xbar.app" ]] && \
             PLUGIN_DIR="$HOME/Library/Application Support/xbar/plugins"
     fi
-    target="$PLUGIN_DIR/skill-vitals.5m.sh"
+    target="$PLUGIN_DIR/agent-vitals.5m.sh"
     if [[ -f "$target" ]]; then
         rm "$target"
         echo "✓ 已卸载 $target"
@@ -93,18 +93,18 @@ fi
 
 # ── 安装脚本 ──────────────────────────────────────────────
 mkdir -p "$PLUGIN_DIR"
-cp "$SCRIPT_SRC" "$PLUGIN_DIR/skill-vitals.5m.sh"
+cp "$SCRIPT_SRC" "$PLUGIN_DIR/agent-vitals.5m.sh"
 # 把占位符换成这次安装时的仓库 scripts/ 绝对路径——装完的副本不知道自己
 # 是从哪个 checkout cp 出来的，dsh_autosync.py 的自动发现全靠这一步烙进去。
 # `|` 定界符：REPO_ROOT 是路径，可能含 `/`，用 `/` 当 sed 定界符会自己打架。
-sed -i '' "s|__SKILL_VITALS_SCRIPTS_DIR__|$REPO_ROOT/scripts|" \
-    "$PLUGIN_DIR/skill-vitals.5m.sh"
-chmod +x "$PLUGIN_DIR/skill-vitals.5m.sh"
+sed -i '' "s|__AGENT_VITALS_SCRIPTS_DIR__|$REPO_ROOT/scripts|" \
+    "$PLUGIN_DIR/agent-vitals.5m.sh"
+chmod +x "$PLUGIN_DIR/agent-vitals.5m.sh"
 
-echo "✓ 已安装到 $PLUGIN_DIR/skill-vitals.5m.sh"
+echo "✓ 已安装到 $PLUGIN_DIR/agent-vitals.5m.sh"
 echo
 echo "─── 测试运行 ───"
-bash "$PLUGIN_DIR/skill-vitals.5m.sh"
+bash "$PLUGIN_DIR/agent-vitals.5m.sh"
 echo
 echo "─── 下一步 ───"
 echo "1. 打开 SwiftBar.app（或 xbar.app）"
@@ -117,7 +117,7 @@ echo "有没有停止增长（≥5 分钟没变化）且还没同步过的会话
 echo "oneline——不用再手动找日志、手动解压。这一步需要 zstandard："
 echo "  pip install zstandard"
 echo "没装的话自动同步会跳过（打印提示，不影响菜单栏），可以照样手动跑："
-echo "  SKILL_VITALS_HOME=$HOME/.skill-vitals python3 scripts/scan.py oneline <your-dsh-session-log>"
+echo "  AGENT_VITALS_HOME=$HOME/.agent-vitals python3 scripts/scan.py oneline <your-dsh-session-log>"
 echo
 echo "要卸载:"
 echo "  bash scripts/install_swiftbar.sh --uninstall"

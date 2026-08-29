@@ -10,7 +10,7 @@ cost, and how long it took.
 The install-time layer has had a capability contract since 2026-08. The runtime
 layer has not, and the consequence is visible in the code: DSH's event vocabulary
 (`tool/call`, `approval/asked`, `data.toolName`, `chunk.usage`) is read directly
-inside `crates/skill-vitals-core`, which makes DSH's session format the de-facto
+inside `crates/agent-vitals-core`, which makes DSH's session format the de-facto
 universal interface by accident. This document defines the interface that should
 have been there, and the rules an adapter must satisfy to claim a host is
 supported.
@@ -168,7 +168,7 @@ pub enum Visibility { HostVisible, HostHidden { reason: &'static str } }
 
 Codex persists `SecurityRiskScore` to the rollout file with the source comment
 "Scores must not enter model-visible conversation context or user-visible thread
-item projections." skill-vitals reads that file and has an export path.
+item projections." agent-vitals reads that file and has an export path.
 **`HostHidden` data is excluded from export by default, and the exclusion itself
 is reported.** Silently exporting what the host chose to hide is a defect even
 when the file is readable.
@@ -272,7 +272,7 @@ hosts; a session log plus a separate usage log for the same run.
 argument.** Silent merging double-counts, and double-counted totals are worse
 than absent ones because they look plausible.
 
-`crates/skill-vitals-core/src/subagent.rs` already documents a live instance of
+`crates/agent-vitals-core/src/subagent.rs` already documents a live instance of
 this hazard: of 19 subagent invocations in a real session, only 5 child sessions
 pointed back at the parent; the other 14 were spawned before the fork. A
 `SessionSet` layer sits above `CanonicalSession` and holds the overlap
@@ -656,7 +656,7 @@ in, and `SessionMetaLine` carries a hand-written `Deserialize` that back-fills
 `session_id` from a legacy `id` field. The format evolves behind compatibility
 shims and exposes no version number.
 
-Consequence: skill-vitals' DSH strategy — "`SESSION_FORMAT_VERSION` mismatch ⇒
+Consequence: agent-vitals' DSH strategy — "`SESSION_FORMAT_VERSION` mismatch ⇒
 degrade the whole read" — **cannot be applied to Codex.** Codex degrades by
 existence probing: unknown item types are skipped and recorded in `attempts`,
 never treated as corruption. The version check remains DSH adapter–private and is
@@ -923,7 +923,7 @@ plane.
 
 **The useful half of this design is the split, not the hook.** The hook supplies
 the *session pointer and lifecycle* — which file, and when it stopped being
-written — and the log supplies the detail. skill-vitals answers the pointer
+written — and the log supplies the detail. agent-vitals answers the pointer
 question today by globbing directories and guessing at liveness. The same split
 can be had **without writing anything into the user's configuration**, by using
 the host's own session registry as the pointer: WorkBuddy's `sessions` table and
@@ -954,7 +954,7 @@ configured collector) than surface 3 (a hook the tool installs itself), and
 surface 4 is excluded outright (§14.8.5). None of the three is retroactive.
 
 So surface 3 should be treated as a likely future requirement, not a rejected
-alternative. What that costs is a change in what the product *is* — skill-vitals
+alternative. What that costs is a change in what the product *is* — agent-vitals
 is read-only today, and installing hooks writes into the user's agent
 configuration. That decision is not taken here. What this contract does require
 is that taking it later must not need a rewrite:
@@ -1194,7 +1194,7 @@ writing anything into the user's configuration.
 
 - **Redact before truncating.** Their transcript reader redacts and *then*
   slices, "so a placeholder (not a raw token fragment) is what lands near the
-  length boundary." Verify skill-vitals' export path does the same ordering.
+  length boundary." Verify agent-vitals' export path does the same ordering.
 - **The pointer/detail split** — see §14.8.2.
 - **Per-assistant-message usage dedup** — see §14.5.
 
@@ -1334,8 +1334,8 @@ behaviour is the golden corpus, and the golden corpus speaks only DSH.
 | Phase | Work | Acceptance |
 |---|---|---|
 | **P0** | This document, plus the §13 matrix as a checked-in baseline | Matrix committed; it *is* the test baseline |
-| **P1 ✅** | `evidence` module in `skill-vitals-core`: `CanonicalSession`, `Signal`, `Observed<T>`, `Provenance`, `CoverageCounts`, `RuleSpec`, `RuleOutcome` | Zero behaviour change — nothing consumes it yet. Landed in `crates/skill-vitals-core/src/evidence.rs`: all §2–§12 types plus `AggregateProvenance::for_window`, `CoverageCounts`/`Coverage` ratios, and the §12 no-host-identifier self-check, 12 unit tests. 15/15 goldens byte-identical before/after (nothing calls it yet) |
-| **P2 ✅** | `crates/skill-vitals-core/src/dsh_evidence.rs`: a plain function (`build_dsh_evidence`, **not a trait** — see `CanonicalSession`'s own doc comment and `ARCHITECTURE.md` §4.2) that folds `src/dsh.rs`'s already-extracted `execution_events`/`usage_events` into a `CanonicalSession` (Signal/Coverage counted per §13's DSH column; the 3 rows §13 doesn't cover — `SandboxPolicy`/`UserPrompts`/`UserCorrections` — are left `Unavailable`, not fabricated), bundled with the raw events (`CanonicalSession` alone has no event-payload field); plus `reverse_project`, a temporary bridge back to today's `behavior.rs` input shape | **Byte-identical `behavior --json` output**, proven three ways: `cargo test` (154 core + 137 binary), `SKILL_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (the real Python↔Rust differential — `golden/*.json` covers the unrelated `scan` command, not this), and a manual before/after diff on `fixtures/dsh/behavior.jsonl`. `reverse_project` is deleted when P3 completes |
+| **P1 ✅** | `evidence` module in `agent-vitals-core`: `CanonicalSession`, `Signal`, `Observed<T>`, `Provenance`, `CoverageCounts`, `RuleSpec`, `RuleOutcome` | Zero behaviour change — nothing consumes it yet. Landed in `crates/agent-vitals-core/src/evidence.rs`: all §2–§12 types plus `AggregateProvenance::for_window`, `CoverageCounts`/`Coverage` ratios, and the §12 no-host-identifier self-check, 12 unit tests. 15/15 goldens byte-identical before/after (nothing calls it yet) |
+| **P2 ✅** | `crates/agent-vitals-core/src/dsh_evidence.rs`: a plain function (`build_dsh_evidence`, **not a trait** — see `CanonicalSession`'s own doc comment and `ARCHITECTURE.md` §4.2) that folds `src/dsh.rs`'s already-extracted `execution_events`/`usage_events` into a `CanonicalSession` (Signal/Coverage counted per §13's DSH column; the 3 rows §13 doesn't cover — `SandboxPolicy`/`UserPrompts`/`UserCorrections` — are left `Unavailable`, not fabricated), bundled with the raw events (`CanonicalSession` alone has no event-payload field); plus `reverse_project`, a temporary bridge back to today's `behavior.rs` input shape | **Byte-identical `behavior --json` output**, proven three ways: `cargo test` (154 core + 137 binary), `AGENT_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (the real Python↔Rust differential — `golden/*.json` covers the unrelated `scan` command, not this), and a manual before/after diff on `fixtures/dsh/behavior.jsonl`. `reverse_project` is deleted when P3 completes |
 | **P3 ✅ (all 5 groups)** | Migrate rules one family per PR: read Signals, declare `requires`, goldens unchanged. Order: ① command/path (SV601–610) ② cost fold ③ duration ④ trajectory ⑤ skill / subagent / compaction / waste | See §17.1a for what actually landed per group. `reverse_project` is retained (not deleted) — see note at the end of §17.1a |
 | **P4 ✅** | Codex adapter | Chosen second not for coverage breadth — §14.1 shows it lacks tool-call duration, approvals, and hooks — but because it is the only host that emits **two incompatible formats without declaring which**. If the model absorbs both Codex modes without structural change, it is sound. See §17.1c for what actually landed: **sound — zero structural change to the shared type layer** (`shared_type_layer_has_no_host_identifiers_in_code` stayed green throughout; §13's Codex Legacy + Paginated columns are absorbed by one flat type→Signal table in `derive_coverage`) |
 | **P4.5** | Schema-drift sentinel for `RolloutItem` (§14.4) | CI fails on upstream persistence-policy change |
@@ -1345,7 +1345,7 @@ behaviour is the golden corpus, and the golden corpus speaks only DSH.
 ### 17.1a P3 group log
 
 **① command/path (SV601–610) ✅**: `RuleSpec` declared for all 10 rules in
-`behavior.rs` (`crates/skill-vitals-core` + Python mirror); a new pure
+`behavior.rs` (`crates/agent-vitals-core` + Python mirror); a new pure
 `rule_outcomes()`/`rule_outcomes_json()` derives `Findings`/`MeasuredZero`/
 `Unavailable` per rule from `findings` + `Coverage` — additive only,
 `detect_svNNN` untouched, `findings` byte-identical. Exposed as a new,
@@ -1471,7 +1471,7 @@ the legacy shape. Deleting `reverse_project` waits for family ④ and the
 remaining signals to migrate, not for this pass.
 
 All five groups verified the same way: `cargo test`, `cargo clippy -D
-warnings`, full Python suite, `SKILL_VITALS_BIN=<rust> python3 -m unittest
+warnings`, full Python suite, `AGENT_VITALS_BIN=<rust> python3 -m unittest
 tests.test_cli_matrix` (byte-identical new keys both languages), wasm
 rebuilt + `dsh-client`'s full `npm test` (including `verify-host.mjs`) green
 against the new binary each time.
@@ -1487,7 +1487,7 @@ stayed green throughout, and no shared type in `evidence.rs` was touched.
 What landed, one new module per layer of the five-stage pipeline (§4.2):
 
 - **locate/shape/extract** — `src/codex_session.rs` ↔
-  `scripts/skill_vitals/adapters/codex_session.py`: read the JSONL, pull
+  `scripts/agent_vitals/adapters/codex_session.py`: read the JSONL, pull
   provenance (`session_id` with §14.4 id back-fill, `history_mode`,
   `cli_version`, `model` + `workspace_roots` from the latest non-empty
   `turn_context`), keep every record in `items`. **No version gate** — §14.4:
@@ -1495,8 +1495,8 @@ What landed, one new module per layer of the five-stage pipeline (§4.2):
   by existence probing only (empty → `missing-header`, non-JSON line →
   `non-json`, unreadable → `file-missing`), never by a `SESSION_FORMAT_VERSION`
   check that would misclassify a new record type as corruption.
-- **derive/coverage** — `crates/skill-vitals-core/src/codex_evidence.rs` ↔
-  `scripts/skill_vitals/codex_evidence.py`: **one flat type→Signal table**
+- **derive/coverage** — `crates/agent-vitals-core/src/codex_evidence.rs` ↔
+  `scripts/agent_vitals/codex_evidence.py`: **one flat type→Signal table**
   (never a per-mode fork — real Paginated rollouts carry `task_started`/
   `task_complete`, so mixed streams must just work). Both §13 Codex columns
   live in the same table. `UsageAggregate` and `SkillInvocations` are
@@ -1519,13 +1519,13 @@ What landed, one new module per layer of the five-stage pipeline (§4.2):
   this is the observable "sound" proof, not findings.
 - **wasm deliberately untouched** — `audit_events` only ever returns `findings`
   (`match_behavior` + `match_trajectory`); P4 touches neither, so
-  `skill-vitals-wasm`/`dsh-client` need no rebuild.
+  `agent-vitals-wasm`/`dsh-client` need no rebuild.
 
 Verified: `cargo test` (202 binary + core, incl. `codex_evidence.rs` +
 `codex_session.rs` unit tests), `cargo clippy -D warnings`, full Python suite
 (705, incl. 17 new characterization tests pinning the pure functions and the
 ClawHub packaging allowlist now admitting the two new modules), and
-`SKILL_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (73
+`AGENT_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (73
 tests, incl. the new `test_codex_evidence_legacy`/`_paginated` byte-for-byte
 differentials). Manual: `codex-evidence` on real rollouts of **both** modes —
 Legacy (`0.147.0-alpha.1.2`: 10 signals, `Compaction` measured, `FileMutations`

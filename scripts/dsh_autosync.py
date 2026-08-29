@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """DSH 会话自动同步 —— 见 docs/PRODUCT.md §5.8.4/5.8.5、docs/DSH_INTEGRATION.md。
 
-本脚本**不是**发行给 ClawHub 的技能扫描器的一部分（不在 `scripts/skill_vitals/`
+本脚本**不是**发行给 ClawHub 的技能扫描器的一部分（不在 `scripts/agent_vitals/`
 包里）——它需要 `zstandard` 做多帧 zstd 解压，而 CLAUDE.md 要求被审计分发的
 技能扫描器保持 stdlib-only（"a skill that audits skills for supply-chain risk
 cannot itself pull third-party code at scan time"）。这个脚本是本地便利工具，
 与 `scripts/install_swiftbar.sh` 同一层级，不参与"发行"——它可以 import
-`skill_vitals` 包里的纯函数（`state.py` 的锁/原子写），但不会给那个包本身
+`agent_vitals` 包里的纯函数（`state.py` 的锁/原子写），但不会给那个包本身
 引入任何第三方依赖。
 
 **为什么不用 hook**：DSH 没有会话结束类的钩子。唯一有文档的钩子
@@ -58,16 +58,16 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from skill_vitals import state as state_module  # noqa: E402
+from agent_vitals import state as state_module  # noqa: E402
 
 # 5 分钟不再增长 = 大概率会话已结束（与 xbar 的 5 分钟 tick 同一个节奏，
-# 见 contrib/xbar/skill-vitals.5m.sh）。
+# 见 contrib/xbar/agent-vitals.5m.sh）。
 STABILITY_WINDOW_SECONDS = 5 * 60
 SCAN_PY = _SCRIPT_DIR / "scan.py"
 
 
 def _dsh_home() -> Path:
-    override = os.environ.get("SKILL_VITALS_DSH_HOME")
+    override = os.environ.get("AGENT_VITALS_DSH_HOME")
     if override:
         return Path(override)
     return Path.home() / ".dsh"
@@ -75,7 +75,7 @@ def _dsh_home() -> Path:
 
 def _discover_session_logs(dsh_home: Path):
     """`$DSH_HOME/sessions/*/*/session.jsonl[.zstd]` —— 跨所有 workspace，
-    不只当前项目：skill-vitals 的预算状态是整机级的（`~/.skill-vitals/
+    不只当前项目：agent-vitals 的预算状态是整机级的（`~/.agent-vitals/
     state/`），不是按项目分的。"""
     sessions_dir = dsh_home / "sessions"
     try:

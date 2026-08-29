@@ -25,20 +25,20 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            asset: skill-vitals-linux-x86_64
+            asset: agent-vitals-linux-x86_64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            asset: skill-vitals-linux-arm64
+            asset: agent-vitals-linux-arm64
             cross_linker: aarch64-linux-gnu-gcc
           - os: macos-latest
             target: x86_64-apple-darwin
-            asset: skill-vitals-macos-x86_64
+            asset: agent-vitals-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset: skill-vitals-macos-arm64
+            asset: agent-vitals-macos-arm64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: skill-vitals-windows-x86_64.exe
+            asset: agent-vitals-windows-x86_64.exe
     steps:
       - uses: actions/checkout@v4
 
@@ -61,7 +61,7 @@ jobs:
       # --version 只证明能加载，跑一次真扫描才证明二进制完整。
       - name: Smoke test (no Python)
         run: |
-          BIN="target/${{ matrix.target }}/release/skill-vitals${{ runner.os == 'Windows' && '.exe' || '' }}"
+          BIN="target/${{ matrix.target }}/release/agent-vitals${{ runner.os == 'Windows' && '.exe' || '' }}"
           "$BIN" --version
           tmpdir="$(mktemp -d)"
           mkdir -p "$tmpdir/.claude/skills/smoke"
@@ -76,9 +76,9 @@ jobs:
         run: |
           cd "target/${{ matrix.target }}/release"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            zip "${{ matrix.asset }}.zip" "skill-vitals.exe"
+            zip "${{ matrix.asset }}.zip" "agent-vitals.exe"
           else
-            tar -czf "${{ matrix.asset }}.tar.gz" skill-vitals
+            tar -czf "${{ matrix.asset }}.tar.gz" agent-vitals
           fi
 
       - uses: actions/upload-artifact@v4

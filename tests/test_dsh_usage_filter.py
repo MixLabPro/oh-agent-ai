@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from skill_vitals.adapters.dsh import _is_usage_event  # noqa: E402
+from agent_vitals.adapters.dsh import _is_usage_event  # noqa: E402
 
 
 class TestIsUsageEvent(unittest.TestCase):

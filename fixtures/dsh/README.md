@@ -323,7 +323,7 @@ deepseek-harness 基线 `47f9438`）：
 | `tool/code-dispatch-start` | `{rootCallId, parentCallId, subCallId, name, arguments}` | `arguments` 是 **JSON 对象**（已规范化，不是字符串） |
 | `tool/code-dispatch` | `{…同上 + isError, content}` | 子调用 settle，`arguments` 同为 JSON 对象 |
 
-两条「字段核对结论」已写进 `scripts/skill_vitals/behavior.py` / `src/behavior.rs`
+两条「字段核对结论」已写进 `scripts/agent_vitals/behavior.py` / `src/behavior.rs`
 头部注释，fixture 与它们保持一致：
 
 1. `approval/asked` 的关联键是 `id`（`callId` 可选），审计对 `asked`+`decided` 按
@@ -353,7 +353,7 @@ python3 fixtures/dsh/build_dsh_behavior_fixture.py
 ```bash
 PYTHONPATH=scripts python3 -c '
 import json, pathlib
-from skill_vitals import behavior
+from agent_vitals import behavior
 events = [json.loads(l) for l in pathlib.Path("fixtures/dsh/behavior.jsonl").read_text().splitlines()[1:]]
 for f in behavior.match_behavior(events):
     print(f["rule"], f["severity"], f["tool_name"], repr(f["evidence"]), "seq", f["seq"])

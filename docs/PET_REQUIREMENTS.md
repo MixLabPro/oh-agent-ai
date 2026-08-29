@@ -1,6 +1,6 @@
-# skill-vitals 跨宿主诊断引擎 + Pet 表现层 — 需求文档
+# agent-vitals 跨宿主诊断引擎 + Pet 表现层 — 需求文档
 
-> 本文档面向我自己。聚焦决策与取舍，跳过背景解释。读者应当熟悉 skill-vitals 现状与 Codex Pet 生态。
+> 本文档面向我自己。聚焦决策与取舍，跳过背景解释。读者应当熟悉 agent-vitals 现状与 Codex Pet 生态。
 
 > **2026-08-27 修订**：新增 §3.0/§6 的 **Phase 0 前置整备**（2 天）、
 > §4.3 的 `UsageSampled` 事件变体、§10.2 的两条守恒律（残差哨兵、跨投影
@@ -14,7 +14,7 @@
 
 ## 0. 一句话目标
 
-**核心**：把 skill-vitals 现有的"DSH-centric 诊断能力"扩展成"host-agnostic 跨宿主诊断引擎" —— 能监听 DSH / Codex / Claude Code / Gemini 的实时事件，归一化后做问题检测（SV 码 + 异常模式 + 成本/时长折叠）。
+**核心**：把 agent-vitals 现有的"DSH-centric 诊断能力"扩展成"host-agnostic 跨宿主诊断引擎" —— 能监听 DSH / Codex / Claude Code / Gemini 的实时事件，归一化后做问题检测（SV 码 + 异常模式 + 成本/时长折叠）。
 
 **表现层**：在诊断引擎之上，加一个 Tauri Pet app 作为可视化消费者，**让用户养一只跨宿主的 pet**，pet 的状态由诊断引擎实时驱动。
 
@@ -24,7 +24,7 @@
 
 ## 1. 背景与定位
 
-### 1.1 skill-vitals 当前的真实分层
+### 1.1 agent-vitals 当前的真实分层
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -58,7 +58,7 @@
 
 ### 1.2 这次要解决的问题
 
-**L3 是 skill-vitals 最有价值的部分**（SV 码审计 + 成本折叠），但被 DSH 锁死了。我们要：
+**L3 是 agent-vitals 最有价值的部分**（SV 码审计 + 成本折叠），但被 DSH 锁死了。我们要：
 
 1. **抽取事件层**：让 host 事件变成 host-agnostic 流
 2. **扩展诊断能力**：SV 码从 DSH 专属变成跨宿主通用（或按 host 分别命名）
@@ -67,12 +67,12 @@
 
 ### 1.3 Pet 项目在这个上下文里的真实定位
 
-Pet 不是新产品 —— **它是诊断引擎的"可视化前端之一"**，跟 `skill-vitals watch` CLI 是同一层的消费者。
+Pet 不是新产品 —— **它是诊断引擎的"可视化前端之一"**，跟 `agent-vitals watch` CLI 是同一层的消费者。
 
 ```
 诊断引擎（核心）                  消费者层
 ──────────────                  ────────
-host-agnostic event stream  ──→ skill-vitals watch（CLI）
+host-agnostic event stream  ──→ agent-vitals watch（CLI）
                               ──→ Tauri Pet（桌面悬浮）
                               ──→ 未来：menu bar / IDE插件 / Webhook
 ```
@@ -85,7 +85,7 @@ host-agnostic event stream  ──→ skill-vitals watch（CLI）
 
 ### 2.1 诊断引擎层（核心）
 
-> 小明同时用 Codex 跑任务、Claude Code 改代码、DSH 跑 agent。他跑 `skill-vitals watch --host all`，终端持续输出三只 agent 的实时诊断 —— 哪个在跑、哪个等审批、哪个检测到危险命令、token 累计多少。诊断引擎在后台跑，他不必再切到三个 host 的不同日志去看。
+> 小明同时用 Codex 跑任务、Claude Code 改代码、DSH 跑 agent。他跑 `agent-vitals watch --host all`，终端持续输出三只 agent 的实时诊断 —— 哪个在跑、哪个等审批、哪个检测到危险命令、token 累计多少。诊断引擎在后台跑，他不必再切到三个 host 的不同日志去看。
 
 > 小明今天收到一条告警："Claude Code session 检测到 3 次 SV603-like 模式（`rm -rf` 模式）" —— 这条告警来自诊断引擎在 Claude Code transcript 上跑 host-agnostic 规则，**而不是 DSH 专属规则**。
 
@@ -110,7 +110,7 @@ host-agnostic event stream  ──→ skill-vitals watch（CLI）
 
 | # | 内容 | 工作量 | 不做的后果 |
 |---|---|---|---|
-| **0-1** | `src/cost.rs` → `crates/skill-vitals-core/src/cost.rs`，根 crate 改 re-export，`include_str!` 路径跟着改 | 半天 | `src-tauri` 依赖不上计价，0a 的"复用 cost"是空话，只能再抄一份 |
+| **0-1** | `src/cost.rs` → `crates/agent-vitals-core/src/cost.rs`，根 crate 改 re-export，`include_str!` 路径跟着改 | 半天 | `src-tauri` 依赖不上计价，0a 的"复用 cost"是空话，只能再抄一份 |
 | **0-2** | `Event` enum 补 `UsageSampled` + `UsageIdentity`（见 4.3） | 半天 | pet 心情里"预算"那一项无从实现；compaction 的钱在归一化就丢 |
 | **0-3** | `host-events` 的 source 层**调 core 谓词**，残差哨兵下沉到 tail 层 | 1 天 | 每写一个新 host 解析器就新增一个静默漏算面（0b/0c 各一次） |
 
@@ -130,7 +130,7 @@ Tauri/host-events 是**第 13 个消费者**。如果 source 层再写一份自�
 **Phase 0 成功标准**：
 1. `cargo test` + `test_cli_matrix.py` 30 条差分在 `cost.rs` 搬迁后全绿
    （byte-for-byte，证明搬迁是纯机械的）
-2. `crates/skill-vitals-wasm` 能直接 `use skill_vitals_core::cost`
+2. `crates/agent-vitals-wasm` 能直接 `use agent_vitals_core::cost`
 3. 有一条测试断言 source 层与 core 用的是同一个谓词（不是各写一份）
 
 ---
@@ -139,17 +139,17 @@ Tauri/host-events 是**第 13 个消费者**。如果 source 层再写一份自�
 
 **目标**：DSH 单 host 的端到端 Pet 跑通。**这一阶段是架构验证 + UX 验证** —— 跑通后才有资格扩到其他 host。
 
-- `crates/skill-vitals-host-events/` 新 crate（I/O 边界，独立于 core）
+- `crates/agent-vitals-host-events/` 新 crate（I/O 边界，独立于 core）
 - **只**实现 `sources/dsh.rs`：wrap `core::dsh::read_session_log`，加增量监听
-- `crates/skill-vitals-core/src/pet/normalize.rs`：host-agnostic `Event` enum（先只装 DSH 一个变体）
-- `crates/skill-vitals-core/src/pet/diagnose.rs`：复用现有 SV601–SV614（DSH 路径不变）
+- `crates/agent-vitals-core/src/pet/normalize.rs`：host-agnostic `Event` enum（先只装 DSH 一个变体）
+- `crates/agent-vitals-core/src/pet/diagnose.rs`：复用现有 SV601–SV614（DSH 路径不变）
 - `tail-offsets.json` 持久化：DSH session offset 重启续传
-- 新子命令：`skill-vitals watch dsh` —— 长驻监听 DSH
+- 新子命令：`agent-vitals watch dsh` —— 长驻监听 DSH
 - **Pet 表现层**（3.2 全部内容）：Tauri 浮窗、pet.json 渲染、状态机、symlink 接管、持久化
 - **不做**：Codex、Claude Code、Gemini
 
 **Phase 0a 成功标准**：
-1. `skill-vitals watch dsh` 在真实 DSH session 上输出实时事件
+1. `agent-vitals watch dsh` 在真实 DSH session 上输出实时事件
 2. Tauri Pet app 启动后，DSH agent 一执行 tool/call，pet 立刻变 `running` 状态
 3. SV603 检测到时 pet 变 `failed`，肉眼可观察
 4. 关闭 Tauri 再开，offset 续传不丢事件
@@ -225,7 +225,7 @@ Tauri/host-events 是**第 13 个消费者**。如果 source 层再写一份自�
 ┌────────────────────────────────────────────────────────────────────┐
 │                        消费者层（多种）                            │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │ skill-vitals │  │ Tauri Pet    │  │ 未来：         │         │
+│  │ agent-vitals │  │ Tauri Pet    │  │ 未来：         │         │
 │  │ watch CLI    │  │ (悬浮窗)      │  │ menu bar      │         │
 │  │              │  │              │  │ IDE插件       │         │
 │  │              │  │              │  │ Webhook       │         │
@@ -253,7 +253,7 @@ Tauri/host-events 是**第 13 个消费者**。如果 source 层再写一份自�
 ├────────────────────────────────────────────────────────────────┤
 │                   事件源层（I/O）                                │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │ crates/skill-vitals-host-events/                     │  │
+│  │ crates/agent-vitals-host-events/                     │  │
 │  │  - tail.rs：notify crate 文件 append 监听           │  │
 │  │  - sources/dsh.rs       (wrap core::dsh)              │  │
 │  │  - sources/codex.rs     (从零写)                       │  │
@@ -267,15 +267,15 @@ Tauri/host-events 是**第 13 个消费者**。如果 source 层再写一份自�
 ### 4.2 crates 结构
 
 ```
-skill-vitals/
+agent-vitals/
 ├── crates/
-│   ├── skill-vitals-core/           # 现有：纯计算（不动结构）
+│   ├── agent-vitals-core/           # 现有：纯计算（不动结构）
 │   │   ├── src/...
 │   │   └── pet/                     # ← 新增：诊断引擎核心
 │   │       ├── normalize.rs         # host-agnostic Event enum
 │   │       └── diagnose.rs          # 跨宿主问题检测
 │   │
-│   ├── skill-vitals-host-events/    # ← 新增：I/O 边界
+│   ├── agent-vitals-host-events/    # ← 新增：I/O 边界
 │   │   ├── src/
 │   │   │   ├── lib.rs               # trait EventSource
 │   │   │   ├── tail.rs              # notify 文件监听
@@ -289,8 +289,8 @@ skill-vitals/
 │   │       ├── fixtures/codex/*.jsonl
 │   │       └── fixtures/claude/*.jsonl
 │   │
-│   ├── skill-vitals-wasm/           # 现有：不动
-│   └── skill-vitals-tui/            # （可选）TUI 长驻进程
+│   ├── agent-vitals-wasm/           # 现有：不动
+│   └── agent-vitals-tui/            # （可选）TUI 长驻进程
 │
 ├── src/                              # CLI binary：薄 wrapper
 │   ├── ...
@@ -412,15 +412,15 @@ pub trait EventSource: Send + Sync {
 
 **决策**：先建诊断引擎，Pet 是后续消费者之一
 **理由**：
-- 诊断引擎本身就有价值（`skill-vitals watch` 即可独立使用）
+- 诊断引擎本身就有价值（`agent-vitals watch` 即可独立使用）
 - Pet 依赖诊断引擎，不能反过来
 - 投资先打核心，可视化后做
 
-### ADR-002：新建 `skill-vitals-host-events` crate 隔离 I/O
+### ADR-002：新建 `agent-vitals-host-events` crate 隔离 I/O
 
 **决策**：事件监听和 JSONL 解析放新 crate
 **理由**：
-- CLAUDE.md 铁律：`skill-vitals-core` 必须保持"无 I/O"（wasm build 用）
+- CLAUDE.md 铁律：`agent-vitals-core` 必须保持"无 I/O"（wasm build 用）
 - 文件监听（notify crate）、hook 注入都是 I/O，不能进 core
 - 新 crate 是 I/O 边界，core 仍是纯函数
 
@@ -446,14 +446,14 @@ pub trait EventSource: Send + Sync {
 
 **决策**：Tauri
 **理由**：
-- skill-vitals 已是 Rust 栈，零新依赖
-- skill-vitals-core 直接 `use`，无需 IPC 序列化
+- agent-vitals 已是 Rust 栈，零新依赖
+- agent-vitals-core 直接 `use`，无需 IPC 序列化
 - Tauri 浮窗已被 koi-pond 等生产验证
 **代价**：~5MB binary
 
 ### ADR-006：单一权威 pet 目录 + symlink 接管
 
-**决策**：`~/.skill-vitals/pets/` 权威，其他 host 目录全部 symlink
+**决策**：`~/.agent-vitals/pets/` 权威，其他 host 目录全部 symlink
 **理由**：
 - 单一来源真相，避免状态不一致
 - 现有 host 客户端无需修改（只读不在意 symlink）
@@ -491,12 +491,12 @@ P1 (3 天):  + Gemini hook       → push 模式补充
 ### Phase 0 — 前置整备（**2 天**）★ 必须先做
 
 - [ ] **0-1** `src/cost.rs` → core（394 行纯函数），根 crate re-export
-  - [ ] `include_str!("../scripts/skill_vitals/pricing.json")` 路径改成
+  - [ ] `include_str!("../scripts/agent_vitals/pricing.json")` 路径改成
         core 相对路径（`../../../scripts/...`），别忘了
         `tests/test_pricing_lockstep.py` 也在校验这份表
-  - [ ] `cargo test` + `SKILL_VITALS_BIN=<rust> test_cli_matrix.py` 全绿
+  - [ ] `cargo test` + `AGENT_VITALS_BIN=<rust> test_cli_matrix.py` 全绿
         （byte-for-byte 证明是纯搬迁）
-  - [ ] `crates/skill-vitals-wasm` 验证能 `use skill_vitals_core::cost`
+  - [ ] `crates/agent-vitals-wasm` 验证能 `use agent_vitals_core::cost`
 - [ ] **0-2** `core::pet::normalize` 的 `Event` 补 `UsageSampled` +
       `UsageIdentity`（两态：`Step{turn,step}` / `Standalone(id)`）
 - [ ] **0-3** `host-events` source 层调 core 谓词；残差哨兵下沉到 tail 层
@@ -512,7 +512,7 @@ P1 (3 天):  + Gemini hook       → push 模式补充
 **目标**：从架构到 UX 全跑通 DSH 一条线
 
 **诊断引擎侧**：
-- [ ] `crates/skill-vitals-host-events/` 新 crate
+- [ ] `crates/agent-vitals-host-events/` 新 crate
   - [ ] `tail.rs`：notify crate 文件 append 监听，offset-based
   - [ ] `offset_store.rs`：tail-offsets.json 持久化
 - [ ] `sources/dsh.rs`：wrap `core::dsh::read_session_log`，加增量
@@ -528,11 +528,11 @@ P1 (3 天):  + Gemini hook       → push 模式补充
 - [ ] `bootstrap.rs`：symlink 接管
 - [ ] 前端：sprite 渲染（CSS background-position）+ 状态气泡
 - [ ] pet.json schema 验证 + spritesheet 解码
-- [ ] `~/.skill-vitals/pets/` 权威目录管理
+- [ ] `~/.agent-vitals/pets/` 权威目录管理
 - [ ] `pet-state.json` 读写（先只记 DSH 数据）
 
 **Phase 0a 成功标准**（硬性）：
-1. ✅ `skill-vitals watch dsh` 在真实 DSH session 上输出实时事件流
+1. ✅ `agent-vitals watch dsh` 在真实 DSH session 上输出实时事件流
 2. ✅ Tauri Pet app 启动后，DSH agent 一执行 tool/call，pet 立刻变 `running` 状态
 3. ✅ SV603 检测到时 pet 变 `failed`，肉眼可观察
 4. ✅ 关闭 Tauri 再开，offset 续传不丢事件
@@ -635,7 +635,7 @@ EventBus ──→ Tauri 后端 state_machine
 
 ---
 
-## 8. 与 skill-vitals 现有能力的关系
+## 8. 与 agent-vitals 现有能力的关系
 
 ### 8.1 复用（必须）
 
@@ -654,7 +654,7 @@ EventBus ──→ Tauri 后端 state_machine
 >
 > 实测：根 `Cargo.toml` 只有 `[[bin]]`、**没有 `[lib]`**，纯 binary crate
 > 无法被别的 crate 依赖。而 `src/cost.rs`（394 行，纯函数无 I/O）里
-> `const PRICING_JSON: &str = include_str!("../scripts/skill_vitals/pricing.json")`
+> `const PRICING_JSON: &str = include_str!("../scripts/agent_vitals/pricing.json")`
 > 的路径也是相对根 crate 的。
 >
 > 所以架构图里"成本/时长折叠（复用现有 cost/duration）"这句话目前只有
@@ -673,7 +673,7 @@ EventBus ──→ Tauri 后端 state_machine
 | `dsh-client/src/host/index.ts::sessionProjections` | DSH 浏览器宿主专属路径，Pet 走独立路径 |
 | `dsh-client` 的 8 个投影 `apply()` 过滤器 | 浏览器专属；但**判据必须共用**，见下 |
 | `src/cli.rs::oneline/calendar` | Python 状态层 —— **v1 先不重写**，见下 |
-| `scripts/skill_vitals/state.py` | 同上 |
+| `scripts/agent_vitals/state.py` | 同上 |
 
 > **⚠️ "Pet 用 Rust 重写状态层"这条要推迟，不是取消。**
 >
@@ -689,7 +689,7 @@ EventBus ──→ Tauri 后端 state_machine
 > 一遍，且新实现没有那批跨调用测试保护。**
 >
 > **v1 的做法**：Tauri 需要"本月已用多少"时，`subprocess` 调
-> `skill-vitals budget show --json`（进程启动约 50ms，对菜单栏刷新完全
+> `agent-vitals budget show --json`（进程启动约 50ms，对菜单栏刷新完全
 > 够用）。等这一层真正下沉到 core 时，**测试要跟着一起搬**，而且必须
 > 保留"从已填充状态起步"这个前提。
 
@@ -713,7 +713,7 @@ EventBus ──→ Tauri 后端 state_machine
 | 多 host tail 同时启动时 CPU 峰值 | CLI 卡顿 | 串行启动，每 200ms 一个 |
 | symlink 在 Windows 上权限问题 | Pet 接管失败 | 检测 OS + 退化为复制 |
 | Tauri 浮窗在 Wayland 上不稳 | Linux 演示失败 | fallback 到 menu bar tray icon |
-| Pet dex URL scheme 注册冲突 | 不能用 `petdex://<slug>` | 改用 `skill-vitals-pet://<slug>` |
+| Pet dex URL scheme 注册冲突 | 不能用 `petdex://<slug>` | 改用 `agent-vitals-pet://<slug>` |
 | 跨 host SV 码命名冲突 | 现有 DSH SV601 含义被覆盖 | 用 ADR-003 通用码 + 后缀命名空间 |
 | core crate 变 I/O 依赖 | wasm build 失效 | 严格 ADR-002，host-events 独立 crate |
 | **新 host 的新事件类型带 token 但没被解析** | **静默少算钱，无人发现** | **残差哨兵（守恒律 3.5）+ source 层宽进** |
@@ -774,7 +774,7 @@ EventBus ──→ Tauri 后端 state_machine
 > `(turn, step)` 替换去重存在的理由）。
 
 **第 3.6 条（跨投影相等）** —— Pet 显示的"本月已用 80%"与
-`skill-vitals budget show` 的数字，是**同一能力的两个投影**，必须有一条
+`agent-vitals budget show` 的数字，是**同一能力的两个投影**，必须有一条
 测试断言它们相等，不能靠"两边各自正确"。
 
 > 2026-08 的教训：日历（按天投影）报 ¥2386，按 session 重算是 ¥1733，
@@ -800,7 +800,7 @@ EventBus ──→ Tauri 后端 state_machine
 
 3. ~~**诊断引擎是否独立二进制**~~ → **已定：CLI 子命令 + NDJSON stdout**
 
-   `skill-vitals watch <host>` 一行一个诊断事件输出到 stdout，**它是诊断
+   `agent-vitals watch <host>` 一行一个诊断事件输出到 stdout，**它是诊断
    引擎唯一稳定、可脚本化的出口**。Tauri / menu bar / 未来的 IDE 插件全都
    `spawn` 这个 CLI 读 stdout，**不各自 link core**。
 
@@ -840,7 +840,7 @@ EventBus ──→ Tauri 后端 state_machine
 | **9 状态** | pet 的 idle / running / running-right / running-left / waving / jumping / failed / waiting / review |
 | **Pull** | tail host 写入的 JSONL 日志 |
 | **Push** | 注册 hook 让 host 主动调用我们 |
-| **权威位置** | `~/.skill-vitals/pets/`，pet 包数据的单一来源 |
+| **权威位置** | `~/.agent-vitals/pets/`，pet 包数据的单一来源 |
 | **接管** | 把 pet 包从 host 自己的目录移到权威位置，用 symlink 兼容 |
 
 ## 附录 B：关键文件路径
@@ -849,37 +849,37 @@ EventBus ──→ Tauri 后端 state_machine
 
 | 路径 | 引入 phase | 用途 |
 |---|---|---|
-| `crates/skill-vitals-host-events/src/lib.rs` | 0a | EventSource trait |
-| `crates/skill-vitals-host-events/src/tail.rs` | 0a | notify 文件监听 |
-| `crates/skill-vitals-host-events/src/offset_store.rs` | 0a | tail 续传 |
-| `crates/skill-vitals-host-events/src/sources/dsh.rs` | 0a | DSH 适配（wrap 现有） |
-| `crates/skill-vitals-core/src/pet/normalize.rs` | 0a | host-agnostic Event enum |
-| `crates/skill-vitals-core/src/pet/diagnose.rs` | 0a | 诊断器 |
+| `crates/agent-vitals-host-events/src/lib.rs` | 0a | EventSource trait |
+| `crates/agent-vitals-host-events/src/tail.rs` | 0a | notify 文件监听 |
+| `crates/agent-vitals-host-events/src/offset_store.rs` | 0a | tail 续传 |
+| `crates/agent-vitals-host-events/src/sources/dsh.rs` | 0a | DSH 适配（wrap 现有） |
+| `crates/agent-vitals-core/src/pet/normalize.rs` | 0a | host-agnostic Event enum |
+| `crates/agent-vitals-core/src/pet/diagnose.rs` | 0a | 诊断器 |
 | `src/watch.rs` | 0a | CLI `watch dsh` 子命令 |
 | `src-tauri/src/commands.rs` | 0a | Pet Tauri command handlers |
 | `src-tauri/src/state_machine.rs` | 0a | Pet 状态聚合（先单 host）|
 | `src-tauri/src/persistence.rs` | 0a | pet-state.json |
 | `src-tauri/src/bootstrap.rs` | 0a | symlink 接管 |
-| `crates/skill-vitals-host-events/src/sources/codex.rs` | **0b** | Codex rollout 适配（从零写）|
-| `crates/skill-vitals-host-events/src/sources/claude.rs` | **0c** | Claude Code 适配（从零写）|
+| `crates/agent-vitals-host-events/src/sources/codex.rs` | **0b** | Codex rollout 适配（从零写）|
+| `crates/agent-vitals-host-events/src/sources/claude.rs` | **0c** | Claude Code 适配（从零写）|
 | `docs/PET_REQUIREMENTS.md` | 0a | 本文档 |
 
 **Phase 0（前置）涉及的文件**：
 
 | 文件 | 动作 |
 |---|---|
-| `src/cost.rs` → `crates/skill-vitals-core/src/cost.rs` | 移动（394 行纯函数） |
-| `src/cost.rs` | 改为 `pub use skill_vitals_core::cost::*;` |
-| `crates/skill-vitals-core/src/lib.rs` | 加 `pub mod cost;` |
-| `crates/skill-vitals-core/src/cost.rs` 里的 `include_str!` | 路径改成 core 相对 |
+| `src/cost.rs` → `crates/agent-vitals-core/src/cost.rs` | 移动（394 行纯函数） |
+| `src/cost.rs` | 改为 `pub use agent_vitals_core::cost::*;` |
+| `crates/agent-vitals-core/src/lib.rs` | 加 `pub mod cost;` |
+| `crates/agent-vitals-core/src/cost.rs` 里的 `include_str!` | 路径改成 core 相对 |
 | `tests/test_pricing_lockstep.py` | 确认仍指向同一份 pricing.json |
 
 ### 不动（明确边界）
 
 | 路径 | 现状 |
 |---|---|
-| `crates/skill-vitals-core/src/dsh.rs` | 不动；只被 sources/dsh.rs wrap |
-| `crates/skill-vitals-core/src/behavior.rs` | 演进（扩展 SV 命名空间）|
+| `crates/agent-vitals-core/src/dsh.rs` | 不动；只被 sources/dsh.rs wrap |
+| `crates/agent-vitals-core/src/behavior.rs` | 演进（扩展 SV 命名空间）|
 | `dsh-client/src/host/index.ts` | 不动；Pet 走独立路径 |
-| `scripts/skill_vitals/state.py` | 不动；Pet 用 Rust 重写 |
+| `scripts/agent_vitals/state.py` | 不动；Pet 用 Rust 重写 |
 | `src/main.rs` CLI 子命令 | 增量加 `watch`，其他不动 |

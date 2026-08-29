@@ -261,7 +261,7 @@ fn reshaped_event(etype: &str, event: &Value) -> Option<Value> {
 /// 非 usage chunk（文本流）与无 usage 的 message 仍不保留——体积控制，且没有
 /// 消费者需要它们。
 /// 成本与上下文折叠需要的事件。Python 平行实现见
-/// `scripts/skill_vitals/adapters/dsh.py::_is_usage_event`，那边有完整的
+/// `scripts/agent_vitals/adapters/dsh.py::_is_usage_event`，那边有完整的
 /// 设计说明（四个消费者共用同一个数组；`compaction/summary` 与结构兜底
 /// 的来由：`compaction/summary` 曾经在这一层就被挡在外面，折叠层
 /// `usage.rs` 的残差哨兵因此永远看不到它，报出"0 处漏算"这个假阴性——
@@ -295,7 +295,7 @@ fn is_usage_event(event: &Value, etype: &str) -> bool {
     // 同一笔用量在多个事件里重复出现时会被双计。
     event
         .get("data")
-        .and_then(|d| skill_vitals_core::usage::usage_shaped_tokens(d, 0))
+        .and_then(|d| agent_vitals_core::usage::usage_shaped_tokens(d, 0))
         .is_some()
 }
 
@@ -310,7 +310,7 @@ pub fn read_session_log(path: &Path) -> Value {
     parse_session_log(&text)
 }
 
-/// 读一次会话日志证据，来自环境变量 `SKILL_VITALS_DSH_SESSION_LOG`。
+/// 读一次会话日志证据，来自环境变量 `AGENT_VITALS_DSH_SESSION_LOG`。
 ///
 /// 返回 `(source, evidence)`：source 是环境变量原始值（进报告里的 source 串），
 /// evidence 是 `read_session_log` 的 dict；未设置时两者都是 None。环境变量可指向
@@ -320,7 +320,7 @@ pub fn read_session_log(path: &Path) -> Value {
 ///
 /// （真机自动从 `$DSH_HOME/sessions/` 发现留后续，本波先靠环境变量注入。）
 pub fn read_session_evidence() -> (Option<String>, Option<Value>) {
-    let raw = match std::env::var("SKILL_VITALS_DSH_SESSION_LOG") {
+    let raw = match std::env::var("AGENT_VITALS_DSH_SESSION_LOG") {
         Ok(v) if !v.is_empty() => v,
         _ => return (None, None),
     };
@@ -350,10 +350,10 @@ fn snapshot_degraded(reason: &str) -> Value {
 /// 纯解析：把 ``--runtime-json`` 摄入的注册表快照折成 probe 证据。与 Python
 /// `read_snapshot` 逐字节对齐。
 ///
-/// 快照是 ``ctx.skills.snapshot()`` 的产物，由 dsh-skill-vitals 的 glue plugin
-/// 写到 ``$DSH_HOME/skill-vitals/snapshot.json``。形状（见 DSH_INTEGRATION §2.2.1）：
+/// 快照是 ``ctx.skills.snapshot()`` 的产物，由 dsh-agent-vitals 的 glue plugin
+/// 写到 ``$DSH_HOME/agent-vitals/snapshot.json``。形状（见 DSH_INTEGRATION §2.2.1）：
 ///
-///     {"schema_version": "1.0", "producer": "dsh-skill-vitals", "observer": null,
+///     {"schema_version": "1.0", "producer": "dsh-agent-vitals", "observer": null,
 ///      "skills": [{"name": "...", "description": "...", ...}], "complete": true,
 ///      "written_at": "ISO8601"}
 ///
@@ -688,7 +688,7 @@ garbage line
 
     #[test]
     fn snapshot_parses_full_shape() {
-        let text = r#"{"schema_version":"1.0","producer":"dsh-skill-vitals","observer":null,"skills":[{"name":"a","description":"d"},{"name":"b"}],"complete":true,"written_at":"2026-08-14T09:12:03Z"}"#;
+        let text = r#"{"schema_version":"1.0","producer":"dsh-agent-vitals","observer":null,"skills":[{"name":"a","description":"d"},{"name":"b"}],"complete":true,"written_at":"2026-08-14T09:12:03Z"}"#;
         let v = parse_snapshot(text);
         assert_eq!(v["catalog_entries"], json!(["a", "b"]));
         assert_eq!(v["complete"], json!(true));
@@ -700,7 +700,7 @@ garbage line
     #[test]
     fn snapshot_complete_false_is_not_zero() {
         // complete===false 是「发现不完整」，不是「目录为空」——不能当 0 次用。
-        let text = r#"{"schema_version":"1.0","producer":"dsh-skill-vitals","observer":null,"skills":[{"name":"a"}],"complete":false,"written_at":"2026-08-14T09:12:03Z"}"#;
+        let text = r#"{"schema_version":"1.0","producer":"dsh-agent-vitals","observer":null,"skills":[{"name":"a"}],"complete":false,"written_at":"2026-08-14T09:12:03Z"}"#;
         let v = parse_snapshot(text);
         assert_eq!(v["complete"], json!(false));
         assert_eq!(v["catalog_entries"], json!(["a"]));

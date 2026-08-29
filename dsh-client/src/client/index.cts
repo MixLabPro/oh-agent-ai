@@ -1,5 +1,5 @@
 /**
- * dsh-skill-vitals-audit — Client half (browser bundle entry).
+ * dsh-agent-vitals-audit — Client half (browser bundle entry).
  *
  * Renders the "审计" tab: reads behaviorFindings / tokenUsage / tokenByModel
  * from the standard kit's useProjection hook and formats them as a severity-
@@ -18,7 +18,7 @@ import { buildTimeline, modelSwitchEvents, nearestPoint, requestOrdinal } from '
 import { buildExportPayload, redactPath } from './export'
 import { t, loadLang, type Lang, setHostLang } from './i18n'
 
-const NS = 'dsh-skill-vitals-audit'
+const NS = 'dsh-agent-vitals-audit'
 
 function apply(ctx: { slots: any; effect: (fn: () => void | (() => void), tag: string) => void; locale?: any }) {
   // Initialize lang from DSH's Language setting (ctx.locale).
@@ -49,11 +49,11 @@ function apply(ctx: { slots: any; effect: (fn: () => void | (() => void), tag: s
   // Inject styles as a plugin-owned <style> tag (removed on unload).
   ctx.effect(() => {
     const tag = document.createElement('style')
-    tag.setAttribute('data-plugin', 'dsh-skill-vitals-audit')
+    tag.setAttribute('data-plugin', 'dsh-agent-vitals-audit')
     tag.textContent = STYLES
     document.head.appendChild(tag)
     return () => { tag.remove() }
-  }, 'dsh-skill-vitals-audit: styles')
+  }, 'dsh-agent-vitals-audit: styles')
 
   ctx.slots.inject('conversation.view', () => {
     return ctx.slots.register(
@@ -75,7 +75,7 @@ function apply(ctx: { slots: any; effect: (fn: () => void | (() => void), tag: s
 // 代码读它。挂出来是为了能直接对聚合数学下断言——通过渲染结果反推比例尺算得
 // 对不对，等于一次测两件事，红了也说不清坏的是哪一件。
 module.exports = {
-  name: 'dsh-skill-vitals-audit',
+  name: 'dsh-agent-vitals-audit',
   inject: ['slots', 'locale'],
   apply,
   __pure: { buildTimeline, modelSwitchEvents, nearestPoint, requestOrdinal, buildExportPayload, redactPath, STYLES },

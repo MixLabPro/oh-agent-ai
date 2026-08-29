@@ -21,7 +21,7 @@ export default defineConfig([
     outDir: 'lib',
     external: ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/client'],
     banner: {
-      js: `window.__ModuleLoader__.load({id:"dsh-skill-vitals-audit",factory:(require)=>{var module={exports:{}};var exports=module.exports;`,
+      js: `window.__ModuleLoader__.load({id:"dsh-agent-vitals-audit",factory:(require)=>{var module={exports:{}};var exports=module.exports;`,
     },
     footer: {
       js: `return module.exports;}})`,

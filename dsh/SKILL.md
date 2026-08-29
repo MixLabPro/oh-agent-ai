@@ -1,9 +1,9 @@
 ---
-name: skill-vitals
+name: agent-vitals
 description: Audit installed Agent Skills: which actually load, what they cost in context, where they conflict, and which are unused. Use when users ask how many skills are installed or active, why a skill never triggered, which are duplicated or safe to remove, how much startup context they cost, or whether one looks unsafe. Claude Code, Codex, OpenClaw, Hermes, WorkBuddy, DeepSeek Harness. 体检已安装 Skills：清单、是否真的加载、上下文成本、覆盖冲突、为什么没触发、僵尸清理与供应链风险。
 ---
 
-# Skill Vitals (DeepSeek Harness)
+# Agent Vitals (DeepSeek Harness)
 
 Audit an installed skill library and report cost versus value with concrete actions.
 
@@ -20,14 +20,14 @@ evidence comes from the session log and the registry snapshot, not a live plugin
 The scanner is not bundled. Install it once, then run one host at a time:
 
 ```bash
-skill-vitals doctor --host claude-code
+agent-vitals doctor --host claude-code
 ```
 
 If the standalone binary is not on PATH yet, use a repository checkout instead:
 
 ```bash
 git clone https://github.com/MixLabPro/agent-vitals
-cd skill-vitals
+cd agent-vitals
 python3 scripts/scan.py doctor --host claude-code
 ```
 

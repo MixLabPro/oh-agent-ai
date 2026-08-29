@@ -22,7 +22,7 @@
 ```
 ~/Documents/Codex/2026-08-21/http-127-0-0-1-3080/outputs/
 ├── AUDIT_TAB_UX_AUDIT_AND_REDESIGN.md          → docs/audit-dashboard/UX_AUDIT_AND_REDESIGN.md
-└── skill-vitals-session-diagnostic-dashboard-v2.png
+└── agent-vitals-session-diagnostic-dashboard-v2.png
                                                  → docs/audit-dashboard/prototype/
 ```
 

@@ -23,7 +23,7 @@ def _skill_md_local_links():
 
 ALLOWED_PACKAGE_FILES = {
     Path(name) for name in (
-        "__init__.py", "cli.py", "compat.py", "model.py", "util.py", "frontmatter.py",
+        "__init__.py", "cli.py", "compat.py", "paths.py", "model.py", "util.py", "frontmatter.py",
         "security.py", "discovery.py", "inventory.py", "report.py",
         "analysis.py", "overlap.py", "doctor.py", "explain.py",
         "lifecycle.py", "redact.py", "snapshots.py", "diff.py", "behavior.py",
@@ -65,7 +65,7 @@ class ClawHubPackagingTests(unittest.TestCase):
     def test_workflow_packages_modules_and_smokes_artifact(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("timeout-minutes: 45", workflow)
-        self.assertIn("cp -R scripts/skill_vitals", workflow)
+        self.assertIn("cp -R scripts/agent_vitals", workflow)
         self.assertIn("Unexpected directory in Python package", workflow)
         self.assertIn("Unexpected file in Python package", workflow)
         self.assertIn("-name '__pycache__'", workflow)
@@ -82,8 +82,8 @@ class ClawHubPackagingTests(unittest.TestCase):
         # 一模一样 —— verify.yml 为差分 job 明确拒绝过这种绿勾。
         self.assertIn("packaged smoke ok", workflow)
         # 探测宿主要 20–30 秒且结果随 runner 而变；这道门测的是包完整性。
-        self.assertIn("SKILL_VITALS_DISABLE_CODEX_RUNTIME=1", workflow)
-        self.assertIn("SKILL_VITALS_DISABLE_OPENCLAW_RUNTIME=1", workflow)
+        self.assertIn("AGENT_VITALS_DISABLE_CODEX_RUNTIME=1", workflow)
+        self.assertIn("AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME=1", workflow)
         # tag 与 __version__ 脱钩过六个版本，发布前必须校验。
         self.assertIn("Version mismatch", workflow)
 
@@ -94,7 +94,7 @@ class ClawHubPackagingTests(unittest.TestCase):
         写成 'v1.1.0' 或带后缀都会让每次发布在最后一步失败。
         """
         import re as _re
-        source = (ROOT / "scripts" / "skill_vitals" / "__init__.py").read_text(
+        source = (ROOT / "scripts" / "agent_vitals" / "__init__.py").read_text(
             encoding="utf-8")
         match = _re.search(r'^__version__ = "([^"]+)"', source, _re.M)
         self.assertIsNotNone(match, "__init__.py 必须定义 __version__")
@@ -123,14 +123,14 @@ class ClawHubPackagingTests(unittest.TestCase):
                           "%s 被 SKILL.md 引用，但没有出现在打包工作流里" % link)
 
     def test_source_package_has_only_explicit_runtime_modules(self):
-        source_package = ROOT / "scripts" / "skill_vitals"
+        source_package = ROOT / "scripts" / "agent_vitals"
         if not source_package.is_dir():
-            self.skipTest("The staged skill_vitals package has not been extracted yet")
+            self.skipTest("The staged agent_vitals package has not been extracted yet")
         self.assertEqual(_unexpected_package_entries(source_package), [])
 
     def test_allowlist_rejects_extra_files_and_directories(self):
         with tempfile.TemporaryDirectory() as temp:
-            package = Path(temp) / "skill_vitals"
+            package = Path(temp) / "agent_vitals"
             (package / "adapters").mkdir(parents=True)
             (package / "__init__.py").write_text("", encoding="utf-8")
             (package / "adapters" / "claude.py").write_text("", encoding="utf-8")
@@ -145,18 +145,18 @@ class ClawHubPackagingTests(unittest.TestCase):
             )
 
     def test_minimal_artifact_contains_all_modules_and_runs(self):
-        source_package = ROOT / "scripts" / "skill_vitals"
+        source_package = ROOT / "scripts" / "agent_vitals"
         if not source_package.is_dir():
-            self.skipTest("The staged skill_vitals package has not been extracted yet")
+            self.skipTest("The staged agent_vitals package has not been extracted yet")
 
         with tempfile.TemporaryDirectory() as temp:
-            artifact = Path(temp) / "skill-vitals"
+            artifact = Path(temp) / "agent-vitals"
             (artifact / "scripts").mkdir(parents=True)
             for name in ("scan.py", "probe_logs.py"):
                 shutil.copy2(ROOT / "scripts" / name, artifact / "scripts" / name)
             shutil.copytree(
                 source_package,
-                artifact / "scripts" / "skill_vitals",
+                artifact / "scripts" / "agent_vitals",
                 ignore=_ignore_python_cache,
             )
 
@@ -165,12 +165,12 @@ class ClawHubPackagingTests(unittest.TestCase):
                 for path in source_package.rglob("*.py")
             }
             artifact_modules = {
-                path.relative_to(artifact / "scripts" / "skill_vitals")
-                for path in (artifact / "scripts" / "skill_vitals").rglob("*.py")
+                path.relative_to(artifact / "scripts" / "agent_vitals")
+                for path in (artifact / "scripts" / "agent_vitals").rglob("*.py")
             }
             self.assertEqual(artifact_modules, source_modules)
             self.assertEqual(
-                _unexpected_package_entries(artifact / "scripts" / "skill_vitals"), [])
+                _unexpected_package_entries(artifact / "scripts" / "agent_vitals"), [])
             self.assertFalse(list(artifact.rglob("__pycache__")))
             self.assertFalse(list(artifact.rglob("*.pyc")))
 

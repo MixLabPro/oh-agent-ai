@@ -1,0 +1,1490 @@
+
+#!/usr/bin/env python3
+"""
+扫描本机各 Agent 宿主的 skill 安装目录，输出成本清单（JSON）。
+
+只做确定性统计，不做判断。判断交给调用它的 Agent。
+
+关键设计：**按宿主隔离「装在磁盘上」和「真的进了上下文」**。
+不同宿主的 skill 绝不能合并计算上下文预算或覆盖冲突。
+
+用法:
+    python3 scan.py                    # 扫描默认路径
+    python3 scan.py --path <dir> ...   # 追加自定义路径
+    python3 scan.py --json out.json    # 写入文件
+    python3 scan.py --all              # 预算按磁盘上所有 skill 算（诊断用，默认只算已加载）
+"""
+
+import argparse
+import json
+import os
+import sys
+import traceback
+from pathlib import Path
+
+from agent_vitals import __version__
+from agent_vitals import behavior as behavior_module
+from agent_vitals import codex_cost as codex_cost_module
+from agent_vitals import codex_evidence as codex_evidence_module
+from agent_vitals import codex_usage as codex_usage_module
+from agent_vitals import cost as cost_module
+from agent_vitals.doctor import _doctor_snapshot, diagnose, render_doctor, render_gate
+from agent_vitals.explain import render_explain
+from agent_vitals.inventory import build_inventory
+from agent_vitals.lifecycle import render_list
+from agent_vitals.overlap import DEFAULT_OVERLAP_MIN, render_overlap
+import agent_vitals.redact as redact_module
+from agent_vitals.report import build_report
+import agent_vitals.security as security_module
+from agent_vitals.snapshots import SNAPSHOT_KEEP, diff_against, latest_snapshot, render_diff, render_snapshot
+from agent_vitals import state as state_module
+from agent_vitals import usage as usage_module
+from agent_vitals import budget as budget_module
+
+# Windows services and CI runners may expose cp1252 consoles. Reports and
+# diagnostics are bilingual, so make redirected and interactive output stable.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
+# 输出 JSON 的 schema 版本。**与工具版本无关**：工具可以升版而 schema 不变，
+# schema 也可以在工具小版本里升主版本。
+#
+# 兼容性策略见 ARCHITECTURE §2.3：字段只增不删不改语义，破坏性变更升主版本。
+#
+# 「1.0」是**第一个带版本号的版本**。在它之前的输出没有版本字段 —— 那段时间
+# schema 改过好几次（新增 unreadable_skills、runtime_verified_* 由 0 改为 null、
+# WorkBuddy 口径变更），下游无法区分自己拿到的是哪一版。**没有版本号的
+# schema 等于没有契约**，这笔账早该还。
+SCHEMA_VERSION = "1.0"
+
+# Claude Code 的 skill/命令描述总预算。默认约 15000 字符（≈4000 token）。
+# 超出后描述被静默丢弃，无任何告警。可用 SLASH_COMMAND_TOOL_CHAR_BUDGET 调大。
+# 不同版本口径不一（另有"上下文窗口 1%"的说法），故做成可配置。
+DEFAULT_DESC_BUDGET = int(os.environ.get("SLASH_COMMAND_TOOL_CHAR_BUDGET", 15000))
+CODEX_FALLBACK_DESC_BUDGET = 8000
+
+# 判定「僵尸」前至少要装够这么多天。装了一天就说零触发没有意义。
+ZOMBIE_MIN_AGE_DAYS = 14
+
+# 各宿主的常见 skill 目录。找不到的会被静默跳过。
+# 同一个 host 的多个根目录按该宿主的优先级归类，绝不跨宿主比较。
+DEFAULT_ROOTS = [
+    ("claude-code", "./.claude/skills"),
+    ("claude-code", "~/.claude/skills"),
+    ("claude-code-plugins", "~/.claude/plugins"),
+    ("codex", "~/.codex/skills"),
+    ("openclaw", "./skills"),
+    ("openclaw", "./.agents/skills"),
+    # DSH 的 discovery roots（契约 §DSH，层内 rank 越小越优先）。~/.agents/skills
+    # 与 OpenClaw 共享，但两边要按各自的 rank 归类，绝不跨宿主合并判定。
+    ("dsh", "./.dsh/skills"),
+    ("dsh", "./.agents/skills"),
+    ("dsh", "~/.dsh/skills"),
+    ("dsh", "~/.agents/skills"),
+    ("hermes", "~/.hermes/skills"),
+    ("workbuddy", "./.codebuddy/skills"),
+    ("workbuddy", "./.workbuddy/skills"),
+    ("workbuddy", "~/.workbuddy/skills"),
+    ("cc-switch", "~/.cc-switch/skills"),
+    ("cursor", "~/.cursor/skills"),
+    ("gemini-cli", "~/.gemini/skills"),
+    ("opencode", "~/.opencode/skills"),
+]
+
+# ── 主流程 ───────────────────────────────────────────────
+
+def _doctor_gate(out, args, auto_snapshot, baseline):
+    """doctor 文本流：报告 → 闸门 → 快照，返回退出码。
+
+    顺序有讲究：闸门结论要紧跟报告（读者刚看完发现），存档放最后（它是
+    副作用，不是结论）。快照写失败不影响闸门的退出码 —— 一个写不了快照的
+    CI runner 不该因此把构建判成通过或失败。
+    """
+    ds = diagnose(out, args.split_threshold, args.min)
+
+    base_ds = None
+    if getattr(args, "new_only", False):
+        if not baseline:
+            print("--new-only needs a baseline: run `agent-vitals snapshot` first, "
+                  "or specify one with --baseline.", file=sys.stderr)
+            return 2
+        try:
+            with open(baseline, encoding="utf-8") as fp:
+                prev = json.load(fp)
+        except (OSError, ValueError):
+            print("--new-only could not read baseline %s" % str(baseline), file=sys.stderr)
+            return 2
+        # 在基线文档上重跑同一个 diagnose。它是纯函数，这一步不需要任何
+        # 额外的「历史诊断」存储，也就不会与快照的内容脱节。
+        base_ds = diagnose(prev, args.split_threshold, args.min)
+
+    ignore = [x.strip().upper() for x in args.ignore.split(",") if x.strip()]
+    text, code = render_gate(ds, args.fail_on, ignore, base_ds)
+    print(text, end="")
+    _doctor_snapshot(out, auto_snapshot)
+    return code
+
+
+def _codex_rollout_signature(files):
+    """rollout 文件清单 → 折叠缓存签名 `[(path, size, mtime_ns), ...]`。
+
+    排序保证确定性（`codex_rollout_files` 本身有序，但签名是独立契约）。
+    `st_mtime_ns` 纳秒级——内容被追加/替换必然改变（用 `touch -r` 伪造同
+    mtime 是对抗性的，不在折叠缓存的威胁模型里；真机复读同一文件靠
+    `codex_fold_file` 的 total 签名去重兜底，缓存只在文件**没变**时命中）。
+    签名用**list 而非 tuple**：JSON 序列化后 tuple 变 list，读回时
+    `tuple != list` 恒不等，缓存永远不会命中（上面这个 bug 就是那一步踩的）。
+    """
+    return [
+        [str(p), p.stat().st_size, p.stat().st_mtime_ns]
+        for p in sorted(files, key=lambda p: str(p))
+    ]
+
+
+# 折叠缓存算法版本。签名只含 (path, size, mtime_ns)——代码改了折叠算法而
+# 源文件没动时，光靠签名命中会把旧算法的 fold 当新结果读出来。2026-08-29
+# codex_hour_of 从「UTC 前缀」改成「北京时间（+8）」就把小时键全变了，任何
+# v1 缓存的 UTC 键 fold 都是错的——升 v2 强制失效重扫。以后动折叠语义（小时
+# 归属、去重、桶字段）记得再升。
+_CODEX_FOLD_CACHE_VERSION = 2
+
+
+def _codex_fold_cache_path():
+    """折叠缓存文件路径（`$AGENT_VITALS_HOME/cache/codex-fold.json`）。
+
+    `state.cache_dir()` 建目录失败（只读文件系统）会抛 —— 调用方捕获后
+    直接重扫，缓存是性能优化不是正确性依赖。
+    """
+    return state_module.cache_dir() / "codex-fold.json"
+
+
+def _read_codex_fold_cache(signature):
+    """读缓存：签名全等 + 能解析 → fold；否则 None（当没有缓存）。
+
+    JSON 解析失败（崩溃留下半文件）或字段缺失 → None → 重扫自愈。返回的
+    fold 与重扫结果逐字节相同（纯 memo），差分门不受命中与否影响。
+    """
+    path = _codex_fold_cache_path()
+    if not path.is_file():
+        return None
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if cached.get("version") != _CODEX_FOLD_CACHE_VERSION or \
+            cached.get("signature") != signature:
+        return None
+    fold = cached.get("fold")
+    return fold if isinstance(fold, dict) else None
+
+
+def _write_codex_fold_cache(signature, merged):
+    """原子写折叠缓存：先写 `.tmp` 再 `os.replace`，崩溃留半文件 → 下次读
+    JSON 解析失败 → 当没有缓存重扫（自愈）。任何失败都吞掉——缓存写不进去
+    只意味着下次重扫，不改变输出。"""
+    path = _codex_fold_cache_path()
+    payload = json.dumps(
+        {"version": _CODEX_FOLD_CACHE_VERSION, "signature": signature,
+         "fold": merged},
+        ensure_ascii=False)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def codex_fold_merged(use_cache=True):
+    """扫描所有 codex rollout（live + archived）→ 逐文件折叠 → 合并成一份 fold。
+
+    codex-cost handler 与 `_render_calendar_html`/`_render_codex_cost_html`
+    （统一看板）共用同一份——看板要出 3 个视图（today/month/all），折叠只跑
+    一遍。两处各写一遍就会有一处忘了「过滤后按模型重算」的 defect
+    （`codex_by_model_from_hours`，见 `codex_cost_report` 文档）。
+
+    瓶颈是**解析**不是折叠（真机 51 份 rollout ≈ 600MB JSONL ≈ 38s，单份
+    210MB 解析 16s、折叠 0.04s）——日历/oneline 每次刷新都重扫会砸穿 xbar
+    tick（`docs/UNIFIED_COST_VIEW.md` 的 `$STATE_DIR` 快照延迟项，现在兑现）。
+    这里做**整折叠 memo**：签名 = (path, size, mtime_ns) 全等则命中，不等则
+    重扫并原子覆写。纯 memo——命中与否输出逐字节相同，差分门不受影响。
+    """
+    from agent_vitals.adapters import codex_session
+    files = codex_session.codex_rollout_files()
+    if use_cache:
+        try:
+            sig = _codex_rollout_signature(files)
+            cached = _read_codex_fold_cache(sig)
+            if cached is not None:
+                return cached
+        except OSError:
+            # 目录建不出来/stat 失败 —— 当没有缓存，直接重扫。
+            sig = None
+    else:
+        sig = None
+    folds = []
+    for path in files:
+        parsed = codex_session.read_codex_session_log(path)
+        items = parsed["items"] if isinstance(parsed.get("items"), list) else []
+        folds.append(codex_usage_module.codex_fold_file(items))
+    merged = codex_usage_module.codex_merge_folds(folds)
+    if sig is not None:
+        _write_codex_fold_cache(sig, merged)
+    return merged
+
+
+def codex_report_from_merged(merged, filter_key, month_out, want_hours):
+    """从已折叠合并的 fold 出一个 `--json` 报告 dict（host/currency/month/today
+    外层包装 + report 键）。filter_key=None 不过滤（all 视图）；`--today` 时
+    want_hours=True（小时热力图数据）。空折叠给全零结构而不是 None——调用方
+    要的是「没有数据」而不是「崩了」，且包装是固定契约（unaccounted/plan
+    必须透传，它们无时间归属、不随月过滤）。
+    """
+    by_hour_model = merged["by_hour_model"]
+    by_model = merged["by_model"]
+    if filter_key:
+        by_hour_model = {h: bm for h, bm in by_hour_model.items()
+                         if h.startswith(filter_key)}
+        # 重算模型轴：merge 的 by_model 只读 fold 的 by_model 字段，不读
+        # by_hour_model——拿 merge 折回去得到的是空模型轴（真实 defect：
+        # --month 整份报告静默变全零）。codex_by_model_from_hours 把过滤后
+        # 的小时桶求和折回 by_model（守恒：sum(days) == total_cost_usd）。
+        by_model = codex_usage_module.codex_by_model_from_hours(by_hour_model)
+    pricing = codex_cost_module.load_codex_pricing()
+    report = codex_cost_module.codex_cost_report(
+        by_hour_model, by_model, merged["unaccounted"], merged["plan"],
+        pricing, want_hours=want_hours)
+    if report is None:
+        report = {
+            "total_cost_usd": 0,
+            "total_tokens": {f: 0 for f in codex_usage_module.CODEX_TOKEN_FIELDS},
+            "per_model": {}, "days": [], "unpriced_tokens": 0,
+            "unaccounted_usage": merged["unaccounted"],
+            "plan": merged["plan"],
+        }
+        if want_hours:
+            report["hours"] = []
+    out = {"host": "codex", "currency": "USD", "month": month_out,
+           "today": codex_cost_module.today_beijing()}
+    out.update(report)
+    return out
+
+
+def codex_calendar_blob(merged, month_key, month_out, default):
+    """统一看板内联的 codex 规范单块（docs/UNIFIED_COST_VIEW.md 的 1 号宿主
+    契约）：{host, currency, today, default, views:{today,month,all}}。每个 view
+    即 `codex_report_from_merged` 的一个报告。today 视图 want_hours=True；
+    month 视图用调用方给的 month_key/month_out（统一看板 = 当前月，codex-cost
+    --html = 请求月）；all 视图不过滤。default = 无 `?file=` 时打开的视图。
+    """
+    today = codex_cost_module.today_beijing()
+    views = {
+        "today": codex_report_from_merged(merged, today, today[:7], True),
+        "month": codex_report_from_merged(merged, month_key, month_out, False),
+        "all": codex_report_from_merged(merged, None, None, False),
+    }
+    return {"host": "codex", "currency": "USD", "today": today,
+            "default": default, "views": views}
+
+
+def _render_calendar_html(output_path, default_source="month"):
+    """把 today.json / month.json 渲染成单文件日历 HTML，写到 output_path。
+
+    `calendar` 子命令与 `oneline`（每次跑完顺手刷新
+    `$STATE_DIR/calendar.html`，给 xbar「打开日历」菜单项用）共用同一份
+    逻辑——两处各写一份，字段名/转义稍有出入就会一个能打开一个打不开，
+    多一份要维护的复制代码。
+
+    两个 tab（today / month）都内联进同一个文件，各自一个
+    `<script id="agent-vitals-data-{mode}">` 块——只内联 `--source`
+    选中的那一份会导致点另一个 tab 没反应或被误判成另一种 schema 硬渲染
+    出一张空图（真实 bug，用户点 today tab 复现过）。**每个 mode 独立
+    判断有没有数据**——today.json 不存在就不内联那个块，那个 tab 落到
+    JS 的 empty-state，不影响 month 那个块正常渲染，反之亦然。
+
+    `default_source` 决定「没有 `?file=` 时默认显示哪个 tab」，通过注入
+    `window.AGENT_VITALS_DEFAULT_MODE` 传给模板 JS。
+
+    内联进 `<script>` 的 JSON 不是 state 文件的原始字节——`_augment_
+    calendar_cost` 会先给有 `by_model` 的桶/日子塞一个按真实模型精算的
+    `cost` 字段（复用 `cost.py::cost_report`，不是模板自己那份
+    deepseek-v4-flash 近似），让日历页的数字能和 `budget show`/xbar
+    菜单栏对上，而不是各算各的（这正是之前那次「UI 显示 ¥1.20 但
+    behavior --json 报 ¥1.35」类漂移的根因）。写到 sidecar 副本（file
+    picker fallback 用）的还是原始字节，不带这个额外字段——那份要跟
+    state.py 的 schema 契约保持字面一致。
+
+    返回 `(embedded_modes, output_path)`；`embedded_modes` 为空列表表示
+    两份 state 文件都不存在，HTML 仍会写出，JS 会显示空态而不是报错。
+    """
+    template = Path(__file__).resolve().parent / "templates" / "calendar.html"
+    if not template.is_file():
+        raise FileNotFoundError(
+            "calendar template not found at %s (run M4 first)" % template)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    html = template.read_text(encoding="utf-8")
+    pricing = cost_module.load_pricing()
+    embedded = []
+    for mode, src_name in (("today", "today.json"), ("month", "month.json")):
+        src = state_module.state_dir() / src_name
+        if not src.is_file():
+            continue
+        json_text = src.read_text(encoding="utf-8")
+        embed_text = json_text
+        try:
+            data = json.loads(json_text)
+        except (json.JSONDecodeError, ValueError):
+            data = None
+        if isinstance(data, dict):
+            # today.json 的 `date` 必须真的是今天——同一个 bug 之前只在
+            # budget.compute_today_cost() 修过（菜单栏），这里是**另一个
+            # 读者**：`rotate_today()` 只在 merge_today() 开头被调用，今天
+            # 一次 DSH 会话都没跑时 today.json 会原封不动停在最后一次有
+            # 会话的那天。不校验的话,日历「今天 24 小时」tab 会把昨天的
+            # 24 小时桶原样画出来,标成"今天"——真机复现：2026-08-27 当天
+            # 没用过 DSH，日历仍在展示 08-26 的热力图。
+            #
+            # 处理方式与「today.json 不存在」完全一致（见本函数文档：
+            # 「today.json 不存在就不内联那个块」）——陈旧数据在这个
+            # 意义上就是「没有今天的数据」，跳过 embed，交给 JS 已有的
+            # empty-state 分支，不需要新的前端逻辑。sidecar 仍然照写：
+            # 那是「原始状态文件的副本」，不是「今天视图该显示什么」的
+            # 判断，file picker fallback 场景下把原始文件递给用户没有错。
+            if (mode == "today" and data.get("date")
+                    and data["date"] != state_module._today_key()):
+                sidecar = out.parent / src_name
+                if sidecar.resolve() != src.resolve():
+                    sidecar.write_text(json_text, encoding="utf-8")
+                # 不能就此 continue（跳过整个 inject）——那样 JS 找不到
+                # `agent-vitals-data-today` 这个 script 标签，会误判成
+                # 「没内联，试试 fetch」，在 file:// 打开时必然撞上 CORS，
+                # 弹出一句让人费解的"读取本地文件被 CORS 阻止"（真实
+                # 复现：之前 today.json 几乎总有数据可内联，这条 fetch
+                # 兜底路径很少被走到，这次改动第一次把它暴露出来）。
+                # 改成内联一个显式的 stale 哨兵，让 JS 立刻识别出「这不是
+                # 没数据，是数据被判定过期而不展示」，直接给清晰文案，
+                # 不再往 fetch/file-picker 那条「不确定有没有文件」的分支走。
+                stale_text = json.dumps({"stale": True, "stale_date": data["date"]})
+                inject = ("<script id=\"agent-vitals-data-today\" "
+                          "type=\"application/json\">" + stale_text + "</script>")
+                html = html.replace("</head>", inject + "\n</head>", 1)
+                continue
+            _augment_calendar_cost(mode, data, pricing)
+            embed_text = json.dumps(data)
+        # JSON 里可能含 </script> —— 必须转义,否则浏览器解析到这就崩
+        json_text_safe = (embed_text
+                          .replace("</script", "<\\/script")
+                          .replace("<!--", "<\\!--"))
+        inject = ("<script id=\"agent-vitals-data-%s\" type=\"application/json\">"
+                   % mode + json_text_safe + "</script>")
+        html = html.replace("</head>", inject + "\n</head>", 1)
+        # 同时把 state 文件 cp 到同目录,作为 fetch fallback 的副本——除非
+        # 输出目录本来就是 state 目录本身(oneline 自动刷新的场景),那样
+        # 会变成把文件写到自己头上,纯浪费一次 I/O。sidecar 写的是**原始**
+        # json_text,不是带精算 cost 字段的 embed_text——见上面文档。
+        sidecar = out.parent / src_name
+        if sidecar.resolve() != src.resolve():
+            sidecar.write_text(json_text, encoding="utf-8")
+        embedded.append(mode)
+    # ── codex 1 号宿主内联块（统一看板）─────────────────────────────────
+    # 规范化单块 {host, currency, today, default, views:{today,month,all}}
+    #（docs/UNIFIED_COST_VIEW.md）。与 DSH 双块并列内联，让跨宿主今日总览
+    # 一打开就有两张宿主卡。**扫描失败时降级**：不内联该块，codex host 落
+    # JS 的 empty-state，DSH 渲染不受影响（codex 只是新增宿主，不能拖垮
+    # 既有看板）。default="month"（当前月）——与 DSH 的 default_source 同构。
+    try:
+        codex_merged = codex_fold_merged()
+        codex_blob = codex_calendar_blob(
+            codex_merged,
+            codex_cost_module.current_month_beijing(),
+            codex_cost_module.current_month_beijing(),
+            "month")
+        codex_json = json.dumps(codex_blob, ensure_ascii=False)
+        codex_safe = (codex_json.replace("</script", "<\\/script")
+                      .replace("<!--", "<\\!--"))
+        codex_inject = ("<script id=\"agent-vitals-data-codex\" "
+                        "type=\"application/json\">" + codex_safe + "</script>")
+        html = html.replace("</head>", codex_inject + "\n</head>", 1)
+    except Exception:
+        # 降级路径：不内联 codex 块。不静默吞异常——至少标一句，不然真挂了
+        # 会被当成「用户今天没 codex 数据」，和「扫崩了」长得一样（同一原则
+        # 见 ARCHITECTURE §6.2 的退出码语义）。
+        sys.stderr.write("warning: codex 会话扫描失败，跳过 codex 视图内联\n")
+    html = html.replace(
+        "</head>",
+        "<script>window.AGENT_VITALS_DEFAULT_MODE = %r;</script>\n"
+        "<script>window.AGENT_VITALS_DEFAULT_HOST = 'dsh';</script>\n</head>"
+        % default_source, 1)
+    out.write_text(html, encoding="utf-8")
+    return embedded, out
+
+
+def _augment_calendar_cost(mode, data, pricing):
+    """给日历模板的内联数据塞一个按真实模型精算的 cost 字段。
+
+    模板自己那份 `costOf()` 是硬编码 deepseek-v4-flash 单价的近似（见
+    calendar.html 头部注释），pro 模型的日子会被低估到 1/3——与
+    budget.py 之前那个 bug（已在 `_price_by_model` 修过）同一个根因。
+    覆盖率校验/补齐的算术在 `cost.py::priced_day`（唯一入口，`budget.py`
+    的 month/7d-average 也调它，避免三处各写一份判断，见该函数文档）。
+
+    today.json 的 `by_model` 是**整天一个总量**，没有按小时拆分——没法
+    给 24 个小时格子分别精算，所以只在顶层塞一个 `accurate_cost` 供
+    summary 卡片用；per-hour 小时格子/tooltip 仍走旧近似，不假装有
+    数据实际不具备的精度。today.json 的 by_model 与 (date,hour) 桶永远
+    同一次 `merge_today` 调用写入、折自同一份 events（`TestUsageHourBucketsReconcile`
+    钉死了这个不变量），结构上不可能出现 `priced_day` 要防的「部分覆盖」
+    （若真出现，覆盖多于顶层也只会被 `priced_day` 判成 exact，不会漏算），
+    所以这里直接用 `cost_report`，不必再走 `priced_day` 的覆盖率分支。
+    month.json 的 `by_model` 是**逐日**的，可以给每一天单独精算。
+    """
+    if mode == "today":
+        by_model = data.get("by_model")
+        if by_model:
+            report = cost_module.cost_report({"by_model": by_model}, pricing)
+            if report is not None:
+                data["accurate_cost"] = {
+                    "total": report["total"],
+                    "peak_total": report["peak_total"],
+                }
+    else:
+        days = data.get("days")
+        if isinstance(days, dict):
+            for day in days.values():
+                if not isinstance(day, dict):
+                    continue
+                priced = cost_module.priced_day(day, pricing)
+                if priced is not None:
+                    day["cost"] = priced
+
+
+def main():
+    """入口。**未捕获异常必须以 2 退出，不是 1。**
+
+    ARCHITECTURE §6.2 把退出码定成对外接口：0 = 无达到阈值的发现，
+    1 = 有，2 = 工具自身错误。Python 默认让未捕获异常退出 1 —— 于是
+    「扫出了 critical」和「工具崩了」在 CI 眼里是同一个码，而这两件事
+    要做的处置完全相反。
+
+    验收时这条真的被踩到：`scan.py`（最朴素的调用）第二次运行崩在
+    `None - None`，退出 1，看起来像「有发现」。
+    """
+    try:
+        return _main()
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception:
+        traceback.print_exc()
+        sys.exit(2)
+
+
+def _dash(v):
+    """`codex-evidence` 人读呈现的空值占位：None / 非字符串 → 长破折号（与
+    Rust `render_codex_evidence` 的 `dash` 闭包同一语义——JSON null 和缺键在
+    Python 里都读成 None，在 Rust 里都是 `Some(_)` → "—"，结果一致）。"""
+    return v if isinstance(v, str) else "—"
+
+
+def _render_codex_evidence(out):
+    """`codex-evidence` 的人读呈现——从 `codex_evidence_json` 输出的同一个
+    dict 上读（形状唯一来源），Rust 侧 `main.rs::render_codex_evidence` 逐字节
+    对齐这一份。19 个全零的 unavailable 信号不在人读视图里制造噪音，JSON 里
+    才是全量。"""
+    roots = out.get("workspace_roots")
+    roots_text = ", ".join(r for r in roots if isinstance(r, str)) if isinstance(roots, list) else ""
+    signals = [s for s in (out.get("signals") or []) if isinstance(s, str)]
+
+    parts = []
+    parts.append("host: codex\n")
+    parts.append("session: %s\n" % _dash(out.get("session_id")))
+    parts.append("title: %s\n" % _dash(out.get("title")))
+    parts.append("history_mode: %s\n" % _dash(out.get("history_mode")))
+    parts.append("cli_version: %s\n" % _dash(out.get("cli_version")))
+    parts.append("model: %s\n" % _dash(out.get("model")))
+    parts.append("workspace_roots: %s\n" % (roots_text or "—"))
+    parts.append("signals: %s\n" % ", ".join(signals))
+    parts.append("\n")
+    cov = out.get("coverage")
+    if isinstance(cov, dict):
+        for name in signals:
+            c = cov.get(name)
+            if not isinstance(c, dict):
+                continue
+            m = c.get("measured")
+            m = m if isinstance(m, int) and not isinstance(m, bool) else 0
+            d = c.get("derived")
+            d = d if isinstance(d, int) and not isinstance(d, bool) else 0
+            l = c.get("lossy")
+            l = l if isinstance(l, int) and not isinstance(l, bool) else 0
+            u = c.get("unmetered")
+            u = u if isinstance(u, int) and not isinstance(u, bool) else 0
+            parts.append("  %-20s measured=%d derived=%d lossy=%d unmetered=%d\n"
+                         % (name, m, d, l, u))
+    parts.append("\n")
+    attempts = out.get("attempts")
+    notes = out.get("notes")
+    parts.append("attempts: %d    notes: %d\n" %
+                 (len(attempts) if isinstance(attempts, list) else 0,
+                  len(notes) if isinstance(notes, list) else 0))
+    return "".join(parts)
+
+
+def _render_codex_roots(report):
+    """`codex-evidence --roots` 的人读呈现——从 `codex_session_roots_report` 的
+    同一个 dict 上读（形状唯一来源），Rust 侧 `main.rs::render_codex_roots`
+    逐字节对齐这一份。缺席的根不猜路径也不报错，只标 `(absent)`。"""
+    parts = ["host: codex\n"]
+    roots = report.get("roots")
+    if isinstance(roots, list):
+        for entry in roots:
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("kind")
+            path = entry.get("path")
+            if not isinstance(kind, str) or not isinstance(path, str):
+                continue
+            if entry.get("exists"):
+                fc = entry.get("file_count")
+                tb = entry.get("total_bytes")
+                fc = fc if isinstance(fc, int) and not isinstance(fc, bool) else 0
+                tb = tb if isinstance(tb, int) and not isinstance(tb, bool) else 0
+                parts.append("%-8s %s  (%d rollouts, %d bytes)\n" % (kind, path, fc, tb))
+            else:
+                parts.append("%-8s %s  (absent)\n" % (kind, path))
+    return "".join(parts)
+
+
+def _render_codex_cost_html(output_path, merged, month_key, month_out, default):
+    """`codex-cost --html`：复用统一看板模板 calendar.html（退役独立
+    codex_cost.html——一套视觉模板，不是两套，见 docs/UNIFIED_COST_VIEW.md）。
+
+    只内联 codex 块 + `AGENT_VITALS_DEFAULT_HOST='codex'`，不内联 DSH 块
+    （codex-cost 是 codex 视角的看板；`_render_calendar_html` 才是跨宿主看板）。
+    块内视图用调用方给的 month_key/month_out（请求月 / 当前月 / all），
+    default 决定无 `?file=` 时打开的 tab。**JS 只渲染 server 已算好的
+    per_model / days / cost**——模板不内嵌价格表，计价永远只有
+    `codex_cost_report` 一处（JS 里再放一份价格就是第四份副本，同 calendar 的
+    `_augment_calendar_cost` 想消灭的漂移）。Rust 侧 `render_codex_cost_html`
+    做同一件事（模板用 include_str 内嵌、注入逻辑同构；HTML 文件不参与差分，
+    只需两边产出等价可解析的页面）。
+    """
+    template = Path(__file__).resolve().parent / "templates" / "calendar.html"
+    if not template.is_file():
+        raise FileNotFoundError(
+            "calendar template not found at %s (run M4 first)" % template)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    html = template.read_text(encoding="utf-8")
+    blob = codex_calendar_blob(merged, month_key, month_out, default)
+    json_text = json.dumps(blob, ensure_ascii=False)
+    # JSON 里可能含 </script> / <!-- —— 必须转义，否则浏览器解析到这就崩
+    # （与 _render_calendar_html 同一条铁律）。
+    json_text_safe = (json_text.replace("</script", "<\\/script")
+                      .replace("<!--", "<\\!--"))
+    inject = ("<script id=\"agent-vitals-data-codex\" type=\"application/json\">"
+              + json_text_safe + "</script>")
+    html = html.replace("</head>", inject + "\n</head>", 1)
+    html = html.replace(
+        "</head>",
+        "<script>window.AGENT_VITALS_DEFAULT_HOST = 'codex';</script>\n</head>", 1)
+    out.write_text(html, encoding="utf-8")
+
+
+def _main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--version", action="version",
+                    version="agent-vitals %s" % __version__)
+    ap.add_argument("--host", choices=("all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"),
+                    default="all", help="Analyze one host; default: scan every supported host separately")
+    ap.add_argument("--path", action="append", default=[],
+                    help="Additional scan path; repeatable")
+    ap.add_argument("--runtime-json", metavar="FILE",
+                    help="DSH registry snapshot (ctx.skills.snapshot() output) for probe evidence")
+    ap.add_argument("--json", metavar="FILE",
+                    help="Write scan JSON to FILE; use - for stdout. Without this option, run doctor.")
+    ap.add_argument("--budget", type=int, default=DEFAULT_DESC_BUDGET,
+                    help=f"Description character budget; default: {DEFAULT_DESC_BUDGET}")
+    ap.add_argument("--all", action="store_true",
+                    help="Calculate budget and conflicts over all on-disk skills (diagnostic; default: loaded only)")
+    ap.add_argument("--zombie-age", type=int, default=ZOMBIE_MIN_AGE_DAYS,
+                    help=f"Minimum installed age for zombie classification; default: {ZOMBIE_MIN_AGE_DAYS}")
+    ap.add_argument("--split-threshold", type=int, default=6000,
+                    help="Recommend splitting above this tier2_core_tokens value; default: 6000")
+    ap.add_argument("--baseline", help="Previous scan JSON used for change comparison")
+    ap.add_argument("--fail-on", choices=("none", "critical", "warning", "info"),
+                    default="critical",
+                    help="Exit code 1 when a finding at this severity is present (for CI). "
+                         "Default: critical; none never fails on findings")
+    ap.add_argument("--ignore", default="",
+                    help="Diagnostic codes excluded from the gate, comma-separated "
+                         "(e.g. SV301,SV302). Ignored codes are still printed")
+    ap.add_argument("--new-only", action="store_true",
+                    help="Gate only diagnostics that are new relative to the baseline; "
+                         "exit code 2 without a baseline")
+    ap.add_argument("--no-snapshot", action="store_true",
+                    help="Disable doctor's automatic snapshot and comparison")
+    ap.add_argument("--redact", action="store_true",
+                    help="Redact home directories and user names in absolute paths for safe sharing")
+    ap.add_argument("--self-root",
+                    help="This tool's own skill directory, excluded from security scanning; inferred when omitted")
+    ap.add_argument("--redact-names", action="store_true",
+                    help="Also redact skill names to stable skill-001-style IDs and drop descriptions")
+    # 子命令建在现有参数**之上**：不带子命令 = 原来的扫描行为。
+    # 这条不是洁癖 —— SKILL.md 与全部集成测试都依赖裸调用 `--json`，
+    # 把扫描降级成子命令会一次性打断所有调用方。
+    sub = ap.add_subparsers(dest="cmd")
+    p_list = sub.add_parser("list", help="List discovered skills and their effective state")
+    p_list.add_argument("--unused", action="store_true", help="Show dormant / zombie only")
+    p_list.add_argument("--shadowed", action="store_true", help="Show shadowed copies only")
+    p_list.add_argument("--stale", type=int, help="Dormant threshold in days; default: 30")
+    p_list.add_argument("--sort", choices=("usage", "cost", "name"), default="cost")
+    p_list.add_argument("--top", type=int, help="Show only the first N rows")
+    p_list.add_argument("--json", help="Write JSON instead of a table")
+    p_over = sub.add_parser("overlap",
+                            help="Lexical filter for skills that may compete for similar requests")
+    p_over.add_argument("--min", type=float, default=DEFAULT_OVERLAP_MIN,
+                        help="Jaccard threshold; default: %.2f" % DEFAULT_OVERLAP_MIN)
+    p_over.add_argument("--top", type=int, help="Show only the first N pairs")
+    p_over.add_argument("--json", help="Write JSON instead of a table")
+    p_doc = sub.add_parser("doctor",
+                           help="Turn scan facts into cause, impact, and action")
+    p_doc.add_argument("--min", type=float, default=DEFAULT_OVERLAP_MIN,
+                       help="Jaccard threshold for SV401; default: %.2f (shared with overlap)"
+                            % DEFAULT_OVERLAP_MIN)
+    p_doc.add_argument("--json", help="Write diagnostic JSON instead of a report")
+    p_doc.add_argument("--no-snapshot", action="store_true",
+                       help="Do not save a snapshot or compare automatically")
+    p_exp = sub.add_parser("explain",
+                           help="Explain why one skill is ineffective and how to fix it")
+    p_exp.add_argument("name", help="Skill name or <plugin>:<name>")
+    p_exp.add_argument("--min", type=float, default=DEFAULT_OVERLAP_MIN,
+                       help="Jaccard threshold for neighbors; default: %.2f (shared with overlap)"
+                            % DEFAULT_OVERLAP_MIN)
+    p_exp.add_argument("--json", help="Write JSON instead of a report")
+    p_snap = sub.add_parser("snapshot", help="Save a snapshot to ~/.agent-vitals/snapshots")
+    p_snap.add_argument("--keep", type=int, default=SNAPSHOT_KEEP,
+                        help="Retain the newest N snapshots; default: %d; 0 means unlimited" % SNAPSHOT_KEEP)
+    p_diff = sub.add_parser("diff", help="Compare with the previous snapshot")
+    p_diff.add_argument("file", nargs="?",
+                        help="Snapshot file to compare; default: latest")
+    p_diff.add_argument("--json", help="Write JSON instead of a report")
+    p_beh = sub.add_parser("behavior",
+                           help="Audit a DSH session log for high-risk behaviors (SV601-SV610)")
+    p_beh.add_argument("session_log", help="Path to the DSH session JSONL log (file or directory)")
+    p_beh.add_argument("--json", help="Write findings JSON to FILE; use - for stdout")
+    # D11：执行时长审计——工具调用/turn/step/审批等待/hook 消费五路耗时数据。
+    # 与 skill-audit 同一种结构（Rust 侧同时有独立子命令），Python CLI 只补
+    # duration-audit（本次范围），不补 skill-audit——那是 T11 遗留的一个更早、
+    # 更大的 Python CLI 缺口（behavior --json 之前一直没输出 skill 键，这次
+    # 修 duration 时顺手在 audit_session_log 里补上了，但"独立的 skill-audit
+    # 子命令"本身不在这个 backlog 范围内，留给专门处理它的时候再做）。
+    p_dur = sub.add_parser("duration-audit",
+                           help="Audit a DSH session log for execution duration "
+                                "(tool calls / turns / steps / approvals / hooks)")
+    p_dur.add_argument("session_log", help="Path to the DSH session JSONL log (file or directory)")
+    p_dur.add_argument("--json", help="Write duration audit JSON to FILE; use - for stdout")
+    # P4（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：Codex rollout → CanonicalSession
+    # 的 "sound" 证明。输出 §13 coverage，不是 findings——Codex 还没有 SV601–614
+    # 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--host
+    # codex` 是安装时探针的表面，与这个子命令无关（命名冲突见
+    # adapters/codex_session.py 顶部注释）。
+    p_codex = sub.add_parser("codex-evidence",
+                             help="Audit a Codex rollout log into a CanonicalSession "
+                                  "with §13 coverage (P4 'sound' proof)")
+    p_codex.add_argument("session_log", nargs="?",
+                         help="Path to the Codex rollout JSONL log (or use --roots)")
+    p_codex.add_argument("--roots", action="store_true",
+                         help="List the Codex session roots (live + archived) instead "
+                              "of auditing one log — archived_sessions existence is "
+                              "probed, never an error")
+    p_codex.add_argument("--json", help="Write coverage JSON to FILE; use - for stdout")
+    # cc-trace 研究 §D defer 的一块新能力（docs/CC_TRACE_APPLICATION.md §5 第 4 项）：
+    # Codex 成本折叠 + 仪表盘。与 codex-evidence 不同，这是**成本**审计——扫所有
+    # rollout（live + archived）的 last_token_usage 折叠成 5 桶 × 模型 × 日期，
+    # 按 codex_pricing.json（USD）计价。无状态单次调用，不落 month.json。
+    # 货币是 USD（cc-trace 价格表权威价，零汇率猜测），与 DSH 的 ¥ 区分。
+    p_codex_cost = sub.add_parser("codex-cost",
+                                  help="Price Codex rollout token usage (USD) "
+                                       "into a per-model / per-day cost report")
+    p_codex_cost.add_argument("--month", metavar="YYYY-MM", default=None,
+                              help="Restrict the report to one calendar month; "
+                                   "'all' = every month. Default (no flags) is the "
+                                   "current calendar month")
+    p_codex_cost.add_argument("--today", action="store_true",
+                              help="Restrict the report to today only (mutually "
+                                   "exclusive with --month)")
+    p_codex_cost.add_argument("--json", metavar="FILE",
+                              help="Write the report JSON to FILE; use - for stdout")
+    p_codex_cost.add_argument("--html", metavar="FILE",
+                              help="Write a self-contained HTML dashboard to FILE")
+    # ──── M3: 跨会话聚合层（v1.x.x）── 三个新子命令 ─────────────────
+    # oneline：单次审计 → oneline.json（覆盖）+ today.json / month.json（合并累加）。
+    # 与 behavior 复用同一份 audit_session_log，但额外调 hour_buckets 把折叠
+    # 结果写进 state 文件。xbar tick 直接读 oneline.json 不重算 cost —— 重算
+    # 两份就两份可能不一致（见 cost.py 顶部 peak/off-peak 计价分支）。
+    p_oneline = sub.add_parser("oneline",
+                               help="Fold one session audit into the persisted state files")
+    p_oneline.add_argument("session_log",
+                           help="Path to the DSH session JSONL log")
+    p_oneline.add_argument("--no-merge", action="store_true",
+                           help="Skip today.json / month.json merge (write oneline.json only)")
+    # calendar：把 month.json / today.json 渲染成单文件 HTML。模板来自
+    # scripts/agent_vitals/templates/calendar.html（inline CSS/JS，无外链）。
+    # 这里只做 copy + （可选）inline JSON，不重做 schema。
+    p_cal = sub.add_parser("calendar",
+                           help="Render the cost calendar HTML from persisted state")
+    p_cal.add_argument("--source", choices=("month", "today"), default="month",
+                       help="Which state file to render (default: month)")
+    p_cal.add_argument("--output", "-o", required=True,
+                       help="Destination HTML path")
+    # state：列出 / 清理 state 目录，或列出有数据的自然月。不接受
+    # --json/--host 等扫描期参数。
+    p_state = sub.add_parser("state", help="Inspect or clean the persisted state directory")
+    p_state.add_argument("action", choices=("list", "clean", "months"),
+                         help="list = show files; clean = remove (with --yes); "
+                              "months = list months with data (current + archived)")
+    p_state.add_argument("--yes", action="store_true",
+                         help="Skip the confirmation prompt for 'state clean'")
+    # ──── M6: 预算告警 ──────────────────────────────────────────
+    # show / set / enable / disable / snooze —— 五种动作覆盖 spec §5.5
+    p_budget = sub.add_parser("budget",
+                              help="Inspect or modify the budget alert thresholds")
+    p_budget.add_argument("action", choices=("show", "set", "enable", "disable",
+                                             "snooze", "unsnooze"),
+                          help="show = current; set = change a field; "
+                               "enable/disable = toggle; snooze = silence for Nh")
+    p_budget.add_argument("--daily", type=float, default=argparse.SUPPRESS,
+                          help="Set daily_cny (元)")
+    p_budget.add_argument("--weekly", type=float, default=argparse.SUPPRESS,
+                          help="Set weekly_cny")
+    p_budget.add_argument("--monthly", type=float, default=argparse.SUPPRESS,
+                          help="Set monthly_cny")
+    p_budget.add_argument("--peak-share-max", type=float, default=argparse.SUPPRESS,
+                          help="Set peak_share_max (0.0–1.0)")
+    p_budget.add_argument("--hours", type=float, default=argparse.SUPPRESS,
+                          help="snooze duration in hours")
+    p_budget.add_argument("--json", action="store_true",
+                          help="Emit alert as JSON (for xbar tick)")
+    p_budget.add_argument("--month", default=None,
+                          help="show only: query a specific month ('YYYY-MM') "
+                               "instead of the current one — reads month.json "
+                               "for the current month, month-archive.json otherwise")
+    # --fail-on / --ignore 对 behavior 同样有意义（闸门），但 --new-only 没有——
+    # 一份会话日志是单次取证输入，没有「相对上次的新增发现」。这里显式补上
+    # 前两个，让它们在子命令前后两个位置都能解析（对齐 Rust 的 global=true）。
+    # 不放进上面的 `for pp in (...)` 循环，是因为那批参数（--host/--path/--all…）
+    # 都是扫描期参数，behavior 不跑扫描，一个都不该收。
+    p_beh.add_argument("--fail-on", choices=("none", "critical", "warning", "info"),
+                       default=argparse.SUPPRESS)
+    p_beh.add_argument("--ignore", default=argparse.SUPPRESS)
+    # 子命令要复用扫描参数，故把它们也挂到子解析器上
+    for pp in (p_list, p_over, p_doc, p_exp, p_snap, p_diff):
+        pp.add_argument("--host", choices=("all", "claude-code", "codex", "openclaw",
+                                           "hermes", "workbuddy", "dsh"), default=argparse.SUPPRESS)
+        pp.add_argument("--path", action="append", default=argparse.SUPPRESS)
+        pp.add_argument("--runtime-json", metavar="FILE", default=argparse.SUPPRESS)
+        pp.add_argument("--all", action="store_true", default=argparse.SUPPRESS)
+        pp.add_argument("--zombie-age", type=int, default=argparse.SUPPRESS)
+        pp.add_argument("--split-threshold", type=int, default=argparse.SUPPRESS)
+        pp.add_argument("--budget", type=int, default=argparse.SUPPRESS)
+        pp.add_argument("--self-root", default=argparse.SUPPRESS)
+        pp.add_argument("--redact", action="store_true", default=argparse.SUPPRESS)
+        pp.add_argument("--redact-names", action="store_true", default=argparse.SUPPRESS)
+        pp.add_argument("--baseline", default=argparse.SUPPRESS)
+        pp.add_argument("--fail-on", choices=("none", "critical", "warning", "info"),
+                        default=argparse.SUPPRESS)
+        pp.add_argument("--ignore", default=argparse.SUPPRESS)
+        pp.add_argument("--new-only", action="store_true", default=argparse.SUPPRESS)
+
+    args = ap.parse_args()
+    if getattr(args, "cmd", None):
+        # 子命令下这些扫描期参数必须有默认值，下面的主流程要用
+        args.baseline = getattr(args, "baseline", None)
+
+    # 负数一律拒绝。**不能静默接受后产出垃圾** —— `--budget -1` 曾经算出
+    # `pct_used: -6300.0` 并原样打进摘要行，一个负百分比被当成测量值输出。
+    # 拒绝比编一个数好：这是本工具反复申明的那条底线。
+    for flag, value in (("--budget", args.budget),
+                        ("--zombie-age", args.zombie_age),
+                        ("--split-threshold", args.split_threshold)):
+        if value is not None and value < 0:
+            ap.error("%s cannot be negative (received %d)" % (flag, value))
+
+    # 显式指定「自己」在哪。Python 版本来能靠 __file__ 推断，二进制形态
+    # 下那条线断了（二进制装在 npm/cargo 的 bin 目录，与 skill 目录无关），
+    # 所以两个实现都提供这个开关，保持命令面一致。
+    # **排除是可见的**：被排除的 skill 带着 self_excluded=true 出现在报告里。
+    if args.self_root:
+        security_module.SELF_SKILL_ROOT = Path(args.self_root).resolve()
+
+    # 行为审计：审计一份 DSH 会话日志的执行轨迹，**不跑 skill 扫描**。
+    # 这是独立的取证命令（读会话日志 → 规则引擎 → findings），在扫描之前短路。
+    if getattr(args, "cmd", None) == "behavior":
+        audit = behavior_module.audit_session_log(args.session_log)
+        if audit is None:
+            print("session log unavailable: unreadable, malformed, or schema mismatch",
+                  file=sys.stderr)
+            sys.exit(2)
+        (findings, usage, requests, context, compaction, waste, pre_fork, subagents, skill,
+         duration, rule_outcomes, usage_coverage, duration_coverage, skill_coverage,
+         subagents_coverage, compaction_coverage, waste_coverage) = audit
+        if args.json:
+            # `--json` 输出十九个键（rule_outcomes/usage_coverage/
+            # duration_coverage/skill_coverage/subagents_coverage/
+            # compaction_coverage/waste_coverage 是 P3 group①-⑤新加的，都是
+            # 纯附加字段——findings/usage/duration 等本身的产出逻辑完全没变，
+            # 见 behavior.py 的对应文档）。三份用量数据是同一批事件的三种
+            # 分辨率，不是重复：usage 按模型汇总（成本），requests 保留逐
+            # 请求时间序列（上下文占用曲线的数据源），context 是常驻前缀的
+            # 分类估算。
+            #
+            # cost 不是 audit 六键之一——它读的是 usage × pricing.json，是 usage
+            # 上的一次派生计算（cost.py 顶部注释：纯展示层）。cost_report 是
+            # cost_block 和这里唯一算价格的地方，两处不会算出两个数。
+            pricing = cost_module.load_pricing()
+            cost = cost_module.cost_report(usage, pricing)
+            # pre_fork 与 usage 是同一个形状（token_by_model 的输出），所以
+            # 定价走同一个 cost_report——**不是**在这里另写一套算法。
+            # usage→cost 与 pre_fork→pre_fork_cost 两条路对称：cli.py 就是
+            # CLI 的展示层，它给 usage 定价本来就是合法的，给 pre_fork 定价
+            # 是补上同一处遗漏的对称性，不是破例。
+            #
+            # 没分叉时 pre_fork 是 None → pre_fork_cost 也是 None，**不是一个
+            # 全零的 cost_report**：「没分叉」和「分叉了但上游没花钱」是两回事。
+            pre_fork_cost = (cost_module.cost_report(pre_fork, pricing)
+                             if pre_fork is not None else None)
+            text = json.dumps({"findings": findings, "usage": usage,
+                               "requests": requests, "context": context,
+                               "compaction": compaction, "waste": waste,
+                               "cost": cost, "pre_fork": pre_fork,
+                               "pre_fork_cost": pre_fork_cost,
+                               "subagents": subagents,
+                               "skill": skill, "duration": duration,
+                               "rule_outcomes": rule_outcomes,
+                               "usage_coverage": usage_coverage,
+                               "duration_coverage": duration_coverage,
+                               "skill_coverage": skill_coverage,
+                               "subagents_coverage": subagents_coverage,
+                               "compaction_coverage": compaction_coverage,
+                               "waste_coverage": waste_coverage},
+                              ensure_ascii=False, indent=2)
+            if args.json == "-":
+                print(text)
+            else:
+                Path(args.json).write_text(text, encoding="utf-8")
+                print("Wrote %s: %d findings" % (args.json, len(findings)))
+        else:
+            glyph = {"critical": "✕", "warning": "⚠", "info": "·"}
+            for f in findings:
+                print("%s %s %s %s (seq %s)" % (
+                    glyph[f["severity"]], f["rule"], f["category"], f["evidence"], f["seq"]))
+            # 成本块：findings 之后空行 + 费用估算（纯展示层，见 cost.py）。无
+            # 可分桶的桶时 cost_block 返回空列表 → 不打印（与 tab 空态同构）。
+            pricing = cost_module.load_pricing()
+            block = cost_module.cost_block(usage, pricing)
+            if block:
+                print()
+                for line in block:
+                    print(line)
+            # 闸门与 doctor 同一套 --fail-on/--ignore 语义（无 --new-only，见
+            # behavior_gate 的 docstring）。成本不影响退出码——闸门只看风险。
+            sys.exit(behavior_module.behavior_gate(findings, args.fail_on, args.ignore))
+        return
+
+    # D11：执行时长审计——与 Rust 侧 main.rs 的 DurationAudit 子命令同一种结构
+    # （独立子命令 + --json 输出同一份 core 结果 + 人读格式加"最慢的几条"）。
+    if getattr(args, "cmd", None) == "duration-audit":
+        audit = behavior_module.audit_session_log(args.session_log)
+        if audit is None:
+            print("session log unavailable: unreadable, malformed, or schema mismatch",
+                  file=sys.stderr)
+            sys.exit(2)
+        duration = audit[9]
+        if args.json:
+            text = json.dumps(duration, ensure_ascii=False, indent=2)
+            if args.json == "-":
+                print(text)
+            else:
+                Path(args.json).write_text(text, encoding="utf-8")
+                print("Wrote %s" % args.json)
+            return
+        tool_calls = duration["tool_calls"]
+        turns = duration["turns"]
+        steps = duration["steps"]
+        approvals = duration["approvals"]
+        hooks = duration["hooks"]["executions"]
+        if not (tool_calls or turns or steps or approvals or hooks):
+            print("No duration data found in session log.")
+            return
+        print("Tool calls: %d · Turns: %d · Steps: %d · Approvals: %d · Hook executions: %d" % (
+            len(tool_calls), len(turns), len(steps), len(approvals), len(hooks)))
+        # 最慢的几条工具调用——duration_ms 缺失（incomplete/failed 没等到结果）
+        # 的排除在外，不是当成 0（那样反而会排到最前，读成"最快"）。
+        timed = [r for r in tool_calls if r["duration_ms"] is not None]
+        timed.sort(key=lambda r: r["duration_ms"], reverse=True)
+        if timed:
+            print("\nSlowest tool calls:")
+            for row in timed[:5]:
+                name = row["tool_name"] or "(unknown)"
+                print("  %s — %dms (%s)" % (name, row["duration_ms"], row["load_status"]))
+        return
+
+    # P4（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：Codex rollout → CanonicalSession
+    # 的 "sound" 证明。输出 §13 coverage，不是 findings——Codex 还没有 SV601–614
+    # 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--host
+    # codex` 是安装时探针的表面，与这个子命令无关（命名冲突见
+    # adapters/codex_session.py 顶部注释）。与 Rust 侧 main.rs 的 CodexEvidence
+    # 子命令同一种结构（独立子命令 + --json 输出同一份 core 结果 + 人读呈现）。
+    if getattr(args, "cmd", None) == "codex-evidence":
+        from agent_vitals.adapters import codex_session
+        if args.roots:
+            report = codex_session.codex_session_roots_report()
+            if args.json:
+                text = json.dumps(report, ensure_ascii=False, indent=2)
+                if args.json == "-":
+                    print(text)
+                else:
+                    try:
+                        Path(args.json).write_text(text, encoding="utf-8")
+                    except OSError:
+                        print("failed to write %s" % args.json, file=sys.stderr)
+                        sys.exit(2)
+                    print("Wrote %s" % args.json)
+            else:
+                print(_render_codex_roots(report), end="")
+            return
+        if not args.session_log:
+            # argparse 的 required 表达不了「session_log 或 --roots 二选一」，
+            # 只能在 handler 里手动挡。退出码 2 是 usage 错误（clap 的
+            # required_unless_present 在 Rust 侧做同一件事）。
+            ap.error("session_log is required unless --roots")
+        parsed = codex_session.read_codex_session_log(args.session_log)
+        if isinstance(parsed.get("degraded"), str):
+            print("session log unavailable: unreadable, malformed, or empty",
+                  file=sys.stderr)
+            sys.exit(2)
+        items = parsed["items"] or []
+        session_id = parsed.get("session_id")
+        if session_id is None:
+            # §14.4 back-fill：session_meta 缺席时退回文件名，保证 session 永远
+            # 可指认（与 behavior 的 dsh session_id 同款兜底）。
+            session_id = Path(args.session_log).stem
+        # 标题从 ~/.codex/session_index.jsonl 查（索引缺失/不在索引 → None，存在性
+        # 探测，绝不报错——与 read_session_index 的缺席铁律一致）。
+        title = codex_session.read_session_index().get(session_id)
+        evidence = codex_evidence_module.build_codex_evidence(
+            items, session_id, title, parsed.get("history_mode"),
+            parsed.get("cli_version"), parsed.get("workspace_roots") or [],
+            parsed.get("model"))
+        if args.json:
+            text = json.dumps(codex_evidence_module.codex_evidence_json(evidence),
+                              ensure_ascii=False, indent=2)
+            if args.json == "-":
+                print(text)
+            else:
+                try:
+                    Path(args.json).write_text(text, encoding="utf-8")
+                except OSError:
+                    print("failed to write %s" % args.json, file=sys.stderr)
+                    sys.exit(2)
+                print("Wrote %s: %d signals" % (args.json,
+                                                len(evidence["canonical"]["signals"])))
+            return
+        print(_render_codex_evidence(
+            codex_evidence_module.codex_evidence_json(evidence)), end="")
+        return
+
+    # Codex 成本折叠 + 计价（cc-trace 研究 §D 落地）。与 Rust 侧 main.rs 的
+    # CodexCost 子命令同一种结构。无状态单次调用：扫 rollout → 折叠 →
+    # 计价 → 文本/JSON/HTML 三路。时间轴是**小时桶**（统一多桶折叠契约，见
+    # docs/UNIFIED_COST_VIEW.md）。`--month` 过滤小时轴后**重算** by_model
+    # （codex_by_model_from_hours 把过滤后的小时求和折回模型轴，不是
+    # merge_folds——merge 只读 fold 的 by_model 字段，拿它折回去是空模型轴），
+    # 保证 days 与 per_model 对得上；unaccounted 无时间归属，跨月份保留（数据
+    # 质量哨兵，不参与归月）。`--today` 时报告带 `hours`（小时热力图数据）。
+    if getattr(args, "cmd", None) == "codex-cost":
+        # `--today` 与 `--month` 互斥（Rust 侧 clap conflicts_with 同款；保持两侧
+        # 对非法输入一致地报错，而不是今天静默赢）。
+        if args.today and args.month:
+            print("error: the argument '--today' cannot be used with '--month'",
+                  file=sys.stderr)
+            sys.exit(2)
+        # 月份解析（北京口径，与 Rust `main.rs` 同源）：默认 = 当前自然月；
+        # `--today` = 今天（过滤键是完整 YYYY-MM-DD，month 标签取今天所属月）；
+        # `--month all` = 全部月份；其余 = 指定月。filter_key=None 即不过滤。
+        if args.today:
+            filter_key = codex_cost_module.today_beijing()
+            month_out = filter_key[:7]
+        elif args.month == "all":
+            filter_key = None
+            month_out = None
+        elif args.month:
+            filter_key = args.month
+            month_out = args.month
+        else:
+            cur = codex_cost_module.current_month_beijing()
+            filter_key = cur
+            month_out = cur
+        merged = codex_fold_merged()
+        want_hours = bool(args.today)
+        out = codex_report_from_merged(merged, filter_key, month_out, want_hours)
+        wrote = False
+        if args.json:
+            text = json.dumps(out, ensure_ascii=False, indent=2)
+            if args.json == "-":
+                print(text)
+            else:
+                try:
+                    Path(args.json).write_text(text, encoding="utf-8")
+                except OSError:
+                    print("failed to write %s" % args.json, file=sys.stderr)
+                    sys.exit(2)
+                print("Wrote %s" % args.json)
+            wrote = True
+        if args.html:
+            # `--html` 复用统一看板模板（codex 视角）：default 随请求——请求月
+            # → "month"、全部 → "all"、今天 → "today"、无请求 → "month"。
+            if args.today:
+                default_view = "today"
+            elif args.month == "all":
+                default_view = "all"
+            else:
+                default_view = "month"
+            _render_codex_cost_html(args.html, merged,
+                                    filter_key, month_out, default_view)
+            wrote = True
+        if not wrote:
+            print(codex_cost_module.render_codex_cost(out), end="")
+        return
+
+    # ──── M3 oneline handler ──────────────────────────────────────
+    # 与 behavior 同源（同一个 audit_session_log），但**额外**把 hour_buckets
+    # 折进 today.json / month.json。审计成本：每会话多跑一次 hour_buckets 折叠
+    # （纯函数、与 token_by_model 同采样路径，无额外 I/O）。
+    if getattr(args, "cmd", None) == "oneline":
+        audit = behavior_module.audit_session_log(args.session_log)
+        if audit is None:
+            print("session log unavailable: unreadable, malformed, or schema mismatch",
+                  file=sys.stderr)
+            sys.exit(2)
+        (findings, usage, requests, ctx, compaction, waste, pre_fork, subagents, skill,
+         duration, _rule_outcomes, _usage_coverage, _duration_coverage, _skill_coverage,
+         _subagents_coverage, _compaction_coverage, _waste_coverage) = audit
+        pricing = cost_module.load_pricing()
+        cost = cost_module.cost_report(usage, pricing)
+        if cost is None:
+            print("warning: cost_report returned None (no usage samples to price)",
+                  file=sys.stderr)
+            cost = {"total": 0, "peak_total": 0, "unpriced_tokens": 0,
+                    "currency": "CNY"}
+        # hour_buckets 复用 token_by_model 的同 step 去重 + peak/off-peak 判定。
+        # 与 token_by_model 的不变量已由 tests/test_characterization.py::TestHourBuckets
+        # 钉死 —— 两边加起来必须字节相等。
+        # 这里再读一次 events 列表（audit_session_log 自己内部读了一次）——
+        # 双读换「不破坏 audit_session_log 签名」的简洁性，且 oneline 是
+        # 5min tick 而非实时路径，多读一次 JSONL 的成本可忽略。
+        from agent_vitals.adapters.dsh import read_session_log
+        session = read_session_log(args.session_log)
+        events = (session or {}).get("usage_events") or []
+        hb = usage_module.hour_buckets(events)
+        # 把 cost / hb 折成「一行摘要」。**不要**塞 findings / requests 全文——
+        # oneline.json 是 xbar 5min tick 读的，塞多了每次都序列化浪费。
+        # tokens_total 必须与 hour_buckets 的 4 桶之和**逐字节相等**
+        # (tests/test_cli_m3::TestUsageHourBucketsReconcile 钉死)——
+        # 所以这里取 4 桶全量,与 token_by_model 同源。
+        tokens_total = sum(
+            m["uncached_input_tokens"] + m["output_tokens"]
+            + m["cache_read_tokens"] + m["cache_write_tokens"]
+            for m in usage["by_model"].values())
+        tokens_peak = sum(
+            m["peak_uncached_input_tokens"] + m["peak_output_tokens"]
+            + m["peak_cache_read_tokens"] + m["peak_cache_write_tokens"]
+            for m in usage["by_model"].values())
+        # session_id / duration_ms：日志 schema 没显式字段时用文件名 + None
+        # 兜底 ——「没数据」与「数据为 0」是两回事（CLAUDE.md §缺列不编列）。
+        session_id = Path(args.session_log).stem
+        duration_ms = None
+        for ev in events:
+            if isinstance(ev, dict) and ev.get("type") == "session/end":
+                end = ev.get("time")
+                if isinstance(end, int) and isinstance(duration_ms, type(None)):
+                    duration_ms = end
+                    break
+        max_sev = "none"
+        sev_rank = {"critical": 4, "warning": 3, "info": 2}
+        for f in findings:
+            r = sev_rank.get(f.get("severity"), 0)
+            if r > sev_rank.get(max_sev, 0):
+                max_sev = f["severity"]
+        summary = {
+            "session_id": session_id,
+            "session_log": str(args.session_log),
+            "duration_ms": duration_ms,
+            "model": (list(usage["by_model"].keys()) or ["unknown"])[0],
+            "tokens_total": tokens_total,
+            "tokens_peak": tokens_peak,
+            "cost_cny": cost["total"],
+            "cost_peak_cny": cost["peak_total"],
+            "unpriced_tokens": cost["unpriced_tokens"],
+            "findings_total": len(findings),
+            "findings_max_severity": max_sev,
+            "hour_buckets_summary": {
+                "bucket_count": len(hb["buckets"]),
+                "min_date": (hb["buckets"][0]["date"]
+                             if hb["buckets"] else None),
+                "max_date": (hb["buckets"][-1]["date"]
+                             if hb["buckets"] else None),
+                "tz_name": hb["tz_name"],
+            },
+        }
+        p_oneline = state_module.write_oneline(summary)
+        if not args.no_merge:
+            # **两个状态文件都喂按 (date, model) 折的那一份**，不是整段
+            # `usage["by_model"]`。
+            #
+            # 曾经 today.json 收的是整段 by_model，理由写着"today.json 只
+            # 代表今天这一个桶，不需要按日拆"——那个推理有个隐含前提：
+            # 「喂进来的 session 整段都发生在今天」。真实数据不满足：一个
+            # session 可以跨 08-23/08-26/08-27 三天（长会话 + 中途 compact），
+            # 于是 hour 桶被正确过滤成只剩今天的 245,760 token，而 by_model
+            # 仍是整段的 17,596,160——同一个 today.json 里两个字段差 70 倍，
+            # 「今日估算成本」（读 by_model）因此报出整段会话的钱。
+            #
+            # 现在 `token_by_date_model` 能给出精确的当日切片，直接取
+            # `[今天]` 那一份；没有今天的数据时是 None，`merge_today` 照
+            # 既有语义不写 by_model 字段。month.json 拿整份多日 dict，各
+            # 日期各自归位（见 state.merge_month 的文档注释）。
+            by_date_model = usage_module.token_by_date_model(events)
+            state_module.merge_today(
+                hb, by_model=by_date_model.get(state_module._today_key()))
+            state_module.merge_month(hb, by_date_model=by_date_model)
+        # 不管 --no-merge 与否都 append 历史 —— xbar「最近 5 次审计」要靠这个
+        state_module.append_session_history(summary)
+        # 顺手把 budget.evaluate() 落盘成 alert.json —— xbar 之前完全绕开
+        # budget.py，自己在 bash 里硬编码阈值重算一遍百分比，用户改的
+        # daily_cny / adaptive floor / snooze 全部对菜单栏不生效。
+        # today.json / month.json 已经 merge 完，evaluate() 读的是最新状态。
+        alert = budget_module.evaluate()
+        state_module.write_alert(alert)
+        # 顺手把日历 HTML 刷新到 $STATE_DIR/calendar.html —— xbar「打开
+        # 日历」菜单项直接 open 这个固定路径,不需要知道 repo 装在哪里
+        # （已安装的 xbar 副本本来就跟 repo 断了联系）。渲染失败(模板缺失
+        # 之类)只警告,不中断审计主路径——calendar.html 是展示层产物,
+        # 不是审计结果的一部分。
+        try:
+            _render_calendar_html(state_module.state_dir() / "calendar.html",
+                                  default_source="month")
+        except Exception as e:
+            print("warning: failed to refresh calendar.html: %s" % e, file=sys.stderr)
+        # 人读输出 —— 让没装 xbar 的用户在终端也能看一眼「这一会话花了多少」。
+        print("session:    %s" % summary["session_id"])
+        print("duration:   %s ms" % (summary["duration_ms"] or "?"))
+        print("model:      %s" % summary["model"])
+        print("tokens:     %s (peak %s)" % (summary["tokens_total"], summary["tokens_peak"]))
+        print("cost:       ¥%.4f (peak ¥%.4f)" % (summary["cost_cny"], summary["cost_peak_cny"]))
+        if summary["unpriced_tokens"]:
+            print("unpriced:   %d tokens (model not in pricing.json)"
+                  % summary["unpriced_tokens"])
+        print("findings:   %d (max severity: %s)"
+              % (summary["findings_total"], summary["findings_max_severity"]))
+        if alert["level"] != "disabled":
+            print("budget:     %s" % alert["level"])
+        print("state:      %s" % p_oneline)
+        return
+
+    # ──── M3 calendar handler ─────────────────────────────────────
+    # 渲染逻辑在 _render_calendar_html()——oneline 每次跑完也会调它把
+    # $STATE_DIR/calendar.html 刷新一遍，供 xbar「打开日历」菜单项用，
+    # 两处共用同一份逻辑，不各写一份互相不一致。
+    if getattr(args, "cmd", None) == "calendar":
+        try:
+            embedded, out = _render_calendar_html(args.output, default_source=args.source)
+        except FileNotFoundError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(2)
+        if embedded:
+            print("rendered: %s (%d bytes, inline: %s, default tab: %s)"
+                  % (out, out.stat().st_size, "+".join(embedded), args.source))
+        else:
+            # 两份都没有：HTML 仍然渲染,JS 检测到内联数据缺失 → 显示
+            # 「无数据」empty state,而不是凭空编一个空 calendar。
+            print("rendered: %s (no today.json/month.json yet — "
+                  "calendar will show empty state)" % out)
+        return
+
+    # ──── M3 state list / clean / months ───────────────────────────
+    if getattr(args, "cmd", None) == "state":
+        if args.action == "months":
+            months = state_module.list_months()
+            if not months:
+                print("(no data)")
+                return
+            for m in months:
+                print(m)
+            return
+        files = state_module.list_state_files()
+        if args.action == "list":
+            if not files:
+                print("(empty)")
+                return
+            for f in files:
+                size = f.stat().st_size
+                mtime = f.stat().st_mtime
+                print("%-40s %6d B  mtime=%d" % (f.name, size, int(mtime)))
+            return
+        if args.action == "clean":
+            # 顺带扫掉 .lock sidecar（_locked 留下的，与 .json 一一对应）
+            lock_files = list(state_module.state_dir().glob("*.json.lock"))
+            if not args.yes:
+                print("refusing without --yes; %d files would be removed" % len(files),
+                      file=sys.stderr)
+                sys.exit(2)
+            for f in files:
+                f.unlink()
+            for lf in lock_files:
+                lf.unlink()
+            print("removed %d files" % len(files))
+            return
+
+    # ──── M6 budget 子命令 ──────────────────────────────────────
+    if getattr(args, "cmd", None) == "budget":
+        if args.action == "show" and getattr(args, "month", None):
+            # 查历史/指定月份——不是「现在花了多少」，跟阈值/告警无关，
+            # 不走 evaluate()（那是当前月+当天的实时判断），直接问
+            # compute_month_cost(month)。
+            result = budget_module.compute_month_cost(args.month)
+            if result is None:
+                if args.json:
+                    print(json.dumps({"month": args.month, "cost": None},
+                                     ensure_ascii=False))
+                else:
+                    print("(no data for %s)" % args.month)
+                return
+            if args.json:
+                print(json.dumps({"month": args.month, "cost": result},
+                                 ensure_ascii=False, indent=2))
+            else:
+                print("month:      %s" % args.month)
+                print("cost:       ¥%.2f (peak ¥%.2f)" %
+                      (result["total"], result["peak_total"]))
+            return
+        if args.action == "show":
+            alert = budget_module.evaluate()
+            if args.json:
+                print(json.dumps(alert, ensure_ascii=False, indent=2,
+                                 default=str))
+            else:
+                cfg = budget_module.load_config()
+                print("enabled:           %s" % cfg["enabled"])
+                print("daily_cny:         %s" % cfg["daily_cny"])
+                print("weekly_cny:        %s" % cfg["weekly_cny"])
+                print("monthly_cny:       %s" % cfg["monthly_cny"])
+                print("peak_share_max:    %s" % cfg["peak_share_max"])
+                print("adaptive_floor:    %s" % cfg["adaptive_floor"])
+                print("adaptive_window:   %s days" % cfg["adaptive_window_days"])
+                print("adaptive_multiplier: %s" % cfg["adaptive_multiplier"])
+                print()
+                print("─── today ───")
+                print("today_cost:        %s" %
+                      ("¥%.2f" % alert["today_cost"] if alert["today_cost"] is not None
+                       else "(no data)"))
+                print("effective_daily:   ¥%.2f (adaptive_floor_applied=%s)" %
+                      (alert["effective_daily_budget"],
+                       alert["adaptive_floor_applied"]))
+                print("ratio:             %s" %
+                      ("%.1f%%" % (alert["ratio"] * 100) if alert["ratio"] is not None
+                       else "(no data)"))
+                print("peak_share:        %s" %
+                      ("%.1f%%" % (alert["peak_share"] * 100)
+                       if alert["peak_share"] is not None else "(no data)"))
+                print()
+                print("─── month ───")
+                print("month_cost:        %s" %
+                      ("¥%.2f" % alert["month_cost"] if alert["month_cost"] is not None
+                       else "(no data)"))
+                print("month_ratio:       %s" %
+                      ("%.1f%%" % (alert["month_ratio"] * 100)
+                       if alert["month_ratio"] is not None else "(no data)"))
+                print()
+                print("alert level:       %s" % alert["level"])
+                if alert["snoozed_until"]:
+                    print("snoozed_until:     %s" % alert["snoozed_until"])
+                if alert["reasons"]:
+                    print()
+                    print("reasons:")
+                    for r in alert["reasons"]:
+                        print("  • %s" % r)
+            return
+        if args.action == "set":
+            changes = {}
+            if hasattr(args, "daily"):
+                changes["daily_cny"] = args.daily
+            if hasattr(args, "weekly"):
+                changes["weekly_cny"] = args.weekly
+            if hasattr(args, "monthly"):
+                changes["monthly_cny"] = args.monthly
+            if hasattr(args, "peak_share_max"):
+                changes["peak_share_max"] = args.peak_share_max
+            if not changes:
+                print("no changes specified (use --daily/--weekly/...)", file=sys.stderr)
+                sys.exit(2)
+            budget_module.write_config(changes)
+            print("wrote %s to %s" % (changes, budget_module._config_path()))
+            return
+        if args.action == "enable":
+            budget_module.write_config({"enabled": True})
+            print("budget enabled")
+            return
+        if args.action == "disable":
+            budget_module.write_config({"enabled": False})
+            print("budget disabled")
+            return
+        if args.action == "snooze":
+            hours = getattr(args, "hours", None)
+            if not hours or hours <= 0:
+                print("--hours must be positive", file=sys.stderr)
+                sys.exit(2)
+            from datetime import datetime as _dt, timedelta
+            until = (_dt.now(budget_module._BEIJING)
+                     + timedelta(hours=hours)).isoformat()
+            budget_module.set_snooze(until, reason="cli")
+            print("snoozed until %s" % until)
+            return
+        if args.action == "unsnooze":
+            budget_module.clear_snooze()
+            print("snooze cleared")
+            return
+
+    zombie_age = args.zombie_age
+    budget = args.budget
+    inventory = build_inventory(
+        args.host, args.path, DEFAULT_ROOTS, env=os.environ,
+        home=Path(os.path.expanduser("~")), cwd=Path.cwd(),
+        runtime_json=getattr(args, "runtime_json", None))
+    skills = inventory["skills"]
+    scanned = inventory["scanned_roots"]
+    unreadable = inventory["unreadable_skills"]
+    roots = inventory["roots"]
+    enabled_plugins = inventory["enabled_plugins"]
+    usage = inventory["usage"]
+    host_cfg = inventory["host_config"]
+    plugins_known = inventory["plugins_known"]
+    workbuddy_mode = inventory["workbuddy_mode"]
+    workbuddy_roots = inventory["workbuddy_roots"]
+    openclaw_runtime = inventory["openclaw_runtime"]
+    codex_runtime = inventory["codex_runtime"]
+
+    out = build_report(
+        inventory,
+        host=args.host,
+        include_all=args.all,
+        budget=budget,
+        codex_fallback_budget=CODEX_FALLBACK_DESC_BUDGET,
+        zombie_age=zombie_age,
+        split_threshold=args.split_threshold,
+        schema_version=SCHEMA_VERSION,
+        home_n=str(Path(os.path.expanduser("~")).resolve()).replace("\\", "/"),
+    )
+    loaded = [skill for skill in skills if skill["loaded"]]
+    budget_report = out["description_budget"]
+    trigger_report = out["trigger_data"]
+    structure_report = out["structure"]
+    security_report = out["security"]
+    tier1_total = out["tier1_total_tokens"]
+
+
+    # 快照要在**算完 diff 之后**才写，否则这一次会拿自己当基线，
+    # 变化段永远是空的 —— 一个看起来在工作、实际什么都没比的功能。
+    cmd = getattr(args, "cmd", None)
+    auto_snapshot = cmd in (None, "doctor") and not getattr(args, "no_snapshot", False) \
+        and not args.json
+    baseline = args.baseline
+    if baseline is None and (auto_snapshot or cmd == "diff" or getattr(args, "new_only", False)):
+        baseline = getattr(args, "file", None) or latest_snapshot()
+    if baseline:
+        out["diff_vs_baseline"] = diff_against(baseline, out)
+
+    if args.redact or args.redact_names:
+        out = redact_module.redact(
+            out, names=args.redact_names, name_map={},
+            home_n=str(Path(os.path.expanduser("~")).resolve()).replace("\\", "/"),
+            cwd_n=str(Path.cwd()).replace("\\", "/"))
+        out["redacted"] = {
+            "paths": True,
+            "names": bool(args.redact_names),
+            "note": "This output is redacted for sharing. Run a new scan to obtain the original data.",
+        }
+
+    # `agent-vitals` 无参数等价于 `doctor`（PRODUCT §5 第一行、§183）。
+    #
+    # 第一次用的人想知道的是「我的 Agent 到底有没有问题」，不该先学 CLI。
+    # 但 SKILL.md 与全部集成测试都靠 `--json <file>` 取原始 JSON，所以判据
+    # 是**有没有给 --json**，不是「有没有子命令」—— 那条路径原样保留。
+    # 想把 JSON 打到 stdout（原来的裸调用行为）用 `--json -`。
+    if not getattr(args, "cmd", None) and not args.json:
+        args.min = DEFAULT_OVERLAP_MIN
+        render_doctor(out, args)
+        sys.exit(_doctor_gate(out, args, auto_snapshot, baseline))
+
+    if getattr(args, "cmd", None) == "list":
+        render_list(out, args)
+        return
+    if getattr(args, "cmd", None) == "overlap":
+        render_overlap(out, args)
+        return
+    if getattr(args, "cmd", None) == "doctor":
+        render_doctor(out, args)
+        if args.json:
+            return
+        sys.exit(_doctor_gate(out, args, auto_snapshot and not args.json, baseline))
+    if getattr(args, "cmd", None) == "snapshot":
+        sys.exit(render_snapshot(out, args))
+    if getattr(args, "cmd", None) == "diff":
+        sys.exit(render_diff(out, args))
+    if getattr(args, "cmd", None) == "explain":
+        # 找不到那个名字要以非零退出：脚本调用方靠退出码判断，
+        # 打印一行「没找到」然后返回 0 会被当成「查过了，没问题」。
+        sys.exit(render_explain(out, args))
+
+    text = json.dumps(out, ensure_ascii=False, indent=2)
+    if args.json == "-":
+        print(text)
+    elif args.json:
+        Path(args.json).write_text(text, encoding="utf-8")
+        budget_text = (f"{budget_report['pct_used']}% ({budget_report['scope']})"
+                       if budget_report["available"] else
+                       "configurable (not set for this instance)" if args.host == "openclaw" else "unavailable")
+        active_text = (f"{len(loaded)} runtime-visible records"
+                       if args.host == "openclaw" else f"{len(loaded)} loaded")
+        print(f"Wrote {args.json}: {len(skills)} skills on disk, "
+              f"{active_text}, "
+              f"approximately {tier1_total} Tier1 tokens, "
+              f"description budget {budget_text}, "
+              f"trigger data {'available' if trigger_report['available'] else 'unavailable'}, "
+              f"{len(structure_report['oversized'])} split candidates, "
+              f"{security_report['flagged_count']} security findings "
+              f"({security_report['all_cited_count']} contain only citation-like matches and still require review)")
+
+    if unreadable:
+        # 也写一份到 stderr：JSON 里那条字段只有解析输出的人会看到，
+        # 而直接在终端跑的人同样需要知道清点数字是不完整的。
+        print("\nWarning: %d SKILL.md files could not be read and were excluded "
+              "(see unreadable_skills):" % len(unreadable), file=sys.stderr)
+        for u in unreadable[:10]:
+            print("  %s" % u["path"], file=sys.stderr)
+
+    if not skills:
+        print("\nNo skills were found. Use --path to specify an installation directory.",
+              file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

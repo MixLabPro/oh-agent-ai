@@ -95,7 +95,7 @@
     "cwd": null,
     "catalog_skills": 0,
     "errors": [
-      "disabled by SKILL_VITALS_DISABLE_CODEX_RUNTIME"
+      "disabled by AGENT_VITALS_DISABLE_CODEX_RUNTIME"
     ],
     "note": "When available=true, Codex discovery, scope, enabled state, interface, and dependencies come from the official app-server. No public per-skill trigger-count API is available."
   },
@@ -134,7 +134,7 @@
   },
   "trigger_data": {
     "available": true,
-    "source": "SKILL_VITALS_DSH_SESSION_LOG -> <FIXTURES>/session.jsonl",
+    "source": "AGENT_VITALS_DSH_SESSION_LOG -> <FIXTURES>/session.jsonl",
     "evidence": "session-log",
     "counts_are": "session-log invocation and selection events (not lifetime skillUsage)",
     "zombie_min_age_days": 14,

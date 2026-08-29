@@ -1,11 +1,11 @@
-# dsh-skill-vitals-audit — out-of-tree DSH audit plugin
+# dsh-agent-vitals-audit — out-of-tree DSH audit plugin
 
 双面插件：
 
 - **宿主半份**（`index.js`）——注册 `behaviorFindings` 与 `tokenByModel` 两个
   session projection。宿主是 projection push 模型里唯一的计算端：`behaviorFindings`
   把原始 session 事件（`tool/call`、`approval/asked`、`sandbox/mode`…）喂给 Rust
-  行为规则（编译成 wasm，`skill_vitals_wasm_bg.wasm`）算出 SV601–SV610 findings；
+  行为规则（编译成 wasm，`agent_vitals_wasm_bg.wasm`）算出 SV601–SV610 findings；
   `tokenByModel` 把 usage 事件喂给同一份 core 的 `token_by_model`（wasm）算出按
   模型分桶的 token 报告——CLI 的 `behavior` 命令走的是**同一份引擎**，never a
   second copy。
@@ -14,7 +14,7 @@
   `useProjection('tokenByModel')`，渲染「成本（token + 价格估算）+ 风险（行为
   findings）」两层数据。价格估算 = 按模型分桶的 token × DeepSeek 官方报价
   （flash/pro × 空闲/高峰），分桶来自 wasm `token_by_model`（snake_case），各桶
-  之和与 `tokenUsage` 严格相等；价格表单一真相源是 `scripts/skill_vitals/pricing.json`，
+  之和与 `tokenUsage` 严格相等；价格表单一真相源是 `scripts/agent_vitals/pricing.json`，
   这里的 PRICING 是其内嵌副本（`tests/test_pricing_lockstep.py` 守）。
 
 浏览器拿不到原始执行事件（client `SessionFace` 只暴露投影，不暴露 raw log，
@@ -23,17 +23,17 @@ wasm 跑在 Node（宿主）而非浏览器的原因。
 
 ## 安装与开发循环
 
-**生产**（从 npm registry，`dsh-skill-vitals-audit` 发布后）：
+**生产**（从 npm registry，`dsh-agent-vitals-audit` 发布后）：
 
 ```bash
-dsh plugin --profile web add dsh-skill-vitals-audit
+dsh plugin --profile web add dsh-agent-vitals-audit
 ```
 
 **开发**（本地改动实时生效，强烈推荐）——用 `link:` 建 symlink，改 `index.js` /
 `client.js` 后**不用重装**，重启 `dsh web` 即生效：
 
 ```bash
-dsh plugin --profile web add link:/Users/Admin/projects/project/skill-vitals/dsh-client
+dsh plugin --profile web add link:/Users/Admin/projects/project/agent-vitals/dsh-client
 ```
 
 > ⚠️ 别用 `file:` 做开发循环。pnpm 的 `file:` 目录依赖是**拷贝 + 按路径缓存**（不按
@@ -42,8 +42,8 @@ dsh plugin --profile web add link:/Users/Admin/projects/project/skill-vitals/dsh
 >
 > ```bash
 > cd ~/.dsh/profiles/web
-> pnpm remove dsh-skill-vitals-audit
-> pnpm add link:/Users/Admin/projects/project/skill-vitals/dsh-client   # 或 file:...（一次性）
+> pnpm remove dsh-agent-vitals-audit
+> pnpm add link:/Users/Admin/projects/project/agent-vitals/dsh-client   # 或 file:...（一次性）
 > ```
 
 ## 构建：tsup（zero workspace dependency）
@@ -89,7 +89,7 @@ dsh-client/
 
 ```json
 {
-  "name": "dsh-skill-vitals-audit",
+  "name": "dsh-agent-vitals-audit",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -120,12 +120,12 @@ dsh-client/
 
 ```js
 window.__ModuleLoader__.load({
-  id: "dsh-skill-vitals-audit",
+  id: "dsh-agent-vitals-audit",
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
     // ... React bundle body ...
-    module.exports = { name: 'dsh-skill-vitals-audit', inject: ['slots', 'locale'], apply }
+    module.exports = { name: 'dsh-agent-vitals-audit', inject: ['slots', 'locale'], apply }
     return module.exports;
   },
 });
@@ -161,13 +161,13 @@ tsup 两条构建：host (ESM, `lib/index.js`) + client (CJS, `lib/client.cjs`)�
 
 能。`packages/client/modules/src/index.ts` 的 `ClientModuleRegistry` 扫描逻辑是：
 
-1. `resolveMeta(pkgName)` → `require.resolve('dsh-skill-vitals-audit/package.json')`
+1. `resolveMeta(pkgName)` → `require.resolve('dsh-agent-vitals-audit/package.json')`
    （锚点是 cordis 配置树的 `ctx.baseUrl`，`dsh plugin add` 把包装进 profile 后即可解析）。
 2. 读 `pkg.dsh.client`，`platform === 'web'` 通过。
 3. `clientExportOf(pkgName, pkg.exports)` 拿到 `"./client"` → `"./client.js"`。
 4. `clientPath = join(dirname(pkgJson), "./client.js")` → 本包根目录的 `client.js` 存在。
 5. `initialBundleRevision` 读文件算 rev，`graphRow` 产出
-   `{ id, url: '/plugins/dsh-skill-vitals-audit/client.js?rev=…', rev }`，加入 `__DSH_BOOT__`
+   `{ id, url: '/plugins/dsh-agent-vitals-audit/client.js?rev=…', rev }`，加入 `__DSH_BOOT__`
    图；`serveBundle` 路由 `/plugins/<id>/client.js` 返回该文件。
 
 因此：**只要 `dsh plugin add` 把本包装进 profile（并由父代理安装依赖 / 重启验证），

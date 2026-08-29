@@ -14,7 +14,7 @@ cargo run --release -- /tmp/ov.json
 
 > **基线是近似复刻，不是生产实现。**主 crate 的分词函数未导出，这里为了同条件
 > 对比重写了一份；同一语料上 ≥0.25 的对数是 13 vs 生产的 11。权威数字请跑
-> `skill-vitals overlap --json`，这个实验回答的是「换个分词器会怎样」。
+> `agent-vitals overlap --json`，这个实验回答的是「换个分词器会怎样」。
 
 输出五段：
 

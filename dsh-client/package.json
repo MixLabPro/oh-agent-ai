@@ -1,5 +1,5 @@
 {
-  "name": "dsh-skill-vitals-audit",
+  "name": "dsh-agent-vitals-audit",
   "description": "Out-of-tree DSH audit plugin: host projections (behaviorFindings + tokenByModel) + Web '审计' tab.",
   "version": "0.1.5",
   "type": "module",
@@ -14,8 +14,8 @@
     "lib/index.js",
     "lib/client.cjs",
     "cordis.patch.yml",
-    "skill_vitals_wasm.js",
-    "skill_vitals_wasm_bg.wasm",
+    "agent_vitals_wasm.js",
+    "agent_vitals_wasm_bg.wasm",
     "pricing.json",
     "README.md"
   ],

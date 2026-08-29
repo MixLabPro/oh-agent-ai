@@ -8,14 +8,14 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
-import { initSync, audit_events, token_by_model } from './skill_vitals_wasm.js'
+import { initSync, audit_events, token_by_model } from './agent_vitals_wasm.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
 // Instantiate the wasm once at module load. The wasm-bindgen `--target web`
 // glue is a plain ESM module; `initSync` is synchronous, so the projection's
 // `view` can call `audit_events` synchronously afterwards.
-const wasmModule = new WebAssembly.Module(readFileSync(join(here, 'skill_vitals_wasm_bg.wasm')))
+const wasmModule = new WebAssembly.Module(readFileSync(join(here, 'agent_vitals_wasm_bg.wasm')))
 initSync({ module: wasmModule })
 
 // Event types the behavior rules (SV601–SV614) consume. Everything else is

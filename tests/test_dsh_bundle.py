@@ -37,7 +37,7 @@ def _frontmatter(path):
 class DshBundleTests(unittest.TestCase):
     def test_package_declares_bundle_patch_without_build_or_deps(self):
         manifest = json.loads((DSH / "package.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["name"], "dsh-skill-vitals")
+        self.assertEqual(manifest["name"], "dsh-agent-vitals")
         self.assertEqual(manifest["dsh"]["bundle"]["patch"], "./cordis.patch.yml")
         self.assertEqual(manifest["type"], "module")
         # 三条硬约束的第一条：只发预构建。没有任何 scripts（含 prepare），
@@ -60,8 +60,8 @@ class DshBundleTests(unittest.TestCase):
         # 一个 insert、一个 row：bundle 的价值就是挂载 index.js，别无其它。
         self.assertEqual(patch.count("- insert:"), 1)
         self.assertEqual(patch.count("- id:"), 1)
-        self.assertIn("id: skill-vitals", patch)
-        self.assertIn("name: dsh-skill-vitals", patch)
+        self.assertIn("id: agent-vitals", patch)
+        self.assertIn("name: dsh-agent-vitals", patch)
 
     def test_glue_plugin_registers_a_provider_and_ships_no_scanner(self):
         source = (DSH / "index.js").read_text(encoding="utf-8")
@@ -70,7 +70,7 @@ class DshBundleTests(unittest.TestCase):
         self.assertIn("export function apply", source)
         # 三条硬约束的第二条：不得有扫描器副本。这里是静态否决 —— 任何
         # 把扫描器代码粘进来的写法都会命中这些标记。
-        for marker in ("scan_skill_dir", "skill_vitals.cli", "def collect", "argparse"):
+        for marker in ("scan_skill_dir", "agent_vitals.cli", "def collect", "argparse"):
             self.assertNotIn(marker, source)
 
     def test_dsh_skill_md_keeps_root_name_and_description(self):
@@ -91,7 +91,7 @@ class DshBundleTests(unittest.TestCase):
 
     def test_package_version_tracks_the_python_cli(self):
         manifest = json.loads((DSH / "package.json").read_text(encoding="utf-8"))
-        init = (ROOT / "scripts" / "skill_vitals" / "__init__.py").read_text(encoding="utf-8")
+        init = (ROOT / "scripts" / "agent_vitals" / "__init__.py").read_text(encoding="utf-8")
         match = re.search(r'^__version__ = "([^"]+)"', init, re.M)
         self.assertIsNotNone(match, "__init__.py 必须定义 __version__")
         self.assertEqual(manifest["version"], match.group(1))
@@ -131,7 +131,7 @@ class DshBundleTests(unittest.TestCase):
         # （name / inject / apply），无需真的拉起整个 DSH。
         probe = (
             "const m = await import(" + json.dumps((DSH / "index.js").as_uri()) + ");"
-            "if (m.name !== 'skill-vitals') throw new Error('bad name: ' + m.name);"
+            "if (m.name !== 'agent-vitals') throw new Error('bad name: ' + m.name);"
             "if (m.inject[0] !== 'skills') throw new Error('bad inject');"
             "if (typeof m.apply !== 'function') throw new Error('apply not a function');"
             "console.log('DSH_BUNDLE_OK');"

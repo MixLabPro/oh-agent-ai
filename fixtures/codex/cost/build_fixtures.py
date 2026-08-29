@@ -18,7 +18,7 @@ characterization 测试使用。
 - `rollout-unpriced.jsonl`（codex-auto-review）：无价目模型 → priced:false、
   token 进 `unpriced_tokens`（诚实上报，不按 0 价冒充）。
 
-夹具跑出来的期望值（手算，与定价表 `scripts/skill_vitals/codex_pricing.json`
+夹具跑出来的期望值（手算，与定价表 `scripts/agent_vitals/codex_pricing.json`
 一致；下面 `EXPECTED` 断言的就是这些）：
 
 - sol：08-01 桶（uncached 50000/cached 40000/write 10000/output 10000）= $0.6325；
@@ -46,8 +46,8 @@ REPO = HERE.parents[2]  # 本仓库根
 
 # 让本脚本能 import 仓库里的实现（自校验要用真实 fold/计价）。
 sys.path.insert(0, str(REPO / "scripts"))
-from skill_vitals import codex_usage, codex_cost  # noqa: E402
-from skill_vitals.codex_cost import load_codex_pricing  # noqa: E402
+from agent_vitals import codex_usage, codex_cost  # noqa: E402
+from agent_vitals.codex_cost import load_codex_pricing  # noqa: E402
 
 
 def tc(ts, model, service_tier=None):
@@ -204,7 +204,7 @@ def _expect_cost(bucket, expected):
             sol_entry = e
             break
     assert sol_entry is not None, "定价表里必须有 gpt-5.6-sol standard 行"
-    from skill_vitals.codex_cost import _price_bucket  # 内部计价函数，逐字节对齐 Rust
+    from agent_vitals.codex_cost import _price_bucket  # 内部计价函数，逐字节对齐 Rust
     got = _price_bucket(bucket, sol_entry)
     assert abs(got - expected) < 1e-9, "sol 桶计价 %.9f != 期望 %.9f" % (got, expected)
 

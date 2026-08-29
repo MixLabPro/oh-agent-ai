@@ -134,7 +134,7 @@ the repository or ClawHub package is copied without installation.
 scripts/
   scan.py                         # compatibility wrapper only
   probe_logs.py                   # independent log probe; unchanged initially
-  skill_vitals/
+  agent_vitals/
     __init__.py                   # version and stable exports
     cli.py                        # argparse, orchestration, exit codes
     model.py                      # Capability, SourceMeta, Inventory, option types
@@ -182,7 +182,7 @@ Responsibilities:
 
 - ensure the adjacent `scripts/` directory is importable;
 - re-export a temporary compatibility surface used by characterization tests;
-- invoke `skill_vitals.cli.main()` under `if __name__ == "__main__"`.
+- invoke `agent_vitals.cli.main()` under `if __name__ == "__main__"`.
 
 It must not parse arguments, scan files, build reports, or render output.
 Temporary re-exports are removed only after tests import the owning modules.
@@ -361,7 +361,7 @@ after all external and test imports have migrated.
 
 - move argparse and dispatch to `cli.py`;
 - reduce `scan.py` to the wrapper;
-- update ClawHub packaging to copy `scripts/skill_vitals/**`;
+- update ClawHub packaging to copy `scripts/agent_vitals/**`;
 - add a packaged-artifact smoke test, not merely a source-tree test;
 - update SKILL.md commands only if the entry path changes (the preferred design
   keeps `python scripts/scan.py` unchanged).
@@ -371,7 +371,7 @@ after all external and test imports have migrated.
 Each phase must pass:
 
 ```text
-python -m py_compile scripts/scan.py scripts/skill_vitals/*.py
+python -m py_compile scripts/scan.py scripts/agent_vitals/*.py
 python -m unittest discover tests -v
 python tests/golden_runner.py --diff
 ```
@@ -397,7 +397,7 @@ After modularization it must recursively copy the package:
 
 ```bash
 cp scripts/scan.py scripts/probe_logs.py "$package_dir/scripts/"
-cp -R scripts/skill_vitals "$package_dir/scripts/skill_vitals"
+cp -R scripts/agent_vitals "$package_dir/scripts/agent_vitals"
 ```
 
 The exact-file allowlist must be replaced with either:
@@ -406,7 +406,7 @@ The exact-file allowlist must be replaced with either:
 - an allowlist that includes every package module and rejects `__pycache__`,
   tests, temporary files, and bytecode.
 
-CI must execute the CLI from `dist/skill-vitals`, with the repository source
+CI must execute the CLI from `dist/agent-vitals`, with the repository source
 directory absent from `PYTHONPATH`, so missing packaged modules fail before
 publication.
 

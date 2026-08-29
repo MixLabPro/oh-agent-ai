@@ -3,7 +3,7 @@
 CLAUDE.md §六测试层: budget 是新模块,这里用 invariant + characterization
 混合。每条「预算必须 X」的不变量一个 test method。
 
-测试通过临时 `$SKILL_VITALS_HOME` 隔离 —— 不让真机 `~/.skill-vitals/config.toml`
+测试通过临时 `$AGENT_VITALS_HOME` 隔离 —— 不让真机 `~/.agent-vitals/config.toml`
 被测试读写污染。state.py 的 fixture 与 _IsolatedHome 同款。
 """
 
@@ -18,16 +18,16 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from skill_vitals import budget
-from skill_vitals import cli as cli_module
-from skill_vitals import state
-from skill_vitals import cost as cost_module
+from agent_vitals import budget
+from agent_vitals import cli as cli_module
+from agent_vitals import state
+from agent_vitals import cost as cost_module
 
 
 class _IsolatedHome:
     def __init__(self):
         self.tmpdir = tempfile.mkdtemp(prefix="sv-budget-test-")
-        self.env = {"SKILL_VITALS_HOME": self.tmpdir}
+        self.env = {"AGENT_VITALS_HOME": self.tmpdir}
 
     def __enter__(self):
         self._patcher = mock.patch.dict(os.environ, self.env, clear=False)

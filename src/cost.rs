@@ -5,10 +5,10 @@
 //! `{by_model, sequence}` × 价格表（`pricing.json`）变成一组字符串，off-peak
 //! 份额（全量 − peak）按空闲价、peak 份额按高峰价，加总成**一个真实发生的
 //! 费用**——不再是旧版本那种「给空闲价和高峰价两个数，猜不出实际该按哪个
-//! 算」的区间估算。与 `scripts/skill_vitals/cost.py` 逐字节一致，由
+//! 算」的区间估算。与 `scripts/agent_vitals/cost.py` 逐字节一致，由
 //! `tests/test_cli_matrix.py` 的 `both()` 差分看守。
 //!
-//! 价格表的单一真相源是 `scripts/skill_vitals/pricing.json`（这里 `include_str!`
+//! 价格表的单一真相源是 `scripts/agent_vitals/pricing.json`（这里 `include_str!`
 //! 内嵌、Python 侧读包内文件；`dsh-client/client.js` 因浏览器限制内嵌自己的
 //! PRICING，lockstep 测试对齐）。缓存写入报价表没有行 → 按 0 计（不臆造价格）。
 //! 高峰时段为北京时间**周一至周五** 9–12、14–18 点，周末全天空闲；空闲价
@@ -16,7 +16,7 @@
 
 use serde_json::Value;
 
-const PRICING_JSON: &str = include_str!("../scripts/skill_vitals/pricing.json");
+const PRICING_JSON: &str = include_str!("../scripts/agent_vitals/pricing.json");
 
 pub fn load_pricing() -> Value {
     serde_json::from_str(PRICING_JSON).unwrap_or_else(|_| Value::Object(Default::default()))
@@ -94,7 +94,7 @@ fn resolve_card(model: &str, provider: Option<&str>, pricing: &Value) -> Option<
     // 归属不明：哨兵不是真实供应商名，查不到它的表，会一路掉到回落分支。
     // 单独认出来是为了让展示层说对话——也顺带保证这个内部哨兵**永远不会**
     // 被当成供应商名渲染给用户看。
-    let ambiguous = provider == Some(skill_vitals_core::usage::AMBIGUOUS_PROVIDER);
+    let ambiguous = provider == Some(agent_vitals_core::usage::AMBIGUOUS_PROVIDER);
     if let Some(p) = provider.filter(|_| !ambiguous) {
         if let Some(cards) = models_of(pricing, p) {
             if let Some(key) = norm_model_in(model, cards) {

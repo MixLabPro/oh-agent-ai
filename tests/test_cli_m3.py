@@ -19,9 +19,9 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "scan.py"
 
 sys.path.insert(0, str(ROOT / "scripts"))
-from skill_vitals import budget as budget_module  # noqa: E402
-from skill_vitals import cli as cli_module  # noqa: E402
-from skill_vitals import cost as cost_module  # noqa: E402
+from agent_vitals import budget as budget_module  # noqa: E402
+from agent_vitals import cli as cli_module  # noqa: E402
+from agent_vitals import cost as cost_module  # noqa: E402
 
 
 def _run(args, env=None):
@@ -36,19 +36,19 @@ def _run(args, env=None):
 
 
 class _TmpHome:
-    """每次测试一个临时 SKILL_VITALS_HOME + HOME —— 不污染真机 ~/.skill-vitals，
+    """每次测试一个临时 AGENT_VITALS_HOME + HOME —— 不污染真机 ~/.agent-vitals，
     也不让 codex 会话扫描碰到真机 ~/.codex。
 
-    必须两个都隔离：`state_dir()` 走 `$SKILL_VITALS_HOME`，而
+    必须两个都隔离：`state_dir()` 走 `$AGENT_VITALS_HOME`，而
     `codex_session.codex_rollout_files()` 走 `Path.home()`——之前只设
-    SKILL_VITALS_HOME，日历/oneline 每次刷新都去折叠真机全部 rollout
+    AGENT_VITALS_HOME，日历/oneline 每次刷新都去折叠真机全部 rollout
     （≈600MB JSONL ≈38s），测试直接挂死（真实事故，2026-08-29）。设 HOME
     后折叠落在空目录，秒回；codex 适配器注释明说「测试用 isolated_home_env
     注入」。"""
 
     def __enter__(self):
         self.tmp = tempfile.mkdtemp(prefix="sv-cli-m3-")
-        self.env = {"SKILL_VITALS_HOME": self.tmp,
+        self.env = {"AGENT_VITALS_HOME": self.tmp,
                     "HOME": self.tmp,
                     "USERPROFILE": self.tmp}
         return self
@@ -405,7 +405,7 @@ class TestCalendarCli(unittest.TestCase):
                 html = out.read_text(encoding="utf-8")
 
                 m = re.search(
-                    r'<script id="skill-vitals-data-today"[^>]*>(.*?)</script>',
+                    r'<script id="agent-vitals-data-today"[^>]*>(.*?)</script>',
                     html, re.DOTALL)
                 self.assertIsNotNone(m, "today 内联数据块必须存在")
                 inlined = json.loads(m.group(1))
@@ -438,7 +438,7 @@ class TestCalendarCli(unittest.TestCase):
            08-26 的完整 24 小时热力图（真正的"今天"不可能有 24 小时数据，
            一天还没过完，这个矛盾本身就是发现这个 bug 的线索）。
         2. 第一版修法是「陈旧就整个不内联」——但 JS 找不到
-           `skill-vitals-data-today` 这个 script 标签时,会当成"不确定
+           `agent-vitals-data-today` 这个 script 标签时,会当成"不确定
            有没有文件"走 fetch() 兜底,在 file:// 打开时必然撞 CORS,
            弹出一句让人费解的"读取本地文件被 CORS 阻止"（真实复现：之前
            today.json 几乎总有数据可内联，这条 fetch 分支很少被走到，这
@@ -461,7 +461,7 @@ class TestCalendarCli(unittest.TestCase):
                 self.assertEqual(r.returncode, 0, r.stderr)
                 html = out.read_text(encoding="utf-8")
                 m = re.search(
-                    r'<script id="skill-vitals-data-today"[^>]*>(.*?)</script>',
+                    r'<script id="agent-vitals-data-today"[^>]*>(.*?)</script>',
                     html, re.DOTALL)
                 self.assertIsNotNone(
                     m, "必须内联一个哨兵——不能让 JS 落入'找不到 script 标签'"
@@ -477,7 +477,7 @@ class TestCalendarCli(unittest.TestCase):
 
     def test_calendar_embeds_codex_three_view_blob(self):
         """统一看板（docs/UNIFIED_COST_VIEW.md 的 1 号宿主契约）：calendar
-        生成的文件必须内联 `skill-vitals-data-codex` 规范单块 =
+        生成的文件必须内联 `agent-vitals-data-codex` 规范单块 =
         {host, currency, today, default, views:{today,month,all}}。每个 view
         即一份 codex 成本报告（host/currency/month/total_cost_usd/per_model/
         days/unaccounted_usage/plan；today 视图额外带 hours）。用**当前月**
@@ -519,7 +519,7 @@ class TestCalendarCli(unittest.TestCase):
                 self.assertEqual(r.returncode, 0, r.stderr)
                 html = out.read_text(encoding="utf-8")
                 m = re.search(
-                    r'<script id="skill-vitals-data-codex"[^>]*>(.*?)</script>',
+                    r'<script id="agent-vitals-data-codex"[^>]*>(.*?)</script>',
                     html, re.DOTALL)
                 self.assertIsNotNone(m, "统一看板必须内联 codex 1 号宿主数据块")
                 blob = json.loads(m.group(1))
@@ -645,7 +645,7 @@ class TestUsageHourBucketsReconcile(unittest.TestCase):
 
 
 class TestCodexFoldCache(unittest.TestCase):
-    """codex 整折叠 memo（`$SKILL_VITALS_HOME/cache/codex-fold.json`）。
+    """codex 整折叠 memo（`$AGENT_VITALS_HOME/cache/codex-fold.json`）。
 
     背景：codex 折叠的瓶颈是**解析**不是折叠（真机 51 份 rollout ≈600MB
     JSONL ≈38s）——日历/oneline 每次刷新都重扫会砸穿 xbar tick（2026-08-29
@@ -656,7 +656,7 @@ class TestCodexFoldCache(unittest.TestCase):
     def test_cache_hit_skips_rescan_and_invalidation_rescans(self):
         with _TmpHome() as h:
             import shutil
-            from skill_vitals.adapters import codex_session
+            from agent_vitals.adapters import codex_session
             with mock.patch.dict(os.environ, h.env, clear=False):
                 live = Path(h.tmp) / ".codex" / "sessions" / "2026" / "08"
                 live.mkdir(parents=True)
@@ -702,7 +702,7 @@ class TestCodexFoldCache(unittest.TestCase):
                 self.assertEqual(fold1, fold2, "坏缓存应降级为重扫，结果一致")
 
     def test_cache_outside_state_dir_does_not_pollute_state(self):
-        """缓存进 `$SKILL_VITALS_HOME/cache/`，不进 `state/`——state 目录的
+        """缓存进 `$AGENT_VITALS_HOME/cache/`，不进 `state/`——state 目录的
         读者（list_state_files / list_months / doctor）不该被缓存文件污染。"""
         with _TmpHome() as h:
             import shutil

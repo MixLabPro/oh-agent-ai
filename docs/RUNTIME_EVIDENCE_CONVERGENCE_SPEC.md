@@ -64,15 +64,15 @@ A 独立，但 A 先做能消掉 B/C 改动里会重复撞上的时区重复。
 把「北京时间轴」收成一模块，DSH 与 Codex 折叠都调它，删掉两处重复。
 
 ### 现状（已核实）
-- `crates/skill-vitals-core/src/usage.rs:72` `BEIJING_OFFSET_SECS: i64 = 8*3600` +
+- `crates/agent-vitals-core/src/usage.rs:72` `BEIJING_OFFSET_SECS: i64 = 8*3600` +
   `beijing_hour(time_ms)` + `hour_buckets`（输入 epoch 毫秒）
-- `crates/skill-vitals-core/src/codex_usage.rs:151` `BEIJING_OFFSET_HOURS: i64 = 8` +
+- `crates/agent-vitals-core/src/codex_usage.rs:151` `BEIJING_OFFSET_HOURS: i64 = 8` +
   `codex_hour_of(event)`（输入 ISO 串）
 - `days_from_civil`/`civil_date_from_days`（Hinnant）已在 `usage.rs`，且
   `codex_usage.rs` 已 `super::usage::` 引用——时间轴收敛已走了一半。
 
 ### 改动
-- 新 `crates/skill-vitals-core/src/timeaxis.rs`（`pub mod timeaxis;` 挂进 `lib.rs`）：
+- 新 `crates/agent-vitals-core/src/timeaxis.rs`（`pub mod timeaxis;` 挂进 `lib.rs`）：
   - `pub const BEIJING_OFFSET_HOURS: i64 = 8;`（单一常量，删掉上面两个）
   - `pub fn beijing_hour_key_from_epoch_ms(ms: i64) -> Option<(String /*date*/, i32 /*hour*/)>`
   - `pub fn beijing_hour_key_from_iso(ts: &str) -> Option<String /*YYYY-MM-DDTHH*/>`
@@ -82,11 +82,11 @@ A 独立，但 A 先做能消掉 B/C 改动里会重复撞上的时区重复。
     `usage.rs` 既有注释的「无第三方供应链」理由）。
 - `usage.rs` / `codex_usage.rs` 改为调 `timeaxis`，各自的 `BEIJING_OFFSET_*` 与
   `beijing_hour`/`codex_hour_of` 的日期算术删掉。
-- Python 镜像 `scripts/skill_vitals/timeaxis.py`，`usage.py`/`codex_usage.py` 改调。
+- Python 镜像 `scripts/agent_vitals/timeaxis.py`，`usage.py`/`codex_usage.py` 改调。
 
 ### 验收
 - `cargo test` 全绿；`cargo clippy -D warnings` 干净。
-- Python 全量 + `SKILL_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix`
+- Python 全量 + `AGENT_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix`
   逐字节一致（`usage` 与 `codex-cost` 两条都跑）。
 - **行为零变化**：`behavior --json` / `codex-cost --json` 与改动前逐字节 diff
   为 IDENTICAL。goldens 15/15。
@@ -147,7 +147,7 @@ additive 的 coverage 注解，没动 detector）：
 
 ### 验收（比 P3 更硬，因为动了 detector 内部）
 - **byte-identical `behavior --json`**，三种证明（P2 同款）：
-  `cargo test`、`SKILL_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix`
+  `cargo test`、`AGENT_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix`
   （Python↔Rust 差分）、手动 `fixtures/dsh/behavior.jsonl` before/after diff。
 - **§10.4 三态落地为可观测**：`RuleOutcome` 从「additive 注解」变成「detector
   真按 `requires ⊆ coverage` 决定跑不跑」。Claude Code/Codex 语料喂进去，
@@ -171,7 +171,7 @@ wasm 从「吃原始 DSH 事件」升到「吃 `CanonicalSession`」；codex 能
 规则引擎 + 同一个审计 tab 骨架。
 
 ### 改动
-1. **wasm 新面**（`crates/skill-vitals-wasm/src/lib.rs`）：
+1. **wasm 新面**（`crates/agent-vitals-wasm/src/lib.rs`）：
    - `audit_session(canonical_json) -> String`：输入 `CanonicalSession`（不是事件流），
      跑 §10.4 的三态裁决。**旧 `audit_events(events, ws)` 保留为兼容别名**，
      内部改成「`dsh_evidence::build_dsh_evidence` → `audit_session`」，让

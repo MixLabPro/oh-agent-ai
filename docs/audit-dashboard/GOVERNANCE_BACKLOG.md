@@ -1,4 +1,4 @@
-# Agent 治理研究 → skill-vitals 治理 Backlog
+# Agent 治理研究 → agent-vitals 治理 Backlog
 
 > 来源：一份关于 Agent 成本失控/可靠性/治理缺失的行业研究（步骤超时、成本断路器、
 > per-task 预算、反循环恢复、SubAgent 成本乘数等），对照当前 `dsh-client` 审计 tab
@@ -37,7 +37,7 @@ V3（预算管理）/V4（Guardrails），且明确要求"控制按钮存在的�
 - `costReport` 投影（`dsh-client/src/host/index.ts:468`）：逐模型定价
   （`per_model[*].total/peak/cache_read_cost`）、峰值/非峰值拆分、缓存命中实付、
   逐请求累计曲线（`series`，单调不降）；CLI 侧 `src/cost.rs`/
-  `scripts/skill_vitals/cost.py` 同款计价逻辑（四方 lockstep 的一环）。
+  `scripts/agent_vitals/cost.py` 同款计价逻辑（四方 lockstep 的一环）。
 - `tokenByModel`：逐模型 token 分桶 + 模型切换序列。
 - Subagent 成本：`subagentUsage`（`dsh-client/src/host/index.ts:260`）把子会话
   token/费用汇总进主会话费用卡副标题，**明确标注"合计是下限"**——子会话日志读不到
@@ -48,10 +48,10 @@ V3（预算管理）/V4（Guardrails），且明确要求"控制按钮存在的�
 
 ### 1.2 可靠性差 & 失控循环 → 已有检测，没有恢复动作
 
-`crates/skill-vitals-core/src/trajectory.rs` 的四个轨迹级检测器，和研究里"反循环
+`crates/agent-vitals-core/src/trajectory.rs` 的四个轨迹级检测器，和研究里"反循环
 恢复"描述的**检测标准**几乎逐条对应：
 
-| 研究里的描述 | skill-vitals 现有规则 | 阈值（`trajectory.rs` 常量） |
+| 研究里的描述 | agent-vitals 现有规则 | 阈值（`trajectory.rs` 常量） |
 |---|---|---|
 | 重复动作检测（同一工具连续调用超过 N 次） | SV611 重复工具调用 | 连续相同 `(name, arguments)` 签名 ≥3 次 |
 | 无进展窗口（连续多步没有状态变化） | SV612 死循环 | 连续 2 个 turn 动作序列相同 |
@@ -164,8 +164,8 @@ KPI 卡**）。全程未碰 core/wasm/host——纯 `dsh-client` 前端叠加层
   区间"曾经的两个候选方案里选了"不追踪循环是否还在延续"这支，更小的改动、
   不改变 SV612 的既有报告时机）；SV613 = run 里最后一个事件的 seq（`flush_
   error_run`/`flush_fail_run` 新增 `last_seq` 参数）。SV614 恒 `null`——计数
-  类判定，没有区间概念。`crates/skill-vitals-wasm`/`src/behavior.rs`（CLI）/
-  `scripts/skill_vitals/behavior.py` 全是纯透传，无需改动；wasm 重新构建
+  类判定，没有区间概念。`crates/agent-vitals-wasm`/`src/behavior.rs`（CLI）/
+  `scripts/agent_vitals/behavior.py` 全是纯透传，无需改动；wasm 重新构建
   （`wasm-pack build --target web`）并只重新拷贝 `.wasm` 二进制（`.js`
   字节相同，`.d.ts` 是手写文件，不能被生成产物覆盖）。`dsh-client/src/host/
   index.ts` 的 `findingSchema`（zod）补了 `run_end_seq: z.number().nullable()`
@@ -222,7 +222,7 @@ KPI 卡**）。全程未碰 core/wasm/host——纯 `dsh-client` 前端叠加层
 ## 3. 结构性做不到的（不是不想做，是这层插件没有这个权限）
 
 研究里呼吁最强烈的三样——**成本断路器（调用前拒绝）、per-task 硬超时/步数熔断、
-反循环恢复的"自动打断 + 清理"动作**——skill-vitals 的 `dsh-client` 插件结构上做
+反循环恢复的"自动打断 + 清理"动作**——agent-vitals 的 `dsh-client` 插件结构上做
 不到，原因见 §0：`inject: ['sessionProjections']` 是纯读投影接口，没有"执行前
 拦截"钩子；这也是 PRD §3.2 的显式非目标，不是实现疏漏。
 
@@ -231,8 +231,8 @@ KPI 卡**）。全程未碰 core/wasm/host——纯 `dsh-client` 前端叠加层
 Anthropic Claude 的子 Agent 隔离机制，或 Codex Harness 强调的"应用层控制审批"
 模式（应用/插件决定拦不拦，Harness 负责执行循环）。
 
-在 DSH 开放这类钩子之前，skill-vitals 能做的最多是：把 §1 已有的判定逻辑（`SV601
-–614` 复用 `crates/skill-vitals-core/src/behavior.rs`/`trajectory.rs` 的纯函数）
+在 DSH 开放这类钩子之前，agent-vitals 能做的最多是：把 §1 已有的判定逻辑（`SV601
+–614` 复用 `crates/agent-vitals-core/src/behavior.rs`/`trajectory.rs` 的纯函数）
 准备好，等钩子开放后直接喂给它做"该不该拦截"的判断——**但执行拦截本身不可能在
 一个只读插件里实现**。如果治理目标包含"真正挡住下一次调用"，这条路线需要先跟
 DSH 侧确认它是否/何时会开放 pre-execution hook；在那之前，G1–G4 是这个仓库能

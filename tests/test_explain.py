@@ -18,7 +18,7 @@
 
 跑法：
     python3 -m unittest tests.test_explain -v
-    需要 SKILL_VITALS_BIN 才做双实现比对，否则只跑行为断言。
+    需要 AGENT_VITALS_BIN 才做双实现比对，否则只跑行为断言。
 """
 
 import json
@@ -36,7 +36,7 @@ from tests.env_helpers import isolated_home_env
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "scripts" / "scan.py"
 PY_CMD = [sys.executable, str(SCAN)]
-_BIN = os.environ.get("SKILL_VITALS_BIN")
+_BIN = os.environ.get("AGENT_VITALS_BIN")
 RS_CMD = [str(Path(_BIN).resolve())] if _BIN else None
 SCAN_CMD = RS_CMD or PY_CMD
 
@@ -364,7 +364,7 @@ class TestTerminalOutputHasNoMarkdown(ExplainCase):
         self.assertIn("This tool never deletes anythingautomatically", flat)
 
 
-@unittest.skipUnless(RS_CMD, "未设 SKILL_VITALS_BIN，跳过双实现比对")
+@unittest.skipUnless(RS_CMD, "未设 AGENT_VITALS_BIN，跳过双实现比对")
 class TestBothImplementationsRenderIdentically(ExplainCase):
     def test_identical(self):
         for name, extra in (("healthy", ()), ("dup", ()), ("gh", ()),

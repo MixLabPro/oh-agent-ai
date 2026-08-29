@@ -479,7 +479,7 @@ export function AuditView({ useProjection }: ConvViewProps) {
         missingFields,
         cwd: sessionCwd?.cwd ?? null,
       })
-      downloadJson(payload, 'skill-vitals-audit-' + (payload.sessionId || 'session') + '.json', setExportStatus)
+      downloadJson(payload, 'agent-vitals-audit-' + (payload.sessionId || 'session') + '.json', setExportStatus)
     }
 
     const toolbar = h('div', { key: 'toolbar', className: 'sv-toolbar' },

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility entry point for the modular Skill Vitals Python CLI."""
+"""Compatibility entry point for the modular Agent Vitals Python CLI."""
 import sys
 from pathlib import Path
 
@@ -7,8 +7,8 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-import skill_vitals.cli as _cli
-import skill_vitals.compat as _compat
+import agent_vitals.cli as _cli
+import agent_vitals.compat as _compat
 for _name in _compat.COMPAT_EXPORTS:
     globals()[_name] = getattr(_compat, _name)
 

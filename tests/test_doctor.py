@@ -17,7 +17,7 @@
 
 跑法：
     python3 -m unittest tests.test_doctor -v
-    需要 SKILL_VITALS_BIN 才做双实现比对，否则只跑行为断言。
+    需要 AGENT_VITALS_BIN 才做双实现比对，否则只跑行为断言。
 """
 
 import json
@@ -34,7 +34,7 @@ from tests.env_helpers import isolated_home_env
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "scripts" / "scan.py"
 PY_CMD = [sys.executable, str(SCAN)]
-_BIN = os.environ.get("SKILL_VITALS_BIN")
+_BIN = os.environ.get("AGENT_VITALS_BIN")
 RS_CMD = [str(Path(_BIN).resolve())] if _BIN else None
 SCAN_CMD = RS_CMD or PY_CMD
 
@@ -104,7 +104,7 @@ class DoctorCase(unittest.TestCase):
     def run_doctor(self, *extra, cmd=None, host="claude-code", snapdir=None):
         env = isolated_home_env(self.tmp)
         if snapdir:
-            env["SKILL_VITALS_SNAPSHOT_DIR"] = str(snapdir)
+            env["AGENT_VITALS_SNAPSHOT_DIR"] = str(snapdir)
         r = subprocess.run((cmd or SCAN_CMD) + ["doctor", "--host", host]
                            + list(extra),
                            cwd=str(self.tmp / "workdir"), env=env,
@@ -134,7 +134,7 @@ class TestRunMarkerProvesTheScanHappened(DoctorCase):
 
     def test_marker_is_on_the_header_line(self):
         out = self.run_doctor("--no-snapshot")
-        self.assertTrue(out.startswith("Skill Vitals "), out[:80])
+        self.assertTrue(out.startswith("Agent Vitals "), out[:80])
         self.assertRegex(out.splitlines()[0], r"· run [0-9a-f]{8}$")
 
     def test_same_state_gives_the_same_marker(self):
@@ -440,10 +440,10 @@ class TestWrapKeepsTextReadable(unittest.TestCase):
             self.assertLessEqual(scan._cols(line), scan.DOCTOR_WIDTH + 2)
 
     def test_english_words_are_not_split(self):
-        text = "run skill-vitals overlap " * 12
+        text = "run agent-vitals overlap " * 12
         joined = " ".join(l.strip() for l in scan._wrap(text, "  → "))
         self.assertNotIn("skill-vital s", joined)
-        self.assertIn("skill-vitals", joined)
+        self.assertIn("agent-vitals", joined)
 
     def test_closing_bracket_never_starts_a_line(self):
         # 「禁则处理」：一行以 」或。开头，读起来像上一行被截断了
@@ -453,7 +453,7 @@ class TestWrapKeepsTextReadable(unittest.TestCase):
 
 
 class TestBareInvocationIsDoctor(DoctorCase):
-    """`skill-vitals` 无参数等价于 `doctor`（PRODUCT §5 第一行、§183）。
+    """`agent-vitals` 无参数等价于 `doctor`（PRODUCT §5 第一行、§183）。
 
     第一次用的人想知道的是「我的 Agent 到底有没有问题」，不该先学 CLI。
 
@@ -473,7 +473,7 @@ class TestBareInvocationIsDoctor(DoctorCase):
 
     def test_no_args_renders_the_doctor_report(self):
         out = self._run("--host", "claude-code")
-        self.assertTrue(out.startswith("Skill Vitals "), out[:80])
+        self.assertTrue(out.startswith("Agent Vitals "), out[:80])
         self.assertIn("Startup context (tier1)", out)
         self.assertNotIn('"schema_version"', out)
 
@@ -490,7 +490,7 @@ class TestBareInvocationIsDoctor(DoctorCase):
         self.assertIn("schema_version", json.loads(out))
 
 
-@unittest.skipUnless(RS_CMD, "未设 SKILL_VITALS_BIN，跳过双实现比对")
+@unittest.skipUnless(RS_CMD, "未设 AGENT_VITALS_BIN，跳过双实现比对")
 class TestBothImplementationsRenderIdentically(DoctorCase):
     """呈现层也在差分覆盖内 —— 用户看到的是这份报告，不是 JSON。"""
 

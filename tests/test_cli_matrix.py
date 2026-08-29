@@ -21,8 +21,8 @@
 全绿了几十次都没碰到。
 
 跑法：
-    SKILL_VITALS_BIN=target/release/skill-vitals python3 -m unittest tests.test_cli_matrix
-    没设 SKILL_VITALS_BIN 时整个模块跳过（只有一个实现，无从比对）。
+    AGENT_VITALS_BIN=target/release/agent-vitals python3 -m unittest tests.test_cli_matrix
+    没设 AGENT_VITALS_BIN 时整个模块跳过（只有一个实现，无从比对）。
 """
 
 import json
@@ -40,11 +40,11 @@ ROOT = Path(__file__).resolve().parent.parent
 PY_CMD = [sys.executable, str(ROOT / "scripts" / "scan.py")]
 # 必须解析成绝对路径。golden_runner.py 早就踩过并修了这一条，本文件却漏了：
 # 下面每个用例都把子进程的 cwd 设成语料目录，相对路径在那里解析不到，于是
-# `SKILL_VITALS_BIN=target/release/skill-vitals`（正是本模块 docstring 里写的
+# `AGENT_VITALS_BIN=target/release/agent-vitals`（正是本模块 docstring 里写的
 # 跑法）会炸出 96 个 FileNotFoundError。CI 一直传绝对路径所以没受影响，但本地
 # 照文档跑的人会看到一屏红，且红的方向是错的——看着像 Rust 实现坏了，实际
 # 只是路径没解析。一个把人指向错误结论的差分门，比没有更费时间。
-_BIN = os.environ.get("SKILL_VITALS_BIN")
+_BIN = os.environ.get("AGENT_VITALS_BIN")
 if _BIN:
     _BIN = str(Path(_BIN).resolve())
 
@@ -57,7 +57,7 @@ HOSTS = ["all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"
 # 放弃「两份报告内容相同」这个最强的断言。代价是凡是进哈希的东西都必须对齐：
 # `diff_vs_baseline.baseline_file` 是绝对路径，所以对比 diff 时两个实现必须
 # 指向**同一个**基线文件，不能各用各的快照目录。
-_SNAP = re.compile(r"[/\\][^/\\ ]*\.skill-vitals[^ ]*|snap-(py|rs)[/\\]\S+\.json")
+_SNAP = re.compile(r"[/\\][^/\\ ]*\.agent-vitals[^ ]*|snap-(py|rs)[/\\]\S+\.json")
 
 
 def _mask(text, tmp):
@@ -149,7 +149,7 @@ def write_dsh_session_log(base: Path, name="session.jsonl"):
     return p
 
 
-@unittest.skipUnless(_BIN, "未设 SKILL_VITALS_BIN，跳过双实现比对")
+@unittest.skipUnless(_BIN, "未设 AGENT_VITALS_BIN，跳过双实现比对")
 class CliMatrix(unittest.TestCase):
     """每个用例把同一条命令喂给两个实现，比 stdout / stderr / 退出码。"""
 
@@ -172,12 +172,12 @@ class CliMatrix(unittest.TestCase):
         got = []
         for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
             env = isolated_home_env(self.tmp)
-            env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("snap-" + tag))
+            env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("snap-" + tag))
             # DSH 宿主扫描的会话日志证据走环境变量（golden_runner 同款注入）。
             # 设了这个的用例是 DSH 扫描差分；没设的保持原样。
             log = getattr(self, "dsh_session_log", None)
             if log:
-                env["SKILL_VITALS_DSH_SESSION_LOG"] = str(log)
+                env["AGENT_VITALS_DSH_SESSION_LOG"] = str(log)
             r = subprocess.run(cmd + list(argv), cwd=str(self.tmp / "workdir"),
                                env=env, capture_output=True, text=True)
             got.append((r.returncode, _mask(r.stdout, self.tmp),
@@ -226,7 +226,7 @@ class CliMatrix(unittest.TestCase):
         """
         base = self.tmp / ("baseline-%s.json" % host)
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.tmp / "seed")
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / "seed")
         subprocess.run(PY_CMD + ["--host", host, "--json", str(base),
                                  "--no-snapshot"],
                        cwd=str(self.tmp / "workdir"), env=env,
@@ -1298,14 +1298,14 @@ class CliMatrix(unittest.TestCase):
         self._codex_cost_roots()
         cal = self.tmp / "cal.html"
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.tmp / "snap-cal")
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / "snap-cal")
         r = subprocess.run(
             PY_CMD + ["calendar", "-o", str(cal)],
             cwd=str(self.tmp / "workdir"), env=env,
             capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         html = cal.read_text(encoding="utf-8")
-        m = re.search(r'<script id="skill-vitals-data-codex"[^>]*>(.*?)</script>',
+        m = re.search(r'<script id="agent-vitals-data-codex"[^>]*>(.*?)</script>',
                       html, re.DOTALL)
         self.assertIsNotNone(m, "calendar 必须内联 codex 数据块")
         blob = json.loads(m.group(1))
@@ -1369,7 +1369,7 @@ class CliMatrix(unittest.TestCase):
                 got = []
                 for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
                     env = isolated_home_env(self.tmp)
-                    env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("snap-" + tag))
+                    env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("snap-" + tag))
                     r = subprocess.run(cmd + ["diff", str(bad), "--host", "all"],
                                        cwd=str(self.tmp / "workdir"), env=env,
                                        capture_output=True, text=True)
@@ -1389,7 +1389,7 @@ class CliMatrix(unittest.TestCase):
                 codes = []
                 for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
                     env = isolated_home_env(self.tmp)
-                    env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("twice-" + tag))
+                    env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("twice-" + tag))
                     for _ in range(2):
                         r = subprocess.run(cmd + ["--host", h],
                                            cwd=str(self.tmp / "workdir"), env=env,

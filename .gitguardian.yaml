@@ -1,6 +1,6 @@
 version: 2
 
-# skill-vitals is a security scanner: its own source contains the *names* of the
+# agent-vitals is a security scanner: its own source contains the *names* of the
 # rules it looks for in other skills (e.g. the string "HARDCODED_SECRET" in
 # doctor.py's SECURITY_CODES table). GitGuardian's generic-password detector
 # matches those rule-code strings as if they were literal secrets — the same
@@ -10,5 +10,5 @@ version: 2
 # tables live, not the whole tree.
 secret:
   ignored-paths:
-    - "scripts/skill_vitals/doctor.py"
+    - "scripts/agent_vitals/doctor.py"
     - "src/doctor.rs"

@@ -137,9 +137,9 @@ let __slowThreshold = null
 Object.defineProperty(globalThis, 'localStorage', {
   value: {
     getItem: (k) => {
-      if (k === 'skill-vitals-audit:notes:v1') return JSON.stringify(__notes)
-      if (k === 'skill-vitals-audit:budget:v1') return __budget === null ? null : JSON.stringify(__budget)
-      if (k === 'skill-vitals-audit:slow-threshold-ms:v1') return __slowThreshold === null ? null : JSON.stringify(__slowThreshold)
+      if (k === 'agent-vitals-audit:notes:v1') return JSON.stringify(__notes)
+      if (k === 'agent-vitals-audit:budget:v1') return __budget === null ? null : JSON.stringify(__budget)
+      if (k === 'agent-vitals-audit:slow-threshold-ms:v1') return __slowThreshold === null ? null : JSON.stringify(__slowThreshold)
       return null
     },
     setItem: () => {},

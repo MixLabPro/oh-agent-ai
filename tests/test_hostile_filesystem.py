@@ -26,7 +26,7 @@ from tests.env_helpers import isolated_home_env
 
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "scripts" / "scan.py"
-_BIN = os.environ.get("SKILL_VITALS_BIN")
+_BIN = os.environ.get("AGENT_VITALS_BIN")
 SCAN_CMD = [_BIN] if _BIN else [sys.executable, str(SCAN)]
 
 # 敌意输入的用例必须有超时：**挂死比报错糟糕得多**。
@@ -58,7 +58,7 @@ class HostileCase(unittest.TestCase):
         out = self.tmp / "out.json"
         env = isolated_home_env(self.tmp)
         for k in ("CODEX_RUNTIME", "OPENCLAW_RUNTIME", "WORKBUDDY_BUILTINS"):
-            env["SKILL_VITALS_DISABLE_" + k] = "1"
+            env["AGENT_VITALS_DISABLE_" + k] = "1"
         started = time.time()
         try:
             r = subprocess.run(SCAN_CMD + ["--host", "claude-code", "--json", str(out)]
@@ -204,7 +204,7 @@ class TestWorkBuddyManifestIsUntrustedInput(HostileCase):
     def _scan_wb(self):
         out = self.tmp / "wb.json"
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_DISABLE_WORKBUDDY_BUILTINS"] = "0"
+        env["AGENT_VITALS_DISABLE_WORKBUDDY_BUILTINS"] = "0"
         r = subprocess.run(SCAN_CMD + ["--host", "workbuddy", "--json", str(out)],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True, timeout=TIMEOUT)

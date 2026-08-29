@@ -5,7 +5,7 @@ CLAUDE.md §六测试层把 fixture / golden / invariant / characterization
 混合：每条「state 文件必须 X」的不变量一个 test method，每条具体行为
 也一个 test method。
 
-测试通过临时 `$SKILL_VITALS_HOME` 隔离 —— 不能让真机 `~/.skill-vitals/
+测试通过临时 `$AGENT_VITALS_HOME` 隔离 —— 不能让真机 `~/.agent-vitals/
 state/` 被测试读写污染（与 `tests/golden_runner.py` 同款约定）。
 """
 
@@ -17,16 +17,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-# 把 scripts/ 加到 sys.path 以便 import skill_vitals —— 与仓库根 `python3
+# 把 scripts/ 加到 sys.path 以便 import agent_vitals —— 与仓库根 `python3
 # -m unittest discover` 行为一致（项目里没有 setup.py / pyproject.toml）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from skill_vitals import state
+from agent_vitals import state
 
 
 class _IsolatedHome:
-    """临时 `$SKILL_VITALS_HOME` 隔离 fixture —— 让 state.py 的
-    `state_dir()` 落到 tmp 目录，**不污染**真机 `~/.skill-vitals/state/`。
+    """临时 `$AGENT_VITALS_HOME` 隔离 fixture —— 让 state.py 的
+    `state_dir()` 落到 tmp 目录，**不污染**真机 `~/.agent-vitals/state/`。
 
     用 `mock.patch.dict(os.environ, …)` 而非真改 HOME / 真 mkdir，因为
     state.py 自己也会 mkdir，mock 阻止它创建真机目录。
@@ -34,7 +34,7 @@ class _IsolatedHome:
 
     def __init__(self):
         self.tmpdir = tempfile.mkdtemp(prefix="sv-state-test-")
-        self.env = {"SKILL_VITALS_HOME": self.tmpdir}
+        self.env = {"AGENT_VITALS_HOME": self.tmpdir}
 
     def __enter__(self):
         self._patcher = mock.patch.dict(os.environ, self.env, clear=False)
@@ -49,7 +49,7 @@ class _IsolatedHome:
 
 
 class TestStateDir(unittest.TestCase):
-    def test_state_dir_under_skill_vitals_home(self):
+    def test_state_dir_under_agent_vitals_home(self):
         with _IsolatedHome() as h:
             p = state.state_dir()
             self.assertEqual(p, Path(h.tmpdir) / "state")

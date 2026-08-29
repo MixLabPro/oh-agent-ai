@@ -85,7 +85,7 @@ pub fn human_last_used(days: Option<f64>) -> String {
 /// DSH 的 invoked/selected 只是名字列表、没有时间戳，所以会出现「usage_count
 /// 非零但 last_used_days_ago 为 None」——此时写「never」就是自相矛盾（明明
 /// 用过却说从没被用过），写 unknown 才是诚实降级。Python 平行实现见
-/// `scripts/skill_vitals/lifecycle.py::last_used_text`。
+/// `scripts/agent_vitals/lifecycle.py::last_used_text`。
 pub fn last_used_text(uses: i64, last: Option<f64>) -> String {
     if uses == 0 {
         return human_last_used(None);

@@ -17,7 +17,7 @@
 
 跑法：
     python3 -m unittest tests.test_host_stubs -v
-    SKILL_VITALS_BIN=target/release/skill-vitals python3 -m unittest tests.test_host_stubs
+    AGENT_VITALS_BIN=target/release/agent-vitals python3 -m unittest tests.test_host_stubs
 """
 
 import json
@@ -33,7 +33,7 @@ from tests.env_helpers import isolated_home_env
 
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "scripts" / "scan.py"
-_BIN = os.environ.get("SKILL_VITALS_BIN")
+_BIN = os.environ.get("AGENT_VITALS_BIN")
 SCAN_CMD = [_BIN] if _BIN else [sys.executable, str(SCAN)]
 
 
@@ -169,13 +169,13 @@ class StubHostTest(unittest.TestCase):
         env["PATH"] = (str(self.bin) if os.name == "nt" else
                        "%s%s%s" % (self.bin, os.pathsep, env.get("PATH", "")))
         # 只留被测的那个探测器开着，其余关掉，避免互相干扰
-        env.setdefault("SKILL_VITALS_DISABLE_CODEX_RUNTIME", "1")
-        env.setdefault("SKILL_VITALS_DISABLE_OPENCLAW_RUNTIME", "1")
-        env.setdefault("SKILL_VITALS_DISABLE_WORKBUDDY_BUILTINS", "1")
+        env.setdefault("AGENT_VITALS_DISABLE_CODEX_RUNTIME", "1")
+        env.setdefault("AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME", "1")
+        env.setdefault("AGENT_VITALS_DISABLE_WORKBUDDY_BUILTINS", "1")
         env.update(env_extra or {})
         codex_stub = self.bin / "codex.py"
         if os.name == "nt" and codex_stub.is_file():
-            env["SKILL_VITALS_CODEX_EXECUTABLE"] = str(codex_stub)
+            env["AGENT_VITALS_CODEX_EXECUTABLE"] = str(codex_stub)
         r = subprocess.run(SCAN_CMD + ["--json", str(out)] + list(extra),
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -195,7 +195,7 @@ class TestCodexRuntimeSucceeds(StubHostTest):
         write_skill(self.skills, "disk-only")
         write_stub(self.bin / "codex", CODEX_STUB)
         self.data = self.scan("--host", "codex", env_extra={
-            "SKILL_VITALS_DISABLE_CODEX_RUNTIME": "0",
+            "AGENT_VITALS_DISABLE_CODEX_RUNTIME": "0",
             "STUB_SKILL_DIR": str(self.skills),
             "STUB_CWD": str(self.tmp / "workdir"),
         })
@@ -250,7 +250,7 @@ class TestOpenClawRuntimeSucceeds(StubHostTest):
             write_skill(inst / "skills", n)
         write_stub(self.bin / "openclaw", OPENCLAW_STUB)
         self.data = self.scan("--host", "openclaw", env_extra={
-            "SKILL_VITALS_DISABLE_OPENCLAW_RUNTIME": "0",
+            "AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME": "0",
         })
 
     def test_runtime_reports_available(self):
@@ -319,7 +319,7 @@ class TestRuntimeUnavailableIsNotFabricated(StubHostTest):
         write_skill(inst / "skills", "unverified-one")
         # 不放假宿主：PATH 上没有 openclaw
         data = self.scan("--host", "openclaw", env_extra={
-            "SKILL_VITALS_DISABLE_OPENCLAW_RUNTIME": "0",
+            "AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME": "0",
         })
         summary = next(iter(data["openclaw_instances"].values()))
         self.assertIsNone(summary["runtime_catalog_skills"],
@@ -339,7 +339,7 @@ class TestRuntimeUnavailableIsNotFabricated(StubHostTest):
         write_skill(self.tmp / ".codex" / "skills", "x")
         write_stub(self.bin / "codex", CODEX_INIT_ONLY_STUB)
         data = self.scan("--host", "codex", env_extra={
-            "SKILL_VITALS_DISABLE_CODEX_RUNTIME": "0",
+            "AGENT_VITALS_DISABLE_CODEX_RUNTIME": "0",
         })
         rt = data["codex_runtime"]
         self.assertFalse(rt["available"])
@@ -365,7 +365,7 @@ class TestStdoutSummaryLine(StubHostTest):
         env["PATH"] = (str(self.bin) if os.name == "nt" else
                        "%s%s%s" % (self.bin, os.pathsep, env.get("PATH", "")))
         for k in ("CODEX_RUNTIME", "OPENCLAW_RUNTIME", "WORKBUDDY_BUILTINS"):
-            env["SKILL_VITALS_DISABLE_" + k] = "1"
+            env["AGENT_VITALS_DISABLE_" + k] = "1"
         r = subprocess.run(SCAN_CMD + ["--json", str(out)] + list(extra),
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)

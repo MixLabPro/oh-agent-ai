@@ -1,4 +1,4 @@
-# skill-vitals-pet 前置工作计划 — Phase 0a
+# agent-vitals-pet 前置工作计划 — Phase 0a
 
 > 本文档聚焦 Phase 0a（DSH Pet 端到端）开工前必须做的事。每条都是 actionable，不做就不能动 Phase 0a。
 
@@ -38,7 +38,7 @@ cargo tauri --version
 
 **推荐**：**Tauri 2**
 - 新项目没理由用 1
-- skill-vitals 现在要长期维护，跟新版更省事
+- agent-vitals 现在要长期维护，跟新版更省事
 - API 差异主要是权限模型，1-2 天能上手
 
 **决策**：Tauri 2（写入 ADR-005 之前确认）
@@ -82,7 +82,7 @@ curl https://petdex.dev/api/manifest
 
 **期望产出**：
 ```
-~/.skill-vitals/pets/boba/
+~/.agent-vitals/pets/boba/
 ├── pet.json         # { displayName, description, spritesheetPath, spriteVersionNumber }
 └── spritesheet.webp # 1536×1872 或 1536×2288
 ```
@@ -90,15 +90,15 @@ curl https://petdex.dev/api/manifest
 **验证**：
 ```bash
 # 1. 文件存在
-ls ~/.skill-vitals/pets/boba/
+ls ~/.agent-vitals/pets/boba/
 
 # 2. pet.json schema 合法（用 Phase 0a 写的 schema.rs 验证）
-cargo run --bin skill-vitals -- pet validate boba
+cargo run --bin agent-vitals -- pet validate boba
 
 # 3. spritesheet 尺寸正确（v1 或 v2）
-file ~/.skill-vitals/pets/boba/spritesheet.webp
+file ~/.agent-vitals/pets/boba/spritesheet.webp
 # 或用 Python:
-python3 -c "from PIL import Image; im=Image.open('$HOME/.skill-vitals/pets/boba/spritesheet.webp'); print(im.size)"
+python3 -c "from PIL import Image; im=Image.open('$HOME/.agent-vitals/pets/boba/spritesheet.webp'); print(im.size)"
 # 期望: (1536, 1872) 或 (1536, 2288)
 ```
 
@@ -189,7 +189,7 @@ python3 -c "from PIL import Image; im=Image.open('$HOME/.skill-vitals/pets/boba/
 **决策时机**：Phase 0a 实现浮窗时
 
 ### 3.2 pet 包安装入口
-- **CLI**：`skill-vitals pet install <slug>`
+- **CLI**：`agent-vitals pet install <slug>`
 - **Tauri 内 UI**：菜单里点 "Install pet from URL"
 - **拖拽**：从浏览器拖 .zip 到浮窗
 
@@ -247,7 +247,7 @@ async fn tail_receives_appended_event() {
 }
 ```
 
-**生成器**：在 `crates/skill-vitals-host-events/tests/` 下现写。
+**生成器**：在 `crates/agent-vitals-host-events/tests/` 下现写。
 
 ### 4.3 Pet 包 sprite 测试 fixture
 
@@ -275,30 +275,30 @@ fixtures/pets/boba/
 [workspace]
 members = [
     ".",
-    "crates/skill-vitals-core",
-    "crates/skill-vitals-wasm",
-    "crates/skill-vitals-host-events",  # ← 新增
+    "crates/agent-vitals-core",
+    "crates/agent-vitals-wasm",
+    "crates/agent-vitals-host-events",  # ← 新增
 ]
-default-members = [".", "crates/skill-vitals-core", "crates/skill-vitals-host-events"]
+default-members = [".", "crates/agent-vitals-core", "crates/agent-vitals-host-events"]
 # wasm 仍然不进 default-members
 ```
 
-### 5.2 crates/skill-vitals-host-events/Cargo.toml
+### 5.2 crates/agent-vitals-host-events/Cargo.toml
 
 ```toml
 [package]
-name = "skill-vitals-host-events"
+name = "agent-vitals-host-events"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
-description = "Host event sourcing for skill-vitals — file watching and JSONL parsing across coding-agent CLIs."
+description = "Host event sourcing for agent-vitals — file watching and JSONL parsing across coding-agent CLIs."
 
 [lib]
-name = "skill_vitals_host_events"
+name = "agent_vitals_host_events"
 path = "src/lib.rs"
 
 [dependencies]
-skill-vitals-core = { path = "../skill-vitals-core" }
+agent-vitals-core = { path = "../agent-vitals-core" }
 serde_json = { version = "1", features = ["preserve_order"] }
 # notify: 文件 append 监听
 notify = "6"
@@ -320,8 +320,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
-skill-vitals-core = { path = "../crates/skill-vitals-core" }
-skill-vitals-host-events = { path = "../crates/skill-vitals-host-events" }
+agent-vitals-core = { path = "../crates/agent-vitals-core" }
+agent-vitals-host-events = { path = "../crates/agent-vitals-host-events" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
@@ -344,7 +344,7 @@ tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
 
 Phase 0a 开工时新建的文件：
 ```
-crates/skill-vitals-host-events/
+crates/agent-vitals-host-events/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs              # EventSource trait
@@ -358,7 +358,7 @@ crates/skill-vitals-host-events/
     └── fixtures/
         └── appended_event.jsonl
 
-crates/skill-vitals-core/src/pet/
+crates/agent-vitals-core/src/pet/
 ├── mod.rs
 ├── normalize.rs            # Event enum
 └── diagnose.rs             # 诊断器
@@ -374,12 +374,12 @@ src/pet.rs                  # pet 相关子命令（install/validate/list）
 ### 阶段 A：环境准备（半日）
 - [ ] 装 Tauri CLI（步骤 1.1）
 - [ ] 跑通 Tauri 2 hello-world（步骤 1.2 验证）
-- [ ] 抓 `boba` pet 包到 `~/.skill-vitals/pets/boba/`（步骤 1.4）
+- [ ] 抓 `boba` pet 包到 `~/.agent-vitals/pets/boba/`（步骤 1.4）
 - [ ] 写 ADR-009 / 010 / 011 / 012 / 013 / 014
 
 ### 阶段 B：host-events crate 起架（1 天）
 - [ ] 修改 workspace `Cargo.toml` 加新 crate
-- [ ] 新建 `crates/skill-vitals-host-events/Cargo.toml`
+- [ ] 新建 `crates/agent-vitals-host-events/Cargo.toml`
 - [ ] 写 `lib.rs`：定义 `EventSource` trait + `Host` enum
 - [ ] 写 `tail.rs`：notify-based 文件监听（offset-based）
 - [ ] 写 `offset_store.rs`：5s 持久化
@@ -392,7 +392,7 @@ src/pet.rs                  # pet 相关子命令（install/validate/list）
 - [ ] **黄金测试**：跑现有 DSH 黄金，新路径 byte-for-byte 一致
 
 ### 阶段 D：core::pet normalize（半天）
-- [ ] 写 `crates/skill-vitals-core/src/pet/mod.rs`
+- [ ] 写 `crates/agent-vitals-core/src/pet/mod.rs`
 - [ ] 写 `Event` enum（双时间戳字段）
 - [ ] sources/dsh.rs 把解析结果归一化到 Event
 

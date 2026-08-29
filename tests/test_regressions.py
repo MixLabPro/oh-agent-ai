@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""skill-vitals 回归测试。
+"""agent-vitals 回归测试。
 
 每个用例对应一个**真实发生过的缺陷**，不是假想场景。
 测试名里的注释说明了当初错在哪，避免同一个坑踩第二次。
@@ -22,18 +22,18 @@ from tests.env_helpers import isolated_home_env
 
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "scripts" / "scan.py"
-SCAN_SPEC = importlib.util.spec_from_file_location("skill_vitals_scan", SCAN)
+SCAN_SPEC = importlib.util.spec_from_file_location("agent_vitals_scan", SCAN)
 scan = importlib.util.module_from_spec(SCAN_SPEC)
 SCAN_SPEC.loader.exec_module(scan)
 PROBE = ROOT / "scripts" / "probe_logs.py"
-PROBE_SPEC = importlib.util.spec_from_file_location("skill_vitals_probe", PROBE)
+PROBE_SPEC = importlib.util.spec_from_file_location("agent_vitals_probe", PROBE)
 probe = importlib.util.module_from_spec(PROBE_SPEC)
 PROBE_SPEC.loader.exec_module(probe)
 
 # 这一行是整个 Python → Rust 移植的测试故事（ENGINEERING §1.4）。
 # 15 个用例里只有这里与 Python 绑定，其余全是「写 fixture → 跑命令 →
-# 解析 JSON → 断言 key」。设 SKILL_VITALS_BIN 即整套原样复用。
-_BIN = os.environ.get("SKILL_VITALS_BIN")
+# 解析 JSON → 断言 key」。设 AGENT_VITALS_BIN 即整套原样复用。
+_BIN = os.environ.get("AGENT_VITALS_BIN")
 SCAN_CMD = [_BIN] if _BIN else [sys.executable, str(SCAN)]
 
 
@@ -50,7 +50,7 @@ def _isolated_env(home):
     """隔离的 HOME + 关掉宿主运行时探测，让边界用例不依赖本机装了什么。"""
     env = isolated_home_env(home)
     for k in ("CODEX_RUNTIME", "OPENCLAW_RUNTIME", "WORKBUDDY_BUILTINS"):
-        env["SKILL_VITALS_DISABLE_" + k] = "1"
+        env["AGENT_VITALS_DISABLE_" + k] = "1"
     return env
 
 
@@ -62,9 +62,9 @@ def run_scan(*extra):
         env = os.environ.copy()
         # Unit tests exercise deterministic filesystem behavior. Live app-server
         # integration is verified separately because its installed catalog can change.
-        env["SKILL_VITALS_DISABLE_CODEX_RUNTIME"] = "1"
-        env["SKILL_VITALS_DISABLE_OPENCLAW_RUNTIME"] = "1"
-        env["SKILL_VITALS_DISABLE_WORKBUDDY_BUILTINS"] = "1"
+        env["AGENT_VITALS_DISABLE_CODEX_RUNTIME"] = "1"
+        env["AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME"] = "1"
+        env["AGENT_VITALS_DISABLE_WORKBUDDY_BUILTINS"] = "1"
         r = subprocess.run(SCAN_CMD + ["--json", out] + list(extra),
                            capture_output=True, text=True, env=env)
         if r.returncode != 0:

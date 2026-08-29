@@ -41,7 +41,7 @@ export const TOKEN_SEGMENTS = [
 
 // DeepSeek pricing, for DISPLAY only (model short-name lookup in normalizeModel/
 // modelShort below) — actual cost math now runs host-side in dsh-client/src/
-// host/index.ts, which reads the real scripts/skill_vitals/pricing.json
+// host/index.ts, which reads the real scripts/agent_vitals/pricing.json
 // directly (Node can; the browser can't, hence this baked copy still exists).
 // Values must still match pricing.json exactly — guarded by
 // tests/test_pricing_lockstep.py.

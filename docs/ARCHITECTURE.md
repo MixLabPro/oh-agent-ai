@@ -1,4 +1,4 @@
-# Skill Vitals — 架构设计
+# Agent Vitals — 架构设计
 
 配套文档：[PRODUCT.md](./PRODUCT.md)（问题 / 定位 / 命令 / 指标） · [ENGINEERING.md](./ENGINEERING.md)（Rust 移植 / 测试 / 分发） · [RUNTIME_EVIDENCE_CONTRACT.md](./RUNTIME_EVIDENCE_CONTRACT.md)（运行时证据契约）
 
@@ -388,7 +388,7 @@ null」的断言，那等于悄悄删掉了这个字段。正向覆盖用假宿�
 （没有证据就什么都不改）。
 
 契约是跨实现的，实现位置各自不同：Python 正从 `scripts/scan.py` 渐进拆到
-`scripts/skill_vitals/inventory.py` 与 `adapters/`（迁移期间由兼容入口继续编排），
+`scripts/agent_vitals/inventory.py` 与 `adapters/`（迁移期间由兼容入口继续编排），
 Rust 在 `src/inventory.rs`。模块移动不得改变下面四阶段的顺序与语义。
 
 | 阶段 | 问题 | claude-code | codex | openclaw | workbuddy | hermes | dsh◇ |
@@ -623,8 +623,8 @@ info       仅供参考（unknown 能力、too_new_to_judge）
 ## 6.1 输出
 
 ```bash
-skill-vitals doctor            # human-readable（默认）
-skill-vitals doctor --json     # 正式 API，带 schema_version
+agent-vitals doctor            # human-readable（默认）
+agent-vitals doctor --json     # 正式 API，带 schema_version
 ```
 
 未来：`--sarif`（安全工具链）、`--markdown`（贴 PR）。
@@ -641,18 +641,18 @@ skill-vitals doctor --json     # 正式 API，带 schema_version
 
 **默认 `--fail-on critical`。**
 
-v0.1 的 `1 = warning` 有坑：1 是 shell 世界默认的泛化失败码，用户随手 `skill-vitals && echo ok` 或放进脚本会因一条 warning 直接红，很快就会有人加 `|| true`——那等于关掉整个机制。参考 shellcheck / eslint：0 通过 / 1 有发现 / 2 工具错误。
+v0.1 的 `1 = warning` 有坑：1 是 shell 世界默认的泛化失败码，用户随手 `agent-vitals && echo ok` 或放进脚本会因一条 warning 直接红，很快就会有人加 `|| true`——那等于关掉整个机制。参考 shellcheck / eslint：0 通过 / 1 有发现 / 2 工具错误。
 
 ```bash
-skill-vitals doctor --fail-on warning
-skill-vitals doctor --ignore SV301,SV302
+agent-vitals doctor --fail-on warning
+agent-vitals doctor --ignore SV301,SV302
 ```
 
 ---
 
 # 7. 配置
 
-`.skill-vitals.toml`：
+`.agent-vitals.toml`：
 
 ```toml
 [general]
@@ -752,7 +752,7 @@ CLI  --json ─→  Skill Vital Record  ─→  In-host Skill 读取并推理
 ```text
 Agent 发现自己的 Skill 行为异常
         ↓
-调用 skill-vitals --json
+调用 agent-vitals --json
         ↓
 读取 Skill Vital Record
         ↓
@@ -774,7 +774,7 @@ Agent 实际做了什么、花了多少、跑了多久。契约在
 ## 10.1 为什么要新加一层
 
 现在没有这一层。DSH 的事件词表（`tool/call`、`approval/asked`、`data.toolName`、
-`chunk.usage`）是直接写在 `crates/skill-vitals-core` 里读的，等于**让 DSH 的会话
+`chunk.usage`）是直接写在 `crates/agent-vitals-core` 里读的，等于**让 DSH 的会话
 格式意外地成了通用接口**。装机层早在 2026-08 就有了 `HOST_ADAPTER_CONTRACT`，
 运行时层一直没有对应的那份。
 
@@ -790,7 +790,7 @@ Agent 实际做了什么、花了多少、跑了多久。契约在
 └───────────────────────────────────────────────────────────────────────┘
                                   ▲
 ┌───────────────────────────────────────────────────────────────────────┐
-│ L3  规则引擎   crates/skill-vitals-core（纯函数）                        │
+│ L3  规则引擎   crates/agent-vitals-core（纯函数）                        │
 │                                                                       │
 │     RuleSpec{ code, requires[], enhances[], min_fidelity }             │
 │         │                                                             │

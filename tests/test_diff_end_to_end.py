@@ -22,7 +22,7 @@ from tests.env_helpers import isolated_home_env
 
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "scripts" / "scan.py"
-_BIN = os.environ.get("SKILL_VITALS_BIN")
+_BIN = os.environ.get("AGENT_VITALS_BIN")
 SCAN_CMD = [_BIN] if _BIN else [sys.executable, str(SCAN)]
 
 
@@ -55,7 +55,7 @@ class DiffCase(unittest.TestCase):
         out = self.tmp / ("out-%d.json" % len(list(self.tmp.glob("out-*.json"))))
         env = isolated_home_env(self.tmp)
         for k in ("CODEX_RUNTIME", "OPENCLAW_RUNTIME", "WORKBUDDY_BUILTINS"):
-            env["SKILL_VITALS_DISABLE_" + k] = "1"
+            env["AGENT_VITALS_DISABLE_" + k] = "1"
         r = subprocess.run(SCAN_CMD + ["--host", "claude-code", "--json", str(out)]
                            + list(extra),
                            cwd=str(self.tmp / "workdir"), env=env,

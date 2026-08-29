@@ -33,35 +33,35 @@ scan = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(scan)
 
 sys.path.insert(0, str(ROOT / "scripts"))
-from skill_vitals.util import split_lines  # noqa: E402
-from skill_vitals.util import fork_boundary, post_fork  # noqa: E402
-from skill_vitals.usage import (  # noqa: E402
+from agent_vitals.util import split_lines  # noqa: E402
+from agent_vitals.util import fork_boundary, post_fork  # noqa: E402
+from agent_vitals.usage import (  # noqa: E402
     context_composition, hour_buckets, request_metrics, token_by_date_model,
     token_by_model, usage_signal_status, usage_shaped_tokens,
 )
-from skill_vitals.compaction import compaction_events  # noqa: E402
-from skill_vitals.waste import detect_duplicate_tool_results, detect_failure_run_waste, detect_structural_waste  # noqa: E402
-from skill_vitals.util import est_tokens, signal_coverage  # noqa: E402
-from skill_vitals.behavior import (  # noqa: E402
+from agent_vitals.compaction import compaction_events  # noqa: E402
+from agent_vitals.waste import detect_duplicate_tool_results, detect_failure_run_waste, detect_structural_waste  # noqa: E402
+from agent_vitals.util import est_tokens, signal_coverage  # noqa: E402
+from agent_vitals.behavior import (  # noqa: E402
     match_behavior, match_behavior_gated, trajectory_rule_outcomes, array_signal_status,
     waste_coverage,
 )
-from skill_vitals.trajectory import match_trajectory  # noqa: E402
-from skill_vitals.skill import skill_invocations  # noqa: E402
-from skill_vitals.duration import (  # noqa: E402
+from agent_vitals.trajectory import match_trajectory  # noqa: E402
+from agent_vitals.skill import skill_invocations  # noqa: E402
+from agent_vitals.duration import (  # noqa: E402
     tool_call_durations, turn_durations, step_durations, approval_latencies, hook_executions,
     duration_coverage,
 )
-from skill_vitals.codex_evidence import codex_evidence_json, derive_coverage  # noqa: E402
-from skill_vitals.codex_usage import (  # noqa: E402
+from agent_vitals.codex_evidence import codex_evidence_json, derive_coverage  # noqa: E402
+from agent_vitals.codex_usage import (  # noqa: E402
     CODEX_TOKEN_FIELDS, codex_aggregate_hours, codex_by_model_from_hours,
     codex_fold_file, codex_merge_folds, codex_token_facts,
 )
-from skill_vitals.codex_cost import (  # noqa: E402
+from agent_vitals.codex_cost import (  # noqa: E402
     codex_cost_report, load_codex_pricing, render_codex_cost,
     _reset_beijing_text_at,
 )
-from skill_vitals.adapters.codex_session import (  # noqa: E402
+from agent_vitals.adapters.codex_session import (  # noqa: E402
     codex_session_roots_report, parse_codex_session_log, parse_session_index,
     read_session_index,
 )
@@ -151,7 +151,7 @@ class TestSafeStrHandlesSurrogates(unittest.TestCase):
 
 
 class TestSplitLines(unittest.TestCase):
-    """`skill_vitals.util.split_lines` 是给 Rust `util::split_lines`（其自身
+    """`agent_vitals.util.split_lines` 是给 Rust `util::split_lines`（其自身
     测试就叫 `split_lines_matches_python`）对齐的 Python 侧目标——两边都只认
     `\\n` / `\\r\\n` / `\\r` 三种真正的换行，不认 `str.splitlines()` 额外识别
     的那批 Unicode 段落/换行符。"""
@@ -2563,7 +2563,7 @@ class TestPeakSlotWeekday(unittest.TestCase):
 
     def test_weekend_is_always_off_peak(self):
         """周末全天空闲，即使落在 9–12 / 14–18 的钟点内。"""
-        from skill_vitals.usage import _is_peak_slot
+        from agent_vitals.usage import _is_peak_slot
         # 北京时间的确定性时间戳
         self.assertTrue(_is_peak_slot(1787277600000), "周五 10:00 是高峰")
         self.assertTrue(_is_peak_slot(1787554800000), "周一 15:00 是高峰")
@@ -2580,7 +2580,7 @@ class TestPeakSlotWeekday(unittest.TestCase):
         做整除，这些情况对它不存在。
         """
         import datetime
-        from skill_vitals.usage import _beijing_weekday
+        from agent_vitals.usage import _beijing_weekday
         BJ = 8 * 3600
         epoch = datetime.datetime(1970, 1, 1)
         d, end = epoch, datetime.datetime(2100, 1, 1)
@@ -2600,7 +2600,7 @@ class TestPeakSlotWeekday(unittest.TestCase):
         """1970 之前的负时间戳也要对——Python 的 // 和 % 本身就是向下取整/
         取正余数，Rust 侧用 div_euclid/rem_euclid 取得同样语义。"""
         import datetime
-        from skill_vitals.usage import _beijing_weekday
+        from agent_vitals.usage import _beijing_weekday
         BJ = 8 * 3600
         for year in (1969, 1960, 1900):
             dt = datetime.datetime(year, 3, 1)
@@ -2837,7 +2837,7 @@ class TestCodexEvidenceJson(unittest.TestCase):
     同一个形状（差分门 both() 在子命令层再兜底一次字节相等）。"""
 
     def _build(self, items, title=None):
-        from skill_vitals.codex_evidence import build_codex_evidence
+        from agent_vitals.codex_evidence import build_codex_evidence
         evidence = build_codex_evidence(items, "s1", title, "legacy", "0.146.0",
                                         ["/repo"], "gpt-5.6-sol")
         return codex_evidence_json(evidence)
@@ -3011,7 +3011,7 @@ class TestCodexSessionIndex(unittest.TestCase):
 class CodexCostCharacterization(unittest.TestCase):
     """`codex-cost` 折叠/计价纯函数的精确值钉死。
 
-    这些数字对应 Rust 侧 `crates/skill-vitals-core/src/codex_usage.rs` 与
+    这些数字对应 Rust 侧 `crates/agent-vitals-core/src/codex_usage.rs` 与
     `src/codex_cost.rs` 的 `#[cfg(test)]` 钉同一批。夹具与手算期望见
     `fixtures/codex/cost/README.md`。**一个值变 = 折叠/计价行为变**，不是
     四舍五入——`cost_usd` 是 f64 原值（JSON 序列化两侧同最短表示，逐字节一致
@@ -3021,7 +3021,7 @@ class CodexCostCharacterization(unittest.TestCase):
     FIXTURES = ROOT / "fixtures" / "codex" / "cost"
 
     def _fold(self, name):
-        from skill_vitals.adapters.codex_session import parse_codex_session_log
+        from agent_vitals.adapters.codex_session import parse_codex_session_log
         text = (self.FIXTURES / name).read_text(encoding="utf-8")
         return codex_fold_file(parse_codex_session_log(text)["items"])
 

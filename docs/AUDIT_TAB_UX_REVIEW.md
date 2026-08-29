@@ -84,7 +84,7 @@ fixture，断言 chips 中不出现 `严重` 或出现的是 `0`，且标题数�
 
 ### P0-2 标记（F3）跨会话泄漏 🔴
 
-**现象**：`MARKS_STORAGE_KEY = 'skill-vitals-audit:marks:v1'`（L84），
+**现象**：`MARKS_STORAGE_KEY = 'agent-vitals-audit:marks:v1'`（L84），
 键是 `JSON.stringify([rule, evidence])`（L86）——**不带 session id**。
 
 **后果**：在会话 A 里把 `SV601 / rm -rf /tmp/build` 标成「安全」，
@@ -448,7 +448,7 @@ dsh-context 的做法点破了症结：**堆叠条的价值全在分母**。
 
 | # | 改动 | 涉及文件（锁步） | 为什么必须 |
 |---|---|---|---|
-| **D1** | finding 增加 `turn` / `step` / `callId` 三字段 | `crates/skill-vitals-core/src/behavior.rs` ↔ `scripts/skill_vitals/behavior.py` ↔ wasm `audit_events` ↔ `dsh-client/src/host/index.ts` 的 zod schema ↔ golden 快照 | 没有 turn/step 就**没有 x 轴**，三张图一张都画不了；没有 callId 就永远接不上官方 inspect 通道（§8.2b） |
+| **D1** | finding 增加 `turn` / `step` / `callId` 三字段 | `crates/agent-vitals-core/src/behavior.rs` ↔ `scripts/agent_vitals/behavior.py` ↔ wasm `audit_events` ↔ `dsh-client/src/host/index.ts` 的 zod schema ↔ golden 快照 | 没有 turn/step 就**没有 x 轴**，三张图一张都画不了；没有 callId 就永远接不上官方 inspect 通道（§8.2b） |
 | **D2** | `token_by_model` 保留 per-turn/step 明细，不只吐总和；**并新增 `modelSwitches: [{seq,time,from,to}]`、消费 `request/context` 取 `contextWindow`**（修订依据见 §12.3） | `usage.rs` ↔ `usage.py` ↔ wasm `token_by_model` ↔ dsh adapter 的 `RELEVANT_TYPES` | 图 1（成本曲线）与图 3（上下文曲线）的唯一数据源；`contextWindow` 是堆叠条唯一有意义的分母 |
 | **D3** | i18n 字典每条规则补 `rule_SVxxx_desc`（一句话触发条件） | `dsh-client/src/client/i18n.ts` | 二级详情里的「规则说明」；**零依赖、纯字典扩充，性价比最高** |
 | **D4** | `styles/index.ts` 从「导出 style 对象」改为「导出 CSS 文本 + 类名常量」 | `dsh-client/src/client/styles/index.ts` + `AuditView.tsx` 全量替换 | **内联 style 写不出 `:hover`** → 不做这条，§9.4 的 hover 预览/hover 显形操作栏一条都做不了（§12.2b）。注入管道 `ctx.effect` + `STYLES` 已存在，只是没用起来 |
@@ -1227,7 +1227,7 @@ token 派生洞察在上（P0），价格在下（P2）。原稿把两者一起�
 
 ## 24. 顺带挖出的真缺陷：「缓存写 0」是一个伪造的列 🔴
 
-追这个问题时核到 `scripts/skill_vitals/usage.py:77`：
+追这个问题时核到 `scripts/agent_vitals/usage.py:77`：
 
 ```python
 "cache_write_tokens": _int_or_none(usage.get("cacheWriteTokens")) or 0,
@@ -1320,7 +1320,7 @@ dsh-context 的堆叠条里，`User Messages 0%` 和 `System Prompt 2%` 在条�
 | `Tool Schemas 7.1k 9% · 25 个` | 陈述事实 | 25 个里**几个本次一次都没被调用**？它们的 schema 每轮都在重发 |
 
 这正是本仓库的核心命题在会话内的投影——
-**skill-vitals 的本业就是「哪些 skill 常驻上下文却从不触发」**，
+**agent-vitals 的本业就是「哪些 skill 常驻上下文却从不触发」**，
 `Tool Schemas` 的分布就是这个问题在单次会话里的形态。
 而「`scan.py` 测量，`SKILL.md` 判断」这条分工，恰好对应
 「dsh-context 测量构成，审计判断浪费」。

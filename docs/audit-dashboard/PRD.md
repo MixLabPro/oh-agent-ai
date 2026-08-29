@@ -1,9 +1,9 @@
-# Skill Vitals 审计 Dashboard 产品需求文档
+# Agent Vitals 审计 Dashboard 产品需求文档
 
 > 文档版本：V1.6  
 > 日期：2026-08-21  
 > 状态：产品与技术评审稿  
-> 适用范围：DeepSeek Harness / DSH 中 Skill Vitals「审计」Tab  
+> 适用范围：DeepSeek Harness / DSH 中 Agent Vitals「审计」Tab  
 > 关联原型：`prototype/session-diagnostic-dashboard-v2.png`（信息层级参考；具体指标与状态以正文为准）。**该图尚未收录**——源文件被 macOS 逐文件权限挡住，见 [README](README.md#两份没能拷进来的文件)；可交互原型见 [`prototype/dsh-native-v2.html`](prototype/dsh-native-v2.html)
 >
 > **V1.2 修订说明**：在 V1.1「会话运行质量与风险报告」定位上继续收敛：异常信号改为只由引擎事实计算；删除 safe/high-risk/ignored 单值状态，V2 只保留个人复核备注；数据不完整与已观测风险改为可同时表达；V2 关键发现只陈述已观测事实，不提前展示上下文开销归因；会话健康时间线明确以请求为采样单位、以 turn 为视觉分组，并为未验证的上下文数据提供降级路径；路线图补充预算管理与上下文优化的真实控制能力。
@@ -22,7 +22,7 @@
 
 ## 1. 文档目的
 
-本文定义 Skill Vitals「审计」Tab 的 V2 重构需求，将现有以数据陈列为主的页面改造成面向会话复核的审计 Dashboard。
+本文定义 Agent Vitals「审计」Tab 的 V2 重构需求，将现有以数据陈列为主的页面改造成面向会话复核的审计 Dashboard。
 
 页面必须帮助用户依次完成三个任务：
 

@@ -1,4 +1,4 @@
-# Skill Vitals — 工程设计
+# Agent Vitals — 工程设计
 
 配套文档：[PRODUCT.md](./PRODUCT.md)（问题 / 定位 / 命令 / 指标） · [ARCHITECTURE.md](./ARCHITECTURE.md)（漏斗模型 / 数据契约 / 诊断引擎）
 
@@ -94,7 +94,7 @@ SCAN_CMD = [str(BINARY)]
                                继续做产品
 ```
 
-**不要让「我要打造一个漂亮的 Rust CLI」取代「我要证明有人真的需要 Skill Vitals」。**
+**不要让「我要打造一个漂亮的 Rust CLI」取代「我要证明有人真的需要 Agent Vitals」。**
 
 超时不是失败，是信息——它说明 §2 的不变量比看上去更纠缠，那么在 Python 里把它们理清、补上测试，本身就是更值钱的工作。
 
@@ -115,7 +115,7 @@ SCAN_CMD = [str(BINARY)]
    ├─ 达成 → 继续
    └─ 超过 timebox → 停止规则（§1.5）
 4. 补齐 §4 的单元与属性测试，使 12 条不变量条条有测试
-5. 全绿后双实现定型：SKILL.md 主调二进制（不存在则 `npm i -g skill-vitals`）；Python 保留，继续服务 ClawHub skill 形态与开发者
+5. 全绿后双实现定型：SKILL.md 主调二进制（不存在则 `npm i -g agent-vitals`）；Python 保留，继续服务 ClawHub skill 形态与开发者
 6. 之后才开始加 explain / 诊断引擎等新能力
 ```
 
@@ -131,7 +131,7 @@ SCAN_CMD = [str(BINARY)]
 
 补偿路径（写进 README 安装章节）：
 
-- `cargo install skill-vitals` —— 从源码构建
+- `cargo install agent-vitals` —— 从源码构建
 - npm provenance（§6）—— tarball 绑定到具体 workflow + commit
 
 ---
@@ -248,7 +248,7 @@ golden 全文比对分工不同：**全文比对回答「有没有变」，验�
 
 ```bash
 python3 tests/golden_runner.py --update                        # 用 Python 固化
-SKILL_VITALS_BIN=target/release/skill-vitals \
+AGENT_VITALS_BIN=target/release/agent-vitals \
     python3 tests/golden_runner.py                             # 二进制比对
 ```
 
@@ -369,17 +369,17 @@ CLI options → host roots → disk inventory → runtime probes → reconciliat
             → pure report → diff → redaction → rendering
 ```
 
-实现从 `scripts/scan.py` 分阶段提取到标准库包 `scripts/skill_vitals/`。宿主适配、
+实现从 `scripts/scan.py` 分阶段提取到标准库包 `scripts/agent_vitals/`。宿主适配、
 发现与 I/O 在边缘；报告计算与诊断保持纯函数；`cli.py` 只负责编排、输出和退出码。
 完整模块边界与迁移门见 [PYTHON_REFACTOR_SPEC.md](./PYTHON_REFACTOR_SPEC.md)。
 
 对用户而言，`python3 scripts/scan.py ...` 始终是兼容入口。迁移不要求安装包或改用
 `python -m`，每一阶段都必须保持 flags、JSON schema、排序、降级行为与退出码。
-最终 `scan.py` 只保留兼容导出和 `skill_vitals.cli.main()` 调用；达到最终阶段前，
+最终 `scan.py` 只保留兼容导出和 `agent_vitals.cli.main()` 调用；达到最终阶段前，
 架构门禁只约束已经存在的模块，不用未完成的目录清单制造假失败。
 
-ClawHub 产物必须递归包含整个 `scripts/skill_vitals/`，同时排除
-`__pycache__`、`.pyc` 与 `.pyo`。打包 CI 必须切换到 `dist/skill-vitals`，在仓库源码
+ClawHub 产物必须递归包含整个 `scripts/agent_vitals/`，同时排除
+`__pycache__`、`.pyc` 与 `.pyo`。打包 CI 必须切换到 `dist/agent-vitals`，在仓库源码
 不进入 `PYTHONPATH` 的条件下执行 `--version` 与 `--help`；只有源码树能运行、产物
 缺模块时必须在发布前失败。
 
@@ -412,18 +412,18 @@ npm/                   主包 shim.cjs + 各平台包模板（§6）
 
 ## 6.1 为什么 npm 是主推渠道
 
-**渠道与受众高度重合**：skill-vitals 的用户按定义就是 Agent CLI 的用户，而 Claude Code 自身即 `npm install -g @anthropic-ai/claude-code`，Codex CLI、Gemini CLI 同理。**Node 在目标用户中具有极高覆盖率。**
+**渠道与受众高度重合**：agent-vitals 的用户按定义就是 Agent CLI 的用户，而 Claude Code 自身即 `npm install -g @anthropic-ai/claude-code`，Codex CLI、Gemini CLI 同理。**Node 在目标用户中具有极高覆盖率。**
 
 > 不是 100%——存在 standalone binary 安装路径与其他宿主的用户。npm 是**覆盖率最高的单一渠道**，不是唯一渠道；§6.6 的其余四条并存正是为了这部分人。
 
 ```bash
-npx skill-vitals                              # 零安装试用
-npx skill-vitals doctor --fail-on critical    # CI，无需 setup-rust / setup-python
+npx agent-vitals                              # 零安装试用
+npx agent-vitals doctor --fail-on critical    # CI，无需 setup-rust / setup-python
 ```
 
 对「运行一次型」诊断工具，`npx` 是转化率的天花板——用户不需要决定「要不要装一个工具」，只需要决定「要不要跑一条命令」。
 
-> `skill-vitals` 与 `@skill-vitals` scope 在 npm 上均未被占用（2026-08 核实），应尽早占名。
+> `agent-vitals` 与 `@agent-vitals` scope 在 npm 上均未被占用（2026-08 核实），应尽早占名。
 
 ## 6.2 打包方式：optionalDependencies，禁止 postinstall 下载
 
@@ -441,18 +441,18 @@ npx skill-vitals doctor --fail-on critical    # CI，无需 setup-rust / setup-p
 optionalDependencies 方案下二进制**在 tarball 里**，被 npm 的 integrity hash 与 provenance 证明一并覆盖。
 
 ```text
-skill-vitals                    主包，只含一个 JS shim
-├── @skill-vitals/darwin-arm64
-├── @skill-vitals/darwin-x64
-├── @skill-vitals/linux-x64      静态 musl，兼容 glibc 与 Alpine
-├── @skill-vitals/linux-arm64
-└── @skill-vitals/win32-x64
+agent-vitals                    主包，只含一个 JS shim
+├── @agent-vitals/darwin-arm64
+├── @agent-vitals/darwin-x64
+├── @agent-vitals/linux-x64      静态 musl，兼容 glibc 与 Alpine
+├── @agent-vitals/linux-arm64
+└── @agent-vitals/win32-x64
 ```
 
 平台包用 `os` / `cpu` 让 npm **只装匹配的那一个**：
 
 ```json
-{ "name": "@skill-vitals/darwin-arm64", "os": ["darwin"], "cpu": ["arm64"], "files": ["bin/"] }
+{ "name": "@agent-vitals/darwin-arm64", "os": ["darwin"], "cpu": ["arm64"], "files": ["bin/"] }
 ```
 
 ## 6.3 shim：退出码必须原样透传
@@ -463,26 +463,26 @@ skill-vitals                    主包，只含一个 JS shim
 const { spawnSync } = require("child_process");
 
 const TARGETS = {
-  "darwin arm64": "@skill-vitals/darwin-arm64",
-  "darwin x64":   "@skill-vitals/darwin-x64",
-  "linux x64":    "@skill-vitals/linux-x64",
-  "linux arm64":  "@skill-vitals/linux-arm64",
-  "win32 x64":    "@skill-vitals/win32-x64",
+  "darwin arm64": "@agent-vitals/darwin-arm64",
+  "darwin x64":   "@agent-vitals/darwin-x64",
+  "linux x64":    "@agent-vitals/linux-x64",
+  "linux arm64":  "@agent-vitals/linux-arm64",
+  "win32 x64":    "@agent-vitals/win32-x64",
 };
 
 const key = `${process.platform} ${process.arch}`;
 const pkg = TARGETS[key];
 if (!pkg) {
-  console.error(`skill-vitals: unsupported platform ${key}`);
+  console.error(`agent-vitals: unsupported platform ${key}`);
   process.exit(2);                                  // 2 = 工具自身错误
 }
 
-const exe = process.platform === "win32" ? "skill-vitals.exe" : "skill-vitals";
+const exe = process.platform === "win32" ? "agent-vitals.exe" : "agent-vitals";
 let bin;
 try {
   bin = require.resolve(`${pkg}/bin/${exe}`);
 } catch {
-  console.error(`skill-vitals: ${pkg} 未安装（optionalDependencies 可能被跳过）`);
+  console.error(`agent-vitals: ${pkg} 未安装（optionalDependencies 可能被跳过）`);
   process.exit(2);
 }
 
@@ -517,8 +517,8 @@ permissions:
 
 | 渠道 | 场景 | 优先级 |
 |---|---|---|
-| `npx skill-vitals` | 首次试用、CI | **主推** |
-| `npm i -g skill-vitals` | 重复使用 | **主推** |
+| `npx agent-vitals` | 首次试用、CI | **主推** |
+| `npm i -g agent-vitals` | 重复使用 | **主推** |
 | `brew install` | macOS 习惯用户 | P1 |
 | `cargo install` | Rust 用户；**从源码构建的可审计路径** | P1 |
 | GitHub Release 裸二进制 | 内网 / 离线 | P1 |
@@ -533,7 +533,7 @@ permissions:
 
 ```json
 {
-  "name": "dsh-skill-vitals",
+  "name": "dsh-agent-vitals",
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
 }
 ```
@@ -541,7 +541,7 @@ permissions:
 没有这个字段的包照样能装，但只是普通依赖，不激活任何层。安装：
 
 ```sh
-dsh plugin --profile web add dsh-skill-vitals
+dsh plugin --profile web add dsh-agent-vitals
 ```
 
 ### 三条硬约束
@@ -556,7 +556,7 @@ machine at install time, outside any sandbox the agent runs under」**。
 postinstall 下载是同一条原则的同一次应用，不是新增约束。
 
 **二、bundle 里不得有扫描器副本。** 它只是约 20 行 JS：向 `ctx.skills` 注册一个
-provider，`resourceBase` 指向 skill 正文，扫描仍由 PATH 上的 `skill-vitals` 二进制
+provider，`resourceBase` 指向 skill 正文，扫描仍由 PATH 上的 `agent-vitals` 二进制
 执行。vendored 一份 `scan.py` 进去会造出第三个扫描器消费者——差分护栏（§6.8）
 只对齐 Python 与 Rust 两个实现，第三个副本不在护栏内，会静默发散。
 
@@ -578,7 +578,7 @@ plugin」）。对本仓库意味着：根目录的 `SKILL.md` 与 `scripts/` �
 
 ## 6.7 In-host Skill 形态的安装
 
-双实现并行下，in-host skill 形态**继续以 Python 为主**（`python3 scripts/scan.py`，`git clone` 完就能用，ClawHub 打包走这条）。二进制形态（`skill-vitals`）服务 npm / brew / cargo / Release，SKILL.md 第 1 步写成「检测二进制，不存在则 `npm i -g skill-vitals`」，Agent 自己会执行。
+双实现并行下，in-host skill 形态**继续以 Python 为主**（`python3 scripts/scan.py`，`git clone` 完就能用，ClawHub 打包走这条）。二进制形态（`agent-vitals`）服务 npm / brew / cargo / Release，SKILL.md 第 1 步写成「检测二进制，不存在则 `npm i -g agent-vitals`」，Agent 自己会执行。
 
 > **双维护的可行性建立在差分护栏上（§6.8）。**「两套实现必然发散」曾经是「绝对不做两套」的理由；现在 `differential` 在当天抓出任何发散，而不是让它静默累积，所以「同时维护两套」从禁令变成「在护栏内做」。护栏失效的那天，本节退回单实现。
 
@@ -588,7 +588,7 @@ plugin」）。对本仓库意味着：根目录的 `SKILL.md` 与 `scripts/` �
 「避免两套」，而是「让发散活不过一次 CI」：`main` 上 Python 与 Rust
 **永久并行**，差分护栏从「移植期的临时脚手架」升级成**永久契约**。
 
-- Rust 二进制（`skill-vitals`）服务 npm / brew / cargo / Release 这些「装一个
+- Rust 二进制（`agent-vitals`）服务 npm / brew / cargo / Release 这些「装一个
   二进制」的渠道；
 - Python（`scripts/scan.py`）服务 ClawHub 的 in-host skill 形态，也便于不同
   语言的开发者阅读与贡献。
@@ -600,7 +600,7 @@ plugin」）。对本仓库意味着：根目录的 `SKILL.md` 与 `scripts/` �
 | 护栏 | 位置 |
 |---|---|
 | 双实现跑同一份 golden，任一不一致即红 | `verify.yml` 的 `differential` job |
-| 集成套件指向二进制再跑一遍 | 同上，靠 `SKILL_VITALS_BIN` |
+| 集成套件指向二进制再跑一遍 | 同上，靠 `AGENT_VITALS_BIN` |
 | 假宿主验运行时适配器的成功路径 | `tests/test_host_stubs.py` |
 | 跨平台复现（macOS + Linux） | `reproducible` job |
 | `clippy -D warnings` 守 §4.5 的「扫描路径不得有 unwrap」 | `rust` job |
@@ -617,7 +617,7 @@ skill 形态与开发者。任何一次 `differential` 变红都必须当天处�
 > 排期 **P1**，依赖 P0.5 的 `--json` 与退出码（[PRODUCT.md §5.0](./PRODUCT.md)）。
 
 ```text
-Developer → 改 SKILL.md → PR → Skill Vitals CI
+Developer → 改 SKILL.md → PR → Agent Vitals CI
 ```
 
 ```text

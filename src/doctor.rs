@@ -298,7 +298,7 @@ This tool never deletes anything automatically.".into(),
         ds.push(diag(
             "SV401", "OVERLAP_CANDIDATE", "warning",
             format!("{} skill pairs have highly overlapping wording and may compete for the same requests.", pairs.len()),
-            "Run `skill-vitals overlap` to inspect shared terms; for an actionable judgment, run /skill-vitals \
+            "Run `agent-vitals overlap` to inspect shared terms; for an actionable judgment, run /agent-vitals \
 in Claude Code and let the model read the descriptions.".into(),
             vec!["This is a lexical filter, not a verdict. Skills with different wording can still compete, \
 so false negatives are more common than false positives.".into()],
@@ -480,7 +480,7 @@ pub fn render_doctor(out: &Value, o: &DoctorOpts) -> String {
         ($($t:tt)*) => { w.push_str(&format!($($t)*)); w.push('\n'); };
     }
 
-    p!("Skill Vitals {} · run {}", o.version, run_id(out));
+    p!("Agent Vitals {} · run {}", o.version, run_id(out));
     p!("{}", "─".repeat(50));
     p!("Host    {}", out.get("host_selection").and_then(|v| v.as_str()).unwrap_or("?"));
     p!("        trigger data {} · load evidence {} · description budget {}",
@@ -612,11 +612,11 @@ pub fn render_doctor(out: &Value, o: &DoctorOpts) -> String {
 
     p!("");
     p!("Next steps");
-    p!("  skill-vitals list                 See which skills are actually in context");
+    p!("  agent-vitals list                 See which skills are actually in context");
     if ds.iter().any(|x| s(x, "code") == "SV401") {
-        p!("  skill-vitals overlap              Inspect potentially competing pairs");
+        p!("  agent-vitals overlap              Inspect potentially competing pairs");
     }
-    p!("  Run /skill-vitals in Claude Code  Let the model judge descriptions semantically");
+    p!("  Run /agent-vitals in Claude Code  Let the model judge descriptions semantically");
     // 快照那几行由 snapshot::doctor_snapshot 在这之后追加 —— **它必须在写盘
     // 成功之后才说自己存了**，所以不能在这里预先打。
     w
@@ -757,7 +757,7 @@ mod tests {
 //   2   工具自身错误
 //
 // v0.1 用 `1 = warning` 有坑：1 是 shell 世界默认的泛化失败码，用户随手
-// `skill-vitals && echo ok` 会因一条 warning 直接红，很快就有人加 `|| true` ——
+// `agent-vitals && echo ok` 会因一条 warning 直接红，很快就有人加 `|| true` ——
 // 那等于关掉整个机制。口径对齐 shellcheck / eslint。
 
 pub const EXIT_OK: i32 = 0;

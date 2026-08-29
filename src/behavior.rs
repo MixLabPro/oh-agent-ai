@@ -1,7 +1,7 @@
 //! 行为审计规则引擎的二进制侧薄封装。
 //!
 //! 纯计算（规则表、`match_behavior`、`usage::token_by_model`、`behavior_gate`）
-//! 住在 `crates/skill-vitals-core`（单一真相源，CLI / Python / wasm 共用）。这里
+//! 住在 `crates/agent-vitals-core`（单一真相源，CLI / Python / wasm 共用）。这里
 //! 只留 I/O 入口 `audit_session_log`——它读会话日志文件（`crate::dsh::read_session_log`），
 //! 把执行事件喂给 core 的 `match_behavior`、把成本账事件喂给 `token_by_model`。
 
@@ -9,11 +9,11 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-pub use skill_vitals_core::behavior::{
+pub use agent_vitals_core::behavior::{
     array_signal_status, behavior_gate, flatten, match_behavior_canonical, rule_outcomes_json,
     waste_coverage,
 };
-use skill_vitals_core::evidence::Signal;
+use agent_vitals_core::evidence::Signal;
 
 /// 一份会话的行为审计结果：风险 findings + 按模型分桶的 token 报告（两条正交
 /// 的审计维度）。成本由 CLI 显示层（`cost.rs`）用 pricing.json 折算。
@@ -43,7 +43,7 @@ pub struct Audit {
     /// 与 `subagents` 不同：这是**本会话**内 skill 触发记录，不跨会话合并。
     pub skill: Value,
     /// D11：执行时长审计——`{tool_calls, turns, steps, approvals, hooks}` 五个
-    /// 数组（`crates/skill-vitals-core/src/duration.rs` 的五个纯函数）。
+    /// 数组（`crates/agent-vitals-core/src/duration.rs` 的五个纯函数）。
     /// `hooks` 是 CLI 独有的一项——浏览器那边的 `durationAudit` 投影**不**收
     /// hook/* 事件（宿主能不能看到 hook 事件还没验证过），但 CLI 直接读盘上
     /// 的原始 JSONL，`hook/*` 本来就在 `EXECUTION_EVENT_TYPES` 里，这里立即
@@ -106,10 +106,10 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string();
-    let dsh_evidence = skill_vitals_core::dsh_evidence::build_dsh_evidence(
+    let dsh_evidence = agent_vitals_core::dsh_evidence::build_dsh_evidence(
         execution_events, usage_events_raw, cwd_raw.clone(), session_id,
     );
-    let (events, usage_events, _cwd_owned) = skill_vitals_core::dsh_evidence::reverse_project(&dsh_evidence);
+    let (events, usage_events, _cwd_owned) = agent_vitals_core::dsh_evidence::reverse_project(&dsh_evidence);
     // P3 group①：SV601–610 前置门控 + SV611–614 后置标注，三态都基于**分叉后**
     // 的证据判——但 `dsh_evidence`（上面）是从分叉前的 execution_events 建的，
     // 服务于 compaction/subagent/skill/duration 那些本来就该看到完整历史的
@@ -121,9 +121,9 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     // SV605 退化成纯绝对路径启发式，漏掉工作区内相对路径的写文件（cwd bug）；
     // 门控 dispatcher 现在直接吃这份 canonical，SV605 的 workspace_root 判断
     // 从此依赖这一行。
-    let post_fork_events = skill_vitals_core::util::post_fork(&events);
-    let post_fork_usage_events = skill_vitals_core::util::post_fork(&usage_events);
-    let post_fork_evidence = skill_vitals_core::dsh_evidence::build_dsh_evidence(
+    let post_fork_events = agent_vitals_core::util::post_fork(&events);
+    let post_fork_usage_events = agent_vitals_core::util::post_fork(&usage_events);
+    let post_fork_evidence = agent_vitals_core::dsh_evidence::build_dsh_evidence(
         post_fork_events, post_fork_usage_events, cwd_raw.clone(), String::new(),
     );
     // 单事件规则（SV601–610）与轨迹级检测（SV611–614）都吃同一份分叉后
@@ -134,38 +134,38 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     // 实现逐字节一致。
     let family1_outcomes = match_behavior_canonical(&post_fork_evidence.canonical);
     let trajectory_outcomes =
-        skill_vitals_core::trajectory::match_trajectory_canonical(&post_fork_evidence.canonical);
+        agent_vitals_core::trajectory::match_trajectory_canonical(&post_fork_evidence.canonical);
     let mut findings = flatten(&family1_outcomes);
-    findings.extend(skill_vitals_core::trajectory::flatten_trajectory(&trajectory_outcomes));
+    findings.extend(agent_vitals_core::trajectory::flatten_trajectory(&trajectory_outcomes));
     // 三态结果合并成一份 `--json` 的 outcomes：family ① 在前、family ④ 在后，
     // 键序即 rule_specs 的 SV601..SV614。
     let mut all_outcomes = family1_outcomes;
     all_outcomes.extend(trajectory_outcomes);
     let rule_outcomes_val = rule_outcomes_json(&all_outcomes);
-    let usage_coverage_val = skill_vitals_core::usage::usage_signal_status(&post_fork_evidence.canonical.coverage);
+    let usage_coverage_val = agent_vitals_core::usage::usage_signal_status(&post_fork_evidence.canonical.coverage);
     // 三个消费者共用 usage_events（各取所需，不认识的事件类型自然跳过）：
     // token_by_model 按模型分桶、request_metrics 保留逐请求分辨率、
     // context_composition 从 header.system/tools 与 skill-catalog 载体算常驻前缀。
-    let usage = skill_vitals_core::usage::token_by_model(&usage_events);
-    let requests_val = skill_vitals_core::usage::request_metrics(&usage_events);
-    let context = skill_vitals_core::usage::context_composition(&usage_events);
-    let compaction = skill_vitals_core::compaction::compaction_events(&events);
-    let waste = Value::Array(skill_vitals_core::waste::detect_structural_waste(&events, requests_val.as_array().unwrap_or(&Vec::new())));
+    let usage = agent_vitals_core::usage::token_by_model(&usage_events);
+    let requests_val = agent_vitals_core::usage::request_metrics(&usage_events);
+    let context = agent_vitals_core::usage::context_composition(&usage_events);
+    let compaction = agent_vitals_core::compaction::compaction_events(&events);
+    let waste = Value::Array(agent_vitals_core::waste::detect_structural_waste(&events, requests_val.as_array().unwrap_or(&Vec::new())));
     // 分叉前被排除掉的用量。上面每一项都只算分叉之后（post_fork），金额会因此
     // 显著变小；不把排除量说出来，读的人会以为数据坏了。没分叉时是 null。
-    let pre_fork = skill_vitals_core::usage::pre_fork_usage(&usage_events);
-    let subagents = skill_vitals_core::subagent::subagent_spawns(&events);
-    let skill = skill_vitals_core::skill::skill_invocations(&events, requests_val.as_array().unwrap_or(&Vec::new()));
+    let pre_fork = agent_vitals_core::usage::pre_fork_usage(&usage_events);
+    let subagents = agent_vitals_core::subagent::subagent_spawns(&events);
+    let skill = agent_vitals_core::skill::skill_invocations(&events, requests_val.as_array().unwrap_or(&Vec::new()));
     let duration = json!({
-        "tool_calls": skill_vitals_core::duration::tool_call_durations(&events),
-        "turns": skill_vitals_core::duration::turn_durations(&events),
-        "steps": skill_vitals_core::duration::step_durations(&events),
-        "approvals": skill_vitals_core::duration::approval_latencies(&events),
-        "hooks": skill_vitals_core::duration::hook_executions(&events),
+        "tool_calls": agent_vitals_core::duration::tool_call_durations(&events),
+        "turns": agent_vitals_core::duration::turn_durations(&events),
+        "steps": agent_vitals_core::duration::step_durations(&events),
+        "approvals": agent_vitals_core::duration::approval_latencies(&events),
+        "hooks": agent_vitals_core::duration::hook_executions(&events),
     });
     // P3 group③：五路时长审计各自的信号覆盖——用同一份 post_fork_evidence 的
     // coverage（execution 事件派生的信号，跟 rule_outcomes 同源）。
-    let duration_coverage_val = skill_vitals_core::duration::duration_coverage(
+    let duration_coverage_val = agent_vitals_core::duration::duration_coverage(
         &duration, &post_fork_evidence.canonical.coverage,
     );
     // P3 group⑤：skill/subagent/compaction 各自对着单一信号判三态；waste

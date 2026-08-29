@@ -1,13 +1,13 @@
-# `dsh-skill-vitals`
+# `dsh-agent-vitals`
 
-[Skill Vitals](../README.md) as a DeepSeek Harness profile bundle. Installing it makes
-`skill-vitals` available as a skill inside DSH, so a DSH agent can audit the *other*
+[Agent Vitals](../README.md) as a DeepSeek Harness profile bundle. Installing it makes
+`agent-vitals` available as a skill inside DSH, so a DSH agent can audit the *other*
 skill hosts on the machine.
 
 ## Install
 
 ```sh
-dsh plugin --profile web add dsh-skill-vitals
+dsh plugin --profile web add dsh-agent-vitals
 ```
 
 The package declares `dsh.bundle.patch`, so the profile composer activates its patch
@@ -17,7 +17,7 @@ layer automatically after `pnpm` resolves it.
 
 | File | Role |
 |---|---|
-| `package.json` | `name: dsh-skill-vitals`, `dsh.bundle.patch`, no build, no dependencies |
+| `package.json` | `name: dsh-agent-vitals`, `dsh.bundle.patch`, no build, no dependencies |
 | `cordis.patch.yml` | one insert row mounting the glue plugin |
 | `index.js` | a Cordis plugin registering one skill provider on `ctx.skills` |
 | `SKILL.md` | the DSH-facing skill body (frontmatter + instructions) |
@@ -32,7 +32,7 @@ This bundle is deliberately thin, for reasons written up in
    supply-chain auditor. This package has no `prepare` script, so installing it grants
    nothing.
 2. **No scanner copy.** The bundle ships instructions, not `scan.py`. The audit runs
-   from the `skill-vitals` binary on PATH (or a repo checkout today). A vendored scanner
+   from the `agent-vitals` binary on PATH (or a repo checkout today). A vendored scanner
    would create a third Python consumer and a second source of truth.
 3. **No build step.** Plain ESM JavaScript, published as-is.
 

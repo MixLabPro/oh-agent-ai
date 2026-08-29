@@ -30,11 +30,11 @@
   拦截"的措辞。
 
 **3. 主体逻辑已经有三份现成模板，照抄不是从零写：**
-- `crates/skill-vitals-core/src/skill.rs` 的 `callId` 配对 + `missing_fields` 纪律
+- `crates/agent-vitals-core/src/skill.rs` 的 `callId` 配对 + `missing_fields` 纪律
   （T3 抄的是 `subagent.rs`，这次抄 `skill.rs` 更近，字段形状几乎一样）；
-- `crates/skill-vitals-core/src/subagent.rs:57` `subagent_spawns()`——同款 `callId`
+- `crates/agent-vitals-core/src/subagent.rs:57` `subagent_spawns()`——同款 `callId`
   索引 → 结果侧按 `/data/message/source/callId` 回连；
-- `crates/skill-vitals-core/src/trajectory.rs:77` `coord_map()`（`pub(crate)`）——
+- `crates/agent-vitals-core/src/trajectory.rs:77` `coord_map()`（`pub(crate)`）——
   turn/step 坐标查表，直接复用，不要重新扫一遍 `turn/start`/`step/start`。
 
 **4. 一个真实存在的坑，`fixtures/dsh/README.md` 已经踩过、写进了文档：**
@@ -48,7 +48,7 @@
 
 ### P0 — 数据通路（core → wasm → 宿主投影）
 
-#### D1 · 新建 `crates/skill-vitals-core/src/duration.rs`：通用工具调用耗时
+#### D1 · 新建 `crates/agent-vitals-core/src/duration.rs`：通用工具调用耗时
 把 `skill.rs` 里"`callId` 配对 `tool/call`↔`tool/result`、算 `duration_ms`"这段逻辑
 **推广到所有工具**，不再局限于 `name="skill"`。
 
@@ -63,13 +63,13 @@
 | `seq` | `tool/call` 自带 | — |
 
 - 纪律：和 `skill.rs` 一样，缺失字段进 `missing_fields`，不填默认值。
-- lockstep：`scripts/skill_vitals/duration.py`
+- lockstep：`scripts/agent_vitals/duration.py`
 - 测试：core `#[cfg(test)]` + `tests/test_degradation.py` 新增一类（残缺日志不能崩）
 - ⚠️ **新 Python 模块要登记两处白名单，漏一处 CI 才报错**（T3 建 `skill.py` 时踩过，
   commit 原话："两处都漏一个都会在真实 CI 里报 'Unexpected file'"）：
   1. `tests/test_clawhub_packaging.py` 的 `ALLOWED_PACKAGE_FILES`
   2. `.github/workflows/package-clawhub.yml` 里那个 `case` 分支的文件名列表
-  这两处**已经漂移过一次**：`model.py` 在 ①里、不在 ②里，而 `scripts/skill_vitals/`
+  这两处**已经漂移过一次**：`model.py` 在 ①里、不在 ②里，而 `scripts/agent_vitals/`
   下根本没有这个文件——白名单留了个永不匹配的条目没人发现。说明这不是"照着改一处
   就顺手改另一处"的机械工作，两处都要自己核一遍。
 - ⚠️ 规模提醒：一个真实会话可能有几百次工具调用，输出数组会比 `skillAudit` 大一个
@@ -105,8 +105,8 @@
 
 #### D4 · Hook 消费抽取（core 已完成，宿主前提仍未验证）
 
-`crates/skill-vitals-core/src/duration.rs::hook_executions` /
-`scripts/skill_vitals/duration.py::hook_executions` 已实现——直接抽取
+`crates/agent-vitals-core/src/duration.rs::hook_executions` /
+`scripts/agent_vitals/duration.py::hook_executions` 已实现——直接抽取
 `hook/result`（不需要跟 `hook/invoked` 配对减时间戳，`durationMs` 已经是
 harness 算好的值），带 `decision` 分布计数。CLI 侧（`src/dsh.rs` 的
 `EXECUTION_EVENT_TYPES` 已收 `hook/*`）立即可用，测试齐全（core 8 个 +
@@ -146,10 +146,10 @@ D6 那一侧的接线——`hook_executions` 本身已经就绪，届时只是�
   是"两条日志之间的墙钟差"，两个数字含义不同，不要混用，注释里写清楚。
 
 #### D5 · wasm 导出
-- 改：`crates/skill-vitals-wasm/src/lib.rs` 加
+- 改：`crates/agent-vitals-wasm/src/lib.rs` 加
   `pub fn duration_audit(events_json: &str) -> String`
 - `wasm-pack build --target web`，拷贝 `pkg/*.js` + `*_bg.wasm` 进 `dsh-client/`
-- 改：`dsh-client/skill_vitals_wasm.d.ts` 补声明
+- 改：`dsh-client/agent_vitals_wasm.d.ts` 补声明
 - ⚠️ wasm↔CLI 漂移没有自动测试守，手工拿同一份 fixture 两边对一遍（`behavior.jsonl`
   就有 turn 9–14 的轨迹级案例，够用来对拍）
 
@@ -299,7 +299,7 @@ D1（通用工具调用耗时，用户最直接能感知"这次卡在哪一步"�
 
 ## 4. 全程纪律（与 `SKILL_EXECUTION_BACKLOG.md` 一致，不重复造轮子）
 
-1. **四方 lockstep**：core（Rust）↔ `scripts/skill_vitals/`（Python）↔ wasm（重编译
+1. **四方 lockstep**：core（Rust）↔ `scripts/agent_vitals/`（Python）↔ wasm（重编译
    并拷贝）↔ 宿主 TS。差分 golden 守 Python↔Rust；wasm↔CLI 漂移没有自动测试，必须
    手工验
 2. **golden `--update` 前逐字确认**——不过本 backlog 的改动大概率不touch

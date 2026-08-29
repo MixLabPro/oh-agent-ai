@@ -1,11 +1,11 @@
 //! Codex 会话日志（rollout JSONL）读取器 —— P4 适配器的 "locate → shape →
 //! extract" 三段（五段式流水线 locate → shape → extract → derive → coverage，
 //! 见 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §4.2）。"derive → coverage" 两段在
-//! core 的 `crates/skill-vitals-core/src/codex_evidence.rs`，I/O 不进去。
+//! core 的 `crates/agent-vitals-core/src/codex_evidence.rs`，I/O 不进去。
 //!
 //! Codex 的 rollout 落盘在 `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl`，
 //! 明文 append-only JSONL，每行一个 `{type, timestamp, payload}` 包络。**命名冲突
-//! 警告**：`src/codex.rs`（和 `scripts/skill_vitals/adapters/codex.py`）是安装时
+//! 警告**：`src/codex.rs`（和 `scripts/agent_vitals/adapters/codex.py`）是安装时
 //! 的运行时探针适配器，跟这里完全无关；本模块是会话日志审计，叫 `codex_session`，
 //! 不要互相复用。
 //!
@@ -49,7 +49,7 @@ fn degraded(reason: &str) -> Value {
 }
 
 /// 纯解析：把整个 rollout JSONL 文本折成 provenance 字段 + 原始条目数组。
-/// 与 Python `scripts/skill_vitals/adapters/codex_session.py::parse_codex_session_log`
+/// 与 Python `scripts/agent_vitals/adapters/codex_session.py::parse_codex_session_log`
 /// 逐字节对齐。
 ///
 /// 抽取的 provenance 字段（实测 field path，见 `codex-corpus-facts` 记忆与
@@ -148,7 +148,7 @@ pub fn read_codex_session_log(path: &Path) -> Value {
 }
 
 /// 列出 Codex 会话根集合的确定性状形：每个根是否存在、rollout 数量、字节总量。
-/// 与 Python `scripts/skill_vitals/adapters/codex_session.py::codex_session_roots_report`
+/// 与 Python `scripts/agent_vitals/adapters/codex_session.py::codex_session_roots_report`
 /// 逐字节对齐。
 ///
 /// **存在性探测，绝不报错**：根目录不存在 → `exists=false` 且 file_count/
@@ -224,7 +224,7 @@ pub fn codex_rollout_files(home: &Path) -> Vec<PathBuf> {
 }
 
 /// 纯解析：把 `session_index.jsonl` 折成 `{id: thread_name}` 映射。与 Python
-/// `scripts/skill_vitals/adapters/codex_session.py::parse_session_index` 对齐。
+/// `scripts/agent_vitals/adapters/codex_session.py::parse_session_index` 对齐。
 ///
 /// 索引的 `id` 键 = **逻辑 `payload.session_id`**（不是 rollout 文件名 UUID
 /// `payload.id`）——实测本机 51 份 rollout：`payload.session_id` 命中索引
@@ -275,8 +275,8 @@ pub fn read_session_index(home: &Path) -> HashMap<String, String> {
 }
 
 /// `codex-evidence` 子命令直接收路径参数（与 behavior/duration-audit 同款），不
-/// 走环境变量注入——`SKILL_VITALS_CODEX_SESSION_LOG` 的机制（DSH 那个
-/// `SKILL_VITALS_DSH_SESSION_LOG` 的对称物）等未来真有「按宿主自动发现会话日志」
+/// 走环境变量注入——`AGENT_VITALS_CODEX_SESSION_LOG` 的机制（DSH 那个
+/// `AGENT_VITALS_DSH_SESSION_LOG` 的对称物）等未来真有「按宿主自动发现会话日志」
 /// 的扫描入口时再加，现在加就是死代码。
 #[cfg(test)]
 mod tests {

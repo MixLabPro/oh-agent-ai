@@ -6,7 +6,7 @@
 // 第三期的时间线（687 点聚合）尤其需要这条路径。
 //
 // 用法：
-//   skill-vitals behavior <session.jsonl> --json report.json
+//   agent-vitals behavior <session.jsonl> --json report.json
 //   node scripts/preview-real.mjs report.json [out.html]
 //
 // 报告 JSON 里没有 session_id（core 看不到它，是宿主注入的），这里补一个

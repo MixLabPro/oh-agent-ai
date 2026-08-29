@@ -1,10 +1,10 @@
 /**
- * Skill Vitals — DeepSeek Harness profile bundle glue plugin.
+ * Agent Vitals — DeepSeek Harness profile bundle glue plugin.
  *
  * Registers ONE skill provider on ctx.skills that serves this package's
  * SKILL.md. The scanner itself is deliberately NOT bundled here: the three
  * hard constraints (npm-prebuilt only, no scanner copy, no build step) mean
- * the audit runs from the `skill-vitals` binary on PATH or from a repo
+ * the audit runs from the `agent-vitals` binary on PATH or from a repo
  * checkout — the skill body explains both.
  *
  * No dependencies, no TypeScript, no build step: this file ships as-is.
@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path'
 const here = dirname(fileURLToPath(import.meta.url))
 const skillPath = join(here, 'SKILL.md')
 
-export const name = 'skill-vitals'
+export const name = 'agent-vitals'
 export const inject = ['skills']
 
 // Minimal dependency-free frontmatter parse. The bundle's SKILL.md keeps a
@@ -24,7 +24,7 @@ export const inject = ['skills']
 // line split is enough — no YAML parser, no third-party code.
 function parseFrontmatter(text) {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(text)
-  if (!match) throw new Error('dsh-skill-vitals: SKILL.md is missing frontmatter')
+  if (!match) throw new Error('dsh-agent-vitals: SKILL.md is missing frontmatter')
   const frontmatter = {}
   for (const line of match[1].split(/\r?\n/)) {
     const colon = line.indexOf(':')
@@ -50,7 +50,7 @@ async function readSkill() {
 
 export function apply(ctx) {
   ctx.skills.registerProvider(() => ({
-    name: 'skill-vitals',
+    name: 'agent-vitals',
 
     async list() {
       const { frontmatter } = await readSkill()
@@ -60,7 +60,7 @@ export function apply(ctx) {
         ...(frontmatter.whenToUse !== undefined ? { whenToUse: frontmatter.whenToUse } : {}),
         invocation: { modelInvocable: true, userInvocable: true },
         source: 'bundled',
-        provider: 'skill-vitals',
+        provider: 'agent-vitals',
         rank: 600,
         locator: { path: skillPath },
         resourceBase: { kind: 'directory', path: here },

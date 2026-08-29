@@ -17,7 +17,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-PACKAGE = SCRIPTS / "skill_vitals"
+PACKAGE = SCRIPTS / "agent_vitals"
 
 
 def _module_names():
@@ -38,7 +38,7 @@ class ImportArchitectureTests(unittest.TestCase):
     def test_existing_package_modules_import_without_process_side_effects(self):
         modules = _module_names()
         if not modules:
-            self.skipTest("The staged skill_vitals package has not been extracted yet")
+            self.skipTest("The staged agent_vitals package has not been extracted yet")
 
         probe = r'''
 import importlib
@@ -88,15 +88,15 @@ print("IMPORT_OK")
             self.skipTest("Host adapters have not been extracted yet")
 
         forbidden = {
-            "skill_vitals.cli",
-            "skill_vitals.report",
-            "skill_vitals.lifecycle",
-            "skill_vitals.doctor",
-            "skill_vitals.explain",
-            "skill_vitals.overlap",
-            "skill_vitals.snapshots",
-            "skill_vitals.diff",
-            "skill_vitals.redact",
+            "agent_vitals.cli",
+            "agent_vitals.report",
+            "agent_vitals.lifecycle",
+            "agent_vitals.doctor",
+            "agent_vitals.explain",
+            "agent_vitals.overlap",
+            "agent_vitals.snapshots",
+            "agent_vitals.diff",
+            "agent_vitals.redact",
         }
         violations = []
         for path in sorted(adapters.glob("*.py")):
@@ -119,7 +119,7 @@ print("IMPORT_OK")
         if len(lines) > 40:
             self.skipTest("The staged migration has not reduced scan.py yet")
         source = "\n".join(lines)
-        self.assertIn("skill_vitals", source)
+        self.assertIn("agent_vitals", source)
         self.assertIn("__main__", source)
         self.assertNotIn("argparse.ArgumentParser", source)
 

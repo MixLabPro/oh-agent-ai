@@ -171,7 +171,7 @@ const NOTES = { k1: { text: '这条我确认过，是我自己跑的清理脚本
 
 // ── 7. redactPath：工作区根路径替换，非正则、cwd 为空原样返回 ──────────────
 {
-  const cwd = '/Users/dev/projects/skill-vitals'
+  const cwd = '/Users/dev/projects/agent-vitals'
   if (redactPath(`写入 ${cwd}/src/foo.ts`, cwd) !== '写入 <workspace>/src/foo.ts') {
     fail('redactPath 应把 evidence 里的工作区根路径整体替换成 <workspace>')
   }
@@ -195,7 +195,7 @@ const NOTES = { k1: { text: '这条我确认过，是我自己跑的清理脚本
 
 // ── 8. pathsRedacted：诚实反映"这次导出有没有可替换的锚点" ──────────────────
 {
-  const cwd = '/Users/dev/projects/skill-vitals'
+  const cwd = '/Users/dev/projects/agent-vitals'
   const rowsWithPath = [
     { key: 'k1', rule: 'SV604', severity: 'warning', category: 'x', tool_name: 'write',
       evidence: `写入 ${cwd}/dist/out.js`, count: 1, seqs: [1], turn: 1, step: 1, call_id: 'c1' },

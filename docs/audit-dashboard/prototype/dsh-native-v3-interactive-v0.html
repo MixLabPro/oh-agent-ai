@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Skill Vitals Audit — DSH-native v3 · interactive v0</title>
+  <title>Agent Vitals Audit — DSH-native v3 · interactive v0</title>
   <style>
     :root{
       --bg:var(--dsw-alias-bg-base,#f6f7fa);--layer:var(--dsw-alias-bg-layer-1,#fff);--layer2:var(--dsw-alias-bg-layer-2,#f2f4f7);
@@ -57,7 +57,7 @@
       <div class="side-head"><span>Workspaces</span><span class="side-tools"><button class="side-icon" aria-label="搜索">⌕</button><button class="side-icon" aria-label="视图">≡</button><button class="side-icon" aria-label="添加">＋</button></span></div>
       <button class="workspace">▱ deepseek-harness</button>
       <button class="session"><span>Install modlens skill health c…</span><span>2d</span></button>
-      <button class="workspace active">▱ skill-vitals</button>
+      <button class="workspace active">▱ agent-vitals</button>
       <button class="session"><span>请检查审计的UI代码：dsh…</span><span>34min</span></button>
       <button class="session"><span>AGENT_BEHAVIOR_AUDIT.</span><span>4d</span></button>
       <button class="session selected"><span>Git拉取最新代码</span><span>6d</span></button>
@@ -106,7 +106,7 @@
               <g data-event="model" class="event" tabindex="0" role="button" aria-label="模型切换 T48"><rect x="630" y="80" width="10" height="10" fill="#fff" stroke="#8256d0" stroke-width="2"></rect></g>
               <g data-event="skill" data-skill="browser" class="event" tabindex="0" role="button" aria-label="browser T48"><path d="M668 77 l7 7 l-7 7 l-7 -7z" fill="#fff" stroke="var(--blue)" stroke-width="2"></path><text class="event-label" x="650" y="65">browser · T48</text></g>
               <g data-event="agent" class="event" tabindex="0" role="button" aria-label="子代理三次 T43"><path d="M520 121 l7 7 l-7 7 l-7 -7z" fill="#fff" stroke="var(--success)" stroke-width="2"></path></g>
-              <g data-event="skill" data-skill="skill-vitals" class="event" tabindex="0" role="button" aria-label="skill-vitals T57"><path d="M758 64 l7 7 l-7 7 l-7 -7z" fill="#fff" stroke="var(--blue)" stroke-width="2"></path><text class="event-label" x="730" y="91">skill-vitals · T57</text></g>
+              <g data-event="skill" data-skill="agent-vitals" class="event" tabindex="0" role="button" aria-label="agent-vitals T57"><path d="M758 64 l7 7 l-7 7 l-7 -7z" fill="#fff" stroke="var(--blue)" stroke-width="2"></path><text class="event-label" x="730" y="91">agent-vitals · T57</text></g>
               <text class="axis" x="42" y="216">T1</text><text class="axis" x="260" y="216">T20</text><text class="axis" x="520" y="216">T43</text><text class="axis" x="780" y="216">T63</text><text class="axis" x="1068" y="216">T78</text>
             </svg>
             <div class="chart-tip" id="chart-tip"><div class="tip-name">ui-ux-pro-max · T43</div><div class="tip-meta">模型主动选择 · 加载成功 · 1.2s</div></div>
@@ -122,7 +122,7 @@
             <div class="skill-row head" role="row"><span>Skill</span><span>状态</span><span>触发</span><span>所在 Agent</span><span>首次触发</span><span>加载耗时</span><span>正文 Token</span><span>关联费用</span><span>Finding</span><span></span></div>
             <div class="skill-row" role="row" tabindex="0" data-kind="triggered verified" data-name="ui-ux-pro-max"><span class="skill-name">ui-ux-pro-max</span><span class="status ok">已验证</span><span>显式 1 · 模型 1</span><span>主 Agent</span><span class="mono">T43</span><span class="mono">1.2s</span><span class="mono">约 8.4K</span><span class="mono">关联 ¥18.6</span><span>0</span><span class="chev">›</span></div>
             <div class="skill-row" role="row" tabindex="0" data-kind="triggered unverified finding" data-name="browser"><span class="skill-name">browser</span><span class="status warn">未验证</span><span>模型 2</span><span>2 个 Agent</span><span class="mono">T48</span><span class="mono">0.8s</span><span class="mono">约 5.1K</span><span class="mono">关联 ¥12.3</span><span>1</span><span class="chev">›</span></div>
-            <div class="skill-row" role="row" tabindex="0" data-kind="triggered failed finding" data-name="skill-vitals"><span class="skill-name">skill-vitals</span><span class="status error">加载失败</span><span>显式 1</span><span>子 Agent T57</span><span class="mono">T57</span><span class="mono">3.4s</span><span class="mono">约 6.7K</span><span class="mono">关联 ¥7.9</span><span>1</span><span class="chev">›</span></div>
+            <div class="skill-row" role="row" tabindex="0" data-kind="triggered failed finding" data-name="agent-vitals"><span class="skill-name">agent-vitals</span><span class="status error">加载失败</span><span>显式 1</span><span>子 Agent T57</span><span class="mono">T57</span><span class="mono">3.4s</span><span class="mono">约 6.7K</span><span class="mono">关联 ¥7.9</span><span>1</span><span class="chev">›</span></div>
             <div class="skill-row" role="row" tabindex="0" data-kind="triggered verified" data-name="web-design-engineer"><span class="skill-name">web-design-engineer</span><span class="status ok">已验证</span><span>模型 2</span><span>主 Agent</span><span class="mono">T63</span><span class="mono">1.6s</span><span class="mono">约 9.2K</span><span class="mono">关联 ¥24.8</span><span>0</span><span class="chev">›</span></div>
           </div>
         </section>
@@ -176,7 +176,7 @@
     const details={
       'ui-ux-pro-max':{status:'结果已验证',klass:'ok',trigger:'用户显式 1 · 模型选择 1',agent:'主 Agent',turn:'T43 · s6',load:'成功',time:'1.2s',token:'约 8.4K Token',cost:'¥18.6'},
       browser:{status:'效果未验证',klass:'warn',trigger:'模型选择 2',agent:'2 个 Agent',turn:'T48',load:'成功',time:'0.8s',token:'约 5.1K Token',cost:'¥12.3'},
-      'skill-vitals':{status:'加载失败',klass:'error',trigger:'用户显式 1',agent:'子 Agent T57',turn:'T57',load:'失败',time:'3.4s',token:'约 6.7K Token',cost:'¥7.9'},
+      'agent-vitals':{status:'加载失败',klass:'error',trigger:'用户显式 1',agent:'子 Agent T57',turn:'T57',load:'失败',time:'3.4s',token:'约 6.7K Token',cost:'¥7.9'},
       'web-design-engineer':{status:'结果已验证',klass:'ok',trigger:'模型选择 2',agent:'主 Agent',turn:'T63',load:'成功',time:'1.6s',token:'约 9.2K Token',cost:'¥24.8'}
     };
     const drawer=document.querySelector('#skill-drawer'),mask=document.querySelector('#drawer-mask');

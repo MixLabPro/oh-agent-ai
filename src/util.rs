@@ -61,13 +61,13 @@ pub fn read_lossy(p: &Path) -> Option<String> {
     Some(out)
 }
 
-/// 粗略 token 估算。**单一真相源在 core**（`skill_vitals_core::util::est_tokens`），
+/// 粗略 token 估算。**单一真相源在 core**（`agent_vitals_core::util::est_tokens`），
 /// 这里只是 re-export —— 与 `src/behavior.rs` re-export core 规则同一个模式。
 ///
 /// 为什么必须下沉而不是在两处各留一份：FR-04a 的上下文构成归因要在浏览器侧算
 /// （宿主投影的 `view()` 跑 wasm），wasm 只能看到 core。两份拷贝悄悄分开正是这个
 /// repo 反复要钉的那类缺陷。CJK 判据与截断语义的说明见 core 侧文档注释。
-pub use skill_vitals_core::util::est_tokens;
+pub use agent_vitals_core::util::est_tokens;
 
 /// 复刻 Python 的 `round(x, n)`。
 ///
@@ -115,7 +115,7 @@ mod tests {
 
     // 期望值来自 tests/test_characterization.py，逐条对齐。比例是 DeepSeek 官方
     // 换算（CJK×0.6、其余×0.3，2026-08-21 从旧比例换过来——理由见
-    // crates/skill-vitals-core/src/util.rs 的文档注释）。
+    // crates/agent-vitals-core/src/util.rs 的文档注释）。
 
     #[test]
     fn est_tokens_ascii_truncates() {
@@ -345,14 +345,14 @@ mod wrap_tests {
 
     #[test]
     fn english_words_are_not_split() {
-        let text = "run skill-vitals overlap ".repeat(12);
+        let text = "run agent-vitals overlap ".repeat(12);
         let joined: String = wrap(&text, "  → ", None)
             .iter()
             .map(|l| l.trim().to_string())
             .collect::<Vec<_>>()
             .join(" ");
         assert!(!joined.contains("skill-vital s"));
-        assert!(joined.contains("skill-vitals"));
+        assert!(joined.contains("agent-vitals"));
     }
 
     #[test]

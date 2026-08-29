@@ -18,7 +18,7 @@ LOAD/STATUS 分列、未加载不谈生命周期、阈值必须显示 —— 这
 
 跑法：
     python3 -m unittest tests.test_render -v
-    需要 SKILL_VITALS_BIN 才做双实现比对，否则只跑行为断言。
+    需要 AGENT_VITALS_BIN 才做双实现比对，否则只跑行为断言。
 """
 
 import json
@@ -34,7 +34,7 @@ from tests.env_helpers import isolated_home_env
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "scripts" / "scan.py"
 PY_CMD = [sys.executable, str(SCAN)]
-_BIN = os.environ.get("SKILL_VITALS_BIN")
+_BIN = os.environ.get("AGENT_VITALS_BIN")
 RS_CMD = [str(Path(_BIN).resolve())] if _BIN else None
 SCAN_CMD = RS_CMD or PY_CMD
 
@@ -208,7 +208,7 @@ class OverlapCase(unittest.TestCase):
     def run_overlap(self, *extra, cmd=None):
         env = isolated_home_env(self.tmp)
         for k in ("CODEX_RUNTIME", "OPENCLAW_RUNTIME", "WORKBUDDY_BUILTINS"):
-            env["SKILL_VITALS_DISABLE_" + k] = "1"
+            env["AGENT_VITALS_DISABLE_" + k] = "1"
         r = subprocess.run((cmd or SCAN_CMD) + ["overlap", "--host", "claude-code"]
                            + list(extra),
                            cwd=str(self.tmp / "workdir"), env=env,
@@ -266,7 +266,7 @@ class TestOverlapMatchesSpec(OverlapCase):
                 self.assertIn("Lexical", out)
                 self.assertIn("not a verdict" if flags[1] == "0.2" else "no semantic competition",
                               out)
-                self.assertIn("/skill-vitals", out, "必须给出拿到真判断的下一步")
+                self.assertIn("/agent-vitals", out, "必须给出拿到真判断的下一步")
 
     def test_judge_is_not_advertised_as_available(self):
         """`--judge` 是 P1.5。把没实现的东西写成可用的选项，用户敲下去
@@ -289,7 +289,7 @@ class TestOverlapMatchesSpec(OverlapCase):
         self.assertEqual(len(json.loads(p.read_text(encoding="utf-8"))), 1)
 
 
-@unittest.skipUnless(RS_CMD, "未设 SKILL_VITALS_BIN，跳过双实现比对")
+@unittest.skipUnless(RS_CMD, "未设 AGENT_VITALS_BIN，跳过双实现比对")
 class TestOverlapIsIdenticalAcrossImplementations(OverlapCase):
     def test_identical(self):
         for c in [("--min", "0.2"), ("--min", "0.05"), ("--min", "0.05", "--top", "2")]:
@@ -298,7 +298,7 @@ class TestOverlapIsIdenticalAcrossImplementations(OverlapCase):
                                  self.run_overlap(*c, cmd=RS_CMD))
 
 
-@unittest.skipUnless(RS_CMD, "未设 SKILL_VITALS_BIN，跳过双实现比对")
+@unittest.skipUnless(RS_CMD, "未设 AGENT_VITALS_BIN，跳过双实现比对")
 class TestBothImplementationsRenderIdentically(RenderCase):
     """呈现层的差分测试。
 

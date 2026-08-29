@@ -366,7 +366,7 @@ If you observe both, runtime behavior may differ from documentation; rename them
 then disable only if it is unnecessary. This tool never deletes anything automatically.", lines.len() + 1));
     }
     if !rec.overlap_candidates.is_empty() {
-        lines.push(format!("{}. It has {} lexically overlapping neighbors; run `skill-vitals overlap` to inspect shared terms",
+        lines.push(format!("{}. It has {} lexically overlapping neighbors; run `agent-vitals overlap` to inspect shared terms",
                            lines.len() + 1, rec.overlap_candidates.len()));
     }
     if lines.is_empty() {
@@ -547,7 +547,7 @@ pub fn render_explain(out: &Value, o: &ExplainOpts, want_json: bool) -> ExplainO
             .collect();
         let mut msg = format!("No skill named '{}'.\n", o.name);
         if near.is_empty() {
-            msg.push_str("Run `skill-vitals list` to see what was discovered.\n");
+            msg.push_str("Run `agent-vitals list` to see what was discovered.\n");
         } else {
             msg.push_str(&format!("Did you mean: {}\n", near.join(", ")));
         }

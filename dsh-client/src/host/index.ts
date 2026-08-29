@@ -38,18 +38,18 @@ function completeIf(missingFields: string[]): ProjectionMeta {
 }
 
 // Instantiate the wasm once at module load.
-const wasmModule = new WebAssembly.Module(readFileSync(join(here, '../skill_vitals_wasm_bg.wasm')))
+const wasmModule = new WebAssembly.Module(readFileSync(join(here, '../agent_vitals_wasm_bg.wasm')))
 initSync({ module: wasmModule })
 
 // 价格表：宿主是 Node，跟 CLI 一样能直接读文件——不是浏览器，不受"client 读不到
 // repo 文件"那条约束（AuditView.tsx 的 PRICING 内嵌副本是为浏览器渲染模型短名
 // 准备的，见 styles/index.ts 顶部注释；那份副本现在只管显示，不再算钱）。这里
-// 读的是 build 时复制进包里的同一份 `scripts/skill_vitals/pricing.json`
+// 读的是 build 时复制进包里的同一份 `scripts/agent_vitals/pricing.json`
 // （见 package.json 的 build 说明），不是又手抄一份数字——价格改了只用改
 // pricing.json 一处，dsh-client 的 pkg build 会带上新值。
 const pricing = JSON.parse(readFileSync(join(here, '../pricing.json'), 'utf8'))
 
-// `_norm_model`/`_price`/`model_short` 的 JS 镜像（Python: scripts/skill_vitals/
+// `_norm_model`/`_price`/`model_short` 的 JS 镜像（Python: scripts/agent_vitals/
 // cost.py，Rust: src/cost.rs::cost_report）——三种语言算同一套价目表，算法必须
 // 逐行对得上；跑 `npm run verify:host` 里对真实 fixture 的断言即是这份镜像的
 // 差分守护（CLI 侧另有 test_cli_matrix.py 的 both() 逐字节比对）。

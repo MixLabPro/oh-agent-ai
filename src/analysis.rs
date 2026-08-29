@@ -489,8 +489,8 @@ fn trigger_dsh(
     dsh_evidence_path: Option<&str>,
 ) -> Map<String, Value> {
     let source = match dsh_evidence_path {
-        Some(p) => format!("SKILL_VITALS_DSH_SESSION_LOG -> {}", p),
-        None => "SKILL_VITALS_DSH_SESSION_LOG (not set)".to_string(),
+        Some(p) => format!("AGENT_VITALS_DSH_SESSION_LOG -> {}", p),
+        None => "AGENT_VITALS_DSH_SESSION_LOG (not set)".to_string(),
     };
     let degraded = dsh_evidence.and_then(|e| e.get("degraded")).and_then(|d| d.as_str());
 

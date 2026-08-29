@@ -1,4 +1,4 @@
-# 价格表单源锁步测试：CLI 用 `scripts/skill_vitals/pricing.json`（单一真相源）。
+# 价格表单源锁步测试：CLI 用 `scripts/agent_vitals/pricing.json`（单一真相源）。
 # dsh-client 现在有两份派生副本，理由不同：
 #   - `src/client/styles/index.ts` 的 PRICING —— 浏览器读不到 repo 文件，只能
 #     内嵌一份，供**展示层**用（模型短名查找）。逐值人工转录，值必须一致。
@@ -29,7 +29,7 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-PRICING_JSON = REPO / "scripts" / "skill_vitals" / "pricing.json"
+PRICING_JSON = REPO / "scripts" / "agent_vitals" / "pricing.json"
 CLIENT_JS = REPO / "dsh-client" / "src" / "client" / "styles" / "index.ts"
 HOST_PRICING_JSON = REPO / "dsh-client" / "pricing.json"
 
@@ -40,7 +40,7 @@ def _client_pricing():
     """用 node 求值 styles/index.ts 里的 `export const PRICING… = {…}` 字面量。
 
     路径必须用 `json.dumps` 转成合法 JS 字符串字面量，不能裸拼进单引号——
-    Windows 的 `str(Path)` 是反斜杠分隔（`D:\\a\\skill-vitals\\...`），裸拼
+    Windows 的 `str(Path)` 是反斜杠分隔（`D:\\a\\agent-vitals\\...`），裸拼
     进 `'...'` 会被 JS 当成转义序列吃掉（`\\a`→`a`、`\\s`→`s`），把路径拼成
     读不到文件的乱码，`fs.readFileSync` 抛出未捕获异常、node 非零退出——
     这条测试在 Windows CI 上一直是这样挂的。`json.dumps` 输出的双反斜杠
@@ -103,11 +103,11 @@ class HostPricingCopyLockstepTests(unittest.TestCase):
     def test_host_copy_matches_source_byte_for_byte(self):
         if not HOST_PRICING_JSON.exists():
             self.fail("dsh-client/pricing.json 缺失——运行时副本没有从 "
-                      "scripts/skill_vitals/pricing.json 复制过去，host/index.ts "
+                      "scripts/agent_vitals/pricing.json 复制过去，host/index.ts "
                       "的 costReport 投影会在 readFileSync 处直接崩")
         self.assertEqual(
             HOST_PRICING_JSON.read_bytes(), PRICING_JSON.read_bytes(),
-            "dsh-client/pricing.json 与 scripts/skill_vitals/pricing.json 内容不同——"
+            "dsh-client/pricing.json 与 scripts/agent_vitals/pricing.json 内容不同——"
             "改了价目表后忘了重新复制到 dsh-client/，宿主的 costReport 会算出旧价钱")
 
 

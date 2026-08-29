@@ -28,12 +28,12 @@ from tests.env_helpers import isolated_home_env
 
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "scripts" / "scan.py"
-_BIN = os.environ.get("SKILL_VITALS_BIN")
+_BIN = os.environ.get("AGENT_VITALS_BIN")
 SCAN_CMD = [_BIN] if _BIN else [sys.executable, str(SCAN)]
 
 sys.path.insert(0, str(ROOT / "scripts"))
-from skill_vitals.skill import skill_invocations  # noqa: E402
-from skill_vitals.duration import (  # noqa: E402
+from agent_vitals.skill import skill_invocations  # noqa: E402
+from agent_vitals.duration import (  # noqa: E402
     tool_call_durations, turn_durations, step_durations, approval_latencies, hook_executions,
 )
 

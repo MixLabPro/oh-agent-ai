@@ -100,7 +100,7 @@
     "cwd": null,
     "catalog_skills": 0,
     "errors": [
-      "disabled by SKILL_VITALS_DISABLE_CODEX_RUNTIME"
+      "disabled by AGENT_VITALS_DISABLE_CODEX_RUNTIME"
     ],
     "note": "When available=true, Codex discovery, scope, enabled state, interface, and dependencies come from the official app-server. No public per-skill trigger-count API is available."
   },

@@ -306,7 +306,7 @@ pub fn render_overlap(out: &Value, o: &OverlapOpts) -> String {
     }
     t.push('\n');
     t.push_str("  To obtain a decision you can act on:\n");
-    t.push_str("    · Run /skill-vitals in Claude Code (free; no API key required).\n");
+    t.push_str("    · Run /agent-vitals in Claude Code (free; no API key required).\n");
     t.push_str("      Let the model judge the description fields; this is not a regex problem.\n");
     t.push_str("    · overlap --judge (external model) is not implemented yet; see PRODUCT §5.4.\n");
     t.push('\n');

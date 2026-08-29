@@ -302,7 +302,7 @@ export interface SkillAttribution {
 }
 
 // durationAudit 投影（D1–D3/D6）：执行时长审计。四路各自独立配对，字段形状
-// 见 crates/skill-vitals-core/src/duration.rs 的模块文档——core 是单一真相源。
+// 见 crates/agent-vitals-core/src/duration.rs 的模块文档——core 是单一真相源。
 export interface ToolCallDuration {
   call_id: string
   tool_name: string | null

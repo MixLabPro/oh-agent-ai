@@ -102,12 +102,12 @@ tooltip、`shortNum`/`commas`/`money`/格式化、三段式加载、宿主/视�
 ```
 
 codex 扫描**失败时降级**:不内联该块,codex host 落 empty-state,DSH 渲染不受影响。
-`codex-cost --html` 复用**同一模板**(只内联 codex 块 + `SKILL_VITALS_DEFAULT_HOST="codex"`),
+`codex-cost --html` 复用**同一模板**(只内联 codex 块 + `AGENT_VITALS_DEFAULT_HOST="codex"`),
 退役独立的 `codex_cost.html` 第二模板——一套视觉模板,不是两套。
 
 ## 为什么 DSH 嵌入格式不动
 
-`tests/test_cli_m3.py` 钉死:`skill-vitals-data-today` 块、`accurate_cost` + `by_model`、
+`tests/test_cli_m3.py` 钉死:`agent-vitals-data-today` 块、`accurate_cost` + `by_model`、
 stale 哨兵、sidecar 原始字节。这些是 DSH 作为 0 号模板的**既有契约**。loader 用宿主声明的
 blob 布局适配它;新宿主一律规范化单块。两代格式 loader 都能读,legacy 单块保留兼容推断。
 
@@ -137,7 +137,7 @@ blob 布局适配它;新宿主一律规范化单块。两代格式 loader 都能
 - **不编汇率**:¥/$ 分列展示,币种不同的花费不强行相加。
 - **整折叠 memo,非跨调用累计**:codex 折叠瓶颈是解析不是折叠(真机 51 份
   rollout ≈600MB JSONL ≈38s,单份 210MB 解析 16s、折叠 0.04s)。2026-08-29
-  兑现延迟项:`codex_fold_merged` 在 `$SKILL_VITALS_HOME/cache/codex-fold.json`
+  兑现延迟项:`codex_fold_merged` 在 `$AGENT_VITALS_HOME/cache/codex-fold.json`
   做整折叠 memo(签名 = (path, size, mtime_ns) 全等命中、不等重扫原子覆写),
   日历/oneline 二次刷新 0.06s。**仍是纯函数 memo 不是状态**:命中与否输出
   逐字节相同,差分门不受影响;`codex-cost` 的语义(无跨调用累计、重读整文件

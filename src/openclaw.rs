@@ -75,12 +75,12 @@ pub fn read_hermes_external_dirs(home: &str) -> Vec<PathBuf> {
 
 /// 在 PATH 上找 openclaw 自带的 skills 目录（npm shim / 直装 / pnpm 都要覆盖）。
 ///
-/// `SKILL_VITALS_DISABLE_OPENCLAW_BUNDLED=1` 关掉这条发现——golden/CI 用，
+/// `AGENT_VITALS_DISABLE_OPENCLAW_BUNDLED=1` 关掉这条发现——golden/CI 用，
 /// 挡住「开发机上真装了全局 openclaw」泄漏进快照。Python 侧
 /// （adapters/openclaw.py::find_openclaw_bundled_skills）一直有这道闸，
 /// Rust 移植时漏了，golden_runner 在没装 openclaw 的机器上永远测不出来。
 fn find_openclaw_bundled_skills() -> Option<PathBuf> {
-    if std::env::var("SKILL_VITALS_DISABLE_OPENCLAW_BUNDLED").as_deref() == Ok("1") {
+    if std::env::var("AGENT_VITALS_DISABLE_OPENCLAW_BUNDLED").as_deref() == Ok("1") {
         return None;
     }
     let path = std::env::var_os("PATH")?;

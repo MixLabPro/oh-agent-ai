@@ -1,8 +1,8 @@
-# Skill Vitals — 接入 DeepSeek Harness
+# Agent Vitals — 接入 DeepSeek Harness
 
 配套文档：[ARCHITECTURE.md](./ARCHITECTURE.md)（漏斗 / 观察者维度 / reconcile 语义） · [HOST_ADAPTER_CONTRACT.md](./HOST_ADAPTER_CONTRACT.md)（DSH 适配器契约） · [ENGINEERING.md](./ENGINEERING.md)（§6.6.1 bundle 分发） · [PRODUCT.md](./PRODUCT.md)（§8 排期）
 
-状态：设计，未实施。基线 deepseek-harness `47f9438`（0.1.0-rc.5），skill-vitals `54ef35e`。
+状态：设计，未实施。基线 deepseek-harness `47f9438`（0.1.0-rc.5），agent-vitals `54ef35e`。
 
 ---
 
@@ -12,8 +12,8 @@ DSH 接入是**两件互不依赖的事**，不要当成一件做：
 
 | | 方向 | 产物 | 排期 |
 |---|---|---|---|
-| **DSH-1 分发** | skill-vitals → DSH | `dsh-skill-vitals` bundle，让 DSH 用户装得上 | 可与 P1 并行 |
-| **DSH-2 能力** | DSH → skill-vitals | `dsh` 宿主适配器，让 DSH 自己被体检 | Rust 侧稳定之后（双维护，§5） |
+| **DSH-1 分发** | agent-vitals → DSH | `dsh-agent-vitals` bundle，让 DSH 用户装得上 | 可与 P1 并行 |
+| **DSH-2 能力** | DSH → agent-vitals | `dsh` 宿主适配器，让 DSH 自己被体检 | Rust 侧稳定之后（双维护，§5） |
 
 DSH-1 约 20 行 JS，一天。DSH-2 是真正的工作，**排在 Rust 侧稳定之后**（§5），且双维护下写两遍。
 
@@ -84,9 +84,9 @@ JSONL 会话日志，不是 SQLite。
 ## 2.2 注册表快照是补充
 
 `ctx.skills.snapshot()` 回答「此刻这个 scope 有什么」。写快照的插件住在**我们自己的
-`dsh-skill-vitals` bundle** 里（树外 glue plugin，`dsh plugin add` 安装，deepseek-harness
+`dsh-agent-vitals` bundle** 里（树外 glue plugin，`dsh plugin add` 安装，deepseek-harness
 仓库零改动）：监听 `skills/change`，把 `{skills, complete}` 写到
-`$DSH_HOME/skill-vitals/snapshot.json`，scanner 用 `--runtime-json <file>` 摄入。
+`$DSH_HOME/agent-vitals/snapshot.json`，scanner 用 `--runtime-json <file>` 摄入。
 
 **不要模仿 Codex 适配器去 spawn 宿主。** DSH 是插件运行时，反过来做更稳：没有
 子进程、没有超时、没有 JSONL 解析，Codex 那五类失败模式一个都不存在。
@@ -112,14 +112,14 @@ export function apply(ctx) {
       const snap = await ctx.skills.snapshot({})        // v1：全局 scope，无 observer
       await writeFile(snapshotPath, JSON.stringify({
         schema_version: '1.0',
-        producer: 'dsh-skill-vitals',
+        producer: 'dsh-agent-vitals',
         observer: null,                                  // v1：全局 scope，见下
         skills: snap.skills,                             // SkillSummary[]（name/description/…）
         complete: snap.complete,
         written_at: new Date().toISOString(),            // 新鲜度时间戳
       }))
     } catch (e) {
-      ctx.logger?.warn(`skill-vitals snapshot write failed: ${e}`)
+      ctx.logger?.warn(`agent-vitals snapshot write failed: ${e}`)
     }
   }
   void write()                                // apply 时写一次（初始快照）
@@ -127,10 +127,10 @@ export function apply(ctx) {
 }
 ```
 
-（`snapshotPath` 取 DSH home 路径下的 `skill-vitals/snapshot.json`，具体 API 实现时
+（`snapshotPath` 取 DSH home 路径下的 `agent-vitals/snapshot.json`，具体 API 实现时
 确认——插件运行在 Cordis 上下文里，有 `ctx.baseUrl`/home 路径服务可用。）
 
-**写入位置**：`$DSH_HOME/skill-vitals/snapshot.json`（固定路径，scanner 好找）。
+**写入位置**：`$DSH_HOME/agent-vitals/snapshot.json`（固定路径，scanner 好找）。
 
 **新鲜度**：`written_at` 是 ISO8601 时间戳。scanner 读快照后把它当「最近一次快照」
 （`evidence_recency="probe"`），`observed_at = written_at`——报告带时间坐标，不与
@@ -182,7 +182,7 @@ DSH 支持 skill 热加载，链路是：chokidar 检测（稳定阈值默认 20
 - **配置类证据不受 §5 排期约束。** `watch` / `watchMaxProjects` / `watchUsePolling`
   / `watchStabilityThresholdMs` 都在 profile 的 cordis 配置里，**磁盘可读**，
   不需要运行时证据也不需要 DSH 在跑。这是 DSH-2 中唯一可以提前做的部分。
-- **扫描与目录的不一致是正常的。** skill-vitals 扫的是时刻 T 的磁盘，DSH 的目录
+- **扫描与目录的不一致是正常的。** agent-vitals 扫的是时刻 T 的磁盘，DSH 的目录
   是上一轮 pre-step 的快照。报告必须能表达这个差而不是把它报成冲突——这正是
   `evidence_recency` 存在的理由（§2.3）。
 
@@ -194,7 +194,7 @@ DSH 支持 skill 热加载，链路是：chokidar 检测（稳定阈值默认 20
 
 # 3. 适配器要改哪些（DSH-2）
 
-## 3.1 skill-vitals 侧
+## 3.1 agent-vitals 侧
 
 | # | 改动 | 位置 |
 |---|---|---|
@@ -236,11 +236,11 @@ DSH 支持 skill 热加载，链路是：chokidar 检测（稳定阈值默认 20
 完整约束见 [ENGINEERING §6.6.1](./ENGINEERING.md)。要点：
 
 ```
-skill-vitals/
+agent-vitals/
 ├── SKILL.md          ← 前五个宿主，不动
 ├── scripts/          ← 扫描器，不动
 └── dsh/              ← 新增
-    ├── package.json      name: dsh-skill-vitals；dsh.bundle.patch；无 build
+    ├── package.json      name: dsh-agent-vitals；dsh.bundle.patch；无 build
     ├── cordis.patch.yml  一行 insert row
     └── index.js          约 20 行，resourceBase 指向 ../，调 PATH 上的二进制
 ```
@@ -277,7 +277,7 @@ DSH 上本来就不成立，他们等的不是自己的痛点。
 
 见 [PRODUCT §8.2](./PRODUCT.md)。摘要：
 
-- DSH 的**工具注册表与技能注册表是同一个模型**，Skill Vitals → Tool Vitals 在
+- DSH 的**工具注册表与技能注册表是同一个模型**，Agent Vitals → Tool Vitals 在
   DSH 上是同一套逻辑换个注册表，在 Claude Code 上是两套新逻辑；
 - DSH 的 preset / scope 让每个 agent 的能力集真的不一样，「我这个 agent 到底
   拥有什么能力」在那里是实问题；

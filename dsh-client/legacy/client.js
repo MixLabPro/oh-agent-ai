@@ -22,7 +22,7 @@
 // raw host projections; this file only formats.
 
 window.__ModuleLoader__.load({
-	id: "dsh-skill-vitals-audit",
+	id: "dsh-agent-vitals-audit",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;

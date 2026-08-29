@@ -8,7 +8,7 @@
 // 存储写法照抄 notes.ts：localStorage + `typeof localStorage === 'undefined'`
 // 守卫 + try/catch best-effort（存储被禁用或配额满不能让整个 tab 崩）。
 
-const BUDGET_STORAGE_KEY = 'skill-vitals-audit:budget:v1'
+const BUDGET_STORAGE_KEY = 'agent-vitals-audit:budget:v1'
 
 // 0 或负数没有意义（除零/负比例），一律当作"未设置"处理。
 export function loadBudget(): number | null {

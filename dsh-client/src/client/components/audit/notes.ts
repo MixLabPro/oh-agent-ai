@@ -1,7 +1,7 @@
 // FR-10 个人复核备注的存储层——本地读写，不碰 DOM 之外的任何东西。
 import type { Note } from './types'
 
-const NOTES_STORAGE_KEY = 'skill-vitals-audit:notes:v1'
+const NOTES_STORAGE_KEY = 'agent-vitals-audit:notes:v1'
 
 // 备注键**必须带 sessionId**（AC-02）：不带的话，A 会话里写的备注会在 B 会话
 // 里凭同样的 rule+evidence 静默出现——用户从没看过 B 的那条，却已经"有了自己

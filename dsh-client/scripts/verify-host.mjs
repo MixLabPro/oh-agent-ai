@@ -143,13 +143,13 @@ ok(`每个投影的注册契约完整（${Object.keys(defs).length} 个：stateV
 // ---------------------------------------------------------------------------
 // events: [] at creation — a genuinely new session has no history yet when
 // session/created fires; its cell only fills in as live events arrive below.
-const session = { id: 'sess-1', header: { cwd: '/workspace/skill-vitals' }, events: [] }
+const session = { id: 'sess-1', header: { cwd: '/workspace/agent-vitals' }, events: [] }
 const events = [
   { type: 'request/header', seq: 1, time: 1000, data: { header: { config: { model: 'deepseek/deepseek-v4-pro-0813' } } } },
   { type: 'assistant/chunk', seq: 2, time: 1001, data: { turn: 1, step: 1, chunk: { type: 'usage', usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 300 } } } },
   { type: 'assistant/message', seq: 3, time: 1002, data: { turn: 1, step: 1, usage: { inputTokens: 1200, outputTokens: 250, cacheReadTokens: 300 } } },
   // 工作区内写 → 不报 SV605（behaviorFindings 用同一批事件，顺带验证）
-  { type: 'tool/call', seq: 4, time: 1003, data: { name: 'write', arguments: '{"file_path":"/workspace/skill-vitals/dsh/a.json"}' } },
+  { type: 'tool/call', seq: 4, time: 1003, data: { name: 'write', arguments: '{"file_path":"/workspace/agent-vitals/dsh/a.json"}' } },
   { type: 'request/header', seq: 5, time: 1004, data: { header: { config: { model: 'deepseek/deepseek-v4-flash' } } } },
   { type: 'assistant/chunk', seq: 6, time: 1005, data: { turn: 2, step: 1, chunk: { type: 'usage', usage: { inputTokens: 500, outputTokens: 50 } } } },
   { type: 'tool/call', seq: 7, time: 1006, data: { name: 'bash', arguments: '{"command":"rm -rf /tmp/x"}' } },
@@ -169,7 +169,7 @@ for (const event of events) {
 
 // sessionCwd：真的能拿到会话工作区根路径（导出脱敏的替换锚点）。
 const scView = sc.view(scState)
-if (scView.cwd !== '/workspace/skill-vitals') {
+if (scView.cwd !== '/workspace/agent-vitals') {
   fail(`sessionCwd should capture the session's cwd, got ${JSON.stringify(scView)}`)
 }
 ok(`sessionCwd captured cwd: ${scView.cwd}`)
@@ -283,7 +283,7 @@ ok('tokenByModel splits peak_* from an event\'s own time (Beijing 10:00 peak vs 
 // costReport: 宿主原生算钱（此前是 AuditView.tsx 自己拿 tokenByModel 的输出
 // 算一遍，内嵌一份 PRICING 副本）。复用上面那批 pro→flash events——同一批
 // usage 数据，costReport 是它的另一个派生视图，价格来自 dsh-client/pricing.json
-// （build 时从 scripts/skill_vitals/pricing.json 复制而来，两处数值必须相等，
+// （build 时从 scripts/agent_vitals/pricing.json 复制而来，两处数值必须相等，
 // 这里用真实文件而非编一份，价格表本身漂移会让下面的断言直接崩，不是悄悄过）。
 // ---------------------------------------------------------------------------
 let crState = cr.init()
@@ -650,7 +650,7 @@ if (unknownView.status !== 'partial' || !unknownView.missingFields.includes('unp
 ok('costReport: 报价单没有的模型进 unpriced_tokens 而不是按 0 计价，meta 标 partial')
 
 // behaviorFindings: cwd 感知 + SV605 只报工作区外
-if (state.cwd !== '/workspace/skill-vitals') {
+if (state.cwd !== '/workspace/agent-vitals') {
   fail(`behaviorFindings did not capture cwd, got ${JSON.stringify(state.cwd)}`)
 }
 ok(`behaviorFindings captured cwd: ${state.cwd}`)
@@ -670,10 +670,10 @@ ok('behaviorFindings view: 工作区内写不报 SV605，rm -rf 报 SV601')
 // ---------------------------------------------------------------------------
 const finishedSession = {
   id: 'sess-cold',
-  header: { cwd: '/workspace/skill-vitals' },
+  header: { cwd: '/workspace/agent-vitals' },
   events: [
-    { type: 'tool/call', seq: 1, time: 1, data: { name: 'edit', arguments: '{"file_path":"/workspace/skill-vitals/src/discovery.rs"}' } },
-    { type: 'tool/call', seq: 2, time: 2, data: { name: 'edit', arguments: '{"file_path":"/workspace/skill-vitals/src/inventory.rs"}' } },
+    { type: 'tool/call', seq: 1, time: 1, data: { name: 'edit', arguments: '{"file_path":"/workspace/agent-vitals/src/discovery.rs"}' } },
+    { type: 'tool/call', seq: 2, time: 2, data: { name: 'edit', arguments: '{"file_path":"/workspace/agent-vitals/src/inventory.rs"}' } },
   ],
 }
 // Only session/created fires — the cold path never touches session/event.

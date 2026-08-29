@@ -79,8 +79,8 @@ try {
 }
 if ((patchText.match(/- insert:/g) || []).length !== 1) fail('cordis.patch.yml must have exactly one - insert:')
 if ((patchText.match(/- id:/g) || []).length !== 1) fail('cordis.patch.yml must have exactly one - id:')
-if (!patchText.includes('id: skill-vitals-audit')) fail('cordis.patch.yml insert id must be skill-vitals-audit')
-if (!patchText.includes('name: dsh-skill-vitals-audit')) fail('cordis.patch.yml insert name must be dsh-skill-vitals-audit')
+if (!patchText.includes('id: agent-vitals-audit')) fail('cordis.patch.yml insert id must be agent-vitals-audit')
+if (!patchText.includes('name: dsh-agent-vitals-audit')) fail('cordis.patch.yml insert name must be dsh-agent-vitals-audit')
 ok(`dsh.bundle.patch -> ${patchRel} (exists, single insert row)`)
 
 // --- 3. load the bundle as the browser loader would ----------------------

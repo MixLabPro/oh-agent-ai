@@ -1,4 +1,4 @@
-# Skill Vitals — 产品设计
+# Agent Vitals — 产品设计
 
 > **Observability for Agent Capabilities**
 > Know what your agent can actually do.
@@ -34,7 +34,7 @@ Phase 1 的全部产品主线就是这一句：
 
 ## 2.1 一句话
 
-**Skill Vitals 是面向 AI Agent 用户与开发团队的本地能力可观测工具**——发现 Agent 实际加载了哪些 Skills、哪些真正被使用、哪些互相干扰、消耗了多少 Context。
+**Agent Vitals 是面向 AI Agent 用户与开发团队的本地能力可观测工具**——发现 Agent 实际加载了哪些 Skills、哪些真正被使用、哪些互相干扰、消耗了多少 Context。
 
 回答三个问题：
 
@@ -69,7 +69,7 @@ GUI / Cloud Sync / Team Dashboard         ×   （MVP 阶段）
 **CLI 最擅长确定性证据，宿主模型最擅长语义判断。**两者是**并列的角色**，谁都不能替代谁。
 
 ```text
-                    Skill Vitals Core
+                    Agent Vitals Core
                            │
               ┌────────────┴────────────┐
               ↓                         ↓
@@ -121,7 +121,7 @@ GUI / Cloud Sync / Team Dashboard         ×   （MVP 阶段）
 信息层级是 **环境 → 对象 → 单体**，命令顺序必须与之对齐。
 
 ```text
-npx skill-vitals                       零安装
+npx agent-vitals                       零安装
    ↓
 doctor        「我的环境整体怎么样？」
               30 秒内给出「N 个可执行问题」
@@ -151,7 +151,7 @@ diff          进入用户路径 —— 由 doctor 带出，而非要求用户�
 # 5. 命令
 
 ```text
-skill-vitals                    # = doctor
+agent-vitals                    # = doctor
 
 P0      诊断闭环
 ├── doctor
@@ -180,7 +180,7 @@ v1.x
 └── report
 ```
 
-`skill-vitals` 无参数等价于 `doctor`——第一次使用的用户想知道的是「我的 Agent 到底有没有问题」，不该先学 CLI。
+`agent-vitals` 无参数等价于 `doctor`——第一次使用的用户想知道的是「我的 Agent 到底有没有问题」，不该先学 CLI。
 
 > 取消 v0.1 提议的简称 `sv`：runit 在 Debian/Ubuntu 占用 `/usr/bin/sv`。如需短名用 `skv`，上线前实测。
 
@@ -222,7 +222,7 @@ overlap 的语义判断有两条路
 ### 首次运行
 
 ```text
-Skill Vitals 1.0
+Agent Vitals 1.0
 ──────────────────────────────────────────────────
 Host    Claude Code 2.0.14
         触发数据 ✓ · 加载判定 ✓ · 描述预算 ✓
@@ -255,8 +255,8 @@ CRITICAL — 4 个可执行问题
   其中 2 条命中疑似引用语境（仅影响排序，仍需人工过目）
 
 下一步
-  skill-vitals list
-  skill-vitals explain proj-deploy
+  agent-vitals list
+  agent-vitals explain proj-deploy
 
   ✓ 已保存快照 → 下次运行会自动对比
 ```
@@ -270,7 +270,7 @@ Changes since last scan (Aug 1)
   + 2 skills · − 1 skill · 1 个新增告警
   描述预算  12,842 → 15,231  (+18.6%)  ⚠ 已溢出
 
-  skill-vitals diff        查看完整变化
+  agent-vitals diff        查看完整变化
 ```
 
 这是 `diff` 进入用户路径的方式——**由产品带出，不指望用户记得**。
@@ -320,8 +320,8 @@ STATUS ∈ { active, occasional, dormant, zombie, too-new, unknown }
 ### 过滤
 
 ```bash
-skill-vitals list --unused --stale 30 --shadowed --host claude
-skill-vitals list --sort usage|cost|name --top 10 --json
+agent-vitals list --unused --stale 30 --shadowed --host claude
+agent-vitals list --sort usage|cost|name --top 10 --json
 ```
 
 ---
@@ -331,7 +331,7 @@ skill-vitals list --sort usage|cost|name --top 10 --json
 漏斗的 UI，也是 `doctor` / `list` 之后**唯一需要用户学的命令**。
 
 ```text
-skill-vitals explain proj-deploy
+agent-vitals explain proj-deploy
 
 proj-deploy
 ──────────────────────────────────────────────────
@@ -381,7 +381,7 @@ STATUS   NOT IN EFFECT
 ## 5.4 `overlap`
 
 ```text
-skill-vitals overlap
+agent-vitals overlap
 
 Overlap candidates                          [Lexical，待判定]
 
@@ -397,8 +397,8 @@ Overlap candidates                          [Lexical，待判定]
   不同的两个 skill 之间，Lexical 查不到。
 
   要得到可作结论的判断：
-    · 在 Claude Code 里运行 /skill-vitals（免费，无需 key）
-    · 或 skill-vitals overlap --judge（调用外部模型）
+    · 在 Claude Code 里运行 /agent-vitals（免费，无需 key）
+    · 或 agent-vitals overlap --judge（调用外部模型）
 ```
 
 判定后（Layer 2 / 3）：
@@ -426,8 +426,8 @@ github  ↔  github-tools                     [judged]
 ## 5.5 `diff`（P0.5）
 
 ```bash
-skill-vitals diff              # 对比最近一次快照
-skill-vitals diff <file>
+agent-vitals diff              # 对比最近一次快照
+agent-vitals diff <file>
 ```
 
 ```text
@@ -580,7 +580,7 @@ xbar / SwiftBar 的执行模型是「每 N 秒**执行一次**脚本、抓 stdou
 
 **落地顺序：**
 
-1. tick 脚本 + 状态文件 + 一行状态栏（`skill-vitals watch --oneline`）
+1. tick 脚本 + 状态文件 + 一行状态栏（`agent-vitals watch --oneline`）
 2. 菜单项 → 生成 HTML → 打开（见 §5.9）
 3. **确实出现「需要一个自己会动的页面」的场景时**，才加服务器 —— 那时状态文件
    已经在了，加服务器是纯增量
@@ -623,13 +623,13 @@ token · 校验 `Origin`**。它暴露的是执行过的命令、绝对路径、
 （`/teamai-share-learnings` 把总结推到共享仓库）；照抄整条流程我们就成了知识库
 工具，过不了 §2.2 那道判断题。我们该说的只有一句：
 
-> 这次会话有 N 个行为发现，`skill-vitals behavior <log>` 看详情。
+> 这次会话有 N 个行为发现，`agent-vitals behavior <log>` 看详情。
 
 **而且这条不需要 hook。** teamai-cli 必须用 Stop hook，是因为它要把提示打进
 **AI 的上下文**里让 AI 转述；我们只需要在状态栏或终端里说一句——tick 脚本看到
 会话文件停止增长就到了同一个时刻，零写入用户配置。
 
-这条已经落地：`scripts/dsh_autosync.py`（由 `contrib/xbar/skill-vitals.5m.sh`
+这条已经落地：`scripts/dsh_autosync.py`（由 `contrib/xbar/agent-vitals.5m.sh`
 每个 tick 顺手调用）就是"tick 看到会话文件停止增长"的具体实现——
 `(mtime, size)` 连续 5 分钟不变即视为会话已结束，解压（DSH 的 `.zstd`
 是多帧追加写的，见该文件 docstring）后跑一次 `oneline`，每个会话只同步
@@ -671,9 +671,9 @@ skillAudit · skillAttribution · durationAudit · sessionCwd · loopCosts · pr
 
 | 方案 | 怎么用 | 复用那 5,597 行 | 代价 |
 |---|---|---|---|
-| **静态 HTML 导出** | `skill-vitals audit --html`，双击打开 | **全部** | 数据是快照，不实时；零服务器 |
-| 本地 serve | `skill-vitals serve` → localhost | 全部 | 要 daemon（§5.8.4） |
-| TUI | `skill-vitals audit --tui` | **0**，渲染需重写 | 不用浏览器，契合终端用户 |
+| **静态 HTML 导出** | `agent-vitals audit --html`，双击打开 | **全部** | 数据是快照，不实时；零服务器 |
+| 本地 serve | `agent-vitals serve` → localhost | 全部 | 要 daemon（§5.8.4） |
+| TUI | `agent-vitals audit --tui` | **0**，渲染需重写 | 不用浏览器，契合终端用户 |
 | 宿主插件 tab | 仅 dsh 可行 | 全部 | 其他宿主**无此扩展点** |
 
 **默认选静态 HTML 导出**：复用最大、零常驻、一个文件可直接转发，且**宿主无关**——
@@ -798,7 +798,7 @@ Intent Fit · Context Efficiency · Skill Coverage · Regression
 
 ```text
 Agent Vitals
-├── Skill Vitals
+├── Agent Vitals
 ├── MCP Vitals
 ├── Tool Vitals
 ├── Memory Vitals
@@ -810,7 +810,7 @@ Agent Vitals
 > 1. **边际成本**。DSH 的工具注册表与技能注册表是同一个模型——同样的分层、
 >    同样的近层覆盖远层、同样的层内 rank 决胜（其文档原话：skills registry 是
 >    "the shape the tools registry established"）。在 Claude Code 上
->    Skill Vitals → Tool Vitals 是两套新逻辑；在 DSH 上是同一套逻辑换个注册表。
+>    Agent Vitals → Tool Vitals 是两套新逻辑；在 DSH 上是同一套逻辑换个注册表。
 > 2. **问题是否真实存在**。DSH 的 preset / scope 让每个 agent 的能力集**真的
 >    不一样**，「我这个 agent 到底拥有什么能力」在那里是个有确定答案的实问题；
 >    在 Claude Code 上它更接近一个概念。
@@ -840,7 +840,7 @@ Capability Registry · Approved Skills · Version · Security · Usage · Cost �
 **npm 为主推渠道**——Node 在目标 Agent CLI 用户中具有极高覆盖率（Claude Code 自身即 npm 分发）：
 
 ```bash
-npx skill-vitals        # 零安装试用，转化率天花板
+npx agent-vitals        # 零安装试用，转化率天花板
 ```
 
 **dsh 是形态不同的第六条渠道**：不是二进制、不是 npm 包、也不是 skill 目录，

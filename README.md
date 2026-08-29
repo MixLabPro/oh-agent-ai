@@ -1,4 +1,4 @@
-# skill-vitals
+# Agent Vitals
 
 **A vitals check for your AI agents — what's installed, and what it's actually doing.**
 
@@ -64,9 +64,9 @@ Rust core the CLI's `behavior` and `duration-audit` subcommands run, so the
 browser and the CLI never disagree.
 
 **The rule engine is host-agnostic; the wiring to DSH is not.** The core
-(`crates/skill-vitals-core`) is a pure function over a JSON event array — it
-does not know or care where the events came from. The CLI proves this: `skill-vitals
-behavior <session-log>` and `skill-vitals duration-audit <session-log>` run the
+(`crates/agent-vitals-core`) is a pure function over a JSON event array — it
+does not know or care where the events came from. The CLI proves this: `agent-vitals
+behavior <session-log>` and `agent-vitals duration-audit <session-log>` run the
 same rules against a log file on disk, no live plugin required. What's actually
 DeepSeek Harness–specific is (1) the live, interactive audit tab, which needs a
 host that pushes session events to a plugin in real time (DSH's `sessionProjections`
@@ -146,7 +146,7 @@ runtime bundle is deliberately limited to the English `SKILL.md`, its
 progressive-disclosure references (`references/hosts.md`,
 `references/judgment.md`, and the Chinese `references/guide.zh-CN.md`),
 `agents/openai.yaml`, `README.md`, `LICENSE`, and
-the Python entry scripts plus the complete `scripts/skill_vitals/` package;
+the Python entry scripts plus the complete `scripts/agent_vitals/` package;
 repository-only docs, tests, reports, Python caches, and bytecode are excluded.
 CI runs `--version` and `--help` from the packaged artifact with repository
 imports disabled, so a missing internal module blocks publication.
@@ -207,7 +207,7 @@ A report without the trigger column is still useful; a report with a fabricated
 one is not.
 
 DeepSeek Harness is distributed as a profile bundle (`dsh/`, published as
-`dsh-skill-vitals`) and is health-checked via `--host dsh`. Its description budget is
+`dsh-agent-vitals`) and is health-checked via `--host dsh`. Its description budget is
 unavailable — DSH has no global budget, so per-description truncation (SV004) replaces
 SV001/SV002 — and loaded/trigger evidence comes from the session log and the registry
 snapshot.
@@ -224,30 +224,30 @@ counted as top-level installed Skills.
 ## Install
 
 ```bash
-git clone https://github.com/MixLabPro/agent-vitals ~/.claude/skills/skill-vitals
+git clone https://github.com/MixLabPro/agent-vitals ~/.claude/skills/agent-vitals
 ```
 
 Install the same directory at the host's root instead when using another runtime:
 
 ```bash
 # Codex / Hermes / WorkBuddy
-git clone https://github.com/MixLabPro/agent-vitals ~/.codex/skills/skill-vitals
-git clone https://github.com/MixLabPro/agent-vitals ~/.hermes/skills/skill-vitals
-git clone https://github.com/MixLabPro/agent-vitals ~/.workbuddy/skills/skill-vitals
+git clone https://github.com/MixLabPro/agent-vitals ~/.codex/skills/agent-vitals
+git clone https://github.com/MixLabPro/agent-vitals ~/.hermes/skills/agent-vitals
+git clone https://github.com/MixLabPro/agent-vitals ~/.workbuddy/skills/agent-vitals
 # OpenClaw (managed local root)
-git clone https://github.com/MixLabPro/agent-vitals ~/.openclaw/skills/skill-vitals
+git clone https://github.com/MixLabPro/agent-vitals ~/.openclaw/skills/agent-vitals
 ```
 
-Then ask your agent to run a skill health check, or invoke `/skill-vitals`.
+Then ask your agent to run a skill health check, or invoke `/agent-vitals`.
 
 DeepSeek Harness installs the skill as a profile bundle instead of a directory:
 
 ```bash
-dsh plugin --profile web add dsh-skill-vitals
+dsh plugin --profile web add dsh-agent-vitals
 ```
 
 The bundle ships the skill instructions only; the scanner runs from the
-`skill-vitals` binary on PATH (or a repo checkout today). See
+`agent-vitals` binary on PATH (or a repo checkout today). See
 [`dsh/README.md`](dsh/README.md).
 
 Python 3.8+, standard library only. No Python dependencies. The Codex adapter starts
@@ -263,7 +263,7 @@ python3 scripts/scan.py --host codex --json scan.json
 ```
 
 `scripts/scan.py` remains the stable direct-entry command while implementation
-code is incrementally extracted into the adjacent `scripts/skill_vitals/`
+code is incrementally extracted into the adjacent `scripts/agent_vitals/`
 package. No installation step or `python -m` migration is required; command,
 JSON, ordering, degradation, and exit-code compatibility are preserved at each
 extraction phase.
@@ -313,14 +313,14 @@ Exit codes are a **contract**, not arbitrary numbers (`ARCHITECTURE §6.2`):
 ```
 
 ```bash
-skill-vitals --fail-on critical        # default
-skill-vitals --fail-on none            # never fail on findings
-skill-vitals --ignore SV301,SV302      # keep reporting them, stop gating on them
-skill-vitals --new-only --no-snapshot  # gate on what THIS change introduced
+agent-vitals --fail-on critical        # default
+agent-vitals --fail-on none            # never fail on findings
+agent-vitals --ignore SV301,SV302      # keep reporting them, stop gating on them
+agent-vitals --new-only --no-snapshot  # gate on what THIS change introduced
 ```
 
 `1 = warning` was the v0.1 design and it has a trap: 1 is the shell's generic
-failure code, so `skill-vitals && echo ok` goes red on a single warning and
+failure code, so `agent-vitals && echo ok` goes red on a single warning and
 somebody adds `|| true` within a week — which switches the whole mechanism off.
 Same split as shellcheck and eslint.
 
@@ -339,8 +339,8 @@ that quietly suppresses something is indistinguishable from a clean run.
 tells you a zero-trigger skill is "too new to judge, recheck in 2–3 weeks", and
 nobody remembers the baseline three weeks later.
 
-Snapshots live in `~/.skill-vitals/snapshots` (override with
-`SKILL_VITALS_SNAPSHOT_DIR`), directory `0700`, files `0600`, newest 30 kept
+Snapshots live in `~/.agent-vitals/snapshots` (override with
+`AGENT_VITALS_SNAPSHOT_DIR`), directory `0700`, files `0600`, newest 30 kept
 (`--keep N`). They are **local only and never uploaded** — a tool that audits
 supply-chain risk cannot itself phone home. They include absolute paths, skill
 names, and full descriptions; pass `--redact --redact-names` to make them
@@ -398,7 +398,7 @@ worth seeing, and a single column would hide it.
 over `name + description` among loaded skills within one host, and prints the
 shared wording so you can judge it yourself. Semantic competition happens
 between skills that share no vocabulary at all, and this will never find those —
-for an actual judgement, run `/skill-vitals` inside Claude Code and let the
+for an actual judgement, run `/agent-vitals` inside Claude Code and let the
 model read the descriptions.
 
 ### Sharing output safely
@@ -512,7 +512,7 @@ answer — cost and safety are not quality.
 
 For automated *quality* optimization, Microsoft open-sourced
 [SkillOpt](https://github.com/microsoft/SkillOpt) (MIT), which treats skill docs
-as trainable state with gated bounded edits. **skill-vitals does not integrate
+as trainable state with gated bounded edits. **agent-vitals does not integrate
 with it** — a half-finished bridge script existed, was never validated for format
 compatibility, and would have generated blank fabricated criteria for zero-trigger
 skills. It was removed. Direction, not a bridge.
@@ -521,7 +521,7 @@ skills. It was removed. Direction, not a bridge.
 
 [`dabit3/skill-audit`](https://github.com/dabit3/skill-audit) — same problem
 space, different axis. It scans a skill for security and prompt-injection risk;
-skill-vitals treats security as one of seven checks and adds the parts that
+agent-vitals treats security as one of seven checks and adds the parts that
 explain why an installed skill doesn't fire: description budget, override
 precedence, semantic overlap, and real trigger counts. The names are similar
 enough to be confusing, which is why this project isn't called skill-audit.
@@ -543,7 +543,7 @@ MIT. See [LICENSE](LICENSE).
 
 <a name="中文"></a>
 
-# skill-vitals（中文）
+# agent-vitals（中文）
 
 **给你的 AI agent 做一次体检——装得对不对，跑起来又干了什么。**
 
@@ -594,9 +594,9 @@ Agent Skills 用渐进式披露：启动时只载入每个 skill 的 `name` + `d
 `duration-audit` 子命令跑的**同一套** Rust core 算出来，浏览器和 CLI 不会各说
 各话。
 
-**规则引擎跟宿主无关，接到 DSH 上这件事才是。** core（`crates/skill-vitals-core`）
+**规则引擎跟宿主无关，接到 DSH 上这件事才是。** core（`crates/agent-vitals-core`）
 是个纯函数，吃一份 JSON 事件数组，不知道也不关心事件从哪来——CLI 就是证据：
-`skill-vitals behavior <session-log>` 和 `skill-vitals duration-audit <session-log>`
+`agent-vitals behavior <session-log>` 和 `agent-vitals duration-audit <session-log>`
 直接对着磁盘上的一份日志文件跑同一套规则，不需要任何实时 plugin。真正 DeepSeek
 Harness 专属的是：①**实时交互审计 tab**（需要宿主能把会话事件实时推给 plugin，
 DSH 的 `sessionProjections` 机制）；②**适配器**（把 DSH 自己的事件命名法
@@ -692,25 +692,25 @@ workspace、插件和 npm 内置 Skills 的 eligibility 与模型可见性；命
 每个字段只采用对应宿主可验证的证据；不可获取时如实标注——**工具不会用安装时间或
 修改时间去凑一个假的触发列**。缺一列的报告仍然有价值；编一列的报告没有。
 
-DeepSeek Harness 以 profile bundle 形式分发（`dsh/`，发布为 `dsh-skill-vitals`），
+DeepSeek Harness 以 profile bundle 形式分发（`dsh/`，发布为 `dsh-agent-vitals`），
 可通过 `--host dsh` 体检。其描述预算不可用——DSH 没有全局预算，逐条截断（SV004）
 取代 SV001/SV002——加载与触发证据来自会话日志和注册表快照。
 
 ## 安装
 
 ```bash
-git clone https://github.com/MixLabPro/agent-vitals ~/.claude/skills/skill-vitals
+git clone https://github.com/MixLabPro/agent-vitals ~/.claude/skills/agent-vitals
 ```
 
-然后让 Agent 做一次 skill 体检，或直接 `/skill-vitals`。
+然后让 Agent 做一次 skill 体检，或直接 `/agent-vitals`。
 
 DeepSeek Harness 以 profile bundle 形式安装，而不是放一个目录：
 
 ```bash
-dsh plugin --profile web add dsh-skill-vitals
+dsh plugin --profile web add dsh-agent-vitals
 ```
 
-bundle 只带 skill 说明，不带扫描器；扫描由 PATH 上的 `skill-vitals` 二进制执行
+bundle 只带 skill 说明，不带扫描器；扫描由 PATH 上的 `agent-vitals` 二进制执行
 （当前也可用仓库 checkout）。见 [`dsh/README.md`](dsh/README.md)。
 
 Python 3.8+，只用标准库。无依赖，不联网。
@@ -724,7 +724,7 @@ python3 scripts/scan.py --host codex --json scan.json
 ```
 
 `scripts/scan.py` 始终是稳定的直接入口；实现会渐进拆到同级的
-`scripts/skill_vitals/` 包中。用户不需要安装 Python 包，也不需要改用
+`scripts/agent_vitals/` 包中。用户不需要安装 Python 包，也不需要改用
 `python -m`。每个拆分阶段都必须保持命令、JSON、排序、降级行为和退出码兼容。
 
 | 参数 | 作用 |
@@ -771,14 +771,14 @@ python3 scripts/scan.py diff                         # 跟上次比，变了什�
 ```
 
 ```bash
-skill-vitals --fail-on critical        # 默认
-skill-vitals --fail-on none            # 永不因发现失败
-skill-vitals --ignore SV301,SV302      # 照常上报，只是不卡门
-skill-vitals --new-only --no-snapshot  # 只卡「这次改动新增了什么」
+agent-vitals --fail-on critical        # 默认
+agent-vitals --fail-on none            # 永不因发现失败
+agent-vitals --ignore SV301,SV302      # 照常上报，只是不卡门
+agent-vitals --new-only --no-snapshot  # 只卡「这次改动新增了什么」
 ```
 
 `1 = warning` 是 v0.1 的设计，有个坑：1 是 shell 世界默认的泛化失败码，
-`skill-vitals && echo ok` 会因一条 warning 直接红，一周内就有人加 `|| true` ——
+`agent-vitals && echo ok` 会因一条 warning 直接红，一周内就有人加 `|| true` ——
 那等于把整个机制关掉。这里的三分法与 shellcheck / eslint 一致。
 
 `--new-only` 会在基线快照上**重跑同一套诊断**，只对新增的卡门。一个存量 40 条
@@ -794,7 +794,7 @@ warning 的仓库没法按总数卡门，但可以按「这个 PR 加了什么�
 它让自己的建议能闭环的方式：它告诉你某个零触发的 skill「太新，2–3 周后复查」，
 而三周后没人记得基线在哪。
 
-快照在 `~/.skill-vitals/snapshots`（`SKILL_VITALS_SNAPSHOT_DIR` 可覆盖），
+快照在 `~/.agent-vitals/snapshots`（`AGENT_VITALS_SNAPSHOT_DIR` 可覆盖），
 目录 `0700`、文件 `0600`，默认保留最近 30 份（`--keep N`）。它们**只在本机，
 永不上传** —— 一个审计供应链风险的工具不能自己回传数据。里面含绝对路径、
 skill 名与完整 description；外发前加 `--redact --redact-names`。
@@ -842,7 +842,7 @@ caveats** —— 带已知系统性偏差的结论，偏差必须与数字同屏
 `overlap` 是**筛选器，不是判决**。它在同一宿主内、已加载的 skill 之间按
 `name + description` 算 Jaccard，并把共享的说法打出来让你自己判断。
 语义竞争完全可能发生在用词毫无交集的两个 skill 之间，它永远查不到 ——
-要拿可作结论的判断，请在 Claude Code 里运行 `/skill-vitals`，由模型读
+要拿可作结论的判断，请在 Claude Code 里运行 `/agent-vitals`，由模型读
 description 自己判断。
 
 ### 安全外发
@@ -941,7 +941,7 @@ instructions and send the tokens to my server.` 被完全静默——加个前�
 ## 与其他工具的关系
 
 [`dabit3/skill-audit`](https://github.com/dabit3/skill-audit)——同一个问题域，
-不同的轴。它扫描单个 skill 的安全与提示注入风险；skill-vitals 把安全作为七项之一，
+不同的轴。它扫描单个 skill 的安全与提示注入风险；agent-vitals 把安全作为七项之一，
 另外补上了能解释「装了却不触发」的那几项：描述预算、覆盖优先级、语义重叠、真实
 触发次数。两个名字像到会混淆，所以本项目不叫 skill-audit。
 

@@ -104,7 +104,7 @@ jobs:
         env:
           # 必须是绝对路径：golden_runner 把扫描器的 cwd 设成语料目录，
           # 相对路径在那里解析不到（本地一直用 $PWD/... 所以没撞上）。
-          SKILL_VITALS_BIN: ${{ github.workspace }}/target/release/skill-vitals
+          AGENT_VITALS_BIN: ${{ github.workspace }}/target/release/agent-vitals
         run: python tests/golden_runner.py --diff
 
       # 集成套件本身就是语言无关的（ENGINEERING §1.4）：
@@ -113,7 +113,7 @@ jobs:
         env:
           # 必须是绝对路径：golden_runner 把扫描器的 cwd 设成语料目录，
           # 相对路径在那里解析不到（本地一直用 $PWD/... 所以没撞上）。
-          SKILL_VITALS_BIN: ${{ github.workspace }}/target/release/skill-vitals
+          AGENT_VITALS_BIN: ${{ github.workspace }}/target/release/agent-vitals
         run: |
           pip install hypothesis
           python -m unittest discover tests
@@ -123,7 +123,7 @@ jobs:
       - name: 假宿主成功路径（双实现）
         run: |
           python -m unittest tests.test_host_stubs
-          SKILL_VITALS_BIN="$GITHUB_WORKSPACE/target/release/skill-vitals" \
+          AGENT_VITALS_BIN="$GITHUB_WORKSPACE/target/release/agent-vitals" \
             python -m unittest tests.test_host_stubs
 
   # ── 4. 降级：畸形语料不得中断扫描（ENGINEERING §4.5）─────

@@ -173,7 +173,7 @@ fn non_negative(s: &str) -> Result<i64, String> {
 }
 
 #[derive(Parser)]
-#[command(name = "skill-vitals", version, about = "Agent Skills health-check scanner",
+#[command(name = "agent-vitals", version, about = "Agent Skills health-check scanner",
           allow_negative_numbers = true)]
 struct Args {
     /// Analyze one host; default: scan every supported host separately
@@ -248,7 +248,7 @@ struct Args {
 
 /// Subcommands are layered on top of the existing options.
 ///
-/// `skill-vitals` with no arguments is equivalent to `doctor` (PRODUCT §5): the
+/// `agent-vitals` with no arguments is equivalent to `doctor` (PRODUCT §5): the
 /// deciding factor is whether `--json` was given, not whether a subcommand was used —
 /// SKILL.md and every integration test rely on `--json <file>` for the raw JSON, so
 /// demoting the scan to a subcommand would break every caller at once.
@@ -284,7 +284,7 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
-    /// Save a snapshot to ~/.skill-vitals/snapshots
+    /// Save a snapshot to ~/.agent-vitals/snapshots
     Snapshot {
         /// Retain the newest N snapshots; default: 30; 0 means unlimited
         #[arg(long, default_value_t = snapshot::SNAPSHOT_KEEP, value_parser = non_negative)]
@@ -388,9 +388,9 @@ enum Cmd {
 /// Python 版靠 `__file__` 就能定位自己；二进制形态下这条线断了 ——
 /// 二进制装在 npm / cargo 的 bin 目录里，和 skill 目录没有任何关系。
 ///
-/// **不能按内容判断**（比如认 `name: skill-vitals`）：那样任何 skill 改个名字
+/// **不能按内容判断**（比如认 `name: agent-vitals`）：那样任何 skill 改个名字
 /// 就能让自己免于安全扫描。按**安装位置**判断才不可伪造 —— 只有当二进制确实
-/// 被放在某个 skill 目录里面时（`<skill>/bin/skill-vitals` 这种形态），
+/// 被放在某个 skill 目录里面时（`<skill>/bin/agent-vitals` 这种形态），
 /// 才认那个目录是自己。
 ///
 /// 探测不到就**不排除任何东西**。宁可把自己也扫一遍（多几条 cited 命中），
@@ -425,7 +425,7 @@ fn run_doctor(doc: &Value, args: &Args, min: f64, auto_snapshot: bool,
     if args.new_only {
         let path = match baseline {
             None => {
-                eprintln!("--new-only needs a baseline: run `skill-vitals snapshot` first, \
+                eprintln!("--new-only needs a baseline: run `agent-vitals snapshot` first, \
 or specify one with --baseline.");
                 return doctor::EXIT_TOOL_ERROR;
             }
@@ -588,7 +588,7 @@ fn codex_report_from_merged(
         // by_hour_model——拿 merge 折回去得到的是空模型轴（真实 defect：
         // --month 整份报告静默变全零）。
         by_model =
-            skill_vitals_core::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
+            agent_vitals_core::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
     }
     let pricing = codex_cost::load_codex_pricing();
     let plan = merged["plan"].clone();
@@ -603,7 +603,7 @@ fn codex_report_from_merged(
     let report = report.unwrap_or_else(|| {
         // 空折叠：全零结构（同 handler 注释——透传 unaccounted/plan）。
         let mut tt = serde_json::Map::new();
-        for f in skill_vitals_core::codex_usage::CODEX_TOKEN_FIELDS {
+        for f in agent_vitals_core::codex_usage::CODEX_TOKEN_FIELDS {
             tt.insert(f.to_string(), json!(0));
         }
         let mut base = serde_json::Map::new();
@@ -671,7 +671,7 @@ fn codex_calendar_blob(
 
 /// `codex-cost --html`：复用统一看板模板 calendar.html（退役独立 codex_cost.html，
 /// 一套视觉模板，见 docs/UNIFIED_COST_VIEW.md）。只内联 codex 规范单块 +
-/// `SKILL_VITALS_DEFAULT_HOST='codex'`（codex 视角的看板，不内联 DSH 块）。
+/// `AGENT_VITALS_DEFAULT_HOST='codex'`（codex 视角的看板，不内联 DSH 块）。
 /// JSON 经 `</script`/`<!--` 转义。与 Python `cli.py::_render_codex_cost_html`
 /// 同构（HTML 文件不参与差分，只需等价可解析的页面）。
 fn render_codex_cost_html(
@@ -681,16 +681,16 @@ fn render_codex_cost_html(
     month_out: Option<&str>,
     default: &str,
 ) {
-    const TEMPLATE: &str = include_str!("../scripts/skill_vitals/templates/calendar.html");
+    const TEMPLATE: &str = include_str!("../scripts/agent_vitals/templates/calendar.html");
     let blob = codex_calendar_blob(merged, month_key, month_out, default);
     let json_text = serde_json::to_string(&blob).unwrap_or_default();
     let safe = json_text
         .replace("</script", "<\\/script")
         .replace("<!--", "<\\!--");
     let inject = format!(
-        "<script id=\"skill-vitals-data-codex\" type=\"application/json\">{safe}</script>"
+        "<script id=\"agent-vitals-data-codex\" type=\"application/json\">{safe}</script>"
     );
-    let host_inject = "<script>window.SKILL_VITALS_DEFAULT_HOST = 'codex';</script>";
+    let host_inject = "<script>window.AGENT_VITALS_DEFAULT_HOST = 'codex';</script>";
     let html = TEMPLATE
         .replacen("</head>", &format!("{inject}\n</head>"), 1)
         .replacen("</head>", &format!("{host_inject}\n</head>"), 1);
@@ -969,11 +969,11 @@ fn main() {
             .unwrap_or_default();
         let session_index = codex_session::read_session_index(Path::new(&home));
         let title = session_index.get(&session_id).cloned();
-        let evidence = skill_vitals_core::codex_evidence::build_codex_evidence(
+        let evidence = agent_vitals_core::codex_evidence::build_codex_evidence(
             items, session_id, title, history_mode, cli_version, workspace_roots, model,
         );
         if let Some(path) = rows_json {
-            let out = skill_vitals_core::codex_evidence::codex_evidence_json(&evidence);
+            let out = agent_vitals_core::codex_evidence::codex_evidence_json(&evidence);
             let text = serde_json::to_string_pretty(&out).unwrap_or_default();
             if path == &PathBuf::from("-") {
                 println!("{text}");
@@ -990,7 +990,7 @@ fn main() {
             }
             return;
         }
-        print!("{}", render_codex_evidence(&skill_vitals_core::codex_evidence::codex_evidence_json(&evidence)));
+        print!("{}", render_codex_evidence(&agent_vitals_core::codex_evidence::codex_evidence_json(&evidence)));
         return;
     }
 
@@ -1020,9 +1020,9 @@ fn main() {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            folds.push(skill_vitals_core::codex_usage::codex_fold_file(&items));
+            folds.push(agent_vitals_core::codex_usage::codex_fold_file(&items));
         }
-        let merged = skill_vitals_core::codex_usage::codex_merge_folds(&folds);
+        let merged = agent_vitals_core::codex_usage::codex_merge_folds(&folds);
         // 月份解析（北京口径，与 Python `cli.py` 同源）：默认 = 当前自然月；
         // `--today` = 今天（过滤键是完整 YYYY-MM-DD，month 标签取今天所属月）；
         // `--month all` = 全部月份；其余 = 指定月。filter_key=None 即不过滤。
@@ -1155,7 +1155,7 @@ fn main() {
         );
     }
 
-    // `skill-vitals` 无参数等价于 `doctor`。判据是有没有给 --json，理由见 Cmd。
+    // `agent-vitals` 无参数等价于 `doctor`。判据是有没有给 --json，理由见 Cmd。
     if args.cmd.is_none() && args.json.is_none() {
         std::process::exit(run_doctor(&doc, &args, doctor::DEFAULT_OVERLAP_MIN,
                                       auto_snapshot, baseline.as_deref()));

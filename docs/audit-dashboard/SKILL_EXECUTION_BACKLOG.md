@@ -12,7 +12,7 @@ PRD §9.1 声称「现有数据已经能够提供」五项。逐条查过代码�
 
 | §9.1 声称 | 实际 | 位置 |
 |---|---|---|
-| 最近一次 catalog 名单 | binary 有，**审计 tab 没有** | `src/dsh.rs:209` 出名单；`crates/skill-vitals-core/src/usage.rs:471` 只出 `list.len()` |
+| 最近一次 catalog 名单 | binary 有，**审计 tab 没有** | `src/dsh.rs:209` 出名单；`crates/agent-vitals-core/src/usage.rs:471` 只出 `list.len()` |
 | 用户显式调用名称集合 | **只有名字，位置全丢** | `src/dsh.rs:183` `invoked.push(name)` |
 | 模型选择名称集合 | 同上，但**原始事件还在** | `tool/call` 在 `execution_events`，`data` 整个保留 |
 | `invoked_counts`/`selected_counts` | **binary 独有，core 里没有** | `src/analysis.rs:577` |
@@ -23,7 +23,7 @@ PRD §9.1 声称「现有数据已经能够提供」五项。逐条查过代码�
 
 ### 好消息：主体逻辑有现成模板
 
-`crates/skill-vitals-core/src/subagent.rs` 已经实现了 skill.rs 需要的**同一套 callId 配对**：
+`crates/agent-vitals-core/src/subagent.rs` 已经实现了 skill.rs 需要的**同一套 callId 配对**：
 按 `data.callId` 建索引 → 在结果侧用 `/data/message/source/callId` 回连 → 输出
 `{seq, time, turn, step, call_id, agent_id, description}`。turn/step 顺延也有现成的
 `trajectory.rs::coord_map` / `fill_coords`。T3 是照着抄，不是从零写。
@@ -38,11 +38,11 @@ PRD §9.1 声称「现有数据已经能够提供」五项。逐条查过代码�
 **性质：加一行。** `usage.rs` 为了算 `catalog_tokens` 本来就在遍历 `entries[].name +
 description`，只是最后只输出了 `len()`。
 
-- 改：`crates/skill-vitals-core/src/usage.rs:471` 附近，新增 `catalog_names`
+- 改：`crates/agent-vitals-core/src/usage.rs:471` 附近，新增 `catalog_names`
 - **隐私决策（必须先定）**：只出 `[{name, tokens}]`，**不出 description 原文**。
   理由：FR-SK-09 要求导出不含未脱敏内容；description 是内容，一旦进投影就会
   进导出。逐 skill「目录 Token」用 `tokens` 就够，不需要原文。
-- lockstep：`scripts/skill_vitals/usage.py`
+- lockstep：`scripts/agent_vitals/usage.py`
 - 测试：core `#[cfg(test)]` + `tests/test_characterization.py`
 - ⚠️ **动 golden**：`--update` 前逐字确认 diff
 - 解锁：FR-SK-02 摘要可下钻、AC-SK-01 目录 vs 触发、逐 skill 目录 Token
@@ -57,11 +57,11 @@ turn/step/seq/time/session 全部蒸发。
   上，**不是独立事件类型**。必须照 `is_usage_event` 对 `skill-catalog` 的做法按
   `source.kind` 判断。把 `user/message` 加进 type 白名单会把**所有用户消息**
   收进事件流——体积爆炸 + 把用户 prompt 原文带进投影和导出。
-- lockstep：`scripts/skill_vitals/dsh.py`
+- lockstep：`scripts/agent_vitals/dsh.py`
 - ⚠️ **动 golden**
 - 解锁：FR-SK-05 B 组（每次调用的 Turn/Step/seq/时间）
 
-#### T3 · 新建 `crates/skill-vitals-core/src/skill.rs`
+#### T3 · 新建 `crates/agent-vitals-core/src/skill.rs`
 **主体工作量。** 照 `subagent.rs` 的 callId 配对写。
 
 产出 `SkillInvocationEvent[]`（PRD §9 契约）：
@@ -75,14 +75,14 @@ turn/step/seq/time/session 全部蒸发。
 | `seq`/`requestSeq` | 事件自带 / 就近 `request/header` | null |
 
 - 纪律：缺失字段进 `missingFields` 数组输出，不填默认值
-- lockstep：`scripts/skill_vitals/skill.py`
+- lockstep：`scripts/agent_vitals/skill.py`
 - 测试：core 单测 + `tests/test_degradation.py`（残缺日志不能崩、缺的要浮出来）
 - 参考真实量级：唯一实测样本 `turn:5 step:3`，**Δt = 18ms**（原型写的 1.2s/3.4s 差两个数量级）
 
 #### T4 · wasm 导出 `skill_audit`
-- 改：`crates/skill-vitals-wasm/src/lib.rs` 加 `pub fn skill_audit(events_json: &str) -> String`
+- 改：`crates/agent-vitals-wasm/src/lib.rs` 加 `pub fn skill_audit(events_json: &str) -> String`
 - `wasm-pack build --target web`，把 `pkg/*.js` + `*_bg.wasm` 拷进 `dsh-client/`
-- 改：`dsh-client/skill_vitals_wasm.d.ts` 补声明
+- 改：`dsh-client/agent_vitals_wasm.d.ts` 补声明
 - ⚠️ wasm↔CLI 漂移**没有自动测试守**，必须手工拿同一份 fixture 两边对一遍
 
 #### T5 · 宿主 `skillAudit` 投影
@@ -189,7 +189,7 @@ turn/step/seq/time/session 全部蒸发。
 
 ## 5. 全程纪律
 
-1. **四方 lockstep**：core（Rust）↔ `scripts/skill_vitals/`（Python）↔ wasm（重编译并拷贝）
+1. **四方 lockstep**：core（Rust）↔ `scripts/agent_vitals/`（Python）↔ wasm（重编译并拷贝）
    ↔ 宿主 TS。差分 golden 守 Python↔Rust；**wasm↔CLI 漂移没有自动测试，必须手工验**
 2. **golden `--update` 前逐字确认**。反射性 `--update` 会把 golden 变成「当前行为的记录」，
    测试就不再有意义

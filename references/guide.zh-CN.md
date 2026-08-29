@@ -1,5 +1,5 @@
 ---
-name: skill-vitals
+name: agent-vitals
 description: 体检本机安装的 Agent Skills：诊断描述预算、上下文成本、覆盖冲突、语义重叠、僵尸 Skill 和供应链风险。用户询问装了多少 Skill、哪些实际可用或可删除、为何没有触发、是否安全时使用。Audit installed Agent Skills across Claude Code, Codex, OpenClaw, Hermes, and WorkBuddy; use for inventory, runtime visibility, context cost, trigger failures, cleanup, conflicts, or security checks.
 ---
 

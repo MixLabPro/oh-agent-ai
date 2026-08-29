@@ -52,10 +52,10 @@ from the filtered dates so `sum(days.cost) == total_cost_usd` still reconciles).
 
 ## Consumers
 
-- `scripts/skill_vitals/codex_usage.py` ↔ `crates/skill-vitals-core/src/codex_usage.rs`
+- `scripts/agent_vitals/codex_usage.py` ↔ `crates/agent-vitals-core/src/codex_usage.rs`
   — the fold.
-- `scripts/skill_vitals/codex_cost.py` ↔ `src/codex_cost.rs` — the pricing.
-- `scripts/skill_vitals/adapters/codex_session.py` ↔ `src/codex_session.rs` —
+- `scripts/agent_vitals/codex_cost.py` ↔ `src/codex_cost.rs` — the pricing.
+- `scripts/agent_vitals/adapters/codex_session.py` ↔ `src/codex_session.rs` —
   the `rollout-*.jsonl` enumeration (`codex_rollout_files`).
 - `tests/test_cli_matrix.py::test_codex_cost_differential` /
   `test_codex_cost_month_filter_reconciles` — byte-for-byte Python↔Rust.

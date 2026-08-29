@@ -17,7 +17,7 @@ carries the Paginated-only TurnItems (`CommandExecution`/`FileChange`/
 one" (§17.1) meaningful.
 
 Only the Python standard library is used (`json` + the repo's own
-`skill_vitals.codex_evidence` for self-verification).
+`agent_vitals.codex_evidence` for self-verification).
 
 Run:  python3 fixtures/codex/build_codex_fixture.py
 
@@ -40,10 +40,10 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.normpath(os.path.join(HERE, "..", "..", "scripts"))
 
-# Load `skill_vitals.codex_evidence` without importing the whole package's
+# Load `agent_vitals.codex_evidence` without importing the whole package's
 # __init__ chain (stdlib-only either way; this keeps the builder independent).
 _spec = importlib.util.spec_from_file_location(
-    "codex_evidence_selfcheck", os.path.join(SCRIPTS, "skill_vitals", "codex_evidence.py"))
+    "codex_evidence_selfcheck", os.path.join(SCRIPTS, "agent_vitals", "codex_evidence.py"))
 _ce = importlib.util.module_from_spec(_spec)
 sys.modules["codex_evidence_selfcheck"] = _ce
 _spec.loader.exec_module(_ce)

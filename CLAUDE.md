@@ -28,16 +28,16 @@ first, then a Chinese section anchored at `#中文`. When editing behaviour, bot
 ## Repo layout
 
 ```
-Cargo.toml                  # [workspace]: "." + crates/skill-vitals-core + crates/skill-vitals-wasm
-src/                        # Rust binary (the `skill-vitals` CLI) — ~21 modules
-crates/skill-vitals-core/   # lib crate: the PURE computation (behavior rules etc.), single source of truth
-crates/skill-vitals-wasm/   # cdylib: wasm-bindgen wrapper over core (audit_events), built with wasm-pack
-scripts/scan.py             # thin entrypoint; the scanner lives in scripts/skill_vitals/ (~26 modules)
+Cargo.toml                  # [workspace]: "." + crates/agent-vitals-core + crates/agent-vitals-wasm
+src/                        # Rust binary (the `agent-vitals` CLI) — ~21 modules
+crates/agent-vitals-core/   # lib crate: the PURE computation (behavior rules etc.), single source of truth
+crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over core (audit_events), built with wasm-pack
+scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/ (~26 modules)
 scripts/probe_logs.py       # legacy fallback (not in the default flow)
 SKILL.md                    # agent-facing driver: routes to doctor, names the SV codes
 references/                 # hosts.md (per-host evidence), judgment.md, guide.zh-CN.md
 docs/                       # design docs (ENGINEERING, DSH_INTEGRATION, AGENT_BEHAVIOR_AUDIT, …)
-dsh/                        # DSH-1 profile bundle (registers skill-vitals as a DSH skill)
+dsh/                        # DSH-1 profile bundle (registers agent-vitals as a DSH skill)
 dsh-client/                 # dual-face audit plugin (host projection + wasm + client tab)
 fixtures/ + golden/         # test corpus + byte-for-byte scanner snapshots
 tests/                      # 18 Python test files
@@ -45,7 +45,7 @@ tests/                      # 18 Python test files
 ```
 
 The **core crate is the single source of truth for pure rules**. `src/behavior.rs` in the
-binary is now a thin wrapper that re-exports `skill_vitals_core::behavior::*` and keeps
+binary is now a thin wrapper that re-exports `agent_vitals_core::behavior::*` and keeps
 only the I/O entry (`audit_session_log`). The wasm crate wraps the same core, so the
 browser/Node runs the exact same rules as the CLI — never a second copy.
 
@@ -66,10 +66,10 @@ cargo test                                 # 144 (default members: binary + core
 cargo clippy --release --all-targets -- -D warnings   # CI gate: scan path must not unwrap
 cargo build --release                       # the CLI binary
 
-# wasm — build the audit_events wasm + JS glue into crates/skill-vitals-wasm/pkg/
+# wasm — build the audit_events wasm + JS glue into crates/agent-vitals-wasm/pkg/
 cargo install wasm-pack                     # one-time
-(cd crates/skill-vitals-wasm && wasm-pack build --target web)
-#   then copy pkg/skill_vitals_wasm.js + pkg/skill_vitals_wasm_bg.wasm into dsh-client/
+(cd crates/agent-vitals-wasm && wasm-pack build --target web)
+#   then copy pkg/agent_vitals_wasm.js + pkg/agent_vitals_wasm_bg.wasm into dsh-client/
 
 # scanner CLI (Python implementation; the Rust binary is the same surface)
 python3 scripts/scan.py                     # scan, print JSON to stdout
@@ -169,7 +169,7 @@ projection's `view` calls the wasm `token_by_model` — so the tab runs the *exa
 CLI `behavior` command runs (never a second copy). Pricing those buckets into money is
 *also* host-side now: the `costReport` projection (`dsh-client/src/host/index.ts`) reads
 `tokenByModel`'s fold and prices it against `dsh-client/pricing.json` — a build-time copy of
-the single-source `scripts/skill_vitals/pricing.json` (Rust embeds the source via
+the single-source `scripts/agent_vitals/pricing.json` (Rust embeds the source via
 `include_str!`; Node can `readFileSync` its own copy directly, unlike the browser). The client
 just renders `useProjection('costReport')`. `AuditView.tsx` keeps a second, *display-only*
 baked `PRICING` copy in `styles/index.ts` — not for pricing math, only for the model
@@ -194,7 +194,7 @@ fourth copy.
 ## Six test layers, six different jobs
 
 - `tests/test_regressions.py` — one case per **defect that actually shipped**.
-- `tests/golden_runner.py` + `golden/*.json` — byte-for-byte snapshots. `SKILL_VITALS_BIN=<path>`
+- `tests/golden_runner.py` + `golden/*.json` — byte-for-byte snapshots. `AGENT_VITALS_BIN=<path>`
   points it at the Rust binary; that env var is the whole Python→Rust test story.
 - `tests/test_invariants.py` — asserts the 12 invariants by their discriminating values.
 - `tests/test_characterization.py` — pins the pure functions (`est_tokens`,
@@ -213,7 +213,7 @@ turns the golden into a record of current behaviour and the test stops meaning a
 
 `run_scan()` with no `--path` scans the actual host directories of whoever runs it.
 Consequence: **`TestScannerExcludesItself.test_self_excluded` fails unless this repo is
-checked out under a scanned root** (normally `~/.claude/skills/skill-vitals`). That single
+checked out under a scanned root** (normally `~/.claude/skills/agent-vitals`). That single
 failure is environmental; any *other* failure is real.
 
 **`--path` does not isolate** — `main()` does `DEFAULT_ROOTS + [custom paths]`. Anything
@@ -230,8 +230,8 @@ register: when changing one of the invariants above, update the comment explaini
 trade-off, and add a regression test whose docstring says what actually broke.
 
 When a rule changes, it changes in **three places that must stay in lockstep**: the Rust
-core crate (`crates/skill-vitals-core/`), the Python implementation
-(`scripts/skill_vitals/behavior.py`), and — for anything the DSH audit tab uses — the wasm
+core crate (`crates/agent-vitals-core/`), the Python implementation
+(`scripts/agent_vitals/behavior.py`), and — for anything the DSH audit tab uses — the wasm
 crate (rebuild + re-copy the `.wasm` into `dsh-client/`). The differential golden guard
 catches Python↔Rust drift; the wasm↔CLI drift is caught only by re-running the wasm build
 against the same fixtures, so verify that manually. The **trajectory detectors** (`trajectory.rs` ↔ `trajectory.py` ↔ wasm `audit_events` 合并 ↔ dsh 提取的 `turn/start·step/start·turn/end·step/end` 边界信号) are the same lockstep. The **cost fold** (`usage.rs` ↔
@@ -319,16 +319,16 @@ per-day *replacement* (idempotent — crashing mid-migration and retrying re-cop
 day, never doubles it); a *backfill* into an already-archived month is a per-day
 *accumulation* instead, because that call is new evidence, not a re-run of the same migration.
 Query a historical month with `state.read_month("YYYY-MM")` /
-`skill-vitals budget show --month YYYY-MM`; `state.list_months()` /
-`skill-vitals state months` enumerates what has data. The computation (`token_by_date_model`,
+`agent-vitals budget show --month YYYY-MM`; `state.list_months()` /
+`agent-vitals state months` enumerates what has data. The computation (`token_by_date_model`,
 `priced_day`) is in the core crate / `cost.py` precisely so the Tauri menu bar and any future
 month-query surface reuse it rather than growing a fourth copy. The DeepSeek **price
-table** lives only in `scripts/skill_vitals/pricing.json` (CLI 两侧读它；`dsh-client/
+table** lives only in `scripts/agent_vitals/pricing.json` (CLI 两侧读它；`dsh-client/
 pricing.json` 是 build 时复制出的运行时份，宿主 `costReport` 投影读它；`styles/index.ts`
 另内嵌一份仅供展示用的模型短名副本——三处由 `tests/test_pricing_lockstep.py` 守）;
 prices are business data, not rules — they change without a golden `--update`. The
 **cost computation itself** (`cost_report`) is a fourth lockstep, one level up from the
-price table: `src/cost.rs` ↔ `scripts/skill_vitals/cost.py` ↔ `dsh-client/src/host/
+price table: `src/cost.rs` ↔ `scripts/agent_vitals/cost.py` ↔ `dsh-client/src/host/
 index.ts::costReportFrom` all implement the same peak/off-peak-split pricing math over
 `{by_model, sequence}`; the CLI two-language parity is caught by `test_cli_matrix.py`'s
 `both()` differential, the TS mirror by `dsh-client/scripts/verify-host.mjs` asserting
@@ -336,10 +336,10 @@ real numbers against the checked-in `pricing.json`.
 
 Scan output must never be committed — `.gitignore` covers `skill-scan*.json`, `scan-*.json`,
 `*.scan.json`, and now also the npm `node_modules/` of `dsh/`/`dsh-client/`. The committed
-`dsh-client/skill_vitals_wasm_bg.wasm` and `dsh-client/pricing.json` are the deliberate
+`dsh-client/agent_vitals_wasm_bg.wasm` and `dsh-client/pricing.json` are the deliberate
 build-artifact exceptions: the host plugin `readFileSync`s both at runtime (the wasm binary
 and the price table `costReport` prices against), `wasm-opt` is disabled so the wasm build
-needs no network, and `pricing.json` is a plain `cp` from `scripts/skill_vitals/pricing.json`
+needs no network, and `pricing.json` is a plain `cp` from `scripts/agent_vitals/pricing.json`
 — re-copy it by hand whenever the source changes; `tests/test_pricing_lockstep.py`'s
 `HostPricingCopyLockstepTests` byte-compares them so a forgotten copy fails loudly instead
 of silently pricing off stale numbers.

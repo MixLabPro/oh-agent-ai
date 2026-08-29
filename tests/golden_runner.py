@@ -12,7 +12,7 @@
     python3 tests/golden_runner.py --diff       # 失败时打印首个差异的上下文
 
 指向 Rust 二进制（§1.6 第 2 步之后）：
-    SKILL_VITALS_BIN=target/release/skill-vitals python3 tests/golden_runner.py
+    AGENT_VITALS_BIN=target/release/agent-vitals python3 tests/golden_runner.py
 
 被扫描器指向哪个实现，唯一区别就是这一个环境变量——测试本身不需要改。
 """
@@ -41,7 +41,7 @@ DSH_SESSION_LOG = ROOT / "fixtures" / "dsh" / "golden.jsonl"
 # probe 快照（A11）：schema_version / producer 必须过 dsh.py 的版本闸。
 DSH_SNAPSHOT = {
     "schema_version": "1.0",
-    "producer": "dsh-skill-vitals",
+    "producer": "dsh-agent-vitals",
     "observer": None,
     "skills": [
         {"name": "shared-tool", "description": "Shared tool from project-dsh (rank 100)"},
@@ -57,10 +57,10 @@ FIXTURE_GEN_BY_CASE = {
     "host-dsh-probe": DSH_GEN,
 }
 
-# 扫描器命令。默认 Python oracle；设 SKILL_VITALS_BIN 即切到二进制。
+# 扫描器命令。默认 Python oracle；设 AGENT_VITALS_BIN 即切到二进制。
 # 必须解析成绝对路径：下面把扫描器的 cwd 设成语料目录，相对路径在那里
 # 解析不到。CI 上就是这么挂的（本地一直传 $PWD/... 所以没显形）。
-BIN = os.environ.get("SKILL_VITALS_BIN")
+BIN = os.environ.get("AGENT_VITALS_BIN")
 if BIN:
     BIN = str(Path(BIN).resolve())
 SCAN_CMD = [BIN] if BIN else [sys.executable, str(ROOT / "scripts" / "scan.py")]
@@ -116,14 +116,14 @@ CASES = [
 # 对比 Codex / OpenClaw：那两个要起子进程问 PATH 上的可执行文件，HOME
 # 隔离拦不住，**永远不能在 golden 里打开**。
 ENV_BY_CASE = {
-    "host-workbuddy": {"SKILL_VITALS_DISABLE_WORKBUDDY_BUILTINS": "0"},
+    "host-workbuddy": {"AGENT_VITALS_DISABLE_WORKBUDDY_BUILTINS": "0"},
     # OpenClaw 的**根发现**读的是语料里的 ~/.open*，在 HOME 隔离下确定；
     # 运行时探测（起子进程问 PATH 上的 openclaw）**仍然关着** ——
     # 那个 HOME 隔离拦不住，永远不能在 golden 里打开。
-    "host-openclaw": {"SKILL_VITALS_DISABLE_OPENCLAW_RUNTIME": "1"},
+    "host-openclaw": {"AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME": "1"},
     # DSH 会话日志证据来自环境变量（真机自动发现留后续）。指向语料根内的副本，
     # scrub 会把路径抹成 <FIXTURES>，不泄漏真机路径。
-    "host-dsh-log": {"SKILL_VITALS_DSH_SESSION_LOG": "{root}/session.jsonl"},
+    "host-dsh-log": {"AGENT_VITALS_DSH_SESSION_LOG": "{root}/session.jsonl"},
 }
 
 # 需要在语料根本身（而不是 workdir）里跑的 case
@@ -164,18 +164,18 @@ def run_case(root: Path, extra, out: Path, cwd_is_root=False, env_extra=None):
     """
     env = isolated_home_env(root)
     # DSH 会话日志证据来自环境变量；isolated_home_env 是 os.environ 的拷贝，
-    # 开发者本机设过 SKILL_VITALS_DSH_SESSION_LOG 会泄漏进来，输出随机器而变。
+    # 开发者本机设过 AGENT_VITALS_DSH_SESSION_LOG 会泄漏进来，输出随机器而变。
     # 先清掉，需要证据的 case 再通过 env_extra 显式注入（见 host-dsh-log）。
-    env.pop("SKILL_VITALS_DSH_SESSION_LOG", None)
+    env.pop("AGENT_VITALS_DSH_SESSION_LOG", None)
     # 预算默认值取自环境变量，必须钉死，否则开发者本地设过就对不上
     env["SLASH_COMMAND_TOOL_CHAR_BUDGET"] = "15000"
     # 宿主运行时探测必须关掉。它们会去问本机真实装着的 Codex / OpenClaw /
     # WorkBuddy —— HOME 隔离拦不住这些（Codex 走的是 PATH 上的可执行文件，
     # 不是 home 下的目录）。开着的话快照取决于「这台机器装没装 Codex」，
     # 刚建立起来的确定性当场失效。
-    env["SKILL_VITALS_DISABLE_CODEX_RUNTIME"] = "1"
-    env["SKILL_VITALS_DISABLE_OPENCLAW_RUNTIME"] = "1"
-    env["SKILL_VITALS_DISABLE_WORKBUDDY_BUILTINS"] = "1"
+    env["AGENT_VITALS_DISABLE_CODEX_RUNTIME"] = "1"
+    env["AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME"] = "1"
+    env["AGENT_VITALS_DISABLE_WORKBUDDY_BUILTINS"] = "1"
     env.update(env_extra or {})
     r = subprocess.run(SCAN_CMD + ["--json", str(out)] + extra,
                        cwd=str(root if cwd_is_root else root / "workdir"), env=env,

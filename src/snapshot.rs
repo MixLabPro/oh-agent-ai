@@ -18,17 +18,60 @@ const EXIT_TOOL_ERROR: i32 = 2;
 const DIR_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 
-/// 快照目录。可用 `SKILL_VITALS_SNAPSHOT_DIR` 覆盖（测试与多配置用）。
-pub fn snapshot_dir() -> PathBuf {
-    if let Ok(v) = std::env::var("SKILL_VITALS_SNAPSHOT_DIR") {
-        if !v.is_empty() {
-            return PathBuf::from(v);
-        }
+/// 注入式 env 读取辅助：空字符串视为未设置（与 Python `paths._env_path` 一致）。
+fn configured_path<F>(get_env: &F, name: &str) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    get_env(name).filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+/// 数据根目录选择（Python 侧镜像：`scripts/agent_vitals/paths.py::data_home`）。
+///
+/// 品牌改名后，`~/.agent-vitals` 是新默认，但不能让既有用户的
+/// `~/.skill-vitals` 预算/日历/快照凭空消失。选择语义逐字对齐 paths.py：
+/// 1. `AGENT_VITALS_HOME`（当前显式覆盖）→ 2. `SKILL_VITALS_HOME`（legacy
+/// 显式覆盖）→ 3. `~/.agent-vitals`（已存在，或两者都不存在）→
+/// 4. `~/.skill-vitals`（只有它存在）。不复制、不移动任何文件。
+fn data_home_from<F>(get_env: &F, home: PathBuf) -> PathBuf
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(path) = configured_path(get_env, "AGENT_VITALS_HOME") {
+        return path;
     }
+    if let Some(path) = configured_path(get_env, "SKILL_VITALS_HOME") {
+        return path;
+    }
+
+    let current = home.join(".agent-vitals");
+    let legacy = home.join(".skill-vitals");
+    if current.exists() || !legacy.exists() {
+        current
+    } else {
+        legacy
+    }
+}
+
+/// 快照目录。支持 Agent Vitals 变量，并兼容旧 Skill Vitals 覆盖变量。
+pub fn snapshot_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
-    PathBuf::from(home).join(".skill-vitals").join("snapshots")
+    snapshot_dir_from(&|name| std::env::var(name).ok(), PathBuf::from(home))
+}
+
+fn snapshot_dir_from<F>(get_env: &F, home: PathBuf) -> PathBuf
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(path) = configured_path(get_env, "AGENT_VITALS_SNAPSHOT_DIR") {
+        return path;
+    }
+    if let Some(path) = configured_path(get_env, "SKILL_VITALS_SNAPSHOT_DIR") {
+        return path;
+    }
+    data_home_from(get_env, home).join("snapshots")
 }
 
 /// 已有快照，**旧→新**。文件名是 UTC 紧凑时间戳，字典序即时间序。
@@ -187,8 +230,8 @@ pub fn render_diff(out: &Value, zombie_gate: i64) -> (String, bool, i32) {
             // 「没东西可比」是在滥用那个码 —— CI 会把前置条件缺失读成「扫出
             // 问题」。2 才是「工具没能完成工作」。
             return (
-                "No snapshot is available for comparison.\nRun `skill-vitals doctor` \
-(saves one automatically) or `skill-vitals snapshot` first.\n".to_string(),
+                "No snapshot is available for comparison.\nRun `agent-vitals doctor` \
+(saves one automatically) or `agent-vitals snapshot` first.\n".to_string(),
                 true, EXIT_TOOL_ERROR,
             );
         }
@@ -319,7 +362,7 @@ pub fn doctor_snapshot(out: &Value, enabled: bool) -> String {
     if !enabled {
         w.push('\n');
         w.push_str("  No snapshot saved. To compare before and after:\n");
-        w.push_str("    skill-vitals snapshot   then skill-vitals diff\n");
+        w.push_str("    agent-vitals snapshot   then agent-vitals diff\n");
         return w;
     }
     match save_snapshot(out, SNAPSHOT_KEEP) {
@@ -341,6 +384,65 @@ pub fn doctor_snapshot(out: &Value, enabled: bool) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ── data_home / snapshot_dir 的兼容选择（镜像 tests/test_paths.py）──────
+
+    #[test]
+    fn current_overrides_win_everywhere() {
+        let home = PathBuf::from("/home/tester");
+        let get_env = |name: &str| match name {
+            "AGENT_VITALS_HOME" => Some("/state/current".to_string()),
+            "SKILL_VITALS_HOME" => Some("/state/legacy".to_string()),
+            "AGENT_VITALS_SNAPSHOT_DIR" => Some("/snaps/current".to_string()),
+            "SKILL_VITALS_SNAPSHOT_DIR" => Some("/snaps/legacy".to_string()),
+            _ => None,
+        };
+        assert_eq!(data_home_from(&get_env, home.clone()), PathBuf::from("/state/current"));
+        assert_eq!(snapshot_dir_from(&get_env, home), PathBuf::from("/snaps/current"));
+    }
+
+    #[test]
+    fn legacy_overrides_remain_supported() {
+        let home = PathBuf::from("/home/tester");
+        let get_env = |name: &str| match name {
+            "SKILL_VITALS_HOME" => Some("/state/legacy".to_string()),
+            "SKILL_VITALS_SNAPSHOT_DIR" => Some("/snaps/legacy".to_string()),
+            _ => None,
+        };
+        assert_eq!(data_home_from(&get_env, home.clone()), PathBuf::from("/state/legacy"));
+        assert_eq!(snapshot_dir_from(&get_env, home), PathBuf::from("/snaps/legacy"));
+    }
+
+    #[test]
+    fn fresh_default_uses_agent_vitals_home() {
+        let home = std::env::temp_dir().join("agent-vitals-snapshot-no-defaults");
+        let get_env = |_name: &str| None;
+        assert_eq!(data_home_from(&get_env, home.clone()), home.join(".agent-vitals"));
+        assert_eq!(
+            snapshot_dir_from(&get_env, home),
+            PathBuf::from(std::env::temp_dir()).join("agent-vitals-snapshot-no-defaults")
+                .join(".agent-vitals").join("snapshots")
+        );
+    }
+
+    #[test]
+    fn only_existing_legacy_directory_is_preserved() {
+        let home = std::env::temp_dir().join("agent-vitals-snapshot-legacy-only");
+        let _ = std::fs::create_dir_all(home.join(".skill-vitals"));
+        let get_env = |_name: &str| None;
+        assert_eq!(data_home_from(&get_env, home.clone()), home.join(".skill-vitals"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn current_directory_wins_when_both_defaults_exist() {
+        let home = std::env::temp_dir().join("agent-vitals-snapshot-both");
+        let _ = std::fs::create_dir_all(home.join(".agent-vitals"));
+        let _ = std::fs::create_dir_all(home.join(".skill-vitals"));
+        let get_env = |_name: &str| None;
+        assert_eq!(data_home_from(&get_env, home.clone()), home.join(".agent-vitals"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn utc_stamp_matches_python_strftime() {

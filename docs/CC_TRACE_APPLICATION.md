@@ -174,9 +174,9 @@ cost 金额两边天然不同（各自价格表，`codex_pricing.json` vs `prici
 Fast mode 用**同一个模型名**（opus）却按更高档计费，模型名区分不了才需要该字段。
 → 真正要加 `speed` 的地方是未来做 **P5（Claude Code 适配器）** 时。
 
-**Codex 侧的成本折叠已落地（`skill-vitals codex-cost`，2026-08）**：给 Codex 做
+**Codex 侧的成本折叠已落地（`agent-vitals codex-cost`，2026-08）**：给 Codex 做
 cost fold 不再等 P5——`codex-cost` 就是 Codex 的成本引擎（USD、5 桶 + speed 行 +
-longContext，见 `scripts/skill_vitals/codex_cost.py` ↔ `src/codex_cost.rs`）。上面
+longContext，见 `scripts/agent_vitals/codex_cost.py` ↔ `src/codex_cost.rs`）。上面
 三个缺口在 Codex 侧的落点：
 
 - **`speed`**：Codex 日志有 `service_tier`（`turn_context`/`thread_settings_applied`），
@@ -232,7 +232,7 @@ cc-trace 给每条 entry 盖 `pricing_fingerprint`，价格目录一变就用 `R
 
 ### F. 额度维（account-side 仍是产品决策；log-side 已落地一半）
 
-**log-side 一半已落地（`skill-vitals codex-cost` 的 `plan` 块，2026-08，零网络）**：
+**log-side 一半已落地（`agent-vitals codex-cost` 的 `plan` 块，2026-08，零网络）**：
 Codex 的 `token_count` 事件自带 `rate_limits`，折叠直接读它（见 §D）——`plan_type`、
 `has_credits`（`credits.has_credits`）、`primary/secondary` 的 `used_percent`/
 `window_minutes`/`resets_at`、`observed_at`。这是**限速窗口的剩余情况**（如 5h/7d

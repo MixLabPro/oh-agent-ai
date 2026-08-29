@@ -7,7 +7,7 @@ persistence backend `@deepseek-ai/dsh-session-persistence-jsonl` (plaintext
 `incomplete.jsonl` in this directory. The difference is the payload: those two
 fixtures feed the trigger-evidence reader (`adapters/dsh.py` —
 catalog/invocation/selection), while this one feeds the behavior-audit evidence
-reader extension and the SV601–SV610 rule engine (`scripts/skill_vitals/behavior.py`
+reader extension and the SV601–SV610 rule engine (`scripts/agent_vitals/behavior.py`
 / `src/behavior.rs`). The envelope is identical — only the event types covered
 grow from "skill trigger" to "execution trace".
 
