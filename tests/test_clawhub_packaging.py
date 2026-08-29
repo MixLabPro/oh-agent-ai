@@ -37,7 +37,8 @@ ALLOWED_PACKAGE_FILES = {
         "skills/security.py", "skills/snapshots.py",
         # agent/：会话行为 + 成本
         "agent/__init__.py", "agent/behavior.py", "agent/budget.py",
-        "agent/codex_cost.py", "agent/codex_evidence.py", "agent/codex_usage.py",
+        "agent/codex_cost.py", "agent/codex_evidence.py",
+        "agent/codex_session_audit.py", "agent/codex_usage.py",
         "agent/compaction.py", "agent/cost.py", "agent/duration.py",
         "agent/skill.py", "agent/state.py", "agent/subagent.py",
         "agent/trajectory.py", "agent/usage.py", "agent/waste.py",
@@ -47,7 +48,7 @@ ALLOWED_PACKAGE_FILES = {
         "adapters/openclaw.py", "adapters/workbuddy.py", "adapters/hermes.py",
         "adapters/dsh.py",
         # templates/
-        "templates/calendar.html",
+        "templates/calendar.html", "templates/codex_session.html",
     )
 }
 ALLOWED_PACKAGE_DIRS = {Path("adapters"), Path("templates"), Path("skills"), Path("agent")}

@@ -364,6 +364,26 @@ enum Cmd {
         #[arg(long = "html")]
         html: Option<PathBuf>,
     },
+    /// Audit ONE Codex session (per-session cost + provenance), in the DSH
+    /// audit-tab visual language. `codex-cost` aggregates session identity away
+    /// during fold; `codex-evidence` gives per-file provenance without cost.
+    /// This joins the two halves back around a logical session_id (resume
+    /// rollouts merge by session_id), reusing the exact fold → price path.
+    /// Stateless single call; `--list` enumerates sessions (the id picker).
+    CodexSession {
+        /// List all Codex sessions: id/title/model/file count/date span
+        #[arg(long)]
+        list: bool,
+        /// The logical session_id to audit; default = the most recent session
+        #[arg(long)]
+        session: Option<String>,
+        /// Write the audit JSON to FILE; use - for stdout
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+        /// Write a self-contained HTML audit report to FILE
+        #[arg(long = "html")]
+        html: Option<PathBuf>,
+    },
 }
 
 /// 探测「扫描器自身所在的 skill 目录」。
@@ -1053,6 +1073,90 @@ fn main() {
         }
         if !wrote {
             print!("{}", agent::codex_cost::render_codex_cost(&out));
+        }
+        return;
+    }
+
+    // Codex 单会话审计：逐 session 成本 + 出处覆盖并集。codex-cost 在折叠时把
+    // session 身份聚合掉，codex-evidence 给出处但不含成本；这里把该 session 的
+    // 文件们折叠→合并→计价（复用 codex-cost 同一条路径），再把 evidence 覆盖取
+    // 并集，拼回一个逻辑 session（跨文件 resume 按 session_id 合并）。
+    // `--list` 只是选 id 的前置（id/标题/模型/文件数/时间跨度），单会话深挖是
+    // `--html`/`--json`/文本三路。无状态单次调用。HTML 是新模板
+    // codex_session.html（套 DSH 审计 tab 的版式，docs/DSH_INTEGRATION.md 的
+    // .sv-* 视觉约定），JSON 经 `</script`/`<!--` 转义后内联。
+    if let Some(Cmd::CodexSession { list, session, rows_json, html }) = &args.cmd {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        let home_path = Path::new(&home);
+        if *list {
+            if html.is_some() {
+                eprintln!("--list only supports --json or plain text, not --html");
+                std::process::exit(2);
+            }
+            let out = agent::codex_session_audit::codex_session_list(home_path);
+            if let Some(path) = rows_json {
+                let text = serde_json::to_string_pretty(&out).unwrap_or_default();
+                if path == &PathBuf::from("-") {
+                    println!("{text}");
+                } else if std::fs::write(path, &text).is_err() {
+                    eprintln!("failed to write {}", path.display());
+                    std::process::exit(2);
+                } else {
+                    println!("Wrote {}", path.display());
+                }
+            } else {
+                print!("{}", agent::codex_session_audit::render_codex_session_list(&out));
+            }
+            return;
+        }
+        // 缺省 --session = 最新（list 排序首项 = 末行时间戳最晚）。无任何 rollout
+        // 文件 → 「no codex sessions found」，与 codex-cost 对空家目录的处理一致。
+        let session_id = match session {
+            Some(s) => s.clone(),
+            None => {
+                let list = agent::codex_session_audit::codex_session_list(home_path);
+                let first = list
+                    .get("sessions")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.get("session_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                match first {
+                    Some(s) => s,
+                    None => {
+                        eprintln!("no codex sessions found");
+                        std::process::exit(2);
+                    }
+                }
+            }
+        };
+        let Some(out) = agent::codex_session_audit::codex_session_audit_json(home_path, &session_id)
+        else {
+            eprintln!("codex session not found: {session_id}");
+            std::process::exit(2);
+        };
+        let mut wrote = false;
+        if let Some(path) = rows_json {
+            let text = serde_json::to_string_pretty(&out).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}", path.display());
+            }
+            wrote = true;
+        }
+        if let Some(path) = html {
+            agent::codex_session_audit::render_codex_session_html(path, &out);
+            wrote = true;
+        }
+        if !wrote {
+            print!("{}", agent::codex_session_audit::render_codex_session(&out));
         }
         return;
     }

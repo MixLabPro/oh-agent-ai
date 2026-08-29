@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex 会话审计 · codex-session</title>
+<style>
+/* ── DSH 审计 tab 视觉语言（dsh-client/src/client/styles/index.ts + preview-real.mjs 的
+   权威 hex 色板）：单会话深挖页，套用 .sv-* 约定。这是 codex-session --html 的独立
+   模板，不是 calendar.html——那是日历看板（docs/UNIFIED_COST_VIEW.md）。── */
+:root{
+  --dsw-alias-bg-base:#f6f7fa; --dsw-alias-bg-layer-1:#fff; --dsw-alias-bg-layer-2:#f2f4f7;
+  --dsw-alias-label-primary:#182230; --dsw-alias-label-secondary:#667085; --dsw-alias-label-tertiary:#98a2b3;
+  --dsw-alias-border-l1:#e4e7ec; --dsw-alias-state-business-primary:#1677ff;
+  --dsw-alias-state-success-primary:#039855; --dsw-alias-state-error-primary:#d92d20; --dsw-alias-state-warn-primary:#dc6803;
+  --dsw-font-s-14:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
+  --dsw-font-xs-13:13px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
+  --dsw-font-markdown-code-block:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --dsw-alias-bg-base:#0d1117; --dsw-alias-bg-layer-1:#161b22; --dsw-alias-bg-layer-2:#1c2128;
+  --dsw-alias-label-primary:#e6edf3; --dsw-alias-label-secondary:#8b949e; --dsw-alias-label-tertiary:#6e7681;
+  --dsw-alias-border-l1:#30363d; --dsw-alias-state-business-primary:#58a6ff;
+  --dsw-alias-state-success-primary:#3fb950; --dsw-alias-state-error-primary:#f85149; --dsw-alias-state-warn-primary:#d29922;
+}}
+:root[data-theme="dark"]{
+  --dsw-alias-bg-base:#0d1117; --dsw-alias-bg-layer-1:#161b22; --dsw-alias-bg-layer-2:#1c2128;
+  --dsw-alias-label-primary:#e6edf3; --dsw-alias-label-secondary:#8b949e; --dsw-alias-label-tertiary:#6e7681;
+  --dsw-alias-border-l1:#30363d; --dsw-alias-state-business-primary:#58a6ff;
+  --dsw-alias-state-success-primary:#3fb950; --dsw-alias-state-error-primary:#f85149; --dsw-alias-state-warn-primary:#d29922;
+}
+body{margin:0;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);}
+.frame{max-width:900px;margin:0 auto;padding:20px 16px 60px;}
+.topbar{padding:6px 2px 18px;}
+.topbar-title{font-size:20px;font-weight:600;letter-spacing:-0.01em;overflow-wrap:anywhere;}
+.topbar-sid{margin-top:4px;font:var(--dsw-font-xs-13);color:var(--dsw-alias-label-tertiary);
+  font-family:var(--dsw-font-markdown-code-block);overflow-wrap:anywhere;}
+.topbar-chips{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;font:var(--dsw-font-xs-13);
+  color:var(--dsw-alias-label-secondary);}
+.topbar-chips b{color:var(--dsw-alias-label-primary);font-weight:600;}
+
+/* 按容器自适应，不按 viewport（同 .sv-metrics 的理由：审计页面活在侧边栏旁的
+   内容列里，写死断点不对症）——auto-fit + minmax 自动四→二→单栏降级。 */
+.sv-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));}
+.sv-metric{padding:14px 18px;min-width:0;outline:1px solid var(--dsw-alias-border-l1);
+  background:var(--dsw-alias-bg-layer-1);}
+.sv-metric-label{font:var(--dsw-font-xs-13);color:var(--dsw-alias-label-secondary);}
+.sv-metric-value{margin-top:4px;overflow-wrap:anywhere;font-size:18px;font-weight:600;
+  letter-spacing:-0.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sv-metric-value.sv-num{font-family:var(--dsw-font-markdown-code-block);
+  font-variant-numeric:tabular-nums;font-size:17px;}
+.sv-metric-note{margin-top:3px;font:var(--dsw-font-xs-13);color:var(--dsw-alias-label-secondary);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
+.sv-section{margin-top:32px;}
+.sv-section:first-child{margin-top:0;}
+.sv-section-header{display:flex;align-items:baseline;justify-content:space-between;
+  gap:12px;padding-bottom:8px;margin-bottom:16px;border-bottom:1px solid var(--dsw-alias-border-l1);}
+.sv-section-title{margin:0;font:var(--dsw-font-s-14);font-weight:600;color:var(--dsw-alias-label-primary);}
+.sv-subcard{margin-top:16px;padding:16px 18px;background:var(--dsw-alias-bg-layer-2);border-radius:8px;}
+.sv-subcard:first-child{margin-top:0;}
+
+.sv-costwrap{overflow-x:auto;margin-top:8px;}
+.sv-costtable{border-collapse:collapse;width:100%;min-width:460px;font:var(--dsw-font-xs-13);}
+.sv-costtable th,.sv-costtable td{padding:7px 10px 7px 0;border-bottom:1px solid var(--dsw-alias-border-l1);
+  text-align:right;white-space:nowrap;}
+.sv-costtable th:first-child,.sv-costtable td:first-child{text-align:left;padding-left:0;}
+.sv-costtable th{color:var(--dsw-alias-label-tertiary);font-weight:400;}
+.sv-costtable tbody tr:last-child td{border-bottom:0;}
+.sv-costtable td.sv-num{font-family:var(--dsw-font-markdown-code-block);font-variant-numeric:tabular-nums;}
+.sv-costtable td.sv-total{font-weight:600;}
+.sv-insight{margin-top:10px;font:var(--dsw-font-xs-13);color:var(--dsw-alias-label-secondary);line-height:1.65;}
+.sv-insight b{color:var(--dsw-alias-label-primary);font-weight:600;}
+.sv-empty{margin-top:10px;font:var(--dsw-font-xs-13);color:var(--dsw-alias-label-tertiary);line-height:1.65;}
+
+.sv-chartwrap{border-top:1px solid var(--dsw-alias-border-l1);padding-top:10px;}
+.sv-chart{display:block;width:100%;height:auto;overflow:visible;}
+.sv-axis{fill:var(--dsw-alias-label-tertiary);font-size:11px;font-family:var(--dsw-font-markdown-code-block);}
+.sv-grid{stroke:var(--dsw-alias-border-l1);stroke-width:1;}
+.sv-line{fill:none;stroke:var(--dsw-alias-state-business-primary);stroke-width:2;stroke-linecap:round;stroke-linejoin:round;}
+.sv-area{fill:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent);}
+.sv-chartfoot{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  font:var(--dsw-font-xs-13);color:var(--dsw-alias-label-tertiary);margin-top:6px;}
+
+.sv-panel-sub{font:var(--dsw-font-xs-13);color:var(--dsw-alias-label-secondary);margin-top:2px;}
+.sv-kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px 24px;margin-top:6px;}
+.sv-kv-item{font:var(--dsw-font-xs-13);}
+.sv-kv-label{color:var(--dsw-alias-label-tertiary);}
+.sv-kv-value{margin-top:2px;color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;}
+.sv-kv-value code{font-family:var(--dsw-font-markdown-code-block);}
+
+.sv-tag{display:inline-block;padding:1px 8px;border-radius:99px;font:var(--dsw-font-xs-13);}
+.sv-tag-ok{color:var(--dsw-alias-state-success-primary);
+  background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent);}
+.sv-tag-warn{color:var(--dsw-alias-state-warn-primary);
+  background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);}
+.sv-tag-muted{color:var(--dsw-alias-label-secondary);
+  background:color-mix(in srgb,var(--dsw-alias-label-secondary) 12%,transparent);}
+
+.sv-finding{margin-top:8px;padding:10px 12px;border-left:2px solid var(--dsw-alias-state-warn-primary);
+  background:var(--dsw-alias-bg-layer-1);border-radius:0 6px 6px 0;font:var(--dsw-font-xs-13);line-height:1.6;}
+.sv-finding b{color:var(--dsw-alias-label-primary);}
+.sv-finding .sv-num{font-family:var(--dsw-font-markdown-code-block);font-variant-numeric:tabular-nums;}
+.sv-finding-ok{border-left-color:var(--dsw-alias-state-success-primary);}
+.sv-finding:first-child{margin-top:10px;}
+</style>
+</head>
+<body>
+<div class="frame">
+  <header class="topbar">
+    <div class="topbar-title" id="sv-title"></div>
+    <div class="topbar-sid" id="sv-sid"></div>
+    <div class="topbar-chips" id="sv-chips"></div>
+  </header>
+
+  <section class="sv-section">
+    <div class="sv-metrics" id="sv-kpis"></div>
+  </section>
+
+  <section class="sv-section" id="s-overview">
+    <div class="sv-section-header"><h2 class="sv-section-title">会话资源概览</h2></div>
+    <div class="sv-subcard"><div class="sv-panel-sub">逐模型 / 速度成本。Codex 折叠时的计价轴：模型 × speed，5 桶 token 合计。</div>
+      <div class="sv-costwrap" id="sv-costtable"></div></div>
+    <div class="sv-subcard"><div class="sv-panel-sub">Token 5 桶分解（合计即上方 KPI 的 Token 用量）。</div>
+      <div class="sv-costwrap" id="sv-buckets"></div></div>
+  </section>
+
+  <section class="sv-section" id="s-timeline">
+    <div class="sv-section-header"><h2 class="sv-section-title">会话时间线</h2></div>
+    <div class="sv-subcard"><div class="sv-panel-sub">逐小时 token 曲线（by_hour_model 折叠 → 小时桶）。Codex 无逐 turn 行为信号，
+      这是「健康时间线」的诚实对应物——只看用量形状，不看行为好坏。</div>
+      <div class="sv-chartwrap" id="sv-timeline"></div></div>
+  </section>
+
+  <section class="sv-section" id="s-coverage">
+    <div class="sv-section-header"><h2 class="sv-section-title">出处与覆盖</h2></div>
+    <div class="sv-subcard"><div class="sv-panel-sub">会话元数据与证据来源。degraded 文件（不可读 / 非 JSON / 空）不编造，
+      缺席字段显示 —。</div>
+      <div class="sv-kv" id="sv-provenance"></div></div>
+    <div class="sv-subcard"><div class="sv-panel-sub">19 信号覆盖（跨文件并集：任一 rollout 文件覆盖即覆盖）。</div>
+      <div class="sv-costwrap" id="sv-coverage"></div></div>
+  </section>
+
+  <section class="sv-section" id="s-plan">
+    <div class="sv-section-header"><h2 class="sv-section-title">计划与额度</h2></div>
+    <div class="sv-subcard" id="sv-plan"></div>
+  </section>
+
+  <section class="sv-section" id="s-findings">
+    <div class="sv-section-header"><h2 class="sv-section-title">Finding 队列</h2></div>
+    <div class="sv-subcard" id="sv-findings"></div>
+  </section>
+</div>
+
+<script>
+"use strict";
+var DATA_EL = document.getElementById('agent-vitals-data-codex-session');
+var D = DATA_EL ? JSON.parse(DATA_EL.textContent || 'null') : null;
+if (!D) {
+  document.body.innerHTML = '<div class="frame"><div class="sv-empty">no data</div></div>';
+} else {
+  var esc = function (s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  };
+  var num = function (n) { return (n == null ? 0 : Number(n)).toLocaleString('en-US'); };
+  var usd = function (n) { return '$' + (n == null ? 0 : Number(n)).toFixed(2); };
+  var dash = function (s) { return (s == null || s === '') ? '—' : s; };
+  var BUCKETS = [
+    ['uncached_input_tokens', '输入（未缓存）'],
+    ['output_tokens', '输出'],
+    ['cached_input_tokens', '缓存读'],
+    ['cache_write_input_tokens', '缓存写'],
+    ['reasoning_output_tokens', '推理'],
+  ];
+  var CR = D.cost_report || {};
+  var TT = CR.total_tokens || {};
+  var totalTokens = BUCKETS.reduce(function (a, b) { return a + (TT[b[0]] || 0); }, 0);
+  var covKeys = D.coverage || {};
+  var covCount = Object.keys(covKeys).length;
+  var covHit = Object.keys(covKeys).filter(function (k) {
+    var c = covKeys[k] || {}; return (c.measured || 0) + (c.derived || 0) + (c.lossy || 0) + (c.unmetered || 0) > 0;
+  }).length;
+  var unacc = (CR.unaccounted_usage || []);
+
+  // ── topbar ─────────────────────────────────────────────────────────
+  document.getElementById('sv-title').textContent = dash(D.title || D.session_id);
+  document.getElementById('sv-sid').textContent = D.session_id || '';
+  var chips = [];
+  chips.push('<b>模型</b> ' + esc(dash(D.model)));
+  chips.push('<b>cli</b> ' + esc(dash(D.cli_version)));
+  chips.push('<b>模式</b> ' + esc(dash(D.history_mode)));
+  chips.push('<b>会话根</b> ' + esc((D.workspace_roots || []).join(', ') || '—'));
+  if (D.date_span) chips.push('<b>跨度</b> ' + esc(dash(D.date_span.first)) + ' → ' + esc(dash(D.date_span.last)));
+  chips.push('<b>文件</b> ' + (D.files || []).length + ' 份 rollout');
+  document.getElementById('sv-chips').innerHTML = chips.join('');
+
+  // ── 4 张 KPI 卡 ────────────────────────────────────────────────────
+  var kpis = [
+    { label: '费用估算', value: usd(CR.total_cost_usd), num: true,
+      note: (CR.per_model ? Object.keys(CR.per_model).length : 0) + ' 个模型' },
+    { label: 'Token 用量', value: num(totalTokens), num: true,
+      note: '5 桶合计' },
+    { label: '上下文上限', value: D.context_window != null ? num(D.context_window) : dash(D.model),
+      num: D.context_window != null,
+      note: D.context_window != null ? '模型上下文窗口' : 'Codex 无逐 turn 峰值' },
+    { label: '异常', value: covHit + '/' + covCount + ' 覆盖',
+      num: false, note: (unacc.length ? unacc.length + ' 条残差 · ' : '无残差 · ') + (covCount - covHit) + ' 信号未命中' },
+  ];
+  document.getElementById('sv-kpis').innerHTML = kpis.map(function (k) {
+    return '<div class="sv-metric"><div class="sv-metric-label">' + esc(k.label) + '</div>' +
+      '<div class="sv-metric-value' + (k.num ? ' sv-num' : '') + '">' + esc(k.value) + '</div>' +
+      '<div class="sv-metric-note">' + esc(k.note) + '</div></div>';
+  }).join('');
+
+  // ── 1 会话资源概览：逐模型成本表 + 5 桶分解 ─────────────────────────
+  var pm = CR.per_model || {};
+  var pmKeys = Object.keys(pm);
+  var pmHtml = '<table class="sv-costtable"><thead><tr>' +
+    '<th>模型</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>推理</th>' +
+    '<th>小计 (USD)</th></tr></thead><tbody>';
+  if (pmKeys.length === 0) {
+    pmHtml += '<tr><td colspan="7" class="sv-empty">无已计价 token（unpriced_tokens=' + num(CR.unpriced_tokens) + '）</td></tr>';
+  } else {
+    pmKeys.forEach(function (m) {
+      var p = pm[m] || {};
+      var t = p.tokens || {};
+      var row = '<tr><td>' + esc(m) + (p.speed ? ' <span class="sv-tag sv-tag-muted">' + esc(p.speed) + '</span>' : '') + '</td>';
+      BUCKETS.forEach(function (b) { row += '<td class="sv-num">' + num(t[b[0]]) + '</td>'; });
+      row += '<td class="sv-num sv-total">' + usd(p.cost_usd) + '</td></tr>';
+      pmHtml += row;
+    });
+  }
+  pmHtml += '</tbody></table>';
+  document.getElementById('sv-costtable').innerHTML = pmHtml +
+    '<div class="sv-insight">unpriced_tokens=<b class="sv-num">' + num(CR.unpriced_tokens) + '</b>：' +
+    '折叠看见了 token 但价目表里没有对应 (model, speed) 的桶，绝不按 0 价冒充，诚实单列。</div>';
+
+  var bucketRows = BUCKETS.map(function (b) {
+    var v = TT[b[0]] || 0;
+    var pct = totalTokens > 0 ? Math.round(v / totalTokens * 100) : 0;
+    return '<tr><td>' + b[1] + '</td><td class="sv-num">' + num(v) + '</td><td class="sv-num">' + pct + '%</td></tr>';
+  }).join('');
+  document.getElementById('sv-buckets').innerHTML =
+    '<table class="sv-costtable"><thead><tr><th>桶</th><th>Token</th><th>占比</th></tr></thead>' +
+    '<tbody>' + bucketRows +
+    '<tr><td class="sv-total">合计</td><td class="sv-num sv-total">' + num(totalTokens) + '</td><td class="sv-num">100%</td></tr>' +
+    '</tbody></table>';
+
+  // ── 2 时间线：逐小时 token 曲线 ─────────────────────────────────────
+  var hours = CR.hours || [];
+  var tl = document.getElementById('sv-timeline');
+  if (hours.length === 0) {
+    tl.innerHTML = '<div class="sv-empty">该会话无小时桶数据（无带时间戳的 token_count 事件）。</div>';
+  } else {
+    var W = 800, H = 130, PAD = 26;
+    var maxTok = Math.max.apply(null, hours.map(function (h) { return h.tokens || 0; })) || 1;
+    var X = function (i) { return PAD + (hours.length === 1 ? 0 : i / (hours.length - 1)) * (W - PAD * 2); };
+    var Y = function (v) { return H - PAD - (v / maxTok) * (H - PAD * 2); };
+    var pts = hours.map(function (h, i) { return X(i) + ',' + Y(h.tokens || 0); });
+    var line = 'M' + pts.join(' L');
+    var area = line + ' L' + X(hours.length - 1) + ',' + Y(0) + ' L' + X(0) + ',' + Y(0) + ' Z';
+    var labels = [0, Math.floor((hours.length - 1) / 2), hours.length - 1];
+    var xlabels = labels.map(function (i) {
+      return '<text class="sv-axis" x="' + X(i).toFixed(1) + '" y="' + (H - 8) + '" text-anchor="middle">' +
+        esc(hours[i].hour.slice(11, 16)) + '</text>';
+    }).join('');
+    tl.innerHTML = '<svg class="sv-chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="逐小时 token 曲线">' +
+      '<line class="sv-grid" x1="' + PAD + '" y1="' + Y(0) + '" x2="' + (W - PAD) + '" y2="' + Y(0) + '"/>' +
+      '<line class="sv-grid" x1="' + PAD + '" y1="' + Y(maxTok) + '" x2="' + (W - PAD) + '" y2="' + Y(maxTok) + '"/>' +
+      '<path class="sv-area" d="' + area + '"/><path class="sv-line" d="' + line + '"/>' +
+      '<text class="sv-axis" x="8" y="' + Y(maxTok).toFixed(1) + '">' + num(maxTok) + '</text>' +
+      xlabels + '</svg>' +
+      '<div class="sv-chartfoot"><span>token / 小时</span>' +
+      '<span>' + esc(hours[0].hour.slice(0, 10)) + ' · ' + hours.length + ' 小时 · 峰值 ' + num(maxTok) + '</span></div>';
+  }
+
+  // ── 3 出处与覆盖 ───────────────────────────────────────────────────
+  var prov = [
+    ['cli_version', D.cli_version], ['history_mode', D.history_mode],
+    ['model', D.model], ['context_window', D.context_window],
+    ['workspace_roots', (D.workspace_roots || []).join(', ')],
+    ['date_span', (D.date_span ? dash(D.date_span.first) + ' → ' + dash(D.date_span.last) : '—')],
+    ['files', (D.files || []).map(function (f) { return f.split('/').pop(); }).join(' · ')],
+  ];
+  document.getElementById('sv-provenance').innerHTML = prov.map(function (p) {
+    return '<div class="sv-kv-item"><div class="sv-kv-label">' + esc(p[0]) + '</div>' +
+      '<div class="sv-kv-value"><code>' + esc(dash(p[1])) + '</code></div></div>';
+  }).join('');
+
+  var sigNames = Object.keys(covKeys);
+  var covRows = sigNames.map(function (s) {
+    var c = covKeys[s] || {};
+    var total = (c.measured || 0) + (c.derived || 0) + (c.lossy || 0) + (c.unmetered || 0);
+    var ok = total > 0;
+    return '<tr><td>' + esc(s) + '</td>' +
+      '<td class="sv-num">' + num(c.measured || 0) + '</td>' +
+      '<td class="sv-num">' + num(c.derived || 0) + '</td>' +
+      '<td class="sv-num">' + num(c.lossy || 0) + '</td>' +
+      '<td class="sv-num">' + num(c.unmetered || 0) + '</td>' +
+      '<td>' + (ok ? '<span class="sv-tag sv-tag-ok">覆盖</span>' : '<span class="sv-tag sv-tag-muted">缺失</span>') + '</td></tr>';
+  }).join('');
+  document.getElementById('sv-coverage').innerHTML =
+    '<table class="sv-costtable"><thead><tr><th>信号</th><th>measured</th><th>derived</th>' +
+    '<th>lossy</th><th>unmetered</th><th>状态</th></tr></thead><tbody>' + covRows + '</tbody></table>';
+
+  // ── 4 计划与额度 ───────────────────────────────────────────────────
+  var plan = CR.plan;
+  var planEl = document.getElementById('sv-plan');
+  if (!plan || !plan.plan_type) {
+    planEl.innerHTML = '<div class="sv-empty">该会话的 rollout 里没有有效的 rate_limits（plan_type 缺失）——配额状态未知，不编造。</div>';
+  } else {
+    // resets_at 是 epoch 秒（1787… 量级），不是毫秒——秒被当成毫秒会渲染成 1970-01-01。
+    // 按量级区分：小于 1e12 视为秒补 ×1000，其余视为毫秒。
+    var fmtEpoch = function (ms) {
+      if (ms == null) return '—';
+      var n = Number(ms);
+      var ms2 = n < 1e12 ? n * 1000 : n;
+      var d = new Date(ms2); return isNaN(d.getTime()) ? String(n) : d.toLocaleString();
+    };
+    var planHtml = '<div class="sv-kv"><div class="sv-kv-item"><div class="sv-kv-label">plan_type</div>' +
+      '<div class="sv-kv-value"><code>' + esc(plan.plan_type) + '</code></div></div>' +
+      '<div class="sv-kv-item"><div class="sv-kv-label">has_credits</div>' +
+      '<div class="sv-kv-value">' + (plan.has_credits ? '<span class="sv-tag sv-tag-ok">是</span>' : '<span class="sv-tag sv-tag-muted">否</span>') + '</div></div>' +
+      '<div class="sv-kv-item"><div class="sv-kv-label">observed_at</div>' +
+      '<div class="sv-kv-value"><code>' + esc(plan.observed_at) + '</code></div></div></div>';
+    var limits = plan.limits || {};
+    ['primary', 'secondary'].forEach(function (name) {
+      var L = limits[name];
+      if (!L) { planHtml += '<div class="sv-insight"><b>' + name + '</b>：无此额度档位。</div>'; return; }
+      var pct = L.used_percent != null ? Number(L.used_percent) : null;
+      var tag = pct == null ? '<span class="sv-tag sv-tag-muted">未知</span>'
+        : pct >= 90 ? '<span class="sv-tag sv-tag-warn">' + num(pct) + '%</span>'
+        : '<span class="sv-tag sv-tag-ok">' + num(pct) + '%</span>';
+      planHtml += '<div class="sv-insight"><b>' + name + '</b> 额度：used ' + tag +
+        (L.window_minutes != null ? ' · 窗口 ' + num(L.window_minutes) + ' 分钟' : '') +
+        (L.resets_at != null ? ' · 重置于 ' + fmtEpoch(L.resets_at) : '') + '</div>';
+    });
+    planEl.innerHTML = planHtml;
+  }
+
+  // ── 5 Finding 队列：残差哨兵 + 覆盖缺口 ────────────────────────────
+  var fEl = document.getElementById('sv-findings');
+  var findings = [];
+  unacc.forEach(function (u) {
+    findings.push('<div class="sv-finding">' +
+      '<b>' + esc(u.type) + '</b> · <span class="sv-num">' + num(u.count) + '</span> 次事件' +
+      (u.tokens_seen ? ' · 看见 token <span class="sv-num">' + num(u.tokens_seen) + '</span>' : '') +
+      '（残差哨兵：宿主/折叠没接住，但 payload 确实带了 token 字段）</div>');
+  });
+  sigNames.forEach(function (s) {
+    var c = covKeys[s] || {};
+    var total = (c.measured || 0) + (c.derived || 0) + (c.lossy || 0) + (c.unmetered || 0);
+    if (total === 0) {
+      findings.push('<div class="sv-finding sv-finding-ok"><b>' + esc(s) + '</b> · 无任何覆盖：' +
+        '该会话证据里完全没有这一类信号。不是缺陷判定，只是出处缺口——有则补，无则不编。</div>');
+    }
+  });
+  if (findings.length === 0) {
+    fEl.innerHTML = '<div class="sv-insight">未命中任何高危规则：残差哨兵为 0、19 信号全部有覆盖。' +
+      '这一页没有 finding 可列——诚实空态，不拿低危项凑数。</div>';
+  } else {
+    fEl.innerHTML = '<div class="sv-panel-sub">' + findings.length + ' 条线索（残差哨兵 + 覆盖缺口；Codex 无 SV 行为检测器，' +
+      '这是「异常」KPI 的构成来源）。</div>' + findings.join('');
+  }
+}
+</script>
+</body>
+</html>

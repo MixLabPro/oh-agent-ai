@@ -42,11 +42,13 @@ RS_SKILLS_FAMILY = {
 # 会话行为/成本审计（agent/ 子树）。**注意 skill.py 在这里**：会话 skill 执行
 # 审计读的是运行证据，不是 SKILL.md 文本——名字像扫描器，家族是 agent。
 PY_AGENT_FAMILY = {
-    "behavior", "budget", "codex_cost", "codex_evidence", "codex_usage",
-    "compaction", "cost", "duration", "skill", "state", "subagent",
-    "trajectory", "usage", "waste",
+    "behavior", "budget", "codex_cost", "codex_evidence", "codex_session_audit",
+    "codex_usage", "compaction", "cost", "duration", "skill", "state",
+    "subagent", "trajectory", "usage", "waste",
 }
-RS_AGENT_FAMILY = {"behavior", "codex_cost", "codex_session", "cost"}
+RS_AGENT_FAMILY = {
+    "behavior", "codex_cost", "codex_session", "codex_session_audit", "cost",
+}
 
 
 def _module_stems(subdir: Path, *, python: bool) -> set:

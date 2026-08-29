@@ -725,6 +725,26 @@ def _main():
                               help="Write the report JSON to FILE; use - for stdout")
     p_codex_cost.add_argument("--html", metavar="FILE",
                               help="Write a self-contained HTML dashboard to FILE")
+    # Codex 单会话审计：逐 session 成本 + 出处覆盖并集（套 DSH 审计 tab 版式）。
+    # codex-cost 在折叠时把 session 身份聚合掉，codex-evidence 给出处但不含成本；
+    # 这里把该 session 的文件们折叠→合并→计价，再把 evidence 覆盖取并集，拼回
+    # 一个逻辑 session（跨文件 resume 按 session_id 合并）。`--list` 只是选 id 的
+    # 前置（id/标题/模型/文件数/时间跨度）；单会话深挖是 --json/--html/文本三路。
+    # 与 Rust main.rs 的 CodexSession 子命令同一种结构。
+    p_codex_session = sub.add_parser("codex-session",
+                                     help="Audit ONE Codex session: per-session cost "
+                                          "(USD) + provenance coverage, in the DSH "
+                                          "audit-tab visual language")
+    p_codex_session.add_argument("--list", action="store_true",
+                                 help="List all Codex sessions (id/title/model/file "
+                                      "count/date span) — the id picker")
+    p_codex_session.add_argument("--session", metavar="ID", default=None,
+                                 help="The logical session_id to audit; default = the "
+                                      "most recent session")
+    p_codex_session.add_argument("--json", metavar="FILE",
+                                 help="Write the audit JSON to FILE; use - for stdout")
+    p_codex_session.add_argument("--html", metavar="FILE",
+                                 help="Write a self-contained HTML audit report to FILE")
     # ──── M3: 跨会话聚合层（v1.x.x）── 三个新子命令 ─────────────────
     # oneline：单次审计 → oneline.json（覆盖）+ today.json / month.json（合并累加）。
     # 与 behavior 复用同一份 audit_session_log，但额外调 hour_buckets 把折叠
@@ -1063,6 +1083,66 @@ def _main():
             wrote = True
         if not wrote:
             print(codex_cost_module.render_codex_cost(out), end="")
+        return
+
+    # Codex 单会话审计：逐 session 成本 + 出处覆盖并集。与 Rust main.rs 的
+    # CodexSession handler 同一种结构：--list 只是选 id 的前置（id/标题/模型/
+    # 文件数/时间跨度）；缺省 --session = 最新（list 排序首项 = 末行时间戳最晚）；
+    # 单会话深挖是 --json/--html/文本三路。HTML 是新模板 codex_session.html
+    # （套 DSH 审计 tab 的 .sv-* 视觉约定），JSON 经 </script>/<!-- 转义内联。
+    if getattr(args, "cmd", None) == "codex-session":
+        from agent_vitals import codex_session_audit as cs
+        if args.list:
+            if args.html:
+                print("--list only supports --json or plain text, not --html",
+                      file=sys.stderr)
+                sys.exit(2)
+            out = cs.codex_session_list()
+            if args.json:
+                text = json.dumps(out, ensure_ascii=False, indent=2)
+                if args.json == "-":
+                    print(text)
+                else:
+                    try:
+                        Path(args.json).write_text(text, encoding="utf-8")
+                    except OSError:
+                        print("failed to write %s" % args.json, file=sys.stderr)
+                        sys.exit(2)
+                    print("Wrote %s" % args.json)
+            else:
+                print(cs._render_list(out), end="")
+            return
+        if args.session is None:
+            lst = cs.codex_session_list()
+            sessions = lst.get("sessions") or []
+            if not sessions:
+                print("no codex sessions found", file=sys.stderr)
+                sys.exit(2)
+            session_id = sessions[0].get("session_id")
+        else:
+            session_id = args.session
+        out = cs.codex_session_audit_json(None, session_id)
+        if out is None:
+            print("codex session not found: %s" % session_id, file=sys.stderr)
+            sys.exit(2)
+        wrote = False
+        if args.json:
+            text = json.dumps(out, ensure_ascii=False, indent=2)
+            if args.json == "-":
+                print(text)
+            else:
+                try:
+                    Path(args.json).write_text(text, encoding="utf-8")
+                except OSError:
+                    print("failed to write %s" % args.json, file=sys.stderr)
+                    sys.exit(2)
+                print("Wrote %s" % args.json)
+            wrote = True
+        if args.html:
+            cs._render_codex_session_html(args.html, out)
+            wrote = True
+        if not wrote:
+            print(cs._render_audit(out), end="")
         return
 
     # ──── M3 oneline handler ──────────────────────────────────────

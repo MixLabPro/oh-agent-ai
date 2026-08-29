@@ -7,4 +7,5 @@
 pub mod behavior;
 pub mod codex_cost;
 pub mod codex_session;
+pub mod codex_session_audit;
 pub mod cost;

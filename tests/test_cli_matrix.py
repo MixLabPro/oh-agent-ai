@@ -1284,6 +1284,202 @@ class CliMatrix(unittest.TestCase):
         # = 2.4 → 4.4（无 longContext、无 unpriced）。
         self.assertAlmostEqual(report["total_cost_usd"], 4.4, places=9)
 
+    # ── codex-session（Codex 单会话审计：逐 session 成本 + 出处覆盖）────────
+    # 复用 _codex_cost_roots() 的三份夹具：文件名即 session_id（夹具无
+    # session_meta 头 → §14.4 filename-stem back-fill）。py==rs 逐字节靠 both()
+    # 兜底；这里的断言钉语义，防两个实现一起漂。
+
+    def test_codex_session_list_differential(self):
+        """`codex-session --list`：全部逻辑 session 的行摘要，按末行时间戳降序
+        （最新在前）。夹具无 session_index → title 全部 None（诚实缺失，不编造）。"""
+        self._codex_cost_roots()
+        code, out, err = self.both("codex-session", "--list", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["host"], "codex")
+        self.assertEqual(report["currency"], "USD")
+        sessions = report["sessions"]
+        self.assertEqual([s["session_id"] for s in sessions],
+                         ["rollout-unpriced", "rollout-sol", "rollout-terra"],
+                         "排序 = 末行时间戳降序（unpriced 08-03 最新在前）")
+        self.assertEqual([s["model"] for s in sessions],
+                         ["codex-auto-review", "gpt-5.6-sol", "gpt-5.6-luna"])
+        self.assertTrue(all(s["title"] is None for s in sessions),
+                        "夹具无 session_index → title 必须 None")
+        self.assertEqual([s["files"] for s in sessions], [1, 1, 1])
+        # 时间跨度 = 该 session 所有文件的首/末行时间戳 min/max
+        self.assertEqual(sessions[1]["first"], "2026-08-01T00:00:00Z")
+        self.assertEqual(sessions[1]["last"], "2026-08-02T00:00:00Z")
+        self.assertEqual(sessions[2]["last"], "2026-07-15T09:01:01Z")
+
+        # 人读视图差分（py==rs，both() 兜底）+ 语义：行宽固定 28。
+        code, out, err = self.both("codex-session", "--list")
+        self.assertEqual(code, 0)
+        self.assertIn("host: codex\n", out)
+        self.assertIn("sessions: 3\n", out)
+        self.assertIn("rollout-sol", out)
+
+    def test_codex_session_detail_differential(self):
+        """`codex-session --session rollout-sol`：单 session 深挖。逐 session 成本 =
+        codex-cost 同一条折叠→计价路径（sol 跨两天 0.6325 + LC 4.425 = 5.0575）；
+        出处覆盖 = 一次 build 并集（单文件夹具 = 该文件覆盖）；时间跨度 = 首/末行
+        min/max；context_window = 最后 token_count 的窗口。py==rs 逐字节（both()）。"""
+        self._codex_cost_roots()
+        code, out, err = self.both("codex-session", "--session", "rollout-sol",
+                                   "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["host"], "codex")
+        self.assertEqual(report["currency"], "USD")
+        self.assertEqual(report["session_id"], "rollout-sol")
+        self.assertEqual(report["model"], "gpt-5.6-sol")
+        self.assertEqual(report["context_window"], 258400)
+        self.assertEqual(report["date_span"]["first"], "2026-08-01T00:00:00Z")
+        self.assertEqual(report["date_span"]["last"], "2026-08-02T00:00:00Z")
+        self.assertEqual(len(report["files"]), 1)
+        self.assertTrue(report["files"][0].endswith("rollout-sol.jsonl"))
+        cr = report["cost_report"]
+        self.assertAlmostEqual(cr["total_cost_usd"], 5.0575, places=9)
+        self.assertEqual(cr["unpriced_tokens"], 0)
+        self.assertEqual(list(cr["per_model"].keys()), ["gpt-5.6-sol"])
+        self.assertEqual([u["type"] for u in cr["unaccounted_usage"]],
+                         ["token_count_before_turn_context", "token_count_invalid_last_usage"])
+        self.assertEqual(cr["plan"]["plan_type"], "plus")
+        self.assertEqual([h["hour"] for h in cr["hours"]],
+                         ["2026-08-01T08", "2026-08-02T08"])
+        # 出处：夹具只有 token_count → Usage/ContextWindow measured、
+        # UsageAggregate derived；信号序 = ALL_SIGNALS 序。
+        self.assertEqual(report["signals"],
+                         ["Usage", "UsageAggregate", "ContextWindow"])
+        cov = report["coverage"]
+        self.assertEqual(cov["Usage"]["measured"], 7)
+        self.assertEqual(cov["ContextWindow"]["measured"], 6)
+        self.assertEqual(cov["UsageAggregate"]["derived"], 1)
+        self.assertEqual(cov["ToolCalls"]["measured"], 0)
+        self.assertEqual(report["attempts"], [])
+        self.assertEqual(report["notes"], [])
+
+        # 缺省 --session = 最新（末行时间戳最晚 = unpriced）→ 与显式指定一致。
+        code, out, err = self.both("codex-session", "--json", "-")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["session_id"], "rollout-unpriced")
+
+    def test_codex_session_unpriced_session(self):
+        """`--session rollout-unpriced`：夹具里唯一带 unpriced token 的 session
+        （codex-auto-review 桶），unpriced_tokens 必须穿透（残差哨兵的双生：
+        不计价 ≠ 不报告）。py==rs 逐字节（both()）。"""
+        self._codex_cost_roots()
+        code, out, err = self.both("codex-session", "--session", "rollout-unpriced",
+                                   "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["model"], "codex-auto-review")
+        cr = report["cost_report"]
+        self.assertEqual(cr["unpriced_tokens"], 6000)
+        self.assertEqual(cr["total_tokens"]["uncached_input_tokens"], 5000)
+        # 上下文窗口：第一条 token_count 带 info（258400），后一条 info=null。
+        # 最后一条 info 为 null → 不算窗口（键存在但 null ≠ 窗口），取最后一条
+        # **真带窗口**的（事件序，非字典序）→ 258400。
+        self.assertEqual(report["context_window"], 258400)
+
+    def test_codex_session_missing_session_is_tool_error(self):
+        """不存在的 session_id → 两个实现都以 2 退出（工具错误，不是「有发现」），
+        stderr 逐字节一致。不能走 both()——它把退出码 2 判成崩溃。"""
+        self._codex_cost_roots()
+        got = []
+        for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
+            r = subprocess.run(
+                cmd + ["codex-session", "--session", "no-such-id", "--json", "-"],
+                cwd=str(self.tmp / "workdir"),
+                env=isolated_home_env(self.tmp),
+                capture_output=True, text=True)
+            got.append((r.returncode, r.stdout, r.stderr))
+        self.assertEqual(got[0][0], got[1][0], "退出码不一致：py=%d rs=%d" % (got[0][0], got[1][0]))
+        self.assertEqual(got[0][0], 2, "不存在的 session 应当是工具错误（2）")
+        self.assertEqual(got[0][1], got[1][1], "stdout 不一致")
+        self.assertEqual(got[0][2], got[1][2], "stderr 不一致")
+        self.assertIn("session not found", got[0][2])
+
+    def test_codex_session_multi_file_union(self):
+        """一条逻辑 session 跨两份 rollout（resume）：覆盖 = concat 全部 items 后
+        一次 build 的并集（A 只有 token_count → Usage/ContextWindow，B 只有
+        mcp_tool_call_end + sub_agent_activity → ToolCalls/SubagentSpawns + 派生
+        SkillInvocations——任一文件单独都凑不齐这五组信号），成本 = 两文件折叠
+        合并。py==rs 逐字节（both()）。"""
+        live = self.tmp / ".codex" / "sessions" / "2026" / "08"
+        live.mkdir(parents=True, exist_ok=True)
+
+        def obj(t):
+            (ti, to, tc, tw, tr, tt) = t
+            return {"input_tokens": ti, "output_tokens": to,
+                    "cached_input_tokens": tc, "cache_write_input_tokens": tw,
+                    "reasoning_output_tokens": tr, "total_tokens": tt}
+
+        def tkn(ts, total):
+            o = obj((total - 100, 100, 0, 0, 0, total))
+            return {"timestamp": ts, "type": "event_msg", "payload": {
+                "type": "token_count",
+                "info": {"total_token_usage": o, "last_token_usage": o,
+                         "model_context_window": 258400}}}
+
+        def tc(ts, sid):
+            return {"timestamp": ts, "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol", "session_id": sid}}
+
+        sid = "union-0001"
+        # 分组键只认 session_meta.payload.session_id / .id（turn_context 里的
+        # session_id 字段解析器不认）——两份文件用不同文件名 + 各自 session_meta
+        # 头写**同一个** session_id，才真正走过「同一逻辑 session 跨文件」的分支。
+        a = [
+            {"timestamp": "2026-08-10T00:00:00Z", "type": "session_meta",
+             "payload": {"session_id": sid, "id": sid, "history_mode": "legacy",
+                         "cli_version": "0.146.0"}},
+            tc("2026-08-10T00:00:01Z", sid),
+            tkn("2026-08-10T00:00:02Z", 1100),
+        ]
+        b = [
+            {"timestamp": "2026-08-10T00:10:00Z", "type": "session_meta",
+             "payload": {"session_id": sid, "id": sid}},
+            tc("2026-08-10T00:10:01Z", sid),
+            {"timestamp": "2026-08-10T00:10:02Z", "type": "event_msg",
+             "payload": {"type": "mcp_tool_call_end", "turn_id": "t1"}},
+            {"timestamp": "2026-08-10T00:10:03Z", "type": "event_msg",
+             "payload": {"type": "sub_agent_activity", "turn_id": "t1"}},
+        ]
+        (live / "rollout-union-a.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in a), encoding="utf-8")
+        (live / "rollout-union-b.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in b), encoding="utf-8")
+
+        code, out, err = self.both("codex-session", "--session", sid, "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["session_id"], sid)
+        self.assertEqual(len(report["files"]), 2, "同一 session_id 两份 rollout 必须合并")
+        # 元数据取路径序最后一份（续写文件 = 当前状态）：B 无 history_mode →
+        # 该值被后置重置成 None（同 parse_codex_session_log 的整体替换语义）。
+        self.assertIsNone(report["history_mode"])
+        self.assertEqual(report["model"], "gpt-5.6-sol")
+        # 覆盖并集：A 的 Usage + B 的 ToolCalls/SubagentSpawns + 派生双信号。
+        self.assertEqual(report["signals"],
+                         ["ToolCalls", "Usage", "UsageAggregate", "ContextWindow",
+                          "SubagentSpawns", "SkillInvocations"])
+        cov = report["coverage"]
+        self.assertEqual(cov["Usage"]["measured"], 1)
+        self.assertEqual(cov["ContextWindow"]["measured"], 1)
+        self.assertEqual(cov["ToolCalls"]["measured"], 1)
+        self.assertEqual(cov["SubagentSpawns"]["measured"], 1)
+        self.assertEqual(cov["UsageAggregate"]["derived"], 1)
+        self.assertEqual(cov["SkillInvocations"]["derived"], 1)
+        # 成本合并：只有 A 有 token → 总价来自 A 的 1100 token（0.1M·5 + 0.01M·30
+        # 之类，不逐项手算，但 must be > 0 且 per_model 非空）。
+        cr = report["cost_report"]
+        self.assertGreater(cr["total_cost_usd"], 0)
+        self.assertEqual(list(cr["per_model"].keys()), ["gpt-5.6-sol"])
+        # 时间跨度 = 跨文件首/末 min/max。
+        self.assertEqual(report["date_span"]["first"], "2026-08-10T00:00:00Z")
+        self.assertEqual(report["date_span"]["last"], "2026-08-10T00:10:03Z")
+
     def test_calendar_codex_blob_views_match_rust_reports(self):
         """统一看板内联的 codex 3 视图 = Rust `codex-cost --json` 三个过滤的
         报告（docs/UNIFIED_COST_VIEW.md 的 1 号宿主契约）。

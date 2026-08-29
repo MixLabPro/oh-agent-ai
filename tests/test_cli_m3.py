@@ -644,6 +644,89 @@ class TestUsageHourBucketsReconcile(unittest.TestCase):
                              "hour_buckets 4 桶累加 == oneline tokens_total")
 
 
+class TestCodexSessionHtml(unittest.TestCase):
+    """`codex-session --html` 的独立模板（DSH 审计 tab 版式）渲染 sanity。
+
+    HTML 是 presentation，不进 byte 差分（同 calendar）——这里断言**结构**：
+    单块 `agent-vitals-data-codex-session` JSON 已转义内联、5 个区块标题 +
+    4 张 KPI 卡 + topbar 齐全、JSON 与 `--json` 同源。用真实 rollout 夹具喂
+    固定 HOME，断言的是模板对真实数据的呈现，不是对假数据的容忍。
+    """
+
+    def test_codex_session_html_inlines_blob_and_sections(self):
+        with _TmpHome() as h:
+            import shutil
+            live = Path(h.tmp) / ".codex" / "sessions" / "2026" / "08"
+            live.mkdir(parents=True)
+            shutil.copy2(ROOT / "fixtures" / "codex" / "cost" / "rollout-sol.jsonl",
+                         live / "rollout-sol.jsonl")
+            with tempfile.TemporaryDirectory() as td:
+                out = Path(td) / "codex-session.html"
+                r = _run(["codex-session", "--session", "rollout-sol",
+                          "--html", str(out)], env=h.env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertTrue(out.is_file())
+                html = out.read_text(encoding="utf-8")
+
+                # 单块 JSON：转义后内联（`</script`→`<\/script`），可逆解析。
+                m = re.search(
+                    r'<script id="agent-vitals-data-codex-session"[^>]*>(.*?)</script>',
+                    html, re.DOTALL)
+                self.assertIsNotNone(m, "codex-session --html 必须内联审计数据块")
+                blob = json.loads(m.group(1))
+                self.assertEqual(blob["host"], "codex")
+                self.assertEqual(blob["session_id"], "rollout-sol")
+                self.assertEqual(blob["currency"], "USD")
+
+                # JSON 与 `--json` 输出同源（同一份 codex_session_audit_json）。
+                r2 = _run(["codex-session", "--session", "rollout-sol",
+                           "--json", "-"], env=h.env)
+                self.assertEqual(r2.returncode, 0, r2.stderr)
+                self.assertEqual(json.loads(r2.stdout), blob,
+                                 "HTML 内联 JSON 必须等于 --json 输出")
+
+                # 5 个区块标题（会话资源概览 / 时间线 / 出处与覆盖 / 计划 / Finding）。
+                for title in ("会话资源概览", "会话时间线", "出处与覆盖",
+                              "计划与额度", "Finding 队列"):
+                    self.assertIn(title, html, "缺区块标题 %s" % title)
+                # 4 张 KPI 卡标签。
+                for label in ("费用估算", "Token 用量", "上下文上限", "异常"):
+                    self.assertIn(label, html, "缺 KPI 标签 %s" % label)
+                # topbar 锚点。
+                for anchor in ("sv-title", "sv-sid", "sv-chips"):
+                    self.assertIn('id="%s"' % anchor, html)
+
+    def test_codex_session_html_escapes_closing_script(self):
+        """JSON 里若含 `</script` / `<!--` 必须转义——否则浏览器解析 HTML 时
+        提前截断。构造一条带恶意串的 session，断言转义后无裸 `</script>`。"""
+        with _TmpHome() as h:
+            import shutil
+            live = Path(h.tmp) / ".codex" / "sessions" / "2026" / "08"
+            live.mkdir(parents=True)
+            # 标题（session_index 查表）注入 `</script>`。
+            index_dir = Path(h.tmp) / ".codex"
+            index_dir.mkdir(parents=True, exist_ok=True)
+            (index_dir / "session_index.jsonl").write_text(
+                '{"id": "rollout-sol", "thread_name": "</script><script>alert(1)"}\n',
+                encoding="utf-8")
+            shutil.copy2(ROOT / "fixtures" / "codex" / "cost" / "rollout-sol.jsonl",
+                         live / "rollout-sol.jsonl")
+            with tempfile.TemporaryDirectory() as td:
+                out = Path(td) / "codex-session.html"
+                r = _run(["codex-session", "--session", "rollout-sol",
+                          "--html", str(out)], env=h.env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                html = out.read_text(encoding="utf-8")
+                # 数据块内不得出现裸 `</script>`（唯一合法的 `</script>` 是块闭合）。
+                body = re.search(
+                    r'<script id="agent-vitals-data-codex-session"[^>]*>(.*?)</script>',
+                    html, re.DOTALL).group(1)
+                self.assertNotIn("</script>", body,
+                                 "数据块内不得有未转义的 </script>")
+                # 转义后仍可解析成原串。
+                self.assertEqual(json.loads(body)["title"], "</script><script>alert(1)")
+
+
 class TestCodexFoldCache(unittest.TestCase):
     """codex 整折叠 memo（`$AGENT_VITALS_HOME/cache/codex-fold.json`）。
 
