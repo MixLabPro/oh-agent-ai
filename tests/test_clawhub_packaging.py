@@ -21,23 +21,36 @@ def _skill_md_local_links():
     text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
     return sorted({m.group(1).strip() for m in MARKDOWN_LINK_RE.finditer(text)})
 
+# 深重构后（第 2 刀）包分两层：顶层入口/共享 + skills/（静态体检）+
+# agent/（会话行为/成本）子树 + adapters/ + templates/。清单按当前布局逐字写，
+# 新增模块必须两处一起改（这里 + package-clawhub.yml），否则打包门禁自说自话。
 ALLOWED_PACKAGE_FILES = {
     Path(name) for name in (
-        "__init__.py", "cli.py", "compat.py", "paths.py", "model.py", "util.py", "frontmatter.py",
-        "security.py", "discovery.py", "inventory.py", "report.py",
-        "analysis.py", "overlap.py", "doctor.py", "explain.py",
-        "lifecycle.py", "redact.py", "snapshots.py", "diff.py", "behavior.py",
-        "usage.py", "cost.py", "trajectory.py", "compaction.py", "waste.py", "subagent.py", "skill.py",
-        "duration.py", "pricing.json", "state.py", "budget.py",
-        "codex_evidence.py", "codex_usage.py", "codex_cost.py", "codex_pricing.json",
+        # 顶层：入口 + 共享
+        "__init__.py", "cli.py", "compat.py", "paths.py", "util.py",
+        "pricing.json", "codex_pricing.json",
+        # skills/：静态 SKILL.md 体检
+        "skills/__init__.py", "skills/analysis.py", "skills/diff.py",
+        "skills/discovery.py", "skills/doctor.py", "skills/explain.py",
+        "skills/frontmatter.py", "skills/inventory.py", "skills/lifecycle.py",
+        "skills/overlap.py", "skills/redact.py", "skills/report.py",
+        "skills/security.py", "skills/snapshots.py",
+        # agent/：会话行为 + 成本
+        "agent/__init__.py", "agent/behavior.py", "agent/budget.py",
+        "agent/codex_cost.py", "agent/codex_evidence.py", "agent/codex_usage.py",
+        "agent/compaction.py", "agent/cost.py", "agent/duration.py",
+        "agent/skill.py", "agent/state.py", "agent/subagent.py",
+        "agent/trajectory.py", "agent/usage.py", "agent/waste.py",
+        # adapters/：宿主适配器
         "adapters/__init__.py", "adapters/claude.py", "adapters/codex.py",
         "adapters/codex_session.py",
         "adapters/openclaw.py", "adapters/workbuddy.py", "adapters/hermes.py",
         "adapters/dsh.py",
+        # templates/
         "templates/calendar.html",
     )
 }
-ALLOWED_PACKAGE_DIRS = {Path("adapters"), Path("templates")}
+ALLOWED_PACKAGE_DIRS = {Path("adapters"), Path("templates"), Path("skills"), Path("agent")}
 
 
 def _ignore_python_cache(_directory, names):

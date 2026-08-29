@@ -63,7 +63,7 @@
 | `seq` | `tool/call` 自带 | — |
 
 - 纪律：和 `skill.rs` 一样，缺失字段进 `missing_fields`，不填默认值。
-- lockstep：`scripts/agent_vitals/duration.py`
+- lockstep：`scripts/agent_vitals/agent/duration.py`
 - 测试：core `#[cfg(test)]` + `tests/test_degradation.py` 新增一类（残缺日志不能崩）
 - ⚠️ **新 Python 模块要登记两处白名单，漏一处 CI 才报错**（T3 建 `skill.py` 时踩过，
   commit 原话："两处都漏一个都会在真实 CI 里报 'Unexpected file'"）：
@@ -106,7 +106,7 @@
 #### D4 · Hook 消费抽取（core 已完成，宿主前提仍未验证）
 
 `crates/agent-vitals-core/src/duration.rs::hook_executions` /
-`scripts/agent_vitals/duration.py::hook_executions` 已实现——直接抽取
+`scripts/agent_vitals/agent/duration.py::hook_executions` 已实现——直接抽取
 `hook/result`（不需要跟 `hook/invoked` 配对减时间戳，`durationMs` 已经是
 harness 算好的值），带 `decision` 分布计数。CLI 侧（`src/dsh.rs` 的
 `EXECUTION_EVENT_TYPES` 已收 `hook/*`）立即可用，测试齐全（core 8 个 +

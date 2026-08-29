@@ -56,7 +56,7 @@
 //! `codex_fold_file`（单文件有序流）与 `codex_merge_folds`（跨文件求和）都输出同一
 //! 形状：`{by_hour_model, by_model, unaccounted, plan}`。小时升序、模型/速度按首现序
 //! （与 Python dict 的插入序对齐，两侧 JSON 逐字节相同靠的是这份一致）。Python 平行
-//! 实现见 `scripts/agent_vitals/codex_usage.py`，差分由
+//! 实现见 `scripts/agent_vitals/agent/codex_usage.py`，差分由
 //! `tests/test_cli_matrix.py::both()` 与 characterization 钉死。
 
 use serde_json::{Map, Value, json};

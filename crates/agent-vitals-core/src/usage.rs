@@ -7,7 +7,7 @@
 //! 折叠语义与 DSH token-meter（packages/llm/token-meter/src/usage-projection.ts
 //! 的 tokenUsageProjectionDefinition）完全一致，并已用真实日志对账：各桶之和
 //! == tokenUsage 投影累计值（94997694 会话 180577354/498735/712320/0 逐字节
-//! 一致）。Python 平行实现见 `scripts/agent_vitals/usage.py`，差分防护在本文件
+//! 一致）。Python 平行实现见 `scripts/agent_vitals/agent/usage.py`，差分防护在本文件
 //! 的 parity 测试与 `tests/test_cli_matrix.py` 的双实现逐字节比较。
 //!
 //! 三个关键语义（为什么这样实现，对应共性缺陷）：
@@ -894,7 +894,7 @@ pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 }
 
 /// 事件流 → 按 `(date, hour)` 折叠到 token 桶。Python 平行实现见
-/// `scripts/agent_vitals/usage.py::hour_buckets`，差分防护在本文件的
+/// `scripts/agent_vitals/agent/usage.py::hour_buckets`，差分防护在本文件的
 /// `hour_buckets_*` 测试 + `tests/test_cli_matrix.py` 的双二进制逐字节比较。
 ///
 /// 与 `token_by_model` / `request_metrics` 是**同一次 fold 的三个出口**：

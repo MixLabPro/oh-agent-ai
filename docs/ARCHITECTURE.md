@@ -388,7 +388,7 @@ null」的断言，那等于悄悄删掉了这个字段。正向覆盖用假宿�
 （没有证据就什么都不改）。
 
 契约是跨实现的，实现位置各自不同：Python 正从 `scripts/scan.py` 渐进拆到
-`scripts/agent_vitals/inventory.py` 与 `adapters/`（迁移期间由兼容入口继续编排），
+`scripts/agent_vitals/skills/inventory.py` 与 `adapters/`（迁移期间由兼容入口继续编排），
 Rust 在 `src/inventory.rs`。模块移动不得改变下面四阶段的顺序与语义。
 
 | 阶段 | 问题 | claude-code | codex | openclaw | workbuddy | hermes | dsh◇ |

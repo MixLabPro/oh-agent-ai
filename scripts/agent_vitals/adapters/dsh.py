@@ -13,7 +13,7 @@ import json
 import os
 from pathlib import Path
 
-from ..usage import usage_shaped_tokens
+from ..agent.usage import usage_shaped_tokens
 from ..util import split_lines
 
 # DSH 自述 SESSION_FORMAT_VERSION 恒为 0、不作兼容承诺；不相符即降级。

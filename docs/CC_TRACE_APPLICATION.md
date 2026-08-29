@@ -176,7 +176,7 @@ Fast mode 用**同一个模型名**（opus）却按更高档计费，模型名�
 
 **Codex 侧的成本折叠已落地（`agent-vitals codex-cost`，2026-08）**：给 Codex 做
 cost fold 不再等 P5——`codex-cost` 就是 Codex 的成本引擎（USD、5 桶 + speed 行 +
-longContext，见 `scripts/agent_vitals/codex_cost.py` ↔ `src/codex_cost.rs`）。上面
+longContext，见 `scripts/agent_vitals/agent/codex_cost.py` ↔ `src/codex_cost.rs`）。上面
 三个缺口在 Codex 侧的落点：
 
 - **`speed`**：Codex 日志有 `service_tier`（`turn_context`/`thread_settings_applied`），

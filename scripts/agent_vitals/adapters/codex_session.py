@@ -1,7 +1,7 @@
 """Codex 会话日志（rollout JSONL）读取器 —— P4 适配器的 "locate → shape →
 extract" 三段（五段式流水线 locate → shape → extract → derive → coverage，
 见 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §4.2）。"derive → coverage" 两段在
-`scripts/agent_vitals/codex_evidence.py`（与 Rust
+`scripts/agent_vitals/agent/codex_evidence.py`（与 Rust
 `crates/agent-vitals-core/src/codex_evidence.rs` 逐字节对齐），I/O 不进去。
 
 与 Rust `src/codex_session.rs` 逐字节对齐——两条实现产出同一份字典，字节序

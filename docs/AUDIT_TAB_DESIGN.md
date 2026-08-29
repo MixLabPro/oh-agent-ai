@@ -109,7 +109,7 @@ fn detect_sv605(event: &Value) -> Option<String> {
 |---|---|---|
 | Rust core | `crates/agent-vitals-core/src/behavior.rs` | `match_behavior(events, workspace_root)`；`detect_sv605` 加前缀判定 |
 | Rust wasm | `crates/agent-vitals-wasm/src/lib.rs` | `audit_events(events_json, workspace_root)` 透传 |
-| Python | `scripts/agent_vitals/behavior.py` | `match_behavior(events, workspace_root)` 双维护同步 |
+| Python | `scripts/agent_vitals/agent/behavior.py` | `match_behavior(events, workspace_root)` 双维护同步 |
 | 二进制 CLI | `src/behavior.rs`（薄封装） | `audit_session_log` 从 session log 头取 cwd 传入 |
 | 宿主插件 | `dsh-client/index.js` | 从 session header 取 `cwd`，透传给 wasm `audit_events` |
 

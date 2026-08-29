@@ -673,7 +673,7 @@ EventBus ──→ Tauri 后端 state_machine
 | `dsh-client/src/host/index.ts::sessionProjections` | DSH 浏览器宿主专属路径，Pet 走独立路径 |
 | `dsh-client` 的 8 个投影 `apply()` 过滤器 | 浏览器专属；但**判据必须共用**，见下 |
 | `src/cli.rs::oneline/calendar` | Python 状态层 —— **v1 先不重写**，见下 |
-| `scripts/agent_vitals/state.py` | 同上 |
+| `scripts/agent_vitals/agent/state.py` | 同上 |
 
 > **⚠️ "Pet 用 Rust 重写状态层"这条要推迟，不是取消。**
 >
@@ -881,5 +881,5 @@ EventBus ──→ Tauri 后端 state_machine
 | `crates/agent-vitals-core/src/dsh.rs` | 不动；只被 sources/dsh.rs wrap |
 | `crates/agent-vitals-core/src/behavior.rs` | 演进（扩展 SV 命名空间）|
 | `dsh-client/src/host/index.ts` | 不动；Pet 走独立路径 |
-| `scripts/agent_vitals/state.py` | 不动；Pet 用 Rust 重写 |
+| `scripts/agent_vitals/agent/state.py` | 不动；Pet 用 Rust 重写 |
 | `src/main.rs` CLI 子命令 | 增量加 `watch`，其他不动 |

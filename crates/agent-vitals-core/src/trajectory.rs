@@ -12,7 +12,7 @@
 //! coverage` 不满足就根本不跑，§10 三态契约）。`match_trajectory(&[Value])`
 //! 降级为兼容 shim（wasm `audit_events` 与差分测试继续调），内部 = post_fork
 //! → 建 canonical → 门控 dispatch → flatten，与 `match_behavior` shim 同款。
-//! Python 平行实现 `scripts/agent_vitals/trajectory.py`，parity 测试逐字节看守。
+//! Python 平行实现 `scripts/agent_vitals/agent/trajectory.py`，parity 测试逐字节看守。
 //!
 //! 阈值常量选值避开 `fixtures/dsh/behavior.jsonl`（无重复调用、≤2 审批、≤1 超时、
 //! 无连续 error turn），让「全部规则都命中」的 fixture 保持干净。harness 侧证实：

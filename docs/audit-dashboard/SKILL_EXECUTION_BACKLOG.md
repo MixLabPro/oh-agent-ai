@@ -42,7 +42,7 @@ description`，只是最后只输出了 `len()`。
 - **隐私决策（必须先定）**：只出 `[{name, tokens}]`，**不出 description 原文**。
   理由：FR-SK-09 要求导出不含未脱敏内容；description 是内容，一旦进投影就会
   进导出。逐 skill「目录 Token」用 `tokens` 就够，不需要原文。
-- lockstep：`scripts/agent_vitals/usage.py`
+- lockstep：`scripts/agent_vitals/agent/usage.py`
 - 测试：core `#[cfg(test)]` + `tests/test_characterization.py`
 - ⚠️ **动 golden**：`--update` 前逐字确认 diff
 - 解锁：FR-SK-02 摘要可下钻、AC-SK-01 目录 vs 触发、逐 skill 目录 Token
@@ -75,7 +75,7 @@ turn/step/seq/time/session 全部蒸发。
 | `seq`/`requestSeq` | 事件自带 / 就近 `request/header` | null |
 
 - 纪律：缺失字段进 `missingFields` 数组输出，不填默认值
-- lockstep：`scripts/agent_vitals/skill.py`
+- lockstep：`scripts/agent_vitals/agent/skill.py`
 - 测试：core 单测 + `tests/test_degradation.py`（残缺日志不能崩、缺的要浮出来）
 - 参考真实量级：唯一实测样本 `turn:5 step:3`，**Δt = 18ms**（原型写的 1.2s/3.4s 差两个数量级）
 

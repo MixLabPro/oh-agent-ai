@@ -71,7 +71,7 @@ date-partitioned `2026/07/…` / `2026/08/…`). The real shape:
 
 - `scripts/agent_vitals/adapters/codex_session.py` ↔ `src/codex_session.rs` —
   the JSONL reader (locate → shape → extract).
-- `scripts/agent_vitals/codex_evidence.py` ↔
+- `scripts/agent_vitals/agent/codex_evidence.py` ↔
   `crates/agent-vitals-core/src/codex_evidence.rs` — the coverage fold
   (derive → coverage).
 - `tests/test_cli_matrix.py::test_codex_evidence_legacy` /

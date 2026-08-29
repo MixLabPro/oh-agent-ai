@@ -323,7 +323,7 @@ deepseek-harness 基线 `47f9438`）：
 | `tool/code-dispatch-start` | `{rootCallId, parentCallId, subCallId, name, arguments}` | `arguments` 是 **JSON 对象**（已规范化，不是字符串） |
 | `tool/code-dispatch` | `{…同上 + isError, content}` | 子调用 settle，`arguments` 同为 JSON 对象 |
 
-两条「字段核对结论」已写进 `scripts/agent_vitals/behavior.py` / `src/behavior.rs`
+两条「字段核对结论」已写进 `scripts/agent_vitals/agent/behavior.py` / `src/behavior.rs`
 头部注释，fixture 与它们保持一致：
 
 1. `approval/asked` 的关联键是 `id`（`callId` 可选），审计对 `asked`+`decided` 按

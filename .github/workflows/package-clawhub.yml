@@ -48,6 +48,7 @@ jobs:
           python_package="$package_dir/scripts/agent_vitals"
           unexpected_dir="$(find "$python_package" -mindepth 1 -type d \
             ! -path "$python_package/adapters" ! -path "$python_package/templates" \
+            ! -path "$python_package/skills" ! -path "$python_package/agent" \
             -print -quit)"
           if [ -n "$unexpected_dir" ]; then
             echo "Unexpected directory in Python package: $unexpected_dir" >&2
@@ -62,7 +63,7 @@ jobs:
           # 逐字一致（改文件清单必须两处一起改，否则打包门禁自说自话）。
           for path in "${package_files[@]}"; do
             case "$path" in
-              __init__.py|cli.py|compat.py|paths.py|model.py|util.py|frontmatter.py|security.py|discovery.py|inventory.py|report.py|analysis.py|overlap.py|doctor.py|explain.py|lifecycle.py|redact.py|snapshots.py|diff.py|behavior.py|trajectory.py|usage.py|cost.py|compaction.py|waste.py|subagent.py|skill.py|duration.py|pricing.json|codex_evidence.py|codex_usage.py|codex_cost.py|codex_pricing.json|state.py|budget.py|adapters/__init__.py|adapters/claude.py|adapters/codex.py|adapters/codex_session.py|adapters/openclaw.py|adapters/workbuddy.py|adapters/hermes.py|adapters/dsh.py|templates/calendar.html)
+              __init__.py|cli.py|compat.py|paths.py|util.py|pricing.json|codex_pricing.json|skills/__init__.py|skills/analysis.py|skills/diff.py|skills/discovery.py|skills/doctor.py|skills/explain.py|skills/frontmatter.py|skills/inventory.py|skills/lifecycle.py|skills/overlap.py|skills/redact.py|skills/report.py|skills/security.py|skills/snapshots.py|agent/__init__.py|agent/behavior.py|agent/budget.py|agent/codex_cost.py|agent/codex_evidence.py|agent/codex_usage.py|agent/compaction.py|agent/cost.py|agent/duration.py|agent/skill.py|agent/state.py|agent/subagent.py|agent/trajectory.py|agent/usage.py|agent/waste.py|adapters/__init__.py|adapters/claude.py|adapters/codex.py|adapters/codex_session.py|adapters/openclaw.py|adapters/workbuddy.py|adapters/hermes.py|adapters/dsh.py|templates/calendar.html)
                 ;;
               *)
                 echo "Unexpected file in Python package: $path" >&2

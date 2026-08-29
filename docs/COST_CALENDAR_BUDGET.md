@@ -557,10 +557,10 @@ agent-vitals doctor --fail-on warning
 
 | 任务 | 文件 | 行数 |
 |------|------|------|
-| `usage.py` 加 `hour_bucket` 折叠 | `scripts/agent_vitals/usage.py` | +40 |
-| `cost.py` 加 `per_hour` 输出 | `scripts/agent_vitals/cost.py` | +30 |
+| `usage.py` 加 `hour_bucket` 折叠 | `scripts/agent_vitals/agent/usage.py` | +40 |
+| `cost.py` 加 `per_hour` 输出 | `scripts/agent_vitals/agent/cost.py` | +30 |
 | 平行 Rust 实现 | `crates/agent-vitals-core/src/usage.rs` + `cost.rs` | +60 |
-| 新增 `state.py`（写 oneline/today/month） | `scripts/agent_vitals/state.py`（新文件）| ~150 |
+| 新增 `state.py`（写 oneline/today/month） | `scripts/agent_vitals/agent/state.py`（新文件）| ~150 |
 | 新增 `cli.py` 子命令 `oneline` `calendar` | `scripts/agent_vitals/cli.py` | +50 |
 | 平行 Rust CLI | `src/main.rs` | +60 |
 | 静态 HTML 模板 | `scripts/agent_vitals/calendar_template.html` | ~200 |
@@ -580,8 +580,8 @@ agent-vitals doctor --fail-on warning
 
 | 任务 | 文件 | 行数 |
 |------|------|------|
-| `budget.py` 加载 + 计算告警等级 | `scripts/agent_vitals/budget.py`（新文件）| ~150 |
-| `state.py` 加 budget 字段 | `scripts/agent_vitals/state.py` | +50 |
+| `budget.py` 加载 + 计算告警等级 | `scripts/agent_vitals/agent/budget.py`（新文件）| ~150 |
+| `state.py` 加 budget 字段 | `scripts/agent_vitals/agent/state.py` | +50 |
 | `cli.py` `budget` 子命令 | `scripts/agent_vitals/cli.py` | +80 |
 | snooze 持久化 | `state.py` | +30 |
 | 配置文件 schema 文档 | `docs/CONFIG.md`（新文件）| ~200 |
@@ -722,8 +722,8 @@ v1.x.3  ~710 行  (1 周)
 
 | 路径 | 用途 |
 |------|------|
-| `scripts/agent_vitals/state.py` | 新增：状态文件写入 |
-| `scripts/agent_vitals/budget.py` | 新增：预算加载与告警计算 |
+| `scripts/agent_vitals/agent/state.py` | 新增：状态文件写入 |
+| `scripts/agent_vitals/agent/budget.py` | 新增：预算加载与告警计算 |
 | `scripts/agent_vitals/calendar_template.html` | 新增：HTML 模板 |
 | `crates/agent-vitals-core/src/state.rs` | 新增：Rust 平行实现 |
 | `crates/agent-vitals-core/src/budget.rs` | 新增：Rust 平行实现 |

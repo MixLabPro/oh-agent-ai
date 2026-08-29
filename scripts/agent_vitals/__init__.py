@@ -14,17 +14,108 @@
 # `--version` 区分；tests/test_regressions.py 在有 Cargo.toml 时会断言。
 __version__ = "1.3.0"
 
-from .frontmatter import parse_frontmatter
-from .security import SECURITY_PATTERNS, is_cited, security_scan
-from .util import est_tokens, norm, safe_str
+# 两个子包：skills/（静态 SKILL.md 体检）+ agent/（会话行为/成本审计）。
+#
+# **不 import compat / cli** —— 两者用绝对路径引用下面的模块名（如 compat.py 的
+# `from agent_vitals.analysis import …`）。若在这里提前 import 它们，会撞上
+# 「包初始化到一半、模块名还没绑好」的循环导入。它们作为子模块被 scan.py /
+# cli 在包完整初始化后再加载，`import agent_vitals.compat` 不需要包属性。
+#
+# 顺序有讲究：先 import 两个子包，**再把子包的模块名抬到包级**，之后任何
+# `from agent_vitals import doctor` / `from agent_vitals.behavior import Coords`
+# 的既有扁平导入（tests/、cli.py、compat.py 大量这么写）都能解析到模块对象。
+# `from package import module` 拿到的就是模块对象，两个路径指向同一份代码。
+from . import agent, skills  # noqa: E402
+
+from .agent import (  # noqa: E402
+    behavior,
+    budget,
+    codex_cost,
+    codex_evidence,
+    codex_usage,
+    compaction,
+    cost,
+    duration,
+    skill,
+    state,
+    subagent,
+    trajectory,
+    usage,
+    waste,
+)
+from .skills import (  # noqa: E402
+    analysis,
+    diff,
+    discovery,
+    doctor,
+    explain,
+    frontmatter,
+    inventory,
+    lifecycle,
+    overlap,
+    redact,
+    report,
+    security,
+    snapshots,
+)
+
+# 点路径解析（`from agent_vitals.doctor import X` / compat.py 的
+# `from agent_vitals.analysis import …`）在**模块查找层**发生，属性层只在
+# `from agent_vitals import doctor` 时够用。把子包模块同时注册成扁平模块名
+# （sys.modules），带点的既有绝对导入才能命中同一份模块对象。
+import sys as _sys  # noqa: E402
+
+_FLAT_MODULE_NAMES = (
+    "analysis", "diff", "discovery", "doctor", "explain", "frontmatter",
+    "inventory", "lifecycle", "overlap", "redact", "report", "security",
+    "snapshots",
+    "behavior", "budget", "codex_cost", "codex_evidence", "codex_usage",
+    "compaction", "cost", "duration", "skill", "state", "subagent",
+    "trajectory", "usage", "waste",
+)
+for _name in _FLAT_MODULE_NAMES:
+    _sys.modules[__name__ + "." + _name] = globals()[_name]
+del _name
+
+# 函数级 re-export 保持原样（测试与外部调用方直接 import 这些名字）。
+from .frontmatter import parse_frontmatter  # noqa: E402
+from .security import SECURITY_PATTERNS, is_cited, security_scan  # noqa: E402
+from .util import est_tokens, norm, safe_str  # noqa: E402
 
 __all__ = [
     "SECURITY_PATTERNS",
     "__version__",
+    "analysis",
+    "behavior",
+    "budget",
+    "codex_cost",
+    "codex_evidence",
+    "codex_usage",
+    "compaction",
+    "cost",
+    "diff",
+    "discovery",
+    "doctor",
+    "duration",
+    "explain",
     "est_tokens",
+    "frontmatter",
+    "inventory",
     "is_cited",
+    "lifecycle",
     "norm",
+    "overlap",
     "parse_frontmatter",
+    "redact",
+    "report",
     "safe_str",
+    "security",
     "security_scan",
+    "skill",
+    "snapshots",
+    "state",
+    "subagent",
+    "trajectory",
+    "usage",
+    "waste",
 ]

@@ -9,36 +9,19 @@
 //! 本文件是 scripts/scan.py 的移植。输出必须与之逐字节一致 ——
 //! `python3 tests/golden_runner.py` 是唯一裁判。
 
-mod analysis;
-mod behavior;
-mod codex;
-mod codex_cost;
-mod codex_session;
-mod cost;
-mod openclaw;
-mod overlap;
-mod diff;
+// 子树：skills/（静态 SKILL.md 体检）+ agent/（会话行为/成本审计）。
+// dsh.rs 与 util.rs 是两世界共享，留在顶层。
+mod skills;
+mod agent;
 mod dsh;
-mod discovery;
-mod doctor;
-mod explain;
-mod frontmatter;
-mod host;
-mod inventory;
-mod redact;
-mod render;
-mod report;
-mod security;
-mod snapshot;
 mod util;
-mod workbuddy;
 
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
-use discovery::Ctx;
+use skills::discovery::Ctx;
 use util::norm;
 
 /// 覆盖优先级**按宿主而异**，不能只用一张表。
@@ -278,7 +261,7 @@ enum Cmd {
     /// Turn scan facts into cause, impact, and action
     Doctor {
         /// Jaccard threshold for SV401; default: 0.25 (shared with overlap)
-        #[arg(long, default_value_t = doctor::DEFAULT_OVERLAP_MIN)]
+        #[arg(long, default_value_t = skills::doctor::DEFAULT_OVERLAP_MIN)]
         min: f64,
         /// Write diagnostic JSON instead of a report
         #[arg(long = "json")]
@@ -287,7 +270,7 @@ enum Cmd {
     /// Save a snapshot to ~/.agent-vitals/snapshots
     Snapshot {
         /// Retain the newest N snapshots; default: 30; 0 means unlimited
-        #[arg(long, default_value_t = snapshot::SNAPSHOT_KEEP, value_parser = non_negative)]
+        #[arg(long, default_value_t = skills::snapshot::SNAPSHOT_KEEP, value_parser = non_negative)]
         keep: i64,
     },
     /// Compare with the previous snapshot
@@ -303,7 +286,7 @@ enum Cmd {
         /// Skill name or <plugin>:<name>
         name: String,
         /// Jaccard threshold for neighbors; default: 0.25 (shared with overlap)
-        #[arg(long, default_value_t = doctor::DEFAULT_OVERLAP_MIN)]
+        #[arg(long, default_value_t = skills::doctor::DEFAULT_OVERLAP_MIN)]
         min: f64,
         /// Write JSON instead of a report
         #[arg(long = "json")]
@@ -312,7 +295,7 @@ enum Cmd {
     /// Lexical filter for skills that may compete for similar requests
     Overlap {
         /// Jaccard threshold; default: 0.25
-        #[arg(long, default_value_t = doctor::DEFAULT_OVERLAP_MIN)]
+        #[arg(long, default_value_t = skills::doctor::DEFAULT_OVERLAP_MIN)]
         min: f64,
         /// Show only the first N pairs
         #[arg(long)]
@@ -414,12 +397,12 @@ fn detect_self_root() -> Option<PathBuf> {
 /// CI runner 不该因此把构建判成通过或失败。
 fn run_doctor(doc: &Value, args: &Args, min: f64, auto_snapshot: bool,
               baseline: Option<&std::path::Path>) -> i32 {
-    print!("{}", doctor::render_doctor(doc, &doctor::DoctorOpts {
+    print!("{}", skills::doctor::render_doctor(doc, &skills::doctor::DoctorOpts {
         split_threshold: args.split_threshold,
         min,
         version: env!("CARGO_PKG_VERSION"),
     }));
-    let ds = doctor::diagnose(doc, args.split_threshold, min);
+    let ds = skills::doctor::diagnose(doc, args.split_threshold, min);
 
     let mut base_ds: Option<Vec<Value>> = None;
     if args.new_only {
@@ -427,7 +410,7 @@ fn run_doctor(doc: &Value, args: &Args, min: f64, auto_snapshot: bool,
             None => {
                 eprintln!("--new-only needs a baseline: run `agent-vitals snapshot` first, \
 or specify one with --baseline.");
-                return doctor::EXIT_TOOL_ERROR;
+                return skills::doctor::EXIT_TOOL_ERROR;
             }
             Some(p) => p,
         };
@@ -436,24 +419,24 @@ or specify one with --baseline.");
         {
             None => {
                 eprintln!("--new-only could not read baseline {}", path.display());
-                return doctor::EXIT_TOOL_ERROR;
+                return skills::doctor::EXIT_TOOL_ERROR;
             }
             Some(v) => v,
         };
         // **在基线文档上重跑同一个 diagnose。**它是纯函数，这一步不需要任何
         // 额外的「历史诊断」存储，也就不会与快照的内容脱节。
-        base_ds = Some(doctor::diagnose(&prev, args.split_threshold, min));
+        base_ds = Some(skills::doctor::diagnose(&prev, args.split_threshold, min));
     }
 
     let ignore: Vec<String> = args.ignore.split(',')
         .map(|x| x.trim().to_uppercase())
         .filter(|x| !x.is_empty())
         .collect();
-    let (text, rc) = doctor::render_gate(
-        &ds, &doctor::GateOpts { fail_on: args.fail_on.clone(), ignore },
+    let (text, rc) = skills::doctor::render_gate(
+        &ds, &skills::doctor::GateOpts { fail_on: args.fail_on.clone(), ignore },
         base_ds.as_deref());
     print!("{}", text);
-    print!("{}", snapshot::doctor_snapshot(doc, auto_snapshot));
+    print!("{}", skills::snapshot::doctor_snapshot(doc, auto_snapshot));
     rc
 }
 
@@ -590,9 +573,9 @@ fn codex_report_from_merged(
         by_model =
             agent_vitals_core::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
     }
-    let pricing = codex_cost::load_codex_pricing();
+    let pricing = agent::codex_cost::load_codex_pricing();
     let plan = merged["plan"].clone();
-    let report = codex_cost::codex_cost_report(
+    let report = agent::codex_cost::codex_cost_report(
         &by_hour_model,
         &by_model,
         &merged["unaccounted"],
@@ -626,7 +609,7 @@ fn codex_report_from_merged(
         "month".into(),
         month_out.map(Value::from).unwrap_or(Value::Null),
     );
-    out.insert("today".into(), json!(codex_cost::today_beijing()));
+    out.insert("today".into(), json!(agent::codex_cost::today_beijing()));
     if let Some(rep) = report.as_object() {
         for (k, v) in rep {
             out.insert(k.clone(), v.clone());
@@ -646,7 +629,7 @@ fn codex_calendar_blob(
     month_out: Option<&str>,
     default: &str,
 ) -> Value {
-    let today = codex_cost::today_beijing();
+    let today = agent::codex_cost::today_beijing();
     let mut views = serde_json::Map::new();
     views.insert(
         "today".into(),
@@ -709,7 +692,7 @@ fn main() {
     // 行为审计：审计一份 DSH 会话日志的执行轨迹，**不跑 skill 扫描**。
     // 独立取证命令（读会话日志 → 规则引擎 → findings），在扫描之前短路。
     if let Some(Cmd::Behavior { session_log, rows_json }) = &args.cmd {
-        let Some(audit) = behavior::audit_session_log(session_log) else {
+        let Some(audit) = agent::behavior::audit_session_log(session_log) else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };
@@ -731,8 +714,8 @@ fn main() {
             // （cost.rs 顶部注释：纯展示层）。之前只有人读的 cost_block 文本，
             // 想要这份数字得手写脚本重新调 _price/load_pricing；现在 cost_report
             // 是 cost_block 和这里唯一的算价格的地方，两处不会算出两个数。
-            let pricing = cost::load_pricing();
-            let cost = cost::cost_report(&audit.usage, &pricing);
+            let pricing = agent::cost::load_pricing();
+            let cost = agent::cost::cost_report(&audit.usage, &pricing);
             // pre_fork 与 usage 是同一个形状（token_by_model 的输出），所以
             // 定价走同一个 cost_report——**不是**在这里另写一套算法。
             // usage→cost 与 pre_fork→pre_fork_cost 两条路对称：main.rs 就是
@@ -745,7 +728,7 @@ fn main() {
             let pre_fork_cost = if audit.pre_fork.is_null() {
                 None
             } else {
-                cost::cost_report(&audit.pre_fork, &pricing)
+                agent::cost::cost_report(&audit.pre_fork, &pricing)
             };
             let text = serde_json::to_string_pretty(&json!({
                 "findings": findings,
@@ -790,8 +773,8 @@ fn main() {
         }
         // 成本块：findings 之后空行 + 费用估算（纯展示层，见 cost.rs）。无
         // 可分桶的桶时 cost_block 返回空列表 → 不打印（与 tab 空态同构）。
-        let pricing = cost::load_pricing();
-        let block = cost::cost_block(&audit.usage, &pricing);
+        let pricing = agent::cost::load_pricing();
+        let block = agent::cost::cost_block(&audit.usage, &pricing);
         if !block.is_empty() {
             println!();
             for line in &block {
@@ -802,14 +785,14 @@ fn main() {
         // behavior_gate 的 docstring）。此前硬编码「有 critical 就退 1」，把
         // --fail-on warning / --ignore SV603 这类全局参数静默吞掉了。成本不
         // 影响退出码——闸门只看风险。
-        std::process::exit(behavior::behavior_gate(findings, &args.fail_on, &args.ignore));
+        std::process::exit(agent::behavior::behavior_gate(findings, &args.fail_on, &args.ignore));
     }
 
     // T11：Skill 执行审计——从会话日志抽取 skill-invocation / tool/call(name=skill) 事件，
     // 输出调用记录（触发方式/加载状态/耗时/位置）。与 behavior 不同：这是 skill 专用，
     // 只出 skill 相关的 invocations 结构，不带 SV601–614 findings。
     if let Some(Cmd::SkillAudit { session_log, rows_json }) = &args.cmd {
-        let Some(audit) = behavior::audit_session_log(session_log) else {
+        let Some(audit) = agent::behavior::audit_session_log(session_log) else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };
@@ -856,7 +839,7 @@ fn main() {
     // 这里额外给人读格式加一段"最慢的几条"——这正是这个命令存在的理由，不是
     // 跟 skill-audit 一样只报计数就够了。
     if let Some(Cmd::DurationAudit { session_log, rows_json }) = &args.cmd {
-        let Some(audit) = behavior::audit_session_log(session_log) else {
+        let Some(audit) = agent::behavior::audit_session_log(session_log) else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };
@@ -913,7 +896,7 @@ fn main() {
             let home = std::env::var("HOME")
                 .or_else(|_| std::env::var("USERPROFILE"))
                 .unwrap_or_default();
-            let report = codex_session::codex_session_roots_report(Path::new(&home));
+            let report = agent::codex_session::codex_session_roots_report(Path::new(&home));
             if let Some(path) = rows_json {
                 let text = serde_json::to_string_pretty(&report).unwrap_or_default();
                 if path == &PathBuf::from("-") {
@@ -931,7 +914,7 @@ fn main() {
         }
         // clap 的 required_unless_present 保证：roots=false 时 session_log 必在。
         let session_log = session_log.as_ref().expect("session_log required unless --roots");
-        let parsed = codex_session::read_codex_session_log(session_log);
+        let parsed = agent::codex_session::read_codex_session_log(session_log);
         if parsed.get("degraded").and_then(|v| v.as_str()).is_some() {
             eprintln!("session log unavailable: unreadable, malformed, or empty");
             std::process::exit(2);
@@ -967,7 +950,7 @@ fn main() {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default();
-        let session_index = codex_session::read_session_index(Path::new(&home));
+        let session_index = agent::codex_session::read_session_index(Path::new(&home));
         let title = session_index.get(&session_id).cloned();
         let evidence = agent_vitals_core::codex_evidence::build_codex_evidence(
             items, session_id, title, history_mode, cli_version, workspace_roots, model,
@@ -1013,8 +996,8 @@ fn main() {
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default();
         let mut folds: Vec<Value> = Vec::new();
-        for path in codex_session::codex_rollout_files(Path::new(&home)) {
-            let parsed = codex_session::read_codex_session_log(&path);
+        for path in agent::codex_session::codex_rollout_files(Path::new(&home)) {
+            let parsed = agent::codex_session::read_codex_session_log(&path);
             let items: Vec<Value> = parsed
                 .get("items")
                 .and_then(|v| v.as_array())
@@ -1027,14 +1010,14 @@ fn main() {
         // `--today` = 今天（过滤键是完整 YYYY-MM-DD，month 标签取今天所属月）；
         // `--month all` = 全部月份；其余 = 指定月。filter_key=None 即不过滤。
         let (filter_key, month_out): (Option<String>, Option<String>) = if *today {
-            let t = codex_cost::today_beijing();
+            let t = agent::codex_cost::today_beijing();
             (Some(t.clone()), Some(t[..7].to_string()))
         } else {
             match month.as_deref() {
                 Some("all") => (None, None),
                 Some(m) => (Some(m.to_string()), Some(m.to_string())),
                 None => {
-                    let cur = codex_cost::current_month_beijing();
+                    let cur = agent::codex_cost::current_month_beijing();
                     (Some(cur.clone()), Some(cur))
                 }
             }
@@ -1069,7 +1052,7 @@ fn main() {
             wrote = true;
         }
         if !wrote {
-            print!("{}", codex_cost::render_codex_cost(&out));
+            print!("{}", agent::codex_cost::render_codex_cost(&out));
         }
         return;
     }
@@ -1096,10 +1079,10 @@ fn main() {
         self_root,
     };
 
-    let cfg = host::read_host_config(&home_n);
+    let cfg = skills::host::read_host_config(&home_n);
 
-    let inv = inventory::take(
-        &inventory::Selection {
+    let inv = skills::inventory::take(
+        &skills::inventory::Selection {
             host: &args.host,
             extra_paths: &args.path,
             runtime_json: args.runtime_json.as_deref(),
@@ -1107,7 +1090,7 @@ fn main() {
         &home_n, &cfg, &ctx);
 
     // 采集到此为止；下面全是纯数据变换，交给 report。
-    let rep = report::build(&report::ReportInput {
+    let rep = skills::report::build(&skills::report::ReportInput {
         host: &args.host,
         all: args.all,
         budget,
@@ -1128,23 +1111,23 @@ fn main() {
         && !matches!(&args.cmd, Some(Cmd::Doctor { rows_json: Some(_), .. }));
     let baseline: Option<PathBuf> = args.baseline.clone().or_else(|| {
         match &args.cmd {
-            Some(Cmd::Diff { file, .. }) => file.clone().or_else(snapshot::latest_snapshot),
+            Some(Cmd::Diff { file, .. }) => file.clone().or_else(skills::snapshot::latest_snapshot),
             // --new-only 也要找基线。**不能只挂在 auto_snapshot 上** ——
             // `--no-snapshot` 的语义是「别写」，不是「别比」。
-            _ if auto_snapshot || args.new_only => snapshot::latest_snapshot(),
+            _ if auto_snapshot || args.new_only => skills::snapshot::latest_snapshot(),
             _ => None,
         }
     });
     if let Some(b) = &baseline {
         // 先算完再插入：diff 要读 doc 的内容，不能在可变借用期间读
-        let d = diff::diff_against(b, &doc);
+        let d = skills::diff::diff_against(b, &doc);
         doc.as_object_mut()
             .unwrap()
             .insert("diff_vs_baseline".into(), d);
     }
 
     if args.redact || args.redact_names {
-        doc = redact::redact(&doc, args.redact_names, &home_n, &cwd_n);
+        doc = skills::redact::redact(&doc, args.redact_names, &home_n, &cwd_n);
         doc.as_object_mut().unwrap().insert(
             "redacted".into(),
             json!({
@@ -1157,12 +1140,12 @@ fn main() {
 
     // `agent-vitals` 无参数等价于 `doctor`。判据是有没有给 --json，理由见 Cmd。
     if args.cmd.is_none() && args.json.is_none() {
-        std::process::exit(run_doctor(&doc, &args, doctor::DEFAULT_OVERLAP_MIN,
+        std::process::exit(run_doctor(&doc, &args, skills::doctor::DEFAULT_OVERLAP_MIN,
                                       auto_snapshot, baseline.as_deref()));
     }
 
     if let Some(Cmd::Snapshot { keep }) = &args.cmd {
-        let (text, rc) = snapshot::render_snapshot(&doc, &snapshot::SnapshotOpts {
+        let (text, rc) = skills::snapshot::render_snapshot(&doc, &skills::snapshot::SnapshotOpts {
             keep: *keep,
             redacted: args.redact || args.redact_names,
         });
@@ -1190,21 +1173,21 @@ fn main() {
         let gate = doc.pointer("/trigger_data/zombie_min_age_days")
             .and_then(|v| v.as_i64())
             .unwrap_or(args.zombie_age);
-        let (text, to_stderr, rc) = snapshot::render_diff(&doc, gate);
+        let (text, to_stderr, rc) = skills::snapshot::render_diff(&doc, gate);
         if to_stderr { eprint!("{}", text); } else { print!("{}", text); }
         std::process::exit(rc);
     }
 
     if let Some(Cmd::Doctor { min, rows_json }) = &args.cmd {
         if let Some(path) = rows_json {
-            let ds = doctor::diagnose(&doc, args.split_threshold, *min);
+            let ds = skills::doctor::diagnose(&doc, args.split_threshold, *min);
             let n = ds.len();
             let payload = serde_json::json!({
                 "schema_version": doc.get("schema_version"),
                 "run": util::run_id(&doc),
                 "host_selection": doc.get("host_selection"),
                 "diagnostics": ds,
-                "not_assessed": doctor::NOT_ASSESSED.iter()
+                "not_assessed": skills::doctor::NOT_ASSESSED.iter()
                     .map(|(c, n, w)| serde_json::json!({"code": c, "name": n, "reason": w}))
                     .collect::<Vec<_>>(),
             });
@@ -1224,15 +1207,15 @@ fn main() {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
-        let o = explain::ExplainOpts { name: name.clone(), min: *min, now };
-        match explain::render_explain(&doc, &o, rows_json.is_some()) {
+        let o = skills::explain::ExplainOpts { name: name.clone(), min: *min, now };
+        match skills::explain::render_explain(&doc, &o, rows_json.is_some()) {
             // 找不到那个名字要以非零退出：脚本调用方靠退出码判断，打印一行
             // 「没找到」然后返回 0 会被当成「查过了，没问题」。
-            explain::ExplainOut::NotFound(msg) => {
+            skills::explain::ExplainOut::NotFound(msg) => {
                 eprint!("{}", msg);
                 std::process::exit(1);
             }
-            explain::ExplainOut::Json(payload, n) => {
+            skills::explain::ExplainOut::Json(payload, n) => {
                 let path = rows_json.as_ref().expect("Json branch implies rows_json is present");
                 if std::fs::write(path, serde_json::to_string_pretty(&payload).unwrap_or_default()).is_err() {
                     eprintln!("failed to write {}", path.display());
@@ -1240,14 +1223,14 @@ fn main() {
                 }
                 println!("Wrote {}: {} copies", path.display(), n);
             }
-            explain::ExplainOut::Text(t) => print!("{}", t),
+            skills::explain::ExplainOut::Text(t) => print!("{}", t),
         }
         return;
     }
 
     if let Some(Cmd::List { unused, shadowed, stale, sort, top, rows_json }) = &args.cmd {
         if let Some(path) = rows_json {
-            let rows = render::list_rows(&doc, &render::ListOpts {
+            let rows = skills::render::list_rows(&doc, &skills::render::ListOpts {
                 unused: *unused, shadowed: *shadowed, stale: *stale,
                 sort: sort.clone(), top: *top,
             });
@@ -1259,7 +1242,7 @@ fn main() {
             println!("Wrote {}: {} rows", path.display(), n);
             return;
         }
-        print!("{}", render::render_list(&doc, &render::ListOpts {
+        print!("{}", skills::render::render_list(&doc, &skills::render::ListOpts {
             unused: *unused,
             shadowed: *shadowed,
             stale: *stale,
@@ -1270,9 +1253,9 @@ fn main() {
     }
 
     if let Some(Cmd::Overlap { min, top, rows_json }) = &args.cmd {
-        let o = overlap::OverlapOpts { min: *min, top: *top };
+        let o = skills::overlap::OverlapOpts { min: *min, top: *top };
         if let Some(path) = rows_json {
-            let rows = overlap::overlap_pairs(&doc, &o);
+            let rows = skills::overlap::overlap_pairs(&doc, &o);
             let n = rows.as_array().map(|a| a.len()).unwrap_or(0);
             if std::fs::write(path, serde_json::to_string_pretty(&rows).unwrap_or_default()).is_err() {
                 eprintln!("failed to write {}", path.display());
@@ -1281,7 +1264,7 @@ fn main() {
             println!("Wrote {}: {} pairs", path.display(), n);
             return;
         }
-        print!("{}", overlap::render_overlap(&doc, &o));
+        print!("{}", skills::overlap::render_overlap(&doc, &o));
         return;
     }
 

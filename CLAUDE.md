@@ -29,10 +29,15 @@ first, then a Chinese section anchored at `#中文`. When editing behaviour, bot
 
 ```
 Cargo.toml                  # [workspace]: "." + crates/agent-vitals-core + crates/agent-vitals-wasm
-src/                        # Rust binary (the `agent-vitals` CLI) — ~21 modules
+src/                        # Rust binary (the `agent-vitals` CLI)
+  skills/                   #   静态 SKILL.md 体检（analysis/security/doctor/discovery/…）
+  agent/                    #   会话行为/成本审计（behavior/cost/codex_cost/codex_session）
+  dsh.rs + util.rs          #   两世界共享，留顶层
 crates/agent-vitals-core/   # lib crate: the PURE computation (behavior rules etc.), single source of truth
 crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over core (audit_events), built with wasm-pack
-scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/ (~26 modules)
+scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/
+scripts/agent_vitals/       # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
+                            #   adapters/（宿主适配器）与 cli/compat/util/paths 留顶层
 scripts/probe_logs.py       # legacy fallback (not in the default flow)
 SKILL.md                    # agent-facing driver: routes to doctor, names the SV codes
 references/                 # hosts.md (per-host evidence), judgment.md, guide.zh-CN.md
@@ -40,9 +45,16 @@ docs/                       # design docs (ENGINEERING, DSH_INTEGRATION, AGENT_B
 dsh/                        # DSH-1 profile bundle (registers agent-vitals as a DSH skill)
 dsh-client/                 # dual-face audit plugin (host projection + wasm + client tab)
 fixtures/ + golden/         # test corpus + byte-for-byte scanner snapshots
-tests/                      # 18 Python test files
+tests/                      # 28 Python test files（含分类守卫 tests/test_classification.py）
 .github/workflows/          # verify.yml, release.yml, package-clawhub.yml
 ```
+
+**两个子树的分界**（`tests/test_classification.py` 用显式清单钉死）：`skills/` 是
+**skill 体检**——静态扫 SKILL.md/目录/触发数据；`agent/` 是 **skill 执行 + 成本**——
+审计一次会话里 skill 被调用得好不好（读运行证据，不是 SKILL.md 文本）。名字像
+扫描器的 `skill.py`/`skill.rs` 属 agent 家族（会话执行），**不进 skills/**；`codex.py`
+（安装时宿主扫描证据源）进 skills/，`codex_session.py`（会话读取）留 adapters/。
+Python 与 Rust 两侧同构，模块清单见 tests/test_classification.py 的家族 set。
 
 The **core crate is the single source of truth for pure rules**. `src/behavior.rs` in the
 binary is now a thin wrapper that re-exports `agent_vitals_core::behavior::*` and keeps
@@ -231,7 +243,7 @@ trade-off, and add a regression test whose docstring says what actually broke.
 
 When a rule changes, it changes in **three places that must stay in lockstep**: the Rust
 core crate (`crates/agent-vitals-core/`), the Python implementation
-(`scripts/agent_vitals/behavior.py`), and — for anything the DSH audit tab uses — the wasm
+(`scripts/agent_vitals/agent/behavior.py`), and — for anything the DSH audit tab uses — the wasm
 crate (rebuild + re-copy the `.wasm` into `dsh-client/`). The differential golden guard
 catches Python↔Rust drift; the wasm↔CLI drift is caught only by re-running the wasm build
 against the same fixtures, so verify that manually. The **trajectory detectors** (`trajectory.rs` ↔ `trajectory.py` ↔ wasm `audit_events` 合并 ↔ dsh 提取的 `turn/start·step/start·turn/end·step/end` 边界信号) are the same lockstep. The **cost fold** (`usage.rs` ↔
@@ -328,7 +340,7 @@ pricing.json` 是 build 时复制出的运行时份，宿主 `costReport` 投影
 另内嵌一份仅供展示用的模型短名副本——三处由 `tests/test_pricing_lockstep.py` 守）;
 prices are business data, not rules — they change without a golden `--update`. The
 **cost computation itself** (`cost_report`) is a fourth lockstep, one level up from the
-price table: `src/cost.rs` ↔ `scripts/agent_vitals/cost.py` ↔ `dsh-client/src/host/
+price table: `src/cost.rs` ↔ `scripts/agent_vitals/agent/cost.py` ↔ `dsh-client/src/host/
 index.ts::costReportFrom` all implement the same peak/off-peak-split pricing math over
 `{by_model, sequence}`; the CLI two-language parity is caught by `test_cli_matrix.py`'s
 `both()` differential, the TS mirror by `dsh-client/scripts/verify-host.mjs` asserting

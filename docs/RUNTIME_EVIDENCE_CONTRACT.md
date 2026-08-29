@@ -1496,7 +1496,7 @@ What landed, one new module per layer of the five-stage pipeline (§4.2):
   `non-json`, unreadable → `file-missing`), never by a `SESSION_FORMAT_VERSION`
   check that would misclassify a new record type as corruption.
 - **derive/coverage** — `crates/agent-vitals-core/src/codex_evidence.rs` ↔
-  `scripts/agent_vitals/codex_evidence.py`: **one flat type→Signal table**
+  `scripts/agent_vitals/agent/codex_evidence.py`: **one flat type→Signal table**
   (never a per-mode fork — real Paginated rollouts carry `task_started`/
   `task_complete`, so mixed streams must just work). Both §13 Codex columns
   live in the same table. `UsageAggregate` and `SkillInvocations` are

@@ -37,7 +37,7 @@ V3（预算管理）/V4（Guardrails），且明确要求"控制按钮存在的�
 - `costReport` 投影（`dsh-client/src/host/index.ts:468`）：逐模型定价
   （`per_model[*].total/peak/cache_read_cost`）、峰值/非峰值拆分、缓存命中实付、
   逐请求累计曲线（`series`，单调不降）；CLI 侧 `src/cost.rs`/
-  `scripts/agent_vitals/cost.py` 同款计价逻辑（四方 lockstep 的一环）。
+  `scripts/agent_vitals/agent/cost.py` 同款计价逻辑（四方 lockstep 的一环）。
 - `tokenByModel`：逐模型 token 分桶 + 模型切换序列。
 - Subagent 成本：`subagentUsage`（`dsh-client/src/host/index.ts:260`）把子会话
   token/费用汇总进主会话费用卡副标题，**明确标注"合计是下限"**——子会话日志读不到
@@ -165,7 +165,7 @@ KPI 卡**）。全程未碰 core/wasm/host——纯 `dsh-client` 前端叠加层
   不改变 SV612 的既有报告时机）；SV613 = run 里最后一个事件的 seq（`flush_
   error_run`/`flush_fail_run` 新增 `last_seq` 参数）。SV614 恒 `null`——计数
   类判定，没有区间概念。`crates/agent-vitals-wasm`/`src/behavior.rs`（CLI）/
-  `scripts/agent_vitals/behavior.py` 全是纯透传，无需改动；wasm 重新构建
+  `scripts/agent_vitals/agent/behavior.py` 全是纯透传，无需改动；wasm 重新构建
   （`wasm-pack build --target web`）并只重新拷贝 `.wasm` 二进制（`.js`
   字节相同，`.d.ts` 是手写文件，不能被生成产物覆盖）。`dsh-client/src/host/
   index.ts` 的 `findingSchema`（zod）补了 `run_end_seq: z.number().nullable()`
