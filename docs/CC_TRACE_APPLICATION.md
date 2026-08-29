@@ -67,6 +67,53 @@ cc-trace 用**第三套独立实现**（不同于我们 Python+Rust 两套）解
   cache_write_input_tokens/reasoning_output_tokens`。两套独立实现 field-path 一致，
   P4 的线格式表没错。
 
+#### A.2 实测结论（2026-08-29）：守恒律第四实现交叉验证通过，归属差异是 cc-trace 的 over-read
+
+交付物 `scripts/cc_trace_oracle.py`（+ `tests/test_cc_trace_oracle.py`）对同一批真实
+Codex rollout 日志（51 个文件）跑两套引擎，退出码只被**守恒律**驱动：
+
+- **全量五桶 totals：5/5 逐字节全平**（uncached 58,362,171 / output 5,617,122 /
+  cached 1,321,830,656 / cache_write 0 / reasoning 1,118,106）。
+- **逐日总 token：25/25 逐字节全平**。这里修了 oracle 自身一个隐患：逐日总和按
+  **六列互斥消费**加（uncached + output + cache_read + cache_write_5m + cache_write_1h
+  + reasoning），不能按五桶加——cached_input ⊇ cache_write，按桶加会双计
+  cache_write。真实语料 cache_write 恒 0 所以没炸过，fixture 钉了这行逻辑。
+- **per-model 五桶分桶不平，但每桶各模型差值合计恰为 0** —— 纯重归属：归错模型但
+  token 一个都没丢/多。守恒在桶级也保持。这维不 gate 退出码，只报告 + 归类。
+
+**归属差异根因**（重放逐事件定位，`classify_attribution` 已数据复现）：cc-trace 的
+Codex 模型游标从**三个**来源更新（`parser.rs:71-77` 读
+`thread_settings_applied.thread_settings.model`），我们只从 `turn_context.model`
+（`session_meta.model` 起手）更新。104 个差异事件形态：
+
+| turn_context（我们归属） | thread_settings（cc-trace 归属） | 事件数 | token |
+|---|---|---|---|
+| sol | terra | 85 | 11,523,381 in / 45,888 out |
+| sol | luna | 17 | 1,388,440 in / 4,543 out |
+| terra | sol | 2 | 0 / 0 |
+
+**判定：我们正确，cc-trace over-read。** 依据是事件流自身的 reverse 自然实验
+（`rollout-2026-07-28…`）：
+
+```
+09:43:46  thread_settings.model=terra  (turn_context=terra)  ← 本轮正跑 terra
+09:44:28  thread_settings.model=sol    (turn_context=terra)  ← settings 翻页到 sol
+09:44:30  token_count … tc=terra th=sol                     ← 本轮仍 terra
+09:44:39  token_count … tc=terra th=sol
+09:46:55  turn_context=sol                                   ← 2.5 分钟后本轮才实际翻页
+```
+
+`thread_settings_applied` 是全量配置快照（model/service_tier/permission_profile/
+collaboration_mode 一起落），**领先本轮实际翻页最多 2.5 分钟**；窗口内的请求仍由本轮
+turn_context 声明的模型执行。settings 翻页**下轮生效**，不中途改执行模型。forward
+方向（85+17 个「本轮 sol、settings 已翻 terra/luna」）是同一机制带真 token；2 个反向
+事件落在同类窗口但带 0 token（零计量请求，归属无实际影响）。所以我们的
+`turn_context`-only 归属规则是对的，**不改 codex 折叠代码**；若将来 cc-trace 反向
+事件出现真 token（形态不再单向），需重新评估。
+
+cost 金额两边天然不同（各自价格表，`codex_pricing.json` vs `pricing-catalog.json`），
+只报告、不断言——token 守恒才是第四实现要验证的硬不变式。
+
 ### B. `session_index.jsonl` + `archived_sessions` —— Codex 的两个漏读
 
 `usage/mod.rs:757-769` 显示 Codex 侧实际有**两个目录 + 一个索引**：
@@ -220,8 +267,10 @@ cc-trace 的 CompactView、UsageDailyChart、QuotaProgress、HeroUI 风格、紧
 
 ## 5. 推荐次序
 
-1. **A（差分 oracle）** 立刻做，纯验证，零风险，即刻获得第四实现交叉验证；P4 线格式
-   已因此得到独立背书。
+1. **A（差分 oracle）** ✅ **已落地（2026-08-29）**：`scripts/cc_trace_oracle.py`
+   + `tests/test_cc_trace_oracle.py`。实测守恒律 totals 5/5、逐日 25/25 逐字节全平
+   ——第四实现交叉验证通过；per-model 归属差异已定位并判定为 cc-trace 的
+   over-read（见 §A.2），不改我们代码。P4 线格式同时因此得到独立背书。
 2. **B 拆成两件**：`session_index` 标题索引是纯新增、随下一次 Codex 适配器迭代带上；
    `archived_sessions` 是**覆盖完整性修复**（漏扫归档会话 = 漏成本），建议优先于标题。
    **✅ 两件都已落地（2026-08-28）**：
