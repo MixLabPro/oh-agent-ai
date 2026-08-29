@@ -31,9 +31,11 @@ def current_month_beijing():
 
 def today_beijing():
     """北京时区（UTC+8）今天 → `YYYY-MM-DD`。与 Rust 侧 `today_beijing` 对齐。
-    作为 `--today` 的过滤键与输出契约的 `today` 字段。时间轴小时桶是 UTC 小时
-    （`codex_hour_of`），「今天」用它去匹配——跨 UTC/北京日界线的几小时落进相邻
-    小时桶，这是既有 UTC 分桶属性，诚实标注、不臆造。"""
+    作为 `--today` 的过滤键与输出契约的 `today` 字段。时间轴小时桶是**北京**
+    小时（`codex_hour_of` 已把 UTC 时间戳 +8 折成北京时间）——`--today` 按北京
+    日前缀匹配与小时桶同一天口径，北京凌晨 0-7 点的消费也能命中，不会跨日线
+    丢桶（2026-08-29 修：此前小时桶是 UTC 前缀，日历把 UTC 小时当北京小时渲染，
+    且北京 0-7 点的桶整块落在相邻 UTC 日）。"""
     return datetime.now(_BEIJING).date().isoformat()
 
 

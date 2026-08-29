@@ -1154,9 +1154,13 @@ class CliMatrix(unittest.TestCase):
         三轴对账。这是 hours 轴唯一一份跨语言测试——空路径让 `--today` 恒为空，
         单语言测试各只守一边，两边一起漂的时候没有人拦。
 
-        时间戳用北京今天的 `T12`/`T13`（UTC 正午/午后 = 北京今晚 20/21 点）——
-        UTC 小时键的日期前缀必然等于北京今天，`--today` 按 `YYYY-MM-DD` 前缀匹配
-        稳命中，与测试运行时刻（含北京 00:00-07:59 的日界线）无关。
+        夹具时间戳是 **UTC** 的 `ref_today + T04/T05`（凌晨）——`codex_hour_of` 把
+        UTC 时间戳 +8 折成**北京**小时键，T04/T05 正好落回北京同一天的 T12/T13
+        （东八区 08:00-15:59 的 UTC 小时与北京同日），所以 hours 的日期前缀必然
+        等于北京今天，`--today` 按 `YYYY-MM-DD` 前缀匹配稳命中，与测试运行时刻
+        （含北京 00:00-07:59 的日界线）无关。断言钉死 **UTC→北京 的 +8 映射**
+        （2026-08-29 修：此前小时键直接用 UTC 前缀，日历把 UTC 小时当北京小时
+        渲染——今天 08:59 的消费显示成「00:00」）。
         """
         from datetime import datetime, timedelta, timezone
         beijing = timezone(timedelta(hours=8))
@@ -1184,7 +1188,9 @@ class CliMatrix(unittest.TestCase):
         # 每个小时一个独立 total 签名（否则连续去重会跳过第二个桶）。单小时
         # input_total 100K/120K、当日聚合 220K，都低于 272000 → 不触发 LC，
         # 手算价才能保持简单。
-        h12, h13 = ref_today + "T12", ref_today + "T13"
+        # UTC ref_today T04/T05 → 北京 ref_today T12/T13（+8，同日）。
+        h12, h13 = ref_today + "T04", ref_today + "T05"
+        bj12, bj13 = ref_today + "T12", ref_today + "T13"
         events = [
             tc(h12 + ":00:00Z"),
             tkn(h12 + ":00:01Z", (100000, 50000, 0, 0, 0, 150000)),
@@ -1201,7 +1207,8 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["month"], ref_month)
         hours = report["hours"]
         self.assertEqual(len(hours), 2, "今天打戳的 rollout 必须产出非空 hours")
-        self.assertEqual([h["hour"] for h in hours], [h12, h13])
+        self.assertEqual([h["hour"] for h in hours], [bj12, bj13],
+                         "UTC T04/T05 必须折成北京同一天 T12/T13（+8）")
         for h in hours:
             self.assertTrue(h["hour"].startswith(ref_today))
         self.assertEqual(len(report["days"]), 1)

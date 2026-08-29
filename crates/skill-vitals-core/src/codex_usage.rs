@@ -102,9 +102,15 @@ fn total_signature(total: &Value) -> Option<(i64, i64, i64, i64, i64, i64)> {
     ))
 }
 
-/// 事件的时间戳 → `YYYY-MM-DDTHH` 小时桶键（统一多桶折叠：时间轴小时粒度，与
-/// DSH `usage.rs::token_by_date_model` 同一条纪律）。顶层 `timestamp` 回退
-/// `payload.timestamp`；不是合法小时时间戳 → None（未知时间，不编造）。
+/// 事件的时间戳 → `YYYY-MM-DDTHH` 北京小时桶键（统一多桶折叠：时间轴小时粒度，
+/// 与 DSH `usage.rs::hour_buckets` 同一条纪律——**北京时间**小时，不是 UTC）。
+///
+/// Codex 事件时间戳是 UTC ISO 串（实测全带 `Z` 后缀）。统一契约要求小时桶与
+/// DSH 同为北京时间（东八区固定 +8、无夏令时）：否则日历把 UTC 小时当北京
+/// 小时渲染（今天 08:59 的消费显示成「00:00」），且 `--today` 按北京日前缀
+/// 过滤会把北京凌晨 0-7 点的消费整块丢掉。顶层 `timestamp` 回退
+/// `payload.timestamp`；不是合法小时时间戳、或日历上不存在的日期（如 02-30）
+/// → None（未知时间，不编造）。
 fn codex_hour_of(event: &Value) -> Option<String> {
     let ts = event
         .get("timestamp")
@@ -122,7 +128,41 @@ fn codex_hour_of(event: &Value) -> Option<String> {
     {
         return None;
     }
-    Some(ts[..13].to_string())
+    let (y, m, d, hh) = (
+        parse_i64(&ts[0..4]),
+        parse_u32(&ts[5..7]),
+        parse_u32(&ts[8..10]),
+        parse_i64(&ts[11..13]),
+    );
+    let days = super::usage::days_from_civil(y, m, d);
+    // 日历有效性 round-trip：02-30 之类不存在的日期在 civil/days 两方向都
+    // 是 Hinnant 的无定义输入，round-trip 不还原 → 不编造小时键。
+    if civil_date_from_days(days) != format!("{:04}-{:02}-{:02}", y, m, d) {
+        return None;
+    }
+    let total = days * 24 + hh + BEIJING_OFFSET_HOURS;
+    let bj_days = total.div_euclid(24);
+    let bj_hour = total.rem_euclid(24);
+    Some(format!("{}T{:02}", civil_date_from_days(bj_days), bj_hour))
+}
+
+/// 东八区固定偏移。中国自 1991 年起全境 UTC+8、无夏令时（与 DSH `usage.rs`
+/// 的 `tz_offset_hours: 8` 同口径）。
+const BEIJING_OFFSET_HOURS: i64 = 8;
+
+fn parse_i64(s: &str) -> i64 {
+    // 结构校验已保证 s 是纯数字（长度 ≤4），parse 不会失败。
+    s.parse().unwrap_or(0)
+}
+
+fn parse_u32(s: &str) -> u32 {
+    s.parse().unwrap_or(0)
+}
+
+/// 与 `usage.rs::civil_date_from_days` 同实现（Hinnant），此处是 `pub(crate)`
+/// 访问同一函数的薄包装，避免重复一份算法。
+fn civil_date_from_days(days: i64) -> String {
+    super::usage::civil_date_from_days(days)
 }
 
 /// 事件的时间戳**原始字符串**（顶层 `timestamp` 回退 `payload.timestamp`）。None =
@@ -692,8 +732,9 @@ mod tests {
             ),
         ];
         let out = codex_fold_file(&events);
-        // by_hour_model[hour][model][speed] 的 5 桶（时间轴小时粒度）
-        let sol_d5 = &out["by_hour_model"]["2026-08-05T10"]["gpt-5.6-sol"]["standard"];
+        // by_hour_model[hour][model][speed] 的 5 桶（时间轴小时粒度，**北京时间**
+        // 键：UTC 08-05T10 → 北京 08-05T18、UTC 08-06T09 → 北京 08-06T17）。
+        let sol_d5 = &out["by_hour_model"]["2026-08-05T18"]["gpt-5.6-sol"]["standard"];
         // uncached = input − cached − cache_write（本样例 cache_write 恰为 0；
         // 用变量保留下「派生公式」的字面形状，而不是把 −0 折叠掉）。
         let cache_write = 0;
@@ -1088,7 +1129,8 @@ mod tests {
             token_count_line("2026-08-01T00:00:01Z", (20, 2, 0, 0, 0, 22), (20, 2, 0, 0, 0, 22))]);
         let merged = codex_merge_folds(&[fa, fb]);
         let hours: Vec<&str> = merged["by_hour_model"].as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(hours, vec!["2026-08-01T00", "2026-08-05T00"]);
+        // 小时键是北京时间：UTC 08-05T00/08-01T00 → 北京同日 T08。
+        assert_eq!(hours, vec!["2026-08-01T08", "2026-08-05T08"]);
         let bm = merged["by_model"]["m1"]["standard"].as_object().unwrap();
         assert_eq!(bm["uncached_input_tokens"], json!(30));
         assert_eq!(bm["output_tokens"], json!(3));
@@ -1191,5 +1233,40 @@ mod tests {
         // 非对象 / 空输入 → 空对象。
         assert!(codex_aggregate_hours(&json!(null)).as_object().unwrap().is_empty());
         assert!(codex_aggregate_hours(&json!({})).as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn hour_of_converts_utc_to_beijing_hours() {
+        // 统一多桶折叠契约（docs/UNIFIED_COST_VIEW.md）：时间轴小时桶是**北京**
+        // 时间（+8 固定、无夏令时），与 DSH `usage.rs::hour_buckets` 同一条纪律。
+        // 此前小时键直接用 UTC 前缀——日历把 UTC 小时当北京小时渲染，且 `--today`
+        // 按北京日前缀过滤会把北京凌晨 0-7 点的消费整块丢掉。真机复现
+        // 2026-08-29：UTC 00:59 的一次消费显示成「00:00」（实际是北京 08:59）。
+        let ev = |ts: &str| serde_json::json!({"timestamp": ts, "type": "event_msg"});
+        // 同日 +8。
+        assert_eq!(codex_hour_of(&ev("2026-08-25T00:00:00Z")), Some("2026-08-25T08".into()));
+        assert_eq!(codex_hour_of(&ev("2026-08-25T15:59:00Z")), Some("2026-08-25T23".into()));
+        // 跨日进位。
+        assert_eq!(codex_hour_of(&ev("2026-08-25T16:00:00Z")), Some("2026-08-26T00".into()));
+        assert_eq!(codex_hour_of(&ev("2026-08-25T23:00:00Z")), Some("2026-08-26T07".into()));
+        // 跨年进位。
+        assert_eq!(codex_hour_of(&ev("2026-12-31T23:00:00Z")), Some("2027-01-01T07".into()));
+        // 真机回归：UTC 08-29T00:59 → 北京 08-29T08（修前错误落在 T00）。
+        assert_eq!(
+            codex_hour_of(&ev("2026-08-29T00:59:47.055Z")),
+            Some("2026-08-29T08".into())
+        );
+        // 非法结构 / 日历上不存在的日期 / 缺时间戳 → None（未知时间，不编造）。
+        assert_eq!(codex_hour_of(&ev("not-a-date")), None);
+        assert_eq!(codex_hour_of(&ev("2026-02-30T10:00:00Z")), None);
+        assert_eq!(codex_hour_of(&serde_json::json!({"type": "event_msg"})), None);
+        // 顶层 `timestamp` 回退 `payload.timestamp`。
+        assert_eq!(
+            codex_hour_of(&serde_json::json!({
+                "type": "event_msg",
+                "payload": {"timestamp": "2026-08-25T00:00:00Z"}
+            })),
+            Some("2026-08-25T08".into())
+        );
     }
 }

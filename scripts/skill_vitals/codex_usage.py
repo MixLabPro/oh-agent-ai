@@ -14,6 +14,8 @@ docs/UNIFIED_COST_VIEW.md）：`by_hour_model` 是小时桶——today 直接显
 month/all 由小时聚合成天。不是"codex 天生只有天"，是统一范式要求补全小时桶。
 """
 
+from datetime import date, timedelta
+
 CODEX_TOKEN_FIELDS = [
     "uncached_input_tokens",
     "output_tokens",
@@ -151,10 +153,32 @@ def _combine_plan(new_p, prev):
     }
 
 
+_EPOCH_DATE = date(1970, 1, 1)
+_BEIJING_OFFSET_HOURS = 8  # 东八区固定偏移；中国自 1991 年起全境 UTC+8、无夏令时
+
+
+def _days_from_civil(y, m, d):
+    """`YYYY-MM-DD` → 1970-01-01 起的天数（与 Rust 侧 `days_from_civil` 等价；
+    用 `date()` 差值实现，跨时区无关）。非真实日期（如 02-30）抛 ValueError，
+    调用方转 None——与 Rust 侧的 round-trip 校验同一语义。"""
+    return (date(y, m, d) - _EPOCH_DATE).days
+
+
+def _civil_from_days(days):
+    """天数 → ISO `YYYY-MM-DD`（与 Rust 侧 `civil_date_from_days` 等价；
+    同 `usage.py::_hour_key` 的 `_EPOCH_DATE + timedelta` 手法）。"""
+    return (_EPOCH_DATE + timedelta(days=days)).isoformat()
+
+
 def codex_hour_of(event):
-    """事件时间戳 → `YYYY-MM-DDTHH` 小时桶键（统一多桶折叠：时间轴小时粒度，与
-    DSH `usage.rs::token_by_date_model` 同一条纪律）。顶层 `timestamp` 回退
-    `payload.timestamp`；不是合法小时时间戳 → None（未知时间，不编造）。"""
+    """事件时间戳 → `YYYY-MM-DDTHH` 北京小时桶键（统一多桶折叠：时间轴小时粒度，
+    与 DSH `usage.rs::hour_buckets` 同一条纪律——**北京时间**小时，不是 UTC）。
+
+    Codex 事件时间戳是 UTC ISO 串（实测全带 `Z` 后缀）。统一契约要求小时桶与
+    DSH 同为北京时间：否则日历把 UTC 小时当北京小时渲染（今天 08:59 的消费显示成
+    「00:00」），且 `--today` 按北京日前缀过滤会把北京凌晨 0-7 点的消费整块丢掉。
+    顶层 `timestamp` 回退 `payload.timestamp`；不是合法小时时间戳、或日历上不存在
+    的日期（如 02-30）→ None（未知时间，不编造）。"""
     ts = event.get("timestamp")
     if not isinstance(ts, str):
         payload = event.get("payload")
@@ -167,7 +191,16 @@ def codex_hour_of(event):
             and ts[:4].isdigit() and ts[5:7].isdigit()
             and ts[8:10].isdigit() and ts[11:13].isdigit()):
         return None
-    return ts[:13]
+    y, m, d, hh = int(ts[0:4]), int(ts[5:7]), int(ts[8:10]), int(ts[11:13])
+    try:
+        days = _days_from_civil(y, m, d)
+    except ValueError:
+        return None  # 日历上不存在的日期，不编造小时键（Rust 侧 round-trip 同判）。
+    if _civil_from_days(days) != "%04d-%02d-%02d" % (y, m, d):
+        return None
+    total_hours = days * 24 + hh + _BEIJING_OFFSET_HOURS
+    bj_days, bj_hour = divmod(total_hours, 24)
+    return "%sT%02d" % (_civil_from_days(bj_days), bj_hour)
 
 
 def normalize_speed(tier):

@@ -142,6 +142,14 @@ def _codex_rollout_signature(files):
     ]
 
 
+# 折叠缓存算法版本。签名只含 (path, size, mtime_ns)——代码改了折叠算法而
+# 源文件没动时，光靠签名命中会把旧算法的 fold 当新结果读出来。2026-08-29
+# codex_hour_of 从「UTC 前缀」改成「北京时间（+8）」就把小时键全变了，任何
+# v1 缓存的 UTC 键 fold 都是错的——升 v2 强制失效重扫。以后动折叠语义（小时
+# 归属、去重、桶字段）记得再升。
+_CODEX_FOLD_CACHE_VERSION = 2
+
+
 def _codex_fold_cache_path():
     """折叠缓存文件路径（`$SKILL_VITALS_HOME/cache/codex-fold.json`）。
 
@@ -164,7 +172,8 @@ def _read_codex_fold_cache(signature):
         cached = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if cached.get("version") != 1 or cached.get("signature") != signature:
+    if cached.get("version") != _CODEX_FOLD_CACHE_VERSION or \
+            cached.get("signature") != signature:
         return None
     fold = cached.get("fold")
     return fold if isinstance(fold, dict) else None
@@ -176,7 +185,8 @@ def _write_codex_fold_cache(signature, merged):
     只意味着下次重扫，不改变输出。"""
     path = _codex_fold_cache_path()
     payload = json.dumps(
-        {"version": 1, "signature": signature, "fold": merged},
+        {"version": _CODEX_FOLD_CACHE_VERSION, "signature": signature,
+         "fold": merged},
         ensure_ascii=False)
     tmp = path.with_name(path.name + ".tmp")
     try:

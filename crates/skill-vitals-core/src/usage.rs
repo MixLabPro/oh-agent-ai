@@ -716,7 +716,7 @@ pub fn pre_fork_usage(events: &[Value]) -> Value {
 /// ——CLAUDE.md §「no third-party supply chain at scan time」，统计折叠这层
 /// 必须是 stdlib-only；引 chrono 就破例了。算法纯整数 ~10 行，且已用
 /// 2026-08-25 = days 20690 等价对过。
-fn civil_date_from_days(days: i64) -> String {
+pub(crate) fn civil_date_from_days(days: i64) -> String {
     let z = days + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u64; // [0, 146096]
@@ -728,6 +728,21 @@ fn civil_date_from_days(days: i64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
     format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// `YYYY-MM-DD` → 1970-01-01 起的天数（Hinnant `days_from_civil`，public domain）。
+/// `civil_date_from_days` 的逆；`codex_usage::codex_hour_of` 要把 UTC 时间戳加
+/// 8 小时折成北京小时键，先拿它把 `YYYY-MM-DD` 归到天数、再跨日进位。**不引
+/// chrono**，理由同 `civil_date_from_days`。非法日期（如 02-30）也会给一个
+/// 数值（Hinnant 对非真实日期无定义）——调用方用 round-trip 校验挡掉。
+pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (m as i64 + 9) % 12; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe - 719468
 }
 
 /// 事件流 → 按 `(date, hour)` 折叠到 token 桶。Python 平行实现见

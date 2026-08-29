@@ -3021,7 +3021,9 @@ class CodexCostCharacterization(unittest.TestCase):
         # 去重 + `info: null` 跳过 → 只有 2 个真桶（08-01、08-02 各一小时）。夹具里
         # 那条 `info: null` 的 token_count（真实语料 08-19 形态）如果被误收进桶或误报
         # unaccounted，这里的小时集合断言会当场红。时间轴是小时桶（统一多桶折叠契约）。
-        self.assertEqual(set(f["by_hour_model"].keys()), {"2026-08-01T00", "2026-08-02T00"})
+        # 时间轴是小时桶（统一多桶折叠契约），且小时键是**北京时间**（+8）——
+        # 夹具 UTC 08-01T00/08-02T00 → 北京 08-01T08/08-02T08（2026-08-29 修）。
+        self.assertEqual(set(f["by_hour_model"].keys()), {"2026-08-01T08", "2026-08-02T08"})
         # 两条 unaccounted，type 升序（null-info 不增加第三条）
         ua = f["unaccounted"]
         self.assertEqual([u["type"] for u in ua],
@@ -3032,8 +3034,9 @@ class CodexCostCharacterization(unittest.TestCase):
     def test_fold_terra_switches_model_mid_file(self):
         """terra 夹具：model 游标中途切换 → 同一小时两个模型分桶。"""
         f = self._fold("rollout-terra.jsonl")
-        self.assertEqual(set(f["by_hour_model"].keys()), {"2026-07-15T09"})
-        hour = f["by_hour_model"]["2026-07-15T09"]
+        # 夹具 UTC 07-15T09 → 北京 07-15T17（+8）。
+        self.assertEqual(set(f["by_hour_model"].keys()), {"2026-07-15T17"})
+        hour = f["by_hour_model"]["2026-07-15T17"]
         self.assertEqual(set(hour.keys()), {"gpt-5.6-terra", "gpt-5.6-luna"})
         terra = hour["gpt-5.6-terra"]["standard"]
         self.assertEqual([terra[k] for k in CODEX_TOKEN_FIELDS], [65000, 20000, 30000, 5000, 2000])
@@ -3148,9 +3151,11 @@ class CodexCostCharacterization(unittest.TestCase):
         无 `hours` 键——`--json --month` 的契约不包含它（月视图热力图用 days）。"""
         report = self._merged_report(want_hours=True)
         hours = report["hours"]
+        # 小时键是北京时间（+8）：夹具 UTC 07-15T09/08-01T00/08-02T00/08-03T12 →
+        # 北京同日 T17/T08/T08/T20。日期轴不变（都是同日 +8）。
         self.assertEqual([h["hour"] for h in hours],
-                         ["2026-07-15T09", "2026-08-01T00", "2026-08-02T00",
-                          "2026-08-03T12"])
+                         ["2026-07-15T17", "2026-08-01T08", "2026-08-02T08",
+                          "2026-08-03T20"])
         hour_sum_by_date = {}
         for h in hours:
             d = h["hour"][:10]
