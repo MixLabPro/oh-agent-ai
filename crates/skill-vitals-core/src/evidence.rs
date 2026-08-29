@@ -417,12 +417,15 @@ pub struct CanonicalSession {
     pub attempts: Vec<SourceAttempt>,
     pub notes: Vec<AdapterNote>,
     // §11.5 timeline：逐事件观测的 host-neutral 投影——phase B 的规则引擎直接读
-    // 这四个字段，不再读裸宿主事件。适配器在「derive」段填充（见 dsh_evidence.rs
+    // 这五个字段，不再读裸宿主事件。适配器在「derive」段填充（见 dsh_evidence.rs
     // 的 populate_timelines）。
     pub tool_calls: Timeline<ToolCallObservation>,
     pub tool_results: Timeline<ToolResultObservation>,
     pub approvals: Timeline<ApprovalObservation>,
     pub sandbox_modes: Timeline<SandboxModeObservation>,
+    /// turn 生命周期（SV612 死循环 / SV613(a) 连续 error turn 的输入）——
+    /// 见 `TurnObservation` 的字段语义。entry 坐标 = turn/start 的坐标。
+    pub turns: Timeline<TurnObservation>,
 }
 
 pub struct SessionMeta {
@@ -441,7 +444,7 @@ pub struct SessionMeta {
 /// 规则引擎直接消费的逐事件投影——phase B 把 `detect_svNNN` 从读裸 DSH JSON
 /// 事件改读这里的窄 payload 后，规则不再依赖任何宿主事件形状（§12 的「不持有
 /// 宿主专属 payload」约束就落在这里：payload 字段名不含宿主名，DSH / Codex /
-/// WorkBuddy 各自适配器把自家事件翻译成这四个观察类型）。
+/// WorkBuddy 各自适配器把自家事件翻译成这五个观察类型）。
 ///
 /// 事件坐标（turn/step/call_id）在抽取时用 `Coords` 顺延定死、随 entry 存下来，
 /// 检测器不再需要自己跑坐标状态机——坐标是「翻译」的产物，不是「规则」的产物。
@@ -479,6 +482,42 @@ pub struct ApprovalObservation {
 #[derive(Clone, Debug)]
 pub struct SandboxModeObservation {
     pub mode: String,
+}
+
+/// 一个 turn 的投影——turn/start 开启、turn 内累积、turn/end 收尾、EOF 兜底
+/// 关闭（填充逻辑在 dsh_evidence.rs 的状态化 pass，见那里的注释）。
+///
+/// `sig` / `last_seq` / `end_*` 三个维度各自回答一个问题，**不可互相替代**：
+/// - `sig`：turn 内 tool/call（含 code-dispatch）的 (name, args_text) 有序表——
+///   SV612 把连续两个相同 `sig` 的 turn 判成死循环。turn 外的 tool/call 不归任何
+///   turn（事件流在 turn 之外的工具调用不属于这个 turn 的"动作序列"）。
+/// - `last_seq`：下一个 turn/start 前**最后出现的事件** seq——SV612 的
+///   `run_end_seq`。turn 内任何事件（tool/result、approval、turn/end 自身）都
+///   推进它，不止工具调用——这样它才是这个 turn 在事件流里真实占到的位置。
+/// - `end_seq` / `end_time` / `end_reason_kind` / `end_error_code`：turn/end 自身
+///   的坐标与收尾原因——SV613(a) 把连续以 error 收尾的 turn 段判成进度停滞，
+///   锚点是**第一个 error turn/end** 的 seq/time，不是 turn/start。
+///
+/// `last_seq` 与 `end_seq` 在 fixture 里恒相等（turn/end 总是紧邻下一个
+/// turn/start），但语义上不可合并：前者是"这个 turn 烧到哪个 seq"（任何事件
+/// 都算），后者是"turn/end 这条边界事件自己的 seq"。夹一个事件在 turn/end 与
+/// 下一个 turn/start 之间，两者就分开了。
+#[derive(Clone, Debug)]
+pub struct TurnObservation {
+    /// turn/start 的 `data.turn`，缺失时 0（与 `detect_loop` 的 unwrap_or(0) 同）。
+    pub turn: i64,
+    /// turn 内 tool/call 的 (name, args_text) 有序表。
+    pub sig: Vec<(String, String)>,
+    /// 下一个 turn/start 前最后事件 seq（SV612 的 run_end_seq）。
+    pub last_seq: Option<i64>,
+    /// turn/end 的 `data.reason.kind`（如 "error"）。
+    pub end_reason_kind: Option<String>,
+    /// turn/end 的 `data.reason.error.code`（如 "TIMEOUT"）。
+    pub end_error_code: Option<String>,
+    /// turn/end 自身的 seq（SV613(a) 锚点）。
+    pub end_seq: Option<i64>,
+    /// turn/end 自身的 time。
+    pub end_time: Option<i64>,
 }
 
 #[derive(Clone, Debug)]

@@ -273,7 +273,8 @@ fn detect_sv610(s: &CanonicalSession) -> RuleOutcome {
 
 /// 一锅 findings 的兜底：空 → MeasuredZero，否则 Findings。检测器都跑过、零命中
 /// 是「测了是零」，不是缺证据——缺证据由 dispatcher 前置门控判 Unavailable。
-fn outcome_from(findings: Vec<Value>) -> RuleOutcome {
+/// `pub(crate)`：trajectory.rs 的四个检测器也用它收尾。
+pub(crate) fn outcome_from(findings: Vec<Value>) -> RuleOutcome {
     if findings.is_empty() {
         RuleOutcome::MeasuredZero
     } else {
@@ -331,16 +332,18 @@ pub(crate) fn normalize(text: &str) -> String {
 }
 
 /// phase B：family ① 规则表直接嵌 `requires`——dispatcher 前置门控读它，
-/// 不单独去 `rule_specs()` 里查（那是 trajectory 后置标注用的规格，两处语义
-/// 必须一致，有 lockstep 测试钉着）。`requires` 里任一信号全零覆盖 → 规则
-/// Unavailable、检测器根本不跑（先滤后调）。severity/category 沿用旧
-/// `rules()` 的三级 critical/warning/info。
-struct FamilyRule {
-    code: &'static str,
-    severity: &'static str,
-    category: &'static str,
-    requires: &'static [Signal],
-    detect: fn(&CanonicalSession) -> RuleOutcome,
+/// 不单独去 `rule_specs()` 里查（那是规格声明，两处语义必须一致，有 lockstep
+/// 测试钉着）。`requires` 里任一信号全零覆盖 → 规则 Unavailable、检测器根本
+/// 不跑（先滤后调）。severity/category 沿用旧 `rules()` 的三级
+/// critical/warning/info。
+/// `pub(crate)`：trajectory.rs 的 `TRAJECTORY_RULES`（family ④）复用同一张
+/// 表结构。
+pub(crate) struct FamilyRule {
+    pub(crate) code: &'static str,
+    pub(crate) severity: &'static str,
+    pub(crate) category: &'static str,
+    pub(crate) requires: &'static [Signal],
+    pub(crate) detect: fn(&CanonicalSession) -> RuleOutcome,
 }
 
 /// family ①（SV601–SV610，§6.5 码表）规则表。`requires` 必须与 `rule_specs()`
@@ -395,7 +398,8 @@ fn rule_specs() -> &'static [RuleSpec] {
             // (b) 连续拒绝 (c) 危险模式反复授予）各自的子判定共享一个规则码
             // 但读不同的信号——两个子判定**任一**有证据，规则就不是完全测
             // 不了，所以这两条的 requires 是"至少一个"而不是"全部"，见
-            // `OR_REQUIRES_CODES` 与 `trajectory_rule_outcomes` 里的 OR 处理。
+            // `trajectory.rs::OR_REQUIRES_CODES` 与 `match_trajectory_canonical`
+            // 里的 OR 处理。
             RuleSpec { code: "SV611", requires: &[Signal::ToolCalls], enhances: &[], min_fidelity: Fidelity::Full },
             RuleSpec { code: "SV612", requires: &[Signal::TurnBoundaries], enhances: &[Signal::ToolCalls], min_fidelity: Fidelity::Full },
             RuleSpec {
@@ -412,62 +416,6 @@ fn rule_specs() -> &'static [RuleSpec] {
             },
         ]
     })
-}
-
-/// `requires` 是"至少一个信号有证据"（OR），不是"全部都要"（AND）的规则码。
-/// SV613/614 各自的子判定读不同信号、任一有证据规则就不是完全测不了；
-/// SV601-612 都是单信号 requires（或 SV612 的"缺了就真测不了"那一个），
-/// AND/OR 在单元素列表上等价，不受影响。
-const OR_REQUIRES_CODES: [&str; 2] = ["SV613", "SV614"];
-
-/// family ④（trajectory，SV611–614）——第一刀不迁移到 CanonicalSession，
-/// `trajectory_rule_outcomes` 只对这四个码做**后置**标注；family ① 的
-/// 三态由 `match_behavior_canonical` 前置门控产出。
-const TRAJECTORY_CODES: [&str; 4] = ["SV611", "SV612", "SV613", "SV614"];
-
-/// family ④（trajectory，SV611–614）的**后置**三态标注——第一刀不动
-/// `match_trajectory`：它仍跑原始事件，这里对它的产出按 `requires ⊆ coverage`
-/// 补 outcome。逻辑与旧 `rule_outcomes` 的 SV611–614 段逐字节相同（SV613/614
-/// 是"至少一个信号有证据"的 OR 语义，见 `OR_REQUIRES_CODES`）。
-pub fn trajectory_rule_outcomes(
-    findings: &[Value],
-    coverage: &Coverage,
-) -> Vec<(&'static str, RuleOutcome)> {
-    rule_specs()
-        .iter()
-        .filter(|spec| TRAJECTORY_CODES.contains(&spec.code))
-        .map(|spec| {
-            let missing: Vec<Signal> = spec
-                .requires
-                .iter()
-                .filter(|s| coverage.get(**s).total() == 0)
-                .copied()
-                .collect();
-            let is_unavailable = if OR_REQUIRES_CODES.contains(&spec.code) {
-                !spec.requires.is_empty() && missing.len() == spec.requires.len()
-            } else {
-                !missing.is_empty()
-            };
-            let outcome = if is_unavailable {
-                RuleOutcome::Unavailable {
-                    missing,
-                    reason: "no evidence for required signal(s) in this session".to_string(),
-                }
-            } else {
-                let matched: Vec<Value> = findings
-                    .iter()
-                    .filter(|f| f.get("rule").and_then(|v| v.as_str()) == Some(spec.code))
-                    .cloned()
-                    .collect();
-                if matched.is_empty() {
-                    RuleOutcome::MeasuredZero
-                } else {
-                    RuleOutcome::Findings(matched)
-                }
-            };
-            (spec.code, outcome)
-        })
-        .collect()
 }
 
 /// family ①（SV601–610）**前置门控**的 dispatcher——先滤后调：`requires` 里
@@ -528,7 +476,7 @@ pub fn flatten(outcomes: &[(&'static str, RuleOutcome)]) -> Vec<Value> {
     items
 }
 
-/// `match_behavior_canonical`（family ①）+ `trajectory_rule_outcomes`
+/// `match_behavior_canonical`（family ①）+ `match_trajectory_canonical`
 /// （family ④）合并出的 outcomes → `--json` 输出用的 JSON 形状。`RuleOutcome`
 /// 不是 serde 类型（§10 的类型定义里没有 derive Serialize），展示层自己转一道。
 pub fn rule_outcomes_json(outcomes: &[(&'static str, RuleOutcome)]) -> Value {
@@ -578,7 +526,7 @@ pub fn array_signal_status(count: usize, signal: Signal, coverage: &Coverage) ->
 /// P3 group⑤：`waste`（FR-04b 结构性浪费）不依赖单一信号——
 /// `detect_duplicate_tool_results`/`detect_failure_run_waste` 都是从
 /// ToolCalls/ToolResults 里挑异常模式，两个信号任一有证据这条就不是完全
-/// 测不了（跟 SV613/614 同一种 OR 语义，见 `OR_REQUIRES_CODES`），不是
+/// 测不了（跟 SV613/614 同一种 OR 语义，见 `trajectory.rs::OR_REQUIRES_CODES`），不是
 /// `array_signal_status` 那种单信号情况，所以单独写。
 pub fn waste_coverage(waste: &Value, coverage: &Coverage) -> Value {
     let tool_calls = coverage.get(Signal::ToolCalls).total();
@@ -1023,10 +971,29 @@ mod tests {
         match_behavior_canonical(&canonical_from(events))
     }
 
+    /// family ④ 的三态 = 前置门控 dispatcher 对 canonical 的产出。
+    fn trajectory_outcomes(events: Vec<Value>) -> Vec<(&'static str, RuleOutcome)> {
+        crate::trajectory::match_trajectory_canonical(&canonical_from(events))
+    }
+
+    /// 覆盖计数可以手工盖（测三态门控用），时间线用适配器从事件建好——门控只看
+    /// `coverage`，检测器只看 timelines，两件事本来就是解耦的。旧
+    /// `trajectory_rule_outcomes(findings, cov)` 允许把 coverage 与 findings 分开
+    /// 喂；迁移到 canonical 后，这条测"某个信号有覆盖"的路径就要能手工设覆盖。
+    fn canonical_with_coverage(events: Vec<Value>, coverage: Coverage) -> CanonicalSession {
+        let mut c = crate::dsh_evidence::build_dsh_evidence(events, Vec::new(), None, "test".to_string()).canonical;
+        c.coverage = coverage;
+        c
+    }
+
+    /// family ④ 的三态，但 coverage 手工盖（配 `canonical_with_coverage`）。
+    fn trajectory_outcomes_with(events: Vec<Value>, coverage: Coverage) -> Vec<(&'static str, RuleOutcome)> {
+        crate::trajectory::match_trajectory_canonical(&canonical_with_coverage(events, coverage))
+    }
+
     /// P3 group①：requires 里的信号全零覆盖 → Unavailable，不是"测了是零"的假 []。
     /// 十条规则各自的 requires 信号覆盖为零时都该拿到 Unavailable，不能有漏网的。
-    /// family ① 由前置门控 dispatcher 产出，family ④ 由 trajectory_rule_outcomes
-    /// 产出——两边都要覆盖到。
+    /// family ① 与 family ④ 都由各自的前置门控 dispatcher 产出——两边都要覆盖到。
     #[test]
     fn each_rule_is_unavailable_when_its_required_signal_has_zero_coverage() {
         let family1 = family1_outcomes(vec![]);
@@ -1047,7 +1014,7 @@ mod tests {
                 _ => panic!("{code} 在零覆盖时应该是 Unavailable，实际是别的分支"),
             }
         }
-        let trajectory = trajectory_rule_outcomes(&[], &Coverage::new());
+        let trajectory = trajectory_outcomes_with(vec![], Coverage::new());
         for (code, missing_signal) in [
             ("SV611", Signal::ToolCalls), ("SV612", Signal::TurnBoundaries),
         ] {
@@ -1103,7 +1070,7 @@ mod tests {
         // TurnBoundaries 有覆盖、ToolCalls 全零——真测出来的结论是"有 turn
         // 结构但没有工具调用可循环",是 MeasuredZero，不是 Unavailable。
         let cov = measured_coverage(Signal::TurnBoundaries, 1);
-        let outcomes = trajectory_rule_outcomes(&[], &cov);
+        let outcomes = trajectory_outcomes_with(vec![], cov);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV612").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero),
             "TurnBoundaries 有覆盖时 SV612 不该因为 ToolCalls 缺覆盖变成 Unavailable");
@@ -1114,7 +1081,7 @@ mod tests {
     #[test]
     fn sv613_and_sv614_are_unavailable_only_when_all_their_signals_are_missing() {
         let empty = Coverage::new();
-        let outcomes = trajectory_rule_outcomes(&[], &empty);
+        let outcomes = trajectory_outcomes_with(vec![], empty);
         for code in ["SV613", "SV614"] {
             let (_, outcome) = outcomes.iter().find(|(c, _)| *c == code).unwrap();
             assert!(matches!(outcome, RuleOutcome::Unavailable { .. }),
@@ -1127,14 +1094,14 @@ mod tests {
         // 只有 ToolResults 有覆盖(TurnBoundaries 全零)——613b(连续工具失败)
         // 那半边测得了，规则不该整体判 Unavailable。
         let cov = measured_coverage(Signal::ToolResults, 1);
-        let outcomes = trajectory_rule_outcomes(&[], &cov);
+        let outcomes = trajectory_outcomes_with(vec![], cov);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV613").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero),
             "ToolResults 有覆盖时 SV613 不该因为 TurnBoundaries 缺覆盖变成 Unavailable");
 
         // 反过来:只有 TurnBoundaries 有覆盖——613a(连续 error turn)测得了。
         let cov2 = measured_coverage(Signal::TurnBoundaries, 1);
-        let outcomes2 = trajectory_rule_outcomes(&[], &cov2);
+        let outcomes2 = trajectory_outcomes_with(vec![], cov2);
         let (_, outcome2) = outcomes2.iter().find(|(c, _)| *c == "SV613").unwrap();
         assert!(matches!(outcome2, RuleOutcome::MeasuredZero));
     }
@@ -1142,7 +1109,7 @@ mod tests {
     #[test]
     fn sv614_is_available_when_only_one_of_its_two_signals_has_coverage() {
         let cov = measured_coverage(Signal::SandboxModes, 1);
-        let outcomes = trajectory_rule_outcomes(&[], &cov);
+        let outcomes = trajectory_outcomes_with(vec![], cov);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV614").unwrap();
         assert!(matches!(outcome, RuleOutcome::MeasuredZero),
             "SandboxModes 有覆盖时 SV614 不该因为 ApprovalDecisions 缺覆盖变成 Unavailable");
@@ -1150,15 +1117,15 @@ mod tests {
 
     #[test]
     fn sv611_through_sv614_findings_are_picked_up_by_trajectory_rule_outcomes() {
-        // trajectory_rule_outcomes 喂的是 match_trajectory 的产出(SV611-614)——这条
-        // 测试确认 SV611-614 真的被 rule_specs() 认得，不是只声明了规格却匹配不到 finding。
-        let cov = {
-            let mut c = Coverage::new();
-            c.set(Signal::ToolCalls, CoverageCounts { measured: 1, ..Default::default() });
-            c
-        };
-        let findings = vec![json!({"rule": "SV611", "severity": "warning"})];
-        let outcomes = trajectory_rule_outcomes(&findings, &cov);
+        // match_trajectory_canonical 是前置门控 dispatcher——确认 SV611 真的被
+        // TRAJECTORY_RULES 认得，不是只声明了规格却匹配不到 finding。喂真实的
+        // 3 连重复调用让检测器产出 finding，而不是手拼 findings 数组。
+        let events = vec![
+            tool_call("bash", r#"{"command":"ls"}"#, 1),
+            tool_call("bash", r#"{"command":"ls"}"#, 2),
+            tool_call("bash", r#"{"command":"ls"}"#, 3),
+        ];
+        let outcomes = trajectory_outcomes(events);
         let (_, outcome) = outcomes.iter().find(|(c, _)| *c == "SV611").unwrap();
         match outcome {
             RuleOutcome::Findings(items) => assert_eq!(items.len(), 1),
@@ -1168,11 +1135,11 @@ mod tests {
 
     #[test]
     fn rule_outcomes_json_shape_for_each_status() {
-        // family ①（canonical 门控）+ family ④（trajectory 后置）合并后才是
+        // family ①（canonical 门控）+ family ④（canonical 门控）合并后才是
         // `--json` 那份 14 键的 outcomes——三态各自落一个键。
         let mut all = family1_outcomes(vec![tool_call("bash", r#"{"command":"rm -rf /x"}"#, 1)]);
-        let traj_cov = canonical_from(vec![tool_call("bash", r#"{"command":"ls"}"#, 1)]).coverage;
-        all.extend(trajectory_rule_outcomes(&[], &traj_cov));
+        let traj = trajectory_outcomes(vec![tool_call("bash", r#"{"command":"ls"}"#, 1)]);
+        all.extend(traj);
         let json_val = rule_outcomes_json(&all);
         assert_eq!(json_val["SV601"], json!({"status": "findings", "count": 1}));
         assert_eq!(json_val["SV602"], json!({"status": "measured_zero"}));
@@ -1211,7 +1178,7 @@ mod tests {
     }
 
     /// FAMILY1_RULES 的 requires 必须与 rule_specs 的 requires 逐条一致——前置门控
-    /// 和 trajectory 后置标注对同一条规则给出同一个三态语义，漂移会静默破坏契约。
+    /// dispatcher 和规格声明对同一条规则给出同一个三态语义，漂移会静默破坏契约。
     #[test]
     fn family1_requires_match_rule_specs_requires() {
         for rule in FAMILY1_RULES {
@@ -1221,6 +1188,22 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} 缺 rule_specs", rule.code));
             assert_eq!(rule.requires, spec.requires,
                 "{} 在 FAMILY1_RULES 与 rule_specs 里的 requires 必须一致", rule.code);
+        }
+    }
+
+    /// TRAJECTORY_RULES 的 requires 必须与 rule_specs 的 requires 逐条一致——family ④
+    /// 前置门控 dispatcher 和规格声明（SV611–614）对同一条规则给出同一个三态语义，
+    /// 漂移会静默破坏契约。rule_specs 是规格的对照源，`rule_specs()` 是单例，不会
+    /// 因为二刀删除后置标注而失去意义。
+    #[test]
+    fn trajectory_rules_match_rule_specs_requires() {
+        for rule in crate::trajectory::TRAJECTORY_RULES {
+            let spec = rule_specs()
+                .iter()
+                .find(|s| s.code == rule.code)
+                .unwrap_or_else(|| panic!("{} 缺 rule_specs", rule.code));
+            assert_eq!(rule.requires, spec.requires,
+                "{} 在 TRAJECTORY_RULES 与 rule_specs 里的 requires 必须一致", rule.code);
         }
     }
 

@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 pub use skill_vitals_core::behavior::{
     array_signal_status, behavior_gate, flatten, match_behavior_canonical, rule_outcomes_json,
-    trajectory_rule_outcomes, waste_coverage,
+    waste_coverage,
 };
 use skill_vitals_core::evidence::Signal;
 
@@ -126,17 +126,19 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     let post_fork_evidence = skill_vitals_core::dsh_evidence::build_dsh_evidence(
         post_fork_events, post_fork_usage_events, cwd_raw.clone(), String::new(),
     );
-    // 单事件规则（SV601–610）前置门控产出 findings；轨迹级检测（SV611–614）
-    // 追加在后。字节序稳定：flatten 用私有键 `__ord`（事件下标）重建
-    // (event, rule) 序，同事件多命中按 dispatcher 表序（stable sort）。
+    // 单事件规则（SV601–610）与轨迹级检测（SV611–614）都吃同一份分叉后
+    // canonical、都由前置门控 dispatcher 产出（先滤后调，§10 三态契约）——
+    // 二者从此同源、同范围（分叉前缀的轨迹异常不再计入本会话，见
+    // match_trajectory_canonical）。字节序稳定：family ① 用私有键 `__ord`
+    // （事件下标）重建 (event, rule) 序，family ④ 按码序追加，合起来与旧
+    // 实现逐字节一致。
     let family1_outcomes = match_behavior_canonical(&post_fork_evidence.canonical);
-    let trajectory_findings = skill_vitals_core::trajectory::match_trajectory(&events);
     let trajectory_outcomes =
-        trajectory_rule_outcomes(&trajectory_findings, &post_fork_evidence.canonical.coverage);
+        skill_vitals_core::trajectory::match_trajectory_canonical(&post_fork_evidence.canonical);
     let mut findings = flatten(&family1_outcomes);
-    findings.extend(trajectory_findings);
-    // 三态结果合并成一份 `--json` 的 outcomes：family ①（门控）在前、family ④
-    // （后置）在后，键序即 rule_specs 的 SV601..SV614。
+    findings.extend(skill_vitals_core::trajectory::flatten_trajectory(&trajectory_outcomes));
+    // 三态结果合并成一份 `--json` 的 outcomes：family ① 在前、family ④ 在后，
+    // 键序即 rule_specs 的 SV601..SV614。
     let mut all_outcomes = family1_outcomes;
     all_outcomes.extend(trajectory_outcomes);
     let rule_outcomes_val = rule_outcomes_json(&all_outcomes);

@@ -483,14 +483,14 @@ pub fn build_codex_evidence(
         coverage,
         attempts,
         notes,
-        // §11.5 timeline 目前只有 DSH 适配器在 populate（phase B 第一刀只迁了
-        // family ① 的 DSH 路径）；Codex 适配器不填——空时间线 + 全零覆盖，
-        // 规则在它上面要么 MeasuredZero 要么 Unavailable，不会读到一个伪造的
-        // 非空时间线。
+        // §11.5 timeline 目前只有 DSH 适配器在 populate（phase B 第一/二刀只迁了
+        // DSH 路径）；Codex 适配器不填——空时间线 + 全零覆盖，规则在它上面要么
+        // MeasuredZero 要么 Unavailable，不会读到一个伪造的非空时间线。
         tool_calls: Timeline::new(),
         tool_results: Timeline::new(),
         approvals: Timeline::new(),
         sandbox_modes: Timeline::new(),
+        turns: Timeline::new(),
     };
     CodexEvidence { canonical, items, title, history_mode, cli_version }
 }

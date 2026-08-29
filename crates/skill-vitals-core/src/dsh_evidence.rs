@@ -26,7 +26,7 @@ use serde_json::{json, Map, Value};
 use crate::evidence::{
     ApprovalAsked, ApprovalDecided, ApprovalObservation, CanonicalSession, Coverage,
     CoverageCounts, SandboxModeObservation, SessionMeta, Signal, SignalSet, Timeline,
-    TimelineEntry, ToolCallObservation, ToolResultObservation,
+    TimelineEntry, ToolCallObservation, ToolResultObservation, TurnObservation,
 };
 
 // ────────────────────── extraction: DSH event shape → payload ──────────────────────
@@ -166,18 +166,60 @@ impl Coords {
 
 // ────────────────────── populate: execution events → timelines ──────────────────────
 
-/// 跑一遍 `Coords`，把 execution_events 里的工具调用/结果/审批/沙箱事件翻译成
-/// 四个 host-neutral timeline（§11.5）。与旧 `match_behavior` 的迭代序一致：
-/// 边界事件先推进坐标、再对本事件取坐标，`ordinal` 就是「在传入数组里的下标」——
-/// flatten 用它重建 (event, rule) 字节序。
+/// turn 生命周期 pass 的中间状态：turn/start 开启，之后任意事件推进 `last_seq`、
+/// tool/call 追加 `sig`、turn/end 填 `end_*` 字段，下一个 turn/start 或 EOF 收尾
+/// push 进 `turns`。语义逐字复刻 `trajectory::detect_loop` 的单遍累加（见
+/// `evidence.rs::TurnObservation` 的字段注释）：
+/// - turn/start 只开新 turn、push 上一个，**本身**不推进任何 `last_seq`
+///   （detect_loop 那里 `continue` 了）；
+/// - turn 内任何事件都推进 `last_seq`——不止工具调用，G2 的 `run_end_seq` 要覆盖
+///   这个 turn 真实占到的位置（包括它自己的 tool/result / turn/end）；
+/// - turn 外的 tool/call 不归任何 turn（`sig` 只在 pending 存在时追加）。
+struct PendingTurn {
+    turn: i64,
+    sig: Vec<(String, String)>,
+    last_seq: Option<i64>,
+    /// turn/start 事件解析出的 entry 坐标，push 时落进 `TimelineEntry`：
+    /// (seq, time, turn, step, call_id, ordinal)。
+    entry: (Option<i64>, Option<i64>, Value, Value, Value, usize),
+    end_reason_kind: Option<String>,
+    end_error_code: Option<String>,
+    end_seq: Option<i64>,
+    end_time: Option<i64>,
+}
+
+fn flush_turn(turns: &mut Timeline<TurnObservation>, p: PendingTurn) {
+    let (seq, time, turn, step, call_id, ordinal) = p.entry;
+    turns.entries.push(make_entry(
+        TurnObservation {
+            turn: p.turn,
+            sig: p.sig,
+            last_seq: p.last_seq,
+            end_reason_kind: p.end_reason_kind,
+            end_error_code: p.end_error_code,
+            end_seq: p.end_seq,
+            end_time: p.end_time,
+        },
+        seq, time, turn, step, call_id, ordinal,
+    ));
+}
+
+/// 跑一遍 `Coords`，把 execution_events 里的工具调用/结果/审批/沙箱/turn 事件
+/// 翻译成五个 host-neutral timeline（§11.5）。与旧 `match_behavior` 的迭代序
+/// 一致：边界事件先推进坐标、再对本事件取坐标，`ordinal` 就是「在传入数组里的
+/// 下标」——flatten 用它重建 (event, rule) 字节序。turn 生命周期是同一遍里额外
+/// 跑的状态化 pass（`PendingTurn`），不是第二次遍历——`last_seq` 需要"下一个
+/// turn/start 之前最后出现的事件 seq"，单遍才能拿到。
 pub(crate) fn populate_timelines(
     execution_events: &[Value],
     tool_calls: &mut Timeline<ToolCallObservation>,
     tool_results: &mut Timeline<ToolResultObservation>,
     approvals: &mut Timeline<ApprovalObservation>,
     sandbox_modes: &mut Timeline<SandboxModeObservation>,
+    turns: &mut Timeline<TurnObservation>,
 ) {
     let mut coords = Coords::default();
+    let mut pending: Option<PendingTurn> = None;
     for (ordinal, event) in execution_events.iter().enumerate() {
         if !event.is_object() {
             continue;
@@ -186,13 +228,41 @@ pub(crate) fn populate_timelines(
         let (turn, step, call_id) = coords.resolve(event);
         let seq = event.get("seq").and_then(|v| v.as_i64());
         let time = event.get("time").and_then(|v| v.as_i64());
-        match event.get("type").and_then(|v| v.as_str()) {
+        let etype = event.get("type").and_then(|v| v.as_str());
+        if etype == Some("turn/start") {
+            if let Some(p) = pending.take() {
+                flush_turn(turns, p);
+            }
+            let turn_no = event.pointer("/data/turn").and_then(|v| v.as_i64()).unwrap_or(0);
+            pending = Some(PendingTurn {
+                turn: turn_no,
+                sig: Vec::new(),
+                last_seq: seq,
+                entry: (seq, time, turn, step, call_id, ordinal),
+                end_reason_kind: None,
+                end_error_code: None,
+                end_seq: None,
+                end_time: None,
+            });
+            continue;
+        }
+        // turn/start 之外的任何事件都推进「最后事件 seq」——turn/end 自身也在内
+        // （它既推进 last_seq 又填 end_* 字段，两者在 fixture 里恒相等但语义不同）。
+        if let Some(p) = pending.as_mut() {
+            if let Some(s) = seq {
+                p.last_seq = Some(s);
+            }
+        }
+        match etype {
             Some(t) if TOOL_CALL_TYPES.contains(&t) => {
                 if let Some((name, args_text)) = tool_invocation(event) {
                     tool_calls.entries.push(make_entry(
-                        ToolCallObservation { name: name.to_string(), args_text },
+                        ToolCallObservation { name: name.to_string(), args_text: args_text.clone() },
                         seq, time, turn, step, call_id, ordinal,
                     ));
+                    if let Some(p) = pending.as_mut() {
+                        p.sig.push((name.to_string(), args_text));
+                    }
                 }
             }
             Some("tool/result") => {
@@ -233,8 +303,29 @@ pub(crate) fn populate_timelines(
                     seq, time, turn, step, call_id, ordinal,
                 ));
             }
+            Some("turn/end") => {
+                if let Some(p) = pending.as_mut() {
+                    let d = event.get("data").and_then(|v| v.as_object());
+                    p.end_reason_kind = d
+                        .and_then(|d| d.get("reason"))
+                        .and_then(|r| r.get("kind"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                    p.end_error_code = d
+                        .and_then(|d| d.get("reason"))
+                        .and_then(|r| r.get("error"))
+                        .and_then(|e| e.get("code"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                    p.end_seq = seq;
+                    p.end_time = time;
+                }
+            }
             _ => {}
         }
+    }
+    if let Some(p) = pending {
+        flush_turn(turns, p);
     }
 }
 
@@ -414,6 +505,7 @@ pub fn build_dsh_evidence(
     let mut tool_results = Timeline::new();
     let mut approvals = Timeline::new();
     let mut sandbox_modes = Timeline::new();
+    let mut turns = Timeline::new();
     // phase B：时间线在适配器的「derive」段一并填充——phase A（旧 match_behavior）
     // 里坐标顺延逻辑跑在规则引擎里，现在它是「翻译」的产物，先于规则存在。
     // 传进来的 execution_events 是分叉后的，时间线自然只含审计范围内的分叉后
@@ -424,6 +516,7 @@ pub fn build_dsh_evidence(
         &mut tool_results,
         &mut approvals,
         &mut sandbox_modes,
+        &mut turns,
     );
     let canonical = CanonicalSession {
         meta: SessionMeta {
@@ -441,6 +534,7 @@ pub fn build_dsh_evidence(
         tool_results,
         approvals,
         sandbox_modes,
+        turns,
     };
     DshEvidence { canonical, execution_events, usage_events, cwd }
 }

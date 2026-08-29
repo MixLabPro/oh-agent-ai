@@ -387,8 +387,9 @@ def trajectory_rule_outcomes(findings, events):
 
     `events` 必须是**分叉之后**的事件（调用方负责先 `post_fork`）——覆盖率
     不能算进分叉前的历史,否则一个信号的证据全部落在分叉前会被误判成"有
-    覆盖",而 findings 从这些分叉前事件里从来没被计过数（match_trajectory 不
-    post_fork，覆盖率是这里单独算的，必须用同一批"审计范围内"的事件）。
+    覆盖"。`audit_session_log` 把同一份 `pf` 既喂给 `match_trajectory` 又喂给
+    这里（findings 与 coverage 同一批"审计范围内"的事件），两端 lockstep 的
+    理由见 Rust `trajectory.rs::match_trajectory`（它内部就 post_fork）。
     """
     coverage = signal_coverage(events)
     by_rule = {}
@@ -588,11 +589,16 @@ def audit_session_log(path):
         return None
     # 工作区根来自 session header 的 cwd；缺失时 None → SV605 退化为纯绝对路径启发式。
     events = session["execution_events"] or []
+    # 分叉后的事件——审计只回答「**这个**会话干了什么」。分叉前缀是上游会话的
+    # 历史，上游自己那份审计会算（match_behavior_gated 内部 post_fork 也是这
+    # 个理由）。family ④ 的轨迹 findings 与所有 coverage 都用同一份 pf，两端
+    # lockstep（Rust src/behavior.rs 用 post_fork_evidence.canonical）。
+    pf = post_fork(events)
     # 单事件规则（SV601–610）前置门控产出 findings + family ① 三态；轨迹级
     # 检测（SV611–614）照旧后置、追加在后，字节序稳定。先滤后调——unavailable
     # 的规则绝不出现在 findings 里（见 match_behavior_gated 的 SV610 分叉回归）。
     findings, family1_outcomes = match_behavior_gated(events, session.get("cwd"))
-    trajectory_findings = match_trajectory(events)
+    trajectory_findings = match_trajectory(pf)
     findings.extend(trajectory_findings)
     # 三个消费者共用 usage_events（各取所需，不认识的事件类型自然跳过）
     usage_events = session["usage_events"] or []
@@ -623,11 +629,9 @@ def audit_session_log(path):
     }
     # P3 group①：family ① 的门控三态已由 match_behavior_gated 算出（它内部用
     # 分叉后的 coverage 判 unavailable）；family ④ 是后置标注，覆盖率必须算在
-    # 分叉之后的事件上——match_trajectory 不 post_fork，这里单独 post_fork 一次
-    # （幂等，见 util.post_fork）喂给 trajectory_rule_outcomes，不能直接用 events
-    # （分叉前）算，否则证据全部落在分叉前的信号会被误判成"有覆盖"。与 Rust
-    # src/behavior.rs 那边同一个理由、同一个修法。
-    pf = post_fork(events)
+    # 分叉之后的事件上——pf 在上面已提前算好（match_trajectory 的输入也要分叉
+    # 后，findings 与 coverage 同一批"审计范围内"的事件，证据才不会全部落在
+    # 分叉前被误判成"有覆盖"）。与 Rust src/behavior.rs 同一个理由。
     trajectory_outcomes = trajectory_rule_outcomes(trajectory_findings, pf)
     # 键序 = family ①（SV601–610，RULES 表序）+ family ④（SV611–614）——
     # 合并成一份 14 键的 outcomes，与 Rust rule_outcomes_json 同序。

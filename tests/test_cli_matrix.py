@@ -462,6 +462,68 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(list(pfc["per_model"].keys()), ["deepseek/deepseek-v4-pro-0813"])
         self.assertEqual(list(report["cost"]["per_model"].keys()), ["deepseek/deepseek-v4-flash"])
 
+    def test_behavior_fork_boundary_excludes_upstream_trajectory(self):
+        """分叉前缀里的**轨迹级**异常（SV611 连续重复调用）不得算进本会话。
+
+        与 test_behavior_fork_boundary_excludes_upstream_session 同一把刀，但这刀
+        落在 family ④ 轨迹族。第二刀之前，match_trajectory 读**分叉前**的裸事件
+        （behavior.py 老代码用 events 而非 pf），分叉前缀里从上游抄来的 3 连重复
+        调用会被误报成 SV611——上游会话的轨迹异常被算进了本会话的账。
+
+        `both()` 差分同时守两端：Python 侧（audit_session_log 喂 pf）与 Rust 侧
+        （shim 内部 post_fork）必须逐字节一致，且都只报分叉后。
+        """
+        header = {"type": "session", "version": 0, "id": "s", "delegationDepth": 0,
+                  "seedLength": 4}
+        events = [
+            # ── 分叉前（seq < 4，从上游抄进来的）：3 连相同签名，够触发 SV611 ──
+            {"type": "tool/call", "seq": 1, "time": 1001,
+             "data": {"turn": 1, "step": 1, "name": "bash",
+                      "arguments": '{"command":"ls"}'}},
+            {"type": "tool/call", "seq": 2, "time": 1002,
+             "data": {"turn": 1, "step": 1, "name": "bash",
+                      "arguments": '{"command":"ls"}'}},
+            {"type": "tool/call", "seq": 3, "time": 1003,
+             "data": {"turn": 1, "step": 1, "name": "bash",
+                      "arguments": '{"command":"ls"}'}},
+            # ── 分叉后（seq >= 4，本会话自己干的）：一次干净调用 ──
+            {"type": "tool/call", "seq": 5, "time": 1005,
+             "data": {"turn": 2, "step": 1, "name": "bash",
+                      "arguments": '{"command":"pwd"}'}},
+        ]
+        log = self.tmp / "forked-trajectory.jsonl"
+        log.write_text(json.dumps(header) + "\n"
+                       + "\n".join(json.dumps(e) for e in events) + "\n",
+                       encoding="utf-8")
+        code, out, err = self.both("behavior", str(log), "--json", "-")
+        report = json.loads(out)
+
+        # findings 里既没有分叉前的 SV611（上游干的），也没有别的噪音。
+        self.assertEqual(report["findings"], [],
+                         "分叉前的重复调用属于上游会话，不该出现在本会话的审计里")
+        # 三态与分叉后 coverage 一致：分叉后还有一次 tool/call → SV611 测了、
+        # 零命中 → measured_zero；不是 unavailable（那是「没信号」，这里是「有
+        # 信号但没重复」）。
+        self.assertEqual(report["rule_outcomes"]["SV611"],
+                         {"status": "measured_zero"},
+                         "分叉后仍有 ToolCalls 证据，SV611 是测了零命中，不是 unavailable")
+        # 其余轨迹规则同样按分叉后 coverage 判：这份日志没有 turn 边界 / 审批 /
+        # 沙箱事件 → 各自 unavailable（missing 如实列出缺的证据，不臆造）。
+        self.assertEqual(
+            report["rule_outcomes"]["SV612"],
+            {"status": "unavailable", "missing": ["TurnBoundaries"],
+             "reason": "no evidence for required signal(s) in this session"})
+        self.assertEqual(
+            report["rule_outcomes"]["SV613"],
+            {"status": "unavailable",
+             "missing": ["TurnBoundaries", "ToolResults"],
+             "reason": "no evidence for required signal(s) in this session"})
+        self.assertEqual(
+            report["rule_outcomes"]["SV614"],
+            {"status": "unavailable",
+             "missing": ["ApprovalDecisions", "SandboxModes"],
+             "reason": "no evidence for required signal(s) in this session"})
+
     def test_behavior_pricing_resolves_per_provider_then_falls_back(self):
         """价目表**按供应商分层**，解析顺序：该供应商自己的表 → 回落原厂 → 未计价。
 
