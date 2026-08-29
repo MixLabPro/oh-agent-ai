@@ -318,30 +318,60 @@ pub fn usage_signal_status(coverage: &Coverage) -> Value {
     }
 }
 
-/// 事件流 → `{"by_model": {...}, "sequence": [...]}`。
+/// 可续折叠的折叠状态（`RUNTIME_EVIDENCE_CONTRACT.md` §10.2「checkpoint 是
+/// 一个值,不是进程」）。
 ///
-/// 纯函数、确定性：同一事件流重放结果逐字节一致。非 object 条目跳过；
-/// request/header 设活跃模型（sequence 相邻去重，保留「切回」信息）；
-/// usage 事件折进当前模型；无 request/header 时归 `"unknown"` 桶。
-pub fn token_by_model(events: &[Value]) -> Value {
-    // 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
-    // branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
-    // 对同一笔钱/同一批行为重复计数（见 util::fork_boundary 的实测数据）。
-    let events = &crate::util::post_fork(events)[..];
-    let mut by_model: Map<String, Value> = Map::new();
-    // 模型名 → 供应商（冲突或未上报时为 Null）。与 by_model 并列而不是把两者
-    // 拼成复合键：展示层要按 (供应商, 模型) 拆行，拼成一个字符串反而要再拆开。
-    let mut providers: Map<String, Value> = Map::new();
-    let mut last: Option<(i64, i64, [i64; 4], String, bool)> = None; // 同 step 去重槽
-    let mut active: Option<String> = None;
-    let mut sequence: Vec<String> = Vec::new();
-    let mut seen: [bool; 4] = [false; 4]; // 真正出现过的 usage 字段（见 buckets_from）
-    let mut samples: u64 = 0; // 0 个样本时不对「未上报」下任何断言
-    // 残差哨兵：类型 → (条数, 漏算 token)（见 usage_shaped_tokens）。用
-    // BTreeMap 而不是 HashMap——输出按类型名排序，与 Python 的
-    // `sorted(unaccounted.items())` 对齐，保证确定性。
-    let mut unaccounted: std::collections::BTreeMap<String, (u64, i64)> =
-        std::collections::BTreeMap::new();
+/// 只捕获**跨 turn 延续**的状态。`last` 同 step 去重槽**不在里面**：turn 边界
+/// 之后第一条 usage 事件必是新 turn，不可能命中前缀最后那条的 (turn, step)——
+/// 契约原文：「mid-turn 的 checkpoint 需要序列化替换状态；boundary 处不需要」。
+/// 这就是 `usage_fold_resume` 只保证在 **turn 边界**切分时与 `token_by_model`
+/// 逐字节一致的原因。
+///
+/// 各字段对应 `token_by_model` 折叠的跨 turn 变量：`by_model`/`providers`/
+/// `sequence`/`active` 是累计或游标，天然跨调用；`seen`/`samples` 决定「宿主
+/// 未上报字段」的断言（0 个样本不下断言）；`unaccounted` 是残差哨兵，逐事件
+/// 累计。没有 serde derive——core 不引 serde 宏，checkpoint 序列化走手写的
+/// `to_json`/`from_json`（`usage_fold_checkpoint_json`/`usage_fold_resume_json`）。
+#[derive(Debug, Clone)]
+pub struct UsageFoldState {
+    pub by_model: Map<String, Value>,
+    pub providers: Map<String, Value>,
+    pub active: Option<String>,
+    pub sequence: Vec<String>,
+    /// 真正出现过的 usage 字段（见 `buckets_from`）。
+    pub seen: [bool; 4],
+    /// 0 个样本时不对「未上报」下任何断言。
+    pub samples: u64,
+    /// 残差哨兵：类型 → (条数, 漏算 token)（见 `usage_shaped_tokens`）。用
+    /// BTreeMap 而不是 HashMap——输出按类型名排序，与 Python 的
+    /// `sorted(unaccounted.items())` 对齐，保证确定性。
+    pub unaccounted: std::collections::BTreeMap<String, (u64, i64)>,
+}
+
+impl Default for UsageFoldState {
+    fn default() -> Self {
+        UsageFoldState {
+            by_model: Map::new(),
+            providers: Map::new(),
+            active: None,
+            sequence: Vec::new(),
+            seen: [false; 4],
+            samples: 0,
+            unaccounted: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+/// 把一段**分叉之后**的事件折进状态——`token_by_model` / `usage_fold_checkpoint`
+/// / `usage_fold_resume` 共用的内层循环。
+///
+/// `last` 同 step 去重槽是函数内局部量，每次从 `None` 起：checkpoint 建立时槽
+/// 本为空；resume 的后缀从 turn 边界开始，第一条 usage 必是新 turn，不会命中
+/// checkpoint 里最后的槽（§10.2）。**增量折叠绝不另写一条"快路"**——必须与全量
+/// 重折逐字节相同，所以它们共用同一个 `usage_fold_into`。
+fn usage_fold_into(state: &mut UsageFoldState, events: &[Value]) {
+    // 同 step 去重槽 —— 不跨调用延续（见 UsageFoldState 文档）。
+    let mut last: Option<(i64, i64, [i64; 4], String, bool)> = None;
 
     for event in events {
         if !event.is_object() {
@@ -367,11 +397,11 @@ pub fn token_by_model(events: &[Value]) -> Value {
             let provider = event
                 .pointer("/data/header/config/provider")
                 .and_then(|v| v.as_str());
-            record_provider(&mut providers, model, provider);
-            if active.as_deref() != Some(model) {
-                sequence.push(model.to_string());
+            record_provider(&mut state.providers, model, provider);
+            if state.active.as_deref() != Some(model) {
+                state.sequence.push(model.to_string());
             }
-            active = Some(model.to_string());
+            state.active = Some(model.to_string());
             continue;
         }
         let Some((turn, step, usage, model_override)) = usage_sample(event) else {
@@ -381,22 +411,22 @@ pub fn token_by_model(events: &[Value]) -> Value {
             if let Some(data) = event.get("data") {
                 if let Some(tokens_seen) = usage_shaped_tokens(data, 0) {
                     let etype = event.get("type").and_then(|v| v.as_str()).unwrap_or("(unknown)");
-                    let entry = unaccounted.entry(etype.to_string()).or_insert((0u64, 0i64));
+                    let entry = state.unaccounted.entry(etype.to_string()).or_insert((0u64, 0i64));
                     entry.0 += 1;
                     entry.1 += tokens_seen;
                 }
             }
             continue;
         };
-        samples += 1;
-        let buckets = buckets_from(usage, &mut seen);
+        state.samples += 1;
+        let buckets = buckets_from(usage, &mut state.seen);
         let model = if let Some((Some(m), provider)) = &model_override {
             // 这份样本自带模型归属（目前只有 compaction/summary）——不能
             // 沿用"当前激活模型"，见 `usage_sample` 文档。
-            record_provider(&mut providers, m, provider.as_deref());
+            record_provider(&mut state.providers, m, provider.as_deref());
             m.clone()
         } else {
-            active.clone().unwrap_or_else(|| "unknown".to_string())
+            state.active.clone().unwrap_or_else(|| "unknown".to_string())
         };
         let peak = is_peak(event);
         match &last {
@@ -404,20 +434,23 @@ pub fn token_by_model(events: &[Value]) -> Value {
                 if *lb == buckets && *lpeak == peak {
                     continue;
                 }
-                add_buckets(&mut by_model, lmodel, *lb, -1, *lpeak);
-                add_buckets(&mut by_model, &model, buckets, 1, peak);
+                add_buckets(&mut state.by_model, lmodel, *lb, -1, *lpeak);
+                add_buckets(&mut state.by_model, &model, buckets, 1, peak);
                 last = Some((turn, step, buckets, model, peak));
             }
             _ => {
-                add_buckets(&mut by_model, &model, buckets, 1, peak);
+                add_buckets(&mut state.by_model, &model, buckets, 1, peak);
                 last = Some((turn, step, buckets, model, peak));
             }
         }
     }
+}
 
+/// 折叠状态 → `token_by_model` 的输出形状。
+pub fn usage_fold_render(state: &UsageFoldState) -> Value {
     // 一个样本都没有时返回空列表：没有数据就不做「宿主不报这个字段」的断言。
-    let unreported: Vec<&str> = if samples > 0 {
-        SAMPLE_FIELDS.iter().enumerate().filter(|(i, _)| !seen[*i]).map(|(_, k)| *k).collect()
+    let unreported: Vec<&str> = if state.samples > 0 {
+        SAMPLE_FIELDS.iter().enumerate().filter(|(i, _)| !state.seen[*i]).map(|(_, k)| *k).collect()
     } else {
         Vec::new()
     };
@@ -427,7 +460,8 @@ pub fn token_by_model(events: &[Value]) -> Value {
     // 模型里它就是 `Signal::Usage` 的 `unmetered` 计数——`evidence.rs` 的
     // 那句注释精确预言了这个 bug：「适配器不能靠"读不到就不算"来偷偷刷高
     // 自己的覆盖率」。
-    let unaccounted_usage: Vec<Value> = unaccounted
+    let unaccounted_usage: Vec<Value> = state
+        .unaccounted
         .iter()
         .map(|(t, (count, tokens_seen))| {
             json!({"type": t, "count": count, "tokens_seen": tokens_seen})
@@ -435,12 +469,126 @@ pub fn token_by_model(events: &[Value]) -> Value {
         .collect();
 
     json!({
-        "by_model": Value::Object(by_model),
-        "providers": Value::Object(providers),
-        "sequence": sequence,
+        "by_model": Value::Object(state.by_model.clone()),
+        "providers": Value::Object(state.providers.clone()),
+        "sequence": state.sequence.clone(),
         "unreported_fields": unreported,
         "unaccounted_usage": unaccounted_usage,
     })
+}
+
+/// 事件流（**分叉之后**）→ 可序列化的 checkpoint。
+///
+/// 调用方负责先 `post_fork`：分叉边界只由日志头第一个 `session` 事件的
+/// `seedLength` 决定（`util::fork_boundary`），对 append-only 日志是一次性
+/// 稳定的，不必每个 checkpoint 重算；而且 resume 时后缀里没有 session 头，
+/// 重算会得到 None（= 不过滤），与「前缀已滤、后缀无分叉事件」一致。
+pub fn usage_fold_checkpoint(events: &[Value]) -> UsageFoldState {
+    let mut state = UsageFoldState::default();
+    usage_fold_into(&mut state, events);
+    state
+}
+
+/// checkpoint + 后续事件 → 输出。
+///
+/// §10.2 契约：`fold(events[0..n]) == fold_resume(checkpoint@k, events[k..n])`
+/// 对任何 **turn 边界** k 成立。`events` 必须是分叉之后、且从 turn 边界开始的
+/// 后缀——mid-turn 切分需要序列化 `last` 替换状态，这个 checkpoint 不携带。
+pub fn usage_fold_resume(state: &UsageFoldState, events: &[Value]) -> Value {
+    let mut st = state.clone();
+    usage_fold_into(&mut st, events);
+    usage_fold_render(&st)
+}
+
+/// checkpoint 的 JSON 形态（watcher/持久化用）。
+///
+/// 手写序列化，不引 serde derive。只落跨 turn 状态；`seen` 折成 `Vec<bool>`
+/// 以便 JSON 表达（长度恒 4）。`unaccounted` 每条存 `[count, tokens_seen]`，
+/// 与 Python 镜像的 `[count, tokens_seen]` 列表逐字节对齐。
+pub fn usage_fold_checkpoint_json(state: &UsageFoldState) -> Value {
+    let seen: Vec<bool> = state.seen.to_vec();
+    let unaccounted: Map<String, Value> = state
+        .unaccounted
+        .iter()
+        .map(|(t, (count, tokens_seen))| {
+            (t.clone(), json!([count, tokens_seen]))
+        })
+        .collect();
+    json!({
+        "by_model": Value::Object(state.by_model.clone()),
+        "providers": Value::Object(state.providers.clone()),
+        "active": state.active,
+        "sequence": state.sequence.clone(),
+        "seen": seen,
+        "samples": state.samples,
+        "unaccounted": Value::Object(unaccounted),
+    })
+}
+
+/// JSON checkpoint → 折叠状态（`usage_fold_checkpoint_json` 的逆）。
+pub fn usage_fold_resume_from_json(value: &Value) -> UsageFoldState {
+    let mut state = UsageFoldState::default();
+    if let Some(obj) = value.as_object() {
+        state.by_model = obj
+            .get("by_model")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        state.providers = obj
+            .get("providers")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        state.active = obj
+            .get("active")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(seq) = obj.get("sequence").and_then(|v| v.as_array()) {
+            state.sequence = seq.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+        }
+        if let Some(seen) = obj.get("seen").and_then(|v| v.as_array()) {
+            for (i, v) in seen.iter().enumerate().take(4) {
+                if let Some(true) = v.as_bool() {
+                    state.seen[i] = true;
+                }
+            }
+        }
+        if let Some(n) = obj.get("samples").and_then(|v| v.as_u64()) {
+            state.samples = n;
+        }
+        if let Some(u) = obj.get("unaccounted").and_then(|v| v.as_object()) {
+            for (t, v) in u {
+                if let Some(arr) = v.as_array() {
+                    if let (Some(count), Some(tokens_seen)) =
+                        (arr.first().and_then(|x| x.as_u64()), arr.get(1).and_then(|x| x.as_i64()))
+                    {
+                        state.unaccounted.insert(t.clone(), (count, tokens_seen));
+                    }
+                }
+            }
+        }
+    }
+    state
+}
+
+/// 事件流 → `{"by_model": {...}, "sequence": [...]}`。
+///
+/// 纯函数、确定性：同一事件流重放结果逐字节一致。非 object 条目跳过；
+/// request/header 设活跃模型（sequence 相邻去重，保留「切回」信息）；
+/// usage 事件折进当前模型；无 request/header 时归 `"unknown"` 桶。
+///
+/// 实现就是 `usage_fold_checkpoint` + `usage_fold_resume`：**增量折叠必须与
+/// 全量重折逐字节相同**，所以增量绝不是另一条快路，而是同一个纯函数作用在
+/// 更多事件上（`usage_fold_resume`）。这就是 §10.2 的
+/// `fold(events[0..n]) == fold_resume(checkpoint@k, events[k..n])`——全量折叠
+/// 与可续折叠由构造保证相等，差分测试钉住这条契约。
+pub fn token_by_model(events: &[Value]) -> Value {
+    // 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
+    // branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
+    // 对同一笔钱/同一批行为重复计数（见 util::fork_boundary 的实测数据）。
+    let events = &crate::util::post_fork(events)[..];
+    let state = usage_fold_checkpoint(events);
+    usage_fold_resume(&state, &[])
 }
 
 /// usage sample 的单个字段：在场取值，缺席取 `None`。
@@ -1322,6 +1470,102 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&out).unwrap(),
             r#"{"by_model":{"deepseek/deepseek-v4-pro-0813":{"uncached_input_tokens":1900,"output_tokens":250,"cache_read_tokens":320,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},"deepseek/deepseek-v4-flash":{"uncached_input_tokens":500,"output_tokens":50,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},"providers":{"deepseek/deepseek-v4-pro-0813":null,"deepseek/deepseek-v4-flash":null},"sequence":["deepseek/deepseek-v4-pro-0813","deepseek/deepseek-v4-flash","deepseek/deepseek-v4-pro-0813"],"unreported_fields":["cacheWriteTokens"],"unaccounted_usage":[]}"#
+        );
+    }
+
+    // ── resumable fold（§10.2 契约：fold(0..n) == fold_resume(checkpoint@k, k..n)）──
+
+    /// 解析 fixtures/dsh/resume.jsonl（每行一个 JSON 对象事件）。
+    fn read_resume_fixture() -> Vec<Value> {
+        let raw = include_str!("../../../fixtures/dsh/resume.jsonl");
+        raw.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("fixture line must parse"))
+            .collect()
+    }
+
+    /// §10.2 契约正文：`fold(events[0..n]) == fold_resume(checkpoint@k, events[k..n])`
+    /// 对任何 **turn 边界** k 成立（k=0 和 k=n 是平凡边界，也一起钉住）。
+    ///
+    /// 实测依据（fixtures/dsh/resume.jsonl）：resume 后缀从 turn/start 开始——
+    /// 第一条 usage 是新 turn，不会命中 checkpoint 里最后一条的同 (turn, step)
+    /// 替换槽，所以 `last` 去重槽可以不进 checkpoint。这就是把 `last` 留在
+    /// `usage_fold_into` 局部、而不是塞进 `UsageFoldState` 的等价性证明。
+    #[test]
+    fn usage_fold_resume_equals_full_fold_at_turn_boundaries() {
+        let events = read_resume_fixture();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("turn/start"))
+                .count(),
+            3,
+            "fixture 必须是 3 个 turn（覆盖切回 + 同 step 替换 + 哨兵）"
+        );
+        let full = token_by_model(&events);
+        let mut boundaries = vec![0usize, events.len()];
+        for (i, e) in events.iter().enumerate() {
+            if e.get("type").and_then(|v| v.as_str()) == Some("turn/start") {
+                boundaries.push(i);
+            }
+        }
+        boundaries.sort_unstable();
+        assert!(boundaries.len() >= 3, "need multiple turn boundaries");
+        for k in boundaries {
+            let checkpoint = usage_fold_checkpoint(&events[..k]);
+            let resumed = usage_fold_resume(&checkpoint, &events[k..]);
+            assert_eq!(resumed, full, "resume at k={k} must equal full fold");
+        }
+    }
+
+    /// Python `json.dumps(usage_fold_resume(usage_fold_checkpoint(events[:6]),
+    /// events[6:]), ensure_ascii=False, separators=(",", ":"))` 的逐字节对照。
+    /// 期望串在 Python 侧生成后硬编码于此（同
+    /// `token_by_model_python_rust_byte_for_byte_parity` 的模式），Python 一改
+    /// 这里就红。
+    ///
+    /// k=6 是 turn 2 的起点：前缀折出 pro（turn1 的净结果 1200），后缀折入
+    /// flash → 回 pro（切回）→ compaction 的模型覆盖 → turn3 同 step 替换
+    /// （3000 被 3100 顶掉）→ 缺 turn/step 的残差哨兵。所有跨 turn 路径都经过
+    /// 这里——任何一处 Python↔Rust 漂移都会让这个字符串不等。数值也钉住：
+    /// pro=4300/250/1300、flash=2000/500/100、compaction=462/3520/245760、
+    /// peak_* 全 0（事件全在非高峰）、哨兵 assistant/message 86 tokens。
+    #[test]
+    fn usage_fold_resume_python_rust_byte_for_byte_parity() {
+        let events = read_resume_fixture();
+        let checkpoint = usage_fold_checkpoint(&events[..6]);
+        let resumed = usage_fold_resume(&checkpoint, &events[6..]);
+        assert_eq!(
+            serde_json::to_string(&resumed).unwrap(),
+            r#"{"by_model":{"deepseek/deepseek-v4-pro-0813":{"uncached_input_tokens":4300,"output_tokens":250,"cache_read_tokens":1300,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},"deepseek/deepseek-v4-flash":{"uncached_input_tokens":2000,"output_tokens":500,"cache_read_tokens":100,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},"deepseek-v4-flash":{"uncached_input_tokens":462,"output_tokens":3520,"cache_read_tokens":245760,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},"providers":{"deepseek/deepseek-v4-pro-0813":"shengsuanyun","deepseek/deepseek-v4-flash":"deepseek-official","deepseek-v4-flash":"deepseek-official"},"sequence":["deepseek/deepseek-v4-pro-0813","deepseek/deepseek-v4-flash","deepseek/deepseek-v4-pro-0813"],"unreported_fields":["cacheWriteTokens"],"unaccounted_usage":[{"type":"assistant/message","count":1,"tokens_seen":86}]}"#
+        );
+    }
+
+    /// checkpoint 序列化往返不丢状态：to_json → from_json → 同一 render 输出。
+    /// `active` 是「下一 turn 会继承的模型」，最容易被序列化丢掉——单独断言。
+    #[test]
+    fn usage_fold_checkpoint_json_round_trips() {
+        let events = read_resume_fixture();
+        let checkpoint = usage_fold_checkpoint(&events);
+        let json = usage_fold_checkpoint_json(&checkpoint);
+        let restored = usage_fold_resume_from_json(&json);
+        assert_eq!(usage_fold_render(&restored), usage_fold_render(&checkpoint));
+        assert_eq!(restored.active, checkpoint.active);
+        assert_eq!(restored.samples, checkpoint.samples);
+        assert_eq!(restored.unaccounted, checkpoint.unaccounted);
+    }
+
+    /// Python `usage_fold_checkpoint_json` 输出的逐字节对照——watcher 将来可能
+    /// 把 checkpoint 落盘、让 Rust 与 Python 进程互读，序列化格式必须锁死
+    /// （`seen` 是 `_SAMPLE_FIELDS` 顺序的 4 个 bool；`unaccounted` 每条是
+    /// `[count, tokens_seen]` 列表；`by_model` 保插入序）。
+    #[test]
+    fn usage_fold_checkpoint_json_python_rust_byte_for_byte_parity() {
+        let events = read_resume_fixture();
+        let json = usage_fold_checkpoint_json(&usage_fold_checkpoint(&events));
+        assert_eq!(
+            serde_json::to_string(&json).unwrap(),
+            r#"{"by_model":{"deepseek/deepseek-v4-pro-0813":{"uncached_input_tokens":4300,"output_tokens":250,"cache_read_tokens":1300,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},"deepseek/deepseek-v4-flash":{"uncached_input_tokens":2000,"output_tokens":500,"cache_read_tokens":100,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},"deepseek-v4-flash":{"uncached_input_tokens":462,"output_tokens":3520,"cache_read_tokens":245760,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},"providers":{"deepseek/deepseek-v4-pro-0813":"shengsuanyun","deepseek/deepseek-v4-flash":"deepseek-official","deepseek-v4-flash":"deepseek-official"},"active":"deepseek/deepseek-v4-pro-0813","sequence":["deepseek/deepseek-v4-pro-0813","deepseek/deepseek-v4-flash","deepseek/deepseek-v4-pro-0813"],"seen":[true,true,true,false],"samples":6,"unaccounted":{"assistant/message":[1,86]}}"#
         );
     }
 

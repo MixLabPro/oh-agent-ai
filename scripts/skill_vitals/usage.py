@@ -518,29 +518,36 @@ def usage_signal_status(usage_events):
     return {"status": "measured", "sample_count": count}
 
 
-def token_by_model(events):
-    """事件流 → `{"by_model": {...}, "sequence": [...]}`。
+def _usage_fold_default():
+    """可续折叠的空状态（`usage.rs::UsageFoldState` 的 Python 镜像）。
 
-    纯函数、确定性：同一事件流重放结果逐字节一致（与 Rust core 对齐）。
-    非 object 条目跳过；request/header 设活跃模型（sequence 相邻去重，保留
-    「切回」信息）；assistant/chunk（usage 型）与 assistant/message（带
-    usage）折进当前模型；缺 turn/step 或 usage 非 object 的 usage 事件跳过；
-    无 request/header 时归 `"unknown"` 桶。
+    只携带**跨 turn 延续**的状态；`last` 同 step 去重槽**不在这里**，留在
+    `_usage_fold_into` 函数内局部——turn 边界之后第一条 usage 必是新 turn，
+    不可能命中前缀最后那条的 (turn, step)（§10.2 契约：「mid-turn 的 checkpoint
+    需要序列化替换状态；boundary 处不需要」）。这就是 `usage_fold_resume` 只
+    保证在 **turn 边界**切分时与 `token_by_model` 逐字节一致的原因。
     """
-    # 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
-    # branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
-    # 对同一笔钱/同一批行为重复计数（见 util.fork_boundary 的实测数据）。
-    events = post_fork(events)
-    by_model = {}
-    # 模型名 → 供应商（冲突或未上报时为 None）。与 by_model 并列而不是把两者
-    # 拼成复合键：展示层要按 (供应商, 模型) 拆行，拼成一个字符串反而要再拆开。
-    providers = {}
-    last = None  # (turn, step, buckets, model, peak) —— 同 step 去重槽
-    active = None
-    sequence = []
-    seen_fields = set()   # 真正出现过的 usage 字段名（见 _buckets_from 的注释）
-    samples = 0           # usage 样本计数——0 个样本时不对「未上报」下任何断言
-    unaccounted = {}      # 残差哨兵：类型 → {count, tokens_seen}（见 usage_shaped_tokens）
+    return {
+        "by_model": {},
+        "providers": {},
+        "active": None,
+        "sequence": [],
+        "seen": set(),      # 真正出现过的 usage 字段名（见 _buckets_from 的注释）
+        "samples": 0,       # usage 样本计数——0 个样本时不对「未上报」下任何断言
+        "unaccounted": {},  # 残差哨兵：类型 → {count, tokens_seen}（见 usage_shaped_tokens）
+    }
+
+
+def _usage_fold_into(state, events):
+    """把一段分叉之后的事件折进 state——`token_by_model` / `usage_fold_checkpoint`
+    / `usage_fold_resume` 共用的内层循环。
+
+    `last` 同 step 去重槽是函数内局部量，每次从 None 起：checkpoint 建立时槽
+    本为空；resume 的后缀从 turn 边界开始，第一条 usage 必是新 turn，不会命中
+    前缀里的槽（§10.2）。**增量折叠绝不另写一条"快路"**——必须与全量重折逐字节
+    相同，所以三者共用同一个 `_usage_fold_into`。
+    """
+    last = None  # (turn, step, buckets, model, peak) —— 同 step 去重槽，不跨调用延续
 
     for event in events:
         if not isinstance(event, dict):
@@ -571,10 +578,10 @@ def token_by_model(events):
             #   - "…"        = 唯一确定的供应商 → 按白名单判断能不能计价；
             #   - AMBIGUOUS  = 同一模型名被两家服务过 → 我们无法判断哪些 token
             #                  属于哪家，猜一个等于替用户编一次归属，拒绝计价。
-            _record_provider(providers, model, provider)
-            if active != model:
-                sequence.append(model)
-            active = model
+            _record_provider(state["providers"], model, provider)
+            if state["active"] != model:
+                state["sequence"].append(model)
+            state["active"] = model
             continue
 
         data = event.get("data")
@@ -587,38 +594,54 @@ def token_by_model(events):
             # 不计价，归类由人来做。
             seen_tokens = usage_shaped_tokens(data)
             if seen_tokens is not None:
-                entry = unaccounted.setdefault(
+                entry = state["unaccounted"].setdefault(
                     etype if isinstance(etype, str) else "(unknown)",
                     {"count": 0, "tokens_seen": 0})
                 entry["count"] += 1
                 entry["tokens_seen"] += seen_tokens
             continue
         turn, step, usage, model_override = sample
-        samples += 1
-        buckets = _buckets_from(usage, seen_fields)
+        state["samples"] += 1
+        buckets = _buckets_from(usage, state["seen"])
         if model_override and model_override[0]:
             # 这份样本自带模型归属（目前只有 compaction/summary）——不能
             # 沿用"当前激活模型"，那是给对话轮次用的追踪状态，compaction
             # 走的往往是另一个模型/供应商（真实实测：会话主体 pro/flash
             # 混合，compaction 用的是 deepseek-v4-flash/deepseek-official）。
             model = model_override[0]
-            _record_provider(providers, model, model_override[1])
+            _record_provider(state["providers"], model, model_override[1])
         else:
-            model = active if active is not None else "unknown"
+            model = state["active"] if state["active"] is not None else "unknown"
         peak = _is_peak(event)
         if last is not None and last[0] == turn and last[1] == step:
             if last[2] == buckets and last[4] == peak:
                 continue
-            _add_buckets(by_model, last[3], last[2], -1, last[4])
-            _add_buckets(by_model, model, buckets, 1, peak)
+            _add_buckets(state["by_model"], last[3], last[2], -1, last[4])
+            _add_buckets(state["by_model"], model, buckets, 1, peak)
             last = (turn, step, buckets, model, peak)
         else:
-            _add_buckets(by_model, model, buckets, 1, peak)
+            _add_buckets(state["by_model"], model, buckets, 1, peak)
             last = (turn, step, buckets, model, peak)
 
+
+def usage_fold_checkpoint(events):
+    """事件流（分叉之后）→ 可序列化的 checkpoint 状态。
+
+    调用方负责先 `post_fork`：分叉边界只由日志头第一个 `session` 事件的
+    `seedLength` 决定（`util.fork_boundary`），对 append-only 日志是一次性
+    稳定的，不必每个 checkpoint 重算；而且 resume 时后缀里没有 session 头，
+    重算会得到 None（= 不过滤），与「前缀已滤、后缀无分叉事件」一致。
+    """
+    state = _usage_fold_default()
+    _usage_fold_into(state, events)
+    return state
+
+
+def usage_fold_render(state):
+    """折叠状态 → `token_by_model` 的输出形状。"""
     # 一个样本都没有时返回空列表：没有数据就不做「宿主不报这个字段」的断言，
     # 与 host 能力缺失时「缺列而不是编列」是同一条纪律。
-    unreported = [f for f in _SAMPLE_FIELDS if f not in seen_fields] if samples else []
+    unreported = [f for f in _SAMPLE_FIELDS if f not in state["seen"]] if state["samples"] else []
     # `unaccounted_usage` 是 `unreported_fields` 的**对偶**：后者说「宿主
     # 从没报过这个字段」，前者说「宿主报了 token，但我们没接住」。在证据
     # 模型里它就是 `Signal::Usage` 的 `unmetered` 计数——`evidence.rs` 的
@@ -626,11 +649,108 @@ def token_by_model(events):
     # 自己的覆盖率」。按类型名排序保证确定性输出（Rust 侧用 BTreeMap 对齐）。
     unaccounted_usage = [
         {"type": t, "count": v["count"], "tokens_seen": v["tokens_seen"]}
-        for t, v in sorted(unaccounted.items())
+        for t, v in sorted(state["unaccounted"].items())
     ]
-    return {"by_model": by_model, "providers": providers,
-            "sequence": sequence, "unreported_fields": unreported,
+    return {"by_model": state["by_model"], "providers": state["providers"],
+            "sequence": state["sequence"], "unreported_fields": unreported,
             "unaccounted_usage": unaccounted_usage}
+
+
+def usage_fold_resume(state, events):
+    """checkpoint + 后续事件 → 输出。
+
+    §10.2 契约：`fold(events[0..n]) == fold_resume(checkpoint@k, events[k..n])`
+    对任何 **turn 边界** k 成立。`events` 必须是分叉之后、且从 turn 边界开始的
+    后缀——mid-turn 切分需要序列化 `last` 替换状态，这个 checkpoint 不携带。
+
+    深拷贝状态再折，不修改调用方的 checkpoint（Rust 侧 `clone` 的镜像）。
+    """
+    st = dict(state)
+    # bucket 值对象也必须复制：`_add_buckets` 是 `cur[key] = ...` 原地改，
+    # 只 `dict(by_model)` 浅拷贝会把 checkpoint 的 bucket 一起改掉——那就不是
+    # 「checkpoint 是可复用值」而是静默双计了。providers 值是 str/None 不可变，
+    # 共享安全，但统一复制保持一致。
+    st["by_model"] = {m: dict(b) for m, b in state["by_model"].items()}
+    st["providers"] = dict(state["providers"])
+    st["sequence"] = list(state["sequence"])
+    st["seen"] = set(state["seen"])
+    st["unaccounted"] = {t: dict(v) for t, v in state["unaccounted"].items()}
+    _usage_fold_into(st, events)
+    return usage_fold_render(st)
+
+
+def usage_fold_checkpoint_json(state):
+    """checkpoint 的 JSON 形态（watcher/持久化用），与 Rust
+    `usage_fold_checkpoint_json` 逐字节对齐。
+
+    只落跨 turn 状态；`seen` 折成 `_SAMPLE_FIELDS` 顺序的 4 个 bool（Rust 侧
+    `[bool; 4]`）；`unaccounted` 每条存 `[count, tokens_seen]` 列表（Rust 侧
+    `[u64, i64]`）。`by_model`/`providers`/`sequence` 保插入序，与 serde
+    preserve_order 对齐。
+    """
+    return {
+        "by_model": state["by_model"],
+        "providers": state["providers"],
+        "active": state["active"],
+        "sequence": state["sequence"],
+        "seen": [f in state["seen"] for f in _SAMPLE_FIELDS],
+        "samples": state["samples"],
+        "unaccounted": {t: [v["count"], v["tokens_seen"]]
+                        for t, v in sorted(state["unaccounted"].items())},
+    }
+
+
+def usage_fold_resume_from_json(value):
+    """JSON checkpoint → 折叠状态（`usage_fold_checkpoint_json` 的逆）。"""
+    state = _usage_fold_default()
+    if not isinstance(value, dict):
+        return state
+    by_model = value.get("by_model")
+    if isinstance(by_model, dict):
+        state["by_model"] = dict(by_model)
+    providers = value.get("providers")
+    if isinstance(providers, dict):
+        state["providers"] = dict(providers)
+    active = value.get("active")
+    if isinstance(active, str):
+        state["active"] = active
+    sequence = value.get("sequence")
+    if isinstance(sequence, list):
+        state["sequence"] = [s for s in sequence if isinstance(s, str)]
+    seen = value.get("seen")
+    if isinstance(seen, list):
+        state["seen"] = {f for f, present in zip(_SAMPLE_FIELDS, seen) if present}
+    samples = value.get("samples")
+    if isinstance(samples, int):
+        state["samples"] = samples
+    unaccounted = value.get("unaccounted")
+    if isinstance(unaccounted, dict):
+        for t, v in unaccounted.items():
+            if (isinstance(v, list) and len(v) == 2
+                    and isinstance(v[0], int) and isinstance(v[1], int)):
+                state["unaccounted"][t] = {"count": v[0], "tokens_seen": v[1]}
+    return state
+
+
+def token_by_model(events):
+    """事件流 → `{"by_model": {...}, "sequence": [...]}`。
+
+    纯函数、确定性：同一事件流重放结果逐字节一致（与 Rust core 对齐）。
+    非 object 条目跳过；request/header 设活跃模型（sequence 相邻去重，保留
+    「切回」信息）；assistant/chunk（usage 型）与 assistant/message（带
+    usage）折进当前模型；缺 turn/step 或 usage 非 object 的 usage 事件跳过；
+    无 request/header 时归 `"unknown"` 桶。
+
+    实现就是 `usage_fold_checkpoint` + `usage_fold_render`：**增量折叠必须与
+    全量重折逐字节相同**，所以增量绝不是另一条快路，而是同一个纯函数作用在
+    更多事件上（`usage_fold_resume`）。
+    """
+    # 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
+    # branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
+    # 对同一笔钱/同一批行为重复计数（见 util.fork_boundary 的实测数据）。
+    events = post_fork(events)
+    state = usage_fold_checkpoint(events)
+    return usage_fold_render(state)
 
 
 def token_by_date_model(events):

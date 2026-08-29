@@ -281,7 +281,19 @@ pinned by its own test) and a byte-for-byte Python↔Rust parity test on both si
 "simplify" the date axis into a Python-only helper: it fell outside the differential once
 already, and the menu-bar work (Rust-Tauri) consumes this same fold.
 
-Consequently the **M3 state layer** (`state.py`'s `merge_today`/`merge_month`/
+**The same fold is also *resumable* (the watcher's incremental path, §10.2).** The fold's
+cross-turn state lives in `UsageFoldState` (`usage.rs`) / `_usage_fold_default`+friends
+(`usage.py`), and the contract `fold(events[0..n]) == fold_resume(checkpoint@k, events[k..n])`
+for any **turn boundary** k is pinned byte-for-byte on both sides
+(`usage_fold_resume_equals_full_fold_at_turn_boundaries` in Rust, `tests/test_resumability.py`
+in Python, plus cross-language characterization on `usage_fold_resume` and
+`usage_fold_checkpoint_json`). The `last` same-step dedup slot is deliberately **not** in the
+checkpoint — a resume suffix starts at a turn boundary, so its first usage event is a new turn
+and cannot collide with the prefix's final (turn, step); mid-turn checkpoints would need to
+serialise that slot, and the contract does not promise them. Incremental folding is not a
+separate fast path: `token_by_model` itself is `usage_fold_checkpoint` + `usage_fold_resume`,
+so the two are equal by construction. In Python, `usage_fold_resume` deep-copies the state —
+a resume that mutates the caller's checkpoint would silently double-count on reuse. (`state.py`'s `merge_today`/`merge_month`/
 `rotate_today`/`read_month`/`list_months`, `budget.py`, `cli.py`'s `oneline`/`calendar`) is
 the one place in this repo that accumulates *across* invocations, and its invariants are not
 input→output but **cross-call**: every token lands in `month.json` exactly once
