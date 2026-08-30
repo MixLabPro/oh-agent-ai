@@ -2816,12 +2816,17 @@ class TestCodexCoverage(unittest.TestCase):
         items = [
             _cx_user_message(),
             {"type": "response_item", "timestamp": 0,
+             "payload": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": "<environment_context>host data</environment_context>"}]}},
+            {"type": "response_item", "timestamp": 0,
+             "payload": {"type": "message", "role": "user", "content": []}},
+            {"type": "response_item", "timestamp": 0,
              "payload": {"type": "message", "role": "assistant",
                          "content": [{"type": "output_text", "text": "你好"}]}},
             _cx_response("reasoning"),
         ]
         signals, cov = self._signals(items)
-        self.assertEqual(cov["UserPrompts"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["UserPrompts"], {"measured": 1, "derived": 0, "lossy": 1, "unmetered": 0})
         self.assertIn("UserPrompts", signals)
 
     def test_unknown_types_are_reported_sorted_and_deduped(self):

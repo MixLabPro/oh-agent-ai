@@ -1222,12 +1222,18 @@ mod tests {
                 "type": "message", "role": "user",
                 "content": [{"type": "input_text", "text": "你好"}]}}),
             json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "<environment_context>host data</environment_context>"}]}}),
+            json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "message", "role": "user", "content": []}}),
+            json!({"type": "response_item", "timestamp": 0, "payload": {
                 "type": "message", "role": "assistant",
                 "content": [{"type": "output_text", "text": "你好"}]}}),
             json!({"type": "response_item", "timestamp": 0, "payload": {"type": "reasoning"}}),
         ];
         let evidence = build(items);
         assert_eq!(evidence.canonical.coverage.get(Signal::UserPrompts).measured, 1);
+        assert_eq!(evidence.canonical.coverage.get(Signal::UserPrompts).lossy, 1);
         assert!(evidence.canonical.signals.contains(Signal::UserPrompts));
         // UserPrompts 不再是结构缺口：序列化标记 available。
         let out = codex_evidence_json(&evidence);
