@@ -44,11 +44,12 @@ const entry = (total, available) => ({ measured: total, derived: 0, lossy: 0, un
 
 console.log('# sv-findings-fold（结构缺口 / 会话缺口 / 全覆盖）');
 
-// 真实会话 01a029cb 形状（2026-08-30 实测）：9 个有覆盖（含 UserPrompts=15）+
-// 5 个会话缺口（ApprovalDecisions/Compaction/SubagentSpawns/Hooks/FileMutations）
-// + 4 个结构缺口 → KPI 10/15。
+// 真实会话 01a029cb 形状（2026-08-30 实测）：10 个有覆盖（含 UserPrompts=15、
+// QuotaConsumption=1）+ 5 个会话缺口（ApprovalDecisions/Compaction/
+// SubagentSpawns/Hooks/FileMutations）+ 4 个结构缺口 → KPI 11/16（20 - 4）。
 const covered = ['ToolCalls', 'ToolResults', 'TurnBoundaries', 'Usage', 'UsageAggregate',
-  'ContextWindow', 'ApprovalPolicy', 'SandboxModes', 'SkillInvocations', 'UserPrompts'];
+  'ContextWindow', 'ApprovalPolicy', 'SandboxModes', 'SkillInvocations', 'UserPrompts',
+  'QuotaConsumption'];
 const gaps = ['ApprovalDecisions', 'Compaction', 'SubagentSpawns', 'Hooks', 'FileMutations'];
 const covKeys = {};
 covered.forEach((s) => { covKeys[s] = entry(s === 'UserPrompts' ? 15 : 1, true); });
@@ -56,8 +57,8 @@ gaps.forEach((s) => { covKeys[s] = entry(0, true); });
 UNAVAIL.forEach((s) => { covKeys[s] = entry(0, false); });
 
 const sum = svFindingsFold(covKeys, [{ type: 'compaction', count: 1 }], esc);
-ok(sum.availCount === 15, 'availCount=15（19 - 4 结构缺口）');
-ok(sum.availHit === 10, 'availHit=10（UserPrompts 已翻 measured）');
+ok(sum.availCount === 16, 'availCount=16（20 - 4 结构缺口）');
+ok(sum.availHit === 11, 'availHit=11（UserPrompts 已翻 measured、QuotaConsumption 计 1）');
 ok(sum.gapCount === 5, 'gapCount=5（会话缺口，不含结构缺口）');
 ok(sum.leads.length === 5 && sum.leads.every((s) => gaps.includes(s)),
   'leads 只含会话缺口：' + sum.leads.join(','));
@@ -72,7 +73,7 @@ const full = {};
 covered.concat(gaps).forEach((s) => { full[s] = entry(1, true); });
 UNAVAIL.forEach((s) => { full[s] = entry(0, false); });
 const empty = svFindingsFold(full, [], esc);
-ok(empty.availHit === 15 && empty.gapCount === 0 && empty.leads.length === 0,
+ok(empty.availHit === 16 && empty.gapCount === 0 && empty.leads.length === 0,
   '全覆盖 → 0 线索（空态可达）');
 ok(empty.note === '无残差 · 0 条会话缺口', '全覆盖 note 无残差');
 
