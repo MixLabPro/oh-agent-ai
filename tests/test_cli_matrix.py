@@ -1341,9 +1341,11 @@ class CliMatrix(unittest.TestCase):
         self.assertAlmostEqual(hour_sum, report["total_cost_usd"], places=9)
         self.assertAlmostEqual(
             report["days"][0]["cost_usd"], report["total_cost_usd"], places=9)
-        # 手算价：uncached 0.1M·5 + output 0.05M·30 = 2.0；0.12M·5 + 0.06M·30
-        # = 2.4 → 4.4（无 longContext、无 unpriced）。
-        self.assertAlmostEqual(report["total_cost_usd"], 4.4, places=9)
+        # 手算价（2026-08 降价后的定价表：uncached $4/M、output $20/M）：
+        # 0.1M·4 + 0.05M·20 = 1.4；0.12M·4 + 0.06M·20 = 1.68 → 3.08
+        # （无 longContext、无 unpriced；旧的 $5/$30 → 4.4 是降价前的手算，差分
+        # 在 2026-08-30 抓到引擎已经换表、断言还停在旧价）。
+        self.assertAlmostEqual(report["total_cost_usd"], 3.08, places=9)
 
     # ── codex-session（Codex 单会话审计：逐 session 成本 + 出处覆盖）────────
     # 复用 _codex_cost_roots() 的三份夹具：文件名即 session_id（夹具无
@@ -1533,8 +1535,8 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(cov["SubagentSpawns"]["measured"], 1)
         self.assertEqual(cov["UsageAggregate"]["derived"], 1)
         self.assertEqual(cov["SkillInvocations"]["derived"], 1)
-        # 成本合并：只有 A 有 token → 总价来自 A 的 1100 token（0.1M·5 + 0.01M·30
-        # 之类，不逐项手算，但 must be > 0 且 per_model 非空）。
+        # 成本合并：只有 A 有 token → 总价来自 A 的 1100 token（2026-08 降价后
+        # 是 0.1M·4 + 0.01M·20 之类，不逐项手算，但 must be > 0 且 per_model 非空）。
         cr = report["cost_report"]
         self.assertGreater(cr["total_cost_usd"], 0)
         self.assertEqual(list(cr["per_model"].keys()), ["gpt-5.6-sol"])
