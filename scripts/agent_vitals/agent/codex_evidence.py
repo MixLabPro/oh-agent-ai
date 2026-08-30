@@ -42,6 +42,7 @@ ALL_SIGNALS = (
     "Usage",
     "UsageAggregate",
     "ContextWindow",
+    "QuotaConsumption",
     "ApprovalDecisions",
     "ApprovalPolicy",
     "SandboxModes",
@@ -312,6 +313,8 @@ def derive_coverage(items):
                 _bump(coverage, "TurnBoundaries", "measured")
             elif inner == "token_count":
                 _bump(coverage, "Usage", "measured")
+                if "rate_limits" in payload:
+                    _bump(coverage, "QuotaConsumption", "measured")
                 # 常驻上下文窗口（model_context_window）在 payload.info 里——
                 # 与逐请求 token 分离，§13 ContextWindow 行的来源。
                 info = payload.get("info")

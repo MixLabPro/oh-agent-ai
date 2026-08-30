@@ -482,6 +482,7 @@ fn derive_coverage(execution_events: &[Value], usage_events: &[Value]) -> (Signa
     // 没有任何网络访问事件类型,如实记 unavailable（全零 coverage,不进
     // SignalSet）,不编一个措辞好看的"未来支持"。
     coverage.set(Signal::NetworkAccess, CoverageCounts::default());
+    coverage.set(Signal::QuotaConsumption, CoverageCounts::default());
 
     // 契约 §13 矩阵没有这三行的 DSH 列——不编造,一律 unavailable。
     coverage.set(Signal::SandboxPolicy, CoverageCounts::default());
@@ -649,7 +650,7 @@ mod tests {
     fn unmapped_signals_are_unavailable_not_fabricated() {
         // §13 矩阵没有 DSH 列的三行——必须原样全零,不能编一个非零数字出来。
         let evidence = build_dsh_evidence(vec![ev("tool/call")], vec![json!({"a": 1})], None, "s1".to_string());
-        for signal in [Signal::SandboxPolicy, Signal::UserPrompts, Signal::UserCorrections] {
+        for signal in [Signal::SandboxPolicy, Signal::UserPrompts, Signal::UserCorrections, Signal::QuotaConsumption] {
             assert_eq!(evidence.canonical.coverage.get(signal), CoverageCounts::default());
             assert!(!evidence.canonical.signals.contains(signal));
         }

@@ -2864,7 +2864,7 @@ class TestCodexCoverage(unittest.TestCase):
 
 
 class TestCodexEvidenceJson(unittest.TestCase):
-    """`codex_evidence_json` 的输出形状——19 个信号键全量、signals 按
+    """`codex_evidence_json` 的输出形状——20 个信号键全量、signals 按
     ALL_SIGNALS 序、attempts/notes 序列化。与 Rust `codex_evidence_json`
     同一个形状（差分门 both() 在子命令层再兜底一次字节相等）。"""
 
@@ -2874,13 +2874,13 @@ class TestCodexEvidenceJson(unittest.TestCase):
                                         ["/repo"], "gpt-5.6-sol")
         return codex_evidence_json(evidence)
 
-    def test_all_19_signals_appear_in_coverage(self):
+    def test_all_20_signals_appear_in_coverage(self):
         out = self._build([_cx_event("mcp_tool_call_end")])
         self.assertEqual(out["host"], "codex")
         self.assertEqual(out["session_id"], "s1")
         self.assertIsNone(out["title"], "无索引态 → title 是 null，绝不编造")
         self.assertEqual(out["history_mode"], "legacy")
-        self.assertEqual(len(out["coverage"]), 19)
+        self.assertEqual(len(out["coverage"]), 20)
         self.assertEqual(out["coverage"]["ToolCalls"],
                          {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
         # available 标记（2026-08 起）：结构缺口 false、可数信号 true——KPI 分母

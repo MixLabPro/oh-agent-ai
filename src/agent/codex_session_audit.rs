@@ -169,6 +169,27 @@ fn tool_output_bytes_of(items: &[Value]) -> Value {
     json!({"stdout":stdout,"stderr":stderr,"commands":commands,"top":top})
 }
 
+fn turn_timeline_of(items: &[Value], audit: &Value) -> Value {
+    let mut refs: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    for finding in audit.get("findings").and_then(|v| v.as_array()).into_iter().flatten() {
+        if let (Some(seq), Some(rule)) = (finding.get("seq").and_then(|v| v.as_i64()), finding.get("rule").and_then(|v| v.as_str())) {
+            refs.entry(seq).or_default().push(rule.to_string());
+        }
+    }
+    let mut events = Vec::new();
+    for (source_order, item) in items.iter().enumerate() {
+        let Some(payload) = item.get("payload") else { continue; };
+        let top = item.get("type").and_then(|v| v.as_str()); let kind = payload.get("type").and_then(|v| v.as_str());
+        let summary = if top == Some("turn_context") { Some("权限上下文") }
+            else if kind == Some("task_started") { Some("turn 开始") }
+            else if kind == Some("task_complete") { Some(if payload.get("error").map_or(true, |v| v.is_null()) { "turn 完成" } else { "turn error" }) }
+            else if kind == Some("item_completed") && payload.get("item").and_then(|v|v.get("type")).and_then(|v|v.as_str()) == Some("CommandExecution") { Some("命令执行") }
+            else if kind == Some("token_count") { Some("用量 / 配额快照") } else { None };
+        if let Some(summary) = summary { events.push(json!({"source_order":source_order,"turn":payload.get("turn_id").and_then(|v|v.as_str()),"kind":kind.or(top),"summary":summary,"rule_refs":refs.get(&(source_order as i64)).cloned().unwrap_or_default()})); }
+    }
+    json!(events)
+}
+
 fn file_info(path: &Path) -> FileInfo {
     let parsed = read_codex_session_log(path);
     let items: Vec<Value> = parsed
@@ -344,12 +365,13 @@ pub fn codex_session_audit_json(home: &Path, session_id: &str) -> Option<Value> 
     );
     out.insert("context_window".into(), context_window.map_or(Value::Null, |w| json!(w)));
     out.insert("date_span".into(), json!({ "first": first, "last": last_ts }));
-    out.insert("audit".into(), audit);
+    out.insert("audit".into(), audit.clone());
     out.insert("quota_trajectory".into(), quota_trajectory_of(&all_items));
     out.insert("permission_transitions".into(), permission_trajectory_of(&all_items));
     out.insert("turn_ends".into(), turn_ends_of(&evidence));
     out.insert("effort".into(), effort_of(&all_items));
     out.insert("tool_output_bytes".into(), tool_output_bytes_of(&all_items));
+    out.insert("turn_timeline".into(), turn_timeline_of(&all_items, &audit));
     out.insert("cost_report".into(), cost_report);
     out.insert("coverage".into(), ev["coverage"].clone());
     out.insert("signals".into(), ev["signals"].clone());

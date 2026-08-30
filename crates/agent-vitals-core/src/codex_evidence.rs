@@ -311,6 +311,9 @@ fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
                 }
                 "token_count" => {
                     bump(&mut coverage, Signal::Usage, Bucket::Measured, 1);
+                    if payload.get("rate_limits").is_some() {
+                        bump(&mut coverage, Signal::QuotaConsumption, Bucket::Measured, 1);
+                    }
                     // 常驻上下文窗口（model_context_window）在 payload.info 里——
                     // 与逐请求 token 分离，§13 ContextWindow 行的来源。
                     let has_window = payload
@@ -473,6 +476,7 @@ const ALL_SIGNALS: &[Signal] = &[
     Signal::Usage,
     Signal::UsageAggregate,
     Signal::ContextWindow,
+    Signal::QuotaConsumption,
     Signal::ApprovalDecisions,
     Signal::ApprovalPolicy,
     Signal::SandboxModes,
@@ -1287,7 +1291,7 @@ mod tests {
         assert!(out["signals"].as_array().unwrap().contains(&json!("ToolCalls")));
         // 所有 19 个 Signal 都出现在 coverage 里，缺一个就说明序列化漏了。
         let coverage = out["coverage"].as_object().unwrap();
-        assert_eq!(coverage.len(), 19);
+        assert_eq!(coverage.len(), 20);
         for s in ALL_SIGNALS {
             assert!(coverage.contains_key(&format!("{s:?}")));
         }

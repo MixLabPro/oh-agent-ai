@@ -174,6 +174,29 @@ def _tool_output_bytes_of(items):
     return {"stdout": stdout, "stderr": stderr, "commands": commands, "top": top[:5]}
 
 
+def _turn_timeline_of(items, audit):
+    """Source-order event list; source_order is explicit, never a fabricated seq."""
+    refs = {}
+    for finding in audit.get("findings", []):
+        seq = finding.get("seq")
+        if isinstance(seq, int) and not isinstance(seq, bool): refs.setdefault(seq, []).append(finding["rule"])
+    events = []
+    for source_order, item in enumerate(items):
+        payload = item.get("payload") if isinstance(item, dict) else None
+        if not isinstance(payload, dict): continue
+        top, kind, turn, summary = item.get("type"), payload.get("type"), payload.get("turn_id"), None
+        if top == "turn_context": summary = "权限上下文"
+        elif kind == "task_started": summary = "turn 开始"
+        elif kind == "task_complete": summary = "turn 完成" if payload.get("error") is None else "turn error"
+        elif kind == "item_completed" and isinstance(payload.get("item"), dict) and payload["item"].get("type") == "CommandExecution": summary = "命令执行"
+        elif kind == "token_count": summary = "用量 / 配额快照"
+        if summary is not None:
+            events.append({"source_order": source_order, "turn": turn if isinstance(turn, str) else None,
+                           "kind": kind if isinstance(kind, str) else top, "summary": summary,
+                           "rule_refs": refs.get(source_order, [])})
+    return events
+
+
 def _file_info(path):
     """一份 rollout 文件对 `codex-session` 有用的全部信息。degraded 文件（不可读/
     非 JSON/空）→ items 空 + 时间戳 None，但**仍按文件名兜底的 session_id
@@ -304,6 +327,7 @@ def codex_session_audit_json(home, session_id):
         "turn_ends": _turn_ends_of(evidence["canonical"]),
         "effort": _effort_of(all_items),
         "tool_output_bytes": _tool_output_bytes_of(all_items),
+        "turn_timeline": _turn_timeline_of(all_items, audit),
         "cost_report": cost_report,
         "coverage": ev["coverage"],
         "signals": ev["signals"],

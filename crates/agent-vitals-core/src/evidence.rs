@@ -58,6 +58,8 @@ pub enum Signal {
     /// 只有总量，没有逐请求分辨率。
     UsageAggregate,
     ContextWindow,
+    /// 宿主报告的额度/配额使用快照。
+    QuotaConsumption,
     ApprovalDecisions,
     ApprovalPolicy,
     SandboxModes,
@@ -75,7 +77,7 @@ pub enum Signal {
     UserCorrections,
 }
 
-/// `Signal` 的位集合——19 个变体放一个 `u32` 里正好，比 `HashSet<Signal>`
+/// `Signal` 的位集合——20 个变体放一个 `u32` 里正好，比 `HashSet<Signal>`
 /// 便宜（`Copy`，不分配），适配器每处理一个事件就可能查询/更新一次。
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub struct SignalSet(u32);

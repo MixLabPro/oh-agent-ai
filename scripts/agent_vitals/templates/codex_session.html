@@ -133,6 +133,8 @@ body{margin:0;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-pr
       <div class="sv-chartwrap" id="sv-timeline"></div></div>
     <div class="sv-subcard"><div class="sv-panel-sub">权限轨迹（只显示有效权限、sandbox 或 approval 改变的 turn）。</div>
       <div class="sv-kv" id="sv-permissions"></div></div>
+    <div class="sv-subcard"><div class="sv-panel-sub">按源记录顺序的审计事件。source_order 是 rollout 中的位置，不冒充宿主 seq。</div>
+      <div id="sv-turn-events"></div></div>
   </section>
 
   <section class="sv-section" id="s-coverage">
@@ -140,7 +142,7 @@ body{margin:0;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-pr
     <div class="sv-subcard"><div class="sv-panel-sub">会话元数据与证据来源。degraded 文件（不可读 / 非 JSON / 空）不编造，
       缺席字段显示 —。</div>
       <div class="sv-kv" id="sv-provenance"></div></div>
-    <div class="sv-subcard"><div class="sv-panel-sub">19 信号覆盖（跨文件并集：任一 rollout 文件覆盖即覆盖；宿主线格式不提供的维度在表中标「结构缺口」）。</div>
+    <div class="sv-subcard"><div class="sv-panel-sub">20 信号覆盖（跨文件并集：任一 rollout 文件覆盖即覆盖；宿主线格式不提供的维度在表中标「结构缺口」）。</div>
       <div class="sv-costwrap" id="sv-coverage"></div></div>
   </section>
 
@@ -335,6 +337,11 @@ if (!D) {
       esc(dash(p.effective_profile || p.sandbox || p.approval)) + '</code></div></div>';
   }).join('');
   document.getElementById('sv-permissions').innerHTML = permissionRows || '<div class="sv-empty">没有持久化的 turn 权限状态。</div>';
+  var events = D.turn_timeline || [];
+  document.getElementById('sv-turn-events').innerHTML = events.length ? events.map(function (e) {
+    return '<div class="sv-finding"><b>#' + num(e.source_order) + '</b> · ' + esc(dash(e.turn)) + ' · ' + esc(dash(e.summary)) +
+      (e.rule_refs && e.rule_refs.length ? ' · <span class="sv-tag sv-tag-warn">' + esc(e.rule_refs.join(', ')) + '</span>' : '') + '</div>';
+  }).join('') : '<div class="sv-empty">没有可定位的 turn 事件。</div>';
 
   // ── 3 出处与覆盖 ───────────────────────────────────────────────────
   var prov = [

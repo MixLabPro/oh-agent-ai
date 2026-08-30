@@ -549,6 +549,7 @@ incompatible vocabularies** (§4).
 | Usage (per request) | measured (4 buckets) | measured (6 buckets) | measured | measured (4 + thinking) | unverified (`generation` spans exist; per-span tokens unchecked) ※ |
 | UsageAggregate | derivable | derivable | derivable | derivable | measured (credits) |
 | ContextWindow | measured | measured (`model_context_window`) | measured | unavailable | unavailable |
+| QuotaConsumption | unavailable | measured (`token_count.rate_limits`) | measured | unavailable | unavailable |
 | ApprovalDecisions | measured | unavailable in rollout ‡ | partial (`FileChangeItem.auto_approved`) ‡ | **partial** — denials only, derived+lossy ¶ | **measured** (hash-chained) |
 | ApprovalPolicy | measured (`sandbox/mode`) | **measured** (`ThreadSettingsSnapshot`) | same | measured (`permission-mode`) | measured (`sessions.permission_mode`) |
 | SandboxModes | measured | unavailable | unavailable | unavailable | measured |
@@ -558,7 +559,7 @@ incompatible vocabularies** (§4).
 | SkillInvocations | measured | **derived** (not persisted; §14.3) | derived | derived (`Skill` tool call) | unavailable |
 | Hooks | measured | **unavailable — not persisted by design** | **measured** (`HookPromptItem`) | lossy (`stop_hook_summary`) | unavailable |
 | FileMutations | measured | lossy (`patch_apply_end` only) | **measured** (`FileChangeItem` + status) | derived (from tool calls) | measured (`file-history/`) |
-| Tool-call duration | measured | **unavailable** (no begin/end pair) | **measured** (`CommandExecutionItem.duration`) | derived | **measured** (`span.duration`) ※ |
+| Tool-call duration | measured | **unavailable** (no begin/end pair) | **not consumed** (`CommandExecutionItem.duration` is observed microseconds, not verified wall time) | derived | **measured** (`span.duration`) ※ |
 | Workspace root | `cwd` | `turn_context.workspace_roots` | same | `cwd` | `sessions.cwd` |
 | Storage medium | JSONL | JSONL | JSONL | JSONL | SQLite + JSONL + **span-tree JSON** + blobs |
 | Process liveness | unavailable | unavailable | unavailable | unavailable | partial (`workerPid`, `status:"running"`) — see §16.1 |
@@ -1535,7 +1536,7 @@ What landed, one new module per layer of the five-stage pipeline (§4.2):
   corpus: 0 attempts.
 - **CLI** — `codex-evidence <rollout.jsonl> [--json]` subcommand (both
   implementations), emitting `{host, session_id, history_mode, cli_version,
-  model, workspace_roots, signals, coverage (all 19 keys), attempts, notes}`.
+  model, workspace_roots, signals, coverage (all 20 keys), attempts, notes}`.
   No detectors run against Codex (the deferred detector-decoupling P3 named);
   this is the observable "sound" proof, not findings.
 - **wasm deliberately untouched** — `audit_events` only ever returns `findings`

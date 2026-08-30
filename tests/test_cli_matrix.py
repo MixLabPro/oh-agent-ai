@@ -1378,11 +1378,12 @@ class CliMatrix(unittest.TestCase):
         # 出处：夹具只有 token_count → Usage/ContextWindow measured、
         # UsageAggregate derived；信号序 = ALL_SIGNALS 序。
         self.assertEqual(report["signals"],
-                         ["Usage", "UsageAggregate", "ContextWindow"])
+                         ["Usage", "UsageAggregate", "ContextWindow", "QuotaConsumption"])
         cov = report["coverage"]
         self.assertEqual(cov["Usage"]["measured"], 7)
         self.assertEqual(cov["ContextWindow"]["measured"], 6)
         self.assertEqual(cov["UsageAggregate"]["derived"], 1)
+        self.assertEqual(cov["QuotaConsumption"]["measured"], 1)
         self.assertEqual(cov["ToolCalls"]["measured"], 0)
         self.assertEqual(report["attempts"], [])
         self.assertEqual(report["notes"], [])
