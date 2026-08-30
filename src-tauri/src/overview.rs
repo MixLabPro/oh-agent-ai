@@ -26,6 +26,32 @@ pub struct DayRow {
     pub coverage: Option<f64>,
 }
 
+/// alert.json 的预算权威字段（`budget.evaluate()` 落盘）。菜单栏**只读不重算**：
+/// level/ratio/日预算/snooze 全部以这里为准——这是迁移要修的 D2 缺口
+/// （Tauri 自算 remaining% 与 budget.py 规则无关）。缺场时 `source = "missing"`，
+/// UI 走降级文案，不臆造百分比。
+#[derive(Serialize, Default)]
+pub struct BudgetAlert {
+    pub level: Option<String>,
+    /// 今日占比（alert.json `ratio`，今日无数据时为 null）。
+    pub ratio: Option<f64>,
+    /// 本月占比（alert.json `month_ratio`）。
+    pub month_ratio: Option<f64>,
+    pub effective_daily_budget: Option<f64>,
+    pub snoozed_until: Option<String>,
+    pub reasons: Option<Vec<String>>,
+    pub today_cost: Option<f64>,
+    pub month_cost: Option<f64>,
+    pub monthly_cny: Option<f64>,
+    pub peak_over: Option<bool>,
+    pub adaptive_floor_applied: Option<bool>,
+    /// 新鲜度源：`budget.evaluate()` 的落盘时刻。
+    pub generated_at: Option<String>,
+    pub schema_version: Option<String>,
+    /// "alert" | "missing" —— 权威来源标记，UI 据此决定展示还是降级。
+    pub source: String,
+}
+
 #[derive(Serialize)]
 pub struct Overview {
     pub data_home: String,
@@ -33,6 +59,7 @@ pub struct Overview {
     pub month: Value,
     pub days: Vec<DayRow>,
     pub budget_monthly_cny: f64,
+    pub budget: BudgetAlert,
     pub estimate_note: String,
 }
 
@@ -130,6 +157,35 @@ fn monthly_budget_cny(data_home: &Path) -> f64 {
     600.0
 }
 
+/// 读 alert.json 的预算权威字段（`budget.evaluate()` 落盘）。**只读字段，不重算
+/// level/ratio**——这是迁移要修的 D2 缺口（Tauri 自算 remaining% 与 budget.py 规则
+/// 无关）。文件缺场或解析失败 → `source = "missing"`、字段全 None，UI 降级文案，
+/// 不臆造百分比。
+fn read_budget_alert(dh: &Path) -> BudgetAlert {
+    let Some(v) = read_json(&dh.join("state").join("alert.json")) else {
+        return BudgetAlert { source: "missing".into(), ..Default::default() };
+    };
+    let get = |k: &str| v.get(k).cloned();
+    BudgetAlert {
+        level: get("level").and_then(|x| x.as_str().map(String::from)),
+        ratio: get("ratio").and_then(|x| x.as_f64()),
+        month_ratio: get("month_ratio").and_then(|x| x.as_f64()),
+        effective_daily_budget: get("effective_daily_budget").and_then(|x| x.as_f64()),
+        snoozed_until: get("snoozed_until").and_then(|x| x.as_str().map(String::from)),
+        reasons: get("reasons").and_then(|x| x.as_array().map(|a| {
+            a.iter().filter_map(|r| r.as_str().map(String::from)).collect()
+        })),
+        today_cost: get("today_cost").and_then(|x| x.as_f64()),
+        month_cost: get("month_cost").and_then(|x| x.as_f64()),
+        monthly_cny: get("monthly_cny").and_then(|x| x.as_f64()),
+        peak_over: get("peak_over").and_then(|x| x.as_bool()),
+        adaptive_floor_applied: get("adaptive_floor_applied").and_then(|x| x.as_bool()),
+        generated_at: get("generated_at").and_then(|x| x.as_str().map(String::from)),
+        schema_version: get("schema_version").and_then(|x| x.as_str().map(String::from)),
+        source: "alert".into(),
+    }
+}
+
 pub fn read_overview() -> Overview {
     read_overview_at(&data_home())
 }
@@ -181,6 +237,7 @@ fn read_overview_at(dh: &Path) -> Overview {
         month,
         days,
         budget_monthly_cny: monthly_budget_cny(dh),
+        budget: read_budget_alert(dh),
         estimate_note: "估算值，不是账单；覆盖率不足的日子按 fallback 价补齐并标注".to_string(),
     }
 }
@@ -345,6 +402,74 @@ mod tests {
         assert_eq!(ov.month.get("total").unwrap().as_f64().unwrap(), 0.0);
         assert!(ov.days.is_empty());
         assert_eq!(ov.budget_monthly_cny, 600.0);
+        // alert.json 缺场 → budget.source == "missing"（UI 走「等预算数据」降级）。
+        assert_eq!(ov.budget.source, "missing");
+        assert!(ov.budget.level.is_none() && ov.budget.month_ratio.is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// alert.json 解析：真机形态（2026-08-30 实测 schema）的字段逐个落位，
+    /// source == "alert"。generated_at 保留为新鲜度源，UI 只读不重算百分比。
+    #[test]
+    fn read_budget_alert_parses_real_shaped_alert() {
+        let tmp = std::env::temp_dir().join("sv-menubar-alert-parse-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        std::fs::write(
+            tmp.join("state").join("alert.json"),
+            r#"{
+              "adaptive_floor_applied": false,
+              "effective_daily_budget": 30.0,
+              "generated_at": "2026-08-30T07:04:38.548588+00:00",
+              "level": "ok",
+              "month_cost": 12.7887157,
+              "month_ratio": 0.021314526166666667,
+              "monthly_cny": 600.0,
+              "peak_over": false,
+              "peak_share": null,
+              "ratio": null,
+              "reasons": ["month at 2% of monthly budget (¥12.79 / ¥600.00)"],
+              "schema_version": "1.0.0",
+              "snoozed_until": null,
+              "today_cost": null,
+              "today_peak_cost": null
+            }"#,
+        )
+        .unwrap();
+
+        let a = read_budget_alert(&tmp);
+        assert_eq!(a.source, "alert");
+        assert_eq!(a.level.as_deref(), Some("ok"));
+        assert_eq!(a.effective_daily_budget, Some(30.0));
+        assert_eq!(a.month_ratio, Some(0.021314526166666667));
+        assert!(a.ratio.is_none(), "今日无数据 → ratio 应为 null");
+        assert_eq!(a.snoozed_until, None);
+        assert_eq!(a.reasons.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            a.generated_at.as_deref(),
+            Some("2026-08-30T07:04:38.548588+00:00")
+        );
+        assert_eq!(a.schema_version.as_deref(), Some("1.0.0"));
+        assert_eq!(a.month_cost, Some(12.7887157));
+
+        let ov = read_overview_at(&tmp);
+        assert_eq!(ov.budget.source, "alert");
+        assert_eq!(ov.budget.level.as_deref(), Some("ok"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// alert.json 是合法 JSON 但缺关键字段 → 该字段 None、source 仍为 "alert"
+    /// （文件在，只是不全）；UI 据此可以显示部分权威值，不退回整行降级。
+    #[test]
+    fn read_budget_alert_tolerates_partial_alert() {
+        let tmp = std::env::temp_dir().join("sv-menubar-alert-partial-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        std::fs::write(tmp.join("state").join("alert.json"), r#"{"level":"ok"}"#).unwrap();
+        let a = read_budget_alert(&tmp);
+        assert_eq!(a.source, "alert");
+        assert_eq!(a.level.as_deref(), Some("ok"));
+        assert!(a.month_ratio.is_none() && a.snoozed_until.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

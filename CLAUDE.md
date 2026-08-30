@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repo **is** an Agent Skill (`SKILL.md` at the root), not a library that ships one.
 It health-checks the *other* skills installed on the machine. There are now **two
-implementations kept in lockstep** (permanent, see §Architecture): a Python scanner
+implementations kept in lockstep** (see §Architecture; the dual structure is being phased
+down per `docs/TAURI_RUNTIME_WORKBENCH_SPEC.md` §7.1): a Python scanner
 (`scripts/`) and a Rust binary + shared lib + wasm build (`src/` + `crates/`). The
 Python scanner is stdlib-only — no dependencies, no network calls; the Rust side has
 normal crates.io deps (clap/regex/serde/serde_json/sha2/walkdir) and the wasm crate adds
@@ -166,11 +167,17 @@ is excluded entirely.
 
 ### Dual implementation, differential guard (2026-08 revision)
 
-Python and Rust are **permanently parallel** — there is no "Rust replaces Python" exit
-point. Rust serves the binary channels (npm/brew/cargo/Release); Python serves the
-ClawHub in-host skill form and cross-language readers. Divergence must not survive one
-CI run: both implementations run the same goldens byte-for-byte, and the
-`differential` job turns red the day they disagree. See `docs/ENGINEERING.md` §6.8.
+Python and Rust are **currently parallel implementations under a differential gate** —
+but this is not an immutable hard limit. It is a clause this repo is revising: per
+`docs/TAURI_RUNTIME_WORKBENCH_SPEC.md` §7.1 (Phased Python Diminishment RFC), the
+structure is phased down — orchestration/IO (Tauri, IPC, watchers) is Rust-only from
+tier 1; pure rules migrate into the Rust core one rule at a time, each removed from
+Python only after the lockstep gate passes; the Python distribution form retires only
+when the tier-3 exit conditions hold. While a rule's Python implementation still
+exists, divergence must not survive one CI run: both implementations run the same
+goldens byte-for-byte, and the `differential` job turns red the day they disagree.
+Rust serves the binary channels (npm/brew/cargo/Release); Python serves the ClawHub
+in-host skill form and cross-language readers. See `docs/ENGINEERING.md` §6.8.
 
 ### DSH audit: computation is host-side
 

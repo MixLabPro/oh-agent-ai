@@ -134,19 +134,54 @@ class TestOnelineCli(unittest.TestCase):
             self.assertFalse((sd / "month.json").is_file())
 
     def test_oneline_today_accumulates_across_runs(self):
-        """两次 oneline 同一份"今天"的会话 → today.json 桶内累加。"""
+        """两个**不同**会话的 oneline → today.json 桶内累加。
+
+        2026-08 起（R1d §4.3）同一 session_log 重复 oneline 会被 dedup 跳过
+        （exactly-once，见 test_oneline_same_log_twice_is_exactly_once）——
+        累加语义只能用**不同会话**测，同一 log 跑两遍不再是「两个会话」的
+        代理。"""
         with _TmpHome() as h:
-            log = Path(h.tmp) / "today.jsonl"
-            _write_today_dated_log(log)
-            for _ in range(2):
+            log1 = Path(h.tmp) / "today-1.jsonl"
+            log2 = Path(h.tmp) / "today-2.jsonl"
+            _write_today_dated_log(log1)
+            _write_today_dated_log(log2)
+            for log in (log1, log2):
                 r = _run(["oneline", str(log)], env=h.env)
                 self.assertEqual(r.returncode, 0, r.stderr)
             today = json.loads((Path(h.tmp) / "state" / "today.json").read_text())
-            # 累加后某个 hour 桶的非零 token 数 = 单次的两倍（同一会话跑两遍）
+            # 累加后某个 hour 桶的非零 token 数 = 单次的两倍（两个会话）
             bucket_values = [v for v in today["buckets"].values()]
             self.assertEqual(len(bucket_values), 1, "同一时间只应有 1 个 hour 桶")
             # 单次 input_tokens 是 1.7M,累加后应是 3.4M
             self.assertEqual(bucket_values[0]["uncached_input_tokens"], 1700000 * 2)
+
+    def test_oneline_same_log_twice_is_exactly_once(self):
+        """R1d §4.3：同一 session_log 连续多 tick 不重复累加。
+
+        第二次 oneline 同 log 被 dedup 跳过，today/month/sessions.jsonl 一字
+        不动 —— 这就是 §4.2 验收里「已填充 state + 同一 session 多 tick
+        fixture 断言」的 Python 侧。2026-08 之前同一 log 跑两遍会把桶翻倍
+        （正是 R1d 修的 bug）。"""
+        with _TmpHome() as h:
+            log = Path(h.tmp) / "today.jsonl"
+            _write_today_dated_log(log)
+            r1 = _run(["oneline", str(log)], env=h.env)
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            sd = Path(h.tmp) / "state"
+            today1 = json.loads((sd / "today.json").read_text())
+            month1 = json.loads((sd / "month.json").read_text())
+            lines1 = (sd / "sessions.jsonl").read_text().count("\n")
+            r2 = _run(["oneline", str(log)], env=h.env)
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            # 第二次同 log 打印 dedup 跳过（stdout 不再是完整 oneline 报告）
+            self.assertIn("already folded", r2.stdout, "重跑应打印 dedup 跳过")
+            self.assertNotIn("session:    today", r2.stdout)
+            today2 = json.loads((sd / "today.json").read_text())
+            month2 = json.loads((sd / "month.json").read_text())
+            lines2 = (sd / "sessions.jsonl").read_text().count("\n")
+            self.assertEqual(today1, today2, "同 session 重跑不得重复累加 today")
+            self.assertEqual(month1, month2, "同 session 重跑不得重复累加 month")
+            self.assertEqual(lines1, lines2, "同 session 重跑不得重复追加 history")
 
     def test_oneline_today_by_model_is_sliced_to_today_not_whole_session(self):
         """跨天的长会话：today.json 的 `by_model` 必须只含**今天那一片**，

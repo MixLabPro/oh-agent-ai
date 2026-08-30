@@ -40,6 +40,7 @@ from agent_vitals.snapshots import SNAPSHOT_KEEP, diff_against, latest_snapshot,
 from agent_vitals import state as state_module
 from agent_vitals import usage as usage_module
 from agent_vitals import budget as budget_module
+from agent_vitals import takeover as takeover_module
 
 # Windows services and CI runners may expose cp1252 consoles. Reports and
 # diagnostics are bilingual, so make redirected and interactive output stable.
@@ -745,6 +746,43 @@ def _main():
                                  help="Write the audit JSON to FILE; use - for stdout")
     p_codex_session.add_argument("--html", metavar="FILE",
                                  help="Write a self-contained HTML audit report to FILE")
+    # ──── R2a SessionStore 查询面（§2.5/§3.3）───────────────────
+    # 只读：填充 Codex 源（Phase 1 唯一可读源）→ 版本化 DTO + cursor 分页。
+    # `--host-kind` 不是 `--host`：后者是扫描期的 global 参数（默认 "all"）。
+    p_sessions = sub.add_parser("sessions",
+                                help="R2a SessionStore query surface (versioned "
+                                     "read model over SessionReport envelopes)")
+    sess_sub = p_sessions.add_subparsers(dest="sessions_action")
+    p_slist = sess_sub.add_parser("list", help="List sessions: versioned DTO + "
+                                  "cursor-paginated page")
+    p_slist.add_argument("--host-kind", default=None,
+                         help="Filter by host kind (only `codex` is readable "
+                              "in Phase 1; `dsh` returns a typed "
+                              "source-unavailable error, never an empty page)")
+    p_slist.add_argument("--model", default=None,
+                         help="Filter by model (exact)")
+    p_slist.add_argument("--from", dest="date_from", default=None,
+                         help="Date lower bound (YYYY-MM-DD, inclusive)")
+    p_slist.add_argument("--to", dest="date_to", default=None,
+                         help="Date upper bound (YYYY-MM-DD, inclusive)")
+    p_slist.add_argument("--query", default=None,
+                         help="Free-text query against session_id / title")
+    p_slist.add_argument("--page-size", type=int, default=50,
+                         help="Page size; default 50")
+    p_slist.add_argument("--cursor", default=None,
+                         help="Cursor JSON from a previous page's next_cursor")
+    p_slist.add_argument("--json", action="store_true",
+                         help="Print the versioned DTO as JSON to stdout")
+    p_sread = sess_sub.add_parser("read", help="Read one session envelope by "
+                                  "session_key (+ optional revision)")
+    p_sread.add_argument("--session-key", required=True,
+                         help="session_key JSON (host_kind/native_id/"
+                              "source_profile/machine_namespace)")
+    p_sread.add_argument("--revision", default=None,
+                         help="Require this session_revision; a mismatch is "
+                              "stale-revision")
+    p_sread.add_argument("--json", action="store_true",
+                         help="Print the envelope as JSON to stdout")
     # ──── M3: 跨会话聚合层（v1.x.x）── 三个新子命令 ─────────────────
     # oneline：单次审计 → oneline.json（覆盖）+ today.json / month.json（合并累加）。
     # 与 behavior 复用同一份 audit_session_log，但额外调 hour_buckets 把折叠
@@ -1145,11 +1183,49 @@ def _main():
             print(cs._render_audit(out), end="")
         return
 
+    # ──── R2a sessions handler（镜像 Rust `sessions list`/`sessions read`）────
+    # 纯查询 + 自有 cache；`home` 由 r2a.codex() 内默认 Path.home() 解析（与
+    # Rust 从 HOME/USERPROFILE 解析同一路径）。
+    if getattr(args, "cmd", None) == "sessions":
+        from agent_vitals.agent import r2a as r2a_mod
+        action = getattr(args, "sessions_action", None)
+        if action == "list":
+            r2a_mod.sessions_list(
+                None,
+                getattr(args, "host_kind", None),
+                getattr(args, "model", None),
+                getattr(args, "date_from", None),
+                getattr(args, "date_to", None),
+                getattr(args, "query", None),
+                getattr(args, "page_size", 50),
+                getattr(args, "cursor", None),
+                getattr(args, "json", False),
+            )
+        elif action == "read":
+            r2a_mod.sessions_read(
+                None,
+                getattr(args, "session_key", ""),
+                getattr(args, "revision", None),
+                getattr(args, "json", False),
+            )
+        else:
+            print("sessions: unknown action %r" % action, file=sys.stderr)
+            sys.exit(2)
+        return
+
     # ──── M3 oneline handler ──────────────────────────────────────
     # 与 behavior 同源（同一个 audit_session_log），但**额外**把 hour_buckets
     # 折进 today.json / month.json。审计成本：每会话多跑一次 hour_buckets 折叠
     # （纯函数、与 token_by_model 同采样路径，无额外 I/O）。
     if getattr(args, "cmd", None) == "oneline":
+        # R1d: Python 写链退休为 mirror —— writer fencing（§4.2）。owner=rust
+        # 时拒绝写（防迁移期双写）；缺 manifest → owner=python → 正常写
+        # （R1 之前 Python 是唯一写者）。挡在最前面，省得审计半天才拒。
+        if not takeover_module.owner_allows_python():
+            print("writer fencing: state owned by rust; python oneline is a "
+                  "retired mirror (run `state takeover python` to roll back)",
+                  file=sys.stderr)
+            sys.exit(2)
         audit = behavior_module.audit_session_log(args.session_log)
         if audit is None:
             print("session log unavailable: unreadable, malformed, or schema mismatch",
@@ -1191,6 +1267,16 @@ def _main():
         # session_id / duration_ms：日志 schema 没显式字段时用文件名 + None
         # 兜底 ——「没数据」与「数据为 0」是两回事（CLAUDE.md §缺列不编列）。
         session_id = Path(args.session_log).stem
+        # R1d exactly-once（§4.3）：同一 session_log 连续多 tick 只折一次。
+        # 已由 Rust / 本 mirror 折过 → 整段跳过（today/month/history 不重复
+        # 累加，oneline/alert 本来就是覆盖快照）。日志**增长**也跳过 —— 宁可
+        # 少计也不翻倍，增量重 fold 是 R3 watcher 的 `fold_resume` 差事。
+        _session_key = takeover_module.session_key(
+            "dsh", session_id, takeover_module.machine_namespace())
+        if takeover_module.folded(_session_key):
+            print("dedup: session %s already folded; skipping (exactly-once, §4.3)"
+                  % session_id)
+            return
         duration_ms = None
         for ev in events:
             if isinstance(ev, dict) and ev.get("type") == "session/end":
@@ -1254,6 +1340,11 @@ def _main():
         # today.json / month.json 已经 merge 完，evaluate() 读的是最新状态。
         alert = budget_module.evaluate()
         state_module.write_alert(alert)
+        # R1d 提交点：ledger 记 key + manifest epoch+1/last_fold_at（与 Rust
+        # fold 驱动同写序：state 文件先折、ledger 记、manifest 最后提交）。
+        # 提交后才算「这个会话已经折过」，下次 oneline 同 log 被 dedup 跳过。
+        takeover_module.record_fold(
+            _session_key, "dsh", session_id, takeover_module.machine_namespace())
         # 顺手把日历 HTML 刷新到 $STATE_DIR/calendar.html —— xbar「打开
         # 日历」菜单项直接 open 这个固定路径,不需要知道 repo 装在哪里
         # （已安装的 xbar 副本本来就跟 repo 断了联系）。渲染失败(模板缺失

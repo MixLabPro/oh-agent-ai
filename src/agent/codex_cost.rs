@@ -516,7 +516,7 @@ pub fn render_codex_cost(out: &Value) -> String {
 // 不引入 chrono（CLI 保持最小依赖）；用 Howard Hinnant 的 civil-from-days 算法从
 // Unix 秒算公历日期。1970 之后秒数非负、`+8h` 后天数非负，era 的 floor == 截断，
 // 无需负数分支（仍用 div_euclid 保险）。
-fn civil_from_unix_secs(secs: i64, offset_secs: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_unix_secs(secs: i64, offset_secs: i64) -> (i64, u32, u32) {
     let days = (secs + offset_secs).div_euclid(86400);
     let z = days + 719468;
     let era = z.div_euclid(146097);

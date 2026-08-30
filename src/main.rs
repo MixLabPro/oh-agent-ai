@@ -312,6 +312,40 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Fold a DSH session log into oneline.json + today.json/month.json +
+    /// alert.json + sessions.jsonl (R1d-tick producer; byte-for-byte mirror of
+    /// Python `scan.py oneline`). Fenced: state owner must be `rust` (takeover)
+    /// unless --shadow. Writer fencing fails fast before the audit cost.
+    Oneline {
+        /// Path to the DSH session JSONL log (single file, not a directory)
+        session_log: PathBuf,
+        /// Native session id override (the tick's discovery passes the agentId
+        /// dir name here — DSH logs are always named `session.jsonl`, so the
+        /// file-stem default "session" would collide every session into one
+        /// dedup key). Default: file stem, byte-mirroring Python scan.py.
+        #[arg(long = "session-id")]
+        session_id: Option<String>,
+        /// Skip folding hour buckets into today.json/month.json (still writes
+        /// oneline.json + sessions.jsonl + alert.json + ledger)
+        #[arg(long)]
+        no_merge: bool,
+        /// Rehearse on a copy: skip writer fencing (like `state fold-session --shadow`)
+        #[arg(long)]
+        shadow: bool,
+    },
+    // Discover 是 R1d-tick 的输入面：Tauri tick 在这里 shell out，折最新未折。
+    // 中文说明放注释——clap 的 help 是 scanner-owned 文本，test_regressions 的
+    // test_help_defaults_to_english 钉死 ASCII-only（英文），不能漏进 command surface。
+    /// Discover unfolded DSH sessions under `<DSH_HOME>/sessions` (R1d-tick
+    /// input: the Tauri tick shells out here and folds the latest). Read-only:
+    /// touches no fencing and writes no state; zstd-only sessions are counted
+    /// and reported honestly (decompression is unwired — an R2a SessionStore
+    /// gap). JSON output: `unfolded` sorted by mtime descending (latest first).
+    Discover {
+        /// Write JSON to FILE; use - for stdout. Default: stdout.
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+    },
     /// Audit a DSH session log for Skill execution events (skill-invocation / tool/call name=skill).
     SkillAudit {
         /// Path to the DSH session JSONL log (file or directory)
@@ -384,6 +418,156 @@ enum Cmd {
         #[arg(long = "html")]
         html: Option<PathBuf>,
     },
+    /// Inspect the spend budget alert (thresholds + current alert level).
+    /// R1b: read path only (`show`); write actions (`set`/`enable`/`disable`/
+    /// `snooze`/`unsnooze`) land with R1c's Rust state-writer, so this subcommand
+    /// intentionally refuses them for now rather than half-implementing them.
+    Budget {
+        /// show — 只读告警态（R1b）
+        #[arg(value_parser = ["show"])]
+        action: String,
+        /// Query a specific month (YYYY-MM) instead of the current one
+        #[arg(long)]
+        month: Option<String>,
+        /// Print JSON to stdout instead of the human-readable report
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drive the Rust state write chain. R1c: the pure merge rules live in
+    /// core::state (single source of truth), this subcommand is the I/O + time
+    /// wiring; the differential in tests/test_cli_matrix.py drives it against
+    /// Python state.py on an isolated AGENT_VITALS_HOME for byte-for-byte lockstep.
+    /// This is also the surface the R1d tick calls instead of spawning python3.
+    State {
+        #[command(subcommand)]
+        action: StateAction,
+    },
+    /// R2a SessionStore query surface (docs/R2A_CONTRACT_DESIGN.md §2-3): a
+    /// versioned, in-memory read-only query model over normalized SessionReport
+    /// envelopes. Stateless single call — populates from Codex sources on
+    /// demand (Phase 1); DSH (zstd) is reported `source-unavailable`, never an
+    /// empty page (§3.3).
+    Sessions {
+        #[command(subcommand)]
+        action: SessionsAction,
+    },
+}
+
+/// `sessions` 子命令的子动作（R2a §2.5/§3.3 查询模型）。
+#[derive(Subcommand)]
+enum SessionsAction {
+    /// List sessions: versioned list DTO + cursor-paginated page (filter by
+    /// host/model/date-range/query). `--json` prints the DTO to stdout; the
+    /// default is a human table.
+    List {
+        /// Filter by host kind (only `codex` is readable in Phase 1; `dsh`
+        /// returns a typed `source-unavailable` error, never an empty page).
+        /// Named `--host-kind` because `--host` is the scanner's global arg
+        /// (default "all").
+        #[arg(long = "host-kind")]
+        host_kind: Option<String>,
+        /// Filter by model (exact)
+        #[arg(long)]
+        model: Option<String>,
+        /// Date lower bound (YYYY-MM-DD, inclusive; matches the session span)
+        #[arg(long = "from")]
+        date_from: Option<String>,
+        /// Date upper bound (YYYY-MM-DD, inclusive)
+        #[arg(long = "to")]
+        date_to: Option<String>,
+        /// Free-text query against session_id / title
+        #[arg(long = "query")]
+        query: Option<String>,
+        /// Page size; default 50
+        #[arg(long, default_value_t = 50)]
+        page_size: usize,
+        /// Cursor JSON from a previous page's next_cursor
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Print the versioned DTO as JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read ONE session envelope by session_key (+ optional session_revision).
+    Read {
+        /// session_key JSON (host_kind/native_id/source_profile/machine_namespace)
+        #[arg(long = "session-key")]
+        session_key: String,
+        /// Require this session_revision; a mismatch is `stale-revision`
+        #[arg(long)]
+        revision: Option<String>,
+        /// Print the envelope as JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `state` 子命令的子动作 —— 一动作一入口，喂的都是**已算好**的 JSON
+/// （hour-buckets / by_date_model / summary），CLI 只接线不重算，让差分测试能
+/// 逐字节对账 Python 侧。
+#[derive(Subcommand)]
+enum StateAction {
+    /// Fold hour buckets into today.json (Python `state.merge_today`).
+    /// `--by-model` is today's slice of token_by_date_model; when the slice
+    /// for today is absent, omit it (Python merges with `None`).
+    MergeToday {
+        /// hour-buckets JSON (the `hb` object from usage.hour_buckets)
+        hb: PathBuf,
+        /// today's by_model JSON (by_date_model[today]); optional
+        #[arg(long)]
+        by_model: Option<PathBuf>,
+    },
+    /// Fold hour buckets + by_date_model into month.json, migrating stale days
+    /// to month-archive.json first (Python `state.merge_month`, two-phase).
+    MergeMonth {
+        /// hour-buckets JSON
+        hb: PathBuf,
+        /// by_date_model JSON (usage.token_by_date_model output)
+        #[arg(long)]
+        by_date_model: Option<PathBuf>,
+    },
+    /// Write oneline.json (the tick's display summary; Python `state.write_oneline`)
+    WriteOneline {
+        summary: PathBuf,
+    },
+    /// Append one summary row to sessions.jsonl (Python `state.append_session_history`)
+    AppendHistory {
+        summary: PathBuf,
+    },
+    /// Write alert.json (Python `state.write_alert`)
+    WriteAlert {
+        alert: PathBuf,
+    },
+    /// Set budget snooze → budget.json (Python `budget.set_snooze`)
+    Snooze {
+        until_iso: String,
+        reason: String,
+    },
+    /// Clear budget snooze → remove budget.json (Python `budget.clear_snooze`)
+    Unsnooze,
+    /// Session-level dedup fold (R1d §4.2/§4.3): fold a session's pre-computed
+    /// audit output into today/month/oneline/alert/sessions.jsonl exactly once.
+    /// Fenced: refuses unless the writer-manifest owner is "rust" (run
+    /// `state takeover rust` first, or pass --shadow to rehearse on a copy).
+    FoldSession {
+        /// fold-req JSON (session_id/host_kind/machine_namespace/oneline/
+        /// hour_buckets/by_model_today/by_date_model/alert)
+        req: PathBuf,
+        /// Shadow mode: skip the owner check and fold into whatever
+        /// AGENT_VITALS_HOME points at (non-authority rehearsal copy).
+        #[arg(long)]
+        shadow: bool,
+    },
+    /// Atomically switch the state writer (owner + epoch+1). This is the
+    /// §4.2 cutover point: run `takeover rust` to let Rust produce, `takeover
+    /// python` to roll back.
+    Takeover {
+        /// "rust" or "python"
+        owner: String,
+    },
+    /// Print (creating if needed) the machine namespace — SessionKey's third
+    /// component, persisted in machine.json (app-owned config, §4.3).
+    MachineNamespace,
 }
 
 /// 探测「扫描器自身所在的 skill 目录」。
@@ -808,6 +992,37 @@ fn main() {
         std::process::exit(agent::behavior::behavior_gate(findings, &args.fail_on, &args.ignore));
     }
 
+    // R1d-tick：oneline 生产者——把一份 DSH 会话日志折成一行摘要 + 今日/本月账
+    // + 预算告警，并在 ledger 记 key。在扫描之前短路（与 behavior 同款），
+    // fencing/审计失败 exit 2 不落盘；dedup 命中则正常退出（无输出以外副作用）。
+    if let Some(Cmd::Oneline { session_log, session_id, no_merge, shadow }) = &args.cmd {
+        match agent::oneline::oneline(session_log, session_id.as_deref(), *no_merge, *shadow) {
+            Ok(_) => return,
+            Err(msg) => {
+                eprintln!("{msg}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // R1d-tick：discover——列 DSH 会话根下未折的裸 session.jsonl（mtime 最新在前）。
+    // 只读：不碰 fencing、不写 state；tick 与验收测试都从这里拿「折哪条」。
+    if let Some(Cmd::Discover { rows_json }) = &args.cmd {
+        let report = agent::discovery::discover();
+        let text = serde_json::to_string_pretty(&report).unwrap_or_default();
+        if let Some(path) = rows_json {
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            }
+        } else {
+            println!("{text}");
+        }
+        return;
+    }
+
     // T11：Skill 执行审计——从会话日志抽取 skill-invocation / tool/call(name=skill) 事件，
     // 输出调用记录（触发方式/加载状态/耗时/位置）。与 behavior 不同：这是 skill 专用，
     // 只出 skill 相关的 invocations 结构，不带 SV601–614 findings。
@@ -1157,6 +1372,134 @@ fn main() {
         }
         if !wrote {
             print!("{}", agent::codex_session_audit::render_codex_session(&out));
+        }
+        return;
+    }
+
+    // R2a SessionStore 查询面（只读）。home 解析与 codex-session 同款；查询本体
+    // 在 core，r2a_store 只做 I/O + 组装 + 类型化错误码。
+    if let Some(Cmd::Sessions { action }) = &args.cmd {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        let home_path = Path::new(&home);
+        match action {
+            SessionsAction::List {
+                host_kind,
+                model,
+                date_from,
+                date_to,
+                query,
+                page_size,
+                cursor,
+                json,
+            } => {
+                let filter = agent_vitals_core::r2a::SessionFilter {
+                    host_kind: host_kind.clone(),
+                    model: model.clone(),
+                    date_from: date_from.clone(),
+                    date_to: date_to.clone(),
+                    query: query.clone(),
+                };
+                agent::r2a_store::sessions_list(
+                    home_path,
+                    &filter,
+                    *page_size,
+                    cursor,
+                    *json,
+                );
+            }
+            SessionsAction::Read { session_key, revision, json } => {
+                agent::r2a_store::sessions_read(home_path, session_key, revision, *json);
+            }
+        }
+        return;
+    }
+
+    // 预算告警只读路径（R1b）。决策在 core（evaluate_alert），这里只接线：
+    // 读输入 → 调 core → 文本/JSON 渲染。`budget show --month` 是纯月查询，
+    // 跟阈值/告警无关，走 budget_show_month。set/snooze 等写路径随 R1c 落地。
+    if let Some(Cmd::Budget { action, month, json }) = &args.cmd {
+        match action.as_str() {
+            "show" => {
+                if let Some(m) = month {
+                    agent::budget::budget_show_month(m, *json);
+                } else {
+                    agent::budget::budget_show(*json);
+                }
+            }
+            // clap value_parser 只放行 "show"，这里不可达 —— 防御性保留，
+            // R1c 加写路径时替换成真分支。
+            other => {
+                eprintln!("budget action not implemented in Rust yet: {other}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    // 状态写链（R1c）。输入都是已经算好的 JSON 文件，CLI 只做「读文件 → 调
+    // 写函数 → 落盘」。文件缺 / 坏 → 走 Python 同款诚实路径（读不到就不写那
+    // 个字段），不在 CLI 层补默认值。
+    if let Some(Cmd::State { action }) = &args.cmd {
+        use agent::state as st;
+        let read_input = |p: &PathBuf| -> serde_json::Value {
+            let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
+                eprintln!("cannot read {p:?}: {e}");
+                std::process::exit(2);
+            });
+            serde_json::from_str(&text).unwrap_or_else(|e| {
+                eprintln!("invalid JSON in {p:?}: {e}");
+                std::process::exit(2);
+            })
+        };
+        let opt = |p: &Option<PathBuf>| p.as_ref().map(read_input);
+        match action {
+            StateAction::MergeToday { hb, by_model } => {
+                st::merge_today(&read_input(hb), opt(by_model).as_ref());
+            }
+            StateAction::MergeMonth { hb, by_date_model } => {
+                st::merge_month(&read_input(hb), opt(by_date_model).as_ref());
+            }
+            StateAction::WriteOneline { summary } => {
+                st::write_oneline(&read_input(summary));
+            }
+            StateAction::AppendHistory { summary } => {
+                st::append_session_history(&read_input(summary));
+            }
+            StateAction::WriteAlert { alert } => {
+                st::write_alert(&read_input(alert));
+            }
+            StateAction::Snooze { until_iso, reason } => {
+                match st::set_snooze(until_iso, reason) {
+                    Some(_) => {}
+                    None => {
+                        eprintln!("invalid ISO time: {until_iso}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            StateAction::Unsnooze => st::clear_snooze(),
+            StateAction::FoldSession { req, shadow } => {
+                use agent::takeover::FoldOutcome;
+                match agent::takeover::fold_session(&read_input(req), *shadow) {
+                    Ok(FoldOutcome::Folded) => println!(r#"{{"outcome":"folded"}}"#),
+                    Ok(FoldOutcome::SkippedAlreadyFolded) => {
+                        println!(r#"{{"outcome":"skipped"}}"#);
+                    }
+                    Err(msg) => {
+                        eprintln!("{msg}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            StateAction::Takeover { owner } => {
+                agent::takeover::takeover(owner);
+                println!("owner switched to {owner}");
+            }
+            StateAction::MachineNamespace => {
+                println!("{}", agent::takeover::machine_namespace());
+            }
         }
         return;
     }

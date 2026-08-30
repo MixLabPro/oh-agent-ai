@@ -45,23 +45,53 @@ async function render() {
   document.getElementById("month-sub").textContent =
     monthPeak > 0 ? "其中高峰 " + fmtMoney(monthPeak) : "";
 
-  // 预算
-  const budget = ov.budget_monthly_cny || 0;
+  // 预算 —— 只读 alert.json 权威（level/ratio/日预算/snooze/reasons），不在这里
+  // 重算百分比。那是迁移要修的 D2 缺口：面板自算 remaining% 与 budget.py 规则无关。
+  const b = ov.budget || { source: "missing" };
   const fill = document.getElementById("budget-fill");
   const budgetSub = document.getElementById("budget-sub");
-  if (budget > 0) {
-    const ratio = Math.min(1, monthTotal / budget);
-    fill.style.width = fmtPct(ratio);
-    fill.className = "fill" + (ratio >= 0.9 ? " danger" : ratio >= 0.7 ? " warn" : "");
-    const remaining = budget - monthTotal;
-    budgetSub.textContent =
-      remaining >= 0
-        ? "剩余 " + fmtMoney(remaining) + "（" + Math.round((remaining / budget) * 100) + "%）"
-        : "超支 " + fmtMoney(-remaining);
-  } else {
+  const denom = b.monthly_cny || ov.budget_monthly_cny || 0;
+  if (b.source !== "alert" || !b.level) {
+    // alert 缺场：不臆造状态，直说数据链路还没产出。
     fill.style.width = "0%";
     fill.className = "fill";
-    budgetSub.textContent = "未配置预算";
+    budgetSub.textContent = "等预算数据（跑一次 oneline）";
+  } else {
+    // 百分比唯一来源：alert.json 的 month_ratio（今日 ratio 可能为 null）。
+    const ratio = Math.min(1, b.month_ratio || b.ratio || 0);
+    const daily =
+      b.effective_daily_budget != null ? " · 日预算 " + fmtMoney(b.effective_daily_budget) : "";
+    fill.style.width = fmtPct(ratio);
+    const levelCls =
+      b.level === "over" ? " danger" : b.level === "warn" ? " warn" : "";
+    fill.className = "fill" + levelCls;
+    // 状态行：over/warn/snoozed/ok 各自的权威文案，百分比来自 alert.json。
+    if (b.level === "over") {
+      budgetSub.textContent =
+        "超支 " + fmtMoney(b.month_cost || 0) + "（月 " + fmtMoney(denom) + "）" + daily;
+    } else if (b.level === "snoozed") {
+      budgetSub.textContent =
+        "已静默" + (b.snoozed_until ? "至 " + b.snoozed_until : "") + daily;
+    } else {
+      budgetSub.textContent =
+        "已用 " + fmtPct(b.month_ratio || 0) + "（" + fmtMoney(b.month_cost || 0) +
+        " / " + fmtMoney(denom) + "）" + daily;
+    }
+    // reasons 悬停可见：为什么是这个 level（预算规则的人话）。
+    budgetSub.title = (b.reasons || []).join("\n");
+  }
+
+  // 新鲜度：alert.json 的 generated_at 是 budget.evaluate() 的落盘时刻。stale
+  // （>5 分钟）要明说「数据过期」，不能假装「正常」——规格 R1 的健康≠新鲜度正交。
+  const note = document.getElementById("note");
+  let freshness = "";
+  if (b.generated_at) {
+    const t = new Date(b.generated_at);
+    const hhmm = t.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+    const stale = Date.now() - t.getTime() > 5 * 60 * 1000;
+    freshness = (stale ? "⚠ 数据过期（更新于 " : "数据更新于 ") + hhmm + "）";
+  } else {
+    freshness = "预算数据尚未产出";
   }
 
   // 逐日
@@ -94,7 +124,7 @@ async function render() {
   }
 
   document.getElementById("note").textContent =
-    ov.estimate_note + " · " + ov.data_home;
+    freshness + " · " + ov.estimate_note + " · " + ov.data_home;
 }
 
 document.getElementById("close").addEventListener("click", () => invoke("hide_window"));

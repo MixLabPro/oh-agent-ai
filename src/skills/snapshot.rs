@@ -53,6 +53,15 @@ where
     }
 }
 
+/// 数据根目录（与 Python `paths.data_home()` 同一套兼容选择）。`budget.rs` /
+/// R1c 的 `state.rs` 等读写状态的地方共用它，不许再长一份「选哪个根」的逻辑。
+pub(crate) fn data_home() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    data_home_from(&|name| std::env::var(name).ok(), PathBuf::from(home))
+}
+
 /// 快照目录。支持 Agent Vitals 变量，并兼容旧 Skill Vitals 覆盖变量。
 pub fn snapshot_dir() -> PathBuf {
     let home = std::env::var("HOME")

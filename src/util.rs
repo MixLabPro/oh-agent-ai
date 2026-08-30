@@ -5,6 +5,15 @@ use std::path::Path;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+/// 一把进程级测试锁。多个 test 模块（agent::budget、agent::state…）都会
+/// set_var `AGENT_VITALS_HOME` —— 进程全局，模块各自造的局部锁只能串行**本
+/// 模块**，跨模块仍互相踩踏：budget 的 read_month 与 state 的 merge_month 同
+/// 时跑，一方把环境变量掀到自己的夹具根，另一方读写就落到错误目录、断言失败
+/// → 锁内 panic → 锁毒化。凡改 AGENT_VITALS_HOME/SKILL_VITALS_HOME 的测试都
+/// 必须在这把锁里做，不许自己再造一把。
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 统一成正斜杠，让所有路径判断在 Windows 上也成立。
 ///
 /// 移植清单第 6 条：不能依赖 `Path::display()` —— 它在 Windows 上产出反斜杠。
@@ -69,15 +78,9 @@ pub fn read_lossy(p: &Path) -> Option<String> {
 /// repo 反复要钉的那类缺陷。CJK 判据与截断语义的说明见 core 侧文档注释。
 pub use agent_vitals_core::util::est_tokens;
 
-/// 复刻 Python 的 `round(x, n)`。
-///
-/// Rust 的 `f64::round()` 是「四舍五入远离零」，Python 的 `round()` 是
-/// 「银行家舍入」（round-half-to-even）。差异只在恰好落在半分点时出现，
-/// 但预算百分比这类数字**会**落在那里。Rust 的 `{:.n}` 格式化用的正是
-/// 银行家舍入，所以格式化再解析回来即可对齐。
-pub fn pyround(x: f64, n: usize) -> f64 {
-    format!("{:.*}", n, x).parse().unwrap_or(x)
-}
+/// 复刻 Python 的 `round(x, n)`（银行家舍入）。实现在 core —— `budget.rs` 的
+/// reason 格式化与这个 repo 其他舍入共用一份（详见 core 侧文档注释）。
+pub use agent_vitals_core::util::pyround;
 
 /// 复刻 Python 的 `str.splitlines()`（常见终止符部分）。
 ///

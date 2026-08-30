@@ -5,7 +5,13 @@
 //! wasm 与 CLI 都包同一份 core，绝不在这里长第二份规则。
 
 pub mod behavior;
+pub mod budget;
 pub mod codex_cost;
 pub mod codex_session;
 pub mod codex_session_audit;
 pub mod cost;
+pub mod discovery;
+pub mod oneline;
+pub mod r2a_store;
+pub mod state;
+pub mod takeover;

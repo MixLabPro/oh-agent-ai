@@ -39,6 +39,20 @@ pub fn est_tokens(text: &str) -> i64 {
     ((cjk as f64) * 0.6 + (other as f64) * 0.3) as i64
 }
 
+/// 复刻 Python 的 `round(x, n)` —— 银行家舍入（round-half-to-even）。
+///
+/// Rust 的 `f64::round()` 是「四舍五入远离零」，Python 的 `round()` 是
+/// 「银行家舍入」。差异只在恰好落在半分点时出现，但预算百分比这类数字**会**
+/// 落在那里。Rust 的 `{:.n}` 格式化用的正是银行家舍入，所以格式化再解析回来
+/// 即可对齐。
+///
+/// 迁进 core 的原因与 `est_tokens` 相同：`budget.rs::evaluate_alert` 的 reason
+/// 字符串里 `round(ratio * 100)` 需要同一舍入（Python 侧 `budget.py` 用内置
+/// `round()`），而二进制侧 `src/util.rs` 改为 re-export —— 一个实现，两个调用面。
+pub fn pyround(x: f64, n: usize) -> f64 {
+    format!("{:.*}", n, x).parse().unwrap_or(x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

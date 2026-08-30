@@ -40,6 +40,7 @@ from .agent import (  # noqa: E402
     skill,
     state,
     subagent,
+    takeover,
     trajectory,
     usage,
     waste,
@@ -72,7 +73,7 @@ _FLAT_MODULE_NAMES = (
     "snapshots",
     "behavior", "budget", "codex_cost", "codex_evidence", "codex_usage",
     "compaction", "cost", "duration", "skill", "state", "subagent",
-    "trajectory", "usage", "waste",
+    "takeover", "trajectory", "usage", "waste",
 )
 for _name in _FLAT_MODULE_NAMES:
     _sys.modules[__name__ + "." + _name] = globals()[_name]
@@ -116,6 +117,7 @@ __all__ = [
     "snapshots",
     "state",
     "subagent",
+    "takeover",
     "trajectory",
     "usage",
     "waste",

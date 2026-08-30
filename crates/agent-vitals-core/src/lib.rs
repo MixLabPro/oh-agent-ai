@@ -7,6 +7,7 @@
 //! never read a file.
 
 pub mod behavior;
+pub mod budget;
 pub mod codex_evidence;
 pub mod codex_usage;
 pub mod compaction;
@@ -14,8 +15,11 @@ pub mod cost;
 pub mod dsh_evidence;
 pub mod duration;
 pub mod evidence;
+pub mod r2a;
 pub mod skill;
+pub mod state;
 pub mod subagent;
+pub mod takeover;
 pub mod waste;
 pub mod trajectory;
 pub mod usage;
