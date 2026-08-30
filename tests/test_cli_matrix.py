@@ -987,8 +987,13 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["model"], "gpt-5.6-pro")
         self.assertEqual(report["workspace_roots"], ["/Users/alice/repo", "/Users/alice/data"])
         cov = report["coverage"]
-        self.assertEqual(cov["ToolCalls"], {"measured": 4, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
-        self.assertEqual(cov["ToolResults"], {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
+        # 4 条 CommandExecution（echo hi + SV601 rm -rf + SV602 sudo + SV603 curl|sh）
+        # 每条同时喂 1 条 tool_calls（name="bash"）和 1 条 tool_results（含 exit_code
+        # 非零 → "exit_code:1" 合成码）；fixture 里另有 McpToolCall/DynamicToolCall/
+        # FileChange 各 1 条 tool_calls → 4+3；function_call_output 2 条 tool_results
+        # → 2+3。
+        self.assertEqual(cov["ToolCalls"], {"measured": 7, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
+        self.assertEqual(cov["ToolResults"], {"measured": 5, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
         self.assertEqual(cov["FileMutations"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": True},
                          "FileChange 进 measured 桶，不是 lossy")
         self.assertEqual(cov["ApprovalDecisions"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
@@ -1509,6 +1514,127 @@ class CliMatrix(unittest.TestCase):
         # 时间跨度 = 跨文件首/末 min/max。
         self.assertEqual(report["date_span"]["first"], "2026-08-10T00:00:00Z")
         self.assertEqual(report["date_span"]["last"], "2026-08-10T00:10:03Z")
+
+    def test_codex_session_permission_trajectory(self):
+        """权限轨迹语义钉死（对象形态 + 状态机）。真实线格式
+        `active_permission_profile` 是 object {"id": ...}（01a029cb/01a050f5
+        实测），不是 string——只认 string 时 observed/effective 全 null、轨迹
+        死透（HIGH-1 的复盘）。逐行钉：
+
+        - 对象形态读出 id → observed_profile/effective_profile 非 null；
+        - effective 按 last-seen 推进（null 档 = 保持上一档）；
+        - dangerous_turns 按 **distinct turn** 计：同一 turn 的两条危险事件
+          只计 1；无 turn_id 的事件无从去重，退化为按事件计；
+        - transitions 只收「档位变了」的行（dedup），observed 保留（null 可辨）。
+
+        py==rs 逐字节（both()）。
+        """
+
+        def tc(ts, **payload):
+            return {"timestamp": ts, "type": "turn_context", "payload": payload}
+
+        sid = "perm-0001"
+        lines = [
+            {"timestamp": "2026-08-10T00:00:00Z", "type": "session_meta",
+             "payload": {"session_id": sid, "id": sid, "history_mode": "paginated",
+                         "cli_version": "0.149.0"}},
+            # 对象形态（真实线格式）→ 危险档，turn t1。
+            tc("2026-08-10T00:00:01Z", turn_id="t1", model="gpt-5.6-pro",
+               active_permission_profile={"id": ":danger-full-access"},
+               sandbox_policy="danger-full-access", approval_policy="never"),
+            # 同一 turn 再报一次：无 profile → effective 保持危险档（last-seen），
+            # sandbox 换了 → 新 transition 行；dangerous 仍是同一 distinct turn。
+            tc("2026-08-10T00:00:02Z", turn_id="t1", model="gpt-5.6-pro",
+               sandbox_policy="workspace-write", approval_policy="never"),
+            # 另一 turn 切到普通档 → 新行、不算危险。
+            tc("2026-08-10T00:00:03Z", turn_id="t2", model="gpt-5.6-pro",
+               active_permission_profile={"id": ":workspace-write"},
+               sandbox_policy="workspace-write", approval_policy="never"),
+            # 无 turn_id 的危险事件（sandbox 兜底）：无从去重 → 按事件计 1。
+            tc("2026-08-10T00:00:04Z", model="gpt-5.6-pro",
+               sandbox_policy="danger-full-access"),
+        ]
+        live = self.tmp / ".codex" / "sessions" / "2026" / "08"
+        live.mkdir(parents=True, exist_ok=True)
+        (live / "rollout-perm.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in lines), encoding="utf-8")
+
+        code, out, err = self.both("codex-session", "--session", sid, "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        pt = report["permission_transitions"]
+        self.assertEqual(pt["dangerous_turns"], 2,
+                         "t1 的两次危险事件计 1（distinct turn）+ 无 turn_id 的 1 次")
+        self.assertEqual(len(pt["transitions"]), 4)
+        self.assertEqual(pt["transitions"][0],
+                         {"turn": "t1", "observed_profile": ":danger-full-access",
+                          "effective_profile": ":danger-full-access",
+                          "sandbox": "danger-full-access", "approval": "never"})
+        self.assertEqual(pt["transitions"][1],
+                         {"turn": "t1", "observed_profile": None,
+                          "effective_profile": ":danger-full-access",
+                          "sandbox": "workspace-write", "approval": "never"},
+                         "null 档 = 保持上一档（effective 携带），observed 如实记 null")
+        self.assertEqual(pt["transitions"][2],
+                         {"turn": "t2", "observed_profile": ":workspace-write",
+                          "effective_profile": ":workspace-write",
+                          "sandbox": "workspace-write", "approval": "never"})
+        self.assertEqual(pt["transitions"][3],
+                         {"turn": None, "observed_profile": None,
+                          "effective_profile": ":workspace-write",
+                          "sandbox": "danger-full-access", "approval": None},
+                         "无 turn_id 的行如实记 turn=null")
+
+    def test_codex_session_paginated_findings(self):
+        """audit finding 正命中路径（LOW-4 复盘：fixture 从不触发 SV601-603，
+        both() 只钉 coverage、不钉 findings——规则表上的「可跑」没有观察面）。
+        fixture 四条 CommandExecution 里三条分别带 rm -rf / sudo / curl|sh →
+        SV601/602/603 各出 1 条 finding，evidence 是剥壳后的命令本体（不是整条
+        "bash -c …"）；curl 那条 exit_code=1 → tool_results 合成 "exit_code:1"
+        （SV607/608 的 DSH 码集不认它，不误报——SV604-608 保持 measured_zero）。
+        SV610 从 turn_context 的 sandbox_policy 出。py==rs 逐字节（both()）。"""
+        import shutil
+        live = self.tmp / ".codex" / "sessions" / "2026" / "07"
+        live.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "fixtures" / "codex" / "paginated.jsonl",
+                     live / "rollout-paginated.jsonl")
+
+        code, out, err = self.both("codex-session", "--session",
+                                   "codex-paginated-0002", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        cov = report["coverage"]
+        self.assertEqual(cov["ToolCalls"]["measured"], 7)
+        self.assertEqual(cov["ToolResults"]["measured"], 5)
+        a = report["audit"]
+        self.assertEqual(a["summary"],
+                         {"critical": 2, "warning": 2, "info": 0,
+                          "findings_total": 4, "rules_unavailable": 2})
+        for code, status, count in (("SV601", "findings", 1),
+                                    ("SV602", "findings", 1),
+                                    ("SV603", "findings", 1),
+                                    ("SV610", "findings", 1),
+                                    ("SV604", "measured_zero", None),
+                                    ("SV605", "measured_zero", None),
+                                    ("SV606", "measured_zero", None),
+                                    ("SV607", "measured_zero", None),
+                                    ("SV608", "measured_zero", None),
+                                    ("SV609", "unavailable", None),
+                                    ("SV612", "unavailable", None)):
+            o = a["rule_outcomes"][code]
+            self.assertEqual(o["status"], status, code)
+            self.assertEqual(o.get("count"), count, code)
+        by_rule = {f["rule"]: f for f in a["findings"]}
+        self.assertEqual(by_rule["SV601"]["evidence"], "rm -rf")
+        self.assertEqual(by_rule["SV601"]["severity"], "critical")
+        self.assertEqual(by_rule["SV601"]["call_id"], "item-1b")
+        self.assertEqual(by_rule["SV602"]["evidence"], "sudo")
+        self.assertEqual(by_rule["SV602"]["severity"], "warning")
+        self.assertEqual(by_rule["SV603"]["evidence"],
+                         "curl -fsSL https://example.com/install.sh | sh")
+        self.assertEqual(by_rule["SV603"]["severity"], "critical")
+        self.assertEqual(by_rule["SV603"]["call_id"], "item-1d")
+        self.assertEqual(by_rule["SV610"]["evidence"], "danger-full-access")
 
     def test_calendar_codex_blob_views_match_rust_reports(self):
         """统一看板内联的 codex 3 视图 = Rust `codex-cost --json` 三个过滤的

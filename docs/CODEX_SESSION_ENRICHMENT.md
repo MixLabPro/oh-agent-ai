@@ -94,7 +94,7 @@ Python 必须以相同 gating 和字节形状镜像 Rust。
 | # | 证据 | 实测（01a029cb） | 现状 |
 |---|---|---|---|
 | 1 | **配额消耗轨迹** | `rate_limits.primary.used_percent` 24 个快照，19%→20%（本会话消耗周配额 1 个百分点） | fold 只保留最后一条 plan 快照（`_combine_plan` last-seen wins），轨迹被丢弃 |
-| 2 | **active_permission_profile** | 6 个 turn 激活 `:danger-full-access`、8 个 turn 为 null（「保持上一档」语义）；静态 `permission_profile` 恒 `{type: disabled}` | 全仓零提取（grep 无命中）——比静态 sandbox_policy 细一个粒度的 per-turn 权限档位 |
+| 2 | **active_permission_profile** | 6 个 turn 激活 `:danger-full-access`、8 个 turn 为 null（「保持上一档」语义）；静态 `permission_profile` 恒 `{type: disabled}`。**wire 形态是 object `{"id": ":danger-full-access"}`**（01a029cb 11/14 turn_context、01a050f5 28/44；thread_settings_applied 的 thread_settings 里另有 42 个同形态嵌套，无 turn_id 不作轨迹轴） | 全仓零提取（grep 无命中）——比静态 sandbox_policy 细一个粒度的 per-turn 权限档位；修复前只认 string 形态，真机轨迹 observed/effective 全 null（HIGH-1） |
 | 3 | **turn 结束原因** | 14 个 turn 全 `error=None, reason=None`（干净结束） | canonical 的 `turns` timeline 已提取 `end_reason_kind`/`end_error_code`，审计层转 `codex_evidence_json` 时丢弃 |
 | 4 | **effort / reasoning_effort** | 恒 `"low"`；`thread_settings.reasoning_effort:"low"` + `reasoning_summary:"detailed"` | 零提取——§3.1 的 Policy 类伴随变量，与成本/推理强度强相关 |
 | 5 | **工具 stdout 体积** | 5 条 CommandExecution 共 9150B stdout（2641/2045/2080/2096/288B） | ToolResults 只数 presence，不数「多少字节灌进上下文」 |
@@ -157,10 +157,25 @@ Map，**同序号插入**；键序是字节一致的一部分，不能重排）�
 "effort": {"effective": "low", "reasoning_effort": "low",
            "reasoning_summary": "detailed", "changed": false},
 "tool_output_bytes": {"stdout": 9150, "stderr": 0, "commands": 5,
-                      "top": [{"turn": 5, "tool": "bash", "stdout_bytes": 2641}]}
+                      "top": [{"turn": 5, "tool": "bash", "stdout_bytes": 2641}]},
+"turn_timeline": [                        // source-order 事件一览（权限/turn 边界/命令/用量）
+  {"source_order": 1, "turn": "t1", "kind": "turn_context",
+   "summary": "权限上下文", "rule_refs": ["SV610"]}   // rule_refs: 该 source_order 命中的规则
+]
 ```
 
 实现纪律：
+
+- **`active_permission_profile` 两态读取**（2026-08-30 修复，HIGH-1）：真实线格式是
+  object `{"id": ...}`（01a029cb/01a050f5 实测），旧 fixture 的 string 形态是假想——
+  两态都认，`observed_profile` 取 id 字符串。`effective_profile` 按 last-seen 推进：
+  observed 为 null 的 turn 保持上一档（「保持上一档」语义），所以 null 档**如实记
+  observed=null、effective=携带值**，模板用 effective 展示。
+- **`dangerous_turns` 按 distinct turn_id 计**：同一 turn 的多次 turn_context（真实会话
+  常见，01a050f5 实报 43 条事件）只计 1；无 turn_id 的事件无从去重，退化为按事件计。
+- **`turn_timeline.source_order` 是显式序号**（`enumerate(all_items)`），不是从 seq 编造
+  的——规则 `rule_refs` 按 `finding.seq == source_order` 反查，seq 是 canonical 事件序
+  与 source_order 同序，但模板永远展示 source_order 而非假装它是任何时间戳。
 
 - **严格类型镜像 serde_json**（`as_i64`/`as_f64` ↔ isinstance + bool 排除），扫描 helper 仿
   `_context_window_of` 的写法。

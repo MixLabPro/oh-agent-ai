@@ -112,12 +112,18 @@ def _quota_trajectory_of(items):
 
 
 def _permission_trajectory_of(items):
-    effective = None; transitions = []; dangerous = 0
+    effective = None; transitions = []; dangerous_turns = set(); dangerous_no_turn = 0
     for item in items:
         payload = item.get("payload") if isinstance(item, dict) else None
         if not isinstance(payload, dict) or item.get("type") != "turn_context":
             continue
+        # 真实线格式（01a029cb/01a050f5 实测）active_permission_profile 是
+        # object {"id": ...}，不是 string——只认 string 会把 observed/effective
+        # 全读成 null、轨迹死透（修复前真机报告权限列全空）。两态都认（同
+        # sandbox_policy 先例），effective 按 last-seen 推进（null 档=保持上一档）。
         observed = payload.get("active_permission_profile")
+        if isinstance(observed, dict):
+            observed = observed.get("id")
         observed = observed if isinstance(observed, str) else None
         if observed is not None: effective = observed
         sandbox = payload.get("sandbox_policy")
@@ -125,13 +131,19 @@ def _permission_trajectory_of(items):
         sandbox = sandbox if isinstance(sandbox, str) else None
         approval = payload.get("approval_policy")
         approval = approval if isinstance(approval, str) else None
-        if effective == ":danger-full-access" or sandbox == "danger-full-access": dangerous += 1
-        state = {"turn": payload.get("turn_id") if isinstance(payload.get("turn_id"), str) else None,
-                 "observed_profile": observed, "effective_profile": effective,
+        turn = payload.get("turn_id")
+        turn = turn if isinstance(turn, str) else None
+        # dangerous 按 **distinct turn** 计：同一 turn 的多次 turn_context 会
+        # 重复计（per-event 把少数几个危险 turn 数成几十条——01a050f5 实报 43）。
+        # 无 turn_id 的事件无从去重，退化为按事件计。
+        if effective == ":danger-full-access" or sandbox == "danger-full-access":
+            if turn is None: dangerous_no_turn += 1
+            else: dangerous_turns.add(turn)
+        state = {"turn": turn, "observed_profile": observed, "effective_profile": effective,
                  "sandbox": sandbox, "approval": approval}
         if not transitions or transitions[-1]["effective_profile"] != state["effective_profile"] or transitions[-1]["sandbox"] != sandbox or transitions[-1]["approval"] != approval:
             transitions.append(state)
-    return {"dangerous_turns": dangerous, "transitions": transitions}
+    return {"dangerous_turns": dangerous_no_turn + len(dangerous_turns), "transitions": transitions}
 
 
 def _turn_ends_of(canonical):

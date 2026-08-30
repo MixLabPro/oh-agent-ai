@@ -21,7 +21,7 @@
 //! `scripts/agent_vitals/agent/codex_session_audit.py` 逐字节对齐，由
 //! `tests/test_cli_matrix.py::both()` 差分看守。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
@@ -126,22 +126,40 @@ fn quota_trajectory_of(items: &[Value]) -> Value {
 }
 
 fn permission_trajectory_of(items: &[Value]) -> Value {
-    let mut effective: Option<String> = None; let mut dangerous = 0u64; let mut transitions: Vec<Value> = Vec::new();
+    let mut effective: Option<String> = None;
+    let mut dangerous_turns: HashSet<String> = HashSet::new();
+    let mut dangerous_no_turn = 0u64;
+    let mut transitions: Vec<Value> = Vec::new();
     for item in items {
         if item.get("type").and_then(|v| v.as_str()) != Some("turn_context") { continue; }
         let Some(payload) = item.get("payload") else { continue; };
-        let observed = payload.get("active_permission_profile").and_then(|v| v.as_str()).map(str::to_owned);
+        // 真实线格式（01a029cb/01a050f5 实测）active_permission_profile 是
+        // object {"id": ...}，不是 string——只认 string 会把 observed/effective
+        // 全读成 null、轨迹死透（修复前真机报告权限列全空）。两态都认（同
+        // sandbox_policy 先例），effective 按 last-seen 推进（null 档=保持上一档）。
+        let observed = payload.get("active_permission_profile").and_then(|v| {
+            if let Some(s) = v.as_str() { Some(s) } else { v.get("id").and_then(|x| x.as_str()) }
+        }).map(str::to_owned);
         if observed.is_some() { effective = observed.clone(); }
         let sandbox = payload.get("sandbox_policy").and_then(|v| {
             if let Some(s) = v.as_str() { Some(s) } else { v.get("type").and_then(|x| x.as_str()) }
         }).map(str::to_owned);
         let approval = payload.get("approval_policy").and_then(|v| v.as_str()).map(str::to_owned);
-        if effective.as_deref() == Some(":danger-full-access") || sandbox.as_deref() == Some("danger-full-access") { dangerous += 1; }
-        let state = json!({"turn":payload.get("turn_id").and_then(|v| v.as_str()),"observed_profile":observed,"effective_profile":effective,"sandbox":sandbox,"approval":approval});
+        let turn = payload.get("turn_id").and_then(|v| v.as_str()).map(str::to_owned);
+        // dangerous 按 **distinct turn** 计：同一 turn 的多次 turn_context 会
+        // 重复计（per-event 把少数几个危险 turn 数成几十条——01a050f5 实报 43）。
+        // 无 turn_id 的事件无从去重，退化为按事件计。
+        if effective.as_deref() == Some(":danger-full-access") || sandbox.as_deref() == Some("danger-full-access") {
+            match &turn {
+                Some(t) => { dangerous_turns.insert(t.clone()); }
+                None => { dangerous_no_turn += 1; }
+            }
+        }
+        let state = json!({"turn":turn,"observed_profile":observed,"effective_profile":effective,"sandbox":sandbox,"approval":approval});
         let changed = transitions.last().map_or(true, |p| p["effective_profile"] != state["effective_profile"] || p["sandbox"] != state["sandbox"] || p["approval"] != state["approval"]);
         if changed { transitions.push(state); }
     }
-    json!({"dangerous_turns":dangerous,"transitions":transitions})
+    json!({"dangerous_turns":dangerous_no_turn + dangerous_turns.len() as u64,"transitions":transitions})
 }
 
 fn turn_ends_of(evidence: &CodexEvidence) -> Value {
