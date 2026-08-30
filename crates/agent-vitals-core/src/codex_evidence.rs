@@ -265,7 +265,7 @@ fn bump(coverage: &mut Coverage, signal: Signal, bucket: Bucket, n: u64) {
 /// | FileMutations | event_msg:`patch_apply_end`（lossy，只有 end 没有变更明细）; item:`FileChange`（measured，带 changes/status） | 两列 lossy/measured |
 /// | StepBoundaries | 无来源 | 两列 unavailable |
 ///
-/// **"Tool-call duration" 不在上表里**——19 个 `Signal` 没有它的变体。
+/// **"Tool-call duration" 不在上表里**——20 个 `Signal` 没有它的变体。
 /// `CommandExecutionItem.duration` 是**值**不是通道：它跟着 item 走，将来做
 /// duration 折叠（DSH `duration-audit` 的同款路径）时从原始条目上读即可。
 /// P4 的 "sound" 恰好体现在这里：吸收 Paginated 的 duration 不需要给共享
@@ -433,8 +433,8 @@ fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
 fn classify_item(coverage: &mut Coverage, item_type: &str, payload: &serde_json::Map<String, Value>) {
     match item_type {
         // 工具执行：McpToolCall/DynamicToolCall/CollabAgentToolCall/Extension 是
-        // §14.1 列出的 typed 等价物；CommandExecution 额外带 duration → 也喂
-        // Tool-call duration（§13 Paginated 列 measured）。
+        // §14.1 列出的 typed 等价物。CommandExecution 的 duration 仍保留在
+        // 原始 item，但实测微秒级且不是已验证的墙钟时长，因此不喂时长信号。
         "McpToolCall" | "DynamicToolCall" | "CollabAgentToolCall" | "Extension" => {
             bump(coverage, Signal::ToolCalls, Bucket::Measured, 1);
         }
@@ -442,7 +442,7 @@ fn classify_item(coverage: &mut Coverage, item_type: &str, payload: &serde_json:
             bump(coverage, Signal::ToolCalls, Bucket::Measured, 1);
             // 带 stdout/stderr/exit_code 的执行记录同时是"结果"载体。
             bump(coverage, Signal::ToolResults, Bucket::Measured, 1);
-            // `.duration`（实测 157/157 都有）是**值**不是通道——19 个 Signal
+            // `.duration`（实测 157/157 都有）是**值**不是通道——20 个 Signal
             // 里没有 ToolCallDuration 变体，P4 的 "sound" 恰好证明不需要加：
             // duration 跟着原始条目走，将来做 duration 折叠时从 item 上读即可，
             // 覆盖率模型不为它开新槽。

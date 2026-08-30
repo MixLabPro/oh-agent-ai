@@ -14,7 +14,7 @@ I/O 不在这里。它把一份 rollout JSONL 里抽出的原始条目折成
 探测内容区分的宿主。如果加这一个宿主、两种形状会逼着共享类型层
 （`CanonicalSession`/`Coverage`/`RuleSpec`，P1 落地）做结构性改动，这个模型
 就失败了。这里不触碰 `evidence.rs` 的任何类型——**"Tool-call duration" 也不
-在 19 个 `Signal` 里，它是 `CommandExecutionItem.duration` 这个**值**而不是
+在 20 个 `Signal` 里，它是 `CommandExecutionItem.duration` 这个**值**而不是
 通道**：duration 跟着原始条目走，将来做 duration 折叠时从 item 上读即可，
 覆盖率模型不为它开新槽。这正是 P4 不需要改共享类型层的证据之一。
 
@@ -244,7 +244,7 @@ def _classify_item(coverage, item_type, payload):
         _bump(coverage, "ToolCalls", "measured")
         # 带 stdout/stderr/exit_code 的执行记录同时是"结果"载体。
         _bump(coverage, "ToolResults", "measured")
-        # `.duration`（实测 157/157 都有）是**值**不是通道——19 个 Signal 里
+        # `.duration`（实测 157/157 都有）是**值**不是通道——20 个 Signal 里
         # 没有 ToolCallDuration 变体，P4 的 "sound" 恰好证明不需要加：duration
         # 跟着原始条目走，将来做 duration 折叠时从 item 上读即可。
     elif item_type == "FileChange":
