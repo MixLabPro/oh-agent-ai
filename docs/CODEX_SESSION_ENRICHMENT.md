@@ -1,8 +1,89 @@
 # Codex 会话审计信号挖掘 — Spec
 
-> 状态：**已批准**（2026-08-30）。落盘于 `docs/`，实现分 Phase A / Phase B 两个提交。
+> 状态：**已修订，待实现**（2026-08-30）。本文件以可验证能力拆分提交；
+> 原有的字段富化仍保留，但不再是第一个阶段。
+>
 > 来源：对真实会话 `01a029cb`（2026-08-22，`gpt-5.6-sol`，paginated，`codex_work_desktop`）
-> 的逐字段深挖——六类证据被当前审计丢弃，本 spec 把它们接回来。
+> 的逐字段深挖。该会话说明 Codex 已有比当前报告更多的原始证据；同时也暴露出：
+> 只有“更多字段”仍不足以形成可行动的审计结论。
+
+## 0. 产品目标与审计状态模型
+
+目标不是像素级复制 DSH Client，也不是把 rollout 的每个字段堆进 HTML。`codex-session`
+必须满足与 DSH Audit 相同的决策链：
+
+```text
+原始 Codex rollout → CanonicalSession → 规则结果 / 真实 finding
+  → 可定位的 turn、tool、evidence → 资源与权限解释 → 跨会话聚合（后续）
+```
+
+当前页面的“Finding 队列”混合了残差哨兵和零覆盖信号，而不是规则 finding；“异常”KPI
+实际显示覆盖率。这两类信息必须拆开。所有消费者使用以下三种状态：
+
+| 概念 | 含义 | UI 表示 | 是否计入异常 |
+|---|---|---|---|
+| 宿主结构缺口 | Codex wire 从不提供该维度 | `Unavailable` / 结构缺口 | 否 |
+| 会话未观测 | 宿主可提供，但本会话没有此事件 | `Not observed` / 证据缺口 | 否 |
+| 审计 finding | 可运行规则命中风险模式 | severity + rule + evidence | 是 |
+
+`coverage.<signal>.available` 只回答第一行；coverage 计数只回答第二行；
+`audit.rule_outcomes` 与 `audit.findings` 才回答第三行。
+
+## Phase 0 — 审计结论投影（必须先做）
+
+### 0.1 复用现有 canonical 规则引擎
+
+不得在 `codex_session_audit.py`、`.rs` 或 HTML 重写 SV 规则。建立一次
+`CanonicalSession` 后，复用共享层的 family ① behavior outcomes（SV601–SV610）和
+trajectory outcomes（SV611–SV614），再通过既有 flatten / `rule_outcomes_json` 产生展示投影。
+Python 必须以相同 gating 和字节形状镜像 Rust。
+
+### 0.2 JSON 形状
+
+在 `date_span` 后、`cost_report` 前新增 `audit`，并保持 Python/Rust 键序一致：
+
+```json
+"audit": {
+  "summary": {
+    "critical": 0,
+    "warning": 1,
+    "info": 0,
+    "findings_total": 1,
+    "rules_unavailable": 2
+  },
+  "findings": [
+    {"rule":"SV610","severity":"warning","category":"approval",
+     "turn":7,"step":null,"tool":null,"evidence":"danger-full-access"}
+  ],
+  "rule_outcomes": {
+    "SV601":{"status":"measured_zero"},
+    "SV609":{"status":"unavailable","missing":["ApprovalDecisions"]},
+    "SV610":{"status":"findings","count":1}
+  }
+}
+```
+
+`findings` 复用既有 finding 的字段与坐标，不能为了 HTML 再建一份会漂移的简化格式。
+`summary` 只是便利投影，必须可以从 `findings` / `rule_outcomes` 完全重建。
+
+### 0.3 页面契约
+
+- “异常”KPI 只显示 `audit.summary.findings_total` 与最严重 rule；
+- “Finding 队列”只显示真实 `audit.findings`；
+- `Unavailable` rule 要显示缺少的信号和宿主限制，不显示为零命中；
+- coverage 移回“证据质量”，不进入 finding 计数；
+- 每条 finding 显示 rule、severity、turn、工具（若有）和截断 evidence。
+
+### 0.4 UserPrompts 数据纪律
+
+`response_item.message + role:"user"` 并不天然等于真人提示：真实会话中已有仅含
+`<recommended_plugins>` 与 `<environment_context>` 的宿主注入 message。Python/Rust 必须
+以同一规则把它分类为 `human` / `ambient_only` / `mixed` / `unknown`：
+
+- `human` 与 `mixed` 每条 message 最多计一次 `UserPrompts.measured`；
+- `ambient_only` 不计入；
+- `unknown` 计入 `lossy`，不得伪装为 `measured`；
+- 分类只检查最小结构和已知 wrapper 前缀，不读取或导出用户正文。
 
 ## 1. Context：线格式里被丢弃的证据
 
@@ -25,11 +106,11 @@
 
 ## 2. 设计决策
 
-- **D1 分层线 = 消费方**：`Signal` enum 只放有检测器/聚合消费的维度。六项里只有**配额**
-  是真正的新维度（contract §8「Quota is a third, distinct kind of cost」；日历/菜单栏/
-  quota 规则将来都吃它）→ **新增 1 个 enum 信号 `QuotaConsumption`**。其余五项是已有信号
-  的数据富化或防御性更正，进报告不进 enum。先例：§13 矩阵本就有非 enum 维度行
-  （Tool-call duration / Workspace root / Storage medium / Process liveness）。
+- **D1 分层线 = 已落地消费者**：`Signal` enum 只放已经有检测器或聚合消费者的维度。
+  配额先作为报告富化字段；只有 quota burn-rate、额度告警、日历/菜单栏聚合或可行动 KPI
+  与 enum 同一阶段落地时，才新增 `QuotaConsumption`。其余五项是已有信号的数据富化或
+  防御性更正，进报告不进 enum。先例：§13 矩阵本就有非 enum 维度行（Tool-call duration /
+  Workspace root / Storage medium / Process liveness）。
 - **D2 不动 fold**：配额轨迹在**审计层**扫 `all_items`（`_context_window_of` 先例：
   `codex_session_audit.py:58-80` ↔ `src/agent/codex_session_audit.rs:57-75`）。
   `codex_fold_file`/`codex_merge_folds`/`codex-cost` 锁步**零风险**——探索确认 fold 输出
@@ -50,19 +131,33 @@
 Map，**同序号插入**；键序是字节一致的一部分，不能重排）。
 
 ```json
+"audit": {                                // Phase 0：真实规则结论，详见 §0
+  "summary": {"critical":0,"warning":0,"info":0,"findings_total":0,"rules_unavailable":2},
+  "findings": [],
+  "rule_outcomes": {"SV601":{"status":"measured_zero"}}
+},
 "quota_trajectory": {                     // 审计层扫 all_items 的 token_count.rate_limits
+  "scope": "primary",
+  "samples": 24,
   "first": {"used_percent": 19.0, "observed_at": "2026-08-22T14:07:33.058Z"},
   "last":  {"used_percent": 20.0, "observed_at": "2026-08-22T14:32:49.509Z"},
-  "consumed_percent": 1.0                 // last-first；first 缺失 → null
+  "consumed_percent": 1.0,
+  "resets_at": null,
+  "comparable": true,
+  "reason": null                           // first 缺失 / reset / 跨窗口时不可编数
 },
-"permission_trajectory": [                // 按 turn_context 事件序
-  {"turn": 1, "active_profile": ":danger-full-access",   // null 允许（保持上一档）
+"permission_transitions": {               // 按 turn_context 事件序；页面默认只展示变化点
+  "dangerous_turns": 6,
+  "transitions": [{"turn": 1,
+   "observed_profile": ":danger-full-access", "effective_profile": ":danger-full-access",
    "sandbox": "danger-full-access", "approval": "never"}
-],
-"turn_ends": {"total": 14, "clean": 14, "error": 0, "codes": {}},   // 来自 canonical.turns
-"effort": {"effort": "low", "reasoning_effort": "low",               // last-seen wins
-           "reasoning_summary": "detailed"},
-"tool_output_bytes": {"stdout": 9150, "stderr": 0, "commands": 5}    // CommandExecution 求和
+  ]
+},
+"turn_ends": {"total": 14, "clean": 14, "error": 0, "incomplete": 0, "codes": {}},
+"effort": {"effective": "low", "reasoning_effort": "low",
+           "reasoning_summary": "detailed", "changed": false},
+"tool_output_bytes": {"stdout": 9150, "stderr": 0, "commands": 5,
+                      "top": [{"turn": 5, "tool": "bash", "stdout_bytes": 2641}]}
 ```
 
 实现纪律：
@@ -73,26 +168,31 @@ Map，**同序号插入**；键序是字节一致的一部分，不能重排）�
   rust `codex_usage.rs:182`）的字段读取口径，不重写第二份字段路径。
 - `quota_trajectory.first/last` 为「有效 used_percent 的首/末快照」；只有 1 个快照时
   first==last、consumed=0；0 个快照时整键 `null`（`_empty_cost_report` 式兜底，绝不编数）。
+- 遇到 reset、不同额度窗口或无法解释的倒退，`consumed_percent` 必须为 `null`、
+  `comparable:false`，并给出 machine-readable `reason`；绝不把跨窗口差值展示成会话消耗。
 
-## 4. Phase A — 报告富化（无 enum 变更）
+## 4. Phase 1 — 报告富化（无 enum 变更）
 
 ### 4.1 双实现审计层（锁步铁律）
 
-- `scripts/agent_vitals/agent/codex_session_audit.py`：新增 5 个 scan helper（
+- `scripts/agent_vitals/agent/codex_session_audit.py`：在 Phase 0 保留的 canonical 基础上新增
+  5 个 scan helper（
   `_quota_trajectory_of` / `_permission_trajectory_of` / `_turn_ends_of` /
   `_effort_of` / `_tool_output_bytes_of`），`codex_session_audit_json` 插入 5 个 key；
-  **保留** `build_codex_evidence` 返回的 canonical（现 py:186-189 丢弃），`turn_ends` 从
-  `canonical["turns"]` 聚合。
+  `turn_ends` 从 `canonical["turns"]` 聚合。
 - `src/agent/codex_session_audit.rs`：同结构镜像（`FileInfo.items` 已在手 rs:47/107）。
+
+额外约束：permission 的 raw `null` 不得清空上一条 effective state；effort 发生变化时
+不得只输出 last-seen；输出体积要包含最大贡献者；turn end 必须区分 `incomplete` 与 clean。
 
 ### 4.2 模板 `scripts/agent_vitals/templates/codex_session.html`
 
 - 配额轨迹：`#s-plan` 区块（:360-393）加一行「本会话消耗配额 N 个百分点（A%→B%）」。
-- 权限轨迹：`#s-timeline` 与 `#s-plan` 之间（:134/:145）新 subcard「权限轨迹（per turn）」，
-  逐 turn `.sv-kv`/`.sv-tag` 行。
+- 权限轨迹：`#s-timeline` 与 `#s-plan` 之间（:134/:145）新 subcard「权限轨迹」，默认显示
+  effective state 的变化点和危险状态持续 turn 数；完整逐 turn 数据折叠展示。
 - turn 结束：`#s-coverage` / provenance 一行（`.sv-insight`）。
 - effort：topbar-chips 徽章。
-- 工具输出体积：`#s-coverage` 一行（「工具输出 N KB 进上下文」）。
+- 工具输出体积：`#s-coverage` 一行（「工具输出 N KB 进上下文」）+ 最大贡献命令列表。
 - **无新 JS 折叠**（D4），全部读预计算字段。
 
 ### 4.3 防御性文档/注释更正（D5 + comp_hash）
@@ -115,14 +215,30 @@ Map，**同序号插入**；键序是字节一致的一部分，不能重排）�
 - `tests/test_cli_m3.py::TestCodexSessionHtml`（:647-727）：新 section 结构断言。
 - 差分本身由 `both()` 自动钉（新 key 即新字节，Python↔Rust 逐字节相等）。
 
-## 5. Phase B — `QuotaConsumption` 信号（enum 变更，独立提交）
+## 5. Phase 2 — 按 turn 的审计时间线
 
-### 5.1 共享层
+逐小时 token 曲线保留为成本概览，但不能承担审计定位。新增按 source order / turn 排列的
+事件层；没有可靠 `seq` 时不得伪造 seq。每个可显示事件至少含：
 
+```text
+turn、source_order、kind、summary、rule refs、permission 状态、token/quota 快照
+```
+
+时间线要叠加 finding marker、permission/sandbox 变化、tool call/result/错误、高输出量命令、
+quota checkpoint 与 turn 结束状态。点击 finding 必须能定位对应事件；图下必须提供同序事件
+列表，不能只依赖颜色或 hover。少于 4 个趋势点时用摘要卡或事件列表，不能把退化折线伪装
+成趋势。
+
+## 6. Phase 3 — `QuotaConsumption` 信号（enum 变更，独立提交）
+
+### 6.1 共享层
+
+- 前置条件：quota burn-rate、额度告警、日历/菜单栏聚合或可行动 quota KPI 至少有一个与
+  enum 同一阶段落地。未满足时，Phase 1 的 `quota_trajectory` 已足够。
 - `crates/agent-vitals-core/src/evidence.rs`：`Signal::QuotaConsumption`
   （host-neutral 名，不违反 `shared_type_layer_has_no_host_identifiers_in_code`）。
 
-### 5.2 Codex 侧（measured）
+### 6.2 Codex 侧（measured）
 
 - `crates/agent-vitals-core/src/codex_evidence.rs` ALL_SIGNALS（:438）+1；
   `derive_coverage` 的 `token_count` 分支：`rate_limits` 存在 → `bump(QuotaConsumption,
@@ -133,7 +249,7 @@ Map，**同序号插入**；键序是字节一致的一部分，不能重排）�
 - `available: true`（wire 提供，Legacy/Paginated 两种 mode 都持久化）——
   `is_unavailable`/`_UNAVAILABLE_SIGNALS` **不动**（仍是 4 项）。
 
-### 5.3 DSH 侧（honest unavailable）
+### 6.3 DSH 侧（honest unavailable）
 
 - `crates/agent-vitals-core/src/dsh_evidence.rs:486-489` 零填充列表 +1
   （`coverage.set(Signal::QuotaConsumption, CoverageCounts::default())`），注释「矩阵没
@@ -141,7 +257,7 @@ Map，**同序号插入**；键序是字节一致的一部分，不能重排）�
   （:649-652）列表 +1。
 - Python DSH 行为路径（`behavior.py`）无 enum/ALL_SIGNALS，`requires` 不含新信号 → **不动**。
 
-### 5.4 wasm + 文案 19→20
+### 6.4 wasm + 文案 19→20
 
 - wasm 重编（core enum 变更波及 `audit_events` 输出）+ 拷进 `dsh-client/` + 跑其 verify
   （锁步铁律：wasm↔CLI 漂移只能靠重跑 wasm build 抓）。
@@ -155,33 +271,45 @@ Map，**同序号插入**；键序是字节一致的一部分，不能重排）�
     （DSH/Claude Code/WorkBuddy 诚实 unavailable——wire 无此字段，将来实测再翻，同
     NetworkAccess 先例）。
 
-## 6. 测试矩阵
+## 7. 测试矩阵
 
 | 层 | 测试 |
 |---|---|
-| 差分锁步 | `AGENT_VITALS_BIN=target/release/agent-vitals python3 -m unittest tests.test_cli_matrix`（新 key 字节级） |
-| 审计语义 | test_cli_matrix detail/multi-file 新断言 |
+| 审计结论 | 同一 canonical 导出的 findings 与 rule outcomes 自洽；unavailable rule 不得泄漏 finding |
+| Prompt 分类 | ambient-only / mixed / human / malformed 四类 Python↔Rust parity |
+| 差分锁步 | `AGENT_VITALS_BIN=target/release/agent-vitals python3 -m unittest tests.test_cli_matrix`（所有新 key 字节级） |
+| 资源富化 | quota 单样本/无样本/reset/倒退/多文件续写；effective permission 不被 raw null 清空；turn incomplete 单列 |
+| 时间线 | 0 / 1 / N event，finding 定位、无障碍事件列表、无伪造 seq |
 | HTML | test_cli_m3 结构断言；blob 内联 = `--json` 输出，自动覆盖新 key |
 | 枚举 | cargo test（dsh 零填充单测 +1）、characterization 20 信号 |
 | 模板 JS | verify-codex-session-findings.mjs 更新后经 test_codex_session_template.py 跑 |
-| wasm | 重编 + dsh-client verify（Phase B） |
+| wasm | 重编 + dsh-client verify（Phase 3） |
 
-## 7. 验证（端到端）
+## 8. 验证（端到端）
 
 ```bash
 cargo test && cargo clippy --release --all-targets -- -D warnings
 python3 -m unittest discover tests
 AGENT_VITALS_BIN=target/release/agent-vitals python3 -m unittest tests.test_cli_matrix
-(cd crates/agent-vitals-wasm && wasm-pack build --target web)   # Phase B
-# 真机回归：01a029cb 再跑 codex-session，人工核对 5 个新 key + 模板新区块
+(cd crates/agent-vitals-wasm && wasm-pack build --target web)   # Phase 3
+# 真机回归：01a029cb 再跑 codex-session，核对真实 findings、prompt 分类、quota 与权限轨迹
 ```
 
-## 8. Out of scope（后续项）
+## 9. Out of scope（后续项）
 
 - 日历/菜单栏聚合配额轨迹（跨会话投影）、quota 烧速检测器规则、codex duration-audit
   消费、comp_hash 实现、name-aware 门控、Claude Code/WorkBuddy/DSH 配额来源实测。
 
-## 9. 交付
+## 10. 交付
 
-Phase A 与 Phase B 各一个提交；本文件即 spec 的正本（草案阶段在
-`.claude/plans/cryptic-waddling-floyd.md`）。
+提交边界按可验证能力划分：
+
+1. `feat(codex): project canonical audit findings and rule outcomes`
+2. `fix(codex): classify human prompts and separate evidence quality`
+3. `feat(codex): enrich quota permission turn and tool-output evidence`
+4. `feat(codex): add turn-event audit timeline`
+5. `feat(core): add quota consumption signal and consumers`
+
+每个提交都必须让 Python/Rust 差分通过；Phase 3 不允许只更新 Codex 而遗漏 DSH 的
+unavailable 语义或 WASM 构建产物。本文件是 spec 正本；草案阶段在
+`.claude/plans/cryptic-waddling-floyd.md`。
