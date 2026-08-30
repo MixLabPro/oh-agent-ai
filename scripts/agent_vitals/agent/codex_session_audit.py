@@ -187,6 +187,7 @@ def codex_session_audit_json(home, session_id):
         all_items, session_id, index.get(session_id), current["history_mode"],
         current["cli_version"], current["workspace_roots"], current["model"])
     ev = codex_evidence.codex_evidence_json(evidence)
+    audit = codex_evidence.codex_audit_projection(evidence["canonical"])
 
     first = min((f["first"] for f in files if f["first"] is not None), default=None)
     last_ts = max((f["last"] for f in files if f["last"] is not None), default=None)
@@ -203,6 +204,7 @@ def codex_session_audit_json(home, session_id):
         "files": [str(f["path"]) for f in files],
         "context_window": context_window,
         "date_span": {"first": first, "last": last_ts},
+        "audit": audit,
         "cost_report": cost_report,
         "coverage": ev["coverage"],
         "signals": ev["signals"],

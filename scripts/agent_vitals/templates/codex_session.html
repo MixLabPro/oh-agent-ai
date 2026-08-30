@@ -180,6 +180,9 @@ if (!D) {
   var totalTokens = BUCKETS.reduce(function (a, b) { return a + (TT[b[0]] || 0); }, 0);
   var covKeys = D.coverage || {};
   var unacc = (CR.unaccounted_usage || []);
+  var AUDIT = D.audit || { summary: {}, findings: [], rule_outcomes: {} };
+  var auditSummary = AUDIT.summary || {};
+  var auditFindings = AUDIT.findings || [];
 
   // ── 覆盖折叠：KPI 分母/命中、Finding 线索、结构缺口 ─────────────────────
   // 纯函数，只读入参（covKeys 条目带 2026-08 起的 available 标记），无 DOM——
@@ -228,8 +231,8 @@ if (!D) {
     { label: '上下文上限', value: D.context_window != null ? num(D.context_window) : dash(D.model),
       num: D.context_window != null,
       note: D.context_window != null ? '模型上下文窗口' : 'Codex 无逐 turn 峰值' },
-    { label: '异常', value: covSum.availHit + '/' + covSum.availCount + ' 覆盖',
-      num: false, note: covSum.note },
+    { label: '审计异常', value: num(auditSummary.findings_total || 0), num: true,
+      note: auditFindings.length ? (auditFindings[0].severity + ' · ' + auditFindings[0].rule) : '未命中规则' },
   ];
   document.getElementById('sv-kpis').innerHTML = kpis.map(function (k) {
     return '<div class="sv-metric"><div class="sv-metric-label">' + esc(k.label) + '</div>' +
@@ -392,29 +395,23 @@ if (!D) {
     planEl.innerHTML = planHtml;
   }
 
-  // ── 5 Finding 队列：残差哨兵 + 会话级覆盖缺口 ────────────────────────
-  // 结构缺口（unavailable）不占线索位——折叠成 covSum.struct 一行静态说明，
-  // 只在「宿主可用信号」上挑会话线索（2026-08 起，Codex 的 SV 行为检测器已能
-  // 跑 SV601-603/610/611-613/614c，覆盖缺口是真实会话信号，不再是宿主无能力）。
+  // ── 5 Finding 队列：只呈现规则命中；coverage 留在证据质量区 ──────────
   var fEl = document.getElementById('sv-findings');
-  var findings = [];
-  unacc.forEach(function (u) {
-    findings.push('<div class="sv-finding">' +
-      '<b>' + esc(u.type) + '</b> · <span class="sv-num">' + num(u.count) + '</span> 次事件' +
-      (u.tokens_seen ? ' · 看见 token <span class="sv-num">' + num(u.tokens_seen) + '</span>' : '') +
-      '（残差哨兵：宿主/折叠没接住，但 payload 确实带了 token 字段）</div>');
-  });
-  covSum.leads.forEach(function (s) {
-    findings.push('<div class="sv-finding sv-finding-ok"><b>' + esc(s) + '</b> · 无任何覆盖：' +
-      '该会话证据里完全没有这一类信号。不是缺陷判定，只是出处缺口——有则补，无则不编。</div>');
-  });
-  if (findings.length === 0) {
-    fEl.innerHTML = '<div class="sv-insight">未命中任何高危规则：残差哨兵为 0、' +
-      covSum.availCount + ' 个宿主可用信号全部有覆盖。' +
-      '这一页没有 finding 可列——诚实空态，不拿低危项凑数。</div>' + covSum.struct;
+  if (auditFindings.length === 0) {
+    var unavailable = auditSummary.rules_unavailable || 0;
+    fEl.innerHTML = '<div class="sv-insight">未命中任何审计规则。' +
+      (unavailable ? '其中 ' + num(unavailable) + ' 条规则因证据不足不可判定；详见出处与覆盖。' : '全部可运行规则均为零命中。') +
+      '</div>';
   } else {
-    fEl.innerHTML = '<div class="sv-panel-sub">' + findings.length + ' 条线索（残差哨兵 + 会话级覆盖缺口；' +
-      '宿主结构缺口不占线索位）。</div>' + findings.join('') + covSum.struct;
+    fEl.innerHTML = '<div class="sv-panel-sub">' + num(auditFindings.length) + ' 条真实规则 finding。</div>' +
+      auditFindings.map(function (f) {
+        var where = [];
+        if (f.turn != null) where.push('turn ' + f.turn);
+        if (f.tool_name) where.push(f.tool_name);
+        return '<div class="sv-finding"><b>' + esc(f.rule) + '</b> · ' + esc(f.severity) +
+          (where.length ? ' · <span class="sv-num">' + esc(where.join(' · ')) + '</span>' : '') +
+          '<br>' + esc(dash(f.evidence)) + '</div>';
+      }).join('');
   }
 }
 </script>

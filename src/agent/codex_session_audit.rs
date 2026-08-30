@@ -28,8 +28,10 @@ use serde_json::{json, Map, Value};
 
 use crate::agent::codex_cost::{codex_cost_report, load_codex_pricing};
 use crate::agent::codex_session::{codex_rollout_files, read_codex_session_log, read_session_index};
-use agent_vitals_core::codex_evidence::{build_codex_evidence, codex_evidence_json};
+use agent_vitals_core::behavior::{flatten, match_behavior_canonical, rule_outcomes_json};
+use agent_vitals_core::codex_evidence::{build_codex_evidence, codex_evidence_json, CodexEvidence};
 use agent_vitals_core::codex_usage::codex_merge_folds;
+use agent_vitals_core::trajectory::{flatten_trajectory, match_trajectory_canonical};
 
 /// 一份 rollout 文件对 `codex-session` 有用的全部信息。degraded 文件（不可读/
 /// 非 JSON/空）→ items 空 + 时间戳 None，但**仍按文件名兜底的 session_id
@@ -72,6 +74,35 @@ fn context_window_of(items: &[Value]) -> Option<i64> {
         }
     }
     found
+}
+
+fn audit_projection(evidence: &CodexEvidence) -> Value {
+    let family1 = match_behavior_canonical(&evidence.canonical);
+    let trajectory = match_trajectory_canonical(&evidence.canonical);
+    let mut findings = flatten(&family1);
+    findings.extend(flatten_trajectory(&trajectory));
+    let mut outcomes = family1;
+    outcomes.extend(trajectory);
+    let mut critical = 0_u64;
+    let mut warning = 0_u64;
+    let mut info = 0_u64;
+    for finding in &findings {
+        match finding.get("severity").and_then(|v| v.as_str()) {
+            Some("critical") => critical += 1,
+            Some("warning") => warning += 1,
+            Some("info") => info += 1,
+            _ => {},
+        }
+    }
+    let rules_unavailable = outcomes.iter().filter(|(_, outcome)| {
+        matches!(outcome, agent_vitals_core::evidence::RuleOutcome::Unavailable { .. })
+    }).count() as u64;
+    json!({
+        "summary": {"critical": critical, "warning": warning, "info": info,
+                    "findings_total": findings.len(), "rules_unavailable": rules_unavailable},
+        "findings": findings,
+        "rule_outcomes": rule_outcomes_json(&outcomes),
+    })
 }
 
 fn file_info(path: &Path) -> FileInfo {
@@ -226,6 +257,7 @@ pub fn codex_session_audit_json(home: &Path, session_id: &str) -> Option<Value> 
         current.model.clone(),
     );
     let ev = codex_evidence_json(&evidence);
+    let audit = audit_projection(&evidence);
 
     let first = files.iter().filter_map(|f| f.first.clone()).min();
     let last_ts = files.iter().filter_map(|f| f.last.clone()).max();
@@ -248,6 +280,7 @@ pub fn codex_session_audit_json(home: &Path, session_id: &str) -> Option<Value> 
     );
     out.insert("context_window".into(), context_window.map_or(Value::Null, |w| json!(w)));
     out.insert("date_span".into(), json!({ "first": first, "last": last_ts }));
+    out.insert("audit".into(), audit);
     out.insert("cost_report".into(), cost_report);
     out.insert("coverage".into(), ev["coverage"].clone());
     out.insert("signals".into(), ev["signals"].clone());

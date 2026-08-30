@@ -126,6 +126,35 @@ const KNOWN_RESPONSE_TYPES: &[&str] = &[
     "tool_search_output",
 ];
 
+/// A `message/user` can contain host-injected context rather than a human
+/// prompt. Inspect only known wrapper prefixes and never retain the body.
+enum UserPromptKind { Human, AmbientOnly, Mixed, Unknown }
+
+fn user_prompt_kind(payload: &Map<String, Value>) -> UserPromptKind {
+    let Some(parts) = payload.get("content").and_then(|v| v.as_array()) else {
+        return UserPromptKind::Unknown;
+    };
+    let mut nonempty = 0usize;
+    let mut ambient = 0usize;
+    for part in parts {
+        let Some(text) = part.get("text").and_then(|v| v.as_str()) else {
+            return UserPromptKind::Unknown;
+        };
+        let text = text.trim();
+        if text.is_empty() { continue; }
+        nonempty += 1;
+        if ["<recommended_plugins>", "<environment_context>", "<skills_instructions>",
+            "<permissions instructions>", "<collaboration_mode>", "<apps_instructions>",
+            "<plugins_instructions>"].iter().any(|p| text.starts_with(p)) {
+            ambient += 1;
+        }
+    }
+    if nonempty == 0 { UserPromptKind::Unknown }
+    else if ambient == nonempty { UserPromptKind::AmbientOnly }
+    else if ambient > 0 { UserPromptKind::Mixed }
+    else { UserPromptKind::Human }
+}
+
 /// 一个条目在哪个命名空间、叫什么类型。`Unknown` 的字符串是"要记进 attempts
 /// 的报错文本"，已去重。
 enum Classification {
@@ -333,11 +362,12 @@ fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
                 "custom_tool_call_output" | "function_call_output" | "tool_search_output" => {
                     bump(&mut coverage, Signal::ToolResults, Bucket::Measured, 1);
                 }
-                // 真实线格式：payload.type="message" + role="user"，正文在
-                // content[].text（数组）——计数只看 role 存在性，不读正文。
-                // role="assistant" 的 message 是模型回复，不算用户提示。
                 "message" if payload.get("role").and_then(|v| v.as_str()) == Some("user") => {
-                    bump(&mut coverage, Signal::UserPrompts, Bucket::Measured, 1);
+                    match user_prompt_kind(payload) {
+                        UserPromptKind::Human | UserPromptKind::Mixed => bump(&mut coverage, Signal::UserPrompts, Bucket::Measured, 1),
+                        UserPromptKind::Unknown => bump(&mut coverage, Signal::UserPrompts, Bucket::Lossy, 1),
+                        UserPromptKind::AmbientOnly => {},
+                    }
                 }
                 _ => {} // reasoning/agent_message 不喂信号
             },

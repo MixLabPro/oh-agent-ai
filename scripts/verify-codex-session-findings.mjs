@@ -86,9 +86,12 @@ ok(tpl.includes('var covSum = svFindingsFold(covKeys, unacc, esc);'),
   '模板调用点走 svFindingsFold()，不旁路');
 // 过时文案必须已经删除（populate 后 Codex 有 SV 行为检测器）。
 ok(!tpl.includes('Codex 无 SV 行为检测器'), '过时文案「Codex 无 SV 行为检测器」已删除');
-// KPI 分母必须走 covSum 的可用信号数，不是 19。
-ok(tpl.includes("value: covSum.availHit + '/' + covSum.availCount + ' 覆盖'"),
-  'KPI 分母用可用信号数');
+// Phase 0：KPI 的「异常」只读真实 audit finding；coverage 留在证据质量表，
+// 不再把一个永远非零的覆盖比例称为异常。
+ok(tpl.includes("label: '审计异常'") && tpl.includes('auditSummary.findings_total'),
+  'KPI 异常只读 audit finding 数');
+ok(tpl.includes('var auditFindings = AUDIT.findings || [];'),
+  'Finding 队列消费 audit.findings');
 
 if (failed) { console.error('\n' + failed + ' 项断言失败'); process.exit(1); }
 console.log('\n通过。');
