@@ -120,9 +120,9 @@ body{margin:0;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-pr
 
   <section class="sv-section" id="s-overview">
     <div class="sv-section-header"><h2 class="sv-section-title">会话资源概览</h2></div>
-    <div class="sv-subcard"><div class="sv-panel-sub">逐模型 / 速度成本。Codex 折叠时的计价轴：模型 × speed，5 桶 token 合计。</div>
+    <div class="sv-subcard"><div class="sv-panel-sub">逐模型 / 速度成本。计价轴：模型 × speed；推理 token 已包含在输出中。</div>
       <div class="sv-costwrap" id="sv-costtable"></div></div>
-    <div class="sv-subcard"><div class="sv-panel-sub">Token 5 桶分解（合计即上方 KPI 的 Token 用量）。</div>
+    <div class="sv-subcard"><div class="sv-panel-sub">Token 5 桶分解（推理为输出子集，不计入上方合计）。</div>
       <div class="sv-costwrap" id="sv-buckets"></div></div>
   </section>
 
@@ -181,7 +181,8 @@ if (!D) {
   ];
   var CR = D.cost_report || {};
   var TT = CR.total_tokens || {};
-  var totalTokens = BUCKETS.reduce(function (a, b) { return a + (TT[b[0]] || 0); }, 0);
+  // reasoning_output_tokens 是 output_tokens 的子集，展示但不计入总用量。
+  var totalTokens = BUCKETS.slice(0, 4).reduce(function (a, b) { return a + (TT[b[0]] || 0); }, 0);
   var covKeys = D.coverage || {};
   var unacc = (CR.unaccounted_usage || []);
   var AUDIT = D.audit || { summary: {}, findings: [], rule_outcomes: {} };
@@ -231,10 +232,10 @@ if (!D) {
 
   // ── 4 张 KPI 卡 ────────────────────────────────────────────────────
   var kpis = [
-    { label: '费用估算', value: usd(CR.total_cost_usd), num: true,
-      note: (CR.per_model ? Object.keys(CR.per_model).length : 0) + ' 个模型' },
+    { label: '基础成本估算', value: usd(CR.total_cost_usd), num: true,
+      note: '公开按量费率等价值；非订阅账单' },
     { label: 'Token 用量', value: num(totalTokens), num: true,
-      note: '5 桶合计' },
+      note: '4 个独立桶（推理已含于输出）' },
     { label: '上下文上限', value: D.context_window != null ? num(D.context_window) : dash(D.model),
       num: D.context_window != null,
       note: D.context_window != null ? '模型上下文窗口' : 'Codex 无逐 turn 峰值' },
@@ -267,13 +268,15 @@ if (!D) {
   }
   pmHtml += '</tbody></table>';
   document.getElementById('sv-costtable').innerHTML = pmHtml +
+    '<div class="sv-insight"><b>计价口径</b>：按公开 token 费率计算的基础等价值；订阅计划不代表实际扣款。' +
+    '长上下文附加价须有单次请求证据，聚合用量不会自动加价。</div>' +
     '<div class="sv-insight">unpriced_tokens=<b class="sv-num">' + num(CR.unpriced_tokens) + '</b>：' +
     '折叠看见了 token 但价目表里没有对应 (model, speed) 的桶，绝不按 0 价冒充，诚实单列。</div>';
 
-  var bucketRows = BUCKETS.map(function (b) {
+  var bucketRows = BUCKETS.map(function (b, i) {
     var v = TT[b[0]] || 0;
-    var pct = totalTokens > 0 ? Math.round(v / totalTokens * 100) : 0;
-    return '<tr><td>' + b[1] + '</td><td class="sv-num">' + num(v) + '</td><td class="sv-num">' + pct + '%</td></tr>';
+    var pct = i < 4 && totalTokens > 0 ? Math.round(v / totalTokens * 100) : null;
+    return '<tr><td>' + b[1] + '</td><td class="sv-num">' + num(v) + '</td><td class="sv-num">' + (pct == null ? '输出子集' : pct + '%') + '</td></tr>';
   }).join('');
   document.getElementById('sv-buckets').innerHTML =
     '<table class="sv-costtable"><thead><tr><th>桶</th><th>Token</th><th>占比</th></tr></thead>' +

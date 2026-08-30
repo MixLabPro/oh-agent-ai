@@ -97,15 +97,18 @@ def _resolve_entry(model, speed, entries):
 
 
 def _lc_multipliers(bucket, entry):
-    """longContext 乘数判定（基于一个**聚合桶**的 `input_total`）。返回
-    `(lc_in, lc_out)` 或 None。threshold<=0 / 未触发 / `longContextPriced:false` →
-    None。
+    """longContext 乘数判定。
 
-    语义：LC 是「这一次请求的上下文超窗」，判定粒度锚定在**单日聚合桶**（踩过的
-    坑：按小时桶判会把一日的大请求摊薄成不触发的小桶，按模型合并桶判又会让多日
-    小请求累加成假超窗）。判定一次，乘数**线性**应用——按小时桶逐桶乘与按日聚合
-    桶乘精确相等，`sum(hours.cost) == sum(days.cost)` 的对账因此成立。
+    官方门槛属于单次请求，聚合后的小时/日桶不足以提供证据；没有
+    `perRequestLongContextEvidence:true` 一律返回 None，避免把累计用量误收为附加费。
+
+    若未来适配器保留了请求级事实，调用方可传入该事实对应的桶并启用乘数。
     """
+    # The rollout fold currently preserves aggregate buckets, not a request's
+    # actual input size.  Aggregates cannot prove the official >272K-request
+    # condition, so never infer the surcharge from them.
+    if entry.get("perRequestLongContextEvidence") is not True:
+        return None
     threshold = entry.get("longContextThresholdTokens", 0)
     if not isinstance(threshold, int) or isinstance(threshold, bool):
         # 非整数 threshold（防御）：Rust 侧 as_i64 → None → 0，两侧一致。
@@ -229,10 +232,8 @@ def codex_cost_report(by_hour_model, by_model, unaccounted, plan, pricing, want_
     `--json`、`--html` 都从这里取数，不是三处各算一遍。
 
     `by_hour_model` 是折叠的时间轴（小时桶键 `YYYY-MM-DDTHH`，统一多桶折叠契约）。
-    先 `codex_aggregate_hours` 聚合成单日桶再计价——**longContext 判定粒度锚定在
-    单日聚合桶**（踩过的坑，见下）。`want_hours=True` 时另按小时桶计价：LC 乘数用
-    该小时所属日的聚合判定（乘数线性 → `sum(hours.cost) == sum(days.cost)` 精确对账），
-    输出 `hours` 键供 today 视图渲染小时热力图（与 DSH 小时桶同一结构）。
+    先 `codex_aggregate_hours` 聚合成单日桶再计价；`want_hours=True` 时另输出 `hours`
+    供 today 视图渲染小时热力图。
 
     `plan` 是折叠出的配额快照（dict 或 None），原样透传到输出——报告不解释它，
     展示层自己判「订阅 → 重标价」。
@@ -240,17 +241,10 @@ def codex_cost_report(by_hour_model, by_model, unaccounted, plan, pricing, want_
     `None` = 没有任何 token 可计价（空折叠：per_model 空、unpriced 0）。有未计价
     token 时返回 dict（total 0 + unpriced > 0 是「看见了、没价目」的诚实上报）。
 
-    **longContext 判定粒度（踩过的坑）**：LC 阈值（272000）按**单日聚合桶**的
-    `input_total` 判，**不是**按 by_model 合并后的模型总桶。一开始直接对
-    by_model 的合并桶 `_price_bucket`，结果是把「每天都没超阈值」的多天小请求
-    累加成一个假的大 input_total，凭空触发 LC（8 月两桶合并后 400K 触发 ×2，
-    per_model $5.54 却对不上 days 之和 $5.5357，守恒测试当场红）。LC 语义是
-    「这一次请求的上下文超窗」——月总量超窗不代表任何单次请求超窗，合并桶
-    判 LC 是静默多收。修正：**先按 (date, model, speed) 逐桶计价**，days 轴直接
-    用逐日价；per_model 轴 = 该模型各日期价之和 + **untimed 剩余**（by_model −
-    Σ 各日期桶，无日期样本没有日期桶可归，单独成一个桶计价）。于是全部样本都
-    带日期时 `sum(days.cost) == total_cost_usd` 精确成立（守恒测试钉死），有
-    untimed 时差异恰好是 untimed 的价——两轴永远对得上，不会出现两份价格。
+    官方的长上下文附加价不能从聚合桶中推断：月/日累计超过阈值均不说明某次请求
+    超过阈值。当前实现因此报告基础用量价格；以后若 fold 保留每请求证据，可由
+    价格条目显式启用该项。per_model = 各日期价 + untimed 剩余，所有样本带时间时
+    `sum(days.cost) == total_cost_usd`。
     """
     if not isinstance(by_model, dict):
         return None
@@ -277,7 +271,7 @@ def codex_cost_report(by_hour_model, by_model, unaccounted, plan, pricing, want_
                 if not isinstance(bucket, dict):
                     continue
                 facts = _bucket_fields(bucket)
-                toks += sum(facts)
+                toks += sum(facts[:4])
                 key = (model, spd)
                 dt = dated_tokens.get(key)
                 if dt is None:
@@ -293,8 +287,7 @@ def codex_cost_report(by_hour_model, by_model, unaccounted, plan, pricing, want_
         days.append({"date": date, "cost_usd": cost, "tokens": toks})
 
     # ── Pass 0b：小时轴计价（today 视图） ─────────────────────────────
-    # 每个小时桶按所属日的聚合 LC 判定计价（乘数线性 → 与日期轴精确对账，
-    # sum(hours.cost) == sum(days.cost)，守恒测试钉死）。小时升序。
+    # 小时桶直接按基础费率计价。小时升序。
     hours = []
     if want_hours and isinstance(by_hour_model, dict):
         for h in sorted(by_hour_model):
@@ -303,7 +296,6 @@ def codex_cost_report(by_hour_model, by_model, unaccounted, plan, pricing, want_
                 continue
             cost = 0.0
             toks = 0
-            date_agg = by_date_model.get(h[:10])
             for model, speeds in hour_map.items():
                 if not isinstance(speeds, dict):
                     continue
@@ -311,15 +303,10 @@ def codex_cost_report(by_hour_model, by_model, unaccounted, plan, pricing, want_
                     if not isinstance(bucket, dict):
                         continue
                     facts = _bucket_fields(bucket)
-                    toks += sum(facts)
+                    toks += sum(facts[:4])
                     entry = _resolve_entry(model, spd, entries)
                     if entry is not None:
-                        lc = None
-                        if isinstance(date_agg, dict):
-                            db = (date_agg.get(model) or {}).get(spd)
-                            if isinstance(db, dict):
-                                lc = _lc_multipliers(db, entry)
-                        cost += _price_bucket(bucket, entry, lc)
+                        cost += _price_bucket(bucket, entry)
             hours.append({"hour": h, "cost_usd": cost, "tokens": toks})
 
     # ── Pass 1：per_model / 总价 / 未计价 ──────────────────────────────
@@ -352,7 +339,7 @@ def codex_cost_report(by_hour_model, by_model, unaccounted, plan, pricing, want_
             else:
                 # 无价目：token 进 unpriced_tokens，诚实上报——绝不按 0 价冒充。
                 all_priced = False
-                for i in range(5):
+                for i in range(4):
                     unpriced += facts[i]
             speed_names.append(spd)
         for i in range(5):
@@ -405,9 +392,9 @@ def render_codex_cost(out):
     plan_line = _plan_line(out.get("plan"))
     if plan_line is not None:
         parts.append(f"plan: {plan_line}\n")
-    # 5 桶人读只需一个总量；分桶明细在 --json 与仪表盘里。
+    # reasoning 是 output 的子集，故人读总量只加 4 个独立桶。
     all_tokens = sum(
-        tt.get(f, 0) for f in CODEX_TOKEN_FIELDS
+        tt.get(f, 0) for f in CODEX_TOKEN_FIELDS[:4]
         if isinstance(tt.get(f), int) and not isinstance(tt.get(f), bool)
     )
     # 订阅套餐（plan 存在）时，per-token 美元是「按量标价」不是账单——账单 = 套餐

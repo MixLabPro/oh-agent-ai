@@ -690,7 +690,7 @@ class TestCodexSessionHtml(unittest.TestCase):
                               "计划与额度", "Finding 队列"):
                     self.assertIn(title, html, "缺区块标题 %s" % title)
                 # 4 张 KPI 卡标签。
-                for label in ("费用估算", "Token 用量", "上下文上限", "异常"):
+                for label in ("基础成本估算", "Token 用量", "上下文上限", "异常"):
                     self.assertIn(label, html, "缺 KPI 标签 %s" % label)
                 # topbar 锚点。
                 for anchor in ("sv-title", "sv-sid", "sv-chips"):

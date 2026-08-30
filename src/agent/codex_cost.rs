@@ -14,10 +14,8 @@
 //!   **reasoning 已计入 output，绝不叠加**。
 //! - **speed 是 catalog 的独立行**（不是乘数）：`fast` 行价 = standard 行 ×2 是
 //!   catalog 里写死的，不是代码里乘出来的。resolve 时按 `(model, speed)` 匹配。
-//! - **longContext**：`input_tokens > longContextThresholdTokens` 且条目没标
-//!   `longContextPriced:false` 时，input 全桶 ×= longContextInputMultiplierBps/10000
-//!   （默认 2.0）、output ×= longContextOutputMultiplierBps/10000（默认 1.5）。fast
-//!   行都显式 `longContextPriced:false` → fast + longContext = 不乘（cc-trace 同款）。
+//! - **长上下文**：官方门槛按单次请求。rollout 只保留聚合桶，无法据此推断附加价；
+//!   只有适配器保留并显式标记 `perRequestLongContextEvidence:true` 时才启用对应乘数。
 //! - **modelPrefix 最长前缀匹配**：`gpt-5.6-sol` 必须命中 sol 行而不是 `gpt-5.6`
 //!   泛化行；`codex-auto-review` 无条目 → unpriced（`priced:false`、token 进
 //!   `unpriced_tokens`，诚实上报，绝不按 0 价冒充）。
@@ -107,15 +105,16 @@ fn resolve_entry<'a>(model: &str, speed: &str, entries: &'a [Value]) -> Option<&
     best
 }
 
-/// longContext 乘数判定（基于一个**聚合桶**的 `input_total`）。返回
-/// `(lc_in, lc_out)` 或 None。threshold<=0 / 未触发 / `longContextPriced:false` →
-/// None。
-///
-/// 语义：LC 是「这一次请求的上下文超窗」，判定粒度锚定在**单日聚合桶**（踩过的
-/// 坑：按小时桶判会把一日的大请求摊薄成不触发的小桶，按模型合并桶判又会让多日
-/// 小请求累加成假超窗）。判定一次，乘数**线性**应用——按小时桶逐桶乘与按日聚合
-/// 桶乘精确相等，`sum(hours.cost) == sum(days.cost)` 的对账因此成立。
+/// longContext 乘数判定。官方门槛属于单次请求，聚合后的小时/日桶不足以提供证据；
+/// 没有 `perRequestLongContextEvidence:true` 一律返回 None，避免把累计用量误收为
+/// 长上下文附加费。
 fn lc_multipliers(bucket: &Value, entry: &Value) -> Option<(f64, f64)> {
+    // Folded hour/day buckets cannot establish the official per-request >272K
+    // condition.  Only enable the surcharge when an adapter has preserved that
+    // request-level evidence explicitly.
+    if entry.get("perRequestLongContextEvidence").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
     let threshold = entry
         .get("longContextThresholdTokens")
         .and_then(|v| v.as_i64())
@@ -150,9 +149,8 @@ fn lc_multipliers(bucket: &Value, entry: &Value) -> Option<(f64, f64)> {
 
 /// 一个 5 桶对象 × 价格条目 → USD 费用。`reasoning` 桶存在但不参与计价——它已
 /// 含在 `output` 里（折叠侧的校验保证 `output >= reasoning`），再乘一次就是双计。
-/// `lc`（可选）= 调用方预判的 `(lc_in, lc_out)` 乘数——小时轴用它把**单日聚合桶**
-/// 的 LC 判定线性应用到每个小时桶（见 `lc_multipliers`）；None 按本桶自己判
-/// （日期轴，桶即聚合桶，判定与 `lc_multipliers` 等价）。
+/// `lc`（可选）= 已验证的请求级长上下文乘数；None 时只在条目明确拥有请求级证据时
+/// 尝试判定（见 `lc_multipliers`）。
 fn price_bucket(bucket: &Value, entry: &Value, lc: Option<(f64, f64)>) -> f64 {
     let uncached = get_i64(bucket, "uncached_input_tokens") as f64;
     let cached = get_i64(bucket, "cached_input_tokens") as f64;
@@ -263,11 +261,8 @@ fn plan_line(plan: Option<&Value>) -> Option<String> {
 /// 折叠结果 × 价格表 → 结构化成本报告。**这是唯一算价格的地方**——人读文本、
 /// `--json`、`--html` 都从这里取数，不是三处各算一遍。
 ///
-/// `by_hour_model` 是折叠的时间轴（小时桶键 `YYYY-MM-DDTHH`，统一多桶折叠契约）。
-/// 先 `codex_aggregate_hours` 聚合成单日桶再计价——**longContext 判定粒度锚定在
-/// 单日聚合桶**（踩过的坑，见下）。`want_hours=True` 时另按小时桶计价：LC 乘数用
-/// 该小时所属日的聚合判定（乘数线性 → `sum(hours.cost) == sum(days.cost)` 精确对账），
-/// 输出 `hours` 键供 today 视图渲染小时热力图（与 DSH 小时桶同一结构）。
+/// `by_hour_model` 是折叠的时间轴（小时桶键 `YYYY-MM-DDTHH`）。按日与按小时的
+/// 成本都由同一基础费率计算，`want_hours=True` 时输出 `hours` 供 today 视图使用。
 ///
 /// `plan` 是折叠出的配额快照（Value，可为 Null），原样透传到输出——报告不解释
 /// 它，展示层自己判「订阅 → 重标价」。
@@ -275,18 +270,10 @@ fn plan_line(plan: Option<&Value>) -> Option<String> {
 /// `None` = 没有任何 token 可计价（空折叠：per_model 空、unpriced 0）。有未计价
 /// token 时返回 `Some`（total 0 + unpriced > 0 是「看见了、没价目」的诚实上报）。
 ///
-/// **longContext 判定粒度（踩过的坑）**：LC 阈值（272000）按**单日聚合桶**的
-/// `input_total` 判，**不是**按 by_model 合并后的模型总桶。一开始直接对 by_model
-/// 的合并桶 `price_bucket`，结果是把「每天都没超阈值」的多天小请求累加成一个假的
-/// 大 input_total，凭空触发 LC（8 月两桶合并后 400K 触发 ×2，per_model $5.54 却对
-/// 不上 days 之和 $5.5357，守恒测试当场红）。LC 语义是「这一次请求的上下文超窗」——
-/// 月总量超窗不代表任何单次请求超窗，合并桶判 LC 是静默多收。修正：**先按
-/// (date, model, speed) 逐桶计价**，days 轴直接用逐日价；per_model 轴 = 该模型各
-/// 日期价之和 + **untimed 剩余**（by_model − Σ 各日期桶，无时间样本没有日期桶可归，
-/// 单独成一个桶计价）。于是全部样本都带时间时 `sum(days.cost) == total_cost_usd`
-/// 精确成立（守恒测试钉死），有 untimed 时差异恰好是 untimed 的价——两轴永远对得
-/// 上，不会出现两份价格。hours 轴（`want_hours`）同 LC 纪律：小时桶的乘数来自所属
-/// 日的聚合桶，逐小时线性应用。
+/// 官方长上下文附加价不能从聚合桶中推断：月/日累计超过阈值均不说明某次请求超过
+/// 阈值。当前实现因此报告基础用量价格；以后若 fold 保留每请求证据，可由价格条目
+/// 显式启用该项。per_model = 各日期价 + untimed 剩余，所有样本带时间时
+/// `sum(days.cost) == total_cost_usd`。
 pub fn codex_cost_report(
     by_hour_model: &Value,
     by_model: &Value,
@@ -303,7 +290,7 @@ pub fn codex_cost_report(
     let bm = by_model.as_object()?;
 
     // ── Pass 0：时间轴聚合 + 日期轴计价 ────────────────────────────────
-    // 小时桶先按日聚合（`codex_aggregate_hours`），LC 判定粒度锚定在单日聚合桶；
+    // 小时桶先按日聚合（`codex_aggregate_hours`）；
     // 同时记下每个 (model, spd) 的「有日期份额」成本与 token，供 per_model 轴
     // 求 untimed 剩余用。by_date_model 键序 = 聚合的日期升序，days 保持升序。
     let by_date_model = agent_vitals_core::codex_usage::codex_aggregate_hours(by_hour_model);
@@ -319,7 +306,7 @@ pub fn codex_cost_report(
                 let Some(speeds) = speeds.as_object() else { continue };
                 for (spd, bucket) in speeds {
                     let facts = bucket_fields(bucket);
-                    for f in &facts {
+                    for f in facts.iter().take(4) {
                         toks += f;
                     }
                     let key = (model.clone(), spd.clone());
@@ -343,8 +330,7 @@ pub fn codex_cost_report(
     }
 
     // ── Pass 0b：小时轴计价（today 视图） ──────────────────────────────
-    // 每个小时桶按所属日的聚合 LC 判定计价（乘数线性 → 与日期轴精确对账，
-    // sum(hours.cost) == sum(days.cost)，守恒测试钉死）。小时升序（与 Python 的
+    // 小时桶直接按基础费率计价；小时升序（与 Python 的
     // `sorted(by_hour_model)` 同序——跨文件合并后插入序已升序，再排一次保险）。
     let mut hours: Vec<Value> = Vec::new();
     if want_hours {
@@ -355,25 +341,15 @@ pub fn codex_cost_report(
                 let Some(hour_map) = bh.get(h).and_then(|v| v.as_object()) else { continue };
                 let mut cost: f64 = 0.0;
                 let mut toks: i64 = 0;
-                let date = &h[..10.min(h.len())];
-                let date_agg = by_date_model
-                    .get(date)
-                    .and_then(|v| v.as_object());
                 for (model, speeds) in hour_map {
                     let Some(speeds) = speeds.as_object() else { continue };
                     for (spd, bucket) in speeds {
                         let facts = bucket_fields(bucket);
-                        for f in &facts {
+                        for f in facts.iter().take(4) {
                             toks += f;
                         }
                         if let Some(entry) = resolve_entry(model, spd, entries) {
-                            let mut lc = None;
-                            if let Some(dm) = date_agg {
-                                if let Some(db) = dm.get(model).and_then(|v| v.get(spd)) {
-                                    lc = lc_multipliers(db, entry);
-                                }
-                            }
-                            cost += price_bucket(bucket, entry, lc);
+                            cost += price_bucket(bucket, entry, None);
                         }
                     }
                 }
@@ -416,7 +392,7 @@ pub fn codex_cost_report(
             } else {
                 // 无价目：token 进 unpriced_tokens，诚实上报——绝不按 0 价冒充。
                 all_priced = false;
-                unpriced += facts.iter().sum::<i64>();
+                unpriced += facts.iter().take(4).sum::<i64>();
             }
             speed_names.push(spd.clone());
         }
@@ -489,9 +465,9 @@ pub fn render_codex_cost(out: &Value) -> String {
     if let Some(pl) = &plan_line {
         parts.push(format!("plan: {pl}\n"));
     }
-    // 5 桶人读只需一个总量；分桶明细在 --json 与仪表盘里。
+    // reasoning 是 output 的子集，故人读总量只加 4 个独立桶。
     let mut all_tokens: i64 = 0;
-    for f in agent_vitals_core::codex_usage::CODEX_TOKEN_FIELDS.iter() {
+    for f in agent_vitals_core::codex_usage::CODEX_TOKEN_FIELDS.iter().take(4) {
         all_tokens += tt.get(*f).and_then(|x| x.as_i64()).unwrap_or(0);
     }
     // 订阅套餐（plan 存在）时，per-token 美元是「按量标价」不是账单——账单 = 套餐
@@ -593,6 +569,7 @@ mod tests {
             "longContextThresholdTokens": 272000,
             "longContextInputMultiplierBps": 20000,
             "longContextOutputMultiplierBps": 15000,
+            "perRequestLongContextEvidence": true,
         })
     }
 
@@ -728,9 +705,8 @@ mod tests {
         let pm = &report["per_model"]["gpt-5.6-sol"];
         assert!(pm["priced"].as_bool().unwrap());
         assert_eq!(pm["speed"], "standard");
-        // 1.7M input_total 超过 272000 → longContext 触发：
-        // input 6.5e6·2 = 13e6、output 3e6·1.5 = 4.5e6 → 17.5 USD。
-        assert!((pm["cost_usd"].as_f64().unwrap() - 17.5).abs() < 1e-9);
+        // 没有每请求长上下文证据时，聚合桶不得推断附加费：$7.20。
+        assert!((pm["cost_usd"].as_f64().unwrap() - 7.2).abs() < 1e-9);
         assert_eq!(report["days"].as_array().unwrap().len(), 2);
         assert!(report["days"].as_array().unwrap()[0]["date"].as_str() == Some("2026-08-05"));
     }
@@ -770,9 +746,8 @@ mod tests {
             day_sum += d["cost_usd"].as_f64().unwrap();
         }
         assert!((total - day_sum).abs() < 1e-9, "total {total} != days {day_sum}");
-        // 每天 input = (0.1M·5 + 0.1M·0.5)/1M = 0.55，output = 0.05M·30/1M = 1.5
-        // → 2.05，两天 4.10。合并桶判 LC 的错误价 6.70 绝不能出现。
-        assert!((total - 4.10).abs() < 1e-9, "got {total}");
+        // 每天按现价 = 0.1M·4 + 0.1M·0.4 + 0.05M·20 = 1.44，两天 2.88。
+        assert!((total - 2.88).abs() < 1e-9, "got {total}");
         assert_eq!(report["days"].as_array().unwrap().len(), 2);
     }
 
@@ -805,9 +780,9 @@ mod tests {
         let report = codex_cost_report(&by_hour_model, &by_model, &json!([]), &json!(null), &pricing, false).unwrap();
         let total = report["total_cost_usd"].as_f64().unwrap();
         let day_sum = report["days"].as_array().unwrap()[0]["cost_usd"].as_f64().unwrap();
-        // dated 2.05 + untimed 2.05 = 4.10；days 只有 2.05 → 差 2.05 == untimed 价。
-        assert!((total - 4.10).abs() < 1e-9, "got {total}");
-        assert!((total - day_sum - 2.05).abs() < 1e-9, "conservation with untimed broken");
+        // dated 1.44 + untimed 1.44 = 2.88；days 只有 1.44。
+        assert!((total - 2.88).abs() < 1e-9, "got {total}");
+        assert!((total - day_sum - 1.44).abs() < 1e-9, "conservation with untimed broken");
     }
 
     #[test]
@@ -949,15 +924,14 @@ mod tests {
         assert!(report.get("hours").is_some());
         let hours = report["hours"].as_array().unwrap();
         assert_eq!(hours.len(), 2);
-        // 单日聚合 input_total 300000 > 272000 → LC 触发：input 全桶 ×2、output
-        // ×1.5。每小时：input (0.15M·5)·2 = 1.5、output (0.1M·30)·1.5 = 4.5 → 6.0。
+        // 聚合桶不构成每请求长上下文证据。每小时：0.15M·4 + 0.1M·20 = 2.6。
         let h0 = hours[0]["cost_usd"].as_f64().unwrap();
-        assert!((h0 - 6.0).abs() < 1e-9, "got {h0}");
+        assert!((h0 - 2.6).abs() < 1e-9, "got {h0}");
         assert_eq!(hours[0]["hour"], "2026-08-01T00");
         assert_eq!(hours[1]["hour"], "2026-08-01T01");
-        // days 轴同 LC 判定：0.3M·5·2 + 0.2M·30·1.5 = 3 + 9 = 12。
+        // days 轴同样不推断 LC：0.3M·4 + 0.2M·20 = 5.2。
         let day = report["days"].as_array().unwrap()[0]["cost_usd"].as_f64().unwrap();
-        assert!((day - 12.0).abs() < 1e-9, "got {day}");
+        assert!((day - 5.2).abs() < 1e-9, "got {day}");
         // 守恒：sum(hours) == sum(days) == total。
         let mut hour_sum = 0.0;
         for h in hours {

@@ -3084,7 +3084,7 @@ class CodexCostCharacterization(unittest.TestCase):
 
     def test_fold_sol_dedup_unaccounted_and_lc(self):
         """sol 夹具：去重两形态都跳过、两条 unaccounted、cache_write 进 5m 档、
-        longContext 桶按 input_total 触发。"""
+        含可用于验证基础费率计算的大桶。"""
         f = self._fold("rollout-sol.jsonl")
         bm = f["by_model"]["gpt-5.6-sol"]["standard"]
         # uncached 派生：08-01 (50000) + 08-02 (120000)
@@ -3163,7 +3163,7 @@ class CodexCostCharacterization(unittest.TestCase):
         self.assertEqual([sol[k] for k in ("uncachedInputUsdPerMTok", "cacheReadUsdPerMTok",
                                            "cacheWrite5mUsdPerMTok", "cacheWrite1hUsdPerMTok",
                                            "outputUsdPerMTok")],
-                         ["5", "0.5", "6.25", "10", "30"])
+                         ["4", "0.4", "5", "8", "20"])
         terra = by_prefix["gpt-5.6-terra"]
         self.assertEqual([terra[k] for k in ("uncachedInputUsdPerMTok", "cacheReadUsdPerMTok",
                                              "cacheWrite5mUsdPerMTok", "cacheWrite1hUsdPerMTok",
@@ -3188,7 +3188,7 @@ class CodexCostCharacterization(unittest.TestCase):
     def test_cost_report_exact_usd_and_reconciles(self):
         """合并三份夹具 → 精确 USD 价 + 守恒：sum(days.cost) == total_cost_usd。"""
         report = self._merged_report()
-        self.assertAlmostEqual(report["total_cost_usd"], 5.5357, places=9)
+        self.assertAlmostEqual(report["total_cost_usd"], 2.8342, places=9)
         tt = report["total_tokens"]
         # 合并三份夹具按桶求和：sol(170000,70000,190000,40000,8000) +
         # terra(65000,20000,30000,5000,2000) + luna(130000,50000,60000,10000,5000) +
@@ -3200,7 +3200,7 @@ class CodexCostCharacterization(unittest.TestCase):
         sol = report["per_model"]["gpt-5.6-sol"]
         self.assertTrue(sol["priced"])
         self.assertEqual(sol["speed"], "standard")
-        self.assertAlmostEqual(sol["cost_usd"], 5.0575, places=9)
+        self.assertAlmostEqual(sol["cost_usd"], 2.356, places=9)
         self.assertAlmostEqual(report["per_model"]["gpt-5.6-terra"]["cost_usd"], 0.3885, places=9)
         self.assertAlmostEqual(report["per_model"]["gpt-5.6-luna"]["cost_usd"], 0.0897, places=9)
         # unpriced 模型诚实上报
@@ -3214,15 +3214,14 @@ class CodexCostCharacterization(unittest.TestCase):
                          ["2026-07-15", "2026-08-01", "2026-08-02", "2026-08-03"])
         day_sum = sum(d["cost_usd"] for d in days)
         self.assertAlmostEqual(day_sum, report["total_cost_usd"], places=9)
-        self.assertEqual(days[0]["tokens"], 377000)
-        self.assertEqual(days[2]["tokens"], 366000)
+        self.assertEqual(days[0]["tokens"], 370000)
+        self.assertEqual(days[2]["tokens"], 360000)
 
     def test_cost_report_hours_reconciles_with_days(self):
         """want_hours=True → 输出 `hours`（小时升序、键 `YYYY-MM-DDTHH`），且
-        `sum(hours.cost) == sum(days.cost) == total_cost_usd` 精确对账——LC 乘数
-        线性，按小时桶应用与按日聚合桶应用相等（统一多桶折叠契约的守恒）。每个
-        日期的小时价之和 == 该日价；08-02 单日聚合触发 longContext（input 300000
-        > 272000 → ×2/×1.5），小时价同样体现（= $4.425）。want_hours=False 时
+        `sum(hours.cost) == sum(days.cost) == total_cost_usd` 精确对账。每个
+        日期的小时价之和 == 该日价；08-02 聚合桶虽超过长上下文阈值，但没有请求级
+        证据，仍只按基础费率计价（= $1.89）。want_hours=False 时
         无 `hours` 键——`--json --month` 的契约不包含它（月视图热力图用 days）。"""
         report = self._merged_report(want_hours=True)
         hours = report["hours"]
@@ -3241,21 +3240,20 @@ class CodexCostCharacterization(unittest.TestCase):
             self.assertAlmostEqual(hour_sum_by_date.get(d, 0.0), c, places=9)
         self.assertAlmostEqual(sum(h["cost_usd"] for h in hours),
                                report["total_cost_usd"], places=9)
-        # 08-02 单日聚合 LC → 小时价 = 日价（$4.425，钉到小数）
-        self.assertAlmostEqual(hour_sum_by_date["2026-08-02"], 4.425, places=9)
+        # 08-02 无请求级证据 → 不从聚合桶推断附加费。
+        self.assertAlmostEqual(hour_sum_by_date["2026-08-02"], 1.89, places=9)
         # want_hours=False（月契约）→ 无 hours 键
         self.assertNotIn("hours", self._merged_report())
 
     def test_cost_report_long_context_sample_exact(self):
-        """longContext 样例钉到小数：input_total 300000 > 272000 → input ×2、
-        output ×1.5（08-02 桶 = $4.425）。"""
+        """聚合 input_total 超阈值但无请求级证据 → 仍为基础费率。"""
         f = self._fold("rollout-sol.jsonl")
         report = codex_cost_report(
             f["by_hour_model"], f["by_model"], f["unaccounted"], f["plan"],
             load_codex_pricing())
         d2 = next(d for d in report["days"] if d["date"] == "2026-08-02")
-        self.assertAlmostEqual(d2["cost_usd"], 4.425, places=9)
-        self.assertEqual(d2["tokens"], 366000)
+        self.assertAlmostEqual(d2["cost_usd"], 1.89, places=9)
+        self.assertEqual(d2["tokens"], 360000)
 
     def test_cost_report_none_when_nothing_to_price(self):
         self.assertIsNone(codex_cost_report({}, {}, [], None, load_codex_pricing()))
@@ -3353,8 +3351,8 @@ class CodexCostCharacterization(unittest.TestCase):
         self.assertIn("每周 剩余91%（重置", text)
         self.assertIn("快照@2026-08-03T12:05:00Z\n", text)
         # 订阅套餐 → per-token 美元是标价不是账单
-        self.assertIn("total cost (按量标价): $5.54 · total tokens: 861K\n", text)
-        self.assertIn("  gpt-5.6-sol  $5.06  (standard)\n", text)
+        self.assertIn("total cost (按量标价): $2.83 · total tokens: 846K\n", text)
+        self.assertIn("  gpt-5.6-sol  $2.36  (standard)\n", text)
         self.assertIn("  codex-auto-review  unpriced  (standard)\n", text)
         self.assertIn("另有 6K tokens 模型未计价\n", text)
         self.assertIn("未接住 1 × token_count_before_turn_context（看见 1.1K tokens）\n", text)
@@ -3378,7 +3376,7 @@ class CodexCostCharacterization(unittest.TestCase):
         out = {"host": "codex", "currency": "USD", "month": None}
         out.update(report)
         text = render_codex_cost(out)
-        self.assertIn("total cost: $0.48 · total tokens: 377K\n", text)
+        self.assertIn("total cost: $0.48 · total tokens: 370K\n", text)
         self.assertNotIn("按量标价", text)
         self.assertNotIn("plan:", text)
 

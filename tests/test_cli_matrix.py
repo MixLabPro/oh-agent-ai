@@ -1138,8 +1138,9 @@ class CliMatrix(unittest.TestCase):
 
     def test_codex_cost_differential(self):
         """`codex-cost --month all`（全量）与 `--month 2026-08`：py==rs 逐字节（both()
-        兜底），且金额等于手算值——sol 两桶（0.6325 + LC 4.425）+ terra 0.3885 +
-        luna 0.0897 = 5.5357；月过滤后 terra/luna 出局 → 5.0575。缺省（不传月）=
+        兜底），且金额等于手算值——sol 两桶（基础费率合计 2.356）+ terra 0.3885 +
+        luna 0.0897 = 2.8342；聚合桶不能证明单请求长上下文，故不套附加费。月过滤后
+        terra/luna 出局 → 2.356。缺省（不传月）=
         当前自然月（北京口径），不再是全量——全量要显式 `--month all`。"""
         self._codex_cost_roots()
         code, out, err = self.both("codex-cost", "--month", "all", "--json", "-")
@@ -1150,8 +1151,8 @@ class CliMatrix(unittest.TestCase):
         # 归档会话必须先于 live（全局路径排序）→ 模型首现序钉住
         self.assertEqual(list(report["per_model"].keys()),
                          ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "codex-auto-review"])
-        self.assertAlmostEqual(report["total_cost_usd"], 5.5357, places=9)
-        self.assertAlmostEqual(report["per_model"]["gpt-5.6-sol"]["cost_usd"], 5.0575, places=9)
+        self.assertAlmostEqual(report["total_cost_usd"], 2.8342, places=9)
+        self.assertAlmostEqual(report["per_model"]["gpt-5.6-sol"]["cost_usd"], 2.356, places=9)
         self.assertEqual(report["unpriced_tokens"], 6000)
         # 残差哨兵跨月保留
         self.assertEqual([u["type"] for u in report["unaccounted_usage"]],
@@ -1167,7 +1168,7 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(code, 0)
         report = json.loads(out)
         self.assertEqual(report["month"], "2026-08")
-        self.assertAlmostEqual(report["total_cost_usd"], 5.0575, places=9)
+        self.assertAlmostEqual(report["total_cost_usd"], 2.356, places=9)
         self.assertEqual(list(report["per_model"].keys()),
                          ["gpt-5.6-sol", "codex-auto-review"])
         self.assertEqual(report["unpriced_tokens"], 6000,
@@ -1349,7 +1350,7 @@ class CliMatrix(unittest.TestCase):
 
     def test_codex_session_detail_differential(self):
         """`codex-session --session rollout-sol`：单 session 深挖。逐 session 成本 =
-        codex-cost 同一条折叠→计价路径（sol 跨两天 0.6325 + LC 4.425 = 5.0575）；
+        codex-cost 同一条折叠→计价路径（sol 跨两天基础费率合计 2.356）；
         出处覆盖 = 一次 build 并集（单文件夹具 = 该文件覆盖）；时间跨度 = 首/末行
         min/max；context_window = 最后 token_count 的窗口。py==rs 逐字节（both()）。"""
         self._codex_cost_roots()
@@ -1367,7 +1368,7 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(len(report["files"]), 1)
         self.assertTrue(report["files"][0].endswith("rollout-sol.jsonl"))
         cr = report["cost_report"]
-        self.assertAlmostEqual(cr["total_cost_usd"], 5.0575, places=9)
+        self.assertAlmostEqual(cr["total_cost_usd"], 2.356, places=9)
         self.assertEqual(cr["unpriced_tokens"], 0)
         self.assertEqual(list(cr["per_model"].keys()), ["gpt-5.6-sol"])
         self.assertEqual([u["type"] for u in cr["unaccounted_usage"]],
