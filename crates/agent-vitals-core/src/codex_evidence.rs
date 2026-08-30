@@ -311,7 +311,11 @@ fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
                 }
                 "token_count" => {
                     bump(&mut coverage, Signal::Usage, Bucket::Measured, 1);
-                    if payload.get("rate_limits").is_some() {
+                    // 只有 rate_limits 真是 object 才计 QuotaConsumption——键存在但
+                    // 值为 null（真实线格式偶尔如此）不是配额证据，is_some() 会
+                    // 把 null 也 bump 成 1（LOW-5：与 usage_shaped 哨兵的「宽进」不
+                    // 冲突——这里是覆盖计数，宽进会虚增 measured）。
+                    if payload.get("rate_limits").is_some_and(|v| v.is_object()) {
                         bump(&mut coverage, Signal::QuotaConsumption, Bucket::Measured, 1);
                     }
                     // 常驻上下文窗口（model_context_window）在 payload.info 里——

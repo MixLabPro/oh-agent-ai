@@ -313,7 +313,11 @@ def derive_coverage(items):
                 _bump(coverage, "TurnBoundaries", "measured")
             elif inner == "token_count":
                 _bump(coverage, "Usage", "measured")
-                if "rate_limits" in payload:
+                # 只有 rate_limits 真是 object 才计 QuotaConsumption——键存在但
+                # 值为 null（真实线格式偶尔如此）不是配额证据，`in payload` 会
+                # 把 null 也 bump 成 1（LOW-5：与 usage_shaped 哨兵的「宽进」不
+                # 冲突——这里是覆盖计数，宽进会虚增 measured）。
+                if isinstance(payload.get("rate_limits"), dict):
                     _bump(coverage, "QuotaConsumption", "measured")
                 # 常驻上下文窗口（model_context_window）在 payload.info 里——
                 # 与逐请求 token 分离，§13 ContextWindow 行的来源。

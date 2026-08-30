@@ -1079,6 +1079,33 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(got[0][2], got[1][2], "stderr 不一致")
         self.assertIn("session log unavailable", got[0][2])
 
+    def test_codex_evidence_rate_limits_null_not_quota(self):
+        """QuotaConsumption 只在 rate_limits **真是 object** 时计（LOW-5）：
+        键存在但值为 null（真实线格式偶尔如此）不是配额证据——`in payload` /
+        `is_some()` 会把 null 也 bump 成 1，虚增 measured。py==rs 逐字节（both()）。"""
+        lines = [
+            {"timestamp": "2026-07-25T11:19:35Z", "type": "session_meta",
+             "payload": {"session_id": "s1", "id": "s1", "history_mode": "legacy",
+                         "cli_version": "0.146.0"}},
+            # null 形态：Usage 照计，QuotaConsumption 必须不计。
+            {"timestamp": "2026-07-25T11:19:36Z", "type": "event_msg",
+             "payload": {"type": "token_count", "rate_limits": None}},
+            # object 形态：QuotaConsumption 计 1。
+            {"timestamp": "2026-07-25T11:19:37Z", "type": "event_msg",
+             "payload": {"type": "token_count",
+                         "rate_limits": {"primary": {"used_percent": 20.0}}}},
+        ]
+        log = self.tmp / "rate-limits-null.jsonl"
+        log.write_text("".join(json.dumps(l) + "\n" for l in lines), encoding="utf-8")
+        report = self._codex_evidence(log)
+        cov = report["coverage"]
+        self.assertEqual(cov["Usage"]["measured"], 2, "两条 token_count 都计 Usage")
+        self.assertEqual(cov["QuotaConsumption"],
+                         {"measured": 1, "derived": 0, "lossy": 0,
+                          "unmetered": 0, "available": True},
+                         "null 的 rate_limits 不得 bump QuotaConsumption")
+        self.assertIn("QuotaConsumption", report["signals"])
+
     def test_codex_evidence_roots_both_roots_present(self):
         """`--roots` 差分（py==rs 逐字节，both() 兜底）：live + archived 两个根
         一起列出；HOME 由 both() 注入 self.tmp，报告读到的就是夹具里的根。"""
