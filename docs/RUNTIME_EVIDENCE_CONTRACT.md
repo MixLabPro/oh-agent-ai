@@ -1479,9 +1479,15 @@ against the new binary each time.
 ### 17.1c P4 group log
 
 > **2026-08 update**: two statements below are superseded. (1) The "six
-> unavailable signals" are now **five** — `SandboxModes` went `measured` once the
+> unavailable signals" are now **four** — `SandboxModes` went `measured` once the
 > real rollout showed `turn_context.sandbox_policy` persists (object `{type}` /
-> legacy string, both counted; it also feeds the `sandbox_modes` timeline).
+> legacy string, both counted; it also feeds the `sandbox_modes` timeline), and
+> `UserPrompts` flipped `measured` on 2026-08-30: `response_item` with
+> `payload.type:"message"` + `role:"user"` is a real wire shape (15 messages in
+> session 01a029cb), counted by role only, never by reading `content[].text`.
+> Both implementations reference the same four-entry list
+> (`_UNAVAILABLE_SIGNALS` / `is_unavailable`:
+> `StepBoundaries`/`SandboxPolicy`/`NetworkAccess`/`UserCorrections`).
 > (2) "No detectors run against Codex" is no longer true at the core level:
 > `populate_codex_timelines` natively fills 4 of 5 timelines (approvals excepted;
 > `CommandExecution` is the primary source, the `custom_tool_call` shadow is
@@ -1516,10 +1522,11 @@ What landed, one new module per layer of the five-stage pipeline (§4.2):
   live in the same table. `UsageAggregate` and `SkillInvocations` are
   `derived(1)` markers — §14.3 says do NOT port Codex's own skill-invocation
   heuristic, so it is marked Derived with an offline-inference-may-disagree
-  note instead of being re-implemented. The six unavailable signals
-  (`StepBoundaries`/`SandboxModes`/`SandboxPolicy`/`NetworkAccess`/
-  `UserPrompts`/`UserCorrections`) are left at zero and never inserted into the
-  `SignalSet` — the "zero = absent, don't fabricate" rule.
+  note instead of being re-implemented. The four unavailable signals
+  (`StepBoundaries`/`SandboxPolicy`/`NetworkAccess`/`UserCorrections`) are left
+  at zero and never inserted into the `SignalSet` — the "zero = absent, don't
+  fabricate" rule. (`SandboxModes` and `UserPrompts` both flipped `measured`
+  during 2026-08 — see the group log above.)
 - **`attempts`, first adapter to populate it** — unknown top-level `type`,
   unknown `item.type`, or unknown `response_item.type` values are skipped and
   recorded as `SourceAttempt { source_id: "codex.rollout.jsonl", kind:

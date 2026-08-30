@@ -269,7 +269,14 @@ def _render_audit(out):
         up = cr.get("unpriced_tokens")
         s += "unpriced_tokens: %s\n" % (up if isinstance(up, int) and not isinstance(up, bool) else 0)
     signals = out.get("signals") or []
-    s += "coverage: %d/19 signals\n" % len(signals)
+    cov = out.get("coverage")
+    avail = 0
+    if isinstance(cov, dict):
+        # 分母是宿主可用信号数，不是 19——结构缺口（available=false）任何会话
+        # 都为零，算进分母只会把「9/19」这种数字弄成永远到不了的满分。
+        avail = sum(1 for c in cov.values()
+                    if isinstance(c, dict) and c.get("available") is not False)
+    s += "coverage: %d/%d available signals\n" % (len(signals), avail)
     notes = out.get("notes") or []
     s += "notes: %d\n" % len(notes)
     return s

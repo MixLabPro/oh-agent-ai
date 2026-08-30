@@ -241,7 +241,19 @@ fn bump(coverage: &mut Coverage, signal: Signal, bucket: Bucket, n: u64) {
 /// duration 折叠（DSH `duration-audit` 的同款路径）时从原始条目上读即可。
 /// P4 的 "sound" 恰好体现在这里：吸收 Paginated 的 duration 不需要给共享
 /// 类型层开新槽。
-/// | UserPrompts / UserCorrections | §13 矩阵没有 Codex 列——unavailable | — |
+/// | UserPrompts | response_item:`message` + `role:"user"`（真实线格式，正文在 `content[].text`；2026-08 实测 session 01a029cb 15 条） | measured |
+/// | UserCorrections | 无任何宿主的参考实现（§3.2 的关键词/时间窗启发未移植，DSH 也显式置零） | unavailable |
+/// §13 没有 Codex 列 / 明确 unavailable 的信号。`derive_coverage` 的置零与
+/// `codex_evidence_json` 的 `available` 标记共用同一份清单，不准两处各写一份
+/// 漂移（UserPrompts 2026-08 起 measured，不在其中；UserCorrections 的定义
+/// 是 §3.2 的关键词/时间窗启发，没有任何宿主有参考实现，移植即发明）。
+fn is_unavailable(signal: Signal) -> bool {
+    matches!(
+        signal,
+        Signal::StepBoundaries | Signal::SandboxPolicy | Signal::NetworkAccess | Signal::UserCorrections
+    )
+}
+
 fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
     let mut coverage = Coverage::new();
     let mut unknown: Vec<String> = Vec::new();
@@ -321,7 +333,13 @@ fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
                 "custom_tool_call_output" | "function_call_output" | "tool_search_output" => {
                     bump(&mut coverage, Signal::ToolResults, Bucket::Measured, 1);
                 }
-                _ => {} // message/reasoning/agent_message 不喂信号
+                // 真实线格式：payload.type="message" + role="user"，正文在
+                // content[].text（数组）——计数只看 role 存在性，不读正文。
+                // role="assistant" 的 message 是模型回复，不算用户提示。
+                "message" if payload.get("role").and_then(|v| v.as_str()) == Some("user") => {
+                    bump(&mut coverage, Signal::UserPrompts, Bucket::Measured, 1);
+                }
+                _ => {} // reasoning/agent_message 不喂信号
             },
             "turn_context" => {
                 // 顶层 turn_context 也携带 approval_policy（实测字段）——与
@@ -367,13 +385,9 @@ fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
     // §13 没有 Codex 列 / 明确 unavailable 的信号——照 DSH 的规矩显式记全零
     // （不进 SignalSet），不能编一个非零数字出来。SandboxModes 不在其中：2026-08
     // 确认 turn_context.sandbox_policy 持久化，已改 measured（见上方映射表）。
-    for signal in [
-        Signal::StepBoundaries,
-        Signal::SandboxPolicy,
-        Signal::NetworkAccess,
-        Signal::UserPrompts,
-        Signal::UserCorrections,
-    ] {
+    // UserPrompts 同样不在其中：response_item.message+role=user 是真实线格式，
+    // 2026-08 已改 measured。清单统一走 is_unavailable，序列化侧同源。
+    for signal in ALL_SIGNALS.iter().copied().filter(|s| is_unavailable(*s)) {
         coverage.set(signal, CoverageCounts::default());
     }
 
@@ -953,6 +967,7 @@ pub fn codex_evidence_json(evidence: &CodexEvidence) -> Value {
                 "derived": c.derived,
                 "lossy": c.lossy,
                 "unmetered": c.unmetered,
+                "available": !is_unavailable(*s),
             }),
         );
     }
@@ -1147,19 +1162,46 @@ mod tests {
 
     #[test]
     fn unavailable_signals_are_zero_and_not_in_signal_set() {
+        // 结构缺口（StepBoundaries/SandboxPolicy/NetworkAccess/UserCorrections）
+        // 任何输入都全零、不进 SignalSet；SandboxModes 已 available，但这份输入
+        // 没有 sandbox_policy 证据 → 同样全零不进（无证据 ≠ 有覆盖）。
+        // UserPrompts 已 available 且有自己的正测（下面那条），不混在这里。
         let evidence = build(vec![token_count(true)]);
         for signal in [
             Signal::StepBoundaries, Signal::SandboxPolicy,
-            Signal::NetworkAccess, Signal::UserPrompts, Signal::UserCorrections,
+            Signal::NetworkAccess, Signal::UserCorrections,
         ] {
             assert_eq!(evidence.canonical.coverage.get(signal), CoverageCounts::default(),
-                "{signal:?} 应 unavailable（全零、不进 SignalSet）");
+                "{signal:?} 应全零、不进 SignalSet（结构缺口）");
             assert!(!evidence.canonical.signals.contains(signal));
         }
         // SandboxModes 2026-08 从 unavailable 改 measured：有 turn_context.sandbox_policy
         // 才算，没有则保持全零不进 SignalSet（token_count 不携带 sandbox_policy）。
         assert_eq!(evidence.canonical.coverage.get(Signal::SandboxModes), CoverageCounts::default());
         assert!(!evidence.canonical.signals.contains(Signal::SandboxModes));
+    }
+
+    #[test]
+    fn user_message_response_item_counts_user_prompts() {
+        // 真实线格式（session 01a029cb 实测 15 条）：response_item.payload.
+        // type="message" + role="user"，正文在 content[].text——计数只看 role
+        // 存在性。role="assistant" 的 message 是模型回复、reasoning 是思考块，
+        // 都不算用户提示。
+        let items = vec![
+            json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "你好"}]}}),
+            json!({"type": "response_item", "timestamp": 0, "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "你好"}]}}),
+            json!({"type": "response_item", "timestamp": 0, "payload": {"type": "reasoning"}}),
+        ];
+        let evidence = build(items);
+        assert_eq!(evidence.canonical.coverage.get(Signal::UserPrompts).measured, 1);
+        assert!(evidence.canonical.signals.contains(Signal::UserPrompts));
+        // UserPrompts 不再是结构缺口：序列化标记 available。
+        let out = codex_evidence_json(&evidence);
+        assert_eq!(out["coverage"]["UserPrompts"]["available"], true);
     }
 
     #[test]
@@ -1213,7 +1255,12 @@ mod tests {
         for s in ALL_SIGNALS {
             assert!(coverage.contains_key(&format!("{s:?}")));
         }
-        assert_eq!(coverage["ToolCalls"], json!({"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0}));
+        assert_eq!(coverage["ToolCalls"], json!({"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": true}));
+        // available 标记（2026-08 起）：结构缺口 false、可数信号 true——KPI 分母
+        // 和模板「结构缺口 vs 会话缺口」的折叠都靠这个键。
+        assert_eq!(coverage["StepBoundaries"], json!({"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0, "available": false}));
+        assert_eq!(coverage["UserPrompts"], json!({"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0, "available": true}),
+            "UserPrompts 已翻 measured，不再是结构缺口");
     }
 
     #[test]

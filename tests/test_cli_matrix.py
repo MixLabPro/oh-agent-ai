@@ -951,22 +951,30 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["model"], "gpt-5.6-sol")
         self.assertEqual(report["workspace_roots"], ["/Users/alice/repo"])
         cov = report["coverage"]
-        self.assertEqual(cov["ToolCalls"], {"measured": 3, "derived": 0, "lossy": 0, "unmetered": 0})
-        self.assertEqual(cov["TurnBoundaries"], {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0})
-        self.assertEqual(cov["FileMutations"], {"measured": 0, "derived": 0, "lossy": 1, "unmetered": 0},
+        # 每个条目都带 available 标记（2026-08 起）：true = 宿主提供该维度，
+        # false = 结构缺口（任何会话都为零）。下面全部是 true——Legacy fixture
+        # 没有用户消息，UserPrompts 因此是 available=true 但 measured=0。
+        self.assertEqual(cov["ToolCalls"], {"measured": 3, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
+        self.assertEqual(cov["TurnBoundaries"], {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
+        self.assertEqual(cov["FileMutations"], {"measured": 0, "derived": 0, "lossy": 1, "unmetered": 0, "available": True},
                          "Legacy 的 patch_apply_end 只进 lossy 桶")
-        self.assertEqual(cov["UsageAggregate"], {"measured": 0, "derived": 1, "lossy": 0, "unmetered": 0})
-        self.assertEqual(cov["SkillInvocations"], {"measured": 0, "derived": 1, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["UsageAggregate"], {"measured": 0, "derived": 1, "lossy": 0, "unmetered": 0, "available": True})
+        self.assertEqual(cov["SkillInvocations"], {"measured": 0, "derived": 1, "lossy": 0, "unmetered": 0, "available": True})
         # Paginated-only 信号在 Legacy 里必须全零、不在 signals 里：
-        self.assertEqual(cov["Hooks"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
-        self.assertEqual(cov["ApprovalDecisions"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["Hooks"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
+        self.assertEqual(cov["ApprovalDecisions"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
         self.assertNotIn("Hooks", report["signals"])
         # SandboxModes（2026-08 起 measured）：Legacy fixture 有一个
         # turn_context.sandbox_policy（字符串形态 "workspace-write"）→ 计 1 且进
         # signals。coverage 从全零翻到 1 是行为变化，差分 both() 保证两语言锁步。
-        self.assertEqual(cov["SandboxModes"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0},
+        self.assertEqual(cov["SandboxModes"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": True},
                          "Legacy 的 turn_context.sandbox_policy 必须计进 SandboxModes")
         self.assertIn("SandboxModes", report["signals"])
+        # UserPrompts（2026-08 起 available）：Legacy fixture 没有
+        # response_item.message+role=user → 保持零，但标记不再是结构缺口。
+        self.assertEqual(cov["UserPrompts"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0, "available": True},
+                         "UserPrompts 已 available，Legacy 无用户消息 → 零但不是结构缺口")
+        self.assertNotIn("UserPrompts", report["signals"])
         self.assertEqual(report["attempts"], [], "认识的条目不记 attempts")
         self.assertEqual(len(report["notes"]), 1, "SkillInvocations 是 derived，必须带 §14.3 说明")
 
@@ -979,24 +987,30 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["model"], "gpt-5.6-pro")
         self.assertEqual(report["workspace_roots"], ["/Users/alice/repo", "/Users/alice/data"])
         cov = report["coverage"]
-        self.assertEqual(cov["ToolCalls"], {"measured": 4, "derived": 0, "lossy": 0, "unmetered": 0})
-        self.assertEqual(cov["ToolResults"], {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0})
-        self.assertEqual(cov["FileMutations"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0},
+        self.assertEqual(cov["ToolCalls"], {"measured": 4, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
+        self.assertEqual(cov["ToolResults"], {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
+        self.assertEqual(cov["FileMutations"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": True},
                          "FileChange 进 measured 桶，不是 lossy")
-        self.assertEqual(cov["ApprovalDecisions"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0})
-        self.assertEqual(cov["Hooks"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["ApprovalDecisions"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
+        self.assertEqual(cov["Hooks"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
         self.assertIn("Hooks", report["signals"])
+        # UserPrompts（2026-08 起 measured）：fixture 里有一条
+        # response_item.message+role=user → 计 1 且进 signals。差分 both() 保证
+        # 两语言锁步；这正是「计数只看 role 存在性」在差分里的观察面。
+        self.assertEqual(cov["UserPrompts"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": True},
+                         "fixture 的 response_item.message+role=user 必须计进 UserPrompts")
+        self.assertIn("UserPrompts", report["signals"])
         # SandboxModes（2026-08 起 measured）：Paginated fixture 有一个
         # turn_context.sandbox_policy（字符串形态 "danger-full-access"）→ 计 1 且进
         # signals。Legacy 与 Paginated 在这里同值（各有 1 个 turn_context），
         # 但来源模式不同（字符串形态 vs 字符串形态——两 fixture 都没用真实的对象
         # 形态；对象形态的填充由 `populate_codex_timelines` 单测钉住）。
-        self.assertEqual(cov["SandboxModes"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0},
+        self.assertEqual(cov["SandboxModes"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": True},
                          "Paginated 的 turn_context.sandbox_policy 必须计进 SandboxModes")
         self.assertIn("SandboxModes", report["signals"])
         # Legacy-only 的 token_count/task_* 在 Paginated fixture 里没有：
-        self.assertEqual(cov["Usage"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
-        self.assertEqual(cov["TurnBoundaries"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertEqual(cov["Usage"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
+        self.assertEqual(cov["TurnBoundaries"], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
         # 两种 mode 的 coverage 必须不同（§17.1 "two rows, not one"）：
         legacy = self._codex_evidence(ROOT / "fixtures" / "codex" / "legacy.jsonl")
         self.assertNotEqual(legacy["signals"], report["signals"],

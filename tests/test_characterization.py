@@ -2642,6 +2642,14 @@ def _cx_response(response_type):
     return {"type": "response_item", "timestamp": 0, "payload": {"type": response_type}}
 
 
+def _cx_user_message():
+    # 真实线格式（session 01a029cb 实测 15 条）：payload.type="message" +
+    # role="user"，正文在 content[].text（数组）——计数只看 role 存在性。
+    return {"type": "response_item", "timestamp": 0,
+            "payload": {"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "你好"}]}}
+
+
 class TestCodexSessionParse(unittest.TestCase):
     """`parse_codex_session_log` 的 provenance 抽取——字段路径来自真实语料
     （session_meta 的 model 恒 null，model 只从 turn_context 取）。"""
@@ -2789,13 +2797,32 @@ class TestCodexCoverage(unittest.TestCase):
         self.assertEqual(cov["FileMutations"]["measured"], 1)
 
     def test_unavailable_signals_are_zero_and_not_in_signal_set(self):
+        # 结构缺口（StepBoundaries/SandboxPolicy/NetworkAccess/UserCorrections）
+        # 任何输入都全零、不进 signals；SandboxModes 已 available，但这份输入
+        # 没有 sandbox_policy 证据 → 同样全零不进（无证据 ≠ 有覆盖）。
+        # UserPrompts 已 available 且有自己的正测（下面那条），不再混在这里。
         items = [_cx_event("token_count", {"info": {"model_context_window": 128000}})]
         signals, cov = self._signals(items)
         for name in ("StepBoundaries", "SandboxModes", "SandboxPolicy",
-                     "NetworkAccess", "UserPrompts", "UserCorrections"):
+                     "NetworkAccess", "UserCorrections"):
             self.assertEqual(cov[name], {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0},
-                             "%s 应 unavailable（全零、不进 signals）" % name)
+                             "%s 应全零、不进 signals（结构缺口或无对应证据）" % name)
             self.assertNotIn(name, signals)
+
+    def test_user_message_response_item_counts_user_prompts(self):
+        # UserPrompts 2026-08 从 unavailable 翻 measured：response_item.message
+        # + role="user" 计 1。role="assistant" 的 message 是模型回复、reasoning
+        # 是思考块——都不算用户提示。
+        items = [
+            _cx_user_message(),
+            {"type": "response_item", "timestamp": 0,
+             "payload": {"type": "message", "role": "assistant",
+                         "content": [{"type": "output_text", "text": "你好"}]}},
+            _cx_response("reasoning"),
+        ]
+        signals, cov = self._signals(items)
+        self.assertEqual(cov["UserPrompts"], {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0})
+        self.assertIn("UserPrompts", signals)
 
     def test_unknown_types_are_reported_sorted_and_deduped(self):
         items = [
@@ -2850,7 +2877,12 @@ class TestCodexEvidenceJson(unittest.TestCase):
         self.assertEqual(out["history_mode"], "legacy")
         self.assertEqual(len(out["coverage"]), 19)
         self.assertEqual(out["coverage"]["ToolCalls"],
-                         {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0})
+                         {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
+        # available 标记（2026-08 起）：结构缺口 false、可数信号 true——KPI 分母
+        # 和模板「结构缺口 vs 会话缺口」的折叠都靠这个键。
+        self.assertIs(out["coverage"]["StepBoundaries"]["available"], False)
+        self.assertIs(out["coverage"]["UserPrompts"]["available"], True,
+                      "UserPrompts 已翻 measured，不再是结构缺口")
 
     def test_title_from_index_is_surfaced(self):
         out = self._build([], title="评估项目添加UI")

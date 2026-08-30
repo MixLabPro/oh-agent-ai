@@ -333,8 +333,15 @@ pub fn render_codex_session(out: &Value) -> String {
         ));
     }
     s.push_str(&format!(
-        "coverage: {}/19 signals\n",
-        out.get("signals").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0)
+        // 分母是宿主可用信号数，不是 19——结构缺口（available=false）任何会话
+        // 都为零，算进分母只会把「9/19」这种数字弄成永远到不了的满分。
+        "coverage: {}/{} available signals\n",
+        out.get("signals").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        out.get("coverage").and_then(|v| v.as_object()).map(|m| {
+            m.values()
+                .filter(|c| c.as_object().is_some_and(|o| o.get("available").and_then(|v| v.as_bool()) != Some(false)))
+                .count()
+        }).unwrap_or(0)
     ));
     s.push_str(&format!(
         "notes: {}\n",

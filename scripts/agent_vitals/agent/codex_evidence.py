@@ -129,11 +129,14 @@ KNOWN_RESPONSE_TYPES = frozenset((
 # §13 没有 Codex 列 / 明确 unavailable 的信号——照 DSH 的规矩显式记全零
 # （不进 SignalSet），不能编一个非零数字出来。SandboxModes 不在其中：2026-08
 # 确认 turn_context.sandbox_policy 持久化，已改 measured（见 derive_coverage）。
+# UserPrompts 同样不在其中：response_item.payload.type="message" + role="user"
+# 是真实线格式（session 01a029cb 实测 15 条），2026-08 已改 measured。
+# UserCorrections 留在里面：它的定义是 UserPrompts + TurnBoundaries 的关键词/
+# 时间窗启发（§3.2），没有任何宿主有参考实现（DSH 也显式置零），移植即发明。
 _UNAVAILABLE_SIGNALS = (
     "StepBoundaries",
     "SandboxPolicy",
     "NetworkAccess",
-    "UserPrompts",
     "UserCorrections",
 )
 
@@ -316,7 +319,12 @@ def derive_coverage(items):
             elif inner in ("custom_tool_call_output", "function_call_output",
                            "tool_search_output"):
                 _bump(coverage, "ToolResults", "measured")
-            # message / reasoning / agent_message 不喂信号
+            elif inner == "message" and payload.get("role") == "user":
+                # 真实线格式：payload.type="message" + role="user"，正文在
+                # content[].text（数组）——计数只看 role 存在性，不读正文。
+                # role="assistant" 的 message 是模型回复，不算用户提示。
+                _bump(coverage, "UserPrompts", "measured")
+            # reasoning / agent_message 不喂信号
         elif top == "turn_context":
             # 顶层 turn_context 也携带 approval_policy（实测字段）——与
             # thread_settings_applied 同源不同载体，数它的存在性即可。
@@ -791,7 +799,8 @@ def codex_evidence_json(evidence):
     """evidence 字典 → `codex-evidence --json` 的输出形状。与 Rust
     `codex_evidence_json` 逐字节对齐——键序、嵌套结构、`attempts`/`notes` 的
     序列化都是这里单独控制的。`signals` 数组按 ALL_SIGNALS 序；`coverage` 19
-    键全量（unavailable 的也是全零四条，不是缺键）。
+    键全量（unavailable 的也是全零四条，不是缺键）；`available` 标记宿主是否
+    提供该维度——false = 结构缺口，任何会话都为零，KPI 分母不算它。
     """
     canonical = evidence["canonical"]
     sigset = set(canonical["signals"])
@@ -804,6 +813,7 @@ def codex_evidence_json(evidence):
             "derived": c["derived"],
             "lossy": c["lossy"],
             "unmetered": c["unmetered"],
+            "available": s not in _UNAVAILABLE_SIGNALS,
         }
     attempts = []
     for a in canonical["attempts"]:
