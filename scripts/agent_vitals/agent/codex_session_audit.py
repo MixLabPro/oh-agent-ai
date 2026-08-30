@@ -80,6 +80,100 @@ def _context_window_of(items):
     return found
 
 
+def _number(value):
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _quota_trajectory_of(items):
+    samples = []
+    for item in items:
+        payload = item.get("payload") if isinstance(item, dict) else None
+        if not isinstance(payload, dict) or payload.get("type") != "token_count":
+            continue
+        primary = payload.get("rate_limits")
+        primary = primary.get("primary") if isinstance(primary, dict) else None
+        used = primary.get("used_percent") if isinstance(primary, dict) else None
+        if _number(used) is not None:
+            samples.append({"used_percent": used, "observed_at": _item_ts(item),
+                            "resets_at": primary.get("resets_at") if isinstance(primary.get("resets_at"), int) and not isinstance(primary.get("resets_at"), bool) else None})
+    if not samples:
+        return None
+    first, last = samples[0], samples[-1]
+    comparable, reason = True, None
+    if first["resets_at"] != last["resets_at"]:
+        comparable, reason = False, "reset_window_changed"
+    elif last["used_percent"] < first["used_percent"]:
+        comparable, reason = False, "used_percent_decreased"
+    return {"scope": "primary", "samples": len(samples),
+            "first": {"used_percent": first["used_percent"], "observed_at": first["observed_at"]},
+            "last": {"used_percent": last["used_percent"], "observed_at": last["observed_at"]},
+            "consumed_percent": last["used_percent"] - first["used_percent"] if comparable else None,
+            "resets_at": last["resets_at"], "comparable": comparable, "reason": reason}
+
+
+def _permission_trajectory_of(items):
+    effective = None; transitions = []; dangerous = 0
+    for item in items:
+        payload = item.get("payload") if isinstance(item, dict) else None
+        if not isinstance(payload, dict) or item.get("type") != "turn_context":
+            continue
+        observed = payload.get("active_permission_profile")
+        observed = observed if isinstance(observed, str) else None
+        if observed is not None: effective = observed
+        sandbox = payload.get("sandbox_policy")
+        sandbox = sandbox.get("type") if isinstance(sandbox, dict) else sandbox
+        sandbox = sandbox if isinstance(sandbox, str) else None
+        approval = payload.get("approval_policy")
+        approval = approval if isinstance(approval, str) else None
+        if effective == ":danger-full-access" or sandbox == "danger-full-access": dangerous += 1
+        state = {"turn": payload.get("turn_id") if isinstance(payload.get("turn_id"), str) else None,
+                 "observed_profile": observed, "effective_profile": effective,
+                 "sandbox": sandbox, "approval": approval}
+        if not transitions or transitions[-1]["effective_profile"] != state["effective_profile"] or transitions[-1]["sandbox"] != sandbox or transitions[-1]["approval"] != approval:
+            transitions.append(state)
+    return {"dangerous_turns": dangerous, "transitions": transitions}
+
+
+def _turn_ends_of(canonical):
+    total = clean = error = incomplete = 0; codes = {}
+    for entry in canonical["turns"]["entries"]:
+        obs = entry["observation"]; total += 1
+        if obs.get("end_seq") is None: incomplete += 1
+        elif obs.get("end_reason_kind") == "error":
+            error += 1
+            code = obs.get("end_error_code")
+            if isinstance(code, str): codes[code] = codes.get(code, 0) + 1
+        else: clean += 1
+    return {"total": total, "clean": clean, "error": error, "incomplete": incomplete, "codes": codes}
+
+
+def _effort_of(items):
+    values = []; summary = None
+    for item in items:
+        payload = item.get("payload") if isinstance(item, dict) else None
+        settings = payload.get("thread_settings") if isinstance(payload, dict) and payload.get("type") == "thread_settings_applied" else None
+        if isinstance(settings, dict):
+            effort = settings.get("reasoning_effort")
+            if isinstance(effort, str): values.append(effort)
+            if isinstance(settings.get("reasoning_summary"), str): summary = settings["reasoning_summary"]
+    return {"effective": values[-1] if values else None, "reasoning_effort": values[-1] if values else None,
+            "reasoning_summary": summary, "changed": len(set(values)) > 1}
+
+
+def _tool_output_bytes_of(items):
+    stdout = stderr = commands = 0; top = []
+    for item in items:
+        payload = item.get("payload") if isinstance(item, dict) else None
+        it = payload.get("item") if isinstance(payload, dict) and payload.get("type") == "item_completed" else None
+        if not isinstance(it, dict) or it.get("type") != "CommandExecution": continue
+        out = it.get("stdout") if isinstance(it.get("stdout"), str) else ""
+        err = it.get("stderr") if isinstance(it.get("stderr"), str) else ""
+        ob, eb = len(out.encode("utf-8")), len(err.encode("utf-8")); stdout += ob; stderr += eb; commands += 1
+        top.append({"turn": payload.get("turn_id") if isinstance(payload.get("turn_id"), str) else None, "tool": "bash", "stdout_bytes": ob})
+    top.sort(key=lambda x: x["stdout_bytes"], reverse=True)
+    return {"stdout": stdout, "stderr": stderr, "commands": commands, "top": top[:5]}
+
+
 def _file_info(path):
     """一份 rollout 文件对 `codex-session` 有用的全部信息。degraded 文件（不可读/
     非 JSON/空）→ items 空 + 时间戳 None，但**仍按文件名兜底的 session_id
@@ -205,6 +299,11 @@ def codex_session_audit_json(home, session_id):
         "context_window": context_window,
         "date_span": {"first": first, "last": last_ts},
         "audit": audit,
+        "quota_trajectory": _quota_trajectory_of(all_items),
+        "permission_transitions": _permission_trajectory_of(all_items),
+        "turn_ends": _turn_ends_of(evidence["canonical"]),
+        "effort": _effort_of(all_items),
+        "tool_output_bytes": _tool_output_bytes_of(all_items),
         "cost_report": cost_report,
         "coverage": ev["coverage"],
         "signals": ev["signals"],

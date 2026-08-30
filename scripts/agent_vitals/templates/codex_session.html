@@ -131,6 +131,8 @@ body{margin:0;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-pr
     <div class="sv-subcard"><div class="sv-panel-sub">逐小时 token 曲线（by_hour_model 折叠 → 小时桶）。Codex 无逐 turn 行为信号，
       这是「健康时间线」的诚实对应物——只看用量形状，不看行为好坏。</div>
       <div class="sv-chartwrap" id="sv-timeline"></div></div>
+    <div class="sv-subcard"><div class="sv-panel-sub">权限轨迹（只显示有效权限、sandbox 或 approval 改变的 turn）。</div>
+      <div class="sv-kv" id="sv-permissions"></div></div>
   </section>
 
   <section class="sv-section" id="s-coverage">
@@ -183,6 +185,8 @@ if (!D) {
   var AUDIT = D.audit || { summary: {}, findings: [], rule_outcomes: {} };
   var auditSummary = AUDIT.summary || {};
   var auditFindings = AUDIT.findings || [];
+  var QUOTA = D.quota_trajectory;
+  var PERMISSIONS = D.permission_transitions || {};
 
   // ── 覆盖折叠：KPI 分母/命中、Finding 线索、结构缺口 ─────────────────────
   // 纯函数，只读入参（covKeys 条目带 2026-08 起的 available 标记），无 DOM——
@@ -220,6 +224,7 @@ if (!D) {
   chips.push('<b>会话根</b> ' + esc((D.workspace_roots || []).join(', ') || '—'));
   if (D.date_span) chips.push('<b>跨度</b> ' + esc(dash(D.date_span.first)) + ' → ' + esc(dash(D.date_span.last)));
   chips.push('<b>文件</b> ' + (D.files || []).length + ' 份 rollout');
+  if (D.effort && D.effort.effective) chips.push('<b>推理强度</b> ' + esc(D.effort.effective));
   document.getElementById('sv-chips').innerHTML = chips.join('');
 
   // ── 4 张 KPI 卡 ────────────────────────────────────────────────────
@@ -325,6 +330,11 @@ if (!D) {
 
   var tl = document.getElementById('sv-timeline');
   tl.innerHTML = svTimelineSvg(CR.hours || [], 800, 130, 26, esc, num);
+  var permissionRows = (PERMISSIONS.transitions || []).map(function (p) {
+    return '<div class="sv-kv-item"><div class="sv-kv-label">turn ' + esc(dash(p.turn)) + '</div><div class="sv-kv-value"><code>' +
+      esc(dash(p.effective_profile || p.sandbox || p.approval)) + '</code></div></div>';
+  }).join('');
+  document.getElementById('sv-permissions').innerHTML = permissionRows || '<div class="sv-empty">没有持久化的 turn 权限状态。</div>';
 
   // ── 3 出处与覆盖 ───────────────────────────────────────────────────
   var prov = [
@@ -359,6 +369,9 @@ if (!D) {
   document.getElementById('sv-coverage').innerHTML =
     '<table class="sv-costtable"><thead><tr><th>信号</th><th>measured</th><th>derived</th>' +
     '<th>lossy</th><th>unmetered</th><th>状态</th></tr></thead><tbody>' + covRows + '</tbody></table>';
+  var ends = D.turn_ends || {};
+  var output = D.tool_output_bytes || {};
+  document.getElementById('sv-coverage').innerHTML += '<div class="sv-insight">turn 结束：<b>' + num(ends.clean || 0) + '</b> clean · <b>' + num(ends.error || 0) + '</b> error · <b>' + num(ends.incomplete || 0) + '</b> incomplete；工具输出 <b>' + num(output.stdout || 0) + '</b> B stdout / <b>' + num(output.stderr || 0) + '</b> B stderr。</div>';
 
   // ── 4 计划与额度 ───────────────────────────────────────────────────
   var plan = CR.plan;
@@ -392,6 +405,10 @@ if (!D) {
         (L.window_minutes != null ? ' · 窗口 ' + num(L.window_minutes) + ' 分钟' : '') +
         (L.resets_at != null ? ' · 重置于 ' + fmtEpoch(L.resets_at) : '') + '</div>';
     });
+    if (QUOTA) {
+      var q = QUOTA.comparable ? '本会话消耗配额 ' + num(QUOTA.consumed_percent) + ' 个百分点（' + num(QUOTA.first.used_percent) + '% → ' + num(QUOTA.last.used_percent) + '%）' : '配额轨迹不可比较：' + dash(QUOTA.reason);
+      planHtml += '<div class="sv-insight"><b>primary 轨迹</b>：' + esc(q) + ' · ' + num(QUOTA.samples) + ' 个快照</div>';
+    }
     planEl.innerHTML = planHtml;
   }
 

@@ -105,6 +105,70 @@ fn audit_projection(evidence: &CodexEvidence) -> Value {
     })
 }
 
+fn quota_trajectory_of(items: &[Value]) -> Value {
+    let mut samples: Vec<(f64, Option<String>, Option<i64>)> = Vec::new();
+    for item in items {
+        let payload = item.get("payload");
+        if payload.and_then(|p| p.get("type")).and_then(|v| v.as_str()) != Some("token_count") { continue; }
+        let primary = payload.and_then(|p| p.get("rate_limits")).and_then(|v| v.get("primary"));
+        let Some(used) = primary.and_then(|p| p.get("used_percent")).and_then(|v| v.as_f64()) else { continue; };
+        samples.push((used, item_ts(item), primary.and_then(|p| p.get("resets_at")).and_then(|v| v.as_i64())));
+    }
+    let Some(first) = samples.first() else { return Value::Null; };
+    let last = samples.last().expect("non-empty");
+    let (comparable, reason) = if first.2 != last.2 { (false, Some("reset_window_changed")) }
+        else if last.0 < first.0 { (false, Some("used_percent_decreased")) } else { (true, None) };
+    json!({"scope":"primary", "samples": samples.len(),
+        "first":{"used_percent":first.0,"observed_at":first.1},
+        "last":{"used_percent":last.0,"observed_at":last.1},
+        "consumed_percent": if comparable { json!(last.0-first.0) } else { Value::Null },
+        "resets_at":last.2,"comparable":comparable,"reason":reason})
+}
+
+fn permission_trajectory_of(items: &[Value]) -> Value {
+    let mut effective: Option<String> = None; let mut dangerous = 0u64; let mut transitions: Vec<Value> = Vec::new();
+    for item in items {
+        if item.get("type").and_then(|v| v.as_str()) != Some("turn_context") { continue; }
+        let Some(payload) = item.get("payload") else { continue; };
+        let observed = payload.get("active_permission_profile").and_then(|v| v.as_str()).map(str::to_owned);
+        if observed.is_some() { effective = observed.clone(); }
+        let sandbox = payload.get("sandbox_policy").and_then(|v| {
+            if let Some(s) = v.as_str() { Some(s) } else { v.get("type").and_then(|x| x.as_str()) }
+        }).map(str::to_owned);
+        let approval = payload.get("approval_policy").and_then(|v| v.as_str()).map(str::to_owned);
+        if effective.as_deref() == Some(":danger-full-access") || sandbox.as_deref() == Some("danger-full-access") { dangerous += 1; }
+        let state = json!({"turn":payload.get("turn_id").and_then(|v| v.as_str()),"observed_profile":observed,"effective_profile":effective,"sandbox":sandbox,"approval":approval});
+        let changed = transitions.last().map_or(true, |p| p["effective_profile"] != state["effective_profile"] || p["sandbox"] != state["sandbox"] || p["approval"] != state["approval"]);
+        if changed { transitions.push(state); }
+    }
+    json!({"dangerous_turns":dangerous,"transitions":transitions})
+}
+
+fn turn_ends_of(evidence: &CodexEvidence) -> Value {
+    let mut clean=0u64; let mut error=0u64; let mut incomplete=0u64; let mut codes=Map::new();
+    for entry in &evidence.canonical.turns.entries {
+        let obs=&entry.observation;
+        if obs.end_seq.is_none() { incomplete+=1; }
+        else if obs.end_reason_kind.as_deref()==Some("error") { error+=1; if let Some(code)=&obs.end_error_code { let n=codes.get(code).and_then(|v|v.as_u64()).unwrap_or(0)+1; codes.insert(code.clone(),json!(n)); } }
+        else { clean+=1; }
+    }
+    json!({"total":evidence.canonical.turns.entries.len(),"clean":clean,"error":error,"incomplete":incomplete,"codes":codes})
+}
+
+fn effort_of(items: &[Value]) -> Value {
+    let mut values:Vec<String>=Vec::new(); let mut summary:Option<String>=None;
+    for item in items { let p=item.get("payload"); if p.and_then(|v|v.get("type")).and_then(|v|v.as_str())!=Some("thread_settings_applied") {continue;} let Some(s)=p.and_then(|v|v.get("thread_settings")) else{continue;}; if let Some(v)=s.get("reasoning_effort").and_then(|v|v.as_str()){values.push(v.to_string())}; if let Some(v)=s.get("reasoning_summary").and_then(|v|v.as_str()){summary=Some(v.to_string())}; }
+    let effective=values.last().cloned(); let changed=values.iter().collect::<std::collections::HashSet<_>>().len()>1;
+    json!({"effective":effective,"reasoning_effort":values.last().cloned(),"reasoning_summary":summary,"changed":changed})
+}
+
+fn tool_output_bytes_of(items: &[Value]) -> Value {
+    let mut stdout=0u64;let mut stderr=0u64;let mut commands=0u64;let mut top:Vec<Value>=Vec::new();
+    for item in items { let p=item.get("payload"); if p.and_then(|v|v.get("type")).and_then(|v|v.as_str())!=Some("item_completed"){continue;} let Some(it)=p.and_then(|v|v.get("item"))else{continue;};if it.get("type").and_then(|v|v.as_str())!=Some("CommandExecution"){continue;}let out=it.get("stdout").and_then(|v|v.as_str()).unwrap_or("");let err=it.get("stderr").and_then(|v|v.as_str()).unwrap_or("");let ob=out.len() as u64;let eb=err.len() as u64;stdout+=ob;stderr+=eb;commands+=1;top.push(json!({"turn":p.and_then(|v|v.get("turn_id")).and_then(|v|v.as_str()),"tool":"bash","stdout_bytes":ob})); }
+    top.sort_by(|a,b|b["stdout_bytes"].as_u64().cmp(&a["stdout_bytes"].as_u64())); top.truncate(5);
+    json!({"stdout":stdout,"stderr":stderr,"commands":commands,"top":top})
+}
+
 fn file_info(path: &Path) -> FileInfo {
     let parsed = read_codex_session_log(path);
     let items: Vec<Value> = parsed
@@ -248,7 +312,7 @@ pub fn codex_session_audit_json(home: &Path, session_id: &str) -> Option<Value> 
 
     // ── 出处：concat 全部 items → 一次 build（覆盖 = 跨文件并集）──────────
     let evidence = build_codex_evidence(
-        all_items,
+        all_items.clone(),
         session_id.to_string(),
         index.get(session_id).cloned(),
         current.history_mode.clone(),
@@ -281,6 +345,11 @@ pub fn codex_session_audit_json(home: &Path, session_id: &str) -> Option<Value> 
     out.insert("context_window".into(), context_window.map_or(Value::Null, |w| json!(w)));
     out.insert("date_span".into(), json!({ "first": first, "last": last_ts }));
     out.insert("audit".into(), audit);
+    out.insert("quota_trajectory".into(), quota_trajectory_of(&all_items));
+    out.insert("permission_transitions".into(), permission_trajectory_of(&all_items));
+    out.insert("turn_ends".into(), turn_ends_of(&evidence));
+    out.insert("effort".into(), effort_of(&all_items));
+    out.insert("tool_output_bytes".into(), tool_output_bytes_of(&all_items));
     out.insert("cost_report".into(), cost_report);
     out.insert("coverage".into(), ev["coverage"].clone());
     out.insert("signals".into(), ev["signals"].clone());
