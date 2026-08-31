@@ -28,8 +28,10 @@ Thumbs.db
 .vscode/
 *.swp
 
-# Rust —— main 上不留源码，但开发者可能在同一工作区切到 rust 分支构建
-/target/
+# Rust —— main 上不留源码，但开发者可能在同一工作区切到 rust 分支构建。
+# 不带锚点：不仅根 target/，任何嵌套位置的 target/（如单独构建某个
+# crates/* 子包时的 target 目录）都兜住，不因构建方式不同而漏入库。
+target/
 
 # ClawHub 打包产物。package-clawhub.yml 往 dist/ 写，本地复现打包时同样。
 # 它是仓库内容的副本，提交进来只会和源文件不同步。
