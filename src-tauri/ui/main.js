@@ -57,24 +57,28 @@ async function render() {
     fill.className = "fill";
     budgetSub.textContent = "等预算数据（跑一次 oneline）";
   } else {
-    // 百分比唯一来源：alert.json 的 month_ratio（今日 ratio 可能为 null）。
-    const ratio = Math.min(1, b.month_ratio || b.ratio || 0);
+    // 百分比唯一来源：alert.json 的 month_ratio（今日 ratio 可能为 null）。用
+    // `??` 而不是 `||`——合法的月占比 0 不能被 `||` 错回退成日占比（review fix 6）。
+    const ratio = Math.min(1, b.month_ratio ?? b.ratio ?? 0);
     const daily =
       b.effective_daily_budget != null ? " · 日预算 " + fmtMoney(b.effective_daily_budget) : "";
     fill.style.width = fmtPct(ratio);
     const levelCls =
       b.level === "over" ? " danger" : b.level === "warn" ? " warn" : "";
     fill.className = "fill" + levelCls;
-    // 状态行：over/warn/snoozed/ok 各自的权威文案，百分比来自 alert.json。
+    // 状态行：over/warn/snoozed/disabled/ok 各自的权威文案，百分比来自 alert.json。
     if (b.level === "over") {
       budgetSub.textContent =
         "超支 " + fmtMoney(b.month_cost || 0) + "（月 " + fmtMoney(denom) + "）" + daily;
     } else if (b.level === "snoozed") {
       budgetSub.textContent =
         "已静默" + (b.snoozed_until ? "至 " + b.snoozed_until : "") + daily;
+    } else if (b.level === "disabled") {
+      // 预算被显式禁用：不落入「已用 xx%」的通用文案（review fix 6）。
+      budgetSub.textContent = "预算已禁用" + daily;
     } else {
       budgetSub.textContent =
-        "已用 " + fmtPct(b.month_ratio || 0) + "（" + fmtMoney(b.month_cost || 0) +
+        "已用 " + fmtPct(b.month_ratio ?? 0) + "（" + fmtMoney(b.month_cost || 0) +
         " / " + fmtMoney(denom) + "）" + daily;
     }
     // reasons 悬停可见：为什么是这个 level（预算规则的人话）。
@@ -93,6 +97,50 @@ async function render() {
   } else {
     freshness = "预算数据尚未产出";
   }
+
+  // 同步状态（review fix 4）：tick 每轮把结果落盘到 state/last-sync.json，这里
+  // 只读展示。失败要可见、要可行动——状态行 + 「立即同步」按钮（trigger_sync =
+  // 与托盘「立即同步」同一条受控 tick 路径）。
+  const sync = ov.sync || { ok: false, stage: "never", message: "尚未同步" };
+  const syncStatus = document.getElementById("sync-status");
+  const syncNow = document.getElementById("sync-now");
+  if (sync.ok) {
+    syncStatus.textContent =
+      "上次同步：成功" + (sync.at ? " " + sync.at.slice(11, 16) : "");
+    syncStatus.title = sync.message + (sync.at ? "（" + sync.at + "）" : "");
+    syncNow.hidden = true;
+  } else if (sync.stage === "never") {
+    // 首次启动、还没跑过 tick：诚实说「尚未同步」，给入口。
+    syncStatus.textContent = "尚未同步（点右侧立即同步）";
+    syncNow.hidden = false;
+  } else {
+    syncStatus.textContent = "⚠ 上次同步失败：" + (sync.message || "未知原因");
+    syncStatus.title = sync.message;
+    syncNow.hidden = false;
+  }
+  syncNow.disabled = false;
+  syncNow.onclick = async () => {
+    syncNow.disabled = true;
+    syncStatus.textContent = "同步中…";
+    const before = sync.at || "";
+    try {
+      await invoke("trigger_sync");
+      // 受控 tick 在后台线程跑（discover→oneline→refresh），轮询等 last-sync.json
+      // 的 at 变化（成功/失败都会落盘）。oneline 一般 <1s，10s 是上界。
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const o = await invoke("read_overview");
+        if (o.sync && (o.sync.at || "") !== before) {
+          render();
+          return;
+        }
+      }
+      render();
+    } catch (e) {
+      syncStatus.textContent = "同步请求失败：" + String(e);
+      syncNow.disabled = false;
+    }
+  };
 
   // 逐日
   const list = document.getElementById("days-list");

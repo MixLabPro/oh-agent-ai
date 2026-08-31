@@ -15,6 +15,7 @@ pub mod cost;
 pub mod dsh_evidence;
 pub mod duration;
 pub mod evidence;
+pub mod findings;
 pub mod r2a;
 pub mod skill;
 pub mod state;

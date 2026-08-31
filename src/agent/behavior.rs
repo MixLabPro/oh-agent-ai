@@ -192,3 +192,52 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
         waste_coverage: waste_coverage_val,
     })
 }
+
+/// 20 键行为审计载荷（`behavior --json` 的输出形状 + cost/pre_fork_cost）。DSH
+/// SessionReport 的 `session` 载荷就是这份（R2a §2.4，不复用第二套字段名）。
+/// main.rs 的 `behavior --json` 与 r2a_store 的 DSH population 共用它。
+///
+/// 键序 = 字节一致的一部分，**不能重排**（与 Python cli.py 的 `json.dumps` 逐字节
+/// 对齐）：findings → usage → requests → context → compaction → waste → cost →
+/// pre_fork → pre_fork_cost → subagents → skill → duration → rule_outcomes →
+/// usage_coverage → duration_coverage → skill_coverage → subagents_coverage →
+/// compaction_coverage → waste_coverage。
+///
+/// `cost` 不是 audit 六键之一——它读的是 `usage` × pricing.json，是 `usage` 上的
+/// 一次派生计算（展示层定价，core 只给 token）。`pre_fork` 与 `usage` 是同一个
+/// 形状，定价走同一个 `cost_report`；没分叉时 `pre_fork`/`pre_fork_cost` 都是
+/// null，**不是**全零结构（「没分叉」和「分叉了但上游没花钱」是两回事）。
+///
+/// 降级时（不可读/畸形/schema 不符）返回 `None`——调用方 exit 2，绝不返回空载荷。
+pub fn audit_payload(path: &Path) -> Option<Value> {
+    let audit = audit_session_log(path)?;
+    let findings = &audit.findings;
+    let pricing = crate::agent::cost::load_pricing();
+    let cost = crate::agent::cost::cost_report(&audit.usage, &pricing);
+    let pre_fork_cost = if audit.pre_fork.is_null() {
+        None
+    } else {
+        crate::agent::cost::cost_report(&audit.pre_fork, &pricing)
+    };
+    Some(json!({
+        "findings": findings,
+        "usage": &audit.usage,
+        "requests": &audit.requests,
+        "context": &audit.context,
+        "compaction": &audit.compaction,
+        "waste": &audit.waste,
+        "cost": cost,
+        "pre_fork": &audit.pre_fork,
+        "pre_fork_cost": pre_fork_cost,
+        "subagents": &audit.subagents,
+        "skill": &audit.skill,
+        "duration": &audit.duration,
+        "rule_outcomes": &audit.rule_outcomes,
+        "usage_coverage": &audit.usage_coverage,
+        "duration_coverage": &audit.duration_coverage,
+        "skill_coverage": &audit.skill_coverage,
+        "subagents_coverage": &audit.subagents_coverage,
+        "compaction_coverage": &audit.compaction_coverage,
+        "waste_coverage": &audit.waste_coverage,
+    }))
+}

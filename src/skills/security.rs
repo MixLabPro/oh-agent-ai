@@ -154,23 +154,29 @@ fn check(text: &str, where_: &str, findings: &mut Vec<Value>) {
 
 /// 对 SKILL.md 正文与附带脚本做启发式安全检查。
 pub fn security_scan(skill_dir: &Path, skill_raw: &str, self_root: Option<&Path>) -> Value {
-    // 排除扫描器自身：否则规则定义与规则说明会自己命中自己（不变量 5）
+    // 排除扫描器自身：否则规则定义与规则说明会自己命中自己（不变量 5）。
+    // canonicalize 任一失败（瞬态 fs 错误、并发下目录被改动）**不得**把排除静默
+    // 丢掉——否则就扫到自己、self_excluded 缺失，正是 test_self_excluded 在差分
+    // harness 下守的回归（曾经扫到自己、报告带自身 22 条规则命中）。失败时回退到
+    // 裸路径等值比较（不碰 fs，纯字符串）：skill_dir 与 self_root 字面相等即可排除。
     if let Some(root) = self_root {
-        if let (Ok(a), Ok(b)) = (skill_dir.canonicalize(), root.canonicalize()) {
-            if a == b {
-                return json!({
-                    "findings": [],
-                    "max_severity": "none",
-                    "max_severity_uncited": "none",
-                    "cited_count": 0,
-                    "all_findings_cited": false,
-                    "exec_scripts": [],
-                    "external_urls": [],
-                    "external_url_count": 0,
-                    "scanned_script_count": 0,
-                    "self_excluded": true,
-                });
-            }
+        let excluded = match (skill_dir.canonicalize(), root.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => skill_dir == root,
+        };
+        if excluded {
+            return json!({
+                "findings": [],
+                "max_severity": "none",
+                "max_severity_uncited": "none",
+                "cited_count": 0,
+                "all_findings_cited": false,
+                "exec_scripts": [],
+                "external_urls": [],
+                "external_url_count": 0,
+                "scanned_script_count": 0,
+                "self_excluded": true,
+            });
         }
     }
 
@@ -317,5 +323,26 @@ mod tests {
         assert_eq!(worst(&plain), "critical");
         assert_eq!(worst(&example), "critical", "cited 不得降低权威严重度");
         assert_eq!(example[0]["cited"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn self_exclusion_survives_canonicalize_failure() {
+        // canonicalize 对不存在的路径返回 Err。旧代码 `if let (Ok, Ok)` 会静默落到
+        // 全扫描（self_excluded 缺失）——test_self_excluded 在差分 harness 下守的
+        // 回归（曾经扫到自己）。回退：skill_dir 与 self_root 字面相等也排除。
+        let missing = Path::new("/definitely/not/a/real/self-exclusion-test-dir");
+        let v = security_scan(missing, "", Some(missing));
+        assert_eq!(v["self_excluded"], serde_json::json!(true));
+        assert_eq!(v["max_severity"], serde_json::json!("none"));
+    }
+
+    #[test]
+    fn self_exclusion_fallback_requires_equal_paths() {
+        // 回退只在路径字面相等时排除；不相等照常扫（self_excluded 不出现）。
+        let a = Path::new("/definitely/not/a/real/self-exclusion-test-a");
+        let b = Path::new("/definitely/not/a/real/self-exclusion-test-b");
+        let v = security_scan(a, "", Some(b));
+        assert_ne!(v["self_excluded"], serde_json::json!(true));
+        assert_eq!(v["max_severity"], serde_json::json!("none"));
     }
 }

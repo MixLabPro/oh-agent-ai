@@ -24,6 +24,10 @@ cargo tauri build
 # 产物在 target/release/bundle/ 下
 ```
 
+菜单栏图标与 App Icon 分离：`icons/trayTemplate.svg` 是 Swept Crest v2A 的
+单色源图，导出为 22×18px / 44×36px PNG；Rust 内嵌 `trayTemplate@2x.png` 并开启
+`icon_as_template(true)`，由 macOS 自动适配明暗、选中和辅助功能状态。
+
 独立 workspace（`[workspace]` 空表 opt-out）：根仓库的 `cargo test`/`clippy`
 不编译 tauri。数据根解析与北京日期键是管道（与 `paths.py`/`codex_cost.rs` 同 spec，
 单测钉住），不是规则。

@@ -431,24 +431,41 @@ pub fn today_cost(data: &Value, pricing: &Value, today: &str) -> Option<Value> {
     if let Some(bm) = by_model.filter(|m| !m.is_empty()) {
         // 新数据：顶层 by_model 按实际模型精确定价。与 Python 一致——cost_report
         // 对"全未计价"返回 None 时仍给 {0,0}（那边 `_price_by_model` 同样兜 0）。
+        let tokens = bm.values().map(base_token_total).sum::<i64>();
         return Some(match cost_report(&json!({"by_model": bm}), pricing) {
             Some(r) => json!({
-                "total": r["total"], "peak_total": r["peak_total"]
+                "total": r["total"], "peak_total": r["peak_total"], "tokens": tokens
             }),
-            None => json!({"total": 0.0, "peak_total": 0.0}),
+            None => json!({"total": 0.0, "peak_total": 0.0, "tokens": tokens}),
         });
     }
     // 老数据：无 by_model，退回 _bucket_cost 逐桶求和。
     let mut total = 0.0;
     let mut peak = 0.0;
+    let mut tokens = 0i64;
     if let Some(bs) = buckets {
         for b in bs.values() {
             let c = bucket_cost(b, pricing);
             total += c["total"].as_f64().unwrap_or(0.0);
             peak += c["peak_total"].as_f64().unwrap_or(0.0);
+            tokens += base_token_total(b);
         }
     }
-    Some(json!({"total": total, "peak_total": peak}))
+    Some(json!({"total": total, "peak_total": peak, "tokens": tokens}))
+}
+
+/// 日 JSON 的 4 个基础 token 桶求和（uncached_input + output + cache_read +
+/// cache_write）。peak_* 是高峰子集、已含在基础桶里（`bucket_cost` 的
+/// off = base - peak），不重复计。词表与 `DAY_BUCKET_FIELDS` 同源——菜单栏标题的
+/// 「今日已消耗 token」读这份，不是另立的第五份字段清单。
+fn base_token_total(day: &Value) -> i64 {
+    [
+        "uncached_input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_write_tokens",
+    ]
+    .iter()
+    .map(|f| get_i64(day, f))
+    .sum()
 }
 
 /// usage 报告 → 成本行列表；无任何可分桶的桶时返回空列表（与 tab 空态同构，
@@ -755,6 +772,8 @@ mod tests {
         let pricing = load_pricing();
         let out = today_cost(&data, &pricing, "2026-08-27").expect("today data present");
         assert!((out["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+        assert_eq!(out["tokens"], serde_json::json!(1000000),
+                   "by_model 路径要带今日 token 总量（菜单栏标题用）");
     }
 
     /// `today_cost` 老数据路径：无 by_model 的 buckets 逐桶 `bucket_cost` 求和。
@@ -772,5 +791,7 @@ mod tests {
         let pricing = load_pricing();
         let out = today_cost(&data, &pricing, "2026-08-27").expect("today data present");
         assert!((out["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+        assert_eq!(out["tokens"], serde_json::json!(1000000),
+                   "buckets 路径同样带 token 总量");
     }
 }

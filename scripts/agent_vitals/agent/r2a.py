@@ -26,10 +26,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_vitals import codex_session_audit as csa
+from agent_vitals.agent import behavior as behavior_mod
 from agent_vitals.agent import codex_cost as codex_cost_mod
 from agent_vitals.agent import takeover as takeover_mod
 from agent_vitals.adapters import codex_session as codex_session_mod
+from agent_vitals.adapters import dsh as dsh_mod
 from agent_vitals.paths import data_home
+from agent_vitals.util import split_lines
 
 CURRENT_CONTRACT_VERSION = 1
 MIN_CONTRACT_VERSION = 0
@@ -374,6 +377,13 @@ def _now_iso_utc():
 
 
 def codex_source_statuses(home, n_sessions):
+    """Codex 源状态（进 envelope 的 `source_statuses` 与 list DTO）：status + 会话
+    数 + 根存在性。**只报自己构建的源**：单源 store 的 envelope 只说自己，不替
+    没构建的 DSH 猜一个状态——Phase 1 把 DSH 硬报成 `unavailable` 是 zstd 未接线
+    时的过渡谎言，zstd 落地后那句「读不了」不再成立，而一个没扫描的源既不是 ok
+    也不是 unavailable，是「本次没构建」。要看到两个源的真实状态，走
+    `SessionStore.all`（no-filter），它合并两边的状态。mirror
+    `r2a_store::codex_source_statuses`。"""
     roots = codex_session_mod.codex_session_roots_report(home)
     return {
         "codex": {
@@ -381,13 +391,54 @@ def codex_source_statuses(home, n_sessions):
             "sessions": n_sessions,
             "roots": roots.get("roots", []),
         },
+    }
+
+
+def dsh_source_fingerprints(home=None):
+    """DSH 源指纹：`<home>/.dsh/sessions/**/session.jsonl[.zstd]` 的文件指纹列表，
+    按 `dsh_session_files` 的全局路径序。mirror `r2a_store::dsh_source_fingerprints`。"""
+    dsh_root = Path(home) / ".dsh" if home is not None else Path.home() / ".dsh"
+    return [(str(p), fingerprint_file(p) or "")
+            for p in dsh_mod.dsh_session_files(dsh_root)]
+
+
+def _dsh_cache_path():
+    return _cache_dir() / "dsh-sessions.json"
+
+
+def dsh_source_statuses(home, files, degraded):
+    """DSH 源状态。三态（§5.2 / §4.3 诚实降级），mirror `r2a_store::dsh_source_statuses`：
+
+      · `files` 为空（sessions 根缺席或没有会话文件）→ `ok`，sessions 0 —— 诚实零，
+        **不是** unavailable（「没有 DSH」和「有 DSH 但读不了」是两回事）；
+      · 全部文件成功构建 → `ok`，sessions = built；
+      · 部分构建（built > 0 < files）→ `ok` + `degraded` 逐文件透传；
+      · 文件在但一个都读不了（built == 0）→ `unavailable` —— 源真的不可读，CLI
+        面对 `--host-kind dsh` 报 source-unavailable 错误码，**不是空页**（§3.3）。
+    """
+    dsh_root = Path(home) / ".dsh" if home is not None else Path.home() / ".dsh"
+    roots = dsh_mod.dsh_session_roots_report(dsh_root)
+    built = len(files) - len(degraded)
+    status = "ok" if not files or built > 0 else "unavailable"
+    degraded_val = None if not degraded else [
+        {"path": p, "reason": r} for p, r in degraded]
+    return {
         "dsh": {
-            "status": "unavailable",
-            "reason": "unsupported-compression",
-            "note": "zstd decode lands in R2a Phase 2 (§6.3-1); a dsh list "
-                    "request returns source-unavailable, not an empty page (§3.3)",
+            "status": status,
+            "sessions": built,
+            "roots": roots.get("roots", []),
+            "degraded": degraded_val,
         },
     }
+
+
+def merge_statuses(a, b):
+    """合并两个单源 statuses（codex + dsh）成 `all` store 的完整 statuses。键序
+    稳定：codex 在前、dsh 在后（JSON 键序是字节一致的一部分）。
+    mirror `r2a_store::merge_statuses`。"""
+    merged = dict(a)
+    merged.update(b)
+    return merged
 
 
 def extract_summary(payload):
@@ -415,12 +466,132 @@ def extract_summary(payload):
     }
 
 
+def dsh_header(text):
+    """从**已解压文本**读会话头：`id` + `cwd`。`id` 缺失 → None（无法建
+    SessionKey）。只读头行。mirror `r2a_store::dsh_header`。"""
+    line = next((l for l in split_lines(text) if l.strip()), None)
+    if line is None:
+        return None
+    try:
+        v = json.loads(line.strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(v, dict):
+        return None
+    id_ = v.get("id")
+    if not isinstance(id_, str):
+        return None
+    cwd = v.get("cwd")
+    return (id_, cwd if isinstance(cwd, str) else None)
+
+
+def dsh_session_revision(text):
+    """DSH 的 SessionRevision（§4.4）= 最大 `seq`（seq 单调不减，样本首 0 /
+    末 16201）。从头到整个文本扫（不是只看末行）：fork 边界事件的 seq 是 null，
+    且「单调不减」是实测属性不是语言保证，最大才算稳。没有任何 seq → None。
+    mirror `r2a_store::dsh_session_revision`。"""
+    max_seq = -1
+    for line in split_lines(text):
+        if not line.strip():
+            continue
+        try:
+            v = json.loads(line.strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(v, dict):
+            seq = v.get("seq")
+            if isinstance(seq, int) and not isinstance(seq, bool) and seq > max_seq:
+                max_seq = seq
+    return str(max_seq) if max_seq >= 0 else None
+
+
+def dsh_source_profile(cwd):
+    """DSH 的 source_profile（§1.3）= 会话头 `cwd` 清洗后的项目路径：
+    `--{cwd.replace('/', "-")}--`。cwd 缺失 → 空串（诚实缺失；native_id 全局
+    唯一，空 source_profile 不会撞键）。mirror `r2a_store::dsh_source_profile`。"""
+    if cwd is None:
+        return ""
+    return "--%s--" % cwd.replace("/", "-")
+
+
+def _utc_civil_date(ms):
+    """epoch 毫秒 → UTC 日期 `YYYY-MM-DD`。与 Rust `civil_from_unix_secs(ms/1000, 0)`
+    同一天（Hinnant civil-from-days @ UTC；Python `fromtimestamp` 显式 UTC，避免
+    本地时区偏移）。"""
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d")
+
+
+def dsh_extract_summary(payload):
+    """DSH 源的 summary 派生列（§2.5 / §4.4）。DSH 的 `session` 载荷是
+    `behavior --json` 的 19 键形状（§2.4），没有 Codex 形状的
+    `date_span`/`files`/`cost_report`/`audit` 字段——派生列全部从既有键里读，
+    **不发明新字段名**。mirror `r2a_store::dsh_extract_summary`：
+
+      · title：workspace.json 查找，population 时以 appended `title` 键并入载荷；
+      · model = 最后一次 usage 请求（`requests[-1]`）的模型；
+      · date_span = `requests[].time`（epoch 毫秒）的最小/最大值 → UTC 日期；
+      · files = 1（DSH 一个日志文件 = 一个会话）；
+      · cost_usd = None（`behavior` 的 `cost` 是 CNY 币种，`cost_usd` 是 USD
+        字段，诚实缺失，绝不把人民币当美元填）；
+      · tokens_total = `usage.by_model` 每模型 **4 个非 peak 桶**之和；
+      · findings_total = `findings` 数组长度。
+    """
+    requests = payload.get("requests")
+    model = None
+    if isinstance(requests, list) and requests:
+        last = requests[-1]
+        if isinstance(last, dict):
+            model = last.get("model")
+    min_ms = max_ms = None
+    if isinstance(requests, list):
+        for r in requests:
+            if isinstance(r, dict):
+                t = r.get("time")
+                if isinstance(t, int) and not isinstance(t, bool):
+                    min_ms = t if min_ms is None else min(min_ms, t)
+                    max_ms = t if max_ms is None else max(max_ms, t)
+    tokens_total = None
+    by_model = (payload.get("usage") or {}).get("by_model")
+    if isinstance(by_model, dict):
+        total = 0
+        for b in by_model.values():
+            if not isinstance(b, dict):
+                continue
+            for k in ("uncached_input_tokens", "output_tokens",
+                      "cache_read_tokens", "cache_write_tokens"):
+                v = b.get(k)
+                if isinstance(v, int) and not isinstance(v, bool):
+                    total += v
+        tokens_total = total
+    findings = payload.get("findings")
+    return {
+        "title": payload.get("title"),
+        "model": model,
+        "date_first": _utc_civil_date(min_ms) if min_ms is not None else None,
+        "date_last": _utc_civil_date(max_ms) if max_ms is not None else None,
+        "files": 1,
+        "cost_usd": None,
+        "tokens_total": tokens_total,
+        "findings_total": len(findings) if isinstance(findings, list) else 0,
+    }
+
+
+def summary_for(key, payload):
+    """按 host_kind 分发 summary 派生（DSH 形状 vs Codex 形状）。
+    mirror `r2a_store::summary_for`。"""
+    if key.host_kind == "dsh":
+        return dsh_extract_summary(payload)
+    return extract_summary(payload)
+
+
 def build_entries(raw, generated_at, source_statuses):
+    """`raw` 是 (key, payload, session_revision) 三元组；revision 为 None 的
+    （Codex）由载荷 date_last 派生。mirror `r2a_store::build_entries`。"""
     raw.sort(key=lambda kv: sort_key(kv[0]))
     entries = []
-    for seq, (key, payload) in enumerate(raw):
-        s = extract_summary(payload)
-        session_revision = s["date_last"]
+    for seq, (key, payload, revision) in enumerate(raw):
+        s = summary_for(key, payload)
+        session_revision = revision if revision is not None else s["date_last"]
         envelope = build_envelope(ENGINE_VERSION, pricing_version(), seq,
                                   generated_at, source_statuses, key,
                                   session_revision, payload)
@@ -440,7 +611,9 @@ def entry_from_envelope(env):
     payload = env.get("session")
     if not isinstance(payload, dict):
         return None
-    s = extract_summary(payload)
+    # DSH 载荷是 behavior 19 键形状，派生列走 dsh_extract_summary（含缓存往返
+    # 必需的 appended `title` 键）；Codex 走 extract_summary。
+    s = summary_for(key, payload)
     session_revision = env.get("session_revision")
     store_seq = env.get("store_revision")
     if not isinstance(store_seq, int):
@@ -552,13 +725,91 @@ class SessionStore:
                     r for r in roots if isinstance(r, str))
             else:
                 source_profile = ""
-            raw.append((SessionKey("codex", sid, source_profile, ns), payload))
+            raw.append((SessionKey("codex", sid, source_profile, ns), payload,
+                        None))
 
         statuses = codex_source_statuses(home, len(raw))
         entries = build_entries(raw, generated_at, statuses)
         store = cls(entries, statuses, generated_at)
         _write_cache(cache_path, store, fingerprints)
         return store
+
+    @classmethod
+    def dsh(cls, home=None):
+        """从 DSH 源填充（§5.2，zstd 落地后）。`<home>/.dsh/sessions/**/
+        session.jsonl[.zstd]` 逐文件：解压 → 头行（id + cwd）→
+        `behavior.audit_payload`（复用 19 键载荷）→ workspace.json 查标题 →
+        PendingEntry。读不了的（解压失败/畸形/无 id）逐文件记进 `degraded`，
+        **绝不数成 0 条真数据**（§4.3）。标题不在 behavior 载荷里（来自
+        workspace.json），但 summary 派生列必须能从 envelope 的 `session` 载荷
+        重算（缓存往返，`entry_from_envelope`）——所以标题以 **appended `title`
+        键** 并入载荷（复用既有字段名，§2.4 不发明新字段名）。
+        mirror `r2a_store::SessionStore::dsh`。"""
+        ns = takeover_mod.machine_namespace()
+        generated_at = _now_iso_utc()
+        fingerprints = dsh_source_fingerprints(home)
+        cache_path = _dsh_cache_path()
+
+        cached = _read_cache(cache_path)
+        if cached is not None and _cache_is_current(cached, fingerprints):
+            store = _cache_to_store(cached)
+            if store is not None:
+                return store
+
+        dsh_root = (Path(home) / ".dsh" if home is not None
+                    else Path.home() / ".dsh")
+        files = dsh_mod.dsh_session_files(dsh_root)
+        by_session, _archived = dsh_mod.read_workspace_index(dsh_root)
+
+        raw = []
+        degraded = []
+        for path in files:
+            path_str = str(path)
+            text, read_err = dsh_mod.read_session_text(path)
+            if read_err is not None:
+                degraded.append((path_str, read_err))
+                continue
+            # 头行有效性由 parse_session_log 验（type=="session" && version==0），
+            # 这里只抽 id + cwd；parse 已通过但缺 id → 无法建键 → missing-header。
+            if dsh_mod.parse_session_log(text).get("degraded"):
+                degraded.append((path_str, "missing-header"))
+                continue
+            hdr = dsh_header(text)
+            if hdr is None:
+                degraded.append((path_str, "missing-header"))
+                continue
+            id_, cwd = hdr
+            payload = behavior_mod.audit_payload(path)
+            if payload is None:
+                # 读之间文件被截断/替换（parse 干净但 audit 重建失败）→ 文件级降级。
+                degraded.append((path_str, "file-missing"))
+                continue
+            if id_ in by_session:
+                payload["title"] = by_session[id_][1]
+            raw.append((SessionKey("dsh", id_, dsh_source_profile(cwd), ns),
+                        payload, dsh_session_revision(text)))
+        raw.sort(key=lambda kv: sort_key(kv[0]))
+
+        statuses = dsh_source_statuses(home, files, degraded)
+        entries = build_entries(raw, generated_at, statuses)
+        store = cls(entries, statuses, generated_at)
+        _write_cache(cache_path, store, fingerprints)
+        return store
+
+    @classmethod
+    def all(cls, home=None):
+        """合并 codex + dsh 两个单源 store（no-filter = 全部源）。**没有自己的
+        合并 cache**——每次把两个子 store 合并（各子 store 走自己的 cache 快
+        路径），`generated_at` 取两边的 max。`source_statuses` 合并成
+        `{codex, dsh}` 完整视图。mirror `r2a_store::SessionStore::all`。"""
+        codex_store = cls.codex(home)
+        dsh_store = cls.dsh(home)
+        entries = list(codex_store.entries) + list(dsh_store.entries)
+        entries.sort(key=lambda e: sort_key(e.key))
+        return cls(entries,
+                   merge_statuses(codex_store.source_statuses,
+                                  dsh_store.source_statuses),
+                   max(codex_store.generated_at, dsh_store.generated_at))
 
     def list(self, filter_, cursor, page_size):
         return list_sessions(self.entries, filter_, cursor, page_size)
@@ -570,21 +821,45 @@ class SessionStore:
 # ── CLI 面（与 Rust `r2a_store` 的 `sessions list` / `sessions read` 对账）────
 
 def _exit_with_error(e, msg):
-    print(json.dumps(e.to_json(), separators=(",", ":")), file=sys.stderr)
+    # ensure_ascii=False：Rust 侧 serde_json 原样输出 UTF-8（`§4.3` 不会转义成
+    # §），差分测试逐字节对账 stderr——Python 必须同规则。
+    print(json.dumps(e.to_json(), separators=(",", ":"), ensure_ascii=False),
+          file=sys.stderr)
     raise SystemExit(2)
 
 
 def sessions_list(home, host_kind, model, date_from, date_to, query,
                   page_size, cursor_json, json_out):
-    if host_kind is not None and host_kind != "codex":
+    # 按 host-kind 分发源（与 Rust `sessions_list` 同一张表）：
+    #   · codex → 只填充 codex 源；
+    #   · dsh → 只填充 dsh 源；**文件在但一个都读不了** → 类型化
+    #     source-unavailable（错误码，不是空页，§4.3/§3.3）；「根本没有 DSH」
+    #     是诚实零 → 空页；
+    #   · 未知 kind → source-unavailable（错误码，不是静默空）；
+    #   · no-filter → `SessionStore::all`（两源合并，source_statuses 给完整视图）。
+    if host_kind == "codex":
+        try:
+            store = SessionStore.codex(home)
+        except StoreError as e:
+            _exit_with_error(e, "session store population failed")
+    elif host_kind == "dsh":
+        try:
+            store = SessionStore.dsh(home)
+        except StoreError as e:
+            _exit_with_error(e, "session store population failed")
+        if store.source_statuses.get("dsh", {}).get("status") == "unavailable":
+            _exit_with_error(StoreError(
+                "source-unavailable",
+                "dsh source unavailable: session files exist but none are "
+                "decodable (§4.3)"), "")
+    elif host_kind is not None:
         _exit_with_error(StoreError(
-            "source-unavailable",
-            "host '%s' is not readable yet: zstd decoding lands in R2a Phase 2 "
-            "(codex is the only populated source)" % host_kind), "")
-    try:
-        store = SessionStore.codex(home)
-    except StoreError as e:
-        _exit_with_error(e, "session store population failed")
+            "source-unavailable", "unknown host kind '%s'" % host_kind), "")
+    else:
+        try:
+            store = SessionStore.all(home)
+        except StoreError as e:
+            _exit_with_error(e, "session store population failed")
     filter_ = SessionFilter(host_kind=host_kind, model=model,
                             date_from=date_from, date_to=date_to, query=query)
     cursor = None
@@ -627,16 +902,29 @@ def sessions_read(home, session_key_json, revision, json_out):
             "schema-mismatch",
             "invalid --session-key JSON (want host_kind/native_id/"
             "source_profile/machine_namespace)"), "")
-    try:
-        store = SessionStore.codex(home)
-    except StoreError as e:
-        _exit_with_error(e, "session store population failed")
+    # 按 key 的 host_kind 读对应源（与 Rust `sessions_read` 同一张表）：读 codex
+    # key 不用为 dsh 付扫描钱，反之亦然。
+    if key.host_kind == "codex":
+        try:
+            store = SessionStore.codex(home)
+        except StoreError as e:
+            _exit_with_error(e, "session store population failed")
+    elif key.host_kind == "dsh":
+        try:
+            store = SessionStore.dsh(home)
+        except StoreError as e:
+            _exit_with_error(e, "session store population failed")
+    else:
+        _exit_with_error(StoreError(
+            "source-unavailable", "unknown host kind '%s'" % key.host_kind), "")
     try:
         envelope = store.read(key, revision)
     except StoreError as e:
         _exit_with_error(e, "read failed")
     text = json.dumps(envelope, ensure_ascii=False, indent=2)
-    if json_out:
+    if json_out or key.host_kind == "dsh":
+        # dsh 没有 CLI 的 HTML 渲染器（那是 Tauri 审计 tab 的活）——非 --json 的
+        # dsh read 直接给 pretty JSON，不走 codex 渲染器。
         print(text)
     else:
         print(csa._render_audit(envelope.get("session") or {}), end="")

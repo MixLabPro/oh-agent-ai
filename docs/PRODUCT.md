@@ -566,6 +566,14 @@ DSH 全部会话合计              52 MB（单份最大 8.5 MB，且为 .zstd�
 
 ### 5.8.4 常驻形态：状态文件是核心资产，服务器不是
 
+> **2026-08-31 更新**：菜单栏主形态已迁到 **Tauri 菜单栏 app**
+> （`src-tauri/`，独立 workspace）。它自带 5 分钟 tick、spawn Rust `oneline`
+> 折 DSH 会话、预算读 `alert.json` 权威，**不再依赖 xbar / SwiftBar**
+> （`contrib/xbar/agent-vitals.5m.sh` 标记为 legacy 降级通道，见
+> `docs/MENUBAR_MIGRATION.md`）。本节「状态文件是核心资产」的结论**仍然成立**
+> ——Tauri 与旧插件读的是同一份 `state/` 文件，本节的落地顺序与安全底线
+> 不变；只是「每 N 秒执行一次脚本」的执行模型由 app 自带的 tick 取代。
+
 xbar / SwiftBar 的执行模型是「每 N 秒**执行一次**脚本、抓 stdout 渲染菜单」，
 脚本跑完就退出。**常驻的是 xbar，不是我们。** 三条推论：
 

@@ -1,8 +1,9 @@
 //! DSH 会话日志（JSONL）读取器 —— 触发证据（A10）。
 //!
 //! DSH 默认会话持久化是 `session-persistence-jsonl`，落盘在
-//! `<DSH_HOME>/sessions/<project>/<id>/session.jsonl[.zstd]`。这里只认裸文本
-//! `.jsonl`（等价于 `compression:'none'`）；zstd 解压是上游的事。
+//! `<DSH_HOME>/sessions/<project>/<id>/session.jsonl[.zstd]`。真机 58/58 都是
+//! `.zstd`（R2a §6.3-1 落地 ruzstd 多帧解压后能读）；裸 `.jsonl` 等价于
+//! `compression:'none'`。
 //!
 //! 与 SQLite（备选后端，非默认）不同：每行一个 JSON，`data` 是**内联对象**而非
 //! JSON 文本串 —— 读取时 `event["data"]["source"]` 即可，无需再解一层。格式见
@@ -10,10 +11,15 @@
 //!
 //! **降级铁律：**任何一行不是合法 JSON、缺 header、或 schema 版本不符，就报
 //! `degraded`，**绝不假装「读到了 0 条」**——报 0 次会直接伪造出假的 SV201。
+//! 同样的纪律延伸到 `.zstd`：解压失败报 `zstd-decode-error`（**不是** `non-json`——
+//! `non-json` 是「日志坏了」，解压失败是「reader 读不了」），`.zstd` 后缀绝不
+//! 被当非 JSON 原始字节硬读。
 
 use std::path::{Path, PathBuf};
 
+use ruzstd::decoding::StreamingDecoder;
 use serde_json::{json, Map, Value};
+use std::io::{Cursor, Read};
 
 use crate::util::split_lines;
 
@@ -299,26 +305,83 @@ fn is_usage_event(event: &Value, etype: &str) -> bool {
         .is_some()
 }
 
-/// 读文件（非 UTF-8 字节替换为 U+FFFD，与 Python `errors="replace"` 对齐），再交给
-/// 纯解析。文件缺失/不可读时降级为 `file-missing`。
-pub fn read_session_log(path: &Path) -> Value {
+/// 增量多帧 zstd → 拼接后的纯文本字节。
+///
+/// DSH 会话日志是**增量多帧压缩**：每 flush 一批事件就把新一帧 zstd 追加到同一
+/// 文件（真机实测：4MB = 6694 帧、882KB = 2090 帧、首帧仅 ~207 字节 ≈ 1 行事件），
+/// 每帧是独立自洽的压缩 JSONL 块、帧间无跨帧状态（R2a §3.4）。ruzstd 的
+/// `StreamingDecoder` 一次只解一帧，用 `Cursor` 计数逐帧推进（`Cursor::position`
+/// 随 `Read` 前进）——解完一帧看它消费了多少源字节，据此切到下一帧。
+///
+/// 任何一帧解析/读取失败（损坏、截断）→ `None` → 调用方报 `zstd-decode-error`，
+/// 绝不拿半截结果当「读到了 N 条」。
+pub fn decode_zstd_multi_frame(bytes: &[u8]) -> Option<Vec<u8>> {
+    // 空输入 = 0 帧 = 空文本（与 Python `zstandard` 对空输入给 `b''` 对齐——
+    // 空会话文件该报 missing-header，不是 zstd-decode-error）。
+    if bytes.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    loop {
+        let consumed = {
+            let mut cursor = Cursor::new(&bytes[pos..]);
+            let mut decoder = StreamingDecoder::new(&mut cursor).ok()?;
+            let mut frame = Vec::new();
+            Read::read_to_end(&mut decoder, &mut frame).ok()?;
+            out.extend_from_slice(&frame);
+            cursor.position() as usize
+        };
+        if consumed == 0 {
+            // 没有进展：帧头合法但解不出字节（截断帧）——防死循环。
+            return None;
+        }
+        pos += consumed;
+        if pos >= bytes.len() {
+            break;
+        }
+    }
+    Some(out)
+}
+
+/// 读会话日志文本：`.zstd` 后缀 → 多帧解压，其余原样。返回 `Ok(text)` 或降级码。
+///
+/// - 文件缺失/不可读 → `file-missing`
+/// - zstd 解压失败 → `zstd-decode-error`（**不是** `non-json`）
+///
+/// 非 UTF-8 字节替换为 U+FFFD（与 Python `errors="replace"` 对齐）。Python 平行
+/// 实现在 `scripts/agent_vitals/adapters/dsh.py`（可选 `zstandard`；缺席时 `.zstd`
+/// 报 `unsupported-compression`——宿内 skill 不拉第三方库，见 spec §7.1 G1）。
+pub fn read_session_text(path: &Path) -> Result<String, &'static str> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(_) => return degraded("file-missing"),
+        Err(_) => return Err("file-missing"),
     };
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    parse_session_log(&text)
+    if path.extension().map(|e| e == "zstd").unwrap_or(false) {
+        let out = decode_zstd_multi_frame(&bytes).ok_or("zstd-decode-error")?;
+        return Ok(String::from_utf8_lossy(&out).into_owned());
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// 读文件（`.zstd` 后缀 → 多帧解压；非 UTF-8 字节替换为 U+FFFD，与 Python
+/// `errors="replace"` 对齐），再交给纯解析。降级码：文件缺失/不可读 →
+/// `file-missing`；zstd 解压失败 → `zstd-decode-error`；两者都不是 `non-json`。
+pub fn read_session_log(path: &Path) -> Value {
+    match read_session_text(path) {
+        Ok(text) => parse_session_log(&text),
+        Err(code) => degraded(code),
+    }
 }
 
 /// 读一次会话日志证据，来自环境变量 `AGENT_VITALS_DSH_SESSION_LOG`。
 ///
 /// 返回 `(source, evidence)`：source 是环境变量原始值（进报告里的 source 串），
 /// evidence 是 `read_session_log` 的 dict；未设置时两者都是 None。环境变量可指向
-/// 裸文本 `.jsonl` 文件或目录——目录则读其中的 `session.jsonl`（与默认落盘路径
-/// `<DSH_HOME>/sessions/<project>/<id>/session.jsonl` 对齐）。读不到的降级由
+/// `.jsonl`/`.zstd` 文件或目录——目录则读其中的 `session.jsonl`（与默认落盘路径
+/// `<DSH_HOME>/sessions/<project>/<id>/session.jsonl` 对齐）；没有裸 jsonl 再退到
+/// `session.jsonl.zstd`（真机 58/58 是 zstd，目录里通常只有它）。读不到的降级由
 /// `read_session_log` 兜底成 `degraded="file-missing"`，**不冒充「没有证据」**。
-///
-/// （真机自动从 `$DSH_HOME/sessions/` 发现留后续，本波先靠环境变量注入。）
 pub fn read_session_evidence() -> (Option<String>, Option<Value>) {
     let raw = match std::env::var("AGENT_VITALS_DSH_SESSION_LOG") {
         Ok(v) if !v.is_empty() => v,
@@ -327,6 +390,12 @@ pub fn read_session_evidence() -> (Option<String>, Option<Value>) {
     let mut path = PathBuf::from(&raw);
     if path.is_dir() {
         path = path.join("session.jsonl");
+        if !path.exists() {
+            let zstd = PathBuf::from(format!("{}.zstd", path.display()));
+            if zstd.exists() {
+                path = zstd;
+            }
+        }
     }
     (Some(raw), Some(read_session_log(&path)))
 }
@@ -514,6 +583,124 @@ garbage line
         assert_eq!(v["degraded"], json!("file-missing"));
         assert_eq!(v["catalog_entries"], json!([]));
         assert_eq!(v["execution_events"], Value::Null);
+    }
+
+    /// ruzstd 压缩帧的工具：把一段文本压成一帧并 append 到 `frames`。
+    /// 每帧独立（同 `dsh_autosync.py::_decompress_zstd` 面对的真实文件结构）。
+    fn append_frame(frames: &mut Vec<u8>, text: &str) {
+        ruzstd::encoding::compress(
+            text.as_bytes(),
+            frames,
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+    }
+
+    #[test]
+    fn decode_zstd_multi_frame_roundtrips_concatenated_frames() {
+        let mut frames = Vec::new();
+        append_frame(&mut frames, "{\"type\":\"session\",\"version\":0,\"id\":\"s\",\"delegationDepth\":0}\n");
+        append_frame(&mut frames, "{\"type\":\"user/message\",\"seq\":0,\"time\":1,\"data\":{\"source\":{\"kind\":\"skill-catalog\",\"entries\":[{\"name\":\"a\"}]}},\"surfaceOp\":\"append\"}\n");
+        append_frame(&mut frames, "{\"type\":\"turn/start\",\"seq\":1,\"time\":2,\"data\":{\"turn\":1}}\n");
+        let out = decode_zstd_multi_frame(&frames).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let v = parse_session_log(&text);
+        assert_eq!(v["catalog_entries"], json!(["a"]));
+        assert_eq!(v["degraded"], json!(false));
+        // 多帧拼接后是完整日志：execution_events 含 turn/start 边界信号。
+        let evs = v["execution_events"].as_array().unwrap();
+        assert_eq!(evs[0]["type"], json!("turn/start"));
+    }
+
+    #[test]
+    fn decode_zstd_multi_frame_handles_single_frame() {
+        let mut frames = Vec::new();
+        append_frame(&mut frames, "hello zstd\n");
+        let out = decode_zstd_multi_frame(&frames).unwrap();
+        assert_eq!(out, b"hello zstd\n");
+    }
+
+    #[test]
+    fn decode_zstd_multi_frame_garbage_is_error() {
+        // 任意字节不是合法 zstd 帧 → None（调用方报 zstd-decode-error），
+        // 绝不把损坏当 0 条数据。
+        assert!(decode_zstd_multi_frame(b"this is not zstd at all").is_none());
+        assert!(decode_zstd_multi_frame(b"").is_some()); // 空输入 = 0 帧 = 合法空
+        // 截断帧：合法帧头 + 被砍断的块。
+        let mut full = Vec::new();
+        append_frame(&mut full, "some content to compress");
+        let cut = &full[..full.len() / 2];
+        assert!(decode_zstd_multi_frame(cut).is_none());
+    }
+
+    #[test]
+    fn read_session_log_zstd_file_decodes_to_evidence() {
+        let t = std::env::temp_dir().join(format!("av-dsh-zstd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let mut frames = Vec::new();
+        append_frame(&mut frames, "{\"type\":\"session\",\"version\":0,\"id\":\"s\",\"delegationDepth\":0}\n");
+        append_frame(&mut frames, "{\"type\":\"user/message\",\"seq\":0,\"time\":1,\"data\":{\"source\":{\"kind\":\"skill-invocation\",\"name\":\"b\"}},\"surfaceOp\":\"append\"}\n");
+        let path = t.join("session.jsonl.zstd");
+        std::fs::write(&path, &frames).unwrap();
+
+        let v = read_session_log(&path);
+        assert_eq!(v["invoked"], json!(["b"]));
+        assert_eq!(v["degraded"], json!(false));
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn read_session_log_corrupt_zstd_is_zstd_decode_error_not_non_json() {
+        let t = std::env::temp_dir().join(format!("av-dsh-zstdbad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let path = t.join("session.jsonl.zstd");
+        std::fs::write(&path, b"\x28\xb5\x2f\xfd not a real frame").unwrap();
+        let v = read_session_log(&path);
+        assert_eq!(v["degraded"], json!("zstd-decode-error"));
+        assert_eq!(v["catalog_entries"], json!([]));
+        assert_eq!(v["execution_events"], Value::Null);
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn zstd_suffix_never_reported_as_non_json() {
+        // §6.3-4 的判据：`.zstd` 后缀是「reader 不认识格式」，不是「日志坏了」。
+        // 现在 ruzstd 落地后它直接解压；解压失败是 zstd-decode-error。退化点：
+        // 万一某天 ruzstd 被移除，这里必须显式报 unsupported-compression，
+        // 不许滑回 non-json。
+        let t = std::env::temp_dir().join(format!("av-dsh-zstdsfx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let path = t.join("session.jsonl.zstd");
+        std::fs::write(&path, b"plain text but with a .zstd name").unwrap();
+        let v = read_session_log(&path);
+        assert_ne!(v["degraded"], json!("non-json"));
+        assert_ne!(v["degraded"], json!(false));
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn read_session_evidence_dir_falls_back_to_zstd() {
+        // 真机目录里通常只有 session.jsonl.zstd（58/58）。目录注入指向没有
+        // 裸 jsonl 的目录时，必须退到 .zstd 而不是报 file-missing。
+        let t = std::env::temp_dir().join(format!("av-dsh-evdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let mut frames = Vec::new();
+        append_frame(&mut frames, "{\"type\":\"session\",\"version\":0,\"id\":\"s\",\"delegationDepth\":0}\n");
+        std::fs::write(t.join("session.jsonl.zstd"), &frames).unwrap();
+
+        let prev = std::env::var("AGENT_VITALS_DSH_SESSION_LOG").ok();
+        std::env::set_var("AGENT_VITALS_DSH_SESSION_LOG", &t);
+        let (source, ev) = read_session_evidence();
+        std::env::remove_var("AGENT_VITALS_DSH_SESSION_LOG");
+        if let Some(p) = prev {
+            std::env::set_var("AGENT_VITALS_DSH_SESSION_LOG", p);
+        }
+        assert_eq!(source.as_deref(), Some(t.to_str().unwrap()));
+        assert_eq!(ev.unwrap()["degraded"], json!(false));
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     #[test]

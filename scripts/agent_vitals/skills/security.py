@@ -62,17 +62,21 @@ def security_scan(skill_dir: Path, skill_raw: str):
     """Scan SKILL.md and executable source files for review-worthy patterns."""
     findings, scanned_files = [], []
 
+    # 排除扫描器自身。resolve() 失败（瞬态 fs 错误）**不得**静默落到全扫描——
+    # 否则就扫到自己、self_excluded 缺失（test_self_excluded 守的回归）。失败时
+    # 回退到报告 path 字段同款字符串比较（norm 不碰 fs）：字面相等即可排除。
     try:
-        if skill_dir.resolve() == SELF_SKILL_ROOT:
-            return {
-                "findings": [], "max_severity": "none",
-                "max_severity_uncited": "none", "cited_count": 0,
-                "all_findings_cited": False, "exec_scripts": [],
-                "external_urls": [], "external_url_count": 0,
-                "scanned_script_count": 0, "self_excluded": True,
-            }
+        is_self = skill_dir.resolve() == SELF_SKILL_ROOT
     except OSError:
-        pass
+        is_self = norm(skill_dir) == norm(SELF_SKILL_ROOT)
+    if is_self:
+        return {
+            "findings": [], "max_severity": "none",
+            "max_severity_uncited": "none", "cited_count": 0,
+            "all_findings_cited": False, "exec_scripts": [],
+            "external_urls": [], "external_url_count": 0,
+            "scanned_script_count": 0, "self_excluded": True,
+        }
 
     def check(text: str, where: str):
         lines = text.splitlines()

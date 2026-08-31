@@ -166,3 +166,39 @@ footer {
   font-size: 11px;
   border-top: 1px solid var(--panel);
 }
+
+.sync {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+#sync-status {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#sync-now {
+  border: 1px solid var(--panel-2);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 11px;
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+#sync-now:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+#sync-now:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

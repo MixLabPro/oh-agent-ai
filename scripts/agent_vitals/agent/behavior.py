@@ -654,6 +654,53 @@ def audit_session_log(path):
             compaction_coverage, waste_cov)
 
 
+def audit_payload(path):
+    """`audit_session_log` 的 19 键 JSON 载荷（R2a DSH population 的 session 载荷）。
+
+    mirror `src/behavior.rs::audit_payload`：findings 后紧跟同一批事件流的五种
+    分辨率（usage 按模型汇总、requests 逐请求序列、context 常驻前缀、compaction、
+    waste），再是成本块（cost / pre_fork / pre_fork_cost），然后是 subagents /
+    skill / duration 与六个 coverage。键序是字节一致的一部分，不能重排。
+
+    cost 不是 audit 六键之一——它读 usage × pricing.json（cost.py 顶部注释：
+    纯展示层）。pre_fork 与 usage 同形状，定价走同一个 cost_report；没分叉时
+    pre_fork 是 None → pre_fork_cost 也是 None（「没分叉」≠「分叉了但上游没花钱」）。
+    降级（`audit_session_log` 返回 None）→ 返回 None，**绝不返回空 payload**。
+    """
+    from . import cost as cost_module
+    audit = audit_session_log(path)
+    if audit is None:
+        return None
+    (findings, usage, requests, context, compaction, waste, pre_fork, subagents, skill,
+     duration, outcomes, usage_coverage, dur_coverage, skill_coverage, subagents_coverage,
+     compaction_coverage, waste_cov) = audit
+    pricing = cost_module.load_pricing()
+    cost = cost_module.cost_report(usage, pricing)
+    pre_fork_cost = (cost_module.cost_report(pre_fork, pricing)
+                     if pre_fork is not None else None)
+    return {
+        "findings": findings,
+        "usage": usage,
+        "requests": requests,
+        "context": context,
+        "compaction": compaction,
+        "waste": waste,
+        "cost": cost,
+        "pre_fork": pre_fork,
+        "pre_fork_cost": pre_fork_cost,
+        "subagents": subagents,
+        "skill": skill,
+        "duration": duration,
+        "rule_outcomes": outcomes,
+        "usage_coverage": usage_coverage,
+        "duration_coverage": dur_coverage,
+        "skill_coverage": skill_coverage,
+        "subagents_coverage": subagents_coverage,
+        "compaction_coverage": compaction_coverage,
+        "waste_coverage": waste_cov,
+    }
+
+
 # 行为审计的闸门阈值语义，与 doctor.gate() 一致：critical/warning/info 三级，
 # 数字越小越严重。这里不复用 doctor.SEVERITY_RANK —— behavior 是独立取证命令，
 # 不 import doctor（那是扫描诊断层），保持模块单向依赖。

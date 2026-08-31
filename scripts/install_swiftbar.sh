@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # 一键安装 agent-vitals 的 SwiftBar / xbar 菜单栏插件。
 #
+# ⚠️ LEGACY（2026-08-31）：菜单栏主形态已迁到 Tauri 菜单栏 app
+#（/Applications/agent-vitals.app），本脚本与 contrib/xbar/ 插件仅作降级通道。
+# 新装用户请直接运行菜单栏 app；迁移细节见 docs/MENUBAR_MIGRATION.md。
+#
 # 用法：
 #   bash scripts/install_swiftbar.sh                # 默认路径
 #   bash scripts/install_swiftbar.sh ~/custom/dir   # 自定义路径

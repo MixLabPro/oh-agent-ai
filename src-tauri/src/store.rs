@@ -30,7 +30,7 @@ fn error_value(code: &str, message: &str) -> Value {
 fn no_binary() -> Value {
     error_value(
         "cancelled",
-        "agent-vitals binary not found (set AGENT_VITALS_BIN or put it on PATH)",
+        "agent-vitals binary not found (set AGENT_VITALS_BIN, add it to PATH, or place it in the app's Contents/Resources/bin/)",
     )
 }
 
@@ -79,6 +79,12 @@ fn list_args(
         a.push(c.clone());
     }
     a
+}
+
+/// `sessions findings` 的 argv（纯函数，供单测钉住 IPC→CLI 参数映射）。无参数——
+/// rollup 恒是全源聚合，跟 list 的 filter/cursor 无关。
+fn findings_args() -> Vec<String> {
+    vec!["sessions".into(), "findings".into(), "--json".into()]
 }
 
 /// `sessions read` 的 argv。
@@ -160,6 +166,20 @@ pub fn sessions_read(
     run_json(cmd)
 }
 
+/// aggregate_findings：跨会话 findings 汇总（workbench「Findings」页）。纯聚合在
+/// core + 二进制（`sessions findings --json`），IPC 只做 spawn + 透传，与
+/// `sessions_list` 同款。
+#[tauri::command]
+pub fn sessions_findings() -> Result<Value, Value> {
+    let Some(bin) = resolve_binary() else {
+        return Err(no_binary());
+    };
+    let mut cmd = Command::new(&bin);
+    cmd.args(findings_args());
+    cmd.env("AGENT_VITALS_HOME", data_home());
+    run_json(cmd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +218,12 @@ mod tests {
         );
     }
 
+    /// findings argv：固定段，无参数（rollup 恒全源聚合，跟 filter/cursor 无关）。
+    #[test]
+    fn findings_args_is_fixed() {
+        assert_eq!(findings_args(), vec!["sessions", "findings", "--json"]);
+    }
+
     /// 错误形状：`cancelled` 的 message 明确（二进制缺失是基础设施失败，不是
     /// 会话源的缺列）。
     #[test]
@@ -205,8 +231,59 @@ mod tests {
         assert_eq!(
             no_binary(),
             json!({"error": {"code": "cancelled",
-                             "message": "agent-vitals binary not found (set \
-                                         AGENT_VITALS_BIN or put it on PATH)"}})
+                             "message": "agent-vitals binary not found (set AGENT_VITALS_BIN, \
+                                         add it to PATH, or place it in the app's \
+                                         Contents/Resources/bin/)"}})
         );
+    }
+
+    /// run_json 成功路径：spawn 真实子进程 → stdout 是 JSON → 原样解析。IPC
+    /// 薄壳的全部行为就是「spawn 二进制 + 解析 stdout + 透传错误」，这三条用例
+    /// 钉住 spawn/解析这一层——参数翻译（上面两条）对了、spawn/解析不对，前端点得
+    /// 再准也拿不到数据。
+    #[test]
+    fn run_json_parses_success_stdout() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("{\"a\":1}");
+        assert_eq!(run_json(cmd), Ok(json!({"a": 1})));
+    }
+
+    /// 非零退出 + stderr 是类型化错误 JSON → 原样透传（错误码不丢、不被包成
+    /// cancelled）。这依赖 spawn 的退出码 + stderr——正是真实二进制报
+    /// `not-found` / `source-unavailable` 的路径。
+    #[test]
+    fn run_json_passes_through_typed_stderr() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c",
+                  "echo '{\"error\":{\"code\":\"not-found\",\"message\":\"m\"}}' \
+                   >&2; exit 2"]);
+        assert_eq!(run_json(cmd),
+                   Err(json!({"error": {"code": "not-found", "message": "m"}})));
+    }
+
+    /// 非零退出 + stderr **不是** `{"error":…}` 形状 → 包成 cancelled（code 集固定，
+    /// 不另造新码），message 带原始 stderr，不能丢成空的。
+    #[test]
+    fn run_json_wraps_non_json_stderr_as_cancelled() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo plain-failure >&2; exit 1"]);
+        match run_json(cmd) {
+            Err(v) => {
+                assert_eq!(v["error"]["code"], "cancelled");
+                assert_eq!(v["error"]["message"], "plain-failure\n");
+            }
+            Ok(_) => panic!("non-zero exit must be an Err"),
+        }
+    }
+
+    /// spawn 本身失败（二进制不存在）→ cancelled（基础设施失败，不是会话源的
+    /// 缺列——§6.3-7 的 code 集固定）。
+    #[test]
+    fn run_json_spawn_failure_is_cancelled() {
+        let cmd = Command::new("definitely-not-a-real-binary-xyz");
+        match run_json(cmd) {
+            Err(v) => assert_eq!(v["error"]["code"], "cancelled"),
+            Ok(_) => panic!("missing binary must be an Err"),
+        }
     }
 }

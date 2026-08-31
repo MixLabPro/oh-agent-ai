@@ -283,9 +283,11 @@ turns the golden into a record of current behaviour and the test stops meaning a
 ### Tests read the real machine
 
 `run_scan()` with no `--path` scans the actual host directories of whoever runs it.
-Consequence: **`TestScannerExcludesItself.test_self_excluded` fails unless this repo is
-checked out under a scanned root** (normally `~/.claude/skills/agent-vitals`). That single
-failure is environmental; any *other* failure is real.
+`SCAN_CMD` is the Rust binary when `AGENT_VITALS_BIN` is set, else the Python scanner.
+`TestScannerExcludesItself.test_self_excluded` therefore passes `--self-root ROOT`
+explicitly: the binary has no `__file__` to infer its own skill dir from, and without the
+flag it used to silently scan itself (22 own-rule findings) under the differential
+harness — the exact regression that test guards. Any failure in this file is real.
 
 **`--path` does not isolate** — `main()` does `DEFAULT_ROOTS + [custom paths]`. Anything
 needing reproducible output must set `HOME=<fixture root>` and `cwd=<fixture root>/workdir`.

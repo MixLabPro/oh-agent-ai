@@ -1,4 +1,4 @@
-//! DSH 会话根发现（R1d-tick 最小形式，#105）。
+//! DSH 会话根发现。
 //!
 //! 解析 DSH_HOME（env → 缺省 `~/.dsh`，与 `dsh-client/src/host/index.ts`
 //! `sessionsRoot()` 同默认），walk `<DSH_HOME>/sessions/**/session.jsonl`，
@@ -10,12 +10,27 @@
 //! 复制时仍能正确去重。这正对 §4.3 的碰撞教训：native id 来自 source identity，
 //! 不是路径。
 //!
-//! 真实机上 58 个会话全是 `session.jsonl.zstd`（0 个裸 `.jsonl`）—— 本发现器
-//! 只认裸 `session.jsonl`，zstd 解压是 R2a SessionStore（#102）的事；这里把
-//! zstd 数也数出来报进 `DiscoveryReport`，让 tick 能诚实记一条「发现 N 个 zstd
-//! 会话、解压未接线」，而不是把「读不了」静默当成「没事做」。
+//! R2a（§6.3-2）在这之上补三件事，全部「存在性探测、绝不报错」：
+//!   · `dsh_session_files` —— population 的目录扫描：枚举
+//!     `session.jsonl` / `session.jsonl.zstd`（真机 58/58 是 zstd）；
+//!   · `dsh_session_roots_report` —— 与 `codex_session_roots_report` 同级的存在性
+//!     报告（sessions 根 + storages/workspace.json 索引层）；
+//!   · `parse_workspace_index` / `read_workspace_index` —— 把 `storages/workspace.json`
+//!     折成 会话→(工作区路径, 标题) + 归档集（DSH 侧的 `session_index` 等价物，
+//!     §4.5），供 `list_sessions` 做标题/归档查询，不扫日志本体。
+//!
+//! 真实机上的会话几乎全是 `session.jsonl.zstd`（0 个裸 `.jsonl`）—— 本发现器
+//! **两种形式都浮出**：裸 `.jsonl` 读日志头取 `id`；`.zstd` 目录以**目录名**作
+//! session_id（真机实测与日志头 id 一致；解压读头要付出解码全量的代价，R2a
+//! SessionStore population 才是 header-authoritative 的负责方，这里与裸路径
+//! 「读不到头退化为目录名」是同一个回退纪律），解压交给 oneline
+//! （`read_session_text` 对 `.zstd` 走多帧解压）。`zstd_only` 仍如实数出
+//! 「只以 zstd 存在的目录数」，让 tick 能区分裸/zstd 混合，而不是把
+//! 「读不了」静默当成「没事做」。
 
 use serde::Serialize;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -38,19 +53,164 @@ pub struct DiscoveryReport {
     pub sessions_root: Option<PathBuf>,
     /// 找到的裸 `session.jsonl` 数（读得到的候选）。
     pub bare_jsonl: usize,
-    /// 只以 `session.jsonl.zstd` 存在的会话目录数（解压未接线 → R2a 缺口）。
+    /// 只以 `session.jsonl.zstd` 存在的会话目录数（这些也进 `unfolded`，
+    /// 经 oneline 的多帧解压折账）。
     pub zstd_only: usize,
-    /// 按 mtime **降序**（最新在前）的未折会话。
+    /// 按 mtime **降序**（最新在前）的未折会话（裸 `.jsonl` 与 `.zstd` 两种
+    /// 形式都算候选）。
     pub unfolded: Vec<DiscoveredSession>,
+}
+
+/// `<DSH_HOME>` 根路径解析（env → `~/.dsh` 缺省）。
+pub fn dsh_home() -> Option<PathBuf> {
+    if let Some(h) = std::env::var_os("DSH_HOME") {
+        return Some(PathBuf::from(h));
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".dsh"))
 }
 
 /// `<DSH_HOME>/sessions` 根路径解析（env → `~/.dsh` 缺省）。
 pub fn sessions_root() -> Option<PathBuf> {
-    if let Some(h) = std::env::var_os("DSH_HOME") {
-        return Some(PathBuf::from(h).join("sessions"));
+    dsh_home().map(|d| d.join("sessions"))
+}
+
+/// 枚举 `$DSH_HOME/sessions/**/session.jsonl[.zstd]` —— R2a population 的目录扫描。
+/// 全局按路径字符串排序（确定性）；sessions 根缺席 → 空（存在性探测，绝不报错）。
+/// 只收 `session.jsonl` / `session.jsonl.zstd` 两个文件名，其它文件不掺进会话集。
+pub fn dsh_session_files(dsh_home: &Path) -> Vec<PathBuf> {
+    let root = dsh_home.join("sessions");
+    if !root.is_dir() {
+        return Vec::new();
     }
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".dsh").join("sessions"))
+    let mut files: Vec<PathBuf> = walkdir::WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy();
+            n == "session.jsonl" || n == "session.jsonl.zstd"
+        })
+        .map(|e| e.into_path())
+        .collect();
+    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    files
+}
+
+/// DSH 会话根集合的存在性报告 —— 与 `codex_session_roots_report` 同级：
+/// 存在性 + 计数 + 字节量，**绝不报错**（根缺席 → `exists=false` 零填充，不猜
+/// 路径、不把缺席当 0 条真数据）。
+///
+/// 两个根：`sessions/`（会话日志，计数 = `session.jsonl[.zstd]` 文件数）与
+/// `storages/`（索引层；R2a 消费其中 `workspace.json` 一个文件，故只数它——
+/// 不把 379MB `session_projcache.json` 拖进报告，那只是可删 cache，§4.5）。
+///
+/// 键序是字节一致的一部分，不能重排：根对象 kind → path → exists →
+/// file_count → total_bytes；外层 host → roots。
+pub fn dsh_session_roots_report(dsh_home: &Path) -> Value {
+    let roots = [
+        ("sessions", dsh_home.join("sessions"), dsh_session_files(dsh_home)),
+        (
+            "storages",
+            dsh_home.join("storages"),
+            {
+                let wp = dsh_home.join("storages").join("workspace.json");
+                if wp.is_file() {
+                    vec![wp]
+                } else {
+                    Vec::new()
+                }
+            },
+        ),
+    ];
+    let mut out = Vec::new();
+    for (kind, root, files) in roots {
+        // exists = 根目录存在（与 codex 同义：目录级存在性探测）。
+        let exists = root.is_dir();
+        let mut total_bytes = 0u64;
+        for f in &files {
+            // 与 codex `_file_bytes` 同款：文件在枚举与 stat 之间消失时按 0 字节
+            // 计，不 abort 整个报告；文件仍算进 file_count。
+            total_bytes += std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+        }
+        out.push(json!({
+            "kind": kind,
+            "path": root.to_string_lossy().to_string(),
+            "exists": exists,
+            "file_count": files.len(),
+            "total_bytes": total_bytes,
+        }));
+    }
+    json!({ "host": "dsh", "roots": out })
+}
+
+/// workspace.json 折出的会话索引：session id → (工作区路径, 标题)，外加归档集。
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceIndex {
+    /// session id（= 会话日志头 `id`，`session-<uuid>`）→ (workspace.path, workspace.title)
+    pub by_session: HashMap<String, (String, String)>,
+    /// 归档 session id 集合（`global.archivedSessionIds`）。
+    pub archived: HashSet<String>,
+}
+
+/// 解析 `storages/workspace.json` → 会话索引。**只读、宽容、绝不报错**：
+/// JSON 解析失败 / `tables.workspaces` 缺位 / 单条 workspace 字段缺 string 值
+/// → 该部分跳过，返回能折多少折多少。缺席整个索引 = 空索引（标题是加分项，
+/// 不是准入项，同 `parse_session_index` 对 session_index.jsonl 的纪律）。
+///
+/// 真实形状（实测 2026-08-30）：`tables.workspaces.{wsid}` = `{path, title,
+/// sessionIds[], createdAt, updatedAt}`；归档在 `global.archivedSessionIds[]`
+/// （**全局**，不在单条 workspace 里）。
+pub fn parse_workspace_index(text: &str) -> WorkspaceIndex {
+    let mut idx = WorkspaceIndex::default();
+    let Ok(doc) = serde_json::from_str::<Value>(text) else {
+        return idx;
+    };
+    // 归档集（全局）。
+    if let Some(archived) = doc.get("global").and_then(|g| g.get("archivedSessionIds"))
+        .and_then(|v| v.as_array())
+    {
+        for id in archived {
+            if let Some(s) = id.as_str() {
+                idx.archived.insert(s.to_string());
+            }
+        }
+    }
+    let Some(workspaces) = doc.pointer("/tables/workspaces").and_then(|v| v.as_object())
+    else {
+        return idx;
+    };
+    for ws in workspaces.values() {
+        let (Some(path), Some(title)) = (
+            ws.get("path").and_then(|v| v.as_str()),
+            ws.get("title").and_then(|v| v.as_str()),
+        ) else {
+            continue; // 单条 workspace 畸形 → 跳过，不 abort 整个索引
+        };
+        let Some(ids) = ws.get("sessionIds").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for sid in ids {
+            if let Some(s) = sid.as_str() {
+                idx.by_session
+                    .insert(s.to_string(), (path.to_string(), title.to_string()));
+            }
+        }
+    }
+    idx
+}
+
+/// 读 `$DSH_HOME/storages/workspace.json` → 会话索引。文件缺失/不可读 → 空索引
+/// （存在性探测，绝不报错——标题是加分项，不是准入项）。
+pub fn read_workspace_index(dsh_home: &Path) -> WorkspaceIndex {
+    let wp = dsh_home.join("storages").join("workspace.json");
+    let bytes = match std::fs::read(&wp) {
+        Ok(b) => b,
+        Err(_) => return WorkspaceIndex::default(),
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    parse_workspace_index(&text)
 }
 
 /// walk `<root>/**/session.jsonl`（含 `.zstd` 计数），滤 ledger，按 mtime 降序。
@@ -108,9 +268,31 @@ pub fn discover() -> DiscoveryReport {
         candidates.push((mtime, DiscoveredSession { path, session_id }));
     }
 
-    // 差集：只有 .zstd、没有可读裸文件的目录数 —— 解压未接线是 R2a 缺口，
-    // 数出来让 tick 诚实记（缺列不编列，但「读不了」也不能静默成「没事做」）。
-    let zstd_only = zstd_dirs.iter().filter(|d| !bare_dirs.contains(*d)).count();
+    // 差集：只有 .zstd、没有可读裸文件的目录 —— **这些也是候选**，经 oneline
+    // 的多帧解压折账（真机 59/59 全是这种，R1d tick 折的就是它们）。session_id
+    // 取目录名：真机实测目录名 == 日志头 id；为读头去解压全部会话代价太高，
+    // header-authoritative 是 R2a SessionStore population（#102）的负责方，这里
+    // 与裸路径「读不到头退化为目录名」同一个回退纪律。
+    let zstd_only_dirs: Vec<PathBuf> = zstd_dirs
+        .iter()
+        .filter(|d| !bare_dirs.contains(*d))
+        .cloned()
+        .collect();
+    for dir in &zstd_only_dirs {
+        let path = dir.join("session.jsonl.zstd");
+        let session_id = dir
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".to_string());
+        let key = tk::session_key("dsh", &session_id, &ns);
+        if tk_io::folded_in_ledger(&key) {
+            continue; // 已折 —— exactly-once，不重折
+        }
+        let mtime = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        candidates.push((mtime, DiscoveredSession { path, session_id }));
+    }
 
     candidates.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime)); // 最新在前
     let unfolded: Vec<DiscoveredSession> =
@@ -119,7 +301,7 @@ pub fn discover() -> DiscoveryReport {
     DiscoveryReport {
         sessions_root: Some(root),
         bare_jsonl,
-        zstd_only,
+        zstd_only: zstd_only_dirs.len(),
         unfolded,
     }
 }
@@ -286,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_counts_zstd_only_as_gap() {
+    fn discover_surfaces_zstd_only_dirs() {
         let _env = env_lock();
         let t = tmp_case();
         let (fake, av) = fake_root(&t);
@@ -298,7 +480,49 @@ mod tests {
         let r = discover();
         assert_eq!(r.bare_jsonl, 0);
         assert_eq!(r.zstd_only, 1);
-        assert_eq!(r.unfolded, vec![]);
+        // zstd-only 目录也是候选：session_id = 目录名，path 指向 .zstd 文件，
+        // 解压交给 oneline（read_session_text 的 `.zstd` 分支）。
+        assert_eq!(r.unfolded.len(), 1);
+        assert_eq!(r.unfolded[0].session_id, "sess-z");
+        assert_eq!(r.unfolded[0].path.file_name().unwrap(), "session.jsonl.zstd");
+    }
+
+    #[test]
+    fn discover_filters_zstd_only_via_ledger() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let (fake, av) = fake_root(&t);
+        let _g = TestEnvGuard::set(&av);
+        // 预置一条已折 ledger：sess-old 的 key（目录名作 session_id 的 dedup key）。
+        let ns = tk_io::machine_namespace();
+        let key = tk::session_key("dsh", "sess-old", &ns);
+        let state = av.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let mut entries = Map::new();
+        entries.insert(
+            key,
+            json!({"folded_at": "2026-08-30T00:00:00Z", "session_log": "/fake/old.zstd"}),
+        );
+        std::fs::write(
+            state.join("session-ledger.json"),
+            serde_json::to_string(&json!({
+                "schema_version": tk::LEDGER_SCHEMA_VERSION,
+                "entries": entries,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        for name in ["sess-old", "sess-new"] {
+            let d = fake.join("sessions").join("ws").join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("session.jsonl.zstd"), b"\x28\xb5\x2f\xfd").unwrap();
+        }
+        set_var("DSH_HOME", Some(fake.to_string_lossy().into_owned()));
+        let r = discover();
+        assert_eq!(r.zstd_only, 2); // 两个都是 zstd-only 目录
+        assert_eq!(r.unfolded.len(), 1); // 旧的已折 → 滤掉；只剩新的
+        assert_eq!(r.unfolded[0].session_id, "sess-new");
     }
 
     #[test]
@@ -322,6 +546,151 @@ mod tests {
         assert_eq!(r.zstd_only, 0);
         assert_eq!(r.unfolded.len(), 1);
         assert_eq!(r.unfolded[0].session_id, "sess-x");
+    }
+
+    #[test]
+    fn dsh_session_files_enumerates_both_forms_sorted() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let (fake, _av) = fake_root(&t);
+        // 两个 workspace 目录 + 两个会话目录；同时放裸 jsonl 与 zstd，外加一个
+        // 不相关的 junk 文件（不该进会话集）。
+        let s1 = fake.join("sessions").join("--proj-a--").join("session-uuid-1");
+        let s2 = fake.join("sessions").join("--proj-b--").join("session-uuid-2");
+        let s3 = fake.join("sessions").join("--proj-a--").join("session-uuid-3");
+        for (dir, name) in [
+            (&s1, "session.jsonl"),
+            (&s2, "session.jsonl.zstd"),
+            (&s3, "session.jsonl"),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(name), "{}").unwrap();
+        }
+        std::fs::create_dir_all(&s1).unwrap();
+        std::fs::write(s1.join("junk.txt"), "x").unwrap();
+
+        let files = dsh_session_files(&fake);
+        assert_eq!(files.len(), 3);
+        // 全局按路径字符串排序（确定性）。
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+    }
+
+    #[test]
+    fn dsh_session_files_absent_root_is_empty() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let (fake, _av) = fake_root(&t);
+        assert_eq!(dsh_session_files(&fake), Vec::<PathBuf>::new());
+        assert_eq!(dsh_session_files(&fake.join("no-sessions-root")), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn dsh_session_roots_report_shape_and_bytes() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let (fake, _av) = fake_root(&t);
+        let s1 = fake.join("sessions").join("--proj--").join("session-uuid-1");
+        std::fs::create_dir_all(&s1).unwrap();
+        std::fs::write(
+            s1.join("session.jsonl"),
+            "{\"type\":\"session\",\"id\":\"session-uuid-1\"}\n{}\n",
+        )
+        .unwrap();
+        // storages/workspace.json
+        let storages = fake.join("storages");
+        std::fs::create_dir_all(&storages).unwrap();
+        std::fs::write(
+            storages.join("workspace.json"),
+            r#"{"tables":{"workspaces":{}}}"#,
+        )
+        .unwrap();
+
+        let v = dsh_session_roots_report(&fake);
+        assert_eq!(v["host"], json!("dsh"));
+        let roots = v["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0]["kind"], json!("sessions"));
+        assert_eq!(roots[0]["exists"], json!(true));
+        assert_eq!(roots[0]["file_count"], json!(1));
+        assert!(roots[0]["total_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(roots[1]["kind"], json!("storages"));
+        assert_eq!(roots[1]["file_count"], json!(1));
+    }
+
+    #[test]
+    fn dsh_session_roots_report_absent_roots_zero_fill() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let (fake, _av) = fake_root(&t);
+        let v = dsh_session_roots_report(&fake);
+        let roots = v["roots"].as_array().unwrap();
+        // 根缺席 → exists=false 零填充，不报错。
+        assert_eq!(roots[0]["exists"], json!(false));
+        assert_eq!(roots[0]["file_count"], json!(0));
+        assert_eq!(roots[0]["total_bytes"], json!(0));
+        assert_eq!(roots[1]["exists"], json!(false));
+    }
+
+    #[test]
+    fn parse_workspace_index_full_shape() {
+        let text = r#"{
+          "unit": {"name": "dsh-storage", "version": 1},
+          "global": {"initialized": true, "archivedSessionIds": ["session-old-1", "session-old-2"]},
+          "tables": {"workspaces": {
+            "w1": {"path": "/Users/a/proj", "title": "proj",
+                    "sessionIds": ["session-aaa", "session-bbb"]},
+            "w2": {"path": "/Users/a/other", "title": "other",
+                    "sessionIds": ["session-ccc"]}
+          }}
+        }"#;
+        let idx = parse_workspace_index(text);
+        assert_eq!(idx.by_session.len(), 3);
+        assert_eq!(idx.by_session.get("session-aaa").unwrap().0, "/Users/a/proj");
+        assert_eq!(idx.by_session.get("session-aaa").unwrap().1, "proj");
+        assert_eq!(idx.by_session.get("session-ccc").unwrap().1, "other");
+        assert!(idx.archived.contains("session-old-1"));
+        assert!(!idx.archived.contains("session-aaa"));
+    }
+
+    #[test]
+    fn parse_workspace_index_malformed_is_empty_not_error() {
+        // 标题是加分项不是准入项：整份 JSON 坏了 → 空索引，绝不 abort。
+        let idx = parse_workspace_index("not json at all");
+        assert!(idx.by_session.is_empty());
+        assert!(idx.archived.is_empty());
+        let idx = parse_workspace_index("{\"tables\":{\"workspaces\":\"not an object\"}}");
+        assert!(idx.by_session.is_empty());
+    }
+
+    #[test]
+    fn parse_workspace_index_skips_single_bad_workspace_row() {
+        // 一条 workspace 缺 title / sessionIds → 跳过它，别条照常进。
+        let text = r#"{
+          "global": {"archivedSessionIds": []},
+          "tables": {"workspaces": {
+            "bad": {"path": "/x", "sessionIds": ["session-bad"]},
+            "good": {"path": "/y", "title": "good", "sessionIds": ["session-good"]}
+          }}
+        }"#;
+        let idx = parse_workspace_index(text);
+        assert_eq!(idx.by_session.len(), 1);
+        assert!(idx.by_session.contains_key("session-good"));
+        assert!(!idx.by_session.contains_key("session-bad"));
+    }
+
+    #[test]
+    fn read_workspace_index_missing_is_empty() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let (fake, _av) = fake_root(&t);
+        let idx = read_workspace_index(&fake);
+        assert!(idx.by_session.is_empty());
     }
 
     #[test]

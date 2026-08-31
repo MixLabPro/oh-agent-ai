@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>agent-vitals 工作台</title>
+  <link rel="stylesheet" href="workbench.css" />
+</head>
+<body>
+  <header class="wb-head">
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="overview">总览</button>
+      <button class="tab" data-tab="calendar">Token 日历</button>
+      <button class="tab" data-tab="sessions">会话</button>
+      <button class="tab" data-tab="findings">Findings</button>
+      <button class="tab" data-tab="sources">数据源</button>
+    </nav>
+    <span class="wb-head-right">
+      <span id="wb-sync-dot" class="sync-dot" title=""></span>
+      <button id="wb-refresh" class="wb-refresh" title="重新加载当前页">刷新</button>
+    </span>
+  </header>
+
+  <main class="wb-main">
+    <!-- ============ 总览 ============ -->
+    <section id="tab-overview" class="tabpane active">
+      <div class="cards">
+        <div class="stat today">
+          <div class="label">今日</div>
+          <div class="amount" id="ov-today-amount">—</div>
+          <div class="sub" id="ov-today-sub"></div>
+        </div>
+        <div class="stat">
+          <div class="label">本月</div>
+          <div class="amount" id="ov-month-amount">—</div>
+          <div class="sub" id="ov-month-sub"></div>
+        </div>
+        <div class="stat">
+          <div class="label">预算</div>
+          <div class="amount" id="ov-budget-amount">—</div>
+          <div class="bar"><div class="fill" id="ov-budget-fill"></div></div>
+          <div class="sub" id="ov-budget-sub"></div>
+        </div>
+      </div>
+
+      <div class="sync-row">
+        <span id="ov-sync-status" class="muted">尚未同步</span>
+        <button id="ov-sync-now" class="btn" hidden>立即同步</button>
+      </div>
+
+      <div class="panel days">
+        <div class="panel-title">本月逐日</div>
+        <div id="ov-days-empty" class="empty" hidden>本月还没有数据</div>
+        <ul id="ov-days-list" class="days-list"></ul>
+      </div>
+
+      <div class="note" id="ov-note"></div>
+    </section>
+
+    <!-- ============ Token 日历 ============ -->
+    <section id="tab-calendar" class="tabpane">
+      <div class="cal-head">
+        <button id="cal-prev" class="btn" title="上个月">‹</button>
+        <input id="cal-month" type="month" class="cal-month-input" />
+        <button id="cal-next" class="btn" title="下个月">›</button>
+        <span class="cal-total" id="cal-total"></span>
+      </div>
+      <div id="cal-empty" class="empty" hidden>该月暂无数据</div>
+      <div id="cal-grid" class="cal-grid"></div>
+      <div class="note" id="cal-note"></div>
+    </section>
+
+    <!-- ============ 会话 ============ -->
+    <section id="tab-sessions" class="tabpane">
+      <div id="sess-list-view">
+        <div class="sess-toolbar">
+          <span class="muted" id="sess-count"></span>
+          <span class="flex-spacer"></span>
+          <button id="sess-reload" class="btn" title="重新加载列表">重载列表</button>
+        </div>
+        <div id="sess-banner" class="banner" hidden></div>
+        <div class="table-wrap">
+          <table class="sess-table">
+            <thead>
+              <tr>
+                <th>标题</th><th>宿主</th><th>模型</th><th>日期</th>
+                <th class="num">Tokens</th><th class="num">成本(USD)</th><th class="num">Findings</th>
+              </tr>
+            </thead>
+            <tbody id="sess-body"></tbody>
+          </table>
+        </div>
+        <div id="sess-empty" class="empty" hidden>暂无会话</div>
+        <div class="sess-more-row">
+          <button id="sess-more" class="btn" hidden>加载更多</button>
+        </div>
+      </div>
+
+      <div id="sess-detail-view" hidden>
+        <button id="sess-back" class="btn">← 返回列表</button>
+        <div id="sess-detail-banner" class="banner" hidden></div>
+        <div id="sess-detail-body"></div>
+      </div>
+    </section>
+
+    <!-- ============ Findings ============ -->
+    <section id="tab-findings" class="tabpane">
+      <div class="find-toolbar">
+        <span class="muted" id="find-summary"></span>
+        <span class="flex-spacer"></span>
+        <button id="find-reload" class="btn" title="重新汇总">重载</button>
+      </div>
+      <div id="find-banner" class="banner" hidden></div>
+
+      <div class="cards cards-4">
+        <div class="stat">
+          <div class="label">总发现</div>
+          <div class="amount" id="find-total">—</div>
+          <div class="sub" id="find-total-sub"></div>
+        </div>
+        <div class="stat danger">
+          <div class="label">危险</div>
+          <div class="amount" id="find-critical">—</div>
+          <div class="sub">critical</div>
+        </div>
+        <div class="stat warn">
+          <div class="label">警告</div>
+          <div class="amount" id="find-warning">—</div>
+          <div class="sub">warning</div>
+        </div>
+        <div class="stat">
+          <div class="label">信息</div>
+          <div class="amount" id="find-info">—</div>
+          <div class="sub">info</div>
+        </div>
+      </div>
+
+      <div class="chips" id="find-chips"></div>
+
+      <div class="panel">
+        <div class="panel-title">规则级汇总</div>
+        <div id="find-rules-empty" class="empty" hidden>暂无发现</div>
+        <div class="table-wrap">
+          <table class="sess-table">
+            <thead>
+              <tr>
+                <th>规则</th><th>严重度</th><th>类别</th>
+                <th class="num">命中</th><th class="num">会话</th>
+              </tr>
+            </thead>
+            <tbody id="find-rules-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">明细</div>
+        <div class="find-filter">
+          <select id="find-sev" class="find-select">
+            <option value="all">全部严重度</option>
+            <option value="critical">危险 critical</option>
+            <option value="warning">警告 warning</option>
+            <option value="info">信息 info</option>
+          </select>
+          <select id="find-rule" class="find-select">
+            <option value="all">全部规则</option>
+          </select>
+          <span class="muted note" id="find-note"></span>
+        </div>
+        <div id="find-empty" class="empty" hidden>该筛选下暂无发现</div>
+        <div class="table-wrap">
+          <table class="sess-table">
+            <thead>
+              <tr>
+                <th>时间</th><th>会话</th><th>严重度</th><th>规则</th><th>工具</th><th>证据</th>
+              </tr>
+            </thead>
+            <tbody id="find-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="note" id="find-foot"></div>
+    </section>
+
+    <!-- ============ 数据源 ============ -->
+    <section id="tab-sources" class="tabpane">
+      <div class="src-toolbar">
+        <span class="muted">数据源状态</span>
+        <span class="flex-spacer"></span>
+        <button id="src-reload" class="btn" title="重新扫描数据源">重载</button>
+      </div>
+      <div id="src-banner" class="banner" hidden></div>
+
+      <div class="sync-row">
+        <span id="src-sync" class="muted">尚未同步</span>
+      </div>
+
+      <div id="src-cards" class="src-cards"></div>
+      <div class="note" id="src-foot"></div>
+    </section>
+  </main>
+
+  <footer class="wb-foot" id="wb-foot"></footer>
+  <script src="workbench.js"></script>
+</body>
+</html>

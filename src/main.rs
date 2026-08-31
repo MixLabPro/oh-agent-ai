@@ -500,6 +500,12 @@ enum SessionsAction {
         #[arg(long)]
         json: bool,
     },
+    /// Aggregate findings across ALL sessions (both sources), rule-level rollup.
+    Findings {
+        /// Print the versioned rollup DTO as JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `state` 子命令的子动作 —— 一动作一入口，喂的都是**已算好**的 JSON
@@ -896,75 +902,33 @@ fn main() {
     // 行为审计：审计一份 DSH 会话日志的执行轨迹，**不跑 skill 扫描**。
     // 独立取证命令（读会话日志 → 规则引擎 → findings），在扫描之前短路。
     if let Some(Cmd::Behavior { session_log, rows_json }) = &args.cmd {
-        let Some(audit) = agent::behavior::audit_session_log(session_log) else {
-            eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
-            std::process::exit(2);
-        };
-        let findings = &audit.findings;
         if let Some(path) = rows_json {
-            // `--json` 输出十二个键（这行注释原来写"九个"，早就跟实际字段数
-            // 脱节了——subagents/skill/duration 陆续加进来时没人回头改这一句，
-            // 这次顺手改成准确的数字，不然它只会继续误导下一个读它的人）。
-            // 三份用量数据是同一批事件的三种分辨率，
-            // 不是重复：usage 按模型汇总（成本），requests 保留逐请求时间序列
-            // （上下文占用曲线的数据源），context 是常驻前缀的分类估算。
-            //
-            // requests[].context_tokens 是 provider 计数，context.* 是 est_tokens
-            // 估算——**两者不同估算器，不能相减后当作精确分类**（详见 core 的
-            // context_composition 文档注释）。
-            //
-            // cost 不是 audit 六键之一——它读的是 audit.usage × pricing.json，
-            // 是 usage 上的一次派生计算，不是 behavior_session_log 的一部分
-            // （cost.rs 顶部注释：纯展示层）。之前只有人读的 cost_block 文本，
-            // 想要这份数字得手写脚本重新调 _price/load_pricing；现在 cost_report
-            // 是 cost_block 和这里唯一的算价格的地方，两处不会算出两个数。
-            let pricing = agent::cost::load_pricing();
-            let cost = agent::cost::cost_report(&audit.usage, &pricing);
-            // pre_fork 与 usage 是同一个形状（token_by_model 的输出），所以
-            // 定价走同一个 cost_report——**不是**在这里另写一套算法。
-            // usage→cost 与 pre_fork→pre_fork_cost 两条路对称：main.rs 就是
-            // CLI 的展示层，它给 usage 定价本来就是合法的（cost.rs 顶部注释：
-            // core 只给 token，定价在展示层），给 pre_fork 定价是补上同一处
-            // 遗漏的对称性，不是破例。
-            //
-            // 没分叉时 pre_fork 是 null → pre_fork_cost 也是 null，**不是一个
-            // 全零的 cost_report**：「没分叉」和「分叉了但上游没花钱」是两回事。
-            let pre_fork_cost = if audit.pre_fork.is_null() {
-                None
-            } else {
-                agent::cost::cost_report(&audit.pre_fork, &pricing)
+            // `--json` 的 20 键载荷在 behavior.rs::audit_payload（唯一来源）——
+            // DSH SessionReport 的 session 载荷就是它，键序逐字节对齐 Python。
+            let Some(payload) = agent::behavior::audit_payload(session_log) else {
+                eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
+                std::process::exit(2);
             };
-            let text = serde_json::to_string_pretty(&json!({
-                "findings": findings,
-                "usage": &audit.usage,
-                "requests": &audit.requests,
-                "context": &audit.context,
-                "compaction": &audit.compaction,
-                "waste": &audit.waste,
-                "cost": cost,
-                "pre_fork": &audit.pre_fork,
-                "pre_fork_cost": pre_fork_cost,
-                "subagents": &audit.subagents,
-                "skill": &audit.skill,
-                "duration": &audit.duration,
-                "rule_outcomes": &audit.rule_outcomes,
-                "usage_coverage": &audit.usage_coverage,
-                "duration_coverage": &audit.duration_coverage,
-                "skill_coverage": &audit.skill_coverage,
-                "subagents_coverage": &audit.subagents_coverage,
-                "compaction_coverage": &audit.compaction_coverage,
-                "waste_coverage": &audit.waste_coverage,
-            })).unwrap_or_default();
+            let findings_len = payload
+                .get("findings")
+                .and_then(|v| v.as_array())
+                .map_or(0, |a| a.len());
+            let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
             if path == &PathBuf::from("-") {
                 println!("{text}");
             } else if std::fs::write(path, &text).is_err() {
                 eprintln!("failed to write {}", path.display());
                 std::process::exit(2);
             } else {
-                println!("Wrote {}: {} findings", path.display(), findings.len());
+                println!("Wrote {}: {} findings", path.display(), findings_len);
             }
             return;
         }
+        let Some(audit) = agent::behavior::audit_session_log(session_log) else {
+            eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
+            std::process::exit(2);
+        };
+        let findings = &audit.findings;
         for f in findings {
             let sev = f.get("severity").and_then(|v| v.as_str()).unwrap_or("");
             let glyph = match sev { "critical" => "✕", "warning" => "⚠", _ => "·" };
@@ -1411,6 +1375,9 @@ fn main() {
             }
             SessionsAction::Read { session_key, revision, json } => {
                 agent::r2a_store::sessions_read(home_path, session_key, revision, *json);
+            }
+            SessionsAction::Findings { json } => {
+                agent::r2a_store::sessions_findings(home_path, *json);
             }
         }
         return;

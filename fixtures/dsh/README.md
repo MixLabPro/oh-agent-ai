@@ -18,6 +18,10 @@ DSH-2 的测试语料 C3：手写的 DSH 会话日志，供 `adapters/dsh.py`（
 本目录的 fixture 用**裸文本 `session.jsonl`**（等价于 `compression:'none'`），文件内容
 与 zstd 解压后的字节完全一致，只是省掉了压缩这一层。
 
+R2a 的**多帧 zstd** 会话夹具是另一套产物：`session.jsonl.zstd` + `workspace.json`
+（DSH 默认持久化后端实际落盘的形态——每次 flush 追加一个 zstd 帧），见文末
+[多帧 zstd 会话夹具（R2a SessionStore）](#多帧-zstd-会话夹具r2a-sessionstore)。
+
 > 基线：deepseek-harness `47f9438`（0.1.0-rc.5）。本目录的版本常量逐字抄自该基线的源码，
 > 见 [重建与校验](#重建与校验)。
 
@@ -32,6 +36,9 @@ DSH-2 的测试语料 C3：手写的 DSH 会话日志，供 `adapters/dsh.py`（
 | `incomplete.jsonl` | 发现**不完整**（`complete === false`）的一轮**没有发布目录** |
 | `build_dsh_behavior_fixture.py` | 行为审计执行事件建库脚本（纯标准库），自校验 |
 | `behavior.jsonl` | 一条**执行轨迹**：命中 SV601–SV610 每条规则 + 安全对照，见下文 |
+| `build_zstd_fixture.py` | **多帧 zstd** 夹具生成器（需可选 `zstandard`），把 `behavior.jsonl` 切成 3 段、每段压成自己的 zstd 帧再拼接 |
+| `session.jsonl.zstd` | 3 帧拼接的 DSH 默认落盘形态（`behavior.jsonl` 的内容，flush 了 3 次） |
+| `workspace.json` | `storages/workspace.json` 标题索引（`sess-behavior-0001` → `demo project`） |
 
 ---
 
@@ -365,3 +372,38 @@ for f in behavior.match_behavior(events):
 
 `SESSION_FORMAT_VERSION` bump 时，本 fixture 的常量与 `behavior.jsonl` 一同重新生成
 （与 `complete.jsonl`/`incomplete.jsonl` 同一条纪律）。
+
+---
+
+## 多帧 zstd 会话夹具（R2a SessionStore）
+
+上面全部是**裸文本** fixture，测的是 `compression:'none'` 分支。但 DSH 的**默认**
+持久化后端每次 flush 追加一个**新的 zstd 帧**——一个会话的 `.zstd` 文件是多个帧的
+拼接，不是单帧。R2a 的 `src/dsh.rs::decode_zstd_multi_frame`（Rust 侧 ruzstd
+`StreamingDecoder` 逐帧读）与 `adapters/dsh.py` 的同名镜像（Python 侧 zstandard
+`decompressobj` 逐帧循环）都为这个形状而生；`tests/test_r2a.py` 的
+`DshPopulationE2ETests` / `DshReconciliationTests` 就是喂这份夹具、把整条链路
+（发现 → 解码 → population → cache → 跨实现对账）钉住的。
+
+产物（**已提交**，CI 不需要 zstandard——解码走 ruzstd / zstandard，只在测试运行时
+才需要）：
+
+```
+fixtures/dsh/session.jsonl.zstd   # 3 帧拼接（= flush 了 3 次），内容 = behavior.jsonl
+fixtures/dsh/workspace.json       # storages/workspace.json 标题索引
+```
+
+`session.jsonl.zstd` 是把 `behavior.jsonl` 按行切成 3 段（`CHUNK_SPANS`），每段独立
+`zstd.ZstdCompressor().compress(...)` 再 `b"".join` 拼接。目录名 `demo-proj` 与 header
+id `sess-behavior-0001` 故意不同——native id 以头行为准（R2a §1.3/§4.5），目录名只
+是路径。
+
+重建（自校验会做两件事：帧数必须 ≥2（否则不是「多帧」夹具），解码产物必须逐字节
+还原 `behavior.jsonl`）：
+
+```bash
+python3 fixtures/dsh/build_zstd_fixture.py     # 需要 pip install zstandard
+```
+
+> 纪律与其余 fixture 相同：`behavior.jsonl` 一旦重新生成，`session.jsonl.zstd` 必须
+> 用本脚本同步重建——解码对账是逐字节的，内容漂了一个字节对账即红。

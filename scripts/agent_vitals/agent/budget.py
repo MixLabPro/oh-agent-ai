@@ -243,8 +243,21 @@ def _price_by_model(by_model, pricing):
     return {"total": report["total"], "peak_total": report["peak_total"]}
 
 
+BASE_TOKEN_FIELDS = (
+    "uncached_input_tokens", "output_tokens",
+    "cache_read_tokens", "cache_write_tokens",
+)
+
+
+def _base_tokens(day):
+    """日桶的 4 个基础 token 字段求和。peak_* 是高峰子集、已含在基础桶里，
+    不重复计。Rust `cost.rs::base_token_total` 的镜像，词表同源——菜单栏标题的
+    「今日已消耗 token」读这份（两边各带一次，靠差分守一致）。"""
+    return sum(int(day.get(f) or 0) for f in BASE_TOKEN_FIELDS)
+
+
 def compute_today_cost():
-    """today.json → 当日 cost (元) + peak 拆分。
+    """today.json → 当日 cost (元) + peak 拆分 + token 总量。
 
     today.json 缺场返回 None —— 与 CLAUDE.md §「缺列不编列」一致。
     浏览器 tab 渲染时显示「尚无数据」,**不**编 0。
@@ -285,14 +298,19 @@ def compute_today_cost():
         return None
     pricing = cost_module.load_pricing()
     if by_model:
-        return _price_by_model(by_model, pricing)
+        out = _price_by_model(by_model, pricing)
+        # 与 Rust `today_cost` 锁步：输出带今日 token 总量（菜单栏标题用）。
+        out["tokens"] = sum(_base_tokens(b) for b in by_model.values())
+        return out
     total = 0.0
     peak = 0.0
+    tokens = 0
     for b in buckets.values():
         c = _bucket_cost(b, pricing)
         total += c.get("total", 0.0)
         peak += c.get("peak_total", 0.0)
-    return {"total": total, "peak_total": peak}
+        tokens += _base_tokens(b)
+    return {"total": total, "peak_total": peak, "tokens": tokens}
 
 
 def compute_month_cost(month=None):

@@ -1,14 +1,24 @@
-"""DSH session log (JSONL) reader for trigger evidence (A10).
+"""DSH session log (JSONL) reader for trigger evidence (A10) + R2a discovery.
 
 DSH 默认会话持久化是 `session-persistence-jsonl`，落盘在
-`<DSH_HOME>/sessions/<project>/<id>/session.jsonl[.zstd]`。本读取器只认
-裸文本 `.jsonl`（等价于 `compression:'none'`）；zstd 解压是上游的事，不在这里做。
+`<DSH_HOME>/sessions/<project>/<id>/session.jsonl[.zstd]`。本读取器认裸文本
+`.jsonl` 与 `.zstd` 两种形态：`.zstd` 是 DSH 增量 flush 追加出的**多帧** zstd
+（每帧一次写盘），用可选 `zstandard` 逐帧解压（`decode_zstd_multi_frame`，
+与 Rust `src/dsh.rs` 的 ruzstd `StreamingDecoder` 循环同语义）。zstandard 是
+**可选**依赖（宿内 skill 不拉第三方库，spec §7.1 G1）：缺席时 `.zstd` 报
+`unsupported-compression`——Rust 侧 ruzstd 是硬依赖，没有这一档，这是宿内
+skill 形态独有的诚实降级。`.jsonl` 只依赖标准库 `json`。逐行读、逐行
+`json.loads`；任何一行不是合法 JSON 就降级，**绝不假装「读到了 0 条」**——报
+0 次会直接伪造出假的 SV201。格式见 `fixtures/dsh/README.md` 与
+`docs/HOST_ADAPTER_CONTRACT.md` 的 DSH 一节。
 
-只依赖标准库 `json`。逐行读、逐行 `json.loads`；任何一行不是合法 JSON 就降级，
-**绝不假装「读到了 0 条」**——报 0 次会直接伪造出假的 SV201。格式见
-`fixtures/dsh/README.md` 与 `docs/HOST_ADAPTER_CONTRACT.md` 的 DSH 一节。
+R2a 的 DSH population 也消费本模块：`dsh_session_files` /
+`dsh_session_roots_report` / `read_workspace_index` / `parse_workspace_index`
+是 Rust `discovery.rs` DSH 半边的 Python 镜像（Rust 的 Codex 半边在
+`adapters/codex_session.py`，这里保持对称）。
 """
 
+import io
 import json
 import os
 from pathlib import Path
@@ -83,8 +93,112 @@ def _is_skill_invocation_carrier(event):
     return isinstance(source, dict) and source.get("kind") == "skill-invocation"
 
 
-def read_session_log(path):
-    """逐行读一个 DSH 会话 JSONL，返回触发证据。
+# ── zstd（R2a 落地，mirror `src/dsh.rs`）─────────────────────────────
+# `zstandard` 是**可选**依赖：宿内 skill 形态不拉第三方库（spec §7.1 G1），
+# 缺席时 `.zstd` 报 `unsupported-compression`（Rust ruzstd 是硬依赖，无此档）。
+# 判定只用 `import` 是否成功——不看版本：DSH 的 zstd 帧是标准 zstd，任何 >=0.15
+# 都解得了，版本差异不影响帧格式。
+
+def _zstd():
+    try:
+        import zstandard
+    except ImportError:
+        return None
+    return zstandard
+
+
+def decode_zstd_multi_frame(data):
+    """多帧 zstd 解压（DSH 增量 flush 每帧一次写盘 → 文件是若干帧首尾相连）。
+
+    语义与 Rust `src/dsh.rs::decode_zstd_multi_frame` 逐条对齐：
+
+      · 空输入 = 0 帧 = 空文本 → `b""`（空会话文件该报 missing-header，
+        **不是** zstd-decode-error）；
+      · 任何一帧解析/读取失败（损坏、截断）→ `None` → 调用方报
+        `zstd-decode-error`，**绝不拿半截结果当「读到了 N 条」**；
+      · zstandard 缺席 → `None`（调用方靠 `_zstd()` 判 `unsupported-compression`）。
+
+    实现是逐帧 `decompressobj()` 循环：`decompress()` 只解第一帧就静默丢弃
+    后续帧，`stream_reader` 对截断帧不抛错、静默返回部分结果——都不诚实。
+    `decompressobj()` 每次新帧新建（`eof`/`unused_data` 是单帧状态），
+    `eof==False` 即输入在帧中途耗尽（截断）→ `None`；`unused_data` 是帧后
+    未消耗的字节，即下一帧的开头（与 Rust 用 `cursor.position()` 前进同义）。
+    """
+    if not data:
+        return b""
+    zstd = _zstd()
+    if zstd is None:
+        return None
+    try:
+        dctx = zstd.ZstdDecompressor()
+        out = bytearray()
+        pos = 0
+        n = len(data)
+        while pos < n:
+            dobj = dctx.decompressobj()
+            chunk = data[pos:]
+            out += dobj.decompress(chunk)
+            if not dobj.eof:
+                # 输入在帧中途耗尽：截断帧。半截结果绝不能当完整会话。
+                return None
+            consumed = len(chunk) - len(dobj.unused_data)
+            if consumed <= 0:
+                # 没有进展：帧头合法但解不出字节——防死循环（Rust 同款守卫）。
+                return None
+            pos += consumed
+        return bytes(out)
+    except zstd.ZstdError:
+        return None
+
+
+def read_session_text(path):
+    """读会话日志文本：`.zstd` 后缀 → 多帧解压，其余原样。返回 `(text, None)`
+    或 `(None, code)`，code ∈ {"file-missing", "zstd-decode-error",
+    "unsupported-compression"}。
+
+      · 文件缺失/不可读 → `file-missing`
+      · zstd 解压失败 → `zstd-decode-error`（**不是** `non-json`）
+      · zstandard 缺席（仅 `.zstd`）→ `unsupported-compression`
+
+    非 UTF-8 字节替换为 U+FFFD（`errors="replace"`，与 Rust
+    `String::from_utf8_lossy` 对齐）。mirror `src/dsh.rs::read_session_text`。
+    """
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None, "file-missing"
+    if Path(path).suffix == ".zstd":
+        if _zstd() is None:
+            return None, "unsupported-compression"
+        out = decode_zstd_multi_frame(data)
+        if out is None:
+            return None, "zstd-decode-error"
+        return out.decode("utf-8", errors="replace"), None
+    return data.decode("utf-8", errors="replace"), None
+
+
+def _evidence_bag():
+    """触发证据 dict 的默认形状：读全时逐一填充；降级时只改 `degraded`。
+
+    与 Rust `_evidence_bag()`（src/dsh.rs）逐键对齐。
+    """
+    return {
+        "catalog_entries": [],
+        "invoked": [],
+        "selected": [],
+        "execution_events": None,
+        "usage_events": None,
+        "cwd": None,
+        "degraded": False,
+    }
+
+
+def parse_session_log(text):
+    """纯解析：一段已解压的 DSH 会话 JSONL 文本 → 触发证据 dict。
+
+    与 Rust `src/dsh.rs::parse_session_log` 一一对应。`read_session_log` 在上游
+    负责取字节/解压（read_session_text），解析是这条纯函数——分拆后 r2a.py 的
+    `SessionStore::dsh` 才能只验 header 而不重跑整个证据提取。
 
     第 1 行是 `SessionHeader`（`{"type":"session","version":0,...}`），其后每行一个
     `SessionEvent`（camelCase 字段 `type`/`seq`/`time`/`data`，表面事件带 `surfaceOp`）。
@@ -103,21 +217,7 @@ def read_session_log(path):
                         降级时为 null
       degraded          False 表示读全了；字符串表示降级原因
     """
-    result = {
-        "catalog_entries": [],
-        "invoked": [],
-        "selected": [],
-        "execution_events": None,
-        "usage_events": None,
-        "cwd": None,
-        "degraded": False,
-    }
-
-    try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        result["degraded"] = "file-missing"
-        return result
+    result = _evidence_bag()
 
     # JSONL 记录边界只能是真正的换行——str.splitlines() 额外认的那批 Unicode
     # 段落/换行符（U+2028、U+0085…）合法出现在 JSON 字符串值里，用它切会把
@@ -244,6 +344,22 @@ def read_session_log(path):
     result["execution_events"] = execution_events
     result["usage_events"] = usage_events
     return result
+
+
+def read_session_log(path):
+    """逐行读一个 DSH 会话 JSONL（.zstd 自动解压），返回触发证据。
+
+    取字节（read_session_text）在上游，解析（parse_session_log）在下游，与 Rust
+    `src/dsh.rs::read_session_log` 同构。返回 dict 字段见 parse_session_log。
+    """
+    text, read_err = read_session_text(path)
+    if read_err is not None:
+        # file-missing / zstd-decode-error / unsupported-compression——
+        # **都不是** non-json，也不许当成「读到了 0 条」。
+        result = _evidence_bag()
+        result["degraded"] = read_err
+        return result
+    return parse_session_log(text)
 
 
 def _is_usage_event(event, etype):
@@ -418,6 +534,118 @@ def read_snapshot(path):
     written_at = doc.get("written_at")
     result["written_at"] = written_at if isinstance(written_at, str) else None
     return result
+
+
+# ── R2a DSH discovery（mirror `src/agent/discovery.rs` 的 DSH 半边）────────
+# Codex 半边在 `adapters/codex_session.py`；这里保持对称。全是存在性探测，
+# **绝不报错**：根缺席/JSON 畸形 → 空结果，绝不把缺席当 0 条真数据。
+
+# 只收这两个文件名；其它文件（session_projcache.json 等）不掺进会话集。
+_DSH_SESSION_FILENAMES = frozenset(("session.jsonl", "session.jsonl.zstd"))
+
+
+def dsh_session_files(dsh_home):
+    """枚举 `<dsh_home>/sessions/**/session.jsonl[.zstd]`——R2a population 的
+    目录扫描。全局按路径字符串排序（确定性）；sessions 根缺席 → 空。
+    mirror `discovery::dsh_session_files`。"""
+    root = Path(dsh_home) / "sessions"
+    if not root.is_dir():
+        return []
+    files = []
+    for p in root.rglob("*"):
+        if p.is_file() and p.name in _DSH_SESSION_FILENAMES:
+            files.append(p)
+    return sorted(files, key=str)
+
+
+def _file_bytes(path):
+    """文件字节数；枚举与 stat 之间文件消失 → 0 字节（不 abort，同
+    `codex_session._file_bytes`）。"""
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return 0
+
+
+def dsh_session_roots_report(dsh_home):
+    """DSH 会话根集合的存在性报告（mirror `discovery::dsh_session_roots_report`）。
+
+    两个根：`sessions/`（会话日志，计数 = `session.jsonl[.zstd]` 文件数）与
+    `storages/`（索引层；只数 `workspace.json` 一个文件——不把 379MB
+    `session_projcache.json` 拖进报告，那只是可删 cache）。键序是字节一致的
+    一部分，不能重排：kind → path → exists → file_count → total_bytes。
+    """
+    dsh_home = Path(dsh_home)
+    sessions_root = dsh_home / "sessions"
+    session_files = dsh_session_files(dsh_home)
+    wp = dsh_home / "storages" / "workspace.json"
+    storage_files = [wp] if wp.is_file() else []
+    roots = []
+    for kind, root, files in (("sessions", sessions_root, session_files),
+                              ("storages", dsh_home / "storages", storage_files)):
+        roots.append({
+            "kind": kind,
+            "path": str(root),
+            "exists": root.is_dir(),
+            "file_count": len(files),
+            "total_bytes": sum(_file_bytes(f) for f in files),
+        })
+    return {"host": "dsh", "roots": roots}
+
+
+def parse_workspace_index(text):
+    """解析 `storages/workspace.json` → (by_session, archived)。**只读、宽容、
+    绝不报错**：JSON 解析失败 / `tables.workspaces` 缺位 / 单条 workspace 字段
+    缺 string → 该部分跳过，能折多少折多少。mirror `discovery::parse_workspace_index`。
+
+    真实形状（实测 2026-08-30）：`tables.workspaces.{wsid}` = `{path, title,
+    sessionIds[], createdAt, updatedAt}`；归档在 `global.archivedSessionIds[]`
+    （**全局**，不在单条 workspace 里）。返回 `(by_session, archived)`：
+      by_session  session id → (workspace.path, workspace.title)
+      archived    归档 session id 集合
+    """
+    by_session = {}
+    archived = set()
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError:
+        return by_session, archived
+    if not isinstance(doc, dict):
+        return by_session, archived
+    global_ = doc.get("global")
+    if isinstance(global_, dict):
+        ids = global_.get("archivedSessionIds")
+        if isinstance(ids, list):
+            for sid in ids:
+                if isinstance(sid, str):
+                    archived.add(sid)
+    workspaces = doc.get("tables", {}).get("workspaces")
+    if isinstance(workspaces, dict):
+        for ws in workspaces.values():
+            if not isinstance(ws, dict):
+                continue
+            path = ws.get("path")
+            title = ws.get("title")
+            ids = ws.get("sessionIds")
+            if not (isinstance(path, str) and isinstance(title, str)
+                    and isinstance(ids, list)):
+                continue  # 单条 workspace 畸形 → 跳过，不 abort 整个索引
+            for sid in ids:
+                if isinstance(sid, str):
+                    by_session[sid] = (path, title)
+    return by_session, archived
+
+
+def read_workspace_index(dsh_home):
+    """读 `<dsh_home>/storages/workspace.json` → (by_session, archived)。
+    文件缺失/不可读 → 空索引（标题是加分项，不是准入项）。
+    mirror `discovery::read_workspace_index`。"""
+    wp = Path(dsh_home) / "storages" / "workspace.json"
+    try:
+        text = wp.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}, set()
+    return parse_workspace_index(text)
 
 
 def _self_test():

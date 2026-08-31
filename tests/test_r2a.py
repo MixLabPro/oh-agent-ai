@@ -46,6 +46,17 @@ if _BIN:
 PY_CMD = [sys.executable, str(ROOT / "scripts" / "scan.py")]
 
 FIXTURE_COST = ROOT / "fixtures" / "codex" / "cost"
+FIXTURE_DSH = ROOT / "fixtures" / "dsh"
+
+# DSH 的多帧 zstd 会话（fixtures/dsh/session.jsonl.zstd）解码需要 zstandard——
+# 该包是**可选**依赖（repo 本身零第三方，只有测试/夹具生成器在装了它时多跑一层）。
+# 缺 zstandard 时 Python 侧诚实报 unsupported-compression 降级，无法与 Rust 逐字节
+# 对账；所以 DSH fixture 用例整体 skip，只有装了 zstandard 才跑。
+try:
+    import zstandard  # noqa: F401
+    _HAVE_ZSTD = True
+except ImportError:
+    _HAVE_ZSTD = False
 
 
 # ── 夹具/环境工具 ───────────────────────────────────────────────
@@ -99,6 +110,31 @@ def _normalize_generated_at(obj):
 
 def _cache_path(av: Path) -> Path:
     return Path(av) / "cache" / "r2a" / "codex-sessions.json"
+
+
+def _dsh_cache_path(av: Path) -> Path:
+    return Path(av) / "cache" / "r2a" / "dsh-sessions.json"
+
+
+def _fake_dsh_home(base: Path) -> Path:
+    """隔离的模拟 HOME：**多帧 zstd** DSH 语料（fixtures/dsh）。
+
+    与 Rust `r2a_store::fake_dsh_home` 同源，只是会话文件换成已提交的
+    `session.jsonl.zstd`（3 帧 = flush 了 3 次，fixtures/dsh/build_zstd_fixture.py
+    生成）——Python 侧要覆盖 zstd 路径，就得喂 zstd 文件，裸 jsonl 只测得到
+    `compression:'none'` 分支。目录名 `demo-proj` 故意与 header id 不同——native id
+    以头行为准（§1.3/§4.5）：
+      `~/.dsh/sessions/demo-proj/agent-1/session.jsonl.zstd`
+      `~/.dsh/storages/workspace.json`（标题索引：sess-behavior-0001 → demo project）
+    """
+    home = base / "home"
+    sdir = home / ".dsh" / "sessions" / "demo-proj" / "agent-1"
+    sdir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(FIXTURE_DSH / "session.jsonl.zstd", sdir / "session.jsonl.zstd")
+    storages = home / ".dsh" / "storages"
+    storages.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(FIXTURE_DSH / "workspace.json", storages / "workspace.json")
+    return home
 
 
 # ── §6.3-5 / §6.3-6 纯规则镜像（与 core `r2a.rs` 断言值同源）───────
@@ -341,8 +377,10 @@ class CodexPopulationE2ETests(unittest.TestCase):
         self.assertEqual(ids, ["rollout-sol", "rollout-terra",
                                "rollout-unpriced"])
         self.assertEqual(page["store_revision"], 2)
-        # 类型化错误码不是空页：dsh 源在 source_statuses 里明说 unavailable。
-        self.assertEqual(dto["source_statuses"]["dsh"]["status"], "unavailable")
+        # 诚实零（§3.3/§4.3）：home 里没有 .dsh 会话 → dsh 报 ok + 0 条，
+        # **不是** unavailable——那个错误码只用于「文件在但一个都读不了」。
+        self.assertEqual(dto["source_statuses"]["dsh"]["status"], "ok")
+        self.assertEqual(dto["source_statuses"]["dsh"]["sessions"], 0)
         self.assertEqual(dto["source_statuses"]["codex"]["status"], "ok")
         # host_kind / source_profile 形状
         it = page["items"][0]
@@ -364,10 +402,32 @@ class CodexPopulationE2ETests(unittest.TestCase):
             _normalize_generated_at(json.loads(b.stdout)),
             "cache delete + rebuild must reproduce the same store")
 
-    def test_dsh_host_is_source_unavailable_not_empty(self):
+    def test_dsh_host_empty_home_is_honest_zero(self):
+        # 根本没有 DSH 会话 → 诚实零：status ok + 空页 + exit 0（§3.3「文件空 →
+        # ok」）。「unavailable」留给「文件在但一个都读不了」的用例。
         av = self._av()
         r = _run_py(["sessions", "list", "--host-kind", "dsh", "--json"],
                     _env(self.home, av))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dto = json.loads(r.stdout)
+        self.assertEqual(dto["source_statuses"]["dsh"]["status"], "ok")
+        self.assertEqual(dto["source_statuses"]["dsh"]["sessions"], 0)
+        self.assertEqual(dto["page"]["total"], 0)
+        self.assertEqual(dto["page"]["items"], [])
+
+    def test_dsh_files_undecodable_is_source_unavailable(self):
+        # 文件在但一个都读不了 → 类型化 source-unavailable（错误码，不是空页，
+        # §4.3）。非 zstd、非 JSON 的 session.jsonl 即触发 non-json 降级 → built 0
+        # → unavailable，而不是数成 0 条真数据。
+        av = self._av()
+        broken = Path(self.home) / ".dsh" / "sessions" / "broken" / "session.jsonl"
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text("this is not json\n", encoding="utf-8")
+        try:
+            r = _run_py(["sessions", "list", "--host-kind", "dsh", "--json"],
+                        _env(self.home, av))
+        finally:
+            broken.unlink(missing_ok=True)
         self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stdout, "")  # 不是空页 —— 是错误码
         err = json.loads(r.stderr)
@@ -507,11 +567,19 @@ class CrossImplementationReconciliationTests(unittest.TestCase):
                          "impls read the same cache")
 
     def test_dsh_source_unavailable_error_parity(self):
+        # 文件在但一个都读不了 → 两侧都走类型化 source-unavailable 错误码，stderr
+        # 逐字节一致。干净 home 是诚实零（exit 0），**不是**这个错误码。
         av = self._av()
-        py = _run_py(["sessions", "list", "--host-kind", "dsh", "--json"],
-                     _env(self.home, av))
-        rs = _run_rs(["sessions", "list", "--host-kind", "dsh", "--json"],
-                     _env(self.home, av))
+        broken = Path(self.home) / ".dsh" / "sessions" / "broken" / "session.jsonl"
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text("this is not json\n", encoding="utf-8")
+        try:
+            py = _run_py(["sessions", "list", "--host-kind", "dsh", "--json"],
+                         _env(self.home, av))
+            rs = _run_rs(["sessions", "list", "--host-kind", "dsh", "--json"],
+                         _env(self.home, av))
+        finally:
+            broken.unlink(missing_ok=True)
         self.assertEqual(py.returncode, 2)
         self.assertEqual(rs.returncode, 2)
         self.assertEqual(py.stderr, rs.stderr,
@@ -529,6 +597,223 @@ class CrossImplementationReconciliationTests(unittest.TestCase):
         self.assertEqual(py.stderr, rs.stderr,
                          "invalid-cursor stderr must be byte-identical")
         self.assertEqual(py.stdout, rs.stdout)
+
+
+# ── §6.3-1/2/11 DSH 半边 E2E（多帧 zstd 夹具）────────────────────
+
+@unittest.skipUnless(_HAVE_ZSTD,
+                     "DSH fixture is multi-frame zstd — Python decode needs the "
+                     "optional `zstandard` package")
+class DshPopulationE2ETests(unittest.TestCase):
+    """隔离 HOME + **多帧 zstd** 会话（fixtures/dsh）→ 根发现 → workspace.json 索引
+    → 适配器解码 → SessionStore 查询全链。断言值与 Rust
+    `dsh_populate_builds_entries_from_fake_home` 同源——两侧对同一份真格式语料要
+    推出同一批派生列（native_id=头 id、source_profile=头 cwd、title=workspace.json、
+    tokens/findings 从 behavior 20 键载荷派生、cost_usd 诚实 null）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="av-r2a-dsh-e2e-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.home = _fake_dsh_home(cls.tmp)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _av(self):
+        av = self.tmp / self._testMethodName
+        av.mkdir(exist_ok=True)
+        return av
+
+    def test_populate_builds_one_session_from_zstd_fixture(self):
+        av = self._av()
+        r = _run_py(["sessions", "list", "--host-kind", "dsh", "--json"],
+                    _env(self.home, av))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dto = json.loads(r.stdout)
+        st = dto["source_statuses"]["dsh"]
+        self.assertEqual(st["status"], "ok")
+        self.assertEqual(st["sessions"], 1)
+        self.assertIsNone(st["degraded"])
+        page = dto["page"]
+        self.assertEqual(page["total"], 1)
+        it = page["items"][0]
+        k = it["session_key"]
+        self.assertEqual(k["host_kind"], "dsh")
+        self.assertEqual(k["native_id"], "sess-behavior-0001",
+                         "native id = header id, not dir name")
+        self.assertEqual(k["source_profile"], "---Users-alice-projects-demo--")
+        self.assertEqual(it["title"], "demo project",
+                         "title from workspace.json index")
+        self.assertEqual(it["model"], "deepseek/deepseek-v4-pro-0813")
+        self.assertEqual(it["date_span"], {"first": "2025-06-15",
+                                           "last": "2025-06-15"})
+        self.assertEqual(it["files"], 1)
+        self.assertIsNone(it["cost_usd"],
+                          "CNY cost must not masquerade as cost_usd")
+        self.assertEqual(it["tokens_total"], 1707000)
+        self.assertEqual(it["findings_total"], 34)
+        self.assertEqual(it["session_revision"], "135",
+                         "revision = max seq")
+        self.assertTrue(_dsh_cache_path(av).is_file(),
+                        "cache must be written at data_home/cache/r2a/")
+
+    def test_populate_builds_from_bare_jsonl_home(self):
+        """裸 jsonl（`compression:'none'`）成功路径也要跑：`parse_session_log` 抽出后，
+        zstd（上面的用例）与裸文本两条分支都要推出同一批派生列。mirror Rust
+        `dsh_populate_builds_entries_from_fake_home`——Rust 那侧 fake home 就是裸
+        jsonl，Python 这侧只测了 zstd，两条压缩形态都要钉住才不会漂。"""
+        av = self._av()
+        home = self.tmp / "bare-home"
+        sdir = home / ".dsh" / "sessions" / "demo-proj" / "agent-1"
+        sdir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(FIXTURE_DSH / "behavior.jsonl", sdir / "session.jsonl")
+        storages = home / ".dsh" / "storages"
+        storages.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(FIXTURE_DSH / "workspace.json", storages / "workspace.json")
+        r = _run_py(["sessions", "list", "--host-kind", "dsh", "--json"],
+                    _env(home, av))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dto = json.loads(r.stdout)
+        st = dto["source_statuses"]["dsh"]
+        self.assertEqual(st["status"], "ok")
+        self.assertEqual(st["sessions"], 1)
+        it = dto["page"]["items"][0]
+        self.assertEqual(it["session_key"]["native_id"], "sess-behavior-0001")
+        self.assertEqual(it["title"], "demo project")
+        self.assertEqual(it["findings_total"], 34)
+
+    def test_dsh_read_returns_full_audit_doc(self):
+        av = self._av()
+        lst = _run_py(["sessions", "list", "--host-kind", "dsh", "--json"],
+                      _env(self.home, av))
+        self.assertEqual(lst.returncode, 0, lst.stderr)
+        key = json.loads(lst.stdout)["page"]["items"][0]["session_key"]
+        rd = _run_py(["sessions", "read", "--session-key",
+                      json.dumps(key, separators=(",", ":")), "--json"],
+                     _env(self.home, av))
+        self.assertEqual(rd.returncode, 0, rd.stderr)
+        doc = json.loads(rd.stdout)
+        self.assertEqual(doc["session"]["title"], "demo project")
+        self.assertEqual(len(doc["session"]["findings"]), 34)
+        # 完整审计载荷（behavior 20 键）而不是空壳
+        for section in ("usage", "cost", "skill", "waste", "duration"):
+            self.assertIn(section, doc["session"])
+
+    def test_dsh_cache_delete_rebuild_is_identical(self):
+        av = self._av()
+        a = _run_py(["sessions", "list", "--host-kind", "dsh", "--json"],
+                    _env(self.home, av))
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertTrue(_dsh_cache_path(av).is_file())
+        _dsh_cache_path(av).unlink()
+        b = _run_py(["sessions", "list", "--host-kind", "dsh", "--json"],
+                    _env(self.home, av))
+        self.assertEqual(b.returncode, 0, b.stderr)
+        self.assertEqual(
+            _normalize_generated_at(json.loads(a.stdout)),
+            _normalize_generated_at(json.loads(b.stdout)),
+            "cache delete + rebuild must reproduce the same store")
+
+    def test_dsh_source_change_invalidates_cache_disconnect_reconnect(self):
+        """断线→重连（§1.5/§3.5 源指纹失效；mirror Rust `source_change_invalidates_cache`
+        的 DSH 半边——Rust 那侧只测了 Codex）。源文件删掉 → 指纹列表变短 → 缓存
+        作废 → 诚实 0（**不是**把旧的 1 藏在 cache 里）；源文件回来 → 缓存再作废 →
+        1 又回来。缓存是可删 memo，不是把源变化藏起来的第二份 truth。有 `_BIN` 时
+        每个状态都让两侧逐字节对账。"""
+        av = self._av()
+        session_file = (Path(self.home) / ".dsh" / "sessions" / "demo-proj"
+                        / "agent-1" / "session.jsonl.zstd")
+
+        def list_total(prog):
+            run = _run_py if prog == "py" else _run_rs
+            r = run(["sessions", "list", "--host-kind", "dsh", "--json"],
+                    _env(self.home, av))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return json.loads(r.stdout)["page"]["total"]
+
+        self.assertEqual(list_total("py"), 1, "start: fixture session present")
+        session_file.unlink()
+        try:
+            self.assertEqual(list_total("py"), 0,
+                             "file gone → honest zero, not the cached 1")
+            if _BIN:
+                self.assertEqual(list_total("rs"), 0)
+        finally:
+            shutil.copy2(FIXTURE_DSH / "session.jsonl.zstd", session_file)
+        self.assertEqual(list_total("py"), 1,
+                         "file back → 1 again (cache re-invalidated)")
+        if _BIN:
+            self.assertEqual(list_total("rs"), 1)
+
+
+# ── §6.3-9 DSH 跨实现字节对账 ──────────────────────────────────
+
+@unittest.skipUnless(_BIN and _HAVE_ZSTD,
+                     "needs AGENT_VITALS_BIN + optional zstandard to reconcile "
+                     "both implementations on the zstd fixture")
+class DshReconciliationTests(unittest.TestCase):
+    """DSH 半边对账台：多帧 zstd 夹具 home 下，cache 共享双方向逐字节一致、read
+    信封一致。缺任一侧（无二进制 / 无 zstandard）无从对账，整体 skip。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="av-r2a-dsh-rec-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.home = _fake_dsh_home(cls.tmp)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _av(self):
+        av = self.tmp / self._testMethodName
+        av.mkdir(exist_ok=True)
+        return av
+
+    def _list(self, prog, av):
+        run = _run_py if prog == "py" else _run_rs
+        return run(["sessions", "list", "--host-kind", "dsh", "--json"],
+                   _env(self.home, av))
+
+    def test_dsh_list_byte_identical_via_cache_share_py_then_rs(self):
+        av = self._av()
+        py = self._list("py", av)
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertTrue(_dsh_cache_path(av).is_file())
+        rs = self._list("rs", av)
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        self.assertEqual(py.stdout, rs.stdout,
+                         "py-writes-cache / rs-reads-cache must be "
+                         "byte-identical (generated_at shared via cache)")
+
+    def test_dsh_list_byte_identical_via_cache_share_rs_then_py(self):
+        av = self._av()
+        rs = self._list("rs", av)
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        py = self._list("py", av)
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertEqual(rs.stdout, py.stdout,
+                         "rs-writes-cache / py-reads-cache must be "
+                         "byte-identical (generated_at shared via cache)")
+
+    def test_dsh_read_byte_identical_via_cache_share(self):
+        av = self._av()
+        py_list = self._list("py", av)
+        self.assertEqual(py_list.returncode, 0, py_list.stderr)
+        key = json.loads(py_list.stdout)["page"]["items"][0]["session_key"]
+        key_json = json.dumps(key, separators=(",", ":"))
+        py = _run_py(["sessions", "read", "--session-key", key_json, "--json"],
+                     _env(self.home, av))
+        rs = _run_rs(["sessions", "read", "--session-key", key_json, "--json"],
+                     _env(self.home, av))
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        self.assertEqual(py.stdout, rs.stdout,
+                         "read envelope must be byte-identical when both "
+                         "impls read the same cache")
 
 
 if __name__ == "__main__":

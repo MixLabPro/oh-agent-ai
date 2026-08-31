@@ -1,4 +1,10 @@
-# contrib/xbar — macOS 菜单栏 5min tick
+# contrib/xbar — macOS 菜单栏 5min tick（legacy）
+
+> **⚠️ legacy（2026-08-31）**：菜单栏主形态已迁到 **Tauri 菜单栏 app**
+> （`src-tauri/`），自带 5 分钟 tick 且从 Rust `oneline` 直接折 DSH 会话，
+> **完全脱离 xbar / SwiftBar**。本目录插件保留为**降级通道**（零维护成本），
+> 新装用户请直接跑 `/Applications/agent-vitals.app`；只有菜单栏 app 不可用时
+> 才考虑本插件。迁移细节见 `docs/MENUBAR_MIGRATION.md`。
 
 [xbar](https://github.com/matryer/xbar) / [SwiftBar](https://github.com/swiftbar/SwiftBar)
 把脚本 stdout 第一行渲染到 macOS 菜单栏，`---` 之后的行作为下拉菜单项。

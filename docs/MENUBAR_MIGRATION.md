@@ -1,6 +1,11 @@
 # 菜单栏能力迁移：SwiftBar → Tauri —— 可行性方案
 
-状态：**方案定稿（2026-08-30），待批准进入 Phase 1**
+状态：**已落地（2026-08-31）**。Phase 1/2/4 由 R1a–R1d（任务 #97–#100）完成，
+Tauri 菜单栏 app（`/Applications/agent-vitals.app`）是**主形态**：自带 5 分钟
+tick、spawn Rust `oneline` 折 DSH 会话、预算权威读 `alert.json`，完全脱离
+SwiftBar/xbar。SwiftBar 插件与 `install_swiftbar.sh` 标记为 **legacy 降级通道**
+（零维护成本保留）。原文保留作方案档案——其中「Python 包是状态层唯一写者」
+等旧论断已被 R1d 推翻（写链迁到 Rust），以 §9 末尾的「2026-08-31 更新」为准。
 范围：把 `contrib/xbar/agent-vitals.5m.sh`（SwiftBar 插件）的菜单栏能力迁进
 `src-tauri/`（Tauri 2 菜单栏 app），并借机修复一个既有架构偏差（预算权威源被
 绕开）。本文所有论断都有证据来源（`文件:行号` 或实测），不写无依据的结论。
@@ -12,7 +17,9 @@
   （adaptive floor / snooze / 日预算全丢）；③ 本次会话 / 最近审计列表 /
   dsh_autosync 调度未迁。
 - Python 包**不能移出项目**：它是 ClawHub 发行形态（`package-clawhub.yml`）、
-  状态层唯一写者（oneline/budget/state 仅 Python 有）、差分守卫的宿主。
+  差分守卫的宿主。~~状态层唯一写者~~ —— R1d 后状态写链迁到 Rust
+  （`src/agent/oneline.rs` 折账 + `core/state.rs` 落盘），Python 写链退休
+  （§9「2026-08-31 更新」）。
 - 推荐路径：**分五阶段**推进，核心动作是「预算规则迁进 core crate」（cost.rs
   先例），Tauri 与 Python 从此共用一份预算评估；SwiftBar 在 Tauri 覆盖全部
   能力后退役（保留为降级通道）。
@@ -219,6 +226,28 @@ overview.rs 数据管道、core::cost 折叠、托盘+面板骨架、空态诚�
   「打开 calendar.html」或面板内嵌逐日列表均可）。
 - 动作：`docs/PRODUCT.md` 菜单栏章节改为 Tauri 优先；`install_swiftbar.sh`
   标注 legacy；**不删除** SwiftBar 插件（降级通道，零维护成本）。
+
+### 2026-08-31 更新（R1a–R1d 落地后的状态）
+
+- **Phase 1（tick + alert.json 权威）✅**：`lib.rs::start_refresh_tick` 每
+  5 分钟一轮，启动即跑；托盘/面板统一读 `overview.rs::read_budget_alert` 的
+  权威字段，不再自算百分比（#97）。
+- **Phase 2（budget 迁 core）✅**：`core/state.rs::budget.evaluate` 落盘
+  alert.json（#98），CLI 两侧同源。
+- **Phase 4（会话结束自同步）✅ 换实现**：原选项 ② 的 Rust 化不必引入独立
+  autosync —— R1d 直接把 tick 的发现链换成 **`agent-vitals discover` → spawn
+  `oneline`**（#100/#104/#105/#116）：discover 浮出 `.zstd` 会话（目录名即
+  id），oneline 多帧解压折账，exactly-once 去重。会话停止增长后下一次 tick
+  自然折入，无需 `dsh_autosync.py`。
+- **Phase 3（面板最近审计列表）部分 ✅**：`store::sessions_list/read` IPC 已
+  在 invoke_handler（面板可读 sessions.jsonl），逐日列表已内嵌。
+- **Phase 5（SwiftBar 退役）✅ 判定**：Tauri 已覆盖显示/调度/自同步三条主线，
+  真机折入 59 条会话后自更新验证通过；本文标题状态、`contrib/xbar/README.md`、
+  `install_swiftbar.sh` 均已标注 Tauri 为主 / SwiftBar legacy。
+- **真机运行形态（2026-08-31）**：`agent-vitals` 二进制装到 `~/.local/bin/`
+  （PATH 内），app tick 经 `resolve_binary` 找到它；`state takeover rust`
+  后写链 owner=rust，真机 59 条 DSH 会话全部折入，month ¥1752.45（预算
+  ¥600 → alert `over`）。SwiftBar 已脱离。
 
 ## 10. 风险与缓解
 
