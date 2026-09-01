@@ -208,6 +208,13 @@ fn turn_timeline_of(items: &[Value], audit: &Value) -> Value {
     json!(events)
 }
 
+/// 单个源文件 → 它所属的逻辑 session_id。R2a SessionStore 的增量缓存
+/// （`r2a_store.rs`）用它判定"新出现/内容变了的文件属于哪个 session"——代价只
+/// 落在这一个文件上（`file_info` 的一次解析），不是重新扫全部 rollout 文件。
+pub(crate) fn codex_session_id_of(path: &Path) -> String {
+    file_info(path).session_id
+}
+
 fn file_info(path: &Path) -> FileInfo {
     let parsed = read_codex_session_log(path);
     let items: Vec<Value> = parsed

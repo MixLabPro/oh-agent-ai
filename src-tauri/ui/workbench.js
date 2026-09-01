@@ -395,6 +395,13 @@ async function loadSessions(reset) {
 
   const args = { pageSize: 50 };
   if (sessState.nextCursor) args.cursor = JSON.stringify(sessState.nextCursor);
+  // `sessions_list` spawn 二进制、首次（冷 cache）可能要几十秒才回——真机实
+  // 测过 631MB/115 个会话文件冷启动要 30+ 秒。这段等待期间之前完全没有任何
+  // 视觉反馈（tab 面板就是空的），跟窗口真的假死在观感上没有区别，这是用户
+  // 报告"点 tab 卡到假死"的直接原因之一，不只是 IPC 本身慢。加一条"加载
+  // 中…"，至少让等待是可见、可解释的等待，不是看起来卡死的等待。
+  const loadingEl = document.getElementById("sess-loading");
+  loadingEl.hidden = false;
   try {
     const resp = await invoke("sessions_list", args);
     // DTO 把分页嵌在顶层 `page` 下（r2a list DTO §2.5），`resp` 本身是 envelope
@@ -410,6 +417,8 @@ async function loadSessions(reset) {
     // 报错不摆「暂无会话」的假空——错误横幅就是错误横幅，跟空态二选一。
     showBanner("sess-banner", e, true);
     renderSessions();
+  } finally {
+    loadingEl.hidden = true;
   }
 }
 
@@ -596,6 +605,10 @@ async function loadFindings(reset) {
     document.getElementById("find-banner").hidden = true;
   }
   findState.loaded = true;
+  // 同 loadSessions：`sessions_findings` 无分页、必须扫全部会话，冷 cache 时
+  // 是这三个 tab 里最重的一个，没有任何等待反馈时最容易被当成假死。
+  const loadingEl = document.getElementById("find-loading");
+  loadingEl.hidden = false;
   try {
     const data = await invoke("sessions_findings");
     findState.data = data;
@@ -606,6 +619,8 @@ async function loadFindings(reset) {
     findState.error = true;
     showBanner("find-banner", e, false);
     renderFindings();
+  } finally {
+    loadingEl.hidden = true;
   }
 }
 
@@ -759,6 +774,11 @@ async function loadSources(reset) {
     document.getElementById("src-banner").hidden = true;
   }
   srcState.loaded = true;
+  // `sessions_list` 即便 pageSize:1，也要先跑完 cache 命中判定（扫全部会话
+  // 文件的指纹）才能回——不是"只要 1 条就一定快"，见 loadSessions 的同款
+  // 注释。
+  const loadingEl = document.getElementById("src-loading");
+  loadingEl.hidden = false;
   // 两个数据源独立拉：一个失败不吞另一个（partial 照样渲染，横幅明说缺哪个）。
   let err = null;
   try {
@@ -769,6 +789,7 @@ async function loadSources(reset) {
     const ov = await invoke("read_overview");
     srcState.sync = (ov && ov.sync) || null;
   } catch (e) { if (!err) err = e; }
+  loadingEl.hidden = true;
   if (err) { srcState.error = true; showBanner("src-banner", err, false); }
   else { srcState.error = false; }
   renderSources();

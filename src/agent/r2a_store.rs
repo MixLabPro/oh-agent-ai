@@ -15,7 +15,31 @@
 //! 仅相等比较：cache 命中判定「相等 ⇒ 内容未变」，截断/替换（指纹不等）→
 //! 全量重建。源不可用的宿主（Phase 1 的 DSH，zstd 未接线）在 `source_statuses`
 //! 里报 `source-unavailable`，**绝不数成 0 个会话**。
+//!
+//! **cache schema v2：按 session 增量失效，不再全有全无**（2026-09）。v1 把
+//! 缓存写成两条互不关联的并行数组——`fingerprints`（按文件路径序）和
+//! `entries`（按 session_key 序，**不同的序**）——`cache_is_current` 只能逐位比
+//! 对两个数组长度是否相等、内容是否逐位相同，任何一个文件指纹变了就只能判
+//! 「不 current」，**没有办法说清楚是哪个 session 受影响**，于是唯一安全的动
+//! 作是把全部 session 重新审计一遍。真机验证过：58 个会话里碰一个文件的
+//! mtime，重建耗时 6.8s——这正是工作台点会话/finding/数据源 tab 反复"卡到
+//! 假死"的第二根因（第一根因是 `fingerprint_file` 整份读文件，已修）。
+//!
+//! v2 把每个 session 自己的依赖路径与指纹存成它自己的一条记录
+//! （`paths`/`fingerprints` 平行数组 + `envelope`），重建时逐 session 核对：
+//! 依赖的路径全部还在、指纹全部相同 → 直接复用旧 envelope（连 payload 都不
+//! 重算，跳过一次完整的成本折叠/证据构建）；只要有一个不符，才把它交回
+//! `codex_built_session_for`/`dsh_built_session_for` 单独重建。Codex 的一个
+//! 逻辑 session 可能横跨多个 rollout 文件（resume 续写）——这条依赖路径不是
+//! 发明出来的新映射，`codex_session_audit_json` 的 payload 早就自带 `files`
+//! 字段，直接拿来用。DSH 是 1 文件 = 1 session（§ dsh_source_fingerprints 的
+//! 注释），依赖路径永远只有一条。
+//!
+//! 旧的 v1 缓存文件（`schema_version` 不是 `"2"`）一律当"缓存不存在"处理——
+//! 不做就地迁移，代价是升级后第一次调用是一次冷启动（和今天冷启动一样贵），
+//! 换来的是往后所有增量重建都不用再为一个不相关的文件变化陪绑全量审计。
 
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -62,7 +86,27 @@ fn dsh_source_fingerprints(home: &Path) -> Vec<(String, String)> {
 
 /// §1.5 源文件指纹：(size, mtime_ns, 首/尾 64 字节的 FNV-1a)。stat 失败 →
 /// None（文件在 walk 与 stat 之间消失，cache 自然失效，不 abort）。
+///
+/// **只 seek 读需要的 128 字节，不整份读文件**——`sessions_list`/
+/// `sessions_read`/`sessions_findings` 每次调用都要为 cache 命中判定重算全
+/// 部会话文件的指纹（`codex_source_fingerprints`/`dsh_source_fingerprints`
+/// 在检查 `read_cache` 之前跑），不管最终 cache 到不到命中；旧实现用
+/// `std::fs::read(path)` 把整个文件读进内存只为切出这 128 字节，等于把
+/// "cache 命中判定"本身变成了一次 O(全部会话文件总字节数) 的磁盘 I/O，命
+/// 中与否都要付这笔钱。这是工作台"点会话/finding/数据源 tab 卡到假死"的真
+/// 机根因：这台机器实测 `.codex` + `.dsh` 两个源合计 631MB、115 个文件，点
+/// 一次 tab 就要整份读一遍——不是"慢"，是走了一条本不该存在的全量 I/O 路
+/// 径。改成对两个窗口分别 seek + `read_exact`，把这一步从 O(总字节数) 降到
+/// O(文件数 × 128 字节)。
+///
+/// 两次独立 seek+读（而不是"读一次、判断要不要复用"这种特判）在 size < 128
+/// 时会让 `first`/`last` 的读取窗口部分或完全重叠——这是有意的：与旧实现
+/// "整份读进来再各切一刀"逐字节等价（两处窗口本来就会重叠或重合），换成两
+/// 次独立 seek 不用为"文件多短会重叠"写分支，指纹值不因为这次改动而变化，
+/// 现有 cache 不会被无谓打脏。
 fn fingerprint_file(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
     let meta = std::fs::metadata(path).ok()?;
     let size = meta.len();
     let mtime_ns = meta
@@ -71,14 +115,23 @@ fn fingerprint_file(path: &Path) -> Option<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_nanos() as u64;
-    let bytes = std::fs::read(path).ok()?;
-    let n = bytes.len().min(64);
-    let first = &bytes[..n];
-    let last = &bytes[bytes.len().saturating_sub(64)..];
+
+    let mut file = std::fs::File::open(path).ok()?;
+
+    let head_len = size.min(64) as usize;
+    let mut first = vec![0u8; head_len];
+    file.read_exact(&mut first).ok()?;
+
+    let tail_start = size.saturating_sub(64);
+    let tail_len = (size - tail_start) as usize; // == head_len 恒成立，写出来只为语义清楚
+    file.seek(SeekFrom::Start(tail_start)).ok()?;
+    let mut last = vec![0u8; tail_len];
+    file.read_exact(&mut last).ok()?;
+
     Some(format!(
         "{size}:{mtime_ns}:{:016x}:{:016x}",
-        fnv1a64(first),
-        fnv1a64(last)
+        fnv1a64(&first),
+        fnv1a64(&last)
     ))
 }
 
@@ -346,63 +399,70 @@ pub struct SessionStore {
 
 impl SessionStore {
     /// 从 Codex 源填充（Phase 1 唯一可读源）。缓存命中（指纹一致）→ 快路径直接
-    /// 读 cache；否则全量重建（`codex_session_list` → `codex_session_audit_json`
-    /// → core 构建 envelope）并写 cache。
+    /// 读 cache；部分命中（v2 schema，仅部分 session 的依赖文件变了）→ 只重建
+    /// 受影响的 session；否则全量重建（`codex_session_list` →
+    /// `codex_session_audit_json` → core 构建 envelope）并写 cache。
     pub fn codex(home: &Path) -> Result<SessionStore, StoreError> {
         let ns = takeover::machine_namespace();
         let generated_at = now_iso_utc();
         let fingerprints = codex_source_fingerprints(home);
+        let fp_map: HashMap<&str, &str> = fingerprints.iter().map(|(p, f)| (p.as_str(), f.as_str())).collect();
         let cache_path = codex_cache_path();
 
         if let Some(cached) = read_cache(&cache_path) {
-            if cache_is_current(&cached, &fingerprints) {
-                if let Some(store) = cache_to_store(&cached) {
-                    return Ok(store);
+            if let Some((cached_sessions, _)) = read_cache_v2(&cached) {
+                let (kept, covered) = kept_sessions(&cached_sessions, &fp_map);
+                let to_process: Vec<&str> =
+                    fingerprints.iter().map(|(p, _)| p.as_str()).filter(|p| !covered.contains(*p)).collect();
+                if to_process.is_empty() && kept.len() == cached_sessions.len() {
+                    // 全命中：一个 session 都不用重排/重算，直接复用 cache 文档
+                    // 里冻结的 generated_at/source_statuses——与 v1 的纯读路径
+                    // 同一份代价（v2 的增量能力不该让"什么都没变"的常见情形反
+                    // 而多付一次排序/写盘）。
+                    if let Some(store) = cache_v2_to_store(&cached, &cached_sessions) {
+                        return Ok(store);
+                    }
+                    // 理论不可达（kept_sessions 已用同一个 entry_from_envelope
+                    // 验过每条都能恢复）——真出现就落回下面重建，不 panic。
                 }
-                // cache 形状坏（比如升级后字段改名）→ 落回全量重建，不 abort。
+                // 部分/全部失配：只对 to_process 覆盖到的 session_id 重建。一个
+                // session 可能横跨多个文件，`codex_session_id_of` 只在**变化或
+                // 新出现**的那些文件上跑（不是全量重新分组），成本 = O(变化文
+                // 件数)，不是 O(全部文件数)。
+                let mut sids: BTreeSet<String> = BTreeSet::new();
+                for p in &to_process {
+                    sids.insert(csa::codex_session_id_of(Path::new(p)));
+                }
+                let mut sessions = kept;
+                for sid in &sids {
+                    if let Some(bs) = codex_built_session_for(home, sid, &ns, &fp_map) {
+                        sessions.push(bs);
+                    }
+                }
+                let statuses = codex_source_statuses(home, sessions.len());
+                return Ok(finalize_and_write("codex", &cache_path, sessions, generated_at, statuses, Vec::new()));
             }
+            // v1 缓存或形状坏（升级后字段改名等）→ 落回下面的全量重建，用新
+            // v2 格式重写一份，不 abort。
         }
 
+        // 冷启动 / 旧格式缓存：全量重建。
         let list = csa::codex_session_list(home);
-        let sessions = list
+        let session_ids: Vec<String> = list
             .get("sessions")
             .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
-        // 先攒 (key, payload)，统一排序后再赋 store_seq —— store_seq = 稳定排序
-        // 序（host_kind → native_id 主序），保证 Python/Rust 逐字节一致。
-        let mut raw: Vec<PendingEntry> = Vec::new();
-        for s in sessions {
-            let Some(sid) = s.get("session_id").and_then(Value::as_str) else { continue };
-            let Some(payload) = csa::codex_session_audit_json(home, sid) else { continue };
-            let source_profile = payload
-                .get("workspace_roots")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            raw.push(PendingEntry {
-                key: SessionKey::new("codex", sid, &source_profile, &ns),
-                payload,
-                // Codex 的 revision = 载荷 date_last，从 summary 派生即可。
-                revision: None,
-            });
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.get("session_id").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let mut sessions = Vec::new();
+        for sid in &session_ids {
+            if let Some(bs) = codex_built_session_for(home, sid, &ns, &fp_map) {
+                sessions.push(bs);
+            }
         }
-        raw.sort_by(|a, b| sort_key(&a.key).cmp(&sort_key(&b.key)));
-
-        let entries = build_entries(&raw, &generated_at, &codex_source_statuses(home, raw.len()));
-        let store = SessionStore {
-            entries,
-            source_statuses: codex_source_statuses(home, raw.len()),
-            generated_at,
-        };
-        write_cache(&cache_path, &store, &fingerprints);
-        Ok(store)
+        let statuses = codex_source_statuses(home, sessions.len());
+        Ok(finalize_and_write("codex", &cache_path, sessions, generated_at, statuses, Vec::new()))
     }
 
     /// 从 DSH 源填充（§5.2，zstd 落地后）。`<home>/.dsh/sessions/**/session.jsonl[.zstd]`
@@ -415,75 +475,69 @@ impl SessionStore {
     /// 以 **appended `title` 键** 并入载荷（复用既有字段名，§2.4 不发明新字段名；
     /// `behavior --json` 是另一条 CLI 面，不受影响）。
     pub fn dsh(home: &Path) -> Result<SessionStore, StoreError> {
-        let ns = takeover::machine_namespace();
         let generated_at = now_iso_utc();
         let fingerprints = dsh_source_fingerprints(home);
+        let fp_map: HashMap<&str, &str> = fingerprints.iter().map(|(p, f)| (p.as_str(), f.as_str())).collect();
         let cache_path = dsh_cache_path();
 
         if let Some(cached) = read_cache(&cache_path) {
-            if cache_is_current(&cached, &fingerprints) {
-                if let Some(store) = cache_to_store(&cached) {
-                    return Ok(store);
+            if let Some((cached_sessions, cached_degraded)) = read_cache_v2(&cached) {
+                let (kept, mut covered) = kept_sessions(&cached_sessions, &fp_map);
+                // 未变化的 degraded 文件也算"覆盖"——不然一个长期损坏的会话
+                // 文件会在每次点 tab 时都被重新解压/重试一遍，白白付一次
+                // I/O，明明内容根本没变。
+                let (kept_deg, deg_covered) = kept_degraded(&cached_degraded, &fp_map);
+                covered.extend(deg_covered);
+                let to_process: Vec<String> = fingerprints
+                    .iter()
+                    .map(|(p, _)| p.clone())
+                    .filter(|p| !covered.contains(p.as_str()))
+                    .collect();
+                if to_process.is_empty() && kept.len() == cached_sessions.len() && kept_deg.len() == cached_degraded.len() {
+                    if let Some(store) = cache_v2_to_store(&cached, &cached_sessions) {
+                        return Ok(store);
+                    }
                 }
+                let dsh_root = home.join(".dsh");
+                let files = crate::agent::discovery::dsh_session_files(&dsh_root);
+                let ws = crate::agent::discovery::read_workspace_index(&dsh_root);
+                let mut sessions = kept;
+                let mut degraded: Vec<DegradedTriple> = kept_deg
+                    .into_iter()
+                    .map(|(p, r)| (p.clone(), fp_map.get(p.as_str()).map(|f| f.to_string()).unwrap_or_default(), r))
+                    .collect();
+                for path in &files {
+                    let path_str = path.display().to_string();
+                    if !to_process.iter().any(|p| p == &path_str) {
+                        continue;
+                    }
+                    match dsh_built_session_for(path, &ws, &fp_map) {
+                        Ok(bs) => sessions.push(bs),
+                        Err((p, reason, fp)) => degraded.push((p, fp, reason)),
+                    }
+                }
+                let degraded_pairs: Vec<(String, String)> =
+                    degraded.iter().map(|(p, _, r)| (p.clone(), r.clone())).collect();
+                let statuses = dsh_source_statuses(home, &files, &degraded_pairs);
+                return Ok(finalize_and_write("dsh", &cache_path, sessions, generated_at, statuses, degraded));
             }
         }
 
+        // 冷启动 / 旧格式缓存：全量重建（含 degraded 逐文件记录）。
         let dsh_root = home.join(".dsh");
         let files = crate::agent::discovery::dsh_session_files(&dsh_root);
         let ws = crate::agent::discovery::read_workspace_index(&dsh_root);
-
-        let mut raw: Vec<PendingEntry> = Vec::new();
-        let mut degraded: Vec<(String, String)> = Vec::new();
+        let mut sessions = Vec::new();
+        let mut degraded: Vec<DegradedTriple> = Vec::new();
         for path in &files {
-            let path_str = path.display().to_string();
-            let text = match crate::dsh::read_session_text(path) {
-                Ok(t) => t,
-                Err(code) => {
-                    degraded.push((path_str, code.to_string()));
-                    continue;
-                }
-            };
-            // 头行有效性由 parse_session_log 验（type=="session" && version==0），
-            // 这里只抽 id + cwd；parse 已通过但缺 id → 无法建键 → missing-header。
-            if crate::dsh::parse_session_log(&text)
-                .get("degraded")
-                .and_then(Value::as_str)
-                .is_some()
-            {
-                degraded.push((path_str, "missing-header".to_string()));
-                continue;
+            match dsh_built_session_for(path, &ws, &fp_map) {
+                Ok(bs) => sessions.push(bs),
+                Err((p, reason, fp)) => degraded.push((p, fp, reason)),
             }
-            let Some((id, cwd)) = dsh_header(&text) else {
-                degraded.push((path_str, "missing-header".to_string()));
-                continue;
-            };
-            let Some(mut payload) = crate::agent::behavior::audit_payload(path) else {
-                // 读之间文件被截断/替换（parse 干净但 audit 重建失败）→ 文件级降级。
-                degraded.push((path_str, "file-missing".to_string()));
-                continue;
-            };
-            if let Some((_, title)) = ws.by_session.get(&id) {
-                if let Some(o) = payload.as_object_mut() {
-                    o.insert("title".to_string(), Value::String(title.clone()));
-                }
-            }
-            raw.push(PendingEntry {
-                key: SessionKey::new("dsh", &id, &dsh_source_profile(cwd.as_deref()), &ns),
-                payload,
-                revision: dsh_session_revision(&text),
-            });
         }
-        raw.sort_by(|a, b| sort_key(&a.key).cmp(&sort_key(&b.key)));
-
-        let statuses = dsh_source_statuses(home, &files, &degraded);
-        let entries = build_entries(&raw, &generated_at, &statuses);
-        let store = SessionStore {
-            entries,
-            source_statuses: statuses,
-            generated_at,
-        };
-        write_cache(&cache_path, &store, &fingerprints);
-        Ok(store)
+        let degraded_pairs: Vec<(String, String)> = degraded.iter().map(|(p, _, r)| (p.clone(), r.clone())).collect();
+        let statuses = dsh_source_statuses(home, &files, &degraded_pairs);
+        Ok(finalize_and_write("dsh", &cache_path, sessions, generated_at, statuses, degraded))
     }
 
     /// 合并 codex + dsh 两个单源 store（`sessions list` no-filter = 全部源）。
@@ -613,24 +667,7 @@ fn dsh_source_profile(cwd: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-// ── cache 读写 ──────────────────────────────────────────────────
-
-/// cache 文件形状（只写自己的可删 app cache，§3.5）：
-/// `{schema_version, source, fingerprints, built_at, source_statuses,
-///   generated_at, entries:[envelope...]}`。
-fn cache_to_store(cached: &Value) -> Option<SessionStore> {
-    let generated_at = cached.get("generated_at").and_then(Value::as_str)?.to_string();
-    let source_statuses = cached.get("source_statuses").cloned()?;
-    let arr = cached.get("entries")?.as_array()?;
-    let mut entries = Vec::with_capacity(arr.len());
-    for env in arr {
-        let e = entry_from_envelope(env)?;
-        entries.push(e);
-    }
-    // 从 cache 恢复的 entries 仍按稳定序重排一遍（防御：cache 手改/旧版乱序）。
-    entries.sort_by(|a, b| sort_key(&a.key).cmp(&sort_key(&b.key)));
-    Some(SessionStore { entries, source_statuses, generated_at })
-}
+// ── cache 读写（v2：按 session 增量，见文件头注释）────────────────────
 
 /// 从 cache 的 envelope 恢复 `SessionReportEntry`（读回 session_key + 派生列）。
 /// 任何字段缺失 → None（cache 版本不兼容 → 落回全量重建）。
@@ -658,48 +695,267 @@ fn entry_from_envelope(env: &Value) -> Option<SessionReportEntry> {
     })
 }
 
-fn cache_is_current(cached: &Value, fingerprints: &[(String, String)]) -> bool {
-    let Some(list) = cached.get("fingerprints").and_then(Value::as_array) else {
-        return false;
-    };
-    if list.len() != fingerprints.len() {
-        return false;
-    }
-    for (i, cur) in fingerprints.iter().enumerate() {
-        let Some(entry) = list.get(i) else { return false };
-        let path = entry.get("path").and_then(Value::as_str).unwrap_or("");
-        let fp = entry.get("fingerprint").and_then(Value::as_str).unwrap_or("");
-        if path != cur.0 || fp != cur.1 {
-            return false;
-        }
-    }
-    true
-}
-
 fn read_cache(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-fn write_cache(path: &Path, store: &SessionStore, fingerprints: &[(String, String)]) {
-    let fps: Vec<Value> = fingerprints
+/// v2 cache 里的一条 session 记录：它依赖的源文件路径 + 各自的指纹（平行数
+/// 组，同序）+ 已构建好的 envelope。
+struct CachedSession {
+    paths: Vec<String>,
+    fingerprints: Vec<String>,
+    envelope: Value,
+}
+
+/// DSH「读不了但没变就别再重试」记录：(path, fingerprint, reason)。
+type DegradedTriple = (String, String, String);
+
+/// 解析 v2 cache（`schema_version == "2"`）。旧 v1 缓存（顶层单一
+/// `fingerprints` 数组）或任何形状不认识的文档一律返回 `None`——调用方当"缓存
+/// 不存在"处理，不做就地迁移（见文件头注释）。返回 `(sessions, degraded)`，
+/// `degraded` 是 DSH 侧"读不了但指纹没变就不用重试"的 (path, fingerprint,
+/// reason) 三元组；Codex 没有这个概念，永远是空数组。
+fn read_cache_v2(cached: &Value) -> Option<(Vec<CachedSession>, Vec<DegradedTriple>)> {
+    if cached.get("schema_version").and_then(Value::as_str) != Some("2") {
+        return None;
+    }
+    let arr = cached.get("sessions")?.as_array()?;
+    let mut sessions = Vec::with_capacity(arr.len());
+    for s in arr {
+        let paths: Vec<String> =
+            s.get("paths")?.as_array()?.iter().map(|v| v.as_str().map(str::to_owned)).collect::<Option<_>>()?;
+        let fingerprints: Vec<String> = s
+            .get("fingerprints")?
+            .as_array()?
+            .iter()
+            .map(|v| v.as_str().map(str::to_owned))
+            .collect::<Option<_>>()?;
+        // 平行数组长度不一致或没有任何依赖路径 → 这条记录形状本身就坏了，
+        // 整份缓存不值得信任（不做"部分行能读就先用着"这种没有测试能钉住
+        // 的半信半疑语义），落回调用方的全量重建。
+        if paths.len() != fingerprints.len() || paths.is_empty() {
+            return None;
+        }
+        let envelope = s.get("envelope")?.clone();
+        sessions.push(CachedSession { paths, fingerprints, envelope });
+    }
+    let degraded = cached
+        .get("degraded")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| {
+                    Some((
+                        d.get("path")?.as_str()?.to_string(),
+                        d.get("fingerprint")?.as_str()?.to_string(),
+                        d.get("reason")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some((sessions, degraded))
+}
+
+/// 已构建的 session：core 数据 + 它依赖的源路径/指纹（用于下一次写 cache）。
+struct BuiltSession {
+    entry: PendingEntry,
+    paths: Vec<String>,
+    fingerprints: Vec<String>,
+}
+
+/// 核对每条缓存 session 的**全部**依赖路径是否仍与当前指纹表一致——一个都不
+/// 差才能整条复用（跳过重新审计），否则整条判脏、连同它没变的那部分文件一
+/// 起交回调用方按 session_id 重建（不做"部分文件命中就拼一半"这种语义）。
+/// 返回复用集 + 它们覆盖到的路径集合（后者用于算出 `to_process`）。
+fn kept_sessions(cached: &[CachedSession], fp_map: &HashMap<&str, &str>) -> (Vec<BuiltSession>, HashSet<String>) {
+    let mut kept = Vec::new();
+    let mut covered = HashSet::new();
+    for cs in cached {
+        let all_match =
+            cs.paths.iter().zip(&cs.fingerprints).all(|(p, fp)| fp_map.get(p.as_str()) == Some(&fp.as_str()));
+        if !all_match {
+            continue;
+        }
+        let Some(restored) = entry_from_envelope(&cs.envelope) else { continue };
+        let payload = cs.envelope.get("session").cloned().unwrap_or(Value::Null);
+        kept.push(BuiltSession {
+            entry: PendingEntry { key: restored.key, payload, revision: restored.session_revision },
+            paths: cs.paths.clone(),
+            fingerprints: cs.fingerprints.clone(),
+        });
+        covered.extend(cs.paths.iter().cloned());
+    }
+    (kept, covered)
+}
+
+/// 同上，但用于 DSH 的"读不了、且内容没变"的文件——指纹没变就不用再解压/
+/// 重新尝试一次，否则一个长期损坏的会话文件会在每次点 tab 时都白付一次 I/O。
+fn kept_degraded(
+    cached: &[DegradedTriple],
+    fp_map: &HashMap<&str, &str>,
+) -> (Vec<(String, String)>, HashSet<String>) {
+    let mut kept = Vec::new();
+    let mut covered = HashSet::new();
+    for (path, fp, reason) in cached {
+        if fp_map.get(path.as_str()) == Some(&fp.as_str()) {
+            kept.push((path.clone(), reason.clone()));
+            covered.insert(path.clone());
+        }
+    }
+    (kept, covered)
+}
+
+/// 纯缓存命中（一个 session 都没变）时的恢复路径：不重排、不重算 store_seq、
+/// 不写盘——`generated_at`/`source_statuses` 原样取自 cache 文档本身（与旧 v1
+/// 的纯读路径同一条纪律：一次真正的"什么都没变"不该比它更贵）。
+fn cache_v2_to_store(cached: &Value, sessions: &[CachedSession]) -> Option<SessionStore> {
+    let generated_at = cached.get("generated_at").and_then(Value::as_str)?.to_string();
+    let source_statuses = cached.get("source_statuses").cloned()?;
+    let mut entries = Vec::with_capacity(sessions.len());
+    for cs in sessions {
+        entries.push(entry_from_envelope(&cs.envelope)?);
+    }
+    entries.sort_by(|a, b| sort_key(&a.key).cmp(&sort_key(&b.key)));
+    Some(SessionStore { entries, source_statuses, generated_at })
+}
+
+/// 合并 kept + 新重建的 session，按稳定序重排、重新赋 store_seq（增量重建之
+/// 外的任何变化都会挪动全局排序位置——store_seq/store_revision 从不承诺跨重
+/// 建稳定，只承诺同一次构建内确定，分页 cursor 靠 `store_revision` 校验新
+/// 鲜度，见 core `r2a` 设计），写 v2 cache。
+fn finalize_and_write(
+    source: &str,
+    cache_path: &Path,
+    mut sessions: Vec<BuiltSession>,
+    generated_at: String,
+    source_statuses: Value,
+    degraded: Vec<DegradedTriple>,
+) -> SessionStore {
+    sessions.sort_by(|a, b| sort_key(&a.entry.key).cmp(&sort_key(&b.entry.key)));
+    let mut raw = Vec::with_capacity(sessions.len());
+    let mut paths_fps = Vec::with_capacity(sessions.len());
+    for s in sessions {
+        raw.push(s.entry);
+        paths_fps.push((s.paths, s.fingerprints));
+    }
+    let entries = build_entries(&raw, &generated_at, &source_statuses);
+    let store = SessionStore { entries, source_statuses, generated_at };
+    write_cache_v2(cache_path, source, &store, &paths_fps, &degraded);
+    store
+}
+
+/// v2 cache 文件形状（只写自己的可删 app cache，§3.5）：
+/// `{schema_version:"2", source, built_at, source_statuses, generated_at,
+///   sessions:[{paths, fingerprints, envelope}], degraded:[{path,
+///   fingerprint, reason}]}`。`store.entries[i]` 与 `sessions[i]` 的
+/// `paths`/`fingerprints` 必须同序——两者都源自 `finalize_and_write` 里同一次
+/// 排序后的 `Vec<BuiltSession>`，不是事后再配对。
+fn write_cache_v2(
+    path: &Path,
+    source: &str,
+    store: &SessionStore,
+    sessions: &[(Vec<String>, Vec<String>)],
+    degraded: &[DegradedTriple],
+) {
+    let session_docs: Vec<Value> = store
+        .entries
         .iter()
-        .map(|(p, f)| json!({ "path": p, "fingerprint": f }))
+        .zip(sessions)
+        .map(|(e, (paths, fps))| json!({ "paths": paths, "fingerprints": fps, "envelope": e.envelope.clone() }))
         .collect();
+    let degraded_docs: Vec<Value> =
+        degraded.iter().map(|(p, fp, r)| json!({ "path": p, "fingerprint": fp, "reason": r })).collect();
     let doc = json!({
-        "schema_version": "1",
-        "source": "codex",
-        "fingerprints": fps,
+        "schema_version": "2",
+        "source": source,
         "built_at": store.generated_at,
         "source_statuses": store.source_statuses,
         "generated_at": store.generated_at,
-        "entries": store.entries.iter().map(|e| e.envelope.clone()).collect::<Vec<_>>(),
+        "sessions": session_docs,
+        "degraded": degraded_docs,
     });
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let text = serde_json::to_string(&doc).unwrap_or_default();
     let _ = std::fs::write(path, text);
+}
+
+/// 单个 session_id 的完整重建（复用既有 `codex_session_audit_json`）。Codex 一
+/// 个逻辑 session 天然可能横跨多个 rollout 文件（resume 续写产生新文件、沿用
+/// 旧 session_id）——payload 自带的 `files` 字段就是这个 session 依赖的**全
+/// 部**源路径，不用另外发明映射，直接拿来做增量缓存的 paths/fingerprints。
+fn codex_built_session_for(home: &Path, sid: &str, ns: &str, fp_map: &HashMap<&str, &str>) -> Option<BuiltSession> {
+    let payload = csa::codex_session_audit_json(home, sid)?;
+    let source_profile = payload
+        .get("workspace_roots")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
+    let paths: Vec<String> = payload
+        .get("files")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .unwrap_or_default();
+    let fingerprints: Vec<String> =
+        paths.iter().map(|p| fp_map.get(p.as_str()).map(|f| f.to_string()).unwrap_or_default()).collect();
+    Some(BuiltSession {
+        entry: PendingEntry {
+            key: SessionKey::new("codex", sid, &source_profile, ns),
+            payload,
+            // Codex 的 revision = 载荷 date_last，从 summary 派生即可。
+            revision: None,
+        },
+        paths,
+        fingerprints,
+    })
+}
+
+/// 单个 DSH 源文件 → 一个逻辑 session（1 文件 = 1 session，见
+/// `dsh_source_fingerprints` 的注释）。读不了/畸形/无 id → `Err((path, reason,
+/// fingerprint))`，调用方记进 degraded（§4.3 绝不数成 0 条真数据）；fingerprint
+/// 一并带出是为了让 degraded 记录也能存进 v2 cache，下次内容没变就不用重试。
+fn dsh_built_session_for(
+    path: &Path,
+    ws: &crate::agent::discovery::WorkspaceIndex,
+    fp_map: &HashMap<&str, &str>,
+) -> Result<BuiltSession, DegradedTriple> {
+    let ns = takeover::machine_namespace();
+    let path_str = path.display().to_string();
+    let fp = fp_map.get(path_str.as_str()).map(|f| f.to_string()).unwrap_or_default();
+    let text = match crate::dsh::read_session_text(path) {
+        Ok(t) => t,
+        Err(code) => return Err((path_str, code.to_string(), fp)),
+    };
+    // 头行有效性由 parse_session_log 验（type=="session" && version==0），这里
+    // 只抽 id + cwd；parse 已通过但缺 id → 无法建键 → missing-header。
+    if crate::dsh::parse_session_log(&text).get("degraded").and_then(Value::as_str).is_some() {
+        return Err((path_str, "missing-header".to_string(), fp));
+    }
+    let Some((id, cwd)) = dsh_header(&text) else {
+        return Err((path_str, "missing-header".to_string(), fp));
+    };
+    let Some(mut payload) = crate::agent::behavior::audit_payload(path) else {
+        // 读之间文件被截断/替换（parse 干净但 audit 重建失败）→ 文件级降级。
+        return Err((path_str, "file-missing".to_string(), fp));
+    };
+    if let Some((_, title)) = ws.by_session.get(&id) {
+        if let Some(o) = payload.as_object_mut() {
+            o.insert("title".to_string(), Value::String(title.clone()));
+        }
+    }
+    let revision = dsh_session_revision(&text);
+    Ok(BuiltSession {
+        entry: PendingEntry {
+            key: SessionKey::new("dsh", &id, &dsh_source_profile(cwd.as_deref()), &ns),
+            payload,
+            revision,
+        },
+        paths: vec![path_str],
+        fingerprints: vec![fp],
+    })
 }
 
 /// 把类型化错误打到 stderr（或 JSON），退出码 2（工具自身错误；区别于
@@ -1117,6 +1373,38 @@ mod tests {
         assert_ne!(f1, f3);
     }
 
+    /// seek 版指纹必须与"整份读文件再切 128 字节"逐字节相同——这次改动是纯
+    /// 性能优化（真机 631MB/115 个会话文件全读一遍是工作台点 tab 卡到假死
+    /// 的根因），不是重新定义指纹格式；算出不同的值会让现有用户的
+    /// `cache/r2a/*.json` 全部失效一次，虽不是灾难但也不该在没人决定的情况
+    /// 下发生。覆盖首尾窗口"不重叠/恰好相接/重叠/完全重合"四种边界：0、63、
+    /// 64、65、127、128、129、200 字节。
+    #[test]
+    fn seek_based_fingerprint_matches_full_read_reference_at_boundary_sizes() {
+        fn full_read_reference(path: &std::path::Path) -> String {
+            let meta = std::fs::metadata(path).unwrap();
+            let size = meta.len();
+            let mtime_ns = meta.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+            let bytes = std::fs::read(path).unwrap();
+            let n = bytes.len().min(64);
+            let first = &bytes[..n];
+            let last = &bytes[bytes.len().saturating_sub(64)..];
+            format!("{size}:{mtime_ns}:{:016x}:{:016x}", fnv1a64(first), fnv1a64(last))
+        }
+
+        let t = tmp_case();
+        for size in [0usize, 1, 63, 64, 65, 127, 128, 129, 200] {
+            let p = t.join(format!("f{size}.bin"));
+            // 内容不是全零/全同字节——首尾窗口如果算错了范围，指纹应该能测
+            // 出差异，不能靠"内容本来就到处一样"侥幸测过。
+            let content: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            std::fs::write(&p, &content).unwrap();
+            let seek_based = fingerprint_file(&p).unwrap();
+            let reference = full_read_reference(&p);
+            assert_eq!(seek_based, reference, "mismatch at size={size}");
+        }
+    }
+
     /// e2e：fake Codex home → 填充 3 个逻辑 session（store_seq 按 native_id 序）。
     #[test]
     fn codex_populate_builds_deterministic_entries() {
@@ -1335,6 +1623,53 @@ mod tests {
         let degraded = store.source_statuses["dsh"]["degraded"].as_array().unwrap();
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0]["reason"], "zstd-decode-error");
+    }
+
+    /// v2 增量缓存新路径：一个长期损坏的 DSH 文件，内容（=指纹）没变，不该在
+    /// 每次不相关的重建里都被重新尝试解压一次——`kept_degraded` 必须把它的
+    /// (path, fingerprint, reason) 原样带过下一次 cache，而不是让它因为"没有
+    /// 任何 session 覆盖它"而回落进 `to_process` 白白重试。用一个好会话 + 一
+    /// 个坏 zstd 建初版 cache，再新增第二个好会话触发一次真·增量重建，断言
+    /// v2 cache 文件里 degraded 条目的 fingerprint 与初版逐字节相同。
+    #[test]
+    fn dsh_unchanged_degraded_file_survives_incremental_rebuild_without_flapping() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let home = fake_dsh_home(&t); // 1 个好会话：sess-behavior-0001
+        let bad_dir = home.join(".dsh").join("sessions").join("--proj--").join("agent-bad");
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        std::fs::write(bad_dir.join("session.jsonl.zstd"), b"\x28\xb5\x2f\xfd\xff").unwrap();
+        let av = t.join("av");
+        std::fs::create_dir_all(&av).unwrap();
+        let _g = EnvGuard::set(&home, &av);
+
+        let a = SessionStore::dsh(&home).expect("populate ok");
+        assert_eq!(a.entries.len(), 1);
+        let deg_a = a.source_statuses["dsh"]["degraded"].as_array().unwrap();
+        assert_eq!(deg_a.len(), 1);
+        let cache_a: Value = serde_json::from_str(&std::fs::read_to_string(dsh_cache_path()).unwrap()).unwrap();
+        assert_eq!(cache_a["schema_version"], "2");
+        let fp_before = cache_a["degraded"][0]["fingerprint"].as_str().unwrap().to_string();
+        assert!(!fp_before.is_empty(), "degraded entries must carry a real fingerprint, not a placeholder");
+
+        // 新增一个不相关的好会话——只有它需要被重建，坏文件内容/指纹全程未动。
+        let dir2 = home.join(".dsh").join("sessions").join("--proj2--").join("agent-2");
+        std::fs::create_dir_all(&dir2).unwrap();
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("dsh").join("behavior.jsonl");
+        let text = std::fs::read_to_string(&src).unwrap();
+        // 换一个不同的 header id，避免与既有会话撞 native_id。
+        let text2 = text.replacen("sess-behavior-0001", "sess-behavior-0002", 1);
+        std::fs::write(dir2.join("session.jsonl"), text2).unwrap();
+
+        let b = SessionStore::dsh(&home).expect("populate ok");
+        assert_eq!(b.entries.len(), 2, "the new session must be picked up incrementally");
+        let deg_b = b.source_statuses["dsh"]["degraded"].as_array().unwrap();
+        assert_eq!(deg_b.len(), 1, "the untouched degraded file must not duplicate or vanish");
+        assert_eq!(deg_b[0]["reason"], "zstd-decode-error");
+
+        let cache_b: Value = serde_json::from_str(&std::fs::read_to_string(dsh_cache_path()).unwrap()).unwrap();
+        let fp_after = cache_b["degraded"][0]["fingerprint"].as_str().unwrap();
+        assert_eq!(fp_after, fp_before, "unchanged degraded file's fingerprint must round-trip byte-identical");
     }
 
     /// no-filter = 两源合并：3 codex + 1 dsh = 4，稳定序 codex 全部在前；完整

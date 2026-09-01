@@ -79,6 +79,7 @@
           <button id="sess-reload" class="btn" title="重新加载列表">重载列表</button>
         </div>
         <div id="sess-banner" class="banner" hidden></div>
+        <div id="sess-loading" class="muted" hidden>加载中…首次汇总可能需要几十秒，之后会走缓存变快</div>
         <div class="table-wrap">
           <table class="sess-table">
             <thead>
@@ -111,6 +112,7 @@
         <button id="find-reload" class="btn" title="重新汇总">重载</button>
       </div>
       <div id="find-banner" class="banner" hidden></div>
+      <div id="find-loading" class="muted" hidden>加载中…跨会话汇总，首次可能需要几十秒，之后会走缓存变快</div>
 
       <div class="cards cards-4">
         <div class="stat">
@@ -190,6 +192,7 @@
         <button id="src-reload" class="btn" title="重新扫描数据源">重载</button>
       </div>
       <div id="src-banner" class="banner" hidden></div>
+      <div id="src-loading" class="muted" hidden>加载中…</div>
 
       <div class="sync-row">
         <span id="src-sync" class="muted">尚未同步</span>
