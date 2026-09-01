@@ -278,9 +278,19 @@ fn read_overview_at(dh: &Path) -> Overview {
         .and_then(|d| today_cost(&d, &pricing, &today));
 
     // 本月：month.json 的 days map → core `month_cost`；读不到/无 days → {0,0}，
-    // 不臆造。
+    // 不臆造。**必须按当月过滤**——`month.json` 只在下一次真的有新数据要写时
+    // 才会把跨月的旧内容迁进 `month-archive.json`（`merge_month` 的迁移是
+    // 写触发的，不是时间触发的）；如果日历月已经翻页但还没有任何新会话被折过
+    // 一次账，`month.json` 会原封不动停在上个月，不过滤就会把上个月的总额当
+    // "本月"展示。真实事故（2026-09-01）：当天 DSH 无新会话可折，`month.json`
+    // 仍是 8 月内容，总览把 ¥1752.4 标成"本月"、预算卡片显示 292% 超支——数字
+    // 全部真实存在，只是贴错了月份标签。`read_month_days_at`（日历 tab 的 IPC）
+    // 早就有这条"读哪个月只认哪个月的键"的防御性过滤（见其文档注释），这里之前
+    // 没有——现在共用同一个 `filter_days_to_month`，不再各写一份判断。
+    let cur_month = current_month_beijing();
     let month_val = read_json(&state.join("month.json"))
         .and_then(|m| m.get("days").cloned())
+        .map(|d| filter_days_to_month(&d, &cur_month))
         .unwrap_or_else(|| json!({}));
     let month = month_cost(&month_val, &pricing);
 
@@ -371,22 +381,39 @@ pub fn read_month_days_at(dh: &Path, month: &str, pricing: &Value) -> Option<(Va
             })
             .unwrap_or_else(|| json!({}))
     };
-    let mut filtered = serde_json::Map::new();
+    let filtered = filter_days_to_month(&raw, month);
     let mut rows = Vec::new();
-    if let Some(map) = raw.as_object() {
+    if let Some(map) = filtered.as_object() {
         for (date, day) in map {
-            if date.starts_with(month) {
-                filtered.insert(date.clone(), day.clone());
-                rows.push(day_to_row(date, day, pricing));
-            }
+            rows.push(day_to_row(date, day, pricing));
         }
     }
     rows.sort_by(|a, b| a.date.cmp(&b.date));
     if rows.is_empty() {
         None
     } else {
-        Some((Value::Object(filtered), rows))
+        Some((filtered, rows))
     }
+}
+
+/// 把一份 days map 过滤到只保留属于 `month`（"YYYY-MM"）的键。两种情况会让
+/// `month.json`/`month-archive.json` 混入不属于目标月的行：①历史遗留脏数据；
+/// ②日历月已经翻页，但 `merge_month` 的滚档迁移是写触发的，还没有新数据落盘
+/// 就不会迁移，`month.json` 会原样停在上个月（真实事故见 `read_overview_at`
+/// 的调用点注释）。`read_overview_at`（总览"本月"卡片）与 `read_month_days_at`
+/// （日历 tab IPC）现在共用这一份"读哪个月只认哪个月的键"的判断，不再各写一份
+/// ——这正是本文件顶部注释警告过的"同一份 month.json 各写一份判断，报出两个价"
+/// 在读侧的镜像版本。
+fn filter_days_to_month(raw: &Value, month: &str) -> Value {
+    let mut filtered = serde_json::Map::new();
+    if let Some(map) = raw.as_object() {
+        for (date, day) in map {
+            if date.starts_with(month) {
+                filtered.insert(date.clone(), day.clone());
+            }
+        }
+    }
+    Value::Object(filtered)
 }
 
 /// 工作台日历 IPC 的响应组装。Some → `{month, days, total, peak_total,
@@ -515,12 +542,19 @@ mod tests {
     /// （今天的 date）+ config.toml，`read_overview_at` 应该产出与 core 单测同一组
     /// 数字——今日 1.5、本月 4.5（1.5 + 3.0）、两行逐日（按日期排序）、预算 888。
     /// 夹具逐字来自 core `cost.rs` 的 `month_cost_sums_exact_and_legacy_days`。
+    ///
+    /// 日期用 `current_month_beijing()` 动态拼，不写死 "2026-08"——写死过一次，
+    /// 真实时钟从 2026-08 跳到 2026-09 之后这条测试本该跟着 `read_overview_at`
+    /// 新加的当月过滤一起变红（月份不匹配 → 过滤成 0），但夹具本来就该跟着"今天"
+    /// 走，不是钉在某个写死的月份上（`read_month_days_at_filters_current_month`
+    /// 已经是这个写法，这里补齐）。
     #[test]
     fn read_overview_assembles_state_into_expected_numbers() {
         let tmp = std::env::temp_dir().join("sv-menubar-overview-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("state")).unwrap();
 
+        let cm = current_month_beijing();
         let legacy = serde_json::json!({
             "uncached_input_tokens": 1000000, "output_tokens": 0,
             "cache_read_tokens": 0, "cache_write_tokens": 0,
@@ -535,10 +569,10 @@ mod tests {
             "by_model": {"deepseek-v4-flash": legacy},
         });
         let month = serde_json::json!({
-            "month": "2026-08",
+            "month": cm,
             "days": {
-                "2026-08-01": exact_day,
-                "2026-08-02": serde_json::json!({ "uncached_input_tokens": 2000000, "output_tokens": 0,
+                format!("{cm}-01"): exact_day,
+                format!("{cm}-02"): serde_json::json!({ "uncached_input_tokens": 2000000, "output_tokens": 0,
                     "cache_read_tokens": 0, "cache_write_tokens": 0,
                     "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
                     "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0 }),
@@ -561,12 +595,52 @@ mod tests {
         let month_total = ov.month.get("total").unwrap().as_f64().unwrap();
         assert!((month_total - 4.5).abs() < 1e-9, "本月应 4.5（1.5+3.0），got {month_total}");
         assert_eq!(ov.days.len(), 2);
-        assert_eq!(ov.days[0].date, "2026-08-01");
+        assert_eq!(ov.days[0].date, format!("{cm}-01"));
         assert_eq!(ov.days[0].basis.as_deref(), Some("exact"));
-        assert_eq!(ov.days[1].date, "2026-08-02");
+        assert_eq!(ov.days[1].date, format!("{cm}-02"));
         assert_eq!(ov.days[1].basis, None);
         assert!((ov.days[1].total - 3.0).abs() < 1e-9);
         assert_eq!(ov.budget_monthly_cny, 888.0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// **真机回归**（2026-09-01）：`month.json` 停在上个月（日历翻页了，但还没
+    /// 有新数据触发过 `merge_month` 的滚档迁移），`read_overview_at` 必须把
+    /// "本月"过滤成空，不能把上个月的总额当本月展示——之前正是这样：8 月账目
+    /// ¥1752.4、预算卡片显示 292% 超支，而当天其实还没有任何一笔本月支出。
+    #[test]
+    fn read_overview_does_not_show_last_months_total_as_this_month() {
+        let tmp = std::env::temp_dir().join("sv-menubar-overview-stale-month-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+
+        // 拿"上个月"造一份还停在原地的 month.json——不管真实当前月是几月，
+        // 上一个日历月总能算出来，不用写死具体年月。
+        let cm = current_month_beijing();
+        let (y, m): (i64, i64) = {
+            let mut it = cm.split('-');
+            (it.next().unwrap().parse().unwrap(), it.next().unwrap().parse().unwrap())
+        };
+        let (py, pm) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+        let prev_month = format!("{py:04}-{pm:02}");
+
+        let day = serde_json::json!({
+            "uncached_input_tokens": 1000000, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+        });
+        let month = serde_json::json!({
+            "month": prev_month,
+            "days": { format!("{prev_month}-15"): day },
+        });
+        std::fs::write(tmp.join("state").join("month.json"), month.to_string()).unwrap();
+
+        let ov = read_overview_at(&tmp);
+        let month_total = ov.month.get("total").unwrap().as_f64().unwrap();
+        assert_eq!(month_total, 0.0, "上月滚存的 month.json 不该被当成本月总额展示");
+        assert!(ov.days.is_empty(), "上月的逐日行不该出现在本月逐日列表里");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

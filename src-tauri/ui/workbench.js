@@ -170,6 +170,19 @@ async function renderOverview() {
   const budgetSub = document.getElementById("ov-budget-sub");
   const budgetAmt = document.getElementById("ov-budget-amount");
   const denom = b.monthly_cny || ov.budget_monthly_cny || 0;
+  // 新鲜度先算好——预算卡片自己也要用，不能只靠页面最下面那行 note。真实事故
+  // （2026-09-01）：alert.json 停在 8 月最后一次 oneline（两天前），总览把它的
+  // 292% 超支当"本月"现状展示，旁边的"本月"卡片同一时刻已经因为按当月过滤
+  // 显示 ¥0——两个数字自相矛盾却都没有任何过期标记，用户没法从卡片本身判断
+  // "这是不是真的"。5 分钟阈值与 `stale_from`（`lib.rs`，托盘文案用的同一个
+  // 判据）保持一致，不新发明一套。
+  let stale = false;
+  let freshHHMM = "";
+  if (b.generated_at) {
+    const t = new Date(b.generated_at);
+    freshHHMM = t.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+    stale = Date.now() - t.getTime() > 5 * 60 * 1000;
+  }
   if (b.source !== "alert" || !b.level) {
     fill.style.width = "0%";
     fill.className = "fill";
@@ -197,16 +210,19 @@ async function renderOverview() {
         "已用 " + fmtPct(b.month_ratio ?? 0) + "（" + fmtMoney(b.month_cost || 0) +
         " / " + fmtMoney(denom) + "）" + daily;
     }
+    // 过期时把警告直接贴在数字旁边，不指望用户往下翻到页尾的 note 才看到——
+    // 这条数字本身可能是几天前的旧账（比如日历月翻了页但当天还没有新会话
+    // 触发过重新评估），过期提示必须跟数字长在一起。
+    if (stale) {
+      budgetSub.textContent = "⚠ 数据截至 " + freshHHMM + "（可能是上一次评估，非本月最新）· " + budgetSub.textContent;
+    }
     budgetSub.title = (b.reasons || []).join("\n");
   }
 
   // 新鲜度 + 同步状态 + 立即同步（与弹窗同一套 poll-at-change 回路）。
   let freshness = "";
   if (b.generated_at) {
-    const t = new Date(b.generated_at);
-    const hhmm = t.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
-    const stale = Date.now() - t.getTime() > 5 * 60 * 1000;
-    freshness = (stale ? "⚠ 数据过期（更新于 " : "数据更新于 ") + hhmm + "）";
+    freshness = (stale ? "⚠ 数据过期（更新于 " : "数据更新于 ") + freshHHMM + "）";
   } else {
     freshness = "预算数据尚未产出";
   }
