@@ -15,13 +15,13 @@ Swept Crest is the selected Agent Vitals mark. The woodpecker represents persist
 
 - Deep navy: `#10182B`
 - Mint: `#73E0C1`
-- Coral: `#FF6B6F`
+- Coral alert accent: `#FF6B6F`
 
 ## Usage
 
 - Use the color app icon for Finder, Dock, Settings, and installers.
 - Use the monochrome template image in the macOS menu bar so the system can adapt it to light, dark, highlighted, and accessibility states.
-- Keep the runtime node separated from the beak. At small sizes, the gap is the visual expression of an active inspection target.
+- Preserve the eye and the two negative-space cuts. They express inspection and keep the silhouette legible at small sizes.
 - Do not add Wi-Fi arcs, signal bars, speed lines, feathers, or a branch.
 
 ## Recommended showcase styles

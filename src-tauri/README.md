@@ -24,7 +24,7 @@ cargo tauri build
 # 产物在 target/release/bundle/ 下
 ```
 
-菜单栏图标与 App Icon 分离：`icons/trayTemplate.svg` 是 Swept Crest v2A 的
+菜单栏图标与 App Icon 分离：`icons/trayTemplate.svg` 是选定 Swept Crest 的
 单色源图，导出为 22×18px / 44×36px PNG；Rust 内嵌 `trayTemplate@2x.png` 并开启
 `icon_as_template(true)`，由 macOS 自动适配明暗、选中和辅助功能状态。
 
