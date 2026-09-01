@@ -624,37 +624,86 @@ def entry_from_envelope(env):
         s["findings_total"], store_seq, env)
 
 
-def _cache_is_current(cached, fingerprints):
-    if not isinstance(cached, dict):
-        return False
-    fp_list = cached.get("fingerprints")
-    if not isinstance(fp_list, list) or len(fp_list) != len(fingerprints):
-        return False
-    for i, (path, fp) in enumerate(fingerprints):
-        entry = fp_list[i]
-        if not isinstance(entry, dict):
-            return False
-        if entry.get("path") != path or entry.get("fingerprint") != fp:
-            return False
-    return True
+def _cache_v2_to_store(cached, fingerprints):
+    """v2 cache 纯命中恢复（mirror `r2a_store` 的 read_cache_v2 + kept_sessions +
+    kept_degraded + 纯命中判定 + cache_v2_to_store 一整条链）。
 
+    v1 缓存（顶层单一 `fingerprints` 数组）或任何形状不认识的文档一律返回 None
+    ——调用方当「缓存不存在」处理，落回全量重建并写一份 v2（Rust 同判，不做就地
+    迁移：v1/v2 两种形状拼不起来）。这是 cache-share 双向字节对账的支点：**读侧
+    必须复用 cache 文档里冻结的 `generated_at`**（§6.3-9 的字节一致含墙钟字段），
+    否则读一次就重折一次、盖一次新墙钟，两侧永远对不上——#7 的 6 个红测试
+    就是这个：Python 写 v1 / 只读 v1，跨实现缓存永远 miss，墙钟字段必然不同。
 
-def _cache_to_store(cached):
+    命中判定（一条都不能差，缺任一 → 全量重建）：
+      · schema_version == "2"，sessions/degraded 形状完好（平行数组等长且非空）；
+      · 每条缓存 session 的**全部**依赖路径指纹与当前源表一致（部分命中不拼凑）；
+      · 每条缓存 degraded 记录的指纹与当前源表一致（DSH 读不了的文件没变就不
+        重试解压；Codex 无 degraded，恒空）；
+      · 当前源表里每个文件都被某条 kept session 或 kept degraded 覆盖。
+    """
     if not isinstance(cached, dict):
+        return None
+    if cached.get("schema_version") != "2":
+        return None
+    session_docs = cached.get("sessions")
+    if not isinstance(session_docs, list):
+        return None
+    fp_map = dict(fingerprints)
+    kept = []
+    covered = set()
+    for s in session_docs:
+        paths = s.get("paths")
+        fps = s.get("fingerprints")
+        envelope = s.get("envelope")
+        if (not isinstance(paths, list) or not isinstance(fps, list)
+                or not isinstance(envelope, dict)):
+            return None
+        # 平行数组长度不一致或没有任何依赖路径 → 这条记录形状本身就坏了，整份
+        # 缓存不值得信任（不做「部分行能读就先用着」这种没有测试能钉住的半信
+        # 半疑语义），落回全量重建（Rust read_cache_v2 同判）。
+        if len(paths) != len(fps) or not paths:
+            return None
+        if any(not isinstance(p, str) or not isinstance(f, str)
+               for p, f in zip(paths, fps)):
+            return None
+        # kept_sessions：全部依赖路径与当前指纹表一致，一条都不能差，否则整条
+        # 判脏（一个 session 可能横跨多个 rollout 文件）。
+        if any(fp_map.get(p) != f for p, f in zip(paths, fps)):
+            return None
+        e = entry_from_envelope(envelope)
+        if e is None:
+            return None
+        kept.append(e)
+        covered.update(paths)
+    degraded = cached.get("degraded")
+    if degraded is not None and not isinstance(degraded, list):
+        return None
+    degraded = degraded if isinstance(degraded, list) else []
+    kept_deg = 0
+    for d in degraded:
+        p, fp, r = d.get("path"), d.get("fingerprint"), d.get("reason")
+        if not isinstance(p, str) or not isinstance(fp, str) or not isinstance(r, str):
+            return None
+        # kept_degraded：指纹没变才算覆盖——变了/文件消失 → 不覆盖 → 落到重建
+        # 重新尝试（长期损坏的文件不该每次点 tab 都重试解压，但内容变了必须重试）。
+        if fp_map.get(p) == fp:
+            kept_deg += 1
+            covered.add(p)
+    # 纯命中三连：所有缓存 session 都 keep、所有缓存 degraded 都 keep、所有当前
+    # 源文件都被覆盖（= Rust 的 to_process.is_empty() && kept 全量 && kept_deg 全量）。
+    if len(kept) != len(session_docs):
+        return None
+    if kept_deg != len(degraded):
+        return None
+    if any(p not in covered for p, _ in fingerprints):
         return None
     generated_at = cached.get("generated_at")
     source_statuses = cached.get("source_statuses")
-    entries_json = cached.get("entries")
-    if not isinstance(generated_at, str) or not isinstance(entries_json, list):
+    if not isinstance(generated_at, str) or not isinstance(source_statuses, dict):
         return None
-    entries = []
-    for env in entries_json:
-        e = entry_from_envelope(env)
-        if e is None:
-            return None
-        entries.append(e)
-    entries.sort(key=lambda e: sort_key(e.key))
-    return SessionStore._from_parts(entries, source_statuses, generated_at)
+    kept.sort(key=lambda e: sort_key(e.key))
+    return SessionStore._from_parts(kept, source_statuses, generated_at)
 
 
 def _read_cache(path):
@@ -665,16 +714,42 @@ def _read_cache(path):
         return None
 
 
-def _write_cache(path, store, fingerprints):
+def _codex_built_paths(payload, fp_map):
+    """Codex 一个逻辑 session 依赖的源文件路径 = 载荷 `files` 数组（resume 续写
+    产生新 rollout 文件、沿用旧 session_id——payload 自带的 `files` 就是这个
+    session 依赖的**全部**源路径，不用另外发明映射）。指纹按当前源表取；文件已
+    从源消失 → 空串（`unwrap_or_default` 镜像——写进 cache 后下次读时
+    kept_sessions 对不上指纹自然判脏落回重建，不 abort）。
+    mirror `r2a_store::codex_built_session_for` 的 paths/fingerprints 段。"""
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return [], []
+    paths = [f for f in files if isinstance(f, str)]
+    return paths, [fp_map.get(p, "") for p in paths]
+
+
+def _write_cache(path, source, store, paths_fps, degraded):
+    """v2 cache 文件形状（§3.5 可删 app cache）：`{schema_version:"2", source,
+    built_at, source_statuses, generated_at, sessions:[{paths, fingerprints,
+    envelope}], degraded:[{path, fingerprint, reason}]}`。`store.entries[i]` 与
+    `paths_fps[i]` 必须同序——两者都源自 `_entries_with_paths` 里同一次排序后
+    的 `built`，不是事后再配对（mirror `r2a_store::write_cache_v2`）。`source`
+    按源取值（"codex"/"dsh"）——v1 时代硬编码 "codex" 让 dsh 缓存源标错，跨实
+    现读不出正确 source。键序与 serde_json `json!` 的插入序一致，字节可比对。"""
     doc = {
-        "schema_version": "1",
-        "source": "codex",
-        "fingerprints": [{"path": p, "fingerprint": f}
-                         for p, f in fingerprints],
+        "schema_version": "2",
+        "source": source,
         "built_at": store.generated_at,
         "source_statuses": store.source_statuses,
         "generated_at": store.generated_at,
-        "entries": [e.envelope for e in store.entries],
+        "sessions": [
+            {"paths": ps, "fingerprints": fp, "envelope": e.envelope}
+            for e, (ps, fp) in zip(store.entries, paths_fps)
+        ],
+        "degraded": [
+            {"path": p, "fingerprint": f, "reason": r}
+            for p, f, r in degraded
+        ],
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -683,6 +758,20 @@ def _write_cache(path, store, fingerprints):
     except OSError:
         # cache 是「可删 memo」—— 写失败不 abort 查询，只当没写过。
         pass
+
+
+def _entries_with_paths(built, generated_at, source_statuses):
+    """`built` 是 (key, payload, session_revision, paths, fingerprints) 五元组
+    （paths 是会话依赖的源文件路径，fingerprints 是各路径当前指纹）。按 key 排
+    序后，用同一次排序派生 entries 与对齐的 (paths, fingerprints) 平行列表——
+    v2 cache 的 `sessions[i]` 与 `store.entries[i]` 必须同序。路径是写缓存专用
+    的元数据，不混进 build_entries 的 (key, payload, revision) 契约（mirror
+    `r2a_store::build_entries`，那侧也不带；Codex 与 DSH 共用）。"""
+    built.sort(key=lambda u: sort_key(u[0]))
+    raw = [(k, p, r) for k, p, r, _ps, _f in built]
+    entries = build_entries(raw, generated_at, source_statuses)
+    paths_fps = [(ps, f) for _k, _p, _r, ps, f in built]
+    return entries, paths_fps
 
 
 class SessionStore:
@@ -702,16 +791,17 @@ class SessionStore:
         ns = takeover_mod.machine_namespace()
         generated_at = _now_iso_utc()
         fingerprints = codex_source_fingerprints(home)
+        fp_map = dict(fingerprints)
         cache_path = _codex_cache_path()
 
         cached = _read_cache(cache_path)
-        if cached is not None and _cache_is_current(cached, fingerprints):
-            store = _cache_to_store(cached)
+        if cached is not None:
+            store = _cache_v2_to_store(cached, fingerprints)
             if store is not None:
                 return store
 
         sessions = csa.codex_session_list(home).get("sessions") or []
-        raw = []
+        built = []
         for s in sessions:
             sid = s.get("session_id")
             if not isinstance(sid, str):
@@ -725,13 +815,16 @@ class SessionStore:
                     r for r in roots if isinstance(r, str))
             else:
                 source_profile = ""
-            raw.append((SessionKey("codex", sid, source_profile, ns), payload,
-                        None))
+            paths, fps = _codex_built_paths(payload, fp_map)
+            built.append((SessionKey("codex", sid, source_profile, ns),
+                          payload, None, paths, fps))
 
-        statuses = codex_source_statuses(home, len(raw))
-        entries = build_entries(raw, generated_at, statuses)
+        statuses = codex_source_statuses(home, len(built))
+        entries, paths_fps = _entries_with_paths(built, generated_at, statuses)
         store = cls(entries, statuses, generated_at)
-        _write_cache(cache_path, store, fingerprints)
+        # Codex 没有 degraded 概念（读不了的 rollout 直接被 codex_session_audit_json
+        # 跳过），写 cache 时恒空数组——Rust 侧同写 Vec::new()。
+        _write_cache(cache_path, "codex", store, paths_fps, [])
         return store
 
     @classmethod
@@ -748,11 +841,12 @@ class SessionStore:
         ns = takeover_mod.machine_namespace()
         generated_at = _now_iso_utc()
         fingerprints = dsh_source_fingerprints(home)
+        fp_map = dict(fingerprints)
         cache_path = _dsh_cache_path()
 
         cached = _read_cache(cache_path)
-        if cached is not None and _cache_is_current(cached, fingerprints):
-            store = _cache_to_store(cached)
+        if cached is not None:
+            store = _cache_v2_to_store(cached, fingerprints)
             if store is not None:
                 return store
 
@@ -761,39 +855,47 @@ class SessionStore:
         files = dsh_mod.dsh_session_files(dsh_root)
         by_session, _archived = dsh_mod.read_workspace_index(dsh_root)
 
-        raw = []
+        built = []
+        # (path, fingerprint, reason) 三元组：指纹随 degraded 一起进 v2 cache，
+        # 内容没变下次就不重试解压（Rust DegradedTriple 同形，§4.3）。指纹在记录
+        # 时刻从当前源表取——文件此刻就在 files 里，必然有指纹。
         degraded = []
         for path in files:
             path_str = str(path)
+            fp = fp_map.get(path_str, "")
             text, read_err = dsh_mod.read_session_text(path)
             if read_err is not None:
-                degraded.append((path_str, read_err))
+                degraded.append((path_str, fp, read_err))
                 continue
             # 头行有效性由 parse_session_log 验（type=="session" && version==0），
             # 这里只抽 id + cwd；parse 已通过但缺 id → 无法建键 → missing-header。
             if dsh_mod.parse_session_log(text).get("degraded"):
-                degraded.append((path_str, "missing-header"))
+                degraded.append((path_str, fp, "missing-header"))
                 continue
             hdr = dsh_header(text)
             if hdr is None:
-                degraded.append((path_str, "missing-header"))
+                degraded.append((path_str, fp, "missing-header"))
                 continue
             id_, cwd = hdr
             payload = behavior_mod.audit_payload(path)
             if payload is None:
                 # 读之间文件被截断/替换（parse 干净但 audit 重建失败）→ 文件级降级。
-                degraded.append((path_str, "file-missing"))
+                degraded.append((path_str, fp, "file-missing"))
                 continue
             if id_ in by_session:
                 payload["title"] = by_session[id_][1]
-            raw.append((SessionKey("dsh", id_, dsh_source_profile(cwd), ns),
-                        payload, dsh_session_revision(text)))
-        raw.sort(key=lambda kv: sort_key(kv[0]))
+            # DSH 1 文件 = 1 逻辑 session：paths 就是这单个文件，指纹取当前源表。
+            built.append((SessionKey("dsh", id_, dsh_source_profile(cwd), ns),
+                          payload, dsh_session_revision(text),
+                          [path_str], [fp]))
 
-        statuses = dsh_source_statuses(home, files, degraded)
-        entries = build_entries(raw, generated_at, statuses)
+        # statuses 要的仍是 (path, reason) 对（mirror r2a_store 的 degraded_pairs
+        # 派生）；三元组是 v2 cache 专用，不进 source_statuses。
+        degraded_pairs = [(p, r) for p, _f, r in degraded]
+        statuses = dsh_source_statuses(home, files, degraded_pairs)
+        entries, paths_fps = _entries_with_paths(built, generated_at, statuses)
         store = cls(entries, statuses, generated_at)
-        _write_cache(cache_path, store, fingerprints)
+        _write_cache(cache_path, "dsh", store, paths_fps, degraded)
         return store
 
     @classmethod

@@ -402,6 +402,37 @@ class CodexPopulationE2ETests(unittest.TestCase):
             _normalize_generated_at(json.loads(b.stdout)),
             "cache delete + rebuild must reproduce the same store")
 
+    def test_cache_is_v2_shape_with_correct_source(self):
+        """v2 cache 文件形状钉死（回归：#7 之前 Python 写 v1 顶层
+        `fingerprints`/`entries`、且 `source` 硬编码 "codex"）。这里**不依赖**
+        AGENT_VITALS_BIN——跨实现字节对账（generated_at 共享）由 `_BIN` 门控的
+        reconciliation 用例守，但那些用例缺二进制就 skip；本用例任何环境都跑，
+        单独抓住「Python 退回写 v1」的回归。"""
+        av = self._av()
+        r = _run_py(["sessions", "list", "--json"], _env(self.home, av))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = json.loads(_cache_path(av).read_text(encoding="utf-8"))
+        self.assertEqual(doc["schema_version"], "2")
+        self.assertEqual(doc["source"], "codex")
+        # v2 形状：per-session 嵌套 sessions + degraded；v1 的顶层键必须消失。
+        self.assertNotIn("fingerprints", doc)
+        self.assertNotIn("entries", doc)
+        self.assertIn("sessions", doc)
+        self.assertIn("degraded", doc)
+        self.assertEqual(doc["degraded"], [])
+        sessions = doc["sessions"]
+        self.assertEqual(len(sessions), 3)
+        for s in sessions:
+            # 平行数组等长且非空——read_cache_v2 的形状前提（Rust 同判，缺任一
+            # 整份缓存按「不存在」处理）。
+            self.assertEqual(len(s["paths"]), len(s["fingerprints"]))
+            self.assertGreater(len(s["paths"]), 0)
+            self.assertIn("envelope", s)
+            self.assertEqual(s["envelope"]["schema_version"], "1",
+                             "v2 只升 cache 文件，envelope 线格式契约仍是 1")
+        # built_at 与 generated_at 同源（store 的冻结墙钟字段）。
+        self.assertEqual(doc["built_at"], doc["generated_at"])
+
     def test_dsh_host_empty_home_is_honest_zero(self):
         # 根本没有 DSH 会话 → 诚实零：status ok + 空页 + exit 0（§3.3「文件空 →
         # ok」）。「unavailable」留给「文件在但一个都读不了」的用例。
@@ -659,6 +690,30 @@ class DshPopulationE2ETests(unittest.TestCase):
                          "revision = max seq")
         self.assertTrue(_dsh_cache_path(av).is_file(),
                         "cache must be written at data_home/cache/r2a/")
+
+    def test_dsh_cache_is_v2_shape_with_correct_source(self):
+        """DSH 半边钉死 v2 的 `source` 字段（回归：#7 之前 `_write_cache` 硬编码
+        "codex"，dsh 缓存源标错；现在按源取值 "dsh"）。degraded 同时钉成
+        (path, fingerprint, reason) 三元组形状——指纹随 degraded 进 cache 是
+        「读不了但没变就不重试」的前提（Rust DegradedTriple 同形）。"""
+        av = self._av()
+        r = _run_py(["sessions", "list", "--host-kind", "dsh", "--json"],
+                    _env(self.home, av))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = json.loads(_dsh_cache_path(av).read_text(encoding="utf-8"))
+        self.assertEqual(doc["schema_version"], "2")
+        self.assertEqual(doc["source"], "dsh",
+                         "source 必须按源取值——硬编码 codex 是 #7 一起修的潜伏 bug")
+        sessions = doc["sessions"]
+        self.assertEqual(len(sessions), 1)
+        s = sessions[0]
+        # DSH 1 文件 = 1 逻辑 session：paths 就是那一个源文件，指纹平行且非空。
+        self.assertEqual(len(s["paths"]), 1)
+        self.assertTrue(s["paths"][0])
+        self.assertEqual(len(s["paths"]), len(s["fingerprints"]))
+        self.assertTrue(s["fingerprints"][0])
+        self.assertIn("envelope", s)
+        self.assertEqual(doc["degraded"], [])
 
     def test_populate_builds_from_bare_jsonl_home(self):
         """裸 jsonl（`compression:'none'`）成功路径也要跑：`parse_session_log` 抽出后，
