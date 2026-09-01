@@ -486,6 +486,10 @@ pub struct ToolCallObservation {
 
 #[derive(Clone, Debug)]
 pub struct ToolResultObservation {
+    /// 通用失败信号（是/否），不解释原因——宿主只证明「失败了」、不给码时用它
+    /// （Claude Code 的 `is_error` 就是这种）。`None` = 源没有失败信号，不是
+    /// "没失败"。原因级检测（SV607/608）读 `error_code`，不读它。
+    pub failed: Option<bool>,
     pub error_code: Option<String>,
 }
 
@@ -553,6 +557,11 @@ pub struct TurnObservation {
 #[derive(Clone, Debug)]
 pub struct TimelineEntry<T> {
     pub observation: T,
+    /// 这条 entry 是宿主原生记的、适配器 derive 的，还是降级过的——兼容桥
+    /// （canonical_session.rs）原样透传给 `CanonicalEvent.provenance`。缺它，
+    /// 推导 turn / 模糊错误会被下游当成原生测量（Codex 输入过桥被标成 dsh 来源、
+    /// Derived 变 Measured 是同一类洞）。
+    pub provenance: Provenance,
     pub seq: Option<i64>,
     pub time: Option<i64>,
     pub turn: Option<i64>,

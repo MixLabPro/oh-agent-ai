@@ -174,7 +174,7 @@ pub fn run_single_family1_rule_with_config<D: Detector + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::evidence::{Coverage as EvidenceCoverage, SessionMeta, SignalSet, Timeline, TimelineEntry, ToolCallObservation};
+    use crate::evidence::{Coverage as EvidenceCoverage, Provenance, SessionMeta, SignalSet, Timeline, TimelineEntry, ToolCallObservation};
     use vitals_core::detector::{AuditContext, SignalRequirement};
     use vitals_core::error::VitalsError;
     use vitals_core::finding::{FindingDraft, Severity};
@@ -213,6 +213,7 @@ mod tests {
     fn tool_call_entry(name: &str, args: &str, seq: i64, ordinal: usize) -> TimelineEntry<ToolCallObservation> {
         TimelineEntry {
             observation: ToolCallObservation { name: name.to_string(), args_text: args.to_string() },
+            provenance: Provenance::Measured,
             seq: Some(seq),
             time: Some(1000 + seq),
             turn: None,

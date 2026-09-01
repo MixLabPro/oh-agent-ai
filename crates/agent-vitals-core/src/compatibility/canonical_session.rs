@@ -24,8 +24,51 @@ use serde_json::{json, Value};
 use vitals_core::event::{CanonicalEvent, SourceRef};
 use vitals_core::id::{ActorId, EventId};
 use vitals_core::provenance::Provenance;
+use vitals_core::signal::SignalId;
 
 use crate::evidence::CanonicalSession;
+
+/// §4 provenance 透传：`evidence::Provenance`（适配器层，`&'static str` 省每次
+/// 热路径分配）→ `vitals_core::provenance::Provenance`（公开模型，`String` /
+/// `Vec<SignalId>`，允许动态构造）。这条映射是**保真的**——Derived 恒是 Derived、
+/// Estimated 恒是 Estimated，绝不落入 Measured。这是 aggregation 纪律（混合来源
+/// 不得伪装成单一 measured）的镜像面：推导坐标不得在过桥时升级成原生测量。
+impl From<crate::evidence::Provenance> for Provenance {
+    fn from(p: crate::evidence::Provenance) -> Self {
+        match p {
+            crate::evidence::Provenance::Measured => Provenance::Measured,
+            crate::evidence::Provenance::Derived { from } => {
+                Provenance::Derived { from: vec![SignalId::from(from)] }
+            }
+            crate::evidence::Provenance::Estimated { estimator } => {
+                Provenance::Estimated { estimator: estimator.to_string() }
+            }
+            crate::evidence::Provenance::Lossy { kind } => Provenance::Lossy {
+                kind: match kind {
+                    crate::evidence::LossKind::Truncated { hint } => {
+                        vitals_core::provenance::LossKind::Truncated { hint }
+                    }
+                    crate::evidence::LossKind::Hashed => vitals_core::provenance::LossKind::Hashed,
+                    crate::evidence::LossKind::Redacted => {
+                        vitals_core::provenance::LossKind::Redacted
+                    }
+                },
+            },
+        }
+    }
+}
+
+/// `SessionMeta.host_id` → `SourceRef.source_type`。此前硬编码 `dsh_session`——
+/// Codex 输入过桥也拿到 DSH 来源（§4 的误标 bug）。现在按宿主登记：已知宿主
+/// 走专属形状，未登记的走 `{host}_session` 通用形状，落到 `dsh` 名下一律不许。
+fn source_type_for(host_id: &str) -> String {
+    match host_id {
+        "dsh" => "dsh_session".to_string(),
+        "codex" => "codex_session".to_string(),
+        "claude-code" => "claude_code_session".to_string(),
+        other => format!("{other}_session"),
+    }
+}
 
 /// §7.1：本次迁移登记的信号名——直接沿用旧 `Signal` 枚举变体名的
 /// snake_case（`ToolCalls` → `agent.tool_calls`）。这条桥存在的目的就是跟
@@ -69,7 +112,15 @@ impl From<vitals_core::error::VitalsError> for CompatibilityError {
     }
 }
 
-fn base_event(actor_id: &str, kind: &'static str, ordinal: usize, time: Option<i64>, attributes: serde_json::Value) -> CanonicalEvent {
+fn base_event(
+    actor_id: &str,
+    source_type: &str,
+    kind: &'static str,
+    ordinal: usize,
+    time: Option<i64>,
+    attributes: serde_json::Value,
+    provenance: crate::evidence::Provenance,
+) -> CanonicalEvent {
     CanonicalEvent {
         schema_version: 1,
         id: EventId::from(format!("evt-{ordinal}")),
@@ -81,12 +132,13 @@ fn base_event(actor_id: &str, kind: &'static str, ordinal: usize, time: Option<i
         attributes,
         outcome: None,
         source: SourceRef {
-            source_type: "dsh_session".to_string(),
+            source_type: source_type.to_string(),
             source_id: actor_id.to_string(),
             raw_reference: None,
             raw_ordinal: Some(ordinal as u64),
         },
-        provenance: Provenance::Measured,
+        // 保真透传——`From` 映射保证 Derived 不进 Measured。
+        provenance: provenance.into(),
     }
 }
 
@@ -96,11 +148,13 @@ fn base_event(actor_id: &str, kind: &'static str, ordinal: usize, time: Option<i
 /// 出正确的顺序，不是替 Engine 决定顺序）。
 pub fn canonical_session_to_vitals(session: &CanonicalSession) -> Result<Vec<CanonicalEvent>, CompatibilityError> {
     let actor_id = if session.meta.session_id.is_empty() { ANONYMOUS_ACTOR } else { session.meta.session_id.as_str() };
+    let source_type = source_type_for(session.meta.host_id);
     let mut events = Vec::new();
 
     for entry in &session.tool_calls.entries {
         events.push(base_event(
             actor_id,
+            &source_type,
             KIND_TOOL_CALL,
             entry.ordinal,
             entry.time,
@@ -112,21 +166,25 @@ pub fn canonical_session_to_vitals(session: &CanonicalSession) -> Result<Vec<Can
                 "step": entry.step,
                 "call_id": entry.call_id,
             }),
+            entry.provenance,
         ));
     }
     for entry in &session.tool_results.entries {
         events.push(base_event(
             actor_id,
+            &source_type,
             KIND_TOOL_RESULT,
             entry.ordinal,
             entry.time,
             json!({
+                "failed": entry.observation.failed,
                 "error_code": entry.observation.error_code,
                 "seq": entry.seq,
                 "turn": entry.turn,
                 "step": entry.step,
                 "call_id": entry.call_id,
             }),
+            entry.provenance,
         ));
     }
     for entry in &session.approvals.entries {
@@ -143,6 +201,7 @@ pub fn canonical_session_to_vitals(session: &CanonicalSession) -> Result<Vec<Can
         let decided = entry.observation.decided.as_ref().map_or(Value::Null, |d| json!({"outcome": d.outcome}));
         events.push(base_event(
             actor_id,
+            &source_type,
             KIND_APPROVAL,
             entry.ordinal,
             entry.time,
@@ -154,11 +213,13 @@ pub fn canonical_session_to_vitals(session: &CanonicalSession) -> Result<Vec<Can
                 "asked": asked,
                 "decided": decided,
             }),
+            entry.provenance,
         ));
     }
     for entry in &session.sandbox_modes.entries {
         events.push(base_event(
             actor_id,
+            &source_type,
             KIND_SANDBOX_MODE,
             entry.ordinal,
             entry.time,
@@ -168,11 +229,13 @@ pub fn canonical_session_to_vitals(session: &CanonicalSession) -> Result<Vec<Can
                 "turn": entry.turn,
                 "step": entry.step,
             }),
+            entry.provenance,
         ));
     }
     for entry in &session.turns.entries {
         events.push(base_event(
             actor_id,
+            &source_type,
             KIND_TURN,
             entry.ordinal,
             entry.time,
@@ -196,6 +259,7 @@ pub fn canonical_session_to_vitals(session: &CanonicalSession) -> Result<Vec<Can
                 "step": entry.step,
                 "call_id": entry.call_id,
             }),
+            entry.provenance,
         ));
     }
 
@@ -217,6 +281,7 @@ mod tests {
     fn entry<T>(observation: T, seq: i64, time: i64, turn: Option<i64>, step: Option<i64>, call_id: Option<&str>, ordinal: usize) -> TimelineEntry<T> {
         TimelineEntry {
             observation,
+            provenance: crate::evidence::Provenance::Measured,
             seq: Some(seq),
             time: Some(time),
             turn,
@@ -274,7 +339,7 @@ mod tests {
     fn ordinals_stay_unique_across_all_five_timelines() {
         let mut session = empty_session();
         session.tool_calls.entries.push(entry(ToolCallObservation { name: "bash".to_string(), args_text: "ls".to_string() }, 1, 1001, None, None, None, 0));
-        session.tool_results.entries.push(entry(ToolResultObservation { error_code: None }, 2, 1002, None, None, None, 1));
+        session.tool_results.entries.push(entry(ToolResultObservation { failed: None, error_code: None }, 2, 1002, None, None, None, 1));
         session.approvals.entries.push(entry(
             ApprovalObservation { asked: Some(ApprovalAsked { tool_name: Some("bash".to_string()), reason: None }), decided: None },
             3,
@@ -341,5 +406,48 @@ mod tests {
         let events = canonical_session_to_vitals(&session).unwrap();
         assert_eq!(events[0].attributes["asked"], Value::Null);
         assert_eq!(events[0].attributes["decided"]["outcome"], json!("rejected"));
+    }
+
+    #[test]
+    fn source_type_follows_host_id_not_hardcoded_dsh() {
+        // §4 的误标 bug：`source_type` 硬编码 `dsh_session`，Codex 输入过桥也拿到
+        // DSH 来源。现在按 `SessionMeta.host_id` 生成——codex 输入必须拿到
+        // `codex_session`，而不是被标成 dsh。
+        let mut session = empty_session();
+        session.meta.host_id = "codex";
+        session.tool_calls.entries.push(entry(ToolCallObservation { name: "bash".to_string(), args_text: "ls".to_string() }, 1, 1001, None, None, None, 0));
+
+        let events = canonical_session_to_vitals(&session).unwrap();
+        assert_eq!(events[0].source.source_type, "codex_session");
+    }
+
+    #[test]
+    fn derived_provenance_passes_through_not_as_measured() {
+        // §4：适配器把 turn 边界等推导坐标标成 Derived 后，桥接不得把它拉回
+        // Measured——「推导坐标冒充原生测量」的回归测试。保真映射的另一半
+        // （Derived 变 Measured 被拦下）见 `From` 实现的单测。
+        let mut session = empty_session();
+        let mut e = entry(ToolCallObservation { name: "bash".to_string(), args_text: "ls".to_string() }, 1, 1001, None, None, None, 0);
+        e.provenance = crate::evidence::Provenance::Derived { from: "turn_rebuild" };
+        session.tool_calls.entries.push(e);
+
+        let events = canonical_session_to_vitals(&session).unwrap();
+        assert_eq!(
+            events[0].provenance,
+            Provenance::Derived { from: vec![SignalId::from("turn_rebuild")] }
+        );
+    }
+
+    #[test]
+    fn tool_result_failed_flag_carries_through_bridge() {
+        // §3：`failed`（通用失败，无原因码）必须随 `error_code` 一起过桥进
+        // attributes，SV613(b) 的 lossy 路径才读得到——Claude 的 `is_error`
+        // 只填它，`error_code` 恒 None。
+        let mut session = empty_session();
+        session.tool_results.entries.push(entry(ToolResultObservation { failed: Some(true), error_code: None }, 2, 1002, None, None, None, 1));
+
+        let events = canonical_session_to_vitals(&session).unwrap();
+        assert_eq!(events[0].attributes["failed"], json!(true));
+        assert_eq!(events[0].attributes["error_code"], Value::Null);
     }
 }

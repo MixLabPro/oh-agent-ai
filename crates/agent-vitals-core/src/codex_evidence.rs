@@ -35,8 +35,8 @@ use regex::Regex;
 use serde_json::{Map, Value};
 
 use crate::evidence::{
-    AdapterNote, CanonicalSession, Coverage, CoverageCounts, SandboxModeObservation, SessionMeta,
-    Signal, SignalSet, SourceAttempt, SourceKind, Surface, Timeline, TimelineEntry,
+    AdapterNote, CanonicalSession, Coverage, CoverageCounts, Provenance, SandboxModeObservation,
+    SessionMeta, Signal, SignalSet, SourceAttempt, SourceKind, Surface, Timeline, TimelineEntry,
     ToolCallObservation, ToolResultObservation, TurnObservation,
 };
 
@@ -599,7 +599,10 @@ fn timeline_entry<T>(
     call_id: Option<String>,
     ordinal: usize,
 ) -> TimelineEntry<T> {
-    TimelineEntry { observation, seq, time: None, turn, step: None, call_id, ordinal }
+    // Codex 的观测值全部来自原生事件（tool/call、result、task_started/complete），
+    // 逐事件 provenance 恒 Measured——turn 号的合成序数只做会话内排序，不改变
+    // 边界事件本身是宿主记下的事实。
+    TimelineEntry { observation, provenance: Provenance::Measured, seq, time: None, turn, step: None, call_id, ordinal }
 }
 
 /// turn 生命周期 pass 的中间状态：task_started 开新 turn、turn 内 CommandExecution
@@ -795,7 +798,7 @@ pub(crate) fn populate_codex_timelines(
                     let exit_code = item.get("exit_code").and_then(|v| v.as_i64());
                     let error_code = exit_code.and_then(|c| (c != 0).then(|| format!("exit_code:{c}")));
                     tool_results.entries.push(timeline_entry(
-                        ToolResultObservation { error_code },
+                        ToolResultObservation { failed: None, error_code },
                         Some(seq),
                         turn_coord,
                         None,
@@ -851,7 +854,7 @@ pub(crate) fn populate_codex_timelines(
                     .get("error")
                     .and_then(output_error_code);
                 tool_results.entries.push(timeline_entry(
-                    ToolResultObservation { error_code },
+                    ToolResultObservation { failed: None, error_code },
                     Some(seq),
                     None,
                     payload.get("call_id").and_then(|v| v.as_str()).map(str::to_owned),

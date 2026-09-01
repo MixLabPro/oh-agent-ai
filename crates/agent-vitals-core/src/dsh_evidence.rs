@@ -25,7 +25,7 @@ use serde_json::{json, Map, Value};
 
 use crate::evidence::{
     ApprovalAsked, ApprovalDecided, ApprovalObservation, CanonicalSession, Coverage,
-    CoverageCounts, SandboxModeObservation, SessionMeta, Signal, SignalSet, Timeline,
+    CoverageCounts, Provenance, SandboxModeObservation, SessionMeta, Signal, SignalSet, Timeline,
     TimelineEntry, ToolCallObservation, ToolResultObservation, TurnObservation,
 };
 
@@ -267,7 +267,7 @@ pub(crate) fn populate_timelines(
             }
             Some("tool/result") => {
                 tool_results.entries.push(make_entry(
-                    ToolResultObservation { error_code: result_code(event).map(str::to_owned) },
+                    ToolResultObservation { failed: None, error_code: result_code(event).map(str::to_owned) },
                     seq, time, turn, step, call_id, ordinal,
                 ));
             }
@@ -342,6 +342,8 @@ fn make_entry<T>(
 ) -> TimelineEntry<T> {
     TimelineEntry {
         observation,
+        // DSH 全部是宿主原生记录——逐事件 provenance 恒 Measured，没有推导/估算。
+        provenance: Provenance::Measured,
         seq,
         time,
         turn: turn.as_i64(),

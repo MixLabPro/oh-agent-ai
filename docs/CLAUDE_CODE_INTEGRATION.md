@@ -2,9 +2,13 @@
 
 > 采集 2026-09-01。本机 Claude Code 全部会话 JSONL 实测。
 > 关联：[CLAUDE_CODE_CORPUS.md](./CLAUDE_CODE_CORPUS.md)（数据面快照）· [VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md](./VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md)（v0.5 架构）· [MENUBAR_MULTIHOST_NAVIGATION_SPEC.md](./MENUBAR_MULTIHOST_NAVIGATION_SPEC.md)（多宿主导航）。
-> 状态：**调研结论，不是可实施 spec**。数据面证据已实测，接入层级、规则能力矩阵、provenance、
-> SessionStore、WASM 五个问题已定案（P0 修正版）；turn 重建状态机（§8）与
-> 工具名规范化细节（§7）仍需实现设计定稿。评审结论：v0.5 通用 Core 不修改的方向**成立**。
+> 状态：**调研结论 + 设计草案，第一刀已落地**。数据面证据已实测（2026-09-01 二次抽查修正：
+> 日期轴原生、事件类型 12 种、usage 富字段、tool_result 三态——见 §2）；接入层级、规则能力
+> 矩阵、provenance、SessionStore、WASM 五个问题已定案（P0 修正版）；§7 工具名规范化与
+> §8 turn 重建状态机已给设计草案。§4 的 `TimelineEntry.provenance` + `source_type` 按 host
+> 生成、§3 的 `ToolResultObservation.failed` 已作为「第一刀」实现进 `agent-vitals-core`
+> （core 单测 + golden 差分 15/15 全绿，输出字节不变，见 §4）。评审结论：v0.5 通用 Core
+> 不修改的方向**成立**。
 
 ## 0. 结论
 
@@ -40,7 +44,7 @@ CanonicalSession → CanonicalEvent 桥。Claude 适配器必须先产出 `Canon
 
 `dsh_evidence.rs:355 DshEvidence` / `:498 build_dsh_evidence` / `:546 reverse_project`
 是既有范式：适配器持有 `canonical + raw_records`，`build_*` 产出、`reverse_project`
-回吐原始形状。`codex_evidence.rs` 同层。Claude 新增 `ClaudeEvidence`（§6 工作项 1）
+回吐原始形状。`codex_evidence.rs` 同层。Claude 新增 `ClaudeEvidence`（§11 工作项 2）
 与这两者同构。
 
 ### 1.3 TrajectoryAssigner 的职责边界（评审 P0-2，已验证）
@@ -89,25 +93,39 @@ derived turn   → agent.turn
 早前会话 65633310/8b85e949/dcf9e5b6 已被清理——Claude Code 会话会轮换删除，
 任何会话文件统计都是时点值（§9.1）。**以上四行不可互比，引用时须带采集时间与范围。**
 
-### 2.2 session.jsonl 事件类型（51 会话抽样）
+### 2.2 session.jsonl 事件类型（51 会话抽样，实测 12 种）
 
 | 类型 | 数量 | 对适配的价值 |
 |---|---:|---|
-| `assistant` | 41,754 | `message.model` + `message.usage` —— 用量/成本源 |
-| `user` | 21,296 | 含 `tool_result` 块（19,437 个） |
+| `assistant` | 41,754 | `message.model` + `message.usage` —— 用量/成本源；`error`/`isApiErrorMessage`/`quotaLimits` 是 assistant **顶层字段**（70/90/20），不是独立事件类型 |
+| `user` | 21,296 | 含 `tool_result` 块（19,437 个）；**无 tool_result 的纯文本 user = 新 turn 根**（§8 问 4） |
 | `attachment` | 21,073 | `deferred_tools_delta` —— 工具名清单 |
 | `permission-mode` | 6,024 | **仅模式快照** `{permissionMode, sessionId}`，无逐次审批 |
-| `quotaLimits`（assistant 顶层） | 20 | 限流负向快照，无 used_percent |
-| `error` / `isApiErrorMessage` | 70 / 90 | 请求失败 |
+| `mode` | 未逐类计数 | 权限模式事件——与 `permission-mode` 的差异待 Claude 适配器落地时复核 |
+| `file-history-snapshot` / `file-history-delta` | 未逐类计数 | 文件内容快照/差异——`FileMutations` 信号候选 |
+| `last-prompt` / `ai-title` / `atis-latch` | 未逐类计数 | 会话元数据更新，无审计价值 |
+| `queue-operation` | 未逐类计数 | Continue 排队操作，无 uuid |
+| `system` | 未逐类计数 | 系统事件，无 uuid |
+
+**计数只标已逐类的；未逐类的不编列（缺列不编列）。** `uuid`/`parentUuid` 树只出现在
+`user`/`attachment`/`assistant` 三类上——其余事件无 uuid，是附属信号不是 turn 树成员（§2.3）。
 
 ### 2.3 结构事实（三态矩阵锚点）
 
-- **`tool_result` 块 = `{content, is_error, tool_use_id, type}`**：有 `is_error` 布尔，
-  **无 `exit_code` 数值**。
+- **`tool_result` 块 = `{content, is_error, tool_use_id, type}`，无 `exit_code` 数值**：
+  `is_error` 是布尔，本次实测三态——`true`×3 / `false`×37 / **键缺失**×18。true 只证明
+  「失败了」、不证明原因：译成 `failed=true`（lossy），`error_code` 保持 None，绝不伪造
+  一个码（§3 的 SV607/608 Unavailable 判定因此站得住）。
+- **时间轴原生**：`user`/`assistant`/`attachment` 事件恒带 ISO-8601 `timestamp`
+  （实测 342/342）。**`CLAUDE_CODE_CORPUS.md` §1 的「无日期字段、不编」已被推翻**——
+  `date_first`/`date_last`、date 过滤、按天聚合全部原生可做，不做是自废。无 uuid 的事件
+  （mode 等）同样带时间戳。
 - **`permission-mode` = `{type, permissionMode, sessionId}`**：模式切换快照，无逐次审批。
 - **无 provider 字段、无 turn/step**：全事件无结构化端点/provider 字段；turn 需从
   `uuid`/`parentUuid` 树重建。
 - **`uuid`/`parentUuid` 树 + `tool_use_id`**：工具调用有唯一 ID，可关联 call/result。
+  树**只在 `user`/`attachment`/`assistant` 三类事件上**（§2.2），turn 重建（§8）只消费
+  这三类。
 
 ### 2.4 usage 富字段
 
@@ -116,6 +134,18 @@ derived turn   → agent.turn
 | `output_tokens_details.thinking_tokens` | M2.7: **91% 非零**（max 488，中位 34）；M3: 19% 非零（max 3,102）；deepseek-*: **恒 0**；claude-opus/sonnet-5: 非零（max 1,889/7,870） | reasoning 维度 |
 | `cache_creation.ephemeral_1h/5m` | 本次 16 文件几乎全无（仅 13 条 cc>0 无分桶） | Anthropic 式缓存分档 |
 | `server_tool_use` | `{web_search_requests, web_fetch_requests}` | 服务端工具计数 |
+
+**assistant 事件承载完整 usage**（本次 126/126 条完整）：`input` / `cache_creation_input` /
+`cache_read_input` / `output` 四桶 + `output_tokens_details.thinking_tokens` +
+`cache_creation.ephemeral_1h|5m` 子桶 + `server_tool_use` + `service_tier`/`inference_geo`/
+`iterations`/`speed`。两个必守的桶纪律：
+
+- **缓存桶是「父标量 + 子桶」**：实测 15844 = ephemeral_1h 15844 + ephemeral_5m 0——父字段
+  与子桶**不得重复计费**。usage.rs 的 `usage_sample` 判据（CLAUDE.md「wide in, narrow out」）
+  认这个形状：宽入窄出，机器先捞、人再归类。
+- **四模型家族（claude/deepseek/minimax/kimi）是四个互不贯通的缓存宇宙**：同一文件的缓存
+  命中只能按家族内对比，混合家族文件是结构性事实（51 文件中 17 个含多家族）——跨家族加总
+  缓存金额没有意义。
 
 **MiniMax thinking 是会话级配置，不是模型恒定**：M3 跨文件 0%~55% 差异
 （6145a051=19%、agent-a652=55%、agent-a17a=0%）——不能写死模型属性。
@@ -137,10 +167,10 @@ derived turn   → agent.turn
 | SV613(b)（连续工具失败） | **Lossy/Partial** | 可用 `is_error` 部分运行（轨迹级 `error_code.is_some()` 逻辑，trajectory.rs:402） |
 | SV614 | **Unavailable** | approval + sandbox 两侧皆缺 |
 
-### SV607/608 的模型修正（评审 P0-4）
+### SV607/608 的模型修正（评审 P0-4，已落地）
 
-`ToolResultObservation` 已有 `error_code: Option<String>`（evidence.rs:489），**缺
-`failed: Option<bool>`**。建议：
+`ToolResultObservation` 已有 `error_code: Option<String>`，本轮**补上 `failed: Option<bool>`**
+（2026-09-01 第一刀，属 `agent-vitals-core` 领域证据层，不动通用 `vitals-core`）：
 
 ```rust
 pub struct ToolResultObservation {
@@ -149,34 +179,40 @@ pub struct ToolResultObservation {
 }
 ```
 
-- `failed` 服务通用失败（is_error → failed=true，provenance=lossy）；
+- `failed` 服务通用失败（is_error → failed=true，provenance=lossy）；**现有 DSH/Codex 适配器
+  一律设 `None`**——它们的失败信息在 `error_code` 里（`exit_code:N`/`error`），不重复造信号；
+  Claude 适配器落地时填 `Some(bool)`。
 - `error_code` 服务拒绝/超时原因级——Claude 无来源时保持 `None`，**绝不伪造一个码**。
+- 兼容桥把 `failed` 原样投影进 `CanonicalEvent.attributes`（与 `error_code` 并列），
+  SV613(b) 的 lossy 路径读得到；core 单测 `tool_result_failed_flag_carries_through_bridge` 钉住。
 
-这属于 `agent-vitals-core` 领域证据层，不动通用 `vitals-core`。
+## 4. Provenance 缺口（评审 P0-5，第一刀已落地）
 
-## 4. Provenance 缺口（评审 P0-5，代码验证属实）
+文档此前要求「is_error 翻译标 lossy、turn 重建标 derived」——此前结构兑现不了，两个缺口
+本轮（2026-09-01 第一刀）都已修复：
 
-文档此前要求「is_error 翻译标 lossy、turn 重建标 derived」——**当前结构兑现不了**：
-
-1. `TimelineEntry<T>`（evidence.rs:554）**没有逐事件 provenance 字段**，兼容桥
-   （canonical_session.rs:97）把事件写成 `Provenance::Measured`——推导 turn、模糊
-   错误类型会冒充原生测量。
-2. `canonical_session.rs:84` 的 `source_type` **硬编码 `"dsh_session"`**——Codex
-   经过这里也得到 DSH provenance。
-
-修正（属 `agent-vitals-core`，不动通用 core）：
+1. **`TimelineEntry<T>` 补 `provenance: Provenance`**（evidence.rs，适配器层类型），兼容桥
+   原样透传。映射是**保真的**：`evidence::Provenance`（`&'static str`，每事件热路省分配）
+   → `vitals_core::provenance::Provenance`（`String`/`Vec<SignalId>`，公开模型）——Derived
+   恒 Derived、Estimated 恒 Estimated，**绝落不进 Measured**。
+2. **`source_type` 改为按 `SessionMeta.host_id` 生成**，不再硬编码 `"dsh_session"`：
+   `dsh_session` / `codex_session` / `claude_code_session`，未登记宿主走 `{host}_session`
+   通用形状，一律不许落回 dsh 名下。
 
 ```rust
 pub struct TimelineEntry<T> {
     pub observation: T,
-    pub provenance: Provenance,   // 新增，桥接时透传
+    pub provenance: Provenance,   // 已加，桥接时透传
     // existing coordinates...
 }
 ```
 
-桥接时 `source_type` 按 `SessionMeta.host_id`（或通用 SourceRef）生成：
-`codex_session` / `dsh_session` / `claude_code_session`。已有测试必须覆盖
-「codex 输入 → 输出 source_type=codex_session，非 dsh_session」。
+回归由三条 core 单测钉住（都过）：
+- `source_type_follows_host_id_not_hardcoded_dsh`——codex 输入 → `codex_session`，非 dsh；
+- `derived_provenance_passes_through_not_as_measured`——Derived 过桥不降级 Measured；
+- `tool_result_failed_flag_carries_through_bridge`——`failed` 随桥进 attributes。
+
+DSH/Codex 现有输入全部 Measured，输出字节不变（golden 差分 15/15 一致，Python↔Rust）。
 
 ## 5. SessionStore 接入面（此前完全缺席）
 
@@ -211,33 +247,57 @@ Tauri Rust backend
 计算保持 host-side（repo 纪律：计算在宿主侧，浏览器只读投影）。若要浏览器侧纯计算，
 须新增**明确的 canonical WASM API**，不是让 JS 再实现一套 Claude parser。
 
-## 7. 工具名规范化（实现设计待定稿）
+## 7. 工具名规范化（设计草案，2026-09-01 定稿）
 
-| Claude 原始值 | canonical name |
-|---|---|
-| `Bash` | `bash` |
-| `Write` | `write` |
-| `Edit` / `MultiEdit` | `edit` |
-| `WebFetch` | `web_fetch` |
+| Claude 原始值 | canonical name | 备注 |
+|---|---|---|
+| `Bash` | `bash` | `args_text` = `input.command`（shell 字符串），与 DSH/Codex 的 bash 处理同一形状 |
+| `Write` | `write` | |
+| `Edit` | `edit` | `MultiEdit` 并入 `edit`——SV611 会把同一语义拆成两个名字识别成不同调用 |
+| `MultiEdit` | `edit` | 同上 |
+| `Read` | `read` | |
+| `Glob` | `glob` | |
+| `Grep` | `grep` | |
+| `WebFetch` | `web_fetch` | |
+| `WebSearch` | `web_search` | |
+| `Task` | `task` | 子代理；**不下降**——子代理活动在独立 session 文件，Task 在本文件里只是一次 tool call |
+| `TodoWrite` | `todo_write` | |
+| `NotebookEdit` | `notebook_edit` | |
 
 - **不做这层映射，SV601–606 不会命中**（现有规则用小写名字，sv601-606 测试为证）。
-- `args_text` 需确定性序列化（JSON key 排序），否则 SV611 把键序不同、语义相同的
-  参数识别成不同调用。参考既有 `canonical_string`（vitals-core/canonical.rs:36）。
+- **`args_text` 确定性序列化**：`tool_use.input` 是 JSON object，按 key 递归排序后压缩
+  序列化（参考 `canonical_string`，vitals-core/canonical.rs:36）——否则 SV611 把键序不同、
+  语义相同的参数识别成不同调用。Bash 例外：直接取 `input.command` 字符串。
+- 规范化发生在**适配器 derive 阶段**（§1.3 的 TrajectoryAssigner 边界），不是 Detector 里；
+  映射表落地随 Claude 适配器（§11 工作项 5）。
 
-## 8. turn 重建状态机（未定义，SV612/613 的 gate）
+## 8. turn 重建状态机（设计草案，2026-09-01）
 
-`parentUuid` 树**不等于** turn。实现设计至少回答：
+`parentUuid` 树**不等于** turn，但 uuid 树只出现在 `user`/`attachment`/`assistant` 三类
+事件上（§2.3），且每个真 root 是 `parentUuid=null` 的 user 事件。八问的草案答案：
 
-1. 如何选择当前有效 leaf path？多 leaf 时选哪个？
-2. abandoned branch 是否排除？
-3. root/orphan/cycle 如何处理？
-4. 普通 human prompt 与携带 `tool_result` 的 user record 如何区分？
-5. assistant 连续消息属于同一 turn 还是多 turn？
-6. 子代理是否独立 scope？
-7. 未结束 turn 如何关闭？
-8. 重建失败时：整个 TurnBoundaries Unavailable，还是仅部分 coverage？
+1. **当前有效 leaf path**：维护「当前 leaf」= 最近一条 user-root 的 uuid 链；新 root
+   （parentUuid=null 的 user）到达即切链。多 leaf 并列时选最近被扩展（max timestamp）的
+   那个；非主干分支一律 Derived。
+2. **abandoned branch 排除**：是。未被后续事件扩展、且已被更新 root 接替的分支，标
+   `isSidechain=true` 不进 turn 边界——SV612 的 turn 分组只认主干。
+3. **root/orphan/cycle**：user 事件 parentUuid=null = 新 turn 根；parentUuid 指向不存在的
+   uuid（截断/清理后的孤儿）→ 归入当前 open turn，无 open turn 时起一个合成 turn（Derived）。
+   append-only JSONL 父恒先于子，cycle 结构性不存在——见到即按孤儿处理，不 panic。
+4. **human prompt vs tool_result user**：看 `message.content`。含 `tool_result` 块的 user 是
+   当前工具循环的续写（**不是**新 turn）；纯文本/image 是新的 human prompt → turn 根。
+5. **assistant 连续消息**：同属一个 turn——turn 内按 tool_use 边界或事件序切 step，不切
+   turn。turn 边界 = 纯文本 user-root 或 EOF。
+6. **子代理**：Task 的 tool_use 是一次调用，子代理活动在独立 session 文件（独立 uuid）——
+   本文件不下降，turn 树里只留一条 tool call。
+7. **未结束 turn**：EOF 兜底 flush——最后一个 open turn 在文件尾关闭，end 坐标 = 最后一条
+   事件 timestamp；时间戳缺失（按 §2.3 不应发生）end=None。
+8. **重建失败**：逐 turn 判。主干链完好的 turn 计 Measured；孤儿/歧义 turn 计 Derived
+   （就近根启发）；整文件无 user-root（截断文件）→ 整个 TurnBoundaries **Unavailable**
+   （沿用 evidence.rs 的 `timeline_is_empty` gate）。**绝不发明不存在的边界。**
 
-**状态机定稿前，SV612/613(a) 只能标 Derived/Partial，不能声称可跑。**
+**草案未实现验证前，SV612/613(a) 仍标 Derived/Partial，不能声称可跑。** 状态机按 §1.3 的
+纪律实现在适配器 derive 阶段（写进 `CanonicalSession.turns`），不挂 TrajectoryAssigner。
 
 ## 9. 成本部分（收紧）
 
@@ -275,13 +335,14 @@ unknown-provider    无法可靠归属 → 不出价
 
 ## 11. 接入工作项（依赖序）
 
-1. **turn 重建状态机设计**（§8 八问定稿）——一切 Derived 判定的前置；
+1. **turn 重建状态机实现**（§8 草案已定，待实现验证）——一切 Derived 判定的前置；
 2. `ClaudeEvidence` 适配器：Claude JSONL → `CanonicalSession`（tool_use/tool_result/
    parentUuid → timeline；turn/step 由 §8 状态机算出）；
-3. `TimelineEntry.provenance` 字段 + 桥透传 + `source_type` 按 host_id 生成（§4，
-   属 agent-vitals-core，需 Codex/DSH 回归验证）；
-4. `ToolResultObservation.failed` 字段 + SV613(b) lossy 路径（§3）；
-5. 工具名规范化表 + `args_text` 确定性序列化（§7）；
+3. ~~`TimelineEntry.provenance` 字段 + 桥透传 + `source_type` 按 host_id 生成~~ **已落地**
+   （2026-09-01 第一刀，core 单测 + golden 差分 15/15 全绿，输出字节不变，见 §4）；
+4. ~~`ToolResultObservation.failed` 字段~~ **字段已落地**（见 §3）；SV613(b) 的 lossy 路径
+   改读 `failed`（Claude 适配器落地时接线）；
+5. 工具名规范化表 + `args_text` 确定性序列化（§7 定稿，落地随适配器）；
 6. pricing.json 补 MiniMax/claude 官方价（业务数据，需价表；§9）；
 7. SessionStore：`claude_code(home)` + source registry 抽取（§5）；
 8. Tauri/workbench 消费（§6 架构，计算 host-side）；
@@ -295,4 +356,5 @@ unknown-provider    无法可靠归属 → 不出价
 4. **thinking 是配置性**：逐请求读 `output_tokens_details.thinking_tokens`；
 5. **`adapters/claude.py` 现只做静态配置证据**（enabledPlugins/skillUsage），会话数据面
    适配器净新增；
-6. **本文件是调研结论**：§7/§8 未定稿前不可直接交给开发照单实现。
+6. **本文件是调研结论 + 设计草案**：§7/§8 已给草案但**未实现验证**，Claude 适配器落地前
+   不可照单实现；§4/§3 的第一刀已落地 agent-vitals-core，回归验证见 §4。
