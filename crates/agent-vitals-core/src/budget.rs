@@ -355,7 +355,11 @@ fn parse_date_days(s: &str) -> Option<i64> {
 /// 裸时间戳（无 offset）按北京时间解释 —— 与 `budget.py::_read_snooze` 的
 /// `dt.replace(tzinfo=_BEIJING)` 同一约定。fraction 部分跳过不解析（比较只需
 /// 到秒；Python 存的都是 isoformat 产物，微秒只影响严格等于边界的亚秒差异）。
-fn parse_iso(s: &str) -> Option<(i64, bool)> {
+///
+/// `pub(crate)`：Claude Code 适配器复用同一套 ISO-8601 解析（Claude 的
+/// `"2026-08-20T14:27:08.827Z"` 带 fraction + Z 后缀，本函数已处理）——不
+/// 复制第四份时间戳解析。
+pub(crate) fn parse_iso(s: &str) -> Option<(i64, bool)> {
     let b = s.as_bytes();
     if b.len() < 19 {
         return None;

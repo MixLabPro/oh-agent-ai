@@ -37,6 +37,8 @@ ALLOWED_PACKAGE_FILES = {
         "skills/security.py", "skills/snapshots.py",
         # agent/：会话行为 + 成本
         "agent/__init__.py", "agent/behavior.py", "agent/budget.py",
+        "agent/canonical_audit.py", "agent/claude_evidence.py",
+        "agent/claude_session_audit.py",
         "agent/codex_cost.py", "agent/codex_evidence.py",
         "agent/codex_session_audit.py", "agent/codex_usage.py",
         "agent/compaction.py", "agent/cost.py", "agent/duration.py",
@@ -48,7 +50,7 @@ ALLOWED_PACKAGE_FILES = {
         "adapters/__init__.py", "adapters/claude.py", "adapters/codex.py",
         "adapters/codex_session.py",
         "adapters/openclaw.py", "adapters/workbuddy.py", "adapters/hermes.py",
-        "adapters/dsh.py",
+        "adapters/dsh.py", "adapters/claude_session.py",
         # templates/
         "templates/calendar.html", "templates/codex_session.html",
     )

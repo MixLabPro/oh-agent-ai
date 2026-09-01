@@ -809,6 +809,28 @@ def _main():
                                  help="Write the audit JSON to FILE; use - for stdout")
     p_codex_session.add_argument("--html", metavar="FILE",
                                  help="Write a self-contained HTML audit report to FILE")
+    # Claude Code 单会话审计：coverage（§13 逐信号）+ SV601–614 findings。五段式
+    # 流水线 locate→shape→extract（adapters/claude_session.py）→ derive→coverage
+    # （agent/claude_evidence.py）→ 组合（agent/claude_session_audit.py）。SV607/608
+    # 的 Unavailable 是 host-capability degradation（§12），在 claude_session_audit
+    # 里 override——Claude 的 tool_result 没有原因码词汇，error_code 结构性恒 None，
+    # 原因级检测器读了也白读，MeasuredZero 是对「结构上读不到原因」撒谎。SV609/610/
+    # 614 不需要 override：approvals/sandbox_modes timeline 恒空，门控已经如实给
+    # Unavailable。`--list` 只是选 id 的前置；缺省 --session = 最新。**没有
+    # --html**——Claude 侧还没有模板，不硬编（与 codex-session 的 --html 不同）。
+    # 与 Rust main.rs 的 ClaudeSession 子命令同一种结构。
+    p_claude_session = sub.add_parser(
+        "claude-session",
+        help="Audit ONE Claude Code session: provenance coverage + SV601-614 "
+             "findings (SV607/608 host-capability Unavailable)")
+    p_claude_session.add_argument("--list", action="store_true",
+                                  help="List all Claude sessions (id/title/model/"
+                                       "cwd/date span) — the id picker")
+    p_claude_session.add_argument("--session", metavar="ID", default=None,
+                                  help="The session_id to audit; default = the "
+                                       "most recent session")
+    p_claude_session.add_argument("--json", metavar="FILE",
+                                  help="Write the audit JSON to FILE; use - for stdout")
     # ──── R2a SessionStore 查询面（§2.5/§3.3）───────────────────
     # 只读：填充 Codex 源（Phase 1 唯一可读源）→ 版本化 DTO + cursor 分页。
     # `--host-kind` 不是 `--host`：后者是扫描期的 global 参数（默认 "all"）。
@@ -1264,6 +1286,58 @@ def _main():
             wrote = True
         if not wrote:
             print(cs._render_audit(out), end="")
+        return
+
+    # Claude Code 单会话审计：coverage（§13 逐信号）+ SV601–614 findings。与 Rust
+    # main.rs 的 ClaudeSession handler 同一种结构：--list 只是选 id 的前置
+    # （id/标题/模型/工作目录/时间跨度）；缺省 --session = 最新（list 排序首项 =
+    # 末行时间戳最晚）；单会话深挖是 --json/纯 JSON 两路，**没有 --html**——Claude
+    # 侧还没有模板，缺省输出就是 pretty JSON（Rust 同款，无 human render）。
+    if getattr(args, "cmd", None) == "claude-session":
+        from agent_vitals import claude_session_audit as clsa
+        if args.list:
+            out = clsa.claude_session_list()
+            if args.json:
+                text = json.dumps(out, ensure_ascii=False, indent=2)
+                if args.json == "-":
+                    print(text)
+                else:
+                    try:
+                        Path(args.json).write_text(text, encoding="utf-8")
+                    except OSError:
+                        print("failed to write %s" % args.json, file=sys.stderr)
+                        sys.exit(2)
+                    print("Wrote %s" % args.json)
+            else:
+                print(clsa._render_list(out), end="")
+            return
+        if args.session is None:
+            lst = clsa.claude_session_list()
+            sessions = lst.get("sessions") or []
+            if not sessions:
+                print("no claude sessions found", file=sys.stderr)
+                sys.exit(2)
+            session_id = sessions[0].get("session_id")
+        else:
+            session_id = args.session
+        out = clsa.claude_session_audit_json(None, session_id)
+        if out is None:
+            print("claude session not found or unreadable: %s" % session_id,
+                  file=sys.stderr)
+            sys.exit(2)
+        text = json.dumps(out, ensure_ascii=False, indent=2)
+        if args.json:
+            if args.json == "-":
+                print(text)
+            else:
+                try:
+                    Path(args.json).write_text(text, encoding="utf-8")
+                except OSError:
+                    print("failed to write %s" % args.json, file=sys.stderr)
+                    sys.exit(2)
+                print("Wrote %s" % args.json)
+        else:
+            print(text)
         return
 
     # ──── R2a sessions handler（镜像 Rust `sessions list`/`sessions read`）────

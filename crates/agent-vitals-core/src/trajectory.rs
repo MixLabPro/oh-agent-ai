@@ -394,12 +394,15 @@ pub fn detect_sv613_legacy(s: &CanonicalSession) -> RuleOutcome {
     }
     flush_error_run(&mut out, &mut err_run, &mut err_anchor, &mut err_last);
 
-    // (b) 连续 tool/result 失败。
+    // (b) 连续 tool/result 失败。失败判据 = 原因码（DSH/Codex）**或** lossy 失败
+    // 标志（Claude：is_error→failed，§3，error_code 恒 None 时该标志是唯一的失败
+    // 证据）。DSH/Codex 的 `failed` 恒 None，`failed == Some(true)` 对它们恒 false，
+    // 整个布尔式退化成原来的 `error_code.is_some()`——golden 字节零漂移。
     let mut fail_run: usize = 0;
     let mut fail_anchor: Option<&TimelineEntry<ToolResultObservation>> = None;
     let mut fail_last: Option<i64> = None; // G2：run 内最后一个事件的 seq
     for e in &s.tool_results.entries {
-        if e.observation.error_code.is_some() {
+        if e.observation.failed == Some(true) || e.observation.error_code.is_some() {
             if fail_run == 0 {
                 fail_anchor = Some(e);
             }

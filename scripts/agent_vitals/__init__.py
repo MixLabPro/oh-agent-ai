@@ -30,6 +30,8 @@ from . import agent, skills  # noqa: E402
 from .agent import (  # noqa: E402
     behavior,
     budget,
+    claude_evidence,
+    claude_session_audit,
     codex_cost,
     codex_evidence,
     codex_session_audit,
@@ -72,8 +74,9 @@ _FLAT_MODULE_NAMES = (
     "analysis", "diff", "discovery", "doctor", "explain", "frontmatter",
     "inventory", "lifecycle", "overlap", "redact", "report", "security",
     "snapshots",
-    "behavior", "budget", "codex_cost", "codex_evidence", "codex_usage",
-    "compaction", "cost", "duration", "plan", "skill", "state", "subagent",
+    "behavior", "budget", "claude_evidence", "codex_cost", "codex_evidence",
+    "codex_usage", "compaction", "cost", "duration", "plan", "skill", "state",
+    "subagent",
     "takeover", "trajectory", "usage", "waste",
 )
 for _name in _FLAT_MODULE_NAMES:
@@ -91,6 +94,7 @@ __all__ = [
     "analysis",
     "behavior",
     "budget",
+    "claude_evidence",
     "codex_cost",
     "codex_evidence",
     "codex_usage",

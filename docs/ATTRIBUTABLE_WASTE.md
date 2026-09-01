@@ -34,6 +34,7 @@ v2 新增第四条,直接来自评审:**分母必须诚实**。用总成本作�
 审计覆盖率      71.4%     ← 护栏,同屏
 估算优化机会    184K tokens ← 展示金额与 token,不进北极星
 待复核异常       3 sessions ← 只展示会话与证据
+单位 token 成本  ¥x.xx / M ← 效率视角,不进分子(§6)
 ```
 
 ---
@@ -173,7 +174,30 @@ bug 后时段成本 / 两个时段总成本
 
 ---
 
-## 6. 诚实性铁律(写进实现,像 `plan.rs` 的 docstring)
+## 6. 单位 token 成本(效率指标,与浪费率互补,不进分子)
+
+用户的第二个直观数字:「这个月花了多少钱、干多少 token 的活」。它与浪费率是两个不同的问题——浪费率问**浪费了多少**,单位成本问**基础单价多贵**;两者相乘 = 每 token 的浪费成本,同屏呈现。
+
+```
+单位 token 成本 = 当月确认成本 ÷ 当月计费口径 token
+```
+
+| 宿主形态 | 分子来源 | pricing_basis |
+|---|---|---|
+| 订阅(Codex / Claude Code 套餐) | 用户填写/确认套餐金额 | **confirmed**(用户确认,从 estimated catalog 升级) |
+| 按量(DSH) | 现有 `priced_day` 月成本 | measured(计价引擎) |
+| 无确认无账单 | — | unavailable(缺列不编列,绝不拿 catalog 价冒充实测) |
+
+**四条纪律:**
+
+1. **订阅金额输入解决 pricing 缺失**——`CLAUDE_CODE_CORPUS.md` 说「要出钱,先要有四族价格表」;用户确认的套餐金额是**实测月花费**,比 catalog 估算更真,且天然覆盖全家族(Claude Code 四模型族一份套餐全包)。
+2. **订阅下省 token ≠ 省套餐钱**(`WINGLET_CAVEMAN_BENCHMARK.md` 论证的镜像):套餐费固定,省 token 让**单位成本下降**——同一套餐干更多活,是**价值指标**不是省钱指标。呈现时必须标注,否则用户看到「浪费率 20%」会误以为「该退订」——错,那是机会成本,不是账单差额。
+3. **分母口径跟随账单**:按宿主账单口径计 token(`token_by_date_model` 的 by_model 总和),四桶 raw 总和可并列展示,但不得同名「单位成本」。月份间对比时:token 结构看占比、钱看单位成本——价格表随 LLMflation 漂移,原始 token 不漂。
+4. **落地路径**:`month.json` 状态层已有月 token 与按量月成本;新增输入位 = **套餐金额**(用户显式提供,`plan.rs` 的 `startup_rate` 模式:没有就 `unavailable`,不编)。
+
+---
+
+## 7. 诚实性铁律(写进实现,像 `plan.rs` 的 docstring)
 
 1. **证据不足 = 不计**。分子只收 `measured`(attribution 可证明)或带稳定复核记录的 `human-confirmed`;其余进「估算机会」「待复核」两块,永远不在分子。
 2. **触发证据缺失 ≠ 零触发**(W4);**首个请求无前缀 ≠ 缓存 bug**(W1);**长尾 ≠ 全浪费**(W3);**影子记录 ≠ 双倍计费**(AccountingShadow)。
@@ -185,11 +209,12 @@ bug 后时段成本 / 两个时段总成本
 
 ---
 
-## 7. 落地状态与动作
+## 8. 落地状态与动作
 
 **已落地(代码,2026-09-01 核实)**:
 
 - SV-COST-01(重复相同工具结果)与 SV-COST-02(失败重试上下文增长):core `waste.rs` ↔ Python `waste.py` 字节级 parity;wasm 导出 `structural_waste`;behavior 报告集成 `waste` + `waste_coverage`(三态门控,同 SV613/614 的 OR 覆盖)。
+- 月 token(`token_by_date_model`)与按量月成本(`priced_day`):`month.json` 状态层,单位成本指标的分母与按量分子已就位。
 
 **未落地(本文定义的需求,按序)**:
 
@@ -198,3 +223,4 @@ bug 后时段成本 / 两个时段总成本
 3. W1 eligibility 实现(按模型族、排除首请求/切换边界、最小请求数)+ 90% 阈值降级为**告警阈值**,按宿主/模型族可配。
 4. W3 人工确认记录结构(`reviewer`/`reviewed_at`/`confirmed_request_ids`),复核结果写入带 revision 的记录,可复现。
 5. W4 exposure count 来源(启动次数)与 `catalog-visible ≠ body loaded` 的展示拆分。
+6. **套餐金额输入位**:订阅宿主每月确认金额(state 层新输入,`startup_rate` 同款「没有就 unavailable」模式)→ 单位 token 成本分子(§6)。

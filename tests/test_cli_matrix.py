@@ -125,6 +125,56 @@ def write_cost_log(base, name="cost.jsonl"):
     return p
 
 
+# ── Claude Code 会话夹具（合成 JSONL，与 Rust claude_session.rs 测试同款构造）─
+# message 是 Anthropic Message 形状：id/model/content/usage；纯文本 user 的
+# content 是字符串，工具续写是块数组。session_id 由文件名兜底（filename-stem）。
+
+
+def claude_rec(typ, uuid, ts, **extra):
+    r = {"type": typ, "uuid": uuid, "timestamp": ts, "cwd": "/repo"}
+    r.update(extra)
+    return r
+
+
+def claude_user_text(uuid, ts, text, model="claude-sonnet-4-5"):
+    return claude_rec("user", uuid, ts,
+                      message={"id": uuid, "model": model, "content": text})
+
+
+def claude_assistant_tool_use(uuid, ts, name, call_id, input_value):
+    return claude_rec("assistant", uuid, ts, message={
+        "id": uuid, "model": "claude-sonnet-4-5",
+        "content": [{"type": "tool_use", "id": call_id, "name": name,
+                     "input": input_value}],
+        "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+
+def claude_user_tool_result(uuid, ts, call_id, is_error=None):
+    block = {"type": "tool_result", "tool_use_id": call_id, "content": "done"}
+    if is_error is not None:
+        block["is_error"] = is_error
+    return claude_rec("user", uuid, ts,
+                      message={"id": uuid, "content": [block]})
+
+
+def claude_ai_title(uuid, ts, title):
+    return claude_rec("ai-title", uuid, ts, aiTitle=title)
+
+
+def claude_jsonl(records):
+    s = "\n".join(json.dumps(r) for r in records)
+    return s + "\n"
+
+
+def write_claude_session_log(base: Path, sid: str, records, slug="p-skill-vitals"):
+    """写一份 Claude 会话到 `base/.claude/projects/<slug>/<sid>.jsonl`。"""
+    d = base / ".claude" / "projects" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / ("%s.jsonl" % sid)
+    p.write_text(claude_jsonl(records), encoding="utf-8")
+    return p
+
+
 def write_dsh_session_log(base: Path, name="session.jsonl"):
     """写一份带触发证据的 DSH 会话日志：目录发布 proj-only/shared-tool，随后
     proj-only 被用户显式 `/<name>` 调用（invoked）、shared-tool 被模型自主选中
@@ -1760,6 +1810,188 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(by_rule["SV603"]["severity"], "critical")
         self.assertEqual(by_rule["SV603"]["call_id"], "item-1d")
         self.assertEqual(by_rule["SV610"]["evidence"], "danger-full-access")
+
+    # ── claude-session（Claude Code 单会话审计：coverage + SV601-614）────────
+    # 夹具是合成 JSONL（Rust claude_session.rs 测试同款构造）。py==rs 逐字节靠
+    # both() 兜底；这里的断言钉语义，防两个实现一起漂。
+
+    def _claude_healthy_home(self):
+        """把验收夹具 `fixtures/claude/healthy.jsonl` 落到临时 home——夹具是
+        §10 验收的单一来源（`fixtures/claude/build_claude_fixture.py` 自校验钉死
+        同一组数字），测试只消费它，不自己再造一份记录（再造一份就漂移了）。"""
+        fixture = ROOT / "fixtures" / "claude" / "healthy.jsonl"
+        records = [json.loads(line) for line in fixture.read_text(encoding="utf-8").splitlines()]
+        write_claude_session_log(
+            self.tmp, "c0ffee00000000000000000000000000", records)
+
+    def test_claude_session_list_differential(self):
+        """`claude-session --list`：全部会话的行摘要，按末行时间戳降序（最新在
+        前）。标题取 ai-title 的 aiTitle；缺席字段 None → 人读视图 `-`。"""
+        write_claude_session_log(
+            self.tmp, "aaa", [claude_user_text("m1", "2026-08-20T10:00:00Z", "早上好"),
+                              claude_ai_title("t1", "2026-08-20T10:05:00Z", "旧会话")],
+            slug="a")
+        write_claude_session_log(
+            self.tmp, "bbb", [claude_user_text("m1", "2026-08-20T11:00:00Z", "晚上好"),
+                              claude_ai_title("t1", "2026-08-20T11:05:00Z", "新会话")],
+            slug="b")
+        code, out, err = self.both("claude-session", "--list", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["host"], "claude-code")
+        sessions = report["sessions"]
+        self.assertEqual([s["session_id"] for s in sessions], ["bbb", "aaa"],
+                         "排序 = 末行时间戳降序（bbb 11:05 最新在前）")
+        self.assertEqual([s["title"] for s in sessions], ["新会话", "旧会话"])
+        self.assertEqual([s["model"] for s in sessions],
+                         ["claude-sonnet-4-5"] * 2)
+        self.assertEqual([s["cwd"] for s in sessions], ["/repo"] * 2)
+        self.assertEqual(sessions[0]["first"], "2026-08-20T11:00:00Z")
+        self.assertEqual(sessions[0]["last"], "2026-08-20T11:05:00Z")
+
+        # 人读视图差分（py==rs，both() 兜底）+ 语义：行宽固定 28。
+        code, out, err = self.both("claude-session", "--list")
+        self.assertEqual(code, 0)
+        self.assertIn("host: claude-code\n", out)
+        self.assertIn("sessions: 2\n", out)
+        self.assertIn("新会话", out)
+
+    def test_claude_session_detail_differential(self):
+        """`claude-session --session <sid>`：健康会话深挖。§10 验收 #4 的三态
+        契约——SV607/608/609/610/614 必须 Unavailable（不得 MeasuredZero），其中
+        SV607/608 的 reason 是 host-capability override、SV609/610/614 是门控的
+        no evidence；可跑规则 SV601-606/611/612/613 空转零命中。SV607/608 的
+        Unavailable 把 rules_unavailable 从 3 推到 5（degrade 后重算）。
+        coverage 与 timeline 同源：2 tool_result、2 tool_use、1 重建 turn。"""
+        self._claude_healthy_home()
+        code, out, err = self.both("claude-session", "--session",
+                                   "c0ffee00000000000000000000000000", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["host"], "claude-code")
+        self.assertEqual(report["session_id"], "c0ffee00000000000000000000000000")
+        self.assertEqual(report["title"], "我的会话")
+        self.assertEqual(report["model"], "claude-sonnet-4-5")
+        self.assertEqual(report["cwd"], "/repo")
+        self.assertTrue(report["file"].endswith("c0ffee00000000000000000000000000.jsonl"))
+        self.assertEqual(report["date_span"]["first"], "2026-08-20T14:27:00Z")
+        self.assertEqual(report["date_span"]["last"], "2026-08-20T14:30:00Z")
+        # 键序是字节一致的一部分，不能重排。
+        self.assertEqual(list(report.keys()),
+                         ["host", "session_id", "title", "model", "cwd", "file",
+                          "date_span", "audit", "coverage", "signals", "attempts",
+                          "notes"])
+        cov = report["coverage"]
+        self.assertEqual(cov["ToolResults"]["measured"], 2)
+        self.assertEqual(cov["ToolCalls"]["measured"], 2)
+        self.assertEqual(cov["TurnBoundaries"]["derived"], 1)
+        self.assertEqual(cov["UserPrompts"]["measured"], 1)
+        self.assertEqual(cov["ApprovalDecisions"]["available"], False)
+        a = report["audit"]
+        self.assertEqual(a["summary"],
+                         {"critical": 0, "warning": 0, "info": 0,
+                          "findings_total": 0, "rules_unavailable": 5})
+        rules = a["rule_outcomes"]
+        for code in ("SV607", "SV608", "SV609", "SV610", "SV614"):
+            self.assertEqual(rules[code]["status"], "unavailable", code)
+        self.assertIn("claude-code host capability", rules["SV607"]["reason"])
+        self.assertIn("claude-code host capability", rules["SV608"]["reason"])
+        self.assertEqual(rules["SV609"]["reason"],
+                         "no evidence for required signal(s) in this session")
+        for code in ("SV601", "SV602", "SV603", "SV604", "SV605", "SV606",
+                     "SV611", "SV612", "SV613"):
+            self.assertEqual(rules[code]["status"], "measured_zero", code)
+        self.assertEqual(report["attempts"], [])
+        # 三条 notes 的有条件触发：TurnBoundaries>0 → turn 重建说明；ApprovalDecisions
+        # ==0（结构性）→ 审批说明。SkillInvocations=0 → skill 说明不出现。
+        self.assertEqual(report["notes"], [
+            "Turn boundaries are rebuilt from the message tree (pure-text user "
+            "roots), not native turn events; SV612/613(a) are Derived/Partial "
+            "and rebuild failure degrades to Unavailable, never fabricated "
+            "boundaries.",
+            "ApprovalDecisions is unavailable in this slice: only "
+            "`permission-mode` snapshots are persisted, and per-decision "
+            "recovery needs marker strings in tool-result text "
+            "(RUNTIME_EVIDENCE_CONTRACT §14.5), a follow-up.",
+        ])
+        # 信号序 = ALL_SIGNALS 序（Signals 数组的顺序是输出契约的一部分）。
+        # 健康夹具无 system 记录 → Compaction/Hooks 不出现；无 sidechain → 无
+        # SubagentSpawns。Usage>0 → UsageAggregate derived 存在。
+        self.assertEqual(report["signals"],
+                         ["ToolCalls", "ToolResults", "TurnBoundaries",
+                          "StepBoundaries", "Usage", "UsageAggregate",
+                          "FileMutations", "UserPrompts"])
+
+    def test_claude_session_detail_defaults_to_latest(self):
+        """缺省 --session = 最新（末行时间戳最晚）→ 与显式指定一致。"""
+        self._claude_healthy_home()
+        write_claude_session_log(
+            self.tmp, "deadbeef", [claude_user_text("m1", "2026-08-21T09:00:00Z", "晚些的会话")],
+            slug="b")
+        code, out, err = self.both("claude-session", "--json", "-")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["session_id"], "deadbeef")
+
+    def test_claude_session_three_failed_results_fires_sv613(self):
+        """is_error → failed=Some(true) 的 lossy 路径——3 连败命中 SV613(b)。
+        error_code 恒 None（§3 结构性缺），这条 finding 只能来自 failed。"""
+        records = [claude_user_text("m1", "2026-08-20T14:27:00Z", "跑测试")]
+        for i in range(3):
+            records.append(claude_assistant_tool_use(
+                "m%d" % (2 * i + 2), "2026-08-20T14:27:0%dZ" % (1 + i * 2),
+                "Bash", "call%d" % i, {"command": "run test %d" % i}))
+            records.append(claude_user_tool_result(
+                "m%d" % (2 * i + 3), "2026-08-20T14:27:0%dZ" % (2 + i * 2),
+                "call%d" % i, is_error=True))
+        write_claude_session_log(self.tmp, "sv613", records)
+        code, out, err = self.both("claude-session", "--session", "sv613",
+                                   "--json", "-")
+        self.assertEqual(code, 0)
+        a = json.loads(out)["audit"]
+        self.assertEqual(a["rule_outcomes"]["SV613"]["status"], "findings")
+        self.assertEqual(a["rule_outcomes"]["SV613"]["count"], 1)
+        self.assertEqual(a["summary"]["findings_total"], 1)
+        self.assertEqual(a["summary"]["warning"], 1)
+        # SV613 因有 tool_results 证据而可跑（OR 门控）；SV607/608 仍 override。
+        self.assertEqual(a["summary"]["rules_unavailable"], 5)
+
+    def test_claude_session_missing_session_is_tool_error(self):
+        """不存在的 session_id → 两个实现都以 2 退出（工具错误），stderr 逐字节
+        一致。不能走 both()——它把退出码 2 判成崩溃。"""
+        self._claude_healthy_home()
+        got = []
+        for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
+            r = subprocess.run(
+                cmd + ["claude-session", "--session", "no-such-session",
+                       "--json", "-"],
+                cwd=str(self.tmp / "workdir"),
+                env=isolated_home_env(self.tmp),
+                capture_output=True, text=True)
+            got.append((r.returncode, r.stdout, r.stderr))
+        self.assertEqual(got[0][0], got[1][0], "退出码不一致：py=%d rs=%d" % (got[0][0], got[1][0]))
+        self.assertEqual(got[0][0], 2, "不存在的 session 应当是工具错误（2）")
+        self.assertEqual(got[0][1], got[1][1], "stdout 不一致")
+        self.assertEqual(got[0][2], got[1][2], "stderr 不一致")
+        self.assertIn("not found or unreadable", got[0][2])
+
+    def test_claude_session_degraded_file_is_tool_error(self):
+        """文件存在但坏（不可读）→ 审计 None → 2 退出：绝不能报「读了但 0 条」的
+        空审计。两条实现一致。"""
+        write_claude_session_log(self.tmp, "bad", [])
+        (self.tmp / ".claude" / "projects" / "p-skill-vitals" / "bad.jsonl").write_text(
+            "{not json\n", encoding="utf-8")
+        got = []
+        for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
+            r = subprocess.run(
+                cmd + ["claude-session", "--session", "bad", "--json", "-"],
+                cwd=str(self.tmp / "workdir"),
+                env=isolated_home_env(self.tmp),
+                capture_output=True, text=True)
+            got.append((r.returncode, r.stdout, r.stderr))
+        self.assertEqual(got[0][0], got[1][0], "退出码不一致：py=%d rs=%d" % (got[0][0], got[1][0]))
+        self.assertEqual(got[0][0], 2, "degraded 会话应当是工具错误（2）")
+        self.assertEqual(got[0][1], got[1][1], "stdout 不一致")
+        self.assertEqual(got[0][2], got[1][2], "stderr 不一致")
 
     def test_calendar_codex_blob_views_match_rust_reports(self):
         """统一看板内联的 codex 3 视图 = Rust `codex-cost --json` 三个过滤的

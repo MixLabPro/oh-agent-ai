@@ -194,7 +194,12 @@ impl Detector for Sv613Detector {
             if event.kind != KIND_TOOL_RESULT {
                 continue;
             }
-            let has_error = !attr(&event.attributes, "error_code").is_null();
+            // 失败判据 = 原因码（DSH/Codex）**或** lossy 失败标志（Claude：
+            // is_error→failed，error_code 恒 None 时该标志是唯一失败证据）。
+            // DSH/Codex 的 failed 恒 None，布尔式退化成原 error_code 判定，
+            // golden 字节零漂移。
+            let has_error = attr(&event.attributes, "failed").as_bool() == Some(true)
+                || !attr(&event.attributes, "error_code").is_null();
             if has_error {
                 if fail_run == 0 {
                     fail_anchor = Some(event);

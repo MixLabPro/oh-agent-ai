@@ -31,6 +31,8 @@ evidence 把 `canonical`（§12 规定不持有任何宿主专属 payload）和�
 
 import re
 
+from agent_vitals.agent import canonical_audit
+
 # 19 个 Signal 的声明序——与 Rust `codex_evidence.rs::ALL_SIGNALS` 同名同序。
 # `signals` 数组 / `coverage` 字典的输出顺序都靠这份显式表对齐，不靠 Python
 # 的任意 set 迭代序。
@@ -751,210 +753,19 @@ def _populate_codex_timelines(items):
 # Audit is deliberately evaluated from the canonical timelines above, not from
 # rollout records again.  That keeps the host adapter responsible for vocabulary
 # translation and gives the Python CLI the same rule boundary as Rust core.
-_DESTRUCTIVE_RE = re.compile(r"(?i)\brm\s+-[a-z]*r[a-z]*f[a-z]*\b|\brm\s+-[a-z]*f[a-z]*r[a-z]*\b|\bdd\b[^\n]{0,60}\bof=/dev/|\bmkfs\b")
-_PRIVILEGE_RE = re.compile(r"(?i)\bsudo\b|\bsu\b|\bchmod\s+[^\n]{0,10}777\b|\bchown\s+-R\b")
-_REMOTE_EXEC_RE = re.compile(r"(?i)(curl|wget)[^\n|]{0,200}\|\s*(ba)?sh|\bbash\s*<\s*\(\s*(curl|wget)\b")
-_SENSITIVE_PATH_RE = re.compile(r"(?i)~/\.ssh/authorized_keys|/etc/|~/\.bashrc")
-_ABS_PATH_RE = re.compile(r"/(?:[A-Za-z0-9_.+-]+/)+[A-Za-z0-9_.+-]*")
-_INTERNAL_IP_URL_RE = re.compile(r"(?i)https?://\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?")
-_DENIED_CODES = frozenset(("FS_SANDBOX_DENIED", "ABORTED", "ABORTED_BEFORE_DISPATCH", "UNKNOWN_TOOL", "SANDBOX_UNAVAILABLE"))
-
-
-def _audit_evidence(text):
-    """Same evidence normalization as core `behavior::normalize`."""
-    return text.replace("\r", " ").replace("\n", " ")[:200]
-
-
-def _audit_finding(rule, severity, category, entry, evidence, tool_name=None,
-                   run_end_seq=None, use_turn_end=False):
-    """Build the wire finding shape from a canonical timeline entry."""
-    obs = entry["observation"]
-    return {
-        "rule": rule, "severity": severity, "category": category,
-        "tool_name": tool_name, "evidence": _audit_evidence(evidence),
-        "seq": obs.get("end_seq") if use_turn_end else entry.get("seq"),
-        "time": obs.get("end_time") if use_turn_end else entry.get("time"),
-        "turn": entry.get("turn"), "step": entry.get("step"),
-        "call_id": entry.get("call_id"), "evidence_recency": "log",
-        "run_end_seq": run_end_seq,
-    }
+# §6.5 regex 与 `_audit_evidence`/`_audit_finding`/求值器本体全部移入共享模块
+# `canonical_audit.py`——Codex 与 Claude 是同一批 core dispatcher 的两个宿主镜像，
+# 求值器是宿主无关的，只允许一份 Python 拷贝（差分测试把关不漂移）。
 
 
 def codex_audit_projection(canonical):
     """Evaluate SV601–SV614 on canonical Codex timelines.
 
-    This is a Python mirror of Rust's canonical dispatchers, rather than a
-    second rollout parser.  An empty required timeline is `unavailable`; a
-    populated timeline with no match is `measured_zero`.
+    Delegates to the shared host-neutral evaluator in `canonical_audit.py`
+    (the Python mirror of Rust's canonical dispatchers).  Codex has no
+    host-specific degradation to apply here.
     """
-    # CanonicalSession serializes timelines as top-level fields (the internal
-    # Python representation mirrors that layout too).
-    tls = canonical
-    calls = tls["tool_calls"]["entries"]
-    results = tls["tool_results"]["entries"]
-    approvals = tls["approvals"]["entries"]
-    sandbox = tls["sandbox_modes"]["entries"]
-    turns = tls["turns"]["entries"]
-    root = (canonical["meta"].get("workspace_roots") or [None])[0]
-    root = root.rstrip("/") if isinstance(root, str) and root else None
-    families = []
-
-    def match_calls(code, severity, category, regex, names):
-        findings = []
-        for e in calls:
-            obs = e["observation"]
-            if obs.get("name") not in names:
-                continue
-            m = regex.search(obs.get("args_text", ""))
-            if m:
-                findings.append(_audit_finding(code, severity, category, e, m.group(0), obs["name"]))
-        return findings
-
-    families.extend([
-        ("SV601", ["ToolCalls"], match_calls("SV601", "critical", "shell", _DESTRUCTIVE_RE, ("bash",))),
-        ("SV602", ["ToolCalls"], match_calls("SV602", "warning", "shell", _PRIVILEGE_RE, ("bash",))),
-        ("SV603", ["ToolCalls"], match_calls("SV603", "critical", "shell", _REMOTE_EXEC_RE, ("bash",))),
-        ("SV604", ["ToolCalls"], match_calls("SV604", "critical", "sensitive-fs", _SENSITIVE_PATH_RE, ("write", "edit"))),
-    ])
-    fs605, fs606, fs607, fs608, fs609, fs610 = [], [], [], [], [], []
-    for e in calls:
-        obs, text = e["observation"], e["observation"].get("args_text", "")
-        if obs.get("name") in ("write", "edit") and not _SENSITIVE_PATH_RE.search(text):
-            m = _ABS_PATH_RE.search(text)
-            if m and not (root and (m.group(0) == root or m.group(0).startswith(root + "/"))):
-                fs605.append(_audit_finding("SV605", "warning", "sensitive-fs", e, m.group(0), obs["name"]))
-        if obs.get("name") == "web_fetch":
-            m = _INTERNAL_IP_URL_RE.search(text)
-            if m:
-                fs606.append(_audit_finding("SV606", "warning", "network", e, m.group(0), "web_fetch"))
-    for e in results:
-        code = e["observation"].get("error_code")
-        if code in _DENIED_CODES:
-            fs607.append(_audit_finding("SV607", "warning", "approval", e, code))
-        if code == "TOOL_TIMEOUT":
-            fs608.append(_audit_finding("SV608", "info", "approval", e, code))
-    for e in approvals:
-        asked = e["observation"].get("asked")
-        if asked:
-            fs609.append(_audit_finding("SV609", "info", "approval", e,
-                                         asked.get("reason") or asked.get("tool_name") or "",
-                                         asked.get("tool_name")))
-        decided = e["observation"].get("decided")
-        if decided and decided.get("outcome") == "allowed-once":
-            fs610.append(_audit_finding("SV610", "warning", "approval", e, "allowed-once"))
-    for e in sandbox:
-        if e["observation"].get("mode") == "danger-full-access":
-            fs610.append(_audit_finding("SV610", "warning", "approval", e, "danger-full-access"))
-    families.extend((("SV605", ["ToolCalls"], fs605), ("SV606", ["ToolCalls"], fs606),
-                     ("SV607", ["ToolResults"], fs607), ("SV608", ["ToolResults"], fs608),
-                     ("SV609", ["ApprovalDecisions"], fs609), ("SV610", ["SandboxModes"], fs610)))
-
-    # Trajectory family.  Codex currently has no approval lifecycle, yet the
-    # evaluation is retained here so a future adapter fills it without a new rule path.
-    fs611, fs612, fs613, fs614 = [], [], [], []
-    prev, count, anchor = None, 0, None
-    for e in calls:
-        obs = e["observation"]; sig = (obs.get("name", ""), obs.get("args_text", ""))
-        if sig == prev: count += 1
-        else: prev, count, anchor = sig, 1, e
-        if count >= 3 and count % 3 == 0:
-            fs611.append(_audit_finding("SV611", "warning", "trajectory", anchor,
-                                        "%s 连续重复 %d 次" % (anchor["observation"]["name"], count),
-                                        anchor["observation"]["name"], e.get("seq")))
-    prev_sig, loop_count = None, 0
-    for e in turns:
-        sig = e["observation"].get("sig") or []
-        if not sig: continue
-        if sig == prev_sig: loop_count += 1
-        else: prev_sig, loop_count = sig, 1
-        if loop_count == 2:
-            fs612.append(_audit_finding("SV612", "warning", "trajectory", e,
-                                        "死循环: turn %s 与上一 turn 动作序列相同" % e["observation"].get("turn"),
-                                        run_end_seq=e["observation"].get("last_seq")))
-    def flush_turn_run(run, anchor, last):
-        if len(run) >= 2:
-            code = anchor["observation"].get("end_error_code") or ""
-            suffix = "（%s）" % code if code else ""
-            fs613.append(_audit_finding("SV613", "warning", "trajectory", anchor,
-                "进度停滞: 连续 %d 个 turn 以 error 结束%s" % (len(run), suffix),
-                run_end_seq=last, use_turn_end=True))
-    run, anchor, last = [], None, None
-    for e in turns:
-        obs = e["observation"]
-        if obs.get("end_seq") is None: continue
-        if obs.get("end_reason_kind") == "error":
-            if not run: anchor = e
-            run.append(e); last = obs.get("end_seq")
-        else:
-            flush_turn_run(run, anchor, last); run, anchor, last = [], None, None
-    flush_turn_run(run, anchor, last)
-    run, anchor, last = [], None, None
-    def flush_fail_run():
-        if len(run) >= 3:
-            fs613.append(_audit_finding("SV613", "warning", "trajectory", anchor,
-                "进度停滞: 连续 %d 个工具失败（首个 %s）" % (len(run), anchor["observation"].get("error_code") or ""),
-                run_end_seq=last))
-    for e in results:
-        if e["observation"].get("error_code") is not None:
-            if not run: anchor = e
-            run.append(e); last = e.get("seq")
-        else:
-            flush_fail_run(); run, anchor, last = [], None, None
-    flush_fail_run()
-    by_call = {}
-    for e in approvals:
-        if e["observation"].get("asked") and e.get("call_id"):
-            by_call.setdefault(e["call_id"], []).append(e)
-    for call_id in sorted(by_call):
-        grouped = by_call[call_id]
-        if len(grouped) >= 3:
-            fs614.append(_audit_finding("SV614", "warning", "approval", grouped[0],
-                "权限异常: 同一调用 %s 请求审批 %d 次" % (call_id, len(grouped))))
-    rejected, anchor = 0, None
-    for e in approvals:
-        decided = e["observation"].get("decided")
-        if not decided: continue
-        if decided.get("outcome") == "rejected":
-            if rejected == 0: anchor = e
-            rejected += 1
-            if rejected >= 3 and rejected % 3 == 0:
-                fs614.append(_audit_finding("SV614", "warning", "approval", anchor,
-                                            "权限异常: 连续 %d 次审批被拒" % rejected))
-        else: rejected, anchor = 0, None
-    danger = [e for e in sandbox if e["observation"].get("mode") == "danger-full-access"]
-    if len(danger) >= 2:
-        fs614.append(_audit_finding("SV614", "warning", "approval", danger[0],
-                                    "权限异常: 危险模式 danger-full-access 授予 %d 次" % len(danger)))
-    families.extend((("SV611", ["ToolCalls"], fs611), ("SV612", ["TurnBoundaries"], fs612),
-                     ("SV613", ["TurnBoundaries", "ToolResults"], fs613),
-                     ("SV614", ["ApprovalDecisions", "SandboxModes"], fs614)))
-
-    timeline_for = {"ToolCalls": calls, "ToolResults": results, "TurnBoundaries": turns,
-                    "ApprovalDecisions": approvals, "SandboxModes": sandbox}
-    outcomes, findings = {}, []
-    for code, requires, matched in families:
-        missing = [s for s in requires if not timeline_for[s]]
-        unavailable = len(missing) == len(requires) if code in ("SV613", "SV614") else bool(missing)
-        if unavailable:
-            outcomes[code] = {"status": "unavailable", "missing": missing,
-                              "reason": "no evidence for required signal(s) in this session"}
-        elif matched:
-            outcomes[code] = {"status": "findings", "count": len(matched)}
-            findings.extend(matched)
-        else:
-            outcomes[code] = {"status": "measured_zero"}
-    # family ① retains event order; trajectory is rule order after it.
-    first, tail = findings[:], []
-    family1 = [f for f in first if f["rule"] <= "SV610"]
-    trajectory = [f for f in first if f["rule"] > "SV610"]
-    family1.sort(key=lambda f: (f["seq"] is None, f["seq"] if f["seq"] is not None else 2**63))
-    findings = family1 + trajectory
-    summary = {"critical": sum(f["severity"] == "critical" for f in findings),
-               "warning": sum(f["severity"] == "warning" for f in findings),
-               "info": sum(f["severity"] == "info" for f in findings),
-               "findings_total": len(findings),
-               "rules_unavailable": sum(v["status"] == "unavailable" for v in outcomes.values())}
-    return {"summary": summary, "findings": findings, "rule_outcomes": outcomes}
+    return canonical_audit.audit_projection(canonical)
 
 
 def build_codex_evidence(items, session_id, title, history_mode, cli_version,

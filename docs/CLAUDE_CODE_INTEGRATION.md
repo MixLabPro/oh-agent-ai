@@ -335,18 +335,27 @@ unknown-provider    无法可靠归属 → 不出价
 
 ## 11. 接入工作项（依赖序）
 
-1. **turn 重建状态机实现**（§8 草案已定，待实现验证）——一切 Derived 判定的前置；
-2. `ClaudeEvidence` 适配器：Claude JSONL → `CanonicalSession`（tool_use/tool_result/
-   parentUuid → timeline；turn/step 由 §8 状态机算出）；
+1. ~~**turn 重建状态机实现**（§8 草案已定，待实现验证）——一切 Derived 判定的前置~~ **已落地**
+   （`claude_code_evidence.rs` / `claude_evidence.py`，判据是内容不是 `parentUuid`，
+   `is_error_three_state_maps_to_failed_with_honest_provenance` 等 core 单测钉住）；
+2. ~~`ClaudeEvidence` 适配器：Claude JSONL → `CanonicalSession`（tool_use/tool_result/
+   parentUuid → timeline；turn/step 由 §8 状态机算出）~~ **已落地**（core `claude_code_evidence.rs`
+   + binary `claude_session.rs` + Python 镜像 `adapters/claude_session.py` /
+   `agent/claude_evidence.py` / `agent/claude_session_audit.py`，`claude-session` CLI）；
 3. ~~`TimelineEntry.provenance` 字段 + 桥透传 + `source_type` 按 host_id 生成~~ **已落地**
    （2026-09-01 第一刀，core 单测 + golden 差分 15/15 全绿，输出字节不变，见 §4）；
 4. ~~`ToolResultObservation.failed` 字段~~ **字段已落地**（见 §3）；SV613(b) 的 lossy 路径
    改读 `failed`（Claude 适配器落地时接线）；
-5. 工具名规范化表 + `args_text` 确定性序列化（§7 定稿，落地随适配器）；
+5. ~~工具名规范化表 + `args_text` 确定性序列化（§7 定稿，落地随适配器）~~ **已落地**
+   （`normalize_tool_name` / `canonical_string`，`args_text_is_deterministic_regardless_of_key_order`
+   等 core 单测钉住）；
 6. pricing.json 补 MiniMax/claude 官方价（业务数据，需价表；§9）；
 7. SessionStore：`claude_code(home)` + source registry 抽取（§5）；
 8. Tauri/workbench 消费（§6 架构，计算 host-side）；
-9. 验收 10 条 + fixtures 入库。
+9. ~~验收 10 条 + fixtures 入库~~ **已落地**（`fixtures/claude/healthy.jsonl` +
+   `build_claude_fixture.py`（自校验钉死 §10 验收 #4 数字）+ `tests/test_cli_matrix.py`
+   `test_claude_session_*` 六条差分，py==rs 逐字节；证据层验收 #1–6 已覆盖，#7–10 属
+   SessionStore/Tauri/cost 后续阶段）。
 
 ## 12. 诚实性注记
 

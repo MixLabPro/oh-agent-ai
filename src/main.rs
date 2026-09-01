@@ -436,6 +436,22 @@ enum Cmd {
         #[arg(long = "html")]
         html: Option<PathBuf>,
     },
+    /// Audit a Claude Code session (`~/.claude/projects/**/*.jsonl`) into a
+    /// CanonicalSession with §13 coverage + SV601–614 findings. Claude's tool
+    /// results carry no reason codes, so SV607/608 degrade to Unavailable
+    /// (host capability, §12); SV609/610/614 are Unavailable via the empty
+    /// approval/sandbox timelines. Stateless single call; `--list` enumerates.
+    ClaudeSession {
+        /// List all Claude sessions: id/title/model/cwd/date span
+        #[arg(long)]
+        list: bool,
+        /// The session_id to audit; default = the most recent session
+        #[arg(long)]
+        session: Option<String>,
+        /// Write the audit JSON to FILE; use - for stdout
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+    },
     /// Inspect the spend budget alert (thresholds + current alert level).
     /// R1b: read path only (`show`); write actions (`set`/`enable`/`disable`/
     /// `snooze`/`unsnooze`) land with R1c's Rust state-writer, so this subcommand
@@ -1448,6 +1464,73 @@ fn main() {
         }
         if !wrote {
             print!("{}", agent::codex_session_audit::render_codex_session(&out));
+        }
+        return;
+    }
+
+    // Claude Code 会话审计。与 codex-session 同款 home 解析与缺省 --session =
+    // 最新；SV607/608 的 Unavailable 覆盖在 claude_session.rs（host-capability
+    // degradation，§12）。
+    if let Some(Cmd::ClaudeSession { list, session, rows_json }) = &args.cmd {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        let home_path = Path::new(&home);
+        if *list {
+            let out = agent::claude_session::claude_session_list(home_path);
+            if let Some(path) = rows_json {
+                let text = serde_json::to_string_pretty(&out).unwrap_or_default();
+                if path == &PathBuf::from("-") {
+                    println!("{text}");
+                } else if std::fs::write(path, &text).is_err() {
+                    eprintln!("failed to write {}", path.display());
+                    std::process::exit(2);
+                } else {
+                    println!("Wrote {}", path.display());
+                }
+            } else {
+                print!("{}", agent::claude_session::render_claude_session_list(&out));
+            }
+            return;
+        }
+        // 缺省 --session = 最新（list 排序首项 = 末行时间戳最晚）。
+        let session_id = match session {
+            Some(s) => s.clone(),
+            None => {
+                let list = agent::claude_session::claude_session_list(home_path);
+                let first = list
+                    .get("sessions")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.get("session_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                match first {
+                    Some(s) => s,
+                    None => {
+                        eprintln!("no claude sessions found");
+                        std::process::exit(2);
+                    }
+                }
+            }
+        };
+        let Some(out) = agent::claude_session::claude_session_audit_json(home_path, &session_id)
+        else {
+            eprintln!("claude session not found or unreadable: {session_id}");
+            std::process::exit(2);
+        };
+        let text = serde_json::to_string_pretty(&out).unwrap_or_default();
+        if let Some(path) = rows_json {
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}", path.display());
+            }
+        } else {
+            println!("{text}");
         }
         return;
     }
