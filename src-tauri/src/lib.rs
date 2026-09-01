@@ -293,18 +293,22 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
     let budget = ov.budget.monthly_cny.unwrap_or(ov.budget_monthly_cny);
     let month_text = format!("本月成本：{} / {}", fmt_money(month_total), fmt_money(budget));
     let budget_text = budget_status_text_at(ov, now_secs);
-    let today_item = MenuItem::with_id(app, "today", today_text, false, None::<&str>)?;
-    let month_item = MenuItem::with_id(app, "month", month_text, false, None::<&str>)?;
-    let budget_item = MenuItem::with_id(app, "budget", budget_text, false, None::<&str>)?;
+    // 信息行一律 enabled=true：macOS 对 disabled 菜单项强制灰色渲染，作为常驻
+    // 信息几乎不可读；enabled 后文字是系统默认黑。代价是悬停高亮 + 点击会触发
+    // MenuEvent——handler 的 `_ => {}` 兜底这些 id，点击什么也不做，只有菜单
+    // 关闭。黑字可读 > 不可点态的视觉暗示，值得。
+    let today_item = MenuItem::with_id(app, "today", today_text, true, None::<&str>)?;
+    let month_item = MenuItem::with_id(app, "month", month_text, true, None::<&str>)?;
+    let budget_item = MenuItem::with_id(app, "budget", budget_text, true, None::<&str>)?;
     let mut builder = MenuBuilder::new(app).item(&today_item);
     // 日预算：紧跟今日成本，回答"今天这些钱占日额度多少"。缺 alert.json 时整条
     // 不显示——预算行本身已经说了「等预算数据」，不用再空一行。
     if let Some(t) = daily_budget_text(ov, now_secs) {
-        builder = builder.item(&MenuItem::with_id(app, "daily", t, false, None::<&str>)?);
+        builder = builder.item(&MenuItem::with_id(app, "daily", t, true, None::<&str>)?);
     }
     builder = builder.item(&month_item);
     if let Some(t) = recent_session_text(ov) {
-        builder = builder.item(&MenuItem::with_id(app, "recent", t, false, None::<&str>)?);
+        builder = builder.item(&MenuItem::with_id(app, "recent", t, true, None::<&str>)?);
     }
     builder = builder.item(&budget_item);
     // 同步状态常驻（成功也显示）——托盘是主入口，"数字是什么时候的"必须在这里
@@ -313,7 +317,7 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
         app,
         "sync",
         sync_line_text(&ov.sync),
-        false,
+        true,
         None::<&str>,
     )?);
     // 工作台主窗口入口（任务 #5）：独立可缩放窗口，五页 总览/日历/会话/Findings/
