@@ -573,7 +573,11 @@ body {
 }
 
 #tab-findings .sess-table tbody tr {
-  cursor: default;
+  cursor: pointer;
+}
+
+#tab-findings .sess-table tbody tr:hover {
+  background: var(--panel);
 }
 
 /* ---------- 数据源 ---------- */
@@ -674,4 +678,44 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---------- 单会话报告分区（kv 键值行 + 折叠 raw） ---------- */
+.kv-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--panel);
+  font-size: 12px;
+}
+
+.kv-label {
+  color: var(--muted);
+  flex-shrink: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kv-value {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  word-break: break-all;
+}
+
+.detail-raw-wrap summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 4px 0;
+  user-select: none;
+}
+
+.row-chevron {
+  color: var(--muted);
+  margin-left: 6px;
+  font-weight: 600;
 }

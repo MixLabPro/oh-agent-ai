@@ -445,7 +445,7 @@ function renderSessions() {
   const more = document.getElementById("sess-more");
   body.innerHTML = "";
 
-  count.textContent = sessState.total != null ? "共 " + sessState.total + " 个会话" : "";
+  count.textContent = sessState.total != null ? "共 " + sessState.total + " 个会话 · 点任意行看报告" : "";
   if (sessState.items.length === 0) {
     // error 时隐藏空态：横幅已经说明了数据源问题，不要再摆「暂无会话」冒充真空。
     empty.hidden = sessState.error;
@@ -455,7 +455,13 @@ function renderSessions() {
   empty.hidden = true;
   for (const s of sessState.items) {
     const tr = document.createElement("tr");
-    tr.appendChild(td(titleText(s)));
+    const titleCell = document.createElement("td");
+    titleCell.textContent = titleText(s);
+    // 行尾 chevron：把「这行能点」写进视觉，不用悬停才发现（原来没有任何提示）。
+    const chev = el("span", "row-chevron");
+    chev.textContent = "›";
+    titleCell.appendChild(chev);
+    tr.appendChild(titleCell);
     tr.appendChild(td(s.host_kind || "—"));
     tr.appendChild(td(s.model || "—"));
     const span = s.date_span;
@@ -510,22 +516,24 @@ function renderDetailSummary(s) {
   const cards = el("div", "detail-cards");
   cards.appendChild(detailCard("标题", titleText(s)));
   cards.appendChild(detailCard("模型", s.model || "—"));
+  // 从 findings 跳过来时 s 只有 session_key/title/model/host_kind，date_span 等
+  // 字段缺场——逐个判空，不拿 undefined 当字符串拼。成本/Token/Findings 同理。
   cards.appendChild(detailCard("宿主 / 日期",
-    s.host_kind + " · " + (s.date_span && s.date_span.first ? s.date_span.first : "—")));
+    (s.host_kind || "—") + " · " + (s.date_span && s.date_span.first ? s.date_span.first.slice(0, 10) : "—")));
   cards.appendChild(detailCard("成本(USD)", fmtUSD(s.cost_usd)));
   cards.appendChild(detailCard("Tokens", fmtTokens(s.tokens_total)));
   cards.appendChild(detailCard("Findings", s.findings_total != null ? String(s.findings_total) : "—"));
   body.appendChild(cards);
 
-  const raw = el("div", "detail-section");
-  const title = el("div", "panel-title");
-  title.textContent = "完整审计报告";
-  raw.appendChild(title);
-  const pre = el("pre", "detail-raw");
-  pre.textContent = "读取中…";
-  raw.appendChild(pre);
-  body.appendChild(raw);
-  body.querySelector(".detail-raw").id = "sess-detail-raw";
+  const loading = el("div", "detail-section");
+  loading.id = "sess-detail-loading";
+  const lt = el("div", "panel-title");
+  lt.textContent = "完整审计报告";
+  loading.appendChild(lt);
+  const p = el("div", "muted");
+  p.textContent = "读取中…";
+  loading.appendChild(p);
+  body.appendChild(loading);
 }
 
 function detailCard(label, value) {
@@ -545,16 +553,330 @@ function el(tag, cls) {
   return e;
 }
 
+// ---------- 单会话报告分区渲染 ----------
+//
+// 之前这里把整份 envelope `JSON.stringify` 成一个 <pre>——一个 DSH 会话实测
+// 286KB，用户点进去看到的是一堵文本墙，等于没有报告。现在按宿主拆分成分区：
+// 两份宿主的 session payload 形状几乎不相交（DSH：cost/context/waste/compaction/
+// duration/subagents/rule_outcomes/*_coverage；Codex：audit/cost_report/coverage/
+// quota_trajectory/permission_transitions/turn_ends/effort/notes/…），所以
+// renderCodexSections / renderDshSections 各自认自己的键，认不到就整段不渲染，
+// 不拿空壳冒充「无数据」。raw JSON 降级成 <details> 默认折叠，留在最底供排查。
+
+function detailSection(title) {
+  const sec = el("div", "detail-section");
+  const t = el("div", "panel-title");
+  t.textContent = title;
+  sec.appendChild(t);
+  return sec;
+}
+
+// 一行「标签 + 值」：标签走 muted，值靠右 tabular-nums。用于成本/上下文这类
+// 数字键值，不用为每个小维度单造一种结构。
+function kvRow(label, value, title) {
+  const row = el("div", "kv-row");
+  const l = el("span", "kv-label");
+  l.textContent = label;
+  row.appendChild(l);
+  const v = el("span", "kv-value");
+  v.textContent = value;
+  if (title) v.title = title;
+  row.appendChild(v);
+  return row;
+}
+
+function sevBadge(severity) {
+  const b = el("span", "sev " + (severity || "info"));
+  b.textContent = severity || "info";
+  return b;
+}
+
+// findings 在两个宿主里位置不同、形状略异，但都是 {rule,severity,evidence,…}。
+// 取 evidence 当展示文本（Codex 无 where/title），rule 当标签，其余进 title 悬停。
+function findingsSection(session) {
+  const codexAudit = session.audit && Array.isArray(session.audit.findings) ? session.audit.findings : null;
+  const findings = Array.isArray(session.findings) ? session.findings : codexAudit;
+  if (!findings || findings.length === 0) return null;
+  const sec = detailSection("findings（" + findings.length + "）");
+  for (const f of findings) {
+    const row = el("div", "detail-finding");
+    row.appendChild(sevBadge(f.severity));
+    const txt = el("span");
+    txt.textContent = (f.rule || "—") + "　" + (f.evidence || "");
+    txt.title = f.tool_name ? "tool: " + f.tool_name : "";
+    row.appendChild(txt);
+    sec.appendChild(row);
+  }
+  return sec;
+}
+
+// ---------- DSH 分区 ----------
+
+function dshCostSection(s) {
+  if (!s.cost || !s.cost.per_model) return null;
+  const sec = detailSection("成本明细（CNY，估算值）");
+  sec.appendChild(kvRow("合计", fmtMoney(s.cost.total || 0)));
+  if (s.cost.peak_total) sec.appendChild(kvRow("高峰", fmtMoney(s.cost.peak_total)));
+  for (const [model, m] of Object.entries(s.cost.per_model)) {
+    const label = m.short_name || model;
+    const sub = m.provider ? " · " + m.provider : "";
+    sec.appendChild(kvRow(label + sub, fmtMoney(m.total || 0), model));
+  }
+  return sec;
+}
+
+function dshContextSection(s) {
+  if (!s.context) return null;
+  const c = s.context;
+  const sec = detailSection("上下文构成");
+  sec.appendChild(kvRow("system", fmtTokens(c.system_tokens)));
+  sec.appendChild(kvRow("tools", fmtTokens(c.tools_tokens)));
+  sec.appendChild(kvRow("catalog", fmtTokens(c.catalog_tokens) + "（" + (c.catalog_entries || 0) + " 条目）"));
+  if (Array.isArray(c.catalog_names) && c.catalog_names.length) {
+    // 每个 skill 目录条目各占多少 token——这个仓库的核心命题，别埋在 JSON 里。
+    const sorted = c.catalog_names.slice().sort((a, b) => (b.tokens || 0) - (a.tokens || 0));
+    for (const n of sorted) {
+      sec.appendChild(kvRow(n.name || "—", fmtTokens(n.tokens)));
+    }
+  }
+  return sec;
+}
+
+function dshWasteSection(s) {
+  if (!Array.isArray(s.waste) || s.waste.length === 0) return null;
+  const sec = detailSection("浪费（" + s.waste.length + "）");
+  for (const w of s.waste) {
+    const row = el("div", "detail-finding");
+    row.appendChild(sevBadge(w.severity));
+    const txt = el("span");
+    txt.textContent = (w.rule || "—") + "　" + fmtTokens(w.waste_tokens) + " token";
+    if (w.suggestion) txt.title = w.suggestion;
+    row.appendChild(txt);
+    sec.appendChild(row);
+  }
+  return sec;
+}
+
+function dshCompactionSection(s) {
+  if (!s.compaction) return null;
+  const comps = Array.isArray(s.compaction.compactions) ? s.compaction.compactions : [];
+  const prunes = Array.isArray(s.compaction.prunes) ? s.compaction.prunes : [];
+  if (comps.length === 0 && prunes.length === 0) return null;
+  const sec = detailSection("压缩 / 剪枝");
+  sec.appendChild(kvRow("压缩", comps.length + " 次"));
+  sec.appendChild(kvRow("剪枝", prunes.length + " 次（共 " +
+    fmtTokens(prunes.reduce((a, p) => a + (p.shadowed_token_count || 0), 0)) + " shadowed）"));
+  return sec;
+}
+
+function dshDurationSection(s) {
+  const calls = s.duration && Array.isArray(s.duration.tool_calls) ? s.duration.tool_calls : null;
+  if (!calls || calls.length === 0) return null;
+  // 273 次调用不逐条列——按工具聚合，按总耗时降序取 Top 10，一眼看出时间都烧在哪。
+  const byTool = {};
+  for (const c of calls) {
+    const n = c.tool_name || "?";
+    const d = c.duration_ms || 0;
+    const e = byTool[n] || (byTool[n] = { count: 0, sum: 0, max: 0 });
+    e.count++; e.sum += d; if (d > e.max) e.max = d;
+  }
+  const top = Object.entries(byTool)
+    .map(([n, e]) => ({ n, ...e, avg: e.sum / e.count }))
+    .sort((a, b) => b.sum - a.sum)
+    .slice(0, 10);
+  const sec = detailSection("工具耗时（Top " + top.length + "，共 " + calls.length + " 次调用）");
+  for (const t of top) {
+    sec.appendChild(kvRow(
+      t.n + "（" + t.count + " 次，峰值 " + Math.round(t.max) + "ms）",
+      (t.sum / 1000).toFixed(1) + "s"
+    ));
+  }
+  return sec;
+}
+
+function dshSubagentsSection(s) {
+  if (!Array.isArray(s.subagents) || s.subagents.length === 0) return null;
+  const sec = detailSection("子代理（" + s.subagents.length + "）");
+  for (const a of s.subagents) {
+    sec.appendChild(kvRow("T" + (a.turn != null ? a.turn : "?") + " " + (a.description || a.agent_id || "—"), ""));
+  }
+  return sec;
+}
+
+function dshRuleOutcomesSection(s) {
+  if (!s.rule_outcomes) return null;
+  const sec = detailSection("规则三态");
+  // findings / measured_zero / unavailable 三种结局，一次会话里每条 SV 规则落在哪
+  // 一格——诚实的三态不折叠成「没发现」。
+  for (const [rule, o] of Object.entries(s.rule_outcomes)) {
+    const status = o && o.status ? o.status : "?";
+    const suffix = status === "findings" && o.count ? "（" + o.count + "）" : "";
+    sec.appendChild(kvRow(rule, status + suffix));
+  }
+  return sec;
+}
+
+function dshCoverageSection(s) {
+  const fields = ["usage_coverage", "duration_coverage", "skill_coverage",
+    "subagents_coverage", "compaction_coverage", "waste_coverage"];
+  const present = fields.filter((k) => s[k]);
+  if (present.length === 0) return null;
+  const sec = detailSection("覆盖率");
+  for (const k of present) {
+    const c = s[k];
+    const v = c.status || "?";
+    const extra = c.count != null ? " · " + c.count : (c.sample_count != null ? " · " + c.sample_count : "");
+    sec.appendChild(kvRow(k.replace("_coverage", ""), v + extra));
+  }
+  return sec;
+}
+
+function renderDshSections(body, s) {
+  const sections = [
+    dshCostSection(s),
+    dshContextSection(s),
+    dshWasteSection(s),
+    dshCompactionSection(s),
+    dshDurationSection(s),
+    dshSubagentsSection(s),
+    dshRuleOutcomesSection(s),
+    dshCoverageSection(s),
+  ];
+  for (const sec of sections) if (sec) body.appendChild(sec);
+}
+
+// ---------- Codex 分区 ----------
+
+function codexAuditSection(s) {
+  const sum = s.audit && s.audit.summary;
+  if (!sum) return null;
+  const sec = detailSection("审计摘要");
+  sec.appendChild(kvRow("findings", (sum.findings_total != null ? sum.findings_total : "—") +
+    "（critical " + (sum.critical || 0) + " / warning " + (sum.warning || 0) + " / info " + (sum.info || 0) + "）"));
+  if (sum.rules_unavailable) sec.appendChild(kvRow("规则不可用", sum.rules_unavailable + " 条"));
+  return sec;
+}
+
+function codexCostSection(s) {
+  if (!s.cost_report) return null;
+  const r = s.cost_report;
+  const sec = detailSection("成本报告（USD）");
+  sec.appendChild(kvRow("合计", fmtUSD(r.total_cost_usd)));
+  const tk = r.total_tokens || {};
+  sec.appendChild(kvRow("tokens", fmtTokens(
+    (tk.uncached_input_tokens || 0) + (tk.cached_input_tokens || 0) + (tk.output_tokens || 0))));
+  if (r.per_model) {
+    for (const [model, m] of Object.entries(r.per_model)) {
+      sec.appendChild(kvRow(m.short_name || model, fmtUSD(m.cost_usd), model));
+    }
+  }
+  return sec;
+}
+
+function codexCoverageSection(s) {
+  if (!s.coverage || typeof s.coverage !== "object") return null;
+  const sec = detailSection("信号覆盖率");
+  for (const [sig, c] of Object.entries(s.coverage)) {
+    const avail = c.available ? "" : "（不可用）";
+    sec.appendChild(kvRow(sig, (c.measured || 0) + " measured" + avail));
+  }
+  return sec;
+}
+
+function codexQuotaSection(s) {
+  if (!s.quota_trajectory) return null;
+  const q = s.quota_trajectory;
+  const sec = detailSection("配额轨迹");
+  if (q.first) sec.appendChild(kvRow("开始", q.first.used_percent + "%"));
+  if (q.last) sec.appendChild(kvRow("结束", q.last.used_percent + "%"));
+  if (q.reason) sec.appendChild(kvRow("说明", q.reason));
+  return sec;
+}
+
+function codexPermissionSection(s) {
+  if (!s.permission_transitions) return null;
+  const p = s.permission_transitions;
+  const sec = detailSection("权限切换");
+  sec.appendChild(kvRow("危险 turn", (p.dangerous_turns || 0) + " 个"));
+  const tr = Array.isArray(p.transitions) ? p.transitions : [];
+  // 只列权限真正变化过的（effective_profile 有值）与 sandbox=full-access 的，其余
+  // 是 on-request/workspace-write 的常态，列出来是噪声。
+  const notable = tr.filter((t) => t.sandbox === "danger-full-access" || t.approval === "never" || t.effective_profile);
+  for (const t of notable.slice(0, 12)) {
+    sec.appendChild(kvRow(
+      "sandbox " + (t.sandbox || "?") + " · approval " + (t.approval || "?"),
+      t.effective_profile ? "→ " + t.effective_profile : ""
+    ));
+  }
+  return sec;
+}
+
+function codexTurnEndsSection(s) {
+  if (!s.turn_ends) return null;
+  const t = s.turn_ends;
+  const sec = detailSection("Turn 结局");
+  sec.appendChild(kvRow("合计", t.total + "（clean " + t.clean + " / error " + t.error + " / incomplete " + t.incomplete + "）"));
+  return sec;
+}
+
+function codexMetaSection(s) {
+  const sec = detailSection("会话元数据");
+  if (s.cli_version) sec.appendChild(kvRow("cli", s.cli_version));
+  if (s.history_mode) sec.appendChild(kvRow("模式", s.history_mode));
+  if (s.context_window) sec.appendChild(kvRow("上下文窗口", fmtTokens(s.context_window)));
+  if (s.effort) {
+    sec.appendChild(kvRow("推理力度", (s.effort.reasoning_effort || s.effort.effective || "—") +
+      (s.effort.reasoning_summary ? " · " + s.effort.reasoning_summary : "")));
+  }
+  if (Array.isArray(s.workspace_roots) && s.workspace_roots.length) {
+    for (const w of s.workspace_roots) sec.appendChild(kvRow("工作区", w));
+  }
+  if (Array.isArray(s.files) && s.files.length) {
+    for (const f of s.files.slice(0, 3)) sec.appendChild(kvRow("文件", f));
+  }
+  if (Array.isArray(s.notes) && s.notes.length) {
+    for (const n of s.notes) {
+      const row = el("div", "detail-meta");
+      row.textContent = "· " + n;
+      sec.appendChild(row);
+    }
+  }
+  return sec;
+}
+
+function renderCodexSections(body, s) {
+  const sections = [
+    codexAuditSection(s),
+    codexCostSection(s),
+    codexCoverageSection(s),
+    codexQuotaSection(s),
+    codexPermissionSection(s),
+    codexTurnEndsSection(s),
+    codexMetaSection(s),
+  ];
+  for (const sec of sections) if (sec) body.appendChild(sec);
+}
+
+function rawSection(env) {
+  const det = el("details", "detail-raw-wrap");
+  const sum = el("summary");
+  sum.textContent = "原始 JSON（" + Math.round(JSON.stringify(env).length / 1024) + " KB，排查用）";
+  det.appendChild(sum);
+  const pre = el("pre", "detail-raw");
+  pre.textContent = JSON.stringify(env, null, 2);
+  det.appendChild(pre);
+  return det;
+}
+
 function renderDetailEnvelope(env) {
   const body = document.getElementById("sess-detail-body");
-  // 头部 summary 卡片已由 renderDetailSummary 画好，这里替换最后那个 raw 区块 + 加 meta。
-  const rawPre = document.getElementById("sess-detail-raw");
-  if (!rawPre) return;
+  const loading = document.getElementById("sess-detail-loading");
+  if (loading) loading.remove();
 
-  const meta = el("div", "detail-section");
-  const mt = el("div", "panel-title");
-  mt.textContent = "版本元数据";
-  meta.appendChild(mt);
+  const session = env.session || {};
+  const host = (env.session_key && env.session_key.host_kind) || session.host_kind || null;
+
+  const meta = detailSection("版本元数据");
   const mm = el("div", "detail-meta");
   mm.textContent = [
     "schema " + (env.schema_version || "—"),
@@ -564,35 +886,18 @@ function renderDetailEnvelope(env) {
     "revision " + (env.session_revision || "—"),
   ].join(" · ");
   meta.appendChild(mm);
-  body.insertBefore(meta, rawPre.parentNode);
+  body.appendChild(meta);
 
-  // session payload：防御性点取常见键（Codex/DSH 形状不同），其余整块进 raw JSON。
-  // findings 字段位：DSH = session.findings，Codex = session.audit.findings（宿主
-  // findings_for 是权威谓词，这里是同一张表的展示端）。Codex 的 finding 是
-  // {rule,severity,evidence,…}，无 where/title 键——fallback 到 JSON 不炸。
-  const session = env.session || {};
-  const codexAudit = session.audit && Array.isArray(session.audit.findings) ? session.audit.findings : null;
-  const findings = Array.isArray(session.findings) ? session.findings : codexAudit;
-  if (findings && findings.length > 0) {
-    const sec = el("div", "detail-section");
-    const st = el("div", "panel-title");
-    st.textContent = "findings（" + findings.length + "）";
-    sec.appendChild(st);
-    for (const f of findings) {
-      const row = el("div", "detail-finding");
-      const sev = el("span", "sev " + (f.severity || "info"));
-      sev.textContent = f.severity || "info";
-      row.appendChild(sev);
-      const txt = el("span");
-      txt.textContent = f.rule || (f.title ? f.title : JSON.stringify(f));
-      txt.title = f.where || "";
-      row.appendChild(txt);
-      sec.appendChild(row);
-    }
-    body.insertBefore(sec, rawPre.parentNode);
+  const fsec = findingsSection(session);
+  if (fsec) body.appendChild(fsec);
+
+  if (host === "codex") {
+    renderCodexSections(body, session);
+  } else {
+    renderDshSections(body, session);
   }
 
-  rawPre.textContent = JSON.stringify(env, null, 2);
+  body.appendChild(rawSection(env));
 }
 
 // ---------- Findings（跨会话汇总） ----------
@@ -777,9 +1082,29 @@ function renderFindingsDetail() {
     ev.textContent = txt.length > 60 ? txt.slice(0, 60) + "…" : txt;
     ev.title = txt;
     tr.appendChild(ev);
+    // 每条 finding 都带着完整的 session_key（DSH/Codex 都是）——点到那条会话的
+    // 完整报告，别再让 critical 发现悬在半空无处可去。
+    if (f.session_key) {
+      tr.addEventListener("click", () => openSessionFromFinding(f));
+    }
     frag.appendChild(tr);
   }
   body.appendChild(frag);
+}
+
+// 从 Findings 明细跳转到该会话详情：切到会话 tab 的详情视图，用 finding 里能
+// 拿到的字段（session_key/title/model/host_kind）拼一个最小 list item 交给
+// showSession。成本/token/findings 三个 summary 卡片会诚实地显示「—」（finding
+// 不含这些），完整数字在下方报告分区里。
+function openSessionFromFinding(f) {
+  if (!f.session_key) return;
+  switchTab("sessions");
+  showSession({
+    session_key: f.session_key,
+    title: f.title || null,
+    model: f.model || null,
+    host_kind: f.host_kind || (f.session_key.host_kind) || null,
+  });
 }
 
 // ---------- 数据源状态 ----------
