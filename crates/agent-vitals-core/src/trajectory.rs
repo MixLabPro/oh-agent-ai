@@ -238,7 +238,22 @@ pub(crate) const TRAJECTORY_RULES: &[FamilyRule] = &[
 /// 才是「重复」，不是全会话里出现过几次）——区别在：它只存内存、重启即清零，
 /// 这里从事件流重算。每次越过 MIN_REPEAT 的倍数报一条（run 为 6 时报 ×3 和 ×6，
 /// 锚点始终是 run 起点）。
+/// §14.4 生产切换。见 `behavior.rs::detect_sv601` 头部注释——同一套纪律：
+/// 门控不受影响，`run_single_rule` 失败退回 `detect_sv611_legacy`。
 fn detect_sv611(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_rule(
+        s,
+        crate::detectors::Sv611Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_TOOL_CALLS, crate::compatibility::canonical_session::KIND_TOOL_CALL)],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv611_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——见 `behavior.rs::detect_sv601_legacy` 为什么特意
+/// 留 `pub`：这份也是 `sv611_parity.rs` 差分对照的入口。
+pub fn detect_sv611_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut out = Vec::new();
     let mut prev: Option<(String, String)> = None; // (name, args) 签名
     let mut count: usize = 0;
@@ -279,7 +294,20 @@ fn detect_sv611(s: &CanonicalSession) -> RuleOutcome {
 /// 列表，按 turn/start 边界分组（`TurnObservation.sig`）；空 turn（无工具调用）
 /// 跳过——两个都没有动作的 turn 不是死循环。同一段连续相同 turn 只报一次
 /// （run 内不再重报）。
+/// §14.4 生产切换（同 `detect_sv611` 头部注释）。
 fn detect_sv612(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_rule(
+        s,
+        crate::detectors::Sv612Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_TURN_BOUNDARIES, crate::compatibility::canonical_session::KIND_TURN)],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv612_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv612_parity.rs` 差分对照的入口。
+pub fn detect_sv612_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut out = Vec::new();
     let mut prev_sig: Option<Vec<(String, String)>> = None;
     let mut run_count: usize = 0;
@@ -323,7 +351,25 @@ fn detect_sv612(s: &CanonicalSession) -> RuleOutcome {
 /// 各自只在同类事件上跑 run；**run 在「断掉」（一个成功/无关事件）或流结束时
 /// 关闭，报 run 的真实总长度**（真实 run 5 个失败就报 5，不报阈值倍数 3）——
 /// 锚点仍是 run 起点。真实日志 e4b0be69 的 6 连 edit 失败由此报「连续 5 个」。
+/// §14.4 生产切换。SV613 是第一条用 `Any` requirement 的切换——两个信号任一
+/// 有证据都要跑，`run_single_rule` 的 `signal_kinds` 列出两组 (signal, kind)，
+/// 由 `Sv613Detector::requirement()` 自己声明 `Any`，这里不用关心。
 fn detect_sv613(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_rule(
+        s,
+        crate::detectors::Sv613Detector,
+        &[
+            (crate::compatibility::canonical_session::SIGNAL_TURN_BOUNDARIES, crate::compatibility::canonical_session::KIND_TURN),
+            (crate::compatibility::canonical_session::SIGNAL_TOOL_RESULTS, crate::compatibility::canonical_session::KIND_TOOL_RESULT),
+        ],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv613_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv613_parity.rs` 差分对照的入口。
+pub fn detect_sv613_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut out = Vec::new();
 
     // (a) 连续 error turn。只把有 turn/end 的 turn 算进序列（`end_seq == None`
@@ -436,7 +482,24 @@ fn flush_fail_run(
     *last_seq = None;
 }
 
+/// §14.4 生产切换（同 `detect_sv613`：`Any` requirement，两个信号任一有证
+/// 据都要跑）。
 fn detect_sv614(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_rule(
+        s,
+        crate::detectors::Sv614Detector,
+        &[
+            (crate::compatibility::canonical_session::SIGNAL_APPROVAL_DECISIONS, crate::compatibility::canonical_session::KIND_APPROVAL),
+            (crate::compatibility::canonical_session::SIGNAL_SANDBOX_MODES, crate::compatibility::canonical_session::KIND_SANDBOX_MODE),
+        ],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv614_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv614_parity.rs` 差分对照的入口。
+pub fn detect_sv614_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut out = Vec::new();
 
     // (a) 同一 callId 审批次数（只算 asked 端——callId 是 approval/asked 自带、

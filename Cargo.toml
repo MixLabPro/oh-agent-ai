@@ -1,9 +1,14 @@
 [workspace]
-members = [".", "crates/agent-vitals-core", "crates/agent-vitals-wasm"]
+members = [".", "crates/agent-vitals-core", "crates/agent-vitals-wasm", "crates/vitals-core"]
 # wasm crate 只在 `wasm-pack build --target wasm32` 下构建，不参与宿主侧的
 # 默认 test/build/clippy —— 否则 `cargo test` 会为 aarch64-apple-darwin 编译
 # wasm-bindgen 入口，既无意义又可能触发非 wasm 目标的告警。
-default-members = [".", "crates/agent-vitals-core"]
+#
+# vitals-core（docs/VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md）在 default-members
+# 里：M0 阶段它不接入 CLI/agent-vitals-core（§5.2 单向依赖只允许反过来），
+# 但必须参与默认 `cargo test`/`cargo clippy`，否则它的边界测试
+# （crates/vitals-core/tests/dependency_boundary.rs）不会被 CI 跑到。
+default-members = [".", "crates/agent-vitals-core", "crates/vitals-core"]
 resolver = "2"
 
 [package]

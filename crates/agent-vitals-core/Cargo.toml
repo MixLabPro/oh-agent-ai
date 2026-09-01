@@ -16,3 +16,6 @@ regex = "1"
 # preserve_order 不是可选项：与二进制侧同一理由 —— findings 的键序必须与
 # Python/CLI 逐字节一致，wasm 侧若用默认 BTreeMap 排序键会破坏差分护栏。
 serde_json = { version = "1", features = ["preserve_order"] }
+# M2 兼容桥（docs/VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md §14）：单向依赖，
+# 只允许这个方向——vitals-core 不知道、也不能依赖 agent-vitals-core（§5.2）。
+vitals-core = { path = "../vitals-core" }

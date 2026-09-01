@@ -11,7 +11,12 @@ pub mod budget;
 pub mod codex_evidence;
 pub mod codex_usage;
 pub mod compaction;
+// M2 兼容桥（docs/VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md §14）+ 第一批迁移
+// 规则的 vitals-core Detector 实现（§14.4）。两者都是这次迁移新增的，其余
+// 模块不受影响——旧 `behavior::match_behavior_canonical` 路径原样保留。
+pub mod compatibility;
 pub mod cost;
+pub mod detectors;
 pub mod dsh_evidence;
 pub mod duration;
 pub mod evidence;

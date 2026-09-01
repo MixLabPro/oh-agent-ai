@@ -162,6 +162,7 @@ SQLite / PostgreSQL EventStore
 分布式流处理
 trajectory reopen / merge / split
 独立 vitals-core 仓库发布
+Detector requirement 的 enhances / min_fidelity 分级（见 §9.1.1）
 ```
 
 这些能力可以在模型中保留扩展位置，但不得为了未来能力提前引入不可验证的复杂度。
@@ -243,9 +244,23 @@ Engine 可以逐条 `ingest`，但 Finding 的权威结果在 `finalize` 后产�
 
 - 现有 JSON key 不删除、不改义；
 - 现有规则码不变；
-- 现有 Python 差分测试继续运行；
+- **Python 侧在 v0.5 期间一行不改**；
 - Tauri 与 dsh-client 不直接依赖新 Core API；
 - 新模型通过 Agent 层投影为现有输出。
+
+Python 不动这一条不是"暂时没顾上"，而是本次迁移的**外层守卫**。规则迁进
+`vitals-core` 之后，golden 差分从「Python == Rust」变成：
+
+```text
+Python 旧实现  ==  Rust 新路径（兼容桥投影）
+```
+
+这比原来更强：新路径必须同时对上另一门语言的独立实现，而不是对上同语言里
+它自己刚重构出来的那份。所以 §14.4 的 parity 有两层——Rust 旧/新逐字节，以及
+Python/Rust 新逐字节——**任何一层红都视为切口不成立**（§21）。
+
+Python 的退役按 `docs/TAURI_RUNTIME_WORKBENCH_SPEC.md` §7.1 的能力门推进，
+不在 v0.5 范围内，也不因本次迁移提前。
 
 ---
 
@@ -316,7 +331,14 @@ v0.5 建议只使用：
 serde
 serde_json
 thiserror
+sha2
 ```
+
+`sha2` 不是可选项：§10.3 的 Finding fingerprint 与 §11.2 的 input fingerprint
+都要求确定性哈希，没有它这两节无法实现。选 `sha2` 而不是别的，是因为现有
+binary crate 已经依赖它（根 `Cargo.toml`），不引入新的供应链面。注意
+`agent-vitals-core` 目前**没有**这个依赖——它住在 binary 侧，M0 需要为
+`vitals-core` 显式加上。
 
 时间使用整数毫秒，ID 使用 newtype string，避免为了基础模型引入异步 Runtime、数据库、UUID 或完整时间库。
 
@@ -388,6 +410,12 @@ ordinal ASC
 - 再次出现但内容不同：返回 `ConflictingDuplicate`，本次审计失败；
 - 不允许按时间、kind 或 attributes 猜测去重。
 
+「规范化内容相同」里的**规范化指 §15.3 定义的 canonical JSON 形态**，不是
+`serde_json::Value` 的默认相等。两个 attributes 只是键序不同、或同一个整数
+一边是 `3` 一边是 `3.0`，必须判为相同——否则重复事件会被误判成
+`ConflictingDuplicate`，整次审计失败。去重比较和 §10.3 的 fingerprint 哈希
+**共用同一个规范化实现**，不允许各写一份。
+
 ### 6.5 校验失败
 
 以下情况为硬错误：
@@ -437,6 +465,24 @@ vitals.trajectory
 vitals.diagnostic
 ```
 
+**开放字符串的代价必须用构建期校验补回来。** 现有 `Signal` 是闭合的 20 变体
+enum（`crates/agent-vitals-core/src/evidence.rs`），配 `SignalSet(u32)` 位集，
+拼写错误是编译错误。换成 `SignalId(String)` 之后，把 `agent.tool_calls` 写成
+`agent.toolcalls` 不会报任何错——它只会让该规则**静默变成 Unavailable**，
+报告看上去完全正常。这是三态契约最难发现的一种破坏方式。
+
+因此 v0.5 要求：
+
+- Domain 在 builder 阶段注册自己的**信号词表**（`with_signal_vocabulary`）；
+- `build()` 时校验每个已注册 Detector 的 `requirement()` 与 `enhances` 中出现的
+  每一个 `SignalId` 都在词表内；
+- 不在词表内 → 返回 `UnknownSignal { detector_id, signal_id }` **硬错误**，
+  与 `DuplicateDetector` 同级，**绝不降级为运行期 Unavailable**；
+- `vitals.*` 前缀由 Core 预置，Domain 不得注册。
+
+`SignalId` 本身的格式约束：非空、仅 `[a-z0-9_.]`、至少一个 `.`、不以 `.` 起止。
+违反同样是构建期错误。
+
 ### 7.2 Provenance
 
 沿用现有语义，改造成可序列化公开模型：
@@ -482,6 +528,61 @@ Engine 在调用 Detector 之前完成门控：
 - `Any`：全部要求无可消费证据才 unavailable；
 - requirement 为空：允许执行；
 - Detector 不得自行把缺失证据解释成零。
+
+#### 7.4.1 「无可消费证据」的判据：不是 coverage 计数
+
+这一节是整份 spec 里最容易实现错、且错了不会有任何测试变红的地方。
+
+**判据是「该信号在本次输入的事件流里有几个可消费事件」，不是 `CoverageCounts`
+的计数是否为零。**
+
+理由是仓库已经付过学费的一次真机事故（见
+`crates/agent-vitals-core/src/evidence.rs` 的 `CanonicalSession::timeline_is_empty`
+注释）：Codex 适配器的 `derive_coverage` 会把 `task_started` / `task_complete`
+数成非零 measured，而对应的证据通道当时是空的。读计数 → 门控放行 → 检测器在
+空证据上空转 → 产出 **MeasuredZero**，而正确答案是 **Unavailable**。这正是
+§4.3 禁止的那种「把无法测量伪装成实测为零」。
+
+现有实现靠"五条类型化 timeline 非空"躲开了这个坑。通用化之后 timeline 没了，
+Engine 手里只剩计数——**结构上退回了产生该 bug 的那个版本**。所以判据必须被
+显式重建：
+
+```rust
+/// Domain 声明：哪些 event kind 构成哪条信号的可消费证据。
+pub struct SignalVocabulary {
+    /// signal_id → 该信号接受的 event kind 集合
+    kinds: BTreeMap<SignalId, BTreeSet<String>>,
+}
+
+/// Engine 在门控前，对本次输入按 trajectory 计算一次。
+pub struct SignalEvidence {
+    /// kind 映射到该信号、且通过 §6.5 校验的事件数。
+    pub consumable_events: u64,
+    /// 仅用于报告，不参与门控。
+    pub counts: CoverageCounts,
+}
+```
+
+门控读 `consumable_events == 0`，**不读 `counts`**。
+
+两者的分工是固定的：
+
+```text
+consumable_events   这条信号有没有东西可读        → 决定跑不跑（门控）
+CoverageCounts      读到的东西有多可信、漏了多少  → 决定报告怎么说（provenance）
+```
+
+`unmetered` 尤其不能参与门控：它的定义就是"已知发生过、但除此之外一无所知"，
+把它算进"有证据"会让检测器在读不到内容的事件上空转，再次产出 MeasuredZero。
+
+必须有一条测试直接钉住这个分叉（§16.1）：
+
+> 构造一份输入，使某信号 `CoverageCounts.total() > 0` 而 `consumable_events == 0`，
+> 断言该规则输出 `Unavailable` 而不是 `MeasuredZero`，且 Detector 未被调用。
+
+这条测试是现有
+`empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero`
+在通用模型下的对应物。它红了就说明门控接错了轴。
 
 ---
 
@@ -552,6 +653,27 @@ split
 
 一个 Event 在 v0.5 只能属于一条 Trajectory。多重归属、父子轨迹和跨轨迹引用推迟到后续版本。
 
+#### 8.4.1 turn 坐标不是父子轨迹，是事件属性（提前说明，避免 §14.4 卡住）
+
+一份 session 是一条扁平 trajectory，但 SV612 需要按 turn 分组比较、SV613 需要
+锚定"第一个 error turn/end"。这两个坐标现在由适配器的状态机算好、写进
+`TimelineEntry` 的 `turn` / `step` / `end_reason_kind` 等字段——不是靠把
+turn 建成子 trajectory 得到的。
+
+v0.5 不引入 `parent_id` / 子轨迹（那是留给 v1.0 §12 的），而是要求兼容桥的
+输入侧（§14.2）把这些已算好的坐标**原样放进 `CanonicalEvent.attributes`**，
+例如：
+
+```json
+{ "vitals.turn": 3, "vitals.turn_sig": [...], "vitals.turn_end_reason": "error" }
+```
+
+Detector 读 `attributes` 里的这些键做分组/锚定，**不在 Core 内重新实现
+turn 状态机**——状态机是"翻译"的产物，不是"规则"的产物，这条纪律从
+`agent-vitals-core/src/evidence.rs` 平移过来，不能因为通用化就丢掉。
+`vitals.*` 前缀在这里是**建议**惯例，供 attributes 内部命名去重之用，不是
+Core 保留字段（Core 不解释 attributes 内容，见 §4.1）。
+
 ---
 
 ## 9. Detector 与 RuleOutcome
@@ -572,6 +694,38 @@ pub trait Detector: Send + Sync {
 ```
 
 `id + version` 是 Replay 确定性的一部分。相同 ID 不允许注册多个版本。
+
+#### 9.1.1 已知缺口：`enhances` 与 `min_fidelity` 不在 v0.5 范围
+
+现有 `RuleSpec`（`agent-vitals-core/src/evidence.rs`）比 §7.4 的
+`SignalRequirement` 多两个维度：
+
+- `enhances`：缺了这个信号规则**仍然跑**，只是可信度降级（不是 `requires`
+  那种"缺了就不跑"）——SV610 正是这样：`requires: [SandboxModes]`，
+  `enhances: [ApprovalDecisions]`；
+- `min_fidelity: Fidelity{Inferred, Partial, Full}`：低于这个档位的 Finding
+  只能是"possible"，不能是"confirmed"。
+
+v0.5 **明确不实现**这两项（§3.2 补一条），`SignalRequirement` 只有
+`All`/`Any`。这是有意的范围收窄，不是遗漏——`enhances` 需要 Finding 携带
+分级 confidence 的展示语义，属于 §3.2 已经排除的 Validator/Recommendation
+族问题。
+
+**更新（迁移完成后）**：SV610 最初因为这个缺口被排除在首批之外，但实现到
+后续批次时发现——迁移 SV610 根本不需要正式的 `enhances` 机制。`Signal
+Requirement::All` 只控制"门控卡哪个信号"，不控制"Detector 能看见哪些事
+件"：`AuditContext.events` 是投影阶段就已经放进去的全部数据，不按
+`requirement()` 过滤。`Sv610Detector::requirement()` 只声明
+`SignalRequirement::All([SIGNAL_SANDBOX_MODES])`（对应旧 `requires`），
+`detect()` 内部照样从 `ctx.events` 里读 `agent.approval` kind 的事件（对应
+旧 `enhances`）——"门控只卡一个信号，detect 内部多读一个"这件事本来就不需
+要额外的类型系统支持。SV610 因此和其余十三条一起完成了迁移；`enhances`/
+`min_fidelity` 作为**分级 confidence 展示语义**的正式支持仍然不在 v0.5 范
+围，这条缺口本身没有变化，只是它从未真正阻碍过任何一条规则的迁移——见
+`crates/agent-vitals-core/src/detectors/sv610.rs` 模块文档。
+
+Finding 的 `confidence: Option<f32>` 字段保留位置，v0.5 里只由 Detector
+自行决定填不填，Core 不对它做任何门控或排序语义。
 
 ### 9.2 AuditContext
 
@@ -663,6 +817,11 @@ pub struct Finding {
 
 v0.5 不包含 Finding lifecycle。`Acknowledged / Resolved / Ignored` 属于上层产品状态，不属于纯审计结果。
 
+`attributes` 里保留一个键供兼容桥使用：`vitals.source_ordinal`（u64，来自
+产生该 Finding 的最后一个 Event 的执行流下标）。这不是 Core 定义的语义
+字段——Core 不读它、不基于它做任何判断——只是 §12.4 排序规则与 §14.3 逐字节
+兼容之间的接口，理由见 §14.3。
+
 ### 10.3 Fingerprint
 
 Fingerprint 必须由以下规范化内容生成：
@@ -697,12 +856,18 @@ summary 文案
 ```rust
 pub struct ReplayFrame {
     pub index: u64,
-    pub event: CanonicalEvent,
+    /// 引用，不持有整份 Event——见下方内存说明。
+    pub event_id: EventId,
     pub trajectory_id: TrajectoryId,
     pub findings_opened: Vec<FindingId>,
     pub diagnostics: Vec<Diagnostic>,
 }
 ```
+
+`ReplayFrame` 存 `EventId` 而不是内嵌整个 `CanonicalEvent`：一帧一份全量拷贝
+会让 Replay 的内存占用变成输入的整数倍，直接顶到 §17 的「内存峰值不超过
+规范化输入 8 倍」红线。`ReplayReport` 已经在 `AuditReport` 里能查到
+`CanonicalEvent` 全量（Engine 保留输入），消费者按 `event_id` 查表即可。
 
 ### 11.2 ReplayReport
 
@@ -711,13 +876,26 @@ pub struct ReplayReport {
     pub schema_version: u16,
     pub engine_version: String,
     pub detector_versions: Vec<DetectorVersion>,
-    pub input_fingerprint: String,
+    pub input_fingerprint: InputFingerprint,
     pub frames: Vec<ReplayFrame>,
     pub outcomes: Vec<NamedRuleOutcome>,
     pub findings: Vec<Finding>,
     pub diagnostics: Vec<Diagnostic>,
 }
+
+pub struct InputFingerprint {
+    pub events_hash: String,
+    pub config_hash: String,
+    pub detector_versions_hash: String,
+    pub engine_version: String,
+}
 ```
+
+`input_fingerprint` 拆成四段而不是一个不透明串：§17 要求「相同数据运行 20
+次完全一致」，一旦某次不一致，读者需要知道**是哪一段变了**——事件变了、
+config 变了、还是有人 bump 了某个 detector 版本忘了说。单个哈希把这三种
+情况压成同一个"不一样"，调试时只能盲猜。合成后的整体指纹（供 §14.3 兼容层
+比较用）由四段拼接哈希得到，四段各自仍然可比较。
 
 ### 11.3 确定性要求
 
@@ -827,6 +1005,12 @@ pub struct AuditReport {
 - evidence event IDs：ordinal、event ID；
 - diagnostics：event ordinal、code。
 
+`Finding` 本身不带执行流下标（§10.2 之前的模型没有这个概念），但兼容桥要
+在 §14.3 里重建旧输出的字节序，这个排序规则给不出旧序——`severity rank →
+trajectory ID → fingerprint` 是 vitals-core 的权威序，不承诺等于任何宿主
+迁移前的展示序。旧序完全由 §10.2 定义的 `attributes["vitals.source_ordinal"]`
+在兼容桥内部重建，Core 的排序规则和兼容桥的重排是两件事，互不覆盖。
+
 ---
 
 ## 13. Error 与 Diagnostic
@@ -916,18 +1100,40 @@ pub fn vitals_report_to_legacy_findings(
 - 映射回现有 `rule / severity / category / evidence / seq / time / turn / step / call_id / run_end_seq`；
 - 保持旧 JSON key 和 key 顺序；
 - 无法无损映射的字段不得猜测；
-- 迁移期允许 Finding attributes 保存旧坐标；
+- **迁移期 Finding attributes 必须保存旧坐标**（`vitals.source_ordinal`，见
+  §10.2）——不是"允许"：没有这个键，输出桥拿不到旧执行流下标，§12.4 的权威
+  排序序与旧 golden 的字节序不保证一致，§14.4 第 5 步的逐字节 parity 无法
+  通过；
 - 兼容输出与现有 golden 逐字节对比。
 
 ### 14.4 第一批迁移规则
 
-建议选择已经使用 CanonicalSession timeline、宿主泄漏较少的三条：
+建议选择的三条，按**依赖复杂度递增**排列，而不是按"看起来都用 timeline、
+泄漏都少"一次性并列迁移——那样会把"管线通不通"和"抽象够不够表达"两个风险
+绑在一次验证里，一旦失败无法定位是哪一层的问题：
 
 ```text
-SV611 重复动作
-SV612 重复序列
-SV613 无进展 / 连续失败
+SV601 危险 shell 命令（事件局部、纯正则，无跨事件状态）
+SV611 重复动作（只依赖 ToolCalls，无 turn 结构）
+SV612 重复序列（引入 turn 结构，§8.4.1 的坐标透传要在这条上第一次接受检验）
 ```
+
+SV601 先证明"管线能把最简单的东西端到端跑通且逐字节一致"；SV611 证明
+"跨事件比较在新模型下可行"；SV612 才是真正考验 §8.4.1 turn 坐标透传方案
+的一条——如果它需要修改 Core 才能落地，按 §21 第 1 条止损。
+
+SV613 与 SV614 一起推迟：SV613 和 SV614 结构相同（一个规则码、多个子判定读
+不同信号，实测**两条都是** `Any` 语义——原稿此处曾误记成"SV613 是 `All`、
+SV614 是 `Any`"，核对 `trajectory.rs::OR_REQUIRES_CODES` 后订正：
+`["SV613", "SV614"]` 两个都在 OR 门控集合里）；两条一起等 §7.4 的
+requirement 模型在 SV612 上跑稳之后再做。SV610 因 §9.1.1 的 `enhances` 缺
+口也不在首批（该节后续更新记录了这条缺口最终为什么没有真正拦住 SV610 的
+迁移）。
+
+**这三条止损线都没有被真正触发**：SV601/611/612 三条打样验证完管线、跨事
+件状态、turn 坐标透传三层风险后，续迁 SV602–610、613、614 也全部完成，没
+有一条规则需要修改 `vitals-core` 本体才能落地（§21 第 1/2/3/7 条止损线均
+未触发）——见 §19 M3 的更新记录。
 
 迁移方式：
 
@@ -974,6 +1180,21 @@ detector_version
 
 Rust struct 是主 API；JSON 用于 fixture、Replay、CLI 和跨语言验证。不得让内部 HashMap 顺序泄漏为 API 契约。
 
+#### 15.3.1 Canonical JSON 形态
+
+§6.4 的重复内容比较与 §10.3 的 fingerprint 哈希都要求"两份 JSON 是否代表
+同一个事实"，这个判断只能有一个实现。canonical 形态：
+
+- object 的键按 UTF-8 字节序排序后再序列化；
+- 整数与浮点不互相退化——`3` 与 `3.0` 是两个不同的值，不做数值归一化；
+- 不允许 `NaN` / `Infinity`（校验期拒绝，见 §6.5）；
+- 字符串不做 Unicode 归一化（NFC/NFD 保持输入原样）；
+- 序列化不插入多余空白。
+
+`§6.4` 去重比较与 `§10.3` fingerprint 哈希都对这个 canonical 形态的字节串
+取值，不允许各自实现一份等价判断——两份实现分岔是历史上真实出现过的一类
+bug（`r2a.rs` 曾为字节对账专门固定过一次键序）。
+
 ---
 
 ## 16. 测试策略
@@ -990,6 +1211,11 @@ Rust struct 是主 API；JSON 用于 fixture、Replay、CLI 和跨语言验证�
 - SignalRequirement All / Any；
 - unavailable 时 Detector 未被调用；
 - measured-zero 与 unavailable 区分；
+- **coverage 计数非零但可消费事件数为零时，门控读后者、判定 Unavailable**
+  （§7.4.1；对应现有 `empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero`
+  在通用模型下的等价用例，缺这条测试 = 门控可能悄悄接错轴）；
+- 未注册进 `SignalVocabulary` 的 `SignalId` 在 `build()` 阶段报错，不在运行期
+  静默降级为 Unavailable（§7.1）；
 - Finding 无 Evidence 被拒绝；
 - fingerprint 稳定；
 - Finding 去重；
@@ -1040,10 +1266,21 @@ normalize(dynamic fields)
 
 ```bash
 cargo test
+cargo clippy --release --all-targets -- -D warnings
 (cd src-tauri && cargo test)
-python -m pytest -q
+python3 -m unittest discover tests
+python3 tests/golden_runner.py
+AGENT_VITALS_BIN=target/release/agent-vitals python3 tests/golden_runner.py
 git diff --check
 ```
+
+本仓没有 `pytest`（stdlib-only，见 CLAUDE.md），`python -m pytest -q` 在这里
+不存在，是笔误——正确入口是 `python3 -m unittest discover tests`。`clippy`
+补进来是因为它是既有 CI gate（扫描路径不得 `unwrap`），不是新增要求。两条
+`golden_runner.py`（默认跑 Python 实现、`AGENT_VITALS_BIN` 指向 Rust 二进制
+再跑一次）合起来才是 verify.yml 里真正的 `differential` job——单跑
+`cargo test` + `unittest` 不会触发这一层，而这层正是 §4.7 承诺的双重
+parity 守卫。
 
 WASM 包装层有 API 变化时额外执行：
 
@@ -1111,7 +1348,11 @@ v0.5 不以极限性能为目标，但必须记录基线。
 - 加入 workspace default-members；
 - 不接入现有 CLI。
 
-验收：类型测试、序列化测试、dependency boundary test 通过。
+验收：类型测试、序列化测试、dependency boundary test 通过——`dependency
+boundary test` 需要覆盖 `src-tauri/`：它是从根 workspace 用空 `[workspace]`
+显式 opt-out 的独立工作区（`src-tauri/Cargo.toml`），以 path 依赖引用
+`agent-vitals-core`，不在根 `cargo test` 的默认成员里。§5.2 的单向依赖规则
+如果只在根 workspace 里检查，这条跨 workspace 的引用不会被测到。
 
 ### M1：Engine 最小闭环
 
@@ -1136,16 +1377,26 @@ v0.5 不以极限性能为目标，但必须记录基线。
 
 验收：桥接单元测试和现有 fixtures 通过。
 
-### M3：三条规则迁移
+### M3：规则迁移
 
-交付：
+原计划交付（按 §14.4 patch 的重排：SV601 → SV611 → SV612 三条打样，验证管线
+本身、跨事件状态、turn 坐标透传三层递增的风险后再决定要不要继续）：
 
-- SV611、SV612、SV613 的 Agent Detector；
+- SV601、SV611、SV612 的 Agent Detector；
 - old/new 双路径 parity；
 - 旧公开入口改为兼容 shim；
 - 新 Replay 可定位到现有 seq / turn / call_id。
 
-验收：逐字节 parity、全仓测试、WASM 构建通过。
+**实际交付超出原计划**：三条打样全部通过、且门控/证据模型没有触发 §21 任何
+一条止损线之后，续迁完成了 SV602–SV610（family①剩余部分）与 SV613/614
+（family④剩余部分，含 §9.1.1 最初标记"暂缓"的 SV610——见该节更新，
+`enhances` 缺口在实现阶段被证明不是阻碍）。SV601–SV614 全部十四条规则现在
+都有对应的 `vitals_core::Detector` 实现、独立 parity 测试
+（`agent-vitals-core/tests/svNNN_parity.rs`）与生产切换（`detect_svNNN` 委
+托新引擎，`detect_svNNN_legacy` 保留作自动回退）。
+
+验收：逐字节 parity（Rust 内部 + Python/Rust 全量 CLI matrix 差分）、全仓测
+试、WASM 构建通过——十四条规则均已满足。
 
 ### M4：稳定与文档
 
@@ -1166,19 +1417,68 @@ v0.5 不以极限性能为目标，但必须记录基线。
 只有同时满足以下条件，Vitals Core v0.5 才算完成：
 
 - [ ] `crates/vitals-core` 不含宿主或 Agent 专属类型；
-- [ ] Core 无文件、网络、时钟、环境变量和子进程 I/O；
-- [ ] Canonical Event 有稳定 ID、ordinal、SourceRef 和 provenance；
-- [ ] 相同输入可稳定重放；
-- [ ] All / Any requirement 前置门控通过测试；
-- [ ] findings / measured-zero / unavailable 三态完整保留；
-- [ ] 每条 Finding 至少包含一个有效 Evidence；
-- [ ] Finding fingerprint 和去重稳定；
-- [ ] SV611–613 新旧路径逐字节一致；
-- [ ] 现有 CLI JSON contract 未变化；
-- [ ] 现有 HTML、Tauri、dsh-client 不需要同步重写；
-- [ ] Rust、Python、Tauri、WASM 相关 gate 全部通过；
-- [ ] 性能与确定性基线已记录；
-- [ ] 未提前引入 State、Progress、LLM、动态插件和 Intervention 执行。
+- [x] Core 无文件、网络、时钟、环境变量和子进程 I/O（`dependency_boundary.rs`）；
+- [x] Canonical Event 有稳定 ID、ordinal、SourceRef 和 provenance；
+- [x] 相同输入可稳定重放（`same_input_run_repeatedly_yields_identical_fingerprint`）；
+- [x] All / Any requirement 前置门控通过测试；
+- [x] findings / measured-zero / unavailable 三态完整保留；
+- [x] 每条 Finding 至少包含一个有效 Evidence；
+- [x] Finding fingerprint 和去重稳定；
+- [x] **SV601–SV614 全部十四条规则**新旧路径逐字节一致——不再是原计划的
+  "SV601/611/612 打样、SV613/614 推迟"：三条打样验证完管线/跨事件状态/
+  turn 坐标透传三层风险、确认没有触发 §21 任一止损线之后，续迁了
+  SV602–610、613、614；`agent-vitals-core/tests/svNNN_parity.rs` 十四份、
+  Python/Rust 全量 CLI matrix 差分（`test_cli_matrix.py`）均通过。此前一次
+  回归——`vitals_report_to_legacy_findings` 按 Replay 帧时间序而非 Detector
+  push 序输出，family④ 规则（`flatten_trajectory` 不重排）在多个子判定组合
+  命中时顺序与旧路径不符——已修复并补了专门的组合命中回归测试
+  （SV613/SV614 各一条）；
+- [x] 现有 CLI JSON contract 未变化（15/15 golden 逐字节一致）；
+- [x] 现有 HTML、Tauri、dsh-client **源码**不需要同步重写——`dsh-client/
+  agent_vitals_wasm_bg.wasm` 构建产物需要每次随 core 改动重新 `wasm-pack
+  build` 并拷贝（本来就是既定流程，不是意外的返工），已重新生成并跑通
+  `verify-host.mjs` 等六个 verify 脚本；
+- [x] Rust、Python、Tauri、WASM 相关 gate 全部通过；
+- [x] 性能与确定性基线已记录（`vitals-core/PERFORMANCE.md`）——记录基线过
+  程中发现并修复了一个真实 O(n²) 复杂度 bug（Finding Validation 对
+  `trajectory.event_ids` 做线性 `Vec::contains`），100k 事件从 6.3s 降到
+  810ms；
+- [x] 未提前引入 State、Progress、LLM、动态插件和 Intervention 执行；
+- [x] 门控判据读**信号的可消费事件数**，不读 `CoverageCounts`——`覆盖非零
+  但可消费事件为零 → Unavailable` 有测试钉住（§7.4.1、§16.1）；
+- [x] `enhances` / `min_fidelity` 作为**正式类型系统支持**（分级 confidence
+  展示语义）仍然未实现，这条缺口本身没有变化；但 SV610 已完成迁移——见
+  §9.1.1 更新，`enhances` 从未真正阻碍过它；
+- [x] canonical JSON 形态（§15.3.1）只有一处实现，去重比较与 fingerprint
+  哈希共用；
+- [x] 未在 `SignalVocabulary` 中注册的 `SignalId` 在 `build()` 阶段报错，
+  不会在运行期静默退化为 Unavailable（§7.1）；
+- [x] `input_fingerprint` 覆盖 `TrajectoryAssigner` 身份与 `SignalVocabulary`
+  内容，`detector_versions_hash` 按 Detector **注册顺序**（不是排序后的展
+  示顺序）哈希——发布前审查发现原实现三者均未覆盖：换 assigner、换
+  signal-kind 映射、只改变 Detector 注册顺序都会改变报告内容（后者通过改
+  变 `FindingId` 分配顺序），但指纹三种情况下都不变，已修复并补测试
+  （`changing_detector_registration_order_changes_the_fingerprint`、
+  `changing_the_trajectory_assigner_changes_the_fingerprint`）；
+- [x] `audit()` 批量调用中途失败时不污染引擎已有状态——发布前审查发现原实
+  现里，批中间某条事件校验失败时，之前已经 `ingest()` 成功的事件仍留在
+  `buffered_events` 里，会污染这个引擎实例下一次调用，`finalize()` 的失败
+  路径已经用 `take()` 清空、`audit()` 的失败路径没有，两者事务语义不一
+  致，已修复（回退到调用前的 baseline 长度）并补测试；
+- [x] `BySourceSession` 按 `source_type` + `source_id` 分组（不是单独
+  `source_id`），且 Engine 在组装 Trajectory 时校验同一条 Trajectory 内事
+  件 `actor_id` 必须一致——发布前审查发现原实现只用 `source_id`，两个不同
+  来源的会话如果碰巧用了同一个 `source_id`（跨来源合并审计时可能发生）会
+  被静默并成一条 Trajectory、内容却混了不同 Actor 的证据，已修复为硬错误
+  并补测试；
+- [ ] `AuditContext.coverage` 仍然是整次 `audit()` 调用共享的同一份引用，
+  不是 trajectory-scoped 的——多 trajectory 输入下每条 trajectory 的
+  Detector 看到的是"整个输入的证据密度"而不是"这条 trajectory 自己的"。
+  发布前审查指出这条，但当前所有产线调用（`agent-vitals-core`）都是单
+  trajectory 输入，不会暴露；修复需要 `AuditInput`/`Coverage` 的 API 形状
+  变更，v0.5 范围内**未修**，只在 `AuditContext` 文档里写清楚了这条边界
+  （见 `detector.rs`），留给下一个真正需要多 trajectory 输入的调用方触发
+  时再解决。
 
 ---
 

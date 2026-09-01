@@ -40,7 +40,7 @@ use crate::evidence::{
 const EVIDENCE_MAX_CHARS: usize = 200;
 
 /// SV607 的拒绝/中止/不可用码集合（TOOL_TIMEOUT 归 SV608）。
-const DENIED_CODES: [&str; 5] = [
+pub(crate) const DENIED_CODES: [&str; 5] = [
     "FS_SANDBOX_DENIED",
     "ABORTED",
     "ABORTED_BEFORE_DISPATCH",
@@ -48,7 +48,13 @@ const DENIED_CODES: [&str; 5] = [
     "SANDBOX_UNAVAILABLE",
 ];
 
-fn destructive_re() -> &'static Regex {
+// 下面这批正则原本全是模块私有——§14.4 生产切换起改 `pub(crate)`：
+// `crate::detectors::sv6NN` 需要跟旧判定逐字节同一个正则，`pub(crate)` 直接
+// 复用比像 `sv601.rs` 那样复制字面量更好（`destructive_re` 没改是因为它先
+// 于这次批量迁移写的，两边行为已经被 `sv601_parity.rs` 钉住，不用为了统一
+// 风格去动一个已经在跑的东西）。
+
+pub(crate) fn destructive_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
@@ -58,7 +64,7 @@ fn destructive_re() -> &'static Regex {
     })
 }
 
-fn privilege_re() -> &'static Regex {
+pub(crate) fn privilege_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(r"(?i)\bsudo\b|\bsu\b|\bchmod\s+[^\n]{0,10}777\b|\bchown\s+-R\b")
@@ -66,7 +72,7 @@ fn privilege_re() -> &'static Regex {
     })
 }
 
-fn remote_exec_re() -> &'static Regex {
+pub(crate) fn remote_exec_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
@@ -76,24 +82,24 @@ fn remote_exec_re() -> &'static Regex {
     })
 }
 
-fn sensitive_path_re() -> &'static Regex {
+pub(crate) fn sensitive_path_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)~/\.ssh/authorized_keys|/etc/|~/\.bashrc").unwrap())
 }
 
-fn abs_path_re() -> &'static Regex {
+pub(crate) fn abs_path_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"/(?:[A-Za-z0-9_.+-]+/)+[A-Za-z0-9_.+-]*").unwrap())
 }
 
-fn internal_ip_url_re() -> &'static Regex {
+pub(crate) fn internal_ip_url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(r"(?i)https?://\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?").unwrap()
     })
 }
 
-fn first_match(re: &Regex, text: &str) -> Option<String> {
+pub(crate) fn first_match(re: &Regex, text: &str) -> Option<String> {
     re.find(text).map(|m| m.as_str().to_string())
 }
 
@@ -106,7 +112,34 @@ fn first_match(re: &Regex, text: &str) -> Option<String> {
 // 跑了但零命中 → `MeasuredZero`；`Unavailable` 由 dispatcher（requires 前置
 // 门控）决定，检测器自己不管——先滤后调，unavailable 的规则根本不会跑到这里。
 
+/// §14.4 生产切换：第一条改走 `vitals-core` 的规则——门控（是否
+/// `Unavailable`）仍由 dispatcher 在调用这个函数之前决定，不受这次切换影
+/// 响。用 `run_single_family1_rule`（不是通用的 `run_single_rule`）——family①
+/// 的 `flatten()` 靠私有键 `__ord` 把跨规则的 finding 按事件流真实顺序交
+/// 织，SV602–610 还没切、仍然产出这个键，SV601 的新路径必须补回同样的键，
+/// 否则会被排到最后（见 `compatibility::run_single_family1_rule` 文档，
+/// 这条切换的第一版就是漏了这步，被既有的多规则回归测试
+/// `python_rust_byte_for_byte_parity` 抓到）。内部任何失败（理论上不可达，
+/// 见该函数文档）都退回 `detect_sv601_legacy`，绝不让一次内部异常打断整条
+/// `agent-vitals behavior` 命令；`sv601_parity.rs`/`golden_runner.py` 差分
+/// 持续钉着两条路径同解。
 fn detect_sv601(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_family1_rule(
+        s,
+        crate::detectors::Sv601Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_TOOL_CALLS, crate::compatibility::canonical_session::KIND_TOOL_CALL)],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv601_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`detect_sv601` 切走新路径后的回退实现。**故意
+/// `pub`**：不是稳定 API 承诺，是 `sv601_parity.rs` 拿它当独立对照组的入
+/// 口——`detect_sv601` 切换之后，`match_behavior()` 已经是新路径本身，
+/// 拿它跟自己比较毫无意义（永远相等），差分测试必须能直接调用这份没有被
+/// 新路径包过的原始实现，否则这条回归护栏在切换那一刻就名存实亡了。
+pub fn detect_sv601_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut findings = Vec::new();
     for e in &s.tool_calls.entries {
         if e.observation.name != "bash" {
@@ -119,7 +152,20 @@ fn detect_sv601(s: &CanonicalSession) -> RuleOutcome {
     outcome_from(findings)
 }
 
+/// §14.4 生产切换（同 `detect_sv601` 头部注释）。
 fn detect_sv602(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_family1_rule(
+        s,
+        crate::detectors::Sv602Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_TOOL_CALLS, crate::compatibility::canonical_session::KIND_TOOL_CALL)],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv602_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv602_parity.rs` 差分对照的入口。
+pub fn detect_sv602_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut findings = Vec::new();
     for e in &s.tool_calls.entries {
         if e.observation.name != "bash" {
@@ -132,7 +178,20 @@ fn detect_sv602(s: &CanonicalSession) -> RuleOutcome {
     outcome_from(findings)
 }
 
+/// §14.4 生产切换。
 fn detect_sv603(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_family1_rule(
+        s,
+        crate::detectors::Sv603Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_TOOL_CALLS, crate::compatibility::canonical_session::KIND_TOOL_CALL)],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv603_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv603_parity.rs` 差分对照的入口。
+pub fn detect_sv603_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut findings = Vec::new();
     for e in &s.tool_calls.entries {
         if e.observation.name != "bash" {
@@ -145,7 +204,20 @@ fn detect_sv603(s: &CanonicalSession) -> RuleOutcome {
     outcome_from(findings)
 }
 
+/// §14.4 生产切换。
 fn detect_sv604(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_family1_rule(
+        s,
+        crate::detectors::Sv604Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_TOOL_CALLS, crate::compatibility::canonical_session::KIND_TOOL_CALL)],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv604_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv604_parity.rs` 差分对照的入口。
+pub fn detect_sv604_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut findings = Vec::new();
     for e in &s.tool_calls.entries {
         if e.observation.name != "write" && e.observation.name != "edit" {
@@ -160,7 +232,24 @@ fn detect_sv604(s: &CanonicalSession) -> RuleOutcome {
     outcome_from(findings)
 }
 
+/// §14.4 生产切换：唯一需要 `config` 的规则——工作区根走
+/// `run_single_family1_rule_with_config`（见 `compatibility::run_pipeline`
+/// 文档、`Sv605Detector` 模块文档）。
 fn detect_sv605(s: &CanonicalSession) -> RuleOutcome {
+    let config = serde_json::json!({"workspace_root": s.meta.workspace_roots.first()});
+    match crate::compatibility::run_single_family1_rule_with_config(
+        s,
+        crate::detectors::Sv605Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_TOOL_CALLS, crate::compatibility::canonical_session::KIND_TOOL_CALL)],
+        config,
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv605_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv605_parity.rs` 差分对照的入口。
+pub fn detect_sv605_legacy(s: &CanonicalSession) -> RuleOutcome {
     // 工作区根来自 `meta.workspace_roots[0]`（适配器把 session header 的 cwd
     // 塞进来）。空串/缺失 → 退化为纯绝对路径启发式——宁可多报不误放（与旧
     // `ws.filter(|w| !w.is_empty())` 同语义）。
@@ -195,7 +284,20 @@ fn detect_sv605(s: &CanonicalSession) -> RuleOutcome {
     outcome_from(findings)
 }
 
+/// §14.4 生产切换。
 fn detect_sv606(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_family1_rule(
+        s,
+        crate::detectors::Sv606Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_TOOL_CALLS, crate::compatibility::canonical_session::KIND_TOOL_CALL)],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv606_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv606_parity.rs` 差分对照的入口。
+pub fn detect_sv606_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut findings = Vec::new();
     for e in &s.tool_calls.entries {
         if e.observation.name != "web_fetch" {
@@ -208,7 +310,20 @@ fn detect_sv606(s: &CanonicalSession) -> RuleOutcome {
     outcome_from(findings)
 }
 
+/// §14.4 生产切换。
 fn detect_sv607(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_family1_rule(
+        s,
+        crate::detectors::Sv607Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_TOOL_RESULTS, crate::compatibility::canonical_session::KIND_TOOL_RESULT)],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv607_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv607_parity.rs` 差分对照的入口。
+pub fn detect_sv607_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut findings = Vec::new();
     for e in &s.tool_results.entries {
         let Some(code) = e.observation.error_code.as_deref() else { continue };
@@ -219,7 +334,20 @@ fn detect_sv607(s: &CanonicalSession) -> RuleOutcome {
     outcome_from(findings)
 }
 
+/// §14.4 生产切换。
 fn detect_sv608(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_family1_rule(
+        s,
+        crate::detectors::Sv608Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_TOOL_RESULTS, crate::compatibility::canonical_session::KIND_TOOL_RESULT)],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv608_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv608_parity.rs` 差分对照的入口。
+pub fn detect_sv608_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut findings = Vec::new();
     for e in &s.tool_results.entries {
         let Some(code) = e.observation.error_code.as_deref() else { continue };
@@ -230,7 +358,20 @@ fn detect_sv608(s: &CanonicalSession) -> RuleOutcome {
     outcome_from(findings)
 }
 
+/// §14.4 生产切换。
 fn detect_sv609(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_family1_rule(
+        s,
+        crate::detectors::Sv609Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_APPROVAL_DECISIONS, crate::compatibility::canonical_session::KIND_APPROVAL)],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv609_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv609_parity.rs` 差分对照的入口。
+pub fn detect_sv609_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut findings = Vec::new();
     for e in &s.approvals.entries {
         let Some(asked) = &e.observation.asked else { continue };
@@ -253,7 +394,24 @@ fn detect_sv609(s: &CanonicalSession) -> RuleOutcome {
     outcome_from(findings)
 }
 
+/// §14.4 生产切换。门控只 `requires: [SandboxModes]`（`ApprovalDecisions`
+/// 是 `enhances`）——`signal_kinds` 只登记 `SIGNAL_SANDBOX_MODES` 一个，与
+/// 旧门控严格一致；approvals 数据仍然出现在 `ctx.events` 里（投影阶段就已
+/// 经放进去，不受这里登记了哪些信号影响），`Sv610Detector` 照样读得到（见
+/// 该 Detector 模块文档）。
 fn detect_sv610(s: &CanonicalSession) -> RuleOutcome {
+    match crate::compatibility::run_single_family1_rule(
+        s,
+        crate::detectors::Sv610Detector,
+        &[(crate::compatibility::canonical_session::SIGNAL_SANDBOX_MODES, crate::compatibility::canonical_session::KIND_SANDBOX_MODE)],
+    ) {
+        Some(findings) => outcome_from(findings),
+        None => detect_sv610_legacy(s),
+    }
+}
+
+/// 原判定逻辑，一字未改——`sv610_parity.rs` 差分对照的入口。
+pub fn detect_sv610_legacy(s: &CanonicalSession) -> RuleOutcome {
     let mut findings = Vec::new();
     for e in &s.sandbox_modes.entries {
         if e.observation.mode == "danger-full-access" {
