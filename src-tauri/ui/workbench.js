@@ -6,6 +6,8 @@
 "use strict";
 
 const { invoke } = window.__TAURI__.core;
+// 事件桥（fold 完成事件，见下方「事件桥」一节）从同一套全局 API 取 listen。
+const { listen } = window.__TAURI__.event;
 
 // ---------- 格式化（与弹窗 main.js / 托盘 lib.rs 同 spec，不许各报各的格式） ----------
 
@@ -89,6 +91,73 @@ function showBanner(id, e, showReload) {
     btn.onclick = () => { el.hidden = true; loadSessions(true); };
     el.appendChild(btn);
   }
+}
+
+// ---------- 事件桥：fold 完成 → 立即重拉当前 tab（Rust 侧 emit，见 lib.rs） ----------
+// Rust `sync_tick` 在 fold 成功落盘后去抖 emit `usage-fold-updated`（200ms 窗口，
+// 负载只有 `{at: unix 秒}`，字段语义见 lib.rs `emit_fold_event`；事件名两处必须
+// 一致）。这里订阅它，收到后重拉当前 tab 的概览数据，让工作台在托盘/外部手动
+// 同步完成的那一刻就刷新，而不是等下一个 5 分钟 tick 或窗口聚焦。
+//
+// **这不是实时通道的替代，是加速带**：事件丢时（webview 未就绪、emit 早于
+// listen 到达）由 5 分钟 tick / 「立即同步」按钮轮询 / 窗口聚焦兜底——丢一两个
+// 事件不会让工作台停在旧数据上超过一个同步周期（lib.rs 的 emit 注释写了同一句
+// 话，两个方向都要记这个取舍）。
+
+let manualSyncPolling = false; // 「立即同步」按钮的轮询回退在跑（按钮 handler 置位）
+
+// 概览重拉的合并状态机（纯函数，可单测——scripts/verify-workbench-fold-bridge.mjs
+// 从真实文件里取它断言，不是照抄一份逻辑去测）。
+// 语义：同一时刻至多一轮重拉在途；在途期间的新触发只标记「稍后再拉一次」，
+// 在途那轮回来后自动补一轮。事件与手点/聚焦同刻到达时，合并器把 N 次触发
+// 折叠成 ≤2 轮重拉（1 轮在途 + 至多 1 轮补拉），不会并发双拉。
+function makePullMerger() {
+  let running = false;
+  let queued = false;
+  return {
+    // 触发一次重拉。返回 true = 由本次触发开始了一轮（调用方去拉数据）；
+    // false = 已在在途，标 queued 由在途那轮回来补。
+    fire() {
+      if (running) { queued = true; return false; }
+      running = true;
+      queued = false;
+      return true;
+    },
+    // 一轮拉完。返回 true = 有排队触发，调用方应再拉一轮（保持 running）；
+    // false = 无排队，释放 running。
+    done() {
+      if (queued) { queued = false; return true; }
+      running = false;
+      return false;
+    },
+  };
+}
+
+const wbPull = makePullMerger();
+
+// 合并的「重拉当前 tab」入口：事件桥与手点都走这里。只刷两个便宜页
+// （overview/calendar）：sessions/findings/sources 是懒加载的重活（spawn 二进制、
+// 几十秒），fold 事件不该把用户正在看的分页/筛选搅掉——与聚焦刷新同一口径。
+async function refreshActiveTab() {
+  if (!wbPull.fire()) return;
+  do {
+    if (activeTab === "overview") await renderOverview();
+    else if (activeTab === "calendar") await renderCalendar();
+  } while (wbPull.done());
+}
+
+function subscribeFoldEvent() {
+  // listen 返回 Promise<unlisten>；工作台是常驻窗口，订阅一次终身有效，不调
+  // unlisten。失败只警告不重试——轮询兜底在，不需要自愈回路。
+  listen("usage-fold-updated", () => {
+    // 手动轮询在跑时，事件是同一轮 fold 的第二个完成信号——按钮自己的 poll
+    // 已经（或将）在重拉，跳过避免双拉。事件负载只有 at、不携带手动/自动来源，
+    // 这里靠按钮 handler 置位的 manualSyncPolling 区分，不靠猜。
+    if (manualSyncPolling) return;
+    refreshActiveTab();
+  }).catch((e) => {
+    console.warn("[workbench] usage-fold-updated 订阅失败（5 分钟 tick / 手动同步兜底）", e);
+  });
 }
 
 // ---------- tab 切换 ----------
@@ -247,6 +316,10 @@ async function renderOverview() {
     syncNow.disabled = true;
     syncStatus.textContent = "同步中…";
     const before = sync.at || "";
+    // 事件桥与手点同刻完成：手动 poll 自己会重拉，事件到达时跳过（见
+    // subscribeFoldEvent）。用 finally 保证任何出口（成功/失败/return）都复位，
+    // 漏复位会让之后的事件全被误吞。
+    manualSyncPolling = true;
     try {
       await invoke("trigger_sync");
       for (let i = 0; i < 10; i++) {
@@ -261,6 +334,8 @@ async function renderOverview() {
     } catch (e2) {
       syncStatus.textContent = "同步请求失败：" + errText(e2);
       syncNow.disabled = false;
+    } finally {
+      manualSyncPolling = false;
     }
   };
 
@@ -1338,6 +1413,9 @@ function renderSourceCard(key, src) {
 // ---------- 初始化 ----------
 
 function init() {
+  // fold 完成事件桥：先订阅再首屏渲染，缩小「事件早于 listen」的丢窗口
+  // （丢的那几个由 5 分钟 tick / 手动同步兜底，见事件桥一节注释）。
+  subscribeFoldEvent();
   document.querySelectorAll(".tab").forEach((t) => {
     t.addEventListener("click", () => switchTab(t.dataset.tab));
   });

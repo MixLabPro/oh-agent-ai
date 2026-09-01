@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
 use overview::{Overview, SyncStatus};
 
@@ -469,6 +469,78 @@ fn perform_sync() -> SyncStatus {
     }
 }
 
+/// fold 完成事件名。与工作台 `src-tauri/ui/workbench.js` 顶部的
+/// `listen("usage-fold-updated", …)` 一一对应——改名/改负载字段必须两处同步改
+/// （workbench.js 的事件桥注释里反向引用了这个名字与负载）。
+const FOLD_EVENT: &str = "usage-fold-updated";
+
+/// fold 事件去抖窗口：200ms 内多轮同步完成只广播一次。
+const FOLD_EVENT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// fold 完成事件的去抖状态（经 `app.manage` 注册，tick/手动两个线程共享——emit
+/// 在 `sync_tick` 里，tick 与「立即同步」都可能走到，必须是跨线程共享状态）。
+/// 只记「上次广播时刻」：leading-edge 去抖在「是否该发」这件事上是**无状态的**
+/// （距上次 ≥ 窗口就发、< 窗口就吞），不需要 Rust 侧的 pending 标志——「有完成
+/// 被吞、还欠一次重拉」这个 pending 语义在 JS 侧落地（workbench.js 的
+/// `makePullMerger`，`queued` 就是那个真正起作用的 pending 标志）。
+///
+/// 为什么需要去抖：fold 是**整批一次完成**（discover → oneline → 落盘），不是
+/// 高频事件流——去抖不是为削峰，是为「手动点同步 + tick 恰好同时完成」时把两轮
+/// 挨着的完成合并成一次广播，避免工作台对同几毫秒的数据双拉。SyncLock 已经保证
+/// 任意时刻至多一轮同步在跑，但一轮可能在另一轮结束后立刻补位（手动按钮在 tick
+/// 的锁上阻塞、tick 一放锁就抢进去），两轮完成的时间差就是第二轮整轮耗时——
+/// 秒级、通常远超窗口；去抖真正的兜底场景是 oneline 极快（小会话 + 热 CLI）时
+/// 两轮完成挤进 200ms。窗口内再次完成只更新 last_emit，不重复 emit。
+struct FoldEventDebounce(Mutex<Option<std::time::Instant>>);
+
+/// 去抖判定（纯函数，单测钉住）：距上次广播 ≥ 窗口（或从未发过）→ 广播；
+/// < 窗口 → 吞掉（不发，避免工作台双拉）。用「距上次多久」而不是绝对 Instant，
+/// 让单测能自由构造时长（Instant 造不出任意值）。
+fn fold_debounce_step(elapsed: Option<std::time::Duration>) -> bool {
+    match elapsed {
+        None => true,
+        Some(e) => e >= FOLD_EVENT_DEBOUNCE,
+    }
+}
+
+/// 是否该广播 fold 事件：oneline 成功折账（stage=="fold" 且 ok）。「无未折会话」
+/// （stage=="discover"）不是 fold——没有新数据落盘，广播只会让工作台拉一遍旧数字。
+fn should_emit_fold_event(status: &SyncStatus) -> bool {
+    status.ok && status.stage == "fold"
+}
+
+/// fold 成功落盘后广播给工作台（200ms 去抖合并）。负载只有 `at`（fold 完成时刻，
+/// unix 秒）——工作台重拉 `read_overview` 拿权威数据，负载里不放 month/数字，
+/// 最小化。`at` 与 `SyncStatus::at`（北京时间）同源（同一时刻）；JS 侧当前只把
+/// 事件当触发信号、不读负载，字段语义见 workbench.js 的事件桥注释。
+///
+/// **webview 未就绪/没打开时 `emit` 是空操作**：事件发出去了但没有 webview 收到，
+/// 静默丢弃。这正是「事件桥失败不比现在更差」的兜底面——工作台下一次聚焦、
+/// 5 分钟 tick、或手动同步都会重新拉，丢一两个事件不会让工作台停在旧数据上
+/// 超过一个同步周期。
+fn emit_fold_event(app: &AppHandle) {
+    let now = std::time::Instant::now();
+    let should_emit = {
+        // 先 bind state 再 .lock()：`app.state()` 返回的是临时 State，直接在一句
+        // 里 .lock() 会让 MutexGuard 借用一个即将析构的临时值（E0716）。
+        let deb = app.state::<FoldEventDebounce>();
+        let mut last_emit = deb.0.lock().unwrap_or_else(|e| e.into_inner());
+        let elapsed = last_emit.map(|t| now.duration_since(t));
+        let emit = fold_debounce_step(elapsed);
+        if emit {
+            *last_emit = Some(now);
+        }
+        emit
+    };
+    if should_emit {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = app.emit(FOLD_EVENT, serde_json::json!({ "at": at }));
+    }
+}
+
 /// 一轮同步 + 落盘状态 + 重建托盘。**每一条路径都走到这里**——没有提前 return
 /// 跳过托盘更新的分支（这正是「多数正常路径连 state 重读都不做」的修复：无未折
 /// 会话/二进制缺失/discover 失败也要刷新，把外部更新带进托盘）。
@@ -476,6 +548,13 @@ fn sync_tick(app: &AppHandle) {
     let status = perform_sync();
     overview::save_sync_status(&status);
     refresh(app);
+    // fold 成功落盘 → 广播给工作台（去抖合并，见 emit_fold_event）。只覆盖真正
+    // 的 fold：discover 成功但「无未折会话」没有新数据落盘，广播只会让工作台
+    // 白拉一遍旧数字；失败同理。webview 未就绪时 emit 是空操作，由下一次
+    // tick/手动同步兜底——事件桥不是唯一通路，只是让工作台「立刻」更新的加速带。
+    if should_emit_fold_event(&status) {
+        emit_fold_event(app);
+    }
 }
 
 /// 每 5 分钟一轮：发现最新未折 DSH 会话 → spawn `agent-vitals oneline` 折账 →
@@ -546,6 +625,8 @@ fn trigger_sync(app: AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .manage(SyncLock(Mutex::new(())))
+        // fold 事件去抖状态：tick/手动线程共享（见 FoldEventDebounce 注释）。
+        .manage(FoldEventDebounce(Mutex::new(None)))
         .on_window_event(|window, event| {
             // 工作台 × 按钮 → 隐藏不销毁。config-created 窗口被 × 关掉会 destroy，
             // 之后 reopen 是 no-op（get_webview_window 返回 None）；hide 保状态——
@@ -1052,5 +1133,31 @@ mod tests {
             budget_status_text_at(&ov, FIXTURE_AT_SECS + 3600),
             "🚨 预算超支：¥612.5（月 ¥600）（数据过期）"
         );
+    }
+
+    /// 去抖窗口：首轮必发；200ms 内再完成 → 吞掉；窗口外再完成 → 再发。为什么有
+    /// 这个窗口：SyncLock 保证至多一轮同步在跑，但「手动先完成、tick 补位完成」
+    /// 可能挤在 200ms 内（oneline 极快时），不去抖工作台会对同几毫秒的数据双拉。
+    #[test]
+    fn fold_debounce_coalesces_back_to_back_folds() {
+        let win = FOLD_EVENT_DEBOUNCE;
+        // 首轮：从未发过 → 必发。
+        assert!(fold_debounce_step(None));
+        // 100ms 后又一轮完成 → 窗口内 → 吞掉（不发，避免双拉）。
+        assert!(!fold_debounce_step(Some(win / 2)));
+        // 恰 200ms → 窗口边界，视为窗口外 → 再发。
+        assert!(fold_debounce_step(Some(win)));
+        // 250ms → 再发。
+        assert!(fold_debounce_step(Some(win + win / 2)));
+    }
+
+    /// 只有 fold 成功才广播：「无未折会话」/失败/其他阶段不广播（没有新数据落盘，
+    /// 工作台重拉也是旧数字）。
+    #[test]
+    fn should_emit_fold_event_only_on_fold_success() {
+        assert!(should_emit_fold_event(&SyncStatus::ok("fold", "已折入 s1".into())));
+        assert!(!should_emit_fold_event(&SyncStatus::ok("discover", "无未折 DSH 会话".into())));
+        assert!(!should_emit_fold_event(&SyncStatus::fail("fold", "oneline 失败".into())));
+        assert!(!should_emit_fold_event(&SyncStatus::default()));
     }
 }
