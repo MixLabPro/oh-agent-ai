@@ -203,9 +203,15 @@ def _turn_timeline_of(items, audit):
         elif kind == "item_completed" and isinstance(payload.get("item"), dict) and payload["item"].get("type") == "CommandExecution": summary = "命令执行"
         elif kind == "token_count": summary = "用量 / 配额快照"
         if summary is not None:
+            ts = item.get("timestamp")
             events.append({"source_order": source_order, "turn": turn if isinstance(turn, str) else None,
                            "kind": kind if isinstance(kind, str) else top, "summary": summary,
-                           "rule_refs": refs.get(source_order, [])})
+                           "rule_refs": refs.get(source_order, []),
+                           # hour：核心 codex_hour_of 折好的北京小时桶键（与
+                           # cost_report.hours 同一把尺）——事件对齐小时桶只做字典
+                           # 查表，浏览器不算第二遍北京时间；ts：原始 ISO，诚实出处。
+                           "hour": codex_usage.codex_hour_of(item),
+                           "ts": ts if isinstance(ts, str) else None})
     return events
 
 

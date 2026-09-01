@@ -30,7 +30,7 @@ use crate::agent::codex_cost::{codex_cost_report, load_codex_pricing};
 use crate::agent::codex_session::{codex_rollout_files, read_codex_session_log, read_session_index};
 use agent_vitals_core::behavior::{flatten, match_behavior_canonical, rule_outcomes_json};
 use agent_vitals_core::codex_evidence::{build_codex_evidence, codex_evidence_json, CodexEvidence};
-use agent_vitals_core::codex_usage::codex_merge_folds;
+use agent_vitals_core::codex_usage::{codex_hour_of, codex_merge_folds};
 use agent_vitals_core::trajectory::{flatten_trajectory, match_trajectory_canonical};
 
 /// 一份 rollout 文件对 `codex-session` 有用的全部信息。degraded 文件（不可读/
@@ -203,7 +203,7 @@ fn turn_timeline_of(items: &[Value], audit: &Value) -> Value {
             else if kind == Some("task_complete") { Some(if payload.get("error").map_or(true, |v| v.is_null()) { "turn 完成" } else { "turn error" }) }
             else if kind == Some("item_completed") && payload.get("item").and_then(|v|v.get("type")).and_then(|v|v.as_str()) == Some("CommandExecution") { Some("命令执行") }
             else if kind == Some("token_count") { Some("用量 / 配额快照") } else { None };
-        if let Some(summary) = summary { events.push(json!({"source_order":source_order,"turn":payload.get("turn_id").and_then(|v|v.as_str()),"kind":kind.or(top),"summary":summary,"rule_refs":refs.get(&(source_order as i64)).cloned().unwrap_or_default()})); }
+        if let Some(summary) = summary { events.push(json!({"source_order":source_order,"turn":payload.get("turn_id").and_then(|v|v.as_str()),"kind":kind.or(top),"summary":summary,"rule_refs":refs.get(&(source_order as i64)).cloned().unwrap_or_default(),"hour":codex_hour_of(item),"ts":item.get("timestamp").and_then(|v|v.as_str())})); }
     }
     json!(events)
 }

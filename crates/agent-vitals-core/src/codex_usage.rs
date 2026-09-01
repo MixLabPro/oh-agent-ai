@@ -111,7 +111,11 @@ fn total_signature(total: &Value) -> Option<(i64, i64, i64, i64, i64, i64)> {
 /// 过滤会把北京凌晨 0-7 点的消费整块丢掉。顶层 `timestamp` 回退
 /// `payload.timestamp`；不是合法小时时间戳、或日历上不存在的日期（如 02-30）
 /// → None（未知时间，不编造）。
-fn codex_hour_of(event: &Value) -> Option<String> {
+///
+/// `pub`：`codex-session` 的 turn_timeline 事件用它把事件对齐到小时桶（§6 数据
+/// 准备归宿主适配器，浏览器只做字典查表，不再算一遍北京时间）。小时桶键是唯一
+/// 真相，不能让二进制侧长第二份换算。
+pub fn codex_hour_of(event: &Value) -> Option<String> {
     let ts = event
         .get("timestamp")
         .and_then(|v| v.as_str())

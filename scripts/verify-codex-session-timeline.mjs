@@ -1,70 +1,59 @@
 #!/usr/bin/env node
-// 断言 codex_session.html 模板里 sv-timeline 几何在 0/1/N 桶下的形状。
+// 断言 codex_session.html 模板的时间线几何 == 共享 timeline.js（锁步），且调用点走
+// 共享的 TimelineGeometry.buildTimeline，不再有内联的 svTimelineSvg 第二份拷贝。
 //
-// 为什么是 node：几何是模板内联 JS，在 Python/Rust 里再实现一遍就是第二份拷贝，
-// 必然漂移（dsh-client 的 verify-*.mjs 同一理由）。这里从标记块抽取纯函数
-// svTimelineSvg，喂三组 hours 直接断言 SVG 形状。
+// 为什么：几何「只写一份」（docs/TRAJECTORY_TIMELINE_SPEC.md §6）。模板内联的
+// 几何一旦与 src-tauri/ui/timeline.js 漂移，就会回到「三份各画各的、比例尺算错
+// 不报错」的旧坑。这里的锁步是 pricing.json 同款——源文件是唯一真相，内联副本
+// 逐字节对齐，漂移当天下一个 CI 就红。
 //
-// 为什么必须接进自动化：verify 脚本存在但没人跑 = 不存在——dsh-client 的 verify
-// 脚本第一次放走「错图不抛异常、单测全绿」的 bug，就是没人把它接进任何流水线。
-// 这个脚本由 tests/test_codex_session_timeline.py 调 node 执行（本地 unittest 与
-// CI python job 都跑它）。
-//
-// 钉的 bug（2026-08-30）：session 01a029cb 单小时桶，折线 X(i) 恒等于 PAD，
-// line 退化成零长线段（M26,26）、area 退化成零宽三角形、三个 label 叠在同一点，
-// 整张图不可见，用户报「会话时间线没有渲染」。
+// 几何本身的形状断言在 verify-timeline-geometry.mjs（对源文件下断言，一次不是
+// 三次）；这里只守「模板内联副本 == 源」与「调用点不旁路」。
 
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const tpl = readFileSync(join(here, 'agent_vitals', 'templates', 'codex_session.html'), 'utf8');
-
-// 抽取 >>> sv-timeline-geometry / <<< sv-timeline-geometry 之间的纯函数源码，
-// 包成函数表达式求值。函数体只依赖入参（hours/W/H/PAD/esc/num），无 DOM、无闭包。
-const m = tpl.match(/\/\/ >>> sv-timeline-geometry\n([\s\S]*?)\n\s*\/\/ <<< sv-timeline-geometry/);
-if (!m) throw new Error('找不到 sv-timeline-geometry 标记块');
-const svTimelineSvg = new Function('hours', 'W', 'H', 'PAD', 'esc', 'num', 'return (' + m[1] + ');')();
-
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const num = (n) => (n == null ? 0 : Number(n)).toLocaleString('en-US');
+const tpl = readFileSync(join(here, "agent_vitals", "templates", "codex_session.html"), "utf8");
+const src = readFileSync(join(here, "..", "src-tauri", "ui", "timeline.js"), "utf8");
 
 let failed = 0;
 const ok = (cond, msg) => {
-  if (cond) { console.log('  ok  ' + msg); }
-  else { failed++; console.error('FAIL  ' + msg); }
+  if (cond) console.log("  ok  " + msg);
+  else { failed++; console.error("FAIL  " + msg); }
 };
 
-console.log('# sv-timeline 几何（0/1/N 桶）');
+console.log("# codex_session.html 时间线几何锁步");
 
-// 0 桶 → 空态消息，不是残图。
-const empty = svTimelineSvg([], 800, 130, 26, esc, num);
-ok(empty.includes('sv-empty') && !empty.includes('<svg'), '0 桶 → 空态消息且无 <svg>');
+// 1) 抽取 >>> sv-timeline-geometry 块，逐字节对齐源 timeline.js（容忍尾随换行差）。
+const m = tpl.match(/\/\/ >>> sv-timeline-geometry[^\n]*\n([\s\S]*?)\n\s*\/\/ <<< sv-timeline-geometry/);
+if (!m) { console.error("FAIL  找不到 sv-timeline-geometry 标记块"); process.exit(1); }
+const inlined = m[1];
+ok(
+  inlined.trimEnd() === src.trimEnd(),
+  `模板内联几何 == src-tauri/ui/timeline.js（内联 ${inlined.length}B / 源 ${src.length}B）`
+);
 
-// 1 桶 → 可见柱（修复对象：此前退化成零长线/零宽面）。
-const one = svTimelineSvg([{ hour: '2026-08-22T22', tokens: 1144727 }], 800, 130, 26, esc, num);
-ok(one.includes('<svg'), '1 桶 → 产出 <svg>');
-ok(one.includes('class="sv-bar"'), '1 桶 → 画 <rect class="sv-bar">');
-ok(!one.includes('sv-line') && !one.includes('sv-area'), '1 桶 → 不再画退化折线/面积');
-const rectW = Number((one.match(/<rect class="sv-bar" x="[\d.-]+" y="[\d.-]+" width="([\d.]+)"/) || [])[1]);
-ok(rectW > 0, '1 桶 → 柱宽 > 0（' + rectW + '）');
-const rectH = Number((one.match(/<rect class="sv-bar" x="[\d.-]+" y="[\d.-]+" width="[\d.]+" height="([\d.]+)"/) || [])[1]);
-ok(rectH > 0, '1 桶 → 柱高 > 0（' + rectH + '；值=峰值 → 满绘图高）');
-ok(one.includes('>1,144,727<'), '1 桶 → 柱顶数值 label 出现');
+// 2) 调用点走 TimelineGeometry.buildTimeline，不旁路成手写 svTimelineSvg。
+ok(tpl.includes("TimelineGeometry.buildTimeline({"), "调用点走 TimelineGeometry.buildTimeline()");
+ok(!tpl.includes("svTimelineSvg("), "模板里不再有内联 svTimelineSvg 第二份拷贝");
+// 3) 事件叠加已接线：buildTimeline 收 events（findings 对齐到小时桶），对齐字典
+//    读 turn_timeline 宿主侧折好的 hour 键——浏览器不重算北京时间。
+ok(tpl.includes("events: tlEvents"), "调用点把 tlEvents 传给 buildTimeline");
+ok(tpl.includes("seqToHour[te.source_order]"), "事件对齐读 turn_timeline.source_order→hour");
+ok(tpl.includes("var seqToHour"), "对齐字典在模板内声明（hour 键来自宿主，不在浏览器算）");
 
-// N 桶 → N 点折线。
-const three = svTimelineSvg([
-  { hour: '2026-08-22T20', tokens: 100 },
-  { hour: '2026-08-22T21', tokens: 500 },
-  { hour: '2026-08-22T22', tokens: 900 },
-], 800, 130, 26, esc, num);
-const d = (three.match(/<path class="sv-line" d="([^"]+)"/) || [])[1];
-ok(!!d, '3 桶 → 有 sv-line');
-ok(d && d.split('L').length === 3, '3 桶 → 折线有 3 个点（' + (d || '') + '）');
+// 4) 内联副本真的能用：eval 出 TimelineGeometry，画一个 3 点序列确认产出 sv-* SVG。
+//    （形状的完整断言在 verify-timeline-geometry.mjs，这里只证明内联副本不是死代码。）
+let geoModule = null;
+new Function(inlined + "\n;globalThis.__inline_geo = (typeof module !== 'undefined' && module.exports) ? module.exports : this.TimelineGeometry;")();
+geoModule = globalThis.__inline_geo;
+const svg = geoModule.buildTimeline({
+  points: [{ ordinal: 0, values: { tokens: 100 } }, { ordinal: 1, values: { tokens: 500 } }],
+  classPrefix: "sv",
+});
+ok(svg.includes("<svg") && svg.includes("sv-line"), "内联副本 eval 后能产出 sv-* SVG");
 
-// 调用点必须经过纯函数——防止有人绕开标记块手写几何（绕过即上述断言全部空转）。
-ok(tpl.includes('tl.innerHTML = svTimelineSvg('), '模板调用点走 svTimelineSvg()，不旁路');
-
-if (failed) { console.error('\n' + failed + ' 项断言失败'); process.exit(1); }
-console.log('\n通过。');
+if (failed) { console.error("\n" + failed + " 项断言失败"); process.exit(1); }
+console.log("\n通过。");

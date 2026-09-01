@@ -588,8 +588,29 @@ function timelineSection(session, host) {
     points = hours.map((h, i) => ({ ordinal: i, values: { tokens: h.tokens } }));
     series = [{ name: "tokens", label: "token", cumulative: false }];
     title = "逐小时 token 用量（" + hours.length + " 小时）";
-    // turn_timeline 的 source_order 是原始事件序号（千级），对不上小时桶（十级），
-    // 事件叠加留到「按 source_order 画逐事件时间线」那一档再做——这里只画用量形状。
+    // 事件叠加：Codex 的 findings 带 seq（事件空间、千级）+ severity/evidence，但
+    // 没有时间；turn_timeline 的 source_order 与 finding.seq 同号，且 hour 是宿主侧
+    // 用核心 codex_hour_of 折好的**北京小时桶键**（与 cost_report.hours 同一把尺，
+    // 浏览器不算第二遍北京时间）。这里只做两次字典查表：finding.seq →
+    // turn_timeline.source_order → hour → 桶下标。seq 不在 turn_timeline 里
+    //（该事件不是 5 类生命周期之一）→ 无 hour → 诚实跳过，不画在猜的位置上
+    //（几何层 orphan 跳过同款）。
+    const hourToOrd = {};
+    for (let i = 0; i < hours.length; i++) hourToOrd[hours[i].hour] = i;
+    const tt = Array.isArray(session.turn_timeline) ? session.turn_timeline : [];
+    const seqToHour = {};
+    for (const e of tt) if (e.hour != null && !(e.source_order in seqToHour)) seqToHour[e.source_order] = e.hour;
+    const codexFindings = session.audit && Array.isArray(session.audit.findings) ? session.audit.findings : [];
+    for (const f of codexFindings) {
+      const h = f.seq != null ? seqToHour[f.seq] : null;
+      if (h == null || !(h in hourToOrd)) continue;
+      events.push({
+        ordinal: hourToOrd[h],
+        kind: f.rule || "risk",
+        label: (f.rule || "?") + " " + (f.evidence || ""),
+        severity: f.severity || "info",
+      });
+    }
   } else {
     // DSH：逐请求累计 token（uncached_input + output + cache_read 累加）。
     const reqs = Array.isArray(session.requests) ? session.requests : null;
