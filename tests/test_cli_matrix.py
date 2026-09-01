@@ -437,7 +437,8 @@ class CliMatrix(unittest.TestCase):
                          ["findings", "usage", "requests", "context", "compaction", "waste",
                           "cost", "pre_fork", "pre_fork_cost", "subagents", "skill", "duration",
                           "rule_outcomes", "usage_coverage", "duration_coverage", "skill_coverage",
-                          "subagents_coverage", "compaction_coverage", "waste_coverage"])
+                          "subagents_coverage", "compaction_coverage", "waste_coverage",
+                          "cost_series"])
         # P3 group②：这份日志完全没有 usage_events → Usage 信号零覆盖，
         # 该是 unavailable。
         self.assertEqual(report["usage_coverage"]["status"], "unavailable")
@@ -947,7 +948,8 @@ class CliMatrix(unittest.TestCase):
                          ["findings", "usage", "requests", "context", "compaction", "waste",
                           "cost", "pre_fork", "pre_fork_cost", "subagents", "skill", "duration",
                           "rule_outcomes", "usage_coverage", "duration_coverage", "skill_coverage",
-                          "subagents_coverage", "compaction_coverage", "waste_coverage"])
+                          "subagents_coverage", "compaction_coverage", "waste_coverage",
+                          "cost_series"])
 
     def test_behavior_trajectory_findings(self):
         """轨迹级检测器（SV611–614）在 behavior.jsonl 上全部命中。

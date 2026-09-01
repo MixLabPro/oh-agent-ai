@@ -646,77 +646,718 @@ function detailSection(title) {
   return sec;
 }
 
+// ---------- 交互式会话时间线（DSH） ----------
+//
+// dsh-client TimelinePanel 的全功能对齐（用户反馈「折线图功能不完整」）。数据准备
+// 镜像 dsh-client timeline.ts 的 DSH 适配（valueOf/modelSwitchEvents/事件定位），
+// 渲染壳镜像 TimelinePanel.tsx 的交互集。几何（比例尺/缺口/聚合/事件定位合并）一律
+// 来自共享 timeline.js 的 buildGeometry——这里**不做**任何比例尺/计价数学：token 求和
+// 公式在 core request_metrics 钉死，逐请求费用由信封 cost_series（Part A）透出，
+// 浏览器只读不重算。定位/取值逻辑是展示层第二份（dsh-client 一份、这里一份），属
+// 既有「每前端一份 data-prep」格局，不构成 CLAUDE.md 的「第四份拷贝」（计算无第二份）。
+
+const TL_GEO = { w: 1000, h: 190, curveTop: 10, curveBottom: 150, eventY: 172, x0: 6, x1: 994 };
+// 「慢」事件阈值：工具调用 ≥60s 才算慢（D9 语义的固定阈值；dsh-client 那边由用户在
+// DurationSection 设阈值，工作台固定一个，不额外给设置项）。
+const TL_SLOW_MS = 60 * 1000;
+const TL_SVGNS = "http://www.w3.org/2000/svg";
+const TL_KIND_LABELS = { risk: "风险", waste: "浪费", compaction: "压缩", model: "切换", subagent: "子代理", skill: "skill", slow: "慢" };
+const TL_KIND_ORDER = ["risk", "waste", "compaction", "model", "subagent", "skill", "slow"];
+
+// 每行在当前纵轴下的值。null = 这一行没测到（不是 0）——镜像 dsh-client valueOf。
+//  - context：provider 实测的该次请求上下文占用（原始值，缺值断开）。
+//  - tokens：该次请求消耗的 token 总量（delta，几何层再累加成累计曲线）。
+//  - cost：已经是累计值（信封 cost_series 算好），几何层 'carry' 直接透传。
+function tlValueOf(mode, r, cum) {
+  if (mode === "context") return r.context_tokens != null ? Number(r.context_tokens) : null;
+  if (mode === "cost") return cum != null ? cum : null;
+  const parts = [r.uncached_input_tokens, r.output_tokens, r.cache_read_tokens];
+  if (parts.every((v) => v == null)) return null;
+  return parts.reduce((s, v) => s + (v || 0), 0);
+}
+
+// 模型切换点：相邻两行 model 不同即为一次切换（镜像 dsh-client modelSwitchEvents）。
+function tlModelSwitchEvents(reqs) {
+  const out = [];
+  for (let i = 1; i < reqs.length; i++) {
+    if (reqs[i].model && reqs[i].model !== reqs[i - 1].model) {
+      out.push({ kind: "model", seq: reqs[i].seq, turn: reqs[i].turn, label: reqs[i].model });
+    }
+  }
+  return out;
+}
+
+// 把事件定位到横轴上某个 request 的 seq（points 的 ordinal 就是 r.seq）：
+//   1. seq 精确命中某请求 → 该请求的 seq；
+//   2. seq 落在两个请求之间 → 「进行中的请求」（最后一个 seq ≤ ev.seq），语义同
+//      dsh-client 的 indexForSeq——事件发生在那次请求进行当中，标在该请求上不算猜；
+//   3. 无 seq → 该 turn 的第一个请求（indexForTurn）。
+// 全落空 → null，调用方诚实跳过（定位不到不画在猜的位置上）。
+function tlOrdinalFor(seq, turn, reqs) {
+  if (seq != null) {
+    for (let i = reqs.length - 1; i >= 0; i--) {
+      const s = reqs[i].seq;
+      if (s != null && s <= seq) return s;
+    }
+  }
+  if (turn != null) {
+    for (const r of reqs) if (r.turn === turn && r.seq != null) return r.seq;
+  }
+  return null;
+}
+
+// 第 idx 行在它所属 turn 里是第几次请求 / 该 turn 共几次（镜像 dsh-client
+// requestOrdinal，信息面板的「turn · request n/m · req{seq}」）。turn 空 → null。
+function tlRequestOrdinal(reqs, idx) {
+  const turn = reqs[idx] && reqs[idx].turn;
+  if (turn == null) return null;
+  let n = 0, m = 0;
+  for (let i = 0; i < reqs.length; i++) {
+    if (reqs[i].turn !== turn) continue;
+    m++;
+    if (i <= idx) n++;
+  }
+  return { n, m };
+}
+
+// DSH 单会话时间线的数据准备：points（三档纵轴的 values 一次算好）+ 事件（7 种）。
+// 返回 null = 没有可画数据（调用方不渲染这一节）。全部输入来自 core 发射器：
+// request_metrics（tokens/context）、cost_series（逐请求累计费用）、findings/waste/
+// compaction/subagents/skill/duration（事件源）。
+function dshTimelineData(session) {
+  const reqs = Array.isArray(session.requests) ? session.requests : null;
+  if (!reqs || reqs.length === 0) return null;
+
+  // cost_series（Part A 信封键）：{series:[{request_seq,cumulative}], priced, total}，
+  // 与 requests 同序（request_seq 即 1..n 行号）；每个请求都有累计条目——未计价
+  // （is_peak null / 未知模型）那笔保持上一笔的累计值，几何层 'carry' 沿用不再加。
+  const costSeries = session.cost_series && Array.isArray(session.cost_series.series)
+    ? session.cost_series.series : [];
+  const cumByReqSeq = new Map();
+  for (const s of costSeries) if (s && s.request_seq != null) cumByReqSeq.set(s.request_seq, s.cumulative);
+  const hasCost = costSeries.length > 0;
+
+  const points = reqs.map((r, i) => ({
+    ordinal: r.seq != null ? r.seq : i,
+    task_id: r.turn != null ? r.turn : null,
+    values: {
+      context: tlValueOf("context", r, null),
+      tokens: tlValueOf("tokens", r, null),
+      cost: tlValueOf("cost", r, cumByReqSeq.get(i + 1) ?? null),
+    },
+  }));
+
+  const hasContext = reqs.some((r) => r.context_tokens != null);
+  const hasTokens = reqs.some((r) =>
+    r.uncached_input_tokens != null || r.output_tokens != null || r.cache_read_tokens != null);
+
+  // 事件定位（7 种）。targetId 指向 findingsSection 里对应 finding 行的 DOM id，
+  // 点击/回车可跳转——与 dsh-client 的 onFocus 同义；没有对应行的种 targetId 为
+  // null，点击是空操作（仍可 hover/焦点读取）。
+  const events = [];
+  const pushEv = (kind, seq, turn, label, severity, targetId, skillMode) => {
+    const ord = tlOrdinalFor(seq, turn, reqs);
+    if (ord == null) return;
+    events.push({ kind, ordinal: ord, turn: turn != null ? turn : null, label, severity, targetId, skillMode });
+  };
+
+  (Array.isArray(session.findings) ? session.findings : [])
+    .forEach((f, i) => pushEv("risk", f.seq, f.turn,
+      (f.rule || "?") + " " + (f.evidence || ""), f.severity || "info", "tl-finding-" + i, null));
+
+  (Array.isArray(session.waste) ? session.waste : [])
+    .forEach((w) => pushEv("waste", w.seq, w.turn,
+      (w.rule || "?") + " " + fmtTokens(w.waste_tokens) + " token", w.severity || "info", null, null));
+
+  if (session.compaction) {
+    (Array.isArray(session.compaction.compactions) ? session.compaction.compactions : [])
+      .forEach((c) => pushEv("compaction", c.start_seq, c.turn, "压缩", null, null, null));
+    (Array.isArray(session.compaction.prunes) ? session.compaction.prunes : [])
+      .forEach((p) => pushEv("compaction", p.seq, p.turn,
+        "剪枝 " + fmtTokens(p.shadowed_token_count) + " token", null, null, null));
+  }
+
+  (Array.isArray(session.subagents) ? session.subagents : [])
+    .forEach((a) => pushEv("subagent", a.seq, a.turn,
+      "子代理 " + (a.description || a.agent_id || "—"), null, null, null));
+
+  (Array.isArray(session.skill) ? session.skill : []).forEach((sk) => {
+    // skill 行带 request_seq（core 回填的 1..n 行号）→ 直接精确到那个请求，最可靠；
+    // 旧会话没有该字段才退回 seq/turn 定位。
+    let ord = null;
+    if (sk.request_seq != null) {
+      const r = reqs[sk.request_seq - 1];
+      if (r && r.seq != null) ord = r.seq;
+    }
+    if (ord == null) ord = tlOrdinalFor(sk.seq, sk.turn, reqs);
+    if (ord == null) return;
+    events.push({
+      kind: "skill", ordinal: ord, turn: sk.turn != null ? sk.turn : null,
+      label: "skill " + (sk.name || "?"), targetId: null,
+      skillMode: sk.trigger_mode === "explicit" ? "explicit" : "model_selected",
+    });
+  });
+
+  // slow ← duration.tool_calls 里 ≥TL_SLOW_MS 的慢调用（十字形状，D9 语义）。
+  const calls = session.duration && Array.isArray(session.duration.tool_calls)
+    ? session.duration.tool_calls : [];
+  for (const c of calls) {
+    if (c.duration_ms == null || c.duration_ms < TL_SLOW_MS) continue;
+    pushEv("slow", c.seq, c.turn,
+      (c.tool_name || "?") + " " + (c.duration_ms / 1000).toFixed(1) + "s", null, null, null);
+  }
+
+  for (const m of tlModelSwitchEvents(reqs)) pushEv("model", m.seq, m.turn, m.label, null, null, null);
+
+  const modes = [];
+  if (hasTokens) modes.push({ id: "tokens", label: "Token", cumulative: true });
+  if (hasContext) modes.push({ id: "context", label: "上下文", cumulative: false });
+  if (hasCost) modes.push({ id: "cost", label: "费用", cumulative: "carry" });
+  // 三档全空（requests 在但哪档都没测到）→ 没有可画的纵轴，整节不渲染，不拿
+  // 空壳冒充「无数据」。
+  if (modes.length === 0) return null;
+
+  return {
+    points, events, reqs, modes,
+    costMeta: hasCost && session.cost_series
+      ? { priced: session.cost_series.priced != null ? session.cost_series.priced : 0,
+          total: session.cost_series.total != null ? session.cost_series.total : reqs.length }
+      : null,
+  };
+}
+
+// —— SVG 构造小助手（事件形状/轴标签） ——
+
+function tlSvgEl(tag) { return document.createElementNS(TL_SVGNS, tag); }
+
+function tlSvgText(svg, cls, x, y, text) {
+  const t = tlSvgEl("text");
+  t.setAttribute("class", cls);
+  t.setAttribute("x", x);
+  t.setAttribute("y", y);
+  t.textContent = text;
+  svg.appendChild(t);
+  return t;
+}
+
+// 7 种事件形状（镜像 TimelinePanel 的 EVENT_STYLE）：
+//   compaction 方块（7×7 圆角） / model 薄 tick（1.5×10） / subagent 三角 /
+//   skill 菱形（explicit）或圆（model_selected） / slow 十字 / 其余圆点。
+// 颜色靠 CSS 类（.tl-ev-<kind>[.tl-sev-<severity>] 设 color，形状 fill/stroke
+// 用 currentColor）——图例开关的颜色与图表标记同源。
+function tlAppendShape(m, ev, g) {
+  const x = ev.x, y = g.eventY;
+  if (ev.kind === "compaction") {
+    const r = tlSvgEl("rect");
+    r.setAttribute("x", x - 3.5); r.setAttribute("y", y - 3.5);
+    r.setAttribute("width", 7); r.setAttribute("height", 7);
+    r.setAttribute("rx", 1);
+    m.appendChild(r);
+  } else if (ev.kind === "model") {
+    const r = tlSvgEl("rect");
+    r.setAttribute("x", x - 0.75); r.setAttribute("y", y - 5);
+    r.setAttribute("width", 1.5); r.setAttribute("height", 10);
+    m.appendChild(r);
+  } else if (ev.kind === "subagent") {
+    const p = tlSvgEl("path");
+    p.setAttribute("d", "M" + x + " " + (y - 5) + "l4.5 8h-9z");
+    m.appendChild(p);
+  } else if (ev.kind === "skill") {
+    if (ev.skillMode === "explicit") {
+      const p = tlSvgEl("path");
+      p.setAttribute("d", "M" + x + " " + (y - 5) + "l4.5 5l-4.5 5l-4.5-5z");
+      m.appendChild(p);
+    } else {
+      const c = tlSvgEl("circle");
+      c.setAttribute("cx", x); c.setAttribute("cy", y);
+      c.setAttribute("r", ev.count > 1 ? 5 : 4);
+      m.appendChild(c);
+    }
+  } else if (ev.kind === "slow") {
+    for (const [dx, dy, w, h] of [[-4, -1, 8, 2], [-1, -4, 2, 8]]) {
+      const r = tlSvgEl("rect");
+      r.setAttribute("x", x + dx); r.setAttribute("y", y + dy);
+      r.setAttribute("width", w); r.setAttribute("height", h);
+      m.appendChild(r);
+    }
+  } else {
+    const c = tlSvgEl("circle");
+    c.setAttribute("cx", x); c.setAttribute("cy", y);
+    c.setAttribute("r", ev.count > 1 ? 5 : 4);
+    m.appendChild(c);
+  }
+  for (const child of m.children) child.setAttribute("class", "tl-ev-shape");
+}
+
+// 交互渲染壳（镜像 TimelinePanel.tsx）：模式切换 / 图例开关 / 悬停+钉住游标 /
+// 键盘漫游 / 常驻信息面板（role=status）/ 脚注 / 小屏折叠摘要。状态闭包内：
+// 改 mode/hidden → 重算几何重画 SVG；游标/activeEvent → 只更新游标层与信息面板。
+function renderInteractiveTimeline(data) {
+  const { points, events, reqs, modes, costMeta } = data;
+  const state = {
+    mode: modes.length ? modes[0].id : "tokens",
+    hidden: {}, hover: null, pinned: null, activeEv: null, roving: 0, expanded: false,
+  };
+  const modeMeta = {};
+  for (const m of modes) modeMeta[m.id] = m;
+
+  // —— 结构 ——
+  const shell = el("div", "tl-shell");
+
+  const summary = el("div", "tl-summary");
+  const summaryLine = el("span", "tl-summary-line");
+  const expandBtn = el("button", "tl-expand");
+  expandBtn.type = "button";
+  expandBtn.setAttribute("aria-expanded", "false");
+  const evList = el("div", "tl-summary-list");
+  const targetable = events.filter((e) => e.targetId !== null);
+  if (targetable.length) {
+    const hd = el("div", "tl-summary-list-head");
+    hd.textContent = "事件列表（点击跳转 findings）";
+    evList.appendChild(hd);
+    for (const e of targetable) {
+      const btn = el("button", "tl-summary-list-item");
+      btn.type = "button";
+      btn.textContent = e.label + (e.count > 1 ? " ×" + e.count : "") + (e.turn != null ? " · T" + e.turn : "");
+      btn.addEventListener("click", () => focusFinding(e.targetId));
+      evList.appendChild(btn);
+    }
+  }
+  summary.appendChild(summaryLine);
+  summary.appendChild(expandBtn);
+  summary.appendChild(evList);
+  shell.appendChild(summary);
+
+  const head = el("div", "tl-head");
+  const sub = el("div", "tl-sub");
+  sub.textContent = "纵轴切换 · 事件标记在任意纵轴下保持同一位置";
+  head.appendChild(sub);
+  const modesEl = el("div", "tl-modes");
+  modesEl.setAttribute("role", "group");
+  for (const m of modes) {
+    const b = el("button", "tl-mode-btn");
+    b.type = "button";
+    b.textContent = m.label;
+    b.setAttribute("aria-pressed", state.mode === m.id ? "true" : "false");
+    b.addEventListener("click", () => {
+      if (state.mode === m.id) return;
+      state.mode = m.id;
+      for (const bb of modesEl.querySelectorAll(".tl-mode-btn")) {
+        bb.setAttribute("aria-pressed", bb === b ? "true" : "false");
+      }
+      renderChart();
+    });
+    modesEl.appendChild(b);
+  }
+  head.appendChild(modesEl);
+  shell.appendChild(head);
+
+  const legend = el("div", "tl-legend");
+  const curveItem = el("span", "tl-legend-item");
+  curveItem.appendChild(el("i", "tl-legend-swatch tl-legend-curve"));
+  curveItem.appendChild(document.createTextNode("曲线"));
+  legend.appendChild(curveItem);
+  const legendBtns = {};
+  for (const k of TL_KIND_ORDER) {
+    if (!events.some((e) => e.kind === k)) continue;
+    const btn = el("button", "tl-legend-btn");
+    btn.type = "button";
+    btn.dataset.kind = k;
+    btn.appendChild(el("i", "tl-legend-swatch tl-ev-" + k));
+    btn.appendChild(document.createTextNode(TL_KIND_LABELS[k]));
+    btn.setAttribute("aria-pressed", "true");
+    legend.appendChild(btn);
+    legendBtns[k] = btn;
+  }
+  shell.appendChild(legend);
+
+  const chartWrap = el("div", "tl-chartwrap");
+  shell.appendChild(chartWrap);
+
+  const info = el("div", "tl-info");
+  info.setAttribute("role", "status");
+  shell.appendChild(info);
+
+  const foot = el("div", "tl-foot");
+  shell.appendChild(foot);
+
+  // —— 几何与渲染状态 ——
+  let tl = null;
+  let cursorG = null, cursorLine = null, cursorDot = null;
+  let markers = [];
+
+  function visibleEvents() { return events.filter((e) => !state.hidden[e.kind]); }
+
+  function build(mode) {
+    const meta = modeMeta[mode] || { label: mode, cumulative: false };
+    const spec = {
+      points,
+      events: visibleEvents(),
+      series: [{ name: mode, label: meta.label, cumulative: meta.cumulative }],
+      geometry: TL_GEO,
+    };
+    // context 模式：context_window 作为显式纵轴上限（曲线画「占了多少窗口」不是
+    // 数据峰值，同 TimelinePanel）；全缺不传，几何退回数据最大值并置 yMaxIsData，
+    // 脚注如实说「无窗口上限」。
+    if (mode === "context") {
+      const maxWin = reqs.reduce((a, r) => Math.max(a, r.context_window || 0), 0);
+      if (maxWin > 0) spec.yMax = maxWin;
+    }
+    return window.TimelineGeometry.buildGeometry(spec, { maxBuckets: 220 });
+  }
+
+  function cursorAt() {
+    const i = state.pinned != null ? state.pinned : state.hover;
+    if (i == null || !tl || i < 0 || i >= tl.points.length) return null;
+    return tl.points[i];
+  }
+
+  function refreshCursorInfo() {
+    const cur = cursorAt();
+    if (cursorG) {
+      if (cur) {
+        cursorG.style.display = "";
+        const g = tl.geometry;
+        cursorLine.setAttribute("x1", cur.x); cursorLine.setAttribute("x2", cur.x);
+        cursorLine.setAttribute("y1", g.curveTop); cursorLine.setAttribute("y2", g.eventY + 8);
+        if (state.pinned !== null) cursorLine.removeAttribute("stroke-dasharray");
+        else cursorLine.setAttribute("stroke-dasharray", "3 3");
+        cursorDot.setAttribute("cx", cur.x); cursorDot.setAttribute("cy", cur.y);
+        cursorDot.setAttribute("r", state.pinned !== null ? "4.5" : "3.5");
+      } else {
+        cursorG.style.display = "none";
+      }
+    }
+    updateInfo();
+    updateFoot();
+    updateSummary();
+  }
+
+  function updateInfo() {
+    const parts = [];
+    if (state.activeEv != null && tl && state.activeEv < tl.events.length) {
+      // 事件优先（游标信息退后）——同 TimelinePanel 的优先级。图例隐藏的种不再
+      // 出现在 tl.events 里，activeEv 在 renderChart 里已重置。
+      const ev = tl.events[state.activeEv];
+      parts.push(ev.label + (ev.count > 1 ? " ×" + ev.count : ""));
+      if (ev.severity) parts.push(ev.severity);
+      const pIdx = window.TimelineGeometry.nearestPoint(tl.points, ev.x);
+      const rowIdx = pIdx >= 0 ? tl.points[pIdx].idx : null;
+      const ord = rowIdx != null ? tlRequestOrdinal(reqs, rowIdx) : null;
+      if (ord && ev.turn != null) {
+        parts.push("T" + ev.turn + " · request " + ord.n + "/" + ord.m +
+          (reqs[rowIdx] && reqs[rowIdx].seq != null ? " · req" + reqs[rowIdx].seq : ""));
+      } else if (ev.turn != null) {
+        parts.push("T" + ev.turn);
+      }
+      if (ev.targetId !== null) parts.push("回车跳转 findings");
+    } else {
+      const cur = cursorAt();
+      const rowIdx = cur ? cur.idx : null;
+      if (rowIdx != null && reqs[rowIdx]) {
+        const r = reqs[rowIdx];
+        const ord = tlRequestOrdinal(reqs, rowIdx);
+        if (ord && r.turn != null) {
+          parts.push("T" + r.turn + " · request " + ord.n + "/" + ord.m +
+            (r.seq != null ? " · req" + r.seq : ""));
+        } else {
+          parts.push("req" + r.request_seq + (r.seq != null ? " · seq" + r.seq : ""));
+        }
+        const v = tl && tl.cols[0] ? tl.cols[0].values[cur.idx] : null;
+        if (v != null) {
+          if (state.mode === "cost") parts.push(fmtMoney(v));
+          else {
+            parts.push(fmtTokens(v) +
+              (state.mode === "context" && r.context_window ? " / " + fmtTokens(r.context_window) : ""));
+          }
+        }
+        if (r.model) parts.push(String(r.model).split("/").pop());
+        const k = cur.hi - cur.lo;
+        if (k > 1) parts.push(k + " 个请求合并");
+        const here = tl.events.filter((e) => Math.abs(e.x - cur.x) < 3);
+        if (here.length > 0) {
+          parts.push("事件 " + here.map((e) => e.label + (e.count > 1 ? " ×" + e.count : "")).join("、"));
+        }
+        if (state.pinned !== null) parts.push("已固定");
+      }
+    }
+    info.classList.toggle("tl-info-pinned", state.pinned !== null);
+    info.textContent = parts.length > 0
+      ? parts.join(" · ")
+      : "悬停 / 点击 / ←→ 查看请求；Tab 漫游事件标记";
+  }
+
+  function updateFoot() {
+    foot.innerHTML = "";
+    if (!tl) return;
+    const parts = [];
+    parts.push(tl.buckets < tl.total
+      ? tl.total + " 个请求聚合为 " + tl.buckets + " 桶"
+      : tl.total + " 个请求");
+    if (tl.measured < tl.total) parts.push((tl.total - tl.measured) + " 行未测到");
+    if (tl.gaps > 0) parts.push("曲线 " + tl.gaps + " 处断开");
+    if (state.mode === "context" && tl.yMaxIsData) parts.push("无上下文窗口上限，按数据峰值缩放");
+    if (state.mode === "cost" && costMeta && costMeta.priced < costMeta.total) {
+      parts.push((costMeta.total - costMeta.priced) + " 笔未计价（缺时间戳），累计为下限");
+    }
+    for (const p of parts) {
+      const s = el("span", "tl-foot-item");
+      s.textContent = p;
+      foot.appendChild(s);
+    }
+  }
+
+  function updateSummary() {
+    if (!tl) { summaryLine.textContent = ""; expandBtn.textContent = "展开时间线"; return; }
+    const peak = state.mode === "cost" ? fmtMoney(tl.yMax) : fmtTokens(tl.yMax);
+    const anomalies = events.filter((e) => e.kind === "risk").length;
+    summaryLine.textContent = tl.total + " 个请求 · 峰值 " + peak + " · " + anomalies + " 条风险";
+    expandBtn.textContent = state.expanded ? "收起时间线" : "展开时间线";
+    expandBtn.setAttribute("aria-expanded", state.expanded ? "true" : "false");
+    shell.classList.toggle("tl-expanded", state.expanded);
+  }
+
+  function focusFinding(id) {
+    const target = document.getElementById(id);
+    if (!target) return;
+    if (typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    target.classList.add("tl-finding-flash");
+    setTimeout(() => target.classList.remove("tl-finding-flash"), 1800);
+  }
+
+  function onPointer(evt) {
+    if (state.pinned !== null || !tl) return;
+    const g = tl.geometry;
+    const box = evt.currentTarget.getBoundingClientRect();
+    if (!box || box.width === 0) return;
+    const vx = ((evt.clientX - box.left) / box.width) * g.w;
+    const i = window.TimelineGeometry.nearestPoint(tl.points, vx);
+    if (i >= 0) { state.hover = i; refreshCursorInfo(); }
+  }
+
+  function moveCursor(delta) {
+    if (!tl) return;
+    const last = tl.points.length - 1;
+    const base = state.pinned != null ? state.pinned : (state.hover != null ? state.hover : 0);
+    const next = Math.max(0, Math.min(last, base + delta));
+    state.pinned = next;
+    state.hover = next;
+    refreshCursorInfo();
+  }
+
+  function moveEventFocus(next) {
+    if (!tl || tl.events.length === 0) return;
+    const clamped = Math.max(0, Math.min(tl.events.length - 1, next));
+    state.roving = clamped;
+    for (let i = 0; i < markers.length; i++) {
+      markers[i].setAttribute("tabindex", i === clamped ? "0" : "-1");
+    }
+    const ev = tl.events[clamped];
+    const pIdx = window.TimelineGeometry.nearestPoint(tl.points, ev.x);
+    if (pIdx >= 0) { state.pinned = pIdx; state.hover = pIdx; }
+    setActiveEv(clamped);
+    if (markers[clamped] && typeof markers[clamped].focus === "function") markers[clamped].focus();
+    if (ev.targetId !== null) focusFinding(ev.targetId);
+  }
+
+  function setActiveEv(i) {
+    state.activeEv = i;
+    refreshCursorInfo();
+  }
+
+  function renderChart() {
+    tl = build(state.mode);
+    markers = [];
+    chartWrap.innerHTML = "";
+    if (tl === null) {
+      const na = el("div", "tl-empty");
+      na.textContent = "该纵轴没有可画的数据";
+      chartWrap.appendChild(na);
+      cursorG = cursorLine = cursorDot = null;
+      state.activeEv = null;
+      refreshCursorInfo();
+      return;
+    }
+    const g = tl.geometry;
+    const yFor = (v) => g.curveBottom - (v / tl.yMax) * (g.curveBottom - g.curveTop);
+
+    const svg = tlSvgEl("svg");
+    svg.setAttribute("class", "tl-chart");
+    svg.setAttribute("viewBox", "0 0 " + g.w + " " + g.h);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("tabindex", "0");
+    svg.setAttribute("aria-label", "会话时间线（" + (modeMeta[state.mode] ? modeMeta[state.mode].label : state.mode) + " 纵轴）");
+
+    for (const frac of [0, 0.5, 1]) {
+      const line = tlSvgEl("line");
+      line.setAttribute("class", "tl-grid");
+      line.setAttribute("x1", g.x0); line.setAttribute("x2", g.x1);
+      line.setAttribute("y1", yFor(frac)); line.setAttribute("y2", yFor(frac));
+      svg.appendChild(line);
+    }
+    tlSvgText(svg, "tl-axis", g.x0, yFor(1) - 4,
+      state.mode === "cost" ? fmtMoney(tl.yMax) : fmtTokens(tl.yMax));
+    tlSvgText(svg, "tl-axis", g.x0, g.curveBottom + 11, "0");
+
+    if (tl.area) {
+      const area = tlSvgEl("path");
+      area.setAttribute("class", "tl-area");
+      area.setAttribute("d", tl.area);
+      svg.appendChild(area);
+    }
+    const path = tlSvgEl("path");
+    path.setAttribute("class", "tl-line");
+    path.setAttribute("d", tl.path);
+    svg.appendChild(path);
+
+    const cg = tlSvgEl("g");
+    cg.setAttribute("class", "tl-cursor");
+    cg.setAttribute("aria-hidden", "true");
+    cursorG = cg;
+    cursorLine = tlSvgEl("line");
+    cursorDot = tlSvgEl("circle");
+    cg.appendChild(cursorLine);
+    cg.appendChild(cursorDot);
+    svg.appendChild(cg);
+
+    state.roving = Math.min(state.roving, tl.events.length - 1);
+    state.activeEv = null;
+    for (let i = 0; i < tl.events.length; i++) {
+      const ev = tl.events[i];
+      const m = tlSvgEl("g");
+      const sevCls = ev.severity && ev.kind === "risk" ? " tl-sev-" + ev.severity : "";
+      m.setAttribute("class", "tl-ev tl-ev-" + ev.kind + sevCls);
+      m.setAttribute("data-kind", ev.kind);
+      m.setAttribute("tabindex", i === state.roving ? "0" : "-1");
+      m.setAttribute("aria-label",
+        ev.label + (ev.count > 1 ? " ×" + ev.count : "") + (ev.turn != null ? " · T" + ev.turn : ""));
+      const clickable = ev.targetId !== null;
+      if (clickable) m.setAttribute("role", "button");
+      const title = tlSvgEl("title");
+      title.textContent = m.getAttribute("aria-label");
+      m.appendChild(title);
+      tlAppendShape(m, ev, g);
+      m.addEventListener("focus", () => setActiveEv(i));
+      m.addEventListener("mouseenter", () => setActiveEv(i));
+      m.addEventListener("mouseleave", () => { if (state.activeEv === i) setActiveEv(null); });
+      m.addEventListener("blur", () => { if (state.activeEv === i) setActiveEv(null); });
+      m.addEventListener("click", (evt) => {
+        evt.stopPropagation();
+        setActiveEv(i);
+        if (clickable) focusFinding(ev.targetId);
+      });
+      m.addEventListener("keydown", (evt) => {
+        if (evt.key === "ArrowRight") { evt.preventDefault(); evt.stopPropagation(); moveEventFocus(i + 1); }
+        else if (evt.key === "ArrowLeft") { evt.preventDefault(); evt.stopPropagation(); moveEventFocus(i - 1); }
+        else if (evt.key === "Home") { evt.preventDefault(); evt.stopPropagation(); moveEventFocus(0); }
+        else if (evt.key === "End") { evt.preventDefault(); evt.stopPropagation(); moveEventFocus(tl.events.length - 1); }
+        else if ((evt.key === "Enter" || evt.key === " ") && clickable) {
+          evt.preventDefault(); evt.stopPropagation(); setActiveEv(i); focusFinding(ev.targetId);
+        } else if (evt.key === "Escape") {
+          evt.stopPropagation(); state.pinned = null; state.hover = null; setActiveEv(null);
+        }
+      });
+      markers.push(m);
+      svg.appendChild(m);
+    }
+
+    for (const tk of tl.turnTicks) tlSvgText(svg, "tl-axis", tk.x, g.h - 1, tk.label);
+
+    svg.addEventListener("mousemove", onPointer);
+    svg.addEventListener("mouseleave", () => {
+      if (state.pinned == null) { state.hover = null; refreshCursorInfo(); }
+    });
+    svg.addEventListener("click", (evt) => {
+      const box = svg.getBoundingClientRect();
+      if (!box || box.width === 0) return;
+      const i = window.TimelineGeometry.nearestPoint(tl.points, ((evt.clientX - box.left) / box.width) * g.w);
+      if (i >= 0) {
+        state.pinned = state.pinned === i ? null : i;
+        state.hover = i;
+        refreshCursorInfo();
+      }
+    });
+    svg.addEventListener("keydown", (evt) => {
+      if (evt.key === "ArrowRight") { evt.preventDefault(); moveCursor(1); }
+      else if (evt.key === "ArrowLeft") { evt.preventDefault(); moveCursor(-1); }
+      else if (evt.key === "Home") { evt.preventDefault(); state.pinned = 0; state.hover = 0; refreshCursorInfo(); }
+      else if (evt.key === "End") { evt.preventDefault(); const l = tl.points.length - 1; state.pinned = l; state.hover = l; refreshCursorInfo(); }
+      else if (evt.key === "Escape") { state.pinned = null; state.hover = null; refreshCursorInfo(); }
+    });
+
+    chartWrap.appendChild(svg);
+    // 测试钩子：jsdom 验证读它（不进任何决策路径）。
+    if (window.__wbTimeline) window.__wbTimeline.lastGeo = tl;
+    refreshCursorInfo();
+  }
+
+  expandBtn.addEventListener("click", () => {
+    state.expanded = !state.expanded;
+    updateSummary();
+  });
+
+  // 测试钩子：jsdom 验证读它（不进任何决策路径）。
+  if (!window.__wbTimeline) window.__wbTimeline = {};
+  window.__wbTimeline.data = data;
+
+  renderChart();
+  return shell;
+}
+
+// DSH 分支入口：数据准备 + 渲染壳。timeline.js 没加载 → 不渲染这一节，不是报错。
+function dshTimelineSection(session) {
+  if (!window.TimelineGeometry || !window.TimelineGeometry.buildGeometry) return null;
+  const data = dshTimelineData(session);
+  if (!data) return null;
+  const sec = detailSection("会话时间线");
+  sec.appendChild(renderInteractiveTimeline(data));
+  return sec;
+}
+
 // 会话时间线：把宿主 envelope 里的用量序列 + 事件投影到通用几何
 // （src-tauri/ui/timeline.js 的 TimelineGeometry.buildTimeline，spec §4 契约）。
 // 纯数据准备 + 渲染壳——比例尺/缺口/事件保真都在 timeline.js 的纯函数里，这里只
 // 负责把 DSH `requests` / Codex `cost_report.hours` 映射成 points/events。
 function timelineSection(session, host) {
+  // DSH 走上面的交互式渲染壳（3 纵轴/7 事件/游标/键盘，用户反馈「功能不完整」的
+  // 对象）；Codex 信封没有逐请求 context/cost，升级对它是无中生有，保持静态图。
+  if (host === "dsh") return dshTimelineSection(session);
+
   const geo = window.TimelineGeometry && window.TimelineGeometry.buildTimeline;
   if (!geo) return null; // timeline.js 没加载 → 不渲染这一节，不是报错
 
   let points = null, events = [], series = null, title = "会话时间线";
-
-  if (host === "codex") {
-    // Codex：逐小时 token 桶（cost_report.hours 已是北京时间的逐小时 delta）。
-    const hours = session.cost_report && Array.isArray(session.cost_report.hours) ? session.cost_report.hours : null;
-    if (!hours || hours.length === 0) return null;
-    points = hours.map((h, i) => ({ ordinal: i, values: { tokens: h.tokens } }));
-    series = [{ name: "tokens", label: "token", cumulative: false }];
-    title = "逐小时 token 用量（" + hours.length + " 小时）";
-    // 事件叠加：Codex 的 findings 带 seq（事件空间、千级）+ severity/evidence，但
-    // 没有时间；turn_timeline 的 source_order 与 finding.seq 同号，且 hour 是宿主侧
-    // 用核心 codex_hour_of 折好的**北京小时桶键**（与 cost_report.hours 同一把尺，
-    // 浏览器不算第二遍北京时间）。这里只做两次字典查表：finding.seq →
-    // turn_timeline.source_order → hour → 桶下标。seq 不在 turn_timeline 里
-    //（该事件不是 5 类生命周期之一）→ 无 hour → 诚实跳过，不画在猜的位置上
-    //（几何层 orphan 跳过同款）。
-    const hourToOrd = {};
-    for (let i = 0; i < hours.length; i++) hourToOrd[hours[i].hour] = i;
-    const tt = Array.isArray(session.turn_timeline) ? session.turn_timeline : [];
-    const seqToHour = {};
-    for (const e of tt) if (e.hour != null && !(e.source_order in seqToHour)) seqToHour[e.source_order] = e.hour;
-    const codexFindings = session.audit && Array.isArray(session.audit.findings) ? session.audit.findings : [];
-    for (const f of codexFindings) {
-      const h = f.seq != null ? seqToHour[f.seq] : null;
-      if (h == null || !(h in hourToOrd)) continue;
-      events.push({
-        ordinal: hourToOrd[h],
-        kind: f.rule || "risk",
-        label: (f.rule || "?") + " " + (f.evidence || ""),
-        severity: f.severity || "info",
-      });
-    }
-  } else {
-    // DSH：逐请求累计 token（uncached_input + output + cache_read 累加）。
-    const reqs = Array.isArray(session.requests) ? session.requests : null;
-    if (!reqs || reqs.length === 0) return null;
-    points = reqs.map((r) => ({
-      ordinal: r.seq,           // 用 DSH seq 当 ordinal，findings 的 seq 才能对上
-      task_id: r.turn != null ? r.turn : null,
-      values: {
-        tokens: (r.uncached_input_tokens || 0) + (r.output_tokens || 0) + (r.cache_read_tokens || 0),
-      },
-    }));
-    series = [{ name: "tokens", label: "累计 token", cumulative: true }];
-    title = "逐请求累计 token（" + reqs.length + " 个请求）";
-    // findings 当事件标记。finding 的 seq 是 DSH **事件流**的 seq（9807 条），而
-    // requests 只是其中 284 个 request 事件的稀疏子集——finding.seq 直接对不上
-    // request.seq（实测 440338/445285 都不在任何 request 里）。改按 turn 定位：
-    // finding.turn → 该 turn 的第一个 request 的 seq，找不到才退回 seq 精确匹配。
-    const turnToSeq = {};
-    for (const r of reqs) if (r.turn != null && !(r.turn in turnToSeq)) turnToSeq[r.turn] = r.seq;
-    const findings = Array.isArray(session.findings) ? session.findings : [];
-    for (const f of findings) {
-      let ord = null;
-      if (f.turn != null && turnToSeq[f.turn] != null) ord = turnToSeq[f.turn];
-      else if (f.seq != null) ord = f.seq;
-      if (ord == null) continue;
-      events.push({
-        ordinal: ord, kind: "risk",
-        label: (f.rule || "?") + " " + (f.evidence || ""),
-        severity: f.severity || "info",
-      });
-    }
+  // Codex：逐小时 token 桶（cost_report.hours 已是北京时间的逐小时 delta）。
+  const hours = session.cost_report && Array.isArray(session.cost_report.hours) ? session.cost_report.hours : null;
+  if (!hours || hours.length === 0) return null;
+  points = hours.map((h, i) => ({ ordinal: i, values: { tokens: h.tokens } }));
+  series = [{ name: "tokens", label: "token", cumulative: false }];
+  title = "逐小时 token 用量（" + hours.length + " 小时）";
+  // 事件叠加：Codex 的 findings 带 seq（事件空间、千级）+ severity/evidence，但
+  // 没有时间；turn_timeline 的 source_order 与 finding.seq 同号，且 hour 是宿主侧
+  // 用核心 codex_hour_of 折好的**北京小时桶键**（与 cost_report.hours 同一把尺，
+  // 浏览器不算第二遍北京时间）。这里只做两次字典查表：finding.seq →
+  // turn_timeline.source_order → hour → 桶下标。seq 不在 turn_timeline 里
+  //（该事件不是 5 类生命周期之一）→ 无 hour → 诚实跳过，不画在猜的位置上
+  //（几何层 orphan 跳过同款）。
+  const hourToOrd = {};
+  for (let i = 0; i < hours.length; i++) hourToOrd[hours[i].hour] = i;
+  const tt = Array.isArray(session.turn_timeline) ? session.turn_timeline : [];
+  const seqToHour = {};
+  for (const e of tt) if (e.hour != null && !(e.source_order in seqToHour)) seqToHour[e.source_order] = e.hour;
+  const codexFindings = session.audit && Array.isArray(session.audit.findings) ? session.audit.findings : [];
+  for (const f of codexFindings) {
+    const h = f.seq != null ? seqToHour[f.seq] : null;
+    if (h == null || !(h in hourToOrd)) continue;
+    events.push({
+      ordinal: hourToOrd[h],
+      kind: f.rule || "risk",
+      label: (f.rule || "?") + " " + (f.evidence || ""),
+      severity: f.severity || "info",
+    });
   }
 
   const svg = geo({ points, events, series, width: 800, height: 130, pad: 26 });
@@ -754,8 +1395,11 @@ function findingsSection(session) {
   const findings = Array.isArray(session.findings) ? session.findings : codexAudit;
   if (!findings || findings.length === 0) return null;
   const sec = detailSection("findings（" + findings.length + "）");
-  for (const f of findings) {
+  for (let i = 0; i < findings.length; i++) {
+    const f = findings[i];
     const row = el("div", "detail-finding");
+    // 交互时间线的 risk 事件带同款 id（tl-finding-<i>），点击/回车跳转过来。
+    row.id = "tl-finding-" + i;
     row.appendChild(sevBadge(f.severity));
     const txt = el("span");
     txt.textContent = (f.rule || "—") + "　" + (f.evidence || "");

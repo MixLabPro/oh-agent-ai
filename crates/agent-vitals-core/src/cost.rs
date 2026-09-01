@@ -2,9 +2,10 @@
 //!
 //! 这里是 cost 计算在 core crate 里的单一实现（原来住在二进制 `src/agent/cost.rs`，
 //! preflight Phase 0-1 搬迁过来）：CLI 的 `cost_report`/`cost_block`、未来的 Tauri
-//! 菜单栏的 `priced_day`、以及任何"按月查钱"的 surface 都从这里取数，**不长第四份
-//! 拷贝**（CLAUDE.md「token_by_date_model/priced_day 在 core 里正是为了让 Tauri 菜单栏
-//! 复用」的落点）。与 `scripts/agent_vitals/agent/cost.py` 逐字节一致，由
+//! 菜单栏的 `priced_day`、逐请求费用序列 `cost_series`、以及任何"按月查钱"的
+//! surface 都从这里取数，**不长第四份拷贝**（CLAUDE.md「token_by_date_model/
+//! priced_day 在 core 里正是为了让 Tauri 菜单栏复用」的落点）。与
+//! `scripts/agent_vitals/agent/cost.py` 逐字节一致，由
 //! `tests/test_cli_matrix.py` 的 `both()` 差分看守。
 //!
 //! 价格表的单一真相源是 `scripts/agent_vitals/pricing.json`（这里 `include_str!`
@@ -251,6 +252,63 @@ pub fn cost_report(usage: &Value, pricing: &Value) -> Option<Value> {
         out["by_source_cost"] = bsc;
     }
     Some(out)
+}
+
+/// 逐请求费用序列（FR-04 的「费用」纵轴，工作台单会话图与 dsh-client 审计 tab 共用）。
+///
+/// 语义逐行照搬 dsh-client 宿主 `costSeriesFrom`（`dsh-client/src/host/index.ts`）——
+/// 这里、`scripts/agent_vitals/agent/cost.py::cost_series`、以及那段 TS 是**同一规则的
+/// 三个镜像**，锁步一致（cost 是四路锁步的第 N 面：见 CLAUDE.md「cost 计算本身也是
+/// 一层锁步」）。
+///
+/// - 每笔 request 用 `resolve_card(model, providers[model], pricing)` 定价格卡；
+///   `is_peak` 为 null（宿主没上报时间戳）时**这一笔不计价**——累计值保持、`priced`
+///   不增，而不是按空闲价猜一档（猜出来的单价就是编数字）。累计曲线因此可能低估，
+///   `priced/total` 一并透出，展示层照实说。
+/// - 单笔费用 = (uncached/1e6)×input_uncached[tier] + (cache_read/1e6)×input_cached[tier] +
+///   (output/1e6)×output[tier]，`tier = is_peak ? "peak" : "off_peak"`。**不含 cache_write**——与 `bucket_price` 的计价成分一致，曲线的终值必须和 `cost` 键对得上。
+/// - 返回 `{series: [{request_seq, cumulative}], priced, total}`，`series` 与 `requests`
+///   同序（request_seq 1..n 连续，去重后回填），浏览器逐项 zip 即可——它只在
+///   `usage.rs::request_metrics` 出的数组上做乘加，展示层不再重算价（规则留在 core，
+///   是 `is_peak` 注释那条纪律的延伸）。
+pub fn cost_series(requests: &[Value], providers: &Value, pricing: &Value) -> Value {
+    let mut series = Vec::with_capacity(requests.len());
+    let mut acc: f64 = 0.0;
+    let mut priced = 0i64;
+    for r in requests {
+        let model = r.get("model").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let provider = providers.get(model).and_then(|v| v.as_str());
+        // 与 `cost_report` 走同一个解析器——逐请求曲线的单价必须和汇总金额同源，
+        // 否则曲线终值跟 `cost` 键对不上。
+        if let Some((key, provider_key, _)) = resolve_card(model, provider, pricing) {
+            // is_peak 为 null（宿主没上报时间戳）时这笔不计价——累计保持（carry），
+            // 不是 false（「没测到」≠「不在高峰」），也不按空闲价猜一档。
+            if let Some(peak) = r.get("is_peak").and_then(|v| v.as_bool()) {
+                let tier = if peak { "peak" } else { "off_peak" };
+                if let Some(card) = pricing.pointer(&format!("/providers/{provider_key}/models/{key}")) {
+                    let rate = |path: &str| {
+                        card.pointer(path).and_then(|v| v.as_f64()).unwrap_or(0.0)
+                    };
+                    acc += (get_i64(r, "uncached_input_tokens") as f64 / 1e6)
+                        * rate(&format!("/input_uncached/{tier}"))
+                        + (get_i64(r, "cache_read_tokens") as f64 / 1e6)
+                            * rate(&format!("/input_cached/{tier}"))
+                        + (get_i64(r, "output_tokens") as f64 / 1e6)
+                            * rate(&format!("/output/{tier}"));
+                    priced += 1;
+                }
+            }
+        }
+        series.push(json!({
+            "request_seq": get_i64(r, "request_seq"),
+            "cumulative": acc,
+        }));
+    }
+    json!({
+        "series": Value::Array(series),
+        "priced": priced,
+        "total": requests.len() as i64,
+    })
 }
 
 /// `usage["by_source"]`（`{source: {model: 8桶}}`，调用方已折平，见
@@ -669,6 +727,100 @@ mod tests {
         let report = cost_report(&usage, &pricing).unwrap();
         assert_eq!(report["per_model"].as_object().unwrap().len(), 0);
         assert_eq!(report["unpriced_tokens"], 1000);
+    }
+
+    /// `cost_series` 的逐请求累计，终值必须和 `cost_report` 的 `total` 对得上——
+    /// 曲线画到最后一笔时显示的费用，和会话成本块的金额是同一笔钱。三笔请求：
+    /// flash 空闲价（1.5）、pro 高峰价（uncached 9 + output 27）、flash 高峰价
+    /// （uncached 3 + output 9），累计 1.5 → 46.5 → 58.5。
+    #[test]
+    fn cost_series_prices_per_request_and_matches_cost_report_total() {
+        let pricing = load_pricing();
+        let requests = serde_json::json!([
+            {"request_seq": 1, "model": "deepseek/deepseek-v4-flash",
+             "uncached_input_tokens": 1000000, "cache_read_tokens": 0,
+             "output_tokens": 0, "is_peak": false},
+            {"request_seq": 2, "model": "deepseek/deepseek-v4-pro-0813",
+             "uncached_input_tokens": 2000000, "cache_read_tokens": 0,
+             "output_tokens": 1000000, "is_peak": true},
+            {"request_seq": 3, "model": "deepseek/deepseek-v4-flash",
+             "uncached_input_tokens": 1000000, "cache_read_tokens": 0,
+             "output_tokens": 1000000, "is_peak": true},
+        ]);
+        let providers = serde_json::json!({
+            "deepseek/deepseek-v4-flash": "deepseek-official",
+            "deepseek/deepseek-v4-pro-0813": "deepseek-official",
+        });
+        let out = cost_series(requests.as_array().unwrap(), &providers, &pricing);
+        let series = out["series"].as_array().unwrap();
+        assert_eq!(out["priced"], 3);
+        assert_eq!(out["total"], 3);
+        let cum: Vec<f64> = series.iter().map(|s| s["cumulative"].as_f64().unwrap()).collect();
+        assert!((cum[0] - 1.5).abs() < 1e-9, "r1 flash 空闲 uncached 1.5, got {}", cum[0]);
+        assert!((cum[1] - 46.5).abs() < 1e-9, "r2 pro 高峰 18+27, got {}", cum[1]);
+        assert!((cum[2] - 58.5).abs() < 1e-9, "r3 flash 高峰 3+9, got {}", cum[2]);
+        // 同一批 token 折成 by_model 后，cost_report 的 total 就是曲线终值。
+        let usage = serde_json::json!({
+            "by_model": {
+                "deepseek/deepseek-v4-flash": {
+                    "uncached_input_tokens": 2000000, "cache_read_tokens": 0,
+                    "output_tokens": 1000000, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 1000000, "peak_output_tokens": 1000000,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+                "deepseek/deepseek-v4-pro-0813": {
+                    "uncached_input_tokens": 2000000, "cache_read_tokens": 0,
+                    "output_tokens": 1000000, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 2000000, "peak_output_tokens": 1000000,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0},
+            },
+            "providers": providers,
+            "sequence": [],
+        });
+        let report = cost_report(&usage, &pricing).unwrap();
+        assert!((report["total"].as_f64().unwrap() - cum[2]).abs() < 1e-9,
+                "曲线终值 {} 必须等于 cost_report.total {}", cum[2], report["total"]);
+    }
+
+    /// `is_peak` 为 null（宿主没上报时间戳）→ 这笔不计价：累计保持、priced 不增，
+    /// 而不是按空闲价猜一档。缺省 is_peak 也要 carry——测过没有 is_peak 键的行。
+    #[test]
+    fn cost_series_carries_unpriced_on_null_peak() {
+        let pricing = load_pricing();
+        let requests = serde_json::json!([
+            {"request_seq": 1, "model": "deepseek-v4-flash",
+             "uncached_input_tokens": 1000000, "cache_read_tokens": 0,
+             "output_tokens": 0, "is_peak": false},
+            {"request_seq": 2, "model": "deepseek-v4-flash",
+             "uncached_input_tokens": 1000000, "cache_read_tokens": 0,
+             "output_tokens": 0, "is_peak": null},
+            {"request_seq": 3, "model": "deepseek-v4-flash",
+             "uncached_input_tokens": 1000000, "cache_read_tokens": 0,
+             "output_tokens": 0}, // 没有 is_peak 键 = null，同第二条
+        ]);
+        let out = cost_series(requests.as_array().unwrap(), &serde_json::json!({}), &pricing);
+        assert_eq!(out["priced"], 1, "只有第一条计了价");
+        assert_eq!(out["total"], 3);
+        let series = out["series"].as_array().unwrap();
+        let cum: Vec<f64> = series.iter().map(|s| s["cumulative"].as_f64().unwrap()).collect();
+        assert!((cum[0] - 1.5).abs() < 1e-9);
+        assert!((cum[1] - 1.5).abs() < 1e-9, "is_peak=null 必须 carry 而非归零");
+        assert!((cum[2] - 1.5).abs() < 1e-9, "缺 is_peak 键同 null");
+    }
+
+    /// 未知模型（`norm_model_in` 在回落表里也匹配不上）→ 不计价、priced 不增、
+    /// 累计保持 0——不是「查不到价按 0 元计」然后把 priced 算进去。
+    #[test]
+    fn cost_series_unknown_model_is_unpriced_not_zero() {
+        let pricing = load_pricing();
+        let requests = serde_json::json!([
+            {"request_seq": 1, "model": "some/unknown-model",
+             "uncached_input_tokens": 1000000, "cache_read_tokens": 0,
+             "output_tokens": 0, "is_peak": false},
+        ]);
+        let out = cost_series(requests.as_array().unwrap(), &serde_json::json!({}), &pricing);
+        assert_eq!(out["priced"], 0);
+        assert_eq!(out["total"], 1);
+        assert_eq!(out["series"][0]["cumulative"], 0.0);
     }
 
     #[test]

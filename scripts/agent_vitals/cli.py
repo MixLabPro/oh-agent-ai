@@ -998,7 +998,9 @@ def _main():
                                "skill_coverage": skill_coverage,
                                "subagents_coverage": subagents_coverage,
                                "compaction_coverage": compaction_coverage,
-                               "waste_coverage": waste_coverage},
+                               "waste_coverage": waste_coverage,
+                               "cost_series": cost_module.cost_series(
+                                   requests, usage.get("providers", {}), pricing)},
                               ensure_ascii=False, indent=2)
             if args.json == "-":
                 print(text)

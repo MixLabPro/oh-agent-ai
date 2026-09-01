@@ -38,6 +38,11 @@
 //! 旧的 v1 缓存文件（`schema_version` 不是 `"2"`）一律当"缓存不存在"处理——
 //! 不做就地迁移，代价是升级后第一次调用是一次冷启动（和今天冷启动一样贵），
 //! 换来的是往后所有增量重建都不用再为一个不相关的文件变化陪绑全量审计。
+//!
+//! **cache schema v3：envelope payload 增加 `cost_series` 键**（2026-09）。v2 的
+//! 增量失效只看源文件指纹——载荷形状变了（工作台费用曲线读的新键）而指纹没变
+//! 的会话会无限期沿用旧 envelope，费用轴在真机上静默消失。所以 v3 把 schema 抬
+//! 一版，旧缓存一次性冷启动重建；同样的"改载荷就抬 schema、不做就地迁移"规则。
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -711,13 +716,13 @@ struct CachedSession {
 /// DSH「读不了但没变就别再重试」记录：(path, fingerprint, reason)。
 type DegradedTriple = (String, String, String);
 
-/// 解析 v2 cache（`schema_version == "2"`）。旧 v1 缓存（顶层单一
+/// 解析 v3 cache（`schema_version == "3"`）。旧 v1/v2 缓存（顶层单一
 /// `fingerprints` 数组）或任何形状不认识的文档一律返回 `None`——调用方当"缓存
 /// 不存在"处理，不做就地迁移（见文件头注释）。返回 `(sessions, degraded)`，
 /// `degraded` 是 DSH 侧"读不了但指纹没变就不用重试"的 (path, fingerprint,
 /// reason) 三元组；Codex 没有这个概念，永远是空数组。
 fn read_cache_v2(cached: &Value) -> Option<(Vec<CachedSession>, Vec<DegradedTriple>)> {
-    if cached.get("schema_version").and_then(Value::as_str) != Some("2") {
+    if cached.get("schema_version").and_then(Value::as_str) != Some("3") {
         return None;
     }
     let arr = cached.get("sessions")?.as_array()?;
@@ -846,8 +851,8 @@ fn finalize_and_write(
     store
 }
 
-/// v2 cache 文件形状（只写自己的可删 app cache，§3.5）：
-/// `{schema_version:"2", source, built_at, source_statuses, generated_at,
+/// v3 cache 文件形状（只写自己的可删 app cache，§3.5）：
+/// `{schema_version:"3", source, built_at, source_statuses, generated_at,
 ///   sessions:[{paths, fingerprints, envelope}], degraded:[{path,
 ///   fingerprint, reason}]}`。`store.entries[i]` 与 `sessions[i]` 的
 /// `paths`/`fingerprints` 必须同序——两者都源自 `finalize_and_write` 里同一次
@@ -868,7 +873,7 @@ fn write_cache_v2(
     let degraded_docs: Vec<Value> =
         degraded.iter().map(|(p, fp, r)| json!({ "path": p, "fingerprint": fp, "reason": r })).collect();
     let doc = json!({
-        "schema_version": "2",
+        "schema_version": "3",
         "source": source,
         "built_at": store.generated_at,
         "source_statuses": store.source_statuses,
@@ -1648,7 +1653,7 @@ mod tests {
         let deg_a = a.source_statuses["dsh"]["degraded"].as_array().unwrap();
         assert_eq!(deg_a.len(), 1);
         let cache_a: Value = serde_json::from_str(&std::fs::read_to_string(dsh_cache_path()).unwrap()).unwrap();
-        assert_eq!(cache_a["schema_version"], "2");
+        assert_eq!(cache_a["schema_version"], "3");
         let fp_before = cache_a["degraded"][0]["fingerprint"].as_str().unwrap().to_string();
         assert!(!fp_before.is_empty(), "degraded entries must carry a real fingerprint, not a placeholder");
 

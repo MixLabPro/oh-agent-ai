@@ -9,6 +9,8 @@
   --accent: #34d399;
   --warn: #fbbf24;
   --danger: #f87171;
+  --success: #4ade80;
+  --skill: #60a5fa;
   --radius: 12px;
 }
 
@@ -732,3 +734,90 @@ body {
 .tl-event[data-severity="warning"] .tl-event-dot { fill: var(--warn, #ffad47); }
 .tl-event[data-severity="info"] .tl-event-dot { fill: var(--muted); }
 .tl-empty { color: var(--muted); font-size: 12px; padding: 8px 0; }
+
+/* ---------- 交互式时间线壳（workbench.js 的 .tl-shell/.tl-*，几何仍来自 timeline.js） ----------
+   7 种事件形状共用「颜色类设 color、形状 fill/stroke: currentColor」机制——图例开关
+   的颜色与图表标记同源，加一种事件只动一处。risk 按 severity 细分三档，其余各一色：
+   waste/曲线 = --accent、compaction/subagent = --success、skill = --skill（蓝，
+   与 dsh-client --sv-skill-explicit 同色）、model = --muted、slow = --warn。 */
+.tl-shell { margin-top: 4px; }
+.tl-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 2px 0; }
+.tl-sub { color: var(--muted); font-size: 11px; }
+.tl-modes { display: flex; gap: 4px; }
+.tl-mode-btn {
+  border: 1px solid var(--panel-2); background: transparent; color: var(--muted);
+  font-size: 12px; padding: 3px 10px; border-radius: 999px; cursor: pointer;
+}
+.tl-mode-btn:hover { color: var(--text); }
+.tl-mode-btn[aria-pressed="true"] { background: var(--panel-2); color: var(--text); font-weight: 600; }
+
+.tl-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 6px 0; }
+.tl-legend-item { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
+.tl-legend-swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; background: currentColor; }
+.tl-legend-curve { color: var(--accent); }
+.tl-legend-btn {
+  display: inline-flex; align-items: center; gap: 4px; border: 0; background: transparent;
+  color: var(--muted); font-size: 11px; cursor: pointer; padding: 2px 4px; border-radius: 6px;
+}
+.tl-legend-btn:hover { background: var(--panel); }
+.tl-legend-btn[aria-pressed="false"] { color: var(--panel-2); }
+.tl-legend-btn[aria-pressed="false"] .tl-legend-swatch { background: var(--panel-2); }
+
+.tl-chartwrap { position: relative; }
+.tl-chart:focus { outline: 1px solid var(--panel-2); border-radius: 6px; }
+
+/* 事件标记：颜色类设 color，形状取 currentColor。 */
+.tl-ev-risk { color: var(--danger); }
+.tl-ev-risk.tl-sev-warning { color: var(--warn); }
+.tl-ev-risk.tl-sev-info { color: var(--muted); }
+.tl-ev-waste { color: var(--accent); }
+.tl-ev-compaction { color: var(--success); }
+.tl-ev-model { color: var(--muted); }
+.tl-ev-subagent { color: var(--success); }
+.tl-ev-skill { color: var(--skill); }
+.tl-ev-slow { color: var(--warn); }
+.tl-ev-shape { fill: currentColor; stroke: currentColor; }
+.tl-ev:focus { outline: none; }
+.tl-ev:focus .tl-ev-shape { stroke: var(--text); stroke-width: 1.5; }
+
+/* 游标：悬停虚线 / 钉住实线（stroke-dasharray 由 JS 切换）。 */
+.tl-cursor line { stroke: var(--accent); stroke-width: 1; }
+.tl-cursor circle { fill: var(--accent); stroke: var(--bg); stroke-width: 1; }
+
+.tl-info {
+  margin-top: 8px; padding: 6px 8px; background: var(--panel);
+  border: 1px solid transparent; border-radius: 8px;
+  font-size: 12px; line-height: 1.5; min-height: 18px;
+}
+.tl-info-pinned { border-color: var(--accent); }
+
+.tl-foot { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; }
+.tl-foot-item { color: var(--muted); font-size: 11px; }
+
+/* 小屏折叠摘要：窄于 620px 时图表收起成一行摘要 + 展开按钮，事件列表提供跳转入口。 */
+.tl-summary { display: none; }
+.tl-summary-line { color: var(--muted); font-size: 12px; }
+.tl-expand { border: 0; background: transparent; color: var(--accent); font-size: 12px; cursor: pointer; padding: 0; }
+.tl-summary-list-head { color: var(--muted); font-size: 11px; margin: 8px 0 2px; }
+.tl-summary-list-item {
+  display: block; border: 0; background: transparent; color: var(--text);
+  font-size: 12px; cursor: pointer; padding: 3px 0; text-align: left;
+}
+.tl-summary-list-item:hover { color: var(--accent); }
+
+@media (max-width: 620px) {
+  .tl-shell:not(.tl-expanded) .tl-head,
+  .tl-shell:not(.tl-expanded) .tl-legend,
+  .tl-shell:not(.tl-expanded) .tl-chartwrap,
+  .tl-shell:not(.tl-expanded) .tl-info,
+  .tl-shell:not(.tl-expanded) .tl-foot { display: none; }
+  .tl-shell:not(.tl-expanded) .tl-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .tl-shell.tl-expanded .tl-summary { display: none; }
+}
+
+/* 事件 → findings 跳转的短暂高亮（focusFinding 给行加这个类）。 */
+.tl-finding-flash { animation: tl-flash 1.8s ease; }
+@keyframes tl-flash {
+  0%, 60% { background: color-mix(in srgb, var(--accent) 25%, transparent); }
+  100% { background: transparent; }
+}

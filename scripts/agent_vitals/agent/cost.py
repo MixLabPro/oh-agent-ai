@@ -300,6 +300,54 @@ def cost_report(usage, pricing):
     return out
 
 
+def cost_series(requests, providers, pricing):
+    """逐请求费用序列（FR-04 的「费用」纵轴，工作台单会话图与 dsh-client 审计
+    tab 共用）。与 `crates/agent-vitals-core/src/cost.rs::cost_series` 及 dsh-client
+    宿主 `costSeriesFrom`（`dsh-client/src/host/index.ts`）是**同一规则的三个镜像**，
+    锁步一致。
+
+    - 每笔 request 用 `_resolve_card(model, providers[model], pricing)` 定价格卡；
+      `is_peak` 为 None（宿主没上报时间戳）时**这一笔不计价**——累计值保持、
+      `priced` 不增，而不是按空闲价猜一档（猜出来的单价就是编数字）。累计曲线
+      因此可能低估，`priced/total` 一并透出，展示层照实说。
+    - 单笔费用 = (uncached/1e6)×input_uncached[tier] + (cache_read/1e6)×
+      input_cached[tier] + (output/1e6)×output[tier]，`tier = is_peak ?
+      "peak" : "off_peak"`。**不含 cache_write**——与 `_price` 的计价成分一致，
+      曲线终值必须和 `cost` 键对得上。
+    - 返回 `{series: [{request_seq, cumulative}], priced, total}`，`series` 与
+      `requests` 同序（request_seq 1..n 连续，去重后回填），浏览器逐项 zip 即可
+      ——它只在 `usage.request_metrics` 出的数组上做乘加，展示层不再重算价。
+    """
+    series = []
+    acc = 0.0
+    priced = 0
+    for r in requests:
+        model = r.get("model") or "unknown"
+        provider = (providers or {}).get(model)
+        if not isinstance(provider, str):
+            provider = None
+        # 与 cost_report 走同一个解析器——逐请求曲线的单价必须和汇总金额同源，
+        # 否则曲线终值跟 cost 键对不上。
+        resolved = _resolve_card(model, provider, pricing)
+        if resolved is not None:
+            key, provider_key, _basis = resolved
+            is_peak = r.get("is_peak")
+            if is_peak is not None:
+                tier = "peak" if is_peak else "off_peak"
+                card = pricing["providers"][provider_key]["models"][key]
+                u = card["input_uncached"].get(tier, 0.0)
+                c = card["input_cached"].get(tier, 0.0)
+                o = card["output"].get(tier, 0.0)
+                acc += ((r.get("uncached_input_tokens") or 0) / 1e6 * u
+                        + (r.get("cache_read_tokens") or 0) / 1e6 * c
+                        + (r.get("output_tokens") or 0) / 1e6 * o)
+                priced += 1
+            # is_peak 为 None：这笔不计价，累计保持（carry）。不是 False——
+            # 「没测到」不等于「不在高峰」。
+        series.append({"request_seq": r.get("request_seq"), "cumulative": acc})
+    return {"series": series, "priced": priced, "total": len(requests)}
+
+
 def _build_by_source_cost(usage, pricing):
     """`usage["by_source"]`（`{source: {model: 八桶}}`，调用方已折平，见
     `state.rollup_by_source`）→ `{source: {total, peak_total, unpriced_tokens}}`。

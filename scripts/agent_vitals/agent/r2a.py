@@ -636,7 +636,7 @@ def _cache_v2_to_store(cached, fingerprints):
     就是这个：Python 写 v1 / 只读 v1，跨实现缓存永远 miss，墙钟字段必然不同。
 
     命中判定（一条都不能差，缺任一 → 全量重建）：
-      · schema_version == "2"，sessions/degraded 形状完好（平行数组等长且非空）；
+      · schema_version == "3"，sessions/degraded 形状完好（平行数组等长且非空）；
       · 每条缓存 session 的**全部**依赖路径指纹与当前源表一致（部分命中不拼凑）；
       · 每条缓存 degraded 记录的指纹与当前源表一致（DSH 读不了的文件没变就不
         重试解压；Codex 无 degraded，恒空）；
@@ -644,7 +644,7 @@ def _cache_v2_to_store(cached, fingerprints):
     """
     if not isinstance(cached, dict):
         return None
-    if cached.get("schema_version") != "2":
+    if cached.get("schema_version") != "3":
         return None
     session_docs = cached.get("sessions")
     if not isinstance(session_docs, list):
@@ -729,15 +729,19 @@ def _codex_built_paths(payload, fp_map):
 
 
 def _write_cache(path, source, store, paths_fps, degraded):
-    """v2 cache 文件形状（§3.5 可删 app cache）：`{schema_version:"2", source,
+    """v3 cache 文件形状（§3.5 可删 app cache）：`{schema_version:"3", source,
     built_at, source_statuses, generated_at, sessions:[{paths, fingerprints,
     envelope}], degraded:[{path, fingerprint, reason}]}`。`store.entries[i]` 与
     `paths_fps[i]` 必须同序——两者都源自 `_entries_with_paths` 里同一次排序后
     的 `built`，不是事后再配对（mirror `r2a_store::write_cache_v2`）。`source`
     按源取值（"codex"/"dsh"）——v1 时代硬编码 "codex" 让 dsh 缓存源标错，跨实
-    现读不出正确 source。键序与 serde_json `json!` 的插入序一致，字节可比对。"""
+    现读不出正确 source。键序与 serde_json `json!` 的插入序一致，字节可比对。
+
+    v3 = v2 加一条规则：envelope payload 增加 `cost_series` 键后（2026-09），
+    增量失效只看源文件指纹会让旧 envelope 无限期沿用、费用曲线静默消失，所以
+    抬一版 schema 强制一次性冷启动重建（mirror `r2a_store` 文件头注释）。"""
     doc = {
-        "schema_version": "2",
+        "schema_version": "3",
         "source": source,
         "built_at": store.generated_at,
         "source_statuses": store.source_statuses,

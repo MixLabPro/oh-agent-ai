@@ -5,4 +5,4 @@
 //! 这里只 re-export，让既有调用点（`main.rs` 的 `agent::cost::*`）不改一行。
 //! 与 `behavior.rs` 的封装同款——core 是规则的家，二进制只做 I/O 接线。
 
-pub use agent_vitals_core::cost::{cost_block, cost_report, load_pricing};
+pub use agent_vitals_core::cost::{cost_block, cost_report, cost_series, load_pricing};

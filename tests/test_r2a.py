@@ -403,18 +403,20 @@ class CodexPopulationE2ETests(unittest.TestCase):
             "cache delete + rebuild must reproduce the same store")
 
     def test_cache_is_v2_shape_with_correct_source(self):
-        """v2 cache 文件形状钉死（回归：#7 之前 Python 写 v1 顶层
-        `fingerprints`/`entries`、且 `source` 硬编码 "codex"）。这里**不依赖**
-        AGENT_VITALS_BIN——跨实现字节对账（generated_at 共享）由 `_BIN` 门控的
-        reconciliation 用例守，但那些用例缺二进制就 skip；本用例任何环境都跑，
-        单独抓住「Python 退回写 v1」的回归。"""
+        """v3 cache 文件形状钉死（回归：#7 之前 Python 写 v1 顶层
+        `fingerprints`/`entries`、且 `source` 硬编码 "codex"；2026-09 抬 v3 是为
+        `cost_series` 键进 envelope 强制冷启动）。这里**不依赖** AGENT_VITALS_BIN
+        ——跨实现字节对账（generated_at 共享）由 `_BIN` 门控的 reconciliation 用
+        例守，但那些用例缺二进制就 skip；本用例任何环境都跑，单独抓住「Python
+        退回写 v1」的回归。"""
         av = self._av()
         r = _run_py(["sessions", "list", "--json"], _env(self.home, av))
         self.assertEqual(r.returncode, 0, r.stderr)
         doc = json.loads(_cache_path(av).read_text(encoding="utf-8"))
-        self.assertEqual(doc["schema_version"], "2")
+        self.assertEqual(doc["schema_version"], "3")
         self.assertEqual(doc["source"], "codex")
-        # v2 形状：per-session 嵌套 sessions + degraded；v1 的顶层键必须消失。
+        # v3 形状（沿自 v2）：per-session 嵌套 sessions + degraded；v1 的顶层键
+        # 必须消失。
         self.assertNotIn("fingerprints", doc)
         self.assertNotIn("entries", doc)
         self.assertIn("sessions", doc)
@@ -692,7 +694,7 @@ class DshPopulationE2ETests(unittest.TestCase):
                         "cache must be written at data_home/cache/r2a/")
 
     def test_dsh_cache_is_v2_shape_with_correct_source(self):
-        """DSH 半边钉死 v2 的 `source` 字段（回归：#7 之前 `_write_cache` 硬编码
+        """DSH 半边钉死 v3 的 `source` 字段（回归：#7 之前 `_write_cache` 硬编码
         "codex"，dsh 缓存源标错；现在按源取值 "dsh"）。degraded 同时钉成
         (path, fingerprint, reason) 三元组形状——指纹随 degraded 进 cache 是
         「读不了但没变就不重试」的前提（Rust DegradedTriple 同形）。"""
@@ -701,7 +703,7 @@ class DshPopulationE2ETests(unittest.TestCase):
                     _env(self.home, av))
         self.assertEqual(r.returncode, 0, r.stderr)
         doc = json.loads(_dsh_cache_path(av).read_text(encoding="utf-8"))
-        self.assertEqual(doc["schema_version"], "2")
+        self.assertEqual(doc["schema_version"], "3")
         self.assertEqual(doc["source"], "dsh",
                          "source 必须按源取值——硬编码 codex 是 #7 一起修的潜伏 bug")
         sessions = doc["sessions"]

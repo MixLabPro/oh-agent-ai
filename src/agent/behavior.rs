@@ -201,7 +201,9 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
 /// 对齐）：findings → usage → requests → context → compaction → waste → cost →
 /// pre_fork → pre_fork_cost → subagents → skill → duration → rule_outcomes →
 /// usage_coverage → duration_coverage → skill_coverage → subagents_coverage →
-/// compaction_coverage → waste_coverage。
+/// compaction_coverage → waste_coverage → cost_series。`cost_series` 在末尾追加
+/// （浏览器/工作台逐请求费用曲线读它，见 cost.rs::cost_series——与 dsh-client 宿主
+/// `costSeriesFrom` 同一规则的第三个镜像，展示层不再重算价）。
 ///
 /// `cost` 不是 audit 六键之一——它读的是 `usage` × pricing.json，是 `usage` 上的
 /// 一次派生计算（展示层定价，core 只给 token）。`pre_fork` 与 `usage` 是同一个
@@ -219,6 +221,8 @@ pub fn audit_payload(path: &Path) -> Option<Value> {
     } else {
         crate::agent::cost::cost_report(&audit.pre_fork, &pricing)
     };
+    let requests_slice: &[serde_json::Value] =
+        audit.requests.as_array().map(|v| v.as_slice()).unwrap_or(&[]);
     Some(json!({
         "findings": findings,
         "usage": &audit.usage,
@@ -239,5 +243,6 @@ pub fn audit_payload(path: &Path) -> Option<Value> {
         "subagents_coverage": &audit.subagents_coverage,
         "compaction_coverage": &audit.compaction_coverage,
         "waste_coverage": &audit.waste_coverage,
+        "cost_series": crate::agent::cost::cost_series(requests_slice, &audit.usage["providers"], &pricing),
     }))
 }

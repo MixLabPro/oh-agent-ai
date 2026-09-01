@@ -655,16 +655,19 @@ def audit_session_log(path):
 
 
 def audit_payload(path):
-    """`audit_session_log` 的 19 键 JSON 载荷（R2a DSH population 的 session 载荷）。
+    """`audit_session_log` 的 20 键 JSON 载荷（R2a DSH population 的 session 载荷）。
 
     mirror `src/behavior.rs::audit_payload`：findings 后紧跟同一批事件流的五种
     分辨率（usage 按模型汇总、requests 逐请求序列、context 常驻前缀、compaction、
     waste），再是成本块（cost / pre_fork / pre_fork_cost），然后是 subagents /
-    skill / duration 与六个 coverage。键序是字节一致的一部分，不能重排。
+    skill / duration 与六个 coverage，末尾追加 cost_series。键序是字节一致的一部分，
+    不能重排。
 
     cost 不是 audit 六键之一——它读 usage × pricing.json（cost.py 顶部注释：
     纯展示层）。pre_fork 与 usage 同形状，定价走同一个 cost_report；没分叉时
     pre_fork 是 None → pre_fork_cost 也是 None（「没分叉」≠「分叉了但上游没花钱」）。
+    cost_series 是逐请求费用序列（`cost.py::cost_series`），追加在末尾，供浏览器/
+    工作台画逐请求费用曲线——展示层不再重算价。
     降级（`audit_session_log` 返回 None）→ 返回 None，**绝不返回空 payload**。
     """
     from . import cost as cost_module
@@ -698,6 +701,7 @@ def audit_payload(path):
         "subagents_coverage": subagents_coverage,
         "compaction_coverage": compaction_coverage,
         "waste_coverage": waste_cov,
+        "cost_series": cost_module.cost_series(requests, usage.get("providers", {}), pricing),
     }
 
 
