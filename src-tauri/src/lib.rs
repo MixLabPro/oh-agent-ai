@@ -101,15 +101,10 @@ fn stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
 /// 预算状态行的权威来源：alert.json（`budget.evaluate()` 落盘）。**只读展示，
 /// 不重算百分比**——迁移要修的 D2 缺口正是托盘自算 remaining% 与 budget.py 规则
 /// 无关。缺场时降级为「等预算数据」，不臆造「预算超支/剩余 X%」。
-fn budget_status_text(ov: &Overview) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    budget_status_text_at(ov, now)
-}
-
-/// 纯函数版预算状态行——now 由调用方注入，单测不用碰系统时钟。
+///
+/// now 由调用方注入（`build_menu` 读一次系统时钟，整个菜单的所有行共用同一个
+/// "现在"——各行分别读钟会让同一次重建里的新鲜度判定互相不一致），单测因此不用
+/// 碰系统时钟。
 fn budget_status_text_at(ov: &Overview, now_secs: i64) -> String {
     let b = &ov.budget;
     // 预算分母：alert.json 的 monthly_cny 是 evaluate() 算 ratio 用的那份，
@@ -175,32 +170,152 @@ fn today_title(ov: &Overview) -> String {
     }
 }
 
+/// 模型短名：`deepseek/deepseek-v4-pro-0813` → `deepseek-v4-pro-0813`。只砍
+/// provider 前缀（第一个 `/` 之前），不做别的美化——菜单一行的宽度有限，但把
+/// `-0813` 这种版本尾巴也砍掉就会让两个不同版本在菜单里长得一模一样。
+fn short_model(name: &str) -> &str {
+    name.rsplit('/').next().unwrap_or(name)
+}
+
+/// 日预算一行：**分子与百分比只在可信时显示**。
+///
+/// 分母 `effective_daily_budget` 来自 alert.json，但它是一个**设置**
+/// （config 的 daily_cny 过一遍 adaptive floor），不是测量值——过期的设置仍然
+/// 是当前设置，照常显示。分子/百分比是**测量值**，两条都必须成立才显示：
+/// ①今天真的有数据（`ov.today` 非 None——`today_cost` 已按北京日期校验过
+/// today.json 的 date）；②alert.json 不过期。少任何一条就只显示分母 + 一句
+/// 说明。
+///
+/// **为什么不自己算 `today_cost / daily_budget`**：那正是迁移要修的 D2 缺口
+/// ——托盘自算的百分比与 `budget.py` 的规则（adaptive floor、peak_share_max、
+/// snooze）无关，`budget show` 里全对、菜单栏上全错。百分比一律读 alert.json
+/// 的 `ratio`，不重算。
+///
+/// **为什么要 ①**：alert.json 的 `today_cost` 是它落盘那一刻的"今日"。日历翻页
+/// 之后没再跑过 oneline 时，它说的是**昨天**的今日——真机 2026-09-01 就是这样：
+/// today.json 停在 08-31（`ov.today` 正确地为 None），alert.json 停在 08-30 报
+/// today_cost ¥0.12。少了这个门，菜单会同时出现"今日成本：—（无数据）"和
+/// "今日预算：¥0.12 / ¥30（0%）"两行自相矛盾的话。
+fn daily_budget_text(ov: &Overview, now_secs: i64) -> Option<String> {
+    let b = &ov.budget;
+    let daily = b.effective_daily_budget?;
+    let denom = fmt_money(daily);
+    let fresh = !stale_from(b.generated_at.as_deref(), now_secs);
+    if ov.today.is_none() {
+        return Some(format!("今日预算：— / {denom}（今日无数据）"));
+    }
+    if !fresh {
+        return Some(format!("今日预算：— / {denom}（数据过期，未重新评估）"));
+    }
+    match (b.today_cost, b.ratio) {
+        (Some(c), Some(r)) => {
+            Some(format!("今日预算：{} / {denom}（{:.0}%）", fmt_money(c), r * 100.0))
+        }
+        // alert.json 在场且新鲜，但这两个字段是 null——`evaluate()` 对"今日无
+        // 数据"就是这么落盘的。不拿 null 当 0。
+        _ => Some(format!("今日预算：— / {denom}（今日无数据）")),
+    }
+}
+
+/// 最近一次会话一行：`最近会话：deepseek-v4-flash · 15.3K · ¥0.02`。findings
+/// 非零时补 `· N 个发现`——0 个不显示（"没有发现"不值得占一行宽度，而且
+/// `findings_total: 0` 与"这次没跑规则"在 oneline.json 里同形，不该说得像后者
+/// 已被排除）。整条只在 oneline.json 在场时出现。
+fn recent_session_text(ov: &Overview) -> Option<String> {
+    let r = &ov.recent;
+    if !r.present {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(m) = &r.model {
+        parts.push(short_model(m).to_string());
+    }
+    if let Some(t) = r.tokens_total {
+        parts.push(fmt_tokens(t));
+    }
+    if let Some(c) = r.cost_cny {
+        parts.push(fmt_money(c));
+    }
+    if let Some(n) = r.findings_total {
+        if n > 0 {
+            parts.push(format!("{n} 个发现"));
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("最近会话：{}", parts.join(" · ")))
+}
+
+/// 同步状态一行：**成功也显示**，不是只在失败时才出现。
+///
+/// "上次成功同步是几点"是判断菜单里这些数字新不新的最直接信号——比预算行末尾
+/// 那个「（数据过期）」后缀更直白，也覆盖了预算行不涉及的部分（今日/本月/最近
+/// 会话都来自同一轮 tick）。原来只在 `!ok` 时显示，成功时菜单里没有任何时间戳，
+/// 用户没法区分"数字是刚更新的"和"app 静默卡住半天了"。
+fn sync_line_text(sync: &SyncStatus) -> String {
+    if !sync.ok {
+        return if sync.stage == "never" {
+            "尚未同步".to_string()
+        } else {
+            format!("⚠ 上次同步失败：{}", sync.message)
+        };
+    }
+    // `at` 是北京时间 `YYYY-MM-DD HH:MM:SS`，菜单只要 HH:MM。
+    match sync.at.as_deref().and_then(|s| s.get(11..16)) {
+        Some(hhmm) => format!("上次同步：{hhmm} 成功"),
+        None => "上次同步：成功".to_string(),
+    }
+}
+
 fn build_menu(app: &AppHandle, ov: &Overview) -> tauri::Result<Menu<tauri::Wry>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    build_menu_at(app, ov, now)
+}
+
+/// 参数化版——now 由调用方注入，单测钉住每一行文案不用碰系统时钟。
+fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result<Menu<tauri::Wry>> {
+    // 今日一行：钱 + token 量。两者不是一回事——缓存命中率变化时钱不动 token 动，
+    // 只报钱会让"今天明明干了很多活却几乎没花钱"这种情况看起来像没数据。托盘
+    // 标题里本来就是这么并排显示的（`today_title`），菜单第一行跟它对齐。
     let today_text = match &ov.today {
-        Some(t) => format!("今日成本：{}", fmt_money(t["total"].as_f64().unwrap_or(0.0))),
+        Some(t) => format!(
+            "今日成本：{} · {} tokens",
+            fmt_money(t["total"].as_f64().unwrap_or(0.0)),
+            fmt_tokens(t["tokens"].as_i64().unwrap_or(0)),
+        ),
         None => "今日成本：—（无数据）".to_string(),
     };
     let month_total = ov.month["total"].as_f64().unwrap_or(0.0);
     let budget = ov.budget.monthly_cny.unwrap_or(ov.budget_monthly_cny);
     let month_text = format!("本月成本：{} / {}", fmt_money(month_total), fmt_money(budget));
-    let budget_text = budget_status_text(ov);
+    let budget_text = budget_status_text_at(ov, now_secs);
     let today_item = MenuItem::with_id(app, "today", today_text, false, None::<&str>)?;
     let month_item = MenuItem::with_id(app, "month", month_text, false, None::<&str>)?;
     let budget_item = MenuItem::with_id(app, "budget", budget_text, false, None::<&str>)?;
-    let mut builder = MenuBuilder::new(app)
-        .item(&today_item)
-        .item(&month_item)
-        .item(&budget_item);
-    // 上次同步失败也要在托盘可见——不是只进 stderr。托盘是主入口，同步断了用户
-    // 应该一眼看到「该动手了」，而不是等到打开工作台才发现数字是旧的。
-    if !ov.sync.ok {
-        let sync_text = if ov.sync.stage == "never" {
-            "尚未同步".to_string()
-        } else {
-            format!("⚠ 上次同步失败：{}", ov.sync.message)
-        };
-        builder = builder.item(&MenuItem::with_id(app, "sync", sync_text, false, None::<&str>)?);
+    let mut builder = MenuBuilder::new(app).item(&today_item);
+    // 日预算：紧跟今日成本，回答"今天这些钱占日额度多少"。缺 alert.json 时整条
+    // 不显示——预算行本身已经说了「等预算数据」，不用再空一行。
+    if let Some(t) = daily_budget_text(ov, now_secs) {
+        builder = builder.item(&MenuItem::with_id(app, "daily", t, false, None::<&str>)?);
     }
+    builder = builder.item(&month_item);
+    if let Some(t) = recent_session_text(ov) {
+        builder = builder.item(&MenuItem::with_id(app, "recent", t, false, None::<&str>)?);
+    }
+    builder = builder.item(&budget_item);
+    // 同步状态常驻（成功也显示）——托盘是主入口，"数字是什么时候的"必须在这里
+    // 一眼可见，不该等到打开工作台才发现同步早就断了。
+    builder = builder.item(&MenuItem::with_id(
+        app,
+        "sync",
+        sync_line_text(&ov.sync),
+        false,
+        None::<&str>,
+    )?);
     // 工作台主窗口入口（任务 #5）：独立可缩放窗口，五页 总览/日历/会话/Findings/
     // 数据源。**没有"打开面板…"菜单项**，面板本身也已经整体删除（2026-09-01）
     // ——面板展示的今日/本月/预算/本月逐日本来就是工作台"总览"tab 的严格子集，
@@ -502,6 +617,7 @@ mod tests {
             days: vec![],
             budget_monthly_cny: 600.0,
             budget,
+            recent: overview::RecentSession::default(),
             sync: SyncStatus::default(),
             estimate_note: String::new(),
         }
@@ -524,6 +640,139 @@ mod tests {
         assert_eq!(fmt_tokens(1398214), "1.4M");
     }
 
+    #[test]
+    fn short_model_strips_provider_prefix_only() {
+        assert_eq!(short_model("deepseek/deepseek-v4-pro-0813"), "deepseek-v4-pro-0813");
+        assert_eq!(short_model("deepseek-v4-flash"), "deepseek-v4-flash");
+        // 版本尾巴保留——砍掉它，两个不同版本在菜单里就长得一模一样了。
+        assert_ne!(short_model("a/m-0813"), short_model("a/m-0901"));
+    }
+
+    /// 日预算行的分子/百分比只在「今天真有数据 + alert 新鲜」时出现。这条钉的是
+    /// 真机 2026-09-01 的形态：today.json 停在昨天（`ov.today` 为 None），
+    /// alert.json 仍报着上一次评估的 today_cost —— 菜单绝不能同时说
+    /// 「今日成本：—（无数据）」和「今日预算：¥0.12 / ¥30（0%）」。
+    #[test]
+    fn daily_budget_line_hides_numerator_when_today_has_no_data() {
+        let ov = ov_with(overview::BudgetAlert {
+            source: "alert".into(),
+            level: Some("ok".into()),
+            effective_daily_budget: Some(30.0),
+            today_cost: Some(0.1224042),
+            ratio: Some(0.00408014),
+            generated_at: Some(FIXTURE_AT.into()),
+            ..Default::default()
+        });
+        assert!(ov.today.is_none());
+        assert_eq!(
+            daily_budget_text(&ov, FIXTURE_AT_SECS).unwrap(),
+            "今日预算：— / ¥30（今日无数据）",
+            "今天没有数据时，alert.json 里那个属于别的一天的 today_cost 不得冒充今日"
+        );
+    }
+
+    /// 今天有数据 + alert 新鲜 → 显示权威分子与百分比（`ratio` 直接来自
+    /// alert.json，不是 today_cost/daily 自算——那是 D2 缺口）。
+    #[test]
+    fn daily_budget_line_uses_alert_ratio_when_fresh_and_today_has_data() {
+        let mut ov = ov_with(overview::BudgetAlert {
+            source: "alert".into(),
+            level: Some("warn".into()),
+            effective_daily_budget: Some(30.0),
+            today_cost: Some(24.0),
+            // 故意不等于 24/30=80%：证明这里读的是 alert 的 ratio，没有自算。
+            ratio: Some(0.93),
+            generated_at: Some(FIXTURE_AT.into()),
+            ..Default::default()
+        });
+        ov.today = Some(serde_json::json!({"total": 24.0, "peak_total": 0.0, "tokens": 100}));
+        assert_eq!(daily_budget_text(&ov, FIXTURE_AT_SECS).unwrap(), "今日预算：¥24 / ¥30（93%）");
+    }
+
+    /// alert 过期时不报旧的分子/百分比，只留分母（分母是设置，不是测量值，过期
+    /// 的设置仍然是当前设置）。
+    #[test]
+    fn daily_budget_line_drops_stale_numerator_but_keeps_the_setting() {
+        let mut ov = ov_with(overview::BudgetAlert {
+            source: "alert".into(),
+            level: Some("ok".into()),
+            effective_daily_budget: Some(30.0),
+            today_cost: Some(24.0),
+            ratio: Some(0.8),
+            generated_at: Some(FIXTURE_AT.into()),
+            ..Default::default()
+        });
+        ov.today = Some(serde_json::json!({"total": 24.0, "peak_total": 0.0, "tokens": 100}));
+        assert_eq!(
+            daily_budget_text(&ov, FIXTURE_AT_SECS + 3600).unwrap(),
+            "今日预算：— / ¥30（数据过期，未重新评估）"
+        );
+    }
+
+    /// 没有 alert.json（拿不到日预算这个设置）→ 整行不显示，不空占一行；预算行
+    /// 本身已经说了「等预算数据」。
+    #[test]
+    fn daily_budget_line_absent_without_alert() {
+        let ov = ov_with(overview::BudgetAlert { source: "missing".into(), ..Default::default() });
+        assert!(daily_budget_text(&ov, FIXTURE_AT_SECS).is_none());
+    }
+
+    /// 最近会话行：oneline.json 在场 → 模型短名 · token · 钱；findings 为 0 时
+    /// 不显示「0 个发现」。
+    #[test]
+    fn recent_session_line_renders_model_tokens_cost() {
+        let mut ov = ov_with(overview::BudgetAlert::default());
+        assert!(recent_session_text(&ov).is_none(), "oneline.json 缺场 → 整行不显示");
+        ov.recent = overview::RecentSession {
+            present: true,
+            model: Some("deepseek/deepseek-v4-flash".into()),
+            tokens_total: Some(15305),
+            cost_cny: Some(0.0230385),
+            findings_total: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(recent_session_text(&ov).unwrap(), "最近会话：deepseek-v4-flash · 15K · ¥0.02");
+        ov.recent.findings_total = Some(3);
+        assert_eq!(
+            recent_session_text(&ov).unwrap(),
+            "最近会话：deepseek-v4-flash · 15K · ¥0.02 · 3 个发现"
+        );
+    }
+
+    /// present 但字段全 null（oneline.json 写了个空壳）→ 不显示一行只有前缀的
+    /// 「最近会话：」。
+    #[test]
+    fn recent_session_line_absent_when_every_field_is_null() {
+        let mut ov = ov_with(overview::BudgetAlert::default());
+        ov.recent = overview::RecentSession { present: true, ..Default::default() };
+        assert!(recent_session_text(&ov).is_none());
+    }
+
+    /// 同步行常驻：成功时也显示（带 HH:MM），不是只在失败时才出现——用户要能一眼
+    /// 看出菜单里的数字是什么时候的。
+    #[test]
+    fn sync_line_shows_time_on_success_not_only_on_failure() {
+        let ok = SyncStatus {
+            ok: true,
+            stage: "discover".into(),
+            message: "无未折 DSH 会话".into(),
+            at: Some("2026-09-01 09:50:52".into()),
+        };
+        assert_eq!(sync_line_text(&ok), "上次同步：09:50 成功");
+        let never = SyncStatus::default();
+        assert_eq!(sync_line_text(&never), "尚未同步");
+        let failed = SyncStatus {
+            ok: false,
+            stage: "fold".into(),
+            message: "oneline 失败".into(),
+            at: Some("2026-09-01 09:50:52".into()),
+        };
+        assert_eq!(sync_line_text(&failed), "⚠ 上次同步失败：oneline 失败");
+        // at 缺场（老状态文件）也不能崩，退化成不带时间的成功。
+        let ok_no_at = SyncStatus { at: None, ..ok };
+        assert_eq!(sync_line_text(&ok_no_at), "上次同步：成功");
+    }
+
     /// 夹具：alert.json 真机形态的 generated_at（2026-08-30 实测），以及用它作
     /// 「现在」的固定秒数——单测不碰系统时钟。
     const FIXTURE_AT: &str = "2026-08-30T07:04:38.548588+00:00";
@@ -533,7 +782,7 @@ mod tests {
     #[test]
     fn budget_line_missing_alert_is_honest() {
         let ov = ov_with(overview::BudgetAlert { source: "missing".into(), ..Default::default() });
-        assert_eq!(budget_status_text(&ov), "预算：等预算数据（跑一次 oneline）");
+        assert_eq!(budget_status_text_at(&ov, FIXTURE_AT_SECS), "预算：等预算数据（跑一次 oneline）");
     }
 
     /// over：百分比与剩余都由 alert.json 的权威字段而来，这里只是翻译成一行字。
@@ -546,7 +795,7 @@ mod tests {
             monthly_cny: Some(600.0),
             ..Default::default()
         });
-        assert_eq!(budget_status_text(&ov), "🚨 预算超支：¥612.5（月 ¥600）");
+        assert_eq!(budget_status_text_at(&ov, FIXTURE_AT_SECS), "🚨 预算超支：¥612.5（月 ¥600）");
     }
 
     /// snoozed：显示静默截止时间；月占比不显示（被静默盖过）。
@@ -559,7 +808,7 @@ mod tests {
             month_ratio: Some(0.5),
             ..Default::default()
         });
-        assert_eq!(budget_status_text(&ov), "🔕 预算静默至 2026-08-31T00:00:00");
+        assert_eq!(budget_status_text_at(&ov, FIXTURE_AT_SECS), "🔕 预算静默至 2026-08-31T00:00:00");
     }
 
     /// warn：百分比直接取 alert.json 的 month_ratio，绝不再用 (budget-spent)/budget
@@ -574,7 +823,7 @@ mod tests {
             monthly_cny: Some(600.0),
             ..Default::default()
         });
-        assert_eq!(budget_status_text(&ov), "⚠️ 预算 2%：¥12.79 / ¥600");
+        assert_eq!(budget_status_text_at(&ov, FIXTURE_AT_SECS), "⚠️ 预算 2%：¥12.79 / ¥600");
     }
 
     /// ok / 未知 level：显示权威数值本身，不添油加醋。
@@ -587,7 +836,7 @@ mod tests {
             monthly_cny: Some(600.0),
             ..Default::default()
         });
-        assert_eq!(budget_status_text(&ov), "✓ 预算：¥12.79 / ¥600");
+        assert_eq!(budget_status_text_at(&ov, FIXTURE_AT_SECS), "✓ 预算：¥12.79 / ¥600");
     }
 
     /// AGENT_VITALS_BIN 优先于自身目录与 PATH（env 指向的文件存在就用它）。

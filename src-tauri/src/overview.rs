@@ -125,6 +125,44 @@ fn load_sync_status(dh: &Path) -> SyncStatus {
         .unwrap_or_default()
 }
 
+/// 最近一次被折账的会话（`state/oneline.json`，`oneline` 写链每次结算末尾落盘）。
+/// **纯展示，不参与任何汇总**——今日/本月的钱来自 today.json/month.json，这里只是
+/// 「上一次跑完的那个会话花了多少」，是个独立问题：刚跑完一个会话的人第一时间想
+/// 知道的就是它，而不用打开工作台翻会话列表。
+///
+/// 字段全部 Option + `present`：文件缺场（一次 oneline 都没跑过）与「跑过但某个
+/// 字段是 null」是两回事，前者整条不显示，后者显示已知部分。不拿缺失字段当 0。
+#[derive(Serialize, Default)]
+pub struct RecentSession {
+    pub present: bool,
+    pub model: Option<String>,
+    pub tokens_total: Option<i64>,
+    pub cost_cny: Option<f64>,
+    pub findings_total: Option<i64>,
+    pub findings_max_severity: Option<String>,
+    /// 这次结算的落盘时刻——与 alert.json 的 `generated_at` 同源同刻（两者都由
+    /// 同一次 `oneline` 末尾写出），展示层判新鲜度可以复用同一个阈值。
+    pub generated_at: Option<String>,
+}
+
+/// 读 `state/oneline.json`。缺场/解析失败 → `present: false`（不是全零结构）。
+fn read_recent_session(dh: &Path) -> RecentSession {
+    let Some(v) = read_json(&dh.join("state").join("oneline.json")) else {
+        return RecentSession::default();
+    };
+    RecentSession {
+        present: true,
+        model: v.get("model").and_then(|x| x.as_str().map(String::from)),
+        tokens_total: v.get("tokens_total").and_then(|x| x.as_i64()),
+        cost_cny: v.get("cost_cny").and_then(|x| x.as_f64()),
+        findings_total: v.get("findings_total").and_then(|x| x.as_i64()),
+        findings_max_severity: v
+            .get("findings_max_severity")
+            .and_then(|x| x.as_str().map(String::from)),
+        generated_at: v.get("generated_at").and_then(|x| x.as_str().map(String::from)),
+    }
+}
+
 #[derive(Serialize)]
 pub struct Overview {
     pub data_home: String,
@@ -133,6 +171,8 @@ pub struct Overview {
     pub days: Vec<DayRow>,
     pub budget_monthly_cny: f64,
     pub budget: BudgetAlert,
+    /// 最近一次折账的会话（oneline.json）。托盘菜单展示「上一次跑完花了多少」。
+    pub recent: RecentSession,
     /// 菜单栏同步回路状态（tick 落盘）。前端据此示警/给「立即同步」入口。
     pub sync: SyncStatus,
     pub estimate_note: String,
@@ -311,6 +351,7 @@ fn read_overview_at(dh: &Path) -> Overview {
         days,
         budget_monthly_cny: monthly_budget_cny(dh),
         budget: read_budget_alert(dh),
+        recent: read_recent_session(dh),
         sync: load_sync_status(dh),
         estimate_note: "估算值，不是账单；覆盖率不足的日子按 fallback 价补齐并标注".to_string(),
     }
