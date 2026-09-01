@@ -93,8 +93,11 @@ python3 scripts/scan.py --redact --redact-names --json safe.json
 python3 scripts/scan.py --baseline prev.json --json out.json
 
 # CLI subcommands (both implementations): doctor · list · explain · overlap · snapshot · diff ·
-#   behavior · skill-audit (Rust only — Python's `behavior --json` has the `skill` key but has
+#   plan · behavior · skill-audit (Rust only — Python's `behavior --json` has the `skill` key but has
 #   never had its own subcommand) · duration-audit
+#   `plan` turns the scan report into a ranked savings plan（zombie/oversized/trim-description/
+#   shadow → 每条点名 skill、标 risk、给测量的 token 节省与 SV 码；诚实性规则见
+#   `crates/agent-vitals-core/src/plan.rs` docstring）。
 #   `behavior <session-log>` audits a DSH session log for SV601–SV614 findings（单事件规则 + 轨迹级检测器）.
 #   `duration-audit <session-log>` audits execution duration（工具调用/turn/step/审批/hook 消费五路耗时，
 #   D1-D4 的 core 纯函数）；`--json` 输出与 `behavior --json` 的 `duration` 键是同一份数据。

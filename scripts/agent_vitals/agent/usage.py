@@ -104,6 +104,16 @@ def _int_or_none(v):
 #: 「不计价」——不需要计价方再认一个特殊分支。
 AMBIGUOUS_PROVIDER = "__ambiguous__"
 
+#: per-source 拆账的来源标签（吸收 cc-switch 的 DataSourceSummary 思路）：
+#: 一次 `token_by_date_model` 喂入的整批事件标一个来源，由**调用方显式标注**，
+#: 绝不从浏览器/渲染层猜。来源缺失 → `unspecified`（诚实降级，不编造来源名）。
+SOURCE_DSH_LIVE = "dsh-live"      # watcher/增量 fold（DSH 会话存储实时路径）
+SOURCE_DSH_BACKFILL = "dsh-backfill"  # session_index/archived_sessions 补扫
+SOURCE_CODEX = "codex"            # Codex 会话导入
+SOURCE_CLI = "cli"                # CLI 重喂（oneline/calendar 重跑同一批 —— 2026-08
+                                  # 「日历 ¥2386 vs 按 session 重算 ¥1733」事故的 (a) 根）
+SOURCE_UNSPECIFIED = "unspecified"
+
 _SAMPLE_FIELDS = ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens")
 
 
@@ -753,7 +763,7 @@ def token_by_model(events):
     return usage_fold_render(state)
 
 
-def token_by_date_model(events):
+def token_by_date_model(events, source=SOURCE_UNSPECIFIED):
     """`token_by_model` 的模型维 × `hour_buckets` 的日期维 —— `{date: {model: 八桶}}`。
 
     单一真相源是 `crates/agent-vitals-core/src/usage.rs::token_by_date_model`，
@@ -781,9 +791,19 @@ def token_by_date_model(events):
 
     时间戳缺失的样本不产生日期桶（与 `hour_buckets` 同一条纪律：未知时间
     不能算进任何一天，否则会被 1970-01-01 污染或凭空当成「今天」）。
+
+    **`source`（per-source 拆账）**：一次调用喂入的整批事件标一个来源，由
+    **调用方显式标注**——oneline/calendar 重跑同一批会话是 2026-08「日历
+    ¥2386 vs 按 session 重算 ¥1733」事故的 (a) 根，没有来源轴就永远看不出
+    「同一批被喂了几次」。输出里多一个 `by_source` 键（`{date: {source:
+    {model: 八桶}}}`），与主输出**同一次循环**累计、同 (turn, step) 去重
+    （扣旧加新都落在同一个 source 键上），保证 by_source 各 source 之和 ==
+    主输出总量。`by_source` 只在有带日期样本时出现（无样本输出仍是 `{}`），
+    插在**最后**——无 by_source 读方的键序不受影响。
     """
     events = post_fork(events)
     by_date_model = {}
+    by_source = {}
     active = None
     last = None  # (turn, step, date, model, buckets, peak)
 
@@ -792,6 +812,19 @@ def token_by_date_model(events):
             return
         day = by_date_model.setdefault(date_str, {})
         cur = day.setdefault(model, dict(_EMPTY_BUCKET))
+        for k in _BASE_KEYS:
+            cur[k] = cur[k] + sign * buckets[k]
+        if peak:
+            for base_key, peak_key in zip(_BASE_KEYS, _PEAK_KEYS):
+                cur[peak_key] = cur[peak_key] + sign * buckets[base_key]
+
+    def fold_source(date_str, model, buckets, peak, sign):
+        # 同一份贡献记进 source 桶。只记带日期的样本——主输出对无时间戳样本
+        # 本来就不产生日期桶，source 轴与它保持同一口径。
+        if date_str is None:
+            return
+        src_day = by_source.setdefault(date_str, {})
+        cur = src_day.setdefault(source, {}).setdefault(model, dict(_EMPTY_BUCKET))
         for k in _BASE_KEYS:
             cur[k] = cur[k] + sign * buckets[k]
         if peak:
@@ -830,12 +863,21 @@ def token_by_date_model(events):
                  else (active if active is not None else "unknown"))
 
         if last is not None and last[0] == turn and last[1] == step:
+            # 扣旧加新在主输出与 source 桶**同步**做——一次调用只喂一个 source，
+            # 净结果等于新值，两个轴都不会翻倍。
             fold(last[2], last[3], last[4], last[5], -1)
+            fold_source(last[2], last[3], last[4], last[5], -1)
             fold(date_str, model, buckets, peak, 1)
+            fold_source(date_str, model, buckets, peak, 1)
         else:
             fold(date_str, model, buckets, peak, 1)
+            fold_source(date_str, model, buckets, peak, 1)
         last = (turn, step, date_str, model, buckets, peak)
 
+    # 只在有带日期样本时插 by_source 键——无样本/全无时间戳时输出仍是空对象
+    # `{}`，不摆一个空 source 结构出来冒充「测到了什么」。
+    if by_source:
+        by_date_model["by_source"] = by_source
     return by_date_model
 
 

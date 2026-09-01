@@ -109,7 +109,7 @@ GUI / Cloud Sync / Team Dashboard         ×   （MVP 阶段）
 
 | 受众 | 场景 | 命令 |
 |---|---|---|
-| **Skill 使用者** | 装了一堆第三方 skill，要诊断和清理 | `doctor` `list` `explain` `overlap` `diff` |
+| **Skill 使用者** | 装了一堆第三方 skill，要诊断和清理 | `doctor` `list` `explain` `overlap` `diff` `plan` |
 | **Skill 作者** | 写 skill，要回归和 CI | `intent-fit` `fix` `--fail-on` |
 
 **MVP 先服务使用者**：分发渠道、activation 路径、留存逻辑都更短。

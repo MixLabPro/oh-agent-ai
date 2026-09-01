@@ -295,12 +295,24 @@ call used to do), pass `--json -`.
 
 ```bash
 python3 scripts/scan.py doctor                       # what needs my attention?
+python3 scripts/scan.py plan --startup-rate 30       # ranked savings plan from the report
 python3 scripts/scan.py list --sort usage --top 10   # what am I actually seeing?
 python3 scripts/scan.py explain proj-deploy          # why is this one not working?
 python3 scripts/scan.py overlap --min 0.3            # who might be competing?
 python3 scripts/scan.py snapshot                     # archive this moment
 python3 scripts/scan.py diff                         # what changed since?
 ```
+
+`plan` turns the report into a **ranked savings plan** — the SKILL.md §4
+"Recommended disposition" as machine-readable data, not prose. Every item names a
+skill, a risk (low→medium), a measured token saving per event, and the SV codes it
+answers. It obeys the same honesty rules as the report: `savings_per_event` is
+always a measured token count; `events_per_month` is filled only from
+`--startup-rate` (an estimate — the lifetime `usage_count` is exposed separately as
+`measured_lifetime_triggers`, never masquerading as a monthly figure); and
+`diagnosis_refs` cites only SV codes the report actually emits. A plan is a
+proposal: risk ordering is a suggested reading order, and `SKILL.md`'s rule that
+you never disable a skill without the user asking still holds.
 
 ### CI
 
@@ -753,12 +765,23 @@ Gemini CLI、OpenCode，以及项目本地 `.claude/skills`。
 
 ```bash
 python3 scripts/scan.py doctor                       # 有什么需要我处理
+python3 scripts/scan.py plan --startup-rate 30       # 把报告变成排序后的省钱方案
 python3 scripts/scan.py list --sort usage --top 10   # 你到底看到了什么
 python3 scripts/scan.py explain proj-deploy          # 这一个为什么没生效
 python3 scripts/scan.py overlap --min 0.3            # 谁可能在争抢同一类请求
 python3 scripts/scan.py snapshot                     # 存一份此刻的档
 python3 scripts/scan.py diff                         # 跟上次比，变了什么
 ```
+
+`plan` 把报告升级成**排序后的省钱方案** —— SKILL.md §4 的 Recommended disposition
+（Keep · revise · merge · disable/delete after confirmation）从散文变成可对账的
+数据，而不是又一份报告。每条都点名 skill、标执行风险（low/medium）、给出每次
+事件可测量的 token 节省与它回应的 SV 码。它守着和报告同一套诚实底线：
+`savings_per_event` 永远是测量值；`events_per_month` 只在 `--startup-rate`
+（估算）提供时填 —— 终身 `usage_count` 单独暴露为 `measured_lifetime_triggers`，
+**绝不**冒充每月数；`diagnosis_refs` 只引用报告真实发出的 SV 码。方案是提案：
+risk 排序只是建议阅读顺序，`SKILL.md`「不经用户同意绝不删/停用 skill」的规则
+不变。
 
 ### CI
 

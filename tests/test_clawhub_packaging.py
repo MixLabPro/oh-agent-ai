@@ -40,7 +40,8 @@ ALLOWED_PACKAGE_FILES = {
         "agent/codex_cost.py", "agent/codex_evidence.py",
         "agent/codex_session_audit.py", "agent/codex_usage.py",
         "agent/compaction.py", "agent/cost.py", "agent/duration.py",
-        "agent/r2a.py", "agent/skill.py", "agent/state.py", "agent/subagent.py",
+        "agent/plan.py", "agent/r2a.py", "agent/skill.py", "agent/state.py",
+        "agent/subagent.py",
         "agent/takeover.py",
         "agent/trajectory.py", "agent/usage.py", "agent/waste.py",
         # adapters/：宿主适配器

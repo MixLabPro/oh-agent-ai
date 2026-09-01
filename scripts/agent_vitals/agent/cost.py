@@ -227,15 +227,19 @@ def cost_report(usage, pricing):
     手写脚本重新调 `_price`/`load_pricing`，算一次就要重新验证一次是否用对了
     价格表——现在报告数据里的 `cost` 字段和人读文本走的是同一次计算。
 
-    无任何可分桶的桶且没有未计价 token 时返回 None（与 `cost_block` 的空列表
-    同一语义：没有数据就是没有，不摆一个全零的结构出来）。金额是未四舍五入的
-    原始浮点——舍入是格式化文本时才做的展示决定，结构化数据不预先舍。
+    无任何可分桶的桶、没有未计价 token、也没有 by_source 时返回 None（与
+    `cost_block` 的空列表同一语义：没有数据就是没有，不摆一个全零的结构出来）。
+    金额是未四舍五入的原始浮点——舍入是格式化文本时才做的展示决定，结构化数据
+    不预先舍。
+
+    `by_source`（`{source: {model: 八桶}}`，调用方已折平，见 `state.rollup_by_source`）
+    单独折成 `by_source_cost` 插在**最后**——按来源拆账是诊断「同一批被喂了几
+    次」的眼睛，但它不是主账单的一部分，插在中间会破坏已有读方的键序。by_source
+    为空/缺场时 `by_source_cost` 键整个不出现，输出与没有该功能的版本逐字节一致。
 
     Rust 平行实现见 `crates/agent-vitals-core/src/cost.rs::cost_report`。
     """
     by_model = (usage or {}).get("by_model") or {}
-    if not by_model:
-        return None
     providers = (usage or {}).get("providers")
     total = 0.0
     peak_total = 0.0
@@ -278,9 +282,12 @@ def cost_report(usage, pricing):
             "peak": p["peak"],
             "cache_read_cost": p["cache_read_cost"],
         }
-    if not per_model and unpriced == 0:
+    bsc = _build_by_source_cost(usage, pricing)
+    if not per_model and unpriced == 0 and bsc is None:
+        # by_source 也没有才真的一无所有；有 by_source 就继续（_build_by_source_cost
+        # 会单独判断「该来源有无可分桶」，不会摆全零行）。
         return None
-    return {
+    out = {
         "currency": "CNY",
         "estimate_disclaimer": "估算值，不是账单",
         "total": total,
@@ -288,6 +295,44 @@ def cost_report(usage, pricing):
         "per_model": per_model,
         "unpriced_tokens": unpriced,
     }
+    if bsc is not None:
+        out["by_source_cost"] = bsc
+    return out
+
+
+def _build_by_source_cost(usage, pricing):
+    """`usage["by_source"]`（`{source: {model: 八桶}}`，调用方已折平，见
+    `state.rollup_by_source`）→ `{source: {total, peak_total, unpriced_tokens}}`。
+
+    每个来源复用 `cost_report` 的主计价循环（把该来源的 `{model: 桶}` 当作
+    by_model 传进去），**不在这里长第二份计价规则**。月级数据没有供应商表
+    （month.json 不存 providers），所以各来源一律回落原厂价——与 `priced_day`
+    对同一份 month.json 的处理一致，同一个来源的钱在两种 surface 上不会算岔。
+
+    来源里全是未知模型 → 该来源只贡献 `unpriced_tokens`，不臆造价格。来源为空
+    或缺场 → None（调用方据此决定要不要插 `by_source_cost` 键）。
+
+    Rust 平行实现见 `cost.rs::build_by_source_cost`。
+    """
+    by_source = (usage or {}).get("by_source") or {}
+    if not by_source:
+        return None
+    out = {}
+    for source, models in by_source.items():
+        if not isinstance(models, dict):
+            continue
+        report = cost_report({"by_model": models}, pricing)
+        if report is None:
+            # 该来源没有任何可分桶的桶（例如空 models）→ 一个真实的零行，不是
+            # 编造——来源行存在本身就说明「这个来源喂过但没贡献可分桶」。
+            out[source] = {"total": 0.0, "peak_total": 0.0, "unpriced_tokens": 0}
+        else:
+            out[source] = {
+                "total": report["total"],
+                "peak_total": report["peak_total"],
+                "unpriced_tokens": report["unpriced_tokens"],
+            }
+    return out or None
 
 
 def cost_block(usage, pricing):

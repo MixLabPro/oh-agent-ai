@@ -43,12 +43,12 @@ RS_SKILLS_FAMILY = {
 # 审计读的是运行证据，不是 SKILL.md 文本——名字像扫描器，家族是 agent。
 PY_AGENT_FAMILY = {
     "behavior", "budget", "codex_cost", "codex_evidence", "codex_session_audit",
-    "codex_usage", "compaction", "cost", "duration", "r2a", "skill", "state",
-    "subagent", "takeover", "trajectory", "usage", "waste",
+    "codex_usage", "compaction", "cost", "duration", "plan", "r2a", "skill",
+    "state", "subagent", "takeover", "trajectory", "usage", "waste",
 }
 RS_AGENT_FAMILY = {
     "behavior", "budget", "codex_cost", "codex_session", "codex_session_audit",
-    "cost", "discovery", "oneline", "r2a_store", "state", "takeover",
+    "cost", "discovery", "oneline", "plan", "r2a_store", "state", "takeover",
 }
 
 

@@ -12,6 +12,7 @@ pub mod codex_session_audit;
 pub mod cost;
 pub mod discovery;
 pub mod oneline;
+pub mod plan;
 pub mod r2a_store;
 pub mod state;
 pub mod takeover;

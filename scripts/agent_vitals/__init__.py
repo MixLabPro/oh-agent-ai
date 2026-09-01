@@ -37,6 +37,7 @@ from .agent import (  # noqa: E402
     compaction,
     cost,
     duration,
+    plan,
     skill,
     state,
     subagent,
@@ -72,7 +73,7 @@ _FLAT_MODULE_NAMES = (
     "inventory", "lifecycle", "overlap", "redact", "report", "security",
     "snapshots",
     "behavior", "budget", "codex_cost", "codex_evidence", "codex_usage",
-    "compaction", "cost", "duration", "skill", "state", "subagent",
+    "compaction", "cost", "duration", "plan", "skill", "state", "subagent",
     "takeover", "trajectory", "usage", "waste",
 )
 for _name in _FLAT_MODULE_NAMES:
@@ -108,6 +109,7 @@ __all__ = [
     "norm",
     "overlap",
     "parse_frontmatter",
+    "plan",
     "redact",
     "report",
     "safe_str",

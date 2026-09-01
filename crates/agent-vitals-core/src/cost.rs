@@ -158,81 +158,140 @@ fn bucket_price(buckets: &Value, model_key: &str, provider_key: &str, pricing: &
 /// 手写脚本重新调 `_price`/`load_pricing`，算一次就要重新验证一次是否用对了
 /// 价格表——现在报告数据里的 `cost` 字段和人读文本走的是同一次计算。
 ///
-/// 无任何可分桶的桶且没有未计价 token 时返回 `None`（与 `cost_block` 的空
-/// 列表同一语义：没有数据就是没有，不摆一个全零的结构出来）。金额是未四舍
-/// 五入的原始浮点——舍入是格式化文本时才做的展示决定，结构化数据不预先舍。
+/// 无任何可分桶的桶、没有未计价 token、也没有 by_source 时返回 `None`（与
+/// `cost_block` 的空列表同一语义：没有数据就是没有，不摆一个全零的结构出来）。
+/// 金额是未四舍五入的原始浮点——舍入是格式化文本时才做的展示决定，结构化数据
+/// 不预先舍。
+///
+/// `by_source`（`{source: {model: 8桶}}`，调用方已折平，见 `rollup_by_source`）
+/// 单独折成 `by_source_cost` 插在**最后**——按来源拆账是诊断「同一批被喂了几次」
+/// 的眼睛，但它不是主账单的一部分，插在中间会破坏已有读方的键序。by_source 为
+/// 空/缺场时 `by_source_cost` 键整个不出现，输出与没有该功能的版本逐字节一致。
 pub fn cost_report(usage: &Value, pricing: &Value) -> Option<Value> {
-    let by_model = usage.get("by_model").and_then(|v| v.as_object())?;
+    let by_model = usage.get("by_model").and_then(|v| v.as_object());
     let providers = usage.get("providers").and_then(|v| v.as_object());
     let mut total: f64 = 0.0;
     let mut peak_total: f64 = 0.0;
     let mut unpriced: i64 = 0;
     let mut per_model = serde_json::Map::new();
-    for (model, buckets) in by_model {
-        // 价目表**按供应商分层**，不是按模型名一张表打天下。真实日志里
-        // provider=shengsuanyun 的 pro 和 provider=deepseek-official 的 flash
-        // 并存，两家报价不同（胜算云 DeepSeek 线路缓存读 0.15、Ali 线路 0.45）。
-        //
-        // 解析顺序见 resolve_card：该供应商自己的表 → 回落原厂 → 未计价。
-        // **回落是有意的默认**：供应商没报价时给一个标注了来源的估算，比什么
-        // 都不给有用；但依据必须一路传到展示层写明「按原厂报价估算」，否则就是
-        // 拿别家的价冒充实价。
-        //
-        // provider 为 Null（老日志没上报）或该模型没留下 header 时按 None 处理，
-        // resolve_card 自然回落到原厂——与老日志的既有行为一致。
-        let provider = providers
-            .and_then(|m| m.get(model))
-            .and_then(|v| v.as_str());
-        match resolve_card(model, provider, pricing) {
-            Some((key, provider_key, basis)) => {
-                if let Some(p) = bucket_price(buckets, &key, &provider_key, pricing) {
-                    total += p.total;
-                    peak_total += p.peak;
-                    per_model.insert(
-                        model.clone(),
-                        serde_json::json!({
-                            "short_name": model_short(model, pricing),
-                            // 供应商随每一行一起给出：同一会话可能横跨两家，
-                            // 只给模型名的话这张表跟任何一家的账单都对不上。
-                            // 归属不明时 provider 落 Null——`__ambiguous__` 是
-                            // 内部哨兵，绝不能作为供应商名渲染给用户看。
-                            "provider": if basis == Basis::Ambiguous {
-                                Value::Null
-                            } else {
-                                provider.map(Value::from).unwrap_or(Value::Null)
-                            },
-                            // 这一行是按谁的报价算的。非 provider 时展示层必须说明依据。
-                            "pricing_basis": match basis {
-                                Basis::Provider => "provider",
-                                Basis::Fallback => "fallback",
-                                Basis::Ambiguous => "ambiguous",
-                            },
-                            "priced_with": provider_key,
-                            "total": p.total,
-                            "peak": p.peak,
-                            "cache_read_cost": p.cache_read_cost,
-                        }),
-                    );
+    // 没有 by_model（例如 `state by-source` 只带 by_source 的 usage）时循环
+    // 整体跳过——per_model 恒空、主账单是 0，但 by_source 仍要计价（下面共享
+    // 的收尾只认「全空」才返回 None，不会因为主账单空就放弃 by_source）。
+    if let Some(by_model) = by_model {
+        for (model, buckets) in by_model {
+            // 价目表**按供应商分层**，不是按模型名一张表打天下。真实日志里
+            // provider=shengsuanyun 的 pro 和 provider=deepseek-official 的 flash
+            // 并存，两家报价不同（胜算云 DeepSeek 线路缓存读 0.15、Ali 线路 0.45）。
+            //
+            // 解析顺序见 resolve_card：该供应商自己的表 → 回落原厂 → 未计价。
+            // **回落是有意的默认**：供应商没报价时给一个标注了来源的估算，比什么
+            // 都不给有用；但依据必须一路传到展示层写明「按原厂报价估算」，否则就是
+            // 拿别家的价冒充实价。
+            //
+            // provider 为 Null（老日志没上报）或该模型没留下 header 时按 None 处理，
+            // resolve_card 自然回落到原厂——与老日志的既有行为一致。
+            let provider = providers
+                .and_then(|m| m.get(model))
+                .and_then(|v| v.as_str());
+            match resolve_card(model, provider, pricing) {
+                Some((key, provider_key, basis)) => {
+                    if let Some(p) = bucket_price(buckets, &key, &provider_key, pricing) {
+                        total += p.total;
+                        peak_total += p.peak;
+                        per_model.insert(
+                            model.clone(),
+                            serde_json::json!({
+                                "short_name": model_short(model, pricing),
+                                // 供应商随每一行一起给出：同一会话可能横跨两家，
+                                // 只给模型名的话这张表跟任何一家的账单都对不上。
+                                // 归属不明时 provider 落 Null——`__ambiguous__` 是
+                                // 内部哨兵，绝不能作为供应商名渲染给用户看。
+                                "provider": if basis == Basis::Ambiguous {
+                                    Value::Null
+                                } else {
+                                    provider.map(Value::from).unwrap_or(Value::Null)
+                                },
+                                // 这一行是按谁的报价算的。非 provider 时展示层必须说明依据。
+                                "pricing_basis": match basis {
+                                    Basis::Provider => "provider",
+                                    Basis::Fallback => "fallback",
+                                    Basis::Ambiguous => "ambiguous",
+                                },
+                                "priced_with": provider_key,
+                                "total": p.total,
+                                "peak": p.peak,
+                                "cache_read_cost": p.cache_read_cost,
+                            }),
+                        );
+                    }
                 }
-            }
-            None => {
-                unpriced += get_i64(buckets, "uncached_input_tokens")
-                    + get_i64(buckets, "cache_read_tokens")
-                    + get_i64(buckets, "cache_write_tokens");
+                None => {
+                    unpriced += get_i64(buckets, "uncached_input_tokens")
+                        + get_i64(buckets, "cache_read_tokens")
+                        + get_i64(buckets, "cache_write_tokens");
+                }
             }
         }
     }
-    if per_model.is_empty() && unpriced == 0 {
+    let bsc = build_by_source_cost(usage, pricing);
+    if per_model.is_empty() && unpriced == 0 && bsc.is_none() {
+        // by_source 也没有才真的一无所有；有 by_source 就继续（by_source_cost 会
+        // 单独判断「该来源有无可分桶」，不会摆全零行）。
         return None;
     }
-    Some(serde_json::json!({
+    let mut out = serde_json::json!({
         "currency": "CNY",
         "estimate_disclaimer": "估算值，不是账单",
         "total": total,
         "peak_total": peak_total,
         "per_model": Value::Object(per_model),
         "unpriced_tokens": unpriced,
-    }))
+    });
+    if let Some(bsc) = bsc {
+        out["by_source_cost"] = bsc;
+    }
+    Some(out)
+}
+
+/// `usage["by_source"]`（`{source: {model: 8桶}}`，调用方已折平，见
+/// `rollup_by_source`）→ `{source: {total, peak_total, unpriced_tokens}}`。
+///
+/// 每个来源复用 `cost_report` 的主计价循环（把该来源的 `{model: 桶}` 当作
+/// by_model 传进去），**不在这里长第二份计价规则**。月级数据没有供应商表
+/// （month.json 不存 providers），所以各来源一律回落原厂价——与 `priced_day`
+/// 对同一份 month.json 的处理一致，同一个来源的钱在两种 surface 上不会算岔。
+///
+/// 来源里全是未知模型 → 该来源只贡献 `unpriced_tokens`，不臆造价格。来源为空
+/// 或缺场 → `None`（调用方据此决定要不要插 `by_source_cost` 键）。
+fn build_by_source_cost(usage: &Value, pricing: &Value) -> Option<Value> {
+    let by_source = usage.get("by_source").and_then(|v| v.as_object())?;
+    if by_source.is_empty() {
+        return None;
+    }
+    let mut out = serde_json::Map::new();
+    for (source, models) in by_source {
+        let Some(models) = models.as_object() else {
+            continue;
+        };
+        let report = cost_report(&json!({"by_model": models}), pricing);
+        out.insert(
+            source.clone(),
+            match report {
+                Some(r) => json!({
+                    "total": r["total"],
+                    "peak_total": r["peak_total"],
+                    "unpriced_tokens": r["unpriced_tokens"],
+                }),
+                // 该来源没有任何可分桶的桶（例如空 models）→ 一个真实的零行，
+                // 不是编造——来源行存在本身就说明「这个来源喂过但没贡献可分桶」。
+                None => json!({"total": 0.0, "peak_total": 0.0, "unpriced_tokens": 0}),
+            },
+        );
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(Value::Object(out))
 }
 
 /// 日桶的 8 个基础字段（`state.py` month.json/today.json 的顶层形状）——
@@ -774,6 +833,88 @@ mod tests {
         assert!((out["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
         assert_eq!(out["tokens"], serde_json::json!(1000000),
                    "by_model 路径要带今日 token 总量（菜单栏标题用）");
+    }
+
+    /// per-source 拆账计价：同一批 100 万 uncached 喂两次（dsh-live + cli），
+    /// `by_source_cost` 必须各来源一行、各 1.5 元（flash 空闲价），而不是把总量
+    /// 翻倍后塞进一个来源——诊断「同一批被喂了几次」靠的就是两行并存。
+    #[test]
+    fn cost_report_by_source_prices_each_source_separately() {
+        let usage = serde_json::json!({
+            "by_model": {"deepseek-v4-flash": {
+                "uncached_input_tokens": 2000000, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            }},
+            "by_source": {
+                "dsh-live": {"deepseek-v4-flash": {
+                    "uncached_input_tokens": 1000000, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                }},
+                "cli": {"deepseek-v4-flash": {
+                    "uncached_input_tokens": 1000000, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                }},
+            },
+        });
+        let pricing = load_pricing();
+        let report = cost_report(&usage, &pricing).expect("by_source present");
+        assert!((report["total"].as_f64().unwrap() - 3.0).abs() < 1e-9, "主账单 = 两来源之和");
+        let bsc = &report["by_source_cost"];
+        assert_eq!(bsc.as_object().unwrap().len(), 2, "两个来源 → 两行");
+        assert!((bsc["dsh-live"]["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+        assert!((bsc["cli"]["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+        assert_eq!(bsc["dsh-live"]["unpriced_tokens"], 0);
+    }
+
+    /// by_source_cost 插在**最后**：by_source 缺场时输出与老版本逐字节一致
+    /// （键序：currency/disclaimer/total/peak_total/per_model/unpriced_tokens，
+    /// 且没有 by_source_cost 键）。
+    #[test]
+    fn cost_report_omits_by_source_cost_when_source_absent() {
+        let usage = serde_json::json!({
+            "by_model": {"deepseek-v4-flash": {
+                "uncached_input_tokens": 1000000, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            }},
+        });
+        let pricing = load_pricing();
+        let report = cost_report(&usage, &pricing).unwrap();
+        assert!(report.get("by_source_cost").is_none());
+        let keys: Vec<_> = report.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            keys,
+            vec![
+                "currency", "estimate_disclaimer", "total",
+                "peak_total", "per_model", "unpriced_tokens",
+            ],
+            "无 by_source 时键序必须保持老版（by_source_cost 插最后的前提）"
+        );
+    }
+
+    /// 只有 by_source、没有 by_model（`state by-source` 的 usage 形状）→ 主账单
+    /// 为 0、by_source_cost 照常给——不能因为主账单空就整体返回 None。
+    #[test]
+    fn cost_report_by_source_only_still_prices_sources() {
+        let usage = serde_json::json!({
+            "by_source": {"codex": {"deepseek-v4-flash": {
+                "uncached_input_tokens": 1000000, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            }}},
+        });
+        let pricing = load_pricing();
+        let report = cost_report(&usage, &pricing).expect("by_source-only must not be None");
+        assert_eq!(report["total"], 0.0);
+        assert!((report["by_source_cost"]["codex"]["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
     }
 
     /// `today_cost` 老数据路径：无 by_model 的 buckets 逐桶 `bucket_cost` 求和。

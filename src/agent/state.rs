@@ -184,6 +184,39 @@ pub fn merge_month(hb: &Value, by_date_model: Option<&Value>) -> PathBuf {
     path
 }
 
+/// `state by-source` 的读路径：month.json 的**逐日** by_source（`days[date]
+/// ["by_source"]`）折平成 `{source: {model: 8桶}}`（core `rollup_by_source`），
+/// 再按主账单同一套 `cost_report` 计价成 `{source: {total, peak_total,
+/// unpriced_tokens}}`。
+///
+/// 输出 JSON 两个键：`by_source`（token 形状，人眼核对来源）与
+/// `by_source_cost`（钱）。month.json 没有 by_source（老数据）→ 两个键都空，
+/// **不摆全零结构**——「这个月还没有按来源记账」和「全来源花了 0 元」是两件事。
+/// 计价来源一律回落原厂价（month.json 不存 providers），与 `priced_day` 对同一
+/// 份 month.json 的处理一致，同一个来源的钱在两个 surface 上不会算岔。
+pub fn by_source_report() {
+    let path = state_dir().join("month.json");
+    let Some(month) = read_json(&path) else {
+        println!(r#"{{"by_source": {{}}, "by_source_cost": null}}"#);
+        return;
+    };
+    let rollup = state_core::rollup_by_source(&month);
+    if rollup.as_object().map_or(true, |m| m.is_empty()) {
+        println!(r#"{{"by_source": {{}}, "by_source_cost": null}}"#);
+        return;
+    }
+    let pricing = crate::agent::cost::load_pricing();
+    let cost = agent_vitals_core::cost::cost_report(&json!({"by_source": rollup}), &pricing);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "by_source": rollup,
+            "by_source_cost": cost,
+        }))
+        .unwrap_or_default()
+    );
+}
+
 /// 复刻 `write_oneline(audit)`：单次审计快照，原地覆盖 + schema_version + generated_at。
 pub fn write_oneline(audit: &Value) -> PathBuf {
     let path = state_dir().join("oneline.json");

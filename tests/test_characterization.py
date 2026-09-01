@@ -2227,7 +2227,19 @@ class TestTokenByDateModel(unittest.TestCase):
             '"flash":{"uncached_input_tokens":500,"output_tokens":50,'
             '"cache_read_tokens":0,"cache_write_tokens":0,'
             '"peak_uncached_input_tokens":0,"peak_output_tokens":0,'
-            '"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}}}')
+            '"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},'
+            '"by_source":{"2026-08-25":{"unspecified":{"pro":{"uncached_input_tokens":0,'
+            '"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,'
+            '"peak_uncached_input_tokens":0,"peak_output_tokens":0,'
+            '"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}}},'
+            '"2026-08-26":{"unspecified":{"pro":{"uncached_input_tokens":1200,'
+            '"output_tokens":120,"cache_read_tokens":60,"cache_write_tokens":0,'
+            '"peak_uncached_input_tokens":0,"peak_output_tokens":0,'
+            '"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},'
+            '"flash":{"uncached_input_tokens":500,"output_tokens":50,'
+            '"cache_read_tokens":0,"cache_write_tokens":0,'
+            '"peak_uncached_input_tokens":0,"peak_output_tokens":0,'
+            '"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}}}}}')
 
     def test_reconciles_with_hour_buckets_and_token_by_model(self):
         """同源不变量：按 (date, model) 折的四桶之和，必须同时等于
@@ -2254,8 +2266,10 @@ class TestTokenByDateModel(unittest.TestCase):
 
         hb_total = sum(total4(b) for b in hour_buckets(events)["buckets"])
         tbm_total = sum(total4(b) for b in token_by_model(events)["by_model"].values())
-        bdm_total = sum(total4(b) for day in token_by_date_model(events).values()
-                        for b in day.values())
+        # by_source 是顶层并列键、形状是 {source: {model}} 不是 {model: 桶}，
+        # 不能当日子折 total——跳过它，主输出的总量不变。
+        bdm_total = sum(total4(b) for date, day in token_by_date_model(events).items()
+                        if date != "by_source" for b in day.values())
         self.assertEqual(hb_total, tbm_total)
         self.assertEqual(bdm_total, tbm_total)
 
@@ -2274,7 +2288,8 @@ class TestTokenByDateModel(unittest.TestCase):
                       "usage": {"inputTokens": 500, "outputTokens": 50}}}},
         ]
         out = token_by_date_model(events)
-        self.assertEqual(list(out.keys()), ["2026-08-25"])
+        # by_source 是顶层并列键，不是日期——日期键仍只有一个。
+        self.assertEqual([k for k in out if k != "by_source"], ["2026-08-25"])
         day = out["2026-08-25"]
         self.assertEqual(day["deepseek-v4-pro"]["uncached_input_tokens"], 1000)
         self.assertEqual(day["deepseek-v4-flash"]["uncached_input_tokens"], 500)
@@ -2294,7 +2309,8 @@ class TestTokenByDateModel(unittest.TestCase):
                       "usage": {"inputTokens": 200, "outputTokens": 20}}}},
         ]
         out = token_by_date_model(events)
-        self.assertEqual(sorted(out.keys()), ["2026-08-25", "2026-08-26"])
+        self.assertEqual(sorted(k for k in out if k != "by_source"),
+                         ["2026-08-25", "2026-08-26"])
         self.assertEqual(out["2026-08-25"]["pro"]["uncached_input_tokens"], 100)
         self.assertEqual(out["2026-08-26"]["pro"]["uncached_input_tokens"], 200)
 

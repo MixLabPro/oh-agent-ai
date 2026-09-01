@@ -360,6 +360,47 @@ def _merge_model_buckets(existing, by_model):
     return existing
 
 
+def _merge_source_into_day(day, source, models):
+    """把 per-source 拆账的 `{source: {model: 八桶}}` 折进 day（`merge_month` 的
+    当前月与历史月回填两处都调它）。
+
+    与 Rust `state.rs::merge_source_into_day` 同构：`_merge_buckets` 只读 8 个
+    token 字段、不碰 by_model 也不碰 by_source，所以 by_source 要像 by_model
+    一样在 `_merge_buckets` 之外单独折。同一来源喂第二次是**累加**（同一批被
+    喂了两次时，诊断靠的是两个来源**键并存**、各来源行是各自的量），不是覆盖。
+    """
+    prev = (day.get("by_source") or {}).get(source)
+    day.setdefault("by_source", {})[source] = _merge_model_buckets(prev, models)
+
+
+def rollup_by_source(month_json):
+    """把 month.json 的**逐日** by_source（`days[date]["by_source"] =
+    {source: {model: 八桶}}`）折平成 `{source: {model: 八桶}}`——给
+    `state by-source` / 日历按来源合计用。
+
+    逐日结构在 month.json 里是对的（按天归位、随天一起归档），但「本月各来源
+    各自贡献多少」需要在展示侧按天折平；不折平的话，诊断「同一批被喂了几次」
+    就要肉眼跨所有天求和。
+    """
+    out = {}
+    for day in (month_json.get("days") or {}).values():
+        for source, models in (day.get("by_source") or {}).items():
+            src = out.setdefault(source, {})
+            for model, b in models.items():
+                cur = src.setdefault(model, {
+                    "uncached_input_tokens": 0, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                })
+                for fld in ("uncached_input_tokens", "output_tokens",
+                            "cache_read_tokens", "cache_write_tokens",
+                            "peak_uncached_input_tokens", "peak_output_tokens",
+                            "peak_cache_read_tokens", "peak_cache_write_tokens"):
+                    cur[fld] = cur.get(fld, 0) + (b.get(fld) or 0)
+    return out
+
+
 def rotate_today(now=None):
     """如果 today.json 的 date 字段 != 当前 BJ 日期,**清空** today.json。
 
@@ -545,6 +586,12 @@ def merge_month(hour_buckets_result, by_date_model=None) -> Path:
         merged = _merge_buckets({}, hour_buckets_result.get("buckets", []),
                                 key_field="date")
         for date_key, by_model in (by_date_model or {}).items():
+            # `token_by_date_model` 的 by_source 轴是顶层并列键，不是日期——
+            # 跳过，单独按「日期 → source → 模型」折（见下）。不跳的话它会被
+            # 当成某一天，_merge_model_buckets 会把 `{date: {source: {model}}}`
+            # 整段塞进 by_model，月账直接错一个量级。
+            if date_key == "by_source":
+                continue
             if not by_model:
                 continue
             day = merged.setdefault(date_key, {
@@ -554,6 +601,19 @@ def merge_month(hour_buckets_result, by_date_model=None) -> Path:
                 "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
             })
             day["by_model"] = _merge_model_buckets(day.get("by_model"), by_model)
+        # by_source 也折进 merged，让下面的 cur/old 分流统一携带它——与
+        # by_model 同一套语义（合并、日期缺桶补零桶），只多一层 source 键。
+        for date_key, sources in ((by_date_model or {}).get("by_source") or {}).items():
+            if not sources:
+                continue
+            day = merged.setdefault(date_key, {
+                "uncached_input_tokens": 0, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            })
+            for src, models in sources.items():
+                _merge_source_into_day(day, src, models)
 
         cur_days = {d: b for d, b in merged.items() if _month_key(d) == current}
         old_days = {d: b for d, b in merged.items() if _month_key(d) != current}
@@ -566,6 +626,12 @@ def merge_month(hour_buckets_result, by_date_model=None) -> Path:
             if b.get("by_model"):
                 existing["days"][d]["by_model"] = _merge_model_buckets(
                     existing["days"][d].get("by_model"), b["by_model"])
+            # by_source 与 by_model 一样在 _merge_buckets 之外单独折——
+            # _merge_buckets 只读 8 个 token 字段，会把 by_source 丢回 new_day。
+            if b.get("by_source"):
+                day = existing["days"][d]
+                for src, models in b["by_source"].items():
+                    _merge_source_into_day(day, src, models)
 
         if old_days:
             # 历史月的回填：累加进归档里已有的那一天，而不是替换——这里的
@@ -581,6 +647,14 @@ def merge_month(hour_buckets_result, by_date_model=None) -> Path:
                 if b.get("by_model") or (prev or {}).get("by_model"):
                     acc[d]["by_model"] = _merge_model_buckets(
                         (prev or {}).get("by_model"), b.get("by_model") or {})
+                # by_source 的回填也是累加（prev 的 source 桶 ∪ 本次的），不是
+                # 替换——同一天被回填两次，两个来源各留各的键。
+                if b.get("by_source") or (prev or {}).get("by_source"):
+                    day = acc[d]
+                    for src, models in ((prev or {}).get("by_source") or {}).items():
+                        _merge_source_into_day(day, src, models)
+                    for src, models in (b.get("by_source") or {}).items():
+                        _merge_source_into_day(day, src, models)
                 rebuilt[d] = acc[d]
             _archive_days(rebuilt)
 

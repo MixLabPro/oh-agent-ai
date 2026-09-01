@@ -38,6 +38,21 @@ use crate::evidence::{Coverage, Signal};
 /// 落进「不计价」——不需要计价方再认一个特殊分支。
 pub const AMBIGUOUS_PROVIDER: &str = "__ambiguous__";
 
+/// usage 样本的**来源**标签（per-source 拆账的键）。跨会话 fold 的
+/// `by_source` 轴按它分桶：2026-08「日历 ¥2386 vs 按 session 重算 ¥1733」
+/// 的账目对不上，根因是同一批会话被喂了多次——给每次喂入标一个来源，
+/// 就能一眼看出「同一个量在 by_source 里出现了几行」，而不是只见总量翻倍。
+///
+/// **来源只能来自 fold 调用方的显式标注**（事件本身没有来源字段，也不能在
+/// 展示层猜）：oneline 喂 → `cli`，watcher 增量 → `dsh-live`，历史补扫 →
+/// `dsh-backfill`，Codex 导入 → `codex`。调用方确实不知道时用
+/// `SOURCE_UNSPECIFIED`——这是诚实的标签，不是编造。
+pub const SOURCE_DSH_LIVE: &str = "dsh-live";
+pub const SOURCE_DSH_BACKFILL: &str = "dsh-backfill";
+pub const SOURCE_CODEX: &str = "codex";
+pub const SOURCE_CLI: &str = "cli";
+pub const SOURCE_UNSPECIFIED: &str = "unspecified";
+
 /// usage sample 的四个字段名（日志里的 camelCase），顺序与四桶对齐。
 const SAMPLE_FIELDS: [&str; 4] =
     ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
@@ -1090,7 +1105,7 @@ type DateModelDedupSlot = (i64, i64, Option<String>, String, [i64; 4], bool);
 /// `(None, None)`、日历渲染时滤掉是同一条纪律：未知时间不能算进任何一天）。
 /// 因此本函数的总量 = `token_by_model` 的总量 − 无时间戳样本的量；语料里
 /// 全部样本都带 time 时两者精确相等，这正是对账测试断言的形式。
-pub fn token_by_date_model(events: &[Value]) -> Value {
+pub fn token_by_date_model(events: &[Value], source: &str) -> Value {
     // 只看分叉之后的事件——见 token_by_model 的同条注释
     let events = &crate::util::post_fork(events)[..];
 
@@ -1100,6 +1115,18 @@ pub fn token_by_date_model(events: &[Value]) -> Value {
     let mut day_model_keys: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     let mut acc: std::collections::HashMap<(String, String), [i64; 8]> =
+        std::collections::HashMap::new();
+
+    // by_source 轴：`{date: {source: {model: 8桶}}}`（date 优先，与主输出同
+    // 日期空间，`merge_month` 才能按日期归位/归档）。与主输出**同一次循环**
+    // 累计、同 (turn, step) 去重（扣旧加新都落在同一个 source 键上），保证
+    // by_source 各 source 之和 == 主输出总量——按来源拆的账和按日期拆的账是
+    // 同一份用量，不是各算各的。
+    let mut src_day_keys: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, Vec<String>>,
+    > = std::collections::BTreeMap::new();
+    let mut src_acc: std::collections::HashMap<(String, String, String), [i64; 8]> =
         std::collections::HashMap::new();
 
     let mut active: Option<String> = None;
@@ -1150,6 +1177,22 @@ pub fn token_by_date_model(events: &[Value]) -> Value {
                         }
                     }
                 }
+                // 旧归属同样从 source 桶扣掉——一次调用只喂一个 source，扣旧加新
+                // 都在同一个 source 键上，净结果等于新值。
+                if let Some(entry) = src_acc.get_mut(&(
+                    ldate.clone(),
+                    source.to_string(),
+                    lmodel.clone(),
+                )) {
+                    for i in 0..4 {
+                        entry[i] -= lb[i];
+                    }
+                    if *lpeak {
+                        for i in 0..4 {
+                            entry[4 + i] -= lb[i];
+                        }
+                    }
+                }
             }
         }
 
@@ -1167,6 +1210,28 @@ pub fn token_by_date_model(events: &[Value]) -> Value {
                     entry[4 + i] += add[i];
                 }
             }
+
+            // 同一份贡献记进 source 桶。只记带日期的样本——主输出对无时间戳
+            // 样本本来就不产生日期桶，source 轴与它保持同一口径。
+            let src_models = src_day_keys
+                .entry(d.clone())
+                .or_default()
+                .entry(source.to_string())
+                .or_default();
+            if !src_models.iter().any(|m| m == &model) {
+                src_models.push(model.clone());
+            }
+            let sentry = src_acc
+                .entry((d.clone(), source.to_string(), model.clone()))
+                .or_insert([0i64; 8]);
+            for i in 0..4 {
+                sentry[i] += add[i];
+            }
+            if peak {
+                for i in 0..4 {
+                    sentry[4 + i] += add[i];
+                }
+            }
         }
         last = Some((turn, step, date_str, model, add, peak));
     }
@@ -1179,23 +1244,50 @@ pub fn token_by_date_model(events: &[Value]) -> Value {
                 .get(&(date_str.clone(), model.clone()))
                 .copied()
                 .unwrap_or([0i64; 8]);
-            day.insert(
-                model.clone(),
-                json!({
-                    "uncached_input_tokens": b[0],
-                    "output_tokens": b[1],
-                    "cache_read_tokens": b[2],
-                    "cache_write_tokens": b[3],
-                    "peak_uncached_input_tokens": b[4],
-                    "peak_output_tokens": b[5],
-                    "peak_cache_read_tokens": b[6],
-                    "peak_cache_write_tokens": b[7],
-                }),
-            );
+            day.insert(model.clone(), bucket_json8(&b));
         }
         out.insert(date_str.clone(), Value::Object(day));
     }
+    // by_source：date 升序、source 按首现顺序（一次调用只喂一个 source，所以
+    // 每日期下恒一个 source 键，但结构保持通用）、模型按首现顺序。
+    let mut src_out = serde_json::Map::new();
+    for (date_str, sources) in &src_day_keys {
+        let mut src_day = serde_json::Map::new();
+        for (source_name, models) in sources {
+            let mut sm = serde_json::Map::new();
+            for model in models {
+                let b = src_acc
+                    .get(&(date_str.clone(), source_name.clone(), model.clone()))
+                    .copied()
+                    .unwrap_or([0i64; 8]);
+                sm.insert(model.clone(), bucket_json8(&b));
+            }
+            src_day.insert(source_name.clone(), Value::Object(sm));
+        }
+        src_out.insert(date_str.clone(), Value::Object(src_day));
+    }
+    // 只在有带日期样本时插 by_source 键——无样本/全无时间戳时输出仍是空对象
+    // `{}`（与 `token_by_date_model_drops_untimed_samples` 钉的语义一致），
+    // 不摆一个空 source 结构出来冒充「测到了什么」。
+    if !src_out.is_empty() {
+        out.insert("by_source".into(), Value::Object(src_out));
+    }
     Value::Object(out)
+}
+
+/// 8 桶 → JSON 对象字面量。`token_by_date_model` 的主输出与 by_source 轴共用，
+/// 保证两个轴同一份桶字段清单，不允许各自拼一份。
+fn bucket_json8(b: &[i64; 8]) -> Value {
+    json!({
+        "uncached_input_tokens": b[0],
+        "output_tokens": b[1],
+        "cache_read_tokens": b[2],
+        "cache_write_tokens": b[3],
+        "peak_uncached_input_tokens": b[4],
+        "peak_output_tokens": b[5],
+        "peak_cache_read_tokens": b[6],
+        "peak_cache_write_tokens": b[7],
+    })
 }
 
 #[cfg(test)]
@@ -1427,7 +1519,7 @@ mod tests {
 
     #[test]
     fn token_by_date_model_attributes_compaction_to_its_own_date_and_model() {
-        let out = token_by_date_model(&[compaction_event(Some("c1"))]);
+        let out = token_by_date_model(&[compaction_event(Some("c1"))], SOURCE_UNSPECIFIED);
         // 1787813784275 ms → 2026-08-27（北京时间），与真实那次 compact 一致。
         assert_eq!(out["2026-08-27"]["deepseek-v4-flash"]["uncached_input_tokens"], json!(462));
     }
@@ -2194,8 +2286,18 @@ mod tests {
     #[test]
     fn token_by_date_model_reconciles_with_token_by_model() {
         let events = reconcile_fixture();
-        let by_date = token_by_date_model(&events);
+        let by_date = token_by_date_model(&events, SOURCE_UNSPECIFIED);
         let by_model = token_by_model(&events);
+
+        // by_source 是顶层并列键，不是日期——对账时显式跳过，不许把它的
+        // 对象值当日期桶累加（那样会静默得 0，把「对不上」藏起来）。
+        let date_keys = by_date
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| k.as_str() != "by_source")
+            .cloned()
+            .collect::<Vec<_>>();
 
         for key in [
             "uncached_input_tokens",
@@ -2203,12 +2305,15 @@ mod tests {
             "cache_read_tokens",
             "cache_write_tokens",
         ] {
-            let date_total: i64 = by_date
-                .as_object()
-                .unwrap()
-                .values()
-                .flat_map(|day| day.as_object().unwrap().values())
-                .map(|b| b[key].as_i64().unwrap_or(0))
+            let date_total: i64 = date_keys
+                .iter()
+                .flat_map(|k| {
+                    by_date[k]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .map(|b| b[key].as_i64().unwrap_or(0))
+                })
                 .sum();
             let model_total: i64 = by_model["by_model"]
                 .as_object()
@@ -2221,6 +2326,23 @@ mod tests {
                 "{key}: 按天折 ({date_total}) 必须等于按 session 折 ({model_total})\
                  ——日历与 DSH 审计是同一份用量的两个投影"
             );
+            // by_source 各 source 之和必须等于主输出——按来源拆的账和按日期
+            // 拆的账是同一份用量（per-source 拆账的基础不变量）。
+            let source_total: i64 = by_date["by_source"]
+                .as_object()
+                .unwrap()
+                .values()
+                .flat_map(|srcs| {
+                    srcs.as_object().unwrap().values().flat_map(|sm| {
+                        sm.as_object().unwrap().values().map(|b| b[key].as_i64().unwrap_or(0))
+                    })
+                })
+                .sum();
+            assert_eq!(
+                source_total, date_total,
+                "{key}: by_source 各 source 之和 ({source_total}) 必须等于主输出 ({date_total})\
+                 ——按来源拆账不能变成另一份用量"
+            );
         }
     }
 
@@ -2230,7 +2352,7 @@ mod tests {
     #[test]
     fn token_by_date_model_reconciles_with_hour_buckets_per_date() {
         let events = reconcile_fixture();
-        let by_date = token_by_date_model(&events);
+        let by_date = token_by_date_model(&events, SOURCE_UNSPECIFIED);
         let hb = hour_buckets(&events);
 
         for key in [
@@ -2241,7 +2363,13 @@ mod tests {
         ] {
             // 逐日对账，不只是总量——总量相等但分配到错误日期是这次真实
             // 事故的形态（by_model 被整段记到"今天"），只查总和会漏掉。
-            for (date_str, day) in by_date.as_object().unwrap() {
+            // by_source 是顶层并列键，不是日期，显式跳过。
+            for (date_str, day) in by_date
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(d, _)| d.as_str() != "by_source")
+            {
                 let date_total: i64 = day
                     .as_object()
                     .unwrap()
@@ -2269,7 +2397,7 @@ mod tests {
     #[test]
     fn token_by_date_model_cross_midnight_replacement_debits_the_old_date() {
         let events = reconcile_fixture();
-        let out = token_by_date_model(&events);
+        let out = token_by_date_model(&events, SOURCE_UNSPECIFIED);
         // seq 2 的 1000 已被 seq 3 替换走 → 8/25 归零
         assert_eq!(
             out["2026-08-25"]["pro"]["uncached_input_tokens"]
@@ -2304,10 +2432,10 @@ mod tests {
     #[test]
     fn token_by_date_model_python_rust_byte_for_byte_parity() {
         let events = reconcile_fixture();
-        let out = token_by_date_model(&events);
+        let out = token_by_date_model(&events, SOURCE_UNSPECIFIED);
         assert_eq!(
             serde_json::to_string(&out).unwrap(),
-            r#"{"2026-08-25":{"pro":{"uncached_input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},"2026-08-26":{"pro":{"uncached_input_tokens":1200,"output_tokens":120,"cache_read_tokens":60,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},"flash":{"uncached_input_tokens":500,"output_tokens":50,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}}}"#
+            r#"{"2026-08-25":{"pro":{"uncached_input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},"2026-08-26":{"pro":{"uncached_input_tokens":1200,"output_tokens":120,"cache_read_tokens":60,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},"flash":{"uncached_input_tokens":500,"output_tokens":50,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}},"by_source":{"2026-08-25":{"unspecified":{"pro":{"uncached_input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}}},"2026-08-26":{"unspecified":{"pro":{"uncached_input_tokens":1200,"output_tokens":120,"cache_read_tokens":60,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0},"flash":{"uncached_input_tokens":500,"output_tokens":50,"cache_read_tokens":0,"cache_write_tokens":0,"peak_uncached_input_tokens":0,"peak_output_tokens":0,"peak_cache_read_tokens":0,"peak_cache_write_tokens":0}}}}}"#
         );
     }
 
@@ -2320,7 +2448,7 @@ mod tests {
             json!({"type":"request/header","seq":1,"time":1001,"data":{"header":{"config":{"model":"pro"}}}}),
             json!({"type":"assistant/chunk","seq":2,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":500,"outputTokens":50}}}}),
         ];
-        let out = token_by_date_model(&events);
+        let out = token_by_date_model(&events, SOURCE_UNSPECIFIED);
         assert!(
             out.as_object().unwrap().is_empty(),
             "无时间戳样本不能被塞进任何一天"
@@ -2331,6 +2459,54 @@ mod tests {
             tm["by_model"]["pro"]["uncached_input_tokens"].as_i64().unwrap(),
             500
         );
+    }
+
+    /// **per-source 拆账的演示断言**：同一批会话被喂两次（两个来源），by_source
+    /// 必须区分两次来源/计数，而不仅仅是总量翻倍。2026-08「日历 ¥2386 vs 按
+    /// session 重算 ¥1733」的根因就是同一批会话被喂了多次——by_source 里能看到
+    /// 两个来源行、每行各一份计数，一眼就能定位「这个量被记了两次」，而不是只见
+    /// 一个翻倍的总数。
+    ///
+    /// 每次 `token_by_date_model` 调用只喂一个来源；「喂两次」在调用侧表现为
+    /// 两次调用各带一个标签，再由 `merge_month` 按日期折进同一份月账。这里在
+    /// 折叠层直接把两次折叠的结果合并，断言每个来源的贡献都被独立记下。
+    #[test]
+    fn by_source_distinguishes_same_batch_fed_twice() {
+        let events = reconcile_fixture();
+        let first = token_by_date_model(&events, SOURCE_DSH_LIVE);
+        let second = token_by_date_model(&events, SOURCE_CLI);
+
+        // 每个来源各有一行、各自一份完整计数（不是加起来翻倍成一个数）。
+        assert_eq!(
+            first["by_source"]["2026-08-26"]["dsh-live"]["pro"]["uncached_input_tokens"]
+                .as_i64()
+                .unwrap(),
+            1200
+        );
+        assert_eq!(
+            second["by_source"]["2026-08-26"]["cli"]["pro"]["uncached_input_tokens"]
+                .as_i64()
+                .unwrap(),
+            1200,
+            "同一批喂两次：两个来源行各带一份完整计数，by_source 不能把两次合并成一个翻倍值"
+        );
+        // 两行来源标签不同 —— 诊断「重复喂」就靠这个键。
+        assert!(first["by_source"]["2026-08-26"].as_object().unwrap().contains_key("dsh-live"));
+        assert!(second["by_source"]["2026-08-26"].as_object().unwrap().contains_key("cli"));
+    }
+
+    /// 调用方没给来源标签时的**诚实降级**：fold 收 `"unspecified"` 标签——是
+    /// 明确标注「未知来源」，不是编造一个看起来真实的来源名。绝不能把缺标签的
+    /// 样本凭空安到 `cli`/`dsh-live` 头上，否则「重复喂」诊断就会被一个假的
+    /// 来源键污染。
+    #[test]
+    fn by_source_labels_missing_source_as_unspecified_not_fabricated() {
+        let events = reconcile_fixture();
+        let out = token_by_date_model(&events, SOURCE_UNSPECIFIED);
+        let sources = out["by_source"]["2026-08-26"].as_object().unwrap();
+        assert!(sources.contains_key("unspecified"));
+        assert!(!sources.contains_key("cli"));
+        assert!(!sources.contains_key("dsh-live"));
     }
 }
 

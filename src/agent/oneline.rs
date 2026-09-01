@@ -150,7 +150,11 @@ pub fn oneline(
     let (by_date_model, by_model_today) = if no_merge {
         (Value::Null, Value::Null)
     } else {
-        let bdm = usage::token_by_date_model(&events);
+        // oneline 是 CLI 喂入路径（tick/手动审计都走这条命令）——标 `cli`。
+        // 来源只能来自调用方显式标注：把一次 oneline 喂的会话标成
+        // `dsh-live`（watcher 增量）或 `codex`（导入）都是**编造**，诊断
+        // 「同一批被喂了几次」时会被一个假来源键污染。
+        let bdm = usage::token_by_date_model(&events, usage::SOURCE_CLI);
         let today_key = today_beijing();
         let today = bdm.get(&today_key).cloned().unwrap_or(Value::Null);
         (bdm, today)

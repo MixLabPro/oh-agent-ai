@@ -145,6 +145,62 @@ pub fn merge_model_buckets(existing: Option<&Value>, by_model: &Value) -> Value 
     out
 }
 
+/// 把一个 source 的 `{model: 8桶}` 合进 `day["by_source"][source]`（键不存在则
+/// 建）——与 `merge_model_buckets` 同一语义，只多一层 source 键。单独提出来
+/// 是因为 `merge_buckets` 只读 8 个 token 字段、不碰 by_model 也不碰 by_source，
+/// 所以 by_source 要像 by_model 一样在 merge_buckets 之外单独折（`merge_month_body`
+/// 的当前月与历史月回填两处都调它）。
+fn merge_source_into_day(day: &mut Value, source: &str, models: &Value) {
+    let prev = day
+        .get("by_source")
+        .and_then(Value::as_object)
+        .and_then(|b| b.get(source))
+        .cloned();
+    let nb = merge_model_buckets(prev.as_ref(), models);
+    if let Some(obj) = day.as_object_mut() {
+        let entry = obj.entry("by_source".to_string()).or_insert_with(|| json!({}));
+        entry[source] = nb;
+    }
+}
+
+/// 把 month.json 的**逐日** by_source（`days[date]["by_source"] = {source: {model: 8桶}}`）
+/// 折平成 `{source: {model: 8桶}}`——给 `state by-source` / 日历按来源合计用。
+///
+/// 逐日结构在 month.json 里是对的（按天归位、随天一起归档），但「本月各来源
+/// 各自贡献多少」需要在展示侧按天折平；不折平的话，诊断「同一批被喂了几次」
+/// 就要肉眼跨所有天求和。
+pub fn rollup_by_source(month_json: &Value) -> Value {
+    let mut out = Map::new();
+    let Some(days) = month_json.get("days").and_then(Value::as_object) else {
+        return Value::Object(out);
+    };
+    for day in days.values() {
+        let Some(bs) = day.get("by_source").and_then(Value::as_object) else {
+            continue;
+        };
+        for (source, models) in bs {
+            let Some(models) = models.as_object() else {
+                continue;
+            };
+            for (model, buckets) in models {
+                let src_entry = out.entry(source.clone()).or_insert_with(|| json!({}));
+                // serde_json 的 Value 没有 entry —— 先 as_object_mut 拿 Map。
+                let m_entry = if let Some(obj) = src_entry.as_object_mut() {
+                    obj.entry(model.clone()).or_insert_with(zero_bucket)
+                } else {
+                    continue;
+                };
+                for f in BUCKET_FIELDS {
+                    let add = buckets.get(f).and_then(Value::as_i64).unwrap_or(0);
+                    let cur_v = m_entry.get(f).and_then(Value::as_i64).unwrap_or(0);
+                    m_entry[f] = json!(cur_v + add);
+                }
+            }
+        }
+    }
+    Value::Object(out)
+}
+
 /// 复刻 `rotate_today(now=...)` 的纯函数一半：旧日期 ≠ 新日期时，把 today.json
 /// **整体替换**成「空桶 + 新日期 + rotated_from」；否则不动。
 ///
@@ -283,6 +339,13 @@ pub fn merge_month_body(
     let mut merged = merge_buckets(None, hb_buckets, "date");
     if let Some(bdm) = by_date_model.and_then(Value::as_object) {
         for (date_key, bm) in bdm {
+            // `token_by_date_model` 的 by_source 轴是顶层并列键，不是日期——
+            // 跳过，单独按「日期 → source → 模型」折（见下）。不跳的话它会被
+            // 当成某一天，merge_model_buckets 会把 `{date: {source: {model}}}`
+            // 整段塞进 by_model，月账直接错一个量级。
+            if date_key == "by_source" {
+                continue;
+            }
             // `if not by_model: continue` —— 空对象 / null 跳过。
             let empty = bm.as_object().map_or(true, |m| m.is_empty());
             if empty {
@@ -300,6 +363,29 @@ pub fn merge_month_body(
             let day_bm = merged.get(date_key).and_then(|d| d.get("by_model"));
             let nb = merge_model_buckets(day_bm, bm);
             merged[date_key]["by_model"] = nb;
+        }
+        // by_source 也折进 merged，让下面的 cur/old 分流统一携带它 —— 与
+        // by_model 同一套语义（合并、日期缺桶补零桶），只多一层 source 键。
+        let bs = bdm.get("by_source").and_then(Value::as_object);
+        if let Some(bs) = bs {
+            for (date_key, sources) in bs {
+                let Some(sources) = sources.as_object() else { continue };
+                if !merged
+                    .as_object()
+                    .is_some_and(|m| m.contains_key(date_key))
+                {
+                    let Some(m) = merged.as_object_mut() else {
+                        continue;
+                    };
+                    m.insert(date_key.clone(), zero_bucket());
+                }
+                let Some(day) = merged.get_mut(date_key) else {
+                    continue;
+                };
+                for (src, models) in sources {
+                    merge_source_into_day(day, src, models);
+                }
+            }
         }
     }
 
@@ -338,6 +424,15 @@ pub fn merge_month_body(
             let nb = merge_model_buckets(day_bm, bm);
             existing["days"][d]["by_model"] = nb;
         }
+        // by_source 与 by_model 一样在 merge_buckets 之外单独折 ——
+        // merge_buckets 只读 8 个 token 字段，会把 by_source 丢回 new_day。
+        if let Some(bs) = b.get("by_source").and_then(Value::as_object) {
+            if let Some(day) = existing.get_mut("days").and_then(|days| days.get_mut(d)) {
+                for (src, models) in bs {
+                    merge_source_into_day(day, src, models);
+                }
+            }
+        }
     }
 
     // ⑤ 历史月回填：累加进归档里已有的那一天，而不是替换 —— 本次输入是「新测到
@@ -374,6 +469,26 @@ pub fn merge_month_body(
                     b_bm.filter(|v| !v.is_null()).unwrap_or(&json!({})),
                 );
                 acc[d]["by_model"] = nb;
+            }
+            // by_source 的回填也是累加（prev 的 source 桶 ∪ 本次的），不是替换——
+            // 同一天被回填两次，两个来源各留各的键。
+            let has_bs = b.get("by_source").is_some()
+                || prev.as_ref().and_then(|p| p.get("by_source")).is_some();
+            if has_bs {
+                let p_bs = prev.as_ref().and_then(|p| p.get("by_source"));
+                let b_bs = b.get("by_source");
+                if let Some(day) = acc.get_mut(d) {
+                    if let Some(bs) = p_bs.and_then(Value::as_object) {
+                        for (src, models) in bs {
+                            merge_source_into_day(day, src, models);
+                        }
+                    }
+                    if let Some(bs) = b_bs.and_then(Value::as_object) {
+                        for (src, models) in bs {
+                            merge_source_into_day(day, src, models);
+                        }
+                    }
+                }
             }
             rebuilt.insert(d.clone(), acc.get(d).cloned().unwrap_or_else(zero_bucket));
         }
@@ -635,6 +750,61 @@ mod tests {
         assert_eq!(day["uncached_input_tokens"], 15); // 10（已归档）+ 5（新量）
         // month.json 里 8 月日子不该出现（回填只进归档）
         assert_eq!(body.month_json["days"].as_object().unwrap().len(), 0);
+    }
+
+    /// per-source 拆账进月账：同一批会话喂两次（两个来源标签），
+    /// `days[date].by_source` 必须保留两个来源行——诊断「同一批被喂了几次」靠
+    /// 的就是并存的来源键；主桶累加（总量翻倍）但 by_source 各来源行各一份，
+    /// 这正是「只见翻倍总数 → 一眼看出哪两个来源」的差。
+    #[test]
+    fn merge_month_keeps_by_source_rows_per_source() {
+        let existing = json!({"days": {}});
+        let hb = json!({"buckets": [
+            {"date": "2026-09-01", "hour": 9, "uncached_input_tokens": 100},
+        ]});
+        let day_bm = json!({"pro": {
+            "uncached_input_tokens": 100, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 100, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0}});
+        let bdm = json!({
+            "2026-09-01": day_bm.clone(),
+            "by_source": {"2026-09-01": {"dsh-live": day_bm.clone()}},
+        });
+        let body = merge_month_body(&existing, &hb, Some(&bdm), "2026-09", "t0", &json!({}));
+        let days = body.month_json["days"].as_object().unwrap();
+        assert_eq!(days.len(), 1, "by_source 键不能被当成日期塞进 days");
+        let bs = days["2026-09-01"]["by_source"].as_object().unwrap();
+        assert!(bs.contains_key("dsh-live"));
+        assert_eq!(bs["dsh-live"]["pro"]["uncached_input_tokens"], 100);
+
+        // 同一天再喂一次，来源不同 → 两个来源行并存，不是互相覆盖。
+        let bdm2 = json!({
+            "2026-09-01": day_bm.clone(),
+            "by_source": {"2026-09-01": {"cli": day_bm.clone()}},
+        });
+        let body2 = merge_month_body(&body.month_json, &hb, Some(&bdm2), "2026-09", "t1", &json!({}));
+        let days2 = body2.month_json["days"].as_object().unwrap();
+        let bs2 = days2["2026-09-01"]["by_source"].as_object().unwrap();
+        assert!(bs2.contains_key("dsh-live"));
+        assert!(bs2.contains_key("cli"));
+        assert_eq!(bs2["dsh-live"]["pro"]["uncached_input_tokens"], 100);
+        assert_eq!(bs2["cli"]["pro"]["uncached_input_tokens"], 100);
+        assert_eq!(days2["2026-09-01"]["uncached_input_tokens"], 200);
+    }
+
+    #[test]
+    fn rollup_by_source_flattens_per_day_rows() {
+        // 逐日 by_source 折平成 source → 模型 —— `state by-source` 读 month.json
+        // 全靠它；跨天同一来源必须累加。
+        let month = json!({
+            "days": {
+                "2026-09-01": {"by_source": {"cli": {"pro": {"uncached_input_tokens": 100}}}},
+                "2026-09-02": {"by_source": {"cli": {"pro": {"uncached_input_tokens": 50}}}},
+            },
+        });
+        let out = rollup_by_source(&month);
+        assert_eq!(out["cli"]["pro"]["uncached_input_tokens"], 150);
     }
 
     #[test]

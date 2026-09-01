@@ -40,11 +40,20 @@ python3 scripts/scan.py doctor --host claude-code
 
 ```bash
 python3 scripts/scan.py explain <name>   # 某个 skill 为什么不生效，以及怎么修
+python3 scripts/scan.py plan --startup-rate 30   # 把报告变成排序后的省钱方案
 python3 scripts/scan.py list --unused    # 休眠 / 僵尸候选
 python3 scripts/scan.py overlap          # SV401 背后的共享词
 python3 scripts/scan.py diff             # 与上次快照相比变了什么
 python3 scripts/scan.py --json -         # 原始度量，需要某个字段时才用
 ```
+
+`plan` 把 §4 的 Recommended disposition 机器化：把报告升级成排序、可执行的清单
+——每条点名 skill、标执行风险（low/medium）、给出每次事件可测量的 token 节省与
+它回应的 SV 码。它守着和报告同一套诚实底线：`savings_per_event` 永远是测量值；
+`events_per_month` 只在 `--startup-rate`（估算）提供时填 —— 终身 `usage_count`
+单独暴露为 `measured_lifetime_triggers`，**绝不**冒充每月数；`diagnosis_refs`
+只引用报告真实发出的 SV 码。方案是提案：risk 排序只是建议阅读顺序，「不经用户
+同意绝不删/停用 skill」的交互规则（§5）不变。
 
 `doctor` 会自动存快照并与上一次比对，`--no-snapshot` 关掉。对外分享前加
 `--redact --redact-names`。

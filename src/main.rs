@@ -267,6 +267,24 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Turn the scan report into a quantified, ranked, honest savings plan
+    /// (diagnosis → treatment plan; SKILL.md §4 Recommended disposition as data).
+    ///
+    /// Items are a **proposal**: risk ordering is a suggested reading order, the
+    /// decision stays with the user (`Never delete or disable a skill unless the
+    /// user explicitly asks`). `savings_per_event` is always measured (report
+    /// fields, tokens); `events_per_month` is filled ONLY from `--startup-rate`
+    /// (an estimate, never from lifetime `usage_count` — that is exposed
+    /// separately as `measured_lifetime_triggers`).
+    Plan {
+        /// Estimated starts of Claude Code per month; the ONLY source for
+        /// per-startup items' events_per_month (an estimate, not a measurement)
+        #[arg(long, value_parser = non_negative)]
+        startup_rate: Option<i64>,
+        /// Write plan JSON to FILE; use - for stdout
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+    },
     /// Save a snapshot to ~/.agent-vitals/snapshots
     Snapshot {
         /// Retain the newest N snapshots; default: 30; 0 means unlimited
@@ -574,6 +592,11 @@ enum StateAction {
     /// Print (creating if needed) the machine namespace — SessionKey's third
     /// component, persisted in machine.json (app-owned config, §4.3).
     MachineNamespace,
+    /// Read-only per-source breakdown of the current month (month.json's
+    /// per-day by_source rolled up + priced). JSON on stdout: `by_source`
+    /// (source → model → 8-bucket) and `by_source_cost` (source → price), or
+    /// both empty when the month has no by_source data — never fabricated.
+    BySource,
 }
 
 /// 探测「扫描器自身所在的 skill 目录」。
@@ -746,6 +769,74 @@ fn render_codex_roots(out: &Value) -> String {
             } else {
                 s.push_str(&format!("{kind:<8} {path}  (absent)\n"));
             }
+        }
+    }
+    s
+}
+
+/// `agent-vitals plan` 的人读呈现 —— 从 `build_plan` 的同一个 Value 上读
+/// （形状唯一来源），Python 侧 `cli.py::_render_plan_human` 逐字节对齐这一份。
+/// 渲染只做呈现：null 一律落 `—`（没测到就标没测到，不假装 0），summary 不汇总
+/// token（per-startup 与 per-trigger 单位不可通约）。
+fn render_plan(out: &Value) -> String {
+    let host = out.get("host_selection").and_then(|v| v.as_str()).unwrap_or("");
+    let startup = out.get("startup_rate_per_month").and_then(|v| v.as_i64());
+    let refs: Vec<&str> = out.get("diagnosis_refs")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    let summary = out.get("summary").unwrap_or(&Value::Null);
+    let n = summary.get("item_count").and_then(|v| v.as_i64()).unwrap_or(0);
+    let savings = summary.get("savings_items").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    let mut s = String::new();
+    s.push_str(&format!("host: {host}\n"));
+    match startup {
+        Some(x) => s.push_str(&format!("startup rate per month: {x}\n")),
+        None => s.push_str("startup rate per month: —\n"),
+    }
+    if refs.is_empty() {
+        s.push_str("diagnosis refs: (none)\n");
+    } else {
+        s.push_str(&format!("diagnosis refs: {}\n", refs.join(", ")));
+    }
+    s.push('\n');
+    s.push_str(&format!("{n} items · {savings} with measured savings\n\n"));
+    if let Some(items) = out.get("items").and_then(|v| v.as_array()) {
+        for (i, it) in items.iter().enumerate() {
+            let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let skill = it.get("skill").and_then(|v| v.as_str()).unwrap_or("");
+            let risk = it.get("risk").and_then(|v| v.as_str()).unwrap_or("");
+            s.push_str(&format!("{}. {id}  {skill}  [{risk}]\n", i + 1));
+            match it.get("savings_per_event") {
+                Some(Value::Object(o)) => {
+                    let tokens = o.get("tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let per = o.get("per").and_then(|v| v.as_str()).unwrap_or("");
+                    s.push_str(&format!("   savings: {tokens} tokens per {per}\n"));
+                }
+                _ => s.push_str("   savings: none measured\n"),
+            }
+            match it.get("events_per_month") {
+                Some(v) if !v.is_null() => s.push_str(&format!("   events per month: {v}\n")),
+                _ => s.push_str("   events per month: —\n"),
+            }
+            match it.get("measured_lifetime_triggers") {
+                Some(v) if !v.is_null() => {
+                    s.push_str(&format!("   lifetime triggers measured: {v}\n"));
+                }
+                _ => s.push_str("   lifetime triggers measured: —\n"),
+            }
+            let drefs: Vec<&str> = it.get("diagnosis_refs")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                .unwrap_or_default();
+            if drefs.is_empty() {
+                s.push_str("   diagnosis: (none)\n");
+            } else {
+                s.push_str(&format!("   diagnosis: {}\n", drefs.join(", ")));
+            }
+            let rationale = it.get("rationale").and_then(|v| v.as_str()).unwrap_or("");
+            s.push_str(&format!("   {rationale}\n\n"));
         }
     }
     s
@@ -1467,6 +1558,7 @@ fn main() {
             StateAction::MachineNamespace => {
                 println!("{}", agent::takeover::machine_namespace());
             }
+            StateAction::BySource => st::by_source_report(),
         }
         return;
     }
@@ -1614,6 +1706,27 @@ fn main() {
         }
         std::process::exit(run_doctor(&doc, &args, *min, auto_snapshot,
                                       baseline.as_deref()));
+    }
+
+    if let Some(Cmd::Plan { startup_rate, rows_json }) = &args.cmd {
+        // 纯派生：build_plan 只读已扫好的 doc，不触发 auto_snapshot（plan 是
+        // 报告的一个视图，不是一次新扫描）。
+        let payload = agent::plan::build_plan(&doc, *startup_rate);
+        if let Some(path) = rows_json {
+            let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                let n = payload["summary"]["item_count"].as_i64().unwrap_or(0);
+                println!("Wrote {}: {} items", path.display(), n);
+            }
+            return;
+        }
+        print!("{}", render_plan(&payload));
+        return;
     }
 
     if let Some(Cmd::Explain { name, min, rows_json }) = &args.cmd {

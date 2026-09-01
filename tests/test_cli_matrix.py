@@ -217,6 +217,100 @@ class CliMatrix(unittest.TestCase):
             with self.subTest(host=h):
                 self.both("--host", h, "snapshot")
 
+    # ── plan：报告 → 省钱方案 ────────────────────────────────
+    def _plan_fixture(self):
+        """补出 plan 四类项全部可达的夹具（端到端，不合成报告）。
+
+        zombie 的年龄闸由 ctime 推出、不能往回设（test_snapshot.py 已说明），所以
+        这里用 `--zombie-age 0` 把「够老」调到边界值：装了 0 天的 skill 只要
+        usage_count==0 就是僵尸 —— 判据仍是「零触发且够老」，只是年龄门槛取 0。
+        其余三类：big 的正文超 `--split-threshold`、longdesc 的 tier1 高于 loaded
+        中位数、shadow 的项目副本更新且内容不同 → shadowed_newer。setUp 的
+        alpha/beta/risky 也在，所以 `.claude.json` 覆写为**除 zombie 外全部有计数**，
+        保证恰好一个僵尸、断言稳定。
+        """
+        sk = self.tmp / ".claude" / "skills"
+        proj = self.tmp / "workdir" / ".claude" / "skills"
+        write_skill(sk, "zombie", desc="a skill nobody ever uses", body="short body\n")
+        write_skill(sk, "big", desc="handles a heavy workload", body="body line\n" * 200)
+        write_skill(sk, "mid", desc="a middle-sized description", body="short body\n")
+        write_skill(sk, "longdesc", desc="this is a very long description" + " that keeps going" * 60,
+                    body="short\n")
+        # 项目副本后写 → mtime 更新。但 st_mtime 截断到整秒，同秒内撞车会退化成
+        # intentional_override；显式把个人胜者往回拨，让「新副本被旧副本压住」成立。
+        p_shadow = write_skill(sk, "shadow", desc="shadow personal copy",
+                               body="personal content v1\n")
+        write_skill(proj, "shadow", desc="shadow project copy",
+                    body="project content entirely different\n")
+        os.utime(p_shadow / "SKILL.md", (1500000000.0, 1500000000.0))
+        (self.tmp / ".claude.json").write_text(json.dumps({
+            "enabledPlugins": {},
+            "skillUsage": {"alpha": {"usageCount": 4}, "beta": {"usageCount": 1},
+                           "risky": {"usageCount": 1}, "big": {"usageCount": 5},
+                           "mid": {"usageCount": 2}, "longdesc": {"usageCount": 1},
+                           "shadow": {"usageCount": 1}},
+        }), encoding="utf-8")
+
+    def test_plan_every_host(self):
+        for h in HOSTS:
+            with self.subTest(host=h):
+                self.both("plan", "--host", h)
+
+    def test_plan_full_fixture_human_and_json(self):
+        """全夹具：zombie+oversized+trim+shadow 四类项同时出现，人读与 JSON 都逐字节一致。"""
+        self._plan_fixture()
+        common = ["plan", "--host", "claude-code", "--zombie-age", "0",
+                  "--split-threshold", "100", "--startup-rate", "30"]
+        # both() 返回 (rc, stdout, stderr) 且内部已断言逐字节一致
+        self.both(*common)
+        payload = json.loads(self.both(*(common + ["--json", "-"]))[1])
+        kinds = [it["kind"] for it in payload["items"]]
+        # 四类项都在（顺序由排序决定，不钉死 item 级顺序）
+        for kind in ("disable-zombie", "split-oversized", "trim-description", "resolve-shadow"):
+            self.assertIn(kind, kinds)
+
+        def item(kind, skill):
+            return next(it for it in payload["items"]
+                        if it["kind"] == kind and it["skill"] == skill)
+
+        # 诚实性字段逐项核对：per-startup 的 disable-zombie 有 events_per_month
+        # （来自 --startup-rate，估算）与 measured_lifetime_triggers=0（终身计数）。
+        dz = item("disable-zombie", "zombie")
+        self.assertEqual(dz["risk"], "low")
+        self.assertEqual(dz["savings_per_event"], {"tokens": 15, "unit": "tokens", "per": "startup"})
+        self.assertEqual(dz["events_per_month"], 30)
+        self.assertEqual(dz["measured_lifetime_triggers"], 0)
+        self.assertEqual(dz["diagnosis_refs"], ["SV201"])
+
+        # split-oversized：终身触发数 5 单独暴露，events_per_month 恒 null（终身数
+        # 绝不冒充月数）。
+        sp = item("split-oversized", "big")
+        self.assertEqual(sp["risk"], "medium")
+        self.assertEqual(sp["savings_per_event"], {"tokens": 500, "unit": "tokens", "per": "trigger"})
+        self.assertIsNone(sp["events_per_month"])
+        self.assertEqual(sp["measured_lifetime_triggers"], 5)
+        self.assertEqual(sp["diagnosis_refs"], ["SV301"])
+
+        # resolve-shadow：一致性项没有可测的 token 收益，诚实不给 savings。
+        rs = item("resolve-shadow", "shadow")
+        self.assertIsNone(rs["savings_per_event"])
+        self.assertEqual(rs["diagnosis_refs"], ["SV101"])
+
+        self.assertEqual(payload["summary"]["savings_items"],
+                         sum(1 for it in payload["items"] if it["savings_per_event"] is not None))
+        self.assertEqual(len(payload["summary"]["top_3_moves"]), 3)
+        self.assertEqual(payload["host_selection"], "claude-code")
+        self.assertEqual(payload["startup_rate_per_month"], 30)
+
+    def test_plan_default_host_has_no_zombies(self):
+        """默认 `--host all`（无 trigger 证据）：报不了 0 次就绝不编 zombie 项。"""
+        self._plan_fixture()
+        py_out = self.both("plan", "--json", "-")
+        payload = json.loads(py_out[1])
+        self.assertNotIn("disable-zombie", [it["kind"] for it in payload["items"]])
+        self.assertEqual(payload["host_selection"], "all")
+        self.assertIsNone(payload["startup_rate_per_month"])
+
     def _shared_baseline(self, host):
         """两个实现共用同一个基线文件。
 

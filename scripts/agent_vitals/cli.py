@@ -33,6 +33,7 @@ from agent_vitals.explain import render_explain
 from agent_vitals.inventory import build_inventory
 from agent_vitals.lifecycle import render_list
 from agent_vitals.overlap import DEFAULT_OVERLAP_MIN, render_overlap
+from agent_vitals.plan import build_plan
 import agent_vitals.redact as redact_module
 from agent_vitals.report import build_report
 import agent_vitals.security as security_module
@@ -563,6 +564,57 @@ def _render_codex_roots(report):
     return "".join(parts)
 
 
+def _render_plan_human(payload):
+    """`plan` 的人读呈现——从 `build_plan` 的同一个 dict 上读（形状唯一来源），
+    Rust 侧 `main.rs::render_plan` 逐字节对齐这一份。渲染只做呈现：null 一律落
+    `—`（没测到就标没测到，不假装 0），summary 不汇总 token（per-startup 与
+    per-trigger 单位不可通约）。"""
+    parts = []
+    parts.append("host: %s" % (payload.get("host_selection") or ""))
+    startup = payload.get("startup_rate_per_month")
+    if startup is None:
+        parts.append("startup rate per month: —")
+    else:
+        parts.append("startup rate per month: %d" % startup)
+    refs = payload.get("diagnosis_refs") or []
+    if refs:
+        parts.append("diagnosis refs: " + ", ".join(refs))
+    else:
+        parts.append("diagnosis refs: (none)")
+    parts.append("")
+    summary = payload.get("summary") or {}
+    parts.append("%d items · %d with measured savings"
+                 % (summary.get("item_count") or 0, summary.get("savings_items") or 0))
+    parts.append("")
+    for i, it in enumerate(payload.get("items") or [], 1):
+        parts.append("%d. %s  %s  [%s]"
+                     % (i, it.get("id") or "", it.get("skill") or "", it.get("risk") or ""))
+        sav = it.get("savings_per_event")
+        if sav is not None:
+            parts.append("   savings: %d tokens per %s"
+                         % (sav.get("tokens") or 0, sav.get("per") or ""))
+        else:
+            parts.append("   savings: none measured")
+        epm = it.get("events_per_month")
+        if epm is None:
+            parts.append("   events per month: —")
+        else:
+            parts.append("   events per month: %d" % epm)
+        ltm = it.get("measured_lifetime_triggers")
+        if ltm is None:
+            parts.append("   lifetime triggers measured: —")
+        else:
+            parts.append("   lifetime triggers measured: %d" % ltm)
+        drefs = it.get("diagnosis_refs") or []
+        if drefs:
+            parts.append("   diagnosis: " + ", ".join(drefs))
+        else:
+            parts.append("   diagnosis: (none)")
+        parts.append("   %s" % (it.get("rationale") or ""))
+        parts.append("")
+    return "\n".join(parts) + "\n"
+
+
 def _render_codex_cost_html(output_path, merged, month_key, month_out, default):
     """`codex-cost --html`：复用统一看板模板 calendar.html（退役独立
     codex_cost.html——一套视觉模板，不是两套，见 docs/UNIFIED_COST_VIEW.md）。
@@ -663,6 +715,17 @@ def _main():
     p_doc.add_argument("--json", help="Write diagnostic JSON instead of a report")
     p_doc.add_argument("--no-snapshot", action="store_true",
                        help="Do not save a snapshot or compare automatically")
+    # 省钱方案（诊断 → 治疗方案）：把 scan 报告派生为量化、排序、诚实的动作清单。
+    # `--startup-rate` 是用户估算的每月启动次数，是 per-startup 项 events_per_month
+    # 的**唯一**来源（估算，不是测量；终身 usage_count 绝不冒充每月数）。
+    p_plan = sub.add_parser("plan",
+                            help="Turn the scan report into a quantified, ranked, "
+                                 "honest savings plan")
+    p_plan.add_argument("--startup-rate", type=int, default=None,
+                        help="Estimated starts of Claude Code per month; the ONLY source "
+                             "for per-startup items' events_per_month (an estimate, "
+                             "not a measurement)")
+    p_plan.add_argument("--json", help="Write plan JSON to FILE; use - for stdout")
     p_exp = sub.add_parser("explain",
                            help="Explain why one skill is ineffective and how to fix it")
     p_exp.add_argument("name", help="Skill name or <plugin>:<name>")
@@ -806,9 +869,11 @@ def _main():
     # state：列出 / 清理 state 目录，或列出有数据的自然月。不接受
     # --json/--host 等扫描期参数。
     p_state = sub.add_parser("state", help="Inspect or clean the persisted state directory")
-    p_state.add_argument("action", choices=("list", "clean", "months"),
+    p_state.add_argument("action", choices=("list", "clean", "months", "by-source"),
                          help="list = show files; clean = remove (with --yes); "
-                              "months = list months with data (current + archived)")
+                              "months = list months with data (current + archived); "
+                              "by-source = per-source breakdown of the current month "
+                              "(JSON on stdout)")
     p_state.add_argument("--yes", action="store_true",
                          help="Skip the confirmation prompt for 'state clean'")
     # ──── M6: 预算告警 ──────────────────────────────────────────
@@ -844,7 +909,7 @@ def _main():
                        default=argparse.SUPPRESS)
     p_beh.add_argument("--ignore", default=argparse.SUPPRESS)
     # 子命令要复用扫描参数，故把它们也挂到子解析器上
-    for pp in (p_list, p_over, p_doc, p_exp, p_snap, p_diff):
+    for pp in (p_list, p_over, p_doc, p_plan, p_exp, p_snap, p_diff):
         pp.add_argument("--host", choices=("all", "claude-code", "codex", "openclaw",
                                            "hermes", "workbuddy", "dsh"), default=argparse.SUPPRESS)
         pp.add_argument("--path", action="append", default=argparse.SUPPRESS)
@@ -872,7 +937,8 @@ def _main():
     # 拒绝比编一个数好：这是本工具反复申明的那条底线。
     for flag, value in (("--budget", args.budget),
                         ("--zombie-age", args.zombie_age),
-                        ("--split-threshold", args.split_threshold)):
+                        ("--split-threshold", args.split_threshold),
+                        ("--startup-rate", getattr(args, "startup_rate", None))):
         if value is not None and value < 0:
             ap.error("%s cannot be negative (received %d)" % (flag, value))
 
@@ -1328,7 +1394,12 @@ def _main():
             # `[今天]` 那一份；没有今天的数据时是 None，`merge_today` 照
             # 既有语义不写 by_model 字段。month.json 拿整份多日 dict，各
             # 日期各自归位（见 state.merge_month 的文档注释）。
-            by_date_model = usage_module.token_by_date_model(events)
+            # oneline 是 CLI 喂入路径（tick/手动审计都走这条命令）——标 `cli`。
+            # 来源只能来自调用方显式标注：把一次 oneline 喂的会话标成 dsh-live
+            # （watcher 增量）或 codex（导入）都是**编造**，诊断「同一批被喂了几
+            # 次」时会被一个假来源键污染。
+            by_date_model = usage_module.token_by_date_model(
+                events, source=usage_module.SOURCE_CLI)
             state_module.merge_today(
                 hb, by_model=by_date_model.get(state_module._today_key()))
             state_module.merge_month(hb, by_date_model=by_date_model)
@@ -1391,8 +1462,23 @@ def _main():
                   "calendar will show empty state)" % out)
         return
 
-    # ──── M3 state list / clean / months ───────────────────────────
+    # ──── M3 state list / clean / months / by-source ───────────────
     if getattr(args, "cmd", None) == "state":
+        if args.action == "by-source":
+            # per-source 拆账：读 month.json 的逐日 by_source，折平成
+            # {source: {model: 八桶}}，再按主账单同一套 cost_report 计价。
+            # 月份没有 by_source（老数据）→ 两个键都空，不摆全零结构。
+            month = state_module._read(state_module.state_dir() / "month.json") or {}
+            rollup = state_module.rollup_by_source(month)
+            if not rollup:
+                print(json.dumps({"by_source": {}, "by_source_cost": None},
+                                 ensure_ascii=False))
+                return
+            report = cost_module.cost_report({"by_source": rollup},
+                                             cost_module.load_pricing())
+            print(json.dumps({"by_source": rollup, "by_source_cost": report},
+                             ensure_ascii=False, indent=2))
+            return
         if args.action == "months":
             months = state_module.list_months()
             if not months:
@@ -1616,6 +1702,22 @@ def _main():
         if args.json:
             return
         sys.exit(_doctor_gate(out, args, auto_snapshot and not args.json, baseline))
+    if getattr(args, "cmd", None) == "plan":
+        # 纯派生：build_plan 只读已扫好的 out，不触发 auto_snapshot（plan 是
+        # 报告的一个视图，不是一次新扫描）。
+        payload = build_plan(out, getattr(args, "startup_rate", None))
+        if args.json:
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+            if args.json == "-":
+                print(text)
+            else:
+                Path(args.json).write_text(text, encoding="utf-8")
+                print("Wrote %s: %d items" % (args.json, payload["summary"]["item_count"]))
+            return
+        # end=""：render 已以 \n 结尾，print 再加一个会多出一行空行（Rust 侧
+        # 用 print! 不加）。codex-roots 同款处理。
+        print(_render_plan_human(payload), end="")
+        return
     if getattr(args, "cmd", None) == "snapshot":
         sys.exit(render_snapshot(out, args))
     if getattr(args, "cmd", None) == "diff":

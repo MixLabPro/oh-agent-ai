@@ -394,7 +394,7 @@ src/
 ├── scan/              discovery · frontmatter · context · security
 ├── analyze/           usage · overlap · cost · lifecycle
 ├── diagnostics/       engine · rules
-├── commands/          doctor · list · explain · overlap · diff · cost · snapshot
+├── commands/          doctor · list · explain · overlap · diff · cost · snapshot · plan
 ├── output/            terminal · json
 └── redact.rs
 

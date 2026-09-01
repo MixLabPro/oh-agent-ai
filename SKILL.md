@@ -42,11 +42,22 @@ Drill down only where the diagnosis points:
 
 ```bash
 python3 scripts/scan.py explain <name>   # why one skill is ineffective, and the fix
+python3 scripts/scan.py plan --startup-rate 30   # ranked savings plan from the report
 python3 scripts/scan.py list --unused    # dormant and zombie candidates
 python3 scripts/scan.py overlap          # the shared terms behind SV401
 python3 scripts/scan.py diff             # what changed since the last snapshot
 python3 scripts/scan.py --json -         # raw measurements, when you need a field
 ```
+
+`plan` machineizes the Recommended disposition (§4): it turns the report into a
+ranked, executable list — each item names a skill, its execution risk, the measured
+token saving per event, and the SV codes it answers. It obeys the same honesty rules
+as the report: `savings_per_event` is always measured; `events_per_month` is filled
+only from `--startup-rate` (an estimate — the lifetime `usage_count` is exposed
+separately as `measured_lifetime_triggers`, never as a monthly figure); and
+`diagnosis_refs` cites only codes the report actually emits. A plan is a proposal:
+the risk ordering is a suggested reading order, and the §5 rule against disabling a
+skill without the user asking still holds.
 
 `doctor` writes a snapshot and compares against the previous one automatically; `--no-snapshot` turns that off. Add `--redact --redact-names` before sharing any output.
 
