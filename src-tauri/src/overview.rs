@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::parse_rfc3339_secs;
 use agent_vitals_core::cost::{bucket_cost, load_pricing, month_cost, priced_day, today_cost};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -333,6 +334,7 @@ fn read_overview_at(dh: &Path) -> Overview {
         .map(|d| filter_days_to_month(&d, &cur_month))
         .unwrap_or_else(|| json!({}));
     let month = month_cost(&month_val, &pricing);
+    let month_total = month.get("total").and_then(|x| x.as_f64()).unwrap_or(0.0);
 
     // 逐日行：`priced_day`（唯一覆盖率校验入口）→ 无 by_model 的日子退回
     // `bucket_cost` 的 fallback 近似。与 core `month_cost` 内部同一套判断。
@@ -344,13 +346,32 @@ fn read_overview_at(dh: &Path) -> Overview {
         days.sort_by(|a, b| a.date.cmp(&b.date));
     }
 
+    // 预算卡的"本月"数字必须跟"本月"卡片同一个口径（当月过滤后的 month.total）。
+    // alert.json 是**评估时所在月份**的快照——日历翻页但没有新会话触发过重新评估
+    // 时（真实事故 2026-09-01：alert.json 停在 8 月最后一次 oneline 的 292% 超支，
+    // 本月卡片同一时刻已经因当月过滤显示 ¥0），原样端出去就是把上个月的判定贴成
+    // 这个月的现状，两个卡片自相矛盾。这里把 month 字段换成当月真实值、level 退成
+    // 中性 "ok"——不是臆造一个"一切正常"的判定（真正的判定要等这个月第一次折账后
+    // 由 budget.evaluate() 重新给出；UI 的 5 分钟过期标记照常挂上），而是不把上月的
+    // "over" 错判成这个月超支。alert 是当月评估（北京月 == cur_month）则原样权威。
+    let mut budget = read_budget_alert(dh);
+    if budget.level.is_some()
+        && budget.generated_at.as_deref().and_then(alert_beijing_month).as_deref()
+            != Some(cur_month.as_str())
+    {
+        budget.month_cost = Some(month_total);
+        budget.month_ratio =
+            budget.monthly_cny.filter(|c| *c > 0.0).map(|c| month_total / c);
+        budget.level = Some("ok".to_string());
+    }
+
     Overview {
         data_home: dh.display().to_string(),
         today: today_val,
         month,
         days,
         budget_monthly_cny: monthly_budget_cny(dh),
-        budget: read_budget_alert(dh),
+        budget,
         recent: read_recent_session(dh),
         sync: load_sync_status(dh),
         estimate_note: "估算值，不是账单；覆盖率不足的日子按 fallback 价补齐并标注".to_string(),
@@ -381,6 +402,17 @@ fn day_to_row(date: &str, day: &Value, pricing: &Value) -> DayRow {
 /// 北京当前月 `YYYY-MM`（`today_beijing()` 的前 7 位）。工作台日历默认落在当月。
 pub fn current_month_beijing() -> String {
     today_beijing()[..7].to_string()
+}
+
+/// alert.json `generated_at`（RFC3339 UTC）落进的北京月 `YYYY-MM`，与
+/// `current_month_beijing()` 同口径（UTC+8 无夏令时）。必须按北京时区翻转：
+/// 9 月 1 日凌晨 01:00 的折账写的是 `2026-08-31T17:00:00+00:00`，UTC 月还是
+/// 8 月、北京已经进 9 月——直接取字符串前 7 位会把一条全新的当月评估误判成
+/// 上月残留（错误触发 budget 的 month-stale 覆盖）。解析失败 → None（没有
+/// 新鲜度信息 = 没有月份归属，调用方按保守口径处理）。
+fn alert_beijing_month(gen: &str) -> Option<String> {
+    let secs = parse_rfc3339_secs(gen)?;
+    Some(beijing_timestamp(secs)[..7].to_string())
 }
 
 /// 月键合法性：`YYYY-MM`（len 7、第 5 字符 '-'、余为数字）。IPC 是外部面，一个
@@ -682,6 +714,117 @@ mod tests {
         let month_total = ov.month.get("total").unwrap().as_f64().unwrap();
         assert_eq!(month_total, 0.0, "上月滚存的 month.json 不该被当成本月总额展示");
         assert!(ov.days.is_empty(), "上月的逐日行不该出现在本月逐日列表里");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// **真机回归**（2026-09-01）：日历翻页、当月还没有任何会话触发过 oneline
+    /// 重新评估时，alert.json 停在**上个月**最后一次评估（level "over"、month_cost
+    /// ¥1752.4、month_ratio 2.92）。`read_overview_at` 之前把它原样端给预算卡——
+    /// 工作台显示 292% 超支、日预算 ¥30，旁边"本月"卡片同一时刻因当月过滤显示
+    /// ¥0，两个数字自相矛盾（上面那条回归只修了 month 卡片，预算卡的月份标签当时
+    /// 漏了——这就是用户看到「预算 292% ⚠ 超支 ¥1752.4」时的真实状态）。预算卡的
+    /// month 字段必须换成当月真实值（core 当月过滤的 month.total）、level 退成中性
+    /// "ok"——不把上月的 "over" 错判成这个月超支，真正的判定等这个月第一次折账后
+    /// 由 budget.evaluate() 重新给出。
+    #[test]
+    fn read_overview_does_not_apply_last_months_alert_to_this_month() {
+        let tmp = std::env::temp_dir().join("sv-menubar-overview-stale-alert-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+
+        // "上个月"（不管真实当前月是几月都能算出来，不写死具体年月）。
+        let cm = current_month_beijing();
+        let (y, m): (i64, i64) = {
+            let mut it = cm.split('-');
+            (it.next().unwrap().parse().unwrap(), it.next().unwrap().parse().unwrap())
+        };
+        let (py, pm) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+        let prev_month = format!("{py:04}-{pm:02}");
+
+        // month.json 停在上一月（没有新数据触发过 merge_month 滚档迁移）。
+        let day = serde_json::json!({
+            "uncached_input_tokens": 1000000, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+        });
+        let month = serde_json::json!({
+            "month": prev_month,
+            "days": { format!("{prev_month}-15"): day },
+        });
+        std::fs::write(tmp.join("state").join("month.json"), month.to_string()).unwrap();
+
+        // alert.json 停在上一月的判定：level over、month_cost ¥1752.4、month_ratio 2.92。
+        // generated_at 落在上一月（UTC 中午 +8h 仍在当月，稳，不碰月末/月初翻转）。
+        let alert = serde_json::json!({
+            "level": "over",
+            "ratio": null,
+            "month_ratio": 2.92,
+            "effective_daily_budget": 30.0,
+            "snoozed_until": null,
+            "reasons": ["month at 292% of monthly budget (¥1752.40 / ¥600.00)"],
+            "today_cost": 22.4,
+            "month_cost": 1752.4,
+            "monthly_cny": 600.0,
+            "peak_over": false,
+            "adaptive_floor_applied": false,
+            "generated_at": format!("{prev_month}-15T04:00:00+00:00"),
+            "schema_version": "1.0.0",
+        });
+        std::fs::write(tmp.join("state").join("alert.json"), alert.to_string()).unwrap();
+
+        let ov = read_overview_at(&tmp);
+        // 本月卡片：上月的 month.json 被过滤成空 → ¥0。
+        assert_eq!(ov.month.get("total").unwrap().as_f64().unwrap(), 0.0);
+        // 预算卡：不再端上月的 292% 超支——month 字段换成本月真实值、level 中性。
+        let b = &ov.budget;
+        assert_eq!(b.source, "alert");
+        assert_eq!(b.month_cost, Some(0.0), "预算卡不得显示上月的 ¥1752.4");
+        assert_eq!(b.month_ratio, Some(0.0), "预算卡不得显示上月的 292%");
+        assert_eq!(b.level.as_deref(), Some("ok"), "上月的 over 不得当本月超支");
+        // generated_at 保留——UI 的 5 分钟过期标记照常挂，不误显"一切正常"。
+        assert_eq!(
+            b.generated_at.as_deref(),
+            Some(format!("{prev_month}-15T04:00:00+00:00").as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 方向守卫：alert.json 是**当月**评估的 → month_cost/month_ratio/level 原样
+    /// 权威，不覆盖。防把修复写反——一旦月份匹配判错（比如拿 UTC 月当北京月，
+    /// 或者漏了 +8h 翻转），当月真实超支会被中性化成 "ok"，超支告警就静默丢了。
+    /// 故意不写 month.json：空月下也绝不能误伤当月评估。
+    #[test]
+    fn read_overview_keeps_current_month_alert_authoritative() {
+        let tmp = std::env::temp_dir().join("sv-menubar-overview-current-alert-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+
+        let cm = current_month_beijing();
+        let alert = serde_json::json!({
+            "level": "warn",
+            "ratio": null,
+            "month_ratio": 0.1667,
+            "effective_daily_budget": 30.0,
+            "snoozed_until": null,
+            "reasons": ["month at 17% of monthly budget (¥100.00 / ¥600.00)"],
+            "today_cost": null,
+            "month_cost": 100.0,
+            "monthly_cny": 600.0,
+            "peak_over": false,
+            "adaptive_floor_applied": false,
+            "generated_at": format!("{cm}-15T04:00:00+00:00"),
+            "schema_version": "1.0.0",
+        });
+        std::fs::write(tmp.join("state").join("alert.json"), alert.to_string()).unwrap();
+
+        let ov = read_overview_at(&tmp);
+        let b = &ov.budget;
+        assert_eq!(b.level.as_deref(), Some("warn"), "当月评估的 level 必须原样权威");
+        assert_eq!(b.month_cost, Some(100.0), "当月评估的 month_cost 不得被覆盖成 ¥0");
+        assert_eq!(b.month_ratio, Some(0.1667), "当月评估的 month_ratio 不得被重算");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
