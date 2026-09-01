@@ -1,15 +1,24 @@
-// 会话健康时间线的**全部算术**。这里是纯函数，不碰 React、不碰 DOM——
-// 因为手写 SVG 真正的风险不是画不出来，是**比例尺算错了也不报错**：曲线歪了
-// 没有任何测试会红，只有人眼看出来。把「数据 → path 字符串」隔离成可直接
-// 下断言的函数，才把这个风险变回"有没有测试"的问题。
+// 会话健康时间线的**数据准备适配器**。这里不再有几何。
 //
-// 两条不能破的语义：
-//   1. **曲线按显示宽度聚合，事件点一个不丢。**687 次请求压到 220 个桶是为了
-//      画得动，但风险 / 压缩 / 模型切换的标记不参与聚合——抽稀曲线可以，抽掉
-//      一次 rm -rf 不行。`eventsIn === eventsOut` 有测试钉着。
-//   2. **缺数据留缺口，不连直线。**真实会话 687 行里有 13 行没有
-//      context_tokens。把它们当 0 会让曲线砸到底，跳过它们直接连下一个点会
-//      画出一条根本没测过的斜线——两种都是编数据。整桶都缺就断开。
+// 几何（比例尺/缺口/聚合/事件定位与合并/纵轴上限）全部在共享的
+// `timeline-shared.cjs`（= src-tauri/ui/timeline.js 的字节锁步副本，见
+// docs/TRAJECTORY_TIMELINE_SPEC.md §6「几何只写一份」）。本文件只做三件事：
+//   1. 把宿主给的行（requests[]）按当前纵轴模式折成共享几何的 spec.points 单序列；
+//   2. 把事件按 seq/turn 定位到行（seq 走二分、turn 走线性，定位不到就丢）；
+//   3. 把共享 buildGeometry 的结构化结果原样交给渲染层。
+//
+// 留在这里的是**数据准备**（valueOf/indexForSeq/indexForTurn/modelSwitchEvents/
+// requestOrdinal）与交互辅助的类型；nearestPoint 是纯几何命中测试，已下沉到
+// 共享几何里再导出，这里不重写。
+//
+// 两条不能破的语义是共享几何守的，不是这里（spec §5 不变量 5）：
+//   1. 曲线按显示宽度聚合抽稀，事件标记一个不丢（eventsIn === eventsOut）；
+//   2. 缺数据留缺口不连直线（累计序列沿用上一格，缺口由 measured/total 披露）。
+
+import { buildGeometry, nearestPoint } from './timeline-shared.cjs'
+import type { SharedTimelinePoint, SharedTimelineEvent, SharedTimelineSeries } from './timeline-shared.cjs'
+
+export { nearestPoint }
 
 export type TimelineMode = 'context' | 'tokens' | 'cost'
 
@@ -113,11 +122,6 @@ const GEO: TimelineGeometry = {
 /** 默认桶数：viewBox 宽 1000，约 4.5 单位一个桶——再密画不出差别，只是白算。 */
 export const DEFAULT_BUCKETS = 220
 
-function xAt(i: number, n: number): number {
-  if (n <= 1) return (GEO.x0 + GEO.x1) / 2
-  return GEO.x0 + (i / (n - 1)) * (GEO.x1 - GEO.x0)
-}
-
 /**
  * 每行在当前模式下的值。null = 这一行**没测到**（不是 0）。
  * - context：provider 实测的该次请求上下文占用。
@@ -171,164 +175,62 @@ export function buildTimeline(opts: {
   const n = rows.length
   if (n === 0) return null
 
-  // ── 1. 逐行取值。tokens 模式先累加成单调序列再聚合。 ──
-  // 累计曲线在缺数据的行上**不产生缺口**：缺的是"这一笔加了多少"，不是"总数
-  // 归零了"。所以缺行沿用上一格的累计值，缺口改由 measured/total 披露。
-  const series: (number | null)[] = new Array(n)
+  // ── 1. 逐行取值 → 共享几何的 spec.points 单序列。 ──
+  // 纵轴模式在共享几何里表达成序列语义（不在这里重算比例尺）：
+  //   context: 原始值——缺值 null，断开；
+  //   tokens:  每行 delta——'sum' 外层累加，缺行沿用上一格；
+  //   cost:    宿主给好的累计值——'carry'，沿用但不**再累加**（再累一遍就双计）。
+  const name = mode
+  const values: (number | null)[] = new Array(n)
   let measured = 0
-  if (mode === 'tokens') {
-    let acc = 0
-    let seen = false
-    for (let i = 0; i < n; i++) {
-      const v = valueOf(rows[i], mode)
-      if (v != null) { acc += v; measured++; seen = true }
-      series[i] = seen ? acc : null
-    }
-  } else if (mode === 'cost') {
-    // 已经是累计值：缺的那几笔宿主没计价（is_peak 为 null），累计值原地不动，
-    // 所以**不产生缺口**——缺口由 measured/total 披露，与 tokens 模式同理。
-    let last: number | null = null
-    for (let i = 0; i < n; i++) {
-      const v = valueOf(rows[i], mode)
-      if (v != null) { measured++; last = v }
-      series[i] = last
-    }
-  } else {
-    for (let i = 0; i < n; i++) {
-      const v = valueOf(rows[i], mode)
-      if (v != null) measured++
-      series[i] = v
-    }
+  for (let i = 0; i < n; i++) {
+    const v = valueOf(rows[i], mode)
+    if (v != null) measured++
+    values[i] = v
   }
   if (measured === 0) return null
 
-  // ── 2. y 轴上限 ──
-  let dataMax = 0
-  for (const v of series) if (v != null && v > dataMax) dataMax = v
-  let yMax = dataMax
-  let yMaxIsData = true
-  if (mode === 'context') {
-    let win = 0
-    for (const r of rows) if (r.context_window && r.context_window > win) win = r.context_window
-    // 上限本来就随模型变；拿不到就退回数据最大值并标记，**不编一个默认上限**。
-    if (win > 0) { yMax = Math.max(win, dataMax); yMaxIsData = false }
-  }
-  if (yMax <= 0) yMax = 1
+  const points: SharedTimelinePoint[] = rows.map((r, i) => ({
+    ordinal: i,
+    task_id: r.turn != null ? r.turn : null,
+    values: { [name]: values[i] },
+  }))
 
-  // ── 3. 聚合。桶内取**最大值**而不是平均：这条曲线是用来找峰值的，
-  //      平均会把一次爆掉的请求抹平成看不见。整桶全缺 → 断开。 ──
-  const maxBuckets = opts.maxBuckets ?? DEFAULT_BUCKETS
-  const buckets = Math.max(1, Math.min(n, maxBuckets))
-  const segments: TimelinePoint[][] = []
-  let current: TimelinePoint[] = []
-  let gaps = 0
-  const yFor = (v: number) => GEO.curveBottom - (v / yMax) * (GEO.curveBottom - GEO.curveTop)
-
-  for (let b = 0; b < buckets; b++) {
-    const lo = Math.floor((b * n) / buckets)
-    const hi = Math.max(lo + 1, Math.floor(((b + 1) * n) / buckets))
-    let best: number | null = null
-    let bestIdx = lo
-    for (let i = lo; i < hi && i < n; i++) {
-      const v = series[i]
-      if (v == null) continue
-      if (best === null || v > best) { best = v; bestIdx = i }
-    }
-    if (best === null) {
-      if (current.length > 0) { segments.push(current); current = [] }
-      gaps++
-      continue
-    }
-    current.push({ x: xAt(bestIdx, n), y: yFor(best), idx: bestIdx, lo, hi: Math.min(hi, n) })
-  }
-  if (current.length > 0) segments.push(current)
-
-  const path = segments.map(seg =>
-    seg.map((p, i) => (i === 0 ? 'M' : 'L') + fmt(p.x) + ' ' + fmt(p.y)).join(' ')
-  ).join(' ')
-  // 单点段没有面积可填（一条零宽的竖线），跳过——否则会画出一根杂散的竖线。
-  const area = segments.filter(seg => seg.length > 1).map(seg =>
-    'M' + fmt(seg[0].x) + ' ' + fmt(GEO.curveBottom) + ' ' +
-    seg.map(p => 'L' + fmt(p.x) + ' ' + fmt(p.y)).join(' ') +
-    ' L' + fmt(seg[seg.length - 1].x) + ' ' + fmt(GEO.curveBottom) + ' Z'
-  ).join(' ')
-
-  // ── 4. 事件。**不参与聚合**——曲线可以抽稀，风险标记不行。 ──
-  // 同一 turn 的同类事件合并成一个标记（真实会话里 10 次 prune 全在 T85，
-  // 不合并就是十个像素级重叠的点，点不中也读不出）。
-  const placed: TimelineEvent[] = []
-  const byKey = new Map<string, TimelineEvent>()
+  // ── 2. 事件定位到行 → spec.events（ordinal = 行下标；合并键用输入事件的 turn）。 ──
+  // 定位不到就丢——画在一个猜的位置上比不画更糟，用户会照着那个位置去找证据。
+  // 丢掉的这条仍在下方队列里，不会消失。
+  const specEvents: SharedTimelineEvent[] = []
   for (const e of opts.events) {
     let idx: number | null = null
     if (e.seq != null) idx = indexForSeq(rows, e.seq)
     if (idx == null && e.turn != null) idx = indexForTurn(rows, e.turn)
-    // 定位不到就丢掉——**画在一个猜的位置上比不画更糟**，用户会照着那个
-    // 位置去找证据。丢掉的这条仍然在下方队列里，不会消失。
     if (idx == null) continue
-    const key = e.kind + '@' + (e.turn ?? ('i' + idx))
-    const hit = byKey.get(key)
-    if (hit) {
-      hit.count++
-      if (e.targetId) hit.members.push(e.targetId)
-      // 合并组的代表取严重度最高的那条，点击落到它身上。
-      if (rank(e.severity) < rank(hit.severity)) {
-        hit.severity = e.severity
-        hit.label = e.label
-        if (e.targetId) hit.targetId = e.targetId
-        // T9 遗漏过一次的坑：只换 severity/label/targetId 不换 skillMode，
-        // 代表事件换了但形状还是上一个事件的——这里跟着代表一起换。
-        if (e.skillMode) hit.skillMode = e.skillMode
-      }
-      continue
-    }
-    const ev: TimelineEvent = {
-      kind: e.kind, severity: e.severity, x: xAt(idx, n), turn: e.turn,
-      label: e.label, targetId: e.targetId, count: 1,
-      members: e.targetId ? [e.targetId] : [],
-      // T9：合并前是 undefined 就是 undefined——非 skill 事件本来就没有这个
-      // 概念，不能填一个默认值假装"是 model_selected"。
-      skillMode: e.skillMode,
-    }
-    byKey.set(key, ev)
-    placed.push(ev)
-  }
-  placed.sort((a, b) => a.x - b.x)
-
-  // ── 5. turn 刻度：横轴按请求走，但人读的是 turn。 ──
-  const turnTicks: { x: number; label: string }[] = []
-  const tickCount = Math.min(6, n)
-  for (let k = 0; k < tickCount; k++) {
-    const i = Math.round((k / Math.max(1, tickCount - 1)) * (n - 1))
-    const turn = rows[i].turn
-    if (turn == null) continue
-    const label = 'T' + turn
-    if (turnTicks.length > 0 && turnTicks[turnTicks.length - 1].label === label) continue
-    turnTicks.push({ x: xAt(i, n), label })
+    specEvents.push({
+      ordinal: idx, kind: e.kind, label: e.label,
+      severity: e.severity, targetId: e.targetId,
+      turn: e.turn, skillMode: e.skillMode,
+    })
   }
 
-  const points = segments.flat()
-  return {
-    path, area, points, events: placed, yMax, yMaxIsData,
-    measured, total: n, buckets, gaps,
-    geometry: GEO, turnTicks,
-  }
-}
+  // ── 3. y 轴上限：context 模式有 contextWindow 时作为显式上限传给共享几何
+  //       （max(dataMax, yMax) 并置 yMaxIsData）；窗口缺失就不传，让几何退回
+  //       数据最大值并标记 yMaxIsData——不编一个默认上限。 ──
+  const maxWin = mode === 'context'
+    ? rows.reduce((a, r) => Math.max(a, r.context_window || 0), 0) : 0
+  const cumulative: SharedTimelineSeries['cumulative'] =
+    mode === 'context' ? false : mode === 'tokens' ? true : 'carry'
 
-/**
- * 找到离给定 x 最近的**已画出的点**。返回 points 里的下标，没有点时返回 -1。
- *
- * 为什么吸附到点而不是按 x 反算行号：曲线画的是桶内最大值，游标停在两点之间
- * 再插值，等于报一个从没测过的值。宁可跳到最近的真实点。
- */
-export function nearestPoint(points: TimelinePoint[], x: number): number {
-  if (points.length === 0) return -1
-  let best = 0
-  let bestD = Math.abs(points[0].x - x)
-  for (let i = 1; i < points.length; i++) {
-    const d = Math.abs(points[i].x - x)
-    if (d < bestD) { bestD = d; best = i }
-  }
-  return best
+  const g = buildGeometry({
+    points,
+    events: specEvents,
+    series: [{ name, label: name, cumulative }],
+    geometry: GEO,
+    yMax: maxWin > 0 ? maxWin : undefined,
+  }, { maxBuckets: opts.maxBuckets ?? DEFAULT_BUCKETS })
+  if (g === null) return null
+  // 共享几何的返回结构与 Timeline 同构（kind: string 比 EventKind 宽，其余字段
+  // 一一对应），渲染层只读这些字段，不做比例尺数学。
+  return g as unknown as Timeline
 }
 
 /**
@@ -346,14 +248,4 @@ export function requestOrdinal(rows: TimelineRow[], idx: number): { n: number; m
     if (i <= idx) n++
   }
   return { n, m }
-}
-
-const SEV_RANK: Record<string, number> = { critical: 0, warning: 1, info: 2 }
-function rank(sev: string | undefined): number {
-  return sev && sev in SEV_RANK ? SEV_RANK[sev] : 3
-}
-
-/** 坐标保留一位小数——path 字符串体积减半，肉眼看不出差别。 */
-function fmt(v: number): string {
-  return (Math.round(v * 10) / 10).toString()
 }

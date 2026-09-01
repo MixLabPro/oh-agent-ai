@@ -1,12 +1,17 @@
 # 轨迹时间线设计说明（Timeline Series Contract）
 
-> 状态：**部分已落地（2026-09-01）**——§4 契约 + §5 不变量 + §6 的「几何只写一份」
+> 状态：**已全部落地（2026-09-01）**——§4 契约 + §5 不变量 + §6 的「几何只写一份」
 >       已实现（`src-tauri/ui/timeline.js` + `scripts/verify-timeline-geometry.mjs`，
->       13 项断言由 `tests/test_codex_session_template.py` 调 node 执行），工作台
->       单会话详情已接线（DSH 逐请求累计 token + findings 事件、Codex 逐小时 token）。
->       **未落地**：dsh-client（React `timeline.ts`）与 `codex_session.html`
->       （内联 `svTimelineSvg`）尚未迁到共享 `timeline.js`——三份几何并存直到它们
->       迁完；Codex 的事件叠加（`turn_timeline` 对不上小时桶）留待逐事件时间线档。
+>       13 项断言由 `tests/test_codex_session_template.py` 调 node 执行），三个消费
+>       面全部迁完、不再有第二份几何：
+>         - 工作台单会话详情（DSH 逐请求累计 token + findings 事件、Codex 逐小时 token）；
+>         - dsh-client `timeline.ts` 已改成**数据准备适配器**，经
+>           `timeline-shared.cjs`（字节锁步副本，`tests/test_timeline_lockstep.py` 守）
+>           import 共享 `buildGeometry`/`nearestPoint`；成本纵轴走 `'carry'` 语义
+>           （宿主算好的累计值，浏览器不再累加、不重算单价）；
+>         - `codex_session.html` 内联块已重生成（`>>> sv-timeline-geometry` 逐字节
+>           对齐源，`scripts/verify-codex-session-timeline.mjs` 守），调用点走
+>           `TimelineGeometry.buildTimeline`，不再有内联 `svTimelineSvg`。
 > 目标：给 DSH / Codex / Claude Code / WorkBuddy / 未来宿主 的「会话时间线」
 >       定一个统一的 canonical 数据形状 + 通用绘制范式，让几何只写一份。
 > 配套：`RUNTIME_EVIDENCE_CONTRACT.md`（每宿主的证据面与退化规则，本文的
@@ -276,7 +281,9 @@ lossy），不把 lossy 的标记和 measured 的标记画成同一种置信度�
 - **vitals-core 不碰时间线**：domain-free 的测量层（finding/cost/replay），不含
   呈现、不含「小时」「北京时间」这类词。`dependency_boundary.rs` 已守这条。
 - **几何只写一份**：无依赖 `.js`，三种消费方式——工作台 `<script src>`、
-  dsh-client `import`、`codex_session.html` Python 内联。一条 node 验证脚本
+  dsh-client `import`（副本 `timeline-shared.cjs`，`.cjs` 后缀是因为 dsh-client
+  是 `"type": "module"`，esbuild 按 ESM 解析 `.js` 会让 UMD 的 `module.exports`
+  变死代码）、`codex_session.html` Python 内联。一条 node 验证脚本
   （现 `verify-timeline.mjs` / `verify-codex-session-timeline.mjs` 的模式）断言
   纯几何，跑在 CI 和本地 unittest 里，风险钉一次不是三次。
 - **数据准备收口到 envelope**：Codex 现在已把 `cost_report.hours` 在宿主侧折好，
