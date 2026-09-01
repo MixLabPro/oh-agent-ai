@@ -571,6 +571,66 @@ function detailSection(title) {
   return sec;
 }
 
+// 会话时间线：把宿主 envelope 里的用量序列 + 事件投影到通用几何
+// （src-tauri/ui/timeline.js 的 TimelineGeometry.buildTimeline，spec §4 契约）。
+// 纯数据准备 + 渲染壳——比例尺/缺口/事件保真都在 timeline.js 的纯函数里，这里只
+// 负责把 DSH `requests` / Codex `cost_report.hours` 映射成 points/events。
+function timelineSection(session, host) {
+  const geo = window.TimelineGeometry && window.TimelineGeometry.buildTimeline;
+  if (!geo) return null; // timeline.js 没加载 → 不渲染这一节，不是报错
+
+  let points = null, events = [], series = null, title = "会话时间线";
+
+  if (host === "codex") {
+    // Codex：逐小时 token 桶（cost_report.hours 已是北京时间的逐小时 delta）。
+    const hours = session.cost_report && Array.isArray(session.cost_report.hours) ? session.cost_report.hours : null;
+    if (!hours || hours.length === 0) return null;
+    points = hours.map((h, i) => ({ ordinal: i, values: { tokens: h.tokens } }));
+    series = [{ name: "tokens", label: "token", cumulative: false }];
+    title = "逐小时 token 用量（" + hours.length + " 小时）";
+    // turn_timeline 的 source_order 是原始事件序号（千级），对不上小时桶（十级），
+    // 事件叠加留到「按 source_order 画逐事件时间线」那一档再做——这里只画用量形状。
+  } else {
+    // DSH：逐请求累计 token（uncached_input + output + cache_read 累加）。
+    const reqs = Array.isArray(session.requests) ? session.requests : null;
+    if (!reqs || reqs.length === 0) return null;
+    points = reqs.map((r) => ({
+      ordinal: r.seq,           // 用 DSH seq 当 ordinal，findings 的 seq 才能对上
+      task_id: r.turn != null ? r.turn : null,
+      values: {
+        tokens: (r.uncached_input_tokens || 0) + (r.output_tokens || 0) + (r.cache_read_tokens || 0),
+      },
+    }));
+    series = [{ name: "tokens", label: "累计 token", cumulative: true }];
+    title = "逐请求累计 token（" + reqs.length + " 个请求）";
+    // findings 当事件标记。finding 的 seq 是 DSH **事件流**的 seq（9807 条），而
+    // requests 只是其中 284 个 request 事件的稀疏子集——finding.seq 直接对不上
+    // request.seq（实测 440338/445285 都不在任何 request 里）。改按 turn 定位：
+    // finding.turn → 该 turn 的第一个 request 的 seq，找不到才退回 seq 精确匹配。
+    const turnToSeq = {};
+    for (const r of reqs) if (r.turn != null && !(r.turn in turnToSeq)) turnToSeq[r.turn] = r.seq;
+    const findings = Array.isArray(session.findings) ? session.findings : [];
+    for (const f of findings) {
+      let ord = null;
+      if (f.turn != null && turnToSeq[f.turn] != null) ord = turnToSeq[f.turn];
+      else if (f.seq != null) ord = f.seq;
+      if (ord == null) continue;
+      events.push({
+        ordinal: ord, kind: "risk",
+        label: (f.rule || "?") + " " + (f.evidence || ""),
+        severity: f.severity || "info",
+      });
+    }
+  }
+
+  const svg = geo({ points, events, series, width: 800, height: 130, pad: 26 });
+  const sec = detailSection(title);
+  const wrap = el("div");
+  wrap.innerHTML = svg;
+  sec.appendChild(wrap);
+  return sec;
+}
+
 // 一行「标签 + 值」：标签走 muted，值靠右 tabular-nums。用于成本/上下文这类
 // 数字键值，不用为每个小维度单造一种结构。
 function kvRow(label, value, title) {
@@ -733,6 +793,7 @@ function dshCoverageSection(s) {
 
 function renderDshSections(body, s) {
   const sections = [
+    timelineSection(s, "dsh"),
     dshCostSection(s),
     dshContextSection(s),
     dshWasteSection(s),
@@ -846,6 +907,7 @@ function codexMetaSection(s) {
 
 function renderCodexSections(body, s) {
   const sections = [
+    timelineSection(s, "codex"),
     codexAuditSection(s),
     codexCostSection(s),
     codexCoverageSection(s),

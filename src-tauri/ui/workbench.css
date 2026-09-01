@@ -719,3 +719,16 @@ body {
   margin-left: 6px;
   font-weight: 600;
 }
+
+/* ---------- 时间线几何（src-tauri/ui/timeline.js 的 .tl-* 类） ---------- */
+.tl-chart { width: 100%; height: auto; display: block; }
+.tl-grid { stroke: var(--panel-2); stroke-width: 1; }
+.tl-line { fill: none; stroke: var(--accent, #4a86e8); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tl-area { fill: color-mix(in srgb, var(--accent, #4a86e8) 10%, transparent); }
+.tl-bar { fill: var(--accent, #4a86e8); }
+.tl-axis { font-size: 10px; fill: var(--muted); }
+.tl-event-tick { stroke: var(--panel-2); stroke-width: 1; }
+.tl-event-dot { fill: var(--danger, #fb4c2f); }
+.tl-event[data-severity="warning"] .tl-event-dot { fill: var(--warn, #ffad47); }
+.tl-event[data-severity="info"] .tl-event-dot { fill: var(--muted); }
+.tl-empty { color: var(--muted); font-size: 12px; padding: 8px 0; }

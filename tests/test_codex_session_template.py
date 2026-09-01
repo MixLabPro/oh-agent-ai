@@ -30,6 +30,7 @@ REPO = Path(__file__).resolve().parents[1]
 VERIFY_SCRIPTS = [
     REPO / "scripts" / "verify-codex-session-timeline.mjs",
     REPO / "scripts" / "verify-codex-session-findings.mjs",
+    REPO / "scripts" / "verify-timeline-geometry.mjs",
 ]
 
 _has_node = shutil.which("node") is not None
