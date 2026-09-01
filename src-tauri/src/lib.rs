@@ -497,6 +497,12 @@ const FOLD_EVENT_DEBOUNCE: std::time::Duration = std::time::Duration::from_milli
 /// 两轮完成挤进 200ms。窗口内再次完成只更新 last_emit，不重复 emit。
 struct FoldEventDebounce(Mutex<Option<std::time::Instant>>);
 
+/// 菜单栏「信息行」点击产生的导航目标（工作台 tab 名）。持久存目标是因为窗口未建/未
+/// 可见时 `emit` 是空操作（`emit_fold_event` 注释，lib.rs:521）——目标要留到工作台下次
+/// init/focus 时 pull 出来消费；`focus-tab` 事件只是通知，pull 是最终仲裁。工作台 apply
+/// 成功后调 `clear_nav_target` 清除，防陈旧目标在下次 focus 重复应用。
+struct NavTarget(Mutex<Option<String>>);
+
 /// 去抖判定（纯函数，单测钉住）：距上次广播 ≥ 窗口（或从未发过）→ 广播；
 /// < 窗口 → 吞掉（不发，避免工作台双拉）。用「距上次多久」而不是绝对 Instant，
 /// 让单测能自由构造时长（Instant 造不出任意值）。
@@ -597,6 +603,30 @@ fn show_workbench(app: &AppHandle) {
     let _ = w.set_focus();
 }
 
+/// 信息行菜单 id → 工作台 tab 名。纯函数，单测钉住映射——切错 tab 的回归靠它挡。
+fn tab_for_menu_id(id: &str) -> Option<&'static str> {
+    match id {
+        "today" | "daily" | "month" | "budget" => Some("overview"),
+        "recent" => Some("sessions"),
+        "sync" => Some("sources"),
+        _ => None,
+    }
+}
+
+/// 菜单信息行点击 → 跳工作台对应 tab。双通路：持久目标（managed state，窗口不可见时
+/// 下次 pull 命中）+ `focus-tab` 事件（窗口已可见时一戳就跳）。**写目标先于 show**——
+/// 避免「emit 早于 listen、show 的 focus 事件又没触发」的窗口期把目标丢掉。块作用域
+/// 先释放锁再 emit（与 `emit_fold_event` 同款 E0716 规避）。
+fn focus_tab(app: &AppHandle, tab: &str) {
+    {
+        let nav = app.state::<NavTarget>();
+        let mut g = nav.0.lock().unwrap_or_else(|e| e.into_inner());
+        *g = Some(tab.to_string());
+    }
+    show_workbench(app);
+    let _ = app.emit("focus-tab", tab);
+}
+
 /// 工作台前端请求当前 overview —— 与托盘菜单同一份数据源，前端只渲染。
 ///
 /// 2026-09-01 之前这里还有一份面板（`ui/index.html`/`main.js`，弹出层 popover
@@ -625,12 +655,27 @@ fn trigger_sync(app: AppHandle) {
     sync_now(&app);
 }
 
+/// 工作台 pull：**非破坏性**读导航目标（窗口未建/未可见时菜单点击的目标留在这里，等
+/// init/focus 时消费；`peek` 不消费，apply 成功后由 `clear_nav_target` 显式清）。
+#[tauri::command]
+fn peek_nav_target(state: tauri::State<'_, NavTarget>) -> Option<String> {
+    state.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// 工作台 apply 成功后清除导航目标——陈旧目标不清会在下次 focus 时重复跳一次 tab。
+#[tauri::command]
+fn clear_nav_target(state: tauri::State<'_, NavTarget>) {
+    *state.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(SyncLock(Mutex::new(())))
         // fold 事件去抖状态：tick/手动线程共享（见 FoldEventDebounce 注释）。
         .manage(FoldEventDebounce(Mutex::new(None)))
+        // 菜单信息行导航目标：菜单点击 → 工作台（见 NavTarget 注释）。
+        .manage(NavTarget(Mutex::new(None)))
         .on_window_event(|window, event| {
             // 工作台 × 按钮 → 隐藏不销毁。config-created 窗口被 × 关掉会 destroy，
             // 之后 reopen 是 no-op（get_webview_window 返回 None）；hide 保状态——
@@ -649,6 +694,8 @@ pub fn run() {
             store::sessions_list,
             store::sessions_read,
             store::sessions_findings,
+            peek_nav_target,
+            clear_nav_target,
         ])
         .setup(|app| {
             // 菜单栏工具:必须 .accessory,否则 macOS 把它当普通 App 常驻 Dock
@@ -670,12 +717,21 @@ pub fn run() {
                 .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(true)
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "workbench" => show_workbench(app),
-                    // 「立即同步」不是重读本地 state，而是受控 tick：discover →
-                    // oneline 折账 → 刷新托盘（review fix 1）。
-                    "refresh" => sync_now(app),
-                    _ => {}
+                .on_menu_event(|app, event| {
+                    let id = event.id().as_ref();
+                    match id {
+                        "workbench" => show_workbench(app),
+                        // 「立即同步」不是重读本地 state，而是受控 tick：discover →
+                        // oneline 折账 → 刷新托盘（review fix 1）。
+                        "refresh" => sync_now(app),
+                        // 信息行导航：映射在 tab_for_menu_id（单测钉住），走双通路
+                        // focus_tab（事件 + 持久 pull）。
+                        _ => {
+                            if let Some(tab) = tab_for_menu_id(id) {
+                                focus_tab(app, tab);
+                            }
+                        }
+                    }
                 })
                 .build(app)?;
             // 初始标题：托盘一亮就带今日消耗，不用等第一个 tick（线程刚 spawn、
@@ -856,6 +912,20 @@ mod tests {
         // at 缺场（老状态文件）也不能崩，退化成不带时间的成功。
         let ok_no_at = SyncStatus { at: None, ..ok };
         assert_eq!(sync_line_text(&ok_no_at), "上次同步：成功");
+    }
+
+    #[test]
+    /// 信息行点击 → 工作台 tab 的映射钉死。today/daily/month/budget 都是总览页的
+    /// 数字，recent 是会话清单，sync 是数据源页；workbench/refresh 不是导航行。
+    fn tab_for_menu_id_maps_info_rows_to_workbench_tabs() {
+        for id in ["today", "daily", "month", "budget"] {
+            assert_eq!(tab_for_menu_id(id), Some("overview"), "id={id} 应跳总览");
+        }
+        assert_eq!(tab_for_menu_id("recent"), Some("sessions"));
+        assert_eq!(tab_for_menu_id("sync"), Some("sources"));
+        for id in ["workbench", "refresh", "nope", ""] {
+            assert_eq!(tab_for_menu_id(id), None, "id={id} 不是导航行");
+        }
     }
 
     /// 夹具：alert.json 真机形态的 generated_at（2026-08-30 实测），以及用它作

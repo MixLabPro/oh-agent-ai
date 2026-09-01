@@ -160,6 +160,32 @@ function subscribeFoldEvent() {
   });
 }
 
+// 菜单信息行导航（双通路，照 MENUBAR_MULTIHOST_NAVIGATION_SPEC §7 简化）：
+//   - `focus-tab` 事件是快路径（窗口已可见时菜单一戳就跳）；
+//   - `peek_nav_target` 持久目标是慢路径——窗口未建/未可见时 emit 是空操作，目标留到
+//     下次 init/focus 时 pull。**事件只是通知，pull 是最终仲裁**：监听器不读 e.payload，
+//     统一从 state 读目标，apply 后 clear 是单点，事件与焦点 pull 不会各 apply 一遍。
+async function pullNavTarget() {
+  try {
+    const tab = await invoke("peek_nav_target");
+    if (tab) {
+      switchTab(tab);
+      await invoke("clear_nav_target");
+    }
+  } catch (e) {
+    console.warn("[workbench] peek_nav_target 失败（菜单导航不可用）", e);
+  }
+}
+
+function subscribeNavEvent() {
+  // 终身订阅，不调 unlisten（与 subscribeFoldEvent 同款）。
+  listen("focus-tab", () => {
+    pullNavTarget();
+  }).catch((e) => {
+    console.warn("[workbench] focus-tab 订阅失败（持久目标 pull 兜底）", e);
+  });
+}
+
 // ---------- tab 切换 ----------
 
 let activeTab = "overview";
@@ -197,6 +223,9 @@ async function loadActiveTab() {
 // 会话页例外：CLI 列表较重，首进加载一次、之后用「重载列表」按钮；焦点只刷新
 // 总览与日历两个便宜页。
 window.addEventListener("focus", () => {
+  // 菜单信息行导航慢路径：窗口重新获得焦点时 pull 持久目标（窗口未可见时 emit 丢掉的
+  // 那次点击在这里命中）。先 pull 再刷新，避免 pull 切 tab 后又按旧 activeTab 刷新。
+  pullNavTarget();
   if (activeTab === "overview") renderOverview();
   else if (activeTab === "calendar") renderCalendar();
 });
@@ -2060,6 +2089,9 @@ function init() {
   // fold 完成事件桥：先订阅再首屏渲染，缩小「事件早于 listen」的丢窗口
   // （丢的那几个由 5 分钟 tick / 手动同步兜底，见事件桥一节注释）。
   subscribeFoldEvent();
+  // 菜单导航事件桥同款：先订阅；冷启动（webview 先加载、focus-tab emit 早于 listen）
+  // 的那次点击由 init 末尾的 pullNavTarget() 命中，subscribeNavEvent 只管窗口已建后。
+  subscribeNavEvent();
   document.querySelectorAll(".tab").forEach((t) => {
     t.addEventListener("click", () => switchTab(t.dataset.tab));
   });
@@ -2088,6 +2120,9 @@ function init() {
   // 日历默认月跟随北京今天；本月输入框受 input[type=month] 约束天然合法。
   if (!calMonth) calMonth = beijingMonth();
   renderOverview();
+  // 启动 pull：冷启动时（webview 先加载、focus-tab emit 早于 listen）菜单点击的目标
+  // 在这里命中。apply 后 clear，此后 focus/事件两条路都不会重复应用。
+  pullNavTarget();
 }
 
 document.addEventListener("DOMContentLoaded", init);
