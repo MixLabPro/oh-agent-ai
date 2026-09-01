@@ -1993,6 +1993,203 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(got[0][1], got[1][1], "stdout 不一致")
         self.assertEqual(got[0][2], got[1][2], "stderr 不一致")
 
+    # ── WorkBuddy 会话审计（合成 home：sqlite db + audit-log + file-history）──
+    # 夹具是 `fixtures/workbuddy/workdir`（`build_workbuddy_fixture.py` 自校验钉死
+    # 同一组 §10 数字），测试只消费它，不自己再造一份（再造一份就漂移了）。
+
+    def _workbuddy_home(self):
+        """把验收夹具 `fixtures/workbuddy/workdir` 落到临时 home。"""
+        src = ROOT / "fixtures" / "workbuddy" / "workdir"
+        shutil.copytree(src, self.tmp, dirs_exist_ok=True)
+
+    def test_workbuddy_session_list_differential(self):
+        """`workbuddy-session --list`：db `sessions` 表是会话索引，排序 =
+        updated_at 降序（最新在前）。标题/模型/cwd 直接来自 db 行。"""
+        self._workbuddy_home()
+        code, out, err = self.both("workbuddy-session", "--list", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["host"], "workbuddy")
+        sessions = report["sessions"]
+        self.assertEqual([s["session_id"] for s in sessions], ["s2", "s1"],
+                         "排序 = updated_at 降序（s2 10:05 最新在前）")
+        self.assertEqual([s["title"] for s in sessions], ["审批流程会话", "健康会话"])
+        self.assertEqual([s["model"] for s in sessions], ["deepseek-v4-flash"] * 2)
+        self.assertEqual([s["cwd"] for s in sessions], ["/repo"] * 2)
+        self.assertEqual(sessions[0]["first"], "2026-08-31T10:00:00Z")
+        self.assertEqual(sessions[0]["last"], "2026-08-31T10:05:00Z")
+
+        # 人读视图差分（py==rs，both() 兜底）+ 语义：行宽固定 28。
+        code, out, err = self.both("workbuddy-session", "--list")
+        self.assertEqual(code, 0)
+        self.assertIn("host: workbuddy\n", out)
+        self.assertIn("sessions: 2\n", out)
+        self.assertIn("健康会话", out)
+
+    def test_workbuddy_session_detail_differential(self):
+        """`workbuddy-session --session s1`：健康会话深挖。§10 验收 #4 的三态
+        契约——SV604/605（host-capability override）+ SV607/608/609/612/613
+        （门控 no evidence）必须 Unavailable，其中 SV604/605 的 reason 是
+        host-capability override；可跑规则 SV601-603/606/610/611/614 空转零命中。
+        SV604/605 的 Unavailable 把 rules_unavailable 从 5 推到 7（degrade 后
+        重算）。coverage 与 timeline 同源：3 tool_calls（2 bash + 1 web_fetch）、
+        2 sandbox 模式、1 网络访问、distinct requestId 派生 2 turn。成本块吃
+        宿主账单：used=5000 + credit_json 求和 ¥0.05。"""
+        self._workbuddy_home()
+        code, out, err = self.both("workbuddy-session", "--session", "s1", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["host"], "workbuddy")
+        self.assertEqual(report["session_id"], "s1")
+        self.assertEqual(report["title"], "健康会话")
+        self.assertEqual(report["model"], "deepseek-v4-flash")
+        self.assertEqual(report["cwd"], "/repo")
+        self.assertTrue(report["file"].endswith("audit-log/s1.jsonl"))
+        self.assertEqual(report["date_span"]["first"], "2026-08-31T09:01:00Z")
+        self.assertEqual(report["date_span"]["last"], "2026-08-31T09:03:00Z")
+        # 键序是字节一致的一部分，不能重排。
+        self.assertEqual(list(report.keys()),
+                         ["host", "session_id", "title", "model", "cwd", "file",
+                          "date_span", "audit", "coverage", "signals", "attempts",
+                          "cost", "notes"])
+        cov = report["coverage"]
+        self.assertEqual(cov["ToolCalls"]["measured"], 3)
+        self.assertEqual(cov["SandboxModes"]["measured"], 2)
+        self.assertEqual(cov["NetworkAccess"]["measured"], 1)
+        self.assertEqual(cov["ApprovalDecisions"]["available"], True)
+        self.assertEqual(cov["ApprovalDecisions"]["measured"], 0)
+        self.assertEqual(cov["TurnBoundaries"]["derived"], 2)
+        self.assertEqual(cov["ApprovalPolicy"]["measured"], 1)
+        self.assertEqual(cov["UsageAggregate"]["measured"], 1)
+        self.assertEqual(cov["FileMutations"]["measured"], 3)
+        a = report["audit"]
+        self.assertEqual(a["summary"],
+                         {"critical": 0, "warning": 0, "info": 0,
+                          "findings_total": 0, "rules_unavailable": 7})
+        rules = a["rule_outcomes"]
+        for code in ("SV604", "SV605", "SV607", "SV608", "SV609", "SV612", "SV613"):
+            self.assertEqual(rules[code]["status"], "unavailable", code)
+        self.assertIn("workbuddy host capability", rules["SV604"]["reason"])
+        self.assertIn("workbuddy host capability", rules["SV605"]["reason"])
+        self.assertEqual(rules["SV609"]["reason"],
+                         "no evidence for required signal(s) in this session")
+        for code in ("SV601", "SV602", "SV603", "SV606", "SV610", "SV611", "SV614"):
+            self.assertEqual(rules[code]["status"], "measured_zero", code)
+        self.assertEqual(report["cost"],
+                         {"tokens": 5000, "cny": 0.05, "host_billed": True})
+        # 信号序 = ALL_SIGNALS 序（Signals 数组的顺序是输出契约的一部分）。
+        self.assertEqual(report["signals"],
+                         ["ToolCalls", "TurnBoundaries", "UsageAggregate",
+                          "ApprovalPolicy", "SandboxModes", "NetworkAccess",
+                          "FileMutations"])
+        # 三条 notes：turn 重建说明 + sandbox 模式说明 + 连续 hash 链。
+        self.assertEqual(report["notes"], [
+            "turn boundaries are derived from distinct audit-log requestId (a lower "
+            "bound: audit-log is not a per-request ledger); native turn structure is "
+            "absent, so SV612/613 are Unavailable, never fabricated boundaries.",
+            "sandbox mode is the WorkBuddy-native permission_mode (bypassPermissions / "
+            "fullAccess); the DSH danger-full-access vocabulary does not apply, so SV610 "
+            "is an honest MeasuredZero, never a translation.",
+            "audit-log hash chain continuous: 3 records (verified from seq=1)",
+        ])
+        # attempts：traces 记成 SourceAttempt（session-anonymous，§14.4）。
+        self.assertEqual(report["attempts"], [{
+            "source_id": "workbuddy.traces", "kind": "Directory",
+            "surface": "Traces", "available": False,
+            "error": ("traces are session-anonymous (no sessionId join); skipped per "
+                      "RUNTIME_EVIDENCE_CONTRACT §14.4"),
+            "observed_span": None}])
+
+    def test_workbuddy_session_approval_flow_differential(self):
+        """`workbuddy-session --session s2`：审批轴。3 条审批记录（approved /
+        rejected / bulk-delete rejected）→ SV609×3 info；commandApproved 的
+        decided allowed-once → SV610×1 warning（family ① 按 seq 排序，两条
+        seq=0 的记录稳定保 SV609 在前）。轮转链头 → rotation note。成本块：
+        credit_json 空对象 → ¥0.0（宿主记了 0，不是我们算不出）。"""
+        self._workbuddy_home()
+        code, out, err = self.both("workbuddy-session", "--session", "s2", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["session_id"], "s2")
+        a = report["audit"]
+        self.assertEqual(a["summary"],
+                         {"critical": 0, "warning": 1, "info": 3,
+                          "findings_total": 4, "rules_unavailable": 6})
+        self.assertEqual([f["rule"] for f in a["findings"]],
+                         ["SV609", "SV610", "SV609", "SV609"])
+        sv609 = [f for f in a["findings"] if f["rule"] == "SV609"]
+        self.assertEqual([f["severity"] for f in sv609], ["info"] * 3)
+        self.assertEqual([f["evidence"] for f in sv609],
+                         ["删除临时缓存目录", "需要 root 权限清理日志", "批量删除 42 个文件"])
+        sv610 = [f for f in a["findings"] if f["rule"] == "SV610"]
+        self.assertEqual(len(sv610), 1)
+        self.assertEqual(sv610[0]["severity"], "warning")
+        self.assertEqual(sv610[0]["evidence"], "allowed-once")
+        rules = a["rule_outcomes"]
+        for code in ("SV604", "SV605", "SV607", "SV608", "SV612", "SV613"):
+            self.assertEqual(rules[code]["status"], "unavailable", code)
+        for code in ("SV601", "SV602", "SV603", "SV606", "SV611", "SV614"):
+            self.assertEqual(rules[code]["status"], "measured_zero", code)
+        self.assertTrue(any("oldest records may be rotated" in n
+                            for n in report["notes"]))
+        self.assertEqual(report["cost"],
+                         {"tokens": 12000, "cny": 0.0, "host_billed": True})
+
+    def test_workbuddy_session_defaults_to_latest(self):
+        """缺省 --session = 最新（updated_at 最晚）→ 与显式指定 s2 一致。"""
+        self._workbuddy_home()
+        code, out, err = self.both("workbuddy-session", "--json", "-")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["session_id"], "s2")
+
+    def test_workbuddy_session_missing_session_is_tool_error(self):
+        """不存在的 session_id → 两个实现都以 2 退出（工具错误），stderr 逐字节
+        一致。不能走 both()——它把退出码 2 判成崩溃。"""
+        self._workbuddy_home()
+        got = []
+        for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
+            r = subprocess.run(
+                cmd + ["workbuddy-session", "--session", "no-such-session",
+                       "--json", "-"],
+                cwd=str(self.tmp / "workdir"),
+                env=isolated_home_env(self.tmp),
+                capture_output=True, text=True)
+            got.append((r.returncode, r.stdout, r.stderr))
+        self.assertEqual(got[0][0], got[1][0],
+                         "退出码不一致：py=%d rs=%d" % (got[0][0], got[1][0]))
+        self.assertEqual(got[0][0], 2, "不存在的 session 应当是工具错误（2）")
+        self.assertEqual(got[0][1], got[1][1], "stdout 不一致")
+        self.assertEqual(got[0][2], got[1][2], "stderr 不一致")
+        self.assertIn("workbuddy session not found or unreadable", got[0][2])
+
+    def test_workbuddy_session_db_only_session_audits_empty_records(self):
+        """db 有行但 audit-log 无记录 → 照审（决策账本为空是诚实结果，不是
+        不可读）：无任何证据 → 14 条规则全 Unavailable（不得 MeasuredZero）。
+        db 独苗会话的 file 落到 db 路径兜底；成本块照吃 usage 行。"""
+        self._workbuddy_home()
+        import sqlite3
+        db = self.tmp / ".workbuddy" / "workbuddy.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "INSERT INTO sessions (id, title, model, cwd, permission_mode, "
+            "use_sandbox_cli, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("s3", "独苗会话", "deepseek-v4-flash", "/repo", "fullAccess", 1,
+             "2026-09-01T09:00:00Z", "2026-09-01T09:05:00Z"))
+        conn.execute(
+            "INSERT INTO session_usage (session_id, used, size, credit_json) "
+            "VALUES (?,?,?,?)", ("s3", 777, 1000, '{"r9":0.01}'))
+        conn.commit()
+        conn.close()
+        code, out, err = self.both("workbuddy-session", "--session", "s3", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["session_id"], "s3")
+        self.assertTrue(report["file"].endswith("workbuddy.db"))
+        self.assertEqual(report["audit"]["summary"]["findings_total"], 0)
+        self.assertEqual(report["audit"]["summary"]["rules_unavailable"], 14)
+        self.assertEqual(report["cost"],
+                         {"tokens": 777, "cny": 0.01, "host_billed": True})
+
     def test_calendar_codex_blob_views_match_rust_reports(self):
         """统一看板内联的 codex 3 视图 = Rust `codex-cost --json` 三个过滤的
         报告（docs/UNIFIED_COST_VIEW.md 的 1 号宿主契约）。

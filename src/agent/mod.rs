@@ -17,3 +17,4 @@ pub mod plan;
 pub mod r2a_store;
 pub mod state;
 pub mod takeover;
+pub mod workbuddy_session;

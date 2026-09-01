@@ -46,11 +46,13 @@ ALLOWED_PACKAGE_FILES = {
         "agent/subagent.py",
         "agent/takeover.py",
         "agent/trajectory.py", "agent/usage.py", "agent/waste.py",
+        "agent/workbuddy_evidence.py", "agent/workbuddy_session_audit.py",
         # adapters/：宿主适配器
         "adapters/__init__.py", "adapters/claude.py", "adapters/codex.py",
         "adapters/codex_session.py",
         "adapters/openclaw.py", "adapters/workbuddy.py", "adapters/hermes.py",
         "adapters/dsh.py", "adapters/claude_session.py",
+        "adapters/workbuddy_session.py",
         # templates/
         "templates/calendar.html", "templates/codex_session.html",
     )

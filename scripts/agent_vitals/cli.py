@@ -831,6 +831,29 @@ def _main():
                                        "most recent session")
     p_claude_session.add_argument("--json", metavar="FILE",
                                   help="Write the audit JSON to FILE; use - for stdout")
+    # WorkBuddy 单会话审计：coverage（§13 逐信号）+ SV601–614 findings。与
+    # claude-session 同构；host-capability degradation 是 SV604/605（spec §3.1）——
+    # 只有 bash（audit-log commandPreview）与 web_fetch（WebFetch target）能 join，
+    # write/edit 只在会话匿名的 traces 里，SV604/605 读不到写维度 → Unavailable。
+    # 成本直接吃 session_usage.credit_json 宿主账单（spec §9），pricing.json 零参与
+    # （不长第四份价格拷贝）。五段式流水线 locate→shape→extract
+    # （adapters/workbuddy_session.py）→ derive→coverage（agent/workbuddy_evidence.py）
+    # → 组合（agent/workbuddy_session_audit.py）。`--list` 只是选 id 的前置；缺省
+    # --session = 最新；没有 --html（同 claude-session）。与 Rust main.rs 的
+    # WorkbuddySession 子命令同一种结构。
+    p_workbuddy_session = sub.add_parser(
+        "workbuddy-session",
+        help="Audit ONE WorkBuddy session: provenance coverage + SV601-614 "
+             "findings (SV604/605 host-capability Unavailable; cost from "
+             "host-billed credit_json)")
+    p_workbuddy_session.add_argument("--list", action="store_true",
+                                     help="List all WorkBuddy sessions (id/title/"
+                                          "model/date span) — the id picker")
+    p_workbuddy_session.add_argument("--session", metavar="ID", default=None,
+                                     help="The session_id to audit; default = the "
+                                          "most recent session")
+    p_workbuddy_session.add_argument("--json", metavar="FILE",
+                                     help="Write the audit JSON to FILE; use - for stdout")
     # ──── R2a SessionStore 查询面（§2.5/§3.3）───────────────────
     # 只读：填充 Codex 源（Phase 1 唯一可读源）→ 版本化 DTO + cursor 分页。
     # `--host-kind` 不是 `--host`：后者是扫描期的 global 参数（默认 "all"）。
@@ -1323,6 +1346,57 @@ def _main():
         out = clsa.claude_session_audit_json(None, session_id)
         if out is None:
             print("claude session not found or unreadable: %s" % session_id,
+                  file=sys.stderr)
+            sys.exit(2)
+        text = json.dumps(out, ensure_ascii=False, indent=2)
+        if args.json:
+            if args.json == "-":
+                print(text)
+            else:
+                try:
+                    Path(args.json).write_text(text, encoding="utf-8")
+                except OSError:
+                    print("failed to write %s" % args.json, file=sys.stderr)
+                    sys.exit(2)
+                print("Wrote %s" % args.json)
+        else:
+            print(text)
+        return
+
+    # WorkBuddy 单会话审计：coverage + SV601–614 findings（SV604/605 降级 Unavailable，
+    # 成本吃 credit_json 宿主账单）。与 claude-session 同构：--list 只是选 id 的前置
+    # （id/标题/模型/时间跨度，db sessions 表是索引）；缺省 --session = 最新；单会话
+    # 深挖是 --json/纯 JSON 两路，无 --html（缺省输出就是 pretty JSON，Rust 同款）。
+    if getattr(args, "cmd", None) == "workbuddy-session":
+        from agent_vitals import workbuddy_session_audit as wbsa
+        if args.list:
+            out = wbsa.workbuddy_session_list()
+            if args.json:
+                text = json.dumps(out, ensure_ascii=False, indent=2)
+                if args.json == "-":
+                    print(text)
+                else:
+                    try:
+                        Path(args.json).write_text(text, encoding="utf-8")
+                    except OSError:
+                        print("failed to write %s" % args.json, file=sys.stderr)
+                        sys.exit(2)
+                    print("Wrote %s" % args.json)
+            else:
+                print(wbsa._render_list(out), end="")
+            return
+        if args.session is None:
+            lst = wbsa.workbuddy_session_list()
+            sessions = lst.get("sessions") or []
+            if not sessions:
+                print("no workbuddy sessions found", file=sys.stderr)
+                sys.exit(2)
+            session_id = sessions[0].get("session_id")
+        else:
+            session_id = args.session
+        out = wbsa.workbuddy_session_audit_json(None, session_id)
+        if out is None:
+            print("workbuddy session not found or unreadable: %s" % session_id,
                   file=sys.stderr)
             sys.exit(2)
         text = json.dumps(out, ensure_ascii=False, indent=2)

@@ -1,0 +1,470 @@
+"""WorkBuddy 适配器的 "derive → coverage" 两段（五段式流水线 locate → shape →
+extract → derive → coverage，"locate → shape → extract" 留在
+`scripts/agent_vitals/adapters/workbuddy_session.py`，I/O 不在这里）。它把
+`~/.workbuddy/audit-log/*.jsonl` 里按 `sessionId` 分组出的原始记录 + db/file-history
+拆出的 `session_meta` 折成 `evidence::CanonicalSession` 的等价字典，覆盖计数按
+`docs/WORKBUDDY_INTEGRATION.md` §3 矩阵逐信号对应。
+
+与 Rust `crates/agent-vitals-core/src/workbuddy_evidence.rs` 逐字节对齐——产出同一个
+`workbuddy_evidence_json` 输出字典（键序一致），`tests/test_cli_matrix.py::both()`
+的差分靠这份一致把关。
+
+**audit-log 只喂三条 timeline（approvals/sandbox_modes 非空，turns 恒空）。** 五条
+timeline 里：`tool_calls` 只有 bash 子集（`sandbox-executed` 的 `commandPreview`）+
+`web_fetch`（`WebFetch` 的 `messageParams.target`）可 join——write/edit 只在匿名
+traces 里（spec §3）；`approvals` 由 commandApproved/commandRejected/bulk-delete.*
+喂（spec §7 决策映射）；`sandbox_modes` 由 sandbox-executed 喂（mode = WorkBuddy
+原生的 `permission_mode`，**不翻译成 DSH 的 danger-full-access**，spec §3.3）；
+`turns` **恒空**——没有 turn 结构，把 distinct requestId 硬填成 turn 就是发明不存在
+的边界，SV612/613 靠 timeline_is_empty 诚实 Unavailable（spec §8）。
+
+**决策映射不双计。** 审批/拒绝记录只进 approvals 轴；sandbox-executed 才进
+tool_calls + sandbox 轴。被批准的命令是否另有执行记录不可靠，两条记录之间不做
+join（spec §7）。
+
+**audit-log 按 `sequence` 排序。** 记录可能来自多个并发 spool 文件，`sequence` 是
+宿主原生顺序（实测有跳号，来自并发写）。排序键 = `(sequence or MAX, 文件内序)`；
+输出 `seq` = 排序后的下标（会话内序，同 Claude 的 `seq = ordinal` 惯例）。
+
+**`session_meta` 携带 db/file-history 拆出的会话级数据**（I/O 层拆好传进来）：
+`{permission_mode, use_sandbox_cli, model, cwd, used, credit_json, file_mutations,
+title}`。db 缺失的列 → 对应信号降级 Unavailable（缺列报缺，编列害人），绝不编一个
+非零数字出来。
+"""
+
+from agent_vitals.agent.claude_evidence import parse_iso
+
+# 20 个 Signal 的声明序——`signals` 数组 / `coverage` 字典的输出顺序都靠这份显式
+# 表对齐（与 Rust `workbuddy_evidence.rs::ALL_SIGNALS` 同表同序），不靠 Python
+# 的任意 set 迭代序。与 claude_evidence / codex_evidence 同一张表。
+ALL_SIGNALS = (
+    "ToolCalls",
+    "ToolResults",
+    "TurnBoundaries",
+    "StepBoundaries",
+    "Usage",
+    "UsageAggregate",
+    "ContextWindow",
+    "QuotaConsumption",
+    "ApprovalDecisions",
+    "ApprovalPolicy",
+    "SandboxModes",
+    "SandboxPolicy",
+    "NetworkAccess",
+    "Compaction",
+    "SubagentSpawns",
+    "SkillInvocations",
+    "Hooks",
+    "FileMutations",
+    "UserPrompts",
+    "UserCorrections",
+)
+
+# audit-log 已知的 eventType（实测 5 路径，spec §2.2）。其余 eventType 记成
+# SourceAttempt，绝不当作损坏吞掉——审计账本可能还有没被本机语料触发的路径，
+# 吞掉就是假装账本干净。
+KNOWN_EVENT_TYPES = frozenset((
+    "sandbox-executed",
+    "WebFetch",
+    "commandApproved",
+    "commandRejected",
+    "bulk-delete.needs-approval",
+    "bulk-delete.approved",
+    "bulk-delete.rejected",
+))
+
+# spec §3 明确 unavailable / 没有对应列的信号（WorkBuddy 列）。`derive_coverage`
+# 的置零与 `workbuddy_evidence_json` 的 `available` 标记共用这一份清单，不准两处
+# 各写一份漂移。
+#
+# - ToolResults：audit-log 无 exit 码，traces 的 status/error 接不进 session；
+# - TurnBoundaries **不在**这个集合里——它按 distinct requestId 派生 coverage
+#   （lossy 下界，available=true），但 turns timeline 恒空（spec §8）；
+# - Usage：无逐请求 token（traces 只有 trace 级 totalTokens）；UsageAggregate
+#   反而 measured（session_usage.used，spec §9）；
+# - SandboxPolicy：use_sandbox_cli 是常量（恒 1），不是结构化策略事件；
+# - SubagentSpawns / SkillInvocations / Hooks / UserPrompts / UserCorrections /
+#   ContextWindow / QuotaConsumption / StepBoundaries / Compaction：只存于匿名
+#   traces 或根本不在 WorkBuddy 会话面上。
+_UNAVAILABLE_SIGNALS = (
+    "ToolResults",
+    "StepBoundaries",
+    "Usage",
+    "ContextWindow",
+    "QuotaConsumption",
+    "SandboxPolicy",
+    "Compaction",
+    "SubagentSpawns",
+    "SkillInvocations",
+    "Hooks",
+    "UserPrompts",
+    "UserCorrections",
+)
+
+# 各 note 的说明文本——与 Rust 逐字节相同，差分测试靠它。
+_TURN_BOUNDARY_NOTE = (
+    "turn boundaries are derived from distinct audit-log requestId (a lower "
+    "bound: audit-log is not a per-request ledger); native turn structure is "
+    "absent, so SV612/613 are Unavailable, never fabricated boundaries."
+)
+_SANDBOX_MODE_NOTE = (
+    "sandbox mode is the WorkBuddy-native permission_mode (bypassPermissions / "
+    "fullAccess); the DSH danger-full-access vocabulary does not apply, so SV610 "
+    "is an honest MeasuredZero, never a translation."
+)
+
+# traces 是「已知但刻意不用的表面」（spec §12.2）——会话匿名，join 不进 session。
+# 记成 SourceAttempt（§14.4：skipped and recorded, never treated as corruption）。
+_TRACES_ATTEMPT = {
+    "source_id": "workbuddy.traces",
+    "kind": "Directory",
+    "surface": "Traces",
+    "available": False,
+    "error": ("traces are session-anonymous (no sessionId join); skipped per "
+              "RUNTIME_EVIDENCE_CONTRACT §14.4"),
+    "observed_span": None,
+}
+
+
+def _timeline_entry(observation, seq, time, call_id, ordinal):
+    """一条 timeline entry 的构造器。`turn`/`step` 恒 None——WorkBuddy 无 turn/step
+    结构；`time` = audit-log timestamp 的 unix 秒（`parse_iso`，无效则 None）。"""
+    return {"observation": observation, "seq": seq, "time": time, "turn": None,
+            "step": None, "call_id": call_id, "ordinal": ordinal}
+
+
+def _text(record, key):
+    value = record.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _seq_of(record):
+    """audit-log `sequence` 字段 → int（int 或数字字符串），否则 None。只认纯
+    ASCII 数字，与 `claude_evidence._num` 同纪律（不宽容出 Rust 不会给的值）；
+    非 dict 记录 → None（排序兜底，不崩溃）。"""
+    if not isinstance(record, dict):
+        return None
+    value = record.get("sequence")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value and value.isascii() and value.isdigit():
+        return int(value)
+    return None
+
+
+def _sort_records(records):
+    """按 `(sequence or MAX, 文件内序)` 排序。并发 spool 写的跳号不影响顺序；
+    缺 sequence 的记录排最后、内部保输入序。"""
+    def key(t):
+        seq = _seq_of(t[1])
+        return (seq if seq is not None else 2 ** 63, t[0])
+    return sorted(enumerate(records), key=key)
+
+
+def _command_preview(record):
+    """sandbox-executed 的完整 bash 命令 → SV601-603 的 args_text（spec §3）。"""
+    return _text(record, "commandPreview")
+
+
+def _target_of(record):
+    """WebFetch 的 `messageParams.target` URL → SV606 的 args_text。"""
+    params = record.get("messageParams")
+    if isinstance(params, dict):
+        target = params.get("target")
+        if isinstance(target, str):
+            return target
+    return ""
+
+
+def _message_key(record):
+    """审批/拒绝记录的 `messageKey` → ApprovalAsked.reason（spec §7）。"""
+    return _text(record, "messageKey")
+
+
+def _approval_tool(record):
+    """审批记录的 tool_name：命令类 → bash，批量删除 → bulk_delete。"""
+    et = _text(record, "eventType")
+    return "bash" if et.startswith("command") else "bulk_delete"
+
+
+def _parse_time(record):
+    ts = record.get("timestamp")
+    if not isinstance(ts, str):
+        return None
+    parsed = parse_iso(ts)
+    return parsed[0] if parsed is not None else None
+
+
+def _chain_note(records):
+    """audit-log `prevHash→hash` 链的完整性 note（spec §2.3/§4）。只做**结构校验**
+    （`records[i+1].prevHash == records[i].hash`），不重算 hash 算法。轮转诚实
+    标注：首条 prevHash 非空且匹配不到任何记录 → 「最老记录可能被轮转，链从
+    seq=F 起验证」。头 prevHash 空 = 该记录是已知起点（干净链）。"""
+    seqs = []
+    for idx, rec in _sort_records(records):
+        if not isinstance(rec, dict):
+            continue
+        seq = _seq_of(rec)
+        seqs.append((idx, seq if seq is not None else idx, rec))
+    if not seqs:
+        return None
+    first_seq = seqs[0][1]
+    if len(seqs) == 1:
+        return ("audit-log hash chain: 1 record, no links to verify "
+                "(verified from seq=%s)" % first_seq)
+    hashes = {_text(rec, "hash") for _, _, rec in seqs}
+    head_prev = _text(seqs[0][2], "prevHash")
+    for i in range(len(seqs) - 1):
+        cur_hash = _text(seqs[i][2], "hash")
+        nxt_prev = _text(seqs[i + 1][2], "prevHash")
+        if cur_hash and nxt_prev != cur_hash:
+            return ("audit-log hash chain broken at seq=%s (prevHash does not "
+                    "match hash of seq=%s)" % (seqs[i + 1][1], seqs[i][1]))
+    if head_prev and head_prev not in hashes:
+        return ("audit-log hash chain verified from seq=%s: oldest records may "
+                "be rotated (first prevHash has no predecessor)" % first_seq)
+    return ("audit-log hash chain continuous: %d records (verified from seq=%s)"
+            % (len(seqs), first_seq))
+
+
+def _populate_workbuddy_timelines(records, session_meta):
+    """跑一遍（按 sequence 排序后的）audit-log 记录，翻译成五条 host-neutral
+    timeline（spec §7 决策映射）：
+    - `tool_calls`：sandbox-executed → bash（commandPreview）；WebFetch → web_fetch
+      （messageParams.target）。
+    - `approvals`：commandApproved/commandRejected/bulk-delete.* → asked
+      （tool_name + messageKey），approved/rejected 再补 decided
+      （allowed-once/rejected）。needs-approval 只有 asked。
+    - `sandbox_modes`：sandbox-executed → mode = permission_mode（原生值，不翻译）。
+    - `turns`/`tool_results`：恒空（spec §3/§8）。
+
+    返回 `(timelines, unknown)`。`seq` = 排序后的下标（会话内序）。"""
+    tool_calls, approvals, sandbox = [], [], []
+    unknown = []
+    mode = session_meta.get("permission_mode")
+    mode = mode if isinstance(mode, str) else None
+    for ordinal, (_, record) in enumerate(_sort_records(records)):
+        if not isinstance(record, dict):
+            continue
+        event_type = record.get("eventType")
+        if not isinstance(event_type, str):
+            event_type = ""
+        if event_type not in KNOWN_EVENT_TYPES:
+            msg = "unknown audit-log event type: %s" % event_type
+            if msg not in unknown:
+                unknown.append(msg)
+            continue
+        seq = ordinal
+        time = _parse_time(record)
+        call_id = record.get("toolCallId")
+        call_id = call_id if isinstance(call_id, str) else None
+        if event_type == "sandbox-executed":
+            tool_calls.append(_timeline_entry(
+                {"name": "bash", "args_text": _command_preview(record)},
+                seq, time, call_id, ordinal))
+            sandbox.append(_timeline_entry({"mode": mode}, seq, time, call_id, ordinal))
+        elif event_type == "WebFetch":
+            tool_calls.append(_timeline_entry(
+                {"name": "web_fetch", "args_text": _target_of(record)},
+                seq, time, call_id, ordinal))
+        else:
+            observation = {
+                "asked": {"tool_name": _approval_tool(record),
+                          "reason": _message_key(record)},
+            }
+            if event_type in ("commandApproved", "bulk-delete.approved"):
+                observation["decided"] = {"outcome": "allowed-once"}
+            elif event_type in ("commandRejected", "bulk-delete.rejected"):
+                observation["decided"] = {"outcome": "rejected"}
+            approvals.append(_timeline_entry(observation, seq, time, call_id, ordinal))
+    return {
+        "tool_calls": tool_calls,
+        "tool_results": [],
+        "approvals": approvals,
+        "sandbox_modes": sandbox,
+        "turns": [],
+    }, unknown
+
+
+def _total(counts):
+    return counts["measured"] + counts["derived"] + counts["lossy"] + counts["unmetered"]
+
+
+def _bump(coverage, signal, bucket, n=1):
+    coverage[signal][bucket] += n
+
+
+def _derive_coverage(records, timelines, session_meta):
+    """spec §3 矩阵逐信号喂覆盖。ToolCalls/SandboxModes/NetworkAccess/ApprovalDecisions
+    与 populate 的 timeline 同源（sandbox-executed 数 = tool_calls 的 bash 数 =
+    sandbox 数，等）——coverage 与 timeline 两条账必须对得上，否则门控读 timeline
+    非空而 coverage 全零。FileMutations/ApprovalPolicy/UsageAggregate 从
+    `session_meta`（db/file-history）拆出。返回 `(sigset, coverage, unknown)`。"""
+    coverage = {s: {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0}
+                for s in ALL_SIGNALS}
+    unknown = []
+    request_ids = set()
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        event_type = record.get("eventType")
+        if not isinstance(event_type, str):
+            event_type = ""
+        if event_type not in KNOWN_EVENT_TYPES:
+            msg = "unknown audit-log event type: %s" % event_type
+            if msg not in unknown:
+                unknown.append(msg)
+            continue
+        rid = record.get("requestId")
+        if isinstance(rid, str) and rid:
+            request_ids.add(rid)
+        if event_type == "sandbox-executed":
+            _bump(coverage, "ToolCalls", "measured")
+            _bump(coverage, "SandboxModes", "measured")
+        elif event_type == "WebFetch":
+            _bump(coverage, "ToolCalls", "measured")
+            _bump(coverage, "NetworkAccess", "measured")
+        else:
+            _bump(coverage, "ApprovalDecisions", "measured")
+
+    # FileMutations measured = file-history 版本数（spec §3 Measured 行）。
+    fm = session_meta.get("file_mutations")
+    if isinstance(fm, int) and fm > 0:
+        _bump(coverage, "FileMutations", "measured", fm)
+    # ApprovalPolicy measured = permission_mode / use_sandbox_cli 存在（spec §3）。
+    if session_meta.get("permission_mode") is not None or session_meta.get("use_sandbox_cli") is not None:
+        _bump(coverage, "ApprovalPolicy", "measured")
+    # UsageAggregate measured = session_usage.used / credit_json 存在（spec §9）。
+    if session_meta.get("used") is not None or session_meta.get("credit_json"):
+        _bump(coverage, "UsageAggregate", "measured")
+    # TurnBoundaries derived = distinct requestId（lossy 下界，spec §8）。coverage
+    # 与 turns timeline **不同源**（timeline 恒空）——这正是
+    # empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero 钉住的
+    # 模式：SV612/613 读 timeline 判 Unavailable，coverage 只报可观察的请求下界。
+    if request_ids:
+        _bump(coverage, "TurnBoundaries", "derived", len(request_ids))
+
+    sigset = {s for s in ALL_SIGNALS if _total(coverage[s]) > 0}
+    for s in _UNAVAILABLE_SIGNALS:
+        coverage[s] = {"measured": 0, "derived": 0, "lossy": 0, "unmetered": 0}
+    unknown.sort()
+    return sigset, coverage, unknown
+
+
+def _build_notes(coverage, records):
+    notes = []
+    if _total(coverage["TurnBoundaries"]) > 0:
+        notes.append(_TURN_BOUNDARY_NOTE)
+    if _total(coverage["SandboxModes"]) > 0:
+        notes.append(_SANDBOX_MODE_NOTE)
+    chain = _chain_note(records)
+    if chain is not None:
+        notes.append(chain)
+    return notes
+
+
+def build_workbuddy_evidence(raw_records, session_id, session_meta):
+    """记录数组 + 会话元数据 → evidence 字典（"derive → coverage" 两段；"locate →
+    shape → extract" 留在 `adapters/workbuddy_session.py`）。与 Rust
+    `build_workbuddy_evidence` 对齐：返回 `{"canonical", "raw_records"}`，其中
+    `canonical` 是 `CanonicalSession` 的等价字典（meta/signals/coverage/attempts/
+    notes + 五条 timeline，turns 恒空——spec §8 的「故意空」构造点）。
+
+    诚实真值表（喂 WorkBuddy canonical 后每条 SV 规则的结果）：
+
+    | 规则 | WorkBuddy |
+    |---|---|
+    | SV601–603 | 跑（sandbox-executed 的 commandPreview → bash args_text） |
+    | SV604/605 | **Unavailable**（dispatcher 层 host-capability degradation，spec §3.1） |
+    | SV606 | 跑（WebFetch target → web_fetch args_text） |
+    | SV607/608 | Unavailable（无 tool_results / exit 码） |
+    | SV609 | 跑（audit-log 审批路径 → asked）；无审批记录则 Unavailable |
+    | SV610 | 跑（sandbox 非空），mode 恒非 danger-full-access → 诚实 MeasuredZero |
+    | SV611 | 跑（bash+web_fetch 子集） |
+    | SV612/613 | Unavailable（turns 恒空 / results 恒空） |
+    | SV614 | 跑（approvals+sandbox 双轴都在） |
+    """
+    timelines, unknown = _populate_workbuddy_timelines(raw_records, session_meta)
+    sigset, coverage, cov_unknown = _derive_coverage(raw_records, timelines, session_meta)
+    all_unknown = unknown + [m for m in cov_unknown if m not in unknown]
+    all_unknown.sort()
+    attempts = [dict(_TRACES_ATTEMPT)] + [{
+        "source_id": "workbuddy.audit-log",
+        "kind": "LogFile",
+        "surface": "SessionLog",
+        "available": False,
+        "error": msg,
+        "observed_span": None,
+    } for msg in all_unknown]
+    notes = _build_notes(coverage, raw_records)
+    canonical = {
+        "meta": {
+            "session_id": session_id,
+            "host_id": "workbuddy",
+            "workspace_roots": _first_cwd(session_meta),
+            "model": _extract_model(session_meta),
+            "span": None,
+        },
+        "signals": [s for s in ALL_SIGNALS if s in sigset],
+        "coverage": coverage,
+        "attempts": attempts,
+        "notes": notes,
+        "tool_calls": {"entries": timelines["tool_calls"]},
+        "tool_results": {"entries": timelines["tool_results"]},
+        "approvals": {"entries": timelines["approvals"]},
+        "sandbox_modes": {"entries": timelines["sandbox_modes"]},
+        "turns": {"entries": timelines["turns"]},
+    }
+    return {"canonical": canonical, "raw_records": raw_records}
+
+
+def _extract_model(session_meta):
+    model = session_meta.get("model")
+    return model if isinstance(model, str) else None
+
+
+def _first_cwd(session_meta):
+    cwd = session_meta.get("cwd")
+    return [cwd] if isinstance(cwd, str) else []
+
+
+def workbuddy_evidence_json(evidence):
+    """evidence 字典 → `workbuddy-evidence --json` 的输出形状。与 Rust
+    `workbuddy_evidence_json` 逐字节对齐——键序、嵌套结构、`attempts`/`notes` 的
+    序列化都是这里单独控制的。`signals` 数组按 ALL_SIGNALS 序；`coverage` 20 键
+    全量（unavailable 的也是全零四条，不是缺键）；`available` 标记宿主是否提供该
+    维度——false = 结构缺口，任何会话都为零，KPI 分母不算它。"""
+    canonical = evidence["canonical"]
+    sigset = set(canonical["signals"])
+    signals = [s for s in ALL_SIGNALS if s in sigset]
+    coverage_map = {}
+    for s in ALL_SIGNALS:
+        c = canonical["coverage"][s]
+        coverage_map[s] = {
+            "measured": c["measured"],
+            "derived": c["derived"],
+            "lossy": c["lossy"],
+            "unmetered": c["unmetered"],
+            "available": s not in _UNAVAILABLE_SIGNALS,
+        }
+    attempts = [{
+        "source_id": a["source_id"],
+        "kind": a["kind"],
+        "surface": a["surface"],
+        "available": a["available"],
+        "error": a["error"],
+        "observed_span": a["observed_span"],
+    } for a in canonical["attempts"]]
+    notes = [n["message"] if isinstance(n, dict) else n
+             for n in canonical["notes"]]
+    return {
+        "host": "workbuddy",
+        "session_id": canonical["meta"]["session_id"],
+        "workspace_roots": canonical["meta"]["workspace_roots"],
+        "model": canonical["meta"]["model"],
+        "signals": signals,
+        "coverage": coverage_map,
+        "attempts": attempts,
+        "notes": notes,
+    }

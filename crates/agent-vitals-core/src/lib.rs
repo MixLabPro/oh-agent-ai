@@ -32,3 +32,4 @@ pub mod waste;
 pub mod trajectory;
 pub mod usage;
 pub mod util;
+pub mod workbuddy_evidence;

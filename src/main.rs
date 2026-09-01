@@ -452,6 +452,23 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
+    /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
+    /// `sessions` row is the join anchor across the three joinable surfaces (spec
+    /// §2.1); cost is the host-billed credit_json (spec §9). SV604/605 degrade to
+    /// Unavailable (host capability: only bash/web_fetch tool calls are joinable to
+    /// sessions, §3.1). Stateless single call; `--list` enumerates.
+    WorkbuddySession {
+        /// List all WorkBuddy sessions: id/title/model/cwd/date span
+        #[arg(long)]
+        list: bool,
+        /// The session_id to audit; default = the most recent session
+        #[arg(long)]
+        session: Option<String>,
+        /// Write the audit JSON to FILE; use - for stdout
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+    },
     /// Inspect the spend budget alert (thresholds + current alert level).
     /// R1b: read path only (`show`); write actions (`set`/`enable`/`disable`/
     /// `snooze`/`unsnooze`) land with R1c's Rust state-writer, so this subcommand
@@ -1517,6 +1534,77 @@ fn main() {
         let Some(out) = agent::claude_session::claude_session_audit_json(home_path, &session_id)
         else {
             eprintln!("claude session not found or unreadable: {session_id}");
+            std::process::exit(2);
+        };
+        let text = serde_json::to_string_pretty(&out).unwrap_or_default();
+        if let Some(path) = rows_json {
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}", path.display());
+            }
+        } else {
+            println!("{text}");
+        }
+        return;
+    }
+
+    // WorkBuddy 会话审计。与 claude/codex-session 同款 home 解析与缺省 --session =
+    // 最新；SV604/605 的 Unavailable 覆盖在 workbuddy_session.rs（host-capability
+    // degradation，spec §3.1）。db 无行且 audit-log 无记录 → 不存在（exit 2）。
+    if let Some(Cmd::WorkbuddySession { list, session, rows_json }) = &args.cmd {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        let home_path = Path::new(&home);
+        if *list {
+            let out = agent::workbuddy_session::workbuddy_session_list(home_path);
+            if let Some(path) = rows_json {
+                let text = serde_json::to_string_pretty(&out).unwrap_or_default();
+                if path == &PathBuf::from("-") {
+                    println!("{text}");
+                } else if std::fs::write(path, &text).is_err() {
+                    eprintln!("failed to write {}", path.display());
+                    std::process::exit(2);
+                } else {
+                    println!("Wrote {}", path.display());
+                }
+            } else {
+                print!(
+                    "{}",
+                    agent::workbuddy_session::render_workbuddy_session_list(&out)
+                );
+            }
+            return;
+        }
+        // 缺省 --session = 最新（list 排序首项 = updated_at 最晚）。
+        let session_id = match session {
+            Some(s) => s.clone(),
+            None => {
+                let list = agent::workbuddy_session::workbuddy_session_list(home_path);
+                let first = list
+                    .get("sessions")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.get("session_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                match first {
+                    Some(s) => s,
+                    None => {
+                        eprintln!("no workbuddy sessions found");
+                        std::process::exit(2);
+                    }
+                }
+            }
+        };
+        let Some(out) =
+            agent::workbuddy_session::workbuddy_session_audit_json(home_path, &session_id)
+        else {
+            eprintln!("workbuddy session not found or unreadable: {session_id}");
             std::process::exit(2);
         };
         let text = serde_json::to_string_pretty(&out).unwrap_or_default();

@@ -374,7 +374,9 @@ pub struct SourceAttempt {
     pub observed_span: Option<TimeSpan>,
 }
 
-/// §14.8.3 的四种证据面对应的存储形态。
+/// §14.8.3 的证据面对应的存储形态。`Directory` 是目录型表面——会话匿名的
+/// traces 目录同样值得留一条 attempt 痕迹（§14.4：skipped and recorded,
+/// never treated as corruption），它不落进 LogFile/Sqlite 任何一格。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SourceKind {
     LogFile,
@@ -383,14 +385,16 @@ pub enum SourceKind {
     RuntimeProbe,
     HookStream,
     TelemetryExport,
+    Directory,
 }
 
-/// 证据来自哪一类观察位置——会话日志本身、旁路遥测、还是钩子。
+/// 证据来自哪一类观察位置——会话日志本身、旁路遥测、钩子，还是目录型表面。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Surface {
     SessionLog,
     Telemetry,
     Hook,
+    Traces,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

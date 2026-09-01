@@ -1,6 +1,7 @@
-# 可归因浪费定义(北极星指标的真相源)
+# 月度成本感知与可归因浪费定义(指标体系真相源)
 
-> 状态:**修订稿 v2**(2026-09-01)。v1 被评审推翻三处 P0,本文是修订结果:
+> 状态:**修订稿 v3**(2026-09-02)。v1 被评审推翻三处 P0,v2 修正归因框架,
+> v3 增加「感知—诊断—归因」三层产品指标与套餐/按量双口径:
 > ①「98.7%→1.3%」不是浪费率;②四类归因粒度不同,不能相加;③「必须 measured」
 > 与各定义实际证据属性冲突,需 basis 分离 + 覆盖率护栏。**评审原文即本文件的
 > 「defect 记录」**——v1 的每个错误都在这版有对应的修复说明。
@@ -11,30 +12,57 @@
 > [PRODUCT.md](./PRODUCT.md) · [plan.rs](../crates/agent-vitals-core/src/plan.rs)(诚实性规则先行者)·
 > [waste.rs](../crates/agent-vitals-core/src/waste.rs)(SV-COST-01/02 已落地)。
 >
-> **一句话**:北极星 = **确认可归因浪费率** = 确认浪费成本 ÷ **eligible audited cost**;
-> 护栏 = **审计覆盖率** = eligible audited cost ÷ observed priced cost。本文钉死
-> 「确认浪费 / 估算机会 / 待复核异常」三块如何区分,以及哪些**不许**进分子。
+> **一句话**:产品第一感知 = **本月总成本 + 每百万处理 token 成本**;先按
+> **套餐摊销 / 按量成本**拆开,满足同币种、同周期、无重叠等条件时再给综合值。
+> 缓存率、模型结构、高峰占比等只负责解释「为什么」;确认浪费、估算机会、待复核
+> 异常负责回答「哪里可以改」。本文钉死三层指标的边界,以及哪些数字**不许**互相冒充。
 
 ---
 
-## 1. 为什么是「一主一护栏」
+## 1. 三层指标体系:先让用户有感知,再做诊断归因
 
 完整论证见 `WINGLET_CAVEMAN_BENCHMARK.md` 与 `COST_BASELINE.md`。决定本定义的三条硬约束不变:
 
 1. **不是「省了多少钱」**——省多少要么反事实、要么基准差,都不可复核;且 Codex 订阅制、DSH 按量,绝对钱数不可统一。
 2. **必须是 measured 的**——每一笔浪费点名、带证据,不许估算冒充测量。
-3. **必须跨宿主可比**——无量纲比例,币种隔离。
+3. **统一结构,不伪造可比性**——宿主可以共用同一套卡片和归因分类;不同币种、
+   不同 billing mode、不同证据覆盖下的绝对数值不强行横比。
 
-v2 新增第四条,直接来自评审:**分母必须诚实**。用总成本作分母,一个什么都测不到的宿主会得到漂亮的 0% 浪费率——所以「确认浪费 ÷ eligible audited cost」必须与「审计覆盖率 = eligible audited cost ÷ observed priced cost」同屏展示。**eligible** 的定义:usage 四桶完整、事件流可归因的请求成本;缺列即不合格(缺列不编列)。
+产品指标分三层,各自回答一个问题:
+
+| 层 | 用户问题 | 主指标 | 不负责什么 |
+|---|---|---|---|
+| **感知层** | 本月花了多少、这份钱换来多少模型处理量? | 本月感知成本、cost/M processed tokens、套餐/按量拆分 | 不证明某笔钱浪费 |
+| **诊断层** | 为什么单位成本变高/变低? | 缓存率、模型/provider 结构、高峰占比、fresh/output 比等 | 不直接进入浪费分子 |
+| **归因层** | 哪些具体请求、会话或常驻资源值得优化? | 确认浪费、估算机会、待复核异常、SV 证据 | 不冒充账单或反事实节省 |
+
+归因层仍保留「一主一护栏」,但 billing mode 决定单位:
+
+```text
+按量: confirmed waste spend / eligible audited spend
+订阅: confirmed avoidable usage / eligible audited usage
+护栏: eligible audited population / observed population
+```
+
+UI 可以统一叫「确认浪费率」,但必须同时标 `basis=spend|usage`。固定套餐没有边际
+token 账单,不得先把套餐费摊成伪单价再冒充 confirmed waste spend。用总成本/总用量
+直接作分母,一个什么都测不到的宿主会得到漂亮的 0%,所以审计覆盖率必须同屏。
+`eligible` 不是固定要求四桶全有,而是满足**该规则 + 该 provider/billing mode**所需
+字段、且事件能归因到请求;provider 不适用的桶不因缺场被误判为不合格。
 
 产品层三栏呈现:
 
 ```
-确认浪费率       2.8%     ← 进北极星(仅 measured / 稳定 human-confirmed)
-审计覆盖率      71.4%     ← 护栏,同屏
-估算优化机会    184K tokens ← 展示金额与 token,不进北极星
+本月感知成本     ¥623.07
+单位处理成本     ¥117.6 / M tokens
+  套餐摊销       ¥600.00 · ¥142.9/M
+  按量成本        ¥23.07 ·  ¥21.0/M
+数据覆盖率        92%       ← 感知层护栏
+
+确认浪费率       2.8%       ← 仅 measured attribution / 稳定 human-confirmed
+审计覆盖率      71.4%       ← 归因层护栏
+估算优化机会    184K tokens ← 不进确认分子
 待复核异常       3 sessions ← 只展示会话与证据
-单位 token 成本  ¥x.xx / M ← 效率视角,不进分子(§6)
 ```
 
 ---
@@ -56,11 +84,18 @@ v1 的 `W1+W2+W3+W4` 可加总假设**不成立**,因为归因粒度不同:
 
 ```rust
 WasteClaim {
+    claim_id,
+    session_key,
+    session_revision,
     request_id,         // 命中的请求 / usage 证据
     category,           // 类别
     token_bucket,       // input / cache_read / output / …
     amount,
-    pricing_basis,      // priced-at-catalog / estimated / unpriced
+    currency,
+    host_id,            // 执行宿主,不等于收费方
+    billing_source,     // 套餐/API/credits 的实际归属
+    billing_mode,       // subscription / metered / credits / unknown
+    pricing_basis,
     measurement_basis,  // 数量怎么测的(§3)
     attribution_basis,  // 归因是否被证明(§3)
     source_refs,        // SV 码 / 事件流引用
@@ -74,37 +109,40 @@ WasteClaim {
 v1 声称「必须 measured」,但四类里严格 measured 的部分很少。**单个 basis 字段不够**,分离成三个维度:
 
 ```text
-measurement_basis: measured | derived | estimated | suspected | unavailable
-attribution_basis:  measured | inferred | human-confirmed
-pricing_basis:      priced-at-catalog | estimated | unpriced
+measurement_basis: measured | derived | estimated | unavailable
+attribution_basis: evidence-confirmed | inferred | benchmark-counterfactual
+                 | human-confirmed | none
+pricing_basis: provider-reported | catalog-provider | catalog-fallback
+             | user-reported-invoice | subscription-allocated | unpriced
+classification: confirmed | opportunity | suspected | review
 ```
 
 basis 取值表(当前证据属性,诚实标出):
 
 | 类别 | measurement | attribution | 能否进确认分子 |
 |---|---|---|---|
-| W1 缓存低命中 | suspected | —(事故证实后 confirmed) | 否,默认告警 |
+| W1 缓存低命中 | measured(命中率本身) | inferred(「本可命中」) | 否,默认 suspected 告警 |
 | SV-COST-01 重复相同结果 | **estimated**(`est_tokens × (n−1)`——est_tokens 是估算器,量出的不是实付 token) | inferred(「第一次是必要」是假设) | 否,估算机会 |
 | SV-COST-02 失败重试上下文增长 | **measured**(request_metrics 前后差值) | **inferred**(期间还含 assistant 输出等,不能证明全部由失败造成) | 否,估算机会 |
-| W3 长尾 session | observed anomaly | **human-confirmed**(复核后) | 复核确认的具体请求/金额才进 |
-| W4 常驻上下文 | estimated | — | 否,估算机会 |
-| 真实重复计费请求(两份 usage 证据) | measured | attributable | **是** |
+| W3 长尾 session | derived(usage×pricing 的成本分布) | **human-confirmed**(复核后) | 复核确认的具体请求/金额才进 |
+| W4 常驻上下文 | estimated | none | 否,估算机会 |
+| 真实重复计费请求(独立 provider billing 证据) | measured | evidence-confirmed | **是** |
 
 只有 `measured`(且 attribution 可证明)或带稳定复核记录的 `human-confirmed` 才能进入「确认浪费」分子。
 
 ---
 
-## 4. 分类定义(六类 + 一条会计排除)
+## 4. 分类定义(并列诊断 + 会计排除)
 
 ### W1 Cache Inefficiency Suspect(原名「缓存未命中」,降级为嫌疑)
 
 | 项 | 定义 |
 |---|---|
 | **是什么** | 命中率低于阈值**只产生告警**,不直接归因。改名为嫌疑——「本可命中」是推测,不是测量 |
-| **eligibility(全部满足才可评估)** | provider 缓存语义已知;排除首次请求;按模型族分别计算;排除模型切换边界;最小请求数;usage 四桶完整;会话路径已线性化 |
+| **eligibility(全部满足才可评估)** | provider 缓存语义已知;排除首次请求;按模型族分别计算;排除模型切换边界;最小请求数;W1 所需的 uncached/cache_read 字段完整;会话路径已线性化 |
 | **阈值** | 90% 是**默认告警阈值**,不是归因阈值——DSH 93% / Codex 95.7% 两个总体值推不出所有模型/任务/宿主共用 90%;按宿主+模型族校准 |
-| **升级为 attributable 的路径** | 已知缓存事故 / 稳定前缀证据 / 受控前后实验 |
-| **金额公式(即使估算,也是增量价差,不是全部未缓存费用)** | `excess_miss = max(0, uncached − (1−target_hit_rate) × eligible_input)`;`estimated_waste_cost = excess_miss × (uncached_price − cache_read_price)`;结果标 `estimated` |
+| **升级路径** | 已知生产缓存事故 + 请求级因果证据可进入 human/evidence-confirmed;稳定前缀只到 inferred;受控前后实验只到 benchmark-counterfactual,不冒充生产实付浪费 |
+| **金额公式(即使估算,也是增量价差,不是全部未缓存费用)** | `excess_miss = max(0, uncached − (1−target_hit_rate) × eligible_input)`;金额交给 provider-specific pricing 函数(需考虑 cache creation/write 语义),结果标 `estimated` |
 | **诚实性边界** | 首次请求、模型切换、provider 差异、分支/恢复、compaction、TTL、system prompt/工具列表变化、正常新增上下文——全部**不是**浪费,是数据属性 |
 
 ### W2 拆四(不再是一个可相加类别)
@@ -115,8 +153,8 @@ v1 把三个不同概念混在一个 W2 里,拆开:
 |---|---|---|
 | **AccountingShadow** | Codex `custom_tool_call{exec}` ↔ `CommandExecution` 是同一逻辑执行的两种日志表示,不是第二次计费。**ingestion 去重**,浪费成本为零 | 永远不算 |
 | **RepeatedToolCall**(SV611) | 连续相同 `(name, args)` 签名 ≥3 次(代码现状,`trajectory.rs`)。行为告警:不证明调用无必要,**不计算费用** | 否 |
-| **RepeatedIdenticalResult**(SV-COST-01) | 跨 turn 同名同参得到**完全相同结果**(`waste.rs` 已落地)。结构性浪费机会:`waste_tokens = est_tokens(内容) × (次数−1)`——第一次是必要工作,后续每次是纯浪费 | estimated,进估算机会 |
-| **DuplicateProviderRequest** | 两个真实 usage/request 证据指向同一逻辑计费(Codex shadow 之外的双份)。**只有证据齐全才算 confirmed waste** | 是(measured) |
+| **RepeatedIdenticalResult**(SV-COST-01) | 跨 turn 同名同参得到**完全相同结果**(`waste.rs` 已落地)。可能冗余的结构性机会:`waste_tokens = est_tokens(内容) × (次数−1)`;重复结果也可能是必要复核,所以 attribution 恒为 inferred | estimated,进估算机会 |
+| **DuplicateProviderRequest** | 两个独立 provider request/billing id 及非累计 usage 证据指向同一逻辑计费(Codex shadow 之外的双份)。只有能排除累计快照/重复日志时才算 confirmed waste | 是(measured) |
 
 工具调用本身通常不是 LLM 计费原子——**不能直接把「第二个 tool call」折算成模型成本**,必须关联到后续 request usage。
 
@@ -128,7 +166,7 @@ v1 把三个不同概念混在一个 W2 里,拆开:
 
 ```text
 session_key | session_revision | confirmed_request_ids | confirmed_amount
-| reviewer | reviewed_at | rationale
+| currency | pricing_basis | pricing_version | reviewer | reviewed_at | rationale
 ```
 
 不带 revision 与 reviewer 的确认记录,在 session 更新、价格表更新或重复审核后无法复现。
@@ -174,53 +212,169 @@ bug 后时段成本 / 两个时段总成本
 
 ---
 
-## 6. 单位 token 成本(效率指标,与浪费率互补,不进分子)
+## 6. 月度感知成本与 cost/M processed tokens
 
-用户的第二个直观数字:「这个月花了多少钱、干多少 token 的活」。它与浪费率是两个不同的问题——浪费率问**浪费了多少**,单位成本问**基础单价多贵**;两者相乘 = 每 token 的浪费成本,同屏呈现。
+这是用户认知门槛最低的总览数字,作用类似 DAU/MAU:快速回答「本月花了多少、这份钱
+换来多少已观察模型处理量」,但不单独承担因果解释。统一分母叫
+`processed_tokens`,不叫「完成的工作量」:
 
+```text
+processed_tokens = uncached_input + cache_read + cache_write + output
 ```
-单位 token 成本 = 当月确认成本 ÷ 当月计费口径 token
+
+四桶必须是 adapter 归一后的互斥计量桶;若某 provider 的父/子字段有包含关系,先在
+adapter 中去重,不得直接相加。`cost/M` 是**混合摊销指标**,不是 provider 公布单价,
+也不等于生产力。
+
+### 6.1 套餐摊销
+
+```text
+subscription_allocated_cost_per_mtok
+  = allocated_plan_amount / observed_processed_tokens_in_scope × 1,000,000
 ```
 
-| 宿主形态 | 分子来源 | pricing_basis |
-|---|---|---|
-| 订阅(Codex / Claude Code 套餐) | 用户填写/确认套餐金额 | **confirmed**(用户确认,从 estimated catalog 升级) |
-| 按量(DSH) | 现有 `priced_day` 月成本 | measured(计价引擎) |
-| 无确认无账单 | — | unavailable(缺列不编列,绝不拿 catalog 价冒充实测) |
+- 套餐金额是 `user-reported-invoice`,不是运行时 measured;至少记录 `amount / currency /
+  billing_period_start / billing_period_end / tax / credits / overage / product_scope /
+  allocated_amount / confirmed_at`。
+- ChatGPT/Claude 套餐可能还覆盖 Web、桌面等其它产品。默认可让用户选择「全额分摊」,
+  但必须显示 `allocation_scope=full-plan`;更精确时由用户填 Agent 部分的 allocated amount。
+- 套餐省 token 通常不减少当月固定账单;单位摊销下降表达的是同一套餐获得更多处理量,
+  属于**使用效率/机会成本**,不是退款或边际节省。
+- 如果日志只覆盖账期的一部分,`fee / observed_tokens` 是单位摊销的**上界**。展示
+  `≤ ¥x/M · observed YYYY-MM-DD…YYYY-MM-DD`,不能冒充完整账期精确值。
 
-**四条纪律:**
+### 6.2 按量成本
 
-1. **订阅金额输入解决 pricing 缺失**——`CLAUDE_CODE_CORPUS.md` 说「要出钱,先要有四族价格表」;用户确认的套餐金额是**实测月花费**,比 catalog 估算更真,且天然覆盖全家族(Claude Code 四模型族一份套餐全包)。
-2. **订阅下省 token ≠ 省套餐钱**(`WINGLET_CAVEMAN_BENCHMARK.md` 论证的镜像):套餐费固定,省 token 让**单位成本下降**——同一套餐干更多活,是**价值指标**不是省钱指标。呈现时必须标注,否则用户看到「浪费率 20%」会误以为「该退订」——错,那是机会成本,不是账单差额。
-3. **分母口径跟随账单**:按宿主账单口径计 token(`token_by_date_model` 的 by_model 总和),四桶 raw 总和可并列展示,但不得同名「单位成本」。月份间对比时:token 结构看占比、钱看单位成本——价格表随 LLMflation 漂移,原始 token 不漂。
-4. **落地路径**:`month.json` 状态层已有月 token 与按量月成本;新增输入位 = **套餐金额**(用户显式提供,`plan.rs` 的 `startup_rate` 模式:没有就 `unavailable`,不编)。
+```text
+metered_cost_per_mtok
+  = priced_usage_cost / priced_processed_tokens × 1,000,000
+```
+
+- 分母只包含成功计价的 usage;未计价模型的 token 另报 `unpriced_tokens`,不得拿进分母
+  压低单位成本。
+- 导入 provider 账单时 `pricing_basis=provider-reported`;现有 `priced_day/month_cost`
+  是 `measured tokens × catalog price`,因此是 `catalog-provider` 或
+  `catalog-fallback`,不是 measured invoice。
+- `pricing_basis=exact/partial` 目前只说明 `by_model` 覆盖是否完整,不说明报价等于实付。
+  价格表必须带 `pricing_version / effective_at / priced_at`;否则更新价表会重写历史月份。
+
+### 6.3 Host 与 BillingSource 分离
+
+Host 是执行壳,不是收费方。Claude Code 可同时使用 Anthropic 套餐、Anthropic API、
+DeepSeek、MiniMax、Kimi 等;同一会话甚至可以混用。每份 usage 应先归属:
+
+```text
+host_id        = claude-code | codex | dsh | …
+billing_source = plan/account/provider identity
+billing_mode   = subscription | metered | credits | unknown
+provider       = usage sample 的模型服务方
+```
+
+不能假定「Claude Code 四模型族天然由一份套餐覆盖」。无法确定收费归属的 usage 进入
+`unknown`,不塞进任一单位成本分母。
+
+### 6.4 综合感知成本
+
+仅在**同币种、同统计周期、套餐/按量 token 归属互斥、各自 coverage 可见**时给综合值:
+
+```text
+recognized_total_cost = allocated_subscription_amount + metered_cost
+blended_cost_per_mtok
+  = recognized_total_cost
+    / (subscription_tokens + metered_priced_tokens)
+    × 1,000,000
+```
+
+不自动换汇;条件不满足时并列显示套餐与按量两张卡,不强拼一个总数。综合 cost/M 与
+确认浪费率使用的 population 不同,**两者不得直接相乘**。
+
+### 6.5 状态层现状
+
+`month.json` 已保存逐日 token 桶与可选 `by_model`,但**不保存历史成本**;
+`priced_day/month_cost` 在读取时按当前 `pricing.json` 投影。准确状态应表述为「月 token
+已落地、按量成本计算器已落地」,不是「月账单已落地」。套餐金额输入、billing period、
+pricing snapshot 和观察覆盖区间仍需新增。
+
+### 6.6 覆盖率在感知层的含义
+
+感知层的 `数据覆盖率` 默认指**进入本卡计算的 token ÷ 同期已观察 token**:
+
+```text
+perception_coverage = attributed_and_priceable_tokens / observed_processed_tokens
+```
+
+它回答「当前 cost/M 覆盖了多少已看到的用量」,不回答「磁盘日志是否覆盖整个账期」。
+后者单独显示 `observed_from / observed_to / collector_health`;无法证明完整时不编百分比。
+套餐日志只覆盖部分账期时,即使 perception coverage=100%,单位摊销仍是上界——两个
+coverage 不得合并成一个看似精确的数字。
 
 ---
 
-## 7. 诚实性铁律(写进实现,像 `plan.rs` 的 docstring)
+## 7. 诊断指标:只解释变化,不进入浪费分子
+
+用户从感知层点「为什么」后,按贡献度展示:
+
+| 诊断维度 | 回答什么 |
+|---|---|
+| cache-read 命中率 / uncached 占比 | 单位成本是否受缓存结构影响 |
+| 模型与 provider 构成 | 是否切到更贵或不同计费来源 |
+| 高峰/低峰比例 | 分时价格是否推高按量成本 |
+| fresh input / output / cache 四桶 | token 花在什么结构上 |
+| 请求数 / session 数 / 平均上下文 | 用量增长来自频次还是单次变重 |
+| compaction / 模型切换 | 上下文与缓存边界为何变化 |
+| unpriced / unknown billing 比例 | 总览数字还缺多少列 |
+
+典型下钻路径:
+
+```text
+单位处理成本上升
+├─ 更贵模型/provider 占比上升
+├─ 缓存命中下降
+├─ 高峰时段占比上升
+├─ output 占比上升
+└─ 套餐观察用量下降(固定费被更少 token 摊销)
+```
+
+这些指标可以触发诊断或 W1 suspected,但不因「解释力强」就自动变成确认浪费。
+
+---
+
+## 8. 诚实性铁律(写进实现,像 `plan.rs` 的 docstring)
 
 1. **证据不足 = 不计**。分子只收 `measured`(attribution 可证明)或带稳定复核记录的 `human-confirmed`;其余进「估算机会」「待复核」两块,永远不在分子。
 2. **触发证据缺失 ≠ 零触发**(W4);**首个请求无前缀 ≠ 缓存 bug**(W1);**长尾 ≠ 全浪费**(W3);**影子记录 ≠ 双倍计费**(AccountingShadow)。
 3. **标签不因措辞转化**——basis 三字段分离(measurement / attribution / pricing),「命中率低」是观察,「缓存坏了」是结论,互相不许代写。
-4. **无反事实数字**。绝不报「若不优化会花 X」。
+4. **反事实隔离**。允许展示明确标为 `estimated` / `benchmark-counterfactual` 的机会,
+   但绝不把「若不优化会花 X」写成生产实付节省或放进 confirmed 分子。
 5. **baseline 必须带语料期标签**:DSH 08-18 前数据(bug 期)不进任何计算(`COST_BASELINE.md` §2);Claude Code 语料缺日期分界,只做 token 结构不做前后对照(`CLAUDE_CODE_CORPUS.md` §6)。
 6. **无基线不告警(FR-05)**——结构性浪费(SV-COST)与相对浪费(缓存)分开;混进来用户会觉得系统冤枉自己的正常行为。
-7. **分母诚实**——总成本不可作分母,审计覆盖率必须同屏;eligible 缺列即不合格。
+7. **分母诚实**——浪费率不用总成本作分母,审计覆盖率必须同屏;eligible 按规则与
+   provider 需要的字段判断,不是机械要求所有宿主四桶全有。
+8. **Host ≠ BillingSource**——执行入口不决定收费方;混合路由逐 usage 归属,归属未知
+   就 unavailable。
+9. **感知不冒充归因**——cost/M 可以做顶层产品指标,但它是摊销/混合效率,不能单凭
+   变高或变低证明浪费。
 
 ---
 
-## 8. 落地状态与动作
+## 9. 落地状态与动作
 
 **已落地(代码,2026-09-01 核实)**:
 
 - SV-COST-01(重复相同工具结果)与 SV-COST-02(失败重试上下文增长):core `waste.rs` ↔ Python `waste.py` 字节级 parity;wasm 导出 `structural_waste`;behavior 报告集成 `waste` + `waste_coverage`(三态门控,同 SV613/614 的 OR 覆盖)。
-- 月 token(`token_by_date_model`)与按量月成本(`priced_day`):`month.json` 状态层,单位成本指标的分母与按量分子已就位。
+- 月 token(`token_by_date_model`)已进入 `month.json`;`priced_day/month_cost` 按读取时
+  价表计算按量估算。单位成本的 token 分母与计算器已就位,账单确认、历史价格快照和
+  billing source 尚未就位。
 
 **未落地(本文定义的需求,按序)**:
 
 1. `WasteClaim` 统一声明(core 类型 + 互斥证明测试)——可加总分子的前提。
-2. 审计覆盖率计算:eligible audited cost 的判定(usage 四桶完整 + 事件可归因)进 core。
+2. 审计覆盖率计算:eligible audited cost 按规则/provider 所需字段 + 事件可归因判定进 core。
 3. W1 eligibility 实现(按模型族、排除首请求/切换边界、最小请求数)+ 90% 阈值降级为**告警阈值**,按宿主/模型族可配。
 4. W3 人工确认记录结构(`reviewer`/`reviewed_at`/`confirmed_request_ids`),复核结果写入带 revision 的记录,可复现。
 5. W4 exposure count 来源(启动次数)与 `catalog-visible ≠ body loaded` 的展示拆分。
-6. **套餐金额输入位**:订阅宿主每月确认金额(state 层新输入,`startup_rate` 同款「没有就 unavailable」模式)→ 单位 token 成本分子(§6)。
+6. **BillingSource + 套餐金额输入位**:按账户/账期记录 user-reported invoice 与
+   allocated amount;没有就 unavailable,不按 host 猜套餐。
+7. **月度感知成本投影**:套餐/按量分卡;同币种、同周期、无重叠才合并;输出数据覆盖区间。
+8. **历史价格稳定性**:pricing card 增加 effective date,月投影保存/引用 pricing_version,
+   防止当前价表静默重写历史。

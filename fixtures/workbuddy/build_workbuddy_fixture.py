@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""Build the WorkBuddy fixture: a synthetic `~/.workbuddy/` home.
+
+This reproduces the real on-disk WorkBuddy shape (`docs/WORKBUDDY_INTEGRATION.md`
+§2.1): a sqlite `workbuddy.db` (`sessions` + `session_usage` tables), per-session
+`audit-log/<file>.jsonl` decision ledgers, and `file-history/<sessionId>/`
+version snapshots. All content is synthetic. Two sessions:
+
+- **s1 健康会话** — three clean audit-log records (two `sandbox-executed` bash,
+  one `WebFetch`), a continuous hash chain, db rows with `fullAccess` +
+  `credit_json` → the healthy-session shape of §10 acceptance #4.
+- **s2 审批流程会话** — three approval decisions (approved / rejected /
+  bulk-delete rejected) + one `sandbox-executed`, with a **rotated** hash-chain
+  head → exercises the approvals axis and the rotation note.
+
+`write_workbuddy_home(base)` writes `base/.workbuddy/` and is the single source
+the differential tests and the builder's self-verification both consume — a
+fixture edit that stops exercising the mapping table fails loudly instead of
+silently changing the gate.
+
+Only the Python standard library is used (`sqlite3`), plus the repo's own
+`agent_vitals` evidence / composition layers for self-verification.
+
+Run:  python3 fixtures/workbuddy/build_workbuddy_fixture.py
+
+Output (in the same directory as this script):
+    workdir/.workbuddy/… — the committed fixture home (tests copy it into a
+    temp HOME so the Rust binary reads the same sqlite db via rusqlite).
+
+The script is deterministic (fixed timestamps / hashes) and self-verifying:
+after writing it re-opens the home and runs the real evidence + audit
+projection, asserting the exact §10 coverage counts, the three-state contract,
+and the §9 cost block.
+"""
+
+import json
+import os
+import shutil
+import sqlite3
+import sys
+from pathlib import Path
+
+HERE = Path(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS = str(HERE.parent.parent / "scripts")
+if SCRIPTS not in sys.path:
+    sys.path.insert(0, SCRIPTS)
+
+from agent_vitals.agent import workbuddy_evidence, workbuddy_session_audit  # noqa: E402
+from agent_vitals.adapters import workbuddy_session  # noqa: E402
+
+
+def j(obj):
+    """Serialize compactly, deterministic key order, no ASCII escaping."""
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def audit_record(session_id, event_type, sequence, prev_hash, cur_hash,
+                 timestamp, request_id, tool_call_id=None, category=None,
+                 decision=None, command_preview=None, message_key=None,
+                 message_params=None):
+    """One audit-log record — the union of fields the evidence layer reads
+    (spec §2.2). Missing fields are omitted (the adapter reads by name)."""
+    r = {"sessionId": session_id, "eventType": event_type, "sequence": sequence,
+         "prevHash": prev_hash, "hash": cur_hash, "timestamp": timestamp,
+         "requestId": request_id}
+    if tool_call_id is not None:
+        r["toolCallId"] = tool_call_id
+    if category is not None:
+        r["category"] = category
+    if decision is not None:
+        r["decision"] = decision
+    if command_preview is not None:
+        r["commandPreview"] = command_preview
+    if message_key is not None:
+        r["messageKey"] = message_key
+    if message_params is not None:
+        r["messageParams"] = message_params
+    return r
+
+
+def s1_records():
+    """s1 健康会话：连续链（head prevHash="" → 干净起点），2 bash + 1 web_fetch，
+    2 distinct requestId → TurnBoundaries derived=2。"""
+    return [
+        audit_record("s1", "sandbox-executed", 1, "", "h1",
+                     "2026-08-31T09:01:00Z", "r1", "call-a", "command-safety",
+                     "executed", "ls -la", None, None),
+        audit_record("s1", "sandbox-executed", 2, "h1", "h2",
+                     "2026-08-31T09:02:00Z", "r1", "call-b", "command-safety",
+                     "executed", "cat README.md", None, None),
+        audit_record("s1", "WebFetch", 3, "h2", "h3",
+                     "2026-08-31T09:03:00Z", "r2", "call-c", "web", "fetched",
+                     None, None, {"target": "https://example.com"}),
+    ]
+
+
+def s2_records():
+    """s2 审批流程会话：head prevHash 无前驱（轮转），3 审批 + 1 sandbox-executed。
+    commandApproved 带 decided allowed-once → SV610 唯一命中点。"""
+    return [
+        audit_record("s2", "commandApproved", 100, "5a5a...rotated", "h100",
+                     "2026-08-31T10:00:00Z", "r1", "call1", "command-safety",
+                     "approved", "rm -rf /tmp/cache", "删除临时缓存目录", None),
+        audit_record("s2", "commandRejected", 101, "h100", "h101",
+                     "2026-08-31T10:01:00Z", "r2", "call2", "command-safety",
+                     "rejected", "sudo rm -rf /var/log/x", "需要 root 权限清理日志", None),
+        audit_record("s2", "bulk-delete.rejected", 102, "h101", "h102",
+                     "2026-08-31T10:02:00Z", "r3", "call3", "file-safety",
+                     "rejected", None, "批量删除 42 个文件", None),
+        audit_record("s2", "sandbox-executed", 103, "h102", "h103",
+                     "2026-08-31T10:03:00Z", "r4", "call4", "command-safety",
+                     "executed", "ls -la", None, None),
+    ]
+
+
+def _connect_db(db_path):
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT, "
+        "cwd TEXT, permission_mode TEXT, use_sandbox_cli INTEGER, "
+        "created_at TEXT, updated_at TEXT);"
+        "CREATE TABLE session_usage (session_id TEXT PRIMARY KEY, "
+        "used INTEGER, size INTEGER, credit_json TEXT);")
+    return conn
+
+
+def _file_history(root, session_id, hashes):
+    """`file-history/<sessionId>/<contentHash>@v<n>` 版本快照文件（spec §3
+    Measured 行：文件数 = 版本数）。"""
+    d = root / "file-history" / session_id
+    d.mkdir(parents=True, exist_ok=True)
+    for h, v in hashes:
+        (d / ("%s@v%d" % (h, v))).write_text("synthetic version\n", encoding="utf-8")
+
+
+def write_workbuddy_home(base):
+    """写一整套 `base/.workbuddy/`（sqlite db + audit-log + file-history）。是
+    fixture 与差分测试共同的单一来源。"""
+    base = Path(base)
+    root = base / ".workbuddy"
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    conn = _connect_db(root / "workbuddy.db")
+    try:
+        conn.execute(
+            "INSERT INTO sessions (id, title, model, cwd, permission_mode, "
+            "use_sandbox_cli, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("s1", "健康会话", "deepseek-v4-flash", "/repo", "fullAccess", 1,
+             "2026-08-31T09:00:00Z", "2026-08-31T09:05:00Z"))
+        conn.execute(
+            "INSERT INTO sessions (id, title, model, cwd, permission_mode, "
+            "use_sandbox_cli, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("s2", "审批流程会话", "deepseek-v4-flash", "/repo", "bypassPermissions",
+             1, "2026-08-31T10:00:00Z", "2026-08-31T10:05:00Z"))
+        conn.execute(
+            "INSERT INTO session_usage (session_id, used, size, credit_json) "
+            "VALUES (?,?,?,?)",
+            ("s1", 5000, 12345, '{"r1":0.02,"r2":0.03}'))
+        conn.execute(
+            "INSERT INTO session_usage (session_id, used, size, credit_json) "
+            "VALUES (?,?,?,?)",
+            ("s2", 12000, 90000, "{}"))
+        conn.commit()
+    finally:
+        conn.close()
+
+    audit_dir = root / "audit-log"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "s1.jsonl").write_text(
+        "".join(j(r) + "\n" for r in s1_records()), encoding="utf-8")
+    (audit_dir / "s2.jsonl").write_text(
+        "".join(j(r) + "\n" for r in s2_records()), encoding="utf-8")
+
+    _file_history(root, "s1", [("abc123", 1), ("abc123", 2), ("def456", 1)])
+    _file_history(root, "s2", [("abc123", 1), ("def456", 1)])
+    return root
+
+
+def _load_session(root, session_id):
+    """重开 home，按生产路径读 db + audit-log + file-history，跑真实 evidence。"""
+    db_sessions, db_usage = workbuddy_session.read_workbuddy_db(root)
+    recs_by_session, _, degraded = workbuddy_session.read_workbuddy_audit_log(root)
+    assert not degraded, "fixture audit-log 必须无坏行，实际 %r" % degraded
+    db_rec = db_sessions.get(session_id)
+    records = recs_by_session.get(session_id, [])
+    meta = workbuddy_session.workbuddy_session_meta(root, session_id, db_rec, db_usage)
+    evidence = workbuddy_evidence.build_workbuddy_evidence(records, session_id, meta)
+    ev = workbuddy_evidence.workbuddy_evidence_json(evidence)
+    audit = workbuddy_session_audit.workbuddy_audit_projection(evidence["canonical"])
+    cost = workbuddy_session_audit._cost_of(meta)
+    return records, ev, audit, cost
+
+
+def self_verify(root):
+    """fixture 必须钉死 §10 验收 #4 + §9 成本块数字——改了映射表/记录就响亮失败。"""
+    root = Path(root)
+
+    # ── s1 健康会话 ──────────────────────────────────────────────
+    records, ev, audit, cost = _load_session(root, "s1")
+    assert len(records) == 3, "s1 应是 3 条记录，实际 %d" % len(records)
+    cov = ev["coverage"]
+    assert cov["ToolCalls"]["measured"] == 3, cov["ToolCalls"]
+    assert cov["SandboxModes"]["measured"] == 2, cov["SandboxModes"]
+    assert cov["NetworkAccess"]["measured"] == 1, cov["NetworkAccess"]
+    assert cov["ApprovalDecisions"]["available"] is True, cov["ApprovalDecisions"]
+    assert cov["ApprovalDecisions"]["measured"] == 0, cov["ApprovalDecisions"]
+    assert cov["TurnBoundaries"]["derived"] == 2, cov["TurnBoundaries"]
+    assert cov["ApprovalPolicy"]["measured"] == 1, cov["ApprovalPolicy"]
+    assert cov["UsageAggregate"]["measured"] == 1, cov["UsageAggregate"]
+    assert cov["FileMutations"]["measured"] == 3, cov["FileMutations"]
+    rules = audit["rule_outcomes"]
+    for code in ("SV604", "SV605", "SV607", "SV608", "SV609", "SV612", "SV613"):
+        assert rules[code]["status"] == "unavailable", (code, rules[code])
+    for code in ("SV601", "SV602", "SV603", "SV606", "SV610", "SV611", "SV614"):
+        assert rules[code]["status"] == "measured_zero", (code, rules[code])
+    assert audit["summary"]["rules_unavailable"] == 7, audit["summary"]
+    assert audit["summary"]["findings_total"] == 0, audit["summary"]
+    assert ev["notes"][2] == (
+        "audit-log hash chain continuous: 3 records (verified from seq=1)"
+    ), ev["notes"]
+    assert ev["attempts"] == [{
+        "source_id": "workbuddy.traces",
+        "kind": "Directory",
+        "surface": "Traces",
+        "available": False,
+        "error": ("traces are session-anonymous (no sessionId join); skipped per "
+                  "RUNTIME_EVIDENCE_CONTRACT §14.4"),
+        "observed_span": None,
+    }], ev["attempts"]
+    assert cost == {"tokens": 5000, "cny": 0.05, "host_billed": True}, cost
+
+    # ── s2 审批流程会话 ──────────────────────────────────────────
+    records, ev, audit, cost = _load_session(root, "s2")
+    assert len(records) == 4, "s2 应是 4 条记录，实际 %d" % len(records)
+    cov = ev["coverage"]
+    assert cov["ToolCalls"]["measured"] == 1, cov["ToolCalls"]
+    assert cov["SandboxModes"]["measured"] == 1, cov["SandboxModes"]
+    assert cov["ApprovalDecisions"]["measured"] == 3, cov["ApprovalDecisions"]
+    rules = audit["rule_outcomes"]
+    for code in ("SV604", "SV605", "SV607", "SV608", "SV612", "SV613"):
+        assert rules[code]["status"] == "unavailable", (code, rules[code])
+    assert rules["SV609"]["status"] == "findings", rules["SV609"]
+    assert rules["SV609"]["count"] == 3, rules["SV609"]
+    assert rules["SV610"]["status"] == "findings", rules["SV610"]
+    assert rules["SV610"]["count"] == 1, rules["SV610"]
+    findings = audit["findings"]
+    assert len(findings) == 4, findings
+    assert audit["summary"] == {"critical": 0, "warning": 1, "info": 3,
+                                "findings_total": 4, "rules_unavailable": 6}, \
+        audit["summary"]
+    sv610 = [f for f in findings if f["rule"] == "SV610"]
+    assert len(sv610) == 1 and sv610[0]["evidence"] == "allowed-once", sv610
+    sv609 = [f for f in findings if f["rule"] == "SV609"]
+    assert [f["evidence"] for f in sv609] == [
+        "删除临时缓存目录", "需要 root 权限清理日志", "批量删除 42 个文件"], sv609
+    assert any("oldest records may be rotated" in n for n in ev["notes"]), ev["notes"]
+    assert cost == {"tokens": 12000, "cny": 0.0, "host_billed": True}, cost
+
+
+def main():
+    root = write_workbuddy_home(HERE / "workdir")
+    self_verify(root)
+    print("wrote %s" % root)
+    print("self-verification passed")
+
+
+if __name__ == "__main__":
+    main()

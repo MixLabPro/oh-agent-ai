@@ -39,6 +39,11 @@ walkdir = "2"
 # 2026-08-30（用户拍板）：桌面/Tauri 运行时加 zstd crate 与「宿内 skill 零第三方库」
 # 是两条约束，前者不违反后者（spec §7.1 G1 管的是分发的 Python skill）。
 ruzstd = "0.8"
+# WorkBuddy 会话审计的 sqlite 读取（`~/.workbuddy/workbuddy.db`）。仓库第一个 sqlite
+# reader；`bundled` 特性自带 sqlite3.c，不依赖系统 sqlite。「宿内 skill 零第三方库」
+# 同样只管分发的 Python skill——Python 侧用 stdlib `sqlite3`，Rust 二进制加 rusqlite
+# 不违反它（ruzstd 同款决策）。core crate 保持纯净，I/O 只在这里。
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 # 仅开发期依赖，**不进二进制**。与 Python 侧的 hypothesis 同一性质：
 # 仓库的「零依赖」约束针对的是被分发的扫描器，不是测试工具。

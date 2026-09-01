@@ -1,0 +1,3 @@
+{"sessionId":"s1","eventType":"sandbox-executed","sequence":1,"prevHash":"","hash":"h1","timestamp":"2026-08-31T09:01:00Z","requestId":"r1","toolCallId":"call-a","category":"command-safety","decision":"executed","commandPreview":"ls -la"}
+{"sessionId":"s1","eventType":"sandbox-executed","sequence":2,"prevHash":"h1","hash":"h2","timestamp":"2026-08-31T09:02:00Z","requestId":"r1","toolCallId":"call-b","category":"command-safety","decision":"executed","commandPreview":"cat README.md"}
+{"sessionId":"s1","eventType":"WebFetch","sequence":3,"prevHash":"h2","hash":"h3","timestamp":"2026-08-31T09:03:00Z","requestId":"r2","toolCallId":"call-c","category":"web","decision":"fetched","messageParams":{"target":"https://example.com"}}

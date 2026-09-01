@@ -47,6 +47,8 @@ from .agent import (  # noqa: E402
     trajectory,
     usage,
     waste,
+    workbuddy_evidence,
+    workbuddy_session_audit,
 )
 from .skills import (  # noqa: E402
     analysis,
@@ -78,6 +80,7 @@ _FLAT_MODULE_NAMES = (
     "codex_usage", "compaction", "cost", "duration", "plan", "skill", "state",
     "subagent",
     "takeover", "trajectory", "usage", "waste",
+    "workbuddy_evidence", "workbuddy_session_audit",
 )
 for _name in _FLAT_MODULE_NAMES:
     _sys.modules[__name__ + "." + _name] = globals()[_name]
@@ -127,4 +130,6 @@ __all__ = [
     "trajectory",
     "usage",
     "waste",
+    "workbuddy_evidence",
+    "workbuddy_session_audit",
 ]
