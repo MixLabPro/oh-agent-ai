@@ -637,11 +637,18 @@ token · 校验 `Origin`**。它暴露的是执行过的命令、绝对路径、
 **AI 的上下文**里让 AI 转述；我们只需要在状态栏或终端里说一句——tick 脚本看到
 会话文件停止增长就到了同一个时刻，零写入用户配置。
 
-这条已经落地：`scripts/dsh_autosync.py`（由 `contrib/xbar/agent-vitals.5m.sh`
-每个 tick 顺手调用）就是"tick 看到会话文件停止增长"的具体实现——
-`(mtime, size)` 连续 5 分钟不变即视为会话已结束，解压（DSH 的 `.zstd`
-是多帧追加写的，见该文件 docstring）后跑一次 `oneline`，每个会话只同步
-一次（`oneline` 没有按 session 去重，同步两次会重复计费）。
+这条已经落地：原先是 `scripts/dsh_autosync.py`（由 `contrib/xbar/
+agent-vitals.5m.sh` 每个 tick 顺手调用）——"tick 看到会话文件停止增长"
+的第一版实现，`(mtime, size)` 连续 5 分钟不变即视为会话已结束，解压
+（DSH 的 `.zstd` 是多帧追加写的）后跑一次 `oneline`，每个会话只同步一次
+（`oneline` 没有按 session 去重，同步两次会重复计费）。
+
+> **2026-09-01 更新**：`scripts/dsh_autosync.py` 与 xbar/SwiftBar 菜单栏
+> 形态一起删除（见 `docs/MENUBAR_MIGRATION.md`）——它的两项职责都已被
+> Rust 原生取代：发现「停止增长的会话」是 Tauri tick 的
+> `discover → oneline`（`src-tauri/src/lib.rs`），多帧 zstd 解压是
+> `src/dsh.rs` 直接内置的 `ruzstd`（R2a §6.3-1，纯 Rust、零 C 依赖），
+> 不再需要 Python 侧单独跑一个自动同步脚本。
 
 ---
 

@@ -1,11 +1,17 @@
 # 菜单栏能力迁移：SwiftBar → Tauri —— 可行性方案
 
-状态：**已落地（2026-08-31）**。Phase 1/2/4 由 R1a–R1d（任务 #97–#100）完成，
-Tauri 菜单栏 app（`/Applications/agent-vitals.app`）是**主形态**：自带 5 分钟
-tick、spawn Rust `oneline` 折 DSH 会话、预算权威读 `alert.json`，完全脱离
-SwiftBar/xbar。SwiftBar 插件与 `install_swiftbar.sh` 标记为 **legacy 降级通道**
-（零维护成本保留）。原文保留作方案档案——其中「Python 包是状态层唯一写者」
-等旧论断已被 R1d 推翻（写链迁到 Rust），以 §9 末尾的「2026-08-31 更新」为准。
+状态：**已落地（2026-08-31），SwiftBar 插件已彻底删除（2026-09-01）**。
+Phase 1/2/4 由 R1a–R1d（任务 #97–#100）完成，Tauri 菜单栏 app
+（`/Applications/agent-vitals.app`）是**唯一形态**：自带 5 分钟 tick、spawn
+Rust `oneline` 折 DSH 会话、预算权威读 `alert.json`，完全脱离
+SwiftBar/xbar。原计划把 SwiftBar 插件与 `install_swiftbar.sh` 标记为
+**legacy 降级通道**永久保留（见下方「Phase 5」一节），但用户后来判断
+Tauri 已完全替代、不再需要降级通道，`contrib/xbar/`、
+`scripts/install_swiftbar.sh`、`scripts/dsh_autosync.py` 连同各自的测试
+一并删除——下面「Phase 5 —— SwiftBar 退役判定」及其后的更新记录了
+「决定保留」到「实际删除」这两步决策，**均保留作历史**，不因后一步而回改
+前一步的文字。以 §9 末尾的「2026-08-31 更新」为准了解写链迁移本身；本节
+「删除」是在那之后的又一步。
 范围：把 `contrib/xbar/agent-vitals.5m.sh`（SwiftBar 插件）的菜单栏能力迁进
 `src-tauri/`（Tauri 2 菜单栏 app），并借机修复一个既有架构偏差（预算权威源被
 绕开）。本文所有论断都有证据来源（`文件:行号` 或实测），不写无依据的结论。
@@ -248,6 +254,35 @@ overview.rs 数据管道、core::cost 折叠、托盘+面板骨架、空态诚�
   （PATH 内），app tick 经 `resolve_binary` 找到它；`state takeover rust`
   后写链 owner=rust，真机 59 条 DSH 会话全部折入，month ¥1752.45（预算
   ¥600 → alert `over`）。SwiftBar 已脱离。
+
+### 2026-09-01 更新：SwiftBar 插件实际删除（推翻上面「不删除」的决定）
+
+上面「Phase 5」一节判定"不删除 SwiftBar 插件（降级通道，零维护成本）"——
+用户后来判断这条"零维护成本"的前提站不住：`contrib/xbar/`、
+`scripts/install_swiftbar.sh` 仍然是要跟着 `state.py`/`state.rs` 字段变化
+保持同步的活代码（`agent-vitals.5m.sh` 直接解析 `alert.json`/`oneline.json`
+的字段名），"零维护"只是"目前没人主动去维护"，不是"不需要维护"。删除内容：
+
+- `contrib/xbar/`（`agent-vitals.5m.sh` + `README.md`）
+- `scripts/install_swiftbar.sh`
+- `scripts/dsh_autosync.py`——Phase 4 更新已经说明"无需 dsh_autosync.py"
+  （discover→oneline 由 Tauri tick 原生做），它当时没删是因为还有 xbar 这
+  一个调用方在用它做 zstd 解压；xbar 删除后，它的另一项职责（多帧 zstd
+  解压）也已被 `src/dsh.rs` 内置的 `ruzstd`（R2a §6.3-1）取代，两项职责都
+  没有调用方了，一并删除。
+- 对应测试：`tests/test_dsh_autosync.py` 整个删除；
+  `tests/test_xbar_integration.py` 里真正测 xbar 脚本本身的两个测试类
+  （`TestXbarSmokeOutput`/`TestXbarBudgetWiring`）删除，测 `state.py`
+  `sessions.jsonl`/`rotate_today` invariant 的两个测试类（与 xbar 无关，
+  只是历史上先被 xbar 暴露）保留，改名进
+  `tests/test_state_history_rotate.py`。
+
+`docs/PRODUCT.md` §5.8.4、本文件顶部状态行同步更新；`docs/COST_CALENDAR_
+BUDGET.md`（原始需求文档）、`docs/R2A_SOURCE_CAPABILITY.md`/`docs/
+R2A_CONTRACT_DESIGN.md`（写作时 `dsh_autosync.py` 确实是唯一的 zstd 解压
+实现，这个事实描述在写作当时是对的）等历史文档**不做追溯性重写**——它们
+记录的是各自当时的真实状态，与本仓库"注释解释为什么之前的实现是错的"的
+编辑惯例一致，不为了让旧文档"看起来"一直正确而回改。
 
 ## 10. 风险与缓解
 
