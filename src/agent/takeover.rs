@@ -35,6 +35,8 @@
 use std::io::Read;
 use std::path::PathBuf;
 
+use std::sync::Mutex;
+
 use serde_json::{json, Value};
 
 use crate::skills::snapshot::data_home;
@@ -69,6 +71,30 @@ fn machine_path() -> PathBuf {
     data_home().join("machine.json")
 }
 
+/// `machine_namespace` 首建的临界区锁。多数路径是缓存命中（machine.json 已存
+/// 在），只有「miss 且要写」才上锁——双检锁保证并发首建（如 R2a
+/// `SessionStore::all` 并行构建 codex+dsh 两个子 store、两边同时 miss）只产生
+/// **一个**随机 ns，两边读到同一个值；不加锁时两边各写各的，envelope 键的
+/// machine_namespace 分叉，且 `atomic_write_json` 共享同一份 `tmp.<pid>` 临时
+/// 文件——先 rename 的线程把临时文件挪走后，后到的 rename 直接 ENOENT panic。
+static MACHINE_NS_LOCK: Mutex<()> = Mutex::new(());
+
+/// 进程内上锁的 `machine_namespace`（双检锁，见 `MACHINE_NS_LOCK` 注释）。
+fn machine_namespace_locked() -> String {
+    let _guard = MACHINE_NS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(m) = read_json(&machine_path()) {
+        if let Some(ns) = m.get("machine_namespace").and_then(Value::as_str) {
+            return ns.to_string();
+        }
+    }
+    let ns = random_hex(16);
+    atomic_write_json(
+        &machine_path(),
+        &json!({"schema_version": "1.0.0", "machine_namespace": ns}),
+    );
+    ns
+}
+
 /// 读 manifest；缺文件 / 坏 JSON → 默认（owner=python、epoch=0）。
 fn read_manifest() -> Value {
     read_json(&manifest_path()).unwrap_or_else(tk::default_manifest)
@@ -95,17 +121,13 @@ fn write_ledger(v: &Value) {
 /// 明示「新 profile」，不静默重排历史。读不到 urandom（非 unix）时退化为
 /// 全零 —— 测试用显式传入，生产侧只在 unix 上跑，这是文档化的平台缺口。
 pub fn machine_namespace() -> String {
+    // 快路径：machine.json 已存在（常态）不碰锁。
     if let Some(m) = read_json(&machine_path()) {
         if let Some(ns) = m.get("machine_namespace").and_then(Value::as_str) {
             return ns.to_string();
         }
     }
-    let ns = random_hex(16);
-    atomic_write_json(
-        &machine_path(),
-        &json!({"schema_version": "1.0.0", "machine_namespace": ns}),
-    );
-    ns
+    machine_namespace_locked()
 }
 
 fn random_hex(bytes: usize) -> String {

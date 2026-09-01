@@ -148,7 +148,13 @@ class TestRotateToday(unittest.TestCase):
                 "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
                 "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
             }]}
-            with mock.patch.object(state, "_today_key", return_value="2026-08-25"):
+            # `_month_key` 必须与 `_today_key` 同月份：merge_month 的「当前月」
+            # 走真实时钟（state.py `_month_key`），只 mock 今天不 mock 月份的话，
+            # 固定日期 2026-08-25 在 9 月会被迁进 month-archive.json（「month.json
+            # 只存当前自然月」是 201 倍事故后的定论）——8 月写测试时真时钟还在
+            # 当月所以碰巧全绿，跨月即腐坏（2026-09-01 真实失败）。
+            with mock.patch.object(state, "_today_key", return_value="2026-08-25"), \
+                 mock.patch.object(state, "_month_key", return_value="2026-08"):
                 state.merge_today(hb)          # cli.py oneline 的调用顺序
                 state.merge_month(hb)
             state.rotate_today(now="2026-08-26")   # 第二天，触发 rotate

@@ -19,6 +19,7 @@ machine namespace = `agent.takeover.machine_namespace`（同一份
 3. 版本矩阵 MIN=0 / MAX=1 / CURRENT=1。
 """
 
+import functools
 import json
 import os
 import sys
@@ -27,7 +28,9 @@ from pathlib import Path
 
 from agent_vitals import codex_session_audit as csa
 from agent_vitals.agent import behavior as behavior_mod
+from agent_vitals.agent import budget as budget_mod
 from agent_vitals.agent import codex_cost as codex_cost_mod
+from agent_vitals.agent import codex_usage as codex_usage_mod
 from agent_vitals.agent import takeover as takeover_mod
 from agent_vitals.adapters import codex_session as codex_session_mod
 from agent_vitals.adapters import dsh as dsh_mod
@@ -137,6 +140,34 @@ def sort_key(k):
     """稳定排序四元组 —— 与 Rust `core::r2a` 的排序语义一致（host_kind →
     native_id → source_profile → machine_namespace 的内容字典序）。"""
     return (k.host_kind, k.native_id, k.source_profile, k.machine_namespace)
+
+
+def _opt_desc(x, y):
+    """DESC 序且 None last：degraded 会话没有日期/revision，诚实排最后。"""
+    if x is None and y is None:
+        return 0
+    if x is None:
+        return 1
+    if y is None:
+        return -1
+    return -1 if x > y else (1 if x < y else 0)
+
+
+def recent_cmp(a, b):
+    """「最近 N」权威排序比较器 —— 与 Rust `core::r2a::recent_cmp` 锁步
+    （spec §5.2 / §6 决策 2）。键序：`date_span.last DESC（None last）→
+    session_revision DESC（None last）→ SessionKey ASC（sort_key）`。
+
+    排序发生在数据层、分页之前：`sessions list` 是 SessionKey 四元组序不是
+    时间序，第一页 50 条页内取最近 ≠ 全局最近。导航命令读全量 summaries
+    按此排完取前 N，不分页；不改 list 语义（spec §11）。"""
+    c = _opt_desc(a.date_last, b.date_last)
+    if c:
+        return c
+    c = _opt_desc(a.session_revision, b.session_revision)
+    if c:
+        return c
+    return -1 if sort_key(a.key) < sort_key(b.key) else (1 if sort_key(a.key) > sort_key(b.key) else 0)
 
 
 # ── filter / cursor / page（§3.3）────────────────────────────────
@@ -1055,4 +1086,222 @@ def _render_list(dto):
     if page.get("next_cursor"):
         out.append("next_cursor: %s"
                    % json.dumps(page["next_cursor"], separators=(",", ":")))
+    return "\n".join(out) + "\n"
+
+
+# ── sessions navigation（多宿主导航投影，spec §5.1/§5.2）──────────
+# 镜像 `r2a_store.rs` 的 `sessions_navigation` 及其纯助手。键序是字节一致的
+# 一部分（serde_json preserve_order 按 json! 字面量序输出，dict 必须同序）；
+# 人读渲染逐字节复刻 Rust（差分门比 stdout）。
+
+
+def sessions_navigation(home, day, timezone_, recent_n, json_out):
+    """多宿主导航投影：一次 spawn 返回两宿主快照（`docs/
+    MENUBAR_MULTIHOST_NAVIGATION_SPEC.md` §5.1/§5.2）。排序、日界折叠、
+    覆盖率、会话计数全部是数据层的测量（§6 决策 3）——Tauri 只缓存渲染，不
+    重新解释。宿主失败彼此隔离：store 构建失败 / 该宿主无数据源 → 对应宿主
+    `unavailable`，不 abort 全命令；托盘宿主区失败不影响顶层今日/预算行（§8）。
+    mirror `r2a_store.rs::sessions_navigation`。"""
+    if timezone_ != "Asia/Shanghai":
+        # json.dumps → 双引号，与 Rust `{timezone:?}` 的 Debug 引号逐字节一致
+        # （差分门比 stderr）。
+        sys.stderr.write(
+            "unsupported --timezone %s: only Asia/Shanghai (core day boundary "
+            "is fixed UTC+8, no DST; §5.1)\n" % json.dumps(timezone_, ensure_ascii=False))
+        raise SystemExit(2)
+
+    # 两宿主 store 独立构建：失败各自降级（unavailable），不 abort——与
+    # sessions_list 的 exit-with-error 不同面：导航是托盘固定两行的投影，
+    # 一个宿主失败不能拖垮整个菜单刷新。
+    try:
+        dsh_store = SessionStore.dsh(home)
+    except StoreError:
+        dsh_store = None
+    try:
+        codex_store = SessionStore.codex(home)
+    except StoreError:
+        codex_store = None
+
+    # DSH 今日 token：today.json → 当日 token。`today_tokens_for_day` 是
+    # `compute_today_cost` 的 day 参数化（后者硬编码真实今天）；date 不符 /
+    # 缺场 / buckets 与 by_model 皆空 → None（缺列不编列，spec §5.2
+    # basis=state-file，与 Tauri 顶层钱行同一份 today.json）。
+    today_data = None
+    today_path = data_home() / "state" / "today.json"
+    if today_path.is_file():
+        try:
+            today_data = json.loads(today_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            today_data = None
+    tokens = None if today_data is None else budget_mod.today_tokens_for_day(today_data, day)
+    if tokens is None:
+        # spec：DSH coverage 恒 complete——state 折叠的覆盖率是 state 层自己的
+        # 轴（日历已单独展示），菜单不重复读。
+        dsh_today_tokens = {"value": None, "basis": None, "coverage": "complete"}
+    else:
+        dsh_today_tokens = {"value": tokens, "basis": "state-file",
+                            "coverage": "complete"}
+
+    # Codex 今日 token：全 rollout 折叠（codex-cost 同一条链路，§2.3）。只在
+    # 该宿主有数据源时折叠——无源反正 unavailable，省掉整次折叠 I/O。
+    codex_merged = None
+    if codex_store is not None and host_has_source("codex", codex_store):
+        folds = []
+        for path in codex_session_mod.codex_rollout_files(home):
+            parsed = codex_session_mod.read_codex_session_log(path)
+            items = parsed.get("items") if isinstance(parsed, dict) else None
+            folds.append(codex_usage_mod.codex_fold_file(items or []))
+        codex_merged = codex_usage_mod.codex_merge_folds(folds)
+    if codex_merged is None:
+        codex_today_tokens = {"value": None, "basis": None, "coverage": None}
+    else:
+        codex_today_tokens = codex_today_tokens_json(
+            codex_merged, day, zero_sessions=len(codex_store.entries) == 0)
+
+    hosts = [
+        host_snapshot("dsh", dsh_store, dsh_today_tokens, day, recent_n),
+        host_snapshot("codex", codex_store, codex_today_tokens, day, recent_n),
+    ]
+    # envelope 的 generated_at 取两 store 中较新的构建时刻（`SessionStore.all`
+    # 的 max 同款语义；缓存共享时两侧逐字节一致——差分门靠它）。两 store 都
+    # 失败时用当前时刻（该形态没有可共享的墙钟）。
+    candidates = [s.generated_at for s in (dsh_store, codex_store) if s is not None]
+    generated_at = max(candidates) if candidates else _now_iso_utc()
+    envelope = {
+        "schema_version": 1,
+        "day_key": day,
+        "timezone": timezone_,
+        "generated_at": generated_at,
+        "hosts": hosts,
+    }
+    if json_out:
+        print(json.dumps(envelope, ensure_ascii=False, indent=2))
+    else:
+        sys.stdout.write(render_navigation(envelope))
+
+
+def host_snapshot(host_kind, store, today_tokens, day_key, recent_n):
+    """单宿主快照组装（纯，可测）。`store` None = 构建失败 → 整宿主
+    `unavailable`（spec §8：宿主区失败不 abort、也不摆 0 冒充）。「该宿主无
+    数据源」——store 的 `source_statuses[host].roots` 全 exists=false（~/.codex
+    或 ~/.dsh 从未安装；与 `sessions list` 的「没有 DSH = 诚实零」不同面：
+    托盘固定渲染两行，未安装的宿主显示「—」而不是「0 会话」，spec §8）——
+    同样 unavailable。DSH store 自报 `unavailable`（文件在但一个都读不了，
+    §4.3）也归这一档。mirror `r2a_store.rs::host_snapshot`。"""
+    def unavailable():
+        return {"host_kind": host_kind, "status": "unavailable",
+                "today_tokens": None, "today_sessions": None,
+                "recent": [], "store_revision": None}
+
+    if store is None or not host_has_source(host_kind, store):
+        return unavailable()
+    statuses = store.source_statuses.get(host_kind) if isinstance(
+        store.source_statuses, dict) else None
+    if isinstance(statuses, dict) and statuses.get("status") == "unavailable":
+        return unavailable()
+
+    # 今日会话数：date_span 与 [day_key, day_key] 交叠（`SessionFilter.matches`
+    # 同语义）；无日期的 degraded 会话不计入。这是「今天碰过的会话」计数，不是
+    # token 归属判定——跨日会话计 1 次是对的，它今天确实活跃（spec §5.2）。
+    filter_ = SessionFilter(host_kind=host_kind, date_from=day_key,
+                            date_to=day_key)
+    today_sessions = sum(1 for e in store.entries if filter_.matches(e))
+
+    # 最近 N：**全量排序后取前 N**，不分页（§6 决策 2——`sessions list` 是
+    # SessionKey 序，页内取最近 ≠ 全局最近；导航命令读全量 summaries 排完取
+    # 前 N）。比较器 `recent_cmp` 在 core（r2a.rs ↔ r2a.py 锁步）。
+    ordered = sorted(store.entries, key=functools.cmp_to_key(recent_cmp))
+    recent = []
+    for e in ordered[:recent_n]:
+        recent.append({
+            # session_key 原样透传（SessionKey::to_json 的 4 字段对象），
+            # 深链时 `sessions read` 期待同形状。
+            "session_key": e.key.to_json(),
+            "title": e.title,
+            "model": e.model,
+            "tokens_total": e.tokens_total,
+            "date_first": e.date_first,
+            "date_last": e.date_last,
+            "revision": e.session_revision,
+        })
+
+    # store_revision：no-filter 的 per-filter 派生 revision（命中集最大
+    # store_seq，与 `list_sessions` 同款推导；空 store → 0）。
+    store_revision = max((e.store_seq for e in store.entries), default=0)
+    status = "ready" if today_tokens.get("value") is not None else "partial"
+    return {"host_kind": host_kind, "status": status,
+            "today_tokens": today_tokens, "today_sessions": today_sessions,
+            "recent": recent, "store_revision": store_revision}
+
+
+def host_has_source(host_kind, store):
+    """「该宿主有数据源」= store 的 `source_statuses[host].roots` 里至少一个
+    根 exists=true（见 `host_snapshot` 的语义注释）。mirror
+    `r2a_store.rs::host_has_source`。"""
+    statuses = store.source_statuses.get(host_kind) if isinstance(
+        store.source_statuses, dict) else None
+    roots = statuses.get("roots") if isinstance(statuses, dict) else None
+    return (isinstance(roots, list) and any(
+        isinstance(r, dict) and r.get("exists") is True for r in roots))
+
+
+def codex_today_tokens_json(merged, day_key, zero_sessions):
+    """Codex 今日 token（spec §5.2 basis=events）：全折叠 → `codex_aggregate_hours`
+    → 当日桶之和 + coverage。真值表与 Rust 同款（`r2a_store.rs::codex_today_tokens_json`）：
+
+      · 零会话（store 可读且无会话）→ 0（真零，诚实测量不是编造）；
+      · `by_hour_model` 空（读到了会话但没计量）→ value=null、coverage=null
+        （诚实「测不出」）；
+      · 当日桶存在 → value=和、coverage=partial（残差哨兵 tokens_seen>0，当日
+        数可能是下界）/ complete；
+      · 当日桶缺席（他日有计量、今天没有）→ value=null（「当日桶之和」的诚实
+        形态——spec 只给零会话一个显式 0，「今天没跑」与「今天没测到」不混成
+        一个 0）。
+    """
+    if zero_sessions:
+        return {"value": 0, "basis": "events", "coverage": "complete"}
+    by_hour = merged.get("by_hour_model") if isinstance(merged, dict) else None
+    if not isinstance(by_hour, dict) or not by_hour:
+        return {"value": None, "basis": None, "coverage": None}
+    by_date = codex_usage_mod.codex_aggregate_hours(by_hour)
+    value = codex_usage_mod.codex_day_tokens(by_date, day_key)
+    if value is None:
+        return {"value": None, "basis": None, "coverage": None}
+    unaccounted = merged.get("unaccounted") if isinstance(merged, dict) else None
+    coverage = ("partial" if codex_usage_mod.unaccounted_tokens_seen(unaccounted) > 0
+                else "complete")
+    return {"value": value, "basis": "events", "coverage": coverage}
+
+
+def render_navigation(env):
+    """人读的导航投影（`--json` 之外）——逐字节复刻 `r2a_store.rs::
+    render_navigation`（差分门比的是整行 stdout）。L2 文案与 Tauri 菜单同一批
+    （spec §8：「会话数据暂不可用」/「尚无会话」）。"""
+    out = ["navigation %s (schema %s)" % (
+        env.get("day_key", ""), env.get("schema_version", 0))]
+    for h in env.get("hosts") or []:
+        kind = h.get("host_kind", "")
+        status = h.get("status", "")
+        tk = h.get("today_tokens") or {}
+        val = tk.get("value")
+        ts = h.get("today_sessions")
+        out.append("%-8s %-11s %s · %s 会话" % (
+            kind, status,
+            str(val) if val is not None else "—",
+            str(ts) if ts is not None else "—"))
+        if status == "unavailable":
+            out.append("          · 会话数据暂不可用")
+            continue
+        recent = h.get("recent") or []
+        if not recent:
+            out.append("          · 尚无会话")
+            continue
+        for r in recent:
+            d = r.get("date_last")
+            m = r.get("model")
+            t = r.get("tokens_total")
+            out.append("          · %s · %s · %s" % (
+                d if d is not None else "—",
+                m if m is not None else "—",
+                str(t) if t is not None else "—"))
     return "\n".join(out) + "\n"

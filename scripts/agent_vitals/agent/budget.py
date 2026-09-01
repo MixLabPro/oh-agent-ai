@@ -341,6 +341,31 @@ def compute_month_cost(month=None):
     return {"total": total, "peak_total": peak}
 
 
+def today_tokens_for_day(data, day_key):
+    """today.json 的 data → 指定日的 token 总量（spec §5.2 DSH basis=state-file），
+    或 None（缺列不编列）。
+
+    `compute_today_cost` 是**真实今天**硬编码的读路径（budget 语义：今天的
+    花费）；`sessions navigation --day` 按任意日投影，但 DSH 的 state 只有
+    today.json 一份（`rotate_today` 只在真实审计时翻页）——date 校验与
+    `cost.rs::today_cost` 同款：date 在场且 ≠ day_key → None；buckets 与
+    by_model 皆空 → None。token 口径与 `today_cost` 的 `tokens` 键完全一致
+    （4 字段求和、同一函数，不重复实现）：by_model 优先，否则逐桶。
+    定价（total/peak）导航不需要，不重算。"""
+    if not isinstance(data, dict):
+        return None
+    d = data.get("date")
+    if d is not None and d != day_key:
+        return None
+    by_model = data.get("by_model") or {}
+    buckets = data.get("buckets") or {}
+    if not by_model and not buckets:
+        return None
+    if by_model:
+        return sum(_base_tokens(b) for b in by_model.values())
+    return sum(_base_tokens(b) for b in buckets.values())
+
+
 def compute_7d_avg_daily():
     """近 7 天日均 cost —— 自适应阈值的输入。
 

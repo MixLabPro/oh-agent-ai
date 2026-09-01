@@ -27,6 +27,8 @@
 //!    `MAX_CONTRACT_VERSION = 1`（当前首发）、`CURRENT = 1`。N+1（major 2）由
 //!    版本闸拒绝，**不看字段名**（独立升级顺序测试）。
 
+use std::cmp::Ordering;
+
 use serde_json::{Map, Value, json};
 
 /// 当前 wire 契约版本（envelope 的 `schema_version`）。设计 §2.2「本次 R2a 首发 = 1」。
@@ -150,6 +152,31 @@ impl SessionKey {
 /// machine_namespace 的内容字典序）。Python 镜像 `r2a.sort_key` 钉同一顺序。
 fn sort_tuple(k: &SessionKey) -> (&str, &str, &str, &str) {
     (&k.host_kind, &k.native_id, &k.source_profile, &k.machine_namespace)
+}
+
+/// 「最近 N」的权威排序比较器（spec §5.2 / §6 决策 2）。排序发生在**数据层、
+/// 分页之前**——`sessions list` 是 SessionKey 四元组序（`sort_tuple`），不是时间序，
+/// 第一页 50 条页内取最近 ≠ 全局最近（P1-3 事故：排序错误发生在分页之前，展示层
+/// 无法修复）。导航命令读全量 summaries 按此排完取前 N，不分页。
+///
+/// 键序：`date_span.last DESC（None last）→ session_revision DESC（None last）→
+/// SessionKey ASC（sort_tuple）`。date/revision 都是 ISO 字符串，字典序即时间序。
+/// 与 `sessions list` 的 `sort_tuple` 序正交，不改 list 语义（spec §11）。
+pub fn recent_cmp(a: &SessionReportEntry, b: &SessionReportEntry) -> Ordering {
+    opt_desc(&a.date_last, &b.date_last)
+        .then_with(|| opt_desc(&a.session_revision, &b.session_revision))
+        .then_with(|| sort_tuple(&a.key).cmp(&sort_tuple(&b.key)))
+}
+
+/// DESC 序且 None last（degraded 会话没有日期/revision，诚实排最后——它们没有
+/// 可比的时间锚，不是「最早」）。
+fn opt_desc(a: &Option<String>, b: &Option<String>) -> Ordering {
+    match (a.as_deref(), b.as_deref()) {
+        (Some(x), Some(y)) => y.cmp(x),
+        (None, None) => Ordering::Equal,
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+    }
 }
 
 /// 不透明、仅相等比较的源文件指纹（设计 §1.5）。无顺序；「相等 ⇒ 内容未变」是
@@ -551,6 +578,52 @@ mod tests {
         let c = SourceFingerprint("abd".into());
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    // ── recent_cmp（spec §5.2 / §6 决策 2）──────────────────────
+
+    /// 测试专用构造：date_last 与 revision 可指定（entry() 写死 08-30）。
+    fn recent_entry(
+        host: &str,
+        native: &str,
+        date_last: Option<&str>,
+        rev: Option<&str>,
+    ) -> SessionReportEntry {
+        let mut e = entry(key(host, native), rev.unwrap_or("2026-08-30T12:00:00Z"), 0);
+        e.date_last = date_last.map(String::from);
+        e.date_first = e.date_last.clone();
+        e.session_revision = rev.map(String::from);
+        e
+    }
+
+    #[test]
+    fn recent_cmp_date_desc_then_revision_desc_then_key_asc() {
+        let mut es = [
+            recent_entry("codex", "old", Some("2026-08-01"), Some("r1")),
+            recent_entry("codex", "new", Some("2026-09-01"), Some("r1")),
+            recent_entry("dsh", "same-date", Some("2026-09-01"), Some("r1")),
+            recent_entry("codex", "newer-rev", Some("2026-09-01"), Some("r2")),
+        ];
+        es.sort_by(recent_cmp);
+        // date DESC：09-01 在前、08-01 在后；同 date 比 revision DESC（newer-rev r2
+        // 在 new/same-date r1 前）；同 date 同 rev 比 key ASC（codex < dsh）
+        let ids: Vec<&str> = es.iter().map(|e| e.key.native_id.as_str()).collect();
+        assert_eq!(ids, vec!["newer-rev", "new", "same-date", "old"]);
+    }
+
+    #[test]
+    fn recent_cmp_none_date_or_revision_last() {
+        let mut es = [
+            recent_entry("codex", "no-rev", Some("2026-09-01"), None),
+            recent_entry("codex", "no-date", None, Some("r9")),
+            recent_entry("codex", "nothing", None, None),
+            recent_entry("codex", "full", Some("2026-09-01"), Some("r9")),
+        ];
+        es.sort_by(recent_cmp);
+        // date 主键优先：full 与 no-rev 同 date → full（有 rev）在前；no-date 与
+        // nothing 都无 date → 比 revision → no-date（r9）在前。
+        let ids: Vec<&str> = es.iter().map(|e| e.key.native_id.as_str()).collect();
+        assert_eq!(ids, vec!["full", "no-rev", "no-date", "nothing"]);
     }
 
     // ── envelope 形状与版本矩阵 ─────────────────────────────────

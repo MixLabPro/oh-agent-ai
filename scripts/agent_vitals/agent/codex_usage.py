@@ -495,3 +495,41 @@ def codex_by_model_from_hours(by_hour_model, prefix=None):
             for spd, bucket in speeds.items():
                 _add_bucket(out, m, spd, _bucket_to_array(bucket))
     return out
+
+
+def codex_day_tokens(by_date_model, day_key):
+    """`sessions navigation` 的 Codex 今日 token：`codex_aggregate_hours` 的日期桶
+    （{date:{model:{speed:桶}}}）→ 当日 5 桶全模型/全速度求和（spec §5.2
+    `basis="events"`，与 codex-cost 的 days[].tokens 同一求和口径）。None =
+    该日没有 token 事件被折入（「测不出」，不是 0——「今天没跑」与「今天没测到」
+    是两个词；零会话的真零由调用方按 store 判）。mirror
+    `codex_usage.rs::codex_day_tokens`。"""
+    if not isinstance(by_date_model, dict):
+        return None
+    day_map = by_date_model.get(day_key)
+    if not isinstance(day_map, dict):
+        return None
+    total = 0
+    for speeds in day_map.values():
+        if not isinstance(speeds, dict):
+            continue
+        for bucket in speeds.values():
+            total += sum(_bucket_to_array(bucket))
+    return total
+
+
+def unaccounted_tokens_seen(unaccounted):
+    """折叠残差哨兵：`unaccounted` 条目（`{type, count, tokens_seen}` 列表）的
+    `tokens_seen` 总和。>0 → 有 token 看见了没接住，当日数可能是下界 →
+    coverage=partial（spec §5.2；全时段残差，当日粒度不重算）。mirror
+    `codex_usage.rs::unaccounted_tokens_seen`。"""
+    if not isinstance(unaccounted, list):
+        return 0
+    total = 0
+    for e in unaccounted:
+        if not isinstance(e, dict):
+            continue
+        v = e.get("tokens_seen")
+        if isinstance(v, int) and not isinstance(v, bool):
+            total += v
+    return total

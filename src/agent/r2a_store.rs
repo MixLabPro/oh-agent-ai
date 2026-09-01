@@ -55,6 +55,45 @@ use crate::agent::codex_session_audit as csa;
 use crate::agent::takeover;
 use crate::skills::snapshot::data_home;
 
+/// 并行逐会话构建，结果按输入序回填。会话构建互相独立（只读各自源文件 + 共享
+/// 只读的 `fp_map`/`ws`），可并行；但每个 worker 持有当前会话解压后的全文，
+/// 并发数过高会爆内存（源合计 631MB、单会话解压后可能几十 MB），所以**有界并
+/// 发**——`thread::scope` + chunk 分片，worker 数 = min(输入数, 可用核, 8)，
+/// 不是 thread-per-item。
+///
+/// 输出顺序与输入一致（chunk 依次 extend）：envelope 的 store_seq 由
+/// `finalize_and_write` 排序决定，`degraded` 列表要保持文件序才字节确定——
+/// 并行只换「谁来算」，不换「结果顺序」。
+fn par_map_in_order<T, U, F>(items: &[T], f: F) -> Vec<U>
+where
+    T: Sync,
+    U: Send,
+    F: Fn(&T) -> U + Send + Sync,
+{
+    if items.len() <= 1 {
+        return items.iter().map(&f).collect();
+    }
+    let n_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(8)
+        .min(items.len());
+    let chunk = items.len().div_ceil(n_workers);
+    std::thread::scope(|s| {
+        // 不用 `move`：闭包共享借用 `f`（Fn 可并发调用），chunk 依次 spawn；
+        // `&f` 是可调用的引用（&F: Fn），每次 spawn 重新取，不消费 `f` 本身。
+        let handles: Vec<_> = items
+            .chunks(chunk)
+            .map(|c| s.spawn(|| c.iter().map(&f).collect::<Vec<_>>()))
+            .collect();
+        let mut out = Vec::with_capacity(items.len());
+        for h in handles {
+            out.extend(h.join().expect("session build worker panicked"));
+        }
+        out
+    })
+}
+
 /// cache 根：`data_home()/cache/r2a/`。在 `state_dir()` 之外 —— R2a SessionStore
 /// 的写面只到自己的 cache，不与 R1 的权威状态文件争 fencing。
 fn cache_dir() -> PathBuf {
@@ -439,10 +478,12 @@ impl SessionStore {
                     sids.insert(csa::codex_session_id_of(Path::new(p)));
                 }
                 let mut sessions = kept;
-                for sid in &sids {
-                    if let Some(bs) = codex_built_session_for(home, sid, &ns, &fp_map) {
-                        sessions.push(bs);
-                    }
+                let sid_list: Vec<String> = sids.into_iter().collect();
+                for bs in par_map_in_order(&sid_list, |sid| codex_built_session_for(home, sid, &ns, &fp_map))
+                    .into_iter()
+                    .flatten()
+                {
+                    sessions.push(bs);
                 }
                 let statuses = codex_source_statuses(home, sessions.len());
                 return Ok(finalize_and_write("codex", &cache_path, sessions, generated_at, statuses, Vec::new()));
@@ -461,10 +502,11 @@ impl SessionStore {
             .filter_map(|s| s.get("session_id").and_then(Value::as_str).map(str::to_owned))
             .collect();
         let mut sessions = Vec::new();
-        for sid in &session_ids {
-            if let Some(bs) = codex_built_session_for(home, sid, &ns, &fp_map) {
-                sessions.push(bs);
-            }
+        for bs in par_map_in_order(&session_ids, |sid| codex_built_session_for(home, sid, &ns, &fp_map))
+            .into_iter()
+            .flatten()
+        {
+            sessions.push(bs);
         }
         let statuses = codex_source_statuses(home, sessions.len());
         Ok(finalize_and_write("codex", &cache_path, sessions, generated_at, statuses, Vec::new()))
@@ -506,17 +548,22 @@ impl SessionStore {
                 let dsh_root = home.join(".dsh");
                 let files = crate::agent::discovery::dsh_session_files(&dsh_root);
                 let ws = crate::agent::discovery::read_workspace_index(&dsh_root);
+                // namespace 必须**并行前**固定：`dsh_built_session_for` 若内部现算
+                // `machine_namespace()`，miss 时会写 machine.json——并发首建会得到
+                // 互相不一致的随机 namespace（envelope 键的一部分，直接破坏分页键）。
+                let ns = takeover::machine_namespace();
                 let mut sessions = kept;
                 let mut degraded: Vec<DegradedTriple> = kept_deg
                     .into_iter()
                     .map(|(p, r)| (p.clone(), fp_map.get(p.as_str()).map(|f| f.to_string()).unwrap_or_default(), r))
                     .collect();
-                for path in &files {
-                    let path_str = path.display().to_string();
-                    if !to_process.iter().any(|p| p == &path_str) {
-                        continue;
-                    }
-                    match dsh_built_session_for(path, &ws, &fp_map) {
+                let to_process_set: HashSet<&str> = to_process.iter().map(String::as_str).collect();
+                let to_build: Vec<&PathBuf> = files
+                    .iter()
+                    .filter(|p| to_process_set.contains(p.display().to_string().as_str()))
+                    .collect();
+                for r in par_map_in_order(&to_build, |p| dsh_built_session_for(p, &ws, &fp_map, &ns)) {
+                    match r {
                         Ok(bs) => sessions.push(bs),
                         Err((p, reason, fp)) => degraded.push((p, fp, reason)),
                     }
@@ -532,10 +579,11 @@ impl SessionStore {
         let dsh_root = home.join(".dsh");
         let files = crate::agent::discovery::dsh_session_files(&dsh_root);
         let ws = crate::agent::discovery::read_workspace_index(&dsh_root);
+        let ns = takeover::machine_namespace();
         let mut sessions = Vec::new();
         let mut degraded: Vec<DegradedTriple> = Vec::new();
-        for path in &files {
-            match dsh_built_session_for(path, &ws, &fp_map) {
+        for r in par_map_in_order(&files, |p| dsh_built_session_for(p, &ws, &fp_map, &ns)) {
+            match r {
                 Ok(bs) => sessions.push(bs),
                 Err((p, reason, fp)) => degraded.push((p, fp, reason)),
             }
@@ -551,8 +599,19 @@ impl SessionStore {
     /// 冻结在各自的 cache 里，跨进程/跨实现稳定）。`source_statuses` 合并成
     /// `{codex, dsh}` 完整视图（§2.1 的 envelope 形状）。
     pub fn all(home: &Path) -> Result<SessionStore, StoreError> {
-        let codex_store = SessionStore::codex(home)?;
-        let dsh_store = SessionStore::dsh(home)?;
+        // 两个单源 store 各自走自己的 cache、写各自的 cache 文件，互相独立——
+        // 冷启动两源串行（实测 30s+）压成两源并行。`machine_namespace()` 只在两
+        // 个单源构建内部各固定一次（codex 首行 / dsh 并行前），跨源无共享写。
+        let (codex_store, dsh_store) = std::thread::scope(|s| {
+            let c = s.spawn(|| SessionStore::codex(home));
+            let d = s.spawn(|| SessionStore::dsh(home));
+            (
+                c.join().expect("codex store build panicked"),
+                d.join().expect("dsh store build panicked"),
+            )
+        });
+        let codex_store = codex_store?;
+        let dsh_store = dsh_store?;
         let mut entries = codex_store.entries.clone();
         entries.extend(dsh_store.entries.clone());
         // 全局稳定序：host_kind "codex" < "dsh"，concat 已序，仍防御性重排一遍
@@ -885,7 +944,13 @@ fn write_cache_v2(
         let _ = std::fs::create_dir_all(dir);
     }
     let text = serde_json::to_string(&doc).unwrap_or_default();
-    let _ = std::fs::write(path, text);
+    // 原子写：两个 `sessions list` 并发（后台预热 + 用户点 tab）可能同时写同一份
+    // cache，直接 fs::write 会交错出半截 JSON。先写同名 .tmp 再 rename——读者要么
+    // 看到旧完整文件要么看到新完整文件，绝不看到中间态。
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
 }
 
 /// 单个 session_id 的完整重建（复用既有 `codex_session_audit_json`）。Codex 一
@@ -926,8 +991,8 @@ fn dsh_built_session_for(
     path: &Path,
     ws: &crate::agent::discovery::WorkspaceIndex,
     fp_map: &HashMap<&str, &str>,
+    ns: &str,
 ) -> Result<BuiltSession, DegradedTriple> {
-    let ns = takeover::machine_namespace();
     let path_str = path.display().to_string();
     let fp = fp_map.get(path_str.as_str()).map(|f| f.to_string()).unwrap_or_default();
     let text = match crate::dsh::read_session_text(path) {
@@ -954,7 +1019,7 @@ fn dsh_built_session_for(
     let revision = dsh_session_revision(&text);
     Ok(BuiltSession {
         entry: PendingEntry {
-            key: SessionKey::new("dsh", &id, &dsh_source_profile(cwd.as_deref()), &ns),
+            key: SessionKey::new("dsh", &id, &dsh_source_profile(cwd.as_deref()), ns),
             payload,
             revision,
         },
@@ -1163,6 +1228,278 @@ fn render_findings(dto: &Value) -> String {
             r.get("hits").and_then(Value::as_u64).unwrap_or(0),
             r.get("sessions").and_then(Value::as_u64).unwrap_or(0),
         ));
+    }
+    out
+}
+
+// ── sessions navigation（多宿主导航投影，spec §5.1/§5.2）─────────
+
+/// `sessions navigation`：单只读投影命令，一次 spawn 返回两宿主快照
+/// （`docs/MENUBAR_MULTIHOST_NAVIGATION_SPEC.md` §5.1/§5.2）。排序、日界折叠、
+/// 覆盖率、会话计数全部是数据层的测量（§6 决策 3）——Tauri 只缓存渲染，不重新
+/// 解释。宿主失败彼此隔离：store 构建失败 / 该宿主无数据源 → 对应宿主
+/// `unavailable`，不 abort 全命令；托盘宿主区失败不影响顶层今日/预算行（§8）。
+pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n: usize, json_out: bool) {
+    if timezone != "Asia/Shanghai" {
+        eprintln!(
+            "unsupported --timezone {timezone:?}: only Asia/Shanghai (core day boundary is fixed UTC+8, no DST; §5.1)"
+        );
+        std::process::exit(2);
+    }
+    // 两宿主 store 独立构建：失败各自降级（unavailable），不 abort。
+    let dsh_store = SessionStore::dsh(home);
+    let codex_store = SessionStore::codex(home);
+
+    // DSH 今日 token：today.json → core `today_cost`——与 Tauri 顶层钱行同一函数
+    // （§5.2 basis=state-file；date stale / 缺场 → None → value=null，不编 0）。
+    let pricing = agent_vitals_core::cost::load_pricing();
+    let today_data = crate::agent::state::read_json(&crate::agent::state::state_dir().join("today.json"));
+    let dsh_today_tokens: Value = match today_data
+        .as_ref()
+        .and_then(|d| agent_vitals_core::cost::today_cost(d, &pricing, day_key))
+    {
+        Some(r) => json!({
+            "value": r.get("tokens").and_then(Value::as_i64),
+            "basis": "state-file",
+            // spec：DSH coverage 恒 complete——state 折叠的覆盖率是 state 层
+            // 自己的轴（日历已单独展示），菜单不重复读。
+            "coverage": "complete",
+        }),
+        None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": "complete" }),
+    };
+
+    // Codex 今日 token：全 rollout 折叠（codex-cost 同一条链路，§2.3）。只在
+    // 该宿主有数据源时折叠——无源反正 unavailable，省掉整次折叠 I/O。
+    let codex_merged: Option<Value> = codex_store
+        .as_ref()
+        .ok()
+        .filter(|s| host_has_source("codex", s))
+        .map(|_| {
+            let mut folds: Vec<Value> = Vec::new();
+            for path in crate::agent::codex_session::codex_rollout_files(home) {
+                let parsed = crate::agent::codex_session::read_codex_session_log(&path);
+                let items = parsed
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                folds.push(agent_vitals_core::codex_usage::codex_fold_file(&items));
+            }
+            agent_vitals_core::codex_usage::codex_merge_folds(&folds)
+        });
+    let codex_today_tokens: Value = match &codex_merged {
+        Some(merged) => codex_today_tokens_json(merged, day_key, codex_store.as_ref().map_or(true, |s| s.entries.is_empty())),
+        None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null }),
+    };
+
+    let hosts = json!([
+        host_snapshot("dsh", dsh_store.as_ref().ok(), dsh_today_tokens, day_key, recent_n),
+        host_snapshot("codex", codex_store.as_ref().ok(), codex_today_tokens, day_key, recent_n),
+    ]);
+    // envelope 的 generated_at 取两 store 中较新的构建时刻（`SessionStore::all`
+    // 的 max 同款语义；缓存共享时两侧逐字节一致——差分门靠它）。两 store 都
+    // 失败时用当前时刻（该形态没有可共享的墙钟）。
+    let generated_at = dsh_store
+        .as_ref()
+        .ok()
+        .map(|s| s.generated_at.as_str())
+        .into_iter()
+        .chain(codex_store.as_ref().ok().map(|s| s.generated_at.as_str()))
+        .max()
+        .map(str::to_string)
+        .unwrap_or_else(now_iso_utc);
+    let envelope = json!({
+        "schema_version": 1,
+        "day_key": day_key,
+        "timezone": timezone,
+        "generated_at": generated_at,
+        "hosts": hosts,
+    });
+    let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
+    if json_out {
+        println!("{text}");
+    } else {
+        print!("{}", render_navigation(&envelope));
+    }
+}
+
+/// 单宿主快照组装（纯，可测）。`store` None = 构建失败 → 整宿主 `unavailable`
+/// （spec §8：宿主区失败不 abort、也不摆 0 冒充）。「该宿主无数据源」——store 的
+/// `source_statuses[host].roots` 全 exists=false（~/.codex / ~/.dsh 从未安装；
+/// 与 `sessions list` 的「没有 DSH = 诚实零」不同面：托盘固定渲染两行，未安装
+/// 的宿主显示「—」而不是「0 会话」，spec §8）——同样 unavailable。DSH store
+/// 自报 `unavailable`（文件在但一个都读不了，§4.3）也归这一档。
+fn host_snapshot(
+    host_kind: &str,
+    store: Option<&SessionStore>,
+    today_tokens: Value,
+    day_key: &str,
+    recent_n: usize,
+) -> Value {
+    let unavailable = || {
+        json!({
+            "host_kind": host_kind,
+            "status": "unavailable",
+            "today_tokens": Value::Null,
+            "today_sessions": Value::Null,
+            "recent": [],
+            "store_revision": Value::Null,
+        })
+    };
+    let Some(store) = store.filter(|s| host_has_source(host_kind, s)) else {
+        return unavailable();
+    };
+    if store
+        .source_statuses
+        .get(host_kind)
+        .and_then(|s| s.get("status"))
+        .and_then(Value::as_str)
+        == Some("unavailable")
+    {
+        return unavailable();
+    }
+
+    // 今日会话数：date_span 与 [day_key, day_key] 交叠（`SessionFilter::matches`
+    // 同语义）；无日期的 degraded 会话不计入。这是「今天碰过的会话」计数，不是
+    // token 归属判定——跨日会话计 1 次是对的，它今天确实活跃（spec §5.2）。
+    let filter = SessionFilter {
+        host_kind: Some(host_kind.to_string()),
+        date_from: Some(day_key.to_string()),
+        date_to: Some(day_key.to_string()),
+        ..SessionFilter::default()
+    };
+    let today_sessions = store.entries.iter().filter(|e| filter.matches(e)).count();
+
+    // 最近 N：**全量排序后取前 N**，不分页（§6 决策 2——`sessions list` 是
+    // SessionKey 序，页内取最近 ≠ 全局最近；导航命令读全量 summaries 排完取前
+    // N）。比较器 `recent_cmp` 在 core（r2a.rs ↔ r2a.py 锁步）。
+    let mut recent_entries: Vec<&SessionReportEntry> = store.entries.iter().collect();
+    recent_entries.sort_by(|a, b| recent_cmp(a, b));
+    let recent: Vec<Value> = recent_entries
+        .iter()
+        .take(recent_n)
+        .map(|e| {
+            json!({
+                // session_key 原样透传（SessionKey::to_json 的 4 字段对象），
+                // 深链时 `sessions read` 期待同形状。
+                "session_key": e.key.to_json(),
+                "title": e.title.as_deref(),
+                "model": e.model.as_deref(),
+                "tokens_total": e.tokens_total,
+                "date_first": e.date_first.as_deref(),
+                "date_last": e.date_last.as_deref(),
+                "revision": e.session_revision.as_deref(),
+            })
+        })
+        .collect();
+
+    // store_revision：no-filter 的 per-filter 派生 revision（命中集最大
+    // store_seq，与 `list_sessions` 同款推导；空 store → 0）。
+    let store_revision = store.entries.iter().map(|e| e.store_seq).max().unwrap_or(0);
+    let status = if today_tokens.get("value").and_then(Value::as_i64).is_some() {
+        "ready"
+    } else {
+        "partial"
+    };
+    json!({
+        "host_kind": host_kind,
+        "status": status,
+        "today_tokens": today_tokens,
+        "today_sessions": today_sessions,
+        "recent": recent,
+        "store_revision": store_revision,
+    })
+}
+
+/// 「该宿主有数据源」= store 的 `source_statuses[host].roots` 里至少一个根
+/// exists=true（见 `host_snapshot` 的语义注释）。
+fn host_has_source(host_kind: &str, store: &SessionStore) -> bool {
+    store
+        .source_statuses
+        .get(host_kind)
+        .and_then(|s| s.get("roots"))
+        .and_then(Value::as_array)
+        .map(|roots| roots.iter().any(|r| r.get("exists").and_then(Value::as_bool).unwrap_or(false)))
+        .unwrap_or(false)
+}
+
+/// Codex 今日 token（spec §5.2 basis=events）：全折叠 → `codex_aggregate_hours`
+/// → 当日桶之和 + coverage：
+///
+///   · 零会话（store 可读且无会话）→ 0（真零，诚实测量不是编造）；
+///   · `by_hour_model` 空（读到了会话但没计量）→ value=null、coverage=null
+///     （诚实「测不出」）；
+///   · 当日桶存在 → value=和、coverage=partial（残差哨兵 tokens_seen>0，当日
+///     数可能是下界）/ complete；
+///   · 当日桶缺席（他日有计量、今天没有）→ value=null（「当日桶之和」的诚实
+///     形态——spec 只给零会话一个显式 0，「今天没跑」与「今天没测到」不混成
+///     一个 0）。
+fn codex_today_tokens_json(merged: &Value, day_key: &str, zero_sessions: bool) -> Value {
+    if zero_sessions {
+        return json!({ "value": 0, "basis": "events", "coverage": "complete" });
+    }
+    let by_hour = merged.get("by_hour_model").unwrap_or(&Value::Null);
+    if !by_hour.as_object().is_some_and(|m| !m.is_empty()) {
+        return json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null });
+    }
+    let by_date = agent_vitals_core::codex_usage::codex_aggregate_hours(by_hour);
+    let Some(value) = agent_vitals_core::codex_usage::codex_day_tokens(&by_date, day_key) else {
+        return json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null });
+    };
+    let unaccounted = merged.get("unaccounted").unwrap_or(&Value::Null);
+    let coverage = if agent_vitals_core::codex_usage::unaccounted_tokens_seen(unaccounted) > 0 {
+        "partial"
+    } else {
+        "complete"
+    };
+    json!({ "value": value, "basis": "events", "coverage": coverage })
+}
+
+/// 人读的导航投影（`--json` 之外）：每宿主一行 L1 + 缩进 L2。与 JSON 同一份
+/// 数据，别另起炉灶；格式是展示层选择，但两实现必须逐字节一致——差分门比的
+/// 是 stdout。L2 文案与 Tauri 菜单同一批（§8：「会话数据暂不可用」/「尚无
+/// 会话」）。
+fn render_navigation(env: &Value) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "navigation {} (schema {})\n",
+        env.get("day_key").and_then(Value::as_str).unwrap_or(""),
+        env.get("schema_version").and_then(Value::as_u64).unwrap_or(0),
+    ));
+    for h in env.get("hosts").and_then(Value::as_array).into_iter().flatten() {
+        let kind = h.get("host_kind").and_then(Value::as_str).unwrap_or("");
+        let status = h.get("status").and_then(Value::as_str).unwrap_or("");
+        let tk = h.get("today_tokens").unwrap_or(&Value::Null);
+        let val = tk
+            .get("value")
+            .and_then(Value::as_i64)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let ts = h
+            .get("today_sessions")
+            .and_then(Value::as_u64)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        out.push_str(&format!("{kind:<8} {status:<11} {val} · {ts} 会话\n"));
+        if status == "unavailable" {
+            out.push_str("          · 会话数据暂不可用\n");
+            continue;
+        }
+        let recent = h.get("recent").and_then(Value::as_array).cloned().unwrap_or_default();
+        if recent.is_empty() {
+            out.push_str("          · 尚无会话\n");
+            continue;
+        }
+        for r in &recent {
+            let d = r.get("date_last").and_then(Value::as_str).unwrap_or("—");
+            let m = r.get("model").and_then(Value::as_str).unwrap_or("—");
+            let t = r
+                .get("tokens_total")
+                .and_then(Value::as_i64)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "—".to_string());
+            out.push_str(&format!("          · {d} · {m} · {t}\n"));
+        }
     }
     out
 }
@@ -1721,5 +2058,231 @@ mod tests {
         assert_eq!(p0.total, 1); // 只有 rollout-sol 是 gpt-5.6-sol
         assert_eq!(p0.items[0]["session_key"]["native_id"], "rollout-sol");
         assert!(p0.next_cursor.is_none());
+    }
+
+    // ── sessions navigation 纯函数单测 ────────────────────────────
+
+    fn nav_entry(
+        host: &str,
+        id: &str,
+        date_first: Option<&str>,
+        date_last: Option<&str>,
+        rev: Option<&str>,
+        seq: u64,
+    ) -> SessionReportEntry {
+        SessionReportEntry {
+            key: SessionKey::new(host, id, "p", "m"),
+            session_revision: rev.map(str::to_string),
+            title: Some(format!("session-{id}")),
+            model: Some("gpt-5.6-sol".to_string()),
+            date_first: date_first.map(str::to_string),
+            date_last: date_last.map(str::to_string),
+            files: 1,
+            cost_usd: None,
+            tokens_total: Some(1000),
+            findings_total: 0,
+            store_seq: seq,
+            envelope: Value::Null,
+        }
+    }
+
+    fn nav_store(host: &str, entries: Vec<SessionReportEntry>, status: &str, any_root: bool) -> SessionStore {
+        SessionStore {
+            entries,
+            source_statuses: json!({
+                host: {
+                    "status": status,
+                    "roots": [{"kind": "live", "path": "/nope", "exists": any_root,
+                               "file_count": 1, "total_bytes": 1}],
+                }
+            }),
+            generated_at: "2026-09-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// 无数据源（roots 全 exists=false——~/.codex / ~/.dsh 从未安装）→ 整宿主
+    /// unavailable（spec §8；与 `sessions list` 的「没有 DSH = 诚实零」不同面：
+    /// 托盘固定渲染两行，未安装的宿主显示「—」而不是「0 会话」）。store 构建
+    /// 失败（None）与 DSH 自报 source-unavailable（文件在但一个都读不了）同档。
+    #[test]
+    fn host_snapshot_unavailable_when_host_has_no_source() {
+        let store = nav_store("codex", vec![], "ok", false);
+        let snap = host_snapshot(
+            "codex",
+            Some(&store),
+            json!({"value": 5, "basis": "events", "coverage": "complete"}),
+            "2026-08-31",
+            5,
+        );
+        assert_eq!(snap["status"], "unavailable");
+        assert!(snap["today_tokens"].is_null());
+        assert!(snap["today_sessions"].is_null());
+        assert_eq!(snap["recent"].as_array().unwrap().len(), 0);
+        assert!(snap["store_revision"].is_null());
+        // store 构建失败 → 同 unavailable，today_tokens 丢弃（宿主原子降级）
+        let snap2 = host_snapshot("dsh", None, json!({"value": 5}), "2026-08-31", 5);
+        assert_eq!(snap2["status"], "unavailable");
+        assert!(snap2["today_tokens"].is_null());
+        // DSH「文件在但一个都读不了」（§4.3）→ 也归这一档，即使 roots 存在
+        let store3 = nav_store("dsh", vec![], "unavailable", true);
+        let snap3 = host_snapshot("dsh", Some(&store3), json!({"value": 5}), "2026-08-31", 5);
+        assert_eq!(snap3["status"], "unavailable");
+    }
+
+    /// ready 宿主：today_sessions = date_span 与当日交叠的会话数（跨日会话计 1
+    /// 次——它今天确实活跃，spec §5.2）；recent = 全量 recent_cmp 排序取前 N
+    /// （date_span.last DESC → session_revision DESC → key ASC）；store_revision =
+    /// 最大 store_seq；today_tokens.value null → partial（有会话但今天没测到，
+    /// 不是没会话——两者不是一个状态）。
+    #[test]
+    fn host_snapshot_ready_measures_today_and_recent() {
+        let entries = vec![
+            nav_entry("codex", "span", Some("2026-08-01"), Some("2026-08-31"), Some("r1"), 3),
+            nav_entry("codex", "old", Some("2026-08-30"), Some("2026-08-30"), Some("r2"), 2),
+            nav_entry("codex", "newest", Some("2026-08-31"), Some("2026-08-31"), Some("r9"), 5),
+        ];
+        let store = nav_store("codex", entries, "ok", true);
+        let snap = host_snapshot(
+            "codex",
+            Some(&store),
+            json!({"value": 123, "basis": "events", "coverage": "complete"}),
+            "2026-08-31",
+            5,
+        );
+        assert_eq!(snap["status"], "ready");
+        assert_eq!(snap["today_sessions"], 2); // span（跨日）+ newest；old 昨天
+        assert_eq!(snap["store_revision"], 5);
+        let recent = snap["recent"].as_array().unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0]["session_key"]["native_id"], "newest");
+        assert_eq!(recent[1]["session_key"]["native_id"], "span");
+        assert_eq!(recent[2]["session_key"]["native_id"], "old");
+        // 4 条 → recent 截断到 N
+        let mut more = store.entries.clone();
+        more.push(nav_entry("codex", "fourth", Some("2026-08-30"), Some("2026-08-31"), Some("r3"), 6));
+        let store4 = nav_store("codex", more, "ok", true);
+        let snap4 = host_snapshot(
+            "codex",
+            Some(&store4),
+            json!({"value": 123}),
+            "2026-08-31",
+            2,
+        );
+        assert_eq!(snap4["recent"].as_array().unwrap().len(), 2);
+        // value null → partial
+        let snap2 = host_snapshot(
+            "codex",
+            Some(&store),
+            json!({"value": Value::Null, "basis": Value::Null, "coverage": "complete"}),
+            "2026-08-31",
+            5,
+        );
+        assert_eq!(snap2["status"], "partial");
+        assert_eq!(snap2["today_sessions"], 2); // 会话计数与 token 无关
+    }
+
+    /// Codex 今日 token 真值表（spec §5.2）：零会话 → 0（真零，唯一显式 0）；
+    /// 读到了会话但没计量 → null 三连（测不出，不编 0）；当日桶缺席（他日有
+    /// 计量、今天没有）→ null（「今天没跑」≠「今天没测到」）；当日桶存在 →
+    /// 和，残差哨兵 tokens_seen>0 → partial。
+    #[test]
+    fn codex_today_tokens_json_honesty_truth_table() {
+        // 零会话 → 0
+        let merged = json!({"by_hour_model": {}});
+        let v = codex_today_tokens_json(&merged, "2026-08-31", true);
+        assert_eq!(v["value"], 0);
+        assert_eq!(v["basis"], "events");
+        assert_eq!(v["coverage"], "complete");
+        // by_hour_model 空（有会话但没计量）→ 测不出
+        let v2 = codex_today_tokens_json(&merged, "2026-08-31", false);
+        assert!(v2["value"].is_null());
+        assert!(v2["basis"].is_null());
+        assert!(v2["coverage"].is_null());
+        // 当日桶缺席 → null（即使昨天有计量）
+        let merged2 = json!({
+            "by_hour_model": {
+                "2026-08-30T10+08:00": {"gpt-5.6-sol": {"p1": {"uncached_input_tokens": 100}}}
+            },
+            "unaccounted": []
+        });
+        let v3 = codex_today_tokens_json(&merged2, "2026-08-31", false);
+        assert!(v3["value"].is_null());
+        // 当日桶存在 → 当日全模型/全速度之和；残差 → partial
+        let merged3 = json!({
+            "by_hour_model": {
+                "2026-08-31T09+08:00": {"gpt-5.6-sol": {"p1": {"uncached_input_tokens": 60}}},
+                "2026-08-31T11+08:00": {"gpt-5.6-sol": {"p2": {"output_tokens": 40}}},
+                "2026-08-31T23+08:00": {"other": {"p1": {"cached_input_tokens": 300}}}
+            },
+            "unaccounted": [{"type": "x", "count": 1, "tokens_seen": 1500}]
+        });
+        let v4 = codex_today_tokens_json(&merged3, "2026-08-31", false);
+        assert_eq!(v4["value"], 400);
+        assert_eq!(v4["basis"], "events");
+        assert_eq!(v4["coverage"], "partial");
+        // 无残差 → complete
+        let merged4 = json!({
+            "by_hour_model": {"2026-08-31T09+08:00": {"gpt-5.6-sol": {"p1": {"uncached_input_tokens": 60}}}},
+            "unaccounted": []
+        });
+        let v5 = codex_today_tokens_json(&merged4, "2026-08-31", false);
+        assert_eq!(v5["value"], 60);
+        assert_eq!(v5["coverage"], "complete");
+    }
+
+    /// 人读渲染钉死逐字节文本（Python 镜像必须原样复刻——差分门比的是一整行
+    /// stdout）。L2 文案与 Tauri 菜单同一批（spec §8）。
+    #[test]
+    fn render_navigation_is_byte_stable() {
+        let env = json!({
+            "schema_version": 1,
+            "day_key": "2026-08-31",
+            "timezone": "Asia/Shanghai",
+            "generated_at": "2026-09-01T00:00:00Z",
+            "hosts": [
+                {
+                    "host_kind": "dsh",
+                    "status": "unavailable",
+                    "today_tokens": Value::Null,
+                    "today_sessions": Value::Null,
+                    "recent": [],
+                    "store_revision": Value::Null
+                },
+                {
+                    "host_kind": "codex",
+                    "status": "ready",
+                    "today_tokens": {"value": 1234, "basis": "events", "coverage": "complete"},
+                    "today_sessions": 2,
+                    "recent": [{
+                        "session_key": SessionKey::new("codex", "c1", "p", "m").to_json(),
+                        "title": "a title",
+                        "model": "gpt-5.6-sol",
+                        "tokens_total": 500,
+                        "date_first": "2026-08-31",
+                        "date_last": "2026-08-31",
+                        "revision": "r1"
+                    }],
+                    "store_revision": 5
+                },
+            ],
+        });
+        let text = render_navigation(&env);
+        assert_eq!(
+            text,
+            concat!(
+                "navigation 2026-08-31 (schema 1)\n",
+                // hosts 序固定 dsh → codex（spec §5.1）
+                "dsh      unavailable — · — 会话\n",
+                "          · 会话数据暂不可用\n",
+                "codex    ready       1234 · 2 会话\n",
+                "          · 2026-08-31 · gpt-5.6-sol · 500\n",
+            )
+        );
+        // JSON 侧：serde_json（preserve_order）按 json! 的字面量顺序输出——
+        // 键序即字节一致的一部分，Python 镜像必须按同样的构造顺序建 dict。
+        let out = serde_json::to_string_pretty(&env).unwrap();
+        let keys: Vec<&str> = env.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["schema_version", "day_key", "timezone", "generated_at", "hosts"]);
+        assert!(out.contains("\"host_kind\": \"dsh\""));
     }
 }

@@ -160,7 +160,8 @@ function subscribeFoldEvent() {
   });
 }
 
-// 菜单信息行导航（双通路，照 MENUBAR_MULTIHOST_NAVIGATION_SPEC §7 简化）：
+// 菜单信息行导航（双通路，与 spec §7 深链同构——§7 描述的就是这套持久目标 +
+// 事件通知机制）：
 //   - `focus-tab` 事件是快路径（窗口已可见时菜单一戳就跳）；
 //   - `peek_nav_target` 持久目标是慢路径——窗口未建/未可见时 emit 是空操作，目标留到
 //     下次 init/focus 时 pull。**事件只是通知，pull 是最终仲裁**：监听器不读 e.payload，
@@ -186,12 +187,67 @@ function subscribeNavEvent() {
   });
 }
 
+// 会话深链导航（spec §7.2，与信息行导航同一套双通路）：`focus-target` 事件是
+// 快路径，`peek_focus_target` 持久目标是慢路径（窗口未建/未可见时 emit 丢掉的
+// 点击留到 init/focus/visibilitychange 时命中）。拿到 `SessionDetail` → 切会话
+// tab + showSession（最小对象，复用 openSessionFromFinding 范式——摘要卡缺字段
+// 显示「—」，完整数字由 sessions_read 的 envelope 分区填）；拿到 `SessionList`
+// → 切 tab + 设 host 过滤 + 重置分页 + 重新加载（v1 菜单不发射它，消费路径先
+// 落地，等「查看全部会话」回归）。apply 后 clear 是单点；apply 失败也 clear
+// （错误横幅已向用户说明，不无限重试，菜单再点会覆盖新目标）。
+async function pullFocusTarget() {
+  let t;
+  try {
+    t = await invoke("peek_focus_target");
+  } catch (e) {
+    console.warn("[workbench] peek_focus_target 失败（会话深链不可用）", e);
+    return;
+  }
+  if (!t) return;
+  try {
+    if (t.type === "sessionDetail" && t.session_key) {
+      switchTab("sessions");
+      // showSession 摘要即时渲染，envelope 异步补齐——导航已生效即可 clear，
+      // 不等 sessions_read（冷 cache 30s+，等它会让深链目标滞留整轮）。
+      showSession({
+        session_key: t.session_key,
+        title: null,
+        model: null,
+        host_kind: t.session_key.host_kind || null,
+      });
+    } else if (t.type === "sessionList") {
+      sessFilter = t.host_kind || "all";
+      updateFilterChips();
+      // loadSessions(true) 同步置 loaded，切 tab 的懒加载不会再叠一次请求。
+      loadSessions(true);
+      switchTab("sessions");
+    }
+    await invoke("clear_focus_target");
+  } catch (e) {
+    await invoke("clear_focus_target");
+    console.warn("[workbench] 深链目标应用失败（已 clear，菜单再点会覆盖新目标）", e);
+  }
+}
+
+function subscribeFocusTargetEvent() {
+  // 终身订阅，不调 unlisten（与 subscribeNavEvent 同款）。
+  listen("focus-target", () => {
+    pullFocusTarget();
+  }).catch((e) => {
+    console.warn("[workbench] focus-target 订阅失败（持久目标 pull 兜底）", e);
+  });
+}
+
 // ---------- tab 切换 ----------
 
 let activeTab = "overview";
 let calMonth = beijingMonth();
 let calData = null;
 let sessState = { items: [], nextCursor: null, total: null, loaded: false, error: false };
+// 会话列表 host 过滤（spec §7.3）："all" | "dsh" | "codex"。过滤变化重置分页
+// （游标语义是「全量翻页」，带旧过滤的游标续拉会混页）；深链 SessionList 目标
+// 也写这里。
+let sessFilter = "all";
 // Findings/数据源页同款懒加载：CLI 汇总较重（sessions_findings / sessions_list 都
 // spawn 二进制），首进一次、之后「重载」按钮刷新——与 sessions 页同一套理由。
 let findState = { loaded: false, error: false, data: null, sev: "all", rule: "all" };
@@ -223,11 +279,23 @@ async function loadActiveTab() {
 // 会话页例外：CLI 列表较重，首进加载一次、之后用「重载列表」按钮；焦点只刷新
 // 总览与日历两个便宜页。
 window.addEventListener("focus", () => {
-  // 菜单信息行导航慢路径：窗口重新获得焦点时 pull 持久目标（窗口未可见时 emit 丢掉的
-  // 那次点击在这里命中）。先 pull 再刷新，避免 pull 切 tab 后又按旧 activeTab 刷新。
+  // 菜单导航慢路径：窗口重新获得焦点时 pull 持久目标（窗口未可见时 emit 丢掉的
+  // 那次点击在这里命中）。信息行与会话深链各一个 slot，都先 pull 再刷新——避免
+  // pull 切 tab 后又按旧 activeTab 刷新。
   pullNavTarget();
+  pullFocusTarget();
   if (activeTab === "overview") renderOverview();
   else if (activeTab === "calendar") renderCalendar();
+});
+
+// 可见性恢复（隐藏/显示、切走再切回）也是「窗口变得可见」——`show()` 后 focus
+// 事件不一定跟着来（focus_session 的 show 早于 webview 完成可见），
+// visibilitychange(visible) 兜底这条路径（spec §7.2 的 pull 触发点之一）。
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    pullNavTarget();
+    pullFocusTarget();
+  }
 });
 
 // ---------- 总览 ----------
@@ -506,40 +574,95 @@ function shiftMonth(delta) {
 
 // ---------- 会话（列表 + 详情） ----------
 
+// 同一时刻至多一个 page fetch。首页 fetch、用户「更多」、后台预取三者共用同一
+// 条 `fetchSessionsPage` 追加路径；没有这层守卫，「更多」与预取并发读同一个
+// nextCursor 会双双拉同一页 → 重复追加。
+let sessFetching = false;
+// reset/reload 时 ++，作废在途预取：加载中途被重置，旧预取的本页不得续写新状态。
+let sessPrefetchGen = 0;
+let sessPrefetchActive = false;
+
 async function loadSessions(reset) {
   if (reset) {
     sessState = { items: [], nextCursor: null, total: null, loaded: true, error: false };
+    sessPrefetchGen++; // 作废在途预取（下一段 await 回来时 gen 对不上，整页丢弃）
     document.getElementById("sess-banner").hidden = true;
   }
   sessState.loaded = true;
 
-  const args = { pageSize: 50 };
-  if (sessState.nextCursor) args.cursor = JSON.stringify(sessState.nextCursor);
-  // `sessions_list` spawn 二进制、首次（冷 cache）可能要几十秒才回——真机实
-  // 测过 631MB/115 个会话文件冷启动要 30+ 秒。这段等待期间之前完全没有任何
-  // 视觉反馈（tab 面板就是空的），跟窗口真的假死在观感上没有区别，这是用户
-  // 报告"点 tab 卡到假死"的直接原因之一，不只是 IPC 本身慢。加一条"加载
-  // 中…"，至少让等待是可见、可解释的等待，不是看起来卡死的等待。
+  // `sessions_list` spawn 二进制、首次（冷 cache）要几十秒才回——真机实测过
+  // 631MB/115 个会话文件冷启动 30+ 秒（2026-09 起：store 构建并行 + app 启动
+  // 后台预热 + IPC 走 spawn_blocking，等待被压到秒级且不再冻 UI，这条兜底保留）。
+  // 这段等待期间之前完全没有任何视觉反馈（tab 面板就是空的），跟窗口真的假死
+  // 在观感上没有区别，这是用户报告"点 tab 卡到假死"的直接原因之一，不只是 IPC
+  // 本身慢。加一条"加载中…"，至少让等待是可见、可解释的等待，不是看起来卡死
+  // 的等待。
   const loadingEl = document.getElementById("sess-loading");
   loadingEl.hidden = false;
+  await fetchSessionsPage(sessPrefetchGen);
+  loadingEl.hidden = true;
+  // 首页渲染完立刻后台续拉剩余页（「分批出来」）：续页走 cache 命中快路径
+  // （~0.1s/页），每页到就重渲染，用户首屏先见第 1 页、数据随后自动补完，不用
+  // 手动点「更多」等后续。
+  if (sessState.nextCursor) prefetchRemainingPages();
+}
+
+/// 拉一页并追加到 `sessState`。守卫 `sessFetching` 防双跑双追；`gen` 是预取代，
+/// 中途 reset 后对不上 → 整页丢弃（不续写新状态）。
+async function fetchSessionsPage(gen) {
+  if (sessFetching) return false;
+  sessFetching = true;
   try {
+    const args = { pageSize: 50 };
+    // host 过滤（spec §7.3）：非 all 时把 host_kind 传给 IPC（参数在 store.rs
+    // 已存在；Tauri 2 命令参数 JS 侧 camelCase，hostKind ← host_kind，
+    // 同 pageSize/sessionKey）。过滤变化时调用方负责重置分页。
+    if (sessFilter !== "all") args.hostKind = sessFilter;
+    if (sessState.nextCursor) args.cursor = JSON.stringify(sessState.nextCursor);
     const resp = await invoke("sessions_list", args);
     // DTO 把分页嵌在顶层 `page` 下（r2a list DTO §2.5），`resp` 本身是 envelope
     // 容器。读错层会恒显「暂无会话」的假空——这是真机实证的缺陷，不是风格问题。
     const page = resp.page || {};
+    if (gen != null && gen !== sessPrefetchGen) return false; // 中途被 reset → 丢本页
     sessState.items = sessState.items.concat(page.items || []);
     sessState.nextCursor = page.next_cursor || null;
     sessState.total = page.total != null ? page.total : sessState.items.length;
     sessState.error = false;
     renderSessions();
+    return true;
   } catch (e) {
+    if (gen != null && gen !== sessPrefetchGen) return false;
     sessState.error = true;
     // 报错不摆「暂无会话」的假空——错误横幅就是错误横幅，跟空态二选一。
     showBanner("sess-banner", e, true);
     renderSessions();
+    return false;
   } finally {
-    loadingEl.hidden = true;
+    sessFetching = false;
   }
+}
+
+/// 首页之后的静默续拉：一条直循环拉完剩余页（58 会话 → 第 2 页只有 8 条）。
+/// `sessPrefetchActive` 防多个入口叠出第二条预取链。
+async function prefetchRemainingPages() {
+  if (sessPrefetchActive) return;
+  sessPrefetchActive = true;
+  const gen = ++sessPrefetchGen;
+  try {
+    while (sessState.nextCursor && sessPrefetchGen === gen) {
+      if (!(await fetchSessionsPage(gen))) return;
+    }
+  } finally {
+    sessPrefetchActive = false;
+  }
+}
+
+/// 过滤 chips 的选中态（spec §7.3）：active 的 chip 即当前 sessFilter。深链
+/// SessionList 与用户点击都写 sessFilter 后调这里，渲染只有一个入口。
+function updateFilterChips() {
+  document.querySelectorAll("#sess-filter .chip").forEach((c) => {
+    c.classList.toggle("active", c.dataset.host === sessFilter);
+  });
 }
 
 function renderSessions() {
@@ -2092,6 +2215,9 @@ function init() {
   // 菜单导航事件桥同款：先订阅；冷启动（webview 先加载、focus-tab emit 早于 listen）
   // 的那次点击由 init 末尾的 pullNavTarget() 命中，subscribeNavEvent 只管窗口已建后。
   subscribeNavEvent();
+  // 会话深链事件桥同款：先订阅；冷启动丢的那次由 init 末尾的 pullFocusTarget()
+  // 命中（subscribeFocusTargetEvent 只管窗口已建后）。
+  subscribeFocusTargetEvent();
   document.querySelectorAll(".tab").forEach((t) => {
     t.addEventListener("click", () => switchTab(t.dataset.tab));
   });
@@ -2100,6 +2226,16 @@ function init() {
   document.getElementById("cal-next").addEventListener("click", () => shiftMonth(1));
   document.getElementById("cal-month").addEventListener("change", (ev) => {
     if (ev.target.value) { calMonth = ev.target.value; renderCalendar(); }
+  });
+  // host 过滤 chips（spec §7.3）：过滤变化 → 重置分页 + 重新加载（游标语义是
+  // 全量翻页，带旧过滤的游标续拉会混页）。
+  document.querySelectorAll("#sess-filter .chip").forEach((c) => {
+    c.addEventListener("click", () => {
+      if (c.dataset.host === sessFilter) return;
+      sessFilter = c.dataset.host;
+      updateFilterChips();
+      loadSessions(true);
+    });
   });
   document.getElementById("sess-more").addEventListener("click", () => loadSessions(false));
   document.getElementById("sess-reload").addEventListener("click", () => loadSessions(true));
@@ -2120,9 +2256,10 @@ function init() {
   // 日历默认月跟随北京今天；本月输入框受 input[type=month] 约束天然合法。
   if (!calMonth) calMonth = beijingMonth();
   renderOverview();
-  // 启动 pull：冷启动时（webview 先加载、focus-tab emit 早于 listen）菜单点击的目标
-  // 在这里命中。apply 后 clear，此后 focus/事件两条路都不会重复应用。
+  // 启动 pull：冷启动时（webview 先加载、focus-tab/focus-target emit 早于 listen）
+  // 菜单点击的目标在这里命中。apply 后 clear，此后 focus/事件两条路都不会重复应用。
   pullNavTarget();
+  pullFocusTarget();
 }
 
 document.addEventListener("DOMContentLoaded", init);

@@ -164,6 +164,157 @@ fn read_recent_session(dh: &Path) -> RecentSession {
     }
 }
 
+/// 多宿主导航行（spec §5.3）：`sessions navigation` 的宿主快照在托盘侧的落盘
+/// 形状。tick 每次查询完写 `state/hosts.json`，`read_overview` 附带返回——托盘
+/// 启动时 warm-start 直接渲染上一轮结果，不阻塞在冷查询上（与 today.json/
+/// month.json 的持久化同款）。
+///
+/// **全部字段来自快照，托盘不做任何排序/求和/日界换算**（spec §5.3）——排序、
+/// 日界折叠、覆盖率在数据层（`sessions navigation`）完成，这里只是落盘 + 渲染。
+/// 诚实降级（spec §8）：`status == "unavailable"` → L1 全 None（「—」）、L2 禁用
+/// 「会话数据暂不可用」；**不拿缺失字段当 0**——「今天没跑」是 None，「今天花了
+/// 0」才是 0，两者在托盘上是两种文案。
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct HostRow {
+    pub host_kind: String,
+    /// 快照 status 原样落盘（"ready" | "partial" | "unavailable"）——L2 渲染
+    /// 靠它区分「读不了」（禁用「会话数据暂不可用」）与「真零会话」（禁用
+    /// 「尚无会话」），两种状态必须可区分。
+    pub status: String,
+    pub today_tokens: Option<i64>,
+    /// `today_tokens.coverage == "partial"`（折叠 unaccounted > 0）→ L1 token
+    /// 加 `≈` 前缀（spec §8）。快照的 coverage 是保守下界标注，托盘渲染时保留，
+    /// 不能丢成精确值。
+    pub today_partial: bool,
+    pub today_sessions: Option<u64>,
+    pub recent: Vec<RecentSessionRow>,
+}
+
+/// 最近会话行的落盘形状（spec §5.3）。`session_key` 存 `Value`：core `SessionKey`
+/// 不 derive Serialize（`r2a.rs` 用 `to_json`/`from_json` 显式往返），这里原样
+/// 存 `SessionKey::to_json()` 的四元组 JSON，深链透传给工作台（`sessions read`
+/// 期待同形状）——一旦在 `HostRow` 里拆开重排，字节契约就断了。
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct RecentSessionRow {
+    pub session_key: Value,
+    pub title: Option<String>,
+    /// `date_span.last` 完整日期（`YYYY-MM-DD`）；展示侧再折成 `MM-DD`/带年。
+    pub date: Option<String>,
+    pub model: Option<String>,
+    pub tokens: Option<i64>,
+}
+
+impl HostRow {
+    /// 查询失败兜底行：L1 字段全 None（托盘显示「—」）、L2 渲染禁用文案。
+    /// 不臆造「0 会话 / 0 token」——失败与零是两种诚实。
+    pub fn unavailable(kind: &str) -> Self {
+        HostRow {
+            host_kind: kind.to_string(),
+            status: "unavailable".to_string(),
+            today_tokens: None,
+            today_partial: false,
+            today_sessions: None,
+            recent: Vec::new(),
+        }
+    }
+}
+
+/// hosts.json 落盘信封（spec §5.1 快照形状的落盘投影）：`generated_at` 是
+/// `sessions navigation` 快照的生成时刻（RFC3339 UTC），托盘据此**渲染时**判
+/// stale（`now - generated_at > 2 × tick`，spec §6 决策 5）——所以 stale 是派生
+/// 值、不入盘（刷新失败不覆盖 hosts.json，旧的 generated_at 自然变旧 → 变 stale，
+/// 这正是「保留末次成功快照」的意义）；display_name 同理是托盘侧映射（spec §4），
+/// 也不入盘。
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct HostsSnapshot {
+    pub generated_at: Option<String>,
+    pub hosts: Vec<HostRow>,
+}
+
+impl HostsSnapshot {
+    /// 缺场/解析失败兜底：generated_at None（无缓存 → 无 stale footer）、固定
+    /// 两行 unavailable（dsh→codex）。一条坏掉的 hosts.json 不该让菜单整块消失
+    /// （同 last-sync.json 的「解析失败走默认」哲学）。
+    pub fn unavailable() -> Self {
+        HostsSnapshot {
+            generated_at: None,
+            hosts: vec![
+                HostRow::unavailable("dsh"),
+                HostRow::unavailable("codex"),
+            ],
+        }
+    }
+}
+
+/// tick 每轮把宿主快照落盘到 `state/hosts.json`（与 last-sync.json 同目录）。
+/// 镜像 `save_sync_status_at`：数据根只有一份，托盘/面板读的都是它。
+pub fn save_hosts_at(dh: &Path, snap: &HostsSnapshot) {
+    let dir = dh.join("state");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(text) = serde_json::to_string_pretty(snap) {
+        let _ = std::fs::write(dir.join("hosts.json"), text);
+    }
+}
+
+/// 读回上一轮 tick 的宿主快照。缺场/解析失败 → `HostsSnapshot::unavailable()`
+/// （dsh→codex 固定两行——托盘永远渲染固定两行，数据缺失才显示「—」，spec §8）。
+pub fn read_hosts_at(dh: &Path) -> HostsSnapshot {
+    read_json(&dh.join("state").join("hosts.json"))
+        .and_then(|v| serde_json::from_value::<HostsSnapshot>(v).ok())
+        .unwrap_or_else(HostsSnapshot::unavailable)
+}
+
+/// `sessions navigation` 快照 JSON → 落盘形状的最后一小段投影（spec §5.2 →
+/// §5.3）。**宽容解析**：单字段坏 → None，不整盘丢弃——一条字段报错不该让两个
+/// 宿主一起消失。`today_tokens` 整个对象可能是 null（Codex 无计量时），
+/// `get("value")` 在 null 上是 None，恰好走诚实降级。宿主顺序原样保留——快照的
+/// dsh→codex 序是数据层的字节契约（r2a_store.rs），托盘不重排（§5.3「不做任何
+/// 排序」）。hosts 数组缺失/不是数组 → 空 vec（落盘后 read 侧 unavailable 兜底，
+/// 与「真零」「失败」都无关，是形状违约的防御）。
+pub fn host_rows_from_navigation(snap: &Value) -> Vec<HostRow> {
+    let Some(hosts) = snap.get("hosts").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    hosts
+        .iter()
+        .map(|h| HostRow {
+            host_kind: h["host_kind"].as_str().unwrap_or_default().to_string(),
+            // status 缺场 → unavailable（未知状态按「读不了」渲染，不冒充零）。
+            status: h["status"].as_str().unwrap_or("unavailable").to_string(),
+            today_tokens: h
+                .get("today_tokens")
+                .and_then(|t| t.get("value"))
+                .and_then(Value::as_i64),
+            today_partial: h
+                .get("today_tokens")
+                .and_then(|t| t.get("coverage"))
+                .and_then(Value::as_str)
+                == Some("partial"),
+            today_sessions: h["today_sessions"].as_u64(),
+            recent: h
+                .get("recent")
+                .and_then(Value::as_array)
+                .map(|rs| {
+                    rs.iter()
+                        .map(|r| RecentSessionRow {
+                            // 原样透传 SessionKey::to_json 的 4 字段对象——深链时
+                            // `sessions read` 期待同形状（字节契约）。
+                            session_key: r
+                                .get("session_key")
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                            title: r["title"].as_str().map(String::from),
+                            date: r["date_last"].as_str().map(String::from),
+                            model: r["model"].as_str().map(String::from),
+                            tokens: r["tokens_total"].as_i64(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
 #[derive(Serialize)]
 pub struct Overview {
     pub data_home: String,
@@ -176,6 +327,11 @@ pub struct Overview {
     pub recent: RecentSession,
     /// 菜单栏同步回路状态（tick 落盘）。前端据此示警/给「立即同步」入口。
     pub sync: SyncStatus,
+    /// 多宿主导航行（tick 落盘 hosts.json）。托盘据此渲染 L1 宿主行 + L2 最近会话。
+    pub hosts: Vec<HostRow>,
+    /// hosts.json 的 `generated_at`（RFC3339 UTC）——托盘渲染时据此判 stale
+    /// （spec §6 决策 5），与 hosts 同源同刻，拆开是因为 stale 是派生值不入盘。
+    pub hosts_generated_at: Option<String>,
     pub estimate_note: String,
 }
 
@@ -224,7 +380,10 @@ pub fn today_beijing() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-fn civil_from_unix_secs(secs: i64, offset_secs: i64) -> (i64, u32, u32) {
+/// unix 秒 → 某时区（offset 秒）的 (年, 月, 日)。pub(crate)：lib.rs 的
+/// `recent_row_text` 做「date 是否当年」判定（北京年，与导航 day_key 同日界）
+/// 复用同一实现，不长第二份历法。
+pub(crate) fn civil_from_unix_secs(secs: i64, offset_secs: i64) -> (i64, u32, u32) {
     let days = (secs + offset_secs).div_euclid(86400);
     let z = days + 719468;
     let era = z.div_euclid(146097);
@@ -365,6 +524,11 @@ fn read_overview_at(dh: &Path) -> Overview {
         budget.level = Some("ok".to_string());
     }
 
+    // 多宿主导航快照：读一次 hosts.json，拆成 hosts + generated_at 两个字段
+    //（后者供托盘判 stale）。**不做任何排序**——快照的 dsh→codex 序是数据层的
+    // 字节契约，托盘只渲染（spec §5.3「托盘不做任何排序/求和/日界换算」）。
+    let hosts_snap = read_hosts_at(dh);
+
     Overview {
         data_home: dh.display().to_string(),
         today: today_val,
@@ -374,6 +538,8 @@ fn read_overview_at(dh: &Path) -> Overview {
         budget,
         recent: read_recent_session(dh),
         sync: load_sync_status(dh),
+        hosts: hosts_snap.hosts,
+        hosts_generated_at: hosts_snap.generated_at,
         estimate_note: "估算值，不是账单；覆盖率不足的日子按 fallback 价补齐并标注".to_string(),
     }
 }
@@ -975,6 +1141,211 @@ mod tests {
         assert!(ov.sync.ok && ov.sync.stage == "fold");
         assert_eq!(ov.sync.message, "已折入 sess-x");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// hosts.json 往返：save_hosts_at 写的快照（generated_at + 两行，含 partial
+    /// 态）能由 read_hosts_at 原样读回。session_key 用 `SessionKey::to_json()` 的
+    /// 真实形状构造——这是「深链透传给工作台」的字节契约：读回后必须仍能过
+    /// `SessionKey::from_json`，一旦在 HostRow 里拆开重排，`sessions read` 就认
+    /// 不出它了。
+    #[test]
+    fn hosts_save_then_read_round_trips() {
+        use agent_vitals_core::r2a::SessionKey;
+        let tmp = std::env::temp_dir().join("sv-menubar-hosts-roundtrip-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        let key = SessionKey::new("dsh", "sess-1", "default", "m1").to_json();
+        let saved = HostsSnapshot {
+            generated_at: Some("2026-09-01T02:31:00Z".into()),
+            hosts: vec![
+                HostRow {
+                    host_kind: "dsh".into(),
+                    status: "partial".into(),
+                    today_tokens: Some(1234),
+                    today_partial: true,
+                    today_sessions: Some(2),
+                    recent: vec![RecentSessionRow {
+                        session_key: key.clone(),
+                        title: Some("重构 r2a 查询".into()),
+                        date: Some("2026-08-28".into()),
+                        model: Some("deepseek-v4-flash".into()),
+                        tokens: Some(88000),
+                    }],
+                },
+                HostRow::unavailable("codex"),
+            ],
+        };
+        save_hosts_at(&tmp, &saved);
+        let back = read_hosts_at(&tmp);
+        assert_eq!(back, saved);
+        assert!(
+            SessionKey::from_json(&back.hosts[0].recent[0].session_key).is_some(),
+            "落盘的 session_key 必须仍是 SessionKey::to_json 形状"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 缺场兜底：没有 hosts.json → generated_at None + 固定两行 unavailable
+    /// （dsh→codex，status "unavailable"），L1 全 None——托盘永远渲染两行，
+    /// 「—」是缺失不是 0；无 generated_at 也就无 stale footer（从未成功过）。
+    #[test]
+    fn hosts_missing_falls_back_to_two_unavailable_rows() {
+        let tmp = std::env::temp_dir().join("sv-menubar-hosts-missing-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        let snap = read_hosts_at(&tmp);
+        assert!(snap.generated_at.is_none());
+        let hosts = &snap.hosts;
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].host_kind, "dsh");
+        assert_eq!(hosts[1].host_kind, "codex");
+        assert!(hosts
+            .iter()
+            .all(|h| h.status == "unavailable"
+                && h.today_tokens.is_none()
+                && h.today_sessions.is_none()
+                && h.recent.is_empty()));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 解析失败兜底：hosts.json 是合法 JSON 但形状不对（数组而不是信封对象）→
+    /// 同缺场回退。一条坏文件不该让菜单整块消失。
+    #[test]
+    fn hosts_parse_failure_falls_back_to_unavailable() {
+        let tmp = std::env::temp_dir().join("sv-menubar-hosts-corrupt-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        std::fs::write(tmp.join("state").join("hosts.json"), r#"["dsh"]"#).unwrap();
+        let snap = read_hosts_at(&tmp);
+        assert!(snap.generated_at.is_none());
+        let hosts = &snap.hosts;
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].host_kind, "dsh");
+        assert_eq!(hosts[1].host_kind, "codex");
+        assert!(hosts.iter().all(|h| h.status == "unavailable"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Overview 组装包含 hosts：往临时数据根写 hosts.json，read_overview_at 的
+    /// ov.hosts 原样带出 + ov.hosts_generated_at 同源；空态（无 hosts.json）→
+    /// generated_at None + 固定两行 unavailable。托盘读 Overview 一次就拿到宿主
+    /// 行，不需要第二条 IPC 或第二个文件读取。
+    #[test]
+    fn read_overview_embeds_hosts() {
+        let tmp = std::env::temp_dir().join("sv-menubar-hosts-overview-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        save_hosts_at(
+            &tmp,
+            &HostsSnapshot {
+                generated_at: Some("2026-09-01T02:31:00Z".into()),
+                hosts: vec![
+                    HostRow::unavailable("dsh"),
+                    HostRow::unavailable("codex"),
+                ],
+            },
+        );
+        let ov = read_overview_at(&tmp);
+        assert_eq!(ov.hosts.len(), 2);
+        assert_eq!(ov.hosts[0].host_kind, "dsh");
+        assert!(ov.hosts[0].status == "unavailable");
+        assert_eq!(
+            ov.hosts_generated_at.as_deref(),
+            Some("2026-09-01T02:31:00Z")
+        );
+
+        let tmp2 = std::env::temp_dir().join("sv-menubar-hosts-overview-empty-test");
+        let _ = std::fs::remove_dir_all(&tmp2);
+        std::fs::create_dir_all(tmp2.join("state")).unwrap();
+        let ov2 = read_overview_at(&tmp2);
+        assert_eq!(ov2.hosts.len(), 2);
+        assert_eq!(ov2.hosts[0].host_kind, "dsh");
+        assert_eq!(ov2.hosts[1].host_kind, "codex");
+        assert!(ov2.hosts_generated_at.is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp2);
+    }
+
+    /// `sessions navigation` 快照 → HostRow 映射：完整形状逐字段落位、null 的
+    /// today_tokens 对象（Codex 无计量）诚实 None、status 缺场 → unavailable、
+    /// hosts 数组缺失 → 空 vec。映射规则全在这——托盘菜单只渲染不重算。
+    #[test]
+    fn host_rows_from_navigation_maps_snapshot_fields() {
+        let snap = serde_json::json!({
+            "schema_version": 1,
+            "generated_at": "2026-09-01T02:31:00Z",
+            "hosts": [
+                {
+                    "host_kind": "dsh",
+                    "status": "ready",
+                    "today_tokens": {"value": 1398214, "basis": "state-file", "coverage": "complete"},
+                    "today_sessions": 3,
+                    "recent": [{
+                        "session_key": {"host_kind": "dsh", "native_id": "s1", "source_profile": null, "machine_namespace": null},
+                        "title": "重构 r2a 查询",
+                        "model": "deepseek-v4-flash",
+                        "tokens_total": 88000,
+                        "date_first": "2026-08-27",
+                        "date_last": "2026-08-28",
+                        "revision": "2026-08-28"
+                    }],
+                    "store_revision": 7
+                },
+                {
+                    "host_kind": "codex",
+                    "status": "partial",
+                    // Codex 无计量时 today_tokens 是整对象 null——get("value") 为
+                    // None，恰好走诚实降级（「—」），不把 null 当成 0。
+                    "today_tokens": null,
+                    "today_sessions": null,
+                    "recent": [],
+                    "store_revision": 0
+                }
+            ]
+        });
+        let rows = host_rows_from_navigation(&snap);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].host_kind, "dsh");
+        assert_eq!(rows[0].status, "ready");
+        assert_eq!(rows[0].today_tokens, Some(1398214));
+        assert!(!rows[0].today_partial, "coverage=complete → 无 ≈");
+        assert_eq!(rows[0].today_sessions, Some(3));
+        assert_eq!(rows[0].recent.len(), 1);
+        assert_eq!(rows[0].recent[0].title.as_deref(), Some("重构 r2a 查询"));
+        assert_eq!(rows[0].recent[0].date.as_deref(), Some("2026-08-28"));
+        assert_eq!(rows[0].recent[0].tokens, Some(88000));
+        // session_key 原样透传（4 字段对象）——深链 `sessions read` 的字节契约。
+        assert_eq!(
+            rows[0].recent[0].session_key["native_id"],
+            serde_json::json!("s1")
+        );
+        assert_eq!(rows[1].host_kind, "codex");
+        assert_eq!(rows[1].status, "partial");
+        assert_eq!(rows[1].today_tokens, None, "null 对象 → None，不编 0");
+        assert_eq!(rows[1].today_sessions, None);
+        assert!(rows[1].recent.is_empty());
+    }
+
+    /// 宽容解析的两个防御面：partial 覆盖率 → today_partial（≈ 前缀的数据来源），
+    /// hosts 数组缺失 → 空 vec（不 panic、不整盘丢弃）。
+    #[test]
+    fn host_rows_from_navigation_partial_coverage_and_missing_hosts() {
+        let partial = serde_json::json!({
+            "hosts": [{
+                "host_kind": "codex",
+                "status": "ready",
+                "today_tokens": {"value": 15000, "basis": "events", "coverage": "partial"},
+                "today_sessions": 1,
+                "recent": [],
+                "store_revision": 3
+            }]
+        });
+        let rows = host_rows_from_navigation(&partial);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].today_partial, "unaccounted>0 → coverage=partial → ≈15K");
+
+        let no_hosts = serde_json::json!({"schema_version": 1, "generated_at": "2026-09-01T02:31:00Z"});
+        assert!(host_rows_from_navigation(&no_hosts).is_empty());
     }
 
     /// day_to_row 三态：exact（by_model 覆盖完整 → basis "exact"、coverage 1.0）、

@@ -8,14 +8,15 @@
 mod overview;
 mod store;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem};
+use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
-use overview::{Overview, SyncStatus};
+use overview::{HostRow, HostsSnapshot, Overview, RecentSessionRow, SyncStatus};
 
 /// 同步互斥：定时 tick 与「立即同步」（菜单/IPC）共用同一把锁，保证任意时刻至多
 /// 一轮 discover→oneline 在跑。oneline 写链本身有 fencing + exactly-once，锁不是
@@ -87,15 +88,26 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// 预算数据是否过期（> 5 分钟）。与工作台 `workbench.js` 的 `> 5*60*1000` 同一阈值——
-/// 托盘和工作台对同一份 alert.json 必须判同一个「过期」，不能一个绿一个黄。
-/// `generated_at` 缺场（没有新鲜度信息）→ 不算过期；解析失败 → 也不算（与工作台
-/// `Invalid Date` 走不 stale 的现状一致，机器写的 alert.json 不会走到这里）。
-fn stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
+/// 同步 tick 周期（start_refresh_tick 的 sleep 与宿主区 stale 判定共用——
+/// 「2 × tick」是 spec §6 决策 5 的过期定义，周期改了 stale 窗口跟着改，不能
+/// 两处各写一个 5 分钟）。
+const TICK_PERIOD: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// 通用过期判定：`generated_at` 年龄 > window。`stale_from`（预算 5 分钟）与
+/// `hosts_stale_from`（宿主区 2 × tick）共用；「无新鲜度信息」→ 不算过期，
+/// 解析失败 → 也不算（机器写的文件不会走到，与工作台 `Invalid Date` 走不 stale
+/// 的现状一致）。
+fn stale_after(generated_at: Option<&str>, now_secs: i64, window_secs: i64) -> bool {
     let Some(at) = generated_at.and_then(parse_rfc3339_secs) else {
         return false;
     };
-    now_secs - at > 5 * 60
+    now_secs - at > window_secs
+}
+
+/// 预算数据是否过期（> 5 分钟）。与工作台 `workbench.js` 的 `> 5*60*1000` 同一阈值——
+/// 托盘和工作台对同一份 alert.json 必须判同一个「过期」，不能一个绿一个黄。
+fn stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
+    stale_after(generated_at, now_secs, 5 * 60)
 }
 
 /// 预算状态行的权威来源：alert.json（`budget.evaluate()` 落盘）。**只读展示，
@@ -177,6 +189,103 @@ fn short_model(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
 }
 
+/// 宿主显示名映射（spec §4）：数据侧只认 `dsh`/`codex`，展示名是托盘侧的事——
+/// 与 `short_model` 同类性质，不落盘、不入快照。未知宿主原样显示（未来加宿主
+/// 不硬编码，也不至于长得像个错别字）。
+fn host_display_name(kind: &str) -> String {
+    match kind {
+        "dsh" => "DeepSeek Harness".to_string(),
+        "codex" => "Codex".to_string(),
+        _ => kind.to_string(),
+    }
+}
+
+/// L1 宿主行文案（spec §4/§8）：`<显示名> · <tokens|—> · <N 会话|—>`。两个
+/// 测量字段都缺 → 单个 `· —`（unavailable 降级矩阵的形态）；只缺一个 → 该槽
+/// 位「—」另一个照常。`today_partial`（覆盖率 partial）→ token 加 `≈` 前缀：
+/// 快照的 coverage 是保守下界标注，渲染成精确值就是编造。
+fn host_row_text(row: &HostRow) -> String {
+    let name = host_display_name(&row.host_kind);
+    let token_part = row.today_tokens.map(|t| {
+        let s = fmt_tokens(t);
+        if row.today_partial { format!("≈{s}") } else { s }
+    });
+    let sess_part = row.today_sessions.map(|n| format!("{n} 会话"));
+    let middle = match (token_part, sess_part) {
+        (Some(t), Some(s)) => format!("{t} · {s}"),
+        (Some(t), None) => format!("{t} · —"),
+        (None, Some(s)) => format!("— · {s}"),
+        (None, None) => "—".to_string(),
+    };
+    format!("{name} · {middle}")
+}
+
+/// 标题截断（spec §4）：超 24 字符 → 前 23 字符 + `…`。按字符数不是字节数——
+/// 中文标题一个字符一个字符地数，按字节截会切成半个字。
+fn truncate_title(s: &str, max_chars: usize) -> String {
+    let n = s.chars().count();
+    if n > max_chars {
+        format!("{}…", s.chars().take(max_chars - 1).collect::<String>())
+    } else {
+        s.to_string()
+    }
+}
+
+/// 北京时刻的 `HH:MM`（spec §8 stale footer 用）：`generated_at` 是 RFC3339 UTC，
+/// 渲染成北京的快照时刻——与日界判定（day_key 北京日）同一时区，早上 8 点前的
+/// 快照不会显示成昨天的点。
+fn beijing_hhmm(secs: i64) -> String {
+    let tod = (secs + 8 * 3600).rem_euclid(86400);
+    format!("{:02}:{:02}", tod / 3600, (tod % 3600) / 60)
+}
+
+/// 多宿主导航快照是否过期（spec §6 决策 5）：`generated_at` 年龄 > 2 × tick
+/// （10 分钟）→ 宿主子菜单底部挂「数据更新于 hh:mm · 可能已过期」。与
+/// `stale_from`（预算 5 分钟窗口）分开——两处「过期」的定义本来就不同，共用一个
+/// 窗口会把预算卡 5 分钟语义硬套到宿主快照上。
+fn hosts_stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
+    stale_after(generated_at, now_secs, 2 * TICK_PERIOD.as_secs() as i64)
+}
+
+/// L2 最近会话行文案（spec §4）：`<date> · <身份> · <tokens>`。date 折 `MM-DD`
+/// （非当年带年 `YYYY-MM-DD`——「8 月 28 日」在当年语境够用，跨年不标年会在
+/// 一年后长得一模一样）；身份 = title（截断 24 字符）→ short_model → native_id
+/// 的 fallback 链；tokens 缺段省略。date 只做展示层折叠，`RecentSessionRow.date`
+/// 里存的完整 `YYYY-MM-DD` 原样保留。「当年」判定用北京年——与导航 day_key 的
+/// 日界一致（UTC 12-31 晚的会话在 UTC 年上跨年、北京年上不跨，整个多宿主导航
+/// 都按北京日界走）。
+fn recent_row_text(row: &RecentSessionRow, now_secs: i64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(d) = &row.date {
+        let current_year = overview::civil_from_unix_secs(now_secs, 8 * 3600).0;
+        let year_is_current = d.len() >= 10
+            && d[..4].parse::<i64>().map(|y| y == current_year).unwrap_or(false);
+        parts.push(if year_is_current {
+            d[5..10].to_string()
+        } else {
+            d.clone()
+        });
+    }
+    let identity = row
+        .title
+        .as_deref()
+        .map(|t| truncate_title(t, 24))
+        .or_else(|| row.model.as_deref().map(short_model).map(String::from))
+        .or_else(|| {
+            row.session_key
+                .get("native_id")
+                .and_then(Value::as_str)
+                .map(String::from)
+        });
+    if let Some(id) = identity {
+        parts.push(id);
+    }
+    if let Some(t) = row.tokens {
+        parts.push(fmt_tokens(t));
+    }
+    parts.join(" · ")
+}
+
 /// 日预算一行：**分子与百分比只在可信时显示**。
 ///
 /// 分母 `effective_daily_budget` 来自 alert.json，但它是一个**设置**
@@ -195,56 +304,26 @@ fn short_model(name: &str) -> &str {
 /// 之后没再跑过 oneline 时，它说的是**昨天**的今日——真机 2026-09-01 就是这样：
 /// today.json 停在 08-31（`ov.today` 正确地为 None），alert.json 停在 08-30 报
 /// today_cost ¥0.12。少了这个门，菜单会同时出现"今日成本：—（无数据）"和
-/// "今日预算：¥0.12 / ¥30（0%）"两行自相矛盾的话。
+/// "今日按量预算：¥0.12 / ¥30（0%）"两行自相矛盾的话。
 fn daily_budget_text(ov: &Overview, now_secs: i64) -> Option<String> {
     let b = &ov.budget;
     let daily = b.effective_daily_budget?;
     let denom = fmt_money(daily);
     let fresh = !stale_from(b.generated_at.as_deref(), now_secs);
     if ov.today.is_none() {
-        return Some(format!("今日预算：— / {denom}（今日无数据）"));
+        return Some(format!("今日按量预算：— / {denom}（今日无数据）"));
     }
     if !fresh {
-        return Some(format!("今日预算：— / {denom}（数据过期，未重新评估）"));
+        return Some(format!("今日按量预算：— / {denom}（数据过期，未重新评估）"));
     }
     match (b.today_cost, b.ratio) {
         (Some(c), Some(r)) => {
-            Some(format!("今日预算：{} / {denom}（{:.0}%）", fmt_money(c), r * 100.0))
+            Some(format!("今日按量预算：{} / {denom}（{:.0}%）", fmt_money(c), r * 100.0))
         }
         // alert.json 在场且新鲜，但这两个字段是 null——`evaluate()` 对"今日无
         // 数据"就是这么落盘的。不拿 null 当 0。
-        _ => Some(format!("今日预算：— / {denom}（今日无数据）")),
+        _ => Some(format!("今日按量预算：— / {denom}（今日无数据）")),
     }
-}
-
-/// 最近一次会话一行：`最近会话：deepseek-v4-flash · 15.3K · ¥0.02`。findings
-/// 非零时补 `· N 个发现`——0 个不显示（"没有发现"不值得占一行宽度，而且
-/// `findings_total: 0` 与"这次没跑规则"在 oneline.json 里同形，不该说得像后者
-/// 已被排除）。整条只在 oneline.json 在场时出现。
-fn recent_session_text(ov: &Overview) -> Option<String> {
-    let r = &ov.recent;
-    if !r.present {
-        return None;
-    }
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(m) = &r.model {
-        parts.push(short_model(m).to_string());
-    }
-    if let Some(t) = r.tokens_total {
-        parts.push(fmt_tokens(t));
-    }
-    if let Some(c) = r.cost_cny {
-        parts.push(fmt_money(c));
-    }
-    if let Some(n) = r.findings_total {
-        if n > 0 {
-            parts.push(format!("{n} 个发现"));
-        }
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    Some(format!("最近会话：{}", parts.join(" · ")))
 }
 
 /// 同步状态一行：**成功也显示**，不是只在失败时才出现。
@@ -261,11 +340,131 @@ fn sync_line_text(sync: &SyncStatus) -> String {
             format!("⚠ 上次同步失败：{}", sync.message)
         };
     }
-    // `at` 是北京时间 `YYYY-MM-DD HH:MM:SS`，菜单只要 HH:MM。
+    // `at` 是北京时间 `YYYY-MM-DD HH:MM:SS`，菜单只要 HH:MM。成功形态加
+    // 「（DSH 状态折叠）」后缀（spec §4）：同步回路只折 DSH 会话，Codex 没有
+    // 同步循环——时间戳的覆盖范围必须说清楚，不能让人以为它是全宿主的新鲜度。
     match sync.at.as_deref().and_then(|s| s.get(11..16)) {
-        Some(hhmm) => format!("上次同步：{hhmm} 成功"),
-        None => "上次同步：成功".to_string(),
+        Some(hhmm) => format!("上次同步：{hhmm} 成功（DSH 状态折叠）"),
+        None => "上次同步：成功（DSH 状态折叠）".to_string(),
     }
+}
+
+/// 托盘菜单的宿主区行树（spec §4/§5.3/§8）。纯数据——`build_menu_at` 只做
+/// `MenuRow` → Tauri `MenuItem/Submenu` 的机械翻译，菜单结构可以单测钉住，
+/// 不用起 AppHandle。只有 Item 与 Submenu：宿主区内的分隔线由 build_menu_at
+/// 在区块之间直接加，不属于行树（host_menu_rows 从不产 Separator）。
+#[derive(Debug, PartialEq)]
+enum MenuRow {
+    Item { id: String, text: String, enabled: bool },
+    Submenu { id: String, text: String, rows: Vec<MenuRow> },
+}
+
+/// 宿主区菜单行（spec §4/§8 降级矩阵逐格）：
+/// · `status == "unavailable"` → L2 单行禁用「会话数据暂不可用」（空子菜单无
+///   任何用户可操作物，禁用文案严格更有信息量——spec §8 原文对 cancelled 说不
+///   渲染 L2，这里渲染禁用文案是**计划里注明的偏离**，更诚实）；
+/// · ready 且 recent 空 → 禁用「尚无会话」（真零，不是失败——两种状态必须
+///   可区分）；
+/// · 其余 → 最近会话行（id `session:{kind}:{i}`，排序/截取在数据层已完成，
+///   这里只按序渲染）。
+/// stale（spec §6 决策 5）→ 每个宿主子菜单底部禁用项「数据更新于 hh:mm ·
+/// 可能已过期」（hh:mm 是北京时刻，`generated_at` UTC 转北京渲染）。
+fn host_menu_rows(
+    hosts: &[HostRow],
+    generated_at: Option<&str>,
+    now_secs: i64,
+) -> Vec<MenuRow> {
+    let mut out = Vec::new();
+    for row in hosts {
+        let mut l2 = if row.status == "unavailable" {
+            vec![MenuRow::Item {
+                id: format!("session:unavailable:{}", row.host_kind),
+                text: "会话数据暂不可用".into(),
+                enabled: false,
+            }]
+        } else if row.recent.is_empty() {
+            vec![MenuRow::Item {
+                id: format!("session:none:{}", row.host_kind),
+                text: "尚无会话".into(),
+                enabled: false,
+            }]
+        } else {
+            row.recent
+                .iter()
+                .enumerate()
+                .map(|(i, r)| MenuRow::Item {
+                    id: format!("session:{}:{}", row.host_kind, i),
+                    text: recent_row_text(r, now_secs),
+                    enabled: true,
+                })
+                .collect()
+        };
+        if hosts_stale_from(generated_at, now_secs) {
+            l2.push(MenuRow::Item {
+                id: format!("session:stale:{}", row.host_kind),
+                text: format!(
+                    "数据更新于 {} · 可能已过期",
+                    generated_at
+                        .and_then(parse_rfc3339_secs)
+                        .map(beijing_hhmm)
+                        .unwrap_or_else(|| "??:??".into())
+                ),
+                enabled: false,
+            });
+        }
+        out.push(MenuRow::Submenu {
+            id: format!("host:{}", row.host_kind),
+            text: host_row_text(row),
+            rows: l2,
+        });
+    }
+    out
+}
+
+/// MenuRow 树 → Tauri 菜单项数组（机械翻译，`dyn IsMenuItem` trait 对象）。
+/// Submenu 用 `Submenu::with_id_and_items`（items 是 `&[&dyn IsMenuItem]`
+/// 切片）：子菜单带 id（`host:{kind}`），菜单事件才拿得到动态 id 做深链分发。
+/// 递归翻译 L2 项。
+fn menu_row_items<M: tauri::Manager<tauri::Wry>>(
+    app: &M,
+    rows: &[MenuRow],
+) -> tauri::Result<Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>>> {
+    let mut out: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = Vec::new();
+    for row in rows {
+        match row {
+            MenuRow::Item { id, text, enabled } => {
+                out.push(Box::new(MenuItem::with_id(
+                    app, id, text, *enabled, None::<&str>,
+                )?));
+            }
+            MenuRow::Submenu { id, text, rows } => {
+                let children = menu_row_items(app, rows)?;
+                let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+                    children.iter().map(|b| b.as_ref()).collect();
+                out.push(Box::new(Submenu::with_id_and_items(
+                    app, id, text, true, &refs,
+                )?));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// MenuRow 树 → 追加进 MenuBuilder（`menu_row_items` 的一层薄壳：builder 一次
+/// item 一个，翻译逻辑都在上面，这里只管把 trait 对象逐个放进去）。
+fn append_menu_rows<'a, M: tauri::Manager<tauri::Wry>>(
+    builder: tauri::menu::MenuBuilder<'a, tauri::Wry, M>,
+    app: &'a M,
+    rows: &[MenuRow],
+) -> tauri::Result<tauri::menu::MenuBuilder<'a, tauri::Wry, M>> {
+    let items = menu_row_items(app, rows)?;
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        items.iter().map(|b| b.as_ref()).collect();
+    let mut b = builder;
+    for r in refs {
+        b = b.item(r);
+    }
+    Ok(b)
 }
 
 fn build_menu(app: &AppHandle, ov: &Overview) -> tauri::Result<Menu<tauri::Wry>> {
@@ -280,18 +479,20 @@ fn build_menu(app: &AppHandle, ov: &Overview) -> tauri::Result<Menu<tauri::Wry>>
 fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result<Menu<tauri::Wry>> {
     // 今日一行：钱 + token 量。两者不是一回事——缓存命中率变化时钱不动 token 动，
     // 只报钱会让"今天明明干了很多活却几乎没花钱"这种情况看起来像没数据。托盘
-    // 标题里本来就是这么并排显示的（`today_title`），菜单第一行跟它对齐。
+    // 标题里本来就是这么并排显示的（`today_title`），菜单第一行跟它对齐。前缀
+    // 「按量」与日预算/月成本同口径（spec §4）：这些是**按量计费**的钱，不是预算
+    // 卡里那笔评估额。
     let today_text = match &ov.today {
         Some(t) => format!(
-            "今日成本：{} · {} tokens",
+            "今日按量成本：{} · {} tokens",
             fmt_money(t["total"].as_f64().unwrap_or(0.0)),
             fmt_tokens(t["tokens"].as_i64().unwrap_or(0)),
         ),
-        None => "今日成本：—（无数据）".to_string(),
+        None => "今日按量成本：—（无数据）".to_string(),
     };
     let month_total = ov.month["total"].as_f64().unwrap_or(0.0);
     let budget = ov.budget.monthly_cny.unwrap_or(ov.budget_monthly_cny);
-    let month_text = format!("本月成本：{} / {}", fmt_money(month_total), fmt_money(budget));
+    let month_text = format!("本月按量成本：{} / {}", fmt_money(month_total), fmt_money(budget));
     let budget_text = budget_status_text_at(ov, now_secs);
     // 信息行一律 enabled=true：macOS 对 disabled 菜单项强制灰色渲染，作为常驻
     // 信息几乎不可读；enabled 后文字是系统默认黑。代价是悬停高亮 + 点击会触发
@@ -307,10 +508,17 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
         builder = builder.item(&MenuItem::with_id(app, "daily", t, true, None::<&str>)?);
     }
     builder = builder.item(&month_item);
-    if let Some(t) = recent_session_text(ov) {
-        builder = builder.item(&MenuItem::with_id(app, "recent", t, true, None::<&str>)?);
-    }
-    builder = builder.item(&budget_item);
+    // 宿主区（spec §4）：每宿主一个子菜单——L1 = 显示名 · 今日 token · 会话数，
+    // L2 = 最近会话跳转行（结构由 host_menu_rows 纯函数钉住，§9.2）。平铺的
+    // 「最近会话」行随面板一起删除（2026-09-01 spec 修订）——最近会话入口收敛
+    // 到宿主子菜单里，顶层菜单只剩钱行与操作项。
+    builder = builder.separator();
+    builder = append_menu_rows(
+        builder,
+        app,
+        &host_menu_rows(&ov.hosts, ov.hosts_generated_at.as_deref(), now_secs),
+    )?;
+    builder = builder.separator().item(&budget_item);
     // 同步状态常驻（成功也显示）——托盘是主入口，"数字是什么时候的"必须在这里
     // 一眼可见，不该等到打开工作台才发现同步早就断了。
     builder = builder.item(&MenuItem::with_id(
@@ -329,13 +537,19 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
     // 代码，一并删除，不留一份没人能打开的界面。
     let workbench_item = MenuItem::with_id(app, "workbench", "打开工作台…", true, None::<&str>)?;
     let refresh_item = MenuItem::with_id(app, "refresh", "立即同步", true, None::<&str>)?;
-    builder
+    let menu = builder
         .separator()
         .item(&workbench_item)
         .item(&refresh_item)
         .separator()
         .item(&PredefinedMenuItem::quit(app, Some("退出"))?)
-        .build()
+        .build()?;
+    // HostsCache：深链分发的映射依据（spec §9.2 #12）——缓存必须等于刚构建的
+    // 菜单用的宿主行，否则 `session:{kind}:{i}` 会查到错行。写在这里而不是
+    // refresh 里：startup warm-start（read_overview 带 hosts.json 旧快照）与
+    // 每轮 tick 的 build_menu 都经过同一写入点，缓存不会停在旧菜单。
+    app.state::<HostsCache>().0.lock().unwrap_or_else(|e| e.into_inner()).clone_from(&ov.hosts);
+    Ok(menu)
 }
 
 /// 重算 overview 并重建托盘 —— 标题（今日成本）与菜单里的数字不是静态文案，每次
@@ -348,6 +562,80 @@ fn refresh(app: &AppHandle) {
             let _ = tray.set_menu(Some(menu));
         }
     }
+}
+
+/// `sessions navigation` 一轮查询的硬超时（spec §6 决策 5）：20 秒后 kill。
+/// 冷 store 首建 30s+ 时首轮会超时——宿主区退化为上一轮快照（或 unavailable），
+/// 下一轮 tick（5 分钟后）重试，不阻塞托盘。工作台 IPC 的 `sessions list`
+/// 故意**没有**超时（冷构建 30s+ 是合法的，前端有 loading banner）——这里是
+/// tick 内的阻塞点，必须有界，否则一轮同步能把 SyncLock 占死 30 秒。
+const NAVIGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// spawn `sessions navigation` 并等 stdout，带 20s 硬超时：`try_wait` 50ms 轮询，
+/// 超时 → `child.kill()` + `wait()`（回收，不留僵尸）→ None。非零退出/spawn
+/// 失败/超时一律 None——调用方决定是保留旧快照还是 degraded，这里不编造。
+fn run_navigation(bin: &Path, day: &str) -> Option<Value> {
+    let mut child = std::process::Command::new(bin)
+        .args([
+            "sessions",
+            "navigation",
+            "--day",
+            day,
+            "--timezone",
+            "Asia/Shanghai",
+            "--recent",
+            "5",
+            "--json",
+        ])
+        .env("AGENT_VITALS_HOME", overview::data_home())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) if status.success() => {
+                let mut out = String::new();
+                use std::io::Read;
+                child.stdout.as_mut()?.read_to_string(&mut out).ok()?;
+                return serde_json::from_str(&out).ok();
+            }
+            Some(_) => return None,
+            None => {
+                if start.elapsed() > NAVIGATION_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// 一轮 tick 的宿主区刷新（spec §6 决策 5）：spawn `sessions navigation` →
+/// 快照落盘 hosts.json。**刷新失败不覆盖 hosts.json**——保留末次成功快照，它靠
+/// generated_at 变旧自然转 stale，托盘显示「数据更新于 hh:mm · 可能已过期」
+/// 而不是整块消失或摆 0。二进制缺失同样静默（顶层钱行有自己的降级文案，宿主
+/// 区上一轮快照继续服务）。单飞由 SyncLock 保证——只在 sync_tick 里被调用，
+/// tick 与「立即同步」都持锁。
+fn refresh_hosts() {
+    let Some(bin) = resolve_binary() else { return };
+    let Some(snap) = run_navigation(&bin, &overview::today_beijing()) else {
+        return;
+    };
+    let hosts = overview::host_rows_from_navigation(&snap);
+    overview::save_hosts_at(
+        &overview::data_home(),
+        &HostsSnapshot {
+            generated_at: snap
+                .get("generated_at")
+                .and_then(Value::as_str)
+                .map(String::from),
+            hosts,
+        },
+    );
 }
 
 /// `agent-vitals` 二进制解析：`AGENT_VITALS_BIN` env 覆盖 → 与自身同目录 / 兄弟
@@ -503,6 +791,66 @@ struct FoldEventDebounce(Mutex<Option<std::time::Instant>>);
 /// 成功后调 `clear_nav_target` 清除，防陈旧目标在下次 focus 重复应用。
 struct NavTarget(Mutex<Option<String>>);
 
+/// 会话深链目标（spec §7.1）：强类型（serde tag `type` + camelCase 变体名），
+/// 不再是裸 `Value`。`sessionDetail`（L2 行 → 会话详情）与 `sessionList`（打开
+/// 会话列表按 host 过滤，为「查看全部会话」回归预留——v1 菜单只发射前者，
+/// §7.1）由 `type` 字段区分，工作台前端据此分发。v1 前端只消费（peek 回来 +
+/// apply 后 clear），不从前端发射。
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum WorkbenchTarget {
+    SessionList { host_kind: Option<String> },
+    SessionDetail { session_key: SessionKeyJson },
+}
+
+/// core `SessionKey::to_json()` 的 4 字段镜像（spec §7.1）。**两处与 spec 代码块
+/// 字面不同，都是 prose/字节契约压过字面，理由写死在这里防回退**：
+/// · 不加 `rename_all = "camelCase"`——`to_json()` 发 snake_case 键，前端把同一
+///   对象原样回传 `sessions_read`（store.rs 透传 `--session-key`），而
+///   `SessionKey::from_json` 只认 4 个 snake_case 键；camelCase 会让回传打到
+///   解析不了的对象上（not-found）。
+/// · 字段用非 Option `String`——`to_json()` 恒发 4 个 string（`from_json` 也只要
+///   string，任一缺/非 string → None）。Option 会让 null 反序列化通过、序列化回
+///   null，回传时 from_json 失败——类型自己堵死这条路，比运行时检查诚实。
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct SessionKeyJson {
+    host_kind: String,
+    native_id: String,
+    source_profile: String,
+    machine_namespace: String,
+}
+
+/// 会话深链的待消费目标（spec §7.2）：菜单 L2 点击 → `focus_session` 覆盖式存入、
+/// 推 `focus-target` 事件、`show_workbench`；工作台在 init / window focus /
+/// `visibilitychange`(visible) 时 pull（`peek_focus_target`，**非破坏性**），
+/// **成功应用后**才 `clear_focus_target`（应用失败也 clear——错误横幅已向用户
+/// 说明，菜单再点会覆盖新目标，不无限重试）。持久是因为窗口未建/未可见时
+/// emit 是空操作，目标要留到工作台下次可见；事件只是通知，pull 是最终仲裁
+/// （§7.2 末句）。与 `NavTarget` 并存：那是信息行→tab 名（另一维度），spec §7
+/// 只描述深链机制，未要求取代信息行通路。
+struct FocusTarget(Mutex<Option<WorkbenchTarget>>);
+
+impl FocusTarget {
+    fn set(&self, target: WorkbenchTarget) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(target);
+    }
+
+    fn peek(&self) -> Option<WorkbenchTarget> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn clear(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// 最近一次托盘菜单构建用的宿主行（spec §9.2 #12 的映射依据）：动态菜单 id
+/// `session:{kind}:{i}` 按 id 查行 → 行内 session_key → `SessionDetail`。由
+/// `build_menu_at` 每次构建后写入——缓存 == 刚构建的菜单；startup warm-start
+/// （read_overview 带 hosts.json 旧快照）与每轮 tick 都经过同一写入点，缓存
+/// 不会停在旧菜单。
+struct HostsCache(Mutex<Vec<HostRow>>);
+
 /// 去抖判定（纯函数，单测钉住）：距上次广播 ≥ 窗口（或从未发过）→ 广播；
 /// < 窗口 → 吞掉（不发，避免工作台双拉）。用「距上次多久」而不是绝对 Instant，
 /// 让单测能自由构造时长（Instant 造不出任意值）。
@@ -557,6 +905,9 @@ fn emit_fold_event(app: &AppHandle) {
 fn sync_tick(app: &AppHandle) {
     let status = perform_sync();
     overview::save_sync_status(&status);
+    // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
+    // 快照继续渲染并自然转 stale，spec §6 决策 5）。
+    refresh_hosts();
     refresh(app);
     // fold 成功落盘 → 广播给工作台（去抖合并，见 emit_fold_event）。只覆盖真正
     // 的 fold：discover 成功但「无未折会话」没有新数据落盘，广播只会让工作台
@@ -579,7 +930,7 @@ fn start_refresh_tick(app: AppHandle) {
         } else {
             eprintln!("[agent-vitals] 同步进行中，跳过本轮");
         }
-        std::thread::sleep(std::time::Duration::from_secs(5 * 60));
+        std::thread::sleep(TICK_PERIOD);
     });
 }
 
@@ -594,6 +945,25 @@ fn sync_now(app: &AppHandle) {
     });
 }
 
+/// 后台预热 R2a store：app 启动就 spawn 一轮 `sessions list`（page-size 1 已是
+/// 最小响应），让 store cache 在用户点会话/finding tab 之前就绪——冷启动两源
+/// 631MB/115 文件的构建 30s+，用户「第一次打开会话 tab 卡住十几秒」的等待就
+/// 来自它。best-effort：二进制缺失/数据根不可写静默吞掉，用户点击时再正常走
+/// async 路径；`StoreBuildLock` 保证与用户点击并发时后者等前者写完，直接命中
+/// cache（也把 machine_namespace 首建串成一次，跨进程并建会得到不一致的 ns）。
+fn warm_r2a_store(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let lock = app.state::<store::StoreBuildLock>().inner().clone();
+        let _guard = lock.acquire();
+        let Some(bin) = resolve_binary() else { return };
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.args(["sessions", "list", "--json", "--page-size", "1"]);
+        cmd.env("AGENT_VITALS_HOME", overview::data_home());
+        let _ = cmd.output();
+    });
+}
+
 /// 打开工作台主窗口：显示 + 聚焦。**不做 toggle**——工作台是常驻主窗口，× 只
 /// 隐藏不销毁（`on_window_event` 拦截 prevent_close + hide），再开保留当前
 /// tab/月/分页状态，不是重建一个空白窗口。
@@ -604,10 +974,11 @@ fn show_workbench(app: &AppHandle) {
 }
 
 /// 信息行菜单 id → 工作台 tab 名。纯函数，单测钉住映射——切错 tab 的回归靠它挡。
+/// `session:{kind}:{i}` / `host:{kind}` 深链 id 不在这里（#11 的 WorkbenchTarget
+/// 分发）；平铺「最近会话」行已删，「recent」id 不再存在。
 fn tab_for_menu_id(id: &str) -> Option<&'static str> {
     match id {
         "today" | "daily" | "month" | "budget" => Some("overview"),
-        "recent" => Some("sessions"),
         "sync" => Some("sources"),
         _ => None,
     }
@@ -625,6 +996,44 @@ fn focus_tab(app: &AppHandle, tab: &str) {
     }
     show_workbench(app);
     let _ = app.emit("focus-tab", tab);
+}
+
+/// 动态菜单 id → 会话深链目标（spec §9.2 #12）。纯函数，单测钉住映射：
+/// · `session:{kind}:{i}` → 该宿主第 i 行 recent 的 `SessionDetail`。session_key
+///   从 hosts.json 里 `SessionKey::to_json()` 形状的 Value 反序列化——失败即该行
+///   key 不完整/形状漂移 → None，不发一个回传不了的目标（L2 行仍渲染，只是
+///   点了不动，比跳到 not-found 详情诚实）。
+/// · `host:{kind}` → `SessionList{host_kind: Some(kind)}`（v1 点击子菜单本身不产
+///   事件，发射点留给「查看全部会话」回归，§7.1）。
+/// · 禁用 id（`session:unavailable:{kind}` / `session:none:{kind}` /
+///   `session:stale:{kind}`）→ None——禁用项点不到，事件即便到达也不该有目标。
+fn workbench_target_for_menu_id(id: &str, hosts: &[HostRow]) -> Option<WorkbenchTarget> {
+    let mut parts = id.splitn(3, ':');
+    let head = parts.next()?;
+    let kind = parts.next()?;
+    match (head, kind) {
+        ("host", k) => Some(WorkbenchTarget::SessionList {
+            host_kind: Some(k.to_string()),
+        }),
+        ("session", k) if k == "unavailable" || k == "none" || k == "stale" => None,
+        ("session", k) => {
+            let i: usize = parts.next()?.parse().ok()?;
+            let row = hosts.iter().find(|r| r.host_kind == k)?;
+            let session_key = serde_json::from_value(row.recent.get(i)?.session_key.clone()).ok()?;
+            Some(WorkbenchTarget::SessionDetail { session_key })
+        }
+        _ => None,
+    }
+}
+
+/// 会话深链的核心动作（spec §7.2 的 focus_session 语义）：**覆盖式**存入
+/// FocusTarget（写先于 show——窗口不可见时 emit 是空操作，目标必须已落持久
+/// slot）→ show_workbench → `focus-target` 事件（窗口已可见时一戳就跳）。事件
+/// 只是通知，pull 是最终仲裁。命令与菜单分发共用这一条路径，语义只写一处。
+fn focus_session_target(app: &AppHandle, target: WorkbenchTarget) {
+    app.state::<FocusTarget>().set(target);
+    show_workbench(app);
+    let _ = app.emit("focus-target", ());
 }
 
 /// 工作台前端请求当前 overview —— 与托盘菜单同一份数据源，前端只渲染。
@@ -668,6 +1077,29 @@ fn clear_nav_target(state: tauri::State<'_, NavTarget>) {
     *state.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+/// 会话深链发射点（spec §7.2 的 focus_session）：覆盖式存入 + `focus-target`
+/// 事件 + show_workbench。前端 v1 不发射（消费侧是 peek/clear），这个命令是给
+/// 菜单分发与未来「查看全部会话」回归共用的 IPC 面。
+#[tauri::command]
+fn focus_session(app: AppHandle, target: WorkbenchTarget) {
+    focus_session_target(&app, target);
+}
+
+/// 工作台 pull：**非破坏性**读深链目标（窗口未建/未可见时菜单点击的目标留在
+/// 这里，等 init/focus/visibilitychange 时消费；`peek` 不消费，apply 成功后由
+/// `clear_focus_target` 显式清——失败也清，不无限重试，spec §7.2）。
+#[tauri::command]
+fn peek_focus_target(state: tauri::State<'_, FocusTarget>) -> Option<WorkbenchTarget> {
+    state.peek()
+}
+
+/// 工作台 apply 成功后清除深链目标（失败也清——错误横幅已向用户说明，菜单再点
+/// 会覆盖新目标）。
+#[tauri::command]
+fn clear_focus_target(state: tauri::State<'_, FocusTarget>) {
+    state.clear();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -676,6 +1108,14 @@ pub fn run() {
         .manage(FoldEventDebounce(Mutex::new(None)))
         // 菜单信息行导航目标：菜单点击 → 工作台（见 NavTarget 注释）。
         .manage(NavTarget(Mutex::new(None)))
+        // 会话深链待消费目标（spec §7.2）：菜单 L2 → 工作台详情。与 NavTarget
+        // 并存——不同维度（会话目标 vs tab 名），见 FocusTarget 注释。
+        .manage(FocusTarget(Mutex::new(None)))
+        // 最近一次菜单构建用的宿主行（spec §9.2 #12 映射依据，见 build_menu_at）。
+        .manage(HostsCache(Mutex::new(Vec::new())))
+        // R2a 冷构建串行锁：后台预热与用户点击并发 spawn CLI 时，后到者等锁 →
+        // 直接命中 cache（见 store.rs StoreBuildLock 注释）。
+        .manage(store::StoreBuildLock::new())
         .on_window_event(|window, event| {
             // 工作台 × 按钮 → 隐藏不销毁。config-created 窗口被 × 关掉会 destroy，
             // 之后 reopen 是 no-op（get_webview_window 返回 None）；hide 保状态——
@@ -696,6 +1136,9 @@ pub fn run() {
             store::sessions_findings,
             peek_nav_target,
             clear_nav_target,
+            focus_session,
+            peek_focus_target,
+            clear_focus_target,
         ])
         .setup(|app| {
             // 菜单栏工具:必须 .accessory,否则 macOS 把它当普通 App 常驻 Dock
@@ -724,10 +1167,20 @@ pub fn run() {
                         // 「立即同步」不是重读本地 state，而是受控 tick：discover →
                         // oneline 折账 → 刷新托盘（review fix 1）。
                         "refresh" => sync_now(app),
-                        // 信息行导航：映射在 tab_for_menu_id（单测钉住），走双通路
-                        // focus_tab（事件 + 持久 pull）。
+                        // 深链优先（spec §7.2）：session:/host: id → 映射
+                        // WorkbenchTarget → focus_session_target（写目标 + 事件 +
+                        // show，双通路）。映射失败（未知 id/禁用 id/回传不了的
+                        // session_key）回退信息行 tab 导航（tab_for_menu_id 钉住）。
                         _ => {
-                            if let Some(tab) = tab_for_menu_id(id) {
+                            let hosts = app
+                                .state::<HostsCache>()
+                                .0
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone();
+                            if let Some(target) = workbench_target_for_menu_id(id, &hosts) {
+                                focus_session_target(app, target);
+                            } else if let Some(tab) = tab_for_menu_id(id) {
                                 focus_tab(app, tab);
                             }
                         }
@@ -740,6 +1193,8 @@ pub fn run() {
                 let _ = t.set_title(Some(today_title(&ov)));
             }
             start_refresh_tick(app.handle().clone());
+            // R2a store 后台预热：不等用户首点才付冷构建钱（见 warm_r2a_store）。
+            warm_r2a_store(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -760,6 +1215,8 @@ mod tests {
             budget,
             recent: overview::RecentSession::default(),
             sync: SyncStatus::default(),
+            hosts: vec![overview::HostRow::unavailable("dsh"), overview::HostRow::unavailable("codex")],
+            hosts_generated_at: None,
             estimate_note: String::new(),
         }
     }
@@ -792,7 +1249,7 @@ mod tests {
     /// 日预算行的分子/百分比只在「今天真有数据 + alert 新鲜」时出现。这条钉的是
     /// 真机 2026-09-01 的形态：today.json 停在昨天（`ov.today` 为 None），
     /// alert.json 仍报着上一次评估的 today_cost —— 菜单绝不能同时说
-    /// 「今日成本：—（无数据）」和「今日预算：¥0.12 / ¥30（0%）」。
+    /// 「今日成本：—（无数据）」和「今日按量预算：¥0.12 / ¥30（0%）」。
     #[test]
     fn daily_budget_line_hides_numerator_when_today_has_no_data() {
         let ov = ov_with(overview::BudgetAlert {
@@ -807,7 +1264,7 @@ mod tests {
         assert!(ov.today.is_none());
         assert_eq!(
             daily_budget_text(&ov, FIXTURE_AT_SECS).unwrap(),
-            "今日预算：— / ¥30（今日无数据）",
+            "今日按量预算：— / ¥30（今日无数据）",
             "今天没有数据时，alert.json 里那个属于别的一天的 today_cost 不得冒充今日"
         );
     }
@@ -827,7 +1284,7 @@ mod tests {
             ..Default::default()
         });
         ov.today = Some(serde_json::json!({"total": 24.0, "peak_total": 0.0, "tokens": 100}));
-        assert_eq!(daily_budget_text(&ov, FIXTURE_AT_SECS).unwrap(), "今日预算：¥24 / ¥30（93%）");
+        assert_eq!(daily_budget_text(&ov, FIXTURE_AT_SECS).unwrap(), "今日按量预算：¥24 / ¥30（93%）");
     }
 
     /// alert 过期时不报旧的分子/百分比，只留分母（分母是设置，不是测量值，过期
@@ -846,7 +1303,7 @@ mod tests {
         ov.today = Some(serde_json::json!({"total": 24.0, "peak_total": 0.0, "tokens": 100}));
         assert_eq!(
             daily_budget_text(&ov, FIXTURE_AT_SECS + 3600).unwrap(),
-            "今日预算：— / ¥30（数据过期，未重新评估）"
+            "今日按量预算：— / ¥30（数据过期，未重新评估）"
         );
     }
 
@@ -858,35 +1315,225 @@ mod tests {
         assert!(daily_budget_text(&ov, FIXTURE_AT_SECS).is_none());
     }
 
-    /// 最近会话行：oneline.json 在场 → 模型短名 · token · 钱；findings 为 0 时
-    /// 不显示「0 个发现」。
+    /// host 显示名映射（spec §4）：dsh → DeepSeek Harness、codex → Codex；
+    /// 未知宿主原样显示（未来加宿主不硬编码）。
     #[test]
-    fn recent_session_line_renders_model_tokens_cost() {
-        let mut ov = ov_with(overview::BudgetAlert::default());
-        assert!(recent_session_text(&ov).is_none(), "oneline.json 缺场 → 整行不显示");
-        ov.recent = overview::RecentSession {
-            present: true,
-            model: Some("deepseek/deepseek-v4-flash".into()),
-            tokens_total: Some(15305),
-            cost_cny: Some(0.0230385),
-            findings_total: Some(0),
-            ..Default::default()
-        };
-        assert_eq!(recent_session_text(&ov).unwrap(), "最近会话：deepseek-v4-flash · 15K · ¥0.02");
-        ov.recent.findings_total = Some(3);
-        assert_eq!(
-            recent_session_text(&ov).unwrap(),
-            "最近会话：deepseek-v4-flash · 15K · ¥0.02 · 3 个发现"
-        );
+    fn host_display_name_maps_both_hosts_and_unknown() {
+        assert_eq!(host_display_name("dsh"), "DeepSeek Harness");
+        assert_eq!(host_display_name("codex"), "Codex");
+        assert_eq!(host_display_name("future-host"), "future-host");
     }
 
-    /// present 但字段全 null（oneline.json 写了个空壳）→ 不显示一行只有前缀的
-    /// 「最近会话：」。
+    /// L1 宿主行（spec §4/§8 矩阵逐格）：完整 → `显示名 · token · N 会话`；
+    /// 全缺 → 单个 `· —`（unavailable 形态）；只缺一个 → 该槽位「—」；
+    /// partial 覆盖率 → token 加 `≈` 前缀（保守下界标注不能渲染成精确值）。
     #[test]
-    fn recent_session_line_absent_when_every_field_is_null() {
-        let mut ov = ov_with(overview::BudgetAlert::default());
-        ov.recent = overview::RecentSession { present: true, ..Default::default() };
-        assert!(recent_session_text(&ov).is_none());
+    fn host_row_text_renders_values_dashes_and_approx() {
+        let full = HostRow {
+            host_kind: "dsh".into(),
+            status: "ready".into(),
+            today_tokens: Some(1398214),
+            today_partial: false,
+            today_sessions: Some(3),
+            recent: vec![],
+        };
+        assert_eq!(host_row_text(&full), "DeepSeek Harness · 1.4M · 3 会话");
+        let partial = HostRow { today_partial: true, ..full.clone() };
+        assert_eq!(host_row_text(&partial), "DeepSeek Harness · ≈1.4M · 3 会话");
+        assert_eq!(host_row_text(&HostRow::unavailable("codex")), "Codex · —");
+        let no_sessions = HostRow {
+            today_tokens: Some(500),
+            today_sessions: None,
+            ..full.clone()
+        };
+        assert_eq!(host_row_text(&no_sessions), "DeepSeek Harness · 500 · —");
+        let no_tokens = HostRow {
+            today_tokens: None,
+            today_sessions: Some(2),
+            ..full.clone()
+        };
+        assert_eq!(host_row_text(&no_tokens), "DeepSeek Harness · — · 2 会话");
+    }
+
+    /// L2 最近会话行（spec §4）：`MM-DD · 身份 · tokens`；title 超 24 字符截断；
+    /// 无 title → short_model → native_id 的 fallback 链；跨年显示完整日期；
+    /// tokens 缺段省略。
+    #[test]
+    fn recent_row_text_formats_date_identity_and_tokens() {
+        // FIXTURE_AT_SECS = 2026-08-30 → 北京年 2026。
+        let row = RecentSessionRow {
+            session_key: serde_json::json!({"host_kind": "dsh", "native_id": "s1"}),
+            title: Some("重构 r2a 查询".into()),
+            date: Some("2026-08-28".into()),
+            model: Some("deepseek/deepseek-v4-flash".into()),
+            tokens: Some(88000),
+        };
+        assert_eq!(
+            recent_row_text(&row, FIXTURE_AT_SECS),
+            "08-28 · 重构 r2a 查询 · 88K"
+        );
+        // 跨年（2025 的会话在 2026 年看）→ 完整日期，不折 MM-DD。
+        let last_year = RecentSessionRow { date: Some("2025-12-31".into()), ..row.clone() };
+        assert_eq!(
+            recent_row_text(&last_year, FIXTURE_AT_SECS),
+            "2025-12-31 · 重构 r2a 查询 · 88K"
+        );
+        // 超长 title（27 字符）→ 前 23 字符 + …（按字符数截，中文不会切成半个字）。
+        let long = RecentSessionRow {
+            title: Some("这是一个非常长的会话标题它绝对超过二十四个字符必须截断".into()),
+            ..row.clone()
+        };
+        assert_eq!(
+            recent_row_text(&long, FIXTURE_AT_SECS),
+            "08-28 · 这是一个非常长的会话标题它绝对超过二十四个字符… · 88K"
+        );
+        // 无 title → short_model；再无 model → native_id；tokens 缺 → 省略。
+        let no_title = RecentSessionRow { title: None, ..row.clone() };
+        assert_eq!(recent_row_text(&no_title, FIXTURE_AT_SECS), "08-28 · deepseek-v4-flash · 88K");
+        let no_model = RecentSessionRow { title: None, model: None, ..row.clone() };
+        assert_eq!(recent_row_text(&no_model, FIXTURE_AT_SECS), "08-28 · s1 · 88K");
+        let no_tokens = RecentSessionRow { tokens: None, ..row.clone() };
+        assert_eq!(recent_row_text(&no_tokens, FIXTURE_AT_SECS), "08-28 · 重构 r2a 查询");
+    }
+
+    /// 宿主区结构（spec §4/§9.2）：固定两宿主子菜单（hosts 数组序 = dsh→codex），
+    /// L2 行 id `session:{kind}:{i}` 按序编号；unavailable 宿主 → L2 单行禁用
+    /// 「会话数据暂不可用」。平铺「最近会话」行已删——结构里只有宿主子菜单。
+    #[test]
+    fn host_menu_rows_builds_two_submenus_dsh_first() {
+        let hosts = vec![
+            HostRow {
+                host_kind: "dsh".into(),
+                status: "ready".into(),
+                today_tokens: Some(15000),
+                today_partial: false,
+                today_sessions: Some(1),
+                recent: vec![
+                    RecentSessionRow {
+                        session_key: serde_json::json!({"native_id": "s1"}),
+                        title: Some("会话甲".into()),
+                        date: Some("2026-08-28".into()),
+                        model: None,
+                        tokens: Some(5000),
+                    },
+                    RecentSessionRow {
+                        session_key: serde_json::json!({"native_id": "s2"}),
+                        title: Some("会话乙".into()),
+                        date: Some("2026-08-27".into()),
+                        model: None,
+                        tokens: Some(3000),
+                    },
+                ],
+            },
+            HostRow::unavailable("codex"),
+        ];
+        let rows = host_menu_rows(&hosts, None, FIXTURE_AT_SECS);
+        assert_eq!(rows.len(), 2);
+        match &rows[0] {
+            MenuRow::Submenu { id, text, rows: l2 } => {
+                assert_eq!(id, "host:dsh");
+                assert_eq!(text, "DeepSeek Harness · 15K · 1 会话");
+                assert_eq!(
+                    *l2,
+                    vec![
+                        MenuRow::Item {
+                            id: "session:dsh:0".into(),
+                            // fmt_tokens：<10K 留一位小数 → 5.0K（与既有钉住的
+                            // fmt_tokens_abbreviates_large_counts 同规则）。
+                            text: "08-28 · 会话甲 · 5.0K".into(),
+                            enabled: true,
+                        },
+                        MenuRow::Item {
+                            id: "session:dsh:1".into(),
+                            text: "08-27 · 会话乙 · 3.0K".into(),
+                            enabled: true,
+                        },
+                    ]
+                );
+            }
+            other => panic!("rows[0] 应是 Submenu，实际 {other:?}"),
+        }
+        match &rows[1] {
+            MenuRow::Submenu { id, text, rows: l2 } => {
+                assert_eq!(id, "host:codex");
+                assert_eq!(text, "Codex · —");
+                assert_eq!(
+                    *l2,
+                    vec![MenuRow::Item {
+                        id: "session:unavailable:codex".into(),
+                        text: "会话数据暂不可用".into(),
+                        enabled: false,
+                    }]
+                );
+            }
+            other => panic!("rows[1] 应是 Submenu，实际 {other:?}"),
+        }
+    }
+
+    /// 降级矩阵（spec §8）：ready + 零会话 → 禁用「尚无会话」（真零不是失败——
+    /// 与 unavailable 的「会话数据暂不可用」必须可区分）；stale 快照（年龄 >
+    /// 2 × tick）→ 宿主子菜单底部「数据更新于 hh:mm · 可能已过期」，hh:mm 是
+    /// 北京时刻（UTC +8）。
+    #[test]
+    fn host_menu_rows_degradation_and_stale_footer() {
+        let zero = vec![HostRow {
+            host_kind: "codex".into(),
+            status: "ready".into(),
+            today_tokens: Some(0),
+            today_partial: false,
+            today_sessions: Some(0),
+            recent: vec![],
+        }];
+        let rows = host_menu_rows(&zero, None, FIXTURE_AT_SECS);
+        assert_eq!(
+            rows[0],
+            MenuRow::Submenu {
+                id: "host:codex".into(),
+                text: "Codex · 0 · 0 会话".into(),
+                rows: vec![MenuRow::Item {
+                    id: "session:none:codex".into(),
+                    text: "尚无会话".into(),
+                    enabled: false,
+                }],
+            }
+        );
+
+        // stale 窗口 = 2 × tick = 10 分钟：+9 分钟仍新鲜、+11 分钟过期。
+        let fresh_now = FIXTURE_AT_SECS + 9 * 60;
+        let stale_now = FIXTURE_AT_SECS + 11 * 60;
+        let hosts = vec![HostRow {
+            host_kind: "dsh".into(),
+            status: "ready".into(),
+            today_tokens: Some(100),
+            today_partial: false,
+            today_sessions: Some(1),
+            recent: vec![RecentSessionRow {
+                session_key: serde_json::json!({"native_id": "s"}),
+                title: Some("t".into()),
+                date: Some("2026-08-28".into()),
+                model: None,
+                tokens: None,
+            }],
+        }];
+        let fresh = host_menu_rows(&hosts, Some(FIXTURE_AT), fresh_now);
+        assert!(!matches!(
+            &fresh[0],
+            MenuRow::Submenu { rows, .. }
+                if rows.iter().any(|r| matches!(r, MenuRow::Item { id, .. } if id == "session:stale:dsh"))
+        ));
+        let stale = host_menu_rows(&hosts, Some(FIXTURE_AT), stale_now);
+        match &stale[0] {
+            MenuRow::Submenu { rows, .. } => assert_eq!(
+                rows.last(),
+                Some(&MenuRow::Item {
+                    id: "session:stale:dsh".into(),
+                    // FIXTURE_AT = 08-30 07:04:38Z → +8h = 15:04 北京。
+                    text: "数据更新于 15:04 · 可能已过期".into(),
+                    enabled: false,
+                })
+            ),
+            other => panic!("stale[0] 应是 Submenu，实际 {other:?}"),
+        }
     }
 
     /// 同步行常驻：成功时也显示（带 HH:MM），不是只在失败时才出现——用户要能一眼
@@ -899,7 +1546,7 @@ mod tests {
             message: "无未折 DSH 会话".into(),
             at: Some("2026-09-01 09:50:52".into()),
         };
-        assert_eq!(sync_line_text(&ok), "上次同步：09:50 成功");
+        assert_eq!(sync_line_text(&ok), "上次同步：09:50 成功（DSH 状态折叠）");
         let never = SyncStatus::default();
         assert_eq!(sync_line_text(&never), "尚未同步");
         let failed = SyncStatus {
@@ -911,20 +1558,20 @@ mod tests {
         assert_eq!(sync_line_text(&failed), "⚠ 上次同步失败：oneline 失败");
         // at 缺场（老状态文件）也不能崩，退化成不带时间的成功。
         let ok_no_at = SyncStatus { at: None, ..ok };
-        assert_eq!(sync_line_text(&ok_no_at), "上次同步：成功");
+        assert_eq!(sync_line_text(&ok_no_at), "上次同步：成功（DSH 状态折叠）");
     }
 
     #[test]
     /// 信息行点击 → 工作台 tab 的映射钉死。today/daily/month/budget 都是总览页的
-    /// 数字，recent 是会话清单，sync 是数据源页；workbench/refresh 不是导航行。
+    /// 数字，sync 是数据源页；workbench/refresh 不是导航行；`recent` 已随平铺行
+    /// 删除（宿主导航的 L2 深链走 WorkbenchTarget，不走 tab 映射）。
     fn tab_for_menu_id_maps_info_rows_to_workbench_tabs() {
         for id in ["today", "daily", "month", "budget"] {
             assert_eq!(tab_for_menu_id(id), Some("overview"), "id={id} 应跳总览");
         }
-        assert_eq!(tab_for_menu_id("recent"), Some("sessions"));
         assert_eq!(tab_for_menu_id("sync"), Some("sources"));
-        for id in ["workbench", "refresh", "nope", ""] {
-            assert_eq!(tab_for_menu_id(id), None, "id={id} 不是导航行");
+        for id in ["workbench", "refresh", "recent", "host:dsh", "session:dsh:0", "nope", ""] {
+            assert_eq!(tab_for_menu_id(id), None, "id={id} 不是信息行导航");
         }
     }
 
@@ -1233,5 +1880,145 @@ mod tests {
         assert!(!should_emit_fold_event(&SyncStatus::ok("discover", "无未折 DSH 会话".into())));
         assert!(!should_emit_fold_event(&SyncStatus::fail("fold", "oneline 失败".into())));
         assert!(!should_emit_fold_event(&SyncStatus::default()));
+    }
+
+    /// spec §9.2 #11 深链 slot 语义：peek 连续读两次返回同一目标（持久、
+    /// 非破坏性——窗口未建/不可见时菜单点击的目标要留到工作台下次消费）；
+    /// clear 后 None；set 覆盖旧目标。命令体（peek/clear）只是 slot 方法的
+    /// 一层薄壳，语义直接钉在 slot 上。
+    #[test]
+    fn focus_target_peek_persists_clear_resets_and_set_overwrites() {
+        let a = WorkbenchTarget::SessionDetail {
+            session_key: SessionKeyJson {
+                host_kind: "dsh".into(),
+                native_id: "s1".into(),
+                source_profile: "work".into(),
+                machine_namespace: "mac-a".into(),
+            },
+        };
+        let b = WorkbenchTarget::SessionList { host_kind: Some("codex".into()) };
+        let slot = FocusTarget(Mutex::new(None));
+        // 未设置 → None。
+        assert_eq!(slot.peek(), None);
+        // set 后 peek 两次 → 同一目标（持久）。
+        slot.set(a.clone());
+        assert_eq!(slot.peek(), Some(a.clone()));
+        assert_eq!(slot.peek(), Some(a.clone()));
+        // 覆盖式存入 → 旧目标消失，新目标生效。
+        slot.set(b.clone());
+        assert_eq!(slot.peek(), Some(b.clone()));
+        // clear → None。
+        slot.clear();
+        assert_eq!(slot.peek(), None);
+    }
+
+    /// spec §9.2 #11 serde round-trip：外层 `type` tag + camelCase 变体名
+    /// （sessionDetail/sessionList）；`session_key` 字段名保持 snake_case，内层
+    /// 4 键与 core `SessionKey::to_json()` **字节一致**（键序也是契约，
+    /// `r2a.rs::to_json` 注释）——回传 sessions_read 的前提，见 SessionKeyJson
+    /// 注释里「两处偏离 spec 代码块」的说明。
+    #[test]
+    fn workbench_target_serde_round_trip_camelcase_tag_snakecase_key() {
+        let key = SessionKeyJson {
+            host_kind: "dsh".into(),
+            native_id: "s1".into(),
+            source_profile: "work".into(),
+            machine_namespace: "mac-a".into(),
+        };
+        // 内层与 core to_json 逐字节一致（字符串比较钉住键序）。
+        let core_key =
+            agent_vitals_core::r2a::SessionKey::new("dsh", "s1", "work", "mac-a");
+        assert_eq!(
+            serde_json::to_string(&key).unwrap(),
+            serde_json::to_string(&core_key.to_json()).unwrap()
+        );
+        // 外层：type tag + camelCase 变体名 + snake_case 字段名。
+        let detail = WorkbenchTarget::SessionDetail { session_key: key };
+        let v = serde_json::to_value(&detail).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "sessionDetail",
+                "session_key": {
+                    "host_kind": "dsh",
+                    "native_id": "s1",
+                    "source_profile": "work",
+                    "machine_namespace": "mac-a",
+                }
+            })
+        );
+        // round-trip 闭合：同一 JSON 解析回原目标。
+        let back: WorkbenchTarget = serde_json::from_value(v).unwrap();
+        assert_eq!(back, detail);
+        // SessionList 变体：host_kind 可空（None = 全部，§7.1）。
+        let list = WorkbenchTarget::SessionList { host_kind: None };
+        let lv = serde_json::to_value(&list).unwrap();
+        assert_eq!(lv, serde_json::json!({"type": "sessionList", "host_kind": null}));
+        let back: WorkbenchTarget = serde_json::from_value(lv).unwrap();
+        assert_eq!(back, list);
+    }
+
+    /// spec §9.2 #12 动态菜单 id → WorkbenchTarget 映射：`session:{kind}:{i}` →
+    /// SessionDetail（key 与行内一致）；`host:{kind}` → SessionList；禁用 id
+    /// （unavailable/none/stale）→ None（禁用项点不到，事件即便到达也不该有
+    /// 目标）；越界索引/未知宿主 → None。
+    #[test]
+    fn menu_ids_map_to_workbench_targets_and_disabled_ids_are_inert() {
+        let hosts = vec![
+            HostRow {
+                host_kind: "dsh".into(),
+                status: "ready".into(),
+                today_tokens: Some(1500),
+                today_partial: false,
+                today_sessions: Some(2),
+                recent: vec![
+                    RecentSessionRow {
+                        session_key: serde_json::json!({
+                            "host_kind": "dsh", "native_id": "s1",
+                            "source_profile": "work", "machine_namespace": "mac-a",
+                        }),
+                        title: Some("title".into()),
+                        date: Some("2026-09-01".into()),
+                        model: Some("m".into()),
+                        tokens: Some(100),
+                    },
+                    // session_key 不完整（容错投影会保留这种行，overview.rs）：
+                    // 该行仍渲染，但点了不动——不发一个回传不了的目标。
+                    RecentSessionRow {
+                        session_key: Value::Null,
+                        title: Some("bad-key".into()),
+                        date: None,
+                        model: None,
+                        tokens: None,
+                    },
+                ],
+            },
+            HostRow::unavailable("codex"),
+        ];
+        // 正常 L2 → SessionDetail，key 原样带出。
+        match workbench_target_for_menu_id("session:dsh:0", &hosts) {
+            Some(WorkbenchTarget::SessionDetail { session_key }) => {
+                assert_eq!(session_key.native_id, "s1");
+            }
+            other => panic!("session:dsh:0 应映射 SessionDetail，得 {other:?}"),
+        }
+        // 越界索引 → None。
+        assert_eq!(workbench_target_for_menu_id("session:dsh:5", &hosts), None);
+        // session_key 不可回传（null）→ None。
+        assert_eq!(workbench_target_for_menu_id("session:dsh:1", &hosts), None);
+        // 未知宿主 → None。
+        assert_eq!(workbench_target_for_menu_id("session:other:0", &hosts), None);
+        // host:{kind} → SessionList（v1 子菜单点击不产事件，发射点留给将来）。
+        assert_eq!(
+            workbench_target_for_menu_id("host:codex", &hosts),
+            Some(WorkbenchTarget::SessionList { host_kind: Some("codex".into()) })
+        );
+        // 禁用 id 一律 None。
+        assert_eq!(
+            workbench_target_for_menu_id("session:unavailable:codex", &hosts),
+            None
+        );
+        assert_eq!(workbench_target_for_menu_id("session:none:codex", &hosts), None);
+        assert_eq!(workbench_target_for_menu_id("session:stale:dsh", &hosts), None);
     }
 }

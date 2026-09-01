@@ -15,13 +15,36 @@
 //! 错误码原样透传：`not-found` / `permission` / `stale-revision` /
 //! `schema-mismatch` / `source-unavailable` / `cancelled`。二进制缺失/ spawn 失败
 //! 这类**基础设施失败**也用 `cancelled`（code 集固定，不另造新码）。
+//!
+//! 三个命令都是 **async + `spawn_blocking`**：冷启动的 store 构建（两源 631MB /
+//! 115 文件，30s+）不能占住主线程——同步 `cmd.output()` 会把 Tauri 主线程冻住
+//! 十几秒，托盘点击排队、切 tab 假死（真机 2026-09 的「点会话 tab 卡住」根因）。
+//! `spawn_blocking` 让 CLI 子进程在阻塞线程池里跑，主线程继续收托盘事件。
 
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
 use crate::overview::data_home;
 use crate::resolve_binary;
+
+/// R2a 冷构建的 app 内串行锁。`sessions_*` 都是 spawn CLI 子进程，后台预热与
+/// 用户点击可能并发各起一个——两份冷构建互抢 I/O、双倍付冷启动钱。原子写
+/// （temp+rename）防的是「读半截 cache」，这把锁防的是「重复冷构建」：后到的
+/// 构建等在锁外，前一个写完 cache 再进，直接走命中快路径。
+#[derive(Clone)]
+pub struct StoreBuildLock(pub Arc<Mutex<()>>);
+
+impl StoreBuildLock {
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(())))
+    }
+
+    pub(crate) fn acquire(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 fn error_value(code: &str, message: &str) -> Value {
     json!({ "error": { "code": code, "message": message } })
@@ -125,8 +148,15 @@ fn run_json(mut cmd: Command) -> Result<Value, Value> {
 }
 
 /// list_sessions：filter + cursor 分页 → versioned list DTO（§2.5/§3.3）。
+/// async：CLI 冷构建 30s+ 不能占主线程，见模块头注释。
+///
+/// `#[allow(clippy::too_many_arguments)]`：这是 Tauri IPC 面，参数扁平是
+/// 契约的一部分——`workbench.js` 的 invoke 调用面就是这七个扁平 filter，
+/// 改成分组结构要连带改前端调用面，为一个 lint 不值。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub fn sessions_list(
+pub async fn sessions_list(
+    state: tauri::State<'_, StoreBuildLock>,
     host_kind: Option<String>,
     model: Option<String>,
     date_from: Option<String>,
@@ -135,49 +165,71 @@ pub fn sessions_list(
     page_size: Option<usize>,
     cursor: Option<String>,
 ) -> Result<Value, Value> {
-    let Some(bin) = resolve_binary() else {
-        return Err(no_binary());
-    };
-    let args = list_args(&host_kind, &model, &date_from, &date_to, &query,
-                         page_size, &cursor);
-    let mut cmd = Command::new(&bin);
-    cmd.args(&args);
-    // 与 tick 同款：显式钉死 AGENT_VITALS_HOME，cache/machine.json 落在 app
-    // 自己的数据根，不依赖子进程继承的环境。
-    cmd.env("AGENT_VITALS_HOME", data_home());
-    run_json(cmd)
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let Some(bin) = resolve_binary() else {
+            return Err(no_binary());
+        };
+        let args = list_args(&host_kind, &model, &date_from, &date_to, &query,
+                             page_size, &cursor);
+        let mut cmd = Command::new(&bin);
+        cmd.args(&args);
+        // 与 tick 同款：显式钉死 AGENT_VITALS_HOME，cache/machine.json 落在 app
+        // 自己的数据根，不依赖子进程继承的环境。
+        cmd.env("AGENT_VITALS_HOME", data_home());
+        run_json(cmd)
+    })
+    .await
+    .map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
 /// read_session：session_key（+ 可选 revision）→ 完整 versioned envelope（§2.1）。
+/// async：会话读取依赖同一份冷构建，走同一把锁 + spawn_blocking。
 #[tauri::command]
-pub fn sessions_read(
+pub async fn sessions_read(
+    state: tauri::State<'_, StoreBuildLock>,
     session_key: Value,
     revision: Option<String>,
 ) -> Result<Value, Value> {
-    let Some(bin) = resolve_binary() else {
-        return Err(no_binary());
-    };
-    let key_json = serde_json::to_string(&session_key)
-        .map_err(|e| error_value("cancelled", &e.to_string()))?;
-    let args = read_args(&key_json, &revision);
-    let mut cmd = Command::new(&bin);
-    cmd.args(&args);
-    cmd.env("AGENT_VITALS_HOME", data_home());
-    run_json(cmd)
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let Some(bin) = resolve_binary() else {
+            return Err(no_binary());
+        };
+        let key_json = serde_json::to_string(&session_key)
+            .map_err(|e| error_value("cancelled", &e.to_string()))?;
+        let args = read_args(&key_json, &revision);
+        let mut cmd = Command::new(&bin);
+        cmd.args(&args);
+        cmd.env("AGENT_VITALS_HOME", data_home());
+        run_json(cmd)
+    })
+    .await
+    .map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
 /// aggregate_findings：跨会话 findings 汇总（workbench「Findings」页）。纯聚合在
 /// core + 二进制（`sessions findings --json`），IPC 只做 spawn + 透传，与
-/// `sessions_list` 同款。
+/// `sessions_list` 同款。async：见模块头注释。
 #[tauri::command]
-pub fn sessions_findings() -> Result<Value, Value> {
-    let Some(bin) = resolve_binary() else {
-        return Err(no_binary());
-    };
-    let mut cmd = Command::new(&bin);
-    cmd.args(findings_args());
-    cmd.env("AGENT_VITALS_HOME", data_home());
-    run_json(cmd)
+pub async fn sessions_findings(
+    state: tauri::State<'_, StoreBuildLock>,
+) -> Result<Value, Value> {
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let Some(bin) = resolve_binary() else {
+            return Err(no_binary());
+        };
+        let mut cmd = Command::new(&bin);
+        cmd.args(findings_args());
+        cmd.env("AGENT_VITALS_HOME", data_home());
+        run_json(cmd)
+    })
+    .await
+    .map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
 #[cfg(test)]

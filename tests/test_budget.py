@@ -214,10 +214,17 @@ class TestEvaluate(unittest.TestCase):
         """
         with _IsolatedHome():
             sd = state.state_dir()
+            # 月份从真实时钟推导：`compute_month_cost` → `state.read_month`
+            # 的「当前月」由 `_month_key()`（真实北京时钟）决定，硬编码
+            # "2026-08" 在 9 月就滚出当前月被过滤，month_ratio 恒 None——
+            # 测试写成固定月份曾因「写测试时还在当月」碰巧全绿（2026-09-01
+            # 起的真实失败），随日历旋转的测试是腐坏测试。
+            mkey = datetime.now(budget._BEIJING).strftime("%Y-%m")
+            dkey = mkey + "-01"
             # 没有 today.json —— ratio=None，level 起点是 "ok"；
             # month.json 里一天的花费远超默认 monthly_cny=600。
             state._atomic_write(sd / "month.json", {
-                "days": {"2026-08-01": {
+                "days": {dkey: {
                     "uncached_input_tokens": 500_000_000,
                     "output_tokens": 0, "cache_read_tokens": 0,
                     "cache_write_tokens": 0,
@@ -225,7 +232,7 @@ class TestEvaluate(unittest.TestCase):
                     "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
                 }},
                 "schema_version": "1.0.0",
-                "month": "2026-08",
+                "month": mkey,
                 "generated_at": datetime.now(budget._BEIJING).isoformat(),
             })
             r = budget.evaluate()
@@ -241,8 +248,11 @@ class TestEvaluate(unittest.TestCase):
         """
         with _IsolatedHome():
             sd = state.state_dir()
+            # 月份从真实时钟推导（同上一条：硬编码月份会随日历滚出当前月，
+            # read_month 按真实 _month_key 过滤后 month_ratio 恒 None）。
+            mkey = datetime.now(budget._BEIJING).strftime("%Y-%m")
             state._atomic_write(sd / "month.json", {
-                "days": {"2026-08-01": {
+                "days": {mkey + "-01": {
                     "uncached_input_tokens": 1_000,
                     "output_tokens": 0, "cache_read_tokens": 0,
                     "cache_write_tokens": 0,
@@ -250,7 +260,7 @@ class TestEvaluate(unittest.TestCase):
                     "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
                 }},
                 "schema_version": "1.0.0",
-                "month": "2026-08",
+                "month": mkey,
                 "generated_at": datetime.now(budget._BEIJING).isoformat(),
             })
             state._atomic_write(sd / "today.json", {

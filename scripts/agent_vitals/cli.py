@@ -846,6 +846,21 @@ def _main():
                               "stale-revision")
     p_sread.add_argument("--json", action="store_true",
                          help="Print the envelope as JSON to stdout")
+    p_snav = sess_sub.add_parser(
+        "navigation",
+        help="Multi-host navigation projection (MENUBAR_MULTIHOST_NAVIGATION_"
+             "SPEC §5.1/§5.2): one spawn, both host snapshots for the Tauri "
+             "menu bar (today tokens + today sessions + recent N)")
+    p_snav.add_argument("--day", default="",
+                        help="Day to project (YYYY-MM-DD, Beijing day boundary; "
+                             "defaults to today)")
+    p_snav.add_argument("--timezone", default="Asia/Shanghai",
+                        help="Timezone of the projected day; only Asia/Shanghai "
+                             "is supported (§5.1)")
+    p_snav.add_argument("--recent", type=int, default=5,
+                        help="How many recent rows per host; default 5")
+    p_snav.add_argument("--json", action="store_true",
+                        help="Print the versioned envelope as JSON to stdout")
     # ──── M3: 跨会话聚合层（v1.x.x）── 三个新子命令 ─────────────────
     # oneline：单次审计 → oneline.json（覆盖）+ today.json / month.json（合并累加）。
     # 与 behavior 复用同一份 audit_session_log，但额外调 hour_buckets 把折叠
@@ -1274,6 +1289,19 @@ def _main():
                 None,
                 getattr(args, "session_key", ""),
                 getattr(args, "revision", None),
+                getattr(args, "json", False),
+            )
+        elif action == "navigation":
+            # `--day` 缺省 = 今天（北京日界，core 折叠的日期桶是 UTC+8 时
+            # 段；spec §5.1）——与 Rust 主入口同款缺省。
+            day = getattr(args, "day", "")
+            if not day:
+                day = codex_cost_module.today_beijing()
+            r2a_mod.sessions_navigation(
+                None,
+                day,
+                getattr(args, "timezone", "Asia/Shanghai"),
+                getattr(args, "recent", 5),
                 getattr(args, "json", False),
             )
         else:

@@ -652,6 +652,34 @@ pub fn codex_by_model_from_hours(by_hour_model: &Value, prefix: Option<&str>) ->
     Value::Object(by_model)
 }
 
+/// `sessions navigation` 的 Codex 今日 token：`codex_aggregate_hours` 的日期桶
+/// （{date:{model:{speed:桶}}}）→ 当日 5 桶全模型/全速度求和（spec §5.2
+/// `basis="events"`，与 codex-cost 的 days[].tokens 同一求和口径）。None =
+/// 该日没有 token 事件被折入（「测不出」，不是 0——「今天没跑」与「今天没测到」
+/// 是两个词；零会话的真零由调用方按 store 判，见 `r2a_store` 注释）。
+pub fn codex_day_tokens(by_date_model: &Value, day_key: &str) -> Option<i64> {
+    let day_map = by_date_model.get(day_key)?.as_object()?;
+    let mut total: i64 = 0;
+    for speeds in day_map.values() {
+        let Some(speeds) = speeds.as_object() else { continue };
+        for bucket in speeds.values() {
+            total += bucket_to_array(bucket).iter().sum::<i64>();
+        }
+    }
+    Some(total)
+}
+
+/// 折叠残差哨兵：`unaccounted` 条目（`{type, count, tokens_seen}` 列表）的
+/// `tokens_seen` 总和。>0 → 有 token 看见了没接住，当日数可能是下界 →
+/// coverage=partial（spec §5.2；全时段残差，当日粒度不重算）。
+pub fn unaccounted_tokens_seen(unaccounted: &Value) -> i64 {
+    let Some(entries) = unaccounted.as_array() else { return 0 };
+    entries
+        .iter()
+        .filter_map(|e| e.get("tokens_seen").and_then(Value::as_i64))
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1276,5 +1304,70 @@ mod tests {
             })),
             Some("2026-08-25T08".into())
         );
+    }
+
+    #[test]
+    fn codex_day_tokens_sums_all_models_and_speeds_of_the_day() {
+        // by_date_model = codex_aggregate_hours 的输出形状：{date:{model:{speed:桶}}}。
+        // 桶 = 5 字段（uncached_input/output/cached_input/cache_write/reasoning）。
+        let by_date = serde_json::json!({
+            "2026-08-31": {
+                "deepseek-v4-flash": {
+                    "standard": {
+                        "uncached_input_tokens": 1000, "output_tokens": 200,
+                        "cached_input_tokens": 300, "cache_write_input_tokens": 40,
+                        "reasoning_output_tokens": 10,
+                    },
+                    "high": {
+                        "uncached_input_tokens": 500, "output_tokens": 100,
+                        "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "reasoning_output_tokens": 0,
+                    },
+                },
+                "deepseek-v4-pro": {
+                    "standard": {
+                        "uncached_input_tokens": 7, "output_tokens": 3,
+                        "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "reasoning_output_tokens": 0,
+                    },
+                },
+            },
+            "2026-08-30": {
+                "deepseek-v4-flash": {
+                    "standard": {
+                        "uncached_input_tokens": 99999, "output_tokens": 0,
+                        "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "reasoning_output_tokens": 0,
+                    },
+                },
+            },
+        });
+        // 2026-08-31 全模型全速度求和：1550+600+10 = 2160。
+        assert_eq!(codex_day_tokens(&by_date, "2026-08-31"), Some(2160));
+        // 别的日互不影响。
+        assert_eq!(codex_day_tokens(&by_date, "2026-08-30"), Some(99999));
+        // 该日没有桶 → None（「测不出」，不是 0 —— 零会话真零在调用方判）。
+        assert_eq!(codex_day_tokens(&by_date, "2026-09-01"), None);
+        // 非对象输入 → None。
+        assert_eq!(codex_day_tokens(&serde_json::json!({"2026-08-31": "x"}), "2026-08-31"), None);
+        assert_eq!(codex_day_tokens(&serde_json::json!([]), "2026-08-31"), None);
+    }
+
+    #[test]
+    fn unaccounted_tokens_seen_sums_sentinel_entries() {
+        // 空/缺键 → 0。
+        assert_eq!(unaccounted_tokens_seen(&serde_json::json!([])), 0);
+        assert_eq!(unaccounted_tokens_seen(&serde_json::json!({"a": 1})), 0);
+        let ua = serde_json::json!([
+            {"type": "token_count_invalid_last_usage", "count": 2, "tokens_seen": 1200},
+            {"type": "token_count_before_turn_context", "count": 1, "tokens_seen": 300},
+        ]);
+        assert_eq!(unaccounted_tokens_seen(&ua), 1500);
+        // 缺 tokens_seen 的条目按 0 计，不崩。
+        let partial = serde_json::json!([
+            {"type": "x", "count": 1, "tokens_seen": 100},
+            {"type": "y", "count": 1},
+        ]);
+        assert_eq!(unaccounted_tokens_seen(&partial), 100);
     }
 }

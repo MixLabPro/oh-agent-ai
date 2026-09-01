@@ -524,6 +524,27 @@ enum SessionsAction {
         #[arg(long)]
         json: bool,
     },
+    /// Multi-host navigation projection (docs/MENUBAR_MULTIHOST_NAVIGATION_SPEC.md
+    /// §5.1/§5.2): one spawn, both host snapshots — today tokens + today session
+    /// count + recent N deep-link rows. The Tauri menu bar caches the envelope and
+    /// only re-renders (§6 决策 3); all measurement (sorting, day boundary,
+    /// coverage) happens here in the data layer.
+    Navigation {
+        /// Day to project (YYYY-MM-DD, Beijing day boundary — the core fold's
+        /// date buckets are UTC+8 hours, no DST). Defaults to today (Beijing).
+        #[arg(long, default_value = "")]
+        day: String,
+        /// Timezone of the projected day. Only `Asia/Shanghai` is supported (the
+        /// core day boundary is fixed UTC+8, no DST; §5.1).
+        #[arg(long, default_value = "Asia/Shanghai")]
+        timezone: String,
+        /// How many recent rows per host; default 5 (§5.1)
+        #[arg(long, default_value_t = 5)]
+        recent: usize,
+        /// Print the versioned envelope as JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `state` 子命令的子动作 —— 一动作一入口，喂的都是**已算好**的 JSON
@@ -1469,6 +1490,16 @@ fn main() {
             }
             SessionsAction::Findings { json } => {
                 agent::r2a_store::sessions_findings(home_path, *json);
+            }
+            SessionsAction::Navigation { day, timezone, recent, json } => {
+                // `--day` 缺省 = 今天（北京日界，core 折叠的日期桶是 UTC+8 时
+                // 段；spec §5.1）。
+                let day = if day.is_empty() {
+                    agent::codex_cost::today_beijing()
+                } else {
+                    day.clone()
+                };
+                agent::r2a_store::sessions_navigation(home_path, &day, timezone, *recent, *json);
             }
         }
         return;

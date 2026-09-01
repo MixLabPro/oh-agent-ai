@@ -27,6 +27,7 @@ test_cli_matrix 约定）。
 """
 
 import json
+import functools
 import os
 import shutil
 import subprocess
@@ -147,6 +148,16 @@ def _entry(native_id, rev="2026-08-30", seq=0, host="codex"):
         tokens_total=45678, findings_total=3, store_seq=seq,
         envelope={"schema_version": "1", "session": {}},
     )
+
+
+def _recent_entry(native_id, date_last, rev, host="codex"):
+    """recent_cmp 测试专用：date_last / revision 可指定。与 Rust
+    `r2a.rs::tests::recent_entry` 同构——两侧各钉同一组输入（spec §6 决策 2）。"""
+    e = _entry(native_id, rev=rev or "2026-08-30T12:00:00Z", host=host)
+    e.date_first = date_last
+    e.date_last = date_last
+    e.session_revision = rev
+    return e
 
 
 class R2aPureRuleTests(unittest.TestCase):
@@ -291,6 +302,34 @@ class R2aPureRuleTests(unittest.TestCase):
         with self.assertRaises(R2A.StoreError) as cm:
             R2A.list_sessions(es2, f, c0, 1)
         self.assertEqual(cm.exception.code, "stale-revision")
+
+    # ── recent_cmp（spec §6 决策 2）──────────────────────────────
+
+    def test_recent_cmp_date_desc_then_revision_desc_then_key_asc(self):
+        # 与 Rust `r2a.rs::tests::recent_cmp_date_desc_then_revision_desc_then_key_asc`
+        # 同一组输入、同一期望串——一侧改了另一侧立刻红。
+        es = [
+            _recent_entry("old", "2026-08-01", "r1"),
+            _recent_entry("new", "2026-09-01", "r1"),
+            _recent_entry("same-date", "2026-09-01", "r1", host="dsh"),
+            _recent_entry("newer-rev", "2026-09-01", "r2"),
+        ]
+        ids = [e.key.native_id
+               for e in sorted(es, key=functools.cmp_to_key(R2A.recent_cmp))]
+        self.assertEqual(ids, ["newer-rev", "new", "same-date", "old"])
+
+    def test_recent_cmp_none_date_or_revision_last(self):
+        # date 主键优先：full 与 no-rev 同 date → full（有 rev）在前；no-date 与
+        # nothing 都无 date → 比 revision → no-date（r9）在前。
+        es = [
+            _recent_entry("no-rev", "2026-09-01", None),
+            _recent_entry("no-date", None, "r9"),
+            _recent_entry("nothing", None, None),
+            _recent_entry("full", "2026-09-01", "r9"),
+        ]
+        ids = [e.key.native_id
+               for e in sorted(es, key=functools.cmp_to_key(R2A.recent_cmp))]
+        self.assertEqual(ids, ["full", "no-rev", "no-date", "nothing"])
 
     def test_read_session_typed_errors(self):
         es = self._three()
@@ -629,6 +668,262 @@ class CrossImplementationReconciliationTests(unittest.TestCase):
         self.assertEqual(rs.returncode, 2)
         self.assertEqual(py.stderr, rs.stderr,
                          "invalid-cursor stderr must be byte-identical")
+        self.assertEqual(py.stdout, rs.stdout)
+
+
+# ── sessions navigation 投影（spec §5.1/§5.2）────────────────────
+# 纯函数真值表与 Rust `r2a_store.rs` 单测同一批钉死输入/输出；差分侧逐字节
+# 对账（cache 共享双方向 + 人读渲染 + 错误路径 + 诚实降级）。
+
+def _fake_dsh_under(home: Path) -> Path:
+    """在既有 home 下补一个裸 jsonl DSH 会话（behavior.jsonl 拷贝 +
+    workspace.json 标题索引）——mirror Rust `fake_dsh_under`（fixtures/dsh/
+    workspace.json 就是同形状）。裸 jsonl 不需要 zstandard。"""
+    sdir = home / ".dsh" / "sessions" / "demo-proj" / "agent-1"
+    sdir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(FIXTURE_DSH / "behavior.jsonl", sdir / "session.jsonl")
+    storages = home / ".dsh" / "storages"
+    storages.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(FIXTURE_DSH / "workspace.json", storages / "workspace.json")
+    return home
+
+
+def _write_today_json(av: Path, date: str, tokens: int):
+    """av/state/today.json：4 字段基础桶（uncached 打满 tokens，其余 0）→
+    当日 token 总量 == tokens（与 today_cost 同一求和口径）。"""
+    (av / "state").mkdir(parents=True, exist_ok=True)
+    json.dump(
+        {"date": date, "schema_version": 1,
+         "generated_at": "2026-08-31T10:00:00+08:00",
+         "buckets": {"p1": {"uncached_input_tokens": tokens, "output_tokens": 0,
+                             "cached_input_tokens": 0,
+                             "cache_write_input_tokens": 0,
+                             "model": "gpt-5.6-sol"}}},
+        open(av / "state" / "today.json", "w"))
+
+
+class NavigationProjectionTests(unittest.TestCase):
+    """纯函数真值表（Python 镜像）——与 Rust 同名单测逐条对应。"""
+
+    def test_host_snapshot_unavailable_when_host_has_no_source(self):
+        # 无数据源（roots 全 exists=false）→ 整宿主 unavailable；「没有 DSH =
+        # 诚实零」是 sessions list 的语义，导航固定渲染两行（spec §8）。
+        store = R2A.SessionStore(
+            [], {"codex": {"status": "ok", "roots": [{"exists": False}]}},
+            "2026-09-01T00:00:00Z")
+        snap = R2A.host_snapshot("codex", store, {"value": 5}, "2026-08-31", 5)
+        self.assertEqual(snap["status"], "unavailable")
+        self.assertIsNone(snap["today_tokens"])
+        self.assertIsNone(snap["today_sessions"])
+        self.assertEqual(snap["recent"], [])
+        self.assertIsNone(snap["store_revision"])
+        # store 构建失败（None）同档
+        snap2 = R2A.host_snapshot("dsh", None, {"value": 5}, "2026-08-31", 5)
+        self.assertEqual(snap2["status"], "unavailable")
+        # DSH「文件在但一个都读不了」（§4.3）→ 也归这一档，即使 roots 存在
+        store3 = R2A.SessionStore(
+            [], {"dsh": {"status": "unavailable", "roots": [{"exists": True}]}},
+            "2026-09-01T00:00:00Z")
+        snap3 = R2A.host_snapshot("dsh", store3, {"value": 5}, "2026-08-31", 5)
+        self.assertEqual(snap3["status"], "unavailable")
+
+    def test_host_snapshot_ready_measures_today_and_recent(self):
+        def entry(nid, first, last, rev, seq):
+            return R2A.SessionReportEntry(
+                R2A.SessionKey("codex", nid, "p", "m"), rev,
+                "session-%s" % nid, "gpt-5.6-sol", first, last,
+                1, None, 1000, 0, seq, None)
+
+        entries = [
+            entry("span", "2026-08-01", "2026-08-31", "r1", 3),
+            entry("old", "2026-08-30", "2026-08-30", "r2", 2),
+            entry("newest", "2026-08-31", "2026-08-31", "r9", 5),
+        ]
+        store = R2A.SessionStore(
+            entries, {"codex": {"status": "ok", "roots": [{"exists": True}]}},
+            "2026-09-01T00:00:00Z")
+        snap = R2A.host_snapshot("codex", store, {"value": 123}, "2026-08-31", 5)
+        self.assertEqual(snap["status"], "ready")
+        # 跨日会话计 1 次（它今天确实活跃，spec §5.2）；old 昨天不计
+        self.assertEqual(snap["today_sessions"], 2)
+        self.assertEqual(snap["store_revision"], 5)
+        # recent_cmp：date_span.last DESC → session_revision DESC → key ASC
+        self.assertEqual([r["session_key"]["native_id"] for r in snap["recent"]],
+                         ["newest", "span", "old"])
+        # 4 条 → recent 截断到 N
+        more = list(store.entries) + [entry("fourth", "2026-08-30", "2026-08-31",
+                                            "r3", 6)]
+        snap4 = R2A.host_snapshot(
+            "codex", R2A.SessionStore(more, store.source_statuses, "x"),
+            {"value": 123}, "2026-08-31", 2)
+        self.assertEqual(len(snap4["recent"]), 2)
+        # value null → partial（有会话但今天没测到，不是没会话）
+        snap2 = R2A.host_snapshot("codex", store, {"value": None}, "2026-08-31", 5)
+        self.assertEqual(snap2["status"], "partial")
+        self.assertEqual(snap2["today_sessions"], 2)
+
+    def test_codex_today_tokens_json_honesty_truth_table(self):
+        # 零会话 → 0（真零，spec 唯一显式 0）
+        self.assertEqual(R2A.codex_today_tokens_json({"by_hour_model": {}},
+                                                     "2026-08-31", True),
+                         {"value": 0, "basis": "events", "coverage": "complete"})
+        # by_hour_model 空（有会话但没计量）→ 测不出（null 三连，不编 0）
+        self.assertEqual(R2A.codex_today_tokens_json({"by_hour_model": {}},
+                                                     "2026-08-31", False),
+                         {"value": None, "basis": None, "coverage": None})
+        # 当日桶缺席（他日有计量、今天没有）→ null（「今天没跑」≠「今天没测到」）
+        merged2 = {"by_hour_model": {"2026-08-30T10+08:00": {
+            "gpt-5.6-sol": {"p1": {"uncached_input_tokens": 100}}}},
+            "unaccounted": []}
+        v3 = R2A.codex_today_tokens_json(merged2, "2026-08-31", False)
+        self.assertIsNone(v3["value"])
+        # 当日桶存在 → 当日全模型/全速度之和；残差哨兵 → partial
+        merged3 = {"by_hour_model": {
+            "2026-08-31T09+08:00": {"gpt-5.6-sol": {"p1": {"uncached_input_tokens": 60}}},
+            "2026-08-31T11+08:00": {"gpt-5.6-sol": {"p2": {"output_tokens": 40}}},
+            "2026-08-31T23+08:00": {"other": {"p1": {"cached_input_tokens": 300}}}},
+            "unaccounted": [{"type": "x", "count": 1, "tokens_seen": 1500}]}
+        v4 = R2A.codex_today_tokens_json(merged3, "2026-08-31", False)
+        self.assertEqual(v4, {"value": 400, "basis": "events",
+                              "coverage": "partial"})
+        # 无残差 → complete
+        merged4 = {"by_hour_model": {"2026-08-31T09+08:00": {
+            "gpt-5.6-sol": {"p1": {"uncached_input_tokens": 60}}}},
+            "unaccounted": []}
+        self.assertEqual(R2A.codex_today_tokens_json(merged4, "2026-08-31", False),
+                         {"value": 60, "basis": "events", "coverage": "complete"})
+
+    def test_render_navigation_is_byte_stable(self):
+        env = {
+            "schema_version": 1, "day_key": "2026-08-31",
+            "timezone": "Asia/Shanghai", "generated_at": "2026-09-01T00:00:00Z",
+            "hosts": [
+                {"host_kind": "dsh", "status": "unavailable",
+                 "today_tokens": None, "today_sessions": None,
+                 "recent": [], "store_revision": None},
+                {"host_kind": "codex", "status": "ready",
+                 "today_tokens": {"value": 1234, "basis": "events",
+                                  "coverage": "complete"},
+                 "today_sessions": 2,
+                 "recent": [{
+                     "session_key": {"host_kind": "codex", "native_id": "c1",
+                                     "source_profile": "p",
+                                     "machine_namespace": "m"},
+                     "title": "a title", "model": "gpt-5.6-sol",
+                     "tokens_total": 500, "date_first": "2026-08-31",
+                     "date_last": "2026-08-31", "revision": "r1"}],
+                 "store_revision": 5},
+            ],
+        }
+        # 与 Rust `render_navigation_is_byte_stable` 的期望字符串完全一致
+        expected = ("navigation 2026-08-31 (schema 1)\n"
+                    "dsh      unavailable — · — 会话\n"
+                    "          · 会话数据暂不可用\n"
+                    "codex    ready       1234 · 2 会话\n"
+                    "          · 2026-08-31 · gpt-5.6-sol · 500\n")
+        self.assertEqual(R2A.render_navigation(env), expected)
+
+
+@unittest.skipUnless(_BIN, "AGENT_VITALS_BIN not set — only one implementation "
+                           "to compare against (same gate as reconciliation)")
+class NavigationDifferentialTests(unittest.TestCase):
+    """navigation 跨实现逐字节对账：cache 共享双方向 + 人读渲染 + 错误路径 +
+    诚实降级（date 校验两侧同款——缺列不编列是锁步承诺的一部分）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="av-r2a-nav-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.home = _fake_codex_home(cls.tmp)
+        _fake_dsh_under(cls.home)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _av(self):
+        av = self.tmp / self._testMethodName
+        (av / "state").mkdir(parents=True, exist_ok=True)
+        return av
+
+    def _nav(self, prog, av, day="2026-08-31"):
+        args = ["sessions", "navigation", "--day", day, "--json"]
+        if prog == "py":
+            return _run_py(args, _env(self.home, av))
+        return _run_rs(args, _env(self.home, av))
+
+    def test_navigation_byte_identical_via_cache_share_py_then_rs(self):
+        av = self._av()
+        _write_today_json(av, "2026-08-31", 1200)
+        py = self._nav("py", av)
+        self.assertEqual(py.returncode, 0, py.stderr)
+        rs = self._nav("rs", av)
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        self.assertEqual(py.stdout, rs.stdout,
+                         "navigation envelope must be byte-identical via cache share")
+        env = json.loads(py.stdout)
+        # DSH 行真的带上了 today.json 的 token（ready，不是 unavailable/空值）
+        self.assertEqual(env["hosts"][0]["host_kind"], "dsh")
+        self.assertEqual(env["hosts"][0]["status"], "ready")
+        self.assertEqual(env["hosts"][0]["today_tokens"]["value"], 1200)
+        self.assertEqual(env["hosts"][0]["today_tokens"]["basis"], "state-file")
+        # fixture 会话在 2025-06-15——投影 2026-08-31 无交叠 → 真 0（不是 null）
+        self.assertEqual(env["hosts"][0]["today_sessions"], 0)
+        self.assertEqual(env["hosts"][1]["host_kind"], "codex")
+        # 键序是字节一致的一部分（serde_json preserve_order = json! 字面量序）
+        self.assertEqual(list(env.keys()), ["schema_version", "day_key",
+                                            "timezone", "generated_at", "hosts"])
+
+    def test_navigation_byte_identical_via_cache_share_rs_then_py(self):
+        av = self._av()
+        _write_today_json(av, "2026-08-31", 1200)
+        rs = self._nav("rs", av)
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        py = self._nav("py", av)
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertEqual(rs.stdout, py.stdout,
+                         "rs-writes-cache / py-reads-cache must be byte-identical")
+
+    def test_navigation_human_render_byte_identical(self):
+        av = self._av()
+        _write_today_json(av, "2026-08-31", 1200)
+        py = _run_py(["sessions", "navigation", "--day", "2026-08-31"],
+                     _env(self.home, av))
+        rs = _run_rs(["sessions", "navigation", "--day", "2026-08-31"],
+                     _env(self.home, av))
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        self.assertEqual(py.stdout, rs.stdout,
+                         "human render must be byte-identical")
+
+    def test_navigation_stale_today_json_is_null_not_zero(self):
+        # 日期不符（8-30 的数据、投影 8-31）→ 两侧 DSH value 都是 null：缺列不
+        # 编列——「没有今天的数据」≠「今天花了 0」（真机回归：8-27 没用过 DSH
+        # 却报了 8-26 的账，cost.rs::today_cost 的 date 校验就为此而存在）。
+        av = self._av()
+        _write_today_json(av, "2026-08-30", 9999)
+        py = self._nav("py", av)
+        rs = self._nav("rs", av)
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        self.assertEqual(py.stdout, rs.stdout)
+        env = json.loads(py.stdout)
+        self.assertEqual(env["hosts"][0]["status"], "partial")
+        self.assertIsNone(env["hosts"][0]["today_tokens"]["value"])
+        # 会话/最近行不受影响（只降 token 一列）
+        self.assertEqual(env["hosts"][0]["today_sessions"], 0)
+        self.assertEqual(len(env["hosts"][0]["recent"]), 1)
+
+    def test_navigation_timezone_error_parity(self):
+        av = self._av()
+        py = _run_py(["sessions", "navigation", "--day", "2026-08-31",
+                      "--timezone", "Europe/Paris"], _env(self.home, av))
+        rs = _run_rs(["sessions", "navigation", "--day", "2026-08-31",
+                      "--timezone", "Europe/Paris"], _env(self.home, av))
+        self.assertEqual(py.returncode, 2)
+        self.assertEqual(rs.returncode, 2)
+        self.assertEqual(py.stderr, rs.stderr,
+                         "unsupported-timezone stderr must be byte-identical")
         self.assertEqual(py.stdout, rs.stdout)
 
 

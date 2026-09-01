@@ -55,6 +55,7 @@ from agent_vitals.duration import (  # noqa: E402
 from agent_vitals.codex_evidence import codex_evidence_json, derive_coverage  # noqa: E402
 from agent_vitals.codex_usage import (  # noqa: E402
     CODEX_TOKEN_FIELDS, codex_aggregate_hours, codex_by_model_from_hours,
+    codex_day_tokens, unaccounted_tokens_seen,
     codex_fold_file, codex_merge_folds, codex_token_facts,
 )
 from agent_vitals.codex_cost import (  # noqa: E402
@@ -3097,6 +3098,62 @@ class CodexCostCharacterization(unittest.TestCase):
         # 缺可选桶 → 缺省 0
         self.assertEqual(codex_token_facts({"input_tokens": 100, "output_tokens": 10}),
                          (100, 10, 0, 0, 0))
+
+    def test_codex_day_tokens_sums_the_day_bucket(self):
+        """`sessions navigation` 的今日 token（spec §5.2 basis=events）。钉
+        Rust `codex_day_tokens` 的同一组数：2026-08-31 全模型全速度求和 = 2160、
+        他日互不影响、当日无桶 → None（测不出，不是 0）。"""
+        by_date = {
+            "2026-08-31": {
+                "deepseek-v4-flash": {
+                    "standard": {
+                        "uncached_input_tokens": 1000, "output_tokens": 200,
+                        "cached_input_tokens": 300, "cache_write_input_tokens": 40,
+                        "reasoning_output_tokens": 10,
+                    },
+                    "high": {
+                        "uncached_input_tokens": 500, "output_tokens": 100,
+                        "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "reasoning_output_tokens": 0,
+                    },
+                },
+                "deepseek-v4-pro": {
+                    "standard": {
+                        "uncached_input_tokens": 7, "output_tokens": 3,
+                        "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "reasoning_output_tokens": 0,
+                    },
+                },
+            },
+            "2026-08-30": {
+                "deepseek-v4-flash": {
+                    "standard": {
+                        "uncached_input_tokens": 99999, "output_tokens": 0,
+                        "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "reasoning_output_tokens": 0,
+                    },
+                },
+            },
+        }
+        self.assertEqual(codex_day_tokens(by_date, "2026-08-31"), 2160)
+        self.assertEqual(codex_day_tokens(by_date, "2026-08-30"), 99999)
+        self.assertIsNone(codex_day_tokens(by_date, "2026-09-01"))
+        self.assertIsNone(codex_day_tokens({"2026-08-31": "x"}, "2026-08-31"))
+        self.assertIsNone(codex_day_tokens([], "2026-08-31"))
+
+    def test_unaccounted_tokens_seen_sums_sentinel_entries(self):
+        """残差哨兵 tokens_seen 总和（>0 → coverage=partial）。与 Rust
+        `unaccounted_tokens_seen` 同值：1500 / 缺 tokens_seen 条目按 0 计。"""
+        self.assertEqual(unaccounted_tokens_seen([]), 0)
+        self.assertEqual(unaccounted_tokens_seen({"a": 1}), 0)
+        self.assertEqual(unaccounted_tokens_seen([
+            {"type": "token_count_invalid_last_usage", "count": 2, "tokens_seen": 1200},
+            {"type": "token_count_before_turn_context", "count": 1, "tokens_seen": 300},
+        ]), 1500)
+        self.assertEqual(unaccounted_tokens_seen([
+            {"type": "x", "count": 1, "tokens_seen": 100},
+            {"type": "y", "count": 1},
+        ]), 100)
 
     def test_fold_sol_dedup_unaccounted_and_lc(self):
         """sol 夹具：去重两形态都跳过、两条 unaccounted、cache_write 进 5m 档、
