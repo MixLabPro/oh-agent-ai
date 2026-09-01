@@ -1042,3 +1042,182 @@ def pre_fork_usage(events):
     out = token_by_model([{"type": "session/end-seed", "seq": -1, "data": {}}] + before)
     out["boundary_seq"] = b
     return out
+
+
+# ==== canonical 归一层（吸收项 #1）=========================================
+#
+# per-source 拆账（by_source 轴）的缺口：它只认 DSH 形状的 4 桶，Codex 是独立
+# 管线（codex_fold_file，5 桶 + speed 维），两种线格式永远进不了同一张表。
+# canonical 层在折叠之上再加一层归一：把各来源自己折好的桶映射成统一维
+# （FRESH/TOTAL/…）。单一真相源是 `crates/agent-vitals-core/src/usage.rs` 的
+# canonical 段——那里有一份完整的中文注释讲**为什么必须建在折叠之上**（窄出
+# 权威 vs 宽进哨兵，两条路径一旦合并，同一笔用量在多个事件里重复出现时会被
+# 双计）。这里是它的逐字节镜像，由 Rust 侧的
+# `canonical_tokens_python_rust_byte_for_byte_parity`（硬编码串）与
+# `tests/test_canonical_cost.py` 双向锁死。
+
+#: canonical 层的统一维清单（`unavailable` 的取值空间）。顺序固定，与 Rust 侧
+#: `usage.rs::CANONICAL_DIMS` 逐字节对齐。
+CANONICAL_DIMS = [
+    "fresh_input_tokens",
+    "total_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "legacy_total_tokens",
+]
+
+SHAPE_DSH = "dsh"
+SHAPE_CODEX = "codex"
+SHAPE_CODEX_TOTAL = "codex-total"
+SHAPE_UNKNOWN = "unknown"
+
+
+def _canonical_row(source, shape, fresh, total, cache_read, cache_write,
+                   reasoning, legacy_total):
+    """组装一行 canonical 输出。值全为 int|None——None 落 null 且进 unavailable，
+    绝不落 0。unavailable 顺序 = CANONICAL_DIMS 顺序（确定性，与 Rust 侧
+    `usage.rs::canonical_row` 逐字节对齐）。
+
+    naive 是把 None 落 0 再拼一个空 unavailable 列表——那会把「宿主没报这个
+    字段」编造成「测到 0」，正是 `unreported_fields` 当初要修的缺陷。
+    """
+    vals = [fresh, total, cache_read, cache_write, reasoning, legacy_total]
+    row = {"source": source, "shape": shape}
+    unavailable = []
+    for dim, v in zip(CANONICAL_DIMS, vals):
+        if v is None:
+            row[dim] = None
+            unavailable.append(dim)
+        else:
+            row[dim] = v
+    row["unavailable"] = unavailable
+    return row
+
+
+def canonical_from_dsh(events, source):
+    """DSH 形状 → canonical 行。复用 `token_by_model`（已经做完 post_fork、同
+    (turn, step) 去重、unreported_fields 收集）——canonical 只归一，不重折。
+
+    DSH 4 桶：inputTokens(=uncached 全价)、outputTokens（reasoning 已含在 output）、
+    cacheReadTokens、cacheWriteTokens。FRESH = input、TOTAL = input + output +
+    cacheRead + cacheWrite。`unreported_fields` 决定哪几维落 null——naive 是
+    把缺字段按 0 求和完事，那正是 UI 曾经显示「缓存写 0」一个伪造测量值的形态。
+    """
+    tm = token_by_model(events)
+    by_model = tm.get("by_model") or {}
+    fresh = output = cache_read = cache_write = 0
+    for m in by_model.values():
+        fresh += m.get("uncached_input_tokens") or 0
+        output += m.get("output_tokens") or 0
+        cache_read += m.get("cache_read_tokens") or 0
+        cache_write += m.get("cache_write_tokens") or 0
+    if not by_model:
+        # 整批没有 usage 样本 → 全部维 null + 全量 unavailable（不是测到 0）。
+        return _canonical_row(source, SHAPE_DSH, None, None, None, None, None, None)
+    unreported = set(tm.get("unreported_fields") or [])
+    fresh_v = fresh if "inputTokens" not in unreported else None
+    total_v = (fresh + output + cache_read + cache_write
+               if "inputTokens" not in unreported and "outputTokens" not in unreported
+               else None)
+    cache_read_v = cache_read if "cacheReadTokens" not in unreported else None
+    cache_write_v = cache_write if "cacheWriteTokens" not in unreported else None
+    # DSH schema 没有 reasoning 维（含在 output 里）→ 恒 null + unavailable。
+    return _canonical_row(source, SHAPE_DSH, fresh_v, total_v, cache_read_v,
+                          cache_write_v, None, None)
+
+
+def canonical_from_codex(events, source):
+    """Codex 形状 → canonical 行。复用 `codex_fold_file`（读完 last_token_usage
+    的 per-turn delta，无效样本已进 unaccounted）——canonical 只归一。
+
+    Codex 5 桶：uncached/output/cached/cache_write/reasoning，其中 cached +
+    cache_write 已经是 input 的一部分（wire 的 input_tokens 是总 input，
+    uncached = input − cached − cache_write）。所以 TOTAL = input + output =
+    uncached + output + cached + cache_write（reasoning 在 output 里不另加）；
+    FRESH = uncached（全价 input）；cache_read 映射到 cached_input。
+
+    延迟 import：codex_usage 与 usage 没有环（它只依赖 datetime），但按
+    `pre_fork_usage` 的既有模式在函数体内 import，避免任何 import 序的脆性。
+    """
+    from .codex_usage import codex_fold_file
+
+    fold = codex_fold_file(events)
+    by_model = fold.get("by_model") or {}
+    fresh = output = cached = cache_write = reasoning = 0
+    any_ = False
+    for speeds in by_model.values():
+        if not isinstance(speeds, dict):
+            continue
+        for bucket in speeds.values():
+            any_ = True
+            fresh += bucket.get("uncached_input_tokens") or 0
+            output += bucket.get("output_tokens") or 0
+            cached += bucket.get("cached_input_tokens") or 0
+            cache_write += bucket.get("cache_write_input_tokens") or 0
+            reasoning += bucket.get("reasoning_output_tokens") or 0
+    if not any_:
+        return _canonical_row(source, SHAPE_CODEX, None, None, None, None, None, None)
+    # 5 桶来自同一份 last_token_usage，codex_token_facts 已保证 uncached>=0、
+    # reasoning<=output —— 没有「某维没测到」的中间态，unavailable 为空。
+    return _canonical_row(source, SHAPE_CODEX, fresh, fresh + output + cached + cache_write,
+                          cached, cache_write, reasoning, None)
+
+
+def canonical_total_delta(prev, cur, source):
+    """Codex `total_token_usage`（每 item 的累计快照）→ canonical 行。prev/cur
+    都是 total_token_usage 对象（caller 负责从 payload.info.total_token_usage
+    提取），本函数只做差分，不碰事件流。
+
+    delta 语义（为什么 naive 直接拿 cur 当增量是错的——cc-trace over-read 教训、
+    codex_fold_file 的 continuous-dedup 同一条铁律）：
+      - prev 为 None：第一条累计快照，没有基线算不出 delta → fresh/total 为
+        null + unavailable，但 legacy_total_tokens 放 raw 累计值（「只有老格式
+        才带的字段」放 legacy 槽，绝不把总量拆成编造的四桶）。
+      - prev 与 cur 签名相同：同一计量复读 → delta 全 0（测到 0，不是没测到）。
+      - 任一 delta < 0：累计回退 → 不产负数，fresh/total null + unavailable，
+        raw 累计照放。
+      - 其余：逐字段差分，uncached 从 delta 派生（d_input − d_cached − d_cw）。
+    """
+    from .codex_usage import _total_signature
+
+    legacy = cur.get("total_tokens") if isinstance(cur, dict) else None
+    cur_sig = _total_signature(cur)
+    if cur_sig is None:
+        return _canonical_row(source, SHAPE_CODEX_TOTAL, None, None, None, None, None, legacy)
+    prev_sig = _total_signature(prev) if isinstance(prev, dict) else None
+    if prev_sig is None:
+        return _canonical_row(source, SHAPE_CODEX_TOTAL, None, None, None, None, None, legacy)
+    if cur_sig == prev_sig:
+        return _canonical_row(source, SHAPE_CODEX_TOTAL, 0, 0, 0, 0, 0, legacy)
+    d = [cur_sig[i] - prev_sig[i] for i in range(5)]
+    if any(x < 0 for x in d):
+        return _canonical_row(source, SHAPE_CODEX_TOTAL, None, None, None, None, None, legacy)
+    d_uncached = d[0] - d[2] - d[3]
+    if d_uncached < 0:
+        return _canonical_row(source, SHAPE_CODEX_TOTAL, None, None, None, None, None, legacy)
+    # TOTAL = d_input + d_output = uncached + output + cached + cache_write。
+    return _canonical_row(source, SHAPE_CODEX_TOTAL, d_uncached,
+                          d_uncached + d[1] + d[2] + d[3], d[2], d[3], d[4], legacy)
+
+
+def canonical_tokens(events, source=SOURCE_UNSPECIFIED):
+    """canonical 归一主入口：`(events, source)` → 一行统一 canonical 计数。
+
+    来源标签声明 shape（走哪张翻译表）：dsh-live / dsh-backfill / cli /
+    unspecified → dsh；codex → codex。未知来源标签 → shape=unknown、全维
+    unavailable——不摆全零结构冒充「测到了什么」（诚实降级）。
+
+    调查结论（#4，带证据）：Codex 事件现在并不进 `token_by_date_model`。生产
+    调用点只有 oneline 两条（Rust `src/agent/oneline.rs` 与 Python
+    `cli.py:1401`，都标 SOURCE_CLI、喂 DSH 形状 usage_events）；Codex 走完全
+    独立的管线（codex_fold_file → codex_aggregate_hours → codex_cost），
+    `adapters/codex_session.py` 保持 Codex item 原样、任何一层都没有预翻译成
+    DSH 形状。canonical 层建好后的接法就是本函数：DSH 事件喂 dsh 形状、Codex
+    事件喂 codex 形状，各自归一成同一行——#6 事件桥在此基础上做跨源合并。
+    """
+    if source in (SOURCE_DSH_LIVE, SOURCE_DSH_BACKFILL, SOURCE_CLI, SOURCE_UNSPECIFIED):
+        return canonical_from_dsh(events, source)
+    if source == SOURCE_CODEX:
+        return canonical_from_codex(events, source)
+    return _canonical_row(source, SHAPE_UNKNOWN, None, None, None, None, None, None)

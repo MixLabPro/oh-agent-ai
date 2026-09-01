@@ -91,7 +91,11 @@ pub fn codex_token_facts(last: &Value) -> Option<[i64; 5]> {
 
 /// `total_token_usage` 的 6 字段签名（去重键）。缺任一字段 → None（这种 total 没法
 /// 判定「同一计量复读」，就不去重，交给下游的 last 校验兜底）。
-fn total_signature(total: &Value) -> Option<(i64, i64, i64, i64, i64, i64)> {
+///
+/// `pub(crate)`：canonical 归一层（`usage.rs::canonical_total_delta`）要用同一份
+/// 签名判定「prev/cur 是同一计量复读还是新的累计」，不能在 canonical 侧再写一份
+/// 字段清单——那正是「一份谓词抄了十二遍」教训的又一例。
+pub(crate) fn total_signature(total: &Value) -> Option<(i64, i64, i64, i64, i64, i64)> {
     Some((
         total.get("input_tokens")?.as_i64()?,
         total.get("output_tokens")?.as_i64()?,

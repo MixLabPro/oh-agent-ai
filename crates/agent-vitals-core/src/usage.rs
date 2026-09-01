@@ -1290,6 +1290,279 @@ fn bucket_json8(b: &[i64; 8]) -> Value {
     })
 }
 
+// ==== canonical 归一层 ======================================================
+//
+// per-source 拆账（`by_source` 轴）的缺口：它只认 **DSH 形状**的 4 桶
+// （`inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheWriteTokens`），Codex
+// 是独立管线（`codex_fold_file`，5 桶 `uncached/output/cached/cache_write/
+// reasoning` + speed 维，见 `codex_usage.rs`），两种线格式永远进不了同一张表
+// ——真实语料里 `state by-source` 只有 cli 行，`SOURCE_CODEX` 在生产代码里没
+// 有一个调用点（调查结论见本文件模块注释下部的 `canonical_tokens`）。canonical
+// 层在**折叠之上**再加一层归一：把各来源自己折好的桶映射成统一维
+// （FRESH/TOTAL/…），让 #6 事件桥能把 DSH 与 Codex 的用量排进同一行。
+//
+// **为什么必须建在折叠之上、而不是重写一遍折叠**：canonical 是「窄出」的权威
+// 一侧，只认每条来源**显式注册**的 (source, field) → canonical 桶 白名单；
+// 「长得像数字就抓」是宽进那侧（`usage_shaped_tokens`）的事。两条路径一旦
+// 合并，同一笔用量在多个事件里重复出现时会被双计——那正是 `(turn, step)` 替换
+// 去重存在的原因。这里复用 `token_by_model` / `codex_fold_file`：它们各自已经
+// 把去重、派生、残差哨兵做完了，canonical 只做「求和 + 归一 + 守卫」，不重新
+// 裁决任何一件事。naive 的做法是拿 `usage_shaped_tokens` 的宽进结果直接当
+// canonical 值——那会把同一笔用量在 chunk/message/compaction 里的多份出现
+// 全加进去，双计翻倍。
+//
+// **诚实性契约（每条维）**：量不到 → `null` + 进 `unavailable`，绝不摆 0。
+//   - 整批没有 usage 样本 → 全部维 null（「没证据」≠「测到 0」）。
+//   - 某维的源字段整批没上报 → 该维 null（DSH 真实语料 `cacheWriteTokens`
+//     一次都没出现过——折成 0 就是把「宿主没报」编造成「测到 0」）。
+//   - 来源 schema 本来就没有的维（DSH 没有 reasoning 维）→ 恒 null。
+// 守卫：任何维 `>= 0`、且 `fresh <= total`（FRESH 是 TOTAL 的真子集）。累计
+// 快照回退 → 不产负数（见 `canonical_total_delta`）。
+//
+// **delta vs cumulative 语义（每个 source 一张表）**：
+//   - `dsh` / `codex` 形状：事件流里的样本是**增量**（DSH 的 usage sample、
+//     Codex 的 `last_token_usage`），直接求和。
+//   - `codex-total` 形状：`total_token_usage` 是**每 item 的累计快照**，当 delta
+//     用会把同一笔用量双计（cc-trace over-read 教训、`codex_fold_file` 的
+//     continuous-dedup 就是靠「累计单调不减 ⇒ 连续去重 = 完全去重」）。所以
+//     `canonical_total_delta` 显式做 prev→cur 差分，绝不拿累计当增量。
+
+/// canonical 层的统一维清单（`unavailable` 的取值空间）。顺序固定，Python 侧
+/// `usage.py::CANONICAL_DIMS` 逐字节对齐。
+pub const CANONICAL_DIMS: [&str; 6] = [
+    "fresh_input_tokens",
+    "total_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "legacy_total_tokens",
+];
+
+/// canonical 层的 shape 标签。shape 由**来源标签**声明该走哪张翻译表，不是由
+/// 事件内容猜的——caller 把 dsh 事件标成 codex 是 caller 的 bug，这里只按声明
+/// 翻译；标错的结果在 `unavailable` 里诚实可见（零样本 → 全 unavailable）。
+pub const SHAPE_DSH: &str = "dsh";
+pub const SHAPE_CODEX: &str = "codex";
+pub const SHAPE_CODEX_TOTAL: &str = "codex-total";
+pub const SHAPE_UNKNOWN: &str = "unknown";
+
+/// 组装一行 canonical 输出。值全为 `Option<i64>`——None 落 `null` 且进
+/// `unavailable`，绝不落 0。`unavailable` 顺序 = `CANONICAL_DIMS` 顺序
+/// （确定性，两侧逐字节一致依赖这份顺序）。Python 平行实现
+/// `usage.py::_canonical_row`。
+///
+/// 8 个参数（source/shape + 6 维）是「把一条维的可用性契约写死在签名里」——
+/// 改成传 `[Option<i64>; 6]` 会丢掉每个位置的语义，还让 Python 镜像更绕。
+/// 与 `r2a.rs`/`trajectory.rs` 的同类辅助同款 allow。
+#[allow(clippy::too_many_arguments)]
+fn canonical_row(
+    source: &str,
+    shape: &str,
+    fresh: Option<i64>,
+    total: Option<i64>,
+    cache_read: Option<i64>,
+    cache_write: Option<i64>,
+    reasoning: Option<i64>,
+    legacy_total: Option<i64>,
+) -> Value {
+    let mut cur = Map::new();
+    cur.insert("source".to_string(), json!(source));
+    cur.insert("shape".to_string(), json!(shape));
+    let vals = [fresh, total, cache_read, cache_write, reasoning, legacy_total];
+    let mut unavailable = Vec::new();
+    for (dim, v) in CANONICAL_DIMS.iter().zip(vals.iter()) {
+        match v {
+            Some(n) => {
+                cur.insert((*dim).to_string(), json!(n));
+            }
+            None => {
+                cur.insert((*dim).to_string(), Value::Null);
+                unavailable.push(json!(*dim));
+            }
+        }
+    }
+    cur.insert("unavailable".to_string(), Value::Array(unavailable));
+    Value::Object(cur)
+}
+
+/// DSH 形状 → canonical 行。复用 `token_by_model`（已经做完 post_fork、同
+/// (turn, step) 去重、`unreported_fields` 收集）——canonical 只归一，不重折。
+///
+/// DSH 4 桶：`inputTokens`(=uncached 全价)、`outputTokens`（reasoning 已含在
+/// output，不另计）、`cacheReadTokens`、`cacheWriteTokens`。所以
+/// FRESH = input、TOTAL = input + output + cacheRead + cacheWrite。
+/// `unreported_fields`（fold 自己收集的「宿主没报的字段名」）决定哪几维落
+/// null——naive 是把缺字段的桶按 0 求和完事，那正是 UI 曾经显示「缓存写 0」
+/// 一个伪造测量值的形态。
+fn canonical_from_dsh(events: &[Value], source: &str) -> Value {
+    let tm = token_by_model(events);
+    let by_model = tm.get("by_model").and_then(|v| v.as_object());
+    let mut fresh = 0i64;
+    let mut output = 0i64;
+    let mut cache_read = 0i64;
+    let mut cache_write = 0i64;
+    if let Some(bm) = by_model {
+        for b in bm.values() {
+            fresh += b.get("uncached_input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+            output += b.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+            cache_read += b.get("cache_read_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+            cache_write += b.get("cache_write_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+        }
+    }
+    let had_samples = by_model.map(|m| !m.is_empty()).unwrap_or(false);
+    if !had_samples {
+        // 整批没有 usage 样本 → 全部维 null + 全量 unavailable（不是测到 0）。
+        return canonical_row(source, SHAPE_DSH, None, None, None, None, None, None);
+    }
+    let unreported: Vec<&str> = tm
+        .get("unreported_fields")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let input_ok = !unreported.contains(&"inputTokens");
+    let output_ok = !unreported.contains(&"outputTokens");
+    let cache_read_ok = !unreported.contains(&"cacheReadTokens");
+    let cache_write_ok = !unreported.contains(&"cacheWriteTokens");
+    // FRESH/TOTAL 依赖两个 headline 量（input/output）；cache_* 缺席只影响
+    // 各自维，TOTAL 仍是「测到的全量之和」（DSH 的 cacheWrite 结构上恒 0）。
+    let fresh_v = input_ok.then_some(fresh);
+    let total_v = (input_ok && output_ok)
+        .then_some(fresh + output + cache_read + cache_write);
+    let cache_read_v = cache_read_ok.then_some(cache_read);
+    let cache_write_v = cache_write_ok.then_some(cache_write);
+    // DSH schema 没有 reasoning 维（含在 output 里）→ 恒 null + unavailable。
+    canonical_row(source, SHAPE_DSH, fresh_v, total_v, cache_read_v, cache_write_v, None, None)
+}
+
+/// Codex 形状 → canonical 行。复用 `codex_fold_file`（读完 `last_token_usage` 的
+/// per-turn delta，无效样本已进 unaccounted）——canonical 只归一。
+///
+/// Codex 5 桶：`uncached_input`/`output`/`cached_input`/`cache_write_input`/
+/// `reasoning_output`，其中 `cached + cache_write` 已经是 input 的一部分
+/// （wire 的 `input_tokens` 是**总** input，uncached = input − cached −
+/// cache_write）。所以 TOTAL = input_tokens + output_tokens =
+/// uncached + output + cached + cache_write（reasoning 在 output 里，不另加）；
+/// FRESH = uncached（全价 input）；cache_read 映射到 `cached_input`（就是
+/// 命中缓存读的那部分 input）。
+fn canonical_from_codex(events: &[Value], source: &str) -> Value {
+    let fold = crate::codex_usage::codex_fold_file(events);
+    let by_model = fold.get("by_model").and_then(|v| v.as_object());
+    let mut fresh = 0i64;
+    let mut output = 0i64;
+    let mut cached = 0i64;
+    let mut cache_write = 0i64;
+    let mut reasoning = 0i64;
+    let mut any = false;
+    if let Some(bm) = by_model {
+        for speeds in bm.values() {
+            if let Some(sp) = speeds.as_object() {
+                for bucket in sp.values() {
+                    any = true;
+                    fresh += bucket.get("uncached_input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                    output += bucket.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                    cached += bucket.get("cached_input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                    cache_write += bucket.get("cache_write_input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                    reasoning += bucket.get("reasoning_output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                }
+            }
+        }
+    }
+    if !any {
+        return canonical_row(source, SHAPE_CODEX, None, None, None, None, None, None);
+    }
+    // 5 桶来自同一份 last_token_usage，`codex_token_facts` 已保证 uncached>=0、
+    // reasoning<=output —— 没有「某维没测到」的中间态，unavailable 为空。
+    canonical_row(
+        source,
+        SHAPE_CODEX,
+        Some(fresh),
+        Some(fresh + output + cached + cache_write),
+        Some(cached),
+        Some(cache_write),
+        Some(reasoning),
+        None,
+    )
+}
+
+/// Codex `total_token_usage`（每 item 的**累计快照**）→ canonical 行。prev/cur
+/// 都是 `total_token_usage` 对象（caller 负责从 `payload.info.total_token_usage`
+/// 提取），本函数只做差分，不碰事件流。
+///
+/// delta 语义（为什么 naive 直接拿 cur 当增量是错的——cc-trace over-read 教训、
+/// `codex_fold_file` 的 continuous-dedup 同一条铁律）：
+///   - `prev == None`：第一条累计快照，没有基线算不出 delta → fresh/total 为
+///     null + unavailable，但 `legacy_total_tokens` 放 raw 累计值（「只有老格式
+///     才带的字段」放 legacy 槽，诚实披露，绝不把总量拆成编造的四桶）。
+///   - prev 与 cur 签名相同：同一计量复读 → delta 全 0（**测到** 0，不是没测到
+///     ——累计没变就是没新开销）。
+///   - 任一 delta < 0：累计回退（跨会话/畸形数据）→ 不产负数，fresh/total
+///     null + unavailable，raw 累计照放。
+///   - 其余：逐字段差分，uncached 从 delta 派生（d_input − d_cached − d_cw），
+///     守卫 uncached >= 0、fresh <= total。
+pub fn canonical_total_delta(prev: Option<&Value>, cur: &Value, source: &str) -> Value {
+    let legacy = cur.get("total_tokens").and_then(|v| v.as_i64());
+    let Some(cur_sig) = crate::codex_usage::total_signature(cur) else {
+        // 签名缺任一字段 → 连「同一计量复读」都判不了（`codex_fold_file` 对
+        // 同样的情况直接放弃去重），canonical 同样不产 delta。
+        return canonical_row(source, SHAPE_CODEX_TOTAL, None, None, None, None, None, legacy);
+    };
+    let Some(prev_sig) = prev.and_then(crate::codex_usage::total_signature) else {
+        // 第一条快照：无基线。
+        return canonical_row(source, SHAPE_CODEX_TOTAL, None, None, None, None, None, legacy);
+    };
+    if cur_sig == prev_sig {
+        // 同一计量复读 → 测到 0。
+        return canonical_row(source, SHAPE_CODEX_TOTAL, Some(0), Some(0), Some(0), Some(0), Some(0), legacy);
+    }
+    // 签名元组：(input, output, cached, cache_write, reasoning, total_tokens)。
+    let d = [
+        cur_sig.0 - prev_sig.0,
+        cur_sig.1 - prev_sig.1,
+        cur_sig.2 - prev_sig.2,
+        cur_sig.3 - prev_sig.3,
+        cur_sig.4 - prev_sig.4,
+    ];
+    if d.iter().any(|&x| x < 0) {
+        // 累计回退 → 不产负数。
+        return canonical_row(source, SHAPE_CODEX_TOTAL, None, None, None, None, None, legacy);
+    }
+    let d_uncached = d[0] - d[2] - d[3];
+    if d_uncached < 0 {
+        return canonical_row(source, SHAPE_CODEX_TOTAL, None, None, None, None, None, legacy);
+    }
+    // TOTAL = d_input + d_output = uncached + output + cached + cache_write。
+    let fresh = d_uncached;
+    let total = d_uncached + d[1] + d[2] + d[3];
+    debug_assert!(fresh <= total, "FRESH 是 TOTAL 的真子集，不可能反超");
+    canonical_row(source, SHAPE_CODEX_TOTAL, Some(fresh), Some(total), Some(d[2]), Some(d[3]), Some(d[4]), legacy)
+}
+
+/// canonical 归一主入口：`(events, source)` → 一行统一 canonical 计数。
+///
+/// 来源标签声明 shape（走哪张翻译表）：dsh-live / dsh-backfill / cli /
+/// unspecified → dsh；codex → codex。未知来源标签 → shape=unknown、全维
+/// unavailable——不摆全零结构冒充「测到了什么」（诚实降级，与
+/// `by_source_labels_missing_source_as_unspecified_not_fabricated` 同一条纪律）。
+///
+/// 调查结论（#4，带证据）：**Codex 事件现在并不进 `token_by_date_model`**。
+/// 生产调用点只有 `src/agent/oneline.rs:157`（SOURCE_CLI）与
+/// `scripts/agent_vitals/cli.py:1401`（SOURCE_CLI），喂的都是 DSH 形状的
+/// `usage_events`（`src/dsh.rs` 只产 DSH 事件）；Codex 走的是完全独立的管线
+/// （`main.rs` codex-cost 路径 → `codex_fold_file`/`codex_aggregate_hours`/
+/// `codex_cost.rs`），`codex_session.py` 适配器保持 Codex item 原样、任何一层
+/// 都没有把它预翻译成 DSH 形状。`SOURCE_CODEX` 因此只有测试在用。canonical
+/// 层建好后的接法就是本函数：DSH 事件喂 dsh 形状、Codex 事件喂 codex 形状，
+/// 各自归一成同一行——#6 事件桥在此基础上做跨源合并，不再需要任何一层预翻译。
+pub fn canonical_tokens(events: &[Value], source: &str) -> Value {
+    match source {
+        SOURCE_DSH_LIVE | SOURCE_DSH_BACKFILL | SOURCE_CLI | SOURCE_UNSPECIFIED => {
+            canonical_from_dsh(events, source)
+        }
+        SOURCE_CODEX => canonical_from_codex(events, source),
+        _ => canonical_row(source, SHAPE_UNKNOWN, None, None, None, None, None, None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2507,6 +2780,202 @@ mod tests {
         assert!(sources.contains_key("unspecified"));
         assert!(!sources.contains_key("cli"));
         assert!(!sources.contains_key("dsh-live"));
+    }
+
+    // ---- canonical 归一层（吸收项 #1）----
+
+    /// canonical 从 DSH 形状归一：FRESH = 全价 input、TOTAL = 4 桶之和；
+    /// `cacheWriteTokens` 整批没上报（reconcile_fixture 的 chunk/message 都没带它，
+    /// 真实语料同样如此）→ cache_write 维必须 null + unavailable，不能折成 0
+    /// 冒充「测到 0」。DSH schema 没有 reasoning 维 → 恒 unavailable。
+    /// 注意本 fixture 里 `cacheWriteTokens` 是**显式报了 0** 的（`buckets_from`
+    /// 对 `Some(0)` 照样置 seen）——所以 cache_write = 0 是「测到的 0」不是
+    /// 「没测到」；真实语料里它从不出现在 payload，才会落 null。legacy 槽只
+    /// 给 codex-total 形状，DSH 形状恒 null → 也进 unavailable。
+    #[test]
+    fn canonical_dsh_measures_fresh_and_total() {
+        let events = reconcile_fixture();
+        let out = canonical_tokens(&events, SOURCE_CLI);
+        assert_eq!(out["source"], json!("cli"));
+        assert_eq!(out["shape"], json!("dsh"));
+        // input = 1200 + 500 = 1700；output = 120 + 50 = 170；cacheRead = 60；
+        // cacheWrite 显式报了 0 → 测到 0（不加 0 是 clippy identity_op 的纪律，
+        // 测到 0 的事实由下一行的 json!(0) 断言钉住）。
+        assert_eq!(out["fresh_input_tokens"], json!(1700));
+        assert_eq!(out["total_tokens"], json!(1700 + 170 + 60));
+        assert_eq!(out["cache_read_tokens"], json!(60));
+        assert_eq!(out["cache_write_tokens"], json!(0));
+        assert_eq!(out["reasoning_tokens"], Value::Null);
+        assert_eq!(out["legacy_total_tokens"], Value::Null);
+        assert_eq!(
+            out["unavailable"],
+            json!(["reasoning_tokens", "legacy_total_tokens"])
+        );
+    }
+
+    /// 整批没有 usage 样本 → 全部维 null + 全量 unavailable。naive 会在这里
+    /// 输出一个全零行，把「没证据」伪装成「花了 0 token」。
+    #[test]
+    fn canonical_dsh_zero_samples_is_all_unavailable() {
+        let out = canonical_tokens(&[], SOURCE_DSH_LIVE);
+        assert_eq!(out["shape"], json!("dsh"));
+        for dim in CANONICAL_DIMS.iter() {
+            assert_eq!(out[dim], Value::Null, "{dim} 无样本必须 null");
+        }
+        assert_eq!(out["unavailable"], json!(CANONICAL_DIMS));
+    }
+
+    /// 未知来源标签 → shape=unknown、全维 unavailable——不摆全零结构冒充
+    /// 「测到了什么」（与 `by_source` 的 unspecified 诚实降级同一条纪律）。
+    #[test]
+    fn canonical_unknown_source_is_all_unavailable() {
+        let events = reconcile_fixture();
+        let out = canonical_tokens(&events, "some-future-source");
+        assert_eq!(out["source"], json!("some-future-source"));
+        assert_eq!(out["shape"], json!("unknown"));
+        assert_eq!(out["fresh_input_tokens"], Value::Null);
+        assert_eq!(out["total_tokens"], Value::Null);
+        assert_eq!(out["unavailable"], json!(CANONICAL_DIMS));
+    }
+
+    /// canonical 从 Codex 形状归一：FRESH = uncached（全价 input）、TOTAL =
+    /// input + output = uncached + output + cached + cache_write（reasoning 在
+    /// output 里不另加）、cache_read 映射到 cached_input、reasoning 单独成维。
+    #[test]
+    fn canonical_codex_measures_fresh_and_total() {
+        let events = [
+            json!({"type":"turn_context","payload":{"model":"codex-1"}}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{
+                "last_token_usage":{"input_tokens":100,"output_tokens":30,
+                                    "cached_input_tokens":40,"cache_write_input_tokens":10,
+                                    "reasoning_output_tokens":5}}}}),
+        ];
+        let out = canonical_tokens(&events, SOURCE_CODEX);
+        assert_eq!(out["source"], json!("codex"));
+        assert_eq!(out["shape"], json!("codex"));
+        // uncached = 100 - 40 - 10 = 50。
+        assert_eq!(out["fresh_input_tokens"], json!(50));
+        assert_eq!(out["total_tokens"], json!(50 + 30 + 40 + 10));
+        assert_eq!(out["cache_read_tokens"], json!(40));
+        assert_eq!(out["cache_write_tokens"], json!(10));
+        assert_eq!(out["reasoning_tokens"], json!(5));
+        // 5 桶同一份 last_token_usage 全测到；legacy 槽只给 codex-total 形状，
+        // codex 形状恒 null → 唯一 unavailable 项。
+        assert_eq!(out["unavailable"], json!(["legacy_total_tokens"]));
+    }
+
+    /// 第一条累计快照：没有基线算不出 delta → fresh/total null + unavailable，
+    /// 但 raw 累计值放 `legacy_total_tokens`（「只有老格式才带的字段」进 legacy
+    /// 槽，诚实披露，绝不把总量拆成编造的四桶）。
+    #[test]
+    fn canonical_total_delta_first_snapshot_legacy_only() {
+        let cur = json!({"input_tokens":100,"output_tokens":30,
+                         "cached_input_tokens":40,"cache_write_input_tokens":10,
+                         "reasoning_output_tokens":5,"total_tokens":130});
+        let out = canonical_total_delta(None, &cur, SOURCE_CODEX);
+        assert_eq!(out["shape"], json!("codex-total"));
+        assert_eq!(out["fresh_input_tokens"], Value::Null);
+        assert_eq!(out["total_tokens"], Value::Null);
+        assert_eq!(out["legacy_total_tokens"], json!(130));
+        assert_eq!(
+            out["unavailable"],
+            json!(["fresh_input_tokens","total_tokens","cache_read_tokens",
+                   "cache_write_tokens","reasoning_tokens"])
+        );
+    }
+
+    /// 同一计量复读（prev 与 cur 签名相同）→ delta 全 0。这是**测到** 0（累计
+    /// 没变就是没新开销），不是没测到——与 `codex_fold_file` 的 continuous-dedup
+    /// 是同一语义，只是这里把 0 显式还给了调用方。
+    #[test]
+    fn canonical_total_delta_repeated_snapshot_is_measured_zero() {
+        let cur = json!({"input_tokens":100,"output_tokens":30,
+                         "cached_input_tokens":40,"cache_write_input_tokens":10,
+                         "reasoning_output_tokens":5,"total_tokens":130});
+        let out = canonical_total_delta(Some(&cur), &cur, SOURCE_CODEX);
+        assert_eq!(out["shape"], json!("codex-total"));
+        assert_eq!(out["fresh_input_tokens"], json!(0));
+        assert_eq!(out["total_tokens"], json!(0));
+        assert_eq!(out["reasoning_tokens"], json!(0));
+        assert_eq!(out["unavailable"], json!([]));
+        assert_eq!(out["legacy_total_tokens"], json!(130));
+    }
+
+    /// prev→cur 差分：uncached 从 delta 派生（d_input − d_cached − d_cw），
+    /// TOTAL = d_input + d_output。守卫 fresh <= total。
+    #[test]
+    fn canonical_total_delta_measures_the_delta() {
+        let prev = json!({"input_tokens":100,"output_tokens":30,
+                          "cached_input_tokens":40,"cache_write_input_tokens":10,
+                          "reasoning_output_tokens":5,"total_tokens":130});
+        let cur = json!({"input_tokens":160,"output_tokens":50,
+                         "cached_input_tokens":60,"cache_write_input_tokens":20,
+                         "reasoning_output_tokens":8,"total_tokens":210});
+        let out = canonical_total_delta(Some(&prev), &cur, SOURCE_CODEX);
+        // d_input=60, d_output=20, d_cached=20, d_cw=10, d_reasoning=3
+        // d_uncached = 60 - 20 - 10 = 30。
+        assert_eq!(out["fresh_input_tokens"], json!(30));
+        assert_eq!(out["total_tokens"], json!(30 + 20 + 20 + 10));
+        assert_eq!(out["cache_read_tokens"], json!(20));
+        assert_eq!(out["cache_write_tokens"], json!(10));
+        assert_eq!(out["reasoning_tokens"], json!(3));
+        assert_eq!(out["unavailable"], json!([]));
+    }
+
+    /// 累计回退（cur 的 input 比 prev 小——跨会话/畸形数据）→ 不产负数，
+    /// fresh/total null + unavailable，raw 累计照放。clamp 到 0 同样是编造：
+    /// 负 delta 是异常信号，不是可以安全地归零的量。
+    #[test]
+    fn canonical_total_delta_cumulative_regression_is_unavailable_not_negative() {
+        let prev = json!({"input_tokens":100,"output_tokens":30,
+                          "cached_input_tokens":40,"cache_write_input_tokens":10,
+                          "reasoning_output_tokens":5,"total_tokens":130});
+        let cur = json!({"input_tokens":80,"output_tokens":40,
+                         "cached_input_tokens":30,"cache_write_input_tokens":5,
+                         "reasoning_output_tokens":2,"total_tokens":120});
+        let out = canonical_total_delta(Some(&prev), &cur, SOURCE_CODEX);
+        assert_eq!(out["fresh_input_tokens"], Value::Null);
+        assert_eq!(out["total_tokens"], Value::Null);
+        assert_eq!(out["legacy_total_tokens"], json!(120));
+        assert!(out["unavailable"].as_array().unwrap().contains(&json!("total_tokens")));
+    }
+
+    /// 守卫跨形状成立：FRESH 是 TOTAL 的真子集、任何维 >= 0。dsh 与 codex 两套
+    /// 形状各验一遍（累计差分的守卫在 `canonical_total_delta_measures_the_delta`
+    /// 已由 `debug_assert` + 值断言钉住）。
+    #[test]
+    fn canonical_fresh_never_exceeds_total() {
+        let dsh = canonical_tokens(&reconcile_fixture(), SOURCE_CLI);
+        let f = dsh["fresh_input_tokens"].as_i64().unwrap();
+        let t = dsh["total_tokens"].as_i64().unwrap();
+        assert!(0 <= f && f <= t, "dsh: 0 <= fresh({f}) <= total({t})");
+
+        let codex_events = [
+            json!({"type":"turn_context","payload":{"model":"codex-1"}}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{
+                "last_token_usage":{"input_tokens":100,"output_tokens":30,
+                                    "cached_input_tokens":40,"cache_write_input_tokens":10,
+                                    "reasoning_output_tokens":5}}}}),
+        ];
+        let codex = canonical_tokens(&codex_events, SOURCE_CODEX);
+        let f = codex["fresh_input_tokens"].as_i64().unwrap();
+        let t = codex["total_tokens"].as_i64().unwrap();
+        assert!(0 <= f && f <= t, "codex: 0 <= fresh({f}) <= total({t})");
+    }
+
+    /// Python `json.dumps(canonical_tokens(events, source), ensure_ascii=False,
+    /// separators=(",", ":"))` 的逐字节对照——键序（source/shape → 六维 →
+    /// unavailable）、null 与 unavailable 顺序全部一致。期望串在 Python 侧生成后
+    /// 硬编码于此，任何一侧改了归一语义或输出顺序这里立刻红。Python 侧
+    /// `tests/test_canonical_cost.py` 断言同一个串，双向锁死。
+    #[test]
+    fn canonical_tokens_python_rust_byte_for_byte_parity() {
+        let events = reconcile_fixture();
+        let out = canonical_tokens(&events, SOURCE_CLI);
+        assert_eq!(
+            serde_json::to_string(&out).unwrap(),
+            r#"{"source":"cli","shape":"dsh","fresh_input_tokens":1700,"total_tokens":1930,"cache_read_tokens":60,"cache_write_tokens":0,"reasoning_tokens":null,"legacy_total_tokens":null,"unavailable":["reasoning_tokens","legacy_total_tokens"]}"#
+        );
     }
 }
 
