@@ -1,9 +1,9 @@
-//! 菜单栏应用入口：托盘 + 弹出面板。计算全部委托给 core（`overview.rs` 只做 I/O
+//! 菜单栏应用入口：托盘 + 工作台主窗口。计算全部委托给 core（`overview.rs` 只做 I/O
 //! 与组装），本文件只负责 Tauri 胶水：托盘菜单、窗口显隐、IPC 命令。
 //!
 //! 菜单栏本身也展示「今日/本月/预算」三个数字 —— 那是**同一个** `read_overview`
 //! 的文本渲染，不是第二份计算。所有金额格式 `fmt_money` 与 core 的 `format_money`
-//! 同 spec（≥100 一位小数、否则两位、去尾零），避免菜单栏和面板对同一份钱报出
+//! 同 spec（≥100 一位小数、否则两位、去尾零），避免菜单栏和工作台对同一份钱报出
 //! 两个格式。
 mod overview;
 mod store;
@@ -12,8 +12,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, PhysicalPosition, WindowEvent};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Manager, WindowEvent};
 
 use overview::{Overview, SyncStatus};
 
@@ -87,9 +87,9 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// 预算数据是否过期（> 5 分钟）。与面板 `main.js` 的 `> 5*60*1000` 同一阈值——
-/// 托盘和面板对同一份 alert.json 必须判同一个「过期」，不能一个绿一个黄。
-/// `generated_at` 缺场（没有新鲜度信息）→ 不算过期；解析失败 → 也不算（与面板
+/// 预算数据是否过期（> 5 分钟）。与工作台 `workbench.js` 的 `> 5*60*1000` 同一阈值——
+/// 托盘和工作台对同一份 alert.json 必须判同一个「过期」，不能一个绿一个黄。
+/// `generated_at` 缺场（没有新鲜度信息）→ 不算过期；解析失败 → 也不算（与工作台
 /// `Invalid Date` 走不 stale 的现状一致，机器写的 alert.json 不会走到这里）。
 fn stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
     let Some(at) = generated_at.and_then(parse_rfc3339_secs) else {
@@ -160,8 +160,8 @@ fn fmt_tokens(n: i64) -> String {
 }
 
 /// 托盘标题：菜单栏里图标旁那一段常驻文字。原设计「托盘展示 今日/本月/预算」里的
-/// 「今日」落在这里（本月/预算在右键菜单与面板里，塞标题太长）。**token + 价格都
-/// 显示**：token 是消耗量的直观信号、价格与预算同单位——菜单/面板只显示价格，标题
+/// 「今日」落在这里（本月/预算在菜单与工作台里，塞标题太长）。**token + 价格都
+/// 显示**：token 是消耗量的直观信号、价格与预算同单位——菜单/工作台只显示价格，标题
 /// 补 token 不重复。数据源与菜单同一份 `read_overview`，不加第四份拷贝；无今日数据
 /// 时诚实显示「—」，不臆造 0。
 fn today_title(ov: &Overview) -> String {
@@ -192,7 +192,7 @@ fn build_menu(app: &AppHandle, ov: &Overview) -> tauri::Result<Menu<tauri::Wry>>
         .item(&month_item)
         .item(&budget_item);
     // 上次同步失败也要在托盘可见——不是只进 stderr。托盘是主入口，同步断了用户
-    // 应该一眼看到「该动手了」，而不是等到打开面板才发现数字是旧的。
+    // 应该一眼看到「该动手了」，而不是等到打开工作台才发现数字是旧的。
     if !ov.sync.ok {
         let sync_text = if ov.sync.stage == "never" {
             "尚未同步".to_string()
@@ -201,14 +201,17 @@ fn build_menu(app: &AppHandle, ov: &Overview) -> tauri::Result<Menu<tauri::Wry>>
         };
         builder = builder.item(&MenuItem::with_id(app, "sync", sync_text, false, None::<&str>)?);
     }
-    let open_item = MenuItem::with_id(app, "open", "打开面板…", true, None::<&str>)?;
-    // 工作台主窗口入口（任务 #5）：独立可缩放窗口，三页 总览/日历/会话。
-    // 与「打开面板…」并列但语义不同——面板是托盘旁的弹出层，工作台是常驻主窗口。
+    // 工作台主窗口入口（任务 #5）：独立可缩放窗口，五页 总览/日历/会话/Findings/
+    // 数据源。**没有"打开面板…"菜单项**，面板本身也已经整体删除（2026-09-01）
+    // ——面板展示的今日/本月/预算/本月逐日本来就是工作台"总览"tab 的严格子集，
+    // 一个字段不多；用户先反馈两者"功能重合"（菜单项先删），又反馈左右键该跟
+    // 大多数状态栏图标一样统一弹菜单（右键的专属"弹面板"手势也删），面板到此
+    // 已经没有任何入口——留着 `toggle_window`/独立 HTML+JS+CSS 就是纯粹的死
+    // 代码，一并删除，不留一份没人能打开的界面。
     let workbench_item = MenuItem::with_id(app, "workbench", "打开工作台…", true, None::<&str>)?;
     let refresh_item = MenuItem::with_id(app, "refresh", "立即同步", true, None::<&str>)?;
     builder
         .separator()
-        .item(&open_item)
         .item(&workbench_item)
         .item(&refresh_item)
         .separator()
@@ -376,7 +379,7 @@ fn start_refresh_tick(app: AppHandle) {
     });
 }
 
-/// 「立即同步」（托盘菜单 / 面板按钮共用）：受控 tick 一次。跑在后台线程，菜单
+/// 「立即同步」（托盘菜单 / 工作台按钮共用）：受控 tick 一次。跑在后台线程，菜单
 /// 事件处理器不阻塞；互斥锁阻塞等待在途同步结束，保证用户点的这一次真的执行。
 fn sync_now(app: &AppHandle) {
     let app = app.clone();
@@ -387,34 +390,23 @@ fn sync_now(app: &AppHandle) {
     });
 }
 
-/// 面板显隐切换：隐藏时直接 hide；显示时先摆到主屏右上角（托盘下方）再 show。
-fn toggle_window(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("overview") else { return };
-    if w.is_visible().unwrap_or(false) {
-        let _ = w.hide();
-        return;
-    }
-    if let Ok(Some(m)) = app.primary_monitor() {
-        let wa = m.work_area();
-        let size = w.outer_size().unwrap_or_default();
-        let right = wa.position.x + wa.size.width as i32;
-        let x = (right - size.width as i32 - 16).max(wa.position.x);
-        let _ = w.set_position(PhysicalPosition::new(x, wa.position.y + 16));
-    }
-    let _ = w.show();
-    let _ = w.set_focus();
-}
-
-/// 打开工作台主窗口：显示 + 聚焦。**不做 toggle**——工作台是常驻主窗口（与面板
-/// 「点了再点收起」不同），× 只隐藏不销毁（`on_window_event` 拦截 prevent_close +
-/// hide），再开保留当前 tab/月/分页状态，不是重建一个空白窗口。
+/// 打开工作台主窗口：显示 + 聚焦。**不做 toggle**——工作台是常驻主窗口，× 只
+/// 隐藏不销毁（`on_window_event` 拦截 prevent_close + hide），再开保留当前
+/// tab/月/分页状态，不是重建一个空白窗口。
 fn show_workbench(app: &AppHandle) {
     let Some(w) = app.get_webview_window("workbench") else { return };
     let _ = w.show();
     let _ = w.set_focus();
 }
 
-/// 面板前端请求当前 overview —— 与托盘菜单同一份数据源，前端只渲染。
+/// 工作台前端请求当前 overview —— 与托盘菜单同一份数据源，前端只渲染。
+///
+/// 2026-09-01 之前这里还有一份面板（`ui/index.html`/`main.js`，弹出层 popover
+/// 窗口，label "overview"）共用同一个命令；面板已整体删除——左右键统一弹菜单
+/// 之后它连入口都没有了，面板展示的字段本来就是工作台"总览"tab 的严格子集，
+/// 没有理由为一份没有入口、内容更少的旧界面继续维护 `toggle_window`/
+/// `hide_window`/一份独立的 HTML+JS+CSS。命令名留作 `read_overview` 不改，
+/// 只是现在唯一的调用方是工作台。
 #[tauri::command]
 fn read_overview() -> Value {
     serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null)
@@ -428,15 +420,8 @@ fn read_month(month: String) -> Value {
     overview::read_month_json(&month)
 }
 
-#[tauri::command]
-fn hide_window(app: AppHandle) {
-    if let Some(w) = app.get_webview_window("overview") {
-        let _ = w.hide();
-    }
-}
-
-/// 面板「立即同步」按钮：受控 tick 一次（与托盘菜单同一路径）。立即返回，不
-/// 阻塞 IPC；面板自己在同步结束后重拉 overview。
+/// 工作台「立即同步」按钮：受控 tick 一次（与托盘菜单同一路径）。立即返回，不
+/// 阻塞 IPC；工作台自己在同步结束后重拉 overview。
 #[tauri::command]
 fn trigger_sync(app: AppHandle) {
     sync_now(&app);
@@ -460,7 +445,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_overview,
             read_month,
-            hide_window,
             trigger_sync,
             store::sessions_list,
             store::sessions_read,
@@ -469,46 +453,35 @@ pub fn run() {
         .setup(|app| {
             // 菜单栏工具:必须 .accessory,否则 macOS 把它当普通 App 常驻 Dock
             // (Info.plist 无 LSUIElement → 缺省 .regular)。skipTaskbar/visible:false
-            // 只藏窗口,藏不住进程的 Dock 图标。toggle_window 已负责 show+set_focus,
+            // 只藏窗口,藏不住进程的 Dock 图标。show_workbench 已负责 show+set_focus,
             // accessory 下窗口照常成为 key。
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let ov = overview::read_overview();
             let menu = build_menu(app.handle(), &ov)?;
-            // 左键 → 弹菜单（今日/本月/预算/打开面板/立即同步/退出）；右键 → 弹面板。
-            // macOS 缺省两个键都弹菜单：左键经 show_menu_on_left_click(true) 走原生
-            // performClick；右键菜单必须显式关掉——Tauri builder 没透出 menu_on_right_click，
-            // 得经 with_inner_tray_icon 直达 tray-icon 底层，否则右键会又弹菜单又切面板。
+            // 左右键都弹菜单（今日/本月/预算/打开工作台/立即同步/退出）——统一到
+            // 大多数状态栏图标的通用手势，不再区分"左键菜单/右键面板"。这是
+            // macOS 的缺省行为本身：`.menu(&menu)` 挂上之后两个键天然都弹菜单，
+            // 之前是特意用 `with_inner_tray_icon` 关掉右键菜单、改绑
+            // `on_tray_icon_event` 的右键分支去做 `toggle_window`，现在两处都删掉，
+            // 直接吃缺省行为，不再自定义（2026-09-01 用户反馈"很多图标左右键都是
+            // 弹菜单，我们也一样"）。
             TrayIconBuilder::with_id("main")
                 .icon(tray_template_icon()?)
                 .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id().as_ref() {
-                    "open" => toggle_window(app),
                     "workbench" => show_workbench(app),
                     // 「立即同步」不是重读本地 state，而是受控 tick：discover →
                     // oneline 折账 → 刷新托盘（review fix 1）。
                     "refresh" => sync_now(app),
                     _ => {}
                 })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Right,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        toggle_window(tray.app_handle());
-                    }
-                })
                 .build(app)?;
             // 初始标题：托盘一亮就带今日消耗，不用等第一个 tick（线程刚 spawn、
-            // 首轮 sync 前有窗口期）。右键菜单一并关掉（见上注释）——菜单只在左键弹。
+            // 首轮 sync 前有窗口期）。
             if let Some(t) = app.tray_by_id("main") {
                 let _ = t.set_title(Some(today_title(&ov)));
-                let _ = t.with_inner_tray_icon(|inner| {
-                    inner.set_show_menu_on_right_click(false);
-                });
             }
             start_refresh_tick(app.handle().clone());
             Ok(())
@@ -770,7 +743,7 @@ mod tests {
         assert_eq!(parse_rfc3339_secs("2026-13-40T25:61:61Z"), None);
     }
 
-    /// stale 判据：> 5 分钟算过期（与面板 main.js 同一阈值）；5 分钟内新鲜；
+    /// stale 判据：> 5 分钟算过期（与工作台 workbench.js 同一阈值）；5 分钟内新鲜；
     /// generated_at 缺场 / 解析失败 → 不算过期（没有新鲜度信息 ≠ 过期）。
     #[test]
     fn stale_from_uses_5min_window() {

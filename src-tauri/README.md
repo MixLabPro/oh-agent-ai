@@ -1,14 +1,21 @@
 # agent-vitals 菜单栏（Tauri 2）
 
-macOS 菜单栏应用：托盘图标 + 弹出面板，展示当日/本月成本与预算。
+macOS 菜单栏应用：托盘图标 + 工作台主窗口，展示当日/本月成本与预算。
 
 - **后端**：`src/overview.rs` 读数据根的 `state/month.json` + `today.json` +
   `config.toml` 预算，喂给 `agent-vitals-core::cost` 的纯函数
   （`priced_day`/`month_cost`/`today_cost`/`bucket_cost`）。**计价一律在 core**，
-  本 crate 不长第四份拷贝。托盘菜单和弹出面板读的是同一个 `read_overview`。
+  本 crate 不长第四份拷贝。托盘菜单和工作台"总览"tab 读的是同一个
+  `read_overview`。
 - **前端**：`ui/` 纯 HTML/CSS/JS（ADR-010），`withGlobalTauri: true` 提供
   `window.__TAURI__`，无构建链、无 npm 依赖。
-- **交互**：左键单击托盘 → 切换面板（右上角）；右键 → 菜单（打开面板/刷新/退出）。
+- **交互**：左右键点托盘图标都弹同一个菜单（今日/本月/预算/打开工作台/立即
+  同步/退出）——跟多数状态栏图标的通用手势一致，不再区分左右键语义。
+  2026-09-01 之前这里还有一个独立的弹出小面板（`toggle_window`，右键单独弹、
+  内容是"总览"tab 的严格子集）；面板本身对着菜单里的"打开工作台…"就已经冗余
+  （内容更少），统一左右键手势之后它又连入口都没有了，所以连同
+  `ui/index.html`/`main.js`/`style.css`、`hide_window` IPC、`tauri.conf.json`
+  的 `overview` 窗口条目一起删除——只剩工作台一个窗口。
 
 ## 构建
 
@@ -34,6 +41,6 @@ cargo tauri build
 
 ## 空态是诚实的
 
-本机没有 `state/month.json`/`today.json` 时，面板显示「—」/「本月还没有数据」，
-不摆全零结构；today.json 的 `date` 停在昨天时按「今天无数据」处理（core 的
-`today_cost` 判，不是把昨天的账报成今天的）。
+本机没有 `state/month.json`/`today.json` 时，工作台"总览"tab 显示「—」/
+「本月还没有数据」，不摆全零结构；today.json 的 `date` 停在昨天时按「今天无
+数据」处理（core 的 `today_cost` 判，不是把昨天的账报成今天的）。

@@ -10,19 +10,6 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "label": "overview",
-        "title": "agent-vitals",
-        "width": 400,
-        "height": 560,
-        "resizable": false,
-        "fullscreen": false,
-        "decorations": false,
-        "transparent": false,
-        "alwaysOnTop": true,
-        "visible": false,
-        "skipTaskbar": true
-      },
-      {
         "label": "workbench",
         "title": "agent-vitals 工作台",
         "url": "workbench.html",
