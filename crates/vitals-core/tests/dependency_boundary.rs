@@ -157,3 +157,97 @@ fn public_item_identifiers_are_domain_free() {
         }
     });
 }
+
+/// §4.1 补强，spec §20 DoD 第一条（"`crates/vitals-core` 不含宿主或 Agent
+/// 专属类型"）打勾之前需要的那一半：`public_item_identifiers_are_domain_free`
+/// 只扫声明行本身（`pub struct Foo {` 这一行的 `Foo`），扫不进花括号内部——
+/// `pub struct Foo { pub codex_session_id: String }` 会被那条测试放过，因为
+/// 违规词出现在字段名，不在类型名。这里从遇到 `pub struct X {` / `pub enum
+/// X {` 开始按花括号深度跟踪 body，对 body 内每一行取行首标识符（字段名，
+/// 或 enum variant 名），同样过一遍 FORBIDDEN_TERMS。
+///
+/// 不是真的做 AST 解析——和 `extract_declared_identifier` 同样的简化取舍
+/// （见其文档注释）：跳过注释/属性宏行（`//`/`///`/`#[...]`），因为
+/// `#[error("... {field} ...")]` 这类属性行里的花括号是 `thiserror` 的插值
+/// 占位符，不是标识符声明；深度计数仍然处理这些行（`#[error("{a}...{b}")]`
+/// 天然成对，不会打乱计数），只是不从里面提取标识符。单行 tuple
+/// struct（`pub struct SignalId(pub String);`）没有 `{`，从不进入 body，
+/// 天然被跳过——本来就没有字段名要查，交给 `public_item_identifiers_are_
+/// domain_free` 查类型名本身就够了。
+fn each_struct_or_enum_body_identifier(content: &str, mut visit: impl FnMut(&str)) {
+    let mut in_body = false;
+    let mut depth: i32 = 0;
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if !in_body {
+            let is_decl = line.starts_with("pub struct ")
+                || line.starts_with("struct ")
+                || line.starts_with("pub enum ")
+                || line.starts_with("enum ");
+            if is_decl && line.contains('{') {
+                depth = line.matches('{').count() as i32 - line.matches('}').count() as i32;
+                in_body = depth > 0;
+            }
+            continue;
+        }
+        let is_noise = line.is_empty() || line.starts_with("//") || line.starts_with('#');
+        // 深度计数不管这行是不是注释/属性——闭合当前 body 的那个 `}` 本身
+        // 从来不是注释，但保守起见两者都数，免得漏掉一个把 depth 算错的边角。
+        depth += line.matches('{').count() as i32;
+        depth -= line.matches('}').count() as i32;
+        if depth <= 0 {
+            in_body = false;
+            continue;
+        }
+        if is_noise {
+            continue;
+        }
+        let field_line = line.trim_start_matches("pub ");
+        let ident: String = field_line.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if !ident.is_empty() {
+            visit(&ident);
+        }
+    }
+}
+
+/// 证明上面那条扫描器不是摆设：`struct_field_and_enum_variant_names_are_
+/// domain_free` 现在全绿，光看这个结果分不清是"真的没有违规词"还是"扫描器
+/// 压根没扫到任何东西"。这里喂一段只存在于这个测试里、从不进 `src/` 的合成
+/// 片段——故意混了 struct 字段、tuple 风格 enum variant、普通字段——断言
+/// 提取出的标识符列表精确匹配。如果这条测试本身挂了，上面那条测试的"全绿"
+/// 就不能信。
+#[test]
+fn struct_and_enum_body_scanner_actually_finds_identifiers() {
+    let synthetic = r#"
+#[derive(Clone)]
+pub struct Foo {
+    pub codex_session_id: String,
+    pub normal_field: u16,
+}
+
+pub enum Bar {
+    Codex,
+    Dsh { detail: String },
+    Neutral,
+}
+"#;
+    let mut found = Vec::new();
+    each_struct_or_enum_body_identifier(synthetic, |ident| found.push(ident.to_string()));
+    assert_eq!(found, vec!["codex_session_id", "normal_field", "Codex", "Dsh", "Neutral"]);
+}
+
+#[test]
+fn struct_field_and_enum_variant_names_are_domain_free() {
+    each_src_file(|path, content| {
+        each_struct_or_enum_body_identifier(content, |ident| {
+            let lower = ident.to_lowercase();
+            for term in FORBIDDEN_TERMS {
+                assert!(
+                    !lower.contains(term),
+                    "§4.1 violated in {}: field/variant `{ident}` contains domain term `{term}`",
+                    path.display()
+                );
+            }
+        });
+    });
+}

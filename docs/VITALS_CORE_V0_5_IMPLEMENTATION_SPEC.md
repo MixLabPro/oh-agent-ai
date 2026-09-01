@@ -1,6 +1,8 @@
 # Vitals Core v0.5 Implementation Spec
 
-> 状态：Draft  
+> 状态：**已交付（2026-09-01）**——M0–M4 全部完成，§20 Definition of Done
+> 22 项中 21 项打勾；剩 1 项（`AuditContext.coverage` 未按 trajectory 隔离）
+> 是记录在案的已知限制，不是缺口，见该条目文字与 §21 止损线判断。
 > 目标版本：0.5  
 > 适用仓库：当前 `agent-vitals` monorepo  
 > 上位设计：《Vitals Core 设计文档 v0.1》  
@@ -1416,7 +1418,17 @@ boundary test` 需要覆盖 `src-tauri/`：它是从根 workspace 用空 `[works
 
 只有同时满足以下条件，Vitals Core v0.5 才算完成：
 
-- [ ] `crates/vitals-core` 不含宿主或 Agent 专属类型；
+- [x] `crates/vitals-core` 不含宿主或 Agent 专属类型——`module_file_names_are_
+  domain_free` / `public_item_identifiers_are_domain_free`
+  （`dependency_boundary.rs`）本来就存在，但只扫声明行本身（`pub struct
+  Foo {` 这一行的 `Foo`），扫不进花括号内部：一个 `pub struct Foo { pub
+  codex_session_id: String }` 会被两条测试都放过，因为违规词出现在字段
+  名，不在类型名，这条 DoD 之前一直空着就是因为没有测试真正堵上这个缝。
+  2026-09-01 补上 `struct_field_and_enum_variant_names_are_domain_free`
+  （按花括号深度扫 struct 字段名和 enum variant 名）+
+  `struct_and_enum_body_scanner_actually_finds_identifiers`（合成片段自测
+  —— 证明扫描器真的会命中 `codex_session_id`/`Codex`/`Dsh` 这类名字，不是
+  因为没扫到任何东西才全绿）；
 - [x] Core 无文件、网络、时钟、环境变量和子进程 I/O（`dependency_boundary.rs`）；
 - [x] Canonical Event 有稳定 ID、ordinal、SourceRef 和 provenance；
 - [x] 相同输入可稳定重放（`same_input_run_repeatedly_yields_identical_fingerprint`）；
