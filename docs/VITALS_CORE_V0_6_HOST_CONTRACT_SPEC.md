@@ -1,9 +1,13 @@
 # Vitals Core v0.6 —— Host 接入契约与完整性守卫（方案）
 
-> 状态：**提案 v0.1.2**（草案，未立项；审核轮次 R1/R2 修订记录见 §14）。调研与状态
-> 基准：2026-09-02。并行 claude-sync/cost 流**部分合入**（868f1a7 menubar 账卡分列、
-> 9464d30 docs），`workbuddy_evidence.rs/.py`、workbuddy fixtures、相关 tests **仍
-> 打开未提交**——落地方案为它保留顺序约束（§11 M2b）。
+> 状态：**提案 v0.1.2**（草案，未立项；审核轮次 R1/R2/R3 修订记录见 §14——R3 是对
+> R1/R2 之后新增的计价分辨率轴的更正轮，不要按标题只读到 R2 就止步）。调研与状态
+> 基准：2026-09-02；**M0–M3 已于 2026-09-02 夜至 09-03 落地**（见 §11 落地记录，
+> commit `e13dafa`…`3d06f15`）——本文档的"提案/未立项"状态描述的是 v0.6 spec 这份
+> 契约的**评审地位**，不代表代码未动工，读者不应按纯草案状态理解现在的仓库。并行
+> claude-sync/cost 流**部分合入**（868f1a7 menubar 账卡分列、9464d30 docs），
+> `workbuddy_evidence.rs/.py`、workbuddy fixtures、相关 tests **仍打开未提交**
+> （截至 2026-09-03 早晨仍无变化）——落地方案为它保留顺序约束（M2b/M4）。
 >
 > 一句话：v0.6 把散落在四个证据适配器、三个 dispatcher、四个 CLI/前端入口里的
 > **宿主能力声明收拢成注册表**（Rust core 与 Python 各一份 parity 双实现），本语言
@@ -396,11 +400,13 @@ WorkBuddy 这个 Host 永久且唯一的计费人格。折叠能力只声明输�
    下界读法（`cost.rs::flat_rate` 的 `/{key}/off_peak` 兜底、`cost.py::_flat_rate`
    同形）。把"有没有 hour 键"当判据会误红 DSH——全仓唯一计价正确的那条路。
 
-   **适用面按计价入口算，不按宿主算（R3 修订）**：`flat_rate` 的兜底位于
-   `price_claude_model`（`cost.rs:756-759`），而 `price_claude_map` 的 doc 注释自己
-   钉死「两面的钱必须同源」——它同时服务 `claude_day_cost`（日桶/托盘）与
-   `claude_session_cost`（会话账）。同一宿主的这两个入口各算一格：只改其中一个既不
-   算修完，还会让两面从此**不同源**，正好违反那条注释钉住的纪律。
+   **适用面按计价入口算，不按宿主算（R3 修订，2026-09-03 复核订正引用行号）**：
+   `flat_rate` 本体（`cost.rs:710-718`）是下界兜底所在，经 `price_claude_model`
+   （`cost.rs:756-759` 是调用它的行，不是兜底本体自身）被 `price_claude_map` 共用，
+   而 `price_claude_map` 的 doc 注释自己钉死「两面的钱必须同源」——它同时服务
+   `claude_day_cost`（日桶/托盘）与 `claude_session_cost`（会话账）。同一宿主的这两
+   个入口各算一格：只改其中一个既不算修完，还会让两面从此**不同源**，正好违反那条
+   注释钉住的纪律。
 
    **为什么它是一条新条款而不是既有条款的推论**：条款 1/3/4 与 `evidence.rs`
    的全部纪律都约束**"某个信号有没有被读到"**（证据轴的 presence/absence）。
