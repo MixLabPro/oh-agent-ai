@@ -706,30 +706,35 @@ B）；`dsh_evidence.rs::derive_coverage` 末尾五行显式置零改循环
 `fixtures/workbuddy/` 截至本次记录（2026-09-03）仍持续处于未提交状态，未见
 清空迹象，本轮全程未触碰。
 
-**M3 已完成 G1–G6/G8/G10；G7/G9 各完成一部分，原因见下**：
+**M3 已全部完成（G1–G10）**：
 - G2（三集分离）/G3（语言支持矩阵，DSH Python "pending M1" 缺口在 M1 关闭后
   降级为存在断言）/G4（降级穷举，行驱动）/G5（§13 矩阵人工对账 + 4 处显式
   偏差登记）/G6（合成会话不变量，dsh/codex/claude-code 三家）/G8（源码自
   扫描）/G10（计价分辨率，行为断言 + 缺口登记闭集）：Python
-  `tests/test_host_contract.py`（18 例）+ Rust
+  `tests/test_host_contract.py`（19 例）+ Rust
   `crates/agent-vitals-core/tests/host_contract.rs`（11 例）全绿。
 - G7（展示层一致性）：src-tauri `overview.rs::HostsSnapshot::unavailable()`
-  （托盘无数据兜底行）已从 `HOSTS` 的 `fold != None` 派生。**未完成**：真实
-  数据路径 `r2a_store.rs::sessions_navigation`——它对 dsh/codex/claude-code
-  各跑不同折叠机制（state 链/全量 rollout/ledger），不是同构循环，接入注册
-  集需要先给 `HostRuntimeRegistration` 设计 `fold` 维度；sessFilter
-  （`workbench.js`，前端）未动。
+  （托盘兜底行）从 `HOSTS` 的 `fold != None` 派生；`lib.rs::host_display_name`
+  从 `HOSTS` 的 `display` 派生（副作用：WorkBuddy 现在也能正确解析出显示名，
+  此前的本地字面量表没收它是因为它没有托盘行——展示名与折叠能力是两件事）；
+  `workbench.html` 的 sessFilter chips（实测 all/claude-code/dsh/codex 四个，
+  claude-code 缺席问题已被并行 claude-sync 流 868f1a7 补上，本 spec 此前的
+  记录滞后于代码）与 `session_store` 宿主集合一致性由
+  `G7SessFilterTests` 源码自扫描钉住。
 - G9（按 surface 的需求 ⊆ 注册）：新建 `src/agent/host_runtime_registration.rs`，
-  登记 `cli.sessions` surface 的 `session_store` 维度（Rust 3 例单测）。
-  **未完成**：`fold` 维度（与上面 G7 的缺口是同一块工作，不是独立缺口）、
-  `tauri.sessions`/`tauri.menubar-cost`（Tauri 是另一个二进制，注册面不
-  共享，要单独建）。
+  登记 `cli.sessions` surface 的 `session_store` 与 `fold` 两个维度——核实
+  `sessions_navigation` 对 dsh/codex/claude-code 当日 token 折叠（state 链/
+  全量 rollout/ledger）与 `HOSTS.fold` 精确对应后直接登记"接了/没接"这个
+  事实，**没有**为三条互不相同的折叠路径发明共享 trait/循环（§2.2 明文
+  拒绝的假抽象）。`tauri.sessions`/`tauri.menubar-cost` 核实后确认**不需要
+  独立登记**：`src-tauri/src/store.rs` 的 `sessions_list`/`sessions_read`/
+  `sessions_findings` 是纯 IPC 透传（spawn CLI 二进制、原样转发输出，不按
+  宿主分支任何逻辑），Tauri 不持有第二份 SessionStore/折叠实现，宿主覆盖面
+  恒等于本二进制已登记的 `cli.sessions`——没有独立能力，也就没有独立注册的
+  必要。G9 至此没有遗留的开放 surface。
 
-这两处剩余工作的共同点：都要求先做一个新的设计决定——`fold` 该按什么粒度
-登记（函数入口？子命令？），而不是照抄本轮已完成部分的体力活；且
-`sessions_navigation` 是菜单栏最复杂、最贴近实时展示的路径，贸然重构的风险
-与本轮其余改动不在同一量级。**M4**（workbuddy 折叠 demo，spec 原文标注
-"可选演练"）依赖 M2b 的 workbuddy 侧先落地，同样未开始。
+**M4**（workbuddy 折叠 demo，spec 原文标注"可选演练"）依赖 M2b 的 workbuddy
+侧先落地，未开始。
 
 每步验证：`cargo test --release`、`cargo clippy --release --all-targets -D
 warnings` 零警告（含 src-tauri 独立 workspace）、
