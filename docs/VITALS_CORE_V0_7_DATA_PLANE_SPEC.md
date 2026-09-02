@@ -20,8 +20,13 @@
    外加 **1bis 计价分辨率的实现面**（2026-09-02 新增）。
    候选 #1/#2（I/O 类型壳、键词表收敛）字节不变，**不占版本、随时可进**。
 
-   **1bis 计价分辨率实现面**：hour 轴（ledger 日桶加 hour 桶、`claude_day_cost` 走
-   `is_peak_slot`、事实行 hour 列）+ 归日转正 + `message.id` 去重 + 残差哨兵。
+   **1bis 计价分辨率实现面**（2026-09-02 R3 更正：**不是 hour 轴**）：claude ledger
+   日桶加 `peak_*` 子桶——照 DSH 既有日形状（`usage.rs::add_buckets` 折叠时按
+   `is_peak_slot` 预拆，`cost.rs::bucket_price` 用「全量 − peak_*」还原空闲份额），
+   于是 `price_claude_map` 的**两个**计价入口（`claude_day_cost` 日面、
+   `claude_session_cost` 会话面）都能改走峰谷读法、复用 `bucket_price`/`priced_day`，
+   与 `token_by_date_model` 同形，**不新造第四种日形状**；事实行随之补时变维列。
+   本面还含：归日转正、`message.id` 去重、残差哨兵（三者与上面同批，见 §5）。
    **契约面不在本版**——不变量（v0.6 spec §5.3 条款 7）与守卫（§8 G10）随 v0.6
    走，本版只负责把 v0.6 登记的 `"pending v0.7"` 缺口结清（方案 b 的后半；理由与
    §5.4.3 列化卡留守 v0.6 同源：条款是 host-contract 语义，动持久格式才是数据面）。
@@ -59,7 +64,7 @@ tab、dsh-client 投影）各自手工 join、每处一个 basis——v0.6 spec 
 |---|---|---|
 | 引用 | `session_key` | 引用 R2a 身份行，不复制（含 machine_namespace） |
 | 计价键 | `host`/`provider`/`model` | v0.6 spec §5.2bis 数据轴：`(model, provider)` 逐事件属性 |
-| 时间 | 事件 ts + 北京日归属 + **北京小时归属** | **小时对时变卡行是 NOT NULL**（v0.6 spec §5.3 条款 7 / G10）：`billing_kind=RepriceTokens` 且其价目卡为 `{off_peak, peak}` 形状时，行必须带小时，否则只能写 partial 并计哨兵——不得取时间维下界（全 `off_peak`）冒充保守。行自带 ts，小时是**投影时不许丢**的分辨率，不是新数据源。**归日不再沿用 `claude_cost` 的 startTime 基线近似**（该近似 2026-09-02 被真机证伪，见下） |
+| 时间 | 事件 ts + 北京日归属 + **峰谷归属**（`is_peak_slot(ts)`，折叠时判定） | **时变卡行必须带峰谷归属**（v0.6 spec §5.3 条款 7 / G10；2026-09-02 R3 更正原写的"小时 NOT NULL"）：`billing_kind=RepriceTokens` 且其价目卡为 `{off_peak, peak}` 形状时，行必须能被峰谷拆分——**保住的是分辨率，不是"hour 这个列"**：DSH 日桶无 hour 键却计价正确，靠的是折叠时预拆的 `peak_*` 子桶。做不到时只能写 partial 并计哨兵，不得取时间维下界（全 `off_peak`）冒充保守。行自带 ts，峰谷是**投影时不许丢**的分辨率，不是新数据源；若本版另行选择保留完整 hour 列（信息更多，峰窗规则改了能重算），须在 §5 写明理由与新增形状的代价。**归日不再沿用 `claude_cost` 的 startTime 基线近似**（该近似 2026-09-02 被真机证伪，见下） |
 | 去重键 | `(turn, step)` 替代语义 / `message.id` / `call_id`+影子主源 | **写表时去重，视图永不担心双计**（SV611、2026-08 三倍计数事故前置） |
 | 度量 | 4 型 token 四列 | API 全形 snake 键；camel→snake 由写者转换，键序固定 |
 | 记账 | `billing_kind` = v0.6 spec §5.1 `BillingKind`（`RepriceTokens`\|`HostBilled`）+ `currency` + `host_amount`（可空） | **金额不是单列**：RepriceTokens 与 HostBilled 不可同列相加（credit ≠ USD ≠ CNY）；单价折算只发生在视图（core cost 函数），不在写表时——`priced_day` 单点纪律 |
@@ -92,8 +97,8 @@ tab、dsh-client 投影）各自手工 join、每处一个 basis——v0.6 spec 
 | 视图 | 基本事实行的查询 | 现有落点 |
 |---|---|---|
 | `token_by_model` | 会话内 (turn,step) 去重桶 + `unaccounted_usage` 哨兵 | dsh-client tokenByModel、behavior --json |
-| `token_by_date_model` | 时间轴投影（**日桶下保留小时桶**——时变卡计价的唯一合法输入，G10 断言面）；月度与 by_model 全等 | 日历、month.json 写入 |
-| `cost_report` | by_model+sequence × pricing 卡片（峰谷/平费率两价面，basis 各标）。**前置条件（v0.6 spec §5.3 条款 7）：平费率面只对平费率卡合法**（catalog anthropic/moonshot USD 卡、MiniMax 档位卡）；`{off_peak, peak}` 时变卡**必须**走峰谷面，缺小时则报 partial，**标 basis 不能替代分辨率** | menubar 账卡、costReport 投影 |
+| `token_by_date_model` | 时间轴投影（**日桶下保留 `peak_*` 子桶**——时变卡计价的合法输入形状，G10 断言面；DSH 侧现状即如此，claude ledger 本版对齐它）；月度与 by_model 全等 | 日历、month.json 写入 |
+| `cost_report` | by_model+sequence × pricing 卡片（峰谷/平费率两价面，basis 各标）。**前置条件（v0.6 spec §5.3 条款 7）：平费率面（`flat_rate`/`_flat_rate`）只对平费率卡合法**（catalog anthropic/moonshot USD 卡、MiniMax 档位卡）；`{off_peak, peak}` 时变卡**必须**走峰谷面（`bucket_price` 族），缺分辨率则报 partial，**标 basis 不能替代分辨率**。G10 的断言就钉在这个读法分界上 | menubar 账卡、costReport 投影 |
 | `priced_day` | 逐日 by_model 覆盖：全→exact、不全→partial 只标不价 | month.json 逐日渲染 |
 | behavior findings | canonical 全信号 × 规则，RuleOutcome 三态 | findings tab、审计投影 |
 | `sessions_navigation` | 身份视图：今日/最近 N 会话（现状唯一跨宿主 join 视图，r2a） | menubar 行、工作台 chip |
@@ -178,14 +183,23 @@ update（v0.6 spec §2.3 版本边界同文）：
   月（merge_month 归档先行）；新视图输出面（§3 交付矩阵三行）各自对真实数据出数并
   与手工复算一致。
 - **计价分辨率转绿（G10 缺口结清）**：v0.6 以显式缺口 `"pending v0.7"` 登记的
-  `claude-code × deepseek-official` 一格，在本版落地 hour 轴后**删除缺口条目、改为
-  硬断言**（v0.6 spec §8 G10 / §12 DoD 9）。本版落地内容：claude ledger 日桶下加
-  hour 桶、`claude_day_cost` 按 hour 查 `is_peak_slot` 取价而非 `flat_rate` 硬取
-  `off_peak`、事实行 hour 列。**验收标准是硬的、可端到端复现的**：
-  **本仓价卡 × 真实小时重算某日 == 该日官方账单**——2026-09-02 已证该等式在数据层
-  成立（¥74.3797 == ¥74.3797，逐行核对 72 条计价行不符 0 行），实现后须端到端复现，
-  并以该日语料落 fixture 钉死。
-- **归日转正 + 残差哨兵**（与 hour 轴**同批**，不得分两次 `--update`）：行按自身
+  **两条**入口——`claude-ledger-day`（`cost.rs::claude_day_cost`）与
+  `claude-session`（`cost.rs::claude_session_cost`），双语言各一次——在本版落地后
+  **删除缺口条目、改为硬断言**（v0.6 spec §8 G10 / §12 DoD 9）。**两条必须同批
+  结清**：两者共用 `price_claude_map`→`price_claude_model`→`flat_rate` 这一条链，
+  且该函数 doc 注释自钉「两面的钱必须同源」，只修一面会让日面与会话面从此分叉。
+  本版落地内容：claude ledger 日桶下加 `peak_*` 子桶（照 DSH 既有日形状，
+  `usage.rs::add_buckets`）、两个入口改走峰谷读法（`bucket_price` 族）而非
+  `flat_rate` 硬取 `off_peak`、事实行补时变维列。命中的时变卡是三张——
+  deepseek-official 的 flash/pro **与 shengsuanyun 的 pro**（`resolve_card_catalog`
+  第二段遍历顶层 `providers` 时同样命中这条兜底），fixture 三张都要覆盖。
+  **验收标准是硬的、可端到端复现的**：
+  **本仓价卡 × 每行真实峰谷归属重算某日 == 该日官方账单**——2026-09-02 已证该等式
+  在数据层成立（¥74.3797 == ¥74.3797，逐行核对 72 条计价行不符 0 行），实现后须端
+  到端复现，并以该日语料落 fixture 钉死。（该核算当时是按每行真实小时做的；小时与
+  峰谷归属对这个等式等价，因为峰谷只是 `is_peak_slot(ts)` 的像——保留 `peak_*` 子桶
+  即足以复现，保留完整 hour 列则是更强但更贵的选项，见 §0.1bis。）
+- **归日转正 + 残差哨兵**（与峰谷子桶**同批**，不得分两次 `--update`）：行按自身
   ts 归日、cost-state 只作对账锚、`message.id` 去重、行和 < 基线的差值报
   partial/`unaccounted`。**同批的理由**：只修归日会让 flash 补回而 pro 的未去重
   虚高单边暴露，总额从系统性偏低翻成偏高（分析文档 §7 实测 flash 0.63× / pro
@@ -195,7 +209,7 @@ update（v0.6 spec §2.3 版本边界同文）：
   「deepseek 官方高峰 00:30–08:30 北京时间」是错的，与 `usage.rs::is_peak_slot`
   （周一至五 9–12/14–18）、`pricing.json` 的 `_doc`、官方文档三方矛盾；`cost.rs` 与
   `cost.py::_flat_rate` 两侧共用的「Claude 会话文件没有时段证据」前提亦为假（实测
-  104,809 条 ts 全带 `Z`）。两段注释必须随 hour 轴同改——否则错误窗口会被照着实现。
+  104,809 条 ts 全带 `Z`）。两段注释必须随峰谷子桶同改——否则错误窗口会被照着实现。
 
 ## 6. 与 v0.6 的文档边界
 
@@ -213,6 +227,22 @@ update（v0.6 spec §2.3 版本边界同文）：
 
 ## 7. 记录
 
+- 2026-09-02（**R3：对下一条"计价分辨率修订"的更正**）——代码级复核后改两处，条款
+  意图不变，错的是它的实现面：
+  1. **转绿项不是 hour 轴，是 `peak_*` 子桶**。DSH 日桶**没有** hour 键却计价正确
+     ——`usage.rs::add_buckets` 折叠时按 `is_peak_slot` 预拆 `peak_*`，
+     `cost.rs::bucket_price`（:145-157）用「全量 − peak_*」还原空闲份额分别计价。
+     照它做，claude ledger 直接复用 `bucket_price`/`priced_day`、与
+     `token_by_date_model` 同形；原写法要新造第四种日形状。落点：§0.1bis、§2 时间行、
+     §3 两行、§5 验收。
+  2. **缺口是两条不是一条**。`flat_rate` 的 off_peak 兜底位于 `price_claude_model`
+     （`cost.rs:756-759`），被 `claude_day_cost`（日/托盘）与 `claude_session_cost`
+     （会话账）共用，且 `price_claude_map` doc 注释自钉「两面的钱必须同源」——只修
+     日面会让两面分叉。命中的时变卡也是三张（含 `shengsuanyun.deepseek-v4-pro`，
+     `resolve_card_catalog:684-694` 第二段遍历顶层 providers 同样命中）。落点：§5
+     验收首条。
+  对应的 v0.6 侧更正见该 spec §14「追加修订之三（R3）」（含 G10 判据从"时间键含
+  hour"改成计价读法的行为级断言、撤回 `时变卡集 × 计价视图集` 叉积的理由）。
 - 2026-09-02（**计价分辨率修订**）：真机对账
   （`docs/CLAUDE_COST_DAY_ATTRIBUTION_ANALYSIS.md`）证伪本文件 §2 时间行原写的
   「基线按会话 startTime 归日近似与 `claude_cost` 同款」。托盘 claude 今日 ¥45.40

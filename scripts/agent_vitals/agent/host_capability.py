@@ -53,3 +53,107 @@ def degrade_rule_outcomes(host_id, outcomes):
                 "missing": missing,
                 "reason": reason,
             }
+
+
+# ────────────────────────── M0：HOSTS 行骨架（v0.6 spec §5.1/§11） ──────────
+#
+# 与 Rust `crates/agent-vitals-core/src/host_capability.rs::HOSTS` 是**双实现
+# 契约**——每种语言内部唯一声明源，跨语言由 `hosts --json` 的 G1 byte-parity
+# 保持一致（v0.6 spec §5.1bis），不是共享数据文件。四行顺序 = 展示顺序
+# （dsh→codex→claude-code→workbuddy），不是 UI 契约。
+#
+# `unmeasured_signals` 取自各证据适配器现有的 `_UNAVAILABLE_SIGNALS`
+# （`claude_evidence.py`/`codex_evidence.py`/`workbuddy_evidence.py`）——dsh 的
+# Python 侧目前无 canonical 适配器（`behavior.py` 走自家门控，M1 才建
+# `dsh_evidence.py`），这里手工镜像 Rust `dsh_evidence.rs` 内联声明的 5 个
+# 信号。M0 是**声明**收拢，行为零变化；M2 才让适配器改从这里 derive。
+HOSTS = (
+    {
+        "id": "dsh",
+        "display": "DeepSeek Harness",
+        "unmeasured_signals": [
+            "QuotaConsumption",
+            "SandboxPolicy",
+            "NetworkAccess",
+            "UserPrompts",
+            "UserCorrections",
+        ],
+        "degraded_rules": [],
+        "session_store": True,
+        "fold": "token_buckets",
+    },
+    {
+        "id": "codex",
+        "display": "Codex",
+        "unmeasured_signals": [
+            "StepBoundaries",
+            "SandboxPolicy",
+            "NetworkAccess",
+            "UserCorrections",
+        ],
+        "degraded_rules": [],
+        "session_store": True,
+        "fold": "token_buckets",
+    },
+    {
+        "id": "claude-code",
+        "display": "Claude Code",
+        "unmeasured_signals": [
+            "ContextWindow",
+            "QuotaConsumption",
+            "ApprovalDecisions",
+            "SandboxModes",
+            "SandboxPolicy",
+            "NetworkAccess",
+            "UserCorrections",
+        ],
+        "degraded_rules": [
+            {"code": "SV607", "missing": ["ToolResults"], "reason": CLAUDE_SV607_608_REASON},
+            {"code": "SV608", "missing": ["ToolResults"], "reason": CLAUDE_SV607_608_REASON},
+        ],
+        "session_store": True,
+        "fold": "token_buckets",
+    },
+    {
+        "id": "workbuddy",
+        "display": "WorkBuddy",
+        "unmeasured_signals": [
+            "ToolResults",
+            "StepBoundaries",
+            "Usage",
+            "ContextWindow",
+            "QuotaConsumption",
+            "SandboxPolicy",
+            "Compaction",
+            "SubagentSpawns",
+            "SkillInvocations",
+            "Hooks",
+            "UserPrompts",
+            "UserCorrections",
+        ],
+        "degraded_rules": [
+            {"code": "SV604", "missing": ["ToolCalls"], "reason": WORKBUDDY_SV604_605_REASON},
+            {"code": "SV605", "missing": ["ToolCalls"], "reason": WORKBUDDY_SV604_605_REASON},
+        ],
+        # 无 SessionStore（envelope 未知宿主 → StoreError，v0.6 spec §4）。
+        "session_store": False,
+        # 无日/月折叠机制（会话审计的成本块是宿主已计费 credit 求和，不重计价）；
+        # M4（可选演练）会把这行改成 "host_bill_totals"。
+        "fold": None,
+    },
+)
+
+
+def host_profile(host_id):
+    """按 id 查找一行。未知 id 返回 `None`——查询路径 fail-open（现状保持），
+    注册路径 fail-closed（不在 `HOSTS` 里的 id 任何消费方都查不到）。"""
+    for h in HOSTS:
+        if h["id"] == host_id:
+            return h
+    return None
+
+
+def hosts_json():
+    """`agent-vitals hosts --json` 的负载——`HOSTS` 行的忠实序列化，与 Rust
+    `host_capability.rs::hosts_json` 逐字节比对（v0.6 spec §8 G1）。"""
+    return {"hosts": [dict(h) for h in HOSTS]}

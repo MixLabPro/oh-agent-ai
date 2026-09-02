@@ -1077,6 +1077,24 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("No duration data found", out)
 
+    # ── v0.6 host-contract spec §8 G1：hosts --json 双语言字节 parity ──────
+
+    def test_hosts_json_byte_parity(self):
+        """G1：`HOSTS` 行的忠实序列化——行、字段、顺序全等（v0.6 spec §8）。"""
+        code, out, err = self.both("hosts", "--json", "-")
+        self.assertEqual(code, 0)
+        hosts = json.loads(out)["hosts"]
+        ids = [h["id"] for h in hosts]
+        self.assertEqual(ids, ["dsh", "codex", "claude-code", "workbuddy"],
+                         "四行顺序即展示顺序（v0.6 spec §5.1）")
+
+    def test_hosts_human_format_byte_parity(self):
+        """人读格式差分（py==rs 逐字节，由 both() 兜底）。"""
+        code, out, err = self.both("hosts")
+        self.assertEqual(code, 0)
+        self.assertIn("dsh (DeepSeek Harness):", out)
+        self.assertIn("workbuddy (WorkBuddy):", out)
+
     # ── P4: codex-evidence（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）────────
     # 差分门 both() 兜底逐字节一致；这里另外断言 legacy vs paginated 的
     # coverage **不同**（§17.1 "two rows, not one"）——这是 P4 "sound" 证明的

@@ -30,6 +30,7 @@ from agent_vitals import codex_usage as codex_usage_module
 from agent_vitals import cost as cost_module
 from agent_vitals.doctor import _doctor_snapshot, diagnose, render_doctor, render_gate
 from agent_vitals.explain import render_explain
+from agent_vitals import host_capability as host_capability_module
 from agent_vitals.inventory import build_inventory
 from agent_vitals.lifecycle import render_list
 from agent_vitals.overlap import DEFAULT_OVERLAP_MIN, render_overlap
@@ -755,6 +756,16 @@ def _main():
                                 "(tool calls / turns / steps / approvals / hooks)")
     p_dur.add_argument("session_log", help="Path to the DSH session JSONL log (file or directory)")
     p_dur.add_argument("--json", help="Write duration audit JSON to FILE; use - for stdout")
+    # v0.6 host-contract spec §5.1/§11-M0：打印 core HostProfile 注册表本身
+    # （四个 runtime 宿主声明的结构能力），与 Rust 侧 main.rs 的 Hosts 子命令
+    # 同一种结构，逐字节比对靠 test_cli_matrix 的 G1。
+    p_hosts = sub.add_parser("hosts",
+                             help="Print the HostProfile registry (v0.6 host-"
+                                  "contract spec §5.1): the four runtime "
+                                  "hosts' declared structural capabilities")
+    p_hosts.add_argument("--json", help="Write hosts JSON to FILE; use - for "
+                                        "stdout. Without this option, print a "
+                                        "human table.")
     # P4（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：Codex rollout → CanonicalSession
     # 的 "sound" 证明。输出 §13 coverage，不是 findings——Codex 还没有 SV601–614
     # 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--host
@@ -1096,6 +1107,25 @@ def _main():
             # 闸门与 doctor 同一套 --fail-on/--ignore 语义（无 --new-only，见
             # behavior_gate 的 docstring）。成本不影响退出码——闸门只看风险。
             sys.exit(behavior_module.behavior_gate(findings, args.fail_on, args.ignore))
+        return
+
+    # v0.6 host-contract spec §5.1/§11-M0：打印 core HostProfile 注册表本身，
+    # 与 Rust 侧 main.rs 的 Hosts 子命令同一种结构（G1 byte-parity）。
+    if getattr(args, "cmd", None) == "hosts":
+        out = host_capability_module.hosts_json()
+        if args.json:
+            text = json.dumps(out, ensure_ascii=False, indent=2)
+            if args.json == "-":
+                print(text)
+            else:
+                Path(args.json).write_text(text, encoding="utf-8")
+                print("Wrote %s" % args.json)
+            return
+        for h in out["hosts"]:
+            print("%s (%s): unmeasured=%d degraded_rules=%d session_store=%s fold=%s" % (
+                h["id"], h["display"], len(h["unmeasured_signals"]),
+                len(h["degraded_rules"]), str(h["session_store"]).lower(),
+                h["fold"] or "none"))
         return
 
     # D11：执行时长审计——与 Rust 侧 main.rs 的 DurationAudit 子命令同一种结构

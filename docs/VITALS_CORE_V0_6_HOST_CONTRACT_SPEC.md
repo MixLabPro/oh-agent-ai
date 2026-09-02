@@ -1,19 +1,21 @@
 # Vitals Core v0.6 —— Host 接入契约与完整性守卫（方案）
 
-> 状态：**提案 v0.1.1**（草案，未立项；审核轮次 R1 修订记录见 §14）。调研与状态
+> 状态：**提案 v0.1.2**（草案，未立项；审核轮次 R1/R2 修订记录见 §14）。调研与状态
 > 基准：2026-09-02。并行 claude-sync/cost 流**部分合入**（868f1a7 menubar 账卡分列、
 > 9464d30 docs），`workbuddy_evidence.rs/.py`、workbuddy fixtures、相关 tests **仍
 > 打开未提交**——落地方案为它保留顺序约束（§11 M2b）。
 >
 > 一句话：v0.6 把散落在四个证据适配器、三个 dispatcher、四个 CLI/前端入口里的
-> **宿主能力声明收拢成一张注册表**（core 里的 `HostProfile` 行），适配器与展示层
-> 一律从注册表 **derive**（不再带第二份拷贝）；一张完整性守卫表从注册表行出发，
-> 逐个断言「行上声明为真的能力，实现必须存在」——接入新宿主时照注册表逐行补齐，
+> **宿主能力声明收拢成注册表**（Rust core 与 Python 各一份 parity 双实现），本语言
+> 的适配器与展示层一律从本侧注册表 **derive**（语言内不再带第二份拷贝）；完整性
+> 守卫从注册表行出发，逐个断言「行上声明为真的能力，实现必须存在」——接入新宿主
+> 时照注册表逐行补齐，
 > 缺失环节变红而不是沉默。
 
 ## 0. 结论
 
-1. **契约的载体是一张注册表**，不是 trait，也不是一份文档。`host_capability.rs`
+1. **契约的载体是每种语言内的一张注册表**，不是 trait，也不是一份文档。Rust
+   `host_capability.rs`
    里的降级表已经是它的雏形——v0.6 把它放宽成完整的 `HostProfile` 行 +
    `static HOSTS`，`degrade_rule_outcomes` 从 match 臂改成行查找。注册表回答一个
    窄问题：「这个宿主**结构上**读不到哪些信号、哪几条规则因此语义不可判、有没有
@@ -50,8 +52,11 @@
    DATA_PLANE_SPEC.md`）是唯一受评审的 `--update` 窗口；演进候选 #1/#2（v0.7 spec
    §4）不入版本、随时可进。**计价分辨率（§5.3 条款 7 / G10）按"条款与守卫先行、
    实现后随"拆**：条款与守卫落 v0.6（加断言不改输出，零漂移相容），让它转绿的
-   hour 轴落 v0.7 窗口；空档期该格以显式缺口 `"pending v0.7"` 登记且缺口清单闭集
-   受断言——理由是防止空档期新接入的宿主又静默长出无小时日桶（§8 G10）。
+   **峰谷子桶**落 v0.7 窗口；空档期违规的**计价入口**以显式缺口 `"pending v0.7"`
+   逐条登记且缺口清单闭集受断言——理由是防止空档期新接入的宿主又静默长出一份
+   下界计价的折叠（§8 G10）。**判据钉在计价读法上，不钉在"有没有 hour 键"**
+   （R3 修订）：DSH 的日桶同样没有 hour 键，它靠 fold 时预拆的 `peak_*` 子桶保住
+   分辨率——拿 hour 当判据会误红全仓唯一计价正确的那条路。
 
 ## 1. 背景与动因
 
@@ -120,7 +125,8 @@ claude-code。两处的修复方向相同——**展示层宿主行从注册表�
 
 ### 2.1 目标
 
-- **声明收口**：证据人格（unmeasured 信号集、降级规则与原因）单一化进 core 注册表；
+- **声明收口**：证据人格（unmeasured 信号集、降级规则与原因）在每种语言内部
+  单一化进注册表；Rust/Python 是 parity 守护的双实现契约（§5.1bis）；
   适配器/降级/展示一律 derive，仓库里不再出现 per-host 的能力声明拷贝。
 - **实现有守卫**：注册表行上每个 `true` 字段都对应一处必须存在的实现；完整性测试
   从行出发双向断言，清单（CLI choices、test_cli_matrix HOSTS、分类家族、前端
@@ -164,7 +170,7 @@ claude-code。两处的修复方向相同——**展示层宿主行从注册表�
 | 候选 #3（事实行契约 + 每宿主一物化视图）、#4（schema_version 迁移函数表）、§5.4.2 未来例中零新数据视图的输出面 | **v0.7 数据平面版**——独立 spec（如 `VITALS_CORE_V0_7_DATA_PLANE_SPEC.md`） | 动持久格式、动跨调用状态、动双语言 lockstep——「数据重构」的真身 |
 | §5.4.3 HostProfile 列化 | 留 v0.6 | 注册表行 = 列填充能力卡，是 host-contract 自身的语义，不随数据面走 |
 | §5.3 条款 7（计价分辨率）+ §8 G10 守卫（含 `"pending v0.7"` 缺口登记） | **留 v0.6** | 契约不变量 + 断言；加断言不改输出、golden 零漂移，与 v0.6 验收相容。缺口清单闭集受断言 = 空档期的防回退面 |
-| ledger 日桶加 hour 桶、`claude_day_cost` 走 `is_peak_slot`、事实行 hour 列 | **v0.7** | 动持久格式与跨调用状态，属受评审 `--update` 窗口；落地后 G10 该格由红转绿、缺口条目删除 |
+| ledger 日桶加 `peak_*` 子桶（照 DSH 既有日形状）、`price_claude_map` 的**两个**计价入口改走峰谷读法、事实行的时变维列 | **v0.7** | 动持久格式与跨调用状态，属受评审 `--update` 窗口；落地后 G10 的两条缺口由红转绿、条目删除。**不新造 hour 桶**（R3 修订）——DSH 的 `peak_*` 子桶（`usage.rs::add_buckets` 预拆 → `cost.rs::bucket_price` 用「全量 − peak_*」还原空闲份额）已是全仓验证过的日形状，claude ledger 照它做即可直接复用 `bucket_price`/`priced_day`，与 `token_by_date_model` 同形；hour 信息更多（峰窗规则改了能重算）但要新造第四种日形状，是个该显式做的取舍，v0.7 若选它须在该 spec §5 写明理由 |
 
 顺序约束：v0.6（registry，字节冻结）先行落地 → v0.7 后开，重叠即互相污染；两者都排
 在并行 claude-sync/workbuddy 流合入之后（`r2a.py`/`r2a_store.rs` 仍在修改清单）。
@@ -186,7 +192,7 @@ v0.7 验收（先写死，防它退化成第二场零散 --update）：
 
 | 层次 | 契约内容 | 载体 | 守卫机制 |
 |---|---|---|---|
-| ① 声明类 | 哪些信号结构上读不到、哪几条规则降级、折叠/存储能力、展示名 | **注册表行**（core，单一真相源） | 消费方 derive，**零拷贝**；残留第二份声明的文件被守卫抓（§12 的源码自扫描先例可复用） |
+| ① 声明类 | 哪些信号结构上读不到、哪几条规则降级、折叠/存储能力、展示名 | **注册表行**（每种语言内部的唯一声明源；跨语言 parity） | 本语言消费方 derive；残留第二份声明的文件被守卫抓（§12 的源码自扫描先例可复用） |
 | ② 实现类 | 行上声明为真的能力对应哪份实现（模块/命令/折叠生产器） | 注册表行字段 | **完整性守卫**：行 × 双语言镜像 × 清单互锁，双向"一个不多一个不少"（借用 test_classification 的显式集合风格） |
 | ③ 语义类 | 某条规则在该宿主语料上真的准（真值表、误报率） | fixture + 真值表单测 + 差分/golden | 注册表**不验证真值**；它只登记"语义不可判 → 降级行"，语义本身由每宿主的语料级测试钉住 |
 
@@ -220,8 +226,9 @@ true` 但没有 store 实现」，抓不了「workbuddy 的 Usage 其实是"未�
 **落点**：放宽 `crates/agent-vitals-core/src/host_capability.rs`（**不改名**——模块
 名被 test_classification 家族清单、imports、Python 镜像引用，改名是纯 churn；行数
 超 ~300 行再考虑拆出 `host_registry.rs`，届时改分类清单 + 两侧 import 一次过）。
-Python 镜像 `host_capability.py` 同步成同一行集。core 是唯一真相源，binary/Tauri/
-wasm 全部经 core 读。
+Python 镜像 `host_capability.py` 同步成同一行集。Rust core 是 Rust 消费方的唯一声明
+源，binary/Tauri/wasm 全部经 core 读；Python 注册表是 Python 消费方的唯一声明源，
+两种语言由 G1 byte-parity 保持一致（§5.1bis）。
 
 ```rust
 /// 一个宿主在 session 分析 runtime 形态（REC §10 四宿主）下的完整人格声明。
@@ -231,11 +238,11 @@ pub struct HostProfile {
     pub id: &'static str,                       // "dsh" | "codex" | "claude-code" | "workbuddy"
     pub display: &'static str,                  // 菜单/报告短名（host_display_name 的真相源）
     /// 结构性缺席信号（**宿主级**，全 shape 交集）：宿主记录里该信号不存在可读形态，
-    /// 任何会话都不可能 bump。排序约定：按 Signal 枚举序。语义 = 现在各适配器
-    /// is_unavailable 声明的并集，加「§13 矩阵根本没有该行」的全宿主共同集
-    /// （SandboxPolicy/UserPrompts/UserCorrections——dsh_evidence 注释已明说不编造、
-    /// 一律 unavailable）。**shape/会话级缺席不在此列**——那是该 shape 解析器的
-    /// 产出（双层缺席规则，§5.2）。
+    /// 任何会话都不可能 bump。排序约定：按 Signal 枚举序。每一行只取**该宿主**
+    /// 当前 is_unavailable 集合，并与 §13 矩阵逐项校验；矩阵未覆盖的信号也按宿主
+    /// 分别登记，绝不构造“全宿主共同缺席集”（UserPrompts 已在 Codex/Claude Code
+    /// measured）。**shape/会话级缺席不在此列**——那是该 shape 解析器的产出
+    /// （双层缺席规则，§5.2）。
     pub unmeasured_signals: &'static [Signal],
     /// 语义降级（逐条声明）。与 unmeasured 的区别：信号**有**形态、规则能跑出零命中，
     /// 但零命中不可信——claude 的 ToolResults 无 denied/error 词表所以 SV607/608 的
@@ -245,7 +252,6 @@ pub struct HostProfile {
     /// + 守卫 G9 保证，§5.1bis——core 不依赖任何文件系统实现）。
     pub session_store: bool,                    // 进 SessionStore（sessions/导航/信封）
     pub fold: Option<FoldOutput>,               // 日/月折叠产出能力；None = 声明缺席
-    pub billing: BillingKind,                   // 记账机制（与 fold 正交，§5.2bis）
 }
 
 /// 降级逐条声明——reason 挂在规则上而非宿主上（R1 修订；宿主级一条 reason 盖全部
@@ -264,14 +270,6 @@ pub enum FoldOutput { TokenBuckets, HostBillTotals }
 // dsh/codex/claude-code = TokenBuckets（各自价目自算）；workbuddy 未来 =
 // HostBillTotals（累计宿主积分账单；billing 仍 HostBilled，绝不冒充逐模型 token
 // 重计价，§5.2bis）。
-
-pub enum BillingKind {
-    RepriceTokens, // 本地按 model×价目表重计价（dsh/codex/claude-code，各自价目不同）
-    HostBilled,    // 宿主已计费：只求和账单、不重计价（workbuddy credit_json）
-}
-// workbuddy 的 fold=None 与 billing=HostBilled 是两个独立事实：前者解释托盘无行，
-// 后者解释会话审计成本块为何是 credit 求和——将来给它加日/月累计，累计的也是
-// 积分账单而非逐模型 token（§5.2bis）。
 
 pub static HOSTS: &[HostProfile] = &[ /* 四行，顺序即展示顺序 */ ];
 ```
@@ -293,12 +291,12 @@ pub static HOSTS: &[HostProfile] = &[ /* 四行，顺序即展示顺序 */ ];
 表；语言间由 G1 byte-parity 保一致。将来若行集膨胀到手工维护不可控，再议
 checked-in 数据表 + 代码生成——目前不是。
 
-**能力声明与实现注册分居两侧。** core 行只声明能力（`session_store`/`fold`/
-`billing` 是事实声明，供展示与派生）；binary CLI 与 src-tauri 各自持有一张
+**能力声明与实现注册分居两侧。** core 行只声明宿主级结构能力
+（`session_store`/`fold`，供展示与派生）；binary CLI 与 src-tauri 各自持有一张
 `HostRuntimeRegistration`——host_id → 该宿主**在这个二进制里**的 store 构造器 /
 fold reader / 会话命令函数入口。core 不依赖任何文件系统实现；守卫 G9 断言
-「core 行声明为真的能力 ⊆ 各二进制注册集」，托盘/会话表面从**注册集**派生而非
-直接遍历行（§6）。
+「某消费表面要求的能力 ⊆ 该表面的实现注册集」，而不是要求每个二进制实现全部
+能力；托盘/会话表面从各自**注册集**派生而非直接遍历行（§6）。
 
 ### 5.2 注册表回答什么、不回答什么
 
@@ -346,14 +344,16 @@ fold reader / 会话命令函数入口。core 不依赖任何文件系统实现�
    §6）。判定维度是 (账户, 路由, 拒绝史)，逐 session 逐提供商——既不是宿主也不是
    裸模型。同轴还有差分 oracle：`lastModelUsage.costUSD` 对 claude 系模型逐分吻合
    可当账单证据，第三方模型按默认卡计价**不可**当证据。
-4. **记账轴（钱怎么进 vitals，per-host policy）**：§4 的记账机制行——四家机制各不
-   相同（自算×3 种价目 + 宿主已计费）。
+4. **记账轴（钱怎么进 vitals，usage/session 级事实）**：Host 只说明语料从哪里来，
+   不决定谁收费。同一个 Claude Code 会话可以经官方订阅、Anthropic API 或第三方
+   provider 路由；每笔 usage 必须分别产出 `billing_source`、`billing_mode` 与
+   `pricing_basis`，无法判定就明确为 unknown（`ATTRIBUTABLE_WASTE.md` §6.3）。
 
-**对注册表的意义**：不引入模型维（价目真相源已单一：`pricing.json` + core cost
-数学，模式判定链是 catalog 数据的职责）；但要显式区分 **fold 轴与 billing 轴**
-（两者正交，§5.1 的 `FoldKind` + `BillingKind`）。`BillingKind` 的上游证据：
-workbuddy 会话审计的成本块只读 `used`/`credit_json`（`workbuddy_evidence.py:390`
-的门就是这两个字段），四家里它是唯一 `HostBilled`。
+**对注册表的意义**：不引入 model/provider/billing 维；`HostProfile` 也不保存唯一的
+`BillingKind`。价目真相源仍是 `pricing.json` + core cost 数学，实际计费归属由
+usage/session 证据判定。WorkBuddy 当前会话成本块只读 `used`/`credit_json`
+（`workbuddy_evidence.py:390`），这是该适配器当前产出的 `host-billed` 证据，不是
+WorkBuddy 这个 Host 永久且唯一的计费人格。折叠能力只声明输出形态 `FoldOutput`。
 
 ### 5.3 安全条款（契约的不变量）
 
@@ -367,7 +367,7 @@ workbuddy 会话审计的成本块只读 `used`/`credit_json`（`workbuddy_evide
    面改造，不值）：行查找返回 `Option<&HostProfile>`，消费方必须处理 None；G2/G4
    断言任何运行时 surface 的合法 id 集与行集相等、`all` 等伪宿主绝不进注册表。
 3. **unmeasured 出处纪律**：行里每条 unmeasured 必须能被追溯——要么对应 §13 矩阵
-   该宿主 unavailable 格，要么属矩阵外信号（全宿主共同集），要么带适配器注记
+   该宿主 unavailable 格，要么属矩阵外的**该宿主补充项**，要么带适配器注记
    （如 workbuddy Usage ※）。无来源注记的条目过不了守卫的对账测试（§8 G5）。
 4. **extract 哨兵条款（P4.5 泛化，收进契约）**：每个证据适配器必须上报它读不懂的
    记录——workbuddy 的 `attempts`/`KNOWN_EVENT_TYPES` 模式是样板（2026-09-02 事故：
@@ -381,12 +381,26 @@ workbuddy 会话审计的成本块只读 `used`/`credit_json`（`workbuddy_evide
 6. **声明缺席 ≠ 遗漏**：`fold: None`/`session_store: false` 是合法状态。守卫锁死
    展示层从行派生（§6），所以缺席永远是"被声明过的缺席"——它和"注册了却没实现"
    是两种不同的红，前者不红。
-7. **计价分辨率条款（2026-09-02 新增，实证来源见下）**：若某模型的价目卡是
-   `{off_peak, peak}` 形状（**单价随时间变**），则任何按该卡计价的事实行与物化
-   视图**必须携带小时分辨率**；做不到时只能报 `partial`/不精确并走哨兵条款
-   （条款 4 同族），**不得取时间维下界（全 `off_peak`）冒充"保守估算"**。
-   合法取平费率的前提是**卡本身是平费率**（catalog 的 anthropic/moonshot USD 卡、
-   MiniMax 档位卡），不是时变卡的兜底。
+7. **计价分辨率条款（2026-09-02 新增；判据经 R3 修订，实证来源见下）**：若某模型
+   的价目卡是 `{off_peak, peak}` 形状（**单价随时间变**），则任何按该卡计价的事实
+   行与物化视图**必须保住足以做峰谷拆分的分辨率，并以峰谷读法计价**；做不到时只能
+   报 `partial`/不精确并走哨兵条款（条款 4 同族），**不得取时间维下界（全
+   `off_peak`）冒充"保守估算"**。合法取平费率的前提是**卡本身是平费率**（catalog
+   的 anthropic/moonshot USD 卡、MiniMax 档位卡），不是时变卡的兜底。
+
+   **"保住分辨率" ≠ "留 hour 键"（R3 修订，此前写反过一版）**：DSH 的日桶里
+   **没有** hour 键——它在 fold 时就按 `is_peak_slot` 把 `peak_*` 子桶拆出来
+   （`usage.rs::add_buckets`），计价侧用「全量 − `peak_*`」还原空闲份额分别计价
+   （`cost.rs::bucket_price`）。分辨率是靠**折叠时预拆**保住的，不是靠留一根时间轴。
+   因此本条约束的是**计价读法**：时变卡必须经峰谷读法（`bucket_price` 族），不得经
+   下界读法（`cost.rs::flat_rate` 的 `/{key}/off_peak` 兜底、`cost.py::_flat_rate`
+   同形）。把"有没有 hour 键"当判据会误红 DSH——全仓唯一计价正确的那条路。
+
+   **适用面按计价入口算，不按宿主算（R3 修订）**：`flat_rate` 的兜底位于
+   `price_claude_model`（`cost.rs:756-759`），而 `price_claude_map` 的 doc 注释自己
+   钉死「两面的钱必须同源」——它同时服务 `claude_day_cost`（日桶/托盘）与
+   `claude_session_cost`（会话账）。同一宿主的这两个入口各算一格：只改其中一个既不
+   算修完，还会让两面从此**不同源**，正好违反那条注释钉住的纪律。
 
    **为什么它是一条新条款而不是既有条款的推论**：条款 1/3/4 与 `evidence.rs`
    的全部纪律都约束**"某个信号有没有被读到"**（证据轴的 presence/absence）。
@@ -431,8 +445,9 @@ tab、dsh-client 投影）各自手工 join、每处一个 basis——§1.2"漏�
   shape/会话级缺席仍是解析结果——双层缺席规则 §5.2 原样）；
 - `degraded_rules` ↔ 视图遇 NULL 列的处理：MeasuredZero = 列读了全空，Unavailable
   = 列不可读（host_capability 三态语义平移到列）；
-- `fold: Option<FoldOutput>` + `billing` ↔ 记账列由谁填：TokenBuckets = 自家折算
-  （RepriceTokens 路径），HostBillTotals = 宿主账单填 `host_amount` 列；
+- `fold: Option<FoldOutput>` ↔ 该宿主当前可产出的折叠列族：TokenBuckets 填 token
+  buckets，HostBillTotals 填 `host_amount`。它不决定实际 `billing_source`/
+  `billing_mode`；这些仍由每条 usage/session 事实携带，Host ≠ BillingSource；
 - `session_store` ↔ 身份行可填（R2a 会话来源）。注册表行 = 一张**列填充能力卡**；
   §8 守卫照旧断言行集与卡同源（G2/G4/G9），测试开销不变。
 
@@ -442,7 +457,7 @@ tab、dsh-client 投影）各自手工 join、每处一个 basis——§1.2"漏�
 |---|---|---|---|
 | `host_capability.rs` degrade | match 臂 | `HOSTS` 行查找 | 现有单测 + Python 镜像 parity |
 | 宿主级 unmeasured 声明（复制点 A） | 每文件一份 | **宿主级**从行读，文件里不再有字面量表；shape/会话级缺席留在适配器解析分支（§5.2 双层规则） | golden 全绿；合成会话属性测试：raw 试图 bump unmeasured 信号 → 产出仍 unavailable/零 |
-| `ALL_SIGNALS`（复制点 B） | 每文件一份 | 行声明 unmeasured 之外的部分留在适配器（那是它真能 bump 的）；无第二份表 | 同上 |
+| `ALL_SIGNALS`（复制点 B） | 每文件一份 | 完整枚举上收为共享 Canonical Schema（Rust `Signal::ALL` 或等价常量；Python schema 常量）；所有适配器统一遍历，不再保留 per-host 完整信号表。“能 bump 什么”由 derive 代码与会话 coverage 表达，不另建声明表 | schema 顺序测试 + golden 全绿 |
 | dispatcher 组装（复制点 C） | Rust 3 份拷贝 | 新 `crates/agent-vitals-core/src/canonical_audit.rs`（或 binary 侧 `src/agent/canonical_audit.rs`）：`audit_projection(canonical, host_id)` 一份共享，内部做 family①→degrade(行)→family④→flatten→summary | **golden 15 例字节零漂移 + differential**（Python 侧已是共享的，`canonical_audit.py:60` 就是模板）；Python 的 DSH 绕行路径（`behavior.py match_behavior_gated`）并入共享求值器 |
 | `evidence_json` 序列化（D）/ `derive_coverage` 骨架（E） | 各一份 | 共享骨架 + host 参数（unmeasured 从行取） | 同上 |
 | `SessionStore` 三段式（F）、源指纹（G） | 3 份 | 行 `session_store: true` 决定 store 集合；构造器骨架共享 | `sessions` 命令输出不变；envelope v1 不变 |
@@ -450,7 +465,7 @@ tab、dsh-client 投影）各自手工 join、每处一个 basis——§1.2"漏�
 | 托盘成本行枚举 | ~8 处硬编码三行 | 遍历**本二进制注册集**里 `fold != None` 的宿主（今天恰好 = 三行，行为零变化）；UI 可自行排序/分组——行数组顺序只是默认展示序，不是 UI 契约（R1） | 菜单快照/DTO 测试原样；`workbuddy` 加折叠（M4）后注册进集即出现 |
 | 工作台 `sessFilter` | `"all"|"dsh"|"codex"` 硬编码 | 从 IPC 宿主列表（`session_store` 行）派生 | jsdom 验证（memory: workbench-frontend-verify 配方）；claude-code 从此出现在筛选里 |
 | `sessions_list/read` 未知宿主 | StoreError | 行集合决定合法 id（未知仍 StoreError，语义不变） | 原测试原样 |
-| 二进制实现注册（R1 新增，G9） | 能力与实现混在声明里、无注册面 | core 行只声明；binary CLI / src-tauri 各持 `HostRuntimeRegistration`（host_id → store 构造器 / fold reader / 会话命令入口）；守卫断言声明 ⊆ 注册 | G9 绿；菜单/sessions 从注册集派生 |
+| 二进制实现注册（R1 新增，G9） | 能力与实现混在声明里、无注册面 | core 行只声明；binary CLI / src-tauri 各持按 surface 划分的 `HostRuntimeRegistration`（host_id → store 构造器 / fold reader / 会话命令入口）；守卫分别断言 `required_capabilities(surface) ⊆ registrations(surface)` | G9 绿；菜单/sessions 从各自注册集派生 |
 
 ## 7. 共享骨架塌缩清单（M1/M2 的工程面）
 
@@ -464,10 +479,11 @@ tab、dsh-client 投影）各自手工 join、每处一个 basis——§1.2"漏�
   ——自 `behavior.py` 的直判路径拆出、镜像 Rust `dsh_evidence.rs` 的 canonical
   构造；test_classification 家族清单与 `__init__.py` 同步。不建它，G3 的 dsh
   Python 行永远红。）
-- **A/B（M2）**：宿主级 unmeasured 声明与覆盖键表从行 derive。语义：适配器保留
-  "我能 bump 的 measured 信号"（derive 代码就是声明），宿主级 unmeasured 全部来自
-  行；shape/会话级缺席留在适配器按 shape 的解析分支——现 is_unavailable 表全是
-  宿主级，删之无损（§5.2 双层规则）。
+- **A/B（M2）**：宿主级 unmeasured 声明从行 derive；完整信号序上收为共享
+  Canonical Schema，适配器不保留 per-host `ALL_SIGNALS`。语义："我能 bump 什么"
+  由 derive 代码与会话 coverage 表达，宿主级 unmeasured 全部来自行；shape/会话级
+  缺席留在适配器按 shape 的解析分支——现 is_unavailable 表全是宿主级，删之无损
+  （§5.2 双层规则）。
 - **D/E（M2 伴随）**：序列化与 coverage 骨架共享——跟 C 同一批文件的同一次重构。
 - **F/G（M3，触 r2a_store.rs，与并行流无交集但量大）**：store 构造器骨架 + 行驱动
   的 store 集合。
@@ -490,20 +506,21 @@ codex_session_audit 均不在 git status 修改清单）；A/B 触碰 `workbuddy
   dsh-client 投影；契约文档 `RUNTIME_EVIDENCE_CONTRACT.md`）。scan 命令同时承载
   方向 A 全部与方向 B 的静态形态；agent/ + core 承载方向 B 的两种形态。本节三组
   集合只属于**方向 B（session 分析）**——skill 分析没有宿主注册表，它只有
-  scan 的跨宿主安装发现面（见 StaticHostChoices 的 hermes/openclaw）。
+  scan 的跨宿主安装发现面（见 ScanCliHostChoices 的 hermes/openclaw）。
 - `RuntimeHostIds = {dsh, codex, claude-code, workbuddy}`：core `HOSTS` 行 id（唯一
   真相源；语义 = session 分析 **runtime 形态**的宿主——REC §13 矩阵的四列）。
-- `StaticHostChoices`（R1 曾名 ScannerHostChoices）：静态形态命令面全局 `--host` 的
+- `ScanCliHostChoices`（R1 曾名 ScannerHostChoices/StaticHostChoices）：历史 scan
+  命令面全局 `--host` 的
   7 值清单（`all`/`claude-code`/`codex`/`openclaw`/`hermes`/`workbuddy`/`dsh`——
   `cli.py:658`、`cli.py:986`、`main.rs:164`、`test_cli_matrix.py:51` 四处硬编码同一
-  份）。语义 = **session 分析静态形态的宿主选择集**（含暂无 session reader、只做
-  安装/配置发现的 hermes/openclaw）+ 伪值。与 runtime 集重叠的四个名字是**同一核心
-  方向在两种形态下的同一批宿主**，不是两个世界；静态集可以大于 runtime 集。
+  份）。它是同时承载 skill 安装发现与部分 session 静态分析的**历史混合 CLI 集**，
+  不是纯 session 宿主集合；hermes/openclaw 当前只有安装/配置发现能力。与 runtime
+  集重叠的四个名字可参与 session 分析，但不得据此推导其 runtime 能力。
 - `PseudoChoices = {all}`：跨宿主聚合伪值，**绝不进 HostProfile**。
 
 守卫断言按集合关系写（G2），不是全集相等。今天成立、但不强求为不变量的关系：
-`RuntimeHostIds ⊆ (StaticHostChoices \ PseudoChoices)`——四个 runtime 宿主当前都
-有静态读面；将来若某宿主只上 runtime 形态而无静态面，该子集关系自然松开。
+`RuntimeHostIds ⊆ (ScanCliHostChoices \ PseudoChoices)` 只是今日现状，不作为永久
+不变量——将来可能出现只上 runtime 而不进入历史 scan 命令面的宿主。
 
 新增 `tests/test_host_contract.py`（Python 侧，延续 test_classification 的显式
 集合风格）+ Rust 侧对应 `#[cfg(test)]`。守卫清单（编号 G1–G10）：
@@ -512,11 +529,10 @@ codex_session_audit 均不在 git status 修改清单）；A/B 触碰 `workbuddy
   `test_cli_matrix.both()` 字节对比 Python/Rust 输出（行、字段、顺序全等）。
 - **G2 三集分离与清单互锁**：(a) `HOSTS` 行 ids == `RuntimeHostIds`（精确枚举，
   双向）；(b) 静态形态命令面四处硬编码清单彼此相等（把现在无人守的四处一致性钉
-  住），且清单内容 == `StaticHostChoices`（写死在测试里当基准）；(c)
-  `PseudoChoices` ∩ 行 = ∅（`all` 绝不进注册表）；(d) 静态集与运行时注册表是同一
-  核心方向（session 分析）的两种形态：注册表行是契约真相、静态集是命令面，静态集
-  可大于注册集（hermes/openclaw 即纯静态/安装发现宿主）；纪律只有"行里不出现伪值
-  与纯静态宿主"（由 (a) 的精确枚举保证）。
+  住），且清单内容 == `ScanCliHostChoices`（写死在测试里当基准）；(c)
+  `PseudoChoices` ∩ 行 = ∅（`all` 绝不进注册表）；(d) scan CLI 是历史混合命令面，
+  与 runtime 注册表只比较明确重叠的宿主名，不从一方推导另一方能力；纪律只有“行里
+  不出现伪值与纯安装发现宿主”（由 (a) 的精确枚举保证）。
 - **G3 行 × 镜像 × 文件存在**：对每个运行时 id 按**显式语言支持矩阵**断言存在的
   证据模块（宿主→`<id>_evidence.rs` ↔ `<id>_evidence.py` 对表；**DSH 的 Python 侧
   在 M1 建成 `dsh_evidence.py` 之前登记为显式缺口** "pending M1"，建成后改为存在
@@ -525,7 +541,7 @@ codex_session_audit 均不在 git status 修改清单）；A/B 触碰 `workbuddy
   MeasuredZero→Unavailable，Python 镜像同断言（§5.3 条款 1 的机械化）。
 - **G5 §13 矩阵对账**：手写期望表（从 `RUNTIME_EVIDENCE_CONTRACT.md` §13 结构性
   列**人工**派生、checked-in 成测试数据——禁止从行生成，它和行互为独立 oracle）
-  vs 行 unmeasured，双向集合相等；矩阵外三信号全宿主共同；workbuddy Usage（※ 未
+  vs 行 unmeasured，双向集合相等；矩阵外信号按宿主分别列期望；workbuddy Usage（※ 未
   复核 vs unavailable）作为**显式偏差登记项**存在——没有注记的偏差过不了。
   **分歧处理流程**：行与期望表分歧 = 行为变更，两侧同改并过 golden；§13 文档与
   期望表分歧 = 契约变更，先改文档（注明"结构性列已由 HOSTS 派生"的交叉引用）再
@@ -538,29 +554,51 @@ codex_session_audit 均不在 git status 修改清单）；A/B 触碰 `workbuddy
 - **G8 源码自扫描**（§5.3 条款 5 的机械形式）：沿用 `evidence.rs` §12 的先例，对
   `*_evidence.rs/.py` 做模式扫描，抓 per-host unmeasured 字面量表残留——不是主
   验证（G6 才是），是防回退的廉价哨兵。
-- **G9 声明 ⊆ 注册**：core 行声明为真的能力（`session_store`/`fold`）⊆ binary CLI
-  与 src-tauri 各自的 `HostRuntimeRegistration` 注册集——core 不碰文件系统实现，
-  注册表住在消费方，守卫锁"声明了就必须注册"（§5.1bis）。
-- **G10 计价分辨率**（§5.3 条款 7 的机械形式，**自 v0.6 起带显式缺口登记**）：
-  断言 **`时变卡集 × 计价视图集` 的每一格，其时间轴含小时**。两侧都可机械推导，
-  不靠人工声明——
-  - **时变卡集**：扫 `pricing.json`，`{off_peak, peak}` 形状的卡即入集（今天 =
-    `providers.deepseek-official` 与 `shengsuanyun` 的全部模型）；catalog 平费率
-    卡与 M3 档位卡不在集内。
-  - **计价视图集**：`fold: Some(TokenBuckets)` 的宿主的物化视图（claude ledger /
-    codex 静态 fold / dsh state 链）——`HostBilled` 宿主不入集（它填 `host_amount`，
-    不按卡折算，条款 7 不适用）。
-  - 判据：格内视图的时间键无 hour → **红**。
+- **G9 按 surface 的需求 ⊆ 注册**：先为 `cli.sessions`、`tauri.sessions`、
+  `tauri.menubar-cost` 等消费表面显式列出 `required_capabilities(surface)`，再分别
+  断言它是该表面 `HostRuntimeRegistration` 的子集。core 不碰文件系统实现；一个
+  二进制不消费某项能力时不要求注册，避免把 CLI 与 Tauri 强制做成同构产品（§5.1bis）。
+- **G10 计价分辨率**（§5.3 条款 7 的机械形式，**自 v0.6 起带显式缺口登记**；判据
+  经 R3 修订）：断言**没有任何时变卡经下界读法被计价**。
+  - **时变卡集**（机械推导，扫 `pricing.json` 的 `{off_peak, peak}` 形状）：今天
+    三张 = `providers.deepseek-official.deepseek-v4-flash`、
+    `providers.deepseek-official.deepseek-v4-pro`、
+    `providers.shengsuanyun.deepseek-v4-pro`。catalog 平费率卡与 M3 档位卡不在集内。
+  - **判据（钉计价读法，不钉 schema 键）**：对每张时变卡，喂给每个计价入口一份该卡
+    的合成用量，断言结果 **≠ 全 `off_peak` 单价 × 用量**——即该入口没有落进
+    `flat_rate` 的 `/{key}/off_peak` 兜底。这是**行为级**断言，不依赖视图长什么形状：
+    DSH 的 `peak_*` 子桶、将来任何别的保真形态都自然通过，缺分辨率的入口自然红。
+    廉价哨兵补一条源码扫描（G8 风格）：`flat_rate`/`_flat_rate` 的 off_peak 兜底
+    分支若被时变卡命中、而调用点不在缺口清单里 → 红。
+  - **为什么不写成 `时变卡集 × 计价视图集` 的叉积（R3 撤回原判据）**：叉积里有真空
+    格——codex 的折叠读的是自家 `codex_pricing.json`（`src/agent/codex_cost.rs:39`
+    `include_str!` 的独立 USD 表），结构上永远碰不到 deepseek 卡；而"某视图会不会
+    见到某张卡"取决于它实际遇到哪些 model，**推不出来**（`pricing.json` 与注册表行
+    都不含这个关系，它是运行期事实）。钉读取函数就不需要这个关系：见不到该卡的入口
+    根本不触发断言。原判据「时间键无 hour → 红」还会**误红 DSH**（其日桶无 hour 键
+    却计价正确，§5.3 条款 7）——两个方向都错，故整体替换。
+  - **注册表在这里只做排除，不做枚举**：按 usage/session 事实判定为
+    `pricing_basis=host-billed` 的记录不进入价目卡折算，条款 7 不适用；不按
+    HostProfile 排除整个宿主。
 
-  **缺口登记（方案 b，沿用 G3 "pending M1" 惯例）**：本守卫落 v0.6 时
-  `claude-code × deepseek-official` 一格**即刻为红**，而让它转绿的实现（ledger 日
-  桶加 hour 桶 + `claude_day_cost` 走 `is_peak_slot`）动持久格式、属 v0.7 窗口
-  （§2.3）。因此 v0.6 交付形态是：该格登记为**显式缺口** `"pending v0.7"`（与 G3
-  的 dsh Python 侧同机制），CI 不因它长红；但**缺口清单本身被断言为闭集**——
-  清单外任何一格违反即硬红，且新增条目必须同时改这份清单与本 spec。这正是把守卫
-  提前到 v0.6 的全部理由：**防止 v0.6→v0.7 之间新接入的宿主又静默长出一份无小时
-  的日桶**。v0.7 hour 轴落地后，该条目删除、改为硬断言（"红转绿"走 §11-M4 的同一
-  流程）。加断言不改任何输出，**golden 字节不动**，与 v0.6 的零漂移验收相容。
+  **缺口登记（方案 b，沿用 G3 "pending M1" 惯例；R3 补齐为两条）**：本守卫落 v0.6
+  时以下**两个计价入口即刻为红**，且必须**同批**修——`price_claude_map` 的 doc
+  注释钉死「两面的钱必须同源」，只修一个会让两面分叉：
+
+  | 缺口条目 | 计价入口 | 命中的时变卡 |
+  |---|---|---|
+  | `claude-ledger-day: pending v0.7` | `cost.rs::claude_day_cost` → `price_claude_map` → `price_claude_model` → `flat_rate` | deepseek-official flash/pro **与 shengsuanyun pro**——`resolve_card_catalog` 第二段遍历顶层 `providers`，三张卡命中的是同一处兜底 |
+  | `claude-session: pending v0.7` | `cost.rs::claude_session_cost` → 同一条链 | 同上 |
+
+  （Python 侧 `cost.py::_flat_rate` 是同形镜像，两条缺口双语言各登记一次。）
+  让它们转绿的实现（ledger 日桶加 `peak_*` 子桶 + 两个入口改走峰谷读法）动持久格式、
+  属 v0.7 窗口（§2.3）。因此 v0.6 交付形态是：这两条登记为**显式缺口**
+  `"pending v0.7"`（与 G3 的 dsh Python 侧同机制），CI 不因它们长红；但**缺口清单
+  本身被断言为闭集**——清单外任何计价入口走下界读法即硬红，且新增条目必须同时改
+  这份清单与本 spec。这正是把守卫提前到 v0.6 的全部理由：**防止 v0.6→v0.7 之间新
+  接入的宿主又静默长出一份下界计价的折叠**。v0.7 落地后两条一并删除、改为硬断言
+  （"红转绿"走 §11-M4 的同一流程）。加断言不改任何输出，**golden 字节不动**，与
+  v0.6 的零漂移验收相容。
 
 ## 9. 新宿主接入流程（playbook）
 
@@ -572,7 +610,7 @@ codex_session_audit 均不在 git status 修改清单）；A/B 触碰 `workbuddy
 2. **写证据适配器**：抄形状最接近的模板（locate→shape→extract→derive→coverage），
    但**不抄 is_unavailable 表**——unmeasured 留给注册表，适配器只表达它能 bump 的
    信号；extract 从第一天遵守哨兵条款（§5.3 条款 4）。
-3. **注册**：`HOSTS` 加一行（id/display/unmeasured/degraded/fold/store/reason，
+3. **注册**：`HOSTS` 加一行（id/display/unmeasured/degraded/fold/store，
    每条 unmeasured 带出处）。未知宿主在注册前所有查询 no-op，注册后所有守卫开始
    对它生效。
 4. **接线清单**（守卫会红的每一项）：core `lib.rs` pub mod ↔ Python
@@ -617,25 +655,41 @@ src-tauri menubar 改动）；工作区**当前仍打开**：core `workbuddy_evi
 
 | 里程碑 | 内容 | 触碰文件 | 验收 |
 |---|---|---|---|
-| **M0 注册表骨架**（additive） | `HostProfile`/`DegradedRule`/`FoldOutput`/`BillingKind`/`HOSTS` 四行入 core `host_capability.rs`；degrade 改行查找；Python 镜像同步行集；双语言来源策略成文（§5.1bis）；`hosts --json` surface 先行，G1 parity 在此落地 | core `host_capability.rs`、`host_capability.py`、`cli.py`/`main.rs` 的 hosts 子命令（均不在打开清单） | `cargo test` + Python 套件全绿，**golden 字节零漂移**（行为不变是硬要求）；G1 绿 |
+| **M0 注册表骨架**（additive） | `HostProfile`/`DegradedRule`/`FoldOutput`/`HOSTS` 四行入 core `host_capability.rs`；共享 Canonical Signal 全序入 evidence/schema 层；degrade 改行查找；Python 镜像同步行集；双语言来源策略成文（§5.1bis）；`hosts --json` surface 先行，G1 parity 在此落地 | core `host_capability.rs`、`evidence.rs`、`host_capability.py`、Python schema 常量、`cli.py`/`main.rs` 的 hosts 子命令（均不在打开清单） | `cargo test` + Python 套件全绿，**golden 字节零漂移**（行为不变是硬要求）；G1 绿 |
 | **M1 共享投影塌缩** | Rust `canonical_audit` 共享求值器（镜像 `canonical_audit.py`）；三 dispatcher 调共享 fn；**Python 侧新建 `dsh_evidence.py`**（自 `behavior.py` 直判路径拆出 DSH canonical 适配器、镜像 `dsh_evidence.rs`；test_classification 家族清单与 `__init__.py` 同步）——DSH Python 从此与三家同构，G3 的 dsh 缺口在此关闭 | `src/agent/` dispatcher 三文件、core/binary 新模块、`behavior.py` 拆出 + 新 `dsh_evidence.py` | golden 15 例字节零漂移 + differential；DSH `behavior` 输出不变；**G3 dsh 行转绿** |
-| **M2a evidence derive（干净侧）** | 按双层缺席规则（§5.2）：dsh/codex/claude-code 适配器的**宿主级** unmeasured/ALL_SIGNALS 改从行读，shape/会话级缺席留在解析分支不动；D/E 骨架共享 | `dsh_evidence.rs`、`codex_evidence.rs`、`claude_code_evidence.rs` + Python 镜像（`claude_evidence.py`/`codex_evidence.py`/新 `dsh_evidence.py`） | G6 合成会话不变量绿；golden 零漂移 |
+| **M2a evidence derive（干净侧）** | 按双层缺席规则（§5.2）：dsh/codex/claude-code 适配器的**宿主级** unmeasured 改从行读，per-host `ALL_SIGNALS` 改用 M0 共享 Canonical Signal 全序，shape/会话级缺席留在解析分支不动；D/E 骨架共享 | `dsh_evidence.rs`、`codex_evidence.rs`、`claude_code_evidence.rs` + Python 镜像（`claude_evidence.py`/`codex_evidence.py`/新 `dsh_evidence.py`） | G6 合成会话不变量绿；golden 零漂移 |
 | **M2b evidence derive（workbuddy 侧）** | 同 M2a 但 workbuddy —— **闸：`workbuddy_evidence.rs/.py` 仍在并行流工作区打开，必须等其合入** | `workbuddy_evidence.rs`、`workbuddy_evidence.py` | G6 绿；golden 零漂移 |
-| **M3 守卫 + surface** | 守卫全量落地：三集分离 G2、语言支持矩阵 G3、矩阵对账 G5、源码自扫描 G8、声明⊆注册 G9、**计价分辨率 G10（带 `"pending v0.7"` 缺口登记，方案 b）**（§8）；binary/Tauri 侧建 `HostRuntimeRegistration`（§5.1bis）；托盘/overview/sessFilter 从注册集派生 | `tests/test_host_contract.py`、binary 注册新模块、`r2a_store.rs`、src-tauri（其 menubar 改动已随 868f1a7 合入；并行流继续 commit 若再触碰则排后） | G1–G10 全绿（G10 以缺口清单闭集断言的形态绿，缺口条目 = `claude-code × deepseek-official`）；托盘三行与今日逐像素一致（快照）；claude-code 进 sessFilter |
-| **M4 workbuddy 折叠 demo（可选演练）** | 走完整契约迭代：行字段 `fold: None → Some(HostBillTotals)`（**billing 保持 HostBilled**——累计宿主积分账单，绝不冒充逐模型 token 重计价）、注册集补 fold reader（机制最接近 claude ledger，~10 文件）、守卫红→绿 | workbuddy 折叠新面 | 托盘出现第四行成本；全程不碰 DSH state 链与 pricing.json |
+| **M3 守卫 + surface** | 守卫全量落地：三集分离 G2、语言支持矩阵 G3、矩阵对账 G5、源码自扫描 G8、按 surface 的需求⊆注册 G9、**计价分辨率 G10（带 `"pending v0.7"` 缺口登记，方案 b）**（§8）；binary/Tauri 侧建 `HostRuntimeRegistration`（§5.1bis）；托盘/overview/sessFilter 从注册集派生 | `tests/test_host_contract.py`、binary 注册新模块、`r2a_store.rs`、src-tauri（其 menubar 改动已随 868f1a7 合入；并行流继续 commit 若再触碰则排后） | G1–G10 全绿（G10 以缺口清单闭集断言的形态绿，缺口条目 = `claude-ledger-day` 与 `claude-session` 两条，双语言各一次）；托盘三行与今日逐像素一致（快照）；claude-code 进 sessFilter |
+| **M4 workbuddy 折叠 demo（可选演练）** | 走完整契约迭代：行字段 `fold: None → Some(HostBillTotals)`；当前适配器继续累计 `used`/`credit_json` 的 host-billed 证据，绝不冒充逐模型 token 重计价；注册集补 fold reader，守卫红→绿 | workbuddy 折叠新面 | 托盘出现第四行成本；全程不碰 DSH state 链与 pricing.json |
 
 每个里程碑独立可合入（M0 先行合入不阻塞并行流）；M2b（及并行流继续合入后与
 M0–M3 撞车的任何步骤）以工作区干净为闸。**任何里程碑的验收若出现字节漂移，回退
 该里程碑而不是 --update golden。**
 
+**落地记录（2026-09-02）**：**M0 已完成**——`HostProfile`/`DegradedRule`/
+`FoldOutput`/`HOSTS` 四行落 core `host_capability.rs`，Python 镜像
+`host_capability.py` 同步同一份行集（`unmeasured_signals` 手工镜像各适配器现有
+`is_unavailable`/`_UNAVAILABLE_SIGNALS`，dsh 一份镜像 `dsh_evidence.rs` 内联声明
+——M2 才让适配器改从行 derive，M0 本身行为零变化）；`degrade_rule_outcomes` 从
+match 臂改成行查找（现有 4 个单测原样通过）；新增 `hosts --json`/`hosts` 子命令
+（Rust `main.rs::Cmd::Hosts` + Python `cli.py`），`tests/test_cli_matrix.py` 新增
+`test_hosts_json_byte_parity`/`test_hosts_human_format_byte_parity` 落地 G1；
+`cargo test --release`（732 用例）、`cargo clippy --release --all-targets -- -D
+warnings`、`AGENT_VITALS_BIN=… python3 -m unittest discover tests`（1015 用例，
+全差分）、`tests/golden_runner.py`（15 例）全绿，golden 字节零漂移，符合 M0 验收
+纪律。M1（共享投影塌缩 + Python 新建 `dsh_evidence.py`）待续；M2b 仍以 workbuddy
+并行流工作区干净为闸。
+
 ## 12. Definition of Done
 
-1. `HOSTS` 四行齐全且是仓库里唯一的 per-host 能力声明；G1 parity 绿（双语言字节
-   相等）。
+1. Rust/Python 的 `HOSTS` 四行齐全，分别是本语言内部唯一的 per-host 能力声明；
+   G1 parity 绿（双语言字节相等）。
 2. G1–G10 全绿——含三集分离（G2：行 == RuntimeHostIds、静态命令面四处清单互锁、
-   `all` 不进注册表）、语言支持矩阵（G3）、声明⊆注册（G9）、计价分辨率（G10：
-   时变卡 × 计价视图每格带小时；`claude-code × deepseek-official` 以显式缺口
-   `"pending v0.7"` 登记，**缺口清单闭集受断言**——清单外任何一格违反即硬红）。
+   `all` 不进注册表）、语言支持矩阵（G3）、按 surface 的需求⊆注册（G9）、
+   计价分辨率（G10：
+   三张时变卡在**任何**计价入口都不走下界读法；`claude-ledger-day` 与
+   `claude-session` 两条入口以显式缺口 `"pending v0.7"` 登记，**缺口清单闭集受
+   断言**——清单外任何入口走下界读法即硬红）。
 3. Rust/Python 两侧无 per-host unmeasured 字面量表残留（G8 源码自扫描过 + G6
    行为验证过）。
 4. 三份 dispatcher 组装消失，`canonical_audit` 共享求值器双侧存在；DSH Python
@@ -649,8 +703,9 @@ M0–M3 撞车的任何步骤）以工作区干净为闸。**任何里程碑的�
 8. 无 SKILL.md/README/pricing.json/timeline.js 改动；信封 v1 不变。**G10 只读
    `pricing.json` 推导时变卡集，不改它**——价目是业务数据，条款 7 约束的是消费
    它的视图分辨率，不是卡本身。
-9. §5.3 条款 7 的缺口登记有到期归属：`"pending v0.7"` 条目在 v0.7 spec §5 验收
-   里有对应的转绿项（hour 轴落地 → 删条目 → 改硬断言），不是无限期豁免。
+9. §5.3 条款 7 的缺口登记有到期归属：两条 `"pending v0.7"` 条目在 v0.7 spec §5
+   验收里有对应的转绿项（`peak_*` 子桶 + 两入口改峰谷读法 → 删条目 → 改硬断言），
+   且**必须同批结清**（半修 = 两面不同源），不是无限期豁免。
 
 ## 13. 风险与失败条件
 
@@ -690,6 +745,17 @@ M0–M3 撞车的任何步骤）以工作区干净为闸。**任何里程碑的�
 | 13 | 文档基准 HEAD/测试数易漂移 | **成立**——HEAD 已移（868f1a7/9464d30 合入），44 个测试文件 | 文档头更新状态基准；playbook 删"（352）"；DoD 只留命令不固定数字 |
 | 14 | 建议收缩里程碑 | **部分成立**——内容吸收：守卫独立成面（G9/注册集）、集合守卫分层；编号保留 M0–M4 以免全文交叉引用重排 | §0 结论 4、§11 表按 R1 语义重写 |
 
+### R2 修订（2026-09-02）
+
+| # | 意见 | 裁决 | 修订落点 |
+|---|---|---|---|
+| 1 | [P0] `BillingKind` 绑定 Host，违反 Host ≠ BillingSource | **成立** | 从 `HostProfile` 删除 `billing`/`BillingKind`；§5.2bis 改为 usage/session 级 `billing_source`、`billing_mode`、`pricing_basis`；WorkBuddy host-billed 只描述当前证据，不成为永久宿主人格 |
+| 2 | [P1] “全宿主共同缺席集”与 Codex/Claude Code 已 measured 的 UserPrompts 冲突 | **成立** | §5.1、§5.3、G5 改成按宿主分别登记矩阵外信号，禁止构造全宿主共同集 |
+| 3 | [P1] G9 要求每个二进制实现全部能力过强 | **成立** | §5.1bis、§6、G9 改为 `required_capabilities(surface) ⊆ registrations(surface)`，CLI/Tauri 可按消费面不同构 |
+| 4 | [P2] “core 唯一真相源”仍与双实现契约矛盾 | **成立** | §2/§3/§5.1 统一为“每种语言内部唯一声明源，跨语言 byte-parity” |
+| 5 | `ALL_SIGNALS` 应属于 Canonical Schema，而非宿主人格 | **成立** | M0 上收共享 Signal 全序；M2 删除 per-host `ALL_SIGNALS`，适配器能力由 derive + coverage 表达 |
+| 6 | StaticHostChoices 对 hermes/openclaw 的 session 语义牵强 | **成立** | 改名 `ScanCliHostChoices`，明确其为混合承载安装发现与部分 session 分析的历史 CLI 集，不从它推导 runtime 能力 |
+
 **本轮修订后仍留的设计决断**（非缺陷，明示待议）：R1 建议"以 checked-in 数据表
 生成两侧代码"作为单一真相源的替代方案——因 typed-rule 特性与 Python 分发约束
 （§5.1bis）不采纳，若行集膨胀或第三语言出现再复议；"shape 级缺席 = 解析结果"
@@ -710,8 +776,11 @@ golden 失去意义）→ §0.6 + §2.3 版本边界拆分表 + v0.7 验收条�
 
 - 新增 **§5.3 条款 7（计价分辨率）**——时变卡（`{off_peak, peak}`）计价必须带小时，
   否则报 partial 走哨兵，不得取时间维下界冒充保守；平费率只对平费率卡合法。
+  （**"必须带小时"这半句已被下方 R3 修订推翻**——正确的是"必须保住足以峰谷拆分的
+  分辨率"，DSH 用 `peak_*` 子桶做到了而没有小时。）
 - 新增 **§8 G10** 守卫——`时变卡集 × 计价视图集` 每格断言时间轴含小时，两集皆从
-  `pricing.json` 与注册表行机械推导，不靠人工声明。
+  `pricing.json` 与注册表行机械推导，不靠人工声明。（**判据与叉积形态均已被 R3
+  撤回**，见下。）
 - **按方案 b 落地**（用户 2026-09-02 裁定）：守卫提前到 v0.6 并对
   `claude-code × deepseek-official` 一格登记显式缺口 `"pending v0.7"`（沿用 G3 的
   "pending M1" 惯例），缺口清单闭集受断言；实现（hour 轴）走 v0.7 窗口后删条目转硬
@@ -721,3 +790,23 @@ golden 失去意义）→ §0.6 + §2.3 版本边界拆分表 + v0.7 验收条�
 - v0.7 侧同步修订（该 spec §2 时间行、§3 `cost_report` 行、§5 验收、§7 记录）：
   原 §2 时间行写「基线按会话 startTime 归日近似**与 claude_cost 同款**」——等于把
   本次证伪的近似写进统一事实行契约，必须改。
+
+**2026-09-02 追加修订之三（R3：G10 判据与缺口面，对"之二"的更正）**：对"之二"的
+落地面做代码级复核，发现 G10 的判据与缺口登记两处都写错，落地前更正（条款 7 的
+**意图**不变，错的是它的机械形式与适用面）：
+
+| # | 问题 | 证据 | 修订落点 |
+|---|---|---|---|
+| 1 | [P0] 判据「时间键无 hour → 红」会**误红 DSH**——全仓唯一计价正确的那条路 | DSH 日桶**没有** hour 键：`usage.rs::add_buckets` 在 fold 时按 `is_peak_slot` 预拆 `peak_*` 子桶，`cost.rs::bucket_price`（:145-157）用「全量 − peak_*」还原空闲份额分别计价。分辨率靠折叠时预拆保住，不靠时间轴 | §5.3 条款 7 增「"保住分辨率" ≠ "留 hour 键"」段；§8 G10 判据整体换成**计价读法的行为级断言**（时变卡合成用量的结果 ≠ 全 off_peak 价）+ G8 风格源码哨兵 |
+| 2 | [P0 连带] v0.7 把转绿项写成"ledger 日桶加 hour 桶" = 造第四种日形状 | DSH 的 `peak_*` 日形状已被 `priced_day`/`token_by_date_model` 全线消费并有测试 | §2.3 拆分表末行改为「加 `peak_*` 子桶，照 DSH 既有日形状」，并注明 hour 若真要选须在 v0.7 §5 写明理由；v0.7 §0.1bis/§2/§3/§5 同步 |
+| 3 | [P1] 叉积 `时变卡集 × 计价视图集` 有真空格，且适用关系不可静态推导 | codex 折叠读自家 `codex_pricing.json`（`src/agent/codex_cost.rs:39` include_str 的独立 USD 表），永远碰不到 deepseek 卡；"哪个视图见得到哪张卡"取决于运行期遇到的 model | §8 G10 撤回叉积形态——钉读取函数则不需要这个关系 |
+| 4 | [P1] 缺口只登记一格，漏了 claude 的**会话面**与 **shengsuanyun 卡** | `flat_rate` 的兜底在 `price_claude_model`（`cost.rs:756-759`），被 `claude_day_cost` 与 `claude_session_cost` 共用，`price_claude_map` doc 注释自钉「两面同源」；`resolve_card_catalog`（:684-694）第二段遍历顶层 providers，shengsuanyun 的 deepseek-v4-pro 同样是 `{off_peak, peak}` 卡、走同一兜底 | §5.3 条款 7 增「适用面按计价入口算」段；§8 G10 缺口表拆成 `claude-ledger-day` / `claude-session` 两条（双语言各一次）并注明必须同批修；§11-M3、§12 DoD 2/9 同步 |
+
+**本轮未处理（P2，另计）**：§4 表把 claude 的 pricing 来源写成 `catalog_2026_09`
+（实际 `resolve_card_catalog` 是两段搜索，catalog 无 deepseek，claude 的 deepseek
+用量落在**顶层 providers**）；§5.1 的 Python 镜像路径实际是
+`scripts/agent_vitals/agent/host_capability.py`；§1.1 复制点 A/B 把 dsh 也算作一份
+（`dsh_evidence.rs` 既无 `is_unavailable` 也无 `ALL_SIGNALS`，份数是 3 不是 4）；
+条款 7 排除 M3 档位卡的理由写错了——`first_tier` 取首档与 off_peak 兜底是同一动作，
+真正的差别是前者在输出留了 `tier` 标签而后者 `pricing_basis` 恒 `"catalog"`、与真
+平费率卡不可区分。

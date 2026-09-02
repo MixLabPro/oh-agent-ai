@@ -364,6 +364,18 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Print the HostProfile registry (v0.6 host-contract spec §5.1): the
+    /// four runtime hosts' declared structural capabilities (unmeasured
+    /// signals, degraded rules, session-store/fold capability). This is the
+    /// registry itself, not a per-session derive — see `docs/
+    /// VITALS_CORE_V0_6_HOST_CONTRACT_SPEC.md` §5.2 for what it does and does
+    /// not answer.
+    Hosts {
+        /// Write hosts JSON to FILE; use - for stdout. Without this option,
+        /// print a human table.
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+    },
     /// Audit a DSH session log for Skill execution events (skill-invocation / tool/call name=skill).
     SkillAudit {
         /// Path to the DSH session JSONL log (file or directory)
@@ -1126,6 +1138,38 @@ fn main() {
                 std::process::exit(2);
             }
         }
+    }
+
+    // v0.6 host-contract spec §5.1/§11-M0: print the core HostProfile registry
+    // as-is. `hosts_json()` is the byte-parity surface Python's
+    // `host_capability.hosts_json()` mirrors (G1).
+    if let Some(Cmd::Hosts { rows_json }) = &args.cmd {
+        let out = agent_vitals_core::host_capability::hosts_json();
+        if let Some(path) = rows_json {
+            let text = serde_json::to_string_pretty(&out).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}", path.display());
+            }
+        } else {
+            for h in out["hosts"].as_array().cloned().unwrap_or_default() {
+                let id = h["id"].as_str().unwrap_or("?");
+                let display = h["display"].as_str().unwrap_or("?");
+                let unmeasured = h["unmeasured_signals"].as_array().map(|a| a.len()).unwrap_or(0);
+                let degraded = h["degraded_rules"].as_array().map(|a| a.len()).unwrap_or(0);
+                let store = h["session_store"].as_bool().unwrap_or(false);
+                let fold = h["fold"].as_str().unwrap_or("none");
+                println!(
+                    "{id} ({display}): unmeasured={unmeasured} degraded_rules={degraded} \
+session_store={store} fold={fold}"
+                );
+            }
+        }
+        return;
     }
 
     // R1d-tick：discover——列 DSH 会话根下未折的裸 session.jsonl（mtime 最新在前）。
