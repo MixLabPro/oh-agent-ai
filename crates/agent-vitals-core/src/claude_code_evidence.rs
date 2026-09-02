@@ -69,49 +69,16 @@ const KNOWN_TYPES: &[&str] = &[
     "user",
 ];
 
-/// 20 个 Signal 的声明序——`Signal` 的 `Ord` 派生自枚举声明顺序，跨语言输出
-/// 顺序靠这份显式表对齐（与 codex_evidence.rs 同表同序），不靠 Rust 的 Debug 序。
-const ALL_SIGNALS: &[Signal] = &[
-    Signal::ToolCalls,
-    Signal::ToolResults,
-    Signal::TurnBoundaries,
-    Signal::StepBoundaries,
-    Signal::Usage,
-    Signal::UsageAggregate,
-    Signal::ContextWindow,
-    Signal::QuotaConsumption,
-    Signal::ApprovalDecisions,
-    Signal::ApprovalPolicy,
-    Signal::SandboxModes,
-    Signal::SandboxPolicy,
-    Signal::NetworkAccess,
-    Signal::Compaction,
-    Signal::SubagentSpawns,
-    Signal::SkillInvocations,
-    Signal::Hooks,
-    Signal::FileMutations,
-    Signal::UserPrompts,
-    Signal::UserCorrections,
-];
-
 /// §13 Claude Code 列明确 unavailable / 没有对应列的信号。`derive_coverage` 的
 /// 置零与 `claude_evidence_json` 的 `available` 标记共用这一份清单，不准两处各写
-/// 一份漂移（同 codex_evidence.rs 的 `is_unavailable`）。
-///
-/// `ApprovalDecisions` 是 first-slice 范围：§13 列值是 **partial——denials only,
-/// derived+lossy**，靠匹配 tool-result 文本里的 marker string 恢复（§14.5），本次
-/// 不实现——先诚实 Unavailable，后续项做 marker 恢复时从这里挪出来。
+/// 一份漂移。v0.6 host-contract spec §6/§11-M2a：宿主级 unmeasured 声明不再是
+/// 本文件的字面量表，改从 core `host_capability::HOSTS` 的 "claude-code" 行读
+/// （行上的值就是从这个函数原来的字面量表搬过去的，golden 字节不变）；
+/// `ApprovalDecisions` 是 first-slice 范围的注记仍留在 `HOSTS` 行的行内文档，
+/// 后续做 marker 恢复时从行上摘掉这一项即可，不用回这个文件改代码。
 fn is_unavailable(signal: Signal) -> bool {
-    matches!(
-        signal,
-        Signal::ContextWindow
-            | Signal::QuotaConsumption
-            | Signal::ApprovalDecisions
-            | Signal::SandboxModes
-            | Signal::SandboxPolicy
-            | Signal::NetworkAccess
-            | Signal::UserCorrections
-    )
+    crate::host_capability::host_profile("claude-code")
+        .is_some_and(|h| h.unmeasured_signals.contains(&signal))
 }
 
 // ────────────────────────── §7 工具名规范化 + args_text ──────────────────────────
@@ -567,7 +534,7 @@ fn derive_coverage(records: &[Value], turns_len: usize) -> (SignalSet, Coverage,
     }
 
     let mut signals = SignalSet::EMPTY;
-    for s in ALL_SIGNALS {
+    for s in &Signal::ALL {
         if coverage.get(*s).total() > 0 {
             signals.insert(*s);
         }
@@ -580,7 +547,7 @@ fn derive_coverage(records: &[Value], turns_len: usize) -> (SignalSet, Coverage,
     }
 
     // §13 unavailable 的信号显式置零（不进 SignalSet）——不能编一个非零数字出来。
-    for signal in ALL_SIGNALS.iter().copied().filter(|s| is_unavailable(*s)) {
+    for signal in Signal::ALL.iter().copied().filter(|s| is_unavailable(*s)) {
         coverage.set(signal, CoverageCounts::default());
     }
 
@@ -701,13 +668,13 @@ pub fn build_claude_evidence(
 /// `codex_evidence_json` 同构（signals/coverage/attempts/notes），Python 镜像
 /// 逐字节对齐。
 pub fn claude_evidence_json(evidence: &ClaudeEvidence) -> Value {
-    let signals: Vec<String> = ALL_SIGNALS
+    let signals: Vec<String> = Signal::ALL
         .iter()
         .filter(|s| evidence.canonical.signals.contains(**s))
         .map(|s| format!("{s:?}"))
         .collect();
     let mut coverage_map = serde_json::Map::new();
-    for s in ALL_SIGNALS {
+    for s in &Signal::ALL {
         let c = evidence.canonical.coverage.get(*s);
         coverage_map.insert(
             format!("{s:?}"),

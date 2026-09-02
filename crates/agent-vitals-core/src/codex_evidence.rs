@@ -276,11 +276,12 @@ fn bump(coverage: &mut Coverage, signal: Signal, bucket: Bucket, n: u64) {
 /// `codex_evidence_json` 的 `available` 标记共用同一份清单，不准两处各写一份
 /// 漂移（UserPrompts 2026-08 起 measured，不在其中；UserCorrections 的定义
 /// 是 §3.2 的关键词/时间窗启发，没有任何宿主有参考实现，移植即发明）。
+/// v0.6 host-contract spec §6/§11-M2a：宿主级 unmeasured 声明不再是本文件的
+/// 字面量表，改从 core `host_capability::HOSTS` 的 "codex" 行读（行上的值就
+/// 是从这个函数原来的字面量表搬过去的，golden 字节不变）。
 fn is_unavailable(signal: Signal) -> bool {
-    matches!(
-        signal,
-        Signal::StepBoundaries | Signal::SandboxPolicy | Signal::NetworkAccess | Signal::UserCorrections
-    )
+    crate::host_capability::host_profile("codex")
+        .is_some_and(|h| h.unmeasured_signals.contains(&signal))
 }
 
 fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
@@ -400,7 +401,7 @@ fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
     }
 
     let mut signals = SignalSet::EMPTY;
-    for s in ALL_SIGNALS {
+    for s in &Signal::ALL {
         if coverage.get(*s).total() > 0 {
             signals.insert(*s);
         }
@@ -424,7 +425,7 @@ fn derive_coverage(items: &[Value]) -> (SignalSet, Coverage, Vec<String>) {
     // 确认 turn_context.sandbox_policy 持久化，已改 measured（见上方映射表）。
     // UserPrompts 同样不在其中：response_item.message+role=user 是真实线格式，
     // 2026-08 已改 measured。清单统一走 is_unavailable，序列化侧同源。
-    for signal in ALL_SIGNALS.iter().copied().filter(|s| is_unavailable(*s)) {
+    for signal in Signal::ALL.iter().copied().filter(|s| is_unavailable(*s)) {
         coverage.set(signal, CoverageCounts::default());
     }
 
@@ -469,31 +470,6 @@ fn classify_item(coverage: &mut Coverage, item_type: &str, payload: &serde_json:
         _ => {} // Plan/Reasoning/AgentMessage/UserMessage/ImageView 不喂信号
     }
 }
-
-/// 19 个 Signal 的声明序——`Signal` 的 `Ord` 派生自枚举声明顺序，跨语言输出
-/// 顺序靠这份显式表对齐（Python 镜像里同名同序），不靠 Rust 的 Debug 序。
-const ALL_SIGNALS: &[Signal] = &[
-    Signal::ToolCalls,
-    Signal::ToolResults,
-    Signal::TurnBoundaries,
-    Signal::StepBoundaries,
-    Signal::Usage,
-    Signal::UsageAggregate,
-    Signal::ContextWindow,
-    Signal::QuotaConsumption,
-    Signal::ApprovalDecisions,
-    Signal::ApprovalPolicy,
-    Signal::SandboxModes,
-    Signal::SandboxPolicy,
-    Signal::NetworkAccess,
-    Signal::Compaction,
-    Signal::SubagentSpawns,
-    Signal::SkillInvocations,
-    Signal::Hooks,
-    Signal::FileMutations,
-    Signal::UserPrompts,
-    Signal::UserCorrections,
-];
 
 // ────────────────────── populate: Codex wire → five timelines ──────────────────────
 //
@@ -993,13 +969,13 @@ pub fn build_codex_evidence(
 /// Serialize），展示层自己转一道——与 `behavior.rs::rule_outcomes_json` 同一个
 /// 做法，输出形状由这里单独控制，Python 镜像逐字节对齐。
 pub fn codex_evidence_json(evidence: &CodexEvidence) -> Value {
-    let signals: Vec<String> = ALL_SIGNALS
+    let signals: Vec<String> = Signal::ALL
         .iter()
         .filter(|s| evidence.canonical.signals.contains(**s))
         .map(|s| format!("{s:?}"))
         .collect();
     let mut coverage_map = serde_json::Map::new();
-    for s in ALL_SIGNALS {
+    for s in &Signal::ALL {
         let c = evidence.canonical.coverage.get(*s);
         coverage_map.insert(
             format!("{s:?}"),
@@ -1299,7 +1275,7 @@ mod tests {
         // 所有 19 个 Signal 都出现在 coverage 里，缺一个就说明序列化漏了。
         let coverage = out["coverage"].as_object().unwrap();
         assert_eq!(coverage.len(), 20);
-        for s in ALL_SIGNALS {
+        for s in &Signal::ALL {
             assert!(coverage.contains_key(&format!("{s:?}")));
         }
         assert_eq!(coverage["ToolCalls"], json!({"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0, "available": true}));

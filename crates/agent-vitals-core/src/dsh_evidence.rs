@@ -480,16 +480,18 @@ fn derive_coverage(execution_events: &[Value], usage_events: &[Value]) -> (Signa
     // （避免出现第二份可能跑偏的常驻上下文估算）。
     add(&mut signals, &mut coverage, Signal::ContextWindow, if usage_events.is_empty() { CoverageCounts::default() } else { derived(1) });
 
-    // NetworkAccess：§13 判 DSH unavailable——EXECUTION_EVENT_TYPES 里确实
-    // 没有任何网络访问事件类型,如实记 unavailable（全零 coverage,不进
-    // SignalSet）,不编一个措辞好看的"未来支持"。
-    coverage.set(Signal::NetworkAccess, CoverageCounts::default());
-    coverage.set(Signal::QuotaConsumption, CoverageCounts::default());
-
-    // 契约 §13 矩阵没有这三行的 DSH 列——不编造,一律 unavailable。
-    coverage.set(Signal::SandboxPolicy, CoverageCounts::default());
-    coverage.set(Signal::UserPrompts, CoverageCounts::default());
-    coverage.set(Signal::UserCorrections, CoverageCounts::default());
+    // NetworkAccess（EXECUTION_EVENT_TYPES 里确实没有任何网络访问事件类型）/
+    // QuotaConsumption / SandboxPolicy / UserPrompts / UserCorrections：§13
+    // 矩阵判 DSH unavailable 或矩阵没有 DSH 列的信号，如实记全零 coverage、
+    // 不进 SignalSet，不编一个措辞好看的"未来支持"。v0.6 host-contract spec
+    // §6/§11-M2a：这五个信号不再是本文件的字面量表，改从 core
+    // `host_capability::HOSTS` 的 "dsh" 行读（行上的值就是从这里原来的五行
+    // 字面量搬过去的，golden 字节不变）。
+    if let Some(profile) = crate::host_capability::host_profile("dsh") {
+        for signal in profile.unmeasured_signals.iter().copied() {
+            coverage.set(signal, CoverageCounts::default());
+        }
+    }
 
     (signals, coverage)
 }

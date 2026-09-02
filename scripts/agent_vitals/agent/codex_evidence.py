@@ -32,6 +32,7 @@ evidence 把 `canonical`（§12 规定不持有任何宿主专属 payload）和�
 import re
 
 from agent_vitals.agent import canonical_audit
+from agent_vitals.agent.host_capability import host_profile
 
 # 19 个 Signal 的声明序——与 Rust `codex_evidence.rs::ALL_SIGNALS` 同名同序。
 # `signals` 数组 / `coverage` 字典的输出顺序都靠这份显式表对齐，不靠 Python
@@ -136,12 +137,10 @@ KNOWN_RESPONSE_TYPES = frozenset((
 # 是真实线格式（session 01a029cb 实测 15 条），2026-08 已改 measured。
 # UserCorrections 留在里面：它的定义是 UserPrompts + TurnBoundaries 的关键词/
 # 时间窗启发（§3.2），没有任何宿主有参考实现（DSH 也显式置零），移植即发明。
-_UNAVAILABLE_SIGNALS = (
-    "StepBoundaries",
-    "SandboxPolicy",
-    "NetworkAccess",
-    "UserCorrections",
-)
+# v0.6 host-contract spec §6/§11-M2a：这份清单不再是本文件的字面量表，改从
+# `host_capability.HOSTS` 的 "codex" 行读（行上的值就是从这里原来的字面量表
+# 搬过去的，golden 字节不变）。
+_UNAVAILABLE_SIGNALS = tuple(host_profile("codex")["unmeasured_signals"])
 
 # §14.3 的 SkillInvocations 说明文本——在 Rust 里逐字节相同，差分测试靠它。
 _SKILL_INVOCATION_NOTE = (

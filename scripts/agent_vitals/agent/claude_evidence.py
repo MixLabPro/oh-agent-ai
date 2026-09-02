@@ -32,6 +32,8 @@ Unavailable 是 dispatcher 层的判定，不在本适配器：本适配器的�
 
 import json
 
+from .host_capability import host_profile
+
 # 20 个 Signal 的声明序——`signals` 数组 / `coverage` 字典的输出顺序都靠这份显式
 # 表对齐（与 Rust `claude_code_evidence.rs::ALL_SIGNALS` 同表同序），不靠 Python
 # 的任意 set 迭代序。
@@ -79,20 +81,15 @@ KNOWN_TYPES = frozenset((
 
 # §13 Claude Code 列明确 unavailable / 没有对应列的信号。`derive_coverage` 的
 # 置零与 `claude_evidence_json` 的 `available` 标记共用这一份清单，不准两处各写
-# 一份漂移（同 codex_evidence.py 的 `_UNAVAILABLE_SIGNALS`）。
+# 一份漂移。v0.6 host-contract spec §6/§11-M2a：宿主级 unmeasured 声明不再是
+# 本文件的字面量表，改从 `host_capability.HOSTS` 的 "claude-code" 行读（行上
+# 的值就是从这里原来的字面量表搬过去的，golden 字节不变）。
 #
 # `ApprovalDecisions` 是 first-slice 范围：§13 列值是 **partial——denials only,
 # derived+lossy**，靠匹配 tool-result 文本里的 marker string 恢复（§14.5），本次
-# 不实现——先诚实 Unavailable，后续项做 marker 恢复时从这里挪出来。
-_UNAVAILABLE_SIGNALS = (
-    "ContextWindow",
-    "QuotaConsumption",
-    "ApprovalDecisions",
-    "SandboxModes",
-    "SandboxPolicy",
-    "NetworkAccess",
-    "UserCorrections",
-)
+# 不实现——先诚实 Unavailable，后续项做 marker 恢复时从这里挪出来（这条注记的
+# 权威版本在 `host_capability.py` 的 `HOSTS` 行注释里）。
+_UNAVAILABLE_SIGNALS = tuple(host_profile("claude-code")["unmeasured_signals"])
 
 # §14.5 的 SkillInvocations 说明文本——与 Rust 逐字节相同，差分测试靠它。
 _SKILL_INVOCATION_NOTE = (

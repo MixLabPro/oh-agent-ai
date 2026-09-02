@@ -77,6 +77,37 @@ pub enum Signal {
     UserCorrections,
 }
 
+impl Signal {
+    /// 20 个变体的声明序——`signals` 数组 / `coverage` 字典的输出顺序、以及
+    /// 各证据适配器过去各自维护的 `ALL_SIGNALS` 都靠这份序对齐。v0.6
+    /// host-contract spec §6（复制点 B）把它上收成这一份共享 Canonical
+    /// Schema：适配器不再各自声明完整信号表，统一用它遍历（M2a）。与 Python
+    /// 镜像 `claude_evidence.py`/`codex_evidence.py`/`workbuddy_evidence.py`
+    /// 的 `ALL_SIGNALS` 元组同表同序。
+    pub const ALL: [Signal; 20] = [
+        Signal::ToolCalls,
+        Signal::ToolResults,
+        Signal::TurnBoundaries,
+        Signal::StepBoundaries,
+        Signal::Usage,
+        Signal::UsageAggregate,
+        Signal::ContextWindow,
+        Signal::QuotaConsumption,
+        Signal::ApprovalDecisions,
+        Signal::ApprovalPolicy,
+        Signal::SandboxModes,
+        Signal::SandboxPolicy,
+        Signal::NetworkAccess,
+        Signal::Compaction,
+        Signal::SubagentSpawns,
+        Signal::SkillInvocations,
+        Signal::Hooks,
+        Signal::FileMutations,
+        Signal::UserPrompts,
+        Signal::UserCorrections,
+    ];
+}
+
 /// `Signal` 的位集合——20 个变体放一个 `u32` 里正好，比 `HashSet<Signal>`
 /// 便宜（`Copy`，不分配），适配器每处理一个事件就可能查询/更新一次。
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -595,6 +626,21 @@ impl<T> Timeline<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signal_all_has_every_variant_exactly_once_in_declaration_order() {
+        // 用位集合断言"一个不多一个不少"，不手写第二份 20 项清单去比对
+        // `Signal::ALL`——那样只是把同一份表抄两遍，抓不出遗漏。
+        let mut seen = SignalSet::EMPTY;
+        for s in Signal::ALL {
+            assert!(!seen.contains(s), "{s:?} 在 Signal::ALL 里出现了不止一次");
+            seen.insert(s);
+        }
+        for s in Signal::ALL {
+            assert!(seen.contains(s));
+        }
+        assert_eq!(Signal::ALL.len(), 20);
+    }
 
     #[test]
     fn coverage_counts_ratio_is_none_when_total_is_zero() {
