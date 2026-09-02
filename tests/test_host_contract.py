@@ -8,10 +8,16 @@
 处理流程）。
 
 Rust 与 Tauri 端的对应实现（G9 的 `HostRuntimeRegistration`、G7 的托盘/
-sessFilter 展示层派生）本轮**未落地**，登记为已知缺口——见模块末尾
-`test_g7_g9_registered_as_known_gap`；理由：两者要求先设计跨二进制/跨语言的
-新注册面，属比本轮其余守卫大一个数量级的独立工作量，不应该为了凑齐编号而
-仓促写一份不真的断言。
+sessFilter 展示层派生）**部分落地**：core `host_capability.rs`（Rust）+
+`crates/agent-vitals-core/tests/host_contract.rs`、二进制侧
+`src/agent/host_runtime_registration.rs`、src-tauri 侧 `overview.rs`/
+`lib.rs::host_display_name` 的单测已经钉住了各自的部分；本文件只补
+`workbench.html` 的 sessFilter chips 这一处纯前端静态资源（读文件文本，
+不需要 Node/浏览器）。仍未落地的部分（Tauri 的 `tauri.sessions`/
+`tauri.menubar-cost` surface 登记）登记为已知缺口——见模块末尾
+`test_g7_g9_registered_as_known_gap`，理由是 Tauri 不直接持有
+SessionStore/折叠逻辑而是 shell 调 CLI 子命令，它的"注册"问题形状不同，
+需要专门梳理调用面。
 """
 
 import re
@@ -466,28 +472,51 @@ class G10PricingResolutionTests(unittest.TestCase):
         self.assertNotAlmostEqual(priced["total"], expected_off_peak_total)
 
 
+# ────────────────────────── G7：sessFilter 展示层一致性 ──────────────────────
+
+class G7SessFilterTests(unittest.TestCase):
+    """`src-tauri/ui/workbench.html` 的会话筛选 chips 是纯静态标记（无构建期
+    代码生成），不能像 Rust 那样"从行派生"；这里退而求其次，用源码自扫描
+    钉住"chips 集合 == 注册了 session_store 的宿主集合"，防止两边手工维护
+    的清单再次分叉（v0.6 spec §6：claude-code 此前缺席过一次 chip，
+    868f1a7 并行流已经补上——本测试是这个事实之后的回归防线，不是新功能）。
+    """
+
+    def test_workbench_chips_match_session_store_hosts_exactly(self):
+        html = (ROOT / "src-tauri" / "ui" / "workbench.html").read_text(encoding="utf-8")
+        chip_hosts = set(re.findall(r'data-host="([a-z-]+)"', html)) - {"all"}
+        expected = {h["id"] for h in host_capability.HOSTS if h["session_store"]}
+        self.assertEqual(chip_hosts, expected,
+                         "workbench.html 的 sessFilter chips 与已注册 session_store "
+                         "的宿主集合不一致——两边任一改了都要同步另一边")
+
+
 # ────────────────────────── G7 / G9：已知缺口登记 ──────────────────────────
 
 class KnownGapRegistrationTests(unittest.TestCase):
     def test_g7_g9_registered_as_known_gap(self):
-        """G7/G9 是**部分**落地，不是全空：
+        """G7/G9 目前只剩一处**真实**缺口，其余都已落地并各自有单测钉住：
 
-        - G7：src-tauri `overview.rs::HostsSnapshot::unavailable()`（托盘兜底
-          三行）已改从 core `HOSTS` 的 `fold != None` 派生（见该文件同名单测
-          `hosts_snapshot_unavailable_derives_from_hosts_registry_fold_
-          capability`）。**未落地**的是真实数据路径
-          `r2a_store.rs::sessions_navigation`——它对三个宿主各跑不同的折叠
-          机制（dsh state 链 / codex 全量 rollout / claude ledger），不是可
-          直接遍历的同构循环，要把它接进注册集需要先在 G9 里把 `fold` 维度
-          设计进 `HostRuntimeRegistration`，两者是同一块未完成的工作，不是
-          各自独立的缺口。sessFilter（`workbench.js`，前端）同样未动。
-        - G9：`src/agent/host_runtime_registration.rs` 新建了 CLI 二进制的
-          `HostRuntimeRegistration`，登记了 `cli.sessions` surface 的
-          `session_store` 维度（`required_for_cli_sessions() ⊆
-          registered_for_cli_sessions()`，Rust 侧单测钉住）。**未落地**的是
-          `fold` 维度（上面 G7 那段解释了它为什么不是简单体力活）与
-          `tauri.sessions`/`tauri.menubar-cost` 两个 surface（要在 src-tauri
-          侧建独立的注册表——那是另一个二进制，注册面不共享）。
+        - G7 已完成：src-tauri `overview.rs::HostsSnapshot::unavailable()`
+          （托盘兜底行）从 `HOSTS` 的 `fold != None` 派生；
+          `lib.rs::host_display_name` 从 `HOSTS` 的 `display` 派生（副作用：
+          WorkBuddy 现在也能正确解析出显示名）；`workbench.html` 的
+          sessFilter chips 与 `session_store` 宿主集合一致性由本文件
+          `G7SessFilterTests` 钉住。
+        - G9 已完成：`src/agent/host_runtime_registration.rs` 登记了
+          `cli.sessions` surface 的 `session_store` 与 `fold` 两个维度
+          （`required_for_cli_sessions[_fold]() ⊆
+          registered_for_cli_sessions[_fold]()`，Rust 侧单测钉住）——
+          `sessions_navigation` 对 dsh/codex/claude-code 的折叠路径本身**未
+          改造成共享循环**（三条路径互不相同：state 链/全量 rollout/
+          ledger，§2.2 明文拒绝为了共享接口发明假抽象），本表只登记"接了
+          没有"这个事实。
+
+        **仍未落地**：`tauri.sessions`/`tauri.menubar-cost` 两个 surface 的
+        注册——Tauri 不直接持有 SessionStore/折叠逻辑，而是 shell 出去调
+        `agent-vitals` 子命令（`store.rs::run_json`），它的"注册"问题形状
+        与本二进制不同（"这个 Tauri 构建调用了哪些子命令"），需要专门梳理
+        调用面，不应该现在为了凑格式塞一张名不副实的占位表。
 
         这里不重复 Rust 侧断言（那些已经在各自的单测里），只登记"做了多少、
         剩多少、为什么剩"，供 M3 收尾时核对。"""
