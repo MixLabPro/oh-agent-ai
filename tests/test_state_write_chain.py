@@ -36,6 +36,12 @@ from agent_vitals.agent import state as state_mod  # noqa: E402
 from agent_vitals.agent import budget as budget_mod  # noqa: E402
 
 _BIN = os.environ.get("AGENT_VITALS_BIN")
+# 与 golden_runner.py / test_cli_matrix.py 同款：解析成绝对路径。差分用例以
+# tmp/workdir 为 cwd 跑子进程，相对路径在这里会 FileNotFoundError（CI 传绝对
+# 路径所以没暴露；本机按 CLAUDE.md 的 `AGENT_VITALS_BIN=target/release/...`
+# 跑就炸）。
+if _BIN:
+    _BIN = str(Path(_BIN).resolve())
 _BJ = timezone(timedelta(hours=8))
 
 # 8 桶字段 —— 与 core/state.rs 的 BUCKET_FIELDS 同清单。

@@ -34,6 +34,12 @@ from tests.env_helpers import isolated_home_env
 ROOT = Path(__file__).resolve().parent.parent
 SCAN = ROOT / "scripts" / "scan.py"
 _BIN = os.environ.get("AGENT_VITALS_BIN")
+# 与 golden_runner.py / test_cli_matrix.py 同款：解析成绝对路径。差分用例以
+# tmp/workdir 为 cwd 跑子进程，相对路径在这里会 FileNotFoundError（CI 传绝对
+# 路径所以没暴露；本机按 CLAUDE.md 的 `AGENT_VITALS_BIN=target/release/...`
+# 跑就炸）。
+if _BIN:
+    _BIN = str(Path(_BIN).resolve())
 SCAN_CMD = [_BIN] if _BIN else [sys.executable, str(SCAN)]
 
 
