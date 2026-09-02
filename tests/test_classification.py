@@ -42,14 +42,15 @@ RS_SKILLS_FAMILY = {
 # 会话行为/成本审计（agent/ 子树）。**注意 skill.py 在这里**：会话 skill 执行
 # 审计读的是运行证据，不是 SKILL.md 文本——名字像扫描器，家族是 agent。
 PY_AGENT_FAMILY = {
-    "behavior", "budget", "canonical_audit", "claude_evidence",
+    "behavior", "budget", "canonical_audit", "claude_cost", "claude_evidence",
     "claude_session_audit", "codex_cost", "codex_evidence", "codex_session_audit",
     "codex_usage", "compaction", "cost", "duration", "host_capability", "plan",
     "r2a", "skill", "state", "subagent", "takeover", "trajectory", "usage",
     "waste", "workbuddy_evidence", "workbuddy_session_audit",
 }
 RS_AGENT_FAMILY = {
-    "behavior", "budget", "claude_session", "codex_cost", "codex_session",
+    "behavior", "budget", "claude_cost", "claude_session", "codex_cost",
+    "codex_session",
     "codex_session_audit", "cost", "discovery", "oneline", "plan", "r2a_store",
     "state", "takeover", "workbuddy_session",
 }

@@ -11,6 +11,7 @@ re-export 本子包的模块名，顶层 `agent_vitals/__init__.py` 再把它们
 from . import (
     behavior,
     budget,
+    claude_cost,
     claude_evidence,
     claude_session_audit,
     codex_cost,
@@ -33,6 +34,7 @@ from . import (
 __all__ = [
     "behavior",
     "budget",
+    "claude_cost",
     "claude_evidence",
     "claude_session_audit",
     "codex_cost",

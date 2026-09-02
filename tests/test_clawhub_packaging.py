@@ -37,7 +37,8 @@ ALLOWED_PACKAGE_FILES = {
         "skills/security.py", "skills/snapshots.py",
         # agent/：会话行为 + 成本
         "agent/__init__.py", "agent/behavior.py", "agent/budget.py",
-        "agent/canonical_audit.py", "agent/claude_evidence.py",
+        "agent/canonical_audit.py", "agent/claude_cost.py",
+        "agent/claude_evidence.py",
         "agent/claude_session_audit.py",
         "agent/codex_cost.py", "agent/codex_evidence.py",
         "agent/codex_session_audit.py", "agent/codex_usage.py",

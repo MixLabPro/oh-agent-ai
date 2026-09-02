@@ -452,6 +452,20 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Fold Claude Code session files (`~/.claude/projects/**/*.jsonl`) into the
+    /// claude data plane: claude-fold.json checkpoints + claude-ledger.json /
+    /// claude-ledger-archive.json per-day by_model buckets (R1d-tick producer
+    /// for the tray's Claude ≈ estimate columns; the tick runs this after the
+    /// DSH oneline fold). Byte-for-byte mirror of Python `scan.py claude-sync`.
+    /// Fenced like oneline: state owner must be `rust` (takeover) unless
+    /// --shadow. Tail-reads appended rows since the last sync (offset + size +
+    /// mtime checkpoints, exactly-once); cost-state records replace the
+    /// session baseline rather than adding to it.
+    ClaudeSync {
+        /// Rehearse on a copy: skip writer fencing (like `oneline --shadow`)
+        #[arg(long)]
+        shadow: bool,
+    },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
     /// `sessions` row is the join anchor across the three joinable surfaces (spec
@@ -1550,6 +1564,21 @@ fn main() {
             println!("{text}");
         }
         return;
+    }
+
+    // claude-sync：Claude Code 会话账 fold 生产者（tick 在 oneline 之后调）。
+    // home 解析同 claude-session；fencing/内部错误 exit 2（同 oneline 语义）。
+    if let Some(Cmd::ClaudeSync { shadow }) = &args.cmd {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        match agent::claude_cost::claude_sync(Path::new(&home), *shadow) {
+            Ok(_) => return,
+            Err(msg) => {
+                eprintln!("{msg}");
+                std::process::exit(2);
+            }
+        }
     }
 
     // WorkBuddy 会话审计。与 claude/codex-session 同款 home 解析与缺省 --session =

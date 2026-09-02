@@ -831,6 +831,19 @@ def _main():
                                        "most recent session")
     p_claude_session.add_argument("--json", metavar="FILE",
                                   help="Write the audit JSON to FILE; use - for stdout")
+    # Claude Code 会话账 fold（第三数据面）：发现 ~/.claude/projects 里变化的
+    # 会话文件 → 尾读折 checkpoint（claude-fold.json，cost-state 基线替换 + 行尾
+    # 增量）→ 全量重建 claude-ledger.json / claude-ledger-archive.json（托盘账卡
+    # 的 Claude 估列数据源，money 由 core cost.rs 在读取时算——本命令只折 token
+    # 桶）。owner fencing 同 oneline（Python 写者纪律：owner=rust 拒绝，--shadow
+    # 演练跳过）。与 Rust main.rs 的 ClaudeSync 子命令同一种结构。
+    p_claude_sync = sub.add_parser(
+        "claude-sync",
+        help="Fold Claude Code session files (cost-state baseline + row usage) "
+             "into claude-ledger.json; fenced like oneline")
+    p_claude_sync.add_argument(
+        "--shadow", action="store_true",
+        help="Rehearse on a copy: skip writer fencing (like `oneline --shadow`)")
     # WorkBuddy 单会话审计：coverage（§13 逐信号）+ SV601–614 findings。与
     # claude-session 同构；host-capability degradation 是 SV604/605（spec §3.1）——
     # 只有 bash（audit-log commandPreview）与 web_fetch（WebFetch target）能 join，
@@ -1361,6 +1374,20 @@ def _main():
                 print("Wrote %s" % args.json)
         else:
             print(text)
+        return
+
+    # Claude Code 会话账 fold。与 Rust main.rs 的 ClaudeSync handler 同一种结构：
+    # home 从 HOME/USERPROFILE 解析（claude_project_files 的根）；fencing 失败
+    # 快速 exit 2（同 oneline 写者纪律）；fold 内部单文件坏行只计 failed、不
+    # abort——只有 fencing/IO 硬错才到这里。
+    if getattr(args, "cmd", None) == "claude-sync":
+        from agent_vitals import claude_cost as cc
+        home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or ""
+        try:
+            cc.claude_sync(Path(home), shadow=getattr(args, "shadow", False))
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(2)
         return
 
     # WorkBuddy 单会话审计：coverage + SV601–614 findings（SV604/605 降级 Unavailable，
