@@ -13,7 +13,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::parse_rfc3339_secs;
-use agent_vitals_core::cost::{bucket_cost, load_pricing, month_cost, priced_day, today_cost};
+use agent_vitals_core::cost::{
+    bucket_cost, claude_day_cost, load_pricing, month_cost, priced_day, today_cost,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -233,14 +235,18 @@ pub struct HostsSnapshot {
 
 impl HostsSnapshot {
     /// 缺场/解析失败兜底：generated_at None（无缓存 → 无 stale footer）、固定
-    /// 两行 unavailable（dsh→codex）。一条坏掉的 hosts.json 不该让菜单整块消失
-    /// （同 last-sync.json 的「解析失败走默认」哲学）。
+    /// 三行 unavailable（dsh→codex→claude-code，键序与 `sessions navigation`
+    /// hosts 数组一致——托盘永远渲染固定三行，数据缺失才显示「—」，spec §8）。
+    /// 一条坏掉的 hosts.json 不该让菜单整块消失（同 last-sync.json 的「解析失败
+    /// 走默认」哲学）。旧版只落两行的 hosts.json 按字面读出两行（宽容：不整盘
+    /// 丢弃），下一轮 tick 的三行快照覆盖它。
     pub fn unavailable() -> Self {
         HostsSnapshot {
             generated_at: None,
             hosts: vec![
                 HostRow::unavailable("dsh"),
                 HostRow::unavailable("codex"),
+                HostRow::unavailable("claude-code"),
             ],
         }
     }
@@ -257,7 +263,8 @@ pub fn save_hosts_at(dh: &Path, snap: &HostsSnapshot) {
 }
 
 /// 读回上一轮 tick 的宿主快照。缺场/解析失败 → `HostsSnapshot::unavailable()`
-/// （dsh→codex 固定两行——托盘永远渲染固定两行，数据缺失才显示「—」，spec §8）。
+/// （dsh→codex→claude-code 固定三行——托盘永远渲染固定三行，数据缺失才显示
+/// 「—」，spec §8）。
 pub fn read_hosts_at(dh: &Path) -> HostsSnapshot {
     read_json(&dh.join("state").join("hosts.json"))
         .and_then(|v| serde_json::from_value::<HostsSnapshot>(v).ok())
@@ -333,6 +340,13 @@ pub struct Overview {
     /// （spec §6 决策 5），与 hosts 同源同刻，拆开是因为 stale 是派生值不入盘。
     pub hosts_generated_at: Option<String>,
     pub estimate_note: String,
+    /// Claude Code 成本估（账卡分列，D2）：`claude_today` = core `claude_day_cost`
+    /// 折 claude-ledger 当日 flat 直图的整报告；`claude_month` = 当月逐日
+    /// currency_totals 聚合。两者 None = 没有可报价的账日（无账文件 / 当日缺场 /
+    /// 当月无账——「没账可报」≠「估 0」，托盘不显示那一段）。钱在**读时**算：
+    /// ledger 只存 token，价表会变 token 不会（与 DSH month.json 同一条纪律）。
+    pub claude_today: Option<Value>,
+    pub claude_month: Option<Value>,
 }
 
 /// 数据根（镜像 `paths.py::data_home` / `snapshot.rs::data_home_from` 的优先序）：
@@ -529,6 +543,20 @@ fn read_overview_at(dh: &Path) -> Overview {
     // 字节契约，托盘只渲染（spec §5.3「托盘不做任何排序/求和/日界换算」）。
     let hosts_snap = read_hosts_at(dh);
 
+    // Claude Code 估（账卡分列，D2）：读 claude-ledger.json 逐日账 → core
+    // `claude_day_cost`（flat 直图，rebuild_days 真机形状）折钱。账文件缺/解析
+    // 失败 → (None, None)（诚实「无账可报」，不把缺账当估 0）。当月聚合按
+    // `cur_month` 过滤——ledger 写时已滚动只装当月（claude_sync 全量重建），读时
+    // 仍只认当月键：日历翻页但还没跑过新一轮 claude-sync 时 ledger 可能还停在上
+    // 个月，不过滤就会把上个月的折算当"本月"贴标签（month.json month-stale 事故
+    // 的同款纪律；flat 日结构不同，`filter_days_to_month` 不适用）。
+    let claude_days = read_json(&state.join("claude-ledger.json"))
+        .and_then(|l| l.get("days").cloned())
+        .and_then(|d| d.as_object().cloned())
+        .unwrap_or_default();
+    let (claude_today, claude_month) =
+        claude_estimates(&claude_days, &today, &cur_month, &pricing);
+
     Overview {
         data_home: dh.display().to_string(),
         today: today_val,
@@ -541,7 +569,58 @@ fn read_overview_at(dh: &Path) -> Overview {
         hosts: hosts_snap.hosts,
         hosts_generated_at: hosts_snap.generated_at,
         estimate_note: "估算值，不是账单；覆盖率不足的日子按 fallback 价补齐并标注".to_string(),
+        claude_today,
+        claude_month,
     }
+}
+
+/// claude-ledger 的逐日 flat 账（`{date: {model: 4 型 snake}}`）→ (今日估报告,
+/// 当月聚合)。纯函数——today/cur_month 由调用方注入，单测不碰系统钟。
+///
+/// · 今日 = core `claude_day_cost` 直出的整报告（per_model 也在，哪天面板想画
+///   模型分列不用改这里的契约）；
+/// · 当月 = 各账日 `currency_totals` 逐日合并（claude 无时段价、同币相加安全；
+///   只算 cur_month 前缀的日子）。
+/// 今日缺场 / 当月没有任何可报价账日 → 对应侧 None。`days` 为空 map → (None,
+/// None)。
+fn claude_estimates(
+    days: &serde_json::Map<String, Value>,
+    today: &str,
+    cur_month: &str,
+    pricing: &Value,
+) -> (Option<Value>, Option<Value>) {
+    let today_report = days.get(today).and_then(|day| claude_day_cost(day, pricing));
+    let mut cny = 0.0f64;
+    let mut usd = 0.0f64;
+    let mut n = 0u32;
+    for (date, day) in days {
+        if !date.starts_with(cur_month) {
+            continue;
+        }
+        if let Some(r) = claude_day_cost(day, pricing) {
+            cny += r
+                .get("currency_totals")
+                .and_then(|c| c.get("CNY"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            usd += r
+                .get("currency_totals")
+                .and_then(|c| c.get("USD"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            n += 1;
+        }
+    }
+    let month_report = if n > 0 {
+        Some(json!({
+            "currency_totals": {"CNY": cny, "USD": usd},
+            "days": n,
+            "estimate_disclaimer": "按模型族官方卡折算的估算，不是账单",
+        }))
+    } else {
+        None
+    };
+    (today_report, month_report)
 }
 
 /// 一天的成本行：`priced_day`（唯一覆盖率校验入口）→ 无 by_model 的日子退回
@@ -1010,6 +1089,93 @@ mod tests {
         // alert.json 缺场 → budget.source == "missing"（UI 走「等预算数据」降级）。
         assert_eq!(ov.budget.source, "missing");
         assert!(ov.budget.level.is_none() && ov.budget.month_ratio.is_none());
+        // 无 claude-ledger.json → claude 估两侧 None（诚实「没账可报」，不摆估 0）。
+        assert!(ov.claude_today.is_none());
+        assert!(ov.claude_month.is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// claude_estimates 纯函数：flat 直图日（rebuild_days 真机形状，含全零的
+    /// `<synthetic>` 未知模型键）→ 今日整报告 + 当月聚合。今日缺场 / 当月无任何
+    /// 可报价账日 → None；上个月的账不进当月聚合（ledger 读时仍只认当月键）。
+    #[test]
+    fn claude_estimates_mix_currencies_and_filter_month() {
+        let pricing = load_pricing();
+        let zero_day = json!({"<synthetic>": {
+            "input_tokens": 0, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0, "output_tokens": 0}});
+        let day_1 = json!({"deepseek-v4-flash": {
+            "input_tokens": 2_000_000, "cache_read_input_tokens": 10_000_000,
+            "cache_creation_input_tokens": 0, "output_tokens": 400_000},
+            "claude-sonnet-5": {
+                "input_tokens": 1_000_000, "cache_read_input_tokens": 2_000_000,
+                "cache_creation_input_tokens": 0, "output_tokens": 100_000}});
+        let day_2 = json!({"claude-sonnet-5": {
+            "input_tokens": 100_000, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0, "output_tokens": 20_000}});
+        let mut days = serde_json::Map::new();
+        days.insert("2026-09-01".into(), day_1.clone());
+        days.insert("2026-09-02".into(), day_2);
+        days.insert("2026-08-31".into(), day_1); // 上月：不进当月聚合
+        days.insert("2026-09-03".into(), zero_day); // 全零未知模型日：不可报价
+        let (today, month) = claude_estimates(&days, "2026-09-02", "2026-09", &pricing);
+
+        let today_r = today.expect("当日 flat 直图必须可报价");
+        let tcny = today_r["currency_totals"]["CNY"].as_f64().unwrap();
+        let tusd = today_r["currency_totals"]["USD"].as_f64().unwrap();
+        assert!(tcny == 0.0, "当日只有 claude-sonnet-5 → CNY 侧应为 0，got {tcny}");
+        assert!(tusd > 0.0, "claude-sonnet-5 按 anthropic USD 卡折算");
+
+        let month_r = month.expect("当月两天可报价");
+        assert_eq!(month_r["days"].as_u64().unwrap(), 2, "上月 08-31 与全零日不计入");
+        // 聚合 = 当月各可报价日的 currency_totals 逐项相加
+        let d1_r = claude_day_cost(&days["2026-09-01"], &pricing).unwrap();
+        let expect_cny = d1_r["currency_totals"]["CNY"].as_f64().unwrap();
+        let expect_usd = d1_r["currency_totals"]["USD"].as_f64().unwrap()
+            + today_r["currency_totals"]["USD"].as_f64().unwrap();
+        assert!((month_r["currency_totals"]["CNY"].as_f64().unwrap() - expect_cny).abs() < 1e-9);
+        assert!((month_r["currency_totals"]["USD"].as_f64().unwrap() - expect_usd).abs() < 1e-9);
+
+        // 缺今日 / 空 map → 对应 None
+        let (t_missing, m_ok) = claude_estimates(&days, "2026-09-09", "2026-09", &pricing);
+        assert!(t_missing.is_none() && m_ok.is_some());
+        let empty = serde_json::Map::new();
+        let (t_e, m_e) = claude_estimates(&empty, "2026-09-02", "2026-09", &pricing);
+        assert!(t_e.is_none() && m_e.is_none());
+    }
+
+    /// 端到端：claude-ledger.json（写当日 flat 直图 + 当月 + 上月残留）→
+    /// read_overview_at 的 claude_today/claude_month 落位，上月残留不进"本月"。
+    #[test]
+    fn read_overview_embeds_claude_ledger_estimates() {
+        let tmp = std::env::temp_dir().join("sv-menubar-claude-ledger-overview-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        let today = today_beijing();
+        let other_month = if &today[5..7] == "01" {
+            format!("{}-12", &today[..4])
+        } else {
+            format!("{:04}-{:02}", today[..4].parse::<i32>().unwrap(),
+                    today[5..7].parse::<u32>().unwrap() - 1)
+        };
+        let day = json!({"claude-sonnet-5": {
+            "input_tokens": 500_000, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0, "output_tokens": 50_000}});
+        let mut days_map = serde_json::Map::new();
+        days_map.insert(today.clone(), day.clone());
+        days_map.insert(format!("{other_month}-15"), day);
+        let ledger = json!({"days": days_map});
+        std::fs::write(
+            tmp.join("state").join("claude-ledger.json"),
+            serde_json::to_string(&ledger).unwrap(),
+        )
+        .unwrap();
+        let ov = read_overview_at(&tmp);
+        let today_r = ov.claude_today.expect("当日 ledger 必须折出估");
+        assert!(today_r["currency_totals"]["USD"].as_f64().unwrap() > 0.0);
+        let month_r = ov.claude_month.expect("当月必须有一日");
+        assert_eq!(month_r["days"].as_u64().unwrap(), 1, "上月残留 15 日不进本月");
+        assert!((month_r["currency_totals"]["CNY"].as_f64().unwrap() - 0.0).abs() < 1e-9);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1185,20 +1351,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 缺场兜底：没有 hosts.json → generated_at None + 固定两行 unavailable
-    /// （dsh→codex，status "unavailable"），L1 全 None——托盘永远渲染两行，
-    /// 「—」是缺失不是 0；无 generated_at 也就无 stale footer（从未成功过）。
+    /// 缺场兜底：没有 hosts.json → generated_at None + 固定三行 unavailable
+    /// （dsh→codex→claude-code，status "unavailable"），L1 全 None——托盘永远
+    /// 渲染三行，「—」是缺失不是 0；无 generated_at 也就无 stale footer（从未
+    /// 成功过）。
     #[test]
-    fn hosts_missing_falls_back_to_two_unavailable_rows() {
+    fn hosts_missing_falls_back_to_three_unavailable_rows() {
         let tmp = std::env::temp_dir().join("sv-menubar-hosts-missing-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("state")).unwrap();
         let snap = read_hosts_at(&tmp);
         assert!(snap.generated_at.is_none());
         let hosts = &snap.hosts;
-        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts.len(), 3);
         assert_eq!(hosts[0].host_kind, "dsh");
         assert_eq!(hosts[1].host_kind, "codex");
+        assert_eq!(hosts[2].host_kind, "claude-code");
         assert!(hosts
             .iter()
             .all(|h| h.status == "unavailable"
@@ -1219,9 +1387,10 @@ mod tests {
         let snap = read_hosts_at(&tmp);
         assert!(snap.generated_at.is_none());
         let hosts = &snap.hosts;
-        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts.len(), 3);
         assert_eq!(hosts[0].host_kind, "dsh");
         assert_eq!(hosts[1].host_kind, "codex");
+        assert_eq!(hosts[2].host_kind, "claude-code");
         assert!(hosts.iter().all(|h| h.status == "unavailable"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1258,9 +1427,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp2);
         std::fs::create_dir_all(tmp2.join("state")).unwrap();
         let ov2 = read_overview_at(&tmp2);
-        assert_eq!(ov2.hosts.len(), 2);
+        // hosts.json 缺场 → 固定三行 unavailable（dsh→codex→claude-code）。
+        assert_eq!(ov2.hosts.len(), 3);
         assert_eq!(ov2.hosts[0].host_kind, "dsh");
         assert_eq!(ov2.hosts[1].host_kind, "codex");
+        assert_eq!(ov2.hosts[2].host_kind, "claude-code");
         assert!(ov2.hosts_generated_at.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&tmp2);

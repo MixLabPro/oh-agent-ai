@@ -30,11 +30,23 @@ fn tray_template_icon() -> tauri::Result<tauri::image::Image<'static>> {
     tauri::image::Image::from_bytes(include_bytes!("../icons/trayTemplate@2x.png"))
 }
 
-/// 金额 → `¥600` / `¥774.7` / `¥6.73`。与 core `cost.rs::format_money` 同 spec。
-fn fmt_money(x: f64) -> String {
+/// 金额修剪 + 符号（`fmt_money`/`fmt_usd` 共享）。尾零与小数点只修剪、不做进位
+/// 取舍——精度由上面的档位决定。与 core `cost.rs::format_money` 同 spec。
+fn fmt_currency(x: f64, symbol: &str) -> String {
     let s = if x >= 100.0 { format!("{x:.1}") } else { format!("{x:.2}") };
     let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
-    format!("¥{s}")
+    format!("{symbol}{s}")
+}
+
+/// 金额 → `¥600` / `¥774.7` / `¥6.73`。与 core `cost.rs::format_money` 同 spec。
+fn fmt_money(x: f64) -> String {
+    fmt_currency(x, "¥")
+}
+
+/// USD 金额 → `$3` / `$28` / `$0.52`（Claude 估列用）。¥ 与 $ 分开标、不混加
+/// （D2 分币分列）——一个数同时标两种货币是记账错误，两个估分开才是诚实。
+fn fmt_usd(x: f64) -> String {
+    fmt_currency(x, "$")
 }
 
 /// RFC3339 时间戳 → unix 秒。只认 alert.json 的机器格式（`2026-08-30T07:04:38.548588+00:00`
@@ -196,8 +208,34 @@ fn host_display_name(kind: &str) -> String {
     match kind {
         "dsh" => "DeepSeek Harness".to_string(),
         "codex" => "Codex".to_string(),
+        "claude-code" => "Claude Code".to_string(),
         _ => kind.to_string(),
     }
+}
+
+/// Claude Code 估列（账卡分列，D2）→ ` · Claude 估 ≈¥A / ≈$B`。读 overview
+/// 嵌的 `claude_today`/`claude_month`（core `claude_day_cost` 折 ledger 的整报
+/// 告）的 `currency_totals.{CNY,USD}`。两币都 ≤0（无账 / None / 全 unknown
+/// 模型没价可折）→ 空串：**没账可报不是估了 0**，「Claude 估 ≈¥0/≈$0」是编造
+/// 形态（D6）。前缀 `≈` = 官方卡折算、非账单（D1）；¥/$ 分标不混加。估是
+/// DSH 钱行的**追加列**，预算/告警语义不动（DSH-only）。
+fn claude_est_suffix(claude: &Option<Value>) -> String {
+    let Some(r) = claude else { return String::new() };
+    let totals = r.get("currency_totals").unwrap_or(&Value::Null);
+    let mut parts: Vec<String> = Vec::new();
+    // 只有非零币种入段：CNY 0 不是「估 ¥0」，是当天没有 CNY 价的用量——把 0 当
+    // 成一个估塞进菜单是编造形态（与「缺列不编列」同一条纪律）。纯 anthropic
+    // 卡机器只出 `≈$B`，混合机器才出 `≈¥A / ≈$B`。
+    if let Some(cny) = totals.get("CNY").and_then(Value::as_f64).filter(|v| *v > 0.0) {
+        parts.push(format!("≈{}", fmt_money(cny)));
+    }
+    if let Some(usd) = totals.get("USD").and_then(Value::as_f64).filter(|v| *v > 0.0) {
+        parts.push(format!("≈{}", fmt_usd(usd)));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!(" · Claude 估 {}", parts.join(" / "))
 }
 
 /// L1 宿主行文案（spec §4/§8）：`<显示名> · <tokens|—> · <N 会话|—>`。两个
@@ -341,11 +379,12 @@ fn sync_line_text(sync: &SyncStatus) -> String {
         };
     }
     // `at` 是北京时间 `YYYY-MM-DD HH:MM:SS`，菜单只要 HH:MM。成功形态加
-    // 「（DSH 状态折叠）」后缀（spec §4）：同步回路只折 DSH 会话，Codex 没有
-    // 同步循环——时间戳的覆盖范围必须说清楚，不能让人以为它是全宿主的新鲜度。
+    // 「（DSH 折叠 + Claude 账）」后缀（spec §4）：同步回路折 DSH 会话 + 尾折
+    // Claude 账（2026-09-02 起，tick 顺序见 sync_tick），Codex 没有同步循环——
+    // 时间戳的覆盖范围必须说清楚，不能让人以为它是全宿主的新鲜度。
     match sync.at.as_deref().and_then(|s| s.get(11..16)) {
-        Some(hhmm) => format!("上次同步：{hhmm} 成功（DSH 状态折叠）"),
-        None => "上次同步：成功（DSH 状态折叠）".to_string(),
+        Some(hhmm) => format!("上次同步：{hhmm} 成功（DSH 折叠 + Claude 账）"),
+        None => "上次同步：成功（DSH 折叠 + Claude 账）".to_string(),
     }
 }
 
@@ -484,15 +523,23 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
     // 卡里那笔评估额。
     let today_text = match &ov.today {
         Some(t) => format!(
-            "今日按量成本：{} · {} tokens",
+            "今日按量成本：{} · {} tokens{}",
             fmt_money(t["total"].as_f64().unwrap_or(0.0)),
             fmt_tokens(t["tokens"].as_i64().unwrap_or(0)),
+            claude_est_suffix(&ov.claude_today),
         ),
-        None => "今日按量成本：—（无数据）".to_string(),
+        // DSH 今天没数据、Claude 有账 → 后半段照常挂（D2 分宿主分列：DSH 段缺
+        // 列报缺，不拦着 Claude 估显示）。
+        None => format!("今日按量成本：—（无数据）{}", claude_est_suffix(&ov.claude_today)),
     };
     let month_total = ov.month["total"].as_f64().unwrap_or(0.0);
     let budget = ov.budget.monthly_cny.unwrap_or(ov.budget_monthly_cny);
-    let month_text = format!("本月按量成本：{} / {}", fmt_money(month_total), fmt_money(budget));
+    let month_text = format!(
+        "本月按量成本：{} / {}{}",
+        fmt_money(month_total),
+        fmt_money(budget),
+        claude_est_suffix(&ov.claude_month),
+    );
     let budget_text = budget_status_text_at(ov, now_secs);
     // 信息行一律 enabled=true：macOS 对 disabled 菜单项强制灰色渲染，作为常驻
     // 信息几乎不可读；enabled 后文字是系统默认黑。代价是悬停高亮 + 点击会触发
@@ -761,6 +808,29 @@ fn perform_sync() -> SyncStatus {
     }
 }
 
+/// Claude 账尾折（tick 顺序 §8：DSH discover/oneline → `claude-sync` → 宿主区
+/// 刷新）。best-effort：返回 `None` = 成功、`Some(错误)` = 失败——失败不 abort
+/// tick（claude-code 宿主行照常刷新：ledger 缺当日 → null 三元组，诚实形态），
+/// 但 SyncStatus 必须留痕，托盘说「同步成功」时用户有权认为 claude-code 行的
+/// 数字也是新的。claude-sync 幂等（size/mtime 指纹，重跑零变化），每轮 tick 都
+/// 跑没有副作用。owner fencing 与 oneline 同款（本二进制 = rust owner，直跑）。
+fn run_claude_sync(bin: &std::path::Path) -> Option<String> {
+    let home = overview::data_home();
+    let out = std::process::Command::new(bin)
+        .arg("claude-sync")
+        .env("AGENT_VITALS_HOME", &home)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => None,
+        Ok(o) => Some(format!(
+            "claude-sync 失败（{}）：{}",
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Some(format!("claude-sync spawn 失败：{e}")),
+    }
+}
+
 /// fold 完成事件名。与工作台 `src-tauri/ui/workbench.js` 顶部的
 /// `listen("usage-fold-updated", …)` 一一对应——改名/改负载字段必须两处同步改
 /// （workbench.js 的事件桥注释里反向引用了这个名字与负载）。
@@ -903,7 +973,18 @@ fn emit_fold_event(app: &AppHandle) {
 /// 跳过托盘更新的分支（这正是「多数正常路径连 state 重读都不做」的修复：无未折
 /// 会话/二进制缺失/discover 失败也要刷新，把外部更新带进托盘）。
 fn sync_tick(app: &AppHandle) {
-    let status = perform_sync();
+    let mut status = perform_sync();
+    // Claude 账尾折（tick 顺序 §8：DSH discover/oneline → claude-sync → 宿主
+    // 区）。DSH 同步已失败时不叠跑 claude-sync——fold 线失败通常意味着 state
+    // 根/二进制问题，claude 账同根也会失败，一次失败留一个原因。claude-sync 失
+    // 败不 abort tick（宿主区照刷），但 status 换成 fail 留痕（见 run_claude_sync）。
+    if status.ok {
+        if let Some(bin) = resolve_binary() {
+            if let Some(err) = run_claude_sync(&bin) {
+                status = SyncStatus::fail("claude-sync", err);
+            }
+        }
+    }
     overview::save_sync_status(&status);
     // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
@@ -1215,9 +1296,15 @@ mod tests {
             budget,
             recent: overview::RecentSession::default(),
             sync: SyncStatus::default(),
-            hosts: vec![overview::HostRow::unavailable("dsh"), overview::HostRow::unavailable("codex")],
+            hosts: vec![
+                overview::HostRow::unavailable("dsh"),
+                overview::HostRow::unavailable("codex"),
+                overview::HostRow::unavailable("claude-code"),
+            ],
             hosts_generated_at: None,
             estimate_note: String::new(),
+            claude_today: None,
+            claude_month: None,
         }
     }
 
@@ -1315,13 +1402,63 @@ mod tests {
         assert!(daily_budget_text(&ov, FIXTURE_AT_SECS).is_none());
     }
 
-    /// host 显示名映射（spec §4）：dsh → DeepSeek Harness、codex → Codex；
-    /// 未知宿主原样显示（未来加宿主不硬编码）。
+    /// host 显示名映射（spec §4）：dsh → DeepSeek Harness、codex → Codex、
+    /// claude-code → Claude Code（第三宿主行，D5）；未知宿主原样显示（未来加宿主
+    /// 不硬编码）。
     #[test]
-    fn host_display_name_maps_both_hosts_and_unknown() {
+    fn host_display_name_maps_three_hosts_and_unknown() {
         assert_eq!(host_display_name("dsh"), "DeepSeek Harness");
         assert_eq!(host_display_name("codex"), "Codex");
+        assert_eq!(host_display_name("claude-code"), "Claude Code");
         assert_eq!(host_display_name("future-host"), "future-host");
+    }
+
+    /// Claude 估后缀（账卡分列，D2）真值表：None / 两币全零 → 空串（没账可报不
+    /// 是估 0）；只有 CNY / 只有 USD / 双币 → ` · Claude 估 ≈¥A / ≈$B`，¥/$
+    /// 分标不混加。数字走 fmt_money/fmt_usd 同款修剪。
+    #[test]
+    fn claude_est_suffix_truth_table() {
+        assert_eq!(claude_est_suffix(&None), "");
+        assert_eq!(
+            claude_est_suffix(&Some(serde_json::json!(
+                {"currency_totals": {"CNY": 0.0, "USD": 0.0}}))),
+            ""
+        );
+        // 全 unknown 模型日：账在但没价可折 → 两币 0 → 空串（有账≠有价）
+        assert_eq!(
+            claude_est_suffix(&Some(serde_json::json!(
+                {"currency_totals": {"CNY": 0.0, "USD": 0.0}, "unpriced_tokens": 100}))),
+            ""
+        );
+        // 双币都有：CNY 大额/小额修剪各走 fmt_money 档位，USD 同款。
+        assert_eq!(
+            claude_est_suffix(&Some(serde_json::json!(
+                {"currency_totals": {"CNY": 200.0, "USD": 28.0}}))),
+            " · Claude 估 ≈¥200 / ≈$28"
+        );
+        assert_eq!(
+            claude_est_suffix(&Some(serde_json::json!(
+                {"currency_totals": {"CNY": 6.0, "USD": 0.52}}))),
+            " · Claude 估 ≈¥6 / ≈$0.52"
+        );
+        // 只有 USD（纯 anthropic 卡）：CNY 0 不影响 USD 段显示。
+        assert_eq!(
+            claude_est_suffix(&Some(serde_json::json!(
+                {"currency_totals": {"CNY": 0.0, "USD": 3.0}}))),
+            " · Claude 估 ≈$3"
+        );
+        // 报告形状里 currency_totals 缺场（坏数据）→ 两币 0 → 空串，不 panic。
+        assert_eq!(claude_est_suffix(&Some(serde_json::json!({"days": 3}))), "");
+    }
+
+    /// fmt_usd 与 fmt_money 同修剪 spec：整美元不拖 `.0`，小数保留非零尾。
+    #[test]
+    fn fmt_currency_symbols_share_trim_spec() {
+        assert_eq!(fmt_usd(28.0), "$28");
+        assert_eq!(fmt_usd(0.52), "$0.52");
+        assert_eq!(fmt_usd(123.4), "$123.4");
+        assert_eq!(fmt_money(6.0), "¥6");
+        assert_eq!(fmt_money(0.05), "¥0.05");
     }
 
     /// L1 宿主行（spec §4/§8 矩阵逐格）：完整 → `显示名 · token · N 会话`；
@@ -1546,7 +1683,7 @@ mod tests {
             message: "无未折 DSH 会话".into(),
             at: Some("2026-09-01 09:50:52".into()),
         };
-        assert_eq!(sync_line_text(&ok), "上次同步：09:50 成功（DSH 状态折叠）");
+        assert_eq!(sync_line_text(&ok), "上次同步：09:50 成功（DSH 折叠 + Claude 账）");
         let never = SyncStatus::default();
         assert_eq!(sync_line_text(&never), "尚未同步");
         let failed = SyncStatus {
@@ -1558,7 +1695,7 @@ mod tests {
         assert_eq!(sync_line_text(&failed), "⚠ 上次同步失败：oneline 失败");
         // at 缺场（老状态文件）也不能崩，退化成不带时间的成功。
         let ok_no_at = SyncStatus { at: None, ..ok };
-        assert_eq!(sync_line_text(&ok_no_at), "上次同步：成功（DSH 状态折叠）");
+        assert_eq!(sync_line_text(&ok_no_at), "上次同步：成功（DSH 折叠 + Claude 账）");
     }
 
     #[test]
