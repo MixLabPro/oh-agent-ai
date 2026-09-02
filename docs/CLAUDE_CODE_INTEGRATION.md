@@ -97,7 +97,7 @@ derived turn   → agent.turn
 早前会话 65633310/8b85e949/dcf9e5b6 已被清理——Claude Code 会话会轮换删除，
 任何会话文件统计都是时点值（§9.1）。**以上四行不可互比，引用时须带采集时间与范围。**
 
-### 2.2 session.jsonl 事件类型（51 会话抽样，实测 12 种）
+### 2.2 session.jsonl 事件类型（51 会话抽样，实测 13 种）
 
 | 类型 | 数量 | 对适配的价值 |
 |---|---:|---|
@@ -110,6 +110,7 @@ derived turn   → agent.turn
 | `last-prompt` / `ai-title` / `atis-latch` | 未逐类计数 | 会话元数据更新，无审计价值 |
 | `queue-operation` | 未逐类计数 | Continue 排队操作，无 uuid |
 | `system` | 未逐类计数 | 系统事件，无 uuid |
+| `cost-state` | 未逐类计数（12/51 会话文件有——新客户端随压缩点/会话结束写入） | **账单真值**（§9.3 的 fold 基线）：`{type, totalCostUSD, startTime, modelUsage:{模型:{inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, webSearchRequests, costUSD}}, hasUnknownModelCost}`。`modelUsage` camelCase、与 `message.usage` 的 snake 桶一一对应（§2.4）。`costUSD` 对网关模型按默认卡计、高估 20–70×，**只能当官方等效价参照**（§9.3）；`totalCostUSD` 与 `~/.claude.json::projects.*.lastCost` 同源。同一会话压缩后仍累积保留 |
 
 **计数只标已逐类的；未逐类的不编列（缺列不编列）。** `uuid`/`parentUuid` 树只出现在
 `user`/`attachment`/`assistant` 三类上——其余事件无 uuid，是附属信号不是 turn 树成员（§2.3）。
@@ -139,10 +140,18 @@ derived turn   → agent.turn
 | `cache_creation.ephemeral_1h/5m` | 本次 16 文件几乎全无（仅 13 条 cc>0 无分桶） | Anthropic 式缓存分档 |
 | `server_tool_use` | `{web_search_requests, web_fetch_requests}` | 服务端工具计数 |
 
-**assistant 事件承载完整 usage**（本次 126/126 条完整）：`input` / `cache_creation_input` /
-`cache_read_input` / `output` 四桶 + `output_tokens_details.thinking_tokens` +
+**assistant 事件承载完整 usage**（本次 126/126 条完整）：四桶 + `output_tokens_details.thinking_tokens` +
 `cache_creation.ephemeral_1h|5m` 子桶 + `server_tool_use` + `service_tier`/`inference_geo`/
 `iterations`/`speed`。两个必守的桶纪律：
+
+- **计数键名两形（2026-09-02 勘误）**：本表上两行记的短键（`input`/`cache_creation_input`/
+  `cache_read_input`/`output`）来自 09-01 语料；claude-sync 的 fold 目标语料里 assistant
+  usage 是 **API 全形键**（`input_tokens`/`cache_read_input_tokens`/
+  `cache_creation_input_tokens`/`output_tokens`）。claude_cost.rs 的 `SNAKE_KEYS`（全形，
+  真机 100%）是计数键唯一真源、`SHORT_KEYS`（短键）兜旧客户端语料——**两态都认**
+  （wide-in），两态皆无 → 不计 + 哨兵，不硬猜。cost-state 的 `modelUsage` 是 camelCase
+  （`inputTokens`/`outputTokens`/`cacheReadInputTokens`/`cacheCreationInputTokens`），
+  fold 读时只做 camel→snake 键名映射后走**同一条** `price_claude_map` 计价，不重算。
 
 - **缓存桶是「父标量 + 子桶」**：实测 15844 = ephemeral_1h 15844 + ephemeral_5m 0——父字段
   与子桶**不得重复计费**。usage.rs 的 `usage_sample` 判据（CLAUDE.md「wide in, narrow out」）
@@ -314,24 +323,62 @@ Tauri Rust backend
 
 ## 9. 成本部分（收紧）
 
-### 9.1 provider 判定三类（此前过强）
+### 9.1 provider 判定三类（设计 → 落地映射）
 
 `ANTHROPIC_BASE_URL` 只证明**当前配置**，不证明历史会话当时的 provider；
-`claude-* + cache_creation>0` 也可能来自兼容代理。定价依据分三类：
+`claude-* + cache_creation>0` 也可能来自兼容代理。定价依据分三类，**本方案按此落地**：
 
-```text
-observed-route      当前会话明确记录/关联到 provider → 精确价
-inferred-provider   由模型+缓存特征推断 → 金额标「估算」
-unknown-provider    无法可靠归属 → 不出价
-```
+| 设计类 | 语义 | 落地 |
+|---|---|---|
+| observed-route | 明确路由 → 精确价 | DSH 既有 state 折叠（today.json/month.json，¥ 实付估算）——主账单，`pricing_basis` 恒 exact（core cost.rs，DSH 字节钉死） |
+| inferred-provider | 模型+缓存推断 → 标估算 | Claude 账 fold 的计价面：core `resolve_card_catalog` 按模型族命中 `catalog_2026_09` 官方卡（deepseek→providers ¥ 卡、claude-*→anthropic USD、MiniMax→CNY、moonshot→USD），report 的 `pricing_basis="catalog"`、per_model 带 `priced_with` provider 与 `currency`，全量标「按模型族官方卡折算的估算，不是账单」（`estimate_disclaimer`） |
+| unknown-provider | 无法可靠归属 → 不出价 | `<synthetic>` 等未知模型 → 4 型 token 全进 `unpriced_tokens`（不丢不零）；币种只可能是 USD/CNY，真第三种落进来会静默混进 CNY——加新币种时改 `price_claude_map` 的分桶 |
 
-推断金额**不得**与明确路由金额混成同一精度。
+**推断金额不得与明确路由金额混成同一精度**：DSH 精确账与 Claude catalog 估在托盘
+账卡里**分列**（`今日按量成本：¥A` DSH 实 + ` · Claude 估 ≈¥B/≈$C` 后缀），两币
+分开不混加，预算/alert 只对 DSH。
 
-### 9.2 计数规则（未验证前不合并）
+### 9.2 计数规则（落地后逐条验证）
 
-- `thinking_tokens` 是否已含在 `output_tokens` 中**未验证**——不能重复相加；
-- `ephemeral_5m/1h` 是 `cache_creation` 的**子桶**，不能与父字段重复计费；
-- `resolve_card` fallback（cost.rs）机制可用，但 fallback 价是估算，标 `pricing_basis`。
+- `thinking_tokens` 是否已含在 `output_tokens` 中：**fold 不碰它**——Claude 账只数
+  `SNAKE_KEYS` 4 型（input/cache_read/cache_creation/output），thinking 既不加也不
+  从 output 里剔（§2.4 该问题留作展示层未来项，不影响账单桶）；
+- `ephemeral_5m/1h` 是 `cache_creation` 的**子桶**，不能与父字段重复计费：fold 只计
+  `cache_creation_input_tokens` 父标量，子桶不读；
+- catalog 卡平费率（无 DSH 的 peak/off-peak 时段拆分），`price_flat` 按模型类型 ×
+  单价累加，无时段轴；MiniMax tiers 按会话输入总量选 ≤512K 档（v1，行归属超档
+  `[1M]` 等变体走记录在案的近似）。
+
+### 9.3 Claude 账 fold（cost-state 基线 + 行尾增量，落地 2026-09-02）
+
+「Claude Code 的钱从未被计量」的缺口由独立数据面补上（D4：不动 month.json/状态链
+不变量）。实现三件套：`claude-sync` CLI（`src/agent/claude_cost.rs` ↔
+`scripts/agent_vitals/agent/claude_cost.py` 逐字节镜像，`tests/test_claude_cost.py`
+`both()` 差分看守）、`state/claude-fold.json` checkpoint、逐日 ledger。
+
+- **成本-state = 账单真值**：随压缩点/会话结束写入、同一会话压缩后仍累积。逐行
+  `message.usage` 求和**必然漏**（压缩掉的 cache read 在行里零可见）——某会话
+  cost-state 全模型合计 16.9M、行里只有 77%～78%。所以 fold 以**最后一条 cost-state
+  的 modelUsage** 为会话基线，基线后行尾增量补；无 cost-state 的老会话 = 纯行和
+  （标 partial）。
+- **append-only 尾读**：每会话一 checkpoint（session_id → {offset, mtime, size}），
+  只解析新行；size/mtime 指纹决定 skip / 尾读续折 / 整份重折替换。折完全部会话后
+  **从 checkpoint 全量重建** ledger（重建天然幂等——崩溃重跑不双计；2026-08 的
+  month.json 三倍计数事故明确是增量累加的温床，claude 账不复刻）。
+- **日界**：assistant 行带 ISO-8601 timestamp → 北京日（UTC+8，`day_from_iso_ts`
+  从字符串直算不经过 epoch——真机 100% 定宽 Z 格式）；cost-state 基线没有日界，
+  折到会话 `startTime` 日（v1 已文档化近似）。会话删除**不清** ledger（按日键控
+  无尸害——语料是时点值，会话轮换删除会让任何会话文件统计都过期）。
+- **ledger 形状**：`claude-ledger.json` = `{days: {"YYYY-MM-DD": {模型: 4 型 snake
+  tokens}}}` **flat 直图**（只有 token，价格会变、token 不会——DSH month.json 同
+  一条纪律，钱在 `claude_day_cost` 读时才算）。只装当前北京月；跨月日滚动进
+  `claude-ledger-archive.json`（`{"months": {"YYYY-MM": {"days": …}}}`，逐日替换
+  幂等）。缺账日 = 没测到（托盘 null/—，不编 0）；当日存在但全零 → Some(0)「测到
+  0」不是「没测」。
+- **消费方**：core `claude_day_cost`/`claude_session_cost` 同源计价（同一
+  `price_claude_map`，日面 flat/包一层两形都认、cost-state 面只做 camel→snake 键名
+  映射）；托盘账卡分列读 `claude_today`/`claude_month`；`sessions navigation` 的
+  claude-code 宿主行 `today_tokens` basis=ledger（MENUBAR spec §5.2）。
 
 ## 10. 验收章节（新增）
 
@@ -367,7 +414,10 @@ unknown-provider    无法可靠归属 → 不出价
 5. ~~工具名规范化表 + `args_text` 确定性序列化（§7 定稿，落地随适配器）~~ **已落地**
    （`normalize_tool_name` / `canonical_string`，`args_text_is_deterministic_regardless_of_key_order`
    等 core 单测钉住）；
-6. pricing.json 补 MiniMax/claude 官方价（业务数据，需价表；§9）；
+6. ~~pricing.json 补 MiniMax/claude 官方价（业务数据，需价表；§9）~~ **已落地**
+   （2026-09-02 `catalog_2026_09`：anthropic 三卡 USD + MiniMax 两卡 CNY + moonshot
+   kimi-k3 USD + deepseek providers 兜底，语料模型全覆盖；pricing.json 零改动延续，
+   卡被 core `resolve_card_catalog` 消费，见 §9.1）；
 7. ~~SessionStore：`claude_code(home)` + source registry 抽取（§5）~~ **已落地**
    （2026-09-02：第三源全弧线——`SessionStore::claude_code` + payload `files` 键 +
    `claude_source_statuses` 三态 + `all()` 三源并行 + roots 报告，Rust/Python 锁步，
@@ -380,7 +430,18 @@ unknown-provider    无法可靠归属 → 不出价
    `healthy.jsonl` / `dangerous.jsonl` / `all-recorded.jsonl`，`build_claude_fixture.py`
    自校验钉死 §10 验收 #4/#5/#6 数字；`tests/test_cli_matrix.py` `test_claude_session_*`
    八条差分，py==rs 逐字节；证据层验收 #1–6 已覆盖，#7–10 属 SessionStore/Tauri/cost
-   后续阶段）。
+   后续阶段）；
+10. ~~Claude Code 成本数据面（claude-sync + ledger + catalog 计价）~~ **已落地**
+    （2026-09-02：`claude-sync`（`src/agent/claude_cost.rs` ↔
+    `scripts/agent_vitals/agent/claude_cost.py`）cost-state 基线 + 行尾增量 fold →
+    `state/claude-fold.json` checkpoint + `claude-ledger.json`/`claude-ledger-archive.json`
+    逐日账，`tests/test_claude_cost.py` both() 差分逐字节；core `resolve_card_catalog`/
+    `claude_day_cost`/`claude_session_cost` 计价，见 §9）；
+11. ~~托盘账卡分列 + 导航第三宿主行~~ **已落地**（2026-09-02：托盘 today/month 行挂
+    ` · Claude 估 ≈¥/≈$` 后缀（read_overview 增读 ledger → Overview claude_today/
+    claude_month），预算 alert 保持 DSH-only；`sessions navigation` 第三宿主行
+    claude-code（today_tokens basis=ledger）+ HostsSnapshot 兜底三行，见 MENUBAR spec；
+    tick 顺序 DSH fold → `claude-sync`，SyncStatus 失败留痕不 abort）。
 
 ## 12. 诚实性注记
 
@@ -391,5 +452,13 @@ unknown-provider    无法可靠归属 → 不出价
 5. **`adapters/claude.py` 现只做静态配置证据**（enabledPlugins/skillUsage），会话数据面
    适配器净新增；
 6. **§7/§8 的草案已随适配器实现并验证**（`claude_code_evidence.rs` / `claude_evidence.py`，
-   三份 leaf fixture + 八条差分测试钉住）；§9 成本部分仍是设计——价表与对账（§11 工作项 6）
-   未做，勿按实现引用。
+   三份 leaf fixture + 八条差分测试钉住）；§9 成本部分已随 claude-sync 落地并验证
+   （§9.1 三分类落地映射 + §9.3 fold，`tests/test_claude_cost.py` + `test_catalog_pricing.py`
+   差分钉住）——价表与对账不再缺口。
+7. **Claude 估的钱是「按官方卡折算的估算」不是账单**：catalog 无 provider 路由证据，
+   网关模型价差 20–70×（cost-state 的默认卡 costUSD 高估量级同源），托盘挂 `≈`/「估」
+   标签、不与 DSH 实付混加、预算只对 DSH——三条诚实性由 `claude_est_suffix` 与
+   DSH-only alert 的执行面保证。
+8. **语料是时点值**：会话文件轮换删除——ledger 是「扫描时刻看到的会话」的下界，
+   与 corpus 快照（CLAUDE_CODE_CORPUS.md）同一条纪律；会话删除不清 ledger，跨月日
+   靠 ledger-archive 按月滚动而非删除。

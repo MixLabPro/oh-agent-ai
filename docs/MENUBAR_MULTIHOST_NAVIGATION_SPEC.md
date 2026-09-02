@@ -1,6 +1,34 @@
 # 菜单栏多宿主导航（宿主 → 最近会话）—— 设计 spec
 
-状态：**评审修订版 v1.1（2026-09-01），未实现**。
+状态：**v1.2（2026-09-02）**。v1.1 的 Phase 1/2（投影命令 `sessions navigation`、L1 宿主行、
+L2 最近 N 深链、`WorkbenchTarget` 双通路、前端 host 过滤）已随 2026-09-01/02 系列提交落地
+（菜单宿主区、账卡分列、hosts.json 快照，Rust/Python 差分逐字节，golden 15/15）。本版按
+「Claude Code 成本数据面」（docs/CLAUDE_CODE_INTEGRATION.md §9.3）用户决策 D1–D5 追加三处
+增量，均已实现：
+
+1. **第三宿主行 `claude-code`**（原固定两行 dsh→codex 变三行，键序稳定）。claude 宿主行的
+   `today_tokens` basis=**ledger**（`claude_ledger_day_tokens` 读 claude-ledger 当日 flat
+   日 4 型 token 总量，SNAKE_KEYS 唯一真源），`today_sessions`/`recent` 复用 r2a
+   `SessionStore::claude_code`；ledger 当日缺席 → null 三元组（status partial，诚实形态）。
+2. **顶层账卡分列**（今日/本月行）：DSH ¥ 实照旧（`今日按量成本：¥A · N tokens`），行尾按
+   Overview `claude_today/claude_month` 的 `currency_totals.{CNY,USD}` 挂 ` · Claude 估
+   ≈¥B/≈$C` 后缀（`claude_est_suffix`）。两币分开不混加；**预算/alert 只对 DSH**（D2）。
+   这**部分走回** v1.1 §3.1 决策 1 的「钱行绝不每宿主一行钱」——分列是用户拍板的呈现决策，
+   且 Claude 列是独立 estimate 投影、从不并入预算的 ¥ 总量，metered/subscription 不混的精
+   神仍在（见下 v1.2 修订说明）。
+3. **tick 顺序**变为 DSH discover/oneline → `claude-sync`（claude 账尾折）→ 宿主区刷新 →
+   emit；claude-sync 幂等（size/mtime 指纹），失败 → SyncStatus `fail("claude-sync", …)`
+   留痕不 abort tick（宿主行照刷）。`上次同步` 行后缀（DSH 折叠 + Claude 账）。
+
+**v1.2 修订说明（为何 §3.1 的「不每宿主一行钱」被部分走回）**：claude-sync 落地后，
+Claude Code 会话的 token 有了可计量的账（cost-state 基线 + 行尾增量，CLAUDE_CODE_INTEGRATION
+§9.3）。用户 D2 要求托盘把这部分钱显示出来，但口径是 **catalog 官方卡折算的估算**（非账单、
+20–70× 量级差）——因此呈现成**独立后缀列**而非并入 ¥ 总量：与 DSH 主账单精度隔离（「估」
+标签 + 币种分列 + `≈`），budget/alert 语义（DSH state 折叠）原样不动。§3.1 的「钱行 = 按量
+流总量、绝不每宿主一行钱」对 **DSH 主账单**仍成立；§9.3/§11 新列的「Claude 估」是预算之外的
+第二投影，遵循 CLAUDE.md 的诚实性纪律（缺列报缺、标估不混实）。
+
+（v1.1 原修订记录保留如下。）
 
 v1.0 于 2026-09-01 经设计评审，5 个阻断问题（2×P0 + 3×P1）在本版全部修订：
 
@@ -21,9 +49,9 @@ v1.0 于 2026-09-01 经设计评审，5 个阻断问题（2×P0 + 3×P1）在本
 - **现状托盘菜单全平、单宿主**：今日成本/日预算/本月成本/最近会话/预算状态/同步/打开工作台/立即同步/退出（`src-tauri/src/lib.rs:271-335`），数据全部来自 DSH state 文件（today.json/month.json/alert.json/oneline.json），**对 Codex 无感**。
 - **CodexBar 是「每 provider 一个状态图标 + popover tiles（用量条 + reset 倒计时）」、Merge 模式把多 provider 折进单图标 + 每 provider 概览行**。结论：抄「每宿主一行状态」，不抄「菜单里列会话」（会话/成本历史在持久化视图）。
 - **设计**：L1 每宿主一行 = 今日 token + 今日会话数（**token 轴**，规避 DSH-CNY vs Codex-USD 币种分叉）；L2 = 该宿主最近 N 个会话的**跳转清单**（身份字段、无成本列），点击深链到工作台会话详情。L2 是「跳转」不是「浏览器」——浏览/分页/过滤是工作台会话 tab 的职责。
-- **数据源**：宿主区统一走新投影命令 `agent-vitals sessions navigation --day <北京今天> --recent 5 --json`（§5），一次 spawn 返回两个宿主的 `HostNavigationSnapshot`；DSH 今日 token 读 today.json（与顶层钱行**同源**），Codex 今日 token 从事件时间按北京日界折叠。
+- **数据源**：宿主区统一走新投影命令 `agent-vitals sessions navigation --day <北京今天> --recent 5 --json`（§5），一次 spawn 返回三个宿主的 `HostNavigationSnapshot`；DSH 今日 token 读 today.json（与顶层钱行**同源**），Codex 今日 token 从事件时间按北京日界折叠，Claude Code 今日 token 读 claude-ledger（basis=ledger，§5.2）。
 - **诚实降级**：每个宿主 status = ready / partial / unavailable；store 冷 build 失败/超时 → 宿主行「—」+ 子菜单「会话数据暂不可用」，主入口（今日/预算/同步）照常；绝不臆造 0。
-- **明确不做**：live「正在运行」指示、per-host 今日成本（需币种决策，v2）、reset 倒计时。
+- **明确不做**：live「正在运行」指示、per-host 今日成本（需币种决策，v2；**v1.2 例外**：Claude Code 账以 catalog 估算列挂账卡，见顶部 v1.2 修订）、reset 倒计时。
 
 ## 1. 背景：CodexBar 对照
 
@@ -35,7 +63,7 @@ CodexBar（Swift 原生 macOS 14+ 菜单栏 app）的事实（README + 截图描
 
 三条对照结论：
 
-1. **保持单图标，不抄多图标**。Tauri 一个 tray 挂一个菜单天然就是「单图标 + 内部分层」——CodexBar 的 merge 模式正是我们的既有形态，不用变。我们的 2 个宿主 ≈ CodexBar 的 6 provider overview rows：L1 每宿主一行 + 展开进宿主详情。
+1. **保持单图标，不抄多图标**。Tauri 一个 tray 挂一个菜单天然就是「单图标 + 内部分层」——CodexBar 的 merge 模式正是我们的既有形态，不用变。我们的 3 个宿主 ≈ CodexBar 的 6 provider overview rows：L1 每宿主一行 + 展开进宿主详情。
 2. **抄「每宿主一行状态」**：一眼看出哪个宿主今天在烧 token。这是 CodexBar 真正做对的地方，也是我们单宿主菜单暴露的断层（§2.3-1）。
 3. **不抄「列会话」**：CodexBar 明确把会话/成本历史留在独立视图。我们的工作台会话 tab 已经是这个独立视图，菜单栏再展开 10 行会话是重复造一个更差版本。
 
@@ -122,7 +150,7 @@ CodexBar 有而我们**不该**抄的：reset 倒计时（provider 额度窗口�
 - **用量轴（L1 宿主行）= 每宿主（harness）token + 会话数**：DeepSeek Harness / Codex / Claude Code / 未来，不带钱（币种分叉，§2.2）。宿主行是**导航轴**（哪个壳、几个会话），与成本轴（哪个供应商、多少钱）**正交**——一个宿主行的 token 可能喂给按量流（Claude Code→DeepSeek），另一个喂给套餐（Codex→GPT）。
 - **未来按量流并入总成本**：新按量供应商（如 Claude API、OpenAI API 超量）要么扩展 state 折叠为多供应商账本、要么单独折叠后并入**同一总量**——钱行永远是总量，**绝不变成「每宿主一行钱」**。新供应商若为美元，并入 ¥ 总量前需先定币种决策（Phase 3，§10）。
 
-**数据面覆盖的诚实性（开放项）**：钱行只能报「当前数据面折叠得到的按量流之和」。本仓库今天只折叠了 DSH 会话（today.json/month.json）；但按量供应商 DeepSeek 的流量还从 Claude Code harness 来（本会话实测）——**Claude Code 会话日志是可折叠的按量源**（`assistant.message.model` + `usage` 齐备，价表已覆盖其模型），给 Claude Code 加适配器+折叠是 Phase 3 数据源工作项，补齐前钱行是 DeepSeek 按量的下界，spec/同步行须写明覆盖范围，不假装全量。
+**数据面覆盖的诚实性（v1.2 已闭环，原「开放项」）**：钱行只报「当前数据面折叠得到的按量流之和」。v1.1 时代只折叠了 DSH 会话，Claude Code harness 跑的 DeepSeek 按量流不在账上——钱行是下界。2026-09-02 claude-sync 落地后 Claude Code 会话日志已可折叠（cost-state 基线 + 行尾增量，CLAUDE_CODE_INTEGRATION §9.3），但口径是 **catalog 官方卡折算的估算**而非 DSH 的实付流——所以它**不进**主账单 ¥ 总量，而是挂成账卡尾部的独立 `Claude 估 ≈¥/≈$` 列（分币种 + `≈` + 估标签），spec/同步行写明覆盖范围，不假装全量，也不把估算冒充实付。
 
 这把评审 P0-1 的「钱行是 DSH-only」钉正为：钱行按**供应商**（DeepSeek 按量）语义，标签用 `按量` 不按宿主名，所以将来从 Claude Code 或其它 harness 接入同一供应商流也不换标签。
 
@@ -133,18 +161,22 @@ CodexBar 有而我们**不该**抄的：reset 倒计时（provider 额度窗口�
 ```
 现状（lib.rs:271-335，全平）          目标
 ──────────────────────              ──────────────────────────────
-今日成本：¥12.34 · 1.4M tokens       今日按量成本：¥12.34 · 1.4M tokens
-今日预算：¥24 / ¥30（93%）           今日按量预算：¥24 / ¥30（93%）
-本月成本：¥774.7 / ¥600              本月按量成本：¥774.7 / ¥600
+今日成本：¥12.34 · 1.4M tokens       今日按量成本：¥12.34 · 1.4M tokens · Claude 估 ≈¥6 / ≈$0.85   ← v1.2 账卡分列
+今日预算：¥24 / ¥30（93%）           今日按量预算：¥24 / ¥30（93%）        ← 预算只对 DSH，不动
+本月成本：¥774.7 / ¥600              本月按量成本：¥774.7 / ¥600 · Claude 估 ≈¥182 / ≈$26
 最近会话：deepseek-v4-flash · 15K     ─────────────────
     · ¥0.02  ⚡ 删除，被宿主行吸收    ▸ DeepSeek Harness · 1.4M · 3 会话   ← L1 子菜单
                                     ▸ Codex · 20K · 1 会话
+                                    ▸ Claude Code · 23M · 2 会话          ← v1.2 第三宿主行
 预算：✓ ¥12.79 / ¥600                ─────────────────
 上次同步：09:50 成功                  预算：✓ ¥12.79 / ¥600
-─────────────────                   上次同步：09:50 成功（DSH 状态折叠）
+─────────────────                   上次同步：09:50 成功（DSH 折叠 + Claude 账）  ← v1.2 后缀
 打开工作台… / 立即同步 / 退出          ─────────────────
                                     打开工作台… / 立即同步 / 退出
 ```
+
+（账卡示例里的 `Claude 估` 列 = Overview `claude_today/claude_month` 的 `currency_totals`
+逐行折算；两币分开不混加，`≈` + 「估」标签，见 v1.2 修订说明。）
 
 L1 宿主行展开后的 L2 子菜单（以 DSH 为例）：
 
@@ -159,13 +191,13 @@ L1 宿主行展开后的 L2 子菜单（以 DSH 为例）：
 
 结构决策：
 
-- **顶层钱行**：今日/本月/预算三行是**按量计费总成本**（§3.1），标签按计量语义（`今日按量成本`），不按宿主名。`上次同步` 行注明「（DSH 状态折叠）」——它是 oneline 的同步时间，与宿主快照的 `generated_at`（§6 决策 5）是两个东西，不混。
+- **顶层钱行**：今日/本月/预算三行是**按量计费总成本**（§3.1），标签按计量语义（`今日按量成本`），不按宿主名。v1.2 账卡分列在今日/本月行的 DSH ¥ 之后挂 `Claude 估` 后缀（Overview `claude_today/claude_month` 的 `currency_totals`，`≈` 标估；**预算行不动、DSH-only**）。`上次同步` 行注明「（DSH 折叠 + Claude 账）」——它是 oneline 同步时间，与宿主快照的 `generated_at`（§6 决策 5）是两个东西，不混（v1.2 起 tick 还叠 claude-sync，失败时 SyncStatus 留痕，见 v1.2 修订）。
 - **预算/同步/今日/本月永远留在顶层，不藏进宿主**——它们是主入口最该一眼看到的东西；host 展开是增量信息，不是替代。
-- **L1 行的顺序 = 固定宿主序**（dsh → codex），不是按 token 量排序——菜单每轮重建的排序要稳定。
-- **宿主区始终渲染两行**（固定序），不因单宿主失败整体消失——失败走 §8 的逐宿主降级文案。
+- **L1 行的顺序 = 固定宿主序**（dsh → codex → claude-code），不是按 token 量排序——菜单每轮重建的排序要稳定。
+- **宿主区始终渲染三行**（固定序），不因单宿主失败整体消失——失败走 §8 的逐宿主降级文案。
 - **「最近会话」平铺行删除**：它展示的是「最近一条 DSH 会话」，被 DSH 宿主子菜单吸收。
 - **L2 行格式 `<date> · <title 截断 | short_model | native_id> · <tokens>`**：身份字段、无成本列。**标题优先**（P1 修正：同 `<日期·模型·tokens>` 的多行用截断标题区分；无标题落 `short_model`，再无落 `native_id`，与 `titleText`（`workbench.js:565-571`）同一兜底链）。标题截断 ~24 字符。`date` = `MM-DD`（`date_last[5..10]`；非当年带年，见下）；`tokens_total` 用 `fmt_tokens`。点击身份 = `session_key`（L2 行显示文本撞车时点的是各自会话，显示文本只是尽力区分）。
-- host 显示名映射是**托盘侧展示**（dsh → `DeepSeek Harness`，codex → `Codex`），与 `short_model` 同类，不是 core 规则。
+- host 显示名映射是**托盘侧展示**（dsh → `DeepSeek Harness`，codex → `Codex`，claude-code → `Claude Code`），与 `short_model` 同类，不是 core 规则。
 
 **日期截断修正**：`date_span.last` 是 `YYYY-MM-DD`，`[0..8]` = `YYYY-MM-`（错）。`MM-DD` 取 `[5..10]`；`date_last` 年份 ≠ 当前年时显示完整 `YYYY-MM-DD`（老会话跨年，`MM-DD` 会误导）。
 
@@ -180,7 +212,7 @@ agent-vitals sessions navigation --day 2026-09-01 --timezone Asia/Shanghai --rec
 - `--day`：北京日期，默认 `today_beijing()`（`src/agent/codex_cost.rs`）。
 - `--timezone`：仅接受 `Asia/Shanghai`（校验；core 日界固定 UTC+8、无夏令时，`codex_usage.py:156-157`。未来真要支持别的时区是 core 改动，本命令不假装通用）。
 - `--recent N`：每宿主的最近 N，默认 5。
-- 读：dsh store、codex store、today.json（DSH 今日 token）。store 构建失败/超时 → 对应宿主 `unavailable`，不 abort 全命令。
+- 读：dsh store、codex store、claude store、today.json（DSH 今日 token）、claude-ledger（claude 今日 token）。store 构建失败/超时 → 对应宿主 `unavailable`，不 abort 全命令。
 - 输出 versioned envelope（stdout，`{"schema_version":1,…}`）：
 
 ```json
@@ -189,7 +221,7 @@ agent-vitals sessions navigation --day 2026-09-01 --timezone Asia/Shanghai --rec
   "day_key": "2026-09-01",
   "timezone": "Asia/Shanghai",
   "generated_at": "2026-09-01T02:31:00Z",
-  "hosts": [ /* 固定 dsh → codex */ ]
+  "hosts": [ /* 固定 dsh → codex → claude-code（v1.2） */ ]
 }
 ```
 
@@ -214,6 +246,7 @@ agent-vitals sessions navigation --day 2026-09-01 --timezone Asia/Shanghai --rec
 **today_tokens**（L1 token 数）：
 - DSH：`value` = today.json 的 token 总量（`basis="state-file"`，与顶层钱行**同源**，一致性测试钉死）；today.json 缺失 → `value=null`、`basis=null`。`coverage` 恒 `complete`——state 折叠的覆盖率是 state 层自己的轴，日历已单独展示（`workbench.js:444-448`），菜单不重复读。
 - Codex：`value` = 事件时间按北京日界折叠后的当日桶之和（`basis="events"`，复用 §2.3 链路：全部 codex 会话 → `codex_fold_file` → `codex_merge_folds` → `codex_aggregate_hours` → 取 `day_key` 日桶求和）。`coverage`：折叠 `unaccounted.tokens_seen > 0` → `partial`（当日数可能是下界），`== 0` → `complete`；`by_hour_model` 空（无任何 token 事件）→ `value=null`、`coverage=null`（读到了会话但没计量，诚实「测不出」）。
+- Claude Code（v1.2）：`value` = claude-ledger 当日 flat 日 4 型 token 总和（`basis="ledger"`——`claude_ledger_day_tokens` 读 `state/claude-ledger.json`，ledger 由 `claude-sync` 维护，见 CLAUDE_CODE_INTEGRATION §9.3）。`coverage` 恒 `complete`（ledger 日桶没有逐日 unaccounted 哨兵，v1 fold 的残差是全局量）；当日缺席 / ledger 不存在 → `value=null`、`basis=null`、`coverage=null`（**今天没测到账**，诚实 null——与 codex 当日桶缺席同语义，不是 0）。当日存在但全零（只有全零 unknown 桶的病理日）→ `value=0`（「测到 0」不是「没测」）。`today_sessions`/`recent` 复用 r2a `SessionStore::claude_code`（第三源，§5 接入面）；claude 无数据源（fixture home 无 `~/.claude`）→ `unavailable`。
 - store 可读且**零会话** → `value=0`（真零，`basis="events"`、`coverage="complete"`）——没有会话就没有 token，0 是诚实测量不是编造。
 
 **today_sessions**：date_span 与 `[day_key, day_key]` 交叠（core `SessionFilter::matches` 同语义）的会话计数；无 date 的 degraded 会话不计入。**这是「今天碰过的会话」计数，不是 token 归属的判定**（跨日会话计 1 次是对的——它今天确实活跃；token 归属已由折叠解决）。
@@ -264,7 +297,7 @@ v1.0 用 `--from T --to T` date_span 交叠过滤求和 `tokens_total`，跨日�
 - **诚实性**：value 可 null（测不出）+ coverage 可 partial（unaccounted 哨兵），绝不拿「0 token」冒充「没跑」。（unaccounted 是全时段残差——当日粒度不重算，coverage=partial 是保守下界标注，注释里写清。）
 
 ### 决策 5 —— 刷新执行模型（P1-5 定案）
-- **启动**：读 hosts.json（末次成功快照）立即建菜单，**不等 store 构建**。hosts.json 缺场 → 两宿主 unavailable 行（§8）。
+- **启动**：读 hosts.json（末次成功快照）立即建菜单，**不等 store 构建**。hosts.json 缺场 → 三宿主 unavailable 行（§8）。
 - **单飞（single-flight）**：`refresh_hosts()` 同步跑在 `sync_tick` 内、`SyncLock` 之下（`lib.rs:475-479`）。`sync_now` 与 tick 线程都要先拿锁 → **不可能并发刷新**。generation 由「同步单写」保证：慢的旧刷新不可能覆盖新结果，因为同一时刻只有一个刷新在跑。注释里写清这条不变量。
 - **超时 + kill**：`sessions navigation` 用 `Command::spawn()` + `try_wait()` 轮询（每 50ms），**20s 硬上限**，超时 `child.kill()` + `wait()`。冷 store 首建 30+ 秒 → 首轮可能超时 → 宿主区 degraded，下一轮 tick（5 分钟后）重试。
 - **保留末次成功快照标 stale**：刷新失败**不覆盖** hosts.json（数据不丢）；托盘按 `generated_at` 年龄判定 stale：`now - generated_at > 2 × tick 周期`（10 分钟）→ 宿主子菜单底部加禁用项 `数据更新于 hh:mm · 可能已过期`。L1 保留末次成功数值。
@@ -327,7 +360,7 @@ struct SessionKeyJson {
 | `today_tokens.coverage = partial` | token 数加 `≈` 前缀（`≈15K`） | — |
 | stale（托盘派生，§6 决策 5） | 保持末次成功数值 | 底部禁用项 `数据更新于 hh:mm · 可能已过期` |
 
-铁律：**缺数据显示「—」/诚实描述，不摆 0 冒充**（CLAUDE.md 空态诚实）；「没有会话」与「读不了会话」是两个不同的字。宿主区失败不得影响顶层今日/预算/同步行——主入口永不因增量信息崩。宿主区**始终渲染**固定 dsh→codex 两行（v1.0 的「宿主区整体失败不渲染」删除，与「Codex · —」矛盾由此解除）。
+铁律：**缺数据显示「—」/诚实描述，不摆 0 冒充**（CLAUDE.md 空态诚实）；「没有会话」与「读不了会话」是两个不同的字。宿主区失败不得影响顶层今日/预算/同步行——主入口永不因增量信息崩。宿主区**始终渲染**固定 dsh→codex→claude-code 三行（v1.0 的「宿主区整体失败不渲染」删除，与「Codex · —」矛盾由此解除）。
 
 ## 9. 测试计划
 
@@ -342,7 +375,7 @@ struct SessionKeyJson {
 
 ### 9.2 托盘侧（`lib.rs`/`overview.rs` `#[cfg(test)]` 注入 now）
 
-7. **菜单结构**：两宿主行、固定 dsh→codex 序、L2 行数、删除「最近会话」平铺行、顶层钱行按计量语义标签（`今日按量成本`，不按宿主名）。
+7. **菜单结构**：三宿主行、固定 dsh→codex→claude-code 序、L2 行数、删除「最近会话」平铺行、顶层钱行按计量语义标签（`今日按量成本`，不按宿主名；v1.2 起 assert 账卡行尾的 ` · Claude 估 ≈¥/≈$` 后缀 truth table，`claude_est_suffix_truth_table`）。
 8. **DSH 一致性**：构造 `ov.today` 与 hosts 冲突的输入，菜单报 today.json 值。
 9. **降级矩阵**：§8 每行一测（文案逐字）——unavailable/零会话/partial/stale 各一条。
 10. **stale**：`generated_at` 超过 2×tick → 子菜单出现过期 footer；刷新失败不覆盖 hosts.json。
@@ -358,7 +391,7 @@ struct SessionKeyJson {
 ## 10. 分阶段实施
 
 ### Phase 1 —— 投影命令 + L1 宿主行 + 钱行改名
-core `recent_cmp`（+Python 镜像）；二进制 `sessions navigation`（复用 codex 折叠链路）；`overview.rs` HostRow + hosts.json 读写；`lib.rs` 菜单宿主区 + Submenu + 顶层钱行改按量标签 + 刷新模型（单飞/超时/stale）。验收：两宿主行出现、DSH 与顶层今日行一致、Codex 今日 token 与整会话求和不一致时可复现（跨日会话）、降级矩阵通过。
+core `recent_cmp`（+Python 镜像）；二进制 `sessions navigation`（复用 codex 折叠链路）；`overview.rs` HostRow + hosts.json 读写；`lib.rs` 菜单宿主区 + Submenu + 顶层钱行改按量标签 + 刷新模型（单飞/超时/stale）。验收：三宿主行出现、DSH 与顶层今日行一致、Codex 今日 token 与整会话求和不一致时可复现（跨日会话）、降级矩阵通过。（Phase 1/2 已落地；v1.2 的第三宿主行 + 账卡分列随 Claude Code 成本数据面并入，见顶部修订。）
 
 ### Phase 2 —— L2 最近 N + 深链 + 前端 host 过滤
 `WorkbenchTarget` IPC（focus/peek/clear + 事件）；工作台双通路消费 + host 过滤；L2 渲染前 5 行。验收：菜单点 L2 → 工作台打开该会话；peek/clear 语义测试过；host 过滤工作。
@@ -369,7 +402,7 @@ Codex 北京日界折叠**已在 v1 落地**（不再是 Phase 3）。Phase 3 �
 ## 11. Out of scope（明确不做）
 
 - **live「正在运行」指示**（§2.4-6，需要 autosync 式检测，已删）。
-- **per-host 今日/本月成本**（Phase 3，需币种决策）。
+- **per-host 今日/本月成本**（Phase 3，需币种决策；v1.2 只放行 Claude Code 的 catalog 估算列作账卡后缀——预算/alert 仍 DSH-only，不做完整 per-host 成本行）。
 - **reset 倒计时**（provider 额度窗口语义，我们审计本地成本无额度窗口）。
 - **菜单内分页/搜索/过滤**（那是工作台会话 tab 的职责）。
 - **多图标模式**（保持单图标 + 菜单内分层，§1 结论 1）。
