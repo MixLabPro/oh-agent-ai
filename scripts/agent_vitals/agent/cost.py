@@ -412,3 +412,209 @@ def cost_block(usage, pricing):
     if unpriced > 0:
         rows.append("另有 " + format_number(unpriced) + " tokens 模型未知未计价")
     return rows
+
+
+# ── Claude Code 语料计价（catalog_2026_09）——独立的第二计价面 ────────────
+# 上面的函数全部服务 DSH 运行时账（providers 段，CNY，高峰/空闲拆分）。Claude
+# Code 会话文件没有 provider 路由证据（message.model 是唯一计价键），价目表在
+# `pricing.json::catalog_2026_09`（按提供商分栏、currency 各异、平费率——没有
+# peak/off_peak）。这一段是**独立的第二计价面**：输出全量标
+# pricing_basis="catalog"，每个数都是「按官方卡折算的估算」，不许与 DSH 的
+# 账单数混加（¥/$ 分桶由调用方分开渲染）。不碰 `_resolve_card`/Basis——新面
+# 直接写字面量 "catalog"，DSH 路径零改动、字节稳定。
+#
+# 计价输入统一用 claude 4 型 snake 键名：input_tokens（uncached，不含缓存写/
+# 读——Anthropic API 语义）/cache_read_input_tokens/cache_creation_input_tokens/
+# output_tokens；与 claude 行 usage 及 cost-state modelUsage 的语义一一对应。
+# Rust 平行实现见 `cost.rs::claude_session_cost`/`claude_day_cost`，数值由两侧
+# 同夹具钉测互守（core inline + tests/test_catalog_pricing.py 同数）。
+
+
+def _resolve_card_catalog(model, pricing):
+    """目录卡解析：在 `catalog_2026_09.providers.*` 找模型卡 → 找不到再在顶层
+    `providers.*`（deepseek 官方 ¥ 卡；catalog 的 _doc 明说 deepseek 不重复收）
+    找。返回 (供应商键, 模型卡键, 币种)——币种取目录卡的 `currency` 字段；顶层
+    providers 段没有币种字段、整段是 ¥，默认 "CNY"（写死在 pricing.json 结构
+    里的真实约定，不是拍脑袋）。前缀匹配与 `_norm_model_in` 同一条规则：
+    `deepseek-v4-pro[1M]`/`deepseek-v4-pro-0813` 都落 `deepseek-v4-pro`——键是
+    短的、模型是长的，**无需为 `[1M]` 变体写剥离代码**。但注意：`[1M]` 档的
+    官方价不在任何价表里，按 pro 卡折是记录在案的近似（ee969d0c 有 3.5M in /
+    47M cr 走它，不是角落），不是想当然的精确。"""
+    catalog = ((pricing.get("catalog_2026_09") or {}).get("providers") or {})
+    for provider, pv in catalog.items():
+        models = (pv or {}).get("models") or {}
+        key = _norm_model_in(model, models)
+        if key is not None:
+            currency = (pv or {}).get("currency") or "CNY"
+            return provider, key, currency
+    top = pricing.get("providers") or {}
+    for provider, pv in top.items():
+        models = (pv or {}).get("models") or {}
+        key = _norm_model_in(model, models)
+        if key is not None:
+            return provider, key, "CNY"
+    return None
+
+
+def _catalog_card(pricing, provider, key):
+    """目录卡的平费率主体：先 `catalog_2026_09.providers` 再顶层 `providers`
+    （deepseek 官方卡）——与 `_resolve_card_catalog` 的两段搜索一一对应。"""
+    cat = ((pricing.get("catalog_2026_09") or {}).get("providers") or {})
+    if provider in cat:
+        card = ((cat[provider] or {}).get("models") or {}).get(key)
+        if card is not None:
+            return card
+    top = pricing.get("providers") or {}
+    if provider in top:
+        return ((top[provider] or {}).get("models") or {}).get(key)
+    return None
+
+
+def _flat_rate(card, key):
+    """平费率读取：`card[key]` 是数字（catalog 平费率/M3 档位）就取它；是
+    `{off_peak, peak}` 对象（顶层 providers 段 deepseek 卡）取 off_peak——
+    Claude 会话文件没有时段证据，全按空闲档折，是最保守的官方价（与 DSH 的
+    高峰拆分不同，低估风险方向已知且如实）。"""
+    v = card.get(key)
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, dict):
+        return v.get("off_peak", 0.0)
+    return 0.0
+
+
+def _cache_write_rate(card):
+    """缓存写入（cache_creation）单价：catalog 卡按 1h 档（5min 是 1.25×输入、
+    1h 是 2×——Claude Code 自报 costUSD 按 1h 计，host_costusd_note 说它与
+    catalog 逐分吻合的前提就是 1h，照它走才能拿 cost-state 当差分 oracle）；
+    没有 1h 档的卡（M2.7 的 `cache_write`、deepseek 无行 → 0）各取各的。"""
+    r = _flat_rate(card, "cache_write_1hr")
+    if r > 0:
+        return r
+    return _flat_rate(card, "cache_write")
+
+
+def _first_tier(card):
+    """tiers 卡（MiniMax-M3）：整请求按输入长度 cliff 分档；cost-state/日账
+    只有会话聚合、分不出单请求长度 → 一律取首档（≤512K），档位标签随行透出
+    ——超长请求会话会被低估，靠标签露馅而不是假装精确。"""
+    tiers = (card or {}).get("tiers")
+    if not tiers:
+        return None
+    first = tiers[0]
+    return (first or {}).get("label", ""), first
+
+
+def _price_claude_model(model, tokens, pricing):
+    """单模型 4 型 tokens（claude snake 键名）→ 平费率总价。返回
+    (供应商, 币种, 总价, 档位标签)。模型/卡都匹配不上 → None（不臆造）。"""
+    resolved = _resolve_card_catalog(model, pricing)
+    if resolved is None:
+        return None
+    provider, key, currency = resolved
+    card = _catalog_card(pricing, provider, key)
+    if card is None:
+        return None
+    tiered = _first_tier(card)
+    label = None
+    if tiered is not None:
+        label, card = tiered
+
+    def m(k):
+        return (tokens.get(k) or 0) / 1e6
+
+    total = (m("input_tokens") * _flat_rate(card, "input_uncached")
+             + m("cache_read_input_tokens") * _flat_rate(card, "input_cached")
+             + m("cache_creation_input_tokens") * _cache_write_rate(card)
+             + m("output_tokens") * _flat_rate(card, "output"))
+    return provider, currency, total, label
+
+
+def _price_claude_map(models, pricing):
+    """`{模型: 4 型 snake tokens}` → 价目报告。`claude_session_cost`（cost-state
+    camel 转换后）与 `claude_day_cost`（ledger by_model 直通）共用——两面的钱
+    必须同源，不在这里为日面长第二份计价规则（DSH 侧
+    token_by_date_model==token_by_model 那条纪律的 claude 镜像）。
+
+    未知模型（`<synthetic>` 等）→ token 四型全进 unpriced。注意与 `cost_report`
+    的 unpriced 词表不同：那边不含 output（DSH 钉测形状），claude cost-state
+    只有这 4 型、output 同样是真实消费，未知就该全数报出来，别悄悄吞掉 output。
+    """
+    cny = 0.0
+    usd = 0.0
+    unpriced = 0
+    per_model = {}
+    for model, tokens in models.items():
+        if not isinstance(tokens, dict):
+            continue
+        priced = _price_claude_model(model, tokens, pricing)
+        if priced is None:
+            unpriced += ((tokens.get("input_tokens") or 0)
+                         + (tokens.get("cache_read_input_tokens") or 0)
+                         + (tokens.get("cache_creation_input_tokens") or 0)
+                         + (tokens.get("output_tokens") or 0))
+            continue
+        provider, currency, total, tier = priced
+        if currency == "USD":
+            usd += total
+        else:
+            # 币种只可能是目录卡显式写的 USD/CNY 或顶层段默认 CNY；真有第三种
+            # 币种落进来会静默混进 CNY——加新币种时改这里。
+            cny += total
+        entry = {
+            "short_name": model_short(model, pricing),
+            "currency": currency,
+            "pricing_basis": "catalog",
+            "priced_with": provider,
+            "total": total,
+        }
+        if tier is not None:
+            entry["tier"] = tier
+        per_model[model] = entry
+    if not per_model and unpriced == 0:
+        return None
+    return {
+        "pricing_basis": "catalog",
+        "currency_totals": {"CNY": cny, "USD": usd},
+        "per_model": per_model,
+        "unpriced_tokens": unpriced,
+        "estimate_disclaimer": "按模型族官方卡折算的估算，不是账单",
+    }
+
+
+def claude_session_cost(model_usage, pricing):
+    """cost-state 的 modelUsage（camelCase：inputTokens/outputTokens/
+    cacheReadInputTokens/cacheCreationInputTokens/costUSD）→ 会话账金额。
+    键名转 claude snake 后走 `_price_claude_map`——转换只有键名映射，不重算。
+    `webSearchRequests`/`costUSD` 不参与计价（web search 没有 token 单价；
+    costUSD 对网关模型按默认卡 $5/$0.5/$25 计、高估 20–70×——host_costusd_note
+    说清了，绝不能当账单数字）。modelUsage 为空/缺场 → None。
+
+    Rust 平行实现见 `cost.rs::claude_session_cost`。"""
+    models = {}
+    for model, ms in (model_usage or {}).items():
+        if not isinstance(ms, dict):
+            continue
+        models[model] = {
+            "input_tokens": ms.get("inputTokens") or 0,
+            "cache_read_input_tokens": ms.get("cacheReadInputTokens") or 0,
+            "cache_creation_input_tokens": ms.get("cacheCreationInputTokens") or 0,
+            "output_tokens": ms.get("outputTokens") or 0,
+        }
+    if not models:
+        return None
+    return _price_claude_map(models, pricing)
+
+
+def claude_day_cost(day, pricing):
+    """claude-ledger 的一天（by_model: {模型: 4 型 snake tokens}）→ 当日金额。
+    ledger 逐日账只存 tokens（价格会变、token 不会——DSH month.json 同一条
+    纪律），钱在这读时才算。结构与 `claude_session_cost` 完全相同（同一个
+    `_price_claude_map`），只是输入已 4 型 snake、无需转换。by_model 缺场/为空
+    → None（调用方自己决定退回哪种近似，不摆全零结构）。
+
+    Rust 平行实现见 `cost.rs::claude_day_cost`。"""
+    by_model = (day or {}).get("by_model") or {}
+    if not by_model:
+        return None
+    return _price_claude_map(by_model, pricing)

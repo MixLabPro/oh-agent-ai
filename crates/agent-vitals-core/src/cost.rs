@@ -8,6 +8,10 @@
 //! `scripts/agent_vitals/agent/cost.py` 逐字节一致，由
 //! `tests/test_cli_matrix.py` 的 `both()` 差分看守。
 //!
+//! 模块尾部另有一张**独立的第二计价面**（`catalog_2026_09`，Claude Code 语料
+//! 官方卡折算）：服务 claude 会话账/托盘第三宿主列，不参与 DSH 账。它只进新
+//! 函数，`cost_report`/`priced_day` 等 DSH 路径字节不变——两条面不许互相改价。
+//!
 //! 价格表的单一真相源是 `scripts/agent_vitals/pricing.json`（这里 `include_str!`
 //! 内嵌、Python 侧读包内文件；`dsh-client/pricing.json` 是 build 时复制出的运行时份，
 //! lockstep 测试对齐）。缓存写入报价表没有行 → 按 0 计（不臆造价格）。高峰时段为
@@ -631,6 +635,230 @@ pub fn cost_block(usage: &Value, pricing: &Value) -> Vec<String> {
     rows
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Claude Code 语料计价（catalog_2026_09）——独立的第二计价面
+// ─────────────────────────────────────────────────────────────────────
+//
+// 上面所有函数服务 DSH 运行时账（providers 段，CNY，高峰/空闲拆分）。Claude
+// Code 会话文件没有 provider 路由证据（message.model 是唯一计价键），价目表在
+// `pricing.json::catalog_2026_09`（按提供商分栏、currency 各异、平费率——没有
+// peak/off_peak）。这一段是**独立的第二计价面**：输出全量标
+// `pricing_basis: "catalog"`，每个数都是「按官方卡折算的估算」，不许与 DSH 的
+// 账单数混加（¥/$ 分桶由调用方分开渲染）。为什么不复用 `Basis` 枚举：新面与
+// 老面的依据轴不同（老面是「哪家报价被用了」，新面恒是 catalog 折算），给枚举
+// 加 Catalog 变体要动 DSH 路径的 match——新面直接写字面量，老路径零改动、
+// 字节稳定（审阅裁定：函数名与 Basis 分离是对的）。
+//
+// 计价输入统一用 claude 4 型 snake 键名：input_tokens（uncached，不含缓存写/
+// 读——Anthropic API 语义）/cache_read_input_tokens/cache_creation_input_tokens/
+// output_tokens；与 claude 行 usage 及 cost-state modelUsage 的语义一一对应。
+// Python 平行实现见 `cost.py::claude_session_cost`/`claude_day_cost`，数值由
+// 两侧同夹具钉测互守（core inline + tests/test_catalog_pricing.py 同数）。
+
+/// 目录卡解析：在 `catalog_2026_09.providers.*` 找模型卡 → 找不到再在顶层
+/// `providers.*`（deepseek 官方 ¥ 卡；catalog 的 _doc 明说 deepseek 不重复收）
+/// 找。返回 (供应商键, 模型卡键, 币种)——币种取目录卡的 `currency` 字段；顶层
+/// providers 段没有币种字段、整段是 ¥，默认 "CNY"（写死在 pricing.json 结构
+/// 里的真实约定，不是拍脑袋）。前缀匹配与 `norm_model_in` 同一条规则：
+/// `deepseek-v4-pro[1M]`/`deepseek-v4-pro-0813` 都落 `deepseek-v4-pro`——键是
+/// 短的、模型是长的，**无需为 `[1M]` 变体写剥离代码**（审阅复核）。但注意：
+/// `[1M]` 档的官方价不在任何价表里，按 pro 卡折是记录在案的近似（ee969d0c 有
+/// 3.5M in / 47M cr 走它，不是角落），不是想当然的精确。
+fn resolve_card_catalog(model: &str, pricing: &Value) -> Option<(String, String, String)> {
+    let catalog = pricing
+        .pointer("/catalog_2026_09/providers")
+        .and_then(|v| v.as_object());
+    if let Some(catalog) = catalog {
+        for (provider, pv) in catalog {
+            let Some(models) = pv.get("models").and_then(|v| v.as_object()) else {
+                continue;
+            };
+            if let Some(key) = norm_model_in(model, models) {
+                let currency = pv.get("currency").and_then(|v| v.as_str()).unwrap_or("CNY");
+                return Some((provider.clone(), key, currency.to_string()));
+            }
+        }
+    }
+    // deepseek 官方卡（顶层 providers 段）：目录不收 deepseek。缓存写入报价表
+    // 没有行 → 按 0 计，与 DSH 同一条规矩。
+    let top = pricing.get("providers").and_then(|v| v.as_object());
+    if let Some(top) = top {
+        for (provider, pv) in top {
+            let Some(models) = pv.get("models").and_then(|v| v.as_object()) else {
+                continue;
+            };
+            if let Some(key) = norm_model_in(model, models) {
+                return Some((provider.clone(), key, "CNY".to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// 目录卡的平费率主体：先 `catalog_2026_09.providers` 再顶层 `providers`
+/// （deepseek 官方卡）——与 `resolve_card_catalog` 的两段搜索一一对应。
+fn catalog_card<'a>(pricing: &'a Value, provider: &str, key: &str) -> Option<&'a Value> {
+    pricing
+        .pointer(&format!("/catalog_2026_09/providers/{provider}/models/{key}"))
+        .or_else(|| pricing.pointer(&format!("/providers/{provider}/models/{key}")))
+}
+
+/// 平费率读取：`card[key]` 是数字（catalog 平费率/M3 档位）就取它；是
+/// `{off_peak, peak}` 对象（顶层 providers 段 deepseek 卡）取 off_peak——Claude
+/// 会话文件没有时段证据，全按空闲档折，是最保守的官方价（与 DSH 的高峰拆分
+/// 不同，低估风险方向已知且如实：deepseek 官方高峰 00:30–08:30 北京时间）。
+fn flat_rate(card: &Value, key: &str) -> f64 {
+    card.get(key)
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            card.pointer(&format!("/{key}/off_peak"))
+                .and_then(|v| v.as_f64())
+        })
+        .unwrap_or(0.0)
+}
+
+/// 缓存写入（cache_creation）单价：catalog 卡按 1h 档（5min 是 1.25×输入、
+/// 1h 是 2×——Claude Code 自报 costUSD 按 1h 计，host_costusd_note 说它与
+/// catalog 逐分吻合的前提就是 1h，照它走才能拿 cost-state 当差分 oracle）；
+/// 没有 1h 档的卡（M2.7 的 `cache_write`、deepseek 无行 → 0）各取各的。
+fn cache_write_rate(card: &Value) -> f64 {
+    let r = flat_rate(card, "cache_write_1hr");
+    if r > 0.0 {
+        return r;
+    }
+    flat_rate(card, "cache_write")
+}
+
+/// tiers 卡（MiniMax-M3）：整请求按输入长度 cliff 分档；cost-state/日账只有
+/// 会话聚合、分不出单请求长度 → 一律取首档（≤512K），档位标签随行透出——
+/// 超长请求会话会被低估，靠标签露馅而不是假装精确。
+fn first_tier(card: &Value) -> Option<(&str, &Value)> {
+    let tiers = card.get("tiers").and_then(|v| v.as_array())?;
+    let first = tiers.first()?;
+    let label = first.get("label").and_then(|v| v.as_str()).unwrap_or("");
+    Some((label, first))
+}
+
+/// 单模型 4 型 tokens（claude snake 键名，见模块注释）→ 平费率总价。返回
+/// (供应商, 币种, 总价, 档位标签)。模型/卡都匹配不上 → None（不臆造）。
+fn price_claude_model(
+    model: &str,
+    tokens: &Value,
+    pricing: &Value,
+) -> Option<(String, String, f64, Option<String>)> {
+    let (provider, key, currency) = resolve_card_catalog(model, pricing)?;
+    let card = catalog_card(pricing, &provider, &key)?;
+    let (label, card) = match first_tier(card) {
+        Some((label, tier)) => (Some(label.to_string()), tier),
+        None => (None, card),
+    };
+    let m = |k: &str| get_i64(tokens, k) as f64 / 1e6;
+    let total = m("input_tokens") * flat_rate(card, "input_uncached")
+        + m("cache_read_input_tokens") * flat_rate(card, "input_cached")
+        + m("cache_creation_input_tokens") * cache_write_rate(card)
+        + m("output_tokens") * flat_rate(card, "output");
+    Some((provider, currency, total, label))
+}
+
+/// `{模型: 4 型 snake tokens}` → 价目报告。`claude_session_cost`（cost-state
+/// camel 转换后）与 `claude_day_cost`（ledger by_model 直通）共用——两面的钱
+/// 必须同源，不在这里为日面长第二份计价规则（DSH 侧
+/// token_by_date_model==token_by_model 那条纪律的 claude 镜像）。
+///
+/// 未知模型（`<synthetic>` 等）→ token 四型全进 unpriced。注意与 `cost_report`
+/// 的 unpriced 词表不同：那边不含 output（DSH 钉测形状），claude cost-state
+/// 只有这 4 型、output 同样是真实消费，未知就该全数报出来，别悄悄吞掉 output。
+fn price_claude_map(models: &serde_json::Map<String, Value>, pricing: &Value) -> Option<Value> {
+    let mut cny = 0.0f64;
+    let mut usd = 0.0f64;
+    let mut unpriced = 0i64;
+    let mut per_model = serde_json::Map::new();
+    for (model, tokens) in models {
+        if tokens.as_object().is_none() {
+            continue;
+        }
+        match price_claude_model(model, tokens, pricing) {
+            Some((provider, currency, total, tier)) => {
+                if currency == "USD" {
+                    usd += total;
+                } else {
+                    // 币种只可能是目录卡显式写的 USD/CNY 或顶层段默认 CNY；
+                    // 真有第三种币种落进来会静默混进 CNY——加新币种时改这里。
+                    cny += total;
+                }
+                let mut entry = json!({
+                    "short_name": model_short(model, pricing),
+                    "currency": currency,
+                    "pricing_basis": "catalog",
+                    "priced_with": provider,
+                    "total": total,
+                });
+                if let Some(label) = tier {
+                    entry["tier"] = json!(label);
+                }
+                per_model.insert(model.clone(), entry);
+            }
+            None => {
+                unpriced += get_i64(tokens, "input_tokens")
+                    + get_i64(tokens, "cache_read_input_tokens")
+                    + get_i64(tokens, "cache_creation_input_tokens")
+                    + get_i64(tokens, "output_tokens");
+            }
+        }
+    }
+    if per_model.is_empty() && unpriced == 0 {
+        return None;
+    }
+    Some(json!({
+        "pricing_basis": "catalog",
+        "currency_totals": {"CNY": cny, "USD": usd},
+        "per_model": Value::Object(per_model),
+        "unpriced_tokens": unpriced,
+        "estimate_disclaimer": "按模型族官方卡折算的估算，不是账单",
+    }))
+}
+
+/// cost-state 的 modelUsage（camelCase：inputTokens/outputTokens/
+/// cacheReadInputTokens/cacheCreationInputTokens/costUSD）→ 会话账金额。
+/// 键名转 claude snake 后走 `price_claude_map`——转换只有键名映射，不重算。
+/// `webSearchRequests`/`costUSD` 不参与计价（web search 没有 token 单价；
+/// costUSD 对网关模型按默认卡 $5/$0.5/$25 计、高估 20–70×——host_costusd_note
+/// 说清了，绝不能当账单数字）。modelUsage 为空/缺场 → None。
+pub fn claude_session_cost(model_usage: &Value, pricing: &Value) -> Option<Value> {
+    let mu = model_usage.as_object()?;
+    let mut models = serde_json::Map::new();
+    for (model, ms) in mu {
+        if ms.as_object().is_none() {
+            continue;
+        }
+        models.insert(
+            model.clone(),
+            json!({
+                "input_tokens": get_i64(ms, "inputTokens"),
+                "cache_read_input_tokens": get_i64(ms, "cacheReadInputTokens"),
+                "cache_creation_input_tokens": get_i64(ms, "cacheCreationInputTokens"),
+                "output_tokens": get_i64(ms, "outputTokens"),
+            }),
+        );
+    }
+    if models.is_empty() {
+        return None;
+    }
+    price_claude_map(&models, pricing)
+}
+
+/// claude-ledger 的一天（by_model: {模型: 4 型 snake tokens}）→ 当日金额。
+/// ledger 逐日账只存 tokens（价格会变、token 不会——DSH month.json 同一条
+/// 纪律），钱在这读时才算。结构与 `claude_session_cost` 完全相同（同一个
+/// `price_claude_map`），只是输入已 4 型 snake、无需转换。
+pub fn claude_day_cost(day: &Value, pricing: &Value) -> Option<Value> {
+    let by_model = day.get("by_model").and_then(|v| v.as_object())?;
+    if by_model.is_empty() {
+        return None;
+    }
+    price_claude_map(by_model, pricing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1086,5 +1314,176 @@ mod tests {
         assert!((out["total"].as_f64().unwrap() - 1.5).abs() < 1e-9);
         assert_eq!(out["tokens"], serde_json::json!(1000000),
                    "buckets 路径同样带 token 总量");
+    }
+
+    // ── catalog_2026_09（Claude Code 语料计价）钉测 ──────────────────────
+    // 夹具与 `tests/test_catalog_pricing.py` 同数——两侧各自钉同一组数字互守
+    // （与 test_cost_priced_day.py 同款交叉引用模式）；命令级差分等 claude-sync
+    // 落地后由 `both()` 补。
+
+    /// 目录解析命中面：catalog 平费率卡（claude-opus-5 → anthropic/USD）、
+    /// 顶层 deepseek 卡（`[1M]`/`-0813` 变体 → deepseek-official/CNY——前缀
+    /// 匹配键是短的、模型是长的，无需剥离代码）、moonshot 斜杠模型；
+    /// `<synthetic>` 与任意未知模型 → None。
+    #[test]
+    fn resolve_card_catalog_hits_and_misses() {
+        let pricing = load_pricing();
+        let (provider, key, currency) =
+            resolve_card_catalog("claude-opus-5", &pricing).unwrap();
+        assert_eq!((provider.as_str(), key.as_str(), currency.as_str()),
+                   ("anthropic", "claude-opus-5", "USD"));
+        let (provider, key, currency) =
+            resolve_card_catalog("deepseek-v4-pro[1M]", &pricing).unwrap();
+        assert_eq!((provider.as_str(), key.as_str(), currency.as_str()),
+                   ("deepseek-official", "deepseek-v4-pro", "CNY"));
+        let (provider, _, currency) =
+            resolve_card_catalog("deepseek/deepseek-v4-pro-0813", &pricing).unwrap();
+        assert_eq!((provider.as_str(), currency.as_str()),
+                   ("deepseek-official", "CNY"));
+        let (provider, _, currency) =
+            resolve_card_catalog("moonshot/kimi-k3", &pricing).unwrap();
+        assert_eq!((provider.as_str(), currency.as_str()), ("moonshot", "USD"));
+        assert_eq!(resolve_card_catalog("<synthetic>", &pricing), None);
+        assert_eq!(resolve_card_catalog("some/unknown-model", &pricing), None);
+    }
+
+    /// `[1M]` 变体按 pro 官方 ¥ 卡折（近似已注释）——1M uncached × off_peak
+    /// 4.5 → ¥4.5 进 CNY 桶，USD 桶保持 0（键序 CNY/USD 稳定）。
+    #[test]
+    fn claude_session_cost_prices_deepseek_variant_at_official_cny_card() {
+        let pricing = load_pricing();
+        let usage = serde_json::json!({
+            "deepseek-v4-pro[1M]": {"inputTokens": 1000000, "outputTokens": 0,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0},
+        });
+        let out = claude_session_cost(&usage, &pricing).unwrap();
+        assert_eq!(out["currency_totals"]["CNY"].as_f64().unwrap(), 4.5);
+        assert_eq!(out["currency_totals"]["USD"].as_f64().unwrap(), 0.0);
+        let pm = &out["per_model"]["deepseek-v4-pro[1M]"];
+        assert_eq!(pm["pricing_basis"], "catalog");
+        assert_eq!(pm["priced_with"], "deepseek-official");
+        assert_eq!(pm["currency"], "CNY");
+        assert!(pm.get("tier").is_none(), "平费率卡不带 tier 键");
+    }
+
+    /// anthropic 卡四型齐计：opus-5 1M uncached ×5 + 1M cached-read ×0.5 +
+    /// 1M cache-creation ×1h 档 10 + 0.5M output ×25 → 5+0.5+10+12.5 = 28.0 USD。
+    /// 缓存写走 1h 档——host_costusd_note：Claude Code 自报 costUSD 按 1h 计，
+    /// 照它走才能与 cost-state 互相当差分 oracle。
+    #[test]
+    fn claude_session_cost_prices_anthropic_all_four_token_types() {
+        let pricing = load_pricing();
+        let usage = serde_json::json!({
+            "claude-opus-5": {"inputTokens": 1000000, "outputTokens": 500000,
+                "cacheReadInputTokens": 1000000, "cacheCreationInputTokens": 1000000},
+        });
+        let out = claude_session_cost(&usage, &pricing).unwrap();
+        let usd = out["currency_totals"]["USD"].as_f64().unwrap();
+        assert!((usd - 28.0).abs() < 1e-9, "got {usd}");
+        assert_eq!(out["unpriced_tokens"], 0);
+        assert_eq!(out["currency_totals"]["CNY"].as_f64().unwrap(), 0.0);
+    }
+
+    /// MiniMax-M3 走 tiers 首档（会话聚合分不出单请求长度，v1 一律首档 + 档位
+    /// 标签透出）：1M input ×2.10 + 0.1M output ×8.40 = 2.94 CNY。
+    #[test]
+    fn claude_session_cost_picks_first_tier_and_labels_it() {
+        let pricing = load_pricing();
+        let usage = serde_json::json!({
+            "MiniMax-M3": {"inputTokens": 1000000, "outputTokens": 100000,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0},
+        });
+        let out = claude_session_cost(&usage, &pricing).unwrap();
+        let pm = &out["per_model"]["MiniMax-M3"];
+        assert_eq!(pm["tier"], "≤512K input");
+        let cny = out["currency_totals"]["CNY"].as_f64().unwrap();
+        assert!((cny - 2.94).abs() < 1e-9, "got {cny}");
+    }
+
+    /// M2.7 无 1h 档 → 缓存写走平费率 `cache_write` 2.625：1M cc → ¥2.625。
+    #[test]
+    fn claude_session_cost_m27_cache_write_uses_cache_write_rate() {
+        let pricing = load_pricing();
+        let usage = serde_json::json!({
+            "MiniMax-M2.7": {"inputTokens": 0, "outputTokens": 0,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 1000000},
+        });
+        let out = claude_session_cost(&usage, &pricing).unwrap();
+        let cny = out["currency_totals"]["CNY"].as_f64().unwrap();
+        assert!((cny - 2.625).abs() < 1e-9, "got {cny}");
+    }
+
+    /// 同一会话跨两家（网关现实）：claude-sonnet-5 + deepseek-v4-flash → 两币
+    /// 各行、per_model 键序 = 输入序。sonnet 2M uncached ×3 = 6 USD；flash
+    /// 2M ×off_peak 1.5 = 3 CNY。
+    #[test]
+    fn claude_session_cost_splits_two_currencies() {
+        let pricing = load_pricing();
+        let usage = serde_json::json!({
+            "claude-sonnet-5": {"inputTokens": 2000000, "outputTokens": 0,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0},
+            "deepseek-v4-flash": {"inputTokens": 2000000, "outputTokens": 0,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0},
+        });
+        let out = claude_session_cost(&usage, &pricing).unwrap();
+        let cny = out["currency_totals"]["CNY"].as_f64().unwrap();
+        let usd = out["currency_totals"]["USD"].as_f64().unwrap();
+        assert!((cny - 3.0).abs() < 1e-9, "got {cny}");
+        assert!((usd - 6.0).abs() < 1e-9, "got {usd}");
+        let keys: Vec<_> = out["per_model"].as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, vec!["claude-sonnet-5", "deepseek-v4-flash"]);
+    }
+
+    /// 未知模型 `<synthetic>` → 四型全进 unpriced（**含 output**——与
+    /// `cost_report` 的 unpriced 词表不同是有意的：claude 侧只有这 4 型、output
+    /// 同属真实消费，未知就该全数报出，见 price_claude_map 注释）。
+    #[test]
+    fn claude_session_cost_unknown_model_unpriced_all_four_types() {
+        let pricing = load_pricing();
+        let usage = serde_json::json!({
+            "<synthetic>": {"inputTokens": 1000, "outputTokens": 40,
+                "cacheReadInputTokens": 10, "cacheCreationInputTokens": 5},
+        });
+        let out = claude_session_cost(&usage, &pricing).unwrap();
+        assert_eq!(out["per_model"].as_object().unwrap().len(), 0);
+        assert_eq!(out["unpriced_tokens"], 1055);
+        assert_eq!(out["currency_totals"]["CNY"].as_f64().unwrap(), 0.0);
+        assert_eq!(out["currency_totals"]["USD"].as_f64().unwrap(), 0.0);
+    }
+
+    /// modelUsage 空/缺场 → None，不摆全零结构（与 cost_report 同一条语义）。
+    #[test]
+    fn claude_session_cost_none_when_no_usage() {
+        let pricing = load_pricing();
+        assert_eq!(claude_session_cost(&serde_json::json!({}), &pricing), None);
+        assert_eq!(claude_session_cost(&serde_json::json!(null), &pricing), None);
+    }
+
+    /// ledger 日面与 cost-state 面同源：同一模型同 tokens → 输出逐字节相同
+    /// （claude_day_cost 直通 by_model，claude_session_cost 只做 camel→snake
+    /// 键名转换，价格计算是同一个 price_claude_map——两面金额必须一致）。
+    #[test]
+    fn claude_day_and_session_costs_agree() {
+        let pricing = load_pricing();
+        let day = serde_json::json!({"by_model": {"claude-sonnet-5": {
+            "input_tokens": 2000000, "cache_read_input_tokens": 1000000,
+            "cache_creation_input_tokens": 0, "output_tokens": 100000}}});
+        let sess = serde_json::json!({"claude-sonnet-5": {
+            "inputTokens": 2000000, "cacheReadInputTokens": 1000000,
+            "cacheCreationInputTokens": 0, "outputTokens": 100000}});
+        assert_eq!(
+            claude_day_cost(&day, &pricing),
+            claude_session_cost(&sess, &pricing),
+            "日面与 cost-state 面对同一批 token 必须报同一个数"
+        );
+    }
+
+    /// claude_day_cost 对 by_model 缺场/为空的日子 → None（调用方自己决定
+    /// 退回哪种近似，本函数不摆全零结构）。
+    #[test]
+    fn claude_day_cost_none_without_by_model() {
+        let pricing = load_pricing();
+        assert_eq!(claude_day_cost(&serde_json::json!({}), &pricing), None);
+        assert_eq!(claude_day_cost(&serde_json::json!({"by_model": {}}), &pricing), None);
     }
 }
