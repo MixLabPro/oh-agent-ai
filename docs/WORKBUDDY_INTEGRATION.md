@@ -5,11 +5,14 @@
 > [CLAUDE_CODE_INTEGRATION.md](./CLAUDE_CODE_INTEGRATION.md)（同构接入范式的上一例）·
 > [MENUBAR_MULTIHOST_NAVIGATION_SPEC.md](./MENUBAR_MULTIHOST_NAVIGATION_SPEC.md)（多宿主导航）·
 > [VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md](./VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md)（v0.5 架构）。
-> 状态：**调研结论 + 设计草案，尚未落地**。数据面证据已实测（§2 的 4 表面 3 可 join、
-> audit-log 三层决策账本、traces 会话匿名、credit_json 宿主计价）；§3 规则能力矩阵、§7 决策
-> 映射、§8 请求重建已定案（P0 修正版）。§4 的 provenance / `ToolResultObservation.failed` 是
-> Claude 接入第一刀落进 `agent-vitals-core` 的既有成果，WorkBuddy 直接复用，**不需要再改 core
-> 模型**。评审结论：不修改通用 `vitals-core`、不修改 `agent-vitals-core` 既有证据模型的方向**成立**。
+> 状态：**调研结论 + 适配器已落地**（2026-09-02 更新）。数据面证据已实测（§2 的 4 表面 3 可
+> join、audit-log 三层决策账本、traces 会话匿名、credit_json 宿主计价）；§3 规则能力矩阵、§7
+> 决策映射、§8 请求重建已定案（P0 修正版）。§4 的 provenance / `ToolResultObservation.failed`
+> 是 Claude 接入第一刀落进 `agent-vitals-core` 的既有成果，WorkBuddy 直接复用，**不需要再改
+> core 模型**。评审结论：不修改通用 `vitals-core`、不修改 `agent-vitals-core` 既有证据模型的
+> 方向**成立**。适配器本体已实现并验证（§11 工作项 1–9：`workbuddy_evidence.rs` /
+> `workbuddy_session.rs` + Python 镜像 + fixtures + 六条差分，`workbuddy-session` CLI 双侧
+> 逐字节一致）。SessionStore/Tauri 接入仍属后续阶段（§5）。
 
 ## 0. 结论
 
@@ -317,41 +320,43 @@ auto 4 / MiniMax-M2.5 2。
 
 ## 11. 接入工作项（依赖序）
 
-1. **rusqlite（bundled）进二进制依赖**（§1.4），core crate 不动；
+1. ~~**rusqlite（bundled）进二进制依赖**~~ **已落地**（§1.4），core crate 不动；
 2. ~~core 证据模型~~ —— 无需改动（Claude 第一刀已备齐 provenance + failed）；
-3. **`crates/agent-vitals-core/src/workbuddy_evidence.rs`**：`build_workbuddy_evidence`
-   （audit-log → tool_calls/approvals/sandbox timeline + TurnBoundaries derived coverage +
-   链路完整性 note）+ `is_unavailable`（ToolResults/StepBoundaries/Usage/ContextWindow/
-   QuotaConsumption/SandboxPolicy/Compaction/SubagentSpawns/SkillInvocations/Hooks/
-   UserPrompts/UserCorrections）+ `derive_coverage` + `build_notes`。core 单测：
+3. ~~**`crates/agent-vitals-core/src/workbuddy_evidence.rs`**~~ **已落地**：
+   `build_workbuddy_evidence`（audit-log → tool_calls/approvals/sandbox timeline +
+   TurnBoundaries derived coverage + 链路完整性 note）+ `is_unavailable` +
+   `derive_coverage` + `build_notes`。core 单测：
    `approval_records_feed_only_the_approvals_axis`、`rotated_chain_reports_verified_from`、
-   `turns_timeline_stays_empty_so_sv612_613_are_unavailable`、`mode_stays_workbuddy_native_not_danger_full_access`；
-4. **`src/agent/workbuddy_session.rs`**（binary I/O + CLI）：rusqlite 读 `sessions`/
-   `session_usage`、glob `audit-log/*.jsonl` 按 `sessionId` 字段分组、file-history 计数；
-   `workbuddy_session_list` / `workbuddy_audit_projection`（用 core `match_behavior_canonical`
-   + `degrade_sv604_605`）/ `workbuddy_session_audit_json`；`Cmd::WorkbuddySession` 进
-   `src/main.rs` + `pub mod workbuddy_session` 进 `src/agent/mod.rs`；
-5. **Python 镜像**：`adapters/workbuddy_session.py`（I/O，sqlite3 stdlib）+ 
+   `turns_timeline_stays_empty_so_sv612_613_are_unavailable`、
+   `mode_stays_workbuddy_native_not_danger_full_access`；
+4. ~~**`src/agent/workbuddy_session.rs`**（binary I/O + CLI）~~ **已落地**：rusqlite 读
+   `sessions`/`session_usage`、glob `audit-log/*.jsonl` 按 `sessionId` 字段分组、
+   file-history 计数；`workbuddy_session_list` / `workbuddy_audit_projection`（core
+   `match_behavior_canonical` + `degrade_sv604_605`）/ `workbuddy_session_audit_json`；
+   `Cmd::WorkbuddySession` 已进 `src/main.rs` + `pub mod workbuddy_session` 已进
+   `src/agent/mod.rs`；
+5. ~~**Python 镜像**~~ **已落地**：`adapters/workbuddy_session.py`（I/O，sqlite3 stdlib）+
    `agent/workbuddy_evidence.py`（derive→coverage）+ `agent/workbuddy_session_audit.py`
    （组合 + `workbuddy_audit_projection` + SV604/605 override + `cost` 块 + list）；
-   `workbuddy-session` 子命令进 `scripts/agent_vitals/cli.py`（镜像 claude-session：--list /
-   --session（默认最新）/ --json，None → exit 2）；
-6. **fixtures/workbuddy/** + `build_workbuddy_fixture.py`（自校验）：真实 sqlite `workbuddy.db`
-   + `audit-log/s1.jsonl`（健康会话）+ `audit-log/s2.jsonl`（approval-flow + 轮转链）+
-   `file-history/s1|s2/`。builder 确定性、自校验钉死 §10.4 数字（见下）；
-7. **tests/test_cli_matrix.py** workbuddy 差分（py==rs 逐字节）：
+   `workbuddy-session` 子命令已进 `scripts/agent_vitals/cli.py`（镜像 claude-session：
+   --list / --session（默认最新）/ --json，None → exit 2）；
+6. ~~**fixtures/workbuddy/** + `build_workbuddy_fixture.py`（自校验）~~ **已落地**：真实
+   sqlite `workbuddy.db` + `audit-log/s1.jsonl`（健康会话）+ `audit-log/s2.jsonl`
+   （approval-flow + 轮转链）+ `file-history/s1|s2/`。builder 确定性、自校验钉死
+   §10.4 数字（见下）；
+7. ~~**tests/test_cli_matrix.py** workbuddy 差分（py==rs 逐字节）~~ **已落地**（六条）：
    `test_workbuddy_session_list_differential`、`test_workbuddy_session_detail_differential`
    （钉死 §10.4 数字 + key 序 + notes 精确串）、`test_workbuddy_session_approval_flow_differential`
    （钉审批映射：approvals timeline 3 条（asked+decided）、SV609 出 3 条 finding、SV610 出
    1 条（allowed-once）、轮转链 verified-from note）、
-   `test_workbuddy_session_defaults_to_latest`、`test_workbuddy_session_missing_surfaces_degrade`
-   （db/audit-log 缺 → 对应信号 Unavailable，不编造）；
-8. **清单守卫三处**：`tests/test_classification.py` `PY_AGENT_FAMILY` 加
-   `workbuddy_evidence`/`workbuddy_session_audit`、`RS_AGENT_FAMILY` 加 `workbuddy_session`；
-   `tests/test_clawhub_packaging.py` `ALLOWED_PACKAGE_FILES` 加
+   `test_workbuddy_session_defaults_to_latest`、`test_workbuddy_session_missing_session_is_tool_error`、
+   `test_workbuddy_session_db_only_session_audits_empty_records`；
+8. ~~**清单守卫三处**~~ **已落地**：`tests/test_classification.py` `PY_AGENT_FAMILY` 已含
+   `workbuddy_evidence`/`workbuddy_session_audit`、`RS_AGENT_FAMILY` 已含 `workbuddy_session`；
+   `tests/test_clawhub_packaging.py` `ALLOWED_PACKAGE_FILES` 已含
    `agent/workbuddy_evidence.py`/`agent/workbuddy_session_audit.py`/`adapters/workbuddy_session.py`；
-   `.github/workflows/package-clawhub.yml` case-list 同步（三处逐字一致）；
-9. **无 wasm、pricing.json 不动**（§6/§9）。
+   `.github/workflows/package-clawhub.yml` case-list 已同步（三处逐字一致）；
+9. ~~**无 wasm、pricing.json 不动**~~ **已满足**（§6/§9，两侧均未引入 wasm/价表改动）。
 
 **健康会话 s1 的 §10.4 验收数字**（自校验 + 差分都钉死）：
 

@@ -2,13 +2,15 @@
 
 > 采集 2026-09-01。本机 Claude Code 全部会话 JSONL 实测。
 > 关联：[CLAUDE_CODE_CORPUS.md](./CLAUDE_CODE_CORPUS.md)（数据面快照）· [VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md](./VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md)（v0.5 架构）· [MENUBAR_MULTIHOST_NAVIGATION_SPEC.md](./MENUBAR_MULTIHOST_NAVIGATION_SPEC.md)（多宿主导航）。
-> 状态：**调研结论 + 设计草案，第一刀已落地**。数据面证据已实测（2026-09-01 二次抽查修正：
-> 日期轴原生、事件类型 12 种、usage 富字段、tool_result 三态——见 §2）；接入层级、规则能力
-> 矩阵、provenance、SessionStore、WASM 五个问题已定案（P0 修正版）；§7 工具名规范化与
-> §8 turn 重建状态机已给设计草案。§4 的 `TimelineEntry.provenance` + `source_type` 按 host
-> 生成、§3 的 `ToolResultObservation.failed` 已作为「第一刀」实现进 `agent-vitals-core`
-> （core 单测 + golden 差分 15/15 全绿，输出字节不变，见 §4）。评审结论：v0.5 通用 Core
-> 不修改的方向**成立**。
+> 状态：**调研结论 + 适配器已落地**（2026-09-02 更新）。数据面证据已实测（2026-09-01 二次
+> 抽查修正：日期轴原生、事件类型 12 种、usage 富字段、tool_result 三态——见 §2）；接入层级、
+> 规则能力矩阵、provenance、SessionStore、WASM 五个问题已定案（P0 修正版）；§7 工具名规范化
+> 与 §8 turn 重建状态机已**实现并验证**（§11 工作项 1/2/5，`claude_code_evidence.rs` /
+> `claude_evidence.py` + 三份 leaf fixture 差分钉住，见 §10/§11）。§4 的
+> `TimelineEntry.provenance` + `source_type` 按 host 生成、§3 的 `ToolResultObservation.failed`
+> 已实现进 `agent-vitals-core`（core 单测 + golden 差分 15/15 全绿，输出字节不变，见 §4）。
+> 评审结论：v0.5 通用 Core 不修改的方向**成立**。§9 成本部分与 §5 SessionStore 接入仍属
+> 后续阶段（§11 工作项 6/7/8）。
 
 ## 0. 结论
 
@@ -101,7 +103,7 @@ derived turn   → agent.turn
 | `user` | 21,296 | 含 `tool_result` 块（19,437 个）；**无 tool_result 的纯文本 user = 新 turn 根**（§8 问 4） |
 | `attachment` | 21,073 | `deferred_tools_delta` —— 工具名清单 |
 | `permission-mode` | 6,024 | **仅模式快照** `{permissionMode, sessionId}`，无逐次审批 |
-| `mode` | 未逐类计数 | 权限模式事件——与 `permission-mode` 的差异待 Claude 适配器落地时复核 |
+| `mode` | 未逐类计数 | 权限模式事件——复核结论（适配器落地时）：`mode` 在已知类型里但不喂任何信号（§13 Claude 列无对应项）；`permission-mode` 喂 `ApprovalPolicy` measured |
 | `file-history-snapshot` / `file-history-delta` | 未逐类计数 | 文件内容快照/差异——`FileMutations` 信号候选 |
 | `last-prompt` / `ai-title` / `atis-latch` | 未逐类计数 | 会话元数据更新，无审计价值 |
 | `queue-operation` | 未逐类计数 | Continue 排队操作，无 uuid |
@@ -181,7 +183,8 @@ pub struct ToolResultObservation {
 
 - `failed` 服务通用失败（is_error → failed=true，provenance=lossy）；**现有 DSH/Codex 适配器
   一律设 `None`**——它们的失败信息在 `error_code` 里（`exit_code:N`/`error`），不重复造信号；
-  Claude 适配器落地时填 `Some(bool)`。
+  Claude 适配器已填：`is_error` 三态 → `Some(bool)`（键存在 = lossy、键缺失 = measured，
+  `claude_code_evidence.rs:236-243`）。
 - `error_code` 服务拒绝/超时原因级——Claude 无来源时保持 `None`，**绝不伪造一个码**。
 - 兼容桥把 `failed` 原样投影进 `CanonicalEvent.attributes`（与 `error_code` 并列），
   SV613(b) 的 lossy 路径读得到；core 单测 `tool_result_failed_flag_carries_through_bridge` 钉住。
@@ -269,9 +272,9 @@ Tauri Rust backend
   序列化（参考 `canonical_string`，vitals-core/canonical.rs:36）——否则 SV611 把键序不同、
   语义相同的参数识别成不同调用。Bash 例外：直接取 `input.command` 字符串。
 - 规范化发生在**适配器 derive 阶段**（§1.3 的 TrajectoryAssigner 边界），不是 Detector 里；
-  映射表落地随 Claude 适配器（§11 工作项 5）。
+  映射表已随适配器落地（§11 工作项 5，`normalize_tool_name`，core 单测钉住）。
 
-## 8. turn 重建状态机（设计草案，2026-09-01）
+## 8. turn 重建状态机（2026-09-01 定稿设计，已实现验证）
 
 `parentUuid` 树**不等于** turn，但 uuid 树只出现在 `user`/`attachment`/`assistant` 三类
 事件上（§2.3），且每个真 root 是 `parentUuid=null` 的 user 事件。八问的草案答案：
@@ -296,8 +299,10 @@ Tauri Rust backend
    （就近根启发）；整文件无 user-root（截断文件）→ 整个 TurnBoundaries **Unavailable**
    （沿用 evidence.rs 的 `timeline_is_empty` gate）。**绝不发明不存在的边界。**
 
-**草案未实现验证前，SV612/613(a) 仍标 Derived/Partial，不能声称可跑。** 状态机按 §1.3 的
-纪律实现在适配器 derive 阶段（写进 `CanonicalSession.turns`），不挂 TrajectoryAssigner。
+**已实现验证**：SV612/613(a) 在重建出的 turn 上跑（Derived/Partial——turn 是合成的，不是
+原生坐标）；重建失败逐 turn 判，整文件无 user-root（截断文件）→ TurnBoundaries **Unavailable**
+（`timeline_is_empty` gate，绝不发明不存在的边界）。状态机按 §1.3 的纪律实现在适配器 derive
+阶段（写进 `CanonicalSession.turns`），不挂 TrajectoryAssigner。
 
 ## 9. 成本部分（收紧）
 
@@ -326,8 +331,12 @@ unknown-provider    无法可靠归属 → 不出价
 2. Claude adapter 必须先生成 `CanonicalSession`，走 `canonical_session_to_vitals` 桥；
 3. Derived/Lossy provenance 不得变成 Measured（§4 的 `TimelineEntry.provenance` 测试）；
 4. unsupported 规则（SV607/608/609/610/614）必须 Unavailable，不得 MeasuredZero；
-5. 跨宿主相同行为产生相同 finding（Claude 与 DSH/Codex fixture 对齐）；
-6. leaf-path 与 all-recorded 分别有 fixture；
+5. 跨宿主相同行为产生相同 finding（Claude 与 DSH/Codex fixture 对齐——`dangerous.jsonl`
+   的 `rm -rf` 与 codex paginated 夹具产出同 evidence/severity/call_id 形状）；
+6. 每个 leaf-path 与 all-recorded 形状分别有 fixture（`fixtures/claude/` 三份——
+   `healthy.jsonl` = healthy leaf、`dangerous.jsonl` = finding leaf、
+   `all-recorded.jsonl` = full-shape leaf；「leaf」= 刻意狭窄的会话，只走映射表的
+   一条路径，改动停了那条路径就响亮失败，而不是静默改掉验收数字）；
 7. SessionStore list/read/all/filter/cursor 通过（§5）；
 8. Tauri 不解析 Claude 原始日志（§6 架构）；
 9. usage/cache/thinking 各桶可以对账（§9.2 不重复计数）；
@@ -344,18 +353,20 @@ unknown-provider    无法可靠归属 → 不出价
    `agent/claude_evidence.py` / `agent/claude_session_audit.py`，`claude-session` CLI）；
 3. ~~`TimelineEntry.provenance` 字段 + 桥透传 + `source_type` 按 host_id 生成~~ **已落地**
    （2026-09-01 第一刀，core 单测 + golden 差分 15/15 全绿，输出字节不变，见 §4）；
-4. ~~`ToolResultObservation.failed` 字段~~ **字段已落地**（见 §3）；SV613(b) 的 lossy 路径
-   改读 `failed`（Claude 适配器落地时接线）；
+4. ~~`ToolResultObservation.failed` 字段 + SV613(b) 的 lossy 路径改读 `failed`~~ **已落地**
+   （见 §3：is_error 三态 → `Some(bool)`；DSH/Codex 的 `failed` 恒 None，布尔式退化成原判据，
+   真值表见 `claude_code_evidence.rs`，golden 字节零漂移）；
 5. ~~工具名规范化表 + `args_text` 确定性序列化（§7 定稿，落地随适配器）~~ **已落地**
    （`normalize_tool_name` / `canonical_string`，`args_text_is_deterministic_regardless_of_key_order`
    等 core 单测钉住）；
 6. pricing.json 补 MiniMax/claude 官方价（业务数据，需价表；§9）；
 7. SessionStore：`claude_code(home)` + source registry 抽取（§5）；
 8. Tauri/workbench 消费（§6 架构，计算 host-side）；
-9. ~~验收 10 条 + fixtures 入库~~ **已落地**（`fixtures/claude/healthy.jsonl` +
-   `build_claude_fixture.py`（自校验钉死 §10 验收 #4 数字）+ `tests/test_cli_matrix.py`
-   `test_claude_session_*` 六条差分，py==rs 逐字节；证据层验收 #1–6 已覆盖，#7–10 属
-   SessionStore/Tauri/cost 后续阶段）。
+9. ~~验收 10 条 + fixtures 入库~~ **已落地**（`fixtures/claude/` 三份 leaf 夹具——
+   `healthy.jsonl` / `dangerous.jsonl` / `all-recorded.jsonl`，`build_claude_fixture.py`
+   自校验钉死 §10 验收 #4/#5/#6 数字；`tests/test_cli_matrix.py` `test_claude_session_*`
+   八条差分，py==rs 逐字节；证据层验收 #1–6 已覆盖，#7–10 属 SessionStore/Tauri/cost
+   后续阶段）。
 
 ## 12. 诚实性注记
 
@@ -365,5 +376,6 @@ unknown-provider    无法可靠归属 → 不出价
 4. **thinking 是配置性**：逐请求读 `output_tokens_details.thinking_tokens`；
 5. **`adapters/claude.py` 现只做静态配置证据**（enabledPlugins/skillUsage），会话数据面
    适配器净新增；
-6. **本文件是调研结论 + 设计草案**：§7/§8 已给草案但**未实现验证**，Claude 适配器落地前
-   不可照单实现；§4/§3 的第一刀已落地 agent-vitals-core，回归验证见 §4。
+6. **§7/§8 的草案已随适配器实现并验证**（`claude_code_evidence.rs` / `claude_evidence.py`，
+   三份 leaf fixture + 八条差分测试钉住）；§9 成本部分仍是设计——价表与对账（§11 工作项 6）
+   未做，勿按实现引用。
