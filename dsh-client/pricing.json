@@ -78,7 +78,7 @@
       }
     },
     "subscriptions": {
-      "_doc": "用户确认的订阅套餐(basis=user-reported-invoice,2026-09-02 口述)。订阅覆盖该提供商全部用量,没有边际 token 账单——摊销单价仅供感知层(总成本/总用量),不得冒充 confirmed waste spend(ATTRIBUTABLE_WASTE.md §6)。",
+      "_doc": "用户确认的订阅套餐(basis=user-reported-invoice,2026-09-02 口述)。订阅覆盖该提供商全部用量,没有边际 token 账单——摊销单价仅供感知层(总成本/总用量),不得冒充 confirmed waste spend(ATTRIBUTABLE_WASTE.md §6)。计费模式判定链(2026-09-02,按序执行,前三层不依赖用户):①账户层读 ~/.claude.json::oauthAccount.billingType(有订阅值→套餐候选);②路由层读 ANTHROPIC_BASE_URL/AUTH_TOKEN/ANTHROPIC_API_KEY(非官方端点→按量);③事件层扫语料 quotaLimits 拒绝史(five_hour/seven_day 出现→订阅窗口在跑,isUsingOverage=0→撞窗被拒不兜底);④前三层判不出或量与窗口矛盾→才向用户确认一句。session.jsonl 不保留端点,历史路由靠模型名+缓存语义推断(claude-* 且 cache_creation>0→官方端点;deepseek-* 且 cc=0→DeepSeek 端点)。",
       "claude-pro": {
         "provider": "anthropic", "currency": "USD", "amount_per_month": 20.0,
         "reported_at": "2026-09-02",
