@@ -28,10 +28,8 @@ use serde_json::{json, Map, Value};
 
 use crate::agent::codex_cost::{codex_cost_report, load_codex_pricing};
 use crate::agent::codex_session::{codex_rollout_files, read_codex_session_log, read_session_index};
-use agent_vitals_core::behavior::{flatten, match_behavior_canonical, rule_outcomes_json};
 use agent_vitals_core::codex_evidence::{build_codex_evidence, codex_evidence_json, CodexEvidence};
 use agent_vitals_core::codex_usage::{codex_hour_of, codex_merge_folds};
-use agent_vitals_core::trajectory::{flatten_trajectory, match_trajectory_canonical};
 
 /// 一份 rollout 文件对 `codex-session` 有用的全部信息。degraded 文件（不可读/
 /// 非 JSON/空）→ items 空 + 时间戳 None，但**仍按文件名兜底的 session_id
@@ -76,33 +74,12 @@ fn context_window_of(items: &[Value]) -> Option<i64> {
     found
 }
 
+/// 薄封装 core 共享求值器（v0.6 host-contract spec §7-C，M1）——三份
+/// dispatcher 的公共部分塌缩进 `canonical_audit::audit_projection`。Codex
+/// 行上没有 `degraded_rules`（`host_capability::HOSTS`），"codex" 走 no-op
+/// 分支，与塌缩前从不调用 degrade 的行为等价。
 fn audit_projection(evidence: &CodexEvidence) -> Value {
-    let family1 = match_behavior_canonical(&evidence.canonical);
-    let trajectory = match_trajectory_canonical(&evidence.canonical);
-    let mut findings = flatten(&family1);
-    findings.extend(flatten_trajectory(&trajectory));
-    let mut outcomes = family1;
-    outcomes.extend(trajectory);
-    let mut critical = 0_u64;
-    let mut warning = 0_u64;
-    let mut info = 0_u64;
-    for finding in &findings {
-        match finding.get("severity").and_then(|v| v.as_str()) {
-            Some("critical") => critical += 1,
-            Some("warning") => warning += 1,
-            Some("info") => info += 1,
-            _ => {},
-        }
-    }
-    let rules_unavailable = outcomes.iter().filter(|(_, outcome)| {
-        matches!(outcome, agent_vitals_core::evidence::RuleOutcome::Unavailable { .. })
-    }).count() as u64;
-    json!({
-        "summary": {"critical": critical, "warning": warning, "info": info,
-                    "findings_total": findings.len(), "rules_unavailable": rules_unavailable},
-        "findings": findings,
-        "rule_outcomes": rule_outcomes_json(&outcomes),
-    })
+    agent_vitals_core::canonical_audit::audit_projection(&evidence.canonical, "codex")
 }
 
 fn quota_trajectory_of(items: &[Value]) -> Value {

@@ -8,6 +8,7 @@
 
 pub mod behavior;
 pub mod budget;
+pub mod canonical_audit;
 pub mod claude_code_evidence;
 pub mod codex_evidence;
 pub mod codex_usage;

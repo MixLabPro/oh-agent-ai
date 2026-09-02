@@ -23,12 +23,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use agent_vitals_core::behavior::{flatten, match_behavior_canonical, rule_outcomes_json};
 use agent_vitals_core::claude_code_evidence::{
     build_claude_evidence, claude_evidence_json, ClaudeEvidence,
 };
-use agent_vitals_core::evidence::RuleOutcome;
-use agent_vitals_core::trajectory::{flatten_trajectory, match_trajectory_canonical};
 
 /// 一个会话文件对 `claude-session` 有用的全部信息（路径本身没有消费者——
 /// 调用方各自从 walk 结果拿路径，这里只携带读出来的元数据）。
@@ -243,42 +240,13 @@ pub fn render_claude_session_list(out: &Value) -> String {
     s
 }
 
-/// family① + family④ 的审计投影：findings + 三态 rule_outcomes + summary。与
-/// codex_session_audit 的 `audit_projection` 同构，唯一差异是 SV607/608 的
-/// host-capability degrade（core `host_capability`——表已下沉，这里是消费方）。
+/// family① + family④ 的审计投影：findings + 三态 rule_outcomes + summary。薄
+/// 封装 core 共享求值器（v0.6 host-contract spec §7-C，M1）——三份 dispatcher
+/// 的公共部分塌缩进 `canonical_audit::audit_projection`，这里只剩「传哪个
+/// host_id」。SV607/608 的 host-capability degrade 由 core `host_capability`
+/// 的 `HOSTS` 行驱动，是这条 host_id 唯一改变的行为。
 fn claude_audit_projection(evidence: &ClaudeEvidence) -> Value {
-    let mut family1 = match_behavior_canonical(&evidence.canonical);
-    agent_vitals_core::host_capability::degrade_rule_outcomes("claude-code", &mut family1);
-    let trajectory = match_trajectory_canonical(&evidence.canonical);
-
-    let mut findings = flatten(&family1);
-    findings.extend(flatten_trajectory(&trajectory));
-    let mut outcomes = family1;
-    outcomes.extend(trajectory);
-
-    let mut critical = 0_u64;
-    let mut warning = 0_u64;
-    let mut info = 0_u64;
-    for finding in &findings {
-        match finding.get("severity").and_then(|v| v.as_str()) {
-            Some("critical") => critical += 1,
-            Some("warning") => warning += 1,
-            Some("info") => info += 1,
-            _ => {}
-        }
-    }
-    let rules_unavailable = outcomes
-        .iter()
-        .filter(|(_, outcome)| matches!(outcome, RuleOutcome::Unavailable { .. }))
-        .count() as u64;
-    json!({
-        "summary": {
-            "critical": critical, "warning": warning, "info": info,
-            "findings_total": findings.len(), "rules_unavailable": rules_unavailable,
-        },
-        "findings": findings,
-        "rule_outcomes": rule_outcomes_json(&outcomes),
-    })
+    agent_vitals_core::canonical_audit::audit_projection(&evidence.canonical, "claude-code")
 }
 
 /// `claude-session` 单会话审计：coverage（§13 逐信号）+ SV601–614 findings。

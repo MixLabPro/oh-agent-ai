@@ -44,9 +44,6 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 
-use agent_vitals_core::behavior::{flatten, match_behavior_canonical, rule_outcomes_json};
-use agent_vitals_core::evidence::RuleOutcome;
-use agent_vitals_core::trajectory::{flatten_trajectory, match_trajectory_canonical};
 use agent_vitals_core::workbuddy_evidence::{
     build_workbuddy_evidence, workbuddy_evidence_json, WorkbuddyEvidence, WorkbuddySessionMeta,
 };
@@ -291,45 +288,13 @@ pub fn date_span_of(records: &[Value], meta: &WorkbuddySessionMeta) -> Value {
     json!({ "first": meta.created_at, "last": meta.updated_at })
 }
 
-/// family① + family④ 的审计投影：findings + 三态 rule_outcomes + summary。委托共享
-/// 求值器 `match_behavior_canonical`（宿主无关），然后做唯一的 WorkBuddy 特例：把
-/// SV604/605 从 MeasuredZero 覆盖成 Unavailable（host-capability degradation，core
-/// `host_capability`——表已下沉，这里是消费方），覆盖后重算
-/// `summary.rules_unavailable`——共享求值器的数已经不反映 degrade 后的状态（健康
-/// 会话 5 → 7）。
+/// family① + family④ 的审计投影：findings + 三态 rule_outcomes + summary。薄
+/// 封装 core 共享求值器（v0.6 host-contract spec §7-C，M1）——三份 dispatcher
+/// 的公共部分（含 SV604/605 的 host-capability degrade 与覆盖后重算
+/// `summary.rules_unavailable`）塌缩进 `canonical_audit::audit_projection`，
+/// 这里只剩「传哪个 host_id」。
 fn workbuddy_audit_projection(evidence: &WorkbuddyEvidence) -> Value {
-    let mut family1 = match_behavior_canonical(&evidence.canonical);
-    agent_vitals_core::host_capability::degrade_rule_outcomes("workbuddy", &mut family1);
-    let trajectory = match_trajectory_canonical(&evidence.canonical);
-
-    let mut findings = flatten(&family1);
-    findings.extend(flatten_trajectory(&trajectory));
-    let mut outcomes = family1;
-    outcomes.extend(trajectory);
-
-    let mut critical = 0_u64;
-    let mut warning = 0_u64;
-    let mut info = 0_u64;
-    for finding in &findings {
-        match finding.get("severity").and_then(|v| v.as_str()) {
-            Some("critical") => critical += 1,
-            Some("warning") => warning += 1,
-            Some("info") => info += 1,
-            _ => {}
-        }
-    }
-    let rules_unavailable = outcomes
-        .iter()
-        .filter(|(_, outcome)| matches!(outcome, RuleOutcome::Unavailable { .. }))
-        .count() as u64;
-    json!({
-        "summary": {
-            "critical": critical, "warning": warning, "info": info,
-            "findings_total": findings.len(), "rules_unavailable": rules_unavailable,
-        },
-        "findings": findings,
-        "rule_outcomes": rule_outcomes_json(&outcomes),
-    })
+    agent_vitals_core::canonical_audit::audit_projection(&evidence.canonical, "workbuddy")
 }
 
 /// `workbuddy-session --list` 的排序：`updated_at` 降序（最新在前），平局按 session_id
