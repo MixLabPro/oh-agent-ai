@@ -29,5 +29,72 @@
       }
     }
   },
-  "cache_write_per_million": 0
+  "cache_write_per_million": 0,
+  "catalog_2026_09": {
+    "_doc": "四族价目表(Claude Code 语料计价用,2026-09-02 采集)。basis=catalog-provider——原厂/官方文档价,不是用户账单;与 providers 的用途不同:providers 是 DSH 运行时计价,本节是跨宿主语料计价。单位:每百万 token,currency 按提供商。平峰同价的模型不设 peak/off_peak。注意:Sonnet 5 于 2026-09-01 起从促销价 $2/$10 涨到 $3/$15;MiniMax M3 整请求按输入长度分档(cliff 非梯度);Kimi 缓存写入价(¥25/M)仅见转售页,官方未确认。DeepSeek 两模型已在 providers 段(2026-08-30 核实,与官方 USD 换算一致),不重复。",
+    "providers": {
+      "anthropic": {
+        "currency": "USD",
+        "note": "cache write 按 5min=1.25×输入、1h=2×输入;US-only 推理在 Opus5/Sonnet5 上另加 10% 附加费(未计入价目)。",
+        "models": {
+          "claude-opus-5": {
+            "input_uncached": 5.0, "input_cached": 0.5, "output": 25.0,
+            "cache_write_5min": 6.25, "cache_write_1hr": 10.0
+          },
+          "claude-sonnet-5": {
+            "input_uncached": 3.0, "input_cached": 0.3, "output": 15.0,
+            "cache_write_5min": 3.75, "cache_write_1hr": 6.0,
+            "note": "9-01 起标准价;$2/$10 促销截至 2026-08-31"
+          },
+          "claude-haiku-4-5-20251001": {
+            "input_uncached": 1.0, "input_cached": 0.1, "output": 5.0,
+            "cache_write_5min": 1.25, "cache_write_1hr": 2.0
+          }
+        }
+      },
+      "minimax": {
+        "currency": "CNY",
+        "note": "M3 为永久五折后价;参考原价 4.20/16.80/0.84。",
+        "models": {
+          "MiniMax-M3": {
+            "tiers": [
+              { "label": "≤512K input", "max_input_tokens": 524288, "input_uncached": 2.10, "input_cached": 0.42, "output": 8.40 },
+              { "label": ">512K input", "max_input_tokens": null, "input_uncached": 4.20, "input_cached": 0.84, "output": 16.80 }
+            ]
+          },
+          "MiniMax-M2.7": {
+            "input_uncached": 2.10, "input_cached": 0.42, "output": 8.40, "cache_write": 2.625
+          }
+        }
+      },
+      "moonshot": {
+        "currency": "USD",
+        "note": "缓存写入价 ¥25/M 仅见 ai.360 转售页,官方未确认,不入价目。",
+        "models": {
+          "kimi-k3": {
+            "input_uncached": 3.0, "input_cached": 0.3, "output": 15.0
+          }
+        }
+      }
+    },
+    "subscriptions": {
+      "_doc": "用户确认的订阅套餐(basis=user-reported-invoice,2026-09-02 口述)。订阅覆盖该提供商全部用量,没有边际 token 账单——摊销单价仅供感知层(总成本/总用量),不得冒充 confirmed waste spend(ATTRIBUTABLE_WASTE.md §6)。",
+      "claude-pro": {
+        "provider": "anthropic", "currency": "USD", "amount_per_month": 20.0,
+        "reported_at": "2026-09-02",
+        "note": "Claude Pro $20/月(账户层已核实:~/.claude.json oauthAccount.billingType=apple_subscription,hasExtraUsageEnabled=false,超额被拒不兜底)。覆盖核对:Claude Code 语料 claude 族 19,248 事件/月(逻辑 10,861)远超 Pro 5h 窗口限额;语料内 20 条 five_hour/seven_day 配额拒绝(quotaLimits,resetsAt 2026-08-19→09-01,isUsingOverage=0)证明官方端点流量挂在订阅窗口体系下,且拒绝史在 09-01 路由切换处终止;当前路由 ANTHROPIC_BASE_URL=api.deepseek.com 全按量(Pro 不参与)。8 月 claude 流量量级超窗口,必然部分走 API——套餐/按量的切割日志不可裁定,待用户一句话确认(是否设过 ANTHROPIC_API_KEY)。"
+      },
+      "minimax-sub": {
+        "provider": "minimax", "currency": "CNY", "amount_per_month": 114.0,
+        "reported_at": "2026-09-02"
+      }
+    },
+    "sources": {
+      "anthropic": "https://benchlm.ai/anthropic/api-pricing (2026-09-01 sync, 对照 platform.claude.com)",
+      "minimax": "https://platform.minimaxi.com/docs/guides/pricing-paygo (官方,CNY)",
+      "moonshot": "https://benchlm.ai/moonshot/api-pricing (2026-09-01 sync, 官方 platform 文档);ai.360.com 转售页:输入 ¥20/输出 ¥100/缓存写 ¥25",
+      "deepseek": "https://api-docs.deepseek.com/quick_start/pricing (USD 峰值/谷值,与 providers 段 CNY 换算一致)"
+    },
+    "host_costusd_note": "Claude Code 本地 lastModelUsage.costUSD 交叉核验(2026-09-02):claude 系模型与 catalog 逐分吻合(含 cc 按 1h 价),可当差分 oracle;第三方模型(deepseek/minimax)一律按 $5/$0.5/$25 默认卡计价,与真实价目不符,不可当账单证据。"
+  }
 }

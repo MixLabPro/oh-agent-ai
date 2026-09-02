@@ -65,6 +65,9 @@ token 账单,不得先把套餐费摊成伪单价再冒充 confirmed waste spend
 待复核异常       3 sessions ← 只展示会话与证据
 ```
 
+> 上表为 UI 示意。**真实 感知层 实测样例**见 `CLAUDE_CODE_CORPUS.md` §6:USD 块
+> $0.458/M processed、CNY 块 ¥0.246/M processed(catalog-provider 估算,两档口径)。
+
 ---
 
 ## 2. 为什么四类不能相加(v1 最核心的修订)
@@ -346,7 +349,7 @@ coverage 不得合并成一个看似精确的数字。
 3. **标签不因措辞转化**——basis 三字段分离(measurement / attribution / pricing),「命中率低」是观察,「缓存坏了」是结论,互相不许代写。
 4. **反事实隔离**。允许展示明确标为 `estimated` / `benchmark-counterfactual` 的机会,
    但绝不把「若不优化会花 X」写成生产实付节省或放进 confirmed 分子。
-5. **baseline 必须带语料期标签**:DSH 08-18 前数据(bug 期)不进任何计算(`COST_BASELINE.md` §2);Claude Code 语料缺日期分界,只做 token 结构不做前后对照(`CLAUDE_CODE_CORPUS.md` §6)。
+5. **baseline 必须带语料期标签**:DSH 08-18 前数据(bug 期)不进任何计算(`COST_BASELINE.md` §2);Claude Code 语料日期范围已实测(08-03 → 09-02)但**无已知事故分界**,只做结构不做前后对照(`CLAUDE_CODE_CORPUS.md` §7);其钱化是 catalog-provider 估算且分事件级/逻辑级两档(回声 1.99x),不冒充账单(§6)。
 6. **无基线不告警(FR-05)**——结构性浪费(SV-COST)与相对浪费(缓存)分开;混进来用户会觉得系统冤枉自己的正常行为。
 7. **分母诚实**——浪费率不用总成本作分母,审计覆盖率必须同屏;eligible 按规则与
    provider 需要的字段判断,不是机械要求所有宿主四桶全有。
@@ -365,6 +368,11 @@ coverage 不得合并成一个看似精确的数字。
 - 月 token(`token_by_date_model`)已进入 `month.json`;`priced_day/month_cost` 按读取时
   价表计算按量估算。单位成本的 token 分母与计算器已就位,账单确认、历史价格快照和
   billing source 尚未就位。
+- **四族价目表 `catalog_2026_09`**(anthropic/minimax/moonshot + deepseek)已入
+  `pricing.json`,`dsh-client/pricing.json` 字节复制,`test_pricing_lockstep.py` 三处一致;
+  Claude Code 语料钱化落成 `CLAUDE_CODE_CORPUS.md` §6(catalog-provider 估算,事件级/逻辑级
+  双档,cc TTL 实测 94.5% 1h、sonnet 09-01 分界、deepseek 平峰、M3 档位均已处理)。
+  单位 token 成本(感知层)首次有真实数字:USD 块 $0.458/M、CNY 块 ¥0.246/M(processed)。
 
 **未落地(本文定义的需求,按序)**:
 
@@ -374,7 +382,10 @@ coverage 不得合并成一个看似精确的数字。
 4. W3 人工确认记录结构(`reviewer`/`reviewed_at`/`confirmed_request_ids`),复核结果写入带 revision 的记录,可复现。
 5. W4 exposure count 来源(启动次数)与 `catalog-visible ≠ body loaded` 的展示拆分。
 6. **BillingSource + 套餐金额输入位**:按账户/账期记录 user-reported invoice 与
-   allocated amount;没有就 unavailable,不按 host 猜套餐。
+   allocated amount;没有就 unavailable,不按 host 猜套餐。**输入位已落地**(2026-09-02:
+   `pricing.json catalog_2026_09.subscriptions` 记 Claude Pro $20/月、MiniMax ¥114/月,
+   basis=user-reported-invoice,锁步测试覆盖;Claude Code 语料已按订阅口径重算,见
+   `CLAUDE_CODE_CORPUS.md` §6)。**账单确认**与历史价格快照仍待。
 7. **月度感知成本投影**:套餐/按量分卡;同币种、同周期、无重叠才合并;输出数据覆盖区间。
 8. **历史价格稳定性**:pricing card 增加 effective date,月投影保存/引用 pricing_version,
    防止当前价表静默重写历史。

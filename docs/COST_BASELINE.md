@@ -15,8 +15,10 @@
 | DSH(post-08-18) | 22 | 22 zstd | 2026-08-18 → 08-31 |
 | DSH(全部,仅供对照) | 59 | 59 zstd | 2026-07-25 → 08-31 |
 
-> Claude Code 语料另见 [CLAUDE_CODE_CORPUS.md](./CLAUDE_CODE_CORPUS.md):47,837 请求 / 4 个模型家族,
-> **token-only 无钱**(claude/minimax/kimi 无定价来源,半张账单不报)。因缺计价与日期分界,不并入本表。
+> Claude Code 语料另见 [CLAUDE_CODE_CORPUS.md](./CLAUDE_CODE_CORPUS.md):52,326 事件 / 26,338 逻辑请求
+> / 4 个模型家族,2026-08-03 → 09-02。catalog-provider 估算(2026-09-02 价表):事件级 **USD $3,542.42 + CNY ¥1,063.86**;
+> 回声合并(逻辑级)后 **USD $1,883.44 + CNY ¥544.77**——宿主计费语义不裁定,两档皆列。
+> 因 basis=catalog(非账单)、无已知事故分界、语料为活快照,不并入本表;计价假设见该文档 §6。
 
 ## 2. 缓存 bug 分界(DSH,实测钉死)
 
