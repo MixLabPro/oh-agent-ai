@@ -135,19 +135,30 @@ class ClaudeSessionCostCase(unittest.TestCase):
 
     def test_day_and_session_costs_agree(self):
         """日面与 cost-state 面对同一批 token 必须报同一个数（同一个
-        _price_claude_map，只差键名转换）。"""
-        day = {"by_model": {"claude-sonnet-5": {
+        _price_claude_map，只差键名转换）。日面再验证 by_model 包一层与 flat
+        直图（claude_cost.py rebuild_days 真机形状）两种形状同 tokens 同价。"""
+        wrapped = {"by_model": {"claude-sonnet-5": {
             "input_tokens": 2000000, "cache_read_input_tokens": 1000000,
             "cache_creation_input_tokens": 0, "output_tokens": 100000}}}
+        flat = {"claude-sonnet-5": {
+            "input_tokens": 2000000, "cache_read_input_tokens": 1000000,
+            "cache_creation_input_tokens": 0, "output_tokens": 100000}}
         sess = {"claude-sonnet-5": {
             "inputTokens": 2000000, "cacheReadInputTokens": 1000000,
             "cacheCreationInputTokens": 0, "outputTokens": 100000}}
-        self.assertEqual(claude_day_cost(day, self.pricing),
-                         claude_session_cost(sess, self.pricing))
+        report = claude_session_cost(sess, self.pricing)
+        self.assertIsNotNone(report)
+        self.assertEqual(claude_day_cost(wrapped, self.pricing), report,
+                         "by_model 包一层日面与 cost-state 面必须同数")
+        self.assertEqual(claude_day_cost(flat, self.pricing), report,
+                         "flat 直图日面（rebuild_days 真实形状）必须同数")
 
-    def test_day_cost_none_without_by_model(self):
+    def test_day_cost_none_without_models(self):
+        """没有任何模型可计价的日子 → None。两种空形状（flat {} / by_model 空
+        壳）与非对象一律 None——flat 空对象不该因为「变成 flat 了」就报全零账。"""
         self.assertIsNone(claude_day_cost({}, self.pricing))
         self.assertIsNone(claude_day_cost({"by_model": {}}, self.pricing))
+        self.assertIsNone(claude_day_cost(None, self.pricing))
 
 
 class PricingJsonShapeCase(unittest.TestCase):

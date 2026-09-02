@@ -607,14 +607,21 @@ def claude_session_cost(model_usage, pricing):
 
 
 def claude_day_cost(day, pricing):
-    """claude-ledger 的一天（by_model: {模型: 4 型 snake tokens}）→ 当日金额。
-    ledger 逐日账只存 tokens（价格会变、token 不会——DSH month.json 同一条
-    纪律），钱在这读时才算。结构与 `claude_session_cost` 完全相同（同一个
-    `_price_claude_map`），只是输入已 4 型 snake、无需转换。by_model 缺场/为空
-    → None（调用方自己决定退回哪种近似，不摆全零结构）。
+    """claude-ledger 的一天 → 当日金额。两种形状都认：
+    - **by_model 包一层** `{"by_model": {模型: 4 型 snake}}`——本函数早期设计
+      （无生产调用方）；
+    - **flat 直图** `{模型: 4 型 snake}`——claude_cost.py `rebuild_days` 的真实
+      形状：逐日账只有 token、模型直作键。
+    真实账本没有模型叫 by_model，嗅 by_model 键无歧义；日级元数据若将来包一层，
+    也只是 flat 的直接超集。结构与 `claude_session_cost` 完全相同（同一个
+    `_price_claude_map`），只是输入已 4 型 snake、无需转换。没有任何模型可计价
+    的日子（空 dict / 全零 token 未知模型 → _price_claude_map 返回 None）→ None
+    （调用方自己决定退回哪种近似，不摆全零结构）。
 
     Rust 平行实现见 `cost.rs::claude_day_cost`。"""
-    by_model = (day or {}).get("by_model") or {}
-    if not by_model:
+    if not isinstance(day, dict):
         return None
-    return _price_claude_map(by_model, pricing)
+    models = day["by_model"] if "by_model" in day else day
+    if not models:
+        return None
+    return _price_claude_map(models, pricing)

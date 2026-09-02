@@ -847,16 +847,28 @@ pub fn claude_session_cost(model_usage: &Value, pricing: &Value) -> Option<Value
     price_claude_map(&models, pricing)
 }
 
-/// claude-ledger 的一天（by_model: {模型: 4 型 snake tokens}）→ 当日金额。
-/// ledger 逐日账只存 tokens（价格会变、token 不会——DSH month.json 同一条
-/// 纪律），钱在这读时才算。结构与 `claude_session_cost` 完全相同（同一个
-/// `price_claude_map`），只是输入已 4 型 snake、无需转换。
+/// claude-ledger 的一天 → 当日金额。两种形状都认：
+/// - **by_model 包一层** `{by_model: {模型: 4 型 snake}}`——本函数早期设计
+///   （无生产调用方）；
+/// - **flat 直图** `{模型: 4 型 snake}`——claude_cost.rs `rebuild_days` 的真实
+///   形状：逐日账只有 token、模型直作键。
+///
+/// 真实账本没有模型叫 `by_model`，嗅 `by_model` 键无歧义；哪天日面想再挂
+/// `cny_total` 之类日级元数据，by_model 包一层也只是 flat 的直接超集。
+///
+/// 结构与 `claude_session_cost` 完全相同（同一个 `price_claude_map`），只是输入
+/// 已 4 型 snake、无需转换。没有任何模型可计价的日子（空 map / 全是零 token 的
+/// 未知模型 → price_claude_map 返回 None）→ None：调用方自己决定退回哪种近似，
+/// 不摆全零结构。
 pub fn claude_day_cost(day: &Value, pricing: &Value) -> Option<Value> {
-    let by_model = day.get("by_model").and_then(|v| v.as_object())?;
-    if by_model.is_empty() {
+    let models = match day.get("by_model") {
+        Some(wrapped) => wrapped.as_object()?,
+        None => day.as_object()?,
+    };
+    if models.is_empty() {
         return None;
     }
-    price_claude_map(by_model, pricing)
+    price_claude_map(models, pricing)
 }
 
 #[cfg(test)]
@@ -1460,30 +1472,47 @@ mod tests {
     }
 
     /// ledger 日面与 cost-state 面同源：同一模型同 tokens → 输出逐字节相同
-    /// （claude_day_cost 直通 by_model，claude_session_cost 只做 camel→snake
-    /// 键名转换，价格计算是同一个 price_claude_map——两面金额必须一致）。
+    /// （claude_day_cost 直通 price_claude_map，claude_session_cost 只做
+    /// camel→snake 键名转换，价格计算是同一个 price_claude_map——两面金额必须
+    /// 一致）。日面再验证 by_model 包一层与 flat 直图两种形状同 tokens 同价——
+    /// 真机 ledger（rebuild_days）写的是 flat，这层是接入钉测。
     #[test]
     fn claude_day_and_session_costs_agree() {
         let pricing = load_pricing();
-        let day = serde_json::json!({"by_model": {"claude-sonnet-5": {
+        let wrapped = serde_json::json!({"by_model": {"claude-sonnet-5": {
             "input_tokens": 2000000, "cache_read_input_tokens": 1000000,
             "cache_creation_input_tokens": 0, "output_tokens": 100000}}});
+        let flat = serde_json::json!({"claude-sonnet-5": {
+            "input_tokens": 2000000, "cache_read_input_tokens": 1000000,
+            "cache_creation_input_tokens": 0, "output_tokens": 100000}});
         let sess = serde_json::json!({"claude-sonnet-5": {
             "inputTokens": 2000000, "cacheReadInputTokens": 1000000,
             "cacheCreationInputTokens": 0, "outputTokens": 100000}});
+        let session_report = claude_session_cost(&sess, &pricing)
+            .expect("cost-state 面必须可计价");
         assert_eq!(
-            claude_day_cost(&day, &pricing),
-            claude_session_cost(&sess, &pricing),
-            "日面与 cost-state 面对同一批 token 必须报同一个数"
+            claude_day_cost(&wrapped, &pricing),
+            Some(session_report.clone()),
+            "by_model 包一层日面与 cost-state 面对同一批 token 必须报同一个数"
+        );
+        assert_eq!(
+            claude_day_cost(&flat, &pricing),
+            Some(session_report),
+            "flat 直图日面（rebuild_days 真实形状）与 cost-state 面必须报同一个数"
         );
     }
 
-    /// claude_day_cost 对 by_model 缺场/为空的日子 → None（调用方自己决定
-    /// 退回哪种近似，本函数不摆全零结构）。
+    /// claude_day_cost 对没有任何模型可计价的日子 → None（调用方自己决定
+    /// 退回哪种近似，本函数不摆全零结构）。两种空形状（flat {} / by_model 空
+    /// 壳）与 null 一律 None——flat 空对象不该因为「变成 flat 了」就报全零账。
     #[test]
-    fn claude_day_cost_none_without_by_model() {
+    fn claude_day_cost_none_without_models() {
         let pricing = load_pricing();
         assert_eq!(claude_day_cost(&serde_json::json!({}), &pricing), None);
-        assert_eq!(claude_day_cost(&serde_json::json!({"by_model": {}}), &pricing), None);
+        assert_eq!(
+            claude_day_cost(&serde_json::json!({"by_model": {}}), &pricing),
+            None
+        );
+        assert_eq!(claude_day_cost(&serde_json::json!(null), &pricing), None);
     }
 }
