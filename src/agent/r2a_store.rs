@@ -1422,7 +1422,7 @@ fn render_findings(dto: &Value) -> String {
 
 // ── sessions navigation（多宿主导航投影，spec §5.1/§5.2）─────────
 
-/// `sessions navigation`：单只读投影命令，一次 spawn 返回两宿主快照
+/// `sessions navigation`：单只读投影命令，一次 spawn 返回三宿主快照
 /// （`docs/MENUBAR_MULTIHOST_NAVIGATION_SPEC.md` §5.1/§5.2）。排序、日界折叠、
 /// 覆盖率、会话计数全部是数据层的测量（§6 决策 3）——Tauri 只缓存渲染，不重新
 /// 解释。宿主失败彼此隔离：store 构建失败 / 该宿主无数据源 → 对应宿主
@@ -1434,9 +1434,10 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
         );
         std::process::exit(2);
     }
-    // 两宿主 store 独立构建：失败各自降级（unavailable），不 abort。
+    // 三宿主 store 独立构建：失败各自降级（unavailable），不 abort。
     let dsh_store = SessionStore::dsh(home);
     let codex_store = SessionStore::codex(home);
+    let claude_store = SessionStore::claude_code(home);
 
     // DSH 今日 token：today.json → core `today_cost`——与 Tauri 顶层钱行同一函数
     // （§5.2 basis=state-file；date stale / 缺场 → None → value=null，不编 0）。
@@ -1480,12 +1481,28 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
         None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null }),
     };
 
+    // Claude 今日 token：读 ledger 当日（spec §5.2 basis=ledger）。不依赖 claude
+    // store 是否构建成功——ledger 是 claude-sync（同一批 ~/.claude 文件的独立
+    // 账，tick 里先于宿主区刷新）的产物，导航只读它，不跨写。当日缺席 → None →
+    // null 三元组（「今天没测到」，不是 0）；「空日不落 ledger」是 claude_cost.rs
+    // 的写侧纪律（见 claude_ledger_day_tokens 的注释）。
+    let claude_today_tokens: Value =
+        match crate::agent::claude_cost::claude_ledger_day_tokens(day_key) {
+            Some(tokens) => json!({
+                "value": tokens,
+                "basis": "ledger",
+                "coverage": "complete",
+            }),
+            None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null }),
+        };
+
     let hosts = json!([
         host_snapshot("dsh", dsh_store.as_ref().ok(), dsh_today_tokens, day_key, recent_n),
         host_snapshot("codex", codex_store.as_ref().ok(), codex_today_tokens, day_key, recent_n),
+        host_snapshot("claude-code", claude_store.as_ref().ok(), claude_today_tokens, day_key, recent_n),
     ]);
-    // envelope 的 generated_at 取两 store 中较新的构建时刻（`SessionStore::all`
-    // 的 max 同款语义；缓存共享时两侧逐字节一致——差分门靠它）。两 store 都
+    // envelope 的 generated_at 取三 store 中较新的构建时刻（`SessionStore::all`
+    // 的 max 同款语义；缓存共享时两侧逐字节一致——差分门靠它）。三 store 都
     // 失败时用当前时刻（该形态没有可共享的墙钟）。
     let generated_at = dsh_store
         .as_ref()
@@ -1493,6 +1510,7 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
         .map(|s| s.generated_at.as_str())
         .into_iter()
         .chain(codex_store.as_ref().ok().map(|s| s.generated_at.as_str()))
+        .chain(claude_store.as_ref().ok().map(|s| s.generated_at.as_str()))
         .max()
         .map(str::to_string)
         .unwrap_or_else(now_iso_utc);
@@ -1513,10 +1531,10 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
 
 /// 单宿主快照组装（纯，可测）。`store` None = 构建失败 → 整宿主 `unavailable`
 /// （spec §8：宿主区失败不 abort、也不摆 0 冒充）。「该宿主无数据源」——store 的
-/// `source_statuses[host].roots` 全 exists=false（~/.codex / ~/.dsh 从未安装；
-/// 与 `sessions list` 的「没有 DSH = 诚实零」不同面：托盘固定渲染两行，未安装
-/// 的宿主显示「—」而不是「0 会话」，spec §8）——同样 unavailable。DSH store
-/// 自报 `unavailable`（文件在但一个都读不了，§4.3）也归这一档。
+/// `source_statuses[host].roots` 全 exists=false（~/.codex / ~/.dsh / ~/.claude
+/// 从未安装；与 `sessions list` 的「没有 DSH = 诚实零」不同面：托盘固定渲染
+/// 三行，未安装的宿主显示「—」而不是「0 会话」，spec §8）——同样 unavailable。
+/// DSH store 自报 `unavailable`（文件在但一个都读不了，§4.3）也归这一档。
 fn host_snapshot(
     host_kind: &str,
     store: Option<&SessionStore>,
@@ -2476,10 +2494,11 @@ mod tests {
         }
     }
 
-    /// 无数据源（roots 全 exists=false——~/.codex / ~/.dsh 从未安装）→ 整宿主
-    /// unavailable（spec §8；与 `sessions list` 的「没有 DSH = 诚实零」不同面：
-    /// 托盘固定渲染两行，未安装的宿主显示「—」而不是「0 会话」）。store 构建
-    /// 失败（None）与 DSH 自报 source-unavailable（文件在但一个都读不了）同档。
+    /// 无数据源（roots 全 exists=false——~/.codex / ~/.dsh / ~/.claude 从未安装）
+    /// → 整宿主 unavailable（spec §8；与 `sessions list` 的「没有 DSH = 诚实零」
+    /// 不同面：托盘固定渲染三行，未安装的宿主显示「—」而不是「0 会话」）。
+    /// store 构建失败（None）与 DSH 自报 source-unavailable（文件在但一个都读不
+    /// 了）同档。
     #[test]
     fn host_snapshot_unavailable_when_host_has_no_source() {
         let store = nav_store("codex", vec![], "ok", false);
@@ -2640,6 +2659,22 @@ mod tests {
                     }],
                     "store_revision": 5
                 },
+                {
+                    "host_kind": "claude-code",
+                    "status": "ready",
+                    "today_tokens": {"value": 100, "basis": "ledger", "coverage": "complete"},
+                    "today_sessions": 1,
+                    "recent": [{
+                        "session_key": SessionKey::new("claude-code", "cl1", "p", "m").to_json(),
+                        "title": "claude title",
+                        "model": "deepseek-v4-flash",
+                        "tokens_total": 600,
+                        "date_first": "2026-08-31",
+                        "date_last": "2026-08-31",
+                        "revision": "r1"
+                    }],
+                    "store_revision": 7
+                },
             ],
         });
         let text = render_navigation(&env);
@@ -2647,11 +2682,14 @@ mod tests {
             text,
             concat!(
                 "navigation 2026-08-31 (schema 1)\n",
-                // hosts 序固定 dsh → codex（spec §5.1）
+                // hosts 序固定 dsh → codex → claude-code（spec §5.1）
                 "dsh      unavailable — · — 会话\n",
                 "          · 会话数据暂不可用\n",
                 "codex    ready       1234 · 2 会话\n",
                 "          · 2026-08-31 · gpt-5.6-sol · 500\n",
+                // claude-code 是 11 字符宿主名，{:<8} 不截断——对齐右移，逐字节钉住
+                "claude-code ready       100 · 1 会话\n",
+                "          · 2026-08-31 · deepseek-v4-flash · 600\n",
             )
         );
         // JSON 侧：serde_json（preserve_order）按 json! 的字面量顺序输出——

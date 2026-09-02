@@ -29,6 +29,7 @@ from pathlib import Path
 from agent_vitals import codex_session_audit as csa
 from agent_vitals.agent import behavior as behavior_mod
 from agent_vitals.agent import budget as budget_mod
+from agent_vitals.agent import claude_cost as claude_cost_mod
 from agent_vitals.agent import claude_session_audit as claude_audit_mod
 from agent_vitals.agent import codex_cost as codex_cost_mod
 from agent_vitals.agent import codex_usage as codex_usage_mod
@@ -1208,7 +1209,7 @@ def _render_list(dto):
 
 
 def sessions_navigation(home, day, timezone_, recent_n, json_out):
-    """多宿主导航投影：一次 spawn 返回两宿主快照（`docs/
+    """多宿主导航投影：一次 spawn 返回三宿主快照（`docs/
     MENUBAR_MULTIHOST_NAVIGATION_SPEC.md` §5.1/§5.2）。排序、日界折叠、
     覆盖率、会话计数全部是数据层的测量（§6 决策 3）——Tauri 只缓存渲染，不
     重新解释。宿主失败彼此隔离：store 构建失败 / 该宿主无数据源 → 对应宿主
@@ -1222,8 +1223,8 @@ def sessions_navigation(home, day, timezone_, recent_n, json_out):
             "is fixed UTC+8, no DST; §5.1)\n" % json.dumps(timezone_, ensure_ascii=False))
         raise SystemExit(2)
 
-    # 两宿主 store 独立构建：失败各自降级（unavailable），不 abort——与
-    # sessions_list 的 exit-with-error 不同面：导航是托盘固定两行的投影，
+    # 三宿主 store 独立构建：失败各自降级（unavailable），不 abort——与
+    # sessions_list 的 exit-with-error 不同面：导航是托盘固定三行的投影，
     # 一个宿主失败不能拖垮整个菜单刷新。
     try:
         dsh_store = SessionStore.dsh(home)
@@ -1233,6 +1234,10 @@ def sessions_navigation(home, day, timezone_, recent_n, json_out):
         codex_store = SessionStore.codex(home)
     except StoreError:
         codex_store = None
+    try:
+        claude_store = SessionStore.claude_code(home)
+    except StoreError:
+        claude_store = None
 
     # DSH 今日 token：today.json → 当日 token。`today_tokens_for_day` 是
     # `compute_today_cost` 的 day 参数化（后者硬编码真实今天）；date 不符 /
@@ -1270,14 +1275,29 @@ def sessions_navigation(home, day, timezone_, recent_n, json_out):
         codex_today_tokens = codex_today_tokens_json(
             codex_merged, day, zero_sessions=len(codex_store.entries) == 0)
 
+    # Claude 今日 token：读 ledger 当日（spec §5.2 basis=ledger）。不依赖 claude
+    # store 是否构建成功——ledger 是 claude-sync（同一批 ~/.claude 文件的独立
+    # 账，tick 里先于宿主区刷新）的产物，导航只读它，不跨写。当日缺席 → None →
+    # null 三元组（「今天没测到」，不是 0）；「空日不落 ledger」是 claude_cost.py
+    # 的写侧纪律（见 claude_ledger_day_tokens 的注释）。
+    claude_tokens = claude_cost_mod.claude_ledger_day_tokens(day)
+    if claude_tokens is None:
+        claude_today_tokens = {"value": None, "basis": None, "coverage": None}
+    else:
+        claude_today_tokens = {"value": claude_tokens, "basis": "ledger",
+                               "coverage": "complete"}
+
     hosts = [
         host_snapshot("dsh", dsh_store, dsh_today_tokens, day, recent_n),
         host_snapshot("codex", codex_store, codex_today_tokens, day, recent_n),
+        host_snapshot("claude-code", claude_store, claude_today_tokens, day,
+                      recent_n),
     ]
-    # envelope 的 generated_at 取两 store 中较新的构建时刻（`SessionStore.all`
-    # 的 max 同款语义；缓存共享时两侧逐字节一致——差分门靠它）。两 store 都
+    # envelope 的 generated_at 取三 store 中较新的构建时刻（`SessionStore.all`
+    # 的 max 同款语义；缓存共享时两侧逐字节一致——差分门靠它）。三 store 都
     # 失败时用当前时刻（该形态没有可共享的墙钟）。
-    candidates = [s.generated_at for s in (dsh_store, codex_store) if s is not None]
+    candidates = [s.generated_at for s in (dsh_store, codex_store, claude_store)
+                  if s is not None]
     generated_at = max(candidates) if candidates else _now_iso_utc()
     envelope = {
         "schema_version": 1,
@@ -1296,10 +1316,10 @@ def host_snapshot(host_kind, store, today_tokens, day_key, recent_n):
     """单宿主快照组装（纯，可测）。`store` None = 构建失败 → 整宿主
     `unavailable`（spec §8：宿主区失败不 abort、也不摆 0 冒充）。「该宿主无
     数据源」——store 的 `source_statuses[host].roots` 全 exists=false（~/.codex
-    或 ~/.dsh 从未安装；与 `sessions list` 的「没有 DSH = 诚实零」不同面：
-    托盘固定渲染两行，未安装的宿主显示「—」而不是「0 会话」，spec §8）——
-    同样 unavailable。DSH store 自报 `unavailable`（文件在但一个都读不了，
-    §4.3）也归这一档。mirror `r2a_store.rs::host_snapshot`。"""
+    / ~/.dsh / ~/.claude 从未安装；与 `sessions list` 的「没有 DSH = 诚实零」
+    不同面：托盘固定渲染三行，未安装的宿主显示「—」而不是「0 会话」，
+    spec §8）——同样 unavailable。DSH store 自报 `unavailable`（文件在但一个都
+    读不了，§4.3）也归这一档。mirror `r2a_store.rs::host_snapshot`。"""
     def unavailable():
         return {"host_kind": host_kind, "status": "unavailable",
                 "today_tokens": None, "today_sessions": None,

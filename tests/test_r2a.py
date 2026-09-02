@@ -870,7 +870,7 @@ class NavigationProjectionTests(unittest.TestCase):
 
     def test_host_snapshot_unavailable_when_host_has_no_source(self):
         # 无数据源（roots 全 exists=false）→ 整宿主 unavailable；「没有 DSH =
-        # 诚实零」是 sessions list 的语义，导航固定渲染两行（spec §8）。
+        # 诚实零」是 sessions list 的语义，导航固定渲染三行（spec §8）。
         store = R2A.SessionStore(
             [], {"codex": {"status": "ok", "roots": [{"exists": False}]}},
             "2026-09-01T00:00:00Z")
@@ -976,6 +976,18 @@ class NavigationProjectionTests(unittest.TestCase):
                      "tokens_total": 500, "date_first": "2026-08-31",
                      "date_last": "2026-08-31", "revision": "r1"}],
                  "store_revision": 5},
+                {"host_kind": "claude-code", "status": "ready",
+                 "today_tokens": {"value": 100, "basis": "ledger",
+                                  "coverage": "complete"},
+                 "today_sessions": 1,
+                 "recent": [{
+                     "session_key": {"host_kind": "claude-code",
+                                     "native_id": "cl1", "source_profile": "p",
+                                     "machine_namespace": "m"},
+                     "title": "claude title", "model": "deepseek-v4-flash",
+                     "tokens_total": 600, "date_first": "2026-08-31",
+                     "date_last": "2026-08-31", "revision": "r1"}],
+                 "store_revision": 7},
             ],
         }
         # 与 Rust `render_navigation_is_byte_stable` 的期望字符串完全一致
@@ -983,7 +995,10 @@ class NavigationProjectionTests(unittest.TestCase):
                     "dsh      unavailable — · — 会话\n"
                     "          · 会话数据暂不可用\n"
                     "codex    ready       1234 · 2 会话\n"
-                    "          · 2026-08-31 · gpt-5.6-sol · 500\n")
+                    "          · 2026-08-31 · gpt-5.6-sol · 500\n"
+                    # claude-code 是 11 字符宿主名，{:<8} 不截断——对齐右移
+                    "claude-code ready       100 · 1 会话\n"
+                    "          · 2026-08-31 · deepseek-v4-flash · 600\n")
         self.assertEqual(R2A.render_navigation(env), expected)
 
 
@@ -1033,6 +1048,11 @@ class NavigationDifferentialTests(unittest.TestCase):
         # fixture 会话在 2025-06-15——投影 2026-08-31 无交叠 → 真 0（不是 null）
         self.assertEqual(env["hosts"][0]["today_sessions"], 0)
         self.assertEqual(env["hosts"][1]["host_kind"], "codex")
+        # 三宿主序固定 dsh → codex → claude-code；fixture home 无 ~/.claude 源 →
+        # claude-code 诚实 unavailable（不摆 0 冒充，spec §8）——两侧同降级
+        self.assertEqual(len(env["hosts"]), 3)
+        self.assertEqual(env["hosts"][2]["host_kind"], "claude-code")
+        self.assertEqual(env["hosts"][2]["status"], "unavailable")
         # 键序是字节一致的一部分（serde_json preserve_order = json! 字面量序）
         self.assertEqual(list(env.keys()), ["schema_version", "day_key",
                                             "timezone", "generated_at", "hosts"])

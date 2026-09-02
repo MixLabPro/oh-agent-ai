@@ -110,6 +110,36 @@ fn ledger_archive_path() -> std::path::PathBuf {
     state_dir().join("claude-ledger-archive.json")
 }
 
+/// ledger flat 日（`{model: 4 型 snake}`，rebuild_days 产出）→ 4 型 token 总量。
+/// r2a_store 的 claude 宿主行「今日 token」走这里；SNAKE_KEYS 只此一处定义，
+/// 别在 r2a 再抄一份键清单（usage_sample 同款「键集合唯一真源」纪律）。非对象
+/// 值（坏日）→ 0；但「读出 0」只发生在坏数据上，空日不落 ledger。
+pub fn ledger_day_total_tokens(day: &Value) -> i64 {
+    let mut total = 0i64;
+    if let Some(models) = day.as_object() {
+        for tokens in models.values() {
+            for k in SNAKE_KEYS {
+                total += tokens.get(k).and_then(Value::as_i64).unwrap_or(0);
+            }
+        }
+    }
+    total
+}
+
+/// 读 ledger 当日（day_key = 北京日）的 4 型 token 总量 → r2a `sessions
+/// navigation` 的 claude 宿主行「今日 token」（spec §5.2 basis=ledger）。
+///
+/// 三种 None：ledger 不存在 / 无 `days` 键 / 当日缺席——都诚实报 None（托盘显
+/// null/—，不编 0）。「空日不落 ledger」：days 里的日子全是 fold 真测到的桶
+/// （cost-state 基线日 + 行尾归属日），当日缺席 = 今天没测到账，与 codex 当日
+/// 桶缺席同语义。当日存在但总和 0（只有全零 unknown 桶的病理日）→ Some(0)，
+/// 「测到 0」不是「没测」。
+pub fn claude_ledger_day_tokens(day_key: &str) -> Option<i64> {
+    let ledger = read_json(&ledger_path())?;
+    let day = ledger.get("days")?.as_object()?.get(day_key)?;
+    Some(ledger_day_total_tokens(day))
+}
+
 /// "YYYY-MM-DD" → "YYYY-MM"（前 7 字符）。
 fn month_key_of(date: &str) -> String {
     date.chars().take(7).collect()
@@ -858,5 +888,25 @@ mod tests {
             d31.get("deepseek-v4-flash").unwrap().get("input_tokens"),
             Some(&json!(150))
         );
+    }
+
+    #[test]
+    fn ledger_day_total_tokens_sums_snake_keys_ignoring_extras() {
+        // r2a claude 宿主行走 `claude_ledger_day_tokens` → 这里。flat 日含真实
+        // 模型 + `<synthetic>`（全零，cost-state 里的 unknown 占位——0 不能贡献
+        // 也不该炸）+ 无关装饰键：只数 SNAKE_KEYS 4 型，其余键一律无视。
+        let day = json!({
+            "<synthetic>": {"input_tokens": 0, "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 0, "output_tokens": 0},
+            "deepseek-v4-flash": {"input_tokens": 12_000, "cache_read_input_tokens": 1000,
+                                  "cache_creation_input_tokens": 0, "output_tokens": 200,
+                                  "server_tool_use": 3},
+            "claude-sonnet-5": {"input_tokens": 0, "cache_read_input_tokens": 62_500,
+                                "cache_creation_input_tokens": 0, "output_tokens": 0},
+        });
+        assert_eq!(ledger_day_total_tokens(&day), 75_700);
+        // 非对象（坏日）→ 0，不 panic（真实数据里空日不落 ledger，这是防御面）。
+        assert_eq!(ledger_day_total_tokens(&Value::Null), 0);
+        assert_eq!(ledger_day_total_tokens(&json!({})), 0);
     }
 }

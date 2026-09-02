@@ -31,6 +31,44 @@ SHORT_KEYS = ["input", "cache_read", "cache_creation", "output"]
 CAMEL_KEYS = ["inputTokens", "cacheReadInputTokens",
               "cacheCreationInputTokens", "outputTokens"]
 
+
+def ledger_day_total_tokens(day):
+    """ledger flat 日（{model: 4 型 snake}，rebuild_days 产出）→ 4 型 token 总量。
+    r2a.py 的 claude 宿主行「今日 token」走这里；SNAKE_KEYS 只此一处定义，别在
+    r2a 再抄一份键清单。非 dict 值（坏日）→ 0；但「读出 0」只发生在坏数据上，
+    空日不落 ledger。
+
+    Rust 平行实现见 `claude_cost.rs::ledger_day_total_tokens`。"""
+    total = 0
+    if isinstance(day, dict):
+        for tokens in day.values():
+            if isinstance(tokens, dict):
+                for k in SNAKE_KEYS:
+                    v = tokens.get(k)
+                    if isinstance(v, int) and not isinstance(v, bool):
+                        total += v  # Rust as_i64：非整数（含 bool）记 0
+    return total
+
+
+def claude_ledger_day_tokens(day_key):
+    """读 ledger 当日（day_key = 北京日）的 4 型 token 总量 → r2a.py
+    `sessions_navigation` 的 claude 宿主行「今日 token」（spec §5.2
+    basis=ledger）。
+
+    三种 None：ledger 不存在 / 无 `days` 键 / 当日缺席——都诚实报 None（托盘显
+    null/—，不编 0）。「空日不落 ledger」：days 里的日子全是 fold 真测到的桶，
+    当日缺席 = 今天没测到账，与 codex 当日桶缺席同语义。当日存在但总和 0（只有
+    全零 unknown 桶的病理日）→ 0，「测到 0」不是「没测」。
+
+    Rust 平行实现见 `claude_cost.rs::claude_ledger_day_tokens`。"""
+    ledger = _read(_ledger_path())
+    if not isinstance(ledger, dict):
+        return None
+    days = ledger.get("days")
+    if not isinstance(days, dict) or day_key not in days:
+        return None
+    return ledger_day_total_tokens(days[day_key])
+
 # 北京日线的月末天数表（add_day 用；年份闰判定走公历规则）。
 _DIM = {1: 31, 3: 31, 5: 31, 7: 31, 8: 31, 10: 31, 12: 31,
         4: 30, 6: 30, 9: 30, 11: 30}
