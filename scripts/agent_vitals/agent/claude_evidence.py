@@ -32,8 +32,6 @@ Unavailable 是 dispatcher 层的判定，不在本适配器：本适配器的�
 
 import json
 
-from agent_vitals.agent import canonical_audit
-
 # 20 个 Signal 的声明序——`signals` 数组 / `coverage` 字典的输出顺序都靠这份显式
 # 表对齐（与 Rust `claude_code_evidence.rs::ALL_SIGNALS` 同表同序），不靠 Python
 # 的任意 set 迭代序。
@@ -104,9 +102,9 @@ _SKILL_INVOCATION_NOTE = (
     "decision."
 )
 _TURN_BOUNDARY_NOTE = (
-    "Turn boundaries are rebuilt from the message tree (pure-text user roots), "
-    "not native turn events; SV612/613(a) are Derived/Partial and rebuild "
-    "failure degrades to Unavailable, never fabricated boundaries."
+    "Turn boundaries are rebuilt from the message stream (pure-text user "
+    "roots), not native turn events; SV612/613(a) are Derived/Partial and "
+    "rebuild failure degrades to Unavailable, never fabricated boundaries."
 )
 _APPROVAL_DECISIONS_NOTE = (
     "ApprovalDecisions is unavailable in this slice: only `permission-mode` "
@@ -278,11 +276,13 @@ def _timeline_entry(observation, seq, time, turn, call_id, ordinal):
             "step": None, "call_id": call_id, "ordinal": ordinal}
 
 
-def _process_tool_result_blocks(record, tool_results, seq, time, turn, ordinal):
+def _process_tool_result_blocks(record, tool_results, seq, time, turn, next_ordinal):
     """一条 tool_result user 的续写块 → `tool_results`。三态 is_error（§2.3）：
     - 键存在（true/false）→ `failed=Some(bool)`（失败理由被截断成布尔）；
     - 键缺失 → `failed=None`（宿主记了结果、无失败信号）。
-    `error_code` 恒 None（§3：Claude 无原因码来源，绝不伪造）。"""
+    `error_code` 恒 None（§3：Claude 无原因码来源，绝不伪造）。
+    `next_ordinal` 是**跨块**的唯一序号（`evt-{ordinal}` 契约）——一条记录可含
+    多个块，用记录序当 ordinal 会撞号。list 容器 = Python 缺引用的惯用替代。"""
     message = record.get("message")
     items = message.get("content") if isinstance(message, dict) else None
     if not isinstance(items, list):
@@ -290,6 +290,8 @@ def _process_tool_result_blocks(record, tool_results, seq, time, turn, ordinal):
     for blk in items:
         if not is_tool_result_block(blk):
             continue
+        ordinal = next_ordinal[0]
+        next_ordinal[0] += 1
         is_error = blk.get("is_error")
         failed = is_error if isinstance(is_error, bool) else None
         tid = blk.get("tool_use_id")
@@ -300,7 +302,7 @@ def _process_tool_result_blocks(record, tool_results, seq, time, turn, ordinal):
             ordinal))
 
 
-def _process_tool_use_blocks(record, tool_calls, seq, time, turn, ordinal):
+def _process_tool_use_blocks(record, tool_calls, seq, time, turn, next_ordinal):
     """一条 assistant 的 tool_use 块 → `tool_calls`，返回各块 `(name, args_text)`
     的 sig 贡献。**sidechain 归属由调用方决定**：调用方只在非 sidechain 时把返回
     值 extend 进当前 turn 的 sig（SV612 死循环检测的输入）——abandoned branch
@@ -313,6 +315,8 @@ def _process_tool_use_blocks(record, tool_calls, seq, time, turn, ordinal):
     for blk in items:
         if not isinstance(blk, dict) or blk.get("type") != "tool_use":
             continue
+        ordinal = next_ordinal[0]
+        next_ordinal[0] += 1
         name = blk.get("name")
         if not isinstance(name, str):
             name = ""
@@ -327,12 +331,16 @@ def _process_tool_use_blocks(record, tool_calls, seq, time, turn, ordinal):
     return sig
 
 
-def _flush_turn(turns, p):
+def _flush_turn(turns, p, next_ordinal):
     """关掉一个 turn：push TurnObservation。entry 坐标 = turn/start（根事件）；
     `end_seq`/`end_time` = `last_*`（最后一个主干事件——镜像 DSH fixture 里
     `last_seq == end_seq` 的不变式），`end_reason_kind`/`end_error_code` 恒 None
     （Claude 无 turn/end 事件）。SV613(a) 读 `end_reason_kind=="error"` 恒不命中 →
-    诚实 MeasuredZero，不发明 error turn。"""
+    诚实 MeasuredZero，不发明 error turn。
+    `next_ordinal` 同前：turn 是第三条 timeline，序号与另两条共用同一把递增
+    （曾硬编码 0——撞 `tool_calls` 首条的 `evt-0`）。"""
+    ordinal = next_ordinal[0]
+    next_ordinal[0] += 1
     turns.append(_timeline_entry(
         {
             "turn": p["turn"], "sig": p["sig"],
@@ -340,7 +348,7 @@ def _flush_turn(turns, p):
             "end_reason_kind": None, "end_error_code": None,
             "end_seq": p["last_seq"], "end_time": p["last_time"],
         },
-        p["start_seq"], p["start_time"], p["turn"], None, 0))
+        p["start_seq"], p["start_time"], p["turn"], None, ordinal))
 
 
 def _populate_claude_timelines(records):
@@ -356,8 +364,12 @@ def _populate_claude_timelines(records):
     tool_calls, tool_results, turns = [], [], []
     pending = None
     next_turn = 0
+    # `next_ordinal` 与 `rec_idx` 是两把不同的尺：rec_idx = 记录序（`seq` 坐标，
+    # 同记录的所有块共享），next_ordinal = 跨三条 timeline 的 entry 唯一序。
+    # 曾用记录序当 ordinal——一条记录多块（或 _flush_turn 硬编码 0）就撞号。
+    next_ordinal = [0]
 
-    for ordinal, record in enumerate(records):
+    for rec_idx, record in enumerate(records):
         if not isinstance(record, dict):
             continue
         typ = record.get("type")
@@ -366,7 +378,7 @@ def _populate_claude_timelines(records):
         # Rust `as_bool` 只认 JSON 布尔：`is_sidechain is True` 排除 `1`/`"true"`
         # 等非布尔真值（Python `1 is True` 为 False）。
         is_sidechain = record.get("isSidechain") is True
-        seq = ordinal
+        seq = rec_idx
         time = None
         ts = record.get("timestamp")
         if isinstance(ts, str):
@@ -383,7 +395,7 @@ def _populate_claude_timelines(records):
                     # 新 turn 根：flush 上一个、开新的。根**不**推进上一个 turn
                     # 的 last_seq（上一个 turn 到根**之前**的最后一个事件为止）。
                     if pending is not None:
-                        _flush_turn(turns, pending)
+                        _flush_turn(turns, pending, next_ordinal)
                     pending = {
                         "turn": next_turn, "sig": [],
                         "start_seq": seq, "start_time": time,
@@ -397,7 +409,7 @@ def _populate_claude_timelines(records):
             _process_tool_result_blocks(
                 record, tool_results, seq, time,
                 None if is_sidechain else (pending["turn"] if pending is not None else None),
-                ordinal)
+                next_ordinal)
         elif typ == "assistant":
             if not is_sidechain and pending is not None:
                 pending["last_seq"] = seq
@@ -405,13 +417,13 @@ def _populate_claude_timelines(records):
             turn_opt = (None if is_sidechain
                         else (pending["turn"] if pending is not None else None))
             sig = _process_tool_use_blocks(
-                record, tool_calls, seq, time, turn_opt, ordinal)
+                record, tool_calls, seq, time, turn_opt, next_ordinal)
             if not is_sidechain and pending is not None:
                 pending["sig"].extend(sig)
 
     # EOF 兜底（§8 问 7）：最后一个 open turn 在文件尾关闭。
     if pending is not None:
-        _flush_turn(turns, pending)
+        _flush_turn(turns, pending, next_ordinal)
 
     return {
         "tool_calls": tool_calls,
@@ -446,10 +458,14 @@ def _derive_coverage(records, turns_len):
     step_ids = set()
 
     for record in records:
-        if not isinstance(record, dict):
-            continue
-        typ = record.get("type")
+        typ = record.get("type") if isinstance(record, dict) else None
         if not isinstance(typ, str):
+            # 非 dict / 缺 type（或 type 非字符串）的记录没有归类的锚点——静默
+            # 跳过等于让证据消失（评审 P4-13：skipped and recorded, never
+            # treated as corruption）。记进 `unknown` 由 SourceAttempt 上报，绝不吞。
+            msg = "missing record type"
+            if msg not in unknown:
+                unknown.append(msg)
             continue
         if typ not in KNOWN_TYPES:
             msg = "unknown record type: %s" % typ
@@ -481,8 +497,13 @@ def _derive_coverage(records, turns_len):
                     if name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
                         # §13 FileMutations = "derived (from tool calls)"。
                         _bump(coverage, "FileMutations", "derived")
-                    elif name == "Task":
-                        # §13 SubagentSpawns = "measured (isSidechain / Task)"。
+                    elif name == "Task" and not is_sidechain:
+                        # is_sidechain 守卫 = SubagentSpawns 的**按记录去重**：
+                        # 记录级 is_sidechain 臂（下面）已数过这条记录，sidechain
+                        # 记录里的 Task 块不能再数一次——否则一条 sidechain 记录
+                        # 既走 Task 臂又走 is_sidechain 臂，双计（评审 P4-12）。
+                        # 主干（非 sidechain）的 Task 块 = 一次真实子代理 spawn，
+                        # 按块数。
                         _bump(coverage, "SubagentSpawns", "measured")
                     elif name == "Skill":
                         # §13 SkillInvocations = "derived (Skill tool call)"。
@@ -518,7 +539,9 @@ def _derive_coverage(records, turns_len):
             # §13 ApprovalPolicy = "measured (permission-mode)"——模式快照即策略。
             _bump(coverage, "ApprovalPolicy", "measured")
         # mode/attachment/last-prompt/ai-title/file-history-*/queue-operation/… 不喂信号
-        # §13 SubagentSpawns：isSidechain 真本身就是子代理分支的证据（Task 上面已数）。
+        # §13 SubagentSpawns：isSidechain 真本身就是子代理分支的证据。记录级去重
+        # 锚点：Task 臂只认主干（守卫在上面），所以一条 sidechain 记录无论含几个
+        # Task 块都只计一次（评审 P4-12）。
         if is_sidechain:
             _bump(coverage, "SubagentSpawns", "measured")
 
@@ -675,14 +698,3 @@ def claude_evidence_json(evidence):
         "attempts": attempts,
         "notes": notes,
     }
-
-
-def claude_audit_projection(canonical):
-    """Evaluate SV601–SV614 on canonical Claude timelines.
-
-    Delegates to the shared host-neutral evaluator in `canonical_audit.py`,
-    then applies the SV607/608 host-capability degradation as a post-process
-    override (the Claude adapter's only host-specific step — see
-    `claude_session_audit.py` for the module docstring).
-    """
-    return canonical_audit.audit_projection(canonical)

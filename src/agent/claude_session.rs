@@ -27,7 +27,7 @@ use agent_vitals_core::behavior::{flatten, match_behavior_canonical, rule_outcom
 use agent_vitals_core::claude_code_evidence::{
     build_claude_evidence, claude_evidence_json, ClaudeEvidence,
 };
-use agent_vitals_core::evidence::{RuleOutcome, Signal};
+use agent_vitals_core::evidence::RuleOutcome;
 use agent_vitals_core::trajectory::{flatten_trajectory, match_trajectory_canonical};
 
 /// 一个会话文件对 `claude-session` 有用的全部信息（路径本身没有消费者——
@@ -204,27 +204,12 @@ pub fn render_claude_session_list(out: &Value) -> String {
     s
 }
 
-/// **SV607/608 host-capability degradation**（模块文档）：Claude 的 error_code 结构
-/// 性恒 None，原因级检测器读了也白读——把 MeasuredZero 覆盖成 Unavailable。
-/// 只覆盖 MeasuredZero：门控已因 timeline 空给 Unavailable（缺失信号、无需 override）
-/// 或给了 Findings（Claude 不可能，但 override 不吞真命中）时保持原样。
-fn degrade_sv607_608(outcomes: &mut [(&'static str, RuleOutcome)]) {
-    for (code, outcome) in outcomes.iter_mut() {
-        if matches!(*code, "SV607" | "SV608") && matches!(outcome, RuleOutcome::MeasuredZero) {
-            *outcome = RuleOutcome::Unavailable {
-                missing: vec![Signal::ToolResults],
-                reason: "claude-code host capability: tool results carry no reason codes (error_code structurally absent); SV607/608 are reason-level detectors and cannot discriminate".to_string(),
-            };
-        }
-    }
-}
-
 /// family① + family④ 的审计投影：findings + 三态 rule_outcomes + summary。与
 /// codex_session_audit 的 `audit_projection` 同构，唯一差异是 SV607/608 的
-/// degrade（上面）。
+/// host-capability degrade（core `host_capability`——表已下沉，这里是消费方）。
 fn claude_audit_projection(evidence: &ClaudeEvidence) -> Value {
     let mut family1 = match_behavior_canonical(&evidence.canonical);
-    degrade_sv607_608(&mut family1);
+    agent_vitals_core::host_capability::degrade_rule_outcomes("claude-code", &mut family1);
     let trajectory = match_trajectory_canonical(&evidence.canonical);
 
     let mut findings = flatten(&family1);
@@ -437,63 +422,8 @@ mod tests {
         assert!(v.get("records").unwrap().is_null());
     }
 
-    // ── SV607/608 host-capability degradation ────────────────────────────────
-
-    #[test]
-    fn degrade_only_flips_measured_zero_sv607_sv608() {
-        let mut out: Vec<(&'static str, RuleOutcome)> = vec![
-            ("SV607", RuleOutcome::MeasuredZero),
-            ("SV608", RuleOutcome::MeasuredZero),
-            (
-                "SV609",
-                RuleOutcome::Unavailable { missing: vec![Signal::ApprovalDecisions], reason: "gate".into() },
-            ),
-            (
-                "SV610",
-                RuleOutcome::Unavailable { missing: vec![Signal::SandboxModes], reason: "gate".into() },
-            ),
-            ("SV611", RuleOutcome::MeasuredZero),
-            (
-                "SV614",
-                RuleOutcome::Unavailable { missing: vec![Signal::ApprovalDecisions, Signal::SandboxModes], reason: "gate".into() },
-            ),
-        ];
-        degrade_sv607_608(&mut out);
-        assert!(matches!(out[0].1, RuleOutcome::Unavailable { .. }));
-        assert!(matches!(out[1].1, RuleOutcome::Unavailable { .. }));
-        // SV609/610/614 的 Unavailable 来自门控，override 不碰；SV611 的 MeasuredZero
-        // 不是 SV607/608，不碰。
-        assert!(matches!(out[2].1, RuleOutcome::Unavailable { .. }));
-        assert!(matches!(out[3].1, RuleOutcome::Unavailable { .. }));
-        assert!(matches!(out[4].1, RuleOutcome::MeasuredZero));
-        assert!(matches!(out[5].1, RuleOutcome::Unavailable { .. }));
-    }
-
-    #[test]
-    fn degrade_does_not_swallow_real_findings() {
-        // Claude 结构上不可能命中 SV607，但 override 的原则是「只把空转翻成
-        // Unavailable」，真命中必须原样通过。
-        let mut out = outcome_for("SV607", RuleOutcome::Findings(vec![json!({"rule": "SV607"})]));
-        degrade_sv607_608(&mut out);
-        assert!(matches!(out[0].1, RuleOutcome::Findings(_)));
-    }
-
-    #[test]
-    fn degrade_reason_names_tool_results_and_host_capability() {
-        let mut out = outcome_for("SV607", RuleOutcome::MeasuredZero);
-        degrade_sv607_608(&mut out);
-        let RuleOutcome::Unavailable { missing, reason } = &out[0].1 else {
-            panic!("expected Unavailable");
-        };
-        assert_eq!(missing, &vec![Signal::ToolResults]);
-        assert!(reason.contains("claude-code host capability"), "reason: {reason}");
-    }
-
-    fn outcome_for(code: &'static str, o: RuleOutcome) -> Vec<(&'static str, RuleOutcome)> {
-        vec![(code, o)]
-    }
-
     // ── audit projection：§10 验收 #4 的三态契约 ───────────────────────────────
+    // （degrade 本身的单测在 core `host_capability.rs`——表已下沉，这里是消费方。）
 
     #[test]
     fn claude_audit_projection_unsupported_rules_are_unavailable_never_measured_zero() {

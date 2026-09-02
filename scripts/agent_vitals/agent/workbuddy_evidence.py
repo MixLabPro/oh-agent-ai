@@ -154,10 +154,14 @@ def _seq_of(record):
 
 def _sort_records(records):
     """按 `(sequence or MAX, 文件内序)` 排序。并发 spool 写的跳号不影响顺序；
-    缺 sequence 的记录排最后、内部保输入序。"""
+    缺 sequence 的记录排最后、内部保输入序。
+
+    负 sequence 按缺处理（排最后）——Rust 侧曾是 `seq as u64`（负 i64 回绕成
+    巨大正数），与本实现的负 int 自然排最前排序相反，是「同一字典」的一个隐藏
+    分歧（评审 P3-7）；`seq >= 0` 检查让两侧一致地把负值当缺失。"""
     def key(t):
         seq = _seq_of(t[1])
-        return (seq if seq is not None else 2 ** 63, t[0])
+        return (seq if seq is not None and seq >= 0 else 2 ** 63, t[0])
     return sorted(enumerate(records), key=key)
 
 
@@ -243,8 +247,26 @@ def _populate_workbuddy_timelines(records, session_meta):
     unknown = []
     mode = session_meta.get("permission_mode")
     mode = mode if isinstance(mode, str) else None
-    for ordinal, (_, record) in enumerate(_sort_records(records)):
+    # `next_ordinal` 与 `rec_idx` 是两把不同的尺：rec_idx = 排序后下标（`seq`
+    # 坐标），next_ordinal = 跨五条 timeline 的 entry 唯一序（`evt-{ordinal}`
+    # 契约）。sandbox-executed 一条记录产 **2 条** entry（tool_calls + sandbox），
+    # 曾共用记录序——bridge 后撞出重复 `evt-{n}`。
+    next_ordinal = [0]
+
+    def take_ordinal():
+        o = next_ordinal[0]
+        next_ordinal[0] += 1
+        return o
+
+    for rec_idx, (_, record) in enumerate(_sort_records(records)):
         if not isinstance(record, dict):
+            # 非对象记录没有 eventType 可归类——静默跳过等于让证据消失（评审
+            # P4-13：skipped and recorded, never treated as corruption）。记进
+            # `unknown` 由 SourceAttempt 上报（与 `_derive_coverage` 的同款缺口
+            # 一起修，两个 unknown 合并时去重）。
+            msg = "non-object audit-log record"
+            if msg not in unknown:
+                unknown.append(msg)
             continue
         event_type = record.get("eventType")
         if not isinstance(event_type, str):
@@ -254,19 +276,20 @@ def _populate_workbuddy_timelines(records, session_meta):
             if msg not in unknown:
                 unknown.append(msg)
             continue
-        seq = ordinal
+        seq = rec_idx
         time = _parse_time(record)
         call_id = record.get("toolCallId")
         call_id = call_id if isinstance(call_id, str) else None
         if event_type == "sandbox-executed":
             tool_calls.append(_timeline_entry(
                 {"name": "bash", "args_text": _command_preview(record)},
-                seq, time, call_id, ordinal))
-            sandbox.append(_timeline_entry({"mode": mode}, seq, time, call_id, ordinal))
+                seq, time, call_id, take_ordinal()))
+            sandbox.append(_timeline_entry({"mode": mode}, seq, time, call_id,
+                                          take_ordinal()))
         elif event_type == "WebFetch":
             tool_calls.append(_timeline_entry(
                 {"name": "web_fetch", "args_text": _target_of(record)},
-                seq, time, call_id, ordinal))
+                seq, time, call_id, take_ordinal()))
         else:
             observation = {
                 "asked": {"tool_name": _approval_tool(record),
@@ -276,7 +299,8 @@ def _populate_workbuddy_timelines(records, session_meta):
                 observation["decided"] = {"outcome": "allowed-once"}
             elif event_type in ("commandRejected", "bulk-delete.rejected"):
                 observation["decided"] = {"outcome": "rejected"}
-            approvals.append(_timeline_entry(observation, seq, time, call_id, ordinal))
+            approvals.append(_timeline_entry(observation, seq, time, call_id,
+                                             take_ordinal()))
     return {
         "tool_calls": tool_calls,
         "tool_results": [],
@@ -307,6 +331,11 @@ def _derive_coverage(records, timelines, session_meta):
 
     for record in records:
         if not isinstance(record, dict):
+            # 同 populate 的 P4-13 修复：非对象记录进 unknown，由 SourceAttempt
+            # 上报（与 populate 的 unknown 合并，去重）。
+            msg = "non-object audit-log record"
+            if msg not in unknown:
+                unknown.append(msg)
             continue
         event_type = record.get("eventType")
         if not isinstance(event_type, str):

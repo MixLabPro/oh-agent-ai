@@ -181,6 +181,15 @@ fn timeline_entry<T>(
     }
 }
 
+/// 取下一个 entry 唯一序号并递增。五条 timeline 共用一把递增（`evt-{ordinal}`
+/// 契约）：一条记录可以产多条 entry（sandbox-executed → tool_calls + sandbox），
+/// 用记录序当 ordinal 会撞号。
+fn take_ordinal(next: &mut usize) -> usize {
+    let o = *next;
+    *next += 1;
+    o
+}
+
 fn text(record: &Value, key: &str) -> String {
     record.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
@@ -203,10 +212,14 @@ fn seq_of(record: &Value) -> Option<i64> {
 
 /// 按 `(sequence or MAX, 文件内序)` 排序。并发 spool 写的跳号不影响顺序；
 /// 缺 sequence 的记录排最后、内部保输入序。返回 `(文件内序, 记录)`。
+///
+/// 负 sequence 按缺处理（排最后）——`seq as u64` 会把负 i64 回绕成巨大正数，
+/// 与 Python（负 int 自然排最前）排序相反，是「同一字典」的一个隐藏分歧
+/// （评审 P3-7）；`u64::try_from(s).ok()` 让两侧一致地把负值当缺失。
 fn sort_records(records: &[Value]) -> Vec<(usize, &Value)> {
     let mut indexed: Vec<(usize, &Value)> = records.iter().enumerate().collect();
     indexed.sort_by_key(|(idx, rec)| {
-        (seq_of(rec).map(|s| s as u64).unwrap_or(2_u64.pow(63)), *idx)
+        (seq_of(rec).and_then(|s| u64::try_from(s).ok()).unwrap_or(2_u64.pow(63)), *idx)
     });
     indexed
 }
@@ -323,8 +336,21 @@ fn populate_workbuddy_timelines(
     let mut sandbox = Timeline::new();
     let mut unknown: Vec<String> = Vec::new();
     let mode = session_meta.permission_mode.clone().unwrap_or_default();
-    for (ordinal, (_, record)) in sort_records(records).into_iter().enumerate() {
+    // `next_ordinal` 与 `rec_idx` 是两把不同的尺：rec_idx = 排序后下标（`seq`
+    // 坐标），next_ordinal = 跨五条 timeline 的 entry 唯一序（`evt-{ordinal}`
+    // 契约）。sandbox-executed 一条记录产 **2 条** entry（tool_calls + sandbox），
+    // 曾共用记录序——bridge 后撞出重复 `evt-{n}`。
+    let mut next_ordinal: usize = 0;
+    for (rec_idx, (_, record)) in sort_records(records).into_iter().enumerate() {
         let Some(obj) = record.as_object() else {
+            // 非对象记录没有 eventType 可归类——静默跳过等于让证据消失（评审
+            // P4-13：skipped and recorded, never treated as corruption）。记进
+            // `unknown` 由 SourceAttempt 上报（与 `derive_coverage` 的同款缺口
+            // 一起修，两个 unknown 合并时去重）。
+            let msg = "non-object audit-log record".to_string();
+            if !unknown.contains(&msg) {
+                unknown.push(msg);
+            }
             continue;
         };
         let event_type = obj.get("eventType").and_then(Value::as_str).unwrap_or("");
@@ -335,7 +361,7 @@ fn populate_workbuddy_timelines(
             }
             continue;
         }
-        let seq = ordinal as i64;
+        let seq = rec_idx as i64;
         let time = parse_time(record);
         let call_id = record.get("toolCallId").and_then(Value::as_str).map(str::to_owned);
         if event_type == "sandbox-executed" {
@@ -347,14 +373,14 @@ fn populate_workbuddy_timelines(
                 Some(seq),
                 time,
                 call_id.clone(),
-                ordinal,
+                take_ordinal(&mut next_ordinal),
             ));
             sandbox.entries.push(timeline_entry(
                 SandboxModeObservation { mode: mode.clone() },
                 Some(seq),
                 time,
                 call_id,
-                ordinal,
+                take_ordinal(&mut next_ordinal),
             ));
         } else if event_type == "WebFetch" {
             tool_calls.entries.push(timeline_entry(
@@ -365,7 +391,7 @@ fn populate_workbuddy_timelines(
                 Some(seq),
                 time,
                 call_id,
-                ordinal,
+                take_ordinal(&mut next_ordinal),
             ));
         } else {
             let mut observation = ApprovalObservation {
@@ -384,7 +410,8 @@ fn populate_workbuddy_timelines(
                     outcome: "rejected".to_string(),
                 });
             }
-            approvals.entries.push(timeline_entry(observation, Some(seq), time, call_id, ordinal));
+            approvals.entries.push(timeline_entry(
+                observation, Some(seq), time, call_id, take_ordinal(&mut next_ordinal)));
         }
     }
     (
@@ -437,6 +464,12 @@ fn derive_coverage(
 
     for record in records {
         let Some(obj) = record.as_object() else {
+            // 同 populate 的 P4-13 修复：非对象记录进 unknown，由 SourceAttempt
+            // 上报（与 populate 的 unknown 合并，去重）。
+            let msg = "non-object audit-log record".to_string();
+            if !unknown.contains(&msg) {
+                unknown.push(msg);
+            }
             continue;
         };
         let event_type = obj.get("eventType").and_then(Value::as_str).unwrap_or("");
@@ -641,4 +674,98 @@ pub fn workbuddy_evidence_json(evidence: &WorkbuddyEvidence) -> Value {
         "attempts": attempts,
         "notes": notes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn meta() -> WorkbuddySessionMeta {
+        WorkbuddySessionMeta {
+            permission_mode: Some("fullAccess".to_string()),
+            use_sandbox_cli: Some(1),
+            model: None,
+            cwd: None,
+            title: None,
+            created_at: None,
+            updated_at: None,
+            used: None,
+            credit_json: None,
+            file_mutations: 0,
+        }
+    }
+
+    #[test]
+    fn sandbox_executed_dual_entries_have_distinct_ordinals() {
+        // `evt-{ordinal}` 契约：sandbox-executed 一条记录产 **2 条** entry
+        // （tool_calls + sandbox_modes），曾共用记录序 → bridge 后重复 evt-{n}。
+        let records = vec![
+            json!({"sequence": 1, "eventType": "sandbox-executed", "toolCallId": "c1",
+                   "commandPreview": "ls", "timestamp": "2026-08-31T10:00:00Z"}),
+            json!({"sequence": 2, "eventType": "WebFetch", "toolCallId": "c2",
+                   "messageParams": {"target": "https://example.com"},
+                   "timestamp": "2026-08-31T10:00:01Z"}),
+            json!({"sequence": 3, "eventType": "sandbox-executed", "toolCallId": "c3",
+                   "commandPreview": "pwd", "timestamp": "2026-08-31T10:00:02Z"}),
+        ];
+        let (tl, unknown) = populate_workbuddy_timelines(&records, &meta());
+        assert!(unknown.is_empty());
+        assert_eq!(tl.tool_calls.entries.len(), 3);
+        assert_eq!(tl.sandbox_modes.entries.len(), 2);
+        let mut ords: Vec<usize> =
+            tl.tool_calls.entries.iter().map(|e| e.ordinal).collect();
+        ords.extend(tl.sandbox_modes.entries.iter().map(|e| e.ordinal));
+        // push 序 = [tc0, s0, tc1, tc2, s1]；旧代码（记录序）给出 [0, 1, 0, 0, 2] 撞号。
+        assert_eq!(ords, vec![0, 2, 3, 1, 4], "tool_calls 与 sandbox 的 ordinal 交错唯一");
+        // seq 仍是记录序：同记录的 entry 共享各自记录序。
+        assert_eq!(tl.tool_calls.entries[0].seq, Some(0));
+        assert_eq!(tl.sandbox_modes.entries[0].seq, Some(0));
+        assert_eq!(tl.tool_calls.entries[2].seq, Some(2));
+        assert_eq!(tl.sandbox_modes.entries[1].seq, Some(2));
+    }
+
+    #[test]
+    fn chain_note_single_record_has_no_links_to_verify() {
+        assert_eq!(
+            chain_note(&[json!({"sequence": 7, "eventType": "sandbox-executed",
+                                "hash": "h7", "prevHash": ""})]).as_deref(),
+            Some("audit-log hash chain: 1 record, no links to verify (verified from seq=7)"));
+    }
+
+    #[test]
+    fn chain_note_continuous_chain_reports_count() {
+        let records = vec![
+            json!({"sequence": 1, "hash": "h1", "prevHash": ""}),
+            json!({"sequence": 2, "hash": "h2", "prevHash": "h1"}),
+            json!({"sequence": 3, "hash": "h3", "prevHash": "h2"}),
+        ];
+        assert_eq!(
+            chain_note(&records).as_deref(),
+            Some("audit-log hash chain continuous: 3 records (verified from seq=1)"));
+    }
+
+    #[test]
+    fn chain_note_broken_link_names_both_seqs() {
+        let records = vec![
+            json!({"sequence": 1, "hash": "h1", "prevHash": ""}),
+            json!({"sequence": 2, "hash": "h2", "prevHash": "wrong"}),
+        ];
+        assert_eq!(
+            chain_note(&records).as_deref(),
+            Some("audit-log hash chain broken at seq=2 (prevHash does not match hash of seq=1)"));
+    }
+
+    #[test]
+    fn chain_note_rotated_head_is_honest_about_verification_start() {
+        // 首条 prevHash 非空且匹配不到任何记录 → 最老记录可能被轮转，链从首条起验证。
+        let records = vec![
+            json!({"sequence": 5, "hash": "h5", "prevHash": "h4"}),
+            json!({"sequence": 6, "hash": "h6", "prevHash": "h5"}),
+        ];
+        assert_eq!(
+            chain_note(&records).as_deref(),
+            Some("audit-log hash chain verified from seq=5: oldest records may be rotated \
+                  (first prevHash has no predecessor)"));
+    }
 }

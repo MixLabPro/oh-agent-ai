@@ -31,14 +31,7 @@ import json
 from pathlib import Path
 
 from agent_vitals.adapters import claude_session
-from agent_vitals.agent import claude_evidence, canonical_audit
-
-# 与 Rust `degrade_sv607_608` 的 reason 逐字节相同——差分测试靠它。
-_SV607_608_DEGRADE_REASON = (
-    "claude-code host capability: tool results carry no reason codes "
-    "(error_code structurally absent); SV607/608 are reason-level detectors "
-    "and cannot discriminate"
-)
+from agent_vitals.agent import canonical_audit, claude_evidence, host_capability
 
 
 def claude_audit_projection(canonical):
@@ -46,22 +39,15 @@ def claude_audit_projection(canonical):
 
     委托共享求值器 `canonical_audit.audit_projection`（宿主无关），然后做唯一的
     Claude 特例：把 SV607/608 从 MeasuredZero 覆盖成 Unavailable（host-capability
-    degradation，模块文档）。**只覆盖 MeasuredZero**：门控已因 timeline 空给
-    Unavailable（缺失信号、无需 override）或给了 Findings（Claude 不可能，但
-    override 不吞真命中）时保持原样。覆盖后重算 `rules_unavailable`——共享求值器
-    的数已经不反映 degrade 后的状态（健康会话 3 → 5）。"""
+    degradation，`host_capability.py`——表已下沉，这里是消费方）。**只覆盖
+    MeasuredZero**：门控已因 timeline 空给 Unavailable（缺失信号、无需 override）
+    或给了 Findings（Claude 不可能，但 override 不吞真命中）时保持原样。覆盖后
+    重算 `rules_unavailable`——共享求值器的数已经不反映 degrade 后的状态（健康
+    会话 3 → 5）。"""
     proj = canonical_audit.audit_projection(canonical)
-    outcomes = proj["rule_outcomes"]
-    for code in ("SV607", "SV608"):
-        outcome = outcomes.get(code)
-        if outcome is not None and outcome.get("status") == "measured_zero":
-            outcomes[code] = {
-                "status": "unavailable",
-                "missing": ["ToolResults"],
-                "reason": _SV607_608_DEGRADE_REASON,
-            }
+    host_capability.degrade_rule_outcomes("claude-code", proj["rule_outcomes"])
     proj["summary"]["rules_unavailable"] = sum(
-        1 for v in outcomes.values() if v.get("status") == "unavailable")
+        1 for v in proj["rule_outcomes"].values() if v.get("status") == "unavailable")
     return proj
 
 

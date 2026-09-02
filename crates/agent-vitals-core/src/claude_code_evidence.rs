@@ -210,13 +210,18 @@ fn timeline_entry<T>(
 /// - 键缺失 → `failed=None`，provenance=**measured**（宿主记了结果、无失败信号）。
 ///
 /// `error_code` 恒 None（§3：Claude 无原因码来源，绝不伪造）。
+///
+/// `next_ordinal` 是**跨块**的唯一序号（§compatibility:canonical_session 的
+/// `evt-{ordinal}` 契约）：一条 message 记录可含多个 tool_result 块，若用记录
+/// 序号当 ordinal，同记录的块会产出重复 `evt-{n}`——契约文档曾声称「同一个
+/// 原始事件不会出现在两条 timeline 里」，Claude 的多块记录是反例。
 fn process_tool_result_blocks(
     record: &Value,
     tool_results: &mut Timeline<ToolResultObservation>,
     seq: i64,
     time: Option<i64>,
     turn: Option<i64>,
-    ordinal: usize,
+    next_ordinal: &mut usize,
 ) {
     let Some(Value::Array(items)) = record.pointer("/message/content") else {
         return;
@@ -225,6 +230,8 @@ fn process_tool_result_blocks(
         if !is_tool_result_block(blk) {
             continue;
         }
+        let ordinal = *next_ordinal;
+        *next_ordinal += 1;
         let is_error = blk.get("is_error");
         let failed = is_error.and_then(Value::as_bool);
         let provenance = if is_error.is_some() {
@@ -250,13 +257,15 @@ fn process_tool_result_blocks(
 /// turn 边界（§8 问 2），但它的工具调用本身照常记录（`turn=None`）。返回而非就地
 /// push 是因为 sidechain 判据在调用方手里，传 `&mut pending` + `is_sidechain` 两个
 /// 参数会让签名过肥，也让「谁拥有 turn 归属」这个决定藏在两层里。
+///
+/// `next_ordinal` 是**跨块**的唯一序号（同 `process_tool_result_blocks` 的契约）。
 fn process_tool_use_blocks(
     record: &Value,
     tool_calls: &mut Timeline<ToolCallObservation>,
     seq: i64,
     time: Option<i64>,
     turn: Option<i64>,
-    ordinal: usize,
+    next_ordinal: &mut usize,
 ) -> Vec<(String, String)> {
     let Some(Value::Array(items)) = record.pointer("/message/content") else {
         return Vec::new();
@@ -266,6 +275,8 @@ fn process_tool_use_blocks(
         if blk.get("type").and_then(Value::as_str) != Some("tool_use") {
             continue;
         }
+        let ordinal = *next_ordinal;
+        *next_ordinal += 1;
         let name = blk.get("name").and_then(Value::as_str).unwrap_or("");
         let (canonical_name, args_text) = normalize_tool(name, blk.get("input"));
         let call_id = blk.get("id").and_then(Value::as_str).map(str::to_owned);
@@ -288,7 +299,16 @@ fn process_tool_use_blocks(
 /// `last_seq == end_seq` 的不变式），`end_reason_kind`/`end_error_code` 恒 None
 /// （Claude 无 turn/end 事件）。SV613(a) 读 `end_reason_kind=="error"` 恒不命中 →
 /// 诚实 MeasuredZero，不发明 error turn。
-fn flush_turn(turns: &mut Timeline<TurnObservation>, p: PendingClaudeTurn) {
+///
+/// `next_ordinal` 同前：turn 是第三条 timeline，序号必须与前两条共用同一把
+/// 递增（曾硬编码 0——第一对真实数据就产出 `evt-0` 撞 `tool_calls` 的首条）。
+fn flush_turn(
+    turns: &mut Timeline<TurnObservation>,
+    p: PendingClaudeTurn,
+    next_ordinal: &mut usize,
+) {
+    let ordinal = *next_ordinal;
+    *next_ordinal += 1;
     turns.entries.push(timeline_entry(
         TurnObservation {
             turn: p.turn,
@@ -299,12 +319,12 @@ fn flush_turn(turns: &mut Timeline<TurnObservation>, p: PendingClaudeTurn) {
             end_seq: p.last_seq,
             end_time: p.last_time,
         },
-        Provenance::Derived { from: "uuid_tree" },
+        Provenance::Derived { from: "content_turn_root" },
         p.start_seq,
         p.start_time,
         Some(p.turn),
         None,
-        0,
+        ordinal,
     ));
 }
 
@@ -324,13 +344,17 @@ pub(crate) fn populate_claude_timelines(
 ) {
     let mut pending: Option<PendingClaudeTurn> = None;
     let mut next_turn: i64 = 0;
+    // `next_ordinal` 与 `rec_idx` 是两把不同的尺：rec_idx = 记录序（`seq` 坐标，
+    // 同记录的所有块共享），next_ordinal = 跨三条 timeline 的 entry 唯一序。
+    // 曾用记录序当 ordinal——一条记录多块（或 flush_turn 硬编码 0）就撞号。
+    let mut next_ordinal: usize = 0;
 
-    for (ordinal, record) in records.iter().enumerate() {
+    for (rec_idx, record) in records.iter().enumerate() {
         let Some(typ) = record.get("type").and_then(Value::as_str) else {
             continue;
         };
         let is_sidechain = record.get("isSidechain").and_then(Value::as_bool).unwrap_or(false);
-        let seq = ordinal as i64;
+        let seq = rec_idx as i64;
         let time = record.get("timestamp").and_then(|v| v.as_str()).and_then(parse_iso).map(|(s, _)| s);
         let message = record.get("message");
 
@@ -342,7 +366,7 @@ pub(crate) fn populate_claude_timelines(
                         // 新 turn 根：flush 上一个、开新的。根**不**推进上一个 turn
                         // 的 last_seq（上一个 turn 到根**之前**的最后一个事件为止）。
                         if let Some(p) = pending.take() {
-                            flush_turn(turns, p);
+                            flush_turn(turns, p, &mut next_ordinal);
                         }
                         pending = Some(PendingClaudeTurn {
                             turn: next_turn,
@@ -365,7 +389,7 @@ pub(crate) fn populate_claude_timelines(
                     seq,
                     time,
                     if is_sidechain { None } else { pending.as_ref().map(|p| p.turn) },
-                    ordinal,
+                    &mut next_ordinal,
                 );
             }
             "assistant" => {
@@ -377,7 +401,8 @@ pub(crate) fn populate_claude_timelines(
                 }
                 let turn_opt =
                     if is_sidechain { None } else { pending.as_ref().map(|p| p.turn) };
-                let sig = process_tool_use_blocks(record, tool_calls, seq, time, turn_opt, ordinal);
+                let sig = process_tool_use_blocks(
+                    record, tool_calls, seq, time, turn_opt, &mut next_ordinal);
                 if !is_sidechain {
                     if let Some(p) = pending.as_mut() {
                         p.sig.extend(sig);
@@ -389,7 +414,7 @@ pub(crate) fn populate_claude_timelines(
     }
     // EOF 兜底（§8 问 7）：最后一个 open turn 在文件尾关闭。
     if let Some(p) = pending.take() {
-        flush_turn(turns, p);
+        flush_turn(turns, p, &mut next_ordinal);
     }
 }
 
@@ -426,6 +451,13 @@ fn derive_coverage(records: &[Value], turns_len: usize) -> (SignalSet, Coverage,
 
     for record in records {
         let Some(typ) = record.get("type").and_then(Value::as_str) else {
+            // 缺 type（或 type 非字符串）的记录没有归类的锚点——静默跳过等于让
+            // 证据消失（评审 P4-13：skipped and recorded, never treated as
+            // corruption）。记进 `unknown` 由 SourceAttempt 上报，绝不吞。
+            let msg = "missing record type".to_string();
+            if !unknown.contains(&msg) {
+                unknown.push(msg);
+            }
             continue;
         };
         if !KNOWN_TYPES.contains(&typ) {
@@ -466,8 +498,13 @@ fn derive_coverage(records: &[Value], turns_len: usize) -> (SignalSet, Coverage,
                                 // §13 FileMutations = "derived (from tool calls)"。
                                 bump(&mut coverage, Signal::FileMutations, Bucket::Derived, 1);
                             }
-                            "Task" => {
-                                // §13 SubagentSpawns = "measured (isSidechain / Task)"。
+                            // is_sidechain 守卫 = SubagentSpawns 的**按记录去重**：
+                            // 记录级 is_sidechain 臂（下面）已数过这条记录，sidechain
+                            // 记录里的 Task 块不能再数一次——否则一条 sidechain 记录
+                            // 既走 Task 臂又走 is_sidechain 臂，双计（评审 P4-12）。
+                            // 主干（非 sidechain）的 Task 块 = 一次真实子代理 spawn，
+                            // 按块数。
+                            "Task" if !is_sidechain => {
                                 bump(&mut coverage, Signal::SubagentSpawns, Bucket::Measured, 1);
                             }
                             "Skill" => {
@@ -514,7 +551,9 @@ fn derive_coverage(records: &[Value], turns_len: usize) -> (SignalSet, Coverage,
             }
             _ => {} // mode/attachment/last-prompt/ai-title/file-history-*/queue-operation/… 不喂信号
         }
-        // §13 SubagentSpawns：isSidechain 真本身就是子代理分支的证据（Task 上面已数）。
+        // §13 SubagentSpawns：isSidechain 真本身就是子代理分支的证据。记录级去重
+        // 锚点：Task 臂只认主干（守卫在上面），所以一条 sidechain 记录无论含几个
+        // Task 块都只计一次（评审 P4-12）。
         if is_sidechain {
             bump(&mut coverage, Signal::SubagentSpawns, Bucket::Measured, 1);
         }
@@ -581,7 +620,10 @@ fn build_notes(coverage: &Coverage) -> Vec<AdapterNote> {
     }
     if coverage.get(Signal::TurnBoundaries).total() > 0 {
         notes.push(AdapterNote {
-            message: "Turn boundaries are rebuilt from the message tree (pure-text user roots), not native turn events; SV612/613(a) are Derived/Partial and rebuild failure degrades to Unavailable, never fabricated boundaries.".to_string(),
+            // 判据是内容不是 parentUuid 树（模块文档的 886 vs 8 实测）——文案与
+            // 算法一致才叫诚实，曾写 "message tree" 与 `Derived{from:"content_turn_root"}`
+            // 的标签自相矛盾（评审 P4-9）。
+            message: "Turn boundaries are rebuilt from the message stream (pure-text user roots), not native turn events; SV612/613(a) are Derived/Partial and rebuild failure degrades to Unavailable, never fabricated boundaries.".to_string(),
         });
     }
     if coverage.get(Signal::ApprovalDecisions).total() == 0 {
@@ -595,7 +637,9 @@ fn build_notes(coverage: &Coverage) -> Vec<AdapterNote> {
 /// 记录数组 → `ClaudeEvidence`。五段式流水线的 "derive → coverage" 两段；
 /// "locate → shape → extract" 留在 `src/agent/claude_session.rs`。
 ///
-/// 诚实真值表（喂 Claude canonical 后每条 SV 规则的结果，Task #30 接线时验收）：
+/// 诚实真值表（喂 Claude canonical 后每条 SV 规则的实际结果——claude-session
+/// 差分测试 + fixture 自校验钉住的当前实现行为，评审 P4-10 修正「Task #30 待接线」
+/// 的过时表述：轨迹级接线已落地）：
 ///
 /// | 规则 | Claude Code |
 /// |---|---|
@@ -605,7 +649,7 @@ fn build_notes(coverage: &Coverage) -> Vec<AdapterNote> {
 /// | SV611 | 跑（比较 (name, args_text)） |
 /// | SV612 | Derived/Partial（turn 重建） |
 /// | SV613(a) | MeasuredZero（无 error turn/end） |
-/// | SV613(b) | Lossy/Partial（is_error → failed，Task #30 接 trajectory.rs:402） |
+/// | SV613(b) | Lossy/Partial（is_error → failed；`trajectory.rs` 连续失败检测读 `failed == Some(true)` 或 `error_code.is_some()`——DSH/Codex 的 `failed` 恒 None，布尔式退化成原判据，golden 字节零漂移） |
 pub fn build_claude_evidence(
     raw_records: Vec<Value>,
     session_id: String,
@@ -933,5 +977,76 @@ mod tests {
         let sigs: Vec<&str> = j["signals"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
         assert!(sigs.contains(&"ApprovalPolicy"));
         assert!(!sigs.contains(&"SandboxModes"));
+    }
+
+    #[test]
+    fn ordinals_are_unique_across_all_three_timelines_and_bridge_emits_distinct_evt_ids() {
+        // `evt-{ordinal}` 契约（compatibility/canonical_session.rs 模块文档声称的
+        // 安全前提）：跨 tool_calls/tool_results/turns 的 entry 序号必须唯一。曾犯
+        // 的两种错——flush_turn 硬编码 0、一条 message 多块共用记录序——都产出
+        // 重复 evt-{n}，bridge 后事件 id 撞号、按 ordinal 排序错乱。夹具必须两条
+        // 都踩到：一条 assistant 记录带两个 tool_use 块、一条 user 记录带两个
+        // tool_result 块、两个纯文本 turn 根（turn 的 flush 穿插在中间）。
+        let records = vec![
+            rec("user", json!({"message": {"id": "m1", "content": "第一轮"}})),
+            rec("assistant", json!({"message": {"id": "m2", "content": [
+                {"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "ls"}},
+                {"type": "tool_use", "id": "tu2", "name": "Write", "input": {"file_path": "/a"}},
+            ]}})),
+            rec("user", json!({"message": {"id": "m3", "content": [
+                {"type": "tool_result", "tool_use_id": "tu1", "content": "ok", "is_error": true},
+                {"type": "tool_result", "tool_use_id": "tu2", "content": "ok"},
+            ]}})),
+            rec("user", json!({"message": {"id": "m4", "content": "第二轮"}})),
+            rec("assistant", json!({"message": {"id": "m5", "content": [
+                {"type": "tool_use", "id": "tu3", "name": "Bash", "input": {"command": "git status"}},
+            ]}})),
+        ];
+        let mut tc = Timeline::new();
+        let mut tr = Timeline::new();
+        let mut turns = Timeline::new();
+        populate_claude_timelines(&records, &mut tc, &mut tr, &mut turns);
+        assert_eq!(tc.entries.len(), 3);
+        assert_eq!(tr.entries.len(), 2);
+        assert_eq!(turns.entries.len(), 2);
+
+        // 两把尺各司其职：seq = 记录序（同记录多块共享），ordinal = entry 唯一序。
+        assert_eq!(tc.entries[0].seq, Some(1));
+        assert_eq!(tc.entries[1].seq, Some(1));
+        assert_eq!(tr.entries[0].seq, Some(2));
+        assert_eq!(tr.entries[1].seq, Some(2));
+
+        // 跨三条 timeline 收集 ordinal：两两不同（旧代码这里给出 [0, 0, 0, 1, 2, 4, 5]）。
+        let mut ordinals: Vec<usize> = tc.entries.iter().map(|e| e.ordinal).collect();
+        ordinals.extend(tr.entries.iter().map(|e| e.ordinal));
+        ordinals.extend(turns.entries.iter().map(|e| e.ordinal));
+        let mut uniq = ordinals.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), ordinals.len(), "ordinals 必须两两不同: {ordinals:?}");
+        ordinals.sort_unstable();
+        assert_eq!(ordinals, vec![0, 1, 2, 3, 4, 5, 6]);
+
+        // bridge 层面（真实消费方）：事件 id 唯一、按 ordinal 排序后 = 会话时序。
+        let evidence = build_claude_evidence(records, "s1".to_string());
+        let events = crate::compatibility::canonical_session::canonical_session_to_vitals(
+            &evidence.canonical).unwrap();
+        assert_eq!(events.len(), 7);
+        let ids: Vec<&str> = events.iter().map(|e| e.id.as_str()).collect();
+        let mut id_uniq = ids.clone();
+        id_uniq.sort_unstable();
+        id_uniq.dedup();
+        assert_eq!(id_uniq.len(), ids.len(), "事件 id 必须唯一: {ids:?}");
+        // 前 4 条 = 第一轮的两个 tool_call + 两个 tool_result（续写紧跟调用）。
+        assert_eq!(ids[..4], ["evt-0", "evt-1", "evt-2", "evt-3"]);
+        assert_eq!(events[0].kind, "agent.tool_call");
+        assert_eq!(events[1].kind, "agent.tool_call");
+        assert_eq!(events[2].kind, "agent.tool_result");
+        assert_eq!(events[3].kind, "agent.tool_result");
+        // 第 5 条 = 第一轮的 turn 收尾，最后两条 = 第二轮 tool_call + turn。
+        assert_eq!(ids[4..], ["evt-4", "evt-5", "evt-6"]);
+        assert_eq!(events[4].kind, "agent.turn");
+        assert_eq!(events[5].kind, "agent.tool_call");
+        assert_eq!(events[6].kind, "agent.turn");
     }
 }

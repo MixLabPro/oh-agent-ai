@@ -86,7 +86,10 @@ def _read_table(conn, table, key_col):
     for row in cur.fetchall():
         rec = dict(zip(cols, row))
         key = rec.get(key_col)
-        if key is None:
+        # 只收字符串键（Rust 侧读表收 String）。SQLite 的 int 主键（如
+        # session_id 存成数字）会在这里被跳过——保留 int 键会让 `{key → 行}` 的
+        # 字典两侧不同构（评审 P3-7：真实语料 session_id 恒字符串，边缘对齐）。
+        if not isinstance(key, str):
             continue
         out[key] = rec
     return out

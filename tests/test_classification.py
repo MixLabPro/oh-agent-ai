@@ -44,9 +44,9 @@ RS_SKILLS_FAMILY = {
 PY_AGENT_FAMILY = {
     "behavior", "budget", "canonical_audit", "claude_evidence",
     "claude_session_audit", "codex_cost", "codex_evidence", "codex_session_audit",
-    "codex_usage", "compaction", "cost", "duration", "plan", "r2a", "skill",
-    "state", "subagent", "takeover", "trajectory", "usage", "waste",
-    "workbuddy_evidence", "workbuddy_session_audit",
+    "codex_usage", "compaction", "cost", "duration", "host_capability", "plan",
+    "r2a", "skill", "state", "subagent", "takeover", "trajectory", "usage",
+    "waste", "workbuddy_evidence", "workbuddy_session_audit",
 }
 RS_AGENT_FAMILY = {
     "behavior", "budget", "claude_session", "codex_cost", "codex_session",

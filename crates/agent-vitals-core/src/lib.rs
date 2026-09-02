@@ -22,6 +22,7 @@ pub mod dsh_evidence;
 pub mod duration;
 pub mod evidence;
 pub mod findings;
+pub mod host_capability;
 pub mod plan;
 pub mod r2a;
 pub mod skill;

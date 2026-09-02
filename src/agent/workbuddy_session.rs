@@ -45,19 +45,11 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 
 use agent_vitals_core::behavior::{flatten, match_behavior_canonical, rule_outcomes_json};
-use agent_vitals_core::evidence::{RuleOutcome, Signal};
+use agent_vitals_core::evidence::RuleOutcome;
 use agent_vitals_core::trajectory::{flatten_trajectory, match_trajectory_canonical};
 use agent_vitals_core::workbuddy_evidence::{
     build_workbuddy_evidence, workbuddy_evidence_json, WorkbuddyEvidence, WorkbuddySessionMeta,
 };
-
-/// SV604/605 host-capability degradation 的 reason——与 Python
-/// `workbuddy_session_audit.py::_SV604_605_DEGRADE_REASON` 逐字节相同，差分测试靠它
-/// （spec §3.1 钉死）。
-const SV604_605_DEGRADE_REASON: &str = "workbuddy host capability: only bash (audit-log \
-commandPreview) and web_fetch (WebFetch target) tool calls are joinable to sessions; \
-write/edit tool calls exist only in session-anonymous traces (file-history has content \
-without paths), so SV604/605 cannot discriminate";
 
 /// `~/.workbuddy/`（真实语料实测位置；测试用 isolated_home_env 把 HOME 指到 fixture
 /// root，根就是 `<root>/.workbuddy/`）。main.rs 解析 `HOME`/`USERPROFILE` 传入。
@@ -299,30 +291,15 @@ pub fn date_span_of(records: &[Value], meta: &WorkbuddySessionMeta) -> Value {
     json!({ "first": meta.created_at, "last": meta.updated_at })
 }
 
-/// **SV604/605 host-capability degradation**（模块文档）：WorkBuddy 的 tool_calls
-/// timeline 只有 bash/web_fetch 两个子集，写工具看不见——把 MeasuredZero 覆盖成
-/// Unavailable。只覆盖 MeasuredZero：门控已因 timeline 空给 Unavailable（缺失信号、
-/// 无需 override）或给了 Findings（audit-log 里有真命令时 SV601-603 会命中）时保持
-/// 原样——override 不吞真命中。
-fn degrade_sv604_605(outcomes: &mut [(&'static str, RuleOutcome)]) {
-    for (code, outcome) in outcomes.iter_mut() {
-        if matches!(*code, "SV604" | "SV605") && matches!(outcome, RuleOutcome::MeasuredZero) {
-            *outcome = RuleOutcome::Unavailable {
-                missing: vec![Signal::ToolCalls],
-                reason: SV604_605_DEGRADE_REASON.to_string(),
-            };
-        }
-    }
-}
-
 /// family① + family④ 的审计投影：findings + 三态 rule_outcomes + summary。委托共享
 /// 求值器 `match_behavior_canonical`（宿主无关），然后做唯一的 WorkBuddy 特例：把
-/// SV604/605 从 MeasuredZero 覆盖成 Unavailable（host-capability degradation，模块
-/// 文档），覆盖后重算 `summary.rules_unavailable`——共享求值器的数已经不反映 degrade
-/// 后的状态（健康会话 5 → 7）。
+/// SV604/605 从 MeasuredZero 覆盖成 Unavailable（host-capability degradation，core
+/// `host_capability`——表已下沉，这里是消费方），覆盖后重算
+/// `summary.rules_unavailable`——共享求值器的数已经不反映 degrade 后的状态（健康
+/// 会话 5 → 7）。
 fn workbuddy_audit_projection(evidence: &WorkbuddyEvidence) -> Value {
     let mut family1 = match_behavior_canonical(&evidence.canonical);
-    degrade_sv604_605(&mut family1);
+    agent_vitals_core::host_capability::degrade_rule_outcomes("workbuddy", &mut family1);
     let trajectory = match_trajectory_canonical(&evidence.canonical);
 
     let mut findings = flatten(&family1);

@@ -35,15 +35,7 @@ import math
 from pathlib import Path
 
 from agent_vitals.adapters import workbuddy_session
-from agent_vitals.agent import workbuddy_evidence, canonical_audit
-
-# 与 Rust `degrade_sv604_605` 的 reason 逐字节相同——差分测试靠它（spec §3.1 钉死）。
-_SV604_605_DEGRADE_REASON = (
-    "workbuddy host capability: only bash (audit-log commandPreview) and web_fetch "
-    "(WebFetch target) tool calls are joinable to sessions; write/edit tool calls "
-    "exist only in session-anonymous traces (file-history has content without "
-    "paths), so SV604/605 cannot discriminate"
-)
+from agent_vitals.agent import canonical_audit, host_capability, workbuddy_evidence
 
 
 def workbuddy_audit_projection(canonical):
@@ -51,22 +43,15 @@ def workbuddy_audit_projection(canonical):
 
     委托共享求值器 `canonical_audit.audit_projection`（宿主无关），然后做唯一的
     WorkBuddy 特例：把 SV604/605 从 MeasuredZero 覆盖成 Unavailable（host-capability
-    degradation，模块文档）。**只覆盖 MeasuredZero**：门控已因 timeline 空给
-    Unavailable（缺失信号）或给了 Findings（audit-log 里有真命令时 SV601-603 会
-    命中）时保持原样——override 不吞真命中。覆盖后重算 `rules_unavailable`——共享
-    求值器的数已经不反映 degrade 后的状态（健康会话 5 → 7）。"""
+    degradation，`host_capability.py`——表已下沉，这里是消费方）。**只覆盖
+    MeasuredZero**：门控已因 timeline 空给 Unavailable（缺失信号）或给了 Findings
+    （audit-log 里有真命令时 SV601-603 会命中）时保持原样——override 不吞真命中。
+    覆盖后重算 `rules_unavailable`——共享求值器的数已经不反映 degrade 后的状态
+    （健康会话 5 → 7）。"""
     proj = canonical_audit.audit_projection(canonical)
-    outcomes = proj["rule_outcomes"]
-    for code in ("SV604", "SV605"):
-        outcome = outcomes.get(code)
-        if outcome is not None and outcome.get("status") == "measured_zero":
-            outcomes[code] = {
-                "status": "unavailable",
-                "missing": ["ToolCalls"],
-                "reason": _SV604_605_DEGRADE_REASON,
-            }
+    host_capability.degrade_rule_outcomes("workbuddy", proj["rule_outcomes"])
     proj["summary"]["rules_unavailable"] = sum(
-        1 for v in outcomes.values() if v.get("status") == "unavailable")
+        1 for v in proj["rule_outcomes"].values() if v.get("status") == "unavailable")
     return proj
 
 

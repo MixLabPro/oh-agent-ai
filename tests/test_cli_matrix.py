@@ -1815,14 +1815,16 @@ class CliMatrix(unittest.TestCase):
     # 夹具是合成 JSONL（Rust claude_session.rs 测试同款构造）。py==rs 逐字节靠
     # both() 兜底；这里的断言钉语义，防两个实现一起漂。
 
-    def _claude_healthy_home(self):
-        """把验收夹具 `fixtures/claude/healthy.jsonl` 落到临时 home——夹具是
-        §10 验收的单一来源（`fixtures/claude/build_claude_fixture.py` 自校验钉死
+    def _claude_fixture_home(self, fname, sid="c0ffee00000000000000000000000000"):
+        """把验收夹具 `fixtures/claude/<fname>` 落到临时 home——夹具是 §10
+        验收的单一来源（`fixtures/claude/build_claude_fixture.py` 自校验钉死
         同一组数字），测试只消费它，不自己再造一份记录（再造一份就漂移了）。"""
-        fixture = ROOT / "fixtures" / "claude" / "healthy.jsonl"
+        fixture = ROOT / "fixtures" / "claude" / fname
         records = [json.loads(line) for line in fixture.read_text(encoding="utf-8").splitlines()]
-        write_claude_session_log(
-            self.tmp, "c0ffee00000000000000000000000000", records)
+        write_claude_session_log(self.tmp, sid, records)
+
+    def _claude_healthy_home(self):
+        self._claude_fixture_home("healthy.jsonl")
 
     def test_claude_session_list_differential(self):
         """`claude-session --list`：全部会话的行摘要，按末行时间戳降序（最新在
@@ -1894,8 +1896,18 @@ class CliMatrix(unittest.TestCase):
         rules = a["rule_outcomes"]
         for code in ("SV607", "SV608", "SV609", "SV610", "SV614"):
             self.assertEqual(rules[code]["status"], "unavailable", code)
-        self.assertIn("claude-code host capability", rules["SV607"]["reason"])
-        self.assertIn("claude-code host capability", rules["SV608"]["reason"])
+        # reason 逐字节钉死（曾只有 assertIn 子串——两侧一起改措辞测试仍绿，
+        # 评审 P3-5）。与 core `host_capability.rs` 常量同串。
+        self.assertEqual(
+            rules["SV607"]["reason"],
+            "claude-code host capability: tool results carry no reason codes "
+            "(error_code structurally absent); SV607/608 are reason-level "
+            "detectors and cannot discriminate")
+        self.assertEqual(
+            rules["SV608"]["reason"],
+            "claude-code host capability: tool results carry no reason codes "
+            "(error_code structurally absent); SV607/608 are reason-level "
+            "detectors and cannot discriminate")
         self.assertEqual(rules["SV609"]["reason"],
                          "no evidence for required signal(s) in this session")
         for code in ("SV601", "SV602", "SV603", "SV604", "SV605", "SV606",
@@ -1905,10 +1917,10 @@ class CliMatrix(unittest.TestCase):
         # 三条 notes 的有条件触发：TurnBoundaries>0 → turn 重建说明；ApprovalDecisions
         # ==0（结构性）→ 审批说明。SkillInvocations=0 → skill 说明不出现。
         self.assertEqual(report["notes"], [
-            "Turn boundaries are rebuilt from the message tree (pure-text user "
-            "roots), not native turn events; SV612/613(a) are Derived/Partial "
-            "and rebuild failure degrades to Unavailable, never fabricated "
-            "boundaries.",
+            "Turn boundaries are rebuilt from the message stream (pure-text "
+            "user roots), not native turn events; SV612/613(a) are "
+            "Derived/Partial and rebuild failure degrades to Unavailable, "
+            "never fabricated boundaries.",
             "ApprovalDecisions is unavailable in this slice: only "
             "`permission-mode` snapshots are persisted, and per-decision "
             "recovery needs marker strings in tool-result text "
@@ -1921,6 +1933,77 @@ class CliMatrix(unittest.TestCase):
                          ["ToolCalls", "ToolResults", "TurnBoundaries",
                           "StepBoundaries", "Usage", "UsageAggregate",
                           "FileMutations", "UserPrompts"])
+
+    def test_claude_session_dangerous_finding_differential(self):
+        """finding leaf（`fixtures/claude/dangerous.jsonl`）：SV601 正命中路径在
+        Claude 侧的观察面（LOW-4 复盘同款——healthy 不触发、both() 只钉
+        coverage，规则表上的「可跑」没有观察面）。§10 验收 #5 跨宿主同 finding：
+        与 codex paginated 夹具同一危险片段 `rm -rf` → 同 evidence/severity/
+        call_id 形状（codex 侧钉在 test_codex_session_paginated_findings）。
+        Bash 里没有 sudo/curl|sh → SV602/603 照跑零命中（measured_zero，不是
+        门控吞掉的 unavailable）。py==rs 逐字节（both()）。"""
+        self._claude_fixture_home("dangerous.jsonl")
+        code, out, err = self.both("claude-session", "--session",
+                                   "c0ffee00000000000000000000000000", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        a = report["audit"]
+        self.assertEqual(a["summary"],
+                         {"critical": 1, "warning": 0, "info": 0,
+                          "findings_total": 1, "rules_unavailable": 5})
+        by_rule = {f["rule"]: f for f in a["findings"]}
+        self.assertEqual(by_rule["SV601"]["evidence"], "rm -rf")
+        self.assertEqual(by_rule["SV601"]["severity"], "critical")
+        self.assertEqual(by_rule["SV601"]["call_id"], "call1")
+        self.assertEqual(by_rule["SV601"]["tool_name"], "bash")
+        for code2 in ("SV602", "SV603"):
+            self.assertEqual(a["rule_outcomes"][code2]["status"],
+                             "measured_zero", code2)
+
+    def test_claude_session_all_recorded_differential(self):
+        """full-shape leaf（`fixtures/claude/all-recorded.jsonl`）：每种记录都走
+        原样路径——两 turn、Bash/Write/Task、sidechain（P4-12：SubagentSpawns
+        2 不是 3——Task 臂被 is_sidechain 守卫挡住，记录级臂只计一次）、缺 type
+        + 未知 type（P4-13：attempts 两条按字典序，绝不静默吞）。coverage 与
+        timeline 同源。py==rs 逐字节（both()）。"""
+        self._claude_fixture_home("all-recorded.jsonl")
+        code, out, err = self.both("claude-session", "--session",
+                                   "c0ffee00000000000000000000000000", "--json", "-")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        cov = report["coverage"]
+        self.assertEqual(cov["ToolCalls"]["measured"], 4)
+        self.assertEqual(cov["ToolResults"]["measured"], 3)
+        self.assertEqual(cov["TurnBoundaries"]["derived"], 2)
+        self.assertEqual(cov["UserPrompts"]["measured"], 2)
+        self.assertEqual(cov["SubagentSpawns"]["measured"], 2)
+        self.assertEqual(cov["StepBoundaries"]["derived"], 4)
+        self.assertEqual(cov["Usage"]["measured"], 4)
+        self.assertEqual(cov["UsageAggregate"]["derived"], 1)
+        self.assertEqual(cov["FileMutations"]["derived"], 1)
+        a = report["audit"]
+        self.assertEqual(a["summary"],
+                         {"critical": 0, "warning": 0, "info": 0,
+                          "findings_total": 0, "rules_unavailable": 5})
+        for code2 in ("SV601", "SV602", "SV603", "SV604", "SV605", "SV606",
+                      "SV611", "SV612", "SV613"):
+            self.assertEqual(a["rule_outcomes"][code2]["status"],
+                             "measured_zero", code2)
+        for code2 in ("SV607", "SV608", "SV609", "SV610", "SV614"):
+            self.assertEqual(a["rule_outcomes"][code2]["status"],
+                             "unavailable", code2)
+        self.assertEqual(report["attempts"], [
+            {"source_id": "claude.session.jsonl", "kind": "LogFile",
+             "surface": "SessionLog", "available": False,
+             "error": "missing record type", "observed_span": None},
+            {"source_id": "claude.session.jsonl", "kind": "LogFile",
+             "surface": "SessionLog", "available": False,
+             "error": "unknown record type: bogus-type", "observed_span": None},
+        ])
+        self.assertEqual(report["signals"],
+                         ["ToolCalls", "ToolResults", "TurnBoundaries",
+                          "StepBoundaries", "Usage", "UsageAggregate",
+                          "SubagentSpawns", "FileMutations", "UserPrompts"])
 
     def test_claude_session_detail_defaults_to_latest(self):
         """缺省 --session = 最新（末行时间戳最晚）→ 与显式指定一致。"""
@@ -2069,8 +2152,22 @@ class CliMatrix(unittest.TestCase):
         rules = a["rule_outcomes"]
         for code in ("SV604", "SV605", "SV607", "SV608", "SV609", "SV612", "SV613"):
             self.assertEqual(rules[code]["status"], "unavailable", code)
-        self.assertIn("workbuddy host capability", rules["SV604"]["reason"])
-        self.assertIn("workbuddy host capability", rules["SV605"]["reason"])
+        # reason 逐字节钉死（曾只有 assertIn 子串，评审 P3-5）。与 core
+        # `host_capability.rs` 常量同串。
+        self.assertEqual(
+            rules["SV604"]["reason"],
+            "workbuddy host capability: only bash (audit-log commandPreview) "
+            "and web_fetch (WebFetch target) tool calls are joinable to "
+            "sessions; write/edit tool calls exist only in session-anonymous "
+            "traces (file-history has content without paths), so SV604/605 "
+            "cannot discriminate")
+        self.assertEqual(
+            rules["SV605"]["reason"],
+            "workbuddy host capability: only bash (audit-log commandPreview) "
+            "and web_fetch (WebFetch target) tool calls are joinable to "
+            "sessions; write/edit tool calls exist only in session-anonymous "
+            "traces (file-history has content without paths), so SV604/605 "
+            "cannot discriminate")
         self.assertEqual(rules["SV609"]["reason"],
                          "no evidence for required signal(s) in this session")
         for code in ("SV601", "SV602", "SV603", "SV606", "SV610", "SV611", "SV614"):
