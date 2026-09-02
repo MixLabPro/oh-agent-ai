@@ -6,13 +6,25 @@
 //!
 //! 守卫断言 `required_capabilities(surface) ⊆ registrations(surface)`——不
 //! 要求每个二进制实现全部能力，一个二进制不消费某项能力时不要求注册
-//! （R2 修订 3：避免把 CLI 与 Tauri 强制做成同构产品）。本轮只登记
-//! `cli.sessions` 一个 surface（`session_store` 维度，即
-//! `r2a_store.rs::SessionStore::<host>` 构造器是否存在）；`fold` 维度与
-//! `tauri.*` surfaces（tauri.sessions/tauri.menubar-cost）留后续——`fold`
-//! 在这个二进制里不是单一构造器，是每个子命令各自的折叠路径（dsh state
-//! 链 / codex 全量 rollout / claude ledger），登记它需要先决定登记的粒度
-//! 是"函数入口"还是"子命令"，属于设计问题、不是照抄这份文件的体力活。
+//! （R2 修订 3：避免把 CLI 与 Tauri 强制做成同构产品）。本轮登记
+//! `cli.sessions` 一个 surface 的两个维度：
+//!
+//! - `session_store`：`r2a_store.rs::SessionStore::<host>` 构造器是否存在。
+//! - `fold`：`sessions_navigation`（同文件）是否为该宿主折了当日 token——
+//!   dsh 读 `state.json`、codex 折全量 rollout、claude-code 读 ledger，三条
+//!   路径各不相同（**不是**统一的函数入口，§2.2 明文不建 trait），本表只
+//!   答"这个二进制里，这个宿主的折叠路径接了没有"，不试图把三条路径统一
+//!   成一个可遍历的循环——那会为了凑一个共享接口而发明一层假抽象，`fold`
+//!   字段的粒度就停在"接了/没接"，与 core `HOSTS` 行的 `fold:
+//!   Option<FoldOutput>` 语义对齐（`Some` ↔ true，`None` ↔ false）。
+//!
+//! `tauri.sessions`/`tauri.menubar-cost` 两个 surface 不在本表——Tauri 是
+//! 另一个二进制（`src-tauri`，独立 workspace），且它不直接持有
+//! `SessionStore`/折叠逻辑，而是 shell 出去调 `agent-vitals` 的子命令
+//! （`store.rs::run_json`）——它的"注册"问题是"这个 Tauri 构建调用了哪些
+//! CLI 子命令"，与本文件回答的"这个 CLI 二进制接了哪些宿主构造器"是不同
+//! 层面的问题，留给专门梳理 Tauri 调用面时再登记，不在这里搭一个名不副实
+//! 的占位表。
 //!
 //! **暂无 CLI 表面**（`#[allow(dead_code)]`，仅本文件的单测消费）：这张表是
 //! 二进制内部的声明，不进 `hosts --json`——那份 JSON 是 G1 跨语言
@@ -23,28 +35,34 @@
 #![allow(dead_code)]
 
 /// 一个宿主在**本二进制**里实际接线的运行时能力。只声明存在性，不声明
-/// 实现细节（构造器函数本身仍是各自模块的普通 pub 函数，这里不做函数
-/// 指针表——core 行已经说明"哪些宿主该有 session_store"，本表只答"这个
-/// 二进制是否真接了"）。
+/// 实现细节（构造器/折叠函数本身仍是各自模块的普通 pub 函数，这里不做函数
+/// 指针表——core 行已经说明"哪些宿主该有 session_store/fold"，本表只答
+/// "这个二进制是否真接了"）。
 pub struct HostRuntimeRegistration {
     pub host_id: &'static str,
     /// `r2a_store.rs::SessionStore::<host>` 构造器是否存在。
     pub session_store: bool,
+    /// `sessions_navigation` 是否为该宿主折了当日 token（对应 core
+    /// `HostProfile.fold: Option<FoldOutput>` 的存在性，不区分具体
+    /// `FoldOutput` 变体——这个二进制目前只产 `TokenBuckets`，`HostBillTotals`
+    /// 是 workbuddy M4 才会出现的形态）。
+    pub fold: bool,
 }
 
 /// `agent-vitals` CLI 二进制的注册集，顺序同 `host_capability::HOSTS`。
 pub static CLI_REGISTRATIONS: &[HostRuntimeRegistration] = &[
-    HostRuntimeRegistration { host_id: "dsh", session_store: true },
-    HostRuntimeRegistration { host_id: "codex", session_store: true },
-    HostRuntimeRegistration { host_id: "claude-code", session_store: true },
+    HostRuntimeRegistration { host_id: "dsh", session_store: true, fold: true },
+    HostRuntimeRegistration { host_id: "codex", session_store: true, fold: true },
+    HostRuntimeRegistration { host_id: "claude-code", session_store: true, fold: true },
     // WorkBuddy：`SessionStore::all`/`sessions_list` 对未知宿主返回
     // `StoreError`（envelope 未知宿主，v0.6 spec §4）——没有 `SessionStore::
-    // workbuddy` 构造器，如实登记 false，不是遗漏。
-    HostRuntimeRegistration { host_id: "workbuddy", session_store: false },
+    // workbuddy` 构造器；`sessions_navigation` 也没有它的折叠分支（M4 才会
+    // 补，那时这两个字段都要翻 true）。如实登记 false，不是遗漏。
+    HostRuntimeRegistration { host_id: "workbuddy", session_store: false, fold: false },
 ];
 
-/// `cli.sessions` surface 需要的能力——从 core `HOSTS` 行的 `session_store`
-/// 字段派生（哪些宿主"应该"有 store，是声明层的事）。
+/// `cli.sessions` surface 需要的 `session_store` 能力——从 core `HOSTS` 行的
+/// `session_store` 字段派生（哪些宿主"应该"有 store，是声明层的事）。
 pub fn required_for_cli_sessions() -> Vec<&'static str> {
     agent_vitals_core::host_capability::HOSTS
         .iter()
@@ -53,14 +71,30 @@ pub fn required_for_cli_sessions() -> Vec<&'static str> {
         .collect()
 }
 
-/// `cli.sessions` surface 实际注册了的宿主（这个二进制"真的接了"，是实现层
-/// 的事）。
+/// `cli.sessions` surface 实际注册了 `session_store` 的宿主（这个二进制
+/// "真的接了"，是实现层的事）。
 pub fn registered_for_cli_sessions() -> Vec<&'static str> {
     CLI_REGISTRATIONS
         .iter()
         .filter(|r| r.session_store)
         .map(|r| r.host_id)
         .collect()
+}
+
+/// `cli.sessions` surface 需要的 `fold` 能力——从 core `HOSTS` 行的
+/// `fold.is_some()` 派生。
+pub fn required_for_cli_sessions_fold() -> Vec<&'static str> {
+    agent_vitals_core::host_capability::HOSTS
+        .iter()
+        .filter(|h| h.fold.is_some())
+        .map(|h| h.id)
+        .collect()
+}
+
+/// `cli.sessions` surface 实际注册了 `fold`（`sessions_navigation` 里真的有
+/// 对应分支）的宿主。
+pub fn registered_for_cli_sessions_fold() -> Vec<&'static str> {
+    CLI_REGISTRATIONS.iter().filter(|r| r.fold).map(|r| r.host_id).collect()
 }
 
 #[cfg(test)]
@@ -74,8 +108,22 @@ mod tests {
         let registered: BTreeSet<&str> = registered_for_cli_sessions().into_iter().collect();
         assert!(
             required.is_subset(&registered),
-            "cli.sessions 需要 {required:?}，但只注册了 {registered:?}——\
-             有宿主声明了 session_store 却没有对应的 SessionStore 构造器"
+            "cli.sessions 的 session_store 维度需要 {required:?}，但只注册了 \
+             {registered:?}——有宿主声明了 session_store 却没有对应的 \
+             SessionStore 构造器"
+        );
+    }
+
+    #[test]
+    fn required_fold_capabilities_for_cli_sessions_is_a_subset_of_registrations() {
+        let required: BTreeSet<&str> = required_for_cli_sessions_fold().into_iter().collect();
+        let registered: BTreeSet<&str> = registered_for_cli_sessions_fold().into_iter().collect();
+        assert!(
+            required.is_subset(&registered),
+            "cli.sessions 的 fold 维度需要 {required:?}，但只注册了 \
+             {registered:?}——`sessions_navigation` 少了某个已声明 fold 的宿主的\
+             折叠分支（或者反过来，行忘了声明；M4 给 workbuddy 补 fold 后，\
+             这条测试会先转红，提醒同步改这张表）"
         );
     }
 
@@ -87,8 +135,9 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_has_no_session_store_registration() {
+    fn workbuddy_has_neither_session_store_nor_fold_registration() {
         let wb = CLI_REGISTRATIONS.iter().find(|r| r.host_id == "workbuddy").unwrap();
         assert!(!wb.session_store, "WorkBuddy 无 SessionStore（envelope 未知宿主 → StoreError）");
+        assert!(!wb.fold, "WorkBuddy 无日/月折叠（sessions_navigation 没有它的分支）");
     }
 }

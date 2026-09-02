@@ -203,16 +203,19 @@ fn short_model(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
 }
 
-/// 宿主显示名映射（spec §4）：数据侧只认 `dsh`/`codex`，展示名是托盘侧的事——
-/// 与 `short_model` 同类性质，不落盘、不入快照。未知宿主原样显示（未来加宿主
-/// 不硬编码，也不至于长得像个错别字）。
+/// 宿主显示名映射（v0.6 host-contract spec §6/§11-M3，G7）：从 core
+/// `host_capability::HOSTS` 行的 `display` 字段读——真相源是 M0 建的注册表，
+/// 这里不再是 Tauri 本地字面量表。展示名与数据侧的 `dsh`/`codex` 之类的键值
+/// 是两回事——与 `short_model` 同类性质，不落盘、不入快照。未知宿主（含未来
+/// 新加但本二进制还没升级到的宿主）原样透传，fail-open，不至于长得像个
+/// 错别字（`host_capability::host_profile` 的查询路径本就 fail-open——注册路径
+/// 才 fail-closed，见 v0.6 spec §5.3 条款 2）。WorkBuddy 现在也能正确解析出
+/// "WorkBuddy"（此前的本地字面量表没收它，因为它没有托盘行——展示名与"有没有
+/// 折叠能力"是两件事，工作台的会话浏览面一直支持 workbuddy）。
 fn host_display_name(kind: &str) -> String {
-    match kind {
-        "dsh" => "DeepSeek Harness".to_string(),
-        "codex" => "Codex".to_string(),
-        "claude-code" => "Claude Code".to_string(),
-        _ => kind.to_string(),
-    }
+    agent_vitals_core::host_capability::host_profile(kind)
+        .map(|h| h.display.to_string())
+        .unwrap_or_else(|| kind.to_string())
 }
 
 /// 读 claude 估报告（core `claude_day_cost` / 当月聚合 `currency_totals`）的单侧
@@ -1492,6 +1495,14 @@ mod tests {
         assert_eq!(host_display_name("codex"), "Codex");
         assert_eq!(host_display_name("claude-code"), "Claude Code");
         assert_eq!(host_display_name("future-host"), "future-host");
+    }
+
+    /// v0.6 host-contract spec §6/§11-M3：改从 `HOSTS` 行派生后，WorkBuddy
+    /// 也能正确解析——它没有托盘行（`fold: None`），但工作台的会话浏览面
+    /// 一直支持它，展示名不该因为没有折叠能力就缺席。
+    #[test]
+    fn host_display_name_resolves_workbuddy_even_though_it_has_no_tray_row() {
+        assert_eq!(host_display_name("workbuddy"), "WorkBuddy");
     }
 
     /// 合并按量总账金额主段（v1.3，spec §3.1/§4）真值表。核心语义：
