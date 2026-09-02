@@ -184,12 +184,14 @@ fn fmt_tokens(n: i64) -> String {
 /// 补 token 不重复。数据源与菜单同一份 `read_overview`，不加第四份拷贝；无今日数据
 /// 时诚实显示「—」，不臆造 0。
 fn today_title(ov: &Overview) -> String {
-    match &ov.today {
-        Some(t) => format!(
-            "今日 {} · {}",
-            fmt_tokens(t["tokens"].as_i64().unwrap_or(0)),
-            fmt_money(t["total"].as_f64().unwrap_or(0.0)),
-        ),
+    let money = metered_amount(
+        ov.today.as_ref().and_then(|t| t["total"].as_f64()),
+        claude_currency(&ov.claude_today, "CNY"),
+        claude_currency(&ov.claude_today, "USD"),
+    );
+    match money {
+        Some(m) => format!("今日 {} · {}", fmt_tokens(today_merged_tokens(ov)), m),
+        // 两宿主今天都没有可报的按量钱 → 诚实「—」，不臆造 0。
         None => "今日 —".to_string(),
     }
 }
@@ -213,29 +215,52 @@ fn host_display_name(kind: &str) -> String {
     }
 }
 
-/// Claude Code 估列（账卡分列，D2）→ ` · Claude 估 ≈¥A / ≈$B`。读 overview
-/// 嵌的 `claude_today`/`claude_month`（core `claude_day_cost` 折 ledger 的整报
-/// 告）的 `currency_totals.{CNY,USD}`。两币都 ≤0（无账 / None / 全 unknown
-/// 模型没价可折）→ 空串：**没账可报不是估了 0**，「Claude 估 ≈¥0/≈$0」是编造
-/// 形态（D6）。前缀 `≈` = 官方卡折算、非账单（D1）；¥/$ 分标不混加。估是
-/// DSH 钱行的**追加列**，预算/告警语义不动（DSH-only）。
-fn claude_est_suffix(claude: &Option<Value>) -> String {
-    let Some(r) = claude else { return String::new() };
-    let totals = r.get("currency_totals").unwrap_or(&Value::Null);
-    let mut parts: Vec<String> = Vec::new();
-    // 只有非零币种入段：CNY 0 不是「估 ¥0」，是当天没有 CNY 价的用量——把 0 当
-    // 成一个估塞进菜单是编造形态（与「缺列不编列」同一条纪律）。纯 anthropic
-    // 卡机器只出 `≈$B`，混合机器才出 `≈¥A / ≈$B`。
-    if let Some(cny) = totals.get("CNY").and_then(Value::as_f64).filter(|v| *v > 0.0) {
-        parts.push(format!("≈{}", fmt_money(cny)));
+/// 读 claude 估报告（core `claude_day_cost` / 当月聚合 `currency_totals`）的单侧
+/// 币种金额。报告缺场 / 该币键缺场 / 值非数 → 0.0。**0 是「这一侧没有钱」的哨兵，
+/// 不是测量到的 0**——CNY 0 意为「当日没有 CNY 价流」（纯 anthropic 卡日）。
+fn claude_currency(claude: &Option<Value>, key: &str) -> f64 {
+    claude
+        .as_ref()
+        .and_then(|r| r.get("currency_totals"))
+        .and_then(|c| c.get(key))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
+/// 合并按量总账的一行金额主段（v1.3，MENUBAR spec §3.1/§4）：`Σ 按量流`，CNY 主币。
+///
+/// 输入：`dsh_cny` = DSH 的**实测** ¥（今日账在 → Some，含 0 = 测到 0 元；今日缺场
+/// → None，不是 0）；`claude_cny`/`claude_usd` = Claude Code 的 catalog 折算估
+/// （来自 `claude_currency`）。
+///
+/// 合并口径：**CNY 主账 = dsh(实) + claude(估) 相加**，任何 claude CNY 估分量并入
+/// → 整段前缀 `≈`。为什么弃用 v1.2 的「¥ 实 + ` · Claude 估 ≈¥A`」追加列：顶层行
+/// 被用户当作「今天按量花了多少钱」读，真机那天 DSH 空转、钱全在 Claude Code 的
+/// deepseek 流上，追加列呈出 `¥0 · Claude 估 ≈¥37.17`——读数像「真没花钱」。合并
+/// 后估占主导就写 `≈¥37.17`，`≈` 即诚实标注；纯 DSH 段（claude 无 CNY 价流）保持
+/// 实测精度、不带 ≈，一笔实测 ¥ 不被标成估。
+///
+/// anthropic USD 流按 spec §3.1 视作套餐、**不进 ¥ 主账**（混币不能相加）；只有整
+/// 行完全没有 ¥ 侧（DSH 也没折到账、claude 无 CNY 价流）时才单独浮出 `≈$B`——
+/// measured 的东西不消失（v1.2 后缀那条纪律的继承：纯 anthropic 日至少还有一行
+/// 可读的钱）。两币皆无 → None：调用方渲染 —，不摆 `¥0`（缺列报缺）。
+fn metered_amount(dsh_cny: Option<f64>, claude_cny: f64, claude_usd: f64) -> Option<String> {
+    match (dsh_cny, claude_cny > 0.0) {
+        (Some(d), true) => Some(format!("≈{}", fmt_money(d + claude_cny))),
+        (Some(d), false) => Some(fmt_money(d)),
+        (None, true) => Some(format!("≈{}", fmt_money(claude_cny))),
+        (None, false) if claude_usd > 0.0 => Some(format!("≈{}", fmt_usd(claude_usd))),
+        _ => None,
     }
-    if let Some(usd) = totals.get("USD").and_then(Value::as_f64).filter(|v| *v > 0.0) {
-        parts.push(format!("≈{}", fmt_usd(usd)));
-    }
-    if parts.is_empty() {
-        return String::new();
-    }
-    format!(" · Claude 估 {}", parts.join(" / "))
+}
+
+/// 今日合并 token（v1.3）：DSH 当日实测 + Claude Code 当日 ledger（core
+/// `claude_day_total_tokens`，Overview 已嵌）。一侧缺场 → 另一侧照常；两侧都缺
+/// → 0（调用方反正渲染 —，0 不会被看见）。token 是消耗量的直观信号、与计价无
+/// 关——全 unknown 的 claude 日 token 依旧计入（价目卡不认 ≠ 没消耗）。
+fn today_merged_tokens(ov: &Overview) -> i64 {
+    let dsh = ov.today.as_ref().and_then(|t| t["tokens"].as_i64()).unwrap_or(0);
+    dsh + ov.claude_today_tokens.unwrap_or(0)
 }
 
 /// L1 宿主行文案（spec §4/§8）：`<显示名> · <tokens|—> · <N 会话|—>`。两个
@@ -514,32 +539,69 @@ fn build_menu(app: &AppHandle, ov: &Overview) -> tauri::Result<Menu<tauri::Wry>>
     build_menu_at(app, ov, now)
 }
 
+/// 账卡两行（今日/本月按量成本）的文案。纯函数拆出来给 build_menu 拼行、给单测钉
+/// 每一格——用户最先看到的菜单文案不能只靠人工核对。
+///
+/// v1.3 起钱段 = **合并按量总账**（`metered_amount`：DSH 实测 + Claude catalog 估
+/// 的 CNY 相加，估分量并入就标 ≈），不是 v1.2 的 DSH-only + 追加「Claude 估」列。
+/// 为什么弃追加列：真机那天 DSH 空转、钱全在 Claude Code 的 deepseek 流上，v1.2
+/// 呈现成「¥0 · Claude 估 ≈¥37.17」，顶层行读起来像真没花钱——用户以为「按量成本
+/// 无数据」是坏的。合并后估占主导就写 `≈¥37.17`，`≈` 即诚实标注。
+///
+/// 今日行 = 钱 + token 量（两者不是一回事——缓存命中率变化时钱不动 token 动，只
+/// 报钱会让"今天明明干了很多活却几乎没花钱"看起来像没数据；标题 `today_title` 里
+/// 本来就是并排显示，菜单第一行跟它对齐）。token 同源合并 `today_merged_tokens`。
+/// 本月行只显示金额（同款合并）。
+///
+/// 前缀「按量」与日预算/月成本同口径（spec §4）：这些是**按量计费**的钱，不是预算
+/// 卡里那笔评估额。预算行是 DSH-only 的（bottom budget_item + 日预算行），不在这
+/// 两行里——spec §4 按量/套餐按 supplier 分，DSH 预算不管 Claude Code 的流。
+fn money_rows_text(ov: &Overview) -> (String, String) {
+    let today_money = metered_amount(
+        ov.today.as_ref().and_then(|t| t["total"].as_f64()),
+        claude_currency(&ov.claude_today, "CNY"),
+        claude_currency(&ov.claude_today, "USD"),
+    );
+    let today_text = match today_money {
+        Some(m) => format!(
+            "今日按量成本：{} · {} tokens",
+            m,
+            fmt_tokens(today_merged_tokens(ov)),
+        ),
+        // 两宿主今天都没有可报的按量钱（DSH 没折到账 + claude 无 CNY/USD 价流）
+        // → 诚实的 —（缺列报缺）。
+        None => "今日按量成本：—（无数据）".to_string(),
+    };
+    // 本月行：同款合并，但 **只显示金额、去掉 `/ ¥600` 分母**（v1.3）。分母是 DSH
+    // 预算——合并后 ¥ 主账已跨宿主，拿 DSH 预算给整个合并总账当分母是把「本月花
+    // 了多少」和「DSH 预算还剩多少」绑成一行；DSH 预算状态常驻在底部预算行
+    // （budget_item）照常显示，这里不需要第二遍。
+    //
+    // DSH 侧本月是否「有折到账」：当月过滤后**有日**才算（镜像今日 None 语义——
+    // 当月空 / 全是上月残留 = 本月没折到账，不是花了 0）。有日但金额 ¥0（只折到
+    // 免费 token 的日子）→ Some(0)，「测到 0」不是「没测」。
+    let month_total = ov.month["total"].as_f64().unwrap_or(0.0);
+    // `ov.days` = read_overview_at 当月过滤后的逐日行（同款 cur_month 过滤）——
+    // 非空 ⇔ DSH 本月确实折到过账。month_cost 聚合本身不带日数，不能从
+    // `ov.month` 里看。
+    let month_has_days = !ov.days.is_empty();
+    let month_money = metered_amount(
+        if month_has_days { Some(month_total) } else { None },
+        claude_currency(&ov.claude_month, "CNY"),
+        claude_currency(&ov.claude_month, "USD"),
+    );
+    // month_money 只在两宿主当月都没有任何按量钱时是 None → ¥0（当月还没花，
+    // 「月初 ¥0」是现状不是编造；预算行挂了过期标记兜底）。
+    let month_text = format!(
+        "本月按量成本：{}",
+        month_money.unwrap_or_else(|| fmt_money(month_total)),
+    );
+    (today_text, month_text)
+}
+
 /// 参数化版——now 由调用方注入，单测钉住每一行文案不用碰系统时钟。
 fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result<Menu<tauri::Wry>> {
-    // 今日一行：钱 + token 量。两者不是一回事——缓存命中率变化时钱不动 token 动，
-    // 只报钱会让"今天明明干了很多活却几乎没花钱"这种情况看起来像没数据。托盘
-    // 标题里本来就是这么并排显示的（`today_title`），菜单第一行跟它对齐。前缀
-    // 「按量」与日预算/月成本同口径（spec §4）：这些是**按量计费**的钱，不是预算
-    // 卡里那笔评估额。
-    let today_text = match &ov.today {
-        Some(t) => format!(
-            "今日按量成本：{} · {} tokens{}",
-            fmt_money(t["total"].as_f64().unwrap_or(0.0)),
-            fmt_tokens(t["tokens"].as_i64().unwrap_or(0)),
-            claude_est_suffix(&ov.claude_today),
-        ),
-        // DSH 今天没数据、Claude 有账 → 后半段照常挂（D2 分宿主分列：DSH 段缺
-        // 列报缺，不拦着 Claude 估显示）。
-        None => format!("今日按量成本：—（无数据）{}", claude_est_suffix(&ov.claude_today)),
-    };
-    let month_total = ov.month["total"].as_f64().unwrap_or(0.0);
-    let budget = ov.budget.monthly_cny.unwrap_or(ov.budget_monthly_cny);
-    let month_text = format!(
-        "本月按量成本：{} / {}{}",
-        fmt_money(month_total),
-        fmt_money(budget),
-        claude_est_suffix(&ov.claude_month),
-    );
+    let (today_text, month_text) = money_rows_text(ov);
     let budget_text = budget_status_text_at(ov, now_secs);
     // 信息行一律 enabled=true：macOS 对 disabled 菜单项强制灰色渲染，作为常驻
     // 信息几乎不可读；enabled 后文字是系统默认黑。代价是悬停高亮 + 点击会触发
@@ -1305,15 +1367,34 @@ mod tests {
             estimate_note: String::new(),
             claude_today: None,
             claude_month: None,
+            claude_today_tokens: None,
         }
     }
 
     #[test]
     fn today_title_renders_tokens_cost_or_honest_dash() {
         let mut ov = ov_with(overview::BudgetAlert::default());
-        assert_eq!(today_title(&ov), "今日 —", "无今日数据不得臆造 0");
+        assert_eq!(today_title(&ov), "今日 —", "两宿主都无今日账不得臆造 0");
         ov.today = Some(serde_json::json!({"total": 12.34, "peak_total": 0.0, "tokens": 1398214}));
         assert_eq!(today_title(&ov), "今日 1.4M · ¥12.34");
+        // 真机那天（2026-09-02）：DSH 空转 + Claude deepseek 全在账 → 标题必须给
+        // 有数的合并行，绝不能还是「今日 —」（用户报的正是这个——DSH 无数据 ≠
+        // 全局无数据）。
+        let mut cl = ov_with(overview::BudgetAlert::default());
+        cl.claude_today = Some(serde_json::json!({"currency_totals": {"CNY": 37.17, "USD": 0.0}}));
+        cl.claude_today_tokens = Some(188_213_789);
+        assert_eq!(today_title(&cl), "今日 188.2M · ≈¥37.17");
+        // 混合：DSH 实测 + Claude 估并存 → token 合并、¥ 相加带 ≈。
+        let mut mix = ov_with(overview::BudgetAlert::default());
+        mix.today = Some(serde_json::json!({"total": 12.34, "tokens": 1_398_214}));
+        mix.claude_today = Some(serde_json::json!({"currency_totals": {"CNY": 6.0, "USD": 0.0}}));
+        mix.claude_today_tokens = Some(100_000);
+        assert_eq!(today_title(&mix), "今日 1.5M · ≈¥18.34");
+        // 纯 anthropic USD 日、DSH 缺场 → USD 浮出（measured 不消失）。
+        let mut usd = ov_with(overview::BudgetAlert::default());
+        usd.claude_today = Some(serde_json::json!({"currency_totals": {"CNY": 0.0, "USD": 3.0}}));
+        usd.claude_today_tokens = Some(500_000);
+        assert_eq!(today_title(&usd), "今日 500K · ≈$3");
     }
 
     #[test]
@@ -1413,42 +1494,80 @@ mod tests {
         assert_eq!(host_display_name("future-host"), "future-host");
     }
 
-    /// Claude 估后缀（账卡分列，D2）真值表：None / 两币全零 → 空串（没账可报不
-    /// 是估 0）；只有 CNY / 只有 USD / 双币 → ` · Claude 估 ≈¥A / ≈$B`，¥/$
-    /// 分标不混加。数字走 fmt_money/fmt_usd 同款修剪。
+    /// 合并按量总账金额主段（v1.3，spec §3.1/§4）真值表。核心语义：
+    /// · CNY = DSH 实测 + Claude catalog 估 相加，任何估分量并入 → 整段 `≈`；
+    /// · 纯 DSH 段（claude 无 CNY 价流）实测精度、不带 ≈——同一笔实测 ¥ 不标成估；
+    /// · anthropic USD 不进 ¥ 主账（套餐，§3.1），只在整行没有 ¥ 侧时单独浮出 ≈$；
+    /// · 两币皆无 → None（调用方渲染 —，不摆 ¥0）。
     #[test]
-    fn claude_est_suffix_truth_table() {
-        assert_eq!(claude_est_suffix(&None), "");
-        assert_eq!(
-            claude_est_suffix(&Some(serde_json::json!(
-                {"currency_totals": {"CNY": 0.0, "USD": 0.0}}))),
-            ""
-        );
-        // 全 unknown 模型日：账在但没价可折 → 两币 0 → 空串（有账≠有价）
-        assert_eq!(
-            claude_est_suffix(&Some(serde_json::json!(
-                {"currency_totals": {"CNY": 0.0, "USD": 0.0}, "unpriced_tokens": 100}))),
-            ""
-        );
-        // 双币都有：CNY 大额/小额修剪各走 fmt_money 档位，USD 同款。
-        assert_eq!(
-            claude_est_suffix(&Some(serde_json::json!(
-                {"currency_totals": {"CNY": 200.0, "USD": 28.0}}))),
-            " · Claude 估 ≈¥200 / ≈$28"
-        );
-        assert_eq!(
-            claude_est_suffix(&Some(serde_json::json!(
-                {"currency_totals": {"CNY": 6.0, "USD": 0.52}}))),
-            " · Claude 估 ≈¥6 / ≈$0.52"
-        );
-        // 只有 USD（纯 anthropic 卡）：CNY 0 不影响 USD 段显示。
-        assert_eq!(
-            claude_est_suffix(&Some(serde_json::json!(
-                {"currency_totals": {"CNY": 0.0, "USD": 3.0}}))),
-            " · Claude 估 ≈$3"
-        );
-        // 报告形状里 currency_totals 缺场（坏数据）→ 两币 0 → 空串，不 panic。
-        assert_eq!(claude_est_suffix(&Some(serde_json::json!({"days": 3}))), "");
+    fn metered_amount_truth_table() {
+        // 纯 DSH 实测：claude 无 CNY 价流 → 不带 ≈（实测不标成估）；含测到 0。
+        assert_eq!(metered_amount(Some(12.34), 0.0, 0.0), Some("¥12.34".to_string()));
+        assert_eq!(metered_amount(Some(0.0), 0.0, 0.0), Some("¥0".to_string()));
+        // DSH 缺场 + claude CNY 估 → 估占主导，≈¥X（v1.2 是 ¥0 + 追加列——用户
+        // 读成「真没花钱」的元凶，见 money_rows_text doc）。
+        assert_eq!(metered_amount(None, 37.17, 0.0), Some("≈¥37.17".to_string()));
+        // 混合：DSH 实测 ¥12.34 + claude 估 ¥6 → 相加 + ≈（含估分量）。
+        assert_eq!(metered_amount(Some(12.34), 6.0, 0.0), Some("≈¥18.34".to_string()));
+        assert_eq!(metered_amount(Some(0.0), 6.0, 0.0), Some("≈¥6".to_string()));
+        // 纯 anthropic USD 日、DSH 缺场 → ≈$（measured 不消失）；CNY 侧一旦有
+        // 内容（哪怕是 DSH 测到的 ¥0），USD 套餐流就不进主段。
+        assert_eq!(metered_amount(None, 0.0, 3.0), Some("≈$3".to_string()));
+        assert_eq!(metered_amount(Some(0.0), 0.0, 3.0), Some("¥0".to_string()));
+        assert_eq!(metered_amount(Some(12.34), 0.0, 3.0), Some("¥12.34".to_string()));
+        // 两币皆无（DSH 缺场 + claude 无价流 / 无账）→ None，不摆 ¥0。
+        assert_eq!(metered_amount(None, 0.0, 0.0), None);
+        // 数字走 fmt_money/fmt_usd 同款修剪（大额/小额）。
+        assert_eq!(metered_amount(None, 200.0, 0.0), Some("≈¥200".to_string()));
+        assert_eq!(metered_amount(None, 0.0, 0.52), Some("≈$0.52".to_string()));
+    }
+
+    /// claude_currency 读报告的 currency_totals 单侧金额：缺场/该币键缺场/值非数
+    /// → 0.0。坏数据不 panic。
+    #[test]
+    fn claude_currency_reads_one_side_of_the_report() {
+        let none: Option<Value> = None;
+        assert_eq!(claude_currency(&none, "CNY"), 0.0);
+        assert_eq!(claude_currency(&none, "USD"), 0.0);
+        let r = Some(serde_json::json!({"currency_totals": {"CNY": 6.0}}));
+        assert_eq!(claude_currency(&r, "CNY"), 6.0);
+        assert_eq!(claude_currency(&r, "USD"), 0.0);
+        // currency_totals 缺场（坏数据）→ 0，不 panic。
+        assert_eq!(claude_currency(&Some(serde_json::json!({"days": 3})), "CNY"), 0.0);
+    }
+
+    /// 账卡两行（money_rows_text）：真机那天（2026-09-02）的三种形态逐格钉住——
+    /// 这是用户直接看的文案，字符串本身必须有测试，不能只靠人工核对。
+    #[test]
+    fn money_rows_merge_dsh_and_claude_never_say_no_data_when_metered() {
+        // ① 真机形态：DSH 空转（今日 None）+ Claude deepseek 全在账 → 合并 ≈¥，token
+        // 全量并排。这正是用户报「按量成本无数据」的那天——修复后必须是有数的。
+        let mut ov = ov_with(overview::BudgetAlert::default());
+        ov.claude_today = Some(serde_json::json!({"currency_totals": {"CNY": 37.17, "USD": 0.0}}));
+        ov.claude_today_tokens = Some(188_213_789);
+        ov.claude_month = Some(serde_json::json!({"currency_totals": {"CNY": 106.1, "USD": 0.0}}));
+        let (today, month) = money_rows_text(&ov);
+        assert_eq!(today, "今日按量成本：≈¥37.17 · 188.2M tokens");
+        assert_eq!(month, "本月按量成本：≈¥106.1", "DSH 本月无日键 → 纯 claude 估主导");
+        // ② 纯 DSH 日（claude 无 CNY 价流）：实测精度，无 ≈；月行带实测 ¥。
+        ov = ov_with(overview::BudgetAlert::default());
+        ov.today = Some(serde_json::json!({"total": 12.34, "tokens": 1_398_214}));
+        ov.month = serde_json::json!({"total": 612.5});
+        ov.days = vec![overview::DayRow {
+            date: "2026-09-01".into(),
+            total: 612.5,
+            peak_total: 0.0,
+            basis: None,
+            coverage: None,
+        }];
+        let (today, month) = money_rows_text(&ov);
+        assert_eq!(today, "今日按量成本：¥12.34 · 1.4M tokens");
+        assert_eq!(month, "本月按量成本：¥612.5", "分母已移除——预算只活在底部预算行");
+        // ③ 两宿主今天都无按量钱 → 今日诚实的 —；本月空 → ¥0 兜底。
+        let ov = ov_with(overview::BudgetAlert::default());
+        let (today, month) = money_rows_text(&ov);
+        assert_eq!(today, "今日按量成本：—（无数据）");
+        assert_eq!(month, "本月按量成本：¥0");
     }
 
     /// fmt_usd 与 fmt_money 同修剪 spec：整美元不拖 `.0`，小数保留非零尾。

@@ -1,32 +1,40 @@
 # 菜单栏多宿主导航（宿主 → 最近会话）—— 设计 spec
 
-状态：**v1.2（2026-09-02）**。v1.1 的 Phase 1/2（投影命令 `sessions navigation`、L1 宿主行、
-L2 最近 N 深链、`WorkbenchTarget` 双通路、前端 host 过滤）已随 2026-09-01/02 系列提交落地
-（菜单宿主区、账卡分列、hosts.json 快照，Rust/Python 差分逐字节，golden 15/15）。本版按
-「Claude Code 成本数据面」（docs/CLAUDE_CODE_INTEGRATION.md §9.3）用户决策 D1–D5 追加三处
-增量，均已实现：
+状态：**v1.3（2026-09-02）**。v1.1 的 Phase 1/2（投影命令 `sessions navigation`、L1 宿主行、
+L2 最近 N 深链、`WorkbenchTarget` 双通路、前端 host 过滤）已随 2026-09-01/02 系列提交落地；
+v1.2 加 Claude Code 成本数据面（第三宿主行 claude-code + 顶层账卡分列 + claude-sync 尾折，
+Rust/Python 差分逐字节，golden 15/15）。本版把 v1.2 的「追加 `Claude 估` 后缀列」改成
+**顶层钱行 = Σ 按量流合并总账**——用户真机那天（DSH 空转、钱全在 Claude Code 里跑的
+deepseek 流上）分列呈现成 `¥0 · Claude 估 ≈¥37.17`，顶层「按量成本」行读起来像真没花钱，
+用户据此报 bug。本版修订（均已实现）：
 
 1. **第三宿主行 `claude-code`**（原固定两行 dsh→codex 变三行，键序稳定）。claude 宿主行的
    `today_tokens` basis=**ledger**（`claude_ledger_day_tokens` 读 claude-ledger 当日 flat
    日 4 型 token 总量，SNAKE_KEYS 唯一真源），`today_sessions`/`recent` 复用 r2a
    `SessionStore::claude_code`；ledger 当日缺席 → null 三元组（status partial，诚实形态）。
-2. **顶层账卡分列**（今日/本月行）：DSH ¥ 实照旧（`今日按量成本：¥A · N tokens`），行尾按
-   Overview `claude_today/claude_month` 的 `currency_totals.{CNY,USD}` 挂 ` · Claude 估
-   ≈¥B/≈$C` 后缀（`claude_est_suffix`）。两币分开不混加；**预算/alert 只对 DSH**（D2）。
-   这**部分走回** v1.1 §3.1 决策 1 的「钱行绝不每宿主一行钱」——分列是用户拍板的呈现决策，
-   且 Claude 列是独立 estimate 投影、从不并入预算的 ¥ 总量，metered/subscription 不混的精
-   神仍在（见下 v1.2 修订说明）。
+2. **顶层钱行 = 合并按量总账**（`metered_amount`，替代 v1.2 的追加列）：`今日/本月按量成本`
+   是 **Σ 按量流**——CNY 主账 = **DSH 实测 + Claude catalog CNY 估 相加**；任何 Claude 估
+   分量并入 → 整段前缀 `≈`（`今日按量成本：≈¥37.17 · 188.2M tokens`），纯 DSH 段保持实测
+   精度、不带 ≈（一笔实测 ¥ 不标成估）。anthropic USD 流按 §3.1 套餐排除、**不进 ¥ 主账**
+   （混币不能相加），只在整行完全没有 ¥ 侧（DSH 也没折到账 + Claude 无 CNY 价流）时单独
+   浮出 `≈$B`（measured 不消失）。今日行 token 同源合并（`today_merged_tokens` = DSH 当日
+   + Claude 当日 ledger 4 型，token 与价目卡无关）；本月行只显金额、**去掉 `/ ¥600` 分母**
+   （分母是 DSH 预算——合并后 ¥ 主账已跨宿主，拿 DSH 预算当整个总账的分母是把两件事绑成
+   一行；DSH 预算状态常驻在底部预算行 budget_item）。**预算/alert 仍 DSH-only**（D2）。
 3. **tick 顺序**变为 DSH discover/oneline → `claude-sync`（claude 账尾折）→ 宿主区刷新 →
    emit；claude-sync 幂等（size/mtime 指纹），失败 → SyncStatus `fail("claude-sync", …)`
    留痕不 abort tick（宿主行照刷）。`上次同步` 行后缀（DSH 折叠 + Claude 账）。
 
-**v1.2 修订说明（为何 §3.1 的「不每宿主一行钱」被部分走回）**：claude-sync 落地后，
-Claude Code 会话的 token 有了可计量的账（cost-state 基线 + 行尾增量，CLAUDE_CODE_INTEGRATION
-§9.3）。用户 D2 要求托盘把这部分钱显示出来，但口径是 **catalog 官方卡折算的估算**（非账单、
-20–70× 量级差）——因此呈现成**独立后缀列**而非并入 ¥ 总量：与 DSH 主账单精度隔离（「估」
-标签 + 币种分列 + `≈`），budget/alert 语义（DSH state 折叠）原样不动。§3.1 的「钱行 = 按量
-流总量、绝不每宿主一行钱」对 **DSH 主账单**仍成立；§9.3/§11 新列的「Claude 估」是预算之外的
-第二投影，遵循 CLAUDE.md 的诚实性纪律（缺列报缺、标估不混实）。
+**v1.3 修订说明（为何 v1.2 的「独立后缀列」被合并总量取代）**：v1.2 把 Claude catalog 折算
+挂成 DSH ¥ 之后的 ` · Claude 估 ≈¥B/≈$C` 后缀列，理由是「估算不进主账单、与实付精度隔离」
+——但用户读顶层行是按 §3.1 决策 1 的口径读的（**钱行 = Σ 按量流总量**）：那笔在 Claude Code
+里跑的 deepseek 是**真按量**（用户没有套餐），只是价卡是 catalog 折算的估算而非实付账单。
+v1.2 把它放后缀，顶层呈现 `¥0 · Claude 估 ≈¥37.17`，读数像「真没花钱」。v1.3 走回 §3.1
+决策 1 的「按量流并入同一总量」：deepseek 就是按量供应商，从哪个 harness 跑都一样，钱行就该
+是 Σ。估算并入后**整段标 `≈`** 保住 D6 诚实性（不假装实付）；USD/CNY 仍分币种不混加，anthropic
+套餐流仍不进 ¥ 主账。这与 DSH 侧 `费用（估算）≈ ¥…` 的先例同构——DSH 对无 by_model 的日
+子也标 ≈ 兜底，不是只有 Claude 需要「估算」标签。§3.1 的「绝不每宿主一行钱」本版恢复为主账
+规则（顶层钱行永远一个总数，不拆三宿主钱）；v1.2 的「per-host 成本行」仍然不做（§10 Phase 3）。
 
 （v1.1 原修订记录保留如下。）
 
@@ -51,7 +59,7 @@ v1.0 于 2026-09-01 经设计评审，5 个阻断问题（2×P0 + 3×P1）在本
 - **设计**：L1 每宿主一行 = 今日 token + 今日会话数（**token 轴**，规避 DSH-CNY vs Codex-USD 币种分叉）；L2 = 该宿主最近 N 个会话的**跳转清单**（身份字段、无成本列），点击深链到工作台会话详情。L2 是「跳转」不是「浏览器」——浏览/分页/过滤是工作台会话 tab 的职责。
 - **数据源**：宿主区统一走新投影命令 `agent-vitals sessions navigation --day <北京今天> --recent 5 --json`（§5），一次 spawn 返回三个宿主的 `HostNavigationSnapshot`；DSH 今日 token 读 today.json（与顶层钱行**同源**），Codex 今日 token 从事件时间按北京日界折叠，Claude Code 今日 token 读 claude-ledger（basis=ledger，§5.2）。
 - **诚实降级**：每个宿主 status = ready / partial / unavailable；store 冷 build 失败/超时 → 宿主行「—」+ 子菜单「会话数据暂不可用」，主入口（今日/预算/同步）照常；绝不臆造 0。
-- **明确不做**：live「正在运行」指示、per-host 今日成本（需币种决策，v2；**v1.2 例外**：Claude Code 账以 catalog 估算列挂账卡，见顶部 v1.2 修订）、reset 倒计时。
+- **明确不做**：live「正在运行」指示、per-host 今日成本（需币种决策，v2；**v1.3 例外**：Claude Code 的 deepseek 按量流按 catalog 折算并进顶层**合并**总账——那不是 per-host 行，是同一条 ¥ 主账里的估分量，见顶部 v1.3 修订）、reset 倒计时。
 
 ## 1. 背景：CodexBar 对照
 
@@ -150,7 +158,7 @@ CodexBar 有而我们**不该**抄的：reset 倒计时（provider 额度窗口�
 - **用量轴（L1 宿主行）= 每宿主（harness）token + 会话数**：DeepSeek Harness / Codex / Claude Code / 未来，不带钱（币种分叉，§2.2）。宿主行是**导航轴**（哪个壳、几个会话），与成本轴（哪个供应商、多少钱）**正交**——一个宿主行的 token 可能喂给按量流（Claude Code→DeepSeek），另一个喂给套餐（Codex→GPT）。
 - **未来按量流并入总成本**：新按量供应商（如 Claude API、OpenAI API 超量）要么扩展 state 折叠为多供应商账本、要么单独折叠后并入**同一总量**——钱行永远是总量，**绝不变成「每宿主一行钱」**。新供应商若为美元，并入 ¥ 总量前需先定币种决策（Phase 3，§10）。
 
-**数据面覆盖的诚实性（v1.2 已闭环，原「开放项」）**：钱行只报「当前数据面折叠得到的按量流之和」。v1.1 时代只折叠了 DSH 会话，Claude Code harness 跑的 DeepSeek 按量流不在账上——钱行是下界。2026-09-02 claude-sync 落地后 Claude Code 会话日志已可折叠（cost-state 基线 + 行尾增量，CLAUDE_CODE_INTEGRATION §9.3），但口径是 **catalog 官方卡折算的估算**而非 DSH 的实付流——所以它**不进**主账单 ¥ 总量，而是挂成账卡尾部的独立 `Claude 估 ≈¥/≈$` 列（分币种 + `≈` + 估标签），spec/同步行写明覆盖范围，不假装全量，也不把估算冒充实付。
+**数据面覆盖的诚实性（v1.3 已闭环，原「开放项」）**：钱行只报「当前数据面折叠得到的按量流之和」。v1.1 时代只折叠了 DSH 会话，Claude Code harness 跑的 DeepSeek 按量流不在账上——钱行是下界。2026-09-02 claude-sync 落地后 Claude Code 会话日志已可折叠（cost-state 基线 + 行尾增量，CLAUDE_CODE_INTEGRATION §9.3），口径是 **catalog 官方卡折算的估算**而非 DSH 的实付流。v1.2 为此把 Claude 估挂成**独立后缀列**不进主账；v1.3 改走 §3.1 决策 1 的「Σ 按量流」——deepseek 从哪个 harness 跑都是同一条按量流，钱行就是 Σ，估算并入主账的代价用**整段 `≈` 前缀**标注（`metered_amount` truth table 钉住：纯 DSH 段精确不带 ≈，任何估分量并入才整段 ≈，USD 只在整行无 ¥ 侧时浮出）。不假装全量，也不把估算冒充实付——`≈` 就是不充实的记号。
 
 这把评审 P0-1 的「钱行是 DSH-only」钉正为：钱行按**供应商**（DeepSeek 按量）语义，标签用 `按量` 不按宿主名，所以将来从 Claude Code 或其它 harness 接入同一供应商流也不换标签。
 
@@ -161,22 +169,26 @@ CodexBar 有而我们**不该**抄的：reset 倒计时（provider 额度窗口�
 ```
 现状（lib.rs:271-335，全平）          目标
 ──────────────────────              ──────────────────────────────
-今日成本：¥12.34 · 1.4M tokens       今日按量成本：¥12.34 · 1.4M tokens · Claude 估 ≈¥6 / ≈$0.85   ← v1.2 账卡分列
-今日预算：¥24 / ¥30（93%）           今日按量预算：¥24 / ¥30（93%）        ← 预算只对 DSH，不动
-本月成本：¥774.7 / ¥600              本月按量成本：¥774.7 / ¥600 · Claude 估 ≈¥182 / ≈$26
+今日成本：¥12.34 · 1.4M tokens       今日按量成本：≈¥37.17 · 188.2M tokens        ← v1.3 合并总账（DSH 实测 + Claude deepseek 估 CNY 相加）
+今日预算：¥24 / ¥30（93%）           今日按量预算：¥24 / ¥30（93%）             ← 预算只对 DSH，不动
+本月成本：¥774.7 / ¥600              本月按量成本：≈¥106.1                      ← v1.3 合并；去掉 /¥600 分母
 最近会话：deepseek-v4-flash · 15K     ─────────────────
-    · ¥0.02  ⚡ 删除，被宿主行吸收    ▸ DeepSeek Harness · 1.4M · 3 会话   ← L1 子菜单
+    · ¥0.02  ⚡ 删除，被宿主行吸收    ▸ DeepSeek Harness · 1.4M · 3 会话        ← L1 子菜单
                                     ▸ Codex · 20K · 1 会话
-                                    ▸ Claude Code · 23M · 2 会话          ← v1.2 第三宿主行
+                                    ▸ Claude Code · 176.7M · 3 会话             ← 第三宿主行
 预算：✓ ¥12.79 / ¥600                ─────────────────
-上次同步：09:50 成功                  预算：✓ ¥12.79 / ¥600
-─────────────────                   上次同步：09:50 成功（DSH 折叠 + Claude 账）  ← v1.2 后缀
+上次同步：09:50 成功                  预算：✓ ¥12.79 / ¥600                      ← 预算底部行 DSH-only
+─────────────────                   上次同步：09:50 成功（DSH 折叠 + Claude 账）
 打开工作台… / 立即同步 / 退出          ─────────────────
                                     打开工作台… / 立即同步 / 退出
 ```
 
-（账卡示例里的 `Claude 估` 列 = Overview `claude_today/claude_month` 的 `currency_totals`
-逐行折算；两币分开不混加，`≈` + 「估」标签，见 v1.2 修订说明。）
+（示例数值取 v1.3 真机那天：DSH 空转、钱全在 Claude Code 的 deepseek 流上 → 今日/本月
+合并总账 = Claude catalog CNY 估占主导，`≈` 前缀标估；pure-DSH 的日子是精确形式
+`今日按量成本：¥12.34 · 1.4M tokens` / `本月按量成本：¥774.7`，不带 ≈——一笔实测 ¥
+不标成估。USD 套餐流只在整行完全没有 ¥ 侧时单独浮出 `≈$B`。分母移除见修订说明；
+顶部今日/本月行 = Overview `claude_today/claude_month` 的 `currency_totals` + DSH
+实测的合并，全部由 `money_rows_text` 纯函数拼出，单测钉逐行文案。）
 
 L1 宿主行展开后的 L2 子菜单（以 DSH 为例）：
 
@@ -191,7 +203,7 @@ L1 宿主行展开后的 L2 子菜单（以 DSH 为例）：
 
 结构决策：
 
-- **顶层钱行**：今日/本月/预算三行是**按量计费总成本**（§3.1），标签按计量语义（`今日按量成本`），不按宿主名。v1.2 账卡分列在今日/本月行的 DSH ¥ 之后挂 `Claude 估` 后缀（Overview `claude_today/claude_month` 的 `currency_totals`，`≈` 标估；**预算行不动、DSH-only**）。`上次同步` 行注明「（DSH 折叠 + Claude 账）」——它是 oneline 同步时间，与宿主快照的 `generated_at`（§6 决策 5）是两个东西，不混（v1.2 起 tick 还叠 claude-sync，失败时 SyncStatus 留痕，见 v1.2 修订）。
+- **顶层钱行**：今日/本月/预算三行是**按量计费总成本**（§3.1），标签按计量语义（`今日按量成本`），不按宿主名。v1.3 起今日/本月两行 = `money_rows_text` **合并总账**（DSH 实测 + Overview `claude_today/claude_month` 的 `currency_totals.CNY` 相加；估分量并入 → 整段 `≈`，USD 只在整行无 ¥ 侧时浮出 `≈$B`；**预算行不动、DSH-only**）。`上次同步` 行注明「（DSH 折叠 + Claude 账）」——它是 oneline 同步时间，与宿主快照的 `generated_at`（§6 决策 5）是两个东西，不混（tick 叠 claude-sync 自 v1.2 起，失败时 SyncStatus 留痕，见顶部修订）。
 - **预算/同步/今日/本月永远留在顶层，不藏进宿主**——它们是主入口最该一眼看到的东西；host 展开是增量信息，不是替代。
 - **L1 行的顺序 = 固定宿主序**（dsh → codex → claude-code），不是按 token 量排序——菜单每轮重建的排序要稳定。
 - **宿主区始终渲染三行**（固定序），不因单宿主失败整体消失——失败走 §8 的逐宿主降级文案。
@@ -375,7 +387,7 @@ struct SessionKeyJson {
 
 ### 9.2 托盘侧（`lib.rs`/`overview.rs` `#[cfg(test)]` 注入 now）
 
-7. **菜单结构**：三宿主行、固定 dsh→codex→claude-code 序、L2 行数、删除「最近会话」平铺行、顶层钱行按计量语义标签（`今日按量成本`，不按宿主名；v1.2 起 assert 账卡行尾的 ` · Claude 估 ≈¥/≈$` 后缀 truth table，`claude_est_suffix_truth_table`）。
+7. **菜单结构**：三宿主行、固定 dsh→codex→claude-code 序、L2 行数、删除「最近会话」平铺行、顶层钱行按计量语义标签（`今日按量成本`，不按宿主名；v1.3 起 assert 合并总账 `metered_amount` 的 11 态 truth table——纯 DSH 精确 / 估并入整段 ≈ / 无 ¥ 侧 USD 浮出 / 双无 → 诚实 —，`metered_amount_truth_table` + `money_rows_merge_dsh_and_claude_never_say_no_data_when_metered` 钉今日/本月整行文案）。
 8. **DSH 一致性**：构造 `ov.today` 与 hosts 冲突的输入，菜单报 today.json 值。
 9. **降级矩阵**：§8 每行一测（文案逐字）——unavailable/零会话/partial/stale 各一条。
 10. **stale**：`generated_at` 超过 2×tick → 子菜单出现过期 footer；刷新失败不覆盖 hosts.json。
@@ -391,7 +403,7 @@ struct SessionKeyJson {
 ## 10. 分阶段实施
 
 ### Phase 1 —— 投影命令 + L1 宿主行 + 钱行改名
-core `recent_cmp`（+Python 镜像）；二进制 `sessions navigation`（复用 codex 折叠链路）；`overview.rs` HostRow + hosts.json 读写；`lib.rs` 菜单宿主区 + Submenu + 顶层钱行改按量标签 + 刷新模型（单飞/超时/stale）。验收：三宿主行出现、DSH 与顶层今日行一致、Codex 今日 token 与整会话求和不一致时可复现（跨日会话）、降级矩阵通过。（Phase 1/2 已落地；v1.2 的第三宿主行 + 账卡分列随 Claude Code 成本数据面并入，见顶部修订。）
+core `recent_cmp`（+Python 镜像）；二进制 `sessions navigation`（复用 codex 折叠链路）；`overview.rs` HostRow + hosts.json 读写；`lib.rs` 菜单宿主区 + Submenu + 顶层钱行改按量标签 + 刷新模型（单飞/超时/stale）。验收：三宿主行出现、DSH 与顶层今日行一致、Codex 今日 token 与整会话求和不一致时可复现（跨日会话）、降级矩阵通过。（Phase 1/2 已落地；第三宿主行随 r2a/成本数据面并入，顶层钱行按 v1.3 合并总账修订，见顶部修订。）
 
 ### Phase 2 —— L2 最近 N + 深链 + 前端 host 过滤
 `WorkbenchTarget` IPC（focus/peek/clear + 事件）；工作台双通路消费 + host 过滤；L2 渲染前 5 行。验收：菜单点 L2 → 工作台打开该会话；peek/clear 语义测试过；host 过滤工作。
@@ -402,7 +414,7 @@ Codex 北京日界折叠**已在 v1 落地**（不再是 Phase 3）。Phase 3 �
 ## 11. Out of scope（明确不做）
 
 - **live「正在运行」指示**（§2.4-6，需要 autosync 式检测，已删）。
-- **per-host 今日/本月成本**（Phase 3，需币种决策；v1.2 只放行 Claude Code 的 catalog 估算列作账卡后缀——预算/alert 仍 DSH-only，不做完整 per-host 成本行）。
+- **per-host 今日/本月成本**（Phase 3，需币种决策；v1.3 只把 Claude Code 的 deepseek 按量流并进顶层**合并**总账 ≈ 行——不是每宿主一行钱，预算/alert 仍 DSH-only，不做完整 per-host 成本行）。
 - **reset 倒计时**（provider 额度窗口语义，我们审计本地成本无额度窗口）。
 - **菜单内分页/搜索/过滤**（那是工作台会话 tab 的职责）。
 - **多图标模式**（保持单图标 + 菜单内分层，§1 结论 1）。

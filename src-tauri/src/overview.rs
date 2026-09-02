@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use crate::parse_rfc3339_secs;
 use agent_vitals_core::cost::{
-    bucket_cost, claude_day_cost, load_pricing, month_cost, priced_day, today_cost,
+    bucket_cost, claude_day_cost, claude_day_total_tokens, load_pricing, month_cost, priced_day,
+    today_cost,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -347,6 +348,12 @@ pub struct Overview {
     /// ledger 只存 token，价表会变 token 不会（与 DSH month.json 同一条纪律）。
     pub claude_today: Option<Value>,
     pub claude_month: Option<Value>,
+    /// Claude Code 当日 4 型 token 总量（ledger 当日存在 → Some，含计价认不出的
+    /// unknown 模型——消耗量与价目卡无关）。托盘合并行 `· N tokens` 用它拼
+    /// 「今日合并 token」；`claude_today` 的报告只带钱，token 数在 money 之外要
+    /// 单独量（v1.3 合并总账，见 MENUBAR spec）。「当日缺场 → None」与
+    /// `claude_today` 同语义，但两者独立：全 unknown 日 = 有 token、无钱。
+    pub claude_today_tokens: Option<i64>,
 }
 
 /// 数据根（镜像 `paths.py::data_home` / `snapshot.rs::data_home_from` 的优先序）：
@@ -554,7 +561,7 @@ fn read_overview_at(dh: &Path) -> Overview {
         .and_then(|l| l.get("days").cloned())
         .and_then(|d| d.as_object().cloned())
         .unwrap_or_default();
-    let (claude_today, claude_month) =
+    let (claude_today, claude_month, claude_today_tokens) =
         claude_estimates(&claude_days, &today, &cur_month, &pricing);
 
     Overview {
@@ -571,25 +578,30 @@ fn read_overview_at(dh: &Path) -> Overview {
         estimate_note: "估算值，不是账单；覆盖率不足的日子按 fallback 价补齐并标注".to_string(),
         claude_today,
         claude_month,
+        claude_today_tokens,
     }
 }
 
 /// claude-ledger 的逐日 flat 账（`{date: {model: 4 型 snake}}`）→ (今日估报告,
-/// 当月聚合)。纯函数——today/cur_month 由调用方注入，单测不碰系统钟。
+/// 当月聚合, 今日 token 总量)。纯函数——today/cur_month 由调用方注入，单测不碰
+/// 系统钟。
 ///
 /// · 今日 = core `claude_day_cost` 直出的整报告（per_model 也在，哪天面板想画
 ///   模型分列不用改这里的契约）；
 /// · 当月 = 各账日 `currency_totals` 逐日合并（claude 无时段价、同币相加安全；
-///   只算 cur_month 前缀的日子）。
+///   只算 cur_month 前缀的日子）；
+/// · 今日 token = `claude_day_total_tokens`（core，与 `claude_day_cost` 同一对日
+///   形状嗅探），当日存在 → Some——包括全 unknown 的「有量无量价」日。
 /// 今日缺场 / 当月没有任何可报价账日 → 对应侧 None。`days` 为空 map → (None,
-/// None)。
+/// None, None)。
 fn claude_estimates(
     days: &serde_json::Map<String, Value>,
     today: &str,
     cur_month: &str,
     pricing: &Value,
-) -> (Option<Value>, Option<Value>) {
+) -> (Option<Value>, Option<Value>, Option<i64>) {
     let today_report = days.get(today).and_then(|day| claude_day_cost(day, pricing));
+    let today_tokens = days.get(today).map(claude_day_total_tokens);
     let mut cny = 0.0f64;
     let mut usd = 0.0f64;
     let mut n = 0u32;
@@ -620,7 +632,7 @@ fn claude_estimates(
     } else {
         None
     };
-    (today_report, month_report)
+    (today_report, month_report, today_tokens)
 }
 
 /// 一天的成本行：`priced_day`（唯一覆盖率校验入口）→ 无 by_model 的日子退回
@@ -1092,6 +1104,7 @@ mod tests {
         // 无 claude-ledger.json → claude 估两侧 None（诚实「没账可报」，不摆估 0）。
         assert!(ov.claude_today.is_none());
         assert!(ov.claude_month.is_none());
+        assert!(ov.claude_today_tokens.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1118,7 +1131,9 @@ mod tests {
         days.insert("2026-09-02".into(), day_2);
         days.insert("2026-08-31".into(), day_1); // 上月：不进当月聚合
         days.insert("2026-09-03".into(), zero_day); // 全零未知模型日：不可报价
-        let (today, month) = claude_estimates(&days, "2026-09-02", "2026-09", &pricing);
+        let (today, month, today_tokens) =
+            claude_estimates(&days, "2026-09-02", "2026-09", &pricing);
+        assert_eq!(today_tokens, Some(120_000), "今日 token = 当日全部模型 4 型求和");
 
         let today_r = today.expect("当日 flat 直图必须可报价");
         let tcny = today_r["currency_totals"]["CNY"].as_f64().unwrap();
@@ -1136,12 +1151,12 @@ mod tests {
         assert!((month_r["currency_totals"]["CNY"].as_f64().unwrap() - expect_cny).abs() < 1e-9);
         assert!((month_r["currency_totals"]["USD"].as_f64().unwrap() - expect_usd).abs() < 1e-9);
 
-        // 缺今日 / 空 map → 对应 None
-        let (t_missing, m_ok) = claude_estimates(&days, "2026-09-09", "2026-09", &pricing);
-        assert!(t_missing.is_none() && m_ok.is_some());
+        // 缺今日 / 空 map → 对应 None（token 总量同日缺席 → None）
+        let (t_missing, m_ok, tk_missing) = claude_estimates(&days, "2026-09-09", "2026-09", &pricing);
+        assert!(t_missing.is_none() && m_ok.is_some() && tk_missing.is_none());
         let empty = serde_json::Map::new();
-        let (t_e, m_e) = claude_estimates(&empty, "2026-09-02", "2026-09", &pricing);
-        assert!(t_e.is_none() && m_e.is_none());
+        let (t_e, m_e, tk_e) = claude_estimates(&empty, "2026-09-02", "2026-09", &pricing);
+        assert!(t_e.is_none() && m_e.is_none() && tk_e.is_none());
     }
 
     /// 端到端：claude-ledger.json（写当日 flat 直图 + 当月 + 上月残留）→
@@ -1173,6 +1188,7 @@ mod tests {
         let ov = read_overview_at(&tmp);
         let today_r = ov.claude_today.expect("当日 ledger 必须折出估");
         assert!(today_r["currency_totals"]["USD"].as_f64().unwrap() > 0.0);
+        assert_eq!(ov.claude_today_tokens, Some(550_000), "token 与钱同源同日结构");
         let month_r = ov.claude_month.expect("当月必须有一日");
         assert_eq!(month_r["days"].as_u64().unwrap(), 1, "上月残留 15 日不进本月");
         assert!((month_r["currency_totals"]["CNY"].as_f64().unwrap() - 0.0).abs() < 1e-9);

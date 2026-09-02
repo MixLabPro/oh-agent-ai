@@ -110,20 +110,16 @@ fn ledger_archive_path() -> std::path::PathBuf {
     state_dir().join("claude-ledger-archive.json")
 }
 
-/// ledger flat 日（`{model: 4 型 snake}`，rebuild_days 产出）→ 4 型 token 总量。
-/// r2a_store 的 claude 宿主行「今日 token」走这里；SNAKE_KEYS 只此一处定义，
-/// 别在 r2a 再抄一份键清单（usage_sample 同款「键集合唯一真源」纪律）。非对象
-/// 值（坏日）→ 0；但「读出 0」只发生在坏数据上，空日不落 ledger。
+/// ledger flat 日 → 4 型 token 总量。r2a_store 的 claude 宿主行「今日 token」与
+/// 托盘合并行的 `· N tokens` 都走这里。**求和委托 core `claude_day_total_tokens`**
+/// ——键清单只在 core 一处定义（托盘是 src-tauri crate，够不到本二进制模块，只能
+/// 用 core；binary 与 src-tauri 都归到 core，就不会长出第二份键集合）。SNAKE_KEYS
+/// 在此文件是**行级 usage 读写**用的，与 ledger 日求和是两个面：行级要 4 桶精确
+/// 读（每桶单独累加），日求和只要总量。非对象值（坏日）→ 0；但「读出 0」只发生
+/// 在坏数据上，空日不落 ledger。core 版顺带认 by_model 包一层的旧壳（与
+/// `claude_day_cost` 同一对形状嗅探），本文件只产 flat，行为不变。
 pub fn ledger_day_total_tokens(day: &Value) -> i64 {
-    let mut total = 0i64;
-    if let Some(models) = day.as_object() {
-        for tokens in models.values() {
-            for k in SNAKE_KEYS {
-                total += tokens.get(k).and_then(Value::as_i64).unwrap_or(0);
-            }
-        }
-    }
-    total
+    agent_vitals_core::cost::claude_day_total_tokens(day)
 }
 
 /// 读 ledger 当日（day_key = 北京日）的 4 型 token 总量 → r2a `sessions

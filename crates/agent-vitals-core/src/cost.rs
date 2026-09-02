@@ -871,6 +871,37 @@ pub fn claude_day_cost(day: &Value, pricing: &Value) -> Option<Value> {
     price_claude_map(models, pricing)
 }
 
+/// claude-ledger 一天 → 4 型 token 总量。形状嗅探与 `claude_day_cost` 是同一对
+/// （by_model 包一层 / flat 直图都认）——两个函数必须认同同一种日形状，不然
+/// 「消耗量」和「折算钱」会是两张对不齐的账（token_by_date_model == token_by_model
+/// 那条纪律的 claude 镜像：托盘合并行要 `· N tokens`，就得由驱动 claude_day_cost
+/// 的同一个日结构算出来）。
+///
+/// 与 `price_claude_map` 的未知模型路径**不同**：这里所有模型都计入——计价只认
+/// 得上目录卡的模型，消耗量跟认不认识价目卡无关（全 unknown 的日 token 依旧在
+/// 账；`price_claude_map` 里 `<synthetic>` 的空 map 日在此处自然计 0）。坏日
+/// （非对象值）→ 0；空日不落 ledger，正常路径不会出现 0。
+pub fn claude_day_total_tokens(day: &Value) -> i64 {
+    let models = match day.get("by_model") {
+        Some(wrapped) => match wrapped.as_object() {
+            Some(o) => o,
+            None => return 0,
+        },
+        None => match day.as_object() {
+            Some(o) => o,
+            None => return 0,
+        },
+    };
+    let mut total = 0i64;
+    for tokens in models.values() {
+        total += get_i64(tokens, "input_tokens")
+            + get_i64(tokens, "cache_read_input_tokens")
+            + get_i64(tokens, "cache_creation_input_tokens")
+            + get_i64(tokens, "output_tokens");
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1514,5 +1545,34 @@ mod tests {
             None
         );
         assert_eq!(claude_day_cost(&serde_json::json!(null), &pricing), None);
+    }
+
+    /// `claude_day_total_tokens` 数与 `claude_day_cost` 是同一种日形状（flat /
+    /// by_model 包一层都认），但**计价认不出的模型也计入**——消耗量与价目卡无关。
+    /// flat 真机形状 + by_model 壳 + `<synthetic>` 全零桶 + 坏值各钉一格。
+    #[test]
+    fn claude_day_total_tokens_counts_all_models_regardless_of_priceability() {
+        // flat 直图（rebuild_days 真机形状）：flash 3 型 + synthetic 全零 + 无关装饰键。
+        let flat = serde_json::json!({
+            "deepseek-v4-flash": {
+                "input_tokens": 1000, "cache_read_input_tokens": 2000,
+                "cache_creation_input_tokens": 3000, "output_tokens": 4000},
+            "<synthetic>": {
+                "input_tokens": 0, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0, "output_tokens": 0},
+            "decor": "ignored",
+        });
+        assert_eq!(claude_day_total_tokens(&flat), 10000);
+        // by_model 包一层（早期设计形状）→ 同数；与 claude_day_cost 同一个嗅探。
+        let wrapped = serde_json::json!({"by_model": flat});
+        assert_eq!(claude_day_total_tokens(&wrapped), 10000);
+        // 未知模型（目录没有的卡）token 照计：消耗量不因"没价"而消失。
+        let unknown = serde_json::json!({"some-future-model": {
+            "input_tokens": 500000, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0, "output_tokens": 70000}});
+        assert_eq!(claude_day_total_tokens(&unknown), 570000);
+        // 坏日（null / 空对象）→ 0，不 panic。
+        assert_eq!(claude_day_total_tokens(&serde_json::json!(null)), 0);
+        assert_eq!(claude_day_total_tokens(&serde_json::json!({})), 0);
     }
 }
