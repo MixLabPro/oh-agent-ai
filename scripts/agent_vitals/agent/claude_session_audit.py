@@ -131,6 +131,7 @@ def claude_session_audit_json(home, session_id):
 
     输出键序是字节一致的一部分（Python 镜像逐字节对齐），不能重排。"""
     records = []
+    files = []
     file = None
     first = None
     last = None
@@ -138,6 +139,7 @@ def claude_session_audit_json(home, session_id):
         info = claude_session._file_info(path)
         if info["session_id"] == session_id:
             file = str(path)
+            files.append(str(path))
             if first is None:
                 first = info["first"]
             last = info["last"]
@@ -160,6 +162,7 @@ def claude_session_audit_json(home, session_id):
         "model": ev["model"],
         "cwd": cwd,
         "file": file,
+        "files": files,
         "date_span": {"first": first, "last": last},
         "audit": audit,
         "coverage": ev["coverage"],

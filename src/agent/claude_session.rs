@@ -113,6 +113,45 @@ pub fn claude_project_files(home: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// `~/.claude/projects` 根的存在性报告（r2a store 的 `source_statuses["claude-code"]`
+/// 与 menubar 的 `host_has_source` 都靠它判「该宿主有数据源」——roots 缺席时绝不能
+/// 报「0 会话」冒充「没有 Claude Code」）。镜像 `codex_session_roots_report`：单根
+/// `projects`，exists/file_count/total_bytes 同形状、同键序（host → roots，根对象
+/// kind → path → exists → file_count → total_bytes）。与 Python
+/// `claude_session.py::claude_session_roots_report` 逐字节对齐。
+pub fn claude_session_roots_report(home: &Path) -> Value {
+    let root = home.join(".claude").join("projects");
+    let exists = root.is_dir();
+    let mut file_count = 0usize;
+    let mut total_bytes = 0u64;
+    if exists {
+        let mut files: Vec<PathBuf> = walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
+            .map(|e| e.into_path())
+            .collect();
+        files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+        file_count = files.len();
+        for f in &files {
+            // 与 codex 侧同款：文件在枚举与 stat 之间消失时按 0 字节计，不 abort；
+            // 文件仍算进 file_count。
+            total_bytes += std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    json!({
+        "host": "claude-code",
+        "roots": [{
+            "kind": "projects",
+            "path": root.to_string_lossy().to_string(),
+            "exists": exists,
+            "file_count": file_count,
+            "total_bytes": total_bytes,
+        }],
+    })
+}
+
 fn file_info(path: &Path) -> FileInfo {
     let parsed = read_claude_session_log(path);
     let records: Vec<Value> = parsed
@@ -250,13 +289,18 @@ fn claude_audit_projection(evidence: &ClaudeEvidence) -> Value {
 /// 输出键序是字节一致的一部分（Python 镜像逐字节对齐），不能重排。
 pub fn claude_session_audit_json(home: &Path, session_id: &str) -> Option<Value> {
     let mut records: Vec<Value> = Vec::new();
+    // `files` = 全部匹配文件（路径序，r2a store 用它做 v2 cache 指纹增量失效——
+    // 与 codex 载荷的 `files` 键同语义，`extract_summary` 不用为 claude 长分支）；
+    // `file` = 路径序最后一个匹配文件（历史语义，两侧锁步，保持原样）。
+    let mut files: Vec<PathBuf> = Vec::new();
     let mut file: Option<PathBuf> = None;
     let mut first: Option<String> = None;
     let mut last: Option<String> = None;
     for path in claude_project_files(home) {
         let info = file_info(&path);
         if info.session_id == session_id {
-            file = Some(path);
+            file = Some(path.clone());
+            files.push(path);
             // 跨文件按路径序拼接（resume 理论情况）；first/last 取全局 min/max。
             if first.is_none() {
                 first = info.first.clone();
@@ -282,6 +326,7 @@ pub fn claude_session_audit_json(home: &Path, session_id: &str) -> Option<Value>
         "model": ev["model"],
         "cwd": roots.first().cloned().unwrap_or(Value::Null),
         "file": file.to_string_lossy().to_string(),
+        "files": files.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
         "date_span": { "first": first, "last": last },
         "audit": audit,
         "coverage": ev["coverage"].clone(),
@@ -538,6 +583,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    // ── claude_session_roots_report（r2a 第三源的 source_statuses 根）──────────
+
+    #[test]
+    fn roots_report_lists_projects_root_with_counts() {
+        let home = temp_home("roots-ok");
+        let dir = home.join(".claude").join("projects").join("p-a");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sid = "c0ffee00000000000000000000000000";
+        let body = jsonl(&[user_text("m1", "2026-08-20T14:27:00Z", "早上好")]);
+        std::fs::write(dir.join(format!("{sid}.jsonl")), &body).unwrap();
+        std::fs::write(dir.join("other.jsonl"), &body).unwrap();
+
+        let v = claude_session_roots_report(&home);
+        assert_eq!(v["host"], json!("claude-code"));
+        let roots = v["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0]["kind"], json!("projects"));
+        assert_eq!(roots[0]["exists"], json!(true));
+        assert_eq!(roots[0]["file_count"], json!(2));
+        assert!(roots[0]["total_bytes"].as_u64().unwrap() > 0);
+        assert!(roots[0]["path"].as_str().unwrap().contains(".claude/projects"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn roots_report_missing_claude_dir_is_exists_false_not_zero() {
+        // ~/.claude 缺席 → exists=false（「没有 Claude Code」与「0 会话」是两回事，
+        // r2a 的 host_has_source 靠它区分）。file_count/total_bytes 归零，不猜路径。
+        let home = temp_home("roots-missing");
+        let v = claude_session_roots_report(&home);
+        assert_eq!(v["roots"][0]["exists"], json!(false));
+        assert_eq!(v["roots"][0]["file_count"], json!(0));
+        assert_eq!(v["roots"][0]["total_bytes"], json!(0));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn audit_json_files_array_spans_matching_files_across_dirs() {
+        // resume 理论情况：同 stem 跨目录 → files 数组收全两份（路径序），
+        // `file` 保持末匹配路径（历史语义），记录跨文件拼接。
+        let home = temp_home("multi-file");
+        let dir_a = home.join(".claude").join("projects").join("a");
+        let dir_b = home.join(".claude").join("projects").join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let sid = "c0ffee00000000000000000000000000";
+        std::fs::write(
+            dir_a.join(format!("{sid}.jsonl")),
+            jsonl(&[user_text("m1", "2026-08-20T14:27:00Z", "前半")]),
+        )
+        .unwrap();
+        std::fs::write(
+            dir_b.join(format!("{sid}.jsonl")),
+            jsonl(&[user_text("m2", "2026-08-20T15:00:00Z", "后半"), ai_title("t1", "2026-08-20T15:05:00Z", "跨文件")]),
+        )
+        .unwrap();
+
+        let out = claude_session_audit_json(&home, sid).expect("两份文件都匹配就该出审计");
+        let files = out["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2, "同 stem 两份文件都要进 files");
+        let fpaths: Vec<&str> = files.iter().map(|f| f.as_str().unwrap()).collect();
+        // 路径序（a < b）：file 键 = 末匹配（b），files[0] = a。
+        assert!(fpaths[0].contains("/a/"));
+        assert!(fpaths[1].contains("/b/"));
+        assert!(out["file"].as_str().unwrap().contains("/b/"));
+        assert_eq!(out["date_span"]["first"], json!("2026-08-20T14:27:00Z"));
+        assert_eq!(out["date_span"]["last"], json!("2026-08-20T15:05:00Z"));
+        assert_eq!(out["title"], json!("跨文件"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     // ── claude_session_audit_json 端到端 ─────────────────────────────────────
 
     #[test]
@@ -555,6 +671,10 @@ mod tests {
         assert_eq!(out["model"], json!("claude-sonnet-4-5"));
         assert_eq!(out["cwd"], json!("/repo"));
         assert!(out["file"].as_str().unwrap().ends_with(&format!("{sid}.jsonl")));
+        // files = 全部匹配文件（r2a store 的 v2 cache 指纹依赖它）；单文件会话
+        // 就是这唯一一份。
+        assert_eq!(out["files"].as_array().unwrap().len(), 1);
+        assert!(out["files"][0].as_str().unwrap().ends_with(&format!("{sid}.jsonl")));
         assert_eq!(out["date_span"]["first"], json!("2026-08-20T14:27:00Z"));
         assert_eq!(out["date_span"]["last"], json!("2026-08-20T14:30:00Z"));
 
@@ -562,7 +682,7 @@ mod tests {
         let keys: Vec<&str> = out.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            vec!["host", "session_id", "title", "model", "cwd", "file", "date_span", "audit", "coverage", "signals", "attempts", "notes"]
+            vec!["host", "session_id", "title", "model", "cwd", "file", "files", "date_span", "audit", "coverage", "signals", "attempts", "notes"]
         );
 
         let rules = out["audit"]["rule_outcomes"].as_object().unwrap();

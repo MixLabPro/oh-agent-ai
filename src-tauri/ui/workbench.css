@@ -558,6 +558,11 @@ body {
   border-color: #a5b4fc;
 }
 
+.chip.claude-code {
+  color: #d7a5e8;
+  border-color: #d7a5e8;
+}
+
 /* 会话列表 host 过滤 chips（spec §7.3）是按钮形态——`button` 自带浏览器底色/
    边框，`.chip` 是按展示 span 写的，这里补按钮差量 + active 态（选中即填充，
    与同 tab 的 Findings chips 同语言）。 */

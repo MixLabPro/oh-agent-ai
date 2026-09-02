@@ -1878,11 +1878,12 @@ class CliMatrix(unittest.TestCase):
         self.assertTrue(report["file"].endswith("c0ffee00000000000000000000000000.jsonl"))
         self.assertEqual(report["date_span"]["first"], "2026-08-20T14:27:00Z")
         self.assertEqual(report["date_span"]["last"], "2026-08-20T14:30:00Z")
-        # 键序是字节一致的一部分，不能重排。
+        # 键序是字节一致的一部分，不能重排。`files` 是第三源接入加的键（插在
+        # `file` 后，两侧锁步；12→13 键）。
         self.assertEqual(list(report.keys()),
                          ["host", "session_id", "title", "model", "cwd", "file",
-                          "date_span", "audit", "coverage", "signals", "attempts",
-                          "notes"])
+                          "files", "date_span", "audit", "coverage", "signals",
+                          "attempts", "notes"])
         cov = report["coverage"]
         self.assertEqual(cov["ToolResults"]["measured"], 2)
         self.assertEqual(cov["ToolCalls"]["measured"], 2)
@@ -2075,6 +2076,73 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(got[0][0], 2, "degraded 会话应当是工具错误（2）")
         self.assertEqual(got[0][1], got[1][1], "stdout 不一致")
         self.assertEqual(got[0][2], got[1][2], "stderr 不一致")
+
+    # ── sessions store 的 claude-code 臂（§5 第三源）──────────────────
+    # 矩阵面的差分在 test_r2a.py 的 ClaudeReconciliationTests（含 cache 共享
+    # 双方向 + 三源合并 + 错误路径）；这里用 both() 补一档「同一条命令、同一
+    # 个隔离 home（cache 落 tmp 的 data_home）」下的逐字节对账。
+
+    def test_sessions_list_claude_host_kind_differential(self):
+        """`sessions list --host-kind claude-code`：3 个 fixture 会话（healthy /
+        dangerous / all-recorded），排序按 sort_key（native_id 字典序）。cache
+        落到 tmp 的 data_home，py 写 rs 读同一份 → generated_at 一起冻结。
+        session_id = 文件 stem——sid 必须互异，否则同一路径互相覆盖。"""
+        self._claude_fixture_home("healthy.jsonl", sid="healthy")
+        self._claude_fixture_home("dangerous.jsonl", sid="dangerous")
+        self._claude_fixture_home("all-recorded.jsonl", sid="all-recorded")
+        code, out, _err = self.both("sessions", "list", "--host-kind",
+                                    "claude-code", "--json")
+        self.assertEqual(code, 0)
+        dto = json.loads(out)
+        self.assertEqual(dto["page"]["total"], 3)
+        ids = [it["session_key"]["native_id"] for it in dto["page"]["items"]]
+        self.assertEqual(ids, ["all-recorded", "dangerous", "healthy"])
+        self.assertEqual(dto["source_statuses"]["claude-code"]["status"], "ok")
+
+    def test_sessions_read_claude_differential(self):
+        """`sessions read` 的 claude-code key：envelope 完整（schema_version /
+        source_statuses / session 载荷带 files 数组），两个实现逐字节一致。"""
+        self._claude_fixture_home("healthy.jsonl", sid="healthy")
+        code, out, _err = self.both("sessions", "list", "--host-kind",
+                                    "claude-code", "--json")
+        self.assertEqual(code, 0)
+        key = json.loads(out)["page"]["items"][0]["session_key"]
+        self.assertEqual(key["host_kind"], "claude-code")
+        self.assertEqual(key["native_id"], "healthy")
+        key_json = json.dumps(key, separators=(",", ":"))
+        code, out, _err = self.both("sessions", "read", "--session-key",
+                                    key_json, "--json")
+        self.assertEqual(code, 0)
+        env = json.loads(out)
+        self.assertEqual(env["schema_version"], "1")
+        self.assertEqual(env["session_key"]["host_kind"], "claude-code")
+        session = env["session"]
+        self.assertEqual(session["host"], "claude-code")
+        self.assertIn("files", session, "payload files array is part of the contract")
+        self.assertEqual(len(session["files"]), 1)
+        self.assertEqual(session["file"], session["files"][0])
+
+    def test_sessions_findings_include_claude_sv601(self):
+        """`sessions findings` 聚合三源：dangerous fixture 的 SV601 经 claude
+        envelope 的 audit.findings 进入 rollup（findings_for 的 claude 分支）。
+        **Rust-only**（92feeac 明写无 Python 镜像——python 逐步弱化），直接跑
+        [_BIN] 不进 both()，语义断言（rule 出现、hits 为 1、贡献明细带
+        claude-code）。"""
+        self._claude_fixture_home("healthy.jsonl", sid="healthy")
+        self._claude_fixture_home("dangerous.jsonl", sid="dangerous")
+        env = isolated_home_env(self.tmp)
+        env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / "snap-rs")
+        r = subprocess.run([_BIN, "sessions", "findings", "--json"],
+                           cwd=str(self.tmp / "workdir"), env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rollup = json.loads(r.stdout)
+        by_rule = {r["rule"]: r for r in rollup["rules"]}
+        self.assertIn("SV601", by_rule, "SV601 from claude dangerous fixture")
+        self.assertEqual(by_rule["SV601"]["hits"], 1)
+        # findings 明细里出现 claude-code 宿主。
+        self.assertTrue(any(f.get("host_kind") == "claude-code"
+                            for f in rollup["findings"]))
 
     # ── WorkBuddy 会话审计（合成 home：sqlite db + audit-log + file-history）──
     # 夹具是 `fixtures/workbuddy/workdir`（`build_workbuddy_fixture.py` 自校验钉死

@@ -76,11 +76,12 @@
         <div class="sess-toolbar">
           <span class="muted" id="sess-count"></span>
           <span class="flex-spacer"></span>
-          <!-- host 过滤 chips（spec §7.3）：全部 / DeepSeek Harness / Codex。
-               过滤变化重置分页重新加载；会话详情深链（SessionList 目标）也会
-               落到这个过滤上。 -->
+          <!-- host 过滤 chips（spec §7.3）：全部 / Claude Code / DeepSeek Harness /
+               Codex。过滤变化重置分页重新加载；会话详情深链（SessionList 目标）
+               也会落到这个过滤上。 -->
           <span class="chips" id="sess-filter">
             <button class="chip active" data-host="all">全部</button>
+            <button class="chip claude-code" data-host="claude-code">Claude Code</button>
             <button class="chip dsh" data-host="dsh">DeepSeek Harness</button>
             <button class="chip codex" data-host="codex">Codex</button>
           </span>

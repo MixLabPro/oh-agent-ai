@@ -108,6 +108,10 @@ fn dsh_cache_path() -> PathBuf {
     cache_dir().join("dsh-sessions.json")
 }
 
+fn claude_cache_path() -> PathBuf {
+    cache_dir().join("claude-sessions.json")
+}
+
 /// Codex 源指纹（当前源文件的指纹列表，按 `codex_rollout_files` 的全局路径序）。
 /// 文件名（session 分组）不是指纹的一部分——路径就是源文件的身份，指纹看内容。
 fn codex_source_fingerprints(home: &Path) -> Vec<(String, String)> {
@@ -123,6 +127,16 @@ fn codex_source_fingerprints(home: &Path) -> Vec<(String, String)> {
 /// 那套 env 覆盖只服务 tick/oneline 路径，两条路径的根在 DSH_HOME 未设时本就一致。
 fn dsh_source_fingerprints(home: &Path) -> Vec<(String, String)> {
     crate::agent::discovery::dsh_session_files(&home.join(".dsh"))
+        .iter()
+        .map(|p| (p.to_string_lossy().to_string(), fingerprint_file(p).unwrap_or_default()))
+        .collect()
+}
+
+/// Claude 源指纹：`~/.claude/projects/**/*.jsonl`（递归，`claude_project_files` 的
+/// 全局路径序）。session_id = 文件 stem——文件名就是分组键，指纹看内容（与 codex
+/// 同一纪律：路径是身份、指纹是内容）。
+fn claude_source_fingerprints(home: &Path) -> Vec<(String, String)> {
+    crate::agent::claude_session::claude_project_files(home)
         .iter()
         .map(|p| (p.to_string_lossy().to_string(), fingerprint_file(p).unwrap_or_default()))
         .collect()
@@ -420,8 +434,39 @@ fn dsh_source_statuses(home: &Path, files: &[PathBuf], degraded: &[(String, Stri
     })
 }
 
-/// 合并两个单源 statuses（codex + dsh）成 `all` store 的完整 statuses。键序稳定：
-/// codex 在前、dsh 在后（JSON 键序是字节一致的一部分）。
+/// Claude 源状态。三态与 DSH 同款（§4.3 诚实降级）——**不是** codex 的恒 ok：
+/// Claude 按 session 构建（1 文件 = 1 session），文件在但一个都构建不出来
+/// （built == 0）是「有语料但读不了」，该报 unavailable 而不是「0 条真数据」：
+///
+///   · `files` 为空（`~/.claude/projects` 缺席或没有会话文件）→ `ok`，sessions 0
+///     —— 诚实零（「没装 Claude Code」和「有 Claude Code 但读不了」是两回事）；
+///   · 全部文件成功构建 → `ok`，sessions = built；
+///   · 文件在但一个都构建不出来（built == 0）→ `unavailable`——CLI 面对
+///     `--host-kind claude-code` 报 source-unavailable 错误码，**不是空页**（§3.3）。
+///
+/// 与 DSH 的差异：不逐文件记 degraded（claude 按 session 构建、损坏的会话文件
+/// 每次都重试——与 codex 同款已接受行为；逐文件归属是 dsh 的 1 文件 = 1 会话
+/// 专属粒度）。
+/// `roots` = `claude_session_roots_report`（`~/.claude/projects` 单根报告）。
+fn claude_source_statuses(home: &Path, files_n: usize, built: usize) -> Value {
+    let roots = crate::agent::claude_session::claude_session_roots_report(home);
+    let status = if files_n == 0 || built > 0 {
+        "ok"
+    } else {
+        "unavailable"
+    };
+    json!({
+        "claude-code": {
+            "status": status,
+            "sessions": built,
+            "roots": roots.get("roots").cloned().unwrap_or_else(|| Value::Array(vec![])),
+        },
+    })
+}
+
+/// 合并单源 statuses（codex + dsh + claude-code）成 `all` store 的完整 statuses。
+/// 键序稳定：claude-code 在前、codex 次之、dsh 在后（JSON 键序是字节一致的一部
+/// 分；host_kind 字典序，与 entries 的 sort_key 同一条纪律）。
 fn merge_statuses(a: &Value, b: &Value) -> Value {
     let mut merged = a.clone();
     if let (Some(m), Some(b_obj)) = (merged.as_object_mut(), b.as_object()) {
@@ -593,34 +638,116 @@ impl SessionStore {
         Ok(finalize_and_write("dsh", &cache_path, sessions, generated_at, statuses, degraded))
     }
 
-    /// 合并 codex + dsh 两个单源 store（`sessions list` no-filter = 全部源）。
-    /// **没有自己的合并 cache**——每次把两个子 store 合并（各子 store 走自己的 cache
-    /// 快路径），`generated_at` 取两边的 max（ISO-UTC 同格式，字典序 = 时间序，且都
-    /// 冻结在各自的 cache 里，跨进程/跨实现稳定）。`source_statuses` 合并成
-    /// `{codex, dsh}` 完整视图（§2.1 的 envelope 形状）。
+    /// 从 Claude Code 源填充（§5 第三源）。镜像 `SessionStore::codex` 的全量/增量
+    /// 两条路径：`claude_source_fingerprints`（`~/.claude/projects/**/*.jsonl` 全量
+    /// walk）→ `cache/r2a/claude-sessions.json` v2 缓存 → 增量重建只对变化文件的
+    /// stem（= session_id）重算 → `finalize_and_write("claude-code", ...)`。
+    ///
+    /// 冷路径全量重建走 `claude_session_list`（复用 `claude_session.rs` 的既有枚举，
+    /// 镜像 codex 的 `codex_session_list`——不重复发明文件枚举）。
+    pub fn claude_code(home: &Path) -> Result<SessionStore, StoreError> {
+        let ns = takeover::machine_namespace();
+        let generated_at = now_iso_utc();
+        let fingerprints = claude_source_fingerprints(home);
+        let fp_map: HashMap<&str, &str> = fingerprints.iter().map(|(p, f)| (p.as_str(), f.as_str())).collect();
+        let cache_path = claude_cache_path();
+        let files_n = fingerprints.len();
+
+        if let Some(cached) = read_cache(&cache_path) {
+            if let Some((cached_sessions, _)) = read_cache_v2(&cached) {
+                let (kept, covered) = kept_sessions(&cached_sessions, &fp_map);
+                let to_process: Vec<&str> =
+                    fingerprints.iter().map(|(p, _)| p.as_str()).filter(|p| !covered.contains(*p)).collect();
+                if to_process.is_empty() && kept.len() == cached_sessions.len() {
+                    // 全命中：直接复用 cache 文档里冻结的 generated_at/statuses
+                    // （与 codex 同款快路径——"什么都没变"的常见情形不付排序写盘）。
+                    if let Some(store) = cache_v2_to_store(&cached, &cached_sessions) {
+                        return Ok(store);
+                    }
+                }
+                // 部分/全部失配：只对 to_process 覆盖到的 session_id 重建。一个
+                // session 可能横跨多个 jsonl（resume），stem → sid 只跑在变化的
+                // 文件上（镜像 codex 的 O(变化文件数) 纪律）。
+                let mut sids: BTreeSet<String> = BTreeSet::new();
+                for p in &to_process {
+                    sids.insert(claude_session_id_of(Path::new(p)));
+                }
+                let mut sessions = kept;
+                let sid_list: Vec<String> = sids.into_iter().collect();
+                for bs in par_map_in_order(&sid_list, |sid| claude_built_session_for(home, sid, &ns, &fp_map))
+                    .into_iter()
+                    .flatten()
+                {
+                    sessions.push(bs);
+                }
+                let statuses = claude_source_statuses(home, files_n, sessions.len());
+                return Ok(finalize_and_write("claude-code", &cache_path, sessions, generated_at, statuses, Vec::new()));
+            }
+            // v1 缓存或形状坏 → 落回下面的全量重建（与 codex 同款，不 abort）。
+        }
+
+        // 冷启动 / 旧格式缓存：全量重建。
+        let list = crate::agent::claude_session::claude_session_list(home);
+        let session_ids: Vec<String> = list
+            .get("sessions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.get("session_id").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let mut sessions = Vec::new();
+        for bs in par_map_in_order(&session_ids, |sid| claude_built_session_for(home, sid, &ns, &fp_map))
+            .into_iter()
+            .flatten()
+        {
+            sessions.push(bs);
+        }
+        let statuses = claude_source_statuses(home, files_n, sessions.len());
+        Ok(finalize_and_write("claude-code", &cache_path, sessions, generated_at, statuses, Vec::new()))
+    }
+
+    /// 合并 codex + dsh + claude-code 三个单源 store（`sessions list` no-filter =
+    /// 全部源）。**没有自己的合并 cache**——每次把三个子 store 合并（各子 store
+    /// 走自己的 cache 快路径），`generated_at` 取三边的 max（ISO-UTC 同格式，字典
+    /// 序 = 时间序，且都冻结在各自的 cache 里，跨进程/跨实现稳定）。
+    /// `source_statuses` 合并成 `{claude-code, codex, dsh}` 完整视图（§2.1 的
+    /// envelope 形状；键序稳定，见 `merge_statuses`）。
     pub fn all(home: &Path) -> Result<SessionStore, StoreError> {
-        // 两个单源 store 各自走自己的 cache、写各自的 cache 文件，互相独立——
-        // 冷启动两源串行（实测 30s+）压成两源并行。`machine_namespace()` 只在两
-        // 个单源构建内部各固定一次（codex 首行 / dsh 并行前），跨源无共享写。
-        let (codex_store, dsh_store) = std::thread::scope(|s| {
+        // 三个单源 store 各自走自己的 cache、写各自的 cache 文件，互相独立——
+        // 冷启动三源串行（实测 30s+）压成三源并行。`machine_namespace()` 只在各
+        // 单源构建内部各固定一次，跨源无共享写。
+        let (codex_store, dsh_store, claude_store) = std::thread::scope(|s| {
             let c = s.spawn(|| SessionStore::codex(home));
             let d = s.spawn(|| SessionStore::dsh(home));
+            let cl = s.spawn(|| SessionStore::claude_code(home));
             (
                 c.join().expect("codex store build panicked"),
                 d.join().expect("dsh store build panicked"),
+                cl.join().expect("claude-code store build panicked"),
             )
         });
         let codex_store = codex_store?;
         let dsh_store = dsh_store?;
+        let claude_store = claude_store?;
         let mut entries = codex_store.entries.clone();
         entries.extend(dsh_store.entries.clone());
-        // 全局稳定序：host_kind "codex" < "dsh"，concat 已序，仍防御性重排一遍
-        // （与 cache_to_store 的恢复序同一条纪律）。
+        entries.extend(claude_store.entries.clone());
+        // 全局稳定序：host_kind "claude-code" < "codex" < "dsh"，concat 已序，仍
+        // 防御性重排一遍（与 cache_to_store 的恢复序同一条纪律）。
         entries.sort_by(|a, b| sort_key(&a.key).cmp(&sort_key(&b.key)));
         Ok(SessionStore {
             entries,
-            source_statuses: merge_statuses(&codex_store.source_statuses, &dsh_store.source_statuses),
-            generated_at: codex_store.generated_at.clone().max(dsh_store.generated_at.clone()),
+            // claude-code 在前（preserve_order 下键序 = 插入序 = 字节序，不能先
+            // 并 codex+dsh 再挂 claude——那是 {codex, dsh, claude-code}）。
+            source_statuses: merge_statuses(
+                &claude_store.source_statuses,
+                &merge_statuses(&codex_store.source_statuses, &dsh_store.source_statuses),
+            ),
+            generated_at: codex_store
+                .generated_at
+                .clone()
+                .max(dsh_store.generated_at.clone())
+                .max(claude_store.generated_at.clone()),
         })
     }
 
@@ -983,6 +1110,41 @@ fn codex_built_session_for(home: &Path, sid: &str, ns: &str, fp_map: &HashMap<&s
     })
 }
 
+/// 变化文件 → 会话 id：claude 的 session_id = 文件名 stem（
+/// `claude_session.rs::file_info` 的同一派生），`claude_project_files` 分组键。
+/// 只在**变化或新出现**的文件上跑（镜像 codex 的 §「成本 = O(变化文件数)」纪律）。
+fn claude_session_id_of(path: &Path) -> String {
+    path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string()
+}
+
+/// 单个 session_id 的完整重建（复用既有 `claude_session_audit_json`）。镜像
+/// `codex_built_session_for`：claude 一个逻辑 session 同样可能横跨多个 jsonl 文件
+/// （resume 续写），payload 自带的 `files` 数组就是这个 session 依赖的全部源路径，
+/// 直接拿来做增量缓存的 paths/fingerprints。`source_profile` 取 payload 的 `cwd`
+/// 键（dsh 同款 `--{cwd.replace('/','-')}--` 形状；claude 载荷的 cwd 来自
+/// workspace_roots 首个，缺席时诚实空串）。revision = 载荷 date_last（codex 同款
+/// 派生，`revision: None`）。
+fn claude_built_session_for(home: &Path, sid: &str, ns: &str, fp_map: &HashMap<&str, &str>) -> Option<BuiltSession> {
+    let payload = crate::agent::claude_session::claude_session_audit_json(home, sid)?;
+    let source_profile = dsh_source_profile(payload.get("cwd").and_then(Value::as_str));
+    let paths: Vec<String> = payload
+        .get("files")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .unwrap_or_default();
+    let fingerprints: Vec<String> =
+        paths.iter().map(|p| fp_map.get(p.as_str()).map(|f| f.to_string()).unwrap_or_default()).collect();
+    Some(BuiltSession {
+        entry: PendingEntry {
+            key: SessionKey::new("claude-code", sid, &source_profile, ns),
+            payload,
+            revision: None,
+        },
+        paths,
+        fingerprints,
+    })
+}
+
 /// 单个 DSH 源文件 → 一个逻辑 session（1 文件 = 1 session，见
 /// `dsh_source_fingerprints` 的注释）。读不了/畸形/无 id → `Err((path, reason,
 /// fingerprint))`，调用方记进 degraded（§4.3 绝不数成 0 条真数据）；fingerprint
@@ -1043,7 +1205,9 @@ fn exit_with_error(e: StoreError, msg: &str) -> ! {
 ///   · `--host-kind dsh` → 只填充 dsh 源；**文件在但一个都读不了** → 类型化
 ///     `source-unavailable`（错误码，不是空页，§4.3/§3.3）；「根本没有 DSH」是诚实零
 ///     → 空页；
-///   · no-filter → `SessionStore::all`（两源合并，`source_statuses` 给完整视图）。
+///   · `--host-kind claude-code` → 只填充 claude-code 源；unavailable 判定与 dsh
+///     同款（文件在但一个都构建不出 → 错误码；没装 Claude Code → 诚实零 → 空页）；
+///   · no-filter → `SessionStore::all`（三源合并，`source_statuses` 给完整视图）。
 pub fn sessions_list(
     home: &Path,
     filter: &SessionFilter,
@@ -1070,6 +1234,24 @@ pub fn sessions_list(
                 exit_with_error(
                     StoreError::SourceUnavailable,
                     "dsh source unavailable: session files exist but none are decodable (§4.3)",
+                );
+            }
+            s
+        }
+        Some("claude-code") => {
+            let s = match SessionStore::claude_code(home) {
+                Ok(s) => s,
+                Err(e) => exit_with_error(e, "session store population failed"),
+            };
+            if s.source_statuses
+                .get("claude-code")
+                .and_then(|d| d.get("status"))
+                .and_then(Value::as_str)
+                == Some("unavailable")
+            {
+                exit_with_error(
+                    StoreError::SourceUnavailable,
+                    "claude-code source unavailable: session files exist but none are decodable (§4.3)",
                 );
             }
             s
@@ -1143,6 +1325,10 @@ pub fn sessions_read(
             Ok(s) => s,
             Err(e) => exit_with_error(e, "session store population failed"),
         },
+        "claude-code" => match SessionStore::claude_code(home) {
+            Ok(s) => s,
+            Err(e) => exit_with_error(e, "session store population failed"),
+        },
         other => exit_with_error(
             StoreError::SourceUnavailable,
             &format!("unknown host kind '{other}'"),
@@ -1151,9 +1337,11 @@ pub fn sessions_read(
     match store.read(&key, revision.as_deref()) {
         Ok(envelope) => {
             let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
-            if json_out || key.host_kind == "dsh" {
-                // dsh 没有 CLI 的 HTML 渲染器（那是 Tauri 审计 tab 的活）——
-                // 非 --json 的 dsh read 直接给 pretty JSON，不走 codex 渲染器。
+            if json_out || key.host_kind == "dsh" || key.host_kind == "claude-code" {
+                // dsh / claude-code 没有 CLI 的 HTML 渲染器（那是 Tauri 审计 tab
+                // 的活）——非 --json 的 read 直接给 pretty JSON，不走 codex 渲染器
+                // （`render_codex_session` 是 codex 专属形状，喂 claude/dsh 载荷
+                // 会渲染错）。
                 println!("{text}");
             } else {
                 print!("{}", csa::render_codex_session(envelope.get("session").unwrap_or(&Value::Null)));
@@ -2058,6 +2246,194 @@ mod tests {
         assert_eq!(p0.total, 1); // 只有 rollout-sol 是 gpt-5.6-sol
         assert_eq!(p0.items[0]["session_key"]["native_id"], "rollout-sol");
         assert!(p0.next_cursor.is_none());
+    }
+
+    /// 建 fake Claude Code home：`home/.claude/projects/<slug>/<stem>.jsonl`。
+    /// 把 fixtures/claude 的三个合成日志拷进去 → 3 个逻辑 session（session_id =
+    /// 文件 stem：healthy / dangerous / all-recorded）。
+    fn fake_claude_home(t: &Path) -> PathBuf {
+        let home = t.join("home");
+        fake_claude_under(&home);
+        home
+    }
+
+    /// 在既有 home 下补 Claude 会话（供三源合并测试复用）。
+    fn fake_claude_under(home: &Path) {
+        let claude = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("claude");
+        for name in ["healthy.jsonl", "dangerous.jsonl", "all-recorded.jsonl"] {
+            let dir = home.join(".claude").join("projects").join("p-skill-vitals");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::copy(claude.join(name), dir.join(name)).unwrap();
+        }
+    }
+
+    /// 「没有 Claude Code」是诚实零：projects 根缺席 → 0 条目 + status ok/0，
+    /// **不是** unavailable（镜像 dsh 的「诚实零」纪律——unavailable 只留给
+    /// 「文件在但一个都构建不出」）。roots 报告 exists=false 一并可见。
+    #[test]
+    fn claude_populate_absent_home_is_ok_zero() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let home = t.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let av = t.join("av");
+        std::fs::create_dir_all(&av).unwrap();
+        let _g = EnvGuard::set(&home, &av);
+
+        let store = SessionStore::claude_code(&home).expect("populate ok");
+        assert_eq!(store.entries.len(), 0);
+        assert_eq!(store.source_statuses["claude-code"]["status"], "ok");
+        assert_eq!(store.source_statuses["claude-code"]["sessions"], 0);
+        let roots = store.source_statuses["claude-code"]["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0]["kind"], "projects");
+        assert_eq!(roots[0]["exists"], false);
+        assert_eq!(roots[0]["file_count"], 0);
+        assert!(claude_cache_path().is_file(), "0 sessions is still a memo");
+    }
+
+    /// fake claude home → 3 个逻辑会话：native_id = 文件 stem、host_kind =
+    /// claude-code、source_profile = payload cwd 的 dsh 同款清洗
+    /// （`--/repo--` 的 `/` → `-`）、title/model/date_span 从 audit 载荷派生、
+    /// findings_total = audit.summary 计数（dangerous 的 SV601 = 1）、files = 1。
+    /// tokens_total/cost_usd 诚实 None——claude 载荷没有 cost_report（§9 是设计
+    /// 不是实现），列表显示「—」而不是编造数字。
+    #[test]
+    fn claude_populate_builds_entries_from_fake_home() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let home = fake_claude_home(&t);
+        let av = t.join("av");
+        std::fs::create_dir_all(&av).unwrap();
+        let _g = EnvGuard::set(&home, &av);
+
+        let store = SessionStore::claude_code(&home).expect("populate ok");
+        assert_eq!(store.entries.len(), 3);
+        let by_id: std::collections::HashMap<&str, &SessionReportEntry> =
+            store.entries.iter().map(|e| (e.key.native_id.as_str(), e)).collect();
+        let healthy = by_id["healthy"];
+        assert_eq!(healthy.key.host_kind, "claude-code");
+        assert_eq!(healthy.key.source_profile, "---repo--", "cwd /repo → / 替换为 -");
+        assert_eq!(healthy.title.as_deref(), Some("我的会话"));
+        assert_eq!(healthy.model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(healthy.date_first.as_deref(), Some("2026-08-20T14:27:00Z"));
+        assert_eq!(healthy.date_last.as_deref(), Some("2026-08-20T14:30:00Z"));
+        assert_eq!(healthy.files, 1);
+        assert!(healthy.cost_usd.is_none(), "no cost_report → honest None");
+        assert!(healthy.tokens_total.is_none(), "no cost_report → honest None");
+        assert_eq!(healthy.findings_total, 0);
+        assert_eq!(by_id["dangerous"].findings_total, 1, "SV601 from dangerous fixture");
+        assert_eq!(by_id["dangerous"].title.as_deref(), Some("危险命令会话"));
+        assert_eq!(by_id["all-recorded"].title.as_deref(), Some("全覆盖会话"));
+        let env = &by_id["healthy"].envelope;
+        assert_eq!(env["session_key"]["host_kind"], "claude-code");
+        assert!(env["session"].get("files").is_some(), "payload files array survives");
+        assert_eq!(env["source_statuses"]["claude-code"]["status"], "ok");
+        assert_eq!(env["source_statuses"]["claude-code"]["sessions"], 3);
+    }
+
+    /// claude cache 快路径：两次调用逐字节一致（含 envelope 里的 statuses）、
+    /// cache 文件存在、删 cache 重建仍一致——cache 只是可删 memo（codex 同款）。
+    #[test]
+    fn claude_populate_cache_delete_rebuild_is_identical() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let home = fake_claude_home(&t);
+        let av = t.join("av");
+        std::fs::create_dir_all(&av).unwrap();
+        let _g = EnvGuard::set(&home, &av);
+
+        let a = SessionStore::claude_code(&home).unwrap();
+        let b = SessionStore::claude_code(&home).unwrap();
+        assert_eq!(store_bytes(&a), store_bytes(&b), "cache hit must be byte-identical");
+        assert!(claude_cache_path().is_file());
+        std::fs::remove_file(claude_cache_path()).unwrap();
+        let c = SessionStore::claude_code(&home).unwrap();
+        assert_eq!(store_bytes(&a), store_bytes(&c), "cache delete + rebuild identical");
+    }
+
+    /// 源变化（新会话文件）→ 指纹不等 → 只重建变化的 session（v2 增量），新
+    /// 会话必须出现、旧会话原样保留（缓存不能把新文件藏起来）。
+    #[test]
+    fn claude_source_change_invalidates_cache() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let home = fake_claude_home(&t);
+        let av = t.join("av");
+        std::fs::create_dir_all(&av).unwrap();
+        let _g = EnvGuard::set(&home, &av);
+
+        let a = SessionStore::claude_code(&home).unwrap();
+        assert_eq!(a.entries.len(), 3);
+        // 新增一个会话：同一份 dangerous 记录、不同 stem（= 新 session_id）。
+        let claude = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("claude");
+        std::fs::copy(claude.join("dangerous.jsonl"), home.join(".claude").join("projects").join("p-skill-vitals").join("another.jsonl")).unwrap();
+        let b = SessionStore::claude_code(&home).unwrap();
+        assert_eq!(b.entries.len(), 4);
+        assert!(b.entries.iter().any(|e| e.key.native_id == "another"));
+    }
+
+    /// 文件在但一个都构建不出 → 源 `unavailable`（CLI 面对 `--host-kind
+    /// claude-code` 报 source-unavailable 错误码，不是空页；镜像 dsh §3.3/§4.3）。
+    /// 一条坏行毁整份（parse degraded）→ audit 无记录 → session 丢弃。claude 的
+    /// 逐文件 degraded 数组不引入——按 session 构建，损坏文件下次重试（codex 同款）。
+    #[test]
+    fn claude_populate_all_degraded_is_unavailable() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let home = t.join("home");
+        let dir = home.join(".claude").join("projects").join("p");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 非 JSON 内容 → parse_claude_session_log 降级 → 0 条记录 → 构建不出。
+        std::fs::write(dir.join("bad.jsonl"), "not json at all\n").unwrap();
+        let av = t.join("av");
+        std::fs::create_dir_all(&av).unwrap();
+        let _g = EnvGuard::set(&home, &av);
+
+        let store = SessionStore::claude_code(&home).expect("populate ok");
+        assert_eq!(store.entries.len(), 0);
+        assert_eq!(store.source_statuses["claude-code"]["status"], "unavailable");
+        assert_eq!(store.source_statuses["claude-code"]["sessions"], 0);
+        let roots = store.source_statuses["claude-code"]["roots"].as_array().unwrap();
+        assert_eq!(roots[0]["file_count"], 1, "file exists but none decodable");
+    }
+
+    /// no-filter = 三源合并：3 claude-code + 3 codex + 1 dsh = 7；稳定序
+    /// claude-code 全部在前（sort_key 字典序 "claude-code" < "codex" < "dsh"）；
+    /// `source_statuses` 键序 = [claude-code, codex, dsh]（preserve_order 下键序
+    /// 是字节序）；generated_at = 三源 max。
+    #[test]
+    fn claude_all_merges_three_sources() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let home = fake_codex_home(&t);
+        fake_dsh_under(&home);
+        fake_claude_under(&home);
+        let av = t.join("av");
+        std::fs::create_dir_all(&av).unwrap();
+        let _g = EnvGuard::set(&home, &av);
+
+        let store = SessionStore::all(&home).expect("populate ok");
+        assert_eq!(store.entries.len(), 7);
+        let hosts: Vec<&str> = store.entries.iter().map(|e| e.key.host_kind.as_str()).collect();
+        assert_eq!(
+            hosts,
+            vec!["claude-code", "claude-code", "claude-code", "codex", "codex", "codex", "dsh"]
+        );
+        let keys: Vec<&str> = store.source_statuses.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["claude-code", "codex", "dsh"], "key order is byte order");
+        assert_eq!(store.source_statuses["claude-code"]["status"], "ok");
+        assert_eq!(store.source_statuses["codex"]["status"], "ok");
+        assert_eq!(store.source_statuses["dsh"]["status"], "ok");
+        assert!(store.generated_at >= SessionStore::claude_code(&home).unwrap().generated_at);
+        let page = store.list(&SessionFilter::default(), None, 10).unwrap();
+        assert_eq!(page.total, 7);
+        // claude 条目的 summary 列经合并 store 存活（title 列 + findings）。
+        // 页内序 = sort_key（host_kind 同值时按 native_id：all-recorded 最前）。
+        let first = page.items.first().unwrap();
+        assert_eq!(first["session_key"]["host_kind"], "claude-code");
+        assert_eq!(first["session_key"]["native_id"], "all-recorded");
+        assert_eq!(first["title"], "全覆盖会话");
     }
 
     // ── sessions navigation 纯函数单测 ────────────────────────────

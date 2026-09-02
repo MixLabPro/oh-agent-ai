@@ -1934,7 +1934,7 @@ function renderFindings() {
     "共 " + total + " 条发现 · 规则 " + (findState.data.rules || []).length + " 条" +
     (findState.data.generated_at ? " · 生成于 " + findState.data.generated_at.slice(0, 16).replace("T", " ") : "");
 
-  // 源贡献 chips：按 host_kind 数明细，DSH/Codex 各几条。
+  // 源贡献 chips：按 host_kind 数明细，Claude Code/DSH/Codex 各几条。
   const chips = document.getElementById("find-chips");
   chips.innerHTML = "";
   const bySrc = {};
@@ -1942,9 +1942,11 @@ function renderFindings() {
     const k = f.host_kind || "?";
     bySrc[k] = (bySrc[k] || 0) + 1;
   }
-  for (const k of ["dsh", "codex"]) {
+  for (const k of ["claude-code", "dsh", "codex"]) {
     if (bySrc[k] == null) continue;
-    const c = el("span", "chip" + (k === "dsh" ? " dsh" : " codex"));
+    // 类名映射必须三分支：claude-code 落进 codex 分支会被染成 codex 色。
+    const cls = k === "dsh" ? " dsh" : k === "claude-code" ? " claude-code" : " codex";
+    const c = el("span", "chip" + cls);
     c.textContent = k + " · " + bySrc[k];
     chips.appendChild(c);
   }

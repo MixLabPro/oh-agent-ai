@@ -151,3 +151,42 @@ def _cwd_of(records):
         if isinstance(cwd, str):
             return cwd
     return None
+
+
+def _file_bytes(path):
+    try:
+        return path.stat().st_size
+    except OSError:
+        # 枚举与 stat 之间文件消失 → 按 0 字节计，不 abort（文件仍算 file_count）。
+        return 0
+
+
+def claude_session_roots_report(home=None):
+    """`~/.claude/projects` 根的存在性报告（r2a store 的
+    `source_statuses["claude-code"]` 与 menubar 的 `host_has_source` 都靠它判「该
+    宿主有数据源」——roots 缺席时绝不能报「0 会话」冒充「没有 Claude Code」）。
+    镜像 `codex_session_roots_report`：单根 `projects`，exists/file_count/
+    total_bytes 同形状、同键序（host → roots，根对象 kind → path → exists →
+    file_count → total_bytes）。键序是字节一致的一部分，不能重排。
+    mirror `claude_session.rs::claude_session_roots_report`。"""
+    if home is None:
+        home = Path.home()
+    home = Path(home)
+    root = home / ".claude" / "projects"
+    exists = root.is_dir()
+    file_count = 0
+    total_bytes = 0
+    if exists:
+        files = [p for p in sorted(root.rglob("*.jsonl"), key=str) if p.is_file()]
+        file_count = len(files)
+        total_bytes = sum(_file_bytes(f) for f in files)
+    return {
+        "host": "claude-code",
+        "roots": [{
+            "kind": "projects",
+            "path": str(root),
+            "exists": exists,
+            "file_count": file_count,
+            "total_bytes": total_bytes,
+        }],
+    }

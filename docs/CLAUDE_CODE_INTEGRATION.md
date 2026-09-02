@@ -9,8 +9,10 @@
 > `claude_evidence.py` + 三份 leaf fixture 差分钉住，见 §10/§11）。§4 的
 > `TimelineEntry.provenance` + `source_type` 按 host 生成、§3 的 `ToolResultObservation.failed`
 > 已实现进 `agent-vitals-core`（core 单测 + golden 差分 15/15 全绿，输出字节不变，见 §4）。
-> 评审结论：v0.5 通用 Core 不修改的方向**成立**。§9 成本部分与 §5 SessionStore 接入仍属
-> 后续阶段（§11 工作项 6/7/8）。
+> 评审结论：v0.5 通用 Core 不修改的方向**成立**。§5 SessionStore 接入已**落地**（2026-09-02，
+> §11 工作项 7/8，见 §5——三源并行 `all()`、`source_statuses["claude-code"]` 三态、
+> workbench 会话 tab 宿主 chip）；仅剩 §9 成本部分（§11 工作项 6，需价表）与 menubar
+> 导航第三宿主行（MENUBAR spec 自证两行，另行跟进）。
 
 ## 0. 结论
 
@@ -217,21 +219,27 @@ pub struct TimelineEntry<T> {
 
 DSH/Codex 现有输入全部 Measured，输出字节不变（golden 差分 15/15 一致，Python↔Rust）。
 
-## 5. SessionStore 接入面（此前完全缺席）
+## 5. SessionStore 接入面（此前完全缺席；**已落地 2026-09-02**）
 
-`src/agent/r2a_store.rs` 目前对 Codex/DSH **硬编码分发**（`codex_cache_path`/
+`src/agent/r2a_store.rs` 曾对 Codex/DSH **硬编码分发**（`codex_cache_path`/
 `dsh_cache_path`、`codex_source_fingerprints`/`dsh_source_fingerprints`、`source_statuses`
-均按宿主写死）。接入 Claude 需要：
+均按宿主写死）。已接入 Claude（本计划的「第三源」）：
 
-- `SessionStore::claude_code(home)` + `sessions list --host-kind claude-code`
-- `sessions read` 接受 Claude `SessionKey`
-- `SessionStore::all()` 合并 Claude
+- `SessionStore::claude_code(home)` + `sessions list --host-kind claude-code` ✅
+- `sessions read` 接受 Claude `SessionKey`（渲染走 pretty JSON，不落 codex HTML 渲染器）✅
+- `SessionStore::all()` 三源并行合并（`thread::scope` 三 spawn；sort_key 字典序 →
+  claude-code 在合并列表最前；`source_statuses` 键序 `{claude-code, codex, dsh}` 稳定）✅
 - Claude source fingerprint（`~/.claude/projects/**/*.jsonl`）+ 缓存 revision
-- `source_statuses["claude-code"]`
-- list/read/filter/pagination 测试
-- Workbench host filter 与导航（menubar spec 的宿主轴复用）
+  （`cache/r2a/claude-sessions.json` v2，增量重建与 codex 同构）✅
+- `source_statuses["claude-code"]` **DSH 式三态**（files 空 → ok/0 诚实零；built>0 →
+  ok；files>0 但 built==0 → unavailable，CLI 报类型化错误码而非空页，§4.3 同款）✅
+- list/read/filter/pagination 测试（`tests/test_r2a.py` ClaudePopulation/Reconciliation
+  E2E + `tests/test_cli_matrix.py` 差分，py==rs 逐字节，含 cache 共享双方向）✅
+- Workbench host filter（`src-tauri/ui/workbench.html` chips 全部/Claude Code/DSH/Codex）
+  ✅；menubar 导航保持两宿主（MENUBAR spec 自证两行，另行跟进）
 
-**建议顺手抽 source registry**：第三宿主开始，每加一个宿主改多处分支的模式不可持续。
+**source registry 不抽（follow-up）**：本次保持 list/read 显式三臂（各 3 行，diff 最小），
+registry 抽取等第四宿主出现再做——刚写完的 codex 镜像不重构，避免两件事互相污染。
 
 ## 6. WASM 复用修正（评审 P0-5）
 
@@ -360,8 +368,14 @@ unknown-provider    无法可靠归属 → 不出价
    （`normalize_tool_name` / `canonical_string`，`args_text_is_deterministic_regardless_of_key_order`
    等 core 单测钉住）；
 6. pricing.json 补 MiniMax/claude 官方价（业务数据，需价表；§9）；
-7. SessionStore：`claude_code(home)` + source registry 抽取（§5）；
-8. Tauri/workbench 消费（§6 架构，计算 host-side）；
+7. ~~SessionStore：`claude_code(home)` + source registry 抽取（§5）~~ **已落地**
+   （2026-09-02：第三源全弧线——`SessionStore::claude_code` + payload `files` 键 +
+   `claude_source_statuses` 三态 + `all()` 三源并行 + roots 报告，Rust/Python 锁步，
+   `tests/test_r2a.py` + `tests/test_cli_matrix.py` 差分逐字节；source registry **不抽**——
+   list/read 保持显式三臂，第四宿主出现时再做，见 §5）；
+8. ~~Tauri/workbench 消费（§6 架构，计算 host-side）~~ **已落地**（2026-09-02：工作台
+   会话 tab 三宿主 chips + 会话列表/详情/Findings 页消费 claude 源，wasm 零改动——
+   claude 源只在 CLI/r2a 面；menubar 导航第三宿主行按 MENUBAR spec 另行跟进）；
 9. ~~验收 10 条 + fixtures 入库~~ **已落地**（`fixtures/claude/` 三份 leaf 夹具——
    `healthy.jsonl` / `dangerous.jsonl` / `all-recorded.jsonl`，`build_claude_fixture.py`
    自校验钉死 §10 验收 #4/#5/#6 数字；`tests/test_cli_matrix.py` `test_claude_session_*`

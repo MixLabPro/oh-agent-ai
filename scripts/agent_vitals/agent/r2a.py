@@ -29,9 +29,11 @@ from pathlib import Path
 from agent_vitals import codex_session_audit as csa
 from agent_vitals.agent import behavior as behavior_mod
 from agent_vitals.agent import budget as budget_mod
+from agent_vitals.agent import claude_session_audit as claude_audit_mod
 from agent_vitals.agent import codex_cost as codex_cost_mod
 from agent_vitals.agent import codex_usage as codex_usage_mod
 from agent_vitals.agent import takeover as takeover_mod
+from agent_vitals.adapters import claude_session as claude_session_mod
 from agent_vitals.adapters import codex_session as codex_session_mod
 from agent_vitals.adapters import dsh as dsh_mod
 from agent_vitals.paths import data_home
@@ -377,6 +379,10 @@ def _codex_cache_path():
     return _cache_dir() / "codex-sessions.json"
 
 
+def _claude_cache_path():
+    return _cache_dir() / "claude-sessions.json"
+
+
 def fingerprint_file(path):
     """(size, mtime_ns, 首/尾 64 字节 FNV-1a)。仅相等比较。stat/read 失败 →
     None（cache 自然失效，不 abort）。"""
@@ -395,6 +401,14 @@ def fingerprint_file(path):
 def codex_source_fingerprints(home=None):
     return [(str(p), fingerprint_file(p) or "")
             for p in codex_session_mod.codex_rollout_files(home)]
+
+
+def claude_source_fingerprints(home=None):
+    """Claude Code 源指纹：`~/.claude/projects/**/*.jsonl` 全量 walk（复用
+    `claude_project_files`，与 codex 同款），按全局路径序。
+    mirror `r2a_store::claude_source_fingerprints`。"""
+    return [(str(p), fingerprint_file(p) or "")
+            for p in claude_session_mod.claude_project_files(home)]
 
 
 def pricing_version():
@@ -463,9 +477,34 @@ def dsh_source_statuses(home, files, degraded):
     }
 
 
+def claude_source_statuses(home, files_n, built):
+    """Claude Code 源状态。**DSH 式三态**（不是 codex 的恒 ok），mirror
+    `r2a_store::claude_source_statuses`：
+
+      · files 空（`~/.claude/projects` 缺席或没有 jsonl）→ `ok`，sessions 0 ——
+        诚实零（没装 Claude Code ≠ 不可读），**不是** unavailable；
+      · built > 0 → `ok`；
+      · files > 0 但 built == 0（文件在但一个都构建不出）→ `unavailable` —— 源
+        真的不可读，CLI 面对 `--host-kind claude-code` 报 source-unavailable
+        错误码，**不是空页**（§4.3）。claude 按 session 构建、逐文件 degraded 的
+        概念不引入（那是 dsh 的专属粒度）；损坏文件每次重试，与 codex 同款。
+
+    `roots` = `claude_session_roots_report`（`~/.claude/projects` 单根报告）。"""
+    roots = claude_session_mod.claude_session_roots_report(home)
+    status = "ok" if files_n == 0 or built > 0 else "unavailable"
+    return {
+        "claude-code": {
+            "status": status,
+            "sessions": built,
+            "roots": roots.get("roots", []),
+        },
+    }
+
+
 def merge_statuses(a, b):
-    """合并两个单源 statuses（codex + dsh）成 `all` store 的完整 statuses。键序
-    稳定：codex 在前、dsh 在后（JSON 键序是字节一致的一部分）。
+    """合并两个单源 statuses（codex + dsh + claude-code）成 `all` store 的完整
+    statuses。键序稳定：claude-code 在前、codex 次之、dsh 在后（JSON 键序是字节
+    一致的一部分——dict 保持插入序，必须先并 claude 再挂 codex+dsh）。
     mirror `r2a_store::merge_statuses`。"""
     merged = dict(a)
     merged.update(b)
@@ -934,19 +973,74 @@ class SessionStore:
         return store
 
     @classmethod
+    def claude_code(cls, home=None):
+        """从 Claude Code 源填充（§5 第三源）。镜像 Python `codex` 的路径
+        （Python 侧 `_cache_v2_to_store` 是 ALL-OR-NOTHING 全命中判定，没有 Rust
+        的 per-session 增量——输出仍逐字节对齐，差分门只看输出）：
+        `claude_source_fingerprints`（`~/.claude/projects/**/*.jsonl`）→
+        `cache/r2a/claude-sessions.json` v2 缓存 → 全命中走快路径 → 否则
+        `claude_session_list` 全量重建（每 sid 调 `claude_session_audit_json`，
+        读不了的直接跳过，**绝不数成 0 条真数据**）。
+        `source_profile` = payload `cwd` 的 dsh 同款清洗（`--{cwd.replace('/',
+        '-')}--`）；`revision: None`（载荷 date_last 派生，codex 同款）。
+        mirror `r2a_store::SessionStore::claude_code`。"""
+        ns = takeover_mod.machine_namespace()
+        generated_at = _now_iso_utc()
+        fingerprints = claude_source_fingerprints(home)
+        fp_map = dict(fingerprints)
+        cache_path = _claude_cache_path()
+        files_n = len(fingerprints)
+
+        cached = _read_cache(cache_path)
+        if cached is not None:
+            store = _cache_v2_to_store(cached, fingerprints)
+            if store is not None:
+                return store
+
+        sessions = claude_audit_mod.claude_session_list(home).get("sessions") or []
+        built = []
+        for s in sessions:
+            sid = s.get("session_id")
+            if not isinstance(sid, str):
+                continue
+            payload = claude_audit_mod.claude_session_audit_json(home, sid)
+            if payload is None:
+                continue
+            cwd = payload.get("cwd")
+            source_profile = dsh_source_profile(cwd if isinstance(cwd, str) else None)
+            paths, fps = _codex_built_paths(payload, fp_map)
+            built.append((SessionKey("claude-code", sid, source_profile, ns),
+                          payload, None, paths, fps))
+
+        statuses = claude_source_statuses(home, files_n, len(built))
+        entries, paths_fps = _entries_with_paths(built, generated_at, statuses)
+        store = cls(entries, statuses, generated_at)
+        # claude 没有 degraded 概念（读不了的 jsonl 直接被 audit_json 跳过），
+        # 写 cache 时恒空数组——Rust 侧同写 Vec::new()。
+        _write_cache(cache_path, "claude-code", store, paths_fps, [])
+        return store
+
+    @classmethod
     def all(cls, home=None):
-        """合并 codex + dsh 两个单源 store（no-filter = 全部源）。**没有自己的
-        合并 cache**——每次把两个子 store 合并（各子 store 走自己的 cache 快
-        路径），`generated_at` 取两边的 max。`source_statuses` 合并成
-        `{codex, dsh}` 完整视图。mirror `r2a_store::SessionStore::all`。"""
+        """合并 codex + dsh + claude-code 三个单源 store（no-filter = 全部源）。
+        **没有自己的合并 cache**——每次把三个子 store 合并（各子 store 走自己的
+        cache 快路径），`generated_at` 取三边的 max。`source_statuses` 合并成
+        `{claude-code, codex, dsh}` 完整视图（键序 = 插入序 = 字节序）。
+        mirror `r2a_store::SessionStore::all`。"""
         codex_store = cls.codex(home)
         dsh_store = cls.dsh(home)
-        entries = list(codex_store.entries) + list(dsh_store.entries)
+        claude_store = cls.claude_code(home)
+        entries = (list(codex_store.entries) + list(dsh_store.entries)
+                   + list(claude_store.entries))
         entries.sort(key=lambda e: sort_key(e.key))
         return cls(entries,
-                   merge_statuses(codex_store.source_statuses,
-                                  dsh_store.source_statuses),
-                   max(codex_store.generated_at, dsh_store.generated_at))
+                   merge_statuses(
+                       claude_store.source_statuses,
+                       merge_statuses(codex_store.source_statuses,
+                                      dsh_store.source_statuses)),
+                   max(codex_store.generated_at,
+                       dsh_store.generated_at,
+                       claude_store.generated_at))
 
     def list(self, filter_, cursor, page_size):
         return list_sessions(self.entries, filter_, cursor, page_size)
@@ -972,8 +1066,10 @@ def sessions_list(home, host_kind, model, date_from, date_to, query,
     #   · dsh → 只填充 dsh 源；**文件在但一个都读不了** → 类型化
     #     source-unavailable（错误码，不是空页，§4.3/§3.3）；「根本没有 DSH」
     #     是诚实零 → 空页；
+    #   · claude-code → 只填充 claude-code 源；unavailable 判定与 dsh 同款
+    #     （文件在但一个都构建不出 → 错误码；没装 Claude Code → 诚实零 → 空页）；
     #   · 未知 kind → source-unavailable（错误码，不是静默空）；
-    #   · no-filter → `SessionStore::all`（两源合并，source_statuses 给完整视图）。
+    #   · no-filter → `SessionStore::all`（三源合并，source_statuses 给完整视图）。
     if host_kind == "codex":
         try:
             store = SessionStore.codex(home)
@@ -989,6 +1085,16 @@ def sessions_list(home, host_kind, model, date_from, date_to, query,
                 "source-unavailable",
                 "dsh source unavailable: session files exist but none are "
                 "decodable (§4.3)"), "")
+    elif host_kind == "claude-code":
+        try:
+            store = SessionStore.claude_code(home)
+        except StoreError as e:
+            _exit_with_error(e, "session store population failed")
+        if store.source_statuses.get("claude-code", {}).get("status") == "unavailable":
+            _exit_with_error(StoreError(
+                "source-unavailable",
+                "claude-code source unavailable: session files exist but none "
+                "are decodable (§4.3)"), "")
     elif host_kind is not None:
         _exit_with_error(StoreError(
             "source-unavailable", "unknown host kind '%s'" % host_kind), "")
@@ -1051,6 +1157,11 @@ def sessions_read(home, session_key_json, revision, json_out):
             store = SessionStore.dsh(home)
         except StoreError as e:
             _exit_with_error(e, "session store population failed")
+    elif key.host_kind == "claude-code":
+        try:
+            store = SessionStore.claude_code(home)
+        except StoreError as e:
+            _exit_with_error(e, "session store population failed")
     else:
         _exit_with_error(StoreError(
             "source-unavailable", "unknown host kind '%s'" % key.host_kind), "")
@@ -1059,9 +1170,10 @@ def sessions_read(home, session_key_json, revision, json_out):
     except StoreError as e:
         _exit_with_error(e, "read failed")
     text = json.dumps(envelope, ensure_ascii=False, indent=2)
-    if json_out or key.host_kind == "dsh":
-        # dsh 没有 CLI 的 HTML 渲染器（那是 Tauri 审计 tab 的活）——非 --json 的
-        # dsh read 直接给 pretty JSON，不走 codex 渲染器。
+    if json_out or key.host_kind in ("dsh", "claude-code"):
+        # dsh / claude-code 没有 CLI 的 HTML 渲染器（那是 Tauri 审计 tab 的
+        # 活）——非 --json 的 read 直接给 pretty JSON，不走 codex 渲染器
+        # （`_render_audit` 是 codex 专属形状，喂 claude/dsh 载荷会渲染错）。
         print(text)
     else:
         print(csa._render_audit(envelope.get("session") or {}), end="")

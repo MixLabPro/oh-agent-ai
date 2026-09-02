@@ -138,6 +138,34 @@ def _fake_dsh_home(base: Path) -> Path:
     return home
 
 
+FIXTURE_CLAUDE = ROOT / "fixtures" / "claude"
+
+
+def _claude_cache_path(av: Path) -> Path:
+    return Path(av) / "cache" / "r2a" / "claude-sessions.json"
+
+
+def _fake_claude_home(base: Path) -> Path:
+    """隔离的模拟 HOME：真格式 Claude 语料（fixtures/claude 的三个合成日志）。
+
+    与 Rust `r2a_store::fake_claude_home` 同构：`healthy` + `dangerous` +
+    `all-recorded` 拷进 `~/.claude/projects/<slug>/` → 3 个逻辑 session
+    （session_id = 文件 stem）。"""
+    home = base / "home"
+    _fake_claude_under(home)
+    return home
+
+
+def _fake_claude_under(home: Path) -> Path:
+    """在既有 home 下补 Claude 会话（供三源合并测试复用）。
+    mirror Rust `fake_claude_under`。"""
+    d = home / ".claude" / "projects" / "p-skill-vitals"
+    d.mkdir(parents=True, exist_ok=True)
+    for name in ["healthy.jsonl", "dangerous.jsonl", "all-recorded.jsonl"]:
+        shutil.copy2(FIXTURE_CLAUDE / name, d / name)
+    return home
+
+
 # ── §6.3-5 / §6.3-6 纯规则镜像（与 core `r2a.rs` 断言值同源）───────
 
 def _entry(native_id, rev="2026-08-30", seq=0, host="codex"):
@@ -671,6 +699,141 @@ class CrossImplementationReconciliationTests(unittest.TestCase):
         self.assertEqual(py.stdout, rs.stdout)
 
 
+# ── Claude Code 源跨实现字节对账（§5 第三源）───────────────────
+
+@unittest.skipUnless(_BIN, "AGENT_VITALS_BIN not set — only one implementation "
+                           "available, nothing to reconcile")
+class ClaudeReconciliationTests(unittest.TestCase):
+    """claude-code 半边对账台：三源合并 home（3 claude + 3 codex + 1 dsh）下，
+    claude 臂 list/read、no-filter 三源合并、错误路径逐字节一致。cache 共享双
+    方向（generated_at 经 cache 冻结后两侧共用同一份墙钟字段）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="av-r2a-claude-rec-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.home = _fake_codex_home(cls.tmp)
+        _fake_dsh_under(cls.home)
+        _fake_claude_under(cls.home)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _av(self):
+        av = self.tmp / self._testMethodName
+        av.mkdir(exist_ok=True)
+        return av
+
+    def _list(self, prog, av, extra=()):
+        run = _run_py if prog == "py" else _run_rs
+        return run(["sessions", "list", "--json"] + list(extra),
+                   _env(self.home, av))
+
+    def test_claude_list_byte_identical_via_cache_share_py_then_rs(self):
+        av = self._av()
+        py = self._list("py", av, ["--host-kind", "claude-code"])
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertTrue(_claude_cache_path(av).is_file())
+        rs = self._list("rs", av, ["--host-kind", "claude-code"])
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        self.assertEqual(py.stdout, rs.stdout,
+                         "py-writes-cache / rs-reads-cache must be "
+                         "byte-identical (generated_at shared via cache)")
+
+    def test_claude_list_byte_identical_via_cache_share_rs_then_py(self):
+        av = self._av()
+        rs = self._list("rs", av, ["--host-kind", "claude-code"])
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        py = self._list("py", av, ["--host-kind", "claude-code"])
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertEqual(rs.stdout, py.stdout)
+
+    def test_claude_read_byte_identical_via_cache_share(self):
+        av = self._av()
+        py_list = self._list("py", av, ["--host-kind", "claude-code"])
+        self.assertEqual(py_list.returncode, 0, py_list.stderr)
+        key = json.loads(py_list.stdout)["page"]["items"][0]["session_key"]
+        self.assertEqual(key["host_kind"], "claude-code")
+        key_json = json.dumps(key, separators=(",", ":"))
+        py = _run_py(["sessions", "read", "--session-key", key_json, "--json"],
+                     _env(self.home, av))
+        rs = _run_rs(["sessions", "read", "--session-key", key_json, "--json"],
+                     _env(self.home, av))
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        self.assertEqual(py.stdout, rs.stdout,
+                         "claude read envelope must be byte-identical when "
+                         "both impls read the same cache")
+
+    def test_all_three_sources_byte_identical(self):
+        """no-filter 三源合并：7 条、稳定序 claude-code 全部在前、`source_statuses`
+        键序 {claude-code, codex, dsh}（preserve_order 下键序是字节序，必须一致）。"""
+        av = self._av()
+        py = self._list("py", av)
+        self.assertEqual(py.returncode, 0, py.stderr)
+        rs = self._list("rs", av)
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        self.assertEqual(py.stdout, rs.stdout)
+        dto = json.loads(py.stdout)
+        self.assertEqual(dto["page"]["total"], 7)
+        hosts = [it["session_key"]["host_kind"] for it in dto["page"]["items"]]
+        self.assertEqual(hosts, ["claude-code"] * 3 + ["codex"] * 3 + ["dsh"])
+        self.assertEqual(list(dto["source_statuses"]),
+                         ["claude-code", "codex", "dsh"],
+                         "source_statuses key order is byte order")
+
+    def test_claude_filter_and_pagination_byte_identical(self):
+        """filter + 分页差分：`--host-kind claude-code --page-size 2` 两页
+        逐字节一致（cursor 往返跨实现同构）。"""
+        av = self._av()
+        py1 = self._list("py", av, ["--host-kind", "claude-code",
+                                    "--page-size", "2"])
+        self.assertEqual(py1.returncode, 0, py1.stderr)
+        rs1 = self._list("rs", av, ["--host-kind", "claude-code",
+                                    "--page-size", "2"])
+        self.assertEqual(rs1.returncode, 0, rs1.stderr)
+        self.assertEqual(py1.stdout, rs1.stdout)
+        page1 = json.loads(py1.stdout)["page"]
+        self.assertEqual(page1["total"], 3)
+        cursor = page1["next_cursor"]
+        self.assertIsNotNone(cursor, "3 items at page-size 2 must have page 2")
+        cursor_json = json.dumps(cursor, separators=(",", ":"))
+        py2 = self._list("py", av, ["--host-kind", "claude-code",
+                                    "--page-size", "2", "--cursor", cursor_json])
+        rs2 = self._list("rs", av, ["--host-kind", "claude-code",
+                                    "--page-size", "2", "--cursor", cursor_json])
+        self.assertEqual(py2.returncode, 0, py2.stderr)
+        self.assertEqual(rs2.returncode, 0, rs2.stderr)
+        self.assertEqual(py2.stdout, rs2.stdout,
+                         "page 2 via cursor must be byte-identical")
+        page2 = json.loads(py2.stdout)["page"]
+        self.assertEqual(len(page2["items"]), 1)
+
+    def test_claude_source_unavailable_error_parity(self):
+        """文件在但一个都构建不出 → 两侧都走类型化 source-unavailable 错误码，
+        stderr 逐字节一致。注意必须用**只有坏文件**的 home——类 home 有 3 个好
+        会话，built>0 → ok，unavailable 只留给「一个都构建不出」（§4.3）。"""
+        av = self._av()
+        base = Path(tempfile.mkdtemp(prefix="av-claude-rec-broken-"))
+        try:
+            d = base / "home" / ".claude" / "projects" / "p"
+            d.mkdir(parents=True)
+            (d / "bad.jsonl").write_text("this is not json\n", encoding="utf-8")
+            py = _run_py(["sessions", "list", "--host-kind", "claude-code",
+                          "--json"], _env(base / "home", av))
+            rs = _run_rs(["sessions", "list", "--host-kind", "claude-code",
+                          "--json"], _env(base / "home", av))
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+        self.assertEqual(py.returncode, 2)
+        self.assertEqual(rs.returncode, 2)
+        self.assertEqual(py.stderr, rs.stderr,
+                         "claude source-unavailable error JSON must be "
+                         "byte-identical")
+        self.assertEqual(py.stdout, rs.stdout)
+
+
 # ── sessions navigation 投影（spec §5.1/§5.2）────────────────────
 # 纯函数真值表与 Rust `r2a_store.rs` 单测同一批钉死输入/输出；差分侧逐字节
 # 对账（cache 共享双方向 + 人读渲染 + 错误路径 + 诚实降级）。
@@ -1099,6 +1262,144 @@ class DshPopulationE2ETests(unittest.TestCase):
                          "file back → 1 again (cache re-invalidated)")
         if _BIN:
             self.assertEqual(list_total("rs"), 1)
+
+
+# ── Claude Code 源（§5 第三源）E2E ─────────────────────────────
+
+class ClaudePopulationE2ETests(unittest.TestCase):
+    """隔离 HOME + 真格式 Claude 语料 → `sessions` CLI 的 claude-code 臂全链
+    （不依赖 AGENT_VITALS_BIN；跨实现对账在下面的 reconciliation 类）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix="av-r2a-claude-")
+        cls.tmp = Path(cls._tmp.name)
+        cls.home = _fake_claude_home(cls.tmp)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _av(self):
+        av = self.tmp / self._testMethodName
+        av.mkdir(exist_ok=True)
+        return av
+
+    def test_absent_home_is_ok_zero(self):
+        """没装 Claude Code 是诚实零：projects 缺席 → 空页 + ok/0 + roots
+        exists=false，**不是** unavailable（错误码只留给「文件在但一个都构建
+        不出」）。"""
+        base = Path(tempfile.mkdtemp(prefix="av-claude-absent-"))
+        try:
+            av = base / "av"
+            av.mkdir()
+            r = _run_py(["sessions", "list", "--host-kind", "claude-code",
+                         "--json"], _env(base / "home", av))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            dto = json.loads(r.stdout)
+            self.assertEqual(dto["page"]["total"], 0)
+            st = dto["source_statuses"]["claude-code"]
+            self.assertEqual(st["status"], "ok")
+            self.assertEqual(st["sessions"], 0)
+            roots = st["roots"]
+            self.assertEqual(roots[0]["kind"], "projects")
+            self.assertFalse(roots[0]["exists"])
+            self.assertEqual(roots[0]["file_count"], 0)
+            self.assertTrue(_claude_cache_path(av).is_file(),
+                            "0 sessions is still a memo")
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_populate_builds_entries_and_stable_sort(self):
+        av = self._av()
+        r = _run_py(["sessions", "list", "--host-kind", "claude-code", "--json"],
+                    _env(self.home, av))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dto = json.loads(r.stdout)
+        self.assertEqual(dto["schema_version"], "1")
+        page = dto["page"]
+        self.assertEqual(page["total"], 3)
+        # 稳定序 = sort_key（host_kind 同值 → native_id 内容字典序）。
+        ids = [it["session_key"]["native_id"] for it in page["items"]]
+        self.assertEqual(ids, ["all-recorded", "dangerous", "healthy"])
+        st = dto["source_statuses"]["claude-code"]
+        self.assertEqual(st["status"], "ok")
+        self.assertEqual(st["sessions"], 3)
+        roots = st["roots"]
+        self.assertTrue(roots[0]["exists"])
+        self.assertEqual(roots[0]["file_count"], 3)
+
+    def test_summary_columns_honest_none_for_cost(self):
+        """summary 列从 audit 载荷派生：title/model/date_span/findings_total 有
+        值；tokens_total/cost_usd 诚实 None（claude 载荷没有 cost_report —— §9
+        是设计不是实现，列表显示「—」而不是编造数字）。"""
+        av = self._av()
+        r = _run_py(["sessions", "list", "--host-kind", "claude-code", "--json"],
+                    _env(self.home, av))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        page = json.loads(r.stdout)["page"]
+        by_id = {it["session_key"]["native_id"]: it for it in page["items"]}
+        healthy = by_id["healthy"]
+        self.assertEqual(healthy["session_key"]["host_kind"], "claude-code")
+        self.assertEqual(healthy["session_key"]["source_profile"], "---repo--",
+                         "cwd /repo → / 替换为 -（dsh 同款清洗）")
+        self.assertEqual(healthy["title"], "我的会话")
+        self.assertEqual(healthy["model"], "claude-sonnet-4-5")
+        self.assertEqual(healthy["date_span"]["first"], "2026-08-20T14:27:00Z")
+        self.assertEqual(healthy["date_span"]["last"], "2026-08-20T14:30:00Z")
+        self.assertIsNone(healthy["cost_usd"], "no cost_report → honest None")
+        self.assertIsNone(healthy["tokens_total"], "no cost_report → honest None")
+        self.assertEqual(by_id["dangerous"]["findings_total"], 1,
+                         "SV601 from dangerous fixture")
+        self.assertEqual(by_id["dangerous"]["title"], "危险命令会话")
+        self.assertEqual(by_id["all-recorded"]["title"], "全覆盖会话")
+
+    def test_cache_v3_shape_and_delete_rebuild_identical(self):
+        av = self._av()
+        a = _run_py(["sessions", "list", "--host-kind", "claude-code", "--json"],
+                    _env(self.home, av))
+        self.assertEqual(a.returncode, 0, a.stderr)
+        doc = json.loads(_claude_cache_path(av).read_text(encoding="utf-8"))
+        self.assertEqual(doc["schema_version"], "3")
+        self.assertEqual(doc["source"], "claude-code")
+        self.assertIn("sessions", doc)
+        self.assertEqual(doc["degraded"], [],
+                         "claude 没有逐文件 degraded（按 session 构建，codex 同款）")
+        sessions = doc["sessions"]
+        self.assertEqual(len(sessions), 3)
+        for s in sessions:
+            self.assertEqual(len(s["paths"]), 1)
+            self.assertEqual(len(s["paths"]), len(s["fingerprints"]))
+            self.assertTrue(all(s["fingerprints"]),
+                            "fingerprints must not be placeholders")
+        # 删 cache 重建 → 源派生内容逐字节一致（墙钟字段归一化）。
+        _claude_cache_path(av).unlink()
+        b = _run_py(["sessions", "list", "--host-kind", "claude-code", "--json"],
+                    _env(self.home, av))
+        self.assertEqual(b.returncode, 0, b.stderr)
+        self.assertEqual(
+            _normalize_generated_at(json.loads(a.stdout)),
+            _normalize_generated_at(json.loads(b.stdout)),
+            "cache delete + rebuild must reproduce the same store")
+
+    def test_all_degraded_is_unavailable_error(self):
+        """文件在但一个都构建不出 → 类型化 source-unavailable 错误码（exit 2，
+        **不是空页**）——与 dsh 的 §4.3 同款纪律。非 JSON 内容 → parse 降级 →
+        0 条记录 → 构建不出。"""
+        base = Path(tempfile.mkdtemp(prefix="av-claude-degraded-"))
+        try:
+            d = base / "home" / ".claude" / "projects" / "p"
+            d.mkdir(parents=True)
+            (d / "bad.jsonl").write_text("not json at all\n", encoding="utf-8")
+            av = base / "av"
+            av.mkdir()
+            r = _run_py(["sessions", "list", "--host-kind", "claude-code",
+                         "--json"], _env(base / "home", av))
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("claude-code source unavailable", r.stderr)
+            self.assertEqual(r.stdout, "")
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
 
 
 # ── §6.3-9 DSH 跨实现字节对账 ──────────────────────────────────
