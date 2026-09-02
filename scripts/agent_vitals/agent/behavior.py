@@ -572,7 +572,8 @@ def audit_session_log(path):
     context_composition 文档）。
     """
     from ..adapters import dsh  # 延迟导入，避免模块加载期耦合
-    from .trajectory import match_trajectory
+    from .dsh_evidence import build_dsh_canonical
+    from .canonical_audit import audit_projection
     from .compaction import compaction_events
     from .waste import detect_structural_waste
     from .usage import (
@@ -594,12 +595,21 @@ def audit_session_log(path):
     # 个理由）。family ④ 的轨迹 findings 与所有 coverage 都用同一份 pf，两端
     # lockstep（Rust src/behavior.rs 用 post_fork_evidence.canonical）。
     pf = post_fork(events)
-    # 单事件规则（SV601–610）前置门控产出 findings + family ① 三态；轨迹级
-    # 检测（SV611–614）照旧后置、追加在后，字节序稳定。先滤后调——unavailable
-    # 的规则绝不出现在 findings 里（见 match_behavior_gated 的 SV610 分叉回归）。
-    findings, family1_outcomes = match_behavior_gated(events, session.get("cwd"))
-    trajectory_findings = match_trajectory(pf)
-    findings.extend(trajectory_findings)
+    # v0.6 host-contract spec §7-C/§11-M1：SV601–614 从此和 claude/codex/
+    # workbuddy 一样，经共享求值器 `canonical_audit.audit_projection` 求值——
+    # `dsh_evidence.build_dsh_canonical` 把 pf 翻译成它消费的 5 条
+    # host-neutral timeline（镜像 Rust `dsh_evidence.rs` + 已塌缩的
+    # `canonical_audit.rs`，Rust 侧的 `match_behavior`/`match_behavior_canonical`
+    # 早就走这条路）。family①（SV601–610，前置门控）+ family④（SV611–614，
+    # 轨迹级）一次求出，键序、findings 字节序与旧的
+    # `match_behavior_gated` + `match_trajectory` + `trajectory_rule_outcomes`
+    # 三路拼接完全一致——这三个函数仍然保留（各自的直接单测/
+    # characterization 测试与 `match_behavior` 公共 API 靠它们），只是
+    # `audit_session_log` 不再调用它们拼 findings/outcomes。
+    canonical = build_dsh_canonical(pf, cwd=session.get("cwd"))
+    canonical_out = audit_projection(canonical)
+    findings = canonical_out["findings"]
+    outcomes = canonical_out["rule_outcomes"]
     # 三个消费者共用 usage_events（各取所需，不认识的事件类型自然跳过）
     usage_events = session["usage_events"] or []
     usage = token_by_model(usage_events)
@@ -627,15 +637,6 @@ def audit_session_log(path):
         "approvals": approval_latencies(events),
         "hooks": hook_executions(events),
     }
-    # P3 group①：family ① 的门控三态已由 match_behavior_gated 算出（它内部用
-    # 分叉后的 coverage 判 unavailable）；family ④ 是后置标注，覆盖率必须算在
-    # 分叉之后的事件上——pf 在上面已提前算好（match_trajectory 的输入也要分叉
-    # 后，findings 与 coverage 同一批"审计范围内"的事件，证据才不会全部落在
-    # 分叉前被误判成"有覆盖"）。与 Rust src/behavior.rs 同一个理由。
-    trajectory_outcomes = trajectory_rule_outcomes(trajectory_findings, pf)
-    # 键序 = family ①（SV601–610，RULES 表序）+ family ④（SV611–614）——
-    # 合并成一份 14 键的 outcomes，与 Rust rule_outcomes_json 同序。
-    outcomes = {**family1_outcomes, **trajectory_outcomes}
     # P3 group②：同样道理，usage_coverage 也要用分叉之后的 usage_events。
     usage_coverage = usage_signal_status(post_fork(usage_events))
     # P3 group③：duration_coverage 用同一份 pf——跟 trajectory_outcomes 同源
