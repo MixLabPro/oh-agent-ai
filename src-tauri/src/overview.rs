@@ -235,20 +235,23 @@ pub struct HostsSnapshot {
 }
 
 impl HostsSnapshot {
-    /// 缺场/解析失败兜底：generated_at None（无缓存 → 无 stale footer）、固定
-    /// 三行 unavailable（dsh→codex→claude-code，键序与 `sessions navigation`
-    /// hosts 数组一致——托盘永远渲染固定三行，数据缺失才显示「—」，spec §8）。
-    /// 一条坏掉的 hosts.json 不该让菜单整块消失（同 last-sync.json 的「解析失败
-    /// 走默认」哲学）。旧版只落两行的 hosts.json 按字面读出两行（宽容：不整盘
-    /// 丢弃），下一轮 tick 的三行快照覆盖它。
+    /// 缺场/解析失败兜底：generated_at None（无缓存 → 无 stale footer）、行集
+    /// 从 core `host_capability::HOSTS` 派生（v0.6 host-contract spec §6/
+    /// §11-M3，G7）——遍历 `fold != None` 的宿主，键序即 `HOSTS` 行序
+    /// （dsh→codex→claude-code→workbuddy），今天恰好等于旧硬编码三行（workbuddy
+    /// 尚 `fold: None`，M4 补 `HostBillTotals` 后自动出现第四行，不用再改这个
+    /// 函数）。托盘永远渲染注册集里有折叠能力的宿主，数据缺失才显示「—」，
+    /// spec §8。一条坏掉的 hosts.json 不该让菜单整块消失（同 last-sync.json 的
+    /// 「解析失败走默认」哲学）。旧版只落两行的 hosts.json 按字面读出两行
+    /// （宽容：不整盘丢弃），下一轮 tick 的新快照覆盖它。
     pub fn unavailable() -> Self {
         HostsSnapshot {
             generated_at: None,
-            hosts: vec![
-                HostRow::unavailable("dsh"),
-                HostRow::unavailable("codex"),
-                HostRow::unavailable("claude-code"),
-            ],
+            hosts: agent_vitals_core::host_capability::HOSTS
+                .iter()
+                .filter(|h| h.fold.is_some())
+                .map(|h| HostRow::unavailable(h.id))
+                .collect(),
         }
     }
 }
@@ -783,6 +786,25 @@ pub fn read_month_json(month: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v0.6 host-contract spec §6/§11-M3（G7）：托盘的兜底行不再是本文件的
+    /// 硬编码三行，而是从 core `host_capability::HOSTS` 派生——遍历
+    /// `fold != None` 的宿主。今天恰好等于旧硬编码（workbuddy 仍
+    /// `fold: None`），行为零变化；M4 给 workbuddy 补 `HostBillTotals` 后，
+    /// 这条测试的期望需要同步改成四行——那正是"注册集派生"要买的东西：
+    /// 加宿主不用回来改这个函数，只需要改 HOSTS 行。
+    #[test]
+    fn hosts_snapshot_unavailable_derives_from_hosts_registry_fold_capability() {
+        let snap = HostsSnapshot::unavailable();
+        let kinds: Vec<&str> = snap.hosts.iter().map(|h| h.host_kind.as_str()).collect();
+        assert_eq!(kinds, vec!["dsh", "codex", "claude-code"]);
+        for h in &snap.hosts {
+            assert_eq!(h.status, "unavailable");
+        }
+        assert!(snap.generated_at.is_none());
+        // workbuddy 声明 fold: None，不该出现在兜底行里。
+        assert!(!kinds.contains(&"workbuddy"));
+    }
 
     /// 北京日期键与二进制 `codex_cost.rs` 同一算法：给出固定 epoch 秒，断言
     /// 产出的 YYYY-MM-DD。1787846400 = 2026-08-28 00:00 北京（= 2026-08-27T16:00Z，
