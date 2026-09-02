@@ -696,9 +696,45 @@ SV601–614，不再自拼 `match_behavior_gated`+`match_trajectory`+
 `AGENT_VITALS_BIN=… python3 -m unittest discover tests`（1015 例全差分）、
 `tests/golden_runner.py`（15 例）均字节零漂移。
 
-M2a（dsh/codex/claude-code 三家 evidence derive 改从行读）待续；M2b 仍以
-workbuddy 并行流工作区干净为闸；M3（守卫 G1–G10 全量落地 + `hosts` surface
-接入托盘/sessFilter）与 M4（可选演练）留后续。
+**M2a 已完成**：`claude_code_evidence.rs`/`codex_evidence.rs` 的 `is_unavailable`
+改查 `host_capability::host_profile(host_id).unmeasured_signals`（值原样从原
+字面量表搬过去）；`ALL_SIGNALS` 改指向 core 新增的共享 `Signal::ALL`（复制点
+B）；`dsh_evidence.rs::derive_coverage` 末尾五行显式置零改循环
+`host_profile("dsh").unmeasured_signals`；Python 镜像 `claude_evidence.py`/
+`codex_evidence.py` 的 `_UNAVAILABLE_SIGNALS` 同样改派生。**workbuddy 侧
+（M2b）仍以并行流工作区干净为闸**——`workbuddy_evidence.rs/.py` 与
+`fixtures/workbuddy/` 截至本次记录（2026-09-03）仍持续处于未提交状态，未见
+清空迹象，本轮全程未触碰。
+
+**M3 已完成 G1–G6/G8/G10；G7/G9 各完成一部分，原因见下**：
+- G2（三集分离）/G3（语言支持矩阵，DSH Python "pending M1" 缺口在 M1 关闭后
+  降级为存在断言）/G4（降级穷举，行驱动）/G5（§13 矩阵人工对账 + 4 处显式
+  偏差登记）/G6（合成会话不变量，dsh/codex/claude-code 三家）/G8（源码自
+  扫描）/G10（计价分辨率，行为断言 + 缺口登记闭集）：Python
+  `tests/test_host_contract.py`（18 例）+ Rust
+  `crates/agent-vitals-core/tests/host_contract.rs`（11 例）全绿。
+- G7（展示层一致性）：src-tauri `overview.rs::HostsSnapshot::unavailable()`
+  （托盘无数据兜底行）已从 `HOSTS` 的 `fold != None` 派生。**未完成**：真实
+  数据路径 `r2a_store.rs::sessions_navigation`——它对 dsh/codex/claude-code
+  各跑不同折叠机制（state 链/全量 rollout/ledger），不是同构循环，接入注册
+  集需要先给 `HostRuntimeRegistration` 设计 `fold` 维度；sessFilter
+  （`workbench.js`，前端）未动。
+- G9（按 surface 的需求 ⊆ 注册）：新建 `src/agent/host_runtime_registration.rs`，
+  登记 `cli.sessions` surface 的 `session_store` 维度（Rust 3 例单测）。
+  **未完成**：`fold` 维度（与上面 G7 的缺口是同一块工作，不是独立缺口）、
+  `tauri.sessions`/`tauri.menubar-cost`（Tauri 是另一个二进制，注册面不
+  共享，要单独建）。
+
+这两处剩余工作的共同点：都要求先做一个新的设计决定——`fold` 该按什么粒度
+登记（函数入口？子命令？），而不是照抄本轮已完成部分的体力活；且
+`sessions_navigation` 是菜单栏最复杂、最贴近实时展示的路径，贸然重构的风险
+与本轮其余改动不在同一量级。**M4**（workbuddy 折叠 demo，spec 原文标注
+"可选演练"）依赖 M2b 的 workbuddy 侧先落地，同样未开始。
+
+每步验证：`cargo test --release`、`cargo clippy --release --all-targets -D
+warnings` 零警告（含 src-tauri 独立 workspace）、
+`AGENT_VITALS_BIN=… python3 -m unittest discover tests` 全差分、
+`tests/golden_runner.py` 全部字节零漂移，逐 commit 未破。
 
 ## 12. Definition of Done
 
