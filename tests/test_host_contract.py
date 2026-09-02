@@ -470,9 +470,25 @@ class G10PricingResolutionTests(unittest.TestCase):
 
 class KnownGapRegistrationTests(unittest.TestCase):
     def test_g7_g9_registered_as_known_gap(self):
-        """G7（展示层一致性：托盘行/sessFilter 从注册集派生）与 G9（按 surface
-        的需求 ⊆ 注册：`HostRuntimeRegistration`）本轮未落地——两者都要求先在
-        binary/Tauri 侧设计一个新的跨语言注册面（v0.6 spec §5.1bis），
-        属于比 G2–G6/G8/G10 大一个数量级的独立工作量，不应该为了凑齐编号在
-        没有真实注册面的情况下写一份断言。登记为已知缺口，留后续里程碑。"""
+        """G7/G9 是**部分**落地，不是全空：
+
+        - G7：src-tauri `overview.rs::HostsSnapshot::unavailable()`（托盘兜底
+          三行）已改从 core `HOSTS` 的 `fold != None` 派生（见该文件同名单测
+          `hosts_snapshot_unavailable_derives_from_hosts_registry_fold_
+          capability`）。**未落地**的是真实数据路径
+          `r2a_store.rs::sessions_navigation`——它对三个宿主各跑不同的折叠
+          机制（dsh state 链 / codex 全量 rollout / claude ledger），不是可
+          直接遍历的同构循环，要把它接进注册集需要先在 G9 里把 `fold` 维度
+          设计进 `HostRuntimeRegistration`，两者是同一块未完成的工作，不是
+          各自独立的缺口。sessFilter（`workbench.js`，前端）同样未动。
+        - G9：`src/agent/host_runtime_registration.rs` 新建了 CLI 二进制的
+          `HostRuntimeRegistration`，登记了 `cli.sessions` surface 的
+          `session_store` 维度（`required_for_cli_sessions() ⊆
+          registered_for_cli_sessions()`，Rust 侧单测钉住）。**未落地**的是
+          `fold` 维度（上面 G7 那段解释了它为什么不是简单体力活）与
+          `tauri.sessions`/`tauri.menubar-cost` 两个 surface（要在 src-tauri
+          侧建独立的注册表——那是另一个二进制，注册面不共享）。
+
+        这里不重复 Rust 侧断言（那些已经在各自的单测里），只登记"做了多少、
+        剩多少、为什么剩"，供 M3 收尾时核对。"""
         self.assertTrue(True)

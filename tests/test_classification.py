@@ -52,7 +52,8 @@ PY_AGENT_FAMILY = {
 RS_AGENT_FAMILY = {
     "behavior", "budget", "claude_cost", "claude_session", "codex_cost",
     "codex_session",
-    "codex_session_audit", "cost", "discovery", "oneline", "plan", "r2a_store",
+    "codex_session_audit", "cost", "discovery", "host_runtime_registration",
+    "oneline", "plan", "r2a_store",
     "state", "takeover", "workbuddy_session",
 }
 

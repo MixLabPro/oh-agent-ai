@@ -13,6 +13,7 @@ pub mod codex_session;
 pub mod codex_session_audit;
 pub mod cost;
 pub mod discovery;
+pub mod host_runtime_registration;
 pub mod oneline;
 pub mod plan;
 pub mod r2a_store;
