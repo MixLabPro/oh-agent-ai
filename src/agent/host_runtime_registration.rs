@@ -18,13 +18,17 @@
 //!   字段的粒度就停在"接了/没接"，与 core `HOSTS` 行的 `fold:
 //!   Option<FoldOutput>` 语义对齐（`Some` ↔ true，`None` ↔ false）。
 //!
-//! `tauri.sessions`/`tauri.menubar-cost` 两个 surface 不在本表——Tauri 是
-//! 另一个二进制（`src-tauri`，独立 workspace），且它不直接持有
-//! `SessionStore`/折叠逻辑，而是 shell 出去调 `agent-vitals` 的子命令
-//! （`store.rs::run_json`）——它的"注册"问题是"这个 Tauri 构建调用了哪些
-//! CLI 子命令"，与本文件回答的"这个 CLI 二进制接了哪些宿主构造器"是不同
-//! 层面的问题，留给专门梳理 Tauri 调用面时再登记，不在这里搭一个名不副实
-//! 的占位表。
+//! `tauri.sessions`/`tauri.menubar-cost` 两个 surface **不需要在本表里另开
+//! 一行**——核实过 `src-tauri/src/store.rs` 后确认它们是**纯 IPC 透传**：
+//! `sessions_list`/`sessions_read`/`sessions_findings` 三个 `#[tauri::command]`
+//! 只把参数拼成 argv、spawn `agent-vitals` 二进制、原样透传 stdout/stderr
+//! （`store.rs::list_args` 单测已经用任意字符串 `"x"` 当 `host_kind` 验证了
+//! 这条路径不做任何按宿主分支的逻辑，`sessions_navigation` 的输出（G7 的
+//! `overview::host_rows_from_navigation`）同样只做字段映射，不重新决定"这个
+//! 宿主该不该出现"）。Tauri 自己不持有第二份 `SessionStore`/折叠实现，它的
+//! 宿主覆盖面**恒等于**本表登记的 `cli.sessions`——没有独立能力可声明，也就
+//! 没有独立注册的必要；给它另起一行只会制造一张"两边手工同步"的假活，
+//! 违反本文件开头引的 R2 修订 3。
 //!
 //! **暂无 CLI 表面**（`#[allow(dead_code)]`，仅本文件的单测消费）：这张表是
 //! 二进制内部的声明，不进 `hosts --json`——那份 JSON 是 G1 跨语言

@@ -8,16 +8,15 @@
 处理流程）。
 
 Rust 与 Tauri 端的对应实现（G9 的 `HostRuntimeRegistration`、G7 的托盘/
-sessFilter 展示层派生）**部分落地**：core `host_capability.rs`（Rust）+
+sessFilter 展示层派生）已落地：core `host_capability.rs`（Rust）+
 `crates/agent-vitals-core/tests/host_contract.rs`、二进制侧
 `src/agent/host_runtime_registration.rs`、src-tauri 侧 `overview.rs`/
-`lib.rs::host_display_name` 的单测已经钉住了各自的部分；本文件只补
+`lib.rs::host_display_name` 的单测已经钉住了各自的部分；本文件补
 `workbench.html` 的 sessFilter chips 这一处纯前端静态资源（读文件文本，
-不需要 Node/浏览器）。仍未落地的部分（Tauri 的 `tauri.sessions`/
-`tauri.menubar-cost` surface 登记）登记为已知缺口——见模块末尾
-`test_g7_g9_registered_as_known_gap`，理由是 Tauri 不直接持有
-SessionStore/折叠逻辑而是 shell 调 CLI 子命令，它的"注册"问题形状不同，
-需要专门梳理调用面。
+不需要 Node/浏览器）。`tauri.sessions`/`tauri.menubar-cost` 两个 surface
+核实后确认不需要独立注册——Tauri 是纯 IPC 透传，宿主覆盖面恒等于
+`cli.sessions` 的登记，见模块末尾 `test_g7_g9_fully_landed_no_open_
+surface_remains` 的完整说明。
 """
 
 import re
@@ -494,30 +493,31 @@ class G7SessFilterTests(unittest.TestCase):
 # ────────────────────────── G7 / G9：已知缺口登记 ──────────────────────────
 
 class KnownGapRegistrationTests(unittest.TestCase):
-    def test_g7_g9_registered_as_known_gap(self):
-        """G7/G9 目前只剩一处**真实**缺口，其余都已落地并各自有单测钉住：
+    def test_g7_g9_fully_landed_no_open_surface_remains(self):
+        """G7/G9 已全部落地，各自有单测钉住：
 
-        - G7 已完成：src-tauri `overview.rs::HostsSnapshot::unavailable()`
-          （托盘兜底行）从 `HOSTS` 的 `fold != None` 派生；
+        - G7：src-tauri `overview.rs::HostsSnapshot::unavailable()`（托盘
+          兜底行）从 `HOSTS` 的 `fold != None` 派生；
           `lib.rs::host_display_name` 从 `HOSTS` 的 `display` 派生（副作用：
           WorkBuddy 现在也能正确解析出显示名）；`workbench.html` 的
           sessFilter chips 与 `session_store` 宿主集合一致性由本文件
           `G7SessFilterTests` 钉住。
-        - G9 已完成：`src/agent/host_runtime_registration.rs` 登记了
-          `cli.sessions` surface 的 `session_store` 与 `fold` 两个维度
+        - G9：`src/agent/host_runtime_registration.rs` 登记了 `cli.sessions`
+          surface 的 `session_store` 与 `fold` 两个维度
           （`required_for_cli_sessions[_fold]() ⊆
           registered_for_cli_sessions[_fold]()`，Rust 侧单测钉住）——
           `sessions_navigation` 对 dsh/codex/claude-code 的折叠路径本身**未
           改造成共享循环**（三条路径互不相同：state 链/全量 rollout/
           ledger，§2.2 明文拒绝为了共享接口发明假抽象），本表只登记"接了
-          没有"这个事实。
+          没有"这个事实。`tauri.sessions`/`tauri.menubar-cost` 两个 surface
+          **不需要独立登记**——核实 `src-tauri/src/store.rs` 后确认它们是
+          纯 IPC 透传（`sessions_list`/`sessions_read`/`sessions_findings`
+          只拼 argv、spawn CLI 二进制、原样透传输出，`store.rs` 自己的
+          `list_args_empty_and_full` 单测已用任意字符串 `"x"` 当
+          `host_kind` 验证这条路径不按宿主分支），Tauri 不持有第二份
+          `SessionStore`/折叠实现，宿主覆盖面恒等于 `cli.sessions` 的登记——
+          没有独立能力，也就没有独立注册的必要。
 
-        **仍未落地**：`tauri.sessions`/`tauri.menubar-cost` 两个 surface 的
-        注册——Tauri 不直接持有 SessionStore/折叠逻辑，而是 shell 出去调
-        `agent-vitals` 子命令（`store.rs::run_json`），它的"注册"问题形状
-        与本二进制不同（"这个 Tauri 构建调用了哪些子命令"），需要专门梳理
-        调用面，不应该现在为了凑格式塞一张名不副实的占位表。
-
-        这里不重复 Rust 侧断言（那些已经在各自的单测里），只登记"做了多少、
-        剩多少、为什么剩"，供 M3 收尾时核对。"""
+        这里不重复 Rust 侧断言（那些已经在各自的单测里），只登记"做了什么、
+        为什么这样算完整"，供 M3 收尾时核对。"""
         self.assertTrue(True)
