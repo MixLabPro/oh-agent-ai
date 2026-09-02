@@ -677,8 +677,28 @@ match 臂改成行查找（现有 4 个单测原样通过）；新增 `hosts --j
 `cargo test --release`（732 用例）、`cargo clippy --release --all-targets -- -D
 warnings`、`AGENT_VITALS_BIN=… python3 -m unittest discover tests`（1015 用例，
 全差分）、`tests/golden_runner.py`（15 例）全绿，golden 字节零漂移，符合 M0 验收
-纪律。M1（共享投影塌缩 + Python 新建 `dsh_evidence.py`）待续；M2b 仍以 workbuddy
-并行流工作区干净为闸。
+纪律。
+
+**M1 已完成**（Rust 侧 + Python 侧）：Rust 新增 core
+`canonical_audit::audit_projection(canonical, host_id)`，三份 dispatcher
+（`claude_session.rs`/`workbuddy_session.rs`/`codex_session_audit.rs`）的
+`<host>_audit_projection` 拷贝塌缩成薄封装。Python 侧新建
+`dsh_evidence.py`（镜像 `dsh_evidence.rs::populate_timelines`，`Coords` 等复用
+`behavior.py` 现成实现），`behavior.py::audit_session_log` 改经
+`dsh_evidence.build_dsh_canonical` → `canonical_audit.audit_projection` 求值
+SV601–614，不再自拼 `match_behavior_gated`+`match_trajectory`+
+`trajectory_rule_outcomes` 三路（三者本身连同 `match_behavior` 原样保留，供
+各自单测/characterization pin/公共 API 使用）——DSH Python 从此与另外三家
+同构，G3 的 dsh Python 侧缺口关闭。切换前先对 `fixtures/dsh/` 全部 5 份真实
+语料做等价性检查（旧三路拼接 vs 新路径逐字节相等）才动 `audit_session_log`。
+两批改动分别验证：`cargo test --release`（core 455 + binary 279）、
+`cargo clippy --release --all-targets -D warnings` 零警告、
+`AGENT_VITALS_BIN=… python3 -m unittest discover tests`（1015 例全差分）、
+`tests/golden_runner.py`（15 例）均字节零漂移。
+
+M2a（dsh/codex/claude-code 三家 evidence derive 改从行读）待续；M2b 仍以
+workbuddy 并行流工作区干净为闸；M3（守卫 G1–G10 全量落地 + `hosts` surface
+接入托盘/sessFilter）与 M4（可选演练）留后续。
 
 ## 12. Definition of Done
 
