@@ -1371,6 +1371,8 @@ mod tests {
             claude_today: None,
             claude_month: None,
             claude_today_tokens: None,
+            claude_uncovered_month: None,
+            month_savings: None,
         }
     }
 

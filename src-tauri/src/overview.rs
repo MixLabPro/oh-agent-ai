@@ -14,11 +14,12 @@ use std::path::{Path, PathBuf};
 
 use crate::parse_rfc3339_secs;
 use agent_vitals_core::cost::{
-    bucket_cost, claude_day_cost, claude_day_total_tokens, load_pricing, month_cost, priced_day,
-    today_cost,
+    bucket_cost, claude_day_cost, claude_day_total_tokens, claude_subscription_uncovered_estimate,
+    load_pricing, month_cost, nominal_vs_actual_cost, priced_day, today_cost,
 };
+use agent_vitals_core::state::rollup_by_model;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 #[derive(Serialize)]
 pub struct DayRow {
@@ -357,6 +358,19 @@ pub struct Overview {
     /// 单独量（v1.3 合并总账，见 MENUBAR spec）。「当日缺场 → None」与
     /// `claude_today` 同语义，但两者独立：全 unknown 日 = 有 token、无钱。
     pub claude_today_tokens: Option<i64>,
+    /// v0.7 spec §3 第二行菜单栏视图：month.json by_model 折平后做 DSH 8 桶
+    /// → Claude 4 型 snake 适配（peak_* 丢弃、其他键按 catalog 输入约定改名），
+    /// 喂 core `claude_subscription_uncovered_estimate`。`pricing_basis` 已被
+    /// core 函数改写为 `estimated-subscription-exclusion`，不在这里二次加工。
+    /// 月无 by_model → None（不摆全零结构，与 `claude_month` 同款诚实降级）。
+    pub claude_uncovered_month: Option<Value>,
+    /// v0.7 spec §3 第三行菜单栏视图：month.json by_model 折平后直接喂
+    /// core `nominal_vs_actual_cost`（月级无 `providers`，各家模型走 fallback
+    /// 价卡，与 `priced_day` 对同一份 month.json 的处理一致）。无缓存命中的
+    /// 语料下 ratio 恒为 1.0（spec §3 原文引用，2026-09-02 实测值），不是
+    /// bug——这是"当前能表达的节约来源只有缓存"这一事实的忠实反映。月无 by_model
+    /// → None。
+    pub month_savings: Option<Value>,
 }
 
 /// 数据根（镜像 `paths.py::data_home` / `snapshot.rs::data_home_from` 的优先序）：
@@ -567,6 +581,41 @@ fn read_overview_at(dh: &Path) -> Overview {
     let (claude_today, claude_month, claude_today_tokens) =
         claude_estimates(&claude_days, &today, &cur_month, &pricing);
 
+    // v0.7 spec §3 第二/三行菜单栏视图：month.json by_model 折平后分别喂
+    // `claude_subscription_uncovered_estimate` 与 `nominal_vs_actual_cost`。
+    // 共用 `core::state::rollup_by_model`（与 CLI `state by-model` 同源字节），
+    // 同一份已按 `cur_month` 过滤的 `month_val`——避免在 Tauri 层重复实现
+    // 折平逻辑、与 `month_cost` 等核心计算口径不同源就是漂移。两视图输入形状
+    // 略不同：uncovered 要 8 桶 → 4 型 snake 适配（peak_* 丢弃 + 键改名），
+    // savings 直接吃 8 桶 by_model（DSH 计价面语义）。两者都喂 core 单一
+    // 决策点；月无 by_model → (None, None) 同款诚实降级。
+    let month_rollup = rollup_by_model(&json!({"days": &month_val}));
+    let month_rollup_empty = month_rollup
+        .as_object().is_none_or(|m| m.is_empty());
+    let (claude_uncovered_month, month_savings) = if month_rollup_empty {
+        (None, None)
+    } else {
+        // DSH 8 桶 → Claude 4 型 snake 适配（与 Python `cli.py` 走同一套）。
+        let mut claude_models = Map::new();
+        if let Some(obj) = month_rollup.as_object() {
+            for (model, buckets) in obj {
+                let Some(b) = buckets.as_object() else { continue };
+                claude_models.insert(
+                    model.clone(),
+                    json!({
+                        "input_tokens": b.get("uncached_input_tokens").cloned().unwrap_or(json!(0)),
+                        "cache_read_input_tokens": b.get("cache_read_tokens").cloned().unwrap_or(json!(0)),
+                        "cache_creation_input_tokens": b.get("cache_write_tokens").cloned().unwrap_or(json!(0)),
+                        "output_tokens": b.get("output_tokens").cloned().unwrap_or(json!(0)),
+                    }),
+                );
+            }
+        }
+        let uncovered = claude_subscription_uncovered_estimate(&claude_models, &pricing);
+        let savings = nominal_vs_actual_cost(&json!({"by_model": month_rollup}), &pricing);
+        (uncovered, savings)
+    };
+
     Overview {
         data_home: dh.display().to_string(),
         today: today_val,
@@ -582,6 +631,8 @@ fn read_overview_at(dh: &Path) -> Overview {
         claude_today,
         claude_month,
         claude_today_tokens,
+        claude_uncovered_month,
+        month_savings,
     }
 }
 
@@ -1766,5 +1817,129 @@ mod tests {
     #[test]
     fn current_month_beijing_matches_today_prefix() {
         assert_eq!(current_month_beijing(), today_beijing()[..7].to_string());
+    }
+
+    // ── v0.7 spec §3 第二/三行菜单栏视图接线钉测 ────────────────────────
+    // 与 CLI `state uncovered`/`state savings`（commit a577497）同源字节——
+    // Tauri 侧走的是 `core::state::rollup_by_model` + `core::cost::{
+    // claude_subscription_uncovered_estimate, nominal_vs_actual_cost}` 同一条
+    // 路径，月无 by_model → (None, None) 同款诚实降级（不摆全零结构）。
+
+    /// 月份没有 by_model（老数据 / 当月无会话）→ 两视图都 None，与
+    /// `claude_month` 的诚实降级一致。
+    #[test]
+    fn read_overview_v07_uncovered_and_savings_both_null_when_no_by_model() {
+        let tmp = std::env::temp_dir().join("sv-menubar-v07-empty-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        let cm = current_month_beijing();
+        // 只有 8 桶顶层字段、没 by_model（老形状）
+        let month = serde_json::json!({
+            "month": cm,
+            "days": {
+                format!("{cm}-01"): {
+                    "uncached_input_tokens": 1000000, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                },
+            },
+        });
+        std::fs::write(tmp.join("state").join("month.json"), month.to_string()).unwrap();
+        let ov = read_overview_at(&tmp);
+        assert!(ov.claude_uncovered_month.is_none(),
+                "无 by_model 时 uncovered 必须 None，不摆全零结构");
+        assert!(ov.month_savings.is_none(),
+                "无 by_model 时 savings 必须 None，不摆全零结构");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// anthropic 在 catalog_2026_09.subscriptions 登记 → claude-opus-5 不进
+    /// uncovered 视图（整 provider 视为已订阅覆盖，spec §3 原文措辞）。deepseek
+    /// 未订阅 → 全 provider 进 uncovered。
+    #[test]
+    fn read_overview_v07_uncovered_excludes_subscribed_provider() {
+        let tmp = std::env::temp_dir().join("sv-menubar-v07-uncovered-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        let cm = current_month_beijing();
+        let month = serde_json::json!({
+            "month": cm,
+            "days": {
+                format!("{cm}-01"): {
+                    "uncached_input_tokens": 0, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                    "by_model": {
+                        "claude-opus-5": {
+                            "uncached_input_tokens": 1000000, "output_tokens": 0,
+                            "cache_read_tokens": 0, "cache_write_tokens": 0,
+                            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                        },
+                        "deepseek-v4-flash": {
+                            "uncached_input_tokens": 1000000, "output_tokens": 0,
+                            "cache_read_tokens": 0, "cache_write_tokens": 0,
+                            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                        },
+                    },
+                },
+            },
+        });
+        std::fs::write(tmp.join("state").join("month.json"), month.to_string()).unwrap();
+        let ov = read_overview_at(&tmp);
+        let uncovered = ov.claude_uncovered_month.expect(
+            "deepseek 未订阅 → uncovered 必须存在（anthropic 订阅的 claude-opus-5 不出现）");
+        assert_eq!(uncovered["pricing_basis"], "estimated-subscription-exclusion");
+        // anthropic 订阅的 claude-opus-5 不在 per_model 里（已订阅覆盖）
+        assert!(uncovered["per_model"].get("claude-opus-5").is_none(),
+                "claude-opus-5 已订阅 → 不应出现在 uncovered.per_model");
+        // deepseek 未订阅 → 必须在
+        assert!(uncovered["per_model"].get("deepseek-v4-flash").is_some(),
+                "deepseek-v4-flash 未订阅 → 必须出现在 uncovered.per_model");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 全 1M cache_read → ratio = 1/30（cached 0.05 vs uncached 1.5，spec §3
+    /// 原文引用的具体信号）。月级无 providers、各家模型走 fallback 价卡——与
+    /// `priced_day` 对同一份 month.json 的处理一致。
+    #[test]
+    fn read_overview_v07_savings_ratio_is_1_over_30_for_cache_only() {
+        let tmp = std::env::temp_dir().join("sv-menubar-v07-savings-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        let cm = current_month_beijing();
+        // 全 cache_read、其它 8 桶字段 0：ratio = 1/30。`uncached_input_tokens`
+        // 必须显式 0（不是默认 100），否则 uncached 残余贡献会偏离 1/30。
+        let month = serde_json::json!({
+            "month": cm,
+            "days": {
+                format!("{cm}-01"): {
+                    "uncached_input_tokens": 0, "output_tokens": 0,
+                    "cache_read_tokens": 1000000, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                    "by_model": {
+                        "deepseek-v4-flash": {
+                            "uncached_input_tokens": 0, "output_tokens": 0,
+                            "cache_read_tokens": 1000000, "cache_write_tokens": 0,
+                            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                        },
+                    },
+                },
+            },
+        });
+        std::fs::write(tmp.join("state").join("month.json"), month.to_string()).unwrap();
+        let ov = read_overview_at(&tmp);
+        let savings = ov.month_savings.expect(
+            "by_model 存在 → savings 必须 Some");
+        assert_eq!(savings["currency"], "CNY");
+        let ratio = savings["ratio"].as_f64().expect("ratio 必须是数字");
+        assert!((ratio - 1.0 / 30.0).abs() < 1e-9,
+                "全 cache_read → ratio 必须 = 1/30，got {ratio}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
