@@ -478,6 +478,26 @@ enum Cmd {
         #[arg(long)]
         shadow: bool,
     },
+    /// Audit ONE Claude session JSONL into per-message UsageFact rows (facts +
+    /// attempts + coverage; v0.7 spec §3 candidate #3). R1 ratified: in-memory
+    /// emit + read-only diagnostic — writes no state (ledger/fold/machine.json
+    /// are untouched unless a default machine_namespace triggers takeover's
+    /// identity bootstrap).
+    /// Byte-for-byte mirror of Python `scan.py claude-usage-facts --json -`.
+    ClaudeUsageFacts {
+        /// Path to a Claude session JSONL file
+        session_jsonl: PathBuf,
+        /// Override machine_namespace (default: read state/machine.json or
+        /// generate fresh UUID); required for stable fact_id across replays
+        #[arg(long)]
+        machine_namespace: Option<String>,
+        /// source_profile component of SessionKey (default: 'default')
+        #[arg(long, default_value = "default")]
+        source_profile: String,
+        /// Write the UsageFact JSON to FILE; use - for stdout (default: human summary)
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+    },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
     /// `sessions` row is the join anchor across the three joinable surfaces (spec
@@ -1643,6 +1663,65 @@ session_store={store} fold={fold}"
                 std::process::exit(2);
             }
         }
+    }
+
+    // claude-usage-facts：单份 Claude JSONL → UsageFact rows（内存 emit，不写
+    // state）。R1 拍板：per-message 事实行 + attempts + coverage，`--json -`
+    // 输出与 Python `scan.py claude-usage-facts --json -` 字节相等（parity 钉测
+    // 在 tests/test_claude_usage_fact.py::ClaudeUsageFactsBothTests）。
+    if let Some(Cmd::ClaudeUsageFacts { session_jsonl, machine_namespace, source_profile, rows_json }) =
+        &args.cmd
+    {
+        // 缺省 machine_namespace：与 Python handler 同款——读 takeover（可能
+        // bootstrap machine.json）。parity 测试显式传 --machine-namespace，
+        // 不触达 takeover 写路径。
+        let ns = match machine_namespace {
+            Some(ns) => ns.clone(),
+            None => agent::takeover::machine_namespace(),
+        };
+        let sid = session_jsonl
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let result = match agent::claude_usage_fact::claude_jsonl_to_usage_facts(
+            session_jsonl,
+            &ns,
+            source_profile,
+            &sid,
+        ) {
+            Ok(r) => r,
+            Err(msg) => {
+                eprintln!("claude-usage-facts failed: {msg}");
+                std::process::exit(2);
+            }
+        };
+        if let Some(path) = rows_json {
+            let payload = agent::claude_usage_fact::to_payload_value(
+                &result, &sid, &ns, source_profile,
+            );
+            let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!(
+                    "Wrote {}: {} facts",
+                    path.display(),
+                    result.facts.len()
+                );
+            }
+        } else {
+            print!(
+                "{}",
+                agent::claude_usage_fact::to_human_summary(
+                    &result, session_jsonl, &sid, &ns, source_profile
+                )
+            );
+        }
+        return;
     }
 
     // WorkBuddy 会话审计。与 claude/codex-session 同款 home 解析与缺省 --session =

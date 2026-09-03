@@ -10,12 +10,20 @@ R1 架构审核（commit d0ec2f2）要求 fold 与未来的 UsageFact emitter �
 跑法：python3 -m unittest tests.test_claude_usage_fact -v
 """
 
+import json
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+
+_BIN = os.environ.get("AGENT_VITALS_BIN")
+_BIN = str(Path(_BIN).resolve()) if _BIN else None
+PY_CMD = [sys.executable, str(ROOT / "scripts" / "scan.py")]
 
 from agent_vitals.agent.claude_usage_fact import (  # noqa: E402
     ClaudeUsageObservation,
@@ -368,6 +376,102 @@ class EmitEndToEndCase(unittest.TestCase):
                 "两次 emit 必须字节相等——FNV-1a hash 与字段映射决定性")
             self.assertEqual(r1.attempts, r2.attempts)
             self.assertEqual(r1.coverage, r2.coverage)
+
+
+@unittest.skipUnless(_BIN, "未设 AGENT_VITALS_BIN，跳过双实现比对")
+class ClaudeUsageFactsBothTests(unittest.TestCase):
+    """Stage 1 commit 2b：`claude-usage-facts` 双实现 byte-parity。
+
+    Python `scan.py claude-usage-facts --json -` ↔ Rust 同子命令：同一份混合
+    语料（cost-state / 全形 native / 无 message.id→derived-hash→bad_id / 无
+    model→unreadable / 坏 ts→unattributed / 短键形状），stdout 逐字节相等。
+    `test_two_calls_produce_byte_equal_output` 是 Python 端前置（字节决定）；
+    本测试是 commit 2b 的 Rust 镜像钉测——`facts`/`attempts`/`coverage` 键序、
+    `attempts` 的 dict 插入序、`fact_id`（FNV-1a + `\x1f` 拼接）跨语言一致。
+
+    Run: AGENT_VITALS_BIN=$PWD/target/release/agent-vitals python3 -m unittest
+    tests.test_claude_usage_fact.ClaudeUsageFactsBothTests -v
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.fixture = self.tmp / "fixture"
+        self.fixture.mkdir()
+        self.session = self.fixture / "sid-1975m.jsonl"
+        # 混合语料：逐行覆盖三类 Skip + bad_id + 两态 token 形状。顺序刻意
+        # 交错——attempts 的插入序（skip 先行、bad_id 后补）在 JSON 输出里
+        # 必须与 Python dict 一致，不能靠巧合。
+        rows = [
+            {"type": "cost-state",
+             "timestamp": "2026-09-01T18:00:00.000Z",
+             "startTime": 1_788_192_000_000,
+             "modelUsage": {"deepseek-v4-flash": {
+                 "inputTokens": 0, "outputTokens": 0,
+                 "cacheReadInputTokens": 38_700_000,
+                 "cacheCreationInputTokens": 0,
+                 "webSearchRequests": 0, "costUSD": 0.0}},
+             "hasUnknownModelCost": False},
+            {"type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
+             "message": {"id": "msg_full_1", "model": "deepseek-v4-flash",
+                         "usage": {"input_tokens": 100, "cache_read_input_tokens": 1_500_000,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 5}}},
+            {"type": "assistant", "timestamp": "2026-09-02T04:00:00.000Z",
+             "message": {"model": "deepseek-v4-flash",
+                         "usage": {"input_tokens": 200, "cache_read_input_tokens": 0,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 7}}},
+            {"type": "assistant", "timestamp": "2026-09-02T05:00:00.000Z",
+             "message": {"usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+            {"type": "assistant", "timestamp": "bogus",
+             "message": {"model": "deepseek-v4-flash",
+                         "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+            {"type": "assistant", "timestamp": "2026-09-02T06:00:00.000Z",
+             "message": {"id": "msg_short_1", "model": "deepseek-v4-flash",
+                         "usage": {"input": 10, "cache_read": 20,
+                                   "cache_creation": 30, "output": 40}}},
+        ]
+        self.session.write_text(
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, cmd):
+        env = dict(os.environ)
+        env["HOME"] = str(self.fixture)
+        env["USERPROFILE"] = str(self.fixture)
+        env.pop("AGENT_VITALS_BIN", None)
+        return subprocess.run(
+            cmd, env=env, capture_output=True, text=True, cwd=str(self.fixture))
+
+    def test_python_rust_json_stdout_byte_equal(self):
+        """同一份混合语料：两侧 `--json -` stdout 逐字节相等 + 语义抽查。"""
+        args = ["claude-usage-facts", str(self.session),
+                "--machine-namespace", "ns-parity",
+                "--source-profile", "default", "--json", "-"]
+        py = self._run(PY_CMD + args)
+        rs = self._run([_BIN] + args)
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        self.assertEqual(
+            py.stdout, rs.stdout,
+            "claude-usage-facts --json stdout 不一致：\npy:\n%s\nrs:\n%s"
+            % (py.stdout, rs.stdout))
+        # 语义抽查（锚 spec §5 点名数字/分支——不逐字段重放，byte 相等已是主断言）。
+        doc = json.loads(py.stdout)
+        self.assertEqual(doc["coverage"]["total_rows"], 6)
+        self.assertEqual(doc["coverage"]["fact_rows"], 2)
+        self.assertEqual(doc["coverage"]["skip_rows"], 4)
+        self.assertEqual(doc["attempts"],
+                         {"skip": 1, "unreadable": 1, "unattributed": 1, "bad_id": 1})
+        self.assertEqual(len(doc["facts"]), 2)
+        ids = [f["fact_id"] for f in doc["facts"]]
+        self.assertEqual(len(set(ids)), 2, "两条 fact_id 必须唯一")
+        # 两条 fact（全形 1500K + 短键 20）的 cache_read 合计。
+        cr = sum(f["cache_read_tokens"] for f in doc["facts"])
+        self.assertEqual(cr, 1_500_000 + 20)
 
 
 if __name__ == "__main__":

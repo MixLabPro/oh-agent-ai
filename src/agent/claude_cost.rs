@@ -256,7 +256,13 @@ pub(crate) fn day_from_ms(ms: i64) -> String {
 
 /// 从 usage 对象嗅 4 桶 token。两态都认、全形优先；键在而值不是数 → 该形
 /// 状不算命中（corpus 值全 int）。两态皆无 → None → 哨兵计数（P0）。
-fn row_tokens(usage: &Value) -> Option<[u64; 4]> {
+///
+/// `pub(crate)`：`claude_usage_fact.rs`（UsageFact emitter）复用同一个 token
+/// 读取器——fold 与 emitter 不得各自解释 usage 形状（R1「共享 extractor」，
+/// commit d0ec2f2）。负值/超 i64 值在 Python `_row_tokens`（任意精度 int、
+/// 只拒 bool）与 Rust `as_u64` 间有已知的病理输入分歧——corpus 恒非负，两
+/// 侧真实行为一致，分歧面留给注释说明不追平。
+pub(crate) fn row_tokens(usage: &Value) -> Option<[u64; 4]> {
     let obj = usage.as_object()?;
     for keys in [&SNAKE_KEYS[..], &SHORT_KEYS[..]] {
         let mut out = [0u64; 4];

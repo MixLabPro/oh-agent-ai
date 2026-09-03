@@ -8,6 +8,7 @@ pub mod behavior;
 pub mod budget;
 pub mod claude_cost;
 pub mod claude_session;
+pub mod claude_usage_fact;
 pub mod codex_cost;
 pub mod codex_session;
 pub mod codex_session_audit;
