@@ -855,6 +855,28 @@ def _main():
     p_claude_sync.add_argument(
         "--shadow", action="store_true",
         help="Rehearse on a copy: skip writer fencing (like `oneline --shadow`)")
+    # Stage 1 commit 2（commit d0ec2f2 R1 拍板）：Claude UsageFact 诊断 CLI
+    # ——单份 JSONL → facts + attempts + coverage，**不写盘**（UsageFact
+    # 持久化是后续 Data Plane 阶段）。与 Rust 镜像同源字节。
+    p_claude_usage_facts = sub.add_parser(
+        "claude-usage-facts",
+        help="Audit ONE Claude JSONL session into UsageFact rows "
+             "(per-message, no state writes; v0.7 spec §3 candidate #3)")
+    p_claude_usage_facts.add_argument(
+        "session_jsonl",
+        help="Path to a Claude session JSONL file "
+             "(e.g. ~/.claude/projects/-proj-x/<sid>.jsonl)")
+    p_claude_usage_facts.add_argument(
+        "--machine-namespace", default=None,
+        help="Override machine_namespace (default: read from state/machine.json "
+             "or generate fresh UUID); required for stable fact_id across replays")
+    p_claude_usage_facts.add_argument(
+        "--source-profile", default="default",
+        help="source_profile component of SessionKey (default: 'default')")
+    p_claude_usage_facts.add_argument(
+        "--json", metavar="FILE",
+        help="Write UsageFact JSON to FILE; use - for stdout. Without this, "
+             "print human summary.")
     # WorkBuddy 单会话审计：coverage（§13 逐信号）+ SV601–614 findings。与
     # claude-session 同构；host-capability degradation 是 SV604/605（spec §3.1）——
     # 只有 bash（audit-log commandPreview）与 web_fetch（WebFetch target）能 join，
@@ -1424,6 +1446,53 @@ def _main():
         except ValueError as e:
             print(str(e), file=sys.stderr)
             sys.exit(2)
+        return
+
+    # Stage 1 commit 2：Claude UsageFact 诊断 CLI（v0.7 spec §3 候选 #3）。
+    # 单份 JSONL → facts + attempts + coverage；不写盘。与 Rust 镜像同源字节。
+    if getattr(args, "cmd", None) == "claude-usage-facts":
+        from agent_vitals.agent import claude_usage_fact as cuf
+        from agent_vitals.agent.takeover import machine_namespace as _read_ns
+        machine_ns = (args.machine_namespace
+                       if args.machine_namespace else _read_ns())
+        sid = Path(args.session_jsonl).stem
+        try:
+            result = cuf.claude_jsonl_to_usage_facts(
+                Path(args.session_jsonl),
+                machine_namespace=machine_ns,
+                source_profile=args.source_profile,
+                native_session_id=sid,
+            )
+        except (OSError, ValueError) as e:
+            print("claude-usage-facts failed: %s" % e, file=sys.stderr)
+            sys.exit(2)
+        # --json: 写文件或 stdout；否则人读摘要。
+        facts_out = {
+            "native_session_id": sid,
+            "machine_namespace": machine_ns,
+            "source_profile": args.source_profile,
+            "facts": result.facts,
+            "attempts": result.attempts,
+            "coverage": result.coverage,
+            "malformed": result.malformed,
+        }
+        text = json.dumps(facts_out, ensure_ascii=False, indent=2)
+        if args.json:
+            if args.json == "-":
+                print(text)
+            else:
+                Path(args.json).write_text(text, encoding="utf-8")
+                print("Wrote %s: %d facts" % (args.json, len(result.facts)))
+        else:
+            print("Source: %s" % args.session_jsonl)
+            print("Native session id: %s" % sid)
+            print("Machine namespace: %s" % machine_ns)
+            print("Source profile: %s" % args.source_profile)
+            print("Facts: %d (rows=%s, skip=%s)"
+                  % (len(result.facts),
+                     result.coverage["total_rows"],
+                     result.coverage["skip_rows"]))
+            print("Attempts: %s" % result.attempts)
         return
 
     # WorkBuddy 单会话审计：coverage + SV601–614 findings（SV604/605 降级 Unavailable，

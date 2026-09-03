@@ -209,5 +209,166 @@ class ParseClaudeUsageRowCase(unittest.TestCase):
                          "native_session_id 必须从 caller 注入，extractor 不读 rec")
 
 
+class EmitEndToEndCase(unittest.TestCase):
+    """Stage 1 commit 2：`claude_jsonl_to_usage_facts` 端到端钉测。
+
+    复用 `tests/test_claude_cost.py::ClaudeSyncBothTests` 的真机 fixture
+    数据（2279b7b0 / 753e080a / b695a35f 三会话）——见 commit 6421f2a。
+    本测试只验 Python 端 emit；Rust 镜像 parity 在 commit 2b 钉测。
+    """
+
+    def _write_session(self, d, name, rows):
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(
+            "".join(__import__("json").dumps(r) + "\n" for r in rows),
+            encoding="utf-8",
+        )
+
+    def _real_world_rows(self):
+        """复用 commit 6421f2a 真机数字：2279b7b0 / 753e080a / b695a35f。
+        ms 约定与 RealWorldMisattributionCase 同款。
+        """
+        start_0901_bj = 1_788_192_000_000
+        start_0901_bj_mid = 1_788_235_200_000
+        start_0831_bj_eve = 1_788_170_400_000
+        rows_2279 = [
+            {"type": "cost-state",
+             "timestamp": "2026-09-01T18:00:00.000Z",
+             "startTime": start_0901_bj,
+             "modelUsage": {"deepseek-v4-flash": {
+                 "inputTokens": 0, "outputTokens": 0,
+                 "cacheReadInputTokens": 38_700_000,
+                 "cacheCreationInputTokens": 0,
+                 "webSearchRequests": 0, "costUSD": 0.0}},
+             "hasUnknownModelCost": False},
+            {"type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
+             "message": {"id": "msg_2279_1", "model": "deepseek-v4-flash",
+                         "usage": {"input_tokens": 0, "cache_read_input_tokens": 1_500_000,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+            {"type": "assistant", "timestamp": "2026-09-02T05:00:00.000Z",
+             "message": {"id": "msg_2279_2", "model": "deepseek-v4-flash",
+                         "usage": {"input_tokens": 0, "cache_read_input_tokens": 1_500_000,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+            {"type": "assistant", "timestamp": "2026-09-02T07:00:00.000Z",
+             "message": {"id": "msg_2279_3", "model": "deepseek-v4-flash",
+                         "usage": {"input_tokens": 0, "cache_read_input_tokens": 1_500_000,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+            {"type": "assistant", "timestamp": "2026-09-02T09:00:00.000Z",
+             "message": {"id": "msg_2279_4", "model": "deepseek-v4-flash",
+                         "usage": {"input_tokens": 0, "cache_read_input_tokens": 1_200_000,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+        ]
+        rows_753e = [
+            {"type": "cost-state",
+             "timestamp": "2026-09-01T18:00:00.000Z",
+             "startTime": start_0901_bj_mid,
+             "modelUsage": {"deepseek-v4-flash": {
+                 "inputTokens": 0, "outputTokens": 0,
+                 "cacheReadInputTokens": 137_100_000,
+                 "cacheCreationInputTokens": 0,
+                 "webSearchRequests": 0, "costUSD": 0.0}},
+             "hasUnknownModelCost": False},
+            *[{"type": "assistant",
+               "timestamp": "2026-09-02T%02d:00:00.000Z" % h,
+               "message": {"id": "msg_753e_%d" % (h // 2), "model": "deepseek-v4-flash",
+                           "usage": {"input_tokens": 0, "cache_read_input_tokens": 11_225_000,
+                                     "cache_creation_input_tokens": 0, "output_tokens": 0}}}
+              for h in (3, 5, 7, 9)],
+        ]
+        rows_b695 = [
+            {"type": "cost-state",
+             "timestamp": "2026-09-01T18:00:00.000Z",
+             "startTime": start_0831_bj_eve,
+             "modelUsage": {"deepseek-v4-flash": {
+                 "inputTokens": 0, "outputTokens": 0,
+                 "cacheReadInputTokens": 88_300_000,
+                 "cacheCreationInputTokens": 0,
+                 "webSearchRequests": 0, "costUSD": 0.0}},
+             "hasUnknownModelCost": False},
+            *[{"type": "assistant",
+               "timestamp": "2026-09-02T%02d:00:00.000Z" % h,
+               "message": {"id": "msg_b695_%d" % (h // 2), "model": "deepseek-v4-flash",
+                           "usage": {"input_tokens": 0, "cache_read_input_tokens": 4_000_000,
+                                     "cache_creation_input_tokens": 0, "output_tokens": 0}}}
+              for h in (3, 5, 7, 9)],
+        ]
+        return {"2279b7b0": rows_2279, "753e080a": rows_753e, "b695a35f": rows_b695}
+
+    def test_real_world_197_5M_emit_totals(self):
+        """复用 commit 6421f2a 的 2279b7b0 / 753e080a / b695a35f 真机语料：
+        - 3 个 cost-state（baseline 对账锚）→ Skip("skip")
+        - 4 + 4 + 4 = 12 条 assistant usage row → emit 12 个 UsageFact
+        - 总 token cache_read = 66_600_000（5.7 + 44.9 + 16.0 = 66.6M）
+        - attempts["skip"] == 3、coverage.fact_rows == 12
+        """
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpd = Path(tmp)
+            for name, rows in self._real_world_rows().items():
+                self._write_session(tmpd, name + ".jsonl", rows)
+            # 三份文件分别 emit，合并 attempts/coverage/facts
+            from agent_vitals.agent.claude_usage_fact import claude_jsonl_to_usage_facts
+            all_facts = []
+            all_attempts = {"skip": 0, "unreadable": 0, "unattributed": 0}
+            total_rows = 0
+            total_facts = 0
+            for name in ("2279b7b0", "753e080a", "b695a35f"):
+                result = claude_jsonl_to_usage_facts(
+                    tmpd / (name + ".jsonl"),
+                    machine_namespace="ns-test",
+                    source_profile="default",
+                    native_session_id=name,
+                )
+                all_facts.extend(result.facts)
+                for k, v in result.attempts.items():
+                    all_attempts[k] = all_attempts.get(k, 0) + v
+                total_rows += result.coverage["total_rows"]
+                total_facts += result.coverage["fact_rows"]
+            self.assertEqual(total_rows, 15, "3 份 × (1 cost-state + 4 assistant) = 15")
+            self.assertEqual(total_facts, 12, "12 条 assistant → 12 个 fact")
+            self.assertEqual(all_attempts["skip"], 3, "3 个 cost-state → 3 skip")
+            # 合计 cache_read tokens = 66.6M（spec §5 后段点名数字）
+            cr_total = sum(f["cache_read_tokens"] for f in all_facts)
+            self.assertEqual(cr_total, 66_600_000)
+            # 每条 fact 的 identity_basis="native"（message.id 取到）
+            self.assertTrue(all(f["identity_basis"] == "native" for f in all_facts))
+            # fact_id 跨三会话唯一（per-session sid 区别）
+            fact_ids = [f["fact_id"] for f in all_facts]
+            self.assertEqual(len(fact_ids), 12)
+            self.assertEqual(len(set(fact_ids)), 12, "12 条 fact_id 应全唯一")
+
+    def test_two_calls_produce_byte_equal_output(self):
+        """`claude_jsonl_to_usage_facts` 必须字节决定（FNV-1a + 固定算法）——
+        同输入两次调用输出逐字节相等。这是与 Rust 镜像 byte-parity 钉测的
+        Python 端前置条件。"""
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpd = Path(tmp)
+            self._write_session(tmpd, "sid.jsonl", [
+                {"type": "assistant",
+                 "timestamp": "2026-09-02T03:00:00.000Z",
+                 "message": {"id": "msg_byte", "model": "deepseek-v4-flash",
+                             "usage": {"input_tokens": 100, "cache_read_input_tokens": 0,
+                                       "cache_creation_input_tokens": 0, "output_tokens": 10}}},
+            ])
+            from agent_vitals.agent.claude_usage_fact import claude_jsonl_to_usage_facts
+            r1 = claude_jsonl_to_usage_facts(
+                tmpd / "sid.jsonl",
+                machine_namespace="ns-byte", source_profile="default",
+                native_session_id="sid")
+            r2 = claude_jsonl_to_usage_facts(
+                tmpd / "sid.jsonl",
+                machine_namespace="ns-byte", source_profile="default",
+                native_session_id="sid")
+            self.assertEqual(
+                json.dumps(r1.facts, sort_keys=True),
+                json.dumps(r2.facts, sort_keys=True),
+                "两次 emit 必须字节相等——FNV-1a hash 与字段映射决定性")
+            self.assertEqual(r1.attempts, r2.attempts)
+            self.assertEqual(r1.coverage, r2.coverage)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
