@@ -47,7 +47,7 @@ PY_AGENT_FAMILY = {
     "codex_usage", "compaction", "cost", "dsh_evidence", "duration",
     "host_capability", "plan",
     "r2a", "skill", "state", "subagent", "takeover", "trajectory", "usage",
-    "waste", "workbuddy_evidence", "workbuddy_session_audit",
+    "usage_fact", "waste", "workbuddy_evidence", "workbuddy_session_audit",
 }
 RS_AGENT_FAMILY = {
     "behavior", "budget", "claude_cost", "claude_session", "codex_cost",

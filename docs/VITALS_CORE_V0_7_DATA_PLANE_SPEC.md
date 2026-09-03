@@ -1,9 +1,12 @@
 # Vitals Core v0.7 —— 数据平面：统一事实行 + 视图目录 + 迁移函数表（方案）
 
-> 状态：**提案 v0.0.2**（草案，未立项；R4 修订见 §7）——**候选 #3 的主体（统一
-> `UsageFact` 契约）与候选 #4（迁移函数表）仍是此状态**：本版的 output-only 切片
-> （§3「本版交付矩阵」三行）已于 2026-09-03 落地，但那不等于本版整体已立项/完成，
-> 见 §3 该节末尾的"明确仍未开始"清单。2026-09-02 由 v0.6 spec
+> 状态：**提案 v0.0.2**（草案，未立项；R4 修订见 §7）——**本版整体仍是此状态**：
+> §3「本版交付矩阵」三行 output-only 视图，以及候选 #3/#4 的契约骨架
+> （`usage_fact.rs`/`.py` 的 `fact_id`/`build_usage_fact`/`migrate_chain`）已于
+> 2026-09-03 落地，但两者都不等于本版整体已立项/完成——没有任何 host adapter
+> 被改造成产出 `UsageFact`、没有任何真实迁移被注册、没有任何持久化格式被替换，
+> 四条现有账（dsh/codex/claude/workbuddy）原样运行。见 §3 末尾与 §4 候选表候选
+> #3/#4 行的"明确仍未开始"清单。2026-09-02 由 v0.6 spec
 > （`VITALS_CORE_V0_6_HOST_CONTRACT_SPEC.md`）§5.4 **独立成版**——版本边界、拆分
 > 表与验收纪律见 v0.6 spec §2.3/§0 结论第 6 条。正文迁自 v0.6 §5.4 的
 > 5.4.1/5.4.2/5.4.4；§5.4.3（HostProfile 列化卡）是 host-contract 语义，留 v0.6
@@ -200,17 +203,22 @@ Python↔Rust stdout 逐字节差分测试）；输入（month.json `by_model`�
 迁移函数表）里风险最小、不需要 schema 演进评审窗口就能独立交付的那一角，而不是
 候选 #3 的主体本身。
 
-**明确仍未开始、且不在本次自动化落地范围内的部分**（诚实边界，避免"输出面已落地"
-被误读成"v0.7 已完成"）：
-- **候选 #3 主体**——§2 的统一 `UsageFact` 序列化契约（`fact_id`、`session_key`、
-  delta/cumulative 归一、per-host 物化视图替换手工 join）完全未动工，仍是本文件
-  §0 标注的"提案 v0.0.2（草案，未立项）"状态。它需要真正的 schema 设计评审（每个
-  字段的取舍、四个宿主 adapter 的逐一改造），不是能在没有人工立项的情况下由自动化
-  流程一次性决定的事。
-- **候选 #4**——§4.1 的显式迁移函数表（`vN -> vN+1`、原子写入、故障恢复演练）
-  同样未动工：它的验收条件（§5：迁移失败保持原文件、故障注入测试、逐项评审
-  `--update`）本身就要求每一步单独评审，与本次没有中途人工检查点的自动化落地
-  节奏冲突，强行动工存在把评审窗口做成摆设的风险。
+**明确仍未开始、且不在本次自动化落地范围内的部分**（诚实边界，避免"输出面/契约
+骨架已落地"被误读成"v0.7 已完成"）：
+- **候选 #3 的"每宿主一物化视图替换手工 join"半句**——§2 的 `fact_id`/
+  `USAGE_FACT_FIELDS`/`build_usage_fact` 契约骨架已落地（`usage_fact.rs`/`.py`，
+  见 §4 候选表候选 #3 行），但**没有任何 host adapter 被改造成产出这份契约**：
+  claude ledger/codex 静态 fold/dsh state 链/workbuddy credit_json 四条账继续
+  各自的原始形状运行，`session_key`/delta-cumulative 归一/per-host 物化视图这些
+  真正需要"逐宿主动手术"的部分完全未碰。这半句需要真正的迁移评审（每个宿主
+  adapter 的逐一改造顺序、与 workbuddy 流的文件面冲突核对），不是能在没有人工
+  立项的情况下由自动化流程一次性决定的事。
+- **候选 #4 的真实迁移链与持久化故障恢复**——`migrate_chain` 通用 walker 已落地
+  且钉测过 vN→vN+1/拒绝跳迁/未来版本只读/幂等（§4 候选表候选 #4 行），但**没有
+  注册任何真实迁移**（`CURRENT_SCHEMA_VERSION=1` 还没有 v2）、**没有文件级原子
+  写入/fsync/故障注入**（§5「迁移与故障恢复」的验收条款）。两者都要等 `UsageFact`
+  真的有了第二个版本或真的被持久化之后才有意义去做——现在做就是自己造靶子自己打，
+  测不出真问题。
 - **两行未接 CLI/menubar 表面**——`claude_subscription_uncovered_estimate`/
   `nominal_vs_actual_cost` 目前只是双语言 parity 纯函数，没有像 `state by-model`
   那样接一个用户能直接调用的入口；接线本身不需要 schema 变更，风险低，是后续
@@ -252,8 +260,8 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
 |---|---|---|---|
 | 1 | 读写边界最小类型壳（frozen dataclass + from_dict，仅 I/O 层） | 字段多到手写易错的既有对策是显式映射表（claude ledger CAMEL_KEYS/SNAKE_KEYS），不是类型系统；序列化照旧 dict 直出，不破 parity | 不入版本，随时可进（字节不变） |
 | 2 | 键名收敛为单一共享词表（4+4 桶名、camel/snake 双面收进常量模块） | 视图组合出错的真实源头是各文件字面量里的键名漂移 | 不入版本，随时可进（字节不变） |
-| 3 | 事实行落成共享序列化契约 + 每宿主一物化视图（§2 → §3，R2a 模式推广） | 现状 per-host ledger 形状各一是跨宿主视图手写 join 的根因 | **本版主体**（§0.1、§2） |
-| 4 | schema_version 从写时 stamp 升级为显式迁移函数表（读旧版→迁移→新版） | 现状迁移只发生在 merge_month 归档处，读时容忍缺键 | **本版验收条目**（§5） |
+| 3 | 事实行落成共享序列化契约 + 每宿主一物化视图（§2 → §3，R2a 模式推广） | 现状 per-host ledger 形状各一是跨宿主视图手写 join 的根因 | **本版主体**（§0.1、§2）——**契约骨架已落地（2026-09-03），adapter 接线未开始**：`usage_fact.rs`/`.py` 落了 `fact_id`（§2.1 幂等键公式）、`USAGE_FACT_FIELDS`（§2.1 全字段词表）、`build_usage_fact`（校验+填充）三个纯函数，双语言 parity 钉测（含跨语言 pinned `fact_id` 值）；**没有任何 host adapter 被改造成产出这份契约**，四条现有账原样运行——"每宿主一物化视图"这半句仍是提案，需要逐宿主评审才能开始 |
+| 4 | schema_version 从写时 stamp 升级为显式迁移函数表（读旧版→迁移→新版） | 现状迁移只发生在 merge_month 归档处，读时容忍缺键 | **本版验收条目**（§5）——**通用骨架已落地（2026-09-03），无真实迁移**：`migrate_chain`（vN→vN+1 严格线性、拒绝跨版本跳迁、未来版本诚实标 read-only、幂等）双语言 parity 钉测；`CURRENT_SCHEMA_VERSION=1` 是 `UsageFact` 的第一个版本，迁移表目前是空的（没有 v2），机制用测试专用的合成迁移表验证，不是拿一个凑数的假迁移填充；文件级原子写入/fsync/故障注入未实现，等真实持久化调用点出现再做，不空转 |
 
 ### 4.1 迁移与重建的边界
 
@@ -397,6 +405,34 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
 
 ## 7. 记录
 
+- 2026-09-03（**候选 #3/#4 契约骨架落地，非 adapter 接线/真实迁移**）：新增
+  `crates/agent-vitals-core/src/usage_fact.rs` + `scripts/agent_vitals/agent/
+  usage_fact.py`（双语言 parity，`tests/test_usage_fact.py` + Rust inline
+  测试互守，含跨语言 pinned `fact_id` 值）：
+  1. `fact_id(...)`——§2.1「统一幂等键」公式的实现，FNV-1a（非密码学哈希，
+     与 `usage.rs::compaction_identity` 同一条"core crate 不新增依赖"纪律），
+     用 `\x1f` 分隔字段防边界吞并。
+  2. `USAGE_FACT_FIELDS`——§2.1 表的完整字段词表，双语言字面量同步（候选 #2
+     的"键名收敛"精神在这份新契约上直接落地）。
+  3. `build_usage_fact(fields)`——校验 6 个身份输入字段非空、token 字段非负
+     整数，缺失字段报具体字段名（不是笼统 invalid）；输出统一填满
+     `USAGE_FACT_FIELDS`，未提供的键显式置 null（区分"没有这项证据"与
+     "这项是 0"）；`fact_id`/`schema_version` 由函数计算并覆盖调用方声称的值
+     （身份不接受外部冒充）。
+  4. `migrate_chain(doc, migrations, target_version)`——候选 #4 的通用骨架：
+     严格线性 vN→vN+1（禁止跨版本跳迁）、命中目标版本是"当前"而非"迁移了
+     一次空动作"、未来版本诚实标 `future-readonly`+warning 而不报错也不
+     写回、迁移链中间缺步骤时诚实报错并保留已完成的部分、幂等。用测试
+     专用的合成两步迁移表验证机制本身——`CURRENT_SCHEMA_VERSION=1` 是
+     `UsageFact` 的第一个版本，生产迁移表目前是空的。
+  **明确没做、且不打算在没有人工立项评审的情况下做**：没有任何 host adapter
+  被接上这份契约（`session_key`/delta-cumulative 归一/per-host 物化视图完全
+  未碰）；没有注册任何真实迁移；没有文件级原子写入/fsync/故障注入（§5"迁移
+  与故障恢复"）。三者都需要真实的持久化调用点或逐宿主评审才有意义去做，
+  现在做是自己造靶子自己打。全套 `cargo test --release`（core 476 例，+13）/
+  clippy/`AGENT_VITALS_BIN=... python3 -m unittest discover tests`/
+  `golden_runner.py` 验证零漂移（golden 零漂移是自然结果：本模块零 I/O、
+  没有任何现有代码路径调用它）。
 - 2026-09-03（**output-only 切片落地，非本版整体立项**）：§3「本版交付矩阵」
   三行（按 provider/model 月成本、未落入已声明订阅覆盖范围（估算）、名义 vs
   实际单位成本）实现为双语言 parity 函数——`cost.rollup_by_model`/

@@ -28,6 +28,7 @@ from . import (
     takeover,
     trajectory,
     usage,
+    usage_fact,
     waste,
 )
 
@@ -51,5 +52,6 @@ __all__ = [
     "takeover",
     "trajectory",
     "usage",
+    "usage_fact",
     "waste",
 ]

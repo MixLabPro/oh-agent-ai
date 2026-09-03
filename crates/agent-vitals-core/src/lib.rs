@@ -33,5 +33,6 @@ pub mod takeover;
 pub mod waste;
 pub mod trajectory;
 pub mod usage;
+pub mod usage_fact;
 pub mod util;
 pub mod workbuddy_evidence;
