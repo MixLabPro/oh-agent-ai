@@ -278,6 +278,173 @@ class FoldSemanticsCase(unittest.TestCase):
         self.assertEqual(unaccounted["deepseek-v4-flash"]["input_tokens"], 100)
 
 
+class RealWorldMisattributionCase(unittest.TestCase):
+    """v0.6.x 热修验收 fixture（spec §5 后段）：钉住 197.5M 归日 + 残差哨兵。
+
+    真机对账（`docs/CLAUDE_COST_DAY_ATTRIBUTION_ANALYSIS.md` §5、§7）的
+    2279b7b0 / 753e080a / b695a35f 三段实测，2026-09-02 北京日的 flash
+    cache_read 总量。**真实回归**：旧算法下 197.5M flash cache_read 被错记
+    到 cost-state 的 startTime 日（09-01 / 08-31），新算法下 rows 按真实 ts
+    归日、baseline > 行和 的差额进 unaccounted。这条 fixture 把"197.5M"这个
+    具体数字钉进回归套件，下次同类 bug 自动报警。
+
+    同夹具同期望值在 `src/agent/claude_cost.rs::tests::real_world_*` 镜像
+    （Rust inline 锁步，字节互守）。
+
+    ms 约定：北京 09-01T00:00:00+08:00 = UTC 2026-08-31T16:00:00Z
+    = epoch ms 1_788_192_000_000（北京 09-01 起点）；
+    北京 09-01T12:00:00+08:00 = UTC 2026-09-01T04:00:00Z = 1_788_235_200_000
+    （北京 09-01 中点）；北京 08-31T18:00:00+08:00 = UTC 2026-08-31T10:00:00Z
+    = 1_788_170_400_000（北京 08-31 傍晚）。
+    """
+
+    @staticmethod
+    def _cs(start_ms, cr_total):
+        """cost-state 累计 baseline：flash cache_read_input_tokens = cr_total。
+
+        其他 3 型 token 故意置 0，让 unaccounted 只来自 cache_read（与真机
+        197.5M = flash cr 单一桶对齐）——其它型有残差也按同样规则进 unaccounted
+        ，不在 fixture 里掺干扰信号。
+        """
+        return {"type": "cost-state",
+                "timestamp": "2026-09-01T18:00:00.000Z",
+                "startTime": start_ms,
+                "modelUsage": {"deepseek-v4-flash": {
+                    "inputTokens": 0, "outputTokens": 0,
+                    "cacheReadInputTokens": cr_total,
+                    "cacheCreationInputTokens": 0,
+                    "webSearchRequests": 0, "costUSD": 0.0}},
+                "hasUnknownModelCost": False}
+
+    @staticmethod
+    def _row(ts_z, cr):
+        """assistant 行（09-02 ts 的 flash cache_read）。"""
+        return {"type": "assistant", "timestamp": ts_z,
+                "message": {"model": "deepseek-v4-flash", "usage": {
+                    "input_tokens": 0, "cache_read_input_tokens": cr,
+                    "cache_creation_input_tokens": 0, "output_tokens": 0}}}
+
+    @staticmethod
+    def _build_session(start_ms, cr_total, row_pairs):
+        sess = {}
+        recs = (RealWorldMisattributionCase._cs(start_ms, cr_total),) + \
+               tuple(RealWorldMisattributionCase._row(t, c) for t, c in row_pairs)
+        for rec in recs:
+            cc._apply_record(sess, rec)
+        return sess
+
+    def test_2279b7b0_baseline_minus_tail_lands_in_unaccounted(self):
+        # 2279b7b0: startTime 北京 09-01、baseline 38.7M、rows 5.7M（4 行 09-02）
+        # 旧算法把 baseline 整段塞进 09-01：ledger["2026-09-01"][flash cr] = 33M（错）。
+        # 新算法：rows 按真实 ts 归 09-02 = 5.7M；baseline - 行和 = 33M 进 unaccounted。
+        start_0901_bj = 1_788_192_000_000
+        rows = [
+            ("2026-09-02T03:00:00.000Z", 1_500_000),
+            ("2026-09-02T05:00:00.000Z", 1_500_000),
+            ("2026-09-02T07:00:00.000Z", 1_500_000),
+            ("2026-09-02T09:00:00.000Z", 1_200_000),
+        ]
+        sess = self._build_session(start_0901_bj, 38_700_000, rows)
+        # baseline 不再进 baseline_day（v0.6.x 热修撤掉的那条旧路径）
+        self.assertNotIn("baseline_day", sess)
+        # tail_days["2026-09-02"] = 5.7M（按真实行 ts 归日，不是被吞掉也不是摊给某一天）
+        self.assertEqual(
+            sess["tail_days"]["2026-09-02"]["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 5_700_000)
+        # 残差 = baseline - 行和 = 38.7M - 5.7M = 33M（不在任何一天）
+        ledger, archive, unaccounted = cc._rebuild_days({"s1": sess}, "2026-09")
+        self.assertEqual(
+            ledger["2026-09-02"]["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 5_700_000)
+        self.assertEqual(
+            unaccounted["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 33_000_000)
+        # 旧算法的反向断言：09-01 / 08-31 都不该出现这条 session 的账
+        self.assertNotIn("2026-09-01", ledger)
+        self.assertNotIn("2026-08-31", ledger)
+        self.assertEqual(archive, {})
+
+    def test_753e080a_same_pattern_larger_volume(self):
+        # 753e080a: startTime 北京 09-01、baseline 137.1M、rows 44.9M（8 行 09-02）
+        # 同款归日 + 残差规律：tail_days[09-02] = 44.9M、unaccounted = 92.2M。
+        start_0901_bj_mid = 1_788_235_200_000
+        # 8 行均分 44.9M → 5_612_500 × 8 = 44_900_000。
+        row_cr = 5_612_500
+        rows = [("2026-09-02T%02d:00:00.000Z" % h, row_cr)
+                for h in (3, 5, 7, 9, 11, 13, 14, 15)]
+        sess = self._build_session(start_0901_bj_mid, 137_100_000, rows)
+        self.assertEqual(
+            sess["tail_days"]["2026-09-02"]["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 44_900_000)
+        ledger, _archive, unaccounted = cc._rebuild_days({"s1": sess}, "2026-09")
+        self.assertEqual(
+            ledger["2026-09-02"]["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 44_900_000)
+        self.assertEqual(
+            unaccounted["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 92_200_000)
+
+    def test_b695a35f_baseline_startTime_08_31_no_day_bucket(self):
+        # b695a35f: startTime 北京 08-31、baseline 88.3M、rows 16.0M（4 行 09-02）
+        # 旧算法把 baseline 整段塞进 08-31：ledger["2026-08-31"][flash cr] = 72.3M（错）。
+        # 新算法：rows 全部 09-02；baseline - 行和 = 72.3M 进 unaccounted；08-31 不出现。
+        start_0831_bj_eve = 1_788_170_400_000
+        rows = [
+            ("2026-09-02T03:00:00.000Z", 4_000_000),
+            ("2026-09-02T05:00:00.000Z", 4_000_000),
+            ("2026-09-02T07:00:00.000Z", 4_000_000),
+            ("2026-09-02T09:00:00.000Z", 4_000_000),
+        ]
+        sess = self._build_session(start_0831_bj_eve, 88_300_000, rows)
+        ledger, _archive, unaccounted = cc._rebuild_days({"s1": sess}, "2026-09")
+        self.assertEqual(
+            ledger["2026-09-02"]["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 16_000_000)
+        self.assertEqual(
+            unaccounted["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 72_300_000)
+        # 旧算法 bug 的反向断言：08-31 不应再有这条 session 的任何桶
+        self.assertNotIn("2026-08-31", ledger)
+
+    def test_three_sessions_combined_unaccounted_is_197_5M(self):
+        # 三段实测合并：tail_days[09-02] = 5.7 + 44.9 + 16.0 = 66.6M cache_read
+        # unaccounted = 33 + 92.2 + 72.3 = 197.5M cache_read ——spec §5 后段点名的
+        # 真机验收数字，单测一旦回归立刻红。
+        sessions = {
+            "2279b7b0": self._build_session(1_788_192_000_000, 38_700_000, [
+                ("2026-09-02T03:00:00.000Z", 1_500_000),
+                ("2026-09-02T05:00:00.000Z", 1_500_000),
+                ("2026-09-02T07:00:00.000Z", 1_500_000),
+                ("2026-09-02T09:00:00.000Z", 1_200_000),
+            ]),
+            "753e080a": self._build_session(1_788_235_200_000, 137_100_000, [
+                ("2026-09-02T03:00:00.000Z", 11_225_000),
+                ("2026-09-02T05:00:00.000Z", 11_225_000),
+                ("2026-09-02T07:00:00.000Z", 11_225_000),
+                ("2026-09-02T09:00:00.000Z", 11_225_000),
+            ]),
+            "b695a35f": self._build_session(1_788_170_400_000, 88_300_000, [
+                ("2026-09-02T03:00:00.000Z", 4_000_000),
+                ("2026-09-02T05:00:00.000Z", 4_000_000),
+                ("2026-09-02T07:00:00.000Z", 4_000_000),
+                ("2026-09-02T09:00:00.000Z", 4_000_000),
+            ]),
+        }
+        ledger, archive, unaccounted = cc._rebuild_days(sessions, "2026-09")
+        # 合并后的 09-02 cache_read：5.7M + 44.9M + 16.0M = 66.6M
+        self.assertEqual(
+            ledger["2026-09-02"]["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 66_600_000)
+        # 合并残差：33M + 92.2M + 72.3M = 197.5M
+        self.assertEqual(
+            unaccounted["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 197_500_000)
+        # 旧算法 bug 反向断言：09-01 / 08-31 都不应出现这三个 session 的账
+        self.assertNotIn("2026-09-01", ledger)
+        self.assertNotIn("2026-08-31", ledger)
+        self.assertEqual(archive, {})
+
+
 # ────────────────────────── 差分：Python ↔ Rust（--shadow） ─────────────────
 
 _TS_MASK = re.compile(r'"archived_at": "[^"]+"')
@@ -534,6 +701,114 @@ class ClaudeSyncBothTests(unittest.TestCase):
         self.assertEqual(rs_ok.returncode, 0, rs_ok.stderr)
         self.assertEqual(_scrub_json_files_under(py_side2),
                          _scrub_json_files_under(rs_side2))
+
+    def test_real_world_197_5M_misattribution_byte_equal(self):
+        """v0.6.x 热修验收 fixture 端到端（spec §5 后段）：2279b7b0/753e080a/
+        b695a35f 三段实测真机数字 → Python 与 Rust 各自独立跑 claude-sync →
+        state 文件字节相等、66.6M / 197.5M 在 ledger.days / unaccounted 各
+        自正确归位。
+
+        fixture 与 RealWorldMisattributionCase 同源（2279/753e/b695 + 38.7M
+        /5.7M/33M 等真机数字），但本测试走完整 I/O 路径（写 JSONL → claude-sync
+        → 读 ledger.json），把 inline 测试证过的算法放进真实流水线再守一遍。
+        """
+        # 把 3 个会话写在同一个 fixture dir（setUp 已建 .claude/projects/-proj-a）
+        # —— startTime 与 RealWorldMisattributionCase 一致（ms 约定见该 docstring）。
+        start_0901_bj = 1_788_192_000_000
+        start_0901_bj_mid = 1_788_235_200_000
+        start_0831_bj_eve = 1_788_170_400_000
+        # 2279b7b0：baseline 38.7M、4 行 09-02 各 1.5/1.5/1.5/1.2M = 5.7M
+        sess_2279 = [
+            {"type": "cost-state",
+             "timestamp": "2026-09-01T18:00:00.000Z",
+             "startTime": start_0901_bj,
+             "modelUsage": {"deepseek-v4-flash": {
+                 "inputTokens": 0, "outputTokens": 0,
+                 "cacheReadInputTokens": 38_700_000,
+                 "cacheCreationInputTokens": 0,
+                 "webSearchRequests": 0, "costUSD": 0.0}},
+             "hasUnknownModelCost": False},
+            {"type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
+             "message": {"model": "deepseek-v4-flash", "usage": {
+                 "input_tokens": 0, "cache_read_input_tokens": 1_500_000,
+                 "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+            {"type": "assistant", "timestamp": "2026-09-02T05:00:00.000Z",
+             "message": {"model": "deepseek-v4-flash", "usage": {
+                 "input_tokens": 0, "cache_read_input_tokens": 1_500_000,
+                 "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+            {"type": "assistant", "timestamp": "2026-09-02T07:00:00.000Z",
+             "message": {"model": "deepseek-v4-flash", "usage": {
+                 "input_tokens": 0, "cache_read_input_tokens": 1_500_000,
+                 "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+            {"type": "assistant", "timestamp": "2026-09-02T09:00:00.000Z",
+             "message": {"model": "deepseek-v4-flash", "usage": {
+                 "input_tokens": 0, "cache_read_input_tokens": 1_200_000,
+                 "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+        ]
+        _write_session(self.sessions_dir, "sess-2279b7b0.jsonl", sess_2279)
+        # 753e080a：baseline 137.1M、4 行 09-02 各 11.225M = 44.9M
+        sess_753e = [
+            {"type": "cost-state",
+             "timestamp": "2026-09-01T18:00:00.000Z",
+             "startTime": start_0901_bj_mid,
+             "modelUsage": {"deepseek-v4-flash": {
+                 "inputTokens": 0, "outputTokens": 0,
+                 "cacheReadInputTokens": 137_100_000,
+                 "cacheCreationInputTokens": 0,
+                 "webSearchRequests": 0, "costUSD": 0.0}},
+             "hasUnknownModelCost": False},
+            *[{"type": "assistant",
+               "timestamp": "2026-09-02T%02d:00:00.000Z" % h,
+               "message": {"model": "deepseek-v4-flash", "usage": {
+                   "input_tokens": 0, "cache_read_input_tokens": 11_225_000,
+                   "cache_creation_input_tokens": 0, "output_tokens": 0}}}
+              for h in (3, 5, 7, 9)],
+        ]
+        _write_session(self.sessions_dir, "sess-753e080a.jsonl", sess_753e)
+        # b695a35f：baseline 88.3M、4 行 09-02 各 4.0M = 16.0M
+        sess_b695 = [
+            {"type": "cost-state",
+             "timestamp": "2026-09-01T18:00:00.000Z",
+             "startTime": start_0831_bj_eve,
+             "modelUsage": {"deepseek-v4-flash": {
+                 "inputTokens": 0, "outputTokens": 0,
+                 "cacheReadInputTokens": 88_300_000,
+                 "cacheCreationInputTokens": 0,
+                 "webSearchRequests": 0, "costUSD": 0.0}},
+             "hasUnknownModelCost": False},
+            *[{"type": "assistant",
+               "timestamp": "2026-09-02T%02d:00:00.000Z" % h,
+               "message": {"model": "deepseek-v4-flash", "usage": {
+                   "input_tokens": 0, "cache_read_input_tokens": 4_000_000,
+                   "cache_creation_input_tokens": 0, "output_tokens": 0}}}
+              for h in (3, 5, 7, 9)],
+        ]
+        _write_session(self.sessions_dir, "sess-b695a35f.jsonl", sess_b695)
+
+        # 两侧独立 sync 到各自 side：Python 走真作者、Rust 走 --shadow（fencing 放行）。
+        py_side, py_r = self._sync("py")
+        rs_side, rs_r = self._sync("rs", ["--shadow"])
+        self.assertEqual(py_r.returncode, 0, py_r.stderr)
+        self.assertEqual(rs_r.returncode, 0, rs_r.stderr)
+        # state 文件逐字节相等（archived_at 掩码）。
+        got_py = _scrub_json_files_under(py_side)
+        got_rs = _scrub_json_files_under(rs_side)
+        self.assertEqual(set(got_py), set(got_rs))
+        for rel, text in got_rs.items():
+            self.assertEqual(got_py[rel], text, "state %s 逐字节不一致" % rel)
+        # 关键数字：66.6M 落 ledger["2026-09-02"]、197.5M 落 unaccounted。
+        ledger = json.loads(got_rs["state/claude-ledger.json"])
+        self.assertEqual(
+            ledger["days"]["2026-09-02"]["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 66_600_000,
+            "5.7 + 44.9 + 16.0 = 66.6M cache_read 正确归 09-02")
+        self.assertEqual(
+            ledger["unaccounted"]["deepseek-v4-flash"]
+            ["cache_read_input_tokens"], 197_500_000,
+            "33 + 92.2 + 72.3 = 197.5M cache_read 残差池（spec §5 后段点名数字）")
+        # 旧算法 bug 反向断言：09-01 / 08-31 都不应出现这三个 session 的任何桶。
+        self.assertNotIn("2026-09-01", ledger["days"])
+        self.assertNotIn("2026-08-31", ledger["days"])
 
 
 if __name__ == "__main__":

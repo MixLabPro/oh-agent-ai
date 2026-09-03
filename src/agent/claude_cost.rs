@@ -1096,4 +1096,212 @@ mod tests {
         assert_eq!(ledger_day_total_tokens(&Value::Null), 0);
         assert_eq!(ledger_day_total_tokens(&json!({})), 0);
     }
+
+    // ── 真机对账 fixture（spec §5 后段）── 钉住 197.5M 归日 + 残差哨兵 ────
+    // Python `tests/test_claude_cost.py::RealWorldMisattributionCase` 同夹具
+    // 同期望值互守（CLAUDE.md「同夹具同期望值两侧各钉一遍」纪律）。真机来源：
+    // `docs/CLAUDE_COST_DAY_ATTRIBUTION_ANALYSIS.md` §5、§7 的 2279b7b0 /
+    // 753e080a / b695a35f 三段实测。ms 约定：北京 09-01T00:00:00+08:00 =
+    // UTC 2026-08-31T16:00:00Z = 1_788_192_000_000（其余类推）。
+
+    fn real_world_cs(start_ms: i64, cr_total: i64) -> Value {
+        json!({
+            "type": "cost-state",
+            "timestamp": "2026-09-01T18:00:00.000Z",
+            "startTime": start_ms,
+            "modelUsage": {"deepseek-v4-flash": {
+                "inputTokens": 0, "outputTokens": 0,
+                "cacheReadInputTokens": cr_total,
+                "cacheCreationInputTokens": 0,
+                "webSearchRequests": 0, "costUSD": 0.0}},
+            "hasUnknownModelCost": false,
+        })
+    }
+
+    fn real_world_row(ts_z: &str, cr: i64) -> Value {
+        json!({
+            "type": "assistant", "timestamp": ts_z,
+            "message": {"model": "deepseek-v4-flash", "usage": {
+                "input_tokens": 0, "cache_read_input_tokens": cr,
+                "cache_creation_input_tokens": 0, "output_tokens": 0}},
+        })
+    }
+
+    fn build_real_world_session(start_ms: i64, cr_total: i64,
+                                 row_pairs: &[(&str, i64)]) -> Map<String, Value> {
+        let mut sess = Map::new();
+        let recs: Vec<Value> =
+            std::iter::once(real_world_cs(start_ms, cr_total))
+                .chain(row_pairs.iter().map(|(t, c)| real_world_row(t, *c)))
+                .collect();
+        for rec in &recs {
+            apply_record(&mut sess, rec);
+        }
+        sess
+    }
+
+    /// 2279b7b0：startTime 北京 09-01、baseline 38.7M、rows 5.7M（4 行 09-02）。
+    /// 旧算法把 baseline 整段塞进 09-01（错）；新算法：tail_days[09-02] = 5.7M，
+    /// baseline - 行和 = 33M 进 unaccounted，09-01 / 08-31 都不出现。
+    #[test]
+    fn real_world_2279b7b0_baseline_minus_tail_lands_in_unaccounted() {
+        let start_0901_bj: i64 = 1_788_192_000_000;
+        let rows = [
+            ("2026-09-02T03:00:00.000Z", 1_500_000_i64),
+            ("2026-09-02T05:00:00.000Z", 1_500_000),
+            ("2026-09-02T07:00:00.000Z", 1_500_000),
+            ("2026-09-02T09:00:00.000Z", 1_200_000),
+        ];
+        let sess = build_real_world_session(start_0901_bj, 38_700_000, &rows);
+        assert!(!sess.contains_key("baseline_day"),
+                "v0.6.x 热修撤掉的旧路径：baseline 不再进 baseline_day");
+        assert_eq!(
+            sess.get("tail_days").unwrap()
+                .get("2026-09-02").unwrap()
+                .get("deepseek-v4-flash").unwrap()
+                .get("cache_read_input_tokens"),
+            Some(&json!(5_700_000)),
+            "rows 按真实 ts 归 09-02，不是被吞也不是摊给某一天"
+        );
+        let mut sessions = Map::new();
+        sessions.insert("s1".to_string(), Value::Object(sess));
+        let (ledger, archive, unaccounted) =
+            rebuild_days(&Value::Object(sessions), "2026-09");
+        assert_eq!(
+            ledger.get("2026-09-02").unwrap()
+                .get("deepseek-v4-flash").unwrap()
+                .get("cache_read_input_tokens"),
+            Some(&json!(5_700_000))
+        );
+        assert_eq!(
+            unaccounted.get("deepseek-v4-flash").unwrap()
+                .get("cache_read_input_tokens"),
+            Some(&json!(33_000_000)),
+            "baseline 38.7M - 行和 5.7M = 33M 残差，不在任何一天"
+        );
+        assert!(ledger.get("2026-09-01").is_none(),
+                "旧算法 bug 反向断言：09-01 不应再吃这条 session 的账");
+        assert!(ledger.get("2026-08-31").is_none());
+        assert!(archive.is_empty(),
+                "当前月=2026-09、09-02 也在当月，无日子需要归档");
+    }
+    /// 同款规律：tail_days[09-02] = 44.9M、unaccounted = 92.2M。
+    #[test]
+    fn real_world_753e080a_same_pattern_larger_volume() {
+        let start_0901_bj_mid: i64 = 1_788_235_200_000;
+        let row_cr: i64 = 5_612_500; // × 8 = 44_900_000
+        let rows = [
+            ("2026-09-02T03:00:00.000Z", row_cr),
+            ("2026-09-02T05:00:00.000Z", row_cr),
+            ("2026-09-02T07:00:00.000Z", row_cr),
+            ("2026-09-02T09:00:00.000Z", row_cr),
+            ("2026-09-02T11:00:00.000Z", row_cr),
+            ("2026-09-02T13:00:00.000Z", row_cr),
+            ("2026-09-02T14:00:00.000Z", row_cr),
+            ("2026-09-02T15:00:00.000Z", row_cr),
+        ];
+        let sess = build_real_world_session(start_0901_bj_mid, 137_100_000, &rows);
+        assert_eq!(
+            sess.get("tail_days").unwrap()
+                .get("2026-09-02").unwrap()
+                .get("deepseek-v4-flash").unwrap()
+                .get("cache_read_input_tokens"),
+            Some(&json!(44_900_000))
+        );
+        let mut sessions = Map::new();
+        sessions.insert("s1".to_string(), Value::Object(sess));
+        let (ledger, _archive, unaccounted) =
+            rebuild_days(&Value::Object(sessions), "2026-09");
+        assert_eq!(
+            ledger.get("2026-09-02").unwrap()
+                .get("deepseek-v4-flash").unwrap()
+                .get("cache_read_input_tokens"),
+            Some(&json!(44_900_000))
+        );
+        assert_eq!(
+            unaccounted.get("deepseek-v4-flash").unwrap()
+                .get("cache_read_input_tokens"),
+            Some(&json!(92_200_000))
+        );
+    }
+
+    /// b695a35f：startTime 北京 08-31、baseline 88.3M、rows 16.0M（4 行 09-02）。
+    /// 旧算法把 baseline 整段塞进 08-31（错）；新算法：08-31 不出现，
+    /// unaccounted = 72.3M。
+    #[test]
+    fn real_world_b695a35f_baseline_starttime_08_31_no_day_bucket() {
+        let start_0831_bj_eve: i64 = 1_788_170_400_000;
+        let rows = [
+            ("2026-09-02T03:00:00.000Z", 4_000_000_i64),
+            ("2026-09-02T05:00:00.000Z", 4_000_000),
+            ("2026-09-02T07:00:00.000Z", 4_000_000),
+            ("2026-09-02T09:00:00.000Z", 4_000_000),
+        ];
+        let sess = build_real_world_session(start_0831_bj_eve, 88_300_000, &rows);
+        let mut sessions = Map::new();
+        sessions.insert("s1".to_string(), Value::Object(sess));
+        let (ledger, _archive, unaccounted) =
+            rebuild_days(&Value::Object(sessions), "2026-09");
+        assert_eq!(
+            ledger.get("2026-09-02").unwrap()
+                .get("deepseek-v4-flash").unwrap()
+                .get("cache_read_input_tokens"),
+            Some(&json!(16_000_000))
+        );
+        assert_eq!(
+            unaccounted.get("deepseek-v4-flash").unwrap()
+                .get("cache_read_input_tokens"),
+            Some(&json!(72_300_000))
+        );
+        assert!(ledger.get("2026-08-31").is_none(),
+                "旧算法 bug 反向断言：08-31 不应再有这条 session 的任何桶");
+    }
+
+    /// 三段实测合并：tail_days[09-02] = 5.7+44.9+16.0 = 66.6M cache_read；
+    /// unaccounted = 33+92.2+72.3 = 197.5M cache_read ——spec §5 后段点名的
+    /// 真机验收数字，单测一旦回归立刻红。
+    #[test]
+    fn real_world_three_sessions_combined_unaccounted_is_197_5_m() {
+        let sessions = json!({
+            "2279b7b0": Value::Object(build_real_world_session(
+                1_788_192_000_000_i64, 38_700_000, &[
+                    ("2026-09-02T03:00:00.000Z", 1_500_000_i64),
+                    ("2026-09-02T05:00:00.000Z", 1_500_000),
+                    ("2026-09-02T07:00:00.000Z", 1_500_000),
+                    ("2026-09-02T09:00:00.000Z", 1_200_000),
+                ])),
+            "753e080a": Value::Object(build_real_world_session(
+                1_788_235_200_000_i64, 137_100_000, &[
+                    ("2026-09-02T03:00:00.000Z", 11_225_000_i64),
+                    ("2026-09-02T05:00:00.000Z", 11_225_000),
+                    ("2026-09-02T07:00:00.000Z", 11_225_000),
+                    ("2026-09-02T09:00:00.000Z", 11_225_000),
+                ])),
+            "b695a35f": Value::Object(build_real_world_session(
+                1_788_170_400_000_i64, 88_300_000, &[
+                    ("2026-09-02T03:00:00.000Z", 4_000_000_i64),
+                    ("2026-09-02T05:00:00.000Z", 4_000_000),
+                    ("2026-09-02T07:00:00.000Z", 4_000_000),
+                    ("2026-09-02T09:00:00.000Z", 4_000_000),
+                ])),
+        });
+        let (ledger, archive, unaccounted) = rebuild_days(&sessions, "2026-09");
+        assert_eq!(
+            ledger.get("2026-09-02").unwrap()
+                .get("deepseek-v4-flash").unwrap()
+                .get("cache_read_input_tokens"),
+            Some(&json!(66_600_000)),
+            "5.7 + 44.9 + 16.0 = 66.6M cache_read 正确归 09-02"
+        );
+        assert_eq!(
+            unaccounted.get("deepseek-v4-flash").unwrap()
+                .get("cache_read_input_tokens"),
+            Some(&json!(197_500_000)),
+            "33 + 92.2 + 72.3 = 197.5M cache_read 进 unaccounted（spec §5 后段点名数字）"
+        );
+        assert!(ledger.get("2026-09-01").is_none());
+        assert!(ledger.get("2026-08-31").is_none());
+        assert!(archive.is_empty(),
+                "当前月=2026-09、09-02 也在当月，无日子需要归档");
+    }
 }
