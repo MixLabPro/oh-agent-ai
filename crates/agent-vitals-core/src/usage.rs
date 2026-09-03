@@ -110,7 +110,12 @@ fn beijing_weekday(time_ms: i64) -> i64 {
 /// 29 次请求的 token 数逐位吻合，只有时段判错。而且这条从来没被真实账单验证
 /// 过：上一次对账的会话跑在 21–22 点，全程落在空闲时段，走的根本不是这个
 /// 分支，所以碰巧对上了。
-fn is_peak_slot(time_ms: i64) -> bool {
+///
+/// `pub`（不是 `pub(crate)`）：v0.6.x 前置热修（2026-09-03）起，二进制侧
+/// `src/agent/claude_cost.rs` 也要用它给 claude ledger 的逐行 usage 判峰谷
+/// ——"哪些时刻算高峰"是单一谓词，core 与二进制都读同一个函数，不重写第二份
+/// （同 `evidence.rs` 的 usage 谓词纪律）。
+pub fn is_peak_slot(time_ms: i64) -> bool {
     if beijing_weekday(time_ms) > 4 {
         return false; // 周六(5)、周日(6) 全天空闲
     }
@@ -908,6 +913,23 @@ pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146097 + doe - 719468
 }
 
+/// 民历日期时刻（UTC，逐字段已从 ISO 字符串切出）→ epoch 毫秒，**校验真实
+/// 日期**（`days_from_civil` 对非法日期无定义，如 02-30——这里用
+/// `civil_date_from_days` 往返比对挡掉）。`pub`：v0.6.x 前置热修
+/// （2026-09-03）起，二进制侧 `src/agent/claude_cost.rs` 的 `ms_from_iso_ts`
+/// 复用它给 claude 逐行 usage 判峰谷（`is_peak_slot` 要精确的北京小时+
+/// 星期，不只是日期）——Python 镜像用 `date(y,mo,d)` 的构造失败做同一件事。
+pub fn ms_from_civil(y: i64, mo: u32, d: u32, hh: u32, mm: u32, ss: u32) -> Option<i64> {
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+    let days = days_from_civil(y, mo, d);
+    if civil_date_from_days(days) != format!("{y:04}-{mo:02}-{d:02}") {
+        return None; // 往返不一致 → 输入本来就不是一个真实存在的日期
+    }
+    Some((days * 86_400 + hh as i64 * 3600 + mm as i64 * 60 + ss as i64) * 1000)
+}
+
 /// 事件流 → 按 `(date, hour)` 折叠到 token 桶。Python 平行实现见
 /// `scripts/agent_vitals/agent/usage.py::hour_buckets`，差分防护在本文件的
 /// `hour_buckets_*` 测试 + `tests/test_cli_matrix.py` 的双二进制逐字节比较。
@@ -1567,6 +1589,24 @@ pub fn canonical_tokens(events: &[Value], source: &str) -> Value {
 mod tests {
     use super::*;
     use crate::evidence::CoverageCounts;
+
+    #[test]
+    fn ms_from_civil_matches_python_oracle_and_feeds_is_peak_slot() {
+        // 2026-08-31 09:30 北京（周一）= 2026-08-31T01:30:00Z。与 Python
+        // 侧手算 ms 交叉核对（scripts 里跑过同样的输入）。
+        let ms = ms_from_civil(2026, 8, 31, 1, 30, 0).unwrap();
+        assert_eq!(ms, 1_788_139_800_000);
+        assert!(is_peak_slot(ms));
+        // 同日 22:00 北京 = 14:00Z，空闲。
+        let ms_off = ms_from_civil(2026, 8, 31, 14, 0, 0).unwrap();
+        assert!(!is_peak_slot(ms_off));
+        // 非法日期（2 月 30 日不存在）→ None，不是"给个数字将就"。
+        assert!(ms_from_civil(2026, 2, 30, 0, 0, 0).is_none());
+        // 越界小时/分/秒 → None。
+        assert!(ms_from_civil(2026, 8, 31, 24, 0, 0).is_none());
+        assert!(ms_from_civil(2026, 8, 31, 0, 60, 0).is_none());
+        assert!(ms_from_civil(2026, 8, 31, 0, 0, 60).is_none());
+    }
 
     #[test]
     fn usage_signal_status_unavailable_when_usage_signal_has_zero_coverage() {

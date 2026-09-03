@@ -291,56 +291,72 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
 - **迁移与故障恢复**：每个 `vN -> vN+1` 用夹具验证幂等、原文件不变、原子替换；在
   临时文件写入和 replace 前注入故障，重启后只能看到完整旧版或完整新版。未来版本
   reader 测试必须证明不会被旧 writer 覆盖。
-- **前置热修复验证（本版不负责首次修复）**：v0.6 原显式缺口由 v0.6.x 结清的
-  **两个函数**——`cost.rs::claude_day_cost`（消费方是 src-tauri `overview.rs`
-  的托盘日面）与 `cost.rs::claude_session_cost`（消费方是 src-tauri 的会话账
-  面），双语言各一次——**这两个 core 函数在 CLI 二进制（`src/`）零暴露**，
-  与命令行的 `claude-sync`/`claude-session` 子命令是不同代码路径（那两个走
-  `claude_cost.rs`/`claude_session_audit.rs`，不经过 `price_claude_map`），
-  行文不要用命令式名字指代，容易读成同一个东西。G10 的断言目前落在核心库
-  单测层（`crates/agent-vitals-core/tests/host_contract.rs`/
-  `tests/test_host_contract.py` 直接调这两个函数），不是 CLI 命令面断言——
-  在本版落地后必须已经是硬断言（v0.6 spec §8 G10）。**两个函数在热修中必须同批
-  结清**：两者共用 `price_claude_map`→`price_claude_model`→`flat_rate` 这一条链，
-  且该函数 doc 注释自钉「两面的钱必须同源」，只修一面会让日面与会话面从此分叉。
-  热修落地内容：claude ledger 日桶下加 `peak_*` 子桶（照 DSH 既有日形状，
-  `usage.rs::add_buckets`）、两个入口改走峰谷读法（`bucket_price` 族）而非
-  `flat_rate` 硬取 `off_peak`、事实行补时变维列。下界兜底本体在 `flat_rate`
-  （`cost.rs:710-718`），不在 `resolve_card_catalog`——后者只负责解析出
+- **前置热修复验证（本版不负责首次修复；2026-09-03 已落地）**：v0.6 原显式
+  缺口由 v0.6.x 结清的**两个函数**——`cost.rs::claude_day_cost`（消费方是
+  src-tauri `overview.rs` 的托盘日面）与 `cost.rs::claude_session_cost`
+  （消费方是 src-tauri 的会话账面），双语言各一次——**这两个 core 函数在 CLI
+  二进制（`src/`）零暴露**，与命令行的 `claude-sync`/`claude-session` 子命令
+  是不同代码路径（那两个走 `claude_cost.rs`/`claude_session_audit.rs`，不
+  经过 `price_claude_map`），行文不要用命令式名字指代，容易读成同一个东西。
+  G10 的断言落在核心库单测层（`crates/agent-vitals-core/tests/
+  host_contract.rs`/`tests/test_host_contract.py` 直接调这两个函数），不是
+  CLI 命令面断言——**现在已是硬断言**（v0.6 spec §8 G10；例数从 11/19 增至
+  12/20）。**两个函数在热修中同批结清**：两者共用
+  `price_claude_map`→`price_claude_model`→`priced_field` 这一条链（`flat_rate`
+  收窄为只服务真正平费率字段），该链 doc 注释自钉「两面的钱必须同源」，`
+  claude_day_cost` 传 `peak_resolved=true`、`claude_session_cost` 传
+  `peak_resolved=false`，未出现半修。落地内容：claude ledger 日桶下加
+  `peak_*` 子桶（`claude_cost.rs`/`.py` 的 `tail_days` 逐行真实 ts 精确标记，
+  不是照抄 DSH 的 `usage.rs::add_buckets`，是 claude 语料自己的折叠管线原生产出）、
+  两个入口改走峰谷拆分计价（`priced_field`）而非硬取 `off_peak`；`claude_day_cost`
+  据此报 `pricing_basis="catalog"`（精确值），`claude_session_cost` 因
+  cost-state 累计口径结构性没有逐行 ts，如实报 `pricing_basis="partial"`
+  （这是它能达到的诚实上限，不是残留缺口）。下界兜底本体原在 `flat_rate`
+  （旧 `cost.rs:710-718`），不在 `resolve_card_catalog`——后者只负责解析出
   `(provider, key, currency)` 三元组，不做任何计价判断；命中的时变卡是三张
   ——deepseek-official 的 flash/pro **与 shengsuanyun 的 pro**（`resolve_
   card_catalog` 第二段遍历顶层 `providers` 时解析出的正是这三张 `{off_peak,
-  peak}` 卡，随后都流进 `flat_rate` 的同一条下界分支），fixture 三张都要覆盖。
-  **验收标准可端到端复现**：对脱敏 fixture，在相同账期、币种、provider、计费范围
-  与调整项口径下，本仓价卡重算值应在明确的 Decimal 舍入容限内等于账单金额。
-  ¥74.3797 样本作为固定回归 fixture，不作为所有 provider 的通用等式定义。（该核算
-  当时是按每行真实小时做的；小时与
-  峰谷归属对这个等式等价，因为峰谷只是 `is_peak_slot(ts)` 的像——保留 `peak_*` 子桶
-  即足以复现，保留完整 hour 列则是更强但更贵的选项，见 §0.1bis。）
-- **归日转正 + 残差哨兵 —— v0.6.x 验收项（前置，落地为 v0.7 前提；截至本次
-  记录尚未落地）**：行应按自身 ts 归日、cost-state 只作对账锚、消解重复计数、
-  行和 < 基线的差值报 partial/`unaccounted`。**同批的理由**：只修归日会让
-  flash 补回而 pro 的未去重虚高单边暴露，总额从系统性偏低翻成偏高（分析文档
-  §7 实测 flash 0.63× / pro 2.12×，两者今日恰好互抵）；两者是同一热修的两半。
-  **现状核实**：`claude_cost.py` 全文没有 `message.id` 去重——它现有的去重
-  机制是按文件 `(size, mtime_ns)` 做 checkpoint（`_fold_one`），不是逐条消息
-  id；上一版写"message.id 去重"是对去重手段的误述，落地时应先确认目标去重键
-  （文件级 checkpoint 是否已经充分，还是真的需要更细粒度的逐条 id），而不是
-  照抄这个提法直接实现。**fixture 现状**：`2279`/`753e`/`b695`/`197.5M` 在
-  `tests/`/`fixtures/` 里目前零命中（只有 `753e` 作为真机 session id 出现在
-  一条注释里）——这是分析文档 `docs/CLAUDE_COST_DAY_ATTRIBUTION_ANALYSIS.md`
-  §9 的建议，**尚未建成 fixture**，落地时才需要真的把这三段实测数据钉进夹具。
-- **陈述性缺陷订正 —— v0.6.x 验收项（前置，落地为 v0.7 前提；截至本次记录
-  尚未落地）**：`cost.rs:709` 注释所写的峰段窗口「deepseek 官方高峰
-  00:30–08:30 北京时间」**目前原文仍在**，与 `usage.rs::is_peak_slot`
-  （周一至五 9–12/14–18）、`pricing.json` 的 `_doc`、官方文档三方矛盾；
-  `cost.rs::flat_rate` 与 `cost.py::_flat_rate` 两侧共用的「Claude 会话文件
-  没有时段证据」docstring 前提**目前也原文仍在**、亦为假（实测 104,809 条
-  ts 全带 `Z`）；`tests/test_host_contract.py` 的
-  `test_registered_gap_entries_currently_take_the_off_peak_floor` 现在还在
-  钉住这两个入口卡在 off_peak 下界这个（错误的）当前行为，作为 v0.6 侧的
-  行为断言——三处会随这次热修一起改（两段注释订正 + 该测试从"验证现状卡在
-  下界"改写成"验证现状已经峰谷正确"），不是各自独立的收尾动作。
+  peak}` 卡），三张 fixture 均覆盖（`g10_time_varying_card_set_matches_registry`
+  机械推导钉住）。**端到端验收现状**：`docs/CLAUDE_COST_DAY_ATTRIBUTION_ANALYSIS.md`
+  的 ¥74.3797 真机样本**尚未**钉进可重放 fixture（见下一条"归日转正"的 fixture
+  现状说明）——本条只验证了计价函数本身的峰谷读法正确、`peak_*` 子桶来自逐行
+  真实 ts，未验证对那个具体真机账期的端到端复现；该样本作为固定回归 fixture
+  仍是后续待办，不作为所有 provider 的通用等式定义。
+- **归日转正 + 残差哨兵 —— v0.6.x 验收项（前置，落地为 v0.7 前提；2026-09-03
+  已落地）**：`claude_cost.rs`/`.py` 的 `tail_days` 改为永不清空、由每条
+  `assistant` 行自己的真实 ts 累加（含峰谷标记）；`cost-state` 的 `baseline`
+  降级为纯粹的对账锚点——重建时按会话按模型比较 `tail_days` 行和与 `baseline`：
+  行和 ≥ baseline → baseline 已被更细粒度数据完全覆盖，弃置；行和 < baseline
+  → 差额进新的 `unaccounted` 顶层键（dateless、无峰谷分辨率，绝不摊到某一
+  具体日期）。**同批的理由**：只修归日会让 flash 补回而 pro 的未去重虚高单边
+  暴露，总额从系统性偏低翻成偏高（分析文档 §7 实测 flash 0.63× / pro 2.12×，
+  两者今日恰好互抵）；两者是同一热修的两半——本次落地里"消解重复计数"体现
+  为 baseline 判定本身（行和覆盖 baseline 即视为无需重复计入，不是逐条消息
+  级去重）。**现状核实（未变）**：`claude_cost.py` 全文没有 `message.id`
+  去重——它现有的去重机制是按文件 `(size, mtime_ns)` 做 checkpoint
+  （`_fold_one`），不是逐条消息 id；上一版写"message.id 去重"是对去重手段的
+  误述，本次落地确认目标去重键就是文件级 checkpoint（未新增逐条 id 去重，
+  未发现需要更细粒度的场景）。**fixture 现状**：`2279`/`753e`/`b695`/
+  `197.5M` 这几个分析文档 §9 建议钉入夹具的具体真机数值**仍未**建成 fixture
+  ——本次落地验证的是机制本身（`tests/test_claude_cost.py::ClaudeSyncBothTests`
+  新增一条真实上月 `assistant` 行触发归档 + 一条 baseline 未被覆盖触发
+  `unaccounted` 的合成夹具，双语言差分逐字节相等），不是对那份具体真机语料的
+  逐数复现；把那三段实测数据钉进夹具仍是后续待办。
+- **陈述性缺陷订正 —— v0.6.x 验收项（前置，落地为 v0.7 前提；2026-09-03
+  已落地）**：`cost.rs` 里所写的峰段窗口「deepseek 官方高峰 00:30–08:30
+  北京时间」这条与 `usage.rs::is_peak_slot`（周一至五 9–12/14–18）、
+  `pricing.json` 的 `_doc`、官方文档三方矛盾的注释**已删除**（连带它所依附
+  的旧 `flat_rate` off_peak 兜底分支一并移除，`flat_rate` 现在收窄为只服务
+  真正平费率字段，文档字符串重写并指出真机对账证据：托盘 claude 今日 ¥45.40
+  vs 官方账单 ¥74.3797，89% 差额来自这一步）；`cost.py::_flat_rate` 同步；
+  `crates/agent-vitals-core/tests/host_contract.rs` 与
+  `tests/test_host_contract.py` 里钉住"两入口卡在 off_peak 下界"这个（错误
+  的）旧行为的测试**已删除**，替换为
+  `g10_claude_day_cost_prices_peak_tokens_at_peak_rate_not_off_peak_floor`
+  （验证峰谷读法正确）与
+  `g10_claude_session_cost_honestly_reports_partial_for_time_varying_cards`
+  （验证诚实降级）两条新硬断言——三处是同一次提交里同批改的，不是各自独立
+  的收尾动作。
 
 ## 6. 与 v0.6 的文档边界
 
@@ -348,10 +364,11 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
   卡**（注册表行 = 列填充能力卡：unmeasured ↔ NULL/absent 列、degraded_rules ↔
   视图对 NULL 列的三态、fold ↔ 可产出的折叠列族、session_store ↔ 身份行——
   host-contract 语义随 v0.6 走）、§2.3 版本边界表、§0 结论第 6 条、**§5.3 条款 7
-  （计价分辨率不变量）与 §8 G10（守卫；缺口归属现状仍是 v0.6 spec 自己登记的
-  `"pending v0.7"`——§0.1bis 提议改记 v0.6.x，但尚未同步，见该节的决策点）**——
-  同为 host-contract 语义。本文件拥有统一事实契约及对前置热修不变量的持续回归
-  验证；条款措辞与守卫判据的修改仍在 v0.6 spec。
+  （计价分辨率不变量）与 §8 G10（守卫；缺口归属已于 2026-09-03 随 R4 的
+  v0.6.x 热修决策同步结清——v0.6 spec §8 G10 的两条 `"pending v0.7"` 条目
+  已删除、改为硬断言，见该节 R4 修订记录）**——同为 host-contract 语义。
+  本文件拥有统一事实契约及对前置热修不变量的持续回归验证；条款措辞与守卫
+  判据的修改仍在 v0.6 spec。
 - **本文件拥有**：统一事实行（§2）、视图目录与交付矩阵（§3）、数据结构演进/ORM-
   NoSQL 定位/候选表（§4）、验收（§5）。
 - 引用纪律：本文件的 §/表引用只指向自身或 v0.6 spec/R2a/价目表等具名文档；v0.6

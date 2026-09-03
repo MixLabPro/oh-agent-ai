@@ -21,6 +21,19 @@ from datetime import date, timedelta
 
 from .codex_cost import current_month_beijing
 from .state import _atomic_write, _now_iso, _read, state_dir
+from .usage import _is_peak_slot
+
+# v0.6.x 前置正确性热修复（归日转正 + 峰谷分辨率 + 残差哨兵，三者同批——
+# 见 docs/VITALS_CORE_V0_6_HOST_CONTRACT_SPEC.md §5.3 条款 7 / §8 G10、
+# docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md §5）。claude-fold.json 在这次改动
+# 之前没有 schema_version：旧 checkpoint 的 tail_days 是在"cost-state 一来
+# 就清空"的旧算法下产生的，只保留最近一次基线之后的行，历史全部已经在写盘
+# 那一刻永久丢失（不是"还没折"，是"折过又被清掉"）——resume 读不回来，唯一
+# 正确的补救是强制全量重折一次（源头 JSONL 文件本身没删，可重建）。
+# `FOLD_SCHEMA_VERSION` 不匹配（含缺失，等价旧版本 0）时，claude_sync 清空
+# 整份 `sessions`，让每个文件都走 `_fold_one` 的 "new" 分支——不是迁移函数，
+# 是"重新从权威源 ingest"，与 v0.7 spec §4.1"事实 cache 可重建"同一个原则。
+FOLD_SCHEMA_VERSION = 2
 
 # 行级 usage 的 4 个计数键（API 全形，真机 100%；写入桶的固定键序）。
 SNAKE_KEYS = ["input_tokens", "cache_read_input_tokens",
@@ -30,6 +43,13 @@ SHORT_KEYS = ["input", "cache_read", "cache_creation", "output"]
 # cost-state modelUsage 的 camel 键，同样一一对应。
 CAMEL_KEYS = ["inputTokens", "cacheReadInputTokens",
               "cacheCreationInputTokens", "outputTokens"]
+# 高峰时段子桶——每个 SNAKE_KEYS 字段配一个 peak_ 前缀的子计数，与 DSH
+# `usage.rs::add_buckets` 的 4+4 形状同构（v0.6 spec §5.3 条款 7 的"折叠时
+# 预拆"）。这四个键只从 tail_days（逐行真实 ts）里累计——cost-state 的
+# modelUsage 是无时间戳的累计快照，永远没有资格填这四个键，见
+# `_price_claude_map` 的 `peak_resolved` 参数。
+PEAK_KEYS = ["peak_input_tokens", "peak_cache_read_input_tokens",
+             "peak_cache_creation_input_tokens", "peak_output_tokens"]
 
 
 def ledger_day_total_tokens(day):
@@ -118,6 +138,36 @@ def day_from_iso_ts(ts):
     return "%04d-%02d-%02d" % (y, mo, d)
 
 
+def ms_from_iso_ts(ts):
+    """同 `day_from_iso_ts` 认的时间戳格式 → epoch 毫秒。给 `usage.py::
+    _is_peak_slot` 用——它要精确的北京小时 + 星期几，`day_from_iso_ts` 只算到
+    "哪一天"不够。复用同一套格式校验（不额外校验分/秒范围外的输入会被
+    `date()` 构造器自己拒——ValueError 兜底），不重开一套解析规则；只多读
+    `mm`/`ss` 两截。用 `date()` 做民历转儒略日（与 `day_from_ms` 同一手法），
+    不手写另一套闰年表。
+    """
+    if not isinstance(ts, str) or not ts.isascii():
+        return None
+    if len(ts) < 20 or ts[10] != "T" or not ts.endswith("Z"):
+        return None
+    try:
+        y = int(ts[0:4])
+        mo = int(ts[5:7])
+        d = int(ts[8:10])
+        hh = int(ts[11:13])
+        mm = int(ts[14:16])
+        ss = int(ts[17:19])
+    except ValueError:
+        return None
+    if not 1 <= mo <= 12 or not 1 <= d <= 31 or hh > 23 or mm > 59 or ss > 59:
+        return None
+    try:
+        days = (date(y, mo, d) - date(1970, 1, 1)).days
+    except ValueError:
+        return None
+    return (days * 86400 + hh * 3600 + mm * 60 + ss) * 1000
+
+
 def _add_day(y, mo, d):
     """公历日 +1（月末/年末/闰年走同一张表）。镜像 Rust add_day。"""
     if mo == 2:
@@ -145,9 +195,21 @@ def day_from_ms(ms):
 
 
 def _bump_obj(obj, t):
-    """4 桶加到 `obj`（4 个 snake 键的桶 dict，如 tail_days[day][model]）。"""
+    """4 桶加到 `obj`（4 个 snake 键的桶 dict）。用于 baseline / 归档合并这类
+    只有 4 型、没有峰谷分辨率的场合。"""
     for i, k in enumerate(SNAKE_KEYS):
         obj[k] = int(obj.get(k) or 0) + int(t[i])
+
+
+def _bump_tail(obj, t, peak):
+    """8 桶加到 `obj`（tail_days[day][model]，4 基础 + 4 峰值子桶，DSH
+    `usage.rs::add_buckets` 同形）。`peak=True` 时额外加进 `PEAK_KEYS`——
+    子桶恒 ≤ 对应基础桶（同一次加法同时进两边，不会倒挂）。"""
+    for i, k in enumerate(SNAKE_KEYS):
+        obj[k] = int(obj.get(k) or 0) + int(t[i])
+    if peak:
+        for i, k in enumerate(PEAK_KEYS):
+            obj[k] = int(obj.get(k) or 0) + int(t[i])
 
 
 def _inc(sess, key):
@@ -187,16 +249,29 @@ def _camel_entry_tokens(entry):
 
 
 def _apply_record(sess, rec):
-    """一条记录 → 会话状态转换（assistant 行入尾差、cost-state 换基线）。
-    纯函数：`sess` 是 claude-fold.json 里 `sessions[sid]` 的 dict。"""
+    """一条记录 → 会话状态转换（assistant 行入尾差、cost-state 换基线对账
+    锚）。纯函数：`sess` 是 claude-fold.json 里 `sessions[sid]` 的 dict。
+
+    v0.6.x 前置热修（归日转正，2026-09-03）：`tail_days` **不再在 cost-state
+    到来时清空**——旧算法「换基线、清尾差」会把已经有真实逐行 ts 的历史,
+    整段折进一个只有单一 `startTime` 归属的基线,跨午夜会话的当日消费因此被
+    错记到会话起始日（真机实测 197.5M flash cache-read 记错一天,见
+    `docs/CLAUDE_COST_DAY_ATTRIBUTION_ANALYSIS.md`）。新规则：`tail_days`
+    对整个会话生命周期只增不清,永远是"每笔 usage 按它自己的 ts 归日"的诚实
+    记录；`cost-state` 的 `modelUsage` 只更新 `baseline`（最新累计自报），
+    在 `_rebuild_days` 里仅用作**对账锚**——`tail_days` 汇总 ≥ 基线时基线
+    是冗余信息（被更精确的逐行数据完全覆盖，直接丢弃）；汇总 < 基线时,
+    差值是真实存在但没有逐行证据的残差（比如日志早期部分被截断/未采集），
+    进 `_rebuild_days` 返回的 `unaccounted` 池——不猜它发生在哪一天。
+    """
     # tail_days 是 assistant 行的落点；fresh 会话第一个 assistant 行进来时
-    # 还没有这个键（cost-state 才会显式 reset 成 {}）——懒建，别 expect。
+    # 还没有这个键——懒建，别 expect。
     sess.setdefault("tail_days", {})
     rtype = rec.get("type") if isinstance(rec, dict) else None
     if rtype == "cost-state":
-        # 基线替换：modelUsage 是整段会话的累计自报（真机两条同值 cost-state
-        # 逐字段相同证明）。换基线、清尾差——**不叠加**；「两条同值 cost-state
-        # + 中间有 usage 行」→ 中间行已被新基线包含，清掉正好不双计。
+        # 基线更新：modelUsage 是整段会话的累计自报（真机两条同值 cost-state
+        # 逐字段相同证明）。只更新对账锚，不再清 tail_days、不再算
+        # baseline_day——归日全部交给 assistant 行自己的 ts（见上）。
         usage = rec.get("modelUsage")
         baseline = {}
         if isinstance(usage, dict):
@@ -209,21 +284,6 @@ def _apply_record(sess, rec):
         else:
             _inc(sess, "unreadable_usage_rows")
         sess["baseline"] = baseline
-        # 基线日 = startTime（会话起始 ms → 北京日）；缺 startTime 退到本条
-        # 记录自己的 ts 日（v1 文档化近似，模块头注释）。都没有 → unattributed
-        # 哨兵（基线仍存 checkpoint，重建时无日可归）。
-        day = None
-        st = rec.get("startTime")
-        if isinstance(st, int) and not isinstance(st, bool):
-            day = day_from_ms(st)
-        if day is None:
-            day = day_from_iso_ts(rec.get("timestamp"))
-        if day is not None:
-            sess["baseline_day"] = day
-        else:
-            _inc(sess, "unattributed_rows")
-            sess["baseline_day"] = None
-        sess["tail_days"] = {}
         return
     if rtype != "assistant":
         return
@@ -243,35 +303,42 @@ def _apply_record(sess, rec):
     if t is None:
         _inc(sess, "unreadable_usage_rows")  # 两态皆无 → 哨兵（P0）
         return
-    day = day_from_iso_ts(rec.get("timestamp"))
+    ts = rec.get("timestamp")
+    day = day_from_iso_ts(ts)
     if day is None:
         # 行有 usage 但 ts 不可解析 → 日线无处可挂 → 哨兵，不猜日。
         _inc(sess, "unattributed_rows")
         return
+    # 峰谷归属：这一行有真实 ts，分辨率是精确的，不是猜的。ms 解析失败（理论
+    # 上不该发生在 day_from_iso_ts 已经认过的字符串上，防御性兜底）→ 保守按
+    # 空闲算，同 `usage.py::_is_peak` 的"缺 time 不臆造高峰"纪律。
+    ms = ms_from_iso_ts(ts)
+    peak = _is_peak_slot(ms) if ms is not None else False
     day_obj = sess["tail_days"].setdefault(day, {})
     model_obj = day_obj.setdefault(model, {})
-    _bump_obj(model_obj, t)
+    _bump_tail(model_obj, t, peak)
 
 
 def _merge_models_into_day(day, buckets):
-    """把 `{model: {4 snake}}` 桶并进一个**已铺平到 model 层**的日对象
+    """把 `{model: {8 snake+peak}}` 桶并进一个**已铺平到 model 层**的日对象
     （多会话同日相加——逐会话 replacement 会丢别的会话，ledger 必须全量重建，
-    这就是不增量累加的原因）。"""
+    这就是不增量累加的原因）。峰值子桶随基础桶一起搬，8 键一视同仁——这里
+    不是"4 键 + 额外逻辑"，是同一份键表的自然扩展。"""
     if not isinstance(buckets, dict):
         return
-    for model, t4 in buckets.items():
-        if not isinstance(t4, dict):
+    for model, t8 in buckets.items():
+        if not isinstance(t8, dict):
             continue
-        arr = [0, 0, 0, 0]
-        any_hit = False
-        for i, k in enumerate(SNAKE_KEYS):
-            v = t4.get(k)
+        hits = {}
+        for k in SNAKE_KEYS + PEAK_KEYS:
+            v = t8.get(k)
             if isinstance(v, int) and not isinstance(v, bool):
-                arr[i] = v
-                any_hit = True
-        if not any_hit:
+                hits[k] = v
+        if not hits:
             continue
-        _bump_obj(day.setdefault(model, {}), arr)
+        out = day.setdefault(model, {})
+        for k, v in hits.items():
+            out[k] = int(out.get(k) or 0) + v
 
 
 def _stat_file(path):
@@ -345,26 +412,67 @@ def _fold_one(sessions, path, size, mtime):
     return kind
 
 
+def _session_row_sum(tail):
+    """`{day: {model: {8 键}}}` → `{model: [4 型 snake 总量]}`（跨全部日子
+    求和，只取基础 4 键——峰谷子桶不参与对账,它们是基础桶的子集,加总基础桶
+    就够判断"这个模型的行级证据覆盖了多少"）。"""
+    out = {}
+    if not isinstance(tail, dict):
+        return out
+    for buckets in tail.values():
+        if not isinstance(buckets, dict):
+            continue
+        for model, t8 in buckets.items():
+            if not isinstance(t8, dict):
+                continue
+            acc = out.setdefault(model, [0, 0, 0, 0])
+            for i, k in enumerate(SNAKE_KEYS):
+                v = t8.get(k)
+                if isinstance(v, int) and not isinstance(v, bool):
+                    acc[i] += v
+    return out
+
+
 def _rebuild_days(sessions, current):
-    """从会话状态全量重建逐日桶。返回 (当前月 ledger days, 要滚进归档的 days)。"""
+    """从会话状态全量重建逐日桶 + 残差对账。返回 (当前月 ledger days,
+    要滚进归档的 days, unaccounted 残差 `{model: {4 键}}`)。
+
+    v0.6.x 前置热修（归日转正 + 残差哨兵，2026-09-03）：日桶**只**由
+    `tail_days`（逐行真实 ts，峰谷分辨率精确）铺出——`baseline`
+    （cost-state 累计自报）不再被当成"这一天的用量"塞进任何日子，它只做
+    **对账锚**：逐会话、逐模型比较 `tail_days` 汇总与最新 `baseline`——
+    汇总 ≥ 基线 → 基线是行级证据的子集，冗余，丢弃；汇总 < 基线 → 差值是
+    真实发生过但没有留下逐行 ts 证据的用量（比如压缩/截断丢失的早期历史），
+    计入 `unaccounted`——它没有日期，也没有峰谷分辨率（不知道何时发生的，
+    不能假装知道），调用方（`priced_day`/日历这类消费端）必须把它单独标注、
+    不能悄悄摊进某一天冒充精确。
+    """
     all_days = {}
+    unaccounted = {}
     if isinstance(sessions, dict):
         for sess in sessions.values():
             if not isinstance(sess, dict):
                 continue
-            # 基线 → baseline_day；tail_days → 各自的日子。同一个日会被多会话
-            # 贡献 → 先全量并进 all，再统一分月。
-            bd = sess.get("baseline_day")
-            if isinstance(bd, str):
-                b = sess.get("baseline")
-                if isinstance(b, dict):
-                    _merge_models_into_day(
-                        all_days.setdefault(bd, {}), b)
             tail = sess.get("tail_days")
             if isinstance(tail, dict):
                 for day, buckets in tail.items():
                     _merge_models_into_day(
                         all_days.setdefault(day, {}), buckets)
+            row_sum = _session_row_sum(tail)
+            baseline = sess.get("baseline")
+            if isinstance(baseline, dict):
+                for model, t4 in baseline.items():
+                    if not isinstance(t4, dict):
+                        continue
+                    base_arr = [0, 0, 0, 0]
+                    for i, k in enumerate(SNAKE_KEYS):
+                        v = t4.get(k)
+                        if isinstance(v, int) and not isinstance(v, bool):
+                            base_arr[i] = v
+                    row_arr = row_sum.get(model, [0, 0, 0, 0])
+                    residual = [max(0, base_arr[i] - row_arr[i]) for i in range(4)]
+                    if any(residual):
+                        _bump_obj(unaccounted.setdefault(model, {}), residual)
     # 分月：当前月 → ledger；更早的日子 → 归档（写侧逐日替换幂等）。
     ledger = {}
     archive = {}
@@ -373,7 +481,7 @@ def _rebuild_days(sessions, current):
             ledger[day] = merged
         else:
             archive[day] = merged
-    return ledger, archive
+    return ledger, archive, unaccounted
 
 
 def _add_days_to_archive(archive, days_by_date, now_iso):
@@ -425,6 +533,15 @@ def claude_sync(home, shadow=False):
     files = claude_project_files(home)
     fp = _fold_path()
     folds = _read(fp) or {"sessions": {}}
+    # v0.6.x 前置热修的强制重折闸门：旧 checkpoint（`schema_version` 缺失或
+    # 不是当前版本）是在"cost-state 一来就清 tail_days"的旧算法下写的——它的
+    # `tail_days` 只剩最近一次基线之后的行，更早的历史已经被旧算法永久清掉，
+    # 不是"还没折"而是"折过又被丢"，resume 读不回来。清空 `sessions` 让
+    # `_fold_one` 对每个文件都走 "new" 分支，从源头 JSONL 重新 ingest——与
+    # v0.7 spec §4.1"事实 cache 可重建"同一个原则，不是迁移函数（没有可从
+    # 旧结构直接推导新结构的路径，旧结构本身就丢了信息）。
+    if folds.get("schema_version") != FOLD_SCHEMA_VERSION:
+        folds = {"sessions": {}}
     sessions = folds.setdefault("sessions", {})
     scanned = fresh = resumed = skipped = failed = 0
     for path in files:
@@ -455,14 +572,15 @@ def claude_sync(home, shadow=False):
             row_sum_only += 1
         unreadable += int(sess.get("unreadable_usage_rows") or 0)
         unattributed += int(sess.get("unattributed_rows") or 0)
+    folds["schema_version"] = FOLD_SCHEMA_VERSION
     _atomic_write(fp, folds)
-    # 全量重建 ledger + 归档（幂等；崩溃重跑不会双计）。rebuild_days 吃的是
-    # sessions 映射（sid → 会话状态），不是 {"sessions": …} 外壳——两层结构
-    # 刚写出时混过一次：把外壳喂进去，整本折叠空账，ledger 恒为空还不报错
-    # （smoke 时抓到的同款 bug 在 Rust 侧一行同型，两侧一起修）。
+    # 全量重建 ledger + 归档 + 残差（幂等；崩溃重跑不会双计）。rebuild_days
+    # 吃的是 sessions 映射（sid → 会话状态），不是 {"sessions": …} 外壳——
+    # 两层结构刚写出时混过一次：把外壳喂进去，整本折叠空账，ledger 恒为空
+    # 还不报错（smoke 时抓到的同款 bug 在 Rust 侧一行同型，两侧一起修）。
     now = _now_iso()
     current = current_month_beijing()
-    ledger_days, archive_days = _rebuild_days(folds.get("sessions"), current)
+    ledger_days, archive_days, unaccounted = _rebuild_days(folds.get("sessions"), current)
     # 归档只在**日桶内容**变化时落盘：_add_days_to_archive 每调用都会给当月
     # 盖一个新 archived_at，若每轮无条件写，零变化的幂等重跑也会改写整个
     # 文件（真机冻结语料复跑抓到：fold/ledger 字节不变、archive 每轮都变）。
@@ -473,8 +591,12 @@ def claude_sync(home, shadow=False):
         if _strip_archive_ts(candidate) != _strip_archive_ts(existing):
             _atomic_write(_ledger_archive_path(), candidate)
     # 每次 sync 都写（哪怕空 days）——不清空的话跨月后旧文件停在盘上被误读
-    # 成"本月"，这是 alert.json month-stale 事故的同类。
-    _atomic_write(_ledger_path(), {"days": ledger_days})
+    # 成"本月"，这是 alert.json month-stale 事故的同类。`unaccounted` 恒写
+    # （哪怕空 dict）——同一条纪律：缺席必须是"测过是空"，不是"没写这个键"。
+    _atomic_write(_ledger_path(), {"days": ledger_days, "unaccounted": unaccounted})
+    unaccounted_tokens = sum(
+        int(t.get(k) or 0) for t in unaccounted.values() for k in SNAKE_KEYS
+    )
     print("claude-sync: scanned %d files; folded %d (new %d, resumed %d); "
           "skipped %d; failed %d" % (scanned, fresh + resumed, fresh, resumed,
                                      skipped, failed))
@@ -483,3 +605,5 @@ def claude_sync(home, shadow=False):
     print("claude-sync: ledger days: %d; unreadable usage rows: %d; "
           "unattributed rows: %d" % (len(ledger_days), unreadable,
                                      unattributed))
+    print("claude-sync: unaccounted residual: %d models; %d tokens"
+          % (len(unaccounted), unaccounted_tokens))

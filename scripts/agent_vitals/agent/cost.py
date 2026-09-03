@@ -471,16 +471,49 @@ def _catalog_card(pricing, provider, key):
 
 
 def _flat_rate(card, key):
-    """平费率读取：`card[key]` 是数字（catalog 平费率/M3 档位）就取它；是
-    `{off_peak, peak}` 对象（顶层 providers 段 deepseek 卡）取 off_peak——
-    Claude 会话文件没有时段证据，全按空闲档折，是最保守的官方价（与 DSH 的
-    高峰拆分不同，低估风险方向已知且如实）。"""
+    """平费率读取：`card[key]` 是数字（catalog 平费率/M3 档位）就取它。
+
+    **不再对 `{off_peak, peak}` 时变卡取 off_peak**（v0.6.x 前置热修，
+    2026-09-03 撤销）：旧版本在这里把时变卡的 off_peak 单价当"保守估算"
+    直接用，实际是拿时间维下界冒充精确——真机对账证明它不是保守而是系统性
+    低估（托盘 claude 今日 ¥45.40 vs 官方账单 ¥74.3797，89% 差额来自这一步；
+    见 `docs/CLAUDE_COST_DAY_ATTRIBUTION_ANALYSIS.md`，v0.6 spec §5.3 条款 7 /
+    §8 G10）。时变卡字段一律经 `_priced_field` 做峰谷拆分计价；这个函数收窄
+    成只服务真正平费率的字段（catalog anthropic/moonshot USD 卡、MiniMax
+    档位卡），命中 dict 形状时诚实返回 0.0 而不是猜一个方向。"""
     v = card.get(key)
     if isinstance(v, (int, float)):
         return float(v)
-    if isinstance(v, dict):
-        return v.get("off_peak", 0.0)
     return 0.0
+
+
+def _priced_field(card, key, total, peak):
+    """一个 token 字段（如 `input_uncached`）的计价：`card[key]` 是数字（平
+    费率）→ `total × 该价`；是 `{off_peak, peak}` 对象（时变卡）→
+    `(total-peak) × off_peak + peak × peak_rate` 分别计价（v0.6 spec §5.3
+    条款 7 的峰谷读法，`bucket_price` 族的同一思想）。`peak` 由调用方给出，
+    钳制在 `[0, total]` 防御倒挂；调用方对"压根不知道峰谷切分"的输入传
+    `peak=0`——这时时变卡会算出与旧下界读法数值相同的结果，但**不是同一件
+    事**：这里的 0 只是"没有更多信息"，`pricing_basis` 必须由调用方另行
+    标注为非 exact（见 `_price_claude_model` 的 `unresolved`），不能靠这个
+    函数自己判断"该不该报精确"——它只管算数，不管诚实性标注。"""
+    v = card.get(key)
+    if isinstance(v, (int, float)):
+        return total * float(v)
+    if isinstance(v, dict):
+        peak = min(max(peak, 0.0), total)
+        off = total - peak
+        return off * v.get("off_peak", 0.0) + peak * v.get("peak", 0.0)
+    return 0.0
+
+
+def _card_is_time_varying(card):
+    """时变卡判定：`input_uncached` 字段是 `{off_peak, peak}` 形状——与 v0.6
+    spec §8 G10 的机械判据同一条规则（今天命中 deepseek-official 的
+    flash/pro、shengsuanyun 的 pro 三张卡；catalog 的平费率/档位卡这个字段
+    恒是数字）。"""
+    v = (card or {}).get("input_uncached")
+    return isinstance(v, dict)
 
 
 def _cache_write_rate(card):
@@ -505,9 +538,14 @@ def _first_tier(card):
     return (first or {}).get("label", ""), first
 
 
-def _price_claude_model(model, tokens, pricing):
-    """单模型 4 型 tokens（claude snake 键名）→ 平费率总价。返回
-    (供应商, 币种, 总价, 档位标签)。模型/卡都匹配不上 → None（不臆造）。"""
+def _price_claude_model(model, tokens, pricing, *, peak_resolved):
+    """单模型 tokens（claude snake 键名）→ 计价。`peak_resolved=True` 时
+    额外读 `peak_` 前缀的峰值子桶（`claude_cost.py::PEAK_KEYS`），对时变卡
+    做峰谷拆分；`False` 时全部按 off_peak 计价（cost-state 累计口径没有
+    逐行 ts，压根没有峰谷可分）。返回 (供应商, 币种, 总价, 档位标签,
+    unresolved)——`unresolved=True` 表示命中了时变卡但没给峰谷分辨率，
+    `_price_claude_map` 据此把 `pricing_basis` 标成非 exact，不能让下游误
+    读成账单级精确。模型/卡都匹配不上 → None（不臆造）。"""
     resolved = _resolve_card_catalog(model, pricing)
     if resolved is None:
         return None
@@ -523,38 +561,59 @@ def _price_claude_model(model, tokens, pricing):
     def m(k):
         return (tokens.get(k) or 0) / 1e6
 
-    total = (m("input_tokens") * _flat_rate(card, "input_uncached")
-             + m("cache_read_input_tokens") * _flat_rate(card, "input_cached")
-             + m("cache_creation_input_tokens") * _cache_write_rate(card)
-             + m("output_tokens") * _flat_rate(card, "output"))
-    return provider, currency, total, label
+    def mp(k):
+        return (tokens.get("peak_" + k) or 0) / 1e6 if peak_resolved else 0.0
+
+    input_t, input_p = m("input_tokens"), mp("input_tokens")
+    cread_t, cread_p = m("cache_read_input_tokens"), mp("cache_read_input_tokens")
+    ccreate_t = m("cache_creation_input_tokens")
+    output_t, output_p = m("output_tokens"), mp("output_tokens")
+
+    total = (_priced_field(card, "input_uncached", input_t, input_p)
+             + _priced_field(card, "input_cached", cread_t, cread_p)
+             + ccreate_t * _cache_write_rate(card)
+             + _priced_field(card, "output", output_t, output_p))
+    unresolved = (not peak_resolved) and _card_is_time_varying(card)
+    return provider, currency, total, label, unresolved
 
 
-def _price_claude_map(models, pricing):
-    """`{模型: 4 型 snake tokens}` → 价目报告。`claude_session_cost`（cost-state
-    camel 转换后）与 `claude_day_cost`（ledger by_model 直通）共用——两面的钱
-    必须同源，不在这里为日面长第二份计价规则（DSH 侧
-    token_by_date_model==token_by_model 那条纪律的 claude 镜像）。
+def _price_claude_map(models, pricing, *, peak_resolved=True):
+    """`{模型: tokens}` → 价目报告。`claude_session_cost`（cost-state camel
+    转换后，`peak_resolved=False`）与 `claude_day_cost`（ledger by_model
+    直通，`peak_resolved=True`）共用——两面的钱必须同源，不在这里为日面长
+    第二份计价规则（DSH 侧 token_by_date_model==token_by_model 那条纪律的
+    claude 镜像）；`peak_resolved` 只影响时变卡是否能做峰谷拆分，不影响
+    这条"同源"纪律本身——两个调用方过的是同一个函数、同一套读法分界。
 
     未知模型（`<synthetic>` 等）→ token 四型全进 unpriced。注意与 `cost_report`
     的 unpriced 词表不同：那边不含 output（DSH 钉测形状），claude cost-state
     只有这 4 型、output 同样是真实消费，未知就该全数报出来，别悄悄吞掉 output。
+
+    `pricing_basis`（顶层与逐模型）：`peak_resolved=True` 且未命中时变卡，或
+    时变卡有真实峰谷分辨率 → `"catalog"`（v0.6.x 前置热修后这是精确值，不再
+    是估算）；命中时变卡但 `peak_resolved=False`（如 cost-state 的会话累计
+    口径，压根没有逐行 ts）→ `"partial"`，如实标注"这个数字全按 off_peak
+    算，不是账单精度"（v0.6 spec §5.3 条款 7 的"做不到时报 partial，不得取
+    时间维下界冒充精确"）。
     """
     cny = 0.0
     usd = 0.0
     unpriced = 0
     per_model = {}
+    any_unresolved = False
     for model, tokens in models.items():
         if not isinstance(tokens, dict):
             continue
-        priced = _price_claude_model(model, tokens, pricing)
+        priced = _price_claude_model(model, tokens, pricing, peak_resolved=peak_resolved)
         if priced is None:
             unpriced += ((tokens.get("input_tokens") or 0)
                          + (tokens.get("cache_read_input_tokens") or 0)
                          + (tokens.get("cache_creation_input_tokens") or 0)
                          + (tokens.get("output_tokens") or 0))
             continue
-        provider, currency, total, tier = priced
+        provider, currency, total, tier, unresolved = priced
+        if unresolved:
+            any_unresolved = True
         if currency == "USD":
             usd += total
         else:
@@ -564,7 +623,7 @@ def _price_claude_map(models, pricing):
         entry = {
             "short_name": model_short(model, pricing),
             "currency": currency,
-            "pricing_basis": "catalog",
+            "pricing_basis": "partial" if unresolved else "catalog",
             "priced_with": provider,
             "total": total,
         }
@@ -574,7 +633,7 @@ def _price_claude_map(models, pricing):
     if not per_model and unpriced == 0:
         return None
     return {
-        "pricing_basis": "catalog",
+        "pricing_basis": "partial" if any_unresolved else "catalog",
         "currency_totals": {"CNY": cny, "USD": usd},
         "per_model": per_model,
         "unpriced_tokens": unpriced,
@@ -590,6 +649,12 @@ def claude_session_cost(model_usage, pricing):
     costUSD 对网关模型按默认卡 $5/$0.5/$25 计、高估 20–70×——host_costusd_note
     说清了，绝不能当账单数字）。modelUsage 为空/缺场 → None。
 
+    `peak_resolved=False`：cost-state 的累计口径没有逐行 ts，压根不知道这些
+    token 里有多少落在高峰时段——时变卡这里恒报 `pricing_basis="partial"`
+    （v0.6.x 前置热修，2026-09-03；此前这里悄悄按 off_peak 下界算出一个
+    看似精确的数字，是被撤销的旧行为）。与 `claude_day_cost` 共用
+    `_price_claude_map`，两面同源。
+
     Rust 平行实现见 `cost.rs::claude_session_cost`。"""
     models = {}
     for model, ms in (model_usage or {}).items():
@@ -603,20 +668,26 @@ def claude_session_cost(model_usage, pricing):
         }
     if not models:
         return None
-    return _price_claude_map(models, pricing)
+    return _price_claude_map(models, pricing, peak_resolved=False)
 
 
 def claude_day_cost(day, pricing):
     """claude-ledger 的一天 → 当日金额。两种形状都认：
-    - **by_model 包一层** `{"by_model": {模型: 4 型 snake}}`——本函数早期设计
+    - **by_model 包一层** `{"by_model": {模型: tokens}}`——本函数早期设计
       （无生产调用方）；
-    - **flat 直图** `{模型: 4 型 snake}`——claude_cost.py `rebuild_days` 的真实
+    - **flat 直图** `{模型: tokens}`——claude_cost.py `rebuild_days` 的真实
       形状：逐日账只有 token、模型直作键。
     真实账本没有模型叫 by_model，嗅 by_model 键无歧义；日级元数据若将来包一层，
     也只是 flat 的直接超集。结构与 `claude_session_cost` 完全相同（同一个
-    `_price_claude_map`），只是输入已 4 型 snake、无需转换。没有任何模型可计价
+    `_price_claude_map`），只是输入已 snake 键、无需转换。没有任何模型可计价
     的日子（空 dict / 全零 token 未知模型 → _price_claude_map 返回 None）→ None
     （调用方自己决定退回哪种近似，不摆全零结构）。
+
+    `peak_resolved=True`：v0.6.x 前置热修后（2026-09-03），ledger 日桶的每个
+    模型都带 `peak_` 前缀的峰值子桶（`claude_cost.py::PEAK_KEYS`，来自
+    `tail_days` 逐行真实 ts，精确不是估算），时变卡走峰谷拆分计价，
+    `pricing_basis="catalog"`——不再是 v0.6 spec §8 G10 登记过的
+    `pending v0.7`/`pending v0.6.x` 缺口。
 
     Rust 平行实现见 `cost.rs::claude_day_cost`。"""
     if not isinstance(day, dict):
@@ -624,4 +695,4 @@ def claude_day_cost(day, pricing):
     models = day["by_model"] if "by_model" in day else day
     if not models:
         return None
-    return _price_claude_map(models, pricing)
+    return _price_claude_map(models, pricing, peak_resolved=True)

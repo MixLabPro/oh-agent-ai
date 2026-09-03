@@ -404,11 +404,15 @@ _EXPECTED_TIME_VARYING_CARDS = sorted([
     ("shengsuanyun", "deepseek-v4-pro"),
 ])
 
-# 缺口登记（方案 b，沿用 G3 "pending M1" 惯例）：这两个计价入口共用
-# `_price_claude_map` → `_price_claude_model` → `_flat_rate` 的 off_peak
-# 兜底，v0.6 阶段以显式缺口登记，v0.7 落地峰谷读法后一并删除、改成硬断言
-# （v0.6 spec §8 G10 / §12 DoD 9：必须同批结清）。
-_PENDING_V07_GAP = frozenset({"claude_day_cost", "claude_session_cost"})
+# 缺口登记（v0.6.x 前置热修，2026-09-03 结清）：`claude_day_cost`/
+# `claude_session_cost` 曾共用 `_price_claude_map` → `_price_claude_model` →
+# `_flat_rate` 的 off_peak 兜底，登记为 `"pending v0.7"`（后改记 v0.6.x）；
+# 两者已同批切换到峰谷读法（`claude_day_cost` 用 `peak_resolved=True`，
+# ledger 日桶的 `peak_*` 子桶来自 `tail_days` 逐行真实 ts；`claude_session_cost`
+# 结构性没有逐行 ts，`peak_resolved=False`，如实报 `pricing_basis="partial"`
+# 而不是悄悄用下界冒充精确）。缺口清单闭集为空，见下面两个测试的新断言
+# （v0.6 spec §8 G10 / §12 DoD 2/9："三张时变卡在任何计价入口都不走下界读法"
+# 现在无条件成立，不再需要缺口登记）。
 
 
 class G10PricingResolutionTests(unittest.TestCase):
@@ -428,28 +432,59 @@ class G10PricingResolutionTests(unittest.TestCase):
                          "_price_claude_map 的调用点数量变化——检查是否有新计价入口"
                          "接上了 _flat_rate 的 off_peak 兜底，需要同步 G10 缺口登记")
 
-    def test_registered_gap_entries_currently_take_the_off_peak_floor(self):
-        """行为断言的对偶：证明这两个入口**目前**确实卡在下界读法——缺口登记
-        准确，不是摆设。v0.7 把它们换成峰谷读法后，这条测试必须跟着改写成
-        "不等于 off_peak 下界"的硬断言（v0.6 spec §8 G10 / §12 DoD 9）。"""
+    def test_claude_day_cost_prices_peak_tokens_at_peak_rate_not_off_peak_floor(self):
+        """硬断言（v0.6 spec §8 G10 / §12 DoD 2/9，v0.6.x 热修落地后从"验证仍
+        卡在下界"翻转成"验证已经峰谷正确"）：`claude_day_cost` 的 ledger 日桶
+        现在带 `peak_*` 子桶（来自 `claude_cost.py::tail_days` 逐行真实 ts），
+        全落在高峰时段的用量必须按 peak 单价算，不是 off_peak 下界——否则
+        `flat_rate` 的下界兜底又静默接管了这张时变卡。"""
         pricing = cost_module.load_pricing()
         card = pricing["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"]
         off_peak_rate = card["input_uncached"]["off_peak"]
         peak_rate = card["input_uncached"]["peak"]
         self.assertNotEqual(off_peak_rate, peak_rate, "测试卡必须真的时变，否则本断言无意义")
 
-        day = {"deepseek-v4-flash": {"input_tokens": 1_000_000, "cache_read_input_tokens": 0,
-                                     "cache_creation_input_tokens": 0, "output_tokens": 0}}
-        day_total = cost_module.claude_day_cost(day, pricing)["per_model"]["deepseek-v4-flash"]["total"]
-        self.assertAlmostEqual(day_total, off_peak_rate,
-                               msg="claude_day_cost：pending v0.7 缺口应仍卡在 off_peak 下界")
+        # 全落峰值：base 与 peak_ 子桶相等——1M input 全部在高峰时段发生。
+        day = {"deepseek-v4-flash": {
+            "input_tokens": 1_000_000, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0, "output_tokens": 0,
+            "peak_input_tokens": 1_000_000, "peak_cache_read_input_tokens": 0,
+            "peak_cache_creation_input_tokens": 0, "peak_output_tokens": 0}}
+        report = cost_module.claude_day_cost(day, pricing)
+        day_total = report["per_model"]["deepseek-v4-flash"]["total"]
+        self.assertAlmostEqual(day_total, peak_rate,
+                               msg="claude_day_cost 全高峰用量必须按 peak 单价算")
+        self.assertNotAlmostEqual(day_total, off_peak_rate)
+        self.assertEqual(report["pricing_basis"], "catalog",
+                         "有峰谷分辨率时是精确值，不再是估算")
 
+        # 全落空闲：peak_* 子桶全 0——必须精确算成 off_peak（不是"没分辨率的
+        # 下界"，是"真的测到全部落在空闲时段"，两者数值恰好相同、语义不同，
+        # pricing_basis 必须仍是 catalog）。
+        day_off = {"deepseek-v4-flash": {
+            "input_tokens": 1_000_000, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0, "output_tokens": 0}}
+        report_off = cost_module.claude_day_cost(day_off, pricing)
+        self.assertAlmostEqual(
+            report_off["per_model"]["deepseek-v4-flash"]["total"], off_peak_rate)
+        self.assertEqual(report_off["pricing_basis"], "catalog")
+
+    def test_claude_session_cost_honestly_reports_partial_for_time_varying_cards(self):
+        """`claude_session_cost` 结构性没有逐行 ts（cost-state 是会话累计
+        自报，不是逐请求流水）——时变卡这里永远给不出真峰谷分辨率，v0.6.x
+        热修后如实报 `pricing_basis="partial"`（不是悄悄按 off_peak 冒充
+        `"catalog"` 精确值；数值仍是 off_peak 下界，因为那是唯一"没有更多
+        信息时"站得住的算法，但标注必须诚实）。"""
+        pricing = cost_module.load_pricing()
+        card = pricing["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"]
+        off_peak_rate = card["input_uncached"]["off_peak"]
         session = {"deepseek-v4-flash": {"inputTokens": 1_000_000, "cacheReadInputTokens": 0,
                                          "cacheCreationInputTokens": 0, "outputTokens": 0}}
-        session_total = cost_module.claude_session_cost(
-            session, pricing)["per_model"]["deepseek-v4-flash"]["total"]
-        self.assertAlmostEqual(session_total, off_peak_rate,
-                               msg="claude_session_cost：pending v0.7 缺口应仍卡在 off_peak 下界")
+        report = cost_module.claude_session_cost(session, pricing)
+        session_total = report["per_model"]["deepseek-v4-flash"]["total"]
+        self.assertAlmostEqual(session_total, off_peak_rate)
+        self.assertEqual(report["per_model"]["deepseek-v4-flash"]["pricing_basis"], "partial")
+        self.assertEqual(report["pricing_basis"], "partial")
 
     def test_dsh_ledger_bucket_pricer_already_does_peak_split(self):
         """正对照：DSH 的日桶计价（`cost._price`，Rust `bucket_price` 的 Python

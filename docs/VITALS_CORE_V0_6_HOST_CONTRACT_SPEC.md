@@ -587,24 +587,34 @@ codex_session_audit 均不在 git status 修改清单）；A/B 触碰 `workbuddy
     `pricing_basis=host-billed` 的记录不进入价目卡折算，条款 7 不适用；不按
     HostProfile 排除整个宿主。
 
-  **缺口登记（方案 b，沿用 G3 "pending M1" 惯例；R3 补齐为两条）**：本守卫落 v0.6
-  时以下**两个计价入口即刻为红**，且必须**同批**修——`price_claude_map` 的 doc
-  注释钉死「两面的钱必须同源」，只修一个会让两面分叉：
+  **缺口登记（方案 b，沿用 G3 "pending M1" 惯例；R3 补齐为两条；2026-09-03
+  v0.6.x 前置热修落地后结清，见下）**：本守卫落 v0.6 时以下**两个计价入口即刻
+  为红**，且必须**同批**修——`price_claude_map` 的 doc 注释钉死「两面的钱必须
+  同源」，只修一个会让两面分叉：
 
-  | 缺口条目 | 计价入口 | 命中的时变卡 |
+  | 缺口条目（已结清） | 计价入口 | 命中的时变卡 |
   |---|---|---|
-  | `claude-ledger-day: pending v0.7` | `cost.rs::claude_day_cost` → `price_claude_map` → `price_claude_model` → `flat_rate` | deepseek-official flash/pro **与 shengsuanyun pro**——`resolve_card_catalog` 第二段遍历顶层 `providers`，三张卡命中的是同一处兜底 |
-  | `claude-session: pending v0.7` | `cost.rs::claude_session_cost` → 同一条链 | 同上 |
+  | ~~`claude-ledger-day: pending v0.7`~~ | `cost.rs::claude_day_cost` → `price_claude_map` → `price_claude_model` → `priced_field` | deepseek-official flash/pro **与 shengsuanyun pro**——`resolve_card_catalog` 第二段遍历顶层 `providers`，三张卡命中的是同一处兜底 |
+  | ~~`claude-session: pending v0.7`~~ | `cost.rs::claude_session_cost` → 同一条链 | 同上 |
 
-  （Python 侧 `cost.py::_flat_rate` 是同形镜像，两条缺口双语言各登记一次。）
-  让它们转绿的实现（ledger 日桶加 `peak_*` 子桶 + 两个入口改走峰谷读法）动持久格式、
-  属 v0.7 窗口（§2.3）。因此 v0.6 交付形态是：这两条登记为**显式缺口**
-  `"pending v0.7"`（与 G3 的 dsh Python 侧同机制），CI 不因它们长红；但**缺口清单
-  本身被断言为闭集**——清单外任何计价入口走下界读法即硬红，且新增条目必须同时改
-  这份清单与本 spec。这正是把守卫提前到 v0.6 的全部理由：**防止 v0.6→v0.7 之间新
-  接入的宿主又静默长出一份下界计价的折叠**。v0.7 落地后两条一并删除、改为硬断言
-  （"红转绿"走 §11-M4 的同一流程）。加断言不改任何输出，**golden 字节不动**，与
-  v0.6 的零漂移验收相容。
+  （Python 侧 `cost.py::_priced_field` 是同形镜像，两条缺口双语言各结清一次。）
+
+  **2026-09-03 结清（v0.6.x 前置热修，非 v0.7）**：让它们转绿的实现被重新定级为
+  **v0.6.x**（不是原计划的 v0.7）——`claude_cost.rs`/`.py` 的 `tail_days` 改为
+  永不清空、逐行真实 ts 精确标记 `peak_*` 子桶，`cost-state` 的 `baseline` 改为
+  纯粹的**对账锚点**而非日面转储；这一步是修复"归日转正"（day-misattribution）
+  bug 的直接副产品，日形状因此原生带上峰谷分辨率，不需要等到 v0.7 的
+  UsageFact/迁移表落地。两个入口现分别改走 `peak_resolved` 参数：
+  `claude_day_cost`（`peak_resolved=true`，ledger 日桶原生带 `peak_*` 子桶）
+  已转硬断言（`pricing_basis="catalog"`，不是估算）；`claude_session_cost`
+  （`peak_resolved=false`，cost-state 会话累计口径结构性没有逐行 ts、永远给不出
+  峰谷分辨率）如实报 `pricing_basis="partial"`——这不是残留缺口，是这个入口
+  能达到的诚实上限。`crates/agent-vitals-core/tests/host_contract.rs` 与
+  `tests/test_host_contract.py` 的 `G10PricingResolutionTests` 已从"验证仍卡在
+  下界"翻转为"验证已经峰谷正确 / 已经诚实降级"两条硬断言，缺口清单闭集现在
+  为**空**——不再需要缺口登记这个机制本身对这两条目生效，但机制保留给未来任何
+  新计价入口静默复用下界读法的情形。所有 15 个 golden 快照字节不变
+  （`claude-sync`/`claude-cost` 命令不在 golden 覆盖范围内）。
 
 ## 9. 新宿主接入流程（playbook）
 
@@ -718,7 +728,11 @@ B）；`dsh_evidence.rs::derive_coverage` 末尾五行显式置零改循环
   偏差登记）/G6（合成会话不变量，dsh/codex/claude-code 三家）/G8（源码自
   扫描）/G10（计价分辨率，行为断言 + 缺口登记闭集）：Python
   `tests/test_host_contract.py`（19 例）+ Rust
-  `crates/agent-vitals-core/tests/host_contract.rs`（11 例）全绿。
+  `crates/agent-vitals-core/tests/host_contract.rs`（11 例）全绿。**2026-09-03
+  追记**：v0.6.x 前置热修（见 §8 G10 一节末尾）把 G10 的两条缺口条目从
+  `"pending v0.7"` 结清为硬断言，替换测试从"验证仍卡在下界"翻转为"验证已经
+  峰谷正确 / 已经诚实降级"，例数各 +1（Python 20 例、Rust 12 例）；`cargo
+  test --release`/clippy/差分套件/golden_runner 全绿，无字节漂移。
 - G7（展示层一致性）：src-tauri `overview.rs::HostsSnapshot::unavailable()`
   （托盘兜底行）从 `HOSTS` 的 `fold != None` 派生；`lib.rs::host_display_name`
   从 `HOSTS` 的 `display` 派生（副作用：WorkBuddy 现在也能正确解析出显示名，
@@ -755,8 +769,11 @@ warnings` 零警告（含 src-tauri 独立 workspace）、
    `all` 不进注册表）、语言支持矩阵（G3）、按 surface 的需求⊆注册（G9）、
    计价分辨率（G10：
    三张时变卡在**任何**计价入口都不走下界读法；`claude-ledger-day` 与
-   `claude-session` 两条入口以显式缺口 `"pending v0.7"` 登记，**缺口清单闭集受
-   断言**——清单外任何入口走下界读法即硬红）。
+   `claude-session` 两条曾以显式缺口 `"pending v0.7"` 登记，**2026-09-03
+   v0.6.x 前置热修已结清**——`claude_day_cost` 转硬断言
+   `pricing_basis="catalog"`，`claude_session_cost` 转硬断言
+   `pricing_basis="partial"`（结构性没有逐行 ts 的诚实上限，非残留缺口）；
+   缺口清单闭集为空，机制保留给未来入口）。
 3. Rust/Python 两侧无 per-host unmeasured 字面量表残留（G8 源码自扫描过 + G6
    行为验证过）。
 4. 三份 dispatcher 组装消失，`canonical_audit` 共享求值器双侧存在；DSH Python
@@ -770,9 +787,11 @@ warnings` 零警告（含 src-tauri 独立 workspace）、
 8. 无 SKILL.md/README/pricing.json/timeline.js 改动；信封 v1 不变。**G10 只读
    `pricing.json` 推导时变卡集，不改它**——价目是业务数据，条款 7 约束的是消费
    它的视图分辨率，不是卡本身。
-9. §5.3 条款 7 的缺口登记有到期归属：两条 `"pending v0.7"` 条目在 v0.7 spec §5
-   验收里有对应的转绿项（`peak_*` 子桶 + 两入口改峰谷读法 → 删条目 → 改硬断言），
-   且**必须同批结清**（半修 = 两面不同源），不是无限期豁免。
+9. §5.3 条款 7 的缺口登记有到期归属：两条 `"pending v0.7"` 条目**已于
+   2026-09-03 随 v0.6.x 前置热修同批结清**（`peak_*` 子桶落地 + 两入口改峰谷
+   读法 → 删条目 → 改硬断言），未出现半修（两面同批切换、同源纪律未破）——
+   提前于原计划的 v0.7 窗口，因为修复它所需的日形状变更是"归日转正"
+   bug-fix 的直接副产品，不需要等待 UsageFact 迁移。
 
 ## 13. 风险与失败条件
 
@@ -877,3 +896,33 @@ golden 失去意义）→ §0.6 + §2.3 版本边界拆分表 + v0.7 验收条�
 条款 7 排除 M3 档位卡的理由写错了——`first_tier` 取首档与 off_peak 兜底是同一动作，
 真正的差别是前者在输出留了 `tier` 标签而后者 `pricing_basis` 恒 `"catalog"`、与真
 平费率卡不可区分。
+
+**2026-09-03 追加修订之四（R4：G10 缺口结清，落点重定级为 v0.6.x）**：R3 登记
+的两条缺口（`claude-ledger-day`/`claude-session` 的 `"pending v0.7"`）在
+`docs/CLAUDE_COST_DAY_ATTRIBUTION_ANALYSIS.md` 的"归日转正"根因排查后，与那个
+bug 共享同一处修复点——`claude_cost.rs`/`.py` 的 `tail_days` 从"遇 cost-state
+即清空、baseline 转储成单日无分辨率数字"改为"永不清空、逐行真实 ts 精确标记
+`peak_*` 子桶，baseline 降级为对账锚点"，日形状因此**原生**带上峰谷分辨率，
+无需等待 v0.7 的 UsageFact/迁移表：
+
+- 落点重定级：R3 曾把转绿项记在 v0.7（"ledger 日桶加 `peak_*` 子桶"属 §2.3 的
+  受评审 `--update` 窗口），实际落地证明这一步是 day-misattribution 修复的直接
+  副产品，**提前到 v0.6.x**（一个新引入的、介于冻结 v0.6 与完整 v0.7 数据平面
+  迁移之间的热修版本层级）完成，不依赖 v0.7 的任何一张迁移表。
+- `claude_day_cost`（`peak_resolved=true`）转硬断言：三张时变卡全落峰值/全落
+  空闲两种合成用量都按真实单价算，`pricing_basis="catalog"`。
+- `claude_session_cost`（`peak_resolved=false`）转硬断言，但断言的是**诚实
+  降级**而非"精确"：cost-state 会话累计口径结构性没有逐行 ts，时变卡永远给
+  不出峰谷分辨率，如实报 `pricing_basis="partial"`（数值仍是 off_peak 下界——
+  唯一在"没有更多信息"时站得住的算法，但标注不再冒充 `"catalog"`）。
+- §8 G10 缺口表两条目从 `"pending v0.7"` 改标删除线、`crates/agent-vitals-core/
+  tests/host_contract.rs` 与 `tests/test_host_contract.py::G10PricingResolutionTests`
+  的对应测试从"验证仍卡在下界"翻转为上述两条硬断言（例数从 11/19 增至
+  12/20）；缺口清单闭集现为空，机制保留给未来任何新入口静默复用下界读法。
+- 无 schema 变更需要 `--update`：`claude-fold.json` 新增
+  `schema_version`（=2）触发一次性全量重折（`tail_days` 的历史分辨率已在旧
+  算法下永久丢失，不可迁移，只能从源 JSONL 重读——"事实 cache 可重建"原则的
+  直接应用，非正式迁移函数）；`claude-ledger.json` 新增 `unaccounted`
+  顶层键（dateless 残差池，取代此前把 baseline 悄悄摊到 `baseline_day` 单日
+  的旧行为）。15 个 golden 快照与全部 `cargo test --release`/clippy/差分套件
+  验证零漂移（`claude-sync`/`claude-cost` 不在 golden 覆盖范围内）。

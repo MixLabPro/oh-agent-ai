@@ -75,10 +75,24 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
+use agent_vitals_core::usage::{is_peak_slot, ms_from_civil};
+
 use crate::agent::codex_cost::{civil_from_unix_secs, current_month_beijing};
 use crate::agent::claude_session::claude_project_files;
 use crate::agent::state::{atomic_write_json, now_iso_utc, read_json, state_dir};
 use crate::agent::takeover::require_rust_owner;
+
+/// v0.6.x 前置正确性热修复（归日转正 + 峰谷分辨率 + 残差哨兵，三者同批——
+/// 见 `docs/VITALS_CORE_V0_6_HOST_CONTRACT_SPEC.md` §5.3 条款 7 / §8 G10、
+/// `docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §5）。`claude-fold.json` 在这次
+/// 改动之前没有 `schema_version`：旧 checkpoint 的 `tail_days` 是在"cost-state
+/// 一来就清空"的旧算法下产生的，只保留最近一次基线之后的行，历史已经在写盘
+/// 那一刻永久丢失——resume 读不回来，唯一正确的补救是强制全量重折一次
+/// （源头 JSONL 文件本身没删，可重建）。`FOLD_SCHEMA_VERSION` 不匹配（含缺失，
+/// 等价旧版本 0）时，`claude_sync` 清空整份 `sessions`，让每个文件都走
+/// `fold_one` 的 "new" 分支——不是迁移函数，是"重新从权威源 ingest"，与 v0.7
+/// spec §4.1"事实 cache 可重建"同一个原则。
+const FOLD_SCHEMA_VERSION: u64 = 2;
 
 /// 行级 usage 的 4 个计数键（API 全形，真机 100%；写入桶的固定键序）。
 const SNAKE_KEYS: [&str; 4] = [
@@ -96,6 +110,16 @@ const CAMEL_KEYS: [&str; 4] = [
     "cacheReadInputTokens",
     "cacheCreationInputTokens",
     "outputTokens",
+];
+/// 高峰时段子桶——每个 SNAKE_KEYS 字段配一个 `peak_` 前缀的子计数，与 DSH
+/// `usage.rs::add_buckets` 的 4+4 形状同构（v0.6 spec §5.3 条款 7 的"折叠时
+/// 预拆"）。只从 `tail_days`（逐行真实 ts）里累计——cost-state 的 modelUsage
+/// 是无时间戳的累计快照，永远没有资格填这四个键。
+const PEAK_KEYS: [&str; 4] = [
+    "peak_input_tokens",
+    "peak_cache_read_input_tokens",
+    "peak_cache_creation_input_tokens",
+    "peak_output_tokens",
 ];
 
 fn fold_path() -> std::path::PathBuf {
@@ -169,6 +193,29 @@ pub(crate) fn day_from_iso_ts(ts: &str) -> Option<String> {
     Some(format!("{y:04}-{mo:02}-{d:02}"))
 }
 
+/// 同 `day_from_iso_ts` 认的时间戳格式 → epoch 毫秒。给
+/// `agent_vitals_core::usage::is_peak_slot` 用——它要精确的北京小时 + 星期几，
+/// `day_from_iso_ts` 只算到"哪一天"不够。复用同一套格式校验，只多读
+/// `mm`/`ss` 两截；真实日期校验委托 `usage::ms_from_civil`（Hinnant 算法
+/// 往返比对，不在这里重开一套闰年表）。
+pub(crate) fn ms_from_iso_ts(ts: &str) -> Option<i64> {
+    let b = ts.as_bytes();
+    if !ts.is_ascii()
+        || b.len() < 20
+        || b.get(10) != Some(&b'T')
+        || b.last() != Some(&b'Z')
+    {
+        return None;
+    }
+    let y: i64 = ts[0..4].parse().ok()?;
+    let mo: u32 = ts[5..7].parse().ok()?;
+    let d: u32 = ts[8..10].parse().ok()?;
+    let hh: u32 = ts[11..13].parse().ok()?;
+    let mm: u32 = ts[14..16].parse().ok()?;
+    let ss: u32 = ts[17..19].parse().ok()?;
+    ms_from_civil(y, mo, d, hh, mm, ss)
+}
+
 /// 公历日 +1（月末/年末/闰年走同一张表）。真机语料无闰日样本——测试钉
 /// 2028-02-29 / 2026-12-31 / 普通月末四条边。
 fn add_day(y: i64, mo: u32, d: u32) -> (i64, u32, u32) {
@@ -193,7 +240,15 @@ fn add_day(y: i64, mo: u32, d: u32) -> (i64, u32, u32) {
     }
 }
 
-/// epoch 毫秒 → 北京日。cost-state 的 `startTime`（会话起始，ms）走这条。
+/// epoch 毫秒 → 北京日。v0.6.x 前置热修（2026-09-03）之前，cost-state 的
+/// `startTime` 走这条算 `baseline_day`——那正是被撤销的"把累计整段摊给一天"
+/// 的旧算法（见 `apply_record`）。函数本身保留（不是没用了，是没有生产
+/// 调用点了）：`day_from_iso_ts`/`day_from_ms` 是这个模块的一对基础日期
+/// 转换原语，Python 镜像 `claude_cost.py::day_from_ms` 同样保留且仍有自己
+/// 的钉测——两侧的"可移植纯函数"清单要保持同构，不能因为当前唯一调用点
+/// 消失就单边删掉一个，那样下次真需要「epoch ms → 北京日」时会两侧各自
+/// 重新发明。
+#[allow(dead_code)]
 pub(crate) fn day_from_ms(ms: i64) -> String {
     let (y, mo, d) = civil_from_unix_secs(ms.div_euclid(1000), 8 * 3600);
     format!("{y:04}-{mo:02}-{d:02}")
@@ -238,7 +293,8 @@ fn inc(sess: &mut Map<String, Value>, key: &str) {
     sess.insert(key.to_string(), json!(cur + 1));
 }
 
-/// 4 桶加到 `obj`（4 个 snake 键的桶对象，如 tail_days[day][model]）里。
+/// 4 桶加到 `obj`（4 个 snake 键的桶对象）里。用于 baseline / 归档合并这类
+/// 只有 4 型、没有峰谷分辨率的场合。
 fn bump_obj(obj: &mut Value, t: [u64; 4]) {
     let m = obj.as_object_mut().expect("bucket target is object");
     for (i, k) in SNAKE_KEYS.iter().enumerate() {
@@ -247,20 +303,48 @@ fn bump_obj(obj: &mut Value, t: [u64; 4]) {
     }
 }
 
-/// 一条记录 → 会话状态转换（assistant 行入尾差、cost-state 换基线）。
+/// 8 桶加到 `obj`（tail_days[day][model]，4 基础 + 4 峰值子桶，DSH
+/// `usage.rs::add_buckets` 同形）。`peak=true` 时额外加进 `PEAK_KEYS`——
+/// 子桶恒 ≤ 对应基础桶（同一次加法同时进两边，不会倒挂）。
+fn bump_tail(obj: &mut Value, t: [u64; 4], peak: bool) {
+    let m = obj.as_object_mut().expect("bucket target is object");
+    for (i, k) in SNAKE_KEYS.iter().enumerate() {
+        let cur = m.get(*k).and_then(Value::as_u64).unwrap_or(0);
+        m.insert((*k).to_string(), json!(cur + t[i]));
+    }
+    if peak {
+        for (i, k) in PEAK_KEYS.iter().enumerate() {
+            let cur = m.get(*k).and_then(Value::as_u64).unwrap_or(0);
+            m.insert((*k).to_string(), json!(cur + t[i]));
+        }
+    }
+}
+
+/// 一条记录 → 会话状态转换（assistant 行入尾差、cost-state 换基线对账锚）。
 /// 纯函数：`sess` 是 claude-fold.json 里 `sessions[sid]` 的可变引用。
+///
+/// v0.6.x 前置热修（归日转正，2026-09-03）：`tail_days` **不再在 cost-state
+/// 到来时清空**——旧算法「换基线、清尾差」会把已经有真实逐行 ts 的历史，
+/// 整段折进一个只有单一 `startTime` 归属的基线，跨午夜会话的当日消费因此被
+/// 错记到会话起始日（真机实测 197.5M flash cache-read 记错一天，见
+/// `docs/CLAUDE_COST_DAY_ATTRIBUTION_ANALYSIS.md`）。新规则：`tail_days` 对
+/// 整个会话生命周期只增不清，永远是"每笔 usage 按它自己的 ts 归日"的诚实
+/// 记录；`cost-state` 的 `modelUsage` 只更新 `baseline`（最新累计自报），在
+/// `rebuild_days` 里仅用作**对账锚**——`tail_days` 汇总 ≥ 基线时基线是冗余
+/// 信息（被更精确的逐行数据完全覆盖，直接丢弃）；汇总 < 基线时，差值是真实
+/// 存在但没有逐行证据的残差，进 `rebuild_days` 返回的 `unaccounted` 池——
+/// 不猜它发生在哪一天。
 fn apply_record(sess: &mut Map<String, Value>, rec: &Value) {
     // tail_days 是 assistant 行的落点；fresh 会话第一个 assistant 行进来时
-    // 还没有这个键（cost-state 才会显式 reset 成 {}）——懒建，别 expect。
+    // 还没有这个键——懒建，别 expect。
     if !sess.contains_key("tail_days") {
         sess.insert("tail_days".to_string(), json!({}));
     }
     match rec.get("type").and_then(Value::as_str) {
         Some("cost-state") => {
-            // 基线替换：modelUsage 是整段会话的累计自报（真机两条同值
-            // cost-state 逐字段相同证明）。换基线、清尾差——**不叠加**；
-            // 「两条同值 cost-state + 中间有 usage 行」→ 中间行已被新基线
-            // 包含，清掉正好不双计（单测钉）。
+            // 基线更新：modelUsage 是整段会话的累计自报（真机两条同值
+            // cost-state 逐字段相同证明）。只更新对账锚，不再清 tail_days、
+            // 不再算 baseline_day——归日全部交给 assistant 行自己的 ts。
             let usage = rec.get("modelUsage");
             let mut baseline = Map::new();
             match usage.and_then(Value::as_object) {
@@ -281,28 +365,6 @@ fn apply_record(sess: &mut Map<String, Value>, rec: &Value) {
                 None => inc(sess, "unreadable_usage_rows"),
             }
             sess.insert("baseline".to_string(), Value::Object(baseline));
-            // 基线日 = startTime（会话起始 ms → 北京日）；缺 startTime 退到
-            // 本条记录自己的 ts 日（v1 文档化近似，模块头注释）。都没有 →
-            // unattributed 哨兵（基线仍存 checkpoint，重建时无日可归）。
-            let day = rec
-                .get("startTime")
-                .and_then(Value::as_i64)
-                .map(day_from_ms)
-                .or_else(|| {
-                    rec.get("timestamp")
-                        .and_then(Value::as_str)
-                        .and_then(day_from_iso_ts)
-                });
-            match day {
-                Some(d) => {
-                    sess.insert("baseline_day".to_string(), json!(d));
-                }
-                None => {
-                    inc(sess, "unattributed_rows");
-                    sess.insert("baseline_day".to_string(), Value::Null);
-                }
-            }
-            sess.insert("tail_days".to_string(), json!({}));
         }
         Some("assistant") => {
             let Some(msg) = rec.get("message").and_then(Value::as_object) else {
@@ -324,12 +386,15 @@ fn apply_record(sess: &mut Map<String, Value>, rec: &Value) {
                 inc(sess, "unreadable_usage_rows"); // 两态皆无 → 哨兵（P0）
                 return;
             };
-            let day = rec
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(day_from_iso_ts);
+            let ts = rec.get("timestamp").and_then(Value::as_str);
+            let day = ts.and_then(day_from_iso_ts);
             match day {
                 Some(d) => {
+                    // 峰谷归属：这一行有真实 ts，分辨率是精确的，不是猜的。
+                    // ms 解析失败（理论上不该发生在 day_from_iso_ts 已经认过
+                    // 的字符串上，防御性兜底）→ 保守按空闲算，同
+                    // `usage::is_peak` 的"缺 time 不臆造高峰"纪律。
+                    let peak = ts.and_then(ms_from_iso_ts).is_some_and(is_peak_slot);
                     let tail = sess
                         .get_mut("tail_days")
                         .and_then(Value::as_object_mut)
@@ -340,7 +405,7 @@ fn apply_record(sess: &mut Map<String, Value>, rec: &Value) {
                         .expect("day entry is object")
                         .entry(model.to_string())
                         .or_insert_with(|| json!({}));
-                    bump_obj(model_obj, t);
+                    bump_tail(model_obj, t, peak);
                 }
                 // 行有 usage 但 ts 不可解析 → 日线无处可挂 → 哨兵，不猜日。
                 None => inc(sess, "unattributed_rows"),
@@ -350,31 +415,37 @@ fn apply_record(sess: &mut Map<String, Value>, rec: &Value) {
     }
 }
 
-/// 把 `{model: {4 snake}}` 桶并进一个**已铺平到 model 层**的日对象
+/// 把 `{model: {8 snake+peak}}` 桶并进一个**已铺平到 model 层**的日对象
 /// （多会话同日相加——逐会话 replacement 会丢别的会话，ledger 必须全量
-/// 重建，这就是不增量累加的原因）。
+/// 重建，这就是不增量累加的原因）。峰值子桶随基础桶一起搬，8 键一视同仁
+/// ——不是"4 键 + 额外逻辑"，是同一份键表的自然扩展。
 fn merge_models_into_day(day: &mut Value, buckets: &Value) {
     let Some(by_model) = buckets.as_object() else {
         return;
     };
     let day_obj = day.as_object_mut().expect("day is object");
-    for (model, t4) in by_model {
-        let Some(obj) = t4.as_object() else {
+    for (model, t8) in by_model {
+        let Some(obj) = t8.as_object() else {
             continue;
         };
-        let mut arr = [0u64; 4];
-        let mut any = false;
-        for (i, k) in SNAKE_KEYS.iter().enumerate() {
+        let mut hits: Vec<(&str, u64)> = Vec::new();
+        for k in SNAKE_KEYS.iter().chain(PEAK_KEYS.iter()) {
             if let Some(v) = obj.get(*k).and_then(Value::as_u64) {
-                arr[i] = v;
-                any = true;
+                hits.push((k, v));
             }
         }
-        if !any {
+        if hits.is_empty() {
             continue;
         }
-        let model_obj = day_obj.entry(model.clone()).or_insert_with(|| json!({}));
-        bump_obj(model_obj, arr);
+        let model_obj = day_obj
+            .entry(model.clone())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .expect("day model entry is object");
+        for (k, v) in hits {
+            let cur = model_obj.get(k).and_then(Value::as_u64).unwrap_or(0);
+            model_obj.insert(k.to_string(), json!(cur + v));
+        }
     }
 }
 
@@ -485,27 +556,86 @@ fn fold_one(
 }
 
 /// 从会话状态全量重建逐日桶。返回 (当前月 ledger days, 要滚进归档的 days)。
-fn rebuild_days(sessions: &Value, current: &str) -> (Map<String, Value>, Map<String, Value>) {
+/// `{day: {model: {8 键}}}` → `{model: [4 型 snake 总量]}`（跨全部日子求和，
+/// 只取基础 4 键——峰谷子桶不参与对账，它们是基础桶的子集，加总基础桶就够
+/// 判断"这个模型的行级证据覆盖了多少"）。
+fn session_row_sum(tail: &Value) -> BTreeMap<String, [u64; 4]> {
+    let mut out: BTreeMap<String, [u64; 4]> = BTreeMap::new();
+    let Some(days) = tail.as_object() else {
+        return out;
+    };
+    for buckets in days.values() {
+        let Some(by_model) = buckets.as_object() else {
+            continue;
+        };
+        for (model, t8) in by_model {
+            let Some(obj) = t8.as_object() else {
+                continue;
+            };
+            let acc = out.entry(model.clone()).or_insert([0u64; 4]);
+            for (i, k) in SNAKE_KEYS.iter().enumerate() {
+                if let Some(v) = obj.get(*k).and_then(Value::as_u64) {
+                    acc[i] += v;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 从会话状态全量重建逐日桶 + 残差对账。返回 (当前月 ledger days, 要滚进
+/// 归档的 days, unaccounted 残差 `{model: {4 键}}`)。
+///
+/// v0.6.x 前置热修（归日转正 + 残差哨兵，2026-09-03）：日桶**只**由
+/// `tail_days`（逐行真实 ts，峰谷分辨率精确）铺出——`baseline`（cost-state
+/// 累计自报）不再被当成"这一天的用量"塞进任何日子，它只做**对账锚**：
+/// 逐会话、逐模型比较 `tail_days` 汇总与最新 `baseline`——汇总 ≥ 基线 →
+/// 基线是行级证据的子集，冗余，丢弃；汇总 < 基线 → 差值是真实发生过但没有
+/// 留下逐行 ts 证据的用量（比如压缩/截断丢失的早期历史），计入
+/// `unaccounted`——它没有日期，也没有峰谷分辨率（不知道何时发生的，不能
+/// 假装知道），调用方（`priced_day`/日历这类消费端）必须把它单独标注、
+/// 不能悄悄摊进某一天冒充精确。
+fn rebuild_days(
+    sessions: &Value,
+    current: &str,
+) -> (Map<String, Value>, Map<String, Value>, Map<String, Value>) {
     let mut all: BTreeMap<String, Value> = BTreeMap::new();
+    let mut unaccounted: Map<String, Value> = Map::new();
     let Some(sessions_map) = sessions.as_object() else {
-        return (Map::new(), Map::new());
+        return (Map::new(), Map::new(), Map::new());
     };
     for sess in sessions_map.values() {
         let Some(obj) = sess.as_object() else {
             continue;
         };
-        // 基线 → baseline_day；tail_days → 各自的日子。同一个日会被多会话
-        // 贡献 → 先全量并进 all，再统一分月。
-        if let Some(day) = obj.get("baseline_day").and_then(Value::as_str) {
-            if let Some(b) = obj.get("baseline") {
-                let entry = all.entry(day.to_string()).or_insert_with(|| json!({}));
-                merge_models_into_day(entry, b);
-            }
-        }
-        if let Some(tail) = obj.get("tail_days").and_then(Value::as_object) {
+        let tail_value = obj.get("tail_days").cloned().unwrap_or_else(|| json!({}));
+        if let Some(tail) = tail_value.as_object() {
             for (day, buckets) in tail {
                 let entry = all.entry(day.clone()).or_insert_with(|| json!({}));
                 merge_models_into_day(entry, buckets);
+            }
+        }
+        let row_sum = session_row_sum(&tail_value);
+        if let Some(baseline) = obj.get("baseline").and_then(Value::as_object) {
+            for (model, t4) in baseline {
+                let Some(bobj) = t4.as_object() else {
+                    continue;
+                };
+                let mut base_arr = [0u64; 4];
+                for (i, k) in SNAKE_KEYS.iter().enumerate() {
+                    if let Some(v) = bobj.get(*k).and_then(Value::as_u64) {
+                        base_arr[i] = v;
+                    }
+                }
+                let row_arr = row_sum.get(model).copied().unwrap_or([0u64; 4]);
+                let residual: [u64; 4] =
+                    std::array::from_fn(|i| base_arr[i].saturating_sub(row_arr[i]));
+                if residual.iter().any(|v| *v > 0) {
+                    let entry = unaccounted
+                        .entry(model.clone())
+                        .or_insert_with(|| json!({}));
+                    bump_obj(entry, residual);
+                }
             }
         }
     }
@@ -519,7 +649,7 @@ fn rebuild_days(sessions: &Value, current: &str) -> (Map<String, Value>, Map<Str
             archive.insert(day, merged);
         }
     }
-    (ledger, archive)
+    (ledger, archive, unaccounted)
 }
 
 /// `agent-vitals claude-sync` 主入口：发现变化会话 → 尾读折入 checkpoint →
@@ -545,6 +675,16 @@ pub fn claude_sync(home: &Path, shadow: bool) -> Result<(), String> {
     let files = claude_project_files(home);
     let fp = fold_path();
     let mut folds = read_json(&fp).unwrap_or_else(|| json!({"sessions": {}}));
+    // v0.6.x 前置热修的强制重折闸门：旧 checkpoint（`schema_version` 缺失或
+    // 不是当前版本）是在"cost-state 一来就清 tail_days"的旧算法下写的——它的
+    // `tail_days` 只剩最近一次基线之后的行，更早的历史已经被旧算法永久清掉，
+    // 不是"还没折"而是"折过又被丢"，resume 读不回来。清空 `sessions` 让
+    // `fold_one` 对每个文件都走 New 分支，从源头 JSONL 重新 ingest——与
+    // v0.7 spec §4.1"事实 cache 可重建"同一个原则，不是迁移函数（没有可从
+    // 旧结构直接推导新结构的路径，旧结构本身就丢了信息）。
+    if folds.get("schema_version").and_then(Value::as_u64) != Some(FOLD_SCHEMA_VERSION) {
+        folds = json!({"sessions": {}});
+    }
     let sessions = match folds.get_mut("sessions") {
         Some(Value::Object(m)) => m,
         _ => {
@@ -589,15 +729,16 @@ pub fn claude_sync(home: &Path, shadow: bool) -> Result<(), String> {
         unreadable += o.get("unreadable_usage_rows").and_then(Value::as_u64).unwrap_or(0);
         unattributed += o.get("unattributed_rows").and_then(Value::as_u64).unwrap_or(0);
     }
+    folds["schema_version"] = json!(FOLD_SCHEMA_VERSION);
     atomic_write_json(&fp, &folds);
-    // 全量重建 ledger + 归档（幂等；崩溃重跑不会双计）。rebuild_days 吃的是
-    // sessions 映射（sid → 会话状态），不是 {"sessions": …} 外壳——两层结构刚
-    // 写出时混过一次：把外壳喂进去，整本折叠空账，ledger 恒为空还不报错
-    // （Python smoke 抓到；两侧一行同型，一起修）。
+    // 全量重建 ledger + 归档 + 残差（幂等；崩溃重跑不会双计）。rebuild_days
+    // 吃的是 sessions 映射（sid → 会话状态），不是 {"sessions": …} 外壳——
+    // 两层结构刚写出时混过一次：把外壳喂进去，整本折叠空账，ledger 恒为空
+    // 还不报错（Python smoke 抓到；两侧一行同型，一起修）。
     let now = now_iso_utc();
     let current = current_month_beijing();
     let sessions_v = folds.get("sessions").cloned().unwrap_or_else(|| json!({}));
-    let (ledger_days, archive_days) = rebuild_days(&sessions_v, &current);
+    let (ledger_days, archive_days, unaccounted) = rebuild_days(&sessions_v, &current);
     // 归档只在**日桶内容**变化时落盘：add_days_to_archive 每调用都会给当月
     // 盖一个新 archived_at，若每轮无条件写，零变化的幂等重跑也会改写整个
     // 文件（真机冻结语料复跑抓到：fold/ledger 字节不变、archive 每轮都变）。
@@ -610,7 +751,16 @@ pub fn claude_sync(home: &Path, shadow: bool) -> Result<(), String> {
             atomic_write_json(&ledger_archive_path(), &candidate);
         }
     }
-    atomic_write_json(&ledger_path(), &json!({ "days": ledger_days }));
+    // `unaccounted` 恒写（哪怕空 object）——同一条纪律：缺席必须是"测过是空"，
+    // 不是"没写这个键"。
+    let unaccounted_tokens: u64 = unaccounted
+        .values()
+        .flat_map(|t| SNAKE_KEYS.iter().filter_map(|k| t.get(*k).and_then(Value::as_u64)))
+        .sum();
+    atomic_write_json(
+        &ledger_path(),
+        &json!({ "days": ledger_days, "unaccounted": unaccounted }),
+    );
     println!(
         "claude-sync: scanned {scanned} files; folded {} (new {fresh}, resumed {resumed}); skipped {skipped}; failed {failed}",
         fresh + resumed
@@ -621,6 +771,10 @@ pub fn claude_sync(home: &Path, shadow: bool) -> Result<(), String> {
     println!(
         "claude-sync: ledger days: {}; unreadable usage rows: {unreadable}; unattributed rows: {unattributed}",
         ledger_days.len()
+    );
+    println!(
+        "claude-sync: unaccounted residual: {} models; {unaccounted_tokens} tokens",
+        unaccounted.len()
     );
     Ok(())
 }
@@ -717,9 +871,12 @@ mod tests {
     }
 
     #[test]
-    fn baseline_replace_does_not_double_count() {
-        // 审阅裁决钉测：两条同值 cost-state + 中间有 usage 行 → 取最后一条为
-        // 基线、中间行被基线包含不清零、不双计。Python 同名测试同 fixture。
+    fn baseline_is_reconciliation_anchor_not_a_day_dump() {
+        // 新算法钉测（取代旧的 baseline_replace_does_not_double_count）：
+        // cost-state 只更新 baseline，不再清 tail_days、不再造
+        // baseline_day——中间那条行在两次基线之间原样留在 tail_days 里，
+        // 日期是它自己 ts 算出来的（08-31，19Z≥16 进位），不是被吞掉也不是
+        // 被摊给某一天。Python 同名测试同 fixture。
         let cs = |start: i64| json!({
             "type": "cost-state",
             "timestamp": "2026-08-30T18:00:00.000Z",
@@ -743,7 +900,6 @@ mod tests {
         for rec in [&cs(1_788_084_986_000), &row, &cs(1_788_084_986_000)] {
             apply_record(&mut sess, rec);
         }
-        // 尾差被清空（中间行已被基线包含）→ baseline 只有一条 1000/100。
         assert_eq!(
             sess.get("baseline")
                 .unwrap()
@@ -752,20 +908,32 @@ mod tests {
                 .get("input_tokens"),
             Some(&json!(1000))
         );
+        assert!(!sess.contains_key("baseline_day"));
         assert_eq!(
-            sess.get("tail_days").unwrap().as_object().unwrap().len(),
-            0,
-            "两条同值 cost-state 之间的 usage 行不得残留进尾差"
+            sess.get("tail_days").unwrap().get("2026-08-31").unwrap()
+                .get("deepseek-v4-flash").unwrap().get("input_tokens"),
+            Some(&json!(10))
         );
-        assert_eq!(sess.get("baseline_day").unwrap(), &json!("2026-08-30"));
-        // 替换后整段会话只计一次：基线 1000 in，无任何行增量。
         assert_eq!(sess.get("unattributed_rows"), None);
         assert_eq!(sess.get("unreadable_usage_rows"), None);
+        // 对账：基线 1000 > 行和 10 → 差值 990 是残差，不体现在 tail_days 里。
+        let mut sessions = Map::new();
+        sessions.insert("s1".to_string(), Value::Object(sess));
+        let (ledger, _archive, unaccounted) =
+            rebuild_days(&Value::Object(sessions), "2026-08");
+        assert_eq!(
+            ledger.get("2026-08-31").unwrap().get("deepseek-v4-flash").unwrap().get("input_tokens"),
+            Some(&json!(10))
+        );
+        assert_eq!(
+            unaccounted.get("deepseek-v4-flash").unwrap().get("input_tokens"),
+            Some(&json!(990))
+        );
     }
 
     #[test]
     fn cost_state_mid_file_then_tail_rows_by_day() {
-        // Python 同名测试同 fixture：基线之后的行 → 行 ts 日；基线 → startTime 日。
+        // Python 同名测试同 fixture：基线不再落在任何一天，只做对账锚。
         let cs = json!({
             "type": "cost-state", "timestamp": "2026-08-30T11:00:00.000Z",
             // 1788084986000 ms = 2026-08-30T10:16:26Z → 北京 08-30（真值，别手算）。
@@ -789,10 +957,14 @@ mod tests {
         {
             apply_record(&mut sess, rec);
         }
-        assert_eq!(sess.get("baseline_day").unwrap(), &json!("2026-08-30"));
+        assert!(!sess.contains_key("baseline_day"));
+        assert_eq!(
+            sess.get("baseline").unwrap().get("claude-opus-5").unwrap().get("input_tokens"),
+            Some(&json!(500))
+        );
         let tail = sess.get("tail_days").unwrap();
         // 三条行的 UTC ts 各自跨日：08-30T19Z→08-31、08-31T12Z→08-31（累 30）、
-        // 08-31T20Z→09-01。基线不落尾差。
+        // 08-31T20Z→09-01。
         assert_eq!(
             tail.get("2026-08-31").unwrap().get("deepseek-v4-flash").unwrap().get("input_tokens"),
             Some(&json!(30))
@@ -803,6 +975,20 @@ mod tests {
         );
         assert_eq!(tail.get("2026-08-30"), None);
         assert_eq!(tail.as_object().unwrap().len(), 2);
+        // claude-opus-5 的基线在 tail_days 里零覆盖（所有行都是
+        // deepseek-v4-flash）→ 500 全部是残差，不落在任何一天。
+        let mut sessions = Map::new();
+        sessions.insert("s1".to_string(), Value::Object(sess));
+        let (ledger, _archive, unaccounted) =
+            rebuild_days(&Value::Object(sessions), "2026-08");
+        assert_eq!(
+            unaccounted.get("claude-opus-5").unwrap().get("input_tokens"),
+            Some(&json!(500))
+        );
+        assert!(ledger
+            .get("2026-08-31")
+            .and_then(|d| d.get("claude-opus-5"))
+            .is_none());
     }
 
     #[test]
@@ -852,14 +1038,16 @@ mod tests {
 
     #[test]
     fn rebuild_partitions_current_month_and_merges_sessions() {
-        // Python 同名测试同 fixture：同日多会话相加；当前月进 ledger、更早进
-        // archive（传入固定 current——纯函数不读钟）。
+        // Python 同名测试同 fixture：当前月进 ledger、更早进 archive（传入
+        // 固定 current——纯函数不读钟）。s1 只有 baseline（无 tail_days 覆盖）
+        // → 100 全部是残差，不进任何一天；s2 的行 50 单独落 08-31（不再被
+        // s1 的基线加成 150）。
         let sessions = json!({
             "s1": {"size": 1, "mtime_ns": 1, "baseline": {
                 "deepseek-v4-flash": {"input_tokens": 100, "cache_read_input_tokens": 0,
                                       "cache_creation_input_tokens": 0,
                                       "output_tokens": 0}},
-                "baseline_day": "2026-08-31", "tail_days": {}},
+                "tail_days": {}},
             "s2": {"size": 1, "mtime_ns": 1, "tail_days": {
                 "2026-08-31": {"deepseek-v4-flash": {"input_tokens": 50,
                     "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
@@ -869,7 +1057,7 @@ mod tests {
                     "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
                     "output_tokens": 0}}}},
         });
-        let (ledger, archive) = rebuild_days(&sessions, "2026-09");
+        let (ledger, archive, unaccounted) = rebuild_days(&sessions, "2026-09");
         // 当前月 = 2026-09：08-31 是过去月 → 滚进 archive；只有 09-01 留 ledger。
         assert_eq!(ledger.len(), 1);
         let d1 = ledger.get("2026-09-01").unwrap();
@@ -877,12 +1065,15 @@ mod tests {
             d1.get("claude-sonnet-5").unwrap().get("input_tokens"),
             Some(&json!(20))
         );
-        // 08-31 上 s1 baseline 100 + s2 行 50 同日相加 → 150 进归档。
         assert_eq!(archive.len(), 1);
         let d31 = archive.get("2026-08-31").unwrap();
         assert_eq!(
             d31.get("deepseek-v4-flash").unwrap().get("input_tokens"),
-            Some(&json!(150))
+            Some(&json!(50))
+        );
+        assert_eq!(
+            unaccounted.get("deepseek-v4-flash").unwrap().get("input_tokens"),
+            Some(&json!(100))
         );
     }
 

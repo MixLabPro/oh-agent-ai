@@ -190,34 +190,75 @@ fn g10_price_claude_map_has_exactly_the_two_registered_callers() {
          flat_rate 的 off_peak 兜底，需要同步 G10 缺口登记");
 }
 
+// 缺口登记（v0.6.x 前置热修，2026-09-03 结清）：`claude_day_cost`/
+// `claude_session_cost` 曾共用 `price_claude_map` → `price_claude_model` →
+// `flat_rate` 的 off_peak 兜底，登记为 "pending v0.7"（后改记 v0.6.x）；
+// 两者已同批切换到峰谷读法（`claude_day_cost` 用 `peak_resolved=true`，
+// ledger 日桶的 `peak_*` 子桶来自 `tail_days` 逐行真实 ts；`claude_session_cost`
+// 结构性没有逐行 ts，`peak_resolved=false`，如实报 `pricing_basis="partial"`
+// 而不是悄悄用下界冒充精确）。缺口清单闭集为空，见下面两个测试的新断言
+// （v0.6 spec §8 G10 / §12 DoD 2/9："三张时变卡在任何计价入口都不走下界读法"
+// 现在无条件成立，不再需要缺口登记）。
+
 #[test]
-fn g10_registered_gap_entries_currently_take_the_off_peak_floor() {
-    // 行为断言的对偶：证明这两个入口**目前**确实卡在下界读法——缺口登记
-    // 准确，不是摆设。v0.7 把它们换成峰谷读法后，这条测试必须跟着改写成
-    // "不等于 off_peak 下界"的硬断言（v0.6 spec §8 G10 / §12 DoD 9）。
+fn g10_claude_day_cost_prices_peak_tokens_at_peak_rate_not_off_peak_floor() {
+    // 硬断言（v0.6 spec §8 G10 / §12 DoD 2/9，v0.6.x 热修落地后从"验证仍卡在
+    // 下界"翻转成"验证已经峰谷正确"）：`claude_day_cost` 的 ledger 日桶现在
+    // 带 `peak_*` 子桶（来自 `claude_cost.rs::tail_days` 逐行真实 ts），全落
+    // 在高峰时段的用量必须按 peak 单价算，不是 off_peak 下界——否则
+    // `flat_rate` 的下界兜底又静默接管了这张时变卡。
     let pricing = agent_vitals_core::cost::load_pricing();
     let card = &pricing["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"];
     let off_peak_rate = card["input_uncached"]["off_peak"].as_f64().unwrap();
     let peak_rate = card["input_uncached"]["peak"].as_f64().unwrap();
     assert_ne!(off_peak_rate, peak_rate, "测试卡必须真的时变，否则本断言无意义");
 
+    // 全落峰值：base 与 peak_ 子桶相等——1M input 全部在高峰时段发生。
     let day = serde_json::json!({"deepseek-v4-flash": {
         "input_tokens": 1_000_000, "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 0, "output_tokens": 0,
+        "peak_input_tokens": 1_000_000, "peak_cache_read_input_tokens": 0,
+        "peak_cache_creation_input_tokens": 0, "peak_output_tokens": 0,
     }});
-    let day_report = agent_vitals_core::cost::claude_day_cost(&day, &pricing).unwrap();
-    let day_total = day_report["per_model"]["deepseek-v4-flash"]["total"].as_f64().unwrap();
-    assert!((day_total - off_peak_rate).abs() < 1e-9,
-        "claude_day_cost：pending v0.7 缺口应仍卡在 off_peak 下界");
+    let report = agent_vitals_core::cost::claude_day_cost(&day, &pricing).unwrap();
+    let day_total = report["per_model"]["deepseek-v4-flash"]["total"].as_f64().unwrap();
+    assert!((day_total - peak_rate).abs() < 1e-9,
+        "claude_day_cost 全高峰用量必须按 peak 单价算");
+    assert!((day_total - off_peak_rate).abs() > 1e-9);
+    assert_eq!(report["pricing_basis"], "catalog", "有峰谷分辨率时是精确值，不再是估算");
 
+    // 全落空闲：peak_* 子桶全 0——必须精确算成 off_peak（不是"没分辨率的
+    // 下界"，是"真的测到全部落在空闲时段"，两者数值恰好相同、语义不同，
+    // pricing_basis 必须仍是 catalog）。
+    let day_off = serde_json::json!({"deepseek-v4-flash": {
+        "input_tokens": 1_000_000, "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0, "output_tokens": 0,
+    }});
+    let report_off = agent_vitals_core::cost::claude_day_cost(&day_off, &pricing).unwrap();
+    let off_total = report_off["per_model"]["deepseek-v4-flash"]["total"].as_f64().unwrap();
+    assert!((off_total - off_peak_rate).abs() < 1e-9);
+    assert_eq!(report_off["pricing_basis"], "catalog");
+}
+
+#[test]
+fn g10_claude_session_cost_honestly_reports_partial_for_time_varying_cards() {
+    // `claude_session_cost` 结构性没有逐行 ts（cost-state 是会话累计自报，
+    // 不是逐请求流水）——时变卡这里永远给不出真峰谷分辨率，v0.6.x 热修后
+    // 如实报 `pricing_basis="partial"`（不是悄悄按 off_peak 冒充 "catalog"
+    // 精确值；数值仍是 off_peak 下界，因为那是唯一"没有更多信息时"站得住
+    // 的算法，但标注必须诚实）。
+    let pricing = agent_vitals_core::cost::load_pricing();
+    let card = &pricing["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"];
+    let off_peak_rate = card["input_uncached"]["off_peak"].as_f64().unwrap();
     let session = serde_json::json!({"deepseek-v4-flash": {
         "inputTokens": 1_000_000, "cacheReadInputTokens": 0,
         "cacheCreationInputTokens": 0, "outputTokens": 0,
     }});
-    let session_report = agent_vitals_core::cost::claude_session_cost(&session, &pricing).unwrap();
-    let session_total = session_report["per_model"]["deepseek-v4-flash"]["total"].as_f64().unwrap();
-    assert!((session_total - off_peak_rate).abs() < 1e-9,
-        "claude_session_cost：pending v0.7 缺口应仍卡在 off_peak 下界");
+    let report = agent_vitals_core::cost::claude_session_cost(&session, &pricing).unwrap();
+    let session_total = report["per_model"]["deepseek-v4-flash"]["total"].as_f64().unwrap();
+    assert!((session_total - off_peak_rate).abs() < 1e-9);
+    assert_eq!(report["per_model"]["deepseek-v4-flash"]["pricing_basis"], "partial");
+    assert_eq!(report["pricing_basis"], "partial");
 }
 
 #[test]

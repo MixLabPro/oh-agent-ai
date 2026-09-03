@@ -136,8 +136,15 @@ class ShapeSniffCase(unittest.TestCase):
 
 
 class FoldSemanticsCase(unittest.TestCase):
-    """Rust `baseline_replace_does_not_double_count` / `cost_state_mid_file…` /
-    `no_cost_state…` / `unparseable…` / `rebuild_partitions…` 同 fixture。"""
+    """Rust `baseline_is_reconciliation_anchor_not_a_day_dump` /
+    `cost_state_mid_file…` / `no_cost_state…` / `unparseable…` /
+    `rebuild_partitions…` 同 fixture。
+
+    v0.6.x 前置热修（归日转正 + 残差哨兵，2026-09-03）：这些用例此前钉的是
+    "cost-state 一来就清 tail_days、把累计塞进 baseline_day 一天"的旧算法
+    ——那正是真机对账揪出的日归因 bug 的根源（跨午夜会话的当日消费被整段
+    错记到起始日）。新算法下 `tail_days` 只增不清、`baseline_day` 不存在，
+    `baseline` 只做对账锚，差值进 `_rebuild_days` 返回的 `unaccounted`。"""
 
     def _cs(self, day_ms):
         return {"type": "cost-state",
@@ -157,22 +164,33 @@ class FoldSemanticsCase(unittest.TestCase):
                     "input_tokens": n, "cache_read_input_tokens": 0,
                     "cache_creation_input_tokens": 0, "output_tokens": 1}}}
 
-    def test_two_equal_cost_states_with_rows_between_do_not_double_count(self):
-        # 审阅裁决钉测：基线 replace 不是 add——中间行被新基线包含、清空不双计。
+    def test_baseline_is_reconciliation_anchor_not_a_day_dump(self):
+        # 新算法钉测（取代旧的"do_not_double_count"）：cost-state 只更新
+        # baseline，不再清 tail_days、不再造 baseline_day——中间那条行在两次
+        # 基线之间原样留在 tail_days 里，日期是它自己 ts 算出来的（08-31，
+        # 19Z≥16 进位），不是被吞掉也不是被摊给某一天。
         sess = {}
         for rec in (self._cs(1_788_084_986_000), self._row(), self._cs(1_788_084_986_000)):
             cc._apply_record(sess, rec)
         self.assertEqual(
             sess["baseline"]["deepseek-v4-flash"]["input_tokens"], 1000)
-        self.assertEqual(sess["tail_days"], {})
-        self.assertEqual(sess["baseline_day"], "2026-08-30")
+        self.assertNotIn("baseline_day", sess)
+        self.assertEqual(
+            sess["tail_days"]["2026-08-31"]["deepseek-v4-flash"]["input_tokens"], 10)
         self.assertNotIn("unattributed_rows", sess)
         self.assertNotIn("unreadable_usage_rows", sess)
+        # 对账：基线 1000 > 行和 10 → 差值 990 是残差，不体现在 tail_days 里
+        # （这里只钉会话状态；残差计算在 _rebuild_days，下面单独测）。
+        ledger, archive, unaccounted = cc._rebuild_days({"s1": sess}, "2026-08")
+        self.assertEqual(
+            ledger["2026-08-31"]["deepseek-v4-flash"]["input_tokens"], 10)
+        self.assertEqual(
+            unaccounted["deepseek-v4-flash"]["input_tokens"], 990)
 
     def test_baseline_start_time_and_tail_rows_by_day(self):
         # Rust `cost_state_mid_file_then_tail_rows_by_day` 同 fixture：
         # 三条行的 UTC ts 各自跨日：08-30T19Z→08-31、08-31T12Z→08-31（累 30）、
-        # 08-31T20Z→09-01。基线 → startTime 北京日 08-30。
+        # 08-31T20Z→09-01。基线本身不再落在任何一天——它只是对账锚。
         cs = {"type": "cost-state", "timestamp": "2026-08-30T11:00:00.000Z",
               # 1788084986000 ms = 2026-08-30T10:16:26Z → 北京 08-30
               "startTime": 1_788_084_986_000,
@@ -186,12 +204,18 @@ class FoldSemanticsCase(unittest.TestCase):
                     self._row("2026-08-31T12:00:00.000Z", 20),
                     self._row("2026-08-31T20:00:00.000Z", 30)):
             cc._apply_record(sess, rec)
-        self.assertEqual(sess["baseline_day"], "2026-08-30")
+        self.assertNotIn("baseline_day", sess)
+        self.assertEqual(sess["baseline"]["claude-opus-5"]["input_tokens"], 500)
         tail = sess["tail_days"]
         self.assertEqual(tail["2026-08-31"]["deepseek-v4-flash"]["input_tokens"], 30)
         self.assertEqual(tail["2026-09-01"]["deepseek-v4-flash"]["input_tokens"], 30)
         self.assertNotIn("2026-08-30", tail)
         self.assertEqual(len(tail), 2)
+        # claude-opus-5 的基线在 tail_days 里零覆盖（所有行都是 deepseek-v4-flash）
+        # → 500 全部是残差，不落在任何一天。
+        ledger, archive, unaccounted = cc._rebuild_days({"s1": sess}, "2026-08")
+        self.assertEqual(unaccounted["claude-opus-5"]["input_tokens"], 500)
+        self.assertNotIn("claude-opus-5", ledger.get("2026-08-31", {}))
 
     def test_no_cost_state_session_is_row_sum(self):
         sess = {}
@@ -226,14 +250,15 @@ class FoldSemanticsCase(unittest.TestCase):
         self.assertEqual(sess["tail_days"], {})
 
     def test_rebuild_partitions_current_month_and_merges_sessions(self):
-        # Rust `rebuild_partitions…` 同 fixture：当前月=2026-09 → 08-31 滚归档，
-        # s1 baseline 100 + s2 行 50 同日相加 150；09-01 留 ledger。
+        # Rust `rebuild_partitions…` 同 fixture：当前月=2026-09 → 08-31 滚归档。
+        # s1 只有 baseline（无 tail_days 覆盖）→ 100 全部是残差，不进任何一天；
+        # s2 的行 50 单独落 08-31（不再被 s1 的基线加成 150）；09-01 留 ledger。
         sessions = {
             "s1": {"size": 1, "mtime_ns": 1,
                    "baseline": {"deepseek-v4-flash": {
                        "input_tokens": 100, "cache_read_input_tokens": 0,
                        "cache_creation_input_tokens": 0, "output_tokens": 0}},
-                   "baseline_day": "2026-08-31", "tail_days": {}},
+                   "tail_days": {}},
             "s2": {"size": 1, "mtime_ns": 1,
                    "tail_days": {"2026-08-31": {"deepseek-v4-flash": {
                        "input_tokens": 50, "cache_read_input_tokens": 0,
@@ -243,13 +268,14 @@ class FoldSemanticsCase(unittest.TestCase):
                        "input_tokens": 20, "cache_read_input_tokens": 0,
                        "cache_creation_input_tokens": 0, "output_tokens": 0}}}},
         }
-        ledger, archive = cc._rebuild_days(sessions, "2026-09")
+        ledger, archive, unaccounted = cc._rebuild_days(sessions, "2026-09")
         self.assertEqual(list(ledger), ["2026-09-01"])
         self.assertEqual(
             ledger["2026-09-01"]["claude-sonnet-5"]["input_tokens"], 20)
         self.assertEqual(list(archive), ["2026-08-31"])
         self.assertEqual(
-            archive["2026-08-31"]["deepseek-v4-flash"]["input_tokens"], 150)
+            archive["2026-08-31"]["deepseek-v4-flash"]["input_tokens"], 50)
+        self.assertEqual(unaccounted["deepseek-v4-flash"]["input_tokens"], 100)
 
 
 # ────────────────────────── 差分：Python ↔ Rust（--shadow） ─────────────────
@@ -308,8 +334,12 @@ class ClaudeSyncBothTests(unittest.TestCase):
     def _build_fixtures(self):
         """三态 usage fixture + 基线 + 跨月归档 + 哨兵行（P0 两态都进语料）。
 
-        月份安排：today 走「今天」（当前月 → ledger）；会话 1 的 cost-state
-        startTime 走「上月 15 号」（必然跨月 → 归档），行尾差一走在今天。
+        月份安排：today 走「今天」（当前月 → ledger）；会话 1 有一条真实
+        prev-month 时间戳的 assistant 行（必然跨月 → 归档，走 `tail_days`
+        真实分辨率，不是靠 cost-state 基线摊到某一天——v0.6.x 前置热修后
+        baseline 只是对账锚点，从不直接产生日面），行尾差一走在今天；
+        cost-state 的 baseline（1000/100）与 tail_days 覆盖的行和（35/4）
+        对不上，差额进 `unaccounted`（dateless 残差池），不是悄悄多算/漏算。
         会话 2 无 cost-state（纯行和）：短键旧形状 + 无 ts 行（unattributed）
         + 有 usage 无 model（unreadable）。
         """
@@ -318,7 +348,8 @@ class ClaudeSyncBothTests(unittest.TestCase):
         y_m1, m_m1 = int(prev[:4]), int(prev[5:7])
         today_y, today_m, today_d = (int(today[:4]), int(today[5:7]),
                                      int(today[8:10]))
-        # 会话 1：cost-state（上月 startTime → 归档日）→ 之后两条行（今天）。
+        # 会话 1：cost-state（对账锚点，1000/100，超过 tail_days 行和 → 差额
+        # 进 unaccounted）→ 一条真实上月行（真正的归档来源）→ 两条今天行。
         rows1 = [
             {"type": "cost-state",
              "timestamp": "%s-15T00:00:00.000Z" % prev,
@@ -328,6 +359,10 @@ class ClaudeSyncBothTests(unittest.TestCase):
                  "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
                  "webSearchRequests": 0, "costUSD": 0.0}},
              "hasUnknownModelCost": False},
+            {"type": "assistant", "timestamp": "%s-20T03:00:00.000Z" % prev,
+             "message": {"model": "deepseek-v4-flash", "usage": {
+                 "input_tokens": 5, "cache_read_input_tokens": 0,
+                 "cache_creation_input_tokens": 0, "output_tokens": 1}}},
             {"type": "assistant", "timestamp": "%sT02:00:00.000Z" % today,
              "message": {"model": "deepseek-v4-flash", "usage": {
                  "input_tokens": 10, "cache_read_input_tokens": 0,
@@ -405,11 +440,18 @@ class ClaudeSyncBothTests(unittest.TestCase):
         self.assertEqual(set(got_py), set(got_rs))
         for rel, text in got_rs.items():
             self.assertEqual(got_py[rel], text, "state %s 逐字节不一致" % rel)
-        # 语义抽查：基线落在归档（上月），行和落在 ledger（今天）。
+        # 语义抽查：真实上月行落归档，今天行落 ledger，baseline 超出 tail_days
+        # 行和的差额落 unaccounted（v0.6.x 前置热修：baseline 不再摊到某一天）。
         ledger = json.loads(got_rs["state/claude-ledger.json"])
         self.assertIn(_today_bj(), ledger["days"])
         archive = json.loads(got_rs["state/claude-ledger-archive.json"])
         self.assertIn(_prev_month(), archive["months"])
+        self.assertEqual(
+            ledger["unaccounted"]["deepseek-v4-flash"]["input_tokens"], 965,
+            "baseline 1000 − tail_days 行和 35（上月 5 + 今天 10+20）")
+        self.assertEqual(
+            ledger["unaccounted"]["deepseek-v4-flash"]["output_tokens"], 96,
+            "baseline 100 − tail_days 行和 4（上月 1 + 今天 1+2）")
 
     def test_idempotent_rerun_and_tail_resume(self):
         """重跑零变化（exactly-once）；append 一行后重跑 → resumed 且只折增量，

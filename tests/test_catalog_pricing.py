@@ -62,6 +62,10 @@ class ClaudeSessionCostCase(unittest.TestCase):
         self.pricing = load_pricing()
 
     def test_deepseek_variant_at_official_cny_card(self):
+        # deepseek-v4-pro 是时变卡（{off_peak, peak}）——`claude_session_cost`
+        # 用的是 cost-state 累计口径，没有逐行 ts、给不了峰谷分辨率，v0.6.x
+        # 前置热修后这里如实报 "partial"（全按 off_peak 4.5 算，不再假装是
+        # 账单级精确的 "catalog"）；数值本身不变，改的只是诚实性标注。
         out = claude_session_cost({
             "deepseek-v4-pro[1M]": {"inputTokens": 1000000, "outputTokens": 0,
                                     "cacheReadInputTokens": 0,
@@ -71,7 +75,8 @@ class ClaudeSessionCostCase(unittest.TestCase):
         self.assertAlmostEqual(out["currency_totals"]["CNY"], 4.5)
         self.assertEqual(out["currency_totals"]["USD"], 0.0)
         pm = out["per_model"]["deepseek-v4-pro[1M]"]
-        self.assertEqual(pm["pricing_basis"], "catalog")
+        self.assertEqual(pm["pricing_basis"], "partial")
+        self.assertEqual(out["pricing_basis"], "partial")
         self.assertEqual(pm["priced_with"], "deepseek-official")
         self.assertEqual(pm["currency"], "CNY")
         self.assertNotIn("tier", pm)

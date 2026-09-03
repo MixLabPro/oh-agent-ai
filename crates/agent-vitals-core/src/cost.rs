@@ -703,18 +703,51 @@ fn catalog_card<'a>(pricing: &'a Value, provider: &str, key: &str) -> Option<&'a
         .or_else(|| pricing.pointer(&format!("/providers/{provider}/models/{key}")))
 }
 
-/// 平费率读取：`card[key]` 是数字（catalog 平费率/M3 档位）就取它；是
-/// `{off_peak, peak}` 对象（顶层 providers 段 deepseek 卡）取 off_peak——Claude
-/// 会话文件没有时段证据，全按空闲档折，是最保守的官方价（与 DSH 的高峰拆分
-/// 不同，低估风险方向已知且如实：deepseek 官方高峰 00:30–08:30 北京时间）。
+/// 平费率读取：`card[key]` 是数字（catalog 平费率/M3 档位）就取它。
+///
+/// **不再对 `{off_peak, peak}` 时变卡取 off_peak**（v0.6.x 前置热修，
+/// 2026-09-03 撤销）：旧版本在这里把时变卡的 off_peak 单价当"保守估算"
+/// 直接用，实际是拿时间维下界冒充精确——真机对账证明它不是保守而是系统性
+/// 低估（托盘 claude 今日 ¥45.40 vs 官方账单 ¥74.3797，89% 差额来自这一步；
+/// 见 `docs/CLAUDE_COST_DAY_ATTRIBUTION_ANALYSIS.md`，v0.6 spec §5.3 条款 7 /
+/// §8 G10）。时变卡字段一律经 `priced_field` 做峰谷拆分计价；这个函数收窄
+/// 成只服务真正平费率的字段（catalog anthropic/moonshot USD 卡、MiniMax
+/// 档位卡），命中 dict 形状时诚实返回 0.0 而不是猜一个方向。
 fn flat_rate(card: &Value, key: &str) -> f64 {
-    card.get(key)
-        .and_then(|v| v.as_f64())
-        .or_else(|| {
-            card.pointer(&format!("/{key}/off_peak"))
-                .and_then(|v| v.as_f64())
-        })
-        .unwrap_or(0.0)
+    card.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0)
+}
+
+/// 一个 token 字段（如 `input_uncached`）的计价：`card[key]` 是数字（平
+/// 费率）→ `total × 该价`；是 `{off_peak, peak}` 对象（时变卡）→
+/// `(total-peak) × off_peak + peak × peak_rate` 分别计价（v0.6 spec §5.3
+/// 条款 7 的峰谷读法）。`peak` 由调用方给出，钳制在 `[0, total]` 防御倒挂；
+/// 调用方对"压根不知道峰谷切分"的输入传 `peak=0.0`——这时时变卡会算出与旧
+/// 下界读法数值相同的结果，但**不是同一件事**：这里的 0 只是"没有更多
+/// 信息"，`pricing_basis` 必须由调用方另行标注为非 catalog（见
+/// `price_claude_model` 的 `unresolved`），不能靠这个函数自己判断"该不该
+/// 报精确"——它只管算数，不管诚实性标注。
+fn priced_field(card: &Value, key: &str, total: f64, peak: f64) -> f64 {
+    match card.get(key) {
+        Some(v) if v.is_number() => total * v.as_f64().unwrap_or(0.0),
+        Some(v) if v.is_object() => {
+            let peak = peak.max(0.0).min(total);
+            let off = total - peak;
+            let off_rate = v.get("off_peak").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let peak_rate = v.get("peak").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            off * off_rate + peak * peak_rate
+        }
+        _ => 0.0,
+    }
+}
+
+/// 时变卡判定：`input_uncached` 字段是 `{off_peak, peak}` 形状——与 v0.6
+/// spec §8 G10 的机械判据同一条规则（今天命中 deepseek-official 的
+/// flash/pro、shengsuanyun 的 pro 三张卡；catalog 的平费率/档位卡这个字段
+/// 恒是数字）。
+fn card_is_time_varying(card: &Value) -> bool {
+    card.get("input_uncached")
+        .map(|v| v.is_object())
+        .unwrap_or(false)
 }
 
 /// 缓存写入（cache_creation）单价：catalog 卡按 1h 档（5min 是 1.25×输入、
@@ -739,13 +772,19 @@ fn first_tier(card: &Value) -> Option<(&str, &Value)> {
     Some((label, first))
 }
 
-/// 单模型 4 型 tokens（claude snake 键名，见模块注释）→ 平费率总价。返回
-/// (供应商, 币种, 总价, 档位标签)。模型/卡都匹配不上 → None（不臆造）。
+/// 单模型 tokens（claude snake 键名，见模块注释）→ 计价。`peak_resolved=true`
+/// 时额外读 `peak_` 前缀的峰值子桶（`claude_cost.rs::PEAK_KEYS`），对时变卡
+/// 做峰谷拆分；`false` 时全部按 off_peak 计价（cost-state 累计口径没有逐行
+/// ts，压根没有峰谷可分）。返回 (供应商, 币种, 总价, 档位标签, unresolved)——
+/// `unresolved=true` 表示命中了时变卡但没给峰谷分辨率，`price_claude_map`
+/// 据此把 `pricing_basis` 标成非 catalog，不能让下游误读成账单级精确。
+/// 模型/卡都匹配不上 → None（不臆造）。
 fn price_claude_model(
     model: &str,
     tokens: &Value,
     pricing: &Value,
-) -> Option<(String, String, f64, Option<String>)> {
+    peak_resolved: bool,
+) -> Option<(String, String, f64, Option<String>, bool)> {
     let (provider, key, currency) = resolve_card_catalog(model, pricing)?;
     let card = catalog_card(pricing, &provider, &key)?;
     let (label, card) = match first_tier(card) {
@@ -753,32 +792,57 @@ fn price_claude_model(
         None => (None, card),
     };
     let m = |k: &str| get_i64(tokens, k) as f64 / 1e6;
-    let total = m("input_tokens") * flat_rate(card, "input_uncached")
-        + m("cache_read_input_tokens") * flat_rate(card, "input_cached")
-        + m("cache_creation_input_tokens") * cache_write_rate(card)
-        + m("output_tokens") * flat_rate(card, "output");
-    Some((provider, currency, total, label))
+    let mp = |k: &str| {
+        if peak_resolved {
+            get_i64(tokens, &format!("peak_{k}")) as f64 / 1e6
+        } else {
+            0.0
+        }
+    };
+    let input_t = m("input_tokens");
+    let input_p = mp("input_tokens");
+    let cread_t = m("cache_read_input_tokens");
+    let cread_p = mp("cache_read_input_tokens");
+    let ccreate_t = m("cache_creation_input_tokens");
+    let output_t = m("output_tokens");
+    let output_p = mp("output_tokens");
+    let total = priced_field(card, "input_uncached", input_t, input_p)
+        + priced_field(card, "input_cached", cread_t, cread_p)
+        + ccreate_t * cache_write_rate(card)
+        + priced_field(card, "output", output_t, output_p);
+    let unresolved = !peak_resolved && card_is_time_varying(card);
+    Some((provider, currency, total, label, unresolved))
 }
 
 /// `{模型: 4 型 snake tokens}` → 价目报告。`claude_session_cost`（cost-state
-/// camel 转换后）与 `claude_day_cost`（ledger by_model 直通）共用——两面的钱
-/// 必须同源，不在这里为日面长第二份计价规则（DSH 侧
-/// token_by_date_model==token_by_model 那条纪律的 claude 镜像）。
+/// camel 转换后，`peak_resolved=false`）与 `claude_day_cost`（ledger
+/// by_model 直通，`peak_resolved=true`）共用——两面的钱必须同源，不在这里
+/// 为日面长第二份计价规则（DSH 侧 token_by_date_model==token_by_model 那条
+/// 纪律的 claude 镜像）；`peak_resolved` 只影响时变卡是否能做峰谷拆分，不
+/// 影响这条"同源"纪律本身——两个调用方过的是同一个函数、同一套读法分界。
 ///
 /// 未知模型（`<synthetic>` 等）→ token 四型全进 unpriced。注意与 `cost_report`
 /// 的 unpriced 词表不同：那边不含 output（DSH 钉测形状），claude cost-state
 /// 只有这 4 型、output 同样是真实消费，未知就该全数报出来，别悄悄吞掉 output。
-fn price_claude_map(models: &serde_json::Map<String, Value>, pricing: &Value) -> Option<Value> {
+fn price_claude_map(
+    models: &serde_json::Map<String, Value>,
+    pricing: &Value,
+    peak_resolved: bool,
+) -> Option<Value> {
     let mut cny = 0.0f64;
     let mut usd = 0.0f64;
     let mut unpriced = 0i64;
     let mut per_model = serde_json::Map::new();
+    let mut any_unresolved = false;
     for (model, tokens) in models {
         if tokens.as_object().is_none() {
             continue;
         }
-        match price_claude_model(model, tokens, pricing) {
-            Some((provider, currency, total, tier)) => {
+        match price_claude_model(model, tokens, pricing, peak_resolved) {
+            Some((provider, currency, total, tier, unresolved)) => {
+                if unresolved {
+                    any_unresolved = true;
+                }
                 if currency == "USD" {
                     usd += total;
                 } else {
@@ -789,7 +853,7 @@ fn price_claude_map(models: &serde_json::Map<String, Value>, pricing: &Value) ->
                 let mut entry = json!({
                     "short_name": model_short(model, pricing),
                     "currency": currency,
-                    "pricing_basis": "catalog",
+                    "pricing_basis": if unresolved { "partial" } else { "catalog" },
                     "priced_with": provider,
                     "total": total,
                 });
@@ -810,7 +874,7 @@ fn price_claude_map(models: &serde_json::Map<String, Value>, pricing: &Value) ->
         return None;
     }
     Some(json!({
-        "pricing_basis": "catalog",
+        "pricing_basis": if any_unresolved { "partial" } else { "catalog" },
         "currency_totals": {"CNY": cny, "USD": usd},
         "per_model": Value::Object(per_model),
         "unpriced_tokens": unpriced,
@@ -824,6 +888,12 @@ fn price_claude_map(models: &serde_json::Map<String, Value>, pricing: &Value) ->
 /// `webSearchRequests`/`costUSD` 不参与计价（web search 没有 token 单价；
 /// costUSD 对网关模型按默认卡 $5/$0.5/$25 计、高估 20–70×——host_costusd_note
 /// 说清了，绝不能当账单数字）。modelUsage 为空/缺场 → None。
+///
+/// `peak_resolved=false`：cost-state 的累计口径没有逐行 ts，压根不知道这些
+/// token 里有多少落在高峰时段——时变卡这里恒报 `pricing_basis="partial"`
+/// （v0.6.x 前置热修，2026-09-03；此前这里悄悄按 off_peak 下界算出一个
+/// 看似精确的数字，是被撤销的旧行为）。与 `claude_day_cost` 共用
+/// `price_claude_map`，两面同源。
 pub fn claude_session_cost(model_usage: &Value, pricing: &Value) -> Option<Value> {
     let mu = model_usage.as_object()?;
     let mut models = serde_json::Map::new();
@@ -844,7 +914,7 @@ pub fn claude_session_cost(model_usage: &Value, pricing: &Value) -> Option<Value
     if models.is_empty() {
         return None;
     }
-    price_claude_map(&models, pricing)
+    price_claude_map(&models, pricing, false)
 }
 
 /// claude-ledger 的一天 → 当日金额。两种形状都认：
@@ -860,6 +930,12 @@ pub fn claude_session_cost(model_usage: &Value, pricing: &Value) -> Option<Value
 /// 已 4 型 snake、无需转换。没有任何模型可计价的日子（空 map / 全是零 token 的
 /// 未知模型 → price_claude_map 返回 None）→ None：调用方自己决定退回哪种近似，
 /// 不摆全零结构。
+///
+/// `peak_resolved=true`：v0.6.x 前置热修后（2026-09-03），ledger 日桶的每个
+/// 模型都带 `peak_` 前缀的峰值子桶（`claude_cost.rs::PEAK_KEYS`，来自
+/// `tail_days` 逐行真实 ts，精确不是估算），时变卡走峰谷拆分计价，
+/// `pricing_basis="catalog"`——不再是 v0.6 spec §8 G10 登记过的
+/// `pending v0.7`/`pending v0.6.x` 缺口。
 pub fn claude_day_cost(day: &Value, pricing: &Value) -> Option<Value> {
     let models = match day.get("by_model") {
         Some(wrapped) => wrapped.as_object()?,
@@ -868,7 +944,7 @@ pub fn claude_day_cost(day: &Value, pricing: &Value) -> Option<Value> {
     if models.is_empty() {
         return None;
     }
-    price_claude_map(models, pricing)
+    price_claude_map(models, pricing, true)
 }
 
 /// claude-ledger 一天 → 4 型 token 总量。形状嗅探与 `claude_day_cost` 是同一对
@@ -1391,7 +1467,11 @@ mod tests {
     }
 
     /// `[1M]` 变体按 pro 官方 ¥ 卡折（近似已注释）——1M uncached × off_peak
-    /// 4.5 → ¥4.5 进 CNY 桶，USD 桶保持 0（键序 CNY/USD 稳定）。
+    /// 4.5 → ¥4.5 进 CNY 桶，USD 桶保持 0（键序 CNY/USD 稳定）。deepseek-v4-pro
+    /// 是时变卡，`claude_session_cost` 走的是 cost-state 累计口径、没有逐行
+    /// ts 给不了峰谷分辨率，v0.6.x 前置热修后这里如实报 "partial"（全按
+    /// off_peak 4.5 算，不再假装是账单级精确的 "catalog"）——数值不变，改的
+    /// 只是诚实性标注。
     #[test]
     fn claude_session_cost_prices_deepseek_variant_at_official_cny_card() {
         let pricing = load_pricing();
@@ -1403,7 +1483,8 @@ mod tests {
         assert_eq!(out["currency_totals"]["CNY"].as_f64().unwrap(), 4.5);
         assert_eq!(out["currency_totals"]["USD"].as_f64().unwrap(), 0.0);
         let pm = &out["per_model"]["deepseek-v4-pro[1M]"];
-        assert_eq!(pm["pricing_basis"], "catalog");
+        assert_eq!(pm["pricing_basis"], "partial");
+        assert_eq!(out["pricing_basis"], "partial");
         assert_eq!(pm["priced_with"], "deepseek-official");
         assert_eq!(pm["currency"], "CNY");
         assert!(pm.get("tier").is_none(), "平费率卡不带 tier 键");
