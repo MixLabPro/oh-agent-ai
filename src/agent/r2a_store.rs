@@ -1478,9 +1478,9 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                folds.push(agent_vitals_core::codex_usage::codex_fold_file(&items));
+                folds.push(agent_vitals_adapters::codex_usage::codex_fold_file(&items));
             }
-            agent_vitals_core::codex_usage::codex_merge_folds(&folds)
+            agent_vitals_adapters::codex_usage::codex_merge_folds(&folds)
         });
     let codex_today_tokens: Value = match &codex_merged {
         Some(merged) => codex_today_tokens_json(merged, day_key, codex_store.as_ref().map_or(true, |s| s.entries.is_empty())),
@@ -1654,12 +1654,12 @@ fn codex_today_tokens_json(merged: &Value, day_key: &str, zero_sessions: bool) -
     if !by_hour.as_object().is_some_and(|m| !m.is_empty()) {
         return json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null });
     }
-    let by_date = agent_vitals_core::codex_usage::codex_aggregate_hours(by_hour);
-    let Some(value) = agent_vitals_core::codex_usage::codex_day_tokens(&by_date, day_key) else {
+    let by_date = agent_vitals_adapters::codex_usage::codex_aggregate_hours(by_hour);
+    let Some(value) = agent_vitals_adapters::codex_usage::codex_day_tokens(&by_date, day_key) else {
         return json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null });
     };
     let unaccounted = merged.get("unaccounted").unwrap_or(&Value::Null);
-    let coverage = if agent_vitals_core::codex_usage::unaccounted_tokens_seen(unaccounted) > 0 {
+    let coverage = if agent_vitals_adapters::codex_usage::unaccounted_tokens_seen(unaccounted) > 0 {
         "partial"
     } else {
         "complete"

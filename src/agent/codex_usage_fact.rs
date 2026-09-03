@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use crate::agent::claude_usage_fact::{SKIP, UNATTRIBUTED, UNREADABLE};
-use agent_vitals_core::codex_usage::{CodexTokenOutcome, CodexFoldState};
+use agent_vitals_adapters::codex_usage::{CodexTokenOutcome, CodexFoldState};
 use agent_vitals_core::source_identity::{canonical_json, fnv1a64_hex};
 use agent_vitals_core::usage_fact::build_usage_fact;
 

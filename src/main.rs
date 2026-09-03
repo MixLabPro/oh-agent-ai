@@ -1044,7 +1044,7 @@ fn codex_report_from_merged(
         // by_hour_model——拿 merge 折回去得到的是空模型轴（真实 defect：
         // --month 整份报告静默变全零）。
         by_model =
-            agent_vitals_core::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
+            agent_vitals_adapters::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
     }
     let pricing = agent::codex_cost::load_codex_pricing();
     let plan = merged["plan"].clone();
@@ -1059,7 +1059,7 @@ fn codex_report_from_merged(
     let report = report.unwrap_or_else(|| {
         // 空折叠：全零结构（同 handler 注释——透传 unaccounted/plan）。
         let mut tt = serde_json::Map::new();
-        for f in agent_vitals_core::codex_usage::CODEX_TOKEN_FIELDS {
+        for f in agent_vitals_adapters::codex_usage::CODEX_TOKEN_FIELDS {
             tt.insert(f.to_string(), json!(0));
         }
         let mut base = serde_json::Map::new();
@@ -1446,11 +1446,11 @@ session_store={store} fold={fold}"
             .unwrap_or_default();
         let session_index = agent::codex_session::read_session_index(Path::new(&home));
         let title = session_index.get(&session_id).cloned();
-        let evidence = agent_vitals_core::codex_evidence::build_codex_evidence(
+        let evidence = agent_vitals_adapters::codex_evidence::build_codex_evidence(
             items, session_id, title, history_mode, cli_version, workspace_roots, model,
         );
         if let Some(path) = rows_json {
-            let out = agent_vitals_core::codex_evidence::codex_evidence_json(&evidence);
+            let out = agent_vitals_adapters::codex_evidence::codex_evidence_json(&evidence);
             let text = serde_json::to_string_pretty(&out).unwrap_or_default();
             if path == &PathBuf::from("-") {
                 println!("{text}");
@@ -1467,7 +1467,7 @@ session_store={store} fold={fold}"
             }
             return;
         }
-        print!("{}", render_codex_evidence(&agent_vitals_core::codex_evidence::codex_evidence_json(&evidence)));
+        print!("{}", render_codex_evidence(&agent_vitals_adapters::codex_evidence::codex_evidence_json(&evidence)));
         return;
     }
 
@@ -1497,9 +1497,9 @@ session_store={store} fold={fold}"
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            folds.push(agent_vitals_core::codex_usage::codex_fold_file(&items));
+            folds.push(agent_vitals_adapters::codex_usage::codex_fold_file(&items));
         }
-        let merged = agent_vitals_core::codex_usage::codex_merge_folds(&folds);
+        let merged = agent_vitals_adapters::codex_usage::codex_merge_folds(&folds);
         // 月份解析（北京口径，与 Python `cli.py` 同源）：默认 = 当前自然月；
         // `--today` = 今天（过滤键是完整 YYYY-MM-DD，month 标签取今天所属月）；
         // `--month all` = 全部月份；其余 = 指定月。filter_key=None 即不过滤。

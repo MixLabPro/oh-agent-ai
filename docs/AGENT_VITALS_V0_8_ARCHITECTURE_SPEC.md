@@ -1,6 +1,6 @@
 # Agent Vitals 目录与模块边界设计
 
-> 状态：目标架构 v3，已拍板；Phase A 已实施（2026-09-04）
+> 状态：目标架构 v3，已拍板；Phase A 完成，Phase B1 已实施（2026-09-04）
 > 适用范围：Rust workspace、Tauri、Python 便携实现、宿主接入与测试资产  
 > 关联文档：`ARCHITECTURE.md`、`DELIVERY_ARCHITECTURE.md`、
 > `TAURI_RUNTIME_WORKBENCH_SPEC.md`、`VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md`、
@@ -13,7 +13,8 @@
 > v3 实施记录：Phase A 在独立分支 `codex/v0.8-phase-a-boundaries` 完成。现有
 > `agent-vitals-core` 已建立 `contracts/domain/adapters/hosts` 所有权目录，并以
 > compatibility re-export 保持旧公开路径；DSH Session 读取也已从 Skill inventory
-> 移到 Session source 后注入。Phase B–F 仍须逐阶段独立评审和验收。
+> 移到 Session source 后注入。Phase B1 已建立独立 adapters crate 并迁出无反向
+> 依赖的叶子 adapter；Phase B2 须在 Phase C 解除两条依赖债务后收口。
 
 ## 0. 结论
 
@@ -980,10 +981,39 @@ runtime probe 仍属于 Skill capability 求证，不被误分类为 Session 日
 
 ### Phase B：抽出 `agent-vitals-adapters`
 
-- 先迁移已稳定的 Claude/Codex adapter；
-- 再迁 DSH 与 WorkBuddy；
-- 保持所有 golden、CLI matrix、WASM 与 Python/Rust parity 零漂移；
-- CLI/Tauri 暂时仍从兼容 re-export 调用。
+**B1（已完成，2026-09-04）：**
+
+- [x] 建立独立纯计算 crate、四宿主命名空间、统一 flat compatibility facade；
+- [x] 迁移 Claude evidence、Codex evidence、WorkBuddy evidence 三个叶子 adapter；
+- [x] CLI 改为统一从 `agent-vitals-adapters` 调用；
+- [x] 增加 adapter 依赖预算、无 I/O、无反向依赖和 facade 等价守卫；
+- [x] 全量门禁零漂移：`cargo test/clippy`、Python `unittest` 1143、golden 15+15
+      逐字节、`cargo check -p agent-vitals-wasm` 全绿。
+
+WASM **暂不登记** `agent-vitals-adapters` 依赖——`agent-vitals-wasm/src/lib.rs`
+当前只调 `domain` 侧函数（behavior/trajectory/usage/…），没有一个符号来自新
+adapter crate。§3.1 的 `wasm ─► adapters` 边是**未来边**：等某个 Phase 让 wasm
+经 adapter facade 取证据时，届时那个 Phase 带真实调用点一起加，不提前挂空依赖。
+
+**B2（待 Phase C 解耦后收口）：**
+
+- [ ] 物理迁移 Codex usage 与 DSH evidence（Phase C 先断 domain → host 依赖）；
+- [ ] 迁移后重跑全量门禁与 Python/Rust parity 零漂移，撤掉 core 里的两条 re-export。
+
+Phase B 实施时确认了原提案未展开的 Cargo 环：`domain::usage` 仍调用 Codex fold，
+`domain::behavior/trajectory/compaction/waste` 仍调用 DSH evidence。若 core 依赖新 adapter
+crate，同时 adapter 又依赖 core contracts/domain，会形成循环。因此 Phase B1 采用
+可编译的单向结构：
+
+```text
+agent-vitals-adapters ──► agent-vitals-core
+          │
+          └─ 统一 re-export core 中暂留的 codex_usage / dsh_evidence
+```
+
+这两项被架构测试钉为**仅有的 Phase C 残余债务**，不得扩张。Phase C 必须先把宿主
+wire 解释从 domain 消费链中解耦，再执行 Phase B2 物理迁移；不能通过复制 parser、
+fold 或 identity 逻辑来“消除”Cargo 环。
 
 ### Phase C：抽出 `agent-vitals-domain`
 

@@ -99,7 +99,7 @@ self-verifying posture as the top-level `assert_coverage`.
 - `scripts/agent_vitals/adapters/codex_session.py` ↔ `src/codex_session.rs` —
   the JSONL reader (locate → shape → extract).
 - `scripts/agent_vitals/agent/codex_evidence.py` ↔
-  `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/evidence.rs` — the coverage fold
+  `crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs` — the coverage fold
   (derive → coverage).
 - `scripts/agent_vitals/agent/codex_usage_fact.py` ↔
   `src/agent/codex_usage_fact.rs` — the Stage-2 UsageFact emitter (§5/§6).

@@ -1,6 +1,6 @@
-//! Pure host protocol adapters.
+//! Temporary Phase B residual adapters.
 //!
-//! Adapters receive data already loaded in memory. File discovery, decoding,
-//! persistence and process orchestration remain runtime responsibilities.
+//! New host adapters belong in `agent-vitals-adapters`. DSH evidence and Codex
+//! usage remain here only until Phase C removes the domain-to-host dependency.
 
 pub mod hosts;

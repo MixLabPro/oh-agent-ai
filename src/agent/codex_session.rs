@@ -1,7 +1,7 @@
 //! Codex 会话日志（rollout JSONL）读取器 —— P4 适配器的 "locate → shape →
 //! extract" 三段（五段式流水线 locate → shape → extract → derive → coverage，
 //! 见 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §4.2）。"derive → coverage" 两段在
-//! core 的 `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/evidence.rs`，I/O 不进去。
+//! core 的 `crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs`，I/O 不进去。
 //!
 //! Codex 的 rollout 落盘在 `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl`，
 //! 明文 append-only JSONL，每行一个 `{type, timestamp, payload}` 包络。**命名冲突

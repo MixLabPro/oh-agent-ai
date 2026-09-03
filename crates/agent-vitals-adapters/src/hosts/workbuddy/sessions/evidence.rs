@@ -35,8 +35,8 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::budget::parse_iso;
-use crate::evidence::{
+use agent_vitals_core::domain::budget::parse_iso;
+use agent_vitals_core::contracts::evidence::{
     AdapterNote, ApprovalAsked, ApprovalDecided, ApprovalObservation, CanonicalSession,
     Coverage, CoverageCounts, Provenance, SandboxModeObservation, SessionMeta, Signal, SignalSet,
     SourceAttempt, SourceKind, Surface, Timeline, TimelineEntry, ToolCallObservation,

@@ -86,10 +86,10 @@ class G2ThreeSetSeparationTests(unittest.TestCase):
 # ────────────────────────── G3：语言支持矩阵 ──────────────────────────
 
 _LANGUAGE_SUPPORT_MATRIX = {
-    "dsh": ("adapters/hosts/dsh/sessions/evidence.rs", "dsh_evidence.py"),
-    "codex": ("adapters/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
-    "claude-code": ("adapters/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
-    "workbuddy": ("adapters/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
+    "dsh": ("crates/agent-vitals-core/src/adapters/hosts/dsh/sessions/evidence.rs", "dsh_evidence.py"),
+    "codex": ("crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
+    "claude-code": ("crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
+    "workbuddy": ("crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
 }
 
 
@@ -101,7 +101,7 @@ class G3LanguageSupportMatrixTests(unittest.TestCase):
     def test_every_runtime_host_has_both_language_evidence_modules(self):
         for host_id, (rust_name, py_name) in _LANGUAGE_SUPPORT_MATRIX.items():
             with self.subTest(host=host_id):
-                rust_path = ROOT / "crates" / "agent-vitals-core" / "src" / rust_name
+                rust_path = ROOT / rust_name
                 py_path = ROOT / "scripts" / "agent_vitals" / "agent" / py_name
                 self.assertTrue(rust_path.is_file(), f"{host_id}: 缺 {rust_path}")
                 self.assertTrue(py_path.is_file(), f"{host_id}: 缺 {py_path}")
@@ -367,10 +367,10 @@ class G8SourceSelfScanTests(unittest.TestCase):
 
     def test_claude_code_and_codex_rust_derive_unavailable_from_host_profile(self):
         for name in (
-            "adapters/hosts/claude_code/sessions/evidence.rs",
-            "adapters/hosts/codex/sessions/evidence.rs",
+            "crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs",
+            "crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs",
         ):
-            path = ROOT / "crates" / "agent-vitals-core" / "src" / name
+            path = ROOT / name
             text = path.read_text(encoding="utf-8")
             with self.subTest(file=name):
                 self.assertIn("host_capability::host_profile(", text,

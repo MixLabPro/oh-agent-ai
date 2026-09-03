@@ -13,13 +13,11 @@ pub mod domain;
 
 // Phase A compatibility facade. Existing CLI, Tauri, WASM, tests and Python
 // parity references keep their old paths while new code uses the explicit
-// `contracts`, `domain`, and `adapters::hosts` namespaces. Remove these aliases
-// only after Phase B/C consumers migrate.
-pub use adapters::hosts::claude_code::sessions::evidence as claude_code_evidence;
-pub use adapters::hosts::codex::sessions::evidence as codex_evidence;
+// `contracts`, `domain`, and adapter namespaces. Leaf adapters moved to
+// `agent-vitals-adapters` in Phase B. These two residual aliases stay until
+// Phase C removes the domain → host dependency.
 pub use adapters::hosts::codex::sessions::usage as codex_usage;
 pub use adapters::hosts::dsh::sessions::evidence as dsh_evidence;
-pub use adapters::hosts::workbuddy::sessions::evidence as workbuddy_evidence;
 pub use contracts::{evidence, host_capability, r2a, source_identity, usage_fact};
 pub use domain::{
     behavior, budget, canonical_audit, compaction, cost, detectors, duration, findings, plan,

@@ -214,7 +214,7 @@ Map，**同序号插入**；键序是字节一致的一部分，不能重排）�
 
 - `docs/RUNTIME_EVIDENCE_CONTRACT.md:561` §13 Tool-call duration 行 Codex-Paginated cell 加
   「⚠️ 实测 4–9µs 非墙钟，语义待澄清」脚注；`:623` TurnItem 表 duration 句同。
-- `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/evidence.rs:403-404` 过时注释（「CommandExecution
+- `crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs:403-404` 过时注释（「CommandExecution
   额外带 duration → 也喂 Tool-call duration」——实际从未喂）改为诚实话；
   `codex_evidence.py:218-220` 同源注释同步。
 - comp_hash 注记：`scripts/agent_vitals/adapters/codex_session.py:116`（turn_context 分支）
@@ -255,7 +255,7 @@ quota checkpoint 与 turn 结束状态。点击 finding 必须能定位对应事
 
 ### 6.2 Codex 侧（measured）
 
-- `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/evidence.rs` ALL_SIGNALS（:438）+1；
+- `crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs` ALL_SIGNALS（:438）+1；
   `derive_coverage` 的 `token_count` 分支：`rate_limits` 存在 → `bump(QuotaConsumption,
   Measured, 1)`（每事件 1，同 Usage 口径；无 rate_limits 的 token_count 不数——同
   ContextWindow 的守卫式）。

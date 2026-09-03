@@ -73,8 +73,11 @@ const FORBIDDEN_DEP_KEYS: &[&str] = &[
     // 时间库 —— CLAUDE.md 纪律：core 的日期用手写 civil 数学，chrono 不是依赖
     "chrono",
     "time",
-    // §3.2 禁止方向：不许反依赖二进制 / wasm crate
+    // §3.2 禁止方向：不许反依赖二进制 / wasm / adapter crate
+    // （adapters → core 是唯一允许方向；core → adapters 会形成 Cargo 环，
+    //  这正是 Phase B2 把 codex_usage / dsh_evidence 暂留 core 的原因）
     "agent-vitals",
+    "agent-vitals-adapters",
     "agent-vitals-wasm",
 ];
 
@@ -299,8 +302,13 @@ fn source_root_is_an_explicit_facade_not_a_flat_module_dump() {
     );
 }
 
+/// Phase B moved the leaf host adapters to `agent-vitals-adapters`. What remains
+/// under core's `adapters/hosts/` is the explicit Phase C debt only: `codex`
+/// (usage fold — `domain::usage` still calls it) and `dsh` (evidence — the
+/// canonical domain wrappers still call it). This set may shrink to empty when
+/// Phase C breaks the domain → host dependency; it must never grow.
 #[test]
-fn host_adapter_directories_match_the_runtime_host_set() {
+fn residual_host_adapter_directories_are_explicit_phase_c_debt() {
     let hosts = manifest_dir().join("src/adapters/hosts");
     let mut actual: Vec<String> = fs::read_dir(&hosts)
         .expect("read adapters/hosts")
@@ -309,7 +317,7 @@ fn host_adapter_directories_match_the_runtime_host_set() {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     actual.sort();
-    assert_eq!(actual, vec!["claude_code", "codex", "dsh", "workbuddy"]);
+    assert_eq!(actual, vec!["codex", "dsh"]);
     for host in &actual {
         assert!(
             hosts.join(host).join("sessions/mod.rs").is_file(),
@@ -332,9 +340,9 @@ fn nested_paths_and_legacy_facade_resolve_to_the_same_items() {
         agent_vitals_core::domain::usage::AMBIGUOUS_PROVIDER,
         agent_vitals_core::usage::AMBIGUOUS_PROVIDER
     );
-    let _: Option<agent_vitals_core::adapters::hosts::claude_code::sessions::evidence::ClaudeEvidence> = None;
+    // Only the two Phase C residuals still have evidence/usage types in core;
+    // the leaf adapters (claude_code, workbuddy) moved to `agent-vitals-adapters`.
     let _: Option<agent_vitals_core::adapters::hosts::dsh::sessions::evidence::DshEvidence> = None;
-    let _: Option<agent_vitals_core::adapters::hosts::workbuddy::sessions::evidence::WorkbuddyEvidence> = None;
 }
 
 /// Phase A is a path/ownership move, not the Phase C semantic split. These are

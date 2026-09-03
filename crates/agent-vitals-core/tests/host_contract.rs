@@ -54,14 +54,17 @@ fn g2_scan_cli_host_choices_literal_agrees_across_three_locations() {
 #[test]
 fn g3_every_runtime_host_has_both_language_evidence_modules() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Phase B split the leaf adapters into `agent-vitals-adapters`; DSH evidence
+    // stays in core (Phase C debt). Paths are repo-root-relative now, not
+    // relative to one crate's `src`.
     let matrix: [(&str, &str, &str); 4] = [
-        ("dsh", "adapters/hosts/dsh/sessions/evidence.rs", "dsh_evidence.py"),
-        ("codex", "adapters/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
-        ("claude-code", "adapters/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
-        ("workbuddy", "adapters/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
+        ("dsh", "crates/agent-vitals-core/src/adapters/hosts/dsh/sessions/evidence.rs", "dsh_evidence.py"),
+        ("codex", "crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
+        ("claude-code", "crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
+        ("workbuddy", "crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
     ];
     for (host, rust_name, py_name) in matrix {
-        let rust_path = root.join("crates/agent-vitals-core/src").join(rust_name);
+        let rust_path = root.join(rust_name);
         let py_path = root.join("scripts/agent_vitals/agent").join(py_name);
         assert!(rust_path.is_file(), "{host}: 缺 {rust_path:?}");
         assert!(py_path.is_file(), "{host}: 缺 {py_path:?}");
@@ -124,10 +127,10 @@ fn g4_degrade_only_flips_measured_zero_for_declared_codes() {
 fn g8_claude_code_and_codex_derive_unavailable_from_host_profile() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for name in [
-        "adapters/hosts/claude_code/sessions/evidence.rs",
-        "adapters/hosts/codex/sessions/evidence.rs",
+        "crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs",
+        "crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs",
     ] {
-        let path = root.join("crates/agent-vitals-core/src").join(name);
+        let path = root.join(name);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("host_capability::host_profile("),
             "{name} 的 is_unavailable 应该查 host_capability::HOSTS");

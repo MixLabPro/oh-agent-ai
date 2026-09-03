@@ -322,7 +322,7 @@ auto 4 / MiniMax-M2.5 2。
 
 1. ~~**rusqlite（bundled）进二进制依赖**~~ **已落地**（§1.4），core crate 不动；
 2. ~~core 证据模型~~ —— 无需改动（Claude 第一刀已备齐 provenance + failed）；
-3. ~~**`crates/agent-vitals-core/src/adapters/hosts/workbuddy/sessions/evidence.rs`**~~ **已落地**：
+3. ~~**`crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs`**~~ **已落地**：
    `build_workbuddy_evidence`（audit-log → tool_calls/approvals/sandbox timeline +
    TurnBoundaries derived coverage + 链路完整性 note）+ `is_unavailable` +
    `derive_coverage` + `build_notes`。core 单测：

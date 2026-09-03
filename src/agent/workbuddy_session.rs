@@ -44,7 +44,7 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 
-use agent_vitals_core::workbuddy_evidence::{
+use agent_vitals_adapters::workbuddy_evidence::{
     build_workbuddy_evidence, workbuddy_evidence_json, WorkbuddyEvidence, WorkbuddySessionMeta,
 };
 

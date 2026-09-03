@@ -1,7 +1,7 @@
 """Claude Code 会话 JSONL 读取器 —— 五段式流水线（locate → shape → extract →
 derive → coverage）的"locate → shape → extract"三段，I/O 都在这里；
 "derive → coverage"在 `scripts/agent_vitals/agent/claude_evidence.py`（与 Rust
-`crates/agent-vitals-core/src/adapters/hosts/claude_code/sessions/evidence.rs` 逐字节对齐），I/O 不进去。
+`crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs` 逐字节对齐），I/O 不进去。
 
 与 Rust `src/agent/claude_session.rs` 逐字节对齐——两条实现产出同一份字典，字节
 序（键序）一致，`tests/test_cli_matrix.py::both()` 的差分靠的就是这份一致。

@@ -106,10 +106,10 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string();
-    let dsh_evidence = agent_vitals_core::dsh_evidence::build_dsh_evidence(
+    let dsh_evidence = agent_vitals_adapters::dsh_evidence::build_dsh_evidence(
         execution_events, usage_events_raw, cwd_raw.clone(), session_id,
     );
-    let (events, usage_events, _cwd_owned) = agent_vitals_core::dsh_evidence::reverse_project(&dsh_evidence);
+    let (events, usage_events, _cwd_owned) = agent_vitals_adapters::dsh_evidence::reverse_project(&dsh_evidence);
     // P3 group①：SV601–610 前置门控 + SV611–614 后置标注，三态都基于**分叉后**
     // 的证据判——但 `dsh_evidence`（上面）是从分叉前的 execution_events 建的，
     // 服务于 compaction/subagent/skill/duration 那些本来就该看到完整历史的
@@ -123,7 +123,7 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     // 从此依赖这一行。
     let post_fork_events = agent_vitals_core::util::post_fork(&events);
     let post_fork_usage_events = agent_vitals_core::util::post_fork(&usage_events);
-    let post_fork_evidence = agent_vitals_core::dsh_evidence::build_dsh_evidence(
+    let post_fork_evidence = agent_vitals_adapters::dsh_evidence::build_dsh_evidence(
         post_fork_events, post_fork_usage_events, cwd_raw.clone(), String::new(),
     );
     // 单事件规则（SV601–610）与轨迹级检测（SV611–614）都吃同一份分叉后

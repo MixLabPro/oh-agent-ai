@@ -1,6 +1,4 @@
-//! Host-owned wire interpretation, grouped first by harness and then surface.
+//! Explicit compatibility debt retained to avoid a core/adapters Cargo cycle.
 
-pub mod claude_code;
 pub mod codex;
 pub mod dsh;
-pub mod workbuddy;

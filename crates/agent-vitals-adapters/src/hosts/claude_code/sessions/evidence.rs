@@ -35,8 +35,8 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::budget::parse_iso;
-use crate::evidence::{
+use agent_vitals_core::domain::budget::parse_iso;
+use agent_vitals_core::contracts::evidence::{
     AdapterNote, CanonicalSession, Coverage, CoverageCounts, LossKind, Provenance, SessionMeta,
     Signal, SignalSet, SourceAttempt, SourceKind, Surface, Timeline, TimelineEntry,
     ToolCallObservation, ToolResultObservation, TurnObservation,
@@ -77,7 +77,7 @@ const KNOWN_TYPES: &[&str] = &[
 /// `ApprovalDecisions` 是 first-slice 范围的注记仍留在 `HOSTS` 行的行内文档，
 /// 后续做 marker 恢复时从行上摘掉这一项即可，不用回这个文件改代码。
 fn is_unavailable(signal: Signal) -> bool {
-    crate::host_capability::host_profile("claude-code")
+    agent_vitals_core::contracts::host_capability::host_profile("claude-code")
         .is_some_and(|h| h.unmeasured_signals.contains(&signal))
 }
 
@@ -996,7 +996,7 @@ mod tests {
 
         // bridge 层面（真实消费方）：事件 id 唯一、按 ordinal 排序后 = 会话时序。
         let evidence = build_claude_evidence(records, "s1".to_string());
-        let events = crate::compatibility::canonical_session::canonical_session_to_vitals(
+        let events = agent_vitals_core::compatibility::canonical_session::canonical_session_to_vitals(
             &evidence.canonical).unwrap();
         assert_eq!(events.len(), 7);
         let ids: Vec<&str> = events.iter().map(|e| e.id.as_str()).collect();
