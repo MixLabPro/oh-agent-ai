@@ -36,9 +36,16 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 /// §2.1 表的完整键清单——候选 #2（键名收敛为单一共享词表）在这份新契约上
 /// 直接落地：Python/Rust 共享同一份字面量清单（parity 测试逐项比对），不是
 /// 各自维护一份可能漂移的字段名。
+///
+/// **身份元组必须在文档里**——`machine_namespace` 与 `native_session_id`
+/// 是 `fact_id` 的输入（§2.1「统一幂等键」公式），不写进文档则持久化后无法
+/// 从文档独立复算主键，也无法审计跨机器/跨会话碰撞。两个字段同时是
+/// `IDENTITY_INPUT_FIELDS`（builder 必填）与 `USAGE_FACT_FIELDS`（序列化
+/// 必出）——同一份契约下「身份既不可缺也不可隐」。
 pub const USAGE_FACT_FIELDS: &[&str] = &[
     // 身份
     "fact_id", "identity_basis", "observation_kind",
+    "machine_namespace", "native_session_id",
     // 会话引用
     "session_key_ref", "session_key_orphan",
     // 来源
@@ -176,8 +183,28 @@ pub type MigrationStep = fn(Value) -> Value;
 ///   对应的迁移函数（迁移表本身不完整）——两种情况都不是"当前版本"也不是
 ///   "未来版本"，无法安全处理，诚实报错而不是瞎猜一个版本。
 pub fn migrate_chain(doc: Value, migrations: &std::collections::BTreeMap<u32, MigrationStep>, target_version: u32) -> Value {
-    let Some(version) = doc.get("schema_version").and_then(Value::as_u64).map(|v| v as u32) else {
-        return json!({"status": "error", "doc": doc, "error": "missing schema_version"});
+    // P1-2 修订：`schema_version` 必须是 u32 表示范围内的非负整数。`as u32`
+    // 直接截断会让 u32::MAX+1 = 1（与 Python 镜像字节不同——Python int
+    // 是任意精度），破坏跨语言一致性。截断前显式拒绝。
+    let version: u32 = match doc.get("schema_version").and_then(Value::as_u64) {
+        Some(v) if v <= u32::MAX as u64 => v as u32,
+        Some(v) => {
+            return json!({
+                "status": "error",
+                "doc": doc,
+                "error": format!(
+                    "schema_version {v} exceeds u32::MAX ({})",
+                    u32::MAX
+                ),
+            });
+        }
+        None => {
+            return json!({
+                "status": "error",
+                "doc": doc,
+                "error": "missing schema_version",
+            });
+        }
     };
     if version == target_version {
         return json!({"status": "current", "doc": doc});
@@ -203,7 +230,37 @@ pub fn migrate_chain(doc: Value, migrations: &std::collections::BTreeMap<u32, Mi
             });
         };
         cur = step(cur);
-        v += 1;
+        // P1-3 修订：迁移步必须实际把版本号抬到下一档。真实迁移若忘了
+        // 升 schema_version，写链会拿旧格式当新格式写回——比「找不到迁移函数」
+        // 更隐蔽，因为它返回了"migrated"标签。逐步校验，坏迁移立即报错。
+        let next_v = cur.get("schema_version")
+            .and_then(Value::as_u64)
+            .map(|x| x as u32);
+        match next_v {
+            Some(next) if next == v + 1 => v += 1,
+            Some(other) => {
+                return json!({
+                    "status": "error",
+                    "doc": cur,
+                    "error": format!(
+                        "migration step for schema_version {v} did not advance version \
+                         (got {other}, expected {})",
+                        v + 1
+                    ),
+                });
+            }
+            None => {
+                return json!({
+                    "status": "error",
+                    "doc": cur,
+                    "error": format!(
+                        "migration step for schema_version {v} removed schema_version \
+                         field (expected {})",
+                        v + 1
+                    ),
+                });
+            }
+        }
     }
     json!({"status": "migrated", "doc": cur})
 }
@@ -258,6 +315,40 @@ mod tests {
             out.as_object().unwrap().len(),
             USAGE_FACT_FIELDS.len() + 1, // + schema_version（fact_id/identity_basis 已在 USAGE_FACT_FIELDS 里）
         );
+    }
+
+    /// P1-1 修订：`machine_namespace` 与 `native_session_id` 是 `fact_id` 入参
+    /// （§2.1「统一幂等键」公式），必须写入文档——持久化后能从文档独立复算
+    /// 主键。两字段同时是 `IDENTITY_INPUT_FIELDS`（必填）与
+    /// `USAGE_FACT_FIELDS`（必出）。
+    #[test]
+    fn build_usage_fact_writes_identity_tuple_to_doc() {
+        let mut fields: Map<String, Value> = Map::new();
+        for (k, v) in [
+            ("machine_namespace", json!("m1")),
+            ("host", json!("claude-code")),
+            ("source_profile", json!("default")),
+            ("native_session_id", json!("sess-1")),
+            ("source_event_id", json!("evt-1")),
+            ("observation_kind", json!("message")),
+            ("uncached_input_tokens", json!(1)),
+        ] {
+            fields.insert(k.into(), v);
+        }
+        let out = build_usage_fact(&fields).unwrap();
+        assert_eq!(out["machine_namespace"], "m1");
+        assert_eq!(out["native_session_id"], "sess-1");
+        // 从文档字段独立复算 fact_id → 必须字节相等。
+        let reconstructed_fact_id = fact_id(
+            out["machine_namespace"].as_str().unwrap(),
+            out["host"].as_str().unwrap(),
+            out["source_profile"].as_str().unwrap(),
+            out["native_session_id"].as_str().unwrap(),
+            out["source_event_id"].as_str().unwrap(),
+            out["observation_kind"].as_str().unwrap(),
+        );
+        assert_eq!(out["fact_id"], json!(reconstructed_fact_id),
+                   "fact_id 必须能从文档字段独立复算");
     }
 
     #[test]
@@ -370,6 +461,70 @@ mod tests {
         let twice = migrate_chain(once["doc"].clone(), &migrations, 2);
         assert_eq!(twice["status"], "current");
         assert_eq!(twice["doc"], once["doc"]);
+    }
+
+    /// P1-2 修订：`schema_version` 超出 u32::MAX (=4294967295) → 显式
+    /// 报错。Rust 侧 `as u32` 会截断成 1，Python int 是任意精度——显式校验
+    /// 保证跨语言字节一致（4294967297 在 Rust 是 1，在 Python 是 4294967297，
+    /// 都不应被默默接受）。
+    #[test]
+    fn migrate_chain_schema_version_exceeding_u32_max_is_an_honest_error() {
+        let mut migrations: std::collections::BTreeMap<u32, MigrationStep> =
+            std::collections::BTreeMap::new();
+        migrations.insert(1, bump_version as MigrationStep);
+        let out = migrate_chain(json!({"schema_version": 4_294_967_297u64}), &migrations, 2);
+        assert_eq!(out["status"], "error");
+        assert!(out["error"].as_str().unwrap().contains("exceeds u32::MAX"),
+                "expected error mentioning u32::MAX, got: {:?}", out["error"]);
+        // 边界：u32::MAX 本身仍合法（4294967295 → 截断到 4294967295，无信息丢失）。
+        // 比 target_version=2 大得多，所以走 future-readonly 分支——不是
+        // migrated 也合法，关键是**不**是 error（没被截断成 1→走迁移分支）。
+        let out_max = migrate_chain(json!({"schema_version": u32::MAX as u64}), &migrations, 2);
+        assert_ne!(out_max["status"], "error",
+                   "u32::MAX 边界必须不被截断——错误地当成 1 会进入 migrated 分支");
+        assert_eq!(out_max["status"], "future-readonly",
+                   "u32::MAX 比 target_version=2 大得多，正确分支是 future-readonly");
+    }
+
+    /// P1-3 修订：迁移步必须实际把 schema_version 抬到下一档。真实迁移若
+    /// 忘了升版本，写链会拿旧格式当新格式写回——比「找不到迁移函数」更隐蔽，
+    /// 因为它返回了 "migrated" 标签。逐步校验，坏迁移立即报错。
+    #[test]
+    fn migrate_chain_must_advance_schema_version_per_step() {
+        // 坏迁移：原样返回 doc（不动 schema_version）。
+        fn bad_step_noop(d: Value) -> Value { d }
+        let mut migrations: std::collections::BTreeMap<u32, MigrationStep> =
+            std::collections::BTreeMap::new();
+        migrations.insert(1, bad_step_noop);
+        let out = migrate_chain(json!({"schema_version": 1}), &migrations, 2);
+        assert_eq!(out["status"], "error");
+        assert!(out["error"].as_str().unwrap().contains("did not advance version"),
+                "expected error mentioning 'did not advance version', got: {:?}", out["error"]);
+        // 坏迁移：抬到错误档位（v+2 而非 v+1，跳迁）。
+        fn bad_step_skip(d: Value) -> Value {
+            let mut out = d.as_object().cloned().unwrap();
+            out.insert("schema_version".into(), json!(3));
+            Value::Object(out)
+        }
+        let mut migrations: std::collections::BTreeMap<u32, MigrationStep> =
+            std::collections::BTreeMap::new();
+        migrations.insert(1, bad_step_skip);
+        let out = migrate_chain(json!({"schema_version": 1}), &migrations, 2);
+        assert_eq!(out["status"], "error");
+        assert!(out["error"].as_str().unwrap().contains("did not advance version"));
+        // 坏迁移：把 schema_version 字段直接删了。
+        fn bad_step_remove(d: Value) -> Value {
+            let mut out = d.as_object().cloned().unwrap();
+            out.remove("schema_version");
+            Value::Object(out)
+        }
+        let mut migrations: std::collections::BTreeMap<u32, MigrationStep> =
+            std::collections::BTreeMap::new();
+        migrations.insert(1, bad_step_remove);
+        let out = migrate_chain(json!({"schema_version": 1}), &migrations, 2);
+        assert_eq!(out["status"], "error");
+        assert!(out["error"].as_str().unwrap().contains("removed schema_version"),
+                "expected error mentioning 'removed schema_version', got: {:?}", out["error"]);
     }
 
     #[test]

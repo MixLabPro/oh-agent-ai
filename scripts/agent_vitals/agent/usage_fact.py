@@ -36,9 +36,16 @@ CURRENT_SCHEMA_VERSION = 1
 # §2.1 表的完整键清单——候选 #2（键名收敛为单一共享词表）在这份新契约上直接
 # 落地：Python/Rust 共享同一份字面量清单（parity 测试逐项比对），不是各自
 # 维护一份可能漂移的字段名。
+#
+# **身份元组必须在文档里**——`machine_namespace` 与 `native_session_id` 是
+# `fact_id` 的输入（§2.1「统一幂等键」公式），不写进文档则持久化后无法
+# 从文档独立复算主键，也无法审计跨机器/跨会话碰撞。两个字段同时是
+# `_IDENTITY_INPUT_FIELDS`（builder 必填）与 `USAGE_FACT_FIELDS`（序列化
+# 必出）——同一份契约下「身份既不可缺也不可隐」。
 USAGE_FACT_FIELDS = (
     # 身份
     "fact_id", "identity_basis", "observation_kind",
+    "machine_namespace", "native_session_id",
     # 会话引用
     "session_key_ref", "session_key_orphan",
     # 来源
@@ -164,6 +171,15 @@ def migrate_chain(doc, migrations, target_version):
     version = doc.get("schema_version") if isinstance(doc, dict) else None
     if not isinstance(version, int) or isinstance(version, bool):
         return {"status": "error", "doc": doc, "error": "missing schema_version"}
+    # P1-2 修订：schema_version 必须是 u32 表示范围内的非负整数（与 Rust
+    # 镜像同步——Rust 侧 as u32 会截断，Python int 是任意精度，靠这条显式
+    # 校验保持字节一致）。u32::MAX = 0xFFFFFFFF。
+    if version < 0 or version > 0xFFFFFFFF:
+        return {
+            "status": "error",
+            "doc": doc,
+            "error": "schema_version %d exceeds u32::MAX (4294967295)" % version,
+        }
     if version == target_version:
         return {"status": "current", "doc": doc}
     if version > target_version:
@@ -186,5 +202,31 @@ def migrate_chain(doc, migrations, target_version):
                         % (v, v + 1),
             }
         cur = step(cur)
+        # P1-3 修订：迁移步必须实际把版本号抬到下一档。真实迁移若忘了
+        # 升 schema_version，写链会拿旧格式当新格式写回——比「找不到迁移
+        # 函数」更隐蔽，因为它返回了 "migrated" 标签。逐步校验，坏迁移
+        # 立即报错。校验前先确认仍是合法 u32 范围（P1-2）。
+        next_v = cur.get("schema_version") if isinstance(cur, dict) else None
+        if not isinstance(next_v, int) or isinstance(next_v, bool):
+            return {
+                "status": "error",
+                "doc": cur,
+                "error": "migration step for schema_version %d removed schema_version field (expected %d)"
+                        % (v, v + 1),
+            }
+        if next_v > 0xFFFFFFFF:
+            return {
+                "status": "error",
+                "doc": cur,
+                "error": "migration step produced schema_version %d exceeding u32::MAX"
+                        % next_v,
+            }
+        if next_v != v + 1:
+            return {
+                "status": "error",
+                "doc": cur,
+                "error": "migration step for schema_version %d did not advance version (got %d, expected %d)"
+                        % (v, next_v, v + 1),
+            }
         v += 1
     return {"status": "migrated", "doc": cur}

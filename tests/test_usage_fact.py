@@ -61,6 +61,22 @@ class BuildUsageFactCase(unittest.TestCase):
         self.assertIsNone(out["cache_read_tokens"])
         self.assertEqual(len(out), len(USAGE_FACT_FIELDS) + 1)
 
+    def test_identity_tuple_written_to_doc(self):
+        """P1-1 修订：`machine_namespace` 与 `native_session_id` 是 `fact_id`
+        入参，必须写入文档；持久化后能从文档独立复算主键。两字段同时是
+        IDENTITY_INPUT_FIELDS（必填）与 USAGE_FACT_FIELDS（必出）。
+        """
+        out = build_usage_fact(dict(_IDENTITY, uncached_input_tokens=1))
+        self.assertEqual(out["machine_namespace"], "m1")
+        self.assertEqual(out["native_session_id"], "sess-1")
+        # 文档必须能独立复算 fact_id——从文档字段拼回 6 元组 → fact_id 字节相等。
+        reconstructed = (
+            out["machine_namespace"], out["host"], out["source_profile"],
+            out["native_session_id"], out["source_event_id"], out["observation_kind"],
+        )
+        self.assertEqual(out["fact_id"], fact_id(*reconstructed),
+                         "fact_id 必须能从文档字段独立复算")
+
     def test_rejects_missing_identity_fields_by_name(self):
         with self.assertRaises(ValueError) as cm:
             build_usage_fact({"host": "claude-code"})
@@ -127,6 +143,48 @@ class MigrateChainCase(unittest.TestCase):
         twice = migrate_chain(once["doc"], {1: self._bump}, 2)
         self.assertEqual(twice["status"], "current")
         self.assertEqual(twice["doc"], once["doc"])
+
+    def test_schema_version_exceeding_u32_max_is_an_honest_error(self):
+        """P1-2 修订：`schema_version` 超出 u32::MAX (=4294967295) → 显式
+        报错。Rust 侧 `as u32` 会截断成 1（4294967297→1），Python int 是任意
+        精度会保留原值——显式校验保证跨语言字节一致。
+        """
+        # 4294967297 = u32::MAX + 2 → Rust 截断后是 1、Python 是 4294967297。
+        out = migrate_chain({"schema_version": 4_294_967_297}, {1: self._bump}, 2)
+        self.assertEqual(out["status"], "error")
+        self.assertIn("exceeds u32::MAX", out["error"])
+        # 边界：u32::MAX 本身仍合法。比 target_version=2 大得多，正确分支是
+        # future-readonly——关键是**不**是 migrated（如果被截断成 1→走迁移分支）。
+        out_max = migrate_chain({"schema_version": 0xFFFFFFFF}, {1: self._bump}, 2)
+        self.assertNotEqual(out_max["status"], "migrated",
+                            "u32::MAX 边界必须不被截断——错误地当成 1 会进入 migrated 分支")
+        self.assertEqual(out_max["status"], "future-readonly")
+
+    def test_migration_step_must_advance_schema_version(self):
+        """P1-3 修订：迁移步必须实际把 schema_version 抬到下一档。坏迁移
+        （忘记升版本）→ 立即报错，不让写链拿到旧格式当新格式。
+        """
+        # 坏迁移：返回 doc 但不动 schema_version。
+        def bad_step(doc):
+            return dict(doc)  # 原样返回，schema_version 不变
+        out = migrate_chain({"schema_version": 1}, {1: bad_step}, 2)
+        self.assertEqual(out["status"], "error")
+        self.assertIn("did not advance version", out["error"])
+        # 另一个坏迁移：把 schema_version 抬到错误档位（v+2 而非 v+1）。
+        def skip_step(doc):
+            d = dict(doc)
+            d["schema_version"] = 3
+            return d
+        out2 = migrate_chain({"schema_version": 1}, {1: skip_step}, 2)
+        self.assertEqual(out2["status"], "error")
+        # 还有一个坏迁移：把 schema_version 字段直接删了。
+        def remove_step(doc):
+            d = dict(doc)
+            d.pop("schema_version", None)
+            return d
+        out3 = migrate_chain({"schema_version": 1}, {1: remove_step}, 2)
+        self.assertEqual(out3["status"], "error")
+        self.assertIn("removed schema_version", out3["error"])
 
 
 class FieldVocabCase(unittest.TestCase):
