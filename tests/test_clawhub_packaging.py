@@ -43,6 +43,7 @@ ALLOWED_PACKAGE_FILES = {
         "agent/claude_usage_fact.py",
         "agent/codex_cost.py", "agent/codex_evidence.py",
         "agent/codex_session_audit.py", "agent/codex_usage.py",
+        "agent/codex_usage_fact.py",
         "agent/compaction.py", "agent/cost.py", "agent/dsh_evidence.py",
         "agent/duration.py",
         "agent/host_capability.py",

@@ -879,6 +879,33 @@ def _main():
         "--json", metavar="FILE",
         help="Write UsageFact JSON to FILE; use - for stdout. Without this, "
              "print human summary.")
+    # Stage 2（commit 2，决策 A/D′）：Codex UsageFact 诊断 CLI——一份或多份
+    # rollout JSONL → facts + attempts + coverage，**不写盘**（同 claude-usage-facts）。
+    # source_event_id 按 rollout **stem** 命名空间（2026-09-03 拍板 D′：byte_offset
+    # 只在单文件内唯一，逻辑 session 命名会把两份续接 rollout 的同 offset 同形行
+    # 误并）。与 Rust 镜像同源字节。
+    p_codex_usage_facts = sub.add_parser(
+        "codex-usage-facts",
+        help="Audit ONE+ Codex rollout JSONL files into UsageFact rows "
+             "(per token_count, no state writes; v0.7 spec §3 candidate #3 "
+             "Stage 2)")
+    p_codex_usage_facts.add_argument(
+        "rollouts", nargs="+",
+        help="One or more Codex rollout JSONL file paths (e.g. "
+             "~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl)")
+    p_codex_usage_facts.add_argument(
+        "--machine-namespace", default=None,
+        help="machine_namespace component of SessionKey — REQUIRED (v0.7 spec "
+             "§9: caller-provided; missing exits 2). The CLI never reads/writes "
+             "state to invent one — a fact's identity fields seed its fact_id, "
+             "so a CLI default would destabilize replays AND write machine.json")
+    p_codex_usage_facts.add_argument(
+        "--source-profile", default="default",
+        help="source_profile component of SessionKey (default: 'default')")
+    p_codex_usage_facts.add_argument(
+        "--json", metavar="FILE",
+        help="Write UsageFact JSON to FILE; use - for stdout. Without this, "
+             "print human summary.")
     # WorkBuddy 单会话审计：coverage（§13 逐信号）+ SV601–614 findings。与
     # claude-session 同构；host-capability degradation 是 SV604/605（spec §3.1）——
     # 只有 bash（audit-log commandPreview）与 web_fetch（WebFetch target）能 join，
@@ -1500,6 +1527,58 @@ def _main():
             print("Facts: %d (rows=%s, skip=%s)"
                   % (len(result.facts),
                      result.coverage["total_rows"],
+                     result.coverage["skip_rows"]))
+            print("Attempts: %s" % result.attempts)
+        return
+
+    # Stage 2 commit 2：Codex UsageFact 诊断 CLI（v0.7 spec §3 候选 #3，决策
+    # A/D′）。一份或多份 rollout JSONL → facts + attempts + coverage；不写盘。
+    # 与 Rust 镜像同源字节（parity 在 tests/test_codex_usage_fact.py）。
+    if getattr(args, "cmd", None) == "codex-usage-facts":
+        from agent_vitals.agent import codex_usage_fact as cuf
+        # machine_namespace 必传（spec §9）。绝不让 CLI 读 takeover 身份来补齐：
+        # 那是一次隐式 state 写（bootstrap machine.json），而 codex-usage-facts
+        # 是只读诊断——缺失即失败（exit 2），与 Rust handler 同款。
+        if not args.machine_namespace:
+            print(
+                "codex-usage-facts: --machine-namespace is required "
+                "(v0.7 spec §9: caller-provided; a CLI default would write state)",
+                file=sys.stderr)
+            sys.exit(2)
+        machine_ns = args.machine_namespace
+        rollout_paths = [Path(p) for p in args.rollouts]
+        try:
+            result = cuf.codex_rollouts_to_usage_facts(
+                rollout_paths,
+                machine_namespace=machine_ns,
+                source_profile=args.source_profile,
+            )
+        except OSError as e:
+            print("codex-usage-facts failed: %s" % e, file=sys.stderr)
+            sys.exit(2)
+        # --json: 写文件或 stdout；否则人读摘要。键序与 Rust to_payload_value 一致。
+        facts_out = {
+            "machine_namespace": machine_ns,
+            "source_profile": args.source_profile,
+            "facts": result.facts,
+            "attempts": result.attempts,
+            "coverage": result.coverage,
+            "malformed": result.malformed,
+        }
+        text = json.dumps(facts_out, ensure_ascii=False, indent=2)
+        if args.json:
+            if args.json == "-":
+                print(text)
+            else:
+                Path(args.json).write_text(text, encoding="utf-8")
+                print("Wrote %s: %d facts" % (args.json, len(result.facts)))
+        else:
+            print("Source: %s" % ", ".join(str(p) for p in rollout_paths))
+            print("Machine namespace: %s" % machine_ns)
+            print("Source profile: %s" % args.source_profile)
+            print("Facts: %d (total_token_count_events=%s, skip=%s)"
+                  % (len(result.facts),
+                     result.coverage["total_token_count_events"],
                      result.coverage["skip_rows"]))
             print("Attempts: %s" % result.attempts)
         return

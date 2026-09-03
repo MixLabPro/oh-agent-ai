@@ -378,6 +378,14 @@ pub struct CodexFoldState {
     unaccounted: std::collections::BTreeMap<String, (i64, i64)>,
 }
 
+impl Default for CodexFoldState {
+    /// 每文件一份干净折叠状态（`speed: "standard"` 是 fold 的默认档，不是
+    /// 从某 host 读来的值——clippy `new_without_default`：唯一构造路径走 new）。
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CodexFoldState {
     pub fn new() -> Self {
         Self {

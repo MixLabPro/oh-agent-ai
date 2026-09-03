@@ -27,7 +27,7 @@ coverage so the differential can assert "two rows, not one" (§17.1):
 | history_mode | `legacy` | `paginated` |
 | cli_version | `0.146.0-alpha.3.1` | `0.149.0-alpha.4` |
 | model | `gpt-5.6-sol` | `gpt-5.6-pro` |
-| signals | ToolCalls, ToolResults, TurnBoundaries, Usage, UsageAggregate, ContextWindow, ApprovalPolicy, Compaction, SubagentSpawns, SkillInvocations, FileMutations | ToolCalls, ToolResults, ApprovalDecisions, ApprovalPolicy, Compaction, SubagentSpawns, SkillInvocations, Hooks, FileMutations |
+| signals | ToolCalls, ToolResults, TurnBoundaries, Usage, UsageAggregate, ContextWindow, QuotaConsumption, ApprovalPolicy, SandboxModes, Compaction, SubagentSpawns, SkillInvocations, FileMutations | ToolCalls, ToolResults, ApprovalDecisions, ApprovalPolicy, SandboxModes, Compaction, SubagentSpawns, SkillInvocations, Hooks, FileMutations, UserPrompts |
 | Tool-call duration | absent | present (`CommandExecution.duration`) |
 | FileMutations bucket | `lossy` (`patch_apply_end` only) | `measured` (`FileChange`) |
 | Hooks / ApprovalDecisions | zero | measured (`HookPrompt` / `FileChange.auto_approved`) |
@@ -67,6 +67,33 @@ date-partitioned `2026/07/…` / `2026/08/…`). The real shape:
   `workspace_roots` come from `turn_context.payload` (latest non-empty wins,
   the same "current state" convention as DSH's `last_catalog_wins`).
 
+## `usage-fact/` — the Stage-2 UsageFact corpus
+
+`docs/VITALS_CORE_V0_7_STAGE_2_CODEX_ADAPTER.md` §6/§8 adds an emitter that
+drives the **same** per-`token_count` state machine as the cost fold
+(`CodexFoldState.apply` ↔ `codex_token_facts`): every consumed `token_count`
+becomes one immutable `UsageFact` in `by_model`. `usage-fact/` is a second,
+self-contained corpus whose `token_count`s are deliberately **fold-consumable**
+(object-shaped `total_token_usage` + `last_token_usage`), unlike the top-level
+`legacy.jsonl` whose integer `last_token_usage: 60000` is the evidence layer's
+simplified shape and reads as `Unreadable` under the fold. The two top-level
+files stay as the §13 evidence/coverage probes.
+
+Six files, regenerated and self-checked by the same builder:
+
+| file | history_mode | what it proves (spec §6) |
+|---|---|---|
+| `usage-fact/legacy.jsonl` | legacy | 2 Consumed facts + all three residuals: token_count before first `turn_context` → Unattributed, same-total repeat → Repeat, reasoning>output → Unreadable (§6.3 acceptance 3) |
+| `usage-fact/paginated.jsonl` | paginated | 1 Consumed fact + Repeat/Unreadable; CommandExecution + `custom_tool_call` **dual-shadow** execs → 0 facts (§6.5 acceptance 5) — mode is provenance only, the emitter never branches on `history_mode` |
+| `usage-fact/rollout-1a.jsonl` + `rollout-1b.jsonl` | legacy | **cross-stem** pair: byte-identical content, same logical `session_id`, same offsets → each file emits its own fact, never merged (§6.8 acceptance 8) |
+| `usage-fact/rollout-live.jsonl` + `usage-fact/archive/rollout-live.jsonl` | paginated | **live/archive** pair under one stem: byte-identical → 1 fact + a `duplicate` attempt (§6.9 acceptance 9, §6.6 acceptance 6) |
+
+`rollout_source_id` = `path.stem`; `source_event_id` = `stem:byte_offset:fnv1a64`
+(canonical row). `build_codex_fixture.py::write_usage_fact_fixtures` runs the
+real emitter and asserts the exact coverage/attempts dicts, so a fixture whose
+shapes stop exercising the fold's discriminations fails at build time — the same
+self-verifying posture as the top-level `assert_coverage`.
+
 ## Consumers
 
 - `scripts/agent_vitals/adapters/codex_session.py` ↔ `src/codex_session.rs` —
@@ -74,5 +101,10 @@ date-partitioned `2026/07/…` / `2026/08/…`). The real shape:
 - `scripts/agent_vitals/agent/codex_evidence.py` ↔
   `crates/agent-vitals-core/src/codex_evidence.rs` — the coverage fold
   (derive → coverage).
+- `scripts/agent_vitals/agent/codex_usage_fact.py` ↔
+  `src/agent/codex_usage_fact.rs` — the Stage-2 UsageFact emitter (§5/§6).
 - `tests/test_cli_matrix.py::test_codex_evidence_legacy` /
   `test_codex_evidence_paginated` — the byte-for-byte Python↔Rust differential.
+- `tests/test_codex_usage_fact.py` — the §6 acceptance suite over `usage-fact/`
+  (+ `fixtures/codex/cost/rollout-sol.jsonl` for the no-`session_meta` stem
+  fallback), with a Rust-binary byte-parity class gated on `AGENT_VITALS_BIN`.

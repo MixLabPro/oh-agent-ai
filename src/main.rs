@@ -500,6 +500,30 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Audit ONE or MORE Codex rollout JSONL files into per-`token_count`
+    /// UsageFact rows (facts + attempts + coverage; v0.7 spec §3 candidate #3
+    /// Stage 2). In-memory emit + read-only diagnostic — writes no state at all.
+    /// machine_namespace is REQUIRED (spec §9) — same reasoning as
+    /// claude-usage-facts: missing exits 2 instead of being defaulted.
+    /// source_event_id is namespaced by the physical rollout stem (not the
+    /// logical session): the same stem re-collected byte-identically dedups
+    /// (live/archive), different stems never merge (2026-09-03 decision D′).
+    /// Byte-for-byte mirror of Python `scan.py codex-usage-facts --json -`.
+    CodexUsageFacts {
+        /// One or more Codex rollout JSONL file paths
+        #[arg(required = true, num_args = 1..)]
+        rollouts: Vec<PathBuf>,
+        /// machine_namespace component of SessionKey — required (spec §9);
+        /// the CLI never reads/writes state to invent one (missing exits 2)
+        #[arg(long)]
+        machine_namespace: Option<String>,
+        /// source_profile component of SessionKey (default: 'default')
+        #[arg(long, default_value = "default")]
+        source_profile: String,
+        /// Write the UsageFact JSON to FILE; use - for stdout (default: human summary)
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+    },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
     /// `sessions` row is the join anchor across the three joinable surfaces (spec
@@ -1726,6 +1750,62 @@ session_store={store} fold={fold}"
                 agent::claude_usage_fact::to_human_summary(
                     &result, session_jsonl, &sid, &ns, source_profile
                 )
+            );
+        }
+        return;
+    }
+
+    // Stage 2（commit 2）：Codex UsageFact 诊断 CLI（v0.7 spec §3 候选 #3）。
+    // 一份或多份 rollout JSONL → facts + attempts + coverage；**不写盘**。source
+    // event id 按 rollout stem 命名空间——同 stem 的 byte-identical 复本去重、
+    // 异 stem 永不误合并。与 Python `scan.py codex-usage-facts --json -` 字节相等
+    // （parity 钉测在 tests/test_codex_usage_fact.py）。
+    if let Some(Cmd::CodexUsageFacts { rollouts, machine_namespace, source_profile, rows_json }) =
+        &args.cmd
+    {
+        // machine_namespace 必传（spec §9）。绝不让 CLI 读 takeover 身份来补齐：
+        // 那是一次隐式 state 写（bootstrap machine.json），而 codex-usage-facts
+        // 是只读诊断——缺失即失败（exit 2），与 Python handler 同款。
+        let ns = match machine_namespace {
+            Some(ns) => ns.clone(),
+            None => {
+                eprintln!(
+                    "codex-usage-facts: --machine-namespace is required \
+                     (v0.7 spec §9: caller-provided; a CLI default would write state)"
+                );
+                std::process::exit(2);
+            }
+        };
+        let result = match agent::codex_usage_fact::codex_rollouts_to_usage_facts(
+            rollouts,
+            &ns,
+            source_profile,
+        ) {
+            Ok(r) => r,
+            Err(msg) => {
+                eprintln!("codex-usage-facts failed: {msg}");
+                std::process::exit(2);
+            }
+        };
+        if let Some(path) = rows_json {
+            let payload = agent::codex_usage_fact::to_payload_value(&result, &ns, source_profile);
+            let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!(
+                    "Wrote {}: {} facts",
+                    path.display(),
+                    result.facts.len()
+                );
+            }
+        } else {
+            print!(
+                "{}",
+                agent::codex_usage_fact::to_human_summary(&result, rollouts, &ns, source_profile)
             );
         }
         return;

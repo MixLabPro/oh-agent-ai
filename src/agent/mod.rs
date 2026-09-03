@@ -12,6 +12,7 @@ pub mod claude_usage_fact;
 pub mod codex_cost;
 pub mod codex_session;
 pub mod codex_session_audit;
+pub mod codex_usage_fact;
 pub mod cost;
 pub mod discovery;
 pub mod host_runtime_registration;

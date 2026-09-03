@@ -45,7 +45,11 @@ pub struct UsageFactEmitResult {
 /// FNV-1a 64 → 16 hex——与 Python `_fnv1a_hex` 同一初值/乘子（Python 镜像
 /// `usage_fact.fact_id` 的算法）。这里 hash 的是 canonical row，不是 identity
 /// 元组，所以返回裸 hex、不带 "uf1-" 前缀。
-fn fnv1a_hex(bytes: &[u8]) -> String {
+///
+/// `pub(crate)`：Stage 2 codex emitter（`codex_usage_fact.rs`）复用同一套
+/// derived-id 原语——codex token_count 无原生 id，derived id 必须与 claude 的
+/// fallback 走同一个 canonical+FNV（两端一致的边界只有一个，不许长第二份）。
+pub(crate) fn fnv1a_hex(bytes: &[u8]) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in bytes {
         h ^= u64::from(b);
@@ -85,7 +89,12 @@ fn push_json_string(s: &str, out: &mut String) {
 /// token 计数（float costUSD 只在 cost-state，不产 fact），整数两边都是十进制；
 /// 若未来真机在 derived-hash row 里出现浮点，Python float repr 与 serde_json
 /// (ryu) 的最短表示可能分叉——文档化的已知边界，不用浮点就碰不到。
-fn canonical_row_string(v: &Value, out: &mut String) {
+///
+/// `pub(crate)`：codex emitter 复用（见 `fnv1a_hex` 注释）。codex token_count 的
+/// `rate_limits.*.used_percent` 是真机浮点（0..100 区间），canonical 分叉只会在
+/// 区间外的小/大浮点出现——usage-fact fixture 与真机值都在 0..100，parity 钉测
+/// 带着浮点行跑，分叉会当场红。
+pub(crate) fn canonical_row_string(v: &Value, out: &mut String) {
     match v {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
