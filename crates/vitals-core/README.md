@@ -178,7 +178,7 @@ tested fallback, not dead code — and every migrated rule has a matching
 `agent-vitals-core/tests/svNNN_parity.rs` that runs the same fixture through
 both the legacy body and this engine and asserts byte-for-byte identical
 legacy JSON output. If you're migrating rule number fifteen, copy the
-shape of `crates/agent-vitals-core/src/detectors/sv601.rs` (simplest, no
+shape of `crates/agent-vitals-core/src/domain/detectors/sv601.rs` (simplest, no
 cross-event state) or `sv612.rs` (has cross-event state and reads a signal
 this crate doesn't know the name of — `agent.turn_boundaries` — entirely
 through the domain-layer's own kind-mapping, not through anything in this

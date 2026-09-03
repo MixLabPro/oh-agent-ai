@@ -18,7 +18,7 @@ adapter）能同一处引用。这是 Agent UsageFact/source-event 身份契约�
 领域都要的通用机制——将来拆出 `agent-vitals-adapters` 包时，本模块整体迁往
 `shared/source_identity.py`。
 
-Rust 平行实现：`crates/agent-vitals-core/src/source_identity.rs`（同字节）。
+Rust 平行实现：`crates/agent-vitals-core/src/contracts/source_identity.rs`（同字节）。
 `canonical_json` 与 Rust `source_identity::canonical_json` 对同一输入产同字节
 （sort_keys + 紧凑分隔 + 不转义非 ASCII）；`fnv1a64_hex` 与 Rust
 `source_identity::fnv1a64_hex` 同一初值/乘子/hex 格式。Stage 1/2 parity 钉测

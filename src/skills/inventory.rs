@@ -84,6 +84,16 @@ pub struct Inventory {
     pub dsh_snapshot: Option<Value>,
 }
 
+/// 由运行时编排层提供的会话证据。
+///
+/// 静态 Skill inventory 只消费这份已读取的输入，不自行定位或打开 Session 日志。
+/// 这样 Skill surface 与 Session surface 可以独立演进，同时仍保留 A4/A9 的关联能力。
+#[derive(Default)]
+pub struct SessionEvidenceInput {
+    pub dsh_path: Option<String>,
+    pub dsh: Option<Value>,
+}
+
 fn disabled(var: &str) -> bool {
     std::env::var(var).as_deref() == Ok("1")
 }
@@ -100,7 +110,13 @@ fn codex_not_probed(reason: &str) -> codex::CodexRuntime {
     }
 }
 
-pub fn take(sel: &Selection, home_n: &str, cfg: &HostConfig, ctx: &Ctx) -> Inventory {
+pub fn take(
+    sel: &Selection,
+    home_n: &str,
+    cfg: &HostConfig,
+    ctx: &Ctx,
+    session_evidence: SessionEvidenceInput,
+) -> Inventory {
     // ── 阶段 1：roots ────────────────────────────────────
     let mut roots: Vec<(String, String, SourceMeta)> = DEFAULT_ROOTS
         .iter()
@@ -155,9 +171,12 @@ pub fn take(sel: &Selection, home_n: &str, cfg: &HostConfig, ctx: &Ctx) -> Inven
         roots.push((custom_host.to_string(), p.clone(), SourceMeta::default()));
     }
 
-    // DSH 会话日志证据在 inventory/discovery 阶段**读一次**，下传给
-    // scan_skill_dir（A4）与 build_trigger（A9）。未设环境变量 → 无证据。
-    let (dsh_evidence_path, dsh_evidence) = dsh::read_session_evidence();
+    // 会话日志由 runtime/session source 读一次后注入。inventory 不定位、不打开
+    // Session 文件，只把证据下传给 scan_skill_dir（A4）与 build_trigger（A9）。
+    let SessionEvidenceInput {
+        dsh_path: dsh_evidence_path,
+        dsh: dsh_evidence,
+    } = session_evidence;
     // 注册表快照（probe 证据，A11）同样读一次。它与日志证据是两个独立的证据源：
     // probe 回答「此刻这个 scope 解析出什么」，log 回答「当时向模型发布了什么」。
     // 快照存在且未降级时优先于日志（probe 更新鲜）。

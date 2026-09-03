@@ -5,7 +5,7 @@ extract → derive → coverage，"locate → shape → extract" 留在
 的等价字典，覆盖计数按 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §13 host coverage
 matrix 的 **Claude Code 列**逐条对应。
 
-与 Rust `crates/agent-vitals-core/src/claude_code_evidence.rs` 逐字节对齐——产出
+与 Rust `crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs` 逐字节对齐——产出
 同一个 `claude_evidence_json` 输出字典（键序一致），`tests/test_cli_matrix.py::
 both()` 的差分靠这份一致把关。
 

@@ -227,7 +227,7 @@ true` 但没有 store 实现」，抓不了「workbuddy 的 Usage 其实是"未�
 
 ### 5.1 载体与行结构
 
-**落点**：放宽 `crates/agent-vitals-core/src/host_capability.rs`（**不改名**——模块
+**落点**：放宽 `crates/agent-vitals-core/src/contracts/host_capability.rs`（**不改名**——模块
 名被 test_classification 家族清单、imports、Python 镜像引用，改名是纯 churn；行数
 超 ~300 行再考虑拆出 `host_registry.rs`，届时改分类清单 + 两侧 import 一次过）。
 Python 镜像 `host_capability.py` 同步成同一行集。Rust core 是 Rust 消费方的唯一声明
@@ -464,7 +464,7 @@ tab、dsh-client 投影）各自手工 join、每处一个 basis——§1.2"漏�
 | `host_capability.rs` degrade | match 臂 | `HOSTS` 行查找 | 现有单测 + Python 镜像 parity |
 | 宿主级 unmeasured 声明（复制点 A） | 每文件一份 | **宿主级**从行读，文件里不再有字面量表；shape/会话级缺席留在适配器解析分支（§5.2 双层规则） | golden 全绿；合成会话属性测试：raw 试图 bump unmeasured 信号 → 产出仍 unavailable/零 |
 | `ALL_SIGNALS`（复制点 B） | 每文件一份 | 完整枚举上收为共享 Canonical Schema（Rust `Signal::ALL` 或等价常量；Python schema 常量）；所有适配器统一遍历，不再保留 per-host 完整信号表。“能 bump 什么”由 derive 代码与会话 coverage 表达，不另建声明表 | schema 顺序测试 + golden 全绿 |
-| dispatcher 组装（复制点 C） | Rust 3 份拷贝 | 新 `crates/agent-vitals-core/src/canonical_audit.rs`（或 binary 侧 `src/agent/canonical_audit.rs`）：`audit_projection(canonical, host_id)` 一份共享，内部做 family①→degrade(行)→family④→flatten→summary | **golden 15 例字节零漂移 + differential**（Python 侧已是共享的，`canonical_audit.py:60` 就是模板）；Python 的 DSH 绕行路径（`behavior.py match_behavior_gated`）并入共享求值器 |
+| dispatcher 组装（复制点 C） | Rust 3 份拷贝 | 新 `crates/agent-vitals-core/src/domain/canonical_audit.rs`（或 binary 侧 `src/agent/canonical_audit.rs`）：`audit_projection(canonical, host_id)` 一份共享，内部做 family①→degrade(行)→family④→flatten→summary | **golden 15 例字节零漂移 + differential**（Python 侧已是共享的，`canonical_audit.py:60` 就是模板）；Python 的 DSH 绕行路径（`behavior.py match_behavior_gated`）并入共享求值器 |
 | `evidence_json` 序列化（D）/ `derive_coverage` 骨架（E） | 各一份 | 共享骨架 + host 参数（unmeasured 从行取） | 同上 |
 | `SessionStore` 三段式（F）、源指纹（G） | 3 份 | 行 `session_store: true` 决定 store 集合；构造器骨架共享 | `sessions` 命令输出不变；envelope v1 不变 |
 | `host_display_name` | `lib.rs:207` match | 从行 `display` 读；unknown → passthrough 保留 | "future-host" 测试原样 |

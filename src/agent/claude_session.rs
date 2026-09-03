@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use agent_vitals_core::claude_code_evidence::{
+use agent_vitals_adapters::claude_code_evidence::{
     build_claude_evidence, claude_evidence_json, ClaudeEvidence,
 };
 

@@ -44,7 +44,7 @@ Two sessions:
   warning), `rules_unavailable=6`, cost `{tokens:12000, cny:0.0,
   host_billed:true}`.
 
-The Rust side (`crates/agent-vitals-core/src/workbuddy_evidence.rs` +
+The Rust side (`crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs` +
 `src/agent/workbuddy_session.rs`) reads the same sqlite db (rusqlite, bundled)
 and audit-log; the differential gate in `tests/test_cli_matrix.py` copies
 `workdir` into a temp HOME, feeds it to both implementations, and byte-compares

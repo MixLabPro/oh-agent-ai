@@ -110,7 +110,7 @@ host-agnostic event stream  ──→ agent-vitals watch（CLI）
 
 | # | 内容 | 工作量 | 不做的后果 |
 |---|---|---|---|
-| **0-1** | `src/cost.rs` → `crates/agent-vitals-core/src/cost.rs`，根 crate 改 re-export，`include_str!` 路径跟着改 | 半天 | `src-tauri` 依赖不上计价，0a 的"复用 cost"是空话，只能再抄一份 |
+| **0-1** | `src/cost.rs` → `crates/agent-vitals-core/src/domain/cost.rs`，根 crate 改 re-export，`include_str!` 路径跟着改 | 半天 | `src-tauri` 依赖不上计价，0a 的"复用 cost"是空话，只能再抄一份 |
 | **0-2** | `Event` enum 补 `UsageSampled` + `UsageIdentity`（见 4.3） | 半天 | pet 心情里"预算"那一项无从实现；compaction 的钱在归一化就丢 |
 | **0-3** | `host-events` 的 source 层**调 core 谓词**，残差哨兵下沉到 tail 层 | 1 天 | 每写一个新 host 解析器就新增一个静默漏算面（0b/0c 各一次） |
 
@@ -923,10 +923,10 @@ EventBus ──→ Tauri 后端 state_machine
 
 | 文件 | 动作 |
 |---|---|
-| `src/cost.rs` → `crates/agent-vitals-core/src/cost.rs` | 移动（394 行纯函数） |
+| `src/cost.rs` → `crates/agent-vitals-core/src/domain/cost.rs` | 移动（394 行纯函数） |
 | `src/cost.rs` | 改为 `pub use agent_vitals_core::cost::*;` |
 | `crates/agent-vitals-core/src/lib.rs` | 加 `pub mod cost;` |
-| `crates/agent-vitals-core/src/cost.rs` 里的 `include_str!` | 路径改成 core 相对 |
+| `crates/agent-vitals-core/src/domain/cost.rs` 里的 `include_str!` | 路径改成 core 相对 |
 | `tests/test_pricing_lockstep.py` | 确认仍指向同一份 pricing.json |
 
 ### 不动（明确边界）
@@ -934,7 +934,7 @@ EventBus ──→ Tauri 后端 state_machine
 | 路径 | 现状 |
 |---|---|
 | `crates/agent-vitals-core/src/dsh.rs` | 不动；只被 sources/dsh.rs wrap |
-| `crates/agent-vitals-core/src/behavior.rs` | 演进（扩展 SV 命名空间）|
+| `crates/agent-vitals-core/src/domain/behavior.rs` | 演进（扩展 SV 命名空间）|
 | `dsh-client/src/host/index.ts` | 不动；Pet 走独立路径 |
 | `scripts/agent_vitals/agent/state.py` | 不动；Pet 用 Rust 重写 |
 | `src/main.rs` CLI 子命令 | 增量加 `watch`，其他不动 |

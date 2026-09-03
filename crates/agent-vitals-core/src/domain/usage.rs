@@ -2090,7 +2090,7 @@ mod tests {
 
     /// 解析 fixtures/dsh/resume.jsonl（每行一个 JSON 对象事件）。
     fn read_resume_fixture() -> Vec<Value> {
-        let raw = include_str!("../../../fixtures/dsh/resume.jsonl");
+        let raw = include_str!("../../../../fixtures/dsh/resume.jsonl");
         raw.lines()
             .filter(|l| !l.trim().is_empty())
             .map(|l| serde_json::from_str(l).expect("fixture line must parse"))
@@ -3425,4 +3425,3 @@ mod tests {
         );
     }
 }
-

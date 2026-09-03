@@ -118,7 +118,7 @@ mod tests {
 
     // 期望值来自 tests/test_characterization.py，逐条对齐。比例是 DeepSeek 官方
     // 换算（CJK×0.6、其余×0.3，2026-08-21 从旧比例换过来——理由见
-    // crates/agent-vitals-core/src/util.rs 的文档注释）。
+    // crates/agent-vitals-core/src/domain/util.rs 的文档注释）。
 
     #[test]
     fn est_tokens_ascii_truncates() {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rust 状态写链（`crates/agent-vitals-core/src/state.rs` + `src/agent/state.rs`）的
+"""Rust 状态写链（`crates/agent-vitals-core/src/domain/state.rs` + `src/agent/state.rs`）的
 差分 + 字符化锁步测试（R1c）。
 
 两层：
@@ -9,7 +9,7 @@
    today.json / month.json / month-archive.json / oneline.json / alert.json /
    sessions.jsonl。这是 Rust 写链与 Python 镜像的差分门 —— 两边一旦漂移这里就红。
 2. `StateMergeCharacterization` —— 把 Python 侧 merge 的输出钉到**具体数值**，与
-   `crates/agent-vitals-core/src/state.rs` 里单测的期望值逐一对应（test_cost_priced_day
+   `crates/agent-vitals-core/src/domain/state.rs` 里单测的期望值逐一对应（test_cost_priced_day
    同款交叉锁定模式）：Python 与 Rust 各自断言同一组数字，docstring 互相指认。
 
 跑法（Rust 差分需要 AGENT_VITALS_BIN，与 test_cli_matrix 同款注入）：

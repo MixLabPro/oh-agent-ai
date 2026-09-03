@@ -34,7 +34,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::{Map, Value};
 
-use crate::evidence::{
+use agent_vitals_core::contracts::evidence::{
     AdapterNote, CanonicalSession, Coverage, CoverageCounts, Provenance, SandboxModeObservation,
     SessionMeta, Signal, SignalSet, SourceAttempt, SourceKind, Surface, Timeline, TimelineEntry,
     ToolCallObservation, ToolResultObservation, TurnObservation,
@@ -280,7 +280,7 @@ fn bump(coverage: &mut Coverage, signal: Signal, bucket: Bucket, n: u64) {
 /// 字面量表，改从 core `host_capability::HOSTS` 的 "codex" 行读（行上的值就
 /// 是从这个函数原来的字面量表搬过去的，golden 字节不变）。
 fn is_unavailable(signal: Signal) -> bool {
-    crate::host_capability::host_profile("codex")
+    agent_vitals_core::contracts::host_capability::host_profile("codex")
         .is_some_and(|h| h.unmeasured_signals.contains(&signal))
 }
 
@@ -1440,9 +1440,9 @@ mod tests {
     /// 从 outcomes 数组里按码取一条 `RuleOutcome`（真值表断言的取数器）。显式
     /// lifetime——闭包在这里推不出来，用模块级 fn 是干净的写法。
     fn outcome<'a>(
-        outcomes: &'a [(&'static str, crate::evidence::RuleOutcome)],
+        outcomes: &'a [(&'static str, agent_vitals_core::contracts::evidence::RuleOutcome)],
         code: &str,
-    ) -> &'a crate::evidence::RuleOutcome {
+    ) -> &'a agent_vitals_core::contracts::evidence::RuleOutcome {
         outcomes.iter().find(|(cc, _)| *cc == code).map(|(_, o)| o).expect("rule present")
     }
 
@@ -1451,8 +1451,8 @@ mod tests {
         // 真值表（诚实结果，build_codex_evidence 注释里那张表的可测形态）：Codex
         // 填了 4 条 timeline 后，SV 规则按门控真正跑起来。这是「解析对齐」的可测
         // 证明——不需要 `codex behavior` CLI 消费者。
-        use crate::behavior::match_behavior_canonical;
-        use crate::trajectory::match_trajectory_canonical;
+        use agent_vitals_core::domain::behavior::match_behavior_canonical;
+        use agent_vitals_core::domain::trajectory::match_trajectory_canonical;
 
         let evidence = build(populated_items());
         let c = &evidence.canonical;
@@ -1460,33 +1460,33 @@ mod tests {
         let trajectory = match_trajectory_canonical(c);
 
         // SV601/602/603（exec→bash 翻译）：rm -rf 命中 SV601；无 sudo/curl|sh。
-        assert!(matches!(outcome(&behavior, "SV601"), crate::evidence::RuleOutcome::Findings(_)));
-        assert!(matches!(outcome(&behavior, "SV602"), crate::evidence::RuleOutcome::MeasuredZero));
-        assert!(matches!(outcome(&behavior, "SV603"), crate::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&behavior, "SV601"), agent_vitals_core::contracts::evidence::RuleOutcome::Findings(_)));
+        assert!(matches!(outcome(&behavior, "SV602"), agent_vitals_core::contracts::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&behavior, "SV603"), agent_vitals_core::contracts::evidence::RuleOutcome::MeasuredZero));
         // SV604/605/606：Codex 没有 write/edit/web_fetch 工具，诚实 MeasuredZero。
-        assert!(matches!(outcome(&behavior, "SV604"), crate::evidence::RuleOutcome::MeasuredZero));
-        assert!(matches!(outcome(&behavior, "SV605"), crate::evidence::RuleOutcome::MeasuredZero));
-        assert!(matches!(outcome(&behavior, "SV606"), crate::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&behavior, "SV604"), agent_vitals_core::contracts::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&behavior, "SV605"), agent_vitals_core::contracts::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&behavior, "SV606"), agent_vitals_core::contracts::evidence::RuleOutcome::MeasuredZero));
         // SV607/608：exit_code:N 不在 DSH 错误码集里，诚实 MeasuredZero。
-        assert!(matches!(outcome(&behavior, "SV607"), crate::evidence::RuleOutcome::MeasuredZero));
-        assert!(matches!(outcome(&behavior, "SV608"), crate::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&behavior, "SV607"), agent_vitals_core::contracts::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&behavior, "SV608"), agent_vitals_core::contracts::evidence::RuleOutcome::MeasuredZero));
         // SV609：approvals 空 → 门控 Unavailable（诚实能力缺失）。
         assert!(matches!(outcome(&behavior, "SV609"),
-                         crate::evidence::RuleOutcome::Unavailable { .. }));
+                         agent_vitals_core::contracts::evidence::RuleOutcome::Unavailable { .. }));
         // SV610：sandbox_policy 翻译进 sandbox_modes → danger-full-access 命中。
-        assert!(matches!(outcome(&behavior, "SV610"), crate::evidence::RuleOutcome::Findings(_)));
+        assert!(matches!(outcome(&behavior, "SV610"), agent_vitals_core::contracts::evidence::RuleOutcome::Findings(_)));
 
         // SV611：三连相同签名 (bash,"echo boom") 触发连续重复。
         assert!(matches!(outcome(&trajectory, "SV611"),
-                         crate::evidence::RuleOutcome::Findings(_)));
+                         agent_vitals_core::contracts::evidence::RuleOutcome::Findings(_)));
         // SV612：两 turn 的 sig 不同，不是死循环。
-        assert!(matches!(outcome(&trajectory, "SV612"), crate::evidence::RuleOutcome::MeasuredZero));
+        assert!(matches!(outcome(&trajectory, "SV612"), agent_vitals_core::contracts::evidence::RuleOutcome::MeasuredZero));
         // SV613：三连 exit_code:1 触发工具级停滞。
         assert!(matches!(outcome(&trajectory, "SV613"),
-                         crate::evidence::RuleOutcome::Findings(_)));
+                         agent_vitals_core::contracts::evidence::RuleOutcome::Findings(_)));
         // SV614：OR 门控（approvals 空但 sandbox 非空）放行，两个 danger 授予触发 c。
         assert!(matches!(outcome(&trajectory, "SV614"),
-                         crate::evidence::RuleOutcome::Findings(_)));
+                         agent_vitals_core::contracts::evidence::RuleOutcome::Findings(_)));
     }
 
     #[test]

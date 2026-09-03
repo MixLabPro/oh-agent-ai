@@ -448,7 +448,7 @@ dsh-context 的做法点破了症结：**堆叠条的价值全在分母**。
 
 | # | 改动 | 涉及文件（锁步） | 为什么必须 |
 |---|---|---|---|
-| **D1** | finding 增加 `turn` / `step` / `callId` 三字段 | `crates/agent-vitals-core/src/behavior.rs` ↔ `scripts/agent_vitals/agent/behavior.py` ↔ wasm `audit_events` ↔ `dsh-client/src/host/index.ts` 的 zod schema ↔ golden 快照 | 没有 turn/step 就**没有 x 轴**，三张图一张都画不了；没有 callId 就永远接不上官方 inspect 通道（§8.2b） |
+| **D1** | finding 增加 `turn` / `step` / `callId` 三字段 | `crates/agent-vitals-core/src/domain/behavior.rs` ↔ `scripts/agent_vitals/agent/behavior.py` ↔ wasm `audit_events` ↔ `dsh-client/src/host/index.ts` 的 zod schema ↔ golden 快照 | 没有 turn/step 就**没有 x 轴**，三张图一张都画不了；没有 callId 就永远接不上官方 inspect 通道（§8.2b） |
 | **D2** | `token_by_model` 保留 per-turn/step 明细，不只吐总和；**并新增 `modelSwitches: [{seq,time,from,to}]`、消费 `request/context` 取 `contextWindow`**（修订依据见 §12.3） | `usage.rs` ↔ `usage.py` ↔ wasm `token_by_model` ↔ dsh adapter 的 `RELEVANT_TYPES` | 图 1（成本曲线）与图 3（上下文曲线）的唯一数据源；`contextWindow` 是堆叠条唯一有意义的分母 |
 | **D3** | i18n 字典每条规则补 `rule_SVxxx_desc`（一句话触发条件） | `dsh-client/src/client/i18n.ts` | 二级详情里的「规则说明」；**零依赖、纯字典扩充，性价比最高** |
 | **D4** | `styles/index.ts` 从「导出 style 对象」改为「导出 CSS 文本 + 类名常量」 | `dsh-client/src/client/styles/index.ts` + `AuditView.tsx` 全量替换 | **内联 style 写不出 `:hover`** → 不做这条，§9.4 的 hover 预览/hover 显形操作栏一条都做不了（§12.2b）。注入管道 `ctx.effect` + `STYLES` 已存在，只是没用起来 |

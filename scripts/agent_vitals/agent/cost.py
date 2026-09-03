@@ -4,7 +4,7 @@
 的 time 精确标出高峰时段）：这里只把 `{by_model, sequence}` × 价格表
 （`pricing.json`）变成一组字符串，off-peak 份额（全量 − peak）按空闲价、
 peak 份额按高峰价，加总成一个真实发生的费用——不再是「给空闲价和高峰价两个
-数，猜不出实际该按哪个算」的区间估算。与 `crates/agent-vitals-core/src/cost.rs` 逐字节一致，由
+数，猜不出实际该按哪个算」的区间估算。与 `crates/agent-vitals-core/src/domain/cost.rs` 逐字节一致，由
 `tests/test_cli_matrix.py` 的 `both()` 差分看守。
 
 价格表的单一真相源是 `scripts/agent_vitals/pricing.json`（Rust 侧用
@@ -136,7 +136,7 @@ def fallback_price(buckets, pricing):
     需要知道"这些 token 是哪个模型"，这里是它唯一的退路，不是另一条计价规则。
 
     只服务 `cli.py::_augment_calendar_cost` 的"日历某天 by_model 覆盖不全"
-    分支（见该函数文档），不在 `crates/agent-vitals-core/src/cost.rs` 的
+    分支（见该函数文档），不在 `crates/agent-vitals-core/src/domain/cost.rs` 的
     lockstep/差分范围内——
     `calendar` 从来不是 Rust 二进制的子命令，没有 `test_cli_matrix.py` 会
     校验一份 Rust 镜像。calendar.html 的 JS 端已经有一份同语义的硬编码
@@ -237,7 +237,7 @@ def cost_report(usage, pricing):
     次」的眼睛，但它不是主账单的一部分，插在中间会破坏已有读方的键序。by_source
     为空/缺场时 `by_source_cost` 键整个不出现，输出与没有该功能的版本逐字节一致。
 
-    Rust 平行实现见 `crates/agent-vitals-core/src/cost.rs::cost_report`。
+    Rust 平行实现见 `crates/agent-vitals-core/src/domain/cost.rs::cost_report`。
     """
     by_model = (usage or {}).get("by_model") or {}
     providers = (usage or {}).get("providers")
@@ -302,7 +302,7 @@ def cost_report(usage, pricing):
 
 def cost_series(requests, providers, pricing):
     """逐请求费用序列（FR-04 的「费用」纵轴，工作台单会话图与 dsh-client 审计
-    tab 共用）。与 `crates/agent-vitals-core/src/cost.rs::cost_series` 及 dsh-client
+    tab 共用）。与 `crates/agent-vitals-core/src/domain/cost.rs::cost_series` 及 dsh-client
     宿主 `costSeriesFrom`（`dsh-client/src/host/index.ts`）是**同一规则的三个镜像**，
     锁步一致。
 

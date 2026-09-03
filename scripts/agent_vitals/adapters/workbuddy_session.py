@@ -1,7 +1,7 @@
 """WorkBuddy 会话读取器 —— 五段式流水线（locate → shape → extract → derive →
 coverage）的"locate → shape → extract"三段，I/O 都在这里；"derive → coverage"在
 `scripts/agent_vitals/agent/workbuddy_evidence.py`（与 Rust
-`crates/agent-vitals-core/src/workbuddy_evidence.rs` 逐字节对齐），I/O 不进去。
+`crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs` 逐字节对齐），I/O 不进去。
 
 与 Rust `src/agent/workbuddy_session.rs` 逐字节对齐——两条实现产出同一份字典，
 `tests/test_cli_matrix.py::both()` 的差分靠这份一致把关（Rust 侧 sqlite 读用

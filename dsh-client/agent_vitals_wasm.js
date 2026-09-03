@@ -104,7 +104,7 @@ export function context_composition(events_json) {
  * **D4（hook 消费）故意不在这里**——`duration::hook_executions` 的宿主前提
  * （浏览器能不能拿到 `hook/*` 事件）还没有人拿真实会话验证过，在验证通过
  * 之前不接进这条浏览器链路，只在 CLI 侧可用（`hook_executions` 本身已经
- * 就绪，见 `crates/agent-vitals-core/src/duration.rs` 的模块级警告）。
+ * 就绪，见 `crates/agent-vitals-core/src/domain/duration.rs` 的模块级警告）。
  * @param {string} events_json
  * @returns {string}
  */

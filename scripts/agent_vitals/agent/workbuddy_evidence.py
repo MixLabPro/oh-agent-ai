@@ -5,7 +5,7 @@ extract → derive → coverage，"locate → shape → extract" 留在
 拆出的 `session_meta` 折成 `evidence::CanonicalSession` 的等价字典，覆盖计数按
 `docs/WORKBUDDY_INTEGRATION.md` §3 矩阵逐信号对应。
 
-与 Rust `crates/agent-vitals-core/src/workbuddy_evidence.rs` 逐字节对齐——产出同一个
+与 Rust `crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs` 逐字节对齐——产出同一个
 `workbuddy_evidence_json` 输出字典（键序一致），`tests/test_cli_matrix.py::both()`
 的差分靠这份一致把关。
 

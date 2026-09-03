@@ -19,7 +19,7 @@
 > 链同时受去重误差与缺行干扰，量不出单一因子；直到用官方 token 量做反事实
 > （官方量 × 全谷价 = ¥48.70）才把两个因子拆开。修正见 §3.1、§6、§9。
 >
-> 涉及实现：**主因**在计价侧 `crates/agent-vitals-core/src/cost.rs`
+> 涉及实现：**主因**在计价侧 `crates/agent-vitals-core/src/domain/cost.rs`
 > （`claude_day_cost` → `price_claude_map` → `price_claude_model` → `flat_rate`）
 > ↔ `scripts/agent_vitals/agent/cost.py`（`_flat_rate`），外加 ledger 日桶结构；
 > **次因**在归日侧 `src/agent/claude_cost.rs` ↔

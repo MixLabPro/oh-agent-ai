@@ -78,9 +78,9 @@ A 独立，但 A 先做能消掉 B/C 改动里会重复撞上的时区重复。
 把「北京时间轴」收成一模块，DSH 与 Codex 折叠都调它，删掉两处重复。
 
 ### 现状（已核实）
-- `crates/agent-vitals-core/src/usage.rs:72` `BEIJING_OFFSET_SECS: i64 = 8*3600` +
+- `crates/agent-vitals-core/src/domain/usage.rs:72` `BEIJING_OFFSET_SECS: i64 = 8*3600` +
   `beijing_hour(time_ms)` + `hour_buckets`（输入 epoch 毫秒）
-- `crates/agent-vitals-core/src/codex_usage.rs:151` `BEIJING_OFFSET_HOURS: i64 = 8` +
+- `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/usage.rs:151` `BEIJING_OFFSET_HOURS: i64 = 8` +
   `codex_hour_of(event)`（输入 ISO 串）
 - `days_from_civil`/`civil_date_from_days`（Hinnant）已在 `usage.rs`，且
   `codex_usage.rs` 已 `super::usage::` 引用——时间轴收敛已走了一半。

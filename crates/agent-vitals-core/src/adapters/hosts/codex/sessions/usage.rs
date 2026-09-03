@@ -142,7 +142,7 @@ pub fn codex_hour_of(event: &Value) -> Option<String> {
         parse_u32(&ts[8..10]),
         parse_i64(&ts[11..13]),
     );
-    let days = super::usage::days_from_civil(y, m, d);
+    let days = crate::usage::days_from_civil(y, m, d);
     // 日历有效性 round-trip：02-30 之类不存在的日期在 civil/days 两方向都
     // 是 Hinnant 的无定义输入，round-trip 不还原 → 不编造小时键。
     if civil_date_from_days(days) != format!("{:04}-{:02}-{:02}", y, m, d) {
@@ -170,7 +170,7 @@ fn parse_u32(s: &str) -> u32 {
 /// 与 `usage.rs::civil_date_from_days` 同实现（Hinnant），此处是 `pub(crate)`
 /// 访问同一函数的薄包装，避免重复一份算法。
 fn civil_date_from_days(days: i64) -> String {
-    super::usage::civil_date_from_days(days)
+    crate::usage::civil_date_from_days(days)
 }
 
 /// 事件的时间戳**原始字符串**（顶层 `timestamp` 回退 `payload.timestamp`）。None =

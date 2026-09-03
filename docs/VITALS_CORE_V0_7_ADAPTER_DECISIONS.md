@@ -9,7 +9,7 @@
 > 关联：
 > - 数据面契约见 `docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §2、§3、§4
 >   候选 #3 行的"明确仍未开始"清单
-> - 契约骨架已落地：`crates/agent-vitals-core/src/usage_fact.rs` +
+> - 契约骨架已落地：`crates/agent-vitals-core/src/contracts/usage_fact.rs` +
 >   `scripts/agent_vitals/agent/usage_fact.py`（commit b806762），含
 >   `fact_id` / `USAGE_FACT_FIELDS` / `build_usage_fact` 纯函数
 > - CLI/menubar 全链路已闭环（commit a577497 + 7bd1349）：剩下的是把
@@ -43,7 +43,7 @@
 
 ### A.0 现状
 
-`crates/agent-vitals-core/src/codex_usage.rs:66-71` 的 5 桶
+`crates/agent-vitals-core/src/adapters/hosts/codex/sessions/usage.rs:66-71` 的 5 桶
 `CODEX_TOKEN_FIELDS`：
 - `uncached_input_tokens`
 - `output_tokens`
@@ -51,7 +51,7 @@
 - `cache_write_input_tokens`
 - **`reasoning_output_tokens`**（5 桶独有，UsageFact 无对应字段）
 
-`USAGE_FACT_FIELDS`（`crates/agent-vitals-core/src/usage_fact.rs`）
+`USAGE_FACT_FIELDS`（`crates/agent-vitals-core/src/contracts/usage_fact.rs`）
 按 Claude 4 型 snake 词表约定，output 单桶、不切分 reasoning。
 
 ### A.1 三选项

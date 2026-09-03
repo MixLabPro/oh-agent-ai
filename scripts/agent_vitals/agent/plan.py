@@ -1,6 +1,6 @@
 """省钱方案 —— 把 scan 报告派生为量化、排序、诚实的动作清单（`agent-vitals plan`）。
 
-与 `crates/agent-vitals-core/src/plan.rs` 的 `build_plan` **逐字节一致**（含 JSON
+与 `crates/agent-vitals-core/src/domain/plan.rs` 的 `build_plan` **逐字节一致**（含 JSON
 key 顺序与 rationale 文案），由 `tests/test_cli_matrix.py` 的 `both()` 差分看守，
 同一 fixture 下同数字由 `tests/test_plan_lockstep.py` 交叉锁定。
 

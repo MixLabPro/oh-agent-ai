@@ -56,7 +56,7 @@ RS_AGENT_FAMILY = {
     "dsh_usage_fact",
     "host_runtime_registration",
     "oneline", "plan", "r2a_store",
-    "state", "takeover", "workbuddy_session",
+    "session_sources", "state", "takeover", "workbuddy_session",
 }
 
 
@@ -132,9 +132,15 @@ class ClassificationGuardTests(unittest.TestCase):
                 % sub.relative_to(ROOT),
             )
         self.assertTrue(
-            (ROOT / "crates" / "agent-vitals-core" / "src" / "skill.rs").is_file(),
-            "core crate 应持有 skill.rs（会话 skill 执行审计的唯一真相源）",
+            (ROOT / "crates" / "agent-vitals-core" / "src" / "domain" / "skill.rs").is_file(),
+            "core domain 应持有 skill.rs（会话 skill 执行审计的唯一真相源）",
         )
+
+    def test_skill_inventory_does_not_read_session_files(self):
+        """Skill surface 只能消费注入证据，不能自行打开 Session 日志。"""
+        inventory = (RS_SRC / "skills" / "inventory.rs").read_text(encoding="utf-8")
+        self.assertNotIn("read_session_evidence", inventory)
+        self.assertIn("SessionEvidenceInput", inventory)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ WorkBuddy 接入**不需要修改通用 `vitals-core`，也不需要修改 `agen
 ——Claude 接入第一刀已经把 provenance（`TimelineEntry.provenance`）与 `ToolResultObservation.failed`
 补进 core，WorkBuddy 需要的全部 observation 类型（`ToolCallObservation`/`ApprovalObservation{asked,decided}`/
 `SandboxModeObservation{mode}`/`TurnObservation`/`TimelineEntry`）都已存在。净新增的是一个**适配器**
-（`agent-vitals-core/src/workbuddy_evidence.rs` + binary `src/agent/workbuddy_session.rs` + Python
+（`agent-vitals-core/src/adapters/hosts/workbuddy/sessions/evidence.rs` + binary `src/agent/workbuddy_session.rs` + Python
 镜像三个文件），外加一个**新依赖类**：rusqlite（bundled，仅二进制侧，§1.4）。
 
 正确层级（与 Claude §0 同构）：
@@ -335,7 +335,7 @@ auto 4 / MiniMax-M2.5 2。
 
 1. ~~**rusqlite（bundled）进二进制依赖**~~ **已落地**（§1.4），core crate 不动；
 2. ~~core 证据模型~~ —— 无需改动（Claude 第一刀已备齐 provenance + failed）；
-3. ~~**`crates/agent-vitals-core/src/workbuddy_evidence.rs`**~~ **已落地**：
+3. ~~**`crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs`**~~ **已落地**：
    `build_workbuddy_evidence`（audit-log → tool_calls/approvals/sandbox timeline +
    TurnBoundaries derived coverage + 链路完整性 note）+ `is_unavailable` +
    `derive_coverage` + `build_notes`。core 单测：

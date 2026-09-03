@@ -30,11 +30,11 @@
   拦截"的措辞。
 
 **3. 主体逻辑已经有三份现成模板，照抄不是从零写：**
-- `crates/agent-vitals-core/src/skill.rs` 的 `callId` 配对 + `missing_fields` 纪律
+- `crates/agent-vitals-core/src/domain/skill.rs` 的 `callId` 配对 + `missing_fields` 纪律
   （T3 抄的是 `subagent.rs`，这次抄 `skill.rs` 更近，字段形状几乎一样）；
-- `crates/agent-vitals-core/src/subagent.rs:57` `subagent_spawns()`——同款 `callId`
+- `crates/agent-vitals-core/src/domain/subagent.rs:57` `subagent_spawns()`——同款 `callId`
   索引 → 结果侧按 `/data/message/source/callId` 回连；
-- `crates/agent-vitals-core/src/trajectory.rs:77` `coord_map()`（`pub(crate)`）——
+- `crates/agent-vitals-core/src/domain/trajectory.rs:77` `coord_map()`（`pub(crate)`）——
   turn/step 坐标查表，直接复用，不要重新扫一遍 `turn/start`/`step/start`。
 
 **4. 一个真实存在的坑，`fixtures/dsh/README.md` 已经踩过、写进了文档：**
@@ -48,7 +48,7 @@
 
 ### P0 — 数据通路（core → wasm → 宿主投影）
 
-#### D1 · 新建 `crates/agent-vitals-core/src/duration.rs`：通用工具调用耗时
+#### D1 · 新建 `crates/agent-vitals-core/src/domain/duration.rs`：通用工具调用耗时
 把 `skill.rs` 里"`callId` 配对 `tool/call`↔`tool/result`、算 `duration_ms`"这段逻辑
 **推广到所有工具**，不再局限于 `name="skill"`。
 
@@ -105,7 +105,7 @@
 
 #### D4 · Hook 消费抽取（core 已完成，宿主前提仍未验证）
 
-`crates/agent-vitals-core/src/duration.rs::hook_executions` /
+`crates/agent-vitals-core/src/domain/duration.rs::hook_executions` /
 `scripts/agent_vitals/agent/duration.py::hook_executions` 已实现——直接抽取
 `hook/result`（不需要跟 `hook/invoked` 配对减时间戳，`durationMs` 已经是
 harness 算好的值），带 `decision` 分布计数。CLI 侧（`src/dsh.rs` 的

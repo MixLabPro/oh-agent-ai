@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use crate::agent::claude_usage_fact::{SKIP, UNATTRIBUTED, UNREADABLE};
-use agent_vitals_core::codex_usage::{CodexTokenOutcome, CodexFoldState};
+use agent_vitals_adapters::codex_usage::{CodexTokenOutcome, CodexFoldState};
 use agent_vitals_core::source_identity::{canonical_json, fnv1a64_hex};
 use agent_vitals_core::usage_fact::build_usage_fact;
 
@@ -394,18 +394,22 @@ pub fn to_human_summary(
 mod tests {
     use super::*;
 
+    static TEMP_DIR_NONCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
     fn line(rec: serde_json::Value) -> String {
         format!("{}\n", serde_json::to_string(&rec).unwrap())
     }
 
     fn temp_dir() -> std::path::PathBuf {
         let tmp = std::env::temp_dir().join(format!(
-            "av-codex-usage-fact-test-{}-{}",
+            "av-codex-usage-fact-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            TEMP_DIR_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
         std::fs::create_dir_all(&tmp).unwrap();
         tmp

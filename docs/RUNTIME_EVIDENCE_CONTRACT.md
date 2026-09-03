@@ -272,7 +272,7 @@ hosts; a session log plus a separate usage log for the same run.
 argument.** Silent merging double-counts, and double-counted totals are worse
 than absent ones because they look plausible.
 
-`crates/agent-vitals-core/src/subagent.rs` already documents a live instance of
+`crates/agent-vitals-core/src/domain/subagent.rs` already documents a live instance of
 this hazard: of 19 subagent invocations in a real session, only 5 child sessions
 pointed back at the parent; the other 14 were spawned before the fork. A
 `SessionSet` layer sits above `CanonicalSession` and holds the overlap
@@ -1335,8 +1335,8 @@ behaviour is the golden corpus, and the golden corpus speaks only DSH.
 | Phase | Work | Acceptance |
 |---|---|---|
 | **P0** | This document, plus the §13 matrix as a checked-in baseline | Matrix committed; it *is* the test baseline |
-| **P1 ✅** | `evidence` module in `agent-vitals-core`: `CanonicalSession`, `Signal`, `Observed<T>`, `Provenance`, `CoverageCounts`, `RuleSpec`, `RuleOutcome` | Zero behaviour change — nothing consumes it yet. Landed in `crates/agent-vitals-core/src/evidence.rs`: all §2–§12 types plus `AggregateProvenance::for_window`, `CoverageCounts`/`Coverage` ratios, and the §12 no-host-identifier self-check, 12 unit tests. 15/15 goldens byte-identical before/after (nothing calls it yet) |
-| **P2 ✅** | `crates/agent-vitals-core/src/dsh_evidence.rs`: a plain function (`build_dsh_evidence`, **not a trait** — see `CanonicalSession`'s own doc comment and `ARCHITECTURE.md` §4.2) that folds `src/dsh.rs`'s already-extracted `execution_events`/`usage_events` into a `CanonicalSession` (Signal/Coverage counted per §13's DSH column; the 3 rows §13 doesn't cover — `SandboxPolicy`/`UserPrompts`/`UserCorrections` — are left `Unavailable`, not fabricated), bundled with the raw events (`CanonicalSession` alone has no event-payload field); plus `reverse_project`, a temporary bridge back to today's `behavior.rs` input shape | **Byte-identical `behavior --json` output**, proven three ways: `cargo test` (154 core + 137 binary), `AGENT_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (the real Python↔Rust differential — `golden/*.json` covers the unrelated `scan` command, not this), and a manual before/after diff on `fixtures/dsh/behavior.jsonl`. `reverse_project` is deleted when P3 completes |
+| **P1 ✅** | `evidence` module in `agent-vitals-core`: `CanonicalSession`, `Signal`, `Observed<T>`, `Provenance`, `CoverageCounts`, `RuleSpec`, `RuleOutcome` | Zero behaviour change — nothing consumes it yet. Landed in `crates/agent-vitals-core/src/contracts/evidence.rs`: all §2–§12 types plus `AggregateProvenance::for_window`, `CoverageCounts`/`Coverage` ratios, and the §12 no-host-identifier self-check, 12 unit tests. 15/15 goldens byte-identical before/after (nothing calls it yet) |
+| **P2 ✅** | `crates/agent-vitals-core/src/adapters/hosts/dsh/sessions/evidence.rs`: a plain function (`build_dsh_evidence`, **not a trait** — see `CanonicalSession`'s own doc comment and `ARCHITECTURE.md` §4.2) that folds `src/dsh.rs`'s already-extracted `execution_events`/`usage_events` into a `CanonicalSession` (Signal/Coverage counted per §13's DSH column; the 3 rows §13 doesn't cover — `SandboxPolicy`/`UserPrompts`/`UserCorrections` — are left `Unavailable`, not fabricated), bundled with the raw events (`CanonicalSession` alone has no event-payload field); plus `reverse_project`, a temporary bridge back to today's `behavior.rs` input shape | **Byte-identical `behavior --json` output**, proven three ways: `cargo test` (154 core + 137 binary), `AGENT_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (the real Python↔Rust differential — `golden/*.json` covers the unrelated `scan` command, not this), and a manual before/after diff on `fixtures/dsh/behavior.jsonl`. `reverse_project` is deleted when P3 completes |
 | **P3 ✅ (all 5 groups)** | Migrate rules one family per PR: read Signals, declare `requires`, goldens unchanged. Order: ① command/path (SV601–610) ② cost fold ③ duration ④ trajectory ⑤ skill / subagent / compaction / waste | See §17.1a for what actually landed per group. `reverse_project` is retained (not deleted) — see note at the end of §17.1a |
 | **P4 ✅** | Codex adapter | Chosen second not for coverage breadth — §14.1 shows it lacks tool-call duration, approvals, and hooks — but because it is the only host that emits **two incompatible formats without declaring which**. If the model absorbs both Codex modes without structural change, it is sound. See §17.1c for what actually landed: **sound — zero structural change to the shared type layer** (`shared_type_layer_has_no_host_identifiers_in_code` stayed green throughout; §13's Codex Legacy + Paginated columns are absorbed by one flat type→Signal table in `derive_coverage`) |
 | **P4.5** | Schema-drift sentinel for `RolloutItem` (§14.4) | CI fails on upstream persistence-policy change |
@@ -1516,7 +1516,7 @@ What landed, one new module per layer of the five-stage pipeline (§4.2):
   by existence probing only (empty → `missing-header`, non-JSON line →
   `non-json`, unreadable → `file-missing`), never by a `SESSION_FORMAT_VERSION`
   check that would misclassify a new record type as corruption.
-- **derive/coverage** — `crates/agent-vitals-core/src/codex_evidence.rs` ↔
+- **derive/coverage** — `crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs` ↔
   `scripts/agent_vitals/agent/codex_evidence.py`: **one flat type→Signal table**
   (never a per-mode fork — real Paginated rollouts carry `task_started`/
   `task_complete`, so mixed streams must just work). Both §13 Codex columns

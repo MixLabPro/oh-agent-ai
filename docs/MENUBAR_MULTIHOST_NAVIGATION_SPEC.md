@@ -50,7 +50,7 @@ v1.0 于 2026-09-01 经设计评审，5 个阻断问题（2×P0 + 3×P1）在本
 
 其他修正：`date_span.last` 前 8 字符是 `YYYY-MM-` 不是 `MM-DD`（改为 `[5..10]`）；L2 行用**截断标题优先**（防同 `<日期·模型·tokens>` 多行不区分）；宿主区**始终渲染**固定 dsh→codex 两行（不再「整体失败不渲染」）；Phase 3 移除 live 指示矛盾；测试补齐跨日/全局 recent/partial coverage/超时/旧覆盖/动态菜单 ID/端到端跳转。
 
-架构要点：数据组装从「托盘 4 次 `sessions list` spawn 拼装」改为**单只读投影命令**（`sessions navigation`），返回 versioned `HostNavigationSnapshot`；**Tauri 只缓存快照并渲染菜单，不负责重新解释测量数据**——排序、日界折叠、覆盖率全部在数据层完成。Codex 北京日界折叠**不是新测量**，复用 core 现成折叠链路（`codex_fold_file`/`codex_aggregate_hours`/`codex_by_model_from_hours`，`crates/agent-vitals-core/src/codex_usage.rs` ↔ `scripts/agent_vitals/agent/codex_usage.py`，已在差分守卫下）。
+架构要点：数据组装从「托盘 4 次 `sessions list` spawn 拼装」改为**单只读投影命令**（`sessions navigation`），返回 versioned `HostNavigationSnapshot`；**Tauri 只缓存快照并渲染菜单，不负责重新解释测量数据**——排序、日界折叠、覆盖率全部在数据层完成。Codex 北京日界折叠**不是新测量**，复用 core 现成折叠链路（`codex_fold_file`/`codex_aggregate_hours`/`codex_by_model_from_hours`，`crates/agent-vitals-core/src/adapters/hosts/codex/sessions/usage.rs` ↔ `scripts/agent_vitals/agent/codex_usage.py`，已在差分守卫下）。
 
 ## 0. TL;DR
 
@@ -93,7 +93,7 @@ CodexBar 有而我们**不该**抄的：reset 倒计时（provider 额度窗口�
 - **host_kind 硬编码两值**：`dsh` / `codex`。
 - list 项字段（`Summary`，`r2a_store.rs:142-151`）：`session_key.host_kind/native_id`、`title`、`model`、`date_span.first/last`（**UTC 日期**）、`tokens_total`、`findings_total`、`cost_usd`。**DSH 的 `cost_usd` 恒为 None**（`r2a_store.rs:202-203`）→ L2 不能带成本列。
 - 分页页有 `total`。
-- **排序 = SessionKey 四元组序**（host_kind → native_id → source_profile → machine_namespace，`crates/agent-vitals-core/src/r2a.rs:22`、`:149-152`），**非时间序** → 「最近 N 个」不能直接取第一页。
+- **排序 = SessionKey 四元组序**（host_kind → native_id → source_profile → machine_namespace，`crates/agent-vitals-core/src/contracts/r2a.rs:22`、`:149-152`），**非时间序** → 「最近 N 个」不能直接取第一页。
 - 日期过滤 = **date_span 交叠语义**：`[first,last]` 与 `[date_from,date_to]` 有交叠才算命中（`r2a.rs:201-216`）。**这只适合当「会话计数」的判定，不能当 token 归属的判定**——P0-2 的根因就在这。
 - 工作台会话 tab 已消费同一命令（`workbench.js:414-505`），冷 cache 首建要几十秒；行已显示 `host_kind`（`:540`），**但没有 host 过滤**（`loadSessions` 只传 `pageSize`，`:487`）——P1-4。
 
@@ -436,9 +436,9 @@ Codex 北京日界折叠**已在 v1 落地**（不再是 Phase 3）。Phase 3 �
 - `sessions list` IPC 薄壳：`src-tauri/src/store.rs:128-149`；**`Command::output()` 无超时 `store.rs:108-110`**（工作台路径，故意保留，§6 决策 5）。
 - host_kind 两值：`src/agent/r2a_store.rs:267`（summary 分发）、`:984`（list 分发）。
 - list 项字段：`r2a_store.rs:142-151`（Summary）；DSH `cost_usd` 恒 None：`:202-203`。
-- 排序非时间序：`crates/agent-vitals-core/src/r2a.rs:22`、`:149-152`（四元组序）。
+- 排序非时间序：`crates/agent-vitals-core/src/contracts/r2a.rs:22`、`:149-152`（四元组序）。
 - 日期过滤交叠语义：`r2a.rs:201-216`；degraded 会话在有日期过滤时被排除：`r2a.rs:188-189`。
-- **Codex 北京日界折叠已存在**：`codex_usage.py:173-203`（`codex_hour_of` +8 北京小时桶）、`:255-350`（`codex_fold_file` + unaccounted 哨兵）、`:353-438`（merge）、`:441-464`（聚合日期桶）、`:467-497`（按前缀过滤）；Rust 镜像 `crates/agent-vitals-core/src/codex_usage.rs`；命令链路 `main.rs:1278-1348`（codex-cost）。
+- **Codex 北京日界折叠已存在**：`codex_usage.py:173-203`（`codex_hour_of` +8 北京小时桶）、`:255-350`（`codex_fold_file` + unaccounted 哨兵）、`:353-438`（merge）、`:441-464`（聚合日期桶）、`:467-497`（按前缀过滤）；Rust 镜像 `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/usage.rs`；命令链路 `main.rs:1278-1348`（codex-cost）。
 - 工作台会话 tab：`src-tauri/ui/workbench.js:480-514`（`loadSessions` 只传 pageSize，**无 host 过滤**）、`:540`（行已显示 host_kind）、`:565-571`（titleText：title → native_id 兜底）、`:573-586`（showSession：最小对象可开详情）、`:489-495`（冷 cache 几十秒 + loading banner）。
 - 托盘无 Submenu 先例、无 host 显示名映射。
 - CodexBar（steipete/CodexBar）：Swift 原生、每 provider 一图标 + popover tiles（用量条/reset 倒计时）、**Merge 模式单图标 + 多 provider overview rows + provider 详情跳转**、会话/成本历史在持久化 Settings → Usage & Spend 视图、popover 不列会话。

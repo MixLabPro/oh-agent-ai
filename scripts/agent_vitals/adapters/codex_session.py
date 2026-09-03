@@ -2,7 +2,7 @@
 extract" 三段（五段式流水线 locate → shape → extract → derive → coverage，
 见 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §4.2）。"derive → coverage" 两段在
 `scripts/agent_vitals/agent/codex_evidence.py`（与 Rust
-`crates/agent-vitals-core/src/codex_evidence.rs` 逐字节对齐），I/O 不进去。
+`crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs` 逐字节对齐），I/O 不进去。
 
 与 Rust `src/codex_session.rs` 逐字节对齐——两条实现产出同一份字典，字节序
 （键序）一致，`tests/test_cli_matrix.py::both()` 的差分靠的就是这份一致。

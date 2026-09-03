@@ -6,6 +6,10 @@
 > 关联：`TAURI_RUNTIME_WORKBENCH_SPEC.md` §7.1、`VITALS_CORE_V0_5/0_6/0_7_*`、
 > `VITALS_CORE_V0_7_ADAPTER_DECISIONS.md`（"先独立 commit 评审拍板、拍板后才动代码"的先例）
 
+> 2026-09-04 后续状态：用户已拍板并授权实施 Phase A 边界；本文件 §0–§7 保留为
+> 当时的可行性审阅记录。Phase A 实际落地见 §8；Phase B1 后续实施与依赖顺序
+> 修正见 §9。Phase B2–F 仍须逐阶段验收。
+
 ---
 
 ## 0. 结论
@@ -48,7 +52,7 @@
 | §12.3 P1「`agent-vitals-core/src` 平铺 Claude/Codex/DSH/WorkBuddy 模块」 | `claude_code_evidence.rs`(49K) `codex_evidence.rs`(85K) `codex_usage.rs`(77K) `dsh_evidence.rs`(33K) `workbuddy_evidence.rs`(36K) 全部平铺在 crate 根 | ✅ 属实——宿主词汇确实进了名义上的"core" |
 | §12.3 P1「data-home 解析存在 Python、CLI Rust、Tauri 三份」 | Rust 侧 `AGENT_VITALS_HOME` 读取散在 `discovery.rs`/`budget.rs`/`r2a_store.rs`/`state.rs`/`takeover.rs`；Tauri `overview.rs:395` 另一份（含 legacy `.skill-vitals` 回退）；Python `paths.py` 第三份 | ✅ 属实 |
 | §12.3 P1「`src/skills/inventory.rs` 同时编排 Skill inventory + DSH session evidence + Codex runtime probe」 | `inventory.rs` 顶部 import `crate::dsh` + `skills::codex` + `skills::openclaw`，docstring 明写四阶段编排含 probe/reconcile | ✅ 属实（但该文件的 docstring 已对"为什么不是一个 trait"给了充分论证——见 §3 反对意见） |
-| §12.3 P1「`cost.rs` 同时承担模型匹配、价格表、订阅排除、成本投影」 | `crates/agent-vitals-core/src/cost.rs` = **99 KB**，单文件含 `price_claude_map` / `resolve_card_catalog` / `flat_rate` / `bucket_price` / `priced_day` / 订阅排除估算 | ✅ 属实——这是最有说服力的一条 |
+| §12.3 P1「`cost.rs` 同时承担模型匹配、价格表、订阅排除、成本投影」 | `crates/agent-vitals-core/src/domain/cost.rs` = **99 KB**，单文件含 `price_claude_map` / `resolve_card_catalog` / `flat_rate` / `bucket_price` / `priced_day` / 订阅排除估算 | ✅ 属实——这是最有说服力的一条 |
 | §14.9「WASM 只能链接 vitals-core、domain 和 adapters 的纯模块」 | `agent-vitals-wasm` 依赖**整个** `agent-vitals-core`（含 `codex_evidence` / `dsh_evidence` / `r2a` / `state` / `cost`）；靠死代码消除裁剪，不是靠 crate 边界 | ⚠️ 现状不满足——需要 crate 拆分才能真正兑现，属 Phase C 的收益之一 |
 | §12.2.4 `host_runtime_registration.rs` 已校验注册 | `src/agent/host_runtime_registration.rs` 存在，`host_contract.rs` G2/G3 已跑 CLI host 词表 ↔ registry ↔ adapter 目录三处逐字对账 | ✅ 属实，是 §7 Host Registry 的可演进基础 |
 | §11 迁移映射表 | 逐条对照现有文件，**路径均存在、映射方向合理**（`usage_fact.rs`→domain/contracts、`*_evidence.rs`→adapters/hosts、`r2a.rs` 拆纯契约/存储投影、`src-tauri`→apps/desktop 等） | ✅ 表本身无错，但见 §4 关于 `usage.rs` / `cost.rs` 拆分粒度的保留意见 |
@@ -171,13 +175,13 @@ Service 时**这段论证和它对应的测试必须迁移过去**，不能在"�
 
 ## 5. 拍板前置检查单（建议用户逐项确认后再进 Phase A 边界）
 
-1. [ ] 确认 v0.8 升为「已拍板」，或指出需要修订的条目。
-2. [ ] 确认 §3.2 的 `usage.rs`/`cost.rs` 拆分标注为「Phase C 设计项」。
-3. [ ] 确认 Python 包在 Phase A–D 期间**不改分层**（§3.3）。
-4. [ ] 确认每个 Phase 换独立分支（§3.7）。
-5. [ ] 确认 Phase A 边界搬迁时 CLAUDE.md 与 `references/` 的模块路径引用同批更新。
-6. [ ] 确认 `~/.agent-vitals/` 新布局的迁移测试是 Phase D 的硬验收项（§3.4）。
-7. [ ] MCP（Phase F）单独立项，本轮不承诺。
+1. [x] v0.8 已升为「已拍板」（2026-09-04）。
+2. [x] `usage.rs`/`cost.rs` 语义拆分保留为 Phase C 设计项；Phase A 只移动所有权路径。
+3. [x] Python 包在 Phase A–D 期间不改分层。
+4. [x] Phase A 使用独立分支 `codex/v0.8-phase-a-boundaries`。
+5. [x] Phase A 同批更新 CLAUDE.md、文档、fixture 与测试中的模块路径引用。
+6. [x] `~/.agent-vitals/` 新布局及迁移测试保留为 Phase D 硬验收项。
+7. [x] MCP 保留为 Phase F 单独立项，本轮不承诺。
 
 ---
 
@@ -197,3 +201,57 @@ Service 时**这段论证和它对应的测试必须迁移过去**，不能在"�
 两者一起提交，全套 gate（`cargo test` / `cargo clippy` / Python `unittest` /
 golden 双侧）验证零漂移后推送。**Phase A 边界搬迁及 B–F 待用户按 §5 拍板后各自
 开分支执行。**
+
+---
+
+## 8. Phase A 边界实施记录（2026-09-04）
+
+用户完成 §5 拍板后，Phase A 边界在独立 worktree/分支实施，未改变公开 JSON、计费、
+fold、fact identity 或宿主 wire 语义：
+
+1. `agent-vitals-core/src` 从平铺结构迁为 `contracts/`、`domain/`、
+   `adapters/hosts/<host>/sessions/`，宿主集合为 Claude Code、Codex、DSH、WorkBuddy。
+2. `lib.rs` 保留旧 public path compatibility re-export；新代码可使用显式所有权路径。
+3. `dependency_budget.rs` 增加目录集合、宿主集合、re-export 等价和
+   domain→host 既有兼容债务不得增长的守卫。
+4. `src/agent/session_sources.rs` 成为 DSH Session 证据读取入口；
+   `src/skills/inventory.rs` 只消费注入的 `SessionEvidenceInput`，不再直接读取
+   Session 日志。注册表快照与 Codex/OpenClaw probe 仍是 Skill capability 证据。
+5. Python 目录结构、state schema、计费逻辑、Tauri 与 MCP 范围均未改变。
+
+Phase A 完成不等于 v0.8 全部完成。下一阶段是 Phase B：抽出独立
+`agent-vitals-adapters` crate；必须在 Phase A 全量门禁和零漂移审计通过后另开评审。
+
+---
+
+## 9. Phase B1 实施与顺序修正（2026-09-04）
+
+独立分支 `codex/v0.8-phase-b-adapters` 已建立 `agent-vitals-adapters` crate，并迁出
+Claude evidence、Codex evidence、WorkBuddy evidence。CLI 使用新 crate 的统一 facade；
+新 crate 保持无文件、进程、环境变量、SQLite、zstd、watcher 与 Tauri 依赖。
+
+实施中确认 Phase A 守卫记录的两组反向依赖会导致 Cargo 环：
+
+- `domain::usage` → Codex usage fold；
+- `domain::{behavior,trajectory,compaction,waste}` → DSH evidence。
+
+所以 Codex usage 与 DSH evidence 暂留 core 的 `adapters/`，由新 adapter crate 统一
+re-export。该状态不是最终所有权，也不冒充 Phase B 全部完成。Phase C 的第一步应先
+解除 domain→host 依赖，然后 Phase B2 将这两个模块物理迁出；架构测试禁止残余集合
+从两个继续增长。这样避免为了目录纯洁复制解析器或提前改变 fold 语义。
+
+**B1 收口（2026-09-04）**：
+
+- **格式噪声清理**：迁移过程一度对 `host_contract.rs` / `dependency_budget.rs`
+  跑了 `cargo fmt` 全文件重排（本仓无 `rustfmt.toml`、既有风格刻意紧凑）——已还原，
+  两个测试文件现在只剩实质路径/断言改动（g3/g8 evidence 路径改仓根相对、
+  `residual_host_adapter_directories` 断言收敛到 `["codex","dsh"]`）。
+- **WASM 依赖**：一度给 `agent-vitals-wasm/Cargo.toml` 挂了 `agent-vitals-adapters`
+  依赖，但 `wasm/src/lib.rs` 一个符号都没用它——已撤掉。§3.1 的 `wasm ─► adapters`
+  是未来边，带真实调用点的 Phase 再加。
+- **全量门禁零漂移**（`codex/v0.8-phase-b-adapters` 工作树）：
+  `cargo build --release` / `cargo test --release`（313 binary + 35 adapters +
+  452 core + 4 依赖预算 + SV601–614 parity + 53 vitals-core，全绿）/
+  `cargo clippy --release --all-targets -D warnings` clean /
+  `python3 -m unittest discover tests` 1143 通过 226 skipped /
+  golden 15 Python + 15 Rust 逐字节一致 / `cargo check -p agent-vitals-wasm` 绿。

@@ -73,8 +73,11 @@ const FORBIDDEN_DEP_KEYS: &[&str] = &[
     // 时间库 —— CLAUDE.md 纪律：core 的日期用手写 civil 数学，chrono 不是依赖
     "chrono",
     "time",
-    // §3.2 禁止方向：不许反依赖二进制 / wasm crate
+    // §3.2 禁止方向：不许反依赖二进制 / wasm / adapter crate
+    // （adapters → core 是唯一允许方向；core → adapters 会形成 Cargo 环，
+    //  这正是 Phase B2 把 codex_usage / dsh_evidence 暂留 core 的原因）
     "agent-vitals",
+    "agent-vitals-adapters",
     "agent-vitals-wasm",
 ];
 
@@ -278,4 +281,111 @@ mod tests {
         strip_test_modules_and_comments(leaky).contains("std::fs"),
         "生产代码里的 std::fs 不能被误剥"
     );
+}
+
+// ─────────────────────── Phase A：逻辑目录边界 ───────────────────────
+
+#[test]
+fn source_root_is_an_explicit_facade_not_a_flat_module_dump() {
+    let src = manifest_dir().join("src");
+    let mut entries: Vec<String> = fs::read_dir(&src)
+        .expect("read src")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["adapters", "compatibility", "contracts", "domain", "lib.rs"],
+        "v0.8 Phase A: agent-vitals-core/src may only expose the three ownership \
+         boundaries, the existing framework compatibility bridge, and lib.rs"
+    );
+}
+
+/// Phase B moved the leaf host adapters to `agent-vitals-adapters`. What remains
+/// under core's `adapters/hosts/` is the explicit Phase C debt only: `codex`
+/// (usage fold — `domain::usage` still calls it) and `dsh` (evidence — the
+/// canonical domain wrappers still call it). This set may shrink to empty when
+/// Phase C breaks the domain → host dependency; it must never grow.
+#[test]
+fn residual_host_adapter_directories_are_explicit_phase_c_debt() {
+    let hosts = manifest_dir().join("src/adapters/hosts");
+    let mut actual: Vec<String> = fs::read_dir(&hosts)
+        .expect("read adapters/hosts")
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    actual.sort();
+    assert_eq!(actual, vec!["codex", "dsh"]);
+    for host in &actual {
+        assert!(
+            hosts.join(host).join("sessions/mod.rs").is_file(),
+            "host `{host}` must expose its existing session surface explicitly"
+        );
+    }
+}
+
+#[test]
+fn nested_paths_and_legacy_facade_resolve_to_the_same_items() {
+    assert_eq!(
+        agent_vitals_core::contracts::usage_fact::USAGE_FACT_FIELDS,
+        agent_vitals_core::usage_fact::USAGE_FACT_FIELDS
+    );
+    assert_eq!(
+        agent_vitals_core::adapters::hosts::codex::sessions::usage::CODEX_TOKEN_FIELDS,
+        agent_vitals_core::codex_usage::CODEX_TOKEN_FIELDS
+    );
+    assert_eq!(
+        agent_vitals_core::domain::usage::AMBIGUOUS_PROVIDER,
+        agent_vitals_core::usage::AMBIGUOUS_PROVIDER
+    );
+    // Only the two Phase C residuals still have evidence/usage types in core;
+    // the leaf adapters (claude_code, workbuddy) moved to `agent-vitals-adapters`.
+    let _: Option<agent_vitals_core::adapters::hosts::dsh::sessions::evidence::DshEvidence> = None;
+}
+
+/// Phase A is a path/ownership move, not the Phase C semantic split. These are
+/// the exact pre-existing domain → host compatibility seams. They may shrink;
+/// any new host dependency must fail CI instead of silently expanding the debt.
+#[test]
+fn domain_to_host_compatibility_debt_cannot_grow() {
+    let allowances = [
+        ("behavior.rs", "crate::dsh_evidence", 4usize),
+        ("canonical_audit.rs", "crate::host_capability", 1),
+        ("compaction.rs", "crate::dsh_evidence", 1),
+        ("trajectory.rs", "crate::dsh_evidence", 2),
+        ("usage.rs", "crate::codex_usage", 3),
+        ("waste.rs", "crate::dsh_evidence", 1),
+    ];
+    let forbidden = [
+        "crate::claude_code_evidence",
+        "crate::codex_evidence",
+        "crate::codex_usage",
+        "crate::dsh_evidence",
+        "crate::workbuddy_evidence",
+        "crate::host_capability",
+        "crate::adapters::hosts",
+    ];
+    each_src_file(|path, content| {
+        if !path.starts_with(manifest_dir().join("src/domain")) {
+            return;
+        }
+        let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+        for needle in forbidden {
+            let found = content.matches(needle).count();
+            let allowed = allowances
+                .iter()
+                .find(|(file, term, _)| *file == name && *term == needle)
+                .map(|(_, _, count)| *count)
+                .unwrap_or(0);
+            assert!(
+                found <= allowed,
+                "v0.8 Phase A dependency direction regressed in {}: found {found} \
+                 references to `{needle}`, budget is {allowed}; remove the host dependency \
+                 or handle it in the Phase C semantic split",
+                path.strip_prefix(manifest_dir()).unwrap_or(path).display()
+            );
+        }
+    });
 }
