@@ -10,10 +10,11 @@
 //! 的差分靠这份一致把关。
 //!
 //! **audit-log 只喂三条 timeline（approvals/sandbox_modes 非空，turns 恒空）。** 五条
-//! timeline 里：`tool_calls` 只有 bash 子集（`sandbox-executed` 的 `commandPreview`）+
-//! `web_fetch`（`WebFetch` 的 `messageParams.target`）可 join——write/edit 只在匿名
-//! traces 里（spec §3）；`approvals` 由 commandApproved/commandRejected/bulk-delete.*
-//! 喂（spec §7 决策映射）；`sandbox_modes` 由 sandbox-executed 喂（mode = WorkBuddy
+//! timeline 里：`tool_calls` 只有 bash 子集（`command-safety.sandbox-executed` 的
+//! `commandPreview`）+ `web_fetch`（`network`+`WebFetch` 的 `messageParams.target`）可
+//! join——write/edit 只在匿名 traces 里（spec §3）；`approvals` 由
+//! `approval`/`rejection`+`Bash`、`file-safety`+`bulk-delete.*` 喂（spec §7 决策映射）；
+//! `sandbox_modes` 由 `command-safety.sandbox-executed` 喂（mode = WorkBuddy
 //! 原生的 `permission_mode`，**不翻译成 DSH 的 danger-full-access**，spec §3.3）；
 //! `turns` **恒空**——没有 turn 结构，把 distinct requestId 硬填成 turn 就是发明不存在
 //! 的边界，SV612/613 靠 `timeline_is_empty` 诚实 Unavailable（spec §8）。
@@ -90,17 +91,27 @@ const ALL_SIGNALS: &[Signal] = &[
     Signal::UserCorrections,
 ];
 
-/// audit-log 已知的 eventType（实测 5 路径，spec §2.2）。其余 eventType 记成
-/// `SourceAttempt`，绝不当作损坏吞掉——审计账本可能还有没被本机语料触发的路径，
-/// 吞掉就是假装账本干净。
-const KNOWN_EVENT_TYPES: &[&str] = &[
-    "sandbox-executed",
-    "WebFetch",
-    "commandApproved",
-    "commandRejected",
-    "bulk-delete.needs-approval",
-    "bulk-delete.approved",
-    "bulk-delete.rejected",
+/// audit-log 已知的 (category, eventType) 对——**WorkBuddy 自己的决策轴就是
+/// category**（轴名 + 全限定 eventType），真机词表（2026-09-02 全量 2,563 条实测）：
+/// 命令进沙箱 `command-safety`+`command-safety.sandbox-executed`、网页抓取
+/// `network`+`WebFetch`、批量删除 `file-safety`+`file-safety.bulk-delete.*`、
+/// 审批/拒绝 `approval`/`rejection`+`Bash`。其余对记成 `SourceAttempt`，绝不当作
+/// 损坏吞掉——审计账本可能还有没被本机语料触发的路径，吞掉就是假装账本干净。
+///
+/// 曾用纸面词表（'sandbox-executed'/'commandApproved'/'bulk-delete.*' 裸名）当
+/// 白名单——真机零命中，2,471/2,563 条记录全被当 unknown 丢掉（ToolCalls 只剩
+/// WebFetch 的 75 条），差分门禁过了是因为 fixture 写的也是纸面词。§14.4 的
+/// schema-drift sentinel（skipped and recorded）当时照实报了 attempts——哨兵没
+/// 错，错在白名单本身。分类键必须用宿主自己的判别器，见
+/// docs/WORKBUDDY_INTEGRATION.md §2.2 的漂移注记。
+const KNOWN_EVENT_TYPES: &[(&str, &str)] = &[
+    ("command-safety", "command-safety.sandbox-executed"),
+    ("network", "WebFetch"),
+    ("file-safety", "file-safety.bulk-delete.needs-approval"),
+    ("file-safety", "file-safety.bulk-delete.approved"),
+    ("file-safety", "file-safety.bulk-delete.rejected"),
+    ("approval", "Bash"),
+    ("rejection", "Bash"),
 ];
 
 /// spec §3 明确 unavailable / 没有对应列的信号（WorkBuddy 列）。`derive_coverage`
@@ -244,10 +255,21 @@ fn message_key(record: &Value) -> String {
     text(record, "messageKey")
 }
 
-/// 审批记录的 tool_name：命令类 → bash，批量删除 → bulk_delete。
+/// (category, eventType) 对——分类键。WorkBuddy 的记录 schema 里 category 就是
+/// 决策轴（command-safety / network / file-safety / approval / rejection），
+/// eventType 是轴内路径（真机实测：命令类是 `command-safety.sandbox-executed`
+/// 全限定名，审批类是裸工具名 `Bash`）。按对键分类才用得上宿主自己的判别器；
+/// 只按 eventType 裸词建白名单正是 2026-09-02 真机事故的根源（见 KNOWN_EVENT_TYPES
+/// 的漂移注记）。
+fn record_key(record: &Value) -> (String, String) {
+    (text(record, "category"), text(record, "eventType"))
+}
+
+/// 审批记录的 tool_name：approval/rejection 轴（真机 eventType='Bash'）→ bash；
+/// file-safety 批量删除 → bulk_delete。旧实现按 `startswith('command')` 猜
+/// eventType——真机审批记录是裸 `Bash`，会被错标成 bulk_delete。
 fn approval_tool(record: &Value) -> String {
-    let et = text(record, "eventType");
-    if et.starts_with("command") {
+    if matches!(text(record, "category").as_str(), "approval" | "rejection") {
         "bash".to_string()
     } else {
         "bulk_delete".to_string()
@@ -316,12 +338,13 @@ struct WorkbuddyTimelines {
 
 /// 跑一遍（按 sequence 排序后的）audit-log 记录，翻译成五条 host-neutral timeline
 /// （spec §7 决策映射）：
-/// - `tool_calls`：sandbox-executed → bash（commandPreview）；WebFetch → web_fetch
-///   （messageParams.target）。
-/// - `approvals`：commandApproved/commandRejected/bulk-delete.* → asked
-///   （tool_name + messageKey），approved/rejected 再补 decided
+/// - `tool_calls`：`command-safety`+`command-safety.sandbox-executed` → bash
+///   （commandPreview）；`network`+`WebFetch` → web_fetch（messageParams.target）。
+/// - `approvals`：`approval`/`rejection`+`Bash`、`file-safety`+`bulk-delete.*` →
+///   asked（tool_name + messageKey），approved/rejected 再补 decided
 ///   （allowed-once/rejected）。needs-approval 只有 asked。
-/// - `sandbox_modes`：sandbox-executed → mode = permission_mode（原生值，不翻译）。
+/// - `sandbox_modes`：`command-safety.sandbox-executed` → mode = permission_mode
+///   （原生值，不翻译）。
 /// - `turns`/`tool_results`：恒空（spec §3/§8）。
 ///
 /// 返回 `(timelines, unknown)`。`seq` = 排序后的下标（会话内序）。`mode` 缺列时
@@ -342,20 +365,27 @@ fn populate_workbuddy_timelines(
     // 曾共用记录序——bridge 后撞出重复 `evt-{n}`。
     let mut next_ordinal: usize = 0;
     for (rec_idx, (_, record)) in sort_records(records).into_iter().enumerate() {
-        let Some(obj) = record.as_object() else {
-            // 非对象记录没有 eventType 可归类——静默跳过等于让证据消失（评审
-            // P4-13：skipped and recorded, never treated as corruption）。记进
-            // `unknown` 由 SourceAttempt 上报（与 `derive_coverage` 的同款缺口
-            // 一起修，两个 unknown 合并时去重）。
+        if !record.is_object() {
+            // 非对象记录没有 (category, eventType) 可归类——静默跳过等于让证据
+            // 消失（评审 P4-13：skipped and recorded, never treated as
+            // corruption）。记进 `unknown` 由 SourceAttempt 上报（与
+            // `derive_coverage` 的同款缺口一起修，两个 unknown 合并时去重）。
             let msg = "non-object audit-log record".to_string();
             if !unknown.contains(&msg) {
                 unknown.push(msg);
             }
             continue;
-        };
-        let event_type = obj.get("eventType").and_then(Value::as_str).unwrap_or("");
-        if !KNOWN_EVENT_TYPES.contains(&event_type) {
-            let msg = format!("unknown audit-log event type: {event_type}");
+        }
+        let key = record_key(record);
+        let key_ref = (key.0.as_str(), key.1.as_str());
+        let known = KNOWN_EVENT_TYPES
+            .iter()
+            .any(|(c, e)| *c == key_ref.0 && *e == key_ref.1);
+        if !known {
+            let msg = format!(
+                "unknown audit-log event (category={}, eventType={})",
+                key.0, key.1
+            );
             if !unknown.contains(&msg) {
                 unknown.push(msg);
             }
@@ -364,7 +394,7 @@ fn populate_workbuddy_timelines(
         let seq = rec_idx as i64;
         let time = parse_time(record);
         let call_id = record.get("toolCallId").and_then(Value::as_str).map(str::to_owned);
-        if event_type == "sandbox-executed" {
+        if key_ref == ("command-safety", "command-safety.sandbox-executed") {
             tool_calls.entries.push(timeline_entry(
                 ToolCallObservation {
                     name: "bash".to_string(),
@@ -382,7 +412,7 @@ fn populate_workbuddy_timelines(
                 call_id,
                 take_ordinal(&mut next_ordinal),
             ));
-        } else if event_type == "WebFetch" {
+        } else if key_ref == ("network", "WebFetch") {
             tool_calls.entries.push(timeline_entry(
                 ToolCallObservation {
                     name: "web_fetch".to_string(),
@@ -401,11 +431,15 @@ fn populate_workbuddy_timelines(
                 }),
                 decided: None,
             };
-            if event_type == "commandApproved" || event_type == "bulk-delete.approved" {
+            if (key.0 == "approval" && key.1 == "Bash")
+                || (key.0 == "file-safety" && key.1 == "file-safety.bulk-delete.approved")
+            {
                 observation.decided = Some(ApprovalDecided {
                     outcome: "allowed-once".to_string(),
                 });
-            } else if event_type == "commandRejected" || event_type == "bulk-delete.rejected" {
+            } else if (key.0 == "rejection" && key.1 == "Bash")
+                || (key.0 == "file-safety" && key.1 == "file-safety.bulk-delete.rejected")
+            {
                 observation.decided = Some(ApprovalDecided {
                     outcome: "rejected".to_string(),
                 });
@@ -472,9 +506,16 @@ fn derive_coverage(
             }
             continue;
         };
-        let event_type = obj.get("eventType").and_then(Value::as_str).unwrap_or("");
-        if !KNOWN_EVENT_TYPES.contains(&event_type) {
-            let msg = format!("unknown audit-log event type: {event_type}");
+        let key = record_key(record);
+        let key_ref = (key.0.as_str(), key.1.as_str());
+        let known = KNOWN_EVENT_TYPES
+            .iter()
+            .any(|(c, e)| *c == key_ref.0 && *e == key_ref.1);
+        if !known {
+            let msg = format!(
+                "unknown audit-log event (category={}, eventType={})",
+                key.0, key.1
+            );
             if !unknown.contains(&msg) {
                 unknown.push(msg);
             }
@@ -485,10 +526,10 @@ fn derive_coverage(
                 request_ids.insert(rid);
             }
         }
-        if event_type == "sandbox-executed" {
+        if key_ref == ("command-safety", "command-safety.sandbox-executed") {
             bump(&mut coverage, Signal::ToolCalls, Bucket::Measured, 1);
             bump(&mut coverage, Signal::SandboxModes, Bucket::Measured, 1);
-        } else if event_type == "WebFetch" {
+        } else if key_ref == ("network", "WebFetch") {
             bump(&mut coverage, Signal::ToolCalls, Bucket::Measured, 1);
             bump(&mut coverage, Signal::NetworkAccess, Bucket::Measured, 1);
         } else {
@@ -559,9 +600,9 @@ fn first_cwd(session_meta: &WorkbuddySessionMeta) -> Vec<String> {
 ///
 /// | 规则 | WorkBuddy |
 /// |---|---|
-/// | SV601–603 | 跑（sandbox-executed 的 commandPreview → bash args_text） |
+/// | SV601–603 | 跑（`command-safety.sandbox-executed` 的 commandPreview → bash args_text） |
 /// | SV604/605 | **Unavailable**（dispatcher 层 host-capability degradation，spec §3.1） |
-/// | SV606 | 跑（WebFetch target → web_fetch args_text） |
+/// | SV606 | 跑（network+WebFetch target → web_fetch args_text） |
 /// | SV607/608 | Unavailable（无 tool_results / exit 码） |
 /// | SV609 | 跑（audit-log 审批路径 → asked）；无审批记录则 Unavailable |
 /// | SV610 | 跑（sandbox 非空），mode 恒非 danger-full-access → 诚实 MeasuredZero |
@@ -700,13 +741,17 @@ mod tests {
     fn sandbox_executed_dual_entries_have_distinct_ordinals() {
         // `evt-{ordinal}` 契约：sandbox-executed 一条记录产 **2 条** entry
         // （tool_calls + sandbox_modes），曾共用记录序 → bridge 后重复 evt-{n}。
+        // 真机词表：命令类 eventType 是 category 全限定名，审批类是裸工具名。
         let records = vec![
-            json!({"sequence": 1, "eventType": "sandbox-executed", "toolCallId": "c1",
+            json!({"sequence": 1, "category": "command-safety",
+                   "eventType": "command-safety.sandbox-executed", "toolCallId": "c1",
                    "commandPreview": "ls", "timestamp": "2026-08-31T10:00:00Z"}),
-            json!({"sequence": 2, "eventType": "WebFetch", "toolCallId": "c2",
+            json!({"sequence": 2, "category": "network", "eventType": "WebFetch",
+                   "toolCallId": "c2",
                    "messageParams": {"target": "https://example.com"},
                    "timestamp": "2026-08-31T10:00:01Z"}),
-            json!({"sequence": 3, "eventType": "sandbox-executed", "toolCallId": "c3",
+            json!({"sequence": 3, "category": "command-safety",
+                   "eventType": "command-safety.sandbox-executed", "toolCallId": "c3",
                    "commandPreview": "pwd", "timestamp": "2026-08-31T10:00:02Z"}),
         ];
         let (tl, unknown) = populate_workbuddy_timelines(&records, &meta());

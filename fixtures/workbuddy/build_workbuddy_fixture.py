@@ -6,12 +6,19 @@ This reproduces the real on-disk WorkBuddy shape (`docs/WORKBUDDY_INTEGRATION.md
 `audit-log/<file>.jsonl` decision ledgers, and `file-history/<sessionId>/`
 version snapshots. All content is synthetic. Two sessions:
 
-- **s1 健康会话** — three clean audit-log records (two `sandbox-executed` bash,
-  one `WebFetch`), a continuous hash chain, db rows with `fullAccess` +
-  `credit_json` → the healthy-session shape of §10 acceptance #4.
-- **s2 审批流程会话** — three approval decisions (approved / rejected /
-  bulk-delete rejected) + one `sandbox-executed`, with a **rotated** hash-chain
-  head → exercises the approvals axis and the rotation note.
+- **s1 健康会话** — three clean audit-log records (two
+  `command-safety.sandbox-executed` bash, one `network`+`WebFetch`), a
+  continuous hash chain, db rows with `fullAccess` + `credit_json` → the
+  healthy-session shape of §10 acceptance #4.
+- **s2 审批流程会话** — three approval decisions (approval/`Bash` approved,
+  rejection/`Bash` rejected, `file-safety` bulk-delete rejected) + one
+  `command-safety.sandbox-executed`, with a **rotated** hash-chain head →
+  exercises the approvals axis and the rotation note.
+
+**eventType 词表必须是真机词表**（category 全限定名 / 审批裸 `Bash`，2026-09-02
+实测，§2.2 漂移注记）：fixture 写纸面词（'sandbox-executed'/'commandApproved'）
+曾让差分门禁两侧同错互证、真机 2,471/2,563 条记录被 evidence 当 unknown 丢弃，
+而 fixture 自校验却全绿——fixture 是「真机形状」的代理，写错词就是让门禁测错东西。
 
 `write_workbuddy_home(base)` writes `base/.workbuddy/` and is the single source
 the differential tests and the builder's self-verification both consume — a
@@ -80,36 +87,39 @@ def audit_record(session_id, event_type, sequence, prev_hash, cur_hash,
 
 def s1_records():
     """s1 健康会话：连续链（head prevHash="" → 干净起点），2 bash + 1 web_fetch，
-    2 distinct requestId → TurnBoundaries derived=2。"""
+    2 distinct requestId → TurnBoundaries derived=2。词表 = 真机（category
+    全限定名；WebFetch 裸名 + category=network）。"""
     return [
-        audit_record("s1", "sandbox-executed", 1, "", "h1",
+        audit_record("s1", "command-safety.sandbox-executed", 1, "", "h1",
                      "2026-08-31T09:01:00Z", "r1", "call-a", "command-safety",
-                     "executed", "ls -la", None, None),
-        audit_record("s1", "sandbox-executed", 2, "h1", "h2",
+                     "allowed", "ls -la", None, None),
+        audit_record("s1", "command-safety.sandbox-executed", 2, "h1", "h2",
                      "2026-08-31T09:02:00Z", "r1", "call-b", "command-safety",
-                     "executed", "cat README.md", None, None),
+                     "allowed", "cat README.md", None, None),
         audit_record("s1", "WebFetch", 3, "h2", "h3",
-                     "2026-08-31T09:03:00Z", "r2", "call-c", "web", "fetched",
-                     None, None, {"target": "https://example.com"}),
+                     "2026-08-31T09:03:00Z", "r2", "call-c", "network",
+                     "allowed", None, None, {"target": "https://example.com"}),
     ]
 
 
 def s2_records():
-    """s2 审批流程会话：head prevHash 无前驱（轮转），3 审批 + 1 sandbox-executed。
-    commandApproved 带 decided allowed-once → SV610 唯一命中点。"""
+    """s2 审批流程会话：head prevHash 无前驱（轮转），3 审批 + 1 bash 执行。
+    approval/`Bash` 带 decided allowed-once → SV610 唯一命中点。词表 = 真机：
+    审批/拒绝记录 eventType 是裸工具名 `Bash`，靠 category=approval/rejection
+    分轴（纸面词 'commandApproved'/'commandRejected' 真机零命中）。"""
     return [
-        audit_record("s2", "commandApproved", 100, "5a5a...rotated", "h100",
-                     "2026-08-31T10:00:00Z", "r1", "call1", "command-safety",
+        audit_record("s2", "Bash", 100, "5a5a...rotated", "h100",
+                     "2026-08-31T10:00:00Z", "r1", "call1", "approval",
                      "approved", "rm -rf /tmp/cache", "删除临时缓存目录", None),
-        audit_record("s2", "commandRejected", 101, "h100", "h101",
-                     "2026-08-31T10:01:00Z", "r2", "call2", "command-safety",
+        audit_record("s2", "Bash", 101, "h100", "h101",
+                     "2026-08-31T10:01:00Z", "r2", "call2", "rejection",
                      "rejected", "sudo rm -rf /var/log/x", "需要 root 权限清理日志", None),
-        audit_record("s2", "bulk-delete.rejected", 102, "h101", "h102",
+        audit_record("s2", "file-safety.bulk-delete.rejected", 102, "h101", "h102",
                      "2026-08-31T10:02:00Z", "r3", "call3", "file-safety",
                      "rejected", None, "批量删除 42 个文件", None),
-        audit_record("s2", "sandbox-executed", 103, "h102", "h103",
+        audit_record("s2", "command-safety.sandbox-executed", 103, "h102", "h103",
                      "2026-08-31T10:03:00Z", "r4", "call4", "command-safety",
-                     "executed", "ls -la", None, None),
+                     "allowed", "ls -la", None, None),
     ]
 
 

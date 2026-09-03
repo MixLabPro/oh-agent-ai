@@ -818,5 +818,107 @@ class TestAtRiskSkillsAreRedacted(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestWorkbuddyEvidenceVocabularyIsTheRealMachineVocabulary(unittest.TestCase):
+    """2026-09-02 真机事故：evidence 白名单用纸面词表（'sandbox-executed'/
+    'commandApproved'/'bulk-delete.*' 裸名），真机 audit-log 的 eventType 是
+    category 全限定名（'command-safety.sandbox-executed'）/ 审批裸工具名
+    （category=approval|rejection + eventType='Bash'）——2,471/2,563 条记录全被
+    当 unknown 丢弃，ToolCalls 只剩 WebFetch 的 75 条；差分门禁全绿是因为 fixture
+    写的也是纸面词。修复后分类键 = (category, eventType) 对。这两个用例钉住：
+    真机形状必须进 timeline/coverage，纸面形状必须进 attempts 哨兵而不是假装通过。"""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from agent_vitals.workbuddy_evidence import (  # noqa: PLC0415
+            _derive_coverage,
+            _populate_workbuddy_timelines,
+        )
+        # staticmethod：普通函数挂成类属性会变绑定方法，self 占了第一参。
+        cls._derive = staticmethod(_derive_coverage)
+        cls._populate = staticmethod(_populate_workbuddy_timelines)
+
+    def _meta(self):
+        return {"permission_mode": "fullAccess", "use_sandbox_cli": 1}
+
+    def test_real_machine_records_feed_all_three_axes(self):
+        """真机形状（2026-09-02 全量 2,563 条实测的 (category, eventType) 对）必须
+        全数进 timeline + coverage，一条都不能掉。"""
+        records = [
+            # 命令进沙箱：category 全限定 eventType ×2
+            {"sequence": 1, "category": "command-safety",
+             "eventType": "command-safety.sandbox-executed", "toolCallId": "c1",
+             "requestId": "r1", "commandPreview": "ls -la",
+             "timestamp": "2026-08-31T10:00:00Z"},
+            {"sequence": 2, "category": "command-safety",
+             "eventType": "command-safety.sandbox-executed", "toolCallId": "c2",
+             "requestId": "r2", "commandPreview": "pwd",
+             "timestamp": "2026-08-31T10:00:01Z"},
+            # 网页抓取：裸名 + category=network
+            {"sequence": 3, "category": "network", "eventType": "WebFetch",
+             "toolCallId": "c3", "requestId": "r3",
+             "messageParams": {"target": "https://example.com"},
+             "timestamp": "2026-08-31T10:00:02Z"},
+            # 审批/拒绝：裸工具名 Bash + category 分轴
+            {"sequence": 4, "category": "approval", "eventType": "Bash",
+             "toolCallId": "c4", "requestId": "r4", "decision": "approved",
+             "messageKey": "m4", "timestamp": "2026-08-31T10:00:03Z"},
+            {"sequence": 5, "category": "rejection", "eventType": "Bash",
+             "toolCallId": "c5", "requestId": "r5", "decision": "rejected",
+             "messageKey": "m5", "timestamp": "2026-08-31T10:00:04Z"},
+            # 批量删除：category 全限定 eventType
+            {"sequence": 6, "category": "file-safety",
+             "eventType": "file-safety.bulk-delete.approved", "toolCallId": "c6",
+             "requestId": "r6", "messageKey": "m6",
+             "timestamp": "2026-08-31T10:00:05Z"},
+        ]
+        timelines, unknown = self._populate(records, self._meta())
+        self.assertEqual(unknown, [], "真机形状一条都不该进 unknown：%r" % unknown)
+        self.assertEqual(len(timelines["tool_calls"]), 3,
+                         "2 bash + 1 web_fetch 全进 tool_calls")
+        self.assertEqual(len(timelines["sandbox_modes"]), 2)
+        self.assertEqual(len(timelines["approvals"]), 3)
+        names = [e["observation"]["name"] for e in timelines["tool_calls"]]
+        self.assertEqual(names, ["bash", "bash", "web_fetch"])
+        # approval/rejection 是裸 Bash → 必须标 bash，不是 bulk_delete（旧实现
+        # startswith('command') 会错标）。
+        tools = [e["observation"]["asked"]["tool_name"]
+                 for e in timelines["approvals"]]
+        self.assertEqual(tools, ["bash", "bash", "bulk_delete"])
+        outcomes = [e["observation"]["decided"]["outcome"]
+                    for e in timelines["approvals"]]
+        self.assertEqual(outcomes, ["allowed-once", "rejected", "allowed-once"])
+        tl, _ = self._populate(records, self._meta())
+        _, cov, cov_unknown = self._derive(records, tl, self._meta())
+        self.assertEqual(cov_unknown, [])
+        self.assertEqual(cov["ToolCalls"]["measured"], 3)
+        self.assertEqual(cov["SandboxModes"]["measured"], 2)
+        self.assertEqual(cov["NetworkAccess"]["measured"], 1)
+        self.assertEqual(cov["ApprovalDecisions"]["measured"], 3)
+
+    def test_paper_vocabulary_never_silently_counts(self):
+        """纸面词（旧白名单的裸名）不是真机形状——必须进 attempts 哨兵，
+        绝不能当 bash/审批计入 timeline（那就是事故复发的样子）。"""
+        records = [
+            {"sequence": 1, "eventType": "sandbox-executed",
+             "commandPreview": "ls", "timestamp": "2026-08-31T10:00:00Z"},
+            {"sequence": 2, "eventType": "commandApproved",
+             "messageKey": "m", "timestamp": "2026-08-31T10:00:01Z"},
+            {"sequence": 3, "category": "approval", "eventType": "Bash",
+             "decision": "approved", "messageKey": "m3",
+             "timestamp": "2026-08-31T10:00:02Z"},
+        ]
+        timelines, unknown = self._populate(records, self._meta())
+        # 前两条是纸面词 → 哨兵；真机形状（approval+Bash）照常进 approvals。
+        self.assertEqual(len(unknown), 2, "纸面词必须全部进哨兵：%r" % unknown)
+        self.assertEqual(len(timelines["tool_calls"]), 0)
+        self.assertEqual(len(timelines["sandbox_modes"]), 0)
+        self.assertEqual(len(timelines["approvals"]), 1)
+        tl, _ = self._populate(records, self._meta())
+        _, cov, _ = self._derive(records, tl, self._meta())
+        self.assertEqual(cov["ToolCalls"]["measured"], 0, "纸面词不许算数")
+        self.assertEqual(cov["ApprovalDecisions"]["measured"], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

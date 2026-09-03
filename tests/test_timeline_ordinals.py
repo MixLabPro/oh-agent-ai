@@ -83,13 +83,18 @@ class WorkbuddyTimelineOrdinalTests(unittest.TestCase):
         return {"permission_mode": "fullAccess", "use_sandbox_cli": 1}
 
     def test_sandbox_executed_dual_entries_have_distinct_ordinals(self):
+        # 真机词表：命令类 eventType 是 category 全限定名（纸面裸名零命中——
+        # 2026-09-02 schema-drift 事故，见 workbuddy_evidence.KNOWN_EVENT_TYPES）。
         records = [
-            {"sequence": 1, "eventType": "sandbox-executed", "toolCallId": "c1",
+            {"sequence": 1, "category": "command-safety",
+             "eventType": "command-safety.sandbox-executed", "toolCallId": "c1",
              "commandPreview": "ls", "timestamp": "2026-08-31T10:00:00Z"},
-            {"sequence": 2, "eventType": "WebFetch", "toolCallId": "c2",
+            {"sequence": 2, "category": "network", "eventType": "WebFetch",
+             "toolCallId": "c2",
              "messageParams": {"target": "https://example.com"},
              "timestamp": "2026-08-31T10:00:01Z"},
-            {"sequence": 3, "eventType": "sandbox-executed", "toolCallId": "c3",
+            {"sequence": 3, "category": "command-safety",
+             "eventType": "command-safety.sandbox-executed", "toolCallId": "c3",
              "commandPreview": "pwd", "timestamp": "2026-08-31T10:00:02Z"},
         ]
         timelines, unknown = _populate_workbuddy_timelines(records, self._meta())

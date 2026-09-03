@@ -10,10 +10,11 @@ extract → derive → coverage，"locate → shape → extract" 留在
 的差分靠这份一致把关。
 
 **audit-log 只喂三条 timeline（approvals/sandbox_modes 非空，turns 恒空）。** 五条
-timeline 里：`tool_calls` 只有 bash 子集（`sandbox-executed` 的 `commandPreview`）+
-`web_fetch`（`WebFetch` 的 `messageParams.target`）可 join——write/edit 只在匿名
-traces 里（spec §3）；`approvals` 由 commandApproved/commandRejected/bulk-delete.*
-喂（spec §7 决策映射）；`sandbox_modes` 由 sandbox-executed 喂（mode = WorkBuddy
+timeline 里：`tool_calls` 只有 bash 子集（`command-safety.sandbox-executed` 的
+`commandPreview`）+ `web_fetch`（`network`+`WebFetch` 的 `messageParams.target`）可
+join——write/edit 只在匿名 traces 里（spec §3）；`approvals` 由
+`approval`/`rejection`+`Bash`、`file-safety`+`bulk-delete.*` 喂（spec §7 决策映射）；
+`sandbox_modes` 由 `command-safety.sandbox-executed` 喂（mode = WorkBuddy
 原生的 `permission_mode`，**不翻译成 DSH 的 danger-full-access**，spec §3.3）；
 `turns` **恒空**——没有 turn 结构，把 distinct requestId 硬填成 turn 就是发明不存在
 的边界，SV612/613 靠 timeline_is_empty 诚实 Unavailable（spec §8）。
@@ -60,17 +61,27 @@ ALL_SIGNALS = (
     "UserCorrections",
 )
 
-# audit-log 已知的 eventType（实测 5 路径，spec §2.2）。其余 eventType 记成
-# SourceAttempt，绝不当作损坏吞掉——审计账本可能还有没被本机语料触发的路径，
-# 吞掉就是假装账本干净。
+# audit-log 已知的 (category, eventType) 对——**WorkBuddy 自己的决策轴就是
+# category**（轴名 + 全限定 eventType），真机词表（2026-09-02 全量 2,563 条实测）：
+# 命令进沙箱 `command-safety`+`command-safety.sandbox-executed`、网页抓取
+# `network`+`WebFetch`、批量删除 `file-safety`+`file-safety.bulk-delete.*`、
+# 审批/拒绝 `approval`/`rejection`+`Bash`。其余对记成 SourceAttempt，绝不当作
+# 损坏吞掉——审计账本可能还有没被本机语料触发的路径，吞掉就是假装账本干净。
+#
+# 曾用纸面词表（'sandbox-executed'/'commandApproved'/'bulk-delete.*' 裸名）当
+# 白名单——真机零命中，2,471/2,563 条记录全被当 unknown 丢掉（ToolCalls 只剩
+# WebFetch 的 75 条），差分门禁过了是因为 fixture 写的也是纸面词。§14.4 的
+# schema-drift sentinel（skipped and recorded）当时照实报了 attempts——哨兵没
+# 错，错在白名单本身。分类键必须用宿主自己的判别器，见
+# docs/WORKBUDDY_INTEGRATION.md §2.2 的漂移注记。
 KNOWN_EVENT_TYPES = frozenset((
-    "sandbox-executed",
-    "WebFetch",
-    "commandApproved",
-    "commandRejected",
-    "bulk-delete.needs-approval",
-    "bulk-delete.approved",
-    "bulk-delete.rejected",
+    ("command-safety", "command-safety.sandbox-executed"),
+    ("network", "WebFetch"),
+    ("file-safety", "file-safety.bulk-delete.needs-approval"),
+    ("file-safety", "file-safety.bulk-delete.approved"),
+    ("file-safety", "file-safety.bulk-delete.rejected"),
+    ("approval", "Bash"),
+    ("rejection", "Bash"),
 ))
 
 # spec §3 明确 unavailable / 没有对应列的信号（WorkBuddy 列）。`derive_coverage`
@@ -185,10 +196,22 @@ def _message_key(record):
     return _text(record, "messageKey")
 
 
+def _record_key(record):
+    """(category, eventType) 对——分类键。WorkBuddy 的记录 schema 里 category 就是
+    决策轴（command-safety / network / file-safety / approval / rejection），
+    eventType 是轴内路径（真机实测：命令类是 `command-safety.sandbox-executed`
+    全限定名，审批类是裸工具名 `Bash`）。按对键分类才用得上宿主自己的判别器；
+    只按 eventType 裸词建白名单正是 2026-09-02 真机事故的根源（见 KNOWN_EVENT_TYPES
+    的漂移注记）。"""
+    return (_text(record, "category"), _text(record, "eventType"))
+
+
 def _approval_tool(record):
-    """审批记录的 tool_name：命令类 → bash，批量删除 → bulk_delete。"""
-    et = _text(record, "eventType")
-    return "bash" if et.startswith("command") else "bulk_delete"
+    """审批记录的 tool_name：approval/rejection 轴（真机 eventType='Bash'）→
+    bash；file-safety 批量删除 → bulk_delete。旧实现按 `startswith('command')`
+    猜 eventType——真机审批记录是裸 `Bash`，会被错标成 bulk_delete。"""
+    return ("bash" if _text(record, "category") in ("approval", "rejection")
+            else "bulk_delete")
 
 
 def _parse_time(record):
@@ -234,12 +257,13 @@ def _chain_note(records):
 def _populate_workbuddy_timelines(records, session_meta):
     """跑一遍（按 sequence 排序后的）audit-log 记录，翻译成五条 host-neutral
     timeline（spec §7 决策映射）：
-    - `tool_calls`：sandbox-executed → bash（commandPreview）；WebFetch → web_fetch
-      （messageParams.target）。
-    - `approvals`：commandApproved/commandRejected/bulk-delete.* → asked
-      （tool_name + messageKey），approved/rejected 再补 decided
+    - `tool_calls`：`command-safety`+`command-safety.sandbox-executed` → bash
+      （commandPreview）；`network`+`WebFetch` → web_fetch（messageParams.target）。
+    - `approvals`：`approval`/`rejection`+`Bash`、`file-safety`+`bulk-delete.*` →
+      asked（tool_name + messageKey），approved/rejected 再补 decided
       （allowed-once/rejected）。needs-approval 只有 asked。
-    - `sandbox_modes`：sandbox-executed → mode = permission_mode（原生值，不翻译）。
+    - `sandbox_modes`：`command-safety.sandbox-executed` → mode = permission_mode
+      （原生值，不翻译）。
     - `turns`/`tool_results`：恒空（spec §3/§8）。
 
     返回 `(timelines, unknown)`。`seq` = 排序后的下标（会话内序）。"""
@@ -268,11 +292,9 @@ def _populate_workbuddy_timelines(records, session_meta):
             if msg not in unknown:
                 unknown.append(msg)
             continue
-        event_type = record.get("eventType")
-        if not isinstance(event_type, str):
-            event_type = ""
-        if event_type not in KNOWN_EVENT_TYPES:
-            msg = "unknown audit-log event type: %s" % event_type
+        key = _record_key(record)
+        if key not in KNOWN_EVENT_TYPES:
+            msg = "unknown audit-log event (category=%s, eventType=%s)" % key
             if msg not in unknown:
                 unknown.append(msg)
             continue
@@ -280,13 +302,13 @@ def _populate_workbuddy_timelines(records, session_meta):
         time = _parse_time(record)
         call_id = record.get("toolCallId")
         call_id = call_id if isinstance(call_id, str) else None
-        if event_type == "sandbox-executed":
+        if key == ("command-safety", "command-safety.sandbox-executed"):
             tool_calls.append(_timeline_entry(
                 {"name": "bash", "args_text": _command_preview(record)},
                 seq, time, call_id, take_ordinal()))
             sandbox.append(_timeline_entry({"mode": mode}, seq, time, call_id,
                                           take_ordinal()))
-        elif event_type == "WebFetch":
+        elif key == ("network", "WebFetch"):
             tool_calls.append(_timeline_entry(
                 {"name": "web_fetch", "args_text": _target_of(record)},
                 seq, time, call_id, take_ordinal()))
@@ -295,9 +317,11 @@ def _populate_workbuddy_timelines(records, session_meta):
                 "asked": {"tool_name": _approval_tool(record),
                           "reason": _message_key(record)},
             }
-            if event_type in ("commandApproved", "bulk-delete.approved"):
+            if key in (("approval", "Bash"),
+                       ("file-safety", "file-safety.bulk-delete.approved")):
                 observation["decided"] = {"outcome": "allowed-once"}
-            elif event_type in ("commandRejected", "bulk-delete.rejected"):
+            elif key in (("rejection", "Bash"),
+                         ("file-safety", "file-safety.bulk-delete.rejected")):
                 observation["decided"] = {"outcome": "rejected"}
             approvals.append(_timeline_entry(observation, seq, time, call_id,
                                              take_ordinal()))
@@ -337,21 +361,19 @@ def _derive_coverage(records, timelines, session_meta):
             if msg not in unknown:
                 unknown.append(msg)
             continue
-        event_type = record.get("eventType")
-        if not isinstance(event_type, str):
-            event_type = ""
-        if event_type not in KNOWN_EVENT_TYPES:
-            msg = "unknown audit-log event type: %s" % event_type
+        key = _record_key(record)
+        if key not in KNOWN_EVENT_TYPES:
+            msg = "unknown audit-log event (category=%s, eventType=%s)" % key
             if msg not in unknown:
                 unknown.append(msg)
             continue
         rid = record.get("requestId")
         if isinstance(rid, str) and rid:
             request_ids.add(rid)
-        if event_type == "sandbox-executed":
+        if key == ("command-safety", "command-safety.sandbox-executed"):
             _bump(coverage, "ToolCalls", "measured")
             _bump(coverage, "SandboxModes", "measured")
-        elif event_type == "WebFetch":
+        elif key == ("network", "WebFetch"):
             _bump(coverage, "ToolCalls", "measured")
             _bump(coverage, "NetworkAccess", "measured")
         else:
@@ -404,9 +426,9 @@ def build_workbuddy_evidence(raw_records, session_id, session_meta):
 
     | 规则 | WorkBuddy |
     |---|---|
-    | SV601–603 | 跑（sandbox-executed 的 commandPreview → bash args_text） |
+    | SV601–603 | 跑（`command-safety.sandbox-executed` 的 commandPreview → bash args_text） |
     | SV604/605 | **Unavailable**（dispatcher 层 host-capability degradation，spec §3.1） |
-    | SV606 | 跑（WebFetch target → web_fetch args_text） |
+    | SV606 | 跑（network+WebFetch target → web_fetch args_text） |
     | SV607/608 | Unavailable（无 tool_results / exit 码） |
     | SV609 | 跑（audit-log 审批路径 → asked）；无审批记录则 Unavailable |
     | SV610 | 跑（sandbox 非空），mode 恒非 danger-full-access → 诚实 MeasuredZero |

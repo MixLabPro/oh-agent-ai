@@ -130,13 +130,26 @@ commandPreview / commandHash / messageKey / messageParams / timestamp / sequence
 hash`。命令类记录带 `commandPreview`/`commandHash`，网络/审批类带 `messageKey`/`messageParams`。
 三类决策路径（实测计数）：
 
-| 路径 | eventType | decision | 适配价值 |
-|---|---|---|---|
-| 命令进沙箱执行 | `command-safety.sandbox-executed`（2391） | `allowed` | `commandPreview` 是完整 bash 命令 → **SV601-603 的 exec→bash 源**；沙箱轴 |
-| 命令需批准放行 | `approval.commandApproved`（1） | `approved` | 审批轴：asked + decided |
-| 命令被用户拒绝 | `rejection.commandRejected`（11） | `rejected` | 审批轴：asked + decided(rejected) |
-| 批量删除审批流 | `file-safety.bulk-delete.{needs-approval,approved,rejected}`（34/28/6） | — | 审批轴；`messageParams` 有 count/threshold/targets |
-| 网页抓取 | `WebFetch`（75） | `allowed` | `messageParams.target`=URL → **SV606 源** |
+| 路径 | category | eventType | decision | 适配价值 |
+|---|---|---|---|---|
+| 命令进沙箱执行 | `command-safety` | `command-safety.sandbox-executed`（2391） | `allowed` | `commandPreview` 是完整 bash 命令 → **SV601-603 的 exec→bash 源**；沙箱轴 |
+| 命令需批准放行 | `approval` | `Bash`（1） | `approved` | 审批轴：asked + decided |
+| 命令被用户拒绝 | `rejection` | `Bash`（11） | `rejected` | 审批轴：asked + decided(rejected) |
+| 批量删除审批流 | `file-safety` | `file-safety.bulk-delete.{needs-approval,approved,rejected}`（34/28/6） | — | 审批轴；`messageParams` 有 count/threshold/targets |
+| 网页抓取 | `network` | `WebFetch`（75） | `allowed` | `messageParams.target`=URL → **SV606 源** |
+
+> **词表漂移事故（2026-09-02 真机核实，分类键必须用 (category, eventType) 对）**：
+> 本表早期两行曾写成 `approval.commandApproved` / `rejection.commandRejected`（纸面词），
+> 且 evidence 白名单（`KNOWN_EVENT_TYPES`）一度只按 eventType 裸词列
+> `sandbox-executed`/`commandApproved`/`bulk-delete.*`——真机零命中，2,471/2,563 条
+> 记录全被当 unknown 丢弃（ToolCalls 只剩 WebFetch 的 75 条），差分门禁全绿是因为
+> fixture 写的也是纸面词。§14.4 的 schema-drift sentinel 当时照实报了 attempts——
+> 哨兵没漏，白名单错了。修复：分类键 = `(category, eventType)` 对（category 是
+> WorkBuddy 自己的决策轴，eventType 是轴内路径——命令类是 category 全限定名，
+> 审批类是裸工具名 `Bash`）；并加回归断言钉住真机形状（fixture 与单测全部用真机词表，
+> 纸面词写进 fixture 就是让门禁测错东西）。账本轮转段标记（17 条，键为
+> `entryCount/segment/firstHash/lastHash/fileSha256`，无 category/eventType）不是
+> 会话事件，归入 unknown → attempts 哨兵，由文档层解释。
 
 ### 2.3 链路完整性：`prevHash→hash` 链
 
