@@ -15,6 +15,7 @@ month/all 由小时聚合成天。不是"codex 天生只有天"，是统一范�
 """
 
 from datetime import date, timedelta
+from typing import NamedTuple, Optional
 
 CODEX_TOKEN_FIELDS = [
     "uncached_input_tokens",
@@ -252,71 +253,100 @@ def _bump_unaccounted(unaccounted, ttype, total_tokens):
     entry["tokens_seen"] += total_tokens
 
 
-def codex_fold_file(events):
-    """单文件有序折叠：一份 rollout 的原始条目流 → `{by_hour_model, by_model,
-    unaccounted, plan}`。纯函数，不碰文件系统——I/O 在适配器层。
+# 单条 token_count 事件的折合出口（mirror `CodexTokenOutcome`，spec §4 判别表）。
+# 单元变体用 kind 常量标记；Consumed 带 5 桶 + 归属 model + 原始时间戳。fold 与
+# UsageFact emitter 共用同一份判别——emitter 绝不另起一套 wire-shape 解释。
+NOT_TOKEN_COUNT = "not-token-count"
+SKIP = "skip"                # info 非 dict / null → skip attempt
+REPEAT = "repeat"            # 同一计量复读 → 不 emit、不计 attempt
+UNREADABLE = "unreadable"    # last_token_usage 无效 → unreadable attempt
+UNATTRIBUTED = "unattributed"  # 首个 turn_context 前 → unattributed attempt
+CONSUMED = "consumed"        # 折进 by_model → 可 emit
 
-    `plan` = 最后看见的有效 rate_limits 快照（含 observed_at；没见过 → None，
-    序列化成 null）。配额状态**即使 info 为 null 也读**（真实语料里 info:null 的
-    事件仍带 rate_limits）。`limits` 是「最后看见的非空限额」——新事件的降级快照
-    （primary/secondary 全 null）不抹掉上一次的限额（见 `_combine_plan`）。
 
-    输出顺序：小时升序、模型/速度按首现序、`unaccounted` 按 type 名升序。这些
-    顺序是字节一致的一部分（Rust 侧 BTreeMap 排序、serde_json Map 插入序对齐）。
+class CodexTokenOutcome(NamedTuple):
+    """单条 token_count 事件的折合出口。`kind` ∈ 上述常量；`facts`（5 桶 tuple）、
+    `model`、`event_ts_utc` 只在 Consumed 上有值（event_ts_utc = 顶层 timestamp
+    回退 payload.timestamp 的原样串，真无时间戳 → None）。"""
+    kind: str
+    facts: Optional[tuple] = None
+    model: Optional[str] = None
+    event_ts_utc: Optional[str] = None
+
+
+class CodexFoldState:
+    """单文件 codex 折叠的**共享 per-`token_count` 观察者**（spec §2.3，mirror
+    `codex_usage.rs::CodexFoldState`）：把 `codex_fold_file` 曾经的内联状态（model/
+    speed 游标、`last_total_sig` 去重、plan 快照、两份桶、unaccounted 残差）提
+    出来，暴露逐事件 `apply`。fold 与 emitter 驱动**同一份状态机**，「emit 集 ==
+    by_model 消费集」是构造出来的，不是事后对齐的。
+
+    `codex_fold_file` 退成薄驱动（new → 逐事件 apply → finish），输出与重构前逐
+    字节一致——零漂移由 golden + `both("codex-cost")` 差分看守。
     """
-    model = None
-    speed = "standard"
-    last_total_sig = None
-    plan = None
-    by_hour_model = {}
-    by_model = {}
-    unaccounted = {}
 
-    for event in events:
+    def __init__(self):
+        self.model = None
+        self.speed = "standard"
+        self.last_total_sig = None
+        self.plan = None
+        self.by_hour_model = {}
+        self.by_model = {}
+        self.unaccounted = {}
+
+    def apply(self, event):
+        """逐事件推进折叠。判别出口只对 token_count 事件有意义；turn_context /
+        thread_settings_applied 只更新游标、返回 NotTokenCount。token_count 分支
+        逐字节对应重构前的 `codex_fold_file` 内联体。"""
         if not isinstance(event, dict):
-            continue
+            return CodexTokenOutcome(NOT_TOKEN_COUNT)
         etype = event.get("type")
         if etype == "turn_context":
             payload = event.get("payload")
             if isinstance(payload, dict):
                 m = payload.get("model")
                 if isinstance(m, str):
-                    model = m
+                    self.model = m
                 s = speed_from_payload(payload)
                 if s is not None:
-                    speed = s
-        elif etype == "event_msg":
+                    self.speed = s
+            return CodexTokenOutcome(NOT_TOKEN_COUNT)
+        if etype == "event_msg":
             payload = event.get("payload")
             if not isinstance(payload, dict):
-                continue
+                return CodexTokenOutcome(NOT_TOKEN_COUNT)
             ptype = payload.get("type")
             if ptype == "thread_settings_applied":
                 s = speed_from_payload(payload)
                 if s is not None:
-                    speed = s
-            elif ptype == "token_count":
+                    self.speed = s
+                return CodexTokenOutcome(NOT_TOKEN_COUNT)
+            if ptype == "token_count":
                 # 配额状态从 token_count 读——**即使 info 为 null 也读**（真实语料
                 # 里 info:null 的事件仍带 rate_limits，配额是独立于 token 计量的
                 # 状态）。plan_type/has_credits/observed_at 最后看见的赢（事件序即
                 # 时间序）；`limits` 走 _combine_plan 保留上一次非空限额——降级快照
                 # （primary/secondary 全 null，真实语料 08-27 出过）不该抹掉配额条。
-                ts = _event_ts(event)
-                if ts is not None:
-                    p = _plan_from_rate_limits(payload.get("rate_limits"), ts)
+                # 时间戳只取一次，原样串喂 Consumed（emitter 的 event_ts_utc）。
+                event_ts_utc = _event_ts(event)
+                if event_ts_utc is not None:
+                    p = _plan_from_rate_limits(payload.get("rate_limits"), event_ts_utc)
                     if p is not None:
-                        plan = _combine_plan(p, plan)
+                        self.plan = _combine_plan(p, self.plan)
                 info = payload.get("info")
                 if not isinstance(info, dict):
-                    continue
+                    return CodexTokenOutcome(SKIP)
                 total = info.get("total_token_usage")
-                # 去重：同一计量复读（total 签名不变）→ 跳过。累计总量单调不减，
-                # 连续去重 = 完全去重（实测 366 处重复签名都是连续成对）。
+                # 去重：同一计量复读（total 签名不变）→ Repeat。累计总量单调不减，
+                # 连续去重 = 完全去重（实测 366 处重复签名都是连续成对）。签名先于
+                # last 校验更新：复读事件即便 last 无效也按 Repeat 处理（与重构前
+                # `continue` 落在同一点）。
                 if isinstance(total, dict):
                     sig = _total_signature(total)
                     if sig is not None:
-                        if last_total_sig == sig:
-                            continue
-                        last_total_sig = sig
+                        if self.last_total_sig == sig:
+                            return CodexTokenOutcome(REPEAT)
+                        self.last_total_sig = sig
                 total_tokens = 0
                 if isinstance(total, dict):
                     tt = total.get("total_tokens")
@@ -324,30 +354,50 @@ def codex_fold_file(events):
                         total_tokens = tt
                 facts = codex_token_facts(info.get("last_token_usage"))
                 if facts is None:
-                    _bump_unaccounted(unaccounted, "token_count_invalid_last_usage",
-                                      total_tokens)
-                    continue
-                if model is None:
+                    _bump_unaccounted(self.unaccounted,
+                                      "token_count_invalid_last_usage", total_tokens)
+                    return CodexTokenOutcome(UNREADABLE)
+                if self.model is None:
                     # 首个 turn_context 之前：看见了 token、没模型可归。
-                    _bump_unaccounted(unaccounted, "token_count_before_turn_context",
-                                      total_tokens)
-                    continue
+                    _bump_unaccounted(self.unaccounted,
+                                      "token_count_before_turn_context", total_tokens)
+                    return CodexTokenOutcome(UNATTRIBUTED)
                 hour = codex_hour_of(event)
                 if hour is not None:
-                    _add_bucket(by_hour_model.setdefault(hour, {}), model, speed, facts)
-                _add_bucket(by_model, model, speed, facts)
+                    _add_bucket(self.by_hour_model.setdefault(hour, {}),
+                                self.model, self.speed, facts)
+                _add_bucket(self.by_model, self.model, self.speed, facts)
+                return CodexTokenOutcome(CONSUMED, facts, self.model, event_ts_utc)
+            return CodexTokenOutcome(NOT_TOKEN_COUNT)
+        return CodexTokenOutcome(NOT_TOKEN_COUNT)
 
-    # 小时升序：与 Rust 侧 BTreeMap 对齐（单文件里本是时间序，但排序保证任意
-    # 输入顺序下两侧仍逐字节一致）。
-    by_hour_out = {}
-    for h in sorted(by_hour_model):
-        by_hour_out[h] = by_hour_model[h]
-    unaccounted_out = [
-        {"type": t, "count": v["count"], "tokens_seen": v["tokens_seen"]}
-        for t, v in sorted(unaccounted.items())
-    ]
-    return {"by_hour_model": by_hour_out, "by_model": by_model,
-            "unaccounted": unaccounted_out, "plan": plan}
+    def finish(self):
+        """折叠收尾：小时升序、unaccounted 按 type 名升序、plan 快照或 None。与
+        重构前的 `codex_fold_file` 尾部逐字节一致（Rust 侧 BTreeMap 排序、serde_json
+        Map 插入序对齐——键序是字节一致的一部分，不能重排）。"""
+        by_hour_out = {}
+        for h in sorted(self.by_hour_model):
+            by_hour_out[h] = self.by_hour_model[h]
+        unaccounted_out = [
+            {"type": t, "count": v["count"], "tokens_seen": v["tokens_seen"]}
+            for t, v in sorted(self.unaccounted.items())
+        ]
+        return {"by_hour_model": by_hour_out, "by_model": self.by_model,
+                "unaccounted": unaccounted_out, "plan": self.plan}
+
+
+def codex_fold_file(events):
+    """单文件有序折叠：一份 rollout 的原始条目流 → `{by_hour_model, by_model,
+    unaccounted, plan}`。纯函数，不碰文件系统——I/O 在适配器层。
+
+    薄驱动：`CodexFoldState` → 逐事件 apply → finish（spec §2.3 byte-neutral
+    refactor）。折叠语义（为什么读 last 不读累计、复读去重、plan 快照、游标）见
+    `CodexFoldState`；输出顺序是字节一致的一部分（Rust 侧 BTreeMap 排序）。
+    """
+    state = CodexFoldState()
+    for event in events:
+        state.apply(event)
+    return state.finish()
 
 
 def codex_merge_folds(folds):

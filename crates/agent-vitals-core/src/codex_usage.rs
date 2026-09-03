@@ -328,38 +328,91 @@ fn bump_unaccounted(
     e.1 += total_tokens;
 }
 
-/// 单文件有序折叠：把一份 rollout 的原始条目流折成 `{by_hour_model, by_model,
-/// unaccounted, plan}`。纯函数，不碰文件系统——I/O 在适配器层，这里只吃 `events`。
+/// 单条 `token_count` 事件的折合出口（spec §2.3 / §4 判别表）。fold 与
+/// UsageFact emitter 共用同一份 per-event 判别——emitter 绝不能另起一套
+/// wire-shape 解释（Stage 1 R1 教训）。判别与 fold 的 by_model 消费集一一对应：
 ///
-/// 输出顺序：小时升序（BTreeMap）、模型/速度按首现序（Map 插入序）、`unaccounted`
-/// 按 type 名升序。这些顺序是字节一致的一部分。
-pub fn codex_fold_file(events: &[Value]) -> Value {
-    let mut model: Option<String> = None;
-    let mut speed: &'static str = "standard";
-    let mut last_total_sig: Option<(i64, i64, i64, i64, i64, i64)> = None;
-    let mut plan: Option<Value> = None;
-    // 小时升序：BTreeMap；模型层 / 速度层用 serde_json Map 保插入序。
-    let mut by_hour_model: std::collections::BTreeMap<String, Map<String, Value>> =
-        std::collections::BTreeMap::new();
-    let mut by_model: Map<String, Value> = Map::new();
-    let mut unaccounted: std::collections::BTreeMap<String, (i64, i64)> =
-        std::collections::BTreeMap::new();
+/// | 变体 | fold 判别 | emitter 行为 |
+/// |---|---|---|
+/// | `NotTokenCount` | 非 token_count 事件（turn_context / thread_settings / …） | 不计数 |
+/// | `Skip` | token_count 但 `info` 非 dict / null | skip attempt，不发 fact |
+/// | `Repeat` | 连续 total 签名复读（同一计量复读） | 不 emit、不计 attempt |
+/// | `Unreadable` | `last_token_usage` 无效（`codex_token_facts` None） | unreadable attempt |
+/// | `Unattributed` | model 游标为空（首个 turn_context 之前） | unattributed attempt |
+/// | `Consumed` | 折进 by_model（可 emit） | fact；附 5 桶 + 归属 model + 原始时间戳 |
+///
+/// `Consumed` 携带 `event_ts_utc`（顶层 `timestamp` 回退 `payload.timestamp` 的
+/// **原样串**；无时间戳 → None）——emitter 不重抄一遍时间戳回退逻辑。时间轴小时
+/// 键由 `codex_hour_of` 在 apply 内算；emitter 只要原始时间戳、不需要小时桶。
+#[derive(Debug, PartialEq)]
+pub enum CodexTokenOutcome {
+    NotTokenCount,
+    Skip,
+    Repeat,
+    Unreadable,
+    Unattributed,
+    Consumed {
+        facts: [i64; 5],
+        model: String,
+        event_ts_utc: Option<String>,
+    },
+}
 
-    for event in events {
+/// 单文件 codex 折叠的**共享 per-`token_count` 观察者**（spec §2.3）：把
+/// `codex_fold_file` 曾经的内联状态（model/speed 游标、`last_total_sig` 去重、
+/// plan 快照、两份桶、unaccounted 残差）提出来，暴露逐事件 `apply`。fold 与
+/// emitter 驱动**同一份状态机**，「emit 集 == by_model 消费集」是构造出来的，
+/// 不是事后对齐的。
+///
+/// 这是 Stage 2 的 byte-neutral refactor：`codex_fold_file` 退成薄驱动
+/// （new → 逐事件 apply → finish），输出与重构前逐字节一致——零漂移由 golden
+/// 15/15 + `test_cli_matrix::both("codex-cost")` 差分看守。Python 镜像见
+/// `codex_usage.py::CodexFoldState`。
+pub struct CodexFoldState {
+    model: Option<String>,
+    speed: &'static str,
+    last_total_sig: Option<(i64, i64, i64, i64, i64, i64)>,
+    plan: Option<Value>,
+    by_hour_model: std::collections::BTreeMap<String, Map<String, Value>>,
+    by_model: Map<String, Value>,
+    unaccounted: std::collections::BTreeMap<String, (i64, i64)>,
+}
+
+impl CodexFoldState {
+    pub fn new() -> Self {
+        Self {
+            model: None,
+            speed: "standard",
+            last_total_sig: None,
+            plan: None,
+            by_hour_model: std::collections::BTreeMap::new(),
+            by_model: Map::new(),
+            unaccounted: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// 逐事件推进折叠。判别出口（`CodexTokenOutcome`）只对 token_count 事件有
+    /// 意义；turn_context / thread_settings_applied 只更新游标、返回
+    /// `NotTokenCount`。token_count 分支**逐字节对应**重构前的 `codex_fold_file`
+    /// 内联体：配额快照即使 `info` 为 null 也读（配额独立于 token 计量），
+    /// `info` 非对象/null 是 skip（不是残差），复读签名先于 last 校验（累计单调
+    /// 不减 → 连续去重 = 完全去重），`total_tokens` 只喂残差哨兵。
+    pub fn apply(&mut self, event: &Value) -> CodexTokenOutcome {
         if !event.is_object() {
-            continue;
+            return CodexTokenOutcome::NotTokenCount;
         }
         let ttype = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match ttype {
             "turn_context" => {
                 if let Some(p) = event.get("payload") {
                     if let Some(m) = p.get("model").and_then(|v| v.as_str()) {
-                        model = Some(m.to_string());
+                        self.model = Some(m.to_string());
                     }
                     if let Some(s) = speed_from_payload(p) {
-                        speed = s;
+                        self.speed = s;
                     }
                 }
+                CodexTokenOutcome::NotTokenCount
             }
             "event_msg" => {
                 let payload = event.get("payload");
@@ -371,22 +424,27 @@ pub fn codex_fold_file(events: &[Value]) -> Value {
                     "thread_settings_applied" => {
                         if let Some(p) = payload {
                             if let Some(s) = speed_from_payload(p) {
-                                speed = s;
+                                self.speed = s;
                             }
                         }
+                        CodexTokenOutcome::NotTokenCount
                     }
                     "token_count" => {
-                        let Some(payload) = payload else { continue };
+                        let Some(payload) = payload else {
+                            return CodexTokenOutcome::NotTokenCount;
+                        };
                         // 配额状态从 token_count 读——**即使 `info` 为 null 也读**
                         // （真实语料里 info:null 的事件仍带 rate_limits，配额是独立
                         // 于 token 计量的状态）。plan_type/has_credits/observed_at 最后
                         // 看见的赢（事件序即时间序）；`limits` 走 combine_plan 保留
                         // 上一次非空限额——降级快照（primary/secondary 全 null，真实
-                        // 语料 08-27 出过）不该抹掉配额条。
+                        // 语料 08-27 出过）不该抹掉配额条。时间戳只取一次，原样串喂
+                        // Consumed（emitter 的 event_ts_utc）。
+                        let event_ts_utc = event_timestamp(event);
                         if let Some(rl) = payload.get("rate_limits") {
-                            if let Some(ts) = event_timestamp(event) {
-                                if let Some(p) = plan_from_rate_limits(rl, &ts) {
-                                    plan = Some(match plan.take() {
+                            if let Some(ts) = event_ts_utc.as_deref() {
+                                if let Some(p) = plan_from_rate_limits(rl, ts) {
+                                    self.plan = Some(match self.plan.take() {
                                         Some(prev) => combine_plan(&p, &prev),
                                         None => p,
                                     });
@@ -396,18 +454,22 @@ pub fn codex_fold_file(events: &[Value]) -> Value {
                         // `info` 必须真是对象：键存在但值为 `null`（真实语料 08-19 出过）
                         // 意味着这个事件**没有任何 token 字段**，不是「看见了没接住」，
                         // 不该进残差哨兵——Python 侧 `isinstance(info, dict)` 直接跳过，
-                        // 这里用 `as_object()` 对齐：缺键和 null 都跳过，绝不在二者之间
-                        // 产生 Py↔Rust 分歧。
-                        let Some(info) = payload.get("info").and_then(|v| v.as_object()) else { continue };
+                        // 这里用 `as_object()` 对齐：缺键和 null 都等价判 Skip，绝不在
+                        // 二者之间产生 Py↔Rust 分歧。
+                        let Some(info) = payload.get("info").and_then(|v| v.as_object()) else {
+                            return CodexTokenOutcome::Skip;
+                        };
                         let total = info.get("total_token_usage");
-                        // 去重：同一计量复读（total 签名不变）→ 跳过。累计总量单调
+                        // 去重：同一计量复读（total 签名不变）→ Repeat。累计总量单调
                         // 不减，连续去重 = 完全去重（实测 366 处重复签名都是连续成对）。
+                        // 签名先于 last 校验更新：复读事件即便 last 无效也按 Repeat 处理
+                        // （与重构前 `continue` 落在同一点）。
                         if let Some(total) = total {
                             if let Some(sig) = total_signature(total) {
-                                if last_total_sig == Some(sig) {
-                                    continue;
+                                if self.last_total_sig == Some(sig) {
+                                    return CodexTokenOutcome::Repeat;
                                 }
-                                last_total_sig = Some(sig);
+                                self.last_total_sig = Some(sig);
                             }
                         }
                         let total_tokens = total
@@ -415,47 +477,71 @@ pub fn codex_fold_file(events: &[Value]) -> Value {
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
                         let Some(last) = info.get("last_token_usage") else {
-                            bump_unaccounted(&mut unaccounted, "token_count_invalid_last_usage", total_tokens);
-                            continue;
+                            bump_unaccounted(&mut self.unaccounted, "token_count_invalid_last_usage", total_tokens);
+                            return CodexTokenOutcome::Unreadable;
                         };
                         let Some(facts) = codex_token_facts(last) else {
-                            bump_unaccounted(&mut unaccounted, "token_count_invalid_last_usage", total_tokens);
-                            continue;
+                            bump_unaccounted(&mut self.unaccounted, "token_count_invalid_last_usage", total_tokens);
+                            return CodexTokenOutcome::Unreadable;
                         };
-                        let Some(m) = model.clone() else {
+                        let Some(m) = self.model.clone() else {
                             // 首个 turn_context 之前：看见了 token、没模型可归。
-                            bump_unaccounted(&mut unaccounted, "token_count_before_turn_context", total_tokens);
-                            continue;
+                            bump_unaccounted(&mut self.unaccounted, "token_count_before_turn_context", total_tokens);
+                            return CodexTokenOutcome::Unattributed;
                         };
                         if let Some(h) = codex_hour_of(event) {
-                            let hour_map = by_hour_model.entry(h).or_default();
-                            add_bucket(hour_map, &m, speed, &facts);
+                            let hour_map = self.by_hour_model.entry(h).or_default();
+                            add_bucket(hour_map, &m, self.speed, &facts);
                         }
-                        add_bucket(&mut by_model, &m, speed, &facts);
+                        add_bucket(&mut self.by_model, &m, self.speed, &facts);
+                        CodexTokenOutcome::Consumed { facts, model: m, event_ts_utc }
                     }
-                    _ => {}
+                    _ => CodexTokenOutcome::NotTokenCount,
                 }
             }
-            _ => {}
+            _ => CodexTokenOutcome::NotTokenCount,
         }
     }
 
-    let mut hour_out = Map::new();
-    for (h, hour_map) in by_hour_model {
-        hour_out.insert(h, Value::Object(hour_map));
-    }
-    let unaccounted_out: Vec<Value> = unaccounted
-        .iter()
-        .map(|(t, (count, tokens_seen))| {
-            json!({"type": t, "count": count, "tokens_seen": tokens_seen})
+    /// 折叠收尾：`by_hour_model` 小时升序（BTreeMap 迭代序）、`unaccounted` 按
+    /// type 名升序排成数组、`plan` 取快照或 null。**与原 `codex_fold_file` 尾部
+    /// 逐字节一致**——键序是字节一致的一部分，不能重排。
+    pub fn finish(self) -> Value {
+        let mut hour_out = Map::new();
+        for (h, hour_map) in self.by_hour_model {
+            hour_out.insert(h, Value::Object(hour_map));
+        }
+        let unaccounted_out: Vec<Value> = self
+            .unaccounted
+            .iter()
+            .map(|(t, (count, tokens_seen))| {
+                json!({"type": t, "count": count, "tokens_seen": tokens_seen})
+            })
+            .collect();
+        json!({
+            "by_hour_model": Value::Object(hour_out),
+            "by_model": Value::Object(self.by_model),
+            "unaccounted": Value::Array(unaccounted_out),
+            "plan": self.plan.unwrap_or(Value::Null),
         })
-        .collect();
-    json!({
-        "by_hour_model": Value::Object(hour_out),
-        "by_model": Value::Object(by_model),
-        "unaccounted": Value::Array(unaccounted_out),
-        "plan": plan.unwrap_or(Value::Null),
-    })
+    }
+}
+
+/// 单文件有序折叠：把一份 rollout 的原始条目流折成 `{by_hour_model, by_model,
+/// unaccounted, plan}`。纯函数，不碰文件系统——I/O 在适配器层，这里只吃 `events`。
+///
+/// 薄驱动：`CodexFoldState::new()` → 逐事件 `apply` → `finish()`。输出与重构前
+/// 逐字节一致（spec §2.3 byte-neutral refactor；golden + `both("codex-cost")`
+/// 差分证零漂移）。
+///
+/// 输出顺序：小时升序（BTreeMap）、模型/速度按首现序（Map 插入序）、`unaccounted`
+/// 按 type 名升序。这些顺序是字节一致的一部分。
+pub fn codex_fold_file(events: &[Value]) -> Value {
+    let mut state = CodexFoldState::new();
+    for event in events {
+        state.apply(event);
+    }
+    state.finish()
 }
 
 /// 跨文件合并：把多个 `codex_fold_file` 的结果逐桶求和。纯函数。
@@ -1369,5 +1455,85 @@ mod tests {
             {"type": "y", "count": 1},
         ]);
         assert_eq!(unaccounted_tokens_seen(&partial), 100);
+    }
+
+    #[test]
+    fn state_apply_exposes_fold_outcome_per_token_count() {
+        // 共享观察者（spec §2.3）的判别出口必须与 fold 的 by_model 消费集一一对应：
+        // valid → Consumed、复读 → Repeat、首 turn_context 前 → Unattributed、
+        // reasoning>output → Unreadable、info null → Skip。这是 emitter 分类的依据
+        // （spec §4 判别表），钉死防止 apply 与 fold 漂移。
+        // 状态独立：before-turn-context 的 token_count 只喂 sig、不折叠。
+        let mut st_un = CodexFoldState::new();
+        let before = token_count_line(
+            "2026-08-05T10:00:01Z",
+            (100, 10, 0, 0, 0, 110),
+            (100, 10, 0, 0, 0, 110),
+        );
+        assert_eq!(st_un.apply(&before), CodexTokenOutcome::Unattributed);
+
+        let mut st = CodexFoldState::new();
+        assert_eq!(
+            st.apply(&turn_context_line("gpt-5.6-sol", "2026-08-05T10:00:00Z")),
+            CodexTokenOutcome::NotTokenCount
+        );
+        let e1 = token_count_line(
+            "2026-08-05T10:00:01Z",
+            (100, 10, 0, 0, 0, 110),
+            (100, 10, 0, 0, 0, 110),
+        );
+        match st.apply(&e1) {
+            CodexTokenOutcome::Consumed { facts, model, event_ts_utc } => {
+                assert_eq!(facts, [100, 10, 0, 0, 0]);
+                assert_eq!(model, "gpt-5.6-sol");
+                assert_eq!(event_ts_utc.as_deref(), Some("2026-08-05T10:00:01Z"));
+            }
+            other => panic!("expected Consumed, got {other:?}"),
+        }
+        // 同一 total 签名复读 → Repeat。
+        let e2 = token_count_line(
+            "2026-08-05T10:00:02Z",
+            (100, 10, 0, 0, 0, 110),
+            (0, 0, 0, 0, 0, 12345),
+        );
+        assert_eq!(st.apply(&e2), CodexTokenOutcome::Repeat);
+        // reasoning > output → Unreadable。
+        let bad = serde_json::json!({
+            "timestamp": "2026-08-05T10:00:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {
+                        "input_tokens": 100, "output_tokens": 10,
+                        "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "reasoning_output_tokens": 12, "total_tokens": 110,
+                    },
+                    "last_token_usage": {
+                        "input_tokens": 100, "output_tokens": 5,
+                        "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "reasoning_output_tokens": 9, "total_tokens": 110,
+                    },
+                }
+            }
+        });
+        assert_eq!(st.apply(&bad), CodexTokenOutcome::Unreadable);
+        // info null → Skip（不进残差哨兵）。
+        let info_null = serde_json::json!({
+            "timestamp": "2026-08-05T10:00:04Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": null, "rate_limits": {"limit_id": "premium"}},
+        });
+        assert_eq!(st.apply(&info_null), CodexTokenOutcome::Skip);
+        // 薄驱动恒等：逐事件 apply + finish == codex_fold_file（byte-neutral 门）。
+        let stream = vec![
+            turn_context_line("gpt-5.6-sol", "2026-08-05T10:00:00Z"),
+            e1, e2, bad, info_null,
+        ];
+        let mut st2 = CodexFoldState::new();
+        for ev in &stream {
+            st2.apply(ev);
+        }
+        assert_eq!(st2.finish(), codex_fold_file(&stream));
     }
 }
