@@ -524,6 +524,32 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Audit ONE DSH session file (`.jsonl` or multi-frame `.zstd`) into
+    /// per-observation-slot UsageFact rows (facts + coverage; v0.7 spec §3
+    /// candidate #3 Stage 3). In-memory emit + read-only diagnostic — writes no
+    /// state at all. machine_namespace is REQUIRED (spec §9) — same reasoning as
+    /// claude-usage-facts: missing exits 2 instead of being defaulted.
+    /// source_profile derives from the header cwd by default; a header with no
+    /// cwd and no explicit profile is `unattributed` (exit 2). Strict single-file
+    /// errors (§4.1) never emit a fake-empty success.
+    /// Byte-for-byte mirror of Python `scan.py dsh-usage-facts --json -`.
+    DshUsageFacts {
+        /// Path to a DSH session file (.jsonl or multi-frame .zstd)
+        #[arg(long = "path")]
+        session_path: PathBuf,
+        /// machine_namespace component of SessionKey — required (spec §9);
+        /// the CLI never reads/writes state to invent one (missing exits 2)
+        #[arg(long)]
+        machine_namespace: Option<String>,
+        /// source_profile component of SessionKey (default: derive from the
+        /// session header cwd; explicit wins; header cwd missing + none →
+        /// unattributed, exit 2)
+        #[arg(long)]
+        source_profile: Option<String>,
+        /// Write the UsageFact JSON to FILE; use - for stdout (default: human summary)
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+    },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
     /// `sessions` row is the join anchor across the three joinable surfaces (spec
@@ -1806,6 +1832,60 @@ session_store={store} fold={fold}"
             print!(
                 "{}",
                 agent::codex_usage_fact::to_human_summary(&result, rollouts, &ns, source_profile)
+            );
+        }
+        return;
+    }
+
+    if let Some(Cmd::DshUsageFacts { session_path, machine_namespace, source_profile, rows_json }) = &args.cmd
+    {
+        // machine_namespace 必传（spec §9），同 codex-usage-facts：绝不让 CLI 读
+        // takeover 身份补齐（隐式 state 写），缺失即失败（exit 2）。
+        let ns = match machine_namespace {
+            Some(ns) => ns.clone(),
+            None => {
+                eprintln!(
+                    "dsh-usage-facts: --machine-namespace is required \
+                     (v0.7 spec §9: caller-provided; a CLI default would write state)"
+                );
+                std::process::exit(2);
+            }
+        };
+        // strict 硬错误（读/解码/解析/身份/归属/duplicate）→ exit 2，不出空成功伪装
+        // 「没有用量」。Err 串恒为 "code: message"，与 Python DshUsageFactError 同源。
+        let result = match agent::dsh_usage_fact::dsh_session_to_usage_facts(
+            session_path,
+            &ns,
+            source_profile.as_deref(),
+        ) {
+            Ok(r) => r,
+            Err(msg) => {
+                eprintln!("dsh-usage-facts failed: {msg}");
+                std::process::exit(2);
+            }
+        };
+        if let Some(json_path) = rows_json {
+            // --json payload = spec §5 字面 {facts, coverage}（键序固定，Python
+            // handler 的 payload dict 同款）。facts 是 build_usage_fact 输出、
+            // coverage 四键。
+            let payload = agent::dsh_usage_fact::to_payload_value(&result);
+            let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            if json_path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(json_path, &text).is_err() {
+                eprintln!("failed to write {}", json_path.display());
+                std::process::exit(2);
+            } else {
+                println!(
+                    "Wrote {}: {} facts",
+                    json_path.display(),
+                    result.facts.len()
+                );
+            }
+        } else {
+            print!(
+                "{}",
+                agent::dsh_usage_fact::to_human_summary(&result, session_path, &ns)
             );
         }
         return;

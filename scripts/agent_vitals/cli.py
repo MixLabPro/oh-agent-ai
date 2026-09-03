@@ -906,6 +906,35 @@ def _main():
         "--json", metavar="FILE",
         help="Write UsageFact JSON to FILE; use - for stdout. Without this, "
              "print human summary.")
+    # v0.7 Stage 3 commit 2（spec §5 字面）：DSH UsageFact 诊断 CLI——单份
+    # session 文件（明文 .jsonl 或 .zstd）→ facts + coverage，**不写盘**。
+    # source_profile 缺省从 header cwd 派生；cwd 缺失 + 无显式 profile →
+    # unattributed（exit 2）。strict 硬错误不输出空成功（§4.1）。与 Rust 镜像
+    # `dsh-usage-facts` stdout 字节同源。
+    p_dsh_usage_facts = sub.add_parser(
+        "dsh-usage-facts",
+        help="Audit ONE DSH session file into UsageFact rows "
+             "(per observation slot, no state writes; v0.7 spec §3 candidate #3 "
+             "Stage 3)")
+    p_dsh_usage_facts.add_argument(
+        "--path", required=True,
+        help="Path to a DSH session file (.jsonl or multi-frame .zstd, e.g. "
+             "<DSH_HOME>/sessions/<project>/<id>/session.jsonl.zstd)")
+    p_dsh_usage_facts.add_argument(
+        "--machine-namespace", default=None,
+        help="machine_namespace component of SessionKey — REQUIRED (v0.7 spec "
+             "§9: caller-provided; missing exits 2). The CLI never reads/writes "
+             "state to invent one — a fact's identity fields seed its fact_id, "
+             "so a CLI default would destabilize replays AND write machine.json")
+    p_dsh_usage_facts.add_argument(
+        "--source-profile", default=None,
+        help="source_profile component of SessionKey (default: derive from the "
+             "session header cwd; explicit P wins; header cwd missing + no P → "
+             "unattributed, exit 2)")
+    p_dsh_usage_facts.add_argument(
+        "--json", metavar="FILE",
+        help="Write UsageFact JSON to FILE; use - for stdout. Without this, "
+             "print human summary.")
     # WorkBuddy 单会话审计：coverage（§13 逐信号）+ SV601–614 findings。与
     # claude-session 同构；host-capability degradation 是 SV604/605（spec §3.1）——
     # 只有 bash（audit-log commandPreview）与 web_fetch（WebFetch target）能 join，
@@ -1581,6 +1610,55 @@ def _main():
                      result.coverage["total_token_count_events"],
                      result.coverage["skip_rows"]))
             print("Attempts: %s" % result.attempts)
+        return
+
+    if getattr(args, "cmd", None) == "dsh-usage-facts":
+        from agent_vitals.agent import dsh_usage_fact as duf
+        # machine_namespace 必传（spec §9），同 codex-usage-facts：绝不让 CLI
+        # 读 takeover 身份补齐（那是隐式 state 写），缺失即失败（exit 2）。
+        if not args.machine_namespace:
+            print(
+                "dsh-usage-facts: --machine-namespace is required "
+                "(v0.7 spec §9: caller-provided; a CLI default would write state)",
+                file=sys.stderr)
+            sys.exit(2)
+        machine_ns = args.machine_namespace
+        try:
+            result = duf.dsh_session_to_usage_facts(
+                args.path,
+                machine_namespace=machine_ns,
+                source_profile=args.source_profile,  # None → header cwd 派生
+            )
+        except duf.DshUsageFactError as e:
+            # strict 硬错误（读/解码/解析/身份/归属/duplicate）→ exit 2，不出
+            # 空成功伪装「没有用量」。Rust handler 输出同一 "code: message"。
+            print("dsh-usage-facts failed: %s" % e, file=sys.stderr)
+            sys.exit(2)
+        # --json payload = spec §5 字面 {facts, coverage}（键序固定，Rust
+        # to_payload_value 同款）。facts 是 build_usage_fact 输出、coverage 四键。
+        facts_out = {"facts": result.facts, "coverage": result.coverage}
+        text = json.dumps(facts_out, ensure_ascii=False, indent=2)
+        if args.json:
+            if args.json == "-":
+                print(text)
+            else:
+                try:
+                    Path(args.json).write_text(text, encoding="utf-8")
+                except OSError as e:
+                    print("failed to write %s: %s" % (args.json, e),
+                          file=sys.stderr)
+                    sys.exit(2)
+                print("Wrote %s: %d facts" % (args.json, len(result.facts)))
+        else:
+            print("Source: %s" % args.path)
+            print("Machine namespace: %s" % machine_ns)
+            print("Facts: %d (observation_rows=%s, unaccounted_events=%s, "
+                  "unaccounted_tokens=%s)"
+                  % (len(result.facts),
+                     result.coverage["observation_rows"],
+                     result.coverage["unaccounted_events"],
+                     result.coverage["unaccounted_tokens"]))
+            print("Coverage: %s" % result.coverage)
         return
 
     # WorkBuddy 单会话审计：coverage + SV601–614 findings（SV604/605 降级 Unavailable，

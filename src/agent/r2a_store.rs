@@ -822,7 +822,11 @@ fn build_entries(raw: &[PendingEntry], generated_at: &str, source_statuses: &Val
 
 /// 从**已解压文本**读会话头：`id` + `cwd`。`id` 缺失 → None（无法建 SessionKey）。
 /// 只读头行，不重复解压——调用方已用 `read_session_text` 解过一次。
-fn dsh_header(text: &str) -> Option<(String, Option<String>)> {
+///
+/// `pub(crate)` 让 dsh UsageFact emitter（`agent::dsh_usage_fact`）复用同一身份
+/// 读法（Python 侧 emitter 复用 `r2a.py::dsh_header`）——identity/attribution 判读
+/// 不许长第二份。
+pub(crate) fn dsh_header(text: &str) -> Option<(String, Option<String>)> {
     let line = text.lines().find(|l| !l.trim().is_empty())?;
     let v: Value = serde_json::from_str(line.trim()).ok()?;
     let id = v.get("id").and_then(Value::as_str)?;
@@ -853,7 +857,9 @@ fn dsh_session_revision(text: &str) -> Option<String> {
 /// DSH 的 source_profile（§1.3）= 会话头 `cwd` 清洗后的项目路径：
 /// `--{cwd.replace('/', "-")}--`。cwd 缺失 → 空串（诚实缺失；native_id 全局唯一，
 /// 空 source_profile 不会撞键）。
-fn dsh_source_profile(cwd: Option<&str>) -> String {
+///
+/// `pub(crate)` 同上（emitter 复用，R2a 对齐验收钉住同一四元）。
+pub(crate) fn dsh_source_profile(cwd: Option<&str>) -> String {
     cwd.map(|c| format!("--{}--", c.replace('/', "-")))
         .unwrap_or_default()
 }

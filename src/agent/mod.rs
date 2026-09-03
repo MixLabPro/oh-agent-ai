@@ -14,6 +14,7 @@ pub mod codex_session;
 pub mod codex_session_audit;
 pub mod codex_usage_fact;
 pub mod cost;
+pub mod dsh_usage_fact;
 pub mod discovery;
 pub mod host_runtime_registration;
 pub mod oneline;
