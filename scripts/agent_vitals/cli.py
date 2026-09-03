@@ -868,8 +868,10 @@ def _main():
              "(e.g. ~/.claude/projects/-proj-x/<sid>.jsonl)")
     p_claude_usage_facts.add_argument(
         "--machine-namespace", default=None,
-        help="Override machine_namespace (default: read from state/machine.json "
-             "or generate fresh UUID); required for stable fact_id across replays")
+        help="machine_namespace component of SessionKey — REQUIRED (v0.7 spec "
+             "§9: caller-provided; missing exits 2). The CLI never reads/writes "
+             "state to invent one — a fact's identity fields seed its fact_id, "
+             "so a CLI default would destabilize replays AND write machine.json")
     p_claude_usage_facts.add_argument(
         "--source-profile", default="default",
         help="source_profile component of SessionKey (default: 'default')")
@@ -1452,9 +1454,16 @@ def _main():
     # 单份 JSONL → facts + attempts + coverage；不写盘。与 Rust 镜像同源字节。
     if getattr(args, "cmd", None) == "claude-usage-facts":
         from agent_vitals.agent import claude_usage_fact as cuf
-        from agent_vitals.agent.takeover import machine_namespace as _read_ns
-        machine_ns = (args.machine_namespace
-                       if args.machine_namespace else _read_ns())
+        # machine_namespace 必传（spec §9）。绝不让 CLI 读 takeover 身份来补齐：
+        # 那是一次隐式 state 写（bootstrap machine.json），而 claude-usage-facts
+        # 是只读诊断——缺失即失败（exit 2），与 Rust handler 同款。
+        if not args.machine_namespace:
+            print(
+                "claude-usage-facts: --machine-namespace is required "
+                "(v0.7 spec §9: caller-provided; a CLI default would write state)",
+                file=sys.stderr)
+            sys.exit(2)
+        machine_ns = args.machine_namespace
         sid = Path(args.session_jsonl).stem
         try:
             result = cuf.claude_jsonl_to_usage_facts(

@@ -23,13 +23,13 @@ parity + 真实 fixture（复用 commit 6421f2a 的 197.5M 三会话语料）。
 Rust 平行实现见 `src/agent/claude_usage_fact.rs`（commit 2 落地）。
 """
 
+import json
 from pathlib import Path
 from typing import Iterator, NamedTuple, Optional, Union
 
 from .claude_cost import (
     SNAKE_KEYS,
     _row_tokens,
-    _read_suffix,
     day_from_iso_ts,
     ms_from_iso_ts,
     _is_peak_slot,
@@ -57,9 +57,9 @@ class ClaudeUsageObservation(NamedTuple):
       共享）。
     """
     native_session_id: str
-    source_event_id: Optional[str]  # message.id（priority: message.id > uuid > offset+hash）
+    source_event_id: Optional[str]  # message.id → 顶层 uuid；都缺 None（offset+hash 由迭代器补）
     observation_kind: str           # 恒 "assistant-usage"
-    identity_basis: str             # "native"（message.id 取到）/ "derived-hash"（fallback）
+    identity_basis: str             # "native"（原生 id 取到）/ "derived-hash"（fallback）
     machine_namespace: str
     source_profile: str
     ts_iso: str                     # 原始 ts（如 "2026-09-02T03:00:00.000Z"）
@@ -107,8 +107,9 @@ def parse_claude_usage_row(
     - `model` 非 str 或空字符串 → Skip(UNREADABLE)
     - `_row_tokens(usage)` 失败（两态皆无 / 错类型）→ Skip(UNREADABLE)
     - `timestamp` 不可解析 → Skip(UNATTRIBUTED)
-    - 都通过 → ClaudeUsageObservation（emit 用 `message.id` 优先级
-      取 source_event_id；commit 1 暂留 None，commit 2 写 fallback 链）
+    - 都通过 → ClaudeUsageObservation（原生 id = `message.id` 优先、顶层
+      `uuid` 次之；两者都缺时 source_event_id=None 且 identity_basis=
+      derived-hash——offset+hash fallback 由文件级迭代器补，parse 不掺 I/O）
 
     关键纪律：**返回的 Observation 字段值与旧 `_apply_record` 计算的
     `(day, model, tokens, peak)` 字节一致**——这是 commit 1 golden 零漂移
@@ -141,14 +142,23 @@ def parse_claude_usage_row(
         return Skip(UNATTRIBUTED)
     ms = ms_from_iso_ts(ts) if isinstance(ts, str) else None
     peak = _is_peak_slot(ms) if ms is not None else False
-    # `message.id` priority chain（commit 2 落地 fallback，commit 1 暂留 None——
-    # fold 不读 source_event_id，golden 零漂移不受影响）。
-    msg_id = msg.get("id") if isinstance(msg.get("id"), str) else None
+    # `message.id` priority chain（R1 §3.2/§9，Stage 1c 补全）：message.id →
+    # 顶层 uuid → offset+hash fallback。本 parse 只解析原生 id 可达的部分
+    # （message.id / 顶层 uuid）；offset+hash 需要行字节偏移 + 原始 record，
+    # 只在文件级迭代器 `iter_claude_usage_observations` 里补——parse 是纯
+    # record→result 映射、不掺 I/O（fold 也调它，fold 不读 source_event_id，
+    # golden 零漂移不受影响）。uuid 在真机 assistant 行位于**顶层**（实测与
+    # message.id 并存）；Stage 1c 前只认 message.id，缺场即降 derived——
+    # 等于把有 uuid 的行也错降级成 fallback。
+    native_id = msg.get("id") if isinstance(msg.get("id"), str) else None
+    if native_id is None:
+        uuid = rec.get("uuid")
+        native_id = uuid if isinstance(uuid, str) else None
     return ClaudeUsageObservation(
         native_session_id=native_session_id,
-        source_event_id=msg_id,  # commit 2 补 uuid → offset+hash fallback
+        source_event_id=native_id,
         observation_kind="assistant-usage",
-        identity_basis="native" if msg_id else "derived-hash",
+        identity_basis="native" if native_id else "derived-hash",
         machine_namespace=machine_namespace,
         source_profile=source_profile,
         ts_iso=ts,
@@ -187,49 +197,97 @@ __all__ = [
 from .usage_fact import build_usage_fact  # 延迟到末尾避免循环 import（cost→fact→cost 链）
 
 
-def source_event_id_for(obs: ClaudeUsageObservation, byte_offset: int) -> str:
-    """R1 §3.1 source_event_id 优先级链：`message.id` → `uuid` → offset+hash。
+def _fnv1a_hex(text: str) -> str:
+    """FNV-1a 64 → 16 hex——与 `usage_fact.fact_id` 同一初值/乘子，只换语义
+    （这里 hash 的是 canonical row，不是 identity 元组），所以返回裸 hex、
+    不带 "uf1-"。跨语言字节相同由 Rust 镜像同一算法保证。"""
+    h = 0xcbf29ce484222325
+    for b in text.encode("utf-8"):
+        h ^= b
+        h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return "%016x" % h
 
-    `obs.source_event_id`（commit 1 暂留 None 或 message.id）→ fallback。
-    真实 Claude JSONL 当前 `message.id` 已足够稳定（Anthropic 原生
-    message id），fallback 链主要防御「id 缺场 + uuid 也缺」的真机漂移
-    ——这种情况下用文件字节偏移 + 行内容 FNV-1a 拼出稳定标识。
 
-    本 commit 实现：仅 message.id（None → derived-hash）。uuid 与
-    offset+hash 留作防御层（未来真机撞上再加，commit 1 fixture 不撞）。
-    """
-    if obs.source_event_id:
-        return obs.source_event_id
-    # 防御层暂留 None：byte_offset 在 commit 1 fixture 里不需要它
-    # （每条 message 都有 id），不在 commit 1 加 fallback 避免编造。
-    return ""
+def _canonical_row_json(rec: dict) -> str:
+    """canonical JSON（§3.2「row hash 使用两端一致的 canonical JSON」）：
+    sort_keys + 紧凑分隔 + 不转义非 ASCII。Python `json.dumps` 与 Rust 手写
+    canonical serializer 对整数/字符串/布尔/null 字节一致；assistant usage
+    row 的数值只有整数 token 计数（float costUSD 只在 cost-state，不产
+    fact），不存在浮点表示法分叉。"""
+    return json.dumps(rec, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False)
+
+
+def _derived_event_id(native_session_id: str, byte_offset: int,
+                      rec: dict) -> str:
+    """§3.2 fallback：`stable_source_identity + byte_offset +
+    normalized_row_hash`。stable_source_identity = native_session_id；
+    byte_offset = 行首在**原文件**的字节位置（不以行号替代）；row hash =
+    canonical JSON 的 FNV-1a。同一文件重复读取稳定（checkpoint resume 从
+    from_byte 续读时，已折行的 offset 不变，fact-id 集合与 full replay 一致）。"""
+    return "%s:%d:%s" % (
+        native_session_id,
+        byte_offset,
+        _fnv1a_hex(_canonical_row_json(rec)),
+    )
+
+
+def _iter_rows_with_offsets(path):
+    """产 (行首字节偏移, 已解析 JSON record) 对。行切分语义与 fold 的
+    `claude_cost._read_suffix` 逐字节一致（`\\n` 切、剥尾 `\\r`、空行跳过、
+    末行无换行符不消费）——emit 的 fallback 行偏移必须与 resume 的 checkpoint
+    同源，不允许两套行切分（`test_rows_with_offsets_matches_read_suffix`
+    钉测不漂移）。坏行抛错（与 `_read_suffix` 同款：整份 abort）。"""
+    with open(path, "rb") as f:
+        data = f.read()
+    start = 0
+    for i, b in enumerate(data):
+        if b != 0x0A:
+            continue
+        line = data[start:i]
+        if line.endswith(b"\r"):
+            line = line[:len(line) - 1]
+        if line:
+            try:
+                rec = json.loads(line.decode("utf-8", errors="replace"))
+            except ValueError as e:
+                raise ValueError(
+                    "non-json line in %s at byte offset %d: %s"
+                    % (path, start, e)) from e
+            yield start, rec
+        start = i + 1
 
 
 def _observation_to_usage_fact(
-    obs: ClaudeUsageObservation, byte_offset: int = 0,
+    obs: ClaudeUsageObservation,
 ) -> Optional[dict]:
     """Observation → UsageFact dict（`build_usage_fact` 输出）。
 
-    None → `build_usage_fact` 拒绝（identity_basis=derived-hash 时
-    source_event_id 必填；commit 1 fixture 每条 message 都有 id，不会
-    走到 None）。
+    None → `build_usage_fact` 拒绝（防御性 `bad_id` 哨兵；Stage 1c 后
+    iter 已给 derived-hash Observation 补上非空 source_event_id，正常
+    路径走不到——保留是因为 builder 是唯一校验方，不许绕开它自证）。
     """
     fields = {
         "machine_namespace": obs.machine_namespace,
         "host": "claude-code",
         "source_profile": obs.source_profile,
         "native_session_id": obs.native_session_id,
-        "source_event_id": source_event_id_for(obs, byte_offset),
+        "source_event_id": obs.source_event_id,
         "observation_kind": obs.observation_kind,
         "identity_basis": obs.identity_basis,
         "event_ts_utc": obs.ts_iso,
-        "time_basis": "native" if obs.identity_basis == "native" else "estimated",
+        # time_basis 与 identity_basis 解耦（Stage 1c）：fact 只在原生 ts
+        # 可归日时发射（否则 unattributed skip），事件时间证据恒为原生——
+        # 不存在「estimated session start 冒充事件时间」的路径。identity_basis
+        # 只描述 source_event_id 的来源，不决定 time_basis。
+        "time_basis": "native",
         "source_usage_semantics": "delta",
+        # provider/model 归属（Stage 1c）：只保留原始证据 `model_raw`。
+        # DATA_PLANE §2.1「raw 值不可改；规范化 id 由带版本的映射产生」——
+        # Stage 1 没有 resolver，model_id/model_normalized/provider_id/
+        # provider_raw/normalization_version 一律不填（序列化为 None），
+        # 绝不用单一真机 provider 硬编码冒充真值。
         "model_raw": obs.model,
-        "model_id": obs.model,  # commit 1 fixture 都是已规范化 id
-        "model_normalized": obs.model,
-        "provider_id": "deepseek-official",  # 真机 fixture 单一 provider
-        "provider_raw": "deepseek-official",
         "uncached_input_tokens": obs.input_tokens,
         "cache_read_tokens": obs.cache_read_tokens,
         "cache_write_tokens": obs.cache_write_tokens,
@@ -246,7 +304,7 @@ class UsageFactEmitResult(NamedTuple):
     共用结构。`malformed` 是源文件读不出的总行数（坏 JSON / 截断等
     I/O 错误，与 Skip 三类「行级不可用」分开计数）。"""
     facts: list          # List[Dict]——每个 dict 是 build_usage_fact 输出
-    attempts: dict       # {"skip": n, "unreadable": n, "unattributed": n, "bad_id": n}
+    attempts: dict       # 插入序：skip/unreadable/unattributed 恒在，duplicate/bad_id 仅 >0
     coverage: dict       # {"total_rows": n, "fact_rows": n, "skip_rows": n}
     malformed: int       # 源 JSONL 坏行数（解析失败、截断等 I/O 错误）
 
@@ -259,23 +317,32 @@ def iter_claude_usage_observations(
 ) -> Iterator[Union[ClaudeUsageObservation, Skip]]:
     """Stage 1 R1 §2.2 文件级迭代器——读 JSONL → yield Observation 或 Skip。
 
+    Observation 的 `source_event_id` 已解析：message.id / 顶层 uuid 原生 id，
+    或（两者都缺）derived offset+hash fallback（§3.2，Stage 1c 补全）——
+    所以下游 emit 看到的 Observation 身份恒非空。
+
     `native_session_id` 默认 = `path.stem`（Claude 项目文件名约定
     `<sid>.jsonl`，与现有 `claude-sync::claude_project_files` 同款）；
     显式传入优先（adapter 调用方可能从 R2a 派生 sid 而非文件 stem）。
     """
     p = Path(path)
     sid = native_session_id if native_session_id is not None else p.stem
-    # `_read_suffix` 走与 `_fold_one` 同样的字节级读取；commit 1 走
-    # from_byte=0（整份读），commit 2 留同样的语义——诊断 CLI 不做
-    # checkpoint resume，只读整份。
-    records, _ = _read_suffix(p, 0)
-    for rec in records:
-        yield parse_claude_usage_row(
+    for offset, rec in _iter_rows_with_offsets(p):
+        result = parse_claude_usage_row(
             rec,
             native_session_id=sid,
             machine_namespace=machine_namespace,
             source_profile=source_profile,
         )
+        if isinstance(result, Skip):
+            yield result
+            continue
+        if result.identity_basis == "derived-hash":
+            # 原生 id 缺场 → 用行字节偏移 + canonical row hash 补稳定身份。
+            # NamedTuple._replace 保持其它字段（含 identity_basis=derived-hash）。
+            result = result._replace(
+                source_event_id=_derived_event_id(sid, offset, rec))
+        yield result
 
 
 def claude_jsonl_to_usage_facts(
@@ -287,16 +354,20 @@ def claude_jsonl_to_usage_facts(
     """整份 Claude JSONL → (facts, attempts, coverage, malformed)。
 
     facts：每条有效 Observation emit 一个 UsageFact dict（`build_usage_fact`
-    输出）；attempts：Skip(reason) 计数；coverage：总行 / fact 行 / skip 行
-    比例；malformed：源 JSONL 解析失败行数（I/O 层错误，与 Skip 三个
-    行级原因分开）。
+    输出）；attempts：Skip(reason) 计数 + duplicate（重复 source_event_id，
+    §3.4 只保留一个 fact）+ bad_id（builder 防御性拒绝）；coverage：总行 /
+    fact 行 / skip 行比例；malformed：源 JSONL 解析失败行数（I/O 层错误，
+    与 Skip 三个行级原因分开）。
 
     不写盘。诊断 CLI 与未来 writer 共用此函数。
     """
     facts: list = []
     attempts = {SKIP: 0, UNREADABLE: 0, UNATTRIBUTED: 0}
+    seen: set = set()
     total = 0
     skip = 0
+    duplicate = 0
+    bad_id = 0
     for result in iter_claude_usage_observations(
             path,
             machine_namespace=machine_namespace,
@@ -307,19 +378,28 @@ def claude_jsonl_to_usage_facts(
             attempts[result.reason] = attempts.get(result.reason, 0) + 1
             skip += 1
             continue
+        if result.source_event_id in seen:
+            # §3.4 同一 session 重复出现相同 native event id → duplicate
+            # attempt、只保留一个 fact；不得加 ordinal 掩盖重复。
+            duplicate += 1
+            skip += 1
+            continue
+        seen.add(result.source_event_id)
         fact = _observation_to_usage_fact(result)
         if fact is None:
-            # build_usage_fact 拒绝（identity_basis=derived-hash + 缺
-            # source_event_id 是唯一已知触发点）→ 记为 bad_id 哨兵。
-            attempts["bad_id"] = attempts.get("bad_id", 0) + 1
+            bad_id += 1
             skip += 1
             continue
         facts.append(fact)
+    if duplicate:
+        attempts["duplicate"] = duplicate
+    if bad_id:
+        attempts["bad_id"] = bad_id
     return UsageFactEmitResult(
         facts=facts,
         attempts=attempts,
         coverage={"total_rows": total, "fact_rows": len(facts),
                   "skip_rows": skip},
-        malformed=0,  # _read_suffix 当前坏行抛异常（commit 1 既有行为），
-                       # commit 2 不改 I/O 路径，malformed 留给未来软失败版。
+        malformed=0,  # _iter_rows_with_offsets 当前坏行抛异常（commit 1
+                       # 既有行为），不改 I/O 路径，malformed 留给未来软失败版。
     )

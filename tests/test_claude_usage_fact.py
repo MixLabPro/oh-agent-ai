@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Stage 1 commit 1：共享 extractor `parse_claude_usage_row` 的钉测。
+"""Stage 1：共享 extractor `parse_claude_usage_row` 的钉测（commit 1 + commit 2b + Stage 1c）。
 
-R1 架构审核（commit d0ec2f2）要求 fold 与未来的 UsageFact emitter 共用
-同一个 row parser。本测试只验证 extractor 自身的字段映射与 sentinel
-触发条件——不验证 fold 字节一致性（那是 `tests/test_claude_cost.py`
-的 `test_python_rust_state_and_stdout_byte_equal` + `golden_runner.py`
-的职责）。
+R1 架构审核（commit d0ec2f2）要求 fold 与 UsageFact emitter 共用同一个 row
+parser。本测试验证 extractor 自身的字段映射与 sentinel 触发条件 + emit 端到端
+（facts/attempts/coverage）——不验证 fold 字节一致性（那是
+`tests/test_claude_cost.py` 的 `test_python_rust_state_and_stdout_byte_equal`
++ `golden_runner.py` 的职责）。
+
+Stage 1c（外部代码审核后的修复提交）：补 R1 §3.2/§3.4/§9 的验收契约——
+事件身份链 message.id → 顶层 uuid → offset+canonical-hash fallback、重复
+source_event_id 去重 + duplicate attempt、provider/model 不再硬编码 DeepSeek
+（claude-native model 原样走 model_raw）、CLI 无 state 写（缺
+--machine-namespace exit 2）。这些分支都进 `ClaudeUsageFactsBothTests` 的
+混合语料做 Python↔Rust byte-parity。
 
 跑法：python3 -m unittest tests.test_claude_usage_fact -v
 """
@@ -49,6 +56,64 @@ VALID_ASSISTANT = {
         },
     },
 }
+
+
+def _stage1c_corpus():
+    """Stage 1c 混合语料（9 行）——Python-only emit 钉测与 Both byte-parity
+    共用同一份，行注释标注期望分支。两个无 id 行内容不同 → canonical hash
+    不同 → 两条 derived fact（offset+hash 跨语言一致就靠它俩验）。"""
+    return [
+        # (1) cost-state → skip
+        {"type": "cost-state",
+         "timestamp": "2026-09-01T18:00:00.000Z",
+         "startTime": 1_788_192_000_000,
+         "modelUsage": {"deepseek-v4-flash": {
+             "inputTokens": 0, "outputTokens": 0,
+             "cacheReadInputTokens": 38_700_000,
+             "cacheCreationInputTokens": 0,
+             "webSearchRequests": 0, "costUSD": 0.0}},
+         "hasUnknownModelCost": False},
+        # (2) message.id native + Claude 原生模型 → fact
+        {"type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
+         "message": {"id": "msg_full_1", "model": "claude-sonnet-5",
+                     "usage": {"input_tokens": 100, "cache_read_input_tokens": 1_500_000,
+                               "cache_creation_input_tokens": 0, "output_tokens": 5}}},
+        # (3) 同 message.id 重复 → duplicate attempt、只留一个 fact
+        {"type": "assistant", "timestamp": "2026-09-02T04:00:00.000Z",
+         "message": {"id": "msg_full_1", "model": "claude-sonnet-5",
+                     "usage": {"input_tokens": 100, "cache_read_input_tokens": 1_500_000,
+                               "cache_creation_input_tokens": 0, "output_tokens": 5}}},
+        # (4) 顶层 uuid 原生（无 message.id）→ fact
+        {"type": "assistant", "timestamp": "2026-09-02T06:00:00.000Z",
+         "uuid": "uuid_only_1",
+         "message": {"model": "claude-sonnet-5",
+                     "usage": {"input_tokens": 50, "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0, "output_tokens": 1}}},
+        # (5) 无 message.id / uuid → derived offset+hash fact #1
+        {"type": "assistant", "timestamp": "2026-09-02T07:00:00.000Z",
+         "message": {"model": "deepseek-v4-flash",
+                     "usage": {"input_tokens": 200, "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0, "output_tokens": 7}}},
+        # (6) 无 message.id / uuid → derived offset+hash fact #2（内容不同）
+        {"type": "assistant", "timestamp": "2026-09-02T08:00:00.000Z",
+         "message": {"model": "deepseek-v4-flash",
+                     "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+        # (7) 有 usage 无 model → unreadable
+        {"type": "assistant", "timestamp": "2026-09-02T09:00:00.000Z",
+         "message": {"usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+        # (8) 坏 ts → unattributed
+        {"type": "assistant", "timestamp": "bogus",
+         "message": {"model": "deepseek-v4-flash",
+                     "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+        # (9) 短键 native（全形/短键两态都认）→ fact
+        {"type": "assistant", "timestamp": "2026-09-02T10:00:00.000Z",
+         "message": {"id": "msg_short_1", "model": "deepseek-v4-flash",
+                     "usage": {"input": 10, "cache_read": 20,
+                               "cache_creation": 30, "output": 40}}},
+    ]
 
 
 class ParseClaudeUsageRowCase(unittest.TestCase):
@@ -170,8 +235,9 @@ class ParseClaudeUsageRowCase(unittest.TestCase):
         self.assertEqual(result.reason, UNATTRIBUTED)
 
     def test_no_message_id_marks_derived_hash(self):
-        """message.id 缺场 → identity_basis=derived-hash（commit 2 fallback 链
-        会进一步从 uuid / offset+hash 补 source_event_id）。"""
+        """message.id 与顶层 uuid 都缺 → source_event_id=None +
+        identity_basis=derived-hash（parse 是纯 record→result 映射；offset+hash
+        fallback 由文件级迭代器补，Stage 1c 后 emitter 见到的身份恒非空）。"""
         obs = parse_claude_usage_row(
             {"type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
              "message": {"model": "m",
@@ -183,8 +249,42 @@ class ParseClaudeUsageRowCase(unittest.TestCase):
         )
         self.assertIsInstance(obs, ClaudeUsageObservation)
         self.assertIsNone(obs.source_event_id,
-                          "message.id 缺场时 commit 1 暂留 None，commit 2 补 fallback")
+                          "parse 层只解析原生 id 可达的部分——offset+hash 由迭代器补")
         self.assertEqual(obs.identity_basis, "derived-hash")
+
+    def test_top_level_uuid_is_native_fallback(self):
+        """缺 message.id 但有**顶层** uuid（真机 assistant 行 uuid 位于顶层，
+        Stage 1c 补全）→ 原生身份，identity_basis=native——不再被错降级成
+        derived-hash。"""
+        obs = parse_claude_usage_row(
+            {"type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
+             "uuid": "uuid-2026-xyz",
+             "message": {"model": "m",
+                         "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+            native_session_id="s",
+            machine_namespace="ns",
+            source_profile="default",
+        )
+        self.assertIsInstance(obs, ClaudeUsageObservation)
+        self.assertEqual(obs.source_event_id, "uuid-2026-xyz")
+        self.assertEqual(obs.identity_basis, "native")
+
+    def test_message_id_precedes_uuid(self):
+        """两者都在时 message.id 优先（§3.1 顺序：message.id → uuid →
+        fallback）——不是取后写者。"""
+        obs = parse_claude_usage_row(
+            {"type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
+             "uuid": "uuid-shadowed",
+             "message": {"id": "msg_prio", "model": "m",
+                         "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 0}}},
+            native_session_id="s",
+            machine_namespace="ns",
+            source_profile="default",
+        )
+        self.assertEqual(obs.source_event_id, "msg_prio")
+        self.assertEqual(obs.identity_basis, "native")
 
     def test_short_keys_shape_also_accepted(self):
         """`_row_tokens` 嗅两态——短键（真机 0 命中但仍认）也走 Observation。"""
@@ -377,17 +477,64 @@ class EmitEndToEndCase(unittest.TestCase):
             self.assertEqual(r1.attempts, r2.attempts)
             self.assertEqual(r1.coverage, r2.coverage)
 
+    def test_stage1c_derived_duplicate_claude_native_semantics(self):
+        """Stage 1c Python-only 语义钉测（不需要 Rust 二进制）——覆盖
+        `_stage1c_corpus` 的 9 个分支：fallback 后无 bad_id、重复 id 只留一个
+        fact、uuid 原生、derived×2 唯一、Claude 原生模型不硬编码 provider、
+        time_basis 与 identity_basis 解耦。Rust 镜像 byte-parity 由
+        `ClaudeUsageFactsBothTests` 承担。"""
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpd = Path(tmp)
+            self._write_session(tmpd, "sid-1975m.jsonl", _stage1c_corpus())
+            from agent_vitals.agent.claude_usage_fact import claude_jsonl_to_usage_facts
+            result = claude_jsonl_to_usage_facts(
+                tmpd / "sid-1975m.jsonl",
+                machine_namespace="ns-test", source_profile="default",
+                native_session_id="sid-1975m")
+            self.assertEqual(result.coverage,
+                             {"total_rows": 9, "fact_rows": 5, "skip_rows": 4})
+            self.assertEqual(result.attempts,
+                             {"skip": 1, "unreadable": 1, "unattributed": 1,
+                              "duplicate": 1},
+                             "bad_id 必须缺席：derived fallback 已覆盖无 id 行")
+            facts = result.facts
+            self.assertEqual(len(facts), 5)
+            self.assertEqual(len(set(f["fact_id"] for f in facts)), 5)
+            bases = [f["identity_basis"] for f in facts]
+            self.assertEqual(bases.count("native"), 3)
+            self.assertEqual(bases.count("derived-hash"), 2)
+            for f in facts:
+                if f["identity_basis"] == "derived-hash":
+                    parts = f["source_event_id"].split(":")
+                    self.assertEqual(len(parts), 3, "derived id = <sid>:<offset>:<hash>")
+                    self.assertEqual(parts[0], "sid-1975m")
+                    self.assertEqual(len(parts[2]), 16, "row hash = 16 hex")
+            # Claude 原生模型（msg_full_1 / uuid_only_1）原样走 model_raw，不许
+            # 硬编码 provider_id/model_id；time_basis 独立于 identity_basis。
+            for f in facts:
+                if f["model_raw"] == "claude-sonnet-5":
+                    self.assertIsNone(f.get("provider_id"))
+                    self.assertIsNone(f.get("model_id"))
+                    self.assertEqual(f.get("time_basis"), "native")
+                self.assertEqual(f.get("time_basis"), "native",
+                                 "每行都有原生 ts → time_basis 恒 native（derived 也是）")
+            cr = sum(f["cache_read_tokens"] for f in facts)
+            self.assertEqual(cr, 1_500_000 + 20)
+
 
 @unittest.skipUnless(_BIN, "未设 AGENT_VITALS_BIN，跳过双实现比对")
 class ClaudeUsageFactsBothTests(unittest.TestCase):
-    """Stage 1 commit 2b：`claude-usage-facts` 双实现 byte-parity。
+    """Stage 1 commit 2b + Stage 1c：`claude-usage-facts` 双实现 byte-parity。
 
     Python `scan.py claude-usage-facts --json -` ↔ Rust 同子命令：同一份混合
-    语料（cost-state / 全形 native / 无 message.id→derived-hash→bad_id / 无
-    model→unreadable / 坏 ts→unattributed / 短键形状），stdout 逐字节相等。
-    `test_two_calls_produce_byte_equal_output` 是 Python 端前置（字节决定）；
-    本测试是 commit 2b 的 Rust 镜像钉测——`facts`/`attempts`/`coverage` 键序、
-    `attempts` 的 dict 插入序、`fact_id`（FNV-1a + `\x1f` 拼接）跨语言一致。
+    语料，stdout 逐字节相等。Stage 1c 后语料把 R1 验收契约的每个分支都扫进去：
+    cost-state→skip / message.id 全形 native（**Claude 原生模型**）/ 同 id 重复
+    →duplicate attempt / 顶层 uuid 原生 / 两个无 id→derived offset+hash（canonical
+    row hash 跨语言一致是这条的目的）/ 无 model→unreadable / 坏 ts→unattributed /
+    短键 native。`bad_id` 在 fallback 修好后必须缺席（合法 usage 行不再被当坏 id
+    丢）。`attempts` 的 dict 插入序、`fact_id`（FNV-1a + `\x1f` 拼接）跨语言一致。
 
     Run: AGENT_VITALS_BIN=$PWD/target/release/agent-vitals python3 -m unittest
     tests.test_claude_usage_fact.ClaudeUsageFactsBothTests -v
@@ -398,41 +545,10 @@ class ClaudeUsageFactsBothTests(unittest.TestCase):
         self.fixture = self.tmp / "fixture"
         self.fixture.mkdir()
         self.session = self.fixture / "sid-1975m.jsonl"
-        # 混合语料：逐行覆盖三类 Skip + bad_id + 两态 token 形状。顺序刻意
-        # 交错——attempts 的插入序（skip 先行、bad_id 后补）在 JSON 输出里
-        # 必须与 Python dict 一致，不能靠巧合。
-        rows = [
-            {"type": "cost-state",
-             "timestamp": "2026-09-01T18:00:00.000Z",
-             "startTime": 1_788_192_000_000,
-             "modelUsage": {"deepseek-v4-flash": {
-                 "inputTokens": 0, "outputTokens": 0,
-                 "cacheReadInputTokens": 38_700_000,
-                 "cacheCreationInputTokens": 0,
-                 "webSearchRequests": 0, "costUSD": 0.0}},
-             "hasUnknownModelCost": False},
-            {"type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
-             "message": {"id": "msg_full_1", "model": "deepseek-v4-flash",
-                         "usage": {"input_tokens": 100, "cache_read_input_tokens": 1_500_000,
-                                   "cache_creation_input_tokens": 0, "output_tokens": 5}}},
-            {"type": "assistant", "timestamp": "2026-09-02T04:00:00.000Z",
-             "message": {"model": "deepseek-v4-flash",
-                         "usage": {"input_tokens": 200, "cache_read_input_tokens": 0,
-                                   "cache_creation_input_tokens": 0, "output_tokens": 7}}},
-            {"type": "assistant", "timestamp": "2026-09-02T05:00:00.000Z",
-             "message": {"usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
-                                   "cache_creation_input_tokens": 0, "output_tokens": 0}}},
-            {"type": "assistant", "timestamp": "bogus",
-             "message": {"model": "deepseek-v4-flash",
-                         "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
-                                   "cache_creation_input_tokens": 0, "output_tokens": 0}}},
-            {"type": "assistant", "timestamp": "2026-09-02T06:00:00.000Z",
-             "message": {"id": "msg_short_1", "model": "deepseek-v4-flash",
-                         "usage": {"input": 10, "cache_read": 20,
-                                   "cache_creation": 30, "output": 40}}},
-        ]
+        # Stage 1c 混合语料（9 行）——见模块级 `_stage1c_corpus` 的行注释。
         self.session.write_text(
-            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            "".join(json.dumps(r) + "\n" for r in _stage1c_corpus()),
+            encoding="utf-8")
 
     def tearDown(self):
         import shutil
@@ -442,6 +558,7 @@ class ClaudeUsageFactsBothTests(unittest.TestCase):
         env = dict(os.environ)
         env["HOME"] = str(self.fixture)
         env["USERPROFILE"] = str(self.fixture)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"  # 别让 CPython 在 fake HOME 写 .pyc 缓存
         env.pop("AGENT_VITALS_BIN", None)
         return subprocess.run(
             cmd, env=env, capture_output=True, text=True, cwd=str(self.fixture))
@@ -459,19 +576,66 @@ class ClaudeUsageFactsBothTests(unittest.TestCase):
             py.stdout, rs.stdout,
             "claude-usage-facts --json stdout 不一致：\npy:\n%s\nrs:\n%s"
             % (py.stdout, rs.stdout))
-        # 语义抽查（锚 spec §5 点名数字/分支——不逐字段重放，byte 相等已是主断言）。
         doc = json.loads(py.stdout)
-        self.assertEqual(doc["coverage"]["total_rows"], 6)
-        self.assertEqual(doc["coverage"]["fact_rows"], 2)
+        # 9 行：5 fact（行 2/4/5/6/9）+ 4 skip（cost-state/duplicate/unreadable/unattributed）
+        self.assertEqual(doc["coverage"]["total_rows"], 9)
+        self.assertEqual(doc["coverage"]["fact_rows"], 5)
         self.assertEqual(doc["coverage"]["skip_rows"], 4)
         self.assertEqual(doc["attempts"],
-                         {"skip": 1, "unreadable": 1, "unattributed": 1, "bad_id": 1})
-        self.assertEqual(len(doc["facts"]), 2)
-        ids = [f["fact_id"] for f in doc["facts"]]
-        self.assertEqual(len(set(ids)), 2, "两条 fact_id 必须唯一")
-        # 两条 fact（全形 1500K + 短键 20）的 cache_read 合计。
-        cr = sum(f["cache_read_tokens"] for f in doc["facts"])
+                         {"skip": 1, "unreadable": 1, "unattributed": 1, "duplicate": 1},
+                         "bad_id 必须缺席：derived fallback 已覆盖无 id 行")
+        facts = doc["facts"]
+        self.assertEqual(len(facts), 5)
+        ids = [f["fact_id"] for f in facts]
+        self.assertEqual(len(set(ids)), 5, "5 条 fact_id 必须唯一")
+        # identity 分层：native × 3（行2 message.id / 行4 uuid / 行9 message.id）
+        # + derived-hash × 2（行5/6）——offset+hash fallback 不再走 bad_id。
+        bases = [f["identity_basis"] for f in facts]
+        self.assertEqual(bases.count("native"), 3)
+        self.assertEqual(bases.count("derived-hash"), 2)
+        # derived 行：source_event_id 带 byte offset + 16 hex canonical row hash
+        # 前缀是本文件 stem 的 native sid。
+        for f in facts:
+            if f["identity_basis"] == "derived-hash":
+                self.assertTrue(
+                    f["source_event_id"].startswith("sid-1975m:"),
+                    "derived source_event_id 应以 native sid 开头: %s"
+                    % f["source_event_id"])
+                self.assertEqual(
+                    len(f["source_event_id"].split(":")), 3,
+                    "derived id = <sid>:<byte_offset>:<16hex>")
+        # Claude 原生模型（行2/4）：model_raw 原样、model_id/provider_id 不许硬编码。
+        for f in facts:
+            if f["model_raw"] == "claude-sonnet-5":
+                self.assertIsNone(f.get("provider_id"),
+                                  "claude 模型不得被硬编码成 deepseek-official")
+                self.assertIsNone(f.get("model_id"))
+                self.assertEqual(f.get("time_basis"), "native",
+                                 "time_basis 独立于 identity_basis")
+        # cache_read 合计 = 行2(1500K) + 行4(0) + 行5(0) + 行6(0) + 行9(20)。
+        cr = sum(f["cache_read_tokens"] for f in facts)
         self.assertEqual(cr, 1_500_000 + 20)
+
+    def test_missing_machine_namespace_exits_2_and_writes_no_state(self):
+        """R1 §9「调用方必传、缺失即失败」+ 只读诊断绝不隐式写 state。
+
+        不带 --machine-namespace 跑（Python 与 Rust 两侧）：exit 2，且 fixture
+        目录里**不新增任何文件**——旧实现会读 takeover.machine_namespace()（可能
+        bootstrap machine.json，一次 state 写），这是 Stage 1c 撤掉的隐式副作用。
+        """
+        snapshot = sorted(str(p.relative_to(self.fixture))
+                          for p in self.fixture.rglob("*") if p.is_file())
+        args = ["claude-usage-facts", str(self.session), "--json", "-"]
+        py = self._run(PY_CMD + args)
+        rs = self._run([_BIN] + args)
+        self.assertEqual(py.returncode, 2,
+                         "Python 缺 --machine-namespace 应 exit 2：%s" % py.stderr)
+        self.assertEqual(rs.returncode, 2,
+                         "Rust 缺 --machine-namespace 应 exit 2：%s" % rs.stderr)
+        after = sorted(str(p.relative_to(self.fixture))
+                       for p in self.fixture.rglob("*") if p.is_file())
+        self.assertEqual(after, snapshot,
+                         "缺 --machine-namespace 时不得写任何 state 文件（machine.json 等）")
 
 
 if __name__ == "__main__":

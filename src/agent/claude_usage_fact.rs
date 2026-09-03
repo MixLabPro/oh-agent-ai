@@ -4,21 +4,30 @@
 //! 走 `agent_vitals_core::usage_fact::build_usage_fact` 同一契约函数。
 //! Python↔Rust byte-parity 钉测：同一 JSONL 两侧 stdout 字节相等。
 //!
-//! Stage 1 commit 1（extractor 重构 + golden 零漂移）已先落地 fold 侧的
-//! 字节不变；本 commit 是 commit 2b——Rust 镜像 + parity 钉测。
+//! Stage 1 commit 1（extractor 重构 + golden 零漂移）先落地 fold 侧的字节
+//! 不变；commit 2b 落地本模块 Rust 镜像 + parity 钉测；**Stage 1c**（外部
+//! 代码审核后修复提交）把 R1 §3.2/§9 的验收契约补全：message.id → 顶层 uuid
+//! → offset+canonical-hash fallback 的事件身份链、source_event_id 去重 +
+//! duplicate attempt、provider/model 归属不再硬编码 DeepSeek（只留
+//! `model_raw`）、time_basis 与 identity_basis 解耦、CLI 无隐式 state 写。
+//! 本模块的 `parse_claude_usage_row` 同时被 claude_cost.rs 的 fold
+//! `apply_record` 消费（Rust 端单一 row parser，镜像 Python `_apply_record`）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use crate::agent::claude_cost::{day_from_iso_ts, row_tokens};
+use crate::agent::claude_cost::{day_from_iso_ts, ms_from_iso_ts, row_tokens};
+use agent_vitals_core::usage::is_peak_slot;
 use agent_vitals_core::usage_fact::build_usage_fact;
 
 // P0 哨兵常量——与 Python `claude_usage_fact.py` 同源字节。
-const SKIP: &str = "skip";
-const UNREADABLE: &str = "unreadable";
-const UNATTRIBUTED: &str = "unattributed";
+// pub(crate)：claude_cost.rs 的 fold `apply_record` 消费本模块 parser 时，
+// 按 reason 字面量匹配，须能看见这些常量。
+pub(crate) const SKIP: &str = "skip";
+pub(crate) const UNREADABLE: &str = "unreadable";
+pub(crate) const UNATTRIBUTED: &str = "unattributed";
 const OBSERVATION_KIND: &str = "assistant-usage";
 
 /// `claude_jsonl_to_usage_facts` 的 Rust 返回类型——`tests/test_claude_usage_fact.py`
@@ -33,12 +42,106 @@ pub struct UsageFactEmitResult {
     pub malformed: i64,
 }
 
+/// FNV-1a 64 → 16 hex——与 Python `_fnv1a_hex` 同一初值/乘子（Python 镜像
+/// `usage_fact.fact_id` 的算法）。这里 hash 的是 canonical row，不是 identity
+/// 元组，所以返回裸 hex、不带 "uf1-" 前缀。
+fn fnv1a_hex(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", h)
+}
+
+/// JSON 字符串转义——与 Python `json.dumps(..., ensure_ascii=False)` 同一组：
+/// `"` `\` `\b` `\f` `\n` `\r` `\t`，其余 < 0x20 用 `\u00xx`；非 ASCII 原样
+/// 输出（UTF-8 字节写进 out）。两边对同一输入产出相同字节，canonical 才成立。
+fn push_json_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// canonical JSON 序列化（R1 §3.2「row hash 使用两端一致的 canonical JSON」）：
+/// 对象键按字节序排序、紧凑分隔 `,`/`:`、不转义非 ASCII。递归直写进 `out`。
+///
+/// 与 Python `json.dumps(rec, sort_keys=True, separators=(",", ":"),
+/// ensure_ascii=False)` 字节一致的前提：assistant usage row 的数值只有整数
+/// token 计数（float costUSD 只在 cost-state，不产 fact），整数两边都是十进制；
+/// 若未来真机在 derived-hash row 里出现浮点，Python float repr 与 serde_json
+/// (ryu) 的最短表示可能分叉——文档化的已知边界，不用浮点就碰不到。
+fn canonical_row_string(v: &Value, out: &mut String) {
+    match v {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(&n.to_string()),
+        Value::String(s) => push_json_string(s, out),
+        Value::Array(a) => {
+            out.push('[');
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical_row_string(item, out);
+            }
+            out.push(']');
+        }
+        Value::Object(map) => {
+            out.push('{');
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for (i, k) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                push_json_string(k, out);
+                out.push(':');
+                canonical_row_string(map.get(*k).expect("key from keys()"), out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// §3.2 fallback 事件身份：`stable_source_identity + byte_offset +
+/// normalized_row_hash`。byte_offset 是行首在原文件的字节位置（不以行号
+/// 替代）；row hash = canonical JSON 的 FNV-1a。与 Python `_derived_event_id`
+/// 字节一致。同一文件重复读取稳定（checkpoint resume 从 from_byte 续读时，
+/// 已折行的 offset 不变，fact-id 集合与 full replay 一致）。
+fn derived_event_id(native_session_id: &str, byte_offset: usize, rec: &Value) -> String {
+    let mut canonical = String::new();
+    canonical_row_string(rec, &mut canonical);
+    format!(
+        "{}:{}:{}",
+        native_session_id,
+        byte_offset,
+        fnv1a_hex(canonical.as_bytes())
+    )
+}
+
 /// `parse_claude_usage_row` 的 Rust 镜像——单条 JSON record → `Ok(Observation)`
 /// 或 `Err(reason)`。与 Python `parse_claude_usage_row` 字段映射逐字段一致。
 ///
 /// Sentinel reason 与 Python 同名字面量（`"skip"` / `"unreadable"` /
-/// `"unattributed"`），保证 attempt 计数跨语言字节相等。
-fn parse_claude_usage_row(
+/// `"unattributed"`），保证 attempt 计数跨语言字节相等。fold 的
+/// `apply_record` 与 emitter 共用本函数（R1「共享 extractor」——两端一个
+/// row parser，不允许第二套 wire-shape 解释）。
+pub(crate) fn parse_claude_usage_row(
     rec: &Value,
     native_session_id: &str,
     machine_namespace: &str,
@@ -72,15 +175,26 @@ fn parse_claude_usage_row(
         return Err(UNREADABLE);
     };
     let ts = obj.get("timestamp").and_then(Value::as_str).unwrap_or("");
-    // 只校验 ts 可归日（mirror Python：day 解析失败 → UNATTRIBUTED）。day/ms/
-    // peak 是 fold 面字段（tail_days 归日 + 峰谷），UsageFact 事实行用原始
-    // `ts_iso` 作 event_ts_utc、不物化归日/峰谷（那是物化视图派生，spec §2.1）——
-    // emit 不消费它们，Observation 不带这三个字段（见 struct 注释）。
-    if day_from_iso_ts(ts).is_none() {
+    // 只校验 ts 可归日（mirror Python：day 解析失败 → UNATTRIBUTED）。
+    let Some(day) = day_from_iso_ts(ts) else {
         return Err(UNATTRIBUTED);
-    }
-    let msg_id = msg.get("id").and_then(Value::as_str).map(String::from);
-    let (identity_basis, source_event_id) = match msg_id.clone() {
+    };
+    // ms/peak：fold 面 tail_days 峰谷归位。ms 解析失败（day_from_iso_ts 认过的
+    // 字符串上理论上不该发生，防御性兜底）→ peak=false，同 `usage::is_peak`
+    // 的「缺 time 不臆造高峰」纪律。
+    let ms = ms_from_iso_ts(ts);
+    let peak = ms.is_some_and(is_peak_slot);
+    // 原生事件身份（Stage 1c §3.2/§9 补全）：message.id → 顶层 uuid。真机
+    // assistant 行的 uuid 位于**顶层**（与 message.id 并存）；只认 message.id
+    // 会让缺 message.id 但有 uuid 的行被错降级成 derived。offset+hash fallback
+    // 由文件级迭代器补（需要行字节偏移 + 原始 record）——本 parse 是纯
+    // record→result 映射、不掺 I/O，fold 调用它也不受影响。
+    let native = msg
+        .get("id")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .or_else(|| obj.get("uuid").and_then(Value::as_str).map(String::from));
+    let (identity_basis, source_event_id) = match native {
         Some(id) => ("native", id),
         None => ("derived-hash", String::new()),
     };
@@ -89,6 +203,9 @@ fn parse_claude_usage_row(
         machine_namespace: machine_namespace.to_string(),
         source_profile: source_profile.to_string(),
         ts_iso: ts.to_string(),
+        day,
+        ms,
+        peak,
         model: model.to_string(),
         input_tokens: in_t,
         cache_read_tokens: cr_t,
@@ -101,32 +218,41 @@ fn parse_claude_usage_row(
 }
 
 /// 单条有效 assistant usage row 的最小事实单元——镜像 Python
-/// `ClaudeUsageObservation`。Python NamedTuple 还带 `day`/`ms`/`peak`（fold
-/// 面 tail_days 归日 + 峰谷）；本 Rust 镜像只服务 emit，UsageFact 事实行不
-/// 物化这三个字段（event_ts_utc 用原始 `ts_iso`，归日/峰谷是物化视图派生，
-/// spec §2.1），所以不携带它们——`day` 的解析只用来判定 UNATTRIBUTED。
+/// `ClaudeUsageObservation`。fold（claude_cost.rs `apply_record`）与 emitter
+/// 共用本结构：fold 读 `day`/`model`/token 4 桶/`peak`，emitter 读
+/// `source_event_id`/`identity_basis` 等身份字段。UsageFact 事实行用原始
+/// `ts_iso` 作 event_ts_utc、不物化归日/峰谷（那是物化视图派生，spec §2.1）。
+///
+/// `source_event_id`：message.id / 顶层 uuid 原生 id；两者都缺时为空串、
+/// `identity_basis="derived-hash"`，由文件级迭代器填 offset+hash fallback。
 #[derive(Debug, Clone)]
-struct Observation {
-    native_session_id: String,
-    machine_namespace: String,
-    source_profile: String,
-    ts_iso: String,
-    model: String,
-    input_tokens: u64,
-    cache_read_tokens: u64,
-    cache_write_tokens: u64,
-    output_tokens: u64,
-    source_event_id: String,
-    identity_basis: String,
-    observation_kind: String,
+pub(crate) struct Observation {
+    pub(crate) native_session_id: String,
+    pub(crate) machine_namespace: String,
+    pub(crate) source_profile: String,
+    pub(crate) ts_iso: String,
+    pub(crate) day: String,
+    /// 镜像 Python NamedTuple 的 `ms`（epoch ms）。fold 只用已算好的 `peak`，
+    /// ms 本身不被消费——保留是为了与 Python Observation 逐字段同构。
+    #[allow(dead_code)]
+    pub(crate) ms: Option<i64>,
+    pub(crate) peak: bool,
+    pub(crate) model: String,
+    pub(crate) input_tokens: u64,
+    pub(crate) cache_read_tokens: u64,
+    pub(crate) cache_write_tokens: u64,
+    pub(crate) output_tokens: u64,
+    pub(crate) source_event_id: String,
+    pub(crate) identity_basis: String,
+    pub(crate) observation_kind: String,
 }
 
 impl Observation {
     fn to_usage_fact(&self) -> Option<Value> {
-        // `build_usage_fact` 需要 6 个 identity 字段非空。`source_event_id`
-        // 在 derived-hash 路径下为空字符串——`build_usage_fact` 拒绝空字
-        // 符串，记为 `bad_id` attempt。
-        if self.identity_basis == "derived-hash" && self.source_event_id.is_empty() {
+        // 防御：source_event_id 空（本不该——iter 已给 derived-hash 补
+        // fallback；保留 `bad_id` 哨兵是因为 builder 是唯一校验方，不许绕开
+        // 它自证身份合法）→ None。
+        if self.source_event_id.is_empty() {
             return None;
         }
         let mut fields = Map::new();
@@ -138,13 +264,15 @@ impl Observation {
         fields.insert("observation_kind".into(), json!(self.observation_kind));
         fields.insert("identity_basis".into(), json!(self.identity_basis));
         fields.insert("event_ts_utc".into(), json!(self.ts_iso));
-        fields.insert("time_basis".into(),
-                      json!(if self.identity_basis == "native" { "native" } else { "estimated" }));
+        // time_basis 与 identity_basis 解耦（Stage 1c）：fact 只在原生 ts 可归日
+        // 时发射（否则 unattributed skip），事件时间证据恒为原生。
+        fields.insert("time_basis".into(), json!("native"));
         fields.insert("source_usage_semantics".into(), json!("delta"));
+        // provider/model 归属（Stage 1c）：只保留原始证据 `model_raw`。DATA_PLANE
+        // §2.1「raw 值不可改；规范化 id 由带版本的映射产生」——没有 resolver 就
+        // 不填 model_id/model_normalized/provider_id/provider_raw/normalization_version
+        // （序列化为 None），绝不用单一真机 provider 硬编码冒充真值。
         fields.insert("model_raw".into(), json!(self.model));
-        fields.insert("model_id".into(), json!(self.model));
-        fields.insert("provider_id".into(), json!("deepseek-official"));
-        fields.insert("provider_raw".into(), json!("deepseek-official"));
         fields.insert("uncached_input_tokens".into(), json!(self.input_tokens));
         fields.insert("cache_read_tokens".into(), json!(self.cache_read_tokens));
         fields.insert("cache_write_tokens".into(), json!(self.cache_write_tokens));
@@ -156,17 +284,22 @@ impl Observation {
 /// 整份 Claude JSONL → `UsageFactEmitResult`。
 ///
 /// 与 Python `claude_jsonl_to_usage_facts` 字节等价：
-/// - facts 顺序按 record 顺序
-/// - attempts 字典键集合 = `{"skip", "unreadable", "unattributed"}` + 可选
-///   `"bad_id"`（仅当存在 derived-hash + 空 source_event_id 的 Observation）
-/// - total_rows / skip_rows 计数按 record 顺序（cost-state 不算 usage 但
-///   算 total_rows，因为它被读了）
-/// - malformed 恒 0（commit 1 既有 I/O 行为：坏行抛异常）
+/// - facts 顺序按 record 顺序；
+/// - 每条 Observation 的 source_event_id 已解析：原生 id（message.id/顶层
+///   uuid），或 derived offset+hash fallback（§3.2，Stage 1c 补全）；
+/// - 同一 session 重复 source_event_id 只保留一个 fact、计 duplicate attempt
+///   （§3.4，不加 ordinal 掩盖重复）；
+/// - attempts 键集合 = `{"skip","unreadable","unattributed"}` + 可选
+///   `"duplicate"`（重复）/ `"bad_id"`（builder 防御性拒绝）；
+/// - total_rows / skip_rows 计数按 record 顺序（cost-state 不算 usage 但算
+///   total_rows，因为它被读了）；
+/// - malformed 恒 0（commit 1 既有 I/O 行为：坏行抛异常）。
 ///
 /// 行切分镜像 Python `_read_suffix`（claude_cost.py）的字节级语义：按 `\n`
 /// 切完整行、剥尾 `\r`、空行跳过；**末行无换行符不消费**（写入方可能写到
-/// 一半，与 fold 尾读续折同款「绝不拼半截」）。`BufRead::lines()` 会把
-/// 无换行结尾的末段当成一行——与 Python 语义分叉，故不用它。
+/// 一半，与 fold 尾读续折同款「绝不拼半截」）。`BufRead::lines()` 会把无换行
+/// 结尾的末段当成一行——与 Python 语义分叉，故不用它。行首字节偏移在整份
+/// 读取下即绝对文件偏移，直接喂给 derived fallback。
 pub fn claude_jsonl_to_usage_facts(
     path: &Path,
     machine_namespace: &str,
@@ -180,6 +313,9 @@ pub fn claude_jsonl_to_usage_facts(
     attempts.insert(SKIP.to_string(), 0);
     attempts.insert(UNREADABLE.to_string(), 0);
     attempts.insert(UNATTRIBUTED.to_string(), 0);
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut duplicate = 0i64;
+    let mut bad_id = 0i64;
     let mut total_rows = 0i64;
     let mut skip_rows = 0i64;
     let mut start = 0usize;
@@ -187,6 +323,7 @@ pub fn claude_jsonl_to_usage_facts(
         if *b != b'\n' {
             continue;
         }
+        let line_offset = start; // 行首绝对字节偏移（整份从 0 读）
         let mut line = &data[start..i];
         if line.ends_with(b"\r") {
             line = &line[..line.len() - 1];
@@ -204,19 +341,38 @@ pub fn claude_jsonl_to_usage_facts(
             format!("non-json line in {} at row {}: {}", path.display(), total_rows, e)
         })?;
         match parse_claude_usage_row(&rec, native_session_id, machine_namespace, source_profile) {
-            Ok(obs) => match obs.to_usage_fact() {
-                Some(fact) => facts.push(fact),
-                None => {
-                    // derived-hash + 空 source_event_id → bad_id 哨兵
-                    *attempts.entry("bad_id".to_string()).or_insert(0) += 1;
-                    skip_rows += 1;
+            Ok(mut obs) => {
+                if obs.identity_basis == "derived-hash" && obs.source_event_id.is_empty() {
+                    obs.source_event_id =
+                        derived_event_id(native_session_id, line_offset, &rec);
                 }
-            },
+                if seen.contains(&obs.source_event_id) {
+                    // §3.4 重复 native event id → duplicate attempt，只留一个 fact。
+                    duplicate += 1;
+                    skip_rows += 1;
+                    continue;
+                }
+                seen.insert(obs.source_event_id.clone());
+                match obs.to_usage_fact() {
+                    Some(fact) => facts.push(fact),
+                    None => {
+                        // 防御性 bad_id 哨兵（identity 校验被 builder 拒绝）
+                        bad_id += 1;
+                        skip_rows += 1;
+                    }
+                }
+            }
             Err(reason) => {
                 *attempts.entry(reason.to_string()).or_insert(0) += 1;
                 skip_rows += 1;
             }
         }
+    }
+    if duplicate > 0 {
+        attempts.insert("duplicate".to_string(), duplicate);
+    }
+    if bad_id > 0 {
+        attempts.insert("bad_id".to_string(), bad_id);
     }
     Ok(UsageFactEmitResult {
         facts,
@@ -250,11 +406,11 @@ pub fn to_payload_value(
             json!(result.attempts.get(k).copied().unwrap_or(0)),
         );
     }
+    if result.attempts.get("duplicate").is_some_and(|v| *v > 0) {
+        attempts_obj.insert("duplicate".to_string(), json!(result.attempts["duplicate"]));
+    }
     if result.attempts.get("bad_id").is_some_and(|v| *v > 0) {
-        attempts_obj.insert(
-            "bad_id".to_string(),
-            json!(result.attempts["bad_id"]),
-        );
+        attempts_obj.insert("bad_id".to_string(), json!(result.attempts["bad_id"]));
     }
     out.insert("attempts".to_string(), Value::Object(attempts_obj));
     let mut cov = Map::new();
@@ -284,6 +440,9 @@ pub fn to_human_summary(
             result.attempts.get(k).copied().unwrap_or(0)
         ));
     }
+    if result.attempts.get("duplicate").is_some_and(|v| *v > 0) {
+        attempts_parts.push(format!("'duplicate': {}", result.attempts["duplicate"]));
+    }
     if result.attempts.get("bad_id").is_some_and(|v| *v > 0) {
         attempts_parts.push(format!("'bad_id': {}", result.attempts["bad_id"]));
     }
@@ -309,6 +468,19 @@ mod tests {
         format!("{}\n", serde_json::to_string(&rec).unwrap())
     }
 
+    fn temp_dir() -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!(
+            "av-claude-usage-fact-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        tmp
+    }
+
     #[test]
     fn parse_assistant_with_id_marks_native() {
         let obs = parse_claude_usage_row(
@@ -321,7 +493,47 @@ mod tests {
                 }
             }),
             "sid", "ns", "default",
-        ).unwrap();
+        )
+        .unwrap();
+        assert_eq!(obs.source_event_id, "msg_x");
+        assert_eq!(obs.identity_basis, "native");
+        assert_eq!(obs.day, "2026-09-02");
+        // day/ms/peak 面已填充（fold 的 tail_days 消费它们，见 claude_cost.rs）
+        assert!(obs.ms.is_some(), "ts 可解析 → ms 应非 None");
+    }
+
+    #[test]
+    fn uuid_top_level_used_when_no_message_id() {
+        // Stage 1c：缺 message.id 但有顶层 uuid → 原生（不再是 derived）。
+        // 真机 assistant 行 uuid 位于顶层。
+        let obs = parse_claude_usage_row(
+            &json!({
+                "type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
+                "uuid": "uuid_1",
+                "message": {"model": "m",
+                            "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                                      "cache_creation_input_tokens": 0, "output_tokens": 0}}
+            }),
+            "sid", "ns", "default",
+        )
+        .unwrap();
+        assert_eq!(obs.source_event_id, "uuid_1");
+        assert_eq!(obs.identity_basis, "native");
+    }
+
+    #[test]
+    fn message_id_takes_priority_over_uuid() {
+        let obs = parse_claude_usage_row(
+            &json!({
+                "type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
+                "uuid": "uuid_9",
+                "message": {"id": "msg_x", "model": "m",
+                            "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                                      "cache_creation_input_tokens": 0, "output_tokens": 0}}
+            }),
+            "sid", "ns", "default",
+        )
+        .unwrap();
         assert_eq!(obs.source_event_id, "msg_x");
         assert_eq!(obs.identity_basis, "native");
     }
@@ -337,6 +549,8 @@ mod tests {
 
     #[test]
     fn parse_no_message_id_marks_derived_hash() {
+        // parse 层（无 I/O）：两者都缺 → source_event_id 空 + derived-hash；
+        // offset+hash fallback 由文件级迭代器补（emitter_dedups/derived 测试见下）。
         let obs = parse_claude_usage_row(
             &json!({
                 "type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
@@ -345,11 +559,12 @@ mod tests {
                                       "cache_creation_input_tokens": 0, "output_tokens": 0}}
             }),
             "sid", "ns", "default",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(obs.source_event_id, "");
         assert_eq!(obs.identity_basis, "derived-hash");
         assert!(obs.to_usage_fact().is_none(),
-                "derived-hash + 空 source_event_id → bad_id 哨兵，不发射 fact");
+                "derived-hash + 空 source_event_id → 防御性 bad_id，不在 parse 层发射");
     }
 
     #[test]
@@ -387,7 +602,7 @@ mod tests {
         let obs = parse_claude_usage_row(
             &json!({
                 "type": "assistant", "timestamp": "2026-09-02T03:00:00.000Z",
-                "message": {"model": "m",
+                "message": {"id": "msg_short", "model": "m",
                             "usage": {"input": 1, "cache_read": 2,
                                       "cache_creation": 3, "output": 4}}
             }),
@@ -398,6 +613,69 @@ mod tests {
         assert_eq!(obs.cache_read_tokens, 2);
         assert_eq!(obs.cache_write_tokens, 3);
         assert_eq!(obs.output_tokens, 4);
+        assert_eq!(obs.source_event_id, "msg_short");
+    }
+
+    #[test]
+    fn emitter_dedups_duplicate_and_counts_attempt() {
+        // §3.4：同一 session 重复相同 native event id → 只保留一个 fact +
+        // duplicate attempt。
+        let tmp = temp_dir();
+        let p = tmp.join("sid.jsonl");
+        std::fs::write(
+            &p,
+            [
+                line(json!({"type":"assistant","timestamp":"2026-09-02T03:00:00.000Z",
+                            "message":{"id":"msg_dup","model":"m",
+                                       "usage":{"input_tokens":1,"cache_read_input_tokens":0,
+                                                "cache_creation_input_tokens":0,"output_tokens":0}}})),
+                line(json!({"type":"assistant","timestamp":"2026-09-02T04:00:00.000Z",
+                            "message":{"id":"msg_dup","model":"m",
+                                       "usage":{"input_tokens":1,"cache_read_input_tokens":0,
+                                                "cache_creation_input_tokens":0,"output_tokens":0}}})),
+            ]
+            .join(""),
+        )
+        .unwrap();
+        let r = claude_jsonl_to_usage_facts(&p, "ns", "default", "sid").unwrap();
+        assert_eq!(r.facts.len(), 1, "重复 id 只保留一个 fact");
+        assert_eq!(r.attempts.get("duplicate").copied().unwrap_or(0), 1);
+        assert_eq!(r.skip_rows, 1);
+        assert_eq!(r.attempts.get("bad_id"), None, "防御性 bad_id 不该触发");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn emitter_derived_fallback_emits_fact_not_bad_id() {
+        // §6.1 验收 4：message.id 与 uuid 都缺 → 稳定 fallback 也产 fact，
+        // 绝不把合法 usage 行当 bad_id 丢掉。derived id 带 byte offset + hash。
+        let tmp = temp_dir();
+        let p = tmp.join("sid.jsonl");
+        std::fs::write(
+            &p,
+            line(json!({"type":"assistant","timestamp":"2026-09-02T03:00:00.000Z",
+                        "message":{"model":"m",
+                                   "usage":{"input_tokens":1,"cache_read_input_tokens":0,
+                                            "cache_creation_input_tokens":0,"output_tokens":0}}})),
+        )
+        .unwrap();
+        let r = claude_jsonl_to_usage_facts(&p, "ns", "default", "sid").unwrap();
+        assert_eq!(r.facts.len(), 1, "derived fallback 必须产 fact");
+        assert_eq!(r.attempts.get("bad_id"), None, "fallback 后不该再走 bad_id");
+        let f = &r.facts[0];
+        assert_eq!(f.get("identity_basis").and_then(Value::as_str), Some("derived-hash"));
+        let sid = f.get("source_event_id").and_then(Value::as_str).unwrap_or("");
+        // sid-1975m 形式的 <native_session_id>:<byte_offset>:<16 hex row hash>
+        assert!(sid.starts_with("sid:0:"), "derived id 应含 byte offset 0：{sid}");
+        assert_eq!(sid.len(), 3 + 1 + 1 + 1 + 16, "sid:0:<16hex>");
+        // provider/model 归属：只留 model_raw，model_id/provider_id 不硬编码。
+        assert_eq!(f.get("model_raw").and_then(Value::as_str), Some("m"));
+        assert_eq!(f.get("provider_id").and_then(Value::as_str), None,
+                   "provider_id 不许硬编码 DeepSeek（Stage 1c）");
+        assert_eq!(f.get("model_id").and_then(Value::as_str), None);
+        assert_eq!(f.get("time_basis").and_then(Value::as_str), Some("native"),
+                   "time_basis 独立于 identity_basis——derived 事件也有原生 ts");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
@@ -442,13 +720,7 @@ mod tests {
                 })),
             ]
         };
-        let tmp = std::env::temp_dir().join(format!(
-            "av-claude-usage-fact-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = temp_dir();
         // 2279b7b0: baseline 38.7M, rows 5.7M (1.5+1.5+1.5+1.2M)
         let p1 = tmp.join("2279b7b0.jsonl");
         std::fs::write(&p1, rows(1_788_192_000_000, 38_700_000, 1_425_000).join("")).unwrap();
@@ -476,6 +748,8 @@ mod tests {
         assert_eq!(all_facts.len(), 12);
         assert_eq!(skip_rows, 3, "15 行 − 12 fact = 3 skip（全为 cost-state）");
         assert_eq!(total_attempts.get(SKIP).copied().unwrap_or(0), 3);
+        assert_eq!(total_attempts.get("duplicate"), None, "真机语料无重复 id");
+        assert_eq!(total_attempts.get("bad_id"), None);
         // 合计 cache_read tokens = 66.6M
         let cr_total: i64 = all_facts.iter()
             .map(|f| f.get("cache_read_tokens").and_then(Value::as_i64).unwrap_or(0))
@@ -490,7 +764,7 @@ mod tests {
             .map(|f| f.get("fact_id").and_then(Value::as_str).unwrap_or("").to_string())
             .collect();
         assert_eq!(ids.len(), 12);
-        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        let unique: HashSet<&String> = ids.iter().collect();
         assert_eq!(unique.len(), 12);
         std::fs::remove_dir_all(&tmp).ok();
     }

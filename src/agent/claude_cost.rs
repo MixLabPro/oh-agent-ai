@@ -75,8 +75,11 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use agent_vitals_core::usage::{is_peak_slot, ms_from_civil};
+use agent_vitals_core::usage::ms_from_civil;
 
+use crate::agent::claude_usage_fact::{
+    parse_claude_usage_row, UNATTRIBUTED, UNREADABLE,
+};
 use crate::agent::codex_cost::{civil_from_unix_secs, current_month_beijing};
 use crate::agent::claude_session::claude_project_files;
 use crate::agent::state::{atomic_write_json, now_iso_utc, read_json, state_dir};
@@ -340,7 +343,23 @@ fn bump_tail(obj: &mut Value, t: [u64; 4], peak: bool) {
 /// 信息（被更精确的逐行数据完全覆盖，直接丢弃）；汇总 < 基线时，差值是真实
 /// 存在但没有逐行证据的残差，进 `rebuild_days` 返回的 `unaccounted` 池——
 /// 不猜它发生在哪一天。
-fn apply_record(sess: &mut Map<String, Value>, rec: &Value) {
+///
+/// R1 共享 extractor（commit d0ec2f2 拍板；Stage 1c 收尾）：assistant 行解析
+/// 走共享 `parse_claude_usage_row`（`claude_usage_fact.rs`），fold 与 emitter
+/// 消费同一个 row parser——两端各自解释 wire shape 会让"emit 出的 fact_id 与
+/// fold 出来的 day"静默错位。Skip 只递增对应 sentinel（SKIP 不增），Ok 走
+/// `bump_tail` 累加 8 桶；Sentinel 触发条件与旧 inline 逻辑逐字段一致（commit
+/// 1 golden 零漂移硬条件）。`native_session_id` / `machine_namespace` /
+/// `source_profile` 只进 Observation 的 identity 字段，fold 不读——透传是让
+/// 调用形状与 Python `_apply_record` 对齐（future writer / R2a 接线时不用再改
+/// 签名），值不影响 fold 输出。
+fn apply_record(
+    sess: &mut Map<String, Value>,
+    rec: &Value,
+    native_session_id: &str,
+    machine_namespace: &str,
+    source_profile: &str,
+) {
     // tail_days 是 assistant 行的落点；fresh 会话第一个 assistant 行进来时
     // 还没有这个键——懒建，别 expect。
     if !sess.contains_key("tail_days") {
@@ -373,48 +392,48 @@ fn apply_record(sess: &mut Map<String, Value>, rec: &Value) {
             sess.insert("baseline".to_string(), Value::Object(baseline));
         }
         Some("assistant") => {
-            let Some(msg) = rec.get("message").and_then(Value::as_object) else {
-                return;
-            };
-            let usage = msg.get("usage");
-            let has_usage = usage
-                .and_then(Value::as_object)
-                .is_some_and(|o| !o.is_empty());
-            if !has_usage {
-                return; // 无 usage 的 assistant 行不是 usage 行
-            }
-            let Some(model) = msg.get("model").and_then(Value::as_str) else {
-                // 有 usage 但没 model → 无处可挂 → 哨兵，绝不编一个模型名。
-                inc(sess, "unreadable_usage_rows");
-                return;
-            };
-            let Some(t) = row_tokens(usage.expect("checked above")) else {
-                inc(sess, "unreadable_usage_rows"); // 两态皆无 → 哨兵（P0）
-                return;
-            };
-            let ts = rec.get("timestamp").and_then(Value::as_str);
-            let day = ts.and_then(day_from_iso_ts);
-            match day {
-                Some(d) => {
+            // R1 共享 extractor（Stage 1c 收尾）：fold 与 emitter 共用一个 row
+            // parser。assistant 行形状 → Ok(Observation)（day/model/tokens/peak
+            // 已由 parser 填好，fold 不再各自解释 wire shape）或
+            // Err(sentinel)。cost-state 在 cost-state 分支处理、不经 parse
+            // （parse 只认 assistant）。
+            match parse_claude_usage_row(
+                rec,
+                native_session_id,
+                machine_namespace,
+                source_profile,
+            ) {
+                Ok(obs) => {
                     // 峰谷归属：这一行有真实 ts，分辨率是精确的，不是猜的。
-                    // ms 解析失败（理论上不该发生在 day_from_iso_ts 已经认过
-                    // 的字符串上，防御性兜底）→ 保守按空闲算，同
-                    // `usage::is_peak` 的"缺 time 不臆造高峰"纪律。
-                    let peak = ts.and_then(ms_from_iso_ts).is_some_and(is_peak_slot);
+                    // ms/peak 由共享 parser 从同一 ts 算（缺 time 不臆造高峰）。
                     let tail = sess
                         .get_mut("tail_days")
                         .and_then(Value::as_object_mut)
                         .expect("tail_days ensured above");
-                    let day_obj = tail.entry(d).or_insert_with(|| json!({}));
+                    let day_obj = tail.entry(obs.day).or_insert_with(|| json!({}));
                     let model_obj = day_obj
                         .as_object_mut()
                         .expect("day entry is object")
-                        .entry(model.to_string())
+                        .entry(obs.model)
                         .or_insert_with(|| json!({}));
-                    bump_tail(model_obj, t, peak);
+                    bump_tail(
+                        model_obj,
+                        [
+                            obs.input_tokens,
+                            obs.cache_read_tokens,
+                            obs.cache_write_tokens,
+                            obs.output_tokens,
+                        ],
+                        obs.peak,
+                    );
                 }
+                // 有 usage 但没 model / 两态皆无 → 哨兵，绝不编模型名/当 0。
+                Err(UNREADABLE) => inc(sess, "unreadable_usage_rows"),
                 // 行有 usage 但 ts 不可解析 → 日线无处可挂 → 哨兵，不猜日。
-                None => inc(sess, "unattributed_rows"),
+                Err(UNATTRIBUTED) => inc(sess, "unattributed_rows"),
+                // SKIP（cost-state 已分流，这里只可能是无 message/无 usage 的
+                // assistant 行等非 usage 行）不增 sentinel。
+                Err(_) => {}
             }
         }
         _ => {}
@@ -516,11 +535,18 @@ fn read_suffix(path: &Path, from: u64) -> Result<(Vec<Value>, u64), String> {
 }
 
 /// 一个会话文件折进 `sessions`。返回折叠类别（New 含整份重折替换）。
+///
+/// R1 共享 extractor：`apply_record` 经 `parse_claude_usage_row` 解析 assistant
+/// 行，需要 `native_session_id`（= 本文件 stem，Python `_fold_one` 同款）与
+/// `machine_namespace`/`source_profile`（caller 注入，fold 不读 identity 字段、
+/// 只透传——值不影响 fold 输出，placeholder 与 Python `claude_sync` 对齐）。
 fn fold_one(
     sessions: &mut Map<String, Value>,
     path: &Path,
     size: u64,
     mtime: u64,
+    machine_namespace: &str,
+    source_profile: &str,
 ) -> Result<FoldKind, String> {
     let sid = path
         .file_stem()
@@ -553,7 +579,7 @@ fn fold_one(
             .unwrap_or_default()
     };
     for rec in &records {
-        apply_record(&mut sess, rec);
+        apply_record(&mut sess, rec, &sid, machine_namespace, source_profile);
     }
     sess.insert("size".to_string(), json!(new_pos));
     sess.insert("mtime_ns".to_string(), json!(mtime));
@@ -711,7 +737,10 @@ pub fn claude_sync(home: &Path, shadow: bool) -> Result<(), String> {
         let Some((size, mtime)) = stat_file(path) else {
             continue; // 枚举与 stat 之间文件消失 → 不计（下轮不再有它）
         };
-        match fold_one(sessions, path, size, mtime) {
+        // machine_namespace/source_profile 目前与 Python claude_sync 同款
+        // placeholder（fold 不读 identity 字段，值不影响输出；等 R2a 接线后
+        // 才注入真实 namespace）。
+        match fold_one(sessions, path, size, mtime, "ns-placeholder", "default") {
             Ok(FoldKind::New) => fresh += 1,
             Ok(FoldKind::Resume) => resumed += 1,
             Ok(FoldKind::Skip) => skipped += 1,
@@ -904,7 +933,7 @@ mod tests {
         });
         let mut sess = Map::new();
         for rec in [&cs(1_788_084_986_000), &row, &cs(1_788_084_986_000)] {
-            apply_record(&mut sess, rec);
+            apply_record(&mut sess, rec, "test-sid", "ns-placeholder", "default");
         }
         assert_eq!(
             sess.get("baseline")
@@ -961,7 +990,7 @@ mod tests {
                     &row("2026-08-31T12:00:00.000Z", 20),     // 北京 08-31
                     &row("2026-08-31T20:00:00.000Z", 30)]     // 北京 09-01
         {
-            apply_record(&mut sess, rec);
+            apply_record(&mut sess, rec, "test-sid", "ns-placeholder", "default");
         }
         assert!(!sess.contains_key("baseline_day"));
         assert_eq!(
@@ -1007,7 +1036,7 @@ mod tests {
                 "cache_creation_input_tokens": 0, "output_tokens": 9}},
         });
         let mut sess = Map::new();
-        apply_record(&mut sess, &row);
+        apply_record(&mut sess, &row, "test-sid", "ns-placeholder", "default");
         assert!(!sess.contains_key("baseline"));
         assert_eq!(
             sess.get("tail_days").unwrap().get("2026-08-31").unwrap()
@@ -1026,17 +1055,17 @@ mod tests {
             "message": {"model": "deepseek-v4-flash", "usage": {
                 "input_tokens": 1, "cache_read_input_tokens": 0,
                 "cache_creation_input_tokens": 0, "output_tokens": 0}},
-        }));
+        }), "test-sid", "ns-placeholder", "default");
         apply_record(&mut sess, &json!({
             "type": "assistant", "timestamp": "2026-08-31T10:00:00.000Z",
             "message": {"model": "deepseek-v4-flash", "usage": {"prompt_tokens": 5}},
-        }));
+        }), "test-sid", "ns-placeholder", "default");
         apply_record(&mut sess, &json!({
             "type": "assistant", "timestamp": "2026-08-31T10:00:00.000Z",
             "message": {"usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
                                   "cache_creation_input_tokens": 0,
                                   "output_tokens": 0}},
-        }));
+        }), "test-sid", "ns-placeholder", "default");
         assert_eq!(sess.get("unattributed_rows"), Some(&json!(1)));
         assert_eq!(sess.get("unreadable_usage_rows"), Some(&json!(2)));
         assert_eq!(sess.get("tail_days").unwrap().as_object().unwrap().len(), 0);
@@ -1141,7 +1170,7 @@ mod tests {
                 .chain(row_pairs.iter().map(|(t, c)| real_world_row(t, *c)))
                 .collect();
         for rec in &recs {
-            apply_record(&mut sess, rec);
+            apply_record(&mut sess, rec, "test-sid", "ns-placeholder", "default");
         }
         sess
     }

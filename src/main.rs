@@ -480,15 +480,17 @@ enum Cmd {
     },
     /// Audit ONE Claude session JSONL into per-message UsageFact rows (facts +
     /// attempts + coverage; v0.7 spec §3 candidate #3). R1 ratified: in-memory
-    /// emit + read-only diagnostic — writes no state (ledger/fold/machine.json
-    /// are untouched unless a default machine_namespace triggers takeover's
-    /// identity bootstrap).
+    /// emit + read-only diagnostic — writes no state at all. machine_namespace
+    /// is REQUIRED (spec §9): a fact's identity fields seed its fact_id, so a
+    /// CLI-invented namespace would make replays unstable AND trigger takeover's
+    /// identity bootstrap (a state write) — both forbidden, so a missing value
+    /// fails with exit 2 instead of being defaulted.
     /// Byte-for-byte mirror of Python `scan.py claude-usage-facts --json -`.
     ClaudeUsageFacts {
         /// Path to a Claude session JSONL file
         session_jsonl: PathBuf,
-        /// Override machine_namespace (default: read state/machine.json or
-        /// generate fresh UUID); required for stable fact_id across replays
+        /// machine_namespace component of SessionKey — required (spec §9);
+        /// the CLI never reads/writes state to invent one (missing exits 2)
         #[arg(long)]
         machine_namespace: Option<String>,
         /// source_profile component of SessionKey (default: 'default')
@@ -1672,12 +1674,17 @@ session_store={store} fold={fold}"
     if let Some(Cmd::ClaudeUsageFacts { session_jsonl, machine_namespace, source_profile, rows_json }) =
         &args.cmd
     {
-        // 缺省 machine_namespace：与 Python handler 同款——读 takeover（可能
-        // bootstrap machine.json）。parity 测试显式传 --machine-namespace，
-        // 不触达 takeover 写路径。
+        // machine_namespace 必传（spec §9）。绝不让 CLI 读 takeover 身份来
+        // 补齐：那是一次隐式 state 写，而 claude-usage-facts 是只读诊断。
         let ns = match machine_namespace {
             Some(ns) => ns.clone(),
-            None => agent::takeover::machine_namespace(),
+            None => {
+                eprintln!(
+                    "claude-usage-facts: --machine-namespace is required \
+                     (v0.7 spec §9: caller-provided; a CLI default would write state)"
+                );
+                std::process::exit(2);
+            }
         };
         let sid = session_jsonl
             .file_stem()
