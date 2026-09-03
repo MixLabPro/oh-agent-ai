@@ -1,9 +1,10 @@
 # Vitals Core v0.7 —— Host Adapter 改造立项决策（候选 #3）
 
-> 状态：**待拍板（提案 v0.0.1）**——本文件是 spec §3 主体候选 #3 启动前的
-> 立项决策清单，**不是代码改动**。每条决策列推荐默认值 + 备选方案 +
-> 影响面分析；待用户拍板后才进 commit。workbuddy 流已明确排除（用户
-> 2026-09-03 决定），本文件只覆盖 claude / codex / dsh 三家。
+> 状态：**已拍板 v1.0（2026-09-03 拍板）**——本文件是 spec §3 主体候选
+> #3 启动前的立项决策清单。每条决策已拍板（见 §5 决策汇总）；后续
+> commit 按本文件决策执行，每 Stage 独立 commit、独立评审。workbuddy
+> 流已明确排除（用户 2026-09-03 决定），本文件只覆盖 claude / codex /
+> dsh 三家。
 >
 > 关联：
 > - 数据面契约见 `docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §2、§3、§4
@@ -13,6 +14,7 @@
 >   `fact_id` / `USAGE_FACT_FIELDS` / `build_usage_fact` 纯函数
 > - CLI/menubar 全链路已闭环（commit a577497 + 7bd1349）：剩下的是把
 >   adapter 接上让事实行真的被产出
+> - 拍板前版本：commit e88d68a（doc-only，提案 v0.0.1）
 
 ## 0. 范围与前置
 
@@ -187,23 +189,21 @@ source_event_id, observation_kind)`。三个待定项：
 - 三家 adapter 各加 ~3 行代码（取 id 喂 `fact_id`）
 - 测试：每个 adapter 加 1 测（同一事件两次 emit → 同一 fact_id）
 
-## 5. 决策汇总（待拍板）
+## 5. 决策汇总（已拍板）
 
-| 决策 | 推荐 | 影响面 | 阻塞点 |
+| 决策 | 拍板值 | 影响面 | 阻塞点 |
 |---|---|---|---|
-| A. codex reasoning_output → output 合并 | (a) | DSH/Claude 计价面无切分，最小代价 | — |
-| B. DSH 从原始事件 replay 投影 | (a) | 与 spec §2「事实 cache 可重建」一致；zstd 多帧不重写历史 | — |
-| C. 改造顺序 claude → codex → dsh | (a) | 每阶段独立 commit、可暂停 | — |
-| D. fact_id source_event_id 来源 | 见 §4 | 三家 adapter 各加 3 行 | — |
+| A. codex reasoning_output → output 合并 | **(a) 合并到 output_tokens** | DSH/Claude 计价面无切分，最小代价 | — |
+| B. DSH 从原始事件 replay 投影 | **(a) 从 usage_events 原始流 replay** | 与 spec §2「事实 cache 可重建」一致；zstd 多帧不重写历史 | — |
+| C. 改造顺序 claude → codex → dsh | **(a) 按风险从低到高** | 每阶段独立 commit、可暂停 | — |
+| D. fact_id source_event_id 来源 | **claude: message.id / codex: rollout item id / DSH: usage_event_id 派生** | 三家 adapter 各加 3 行 | — |
 
-**用户决策点**：以上 4 项默认值（(a)/(a)/(a)/见 §4）是否拍板？如
-修改任何一项请直接说「A 改 (b)」「B 改 (a+b 混合」等，本文件
-即时修订。**拍板后**：
+**拍板日期**：2026-09-03。后续 commit 按本文件决策执行：
 
-1. 决策 A 单独 commit 修订本文件 → 启动 Stage 1（claude ledger）
-2. Stage 1 commit → 启动 Stage 2（codex static fold）
-3. Stage 2 commit → 启动 Stage 3（dsh state chain）
-4. Stage 3 commit → 写 v0.7 完成记录进 spec §7
+1. ✅ 决策 A/B/C/D 拍板（commit 文档状态更新）→ 启动 Stage 1（claude ledger）
+2. ⏸ Stage 1 commit → 启动 Stage 2（codex static fold）
+3. ⏸ Stage 2 commit → 启动 Stage 3（dsh state chain）
+4. ⏸ Stage 3 commit → 写 v0.7 完成记录进 spec §7
 
 ## 6. 与既有纪律的对照
 
