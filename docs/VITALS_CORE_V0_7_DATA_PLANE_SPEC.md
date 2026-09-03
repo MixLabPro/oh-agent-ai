@@ -219,10 +219,6 @@ Python↔Rust stdout 逐字节差分测试）；输入（month.json `by_model`�
   写入/fsync/故障注入**（§5「迁移与故障恢复」的验收条款）。两者都要等 `UsageFact`
   真的有了第二个版本或真的被持久化之后才有意义去做——现在做就是自己造靶子自己打，
   测不出真问题。
-- **两行未接 CLI/menubar 表面**——`claude_subscription_uncovered_estimate`/
-  `nominal_vs_actual_cost` 目前只是双语言 parity 纯函数，没有像 `state by-model`
-  那样接一个用户能直接调用的入口；接线本身不需要 schema 变更，风险低，是后续
-  会话可以直接捡起的下一步，不是本条记录里"完成"的一部分。
 - **不随本版**：非订阅成本（裁定列档）依赖会话级**裁定 reader**——订阅裁决链（价
   目表 `_doc`：①账户层 oauthAccount.billingType ②路由层 ANTHROPIC_BASE_URL ③事件
   层 quotaLimits 拒绝史 ④问用户）的代码 reader 未实现前保持不可用；reader 是 v0.6
@@ -454,8 +450,37 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
   §0 标注的"提案，未立项"状态；这三行之所以能在没有正式立项评审的情况下
   独立落地，恰恰是因为它们符合候选 #3 描述的"零新数据、零新持久化、纯新增
   视图"标准——不触碰任何持久格式、不需要 §5 那套 schema 迁移评审窗口。
-  `claude_subscription_uncovered_estimate`/`nominal_vs_actual_cost` 两行
-  尚未接 CLI/menubar 表面（只是纯函数+测试），留给后续会话。
+- 2026-09-03（**§3 第二/三行视图 CLI/menubar 全链路闭环**）：
+  `claude_subscription_uncovered_estimate`（provider 粒度订阅排除估算）和
+  `nominal_vs_actual_cost`（名义 vs 实际单位成本/缓存节约因子）从「双语言
+  parity 纯函数」推进到「CLI/menubar 表面闭环」：
+  - CLI（commit a577497）：`agent-vitals state uncovered` /
+    `state savings` 两个子命令，与既有 `state by-model` 同构——读 month.json
+    折平、8 桶 DSH → Claude 4 型 snake 薄适配（peak_* 丢弃 + 键改名）、
+    core 单一决策点计价。Python↔Rust stdout 字节相等差分钉测
+    （`tests/test_v07_views.py`，9 测非 BIN + 2 测 BIN 字节相等）。
+  - menubar（commit 7bd1349）：`Overview` 加 `claude_uncovered_month` /
+    `month_savings` 两个 `Option<Value>` 字段（additive，不破既有读方），
+    复用与 `month_cost` 同一份已按 `cur_month` 过滤的 `month_val`，
+    调 core `state::rollup_by_model` + core `cost::{claude_subscription_
+    uncovered_estimate, nominal_vs_actual_cost}`。月无 by_model →
+    (None, None) 同款诚实降级。3 个 inline 测试覆盖空月份 / 订阅排除 /
+    缓存节约 ratio = 1/30（spec §3 原文引用）。
+  §3「明确仍未开始」清单移除此条；剩余项：候选 #3 host adapter 改造
+  （claude/codex/dsh 三家，workbuddy 已排除）、候选 #4 真实迁移 +
+  atomic write/fsync。两者都需要 Item 1 立项决策（已拍板，commit e88d68a +
+  b1220b3）+ Stage 1 启动前的细化分析（待审，commit 1c697db）。
+- 2026-09-03（**UsageFact 契约 P1 缺口修复**）：代码审核发现 3 个会在
+  Stage 1 adapter 改造时扩散的契约缺口，提交 c965926 一并修复：
+  - identity 元组（`machine_namespace` / `native_session_id`）加入
+    `USAGE_FACT_FIELDS`——`fact_id` 入参必须写入文档，持久化后能独立复算
+    主键。
+  - `schema_version` 超 u32::MAX → 显式 error（防止 Rust `as u32`
+    截断成 1、Python 保留原值的跨语言不一致）。
+  - 迁移步执行后断言 `cur.schema_version == v+1`——坏迁移（忘记升版本）
+    立即报错，不让下游拿到旧格式当新格式写回。
+  P1-4 [fact_id 字段分隔安全，较低优先级] 留独立项：当前用 `\x1f`
+  分隔但不拒绝字段内含该字符，需要时改长度前缀或 canonical JSON。
 - 2026-09-02（**R4 架构审核修订**）：
   1. 定义事实粒度为“一个宿主原生 usage observation”，新增稳定 `fact_id`、来源修订、
      delta/cumulative、raw/normalized model/provider 与 adapter version；turn/step 不再
