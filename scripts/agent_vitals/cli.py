@@ -953,11 +953,13 @@ def _main():
     # state：列出 / 清理 state 目录，或列出有数据的自然月。不接受
     # --json/--host 等扫描期参数。
     p_state = sub.add_parser("state", help="Inspect or clean the persisted state directory")
-    p_state.add_argument("action", choices=("list", "clean", "months", "by-source"),
+    p_state.add_argument("action", choices=("list", "clean", "months", "by-source", "by-model"),
                          help="list = show files; clean = remove (with --yes); "
                               "months = list months with data (current + archived); "
                               "by-source = per-source breakdown of the current month "
-                              "(JSON on stdout)")
+                              "(JSON on stdout); by-model = per-model monthly cost "
+                              "breakdown of the current month (JSON on stdout, v0.7 "
+                              "spec §3 first output view)")
     p_state.add_argument("--yes", action="store_true",
                          help="Skip the confirmation prompt for 'state clean'")
     # ──── M6: 预算告警 ──────────────────────────────────────────
@@ -1712,6 +1714,23 @@ def _main():
             report = cost_module.cost_report({"by_source": rollup},
                                              cost_module.load_pricing())
             print(json.dumps({"by_source": rollup, "by_source_cost": report},
+                             ensure_ascii=False, indent=2))
+            return
+        if args.action == "by-model":
+            # v0.7 spec §3「按 provider/model 月成本」的首个落地输出面：零新
+            # 数据、零新持久化——把 month.json 逐日 by_model 折平成月度粒度
+            # （`state.rollup_by_model`），复用既有 `cost_report` 计价，与
+            # `by-source` 同一套读法只是折平的键换成模型名。月份没有 by_model
+            # （老数据）→ 两个键都空，不摆全零结构。
+            month = state_module._read(state_module.state_dir() / "month.json") or {}
+            rollup = state_module.rollup_by_model(month)
+            if not rollup:
+                print(json.dumps({"by_model": {}, "by_model_cost": None},
+                                 ensure_ascii=False))
+                return
+            report = cost_module.cost_report({"by_model": rollup},
+                                             cost_module.load_pricing())
+            print(json.dumps({"by_model": rollup, "by_model_cost": report},
                              ensure_ascii=False, indent=2))
             return
         if args.action == "months":

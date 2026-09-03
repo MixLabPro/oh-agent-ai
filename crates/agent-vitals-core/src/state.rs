@@ -201,6 +201,25 @@ pub fn rollup_by_source(month_json: &Value) -> Value {
     Value::Object(out)
 }
 
+/// 把 month.json 的**逐日** by_model（`days[date]["by_model"] = {model: 8桶}`）
+/// 折平成 `{model: 8桶}`——v0.7 spec §3「按 provider/model 月成本」视图的输入：
+/// 零新数据、零新持久化，纯粹把已有的逐日 by_model 折平成月度粒度再喂给既有
+/// `cost::cost_report`。与 `rollup_by_source` 同一折法，只是不带 source 那层键
+/// ——直接复用 `merge_model_buckets` 而不是像 `rollup_by_source` 那样手写循环。
+pub fn rollup_by_model(month_json: &Value) -> Value {
+    let mut out = json!({});
+    let Some(days) = month_json.get("days").and_then(Value::as_object) else {
+        return out;
+    };
+    for day in days.values() {
+        let Some(by_model) = day.get("by_model") else {
+            continue;
+        };
+        out = merge_model_buckets(Some(&out), by_model);
+    }
+    out
+}
+
 /// 复刻 `rotate_today(now=...)` 的纯函数一半：旧日期 ≠ 新日期时，把 today.json
 /// **整体替换**成「空桶 + 新日期 + rotated_from」；否则不动。
 ///
@@ -805,6 +824,29 @@ mod tests {
         });
         let out = rollup_by_source(&month);
         assert_eq!(out["cli"]["pro"]["uncached_input_tokens"], 150);
+    }
+
+    #[test]
+    fn rollup_by_model_flattens_per_day_rows() {
+        // 逐日 by_model 折平成模型 → 8桶——v0.7 spec §3「按 provider/model
+        // 月成本」视图读 month.json 全靠它；跨天同一模型必须累加。与
+        // rollup_by_source 同一份夹具形状，只是不带 source 那层键。
+        let month = json!({
+            "days": {
+                "2026-09-01": {"by_model": {"pro": {"uncached_input_tokens": 100}}},
+                "2026-09-02": {"by_model": {"pro": {"uncached_input_tokens": 50}}},
+            },
+        });
+        let out = rollup_by_model(&month);
+        assert_eq!(out["pro"]["uncached_input_tokens"], 150);
+    }
+
+    #[test]
+    fn rollup_by_model_empty_days_is_empty_object() {
+        // 没有 by_model 的老月份 → 空对象，不摆全零结构（与 by_model_report
+        // 的「两个键都空」诚实降级一致）。
+        assert_eq!(rollup_by_model(&json!({"days": {}})), json!({}));
+        assert_eq!(rollup_by_model(&json!({})), json!({}));
     }
 
     #[test]

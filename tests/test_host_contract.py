@@ -421,16 +421,22 @@ class G10PricingResolutionTests(unittest.TestCase):
         self.assertEqual(_mechanically_find_time_varying_cards(pricing),
                          _EXPECTED_TIME_VARYING_CARDS)
 
-    def test_price_claude_map_has_exactly_the_two_registered_callers(self):
-        """廉价哨兵（G8 风格）：`_flat_rate` 的 off_peak 兜底只应经这两个已登记
-        入口触达。调用点数变了就说明有新入口悄悄接上了下界读法，须同步这份
-        缺口登记与 v0.6 spec §8 G10。"""
+    def test_price_claude_map_has_exactly_the_three_registered_callers(self):
+        """廉价哨兵（G8 风格）：v0.6.x 热修后 `_flat_rate` 已收窄为只服务真正
+        平费率字段，不再有 off_peak 兜底可"悄悄接上"；这条哨兵现在盯的是
+        `_price_claude_map` 的调用面本身——调用点数变了说明有新计价入口出现，
+        需要确认它是否传对了 `peak_resolved`（时变卡缺分辨率时必须诚实降级
+        成 `"partial"`，不能悄悄冒充 `"catalog"`）。三个已登记入口：
+        `claude_day_cost`/`claude_session_cost`（`_price_claude_map` doc
+        注释自钉「两面的钱必须同源」）+ v0.7 spec §3 新增的
+        `claude_subscription_uncovered_estimate`（`peak_resolved=True`，
+        复用 ledger 的峰谷分辨率，不是又一个下界兜底）。"""
         text = (ROOT / "scripts" / "agent_vitals" / "agent" / "cost.py").read_text(encoding="utf-8")
         occurrences = len(re.findall(r"_price_claude_map\(", text))
-        # 1 处定义 + 2 个已登记入口各调用 1 次。
-        self.assertEqual(occurrences, 3,
-                         "_price_claude_map 的调用点数量变化——检查是否有新计价入口"
-                         "接上了 _flat_rate 的 off_peak 兜底，需要同步 G10 缺口登记")
+        # 1 处定义 + 三个已登记入口各调用 1 次。
+        self.assertEqual(occurrences, 4,
+                         "_price_claude_map 的调用点数量变化——检查新计价入口传的 "
+                         "peak_resolved 是否诚实，需要同步这份登记")
 
     def test_claude_day_cost_prices_peak_tokens_at_peak_rate_not_off_peak_floor(self):
         """硬断言（v0.6 spec §8 G10 / §12 DoD 2/9，v0.6.x 热修落地后从"验证仍

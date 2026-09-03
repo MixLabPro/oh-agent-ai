@@ -677,6 +677,12 @@ enum StateAction {
     /// (source → model → 8-bucket) and `by_source_cost` (source → price), or
     /// both empty when the month has no by_source data — never fabricated.
     BySource,
+    /// Read-only per-model monthly cost breakdown of the current month
+    /// (month.json's per-day by_model rolled up + priced; v0.7 spec §3 first
+    /// landed output view). JSON on stdout: `by_model` (model → 8-bucket) and
+    /// `by_model_cost` (model → price), or both empty when the month has no
+    /// by_model data — never fabricated.
+    ByModel,
 }
 
 /// 探测「扫描器自身所在的 skill 目录」。
@@ -1834,6 +1840,7 @@ session_store={store} fold={fold}"
                 println!("{}", agent::takeover::machine_namespace());
             }
             StateAction::BySource => st::by_source_report(),
+            StateAction::ByModel => st::by_model_report(),
         }
         return;
     }

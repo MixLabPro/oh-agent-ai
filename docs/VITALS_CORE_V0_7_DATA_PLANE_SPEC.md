@@ -1,6 +1,9 @@
 # Vitals Core v0.7 —— 数据平面：统一事实行 + 视图目录 + 迁移函数表（方案）
 
-> 状态：**提案 v0.0.2**（草案，未立项；R4 修订见 §7）。2026-09-02 由 v0.6 spec
+> 状态：**提案 v0.0.2**（草案，未立项；R4 修订见 §7）——**候选 #3 的主体（统一
+> `UsageFact` 契约）与候选 #4（迁移函数表）仍是此状态**：本版的 output-only 切片
+> （§3「本版交付矩阵」三行）已于 2026-09-03 落地，但那不等于本版整体已立项/完成，
+> 见 §3 该节末尾的"明确仍未开始"清单。2026-09-02 由 v0.6 spec
 > （`VITALS_CORE_V0_6_HOST_CONTRACT_SPEC.md`）§5.4 **独立成版**——版本边界、拆分
 > 表与验收纪律见 v0.6 spec §2.3/§0 结论第 6 条。正文迁自 v0.6 §5.4 的
 > 5.4.1/5.4.2/5.4.4；§5.4.3（HostProfile 列化卡）是 host-contract 语义，留 v0.6
@@ -166,9 +169,9 @@ cache、不碰 R1 权威状态——写权边界见 R2a 设计 §3.2，不是 §
 | `priced_day` | 逐日 by_model 覆盖：全→exact；不全→标 `pricing_basis="partial"` + `coverage` 比例，未覆盖的剩余部分仍经 `fallback_price` 补齐计入 `total`（不是"只标不价"——`basis` 字段本身就是"这个数字不精确"的标注，不许被下游读成 exact） | month.json 逐日渲染 |
 | behavior findings | canonical 全信号 × 规则，RuleOutcome 三态 | findings tab、审计投影 |
 | `sessions_navigation` | 身份视图：今日/最近 N 会话（现状唯一跨宿主 join 视图，r2a） | menubar 行、工作台 chip |
-| 未来例：**按 provider/model 月成本** | month.json `by_model` 逐模型 × 模型卡（core 计价函数现成）→ per-model 金额；同一 provider 跨两账（如 deepseek：DSH 真账 vs claude ledger 估算）**分 basis 列，不裸加** | —（数据/价目/函数全现成，缺输出面） |
-| 未来例：**未落入已声明套餐覆盖范围（估算）** | model 不在当前已声明 subscription 的覆盖范围 → 仅输出 token 与 catalog 反事实金额，`basis=estimated-subscription-exclusion`；不能据此断言发生按量现金成本。**粒度待定，非零新数据**：`pricing.json` 的 `subscriptions.*` 目前只有 `provider`/`currency`/`amount_per_month`/`reported_at`/`note`——覆盖范围的核对（如 claude-pro 那段"19,248 事件超窗口"的推理）是**散文**写在 `note` 里，没有结构化键。若谓词按 **provider 粒度**（该 provider 订阅覆盖全部用量）判定，行名"模型集"就名不副实，应改叫"未落入已声明订阅覆盖范围"；若坚持**模型粒度**，则需要新增一个结构化的模型清单字段——这本身就是新数据，与"零新数据"矛盾。两者二选一，落地前须先在本节澄清，不能两种粒度混着写 | —（价目/函数现成，覆盖范围粒度与其结构化表示待定；可能仍属企业套餐、免费额度、代理路由或未知来源） |
-| 未来例：**名义 vs 实际单位成本（节约因子）** | Σ tokens_m × 市价_m（不排除订阅，counterfactual 基线）÷ Σ tokens = 名义混合单价；真账实际 ÷ Σ tokens = 实际混合单价；ratio<1 = 节约；订阅含 USD 卡，跨币种 ratio 需 basis 分列 | —（可算；单宿主官方卡语义下 ratio 恒 1——2026-09-02 实测 1.00；信号仅在结算价≠卡价时出现：订阅覆盖/路由折扣/模型替代；缓存节约已内嵌卡价差 cached 0.05 vs uncached 1.5 = 1/30，需无缓存反事实基线才显性） |
+| **按 provider/model 月成本**（已落地，2026-09-03） | month.json `by_model` 逐模型 × 模型卡 → per-model 金额；`state.rollup_by_model`（逐日折平，与 `rollup_by_source` 同一套折法）+ 既有 `cost_report`，零新计价规则 | `agent-vitals state by-model`（`by_model`+`by_model_cost` JSON on stdout，与既有 `state by-source` 同一套接线） |
+| **未落入已声明订阅覆盖范围（估算）**（已落地，2026-09-03） | **粒度决策已澄清并落地：选 provider 粒度**（`pricing.json` 现有 `catalog_2026_09.subscriptions.*.provider` 字段即可判定，零新数据；模型粒度需要新增结构化字段，与"零新数据"矛盾，未采用）。provider 未在 subscriptions 出现 → 该 provider 全部用量进本视图的 catalog 反事实金额，`pricing_basis="estimated-subscription-exclusion"`；出现过 → 视为已订阅覆盖，不进本视图。行名相应从"模型集排除"改为"未落入已声明订阅覆盖范围"（drop 掉不准确的"模型"二字） | `cost.claude_subscription_uncovered_estimate`（`cost.rs` 同名函数）；尚未接线到 CLI/menubar 表面，函数本身双语言 parity 已钉测 |
+| **名义 vs 实际单位成本（节约因子）**（已落地，2026-09-03） | `nominal_vs_actual_cost`：actual = `cost_report` 真实计价；nominal = 假设无缓存命中（cache_read 按 uncached 单价折）的反事实基线；ratio = actual/nominal。**当前唯一建模的节约信号是缓存折扣**——订阅覆盖/路由折扣/模型替代尚未接入计价引擎，无缓存命中的语料下 ratio 恒为 1（2026-09-02 实测值，非 bug）；全缓存命中语料下 ratio = 1/30（cached 0.05 vs uncached 1.5，钉测值） | `cost.nominal_vs_actual_cost`（`cost.rs` 同名函数）；尚未接线到 CLI/menubar 表面 |
 | 未来例：**已确认非订阅成本** | `WHERE billing_mode=metered AND billing_source 已归属` → 按相同币种与 pricing basis 折算；unknown 单列 | — |
 
 **提醒（现状，不是本版待改行为）**：`unaccounted_usage` 哨兵目前只在
@@ -182,22 +185,36 @@ spec §5.2bis 记账轴各自的物化）；统一事实行是它们的共同逻
 纪律：视图是纯函数，同一语义两语言 = 双实现 + parity（v0.6 spec §5.1bis），不落第
 四份拷贝；单会话视图恒单宿主，跨宿主只在聚合视图（月总额）相汇。**裁定列 reader
 未实现前，非订阅成本视图天然不可用**——那是缺数据不是缺视图（裁定列三子列的证据
-现在只写在价目表 claude-pro 行注里，代码零 reader）。反观按 provider/model 月成本
-行：month.json `by_model`、模型价目卡、core 计价函数全已在手，缺的只是输出面——
-纯新增视图（零新数据、零新持久化、与裁定列无依赖），DSH 宿主侧当月即可兑现
-（`budget show --month` 总量之外的分模型金额）。非订阅成本是两档分层：**模型族排
-除档**（模型名级近似，只能展示 estimated coverage，不称按量现金）先行，裁定列档
-（会话级严格）等
-reader 落地；ratio 行的计算不依赖裁定列（真账与卡价均现成，实测 1.00），但信号归
-因（订阅覆盖/路由折扣/模型替代）与展示基线须挑明（§4）。
+现在只写在价目表 claude-pro 行注里，代码零 reader）。非订阅成本是两档分层：**模型
+族排除档**（模型名级近似，只能展示 estimated coverage，不称按量现金，已落地——见
+下）先行，裁定列档（会话级严格）等 reader 落地。
 
-**本版交付矩阵**（候选 #3 + 输出面）：上表「未来例」行的归属——
+**本版交付矩阵**（候选 #3 的输出面切片，2026-09-03 落地）：上表标"已落地"的三行——
+按 provider/model 月成本、未落入已声明订阅覆盖范围（估算）、名义 vs 实际单位
+成本——已实现为双语言 parity 函数（Python `cost.py`/Rust `cost.rs`，各自钉测 +
+`tests/test_catalog_pricing.py`/`tests/test_monthly_cost_by_model.py` 交叉锁定），
+第一行额外接了 CLI 表面（`state by-model`，与既有 `state by-source` 同构，含
+Python↔Rust stdout 逐字节差分测试）；输入（month.json `by_model`）、价目（catalog
+卡 + subscriptions）、计价函数（core `cost_report`/`resolve_card_catalog`）全部
+沿用既有代码，未新增任何持久化字段或 schema 版本——是候选 #3（统一事实行 +
+迁移函数表）里风险最小、不需要 schema 演进评审窗口就能独立交付的那一角，而不是
+候选 #3 的主体本身。
 
-- **随本版落地（零新数据、零新持久化、纯新增视图）**：按 provider/model 月成本、
-  未落入已声明套餐覆盖范围（估算）、名义 vs 实际单位成本三行的**输出面**——输入
-  （today.json/month.json `by_model`）、价目（catalog 卡 + subscriptions）、计价函
-  数（core cost_report/resolve_card_catalog）全现成，缺的只是逐模型金额与排除谓词
-  的输出落点（CLI/budget 表面 + menubar 派生行）。
+**明确仍未开始、且不在本次自动化落地范围内的部分**（诚实边界，避免"输出面已落地"
+被误读成"v0.7 已完成"）：
+- **候选 #3 主体**——§2 的统一 `UsageFact` 序列化契约（`fact_id`、`session_key`、
+  delta/cumulative 归一、per-host 物化视图替换手工 join）完全未动工，仍是本文件
+  §0 标注的"提案 v0.0.2（草案，未立项）"状态。它需要真正的 schema 设计评审（每个
+  字段的取舍、四个宿主 adapter 的逐一改造），不是能在没有人工立项的情况下由自动化
+  流程一次性决定的事。
+- **候选 #4**——§4.1 的显式迁移函数表（`vN -> vN+1`、原子写入、故障恢复演练）
+  同样未动工：它的验收条件（§5：迁移失败保持原文件、故障注入测试、逐项评审
+  `--update`）本身就要求每一步单独评审，与本次没有中途人工检查点的自动化落地
+  节奏冲突，强行动工存在把评审窗口做成摆设的风险。
+- **两行未接 CLI/menubar 表面**——`claude_subscription_uncovered_estimate`/
+  `nominal_vs_actual_cost` 目前只是双语言 parity 纯函数，没有像 `state by-model`
+  那样接一个用户能直接调用的入口；接线本身不需要 schema 变更，风险低，是后续
+  会话可以直接捡起的下一步，不是本条记录里"完成"的一部分。
 - **不随本版**：非订阅成本（裁定列档）依赖会话级**裁定 reader**——订阅裁决链（价
   目表 `_doc`：①账户层 oauthAccount.billingType ②路由层 ANTHROPIC_BASE_URL ③事件
   层 quotaLimits 拒绝史 ④问用户）的代码 reader 未实现前保持不可用；reader 是 v0.6
@@ -380,6 +397,29 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
 
 ## 7. 记录
 
+- 2026-09-03（**output-only 切片落地，非本版整体立项**）：§3「本版交付矩阵」
+  三行（按 provider/model 月成本、未落入已声明订阅覆盖范围（估算）、名义 vs
+  实际单位成本）实现为双语言 parity 函数——`cost.rollup_by_model`/
+  `state.rollup_by_model`（Python/Rust 同名）、
+  `cost.claude_subscription_uncovered_estimate`、`cost.nominal_vs_actual_cost`
+  （`cost.rs` 同名镜像），第一行接了 `agent-vitals state by-model` CLI 表面
+  （复刻既有 `state by-source` 的读法与接线）。三行落地前先解决了 §3 表格里
+  记录的开放决策：「未落入已声明订阅覆盖范围」按 **provider 粒度**判定（复用
+  `pricing.json` 现有 `catalog_2026_09.subscriptions.*.provider`，零新数据），
+  不是模型粒度（需要新增结构化字段，会打破"零新数据"承诺）。测试：Python
+  `tests/test_catalog_pricing.py`（新增两个 test class）+
+  `tests/test_monthly_cost_by_model.py`（新文件，含 CLI 差分）+ Rust
+  `cost.rs` inline 测试（6 个新测试）；v0.6 spec §8 G10 的
+  `price_claude_map` 调用点哨兵从"恰好两个入口"更新为"恰好三个入口"（新增
+  的 `claude_subscription_uncovered_estimate` 传 `peak_resolved=true`，不是
+  又一处下界兜底）。全套 `cargo test --release`/clippy/差分套件/golden_runner
+  验证零漂移。**这不是本版（候选 #3 主体 + 候选 #4）的完成**——`UsageFact`
+  统一事实行契约、per-host 物化视图迁移、显式迁移函数表均未动工，仍处于
+  §0 标注的"提案，未立项"状态；这三行之所以能在没有正式立项评审的情况下
+  独立落地，恰恰是因为它们符合候选 #3 描述的"零新数据、零新持久化、纯新增
+  视图"标准——不触碰任何持久格式、不需要 §5 那套 schema 迁移评审窗口。
+  `claude_subscription_uncovered_estimate`/`nominal_vs_actual_cost` 两行
+  尚未接 CLI/menubar 表面（只是纯函数+测试），留给后续会话。
 - 2026-09-02（**R4 架构审核修订**）：
   1. 定义事实粒度为“一个宿主原生 usage observation”，新增稳定 `fact_id`、来源修订、
      delta/cumulative、raw/normalized model/provider 与 adapter version；turn/step 不再

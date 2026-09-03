@@ -217,6 +217,33 @@ pub fn by_source_report() {
     );
 }
 
+/// v0.7 spec §3「按 provider/model 月成本」的首个落地输出面：零新数据、零新
+/// 持久化——把 month.json 逐日 by_model 折平成月度粒度（`state_core::rollup_by_model`），
+/// 复用既有 `cost::cost_report` 计价。与 `by_source_report` 同一套读法，只是
+/// 折平的键换成模型名（镜像 `cli.py` 的 `state by-model` 分支）。
+pub fn by_model_report() {
+    let path = state_dir().join("month.json");
+    let Some(month) = read_json(&path) else {
+        println!(r#"{{"by_model": {{}}, "by_model_cost": null}}"#);
+        return;
+    };
+    let rollup = state_core::rollup_by_model(&month);
+    if rollup.as_object().map_or(true, |m| m.is_empty()) {
+        println!(r#"{{"by_model": {{}}, "by_model_cost": null}}"#);
+        return;
+    }
+    let pricing = crate::agent::cost::load_pricing();
+    let cost = agent_vitals_core::cost::cost_report(&json!({"by_model": rollup}), &pricing);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "by_model": rollup,
+            "by_model_cost": cost,
+        }))
+        .unwrap_or_default()
+    );
+}
+
 /// 复刻 `write_oneline(audit)`：单次审计快照，原地覆盖 + schema_version + generated_at。
 pub fn write_oneline(audit: &Value) -> PathBuf {
     let path = state_dir().join("oneline.json");

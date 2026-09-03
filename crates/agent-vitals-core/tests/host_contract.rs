@@ -176,18 +176,22 @@ fn g10_time_varying_card_set_matches_registry() {
 }
 
 #[test]
-fn g10_price_claude_map_has_exactly_the_two_registered_callers() {
-    // 廉价哨兵（G8 风格）：`flat_rate` 的 off_peak 兜底只应经这两个已登记入口
-    // 触达（`price_claude_map` 由 `claude_day_cost`/`claude_session_cost` 共用，
-    // doc 注释自钉「两面的钱必须同源」）。调用点数变了说明有新入口悄悄接上，
-    // 须同步 v0.6 spec §8 G10 的缺口登记。
+fn g10_price_claude_map_has_exactly_the_three_registered_callers() {
+    // 廉价哨兵（G8 风格）：v0.6.x 热修后 `flat_rate` 已收窄为只服务真正平费率
+    // 字段，不再有 off_peak 兜底可"悄悄接上"；这条哨兵现在盯的是`price_claude_map`
+    // 的调用面本身——调用点数变了说明有新计价入口出现，需要确认它是否传对了
+    // `peak_resolved`（时变卡缺分辨率时必须诚实降级成 `"partial"`，不能悄悄
+    // 冒充 `"catalog"`）。三个已登记入口：`claude_day_cost`/`claude_session_cost`
+    // （`price_claude_map` doc 注释自钉「两面的钱必须同源」）+ v0.7 spec §3 新增的
+    // `claude_subscription_uncovered_estimate`（`peak_resolved=true`，复用
+    // ledger 的峰谷分辨率，不是又一个下界兜底）。
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let text = std::fs::read_to_string(root.join("crates/agent-vitals-core/src/cost.rs")).unwrap();
     let occurrences = text.matches("price_claude_map(").count();
-    // 1 处定义签名 + 两个已登记入口各调用 1 次。
-    assert_eq!(occurrences, 3,
-        "price_claude_map 的调用点数量变化——检查是否有新计价入口接上了 \
-         flat_rate 的 off_peak 兜底，需要同步 G10 缺口登记");
+    // 1 处定义签名 + 三个已登记入口各调用 1 次。
+    assert_eq!(occurrences, 4,
+        "price_claude_map 的调用点数量变化——检查新计价入口传的 peak_resolved \
+         是否诚实，需要同步这份登记");
 }
 
 // 缺口登记（v0.6.x 前置热修，2026-09-03 结清）：`claude_day_cost`/

@@ -401,6 +401,21 @@ def rollup_by_source(month_json):
     return out
 
 
+def rollup_by_model(month_json):
+    """把 month.json 的**逐日** by_model（`days[date]["by_model"] = {model: 八桶}`）
+    折平成 `{model: 八桶}`——v0.7 spec §3「按 provider/model 月成本」视图的输入：
+    零新数据、零新持久化，纯粹把已有的逐日 by_model 折平成月度粒度再喂给既有
+    `cost.cost_report`。与 `rollup_by_source` 同一折法，只是不带 source 那层键
+    ——直接复用 `_merge_model_buckets` 而不是手写循环。
+
+    Rust 平行实现见 `state.rs::rollup_by_model`。
+    """
+    out = {}
+    for day in (month_json.get("days") or {}).values():
+        out = _merge_model_buckets(out, day.get("by_model") or {})
+    return out
+
+
 def rotate_today(now=None):
     """如果 today.json 的 date 字段 != 当前 BJ 日期,**清空** today.json。
 

@@ -30,7 +30,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from agent_vitals.agent.cost import (  # noqa: E402
     claude_day_cost,
     claude_session_cost,
+    claude_subscription_uncovered_estimate,
     load_pricing,
+    nominal_vs_actual_cost,
 )
 
 
@@ -189,6 +191,73 @@ class PricingJsonShapeCase(unittest.TestCase):
                     for k in ("input_uncached", "input_cached", "output"):
                         self.assertIsInstance(card[k], (int, float),
                                               f"{provider}/{model}")
+
+
+class ClaudeSubscriptionUncoveredEstimateCase(unittest.TestCase):
+    """v0.7 spec §3 交付矩阵第二行——夹具与 cost.rs::tests 的同名测试同数。"""
+
+    def setUp(self):
+        self.pricing = load_pricing()
+
+    def test_flags_unsubscribed_provider(self):
+        """deepseek-official 没有 catalog_2026_09 订阅登记 → 全部落进本视图。"""
+        models = {"deepseek-v4-flash": {
+            "input_tokens": 1_000_000, "output_tokens": 0,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}
+        out = claude_subscription_uncovered_estimate(models, self.pricing)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["pricing_basis"], "estimated-subscription-exclusion")
+        self.assertEqual(
+            out["per_model"]["deepseek-v4-flash"]["pricing_basis"],
+            "estimated-subscription-exclusion")
+        self.assertAlmostEqual(out["currency_totals"]["CNY"], 1.5)
+
+    def test_excludes_subscribed_provider(self):
+        """anthropic 在 catalog_2026_09.subscriptions（claude-pro）登记过 →
+        claude-opus-5 视为已订阅覆盖，不进本视图 → None（不摆全零结构）。"""
+        models = {"claude-opus-5": {
+            "input_tokens": 1_000_000, "output_tokens": 0,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}
+        self.assertIsNone(
+            claude_subscription_uncovered_estimate(models, self.pricing))
+
+    def test_none_without_models(self):
+        self.assertIsNone(claude_subscription_uncovered_estimate({}, self.pricing))
+        self.assertIsNone(claude_subscription_uncovered_estimate(None, self.pricing))
+
+
+class NominalVsActualCostCase(unittest.TestCase):
+    """v0.7 spec §3 交付矩阵第三行——夹具与 cost.rs::tests 的同名测试同数。"""
+
+    def setUp(self):
+        self.pricing = load_pricing()
+
+    def _usage(self, uncached=0, cache_read=0):
+        return {"by_model": {"deepseek-v4-flash": {
+            "uncached_input_tokens": uncached, "output_tokens": 0,
+            "cache_read_tokens": cache_read, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+        }}}
+
+    def test_ratio_is_one_without_cache_hits(self):
+        """无缓存命中的语料下 ratio 恒为 1.00（2026-09-02 实测值，spec 原文
+        引用）——不是本函数的 bug。"""
+        out = nominal_vs_actual_cost(self._usage(uncached=1_000_000), self.pricing)
+        self.assertIsNotNone(out)
+        self.assertAlmostEqual(out["ratio"], 1.0)
+        self.assertAlmostEqual(out["actual"], out["nominal"])
+
+    def test_ratio_reflects_cache_savings(self):
+        """全部落在缓存命中：实测缓存节约 1/30（cached 0.05 vs uncached
+        1.5）——spec §3 原文引用的具体信号，ratio 必须显著偏离 1。"""
+        out = nominal_vs_actual_cost(self._usage(cache_read=1_000_000), self.pricing)
+        self.assertIsNotNone(out)
+        self.assertAlmostEqual(out["ratio"], 1 / 30)
+
+    def test_none_when_no_usage(self):
+        self.assertIsNone(nominal_vs_actual_cost({}, self.pricing))
+        self.assertIsNone(nominal_vs_actual_cost(None, self.pricing))
 
 
 if __name__ == "__main__":

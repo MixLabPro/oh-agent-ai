@@ -157,6 +157,65 @@ fn bucket_price(buckets: &Value, model_key: &str, provider_key: &str, pricing: &
     Some(Price { total: off + peak, peak, cache_read_cost })
 }
 
+/// 反事实基线：把缓存命中份额（`cache_read`）也按 `uncached` 单价折——
+/// 「假装没发生缓存」的名义单价，用来算缓存节约（v0.7 spec §3「名义 vs
+/// 实际单位成本」交付矩阵第三行）。`cache_write`/`output` 与真实计价一致，
+/// 只有 input 侧的 cached/uncached 二分被抹平。
+fn nominal_bucket_price(buckets: &Value, model_key: &str, provider_key: &str, pricing: &Value) -> Option<f64> {
+    let card = pricing.pointer(&format!("/providers/{provider_key}/models/{model_key}"))?;
+    let get = |key: &str| get_i64(buckets, key) as f64 / 1e6;
+    let u_peak = get("peak_uncached_input_tokens");
+    let c_peak = get("peak_cache_read_tokens");
+    let o_peak = get("peak_output_tokens");
+    let u_off = get("uncached_input_tokens") - u_peak;
+    let c_off = get("cache_read_tokens") - c_peak;
+    let o_off = get("output_tokens") - o_peak;
+    let rate = |path: &str| card.pointer(path).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let off = rate("/input_uncached/off_peak") * (u_off + c_off) + rate("/output/off_peak") * o_off;
+    let peak = rate("/input_uncached/peak") * (u_peak + c_peak) + rate("/output/peak") * o_peak;
+    Some(off + peak)
+}
+
+/// 名义 vs 实际单位成本（节约因子）——v0.7 spec §3 交付矩阵第三行。`actual` =
+/// `cost_report` 的真实计价 `total`（当前定价引擎能表达的"实际"，尚未建模
+/// 订阅覆盖/路由折扣，见下）；`nominal` = 假设所有 input（含缓存命中部分）
+/// 都按 uncached 单价算的反事实总价，逐模型用 `nominal_bucket_price` 求和。
+/// `ratio = actual / nominal`，<1 表示节约。
+///
+/// **当前唯一建模的节约信号是缓存折扣**（cached 0.05 vs uncached 1.5 = 1/30）；
+/// 订阅覆盖、路由折扣、模型替代尚未接入计价引擎，故没有缓存命中的语料下
+/// ratio 恒为 1.00（2026-09-02 实测值）——这不是本函数的 bug，是"当前能表达
+/// 的节约来源只有缓存"这一事实的忠实反映，未来接入订阅/路由信号后 ratio 才会
+/// 承载更多信号（v0.7 spec §3 原文）。
+///
+/// usage 为空/无可计价模型 → `None`。
+pub fn nominal_vs_actual_cost(usage: &Value, pricing: &Value) -> Option<Value> {
+    let report = cost_report(usage, pricing)?;
+    let by_model = usage.get("by_model").and_then(Value::as_object);
+    let providers = usage.get("providers").and_then(Value::as_object);
+    let mut nominal = 0.0f64;
+    if let Some(by_model) = by_model {
+        for (model, buckets) in by_model {
+            let provider = providers.and_then(|m| m.get(model)).and_then(Value::as_str);
+            if let Some((key, provider_key, _basis)) = resolve_card(model, provider, pricing) {
+                if let Some(p) = nominal_bucket_price(buckets, &key, &provider_key, pricing) {
+                    nominal += p;
+                }
+            }
+        }
+    }
+    let actual = report["total"].as_f64().unwrap_or(0.0);
+    let ratio = if nominal > 0.0 { Value::from(actual / nominal) } else { Value::Null };
+    Some(json!({
+        "currency": "CNY",
+        "actual": actual,
+        "nominal": nominal,
+        "ratio": ratio,
+        "estimate_disclaimer": "actual 是当前定价引擎的真实计价（未建模订阅覆盖/路由折扣），\
+nominal 是假设无缓存命中的反事实基线；ratio<1 表示节约，当前唯一建模的节约来源是缓存折扣",
+    }))
+}
+
 /// usage 报告 × 价格表 → 结构化成本数据。**这是唯一算价格的地方**——
 /// `cost_block`（人读文本）与 `--json` 的 `cost` 键都从这里取数，不是两处
 /// 各算一遍再凑成两种格式。之前 `cost` 完全没有 JSON 出口：想拿这份数字只能
@@ -947,6 +1006,63 @@ pub fn claude_day_cost(day: &Value, pricing: &Value) -> Option<Value> {
     price_claude_map(models, pricing, true)
 }
 
+/// 未落入已声明订阅覆盖范围（估算）——v0.7 spec §3 交付矩阵第二行，**provider
+/// 粒度**版本（澄清后的选择：模型粒度需要新增结构化字段，与"零新数据"矛盾；
+/// provider 粒度复用 `pricing.json` 现有 `catalog_2026_09.subscriptions.*`
+/// 字段即可判定，代价是这个视图判的是 provider 整体有没有已声明订阅，不是
+/// 逐模型——因此叫"未落入已声明订阅覆盖范围"而不是"模型集排除"）。
+///
+/// `models` 是 claude 4 型 snake 键 tokens（ledger 的 `by_model` 或 cost-state
+/// 转换后的形状，与 `claude_day_cost`/`claude_session_cost` 同型）。provider
+/// 在 `catalog_2026_09.subscriptions.*.provider` 出现过 → 该 provider 全部
+/// 用量视为已订阅覆盖，不进本视图；没出现过 → 全部 token 进本视图的 catalog
+/// 反事实金额，标 `pricing_basis="estimated-subscription-exclusion"`——不得
+/// 据此断言这是真实按量现金成本（可能仍是企业套餐、免费额度、代理路由或
+/// 未知来源，v0.7 spec §3 原文措辞）。`models` 为空/无可归属 provider 的模型
+/// → `None`。
+pub fn claude_subscription_uncovered_estimate(
+    models: &serde_json::Map<String, Value>,
+    pricing: &Value,
+) -> Option<Value> {
+    let covered: std::collections::HashSet<String> = pricing
+        .pointer("/catalog_2026_09/subscriptions")
+        .and_then(Value::as_object)
+        .map(|subs| {
+            subs.iter()
+                .filter(|(k, _)| k.as_str() != "_doc")
+                .filter_map(|(_, v)| v.get("provider").and_then(Value::as_str).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut uncovered = serde_json::Map::new();
+    for (model, tokens) in models {
+        if tokens.as_object().is_none() {
+            continue;
+        }
+        let Some((provider, _key, _currency)) = resolve_card_catalog(model, pricing) else {
+            continue; // 未知模型：本视图只处理"能定位到 provider 才能判是否覆盖"的模型
+        };
+        if covered.contains(&provider) {
+            continue;
+        }
+        uncovered.insert(model.clone(), tokens.clone());
+    }
+    if uncovered.is_empty() {
+        return None;
+    }
+    let mut report = price_claude_map(&uncovered, pricing, true)?;
+    report["pricing_basis"] = json!("estimated-subscription-exclusion");
+    if let Some(per_model) = report["per_model"].as_object_mut() {
+        for pm in per_model.values_mut() {
+            pm["pricing_basis"] = json!("estimated-subscription-exclusion");
+        }
+    }
+    report["estimate_disclaimer"] = json!(
+        "未落入已声明订阅覆盖范围的估算；可能仍属企业套餐、免费额度、代理路由或未知来源，不构成按量现金成本的确认"
+    );
+    Some(report)
+}
+
 /// claude-ledger 一天 → 4 型 token 总量。形状嗅探与 `claude_day_cost` 是同一对
 /// （by_model 包一层 / flat 直图都认）——两个函数必须认同同一种日形状，不然
 /// 「消耗量」和「折算钱」会是两张对不齐的账（token_by_date_model == token_by_model
@@ -981,6 +1097,73 @@ pub fn claude_day_total_tokens(day: &Value) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v0.7 spec §3 交付矩阵第二行：deepseek-official 没有 catalog_2026_09
+    /// 订阅登记 → 全部落进"未落入已声明订阅覆盖范围"视图；与 cost.py 同名
+    /// 测试同数（1M uncached × off_peak 4.5/M... 实为 flash 1.5/M = ¥1.5）。
+    #[test]
+    fn claude_subscription_uncovered_estimate_flags_unsubscribed_provider() {
+        let pricing = load_pricing();
+        let models = serde_json::json!({
+            "deepseek-v4-flash": {"input_tokens": 1_000_000, "output_tokens": 0,
+                "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+        });
+        let out = claude_subscription_uncovered_estimate(models.as_object().unwrap(), &pricing)
+            .unwrap();
+        assert_eq!(out["pricing_basis"], "estimated-subscription-exclusion");
+        assert_eq!(
+            out["per_model"]["deepseek-v4-flash"]["pricing_basis"],
+            "estimated-subscription-exclusion"
+        );
+        assert!((out["currency_totals"]["CNY"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+    }
+
+    /// anthropic 在 catalog_2026_09.subscriptions（claude-pro）登记过 → claude-opus-5
+    /// 的用量视为已订阅覆盖，不进本视图 → None（不是全零结构）。
+    #[test]
+    fn claude_subscription_uncovered_estimate_excludes_subscribed_provider() {
+        let pricing = load_pricing();
+        let models = serde_json::json!({
+            "claude-opus-5": {"input_tokens": 1_000_000, "output_tokens": 0,
+                "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+        });
+        assert_eq!(
+            claude_subscription_uncovered_estimate(models.as_object().unwrap(), &pricing),
+            None
+        );
+    }
+
+    /// v0.7 spec §3 交付矩阵第三行：无缓存命中的语料下 ratio 恒为 1.00
+    /// （2026-09-02 实测值，spec 原文引用）——不是本函数的 bug。
+    #[test]
+    fn nominal_vs_actual_cost_ratio_is_one_without_cache_hits() {
+        let pricing = load_pricing();
+        let usage = serde_json::json!({"by_model": {"deepseek-v4-flash": {
+            "uncached_input_tokens": 1_000_000, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+        }}});
+        let out = nominal_vs_actual_cost(&usage, &pricing).unwrap();
+        assert!((out["ratio"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        assert!((out["actual"].as_f64().unwrap() - out["nominal"].as_f64().unwrap()).abs() < 1e-9);
+    }
+
+    /// 全部落在缓存命中：实测缓存节约 1/30（cached 0.05 vs uncached 1.5）——
+    /// spec §3 原文引用的具体信号，ratio 必须显著偏离 1。
+    #[test]
+    fn nominal_vs_actual_cost_ratio_reflects_cache_savings() {
+        let pricing = load_pricing();
+        let usage = serde_json::json!({"by_model": {"deepseek-v4-flash": {
+            "uncached_input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 1_000_000, "cache_write_tokens": 0,
+            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+        }}});
+        let out = nominal_vs_actual_cost(&usage, &pricing).unwrap();
+        let ratio = out["ratio"].as_f64().unwrap();
+        assert!((ratio - (1.0 / 30.0)).abs() < 1e-9, "ratio={ratio}");
+    }
 
     /// 与 cost.py 对同一份真实 usage 报告的输出逐字节一致（差分由 cli_matrix 补）。
     /// 桶里没有 peak_* 键（老形状/手写夹具）→ 缺省 0，全部按空闲价计——真实总价

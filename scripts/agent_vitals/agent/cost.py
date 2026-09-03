@@ -696,3 +696,123 @@ def claude_day_cost(day, pricing):
     if not models:
         return None
     return _price_claude_map(models, pricing, peak_resolved=True)
+
+
+def claude_subscription_uncovered_estimate(models, pricing):
+    """未落入已声明订阅覆盖范围（估算）——v0.7 spec §3 交付矩阵第二行，
+    **provider 粒度**版本（澄清后的选择：模型粒度需要新增结构化字段，与
+    "零新数据"矛盾；provider 粒度复用 `pricing.json` 现有
+    `catalog_2026_09.subscriptions.*` 字段即可判定，代价是这个视图判的是
+    provider 整体有没有已声明订阅，不是逐模型——因此叫"未落入已声明订阅
+    覆盖范围"而不是"模型集排除"）。
+
+    `models` 是 claude 4 型 snake 键 tokens（ledger 的 `by_model` 或
+    cost-state 转换后的形状，与 `claude_day_cost`/`claude_session_cost`
+    同型）。provider 在 `catalog_2026_09.subscriptions.*.provider` 出现过
+    → 该 provider 全部用量视为已订阅覆盖，不进本视图；没出现过 → 全部
+    token 进本视图的 catalog 反事实金额，标
+    `pricing_basis="estimated-subscription-exclusion"`——不得据此断言这是
+    真实按量现金成本（可能仍是企业套餐、免费额度、代理路由或未知来源，
+    v0.7 spec §3 原文措辞）。`models` 为空/无可归属 provider 的模型 →
+    `None`。
+
+    Rust 平行实现见 `cost.rs::claude_subscription_uncovered_estimate`。
+    """
+    subs = (pricing.get("catalog_2026_09") or {}).get("subscriptions") or {}
+    covered = {v.get("provider") for k, v in subs.items()
+              if k != "_doc" and isinstance(v, dict)}
+    uncovered = {}
+    for model, tokens in (models or {}).items():
+        if not isinstance(tokens, dict):
+            continue
+        resolved = _resolve_card_catalog(model, pricing)
+        if resolved is None:
+            continue  # 未知模型：本视图只处理"能定位到 provider 才能判是否覆盖"的模型
+        provider, _key, _currency = resolved
+        if provider in covered:
+            continue
+        uncovered[model] = tokens
+    if not uncovered:
+        return None
+    report = _price_claude_map(uncovered, pricing, peak_resolved=True)
+    if report is None:
+        return None
+    report = dict(report)
+    report["pricing_basis"] = "estimated-subscription-exclusion"
+    report["per_model"] = {
+        m: dict(pm, pricing_basis="estimated-subscription-exclusion")
+        for m, pm in report["per_model"].items()
+    }
+    report["estimate_disclaimer"] = (
+        "未落入已声明订阅覆盖范围的估算；可能仍属企业套餐、免费额度、"
+        "代理路由或未知来源，不构成按量现金成本的确认")
+    return report
+
+
+def _nominal_price(buckets, model_key, provider_key, pricing):
+    """反事实基线：把缓存命中份额（cache_read）也按 uncached 单价折——
+    「假装没发生缓存」的名义单价，用来算缓存节约（v0.7 spec §3「名义 vs
+    实际单位成本」交付矩阵第三行）。cache_write/output 与真实计价一致，
+    只有 input 侧的 cached/uncached 二分被抹平。这是 DSH 运行时计价面
+    （`providers` 段，与 `_price` 同源）的函数，不是 claude catalog 面——
+    catalog 面（`claude_session_cost` 等）目前没有平费率卡的"缓存折扣"
+    语义要抹平（cache_write 是溢价不是折扣），此函数不服务那一面。
+    """
+    card = pricing["providers"][provider_key]["models"][model_key]
+    u_peak = buckets.get("peak_uncached_input_tokens", 0) / 1e6
+    c_peak = buckets.get("peak_cache_read_tokens", 0) / 1e6
+    o_peak = buckets.get("peak_output_tokens", 0) / 1e6
+    u_off = buckets["uncached_input_tokens"] / 1e6 - u_peak
+    c_off = buckets["cache_read_tokens"] / 1e6 - c_peak
+    o_off = buckets["output_tokens"] / 1e6 - o_peak
+    off = ((u_off + c_off) * card["input_uncached"]["off_peak"]
+           + o_off * card["output"]["off_peak"])
+    peak = ((u_peak + c_peak) * card["input_uncached"]["peak"]
+            + o_peak * card["output"]["peak"])
+    return off + peak
+
+
+def nominal_vs_actual_cost(usage, pricing):
+    """名义 vs 实际单位成本（节约因子）——v0.7 spec §3 交付矩阵第三行。
+    `actual` = `cost_report` 的真实计价 `total`（当前定价引擎能表达的
+    "实际"，尚未建模订阅覆盖/路由折扣，见下）；`nominal` = 假设所有 input
+    （含缓存命中部分）都按 uncached 单价算的反事实总价，逐模型用
+    `_nominal_price` 求和。`ratio = actual / nominal`，<1 表示节约。
+
+    **当前唯一建模的节约信号是缓存折扣**（cached 0.05 vs uncached 1.5 =
+    1/30）；订阅覆盖、路由折扣、模型替代尚未接入计价引擎，故没有缓存命中
+    的语料下 ratio 恒为 1.00（2026-09-02 实测值）——这不是本函数的 bug，是
+    "当前能表达的节约来源只有缓存"这一事实的忠实反映，未来接入订阅/路由
+    信号后 ratio 才会承载更多信号（v0.7 spec §3 原文）。
+
+    usage 为空/无可计价模型 → `None`。
+
+    Rust 平行实现见 `cost.rs::nominal_vs_actual_cost`。
+    """
+    report = cost_report(usage, pricing)
+    if report is None:
+        return None
+    by_model = (usage or {}).get("by_model") or {}
+    providers = (usage or {}).get("providers")
+    nominal = 0.0
+    for model, buckets in by_model.items():
+        provider = (providers or {}).get(model)
+        if not isinstance(provider, str):
+            provider = None
+        resolved = _resolve_card(model, provider, pricing)
+        if resolved is None:
+            continue
+        key, provider_key, _basis = resolved
+        nominal += _nominal_price(buckets, key, provider_key, pricing)
+    actual = report["total"]
+    ratio = (actual / nominal) if nominal > 0 else None
+    return {
+        "currency": "CNY",
+        "actual": actual,
+        "nominal": nominal,
+        "ratio": ratio,
+        "estimate_disclaimer": (
+            "actual 是当前定价引擎的真实计价（未建模订阅覆盖/路由折扣），"
+            "nominal 是假设无缓存命中的反事实基线；ratio<1 表示节约，"
+            "当前唯一建模的节约来源是缓存折扣"),
+    }
