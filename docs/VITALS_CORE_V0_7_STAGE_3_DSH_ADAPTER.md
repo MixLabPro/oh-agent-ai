@@ -214,7 +214,7 @@ model/provider（与 fold/request_metrics 的「后到重判」一致：request_
 
 | UsageFact 字段 | 来源 | 备注 |
 |---|---|---|
-| `machine_namespace` | CLI 必填（缺失 exit 2） | 同 Stage 1/2：CLI 绝不读 machine.json 的 takeover identity |
+| `machine_namespace` | CLI 必填且非空（缺失或空串 exit 2） | 同 Stage 1/2：CLI 绝不读 machine.json 的 takeover identity |
 | `host` | 常量 `"dsh"` | == R2a host_kind |
 | `source_profile` | CLI 显式，否则 header cwd 派生 | §3.6；cwd 缺失 → 硬错误 |
 | `native_session_id` | 头行 `id` | 与 R2a 同源（`r2a_store.rs:1184`）；缺 → 硬错误 |
@@ -374,7 +374,7 @@ source_event_id/fact_id。规则：
 
 | 层 | 情形 | 处理 |
 |---|---|---|
-| 参数 | `--machine-namespace` 缺失 | exit 2（同 Stage 1/2） |
+| 参数 | `--machine-namespace` 缺失或空串 | exit 2（同 Stage 1/2） |
 | 读/解码 | `file-missing` / `unsupported-compression` / `zstd-decode-error`（截断/坏帧） | **上抛硬错误** → CLI exit 2，消息带 dsh.py 错误码 |
 | 解析 | `parse_session_log` 降级 → `usage_events=None` | **上抛硬错误** → CLI exit 2（降级 = 整份不可用，不是读到 0 条） |
 | 身份 | header 缺 session `id` | **上抛硬错误** → CLI exit 2（不是 DSH 会话 / 无法定身份） |
@@ -535,7 +535,7 @@ helper，不动现有产物。
    整数边界）逐字节一致；身份 canonical hash 跨语言 battery（含普通槽
    `first_sample_seq` None → 省略 seq 键、以及无 id compaction `identity_row` 的
    seq 整数 / None 两分支——两语言同一省略规则，Python 不产 "None"/Rust 不产
-   "null"）；`--machine-namespace` 缺失 exit 2；不存在文件 exit 2；duplicate 文件
+   "null"）；`--machine-namespace` 缺失或空串 exit 2；不存在文件 exit 2；duplicate 文件
    exit 2 + 消息两语言同码。
 10. **Commit 1 零漂移门**（在 commit 1 内验证）：request_metrics 对同一批 fixture 的
     JSON 输出 refactor 前后逐字节相同；Python↔Rust request_metrics parity 全绿；

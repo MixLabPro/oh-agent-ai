@@ -233,7 +233,7 @@ provenance」。逐条落到 codex：
 | 字段 | 值 |
 |---|---|
 | `host` | `"codex"` |
-| `machine_namespace` | 调用方**必传**，缺失即调用级失败（exit 2），Stage 1c §9 同纪律 |
+| `machine_namespace` | 调用方**必传且非空**，缺失或空串即调用级失败（exit 2），Stage 1c §9 同纪律 |
 | `source_profile` | 必填；locate/R2a 前的处理沿用 Stage 1 现状（Stage 1 遗留的
   `source_profile="default"` 属后续清理，不夹带进 Stage 2） |
 | `observation_kind` | **`"assistant-usage"`**（已拍板）——per-request delta model usage
@@ -325,7 +325,7 @@ coverage：`{total_token_count_events, fact_rows, skip_rows}`。
 | 架构 | 共享 per-token_count 观察者（byte-neutral core fold refactor）+ emitter host adapter；不另起第四份 wire-shape |
 | 发射集 | == fold 的 by_model 消费集（含无时间样本） |
 | 发射域 | 本次传入的 rollout 路径集；同次发射内按 source_event_id（stem 命名空间）去重，异 stem 永不误合并 |
-| machine ns / source profile | 调用方必传缺失失败；source_profile 沿用 Stage 1 现状（locate/R2a 遗留） |
+| machine ns / source profile | machine ns 必传且非空，缺失或空串失败；source_profile 沿用 Stage 1 现状（locate/R2a 遗留） |
 | 诊断入口 | `codex-usage-facts <rollout.jsonl> [<rollout.jsonl> …] [--json] [--machine-namespace X]`（只读，不写 state） |
 
 ## 8. 需要拍板 / 已知遗留

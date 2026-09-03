@@ -445,30 +445,31 @@ class CodexUsageFactsBothTests(unittest.TestCase):
                          {"skip": 0, "unreadable": 1, "unattributed": 1})
         self.assertEqual(len(set(f["fact_id"] for f in doc["facts"])), 4)
 
-    def test_missing_machine_namespace_exits_2_and_writes_no_state(self):
-        """R1 §9「调用方必传、缺失即失败」+ 只读诊断绝不隐式写 state——镜像
+    def test_missing_or_empty_machine_namespace_exits_2_and_writes_no_state(self):
+        """R1 §9「调用方必传且非空」+ 只读诊断绝不隐式写 state——镜像
         claude-usage-facts 的同一契约。codex-usage-facts 也绝不让 CLI 读
         takeover 身份补齐（那是一次隐式 machine.json state 写）。"""
         snapshot = sorted(str(p.relative_to(self.home))
                           for p in self.home.rglob("*") if p.is_file())
-        args = ["codex-usage-facts", str(UF_LEGACY), "--json", "-"]
         env = dict(os.environ)
         env["HOME"] = str(self.home)
         env["USERPROFILE"] = str(self.home)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env.pop("AGENT_VITALS_BIN", None)
-        py = subprocess.run(PY_CMD + args, env=env, capture_output=True, text=True,
-                            cwd=str(self.home))
-        rs = subprocess.run([_BIN] + args, env=env, capture_output=True, text=True,
-                            cwd=str(self.home))
-        self.assertEqual(py.returncode, 2,
-                         "Python 缺 --machine-namespace 应 exit 2：%s" % py.stderr)
-        self.assertEqual(rs.returncode, 2,
-                         "Rust 缺 --machine-namespace 应 exit 2：%s" % rs.stderr)
+        base = ["codex-usage-facts", str(UF_LEGACY), "--json", "-"]
+        for suffix in ([], ["--machine-namespace", ""]):
+            py = subprocess.run(PY_CMD + base + suffix, env=env, capture_output=True,
+                                text=True, cwd=str(self.home))
+            rs = subprocess.run([_BIN] + base + suffix, env=env, capture_output=True,
+                                text=True, cwd=str(self.home))
+            self.assertEqual(py.returncode, 2, py.stderr)
+            self.assertEqual(rs.returncode, 2, rs.stderr)
+            self.assertEqual(py.stderr, rs.stderr)
+            self.assertIn("--machine-namespace is required", py.stderr)
         after = sorted(str(p.relative_to(self.home))
                        for p in self.home.rglob("*") if p.is_file())
         self.assertEqual(after, snapshot,
-                         "缺 --machine-namespace 时不得写任何 state 文件")
+                         "namespace 缺失或为空时不得写任何 state 文件")
 
     def test_nonexistent_rollout_exits_2(self):
         """I/O 错误（不可读 rollout）向上抛 → CLI exit 2（镜像 claude-usage-facts

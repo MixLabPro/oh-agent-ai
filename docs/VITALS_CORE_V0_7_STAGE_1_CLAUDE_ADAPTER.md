@@ -129,7 +129,7 @@ stable_source_identity + byte_offset + normalized_row_hash
 
 两者都是已落地 builder 的必填身份字段，禁止 `None` 或空串。
 
-- `machine_namespace` 由调用方明确提供，缺失时整次调用失败；
+- `machine_namespace` 由调用方明确提供且必须非空，缺失或空串时整次调用失败；
 - `source_profile` 在 locate 阶段从 Claude source identity 稳定派生；
 - 派生逻辑应与后续 R2a 共用纯规范化函数；
 - Adapter 不反向依赖 SessionStore；

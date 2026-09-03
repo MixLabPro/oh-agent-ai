@@ -846,22 +846,23 @@ class DshUsageFactsBothTests(unittest.TestCase):
         self.assertEqual(doc_pref["facts"][0]["uncached_input_tokens"], 1000000)
         self.assertEqual(doc_full["facts"][0]["uncached_input_tokens"], 1200000)
 
-    def test_missing_machine_namespace_exits_2_and_writes_no_state(self):
-        """v0.7 spec §9「调用方必传、缺失即失败」+ 只读诊断绝不隐式写 state——镜像
-        claude/codex-usage-facts 的同一契约（CLI 绝不让 takeover 身份补齐）。"""
+    def test_missing_or_empty_machine_namespace_exits_2_and_writes_no_state(self):
+        """v0.7 收口：namespace 缺失或空串均无效；两套 CLI 在参数边界给出
+        同一错误，且绝不让 takeover 身份补齐或写入 state。"""
         snapshot = sorted(str(p.relative_to(self.home))
                           for p in self.home.rglob("*") if p.is_file())
-        args = ["--path", str(BEHAVIOR), "--json", "-"]
-        py = self._run(PY_CMD, args, home_isolation=True)
-        rs = self._run([_BIN], args, home_isolation=True)
-        self.assertEqual(py.returncode, 2,
-                         "Python 缺 --machine-namespace 应 exit 2：%s" % py.stderr)
-        self.assertEqual(rs.returncode, 2,
-                         "Rust 缺 --machine-namespace 应 exit 2：%s" % rs.stderr)
+        for suffix in ([], ["--machine-namespace", ""]):
+            args = ["--path", str(BEHAVIOR), "--json", "-"] + suffix
+            py = self._run(PY_CMD, args, home_isolation=True)
+            rs = self._run([_BIN], args, home_isolation=True)
+            self.assertEqual(py.returncode, 2, py.stderr)
+            self.assertEqual(rs.returncode, 2, rs.stderr)
+            self.assertEqual(py.stderr, rs.stderr)
+            self.assertIn("--machine-namespace is required", py.stderr)
         after = sorted(str(p.relative_to(self.home))
                        for p in self.home.rglob("*") if p.is_file())
         self.assertEqual(after, snapshot,
-                         "缺 --machine-namespace 时不得写任何 state 文件")
+                         "namespace 缺失或为空时不得写任何 state 文件")
 
     def test_strict_errors_exit_2_both_implementations(self):
         """acceptance #8+#9 CLI 半侧：I/O 缺失 / 无 cwd 无 profile / 缺 id /

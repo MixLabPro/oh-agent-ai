@@ -1,12 +1,16 @@
-# Vitals Core v0.7 —— 数据平面：统一事实行 + 视图目录 + 迁移函数表（方案）
+# Vitals Core v0.7 —— 数据平面：UsageFact 最小闭环（已完成）
 
-> 状态：**提案 v0.0.2**（草案，未立项；R4 修订见 §7）——**本版整体仍是此状态**：
-> §3「本版交付矩阵」三行 output-only 视图，以及候选 #3/#4 的契约骨架
-> （`usage_fact.rs`/`.py` 的 `fact_id`/`build_usage_fact`/`migrate_chain`）已于
-> 2026-09-03 落地，但两者都不等于本版整体已立项/完成——没有任何 host adapter
-> 被改造成产出 `UsageFact`、没有任何真实迁移被注册、没有任何持久化格式被替换，
-> 四条现有账（dsh/codex/claude/workbuddy）原样运行。见 §3 末尾与 §4 候选表候选
-> #3/#4 行的"明确仍未开始"清单。2026-09-02 由 v0.6 spec
+> 状态：**实施完成 v1.0**（2026-09-04；收口边界见 §0，落地记录见 §7）。
+> v0.7 交付 `UsageFact v1` 契约、Claude/Codex/DSH 三宿主内存 emitter、只读诊断
+> CLI、Python↔Rust byte-parity，以及三项 output-only 成本视图。`fact_id`、
+> `build_usage_fact` 与 `migrate_chain` 通用骨架均已落地。
+>
+> **版本裁定**：v0.7 的完成不以持久化新账为条件。`UsageFact` writer、per-host
+> materialized view、R2a 指纹增量失效、真实 schema migration、原子写入/fsync/
+> 故障恢复与 WorkBuddy 最终接入，正式延期到 v0.8 Runtime/Data Plane 工作，不再作为
+> v0.7 的未完成项。旧账保持原样是兼容边界，不是本版缺陷。
+>
+> 本文最初于 2026-09-02 由 v0.6 spec
 > （`VITALS_CORE_V0_6_HOST_CONTRACT_SPEC.md`）§5.4 **独立成版**——版本边界、拆分
 > 表与验收纪律见 v0.6 spec §2.3/§0 结论第 6 条。正文迁自 v0.6 §5.4 的
 > 5.4.1/5.4.2/5.4.4；§5.4.3（HostProfile 列化卡）是 host-contract 语义，留 v0.6
@@ -15,18 +19,16 @@
 > 塌缩/evidence derive/G1–G10 完整性守卫全部字节零漂移验收），读本文件时不要
 > 按 09-02 那个时间点想象 v0.6 侧还是纯草案。
 >
-> 一句话：v0.6 把「关于宿主长什么样的声明」收进注册表（字节零漂移，golden 不许
-> 动）；本版把散在 per-host 账里的 usage/token/账单事实收成一张**逻辑统一事实行**
-> （§2），消费端只许查**视图目录**（§3）不许直读各家账，schema 演进收进显式
-> **迁移函数表**（§4 候选 #4、§5 验收）——schema/输出变化必须逐项产生可审查 diff，
-> 禁止 reflexive `--update`。
+> 一句话：v0.6 把「关于宿主长什么样的声明」收进注册表；v0.7 完成逻辑统一事实行
+> 及三宿主只读 emit 最小闭环；v0.8 再把它接入 Runtime 持久化与物化视图。schema/
+> 输出变化必须逐项产生可审查 diff，禁止 reflexive `--update`。
 
 ## 0. 范围与版本边界
 
-1. **本版 = 机制落地**：v0.6 spec §5.4.4 候选 #3（事实行契约 + 每宿主一物化视图）、
-   候选 #4（schema_version 迁移函数表）、§3 视图目录里「零新数据」未来例行的
+1. **本版 = 通用最小闭环**：v0.6 spec §5.4.4 候选 #3 的事实行契约 + 三宿主只读
+   emitter、候选 #4 的 `migrate_chain` 通用骨架，以及 §3 视图目录里「零新数据」的
    **输出面**（按 provider/model 月成本、未落入已声明套餐覆盖范围的估算、名义 vs
-   实际单位成本），
+   实际单位成本）。每宿主物化视图、真实迁移与 writer 明确转入 v0.8，
    计价分辨率、归日、去重和残差哨兵的**正确性修复不再绑进本版**：它们作为
    v0.6.x 前置热修复先行落地，本版复用其 fixture 与不变量（R4 修订）。
    候选 #1/#2（I/O 类型壳、键词表收敛）字节不变，**不占版本、随时可进**。
@@ -48,9 +50,9 @@
    修订，才能把本条从"提案"转正；否则保持现状（缺口仍归 v0.7，本节这段作废）。
    热修后的 ledger 是 v0.7 writer 的已验证输入；v0.7 的基本事实保留原始事件时间，
    `peak_*` 仅是从时间投影出来的可重建物化视图，不是事实列。
-2. **验收先写死**（§5）：迁移函数表落地 + 每项 schema 变更的逐条评审 diff +
-   parity 与不变式全绿。绝不 reflexive `--update`——那是把 golden 变成「当前行为
-   的记录」，快照测试失去意义（CLAUDE.md 纪律）。
+2. **验收先写死**（§5）：`UsageFact v1`/身份/去重/覆盖率契约、三宿主 emitter、
+   诊断 CLI、迁移通用骨架、parity 与不变式全绿。绝不 reflexive `--update`——那是
+   把 golden 变成「当前行为的记录」，快照测试会失去意义。
 3. **顺序约束**：v0.6 registry → v0.6.x 正确性热修 → 本版——先把用户可见计费结果
    修正确，再迁移数据平面。v0.6 的字节冻结验收完成前不启动 v0.7 schema 变更，
    避免 golden 变红后无法归属。**现状核实（2026-09-03）**：claude-sync 流已合入
@@ -203,8 +205,8 @@ Python↔Rust stdout 逐字节差分测试）；输入（month.json `by_model`�
 迁移函数表）里风险最小、不需要 schema 演进评审窗口就能独立交付的那一角，而不是
 候选 #3 的主体本身。
 
-**明确仍未开始、且不在本次自动化落地范围内的部分**（诚实边界，避免"输出面/契约
-骨架已落地"被误读成"v0.7 已完成"）：
+**已从 v0.7 DoD 移出、正式延期至 v0.8 的部分**（保留在此作为交接清单，不再影响
+v0.7 完成状态）：
 - **候选 #3 的"每宿主一物化视图替换手工 join"半句——落盘/物化视图那一段**：
   2026-09-03（见 §7）claude/codex/dsh 三家 adapter 已按决策 C(a) 逐一改造成产出
   `UsageFact`（`{claude,codex,dsh}-usage-facts` 诊断 CLI，per-message／per-`token_count`
@@ -213,10 +215,10 @@ Python↔Rust stdout 逐字节差分测试）；输入（month.json `by_model`�
   ——归属失败/duplicate 是硬错误 exit 2，不产生 attempts 类别），但 emit **只在
   内存 + 只读诊断 CLI**——`session_key` 的稳定序列化落盘、
   delta/cumulative 归一后的**物化事实视图**替手工 join、R2a `SourceFingerprint`
-  指纹增量失效这些"真正需要逐宿主动手术"的持久化段完全未碰，四条现有账
+  指纹增量失效这些需要逐宿主动手术的持久化段尚未实施，四条现有账
   （today/month/ledger/credit_json）继续各自原始形状运行。这一段需要真实持久化
   调用点或候选 #4 的迁移评审才有意义去做。workbuddy credit_json 按用户 2026-09-03
-  决定继续排除（evidence adapter + credit_json 原始形状运行，最终验收接入）。
+  决定继续排除（evidence adapter + credit_json 原始形状运行，转入 v0.8 接入）。
 - **候选 #4 的真实迁移链与持久化故障恢复**——`migrate_chain` 通用 walker 已落地
   且钉测过 vN→vN+1/拒绝跳迁/未来版本只读/幂等（§4 候选表候选 #4 行），但**没有
   注册任何真实迁移**（`CURRENT_SCHEMA_VERSION=1` 还没有 v2）、**没有文件级原子
@@ -260,8 +262,8 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
 |---|---|---|---|
 | 1 | 读写边界最小类型壳（frozen dataclass + from_dict，仅 I/O 层） | 字段多到手写易错的既有对策是显式映射表（claude ledger CAMEL_KEYS/SNAKE_KEYS），不是类型系统；序列化照旧 dict 直出，不破 parity | 不入版本，随时可进（字节不变） |
 | 2 | 键名收敛为单一共享词表（4+4 桶名、camel/snake 双面收进常量模块） | 视图组合出错的真实源头是各文件字面量里的键名漂移 | 不入版本，随时可进（字节不变） |
-| 3 | 事实行落成共享序列化契约 + 每宿主一物化视图（§2 → §3，R2a 模式推广） | 现状 per-host ledger 形状各一是跨宿主视图手写 join 的根因 | **本版主体**（§0.1、§2）——**契约骨架 + adapter emit 已落地（2026-09-03），落盘/物化视图未开始**：`usage_fact.rs`/`.py` 的 `fact_id`（§2.1 幂等键公式）、`USAGE_FACT_FIELDS`、`build_usage_fact` 三个纯函数双语言 parity 钉测；决策 C(a) 顺序 claude（`6fb8c99`+`1e616c9`+`c11d4b7`+`41b5225`）→ codex（`5449d0a`+`faa5caf`）→ dsh（`ba01147`+`753cbdc`）三个 Stage 全部改造完成，`{claude,codex,dsh}-usage-facts` 诊断 CLI 双语言 byte-parity（§7）。但 emit **只在内存 + 只读诊断**——`session_key` 落盘、delta/cumulative 归一后的物化事实视图、R2a 指纹失效未接，四条现有账原样运行；"每宿主一物化视图"这半句待真实持久化调用点。workbuddy 排除 |
-| 4 | schema_version 从写时 stamp 升级为显式迁移函数表（读旧版→迁移→新版） | 现状迁移只发生在 merge_month 归档处，读时容忍缺键 | **本版验收条目**（§5）——**通用骨架已落地（2026-09-03），无真实迁移**：`migrate_chain`（vN→vN+1 严格线性、拒绝跨版本跳迁、未来版本诚实标 read-only、幂等）双语言 parity 钉测；`CURRENT_SCHEMA_VERSION=1` 是 `UsageFact` 的第一个版本，迁移表目前是空的（没有 v2），机制用测试专用的合成迁移表验证，不是拿一个凑数的假迁移填充；文件级原子写入/fsync/故障注入未实现，等真实持久化调用点出现再做，不空转 |
+| 3 | 事实行落成共享序列化契约 + 每宿主一物化视图（§2 → §3，R2a 模式推广） | 现状 per-host ledger 形状各一是跨宿主视图手写 join 的根因 | **v0.7 范围完成**：`UsageFact v1` 契约与 claude→codex→dsh 三个 emitter 全部落地，三个诊断 CLI 双语言 byte-parity。**v0.8 延期项**：落盘、物化视图、R2a 指纹失效及 WorkBuddy 接入 |
+| 4 | schema_version 从写时 stamp 升级为显式迁移函数表（读旧版→迁移→新版） | 现状迁移只发生在 merge_month 归档处，读时容忍缺键 | **v0.7 范围完成**：`migrate_chain` 通用骨架及双语言 parity 已落地；`CURRENT_SCHEMA_VERSION=1` 尚无 v2，故不注册虚假生产迁移。**v0.8 延期项**：首个真实迁移随持久化调用点实现，并补原子写入/fsync/故障注入 |
 
 ### 4.1 迁移与重建的边界
 
@@ -397,14 +399,23 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
 - **本文件拥有**：统一事实行（§2）、视图目录与交付矩阵（§3）、数据结构演进/ORM-
   NoSQL 定位/候选表（§4）、验收（§5）。
 - 引用纪律：本文件的 §/表引用只指向自身或 v0.6 spec/R2a/价目表等具名文档；v0.6
-  spec §5.4 对本文件留指针。**两文件的评审地位都是提案（草案，未立项）**，机制
-  变更从各自获批落地时生效——但这不等于"代码未动工"：v0.6 spec 的 M0–M3（注册表
+  spec §5.4 对本文件留指针。v0.7 已按 §0 的最小闭环边界实施完成；v0.6 文档保持其
+  自身记录的评审地位。v0.6 spec 的 M0–M3（注册表
   骨架、共享投影塌缩、evidence derive、G1–G10 完整性守卫）已于 2026-09-02 夜至
   09-03 落地并提交（commit `e13dafa`…`3d06f15`），读者不应按本文件 2026-09-02
   的设计基准日期把 v0.6 一侧也理解成原地未动。
 
 ## 7. 记录
 
+- 2026-09-04（**v0.7 正式收口**）：版本边界裁定为 `UsageFact v1` 契约 +
+  Claude/Codex/DSH 三宿主内存 emitter + 只读诊断 CLI + Python↔Rust byte-parity +
+  output-only 成本视图。三 Stage 与通用 `migrate_chain` 骨架的实现和验收均已完成。
+  writer、per-host materialized view、R2a 指纹增量失效、首个真实 migration、原子
+  写入/fsync/故障恢复和 WorkBuddy 最终接入转入 v0.8；它们不再是 v0.7 DoD。
+  同批把三宿主 Rust CLI 的空 `--machine-namespace ''` 与缺参统一为参数错误 exit 2，
+  并由三组 Python↔Rust 测试钉住相同 stderr 与不写 state。
+  最终门禁：Python 1144 tests OK（skipped=2）；`cargo test --release` 全绿；
+  `cargo clippy --release --all-targets -- -D warnings` clean；golden 15/15 逐字节一致。
 - 2026-09-03（**候选 #3 host adapter 改造完成——claude/codex/dsh 三家 emit
   `UsageFact`（内存 + 只读诊断 CLI），adapter 接线段收尾**）：决策 C(a)「按风险
   claude → codex → dsh」的三个 Stage 全部落地，每 Stage 独立 commit + 独立
@@ -412,8 +423,8 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
   adapter 被改造成产出这份契约」一句作废**——三家 adapter 现已产出 `UsageFact`，
   但**只在内存 + 诊断 CLI**（`scan.py {claude,codex,dsh}-usage-facts --json -` ↔ Rust
   同名子命令），**不写盘**：`session_key` 稳定序列化落盘、per-host 物化视图替手工
-  join、R2a `SourceFingerprint` 指纹增量失效仍未接（那是候选 #4 + 真实持久化调用点
-  的事，§0 标注的「提案，未立项」状态不变）。
+  join、R2a `SourceFingerprint` 指纹增量失效仍未接（2026-09-04 收口决策已将其
+  正式延期至 v0.8）。
   - **Stage 1（claude ledger）**：`refactor` commit `6fb8c99`（per-message 共享
     observation extractor + golden 零漂移门）、`feat` commit `1e616c9`（Python
     emitter + `claude-usage-facts` 诊断 CLI + 真实 fixture）、`feat` commit `c11d4b7`
@@ -453,7 +464,8 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
     「v4 待 review」升为**已落地**（`VITALS_CORE_V0_7_STAGE_3_DSH_ADAPTER.md`）。
   **验收（HEAD `753cbdc`；WorkBuddy 词表漂移修复 8 文件按用户 2026-09-03 决定保持
   unstaged 排除，本记录的绿都是不含那批改动的干净树）**：
-  - `python3 -m unittest discover tests` — 1142 通过（skipped 226），exit 0
+  - `python3 -m unittest discover tests` — 当时 1142 通过；2026-09-04 收口重跑为
+    1144 通过（skipped=2），exit 0
   - `cargo test --release` — 全绿（binary 313 + `agent-vitals-core` lib 487 +
     `vitals_core` lib 53 + host_contract 12 + SV601–614 parity 52 +
     dependency_boundary/golden_replay/performance/pipeline 34）；
@@ -467,10 +479,10 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
   - clawhub 打包 allow-list（`.github/workflows/package-clawhub.yml`）与
     `tests/test_clawhub_packaging.py`、`tests/test_classification.py` 的 agent
     family 两集合同步登记 `source_identity` / `{claude,codex,dsh}_usage_fact`
-  **明确未做（候选 #4 + 持久化，仍 §0「提案，未立项」）**：没有注册任何真实迁移
+  **明确延期至 v0.8（候选 #4 + 持久化）**：没有注册任何真实迁移
   （`CURRENT_SCHEMA_VERSION=1` 无 v2）；没有文件级原子写入/fsync/故障注入；三家
   adapter 的 emit 只到内存 + 诊断 CLI，落盘/物化视图/R2a 指纹失效未接。workbuddy
-  流（credit_json + evidence adapter）继续按用户 2026-09-03 决定排除，留最终验收接入。
+  流（credit_json + evidence adapter）继续按用户 2026-09-03 决定排除，转入 v0.8 接入。
 - 2026-09-03（**候选 #3/#4 契约骨架落地，非 adapter 接线/真实迁移**）：新增
   `crates/agent-vitals-core/src/usage_fact.rs` + `scripts/agent_vitals/agent/
   usage_fact.py`（双语言 parity，`tests/test_usage_fact.py` + Rust inline
@@ -491,11 +503,11 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
      写回、迁移链中间缺步骤时诚实报错并保留已完成的部分、幂等。用测试
      专用的合成两步迁移表验证机制本身——`CURRENT_SCHEMA_VERSION=1` 是
      `UsageFact` 的第一个版本，生产迁移表目前是空的。
-  **明确没做、且不打算在没有人工立项评审的情况下做**：没有任何 host adapter
-  被接上这份契约（`session_key`/delta-cumulative 归一/per-host 物化视图完全
-  未碰）；没有注册任何真实迁移；没有文件级原子写入/fsync/故障注入（§5"迁移
-  与故障恢复"）。三者都需要真实的持久化调用点或逐宿主评审才有意义去做，
-  现在做是自己造靶子自己打。全套 `cargo test --release`（core 476 例，+13）/
+  **当时尚未做**：host adapter 尚未接上这份契约（随后已由 Stage 1–3 完成）；
+  `session_key`/delta-cumulative 归一/per-host 物化视图、真实迁移与文件级原子
+  写入/fsync/故障注入尚未开始（2026-09-04 已正式延期到 v0.8）。这些能力需要
+  真实的持久化调用点或逐宿主评审才有意义。全套 `cargo test --release`
+  （core 476 例，+13）/
   clippy/`AGENT_VITALS_BIN=... python3 -m unittest discover tests`/
   `golden_runner.py` 验证零漂移（golden 零漂移是自然结果：本模块零 I/O、
   没有任何现有代码路径调用它）。
@@ -515,9 +527,9 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
   `price_claude_map` 调用点哨兵从"恰好两个入口"更新为"恰好三个入口"（新增
   的 `claude_subscription_uncovered_estimate` 传 `peak_resolved=true`，不是
   又一处下界兜底）。全套 `cargo test --release`/clippy/差分套件/golden_runner
-  验证零漂移。**这不是本版（候选 #3 主体 + 候选 #4）的完成**——`UsageFact`
-  统一事实行契约、per-host 物化视图迁移、显式迁移函数表均未动工，仍处于
-  §0 标注的"提案，未立项"状态；这三行之所以能在没有正式立项评审的情况下
+  验证零漂移。**在该时点这还不是本版完成**——`UsageFact` 统一事实行契约与
+  显式迁移函数表随后已经落地，per-host 物化视图则于 2026-09-04 转入 v0.8；
+  这三行之所以能在当时没有正式立项评审的情况下
   独立落地，恰恰是因为它们符合候选 #3 描述的"零新数据、零新持久化、纯新增
   视图"标准——不触碰任何持久格式、不需要 §5 那套 schema 迁移评审窗口。
 - 2026-09-03（**§3 第二/三行视图 CLI/menubar 全链路闭环**）：

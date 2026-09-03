@@ -616,26 +616,27 @@ class ClaudeUsageFactsBothTests(unittest.TestCase):
         cr = sum(f["cache_read_tokens"] for f in facts)
         self.assertEqual(cr, 1_500_000 + 20)
 
-    def test_missing_machine_namespace_exits_2_and_writes_no_state(self):
-        """R1 §9「调用方必传、缺失即失败」+ 只读诊断绝不隐式写 state。
+    def test_missing_or_empty_machine_namespace_exits_2_and_writes_no_state(self):
+        """R1 §9「调用方必传且非空」+ 只读诊断绝不隐式写 state。
 
-        不带 --machine-namespace 跑（Python 与 Rust 两侧）：exit 2，且 fixture
+        不带或传空 --machine-namespace 跑（Python 与 Rust 两侧）：exit 2，且 fixture
         目录里**不新增任何文件**——旧实现会读 takeover.machine_namespace()（可能
         bootstrap machine.json，一次 state 写），这是 Stage 1c 撤掉的隐式副作用。
         """
         snapshot = sorted(str(p.relative_to(self.fixture))
                           for p in self.fixture.rglob("*") if p.is_file())
-        args = ["claude-usage-facts", str(self.session), "--json", "-"]
-        py = self._run(PY_CMD + args)
-        rs = self._run([_BIN] + args)
-        self.assertEqual(py.returncode, 2,
-                         "Python 缺 --machine-namespace 应 exit 2：%s" % py.stderr)
-        self.assertEqual(rs.returncode, 2,
-                         "Rust 缺 --machine-namespace 应 exit 2：%s" % rs.stderr)
+        base = ["claude-usage-facts", str(self.session), "--json", "-"]
+        for suffix in ([], ["--machine-namespace", ""]):
+            py = self._run(PY_CMD + base + suffix)
+            rs = self._run([_BIN] + base + suffix)
+            self.assertEqual(py.returncode, 2, py.stderr)
+            self.assertEqual(rs.returncode, 2, rs.stderr)
+            self.assertEqual(py.stderr, rs.stderr)
+            self.assertIn("--machine-namespace is required", py.stderr)
         after = sorted(str(p.relative_to(self.fixture))
                        for p in self.fixture.rglob("*") if p.is_file())
         self.assertEqual(after, snapshot,
-                         "缺 --machine-namespace 时不得写任何 state 文件（machine.json 等）")
+                         "namespace 缺失或为空时不得写任何 state 文件（machine.json 等）")
 
 
 if __name__ == "__main__":

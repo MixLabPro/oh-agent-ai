@@ -1724,11 +1724,11 @@ session_store={store} fold={fold}"
     if let Some(Cmd::ClaudeUsageFacts { session_jsonl, machine_namespace, source_profile, rows_json }) =
         &args.cmd
     {
-        // machine_namespace 必传（spec §9）。绝不让 CLI 读 takeover 身份来
+        // machine_namespace 必传且非空（spec §9）。绝不让 CLI 读 takeover 身份来
         // 补齐：那是一次隐式 state 写，而 claude-usage-facts 是只读诊断。
         let ns = match machine_namespace {
-            Some(ns) => ns.clone(),
-            None => {
+            Some(ns) if !ns.is_empty() => ns.clone(),
+            _ => {
                 eprintln!(
                     "claude-usage-facts: --machine-namespace is required \
                      (v0.7 spec §9: caller-provided; a CLI default would write state)"
@@ -1791,10 +1791,10 @@ session_store={store} fold={fold}"
     {
         // machine_namespace 必传（spec §9）。绝不让 CLI 读 takeover 身份来补齐：
         // 那是一次隐式 state 写（bootstrap machine.json），而 codex-usage-facts
-        // 是只读诊断——缺失即失败（exit 2），与 Python handler 同款。
+        // 是只读诊断——缺失或空串即失败（exit 2），与 Python handler 同款。
         let ns = match machine_namespace {
-            Some(ns) => ns.clone(),
-            None => {
+            Some(ns) if !ns.is_empty() => ns.clone(),
+            _ => {
                 eprintln!(
                     "codex-usage-facts: --machine-namespace is required \
                      (v0.7 spec §9: caller-provided; a CLI default would write state)"
@@ -1840,10 +1840,10 @@ session_store={store} fold={fold}"
     if let Some(Cmd::DshUsageFacts { session_path, machine_namespace, source_profile, rows_json }) = &args.cmd
     {
         // machine_namespace 必传（spec §9），同 codex-usage-facts：绝不让 CLI 读
-        // takeover 身份补齐（隐式 state 写），缺失即失败（exit 2）。
+        // takeover 身份补齐（隐式 state 写），缺失或空串即失败（exit 2）。
         let ns = match machine_namespace {
-            Some(ns) => ns.clone(),
-            None => {
+            Some(ns) if !ns.is_empty() => ns.clone(),
+            _ => {
                 eprintln!(
                     "dsh-usage-facts: --machine-namespace is required \
                      (v0.7 spec §9: caller-provided; a CLI default would write state)"

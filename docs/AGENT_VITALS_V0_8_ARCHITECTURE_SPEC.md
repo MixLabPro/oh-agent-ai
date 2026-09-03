@@ -985,6 +985,10 @@ projection DTO，而不是维护两套审计和计费逻辑。
 
 - 移动 discovery、reader、zstd、SQLite、state、watcher；
 - 建立唯一 HomeResolver、User Profile/Catalog loader 和 Skill/Session services；
+- 承接 v0.7 延期的数据平面：`UsageFact` writer、per-host materialized view、
+  R2a `SourceFingerprint` 增量失效、WorkBuddy `UsageFact` 接入；
+- 在出现第二个持久 schema 时实现首个真实 migration，并同时交付原子写入、fsync
+  与故障注入；没有 v2 之前不创建凑数迁移；
 - CLI 与 Tauri 共用 runtime services；
 - 禁止 Tauri command 直接读任意宿主 state 文件。
 
