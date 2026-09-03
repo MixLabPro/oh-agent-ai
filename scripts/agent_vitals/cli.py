@@ -953,13 +953,17 @@ def _main():
     # state：列出 / 清理 state 目录，或列出有数据的自然月。不接受
     # --json/--host 等扫描期参数。
     p_state = sub.add_parser("state", help="Inspect or clean the persisted state directory")
-    p_state.add_argument("action", choices=("list", "clean", "months", "by-source", "by-model"),
+    p_state.add_argument("action", choices=("list", "clean", "months", "by-source", "by-model",
+                                              "uncovered", "savings"),
                          help="list = show files; clean = remove (with --yes); "
                               "months = list months with data (current + archived); "
                               "by-source = per-source breakdown of the current month "
                               "(JSON on stdout); by-model = per-model monthly cost "
                               "breakdown of the current month (JSON on stdout, v0.7 "
-                              "spec §3 first output view)")
+                              "spec §3 first output view); uncovered = provider-grain "
+                              "subscription-exclusion estimate (v0.7 spec §3 second "
+                              "output view); savings = actual-vs-nominal cache-savings "
+                              "ratio (v0.7 spec §3 third output view)")
     p_state.add_argument("--yes", action="store_true",
                          help="Skip the confirmation prompt for 'state clean'")
     # ──── M6: 预算告警 ──────────────────────────────────────────
@@ -1731,6 +1735,52 @@ def _main():
             report = cost_module.cost_report({"by_model": rollup},
                                              cost_module.load_pricing())
             print(json.dumps({"by_model": rollup, "by_model_cost": report},
+                             ensure_ascii=False, indent=2))
+            return
+        if args.action == "uncovered":
+            # v0.7 spec §3 第二行：未落入已声明订阅覆盖范围（估算）。DSH 8 桶
+            # 形状 → Claude 4 型 snake 形状的薄适配（peak_* 丢弃、其他键按
+            # catalog 输入约定改名），然后调
+            # `cost.claude_subscription_uncovered_estimate`——core 是单一
+            # 定价决策点，不在这里二次改写 pricing_basis。月份没有 by_model
+            # → 两个键都空，不摆全零结构（与 by-model 同款诚实降级）。
+            month = state_module._read(state_module.state_dir() / "month.json") or {}
+            rollup = state_module.rollup_by_model(month)
+            if not rollup:
+                print(json.dumps({"by_model": {}, "uncovered": None},
+                                 ensure_ascii=False))
+                return
+            claude_models = {}
+            for model, buckets in rollup.items():
+                if not isinstance(buckets, dict):
+                    continue
+                claude_models[model] = {
+                    "input_tokens": buckets.get("uncached_input_tokens") or 0,
+                    "cache_read_input_tokens": buckets.get("cache_read_tokens") or 0,
+                    "cache_creation_input_tokens": buckets.get("cache_write_tokens") or 0,
+                    "output_tokens": buckets.get("output_tokens") or 0,
+                }
+            uncovered = cost_module.claude_subscription_uncovered_estimate(
+                claude_models, cost_module.load_pricing())
+            print(json.dumps({"by_model": claude_models, "uncovered": uncovered},
+                             ensure_ascii=False, indent=2))
+            return
+        if args.action == "savings":
+            # v0.7 spec §3 第三行：名义 vs 实际单位成本（节约因子）。月级数据
+            # 没有 `providers`（month.json 不存），各家模型自然走 fallback 价
+            # 卡——与 priced_day 对同一份 month.json 的处理一致。无缓存命中
+            # 的语料下 ratio 恒为 1.0（spec §3 原文引用，2026-09-02 实测值），
+            # 不是 bug——这是"当前能表达的节约来源只有缓存"这一事实的忠实反映。
+            # 月份没有 by_model → 两个键都空，不摆全零结构。
+            month = state_module._read(state_module.state_dir() / "month.json") or {}
+            rollup = state_module.rollup_by_model(month)
+            if not rollup:
+                print(json.dumps({"by_model": {}, "savings": None},
+                                 ensure_ascii=False))
+                return
+            savings = cost_module.nominal_vs_actual_cost(
+                {"by_model": rollup}, cost_module.load_pricing())
+            print(json.dumps({"by_model": rollup, "savings": savings},
                              ensure_ascii=False, indent=2))
             return
         if args.action == "months":

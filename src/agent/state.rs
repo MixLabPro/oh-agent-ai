@@ -241,7 +241,95 @@ pub fn by_model_report() {
             "by_model_cost": cost,
         }))
         .unwrap_or_default()
-    );
+    )
+}
+
+/// v0.7 spec §3「未落入已声明订阅覆盖范围（估算）」的 CLI 接线：把 month.json
+/// 逐日 by_model 折平成月度粒度后，再做一次 **8 桶 DSH 形状 → Claude 4 型
+/// snake 形状** 的薄适配（`uncached_input_tokens`→`input_tokens`、
+/// `cache_read_tokens`→`cache_read_input_tokens`、`cache_write_tokens`→
+/// `cache_creation_input_tokens`、`output_tokens`→`output_tokens`，丢弃
+/// `peak_*`），然后喂 core 的 `claude_subscription_uncovered_estimate`。
+///
+/// month.json 缺 / 没 by_model → `{"by_model": {}, "uncovered": null}`，
+/// 不摆全零结构（与 `by_model_report` 同款诚实降级）。`uncovered` 顶层
+/// `pricing_basis` 已被 core 函数改写成 `"estimated-subscription-exclusion"`，
+/// 不在这里二次加工——core 是单一定价决策点，不长第二份改写。
+pub fn uncovered_report() {
+    let path = state_dir().join("month.json");
+    let Some(month) = read_json(&path) else {
+        println!(r#"{{"by_model": {{}}, "uncovered": null}}"#);
+        return;
+    };
+    let rollup = state_core::rollup_by_model(&month);
+    if rollup.as_object().map_or(true, |m| m.is_empty()) {
+        println!(r#"{{"by_model": {{}}, "uncovered": null}}"#);
+        return;
+    }
+    // DSH 8 桶 → Claude 4 型 snake 适配：peak_* 丢弃、其他键按 catalog 输入
+    // 约定改名（与 `cost.py::claude_subscription_uncovered_estimate` 的输入
+    // 形状逐字段对齐）。未知模型 token 字段缺失 → 该模型不进入 uncovered 视图
+    // （core 的 `resolve_card_catalog` 返回 None 即丢弃）。
+    let mut claude_models = Map::new();
+    if let Some(obj) = rollup.as_object() {
+        for (model, buckets) in obj {
+            let Some(b) = buckets.as_object() else { continue };
+            claude_models.insert(
+                model.clone(),
+                json!({
+                    "input_tokens": b.get("uncached_input_tokens").cloned().unwrap_or(json!(0)),
+                    "cache_read_input_tokens": b.get("cache_read_tokens").cloned().unwrap_or(json!(0)),
+                    "cache_creation_input_tokens": b.get("cache_write_tokens").cloned().unwrap_or(json!(0)),
+                    "output_tokens": b.get("output_tokens").cloned().unwrap_or(json!(0)),
+                }),
+            );
+        }
+    }
+    let pricing = crate::agent::cost::load_pricing();
+    let uncovered = agent_vitals_core::cost::claude_subscription_uncovered_estimate(
+        &claude_models, &pricing);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "by_model": Value::Object(claude_models),
+            "uncovered": uncovered,
+        }))
+        .unwrap_or_default()
+    )
+}
+
+/// v0.7 spec §3「名义 vs 实际单位成本（节约因子）」的 CLI 接线：把 month.json
+/// 逐日 by_model 折平成月度粒度后，喂 core 的 `nominal_vs_actual_cost`——
+/// 月级数据没有 `providers`（month.json 不存），各家模型自然走 fallback 价卡，
+/// 与 `priced_day` 对同一份 month.json 的处理一致，同一个模型的"实际"和
+/// "名义"在两种 surface 上不会算岔。
+///
+/// month.json 缺 / 没 by_model → `{"by_model": {}, "savings": null}`，不摆
+/// 全零结构。`savings` 顶层 `ratio = actual / nominal`；无缓存命中的语料下
+/// 恒为 1.0（spec §3 原文引用，2026-09-02 实测值），不是 bug——这是"当前能
+/// 表达的节约来源只有缓存"这一事实的忠实反映。
+pub fn savings_report() {
+    let path = state_dir().join("month.json");
+    let Some(month) = read_json(&path) else {
+        println!(r#"{{"by_model": {{}}, "savings": null}}"#);
+        return;
+    };
+    let rollup = state_core::rollup_by_model(&month);
+    if rollup.as_object().map_or(true, |m| m.is_empty()) {
+        println!(r#"{{"by_model": {{}}, "savings": null}}"#);
+        return;
+    }
+    let pricing = crate::agent::cost::load_pricing();
+    let savings = agent_vitals_core::cost::nominal_vs_actual_cost(
+        &json!({"by_model": rollup}), &pricing);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "by_model": rollup,
+            "savings": savings,
+        }))
+        .unwrap_or_default()
+    )
 }
 
 /// 复刻 `write_oneline(audit)`：单次审计快照，原地覆盖 + schema_version + generated_at。

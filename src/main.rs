@@ -683,6 +683,20 @@ enum StateAction {
     /// `by_model_cost` (model → price), or both empty when the month has no
     /// by_model data — never fabricated.
     ByModel,
+    /// v0.7 spec §3 second output view: provider-grain "未落入已声明订阅覆盖
+    /// 范围" estimate (Claude Code catalog pricing surface). Reads month.json
+    /// by_model, maps the 8-bucket DSH shape → Claude 4-type snake shape
+    /// (peak_* dropped), then prices via core `claude_subscription_uncovered_
+    /// estimate`. Output JSON: `by_model` (Claude 4-type) + `uncovered`
+    /// (`price_claude_map` with `pricing_basis="estimated-subscription-
+    /// exclusion"`); both empty/null when no by_model data.
+    Uncovered,
+    /// v0.7 spec §3 third output view: actual-vs-nominal cache-savings ratio.
+    /// Reads month.json by_model, prices the same shape via core
+    /// `nominal_vs_actual_cost` (cache-discount counterfactual). Output JSON:
+    /// `by_model` + `savings` (`{actual, nominal, ratio, currency,
+    /// estimate_disclaimer}`); both empty/null when no by_model data.
+    Savings,
 }
 
 /// 探测「扫描器自身所在的 skill 目录」。
@@ -1841,6 +1855,8 @@ session_store={store} fold={fold}"
             }
             StateAction::BySource => st::by_source_report(),
             StateAction::ByModel => st::by_model_report(),
+            StateAction::Uncovered => st::uncovered_report(),
+            StateAction::Savings => st::savings_report(),
         }
         return;
     }
