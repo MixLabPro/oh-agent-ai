@@ -29,12 +29,16 @@ first, then a Chinese section anchored at `#中文`. When editing behaviour, bot
 ## Repo layout
 
 ```
-Cargo.toml                  # [workspace]: "." + crates/agent-vitals-core + crates/agent-vitals-wasm
+Cargo.toml                  # [workspace]: "." + crates/{vitals-core,agent-vitals-core,agent-vitals-adapters,agent-vitals-wasm}
 src/                        # Rust binary (the `agent-vitals` CLI)
   skills/                   #   静态 SKILL.md 体检（analysis/security/doctor/discovery/…）
   agent/                    #   会话行为/成本审计（behavior/cost/codex_cost/codex_session）
   dsh.rs + util.rs          #   两世界共享，留顶层
-crates/agent-vitals-core/   # lib crate: the PURE computation (behavior rules etc.), single source of truth
+crates/vitals-core/         # 宿主无关的通用审计机制（Event→Trajectory→Detector→Finding→Replay）；不认识 Agent/宿主
+crates/agent-vitals-core/   # lib crate：PURE computation，single source of truth。v0.8 Phase A 起内分
+                            #   src/{contracts,domain,adapters,compatibility}/ 三所有权层 + 兼容桥；lib.rs re-export 旧路径
+crates/agent-vitals-adapters/ # v0.8 Phase B1：叶子 host 证据适配（claude_code/codex/workbuddy evidence）迁出 core 的纯计算 crate。
+                            #   Codex usage fold + DSH evidence 因 domain→host 依赖暂留 core（Phase C 残余债务，架构测试钉死不得涨）
 crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over core (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/
 scripts/agent_vitals/       # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
@@ -63,6 +67,21 @@ The **core crate is the single source of truth for pure rules**. `src/behavior.r
 binary is now a thin wrapper that re-exports `agent_vitals_core::behavior::*` and keeps
 only the I/O entry (`audit_session_log`). The wasm crate wraps the same core, so the
 browser/Node runs the exact same rules as the CLI — never a second copy.
+
+**v0.8 crate split (in progress, phased — `docs/AGENT_VITALS_V0_8_ARCHITECTURE_SPEC.md`).**
+Phase A carved `agent-vitals-core/src` into `contracts/` (UsageFact/SessionKey/source-identity/
+host-capability), `domain/` (behavior/trajectory/cost/usage/detectors/…), `adapters/` and
+`compatibility/`; `lib.rs` re-exports every old flat path so `agent_vitals_core::behavior::*`
+etc. still resolve. Phase B1 moved the leaf host-evidence adapters (Claude/Codex/WorkBuddy
+`*_evidence`) into a new pure crate `agent-vitals-adapters` (binary + wasm import surface:
+`agent_vitals_adapters::{claude_code_evidence,codex_evidence,codex_usage,dsh_evidence,
+workbuddy_evidence}`). Codex `codex_usage` and DSH `dsh_evidence` are **still physically in
+core** (re-exported through the adapters facade) because `domain::usage` folds Codex and
+`domain::{behavior,trajectory,compaction,waste}` reconstruct DSH evidence — moving them would
+form a `core → adapters → core` Cargo cycle. Phase C breaks that coupling first; the two
+residuals are pinned by `dependency_budget.rs::residual_host_adapter_directories_are_explicit_phase_c_debt`
+(may shrink, never grow). Adapter purity (no fs/process/env/sqlite/zstd/tauri; no reverse
+dep on the binary) is executable in both crates' `tests/dependency_budget.rs`.
 
 ## Commands
 
