@@ -205,14 +205,18 @@ Python↔Rust stdout 逐字节差分测试）；输入（month.json `by_model`�
 
 **明确仍未开始、且不在本次自动化落地范围内的部分**（诚实边界，避免"输出面/契约
 骨架已落地"被误读成"v0.7 已完成"）：
-- **候选 #3 的"每宿主一物化视图替换手工 join"半句**——§2 的 `fact_id`/
-  `USAGE_FACT_FIELDS`/`build_usage_fact` 契约骨架已落地（`usage_fact.rs`/`.py`，
-  见 §4 候选表候选 #3 行），但**没有任何 host adapter 被改造成产出这份契约**：
-  claude ledger/codex 静态 fold/dsh state 链/workbuddy credit_json 四条账继续
-  各自的原始形状运行，`session_key`/delta-cumulative 归一/per-host 物化视图这些
-  真正需要"逐宿主动手术"的部分完全未碰。这半句需要真正的迁移评审（每个宿主
-  adapter 的逐一改造顺序、与 workbuddy 流的文件面冲突核对），不是能在没有人工
-  立项的情况下由自动化流程一次性决定的事。
+- **候选 #3 的"每宿主一物化视图替换手工 join"半句——落盘/物化视图那一段**：
+  2026-09-03（见 §7）claude/codex/dsh 三家 adapter 已按决策 C(a) 逐一改造成产出
+  `UsageFact`（`{claude,codex,dsh}-usage-facts` 诊断 CLI，per-message／per-`token_count`
+  ／per-slot 粒度，native/derived-hash `source_event_id`；claude/codex 结果带
+  `facts + attempts + coverage`，dsh 是 strict 单文件、结果只有 `facts + coverage`
+  ——归属失败/duplicate 是硬错误 exit 2，不产生 attempts 类别），但 emit **只在
+  内存 + 只读诊断 CLI**——`session_key` 的稳定序列化落盘、
+  delta/cumulative 归一后的**物化事实视图**替手工 join、R2a `SourceFingerprint`
+  指纹增量失效这些"真正需要逐宿主动手术"的持久化段完全未碰，四条现有账
+  （today/month/ledger/credit_json）继续各自原始形状运行。这一段需要真实持久化
+  调用点或候选 #4 的迁移评审才有意义去做。workbuddy credit_json 按用户 2026-09-03
+  决定继续排除（evidence adapter + credit_json 原始形状运行，最终验收接入）。
 - **候选 #4 的真实迁移链与持久化故障恢复**——`migrate_chain` 通用 walker 已落地
   且钉测过 vN→vN+1/拒绝跳迁/未来版本只读/幂等（§4 候选表候选 #4 行），但**没有
   注册任何真实迁移**（`CURRENT_SCHEMA_VERSION=1` 还没有 v2）、**没有文件级原子
@@ -256,7 +260,7 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
 |---|---|---|---|
 | 1 | 读写边界最小类型壳（frozen dataclass + from_dict，仅 I/O 层） | 字段多到手写易错的既有对策是显式映射表（claude ledger CAMEL_KEYS/SNAKE_KEYS），不是类型系统；序列化照旧 dict 直出，不破 parity | 不入版本，随时可进（字节不变） |
 | 2 | 键名收敛为单一共享词表（4+4 桶名、camel/snake 双面收进常量模块） | 视图组合出错的真实源头是各文件字面量里的键名漂移 | 不入版本，随时可进（字节不变） |
-| 3 | 事实行落成共享序列化契约 + 每宿主一物化视图（§2 → §3，R2a 模式推广） | 现状 per-host ledger 形状各一是跨宿主视图手写 join 的根因 | **本版主体**（§0.1、§2）——**契约骨架已落地（2026-09-03），adapter 接线未开始**：`usage_fact.rs`/`.py` 落了 `fact_id`（§2.1 幂等键公式）、`USAGE_FACT_FIELDS`（§2.1 全字段词表）、`build_usage_fact`（校验+填充）三个纯函数，双语言 parity 钉测（含跨语言 pinned `fact_id` 值）；**没有任何 host adapter 被改造成产出这份契约**，四条现有账原样运行——"每宿主一物化视图"这半句仍是提案，需要逐宿主评审才能开始 |
+| 3 | 事实行落成共享序列化契约 + 每宿主一物化视图（§2 → §3，R2a 模式推广） | 现状 per-host ledger 形状各一是跨宿主视图手写 join 的根因 | **本版主体**（§0.1、§2）——**契约骨架 + adapter emit 已落地（2026-09-03），落盘/物化视图未开始**：`usage_fact.rs`/`.py` 的 `fact_id`（§2.1 幂等键公式）、`USAGE_FACT_FIELDS`、`build_usage_fact` 三个纯函数双语言 parity 钉测；决策 C(a) 顺序 claude（`6fb8c99`+`1e616c9`+`c11d4b7`+`41b5225`）→ codex（`5449d0a`+`faa5caf`）→ dsh（`ba01147`+`753cbdc`）三个 Stage 全部改造完成，`{claude,codex,dsh}-usage-facts` 诊断 CLI 双语言 byte-parity（§7）。但 emit **只在内存 + 只读诊断**——`session_key` 落盘、delta/cumulative 归一后的物化事实视图、R2a 指纹失效未接，四条现有账原样运行；"每宿主一物化视图"这半句待真实持久化调用点。workbuddy 排除 |
 | 4 | schema_version 从写时 stamp 升级为显式迁移函数表（读旧版→迁移→新版） | 现状迁移只发生在 merge_month 归档处，读时容忍缺键 | **本版验收条目**（§5）——**通用骨架已落地（2026-09-03），无真实迁移**：`migrate_chain`（vN→vN+1 严格线性、拒绝跨版本跳迁、未来版本诚实标 read-only、幂等）双语言 parity 钉测；`CURRENT_SCHEMA_VERSION=1` 是 `UsageFact` 的第一个版本，迁移表目前是空的（没有 v2），机制用测试专用的合成迁移表验证，不是拿一个凑数的假迁移填充；文件级原子写入/fsync/故障注入未实现，等真实持久化调用点出现再做，不空转 |
 
 ### 4.1 迁移与重建的边界
@@ -401,6 +405,72 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
 
 ## 7. 记录
 
+- 2026-09-03（**候选 #3 host adapter 改造完成——claude/codex/dsh 三家 emit
+  `UsageFact`（内存 + 只读诊断 CLI），adapter 接线段收尾**）：决策 C(a)「按风险
+  claude → codex → dsh」的三个 Stage 全部落地，每 Stage 独立 commit + 独立
+  Python↔Rust byte-parity 钉测。**§3 与本节 §4 候选表候选 #3 行「没有任何 host
+  adapter 被改造成产出这份契约」一句作废**——三家 adapter 现已产出 `UsageFact`，
+  但**只在内存 + 诊断 CLI**（`scan.py {claude,codex,dsh}-usage-facts --json -` ↔ Rust
+  同名子命令），**不写盘**：`session_key` 稳定序列化落盘、per-host 物化视图替手工
+  join、R2a `SourceFingerprint` 指纹增量失效仍未接（那是候选 #4 + 真实持久化调用点
+  的事，§0 标注的「提案，未立项」状态不变）。
+  - **Stage 1（claude ledger）**：`refactor` commit `6fb8c99`（per-message 共享
+    observation extractor + golden 零漂移门）、`feat` commit `1e616c9`（Python
+    emitter + `claude-usage-facts` 诊断 CLI + 真实 fixture）、`feat` commit `c11d4b7`
+    （Rust mirror + Python↔Rust byte-parity）、`fix` commit `41b5225`（Stage 1c：补
+    全 6 项 R1 契约缺口）。R1 设计：per-message 粒度、`message.id → native
+    source_event_id`（缺失走 uuid → offset+hash fallback，标 `derived-hash`）、
+    `observation_kind="assistant-usage"`、facts + attempts + coverage 三段结果。
+    实现规格见 `VITALS_CORE_V0_7_STAGE_1_CLAUDE_ADAPTER.md`。
+  - **Stage 2（codex static fold）**：`refactor` commit `5449d0a`（`CodexFoldState`
+    共享 per-`token_count` 观察者，byte-neutral，零漂移门）、`feat` commit `faa5caf`
+    （emitter + `codex-usage-facts` 多 rollout CLI + `usage-fact/` 六文件 fixture +
+    11 验收 + 5 语料 byte-parity）。决策 A 映射：5 桶 → 4 型 snake，
+    `reasoning_output_tokens ⊆ output_tokens`（**合并不叠加**）。决策 D′（2026-09-03
+    wire 实证修订，§4.2）：`token_count` 是 `event_msg` 无原生 id →
+    `source_event_id` 一律 `derived-hash`，按**物理 rollout stem** 命名空间
+    （`stem:byte_offset:fnv1a64(canonical_row)`），`native_session_id` = 逻辑
+    session_id 独立承载续接不拆会话；Legacy/Paginated 双输入态都 emit，影子
+    `custom_tool_call` 去重。规格见 `VITALS_CORE_V0_7_STAGE_2_CODEX_ADAPTER.md`。
+  - **Stage 3（dsh state chain）**：`refactor` commit `ba01147`（Task A：
+    `canonical_json` + `fnv1a64_hex` 原语下沉进 core `source_identity.rs` ↔ 顶层
+    `source_identity.py`，四宿主/ID 消费方共用同一 helper、删五处 inline 拷贝、行为
+    字节不变；Task B：`DshUsageObservation` 共享 observer 携**开槽即固化**的
+    `source_event_id`/`identity_basis`/`first_sample_seq`/`first_sample_identity_hash`
+    ——shadow 永不覆盖身份、只覆盖 value，`request_metrics` 改道其上、输出字节冻结）、
+    `feat` commit `753cbdc`（`dsh_usage_fact.{py,rs}` emitter + `dsh-usage-facts` CLI
+    + 23 验收：18 direct-call + 5 语料 byte-parity）。身份三段公式：普通请求
+    `request:derived:{fnv1a64(canonical({turn,step,seq:first_sample_seq}))}` /
+    有 `compactionId` → `compaction:{id}`（**native**）/ 无 id →
+    `compaction:derived:{first_sample_identity_hash}`（`derived-hash`），`seq=None`
+    时 canonical dict 整体省略该键（两语言同分支，不产 `"None"`/`"null"` 字面量）。
+    归属失败（缺 header session id / 缺 cwd 且无显式 `--source-profile`）= **硬错误
+    exit 2**，不返回伪装空集；非相邻同 `compactionId` 重现 → `duplicate-source-event-id`
+    硬错误，**不静默去重**（否则 UsageFact 总量与 fold 总量对不上账）。coverage 键
+    `{observation_rows, fact_rows, unaccounted_events, unaccounted_tokens}`，成功时
+    `observation_rows == fact_rows` 且 `source_event_id` 全唯一无条件成立（无
+    attempts/malformed 类别——DSH decode/parse 是全有或全无）。Stage 3 spec 由
+    「v4 待 review」升为**已落地**（`VITALS_CORE_V0_7_STAGE_3_DSH_ADAPTER.md`）。
+  **验收（HEAD `753cbdc`；WorkBuddy 词表漂移修复 8 文件按用户 2026-09-03 决定保持
+  unstaged 排除，本记录的绿都是不含那批改动的干净树）**：
+  - `python3 -m unittest discover tests` — 1142 通过（skipped 226），exit 0
+  - `cargo test --release` — 全绿（binary 313 + `agent-vitals-core` lib 487 +
+    `vitals_core` lib 53 + host_contract 12 + SV601–614 parity 52 +
+    dependency_boundary/golden_replay/performance/pipeline 34）；
+    `agent::dsh_usage_fact::tests` 9 + `agent::codex_usage_fact` / `agent::
+    claude_usage_fact` / core `source_identity` 各自 inline，Python↔Rust
+    byte-parity 由 `AGENT_VITALS_BIN` 差分在 `tests/test_{claude,codex,dsh}_usage_fact.py`
+    钉住
+  - `cargo clippy --release --all-targets -- -D warnings` — clean
+  - `tests/golden_runner.py` — 15 case Python + 15 case Rust（`AGENT_VITALS_BIN`）
+    全部逐字节一致（本阶段零 schema/golden 变更，三家 emit 都是零 I/O 新路径）
+  - clawhub 打包 allow-list（`.github/workflows/package-clawhub.yml`）与
+    `tests/test_clawhub_packaging.py`、`tests/test_classification.py` 的 agent
+    family 两集合同步登记 `source_identity` / `{claude,codex,dsh}_usage_fact`
+  **明确未做（候选 #4 + 持久化，仍 §0「提案，未立项」）**：没有注册任何真实迁移
+  （`CURRENT_SCHEMA_VERSION=1` 无 v2）；没有文件级原子写入/fsync/故障注入；三家
+  adapter 的 emit 只到内存 + 诊断 CLI，落盘/物化视图/R2a 指纹失效未接。workbuddy
+  流（credit_json + evidence adapter）继续按用户 2026-09-03 决定排除，留最终验收接入。
 - 2026-09-03（**候选 #3/#4 契约骨架落地，非 adapter 接线/真实迁移**）：新增
   `crates/agent-vitals-core/src/usage_fact.rs` + `scripts/agent_vitals/agent/
   usage_fact.py`（双语言 parity，`tests/test_usage_fact.py` + Rust inline

@@ -248,13 +248,26 @@ claude / DSH 两项不受影响，仍按 §D.1 执行。
    - UsageFact emitter + 诊断 CLI + 真实 fixture（Python commit 1e616c9、
      Rust mirror commit c11d4b7）
    - Stage 1c：补全 6 项 R1 契约缺口（commit 41b5225）
-7. ⏸ Stage 2：codex static fold emit UsageFact（决策 A 映射）
+7. ✅ Stage 2：codex static fold emit UsageFact（决策 A 映射 + 决策 D′ 修订）
    - 拍板 + decision-D 修订同步：本文 §4.2 + `STAGE_2_CODEX_ADAPTER.md`（doc
-     commit，2026-09-03）；代码实施按该 spec §2.3 拆「共享观察者 byte-neutral
-     refactor（零漂移门）」与「emitter + 诊断 CLI + fixture + 11 验收」两步
-   - 拍板状态更新在本 doc commit 里登记（workbuddy 流继续排除，不碰）
-8. ⏸ Stage 3：dsh state chain emit UsageFact（决策 B replay）
-9. ⏸ Stage 3 commit → 写 v0.7 完成记录进 spec §7
+     commit `6b5a33a`，2026-09-03）
+   - 代码实施按该 spec §2.3 两步：共享 `CodexFoldState` 观察者 byte-neutral
+     refactor（commit `5449d0a`，零漂移门）+ emitter + `codex-usage-facts` 多
+     rollout CLI + `usage-fact/` fixture + 11 验收 + 5 语料 byte-parity
+     （commit `faa5caf`）。`reasoning_output_tokens ⊆ output_tokens`（合并不叠加）；
+     `source_event_id` 按物理 rollout stem 命名空间（`stem:offset:fnv1a64`）
+8. ✅ Stage 3：dsh state chain emit UsageFact（决策 B replay，spec v4）
+   - 规格 v4 拍板（commit `6fe7e53`）：observer 开槽即固化身份、
+     `duplicate-source-event-id` 硬错误守卫、归属失败 strict exit 2
+   - 代码实施两步：`canonical/FNV` 原语下沉进 core `source_identity` +
+     `DshUsageObservation` 携固化身份（commit `ba01147`，四宿主共用 helper、
+     `request_metrics` 输出字节冻结）+ `dsh_usage_fact.{py,rs}` emitter +
+     `dsh-usage-facts` CLI + 23 验收（18 direct-call + 5 语料 byte-parity）
+     （commit `753cbdc`）
+9. ✅ Stage 3 commit → v0.7 完成记录写进 `VITALS_CORE_V0_7_DATA_PLANE_SPEC.md`
+   §7（本 doc commit，2026-09-03）；§3「明确仍未开始」清单与 §4 候选表候选 #3
+   行同步——三家 adapter emit 段收尾，落盘/物化视图/候选 #4 真实迁移仍未开始
+   （§0「提案，未立项」不变），workbuddy 流继续排除
 
 ## 6. 与既有纪律的对照
 

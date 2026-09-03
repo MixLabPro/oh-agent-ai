@@ -1,10 +1,13 @@
 # Vitals Core v0.7 —— Stage 2：Codex static fold → UsageFact（映射小规格）
 
-> 状态：**已拍板（2026-09-03）**。本文定义 Codex `token_count` 事件 →
+> 状态：**已落地（2026-09-03）**。本文定义 Codex `token_count` 事件 →
 > `UsageFact` 的最小映射：事件 ID、reasoning 合并、去重、Legacy/Paginated 双输入。
 > 拍板内容：决策 A/B/C/D + §7 决策汇总；2026-09-03 拍板同时修订了决策 D 的 codex
 > 项（wire 实证取代，见 §3.3 与 `VITALS_CORE_V0_7_ADAPTER_DECISIONS.md` §4.2）。
-> 是实现规格，不代表 Stage 2 已完成；spec §6 验收项全部通过才算落地。
+> 实施：`5449d0a`（共享 `CodexFoldState` 观察者 byte-neutral refactor + 零漂移门）+
+> `faa5caf`（emitter + `codex-usage-facts` 多 rollout CLI + `usage-fact/` fixture +
+> 11 验收 + 5 语料 byte-parity）。v0.7 完成记录见
+> `VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §7。
 >
 > 关联：`VITALS_CORE_V0_7_ADAPTER_DECISIONS.md`（决策 A/B/C/D + §4.2 修订）、
 > `VITALS_CORE_V0_7_DATA_PLANE_SPEC.md`、`VITALS_CORE_V0_7_STAGE_1_CLAUDE_ADAPTER.md`、

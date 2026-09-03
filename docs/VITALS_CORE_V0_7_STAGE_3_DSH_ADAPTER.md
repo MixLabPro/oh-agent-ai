@@ -21,7 +21,12 @@
 >   invariant 守卫」；③ Core 边界表述修正——共享 observer 属 usage domain/core，
 >   emitter/DSH 文件解析/CLI 属 host adapter（v3 §0 的「不进 Core」与 Commit 1 动
 >   `usage.py`/`usage.rs` 矛盾）；④ 措辞：同模型换 provider 是**同一会话内**。
-> 本文仍**不标记定稿**：v4 修订待 review 通过后再升「已拍板」。
+> - **已落地（2026-09-03）**：v4 规格通过 review，Commit 1（`ba01147`，canonical/FNV
+>   原语下沉 + `DshUsageObservation` 开槽即固化身份 + `request_metrics` 字节冻结）
+>   与 Commit 2（`753cbdc`，`dsh_usage_fact.{py,rs}` emitter + `dsh-usage-facts` CLI
+>   + 23 验收：18 direct-call + 5 语料 byte-parity）双侧落地，全套 gate 绿
+>   （Python 1142 / `cargo test --release` 全绿 / clippy clean / 15+15 golden 逐字节
+>   一致）。v0.7 完成记录见 `VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §7。
 
 ## 0. 当前结论
 

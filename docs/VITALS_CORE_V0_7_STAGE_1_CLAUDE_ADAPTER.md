@@ -1,8 +1,11 @@
 # Vitals Core v0.7 —— Stage 1：Claude Adapter Emit UsageFact
 
-> 状态：**已拍板（v0.0.2，R1 架构审核修订 + 用户 2026-09-03 拍板）**
-> 本文定义 Claude Code 原始 session JSONL 到 `UsageFact` 的最小闭环；是
-> 实现规格，不代表 Stage 1 已完成（spec §6 验收项全部通过才算落地）。
+> 状态：**已落地（v0.0.2，2026-09-03）**——本文定义 Claude Code 原始 session
+> JSONL 到 `UsageFact` 的最小闭环。实施：`6fb8c99`（共享 observation extractor +
+> golden 零漂移）+ `1e616c9`（Python emitter + `claude-usage-facts` CLI + 真实
+> fixture）+ `c11d4b7`（Rust mirror + Python↔Rust byte-parity）+ `41b5225`
+> （Stage 1c：补全 6 项 R1 契约缺口）。v0.7 完成记录见
+> `VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §7。
 >
 > 关联：`VITALS_CORE_V0_7_ADAPTER_DECISIONS.md`、`VITALS_CORE_V0_7_DATA_PLANE_SPEC.md`、
 > `crates/agent-vitals-core/src/usage_fact.rs`、`scripts/agent_vitals/agent/usage_fact.py`、

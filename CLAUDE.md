@@ -94,13 +94,18 @@ python3 scripts/scan.py --baseline prev.json --json out.json
 
 # CLI subcommands (both implementations): doctor · list · explain · overlap · snapshot · diff ·
 #   plan · behavior · skill-audit (Rust only — Python's `behavior --json` has the `skill` key but has
-#   never had its own subcommand) · duration-audit
+#   never had its own subcommand) · duration-audit ·
+#   {claude,codex,dsh}-usage-facts (v0.7 数据面诊断，只读、不写盘)
 #   `plan` turns the scan report into a ranked savings plan（zombie/oversized/trim-description/
 #   shadow → 每条点名 skill、标 risk、给测量的 token 节省与 SV 码；诚实性规则见
 #   `crates/agent-vitals-core/src/plan.rs` docstring）。
 #   `behavior <session-log>` audits a DSH session log for SV601–SV614 findings（单事件规则 + 轨迹级检测器）.
 #   `duration-audit <session-log>` audits execution duration（工具调用/turn/step/审批/hook 消费五路耗时，
 #   D1-D4 的 core 纯函数）；`--json` 输出与 `behavior --json` 的 `duration` 键是同一份数据。
+#   `{claude,codex,dsh}-usage-facts <session-file> --machine-namespace NS [--json -]` 把一份会话
+#   replay 成 `UsageFact` 事实行（claude=per-message／codex=per-token_count／dsh=per-slot 粒度，
+#   facts + coverage；codex 收多 rollout）。**内存 emit + 只读诊断，不写盘**——v0.7 候选 #3
+#   adapter 段，规格见 `docs/VITALS_CORE_V0_7_STAGE_{1,2,3}_*_ADAPTER.md` + `DATA_PLANE_SPEC.md` §7。
 ```
 
 `tests/test_properties.py` needs `hypothesis`, which is **optional** — the suite skips it
@@ -314,6 +319,20 @@ against the same fixtures, so verify that manually. The **trajectory detectors**
 `usage.py` ↔ wasm `token_by_model` ↔ dsh adapter `usage_events`) is the same three-way
 lockstep; its reconciliation invariant — bucket sums must equal DSH's `tokenUsage` — is
 checked against a real session log in the CLI's `behavior` output.
+
+The **v0.7 UsageFact emitters** (`{claude,codex,dsh}_usage_fact.py` ↔ `src/agent/
+{claude,codex,dsh}_usage_fact.rs`, driven by the `{claude,codex,dsh}-usage-facts` CLIs)
+are Python↔Rust byte-parity locksteps pinned by `AGENT_VITALS_BIN` differential in
+`tests/test_{claude,codex,dsh}_usage_fact.py`. They share ONE identity primitive —
+`crates/agent-vitals-core/src/source_identity.rs` (`canonical_json` + `fnv1a64_hex`) ↔
+top-level `scripts/agent_vitals/source_identity.py` — which is also what
+`usage_fact.{rs,py}`'s `fact_id` and the DSH observer's frozen `source_event_id` hash
+through; **no consumer may grow a second inline copy** (both packaging allow-lists —
+`.github/workflows/package-clawhub.yml` + `tests/test_clawhub_packaging.py` — and the
+`test_classification.py` agent-family sets pin the module list verbatim). The emit is
+in-memory + read-only diagnostic only — nothing is written to disk yet (see
+`docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §7). WorkBuddy is deliberately excluded from
+this whole line of work (user decision 2026-09-03).
 
 **"Which events carry usage" is one predicate, and it was duplicated twelve times.** It
 lives in `usage.rs::usage_sample` (the authority), mirrored in `usage.py::_usage_sample`,
