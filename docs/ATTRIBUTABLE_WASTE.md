@@ -9,8 +9,8 @@
 > 关联:[COST_BASELINE.md](./COST_BASELINE.md)(实测快照,含语料期纪律)·
 > [CLAUDE_CODE_CORPUS.md](./CLAUDE_CODE_CORPUS.md)(Claude Code 快照,四模型族分栏)·
 > [WINGLET_CAVEMAN_BENCHMARK.md](./WINGLET_CAVEMAN_BENCHMARK.md)(单边收据论证)·
-> [PRODUCT.md](./PRODUCT.md) · [plan.rs](../crates/agent-vitals-core/src/plan.rs)(诚实性规则先行者)·
-> [waste.rs](../crates/agent-vitals-core/src/waste.rs)(SV-COST-01/02 已落地)。
+> [PRODUCT.md](./PRODUCT.md) · [plan.rs](../crates/agent-vitals-core/src/domain/plan.rs)(诚实性规则先行者)·
+> [waste.rs](../crates/agent-vitals-core/src/domain/waste.rs)(SV-COST-01/02 已落地)。
 >
 > **一句话**:产品第一感知 = **本月总成本 + 每百万处理 token 成本**;先按
 > **套餐摊销 / 按量成本**拆开,满足同币种、同周期、无重叠等条件时再给综合值。

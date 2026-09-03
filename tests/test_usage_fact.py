@@ -2,7 +2,7 @@
 """v0.7 spec §2/§4：`UsageFact` 序列化契约（候选 #3）+ 迁移链骨架（候选 #4）。
 
 纯函数钉测——`usage_fact.py` 没有任何 I/O、没有任何持久化调用点，与
-`crates/agent-vitals-core/src/usage_fact.rs` 的 inline 测试同一组夹具同一
+`crates/agent-vitals-core/src/contracts/usage_fact.rs` 的 inline 测试同一组夹具同一
 组期望值互守（`fact_id` 的跨语言 pinned 值尤其关键：两侧必须对同一组入参
 产出同一个字符串，否则"共享序列化契约"这个说法就是假的）。
 

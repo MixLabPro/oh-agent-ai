@@ -11,8 +11,8 @@
 >
 > 关联：`VITALS_CORE_V0_7_ADAPTER_DECISIONS.md`（决策 A/B/C/D + §4.2 修订）、
 > `VITALS_CORE_V0_7_DATA_PLANE_SPEC.md`、`VITALS_CORE_V0_7_STAGE_1_CLAUDE_ADAPTER.md`、
-> `crates/agent-vitals-core/src/codex_usage.rs`（+ Python 镜像 `codex_usage.py`）、
-> `crates/agent-vitals-core/src/usage_fact.rs`（+ `usage_fact.py`）。
+> `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/usage.rs`（+ Python 镜像 `codex_usage.py`）、
+> `crates/agent-vitals-core/src/contracts/usage_fact.rs`（+ `usage_fact.py`）。
 
 ## 0. 当前结论
 

@@ -214,7 +214,7 @@ Map，**同序号插入**；键序是字节一致的一部分，不能重排）�
 
 - `docs/RUNTIME_EVIDENCE_CONTRACT.md:561` §13 Tool-call duration 行 Codex-Paginated cell 加
   「⚠️ 实测 4–9µs 非墙钟，语义待澄清」脚注；`:623` TurnItem 表 duration 句同。
-- `crates/agent-vitals-core/src/codex_evidence.rs:403-404` 过时注释（「CommandExecution
+- `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/evidence.rs:403-404` 过时注释（「CommandExecution
   额外带 duration → 也喂 Tool-call duration」——实际从未喂）改为诚实话；
   `codex_evidence.py:218-220` 同源注释同步。
 - comp_hash 注记：`scripts/agent_vitals/adapters/codex_session.py:116`（turn_context 分支）
@@ -250,12 +250,12 @@ quota checkpoint 与 turn 结束状态。点击 finding 必须能定位对应事
 
 - 前置条件：quota burn-rate、额度告警、日历/菜单栏聚合或可行动 quota KPI 至少有一个与
   enum 同一阶段落地。未满足时，Phase 1 的 `quota_trajectory` 已足够。
-- `crates/agent-vitals-core/src/evidence.rs`：`Signal::QuotaConsumption`
+- `crates/agent-vitals-core/src/contracts/evidence.rs`：`Signal::QuotaConsumption`
   （host-neutral 名，不违反 `shared_type_layer_has_no_host_identifiers_in_code`）。
 
 ### 6.2 Codex 侧（measured）
 
-- `crates/agent-vitals-core/src/codex_evidence.rs` ALL_SIGNALS（:438）+1；
+- `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/evidence.rs` ALL_SIGNALS（:438）+1；
   `derive_coverage` 的 `token_count` 分支：`rate_limits` 存在 → `bump(QuotaConsumption,
   Measured, 1)`（每事件 1，同 Usage 口径；无 rate_limits 的 token_count 不数——同
   ContextWindow 的守卫式）。
@@ -266,7 +266,7 @@ quota checkpoint 与 turn 结束状态。点击 finding 必须能定位对应事
 
 ### 6.3 DSH 侧（honest unavailable）
 
-- `crates/agent-vitals-core/src/dsh_evidence.rs:486-489` 零填充列表 +1
+- `crates/agent-vitals-core/src/adapters/hosts/dsh/sessions/evidence.rs:486-489` 零填充列表 +1
   （`coverage.set(Signal::QuotaConsumption, CoverageCounts::default())`），注释「矩阵没
   覆盖的三行」→ 四行；单测 `unmapped_signals_are_unavailable_not_fabricated`
   （:649-652）列表 +1。

@@ -85,7 +85,7 @@ F2 / F3 / F4 随后。
 
 ### 4.1 现状
 
-`crates/agent-vitals-core/src/behavior.rs` 的 `detect_sv605`：
+`crates/agent-vitals-core/src/domain/behavior.rs` 的 `detect_sv605`：
 
 ```rust
 fn detect_sv605(event: &Value) -> Option<String> {
@@ -107,7 +107,7 @@ fn detect_sv605(event: &Value) -> Option<String> {
 
 | 层 | 文件 | 改动 |
 |---|---|---|
-| Rust core | `crates/agent-vitals-core/src/behavior.rs` | `match_behavior(events, workspace_root)`；`detect_sv605` 加前缀判定 |
+| Rust core | `crates/agent-vitals-core/src/domain/behavior.rs` | `match_behavior(events, workspace_root)`；`detect_sv605` 加前缀判定 |
 | Rust wasm | `crates/agent-vitals-wasm/src/lib.rs` | `audit_events(events_json, workspace_root)` 透传 |
 | Python | `scripts/agent_vitals/agent/behavior.py` | `match_behavior(events, workspace_root)` 双维护同步 |
 | 二进制 CLI | `src/behavior.rs`（薄封装） | `audit_session_log` 从 session log 头取 cwd 传入 |
@@ -176,7 +176,7 @@ token 行下方：
 - **为什么按模型分桶**：`request/header` 的 `config.model` 会在会话中途变化（真实日志出现过
   pro → flash → pro）。DSH 的 `tokenUsage` 投影只有全会话累计、没有模型维度——拿一个模型价算
   整段账会错 3 倍（flash 与 pro 输入价差 3 倍）。折叠的**单一真相源是 core 的
-  `usage::token_by_model`**（`crates/agent-vitals-core/src/usage.rs` ↔ `usage.py` ↔ wasm
+  `usage::token_by_model`**（`crates/agent-vitals-core/src/domain/usage.rs` ↔ `usage.py` ↔ wasm
   `token_by_model` ↔ dsh 适配器 `usage_events` 四方锁步）：CLI 的 `behavior` 命令与 tab 的
   `tokenByModel` 投影共用这一份引擎（tab 的 `view` 把 usage 事件喂 wasm），JS 折叠已删——
   never a second copy。折叠语义复刻 token-meter（同 turn/step 只计最后一份 sample，替换时

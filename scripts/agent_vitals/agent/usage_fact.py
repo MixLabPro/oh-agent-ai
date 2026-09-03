@@ -24,7 +24,7 @@ adapter 被改造成产出 `UsageFact`、没有任何持久化格式被替换。
   持久化调用点才有意义验证；本模块目前是纯内存契约，硬写一套无人使用的
   文件 I/O 测不出真问题，只会制造一个自己骗自己通过的假验收。
 
-Rust 平行实现见 `crates/agent-vitals-core/src/usage_fact.rs`（parity 由
+Rust 平行实现见 `crates/agent-vitals-core/src/contracts/usage_fact.rs`（parity 由
 `tests/test_usage_fact.py` 钉住）。
 """
 

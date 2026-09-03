@@ -36,7 +36,8 @@ def _rust_canonical_session_fields():
     字段跨行（`pub x:` 后换行写类型），这个正则拿不到字段名，测试会红，需要
     同步更新解析——这比静默漂移好。
     """
-    source = (ROOT / "crates" / "agent-vitals-core" / "src" / "evidence.rs").read_text(
+    source = (ROOT / "crates" / "agent-vitals-core" / "src" / "contracts" /
+              "evidence.rs").read_text(
         encoding="utf-8")
     start = source.index("pub struct CanonicalSession {")
     body = source[start:]

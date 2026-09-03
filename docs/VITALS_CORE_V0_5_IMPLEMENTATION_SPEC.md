@@ -468,7 +468,7 @@ vitals.diagnostic
 ```
 
 **开放字符串的代价必须用构建期校验补回来。** 现有 `Signal` 是闭合的 20 变体
-enum（`crates/agent-vitals-core/src/evidence.rs`），配 `SignalSet(u32)` 位集，
+enum（`crates/agent-vitals-core/src/contracts/evidence.rs`），配 `SignalSet(u32)` 位集，
 拼写错误是编译错误。换成 `SignalId(String)` 之后，把 `agent.tool_calls` 写成
 `agent.toolcalls` 不会报任何错——它只会让该规则**静默变成 Unavailable**，
 报告看上去完全正常。这是三态契约最难发现的一种破坏方式。
@@ -539,7 +539,7 @@ Engine 在调用 Detector 之前完成门控：
 的计数是否为零。**
 
 理由是仓库已经付过学费的一次真机事故（见
-`crates/agent-vitals-core/src/evidence.rs` 的 `CanonicalSession::timeline_is_empty`
+`crates/agent-vitals-core/src/contracts/evidence.rs` 的 `CanonicalSession::timeline_is_empty`
 注释）：Codex 适配器的 `derive_coverage` 会把 `task_started` / `task_complete`
 数成非零 measured，而对应的证据通道当时是空的。读计数 → 门控放行 → 检测器在
 空证据上空转 → 产出 **MeasuredZero**，而正确答案是 **Unavailable**。这正是
@@ -672,7 +672,7 @@ v0.5 不引入 `parent_id` / 子轨迹（那是留给 v1.0 §12 的），而是�
 
 Detector 读 `attributes` 里的这些键做分组/锚定，**不在 Core 内重新实现
 turn 状态机**——状态机是"翻译"的产物，不是"规则"的产物，这条纪律从
-`agent-vitals-core/src/evidence.rs` 平移过来，不能因为通用化就丢掉。
+`agent-vitals-core/src/contracts/evidence.rs` 平移过来，不能因为通用化就丢掉。
 `vitals.*` 前缀在这里是**建议**惯例，供 attributes 内部命名去重之用，不是
 Core 保留字段（Core 不解释 attributes 内容，见 §4.1）。
 
@@ -699,7 +699,7 @@ pub trait Detector: Send + Sync {
 
 #### 9.1.1 已知缺口：`enhances` 与 `min_fidelity` 不在 v0.5 范围
 
-现有 `RuleSpec`（`agent-vitals-core/src/evidence.rs`）比 §7.4 的
+现有 `RuleSpec`（`agent-vitals-core/src/contracts/evidence.rs`）比 §7.4 的
 `SignalRequirement` 多两个维度：
 
 - `enhances`：缺了这个信号规则**仍然跑**，只是可信度降级（不是 `requires`
@@ -724,7 +724,7 @@ Requirement::All` 只控制"门控卡哪个信号"，不控制"Detector 能看�
 要额外的类型系统支持。SV610 因此和其余十三条一起完成了迁移；`enhances`/
 `min_fidelity` 作为**分级 confidence 展示语义**的正式支持仍然不在 v0.5 范
 围，这条缺口本身没有变化，只是它从未真正阻碍过任何一条规则的迁移——见
-`crates/agent-vitals-core/src/detectors/sv610.rs` 模块文档。
+`crates/agent-vitals-core/src/domain/detectors/sv610.rs` 模块文档。
 
 Finding 的 `confidence: Option<f32>` 字段保留位置，v0.5 里只由 Detector
 自行决定填不填，Core 不对它做任何门控或排序语义。

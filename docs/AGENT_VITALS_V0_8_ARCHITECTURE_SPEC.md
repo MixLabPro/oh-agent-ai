@@ -1,6 +1,6 @@
 # Agent Vitals 目录与模块边界设计
 
-> 状态：目标架构提案 v2（2026-09-03）  
+> 状态：目标架构 v3，已拍板；Phase A 已实施（2026-09-04）
 > 适用范围：Rust workspace、Tauri、Python 便携实现、宿主接入与测试资产  
 > 关联文档：`ARCHITECTURE.md`、`DELIVERY_ARCHITECTURE.md`、
 > `TAURI_RUNTIME_WORKBENCH_SPEC.md`、`VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md`、
@@ -9,6 +9,11 @@
 > v2 补充：Skill/Session 双数据面、Model & Billing、User Profile，以及基于现有
 > Rust/Python/Tauri 代码的架构差距评估。本文描述目标边界，不授权在功能提交中夹带
 > 目录搬迁。
+>
+> v3 实施记录：Phase A 在独立分支 `codex/v0.8-phase-a-boundaries` 完成。现有
+> `agent-vitals-core` 已建立 `contracts/domain/adapters/hosts` 所有权目录，并以
+> compatibility re-export 保持旧公开路径；DSH Session 读取也已从 Skill inventory
+> 移到 Session source 后注入。Phase B–F 仍须逐阶段独立评审和验收。
 
 ## 0. 结论
 
@@ -961,11 +966,17 @@ projection DTO，而不是维护两套审计和计费逻辑。
 
 ### Phase A：先建立逻辑边界，不改 crate 名
 
-- 在现有 `agent-vitals-core/src` 内建立 `contracts/`、`domain/`、`adapters/hosts/`；
-- 在现有 runtime 代码内先区分 `skills/` 与 `sessions/` 调用链；
-- 用 re-export 保持旧 public path；
-- 新宿主代码不再落到根目录；
-- 增加禁止 adapter 依赖 I/O crate 的架构测试。
+- [x] 在现有 `agent-vitals-core/src` 内建立 `contracts/`、`domain/`、`adapters/hosts/`；
+- [x] 在现有 runtime 代码内先区分 `skills/` 与 `sessions/` 调用链；
+- [x] 用 re-export 保持旧 public path；
+- [x] 新宿主代码不再落到根目录；
+- [x] 增加禁止 adapter 依赖 I/O crate 的架构测试。
+
+Phase A 的 runtime 边界采用依赖注入而不是新建一套 fold：
+`agent/session_sources.rs` 读取 DSH Session 证据，根编排层把已读取的
+`SessionEvidenceInput` 传给 `skills/inventory.rs`。Skill inventory 仍可做
+Installed/Loaded/Triggered 关联，但不能自行扫描 Session 文件。Codex/OpenClaw 的
+runtime probe 仍属于 Skill capability 求证，不被误分类为 Session 日志读取。
 
 ### Phase B：抽出 `agent-vitals-adapters`
 

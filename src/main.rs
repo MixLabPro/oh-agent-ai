@@ -2131,13 +2131,22 @@ session_store={store} fold={fold}"
 
     let cfg = skills::host::read_host_config(&home_n);
 
+    // Session surface 负责读日志；Skill surface 只消费注入的证据。
+    let (dsh_path, dsh_evidence) = agent::session_sources::read_dsh_skill_correlation();
     let inv = skills::inventory::take(
         &skills::inventory::Selection {
             host: &args.host,
             extra_paths: &args.path,
             runtime_json: args.runtime_json.as_deref(),
         },
-        &home_n, &cfg, &ctx);
+        &home_n,
+        &cfg,
+        &ctx,
+        skills::inventory::SessionEvidenceInput {
+            dsh_path,
+            dsh: dsh_evidence,
+        },
+    );
 
     // 采集到此为止；下面全是纯数据变换，交给 report。
     let rep = skills::report::build(&skills::report::ReportInput {

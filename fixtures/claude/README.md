@@ -42,7 +42,7 @@ normal), one title. No sensitive paths, no network tools, no duplicate sigs, so
 SV601–606/611/612/613 spin to MeasuredZero and SV607/608/609/610/614 are
 Unavailable — the healthy-session shape of §10 acceptance #4.
 
-The Rust side (`crates/agent-vitals-core/src/claude_code_evidence.rs` +
+The Rust side (`crates/agent-vitals-core/src/adapters/hosts/claude_code/sessions/evidence.rs` +
 `src/agent/claude_session.rs`) builds the same records inline; the differential
 gate in `tests/test_cli_matrix.py::test_claude_session_detail_differential`
 feeds this file to both implementations and byte-compares the output, which is

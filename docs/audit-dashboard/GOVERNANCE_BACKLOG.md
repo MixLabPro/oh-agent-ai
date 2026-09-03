@@ -48,7 +48,7 @@ V3（预算管理）/V4（Guardrails），且明确要求"控制按钮存在的�
 
 ### 1.2 可靠性差 & 失控循环 → 已有检测，没有恢复动作
 
-`crates/agent-vitals-core/src/trajectory.rs` 的四个轨迹级检测器，和研究里"反循环
+`crates/agent-vitals-core/src/domain/trajectory.rs` 的四个轨迹级检测器，和研究里"反循环
 恢复"描述的**检测标准**几乎逐条对应：
 
 | 研究里的描述 | agent-vitals 现有规则 | 阈值（`trajectory.rs` 常量） |
@@ -232,7 +232,7 @@ Anthropic Claude 的子 Agent 隔离机制，或 Codex Harness 强调的"应用�
 模式（应用/插件决定拦不拦，Harness 负责执行循环）。
 
 在 DSH 开放这类钩子之前，agent-vitals 能做的最多是：把 §1 已有的判定逻辑（`SV601
-–614` 复用 `crates/agent-vitals-core/src/behavior.rs`/`trajectory.rs` 的纯函数）
+–614` 复用 `crates/agent-vitals-core/src/domain/behavior.rs`/`trajectory.rs` 的纯函数）
 准备好，等钩子开放后直接喂给它做"该不该拦截"的判断——**但执行拦截本身不可能在
 一个只读插件里实现**。如果治理目标包含"真正挡住下一次调用"，这条路线需要先跟
 DSH 侧确认它是否/何时会开放 pre-execution hook；在那之前，G1–G4 是这个仓库能

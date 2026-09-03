@@ -12,7 +12,7 @@ PRD §9.1 声称「现有数据已经能够提供」五项。逐条查过代码�
 
 | §9.1 声称 | 实际 | 位置 |
 |---|---|---|
-| 最近一次 catalog 名单 | binary 有，**审计 tab 没有** | `src/dsh.rs:209` 出名单；`crates/agent-vitals-core/src/usage.rs:471` 只出 `list.len()` |
+| 最近一次 catalog 名单 | binary 有，**审计 tab 没有** | `src/dsh.rs:209` 出名单；`crates/agent-vitals-core/src/domain/usage.rs:471` 只出 `list.len()` |
 | 用户显式调用名称集合 | **只有名字，位置全丢** | `src/dsh.rs:183` `invoked.push(name)` |
 | 模型选择名称集合 | 同上，但**原始事件还在** | `tool/call` 在 `execution_events`，`data` 整个保留 |
 | `invoked_counts`/`selected_counts` | **binary 独有，core 里没有** | `src/analysis.rs:577` |
@@ -23,7 +23,7 @@ PRD §9.1 声称「现有数据已经能够提供」五项。逐条查过代码�
 
 ### 好消息：主体逻辑有现成模板
 
-`crates/agent-vitals-core/src/subagent.rs` 已经实现了 skill.rs 需要的**同一套 callId 配对**：
+`crates/agent-vitals-core/src/domain/subagent.rs` 已经实现了 skill.rs 需要的**同一套 callId 配对**：
 按 `data.callId` 建索引 → 在结果侧用 `/data/message/source/callId` 回连 → 输出
 `{seq, time, turn, step, call_id, agent_id, description}`。turn/step 顺延也有现成的
 `trajectory.rs::coord_map` / `fill_coords`。T3 是照着抄，不是从零写。
@@ -38,7 +38,7 @@ PRD §9.1 声称「现有数据已经能够提供」五项。逐条查过代码�
 **性质：加一行。** `usage.rs` 为了算 `catalog_tokens` 本来就在遍历 `entries[].name +
 description`，只是最后只输出了 `len()`。
 
-- 改：`crates/agent-vitals-core/src/usage.rs:471` 附近，新增 `catalog_names`
+- 改：`crates/agent-vitals-core/src/domain/usage.rs:471` 附近，新增 `catalog_names`
 - **隐私决策（必须先定）**：只出 `[{name, tokens}]`，**不出 description 原文**。
   理由：FR-SK-09 要求导出不含未脱敏内容；description 是内容，一旦进投影就会
   进导出。逐 skill「目录 Token」用 `tokens` 就够，不需要原文。
@@ -61,7 +61,7 @@ turn/step/seq/time/session 全部蒸发。
 - ⚠️ **动 golden**
 - 解锁：FR-SK-05 B 组（每次调用的 Turn/Step/seq/时间）
 
-#### T3 · 新建 `crates/agent-vitals-core/src/skill.rs`
+#### T3 · 新建 `crates/agent-vitals-core/src/domain/skill.rs`
 **主体工作量。** 照 `subagent.rs` 的 callId 配对写。
 
 产出 `SkillInvocationEvent[]`（PRD §9 契约）：

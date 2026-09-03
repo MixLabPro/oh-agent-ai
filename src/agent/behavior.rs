@@ -43,7 +43,7 @@ pub struct Audit {
     /// 与 `subagents` 不同：这是**本会话**内 skill 触发记录，不跨会话合并。
     pub skill: Value,
     /// D11：执行时长审计——`{tool_calls, turns, steps, approvals, hooks}` 五个
-    /// 数组（`crates/agent-vitals-core/src/duration.rs` 的五个纯函数）。
+    /// 数组（`crates/agent-vitals-core/src/domain/duration.rs` 的五个纯函数）。
     /// `hooks` 是 CLI 独有的一项——浏览器那边的 `durationAudit` 投影**不**收
     /// hook/* 事件（宿主能不能看到 hook 事件还没验证过），但 CLI 直接读盘上
     /// 的原始 JSONL，`hook/*` 本来就在 `EXECUTION_EVENT_TYPES` 里，这里立即

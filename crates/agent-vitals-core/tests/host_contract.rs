@@ -55,10 +55,10 @@ fn g2_scan_cli_host_choices_literal_agrees_across_three_locations() {
 fn g3_every_runtime_host_has_both_language_evidence_modules() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let matrix: [(&str, &str, &str); 4] = [
-        ("dsh", "dsh_evidence.rs", "dsh_evidence.py"),
-        ("codex", "codex_evidence.rs", "codex_evidence.py"),
-        ("claude-code", "claude_code_evidence.rs", "claude_evidence.py"),
-        ("workbuddy", "workbuddy_evidence.rs", "workbuddy_evidence.py"),
+        ("dsh", "adapters/hosts/dsh/sessions/evidence.rs", "dsh_evidence.py"),
+        ("codex", "adapters/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
+        ("claude-code", "adapters/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
+        ("workbuddy", "adapters/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
     ];
     for (host, rust_name, py_name) in matrix {
         let rust_path = root.join("crates/agent-vitals-core/src").join(rust_name);
@@ -123,7 +123,10 @@ fn g4_degrade_only_flips_measured_zero_for_declared_codes() {
 #[test]
 fn g8_claude_code_and_codex_derive_unavailable_from_host_profile() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in ["claude_code_evidence.rs", "codex_evidence.rs"] {
+    for name in [
+        "adapters/hosts/claude_code/sessions/evidence.rs",
+        "adapters/hosts/codex/sessions/evidence.rs",
+    ] {
         let path = root.join("crates/agent-vitals-core/src").join(name);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("host_capability::host_profile("),
@@ -136,7 +139,7 @@ fn g8_claude_code_and_codex_derive_unavailable_from_host_profile() {
 #[test]
 fn g8_dsh_derives_unavailable_from_host_profile() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let path = root.join("crates/agent-vitals-core/src/dsh_evidence.rs");
+    let path = root.join("crates/agent-vitals-core/src/adapters/hosts/dsh/sessions/evidence.rs");
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains(r#"host_capability::host_profile("dsh")"#),
         "dsh_evidence.rs 的五个 unmeasured 信号置零应查 HOSTS 行");
@@ -186,7 +189,7 @@ fn g10_price_claude_map_has_exactly_the_three_registered_callers() {
     // `claude_subscription_uncovered_estimate`（`peak_resolved=true`，复用
     // ledger 的峰谷分辨率，不是又一个下界兜底）。
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let text = std::fs::read_to_string(root.join("crates/agent-vitals-core/src/cost.rs")).unwrap();
+    let text = std::fs::read_to_string(root.join("crates/agent-vitals-core/src/domain/cost.rs")).unwrap();
     let occurrences = text.matches("price_claude_map(").count();
     // 1 处定义签名 + 三个已登记入口各调用 1 次。
     assert_eq!(occurrences, 4,

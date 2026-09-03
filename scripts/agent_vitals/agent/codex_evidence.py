@@ -6,7 +6,7 @@ I/O 不在这里。它把一份 rollout JSONL 里抽出的原始条目折成
 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §13 host coverage matrix 的 **Codex
 (Legacy) 与 Codex (Paginated) 两列**逐条对应。
 
-与 Rust `crates/agent-vitals-core/src/codex_evidence.rs` 逐字节对齐——产出
+与 Rust `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/evidence.rs` 逐字节对齐——产出
 同一个 `codex_evidence_json` 输出字典（键序一致），差分测试靠这份一致把关。
 
 **P4 的验收标准是单个词 "sound"**：Codex 是唯一一个在两种互不兼容的词表
@@ -402,7 +402,7 @@ def derive_coverage(items):
 
 
 # `evidence::CanonicalSession` 的五个 host-neutral timeline 字段（Rust 侧
-# `crates/agent-vitals-core/src/evidence.rs` 的 struct 字段集——形状对账测试
+# `crates/agent-vitals-core/src/contracts/evidence.rs` 的 struct 字段集——形状对账测试
 # `tests/test_canonical_schema.py` 钉死两边一致，漏加一个字段这里就红）。
 # 共享类型层的文档化 schema，与 ALL_SIGNALS 同为显式清单。
 _TIMELINE_KEYS = (
@@ -568,7 +568,7 @@ def _has_command_execution(items):
 
 def _populate_codex_timelines(items):
     """跑一遍 `items`，把 Codex 线格式翻译成五个 host-neutral timeline（§11.5）。
-    仿 Rust `populate_codex_timelines`（`crates/agent-vitals-core/src/codex_evidence.rs`）
+    仿 Rust `populate_codex_timelines`（`crates/agent-vitals-core/src/adapters/hosts/codex/sessions/evidence.rs`）
     的状态机写法，与它逐条对齐：
     - `sandbox_modes`：顶层 turn_context 的 sandbox_policy（对象/字符串两态）→ 一条。
     - `tool_calls`：`CommandExecution` → `name:"bash"` + 命令文本；`function_call` →

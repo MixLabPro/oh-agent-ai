@@ -98,7 +98,7 @@ python3 scripts/scan.py --baseline prev.json --json out.json
 #   {claude,codex,dsh}-usage-facts (v0.7 数据面诊断，只读、不写盘)
 #   `plan` turns the scan report into a ranked savings plan（zombie/oversized/trim-description/
 #   shadow → 每条点名 skill、标 risk、给测量的 token 节省与 SV 码；诚实性规则见
-#   `crates/agent-vitals-core/src/plan.rs` docstring）。
+#   `crates/agent-vitals-core/src/domain/plan.rs` docstring）。
 #   `behavior <session-log>` audits a DSH session log for SV601–SV614 findings（单事件规则 + 轨迹级检测器）.
 #   `duration-audit <session-log>` audits execution duration（工具调用/turn/step/审批/hook 消费五路耗时，
 #   D1-D4 的 core 纯函数）；`--json` 输出与 `behavior --json` 的 `duration` 键是同一份数据。
@@ -324,7 +324,7 @@ The **v0.7 UsageFact emitters** (`{claude,codex,dsh}_usage_fact.py` ↔ `src/age
 {claude,codex,dsh}_usage_fact.rs`, driven by the `{claude,codex,dsh}-usage-facts` CLIs)
 are Python↔Rust byte-parity locksteps pinned by `AGENT_VITALS_BIN` differential in
 `tests/test_{claude,codex,dsh}_usage_fact.py`. They share ONE identity primitive —
-`crates/agent-vitals-core/src/source_identity.rs` (`canonical_json` + `fnv1a64_hex`) ↔
+`crates/agent-vitals-core/src/contracts/source_identity.rs` (`canonical_json` + `fnv1a64_hex`) ↔
 top-level `scripts/agent_vitals/source_identity.py` — which is also what
 `usage_fact.{rs,py}`'s `fact_id` and the DSH observer's frozen `source_event_id` hash
 through; **no consumer may grow a second inline copy** (both packaging allow-lists —
@@ -423,7 +423,7 @@ pricing.json` 是 build 时复制出的运行时份，宿主 `costReport` 投影
 另内嵌一份仅供展示用的模型短名副本——三处由 `tests/test_pricing_lockstep.py` 守）;
 prices are business data, not rules — they change without a golden `--update`. The
 **cost computation itself** (`cost_report`) is a fourth lockstep, one level up from the
-price table: `crates/agent-vitals-core/src/cost.rs` ↔ `scripts/agent_vitals/agent/cost.py`
+price table: `crates/agent-vitals-core/src/domain/cost.rs` ↔ `scripts/agent_vitals/agent/cost.py`
 ↔ `dsh-client/src/host/index.ts::costReportFrom` all implement the same
 peak/off-peak-split pricing math over `{by_model, sequence}`; the CLI two-language parity
 is caught by `test_cli_matrix.py`'s `both()` differential, the TS mirror by

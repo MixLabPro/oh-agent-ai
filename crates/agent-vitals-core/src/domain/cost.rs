@@ -19,7 +19,7 @@
 
 use serde_json::{json, Value};
 
-const PRICING_JSON: &str = include_str!("../../../scripts/agent_vitals/pricing.json");
+const PRICING_JSON: &str = include_str!("../../../../scripts/agent_vitals/pricing.json");
 
 pub fn load_pricing() -> Value {
     serde_json::from_str(PRICING_JSON).unwrap_or_else(|_| Value::Object(Default::default()))

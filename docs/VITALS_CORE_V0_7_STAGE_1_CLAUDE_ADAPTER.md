@@ -8,7 +8,7 @@
 > `VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §7。
 >
 > 关联：`VITALS_CORE_V0_7_ADAPTER_DECISIONS.md`、`VITALS_CORE_V0_7_DATA_PLANE_SPEC.md`、
-> `crates/agent-vitals-core/src/usage_fact.rs`、`scripts/agent_vitals/agent/usage_fact.py`、
+> `crates/agent-vitals-core/src/contracts/usage_fact.rs`、`scripts/agent_vitals/agent/usage_fact.py`、
 > `scripts/agent_vitals/agent/claude_cost.py`。
 
 ## 0. 当前结论

@@ -78,7 +78,7 @@ host_kind→native_id→source_profile→machine_namespace + filter/cursor/版�
 v0.6 spec §5.4 intro 的两层模型（基本事实行 + 视图）是两版共享的公共声明。
 
 **已知优化点（非本版待办，供记录）**：`r2a.rs::list_sessions`
-（`crates/agent-vitals-core/src/r2a.rs:430-468`）每次翻页都对命中集做**全量
+（`crates/agent-vitals-core/src/contracts/r2a.rs:430-468`）每次翻页都对命中集做**全量
 重排** + **线性扫描**找游标断点（`matched.sort_by(...)` 之后紧跟
 `matched.iter().position(...)`）——会话数一旦上到几千，翻 P 页就是
 O(N·P·log N) 的重复功。`matched` 排序之后紧接着找游标位置这一步，把
@@ -484,7 +484,7 @@ collections + materialized docs，迁移不改视图层——不是设计目标�
   adapter 的 emit 只到内存 + 诊断 CLI，落盘/物化视图/R2a 指纹失效未接。workbuddy
   流（credit_json + evidence adapter）继续按用户 2026-09-03 决定排除，转入 v0.8 接入。
 - 2026-09-03（**候选 #3/#4 契约骨架落地，非 adapter 接线/真实迁移**）：新增
-  `crates/agent-vitals-core/src/usage_fact.rs` + `scripts/agent_vitals/agent/
+  `crates/agent-vitals-core/src/contracts/usage_fact.rs` + `scripts/agent_vitals/agent/
   usage_fact.py`（双语言 parity，`tests/test_usage_fact.py` + Rust inline
   测试互守，含跨语言 pinned `fact_id` 值）：
   1. `fact_id(...)`——§2.1「统一幂等键」公式的实现，FNV-1a（非密码学哈希，

@@ -1,6 +1,6 @@
 """FR-04b 结构性浪费识别 —— 回答"哪些是浪费的"与"我该怎么办"。
 
-单一真相源是 `crates/agent-vitals-core/src/waste.rs`；这里是 Python 平行实现，
+单一真相源是 `crates/agent-vitals-core/src/domain/waste.rs`；这里是 Python 平行实现，
 差分防护在 core 的 parity 测试与 `tests/test_cli_matrix.py` 的双实现比较。
 
 **结构性浪费**是规则可直接判定、不需要历史基线的浪费模式（PRD FR-04b）；与

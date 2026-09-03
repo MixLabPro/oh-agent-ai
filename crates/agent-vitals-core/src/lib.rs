@@ -1,41 +1,27 @@
-//! Pure computation core of agent-vitals, shared by the native CLI and the
-//! browser wasm build. Only the I/O-free modules live here; anything that
-//! touches the filesystem, a subprocess, or the CLI stays in the binary crate.
+//! Pure computation facade of agent-vitals, shared by the native CLI and the
+//! browser wasm build. Phase A makes the contracts/domain/adapters ownership
+//! explicit inside the existing crate without changing public behavior.
 //!
 //! The split is the disk ≠ context boundary from the repo's design: the wasm
 //! build can run these pure functions on data already in memory, but it must
 //! never read a file.
 
-pub mod behavior;
-pub mod budget;
-pub mod canonical_audit;
-pub mod claude_code_evidence;
-pub mod codex_evidence;
-pub mod codex_usage;
-pub mod compaction;
-// M2 兼容桥（docs/VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md §14）+ 第一批迁移
-// 规则的 vitals-core Detector 实现（§14.4）。两者都是这次迁移新增的，其余
-// 模块不受影响——旧 `behavior::match_behavior_canonical` 路径原样保留。
+pub mod adapters;
 pub mod compatibility;
-pub mod cost;
-pub mod detectors;
-pub mod dsh_evidence;
-pub mod duration;
-pub mod evidence;
-pub mod findings;
-pub mod host_capability;
-pub mod plan;
-pub mod r2a;
-pub mod skill;
-// 过渡居 core：Agent UsageFact/source-event 身份契约的共享原语（canonical JSON
-// + FNV-1a），最终迁 agent-vitals-adapters/src/shared/source_identity.rs。
-pub mod source_identity;
-pub mod state;
-pub mod subagent;
-pub mod takeover;
-pub mod waste;
-pub mod trajectory;
-pub mod usage;
-pub mod usage_fact;
-pub mod util;
-pub mod workbuddy_evidence;
+pub mod contracts;
+pub mod domain;
+
+// Phase A compatibility facade. Existing CLI, Tauri, WASM, tests and Python
+// parity references keep their old paths while new code uses the explicit
+// `contracts`, `domain`, and `adapters::hosts` namespaces. Remove these aliases
+// only after Phase B/C consumers migrate.
+pub use adapters::hosts::claude_code::sessions::evidence as claude_code_evidence;
+pub use adapters::hosts::codex::sessions::evidence as codex_evidence;
+pub use adapters::hosts::codex::sessions::usage as codex_usage;
+pub use adapters::hosts::dsh::sessions::evidence as dsh_evidence;
+pub use adapters::hosts::workbuddy::sessions::evidence as workbuddy_evidence;
+pub use contracts::{evidence, host_capability, r2a, source_identity, usage_fact};
+pub use domain::{
+    behavior, budget, canonical_audit, compaction, cost, detectors, duration, findings, plan,
+    skill, state, subagent, takeover, trajectory, usage, util, waste,
+};

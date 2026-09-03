@@ -1,7 +1,7 @@
 """执行时长审计（Duration Audit，`docs/audit-dashboard/DURATION_AUDIT_BACKLOG.md`
 D1）—— 把 `skill.py` 里"`callId` 配对 `tool/call`↔`tool/result`、算
 `duration_ms`"这段逻辑推广到所有工具，不再局限于 `name=="skill"`。单一真相源是
-`crates/agent-vitals-core/src/duration.rs`；这里是 Python 平行实现，两侧逐字节
+`crates/agent-vitals-core/src/domain/duration.rs`；这里是 Python 平行实现，两侧逐字节
 对齐（`tests/test_characterization.py::TestToolCallDurations` 与 Rust 侧
 `duration::tests::python_rust_byte_for_byte_parity` 各钉同一个串）。
 

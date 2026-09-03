@@ -296,7 +296,7 @@ apply/filter 声明）、`node/plugins/index.ts`（结构性排序 + filter 编�
 `node/server/{moduleGraph,transformRequest,hmr}.ts`（失效/HMR 门卫）、`node/watch.ts`、
 `node/build.ts`（sharedConfigBuild 显式开关）。
 
-**我们**：`crates/agent-vitals-core/src/evidence.rs`（RuleSpec:336 / RuleOutcome:350 /
+**我们**：`crates/agent-vitals-core/src/contracts/evidence.rs`（RuleSpec:336 / RuleOutcome:350 /
 CanonicalSession:413 / §12:534）、`behavior.rs`（rule_outcomes:462）、`dsh_evidence.rs`
 （derive_coverage:72 / reverse_project:197）、`usage.rs`（替换语义:402）、
 `dsh-client/src/host/index.ts`（costReportFrom:186 / carriesUsage:412 / apply:421-440）、

@@ -2,7 +2,7 @@
 """`agent/plan.py::build_plan` 的交叉锁定测试 —— 与 Rust `plan.rs::build_plan` 对守。
 
 `build_plan` 把 scan 报告派生为省钱方案。Python 侧钉到**具体数值**，与
-`crates/agent-vitals-core/src/plan.rs` 里 `#[cfg(test)]` 单测的期望值逐一对应：
+`crates/agent-vitals-core/src/domain/plan.rs` 里 `#[cfg(test)]` 单测的期望值逐一对应：
 **同一份 fixture、同一组数字，两边各自断言**，docstring 互相指认。命令面差分
 （同一 fixture 跑两边 CLI 逐字节比）另由 `tests/test_cli_matrix.py` 的
 `both("plan", ...)` 看守。

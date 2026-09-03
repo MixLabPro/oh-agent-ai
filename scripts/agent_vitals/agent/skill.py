@@ -2,7 +2,7 @@
 什么方式触发、加载成功没有、花了多久」从执行事件流里抽出来，产出
 `SkillInvocationEvent[]`（`docs/audit-dashboard/SKILL_EXECUTION_BACKLOG.md`
 T3 表格 = PRD §9 契约的蒸馏）。单一真相源是
-`crates/agent-vitals-core/src/skill.rs`；这里是 Python 平行实现，两侧逐字节
+`crates/agent-vitals-core/src/domain/skill.rs`；这里是 Python 平行实现，两侧逐字节
 对齐（差分由 `tests/test_cli_matrix.py` 的 `both()` 看守）。
 
 两种触发方式，落库形态完全不同（`fixtures/dsh/README.md` 实测验证过）：
