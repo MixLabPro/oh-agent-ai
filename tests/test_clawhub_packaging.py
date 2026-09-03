@@ -40,6 +40,7 @@ ALLOWED_PACKAGE_FILES = {
         "agent/canonical_audit.py", "agent/claude_cost.py",
         "agent/claude_evidence.py",
         "agent/claude_session_audit.py",
+        "agent/claude_usage_fact.py",
         "agent/codex_cost.py", "agent/codex_evidence.py",
         "agent/codex_session_audit.py", "agent/codex_usage.py",
         "agent/compaction.py", "agent/cost.py", "agent/dsh_evidence.py",

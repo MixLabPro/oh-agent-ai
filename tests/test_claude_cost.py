@@ -171,7 +171,10 @@ class FoldSemanticsCase(unittest.TestCase):
         # 19Z≥16 进位），不是被吞掉也不是被摊给某一天。
         sess = {}
         for rec in (self._cs(1_788_084_986_000), self._row(), self._cs(1_788_084_986_000)):
-            cc._apply_record(sess, rec)
+            cc._apply_record(sess, rec,
+                     native_session_id="test",
+                     machine_namespace="test-ns",
+                     source_profile="default")
         self.assertEqual(
             sess["baseline"]["deepseek-v4-flash"]["input_tokens"], 1000)
         self.assertNotIn("baseline_day", sess)
@@ -203,7 +206,10 @@ class FoldSemanticsCase(unittest.TestCase):
         for rec in (cs, self._row("2026-08-30T19:00:00.000Z", 10),
                     self._row("2026-08-31T12:00:00.000Z", 20),
                     self._row("2026-08-31T20:00:00.000Z", 30)):
-            cc._apply_record(sess, rec)
+            cc._apply_record(sess, rec,
+                     native_session_id="test",
+                     machine_namespace="test-ns",
+                     source_profile="default")
         self.assertNotIn("baseline_day", sess)
         self.assertEqual(sess["baseline"]["claude-opus-5"]["input_tokens"], 500)
         tail = sess["tail_days"]
@@ -219,7 +225,10 @@ class FoldSemanticsCase(unittest.TestCase):
 
     def test_no_cost_state_session_is_row_sum(self):
         sess = {}
-        cc._apply_record(sess, self._row("2026-08-31T10:00:00.000Z", 7))
+        cc._apply_record(sess, self._row("2026-08-31T10:00:00.000Z", 7),
+                         native_session_id="test",
+                         machine_namespace="test-ns",
+                         source_profile="default")
         self.assertNotIn("baseline", sess)
         self.assertEqual(
             sess["tail_days"]["2026-08-31"]["deepseek-v4-flash"]
@@ -229,22 +238,35 @@ class FoldSemanticsCase(unittest.TestCase):
 
     def test_sentinels_not_faked(self):
         sess = {}
-        cc._apply_record(sess, {"type": "assistant", "timestamp": "bogus",
-                                "message": {"model": "deepseek-v4-flash",
-                                            "usage": {"input_tokens": 1,
-                                                      "cache_read_input_tokens": 0,
-                                                      "cache_creation_input_tokens": 0,
-                                                      "output_tokens": 0}}})
-        cc._apply_record(sess, {"type": "assistant",
-                                "timestamp": "2026-08-31T10:00:00.000Z",
-                                "message": {"model": "deepseek-v4-flash",
-                                            "usage": {"prompt_tokens": 5}}})
-        cc._apply_record(sess, {"type": "assistant",
-                                "timestamp": "2026-08-31T10:00:00.000Z",
-                                "message": {"usage": {"input_tokens": 1,
-                                                      "cache_read_input_tokens": 0,
-                                                      "cache_creation_input_tokens": 0,
-                                                      "output_tokens": 0}}})
+        cc._apply_record(sess,
+            {"type": "assistant",
+             "timestamp": "bogus",
+             "message": {"model": "deepseek-v4-flash",
+                         "usage": {"input_tokens": 1,
+                                   "cache_read_input_tokens": 0,
+                                   "cache_creation_input_tokens": 0,
+                                   "output_tokens": 0}}},
+            native_session_id="test",
+            machine_namespace="test-ns",
+            source_profile="default")
+        cc._apply_record(sess,
+            {"type": "assistant",
+             "timestamp": "2026-08-31T10:00:00.000Z",
+             "message": {"model": "deepseek-v4-flash",
+                         "usage": {"prompt_tokens": 5}}},
+            native_session_id="test",
+            machine_namespace="test-ns",
+            source_profile="default")
+        cc._apply_record(sess,
+            {"type": "assistant",
+             "timestamp": "2026-08-31T10:00:00.000Z",
+             "message": {"usage": {"input_tokens": 1,
+                                   "cache_read_input_tokens": 0,
+                                   "cache_creation_input_tokens": 0,
+                                   "output_tokens": 0}}},
+            native_session_id="test",
+            machine_namespace="test-ns",
+            source_profile="default")
         self.assertEqual(sess["unattributed_rows"], 1)
         self.assertEqual(sess["unreadable_usage_rows"], 2)
         self.assertEqual(sess["tail_days"], {})
@@ -330,7 +352,10 @@ class RealWorldMisattributionCase(unittest.TestCase):
         recs = (RealWorldMisattributionCase._cs(start_ms, cr_total),) + \
                tuple(RealWorldMisattributionCase._row(t, c) for t, c in row_pairs)
         for rec in recs:
-            cc._apply_record(sess, rec)
+            cc._apply_record(sess, rec,
+                     native_session_id="test",
+                     machine_namespace="test-ns",
+                     source_profile="default")
         return sess
 
     def test_2279b7b0_baseline_minus_tail_lands_in_unaccounted(self):

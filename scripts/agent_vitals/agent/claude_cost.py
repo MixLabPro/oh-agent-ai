@@ -248,7 +248,7 @@ def _camel_entry_tokens(entry):
     return out
 
 
-def _apply_record(sess, rec):
+def _apply_record(sess, rec, *, native_session_id, machine_namespace, source_profile):
     """一条记录 → 会话状态转换（assistant 行入尾差、cost-state 换基线对账
     锚）。纯函数：`sess` 是 claude-fold.json 里 `sessions[sid]` 的 dict。
 
@@ -263,6 +263,12 @@ def _apply_record(sess, rec):
     是冗余信息（被更精确的逐行数据完全覆盖，直接丢弃）；汇总 < 基线时,
     差值是真实存在但没有逐行证据的残差（比如日志早期部分被截断/未采集），
     进 `_rebuild_days` 返回的 `unaccounted` 池——不猜它发生在哪一天。
+
+    Stage 1 R1 重构（commit d0ec2f2 拍板，commit 1：extractor + golden 零
+    漂移）：assistant 行解析走共享 extractor `parse_claude_usage_row`，
+    fold 与未来的 emitter 消费同一个 Observation。fold 行为字节不变——
+    sentinel 触发条件与 `_bump_tail` 入参逐字段一致，golden runner 与
+    `test_claude_cost.py` byte-parity 验证零漂移。
     """
     # tail_days 是 assistant 行的落点；fresh 会话第一个 assistant 行进来时
     # 还没有这个键——懒建，别 expect。
@@ -287,36 +293,32 @@ def _apply_record(sess, rec):
         return
     if rtype != "assistant":
         return
-    msg = rec.get("message")
-    if not isinstance(msg, dict):
+    # R1 共享 extractor：fold 与 emitter 共用一个 row parser（commit
+    # d0ec2f2 §2.3）——返回 Observation 或 Skip(reason)；fold 侧对 Skip
+    # 递增 sentinel 后 return，Observation 走 `_bump_tail` 累加 8 桶。
+    # **Sentinel 触发条件与旧 `_apply_record` 逐字段一致**（commit 1
+    # golden 零漂移硬条件）。
+    from .claude_usage_fact import Skip, parse_claude_usage_row, UNREADABLE, UNATTRIBUTED
+    result = parse_claude_usage_row(
+        rec,
+        native_session_id=native_session_id,
+        machine_namespace=machine_namespace,
+        source_profile=source_profile,
+    )
+    if isinstance(result, Skip):
+        if result.reason == UNREADABLE:
+            _inc(sess, "unreadable_usage_rows")
+        elif result.reason == UNATTRIBUTED:
+            _inc(sess, "unattributed_rows")
+        # SKIP 不增 sentinel（cost-state / 非 dict / 无 usage 都不计）。
         return
-    usage = msg.get("usage")
-    has_usage = isinstance(usage, dict) and bool(usage)
-    if not has_usage:
-        return  # 无 usage 的 assistant 行不是 usage 行
-    model = msg.get("model")
-    if not isinstance(model, str) or not model:
-        # 有 usage 但没 model → 无处可挂 → 哨兵，绝不编一个模型名。
-        _inc(sess, "unreadable_usage_rows")
-        return
-    t = _row_tokens(usage)
-    if t is None:
-        _inc(sess, "unreadable_usage_rows")  # 两态皆无 → 哨兵（P0）
-        return
-    ts = rec.get("timestamp")
-    day = day_from_iso_ts(ts)
-    if day is None:
-        # 行有 usage 但 ts 不可解析 → 日线无处可挂 → 哨兵，不猜日。
-        _inc(sess, "unattributed_rows")
-        return
-    # 峰谷归属：这一行有真实 ts，分辨率是精确的，不是猜的。ms 解析失败（理论
-    # 上不该发生在 day_from_iso_ts 已经认过的字符串上，防御性兜底）→ 保守按
-    # 空闲算，同 `usage.py::_is_peak` 的"缺 time 不臆造高峰"纪律。
-    ms = ms_from_iso_ts(ts)
-    peak = _is_peak_slot(ms) if ms is not None else False
-    day_obj = sess["tail_days"].setdefault(day, {})
-    model_obj = day_obj.setdefault(model, {})
-    _bump_tail(model_obj, t, peak)
+    # Observation → fold tail_days。emit 用的额外字段（message_id 等）
+    # 在 commit 2 落地，本函数只读 fold 字段（day / model / tokens_4 / peak）。
+    tokens = (result.input_tokens, result.cache_read_tokens,
+              result.cache_write_tokens, result.output_tokens)
+    day_obj = sess["tail_days"].setdefault(result.day, {})
+    model_obj = day_obj.setdefault(result.model, {})
+    _bump_tail(model_obj, tokens, result.peak)
 
 
 def _merge_models_into_day(day, buckets):
@@ -381,9 +383,15 @@ def _read_suffix(path, from_byte):
     return records, pos
 
 
-def _fold_one(sessions, path, size, mtime):
+def _fold_one(sessions, path, size, mtime, *, machine_namespace, source_profile):
     """一个会话文件折进 `sessions`。返回折叠类别（"new" 含整份重折替换）。
-    对应 Rust `fold_one` → FoldKind（New/Resume/Skip）。"""
+    对应 Rust `fold_one` → FoldKind（New/Resume/Skip）。
+
+    Stage 1 R1 重构（commit d0ec2f2）：`_apply_record` 通过共享 extractor
+    `parse_claude_usage_row` 解析 assistant 行——`machine_namespace` 与
+    `source_profile` 由 caller（`claude_sync`）从 R2a 注入，本函数只透传，
+    不解析、不生成。fold 行为字节不变。
+    """
     sid = path.stem
     existing = sessions.get(sid)
     if not isinstance(existing, dict):
@@ -405,7 +413,12 @@ def _fold_one(sessions, path, size, mtime):
     # `as_object().cloned().unwrap_or_default()` 同结果。
     sess = {} if kind == "new" else dict(existing) if isinstance(existing, dict) else {}
     for rec in records:
-        _apply_record(sess, rec)
+        _apply_record(
+            sess, rec,
+            native_session_id=sid,
+            machine_namespace=machine_namespace,
+            source_profile=source_profile,
+        )
     sess["size"] = new_pos
     sess["mtime_ns"] = mtime
     sessions[sid] = sess
@@ -543,6 +556,15 @@ def claude_sync(home, shadow=False):
     if folds.get("schema_version") != FOLD_SCHEMA_VERSION:
         folds = {"sessions": {}}
     sessions = folds.setdefault("sessions", {})
+    # Stage 1 R1 commit 1（extractor 重构 + golden 零漂移）：machine_namespace
+    # 与 source_profile 经共享 extractor 注入 `_apply_record`，但本 commit
+    # 不触发 `state/machine.json` 写入（那会让 Python 端多出这个文件、
+    # 破坏与 Rust 的 byte-parity）—— fold 行为字节不变要求不读不写 state
+    # 目录。占位值不影响 fold（fold 只用 day/model/tokens/peak，emit 用
+    # machine_namespace 与 source_profile 留给 commit 2 接线）。
+    # 见 `docs/VITALS_CORE_V0_7_STAGE_1_CLAUDE_ADAPTER.md` §9 拍板表。
+    machine_namespace = "ns-placeholder"  # commit 2: takeover.machine_namespace()
+    source_profile = "default"
     scanned = fresh = resumed = skipped = failed = 0
     for path in files:
         scanned += 1
@@ -551,7 +573,11 @@ def claude_sync(home, shadow=False):
             continue  # 枚举与 stat 之间文件消失 → 不计（下轮不再有它）
         size, mtime = st
         try:
-            kind = _fold_one(sessions, path, size, mtime)
+            kind = _fold_one(
+                sessions, path, size, mtime,
+                machine_namespace=machine_namespace,
+                source_profile=source_profile,
+            )
         except (OSError, ValueError):
             failed += 1
             continue
