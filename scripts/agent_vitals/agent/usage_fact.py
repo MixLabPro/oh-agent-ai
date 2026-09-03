@@ -28,6 +28,9 @@ Rust 平行实现见 `crates/agent-vitals-core/src/usage_fact.rs`（parity 由
 `tests/test_usage_fact.py` 钉住）。
 """
 
+from ..source_identity import fnv1a64_hex  # UsageFact ID 的 FNV 原语共用（见 fact_id docstring）
+
+
 # 当前 schema 版本（v0.7 spec §4.1：「新的 UsageFact 序列化契约从
 # schema_version=1 起步；旧 today/month/ledger 不是 UsageFact v0，不能靠改键
 # 假装无损迁移」）。
@@ -89,18 +92,15 @@ def fact_id(machine_namespace, host, source_profile, native_session_id,
           source_event_id, observation_kind)`。
 
     用 FNV-1a 而不是密码学哈希：与 `usage.py::_compaction_identity` 同一条
-    纪律——这个值只用作去重身份，不需要抗碰撞到密码学强度；跨语言字节相同
-    由 Rust 镜像同一算法保证（parity 测试钉住）。字段间用 `\\x1f`（unit
-    separator，真实字段值里几乎不可能出现的控制字符）拼接，防止
-    `("ab","c")` 与 `("a","bc")` 撞出同一个哈希。
+    纪律——这个值只用作去重身份，不需要抗碰撞到密码学强度。FNV 原语本身取自
+    包顶层 `source_identity.fnv1a64_hex`（同一边界，Stage 3 拍板把 UsageFact
+    ID 也接进共享层）；跨语言字节相同由 Rust 镜像同一算法保证（parity 测试
+    钉住）。字段间用 `\\x1f`（unit separator，真实字段值里几乎不可能出现的
+    控制字符）拼接，防止 `("ab","c")` 与 `("a","bc")` 撞出同一个哈希。
     """
     joined = "\x1f".join([machine_namespace, host, source_profile,
                           native_session_id, source_event_id, observation_kind])
-    h = 0xcbf29ce484222325
-    for b in joined.encode("utf-8"):
-        h ^= b
-        h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
-    return "uf1-%016x" % h
+    return "uf1-" + fnv1a64_hex(joined)
 
 
 def build_usage_fact(fields):

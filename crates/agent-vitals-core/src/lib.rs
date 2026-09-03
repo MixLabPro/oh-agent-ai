@@ -27,6 +27,9 @@ pub mod host_capability;
 pub mod plan;
 pub mod r2a;
 pub mod skill;
+// 过渡居 core：Agent UsageFact/source-event 身份契约的共享原语（canonical JSON
+// + FNV-1a），最终迁 agent-vitals-adapters/src/shared/source_identity.rs。
+pub mod source_identity;
 pub mod state;
 pub mod subagent;
 pub mod takeover;

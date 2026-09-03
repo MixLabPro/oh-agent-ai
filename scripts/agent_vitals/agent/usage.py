@@ -30,8 +30,10 @@ time 字段判定。这让展示层能算
 
 import json
 from datetime import date, timedelta
+from typing import NamedTuple, Optional
 
 from ..util import est_tokens, post_fork
+from ..source_identity import canonical_json, fnv1a64_hex  # §3.3 身份哈希原语（与 claude/codex/UsageFact ID 同一边界）
 
 _EPOCH_DATE = date(1970, 1, 1)
 
@@ -323,29 +325,104 @@ def _opt_int(usage, key):
     return _int_or_none(usage.get(key))
 
 
-def request_metrics(events):
-    """逐请求指标（PRD §9.3 RequestMetric）。Rust 平行实现见 `usage.rs`。
+def _resolve_raw(self_val, active_val):
+    """§3.4 的 model_raw/provider_raw 判定：样本自带的 self（仅 compaction 有）
+    **非空**取 self，否则回落那一刻的 active 游标；普通请求 self_val 恒 None →
+    直接取 active。
 
-    与 `token_by_model` 是**同一个 fold 的两个出口**：那边把每个样本折进按模型
-    的总数，这里保留每次请求自己的一行。会话健康时间线上的每个点都来自它。
-    不变量：逐请求四桶之和 == token_by_model 四桶之和（两侧都有测试钉死）。
-
-    三条诚实性约定（与本仓「缺列不编列」同一条纪律）：
-    - 缺字段落 None（JSON null）不落 0；
-    - `context_tokens` 只在两个加数都在场时才非空——真实会话 687 个请求点里
-      13 个缺 cacheReadTokens，这些点该在图上留缺口，而不是拿部分和凑一个偏低值；
-    - **不输出逐请求的 `compacted` 布尔列**：压缩事件类型已确认（见 `compaction.py`），
-      但它独立于请求，不该硬塞成每行一个 True/False；真正的压缩视图是
-      `compaction_events()` 单独的输出。
+    空串是退化值、不是 str 缺失，不冒充证据——`_usage_sample` 在 data.model=""
+    时给 ""，空串两侧都回落 active。这条同时收敛了 Python 渲染真值语义（旧的
+    `model_self if model_self else model_active`）与 Rust `match Some(m) => m` 的
+    **历史分歧**（Rust 过去把空串渲染成 ""、Python 渲染成 active）：现在两侧同一
+    谓词，request_metrics 的 model 列才逐字节一致。
     """
-    # 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
-    # branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
-    # 对同一笔钱/同一批行为重复计数（见 util.fork_boundary 的实测数据）。
+    return self_val if self_val else active_val
+
+
+class DshUsageObservation(NamedTuple):
+    """逐相邻槽的一条 usage 观察——`request_metrics`（展示）与 UsageFact
+    emitter（Commit 2，事实）的**共享观测**，`dsh_usage_observations` 逐槽产出。
+
+    槽语义与聚合 fold 同款：**相邻 run**（`last` 同 (turn, step) 比较），**不是**
+    全文件 HashMap 去重——非相邻的同 (turn, step) 重现是两个独立槽（普通请求因
+    `first_sample_seq` 不同而身份各异；同 compactionId 重现则 collide，靠
+    Commit 2 的 duplicate 守卫）。字段分两组：
+
+    - **槽身份（开槽即固化、shadow 永不覆盖）**：`is_compaction`/`turn`/`step`/
+      `compaction_id` 定义这个槽是谁（compaction 的 turn/step 置 None——内部去重
+      用的 `_compaction_identity` 负号哈希是实现细节，不泄漏成真实 turn 号）；
+      `identity_basis`/`source_event_id`/`first_sample_seq`/
+      `first_sample_identity_hash` 是**身份形成的唯一边界**：观察者在该槽**第一个**
+      被消费的 usage 样本到达时（开槽）按 §3.3 三段公式算好并冻结，shadow 一律
+      不覆盖——无 compactionId 的 compaction 折进固定负号槽，相邻后续同槽样本会
+      让支配样本变化，若身份 hash 取支配样本 canonical 行，append 一条 shadow 后
+      hash/fact_id 就变（v3 的错，v4 拍板改）。
+    - **支配样本 value（shadow 可覆盖）**：同一相邻槽内后来的 usage 样本（如 chunk
+      后的 message、双 chunk 后到者、相邻同槽 compaction 重现）覆盖
+      `seq`/`time`/`model_raw`/`provider_raw`/`context_window`/`context_tokens`/
+      四桶/`is_peak`——每份 sample 都按**那一刻**的 active 游标重判 model/provider
+      （§3.4，与 fold/request_metrics 的「后到重判」一致），**不缓存成槽建立时的
+      值**（header 若在 chunk/message 之间变化，缓存会让 observer 与 fold 分叉）。
+
+    `source_event_id` 由 observer 直接携带（不是 Commit 2 emitter 复算——emitter 只
+    消费、绝不重读日志）。`first_sample_identity_hash` 仅无 compactionId 的
+    compaction 非 None（开槽样本 canonical 行 hash）；其余恒 None。
+    """
+
+    # 槽身份——开槽即固化，shadow 永不覆盖
+    is_compaction: bool
+    turn: Optional[int]           # 真实 turn；compaction 槽 = None（不泄漏内部负号哈希）
+    step: Optional[int]           # 真实 step；compaction 槽 = None
+    compaction_id: Optional[str]  # 原生 data.compactionId（str 非空）；非 compaction = None
+    identity_basis: str           # §3.3："native" iff compaction 有原生 id，否则 "derived-hash"
+    source_event_id: str          # §3.3 三段公式：request:derived:… / compaction:<id> / compaction:derived:<hash>
+    first_sample_seq: Optional[int]  # 槽首个被消费 usage 样本的 seq（append 稳定锚）
+    first_sample_identity_hash: Optional[str]  # 仅无 id compaction：开槽样本 canonical 行 hash；其余 None
+    # 支配样本 value——shadow 可覆盖（开槽时 == 开槽样本本身）
+    seq: Optional[int]            # 支配样本的 seq
+    time: Optional[int]           # 支配样本的 time
+    # §3.4：普通 = 支配样本那一刻的 active config.model/provider；compaction = 自带
+    # data.model/provider（非空 str）否则回落 active。只允许原始字符串或 None。
+    model_raw: Optional[str]
+    provider_raw: Optional[str]
+    context_window: Optional[int]
+    context_tokens: Optional[int]
+    uncached_input_tokens: Optional[int]
+    output_tokens: Optional[int]
+    cache_read_tokens: Optional[int]
+    cache_write_tokens: Optional[int]
+    is_peak: Optional[bool]
+
+
+def dsh_usage_observations(events):
+    """逐相邻槽产出 `DshUsageObservation`（Rust 镜像见 `usage.rs`）。
+
+    这是从 request_metrics 原循环抽出的**共享逐槽 observer**（v0.7 Stage 3 Commit
+    1）：request_metrics 原先自己维护一条「request/header 追踪 active model →
+    逐样本提取 → 同槽去重」的循环，与 `_usage_fold_into` 各写一遍槽语义，且这条
+    循环**丢弃了 provider 与首样本身份**——这正是「UsageFact 不能消费它」的根因。
+    抽成 observer 后同时服务 request_metrics（展示）与 emitter（Commit 2，事实）。
+
+    v4（review P0 拍板）：身份形成的**唯一边界**在开槽。observer 在该槽**第一个**
+    样本到达时按 §3.3 三段公式算好并冻结 `source_event_id`/`identity_basis`/
+    `first_sample_seq`/`first_sample_identity_hash`——`source_event_id` 直接带在
+    observation 上（Commit 2 emitter 只消费、绝不重读日志复算）；相邻 shadow 只
+    `_replace` value 字段，身份字段不列出即不触碰，结构性保证「append 一条 shadow
+    不改写旧 fact_id 的身份输入」。
+
+    **`token_by_model` 的聚合 fold 不接 observer**、继续走 `_usage_fold_into`——
+    观察者与聚合 fold 是两条**已 reconcile** 的路径，不是唯一逐槽解释；四桶之和
+    相等由测试钉死。`_usage_sample` 仍是逐样本提取的唯一入口，observer 与 fold
+    共用。active 游标（config.model/config.provider）推进规则与 fold 的 active +
+    `_record_provider` 同谓词：config.model 为 str 才推进 model 游标，provider 取
+    `config.provider` 原样 str-or-None。
+    """
     events = post_fork(events)
-    out = []
-    active = None
-    window = None
-    last_key = None  # 同 (turn, step) 去重
+    observations = []
+    active_model = None    # request/header 的 config.model 游标（str 才推进）
+    active_provider = None  # request/header 的 config.provider 游标（原样 str-or-None）
+    window = None          # request/context 的 contextWindow 游标（最近一次上报）
+    last_key = None        # 同 (turn, step) 相邻槽去重
 
     for event in events:
         if not isinstance(event, dict):
@@ -359,7 +436,9 @@ def request_metrics(events):
                 if isinstance(header, dict):
                     config = header.get("config")
                     if isinstance(config, dict) and isinstance(config.get("model"), str):
-                        active = config["model"]
+                        active_model = config["model"]
+                        provider = config.get("provider")
+                        active_provider = provider if isinstance(provider, str) else None
             continue
         if etype == "request/context":
             # 缺 contextWindow 时保留上一次的值——一次畸形事件不该让后面所有
@@ -378,24 +457,38 @@ def request_metrics(events):
             continue
         turn, step, usage, model_override = sample
         # compaction 的 (turn, step) 是内部去重用的哈希身份（见
-        # `_compaction_identity`），不是真实存在的 turn 号——报给调用方的
-        # 这一行必须诚实写 None，不能把去重实现细节泄漏成一个看起来像
-        # 真实 turn 的负数（缺列不编列，这里是同一条纪律）。
+        # `_compaction_identity`），不是真实存在的 turn 号——观察者这一槽必须诚实
+        # 写 None（缺列不编列，把去重实现细节泄漏成负数就是编造）；去重键仍用内部
+        # (turn, step)，相邻同槽判断与 fold 同款。
         is_compaction = etype == "compaction/summary"
 
+        # 样本自带 model/provider（§3.4 的 self 半边）：仅 compaction 有，且已由
+        # `_usage_sample` 判成 str-or-None（含空串退化值）。
+        if is_compaction:
+            cid = data.get("compactionId")
+            compaction_id = cid if isinstance(cid, str) and cid else None
+            model_self, provider_self = model_override
+        else:
+            compaction_id = None
+            model_self = provider_self = None
+
+        first_seq = _int_or_none(event.get("seq"))
+        time_ms = _int_or_none(event.get("time"))
         uncached = _opt_int(usage, "inputTokens")
         cache_read = _opt_int(usage, "cacheReadTokens")
+        # 两项都在场才给 context_tokens；少一项整行留空。
         context_tokens = (uncached + cache_read
                           if uncached is not None and cache_read is not None else None)
 
-        row = {
-            "request_seq": 0,  # 去重后统一回填
-            "seq": _int_or_none(event.get("seq")),
-            "time": _int_or_none(event.get("time")),
-            "turn": None if is_compaction else _int_or_none(turn),
-            "step": None if is_compaction else _int_or_none(step),
-            "model": (model_override[0] if model_override and model_override[0]
-                      else (active if active is not None else "unknown")),
+        # 支配样本 value——shadow 分支用它对 prev `_replace`（身份字段不在 dict 里，
+        # 即不触碰 = 原样保留）；开槽分支直接构造新 observation。
+        value = {
+            "seq": first_seq,
+            "time": time_ms,
+            # §3.4：self 非空取 self、否则回落那一刻 active 游标（普通请求 self 恒
+            # None → 即 active；空串两侧都回落，见 `_resolve_raw`）。
+            "model_raw": _resolve_raw(model_self, active_model),
+            "provider_raw": _resolve_raw(provider_self, active_provider),
             "context_window": window,
             "context_tokens": context_tokens,
             "uncached_input_tokens": uncached,
@@ -406,19 +499,99 @@ def request_metrics(events):
             # 展示层要画逐请求费用曲线就必须知道每笔按高峰价还是空闲价算，
             # 让浏览器自己重算一遍 _is_peak 就是这条规则的第四份拷贝。
             # 时间戳缺失时为 None——不是 False（"没测到"不等于"不在高峰"）。
-            "is_peak": _is_peak(event) if _int_or_none(event.get("time")) is not None else None,
+            "is_peak": _is_peak(event) if time_ms is not None else None,
         }
 
-        if last_key == (turn, step) and out:
-            out[-1] = row  # 后到者覆盖（与 token_by_model 的替换语义一致）
+        if last_key == (turn, step) and observations:
+            # 后到者覆盖（与 token_by_model 的替换语义一致）；只覆盖 value 字段，
+            # 槽身份/身份固化字段原样保留——append 一条 shadow 不改写旧 fact_id。
+            observations[-1] = observations[-1]._replace(**value)
+            continue
+
+        # ── 开槽：身份形成的唯一边界（§3.3 三段公式，一律此刻算好并冻结）──
+        if is_compaction and compaction_id is not None:
+            # 有 compactionId：compaction_id 是宿主原生标识 → native 身份，无 hash。
+            identity_basis = "native"
+            source_event_id = "compaction:" + compaction_id
+            identity_hash = None
+        elif is_compaction:
+            # 无 compactionId：对开槽样本 canonical 行算 hash 并冻结。首样本重塑
+            # 事件 {type, time, data}，seq 为整数才追加（hash 对象永不带 null 键）。
+            identity_basis = "derived-hash"
+            identity_row = {"type": etype, "time": event.get("time"), "data": data}
+            if first_seq is not None:
+                identity_row["seq"] = first_seq
+            identity_hash = fnv1a64_hex(canonical_json(identity_row))
+            source_event_id = "compaction:derived:" + identity_hash
         else:
-            out.append(row)
-            last_key = (turn, step)
+            # 普通请求：canonical 身份元组 {turn, step}，seq 为整数才追加、None 就
+            # 整体省略该键。first_sample_seq 本身就是冻结值，但为统一存固化字段。
+            identity_basis = "derived-hash"
+            identity_hash = None
+            identity_row = {"turn": turn, "step": step}
+            if first_seq is not None:
+                identity_row["seq"] = first_seq
+            source_event_id = "request:derived:" + fnv1a64_hex(canonical_json(identity_row))
+
+        observations.append(DshUsageObservation(
+            is_compaction=is_compaction,
+            turn=None if is_compaction else turn,
+            step=None if is_compaction else step,
+            compaction_id=compaction_id,
+            identity_basis=identity_basis,
+            source_event_id=source_event_id,
+            first_sample_seq=first_seq,
+            first_sample_identity_hash=identity_hash,
+            **value,
+        ))
+        last_key = (turn, step)
+    return observations
+
+
+def request_metrics(events):
+    """逐请求指标（PRD §9.3 RequestMetric）。Rust 平行实现见 `usage.rs`。
+
+    与 `token_by_model` 是**同一个 fold 的两个出口**：那边把每个样本折进按模型
+    的总数，这里保留每次请求自己的一行。会话健康时间线上的每个点都来自它。
+    不变量：逐请求四桶之和 == token_by_model 四桶之和（两侧都有测试钉死）。
+
+    自 v0.7 Stage 3 Commit 1 起这里是 `dsh_usage_observations` 的**一薄渲染**：
+    逐槽折叠循环已抽进 observer（共享 `_usage_sample` + active 游标 + 相邻槽
+    去重 + §3.3/§3.4 身份与 model_raw 解析），这里只把每条 observation 映成一行
+    JSON，输出**逐字节不变**——新携带的 source_event_id/身份字段不渲染。model 列
+    直接用 observer 解析好的 `model_raw`（§3.4：compaction 自带或 active 游标），
+    无证据才落 "unknown" 渲染哨兵。
+
+    三条诚实性约定（与本仓「缺列不编列」同一条纪律）：
+    - 缺字段落 None（JSON null）不落 0；
+    - `context_tokens` 只在两个加数都在场时才非空——真实会话 687 个请求点里
+      13 个缺 cacheReadTokens，这些点该在图上留缺口，而不是拿部分和凑一个偏低值；
+    - **不输出逐请求的 `compacted` 布尔列**：压缩事件类型已确认（见 `compaction.py`），
+      但它独立于请求，不该硬塞成每行一个 True/False；真正的压缩视图是
+      `compaction_events()` 单独的输出。
+    """
+    rows = []
+    for obs in dsh_usage_observations(events):
+        rows.append({
+            "request_seq": 0,  # 去重后统一回填
+            "seq": obs.seq,
+            "time": obs.time,
+            "turn": obs.turn,
+            "step": obs.step,
+            "model": (obs.model_raw if obs.model_raw is not None else "unknown"),
+            "context_window": obs.context_window,
+            "context_tokens": obs.context_tokens,
+            "uncached_input_tokens": obs.uncached_input_tokens,
+            "output_tokens": obs.output_tokens,
+            "cache_read_tokens": obs.cache_read_tokens,
+            "cache_write_tokens": obs.cache_write_tokens,
+            "is_peak": obs.is_peak,
+        })
 
     # request_seq 在去重之后才有意义：它是「第几个请求点」，不是「第几个样本」。
-    for i, row in enumerate(out):
+    for i, row in enumerate(rows):
         row["request_seq"] = i + 1
-    return out
+    return rows
 
 
 def context_composition(events):

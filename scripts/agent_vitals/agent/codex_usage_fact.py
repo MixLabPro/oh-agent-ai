@@ -25,7 +25,7 @@ import json
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from .claude_usage_fact import _canonical_row_json, _fnv1a_hex
+from ..source_identity import canonical_json, fnv1a64_hex
 from .codex_usage import (
     CONSUMED,
     NOT_TOKEN_COUNT,
@@ -141,14 +141,14 @@ def _derived_event_id(rollout_source_id: str, byte_offset: int, rec: dict) -> st
     `byte_offset` 只在单个物理 rollout 文件内唯一——命名空间必须是 **stem** 而非
     逻辑 session（同一逻辑 session 的两份续接 rollout 可能都有 offset 0 且同形，
     按 session 命名会误判跨文件重复、少算一笔，2026-09-03 修订）。row hash =
-    两端一致的 canonical JSON 的 FNV-1a（`_canonical_row_json`/`_fnv1a_hex` 与
-    Rust `claude_usage_fact.rs` 的 `canonical_row_string`/`fnv1a_hex` 逐字节一致，
-    Stage 1 已由 parity 钉测验证）。
+    两端一致的 canonical JSON 的 FNV-1a（canonical/FNV 原语在包顶层
+    `source_identity`，与 claude/DSH 共用，逐字节一致由 Stage 1/3 parity 钉测
+    验证）。
     """
     return "%s:%d:%s" % (
         rollout_source_id,
         byte_offset,
-        _fnv1a_hex(_canonical_row_json(rec)),
+        fnv1a64_hex(canonical_json(rec)),
     )
 
 

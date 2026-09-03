@@ -36,8 +36,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from agent_vitals.util import split_lines  # noqa: E402
 from agent_vitals.util import fork_boundary, post_fork  # noqa: E402
 from agent_vitals.usage import (  # noqa: E402
-    context_composition, hour_buckets, request_metrics, token_by_date_model,
-    token_by_model, usage_signal_status, usage_shaped_tokens,
+    context_composition, dsh_usage_observations, hour_buckets, request_metrics,
+    token_by_date_model, token_by_model, usage_signal_status, usage_shaped_tokens,
 )
 from agent_vitals.compaction import compaction_events  # noqa: E402
 from agent_vitals.waste import detect_duplicate_tool_results, detect_failure_run_waste, detect_structural_waste  # noqa: E402
@@ -1916,6 +1916,253 @@ class TestRequestMetrics(unittest.TestCase):
         ])
         self.assertIsNone(rows[0]["context_window"], "不臆造 128K 之类的默认值")
         self.assertEqual(rows[0]["context_tokens"], 15, "分子照常可算")
+
+
+class TestDshUsageObservations(unittest.TestCase):
+    """`dsh_usage_observations` 的语义——Rust 侧 `usage.rs` 同名测试要对齐。
+
+    字段分两组：槽身份/身份固化字段（identity_basis/source_event_id/
+    first_sample_seq/first_sample_identity_hash/compaction_id，开槽即固化、
+    shadow 永不覆盖）与支配样本 value（shadow 可覆盖，含 §3.4 model_raw/
+    provider_raw）。observer 直接携带最终 `source_event_id`（Commit 2 emitter
+    只消费、不复算）——所以这里是对 Commit 2 身份输入的语义护栏。source_event_id
+    的 canonical hash 用与 Rust 测试**同一个字面量**钉住：任一侧的身份行构造漂移
+    （seq 键该省没省、time/data 键该带没带、模型解析谓词不一致）当场红。
+    """
+
+    def test_first_sample_seq_is_opening_sample_not_governing(self):
+        """开槽样本锚定 first_sample_seq 与 source_event_id——同 (turn, step) 的
+        shadow（chunk 后到 message）只更新支配样本 value，身份不随支配样本走
+        （spec §3.3「append shadow 不改写身份输入」在 seq 元组与 fact_id 上的
+        镜像）。
+        """
+        obs = dsh_usage_observations([
+            {"type": "assistant/chunk", "seq": 10, "time": 1001,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000, "outputTokens": 200,
+                                "cacheReadTokens": 300}}}},
+            {"type": "assistant/message", "seq": 11, "time": 1002,
+             "data": {"turn": 1, "step": 1,
+                      "usage": {"inputTokens": 1200, "outputTokens": 250,
+                                "cacheReadTokens": 300}}},
+        ])
+        self.assertEqual(len(obs), 1, "两份同槽样本 = 一个请求点")
+        self.assertEqual(obs[0].first_sample_seq, 10, "锚定开槽样本 seq，不是支配样本 11")
+        self.assertEqual(obs[0].seq, 11, "value 侧仍指向支配样本")
+        self.assertEqual(obs[0].uncached_input_tokens, 1200, "value 用后到者")
+        self.assertEqual(obs[0].output_tokens, 250)
+        self.assertEqual(obs[0].identity_basis, "derived-hash")
+        self.assertEqual(
+            obs[0].source_event_id, "request:derived:2e4298cf1c7ad82a",
+            "普通槽身份 = fnv1a64(canonical{{turn,step,seq:开槽 seq 10}})，observer 直接携带")
+        self.assertFalse(obs[0].is_compaction)
+        self.assertEqual((obs[0].turn, obs[0].step), (1, 1))
+        self.assertIsNone(obs[0].model_raw, "无 header 则无 active 证据")
+        self.assertIsNone(obs[0].first_sample_identity_hash, "仅无 id compaction 有 hash")
+
+    def test_non_adjacent_same_turn_step_is_two_slots(self):
+        """相邻槽去重是相邻 run（fold 同款 last-key）：同 (turn, step) 非相邻
+        重现（中间隔着别的槽）是两个独立槽，各锚自己的开槽样本——若当同一槽，
+        append 的 shadow 会跨越大段时间改写首份样本的身份。
+        """
+        obs = dsh_usage_observations([
+            {"type": "assistant/chunk", "seq": 2, "time": 1,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000}}}},
+            {"type": "assistant/chunk", "seq": 3, "time": 2,
+             "data": {"turn": 2, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 500}}}},
+            {"type": "assistant/chunk", "seq": 4, "time": 3,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 800}}}},
+        ])
+        self.assertEqual(len(obs), 3)
+        self.assertEqual([o.first_sample_seq for o in obs], [2, 3, 4])
+        self.assertEqual(obs[2].uncached_input_tokens, 800)
+        self.assertNotEqual(obs[0].source_event_id, obs[2].source_event_id,
+                            "同 (1,1) 非相邻两槽各自 derived-hash 身份（first_sample_seq 不同）")
+
+    def test_compaction_with_id_is_native_with_self_evidence(self):
+        """compaction 槽折进负号身份槽，turn/step 诚实置 None（内部去重哈希不
+        泄漏成真实 turn 号）；有原生 compactionId → native 身份 + 无 hash；自带
+        model/provider（str 非空）优先 → model_raw/provider_raw 取 self、不取
+        active（§3.4 compaction 分支），source_event_id 是 `compaction:<id>`。
+        """
+        obs = dsh_usage_observations([
+            {"type": "request/header", "seq": 1, "time": 1,
+             "data": {"header": {"config": {"model": "deepseek-v4-pro",
+                                            "provider": "shengsuanyun"}}}},
+            {"type": "compaction/summary", "seq": 2, "time": 1787813784275,
+             "data": {"compactionId": "c1", "sourceCommandId": "cmd-1",
+                      "model": "deepseek-v4-flash", "provider": "deepseek-official",
+                      "usage": {"inputTokens": 462, "outputTokens": 3520,
+                                "cacheReadTokens": 245760}}},
+        ])
+        self.assertEqual(len(obs), 1)
+        self.assertTrue(obs[0].is_compaction)
+        self.assertIsNone(obs[0].turn)
+        self.assertIsNone(obs[0].step)
+        self.assertEqual(obs[0].compaction_id, "c1")
+        self.assertEqual(obs[0].identity_basis, "native", "compactionId 是宿主原生标识")
+        self.assertEqual(obs[0].source_event_id, "compaction:c1")
+        self.assertIsNone(obs[0].first_sample_identity_hash, "有 id 无 hash")
+        self.assertEqual(obs[0].model_raw, "deepseek-v4-flash",
+                         "§3.4：自带 model（非空）优先于 active 的 deepseek-v4-pro")
+        self.assertEqual(obs[0].provider_raw, "deepseek-official")
+        self.assertEqual(obs[0].first_sample_seq, 2)
+
+    def test_no_id_compaction_fixed_slot_shadow_freezes_first_sample(self):
+        """§3.3 的冻结场景：无 compactionId 的 compaction 折进固定负号槽 (-1, 0)
+        ——任何相邻第二份无 id compaction 都落进同一槽替换支配样本。观察者在开槽
+        样本算好并冻结 first_sample_identity_hash（canonical 行 hash，本测试用
+        字面量钉住——Rust 侧断言同值，身份行构造漂移当场红），shadow 只更新
+        value。prefix-only（只有开槽样本）与 full（+shadow）身份逐字相同 =
+        append 稳定。
+        """
+        opening = {"type": "compaction/summary", "seq": 5, "time": 1001,
+                   "data": {"sourceCommandId": "cmd-1", "model": "m1",
+                            "provider": "p1",
+                            "usage": {"inputTokens": 100, "outputTokens": 10,
+                                      "cacheReadTokens": 5}}}
+        shadow = {"type": "compaction/summary", "seq": 6, "time": 1002,
+                  "data": {"sourceCommandId": "cmd-1", "model": "m1",
+                           "provider": "p1",
+                           "usage": {"inputTokens": 200, "outputTokens": 20,
+                                     "cacheReadTokens": 5}}}
+        obs = dsh_usage_observations([opening, shadow])
+        self.assertEqual(len(obs), 1, "两份同 (-1,0) 相邻样本 = 一个槽")
+        self.assertEqual(obs[0].first_sample_seq, 5, "身份锚在开槽样本 seq 5")
+        self.assertEqual(
+            obs[0].first_sample_identity_hash, "c71a9fe6db364b69",
+            "无 id compaction hash = 开槽样本重塑事件（{type,time,data}+seq5）canonical 行的 fnv1a64 hex")
+        self.assertEqual(obs[0].source_event_id, "compaction:derived:c71a9fe6db364b69")
+        self.assertEqual(obs[0].seq, 6, "value 侧指向支配样本 seq 6")
+        self.assertEqual(obs[0].uncached_input_tokens, 200, "value 用后到者")
+        self.assertIsNone(obs[0].compaction_id)
+        self.assertEqual(obs[0].identity_basis, "derived-hash")
+        self.assertIsNone(obs[0].turn)
+        self.assertIsNone(obs[0].step)
+        # prefix-only 与 full 身份逐字相同——append shadow 不改写旧 fact_id。
+        prefix = dsh_usage_observations([opening])
+        self.assertEqual(prefix[0].source_event_id, obs[0].source_event_id)
+        self.assertEqual(prefix[0].first_sample_identity_hash,
+                         obs[0].first_sample_identity_hash)
+        self.assertEqual(prefix[0].first_sample_seq, obs[0].first_sample_seq)
+
+    def test_governing_sample_rejudges_active_cursor(self):
+        """每份支配样本都按那一刻的 active 游标重判 model_raw/provider_raw，不
+        缓存成槽建立时的值——header 若在 chunk/message 之间切换，governing 落在
+        新模型上（§3.4 + fold「后到重判」一致），而身份仍锚开槽样本、逐字不变。
+        """
+        obs = dsh_usage_observations([
+            {"type": "request/header", "seq": 1, "time": 1,
+             "data": {"header": {"config": {"model": "pro", "provider": "p1"}}}},
+            {"type": "assistant/chunk", "seq": 2, "time": 2,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000}}}},
+            {"type": "request/header", "seq": 3, "time": 3,
+             "data": {"header": {"config": {"model": "flash", "provider": "p2"}}}},
+            {"type": "assistant/message", "seq": 4, "time": 4,
+             "data": {"turn": 1, "step": 1,
+                      "usage": {"inputTokens": 1200}}},
+        ])
+        self.assertEqual(len(obs), 1)
+        self.assertEqual(obs[0].first_sample_seq, 2, "身份仍锚开槽样本 seq 2")
+        self.assertEqual(obs[0].source_event_id, "request:derived:d000f644afcc1839")
+        self.assertEqual(obs[0].model_raw, "flash", "governing 那一刻的 active 游标")
+        self.assertEqual(obs[0].provider_raw, "p2")
+        self.assertEqual(obs[0].uncached_input_tokens, 1200)
+        # 只有开槽样本的 prefix：value 落在当时 pro/p1，但身份逐字不变。
+        prefix = dsh_usage_observations([
+            {"type": "request/header", "seq": 1, "time": 1,
+             "data": {"header": {"config": {"model": "pro", "provider": "p1"}}}},
+            {"type": "assistant/chunk", "seq": 2, "time": 2,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000}}}},
+        ])
+        self.assertEqual(prefix[0].source_event_id, obs[0].source_event_id)
+        self.assertEqual(prefix[0].model_raw, "pro")
+        self.assertEqual(obs[0].model_raw, "flash", "shadow 只更新 value，身份字段原样")
+
+    def test_seq_none_omits_seq_key(self):
+        """§3.3 seq=None 确定性降级：真实样本恒带整型 seq，这条纯属防御。
+        first_sample_seq 为 None 时 canonical 身份 dict 整体省略 seq 键（只 hash
+        {turn, step}）——Python 序列化成 "None" / Rust 序列化成 "null" 都会字节
+        分叉或 id 不稳定。普通请求与无 id compaction 共用同一条「整数才追加 seq」
+        分支，两分支都在此钉字面量。
+        """
+        # 普通请求：message 无顶层 seq → 身份 hash 只含 {turn:1, step:1}。
+        obs = dsh_usage_observations([
+            {"type": "assistant/message", "time": 1,
+             "data": {"turn": 1, "step": 1,
+                      "usage": {"inputTokens": 1200}}},
+        ])
+        self.assertIsNone(obs[0].first_sample_seq)
+        self.assertEqual(obs[0].source_event_id, "request:derived:5c5b05e3d3ff0a96",
+                         "hash 对象是 {step:1,turn:1}（无 seq 键），不是含 null 的 seq")
+        # 无 id compaction 同款：首样本无 seq → identity_row 不带 seq 键。
+        obs2 = dsh_usage_observations([
+            {"type": "compaction/summary", "time": 1001,
+             "data": {"sourceCommandId": "cmd-1", "model": "m1", "provider": "p1",
+                      "usage": {"inputTokens": 100, "outputTokens": 10,
+                                "cacheReadTokens": 5}}},
+        ])
+        self.assertIsNone(obs2[0].first_sample_seq)
+        self.assertEqual(obs2[0].first_sample_identity_hash, "f54d0f50212df43d")
+        self.assertEqual(obs2[0].source_event_id, "compaction:derived:f54d0f50212df43d")
+
+    def test_empty_self_model_falls_back_to_active(self):
+        """§3.4 model_raw/provider_raw 解析：compaction 自带 data.model 为空串
+        （退化值，不是 str 缺失）时回落当时 active 游标，不把 "" 当模型名——
+        Python 真值渲染与 Rust `Some(m) => m` 的历史分歧（Rust 过去把空串当
+        模型名）在此收敛为同一谓词。
+        """
+        obs = dsh_usage_observations([
+            {"type": "request/header", "seq": 1, "time": 1,
+             "data": {"header": {"config": {"model": "pro", "provider": "p1"}}}},
+            {"type": "compaction/summary", "seq": 2, "time": 1001,
+             "data": {"sourceCommandId": "cmd-1", "model": "", "provider": "",
+                      "usage": {"inputTokens": 100}}},
+        ])
+        self.assertEqual(len(obs), 1)
+        self.assertEqual(obs[0].identity_basis, "derived-hash", "空 compactionId = derived")
+        self.assertEqual(obs[0].model_raw, "pro", "空串回落 active，不把 '' 当模型名")
+        self.assertEqual(obs[0].provider_raw, "p1")
+
+    def test_reconciles_four_buckets_with_token_by_model(self):
+        """observer 与聚合 fold 两条已 reconcile 路径：逐观察四桶之和 ==
+        token_by_model 四桶之和（request_metrics 级已钉过，这里在观察级再钉一次
+        ——请求点数可经渲染变化，观察字段是源头）。"""
+        events = [
+            {"type": "request/header", "seq": 1,
+             "data": {"header": {"config": {"model": "pro"}}}},
+            # 同 (1,1)：chunk 先到、message 后到——只算后者
+            {"type": "assistant/chunk", "seq": 2,
+             "data": {"turn": 1, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 1000, "outputTokens": 200,
+                                "cacheReadTokens": 300, "cacheWriteTokens": 0}}}},
+            {"type": "assistant/message", "seq": 3,
+             "data": {"turn": 1, "step": 1,
+                      "usage": {"inputTokens": 1200, "outputTokens": 250,
+                                "cacheReadTokens": 300, "cacheWriteTokens": 0}}},
+            {"type": "request/header", "seq": 4,
+             "data": {"header": {"config": {"model": "flash"}}}},
+            {"type": "assistant/chunk", "seq": 5,
+             "data": {"turn": 2, "step": 1, "chunk": {"type": "usage",
+                      "usage": {"inputTokens": 500, "outputTokens": 50,
+                                "cacheReadTokens": 0, "cacheWriteTokens": 0}}}},
+        ]
+        obs = dsh_usage_observations(events)
+        self.assertEqual(len(obs), 2, "3 个样本去重成 2 个槽")
+        agg = token_by_model(events)
+        for key in ("uncached_input_tokens", "output_tokens",
+                    "cache_read_tokens", "cache_write_tokens"):
+            self.assertEqual(
+                sum(getattr(o, key) or 0 for o in obs),
+                sum(m[key] for m in agg["by_model"].values()),
+                f"{key}: 逐观察之和必须等于按模型之和")
+        self.assertEqual(obs[0].uncached_input_tokens, 1200, "替换后的值，不是 1000")
+        self.assertEqual([o.identity_basis for o in obs], ["derived-hash"] * 2)
 
 
 class TestHourBuckets(unittest.TestCase):

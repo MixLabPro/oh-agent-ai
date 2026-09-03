@@ -34,6 +34,7 @@ from .claude_cost import (
     ms_from_iso_ts,
     _is_peak_slot,
 )
+from ..source_identity import canonical_json, fnv1a64_hex  # 共享原语：Claude/Codex/DSH/UsageFact ID 共用
 
 
 # Sentinel 原因——fold 仍要递增 unreadable_usage_rows / unattributed_rows，
@@ -197,38 +198,19 @@ __all__ = [
 from .usage_fact import build_usage_fact  # 延迟到末尾避免循环 import（cost→fact→cost 链）
 
 
-def _fnv1a_hex(text: str) -> str:
-    """FNV-1a 64 → 16 hex——与 `usage_fact.fact_id` 同一初值/乘子，只换语义
-    （这里 hash 的是 canonical row，不是 identity 元组），所以返回裸 hex、
-    不带 "uf1-"。跨语言字节相同由 Rust 镜像同一算法保证。"""
-    h = 0xcbf29ce484222325
-    for b in text.encode("utf-8"):
-        h ^= b
-        h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
-    return "%016x" % h
-
-
-def _canonical_row_json(rec: dict) -> str:
-    """canonical JSON（§3.2「row hash 使用两端一致的 canonical JSON」）：
-    sort_keys + 紧凑分隔 + 不转义非 ASCII。Python `json.dumps` 与 Rust 手写
-    canonical serializer 对整数/字符串/布尔/null 字节一致；assistant usage
-    row 的数值只有整数 token 计数（float costUSD 只在 cost-state，不产
-    fact），不存在浮点表示法分叉。"""
-    return json.dumps(rec, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False)
-
-
 def _derived_event_id(native_session_id: str, byte_offset: int,
                       rec: dict) -> str:
     """§3.2 fallback：`stable_source_identity + byte_offset +
     normalized_row_hash`。stable_source_identity = native_session_id；
     byte_offset = 行首在**原文件**的字节位置（不以行号替代）；row hash =
-    canonical JSON 的 FNV-1a。同一文件重复读取稳定（checkpoint resume 从
-    from_byte 续读时，已折行的 offset 不变，fact-id 集合与 full replay 一致）。"""
+    canonical JSON 的 FNV-1a（canonical/FNV 原语在包顶层 `source_identity`，
+    Claude/Codex/DSH/UsageFact ID 共用，本模块不长第二份）。同一文件重复读取
+    稳定（checkpoint resume 从 from_byte 续读时，已折行的 offset 不变，
+    fact-id 集合与 full replay 一致）。"""
     return "%s:%d:%s" % (
         native_session_id,
         byte_offset,
-        _fnv1a_hex(_canonical_row_json(rec)),
+        fnv1a64_hex(canonical_json(rec)),
     )
 
 

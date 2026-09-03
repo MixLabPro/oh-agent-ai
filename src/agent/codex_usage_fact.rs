@@ -23,17 +23,17 @@
 //! 2026-09-03 拍板）。degraded 文件（空 / 含坏 JSON 行）镜像 codex-cost 按零
 //! 事件处理、计进 `malformed`；I/O 错误向上抛（CLI 层 exit 2，镜像 claude）。
 //!
-//! derived-id 原语（`canonical_row_string` / `fnv1a_hex`）复用 claude emitter
-//! 的 `pub(crate)` 版本——两宿主共用同一 canonical+FNV，两端一致的边界只有一
-//! 个，不许长第二份。
+//! derived-id 原语（canonical/FNV）来自 core `source_identity`（Claude/Codex/
+//! DSH observer/UsageFact ID 共用的同一份，不许长第二份）。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::agent::claude_usage_fact::{canonical_row_string, fnv1a_hex, SKIP, UNATTRIBUTED, UNREADABLE};
+use crate::agent::claude_usage_fact::{SKIP, UNATTRIBUTED, UNREADABLE};
 use agent_vitals_core::codex_usage::{CodexTokenOutcome, CodexFoldState};
+use agent_vitals_core::source_identity::{canonical_json, fnv1a64_hex};
 use agent_vitals_core::usage_fact::build_usage_fact;
 
 const HOST: &str = "codex";
@@ -153,16 +153,16 @@ fn resolve_native_session_id(path: &Path, items: &[(usize, Value)]) -> String {
 /// `byte_offset` 只在单个物理 rollout 文件内唯一——命名空间必须是 **stem** 而非
 /// 逻辑 session（同一逻辑 session 的两份续接 rollout 可能都有 offset 0 且同形，
 /// 按 session 命名会误判跨文件重复、少算一笔，2026-09-03 修订）。row hash =
-/// 两端一致的 canonical JSON 的 FNV-1a（复用 claude emitter 的 `canonical_row_string`
-/// / `fnv1a_hex`——见模块 docstring）。
+/// 两端一致的 canonical JSON 的 FNV-1a（canonical/FNV 原语在 core
+/// `source_identity`，与 claude/DSH 共用——见模块 docstring）。
 fn derived_event_id(rollout_source_id: &str, byte_offset: usize, rec: &Value) -> String {
     let mut canonical = String::new();
-    canonical_row_string(rec, &mut canonical);
+    canonical_json(rec, &mut canonical);
     format!(
         "{}:{}:{}",
         rollout_source_id,
         byte_offset,
-        fnv1a_hex(canonical.as_bytes())
+        fnv1a64_hex(canonical.as_bytes())
     )
 }
 

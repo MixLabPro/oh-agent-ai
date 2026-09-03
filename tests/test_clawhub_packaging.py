@@ -28,6 +28,7 @@ ALLOWED_PACKAGE_FILES = {
     Path(name) for name in (
         # 顶层：入口 + 共享
         "__init__.py", "cli.py", "compat.py", "paths.py", "util.py",
+        "source_identity.py",
         "pricing.json", "codex_pricing.json",
         # skills/：静态 SKILL.md 体检
         "skills/__init__.py", "skills/analysis.py", "skills/diff.py",

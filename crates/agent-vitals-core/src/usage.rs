@@ -32,6 +32,7 @@
 use serde_json::{Map, Value, json};
 
 use crate::evidence::{Coverage, Signal};
+use crate::source_identity::{canonical_json, fnv1a64_hex}; // §3.3 身份哈希原语（与 claude/codex/UsageFact ID 同一边界）
 
 /// 同一模型名在一次会话里被两家供应商服务过时的标记。故意用一个不可能是
 /// 真实供应商名的字符串：它不会命中 `priced_providers` 白名单，于是自动
@@ -629,9 +630,271 @@ fn or_null(v: Option<i64>) -> Value {
     }
 }
 
+/// 逐相邻槽的一条 usage 观察（Python `usage.py::DshUsageObservation` 的镜像，
+/// v0.7 Stage 3 Commit 1）——`request_metrics`（展示）与 UsageFact emitter
+/// （Commit 2，事实）的**共享观测**。
+///
+/// 槽语义与聚合 fold 同款：**相邻 run**（`last` 同 (turn, step) 比较），不是全
+/// 文件 HashMap 去重——非相邻的同 (turn, step) 重现是两个独立槽。字段分两组：
+///
+/// - **槽身份（开槽即固化、shadow 永不覆盖）**：`is_compaction`/`turn`/`step`/
+///   `compaction_id` 定义这个槽是谁（compaction 的 turn/step 置 None——内部去重
+///   用 `compaction_identity` 的负号哈希是实现细节，不泄漏成真实 turn 号）；
+///   `identity_basis`/`source_event_id`/`first_sample_seq`/
+///   `first_sample_identity_hash` 是**身份形成的唯一边界**（R3 拍板）：观察者在该
+///   槽**第一个**被消费的 usage 样本到达时（开槽）按 §3.3 三段公式算好并冻结，
+///   shadow 一律不覆盖——无 compactionId 的 compaction 折进固定负号槽，相邻后续
+///   同槽样本会让支配样本变化，若身份 hash 取支配样本 canonical 行，append 一条
+///   shadow 后 hash/fact_id 就变（v3 的错，v4 拍板改）。
+/// - **支配样本 value（shadow 可覆盖）**：shadow（chunk 后的 message、双 chunk
+///   后到者、相邻同槽 compaction 重现）覆盖 `seq`/`time`/`model_raw`/
+///   `provider_raw`/`context_window`/`context_tokens`/四桶/`is_peak`——每份 sample
+///   都按**那一刻**的 active 游标重判 model/provider（§3.4，与 fold 的「后到
+///   重判」一致），不缓存成槽建立时的值。
+///
+/// `source_event_id` 由 observer 直接携带（Commit 2 emitter 只消费、绝不重读日志
+/// 复算）。`first_sample_identity_hash` 仅无 compactionId 的 compaction 非 None。
+#[derive(Debug, Clone)]
+pub struct DshUsageObservation {
+    // 槽身份——开槽即固化，shadow 永不覆盖
+    pub is_compaction: bool,
+    pub turn: Option<i64>,             // 真实 turn；compaction 槽 = None（不泄漏内部负号哈希）
+    pub step: Option<i64>,             // 真实 step；compaction 槽 = None
+    pub compaction_id: Option<String>, // 原生 data.compactionId（str 非空）；非 compaction = None
+    pub identity_basis: String,        // §3.3："native" iff compaction 有原生 id，否则 "derived-hash"
+    pub source_event_id: String, // §3.3 三段公式：request:derived:… / compaction:<id> / compaction:derived:<hash>
+    pub first_sample_seq: Option<i64>, // 槽首个被消费 usage 样本的 seq（append 稳定锚）
+    pub first_sample_identity_hash: Option<String>, // 仅无 id compaction：开槽样本 canonical 行 hash；其余 None
+    // 支配样本 value——shadow 可覆盖（开槽时 == 开槽样本本身）
+    pub seq: Option<i64>,
+    pub time: Option<i64>,
+    // §3.4：普通 = 支配样本那一刻的 active config.model/provider；compaction = 自带
+    // data.model/provider（非空 str）否则回落 active。只允许原始字符串或 None。
+    pub model_raw: Option<String>,
+    pub provider_raw: Option<String>,
+    pub context_window: Option<i64>,
+    pub context_tokens: Option<i64>,
+    pub uncached_input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub is_peak: Option<bool>,
+}
+
+/// §3.4 model_raw/provider_raw 判定：self（样本自带，仅 compaction 有）**非空**
+/// 取 self，否则回落那一刻的 active 游标。Python `usage.py::_resolve_raw` 的镜像。
+///
+/// 空串是退化值、不是 str 缺失，不冒充证据——`usage_sample` 在 data.model="" 时给
+/// `Some("")`，空串两侧都回落 active。这条同时收敛了 Python 渲染真值语义与 Rust
+/// `match Some(m) => m` 的**历史分歧**（Rust 过去把空串当模型名、Python 回落
+/// active）：现在两侧同一谓词，request_metrics 的 model 列才逐字节一致。
+fn resolve_raw(self_val: Option<String>, active_val: Option<String>) -> Option<String> {
+    match self_val {
+        Some(s) if !s.is_empty() => Some(s),
+        _ => active_val,
+    }
+}
+
+/// §3.3 canonical 行 hash 的 hex——serde_json Value → canonical JSON 字节 → FNV-1a
+/// hex。原语在 `crate::source_identity`（与 claude/codex/UsageFact ID 同一边界，
+/// 本文件不长第二份 canonical/FNV）。
+fn canonical_row_hex(row: Value) -> String {
+    let mut canonical = String::new();
+    canonical_json(&row, &mut canonical);
+    fnv1a64_hex(canonical.as_bytes())
+}
+
+/// 逐相邻槽产出 [`DshUsageObservation`]（Python `usage.py::dsh_usage_observations`
+/// 的镜像）——从 `request_metrics` 原循环抽出的**共享逐槽 observer**。
+///
+/// 原循环丢弃了 provider 与首样本身份，正是「UsageFact 不能消费它」的根因。
+/// v4（R3 拍板）：身份形成的**唯一边界**在开槽——observer 在该槽第一个样本到达时
+/// 按 §3.3 三段公式算好并冻结 `source_event_id`/`identity_basis`/`first_sample_seq`
+/// /`first_sample_identity_hash`（`source_event_id` 直接带在 observation 上，Commit
+/// 2 emitter 只消费、绝不重读日志复算）；相邻 shadow 只替换 value 字段，身份字段
+/// 原样保留，结构性保证「append 一条 shadow 不改写旧 fact_id 的身份输入」。
+/// **`token_by_model` 的聚合 fold 不接 observer**、继续走 `usage_fold_checkpoint`；
+/// 观察者与聚合 fold 是两条**已 reconcile** 的路径（四桶之和相等由测试钉死）。
+/// active 游标（config.model/config.provider）推进谓词与 fold 的 active +
+/// `record_provider` 一致：config.model 为 str 才推进 model，provider 原样
+/// str-or-None。
+pub fn dsh_usage_observations(events: &[Value]) -> Vec<DshUsageObservation> {
+    // 只看分叉之后的事件——见 token_by_model 的同条注释。
+    let events = &crate::util::post_fork(events)[..];
+    let mut observations: Vec<DshUsageObservation> = Vec::new();
+    let mut active_model: Option<String> = None;
+    let mut active_provider: Option<String> = None;
+    let mut window: Option<i64> = None; // request/context 的 contextWindow 游标
+    let mut last_key: Option<(i64, i64)> = None; // 同 (turn, step) 相邻槽去重
+
+    for event in events {
+        if !event.is_object() {
+            continue;
+        }
+        match event.get("type").and_then(|v| v.as_str()) {
+            Some("request/header") => {
+                if let Some(m) =
+                    event.pointer("/data/header/config/model").and_then(|v| v.as_str())
+                {
+                    active_model = Some(m.to_string());
+                    active_provider = event
+                        .pointer("/data/header/config/provider")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                }
+                continue;
+            }
+            Some("request/context") => {
+                // 缺 contextWindow 时保留上一次的值，不清空——一次畸形事件不该让
+                // 后面所有请求都失去分母。
+                if let Some(w) = event.pointer("/data/contextWindow").and_then(|v| v.as_i64()) {
+                    window = Some(w);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if !event.get("data").is_some_and(|d| d.is_object()) {
+            continue;
+        }
+        let etype = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let data_obj = event.get("data").expect("上面 is_object 已保证").clone();
+        let Some((turn, step, usage, model_override)) = usage_sample(event) else { continue };
+        // compaction 的 (turn, step) 是内部去重用的哈希身份，不是真实存在的
+        // turn 号——观察者这一槽必须诚实写 None（见 `DshUsageObservation`）；
+        // 去重键仍用内部 (turn, step)，与 fold 的相邻同槽判断同款。
+        let is_compaction = etype == "compaction/summary";
+
+        // 样本自带 model/provider（§3.4 的 self 半边）：仅 compaction 有，且已由
+        // `usage_sample` 判成 Option（可能含空串退化值）。
+        let (compaction_id, model_self, provider_self) = if is_compaction {
+            let cid = event
+                .get("data")
+                .and_then(|d| d.get("compactionId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let (m, p) = match &model_override {
+                Some((m, p)) => (m.clone(), p.clone()),
+                None => (None, None),
+            };
+            (cid, m, p)
+        } else {
+            (None, None, None)
+        };
+
+        let first_seq = event.get("seq").and_then(|v| v.as_i64());
+        let time_ms = event.get("time").and_then(|v| v.as_i64());
+        let uncached = opt_i64(usage, "inputTokens");
+        let cache_read = opt_i64(usage, "cacheReadTokens");
+        let out_tok = opt_i64(usage, "outputTokens");
+        let cache_write = opt_i64(usage, "cacheWriteTokens");
+        // 两项都在场才给 context_tokens；少一项整行留空。
+        let context_tokens = match (uncached, cache_read) {
+            (Some(a), Some(b)) => Some(a + b),
+            _ => None,
+        };
+        // 支配样本 value 的"当时那一刻"解析：§3.4 每次重判，不缓存成槽建立时的值。
+        let model_raw = resolve_raw(model_self, active_model.clone());
+        let provider_raw = resolve_raw(provider_self, active_provider.clone());
+
+        if last_key == Some((turn, step)) {
+            // 后到者覆盖（与 token_by_model 的替换语义一致）：只替换 value 字段，
+            // 槽身份/身份固化字段（struct 里不写即不动）原样保留——append 一条
+            // shadow 不改写旧 fact_id 的身份输入。
+            if let Some(slot) = observations.last_mut() {
+                slot.seq = first_seq;
+                slot.time = time_ms;
+                slot.model_raw = model_raw;
+                slot.provider_raw = provider_raw;
+                slot.context_window = window;
+                slot.context_tokens = context_tokens;
+                slot.uncached_input_tokens = uncached;
+                slot.output_tokens = out_tok;
+                slot.cache_read_tokens = cache_read;
+                slot.cache_write_tokens = cache_write;
+                slot.is_peak = time_ms.map(|_| is_peak(event));
+            }
+            continue;
+        }
+
+        // ── 开槽：身份形成的唯一边界（§3.3 三段公式，一律此刻算好并冻结）──
+        let (identity_basis, source_event_id, first_hash) = if is_compaction {
+            match &compaction_id {
+                // 有 compactionId：compaction_id 是宿主原生标识 → native 身份，无
+                // hash。
+                Some(cid) => ("native", format!("compaction:{}", cid), None),
+                // 无 compactionId：对开槽样本 canonical 行算 hash 并冻结。首样本
+                // 重塑事件 {type, time, data}，seq 为整数才追加（hash 对象永不带
+                // null 键——Python 序列化成 "null" / Rust 序列化成 null 都会字节分叉）。
+                None => {
+                    let mut row = Map::new();
+                    row.insert("type".to_string(), json!(etype));
+                    row.insert(
+                        "time".to_string(),
+                        event.get("time").cloned().unwrap_or(Value::Null),
+                    );
+                    row.insert("data".to_string(), data_obj);
+                    if let Some(s) = first_seq {
+                        row.insert("seq".to_string(), json!(s));
+                    }
+                    let hash = canonical_row_hex(Value::Object(row));
+                    (
+                        "derived-hash",
+                        format!("compaction:derived:{}", hash),
+                        Some(hash),
+                    )
+                }
+            }
+        } else {
+            // 普通请求：canonical 身份元组 {turn, step}，seq 为整数才追加、None 就
+            // 整体省略该键。first_sample_seq 本身就是冻结值，但为统一存固化字段。
+            let mut row = Map::new();
+            row.insert("turn".to_string(), json!(turn));
+            row.insert("step".to_string(), json!(step));
+            if let Some(s) = first_seq {
+                row.insert("seq".to_string(), json!(s));
+            }
+            let id = canonical_row_hex(Value::Object(row));
+            ("derived-hash", format!("request:derived:{}", id), None)
+        };
+
+        observations.push(DshUsageObservation {
+            is_compaction,
+            turn: if is_compaction { None } else { Some(turn) },
+            step: if is_compaction { None } else { Some(step) },
+            compaction_id,
+            identity_basis: identity_basis.to_string(),
+            source_event_id,
+            first_sample_seq: first_seq,
+            first_sample_identity_hash: first_hash,
+            seq: first_seq,
+            time: time_ms,
+            model_raw,
+            provider_raw,
+            context_window: window,
+            context_tokens,
+            uncached_input_tokens: uncached,
+            output_tokens: out_tok,
+            cache_read_tokens: cache_read,
+            cache_write_tokens: cache_write,
+            // 这笔请求是否落在北京高峰时段。时间戳缺失时为 None——不是 false
+            // （"没测到"不等于"不在高峰"）。
+            is_peak: time_ms.map(|_| is_peak(event)),
+        });
+        last_key = Some((turn, step));
+    }
+    observations
+}
+
 /// 逐请求指标（PRD §9.3 RequestMetric）——与 `token_by_model` 是**同一个 fold
 /// 的两个出口**，区别只在保留分辨率：那边把每个样本折进按模型的总数，这里保留
 /// 每次请求自己的一行。会话健康时间线上的每个点都来自它。
+///
+/// 自 v0.7 Commit 1 起，本函数是 `dsh_usage_observations` 之上的**薄渲染**：
+/// 逐槽抽取（usage_sample、active 游标、后到者覆盖、compaction 折叠）全部移进
+/// 共享 observer（UsageFact emitter 需要的 provider 游标与开槽身份固化，展示层
+/// 不需要）。输出 byte 不变由表征/对账测试与 goldens 钉住。
 ///
 /// 为什么必须同源而不是另写一份：同 (turn, step) 的 usage chunk 先到、
 /// assistant/message 后到是同一次请求的两份 sample，只算最后一份。两处各写一遍
@@ -652,89 +915,34 @@ fn or_null(v: Option<i64>) -> Value {
 /// 「最近一次上报」向后生效——真实日志里它一个会话只出现 5 次（每次模型切换
 /// 各一次），不是每请求一次，所以不能按请求去找，只能沿用最近值。
 pub fn request_metrics(events: &[Value]) -> Value {
-    // 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
-    // branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
-    // 对同一笔钱/同一批行为重复计数（见 util::fork_boundary 的实测数据）。
-    let events = &crate::util::post_fork(events)[..];
+    // request_metrics 自 v0.7 Commit 1 起是共享 observer 之上的薄渲染：逐槽抽取
+    // （usage_sample / active 游标 / 后到者覆盖 / compaction 折叠 / §3.3 身份与
+    // §3.4 model_raw 解析）全在 `dsh_usage_observations`，这里把每个观察折成展示
+    // 行；model 列直接渲染 observer 的 `model_raw`。输出 byte 不变。
     let mut out: Vec<Value> = Vec::new();
-    let mut active: Option<String> = None;
-    let mut window: Option<i64> = None;
-    let mut last_key: Option<(i64, i64)> = None; // 同 (turn, step) 去重
-
-    for event in events {
-        if !event.is_object() {
-            continue;
-        }
-        match event.get("type").and_then(|v| v.as_str()) {
-            Some("request/header") => {
-                if let Some(m) = event.pointer("/data/header/config/model").and_then(|v| v.as_str())
-                {
-                    active = Some(m.to_string());
-                }
-                continue;
-            }
-            Some("request/context") => {
-                // 缺 contextWindow 时保留上一次的值，不清空——一次畸形事件不该
-                // 让后面所有请求都失去分母。
-                if let Some(w) = event.pointer("/data/contextWindow").and_then(|v| v.as_i64()) {
-                    window = Some(w);
-                }
-                continue;
-            }
-            _ => {}
-        }
-
-        let Some((turn, step, usage, model_override)) = usage_sample(event) else { continue };
-        // compaction 的 (turn, step) 是内部去重用的哈希身份（见
-        // `compaction_identity`），不是真实存在的 turn 号——报给调用方的
-        // 这一行必须诚实写 null，不能把去重实现细节泄漏成一个看起来像
-        // 真实 turn 的负数。
-        let is_compaction =
-            event.get("type").and_then(|v| v.as_str()) == Some("compaction/summary");
-
-        let uncached = opt_i64(usage, "inputTokens");
-        let cache_read = opt_i64(usage, "cacheReadTokens");
-        // 两项都在场才给 context_tokens；少一项整行留空（见 doc 注释）。
-        let context_tokens = match (uncached, cache_read) {
-            (Some(a), Some(b)) => Some(a + b),
-            _ => None,
-        };
-
-        let row = json!({
+    for o in dsh_usage_observations(events) {
+        out.push(json!({
             "request_seq": 0i64, // 去重后统一回填，见下
-            "seq": or_null(event.get("seq").and_then(|v| v.as_i64())),
-            "time": or_null(event.get("time").and_then(|v| v.as_i64())),
-            "turn": if is_compaction { Value::Null } else { json!(turn) },
-            "step": if is_compaction { Value::Null } else { json!(step) },
-            "model": match &model_override {
-                Some((Some(m), _)) => m.clone(),
-                _ => active.clone().unwrap_or_else(|| "unknown".to_string()),
-            },
-            "context_window": or_null(window),
-            "context_tokens": or_null(context_tokens),
-            "uncached_input_tokens": or_null(uncached),
-            "output_tokens": or_null(opt_i64(usage, "outputTokens")),
-            "cache_read_tokens": or_null(cache_read),
-            "cache_write_tokens": or_null(opt_i64(usage, "cacheWriteTokens")),
+            "seq": or_null(o.seq),
+            "time": or_null(o.time),
+            "turn": or_null(o.turn),
+            "step": or_null(o.step),
+            "model": o.model_raw.clone().unwrap_or_else(|| "unknown".to_string()),
+            "context_window": or_null(o.context_window),
+            "context_tokens": or_null(o.context_tokens),
+            "uncached_input_tokens": or_null(o.uncached_input_tokens),
+            "output_tokens": or_null(o.output_tokens),
+            "cache_read_tokens": or_null(o.cache_read_tokens),
+            "cache_write_tokens": or_null(o.cache_write_tokens),
             // 这笔请求是否落在北京高峰时段。**规则留在 core，价格留给调用方**：
             // 展示层要画逐请求费用曲线，就必须知道每笔按高峰价还是空闲价算；
             // 让浏览器自己重算一遍 `is_peak` 就是这条规则的第四份拷贝。
             // 时间戳缺失时为 null——不是 false（"没测到"不等于"不在高峰"）。
-            "is_peak": match event.get("time").and_then(|v| v.as_i64()) {
-                Some(_) => json!(is_peak(event)),
+            "is_peak": match o.is_peak {
+                Some(b) => json!(b),
                 None => Value::Null,
             },
-        });
-
-        if last_key == Some((turn, step)) {
-            // 后到者覆盖前一行（与 token_by_model 的替换语义一致）
-            if let Some(slot) = out.last_mut() {
-                *slot = row;
-            }
-        } else {
-            out.push(row);
-            last_key = Some((turn, step));
-        }
+        }));
     }
 
     // request_seq 在去重之后才有意义：它是「第几个请求点」，不是「第几个样本」。
@@ -2404,6 +2612,205 @@ mod tests {
         ];
         assert_eq!(request_metrics(&events), json!([]));
         assert_eq!(request_metrics(&[]), json!([]));
+    }
+
+    // ──────────────────────── dsh_usage_observations ────────────────────────
+    //
+    // Commit 1 的共享 observer。字段分两组：槽身份/身份固化字段（identity_basis /
+    // source_event_id / first_sample_seq / first_sample_identity_hash / compaction_id，
+    // 开槽即固化、shadow 永不覆盖）与支配样本 value（shadow 可覆盖，含 §3.4
+    // model_raw/provider_raw）。Python `usage.py` 侧 TestDshUsageObservations 有同款
+    // 断言——source_event_id 的 canonical hash 用**同一个字面量**钉在两语言测试里，
+    // 任一端的身份行构造漂移（seq 键该省没省、time/data 键该带没带）当场红。
+
+    /// 开槽样本锚定 `first_sample_seq` 与 `source_event_id`——同 (turn, step) 的
+    /// shadow（chunk 后到 message）只更新支配样本 value，身份（first_sample_seq +
+    /// 已冻结的 source_event_id）不随支配样本走（spec §3.3「append shadow 不改写
+    /// 身份输入」在 seq 元组与 fact_id 上的镜像）。observer 直接携带最终
+    /// source_event_id（Commit 2 emitter 只消费、不复算）。
+    #[test]
+    fn observer_first_sample_seq_is_opening_sample_not_governing() {
+        let events = [
+            json!({"type":"assistant/chunk","seq":10,"time":1001,"data":{"turn":1,"step":1,
+                   "chunk":{"type":"usage","usage":{"inputTokens":1000,"outputTokens":200,"cacheReadTokens":300}}}}),
+            json!({"type":"assistant/message","seq":11,"time":1002,"data":{"turn":1,"step":1,
+                   "usage":{"inputTokens":1200,"outputTokens":250,"cacheReadTokens":300}}}),
+        ];
+        let obs = dsh_usage_observations(&events);
+        assert_eq!(obs.len(), 1, "两份同槽样本 = 一个请求点");
+        assert_eq!(obs[0].first_sample_seq, Some(10), "锚定开槽样本 seq，不是支配样本 11");
+        assert_eq!(obs[0].seq, Some(11), "value 侧仍指向支配样本");
+        assert_eq!(obs[0].uncached_input_tokens, Some(1200), "value 用后到者");
+        assert_eq!(obs[0].output_tokens, Some(250));
+        assert_eq!(obs[0].identity_basis, "derived-hash");
+        assert_eq!(obs[0].source_event_id, "request:derived:2e4298cf1c7ad82a",
+                   "普通槽身份 = fnv1a64(canonical{{turn,step,seq:开槽 seq 10}})，observer 直接携带");
+        assert!(!obs[0].is_compaction);
+        assert_eq!(obs[0].turn, Some(1));
+        assert_eq!(obs[0].step, Some(1));
+        assert_eq!(obs[0].model_raw, None, "无 header 则无 active 证据");
+        assert_eq!(obs[0].first_sample_identity_hash, None, "仅无 id compaction 有 hash");
+    }
+
+    /// 相邻槽去重是相邻 run（fold 同款 last-key）：同 (turn, step) 非相邻重现
+    /// （中间隔着别的槽）是**两个独立槽**，各锚自己的开槽样本（first_sample_seq 与
+    /// source_event_id 各异）——若当同一槽，append 的 shadow 会跨越大段时间改写
+    /// 首份样本的身份。
+    #[test]
+    fn observer_non_adjacent_same_turn_step_is_two_slots() {
+        let events = [
+            json!({"type":"assistant/chunk","seq":2,"time":1,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":1000}}}}),
+            json!({"type":"assistant/chunk","seq":3,"time":2,"data":{"turn":2,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":500}}}}),
+            json!({"type":"assistant/chunk","seq":4,"time":3,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":800}}}}),
+        ];
+        let obs = dsh_usage_observations(&events);
+        assert_eq!(obs.len(), 3);
+        assert_eq!(obs[0].first_sample_seq, Some(2));
+        assert_eq!(obs[1].first_sample_seq, Some(3));
+        assert_eq!(obs[2].first_sample_seq, Some(4), "非相邻重现独立开槽");
+        assert_eq!(obs[2].uncached_input_tokens, Some(800));
+        assert_ne!(obs[0].source_event_id, obs[2].source_event_id,
+                  "同 (1,1) 非相邻两槽各自 derived-hash 身份（first_sample_seq 不同）");
+    }
+
+    /// compaction 槽折进负号身份槽，turn/step 诚实置 None（内部去重哈希不泄漏成
+    /// 真实 turn 号）；有原生 compactionId → native 身份 + 无 hash；自带
+    /// model/provider（str 非空）优先 → model_raw/provider_raw 取 self、不取 active
+    /// （§3.4 compaction 分支），source_event_id 是 `compaction:<id>`。
+    #[test]
+    fn observer_compaction_with_id_is_native_with_self_evidence() {
+        let events = [
+            json!({"type":"request/header","seq":1,"time":1,
+                   "data":{"header":{"config":{"model":"deepseek-v4-pro","provider":"shengsuanyun"}}}}),
+            json!({"type":"compaction/summary","seq":2,"time":1_787_813_784_275i64,
+                   "data":{"compactionId":"c1","sourceCommandId":"cmd-1",
+                           "model":"deepseek-v4-flash","provider":"deepseek-official",
+                           "usage":{"inputTokens":462,"outputTokens":3520,"cacheReadTokens":245760}}}),
+        ];
+        let obs = dsh_usage_observations(&events);
+        assert_eq!(obs.len(), 1);
+        assert!(obs[0].is_compaction);
+        assert_eq!(obs[0].turn, None);
+        assert_eq!(obs[0].step, None);
+        assert_eq!(obs[0].compaction_id.as_deref(), Some("c1"));
+        assert_eq!(obs[0].identity_basis, "native", "compactionId 是宿主原生标识");
+        assert_eq!(obs[0].source_event_id, "compaction:c1");
+        assert_eq!(obs[0].first_sample_identity_hash, None, "有 id 无 hash");
+        assert_eq!(obs[0].model_raw.as_deref(), Some("deepseek-v4-flash"),
+                   "§3.4：自带 model（非空）优先于 active 的 deepseek-v4-pro");
+        assert_eq!(obs[0].provider_raw.as_deref(), Some("deepseek-official"));
+        assert_eq!(obs[0].first_sample_seq, Some(2));
+    }
+
+    /// §3.3 的冻结场景：**无 compactionId** 的 compaction 折进固定负号槽 (-1, 0)
+    /// ——任何相邻第二份无 id compaction 都会落进**同一槽**替换支配样本。observer
+    /// 在开槽样本算好并冻结 `first_sample_identity_hash`（canonical 行 hash，本测试
+    /// 用**字面量**钉住——Python `usage.py` 侧断言同值，任一端的身份行构造漂移当场
+    /// 红），shadow 只更新 value。prefix-only（只有开槽样本）与 full（+shadow）身份
+    /// 逐字相同 = append 稳定。
+    #[test]
+    fn observer_no_id_compaction_fixed_slot_shadow_freezes_first_sample() {
+        let opening = json!({"type":"compaction/summary","seq":5,"time":1001,
+                             "data":{"sourceCommandId":"cmd-1","model":"m1","provider":"p1",
+                                     "usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":5}}});
+        let shadow = json!({"type":"compaction/summary","seq":6,"time":1002,
+                            "data":{"sourceCommandId":"cmd-1","model":"m1","provider":"p1",
+                                    "usage":{"inputTokens":200,"outputTokens":20,"cacheReadTokens":5}}});
+        let obs = dsh_usage_observations(&[opening.clone(), shadow]);
+        assert_eq!(obs.len(), 1, "两份同 (-1,0) 相邻样本 = 一个槽");
+        assert_eq!(obs[0].first_sample_seq, Some(5), "身份锚在开槽样本 seq 5");
+        assert_eq!(obs[0].first_sample_identity_hash.as_deref(), Some("c71a9fe6db364b69"),
+                   "无 id compaction hash = 开槽样本重塑事件（{{type,time,data}}+seq5）canonical 行的 fnv1a64 hex");
+        assert_eq!(obs[0].source_event_id, "compaction:derived:c71a9fe6db364b69");
+        assert_eq!(obs[0].seq, Some(6), "value 侧指向支配样本 seq 6");
+        assert_eq!(obs[0].uncached_input_tokens, Some(200), "value 用后到者");
+        assert_eq!(obs[0].compaction_id, None);
+        assert_eq!(obs[0].identity_basis, "derived-hash");
+        assert_eq!(obs[0].turn, None);
+        assert_eq!(obs[0].step, None);
+        // prefix-only 与 full 身份逐字相同——append shadow 不改写旧 fact_id。
+        let prefix = dsh_usage_observations(&[opening]);
+        assert_eq!(prefix[0].source_event_id, obs[0].source_event_id);
+        assert_eq!(prefix[0].first_sample_identity_hash, obs[0].first_sample_identity_hash);
+        assert_eq!(prefix[0].first_sample_seq, obs[0].first_sample_seq);
+    }
+
+    /// 每份支配样本都按**那一刻**的 active 游标重判 model_raw/provider_raw，不缓存
+    /// 成槽建立时的值——header 若在 chunk/message 之间切换，governing 落在新模型上
+    /// （§3.4 + fold「后到重判」一致），而身份（source_event_id/first_sample_seq）
+    /// 仍锚开槽样本、逐字不变。
+    #[test]
+    fn observer_governing_sample_rejudges_active_cursor() {
+        let events = [
+            json!({"type":"request/header","seq":1,"time":1,
+                   "data":{"header":{"config":{"model":"pro","provider":"p1"}}}}),
+            json!({"type":"assistant/chunk","seq":2,"time":2,
+                   "data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":1000}}}}),
+            json!({"type":"request/header","seq":3,"time":3,
+                   "data":{"header":{"config":{"model":"flash","provider":"p2"}}}}),
+            json!({"type":"assistant/message","seq":4,"time":4,
+                   "data":{"turn":1,"step":1,"usage":{"inputTokens":1200}}}),
+        ];
+        let obs = dsh_usage_observations(&events);
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].first_sample_seq, Some(2), "身份仍锚开槽样本 seq 2");
+        assert_eq!(obs[0].source_event_id, "request:derived:d000f644afcc1839");
+        assert_eq!(obs[0].model_raw.as_deref(), Some("flash"), "governing 那一刻的 active 游标");
+        assert_eq!(obs[0].provider_raw.as_deref(), Some("p2"));
+        assert_eq!(obs[0].uncached_input_tokens, Some(1200));
+        // 只有开槽样本的 prefix：value 落在当时 pro/p1，但身份逐字不变。
+        let prefix = dsh_usage_observations(&events[..2]);
+        assert_eq!(prefix[0].source_event_id, obs[0].source_event_id);
+        assert_eq!(prefix[0].model_raw.as_deref(), Some("pro"));
+        assert_eq!(obs[0].model_raw.as_deref(), Some("flash"),
+                   "shadow 只更新 value，身份字段原样");
+    }
+
+    /// §3.3 seq=None 确定性降级：真实样本恒带整型 seq，这条纯属防御。first_sample_seq
+    /// 为 None 时 canonical 身份 dict **整体省略 seq 键**（只 hash {turn, step}）——
+    /// Python 序列化成 "None" / Rust 序列化成 "null" 都会字节分叉或 id 不稳定。普通
+    /// 请求与无 id compaction 共用同一条「整数才追加 seq」分支，两分支都在此钉字面量。
+    #[test]
+    fn observer_seq_none_omits_seq_key() {
+        // 普通请求：message 无顶层 seq → 身份 hash 只含 {turn:1, step:1}。
+        let normal = [
+            json!({"type":"assistant/message","time":1,"data":{"turn":1,"step":1,
+                   "usage":{"inputTokens":1200}}}),
+        ];
+        let obs = dsh_usage_observations(&normal);
+        assert_eq!(obs[0].first_sample_seq, None);
+        assert_eq!(obs[0].source_event_id, "request:derived:5c5b05e3d3ff0a96",
+                   "hash 对象是 {{step:1,turn:1}}（无 seq 键），不是含 null 的 seq");
+        // 无 id compaction 同款：首样本无 seq → identity_row 不带 seq 键。
+        let nocid = [
+            json!({"type":"compaction/summary","time":1001,
+                   "data":{"sourceCommandId":"cmd-1","model":"m1","provider":"p1",
+                           "usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":5}}}),
+        ];
+        let obs2 = dsh_usage_observations(&nocid);
+        assert_eq!(obs2[0].first_sample_seq, None);
+        assert_eq!(obs2[0].first_sample_identity_hash.as_deref(), Some("f54d0f50212df43d"));
+        assert_eq!(obs2[0].source_event_id, "compaction:derived:f54d0f50212df43d");
+    }
+
+    /// §3.4 model_raw/provider_raw 解析：compaction 自带 data.model 为空串（退化值，
+    /// 不是 str 缺失）时回落当时 active 游标，不把 "" 当模型名——Python 真值渲染
+    /// 与 Rust `Some(m) => m` 的**历史分歧**（Rust 过去把空串当模型名）在此收敛为
+    /// 同一谓词。
+    #[test]
+    fn observer_empty_self_model_falls_back_to_active() {
+        let events = [
+            json!({"type":"request/header","seq":1,"time":1,
+                   "data":{"header":{"config":{"model":"pro","provider":"p1"}}}}),
+            json!({"type":"compaction/summary","seq":2,"time":1001,
+                   "data":{"sourceCommandId":"cmd-1","model":"","provider":"",
+                           "usage":{"inputTokens":100}}}),
+        ];
+        let obs = dsh_usage_observations(&events);
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].identity_basis, "derived-hash", "空 compactionId = derived");
+        assert_eq!(obs[0].model_raw.as_deref(), Some("pro"), "空串回落 active，不把 '' 当模型名");
+        assert_eq!(obs[0].provider_raw.as_deref(), Some("p1"));
     }
 
     // ──────────────────────── hour_buckets ────────────────────────

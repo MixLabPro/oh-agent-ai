@@ -28,6 +28,8 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::source_identity::fnv1a64_hex;
+
 /// 当前 schema 版本（v0.7 spec §4.1：「新的 `UsageFact` 序列化契约从
 /// `schema_version=1` 起步；旧 today/month/ledger 不是 `UsageFact` v0，不能
 /// 靠改键假装无损迁移」）。
@@ -85,12 +87,13 @@ const TOKEN_FIELDS: &[&str] = &[
 /// `hash(machine_namespace, host, source_profile, native_session_id,
 ///       source_event_id, observation_kind)`。
 ///
-/// 用 FNV-1a 而不是密码学哈希：与 `usage.rs::compaction_identity` 同一条
-/// 纪律——这个值只用作去重身份，不需要抗碰撞到密码学强度，避免给 core
-/// crate（wasm 也要编译）新增依赖；跨语言字节相同由 Python 镜像同一算法
-/// 保证（parity 测试钉住）。字段间用 `\x1f`（unit separator，真实字段值里
-/// 几乎不可能出现的控制字符）拼接，防止 `("ab","c")` 与 `("a","bc")` 撞出
-/// 同一个哈希。
+/// 用 FNV-1a 而不是密码学哈希：与 `usage::compaction_identity` 同一条纪律——
+/// 这个值只用作去重身份，不需要抗碰撞到密码学强度，避免给 core crate（wasm
+/// 也要编译）新增依赖。FNV 原语本身取自 `source_identity::fnv1a64_hex`（同一
+/// 边界，不许第三份 inline 拷贝——Stage 3 拍板把 UsageFact ID 也接进共享层）；
+/// 跨语言字节相同由 Python 镜像同一算法保证（parity 测试钉住）。字段间用
+/// `\x1f`（unit separator，真实字段值里几乎不可能出现的控制字符）拼接，防止
+/// `("ab","c")` 与 `("a","bc")` 撞出同一个哈希。
 pub fn fact_id(
     machine_namespace: &str,
     host: &str,
@@ -104,12 +107,7 @@ pub fn fact_id(
         source_event_id, observation_kind,
     ]
     .join("\u{1f}");
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in joined.as_bytes() {
-        hash ^= *b as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("uf1-{hash:016x}")
+    format!("uf1-{}", fnv1a64_hex(joined.as_bytes()))
 }
 
 /// `fields` → 一份完整的 `UsageFact` 文档，或校验失败的问题清单（诚实报错，
