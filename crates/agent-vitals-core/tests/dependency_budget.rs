@@ -292,6 +292,9 @@ fn source_root_is_an_explicit_facade_not_a_flat_module_dump() {
         .expect("read src")
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        // 忽略 `.`-前缀的非模块项（`.DS_Store` 之类 OS/工具产物，`.gitignore`
+        // 已排除）——本测试钉的是**模块**布局，不是目录里有没有 Finder 落过灰。
+        .filter(|name| !name.starts_with('.'))
         .collect();
     entries.sort();
     assert_eq!(
