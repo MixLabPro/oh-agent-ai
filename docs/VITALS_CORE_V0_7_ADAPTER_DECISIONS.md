@@ -154,7 +154,10 @@ dsh-storage-facts.md`）——同一文件每次会话可被增量压缩多次�
   （键序是字节一致的一部分，不能重排）"）
 - 测试：8 测 = 5→4 映射正确 / fact_id 一致性 / reasoning_output 合
   并 / Legacy/Paginated 两态都 emit / 影子 custom_tool_call 去重
-  / byte-parity Python↔Rust
+  / byte-parity Python↔Rust。2026-09-03 拍板修订：event id 改物理
+  rollout stem 命名空间（决策 D′，§4.2），验收补 3 测（异 stem 同形
+  各发一条 / 同 stem 双收保留一条 + duplicate / CLI 多 rollout 路径）
+  ——完整 11 测见 Stage 2 规格 §6
 
 **Stage 3：dsh state chain**（预计 ~100 行 + 6 测试）
 - 入口：`adapters/dsh.py::usage_fold_state`（事件级）
@@ -187,9 +190,36 @@ source_event_id, observation_kind)`。三个待定项：
 
 - **claude**：直接用 `message.id`（Anthropic 原生稳定 id，v0.6.x 已
   在残差哨兵里讨论过"按 message.id 去重"——本决策正式采纳）
-- **codex**：用 rollout item `id`（codex 原生稳定 id）
+- **codex**：用 rollout item `id`（codex 原生稳定 id）——**已被 wire 实证
+  取代（2026-09-03，见 §4.2）**
 - **DSH**：用 `usage_event_id`（adapter 在事件投影时派生，保证同一
   帧同一事件 → 同一 id）
+
+### 4.2 2026-09-03 修订：codex source_event_id 被 wire 实证取代（旧决策）
+
+**状态标记：决策 D 的「codex: rollout item id」是 [被 wire 实证取代的旧决策]。**
+Stage 2 规格细化（`VITALS_CORE_V0_7_STAGE_2_CODEX_ADAPTER.md` §3.3）核对真实
+rollout 语料时发现：
+
+1. `event_msg/token_count` envelope 只有 `{timestamp, type, payload}`，`payload`
+   只有 `type / info / rate_limits`——**没有 `id`、没有 `turn_id`、没有
+   item.id**。决策 D 假设的「rollout item id」属于带 `item.id` 的 TurnItem
+   （CommandExecution 等）；token_count 是 event_msg，**不是 TurnItem，无可取
+   原生 id**。
+2. 因此 codex 的 token_count source_event_id **一律 derived-hash**，并按
+   **物理 rollout 文件（path.stem）命名空间**构造，不能用逻辑 session_id：
+   `byte_offset` 只在单个文件内唯一，混进跨文件的逻辑 session 命名空间会把同
+   一逻辑 session 两份续接 rollout 里同 offset 同 JSON 的合法行误判为跨文件
+   重复。修订后公式：
+   `source_event_id = rollout_source_id(:path.stem) + byte_offset + fnv1a64(canonical_row)`，
+   `native_session_id = 逻辑 session_id`（session_meta.payload.session_id ←
+   payload.id ← path.stem 兜底，两个身份轴独立）。
+3. 语义边界：derived id **不宣称**能对任意跨-rollout 重放可靠去重（宁可两条，
+   绝不误合并）；同物理 rollout 被 live/archive 重复收录时仍可安全去重。
+   未来若某 cli 给 token_count 带原生 id，再按 Claude 的 message.id → uuid 模式
+   补 native 态（向后兼容，schema 先 derived、后按需抬 native）。
+
+claude / DSH 两项不受影响，仍按 §D.1 执行。
 
 ### D.2 影响面
 
@@ -204,13 +234,27 @@ source_event_id, observation_kind)`。三个待定项：
 | B. DSH 从原始事件 replay 投影 | **(a) 从 usage_events 原始流 replay** | 与 spec §2「事实 cache 可重建」一致；zstd 多帧不重写历史 | — |
 | C. 改造顺序 claude → codex → dsh | **(a) 按风险从低到高** | 每阶段独立 commit、可暂停 | — |
 | D. fact_id source_event_id 来源 | **claude: message.id / codex: rollout item id / DSH: usage_event_id 派生** | 三家 adapter 各加 3 行 | — |
+| D′. codex token_count 无原生 id（2026-09-03 wire 实证修订） | codex 一律 derived-hash，按物理 rollout 文件 stem 命名空间（`stem:offset:fnv1a(canonical_row)`）；native_session_id = 逻辑 session_id 独立承载续接不拆会话 | 覆盖决策 D 的 codex 项（**被 wire 实证取代的旧决策**，见 §4.2） | claude / DSH 不受影响 |
 
 **拍板日期**：2026-09-03。后续 commit 按本文件决策执行：
 
-1. ✅ 决策 A/B/C/D 拍板（commit 文档状态更新）→ 启动 Stage 1（claude ledger）
-2. ⏸ Stage 1 commit → 启动 Stage 2（codex static fold）
-3. ⏸ Stage 2 commit → 启动 Stage 3（dsh state chain）
-4. ⏸ Stage 3 commit → 写 v0.7 完成记录进 spec §7
+1. ✅ 决策 A/B/C/D 拍板（commit b1220b3）
+2. ✅ Stage 1 规格细化（commit 1c697db，v0.0.2 已拍板 R1 修订）
+3. ✅ P1 契约缺口修复（commit c965926，adapter 改造前的契约基础）
+4. ✅ Spec §3 状态同步（commit 4a38986，CLI/menubar 闭环登记）
+5. ✅ Stage 1 规格拍板 commit（doc-only，把 R1 决策升为 v0.0.2 已拍板）
+6. ✅ Stage 1 代码实施（按 R1 设计：共享 extractor + per-message emit）
+   - extractor 重构 + golden 零漂移（commit 6fb8c99）
+   - UsageFact emitter + 诊断 CLI + 真实 fixture（Python commit 1e616c9、
+     Rust mirror commit c11d4b7）
+   - Stage 1c：补全 6 项 R1 契约缺口（commit 41b5225）
+7. ⏸ Stage 2：codex static fold emit UsageFact（决策 A 映射）
+   - 拍板 + decision-D 修订同步：本文 §4.2 + `STAGE_2_CODEX_ADAPTER.md`（doc
+     commit，2026-09-03）；代码实施按该 spec §2.3 拆「共享观察者 byte-neutral
+     refactor（零漂移门）」与「emitter + 诊断 CLI + fixture + 11 验收」两步
+   - 拍板状态更新在本 doc commit 里登记（workbuddy 流继续排除，不碰）
+8. ⏸ Stage 3：dsh state chain emit UsageFact（决策 B replay）
+9. ⏸ Stage 3 commit → 写 v0.7 完成记录进 spec §7
 
 ## 6. 与既有纪律的对照
 
