@@ -14,6 +14,13 @@
 >   `fact_id` / `USAGE_FACT_FIELDS` / `build_usage_fact` 纯函数
 > - CLI/menubar 全链路已闭环（commit a577497 + 7bd1349）：剩下的是把
 >   adapter 接上让事实行真的被产出
+> - Stage 1 规格细化（R1 修订）：`docs/VITALS_CORE_V0_7_STAGE_1_CLAUDE_ADAPTER.md`
+>   （commit 1c697db，v0.0.2 已拍板）——Claude adapter 的具体设计：
+>   per-message 粒度、共享 extractor、message.id → uuid → offset+hash
+>   fallback、`assistant-usage` observation_kind、facts + attempts +
+>   coverage 错误结果、内存 emit + 只读诊断 CLI
+> - P1 契约缺口修复：commit c965926（identity 元组入表 / u32 截断防御
+>   / 迁移步版本校验）——adapter 改造前的契约基础
 > - 拍板前版本：commit e88d68a（doc-only，提案 v0.0.1）
 
 ## 0. 范围与前置
@@ -218,3 +225,9 @@ source_event_id, observation_kind)`。三个待定项：
   §3 视图是**输出面**消费
 - ✅ **spec §5 逐项评审**：本文件本身是一次"决策评审"，4 项决策
   拍板后写进 spec §7 记录
+- ✅ **R1 架构审核**：用户在 1c697db 提交后外部修订 Stage 1 规格
+  （R1 v0.0.2：共享 extractor + per-message emit，区别于原 v0.0.1
+  聚合层 emit）。修订本身是更深入的分析——R1 把粒度从聚合层升
+  到原始 row、身份从 derived-hash 升到 native、observation_kind
+  从 ledger-rollup 升到 assistant-usage。本 Stage 1 必须按 R1
+  实施，按聚合层实施属于违规。

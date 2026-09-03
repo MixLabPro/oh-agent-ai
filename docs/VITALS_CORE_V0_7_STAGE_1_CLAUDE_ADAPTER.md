@@ -1,373 +1,278 @@
-# Vitals Core v0.7 —— Stage 1 细化分析：claude ledger adapter emit UsageFact
+# Vitals Core v0.7 —— Stage 1：Claude Adapter Emit UsageFact
 
-> 状态：**待审（提案 v0.0.1）**——本文是 `docs/VITALS_CORE_V0_7_ADAPTER_DECISIONS.md`
-> 决策 C「Stage 1：claude ledger」启动前的细化分析，**不是代码**。待用户
-> 审核拍板后才进 commit。每条改动建议列三选项 + 推荐 + 影响面，与决策
-> 文档同款纪律。
+> 状态：**已拍板（v0.0.2，R1 架构审核修订 + 用户 2026-09-03 拍板）**
+> 本文定义 Claude Code 原始 session JSONL 到 `UsageFact` 的最小闭环；是
+> 实现规格，不代表 Stage 1 已完成（spec §6 验收项全部通过才算落地）。
 >
-> 关联：
-> - 立项决策：`docs/VITALS_CORE_V0_7_ADAPTER_DECISIONS.md`（commit e88d68a + b1220b3）
-> - 契约骨架：`crates/agent-vitals-core/src/usage_fact.rs` +
->   `scripts/agent_vitals/agent/usage_fact.py`（commit b806762）
-> - 既有 fold 流水线：`scripts/agent_vitals/agent/claude_cost.py::claude_sync`
-> - v0.6.x 热修：归日转正 + 残差哨兵（commit 1ec98af，本 Stage 1 **不动**）
+> 关联：`VITALS_CORE_V0_7_ADAPTER_DECISIONS.md`、`VITALS_CORE_V0_7_DATA_PLANE_SPEC.md`、
+> `crates/agent-vitals-core/src/usage_fact.rs`、`scripts/agent_vitals/agent/usage_fact.py`、
+> `scripts/agent_vitals/agent/claude_cost.py`。
 
-## 0. 范围与不动边界
+## 0. 当前结论
 
-### 0.1 本 Stage 1 = 机制骨架
+现有代码已经具备 `UsageFact` 跨语言契约、稳定 `fact_id` builder、迁移 walker，
+也具备 Claude v0.6.x 成本 fold、真实 fixture 与回归测试。但 **Claude → UsageFact
+Adapter 尚未实现**：当前仓库没有 Claude observation extractor、UsageFact emitter 或
+对应诊断 CLI。
 
-按 commit b806762 同款"机制骨架"模式（fact_id 公式 + build_usage_fact +
-migrate_chain walker 三件套）——本 Stage 1 给 claude ledger 一个
-**emit 机制骨架**：
+- 前置契约健康；
+- 既有 Claude fold 健康；
+- Stage 1 可以开工，但不能标记完成。
 
-1. **新增**：`claude_session_to_usage_facts(sessions, machine_namespace)`
-   把 `claude-fold.json` 的聚合 session 折平成 UsageFact 列表（**内存**
-   emit，**不写盘**）
-2. **不新增**：UsageFact 持久化、schema_version 升级、文件级原子写入
-3. **不修改**：cost-state baseline 对账锚、tail_days 归日逻辑、残差哨兵、
-   `_rebuild_days` 聚合路径（v0.6.x 热修已落地）
+## 1. 目标与不动边界
 
-### 0.2 决策 C 推荐值的实际落地
+### 1.1 Stage 1 目标
 
-决策 C 推荐（a）「每个 assistant row → emit 一个 UsageFact」是**理想**
-形态——per-message 粒度。但 v0.6.x 热修后的 `claude-fold.json` 是**聚合后**
-的 session dict（`{sid: {baseline, tail_days, sentinels}}`），**原始 row
-metadata（message.id、原始 ts、raw usage）已被 `_apply_record` 聚合成
-`tail_days[day][model]` 桶**。
+1. 每个有效 Claude `assistant` usage row 发射一个不可变 `UsageFact`；
+2. Python/Rust 对同一行生成相同规范字段和 `fact_id`；
+3. 同时返回 attempts 与 coverage，坏数据不能静默消失；
+4. 既有 cost fold、ledger、archive、checkpoint 行为不变；
+5. 提供只读诊断入口，以真实 JSONL 验证双实现一致性。
 
-直接拿聚合后的 `tail_days` emit → 粒度退化为 per-(day, model)，**与
-spec §2.1「一行 = 一个宿主原生 usage observation」有偏差**。
+### 1.2 本阶段不做
 
-### 0.3 三选项 + 推荐
+- 不持久化 UsageFact，不升级 ledger/archive/fold/Store schema；
+- 不把 Claude 私有字段引入 `agent-vitals-core`；
+- 不改 baseline、归日、残差哨兵或成本算法；
+- 不接入 Claude 之外的新宿主。
 
-| 选项 | 粒度 | 改动量 | 与 spec §2.1 一致性 |
-|---|---|---|---|
-| **(a) 从聚合 tail_days emit，per-(day, model) [推荐]** | 粗 | ~30 行 + 5 测试 | 部分一致：粒度粗于 spec，但仍是诚实聚合（不是伪造消息粒度） |
-| (b) 改造 `_apply_record` 保留 raw row metadata，per-message emit | 细 | ~80 行 + 8 测试 | 完全一致：需要 fold.json 增字段、改 schema_version=2、动 v0.6.x 不动边界 |
-| (c) 读 JSONL 两次（fold + emit） | 细 | ~50 行 + 6 测试 | 完全一致：性能成本可接受（I/O 一次会话文件读两遍），但语义双源 |
+## 2. 数据源与处理架构
 
-**推荐 (a)**：spec §2.1 是远期目标，骨架阶段允许粒度退化（标注
-`identity_basis="derived-hash"` 即可）。Stage 2/3 推进时再统一细化
-（如果需要，**可以**让 codex/DSH 直接 per-message，因为 codex/DSH
-的 fold 路径里 row metadata 还保留）。
+### 2.1 唯一正确粒度
 
----
+`claude-fold.json::tail_days` 是持续变化的 per-(day, model) 物化汇总，不是不可变事实。
+同一天同一模型的多条消息必须保留为多个 UsageFact。发射点必须位于 `_apply_record`
+聚合之前，直接消费原始 JSONL row。
 
-## 1. 函数签名与数据流
+| 方案 | 结论 |
+|---|---|
+| 从 `tail_days` 发射 | 禁止：粒度错误、身份不稳定、无法审计重复事件 |
+| 在 fold schema 保存 raw metadata | 不采用：无必要扩大持久化契约 |
+| 独立重读 JSONL | 可作降级方案，但必须复用同一 extractor |
+| **共享 extractor，fold/emitter 同源** | **推荐：避免双套 wire-shape 解释** |
 
-### 1.1 推荐 (a) 的接口
+### 2.2 推荐接口
 
 ```python
-# scripts/agent_vitals/agent/usage_fact.py（已存在）或新文件
 # scripts/agent_vitals/agent/claude_usage_fact.py
+def iter_claude_usage_observations(
+    path: Path, *, machine_namespace: str, source_profile: str,
+) -> Iterator[ClaudeUsageObservation]: ...
 
-def claude_session_to_usage_facts(
-    sessions: Dict[str, Dict[str, Any]],
-    *,
-    machine_namespace: str,
-    host: str = "claude-code",
-    source_profile: Optional[str] = None,  # 见 §1.4
-) -> List[Dict[str, Any]]:
-    """claude-fold.json 的聚合 sessions → UsageFact 列表（per-(day, model)）。
-
-    粒度退化（spec §2.1「一行 = 一个宿主原生 usage observation」）：
-    每个 UsageFact 对应「一个会话在一天里某个模型的聚合」，不是单个
-    message。每条 UsageFact 的 `identity_basis="derived-hash"`、
-    `source_event_id = f"{sid}:{day}:{model}"`（合成 id，原始
-    message.id 已在 `_apply_record` 阶段聚合时丢失）。
-
-    空 sessions / 无 tail_days → 返回空列表，**不**返回 [None] 或
-    抛错。空列表 = 「这个 fold 周期没有任何 usage observation」，
-    与 `_rebuild_days` 返回 `(empty, empty, empty)` 同款诚实降级。
-    """
+def claude_jsonl_to_usage_facts(
+    path: Path, *, machine_namespace: str, source_profile: str,
+) -> UsageFactEmitResult:
+    """返回 facts、attempts、coverage；不写盘。"""
 ```
-
-### 1.2 数据流
-
-```text
-claude_sync (existing)
-  ├─ claude_project_files → 文件清单
-  ├─ _fold_one × N → sessions dict（已聚合，v0.6.x 不动）
-  ├─ _rebuild_days → ledger_days + archive + unaccounted
-  ├─ write ledger.json + archive.json + fold.json
-  │
-  └─ 【新增】claude_session_to_usage_facts(sessions, machine_namespace) → List[UsageFact]
-       └─ 内存返回，**不写盘**（Stage 1 不引入 schema_version=2 / 持久化）
-```
-
-### 1.3 Rust 镜像（同形 + byte-parity 钉测）
 
 ```rust
-// crates/agent-vitals-core/src/usage_fact.rs（新增 fn）
-pub fn claude_session_to_usage_facts(
-    sessions: &Map<String, Value>,
+// src/agent/claude_usage_fact.rs（host adapter，不进 Core）
+pub fn claude_jsonl_to_usage_facts(
+    path: &Path,
     machine_namespace: &str,
-    host: Option<&str>,  // default "claude-code"
-    source_profile: Option<&str>,
-) -> Vec<Value>
+    source_profile: &str,
+) -> UsageFactEmitResult
 ```
 
-### 1.4 `source_profile` 从哪来
+Core 继续只负责宿主无关的 schema、builder、`fact_id` 与迁移逻辑。
 
-claude ledger 当前**不存 source_profile**（不像 R2a 有 source_profile 字段）。
-三选项：
-
-| 选项 | 描述 | 影响面 |
-|---|---|---|
-| **(a) 默认 None [推荐]** | `source_profile = None`，UsageFact 里 `source_profile=null` | 不动 fold.json schema；与 R2a 不一致但 UsageFact 接受 None（fact_id 公式里 source_profile 为 null 用空串代替） |
-| (b) 从 `claude-fold.json` 顶层字段读 | 给 fold.json 加 `source_profile` 字段 | 改 schema_version=2，触发候选 #4 真实迁移，**Stage 1 不应做** |
-| (c) 从 R2a SessionStore 反查 | `session_key(host, sid, machine_namespace)` 查 R2a | 跨模块依赖（fold 阶段不该 import R2a） |
-
-**推荐 (a)**：Stage 1 不引入 schema 变更，`source_profile` 留 None。
-spec §2.1 字段表允许 `source_profile` 可空。
-
----
-
-## 2. fact_id 的精确算法（Python↔Rust 字节相等钉测）
-
-### 2.1 公式（与决策 D 一致）
+### 2.3 推荐数据流
 
 ```text
-fact_id(machine_namespace, host, source_profile, native_session_id,
-        source_event_id, observation_kind)
-  = uf1-{fnv1a_64_hex(
-      unit_separator.join([
-        machine_namespace,
-        host,                                # "claude-code"
-        source_profile or "",                # None → 空串
-        native_session_id,                   # sessions 的 sid（path.stem）
-        source_event_id,                      # f"{sid}:{day}:{model}"（合成）
-        observation_kind,                     # "ledger-rollup"（新常量）
-      ])
-    )}
+Claude session JSONL
+  → shared Claude observation extractor
+      ├─ existing fold accumulator → sessions/tail_days → ledger/archive/fold
+      └─ UsageFact emitter → facts + attempts + coverage
 ```
 
-### 2.2 `observation_kind` 三选项
+如果一次遍历 tee 会显著增加风险，可以先二次读取；但 fold 与 emitter 必须调用同一个
+row parser，不能形成两套 Claude wire-shape 语义。
 
-| 选项 | 描述 | 影响面 |
-|---|---|---|
-| **(a) `"ledger-rollup"` [推荐]** | 明确标记这是从 ledger 聚合层 emit，不是原始 message 事件 | 字符串常量；不与 codex/DSH 撞名 |
-| (b) `"message"` | 假装是单 message emit | 撒谎——违反「与 spec §2.1 字段粒度一致」纪律 |
-| (c) `"assistant"` | 复用 Claude 原生类型名 | 与 message 事件撞名；下游分不清 |
+## 3. 字段映射与身份契约
 
-**推荐 (a)**：明确区分 Stage 1 聚合层 emit 与未来 per-message emit。
+### 3.1 字段映射
 
-### 2.3 `identity_basis` 三选项
-
-| 选项 | 描述 |
+| UsageFact 字段 | Claude 来源 / 规则 |
 |---|---|
-| **(a) 恒 `"derived-hash"` [推荐]** | spec §2.1 原文「没有原生 id 时，adapter 才可用 hash fallback，并必须标 identity_basis=derived-hash」——Stage 1 的合成 source_event_id 正是这条规则的应用 |
-| (b) 恒 `"native"` | 假装是原生 id | 撒谎 |
-| (c) 按 sid 动态判：有 message.id 则 native，否则 derived | Stage 1 拿不到 message.id（全在聚合时被丢了）——不可行 |
+| `native_session_id` | locate 阶段确定的稳定 session id，受 `source_profile` 约束 |
+| `source_event_id` | 优先 `message.id`，其次顶层 `uuid`，最后稳定 fallback |
+| `observation_kind` | 固定为 `assistant-usage` |
+| `event_ts_utc` | 顶层 `timestamp`，规范化为 UTC |
+| `model_raw` | `message.model` |
+| `model_normalized` | 经版本化 model resolver 规范化 |
+| `source_usage_semantics` | 固定为 `delta` |
+| `uncached_input_tokens` | `input_tokens` |
+| `cache_read_tokens` | `cache_read_input_tokens` |
+| `cache_write_tokens` | `cache_creation_input_tokens` |
+| `output_tokens` | `output_tokens` |
 
-**推荐 (a)**：spec §2.1 明文允许，诚实标注。
+`cost-state` 是累计 baseline 锚，不发射 UsageFact。无法归因的 residual 也不是事实，
+继续由既有哨兵表达。
 
----
+### 3.2 `source_event_id` fallback
 
-## 3. 错误处理与边界
+当 `message.id` 与顶层 `uuid` 均缺失时，使用：
 
-### 3.1 输入边界
-
-- `sessions = {}` 或 `sessions[sid].tail_days = {}` → 返回空列表（**不**抛）
-- `sessions[sid]` 不是 dict → 跳过该 sid，继续下一个
-- `sessions[sid].tail_days[day][model]` 缺 4 个 token 字段中的任意一个 → 跳过该 fact，继续下一个（**不抛**——与 `build_usage_fact` 自身的字段校验分开：Stage 1 emit 函数只做聚合层到事实行的映射，缺字段跳过是聚合层语义，不是「emit 失败」）
-
-### 3.2 与 build_usage_fact 的责任划分
-
-- `claude_session_to_usage_facts`：聚合层 → 字段填好（`input_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` / `output_tokens`、identity_basis、observation_kind）+ 调用 `build_usage_fact`
-- `build_usage_fact`：校验字段合法性（identity 非空、token 非负、hash 覆盖）
-- **Stage 1 不重复实现 build_usage_fact 的校验**——那是 b806762 已落地的契约
-
-### 3.3 machine_namespace 缺场
-
-`machine_namespace` 必须由 caller 提供（从 R2a `takeover.machine_namespace()` 读）。
-三选项：
-
-| 选项 | 描述 |
-|---|---|
-| **(a) 必传，缺场 → 抛 ValueError [推荐]** | caller bug 应该早期暴露；spec §2.1 identity 字段不能为空 |
-| (b) 缺场 → None → fact_id 公式用空串 | 与 §2.1 「machine_namespace 不能空」不一致 |
-| (c) 缺场 → 静默 return [] | 丢失事实——违反 spec §2「事实 cache 可重建」 |
-
-**推荐 (a)**：与 `build_usage_fact` 自身的 identity 校验一致。
-
-### 3.4 与 v0.6.x 热修的兼容性
-
-v0.6.x 把 `tail_days` 从「cost-state 到来就清空」改为「只增不清」。
-Stage 1 emit 读 `tail_days` 时——**emit 数 = 聚合后行数，不是原始行数**。
-
-含义：
-- Stage 1 emit 不参与残差哨兵（`unaccounted` 那是 cost-state baseline
-  对账锚的差额，不是 row 缺漏）
-- Stage 1 emit 不知道「这一行是 message 还是 cost-state 残留」——
-  tail_days 已经是聚合后产物
-- v0.6.x 的归日转正让 `tail_days[day][model]` 反映**真实 ts 归日**，
-  Stage 1 emit 出来的 `source_event_id = f"{sid}:{day}:{model}"`
-  里 day 就是真实归日——这条路径是诚实的，不是聚合污染
-
-### 3.5 不写盘的纪律
-
-Stage 1 函数返回 `List[Dict]`，**调用方拿到后**：
-- `claude_sync` 不消费这个 list（写代码里就当不存在）
-- 未来 Stage 5+ 持久化时单独接一个 writer 函数
-- 现在唯一的「消费方」是测试（assert fact_id 一致性、assert 数 = 期望）
-
-这避免了在 Stage 1 里把 list 接到 `claude_sync` 写链上、然后忘了拆。
-
----
-
-## 4. 测试布局（5 测 + Rust inline 镜像）
-
-### 4.1 Python（`tests/test_usage_fact.py` 续 / 新文件 `test_claude_usage_fact.py`）
-
-```python
-class ClaudeSessionToUsageFactsCase(unittest.TestCase):
-    def test_empty_sessions_returns_empty_list(self):
-        """sessions={} → []，与 _rebuild_days 空 dict 同款诚实降级"""
-        self.assertEqual(claude_session_to_usage_facts({}, machine_namespace="ns1"), [])
-
-    def test_one_session_one_day_one_model_emits_one_fact(self):
-        """单 session 单 day 单 model → 1 个 fact，4 桶 token 正确填入，
-        identity_basis="derived-hash", observation_kind="ledger-rollup" """
-        sessions = {"s1": {"tail_days": {"2026-09-02": {"deepseek-v4-flash": {
-            "input_tokens": 100, "cache_read_input_tokens": 50,
-            "cache_creation_input_tokens": 0, "output_tokens": 10}}}}}
-        facts = claude_session_to_usage_facts(sessions, machine_namespace="ns1")
-        self.assertEqual(len(facts), 1)
-        f = facts[0]
-        self.assertEqual(f["input_tokens"], 100)
-        self.assertEqual(f["cache_read_input_tokens"], 50)
-        self.assertEqual(f["cache_creation_input_tokens"], 0)
-        self.assertEqual(f["output_tokens"], 10)
-        self.assertEqual(f["identity_basis"], "derived-hash")
-        self.assertEqual(f["observation_kind"], "ledger-rollup")
-
-    def test_source_event_id_is_synthetic_per_day_model(self):
-        """source_event_id = f"{sid}:{day}:{model}"，Stage 1 粒度退化的诚实标注"""
-        f = claude_session_to_usage_facts(
-            {"s1": {"tail_days": {"2026-09-02": {"m1": _bucket(1)}}}},
-            machine_namespace="ns1")[0]
-        self.assertEqual(f["source_event_id"], "s1:2026-09-02:m1")
-
-    def test_fact_id_is_stable_across_calls(self):
-        """同一输入两次调用 → fact_id 字节相等（FNV-1a 决定性）"""
-        sessions = {"s1": {"tail_days": {"2026-09-02": {"m1": _bucket(1)}}}}
-        a = claude_session_to_usage_facts(sessions, machine_namespace="ns1")[0]["fact_id"]
-        b = claude_session_to_usage_facts(sessions, machine_namespace="ns1")[0]["fact_id"]
-        self.assertEqual(a, b)
-
-    def test_missing_machine_namespace_raises(self):
-        """machine_namespace=None → ValueError，与 build_usage_fact 校验一致"""
-        with self.assertRaises(ValueError):
-            claude_session_to_usage_facts({"s1": {"tail_days": {"d": {"m": _bucket(1)}}}},
-                                          machine_namespace=None)
-
-    def test_python_rust_byte_equal(self):
-        """Python↔Rust：同一 sessions dict → 输出列表逐 fact 字节相等（fact_id
-        + 所有 4 桶字段 + identity_basis + observation_kind）。受
-        AGENT_VITALS_BIN 守门，与既有 byte-parity 钉测同款。
-        """
-        ...
+```text
+stable_source_identity + byte_offset + normalized_row_hash
 ```
 
-### 4.2 Rust inline 镜像
+- `byte_offset` 来自原文件字节位置，不以行号替代；
+- row hash 使用两端一致的 canonical JSON；
+- 同一文件重复读取必须稳定；
+- native id 标记 `identity_basis=native`，fallback 标记 `derived-hash`。
 
-`crates/agent-vitals-core/src/usage_fact.rs::tests` 加 6 个 inline 测试，
-与 Python 侧 1:1 镜像（含 byte-parity pinned 值）。
+### 3.3 `source_profile` 与 machine namespace
 
-### 4.3 与既有测试矩阵的对齐
+两者都是已落地 builder 的必填身份字段，禁止 `None` 或空串。
 
-- `tests/test_usage_fact.py`（b806762 落地）已有 5 测：fact_id / build_usage_fact /
-  migrate_chain / USAGE_FACT_FIELDS
-- `tests/test_claude_cost.py`（v0.6.x + 6421f2a 落地）已有 21 测：fold 语义 +
-  残差哨兵 + 197.5M 真机 fixture + byte-parity diff
-- **新增** `tests/test_claude_usage_fact.py` 与 `usage_fact.rs::tests::claude_*`
-  互守——**不**侵入既有 `test_claude_cost.py`（那是 fold 语义测试，不是
-  emit 测试）
+- `machine_namespace` 由调用方明确提供，缺失时整次调用失败；
+- `source_profile` 在 locate 阶段从 Claude source identity 稳定派生；
+- 派生逻辑应与后续 R2a 共用纯规范化函数；
+- Adapter 不反向依赖 SessionStore；
+- 同机不同项目出现相同 session/message id 时不得碰撞。
 
----
+### 3.4 `fact_id`
 
-## 5. 不动边界复盘（与决策文档 §0 一致）
+Adapter 不自行拼接或哈希，必须调用现有 Core/Python builder。`adapter_version`、
+`normalization_version`、`source_revision` 属于 provenance，不加入事件身份，避免仅升级
+实现就重写事实身份。
 
-### 5.1 不动
+同一 session 中重复出现相同 native event id 时，只发射一个事实，并记录 duplicate
+attempt；不得添加 ordinal 掩盖重复。
 
-- `claude_cost.py::_fold_one`、`_apply_record`、`_row_tokens`、`_camel_entry_tokens`、
-  `_rebuild_days`、`claude_sync`（fold 流水线本体）
-- `claude-fold.json` schema（不写 facts_emit 字段、不升 schema_version）
-- `claude-ledger.json` / `claude-ledger-archive.json`（输出层）
-- baseline / tail_days / 哨兵 / 残差（v0.6.x 已落地）
-- cost-state 处理（modelUsage 累计自报对账锚）
+## 4. 错误、attempts 与 coverage
 
-### 5.2 新增
+```text
+UsageFactEmitResult
+  facts: list[UsageFact]
+  attempts: list[UsageFactAttempt]
+  coverage: UsageFactCoverage
+```
 
-- `scripts/agent_vitals/agent/usage_fact.py::claude_session_to_usage_facts`（新函数）
-  或新文件 `claude_usage_fact.py`（与 §5.3 文件归属决策二选一）
-- `crates/agent-vitals-core/src/usage_fact.rs::claude_session_to_usage_facts`（Rust 镜像）
-- `tests/test_claude_usage_fact.py`（新文件，~6 测）
-- `crates/agent-vitals-core/src/usage_fact.rs::tests::claude_*`（5-6 inline 镜像）
-
-### 5.3 文件归属决策
-
-新函数放 `usage_fact.py` 还是新文件 `claude_usage_fact.py`？
-
-| 选项 | 描述 |
+| 情况 | 行为 |
 |---|---|
-| **(a) 放现有 `usage_fact.py` [推荐]** | 同一文件聚集所有 UsageFact 相关函数（fact_id / build_usage_fact / migrate_chain / claude_session_to_usage_facts），Rust 镜像同理放 `usage_fact.rs` |
-| (b) 新文件 `claude_usage_fact.py` | 隔离 host-specific emit，未来 Stage 2/3 各加一份（codex_usage_fact.py / dsh_usage_fact.py） |
+| 空文件 | 空 facts/attempts、零覆盖 |
+| 缺 machine namespace/source profile | 调用级错误，不开始发射 |
+| 完整行 JSON 损坏 | 本文件失败，checkpoint 不前移 |
+| 尾部半行 | 按既有 checkpoint 规则等待补全 |
+| 缺 model/timestamp | rejected attempt，不发 fact |
+| token 非数值、负值或溢出 | rejected attempt，不发 fact |
+| 非 assistant 或无 usage row | ignored/skipped coverage，不伪造 fact |
+| 重复 source event id | duplicate attempt，只保留一个 fact |
 
-**推荐 (a)**：host-specific emit 不是逻辑独立的模块（它们共享 build_usage_fact
-和 fact_id），放一起减少 import 链。Stage 2/3 新增时**也放同一文件**，
-用 `claude_*` / `codex_*` / `dsh_*` 前缀函数名区分。
+token 必须先映射到四个 canonical bucket，再交给 builder 校验。禁止两端各自增加隐式
+修正或默认值。
 
----
+Stage 1 不写 state，但必须提供只读诊断入口：
 
-## 6. 与既有纪律的对照
+```text
+agent-vitals claude-usage-facts <session.jsonl> --json
+```
 
-- ✅ **零新持久化**：emit 内存返回，不写盘
-- ✅ **零 schema 变更**：claude-fold.json / ledger.json / archive.json schema 不动
-- ✅ **Python↔Rust byte-parity**：5 测含 byte-parity 钉测，Rust inline 镜像
-- ✅ **不动 v0.6.x 热修**：fold 流水线 / baseline / 残差哨兵全不动
-- ✅ **不动 workbuddy 流**：本文件不覆盖
-- ✅ **不引新依赖**：core crate 不新增依赖（与决策文档 §6 一致）
-- ✅ **诚实粒度退化**：`identity_basis="derived-hash"` 明确标注 source_event_id 是合成的
-- ✅ **spec §5 逐项评审**：本文件本身是 Stage 1 启动前的细化评审；拍板后才动代码
+它只用于 characterization、跨语言 parity 与人工检查，不改变同步状态。
 
----
+## 5. 兼容性与代码边界
 
-## 7. 后续 Stage 接口（供 Stage 1 commit 完后再看）
+允许：
 
-- **Stage 2**：codex static fold emit UsageFact（决策 A mapping：
-  `output_tokens + reasoning_output_tokens`）
-- **Stage 3**：dsh state chain emit UsageFact（决策 B replay：
-  从 `usage_events` 原始流 replay）
-- **Stage 4**：UsageFact 持久化（schema_version=2 + 真实持久化调用点）
-  ——**不在 v0.7 spec §3「明确仍未开始」清单内**，属候选 #4 真实迁移
-- **Stage 5**：file-level atomic write/fsync/fault injection（候选 #4）
-  ——同上
+- `_read_suffix` 在保持 checkpoint 语义下暴露字节 offset；
+- 从 `_apply_record` 抽取共享 usage row parser；
+- `_fold_one` 消费 observation 后继续生成相同 accumulator；
+- 新增 Python/Rust adapter 与诊断 CLI。
 
----
+禁止：
 
-## 8. 决策汇总（待拍板）
+- sessions/tail_days/ledger/archive 输出发生字段或数值漂移；
+- baseline/cost-state 被转换成 delta fact；
+- 为发射事实升级 fold schema；
+- Core 出现 `message.usage` 等 Claude 专属结构；
+- 静默跳过坏数据。
 
-| 子决策 | 推荐 | 拍板值 |
-|---|---|---|
-| 粒度选择 | (a) per-(day, model) emit | ? |
-| `observation_kind` 字符串 | (a) `"ledger-rollup"` | ? |
-| `identity_basis` 字符串 | (a) 恒 `"derived-hash"` | ? |
-| `machine_namespace` 缺场 | (a) 抛 ValueError | ? |
-| `source_profile` 默认 | (a) None | ? |
-| 函数归属文件 | (a) 现有 `usage_fact.py` | ? |
-| 接入 `claude_sync` 写链 | (a) **不接**（Stage 1 emit 不写盘） | ? |
+## 6. 验收测试
 
-**用户决策点**：以上 7 项默认值是否拍板？如修改任何一项请直接说
-「§8 第 X 行改 (b)」等，本文件即时修订。**拍板后**：
+### 6.1 Adapter 契约
 
-1. 决策拍板 commit（独立 doc-only commit）
-2. 启动 Stage 1 代码工作（commit 含 Python + Rust + 测试）
+1. 一条有效 raw assistant row 产生一个 fact，四类 token 映射正确；
+2. 同 day/model 两个不同 message id 产生两个 fact；
+3. 重复 message id 只产生一个 fact，并有 duplicate attempt；
+4. 缺 message id 使用 `uuid`，两者都缺时 fallback 稳定；
+5. 不同 `source_profile` 下相同 native id 不碰撞；
+6. 缺 model、坏 timestamp、非法 token 均产生明确 attempt；
+7. cost-state 与 residual 不产生 UsageFact。
 
-## 9. 工作量估计
+### 6.2 兼容与增量
 
-- 函数实现：~30 行 Python + ~30 行 Rust
-- 测试：~80 行 Python（6 测）+ ~80 行 Rust inline（5-6 测）
-- 文档：本文 + 拍板 commit
-- 验证：cargo test + clippy + Python unittest + golden_runner（零漂移确认）
+8. 重构前后 fold/ledger/archive golden byte-equivalent；
+9. full replay 与 checkpoint resume 的 fact-id 集合一致；
+10. 尾部半行补全后只产生一次事实。
+
+### 6.3 双实现 parity
+
+11. Python/Rust CLI 对同一真实 fixture 输出相同 canonical JSON；
+12. native/fallback 两条路径都做 byte-level `fact_id` 钉测；
+13. malformed corpus 的 attempts 分类与 coverage 计数一致。
+
+## 7. 当前代码审核记录
+
+审核时未找到 `claude_jsonl_to_usage_facts`、`iter_claude_usage_observations`、
+`claude_session_to_usage_facts` 或 Claude UsageFact 诊断 CLI。
+
+已执行前置回归：
+
+```text
+python3 -m unittest tests.test_usage_fact tests.test_claude_cost tests.test_v07_views
+结果：46 passed，6 skipped
+
+cargo test -p agent-vitals-core usage_fact --quiet
+结果：13 passed，0 failed
+```
+
+这证明 Core 契约和既有 Claude 成本路径可作为稳定基线，但不是 Stage 1 已完成的证据。
+Stage 1 完成必须满足 §6 全部验收项。
+
+## 8. 实施顺序
+
+1. 钉住现有 Claude fold/ledger/archive golden；
+2. 抽取单一 row parser并保留 byte offset；
+3. 接回旧 fold，证明输出零漂移；
+4. 实现 Python emitter、attempts、coverage；
+5. 实现 Rust 镜像；
+6. 增加只读诊断 CLI；
+7. 跑真实 fixture、增量恢复与 Python/Rust parity；
+8. 同步更新 Adapter Decisions 中 Stage 1 状态与工作量。
+
+只有第 1—7 项全部通过，Stage 1 才能标记完成。UsageFact 持久化留到后续 Data Plane
+阶段，不夹带进入本次提交。
+
+## 9. 决策汇总（R1 推荐，已拍板 v0.0.2，2026-09-03）
+
+| 决策 | 拍板值 |
+|---|---|
+| 发射粒度 | **每个原始 assistant usage row 一个 fact**（不是聚合层 emit） |
+| 数据流 | **共享 extractor**（`iter_claude_usage_observations`）；优先单次 tee，二次读取仅作降级；fold 与 emitter 必须调用同一个 row parser |
+| event id | `message.id` → `uuid` → source + byte offset + row hash（优先级降级，fallback 也要稳定） |
+| observation kind | `assistant-usage` |
+| identity basis | native/fallback **按实际来源动态标记**（message.id 取到 → native；fallback → derived-hash） |
+| source profile | locate 阶段稳定派生，**必填**（与 R2a 共用规范化函数，不读取 Store） |
+| machine namespace | 调用方**必传**，缺失即失败（与 build_usage_fact 校验一致） |
+| 模块归属 | Claude host adapter（新文件 `claude_usage_fact.py`/`.rs`）；**Core 宿主无关** |
+| 错误结果 | `facts + attempts + coverage`（坏数据不静默消失） |
+| Stage 1 输出 | 内存结果 + 只读诊断 CLI，**不持久化**（`UsageFact` 持久化留到后续 Data Plane 阶段） |
+
+**拍板来源**：R1 架构审核（用户在 `1c697db` 提交后外部修订本文档）+ 2026-09-03 用户拍板确认。
+
+**Stage 1 验收**（spec §6）：extractor 重构后既有 fold/ledger/archive **golden 字节零漂移**、UsageFact emit per-message、Python/Rust 双实现 parity、只读诊断 CLI、真实 fixture 覆盖。
+
+**Stage 1 完成 ≠ v0.7 完成**：本 Stage 仅占 v0.7 候选 #3 三家 adapter 的第一阶段；候选 #3 主体未完成前 v0.7 spec §3 仍处于「明确仍未开始」状态（host adapter 改造 + 候选 #4 真实迁移 + atomic write/fsync）。
+
+## 10. 工作量估计
+
+- Python extractor/emitter：80—140 行；
+- Rust adapter 镜像：100—180 行；
+- 两端诊断 CLI：40—80 行；
+- fixture、golden、增量与 parity 测试：180—300 行；
+- 文档与决策状态同步：20—40 行。
+
+风险主要在 checkpoint、尾部半行、fold 零漂移及双实现 canonicalization。原先按“从
+`tail_days` 转换”得到的工作量估计偏低，应废弃。
