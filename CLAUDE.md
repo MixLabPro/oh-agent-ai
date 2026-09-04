@@ -36,9 +36,11 @@ src/                        # Rust binary (the `agent-vitals` CLI)
   dsh.rs + util.rs          #   两世界共享，留顶层
 crates/vitals-core/         # 宿主无关的通用审计机制（Event→Trajectory→Detector→Finding→Replay）；不认识 Agent/宿主
 crates/agent-vitals-core/   # lib crate：PURE computation，single source of truth。v0.8 Phase A 起内分
-                            #   src/{contracts,domain,adapters,compatibility}/ 三所有权层 + 兼容桥；lib.rs re-export 旧路径
+                            #   src/{contracts,domain,compatibility}/ 三所有权层 + 兼容桥；lib.rs re-export 旧路径。
+                            #   Phase C(B2)：src/adapters/ 已清空；DSH wire 解析（evidence/audit/compaction/waste）
+                            #   落 src/domain/dsh/（登记的 layer-2 债，domain 测试的 build_dsh_evidence fixture 依赖）
 crates/agent-vitals-adapters/ # v0.8 Phase B1：叶子 host 证据适配（claude_code/codex/workbuddy evidence）迁出 core 的纯计算 crate。
-                            #   Codex usage fold + DSH evidence 因 domain→host 依赖暂留 core（Phase C 残余债务，架构测试钉死不得涨）
+                            #   Phase C(B2)：Codex usage fold（codex_usage）+ 跨宿主 canonical_usage 归一层也迁进来
 crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over core (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/
 scripts/agent_vitals/       # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
@@ -70,18 +72,25 @@ browser/Node runs the exact same rules as the CLI — never a second copy.
 
 **v0.8 crate split (in progress, phased — `docs/AGENT_VITALS_V0_8_ARCHITECTURE_SPEC.md`).**
 Phase A carved `agent-vitals-core/src` into `contracts/` (UsageFact/SessionKey/source-identity/
-host-capability), `domain/` (behavior/trajectory/cost/usage/detectors/…), `adapters/` and
+host-capability), `domain/` (behavior/trajectory/cost/usage/detectors/…) and
 `compatibility/`; `lib.rs` re-exports every old flat path so `agent_vitals_core::behavior::*`
 etc. still resolve. Phase B1 moved the leaf host-evidence adapters (Claude/Codex/WorkBuddy
 `*_evidence`) into a new pure crate `agent-vitals-adapters` (binary + wasm import surface:
 `agent_vitals_adapters::{claude_code_evidence,codex_evidence,codex_usage,dsh_evidence,
-workbuddy_evidence}`). Codex `codex_usage` and DSH `dsh_evidence` are **still physically in
-core** (re-exported through the adapters facade) because `domain::usage` folds Codex and
-`domain::{behavior,trajectory,compaction,waste}` reconstruct DSH evidence — moving them would
-form a `core → adapters → core` Cargo cycle. Phase C breaks that coupling first; the two
-residuals are pinned by `dependency_budget.rs::residual_host_adapter_directories_are_explicit_phase_c_debt`
-(may shrink, never grow). Adapter purity (no fs/process/env/sqlite/zstd/tauri; no reverse
-dep on the binary) is executable in both crates' `tests/dependency_budget.rs`.
+workbuddy_evidence}`). **Phase C Step 1-2** hoisted the DSH raw-event helpers (`Coords`,
+`match_behavior`/`match_trajectory` shims, `compaction`/`waste`) out of `domain/*.rs`
+production paths, and **Step 3 (B2)** finished the physical move: `codex_usage` + the
+cross-host `canonical_usage` layer now live in `agent-vitals-adapters`; the DSH wire
+interpreters (`evidence`/`audit`/`compaction`/`waste`) moved to
+`agent-vitals-core/src/domain/dsh/` as **registered layer-2 debt** — they can't join the
+adapters crate because `domain/*.rs` tests build `CanonicalSession` fixtures via
+`build_dsh_evidence`, and a `core → adapters` `[dev-dependencies]` cycle makes Cargo
+compile core twice (`multiple versions of crate agent_vitals_core` for any inline test
+that passes a core type across the boundary). `core/src/adapters/` no longer exists. The
+`domain/dsh/` debt is pinned by `dependency_budget.rs::domain_dsh_is_the_only_registered_layer2_wire_module`
++ `domain_production_code_outside_dsh_has_no_host_adapter_dependency` (may shrink with the
+post-Phase-D wire/fold separation, never grow). Adapter purity (no fs/process/env/sqlite/
+zstd/tauri; no reverse dep on the binary) is executable in both crates' `tests/dependency_budget.rs`.
 
 ## Commands
 

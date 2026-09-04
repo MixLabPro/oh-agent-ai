@@ -1,7 +1,4 @@
-//! Codex session wire, evidence and token observations.
+//! Codex session wire、evidence、以及 token 观察折叠（`codex_fold_file` 等）。
 
 pub mod evidence;
-
-/// Phase B residual bridge; physical ownership moves here after Phase C
-/// removes `domain::usage`'s reverse dependency on the Codex fold.
-pub use agent_vitals_core::codex_usage as usage;
+pub mod usage;

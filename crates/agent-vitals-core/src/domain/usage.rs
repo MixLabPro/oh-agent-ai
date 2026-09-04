@@ -1092,7 +1092,7 @@ pub fn pre_fork_usage(events: &[Value]) -> Value {
 /// ——CLAUDE.md §「no third-party supply chain at scan time」，统计折叠这层
 /// 必须是 stdlib-only；引 chrono 就破例了。算法纯整数 ~10 行，且已用
 /// 2026-08-25 = days 20690 等价对过。
-pub(crate) fn civil_date_from_days(days: i64) -> String {
+pub fn civil_date_from_days(days: i64) -> String {
     let z = days + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u64; // [0, 146096]
@@ -1111,7 +1111,7 @@ pub(crate) fn civil_date_from_days(days: i64) -> String {
 /// 8 小时折成北京小时键，先拿它把 `YYYY-MM-DD` 归到天数、再跨日进位。**不引
 /// chrono**，理由同 `civil_date_from_days`。非法日期（如 02-30）也会给一个
 /// 数值（Hinnant 对非真实日期无定义）——调用方用 round-trip 校验挡掉。
-pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400; // [0, 399]
@@ -1526,7 +1526,7 @@ mod tests {
     use crate::evidence::CoverageCounts;
     // canonical 归一层 phase C 迁进 `adapters/canonical_usage.rs`；这些测试
     // 复用本模块的 `reconcile_fixture`，留原处、经 crate 根 re-export 调进来。
-    use crate::canonical_usage::{
+    use agent_vitals_adapters::canonical_usage::{
         canonical_tokens, canonical_total_delta, CANONICAL_DIMS,
     };
 

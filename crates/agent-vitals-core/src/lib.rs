@@ -1,27 +1,25 @@
 //! Pure computation facade of agent-vitals, shared by the native CLI and the
-//! browser wasm build. Phase A makes the contracts/domain/adapters ownership
-//! explicit inside the existing crate without changing public behavior.
+//! browser wasm build.
 //!
-//! The split is the disk ≠ context boundary from the repo's design: the wasm
-//! build can run these pure functions on data already in memory, but it must
-//! never read a file.
+//! Phase A carved the crate into `contracts/` (shared vocabulary + the
+//! `vitals-core` bridge), `domain/` (cross-host business computation) and
+//! `compatibility/`. Phase C (B2) moved the leaf host adapters + Codex fold +
+//! cross-host canonical layer out to `agent-vitals-adapters`. What DSH wire
+//! interpretation remains (`domain/dsh/` — `evidence`/`audit`/`compaction`/
+//! `waste`) is registered layer-2 debt: `domain/*.rs` tests build
+//! `CanonicalSession` fixtures through `build_dsh_evidence`, which a separate
+//! crate + dev-dependency cycle cannot satisfy. It retires with the wire/fold
+//! separation (post-Phase-D).
+//!
+//! `lib.rs` re-exports keep the old flat paths (`agent_vitals_core::behavior::*`
+//! etc.) for the CLI / Tauri / WASM / tests.
 
-pub mod adapters;
 pub mod compatibility;
 pub mod contracts;
 pub mod domain;
 
-// Phase A compatibility facade. Existing CLI, Tauri, WASM, tests and Python
-// parity references keep their old paths while new code uses the explicit
-// `contracts`, `domain`, and adapter namespaces. Leaf adapters moved to
-// `agent-vitals-adapters` in Phase B. These two residual aliases stay until
-// Phase C removes the domain → host dependency.
-pub use adapters::canonical_usage;
-pub use adapters::hosts::codex::sessions::usage as codex_usage;
-pub use adapters::hosts::dsh::sessions::{
-    audit, compaction, evidence as dsh_evidence, waste,
-};
 pub use contracts::{evidence, host_capability, r2a, source_identity, usage_fact};
+pub use domain::dsh::{audit, compaction, evidence as dsh_evidence, waste};
 pub use domain::{
     behavior, budget, canonical_audit, coords, cost, detectors, duration, findings, plan, skill,
     state, subagent, takeover, trajectory, usage, util,

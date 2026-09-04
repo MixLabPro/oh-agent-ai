@@ -9,7 +9,7 @@ import json
 _TOOL_CALL_TYPES = ("tool/call", "tool/code-dispatch-start", "tool/code-dispatch")
 
 # 事件 type → 计入哪个信号的覆盖计数。与 Rust
-# crates/agent-vitals-core/src/adapters/hosts/dsh/sessions/evidence.rs::derive_coverage 对齐，只镜像
+# crates/agent-vitals-core/src/domain/dsh/evidence.rs::derive_coverage 对齐，只镜像
 # 目前 P3 各 group 实际用到的信号（不是完整 19 个）。approval/asked 和
 # approval/decided 是同一个"问了→给了结果"生命周期的两端，都算
 # ApprovalDecisions 的证据——与 Rust 那边这次一起修的 bug 对齐（之前只数了

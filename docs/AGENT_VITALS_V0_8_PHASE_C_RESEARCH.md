@@ -356,6 +356,7 @@ Python 分层）。Rust 侧每个 Step 动一处，Python 侧对应：
 | `cd4f89a` | Step 1b：`match_behavior`/`match_trajectory` raw shim → `adapters/…/audit.rs` | 全绿 + wasm-pack |
 | `69888c6` | Step 2a：`Coords` → `domain/coords.rs`（`trajectory::coord_map` 不再横跨取）| 全绿 |
 | `6ce4d13` | Step 2b：canonical 归一层 → `adapters/canonical_usage.rs`（生产零调用）| 全绿 |
+| 本提交 | Step 3（B2）：`codex_usage` + `canonical_usage` → adapters crate；DSH wire → `domain/dsh/`；`core/src/adapters/` 删除；守卫改写 | 全绿（见 §6quater）|
 
 **至此 `domain/*.rs` 生产代码对 `crate::{dsh_evidence, codex_usage, adapters::hosts}`
 引用归零**——层 1 全清。剩下的命中全在 `#[cfg(test)]`（造 fixture / 调迁走的
@@ -369,8 +370,8 @@ shim），crate 拆分后经 `[dev-dependencies]` 解析。
 - `Coords` 落 `domain/coords.rs` 而非 `contracts/`（模块注释写清是过渡；`contracts`
   保持 host-agnostic）
 
-**剩余**：Step 3（B2 residual 物理迁 `agent-vitals-adapters` crate）+ Step 4
-（抽 `agent-vitals-domain` crate）——见下 §6ter。
+**剩余**：Step 4（抽 `agent-vitals-domain` crate）。Step 3（B2）已完成，实际做法
+与 §6ter 计划有偏差，见 §6quater。
 
 ## 6ter. Step 3/4 的已知拦路石（2026-09-04 试做发现）
 
@@ -424,6 +425,43 @@ helper（~350 行）搬去 `crates/agent-vitals-core/tests/behavior_canonical.rs
     `test_classification.py` family set；clawhub 打包清单
 
 这是**机械 + 一个判断点（第 1 步测试搬法）**——Codex-appropriate。
+
+## 6quater. Step 3（B2）实际执行（2026-09-04，本会话）
+
+§6ter 的方案假设「6 个 residual 全迁进 adapters crate + `build_dsh_evidence` inline
+test 搬去 integration test」。实做时选了**更小的解法**——把成环风险源留在 core：
+
+| 模块 | 去向 | 理由 |
+|---|---|---|
+| `codex/sessions/usage.rs`（Codex fold）| → `agent-vitals-adapters/src/hosts/codex/sessions/usage.rs` | 其 inline test 只传 `serde_json::Value`，dev-dep 成环安全 |
+| `canonical_usage.rs`（跨宿主归一层）| → `agent-vitals-adapters/src/canonical_usage.rs` | 同上；`domain/usage.rs::tests` 经 `[dev-dependencies]` 调 `canonical_tokens` |
+| `dsh/sessions/{evidence,audit,compaction,waste}.rs` | → `agent-vitals-core/src/domain/dsh/`（**留 core**）| `domain/{behavior,trajectory}.rs::tests` 的 `build_dsh_evidence` fixture 跨 crate 传 `CanonicalSession` → `multiple versions of crate` |
+
+**净效果**：`core/src/adapters/` 整个删除；`domain/dsh/` 成为唯一登记的 layer-2
+DSH-wire 债（与 `coords` 同性质）。`lib.rs` re-export（`pub use domain::dsh::{audit,
+compaction, evidence as dsh_evidence, waste}`）保住二进制 / wasm / 测试的旧扁平路径
+——**二进制 0 改动、wasm 0 改动、无 inline-test 搬迁**。core `Cargo.toml` 加
+`[dev-dependencies] agent-vitals-adapters`（只 integration + `domain/usage.rs::tests`
+用，`[dependencies]` 无环）。
+
+守卫改写（`crates/agent-vitals-core/tests/dependency_budget.rs`）：
+- `source_root_is_an_explicit_facade`：断言 `["compatibility","contracts","domain","lib.rs"]`（去 `"adapters"`）
+- 新 `core_has_no_host_adapter_directory`：`src/adapters/` 不存在
+- 新 `domain_dsh_is_the_only_registered_layer2_wire_module`：`domain/dsh/` 只含 4 wire 模块 + `mod.rs`
+- `domain_production_code_outside_dsh_has_no_host_adapter_dependency`（原 `domain_to_host_compatibility_debt_cannot_grow`）：扫 `src/domain/`（排除 `src/domain/dsh/`）生产代码零 `agent_vitals_adapters::` / `crate::adapters` / `crate::*_evidence`
+- `residual_host_adapter_directories_are_explicit_phase_c_debt`：删（core 无 `src/adapters/`）
+- `nested_paths_…`：去死引用，加 `domain::dsh::audit::match_behavior` == `audit::match_behavior` facade 等价检查
+
+路径同步：`host_contract.rs` g3/g8 + `test_host_contract.py`（dsh evidence →
+`crates/agent-vitals-core/src/domain/dsh/evidence.rs`）；Python 侧 docstring 里指向
+Rust 源的路径注释（`util.py` / `behavior.py` / `dsh_evidence.py` / `codex_usage.py` /
+`test_characterization.py`）。
+
+**门禁全绿**：`cargo test --release`（binary 313 + core 431 + adapters 56 + 各 parity）、
+`cargo clippy --release --all-targets -D warnings`、`cargo check -p agent-vitals-wasm`、
+`python3 -m unittest discover tests`（1145，226 skip）、golden 15+15 逐字节（Python & Rust bin）。
+
+**剩余**：Step 4（抽 `agent-vitals-domain` crate）。
 
 ## 6. 建议执行顺序（C-minimal，每步独立提交、golden 绿）
 

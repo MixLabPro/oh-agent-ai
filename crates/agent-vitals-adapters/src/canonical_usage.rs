@@ -22,8 +22,8 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::codex_usage::{codex_fold_file, total_signature};
-use crate::usage::{
+use crate::hosts::codex::sessions::usage::{codex_fold_file, total_signature};
+use agent_vitals_core::usage::{
     token_by_model, SOURCE_CLI, SOURCE_CODEX, SOURCE_DSH_BACKFILL, SOURCE_DSH_LIVE,
     SOURCE_UNSPECIFIED,
 };

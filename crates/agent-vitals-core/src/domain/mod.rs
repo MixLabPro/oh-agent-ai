@@ -10,6 +10,7 @@ pub mod canonical_audit;
 pub mod coords;
 pub mod cost;
 pub mod detectors;
+pub mod dsh;
 pub mod duration;
 pub mod findings;
 pub mod plan;

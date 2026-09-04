@@ -73,9 +73,12 @@ const FORBIDDEN_DEP_KEYS: &[&str] = &[
     // 时间库 —— CLAUDE.md 纪律：core 的日期用手写 civil 数学，chrono 不是依赖
     "chrono",
     "time",
-    // §3.2 禁止方向：不许反依赖二进制 / wasm / adapter crate
-    // （adapters → core 是唯一允许方向；core → adapters 会形成 Cargo 环，
-    //  这正是 Phase B2 把 codex_usage / dsh_evidence 暂留 core 的原因）
+    // §3.2 禁止方向：`[dependencies]` 不许反依赖二进制 / wasm / adapter crate
+    // （adapters → core 是唯一允许的**生产**方向；core → adapters 只以
+    //  `[dev-dependencies]` 存在——`domain/usage.rs::tests` 经它调
+    //  `canonical_tokens`，只换 `serde_json::Value`、不跨 crate 传 core 类型，
+    //  成环也安全。跨边界传 `CanonicalSession` 的 fixture 测试正因成环限制
+    //  才把 `dsh_evidence`/`audit`/`compaction`/`waste` 留在 `domain/dsh/`）
     "agent-vitals",
     "agent-vitals-adapters",
     "agent-vitals-wasm",
@@ -283,7 +286,7 @@ mod tests {
     );
 }
 
-// ─────────────────────── Phase A：逻辑目录边界 ───────────────────────
+// ─────────────────────── Phase A/C：逻辑目录边界 ───────────────────────
 
 #[test]
 fn source_root_is_an_explicit_facade_not_a_flat_module_dump() {
@@ -297,36 +300,45 @@ fn source_root_is_an_explicit_facade_not_a_flat_module_dump() {
         .filter(|name| !name.starts_with('.'))
         .collect();
     entries.sort();
+    // Phase C（B2）起 `adapters/` 整个迁出——`codex_usage`/`canonical_usage` 进
+    // `agent-vitals-adapters` crate，DSH 的 `evidence`/`audit`/`compaction`/
+    // `waste` 进 `domain/dsh/`（layer-2 债）。core src 只剩三个所有权层 + lib.rs。
     assert_eq!(
         entries,
-        vec!["adapters", "compatibility", "contracts", "domain", "lib.rs"],
-        "v0.8 Phase A: agent-vitals-core/src may only expose the three ownership \
-         boundaries, the existing framework compatibility bridge, and lib.rs"
+        vec!["compatibility", "contracts", "domain", "lib.rs"],
+        "agent-vitals-core/src may only expose contracts / domain / compatibility + lib.rs"
     );
 }
 
-/// Phase B moved the leaf host adapters to `agent-vitals-adapters`. What remains
-/// under core's `adapters/hosts/` is the explicit Phase C debt only: `codex`
-/// (usage fold — `domain::usage` still calls it) and `dsh` (evidence — the
-/// canonical domain wrappers still call it). This set may shrink to empty when
-/// Phase C breaks the domain → host dependency; it must never grow.
+/// Phase C（B2）之后 core 不再有 `src/adapters/`。
 #[test]
-fn residual_host_adapter_directories_are_explicit_phase_c_debt() {
-    let hosts = manifest_dir().join("src/adapters/hosts");
-    let mut actual: Vec<String> = fs::read_dir(&hosts)
-        .expect("read adapters/hosts")
+fn core_has_no_host_adapter_directory() {
+    assert!(
+        !manifest_dir().join("src/adapters").exists(),
+        "Phase C B2: `agent-vitals-core/src/adapters/` must be gone"
+    );
+}
+
+/// `domain/dsh/` 是**唯一**登记的 layer-2 DSH-wire 债（`evidence`/`audit`/
+/// `compaction`/`waste` 解析 DSH 原始事件、暂住 domain 因为 domain 测试的
+/// `build_dsh_evidence` fixture 依赖，见 `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md`
+/// §6ter）。它可以缩到空、不许长出第二个同类模块。
+#[test]
+fn domain_dsh_is_the_only_registered_layer2_wire_module() {
+    let dsh = manifest_dir().join("src/domain/dsh");
+    assert!(dsh.join("mod.rs").is_file(), "domain/dsh/mod.rs 必须显式登记这条债");
+    let mut files: Vec<String> = fs::read_dir(&dsh)
+        .expect("read domain/dsh")
         .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
         .collect();
-    actual.sort();
-    assert_eq!(actual, vec!["codex", "dsh"]);
-    for host in &actual {
-        assert!(
-            hosts.join(host).join("sessions/mod.rs").is_file(),
-            "host `{host}` must expose its existing session surface explicitly"
-        );
-    }
+    files.sort();
+    assert_eq!(
+        files,
+        vec!["audit.rs", "compaction.rs", "evidence.rs", "mod.rs", "waste.rs"],
+        "domain/dsh/ 只该有这四个 wire 模块 + mod.rs——新增即 layer-2 债扩张"
+    );
 }
 
 #[test]
@@ -336,61 +348,42 @@ fn nested_paths_and_legacy_facade_resolve_to_the_same_items() {
         agent_vitals_core::usage_fact::USAGE_FACT_FIELDS
     );
     assert_eq!(
-        agent_vitals_core::adapters::hosts::codex::sessions::usage::CODEX_TOKEN_FIELDS,
-        agent_vitals_core::codex_usage::CODEX_TOKEN_FIELDS
-    );
-    assert_eq!(
         agent_vitals_core::domain::usage::AMBIGUOUS_PROVIDER,
         agent_vitals_core::usage::AMBIGUOUS_PROVIDER
     );
-    // Only the two Phase C residuals still have evidence/usage types in core;
-    // the leaf adapters (claude_code, workbuddy) moved to `agent-vitals-adapters`.
-    let _: Option<agent_vitals_core::adapters::hosts::dsh::sessions::evidence::DshEvidence> = None;
+    assert_eq!(
+        agent_vitals_core::domain::dsh::audit::match_behavior(&[], None),
+        agent_vitals_core::audit::match_behavior(&[], None),
+    );
 }
 
-/// Phase A is a path/ownership move, not the Phase C semantic split. These are
-/// the exact pre-existing domain → host compatibility seams. They may shrink;
-/// any new host dependency must fail CI instead of silently expanding the debt.
+/// `domain/` 的生产代码（`domain/dsh/` 那条登记债除外）不许引用 host 适配
+/// （`agent-vitals-adapters` / `crate::adapters` / `crate::{*_evidence, codex_usage}`）
+/// ——方向是 `adapters → domain`。`#[cfg(test)]` 里经 `[dev-dependencies]` 调
+/// `canonical_tokens`（只换 `Value`）/ `crate::dsh_evidence`（现 `domain/dsh/`）
+/// 造 fixture 是允许的。
 #[test]
-fn domain_to_host_compatibility_debt_cannot_grow() {
-    // Phase C Step 1（compaction/waste + match_{behavior,trajectory} raw shim）、
-    // Step 2a（`Coords` → `domain/coords.rs`）、Step 2b（canonical 归一层 →
-    // `adapters/canonical_usage.rs`）之后，`domain/` 的**生产** domain→host 依赖
-    // **归零**。剩下的命中全在 `#[cfg(test)]`——`build_dsh_evidence` 造 fixture
-    // （behavior）/ 调迁走的 raw shim（behavior/trajectory）/ 调迁走的 canonical
-    // 层（usage），非生产依赖，crate 拆分后经 dev-dependency 解析。
-    let allowances = [
-        ("behavior.rs", "crate::dsh_evidence", 3usize),
-        ("behavior.rs", "crate::adapters::hosts", 1),
-        ("canonical_audit.rs", "crate::host_capability", 1),
-        ("trajectory.rs", "crate::adapters::hosts", 1),
-    ];
-    let forbidden = [
-        "crate::claude_code_evidence",
-        "crate::codex_evidence",
-        "crate::codex_usage",
-        "crate::dsh_evidence",
-        "crate::workbuddy_evidence",
-        "crate::host_capability",
-        "crate::adapters::hosts",
-    ];
+fn domain_production_code_outside_dsh_has_no_host_adapter_dependency() {
+    let dsh_dir = manifest_dir().join("src/domain/dsh");
     each_src_file(|path, content| {
-        if !path.starts_with(manifest_dir().join("src/domain")) {
+        if !path.starts_with(manifest_dir().join("src/domain")) || path.starts_with(&dsh_dir) {
             return;
         }
-        let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
-        for needle in forbidden {
-            let found = content.matches(needle).count();
-            let allowed = allowances
-                .iter()
-                .find(|(file, term, _)| *file == name && *term == needle)
-                .map(|(_, _, count)| *count)
-                .unwrap_or(0);
+        let prod = strip_test_modules_and_comments(content);
+        for needle in [
+            "agent_vitals_adapters",
+            "crate::adapters",
+            "crate::claude_code_evidence",
+            "crate::codex_evidence",
+            "crate::codex_usage",
+            "crate::dsh_evidence",
+            "crate::workbuddy_evidence",
+        ] {
             assert!(
-                found <= allowed,
-                "v0.8 Phase A dependency direction regressed in {}: found {found} \
-                 references to `{needle}`, budget is {allowed}; remove the host dependency \
-                 or handle it in the Phase C semantic split",
+                !prod.contains(needle),
+                "v0.8 Phase C: production code in {} references `{needle}` — host wire \
+                 interpretation belongs in agent-vitals-adapters or the registered \
+                 `domain/dsh/` debt module, not scattered through domain",
                 path.strip_prefix(manifest_dir()).unwrap_or(path).display()
             );
         }

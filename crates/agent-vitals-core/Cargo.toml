@@ -19,3 +19,12 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # M2 兼容桥（docs/VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md §14）：单向依赖，
 # 只允许这个方向——vitals-core 不知道、也不能依赖 agent-vitals-core（§5.2）。
 vitals-core = { path = "../vitals-core" }
+
+# Phase C（B2）：`canonical_usage` 迁进 `agent-vitals-adapters`，`domain/usage.rs`
+# 的 `#[cfg(test)]` 经它调 `canonical_tokens`（只换 `serde_json::Value`，不跨
+# crate 传 core 类型，dev-dep 成环也安全）。dev-dep 不进 lib 构建图 / 二进制 /
+# wasm。**成环限制**：跨 crate 传 `CanonicalSession` 等 core 类型的 inline lib
+# test 会撞「multiple versions of crate」——那类测试（`build_dsh_evidence` 造
+# fixture）正因如此保留在 `domain/dsh/`（core 内），见 lib.rs 注释。
+[dev-dependencies]
+agent-vitals-adapters = { path = "../agent-vitals-adapters" }
