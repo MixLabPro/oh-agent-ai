@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rust 状态写链（`crates/agent-vitals-domain/src/domain/state.rs` + `src/agent/state.rs`）的
+"""Rust 状态写链（`crates/agent-vitals-domain/src/domain/state.rs` + `agent-vitals-runtime/src/state.rs`）的
 差分 + 字符化锁步测试（R1c）。
 
 两层：

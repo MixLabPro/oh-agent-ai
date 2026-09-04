@@ -39,7 +39,7 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
-use crate::skills::snapshot::data_home;
+use crate::home::data_home;
 
 use agent_vitals_domain::takeover as tk;
 
@@ -218,7 +218,7 @@ pub fn fold_session(req: &Value, shadow: bool) -> Result<FoldOutcome, String> {
 /// R1d-tick 生产者（oneline）的 fencing 快速失败：owner 不是 rust 就拒绝，在
 /// 花掉 audit + cost 之前挡在最前面 —— Python 同款「挡在最前面，省得审计半天
 /// 才拒」。`shadow=true` 跳过（演练模式，折进影子副本，owner 还没 cutover）。
-pub(crate) fn require_rust_owner(shadow: bool) -> Result<(), String> {
+pub fn require_rust_owner(shadow: bool) -> Result<(), String> {
     if shadow {
         return Ok(());
     }
@@ -235,7 +235,7 @@ pub(crate) fn require_rust_owner(shadow: bool) -> Result<(), String> {
 }
 
 /// 这条会话 key 是否已在 ledger 里折过（exactly-once 去重门）。
-pub(crate) fn folded_in_ledger(key: &str) -> bool {
+pub fn folded_in_ledger(key: &str) -> bool {
     tk::ledger_folded(&read_ledger(), key)
 }
 
@@ -245,7 +245,7 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::super::codex_cost::today_beijing;
+    use crate::clock::today_beijing;
 
     static HOME_SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -254,7 +254,7 @@ mod tests {
     /// 毒化再 lock 就 Err —— 这是**测试夹具**的锁，夹具不该让一个坏断言
     /// 连坐后续所有用例，直接取回即可（每个测试自带 env 恢复 guard）。
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::util::ENV_LOCK
+        crate::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     }

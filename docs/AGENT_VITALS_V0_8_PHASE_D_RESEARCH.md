@@ -143,11 +143,36 @@ Step 3 已验证 `sv6*_parity.rs` 的同款用法）。
 （调 session reader + cost）—— 这些是「读证据 → 调纯计算 → 出报告」的 CLI 接线，
 随 D6 进 `agent-vitals-runtime` 的 service 层，不是 `hosts/<h>/sources/`。
 
-### D6 —— `agent-vitals-runtime` crate
-新 crate。迁入：`src/agent/state.rs`、`r2a_store.rs`、`takeover.rs`、`budget.rs` 的
-state 读写部分（纯计算留 domain）、`session_sources.rs` → runtime service。
-deps：`agent-vitals-hosts { features=["sources"] }` + `agent-vitals-domain`。
-**不加** `notify`/watcher/`tokio`（那是 feature，不是结构重构）。
+### D6 —— `agent-vitals-runtime` crate 装 state 层 —— ✅ 完成（2026-09-04）
+
+`src/agent/{state,budget,takeover,session_sources}.rs` `git mv` → `agent-vitals-runtime/src/`。
+runtime deps：`agent-vitals-domain` + `agent-vitals-hosts { features=["sources"] }` +
+`serde` + `serde_json`。
+
+- 日期 helper：`civil_from_unix_secs`（纯）→ `agent-vitals-domain::util`；读时钟的
+  `current_month_beijing` / `today_beijing` → 新 `agent-vitals-runtime::clock`。
+  `src/agent/codex_cost.rs` re-export 保 `crate::agent::codex_cost::{...}` 旧路径。
+- 移入文件 import：`crate::skills::snapshot::data_home` → `crate::home::data_home`；
+  `crate::agent::cost::load_pricing()` → `agent_vitals_domain::cost::load_pricing()`；
+  `crate::util::{ENV_LOCK,split_lines}` → `crate::ENV_LOCK`（runtime lib.rs 新增一份
+  test 用的进程 env 锁）/ `agent_vitals_domain::util::split_lines`。
+- 移入文件的 `pub(crate) fn` → `pub fn`（`state_dir`/`read_json`/`now_iso_utc`/
+  `atomic_write_json`/`require_rust_owner`/`folded_in_ledger`/`evaluate_alert_*` 等，
+  现在跨 crate 被 `main.rs`/`claude_cost.rs`/`oneline.rs`/`discovery.rs`/`r2a_store.rs` 调）。
+- 二进制 ~40 处 `agent::{state,budget,takeover,session_sources}::X` /
+  `crate::agent::…` → `agent_vitals_runtime::…::X`；`src/agent/mod.rs` 删 4 条 pub mod。
+- Python：`test_classification.py::RS_AGENT_FAMILY` 去 4 个迁出模块；
+  `test_takeover_lockstep.py` / `test_state_write_chain.py` docstring 路径。
+- **门禁全绿**：cargo test 32 binary、clippy -D warnings、wasm/src-tauri check、
+  python 1145/226 skip、golden 15+15。
+
+**未迁（转 Phase E 的 apps/cli 抽出）**：`src/agent/r2a_store.rs`（2708 行）+
+`src/agent/discovery.rs`（733 行）。spec §11 说它们进 `agent-vitals-runtime/state/`，
+但两者与 CLI 成本/审计 handler（`codex_session_audit` / `*_cost` / `*_usage_fact`）
+深度交织——`r2a_store` 调 `csa::codex_session_audit_json` / `csa::render_codex_session`，
+`csa` 又调 `codex_cost::codex_cost_report`。Phase E 把这批 CLI handler 抽进 `apps/cli`
+时一起归位更干净，避免 D6 里为切一条缝再造 3 层 re-export。runtime 现在装的是
+**纯 state/ledger 层**（无 CLI handler 依赖），边界清爽。
 
 ### D7 —— `HomeResolver` 单点
 `agent-vitals-runtime/src/user/home.rs`：合并 `data_home()`（`AGENT_VITALS_HOME` →
@@ -160,13 +185,19 @@ deps：`agent-vitals-hosts { features=["sources"] }` + `agent-vitals-domain`。
 
 ```
 D1  wire/fold 分离          [中 + wasm 重建]   ✅ 完成（commit 6f9af88）
-D2  cost.rs 文件切分        [低，纯 domain]    ✅ 完成（本提交：切出 cost/claude.rs）
+D2  cost.rs 文件切分        [低，纯 domain]    ✅ 完成（commit 1bb232e：切出 cost/claude.rs）
 D3  adapters → hosts 改名   [中，机械面大]    ✅ 完成（commit c07da01，纯 rename）
 D4  DSH I/O → sources/      [高，feature-gate 首用]  ✅ 完成（commit 6e1e130）
 D5  其他 host readers       [高，rusqlite 迁移]  ✅ 完成（commit 6f48e2e）
-D7  HomeResolver 单点       [中]  ✅ 完成（本提交——**先于 D6**，D6 的 state 模块要用 data_home）
-D6  agent-vitals-runtime    [高，state 层迁移]  —— 剩这一步
+D7  HomeResolver 单点       [中]  ✅ 完成（commit 259a821——**先于 D6**）
+D6  agent-vitals-runtime    [高，state 层迁移]  ✅ 完成（本提交；state/budget/takeover/session_sources
+                            + clock。r2a_store/discovery 因与 CLI handler 交织，转 Phase E 的 apps/cli 抽出）
 ```
+
+**Phase D（结构重构）实质完成**。剩 `r2a_store` / `discovery` 两个 CLI-orchestrator
+的物理迁移，随 Phase E 把 `src/agent/{codex_cost,claude_cost,codex_session_audit,
+*_usage_fact,oneline,behavior,cost,plan}.rs` 抽进 `apps/cli` 时一起归位。Phase D 的
+crate 骨架（domain / hosts / runtime / wasm 四 crate + feature-gated sources）已到位。
 
 ### D7 完成记录（2026-09-04）
 

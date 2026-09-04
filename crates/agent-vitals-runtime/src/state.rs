@@ -26,14 +26,15 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::agent::codex_cost::{civil_from_unix_secs, current_month_beijing, today_beijing};
-use crate::skills::snapshot::data_home;
+use agent_vitals_domain::util::civil_from_unix_secs;
+use crate::clock::{current_month_beijing, today_beijing};
+use crate::home::data_home;
 
 use agent_vitals_domain::state as state_core;
 
 /// 数据根 `state/` 目录 —— 与 Python `state.state_dir()` 同路径。
 /// `pub(crate)`：R1d 的 `agent::takeover`（fold 驱动）复用同一个根。
-pub(crate) fn state_dir() -> PathBuf {
+pub fn state_dir() -> PathBuf {
     data_home().join("state")
 }
 
@@ -43,7 +44,7 @@ fn archive_path() -> PathBuf {
 
 /// 复刻 Python `state._read`：缺文件 / 坏 JSON → None（「缺列不编列」）。
 /// `pub(crate)`：R1d 的 `agent::takeover` 读 manifest/ledger/machine.json 复用。
-pub(crate) fn read_json(p: &Path) -> Option<Value> {
+pub fn read_json(p: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(p).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -63,7 +64,7 @@ fn now_unix_secs() -> i64 {
 /// 分数）—— 这里也省略，否则亚秒为 0 的那一刻写出的时间戳与 Python 格式不符。
 /// 差分测试里 `generated_at` 一律打码，所以这个格式只影响真实写出的文件与
 /// Python 读者（`fromisoformat` 两种都吃）。
-pub(crate) fn now_iso_utc() -> String {
+pub fn now_iso_utc() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -84,7 +85,7 @@ pub(crate) fn now_iso_utc() -> String {
 /// 递归按 key 排序 —— 复刻 Python `json.dump(sort_keys=True)` 的**每一层**排序。
 /// serde_json 的 `to_string_pretty` 只保证结构，key 顺序由插入顺序（preserve_order）
 /// 决定；必须显式排一遍才能与 Python 逐字节一致。
-pub(crate) fn sort_keys(v: &Value) -> Value {
+pub fn sort_keys(v: &Value) -> Value {
     match v {
         Value::Object(m) => {
             let mut pairs: Vec<(String, Value)> = m
@@ -106,7 +107,7 @@ pub(crate) fn sort_keys(v: &Value) -> Value {
 /// 原子写 —— 复刻 Python `state._atomic_write`：写 `<file>.tmp.<pid>` → fsync →
 /// `rename`。POSIX rename 原子：任何读者要么见旧版要么见新版。出错清理 tmp，
 /// 不给 state 目录留垃圾。
-pub(crate) fn atomic_write_json(path: &Path, data: &Value) {
+pub fn atomic_write_json(path: &Path, data: &Value) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("cannot create state dir");
     }
@@ -205,7 +206,7 @@ pub fn by_source_report() {
         println!(r#"{{"by_source": {{}}, "by_source_cost": null}}"#);
         return;
     }
-    let pricing = crate::agent::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let cost = agent_vitals_domain::cost::cost_report(&json!({"by_source": rollup}), &pricing);
     println!(
         "{}",
@@ -232,7 +233,7 @@ pub fn by_model_report() {
         println!(r#"{{"by_model": {{}}, "by_model_cost": null}}"#);
         return;
     }
-    let pricing = crate::agent::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let cost = agent_vitals_domain::cost::cost_report(&json!({"by_model": rollup}), &pricing);
     println!(
         "{}",
@@ -285,7 +286,7 @@ pub fn uncovered_report() {
             );
         }
     }
-    let pricing = crate::agent::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let uncovered = agent_vitals_domain::cost::claude_subscription_uncovered_estimate(
         &claude_models, &pricing);
     println!(
@@ -319,7 +320,7 @@ pub fn savings_report() {
         println!(r#"{{"by_model": {{}}, "savings": null}}"#);
         return;
     }
-    let pricing = crate::agent::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let savings = agent_vitals_domain::cost::nominal_vs_actual_cost(
         &json!({"by_model": rollup}), &pricing);
     println!(
@@ -651,7 +652,7 @@ mod tests {
 
     #[test]
     fn atomic_write_sorts_keys_and_no_trailing_newline() {
-        let _env = crate::util::ENV_LOCK.lock().unwrap();
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let home = tmp_home(&std::env::temp_dir().join(format!("av-state-test-{}", std::process::id())));
         let _guard = TestEnvGuard::set(&home);
         let p = state_dir().join("probe.json");
@@ -667,7 +668,7 @@ mod tests {
     #[test]
     fn merge_today_writes_filtered_buckets() {
         // 全部桶都属今天 → 直接合并；by_model 与 buckets 并列写入。
-        let _env = crate::util::ENV_LOCK.lock().unwrap();
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let home = tmp_home(&std::env::temp_dir().join(format!("av-state-test-{}", std::process::id())));
         let _guard = TestEnvGuard::set(&home);
         let today = today_beijing();
@@ -692,7 +693,7 @@ mod tests {
     #[test]
     fn merge_today_rotates_across_midnight() {
         // today.json 里是昨天 → 合并前先滚动成空桶 + 新日期 + rotated_from。
-        let _env = crate::util::ENV_LOCK.lock().unwrap();
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let home = tmp_home(&std::env::temp_dir().join(format!("av-state-test-{}", std::process::id())));
         let _guard = TestEnvGuard::set(&home);
         let today = today_beijing();
@@ -721,7 +722,7 @@ mod tests {
     #[test]
     fn merge_month_migrates_stale_then_merges_current() {
         // month.json 里是上个月的日子 → 迁进归档；新数据（当前月）折进 days。
-        let _env = crate::util::ENV_LOCK.lock().unwrap();
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let home = tmp_home(&std::env::temp_dir().join(format!("av-state-test-{}", std::process::id())));
         let _guard = TestEnvGuard::set(&home);
         let cur = current_month_beijing();
@@ -756,7 +757,7 @@ mod tests {
 
     #[test]
     fn write_oneline_and_alert_stamp_metadata() {
-        let _env = crate::util::ENV_LOCK.lock().unwrap();
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let home = tmp_home(&std::env::temp_dir().join(format!("av-state-test-{}", std::process::id())));
         let _guard = TestEnvGuard::set(&home);
         let summary = json!({"session_id": "s1", "tokens_total": 100});
@@ -778,7 +779,7 @@ mod tests {
     fn append_session_history_appends_with_py_separators() {
         // 行格式与 Python `json.dumps(payload, ensure_ascii=False)` 逐字节一致
         // （`, ` 与 `: ` 分隔符，非 serde 默认的 `,` `:`）。
-        let _env = crate::util::ENV_LOCK.lock().unwrap();
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let home = tmp_home(&std::env::temp_dir().join(format!("av-state-test-{}", std::process::id())));
         let _guard = TestEnvGuard::set(&home);
         let summary = json!({"session_id": "s1", "cost_cny": 0.5});
@@ -798,7 +799,7 @@ mod tests {
 
     #[test]
     fn set_snooze_normalizes_and_writes() {
-        let _env = crate::util::ENV_LOCK.lock().unwrap();
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let home = tmp_home(&std::env::temp_dir().join(format!("av-state-test-{}", std::process::id())));
         let _guard = TestEnvGuard::set(&home);
         // 带 offset 的输入往返不变（Python isoformat 保留原 offset）

@@ -18,8 +18,8 @@ use serde_json::{json, Map, Value};
 
 use crate::agent::behavior::audit_session_log;
 use crate::agent::codex_cost::today_beijing;
-use crate::agent::state;
-use crate::agent::takeover as tk_io;
+use agent_vitals_runtime::state;
+use agent_vitals_runtime::takeover as tk_io;
 use agent_vitals_domain::takeover as tk;
 use agent_vitals_domain::usage;
 
@@ -163,9 +163,9 @@ pub fn oneline(
     // 10. alert —— Python 先 merge 再 evaluate，这里在内存里模拟 merge（同一组
     //     core 纯函数）再评估；--no-merge 时 evaluate 读未 merge 态。
     let alert = if no_merge {
-        crate::agent::budget::evaluate_alert_from_state()
+        agent_vitals_runtime::budget::evaluate_alert_from_state()
     } else {
-        crate::agent::budget::evaluate_alert_after_fold(
+        agent_vitals_runtime::budget::evaluate_alert_after_fold(
             &hb,
             by_model_today.as_object().map(|_| &by_model_today),
             &by_date_model,

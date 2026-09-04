@@ -2,7 +2,7 @@
 """R1d 接管协议（§4.2/§4.3 最小可测子集）的差分 + 字符化锁步测试。
 
 纯规则单一真相源在 `crates/agent-vitals-domain/src/domain/takeover.rs`；Python
-`agent/takeover.py` 是 mirror，binary `src/agent/takeover.rs` 是 I/O + fold 驱动。
+`agent/takeover.py` 是 mirror，`agent-vitals-runtime/src/takeover.rs`（Phase D6 前 `src/agent/`）是 I/O + fold 驱动。
 本文件三层钉死三者不漂移：
 
 1. `TakeoverCharacterization`（恒跑）—— 把 mirror 的纯函数输出钉到具体数值，
@@ -78,7 +78,7 @@ def _mask_ts(text):
 
 
 def _fold_req(session_id, tokens):
-    """一份 fold-req：与 `src/agent/takeover.rs` 测试里 `req()` 同形状同键序
+    """一份 fold-req：与 `agent-vitals-runtime/src/takeover.rs` 测试里 `req()` 同形状同键序
     （sessions.jsonl 保序追加，键序不同字节就不同）。日期用运行时北京今天——
     写死日期会在非 08-30 那天被 merge 当成非今日整条丢弃（R1c 同款教训）。"""
     today = today_str()

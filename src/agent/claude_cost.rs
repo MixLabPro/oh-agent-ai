@@ -82,8 +82,8 @@ use crate::agent::claude_usage_fact::{
 };
 use crate::agent::codex_cost::{civil_from_unix_secs, current_month_beijing};
 use agent_vitals_hosts::claude_session::claude_project_files;
-use crate::agent::state::{atomic_write_json, now_iso_utc, read_json, state_dir};
-use crate::agent::takeover::require_rust_owner;
+use agent_vitals_runtime::state::{atomic_write_json, now_iso_utc, read_json, state_dir};
+use agent_vitals_runtime::takeover::require_rust_owner;
 
 /// v0.6.x 前置正确性热修复（归日转正 + 峰谷分辨率 + 残差哨兵，三者同批——
 /// 见 `docs/VITALS_CORE_V0_6_HOST_CONTRACT_SPEC.md` §5.3 条款 7 / §8 G10、

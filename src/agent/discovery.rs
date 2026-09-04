@@ -35,7 +35,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::agent::takeover as tk_io;
+use agent_vitals_runtime::takeover as tk_io;
 use agent_vitals_domain::takeover as tk;
 use agent_vitals_runtime::home::dsh_home;
 

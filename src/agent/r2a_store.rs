@@ -52,7 +52,7 @@ use serde_json::{Value, json};
 use agent_vitals_domain::findings::{FindingRef, FindingSession, rollup_findings};
 use agent_vitals_domain::r2a::*;
 use crate::agent::codex_session_audit as csa;
-use crate::agent::takeover;
+use agent_vitals_runtime::takeover;
 use crate::skills::snapshot::data_home;
 
 /// 并行逐会话构建，结果按输入序回填。会话构建互相独立（只读各自源文件 + 共享
@@ -373,7 +373,7 @@ fn pricing_version() -> String {
 /// 秒级 UTC ISO（复用 state 的同一实现，测试对账把 generated_at 归一化，只比
 /// 结构——两进程墙钟不同，字节一致不承诺墙钟字段）。
 fn now_iso_utc() -> String {
-    crate::agent::state::now_iso_utc()
+    agent_vitals_runtime::state::now_iso_utc()
 }
 
 /// Codex 源状态（进 envelope 的 `source_statuses` 与 list DTO）：status + 会话数 +
@@ -1448,7 +1448,7 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
     // DSH 今日 token：today.json → core `today_cost`——与 Tauri 顶层钱行同一函数
     // （§5.2 basis=state-file；date stale / 缺场 → None → value=null，不编 0）。
     let pricing = agent_vitals_domain::cost::load_pricing();
-    let today_data = crate::agent::state::read_json(&crate::agent::state::state_dir().join("today.json"));
+    let today_data = agent_vitals_runtime::state::read_json(&agent_vitals_runtime::state::state_dir().join("today.json"));
     let dsh_today_tokens: Value = match today_data
         .as_ref()
         .and_then(|d| agent_vitals_domain::cost::today_cost(d, &pricing, day_key))

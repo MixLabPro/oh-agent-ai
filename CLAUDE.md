@@ -44,8 +44,10 @@ crates/agent-vitals-hosts/ # v0.8：一个 crate 装所有宿主的 wire 适配�
                             #   hosts/<h>/sessions/=会话证据（纯，wasm 可链）：claude_code/codex/workbuddy evidence、
                             #   Codex usage fold、canonical_usage、Phase D1 起的 DSH evidence/audit/compaction/waste。
                             #   hosts/<h>/{sources/（I/O，feature-gated）,skills/,capability.rs}=D4/D5 填。依赖 domain。
-crates/agent-vitals-runtime/ # v0.8 Phase D7：非宿主本机机器——唯一 HomeResolver（src/home.rs：
-                            #   data_home/snapshot_dir/DSH_HOME 解析）。D6 起还装 state/ledger/discovery。
+crates/agent-vitals-runtime/ # v0.8 Phase D6/D7：非宿主本机机器。home（唯一 HomeResolver：
+                            #   data_home/snapshot_dir/DSH_HOME）· clock（读时钟的北京日期）· state/budget/takeover
+                            #   （state store + ledger）· session_sources（service 接线）。依赖 domain + hosts。
+                            #   r2a_store/discovery 随 Phase E 的 apps/cli 抽出一起归位（与 CLI handler 交织）。
 crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + hosts (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/
 scripts/agent_vitals/       # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
@@ -118,12 +120,14 @@ holds no DSH wire module (`domain_holds_no_dsh_wire_module` +
 moved to `agent-vitals-hosts/src/hosts/<h>/sources.rs` behind `#[cfg(feature = "sources")]`;
 `ruzstd`/`walkdir`/`rusqlite` are now optional deps of hosts under the `sources` feature;
 the binary enables it, wasm sets `default-features = false`; `split_lines` moved to
-`agent-vitals-domain::util`), D7 (`agent-vitals-runtime` crate created; `data_home` /
-`snapshot_dir` / `DSH_HOME` resolution consolidated into `agent_vitals_runtime::home`).
-**Remaining** (`docs/AGENT_VITALS_V0_8_PHASE_D_RESEARCH.md`): D6 — move
-`src/agent/{state,budget,takeover,r2a_store,discovery,session_sources}.rs` (+ the
-`*_usage_fact` / `*_cost` service wiring) into `agent-vitals-runtime`. Then Phase E (dir
-moves) / F (MCP).
+`agent-vitals-domain::util`), D7 (`agent-vitals-runtime` crate; `home` = the single
+`HomeResolver`), D6 (`state` / `budget` / `takeover` / `session_sources` / `clock` moved
+into `agent-vitals-runtime`; `civil_from_unix_secs` → `agent-vitals-domain::util`).
+**Phase D structural refactor is substantially done** — the crate skeleton (domain / hosts
+/ runtime / wasm + feature-gated `sources`) is in place. `src/agent/r2a_store.rs` and
+`src/agent/discovery.rs` still live in the binary (entangled with the CLI cost/audit
+handlers); they move to `agent-vitals-runtime` as part of **Phase E**'s `apps/cli`
+extraction. Then Phase F (MCP).
 
 Guard: `agent-vitals-hosts/tests/dependency_budget.rs::io_tokens_only_appear_under_sources`
 — `std::fs`/`ruzstd`/`rusqlite`/… may appear only in files whose path contains `/sources`.

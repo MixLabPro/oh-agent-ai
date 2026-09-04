@@ -2021,9 +2021,9 @@ session_store={store} fold={fold}"
         match action.as_str() {
             "show" => {
                 if let Some(m) = month {
-                    agent::budget::budget_show_month(m, *json);
+                    agent_vitals_runtime::budget::budget_show_month(m, *json);
                 } else {
-                    agent::budget::budget_show(*json);
+                    agent_vitals_runtime::budget::budget_show(*json);
                 }
             }
             // clap value_parser 只放行 "show"，这里不可达 —— 防御性保留，
@@ -2040,7 +2040,7 @@ session_store={store} fold={fold}"
     // 写函数 → 落盘」。文件缺 / 坏 → 走 Python 同款诚实路径（读不到就不写那
     // 个字段），不在 CLI 层补默认值。
     if let Some(Cmd::State { action }) = &args.cmd {
-        use agent::state as st;
+        use agent_vitals_runtime::state as st;
         let read_input = |p: &PathBuf| -> serde_json::Value {
             let text = std::fs::read_to_string(p).unwrap_or_else(|e| {
                 eprintln!("cannot read {p:?}: {e}");
@@ -2079,8 +2079,8 @@ session_store={store} fold={fold}"
             }
             StateAction::Unsnooze => st::clear_snooze(),
             StateAction::FoldSession { req, shadow } => {
-                use agent::takeover::FoldOutcome;
-                match agent::takeover::fold_session(&read_input(req), *shadow) {
+                use agent_vitals_runtime::takeover::FoldOutcome;
+                match agent_vitals_runtime::takeover::fold_session(&read_input(req), *shadow) {
                     Ok(FoldOutcome::Folded) => println!(r#"{{"outcome":"folded"}}"#),
                     Ok(FoldOutcome::SkippedAlreadyFolded) => {
                         println!(r#"{{"outcome":"skipped"}}"#);
@@ -2092,11 +2092,11 @@ session_store={store} fold={fold}"
                 }
             }
             StateAction::Takeover { owner } => {
-                agent::takeover::takeover(owner);
+                agent_vitals_runtime::takeover::takeover(owner);
                 println!("owner switched to {owner}");
             }
             StateAction::MachineNamespace => {
-                println!("{}", agent::takeover::machine_namespace());
+                println!("{}", agent_vitals_runtime::takeover::machine_namespace());
             }
             StateAction::BySource => st::by_source_report(),
             StateAction::ByModel => st::by_model_report(),
@@ -2131,7 +2131,7 @@ session_store={store} fold={fold}"
     let cfg = skills::host::read_host_config(&home_n);
 
     // Session surface 负责读日志；Skill surface 只消费注入的证据。
-    let (dsh_path, dsh_evidence) = agent::session_sources::read_dsh_skill_correlation();
+    let (dsh_path, dsh_evidence) = agent_vitals_runtime::session_sources::read_dsh_skill_correlation();
     let inv = skills::inventory::take(
         &skills::inventory::Selection {
             host: &args.host,

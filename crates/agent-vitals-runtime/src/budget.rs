@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::agent::codex_cost::{current_month_beijing, today_beijing};
-use crate::skills::snapshot::data_home;
+use crate::clock::{current_month_beijing, today_beijing};
+use crate::home::data_home;
 
 /// 数据根 `state/` 目录 —— 与 Python `state.state_dir()` 同路径
 /// （`paths.data_home() / "state"`）。这里只读不建目录（纯读路径，不许有写
@@ -108,7 +108,7 @@ fn load_config() -> Value {
     let mut in_budget = false;
     // Python 用 `text.splitlines()`；`util::split_lines` 是它的逐字节镜像
     // （CRLF 算一个终止符、末尾终止符不产空元素）。
-    for line in crate::util::split_lines(&text) {
+    for line in agent_vitals_domain::util::split_lines(&text) {
         let s = line.trim();
         if s.is_empty() || s.starts_with('#') {
             continue;
@@ -312,7 +312,7 @@ fn render_budget_month(month: &str, result: Option<&Value>) -> String {
 /// 镜像 `budget.py::compute_month_cost` 的 I/O 段。
 fn compute_month(month: Option<&str>) -> Option<Value> {
     let days = read_month(month)?;
-    let pricing = crate::agent::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     Some(agent_vitals_domain::cost::month_cost(&days, &pricing))
 }
 
@@ -324,7 +324,7 @@ pub fn budget_show(json_out: bool) {
     let cfg = load_config();
     let today_data = read_json(&state_dir().join("today.json"));
     let month_days = read_month(None);
-    let pricing = crate::agent::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let snooze = read_snooze();
     let alert = agent_vitals_domain::budget::evaluate_alert(
         &cfg,
@@ -345,11 +345,11 @@ pub fn budget_show(json_out: bool) {
 /// `budget.evaluate()` 的 I/O 组装（不渲染、不 print）—— oneline 生产者用它
 /// 落盘 alert.json，与 `budget_show` 同一份组装，只有一个调用面，不各写一份
 /// 互相不一致（R1a 的 xbar「阈值改了菜单栏不生效」教训）。
-pub(crate) fn evaluate_alert_from_state() -> Value {
+pub fn evaluate_alert_from_state() -> Value {
     let cfg = load_config();
     let today_data = read_json(&state_dir().join("today.json"));
     let month_days = read_month(None);
-    let pricing = crate::agent::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let snooze = read_snooze();
     agent_vitals_domain::budget::evaluate_alert(
         &cfg,
@@ -370,17 +370,17 @@ pub(crate) fn evaluate_alert_from_state() -> Value {
 ///
 /// `by_model_today` = `token_by_date_model(events)[今天]`（可能 None）；`by_date_model`
 /// = 整份多日 dict。与 fold-req 传给 fold_session 的同一对切片。
-pub(crate) fn evaluate_alert_after_fold(
+pub fn evaluate_alert_after_fold(
     hb: &Value,
     by_model_today: Option<&Value>,
     by_date_model: &Value,
 ) -> Value {
     let cfg = load_config();
-    let pricing = crate::agent::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let snooze = read_snooze();
     let today_key = today_beijing();
     let current = current_month_beijing();
-    let now = crate::agent::state::now_iso_utc();
+    let now = crate::state::now_iso_utc();
 
     // 模拟 merge_today：rotate（跨 BJ 0:00）→ merge_today_state。
     let existing_today = read_json(&state_dir().join("today.json")).unwrap_or_else(|| json!({}));
@@ -506,7 +506,7 @@ mod tests {
     /// TOML 极简解析只认 `[budget]` 节里已知 key；缺文件走默认。
     #[test]
     fn load_config_mirrors_python() {
-        let _env = crate::util::ENV_LOCK.lock().unwrap();
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("av-budget-test-{}", std::process::id()));
         let home = tmp_home(&dir);
         let _guard = TestEnvGuard::set(&home);
@@ -527,7 +527,7 @@ mod tests {
     /// 日期过滤、缺月 None —— 与 `state.read_month` 同语义。
     #[test]
     fn read_month_filters_to_target_and_returns_none_for_empty() {
-        let _env = crate::util::ENV_LOCK.lock().unwrap();
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("av-budget-rm-{}", std::process::id()));
         let home = tmp_home(&dir);
         let _guard = TestEnvGuard::set(&home);
@@ -625,7 +625,7 @@ mod tests {
     /// 不同，`budget show --month M --json` 的 None 分支必须手拼这个形状。
     #[test]
     fn month_none_json_is_compact_with_spaces() {
-        let _env = crate::util::ENV_LOCK.lock().unwrap();
+        let _env = crate::ENV_LOCK.lock().unwrap();
         let month = "1999-01";
         let s = format!(
             r#"{{"month": {}, "cost": null}}"#,

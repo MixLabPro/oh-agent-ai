@@ -13,6 +13,10 @@ path = "src/lib.rs"
 
 # v0.8 Phase D6/D7：`agent-vitals-runtime` 装**非宿主**的本机机器——唯一
 # `HomeResolver`、state/ledger 存储、Skill/Session service 编排。依赖
-# `agent-vitals-hosts`（`features = ["sources"]`，D6 起）+ `agent-vitals-domain`；
-# **不加** `notify`/watcher/`tokio`（那是 feature，不是结构重构）。
+# `agent-vitals-hosts`（`features = ["sources"]`）+ `agent-vitals-domain`（正向）。
+# **不加** `notify`/watcher/`tokio`/`chrono`（那是 feature 或纪律禁项，不是结构重构）。
 [dependencies]
+agent-vitals-domain = { path = "../agent-vitals-domain" }
+agent-vitals-hosts = { path = "../agent-vitals-hosts", features = ["sources"] }
+serde = "1"
+serde_json = { version = "1", features = ["preserve_order"] }

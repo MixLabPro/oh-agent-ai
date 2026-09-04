@@ -85,6 +85,52 @@ pub fn split_lines(s: &str) -> Vec<&str> {
     out
 }
 
+/// Unix 秒 + 时区偏移 → 公历 `(year, month, day)`。Howard Hinnant 的
+/// civil-from-days 算法，不引 `chrono`。v0.8 Phase D6 从二进制 `src/agent/
+/// codex_cost.rs` 迁进来——`runtime::clock` 与二进制 CLI 都用它（读时钟的
+/// `current_month_beijing`/`today_beijing` 在 `agent-vitals-runtime::clock`）。
+/// Python 镜像 `codex_cost.py`，差分交叉断言两侧一致。
+pub fn civil_from_unix_secs(secs: i64, offset_secs: i64) -> (i64, u32, u32) {
+    let days = (secs + offset_secs).div_euclid(86400);
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32)
+}
+
+#[cfg(test)]
+mod civil_tests {
+    use super::civil_from_unix_secs;
+
+    #[test]
+    fn civil_from_unix_secs_matches_python_oracle() {
+        let cases: [(i64, &str); 11] = [
+            (0, "1970-01-01"),
+            (86400, "1970-01-02"),
+            (951782400, "2000-02-29"),
+            (1585584000, "2020-03-31"),
+            (1725000000, "2024-08-30"),
+            (1725245370, "2024-09-02"),
+            (1767196799, "2025-12-31"),
+            (1767196800, "2026-01-01"),
+            (1767225600, "2026-01-01"),
+            (1787866858, "2026-08-28"),
+            (1788453658, "2026-09-04"),
+        ];
+        for (secs, want) in cases {
+            let (y, m, d) = civil_from_unix_secs(secs, 8 * 3600);
+            assert_eq!(format!("{y:04}-{m:02}-{d:02}"), want, "civil_from_unix_secs({secs})");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
