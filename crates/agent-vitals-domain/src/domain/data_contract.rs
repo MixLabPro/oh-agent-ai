@@ -1,0 +1,539 @@
+//! v0.9 Data Foundation 的 Query API 契约类型
+//! （`docs/AGENT_VITALS_V0_9_DATA_VALUE_ARCHITECTURE_SPEC.md` §3.1/§4/§0.1）。
+//!
+//! 这里冻结的是**形状与不变式**，不是计算：谁来产出一份 `MonthlySummary`
+//! （Stage 0 的 JSON 读 adapter，还是 Stage B 的 SQLite repository）是
+//! `agent-vitals-data` crate 的事——本模块只回答"一份 MonthlySummary 必须长
+//! 什么样、字段之间不允许违反哪些约束"，两边都要构造同一批类型，任何一边
+//! 想抄近路（比如把 unresolved 悄悄记成 0，或者把排除的宿主又塞回
+//! by_host）在这里就会被 `contract_violations` 抓到。domain crate 不读文件、
+//! 不连 SQLite（`tests/dependency_budget.rs` 钉住），本文件全程只是
+//! 结构体/枚举 + 纯函数。
+//!
+//! 三条硬性不变式，来自 spec 原文，不是本文件发明的：
+//! 1. spec §0.1「诚实展示」：`excluded_hosts` 里的宿主不能同时出现在
+//!    `by_host` 里——排除是显式声明的事实，不是"恰好没数据"的沉默现象。
+//! 2. spec §4「unresolved：不得归零」：`BillingBasis::Unresolved` 从不作为
+//!    金额出现在 `amounts_by_basis` 里，只能通过 `has_unresolved` 标记存在
+//!    性；对称地，`total_summable()` 永远不会把它算进去伪装成确定数字。
+//! 3. spec §3.1「数据源状态可见」：`FreshnessState::Unavailable` 是「这个
+//!    范围从未被观测到」，不能同时带一个 `last_observed_at`——那是自相矛盾
+//!    的"没数据但有时间戳"。
+//!
+//! **序列化不用 `serde` derive**：本 crate 现有类型
+//! （`contracts::host_capability::HostProfile` 等）一律手写 `as_str()`/
+//! `to_json()` 落 `serde_json::Value`，`serde` 派生宏从未是这个 crate 的
+//! 依赖；这里延续同一习惯，不为本文件单开第二套序列化路径。
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::{json, Value};
+
+/// spec §4 表：一笔金额的账单口径，禁止互相冒充。
+///
+/// `Unresolved` 刻意不参与任何"能否汇总"的判断——它根本不是一个金额，是
+/// "模型或价格不可确认"这件事本身；持有 `Unresolved` 的地方只应该记
+/// 存在性（`has_unresolved: bool`），不应该出现在按 basis 分桶的金额表里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BillingBasis {
+    /// 用户声明的固定订阅费用——spec §4："只能按周期单列"。
+    FixedSubscription,
+    /// 可观测到的按量实际费用——spec §4："可以按口径汇总"。
+    MeteredActual,
+    /// 依据价格表的估算——spec §4："不可以"冒充真实账单。
+    MeteredEstimate,
+    /// 宿主提供的账单/credits 消耗，无逐请求 token 归因——spec §4：
+    /// "可以按宿主账单口径汇总，不能重标为模型 API 成本"（WorkBuddy 的
+    /// credit_json 落在这一档，不是 metered_actual）。
+    HostBilled,
+    /// 套餐消耗的等价 API 标价——spec §4："只作诊断"，不计入用户账单总额。
+    ApiEquivalent,
+}
+
+impl BillingBasis {
+    /// spec §4"能否冒充真实账单"列里明确写"可以汇总"的三档。`MeteredEstimate`
+    /// 与 `ApiEquivalent` 都不参与——它们分别是"估算"与"仅供诊断的等价值"，
+    /// 混进用户看到的月度总额就是把不确定的数字伪装成确定的数字。
+    pub fn summable_into_total(self) -> bool {
+        matches!(self, Self::FixedSubscription | Self::MeteredActual | Self::HostBilled)
+    }
+
+    /// `hosts --json`/`data coverage --json` 一贯的 snake_case 词汇。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FixedSubscription => "fixed_subscription",
+            Self::MeteredActual => "metered_actual",
+            Self::MeteredEstimate => "metered_estimate",
+            Self::HostBilled => "host_billed",
+            Self::ApiEquivalent => "api_equivalent",
+        }
+    }
+}
+
+/// spec §0.1：每一项成本必须可见的口径，比 `BillingBasis` 粗一档——回答
+/// "这个数字有多可信"，而不是"这个数字属于哪种账单"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostBasis {
+    /// 直接从宿主证据读到的数字。
+    Measured,
+    /// 从其他 measured 字段推导出来的数字（例如按价格表折算）。
+    Derived,
+    /// 缺少直接证据时的估算。
+    Estimated,
+    /// 模型、价格或归属都不可确认——spec §4："不得归零"，调用方必须显式
+    /// 处理这个变体，不能落进任何数值字段。
+    Unresolved,
+}
+
+impl CostBasis {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Measured => "measured",
+            Self::Derived => "derived",
+            Self::Estimated => "estimated",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
+/// spec §3.1/§0.1：一个范围（某宿主、某天、某月）的新鲜度状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreshnessState {
+    /// 已在预期窗口内观测到最新数据。
+    Fresh,
+    /// 曾经观测到，但已超出预期新鲜窗口（宿主停更、同步滞后）。
+    Stale,
+    /// 只观测到部分维度/部分时间段，不是完整覆盖。
+    Partial,
+    /// 该宿主/范围从未被观测——不是"测量结果是零"，是"没有测量"
+    /// （spec §0.1："不得渲染为 ¥0、正常或看似完整的总额"）。
+    Unavailable,
+}
+
+impl FreshnessState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::Partial => "partial",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// 一个范围的新鲜度：状态 + 最后一次真正观测到数据的时间。
+///
+/// `Unavailable` 状态下 `last_observed_at` 必须是 `None`——见模块头不变式 3；
+/// 用 [`Freshness::contract_violations`] 校验，不在构造时 panic（domain 只
+/// 报告矛盾，不代替调用方决定怎么处理，一贯做法见 `usage.rs` 的
+/// `unaccounted_usage` 哨兵）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Freshness {
+    pub state: FreshnessState,
+    /// RFC3339。`None` 当且仅当 `state == Unavailable`。
+    pub last_observed_at: Option<String>,
+}
+
+impl Freshness {
+    pub fn unavailable() -> Self {
+        Self { state: FreshnessState::Unavailable, last_observed_at: None }
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({
+            "state": self.state.as_str(),
+            "last_observed_at": self.last_observed_at,
+        })
+    }
+
+    fn contract_violations(&self, into: &mut Vec<String>, where_: &str) {
+        if self.state == FreshnessState::Unavailable && self.last_observed_at.is_some() {
+            into.push(format!(
+                "{where_}: freshness=Unavailable 但带了 last_observed_at——\
+                 「从未观测到」不能同时有一个观测时间戳"
+            ));
+        }
+    }
+}
+
+/// spec §0 DoD #5："coverage 不把未知伪装成零，所有分母有版本化定义"。
+///
+/// `denominator_version` 存在的理由：分母的定义本身会随规则演进而变化
+/// （新增一个可观测字段，分母就变大）——旧快照的覆盖率与新快照的覆盖率
+/// 不能被无声地当成同一把尺子比较，这是 `usage_fact` 系列已经踩过的教训
+/// （`fact_id`/`source_event_id` 的身份哈希同样带版本化前提）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoverageStatus {
+    pub measured_fields: u64,
+    pub total_fields: u64,
+    pub denominator_version: u32,
+}
+
+impl CoverageStatus {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "measured_fields": self.measured_fields,
+            "total_fields": self.total_fields,
+            "denominator_version": self.denominator_version,
+        })
+    }
+
+    fn contract_violations(&self, into: &mut Vec<String>, where_: &str) {
+        if self.measured_fields > self.total_fields {
+            into.push(format!(
+                "{where_}: measured_fields ({}) > total_fields ({})——分子不能超过分母",
+                self.measured_fields, self.total_fields
+            ));
+        }
+    }
+}
+
+/// 一个宿主在某个范围内的金额，按 [`BillingBasis`] 分桶——绝不是脱离来源的
+/// scalar（spec §3.1："任何 UI 若只消费金额而丢弃这些字段，视为契约违规"）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostAmount {
+    pub host_id: String,
+    /// `BillingBasis::Unresolved` 意义上没有金额，故 key 类型本身就排除了
+    /// unresolved——见 `has_unresolved` 字段。
+    pub amounts_by_basis: BTreeMap<BillingBasis, f64>,
+    pub has_unresolved: bool,
+    pub freshness: Freshness,
+}
+
+impl HostAmount {
+    /// spec §4"能否汇总"列为真的几档之和——用户会看到的、这个宿主贡献的
+    /// 可信总额。**不存字段，每次算**：存字段会重蹈 `month.json` 三倍计数
+    /// 事故的覆辙（同一个数字有两个来源，迟早对不上）。
+    pub fn summable_total(&self) -> f64 {
+        self.amounts_by_basis
+            .iter()
+            .filter(|(basis, _)| basis.summable_into_total())
+            .map(|(_, amount)| amount)
+            .sum()
+    }
+
+    pub fn to_json(&self) -> Value {
+        let by_basis: serde_json::Map<String, Value> = self
+            .amounts_by_basis
+            .iter()
+            .map(|(basis, amount)| (basis.as_str().to_string(), json!(amount)))
+            .collect();
+        json!({
+            "host_id": self.host_id,
+            "amounts_by_basis": Value::Object(by_basis),
+            "summable_total": self.summable_total(),
+            "has_unresolved": self.has_unresolved,
+            "freshness": self.freshness.to_json(),
+        })
+    }
+
+    fn contract_violations(&self, into: &mut Vec<String>) {
+        let where_ = format!("by_host[{}]", self.host_id);
+        self.freshness.contract_violations(into, &where_);
+    }
+}
+
+/// spec §3.1：`daily_summary`/`monthly_summary` 查询的返回形状。字段齐全性
+/// 本身就是契约的一部分——少一个字段就是丢失一条业务语义，不是"精简"。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonthlySummary {
+    /// "YYYY-MM"。
+    pub month: String,
+    pub by_host: BTreeMap<String, HostAmount>,
+    pub coverage: CoverageStatus,
+    pub freshness: Freshness,
+    /// 已知存在但本版本不产出数据的宿主（例如 WorkBuddy 在 v0.9 Stage 0
+    /// 之前）——这是显式声明，见 `apps/cli/src/agent/
+    /// host_runtime_registration.rs` 里 `workbuddy_has_neither_session_store_
+    /// nor_fold_registration` 已经钉住的现状，本类型只是把同一个事实抬到
+    /// 跨宿主查询层。
+    pub excluded_hosts: BTreeSet<String>,
+    pub last_observed_at: Option<String>,
+}
+
+impl MonthlySummary {
+    /// 所有宿主可汇总金额之和——见 [`HostAmount::summable_total`] 的同一条
+    /// "不存字段、每次算"纪律。
+    pub fn total_summable(&self) -> f64 {
+        self.by_host.values().map(HostAmount::summable_total).sum()
+    }
+
+    pub fn has_unresolved(&self) -> bool {
+        self.by_host.values().any(|h| h.has_unresolved)
+    }
+
+    /// 校验模块头三条不变式，返回违反描述；空 vec = 合规。
+    ///
+    /// 这是给 `agent-vitals-data` 的构建函数用的安全网，不是运行时会 panic
+    /// 的断言——诚实原则是"报告矛盾"而不是"代替调用方决定"，参见
+    /// `usage.rs` 的 `unaccounted_usage` 哨兵与本仓库一贯做法。
+    pub fn contract_violations(&self) -> Vec<String> {
+        let mut violations = Vec::new();
+
+        for host in &self.excluded_hosts {
+            if self.by_host.contains_key(host) {
+                violations.push(format!(
+                    "excluded_hosts 包含 {host}，但 by_host 里也有它——排除的宿主\
+                     不能同时贡献数据，那不是排除，是遗漏"
+                ));
+            }
+        }
+
+        self.coverage.contract_violations(&mut violations, "coverage");
+        self.freshness.contract_violations(&mut violations, "freshness");
+        for host_amount in self.by_host.values() {
+            host_amount.contract_violations(&mut violations);
+        }
+
+        violations
+    }
+
+    pub fn to_json(&self) -> Value {
+        let by_host: serde_json::Map<String, Value> =
+            self.by_host.iter().map(|(id, amount)| (id.clone(), amount.to_json())).collect();
+        json!({
+            "month": self.month,
+            "by_host": Value::Object(by_host),
+            "total_summable": self.total_summable(),
+            "has_unresolved": self.has_unresolved(),
+            "coverage": self.coverage.to_json(),
+            "freshness": self.freshness.to_json(),
+            "excluded_hosts": self.excluded_hosts.iter().cloned().collect::<Vec<_>>(),
+            "last_observed_at": self.last_observed_at,
+        })
+    }
+}
+
+/// spec §3.1 的日粒度对应物——字段集与 `MonthlySummary` 一致（含
+/// `excluded_hosts`），因为"今天这个宿主没接"跟"今天这个宿主接了但没数据"
+/// 必须能区分，道理与月度相同。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailySummary {
+    /// "YYYY-MM-DD"。
+    pub date: String,
+    pub by_host: BTreeMap<String, HostAmount>,
+    pub coverage: CoverageStatus,
+    pub freshness: Freshness,
+    pub excluded_hosts: BTreeSet<String>,
+    pub last_observed_at: Option<String>,
+}
+
+impl DailySummary {
+    pub fn total_summable(&self) -> f64 {
+        self.by_host.values().map(HostAmount::summable_total).sum()
+    }
+
+    pub fn contract_violations(&self) -> Vec<String> {
+        let mut violations = Vec::new();
+        for host in &self.excluded_hosts {
+            if self.by_host.contains_key(host) {
+                violations.push(format!(
+                    "excluded_hosts 包含 {host}，但 by_host 里也有它——排除的宿主\
+                     不能同时贡献数据，那不是排除，是遗漏"
+                ));
+            }
+        }
+        self.coverage.contract_violations(&mut violations, "coverage");
+        self.freshness.contract_violations(&mut violations, "freshness");
+        for host_amount in self.by_host.values() {
+            host_amount.contract_violations(&mut violations);
+        }
+        violations
+    }
+
+    pub fn to_json(&self) -> Value {
+        let by_host: serde_json::Map<String, Value> =
+            self.by_host.iter().map(|(id, amount)| (id.clone(), amount.to_json())).collect();
+        json!({
+            "date": self.date,
+            "by_host": Value::Object(by_host),
+            "total_summable": self.total_summable(),
+            "coverage": self.coverage.to_json(),
+            "freshness": self.freshness.to_json(),
+            "excluded_hosts": self.excluded_hosts.iter().cloned().collect::<Vec<_>>(),
+            "last_observed_at": self.last_observed_at,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh(at: &str) -> Freshness {
+        Freshness { state: FreshnessState::Fresh, last_observed_at: Some(at.to_string()) }
+    }
+
+    fn coverage_ok() -> CoverageStatus {
+        CoverageStatus { measured_fields: 3, total_fields: 5, denominator_version: 1 }
+    }
+
+    fn host_amount(host: &str, basis: BillingBasis, amount: f64) -> HostAmount {
+        let mut amounts_by_basis = BTreeMap::new();
+        amounts_by_basis.insert(basis, amount);
+        HostAmount {
+            host_id: host.to_string(),
+            amounts_by_basis,
+            has_unresolved: false,
+            freshness: fresh("2026-09-01T00:00:00Z"),
+        }
+    }
+
+    #[test]
+    fn summable_basis_matches_spec_table_exactly() {
+        // spec §4 的"能否冒充真实账单"列——这条测试就是把那张表翻成代码，
+        // 表格改了这条测试必须跟着改，不能各说各话。
+        assert!(BillingBasis::FixedSubscription.summable_into_total());
+        assert!(BillingBasis::MeteredActual.summable_into_total());
+        assert!(BillingBasis::HostBilled.summable_into_total());
+        assert!(!BillingBasis::MeteredEstimate.summable_into_total());
+        assert!(!BillingBasis::ApiEquivalent.summable_into_total());
+    }
+
+    #[test]
+    fn host_amount_total_sums_only_summable_basis() {
+        let mut amounts_by_basis = BTreeMap::new();
+        amounts_by_basis.insert(BillingBasis::MeteredActual, 10.0);
+        amounts_by_basis.insert(BillingBasis::ApiEquivalent, 999.0); // 诊断用，不计入
+        let h = HostAmount {
+            host_id: "codex".to_string(),
+            amounts_by_basis,
+            has_unresolved: false,
+            freshness: fresh("2026-09-01T00:00:00Z"),
+        };
+        assert_eq!(h.summable_total(), 10.0);
+    }
+
+    #[test]
+    fn workbuddy_credit_billing_is_host_billed_not_metered_actual() {
+        // memory: workbuddy-data-facts——WorkBuddy 按宿主 credit_json 积分账单，
+        // 不是逐请求 token 计价；混进 metered_actual 会让"这笔钱有没有 token
+        // 证据支撑"这件事在下游变得不可判断。
+        let h = host_amount("workbuddy", BillingBasis::HostBilled, 215.0);
+        assert_eq!(h.summable_total(), 215.0); // host_billed 仍可汇总进总额
+        assert!(!h.amounts_by_basis.contains_key(&BillingBasis::MeteredActual));
+    }
+
+    #[test]
+    fn monthly_summary_totals_only_the_summable_bases() {
+        let mut by_host = BTreeMap::new();
+        by_host.insert("codex".to_string(), host_amount("codex", BillingBasis::MeteredActual, 10.0));
+        by_host.insert(
+            "claude-code".to_string(),
+            host_amount("claude-code", BillingBasis::MeteredEstimate, 999.0),
+        );
+        let summary = MonthlySummary {
+            month: "2026-09".to_string(),
+            by_host,
+            coverage: coverage_ok(),
+            freshness: fresh("2026-09-04T00:00:00Z"),
+            excluded_hosts: BTreeSet::new(),
+            last_observed_at: Some("2026-09-04T00:00:00Z".to_string()),
+        };
+        assert_eq!(summary.total_summable(), 10.0);
+        assert!(summary.contract_violations().is_empty());
+    }
+
+    #[test]
+    fn excluded_host_present_in_by_host_is_a_contract_violation() {
+        let mut by_host = BTreeMap::new();
+        by_host.insert("workbuddy".to_string(), host_amount("workbuddy", BillingBasis::HostBilled, 1.0));
+        let mut excluded_hosts = BTreeSet::new();
+        excluded_hosts.insert("workbuddy".to_string());
+        let summary = MonthlySummary {
+            month: "2026-09".to_string(),
+            by_host,
+            coverage: coverage_ok(),
+            freshness: fresh("2026-09-04T00:00:00Z"),
+            excluded_hosts,
+            last_observed_at: None,
+        };
+        let violations = summary.contract_violations();
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("workbuddy"));
+    }
+
+    #[test]
+    fn unavailable_freshness_with_a_timestamp_is_a_contract_violation() {
+        let bad = Freshness {
+            state: FreshnessState::Unavailable,
+            last_observed_at: Some("2026-09-01T00:00:00Z".to_string()),
+        };
+        let summary = MonthlySummary {
+            month: "2026-09".to_string(),
+            by_host: BTreeMap::new(),
+            coverage: coverage_ok(),
+            freshness: bad,
+            excluded_hosts: BTreeSet::new(),
+            last_observed_at: None,
+        };
+        let violations = summary.contract_violations();
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("Unavailable"));
+    }
+
+    #[test]
+    fn freshness_unavailable_helper_has_no_timestamp() {
+        // tests 是 data_contract 的子模块，可以直接摸私有方法——不用为了测
+        // 一个私有校验器专门开一条 pub 后门。
+        assert_eq!(Freshness::unavailable().last_observed_at, None);
+        let mut v = Vec::new();
+        Freshness::unavailable().contract_violations(&mut v, "test");
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn coverage_measured_exceeding_total_is_a_contract_violation() {
+        let bad = CoverageStatus { measured_fields: 9, total_fields: 5, denominator_version: 1 };
+        let summary = MonthlySummary {
+            month: "2026-09".to_string(),
+            by_host: BTreeMap::new(),
+            coverage: bad,
+            freshness: Freshness::unavailable(),
+            excluded_hosts: BTreeSet::new(),
+            last_observed_at: None,
+        };
+        let violations = summary.contract_violations();
+        assert!(violations.iter().any(|v| v.contains("measured_fields")), "{violations:?}");
+    }
+
+    #[test]
+    fn daily_summary_mirrors_the_same_invariants() {
+        let mut by_host = BTreeMap::new();
+        by_host.insert("dsh".to_string(), host_amount("dsh", BillingBasis::MeteredActual, 3.5));
+        let summary = DailySummary {
+            date: "2026-09-04".to_string(),
+            by_host,
+            coverage: coverage_ok(),
+            freshness: fresh("2026-09-04T12:00:00Z"),
+            excluded_hosts: BTreeSet::new(),
+            last_observed_at: Some("2026-09-04T12:00:00Z".to_string()),
+        };
+        assert_eq!(summary.total_summable(), 3.5);
+        assert!(summary.contract_violations().is_empty());
+    }
+
+    #[test]
+    fn to_json_carries_summable_total_and_freshness_not_a_bare_scalar() {
+        // spec §3.1："任何 UI 若只消费金额而丢弃这些字段，视为契约违规"——
+        // 这条测试钉住 to_json() 的输出形状本身带着 freshness/coverage，
+        // 不是一个裸 number。
+        let mut by_host = BTreeMap::new();
+        by_host.insert("codex".to_string(), host_amount("codex", BillingBasis::MeteredActual, 10.0));
+        let mut excluded_hosts = BTreeSet::new();
+        excluded_hosts.insert("workbuddy".to_string());
+        let summary = MonthlySummary {
+            month: "2026-09".to_string(),
+            by_host,
+            coverage: coverage_ok(),
+            freshness: fresh("2026-09-04T00:00:00Z"),
+            excluded_hosts,
+            last_observed_at: Some("2026-09-04T00:00:00Z".to_string()),
+        };
+        let v = summary.to_json();
+        assert_eq!(v["total_summable"], json!(10.0));
+        assert_eq!(v["excluded_hosts"], json!(["workbuddy"]));
+        assert_eq!(v["by_host"]["codex"]["freshness"]["state"], json!("fresh"));
+        assert_eq!(v["by_host"]["codex"]["amounts_by_basis"]["metered_actual"], json!(10.0));
+    }
+}
