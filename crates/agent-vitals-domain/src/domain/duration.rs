@@ -418,7 +418,7 @@ pub fn approval_latencies(events: &[Value]) -> Value {
 /// 顺带给出 `decision`（`pass`/`deny`/其它）的分布计数——这是
 /// `GOVERNANCE_BACKLOG.md` 提到的"不需要基线就能用"的信号。
 ///
-/// ⚠️ **D4 的宿主前提尚未验证**：`dsh-client/src/host/index.ts` 的
+/// ⚠️ **D4 的宿主前提尚未验证**：`integrations/dsh-client/src/host/index.ts` 的
 /// `RELEVANT_TYPES` 目前没有收 `hook/*`（见
 /// `docs/audit-dashboard/DURATION_AUDIT_BACKLOG.md` D4）。这个函数在 CLI 侧
 /// （`src/dsh.rs` 的 `EXECUTION_EVENT_TYPES` 已经收了 `hook/*`，`behavior`

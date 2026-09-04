@@ -1,6 +1,6 @@
 //! DSH 会话根发现。
 //!
-//! 解析 DSH_HOME（env → 缺省 `~/.dsh`，与 `dsh-client/src/host/index.ts`
+//! 解析 DSH_HOME（env → 缺省 `~/.dsh`，与 `integrations/dsh-client/src/host/index.ts`
 //! `sessionsRoot()` 同默认），walk `<DSH_HOME>/sessions/**/session.jsonl`，
 //! 用 takeover ledger 滤掉已折会话，取 mtime 最新的一条未折会话。
 //!

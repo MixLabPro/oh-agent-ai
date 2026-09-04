@@ -10,8 +10,9 @@ peak 份额按高峰价，加总成一个真实发生的费用——不再是「
 价格表的单一真相源是 `assets/pricing.json`（v0.8 Phase E5 从包内搬到仓库根的
 `assets/`——它被 Rust、Python、DSH client 三方共读，不是 Python 包私有数据；
 Rust 侧用 `include_str!` 内嵌、本模块用 `Path(__file__).resolve().parents[4]`
-爬回仓库根读同一份文件；`dsh-client/client.js` 因浏览器限制内嵌自己的
-PRICING，lockstep 测试对齐）。缓存写入报价表没有行 → 按 0 计
+爬回仓库根读同一份文件；`integrations/dsh-client/src/client/styles/index.ts`
+因浏览器读不到 repo 文件，内嵌自己的 PRICING 副本，lockstep 测试对齐）。
+缓存写入报价表没有行 → 按 0 计
 （不臆造价格）。高峰时段为北京时间**周一至周五** 9–12、14–18 点，周末全天
 空闲；空闲价 = 高峰价的一半。
 """
@@ -307,7 +308,7 @@ def cost_report(usage, pricing):
 def cost_series(requests, providers, pricing):
     """逐请求费用序列（FR-04 的「费用」纵轴，工作台单会话图与 dsh-client 审计
     tab 共用）。与 `crates/agent-vitals-domain/src/domain/cost/mod.rs::cost_series` 及 dsh-client
-    宿主 `costSeriesFrom`（`dsh-client/src/host/index.ts`）是**同一规则的三个镜像**，
+    宿主 `costSeriesFrom`（`integrations/dsh-client/src/host/index.ts`）是**同一规则的三个镜像**，
     锁步一致。
 
     - 每笔 request 用 `_resolve_card(model, providers[model], pricing)` 定价格卡；

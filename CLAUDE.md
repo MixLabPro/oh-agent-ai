@@ -150,8 +150,10 @@ mirrors the same relative layout so one `sys.path` formula works in both places)
 spec §11's `assets/` tree that already has real cross-language lockstep tests; the
 `catalog/{models,pricing,subscriptions}` registry + loader + `billing.toml` are v0.9+
 feature work, not a directory move, so E5 does not build them; Tauri's `icons/` stays put —
-tool convention, zero lockstep value) done. Remaining: E6 (CI path sync — largely folded
-into E1-E5 already). Then Phase F (MCP).
+tool convention, zero lockstep value), E6 (CI workflow path sync — verify.yml/release.yml/
+verify-dsh-client.yml needed no changes, already workspace-root-relative or fixed in E1;
+swept up several stale `src-tauri`/`src/agent/cost.rs`/`dsh-client/...` path mentions left
+in comments by E1-E5) done. **Phase E (E1-E6) is complete.** Then Phase F (MCP).
 
 Guard: `agent-vitals-hosts/tests/dependency_budget.rs::io_tokens_only_appear_under_sources`
 — `std::fs`/`ruzstd`/`rusqlite`/… may appear only in files whose path contains `/sources`.

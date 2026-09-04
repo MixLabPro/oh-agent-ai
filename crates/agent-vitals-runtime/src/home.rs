@@ -72,7 +72,7 @@ pub fn snapshot_dir() -> PathBuf {
     snapshot_dir_from(&|name| std::env::var(name).ok(), host_dir())
 }
 
-/// `<DSH_HOME>` 根：`DSH_HOME` env → `~/.dsh` 缺省（与 `dsh-client/src/host/
+/// `<DSH_HOME>` 根：`DSH_HOME` env → `~/.dsh` 缺省（与 `integrations/dsh-client/src/host/
 /// index.ts::sessionsRoot()` 同默认）。`DSH_HOME` 未设且 `HOME` 也未知 → `None`。
 pub fn dsh_home() -> Option<PathBuf> {
     if let Some(h) = std::env::var_os("DSH_HOME") {

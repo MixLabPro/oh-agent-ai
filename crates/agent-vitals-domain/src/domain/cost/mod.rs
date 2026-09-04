@@ -1,7 +1,8 @@
 //! 成本计算 —— 把 usage 报告变成结构化费用，以及把日桶变成精确/部分计价的一天。
 //!
-//! 这里是 cost 计算在 core crate 里的单一实现（原来住在二进制 `src/agent/cost.rs`，
-//! preflight Phase 0-1 搬迁过来）：CLI 的 `cost_report`/`cost_block`、未来的 Tauri
+//! 这里是 cost 计算在 core crate 里的单一实现（原来住在二进制
+//! `apps/cli/src/agent/cost.rs`，preflight Phase 0-1 搬迁过来）：CLI 的
+//! `cost_report`/`cost_block`、未来的 Tauri
 //! 菜单栏的 `priced_day`、逐请求费用序列 `cost_series`、以及任何"按月查钱"的
 //! surface 都从这里取数，**不长第四份拷贝**（CLAUDE.md「token_by_date_model/
 //! priced_day 在 core 里正是为了让 Tauri 菜单栏复用」的落点）。与
@@ -14,8 +15,8 @@
 //!
 //! 价格表的单一真相源是 `assets/pricing.json`（v0.8 Phase E5 从 Python 包内搬到
 //! 仓库根——三方共读，不是 Python 包私有数据；这里 `include_str!` 内嵌、Python 侧
-//! 爬回仓库根读同一份文件；`dsh-client/pricing.json` 是 build 时复制出的运行时份，
-//! lockstep 测试对齐）。缓存写入报价表没有行 → 按 0 计（不臆造价格）。高峰时段为
+//! 爬回仓库根读同一份文件；`integrations/dsh-client/pricing.json` 是 build 时复制
+//! 出的运行时份，lockstep 测试对齐）。缓存写入报价表没有行 → 按 0 计（不臆造价格）。高峰时段为
 //! 北京时间**周一至周五** 9–12、14–18 点，周末全天空闲；空闲价 = 高峰价的一半。
 
 use serde_json::{json, Value};
@@ -328,7 +329,7 @@ pub fn cost_report(usage: &Value, pricing: &Value) -> Option<Value> {
 
 /// 逐请求费用序列（FR-04 的「费用」纵轴，工作台单会话图与 dsh-client 审计 tab 共用）。
 ///
-/// 语义逐行照搬 dsh-client 宿主 `costSeriesFrom`（`dsh-client/src/host/index.ts`）——
+/// 语义逐行照搬 dsh-client 宿主 `costSeriesFrom`（`integrations/dsh-client/src/host/index.ts`）——
 /// 这里、`scripts/agent_vitals/agent/cost.py::cost_series`、以及那段 TS 是**同一规则的
 /// 三个镜像**，锁步一致（cost 是四路锁步的第 N 面：见 CLAUDE.md「cost 计算本身也是
 /// 一层锁步」）。

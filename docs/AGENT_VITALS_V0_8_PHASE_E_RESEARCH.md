@@ -15,7 +15,7 @@ E2  src-tauri/ → apps/desktop/src-tauri/     ✅ 完成（commit 6335d29）
 E3  src/（binary）→ apps/cli/                ✅ 完成（本提交）
 E4  scripts/agent_vitals/ → packages/agent-vitals-python/agent_vitals/   ✅ 完成（本提交）
 E5  pricing/templates → assets/（跨语言共享资产出包）           ✅ 完成（本提交，范围收窄见完成记录）
-E6  CI workflows 路径同步（verify.yml / release.yml / package-clawhub.yml） [低，跟随]
+E6  CI workflows 路径同步（verify.yml / release.yml / package-clawhub.yml） ✅ 完成（本提交）
 ```
 
 ### E1 完成记录（2026-09-04）
@@ -197,6 +197,42 @@ subscriptions},templates,icons}` 树收窄——原因是这棵完整树连着**
   15+15 两实现字节一致。（`tests/e2e_smoke.py` 的 M1 `hour_buckets` 失败在改动
   前后一致复现——真机会话数据依赖，与本步无关，不在 `unittest discover tests`
   的门禁范围内。）
+
+### E6 完成记录（2026-09-04）
+
+`verify.yml`/`release.yml`/`verify-dsh-client.yml` 检查后**没有硬编码路径需要
+改**——三个 workflow 的 `run:` 步骤全是 workspace-root-relative 命令
+（`cargo build/test/clippy`、`python -m unittest discover tests`、
+`python tests/golden_runner.py`），不依赖 crate 内部目录布局；`verify-
+dsh-client.yml` 的 `paths:` 触发过滤器在 E1 就已经改成 `integrations/
+dsh-client/**`。`package-clawhub.yml` 的路径已经在 E4/E5 里随打包内容变化同步
+过，这一步等于是回头核实：确认无遗漏。
+
+真正找到并修的，是 E1-E5 各步散落的**注释里的过期路径**（功能不受影响，但
+读者会被带偏）——顺手在这一步一起清：
+
+- `crates/vitals-core/src/lib.rs` / `apps/cli/src/agent/host_runtime_
+  registration.rs`：裸 `src-tauri` → `apps/desktop/src-tauri`（E2 遗留）。
+- `crates/agent-vitals-domain/src/domain/cost/mod.rs`：裸 `src/agent/cost.rs`
+  → `apps/cli/src/agent/cost.rs`（E3 遗留）；6 处裸 `dsh-client/...` →
+  `integrations/dsh-client/...`（E1 遗留，含本次 E5 提交里我自己刚写进去的
+  一处 `dsh-client/pricing.json`）。
+- `crates/agent-vitals-runtime/src/home.rs`、`apps/cli/src/agent/discovery.rs`、
+  `crates/agent-vitals-domain/src/domain/duration.rs`、`packages/agent-vitals-
+  python/agent_vitals/agent/{duration,cost}.py`：同款裸 `dsh-client/src/host/
+  index.ts` → `integrations/dsh-client/src/host/index.ts`。
+- `packages/agent-vitals-python/agent_vitals/agent/cost.py`：顺带发现的
+  二次错误——E5 提交里我把价格表单源注释指向了 `dsh-client/client.js`（缺
+  `integrations/` 前缀，且这个文件早在 tsup 迁移后就不存在了，真正的展示层
+  副本在 `src/client/styles/index.ts`），改成
+  `integrations/dsh-client/src/client/styles/index.ts`。
+
+**门禁重跑**：`cargo build/test/clippy --release`（全绿）、golden 15/15（纯
+Python）、python 全量 1146（`OK skipped=228`）。纯注释改动，未重跑
+wasm/tauri check 与 `AGENT_VITALS_BIN` 差分——E5 完成记录里的那一轮已经覆盖
+过一次，这里的改动不碰任何代码路径，只碰落在文档注释里的字符串字面量。
+
+至此 Phase E（E1-E6）全部完成。
 
 ## 明确不做（同 D 的边界）
 

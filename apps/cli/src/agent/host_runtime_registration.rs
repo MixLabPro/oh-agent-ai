@@ -19,7 +19,7 @@
 //!   Option<FoldOutput>` 语义对齐（`Some` ↔ true，`None` ↔ false）。
 //!
 //! `tauri.sessions`/`tauri.menubar-cost` 两个 surface **不需要在本表里另开
-//! 一行**——核实过 `src-tauri/src/store.rs` 后确认它们是**纯 IPC 透传**：
+//! 一行**——核实过 `apps/desktop/src-tauri/src/store.rs` 后确认它们是**纯 IPC 透传**：
 //! `sessions_list`/`sessions_read`/`sessions_findings` 三个 `#[tauri::command]`
 //! 只把参数拼成 argv、spawn `agent-vitals` 二进制、原样透传 stdout/stderr
 //! （`store.rs::list_args` 单测已经用任意字符串 `"x"` 当 `host_kind` 验证了

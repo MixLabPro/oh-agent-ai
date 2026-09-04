@@ -381,7 +381,7 @@ def hook_executions(events):
 
     顺带给出 decision（pass/deny/其它）的分布计数。
 
-    ⚠️ D4 的宿主前提尚未验证：`dsh-client/src/host/index.ts` 的
+    ⚠️ D4 的宿主前提尚未验证：`integrations/dsh-client/src/host/index.ts` 的
     `RELEVANT_TYPES` 目前没有收 hook/*（见 DURATION_AUDIT_BACKLOG.md D4）。
     这个函数在 CLI 侧立即可用；宿主投影（D6）故意不把 hook/* 加进
     `RELEVANT_TYPES`，直到有人拿真实会话实测过。"""
