@@ -1,7 +1,7 @@
 //! §7.2 Provenance——一个观察值是宿主直接记录的、适配器推导出来的、纯估算
 //! 的，还是被脱敏/截断过的（§4.4 Provenance-preserving）。
 //!
-//! 通用化自 `agent-vitals-core::evidence::Provenance`：那边为了在每事件热路
+//! 通用化自 `agent-vitals-domain::evidence::Provenance`：那边为了在每事件热路
 //! 径省一次分配用 `&'static str`；这里是要对外发布的公开模型（§15.3 要求
 //! `Serialize + Deserialize`），改成 `String`，允许适配器运行期动态构造
 //! `Derived { from }` 里的信号列表。

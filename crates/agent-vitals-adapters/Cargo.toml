@@ -12,7 +12,7 @@ name = "agent_vitals_adapters"
 path = "src/lib.rs"
 
 [dependencies]
-agent-vitals-core = { path = "../agent-vitals-core" }
+agent-vitals-domain = { path = "../agent-vitals-domain" }
 regex = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 vitals-core = { path = "../vitals-core" }

@@ -11,7 +11,7 @@
 //! 因此一直没兑现。`src_tauri_does_not_depend_on_vitals_core_directly` 补上
 //! 这条：读 `../../src-tauri/Cargo.toml`（相对本 crate 的 `CARGO_MANIFEST_
 //! DIR` 向上两级到仓库根），断言它不直接依赖 `vitals-core`——`src-tauri` 现
-//! 在唯一允许的依赖路径是 `src-tauri → agent-vitals-core → vitals-core`
+//! 在唯一允许的依赖路径是 `src-tauri → agent-vitals-domain → vitals-core`
 //! （§5.2 单向依赖，跨两层 crate 都要守住，不是只守 `vitals-core` 自己这一
 //! 层）。
 
@@ -20,7 +20,8 @@ use std::path::Path;
 
 /// §5.2：`vitals-core` 禁止依赖的对象——反过来的方向是允许的（binary/wasm
 /// 依赖它），这条只测这一个 crate 自己的 `[dependencies]`。
-const FORBIDDEN_DEPS: &[&str] = &["agent-vitals-core", "agent-vitals-wasm", "agent-vitals", "tauri"];
+const FORBIDDEN_DEPS: &[&str] =
+    &["agent-vitals-domain", "agent-vitals-adapters", "agent-vitals-wasm", "agent-vitals", "tauri"];
 
 /// §4.1：出现在公开类型/模块名字里通常意味着领域语义泄漏进了通用层。只扫
 /// 「名字」，不扫注释/文档字符串——注释里解释"为什么不叫 ToolCalls"完全合
@@ -46,9 +47,9 @@ fn cargo_toml_does_not_depend_on_forbidden_crates() {
 /// 判断某个依赖**名**是否作为 TOML key 出现在 `[dependencies]` 段——只看
 /// `[dependencies]`，避免误伤 `package.description`/`repository` 里出现的
 /// `"agent-vitals"` 字样，也避免注释里解释性的文字（比如"同
-/// agent-vitals-core 的理由"）被误判成一条依赖声明。**必须逐行按 key 精确
+/// agent-vitals-domain 的理由"）被误判成一条依赖声明。**必须逐行按 key 精确
 /// 匹配，不能整段做子串包含**——`src-tauri` 的检查第一版就是子串匹配，查
-/// `"vitals-core"` 时把 `agent-vitals-core = {...}` 这一行也算命中了（后者
+/// `"vitals-core"` 时把 `agent-vitals-domain = {...}` 这一行也算命中了（后者
 /// 的名字本来就包含前者的字面量），一个真实依赖都没有也会假阳性报违规；
 /// 现在按 `=`/`.`（兼容 `name.path = "..."` 这种点号表形式）切出 key、trim
 /// 后精确比较。`src-tauri` 的检查复用同一份，不重写一份。
@@ -87,14 +88,14 @@ fn src_tauri_does_not_depend_on_vitals_core_directly() {
     };
     assert!(
         !deps_section_contains(&manifest, "vitals-core"),
-        "§5.2 violated: src-tauri/Cargo.toml must not depend on vitals-core directly — the only allowed path is src-tauri → agent-vitals-core → vitals-core"
+        "§5.2 violated: src-tauri/Cargo.toml must not depend on vitals-core directly — the only allowed path is src-tauri → agent-vitals-domain → vitals-core"
     );
-    // 反过来确认它确实走 agent-vitals-core——不然上面那条断言测的是个假问题
-    // （比如 src-tauri 干脆没接 agent-vitals-core 了，两条依赖都不存在，
+    // 反过来确认它确实走 agent-vitals-domain——不然上面那条断言测的是个假问题
+    // （比如 src-tauri 干脆没接 agent-vitals-domain 了，两条依赖都不存在，
     // "不直接依赖 vitals-core" 会假阳性地通过）。
     assert!(
-        deps_section_contains(&manifest, "agent-vitals-core"),
-        "sanity: src-tauri should depend on agent-vitals-core (the allowed indirection path) — if this changed on purpose, the assertion above needs re-checking too"
+        deps_section_contains(&manifest, "agent-vitals-domain"),
+        "sanity: src-tauri should depend on agent-vitals-domain (the allowed indirection path) — if this changed on purpose, the assertion above needs re-checking too"
     );
 }
 

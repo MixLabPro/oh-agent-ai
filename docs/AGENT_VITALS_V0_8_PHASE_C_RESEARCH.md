@@ -357,7 +357,8 @@ Python 分层）。Rust 侧每个 Step 动一处，Python 侧对应：
 | `69888c6` | Step 2a：`Coords` → `domain/coords.rs`（`trajectory::coord_map` 不再横跨取）| 全绿 |
 | `6ce4d13` | Step 2b：canonical 归一层 → `adapters/canonical_usage.rs`（生产零调用）| 全绿 |
 | `ecdda70` | Step 3（B2）：`codex_usage` + `canonical_usage` → adapters crate；DSH wire → `domain/dsh/`；`core/src/adapters/` 删除；守卫改写 | 全绿（见 §6quater）|
-| 本提交 | Step 4：抽 `agent-vitals-contracts` + `agent-vitals-domain`，`agent-vitals-core` 退成薄 facade | 全绿（见 §6quinquies）|
+| `f4180ca` | Step 4：抽 `agent-vitals-contracts` + `agent-vitals-domain`，`agent-vitals-core` 退成薄 facade（3 crate + 垫片，见 §6quinquies）| 全绿 |
+| 本提交 | Step 4 收尾：`agent-vitals-contracts` 折回 `agent-vitals-domain/src/contracts/`，删 `agent-vitals-core` 垫片，全量 rename `agent_vitals_core::`→`agent_vitals_domain::`（见 §6sexies）| 全绿 |
 
 **至此 `domain/*.rs` 生产代码对 `crate::{dsh_evidence, codex_usage, adapters::hosts}`
 引用归零**——层 1 全清。剩下的命中全在 `#[cfg(test)]`（造 fixture / 调迁走的
@@ -371,9 +372,11 @@ shim），crate 拆分后经 `[dev-dependencies]` 解析。
 - `Coords` 落 `domain/coords.rs` 而非 `contracts/`（模块注释写清是过渡；`contracts`
   保持 host-agnostic）
 
-**剩余**：无——Phase C（C-minimal）Step 1-4 全部完成。Step 3/4 实际做法与
-§6ter 计划有偏差（更小），见 §6quater / §6quinquies。层 2 wire/fold 分离与
-`cost.rs` 拆分仍是 Phase D 之后的独立迭代（§6「不在 C-minimal」）。
+**剩余**：无——Phase C（C-minimal）Step 1-4 + 收尾全部完成。Step 3/4 实际做法与
+§6ter 计划有偏差（更小），见 §6quater / §6quinquies / §6sexies（收尾把中途的
+`agent-vitals-contracts` + `agent-vitals-core` 两层合并成单个 `agent-vitals-domain`）。
+**wire/fold 分离**（`domain/dsh/` → `hosts/dsh/sessions/`）是 **Phase D 首项**，不是
+Phase C 的一部分——Phase C 后 domain 仍不是完全 wire-pure。`cost.rs` 拆分同 Phase D。
 
 ## 6ter. Step 3/4 的已知拦路石（2026-09-04 试做发现）
 
@@ -509,8 +512,45 @@ adapters 56 + facade 2 + 各 parity/host_contract/dependency_budget；facade cra
 `cargo clippy --release --all-targets -D warnings`、`cargo check -p agent-vitals-wasm`、
 `python3 -m unittest discover tests`（1145，226 skip）、golden 15+15 逐字节（Python & Rust bin）。
 
-wasm `.wasm` 无需重建——规则逻辑一行没改，wasm 经 `agent_vitals_core::` facade 引，
+wasm `.wasm` 无需重建——规则逻辑一行没改，wasm 经 facade 引，
 `cargo check -p agent-vitals-wasm` 过。
+
+## 6sexies. Step 4 收尾——合并成单个 `agent-vitals-domain`（2026-09-04，本会话）
+
+用户反馈「3 crate + 垫片太零碎，`agent-vitals-core` 只剩一个 `lib.rs`、是不是要
+移除」。对照 arch spec §3.1 依赖图（`adapters → agent-vitals-domain → vitals-core`，
+无 `agent-vitals-core`、无独立 `agent-vitals-contracts`）与 §9 映射表（`contracts/`
+是 `agent-vitals-domain` 的**子目录**）——§6quinquies 的三层确实超出 spec。独立
+`contracts` crate 当初是为解「core 保留 contracts 则 `domain→core→domain` 成环」，
+既然 core 要退成垫片，contracts 直接进 domain 就没有环。
+
+- `agent-vitals-contracts/src/contracts/` → `agent-vitals-domain/src/contracts/`；
+  删 `agent-vitals-contracts` crate。`domain/lib.rs` 改 `pub mod contracts;` +
+  `pub use contracts::{...}`（扁平别名不变，`crate::evidence` 等零改动）。
+- 删 `crates/agent-vitals-core/`。`agent_vitals_core::` → `agent_vitals_domain::`
+  全量 rename（~33 文件 / ~180 处，纯机械）；root/adapters/wasm/src-tauri 的
+  `Cargo.toml` dep `agent-vitals-core` → `agent-vitals-domain`；workspace
+  `members`/`default-members` 摘掉 core + contracts。
+- 孤儿规则：`compatibility/canonical_session.rs` 的
+  `impl From<evidence::Provenance> for vitals_core::…::Provenance`（两类型都外来）
+  → 自由函数 `provenance_to_vitals()`。
+- 守卫：`vitals-core/tests/dependency_boundary.rs` FORBIDDEN 改 `agent-vitals-domain`；
+  `adapters/tests/dependency_budget.rs` 断言 dep set = `["agent-vitals-domain",…]`；
+  domain `dependency_budget.rs` `source_root` 断言 `["compatibility","contracts",
+  "domain","lib.rs"]`，新 `contracts_module_stays_vocabulary_only`（扫 `src/contracts/**`
+  零 `regex`/`vitals_core`/`crate::domain`/`crate::compatibility`/adapter）。
+- Python：`test_canonical_schema.py` 等 3 个 FS 断言路径 + 一批 docstring 里的
+  `crates/agent-vitals-core/…` / `agent-vitals-contracts` → `agent-vitals-domain`。
+- **终态** = spec §3.1 图：`vitals-core ← agent-vitals-domain ← agent-vitals-adapters
+  ← binary/wasm/src-tauri`。3 个 agent-vitals crate，无垫片。
+
+**遗留债（转 Phase D 首项）**：`domain/dsh/` 4 个模块仍直接解析 DSH wire——
+domain **不是**完全 wire-pure。见 `domain/dsh/mod.rs` + arch spec Phase C/D 段。
+
+**门禁全绿**：`cargo test --release`（binary 313 + domain 431 lib + adapters 56 +
+各 parity/host_contract/dependency_budget）、`clippy -D warnings`、
+`cargo check -p agent-vitals-wasm`、`src-tauri cargo check`、
+`python3 -m unittest discover tests`（1145，226 skip）、golden 15+15 逐字节。
 
 ## 6. 建议执行顺序（C-minimal，每步独立提交、golden 绿）
 

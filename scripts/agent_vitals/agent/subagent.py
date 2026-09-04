@@ -1,6 +1,6 @@
 """子代理启动事件 —— 从父会话的事件流里提取「什么时候派了谁去干什么」。
 
-单一真相源是 `crates/agent-vitals-core/src/domain/subagent.rs`；这里是 Python 平行
+单一真相源是 `crates/agent-vitals-domain/src/domain/subagent.rs`；这里是 Python 平行
 实现，两侧逐字节对齐（差分由 `tests/test_cli_matrix.py` 的 `both()` 看守）。
 
 为什么是一层独立提取而不是一条规则：启动子代理**不是异常**，不该产生 finding。

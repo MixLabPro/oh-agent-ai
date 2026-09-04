@@ -7,7 +7,7 @@ per-source 拆账（by_source 轴）只认 DSH 形状的 4 桶，Codex 是独立
 cache_read/cache_write/reasoning/legacy），让 #6 事件桥能把 DSH 与 Codex 的
 用量排进同一行。
 
-与 Rust 侧对守（单一真相源 `crates/agent-vitals-core/src/domain/usage.rs` 的 canonical
+与 Rust 侧对守（单一真相源 `crates/agent-vitals-domain/src/domain/usage.rs` 的 canonical
 段，逐字节锁步）：
 - `canonical_from_dsh` / `canonical_from_codex` / `canonical_total_delta` /
   `canonical_tokens` 一一对应；

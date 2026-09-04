@@ -1,6 +1,6 @@
 """接管协议的 **Python mirror**（R1d，§4.2/§4.3 最小可测子集）。
 
-`agent_vitals_core::takeover` 的 Python 镜像：session_key / manifest+ledger 读写 /
+`agent_vitals_domain::takeover` 的 Python 镜像：session_key / manifest+ledger 读写 /
 owner_allows / cutover / mark_fold / record_fold / machine_namespace。
 
 R1d 起 Python 写链退休为 mirror —— 这个模块的作用是让 mirror 还能

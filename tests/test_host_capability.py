@@ -1,6 +1,6 @@
 """host-capability degradation 表的 Python 镜像测试。
 
-Rust 侧单测（`crates/agent-vitals-core/src/contracts/host_capability.rs`）逐条镜像：
+Rust 侧单测（`crates/agent-vitals-domain/src/contracts/host_capability.rs`）逐条镜像：
 claude-code 只翻 SV607/608、workbuddy 只翻 SV604/605、未知宿主 no-op、
 override 永不吞 Findings / 已有 Unavailable。reason 文案逐字节钉死——差分
 测试（`both()`）靠两份实现给出同串。

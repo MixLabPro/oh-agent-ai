@@ -1,6 +1,6 @@
 """Agent 行为与成本审计子面：会话执行审计 + 跨调用状态/预算。
 
-对应 Rust `src/agent/`。计算本体在 core crate（agent_vitals_core），本子包做
+对应 Rust `src/agent/`。计算本体在 domain crate（agent_vitals_domain），本子包做
 DSH/Codex 会话的 I/O 读取与折叠接线。`state`/`budget` 是跨调用累积的状态根，
 `usage`/`cost`/`codex_*` 是成本折叠与计价，`behavior`/`trajectory`/`duration`
 是行为审计。

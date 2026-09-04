@@ -34,7 +34,7 @@ use crate::evidence::CanonicalSession;
 /// Estimated 恒是 Estimated，绝不落入 Measured。这是 aggregation 纪律（混合来源
 /// 不得伪装成单一 measured）的镜像面：推导坐标不得在过桥时升级成原生测量。
 ///
-/// Phase C Step 4b：`evidence::Provenance` 归 `agent-vitals-contracts`、
+/// Phase C Step 4b：`evidence::Provenance` 归 `contracts/`、
 /// `vitals_core::provenance::Provenance` 归 `vitals-core`——两个类型都不再属本
 /// crate，孤儿规则不许写 `impl From`，落成自由函数（桥模块本就该显式转换）。
 fn provenance_to_vitals(p: crate::evidence::Provenance) -> Provenance {

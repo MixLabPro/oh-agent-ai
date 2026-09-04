@@ -20,8 +20,8 @@ use crate::agent::behavior::audit_session_log;
 use crate::agent::codex_cost::today_beijing;
 use crate::agent::state;
 use crate::agent::takeover as tk_io;
-use agent_vitals_core::takeover as tk;
-use agent_vitals_core::usage;
+use agent_vitals_domain::takeover as tk;
+use agent_vitals_domain::usage;
 
 /// oneline 一次运行的结果。
 #[derive(Debug, PartialEq, Eq)]

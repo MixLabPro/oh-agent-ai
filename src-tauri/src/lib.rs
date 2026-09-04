@@ -213,7 +213,7 @@ fn short_model(name: &str) -> &str {
 /// "WorkBuddy"（此前的本地字面量表没收它，因为它没有托盘行——展示名与"有没有
 /// 折叠能力"是两件事，工作台的会话浏览面一直支持 workbuddy）。
 fn host_display_name(kind: &str) -> String {
-    agent_vitals_core::host_capability::host_profile(kind)
+    agent_vitals_domain::host_capability::host_profile(kind)
         .map(|h| h.display.to_string())
         .unwrap_or_else(|| kind.to_string())
 }
@@ -2196,7 +2196,7 @@ mod tests {
         };
         // 内层与 core to_json 逐字节一致（字符串比较钉住键序）。
         let core_key =
-            agent_vitals_core::r2a::SessionKey::new("dsh", "s1", "work", "mac-a");
+            agent_vitals_domain::r2a::SessionKey::new("dsh", "s1", "work", "mac-a");
         assert_eq!(
             serde_json::to_string(&key).unwrap(),
             serde_json::to_string(&core_key.to_json()).unwrap()

@@ -1,7 +1,7 @@
 //! R2a SessionStore 的 **I/O 层**（`docs/R2A_CONTRACT_DESIGN.md`）。
 //!
 //! 纯规则（SessionKey / 版本闸 / filter / cursor / 分页 / 类型化错误）在
-//! `agent_vitals_core::r2a`；本模块只做 I/O：
+//! `agent_vitals_domain::r2a`；本模块只做 I/O：
 //!
 //!   · Codex 根发现 → 复用 `codex_session_audit::codex_session_audit_json`（R2a
 //!     的 `session` 载荷**必须复用既有输出，不发明新字段名**，设计 §2.2）；
@@ -49,8 +49,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use agent_vitals_core::findings::{FindingRef, FindingSession, rollup_findings};
-use agent_vitals_core::r2a::*;
+use agent_vitals_domain::findings::{FindingRef, FindingSession, rollup_findings};
+use agent_vitals_domain::r2a::*;
 use crate::agent::codex_session_audit as csa;
 use crate::agent::takeover;
 use crate::skills::snapshot::data_home;
@@ -1447,11 +1447,11 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
 
     // DSH 今日 token：today.json → core `today_cost`——与 Tauri 顶层钱行同一函数
     // （§5.2 basis=state-file；date stale / 缺场 → None → value=null，不编 0）。
-    let pricing = agent_vitals_core::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let today_data = crate::agent::state::read_json(&crate::agent::state::state_dir().join("today.json"));
     let dsh_today_tokens: Value = match today_data
         .as_ref()
-        .and_then(|d| agent_vitals_core::cost::today_cost(d, &pricing, day_key))
+        .and_then(|d| agent_vitals_domain::cost::today_cost(d, &pricing, day_key))
     {
         Some(r) => json!({
             "value": r.get("tokens").and_then(Value::as_i64),

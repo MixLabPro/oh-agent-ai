@@ -1,6 +1,6 @@
 """上下文压缩事件 —— 时间线的 ✂ 标记，以及 FR-04b 结构性浪费的**实测**来源。
 
-单一真相源是 `crates/agent-vitals-core/src/domain/compaction.rs`；这里是 Python 平行
+单一真相源是 `crates/agent-vitals-domain/src/domain/compaction.rs`；这里是 Python 平行
 实现，差分防护在 core 的 parity 测试与 `tests/test_cli_matrix.py` 的双实现比较。
 
 真实日志（session-e4b0be69）里是**两种不同机制**，不能混成一个概念：

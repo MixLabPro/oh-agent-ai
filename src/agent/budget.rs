@@ -1,6 +1,6 @@
 //! 预算告警的 **I/O + 渲染侧**（CLI `budget show`）。
 //!
-//! 决策段在 core（`agent_vitals_core::budget::evaluate_alert`），本模块只做：
+//! 决策段在 core（`agent_vitals_domain::budget::evaluate_alert`），本模块只做：
 //! 读 config.toml / today.json / month.json / month-archive.json / budget.json、
 //! 北京日期/now 生成、文本与 JSON 渲染。与 `cost.rs` 同款边界 —— 计算本体
 //! 单一真相源在 core，这里不重写任何算术（连 7 日均、自适应 floor 都在 core）。
@@ -100,7 +100,7 @@ fn parse_scalar(text: &str) -> Value {
 /// `merged_config`）。缺文件 / 缺节 / 缺字段一律走默认 —— 配置缺失降级而非
 /// 崩溃，与「host 能力缺失时不臆造」同一纪律。
 fn load_config() -> Value {
-    let defaults = agent_vitals_core::budget::default_budget();
+    let defaults = agent_vitals_domain::budget::default_budget();
     let Ok(text) = std::fs::read_to_string(config_path()) else {
         return defaults;
     };
@@ -148,7 +148,7 @@ fn load_config() -> Value {
         // 只认 default_budget 的 8 个 key），这里一律插入，语义与 Python 相同。
         parsed.insert(key, parse_scalar(val));
     }
-    agent_vitals_core::budget::merged_config(&Value::Object(parsed))
+    agent_vitals_domain::budget::merged_config(&Value::Object(parsed))
 }
 
 /// 复刻 `state.py::read_month` —— 返回「已过滤到目标月」的 `days` map。
@@ -313,7 +313,7 @@ fn render_budget_month(month: &str, result: Option<&Value>) -> String {
 fn compute_month(month: Option<&str>) -> Option<Value> {
     let days = read_month(month)?;
     let pricing = crate::agent::cost::load_pricing();
-    Some(agent_vitals_core::cost::month_cost(&days, &pricing))
+    Some(agent_vitals_domain::cost::month_cost(&days, &pricing))
 }
 
 /// `budget show` 主入口：读齐输入 → core `evaluate_alert` → 文本/JSON。
@@ -326,7 +326,7 @@ pub fn budget_show(json_out: bool) {
     let month_days = read_month(None);
     let pricing = crate::agent::cost::load_pricing();
     let snooze = read_snooze();
-    let alert = agent_vitals_core::budget::evaluate_alert(
+    let alert = agent_vitals_domain::budget::evaluate_alert(
         &cfg,
         today_data.as_ref(),
         month_days.as_ref(),
@@ -351,7 +351,7 @@ pub(crate) fn evaluate_alert_from_state() -> Value {
     let month_days = read_month(None);
     let pricing = crate::agent::cost::load_pricing();
     let snooze = read_snooze();
-    agent_vitals_core::budget::evaluate_alert(
+    agent_vitals_domain::budget::evaluate_alert(
         &cfg,
         today_data.as_ref(),
         month_days.as_ref(),
@@ -384,22 +384,22 @@ pub(crate) fn evaluate_alert_after_fold(
 
     // 模拟 merge_today：rotate（跨 BJ 0:00）→ merge_today_state。
     let existing_today = read_json(&state_dir().join("today.json")).unwrap_or_else(|| json!({}));
-    let rotated = match agent_vitals_core::state::rotate_today_state(&existing_today, &today_key, &now)
+    let rotated = match agent_vitals_domain::state::rotate_today_state(&existing_today, &today_key, &now)
     {
         Some(r) => r,
         None => existing_today,
     };
     let merged_today =
-        agent_vitals_core::state::merge_today_state(&rotated, hb, by_model_today, &today_key, &now);
+        agent_vitals_domain::state::merge_today_state(&rotated, hb, by_model_today, &today_key, &now);
 
     // 模拟 merge_month：stale 先迁档，再 merge_month_body → 新的月 days。
     let existing_month = read_json(&state_dir().join("month.json")).unwrap_or_else(|| json!({}));
     let mut archive = read_json(&state_dir().join("month-archive.json")).unwrap_or_else(|| json!({}));
-    let stale = agent_vitals_core::state::stale_days(&existing_month, &current);
+    let stale = agent_vitals_domain::state::stale_days(&existing_month, &current);
     if stale.as_object().is_some_and(|m| !m.is_empty()) {
-        archive = agent_vitals_core::state::add_days_to_archive(&archive, &stale, &now);
+        archive = agent_vitals_domain::state::add_days_to_archive(&archive, &stale, &now);
     }
-    let body = agent_vitals_core::state::merge_month_body(
+    let body = agent_vitals_domain::state::merge_month_body(
         &existing_month,
         hb,
         Some(by_date_model),
@@ -415,7 +415,7 @@ pub(crate) fn evaluate_alert_after_fold(
         _ => None,
     };
 
-    agent_vitals_core::budget::evaluate_alert(
+    agent_vitals_domain::budget::evaluate_alert(
         &cfg,
         Some(&merged_today),
         month_days.as_ref(),
@@ -565,7 +565,7 @@ mod tests {
     /// 文本输出是纯渲染 —— 给一个手工 alert，断言关键行。
     #[test]
     fn render_show_text_matches_shape() {
-        let cfg = agent_vitals_core::budget::default_budget();
+        let cfg = agent_vitals_domain::budget::default_budget();
         let alert = json!({
             "level": "warn",
             "ratio": 0.85,
@@ -599,7 +599,7 @@ mod tests {
     /// snoozed 状态下的文本：snoozed_until 行 + 无 reasons 段落。
     #[test]
     fn render_show_text_with_snooze() {
-        let cfg = agent_vitals_core::budget::default_budget();
+        let cfg = agent_vitals_domain::budget::default_budget();
         let alert = json!({
             "level": "snoozed",
             "ratio": 1.2,

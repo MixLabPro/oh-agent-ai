@@ -34,11 +34,11 @@ use serde_json::{json, Map, Value};
 use crate::agent::codex_cost::civil_from_unix_secs;
 use crate::agent::r2a_store::{dsh_header, dsh_source_profile};
 use crate::dsh::{parse_session_log, read_session_text};
-use agent_vitals_core::usage::{
+use agent_vitals_domain::usage::{
     dsh_usage_observations, usage_fold_checkpoint, DshUsageObservation,
 };
-use agent_vitals_core::usage_fact::build_usage_fact;
-use agent_vitals_core::util::post_fork;
+use agent_vitals_domain::usage_fact::build_usage_fact;
+use agent_vitals_domain::util::post_fork;
 
 const HOST: &str = "dsh";
 const OBSERVATION_KIND: &str = "assistant-usage";

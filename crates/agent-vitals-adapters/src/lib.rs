@@ -5,7 +5,7 @@
 //!
 //! Phase C（B2）起 Codex fold（`codex_usage`）与跨宿主 `canonical_usage` 物理
 //! 住这个 crate。DSH 的 `evidence`/`audit`/`compaction`/`waste` 因 domain 测试
-//! 的 fixture 依赖仍暂住 `agent-vitals-core::domain::dsh`（layer-2 债，见 core
+//! 的 fixture 依赖仍暂住 `agent-vitals-domain::domain::dsh`（layer-2 债，见 core
 //! `lib.rs` 注释），本 crate 经 re-export 提供 `dsh_evidence`。
 
 pub mod canonical_usage;

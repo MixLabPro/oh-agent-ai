@@ -1,7 +1,7 @@
 //! v0.7 Stage 2：Codex static fold → UsageFact emitter（Rust 镜像）。
 //!
 //! 镜像 `scripts/agent_vitals/agent/codex_usage_fact.py` 的 Python 端实现，走
-//! `agent_vitals_core::usage_fact::build_usage_fact` 同一契约函数。Python↔Rust
+//! `agent_vitals_domain::usage_fact::build_usage_fact` 同一契约函数。Python↔Rust
 //! byte-parity 钉测：同一批 rollout 两侧 stdout 字节相等。
 //!
 //! spec §2.3「发射集 == fold 的 by_model 消费集，是构造出来的」：本模块不重抄
@@ -33,8 +33,8 @@ use serde_json::{json, Map, Value};
 
 use crate::agent::claude_usage_fact::{SKIP, UNATTRIBUTED, UNREADABLE};
 use agent_vitals_adapters::codex_usage::{CodexTokenOutcome, CodexFoldState};
-use agent_vitals_core::source_identity::{canonical_json, fnv1a64_hex};
-use agent_vitals_core::usage_fact::build_usage_fact;
+use agent_vitals_domain::source_identity::{canonical_json, fnv1a64_hex};
+use agent_vitals_domain::usage_fact::build_usage_fact;
 
 const HOST: &str = "codex";
 const OBSERVATION_KIND: &str = "assistant-usage";

@@ -7,7 +7,7 @@ finding 列表，这里输出 `{"by_model": {model: 四桶}, "sequence": [模型
 的 tokenUsageProjectionDefinition）完全一致，并已用真实日志对账：各桶之和
 == tokenUsage 投影累计值（94997694 会话 180577354/498735/712320/0 逐字节
 一致）。这里是 Python 平行实现，单一真相源是
-`crates/agent-vitals-core/src/domain/usage.rs`；差分防护在 core 的 parity 测试与
+`crates/agent-vitals-domain/src/domain/usage.rs`；差分防护在 core 的 parity 测试与
 `tests/test_cli_matrix.py` 的双实现逐字节比较。
 
 三个关键语义（为什么这样实现，对应共性缺陷）：
@@ -939,7 +939,7 @@ def token_by_model(events):
 def token_by_date_model(events, source=SOURCE_UNSPECIFIED):
     """`token_by_model` 的模型维 × `hour_buckets` 的日期维 —— `{date: {model: 八桶}}`。
 
-    单一真相源是 `crates/agent-vitals-core/src/domain/usage.rs::token_by_date_model`，
+    单一真相源是 `crates/agent-vitals-domain/src/domain/usage.rs::token_by_date_model`，
     这里是 Python 平行实现，由该文件的
     `token_by_date_model_python_rust_byte_for_byte_parity` 逐字节看守（键序：
     日期升序、模型按首现顺序）。
@@ -1096,7 +1096,7 @@ def _fold_hour_bucket(buckets_map, time_ms, add_buckets, peak, sign):
 
 def hour_buckets(events):
     """事件流 → 按 (date, hour) 折叠到 token 桶。Rust 平行实现见
-    `crates/agent-vitals-core/src/domain/usage.rs::hour_buckets`。
+    `crates/agent-vitals-domain/src/domain/usage.rs::hour_buckets`。
 
     与 `token_by_model` 是**同一次 fold 的第三个出口**：那边按模型折、
     `request_metrics` 按请求点折、这里按小时折。共用 `_usage_sample` +
@@ -1201,7 +1201,7 @@ def pre_fork_usage(events):
     返回 None 表示这个会话根本没有分叉——不是返回一个全零的结构，「没分叉」和
     「分叉了但上游没花钱」是两回事。
 
-    Rust 平行实现见 `crates/agent-vitals-core/src/domain/usage.rs::pre_fork_usage`。
+    Rust 平行实现见 `crates/agent-vitals-domain/src/domain/usage.rs::pre_fork_usage`。
     """
     from ..util import fork_boundary
     b = fork_boundary(events)
@@ -1222,7 +1222,7 @@ def pre_fork_usage(events):
 # per-source 拆账（by_source 轴）的缺口：它只认 DSH 形状的 4 桶，Codex 是独立
 # 管线（codex_fold_file，5 桶 + speed 维），两种线格式永远进不了同一张表。
 # canonical 层在折叠之上再加一层归一：把各来源自己折好的桶映射成统一维
-# （FRESH/TOTAL/…）。单一真相源是 `crates/agent-vitals-core/src/domain/usage.rs` 的
+# （FRESH/TOTAL/…）。单一真相源是 `crates/agent-vitals-domain/src/domain/usage.rs` 的
 # canonical 段——那里有一份完整的中文注释讲**为什么必须建在折叠之上**（窄出
 # 权威 vs 宽进哨兵，两条路径一旦合并，同一笔用量在多个事件里重复出现时会被
 # 双计）。这里是它的逐字节镜像，由 Rust 侧的

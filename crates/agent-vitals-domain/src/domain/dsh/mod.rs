@@ -9,9 +9,13 @@
 //! crate」（见 `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6ter）。
 //!
 //! 所以与 `coords` / `usage` 里的 inline DSH 解析同一处理：登记为 layer-2 债、
-//! 住 `domain/dsh/`，`dependency_budget.rs` 显式允许。终态是 per-host
-//! `sessions/evidence` 产出的 `CanonicalSession` 时间线自带一切、`domain/dsh/`
-//! 整个退场（wire/fold 分离，Phase D 之后）。
+//! 住 `domain/dsh/`，`dependency_budget.rs` 显式允许。
+//!
+//! **这是 Phase C 遗留的一处债，不是完结态**——`domain/` 因此还**不是**完全
+//! wire-pure。把这 4 个模块迁进 `hosts/dsh/sessions/`（`build_dsh_evidence`
+//! fixture 改由 adapters crate 的 integration test 承载）是 **Phase D 的第一项**，
+//! 那时 `hosts/<h>/sources/` 已落地、`sessions/` 收 wire 解析顺理成章。在此之前
+//! `dependency_budget.rs` 把它钉为**唯一**登记债、不许扩张。
 
 pub mod audit;
 pub mod compaction;

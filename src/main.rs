@@ -1236,7 +1236,7 @@ fn main() {
     // as-is. `hosts_json()` is the byte-parity surface Python's
     // `host_capability.hosts_json()` mirrors (G1).
     if let Some(Cmd::Hosts { rows_json }) = &args.cmd {
-        let out = agent_vitals_core::host_capability::hosts_json();
+        let out = agent_vitals_domain::host_capability::hosts_json();
         if let Some(path) = rows_json {
             let text = serde_json::to_string_pretty(&out).unwrap_or_default();
             if path == &PathBuf::from("-") {
@@ -1980,7 +1980,7 @@ session_store={store} fold={fold}"
                 cursor,
                 json,
             } => {
-                let filter = agent_vitals_core::r2a::SessionFilter {
+                let filter = agent_vitals_domain::r2a::SessionFilter {
                     host_kind: host_kind.clone(),
                     model: model.clone(),
                     date_from: date_from.clone(),

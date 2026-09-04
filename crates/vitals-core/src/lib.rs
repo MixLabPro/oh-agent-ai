@@ -7,7 +7,7 @@
 //! `Detector` / `Evidence` / `Finding` / `Replay` / `VitalsEngine` 全部已实
 //! 现（README.md 的 30 秒示例、`tests/golden_replay.rs` 的五个 fixture、
 //! `tests/pipeline.rs` 都在跑真实的端到端管线，不是骨架）。**已接入现有
-//! CLI**：`agent-vitals-core` 依赖这个 crate（`compatibility/` 桥接层），
+//! CLI**：`agent-vitals-domain` 依赖这个 crate（`compatibility/` 桥接层），
 //! `behavior.rs`/`trajectory.rs` 的 SV601–SV614 全部十四条规则的
 //! `detect_svNNN` 生产入口都委托这里的 `VitalsEngine`，原判定逻辑保留成
 //! `detect_svNNN_legacy` 作自动回退——不是并行存在两条从不交汇的路径，是
@@ -22,7 +22,7 @@
 //! - 本 crate 的公开类型、模块名不出现 Codex / DSH / Skill / Investment /
 //!   IBKR 等领域词——领域内容只能通过 `CanonicalEvent::kind` /
 //!   `CanonicalEvent::attributes` 承载，Core 不解释这些值（§4.1）。
-//! - 本 crate 不依赖 `agent-vitals-core` / `agent-vitals-wasm` / 二进制 /
+//! - 本 crate 不依赖 `agent-vitals-domain` / `agent-vitals-adapters` / `agent-vitals-wasm` / 二进制 /
 //!   `src-tauri`（§5.2 单向依赖：只能反过来）。
 //! - 本 crate 不读文件、不读环境变量、不访问网络、不启动子进程（§18.1）。
 

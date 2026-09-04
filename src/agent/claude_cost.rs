@@ -75,7 +75,7 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use agent_vitals_core::usage::ms_from_civil;
+use agent_vitals_domain::usage::ms_from_civil;
 
 use crate::agent::claude_usage_fact::{
     parse_claude_usage_row, UNATTRIBUTED, UNREADABLE,
@@ -146,7 +146,7 @@ fn ledger_archive_path() -> std::path::PathBuf {
 /// 在坏数据上，空日不落 ledger。core 版顺带认 by_model 包一层的旧壳（与
 /// `claude_day_cost` 同一对形状嗅探），本文件只产 flat，行为不变。
 pub fn ledger_day_total_tokens(day: &Value) -> i64 {
-    agent_vitals_core::cost::claude_day_total_tokens(day)
+    agent_vitals_domain::cost::claude_day_total_tokens(day)
 }
 
 /// 读 ledger 当日（day_key = 北京日）的 4 型 token 总量 → r2a `sessions
@@ -197,7 +197,7 @@ pub(crate) fn day_from_iso_ts(ts: &str) -> Option<String> {
 }
 
 /// 同 `day_from_iso_ts` 认的时间戳格式 → epoch 毫秒。给
-/// `agent_vitals_core::usage::is_peak_slot` 用——它要精确的北京小时 + 星期几，
+/// `agent_vitals_domain::usage::is_peak_slot` 用——它要精确的北京小时 + 星期几，
 /// `day_from_iso_ts` 只算到"哪一天"不够。复用同一套格式校验，只多读
 /// `mm`/`ss` 两截；真实日期校验委托 `usage::ms_from_civil`（Hinnant 算法
 /// 往返比对，不在这里重开一套闰年表）。
@@ -780,7 +780,7 @@ pub fn claude_sync(home: &Path, shadow: bool) -> Result<(), String> {
     // archived_at 记录的是「真正归档那次」的时刻，不是「本轮核对过」。
     if !archive_days.is_empty() {
         let existing = read_json(&ledger_archive_path()).unwrap_or_else(|| json!({}));
-        let candidate = agent_vitals_core::state::add_days_to_archive(
+        let candidate = agent_vitals_domain::state::add_days_to_archive(
             &existing, &json!(archive_days), &now);
         if strip_archive_ts(&candidate) != strip_archive_ts(&existing) {
             atomic_write_json(&ledger_archive_path(), &candidate);

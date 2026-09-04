@@ -1,7 +1,7 @@
 //! 菜单栏后端数据组装：读数据根的 month.json/today.json + 根下 config.toml 预算，
 //! 喂给 core 的 cost 折叠，产出一个纯展示 JSON。
 //!
-//! **计算本体在 core**（`agent_vitals_core::cost::{priced_day, month_cost,
+//! **计算本体在 core**（`agent_vitals_domain::cost::{priced_day, month_cost,
 //! today_cost, bucket_cost}`），这里只有文件 I/O 与组装——CLAUDE.md 教训：同一份
 //! month.json 在日历/budget/菜单栏各写一份「有没有 by_model 就……」的判断，报出
 //! ¥4.50 vs ¥18.00 两个价。菜单栏不重写任何定价，只调 core 的单一覆盖率校验入口。
@@ -13,11 +13,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::parse_rfc3339_secs;
-use agent_vitals_core::cost::{
+use agent_vitals_domain::cost::{
     bucket_cost, claude_day_cost, claude_day_total_tokens, claude_subscription_uncovered_estimate,
     load_pricing, month_cost, nominal_vs_actual_cost, priced_day, today_cost,
 };
-use agent_vitals_core::state::rollup_by_model;
+use agent_vitals_domain::state::rollup_by_model;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -248,7 +248,7 @@ impl HostsSnapshot {
     pub fn unavailable() -> Self {
         HostsSnapshot {
             generated_at: None,
-            hosts: agent_vitals_core::host_capability::HOSTS
+            hosts: agent_vitals_domain::host_capability::HOSTS
                 .iter()
                 .filter(|h| h.fold.is_some())
                 .map(|h| HostRow::unavailable(h.id))
@@ -1405,7 +1405,7 @@ mod tests {
     /// 不出它了。
     #[test]
     fn hosts_save_then_read_round_trips() {
-        use agent_vitals_core::r2a::SessionKey;
+        use agent_vitals_domain::r2a::SessionKey;
         let tmp = std::env::temp_dir().join("sv-menubar-hosts-roundtrip-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("state")).unwrap();

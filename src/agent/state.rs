@@ -1,6 +1,6 @@
 //! 状态写链的 **I/O + 时间侧**（R1c）。
 //!
-//! 纯合并规则在 core（`agent_vitals_core::state`），本模块只做：state 目录定位、
+//! 纯合并规则在 core（`agent_vitals_domain::state`），本模块只做：state 目录定位、
 //! 原子写（递归 sort_keys + indent=2，逐字节复刻 Python `_atomic_write`）、
 //! UTC now / 北京日期生成、以及把 core 规则接起来的写入口：
 //! `merge_today` / `merge_month` / `write_oneline` / `write_alert` /
@@ -29,7 +29,7 @@ use serde_json::{json, Map, Value};
 use crate::agent::codex_cost::{civil_from_unix_secs, current_month_beijing, today_beijing};
 use crate::skills::snapshot::data_home;
 
-use agent_vitals_core::state as state_core;
+use agent_vitals_domain::state as state_core;
 
 /// 数据根 `state/` 目录 —— 与 Python `state.state_dir()` 同路径。
 /// `pub(crate)`：R1d 的 `agent::takeover`（fold 驱动）复用同一个根。
@@ -206,7 +206,7 @@ pub fn by_source_report() {
         return;
     }
     let pricing = crate::agent::cost::load_pricing();
-    let cost = agent_vitals_core::cost::cost_report(&json!({"by_source": rollup}), &pricing);
+    let cost = agent_vitals_domain::cost::cost_report(&json!({"by_source": rollup}), &pricing);
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
@@ -233,7 +233,7 @@ pub fn by_model_report() {
         return;
     }
     let pricing = crate::agent::cost::load_pricing();
-    let cost = agent_vitals_core::cost::cost_report(&json!({"by_model": rollup}), &pricing);
+    let cost = agent_vitals_domain::cost::cost_report(&json!({"by_model": rollup}), &pricing);
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
@@ -286,7 +286,7 @@ pub fn uncovered_report() {
         }
     }
     let pricing = crate::agent::cost::load_pricing();
-    let uncovered = agent_vitals_core::cost::claude_subscription_uncovered_estimate(
+    let uncovered = agent_vitals_domain::cost::claude_subscription_uncovered_estimate(
         &claude_models, &pricing);
     println!(
         "{}",
@@ -320,7 +320,7 @@ pub fn savings_report() {
         return;
     }
     let pricing = crate::agent::cost::load_pricing();
-    let savings = agent_vitals_core::cost::nominal_vs_actual_cost(
+    let savings = agent_vitals_domain::cost::nominal_vs_actual_cost(
         &json!({"by_model": rollup}), &pricing);
     println!(
         "{}",

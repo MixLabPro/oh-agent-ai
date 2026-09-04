@@ -402,7 +402,7 @@ def derive_coverage(items):
 
 
 # `evidence::CanonicalSession` 的五个 host-neutral timeline 字段（Rust 侧
-# `crates/agent-vitals-core/src/contracts/evidence.rs` 的 struct 字段集——形状对账测试
+# `crates/agent-vitals-domain/src/contracts/evidence.rs` 的 struct 字段集——形状对账测试
 # `tests/test_canonical_schema.py` 钉死两边一致，漏加一个字段这里就红）。
 # 共享类型层的文档化 schema，与 ALL_SIGNALS 同为显式清单。
 _TIMELINE_KEYS = (

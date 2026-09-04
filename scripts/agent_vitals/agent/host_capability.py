@@ -1,6 +1,6 @@
 """host-capability degradation 表的单一事实来源（Python 镜像）。
 
-与 Rust `crates/agent-vitals-core/src/contracts/host_capability.rs` 逐字节对齐：reason
+与 Rust `crates/agent-vitals-domain/src/contracts/host_capability.rs` 逐字节对齐：reason
 文案、规则集合、missing 信号都在同一张表里，两边的 `degrade_rule_outcomes`
 对同一份 dict/切片做同一件事，差分测试靠它。
 
@@ -57,7 +57,7 @@ def degrade_rule_outcomes(host_id, outcomes):
 
 # ────────────────────────── M0：HOSTS 行骨架（v0.6 spec §5.1/§11） ──────────
 #
-# 与 Rust `crates/agent-vitals-core/src/contracts/host_capability.rs::HOSTS` 是**双实现
+# 与 Rust `crates/agent-vitals-domain/src/contracts/host_capability.rs::HOSTS` 是**双实现
 # 契约**——每种语言内部唯一声明源，跨语言由 `hosts --json` 的 G1 byte-parity
 # 保持一致（v0.6 spec §5.1bis），不是共享数据文件。四行顺序 = 展示顺序
 # （dsh→codex→claude-code→workbuddy），不是 UI 契约。

@@ -1,6 +1,6 @@
 //! R2a SessionStore 的 Tauri IPC 薄壳（docs/R2A_CONTRACT_DESIGN.md §6.3-7）。
 //!
-//! 纯查询逻辑在 `agent_vitals_core::r2a`（core crate，单一真相源），I/O 在二进制
+//! 纯查询逻辑在 `agent_vitals_domain::r2a`（core crate，单一真相源），I/O 在二进制
 //! crate 的 `src/agent/r2a_store.rs`。src-tauri 是**独立 workspace**，import 不到
 //! 二进制 crate 的模块——所以 `sessions list` / `sessions read` 与 tick 的
 //! `oneline` 同款：**spawn `agent-vitals` 二进制**，stdout 就是 versioned

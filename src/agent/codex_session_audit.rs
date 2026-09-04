@@ -79,7 +79,7 @@ fn context_window_of(items: &[Value]) -> Option<i64> {
 /// 行上没有 `degraded_rules`（`host_capability::HOSTS`），"codex" 走 no-op
 /// 分支，与塌缩前从不调用 degrade 的行为等价。
 fn audit_projection(evidence: &CodexEvidence) -> Value {
-    agent_vitals_core::canonical_audit::audit_projection(&evidence.canonical, "codex")
+    agent_vitals_domain::canonical_audit::audit_projection(&evidence.canonical, "codex")
 }
 
 fn quota_trajectory_of(items: &[Value]) -> Value {

@@ -29,23 +29,20 @@ first, then a Chinese section anchored at `#中文`. When editing behaviour, bot
 ## Repo layout
 
 ```
-Cargo.toml                  # [workspace]: "." + crates/{vitals-core,agent-vitals-contracts,agent-vitals-domain,agent-vitals-core,agent-vitals-adapters,agent-vitals-wasm}
+Cargo.toml                  # [workspace]: "." + crates/{vitals-core,agent-vitals-domain,agent-vitals-adapters,agent-vitals-wasm}
 src/                        # Rust binary (the `agent-vitals` CLI)
   skills/                   #   静态 SKILL.md 体检（analysis/security/doctor/discovery/…）
   agent/                    #   会话行为/成本审计（behavior/cost/codex_cost/codex_session）
   dsh.rs + util.rs          #   两世界共享，留顶层
 crates/vitals-core/         # 宿主无关的通用审计机制（Event→Trajectory→Detector→Finding→Replay）；不认识 Agent/宿主
-crates/agent-vitals-contracts/ # v0.8 Phase C Step 4a：宿主无关词表（evidence/host_capability/source_identity/
-                            #   usage_fact/r2a）。只依赖 serde_json。adapters/domain/runtime 都依赖它。
-crates/agent-vitals-domain/ # v0.8 Phase C Step 4b：PURE computation，single source of truth。
-                            #   src/{domain,compatibility}/ + lib.rs；domain/dsh/ 是登记的 layer-2 DSH-wire 债
-                            #   （build_dsh_evidence fixture 依赖）。依赖 contracts + vitals-core。
-crates/agent-vitals-core/   # v0.8 Phase C Step 4：薄 re-export facade（src/ 只有 lib.rs）——把
-                            #   agent_vitals_core::{evidence,behavior,cost,compatibility,…} 旧扁平路径转发给
-                            #   contracts + domain 两 crate，二进制/wasm/adapters/Tauri 调用点零改动
-crates/agent-vitals-adapters/ # v0.8 Phase B1：叶子 host 证据适配（claude_code/codex/workbuddy evidence）迁出 core 的纯计算 crate。
-                            #   Phase C(B2)：Codex usage fold（codex_usage）+ 跨宿主 canonical_usage 归一层也迁进来
-crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over core (audit_events), built with wasm-pack
+crates/agent-vitals-domain/ # v0.8 Phase C：PURE computation + 词表契约，single source of truth。
+                            #   src/{contracts,domain,compatibility}/ + lib.rs。contracts/=宿主无关词表
+                            #   （evidence/host_capability/source_identity/usage_fact/r2a，只碰 serde_json）；
+                            #   domain/=跨宿主计算；domain/dsh/=登记的 layer-2 DSH-wire 债（build_dsh_evidence
+                            #   fixture 依赖）；compatibility/=vitals-core 桥。lib.rs 暴露嵌套 + 扁平两套路径。
+crates/agent-vitals-adapters/ # v0.8 Phase B1：叶子 host 证据适配（claude_code/codex/workbuddy evidence）迁出 core 的纯 crate。
+                            #   Phase C(B2)：Codex usage fold（codex_usage）+ 跨宿主 canonical_usage 归一层也迁进来。依赖 domain。
+crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/
 scripts/agent_vitals/       # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
                             #   adapters/（宿主适配器）与 cli/compat/util/paths 留顶层
@@ -56,7 +53,7 @@ docs/                       # design docs (ENGINEERING, DSH_INTEGRATION, AGENT_B
 dsh/                        # DSH-1 profile bundle (registers agent-vitals as a DSH skill)
 dsh-client/                 # dual-face audit plugin (host projection + wasm + client tab)
 src-tauri/                  # 菜单栏 app（Tauri 2，**独立 workspace**，不入根 default-members）：
-                            #   托盘 + 弹出面板展示 今日/本月/预算，计价全部委托 core::cost（不长第四份拷贝）
+                            #   托盘 + 弹出面板展示 今日/本月/预算，计价全部委托 domain::cost（不长第四份拷贝）
 fixtures/ + golden/         # test corpus + byte-for-byte scanner snapshots
 tests/                      # 28 Python test files（含分类守卫 tests/test_classification.py）
 .github/workflows/          # verify.yml, release.yml, package-clawhub.yml
@@ -71,9 +68,9 @@ Python 与 Rust 两侧同构，模块清单见 tests/test_classification.py 的�
 
 The **`agent-vitals-domain` crate is the single source of truth for pure rules**.
 `src/behavior.rs` in the binary is a thin wrapper that re-exports
-`agent_vitals_core::behavior::*` (which the facade forwards to `agent_vitals_domain`) and
-keeps only the I/O entry (`audit_session_log`). The wasm crate wraps the same domain, so
-the browser/Node runs the exact same rules as the CLI — never a second copy.
+`agent_vitals_domain::behavior::*` and keeps only the I/O entry (`audit_session_log`). The
+wasm crate wraps the same domain, so the browser/Node runs the exact same rules as the
+CLI — never a second copy.
 
 **v0.8 crate split (Phase C complete — `docs/AGENT_VITALS_V0_8_ARCHITECTURE_SPEC.md`).**
 Phase A carved `agent-vitals-core/src` into `contracts/` / `domain/` / `compatibility/`
@@ -83,31 +80,42 @@ helpers (`Coords`, `match_behavior`/`match_trajectory` shims, `compaction`/`wast
 `domain/*.rs` production paths; **Step 3 (B2)** moved `codex_usage` + the cross-host
 `canonical_usage` layer into `agent-vitals-adapters`, and the DSH wire interpreters
 (`evidence`/`audit`/`compaction`/`waste`) into `domain/dsh/` as registered layer-2 debt;
-**Step 4** finished the crate split:
+**Step 4** finished the crate split into **three crates**:
 
-- **`agent-vitals-contracts`** — host-agnostic vocabulary (`evidence`, `host_capability`,
-  `source_identity`, `usage_fact`, `r2a`). Depends on `serde_json` only. adapters / domain
-  / the future runtime depend on this without pulling in the domain computation.
-- **`agent-vitals-domain`** — all the pure business computation (`domain/` +
-  `domain/dsh/` + `compatibility/`). Depends on `agent-vitals-contracts` + `vitals-core`.
+- **`vitals-core`** — the host-agnostic engine (unchanged).
+- **`agent-vitals-domain`** — `contracts/` (host-agnostic vocabulary — `evidence`,
+  `host_capability`, `source_identity`, `usage_fact`, `r2a`) + `domain/` (pure business
+  computation) + `domain/dsh/` (registered layer-2 DSH-wire debt) + `compatibility/` (the
+  `vitals-core` bridge). Depends on `vitals-core` + `regex` + `serde_json`.
   `[dev-dependencies] agent-vitals-adapters` for the `domain/usage.rs::tests` that exchange
   only `serde_json::Value` with `canonical_tokens`; the `build_dsh_evidence` fixture tests
-  stay intra-crate in `domain/dsh/` because a `domain → adapters` dev-dep cycle makes Cargo
-  compile domain twice (`multiple versions of crate` for any inline test passing a domain
-  type across the boundary).
-- **`agent-vitals-core`** — thin `pub use` facade, `src/` holds only `lib.rs`. Forwards
-  every historical flat path (`agent_vitals_core::{evidence,behavior,cost,compatibility,
-  dsh_evidence,…}`) so the CLI binary, wasm, `agent-vitals-adapters` and the Tauri menu bar
-  need no change for one version cycle. New code imports from `agent-vitals-domain` /
-  `agent-vitals-contracts` directly.
+  stay in `domain/dsh/` (intra-crate) because a `domain → adapters` dev-dep cycle makes
+  Cargo compile domain twice (`multiple versions of crate` for any inline test passing a
+  domain type across the boundary). `lib.rs` re-exports both nested
+  (`agent_vitals_domain::{contracts,domain}::X`) and flat
+  (`agent_vitals_domain::{evidence,behavior,cost,…}::X`) paths.
+- **`agent-vitals-adapters`** — host wire adapters (Claude/Codex/WorkBuddy evidence, Codex
+  fold, `canonical_usage`). Depends on `agent-vitals-domain`.
 
-The `domain/dsh/` debt is pinned by `agent-vitals-domain/tests/dependency_budget.rs`
+`agent-vitals-core` was a one-cycle re-export facade during Step 4 and was removed at
+Step 4's close — the binary / wasm / adapters / `src-tauri` import `agent_vitals_domain::*`
+directly.
+
+**`domain/` is not yet fully wire-pure.** `domain/dsh/` (`evidence`/`audit`/`compaction`/
+`waste`) still reads DSH raw event shapes directly — it stayed in domain only because
+`domain/*.rs` tests build `CanonicalSession` fixtures via `build_dsh_evidence`, and a
+`domain → adapters` dev-dep cycle can't satisfy that (`multiple versions of crate` for any
+inline test passing a domain type across the boundary). This is **registered debt, not a
+finished state**: moving DSH wire interpretation out of domain into the adapters/hosts
+sessions layer (the wire/fold separation) is **the first item of Phase D**, when
+`hosts/<h>/sources/` lands and `sessions/` becomes the natural home for wire parsing. Until
+then the debt is *pinned* (never grows) by `agent-vitals-domain/tests/dependency_budget.rs`
 (`domain_dsh_is_the_only_registered_layer2_wire_module` +
-`domain_production_code_outside_dsh_has_no_host_adapter_dependency`; may shrink with the
-post-Phase-D wire/fold separation, never grow). Crate purity — contracts stays
-serde_json-only, domain takes no fs/process/env/clock and never reverse-deps the facade or
-an adapter — is executable in each crate's `tests/dependency_budget.rs`; `facade.rs` in
-`agent-vitals-core/tests/` pins that the re-exports still resolve.
+`domain_production_code_outside_dsh_has_no_host_adapter_dependency`) — the rest of
+`domain/` outside `domain/dsh/` takes no host wire. Other module boundaries — `contracts/`
+stays serde_json-only (`contracts_module_stays_vocabulary_only`), domain takes no
+fs/process/env/clock, adapters is one-way (`adapters → domain`) — are executable in each
+crate's `tests/dependency_budget.rs`.
 
 ## Commands
 
@@ -120,10 +128,11 @@ python3 tests/golden_runner.py --diff      # …and show the first mismatch
 python3 tests/golden_runner.py --update    # re-freeze after an intended change (confirm first!)
 python3 -m unittest tests.test_invariants  # the 12-invariant acceptance gate
 
-# Rust — ~970 tests across the workspace: binary + agent-vitals-{contracts,domain,adapters}
-# + vitals-core. `agent-vitals-core` is a facade (0 lib tests, a `facade.rs` re-export
-# check). The wasm crate has no host-side tests; its build is wasm-pack (below).
-cargo test                                 # default members: binary + the 4 lib crates
+# Rust — ~970 tests: binary (313) + agent-vitals-domain (431 lib + host_contract +
+# dependency_budget + 15 svNNN_parity) + agent-vitals-adapters (56 + dependency_budget)
+# + vitals-core (53 + boundary/replay/perf/pipeline). The wasm crate has no host-side
+# tests; its build is wasm-pack (below).
+cargo test                                 # default members: binary + the 3 lib crates
 cargo clippy --release --all-targets -- -D warnings   # CI gate: scan path must not unwrap
 cargo build --release                       # the CLI binary
 
@@ -357,9 +366,9 @@ register: when changing one of the invariants above, update the comment explaini
 trade-off, and add a regression test whose docstring says what actually broke.
 
 When a rule changes, it changes in **three places that must stay in lockstep**: the Rust
-domain crate (`crates/agent-vitals-domain/`, reached as `agent_vitals_core::*` through the
-facade), the Python implementation (`scripts/agent_vitals/agent/behavior.py`), and — for
-anything the DSH audit tab uses — the wasm crate (rebuild + re-copy the `.wasm` into
+domain crate (`crates/agent-vitals-domain/`, imported as `agent_vitals_domain::*`), the
+Python implementation (`scripts/agent_vitals/agent/behavior.py`), and — for anything the
+DSH audit tab uses — the wasm crate (rebuild + re-copy the `.wasm` into
 `dsh-client/`). The differential golden guard
 catches Python↔Rust drift; the wasm↔CLI drift is caught only by re-running the wasm build
 against the same fixtures, so verify that manually. The **trajectory detectors** (`trajectory.rs` ↔ `trajectory.py` ↔ wasm `audit_events` 合并 ↔ dsh 提取的 `turn/start·step/start·turn/end·step/end` 边界信号) are the same lockstep. The **cost fold** (`usage.rs` ↔
@@ -371,7 +380,7 @@ The **v0.7 UsageFact emitters** (`{claude,codex,dsh}_usage_fact.py` ↔ `src/age
 {claude,codex,dsh}_usage_fact.rs`, driven by the `{claude,codex,dsh}-usage-facts` CLIs)
 are Python↔Rust byte-parity locksteps pinned by `AGENT_VITALS_BIN` differential in
 `tests/test_{claude,codex,dsh}_usage_fact.py`. They share ONE identity primitive —
-`crates/agent-vitals-contracts/src/contracts/source_identity.rs` (`canonical_json` + `fnv1a64_hex`) ↔
+`crates/agent-vitals-domain/src/contracts/source_identity.rs` (`canonical_json` + `fnv1a64_hex`) ↔
 top-level `scripts/agent_vitals/source_identity.py` — which is also what
 `usage_fact.{rs,py}`'s `fact_id` and the DSH observer's frozen `source_event_id` hash
 through; **no consumer may grow a second inline copy** (both packaging allow-lists —
@@ -463,7 +472,7 @@ day, never doubles it); a *backfill* into an already-archived month is a per-day
 Query a historical month with `state.read_month("YYYY-MM")` /
 `agent-vitals budget show --month YYYY-MM`; `state.list_months()` /
 `agent-vitals state months` enumerates what has data. The computation (`token_by_date_model`,
-`priced_day`) is in the core crate / `cost.py` precisely so the Tauri menu bar and any future
+`priced_day`) is in agent-vitals-domain / `cost.py` precisely so the Tauri menu bar and any future
 month-query surface reuse it rather than growing a fourth copy. The DeepSeek **price
 table** lives only in `scripts/agent_vitals/pricing.json` (CLI 两侧读它；`dsh-client/
 pricing.json` 是 build 时复制出的运行时份，宿主 `costReport` 投影读它；`styles/index.ts`
@@ -475,10 +484,10 @@ price table: `crates/agent-vitals-domain/src/domain/cost.rs` ↔ `scripts/agent_
 peak/off-peak-split pricing math over `{by_model, sequence}`; the CLI two-language parity
 is caught by `test_cli_matrix.py`'s `both()` differential, the TS mirror by
 `dsh-client/scripts/verify-host.mjs` asserting real numbers against the checked-in
-`pricing.json`. (2026-08: cost 从二进制 `src/agent/cost.rs` 迁进 core crate —— preflight
+`pricing.json`. (2026-08: cost 从二进制 `src/agent/cost.rs` 迁进 domain crate —— preflight
 Phase 0-1 —— 二进制侧退成 `pub use` 薄封装；`priced_day` 一并进 core
 （`cost.rs::priced_day` ↔ `cost.py::priced_day`，`tests/test_cost_priced_day.py` 交叉锁定），
-Tauri 菜单栏与未来按月查询 surface 直接 `use agent_vitals_core::cost`，不长第四份拷贝。)
+Tauri 菜单栏与未来按月查询 surface 直接 `use agent_vitals_domain::cost`，不长第四份拷贝。)
 
 Scan output must never be committed — `.gitignore` covers `skill-scan*.json`, `scan-*.json`,
 `*.scan.json`, and now also the npm `node_modules/` of `dsh/`/`dsh-client/`. The committed

@@ -1,10 +1,13 @@
 # Agent Vitals 目录与模块边界设计
 
 > 状态：目标架构 **v3.1**（2026-09-04：宿主统一为 `agent-vitals-hosts` 单 crate +
-> feature-gated `sources/`，见 §4/§5/§6）；Phase A 完成、Phase B1 已实施、**Phase C
-> （C-minimal）Step 1-4 完成**——`agent-vitals-contracts` + `agent-vitals-domain` 已
-> 抽出，`agent-vitals-core` 退成薄 re-export facade（执行记录见
-> `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6bis–§6quinquies）。B2 随 Step 3 一并收口。
+> feature-gated `sources/`，见 §4/§5/§6）；**Phase A/B/C 完成**——workspace 现为
+> `vitals-core` ← `agent-vitals-domain`（`contracts/` + `domain/` + `compatibility/`）
+> ← `agent-vitals-adapters` ← binary/wasm/src-tauri（§3.1 的图）。`agent-vitals-core`
+> 与中途的 `agent-vitals-contracts` 独立 crate 均已撤销；调用方直接
+> `use agent_vitals_domain::*`。执行记录见 `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md`
+> §6bis–§6quinquies。**遗留一处债**：`domain/dsh/` 仍直接解析 DSH wire，wire/fold
+> 分离是 Phase D 首项（见 Phase C / Phase D 段）。
 > 适用范围：Rust workspace、Tauri、Python 便携实现、宿主接入与测试资产  
 > 关联文档：`ARCHITECTURE.md`、`DELIVERY_ARCHITECTURE.md`、
 > `TAURI_RUNTIME_WORKBENCH_SPEC.md`、`VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md`、
@@ -14,11 +17,13 @@
 > Rust/Python/Tauri 代码的架构差距评估。本文描述目标边界，不授权在功能提交中夹带
 > 目录搬迁。
 >
-> v3 实施记录：Phase A 在独立分支 `codex/v0.8-phase-a-boundaries` 完成。现有
-> `agent-vitals-core` 已建立 `contracts/domain/adapters/hosts` 所有权目录，并以
-> compatibility re-export 保持旧公开路径；DSH Session 读取也已从 Skill inventory
-> 移到 Session source 后注入。Phase B1 已建立独立 adapters crate 并迁出无反向
-> 依赖的叶子 adapter；Phase B2 须在 Phase C 解除两条依赖债务后收口。
+> v3 实施记录：Phase A 建 `contracts/domain/adapters/compatibility` 所有权目录并以
+> re-export 保旧路径；DSH Session 读取从 Skill inventory 移到 Session source 后注入。
+> Phase B1 抽出 `agent-vitals-adapters` 并迁出叶子 evidence adapter。Phase C（Step 1–4）
+> 断开 `domain → host` 生产耦合、把 `contracts/`+`domain/`+`compatibility/` 收进
+> `agent-vitals-domain`、撤销 `agent-vitals-core` facade。B2（Codex fold + canonical
+> 层物理迁 adapters）随 Step 3 收口。**下一步是 Phase D**（`agent-vitals-runtime` +
+> host `sources/`，首项为 wire/fold 分离）。
 
 ## 0. 结论
 
@@ -69,10 +74,10 @@ MCP Surface         外部工具服务的配置与运行健康（后续阶段）
 - `User Profile`：当前用户声明的账户、套餐、费用和计费路由；
 - `agent-vitals`：用户看到的产品名、CLI 命令和安装包名。
 
-现有 `agent-vitals-core` 不直接改名为 `agent-vitals`。目标状态是拆成
-`agent-vitals-domain`（domain/）+ `agent-vitals-hosts`（现 `agent-vitals-adapters`
-的 `hosts/` 加 `sources/`）+ 薄 `agent-vitals-core`（contracts/ + compatibility/）；
-拆分完成前保留当前 crate 名，避免大规模无语义重构。
+**已到位**（Phase C 收尾）：`agent-vitals-domain` = `contracts/`（宿主无关词表）+
+`domain/`（跨宿主计算）+ `compatibility/`（vitals-core 桥）。`agent-vitals-core` 已删除。
+**Phase D 目标**：`agent-vitals-adapters` → `agent-vitals-hosts`（`hosts/<h>/` 加
+feature-gated `sources/`），DSH wire 从 `domain/dsh/` 迁进 `hosts/dsh/sessions/`。
 
 > **v3.1 修订（2026-09-04）**：§4 起把 v3 的「`agent-vitals-adapters/hosts/<h>/`（纯）
 > + `agent-vitals-runtime/sources/<h>/`（I/O）双 crate」统一为 `agent-vitals-hosts`
@@ -931,19 +936,22 @@ Catalog 中每张 rate card 应携带 `catalog_version`、币种、`effective_fr
 
 ## 11. 现有文件迁移映射
 
+> 「当前文件/目录」列写的是 **v0.8 之前**的扁平布局。Phase B/C 已落地的行标 ✅
+> 并给出实际落点；未标的仍待 Phase D/E。
+
 | 当前文件/目录 | 目标位置 |
 |---|---|
 | `crates/vitals-core` | 原位保留 |
-| `agent-vitals-core/usage_fact.rs` | `agent-vitals-domain/contracts/usage_fact.rs` |
-| `agent-vitals-core/r2a.rs` 的纯契约 | `agent-vitals-domain/contracts/session_key.rs` |
-| `agent-vitals-core/r2a.rs` 的存储投影 | `agent-vitals-runtime/state/` |
-| `agent-vitals-core/claude_code_evidence.rs` | `agent-vitals-adapters/hosts/claude_code/evidence.rs` |
-| `agent-vitals-core/codex_evidence.rs` | `agent-vitals-adapters/hosts/codex/evidence.rs` |
-| `agent-vitals-core/codex_usage.rs` | `agent-vitals-adapters/hosts/codex/usage.rs` |
-| `agent-vitals-core/dsh_evidence.rs` | `agent-vitals-adapters/hosts/dsh/evidence.rs` |
-| `agent-vitals-core/workbuddy_evidence.rs` | `agent-vitals-adapters/hosts/workbuddy/evidence.rs` |
-| `agent-vitals-core/usage.rs` | 拆为 domain 通用计算与 `adapters/hosts/dsh/usage.rs` |
-| `agent-vitals-core/cost.rs` | 拆为 domain `models/` + `billing/`；宿主字段翻译进对应 adapter |
+| `agent-vitals-core/usage_fact.rs` | ✅ `agent-vitals-domain/src/contracts/usage_fact.rs` |
+| `agent-vitals-core/r2a.rs` 的纯契约 | ✅ `agent-vitals-domain/src/contracts/r2a.rs`（`SessionKey` 等） |
+| `agent-vitals-core/r2a.rs` 的存储投影 | `agent-vitals-runtime/state/`（Phase D） |
+| `agent-vitals-core/claude_code_evidence.rs` | ✅ `agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs` |
+| `agent-vitals-core/codex_evidence.rs` | ✅ `agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs` |
+| `agent-vitals-core/codex_usage.rs` | ✅ `agent-vitals-adapters/src/hosts/codex/sessions/usage.rs` |
+| `agent-vitals-core/dsh_evidence.rs` | ⏳ `agent-vitals-domain/src/domain/dsh/evidence.rs`（登记债，Phase D 迁 `hosts/dsh/sessions/`） |
+| `agent-vitals-core/workbuddy_evidence.rs` | ✅ `agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs` |
+| `agent-vitals-core/usage.rs` | ✅ `agent-vitals-domain/src/domain/usage.rs`（通用计算）；DSH wire 部分 = `domain/dsh/`（Phase D 迁 adapters） |
+| `agent-vitals-core/cost.rs` | `agent-vitals-domain/src/domain/cost.rs`（as-is 已进）；拆 `models/` + `billing/` 并入 Phase D |
 | `src/skills/discovery.rs`、`src/skills/inventory.rs` | runtime Skill Source + Skill service；移除对 Session reader 的直接编排 |
 | `src/skills/snapshot.rs`、`scripts/agent_vitals/paths.py`、Tauri `overview.rs` 的 home 解析 | `agent-vitals-runtime/user/home.rs`，迁移期保留跨实现契约测试 |
 | `src/agent/*session*.rs` | `agent-vitals-runtime/sources/<host>/reader.rs` |
@@ -958,8 +966,8 @@ Catalog 中每张 rate card 应携带 `catalog_version`、币种、`effective_fr
 | `pricing.json` 里的套餐定义 | `assets/catalog/subscriptions/`；用户购买事实进入 `~/.agent-vitals/billing.toml` |
 | 模板、图标 | `assets/` 对应子目录 |
 
-Stage 3 DSH observer 的当前落点仍可按已经批准的 v4 规格放入现有
-`agent-vitals-core::usage`，先守住 byte-neutral 与 Python/Rust parity。目标架构下它属于
+Stage 3 DSH observer 的当前落点在 `agent-vitals-domain::usage`（`agent-vitals-core`
+已删除），先守住 byte-neutral 与 Python/Rust parity。目标架构下它属于
 `agent-vitals-adapters::hosts::dsh::observer`。这次功能实现与目录迁移应分开提交，不能用
 架构整理扩大 Stage 3 的变更面。
 
@@ -1058,57 +1066,60 @@ WASM **暂不登记** `agent-vitals-adapters` 依赖——`agent-vitals-wasm/src
 adapter crate。§3.1 的 `wasm ─► adapters` 边是**未来边**：等某个 Phase 让 wasm
 经 adapter facade 取证据时，届时那个 Phase 带真实调用点一起加，不提前挂空依赖。
 
-**B2（随 Phase C Step 3 收口，2026-09-04）：**
+**B2（随 Phase C Step 3 收口，2026-09-04 — ✅ 完成）：**
 
 - [x] 物理迁移 Codex usage（`codex_usage` + `canonical_usage` → `agent-vitals-adapters`）；
-- [x] DSH evidence 未进 adapters 而落 `agent-vitals-domain/src/domain/dsh/`（登记的
-      layer-2 债——`build_dsh_evidence` fixture 跨 crate 传 `CanonicalSession` 会撞
-      `multiple versions of crate`）；
-- [x] `agent-vitals-core/src/adapters/` 删除，撤掉相关 re-export；全量门禁与
-      Python/Rust parity 零漂移（`AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6quater）。
+- [x] DSH wire（`evidence`/`audit`/`compaction`/`waste`）**未进 adapters**——落
+      `agent-vitals-domain/src/domain/dsh/`，作登记的 layer-2 债（`build_dsh_evidence`
+      fixture 跨 crate 传 `CanonicalSession` 会撞 `multiple versions of crate`，见下 Phase C）；
+- [x] `agent-vitals-core/src/adapters/` 删除；全量门禁与 Python/Rust parity 零漂移
+      （`AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6quater）。
 
-Phase B 实施时确认了原提案未展开的 Cargo 环：`domain::usage` 仍调用 Codex fold，
-`domain::behavior/trajectory/compaction/waste` 仍调用 DSH evidence。若 core 依赖新 adapter
-crate，同时 adapter 又依赖 core contracts/domain，会形成循环。因此 Phase B1 采用
-可编译的单向结构：
+原提案未展开的 Cargo 环（`domain::usage` 调 Codex fold、`domain::{behavior,trajectory,
+compaction,waste}` 调 DSH evidence，若 domain 反依赖 adapter 就成环）已由 Phase C
+Step 1–3 拆解：纯计算耦合（`Coords`、canonical 归一层、`match_behavior/trajectory` shim）
+迁走后，`domain/` **生产**代码对 host 适配的引用归零；`domain/dsh/` 的 4 个 wire
+模块是仅剩的一处，且只被 `#[cfg(test)]` fixture 依赖（见 Phase C）。
 
-```text
-agent-vitals-adapters ──► agent-vitals-core
-          │
-          └─ 统一 re-export core 中暂留的 codex_usage / dsh_evidence
-```
-
-这两项被架构测试钉为**仅有的 Phase C 残余债务**，不得扩张。Phase C 必须先把宿主
-wire 解释从 domain 消费链中解耦，再执行 Phase B2 物理迁移；不能通过复制 parser、
-fold 或 identity 逻辑来“消除”Cargo 环。
-
-### Phase C：抽出 `agent-vitals-domain`
+### Phase C：抽出 `agent-vitals-domain`（✅ 完成，2026-09-04）
 
 > **代码调研先行**（用户 2026-09-04 要求）：`docs/AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md`。
 > 调研结论修正了本节的范围估计——真实的 `domain → host` 生产耦合是 **6 个点 / ~370 行**
-> （3 组：`Coords`+`tool_invocation` → contracts；`match_behavior`/`match_trajectory`
-> raw shim → dsh adapter；canonical 归一层（生产零调用点）→ adapters），**不是**
-> 「拆 `usage.rs` 188KB」。
+> （3 组：`Coords`+`tool_invocation`；`match_behavior`/`match_trajectory` raw shim；
+> canonical 归一层），**不是**「拆 `usage.rs` 188KB」。
 
-- **C1–C3（阻塞项，见调研 §2–4）** — ✅ **完成**（Step 1a/1b/2a/2b，commit
-  `4b44b8c`..`6ce4d13`）：断 `domain → {dsh_evidence, codex_usage}` 的 3 组耦合。
-- **B2** — ✅ **完成**（Step 3，commit `ecdda70`）：`codex_usage` + `canonical_usage`
-  迁进 `agent-vitals-adapters`；DSH wire（`evidence`/`audit`/`compaction`/`waste`）
-  落 `agent-vitals-domain/src/domain/dsh/`（成环限制，登记的 layer-2 债）。
-- **抽 crate** — ✅ **完成**（Step 4，本提交）：实做拆成**三个** crate——
-  `agent-vitals-contracts`（词表，`serde_json` only）+ `agent-vitals-domain`
-  （`domain/` + `compatibility/`）+ `agent-vitals-core`（**薄 re-export facade**，
-  `src/` 只有 `lib.rs`）。`contracts` 留 core 会让 `domain → core → domain` 成环，
-  故 `contracts` 也独立；facade 保 123 处 `agent_vitals_core::` 调用点零改动。
-  详见 `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6quinquies。
+- **C1–C3（阻塞项，见调研 §2–4）** — ✅ Step 1a/1b/2a/2b（commit `4b44b8c`..`6ce4d13`）：
+  `Coords`+`tool_invocation` → `domain/coords.rs`（过渡）；`match_behavior/trajectory` raw
+  shim → DSH adapter；canonical 归一层 → `agent-vitals-adapters`。`domain/` 生产代码
+  对 `crate::{dsh_evidence,codex_usage,adapters}` 引用归零。
+- **B2** — ✅ Step 3（commit `ecdda70`）：`codex_usage` + `canonical_usage` 迁进
+  `agent-vitals-adapters`。DSH wire（`evidence`/`audit`/`compaction`/`waste`）**留在
+  `domain/dsh/`**——`domain/{behavior,trajectory}.rs` 的 inline `#[cfg(test)]` 用
+  `build_dsh_evidence` 造 `CanonicalSession` fixture，`domain → adapters` 的
+  `[dev-dependencies]` 成环会让 Cargo 把 domain 编两遍（`multiple versions of crate`）。
+- **抽 crate** — ✅ Step 4（commit `f4180ca` + 收尾）：`contracts/` + `domain/` +
+  `compatibility/` 整体成 **`agent-vitals-domain`** crate。Step 4 中途一度多出
+  `agent-vitals-contracts`（独立词表 crate）与 `agent-vitals-core`（薄 re-export
+  facade）两层，Step 4 收尾把它们撤销——`contracts/` 作 domain 的子模块（对齐 §9），
+  调用方直接 `use agent_vitals_domain::*`（binary/wasm/adapters/src-tauri 全改）。
+  终态 = §3.1 的图：`adapters → domain → vitals-core`。详见调研文档 §6quinquies。
+- **Phase C 遗留的一处债（转 Phase D 首项）**：`domain/dsh/` 里 4 个模块仍**直接
+  解析 DSH 原始事件形状**，与「domain 不解释宿主 wire」的目标不一致。它只以
+  `#[cfg(test)] build_dsh_evidence` fixture 形式被依赖，由
+  `agent-vitals-domain/tests/dependency_budget.rs` 钉为**唯一**登记债、不许扩张。
+  wire/fold 分离（把这 4 个模块迁进 `hosts/<h>/sessions/`）是 **Phase D 的第一项**
+  ——那时 `hosts/<h>/sources/` 落地，`sessions/` 收 wire 解析顺理成章。
 - **不在 Phase C**：`cost.rs` 99KB 拆 Model Resolver / Rate Card / BillingContext /
-  Cost Projection —— `cost.rs` 零 host import，是 domain **内部**重构，建议并入
-  Phase D（与 Model Catalog / BillingContext / User Profile 同批，那时才有真实需求
-  驱动）。`usage.rs` 的「DSH wire 解析混在 domain」同类，as-is 进 domain crate，
-  wire/fold 分离另开。
+  Cost Projection —— 零 host import，是 domain **内部**重构，并入 Phase D（与 Model
+  Catalog / BillingContext / User Profile 同批）。
 
 ### Phase D：建立 `agent-vitals-runtime` + host `sources/`
 
+- **首项 · wire/fold 分离（Phase C 遗留债）**：把 `agent-vitals-domain/src/domain/dsh/`
+  的 4 个模块（`evidence`/`audit`/`compaction`/`waste`——直接解析 DSH 原始事件）迁进
+  `hosts/dsh/sessions/`。此时 `hosts/<h>/sources/` 已落地，`sessions/` 是 wire 解析的
+  自然归属；迁走后 `domain/` 对宿主 wire 形状彻底不知情，`build_dsh_evidence` fixture
+  改由 adapters crate 的 integration test 承载（不再是 domain 的 inline 依赖）。
 - **host I/O 落 `hosts/<h>/sources/`**（v3.1）：`src/dsh.rs`（zstd）、
   `src/agent/workbuddy_session.rs`（sqlite）、`src/agent/*session*.rs`（readers）、
   `src/agent/discovery.rs` 迁进对应宿主的 `sources/`，`agent-vitals-hosts` 加

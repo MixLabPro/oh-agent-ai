@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """R1d 接管协议（§4.2/§4.3 最小可测子集）的差分 + 字符化锁步测试。
 
-纯规则单一真相源在 `crates/agent-vitals-core/src/domain/takeover.rs`；Python
+纯规则单一真相源在 `crates/agent-vitals-domain/src/domain/takeover.rs`；Python
 `agent/takeover.py` 是 mirror，binary `src/agent/takeover.rs` 是 I/O + fold 驱动。
 本文件三层钉死三者不漂移：
 

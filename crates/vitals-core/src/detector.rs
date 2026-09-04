@@ -36,7 +36,7 @@ impl SignalRequirement {
 /// 控（"这条信号有没有可消费事件"）不受影响，它读的是 `events`（已经按
 /// trajectory 切好），不读 `coverage`；但 Detector 自己如果在 `detect()`
 /// 里读 `ctx.coverage` 做展示或置信度调整，在**单 trajectory** 输入下没问
-/// 题（`agent-vitals-core` 现在的每次 Engine 调用都只喂一个 session、只产
+/// 题（`agent-vitals-domain` 现在的每次 Engine 调用都只喂一个 session、只产
 /// 生一条 trajectory），一旦真的有多 trajectory 输入（比如用 `ByActor` 分
 /// 组、或者跨来源合并审计），每条 trajectory 看到的 `coverage` 其实是"整
 /// 个输入的证据密度"，不是"这条 trajectory 自己的"——数字可能来自另一个

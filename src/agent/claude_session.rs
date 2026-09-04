@@ -246,7 +246,7 @@ pub fn render_claude_session_list(out: &Value) -> String {
 /// host_id」。SV607/608 的 host-capability degrade 由 core `host_capability`
 /// 的 `HOSTS` 行驱动，是这条 host_id 唯一改变的行为。
 fn claude_audit_projection(evidence: &ClaudeEvidence) -> Value {
-    agent_vitals_core::canonical_audit::audit_projection(&evidence.canonical, "claude-code")
+    agent_vitals_domain::canonical_audit::audit_projection(&evidence.canonical, "claude-code")
 }
 
 /// `claude-session` 单会话审计：coverage（§13 逐信号）+ SV601–614 findings。

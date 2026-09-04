@@ -294,7 +294,7 @@ pub fn date_span_of(records: &[Value], meta: &WorkbuddySessionMeta) -> Value {
 /// `summary.rules_unavailable`）塌缩进 `canonical_audit::audit_projection`，
 /// 这里只剩「传哪个 host_id」。
 fn workbuddy_audit_projection(evidence: &WorkbuddyEvidence) -> Value {
-    agent_vitals_core::canonical_audit::audit_projection(&evidence.canonical, "workbuddy")
+    agent_vitals_domain::canonical_audit::audit_projection(&evidence.canonical, "workbuddy")
 }
 
 /// `workbuddy-session --list` 的排序：`updated_at` 降序（最新在前），平局按 session_id

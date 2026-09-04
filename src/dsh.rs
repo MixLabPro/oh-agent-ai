@@ -301,7 +301,7 @@ fn is_usage_event(event: &Value, etype: &str) -> bool {
     // 同一笔用量在多个事件里重复出现时会被双计。
     event
         .get("data")
-        .and_then(|d| agent_vitals_core::usage::usage_shaped_tokens(d, 0))
+        .and_then(|d| agent_vitals_domain::usage::usage_shaped_tokens(d, 0))
         .is_some()
 }
 

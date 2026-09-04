@@ -36,16 +36,20 @@ fn adapters_dependency_budget_is_pure_and_one_way() {
     actual.sort();
     assert_eq!(
         actual,
-        vec!["agent-vitals-core", "regex", "serde_json", "vitals-core"]
+        vec!["agent-vitals-domain", "regex", "serde_json", "vitals-core"]
     );
 
-    let core_manifest =
-        fs::read_to_string(manifest_dir().join("../agent-vitals-core/Cargo.toml")).unwrap();
+    // `adapters → domain` 是唯一允许的**生产**方向。`domain → adapters` 只以
+    // `[dev-dependencies]` 存在（`domain/usage.rs::tests` 经它调 `canonical_tokens`，
+    // 只换 `serde_json::Value`），Cargo 允许 dev-dep 成环。这里只断言 domain 的
+    // `[dependencies]`（`dependency_keys` 在 `[dev-dependencies]` 处停）不含 adapters。
+    let domain_manifest =
+        fs::read_to_string(manifest_dir().join("../agent-vitals-domain/Cargo.toml")).unwrap();
     assert!(
-        !dependency_keys(&core_manifest)
+        !dependency_keys(&domain_manifest)
             .iter()
             .any(|v| v == "agent-vitals-adapters"),
-        "core → adapters would create a Cargo cycle; only adapters → core is allowed in Phase B"
+        "domain's [dependencies] must not reference adapters (only the dev-dep back-edge is allowed)"
     );
 }
 

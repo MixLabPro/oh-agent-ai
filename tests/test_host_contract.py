@@ -1,6 +1,6 @@
 """v0.6 host-contract spec §8：完整性守卫 G2–G10（G1 已在
 `test_cli_matrix.py::test_hosts_json_byte_parity`/`test_hosts_human_format_byte_parity`
-落地，Rust 侧对应见 `crates/agent-vitals-core/src/contracts/host_capability.rs` 与
+落地，Rust 侧对应见 `crates/agent-vitals-domain/src/contracts/host_capability.rs` 与
 `canonical_audit.rs` 的 `#[cfg(test)]`）。
 
 延续 `test_classification.py` 的显式集合风格：清单人工写、checked-in，不从行
@@ -9,7 +9,7 @@
 
 Rust 与 Tauri 端的对应实现（G9 的 `HostRuntimeRegistration`、G7 的托盘/
 sessFilter 展示层派生）已落地：core `host_capability.rs`（Rust）+
-`crates/agent-vitals-core/tests/host_contract.rs`、二进制侧
+`crates/agent-vitals-domain/tests/host_contract.rs`、二进制侧
 `src/agent/host_runtime_registration.rs`、src-tauri 侧 `overview.rs`/
 `lib.rs::host_display_name` 的单测已经钉住了各自的部分；本文件补
 `workbench.html` 的 sessFilter chips 这一处纯前端静态资源（读文件文本，

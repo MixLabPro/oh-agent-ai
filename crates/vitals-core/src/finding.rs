@@ -13,7 +13,7 @@ use crate::canonical::{canonical_string, sha256_hex};
 use crate::evidence::Evidence;
 use crate::id::{FindingId, TrajectoryId};
 
-/// 三级严重度，沿用现有 `agent-vitals-core` 的 critical/warning/info 三分。
+/// 三级严重度，沿用现有 `agent-vitals-domain` 的 critical/warning/info 三分。
 /// 派生 `Ord` 按声明顺序：`Critical < Warning < Info`，升序排列即"最严重的
 /// 排在最前"——§12.4 "findings：severity rank" 的具体含义。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

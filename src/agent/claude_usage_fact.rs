@@ -1,7 +1,7 @@
 //! v0.7 Stage 1：Claude Code 原始 session JSONL → UsageFact emitter（Rust 镜像）。
 //!
 //! 镜像 `scripts/agent_vitals/agent/claude_usage_fact.py` 的 Python 端实现，
-//! 走 `agent_vitals_core::usage_fact::build_usage_fact` 同一契约函数。
+//! 走 `agent_vitals_domain::usage_fact::build_usage_fact` 同一契约函数。
 //! Python↔Rust byte-parity 钉测：同一 JSONL 两侧 stdout 字节相等。
 //!
 //! Stage 1 commit 1（extractor 重构 + golden 零漂移）先落地 fold 侧的字节
@@ -19,9 +19,9 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use crate::agent::claude_cost::{day_from_iso_ts, ms_from_iso_ts, row_tokens};
-use agent_vitals_core::source_identity::{canonical_json, fnv1a64_hex};
-use agent_vitals_core::usage::is_peak_slot;
-use agent_vitals_core::usage_fact::build_usage_fact;
+use agent_vitals_domain::source_identity::{canonical_json, fnv1a64_hex};
+use agent_vitals_domain::usage::is_peak_slot;
+use agent_vitals_domain::usage_fact::build_usage_fact;
 
 // P0 哨兵常量——与 Python `claude_usage_fact.py` 同源字节。
 // pub(crate)：claude_cost.rs 的 fold `apply_record` 消费本模块 parser 时，

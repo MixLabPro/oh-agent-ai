@@ -9,7 +9,7 @@
     SV614 权限异常 —— 同一调用反复审批 / 连续拒绝 / 危险模式反复授予
 
 findings 复用 8 键结构，由消费端追加在 `match_behavior` 之后（字节序稳定）。
-单一真相源是 `crates/agent-vitals-core/src/domain/trajectory.rs`；parity 测试与
+单一真相源是 `crates/agent-vitals-domain/src/domain/trajectory.rs`；parity 测试与
 `tests/test_cli_matrix.py` 的 both() 差分逐字节看守。
 
 阈值常量选值避开 `fixtures/dsh/behavior.jsonl`（无重复调用、≤2 审批、≤1 超时、

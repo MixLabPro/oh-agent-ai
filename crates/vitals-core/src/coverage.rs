@@ -1,4 +1,4 @@
-//! §7.3 Coverage——沿用 `agent-vitals-core::evidence::CoverageCounts` 的四桶
+//! §7.3 Coverage——沿用 `agent-vitals-domain::evidence::CoverageCounts` 的四桶
 //! 计数语义（measured / derived / lossy / unmetered），移植进通用 crate、以
 //! `SignalId` 为键。`ratio()` 的语义不变：`total == 0` 时必须是 `None`，
 //! 不能输出 `0.0`——`Unavailable` 不得被序列化为零（§4.3）的数值版本。

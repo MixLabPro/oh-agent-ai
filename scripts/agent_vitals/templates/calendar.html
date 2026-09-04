@@ -7,7 +7,7 @@
   把 state.py 已经写好的 today.json / month.json 渲染成一张热力图。**单一
   真相源是 `scripts/agent_vitals/state.py`**，本模板对其 schema 是「只读、
   只渲染、发现不符就报错」。任何字段含义的改动必须先回到 state.py 与
-  crates/agent-vitals-core/，再回这里同步；反过来用本模板去「教」state.py
+  crates/agent-vitals-domain/，再回这里同步；反过来用本模板去「教」state.py
   怎么写 schema 是方向性错误。
 
   ── 与 state.py 的 schema 对应 ──────────────────────────────────────────────
@@ -68,7 +68,7 @@
     JSON——JS 这份硬编码公式只在那个字段不存在时（这个功能上线前的旧
     数据）才会被用到。若价目表（pricing.json）改了，精算路径自动跟着走；
     只有这份 fallback 公式需要手动同步（与
-    scripts/agent_vitals/cost.py::_price + crates/agent-vitals-core/src/domain/cost.rs
+    scripts/agent_vitals/cost.py::_price + crates/agent-vitals-domain/src/domain/cost.rs
     + dsh-client/src/host/index.ts::costReportFrom 平行）。
     tests/test_pricing_lockstep.py 守价目表源头一致性，fallback 副本目前没
     自动测——这是已知的单点，接受它只是「大致近似」。

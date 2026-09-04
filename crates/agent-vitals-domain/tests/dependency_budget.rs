@@ -1,20 +1,20 @@
 //! v0.8 目标架构（`docs/AGENT_VITALS_V0_8_ARCHITECTURE_SPEC.md` §3.3 依赖预算 /
-//! §14.2 / §15 DoD）的**可执行守卫**。Phase C Step 4 把 `agent-vitals-core`
-//! 拆成 `agent-vitals-contracts`（宿主无关词表）+ `agent-vitals-domain`
-//! （本 crate，纯计算）+ `agent-vitals-core`（薄 re-export facade）。本文件钉
-//! 住 **`agent-vitals-domain` 必须保持纯计算**：不许 I/O / 原生 / 运行时依赖
-//! 悄悄进来，方向只能 `adapters → domain`（domain 不许回依赖 facade 或 adapter）。
-//! 迁移过程中任何一步破坏这条，`cargo test` 立刻红。
+//! §14.2 / §15 DoD）的**可执行守卫**。Phase C 把 `agent-vitals-core` 拆解，最终
+//! 收进单个 **`agent-vitals-domain`**：`contracts/`（宿主无关词表）+ `domain/`
+//! （纯计算）+ `compatibility/`（vitals-core 桥）。中途的 `agent-vitals-contracts`
+//! 独立 crate 与 `agent-vitals-core` facade 都已撤销（见
+//! `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6sexies）。本文件钉住
+//! **`agent-vitals-domain` 必须保持纯计算**：不许 I/O / 原生 / 运行时依赖悄悄
+//! 进来，方向只能 `adapters → domain`（domain 不许回依赖 adapter）；`contracts/`
+//! 子模块不许糊进 domain 计算（`contracts_module_stays_vocabulary_only`）。
 //!
 //! 实测基线：`agent-vitals-domain/src` 的非 test 代码对
 //! `std::fs`/`std::process`/`std::env`/`SystemTime::now` 命中数是 0，
-//! `[dependencies]` 只有 `agent-vitals-contracts`/`regex`/`serde_json`/
-//! `vitals-core`。守卫是防回归，不是修 bug。
+//! `[dependencies]` 只有 `regex`/`serde_json`/`vitals-core`。守卫是防回归，不是修 bug。
 //!
 //! 做法与 `crates/vitals-core/tests/dependency_boundary.rs` 同源：源码/清单
 //! 文本层面的静态断言，不引 `cargo metadata`。测试范围仅本 crate 自己
-//! （`CARGO_MANIFEST_DIR`），不跨仓。`agent-vitals-contracts` 的纯净度由
-//! `crates/agent-vitals-contracts/tests/dependency_budget.rs` 各自守。
+//! （`CARGO_MANIFEST_DIR`），不跨仓。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -75,13 +75,13 @@ const FORBIDDEN_DEP_KEYS: &[&str] = &[
     // 时间库 —— CLAUDE.md 纪律：core 的日期用手写 civil 数学，chrono 不是依赖
     "chrono",
     "time",
-    // §3.2 禁止方向：`[dependencies]` 不许反依赖 facade / 二进制 / wasm / adapter
-    // （`adapters → domain` 是唯一允许的**生产**方向；`agent-vitals-core` 是
-    //  domain 的**下游** facade，domain 回依赖它即成环）。`domain → adapters`
+    // §3.2 禁止方向：`[dependencies]` 不许反依赖二进制 / wasm / adapter
+    // （`adapters → domain` 是唯一允许的**生产**方向）。`domain → adapters`
     //  只以 `[dev-dependencies]` 存在——`domain/usage.rs::tests` 经它调
     //  `canonical_tokens`，只换 `serde_json::Value`、不跨 crate 传 domain 类型，
     //  成环也安全。跨边界传 `CanonicalSession` 的 fixture 测试正因成环限制
     //  才把 `dsh_evidence`/`audit`/`compaction`/`waste` 留在 `domain/dsh/`。
+    //  `agent-vitals-core` 已删除（Phase C Step 4 收尾）——列在这里挡它复活。
     "agent-vitals",
     "agent-vitals-core",
     "agent-vitals-adapters",
@@ -136,9 +136,8 @@ fn cargo_toml_has_no_io_or_runtime_dependency() {
              an app crate, never in the pure computation domain crate."
         );
     }
-    // 正向 sanity：确实走 contracts + vitals-core 这条允许路径——否则上面的
-    // 否定断言可能是在测一个假问题（比如 domain 干脆没接 contracts 了）。
-    assert!(keys.iter().any(|k| k == "agent-vitals-contracts"), "domain 必须依赖 agent-vitals-contracts");
+    // 正向 sanity：确实走 vitals-core 这条允许路径——否则上面的否定断言可能
+    // 是在测一个假问题（比如 domain 干脆没接 vitals-core 了）。
     assert!(keys.iter().any(|k| k == "vitals-core"), "domain 必须依赖 vitals-core（M2 桥）");
 }
 
@@ -308,27 +307,60 @@ fn source_root_is_an_explicit_facade_not_a_flat_module_dump() {
         .filter(|name| !name.starts_with('.'))
         .collect();
     entries.sort();
-    // Phase C Step 4：`contracts/` 迁进 `agent-vitals-contracts` crate；
-    // `agent-vitals-core/src/adapters/` 早已删除（Step 3）。domain crate 的
-    // src 只剩 `domain/`（计算）+ `compatibility/`（vitals-core 桥）+ lib.rs。
+    // Phase C Step 4：`domain/` 计算 + `contracts/` 词表 + `compatibility/`
+    // （vitals-core 桥）整体成 `agent-vitals-domain` crate；`agent-vitals-core`
+    // facade 与独立的 `agent-vitals-contracts` crate 都已撤销，调用方直接
+    // `use agent_vitals_domain::*`。host `adapters/` 早在 Step 3 迁出。
     assert_eq!(
         entries,
-        vec!["compatibility", "domain", "lib.rs"],
-        "agent-vitals-domain/src may only expose domain/ + compatibility/ + lib.rs"
+        vec!["compatibility", "contracts", "domain", "lib.rs"],
+        "agent-vitals-domain/src may only expose contracts/ + domain/ + compatibility/ + lib.rs"
     );
 }
 
-/// Phase C Step 4：`contracts/` 与任何 host `adapters/` 目录都不在本 crate。
+/// Phase C Step 3：host wire 适配（`claude_code`/`codex`/`workbuddy` evidence +
+/// Codex fold + canonical 归一层）都在 `agent-vitals-adapters`，不在本 crate；
+/// DSH wire 只以登记的 `domain/dsh/` 债形式存在。
 #[test]
-fn domain_crate_holds_neither_contracts_nor_host_adapters() {
-    assert!(
-        !manifest_dir().join("src/contracts").exists(),
-        "Phase C Step 4a: `contracts/` moved to the agent-vitals-contracts crate"
-    );
+fn domain_crate_holds_no_host_adapter_directory() {
     assert!(
         !manifest_dir().join("src/adapters").exists(),
-        "Phase C Step 3: host adapters moved to agent-vitals-adapters / domain/dsh/"
+        "host wire adapters belong in agent-vitals-adapters (DSH wire → the registered domain/dsh/ debt)"
     );
+    assert!(
+        !manifest_dir().join("src/hosts").exists(),
+        "no per-host folder in the domain crate — that is agent-vitals-adapters' shape"
+    );
+}
+
+/// `contracts/` 是**宿主无关词表**：只碰 `serde_json`，不 `use regex` /
+/// `vitals_core` / `crate::domain` / `crate::compatibility` / adapter。这条
+/// 钉住「adapters 与未来 runtime 能只依赖词表而不拉进 domain 计算」——即使
+/// 词表和计算现在同 crate，模块边界也不许糊。
+#[test]
+fn contracts_module_stays_vocabulary_only() {
+    let contracts = manifest_dir().join("src/contracts");
+    each_src_file(|path, content| {
+        if !path.starts_with(&contracts) {
+            return;
+        }
+        let prod = strip_test_modules_and_comments(content);
+        for needle in [
+            "use regex",
+            "regex::",
+            "vitals_core",
+            "crate::domain",
+            "crate::compatibility",
+            "agent_vitals_adapters",
+        ] {
+            assert!(
+                !prod.contains(needle),
+                "contracts/{} references `{needle}` — the vocabulary layer stays serde_json-only \
+                 and never reaches into domain computation",
+                path.strip_prefix(&contracts).unwrap_or(path).display()
+            );
+        }
+    });
 }
 
 /// `domain/dsh/` 是**唯一**登记的 layer-2 DSH-wire 债（`evidence`/`audit`/

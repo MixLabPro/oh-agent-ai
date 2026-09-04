@@ -1,5 +1,5 @@
 //! §7.1 Signal——具名、类型化的证据通道标识。通用 Core 不内置 `ToolCalls`
-//! 等 Agent 专属枚举（那是 `agent-vitals-core::evidence::Signal` 的领域私有
+//! 等 Agent 专属枚举（那是 `agent-vitals-domain::evidence::Signal` 的领域私有
 //! 概念），改用稳定字符串 newtype，命名规范 `<domain>.<signal>`。
 //!
 //! # 开放字符串的代价，和为什么这里有 `SignalVocabulary`

@@ -1,6 +1,6 @@
 //! 接管协议的 **I/O + fold 驱动**（R1d，§4.2/§4.3 最小可测子集）。
 //!
-//! 纯规则在 core（`agent_vitals_core::takeover`）：session key、ledger
+//! 纯规则在 core（`agent_vitals_domain::takeover`）：session key、ledger
 //! folded/record、manifest owner_allows/cutover/mark_fold。这里只做：
 //!
 //!   · `writer-manifest.json` / `session-ledger.json` / `machine.json` 的读写
@@ -41,7 +41,7 @@ use serde_json::{json, Value};
 
 use crate::skills::snapshot::data_home;
 
-use agent_vitals_core::takeover as tk;
+use agent_vitals_domain::takeover as tk;
 
 use super::state::{atomic_write_json, now_iso_utc, read_json, state_dir};
 

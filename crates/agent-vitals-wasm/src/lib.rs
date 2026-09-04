@@ -5,7 +5,7 @@
 //! events it has already read from disk into a JSON string, and these functions
 //! return the Behavior Finding list / per-model token report as JSON strings.
 //! No I/O here, and none possible: `match_behavior` and `usage::token_by_model`
-//! are the pure core (crates/agent-vitals-core). The DSH audit tab folds the
+//! are the pure domain crate (crates/agent-vitals-domain). The DSH audit tab folds the
 //! same rules as the CLI — never a second copy.
 
 use serde_json::{json, Value};
@@ -25,8 +25,8 @@ pub fn audit_events(events_json: &str, workspace_root: &str) -> String {
     // 跑的是同一份 core 引擎。
     // raw-events → findings 的 DSH shim（phase C 起住 adapter，规则本体仍是 core
     // 的 `match_{behavior,trajectory}_canonical`——从不是第二份拷贝）。
-    let mut findings = agent_vitals_core::audit::match_behavior(&events, ws);
-    findings.extend(agent_vitals_core::audit::match_trajectory(&events));
+    let mut findings = agent_vitals_domain::audit::match_behavior(&events, ws);
+    findings.extend(agent_vitals_domain::audit::match_trajectory(&events));
     serde_json::to_string(&findings).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -39,7 +39,7 @@ pub fn audit_events(events_json: &str, workspace_root: &str) -> String {
 #[wasm_bindgen]
 pub fn token_by_model(events_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
-    let report = agent_vitals_core::usage::token_by_model(&events);
+    let report = agent_vitals_domain::usage::token_by_model(&events);
     serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -58,7 +58,7 @@ pub fn token_by_model(events_json: &str) -> String {
 #[wasm_bindgen]
 pub fn hour_buckets(events_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
-    let report = agent_vitals_core::usage::hour_buckets(&events);
+    let report = agent_vitals_domain::usage::hour_buckets(&events);
     serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -74,7 +74,7 @@ pub fn hour_buckets(events_json: &str) -> String {
 #[wasm_bindgen]
 pub fn request_metrics(events_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
-    let rows = agent_vitals_core::usage::request_metrics(&events);
+    let rows = agent_vitals_domain::usage::request_metrics(&events);
     serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -91,7 +91,7 @@ pub fn request_metrics(events_json: &str) -> String {
 #[wasm_bindgen]
 pub fn context_composition(events_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
-    let out = agent_vitals_core::usage::context_composition(&events);
+    let out = agent_vitals_domain::usage::context_composition(&events);
     serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -106,14 +106,14 @@ pub fn context_composition(events_json: &str) -> String {
 #[wasm_bindgen]
 pub fn compaction_events(events_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
-    let out = agent_vitals_core::compaction::compaction_events(&events);
+    let out = agent_vitals_domain::compaction::compaction_events(&events);
     serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
 }
 
 #[wasm_bindgen]
 pub fn subagent_spawns(events_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
-    let out = agent_vitals_core::subagent::subagent_spawns(&events);
+    let out = agent_vitals_domain::subagent::subagent_spawns(&events);
     serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -125,7 +125,7 @@ pub fn subagent_spawns(events_json: &str) -> String {
 pub fn structural_waste(events_json: &str, requests_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
     let requests: Vec<Value> = serde_json::from_str(requests_json).unwrap_or_default();
-    let out = agent_vitals_core::waste::detect_structural_waste(&events, &requests);
+    let out = agent_vitals_domain::waste::detect_structural_waste(&events, &requests);
     serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -140,7 +140,7 @@ pub fn structural_waste(events_json: &str, requests_json: &str) -> String {
 pub fn skill_audit(events_json: &str, requests_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
     let requests: Vec<Value> = serde_json::from_str(requests_json).unwrap_or_default();
-    let out = agent_vitals_core::skill::skill_invocations(&events, &requests);
+    let out = agent_vitals_domain::skill::skill_invocations(&events, &requests);
     serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -151,7 +151,7 @@ pub fn skill_audit_enriched(events_json: &str, requests_json: &str, spawns_json:
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
     let requests: Vec<Value> = serde_json::from_str(requests_json).unwrap_or_default();
     let spawns: Vec<Value> = serde_json::from_str(spawns_json).unwrap_or_default();
-    let out = agent_vitals_core::skill::skill_invocations_enriched(&events, &requests, &spawns);
+    let out = agent_vitals_domain::skill::skill_invocations_enriched(&events, &requests, &spawns);
     serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -162,15 +162,15 @@ pub fn skill_audit_enriched(events_json: &str, requests_json: &str, spawns_json:
 /// **D4（hook 消费）故意不在这里**——`duration::hook_executions` 的宿主前提
 /// （浏览器能不能拿到 `hook/*` 事件）还没有人拿真实会话验证过，在验证通过
 /// 之前不接进这条浏览器链路，只在 CLI 侧可用（`hook_executions` 本身已经
-/// 就绪，见 `crates/agent-vitals-core/src/domain/duration.rs` 的模块级警告）。
+/// 就绪，见 `crates/agent-vitals-domain/src/domain/duration.rs` 的模块级警告）。
 #[wasm_bindgen]
 pub fn duration_audit(events_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
     let out = json!({
-        "tool_calls": agent_vitals_core::duration::tool_call_durations(&events),
-        "turns": agent_vitals_core::duration::turn_durations(&events),
-        "steps": agent_vitals_core::duration::step_durations(&events),
-        "approvals": agent_vitals_core::duration::approval_latencies(&events),
+        "tool_calls": agent_vitals_domain::duration::tool_call_durations(&events),
+        "turns": agent_vitals_domain::duration::turn_durations(&events),
+        "steps": agent_vitals_domain::duration::step_durations(&events),
+        "approvals": agent_vitals_domain::duration::approval_latencies(&events),
     });
     serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
 }

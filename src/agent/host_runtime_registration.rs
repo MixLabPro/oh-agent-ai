@@ -68,7 +68,7 @@ pub static CLI_REGISTRATIONS: &[HostRuntimeRegistration] = &[
 /// `cli.sessions` surface 需要的 `session_store` 能力——从 core `HOSTS` 行的
 /// `session_store` 字段派生（哪些宿主"应该"有 store，是声明层的事）。
 pub fn required_for_cli_sessions() -> Vec<&'static str> {
-    agent_vitals_core::host_capability::HOSTS
+    agent_vitals_domain::host_capability::HOSTS
         .iter()
         .filter(|h| h.session_store)
         .map(|h| h.id)
@@ -88,7 +88,7 @@ pub fn registered_for_cli_sessions() -> Vec<&'static str> {
 /// `cli.sessions` surface 需要的 `fold` 能力——从 core `HOSTS` 行的
 /// `fold.is_some()` 派生。
 pub fn required_for_cli_sessions_fold() -> Vec<&'static str> {
-    agent_vitals_core::host_capability::HOSTS
+    agent_vitals_domain::host_capability::HOSTS
         .iter()
         .filter(|h| h.fold.is_some())
         .map(|h| h.id)
