@@ -4,14 +4,14 @@
 //! `SIGNAL_TOOL_RESULTS` 任一有证据都该跑，见 `assert_parity` 分别用只含
 //! turn 事件、只含 tool_result 事件的夹具各测一次子判定。
 
-use agent_vitals_core::compatibility::canonical_session::{
+use agent_vitals_domain::compatibility::canonical_session::{
     canonical_session_to_vitals, KIND_TOOL_RESULT, KIND_TURN, SIGNAL_TOOL_RESULTS, SIGNAL_TURN_BOUNDARIES,
 };
-use agent_vitals_core::compatibility::findings::vitals_report_to_legacy_findings;
-use agent_vitals_core::detectors::Sv613Detector;
-use agent_vitals_core::dsh_evidence::build_dsh_evidence;
-use agent_vitals_core::trajectory::{detect_sv613_legacy, flatten_trajectory};
-use agent_vitals_core::util::post_fork;
+use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
+use agent_vitals_domain::detectors::Sv613Detector;
+use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_domain::trajectory::{detect_sv613_legacy, flatten_trajectory};
+use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};
 use vitals_core::coverage::Coverage;
 use vitals_core::engine::{AuditInput, VitalsEngine};

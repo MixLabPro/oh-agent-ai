@@ -356,7 +356,8 @@ Python 分层）。Rust 侧每个 Step 动一处，Python 侧对应：
 | `cd4f89a` | Step 1b：`match_behavior`/`match_trajectory` raw shim → `adapters/…/audit.rs` | 全绿 + wasm-pack |
 | `69888c6` | Step 2a：`Coords` → `domain/coords.rs`（`trajectory::coord_map` 不再横跨取）| 全绿 |
 | `6ce4d13` | Step 2b：canonical 归一层 → `adapters/canonical_usage.rs`（生产零调用）| 全绿 |
-| 本提交 | Step 3（B2）：`codex_usage` + `canonical_usage` → adapters crate；DSH wire → `domain/dsh/`；`core/src/adapters/` 删除；守卫改写 | 全绿（见 §6quater）|
+| `ecdda70` | Step 3（B2）：`codex_usage` + `canonical_usage` → adapters crate；DSH wire → `domain/dsh/`；`core/src/adapters/` 删除；守卫改写 | 全绿（见 §6quater）|
+| 本提交 | Step 4：抽 `agent-vitals-contracts` + `agent-vitals-domain`，`agent-vitals-core` 退成薄 facade | 全绿（见 §6quinquies）|
 
 **至此 `domain/*.rs` 生产代码对 `crate::{dsh_evidence, codex_usage, adapters::hosts}`
 引用归零**——层 1 全清。剩下的命中全在 `#[cfg(test)]`（造 fixture / 调迁走的
@@ -370,8 +371,9 @@ shim），crate 拆分后经 `[dev-dependencies]` 解析。
 - `Coords` 落 `domain/coords.rs` 而非 `contracts/`（模块注释写清是过渡；`contracts`
   保持 host-agnostic）
 
-**剩余**：Step 4（抽 `agent-vitals-domain` crate）。Step 3（B2）已完成，实际做法
-与 §6ter 计划有偏差，见 §6quater。
+**剩余**：无——Phase C（C-minimal）Step 1-4 全部完成。Step 3/4 实际做法与
+§6ter 计划有偏差（更小），见 §6quater / §6quinquies。层 2 wire/fold 分离与
+`cost.rs` 拆分仍是 Phase D 之后的独立迭代（§6「不在 C-minimal」）。
 
 ## 6ter. Step 3/4 的已知拦路石（2026-09-04 试做发现）
 
@@ -461,7 +463,54 @@ Rust 源的路径注释（`util.py` / `behavior.py` / `dsh_evidence.py` / `codex
 `cargo clippy --release --all-targets -D warnings`、`cargo check -p agent-vitals-wasm`、
 `python3 -m unittest discover tests`（1145，226 skip）、golden 15+15 逐字节（Python & Rust bin）。
 
-**剩余**：Step 4（抽 `agent-vitals-domain` crate）。
+**剩余**：Step 4（抽 `agent-vitals-domain` crate）——见 §6quinquies。
+
+## 6quinquies. Step 4 实际执行（2026-09-04，本会话）
+
+§6ter step 10 假设「`domain/` 整体成 crate、`agent-vitals-core` 退成
+`contracts + compatibility`、123 处 `agent_vitals_core::<domain模块>` 调用点全改
+`agent_vitals_domain::`」。实做发现 **`agent-vitals-core` 不能既留 `contracts` 又
+让别人 facade 到 `domain`**——`domain/*.rs` + 全部 `detectors/svXXX.rs` 大量
+`use crate::compatibility::...`、`compatibility/` 又 `use crate::evidence::`，
+`domain` 必须能引到 `contracts`；若 `contracts` 留 core、`domain` 独立，则
+`domain → core`，core 就不能再 `pub use domain::*`（成环）。
+
+**选了三 crate 干净拆 + core 当纯 facade**（123 调用点 + 二进制 + wasm + adapters
++ 全部测试**零改动**）：
+
+| crate | 内容 | 依赖 |
+|---|---|---|
+| `agent-vitals-contracts` | `contracts/{evidence,host_capability,r2a,source_identity,usage_fact}` | `serde_json` only |
+| `agent-vitals-domain` | `domain/*` + `domain/dsh/*` + `compatibility/*` | `agent-vitals-contracts` + `vitals-core` + `regex` + `serde_json`；`[dev] agent-vitals-adapters` |
+| `agent-vitals-core` | **薄 facade**，`src/` 只有 `lib.rs`：`pub use agent_vitals_{contracts,domain}::*` | 上两者 |
+
+- `domain`/`contracts` 的 lib.rs 都 re-export 扁平路径，模块内 `use crate::evidence` /
+  `use crate::behavior` / `use crate::compatibility` **零改动**（`domain` 的 lib.rs
+  `pub use agent_vitals_contracts::{evidence,...}` 补齐契约扁平别名）。
+- **孤儿规则**：`compatibility/canonical_session.rs` 的
+  `impl From<evidence::Provenance> for vitals_core::provenance::Provenance` 两个类型都
+  外来 → 落成自由函数 `provenance_to_vitals()`（唯一 1 处调用点 `.into()` 改函数调用）。
+- workspace `members` + `default-members` 都加 `agent-vitals-contracts` /
+  `agent-vitals-domain`（漏 `default-members` 会让 `cargo test` 编译但不跑 domain 的
+  365 lib test）。
+- 测试搬迁：`crates/agent-vitals-core/tests/{dependency_budget,host_contract,
+  sv6*_parity}.rs` → `crates/agent-vitals-domain/tests/`，`s/agent_vitals_core/
+  agent_vitals_domain/`。新 `agent-vitals-contracts/tests/dependency_budget.rs`
+  （契约只依赖 serde_json）、`agent-vitals-core/tests/facade.rs`（re-export 仍解析）。
+- 守卫：domain `dependency_budget.rs` 的 `source_root` 断言改
+  `["compatibility","domain","lib.rs"]`；`FORBIDDEN_DEP_KEYS` 加 `agent-vitals-core`
+  （domain 不许回依赖 facade）；新 `domain_crate_holds_neither_contracts_nor_host_adapters`。
+- Python：`test_classification.py`（`skill.rs` 路径）、`test_canonical_schema.py`
+  （`evidence.rs` → contracts）、`test_host_contract.py`（dsh evidence + G8 路径 →
+  domain）；`CLAUDE.md` repo layout + lockstep 段。
+
+**门禁全绿**：`cargo test --release`（binary 313 + contracts 66 + domain 365 +
+adapters 56 + facade 2 + 各 parity/host_contract/dependency_budget；facade crate 0）、
+`cargo clippy --release --all-targets -D warnings`、`cargo check -p agent-vitals-wasm`、
+`python3 -m unittest discover tests`（1145，226 skip）、golden 15+15 逐字节（Python & Rust bin）。
+
+wasm `.wasm` 无需重建——规则逻辑一行没改，wasm 经 `agent_vitals_core::` facade 引，
+`cargo check -p agent-vitals-wasm` 过。
 
 ## 6. 建议执行顺序（C-minimal，每步独立提交、golden 绿）
 

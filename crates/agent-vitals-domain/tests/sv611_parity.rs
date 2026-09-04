@@ -5,12 +5,12 @@
 //! 身，参见 `sv601_parity.rs` 同一处注释）。这条比 SV601 多验一件事：跨事件
 //! 状态（连续计数/anchor）在新路径下是否与旧路径重算出相同的 `run_end_seq`。
 
-use agent_vitals_core::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TOOL_CALL, SIGNAL_TOOL_CALLS};
-use agent_vitals_core::compatibility::findings::vitals_report_to_legacy_findings;
-use agent_vitals_core::detectors::Sv611Detector;
-use agent_vitals_core::dsh_evidence::build_dsh_evidence;
-use agent_vitals_core::trajectory::{detect_sv611_legacy, flatten_trajectory};
-use agent_vitals_core::util::post_fork;
+use agent_vitals_domain::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TOOL_CALL, SIGNAL_TOOL_CALLS};
+use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
+use agent_vitals_domain::detectors::Sv611Detector;
+use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_domain::trajectory::{detect_sv611_legacy, flatten_trajectory};
+use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};
 use vitals_core::coverage::Coverage;
 use vitals_core::engine::{AuditInput, VitalsEngine};

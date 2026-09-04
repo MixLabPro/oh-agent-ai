@@ -2,14 +2,14 @@
 //! 夹具取自 `trajectory.rs::sv614_permission_anomaly_hit_and_miss`，覆盖三
 //! 个独立子判定 (a)(b)(c) 各自的 hit 与共同的 miss。
 
-use agent_vitals_core::compatibility::canonical_session::{
+use agent_vitals_domain::compatibility::canonical_session::{
     canonical_session_to_vitals, KIND_APPROVAL, KIND_SANDBOX_MODE, SIGNAL_APPROVAL_DECISIONS, SIGNAL_SANDBOX_MODES,
 };
-use agent_vitals_core::compatibility::findings::vitals_report_to_legacy_findings;
-use agent_vitals_core::detectors::Sv614Detector;
-use agent_vitals_core::dsh_evidence::build_dsh_evidence;
-use agent_vitals_core::trajectory::{detect_sv614_legacy, flatten_trajectory};
-use agent_vitals_core::util::post_fork;
+use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
+use agent_vitals_domain::detectors::Sv614Detector;
+use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_domain::trajectory::{detect_sv614_legacy, flatten_trajectory};
+use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};
 use vitals_core::coverage::Coverage;
 use vitals_core::engine::{AuditInput, VitalsEngine};

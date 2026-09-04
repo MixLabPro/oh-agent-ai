@@ -86,7 +86,7 @@ class G2ThreeSetSeparationTests(unittest.TestCase):
 # ────────────────────────── G3：语言支持矩阵 ──────────────────────────
 
 _LANGUAGE_SUPPORT_MATRIX = {
-    "dsh": ("crates/agent-vitals-core/src/domain/dsh/evidence.rs", "dsh_evidence.py"),
+    "dsh": ("crates/agent-vitals-domain/src/domain/dsh/evidence.rs", "dsh_evidence.py"),
     "codex": ("crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
     "claude-code": ("crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
     "workbuddy": ("crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
@@ -381,7 +381,7 @@ class G8SourceSelfScanTests(unittest.TestCase):
                 self.assertIsNone(m, f"{name} 的 is_unavailable 疑似退回了 matches! 字面量表")
 
     def test_dsh_rust_derives_unavailable_from_host_profile(self):
-        path = (ROOT / "crates" / "agent-vitals-core" / "src" / "domain" /
+        path = (ROOT / "crates" / "agent-vitals-domain" / "src" / "domain" /
                 "dsh" / "evidence.rs")
         text = path.read_text(encoding="utf-8")
         self.assertIn('host_capability::host_profile("dsh")', text,

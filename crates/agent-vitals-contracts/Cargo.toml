@@ -1,0 +1,19 @@
+[package]
+name = "agent-vitals-contracts"
+version = "1.3.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Stable cross-host contracts (identities + serialized fact shapes) for agent-vitals"
+repository = "https://github.com/MixLabPro/agent-vitals"
+license = "MIT"
+
+[lib]
+name = "agent_vitals_contracts"
+path = "src/lib.rs"
+
+[dependencies]
+# 契约层只做身份与序列化事实形状，不解释宿主 wire、不碰 I/O。唯一依赖是
+# serde_json——preserve_order 与全仓同一理由（键序必须与 Python/CLI 逐字节
+# 一致，默认 BTreeMap 排序会破坏差分护栏）。**不许**长出 regex / vitals-core /
+# 任何 domain 依赖：契约要能被 adapters / runtime 单独依赖而不拉进 domain 逻辑。
+serde_json = { version = "1", features = ["preserve_order"] }

@@ -8,8 +8,8 @@
 //! oracle，价值有限；G7（展示层派生）/G9（`HostRuntimeRegistration`）两语言
 //! 都未落地，理由见 Python 侧 `KnownGapRegistrationTests`。
 
-use agent_vitals_core::evidence::RuleOutcome;
-use agent_vitals_core::host_capability::{degrade_rule_outcomes, HOSTS};
+use agent_vitals_domain::evidence::RuleOutcome;
+use agent_vitals_domain::host_capability::{degrade_rule_outcomes, HOSTS};
 
 const RUNTIME_HOST_IDS: [&str; 4] = ["dsh", "codex", "claude-code", "workbuddy"];
 
@@ -58,7 +58,7 @@ fn g3_every_runtime_host_has_both_language_evidence_modules() {
     // stays in core as registered layer-2 wire debt (`domain/dsh/`, Phase C).
     // Paths are repo-root-relative now, not relative to one crate's `src`.
     let matrix: [(&str, &str, &str); 4] = [
-        ("dsh", "crates/agent-vitals-core/src/domain/dsh/evidence.rs", "dsh_evidence.py"),
+        ("dsh", "crates/agent-vitals-domain/src/domain/dsh/evidence.rs", "dsh_evidence.py"),
         ("codex", "crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
         ("claude-code", "crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
         ("workbuddy", "crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
@@ -142,7 +142,7 @@ fn g8_claude_code_and_codex_derive_unavailable_from_host_profile() {
 #[test]
 fn g8_dsh_derives_unavailable_from_host_profile() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let path = root.join("crates/agent-vitals-core/src/domain/dsh/evidence.rs");
+    let path = root.join("crates/agent-vitals-domain/src/domain/dsh/evidence.rs");
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains(r#"host_capability::host_profile("dsh")"#),
         "dsh_evidence.rs 的五个 unmeasured 信号置零应查 HOSTS 行");
@@ -171,7 +171,7 @@ fn mechanically_find_time_varying_cards(pricing: &serde_json::Value) -> Vec<(Str
 
 #[test]
 fn g10_time_varying_card_set_matches_registry() {
-    let pricing = agent_vitals_core::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let found = mechanically_find_time_varying_cards(&pricing);
     let expected = vec![
         ("deepseek-official".to_string(), "deepseek-v4-flash".to_string()),
@@ -192,7 +192,7 @@ fn g10_price_claude_map_has_exactly_the_three_registered_callers() {
     // `claude_subscription_uncovered_estimate`（`peak_resolved=true`，复用
     // ledger 的峰谷分辨率，不是又一个下界兜底）。
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let text = std::fs::read_to_string(root.join("crates/agent-vitals-core/src/domain/cost.rs")).unwrap();
+    let text = std::fs::read_to_string(root.join("crates/agent-vitals-domain/src/domain/cost.rs")).unwrap();
     let occurrences = text.matches("price_claude_map(").count();
     // 1 处定义签名 + 三个已登记入口各调用 1 次。
     assert_eq!(occurrences, 4,
@@ -217,7 +217,7 @@ fn g10_claude_day_cost_prices_peak_tokens_at_peak_rate_not_off_peak_floor() {
     // 带 `peak_*` 子桶（来自 `claude_cost.rs::tail_days` 逐行真实 ts），全落
     // 在高峰时段的用量必须按 peak 单价算，不是 off_peak 下界——否则
     // `flat_rate` 的下界兜底又静默接管了这张时变卡。
-    let pricing = agent_vitals_core::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let card = &pricing["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"];
     let off_peak_rate = card["input_uncached"]["off_peak"].as_f64().unwrap();
     let peak_rate = card["input_uncached"]["peak"].as_f64().unwrap();
@@ -230,7 +230,7 @@ fn g10_claude_day_cost_prices_peak_tokens_at_peak_rate_not_off_peak_floor() {
         "peak_input_tokens": 1_000_000, "peak_cache_read_input_tokens": 0,
         "peak_cache_creation_input_tokens": 0, "peak_output_tokens": 0,
     }});
-    let report = agent_vitals_core::cost::claude_day_cost(&day, &pricing).unwrap();
+    let report = agent_vitals_domain::cost::claude_day_cost(&day, &pricing).unwrap();
     let day_total = report["per_model"]["deepseek-v4-flash"]["total"].as_f64().unwrap();
     assert!((day_total - peak_rate).abs() < 1e-9,
         "claude_day_cost 全高峰用量必须按 peak 单价算");
@@ -244,7 +244,7 @@ fn g10_claude_day_cost_prices_peak_tokens_at_peak_rate_not_off_peak_floor() {
         "input_tokens": 1_000_000, "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 0, "output_tokens": 0,
     }});
-    let report_off = agent_vitals_core::cost::claude_day_cost(&day_off, &pricing).unwrap();
+    let report_off = agent_vitals_domain::cost::claude_day_cost(&day_off, &pricing).unwrap();
     let off_total = report_off["per_model"]["deepseek-v4-flash"]["total"].as_f64().unwrap();
     assert!((off_total - off_peak_rate).abs() < 1e-9);
     assert_eq!(report_off["pricing_basis"], "catalog");
@@ -257,14 +257,14 @@ fn g10_claude_session_cost_honestly_reports_partial_for_time_varying_cards() {
     // 如实报 `pricing_basis="partial"`（不是悄悄按 off_peak 冒充 "catalog"
     // 精确值；数值仍是 off_peak 下界，因为那是唯一"没有更多信息时"站得住
     // 的算法，但标注必须诚实）。
-    let pricing = agent_vitals_core::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let card = &pricing["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"];
     let off_peak_rate = card["input_uncached"]["off_peak"].as_f64().unwrap();
     let session = serde_json::json!({"deepseek-v4-flash": {
         "inputTokens": 1_000_000, "cacheReadInputTokens": 0,
         "cacheCreationInputTokens": 0, "outputTokens": 0,
     }});
-    let report = agent_vitals_core::cost::claude_session_cost(&session, &pricing).unwrap();
+    let report = agent_vitals_domain::cost::claude_session_cost(&session, &pricing).unwrap();
     let session_total = report["per_model"]["deepseek-v4-flash"]["total"].as_f64().unwrap();
     assert!((session_total - off_peak_rate).abs() < 1e-9);
     assert_eq!(report["per_model"]["deepseek-v4-flash"]["pricing_basis"], "partial");
@@ -276,7 +276,7 @@ fn g10_dsh_ledger_bucket_pricer_already_does_peak_split() {
     // 正对照：DSH 日桶计价（`cost::bucket_price`，经公开入口 `cost_report`
     // 触达）已经是全仓验证过的峰谷读法——喂一份全落在高峰的用量，价格必须
     // 按 peak 单价算，不是 off_peak。
-    let pricing = agent_vitals_core::cost::load_pricing();
+    let pricing = agent_vitals_domain::cost::load_pricing();
     let card = &pricing["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"];
     let peak_rate = card["input_uncached"]["peak"].as_f64().unwrap();
     let off_peak_rate = card["input_uncached"]["off_peak"].as_f64().unwrap();
@@ -290,7 +290,7 @@ fn g10_dsh_ledger_bucket_pricer_already_does_peak_split() {
         }},
         "providers": {"deepseek-v4-flash": "deepseek-official"},
     });
-    let report = agent_vitals_core::cost::cost_report(&usage, &pricing).unwrap();
+    let report = agent_vitals_domain::cost::cost_report(&usage, &pricing).unwrap();
     let total = report["total"].as_f64().unwrap();
     assert!((total - peak_rate).abs() < 1e-9);
     assert!((total - off_peak_rate).abs() > 1e-9);

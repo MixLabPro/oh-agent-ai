@@ -2,12 +2,12 @@
 //! 的唯一区别：需要显式构造 `config`（`{"workspace_root": ...}`），跟生产
 //! 切换里 `behavior.rs::detect_sv605` 拼 config 的方式完全一致。
 
-use agent_vitals_core::behavior::{detect_sv605_legacy, flatten};
-use agent_vitals_core::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TOOL_CALL, SIGNAL_TOOL_CALLS};
-use agent_vitals_core::compatibility::findings::vitals_report_to_legacy_findings;
-use agent_vitals_core::detectors::Sv605Detector;
-use agent_vitals_core::dsh_evidence::build_dsh_evidence;
-use agent_vitals_core::util::post_fork;
+use agent_vitals_domain::behavior::{detect_sv605_legacy, flatten};
+use agent_vitals_domain::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TOOL_CALL, SIGNAL_TOOL_CALLS};
+use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
+use agent_vitals_domain::detectors::Sv605Detector;
+use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};
 use vitals_core::coverage::Coverage;
 use vitals_core::engine::{AuditInput, VitalsEngine};

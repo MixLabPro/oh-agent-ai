@@ -16,12 +16,12 @@
 //! `CanonicalSession` 往后，新旧两条尾巴产出是否一致"，不是重新验证适配器
 //! 本身（那是 `dsh_evidence.rs` 自己的测试范围）。
 
-use agent_vitals_core::behavior::{detect_sv601_legacy, flatten};
-use agent_vitals_core::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TOOL_CALL, SIGNAL_TOOL_CALLS};
-use agent_vitals_core::compatibility::findings::vitals_report_to_legacy_findings;
-use agent_vitals_core::detectors::Sv601Detector;
-use agent_vitals_core::dsh_evidence::build_dsh_evidence;
-use agent_vitals_core::util::post_fork;
+use agent_vitals_domain::behavior::{detect_sv601_legacy, flatten};
+use agent_vitals_domain::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TOOL_CALL, SIGNAL_TOOL_CALLS};
+use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
+use agent_vitals_domain::detectors::Sv601Detector;
+use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};
 use vitals_core::coverage::Coverage;
 use vitals_core::engine::{AuditInput, VitalsEngine};

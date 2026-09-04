@@ -132,8 +132,8 @@ class ClassificationGuardTests(unittest.TestCase):
                 % sub.relative_to(ROOT),
             )
         self.assertTrue(
-            (ROOT / "crates" / "agent-vitals-core" / "src" / "domain" / "skill.rs").is_file(),
-            "core domain 应持有 skill.rs（会话 skill 执行审计的唯一真相源）",
+            (ROOT / "crates" / "agent-vitals-domain" / "src" / "domain" / "skill.rs").is_file(),
+            "domain crate 应持有 skill.rs（会话 skill 执行审计的唯一真相源）",
         )
 
     def test_skill_inventory_does_not_read_session_files(self):

@@ -17,13 +17,13 @@
 //! "push 顺序"（见 `findings.rs` 顶部文档），这个测试跟着从"侥幸测对"变成
 //! "明确测错"，在这里补上完整链路后重新对。
 
-use agent_vitals_core::behavior::{detect_sv610_legacy, flatten};
-use agent_vitals_core::compatibility::canonical_session::{KIND_SANDBOX_MODE, SIGNAL_SANDBOX_MODES};
-use agent_vitals_core::compatibility::run_single_family1_rule;
-use agent_vitals_core::detectors::Sv610Detector;
-use agent_vitals_core::dsh_evidence::build_dsh_evidence;
-use agent_vitals_core::evidence::{RuleOutcome, Signal};
-use agent_vitals_core::util::post_fork;
+use agent_vitals_domain::behavior::{detect_sv610_legacy, flatten};
+use agent_vitals_domain::compatibility::canonical_session::{KIND_SANDBOX_MODE, SIGNAL_SANDBOX_MODES};
+use agent_vitals_domain::compatibility::run_single_family1_rule;
+use agent_vitals_domain::detectors::Sv610Detector;
+use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_domain::evidence::{RuleOutcome, Signal};
+use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};
 
 fn ev(etype: &str, seq: i64, time: i64, data: Value) -> Value {

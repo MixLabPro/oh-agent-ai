@@ -1,18 +1,20 @@
 //! v0.8 目标架构（`docs/AGENT_VITALS_V0_8_ARCHITECTURE_SPEC.md` §3.3 依赖预算 /
-//! §14.2 / §15 DoD）的**可执行守卫**——在把 `agent-vitals-core` 拆成
-//! `agent-vitals-domain` + `agent-vitals-adapters` **之前**先钉住：这个 crate
-//! （及它未来分裂出的两半）必须保持**纯计算**，不许 I/O / 原生 / 运行时依赖
-//! 悄悄进来。迁移过程中任何一步破坏这条，`cargo test` 立刻红。
+//! §14.2 / §15 DoD）的**可执行守卫**。Phase C Step 4 把 `agent-vitals-core`
+//! 拆成 `agent-vitals-contracts`（宿主无关词表）+ `agent-vitals-domain`
+//! （本 crate，纯计算）+ `agent-vitals-core`（薄 re-export facade）。本文件钉
+//! 住 **`agent-vitals-domain` 必须保持纯计算**：不许 I/O / 原生 / 运行时依赖
+//! 悄悄进来，方向只能 `adapters → domain`（domain 不许回依赖 facade 或 adapter）。
+//! 迁移过程中任何一步破坏这条，`cargo test` 立刻红。
 //!
-//! 为什么现在就加、而不是等 crate 拆完：`docs/AGENT_VITALS_V0_8_FEASIBILITY_
-//! REVIEW.md` §1 实测——当前 `agent-vitals-core/src` 的非 test 代码对
-//! `std::fs`/`std::process`/`std::env`/`SystemTime::now` 命中数就是 0，
-//! `[dependencies]` 只有 `regex`/`serde_json`/`vitals-core`。约束**已经满足**，
-//! 守卫是纯增量、零行为改动；它的价值是**防回归**，不是修 bug。
+//! 实测基线：`agent-vitals-domain/src` 的非 test 代码对
+//! `std::fs`/`std::process`/`std::env`/`SystemTime::now` 命中数是 0，
+//! `[dependencies]` 只有 `agent-vitals-contracts`/`regex`/`serde_json`/
+//! `vitals-core`。守卫是防回归，不是修 bug。
 //!
 //! 做法与 `crates/vitals-core/tests/dependency_boundary.rs` 同源：源码/清单
 //! 文本层面的静态断言，不引 `cargo metadata`。测试范围仅本 crate 自己
-//! （`CARGO_MANIFEST_DIR`），不跨仓。
+//! （`CARGO_MANIFEST_DIR`），不跨仓。`agent-vitals-contracts` 的纯净度由
+//! `crates/agent-vitals-contracts/tests/dependency_budget.rs` 各自守。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -73,13 +75,15 @@ const FORBIDDEN_DEP_KEYS: &[&str] = &[
     // 时间库 —— CLAUDE.md 纪律：core 的日期用手写 civil 数学，chrono 不是依赖
     "chrono",
     "time",
-    // §3.2 禁止方向：`[dependencies]` 不许反依赖二进制 / wasm / adapter crate
-    // （adapters → core 是唯一允许的**生产**方向；core → adapters 只以
-    //  `[dev-dependencies]` 存在——`domain/usage.rs::tests` 经它调
-    //  `canonical_tokens`，只换 `serde_json::Value`、不跨 crate 传 core 类型，
+    // §3.2 禁止方向：`[dependencies]` 不许反依赖 facade / 二进制 / wasm / adapter
+    // （`adapters → domain` 是唯一允许的**生产**方向；`agent-vitals-core` 是
+    //  domain 的**下游** facade，domain 回依赖它即成环）。`domain → adapters`
+    //  只以 `[dev-dependencies]` 存在——`domain/usage.rs::tests` 经它调
+    //  `canonical_tokens`，只换 `serde_json::Value`、不跨 crate 传 domain 类型，
     //  成环也安全。跨边界传 `CanonicalSession` 的 fixture 测试正因成环限制
-    //  才把 `dsh_evidence`/`audit`/`compaction`/`waste` 留在 `domain/dsh/`）
+    //  才把 `dsh_evidence`/`audit`/`compaction`/`waste` 留在 `domain/dsh/`。
     "agent-vitals",
+    "agent-vitals-core",
     "agent-vitals-adapters",
     "agent-vitals-wasm",
 ];
@@ -127,11 +131,15 @@ fn cargo_toml_has_no_io_or_runtime_dependency() {
     for key in &keys {
         assert!(
             !FORBIDDEN_DEP_KEYS.contains(&key.as_str()),
-            "v0.8 §3.3/§14.2 violated: agent-vitals-core/Cargo.toml [dependencies] must not \
+            "v0.8 §3.3/§14.2 violated: agent-vitals-domain/Cargo.toml [dependencies] must not \
              pull in `{key}` — I/O / native / runtime deps belong in agent-vitals-runtime or \
-             an app crate, never in the pure computation core (the future domain+adapters split)."
+             an app crate, never in the pure computation domain crate."
         );
     }
+    // 正向 sanity：确实走 contracts + vitals-core 这条允许路径——否则上面的
+    // 否定断言可能是在测一个假问题（比如 domain 干脆没接 contracts 了）。
+    assert!(keys.iter().any(|k| k == "agent-vitals-contracts"), "domain 必须依赖 agent-vitals-contracts");
+    assert!(keys.iter().any(|k| k == "vitals-core"), "domain 必须依赖 vitals-core（M2 桥）");
 }
 
 /// 证明上面那条不是摆设：喂一段只存在于本测试里的合成清单，断言解析器**确实**
@@ -286,7 +294,7 @@ mod tests {
     );
 }
 
-// ─────────────────────── Phase A/C：逻辑目录边界 ───────────────────────
+// ─────────────────────── Phase C：crate 边界 ───────────────────────
 
 #[test]
 fn source_root_is_an_explicit_facade_not_a_flat_module_dump() {
@@ -300,22 +308,26 @@ fn source_root_is_an_explicit_facade_not_a_flat_module_dump() {
         .filter(|name| !name.starts_with('.'))
         .collect();
     entries.sort();
-    // Phase C（B2）起 `adapters/` 整个迁出——`codex_usage`/`canonical_usage` 进
-    // `agent-vitals-adapters` crate，DSH 的 `evidence`/`audit`/`compaction`/
-    // `waste` 进 `domain/dsh/`（layer-2 债）。core src 只剩三个所有权层 + lib.rs。
+    // Phase C Step 4：`contracts/` 迁进 `agent-vitals-contracts` crate；
+    // `agent-vitals-core/src/adapters/` 早已删除（Step 3）。domain crate 的
+    // src 只剩 `domain/`（计算）+ `compatibility/`（vitals-core 桥）+ lib.rs。
     assert_eq!(
         entries,
-        vec!["compatibility", "contracts", "domain", "lib.rs"],
-        "agent-vitals-core/src may only expose contracts / domain / compatibility + lib.rs"
+        vec!["compatibility", "domain", "lib.rs"],
+        "agent-vitals-domain/src may only expose domain/ + compatibility/ + lib.rs"
     );
 }
 
-/// Phase C（B2）之后 core 不再有 `src/adapters/`。
+/// Phase C Step 4：`contracts/` 与任何 host `adapters/` 目录都不在本 crate。
 #[test]
-fn core_has_no_host_adapter_directory() {
+fn domain_crate_holds_neither_contracts_nor_host_adapters() {
+    assert!(
+        !manifest_dir().join("src/contracts").exists(),
+        "Phase C Step 4a: `contracts/` moved to the agent-vitals-contracts crate"
+    );
     assert!(
         !manifest_dir().join("src/adapters").exists(),
-        "Phase C B2: `agent-vitals-core/src/adapters/` must be gone"
+        "Phase C Step 3: host adapters moved to agent-vitals-adapters / domain/dsh/"
     );
 }
 
@@ -344,16 +356,16 @@ fn domain_dsh_is_the_only_registered_layer2_wire_module() {
 #[test]
 fn nested_paths_and_legacy_facade_resolve_to_the_same_items() {
     assert_eq!(
-        agent_vitals_core::contracts::usage_fact::USAGE_FACT_FIELDS,
-        agent_vitals_core::usage_fact::USAGE_FACT_FIELDS
+        agent_vitals_domain::contracts::usage_fact::USAGE_FACT_FIELDS,
+        agent_vitals_domain::usage_fact::USAGE_FACT_FIELDS
     );
     assert_eq!(
-        agent_vitals_core::domain::usage::AMBIGUOUS_PROVIDER,
-        agent_vitals_core::usage::AMBIGUOUS_PROVIDER
+        agent_vitals_domain::domain::usage::AMBIGUOUS_PROVIDER,
+        agent_vitals_domain::usage::AMBIGUOUS_PROVIDER
     );
     assert_eq!(
-        agent_vitals_core::domain::dsh::audit::match_behavior(&[], None),
-        agent_vitals_core::audit::match_behavior(&[], None),
+        agent_vitals_domain::domain::dsh::audit::match_behavior(&[], None),
+        agent_vitals_domain::audit::match_behavior(&[], None),
     );
 }
 

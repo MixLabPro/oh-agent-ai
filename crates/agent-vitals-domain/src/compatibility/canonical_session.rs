@@ -33,28 +33,28 @@ use crate::evidence::CanonicalSession;
 /// `Vec<SignalId>`，允许动态构造）。这条映射是**保真的**——Derived 恒是 Derived、
 /// Estimated 恒是 Estimated，绝不落入 Measured。这是 aggregation 纪律（混合来源
 /// 不得伪装成单一 measured）的镜像面：推导坐标不得在过桥时升级成原生测量。
-impl From<crate::evidence::Provenance> for Provenance {
-    fn from(p: crate::evidence::Provenance) -> Self {
-        match p {
-            crate::evidence::Provenance::Measured => Provenance::Measured,
-            crate::evidence::Provenance::Derived { from } => {
-                Provenance::Derived { from: vec![SignalId::from(from)] }
-            }
-            crate::evidence::Provenance::Estimated { estimator } => {
-                Provenance::Estimated { estimator: estimator.to_string() }
-            }
-            crate::evidence::Provenance::Lossy { kind } => Provenance::Lossy {
-                kind: match kind {
-                    crate::evidence::LossKind::Truncated { hint } => {
-                        vitals_core::provenance::LossKind::Truncated { hint }
-                    }
-                    crate::evidence::LossKind::Hashed => vitals_core::provenance::LossKind::Hashed,
-                    crate::evidence::LossKind::Redacted => {
-                        vitals_core::provenance::LossKind::Redacted
-                    }
-                },
-            },
+///
+/// Phase C Step 4b：`evidence::Provenance` 归 `agent-vitals-contracts`、
+/// `vitals_core::provenance::Provenance` 归 `vitals-core`——两个类型都不再属本
+/// crate，孤儿规则不许写 `impl From`，落成自由函数（桥模块本就该显式转换）。
+fn provenance_to_vitals(p: crate::evidence::Provenance) -> Provenance {
+    match p {
+        crate::evidence::Provenance::Measured => Provenance::Measured,
+        crate::evidence::Provenance::Derived { from } => {
+            Provenance::Derived { from: vec![SignalId::from(from)] }
         }
+        crate::evidence::Provenance::Estimated { estimator } => {
+            Provenance::Estimated { estimator: estimator.to_string() }
+        }
+        crate::evidence::Provenance::Lossy { kind } => Provenance::Lossy {
+            kind: match kind {
+                crate::evidence::LossKind::Truncated { hint } => {
+                    vitals_core::provenance::LossKind::Truncated { hint }
+                }
+                crate::evidence::LossKind::Hashed => vitals_core::provenance::LossKind::Hashed,
+                crate::evidence::LossKind::Redacted => vitals_core::provenance::LossKind::Redacted,
+            },
+        },
     }
 }
 
@@ -137,8 +137,8 @@ fn base_event(
             raw_reference: None,
             raw_ordinal: Some(ordinal as u64),
         },
-        // 保真透传——`From` 映射保证 Derived 不进 Measured。
-        provenance: provenance.into(),
+        // 保真透传——`provenance_to_vitals` 保证 Derived 不进 Measured。
+        provenance: provenance_to_vitals(provenance),
     }
 }
 

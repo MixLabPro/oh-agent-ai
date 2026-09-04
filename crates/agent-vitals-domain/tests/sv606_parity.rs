@@ -1,11 +1,11 @@
-//! §14.4 逐字节 parity：SV609（审批请求，无条件 info）。
+//! §14.4 逐字节 parity：SV606（访问内网 IP）。结构同 `sv602_parity.rs`.
 
-use agent_vitals_core::behavior::{detect_sv609_legacy, flatten};
-use agent_vitals_core::compatibility::canonical_session::{canonical_session_to_vitals, KIND_APPROVAL, SIGNAL_APPROVAL_DECISIONS};
-use agent_vitals_core::compatibility::findings::vitals_report_to_legacy_findings;
-use agent_vitals_core::detectors::Sv609Detector;
-use agent_vitals_core::dsh_evidence::build_dsh_evidence;
-use agent_vitals_core::util::post_fork;
+use agent_vitals_domain::behavior::{detect_sv606_legacy, flatten};
+use agent_vitals_domain::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TOOL_CALL, SIGNAL_TOOL_CALLS};
+use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
+use agent_vitals_domain::detectors::Sv606Detector;
+use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};
 use vitals_core::coverage::Coverage;
 use vitals_core::engine::{AuditInput, VitalsEngine};
@@ -15,10 +15,14 @@ fn ev(etype: &str, seq: i64, time: i64, data: Value) -> Value {
     json!({"type": etype, "seq": seq, "time": time, "data": data})
 }
 
+fn tool_call(name: &str, arguments: &str, seq: i64) -> Value {
+    ev("tool/call", seq, 1000 + seq, json!({"name": name, "arguments": arguments}))
+}
+
 fn old_path_findings(events: &[Value]) -> Vec<Value> {
     let post_forked = post_fork(events);
     let dsh_evidence = build_dsh_evidence(post_forked, Vec::new(), None, "session-1".to_string());
-    flatten(&[("SV609", detect_sv609_legacy(&dsh_evidence.canonical))])
+    flatten(&[("SV606", detect_sv606_legacy(&dsh_evidence.canonical))])
 }
 
 fn new_path_findings(events: &[Value]) -> Vec<Value> {
@@ -27,8 +31,8 @@ fn new_path_findings(events: &[Value]) -> Vec<Value> {
     let vitals_events = canonical_session_to_vitals(&dsh_evidence.canonical).unwrap();
 
     let mut engine = VitalsEngine::builder()
-        .with_detector(Sv609Detector)
-        .with_signal(SignalId::from(SIGNAL_APPROVAL_DECISIONS), vec![KIND_APPROVAL.to_string()])
+        .with_detector(Sv606Detector)
+        .with_signal(SignalId::from(SIGNAL_TOOL_CALLS), vec![KIND_TOOL_CALL.to_string()])
         .unwrap()
         .build()
         .unwrap();
@@ -42,11 +46,6 @@ fn assert_parity(events: &[Value]) {
 
 #[test]
 fn hit_and_miss_match_the_old_path() {
-    assert_parity(&[ev("approval/asked", 1, 1001, json!({"id": "a1", "toolName": "bash", "reason": "needs escalation"}))]);
-    assert_parity(&[ev("approval/decided", 2, 1002, json!({"id": "a1", "outcome": "rejected"}))]);
-}
-
-#[test]
-fn evidence_fallback_to_tool_name_matches_on_both_paths() {
-    assert_parity(&[ev("approval/asked", 1, 1001, json!({"id": "a1", "toolName": "write"}))]);
+    assert_parity(&[tool_call("web_fetch", r#"{"url":"http://10.0.0.1:8000/api"}"#, 1)]);
+    assert_parity(&[tool_call("web_fetch", r#"{"url":"https://example.com/x"}"#, 2)]);
 }

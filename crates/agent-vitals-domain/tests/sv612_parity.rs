@@ -9,12 +9,12 @@
 //! 这些是已经被验证过、覆盖了"夹心事件推进 last_seq 但不进 sig"这种边界情
 //! 形的真实回归夹具，不是重新拍脑袋编的。
 
-use agent_vitals_core::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TURN, SIGNAL_TURN_BOUNDARIES};
-use agent_vitals_core::compatibility::findings::vitals_report_to_legacy_findings;
-use agent_vitals_core::detectors::Sv612Detector;
-use agent_vitals_core::dsh_evidence::build_dsh_evidence;
-use agent_vitals_core::trajectory::{detect_sv612_legacy, flatten_trajectory};
-use agent_vitals_core::util::post_fork;
+use agent_vitals_domain::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TURN, SIGNAL_TURN_BOUNDARIES};
+use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
+use agent_vitals_domain::detectors::Sv612Detector;
+use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_domain::trajectory::{detect_sv612_legacy, flatten_trajectory};
+use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};
 use vitals_core::coverage::Coverage;
 use vitals_core::engine::{AuditInput, VitalsEngine};

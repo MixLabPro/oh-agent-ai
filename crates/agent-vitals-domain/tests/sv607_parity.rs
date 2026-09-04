@@ -1,11 +1,11 @@
 //! §14.4 逐字节 parity：SV607（拒绝/中止工具结果码）。
 
-use agent_vitals_core::behavior::{detect_sv607_legacy, flatten};
-use agent_vitals_core::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TOOL_RESULT, SIGNAL_TOOL_RESULTS};
-use agent_vitals_core::compatibility::findings::vitals_report_to_legacy_findings;
-use agent_vitals_core::detectors::Sv607Detector;
-use agent_vitals_core::dsh_evidence::build_dsh_evidence;
-use agent_vitals_core::util::post_fork;
+use agent_vitals_domain::behavior::{detect_sv607_legacy, flatten};
+use agent_vitals_domain::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TOOL_RESULT, SIGNAL_TOOL_RESULTS};
+use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
+use agent_vitals_domain::detectors::Sv607Detector;
+use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};
 use vitals_core::coverage::Coverage;
 use vitals_core::engine::{AuditInput, VitalsEngine};

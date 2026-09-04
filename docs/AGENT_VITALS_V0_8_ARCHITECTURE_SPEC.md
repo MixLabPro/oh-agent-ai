@@ -1,8 +1,10 @@
 # Agent Vitals 目录与模块边界设计
 
 > 状态：目标架构 **v3.1**（2026-09-04：宿主统一为 `agent-vitals-hosts` 单 crate +
-> feature-gated `sources/`，见 §4/§5/§6）；Phase A 完成、Phase B1 已实施、Phase C
-> 代码调研完成（`AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md`）
+> feature-gated `sources/`，见 §4/§5/§6）；Phase A 完成、Phase B1 已实施、**Phase C
+> （C-minimal）Step 1-4 完成**——`agent-vitals-contracts` + `agent-vitals-domain` 已
+> 抽出，`agent-vitals-core` 退成薄 re-export facade（执行记录见
+> `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6bis–§6quinquies）。B2 随 Step 3 一并收口。
 > 适用范围：Rust workspace、Tauri、Python 便携实现、宿主接入与测试资产  
 > 关联文档：`ARCHITECTURE.md`、`DELIVERY_ARCHITECTURE.md`、
 > `TAURI_RUNTIME_WORKBENCH_SPEC.md`、`VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md`、
@@ -1056,10 +1058,14 @@ WASM **暂不登记** `agent-vitals-adapters` 依赖——`agent-vitals-wasm/src
 adapter crate。§3.1 的 `wasm ─► adapters` 边是**未来边**：等某个 Phase 让 wasm
 经 adapter facade 取证据时，届时那个 Phase 带真实调用点一起加，不提前挂空依赖。
 
-**B2（待 Phase C 解耦后收口）：**
+**B2（随 Phase C Step 3 收口，2026-09-04）：**
 
-- [ ] 物理迁移 Codex usage 与 DSH evidence（Phase C 先断 domain → host 依赖）；
-- [ ] 迁移后重跑全量门禁与 Python/Rust parity 零漂移，撤掉 core 里的两条 re-export。
+- [x] 物理迁移 Codex usage（`codex_usage` + `canonical_usage` → `agent-vitals-adapters`）；
+- [x] DSH evidence 未进 adapters 而落 `agent-vitals-domain/src/domain/dsh/`（登记的
+      layer-2 债——`build_dsh_evidence` fixture 跨 crate 传 `CanonicalSession` 会撞
+      `multiple versions of crate`）；
+- [x] `agent-vitals-core/src/adapters/` 删除，撤掉相关 re-export；全量门禁与
+      Python/Rust parity 零漂移（`AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6quater）。
 
 Phase B 实施时确认了原提案未展开的 Cargo 环：`domain::usage` 仍调用 Codex fold，
 `domain::behavior/trajectory/compaction/waste` 仍调用 DSH evidence。若 core 依赖新 adapter
@@ -1084,12 +1090,17 @@ fold 或 identity 逻辑来“消除”Cargo 环。
 > raw shim → dsh adapter；canonical 归一层（生产零调用点）→ adapters），**不是**
 > 「拆 `usage.rs` 188KB」。
 
-- **C1–C3（阻塞项，见调研 §2–4）**：断 `domain → {dsh_evidence, codex_usage}` 的
-  3 组耦合，每组「移动 + 改 import」级、golden 零漂移。
-- **B2**：`dsh_evidence` + `codex_usage` residual 物理迁进 `agent-vitals-adapters`，
-  撤 core lib.rs 的两条 re-export。
-- **抽 crate**：`domain/` 整体成 `agent-vitals-domain`；`agent-vitals-core` 退成
-  `contracts/` + `compatibility/` 薄 crate（arch §0「拆完前保留 crate 名」）。
+- **C1–C3（阻塞项，见调研 §2–4）** — ✅ **完成**（Step 1a/1b/2a/2b，commit
+  `4b44b8c`..`6ce4d13`）：断 `domain → {dsh_evidence, codex_usage}` 的 3 组耦合。
+- **B2** — ✅ **完成**（Step 3，commit `ecdda70`）：`codex_usage` + `canonical_usage`
+  迁进 `agent-vitals-adapters`；DSH wire（`evidence`/`audit`/`compaction`/`waste`）
+  落 `agent-vitals-domain/src/domain/dsh/`（成环限制，登记的 layer-2 债）。
+- **抽 crate** — ✅ **完成**（Step 4，本提交）：实做拆成**三个** crate——
+  `agent-vitals-contracts`（词表，`serde_json` only）+ `agent-vitals-domain`
+  （`domain/` + `compatibility/`）+ `agent-vitals-core`（**薄 re-export facade**，
+  `src/` 只有 `lib.rs`）。`contracts` 留 core 会让 `domain → core → domain` 成环，
+  故 `contracts` 也独立；facade 保 123 处 `agent_vitals_core::` 调用点零改动。
+  详见 `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6quinquies。
 - **不在 Phase C**：`cost.rs` 99KB 拆 Model Resolver / Rate Card / BillingContext /
   Cost Projection —— `cost.rs` 零 host import，是 domain **内部**重构，建议并入
   Phase D（与 Model Catalog / BillingContext / User Profile 同批，那时才有真实需求
