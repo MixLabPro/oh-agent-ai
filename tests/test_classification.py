@@ -38,16 +38,20 @@ RS_SRC = ROOT / "apps" / "cli" / "src"  # v0.8 Phase E3：二进制从根 src/ �
 # claude_code::skills，I/O 部分到 …::sources::skills）+ workbuddy（marketplace
 # 解析 + welcomeMode 取证，路径穿越防护与 I/O 交织较深，整体不拆，迁进
 # …::hosts::workbuddy::sources::skills；`SourceMeta` 跨宿主共享类型先迁进
-# agent-vitals-hosts::skill_discovery 解除循环依赖）——都不再在
-# apps/cli/src/skills/，从 RS_SKILLS_FAMILY 里删掉；Python 侧对应模块暂未
-# 跟进搬迁，PY_SKILLS_FAMILY 不变。
+# agent-vitals-hosts::skill_discovery 解除循环依赖）+ openclaw（首个
+# Skill-Surface-only 宿主，无 sessions/，整体不拆，迁进
+# …::hosts::openclaw::sources::skills）+ codex（协议报文构造/响应解析/运行时
+# 元数据合并拆到 …::hosts::codex::skills，子进程 I/O 到
+# …::sources::skills——该文件自己的模块头早就说清了这条纯/I/O 边界，本次只是
+# 落进 crate 边界）——都不再在 apps/cli/src/skills/，从 RS_SKILLS_FAMILY 里
+# 删掉；Python 侧对应模块暂未跟进搬迁，PY_SKILLS_FAMILY 不变。
 PY_SKILLS_FAMILY = {
     "analysis", "diff", "discovery", "doctor", "explain", "frontmatter",
     "inventory", "lifecycle", "overlap", "redact", "report", "security",
     "snapshots",
 }
 RS_SKILLS_FAMILY = {
-    "codex", "diff", "discovery", "doctor", "explain",
+    "diff", "discovery", "doctor", "explain",
     "inventory", "redact",
     "render", "report", "security",
 }

@@ -220,6 +220,29 @@ openclaw 真的没有 Session Surface，改成显式分支（openclaw 断言**�
 （`read_hermes_external_dirs`）与 OpenClaw 共用同一份代码/同一个模块，
 跟着一起搬，没有单独拆 `hosts/hermes/`。golden 15+15 逐字节一致（
 `host-openclaw` case）。
+
+**codex.rs 已完成——E7.6 至此全部完成**：与 workbuddy/openclaw 不同，
+codex.rs**能拆**（不是"整体搬"）——它自己的模块头文档早就写明设计意图
+（"把能测的部分抽成纯函数：消息构造与响应解析都不碰进程"），作者已经把
+`protocol_messages`/`parse_skills_list`/`apply_codex_runtime`（含
+`CodexRuntime` 结构体）跟子进程 spawn/管道读写（`find_codex_executable`/
+`write_message`/`wait_for_response`/`read_codex_runtime`）分得很清楚，只是
+之前都堆在同一个文件、同一个二进制模块里。这次只是把已有的设计意图真的落进
+crate 边界：纯部分进新建的 `agent-vitals-hosts::hosts::codex::skills`，I/O
+部分进 `…::sources::skills`（`sources.rs` 同前几个宿主一样升级成 `sources/`
+目录）。`sources::skills` 对纯部分做 `pub use`，`inventory.rs` 一个 `use …
+as codex;` 就同时拿到两边，call site 零改动。`CodexRuntime::failed` 从
+私有 `fn` 改 `pub fn`（I/O 侧要跨模块调用它构造失败态）。
+
+**E7.6 收尾小结**：四个宿主里，claude_code（host.rs）与 codex.rs 是"能拆"
+的（作者本就区分了纯计算/I/O，或 grep 漏判的间接 I/O 剥离后线性无交织）；
+workbuddy.rs 与 openclaw.rs 是"整体搬"的（多轮 fs 探测/子进程探测与判断逻辑
+真的交织在一起，强拆的正确性代价不确定，尤其 workbuddy 还带着一段已经修过
+的路径穿越防护）。openclaw 顺带成为本 crate 第一个 Skill-Surface-only 宿主。
+`norm`/`bytes_to_lossy_normalized`/`SourceMeta` 三个原本二进制专属的共享件
+被迫下沉到 `agent_vitals_domain::util`/`agent-vitals-hosts::skill_discovery`
+——不是提前规划好的，是每一步真去核实依赖关系时才发现的阻塞，符合本阶段
+"每一步的真实依赖图只有读完文件才知道"的教训。
 E7.5  inventory.rs + discovery.rs 拆分 → runtime/skills/{inventory,scanner}.rs
       discovery.rs 963 行是这次最大最复杂的一块——4 处 I/O 命中不代表只有 4 处
       跟宿主相关，需要通读，可能还要再拆出 hosts/<h>/skills/ 的部分（哪些目录

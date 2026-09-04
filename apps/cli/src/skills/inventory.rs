@@ -47,9 +47,12 @@ use crate::skills::discovery::{collect, Ctx, SourceMeta, DEFAULT_ROOTS};
 use agent_vitals_hosts::hosts::claude_code::skills::HostConfig;
 use crate::util::norm;
 use agent_vitals_hosts::dsh_sources as dsh;
-use crate::{skills::codex, skills::discovery};
-// v0.8 Phase E7.6：workbuddy.rs/openclaw.rs 迁进 agent-vitals-hosts（库
-// crate），re-import 时保留同样的局部别名，call site 零改动。
+use crate::skills::discovery;
+// v0.8 Phase E7.6：codex.rs/workbuddy.rs/openclaw.rs 迁进 agent-vitals-hosts
+// （库 crate），re-import 时保留同样的局部别名，call site 零改动。
+// codex 的 sources::skills 已经 re-export 了 hosts::codex::skills 的纯部分
+// （CodexRuntime/apply_codex_runtime/…），一个别名两边都拿到。
+use agent_vitals_hosts::hosts::codex::sources::skills as codex;
 use agent_vitals_hosts::hosts::workbuddy::sources::skills as workbuddy;
 use agent_vitals_hosts::hosts::openclaw::sources::skills as openclaw;
 

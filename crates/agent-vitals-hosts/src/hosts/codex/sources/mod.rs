@@ -27,6 +27,10 @@ use serde_json::{json, Map, Value};
 
 use agent_vitals_domain::util::split_lines;
 
+// v0.8 Phase E7.6：Skill 配置 I/O（app-server 子进程探测）与本文件的会话 I/O
+// 是两条独立证据线，分文件放。
+pub mod skills;
+
 fn empty_result() -> Map<String, Value> {
     let mut map = Map::new();
     map.insert("items".to_string(), Value::Null);
