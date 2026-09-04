@@ -21,7 +21,7 @@ use ruzstd::decoding::StreamingDecoder;
 use serde_json::{json, Map, Value};
 use std::io::{Cursor, Read};
 
-use crate::util::split_lines;
+use agent_vitals_domain::util::split_lines;
 
 /// DSH 自述 `SESSION_FORMAT_VERSION` 恒为 0、不作兼容承诺；不相符即降级。
 /// 它是头行 `version` 字段，不是 SQLite 后端的 `PRAGMA user_version`（那是表结构版本）。
@@ -422,9 +422,11 @@ fn snapshot_degraded(reason: &str) -> Value {
 /// 快照是 ``ctx.skills.snapshot()`` 的产物，由 dsh-agent-vitals 的 glue plugin
 /// 写到 ``$DSH_HOME/agent-vitals/snapshot.json``。形状（见 DSH_INTEGRATION §2.2.1）：
 ///
-///     {"schema_version": "1.0", "producer": "dsh-agent-vitals", "observer": null,
-///      "skills": [{"name": "...", "description": "...", ...}], "complete": true,
-///      "written_at": "ISO8601"}
+/// ```text
+/// {"schema_version": "1.0", "producer": "dsh-agent-vitals", "observer": null,
+///  "skills": [{"name": "...", "description": "...", ...}], "complete": true,
+///  "written_at": "ISO8601"}
+/// ```
 ///
 /// 映射（契约「Two independent evidence sources」，**绝不折叠**）：
 ///   - ``complete === true``  → 快照里的名字是「此刻这个 scope 解析出的目录」；
@@ -490,6 +492,12 @@ pub fn read_snapshot(path: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// checked-in fixture 的绝对路径 —— D4 迁进 hosts crate 后 `CARGO_MANIFEST_DIR`
+    /// 是 `crates/agent-vitals-hosts/`，仓库 `fixtures/` 在其上两级。
+    fn fixture(rel: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel)
+    }
 
     #[test]
     fn reads_all_three_evidence_kinds() {
@@ -707,7 +715,7 @@ garbage line
     fn complete_fixture_serializes_byte_for_byte() {
         // 期望串取自 Python `json.dumps(..., ensure_ascii=False, separators=(",", ":"))`
         // 对同一 fixture 的实际输出 —— 键序、值、布尔全部逐字节一致。
-        let v = read_session_log(Path::new("fixtures/dsh/complete.jsonl"));
+        let v = read_session_log(&fixture("fixtures/dsh/complete.jsonl"));
         let compact = serde_json::to_string(&v).unwrap();
         assert_eq!(
             compact,
@@ -717,7 +725,7 @@ garbage line
 
     #[test]
     fn reads_the_checked_in_complete_fixture() {
-        let v = read_session_log(Path::new("fixtures/dsh/complete.jsonl"));
+        let v = read_session_log(&fixture("fixtures/dsh/complete.jsonl"));
         assert_eq!(v["catalog_entries"], json!(["repo-auditor", "release-notes",
                                                "commit-summarizer", "test-runner"]));
         assert_eq!(v["invoked"], json!(["release-notes"]));
@@ -727,7 +735,7 @@ garbage line
 
     #[test]
     fn reads_the_checked_in_incomplete_fixture() {
-        let v = read_session_log(Path::new("fixtures/dsh/incomplete.jsonl"));
+        let v = read_session_log(&fixture("fixtures/dsh/incomplete.jsonl"));
         assert_eq!(v["catalog_entries"], json!(["repo-auditor", "release-notes"]));
         assert_eq!(v["invoked"], json!([]));
         assert_eq!(v["selected"], json!([]));

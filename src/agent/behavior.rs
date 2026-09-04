@@ -2,7 +2,7 @@
 //!
 //! 纯计算（规则表、`match_behavior`、`usage::token_by_model`、`behavior_gate`）
 //! 住在 `crates/agent-vitals-domain`（单一真相源，CLI / Python / wasm 共用）。这里
-//! 只留 I/O 入口 `audit_session_log`——它读会话日志文件（`crate::dsh::read_session_log`），
+//! 只留 I/O 入口 `audit_session_log`——它读会话日志文件（`agent_vitals_hosts::dsh_sources::read_session_log`），
 //! 把执行事件喂给 core 的 `match_behavior`、把成本账事件喂给 `token_by_model`。
 
 use std::path::Path;
@@ -81,7 +81,7 @@ pub struct Audit {
 /// 降级时（不可读 / 畸形 / schema 不符，`degraded` 为字符串）返回 `None`，
 /// **绝不返回空列表 = 0 条**——空列表只在「读全了但确实 0 条执行事件」时出现。
 pub fn audit_session_log(path: &Path) -> Option<Audit> {
-    let session = crate::dsh::read_session_log(path);
+    let session = agent_vitals_hosts::dsh_sources::read_session_log(path);
     if session.get("degraded").and_then(|v| v.as_str()).is_some() {
         return None;
     }

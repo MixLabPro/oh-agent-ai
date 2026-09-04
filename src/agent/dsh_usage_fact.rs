@@ -6,7 +6,7 @@
 //! Python↔Rust stdout byte-parity 由 `tests/test_dsh_usage_fact.py` 钉住（同批文件
 //! 两侧 `--json -` 字节相等）。
 //!
-//! **本模块不解释任何 DSH wire shape**——读/解码（`crate::dsh::read_session_text`）、
+//! **本模块不解释任何 DSH wire shape**——读/解码（`agent_vitals_hosts::dsh_sources::read_session_text`）、
 //! reshape（`parse_session_log`）、身份与 profile（`r2a_store::dsh_header` /
 //! `dsh_source_profile`）、逐槽观测（core `usage::dsh_usage_observations`）、残差
 //! 折叠（`usage::usage_fold_checkpoint`）、UsageFact 契约（core
@@ -33,7 +33,7 @@ use serde_json::{json, Map, Value};
 
 use crate::agent::codex_cost::civil_from_unix_secs;
 use crate::agent::r2a_store::{dsh_header, dsh_source_profile};
-use crate::dsh::{parse_session_log, read_session_text};
+use agent_vitals_hosts::dsh_sources::{parse_session_log, read_session_text};
 use agent_vitals_domain::usage::{
     dsh_usage_observations, usage_fold_checkpoint, DshUsageObservation,
 };

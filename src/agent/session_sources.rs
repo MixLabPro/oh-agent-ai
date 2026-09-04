@@ -11,5 +11,5 @@ use serde_json::Value;
 /// 返回值保持既有语义：未配置来源时两项均为 `None`；解析和降级策略仍由 DSH
 /// source 持有。本函数只建立明确的 surface 边界，不改变证据内容。
 pub fn read_dsh_skill_correlation() -> (Option<String>, Option<Value>) {
-    crate::dsh::read_session_evidence()
+    agent_vitals_hosts::dsh_sources::read_session_evidence()
 }

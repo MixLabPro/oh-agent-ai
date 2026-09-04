@@ -13,7 +13,6 @@
 // dsh.rs 与 util.rs 是两世界共享，留在顶层。
 mod skills;
 mod agent;
-mod dsh;
 mod util;
 
 use std::path::{Path, PathBuf};

@@ -16,3 +16,13 @@ agent-vitals-domain = { path = "../agent-vitals-domain" }
 regex = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 vitals-core = { path = "../vitals-core" }
+# v0.8 Phase D4：DSH 会话 `.zstd` 多帧解压（R2a §6.3-1）。纯 Rust、零 C 依赖。
+# **只在 `sources` feature 下链入**——`sessions/` / `skills/` 纯子树编不进它，
+# wasm（`default-features = false`）也不会拉它。
+ruzstd = { version = "0.8", optional = true }
+
+[features]
+# 宿主 I/O 面（`hosts/<h>/sources/`）：文件定位、读取、解压。二进制 / runtime
+# 开它；wasm 与纯构建关它。误把需要 gated dep 的 I/O 写进 `sessions/` → 纯构建
+# 编译失败（§4.3 第 1 条）。
+sources = ["dep:ruzstd"]

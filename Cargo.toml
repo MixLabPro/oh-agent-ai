@@ -25,7 +25,7 @@ name = "agent-vitals"
 path = "src/main.rs"
 
 [dependencies]
-agent-vitals-hosts = { path = "crates/agent-vitals-hosts" }
+agent-vitals-hosts = { path = "crates/agent-vitals-hosts", features = ["sources"] }
 agent-vitals-domain = { path = "crates/agent-vitals-domain" }
 clap = { version = "4", features = ["derive"] }
 regex = "1"
@@ -36,10 +36,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 walkdir = "2"
-# DSH 会话日志的增量多帧 zstd 解压（R2a §6.3-1）。纯 Rust、零 C 依赖——设计决策
-# 2026-08-30（用户拍板）：桌面/Tauri 运行时加 zstd crate 与「宿内 skill 零第三方库」
-# 是两条约束，前者不违反后者（spec §7.1 G1 管的是分发的 Python skill）。
-ruzstd = "0.8"
+# v0.8 Phase D4：DSH 会话 `.zstd` 多帧解压（`ruzstd`）迁进
+# `agent-vitals-hosts` 的 `sources` feature——二进制经 `features = ["sources"]`
+# 传递拿到，不再直接依赖。
 # WorkBuddy 会话审计的 sqlite 读取（`~/.workbuddy/workbuddy.db`）。仓库第一个 sqlite
 # reader；`bundled` 特性自带 sqlite3.c，不依赖系统 sqlite。「宿内 skill 零第三方库」
 # 同样只管分发的 Python skill——Python 侧用 stdlib `sqlite3`，Rust 二进制加 rusqlite

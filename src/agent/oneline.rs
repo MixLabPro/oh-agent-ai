@@ -77,7 +77,7 @@ pub fn oneline(
     });
 
     // 4. 双读 events —— hour_buckets 与 token_by_date_model 都吃 usage_events。
-    let session = crate::dsh::read_session_log(path);
+    let session = agent_vitals_hosts::dsh_sources::read_session_log(path);
     let events: Vec<Value> = session
         .get("usage_events")
         .and_then(Value::as_array)

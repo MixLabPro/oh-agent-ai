@@ -24,3 +24,8 @@ pub use hosts::dsh::sessions::{
     audit, compaction, evidence as dsh_evidence, waste,
 };
 pub use hosts::workbuddy::sessions::evidence as workbuddy_evidence;
+
+// D4：DSH 会话读取器（I/O，`sources` feature）。二进制 / runtime 经这个扁平别名
+// 取；纯构建 / wasm 关 feature 时它不存在。
+#[cfg(feature = "sources")]
+pub use hosts::dsh::sources as dsh_sources;

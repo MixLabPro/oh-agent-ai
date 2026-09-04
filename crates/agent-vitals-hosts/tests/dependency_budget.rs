@@ -1,4 +1,12 @@
-//! v0.8 Phase B executable boundary for the pure host-adapter crate.
+//! v0.8 `agent-vitals-hosts` 的可执行边界守卫（arch §4.3）。
+//!
+//! - `[dependencies]`：允许 `agent-vitals-domain` / `regex` / `serde_json` /
+//!   `vitals-core` + feature-gated 的 I/O 读取器依赖（`ruzstd`/`rusqlite`/`walkdir`，
+//!   `optional = true`，只在 `sources` feature 下链入）。禁 `agent-vitals`（binary）
+//!   / `tauri` / `notify` / `tokio` 等编排/watcher。
+//! - I/O token（`std::fs`/`std::process`/`std::env::`/`ruzstd`/`rusqlite`/…）**只许**
+//!   出现在路径含 `/sources` 或 `mcp/probe.rs` 的文件；`sessions/`/`skills/`/
+//!   `shared/`/`lib.rs`/`registry.rs`/`capability.rs` 命中即红（§4.3 第 2 条）。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,12 +40,25 @@ fn dependency_keys(manifest: &str) -> Vec<String> {
 #[test]
 fn adapters_dependency_budget_is_pure_and_one_way() {
     let manifest = fs::read_to_string(manifest_dir().join("Cargo.toml")).unwrap();
-    let mut actual = dependency_keys(&manifest);
-    actual.sort();
-    assert_eq!(
-        actual,
-        vec!["agent-vitals-domain", "regex", "serde_json", "vitals-core"]
-    );
+    let actual: std::collections::BTreeSet<String> = dependency_keys(&manifest).into_iter().collect();
+    // 纯依赖 —— 恒在。
+    for req in ["agent-vitals-domain", "regex", "serde_json", "vitals-core"] {
+        assert!(actual.contains(req), "hosts 必须依赖 `{req}`");
+    }
+    // feature-gated I/O 读取器依赖：允许，但必须 `optional`（`[features] sources`
+    // 才链入）——`[dependencies]` 里带 `optional = true` 的行 `dependency_keys`
+    // 照常切出 key，这里只把它们从「未知依赖」白名单里放行。
+    let io_optional = ["ruzstd", "rusqlite", "walkdir"];
+    let forbidden_deps = ["agent-vitals", "agent-vitals-wasm", "tauri", "notify", "tokio", "reqwest"];
+    for key in &actual {
+        assert!(
+            !forbidden_deps.contains(&key.as_str()),
+            "hosts/Cargo.toml [dependencies] 不许有 `{key}`（编排/watcher/binary 属 runtime/app）"
+        );
+        let known = ["agent-vitals-domain", "regex", "serde_json", "vitals-core"].contains(&key.as_str())
+            || io_optional.contains(&key.as_str());
+        assert!(known, "hosts 出现未登记依赖 `{key}`——若是新 I/O 读取器，标 optional 并加进 io_optional");
+    }
 
     // `adapters → domain` 是唯一允许的**生产**方向。`domain → adapters` 只以
     // `[dev-dependencies]` 存在（`domain/usage.rs::tests` 经它调 `canonical_tokens`，
@@ -72,8 +93,10 @@ fn each_src_file(mut visit: impl FnMut(&Path, &str)) {
     walk(&manifest_dir().join("src"), &mut visit);
 }
 
+/// §4.3 第 2 条：I/O token 只许出现在 `/sources` 或 `mcp/probe.rs`；`sessions/`/
+/// `skills/`/`shared/`/`lib.rs`/`registry.rs`/`capability.rs` 命中即红。
 #[test]
-fn production_adapters_do_not_perform_io_or_runtime_orchestration() {
+fn io_tokens_only_appear_under_sources() {
     let forbidden = [
         "std::fs",
         "std::process",
@@ -81,18 +104,33 @@ fn production_adapters_do_not_perform_io_or_runtime_orchestration() {
         "File::open",
         "File::create",
         "SystemTime::now",
+        "Instant::now",
         "rusqlite",
         "ruzstd",
+        "walkdir",
         "notify::",
         "tauri::",
     ];
     each_src_file(|path, content| {
-        let production = content.split("#[cfg(test)]").next().unwrap_or(content);
+        let rel = path.strip_prefix(manifest_dir()).unwrap_or(path);
+        let s = rel.to_string_lossy();
+        // `sources.rs` / `sources/**` / `mcp/probe.rs` 是允许 I/O 的层。
+        let is_io_layer = s.contains("/sources") || s.ends_with("/sources.rs") || s.ends_with("mcp/probe.rs");
+        if is_io_layer {
+            return;
+        }
+        let before_tests = content.split("#[cfg(test)]").next().unwrap_or(content);
+        // 去行注释——`mod.rs` 的模块文档里会提到 `ruzstd` 之类，那是说明不是代码。
+        let production: String = before_tests
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
         for needle in forbidden {
             assert!(
                 !production.contains(needle),
-                "pure adapter {} contains forbidden runtime token `{needle}`",
-                path.strip_prefix(manifest_dir()).unwrap_or(path).display()
+                "pure host layer {} contains I/O token `{needle}` —— 移进 hosts/<h>/sources/",
+                rel.display()
             );
         }
     });

@@ -92,13 +92,31 @@ Step 3 已验证 `sv6*_parity.rs` 的同款用法）。
 - 新 `tests/host_boundary.rs`：源码扫描守卫（`std::fs`/`Connection::open`/`ruzstd`/
   `rusqlite` 只许在 `/sources/` 或 `mcp/probe.rs`）。
 
-### D4 —— DSH I/O → `hosts/dsh/sources/`
-`src/dsh.rs`（locate + 多帧 zstd 解码 + `read_session_evidence` + snapshot 写）
-+ `src/agent/discovery.rs`（DSH session 发现、`workspace.json` 索引）
-→ `agent-vitals-hosts/src/hosts/dsh/sources/{discovery,reader,zstd}.rs`（`#[cfg(feature="sources")]`）。
-- `ruzstd` 从二进制 `Cargo.toml` 迁到 hosts 的 optional。
-- 二进制经 `hosts::dsh::sources`（`features=["sources"]`）调；`session_sources.rs` 的
-  `read_dsh_skill_correlation` 改调 hosts。
+### D4 —— DSH I/O → `hosts/dsh/sources/` —— ✅ 完成（2026-09-04）
+
+`src/dsh.rs`（938 行：DSH 会话 JSONL 读取器 + 多帧 zstd 解码 + snapshot 解析）
+**整体** `git mv` → `agent-vitals-hosts/src/hosts/dsh/sources.rs`，`#[cfg(feature = "sources")]`
+在 `hosts/dsh/mod.rs` 门控整个模块。
+
+- `ruzstd` 从二进制 `Cargo.toml` → `agent-vitals-hosts` 的 `[dependencies] ruzstd = { optional = true }`
+  + `[features] sources = ["dep:ruzstd"]`。二进制 `agent-vitals-hosts = { features = ["sources"] }`；
+  wasm `default-features = false`（§4.0）。
+- `split_lines` 提前迁进 `agent-vitals-domain::util`（DSH wire 解析要用；二进制
+  `src/util.rs` 改 `pub use`）。
+- 二进制 6 处 `crate::dsh::X` → `agent_vitals_hosts::dsh_sources::X`（`lib.rs` 扁平别名，
+  `#[cfg(feature = "sources")]`）；`src/main.rs` 删 `mod dsh;`。
+- **pure/impure 未细分**（`sessions/wire.rs` vs `sources/reader.rs`）——D4 的关键是「I/O
+  出二进制、进 hosts、feature-gated」，wasm 本就不碰 dsh.rs 任何函数，整块 gate 可行。
+  wire/fold 细分排后续（低价值）。
+- 守卫：`hosts/tests/dependency_budget.rs` 重写成 host_boundary——`io_tokens_only_appear_under_sources`
+  （`std::fs`/`ruzstd`/… 只许路径含 `/sources`）+ 依赖白名单放行 `optional` I/O crate。
+  移进 lib crate 后 3 个读 checked-in fixture 的测试改用 `CARGO_MANIFEST_DIR/../..` 绝对路径；
+  `parse_snapshot` doc 里的 JSON 例子加 ```` ```text ```` 围栏（lib crate 跑 doctest）。
+- **门禁全绿**：cargo test 29 binary、clippy -D warnings、wasm-pack 重建 + verify-*.mjs、
+  src-tauri check、python 1145/226 skip、golden 15+15。
+
+**未迁**：`src/agent/discovery.rs`（DSH session 发现）—— 它 `use crate::agent::takeover`
++ 读 ledger 状态，是 runtime 编排，随 D6 进 `agent-vitals-runtime`（不是 `hosts/dsh/sources/`）。
 
 ### D5 —— Codex / Claude / WorkBuddy session readers → `hosts/<h>/sources/`
 `src/agent/{claude_session,codex_session,workbuddy_session}.rs` + discovery 部分
@@ -124,7 +142,7 @@ deps：`agent-vitals-hosts { features=["sources"] }` + `agent-vitals-domain`。
 D1  wire/fold 分离          [中 + wasm 重建]   ✅ 完成（commit 6f9af88）
 D2  cost.rs 文件切分        [低，纯 domain]    ✅ 完成（本提交：切出 cost/claude.rs）
 D3  adapters → hosts 改名   [中，机械面大]    ✅ 完成（commit c07da01，纯 rename）
-D4  DSH I/O → sources/      [高，feature-gate 首用]
+D4  DSH I/O → sources/      [高，feature-gate 首用]  ✅ 完成（本提交）
 D5  其他 host readers       [高，rusqlite 迁移]
 D6  agent-vitals-runtime    [高，state 层迁移]
 D7  HomeResolver 单点       [中，收敛 + 契约测试]

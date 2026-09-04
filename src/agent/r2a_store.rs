@@ -1163,13 +1163,13 @@ fn dsh_built_session_for(
 ) -> Result<BuiltSession, DegradedTriple> {
     let path_str = path.display().to_string();
     let fp = fp_map.get(path_str.as_str()).map(|f| f.to_string()).unwrap_or_default();
-    let text = match crate::dsh::read_session_text(path) {
+    let text = match agent_vitals_hosts::dsh_sources::read_session_text(path) {
         Ok(t) => t,
         Err(code) => return Err((path_str, code.to_string(), fp)),
     };
     // 头行有效性由 parse_session_log 验（type=="session" && version==0），这里
     // 只抽 id + cwd；parse 已通过但缺 id → 无法建键 → missing-header。
-    if crate::dsh::parse_session_log(&text).get("degraded").and_then(Value::as_str).is_some() {
+    if agent_vitals_hosts::dsh_sources::parse_session_log(&text).get("degraded").and_then(Value::as_str).is_some() {
         return Err((path_str, "missing-header".to_string(), fp));
     }
     let Some((id, cwd)) = dsh_header(&text) else {

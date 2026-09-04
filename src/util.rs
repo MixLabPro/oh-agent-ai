@@ -82,35 +82,10 @@ pub use agent_vitals_domain::util::est_tokens;
 /// reason 格式化与这个 repo 其他舍入共用一份（详见 core 侧文档注释）。
 pub use agent_vitals_domain::util::pyround;
 
-/// 复刻 Python 的 `str.splitlines()`（常见终止符部分）。
-///
-/// 与 `split('\n')` 的区别在于：CRLF 算一个终止符，且末尾终止符不产生空元素。
-/// 行号计算与 `is_cited()` 取行都依赖它。
-pub fn split_lines(s: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let bytes = s.as_bytes();
-    let mut start = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\n' => {
-                out.push(&s[start..i]);
-                i += 1;
-                start = i;
-            }
-            b'\r' => {
-                out.push(&s[start..i]);
-                i += if i + 1 < bytes.len() && bytes[i + 1] == b'\n' { 2 } else { 1 };
-                start = i;
-            }
-            _ => i += 1,
-        }
-    }
-    if start < bytes.len() {
-        out.push(&s[start..]);
-    }
-    out
-}
+/// 复刻 Python 的 `str.splitlines()`（常见终止符部分）。行号计算与 `is_cited()`
+/// 取行都依赖它。实现在 domain（`pyround`/`est_tokens` 同款）—— v0.8 Phase D4
+/// 起 DSH wire 解析也用它，一个实现、多个调用面。
+pub use agent_vitals_domain::util::split_lines;
 
 #[cfg(test)]
 mod tests {

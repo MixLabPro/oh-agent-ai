@@ -53,6 +53,38 @@ pub fn pyround(x: f64, n: usize) -> f64 {
     format!("{:.*}", n, x).parse().unwrap_or(x)
 }
 
+/// 复刻 Python 的 `str.splitlines()`（常见终止符部分）。
+///
+/// 与 `split('\n')` 的区别：CRLF 算一个终止符，且末尾终止符不产生空元素。
+/// v0.8 Phase D4 从二进制 `src/util.rs` 迁进 domain —— DSH wire 解析
+/// （`agent-vitals-hosts/hosts/dsh/sessions/wire.rs`）与扫描器都要按行切，
+/// 一个纯 `&str` 实现，多个调用面。二进制侧 `src/util.rs` 改 re-export。
+pub fn split_lines(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => {
+                out.push(&s[start..i]);
+                i += 1;
+                start = i;
+            }
+            b'\r' => {
+                out.push(&s[start..i]);
+                i += if i + 1 < bytes.len() && bytes[i + 1] == b'\n' { 2 } else { 1 };
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if start < bytes.len() {
+        out.push(&s[start..]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

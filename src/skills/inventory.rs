@@ -46,7 +46,8 @@ use serde_json::Value;
 use crate::skills::discovery::{collect, Ctx, SourceMeta, DEFAULT_ROOTS};
 use crate::skills::host::HostConfig;
 use crate::util::norm;
-use crate::{dsh, skills::codex, skills::discovery, skills::openclaw, skills::workbuddy};
+use agent_vitals_hosts::dsh_sources as dsh;
+use crate::{skills::codex, skills::discovery, skills::openclaw, skills::workbuddy};
 
 /// 本次要看哪个宿主、额外看哪些目录。
 pub struct Selection<'a> {
