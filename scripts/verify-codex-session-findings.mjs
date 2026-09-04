@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const tpl = readFileSync(
-  join(here, '..', 'packages', 'agent-vitals-python', 'agent_vitals', 'templates', 'codex_session.html'),
+  join(here, '..', 'assets', 'templates', 'codex_session.html'),
   'utf8',
 );
 

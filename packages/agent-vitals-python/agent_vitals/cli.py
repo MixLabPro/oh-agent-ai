@@ -324,7 +324,7 @@ def _render_calendar_html(output_path, default_source="month"):
     返回 `(embedded_modes, output_path)`；`embedded_modes` 为空列表表示
     两份 state 文件都不存在，HTML 仍会写出，JS 会显示空态而不是报错。
     """
-    template = Path(__file__).resolve().parent / "templates" / "calendar.html"
+    template = Path(__file__).resolve().parents[3] / "assets" / "templates" / "calendar.html"
     if not template.is_file():
         raise FileNotFoundError(
             "calendar template not found at %s (run M4 first)" % template)
@@ -630,7 +630,7 @@ def _render_codex_cost_html(output_path, merged, month_key, month_out, default):
     做同一件事（模板用 include_str 内嵌、注入逻辑同构；HTML 文件不参与差分，
     只需两边产出等价可解析的页面）。
     """
-    template = Path(__file__).resolve().parent / "templates" / "calendar.html"
+    template = Path(__file__).resolve().parents[3] / "assets" / "templates" / "calendar.html"
     if not template.is_file():
         raise FileNotFoundError(
             "calendar template not found at %s (run M4 first)" % template)
@@ -1022,7 +1022,7 @@ def _main():
     p_oneline.add_argument("--no-merge", action="store_true",
                            help="Skip today.json / month.json merge (write oneline.json only)")
     # calendar：把 month.json / today.json 渲染成单文件 HTML。模板来自
-    # scripts/agent_vitals/templates/calendar.html（inline CSS/JS，无外链）。
+    # assets/templates/calendar.html（inline CSS/JS，无外链）。
     # 这里只做 copy + （可选）inline JSON，不重做 schema。
     p_cal = sub.add_parser("calendar",
                            help="Render the cost calendar HTML from persisted state")

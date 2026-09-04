@@ -29,7 +29,6 @@ ALLOWED_PACKAGE_FILES = {
         # 顶层：入口 + 共享
         "__init__.py", "cli.py", "compat.py", "paths.py", "util.py",
         "source_identity.py",
-        "pricing.json", "codex_pricing.json",
         # skills/：静态 SKILL.md 体检
         "skills/__init__.py", "skills/analysis.py", "skills/diff.py",
         "skills/discovery.py", "skills/doctor.py", "skills/explain.py",
@@ -61,11 +60,20 @@ ALLOWED_PACKAGE_FILES = {
         "adapters/openclaw.py", "adapters/workbuddy.py", "adapters/hermes.py",
         "adapters/dsh.py", "adapters/claude_session.py",
         "adapters/workbuddy_session.py",
-        # templates/
+    )
+}
+ALLOWED_PACKAGE_DIRS = {Path("adapters"), Path("skills"), Path("agent")}
+
+# v0.8 Phase E5：pricing.json/codex_pricing.json/templates/ 是 Rust/Python/
+# dsh-client 三方共读的资产，从 agent_vitals/ 包搬进仓库根 assets/（不是 Python
+# 包私有数据）——打包产物里单独镜像同一层，不进 ALLOWED_PACKAGE_FILES。
+ALLOWED_ASSETS_FILES = {
+    Path(name) for name in (
+        "pricing.json", "codex_pricing.json",
         "templates/calendar.html", "templates/codex_session.html",
     )
 }
-ALLOWED_PACKAGE_DIRS = {Path("adapters"), Path("templates"), Path("skills"), Path("agent")}
+ALLOWED_ASSETS_DIRS = {Path("templates")}
 
 
 def _ignore_python_cache(_directory, names):
@@ -75,16 +83,17 @@ def _ignore_python_cache(_directory, names):
     }
 
 
-def _unexpected_package_entries(package):
+def _unexpected_package_entries(package, allowed_files=ALLOWED_PACKAGE_FILES,
+                                 allowed_dirs=ALLOWED_PACKAGE_DIRS):
     unexpected = []
     for path in package.rglob("*"):
         relative = path.relative_to(package)
         if "__pycache__" in relative.parts or path.suffix in (".pyc", ".pyo"):
             continue
         if path.is_dir():
-            if relative not in ALLOWED_PACKAGE_DIRS:
+            if relative not in allowed_dirs:
                 unexpected.append(relative)
-        elif relative not in ALLOWED_PACKAGE_FILES:
+        elif relative not in allowed_files:
             unexpected.append(relative)
     return sorted(unexpected, key=lambda value: value.as_posix())
 
@@ -94,6 +103,7 @@ class ClawHubPackagingTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("timeout-minutes: 45", workflow)
         self.assertIn("cp -R packages/agent-vitals-python/agent_vitals", workflow)
+        self.assertIn("cp assets/pricing.json assets/codex_pricing.json", workflow)
         self.assertIn("Unexpected directory in Python package", workflow)
         self.assertIn("Unexpected file in Python package", workflow)
         self.assertIn("-name '__pycache__'", workflow)
@@ -156,6 +166,16 @@ class ClawHubPackagingTests(unittest.TestCase):
             self.skipTest("The staged agent_vitals package has not been extracted yet")
         self.assertEqual(_unexpected_package_entries(source_package), [])
 
+    def test_assets_dir_has_only_the_shared_files(self):
+        # v0.8 Phase E5：assets/ 是 Rust/Python/dsh-client 三方共读的资产（价格表 +
+        # HTML 模板），不是 Python 包私有数据——独立于 ALLOWED_PACKAGE_* 单钉一份。
+        assets = ROOT / "assets"
+        self.assertEqual(
+            _unexpected_package_entries(
+                assets, allowed_files=ALLOWED_ASSETS_FILES, allowed_dirs=ALLOWED_ASSETS_DIRS),
+            [],
+        )
+
     def test_allowlist_rejects_extra_files_and_directories(self):
         with tempfile.TemporaryDirectory() as temp:
             package = Path(temp) / "agent_vitals"
@@ -178,9 +198,14 @@ class ClawHubPackagingTests(unittest.TestCase):
         # 打包产物镜像同一相对结构——scan.py 用
         # `Path(__file__).resolve().parent.parent / "packages" / "agent-vitals-python"`
         # 找包，源仓库和打包产物走同一份 sys.path 逻辑。
+        # v0.8 Phase E5：pricing.json/codex_pricing.json/templates/ 搬出包，进了
+        # 仓库根 assets/——同样镜像相对结构，各消费者往上爬的层数才对得上。
         source_package = ROOT / "packages" / "agent-vitals-python" / "agent_vitals"
         if not source_package.is_dir():
             self.skipTest("The staged agent_vitals package has not been extracted yet")
+        source_assets = ROOT / "assets"
+        if not source_assets.is_dir():
+            self.skipTest("The staged assets/ directory has not been extracted yet")
 
         with tempfile.TemporaryDirectory() as temp:
             artifact = Path(temp) / "agent-vitals"
@@ -194,6 +219,8 @@ class ClawHubPackagingTests(unittest.TestCase):
                 artifact_package,
                 ignore=_ignore_python_cache,
             )
+            artifact_assets = artifact / "assets"
+            shutil.copytree(source_assets, artifact_assets, ignore=_ignore_python_cache)
 
             source_modules = {
                 path.relative_to(source_package)
@@ -205,6 +232,12 @@ class ClawHubPackagingTests(unittest.TestCase):
             }
             self.assertEqual(artifact_modules, source_modules)
             self.assertEqual(_unexpected_package_entries(artifact_package), [])
+            self.assertEqual(
+                _unexpected_package_entries(
+                    artifact_assets, allowed_files=ALLOWED_ASSETS_FILES,
+                    allowed_dirs=ALLOWED_ASSETS_DIRS),
+                [],
+            )
             self.assertFalse(list(artifact.rglob("__pycache__")))
             self.assertFalse(list(artifact.rglob("*.pyc")))
 

@@ -14,7 +14,7 @@ E1  dsh/ + dsh-client/ → integrations/       ✅ 完成（commit b2738ab）
 E2  src-tauri/ → apps/desktop/src-tauri/     ✅ 完成（commit 6335d29）
 E3  src/（binary）→ apps/cli/                ✅ 完成（本提交）
 E4  scripts/agent_vitals/ → packages/agent-vitals-python/agent_vitals/   ✅ 完成（本提交）
-E5  assets/ 归并（templates/icons/pricing → assets/）                   [中]
+E5  pricing/templates → assets/（跨语言共享资产出包）           ✅ 完成（本提交，范围收窄见完成记录）
 E6  CI workflows 路径同步（verify.yml / release.yml / package-clawhub.yml） [低，跟随]
 ```
 
@@ -139,6 +139,64 @@ packages/agent-vitals-python/agent_vitals`。核心设计张力：打包产物�
   dsh-client/scripts/verify-host.mjs`、python 1145 跑通两遍（纯 Python 与
   `AGENT_VITALS_BIN=./target/release/agent-vitals` 差分各一遍，后者 skip=4）、
   golden 15+15 两实现字节一致。
+
+### E5 完成记录（2026-09-04）
+
+`git mv packages/agent-vitals-python/agent_vitals/{pricing.json,codex_pricing.json,
+templates/} assets/`。范围比 spec §11 的完整 `assets/{catalog/{models,pricing,
+subscriptions},templates,icons}` 树收窄——原因是这棵完整树连着**未建的功能**
+（catalog loader、模型/订阅注册表、`~/.agent-vitals/billing.toml`），跟本文档
+开篇那句「Phase E 是纯目录搬迁，零逻辑改动」直接冲突，也正是「明确不做」那条
+早就划的线（v0.7 延期写盘/migration 框架属于功能，不是目录搬迁——同一条线这里
+适用）。E5 只做其中**已经有真实跨语言 lockstep 测试撑腰**的那部分：
+
+- `assets/pricing.json` + `assets/codex_pricing.json`——Rust `include_str!`、
+  Python `_PRICING_PATH`/`_CODEX_PRICING_PATH`、`integrations/dsh-client/
+  pricing.json`（build 时复制）三方共读的同一份文件，搬出 Python 包只是把
+  「这其实不是 Python 私有数据」的事实显式化。
+- `assets/templates/{calendar.html,codex_session.html}`——Rust `include_str!`
+  与 Python 两边共读同一份模板，同样的道理。
+- **不做**：`assets/catalog/{models,pricing,subscriptions}/` 子目录结构、
+  catalog loader、模型/订阅注册表、`billing.toml`——这些是 v0.9+ 的功能范畴。
+- **不做**：`apps/desktop/src-tauri/icons/` 不动。Tauri 工具链按约定在
+  `src-tauri/icons/` 找图标（`tauri.conf.json` 的 bundle 配置、`tauri icon`
+  命令都假设这个相对位置），且图标不参与任何跨语言 lockstep 测试——挪出去唯一
+  的收益是"目录名好看"，代价是打包配置漂移只有真跑 `tauri build` 才能发现（现有
+  门禁只到 `cargo check`）。与 E3 的 `r2a_store.rs`/`discovery.rs` 同款判断：
+  工具需要它在那，不是欠债。
+
+改动内容：
+
+- Python 5 处路径常量/字面量：`cost.py::_PRICING_PATH`、
+  `codex_cost.py::_CODEX_PRICING_PATH`、`cli.py` 两处 calendar 模板路径、
+  `codex_session_audit.py` 的 codex_session 模板路径——全部从 `Path(__file__).
+  parent(.parent)` 改成 `Path(__file__).resolve().parents[N]`（N=3 给 cli.py，
+  N=4 给 agent/ 子目录下的模块）爬回仓库根找 `assets/`。
+- Rust `include_str!` 4 处——目录段从 `packages/agent-vitals-python/agent_vitals/`
+  换成 `assets/`，`../` 深度不变（assets/ 与 packages/ 同在仓库根）。
+- `.github/workflows/package-clawhub.yml`：新增 `assets/` 打包步骤（`mkdir -p
+  .../assets/templates` + `cp`），Python 包 allowlist 里删掉
+  `pricing.json|codex_pricing.json|templates/*.html`（它们不再是包内容），
+  `required=` 清单加 4 个 `assets/...` 路径。
+- `tests/test_clawhub_packaging.py`：新增 `ALLOWED_ASSETS_FILES`/
+  `ALLOWED_ASSETS_DIRS` + `test_assets_dir_has_only_the_shared_files`，
+  `_unexpected_package_entries` 加 `allowed_files`/`allowed_dirs` 形参（默认值
+  = 原 Python 包清单，向后兼容）；模拟打包产物的构造逻辑加一步拷贝 `assets/`。
+- `tests/test_pricing_lockstep.py`/`tests/test_catalog_pricing.py`/
+  `tests/e2e_smoke.py`：`PRICING_JSON` 常量与直读路径同步到 `assets/`。
+- 2 个 `.mjs`（同 E4 改过的那两个）：模板路径从
+  `packages/agent-vitals-python/agent_vitals/templates` 改成 `assets/templates`；
+  `integrations/dsh-client/scripts/verify-host.mjs` 的注释同步。
+- 顺手抓到几处 E3/E4 遗留的过期路径注释（`cost.py`/`codex_cost.py`/
+  `codex_session_audit.py` 里指向 `src/codex_cost.rs`/`scripts/agent_vitals/…`
+  的旧路径），一起改掉。
+- **门禁全绿**：`cargo build/test/clippy --release`、wasm check、
+  `apps/desktop/src-tauri` check、`scripts/verify-codex-session-{timeline,
+  findings}.mjs`、`integrations/dsh-client/scripts/verify-host.mjs`、python
+  1146 跑两遍（纯 Python + `AGENT_VITALS_BIN` 差分，后者 skip=4）、golden
+  15+15 两实现字节一致。（`tests/e2e_smoke.py` 的 M1 `hour_buckets` 失败在改动
+  前后一致复现——真机会话数据依赖，与本步无关，不在 `unittest discover tests`
+  的门禁范围内。）
 
 ## 明确不做（同 D 的边界）
 

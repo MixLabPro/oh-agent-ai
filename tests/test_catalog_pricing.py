@@ -173,8 +173,7 @@ class PricingJsonShapeCase(unittest.TestCase):
     算出 0（2026-09-02 P4.5 RolloutItem schema-drift sentinel 同款纪律）。"""
 
     def setUp(self):
-        with (ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "pricing.json").open(
-                encoding="utf-8") as f:
+        with (ROOT / "assets" / "pricing.json").open(encoding="utf-8") as f:
             self.pricing = json.load(f)
 
     def test_catalog_cards_flat_or_tiered(self):

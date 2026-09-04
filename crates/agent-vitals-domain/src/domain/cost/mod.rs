@@ -5,17 +5,17 @@
 //! 菜单栏的 `priced_day`、逐请求费用序列 `cost_series`、以及任何"按月查钱"的
 //! surface 都从这里取数，**不长第四份拷贝**（CLAUDE.md「token_by_date_model/
 //! priced_day 在 core 里正是为了让 Tauri 菜单栏复用」的落点）。与
-//! `scripts/agent_vitals/agent/cost.py` 逐字节一致，由
+//! `packages/agent-vitals-python/agent_vitals/agent/cost.py` 逐字节一致，由
 //! `tests/test_cli_matrix.py` 的 `both()` 差分看守。
 //!
 //! 模块尾部另有一张**独立的第二计价面**（`catalog_2026_09`，Claude Code 语料
 //! 官方卡折算）：服务 claude 会话账/托盘第三宿主列，不参与 DSH 账。它只进新
 //! 函数，`cost_report`/`priced_day` 等 DSH 路径字节不变——两条面不许互相改价。
 //!
-//! 价格表的单一真相源是 `packages/agent-vitals-python/agent_vitals/pricing.json`（v0.8
-//! Phase E4 从 `scripts/agent_vitals/` 搬来；这里 `include_str!` 内嵌、Python 侧读包内
-//! 文件；`dsh-client/pricing.json` 是 build 时复制出的运行时份，lockstep 测试对齐）。
-//! 缓存写入报价表没有行 → 按 0 计（不臆造价格）。高峰时段为
+//! 价格表的单一真相源是 `assets/pricing.json`（v0.8 Phase E5 从 Python 包内搬到
+//! 仓库根——三方共读，不是 Python 包私有数据；这里 `include_str!` 内嵌、Python 侧
+//! 爬回仓库根读同一份文件；`dsh-client/pricing.json` 是 build 时复制出的运行时份，
+//! lockstep 测试对齐）。缓存写入报价表没有行 → 按 0 计（不臆造价格）。高峰时段为
 //! 北京时间**周一至周五** 9–12、14–18 点，周末全天空闲；空闲价 = 高峰价的一半。
 
 use serde_json::{json, Value};
@@ -28,8 +28,7 @@ pub use claude::{
     claude_subscription_uncovered_estimate,
 };
 
-const PRICING_JSON: &str =
-    include_str!("../../../../../packages/agent-vitals-python/agent_vitals/pricing.json");
+const PRICING_JSON: &str = include_str!("../../../../../assets/pricing.json");
 
 pub fn load_pricing() -> Value {
     serde_json::from_str(PRICING_JSON).unwrap_or_else(|_| Value::Object(Default::default()))

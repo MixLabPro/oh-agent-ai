@@ -37,7 +37,7 @@ jobs:
           set -euo pipefail
           package_dir="dist/agent-vitals"
           mkdir -p "$package_dir/scripts" "$package_dir/references" "$package_dir/agents" \
-            "$package_dir/packages/agent-vitals-python"
+            "$package_dir/packages/agent-vitals-python" "$package_dir/assets/templates"
           cp SKILL.md README.md LICENSE "$package_dir/"
           cp scripts/scan.py scripts/probe_logs.py "$package_dir/scripts/"
           cp -R packages/agent-vitals-python/agent_vitals "$package_dir/packages/agent-vitals-python/agent_vitals"
@@ -45,10 +45,17 @@ jobs:
             \( -name '*.pyc' -o -name '*.pyo' \) -delete
           find "$package_dir/packages/agent-vitals-python/agent_vitals" -type d \
             -name '__pycache__' -prune -exec rm -rf -- {} +
+          # v0.8 Phase E5：pricing.json/codex_pricing.json/templates/ 是 Rust/Python/
+          # dsh-client 三方共读的资产，不是 Python 包私有数据，搬出 agent_vitals/ 后
+          # 单独打进 assets/（与源仓库同一相对结构，scan.py 的 sys.path 之外这份是
+          # 各消费者各自往上爬几层找）。
+          cp assets/pricing.json assets/codex_pricing.json "$package_dir/assets/"
+          cp assets/templates/calendar.html assets/templates/codex_session.html \
+            "$package_dir/assets/templates/"
 
           python_package="$package_dir/packages/agent-vitals-python/agent_vitals"
           unexpected_dir="$(find "$python_package" -mindepth 1 -type d \
-            ! -path "$python_package/adapters" ! -path "$python_package/templates" \
+            ! -path "$python_package/adapters" \
             ! -path "$python_package/skills" ! -path "$python_package/agent" \
             -print -quit)"
           if [ -n "$unexpected_dir" ]; then
@@ -64,7 +71,7 @@ jobs:
           # 逐字一致（改文件清单必须两处一起改，否则打包门禁自说自话）。
           for path in "${package_files[@]}"; do
             case "$path" in
-              __init__.py|cli.py|compat.py|paths.py|util.py|source_identity.py|pricing.json|codex_pricing.json|skills/__init__.py|skills/analysis.py|skills/diff.py|skills/discovery.py|skills/doctor.py|skills/explain.py|skills/frontmatter.py|skills/inventory.py|skills/lifecycle.py|skills/overlap.py|skills/redact.py|skills/report.py|skills/security.py|skills/snapshots.py|agent/__init__.py|agent/behavior.py|agent/budget.py|agent/canonical_audit.py|agent/claude_cost.py|agent/claude_evidence.py|agent/claude_session_audit.py|agent/codex_cost.py|agent/codex_evidence.py|agent/codex_session_audit.py|agent/codex_usage.py|agent/compaction.py|agent/cost.py|agent/dsh_evidence.py|agent/dsh_usage_fact.py|agent/duration.py|agent/host_capability.py|agent/plan.py|agent/r2a.py|agent/skill.py|agent/state.py|agent/subagent.py|agent/takeover.py|agent/trajectory.py|agent/usage.py|agent/waste.py|agent/workbuddy_evidence.py|agent/workbuddy_session_audit.py|adapters/__init__.py|adapters/claude.py|adapters/codex.py|adapters/codex_session.py|adapters/openclaw.py|adapters/workbuddy.py|adapters/hermes.py|adapters/dsh.py|adapters/claude_session.py|adapters/workbuddy_session.py|templates/calendar.html|templates/codex_session.html)
+              __init__.py|cli.py|compat.py|paths.py|util.py|source_identity.py|skills/__init__.py|skills/analysis.py|skills/diff.py|skills/discovery.py|skills/doctor.py|skills/explain.py|skills/frontmatter.py|skills/inventory.py|skills/lifecycle.py|skills/overlap.py|skills/redact.py|skills/report.py|skills/security.py|skills/snapshots.py|agent/__init__.py|agent/behavior.py|agent/budget.py|agent/canonical_audit.py|agent/claude_cost.py|agent/claude_evidence.py|agent/claude_session_audit.py|agent/codex_cost.py|agent/codex_evidence.py|agent/codex_session_audit.py|agent/codex_usage.py|agent/compaction.py|agent/cost.py|agent/dsh_evidence.py|agent/dsh_usage_fact.py|agent/duration.py|agent/host_capability.py|agent/plan.py|agent/r2a.py|agent/skill.py|agent/state.py|agent/subagent.py|agent/takeover.py|agent/trajectory.py|agent/usage.py|agent/waste.py|agent/workbuddy_evidence.py|agent/workbuddy_session_audit.py|adapters/__init__.py|adapters/claude.py|adapters/codex.py|adapters/codex_session.py|adapters/openclaw.py|adapters/workbuddy.py|adapters/hermes.py|adapters/dsh.py|adapters/claude_session.py|adapters/workbuddy_session.py)
                 ;;
               *)
                 echo "Unexpected file in Python package: $path" >&2
@@ -76,7 +83,7 @@ jobs:
             "$package_dir/references/"
           cp agents/openai.yaml "$package_dir/agents/"
 
-          required="LICENSE README.md SKILL.md agents/openai.yaml references/guide.zh-CN.md references/hosts.md references/judgment.md scripts/probe_logs.py scripts/scan.py packages/agent-vitals-python/agent_vitals/__init__.py"
+          required="LICENSE README.md SKILL.md agents/openai.yaml references/guide.zh-CN.md references/hosts.md references/judgment.md scripts/probe_logs.py scripts/scan.py packages/agent-vitals-python/agent_vitals/__init__.py assets/pricing.json assets/codex_pricing.json assets/templates/calendar.html assets/templates/codex_session.html"
           for path in $required; do
             if [ ! -f "$package_dir/$path" ]; then
               echo "Required package file is missing: $path" >&2

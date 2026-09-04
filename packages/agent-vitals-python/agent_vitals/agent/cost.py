@@ -7,9 +7,11 @@ peak 份额按高峰价，加总成一个真实发生的费用——不再是「
 数，猜不出实际该按哪个算」的区间估算。与 `crates/agent-vitals-domain/src/domain/cost/mod.rs` 逐字节一致，由
 `tests/test_cli_matrix.py` 的 `both()` 差分看守。
 
-价格表的单一真相源是 `scripts/agent_vitals/pricing.json`（Rust 侧用
-`include_str!` 内嵌、本模块读包内文件；`dsh-client/client.js` 因浏览器限制
-内嵌自己的 PRICING，lockstep 测试对齐）。缓存写入报价表没有行 → 按 0 计
+价格表的单一真相源是 `assets/pricing.json`（v0.8 Phase E5 从包内搬到仓库根的
+`assets/`——它被 Rust、Python、DSH client 三方共读，不是 Python 包私有数据；
+Rust 侧用 `include_str!` 内嵌、本模块用 `Path(__file__).resolve().parents[4]`
+爬回仓库根读同一份文件；`dsh-client/client.js` 因浏览器限制内嵌自己的
+PRICING，lockstep 测试对齐）。缓存写入报价表没有行 → 按 0 计
 （不臆造价格）。高峰时段为北京时间**周一至周五** 9–12、14–18 点，周末全天
 空闲；空闲价 = 高峰价的一半。
 """
@@ -18,7 +20,9 @@ from pathlib import Path
 
 from .usage import AMBIGUOUS_PROVIDER
 
-_PRICING_PATH = Path(__file__).parent.parent / "pricing.json"
+# packages/agent-vitals-python/agent_vitals/agent/cost.py → 仓库根需要爬 5 层
+# （agent/ → agent_vitals/ → agent-vitals-python/ → packages/ → 根）。
+_PRICING_PATH = Path(__file__).resolve().parents[4] / "assets" / "pricing.json"
 
 
 def load_pricing():

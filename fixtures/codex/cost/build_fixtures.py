@@ -18,7 +18,7 @@ characterization 测试使用。
 - `rollout-unpriced.jsonl`（codex-auto-review）：无价目模型 → priced:false、
   token 进 `unpriced_tokens`（诚实上报，不按 0 价冒充）。
 
-夹具跑出来的期望值（手算，与定价表 `scripts/agent_vitals/codex_pricing.json`
+夹具跑出来的期望值（手算，与定价表 `assets/codex_pricing.json`
 一致；下面 `EXPECTED` 断言的就是这些）：
 
 - sol：08-01 桶（uncached 50000/cached 40000/write 10000/output 10000）= $0.6325；

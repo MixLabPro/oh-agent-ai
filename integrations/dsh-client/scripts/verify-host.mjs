@@ -283,7 +283,7 @@ ok('tokenByModel splits peak_* from an event\'s own time (Beijing 10:00 peak vs 
 // costReport: 宿主原生算钱（此前是 AuditView.tsx 自己拿 tokenByModel 的输出
 // 算一遍，内嵌一份 PRICING 副本）。复用上面那批 pro→flash events——同一批
 // usage 数据，costReport 是它的另一个派生视图，价格来自 dsh-client/pricing.json
-// （build 时从 packages/agent-vitals-python/agent_vitals/pricing.json 复制而来，两处数值必须相等，
+// （build 时从 assets/pricing.json 复制而来，两处数值必须相等，
 // 这里用真实文件而非编一份，价格表本身漂移会让下面的断言直接崩，不是悄悄过）。
 // ---------------------------------------------------------------------------
 let crState = cr.init()

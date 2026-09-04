@@ -110,7 +110,7 @@ def m3_cli(home):
 
 def m4_html_renderable(home):
     _step("M4: HTML 模板可在浏览器渲染（语法检查）")
-    tpl = ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "templates" / "calendar.html"
+    tpl = ROOT / "assets" / "templates" / "calendar.html"
     _assert(tpl.is_file(), "templates/calendar.html 存在")
     text = tpl.read_text()
     # 零外链（CLAUDE.md §no third-party supply chain）

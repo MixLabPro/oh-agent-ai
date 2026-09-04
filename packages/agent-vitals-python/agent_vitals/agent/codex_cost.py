@@ -1,13 +1,15 @@
 """Codex 成本计价的 Python 平行实现。
 
-单一真相源是 `src/codex_cost.rs`——那里有一份完整的中文注释讲**计价铁律**
-（为什么 cache_write 全进 5m 档、为什么 speed 是 catalog 独立行而不是乘数、
-为什么 longContextPriced:false 不触发乘数、为什么最长前缀匹配）。这一份是它的
-逐字节镜像，由 `tests/test_cli_matrix.py::both("codex-cost", ...)` 差分看守。
+单一真相源是 `apps/cli/src/agent/codex_cost.rs`——那里有一份完整的中文注释讲
+**计价铁律**（为什么 cache_write 全进 5m 档、为什么 speed 是 catalog 独立行而
+不是乘数、为什么 longContextPriced:false 不触发乘数、为什么最长前缀匹配）。这
+一份是它的逐字节镜像，由 `tests/test_cli_matrix.py::both("codex-cost", ...)`
+差分看守。
 
 与 `cost.py` 的关系：`cost.py` 是 DSH（¥、peak/off-peak、provider 分层）的计价；
 本模块是 Codex（USD、5 桶、speed 行、longContext），**不是**给 DSH 的成本引擎
-套 Codex 壳。价格表 `codex_pricing.json` 独立于 `pricing.json`。
+套 Codex 壳。价格表 `codex_pricing.json` 独立于 `pricing.json`，v0.8 Phase E5
+起两者一起搬进仓库根 `assets/`（三方共读，不是 Python 包私有数据）。
 """
 import json
 from datetime import datetime, timedelta, timezone
@@ -15,7 +17,8 @@ from pathlib import Path
 
 from .codex_usage import CODEX_TOKEN_FIELDS, codex_aggregate_hours
 
-_CODEX_PRICING_PATH = Path(__file__).parent.parent / "codex_pricing.json"
+# packages/agent-vitals-python/agent_vitals/agent/codex_cost.py → 仓库根爬 5 层。
+_CODEX_PRICING_PATH = Path(__file__).resolve().parents[4] / "assets" / "codex_pricing.json"
 
 # 北京时区（UTC+8）。与 `state.py` 的 `_BEIJING` 同口径：本仓库「当前月/今天」统一
 # 按北京时间定，codex-cost 的默认月与 DSH month.json 的月份在月初/月末才不会打架。

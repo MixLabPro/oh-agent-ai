@@ -60,6 +60,10 @@ packages/agent-vitals-python/
                             #   产物镜像同一相对结构（packages/agent-vitals-python/agent_vitals/），
                             #   scan.py 的一份 sys.path 逻辑在源仓库和打包产物里都成立
 scripts/probe_logs.py       # legacy fallback (not in the default flow)
+assets/                      # v0.8 Phase E5：Rust/Python/dsh-client 三方共读的资产，
+                            #   不是 Python 包私有数据——pricing.json/codex_pricing.json/
+                            #   templates/{calendar,codex_session}.html。Tauri icons/ 不在
+                            #   这里（留 apps/desktop/src-tauri/icons/，工具约定）
 SKILL.md                    # agent-facing driver: routes to doctor, names the SV codes
 references/                 # hosts.md (per-host evidence), judgment.md, guide.zh-CN.md
 docs/                       # design docs (ENGINEERING, DSH_INTEGRATION, AGENT_BEHAVIOR_AUDIT, …)
@@ -141,9 +145,13 @@ AGENT_VITALS_V0_8_PHASE_E_RESEARCH.md`) is in progress: E1 (`dsh`/`dsh-client` �
 `integrations/`), E2 (`src-tauri` → `apps/desktop/src-tauri`), E3 (`src/` → `apps/cli/`),
 E4 (`scripts/agent_vitals/` → `packages/agent-vitals-python/agent_vitals/`; `scripts/scan.py`
 stays put and just points its `sys.path` at the new location — the packaged ClawHub artifact
-mirrors the same relative layout so one `sys.path` formula works in both places) done.
-Remaining: E5 (assets), E6 (CI path sync — largely folded into E1-E4 already). Then Phase F
-(MCP).
+mirrors the same relative layout so one `sys.path` formula works in both places), E5
+(`pricing.json`/`codex_pricing.json`/`templates/` → repo-root `assets/` — the subset of
+spec §11's `assets/` tree that already has real cross-language lockstep tests; the
+`catalog/{models,pricing,subscriptions}` registry + loader + `billing.toml` are v0.9+
+feature work, not a directory move, so E5 does not build them; Tauri's `icons/` stays put —
+tool convention, zero lockstep value) done. Remaining: E6 (CI path sync — largely folded
+into E1-E5 already). Then Phase F (MCP).
 
 Guard: `agent-vitals-hosts/tests/dependency_budget.rs::io_tokens_only_appear_under_sources`
 — `std::fs`/`ruzstd`/`rusqlite`/… may appear only in files whose path contains `/sources`.
@@ -284,7 +292,7 @@ projection's `view` calls the wasm `token_by_model` — so the tab runs the *exa
 CLI `behavior` command runs (never a second copy). Pricing those buckets into money is
 *also* host-side now: the `costReport` projection (`integrations/dsh-client/src/host/index.ts`) reads
 `tokenByModel`'s fold and prices it against `integrations/dsh-client/pricing.json` — a build-time copy of
-the single-source `packages/agent-vitals-python/agent_vitals/pricing.json` (Rust embeds the source via
+the single-source `assets/pricing.json` (Rust embeds the source via
 `include_str!`; Node can `readFileSync` its own copy directly, unlike the browser). The client
 just renders `useProjection('costReport')`. `AuditView.tsx` keeps a second, *display-only*
 baked `PRICING` copy in `styles/index.ts` — not for pricing math, only for the model
@@ -505,7 +513,7 @@ Query a historical month with `state.read_month("YYYY-MM")` /
 `agent-vitals state months` enumerates what has data. The computation (`token_by_date_model`,
 `priced_day`) is in agent-vitals-domain / `cost.py` precisely so the Tauri menu bar and any future
 month-query surface reuse it rather than growing a fourth copy. The DeepSeek **price
-table** lives only in `packages/agent-vitals-python/agent_vitals/pricing.json` (CLI 两侧读它；`integrations/dsh-client/
+table** lives only in `assets/pricing.json` (CLI 两侧读它；`integrations/dsh-client/
 pricing.json` 是 build 时复制出的运行时份，宿主 `costReport` 投影读它；`styles/index.ts`
 另内嵌一份仅供展示用的模型短名副本——三处由 `tests/test_pricing_lockstep.py` 守）;
 prices are business data, not rules — they change without a golden `--update`. The
@@ -525,7 +533,7 @@ Scan output must never be committed — `.gitignore` covers `skill-scan*.json`, 
 `integrations/dsh-client/agent_vitals_wasm_bg.wasm` and `integrations/dsh-client/pricing.json` are the deliberate
 build-artifact exceptions: the host plugin `readFileSync`s both at runtime (the wasm binary
 and the price table `costReport` prices against), `wasm-opt` is disabled so the wasm build
-needs no network, and `pricing.json` is a plain `cp` from `packages/agent-vitals-python/agent_vitals/pricing.json`
+needs no network, and `pricing.json` is a plain `cp` from `assets/pricing.json`
 — re-copy it by hand whenever the source changes; `tests/test_pricing_lockstep.py`'s
 `HostPricingCopyLockstepTests` byte-compares them so a forgotten copy fails loudly instead
 of silently pricing off stale numbers.

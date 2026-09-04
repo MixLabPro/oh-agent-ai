@@ -1,7 +1,7 @@
 //! Codex 成本计价 —— 把 core 的 `codex_usage` 折叠（5 桶 × 模型 × 小时）变成 USD 费用。
 //!
 //! 与 DSH 的分工同构：**折叠进 core，计价进 binary**。折叠（`codex_usage.rs`）是纯
-//! 规则、零 I/O；计价（本文件）读 `codex_pricing.json`（`include_str!` 内嵌，Python
+//! 规则、零 I/O；计价（本文件）读 `assets/codex_pricing.json`（`include_str!` 内嵌，Python
 //! 侧读包内文件）——价格是**业务数据**，不是规则，与 `src/cost.rs` 的 `pricing.json`
 //! 同一哲学，且没有 wasm 消费者，所以不进 core。Python 平行实现
 //! `packages/agent-vitals-python/agent_vitals/agent/codex_cost.py`，由
@@ -37,7 +37,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
-const CODEX_PRICING_JSON: &str = include_str!("../../../../packages/agent-vitals-python/agent_vitals/codex_pricing.json");
+const CODEX_PRICING_JSON: &str = include_str!("../../../../assets/codex_pricing.json");
 
 pub fn load_codex_pricing() -> Value {
     serde_json::from_str(CODEX_PRICING_JSON).unwrap_or_else(|_| Value::Object(Default::default()))

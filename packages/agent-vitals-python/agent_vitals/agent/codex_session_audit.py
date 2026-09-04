@@ -18,9 +18,9 @@
 - **上下文窗口**：最后一个 token_count 的 `info.model_context_window`（最后看见
   的赢）——Codex 无逐 turn 上下文峰值，窗口是报告能诚实给出的「上下文上限」。
 
-全是既有纯函数的组合，**无新规则**；与 Rust `src/agent/codex_session_audit.rs`
+全是既有纯函数的组合，**无新规则**；与 Rust `apps/cli/src/agent/codex_session_audit.rs`
 逐字节对齐，由 `tests/test_cli_matrix.py::both()` 差分看守。HTML 模板与 Rust
-共用 `templates/codex_session.html`（DSH 审计 tab 版式）。
+共用 `assets/templates/codex_session.html`（DSH 审计 tab 版式）。
 """
 
 import functools
@@ -431,7 +431,8 @@ def _render_codex_session_html(output_path, out):
     `<script id="agent-vitals-data-codex-session">`。JSON 经 `</script`/`<!--`
     转义。与 Rust `render_codex_session_html` 同构（HTML 文件不参与差分，只需
     等价可解析的页面；两边共读同一份模板文件）。"""
-    template = Path(__file__).resolve().parent.parent / "templates" / "codex_session.html"
+    # packages/agent-vitals-python/agent_vitals/agent/codex_session_audit.py → 仓库根爬 5 层。
+    template = Path(__file__).resolve().parents[4] / "assets" / "templates" / "codex_session.html"
     if not template.is_file():
         raise FileNotFoundError(
             "codex-session template not found at %s" % template)
