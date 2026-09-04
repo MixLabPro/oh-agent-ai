@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::util::split_lines;
+use crate::domain::util::split_lines;
 
 fn fm_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();

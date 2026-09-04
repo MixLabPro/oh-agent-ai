@@ -15,6 +15,7 @@ pub mod findings;
 pub mod mcp;
 pub mod plan;
 pub mod skill;
+pub mod skills;
 pub mod state;
 pub mod subagent;
 pub mod takeover;

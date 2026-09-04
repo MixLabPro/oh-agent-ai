@@ -13,7 +13,6 @@ pub mod discovery;
 pub mod diff;
 pub mod doctor;
 pub mod explain;
-pub mod frontmatter;
 pub mod host;
 pub mod inventory;
 pub mod openclaw;

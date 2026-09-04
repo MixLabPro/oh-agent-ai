@@ -12,7 +12,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
-use crate::skills::frontmatter::parse_frontmatter;
+use agent_vitals_domain::skills::frontmatter::parse_frontmatter;
 use crate::skills::host::lookup_usage;
 use crate::skills::security::security_scan;
 use crate::util::{est_tokens, norm, pyround, read_lossy};

@@ -30,5 +30,5 @@ pub use contracts::{evidence, host_capability, r2a, source_identity, usage_fact}
 // domain 计算模块的扁平别名——Phase C 迁出前 `agent_vitals_domain::behavior::*` 等。
 pub use domain::{
     behavior, budget, canonical_audit, coords, cost, detectors, duration, findings, mcp, plan,
-    skill, state, subagent, takeover, trajectory, usage, util,
+    skill, skills, state, subagent, takeover, trajectory, usage, util,
 };

@@ -28,6 +28,11 @@ RS_SRC = ROOT / "apps" / "cli" / "src"  # v0.8 Phase E3：二进制从根 src/ �
 # 静态 SKILL.md 体检（skills/ 子树）——两实现的名单略有出入：
 # Python 有 lifecycle/snapshots，Rust 没有（这些函数在 core 或别处）；
 # Rust 有 host/render/codex/openclaw/workbuddy，Python 在 adapters/ 或 core。
+# v0.8 Phase E7.1：Rust 的 frontmatter 迁进 agent-vitals-domain/src/domain/
+# skills/frontmatter.rs（纯解析，零 I/O、零宿主专有逻辑，是 D4/D5 当初该做但
+# 漏做的 Skill Surface 宿主归位第一步）——不再在 apps/cli/src/skills/，从
+# RS_SKILLS_FAMILY 里删掉；Python 侧的 frontmatter.py 暂未跟进搬迁，PY_SKILLS_
+# FAMILY 不变。
 PY_SKILLS_FAMILY = {
     "analysis", "diff", "discovery", "doctor", "explain", "frontmatter",
     "inventory", "lifecycle", "overlap", "redact", "report", "security",
@@ -35,7 +40,7 @@ PY_SKILLS_FAMILY = {
 }
 RS_SKILLS_FAMILY = {
     "analysis", "codex", "diff", "discovery", "doctor", "explain",
-    "frontmatter", "host", "inventory", "openclaw", "overlap", "redact",
+    "host", "inventory", "openclaw", "overlap", "redact",
     "render", "report", "security", "snapshot", "workbuddy",
 }
 
