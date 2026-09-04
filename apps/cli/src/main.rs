@@ -183,7 +183,7 @@ enum Cmd {
     /// Save a snapshot to ~/.agent-vitals/snapshots
     Snapshot {
         /// Retain the newest N snapshots; default: 30; 0 means unlimited
-        #[arg(long, default_value_t = skills::snapshot::SNAPSHOT_KEEP, value_parser = non_negative)]
+        #[arg(long, default_value_t = agent_vitals_runtime::skills::snapshot::SNAPSHOT_KEEP, value_parser = non_negative)]
         keep: i64,
     },
     /// Compare with the previous snapshot
@@ -736,7 +736,7 @@ or specify one with --baseline.");
         &ds, &skills::doctor::GateOpts { fail_on: args.fail_on.clone(), ignore },
         base_ds.as_deref());
     print!("{}", text);
-    print!("{}", skills::snapshot::doctor_snapshot(doc, auto_snapshot));
+    print!("{}", agent_vitals_runtime::skills::snapshot::doctor_snapshot(doc, auto_snapshot));
     rc
 }
 
@@ -2049,10 +2049,10 @@ session_store={store} fold={fold}"
         && !matches!(&args.cmd, Some(Cmd::Doctor { rows_json: Some(_), .. }));
     let baseline: Option<PathBuf> = args.baseline.clone().or_else(|| {
         match &args.cmd {
-            Some(Cmd::Diff { file, .. }) => file.clone().or_else(skills::snapshot::latest_snapshot),
+            Some(Cmd::Diff { file, .. }) => file.clone().or_else(agent_vitals_runtime::skills::snapshot::latest_snapshot),
             // --new-only 也要找基线。**不能只挂在 auto_snapshot 上** ——
             // `--no-snapshot` 的语义是「别写」，不是「别比」。
-            _ if auto_snapshot || args.new_only => skills::snapshot::latest_snapshot(),
+            _ if auto_snapshot || args.new_only => agent_vitals_runtime::skills::snapshot::latest_snapshot(),
             _ => None,
         }
     });
@@ -2083,7 +2083,7 @@ session_store={store} fold={fold}"
     }
 
     if let Some(Cmd::Snapshot { keep }) = &args.cmd {
-        let (text, rc) = skills::snapshot::render_snapshot(&doc, &skills::snapshot::SnapshotOpts {
+        let (text, rc) = agent_vitals_runtime::skills::snapshot::render_snapshot(&doc, &agent_vitals_runtime::skills::snapshot::SnapshotOpts {
             keep: *keep,
             redacted: args.redact || args.redact_names,
         });
@@ -2111,7 +2111,7 @@ session_store={store} fold={fold}"
         let gate = doc.pointer("/trigger_data/zombie_min_age_days")
             .and_then(|v| v.as_i64())
             .unwrap_or(args.zombie_age);
-        let (text, to_stderr, rc) = skills::snapshot::render_diff(&doc, gate);
+        let (text, to_stderr, rc) = agent_vitals_runtime::skills::snapshot::render_diff(&doc, gate);
         if to_stderr { eprint!("{}", text); } else { print!("{}", text); }
         std::process::exit(rc);
     }

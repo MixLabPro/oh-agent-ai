@@ -28,12 +28,14 @@ RS_SRC = ROOT / "apps" / "cli" / "src"  # v0.8 Phase E3：二进制从根 src/ �
 # 静态 SKILL.md 体检（skills/ 子树）——两实现的名单略有出入：
 # Python 有 lifecycle/snapshots，Rust 没有（这些函数在 core 或别处）；
 # Rust 有 host/render/codex/openclaw/workbuddy，Python 在 adapters/ 或 core。
-# v0.8 Phase E7.1/E7.2：Rust 的 frontmatter（E7.1）+ analysis/overlap（E7.2，
-# 连同它们依赖的 ranking 排序簇 + s/i/f/b/chars 取值助手）迁进 agent-vitals-
-# domain/src/domain/skills/（纯计算，零 I/O、零宿主专有逻辑，是 D4/D5 当初该做
-# 但漏做的 Skill Surface 宿主归位）——不再在 apps/cli/src/skills/，从
-# RS_SKILLS_FAMILY 里删掉；Python 侧的 frontmatter.py/analysis.py/overlap.py
-# 暂未跟进搬迁，PY_SKILLS_FAMILY 不变。
+# v0.8 Phase E7（收口 D4/D5 当初该做但漏做的 Skill Surface 宿主归位）：
+# E7.1 frontmatter、E7.2 analysis/overlap（连同它们依赖的 ranking 排序簇 +
+# s/i/f/b/chars 取值助手）、E7.3 security（拆出纯规则引擎 security_rules，
+# I/O 部分留 apps/cli 当薄壳，security 本身不搬）迁进 agent-vitals-domain/
+# src/domain/skills/；E7.4 snapshot（本机快照读写，I/O 天然属于 runtime，
+# 不需要像 security 那样拆）迁进 agent-vitals-runtime/src/skills/——都不再在
+# apps/cli/src/skills/，从 RS_SKILLS_FAMILY 里删掉；Python 侧对应模块暂未
+# 跟进搬迁，PY_SKILLS_FAMILY 不变。
 PY_SKILLS_FAMILY = {
     "analysis", "diff", "discovery", "doctor", "explain", "frontmatter",
     "inventory", "lifecycle", "overlap", "redact", "report", "security",
@@ -42,7 +44,7 @@ PY_SKILLS_FAMILY = {
 RS_SKILLS_FAMILY = {
     "codex", "diff", "discovery", "doctor", "explain",
     "host", "inventory", "openclaw", "redact",
-    "render", "report", "security", "snapshot", "workbuddy",
+    "render", "report", "security", "workbuddy",
 }
 
 # 会话行为/成本审计（agent/ 子树）。**注意 skill.py 在这里**：会话 skill 执行

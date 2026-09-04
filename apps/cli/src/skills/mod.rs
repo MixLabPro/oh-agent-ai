@@ -19,5 +19,4 @@ pub mod redact;
 pub mod render;
 pub mod report;
 pub mod security;
-pub mod snapshot;
 pub mod workbuddy;

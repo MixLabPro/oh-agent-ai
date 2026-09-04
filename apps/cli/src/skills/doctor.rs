@@ -618,7 +618,7 @@ pub fn render_doctor(out: &Value, o: &DoctorOpts) -> String {
         p!("  agent-vitals overlap              Inspect potentially competing pairs");
     }
     p!("  Run /agent-vitals in Claude Code  Let the model judge descriptions semantically");
-    // 快照那几行由 skills::snapshot::doctor_snapshot 在这之后追加 —— **它必须在写盘
+    // 快照那几行由 agent_vitals_runtime::skills::snapshot::doctor_snapshot 在这之后追加 —— **它必须在写盘
     // 成功之后才说自己存了**，所以不能在这里预先打。
     w
 }

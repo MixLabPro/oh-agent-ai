@@ -114,8 +114,22 @@ E7.3  security.rs → agent-vitals-domain/src/domain/skills/security_rules.rs
       golden 15+15 逐字节一致——这是本轮唯一一次「拆」而非「搬」，golden
       过了才真正证明零行为漂移，不是靠"只挪没改"的先验保证。
 E7.4  snapshot.rs → agent-vitals-runtime/src/skills/snapshot.rs
-      5 处 I/O，本机快照读写——与 D6 的 state/budget/takeover 同类，是 runtime
-      的天然归属。
+      ✅ 完成。与 E7.3 不同，这次**整个文件原样搬**，不用拆——
+      `agent-vitals-runtime` 本来就允许 I/O（不像 domain），渲染函数
+      （`render_snapshot`/`render_diff`）虽然本身不碰 fs，但与
+      `save_snapshot`/`list_snapshots` 等 I/O 函数逻辑上是一个整体（同 D6
+      把 `state.rs`/`budget.rs`/`takeover.rs` 整体搬进 runtime 的先例，没有
+      在那几个文件里拆"渲染 vs I/O"）。`i`/`s` 改从
+      `agent_vitals_domain::util` 取（E7.2 迁的位置）；`snapshot_dir` 从
+      `pub use agent_vitals_runtime::home::snapshot_dir` 的跨 crate 桥接
+      简化成同 crate 内 `use crate::home::snapshot_dir`（D7 时 `home` 已经
+      在 runtime，只是 `snapshot.rs` 当时还没跟过来）。3 处消费者更新：
+      `main.rs`（6 处 `skills::snapshot::` → `agent_vitals_runtime::skills::
+      snapshot::`）、`doctor.rs`（1 处注释）、`agent/r2a_store.rs`（唯一
+      真实依赖是 `data_home`，改直接指
+      `agent_vitals_runtime::home::data_home`——不是"顺带搬了 agent/ 的
+      东西"，只是这一行 import 指向变了，`r2a_store.rs` 本体分毫未动，
+      仍是本会话明确暂停的"扩大版 E7"范围外）。golden 15+15 逐字节一致。
 E7.5  inventory.rs + discovery.rs 拆分 → runtime/skills/{inventory,scanner}.rs
       discovery.rs 963 行是这次最大最复杂的一块——4 处 I/O 命中不代表只有 4 处
       跟宿主相关，需要通读，可能还要再拆出 hosts/<h>/skills/ 的部分（哪些目录

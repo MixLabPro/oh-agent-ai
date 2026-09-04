@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use crate::{i, s};
-// v0.8 Phase D7：home 解析迁进 agent-vitals-runtime。`data_home` 保 `pub(crate)`
-// 语义（`crate::skills::snapshot::data_home` 旧路径），`snapshot_dir` 保 `pub`。
-pub(crate) use agent_vitals_runtime::home::data_home;
-pub use agent_vitals_runtime::home::snapshot_dir;
+use agent_vitals_domain::util::{i, s};
+// v0.8 Phase E7.4：本文件从 apps/cli/src/skills/ 迁进本 crate（D7 时
+// snapshot_dir/data_home 已经先一步迁到 agent-vitals-runtime::home，本文件
+// 当时留在 apps/cli 靠 re-export 桥过去）——现在同一个 crate 内，直接引用
+// 兄弟模块，不用再 re-export。
+use crate::home::snapshot_dir;
 
 pub const SNAPSHOT_KEEP: i64 = 30;
 /// §6.2：2 = 工具自身错误（路径不可读、配置非法等）

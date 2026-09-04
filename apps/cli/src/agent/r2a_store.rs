@@ -53,7 +53,7 @@ use agent_vitals_domain::findings::{FindingRef, FindingSession, rollup_findings}
 use agent_vitals_domain::r2a::*;
 use crate::agent::codex_session_audit as csa;
 use agent_vitals_runtime::takeover;
-use crate::skills::snapshot::data_home;
+use agent_vitals_runtime::home::data_home;
 
 /// 并行逐会话构建，结果按输入序回填。会话构建互相独立（只读各自源文件 + 共享
 /// 只读的 `fp_map`/`ws`），可并行；但每个 worker 持有当前会话解压后的全文，

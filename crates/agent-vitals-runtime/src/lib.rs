@@ -8,12 +8,15 @@
 //!
 //! v0.8：D7 落 `home`；D6 迁 `clock` / `state` / `budget` / `takeover` /
 //! `session_sources`（`r2a_store` / `discovery` 随 Phase E 的 apps/cli 抽出一起，
-//! 它们与 CLI 成本/审计 handler 交织）。
+//! 它们与 CLI 成本/审计 handler 交织）；E7.4 迁 `skills::snapshot`（Skill
+//! Surface 的本机快照读写——本机 fs 状态，与 `state`/`budget`/`takeover` 同类，
+//! 是 runtime 的天然归属，不是 hosts 的 sources/，因为它不认识任何宿主）。
 
 pub mod budget;
 pub mod clock;
 pub mod home;
 pub mod session_sources;
+pub mod skills;
 pub mod state;
 pub mod takeover;
 
