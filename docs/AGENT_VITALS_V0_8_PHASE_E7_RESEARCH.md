@@ -130,14 +130,35 @@ E7.4  snapshot.rs → agent-vitals-runtime/src/skills/snapshot.rs
       `agent_vitals_runtime::home::data_home`——不是"顺带搬了 agent/ 的
       东西"，只是这一行 import 指向变了，`r2a_store.rs` 本体分毫未动，
       仍是本会话明确暂停的"扩大版 E7"范围外）。golden 15+15 逐字节一致。
-E7.5  inventory.rs + discovery.rs 拆分 → runtime/skills/{inventory,scanner}.rs
-      discovery.rs 963 行是这次最大最复杂的一块——4 处 I/O 命中不代表只有 4 处
-      跟宿主相关，需要通读，可能还要再拆出 hosts/<h>/skills/ 的部分（哪些目录
-      算"这个宿主的 skill 根"是宿主专有知识，不是通用扫描逻辑）。
+⚠️ **E7.5/E7.6 顺序在这里被推翻，实际顺序是 E7.6 → E7.5**：`inventory.rs`
+（E7.5 目标之一）内部直接调用 `codex::read_codex_runtime`/
+`openclaw::read_openclaw_runtime`/`workbuddy::discover_builtin`/
+`host::HostConfig` 等——这些都还是 `apps/cli`（**二进制** crate）里的模块。
+`inventory.rs` 想先搬进 `agent-vitals-runtime`（一个**库** crate），会变成
+"库 crate 依赖二进制 crate"——Rust 不允许，二进制反过来依赖库才是唯一合法
+方向。所以必须先做 E7.6（把 codex/openclaw/workbuddy/host 四个宿主适配器
+迁成 `agent-vitals-hosts` 里可被库 crate 引用的模块），`inventory.rs` 才有
+地方可去。原文档把 E7.5 排在 E7.6 前面是没核实这条依赖方向就先写的计划，
+按 D4/D5 的教训（"1 处 I/O 命中"最后核实出 3 处）又一次证明：**每一步的
+真实依赖图只有读完文件才知道，不能从文件名/行数先验推断执行顺序**。
+
 E7.6  codex.rs / openclaw.rs / workbuddy.rs / host.rs → hosts/<h>/skills/
       + hosts/<h>/sources/skills.rs（I/O 部分，feature-gated，复用 D4/D5 已经
       搭好的 sources feature）。四个宿主逐个做，workbuddy 和 openclaw I/O
-      命中最多，工作量最大。
+      命中最多，工作量最大——且是**真实的 codex/openclaw 子进程/运行时探测
+      代码**（`read_codex_runtime`/`read_openclaw_runtime` 各带 `Duration`
+      超时参数，说明背后是真实子进程调用），不是纯文件读写。golden 语料库
+      虽然有 `host-codex`/`host-openclaw`/`host-workbuddy` 三个 case，但这些
+      通常在 CI/沙箱环境下通过 `AGENT_VITALS_DISABLE_*_RUNTIME` 环境变量禁用
+      真实探测（走 `codex_not_probed`/`openclaw` 的禁用分支），意味着 golden
+      diff 对这批探测代码本身的覆盖率**低于**对纯规则/纯解析代码的覆盖率——
+      移动这批代码时哪怕语法正确、golden 也过，仍不能像 E7.1-E7.4 那样把
+      "golden 绿"当作"零行为漂移"的完整证明，需要额外读一遍探测逻辑本身。
+E7.5  inventory.rs + discovery.rs 拆分 → runtime/skills/{inventory,scanner}.rs
+      discovery.rs 963 行是这次最大最复杂的一块——4 处 I/O 命中不代表只有 4 处
+      跟宿主相关，需要通读，可能还要再拆出 hosts/<h>/skills/ 的部分（哪些目录
+      算"这个宿主的 skill 根"是宿主专有知识，不是通用扫描逻辑）。依赖 E7.6
+      先完成（见上）。
 E7.7  apps/cli/src/skills/mod.rs 收敛成 apps/cli/src/commands/skills.rs
       （参数解析 + 调用 runtime service + 渲染），doctor/explain/report/render/
       redact/diff 视 E7.1-E7.6 结果决定去留（大概率留在 CLI，逐个核实）。
