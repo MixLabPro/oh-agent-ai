@@ -347,6 +347,31 @@ Python 分层）。Rust 侧每个 Step 动一处，Python 侧对应：
 
 ---
 
+## 6bis. 执行进度（2026-09-04，本会话逐步做）
+
+| commit | 内容 | 门禁 |
+|---|---|---|
+| `e82f168` | 预备：`find_request`/`find_next_request` → `util`（waste↔skill 共用）| 全绿 |
+| `4b44b8c` | Step 1a：`compaction` + `waste` 迁出 `domain/` 进 `adapters/hosts/dsh/sessions/` | 全绿 |
+| `cd4f89a` | Step 1b：`match_behavior`/`match_trajectory` raw shim → `adapters/…/audit.rs` | 全绿 + wasm-pack |
+| `69888c6` | Step 2a：`Coords` → `domain/coords.rs`（`trajectory::coord_map` 不再横跨取）| 全绿 |
+| `6ce4d13` | Step 2b：canonical 归一层 → `adapters/canonical_usage.rs`（生产零调用）| 全绿 |
+
+**至此 `domain/*.rs` 生产代码对 `crate::{dsh_evidence, codex_usage, adapters::hosts}`
+引用归零**——层 1 全清。剩下的命中全在 `#[cfg(test)]`（造 fixture / 调迁走的
+shim），crate 拆分后经 `[dev-dependencies]` 解析。
+
+**实际做法与原 §2 计划的偏差**（都是 crate 内移动 + `lib.rs` re-export 保旧路径，
+比原计划「移到 agent-vitals-adapters crate + wasm 全改」小）：
+- 移动全在 `agent-vitals-core` 内（`domain/` ↔ `adapters/`），`lib.rs` re-export 保
+  `agent_vitals_core::{compaction,waste,audit,canonical_usage,coords}` 旧路径
+- wasm 只改 2 处（`match_{behavior,trajectory}` → `agent_vitals_core::audit::*`）
+- `Coords` 落 `domain/coords.rs` 而非 `contracts/`（模块注释写清是过渡；`contracts`
+  保持 host-agnostic）
+
+**剩余**：Step 3（B2 residual 物理迁 `agent-vitals-adapters` crate）+ Step 4
+（抽 `agent-vitals-domain` crate）——见下。
+
 ## 6. 建议执行顺序（C-minimal，每步独立提交、golden 绿）
 
 ```
