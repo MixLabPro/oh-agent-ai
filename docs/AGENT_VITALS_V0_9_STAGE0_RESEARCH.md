@@ -89,3 +89,23 @@ WorkBuddy 数据读取——与"workbuddy 的问题先不处理"的决定一致�
 全绿；`cargo test --release`（workspace）无新增失败。
 
 0.2 起的每一步单独提交、单独验收，遵循同一纪律。
+
+## 4. 0.2 完成记录
+
+**落地**：新 workspace member `crates/agent-vitals-data/`（六个模块骨架：
+`evidence`/`store`/`billing`/`coverage`/`repository`/`projection`，只有
+`projection` 重新导出 0.1 的契约类型，其余五个目前只是说明未来职责的文档
+注释）。`Cargo.toml` 只依赖 `agent-vitals-domain`，不接 `agent-vitals-hosts`/
+`rusqlite`——`tests/dependency_budget.rs` 把这个"现状"钉成可执行断言，并在
+注释里明写这是 Stage 0.3/Stage B 会按计划放开的收紧，不是永久上限。
+
+**验收**：`cargo test -p agent-vitals-data` 2/2；`cargo build/clippy
+--release`（workspace）全绿；`cargo check -p agent-vitals-wasm`、
+`apps/desktop/src-tauri cargo check` 全绿；`cargo test --release`
+（workspace，33 个 test binary）全部 0 failed。`.github/workflows/*.yml`
+核实过不需要改——三个 workflow 都是 `cargo test/clippy/build --release`
+workspace-root 命令，不硬编码 crate 列表，新 member 靠 `default-members`
+自动纳入。
+
+0.3（只读 JSON adapter，把 `r2a_store.rs::host_snapshot` 现有输出组装成
+`MonthlySummary`/`DailySummary`）是下一步。
