@@ -48,7 +48,7 @@ PY_SKILLS_FAMILY = {
 }
 RS_SKILLS_FAMILY = {
     "codex", "diff", "discovery", "doctor", "explain",
-    "inventory", "openclaw", "redact",
+    "inventory", "redact",
     "render", "report", "security",
 }
 

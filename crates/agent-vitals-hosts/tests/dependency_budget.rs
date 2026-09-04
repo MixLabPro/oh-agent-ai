@@ -146,8 +146,23 @@ fn host_namespace_is_complete_and_surface_explicit() {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     actual.sort();
-    assert_eq!(actual, vec!["claude_code", "codex", "dsh", "workbuddy"]);
+    assert_eq!(
+        actual,
+        vec!["claude_code", "codex", "dsh", "openclaw", "workbuddy"]
+    );
+    // v0.8 Phase E7.6：openclaw 是 Skill-Surface-only 宿主——它没有 Session
+    // Surface 证据面（不在 host_capability.rs 的 RUNTIME_HOST_IDS 四个"运行时
+    // 宿主"里），只有 `sources/skills.rs`（目录发现 + `openclaw skills list`
+    // 探测），没有、也不该有 `sessions/`。其余四个宿主都是运行时宿主，
+    // `sessions/mod.rs` 仍然强制存在。
     for host in actual {
+        if host == "openclaw" {
+            assert!(
+                !hosts.join(&host).join("sessions").exists(),
+                "openclaw 没有 Session Surface 证据面，不该凭空长出 sessions/"
+            );
+            continue;
+        }
         assert!(hosts.join(host).join("sessions/mod.rs").is_file());
     }
 }

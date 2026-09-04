@@ -47,10 +47,11 @@ use crate::skills::discovery::{collect, Ctx, SourceMeta, DEFAULT_ROOTS};
 use agent_vitals_hosts::hosts::claude_code::skills::HostConfig;
 use crate::util::norm;
 use agent_vitals_hosts::dsh_sources as dsh;
-use crate::{skills::codex, skills::discovery, skills::openclaw};
-// v0.8 Phase E7.6：workbuddy.rs 迁进 agent-vitals-hosts（库 crate），
-// re-import 时保留同一个局部别名 `workbuddy`，call site 零改动。
+use crate::{skills::codex, skills::discovery};
+// v0.8 Phase E7.6：workbuddy.rs/openclaw.rs 迁进 agent-vitals-hosts（库
+// crate），re-import 时保留同样的局部别名，call site 零改动。
 use agent_vitals_hosts::hosts::workbuddy::sources::skills as workbuddy;
+use agent_vitals_hosts::hosts::openclaw::sources::skills as openclaw;
 
 /// 本次要看哪个宿主、额外看哪些目录。
 pub struct Selection<'a> {

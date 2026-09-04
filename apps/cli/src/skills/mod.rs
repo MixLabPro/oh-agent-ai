@@ -13,7 +13,6 @@ pub mod diff;
 pub mod doctor;
 pub mod explain;
 pub mod inventory;
-pub mod openclaw;
 pub mod redact;
 pub mod render;
 pub mod report;

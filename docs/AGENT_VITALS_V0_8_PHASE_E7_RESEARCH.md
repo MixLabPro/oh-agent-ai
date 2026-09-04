@@ -206,6 +206,20 @@ E7.6  codex.rs / openclaw.rs / workbuddy.rs / host.rs → hosts/<h>/skills/
       保留原有的 `workbuddy::xxx` 调用形态，call site 内部零改动。golden
       15+15 逐字节一致（`host-workbuddy` case 直接覆盖 `discover_builtin`
       真实路径，含路径穿越防护的回归测试）。
+**openclaw.rs 已完成**：同 workbuddy.rs 判断，整体搬、不拆（多实例目录发现
+与 `openclaw skills list --eligible --json` 子进程探测——真实子进程调用，
+`std::thread::spawn` + `mpsc` 实现超时，是本阶段风险最高的一段代码——交织
+在一起）。迁进新建的 `agent-vitals-hosts::hosts::openclaw::sources::skills`
+——**openclaw 是本 crate 第一个"Skill-Surface-only"宿主**：它没有 Session
+Surface 证据面（不在 `host_capability.rs::RUNTIME_HOST_IDS` 的四个"运行时
+宿主"里），只有 `sources/`，没有 `sessions/`。`dependency_budget.rs` 的
+`host_namespace_is_complete_and_surface_explicit` 原先假设"每个 hosts/<h>/
+都有 sessions/mod.rs"，加 openclaw 会让这条断言失败——不是测试写错，是
+openclaw 真的没有 Session Surface，改成显式分支（openclaw 断言**没有**
+`sessions/`，其余四个宿主仍强制要求）而不是放宽整条规则。Hermes 的目录发现
+（`read_hermes_external_dirs`）与 OpenClaw 共用同一份代码/同一个模块，
+跟着一起搬，没有单独拆 `hosts/hermes/`。golden 15+15 逐字节一致（
+`host-openclaw` case）。
 E7.5  inventory.rs + discovery.rs 拆分 → runtime/skills/{inventory,scanner}.rs
       discovery.rs 963 行是这次最大最复杂的一块——4 处 I/O 命中不代表只有 4 处
       跟宿主相关，需要通读，可能还要再拆出 hosts/<h>/skills/ 的部分（哪些目录

@@ -3,4 +3,5 @@
 pub mod claude_code;
 pub mod codex;
 pub mod dsh;
+pub mod openclaw;
 pub mod workbuddy;

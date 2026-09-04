@@ -15,8 +15,13 @@ use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
-use crate::skills::discovery::SourceMeta;
-use crate::util::{norm, read_lossy};
+use crate::skill_discovery::SourceMeta;
+use agent_vitals_domain::util::norm;
+
+fn read_lossy(p: &Path) -> Option<String> {
+    let bytes = std::fs::read(p).ok()?;
+    Some(agent_vitals_domain::util::bytes_to_lossy_normalized(&bytes))
+}
 
 fn expand(p: &str, home: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~/") {
