@@ -36,7 +36,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
-const CODEX_PRICING_JSON: &str = include_str!("../../scripts/agent_vitals/codex_pricing.json");
+const CODEX_PRICING_JSON: &str = include_str!("../../../../scripts/agent_vitals/codex_pricing.json");
 
 pub fn load_codex_pricing() -> Value {
     serde_json::from_str(CODEX_PRICING_JSON).unwrap_or_else(|_| Value::Object(Default::default()))

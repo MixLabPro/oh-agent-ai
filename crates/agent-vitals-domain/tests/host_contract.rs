@@ -40,7 +40,7 @@ fn g2_scan_cli_host_choices_literal_agrees_across_three_locations() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for rel in [
         "scripts/agent_vitals/cli.py",
-        "src/main.rs",
+        "apps/cli/src/main.rs",
         "tests/test_cli_matrix.py",
     ] {
         let path = root.join(rel);

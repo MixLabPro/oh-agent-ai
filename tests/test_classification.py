@@ -23,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PY_PACKAGE = ROOT / "scripts" / "agent_vitals"
-RS_SRC = ROOT / "src"
+RS_SRC = ROOT / "apps" / "cli" / "src"  # v0.8 Phase E3：二进制从根 src/ 迁进 apps/cli/src/
 
 # 静态 SKILL.md 体检（skills/ 子树）——两实现的名单略有出入：
 # Python 有 lifecycle/snapshots，Rust 没有（这些函数在 core 或别处）；

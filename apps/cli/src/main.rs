@@ -1136,7 +1136,7 @@ fn render_codex_cost_html(
     month_out: Option<&str>,
     default: &str,
 ) {
-    const TEMPLATE: &str = include_str!("../scripts/agent_vitals/templates/calendar.html");
+    const TEMPLATE: &str = include_str!("../../../scripts/agent_vitals/templates/calendar.html");
     let blob = codex_calendar_blob(merged, month_key, month_out, default);
     let json_text = serde_json::to_string(&blob).unwrap_or_default();
     let safe = json_text

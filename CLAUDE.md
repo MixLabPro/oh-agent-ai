@@ -29,11 +29,12 @@ first, then a Chinese section anchored at `#中文`. When editing behaviour, bot
 ## Repo layout
 
 ```
-Cargo.toml                  # [workspace]: "." + crates/{vitals-core,agent-vitals-domain,agent-vitals-hosts,agent-vitals-runtime,agent-vitals-wasm}
-src/                        # Rust binary (the `agent-vitals` CLI)
-  skills/                   #   静态 SKILL.md 体检（analysis/security/doctor/discovery/…）
-  agent/                    #   会话行为/成本审计（behavior/cost/codex_cost/codex_session）
-  dsh.rs + util.rs          #   两世界共享，留顶层
+Cargo.toml                  # 纯 [workspace] manifest（Phase E3 起；[profile.release] 留根，Cargo 规则）：
+                            #   apps/cli + crates/{vitals-core,agent-vitals-domain,agent-vitals-hosts,agent-vitals-runtime,agent-vitals-wasm}
+apps/cli/                   # Rust binary crate（the `agent-vitals` CLI），Phase E3 由根 src/ 迁来
+  src/skills/               #   静态 SKILL.md 体检（analysis/security/doctor/discovery/…）
+  src/agent/                #   会话行为/成本审计（behavior/cost/codex_cost/codex_session/r2a_store/discovery）
+  src/util.rs               #   二进制侧 util（split_lines/pyround 等 re-export 自 domain）
 crates/vitals-core/         # 宿主无关的通用审计机制（Event→Trajectory→Detector→Finding→Replay）；不认识 Agent/宿主
 crates/agent-vitals-domain/ # v0.8 Phase C：PURE computation + 词表契约，single source of truth。
                             #   src/{contracts,domain,compatibility}/ + lib.rs。contracts/=宿主无关词表
@@ -47,7 +48,7 @@ crates/agent-vitals-hosts/ # v0.8：一个 crate 装所有宿主的 wire 适配�
 crates/agent-vitals-runtime/ # v0.8 Phase D6/D7：非宿主本机机器。home（唯一 HomeResolver：
                             #   data_home/snapshot_dir/DSH_HOME）· clock（读时钟的北京日期）· state/budget/takeover
                             #   （state store + ledger）· session_sources（service 接线）。依赖 domain + hosts。
-                            #   r2a_store/discovery 随 Phase E 的 apps/cli 抽出一起归位（与 CLI handler 交织）。
+                            #   r2a_store/discovery 留 apps/cli/src/agent/（与 CLI 成本/审计 handler 交织，是合法终态，不是欠债）。
 crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + hosts (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/
 scripts/agent_vitals/       # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
@@ -123,11 +124,17 @@ the binary enables it, wasm sets `default-features = false`; `split_lines` moved
 `agent-vitals-domain::util`), D7 (`agent-vitals-runtime` crate; `home` = the single
 `HomeResolver`), D6 (`state` / `budget` / `takeover` / `session_sources` / `clock` moved
 into `agent-vitals-runtime`; `civil_from_unix_secs` → `agent-vitals-domain::util`).
-**Phase D structural refactor is substantially done** — the crate skeleton (domain / hosts
-/ runtime / wasm + feature-gated `sources`) is in place. `src/agent/r2a_store.rs` and
-`src/agent/discovery.rs` still live in the binary (entangled with the CLI cost/audit
-handlers); they move to `agent-vitals-runtime` as part of **Phase E**'s `apps/cli`
-extraction. Then Phase F (MCP).
+**Phase D structural refactor is done** — the crate skeleton (domain / hosts / runtime /
+wasm + feature-gated `sources`) is in place. `apps/cli/src/agent/r2a_store.rs` and
+`discovery.rs` stay in the CLI crate — entangled with the CLI cost/audit handlers
+(`codex_session_audit` / `codex_cost` / `claude_cost`), they're legitimately CLI-side
+"read evidence → call domain → render report" service code, not deferred runtime debt; D6
+already moved the actual pure state/ledger layer (`state`/`budget`/`takeover`/
+`session_sources`) into `agent-vitals-runtime`. Phase E (dir moves, `docs/
+AGENT_VITALS_V0_8_PHASE_E_RESEARCH.md`) is in progress: E1 (`dsh`/`dsh-client` →
+`integrations/`), E2 (`src-tauri` → `apps/desktop/src-tauri`), E3 (`src/` → `apps/cli/`)
+done. Remaining: E4 (`scripts/agent_vitals/` → `packages/agent-vitals-python/`), E5
+(assets), E6 (CI path sync). Then Phase F (MCP).
 
 Guard: `agent-vitals-hosts/tests/dependency_budget.rs::io_tokens_only_appear_under_sources`
 — `std::fs`/`ruzstd`/`rusqlite`/… may appear only in files whose path contains `/sources`.

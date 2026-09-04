@@ -1848,7 +1848,7 @@ mod tests {
         std::fs::create_dir_all(&live).unwrap();
         std::fs::create_dir_all(&arch).unwrap();
         let cost = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures").join("codex").join("cost");
+            .join("../..").join("fixtures").join("codex").join("cost");
         for name in ["rollout-sol.jsonl", "rollout-unpriced.jsonl"] {
             std::fs::copy(cost.join(name), live.join(name)).unwrap();
         }
@@ -1875,7 +1875,7 @@ mod tests {
             .join("agent-1");
         std::fs::create_dir_all(&dir).unwrap();
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures").join("dsh").join("behavior.jsonl");
+            .join("../..").join("fixtures").join("dsh").join("behavior.jsonl");
         std::fs::copy(&src, dir.join("session.jsonl")).unwrap();
         let storages = home.join(".dsh").join("storages");
         std::fs::create_dir_all(&storages).unwrap();
@@ -2069,7 +2069,7 @@ mod tests {
         // 新增一个 rollout（新 session rollout-new）。
         let live = home.join(".codex").join("sessions").join("2026").join("08");
         std::fs::copy(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("codex").join("legacy.jsonl"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("fixtures").join("codex").join("legacy.jsonl"),
             live.join("rollout-new.jsonl"),
         )
         .unwrap();
@@ -2209,7 +2209,7 @@ mod tests {
         // 新增一个不相关的好会话——只有它需要被重建，坏文件内容/指纹全程未动。
         let dir2 = home.join(".dsh").join("sessions").join("--proj2--").join("agent-2");
         std::fs::create_dir_all(&dir2).unwrap();
-        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("dsh").join("behavior.jsonl");
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("fixtures").join("dsh").join("behavior.jsonl");
         let text = std::fs::read_to_string(&src).unwrap();
         // 换一个不同的 header id，避免与既有会话撞 native_id。
         let text2 = text.replacen("sess-behavior-0001", "sess-behavior-0002", 1);
@@ -2283,7 +2283,7 @@ mod tests {
 
     /// 在既有 home 下补 Claude 会话（供三源合并测试复用）。
     fn fake_claude_under(home: &Path) {
-        let claude = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("claude");
+        let claude = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("fixtures").join("claude");
         for name in ["healthy.jsonl", "dangerous.jsonl", "all-recorded.jsonl"] {
             let dir = home.join(".claude").join("projects").join("p-skill-vitals");
             std::fs::create_dir_all(&dir).unwrap();
@@ -2390,7 +2390,7 @@ mod tests {
         let a = SessionStore::claude_code(&home).unwrap();
         assert_eq!(a.entries.len(), 3);
         // 新增一个会话：同一份 dangerous 记录、不同 stem（= 新 session_id）。
-        let claude = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("claude");
+        let claude = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("fixtures").join("claude");
         std::fs::copy(claude.join("dangerous.jsonl"), home.join(".claude").join("projects").join("p-skill-vitals").join("another.jsonl")).unwrap();
         let b = SessionStore::claude_code(&home).unwrap();
         assert_eq!(b.entries.len(), 4);

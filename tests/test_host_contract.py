@@ -48,7 +48,7 @@ PSEUDO_CHOICES = frozenset({"all"})
 _SCAN_CLI_LITERAL = '"all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"'
 _SCAN_CLI_LOCATIONS = (
     ROOT / "scripts" / "agent_vitals" / "cli.py",
-    ROOT / "src" / "main.rs",
+    ROOT / "apps" / "cli" / "src" / "main.rs",
     ROOT / "tests" / "test_cli_matrix.py",
 )
 

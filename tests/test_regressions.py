@@ -438,7 +438,9 @@ class TestCliSurfaceIsIdenticalAcrossImplementations(unittest.TestCase):
         self.assertEqual(r.returncode, 0, "--version 必须存在且退出码 0")
         printed = (r.stdout + r.stderr).strip()
 
-        cargo = ROOT / "Cargo.toml"
+        # v0.8 Phase E3：二进制包的 [package] 从根 Cargo.toml 迁进 apps/cli/
+        # （根现在是纯 [workspace] manifest，没有 version 行）。
+        cargo = ROOT / "apps" / "cli" / "Cargo.toml"
         if not cargo.is_file():
             self.skipTest("纯 Python 分支，没有 Cargo.toml 可比对")
         version = None
