@@ -14,28 +14,9 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// 统一成正斜杠，让所有路径判断在 Windows 上也成立。
-///
-/// 移植清单第 6 条：不能依赖 `Path::display()` —— 它在 Windows 上产出反斜杠。
-/// 保留显式 normalize，所有路径判断走 normalized string。
-///
-/// **`\\?\` verbatim 前缀必须剥掉。**`Path::canonicalize()` 在 Windows 上
-/// 返回 extended-length（verbatim）路径，例如 `\\?\C:\Users\...`；而
-/// `home_n`/`cwd_n`（main.rs）直接从环境变量 norm 而来，从不带这个前缀。
-/// `classify()` 靠字符串前缀匹配判定 personal/project/workspace ——
-/// 两侧前缀不一致时匹配必然失败，skill 被静默归到 unknown、
-/// `loaded_skills` 跟着腰斩（这台机器上 31 → 11）。Python 的
-/// `Path.resolve()` 从不产出这个前缀，golden 也不含它。
-pub fn norm(p: &Path) -> String {
-    let s = p.to_string_lossy().replace('\\', "/");
-    if let Some(rest) = s.strip_prefix("//?/UNC/") {
-        format!("//{rest}")
-    } else if let Some(rest) = s.strip_prefix("//?/") {
-        rest.to_string()
-    } else {
-        s
-    }
-}
+/// 单一真相源在 domain（`agent_vitals_domain::util::norm`）—— v0.8 Phase E7.6
+/// 起 `agent-vitals-hosts` 的宿主适配器也要用它，不能各写一份。
+pub use agent_vitals_domain::util::norm;
 
 /// 读文件，非 UTF-8 字节替换为 U+FFFD，并做 universal newlines 转换。
 ///

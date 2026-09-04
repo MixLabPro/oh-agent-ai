@@ -35,7 +35,10 @@ RS_SRC = ROOT / "apps" / "cli" / "src"  # v0.8 Phase E3：二进制从根 src/ �
 # src/domain/skills/；E7.4 snapshot（本机快照读写，I/O 天然属于 runtime，
 # 不需要像 security 那样拆）迁进 agent-vitals-runtime/src/skills/；E7.6 host
 # （Claude Code 宿主配置解释，拆出纯部分到 agent-vitals-hosts::hosts::
-# claude_code::skills，I/O 部分到 …::sources::skills）——都不再在
+# claude_code::skills，I/O 部分到 …::sources::skills）+ workbuddy（marketplace
+# 解析 + welcomeMode 取证，路径穿越防护与 I/O 交织较深，整体不拆，迁进
+# …::hosts::workbuddy::sources::skills；`SourceMeta` 跨宿主共享类型先迁进
+# agent-vitals-hosts::skill_discovery 解除循环依赖）——都不再在
 # apps/cli/src/skills/，从 RS_SKILLS_FAMILY 里删掉；Python 侧对应模块暂未
 # 跟进搬迁，PY_SKILLS_FAMILY 不变。
 PY_SKILLS_FAMILY = {
@@ -46,7 +49,7 @@ PY_SKILLS_FAMILY = {
 RS_SKILLS_FAMILY = {
     "codex", "diff", "discovery", "doctor", "explain",
     "inventory", "openclaw", "redact",
-    "render", "report", "security", "workbuddy",
+    "render", "report", "security",
 }
 
 # 会话行为/成本审计（agent/ 子树）。**注意 skill.py 在这里**：会话 skill 执行

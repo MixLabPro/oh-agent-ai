@@ -171,6 +171,41 @@ E7.6  codex.rs / openclaw.rs / workbuddy.rs / host.rs → hosts/<h>/skills/
       `claude-code-all`/`no-host-config` 三个 golden case 直接覆盖
       `read_host_config` 的真实路径，不是禁用态，golden 绿在这里确实是
       完整证明（不像 codex/openclaw 的探测代码）。
+
+      **workbuddy.rs 已完成**（用户 2026-09-05 明确点名要优先做的部分）：
+      核实发现它跟 `inventory.rs` 一样卡"库依赖二进制"——`BuiltinDiscovery`
+      内嵌 `SourceMeta`（原定义在 `discovery.rs`，二进制专属）。先把
+      `SourceMeta`（连同它唯一的方法 `opt()`）抽进新建的
+      `agent-vitals-hosts::skill_discovery`（crate 根，同 `canonical_usage.rs`
+      的先例——真正跨宿主、不属于任何单一 `hosts/<h>/`，但也不是
+      `agent-vitals-domain` 意义上完全对宿主不知情的纯规则，携带
+      `workbuddy_package`/`instance_id` 等具体宿主字段），才解开 workbuddy.rs
+      的搬迁阻塞；openclaw.rs 同样只需要 `SourceMeta`，顺带一起解阻塞（但
+      openclaw.rs 本体这一步未搬，见下）。
+
+      `workbuddy.rs`（341 行）**整体搬**、不拆——`discover_builtin` 的目录
+      探测（cache 版本回退、builtin-plugin 白名单）与路径穿越防护
+      （`is_safe_path_segment`/`within`）交织成一套多轮 fs 探测算法，不是
+      "先收集数据再判断"的线性结构（跟 security.rs 的"读文件→过正则"完全
+      不同），强行拆纯/I/O 两半的收益不确定、拆错的代价是重新引入一个已经
+      修过的路径穿越漏洞（模块头注释原话："曾经...能让扫描器读到 marketplace
+      之外的任意目录"）——同 E7.4 对 snapshot.rs 的判断，安全敏感 + 算法
+      交织时选择整体搬而不是拆。迁进
+      `agent-vitals-hosts::hosts::workbuddy::sources::skills`（`sources.rs`
+      同 claude_code 那次一样升级成 `sources/` 目录）。
+
+      副产品：`norm()`（路径正斜杠归一化，`\\?\` 前缀剥离）原来是
+      `apps/cli::util::norm`，workbuddy.rs 与 discovery.rs/codex.rs/
+      openclaw.rs/report.rs/security.rs/main.rs 等 8 个文件共用——workbuddy.rs
+      搬进库 crate 后不能再从二进制 `use`，一并下沉到
+      `agent_vitals_domain::util::norm`（同 `bytes_to_lossy_normalized`
+      的处理方式：单一实现，两侧 re-export，不手搓第二份）。
+
+      `inventory.rs`/`discovery.rs` 的调用点改用重命名 import（`use
+      agent_vitals_hosts::hosts::workbuddy::sources::skills as workbuddy;`）
+      保留原有的 `workbuddy::xxx` 调用形态，call site 内部零改动。golden
+      15+15 逐字节一致（`host-workbuddy` case 直接覆盖 `discover_builtin`
+      真实路径，含路径穿越防护的回归测试）。
 E7.5  inventory.rs + discovery.rs 拆分 → runtime/skills/{inventory,scanner}.rs
       discovery.rs 963 行是这次最大最复杂的一块——4 处 I/O 命中不代表只有 4 处
       跟宿主相关，需要通读，可能还要再拆出 hosts/<h>/skills/ 的部分（哪些目录

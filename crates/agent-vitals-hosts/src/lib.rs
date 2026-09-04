@@ -16,6 +16,7 @@
 
 pub mod canonical_usage;
 pub mod hosts;
+pub mod skill_discovery;
 
 // Flat compatibility facade——调用方一个 crate 一个入口。
 pub use hosts::claude_code::sessions::evidence as claude_code_evidence;

@@ -63,38 +63,11 @@ fn plugin_path_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"/plugins/(cache|marketplaces)/([^/]+)/(.+?)/skills/").unwrap())
 }
 
-/// 根目录附带的证据。OpenClaw 是多实例的，同一个 skill 名在两个实例里
-/// 不是同一个东西，所以实例身份必须一路带到每条记录上。
-#[derive(Clone, Default)]
-pub struct SourceMeta {
-    pub instance_id: Option<String>,
-    pub instance_root: Option<String>,
-    pub config_path: Option<String>,
-    pub root_kind: Option<String>,
-    /// `openclaw.json` 里 skills.entries：唯一能判定「被显式关掉」的本机证据。
-    pub skill_entries: Map<String, Value>,
-    /// `openclaw.json` 的 skills.limits.maxSkillsPromptChars。
-    /// OpenClaw 的描述预算**是用户可配的**，所以不能套 Claude Code 的默认值。
-    /// 顶层 openclaw_instances 块尚未移植，届时由它消费。
-    #[allow(dead_code)]
-    pub skills_prompt_budget_chars: Option<i64>,
-    /// WorkBuddy：清单选出的顶层包名。有它才说明这个根来自 builtin marketplace。
-    pub workbuddy_package: Option<String>,
-    /// 清单里的目录名。`ardot-` 前缀的包只在 design 模式下注入。
-    pub workbuddy_legacy_name: Option<String>,
-    /// 从日志取证得到的 welcomeMode。**None 表示未知，不是某个默认模式。**
-    pub workbuddy_welcome_mode: Option<String>,
-    /// 只看这一层的 SKILL.md，不向下递归。builtin-plugin 的包根用它 ——
-    /// 那个目录里同时躺着 experts/ 与 skills/，递归会把包内部的角色定义
-    /// 也当成顶层 skill。
-    pub workbuddy_only_direct: bool,
-}
-
-impl SourceMeta {
-    fn opt(v: &Option<String>) -> Value {
-        v.as_ref().map(|x| json!(x)).unwrap_or(Value::Null)
-    }
-}
+// v0.8 Phase E7.6：SourceMeta 迁进 agent-vitals-hosts::skill_discovery——
+// openclaw.rs/workbuddy.rs 也要用它，而它们要迁进库 crate（库不能反过来依赖
+// 本二进制），SourceMeta 必须先搬。re-export 保这个二进制里的既有 call site
+// （含 `SourceMeta::opt`）零改动。
+pub use agent_vitals_hosts::skill_discovery::SourceMeta;
 
 /// 扫描上下文。Python 版把这些放在模块级全局里，这里显式传递。
 pub struct Ctx {
@@ -506,7 +479,7 @@ pub fn scan_skill_dir(
         // WorkBuddy 按 welcomeMode 过滤注入。模式未知时**不过滤** ——
         // 宁可多报一个「可能在」，也不要因为读不到日志就把 skill 抹掉。
         let mode = meta.workbuddy_welcome_mode.as_deref();
-        if !crate::skills::workbuddy::skill_active(meta.workbuddy_legacy_name.as_deref(), mode) {
+        if !agent_vitals_hosts::hosts::workbuddy::sources::skills::skill_active(meta.workbuddy_legacy_name.as_deref(), mode) {
             enabled_state = json!(false);
             loaded_state = json!(false); // 模式过滤掉 = 明确不在
             loaded = false;

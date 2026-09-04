@@ -48,6 +48,10 @@ use crate::workbuddy_evidence::{
     build_workbuddy_evidence, workbuddy_evidence_json, WorkbuddyEvidence, WorkbuddySessionMeta,
 };
 
+// v0.8 Phase E7.6：Skill 配置 I/O（marketplace.json/welcomeMode 日志读取）与
+// 本文件的会话 I/O 是两条独立证据线，分文件放。
+pub mod skills;
+
 /// `~/.workbuddy/`（真实语料实测位置；测试用 isolated_home_env 把 HOME 指到 fixture
 /// root，根就是 `<root>/.workbuddy/`）。main.rs 解析 `HOME`/`USERPROFILE` 传入。
 pub fn workbuddy_root(home: &Path) -> PathBuf {

@@ -12,8 +12,13 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::skills::discovery::SourceMeta;
-use crate::util::{norm, read_lossy};
+use crate::skill_discovery::SourceMeta;
+use agent_vitals_domain::util::norm;
+
+fn read_lossy(p: &Path) -> Option<String> {
+    let bytes = std::fs::read(p).ok()?;
+    Some(agent_vitals_domain::util::bytes_to_lossy_normalized(&bytes))
+}
 
 /// 从 `marketplace.json` 解析出顶层安装的 Skill 包及其根目录。
 ///
