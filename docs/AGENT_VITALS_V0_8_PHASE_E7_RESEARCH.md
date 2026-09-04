@@ -95,8 +95,24 @@ E7.2  analysis.rs + overlap.rs → agent-vitals-domain/src/domain/skills/
       独立同名的 `severity_rank` 实现，是两个不同函数，不是同一份代码的两个
       入口，也顺带没被误删）。golden 15+15 逐字节一致，证明纯移动零行为漂移。
 E7.3  security.rs → agent-vitals-domain/src/domain/skills/security_rules.rs
-      1 处 I/O 命中需要先读上下文确认是读文件内容（该留在 sources）还是纯粹
-      读已经在内存里的字符串（该留在 domain）。
+      ✅ 完成。核实结果：不是 1 处 I/O，是 3 处（`std::fs::metadata`
+      读权限位、`read_lossy` 读文件内容、`Path::canonicalize` 判 self-
+      exclusion），且**这次不是移动，是拆**——原 `security_scan` 把目录遍历/
+      读文件/读权限位焊在正则规则判断的同一个函数里。拆法：`Rule`/`rules`/
+      `is_cited`/`worst`/`check`/`EXEC_EXT` 纯规则引擎 + 新写的 `evaluate()`
+      （接收调用方已收集好的 `(相对路径, 是否可执行, 读到的文本)` 三元组，
+      做原 `security_scan` 里除 I/O 之外的全部逻辑：去重/cited 统计/URL 提取/
+      结果组装）+ `self_excluded_result()` 进 domain；`apps/cli/src/skills/
+      security.rs` 收缩成只剩 `mode_of` + 目录遍历循环 + `canonicalize`
+      判定的 I/O 薄壳，收集完数据调 `evaluate()`。`doctor.rs` 唯一的跨模块
+      调用点（`rule_names()`，无 `#[cfg(test)]`——domain 侧不能再标 test-only，
+      否则 apps/cli 用普通依赖模式编译时这个跨 crate 测试调用点找不到符号）
+      改指 `agent_vitals_domain::skills::security_rules::rule_names`。
+      顺手清了 `apps/cli/src/util.rs` 里 `split_lines` re-export 从「有真实
+      调用点」变成「只剩测试用」后 `cargo build --release` 冒出的
+      unused_imports（改成 test 模块内部 import，不改变覆盖范围）。
+      golden 15+15 逐字节一致——这是本轮唯一一次「拆」而非「搬」，golden
+      过了才真正证明零行为漂移，不是靠"只挪没改"的先验保证。
 E7.4  snapshot.rs → agent-vitals-runtime/src/skills/snapshot.rs
       5 处 I/O，本机快照读写——与 D6 的 state/budget/takeover 同类，是 runtime
       的天然归属。

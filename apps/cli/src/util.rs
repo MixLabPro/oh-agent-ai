@@ -82,14 +82,16 @@ pub use agent_vitals_domain::util::est_tokens;
 /// reason 格式化与这个 repo 其他舍入共用一份（详见 core 侧文档注释）。
 pub use agent_vitals_domain::util::pyround;
 
-/// 复刻 Python 的 `str.splitlines()`（常见终止符部分）。行号计算与 `is_cited()`
-/// 取行都依赖它。实现在 domain（`pyround`/`est_tokens` 同款）—— v0.8 Phase D4
-/// 起 DSH wire 解析也用它，一个实现、多个调用面。
-pub use agent_vitals_domain::util::split_lines;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 复刻 Python 的 `str.splitlines()`（常见终止符部分）。实现在 domain
+    // （`pyround`/`est_tokens` 同款）—— v0.8 Phase D4 起 DSH wire 解析、E7.3
+    // 起 `security_rules::check()` 的行号计算/`is_cited()` 取行都依赖它，但
+    // 都在 domain crate 内部直接 `use crate::domain::util::split_lines`，
+    // apps/cli 侧已无非测试调用点，这里只留测试用的 import（同款测试见
+    // crates/agent-vitals-domain/src/domain/util.rs 的 est_tokens 等）。
+    use agent_vitals_domain::util::split_lines;
 
     // 期望值来自 tests/test_characterization.py，逐条对齐。比例是 DeepSeek 官方
     // 换算（CJK×0.6、其余×0.3，2026-08-21 从旧比例换过来——理由见

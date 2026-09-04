@@ -31,7 +31,8 @@ fn glyph(sev: &str) -> &'static str {
     }
 }
 
-/// 安全规则名 → 诊断码。**必须覆盖 skills::security::rule_names() 的每一条**：
+/// 安全规则名 → 诊断码。**必须覆盖
+/// agent_vitals_domain::skills::security_rules::rule_names() 的每一条**：
 /// 扫描器里有、这张表里没有的规则会在 doctor 里**静默消失** —— 一条命中了却
 /// 不出现在诊断里的规则，比没有这条规则更糟。下面的 `#[cfg(test)]` 钉住全覆盖。
 pub const SECURITY_CODES: &[(&str, &str, &str)] = &[
@@ -719,7 +720,7 @@ mod tests {
     fn every_security_rule_has_a_code() {
         // 扫描器有、诊断码表没有的规则，命中后会在 doctor 里静默消失 ——
         // 比没有这条规则更糟。加规则时必须同时加码。
-        let rules = crate::skills::security::rule_names();
+        let rules = agent_vitals_domain::skills::security_rules::rule_names();
         for r in &rules {
             assert!(SECURITY_CODES.iter().any(|(n, _, _)| n == r),
                     "安全规则 {r} 没有诊断码，命中后会静默消失");
