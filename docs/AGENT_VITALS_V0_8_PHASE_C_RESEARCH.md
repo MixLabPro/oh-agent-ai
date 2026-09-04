@@ -370,7 +370,60 @@ shim），crate 拆分后经 `[dev-dependencies]` 解析。
   保持 host-agnostic）
 
 **剩余**：Step 3（B2 residual 物理迁 `agent-vitals-adapters` crate）+ Step 4
-（抽 `agent-vitals-domain` crate）——见下。
+（抽 `agent-vitals-domain` crate）——见下 §6ter。
+
+## 6ter. Step 3/4 的已知拦路石（2026-09-04 试做发现）
+
+试做 Step 3（把 `dsh_evidence`/`codex_usage`/`audit`/`compaction`/`waste`/
+`canonical_usage` 从 `agent-vitals-core` 迁进 `agent-vitals-adapters` crate）时撞到：
+
+**`domain/behavior.rs` 的 inline `#[cfg(test)] mod tests` 用 `build_dsh_evidence`
+造 `CanonicalSession` fixture**（`canonical_from` / `canonical_with_coverage` 两个
+helper + ~15–20 个依赖它们的测试，测的是 `match_behavior_canonical`）。
+
+- **`[dev-dependencies]` 成环不行**：`agent-vitals-core` dev-dep `agent-vitals-adapters`
+  → Cargo 把 `agent-vitals-core` 编**两遍**（一遍给 adapters 依赖、一遍作 test
+  target）→ inline lib test 里 `agent_vitals_adapters::dsh_evidence::build_dsh_evidence(..)
+  .canonical` 返回的 `CanonicalSession` 与 test 侧期望的是「不同版本的同名类型」
+  （`error[E0308]: there are multiple different versions of crate agent_vitals_core`）。
+  只影响**跨 crate 边界传 core 类型**的 inline test；传 `serde_json::Value` 的
+  （~40 个 `match_behavior(&[raw])` 测试）不受影响。
+- **integration test（`crates/agent-vitals-core/tests/*.rs`）没这问题**——它们是
+  独立 crate、`agent-vitals-core` 只编一遍。`sv6*_parity.rs` / `host_contract.rs`
+  改成 `agent_vitals_adapters::dsh_evidence` 后照常编过。
+
+**解法**：把 `behavior.rs::tests` 里用 `build_dsh_evidence` 的 ~15–20 个测试 +
+`canonical_from`/`canonical_with_coverage`/`family1_outcomes`/`trajectory_outcomes`
+helper（~350 行）搬去 `crates/agent-vitals-core/tests/behavior_canonical.rs`
+（integration test）。`match_behavior(&[raw])` 那批（只换 `Value`）留 inline。
+`trajectory.rs::tests` 同类检查。
+
+**Step 3/4 完整清单**（都在 `agent-vitals-core` 内已验证可编译的前提下）：
+1. `behavior.rs`/`trajectory.rs` 的 `build_dsh_evidence` inline test → integration test
+2. `git mv` 6 个 residual 文件 core → adapters crate；`hosts/{dsh,codex}/sessions/mod.rs`
+   改真 `pub mod`；adapters `lib.rs` facade 加 `canonical_usage`/`audit`/`compaction`/`waste`
+3. moved 文件 import：`crate::{domain,contracts,util,...}` → `agent_vitals_core::*`；
+   `crate::codex_usage`（canonical_usage 里）→ `crate::hosts::codex::sessions::usage`；
+   `crate::dsh_evidence::tool_invocation`（waste 里）→ `super::evidence::tool_invocation`
+4. `domain/usage.rs`：`civil_date_from_days` / `days_from_civil` 提 `pub`（codex usage 用）
+5. core `lib.rs`：删 `pub mod adapters` + 全部 adapter re-export；core `Cargo.toml` 加
+   `[dev-dependencies] agent-vitals-adapters`（integration test 用，无环）
+6. `src/agent/behavior.rs`：`agent_vitals_core::{compaction,waste}` → `agent_vitals_adapters::*`
+   （其余 `agent_vitals_adapters::codex_usage`/`dsh_evidence` Phase B1 起就对了，不动）
+7. wasm `lib.rs` + `Cargo.toml`：加 `agent-vitals-adapters` dep；
+   `agent_vitals_core::{audit,compaction,waste}` → `agent_vitals_adapters::*`；wasm-pack 重建
+8. `crates/agent-vitals-core/tests/dependency_budget.rs`：
+   `source_root` 断言去 `"adapters"`；删 `residual_host_adapter_directories`（core 无
+   `src/adapters/` 了）；`nested_paths_…` 去死引用；`domain_to_host_compatibility_debt`
+   改扫「`src/domain/` 生产代码零 `agent_vitals_adapters::`/`crate::adapters`」
+9. `host_contract.rs` g3/g8 + `test_host_contract.py`：dsh evidence 路径
+   `crates/agent-vitals-core/src/adapters/…` → `crates/agent-vitals-adapters/src/hosts/dsh/…`
+10. Step 4：`domain/` 整体 → `crates/agent-vitals-domain/`；core 退成
+    `contracts` + `compatibility`；binary/wasm/adapters 的 `agent_vitals_core::<domain模块>::X`
+    → `agent_vitals_domain::X`（海量，或 core 留一版本周期 `pub use` facade）；
+    `test_classification.py` family set；clawhub 打包清单
+
+这是**机械 + 一个判断点（第 1 步测试搬法）**——Codex-appropriate。
 
 ## 6. 建议执行顺序（C-minimal，每步独立提交、golden 绿）
 
