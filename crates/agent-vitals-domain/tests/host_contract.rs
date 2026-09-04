@@ -39,7 +39,7 @@ fn g2_scan_cli_host_choices_literal_agrees_across_three_locations() {
         r#""all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh""#;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for rel in [
-        "scripts/agent_vitals/cli.py",
+        "packages/agent-vitals-python/agent_vitals/cli.py",
         "apps/cli/src/main.rs",
         "tests/test_cli_matrix.py",
     ] {
@@ -65,7 +65,7 @@ fn g3_every_runtime_host_has_both_language_evidence_modules() {
     ];
     for (host, rust_name, py_name) in matrix {
         let rust_path = root.join(rust_name);
-        let py_path = root.join("scripts/agent_vitals/agent").join(py_name);
+        let py_path = root.join("packages/agent-vitals-python/agent_vitals/agent").join(py_name);
         assert!(rust_path.is_file(), "{host}: 缺 {rust_path:?}");
         assert!(py_path.is_file(), "{host}: 缺 {py_path:?}");
     }

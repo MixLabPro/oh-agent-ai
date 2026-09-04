@@ -3,9 +3,13 @@
 import sys
 from pathlib import Path
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
-if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
+# v0.8 Phase E4: the `agent_vitals` package lives in packages/agent-vitals-python/
+# (spec §11); this file stays at scripts/scan.py — it's the documented entrypoint
+# (`python3 scripts/scan.py ...` in SKILL.md/README) and also what the ClawHub
+# package ships at scripts/scan.py, so nothing user-facing changes.
+_PACKAGE_DIR = Path(__file__).resolve().parent.parent / "packages" / "agent-vitals-python"
+if str(_PACKAGE_DIR) not in sys.path:
+    sys.path.insert(0, str(_PACKAGE_DIR))
 
 import agent_vitals.cli as _cli
 import agent_vitals.compat as _compat

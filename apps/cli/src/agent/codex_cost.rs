@@ -4,7 +4,8 @@
 //! 规则、零 I/O；计价（本文件）读 `codex_pricing.json`（`include_str!` 内嵌，Python
 //! 侧读包内文件）——价格是**业务数据**，不是规则，与 `src/cost.rs` 的 `pricing.json`
 //! 同一哲学，且没有 wasm 消费者，所以不进 core。Python 平行实现
-//! `scripts/agent_vitals/agent/codex_cost.py`，由 `both("codex-cost", ...)` 逐字节看守。
+//! `packages/agent-vitals-python/agent_vitals/agent/codex_cost.py`，由
+//! `both("codex-cost", ...)` 逐字节看守。
 //!
 //! **计价铁律**（与 cc-trace 的公式逐条对齐，见 `codex_pricing.json` 的 `_doc`）：
 //!
@@ -36,7 +37,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
-const CODEX_PRICING_JSON: &str = include_str!("../../../../scripts/agent_vitals/codex_pricing.json");
+const CODEX_PRICING_JSON: &str = include_str!("../../../../packages/agent-vitals-python/agent_vitals/codex_pricing.json");
 
 pub fn load_codex_pricing() -> Value {
     serde_json::from_str(CODEX_PRICING_JSON).unwrap_or_else(|_| Value::Object(Default::default()))

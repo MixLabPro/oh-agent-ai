@@ -32,7 +32,7 @@ _spec = importlib.util.spec_from_file_location("scan", ROOT / "scripts" / "scan.
 scan = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(scan)
 
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 from agent_vitals.util import split_lines  # noqa: E402
 from agent_vitals.util import fork_boundary, post_fork  # noqa: E402
 from agent_vitals.usage import (  # noqa: E402

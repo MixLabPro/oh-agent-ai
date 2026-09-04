@@ -482,7 +482,7 @@ pub fn render_codex_session(out: &Value) -> String {
 /// 转义。与 Python `codex_session_audit.py::_render_codex_session_html` 同构
 /// （HTML 文件不参与差分，只需等价可解析的页面）。
 pub fn render_codex_session_html(output_path: &Path, out: &Value) {
-    const TEMPLATE: &str = include_str!("../../../../scripts/agent_vitals/templates/codex_session.html");
+    const TEMPLATE: &str = include_str!("../../../../packages/agent-vitals-python/agent_vitals/templates/codex_session.html");
     let json_text = serde_json::to_string(out).unwrap_or_default();
     let safe = json_text
         .replace("</script", "<\\/script")

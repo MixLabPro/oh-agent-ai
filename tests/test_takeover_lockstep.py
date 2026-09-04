@@ -37,7 +37,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "scan.py"
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 
 from tests.env_helpers import isolated_home_env  # noqa: E402
 from agent_vitals.agent import takeover  # noqa: E402

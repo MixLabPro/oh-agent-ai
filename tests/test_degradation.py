@@ -37,7 +37,7 @@ if _BIN:
     _BIN = str(Path(_BIN).resolve())
 SCAN_CMD = [_BIN] if _BIN else [sys.executable, str(SCAN)]
 
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 from agent_vitals.skill import skill_invocations  # noqa: E402
 from agent_vitals.duration import (  # noqa: E402
     tool_call_durations, turn_durations, step_durations, approval_latencies, hook_executions,

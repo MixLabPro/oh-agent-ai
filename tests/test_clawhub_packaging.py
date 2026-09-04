@@ -93,7 +93,7 @@ class ClawHubPackagingTests(unittest.TestCase):
     def test_workflow_packages_modules_and_smokes_artifact(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("timeout-minutes: 45", workflow)
-        self.assertIn("cp -R scripts/agent_vitals", workflow)
+        self.assertIn("cp -R packages/agent-vitals-python/agent_vitals", workflow)
         self.assertIn("Unexpected directory in Python package", workflow)
         self.assertIn("Unexpected file in Python package", workflow)
         self.assertIn("-name '__pycache__'", workflow)
@@ -122,7 +122,7 @@ class ClawHubPackagingTests(unittest.TestCase):
         写成 'v1.1.0' 或带后缀都会让每次发布在最后一步失败。
         """
         import re as _re
-        source = (ROOT / "scripts" / "agent_vitals" / "__init__.py").read_text(
+        source = (ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "__init__.py").read_text(
             encoding="utf-8")
         match = _re.search(r'^__version__ = "([^"]+)"', source, _re.M)
         self.assertIsNotNone(match, "__init__.py 必须定义 __version__")
@@ -151,7 +151,7 @@ class ClawHubPackagingTests(unittest.TestCase):
                           "%s 被 SKILL.md 引用，但没有出现在打包工作流里" % link)
 
     def test_source_package_has_only_explicit_runtime_modules(self):
-        source_package = ROOT / "scripts" / "agent_vitals"
+        source_package = ROOT / "packages" / "agent-vitals-python" / "agent_vitals"
         if not source_package.is_dir():
             self.skipTest("The staged agent_vitals package has not been extracted yet")
         self.assertEqual(_unexpected_package_entries(source_package), [])
@@ -173,18 +173,25 @@ class ClawHubPackagingTests(unittest.TestCase):
             )
 
     def test_minimal_artifact_contains_all_modules_and_runs(self):
-        source_package = ROOT / "scripts" / "agent_vitals"
+        # v0.8 Phase E4：源仓库把 agent_vitals 挪进 packages/agent-vitals-python/，
+        # 但 scan.py 留在 scripts/（用户文档 `python3 scripts/scan.py` 不变）。
+        # 打包产物镜像同一相对结构——scan.py 用
+        # `Path(__file__).resolve().parent.parent / "packages" / "agent-vitals-python"`
+        # 找包，源仓库和打包产物走同一份 sys.path 逻辑。
+        source_package = ROOT / "packages" / "agent-vitals-python" / "agent_vitals"
         if not source_package.is_dir():
             self.skipTest("The staged agent_vitals package has not been extracted yet")
 
         with tempfile.TemporaryDirectory() as temp:
             artifact = Path(temp) / "agent-vitals"
             (artifact / "scripts").mkdir(parents=True)
+            (artifact / "packages" / "agent-vitals-python").mkdir(parents=True)
             for name in ("scan.py", "probe_logs.py"):
                 shutil.copy2(ROOT / "scripts" / name, artifact / "scripts" / name)
+            artifact_package = artifact / "packages" / "agent-vitals-python" / "agent_vitals"
             shutil.copytree(
                 source_package,
-                artifact / "scripts" / "agent_vitals",
+                artifact_package,
                 ignore=_ignore_python_cache,
             )
 
@@ -193,12 +200,11 @@ class ClawHubPackagingTests(unittest.TestCase):
                 for path in source_package.rglob("*.py")
             }
             artifact_modules = {
-                path.relative_to(artifact / "scripts" / "agent_vitals")
-                for path in (artifact / "scripts" / "agent_vitals").rglob("*.py")
+                path.relative_to(artifact_package)
+                for path in artifact_package.rglob("*.py")
             }
             self.assertEqual(artifact_modules, source_modules)
-            self.assertEqual(
-                _unexpected_package_entries(artifact / "scripts" / "agent_vitals"), [])
+            self.assertEqual(_unexpected_package_entries(artifact_package), [])
             self.assertFalse(list(artifact.rglob("__pycache__")))
             self.assertFalse(list(artifact.rglob("*.pyc")))
 

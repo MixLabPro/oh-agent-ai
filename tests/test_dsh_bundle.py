@@ -91,7 +91,7 @@ class DshBundleTests(unittest.TestCase):
 
     def test_package_version_tracks_the_python_cli(self):
         manifest = json.loads((DSH / "package.json").read_text(encoding="utf-8"))
-        init = (ROOT / "scripts" / "agent_vitals" / "__init__.py").read_text(encoding="utf-8")
+        init = (ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "__init__.py").read_text(encoding="utf-8")
         match = re.search(r'^__version__ = "([^"]+)"', init, re.M)
         self.assertIsNotNone(match, "__init__.py 必须定义 __version__")
         self.assertEqual(manifest["version"], match.group(1))

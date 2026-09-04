@@ -8,7 +8,8 @@ This repo **is** an Agent Skill (`SKILL.md` at the root), not a library that shi
 It health-checks the *other* skills installed on the machine. There are now **two
 implementations kept in lockstep** (see §Architecture; the dual structure is being phased
 down per `docs/TAURI_RUNTIME_WORKBENCH_SPEC.md` §7.1): a Python scanner
-(`scripts/`) and a Rust binary + shared lib + wasm build (`src/` + `crates/`). The
+(`scripts/` entrypoint + `packages/agent-vitals-python/agent_vitals/`) and a Rust binary +
+shared lib + wasm build (`apps/cli/src/` + `crates/`). The
 Python scanner is stdlib-only — no dependencies, no network calls; the Rust side has
 normal crates.io deps (clap/regex/serde/serde_json/sha2/walkdir) and the wasm crate adds
 wasm-bindgen. The "no network, no third-party supply chain" constraint still holds for
@@ -50,9 +51,14 @@ crates/agent-vitals-runtime/ # v0.8 Phase D6/D7：非宿主本机机器。home�
                             #   （state store + ledger）· session_sources（service 接线）。依赖 domain + hosts。
                             #   r2a_store/discovery 留 apps/cli/src/agent/（与 CLI 成本/审计 handler 交织，是合法终态，不是欠债）。
 crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + hosts (audit_events), built with wasm-pack
-scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/
-scripts/agent_vitals/       # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
-                            #   adapters/（宿主适配器）与 cli/compat/util/paths 留顶层
+scripts/scan.py             # thin entrypoint; stays here (documented `python3 scripts/scan.py`
+                            #   command, and what the ClawHub package ships at scripts/scan.py) —
+                            #   Phase E4 moved the package itself, this file just sys.path's to it
+packages/agent-vitals-python/
+  agent_vitals/              # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
+                            #   adapters/（宿主适配器）与 cli/compat/util/paths 留顶层。ClawHub 打包
+                            #   产物镜像同一相对结构（packages/agent-vitals-python/agent_vitals/），
+                            #   scan.py 的一份 sys.path 逻辑在源仓库和打包产物里都成立
 scripts/probe_logs.py       # legacy fallback (not in the default flow)
 SKILL.md                    # agent-facing driver: routes to doctor, names the SV codes
 references/                 # hosts.md (per-host evidence), judgment.md, guide.zh-CN.md
@@ -74,7 +80,7 @@ tests/                      # 28 Python test files（含分类守卫 tests/test_
 Python 与 Rust 两侧同构，模块清单见 tests/test_classification.py 的家族 set。
 
 The **`agent-vitals-domain` crate is the single source of truth for pure rules**.
-`src/behavior.rs` in the binary is a thin wrapper that re-exports
+`apps/cli/src/agent/behavior.rs` in the binary is a thin wrapper that re-exports
 `agent_vitals_domain::behavior::*` and keeps only the I/O entry (`audit_session_log`). The
 wasm crate wraps the same domain, so the browser/Node runs the exact same rules as the
 CLI — never a second copy.
@@ -132,9 +138,12 @@ wasm + feature-gated `sources`) is in place. `apps/cli/src/agent/r2a_store.rs` a
 already moved the actual pure state/ledger layer (`state`/`budget`/`takeover`/
 `session_sources`) into `agent-vitals-runtime`. Phase E (dir moves, `docs/
 AGENT_VITALS_V0_8_PHASE_E_RESEARCH.md`) is in progress: E1 (`dsh`/`dsh-client` →
-`integrations/`), E2 (`src-tauri` → `apps/desktop/src-tauri`), E3 (`src/` → `apps/cli/`)
-done. Remaining: E4 (`scripts/agent_vitals/` → `packages/agent-vitals-python/`), E5
-(assets), E6 (CI path sync). Then Phase F (MCP).
+`integrations/`), E2 (`src-tauri` → `apps/desktop/src-tauri`), E3 (`src/` → `apps/cli/`),
+E4 (`scripts/agent_vitals/` → `packages/agent-vitals-python/agent_vitals/`; `scripts/scan.py`
+stays put and just points its `sys.path` at the new location — the packaged ClawHub artifact
+mirrors the same relative layout so one `sys.path` formula works in both places) done.
+Remaining: E5 (assets), E6 (CI path sync — largely folded into E1-E4 already). Then Phase F
+(MCP).
 
 Guard: `agent-vitals-hosts/tests/dependency_budget.rs::io_tokens_only_appear_under_sources`
 — `std::fs`/`ruzstd`/`rusqlite`/… may appear only in files whose path contains `/sources`.
@@ -275,7 +284,7 @@ projection's `view` calls the wasm `token_by_model` — so the tab runs the *exa
 CLI `behavior` command runs (never a second copy). Pricing those buckets into money is
 *also* host-side now: the `costReport` projection (`integrations/dsh-client/src/host/index.ts`) reads
 `tokenByModel`'s fold and prices it against `integrations/dsh-client/pricing.json` — a build-time copy of
-the single-source `scripts/agent_vitals/pricing.json` (Rust embeds the source via
+the single-source `packages/agent-vitals-python/agent_vitals/pricing.json` (Rust embeds the source via
 `include_str!`; Node can `readFileSync` its own copy directly, unlike the browser). The client
 just renders `useProjection('costReport')`. `AuditView.tsx` keeps a second, *display-only*
 baked `PRICING` copy in `styles/index.ts` — not for pricing math, only for the model
@@ -389,7 +398,7 @@ trade-off, and add a regression test whose docstring says what actually broke.
 
 When a rule changes, it changes in **three places that must stay in lockstep**: the Rust
 domain crate (`crates/agent-vitals-domain/`, imported as `agent_vitals_domain::*`), the
-Python implementation (`scripts/agent_vitals/agent/behavior.py`), and — for anything the
+Python implementation (`packages/agent-vitals-python/agent_vitals/agent/behavior.py`), and — for anything the
 DSH audit tab uses — the wasm crate (rebuild + re-copy the `.wasm` into
 `integrations/dsh-client/`). The differential golden guard
 catches Python↔Rust drift; the wasm↔CLI drift is caught only by re-running the wasm build
@@ -403,7 +412,7 @@ The **v0.7 UsageFact emitters** (`{claude,codex,dsh}_usage_fact.py` ↔ `src/age
 are Python↔Rust byte-parity locksteps pinned by `AGENT_VITALS_BIN` differential in
 `tests/test_{claude,codex,dsh}_usage_fact.py`. They share ONE identity primitive —
 `crates/agent-vitals-domain/src/contracts/source_identity.rs` (`canonical_json` + `fnv1a64_hex`) ↔
-top-level `scripts/agent_vitals/source_identity.py` — which is also what
+top-level `packages/agent-vitals-python/agent_vitals/source_identity.py` — which is also what
 `usage_fact.{rs,py}`'s `fact_id` and the DSH observer's frozen `source_event_id` hash
 through; **no consumer may grow a second inline copy** (both packaging allow-lists —
 `.github/workflows/package-clawhub.yml` + `tests/test_clawhub_packaging.py` — and the
@@ -496,12 +505,12 @@ Query a historical month with `state.read_month("YYYY-MM")` /
 `agent-vitals state months` enumerates what has data. The computation (`token_by_date_model`,
 `priced_day`) is in agent-vitals-domain / `cost.py` precisely so the Tauri menu bar and any future
 month-query surface reuse it rather than growing a fourth copy. The DeepSeek **price
-table** lives only in `scripts/agent_vitals/pricing.json` (CLI 两侧读它；`integrations/dsh-client/
+table** lives only in `packages/agent-vitals-python/agent_vitals/pricing.json` (CLI 两侧读它；`integrations/dsh-client/
 pricing.json` 是 build 时复制出的运行时份，宿主 `costReport` 投影读它；`styles/index.ts`
 另内嵌一份仅供展示用的模型短名副本——三处由 `tests/test_pricing_lockstep.py` 守）;
 prices are business data, not rules — they change without a golden `--update`. The
 **cost computation itself** (`cost_report`) is a fourth lockstep, one level up from the
-price table: `crates/agent-vitals-domain/src/domain/cost/mod.rs` ↔ `scripts/agent_vitals/agent/cost.py`
+price table: `crates/agent-vitals-domain/src/domain/cost/mod.rs` ↔ `packages/agent-vitals-python/agent_vitals/agent/cost.py`
 ↔ `integrations/dsh-client/src/host/index.ts::costReportFrom` all implement the same
 peak/off-peak-split pricing math over `{by_model, sequence}`; the CLI two-language parity
 is caught by `test_cli_matrix.py`'s `both()` differential, the TS mirror by
@@ -516,7 +525,7 @@ Scan output must never be committed — `.gitignore` covers `skill-scan*.json`, 
 `integrations/dsh-client/agent_vitals_wasm_bg.wasm` and `integrations/dsh-client/pricing.json` are the deliberate
 build-artifact exceptions: the host plugin `readFileSync`s both at runtime (the wasm binary
 and the price table `costReport` prices against), `wasm-opt` is disabled so the wasm build
-needs no network, and `pricing.json` is a plain `cp` from `scripts/agent_vitals/pricing.json`
+needs no network, and `pricing.json` is a plain `cp` from `packages/agent-vitals-python/agent_vitals/pricing.json`
 — re-copy it by hand whenever the source changes; `tests/test_pricing_lockstep.py`'s
 `HostPricingCopyLockstepTests` byte-compares them so a forgotten copy fails loudly instead
 of silently pricing off stale numbers.

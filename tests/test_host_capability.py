@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 from agent_vitals.host_capability import (  # noqa: E402
     CLAUDE_SV607_608_REASON,
     WORKBUDDY_SV604_605_REASON,

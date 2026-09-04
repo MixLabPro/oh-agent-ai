@@ -40,7 +40,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 
 _BIN = os.environ.get("AGENT_VITALS_BIN")
 _BIN = str(Path(_BIN).resolve()) if _BIN else None

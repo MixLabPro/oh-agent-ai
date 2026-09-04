@@ -25,7 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 # 与 test_cost_priced_day.py 同款：agent_vitals 包按 scripts/ 相对导入
 # （agent/__init__ 链上有绝对导入，不插 scripts/ 会 ModuleNotFoundError）。
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 
 from agent_vitals.agent.cost import (  # noqa: E402
     claude_day_cost,
@@ -41,7 +41,7 @@ class CatalogResolveCase(unittest.TestCase):
         self.pricing = load_pricing()
 
     def test_resolve_hits_and_misses(self):
-        from scripts.agent_vitals.agent.cost import _resolve_card_catalog
+        from agent_vitals.agent.cost import _resolve_card_catalog
 
         self.assertEqual(_resolve_card_catalog("claude-opus-5", self.pricing),
                          ("anthropic", "claude-opus-5", "USD"))
@@ -173,7 +173,7 @@ class PricingJsonShapeCase(unittest.TestCase):
     算出 0（2026-09-02 P4.5 RolloutItem schema-drift sentinel 同款纪律）。"""
 
     def setUp(self):
-        with (ROOT / "scripts" / "agent_vitals" / "pricing.json").open(
+        with (ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "pricing.json").open(
                 encoding="utf-8") as f:
             self.pricing = json.load(f)
 

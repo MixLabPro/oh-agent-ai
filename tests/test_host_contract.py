@@ -25,7 +25,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 
 from agent_vitals import host_capability  # noqa: E402
 from agent_vitals import cost as cost_module  # noqa: E402
@@ -47,7 +47,7 @@ PSEUDO_CHOICES = frozenset({"all"})
 # 不是漏查——`grep -c` 已验证 cli.py 里这个字面量子串只出现一次）。
 _SCAN_CLI_LITERAL = '"all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"'
 _SCAN_CLI_LOCATIONS = (
-    ROOT / "scripts" / "agent_vitals" / "cli.py",
+    ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "cli.py",
     ROOT / "apps" / "cli" / "src" / "main.rs",
     ROOT / "tests" / "test_cli_matrix.py",
 )
@@ -102,7 +102,7 @@ class G3LanguageSupportMatrixTests(unittest.TestCase):
         for host_id, (rust_name, py_name) in _LANGUAGE_SUPPORT_MATRIX.items():
             with self.subTest(host=host_id):
                 rust_path = ROOT / rust_name
-                py_path = ROOT / "scripts" / "agent_vitals" / "agent" / py_name
+                py_path = ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "agent" / py_name
                 self.assertTrue(rust_path.is_file(), f"{host_id}: 缺 {rust_path}")
                 self.assertTrue(py_path.is_file(), f"{host_id}: 缺 {py_path}")
 
@@ -353,7 +353,7 @@ class G8SourceSelfScanTests(unittest.TestCase):
 
     def test_claude_and_codex_python_derive_unavailable_from_host_profile(self):
         for name in ("claude_evidence.py", "codex_evidence.py"):
-            path = ROOT / "scripts" / "agent_vitals" / "agent" / name
+            path = ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "agent" / name
             text = path.read_text(encoding="utf-8")
             with self.subTest(file=name):
                 self.assertIn("host_profile(", text,
@@ -435,7 +435,7 @@ class G10PricingResolutionTests(unittest.TestCase):
         注释自钉「两面的钱必须同源」）+ v0.7 spec §3 新增的
         `claude_subscription_uncovered_estimate`（`peak_resolved=True`，
         复用 ledger 的峰谷分辨率，不是又一个下界兜底）。"""
-        text = (ROOT / "scripts" / "agent_vitals" / "agent" / "cost.py").read_text(encoding="utf-8")
+        text = (ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "agent" / "cost.py").read_text(encoding="utf-8")
         occurrences = len(re.findall(r"_price_claude_map\(", text))
         # 1 处定义 + 三个已登记入口各调用 1 次。
         self.assertEqual(occurrences, 4,

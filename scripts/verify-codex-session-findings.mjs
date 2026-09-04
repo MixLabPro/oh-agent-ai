@@ -19,7 +19,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const tpl = readFileSync(join(here, 'agent_vitals', 'templates', 'codex_session.html'), 'utf8');
+const tpl = readFileSync(
+  join(here, '..', 'packages', 'agent-vitals-python', 'agent_vitals', 'templates', 'codex_session.html'),
+  'utf8',
+);
 
 // 抽取 >>> sv-findings-fold / <<< sv-findings-fold 之间的纯函数源码，包成函数
 // 表达式求值（末尾 () 立即调用解包，同 timeline verify 的教训）。函数体只依赖

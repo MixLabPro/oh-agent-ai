@@ -36,16 +36,17 @@ jobs:
         run: |
           set -euo pipefail
           package_dir="dist/agent-vitals"
-          mkdir -p "$package_dir/scripts" "$package_dir/references" "$package_dir/agents"
+          mkdir -p "$package_dir/scripts" "$package_dir/references" "$package_dir/agents" \
+            "$package_dir/packages/agent-vitals-python"
           cp SKILL.md README.md LICENSE "$package_dir/"
           cp scripts/scan.py scripts/probe_logs.py "$package_dir/scripts/"
-          cp -R scripts/agent_vitals "$package_dir/scripts/agent_vitals"
-          find "$package_dir/scripts/agent_vitals" -type f \
+          cp -R packages/agent-vitals-python/agent_vitals "$package_dir/packages/agent-vitals-python/agent_vitals"
+          find "$package_dir/packages/agent-vitals-python/agent_vitals" -type f \
             \( -name '*.pyc' -o -name '*.pyo' \) -delete
-          find "$package_dir/scripts/agent_vitals" -type d \
+          find "$package_dir/packages/agent-vitals-python/agent_vitals" -type d \
             -name '__pycache__' -prune -exec rm -rf -- {} +
 
-          python_package="$package_dir/scripts/agent_vitals"
+          python_package="$package_dir/packages/agent-vitals-python/agent_vitals"
           unexpected_dir="$(find "$python_package" -mindepth 1 -type d \
             ! -path "$python_package/adapters" ! -path "$python_package/templates" \
             ! -path "$python_package/skills" ! -path "$python_package/agent" \
@@ -75,7 +76,7 @@ jobs:
             "$package_dir/references/"
           cp agents/openai.yaml "$package_dir/agents/"
 
-          required="LICENSE README.md SKILL.md agents/openai.yaml references/guide.zh-CN.md references/hosts.md references/judgment.md scripts/probe_logs.py scripts/scan.py scripts/agent_vitals/__init__.py"
+          required="LICENSE README.md SKILL.md agents/openai.yaml references/guide.zh-CN.md references/hosts.md references/judgment.md scripts/probe_logs.py scripts/scan.py packages/agent-vitals-python/agent_vitals/__init__.py"
           for path in $required; do
             if [ ! -f "$package_dir/$path" ]; then
               echo "Required package file is missing: $path" >&2
@@ -229,7 +230,7 @@ jobs:
           if [ "$cli_version" != "$RELEASE_VERSION" ]; then
             echo "Version mismatch: the tag publishes '$RELEASE_VERSION' but the" >&2
             echo "packaged CLI reports '$cli_version'. Update __version__ in" >&2
-            echo "scripts/agent_vitals/__init__.py to match the tag." >&2
+            echo "packages/agent-vitals-python/agent_vitals/__init__.py to match the tag." >&2
             exit 1
           fi
           # clawhub 0.23.3 stores authentication in its local config; merely

@@ -34,7 +34,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 from agent_vitals.agent import claude_cost as cc  # noqa: E402
 
 _BJ = timezone(timedelta(hours=8))

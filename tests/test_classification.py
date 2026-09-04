@@ -22,7 +22,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PY_PACKAGE = ROOT / "scripts" / "agent_vitals"
+PY_PACKAGE = ROOT / "packages" / "agent-vitals-python" / "agent_vitals"
 RS_SRC = ROOT / "apps" / "cli" / "src"  # v0.8 Phase E3：二进制从根 src/ 迁进 apps/cli/src/
 
 # 静态 SKILL.md 体检（skills/ 子树）——两实现的名单略有出入：

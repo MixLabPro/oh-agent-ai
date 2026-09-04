@@ -170,7 +170,7 @@ class TestSelfExclusionSurvivesFsError(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._path = list(sys.path)
-        sys.path.insert(0, str(ROOT / "scripts"))
+        sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
         import agent_vitals.skills.security as security_module
         cls.security_module = security_module
         cls.root = Path(security_module.SELF_SKILL_ROOT)
@@ -831,7 +831,7 @@ class TestWorkbuddyEvidenceVocabularyIsTheRealMachineVocabulary(unittest.TestCas
 
     @classmethod
     def setUpClass(cls):
-        sys.path.insert(0, str(ROOT / "scripts"))
+        sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
         from agent_vitals.workbuddy_evidence import (  # noqa: PLC0415
             _derive_coverage,
             _populate_workbuddy_timelines,

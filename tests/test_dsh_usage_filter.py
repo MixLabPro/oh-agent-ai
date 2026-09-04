@@ -18,7 +18,7 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packages" / "agent-vitals-python"))
 
 from agent_vitals.adapters.dsh import _is_usage_event  # noqa: E402
 

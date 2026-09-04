@@ -32,7 +32,7 @@ SCRIPT = ROOT / "scripts" / "scan.py"
 BIN = os.environ.get("AGENT_VITALS_BIN")
 BIN = str(Path(BIN).resolve()) if BIN else None
 
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 from agent_vitals.agent.cost import load_pricing  # noqa: E402
 
 PRICING = load_pricing()

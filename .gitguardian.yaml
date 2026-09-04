@@ -10,5 +10,5 @@ version: 2
 # tables live, not the whole tree.
 secret:
   ignored-paths:
-    - "scripts/agent_vitals/doctor.py"
-    - "src/doctor.rs"
+    - "packages/agent-vitals-python/agent_vitals/skills/doctor.py"
+    - "apps/cli/src/skills/doctor.rs"

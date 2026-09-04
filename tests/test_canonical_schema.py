@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 from agent_vitals.codex_evidence import build_codex_evidence  # noqa: E402
 
 # `CanonicalSession` 的字段集——对账目标。`_rust_canonical_session_fields` 的

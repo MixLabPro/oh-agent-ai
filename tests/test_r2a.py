@@ -38,7 +38,7 @@ from pathlib import Path
 from tests.env_helpers import isolated_home_env
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 from agent_vitals.agent import r2a as R2A  # noqa: E402
 
 _BIN = os.environ.get("AGENT_VITALS_BIN")

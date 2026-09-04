@@ -13,7 +13,7 @@
 E1  dsh/ + dsh-client/ → integrations/       ✅ 完成（commit b2738ab）
 E2  src-tauri/ → apps/desktop/src-tauri/     ✅ 完成（commit 6335d29）
 E3  src/（binary）→ apps/cli/                ✅ 完成（本提交）
-E4  scripts/agent_vitals/ → packages/agent-vitals-python/agent_vitals/   [高：~40 test 的 sys.path、scan.py、include_str!、ClawHub 清单]
+E4  scripts/agent_vitals/ → packages/agent-vitals-python/agent_vitals/   ✅ 完成（本提交）
 E5  assets/ 归并（templates/icons/pricing → assets/）                   [中]
 E6  CI workflows 路径同步（verify.yml / release.yml / package-clawhub.yml） [低，跟随]
 ```
@@ -81,6 +81,64 @@ manifest（`[profile.release]` 仍只能在 workspace 根声明，留在根）�
   `apps/desktop/src-tauri` check、python 1145/226 skip、golden 15+15（workspace
   `target/` 目录不变，golden runner 的 `AGENT_VITALS_BIN=./target/release/agent-vitals`
   路径零改动）。
+
+### E4 完成记录（2026-09-04）
+
+`mkdir -p packages/agent-vitals-python && git mv scripts/agent_vitals
+packages/agent-vitals-python/agent_vitals`。核心设计张力：打包产物给用户的命令
+必须留 `python3 scripts/scan.py`（SKILL.md/README 已文档化，ClawHub 也在
+`scripts/scan.py` 起步），但包本体要挪走——解法是让 **源仓库和打包产物走同一份
+相对结构**：`scan.py` 留在 `scripts/`，用
+`Path(__file__).resolve().parent.parent / "packages" / "agent-vitals-python"` 找包；
+打包工作流现在也在产物里建出同一层 `packages/agent-vitals-python/agent_vitals/`
+——一份 `sys.path` 公式两个语境都成立，不必分源码态/打包态两套逻辑。
+
+- `scripts/scan.py`：新增 4 行 `sys.path` 前缀（找 `packages/agent-vitals-python/`），
+  其余 `import agent_vitals.cli`/`compat` 调用点不变。
+- `.github/workflows/package-clawhub.yml`：`cp -R scripts/agent_vitals` →
+  `cp -R packages/agent-vitals-python/agent_vitals`；`python_package=` 变量、
+  `required=` 清单里的 `scripts/agent_vitals/__init__.py` 同步为
+  `packages/agent-vitals-python/agent_vitals/__init__.py`；版本不匹配报错文案里的
+  路径提示同步。
+- 33 个 `tests/*.py` + `scripts/*.py` 的 `sys.path.insert(0, ROOT / "scripts")` 批量
+  改成 `ROOT / "packages" / "agent-vitals-python"`——但 `test_doctor.py`（`import scan`）
+  和 `test_cc_trace_oracle.py`（`import cc_trace_oracle`）这两个文件导入的是**留在
+  `scripts/` 的模块**，不是 `agent_vitals` 包，批量 sed 误改后被两个 `ModuleNotFoundError`
+  当场抓住，改回 `ROOT / "scripts"`。教训：批量替换 `sys.path.insert` 之前先确认该文件
+  import 的是不是 `agent_vitals` 本体。
+- `tests/test_catalog_pricing.py`：`from scripts.agent_vitals.agent.cost import
+  _resolve_card_catalog`（点号导入，不是 sys.path 依赖）漏改，`ModuleNotFoundError:
+  No module named 'scripts.agent_vitals'`——改成 `from agent_vitals.agent.cost import
+  _resolve_card_catalog`（吃文件顶部已插的 sys.path）。
+- `tests/test_clawhub_packaging.py`：`ALLOWED_PACKAGE_FILES`/工作流断言/
+  `test_minimal_artifact_contains_all_modules_and_runs`（模拟打包产物的构造逻辑本身）
+  三处一起改，镜像新的相对结构。
+- Rust `include_str!` 4 处目录名变了（不只是深度）：`apps/cli/src/agent/codex_cost.rs`
+  （codex_pricing.json）、`apps/cli/src/main.rs`（calendar.html）、
+  `apps/cli/src/agent/codex_session_audit.rs`（codex_session.html）、
+  `crates/agent-vitals-domain/src/domain/cost/mod.rs`（pricing.json）——
+  `scripts/agent_vitals/` 段替换成 `packages/agent-vitals-python/agent_vitals/`，
+  层数（`../..` 前缀）不变。
+- `crates/agent-vitals-domain/tests/host_contract.rs`：G2/G3 两处源码自扫描基准路径
+  （`cli.py`、`agent/dsh_evidence.py` 等）同步，之前漏改导致 `cargo test` 两个 G2/G3
+  断言直接报文件不存在。
+- 2 个 `.mjs`（`scripts/verify-codex-session-{timeline,findings}.mjs`）：
+  `readFileSync(join(here, "agent_vitals", "templates", …))` → 插一层
+  `"..", "packages", "agent-vitals-python"`。
+- `.gitguardian.yaml`：顺手发现 `src/doctor.rs`/`scripts/agent_vitals/doctor.py`
+  两条 ignored-paths 早就因为 E3（`src/` → `apps/cli/src/`）和本步都过期了（doctor.py
+  实际在 `agent_vitals/skills/` 子树，不是包顶层）——两条一起修成
+  `apps/cli/src/skills/doctor.rs` / `packages/agent-vitals-python/agent_vitals/skills/doctor.py`。
+- CLAUDE.md：repo-layout 块、"两套实现"开篇段、~7 处正文里的 `scripts/agent_vitals/…`
+  路径引用（价格表单源、`behavior.py`/`source_identity.py`/`cost.py` 平行实现指路）
+  同步；顺手把一处更早就该改的 `src/behavior.rs`（应为 `apps/cli/src/agent/behavior.rs`）
+  也修了。
+- **门禁全绿**：`cargo build/test/clippy --release` 全绿（包括修复后的
+  `host_contract.rs` G2/G3）、`cargo check -p agent-vitals-wasm`、
+  `apps/desktop/src-tauri cargo check`、5 个 `scripts/*.mjs` + `integrations/
+  dsh-client/scripts/verify-host.mjs`、python 1145 跑通两遍（纯 Python 与
+  `AGENT_VITALS_BIN=./target/release/agent-vitals` 差分各一遍，后者 skip=4）、
+  golden 15+15 两实现字节一致。
 
 ## 明确不做（同 D 的边界）
 

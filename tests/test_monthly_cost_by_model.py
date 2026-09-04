@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "scan.py"
 BIN = os.environ.get("AGENT_VITALS_BIN")
 
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 from agent_vitals.agent.cost import load_pricing, cost_report  # noqa: E402
 from agent_vitals.agent import state as state_module  # noqa: E402
 

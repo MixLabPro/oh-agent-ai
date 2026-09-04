@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 from agent_vitals.claude_evidence import build_claude_evidence  # noqa: E402
 from agent_vitals.workbuddy_evidence import (  # noqa: E402
     _chain_note,

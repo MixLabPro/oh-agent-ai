@@ -12,9 +12,10 @@
 //! 官方卡折算）：服务 claude 会话账/托盘第三宿主列，不参与 DSH 账。它只进新
 //! 函数，`cost_report`/`priced_day` 等 DSH 路径字节不变——两条面不许互相改价。
 //!
-//! 价格表的单一真相源是 `scripts/agent_vitals/pricing.json`（这里 `include_str!`
-//! 内嵌、Python 侧读包内文件；`dsh-client/pricing.json` 是 build 时复制出的运行时份，
-//! lockstep 测试对齐）。缓存写入报价表没有行 → 按 0 计（不臆造价格）。高峰时段为
+//! 价格表的单一真相源是 `packages/agent-vitals-python/agent_vitals/pricing.json`（v0.8
+//! Phase E4 从 `scripts/agent_vitals/` 搬来；这里 `include_str!` 内嵌、Python 侧读包内
+//! 文件；`dsh-client/pricing.json` 是 build 时复制出的运行时份，lockstep 测试对齐）。
+//! 缓存写入报价表没有行 → 按 0 计（不臆造价格）。高峰时段为
 //! 北京时间**周一至周五** 9–12、14–18 点，周末全天空闲；空闲价 = 高峰价的一半。
 
 use serde_json::{json, Value};
@@ -27,7 +28,8 @@ pub use claude::{
     claude_subscription_uncovered_estimate,
 };
 
-const PRICING_JSON: &str = include_str!("../../../../../scripts/agent_vitals/pricing.json");
+const PRICING_JSON: &str =
+    include_str!("../../../../../packages/agent-vitals-python/agent_vitals/pricing.json");
 
 pub fn load_pricing() -> Value {
     serde_json::from_str(PRICING_JSON).unwrap_or_else(|_| Value::Object(Default::default()))

@@ -19,7 +19,7 @@ from unittest import mock
 
 # 把 scripts/ 加到 sys.path 以便 import agent_vitals —— 与仓库根 `python3
 # -m unittest discover` 行为一致（项目里没有 setup.py / pyproject.toml）
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packages" / "agent-vitals-python"))
 
 from agent_vitals import state
 
