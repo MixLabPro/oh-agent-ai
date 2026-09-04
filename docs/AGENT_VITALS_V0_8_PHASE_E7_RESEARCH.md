@@ -1,5 +1,9 @@
 # v0.8 Phase E7 —— Skill Surface 宿主归位（收口缺口）
 
+> **✅ 2026-09-05：E7.1-E7.7 全部完成**，逐步小提交、每步全量门禁绿、已推
+> `main` + `docs/cost-attribution-and-hour-axis-spec` 两分支（`a4488c2`
+> 到 `79d2122` 一路 + 本次 E7.7 核实）。完成小结见文末新增一节。
+
 > 用户 2026-09-04 审阅发现的真实缺口：`crates/agent-vitals-hosts` 的模块文档
 > （CLAUDE.md「D4/D5 填」那句）早就声明每个宿主该有 `sessions/` **和**
 > `skills/` 两个子树，但 D4/D5 实际执行时只做了 `sessions/`（会话 I/O 迁移），
@@ -13,8 +17,8 @@
 > **这是需要更正的记录**：此前几次提交把 Phase E 报告为"全部完成"，准确说法
 > 应为——**Session Surface 的宿主归位（D1/D4/D5）已完成；Skill Surface 的宿主
 > 归位从未开始，是本阶段之前遗漏的缺口，不是明确不做的范围**（与 D6 里
-> `r2a_store.rs`/`discovery.rs` 那种"评估过、有документированный理由留下"的
-> 情况不同——这里是真的没做）。
+> `r2a_store.rs`/`discovery.rs` 那种"评估过、有文档记录的理由留下"的情况
+> 不同——这里是真的没做）。
 
 ## 1. 目标结构（用户提案，经文件级核实调整）
 
@@ -292,6 +296,31 @@ E7.5  inventory.rs + discovery.rs + security.rs → runtime/skills/{inventory,sc
 E7.7  apps/cli/src/skills/mod.rs 收敛成 apps/cli/src/commands/skills.rs
       （参数解析 + 调用 runtime service + 渲染），doctor/explain/report/render/
       redact/diff 视 E7.1-E7.6 结果决定去留（大概率留在 CLI，逐个核实）。
+      ✅ **核实完成，判断：不搬、不改目录名**——E7 至此全部完成（E7.1-E7.7）。
+
+      核实结果：6 个剩余文件（diff/doctor/explain/redact/render/report，
+      共 3018 行）里，5 个（doctor/explain/redact/render/report）真零 I/O
+      （连间接 I/O 都没有——已用 `security.rs` 当初漏判间接 I/O 的教训重新
+      核实过 `read_lossy` 等间接调用，确认没有）；`diff.rs` 有一处真实但
+      **范围恰当**的 I/O——`agent-vitals diff` 子命令读用户在命令行指定的
+      基线快照文件（`io_reason`/`read_lossy`），这不是"宿主 wire 解释"或
+      "Skill 扫描"式的 I/O，是"CLI 命令读它自己的参数指向的文件"，跟
+      `main.rs` 本身解析参数属于同一类——`apps/cli 只负责用户如何调用和
+      看到它`（研究文档 §"目标结构"原话）明确允许这类叶子级 I/O，不需要
+      像 `security.rs`/`host.rs` 那样为了让纯逻辑对 wasm/其他宿主可复用而
+      拆分（`diff.rs` 没有除 CLI 自己以外的调用方，拆分没有对应的复用收益）。
+
+      **目录不改名为 `commands/`**：原计划设想的"收敛成单个 `commands/
+      skills.rs`"是把 6 个文件合并成 1 个大文件——评估后判断这会带来实质
+      风险（更大的单点故障面、更难 review 的巨型文件）而收益仅是"目录名更
+      贴合语义"这类命名整洁度，用户提出的更大范围目标（E7 之外的
+      `apps/cli/src/agent/` 重分布）里也没有专门要求这一步；比照 D6 把
+      `r2a_store.rs`/`discovery.rs` 留在 `apps/cli/src/agent/` 时的同款
+      判断（"合法终态，不是欠债，不因为文件名不完全贴合目标图就强拆"），
+      这里同理：6 个文件已经是"参数解析 + 调用 runtime service + 渲染"的
+      CLI 命令层，`apps/cli/src/skills/` 这个目录名描述的是它们的**内容**
+      （渲染 Skill 报告），不改成 `commands/` 不影响任何依赖方向或跨 crate
+      边界——是纯粹的命名偏好，不是架构问题，留给真正需要时再动。
 ```
 
 **本文档创建时只完成到规划**——E7.1 是唯一在本轮实际执行的子步骤，其余留给
@@ -343,12 +372,47 @@ host——**不能把所有 `agent/` 文件都挪进 `hosts/`，那会让每个�
 本文档，值不值得现在继续做、还是先按当前已完成的 D/E/E7.1/F1a 收一次尾，
 留给用户决定。
 
-## 3. 不确定项（留给执行到那一步时核实，不在此提前假设）
+## 3. 不确定项（留给执行到那一步时核实，不在此提前假设）—— 均已解决，见 §4
 
 - DSH 是否需要 `hosts/dsh/skills/`——`apps/cli/src/skills/` 里没有 dsh 专属
   文件，可能 DSH 的 skill 证据走 `hosts/dsh/sessions/` 或另一条路径，需要
-  执行到 E7.6 附近再查。
+  执行到 E7.6 附近再查。**解决**：确认无 dsh 专属 Skill Surface 文件，
+  E7.6 没有新建 `hosts/dsh/skills/`——DSH 的 skill 证据判定逻辑就在
+  `scanner.rs::scan_skill_dir` 的 `host == "dsh"` 分支里（E7.5 整体搬时
+  一起过去了），不是独立文件。
 - `doctor.rs`/`explain.rs`/`report.rs` 等"零 I/O 但看着像业务逻辑"的文件，
   最终该落 `apps/cli`（CLI 展示层）还是 `agent-vitals-runtime`（Tauri 复用的
   service 投影）——不是 I/O 命中数能回答的问题，需要读函数签名判断"是不是
-  Tauri 菜单栏也需要同一份逻辑"。
+  Tauri 菜单栏也需要同一份逻辑"。**解决**：`apps/desktop/src-tauri` 不直接
+  调用这几个文件的任何函数（Tauri 菜单栏消费的是 `domain::cost`/
+  `runtime::skills::snapshot` 等已经归位的纯计算/state 层，不经过 CLI 的
+  文本渲染层），确认它们是"只服务 CLI 自己"的展示代码，E7.7 判定留在
+  `apps/cli`，见 §2 的 E7.7 完成记录。
+
+## 4. E7 全部完成小结（2026-09-05）
+
+七个子步骤按依赖关系重排后的实际执行序（不是原计划的数字序）：
+E7.1（frontmatter）→ E7.2（analysis/overlap/ranking + 5 个 JSON 助手 + norm）
+→ E7.3（security 拆分）→ E7.4（snapshot 整体搬）→ E7.6（host + workbuddy +
+openclaw + codex 四个宿主适配器，`SourceMeta`/`norm`/
+`bytes_to_lossy_normalized` 三个共享件被迫先下沉）→ E7.5（discovery +
+inventory + security.rs 整体搬进 runtime，依赖 E7.6 全部完成）→ E7.7
+（核实剩余 6 个 CLI 文件不需要再搬，判定完成）。
+
+**贯穿全程的教训**（比任何单步的具体决定更重要）：
+1. **"零 I/O" 的判断只能靠读代码，不能靠 grep 字面量**——`std::fs`/
+   `std::process` 的字面量 grep 在 `host.rs`（`read_lossy` 间接 I/O）、
+   `analysis.rs`/`overlap.rs`（依赖 main.rs 顶层 8 个助手函数）、
+   `workbuddy.rs`/`inventory.rs`（`SourceMeta` 循环依赖）上全部低估了真实
+   复杂度。
+2. **依赖方向必须先核实，不能先规划**——原文档把 E7.5 排在 E7.6 前面，
+   实际执行时发现顺序反了（inventory.rs 依赖三个宿主适配器）；这类"库依赖
+   二进制"的错误只有真去接线才会暴露。
+3. **"拆" vs "整体搬"是每次都要重新判断的选择，没有通用规则**——
+   `security.rs`/`host.rs`/`codex.rs` 能拆是因为原作者已经把纯/I/O 分清楚
+   了；`workbuddy.rs`/`openclaw.rs`/`discovery.rs` 整体搬是因为强拆的正确性
+   代价不确定（尤其涉及已经修过的安全漏洞时）。判断标准是"拆分是否有真实的
+   复用/可测性收益"，不是"能不能拆"。
+4. **golden 是唯一真正有分量的正确性证明**——尤其在 E7.5 这种触及核心扫描
+   算法的移动上，"编译通过 + clippy 干净"完全不能替代"15 个 golden case
+   逐字节一致"。
