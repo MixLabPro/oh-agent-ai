@@ -43,13 +43,15 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::skills::discovery::{collect, Ctx, SourceMeta, DEFAULT_ROOTS};
+use agent_vitals_hosts::skill_discovery::SourceMeta;
+use super::scanner::{collect, Ctx, DEFAULT_ROOTS};
+use super::scanner as discovery;
 use agent_vitals_hosts::hosts::claude_code::skills::HostConfig;
-use crate::util::norm;
+use agent_vitals_domain::util::norm;
 use agent_vitals_hosts::dsh_sources as dsh;
-use crate::skills::discovery;
 // v0.8 Phase E7.6：codex.rs/workbuddy.rs/openclaw.rs 迁进 agent-vitals-hosts
-// （库 crate），re-import 时保留同样的局部别名，call site 零改动。
+// （库 crate），E7.5 起本文件也迁进库 crate（agent-vitals-runtime）——同一批
+// import 路径继续有效，只是不再是"二进制 use 库"，是"库 use 库"。
 // codex 的 sources::skills 已经 re-export 了 hosts::codex::skills 的纯部分
 // （CodexRuntime/apply_codex_runtime/…），一个别名两边都拿到。
 use agent_vitals_hosts::hosts::codex::sources::skills as codex;

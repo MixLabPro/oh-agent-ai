@@ -1,16 +1,25 @@
-//! 安全启发式扫描的 I/O 层——v0.8 Phase E7.3 从原 `security.rs` 拆出（原文件
-//! 把目录遍历/文件读取/权限位读取焊在正则规则判断里）。纯规则引擎迁进
-//! `agent_vitals_domain::skills::security_rules`（`Rule`/`rules`/`is_cited`/
-//! `check`/`evaluate`/…）；这里只做三件真实 I/O 的事——`canonicalize`（self-
-//! exclusion 判定）、`discovery::sorted_files`（目录遍历）、`read_lossy` +
-//! `mode_of`（文件内容与权限位读取）——收集好数据后交给 `evaluate()`。
+//! 安全启发式扫描的 I/O 层——v0.8 Phase E7.3 从 `apps/cli/src/skills/
+//! security.rs` 拆出纯规则引擎（进
+//! `agent_vitals_domain::skills::security_rules`：`Rule`/`rules`/`is_cited`/
+//! `check`/`evaluate`/…），本文件只留三件真实 I/O 的事——`canonicalize`
+//! （self-exclusion 判定）、`sorted_files`（目录遍历，同 crate 兄弟模块
+//! `scanner`）、`read_lossy` + `mode_of`（文件内容与权限位读取）——收集好
+//! 数据后交给 `evaluate()`。E7.5 起本文件本体也从二进制 `apps/cli/src/
+//! skills/security.rs` 迁进这里（`security.rs`/`scanner.rs` 互相调用对方，
+//! 必须一起迁，否则出现"库依赖二进制"）。
 
 use std::path::Path;
 
 use agent_vitals_domain::skills::security_rules::{evaluate, self_excluded_result, EXEC_EXT};
+use agent_vitals_domain::util::norm;
 use serde_json::Value;
 
-use crate::util::{norm, read_lossy};
+use super::scanner::sorted_files;
+
+fn read_lossy(p: &Path) -> Option<String> {
+    let bytes = std::fs::read(p).ok()?;
+    Some(agent_vitals_domain::util::bytes_to_lossy_normalized(&bytes))
+}
 
 /// 对 SKILL.md 正文与附带脚本做启发式安全检查。
 pub fn security_scan(skill_dir: &Path, skill_raw: &str, self_root: Option<&Path>) -> Value {
@@ -32,7 +41,7 @@ pub fn security_scan(skill_dir: &Path, skill_raw: &str, self_root: Option<&Path>
     let mut scripts: Vec<(String, bool, Option<String>)> = Vec::new();
 
     // 排序：walkdir 不保证顺序，findings 与 exec_scripts 的次序都跟着它走
-    for p in crate::skills::discovery::sorted_files(skill_dir) {
+    for p in sorted_files(skill_dir) {
         if p.file_name().and_then(|s| s.to_str()) == Some("SKILL.md") {
             continue;
         }

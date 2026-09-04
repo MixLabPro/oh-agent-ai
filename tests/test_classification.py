@@ -43,17 +43,25 @@ RS_SRC = ROOT / "apps" / "cli" / "src"  # v0.8 Phase E3：二进制从根 src/ �
 # …::hosts::openclaw::sources::skills）+ codex（协议报文构造/响应解析/运行时
 # 元数据合并拆到 …::hosts::codex::skills，子进程 I/O 到
 # …::sources::skills——该文件自己的模块头早就说清了这条纯/I/O 边界，本次只是
-# 落进 crate 边界）——都不再在 apps/cli/src/skills/，从 RS_SKILLS_FAMILY 里
-# 删掉；Python 侧对应模块暂未跟进搬迁，PY_SKILLS_FAMILY 不变。
+# 落进 crate 边界）；E7.5 discovery（936 行，本仓库最复杂的单一函数集：目录
+# 遍历+按宿主分类+逐 skill 记录组装）+ inventory（跨宿主编排，依赖 E7.6 四个
+# 宿主适配器都已是库 crate 模块）+ security（I/O 薄壳，与 discovery 互相
+# 调用，必须一起迁）——三者一起迁进 agent-vitals-runtime::skills::
+# {scanner,inventory,security}（整体搬，不做"host 归属"式再拆分，同 D 阶段
+# 教训：先给一个正确的家，深层重构留后续）——都不再在 apps/cli/src/skills/，
+# 从 RS_SKILLS_FAMILY 里删掉；Python 侧对应模块暂未跟进搬迁，PY_SKILLS_FAMILY
+# 不变。apps/cli/src/skills/ 现在只剩 CLI 展示层（diff/doctor/explain/
+# redact/render/report，读已扫描记录渲染成文字/JSON，没有自己的扫描/编排
+# 逻辑）。
 PY_SKILLS_FAMILY = {
     "analysis", "diff", "discovery", "doctor", "explain", "frontmatter",
     "inventory", "lifecycle", "overlap", "redact", "report", "security",
     "snapshots",
 }
 RS_SKILLS_FAMILY = {
-    "diff", "discovery", "doctor", "explain",
-    "inventory", "redact",
-    "render", "report", "security",
+    "diff", "doctor", "explain",
+    "redact",
+    "render", "report",
 }
 
 # 会话行为/成本审计（agent/ 子树）。**注意 skill.py 在这里**：会话 skill 执行
@@ -157,8 +165,15 @@ class ClassificationGuardTests(unittest.TestCase):
         )
 
     def test_skill_inventory_does_not_read_session_files(self):
-        """Skill surface 只能消费注入证据，不能自行打开 Session 日志。"""
-        inventory = (RS_SRC / "skills" / "inventory.rs").read_text(encoding="utf-8")
+        """Skill surface 只能消费注入证据，不能自行打开 Session 日志。
+
+        v0.8 Phase E7.5：inventory.rs 从 apps/cli/src/skills/ 迁进
+        agent-vitals-runtime/src/skills/（跨宿主编排，依赖 E7.6 的四个宿主
+        适配器都已是库 crate 模块）。
+        """
+        inventory = (
+            ROOT / "crates" / "agent-vitals-runtime" / "src" / "skills" / "inventory.rs"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("read_session_evidence", inventory)
         self.assertIn("SessionEvidenceInput", inventory)
 

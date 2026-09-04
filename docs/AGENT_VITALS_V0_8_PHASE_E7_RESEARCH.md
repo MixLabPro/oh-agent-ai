@@ -243,11 +243,52 @@ workbuddy.rs 与 openclaw.rs 是"整体搬"的（多轮 fs 探测/子进程探�
 被迫下沉到 `agent_vitals_domain::util`/`agent-vitals-hosts::skill_discovery`
 ——不是提前规划好的，是每一步真去核实依赖关系时才发现的阻塞，符合本阶段
 "每一步的真实依赖图只有读完文件才知道"的教训。
-E7.5  inventory.rs + discovery.rs 拆分 → runtime/skills/{inventory,scanner}.rs
-      discovery.rs 963 行是这次最大最复杂的一块——4 处 I/O 命中不代表只有 4 处
-      跟宿主相关，需要通读，可能还要再拆出 hosts/<h>/skills/ 的部分（哪些目录
-      算"这个宿主的 skill 根"是宿主专有知识，不是通用扫描逻辑）。依赖 E7.6
-      先完成（见上）。
+E7.5  inventory.rs + discovery.rs + security.rs → runtime/skills/{inventory,scanner,security}
+      ✅ 完成。核实结果：**整体搬，没有再拆出 hosts/<h>/skills/**——
+      `classify()` 的每宿主分支（openclaw/hermes/codex/workbuddy/dsh/
+      claude-code 各自的层级词汇、路径前缀规则）与 `scan_skill_dir()` 的
+      每宿主 `loaded`/`why` 判定逻辑（openclaw 的三态、workbuddy 的
+      welcomeMode 过滤、dsh 的 probe/log 双证据源）确实是"宿主专有知识"，
+      但它们跟通用的 tier1/tier2 token 计算、content hash、bundled 文件计数、
+      security_scan 调用、DSH 证据注入**全部焊在同一个 ~400 行函数里**，
+      再往下拆需要重新设计"宿主专有分类规则往哪放、通用编排往哪放"这条边界
+      本身——那是一次新的架构设计，不是"给现有代码找个新家"的搬迁，超出
+      E7 的范围（E7 是给 Skill Surface 补上 Session Surface 在 D 阶段已经
+      做过的宿主归位，不是重新设计 Skill Surface 的内部分层）。同 E7.4/
+      workbuddy.rs/openclaw.rs 的判断：整体搬，不重新设计。
+
+      发现的额外阻塞：`security.rs`（E7.3 的 I/O 薄壳）与 `discovery.rs`
+      互相调用（`security_scan` 内部调 `discovery::sorted_files`，
+      `scan_skill_dir` 调 `security_scan`）——二进制内是合法的模块间循环，
+      但 `discovery.rs` 单独搬进库 crate 会让这条循环变成"库依赖二进制"，
+      所以 `security.rs` 必须跟着一起搬（`crates/agent-vitals-runtime/src/
+      skills/security.rs`，`scanner.rs` 用 `super::security::security_scan`，
+      `security.rs` 用 `super::scanner::sorted_files`，同一 crate 内部循环
+      合法）。
+
+      `agent-vitals-runtime` 新增 3 个直接依赖（`regex`/`sha2`/`walkdir`）
+      ——discovery.rs 的正则分类/内容哈希/目录遍历需要，runtime 不参与 wasm
+      构建，加依赖没有 wasm 纯度顾虑（不同于 `agent-vitals-hosts` 的
+      `sources` feature-gate 是专门为了让 wasm 只链纯子树）。`crate::
+      layer_of`（`group_by_key` 用）改成 `agent_vitals_domain::skills::
+      ranking::layer_of` 全限定路径；main.rs 里为它开的 `pub(crate) use`
+      re-export 随之变成无调用点，删掉（同一批清理还删了 `est_tokens` 的
+      顶层 re-export，移进 `apps/cli/src/util.rs` 自己的 `#[cfg(test)]`
+      模块——它现在只有测试用它，同 `split_lines` 之前的处理）。
+
+      `apps/cli/src/skills/mod.rs` 现在只剩 CLI 展示层（diff/doctor/
+      explain/redact/render/report）——没有自己的扫描/编排逻辑，只读
+      `runtime::skills::inventory::take()` 的结果渲染。`tests/
+      test_classification.py::test_skill_inventory_does_not_read_session_
+      files` 直接读 `inventory.rs` 文件内容做不变量断言，路径也要跟着改。
+
+      **门禁验证强度**：这是本阶段（E7 全程）风险最高的一次移动——936+255
+      行的核心扫描算法，逐宿主判定逻辑极密集，是全仓库测试覆盖最密的一块
+      代码。golden 15+15 逐字节一致（含 `default`/`all`/`claude-code`/
+      `claude-code-all`/`zombie-age-0`/`redacted`/`no-host-config`/
+      `cwd-is-home`/`host-codex`/`host-openclaw`/`host-workbuddy`/
+      `host-dsh*`/`diff-baseline`——几乎覆盖了整条扫描流水线的每一个分支）
+      是这一步唯一真正有分量的正确性证明，不是"顺手跑一下"。
 E7.7  apps/cli/src/skills/mod.rs 收敛成 apps/cli/src/commands/skills.rs
       （参数解析 + 调用 runtime service + 渲染），doctor/explain/report/render/
       redact/diff 视 E7.1-E7.6 结果决定去留（大概率留在 CLI，逐个核实）。

@@ -14,8 +14,14 @@ use walkdir::WalkDir;
 
 use agent_vitals_domain::skills::frontmatter::parse_frontmatter;
 use agent_vitals_hosts::hosts::claude_code::skills::lookup_usage;
-use crate::skills::security::security_scan;
-use crate::util::{est_tokens, norm, pyround, read_lossy};
+use agent_vitals_domain::util::{est_tokens, norm, pyround};
+
+use super::security::security_scan;
+
+fn read_lossy(p: &Path) -> Option<String> {
+    let bytes = std::fs::read(p).ok()?;
+    Some(agent_vitals_domain::util::bytes_to_lossy_normalized(&bytes))
+}
 
 /// 各宿主的常见 skill 目录。找不到的会被静默跳过。
 /// host 为 "claude-code*" 的才可能进 Claude Code 的上下文。
@@ -64,10 +70,11 @@ fn plugin_path_re() -> &'static Regex {
 }
 
 // v0.8 Phase E7.6：SourceMeta 迁进 agent-vitals-hosts::skill_discovery——
-// openclaw.rs/workbuddy.rs 也要用它，而它们要迁进库 crate（库不能反过来依赖
-// 本二进制），SourceMeta 必须先搬。re-export 保这个二进制里的既有 call site
-// （含 `SourceMeta::opt`）零改动。
-pub use agent_vitals_hosts::skill_discovery::SourceMeta;
+// openclaw/workbuddy 的宿主适配器也要用它，而它们要迁进库 crate（库不能反过来
+// 依赖本二进制），SourceMeta 必须先搬。E7.5 起本文件自己也迁进了库 crate，
+// 不再需要 `pub use` 桥给二进制侧——直接 `use`（无消费者在本 crate 外还要经
+// scanner 转手拿 SourceMeta）。
+use agent_vitals_hosts::skill_discovery::SourceMeta;
 
 /// 扫描上下文。Python 版把这些放在模块级全局里，这里显式传递。
 pub struct Ctx {
@@ -818,7 +825,7 @@ pub fn group_by_key(scope: &[Value]) -> Vec<(String, Vec<usize>)> {
         // 同名 skill 只会在同一宿主内争抢；跨宿主是独立运行时，不是冲突。
         // DSH 的覆盖层也进键：跨层同名是设计不是冲突，只有同层同名才比 rank。
         let domain = s["conflict_domain"].as_str().unwrap_or("");
-        let layer = crate::layer_of(s);
+        let layer = agent_vitals_domain::skills::ranking::layer_of(s);
         let ns = s["namespace"].as_str().unwrap_or("");
         let name = s["name"].as_str().unwrap_or("");
         let key = format!("{}\u{0}{}\u{0}{}\u{0}{}", domain, layer, ns, name);

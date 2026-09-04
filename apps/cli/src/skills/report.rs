@@ -16,9 +16,9 @@ use std::path::PathBuf;
 use serde_json::{json, Map, Value};
 
 use agent_vitals_domain::skills::analysis;
-use crate::skills::discovery::group_by_key;
+use agent_vitals_runtime::skills::scanner::group_by_key;
 use agent_vitals_hosts::hosts::claude_code::skills::HostConfig;
-use crate::skills::inventory::Inventory;
+use agent_vitals_runtime::skills::inventory::Inventory;
 use crate::util::{norm, pyround};
 use crate::{b, i, s};
 

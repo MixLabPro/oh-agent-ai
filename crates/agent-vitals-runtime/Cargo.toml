@@ -20,3 +20,8 @@ agent-vitals-domain = { path = "../agent-vitals-domain" }
 agent-vitals-hosts = { path = "../agent-vitals-hosts", features = ["sources"] }
 serde = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
+# v0.8 Phase E7.5：discovery.rs/security.rs 从 apps/cli 迁来的目录遍历/正则/
+# 内容哈希——skills::scanner 与 skills::security 需要，其余 runtime 模块不碰。
+regex = "1"
+sha2 = "0.10"
+walkdir = "2"

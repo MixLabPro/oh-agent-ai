@@ -20,20 +20,21 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
-use skills::discovery::Ctx;
+use agent_vitals_runtime::skills::scanner::Ctx;
 use util::norm;
 
 // v0.8 Phase E7.2：覆盖优先级排序（level_rank/level_rank_for/severity_rank/
-// conflict_rank/CODEX_FALLBACK_DESC_BUDGET）+ JSON 字段取值助手（s/i/f/b/
-// chars）迁进 agent-vitals-domain（纯计算，不认识宿主 wire 格式，本该一直在
-// 那）。`analysis.rs`/`overlap.rs` 同一步跟着搬进 domain，是这批函数在二进制
-// 侧唯一的消费者——搬完之后只有 `layer_of`（discovery.rs 用）与 `s`/`i`/`f`/
-// `b`（doctor/explain/report/snapshot/oneline 用）在 apps/cli 里还有调用点，
-// 保留 re-export 让这些 call site 零改动；其余（`conflict_rank`/`level_rank`/
-// `level_rank_for`/`severity_rank`/`CODEX_FALLBACK_DESC_BUDGET`/`chars`）只在
-// domain 内部被 analysis.rs 用，不再 re-export（`doctor.rs` 恰好有自己独立的
-// `severity_rank` 实现，同名不同函数，不是同一份代码的两个入口）。
-pub(crate) use agent_vitals_domain::skills::ranking::layer_of;
+// conflict_rank/CODEX_FALLBACK_DESC_BUDGET/layer_of）+ JSON 字段取值助手
+// （s/i/f/b/chars）迁进 agent-vitals-domain（纯计算，不认识宿主 wire 格式，
+// 本该一直在那）。`analysis.rs`/`overlap.rs` 同一步跟着搬进 domain；
+// `layer_of` 原本因为 `discovery.rs` 还在二进制里而保留 re-export，E7.5
+// discovery.rs 也搬进库 crate 后这条 re-export 已无调用点，删掉——只有
+// `s`/`i`/`f`/`b`（doctor/explain/report/snapshot/oneline 用）在 apps/cli
+// 里还有调用点，保留 re-export 让这些 call site 零改动；其余
+// （`conflict_rank`/`level_rank`/`level_rank_for`/`severity_rank`/
+// `CODEX_FALLBACK_DESC_BUDGET`/`chars`）只在 domain/runtime 内部被用，不再
+// re-export（`doctor.rs` 恰好有自己独立的 `severity_rank` 实现，同名不同
+// 函数，不是同一份代码的两个入口）。
 pub(crate) use agent_vitals_domain::util::{b, f, i, s};
 
 /// 拒绝负数。**不能静默接受后产出垃圾** —— `--budget -1` 会算出
@@ -2012,8 +2013,8 @@ session_store={store} fold={fold}"
 
     // Session surface 负责读日志；Skill surface 只消费注入的证据。
     let (dsh_path, dsh_evidence) = agent_vitals_runtime::session_sources::read_dsh_skill_correlation();
-    let inv = skills::inventory::take(
-        &skills::inventory::Selection {
+    let inv = agent_vitals_runtime::skills::inventory::take(
+        &agent_vitals_runtime::skills::inventory::Selection {
             host: &args.host,
             extra_paths: &args.path,
             runtime_json: args.runtime_json.as_deref(),
@@ -2021,7 +2022,7 @@ session_store={store} fold={fold}"
         &home_n,
         &cfg,
         &ctx,
-        skills::inventory::SessionEvidenceInput {
+        agent_vitals_runtime::skills::inventory::SessionEvidenceInput {
             dsh_path,
             dsh: dsh_evidence,
         },
