@@ -19,7 +19,7 @@
 
 use serde_json::{Value, json};
 
-use crate::dsh_evidence::Coords;
+use crate::coords::Coords;
 
 fn or_null(v: Option<i64>) -> Value {
     match v {

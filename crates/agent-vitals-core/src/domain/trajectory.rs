@@ -123,7 +123,7 @@ fn from_entry<T>(
 /// 自带坐标，只能靠边界顺延。
 pub(crate) fn coord_map(events: &[Value]) -> std::collections::HashMap<i64, (Value, Value, Value)> {
     let mut map = std::collections::HashMap::new();
-    let mut coords = crate::dsh_evidence::Coords::default();
+    let mut coords = crate::coords::Coords::default();
     for event in events {
         if !event.is_object() {
             continue;

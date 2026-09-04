@@ -7,6 +7,7 @@
 pub mod behavior;
 pub mod budget;
 pub mod canonical_audit;
+pub mod coords;
 pub mod cost;
 pub mod detectors;
 pub mod duration;

@@ -22,6 +22,6 @@ pub use adapters::hosts::dsh::sessions::{
 };
 pub use contracts::{evidence, host_capability, r2a, source_identity, usage_fact};
 pub use domain::{
-    behavior, budget, canonical_audit, cost, detectors, duration, findings, plan, skill, state,
-    subagent, takeover, trajectory, usage, util,
+    behavior, budget, canonical_audit, coords, cost, detectors, duration, findings, plan, skill,
+    state, subagent, takeover, trajectory, usage, util,
 };
