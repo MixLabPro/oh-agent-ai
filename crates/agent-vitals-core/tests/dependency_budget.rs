@@ -353,18 +353,17 @@ fn nested_paths_and_legacy_facade_resolve_to_the_same_items() {
 /// any new host dependency must fail CI instead of silently expanding the debt.
 #[test]
 fn domain_to_host_compatibility_debt_cannot_grow() {
-    // Phase C Step 1（compaction/waste + match_{behavior,trajectory} raw shim）
-    // 与 Step 2a（`Coords` 迁进 `domain/coords.rs`）之后，`domain/` 的**生产**
-    // domain→host 债只剩 `usage.rs` 的 canonical 归一层（`crate::codex_usage`，
-    // Step 2b 迁）。`behavior.rs`/`trajectory.rs` 的命中现在**全在
-    // `#[cfg(test)]`**——测试用 `build_dsh_evidence` 造 fixture（behavior）/ 调
-    // 迁走的 raw shim（两者），非生产依赖，crate 拆分后经 dev-dependency 解析。
+    // Phase C Step 1（compaction/waste + match_{behavior,trajectory} raw shim）、
+    // Step 2a（`Coords` → `domain/coords.rs`）、Step 2b（canonical 归一层 →
+    // `adapters/canonical_usage.rs`）之后，`domain/` 的**生产** domain→host 依赖
+    // **归零**。剩下的命中全在 `#[cfg(test)]`——`build_dsh_evidence` 造 fixture
+    // （behavior）/ 调迁走的 raw shim（behavior/trajectory）/ 调迁走的 canonical
+    // 层（usage），非生产依赖，crate 拆分后经 dev-dependency 解析。
     let allowances = [
         ("behavior.rs", "crate::dsh_evidence", 3usize),
         ("behavior.rs", "crate::adapters::hosts", 1),
         ("canonical_audit.rs", "crate::host_capability", 1),
         ("trajectory.rs", "crate::adapters::hosts", 1),
-        ("usage.rs", "crate::codex_usage", 3),
     ];
     let forbidden = [
         "crate::claude_code_evidence",

@@ -1,6 +1,7 @@
-//! Temporary Phase B residual adapters.
+//! Temporary Phase B/C residual adapters.
 //!
-//! New host adapters belong in `agent-vitals-adapters`. DSH evidence and Codex
-//! usage remain here only until Phase C removes the domain-to-host dependency.
+//! New host adapters belong in `agent-vitals-adapters`. DSH evidence、Codex
+//! usage fold、以及跨宿主的 canonical 归一层暂留这里，直到 Phase C/B2 收口。
 
+pub mod canonical_usage;
 pub mod hosts;

@@ -16,6 +16,7 @@ pub mod domain;
 // `contracts`, `domain`, and adapter namespaces. Leaf adapters moved to
 // `agent-vitals-adapters` in Phase B. These two residual aliases stay until
 // Phase C removes the domain → host dependency.
+pub use adapters::canonical_usage;
 pub use adapters::hosts::codex::sessions::usage as codex_usage;
 pub use adapters::hosts::dsh::sessions::{
     audit, compaction, evidence as dsh_evidence, waste,
