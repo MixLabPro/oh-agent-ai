@@ -20,6 +20,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-vitals-data"
+version = "0.1.0"
+dependencies = [
+ "agent-vitals-domain",
+ "serde_json",
+]
+
+[[package]]
 name = "agent-vitals-domain"
 version = "1.3.0"
 dependencies = [

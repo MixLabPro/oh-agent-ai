@@ -1,0 +1,22 @@
+[package]
+name = "agent-vitals-data"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Durable evidence + queryable projection layer for Agent Vitals (v0.9 Data Foundation)"
+repository = "https://github.com/MixLabPro/agent-vitals"
+license = "MIT"
+
+[lib]
+name = "agent_vitals_data"
+path = "src/lib.rs"
+
+# v0.9 Stage 0.2：骨架阶段——只依赖 domain 的纯 DTO 契约（data_contract），
+# 不接 agent-vitals-hosts、不接 rusqlite。Stage 0.3 会把只读 JSON adapter 接
+# 进来（仍不需要 SQLite），Stage B 才真正引入 rusqlite（spec §5.1）——那两步
+# 是 spec 明确安排好的阶段，届时放开这里的依赖不算违反本阶段的收紧，是按
+# 计划推进；`tests/dependency_budget.rs` 的收紧断言与本注释要一并更新，
+# 不能悄悄放开。
+[dependencies]
+agent-vitals-domain = { path = "../agent-vitals-domain" }
+serde_json = { version = "1", features = ["preserve_order"] }
