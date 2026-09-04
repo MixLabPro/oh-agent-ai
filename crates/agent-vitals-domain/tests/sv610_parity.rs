@@ -21,7 +21,7 @@ use agent_vitals_domain::behavior::{detect_sv610_legacy, flatten};
 use agent_vitals_domain::compatibility::canonical_session::{KIND_SANDBOX_MODE, SIGNAL_SANDBOX_MODES};
 use agent_vitals_domain::compatibility::run_single_family1_rule;
 use agent_vitals_domain::detectors::Sv610Detector;
-use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_adapters::dsh_evidence::build_dsh_evidence;
 use agent_vitals_domain::evidence::{RuleOutcome, Signal};
 use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};

@@ -58,7 +58,7 @@ fn g3_every_runtime_host_has_both_language_evidence_modules() {
     // stays in core as registered layer-2 wire debt (`domain/dsh/`, Phase C).
     // Paths are repo-root-relative now, not relative to one crate's `src`.
     let matrix: [(&str, &str, &str); 4] = [
-        ("dsh", "crates/agent-vitals-domain/src/domain/dsh/evidence.rs", "dsh_evidence.py"),
+        ("dsh", "crates/agent-vitals-adapters/src/hosts/dsh/sessions/evidence.rs", "dsh_evidence.py"),
         ("codex", "crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
         ("claude-code", "crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
         ("workbuddy", "crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
@@ -142,7 +142,7 @@ fn g8_claude_code_and_codex_derive_unavailable_from_host_profile() {
 #[test]
 fn g8_dsh_derives_unavailable_from_host_profile() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let path = root.join("crates/agent-vitals-domain/src/domain/dsh/evidence.rs");
+    let path = root.join("crates/agent-vitals-adapters/src/hosts/dsh/sessions/evidence.rs");
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains(r#"host_capability::host_profile("dsh")"#),
         "dsh_evidence.rs 的五个 unmeasured 信号置零应查 HOSTS 行");

@@ -137,7 +137,7 @@ pub(crate) fn coord_map(events: &[Value]) -> std::collections::HashMap<i64, (Val
 }
 
 // `match_trajectory`（DSH 原始事件 → findings 的兼容 shim）phase C 迁进
-// `domain::dsh::audit`（登记的 layer-2 DSH-wire 债）。规则本体
+// `agent-vitals-adapters` 的 `hosts/dsh/sessions/audit`（Phase D1）。规则本体
 // `match_trajectory_canonical`（吃 `&CanonicalSession`）与 `coord_map`
 // （skill.rs 用的坐标顺延）留在这里。
 
@@ -590,7 +590,7 @@ mod tests {
     use super::*;
     // `match_trajectory` 的 raw-shim 已迁 audit；raw-events 测试继续在这里调它
     // （测试依赖，非生产依赖——crate 拆分后经 dev-dependency 解析）。
-    use crate::audit::match_trajectory;
+    use agent_vitals_adapters::audit::match_trajectory;
 
     fn ev(etype: &str, seq: i64, time: i64, data: Value) -> Value {
         json!({"type": etype, "seq": seq, "time": time, "data": data})

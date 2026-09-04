@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::evidence::tool_invocation;
-use crate::util::{est_tokens, find_next_request, find_request};
+use agent_vitals_domain::util::{est_tokens, find_next_request, find_request};
 
 const MIN_REPEAT_TURNS: usize = 2; // 至少跨 2 个不同 turn 才算"重复"，同一 turn 内多次调用不算
 const MIN_FAILED_RESULTS: usize = 3; // 与 trajectory.rs 的 SV613b 阈值一致（概念对齐，各自独立扫描）
@@ -253,7 +253,7 @@ pub fn detect_structural_waste(events: &[Value], requests: &[Value]) -> Vec<Valu
     // 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
     // branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
     // 对同一笔钱/同一批行为重复计数（见 util::fork_boundary 的实测数据）。
-    let events = &crate::util::post_fork(events)[..];
+    let events = &agent_vitals_domain::util::post_fork(events)[..];
     let mut out = Vec::new();
     out.extend(detect_duplicate_tool_results(events));
     out.extend(detect_failure_run_waste(events, requests));

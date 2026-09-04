@@ -105,10 +105,10 @@ deps：`agent-vitals-hosts { features=["sources"] }` + `agent-vitals-domain`。
 `scripts/agent_vitals/paths.py` 与 `src-tauri/overview.rs` 保持跨实现契约测试
 （`tests/test_*` 里已有 isolated-home 夹具模式）。
 
-## 2. 建议执行顺序
+## 2. 建议执行顺序 / 进度
 
 ```
-D1  wire/fold 分离          [中 + wasm 重建]   —— 首项，清 Phase C 债，domain 变 wire-pure
+D1  wire/fold 分离          [中 + wasm 重建]   ✅ 完成
 D2  cost.rs 文件切分        [低，纯 domain]    —— 独立，golden/parity 零漂移
 D3  adapters → hosts 改名   [中，机械面大]    —— 骨架，feature 空壳
 D4  DSH I/O → sources/      [高，feature-gate 首用]
@@ -116,6 +116,38 @@ D5  其他 host readers       [高，rusqlite 迁移]
 D6  agent-vitals-runtime    [高，state 层迁移]
 D7  HomeResolver 单点       [中，收敛 + 契约测试]
 ```
+
+### D1 完成记录（2026-09-04，本会话）
+
+`domain/dsh/{evidence,audit,compaction,waste,mod}.rs` → `agent-vitals-adapters/src/hosts/dsh/sessions/`。
+`Coords` 留 `domain/coords.rs`（决策 (ii)：`turn`/`step`/`call_id` 抽象字段名，
+host-agnostic；`trajectory::coord_map` / `duration` / `skill` 继续用）。
+
+- adapters `lib.rs`：加 `pub use hosts::dsh::sessions::{audit, compaction, waste}` 扁平别名。
+- domain `lib.rs` / `domain/mod.rs`：删 `dsh` 模块与全部 `dsh::*` 别名。
+- 二进制 `src/agent/behavior.rs`：`agent_vitals_domain::{compaction,waste}` → `agent_vitals_adapters::…`。
+- wasm `lib.rs` + `Cargo.toml`：加 `agent-vitals-adapters` dep，`audit`/`compaction`/`waste`
+  4 处改道；**wasm-pack 重建 + 重拷 `dsh-client/agent_vitals_wasm{.js,_bg.wasm,.d.ts}`**。
+- `domain/behavior.rs::tests` 里 14 个 `build_dsh_evidence`-fixture 测试 + 5 个 helper
+  → `agent-vitals-domain/tests/behavior_rules.rs`（integration test，无成环）。用私有
+  项（`FAMILY1_RULES`/`rule_specs`）或纯 `match_behavior(&[Value])` 的测试留 inline
+  （import 改 `agent_vitals_adapters::audit::match_behavior`）。moved `evidence/audit/
+  compaction/waste` 的 inline 测试（+29）跟文件迁去 adapters。
+- 守卫：删 `domain_dsh_is_the_only_registered_layer2_wire_module`，新
+  `domain_holds_no_dsh_wire_module`（`src/domain/dsh` 不存在）；
+  `domain_production_code_outside_dsh_…` → `domain_production_code_has_no_host_adapter_dependency`
+  （去掉 dsh 例外，扫全 `src/domain/`）。
+- Python：`test_host_contract.py` 的 G3 matrix + G8 dsh 路径 →
+  `crates/agent-vitals-adapters/src/hosts/dsh/sessions/evidence.rs`；`util.py`/`behavior.py`/
+  `dsh_evidence.py` docstring 同步。
+
+**门禁全绿**：cargo test（binary 313 + domain 388 lib + behavior_rules 14 + adapters 85
++ parity/host_contract/dependency_budget）、clippy -D warnings、wasm-pack 重建 +
+`dsh-client/scripts/verify-*.mjs` 7 个全过、src-tauri check、python 1145/226 skip、
+golden 15+15 逐字节。
+
+**净效果**：`domain/` 生产代码对 DSH raw 事件形状彻底不知情。arch spec「Phase D 首项」
+兑现。
 
 D1/D2 相互独立，可任意先后。D3 是 D4–D7 的前置。D4/D5 平行。D6 依赖 D3。D7 收尾。
 

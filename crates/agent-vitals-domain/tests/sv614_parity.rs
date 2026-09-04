@@ -7,7 +7,7 @@ use agent_vitals_domain::compatibility::canonical_session::{
 };
 use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
 use agent_vitals_domain::detectors::Sv614Detector;
-use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_adapters::dsh_evidence::build_dsh_evidence;
 use agent_vitals_domain::trajectory::{detect_sv614_legacy, flatten_trajectory};
 use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};

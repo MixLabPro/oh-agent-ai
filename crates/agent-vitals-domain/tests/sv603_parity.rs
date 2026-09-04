@@ -4,7 +4,7 @@ use agent_vitals_domain::behavior::{detect_sv603_legacy, flatten};
 use agent_vitals_domain::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TOOL_CALL, SIGNAL_TOOL_CALLS};
 use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
 use agent_vitals_domain::detectors::Sv603Detector;
-use agent_vitals_domain::dsh_evidence::build_dsh_evidence;
+use agent_vitals_adapters::dsh_evidence::build_dsh_evidence;
 use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};
 use vitals_core::coverage::Coverage;

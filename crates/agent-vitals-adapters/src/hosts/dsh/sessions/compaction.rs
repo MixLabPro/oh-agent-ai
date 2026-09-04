@@ -19,7 +19,7 @@
 
 use serde_json::{Value, json};
 
-use crate::coords::Coords;
+use agent_vitals_domain::coords::Coords;
 
 fn or_null(v: Option<i64>) -> Value {
     match v {
@@ -52,7 +52,7 @@ pub fn compaction_events(events: &[Value]) -> Value {
     // 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
     // branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
     // 对同一笔钱/同一批行为重复计数（见 util::fork_boundary 的实测数据）。
-    let events = &crate::util::post_fork(events)[..];
+    let events = &agent_vitals_domain::util::post_fork(events)[..];
     let mut compactions: Vec<Value> = Vec::new();
     let mut prunes: Vec<Value> = Vec::new();
     let mut pruned_total: i64 = 0;

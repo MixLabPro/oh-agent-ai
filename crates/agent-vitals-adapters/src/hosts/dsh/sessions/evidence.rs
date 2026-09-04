@@ -26,8 +26,8 @@ use serde_json::{Map, Value};
 // `Coords`（事件定位坐标顺延状态机）phase C 迁进 `domain::coords`——见那里的
 // 模块注释（住 domain 是过渡：`trajectory::coord_map`/`duration`/`skill` 还对
 // raw 事件跑它，那几个要留 domain）。adapter 侧经 `hosts → domain` 正向依赖取。
-use crate::coords::Coords;
-use crate::evidence::{
+use agent_vitals_domain::coords::Coords;
+use agent_vitals_domain::evidence::{
     ApprovalAsked, ApprovalDecided, ApprovalObservation, CanonicalSession, Coverage,
     CoverageCounts, Provenance, SandboxModeObservation, SessionMeta, Signal, SignalSet, Timeline,
     TimelineEntry, ToolCallObservation, ToolResultObservation, TurnObservation,
@@ -424,7 +424,7 @@ fn derive_coverage(execution_events: &[Value], usage_events: &[Value]) -> (Signa
     // §6/§11-M2a：这五个信号不再是本文件的字面量表，改从 core
     // `host_capability::HOSTS` 的 "dsh" 行读（行上的值就是从这里原来的五行
     // 字面量搬过去的，golden 字节不变）。
-    if let Some(profile) = crate::host_capability::host_profile("dsh") {
+    if let Some(profile) = agent_vitals_domain::host_capability::host_profile("dsh") {
         for signal in profile.unmeasured_signals.iter().copied() {
             coverage.set(signal, CoverageCounts::default());
         }

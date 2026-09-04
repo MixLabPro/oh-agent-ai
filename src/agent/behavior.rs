@@ -149,8 +149,8 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     let usage = agent_vitals_domain::usage::token_by_model(&usage_events);
     let requests_val = agent_vitals_domain::usage::request_metrics(&usage_events);
     let context = agent_vitals_domain::usage::context_composition(&usage_events);
-    let compaction = agent_vitals_domain::compaction::compaction_events(&events);
-    let waste = Value::Array(agent_vitals_domain::waste::detect_structural_waste(&events, requests_val.as_array().unwrap_or(&Vec::new())));
+    let compaction = agent_vitals_adapters::compaction::compaction_events(&events);
+    let waste = Value::Array(agent_vitals_adapters::waste::detect_structural_waste(&events, requests_val.as_array().unwrap_or(&Vec::new())));
     // 分叉前被排除掉的用量。上面每一项都只算分叉之后（post_fork），金额会因此
     // 显著变小；不把排除量说出来，读的人会以为数据坏了。没分叉时是 null。
     let pre_fork = agent_vitals_domain::usage::pre_fork_usage(&usage_events);

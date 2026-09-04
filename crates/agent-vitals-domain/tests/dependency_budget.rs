@@ -78,10 +78,10 @@ const FORBIDDEN_DEP_KEYS: &[&str] = &[
     // §3.2 禁止方向：`[dependencies]` 不许反依赖二进制 / wasm / adapter
     // （`adapters → domain` 是唯一允许的**生产**方向）。`domain → adapters`
     //  只以 `[dev-dependencies]` 存在——`domain/usage.rs::tests` 经它调
-    //  `canonical_tokens`，只换 `serde_json::Value`、不跨 crate 传 domain 类型，
-    //  成环也安全。跨边界传 `CanonicalSession` 的 fixture 测试正因成环限制
-    //  才把 `dsh_evidence`/`audit`/`compaction`/`waste` 留在 `domain/dsh/`。
-    //  `agent-vitals-core` 已删除（Phase C Step 4 收尾）——列在这里挡它复活。
+    //  `canonical_tokens`（只换 `serde_json::Value`），`tests/behavior_rules.rs`
+    //  经它调 `build_dsh_evidence` 造 `CanonicalSession` fixture（integration test，
+    //  domain 只编一遍，无成环）。`agent-vitals-core` 已删除（Phase C Step 4 收尾）
+    //  ——列在这里挡它复活。
     "agent-vitals",
     "agent-vitals-core",
     "agent-vitals-adapters",
@@ -318,14 +318,14 @@ fn source_root_is_an_explicit_facade_not_a_flat_module_dump() {
     );
 }
 
-/// Phase C Step 3：host wire 适配（`claude_code`/`codex`/`workbuddy` evidence +
-/// Codex fold + canonical 归一层）都在 `agent-vitals-adapters`，不在本 crate；
-/// DSH wire 只以登记的 `domain/dsh/` 债形式存在。
+/// 所有 host wire 适配（`claude_code`/`codex`/`workbuddy` evidence + Codex fold +
+/// canonical 归一层 + Phase D1 起的 DSH `evidence`/`audit`/`compaction`/`waste`）
+/// 都在 `agent-vitals-adapters`，不在本 crate。
 #[test]
 fn domain_crate_holds_no_host_adapter_directory() {
     assert!(
         !manifest_dir().join("src/adapters").exists(),
-        "host wire adapters belong in agent-vitals-adapters (DSH wire → the registered domain/dsh/ debt)"
+        "host wire adapters belong in agent-vitals-adapters"
     );
     assert!(
         !manifest_dir().join("src/hosts").exists(),
@@ -363,25 +363,14 @@ fn contracts_module_stays_vocabulary_only() {
     });
 }
 
-/// `domain/dsh/` 是**唯一**登记的 layer-2 DSH-wire 债（`evidence`/`audit`/
-/// `compaction`/`waste` 解析 DSH 原始事件、暂住 domain 因为 domain 测试的
-/// `build_dsh_evidence` fixture 依赖，见 `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md`
-/// §6ter）。它可以缩到空、不许长出第二个同类模块。
+/// v0.8 Phase D1：`domain/dsh/` 整个迁进 `agent-vitals-adapters/hosts/dsh/sessions/`。
+/// domain 里不再有任何 DSH-wire 解析模块——这条断言钉死它不复活。
 #[test]
-fn domain_dsh_is_the_only_registered_layer2_wire_module() {
-    let dsh = manifest_dir().join("src/domain/dsh");
-    assert!(dsh.join("mod.rs").is_file(), "domain/dsh/mod.rs 必须显式登记这条债");
-    let mut files: Vec<String> = fs::read_dir(&dsh)
-        .expect("read domain/dsh")
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    files.sort();
-    assert_eq!(
-        files,
-        vec!["audit.rs", "compaction.rs", "evidence.rs", "mod.rs", "waste.rs"],
-        "domain/dsh/ 只该有这四个 wire 模块 + mod.rs——新增即 layer-2 债扩张"
+fn domain_holds_no_dsh_wire_module() {
+    assert!(
+        !manifest_dir().join("src/domain/dsh").exists(),
+        "Phase D1: DSH wire 解析（evidence/audit/compaction/waste）已迁进 \
+         agent-vitals-adapters/hosts/dsh/sessions/——domain/dsh/ 不该再出现"
     );
 }
 
@@ -395,22 +384,16 @@ fn nested_paths_and_legacy_facade_resolve_to_the_same_items() {
         agent_vitals_domain::domain::usage::AMBIGUOUS_PROVIDER,
         agent_vitals_domain::usage::AMBIGUOUS_PROVIDER
     );
-    assert_eq!(
-        agent_vitals_domain::domain::dsh::audit::match_behavior(&[], None),
-        agent_vitals_domain::audit::match_behavior(&[], None),
-    );
 }
 
-/// `domain/` 的生产代码（`domain/dsh/` 那条登记债除外）不许引用 host 适配
-/// （`agent-vitals-adapters` / `crate::adapters` / `crate::{*_evidence, codex_usage}`）
-/// ——方向是 `adapters → domain`。`#[cfg(test)]` 里经 `[dev-dependencies]` 调
-/// `canonical_tokens`（只换 `Value`）/ `crate::dsh_evidence`（现 `domain/dsh/`）
-/// 造 fixture 是允许的。
+/// v0.8 Phase D1 起 `domain/` 的**生产**代码对任何宿主 wire 解析零依赖——DSH
+/// wire 已迁出。`#[cfg(test)]` 里经 `[dev-dependencies]` 调 `canonical_tokens`
+/// （只换 `Value`）或 `agent_vitals_adapters::dsh_evidence::build_dsh_evidence`
+/// 造 fixture（`tests/behavior_rules.rs` 是 integration test，无成环）是允许的。
 #[test]
-fn domain_production_code_outside_dsh_has_no_host_adapter_dependency() {
-    let dsh_dir = manifest_dir().join("src/domain/dsh");
+fn domain_production_code_has_no_host_adapter_dependency() {
     each_src_file(|path, content| {
-        if !path.starts_with(manifest_dir().join("src/domain")) || path.starts_with(&dsh_dir) {
+        if !path.starts_with(manifest_dir().join("src/domain")) {
             return;
         }
         let prod = strip_test_modules_and_comments(content);
@@ -425,9 +408,8 @@ fn domain_production_code_outside_dsh_has_no_host_adapter_dependency() {
         ] {
             assert!(
                 !prod.contains(needle),
-                "v0.8 Phase C: production code in {} references `{needle}` — host wire \
-                 interpretation belongs in agent-vitals-adapters or the registered \
-                 `domain/dsh/` debt module, not scattered through domain",
+                "v0.8 Phase D1: production code in {} references `{needle}` — 宿主 wire \
+                 解释归 agent-vitals-adapters，domain 只算不解析",
                 path.strip_prefix(manifest_dir()).unwrap_or(path).display()
             );
         }

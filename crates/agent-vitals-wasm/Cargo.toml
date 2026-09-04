@@ -12,6 +12,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 agent-vitals-domain = { path = "../agent-vitals-domain" }
+# Phase D1：DSH wire 解析（`audit`/`compaction`/`waste`）迁进 adapters 的
+# `hosts/dsh/sessions/`——wasm 的 `audit_events` / `compaction_events` /
+# `detect_structural_waste` 现在从这里取。adapters 是纯 crate（无 I/O），
+# 编得到 wasm32。
+agent-vitals-adapters = { path = "../agent-vitals-adapters" }
 wasm-bindgen = "0.2"
 # preserve_order 与 domain 同一理由：findings 键序必须与 CLI 逐字节一致。
 serde_json = { version = "1", features = ["preserve_order"] }

@@ -14,9 +14,9 @@
 use serde_json::Value;
 
 use super::evidence::build_dsh_evidence;
-use crate::behavior::{flatten, match_behavior_canonical};
-use crate::trajectory::{flatten_trajectory, match_trajectory_canonical};
-use crate::util::post_fork;
+use agent_vitals_domain::behavior::{flatten, match_behavior_canonical};
+use agent_vitals_domain::trajectory::{flatten_trajectory, match_trajectory_canonical};
+use agent_vitals_domain::util::post_fork;
 
 /// 事件序列 → 行为 findings（SV601–614），按码序产出。产出与旧
 /// `match_behavior` 逐字节一致（SV610 分叉除外，见 `match_behavior_canonical`）。

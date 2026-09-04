@@ -1,13 +1,15 @@
 # Agent Vitals 目录与模块边界设计
 
 > 状态：目标架构 **v3.1**（2026-09-04：宿主统一为 `agent-vitals-hosts` 单 crate +
-> feature-gated `sources/`，见 §4/§5/§6）；**Phase A/B/C 完成**——workspace 现为
-> `vitals-core` ← `agent-vitals-domain`（`contracts/` + `domain/` + `compatibility/`）
-> ← `agent-vitals-adapters` ← binary/wasm/src-tauri（§3.1 的图）。`agent-vitals-core`
-> 与中途的 `agent-vitals-contracts` 独立 crate 均已撤销；调用方直接
-> `use agent_vitals_domain::*`。执行记录见 `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md`
-> §6bis–§6quinquies。**遗留一处债**：`domain/dsh/` 仍直接解析 DSH wire，wire/fold
-> 分离是 Phase D 首项（见 Phase C / Phase D 段）。
+> feature-gated `sources/`，见 §4/§5/§6）；**Phase A/B/C 完成 + Phase D 进行中（D1 完成）**
+> ——workspace 现为 `vitals-core` ← `agent-vitals-domain`（`contracts/` + `domain/` +
+> `compatibility/`）← `agent-vitals-adapters`（含 `hosts/dsh/sessions/` 的 DSH wire）
+> ← binary/wasm/src-tauri（§3.1 的图）。`agent-vitals-core` 与中途的
+> `agent-vitals-contracts` 独立 crate 均已撤销；调用方直接 `use agent_vitals_domain::*`。
+> **D1（wire/fold 分离）已完成**：DSH wire 解析出 `domain/`，`domain/` 对宿主 wire
+> 形状彻底不知情。执行记录见 `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6bis–§6quinquies
+> 与 `AGENT_VITALS_V0_8_PHASE_D_RESEARCH.md`。剩 D2–D7（cost.rs 切分、adapters→hosts、
+> host I/O → sources/、agent-vitals-runtime、HomeResolver）。
 > 适用范围：Rust workspace、Tauri、Python 便携实现、宿主接入与测试资产  
 > 关联文档：`ARCHITECTURE.md`、`DELIVERY_ARCHITECTURE.md`、
 > `TAURI_RUNTIME_WORKBENCH_SPEC.md`、`VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md`、
@@ -1115,11 +1117,14 @@ Step 1–3 拆解：纯计算耦合（`Coords`、canonical 归一层、`match_be
 
 ### Phase D：建立 `agent-vitals-runtime` + host `sources/`
 
-- **首项 · wire/fold 分离（Phase C 遗留债）**：把 `agent-vitals-domain/src/domain/dsh/`
-  的 4 个模块（`evidence`/`audit`/`compaction`/`waste`——直接解析 DSH 原始事件）迁进
-  `hosts/dsh/sessions/`。此时 `hosts/<h>/sources/` 已落地，`sessions/` 是 wire 解析的
-  自然归属；迁走后 `domain/` 对宿主 wire 形状彻底不知情，`build_dsh_evidence` fixture
-  改由 adapters crate 的 integration test 承载（不再是 domain 的 inline 依赖）。
+- **D1 · wire/fold 分离（Phase C 遗留债）—— ✅ 完成（2026-09-04）**：
+  `agent-vitals-domain/src/domain/dsh/` 的 4 个模块（`evidence`/`audit`/`compaction`/
+  `waste`）迁进 `agent-vitals-adapters/src/hosts/dsh/sessions/`；`domain/` 对宿主 wire
+  形状彻底不知情。`build_dsh_evidence` fixture 测试迁去
+  `agent-vitals-domain/tests/behavior_rules.rs`（integration test）。`Coords` 留
+  `domain/coords.rs`（抽象字段名，host-agnostic）。wasm 加 `agent-vitals-adapters` dep +
+  重建。记录见 `AGENT_VITALS_V0_8_PHASE_D_RESEARCH.md` §D1。此时尚无 `sources/`——
+  D1 不需要它，只是纯模块迁移；D3 之后 `hosts/dsh/sessions/` 与 `sources/` 同目录相邻。
 - **host I/O 落 `hosts/<h>/sources/`**（v3.1）：`src/dsh.rs`（zstd）、
   `src/agent/workbuddy_session.rs`（sqlite）、`src/agent/*session*.rs`（readers）、
   `src/agent/discovery.rs` 迁进对应宿主的 `sources/`，`agent-vitals-hosts` 加

@@ -38,11 +38,12 @@ crates/vitals-core/         # 宿主无关的通用审计机制（Event→Trajec
 crates/agent-vitals-domain/ # v0.8 Phase C：PURE computation + 词表契约，single source of truth。
                             #   src/{contracts,domain,compatibility}/ + lib.rs。contracts/=宿主无关词表
                             #   （evidence/host_capability/source_identity/usage_fact/r2a，只碰 serde_json）；
-                            #   domain/=跨宿主计算；domain/dsh/=登记的 layer-2 DSH-wire 债（build_dsh_evidence
-                            #   fixture 依赖）；compatibility/=vitals-core 桥。lib.rs 暴露嵌套 + 扁平两套路径。
+                            #   domain/=跨宿主计算（Phase D1 起对任何宿主 wire 事件形状不知情）；
+                            #   compatibility/=vitals-core 桥。lib.rs 暴露嵌套 + 扁平两套路径。
 crates/agent-vitals-adapters/ # v0.8 Phase B1：叶子 host 证据适配（claude_code/codex/workbuddy evidence）迁出 core 的纯 crate。
-                            #   Phase C(B2)：Codex usage fold（codex_usage）+ 跨宿主 canonical_usage 归一层也迁进来。依赖 domain。
-crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain (audit_events), built with wasm-pack
+                            #   Phase C(B2)：Codex usage fold（codex_usage）+ 跨宿主 canonical_usage 归一层。
+                            #   Phase D1：DSH wire 解析（hosts/dsh/sessions/{evidence,audit,compaction,waste}）也迁进来。依赖 domain。
+crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + adapters (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/
 scripts/agent_vitals/       # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
                             #   adapters/（宿主适配器）与 cli/compat/util/paths 留顶层
@@ -95,25 +96,24 @@ helpers (`Coords`, `match_behavior`/`match_trajectory` shims, `compaction`/`wast
   (`agent_vitals_domain::{contracts,domain}::X`) and flat
   (`agent_vitals_domain::{evidence,behavior,cost,…}::X`) paths.
 - **`agent-vitals-adapters`** — host wire adapters (Claude/Codex/WorkBuddy evidence, Codex
-  fold, `canonical_usage`). Depends on `agent-vitals-domain`.
+  fold, `canonical_usage`, and — since **v0.8 Phase D1** — DSH session wire
+  `hosts/dsh/sessions/{evidence,audit,compaction,waste}`). Depends on `agent-vitals-domain`.
 
 `agent-vitals-core` was a one-cycle re-export facade during Step 4 and was removed at
 Step 4's close — the binary / wasm / adapters / `src-tauri` import `agent_vitals_domain::*`
 directly.
 
-**`domain/` is not yet fully wire-pure.** `domain/dsh/` (`evidence`/`audit`/`compaction`/
-`waste`) still reads DSH raw event shapes directly — it stayed in domain only because
-`domain/*.rs` tests build `CanonicalSession` fixtures via `build_dsh_evidence`, and a
-`domain → adapters` dev-dep cycle can't satisfy that (`multiple versions of crate` for any
-inline test passing a domain type across the boundary). This is **registered debt, not a
-finished state**: moving DSH wire interpretation out of domain into the adapters/hosts
-sessions layer (the wire/fold separation) is **the first item of Phase D**, when
-`hosts/<h>/sources/` lands and `sessions/` becomes the natural home for wire parsing. Until
-then the debt is *pinned* (never grows) by `agent-vitals-domain/tests/dependency_budget.rs`
-(`domain_dsh_is_the_only_registered_layer2_wire_module` +
-`domain_production_code_outside_dsh_has_no_host_adapter_dependency`) — the rest of
-`domain/` outside `domain/dsh/` takes no host wire. Other module boundaries — `contracts/`
-stays serde_json-only (`contracts_module_stays_vocabulary_only`), domain takes no
+**Phase D1 (wire/fold separation) moved DSH wire parsing out of `domain/`.** The
+`evidence`/`audit`/`compaction`/`waste` modules (which read DSH raw event shapes like
+`"tool/call"`) now live in `agent-vitals-adapters/src/hosts/dsh/sessions/`;
+`domain/` no longer knows any host wire format. The `build_dsh_evidence` fixture tests
+that could not survive the `domain → adapters` dev-dep cycle as inline tests moved to
+`agent-vitals-domain/tests/behavior_rules.rs` (an integration test — domain is compiled
+once there). `domain/coords.rs` (`Coords` — abstract `turn`/`step`/`call_id` field names,
+host-agnostic) stays in domain. `agent-vitals-domain/tests/dependency_budget.rs`
+(`domain_holds_no_dsh_wire_module` + `domain_production_code_has_no_host_adapter_dependency`)
+pins that domain never regrows a wire module. Other module boundaries — `contracts/` stays
+serde_json-only (`contracts_module_stays_vocabulary_only`), domain takes no
 fs/process/env/clock, adapters is one-way (`adapters → domain`) — are executable in each
 crate's `tests/dependency_budget.rs`.
 
