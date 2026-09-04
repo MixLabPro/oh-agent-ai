@@ -14,31 +14,72 @@
 
 ---
 
-## 0. 结论（TL;DR）
+## 0. 结论（TL;DR，2026-09-04 二轮修正）
 
-**Phase C 的阻塞性工作量远小于 arch spec 的估计。** 真实的 `domain → host` 生产耦合
-是 **6 个点、约 370 行**，分 3 组，每组都是「移动 + 改 import」级别，不是「重写折叠」：
+**耦合分两层，只有第一层阻塞 crate 抽出：**
 
-| 组 | 耦合点 | 迁往 | 行数 | 风险 |
-|---|---|---|---|---|
-| **C1** | `Coords`（struct+impl）、`tool_invocation`（fn）——`domain/{compaction,trajectory,waste}` 用 | `contracts/`（共享时间线/事件原语，本就不是 DSH wire） | ~100 | 极低 |
-| **C2** | `match_behavior` / `match_trajectory` 两个 raw-events shim（`domain/{behavior,trajectory}`，唯一调用方是 **wasm**）| `agent-vitals-adapters/hosts/dsh/sessions/audit.rs` | ~30 | 低（需重建 wasm + 重拷 `dsh-client/`） |
-| **C3** | canonical 归一层（`canonical_tokens` / `canonical_total_delta` / `CANONICAL_DIMS` / `SHAPE_*`，`domain/usage.rs:1523–1795`）——调 `codex_fold_file` / `total_signature`。**生产代码零调用点**，只有 `test_canonical_cost.py` + `usage.rs` 的 `#[cfg(test)]` 用 | `agent-vitals-adapters`（多宿主 wire 归一，天然 adapter territory），parity 测试一起搬 | ~272 + 测试 | 低（无生产消费方） |
+### 层 1 —— import 耦合（阻塞，6 个点）
 
-做完 C1–C3，`domain/*.rs` 对 `crate::{dsh_evidence, codex_usage, adapters::hosts}` 的
-**生产引用归零**。此后：
+`domain/*.rs` 里 `crate::{dsh_evidence, codex_usage}` 的**符号 import**——crate 拆分后
+`agent-vitals-domain` 依赖不到宿主 crate，这 6 处编译失败。
 
-- **B2**（arch Phase B 遗留）：`dsh_evidence` + `codex_usage`（core 里的两条 residual）
-  物理迁进 `agent-vitals-adapters`，撤掉 core lib.rs 的两条 re-export。
-- **抽 `agent-vitals-domain` crate**：`domain/` 整体成 crate，`agent-vitals-core`
-  退成 `contracts/` + `compatibility/`（或并入）。
+| 点 | 用的东西 | 本质 |
+|---|---|---|
+| `compaction.rs:22,60` | `Coords` | **DSH 原始事件**坐标状态机（`observe` match `"turn/start"`…）|
+| `trajectory.rs:126` | `Coords` | 同上（在 `match_trajectory` raw shim 里）|
+| `trajectory.rs:148` | `build_dsh_evidence` | raw shim（唯一调用方 wasm）|
+| `behavior.rs:725` | `build_dsh_evidence` | raw shim（唯一调用方 wasm）|
+| `waste.rs:25,78` | `tool_invocation` | **DSH 原始事件** → `(name, args)`（match `TOOL_CALL_TYPES` = `"tool/call"`…）|
+| `usage.rs:1678,1734,1739` | `codex_fold_file` / `total_signature` | canonical 归一层（**生产零调用点**，只测试用）|
 
-**`cost.rs` 99KB 拆 Model Resolver / Rate Card / BillingContext / Cost Projection
-不在 Phase C 阻塞路径上**——`cost.rs` 零 host import（只 `serde_json`），是 domain
-**内部**重构，可在 crate 抽出后单独迭代（建议与 Phase D 的 Billing/User Profile
-工作合并）。`usage.rs` 里 `token_by_model`/`request_metrics`/`hour_buckets`/
-`token_by_date_model` 的「DSH wire 解析混在 domain」也是同类——命名不纯但零跨 crate
-耦合，可 as-is 进 `agent-vitals-domain`，wire/fold 分离另开。
+**二轮修正**：一轮误判 `Coords`/`tool_invocation` 是「共享时间线原语、非 DSH wire」——
+错。它们 match DSH 原始事件类型字符串（`"turn/start"`/`"tool/call"`），是 **DSH wire
+helper**，**不能进 `contracts/`**。用它们的 `domain/{compaction,trajectory,waste}`
+函数本身也在解析 DSH raw 事件（见层 2）。
+
+### 层 2 —— wire-shape 耦合（不阻塞，但是真正的架构债）
+
+`domain/{usage,duration,compaction,subagent,skill,waste}.rs` + `behavior/trajectory`
+的 raw 入口**直接 match DSH 原始事件类型**（`grep` 实证）：
+
+```
+usage.rs      "assistant/chunk" "assistant/message" "request/context" "request/header" "turn/start"
+duration.rs   "approval/asked" "approval/decided" "step/start" "step/end" "tool/call" "tool/result" "turn/start" "turn/end"
+compaction.rs "tool/call" "turn/start" "turn/end"
+subagent.rs   "session" "tool/call" "tool/result"
+skill.rs      "session" "tool/call" "tool/result" "turn/start" "turn/end"
+```
+
+wasm `lib.rs` 调的 **15 个** domain 函数几乎全在这一层（`token_by_model` /
+`hour_buckets` / `request_metrics` / `tool_call_durations` / `compaction_events` /
+`subagent_spawns` / `skill_invocations` / `detect_structural_waste` / …）。
+
+**这些函数没有 `crate::dsh_evidence` import**（inline 解析），所以**编译进
+`agent-vitals-domain` 不报错**，只是「名义 domain、实为 DSH session adapter」。
+
+### 两个执行选项
+
+| | **C-minimal（推荐）** | **C-full** |
+|---|---|---|
+| 范围 | 只解层 1 的 6 个点 + 抽 crate | 层 1 + 把层 2 的 DSH-wire 函数全迁进 `agent-vitals-hosts/dsh/sessions/` |
+| `Coords`/`tool_invocation` | 跟着用它们的 raw 函数（`compaction_events`/`detect_structural_waste`/`match_*` shim）一起迁进 dsh adapter；domain 只留 canonical 入口 | 同左，但 usage/duration/subagent/skill 也一起迁 |
+| wasm 改动 | 4~5 个函数改 import 到 `agent_vitals_hosts::dsh::…` | 15 个函数全改 |
+| 行数 | ~500（含 waste/compaction 的 helper）| ~2500 |
+| golden/parity | 零漂移（CLI `behavior` 走 canonical 不变；wasm 重建重拷）| 零漂移，但面大、验收轮次多 |
+| 结果 | `agent-vitals-domain` 抽出，`usage/duration/subagent/skill` 的 DSH-wire 解析**仍在 domain**（记为债，wire/fold 分离另开）| domain 真纯净——`agent-vitals-domain` 只吃 `CanonicalSession`/`CanonicalEvent`/`{by_model,sequence}` |
+
+**推荐 C-minimal**：与「每个 Phase 做一件事」纪律一致。层 2 的完整 wire/fold 分离
+是独立迭代（arch §Phase C「不在 Phase C」条 + arch §11「`usage.rs` 拆」），建议排在
+Phase D（Runtime + host `sources/`）**之后**——那时 `hosts/dsh/sources/` 已落地，
+`sessions/` 收 wire 解析顺理成章。
+
+### C-minimal 做完后
+
+- **B2**：`dsh_evidence` + `codex_usage` residual 物理迁进 `agent-vitals-hosts`，撤 core
+  lib.rs 两条 re-export。
+- **抽 `agent-vitals-domain` crate**：`domain/` 整体成 crate（含层 2 债），
+  `agent-vitals-core` 退成 `contracts/` + `compatibility/` 薄 crate。
+- `cost.rs` 99KB 拆分（零 host import）→ 并入 Phase D。
 
 ---
 
@@ -72,46 +113,106 @@ domain/waste.rs:25       [PROD]  use crate::dsh_evidence::tool_invocation
 
 ---
 
-## 2. C1 —— `Coords` + `tool_invocation` → `contracts/`
+## 2. C-minimal 执行（推荐）
 
-### 2.1 现状
+**一句话**：把 `domain/` 里 `use crate::{dsh_evidence,codex_usage}` 的那几个函数
+——它们本来就在解析 DSH 原始事件——迁进 `agent-vitals-hosts/dsh/sessions/`，
+`domain/` 只留吃 `CanonicalSession`/`CanonicalEvent` 的纯入口。`Coords` /
+`tool_invocation` 跟着一起走（它们是 DSH wire helper，不进 `contracts/`）。
 
-`crates/agent-vitals-core/src/adapters/hosts/dsh/sessions/evidence.rs`：
-- `pub(crate) fn tool_invocation(event: &Value) -> Option<(&str, String)>`（:82–98，~17 行）
-- `pub(crate) struct Coords { … }` + `impl Coords`（:121–205，~85 行）
+### 2.1 Step 1 —— DSH raw-events 审计函数 → `hosts/dsh/sessions/audit.rs`
 
-两者都是「时间线坐标 / 事件 tool-call 形状」的**共享原语**，被两侧用：
-- DSH 适配器的 `populate_timelines`（给每条 timeline entry 解坐标）
-- domain 检测器：`compaction.rs`（prune 坐标）、`trajectory.rs`（`Coords::default()` 顺延）、`waste.rs`（`tool_invocation` 取 `(name, args)`）
+迁移这几个（都在解析 DSH wire、都被 wasm 调、`domain` 里 import 了 dsh_evidence）：
 
-它们放在 `dsh_evidence.rs` 是历史位置（DSH 是第一个宿主），**不是** DSH wire 语义。
-`Coords::resolve` 出的坐标已由 differential/goldens 逐字节钉死。
+| 函数 | 现位置 | wasm 调 | 二进制调 |
+|---|---|---|---|
+| `match_behavior(events, ws)` | `domain/behavior.rs:720` | ✅ | ❌（走 canonical）|
+| `match_trajectory(events)` | `domain/trajectory.rs:144` | ✅ | ❌ |
+| `compaction_events(events)` | `domain/compaction.rs:51` | ✅ | ✅ `src/agent/behavior.rs` |
+| `detect_structural_waste(events, reqs)` + `detect_duplicate_tool_results` + `detect_failure_run_waste` + `extract_target` | `domain/waste.rs` | ✅ | ✅ |
 
-### 2.2 迁移
+`Coords`（struct+impl，dsh evidence :121–205）、`tool_invocation`（:82–98）、
+`TOOL_CALL_TYPES`、`args_text` —— **留在 `hosts/dsh/sessions/`**（本就在那），
+迁进来的 4 个函数直接 `use super::evidence::{Coords, tool_invocation}` 或同 crate 路径。
 
-1. 新增 `contracts/coords.rs`（`Coords` struct + impl）+ `contracts/event_shape.rs`
-   （`tool_invocation`；或并入现有 `contracts/evidence.rs`——按 review 口味定）。
-2. `contracts/mod.rs` 导出；`agent_vitals_core::contracts::{coords::Coords,
-   event_shape::tool_invocation}`。
-3. `dsh/sessions/evidence.rs`：`use crate::contracts::coords::Coords` 等，删本地定义。
-4. `domain/{compaction,trajectory,waste}.rs`：`crate::dsh_evidence::X` →
-   `crate::contracts::…::X`（或经 lib.rs 的 `pub use` 保旧路径，过渡期不动 domain）。
-5. lib.rs：加 `pub use contracts::coords::Coords;` 等兼容 re-export（`crate::Coords`
-   老路径若有别处用）。
+`domain/` 保留：`match_behavior_canonical` / `match_trajectory_canonical`（吃
+`&CanonicalSession`，二进制走这条）、`detectors/sv6*`（吃 `CanonicalEvent`）、
+`behavior.rs` 的 `flatten`/`rule_outcomes_json`/`behavior_gate`/`waste_coverage` 等
+纯投影。
 
-### 2.3 验收
+**wasm `lib.rs`**：`agent_vitals_core::{behavior::match_behavior, trajectory::
+match_trajectory, compaction::compaction_events, waste::detect_structural_waste}`
+→ `agent_vitals_hosts::dsh::sessions::audit::*`（4 处）。wasm 加
+`agent-vitals-hosts` 依赖（arch §3.1 的 `wasm ─► hosts` 未来边，带真实调用点落地；
+`default-features = false` 只拿纯子树）。
 
-- `cargo test` / `cargo clippy` 全绿——纯类型/函数移动，无行为改动。
-- golden 15+15 零漂移（`Coords` 喂的 timeline 坐标已 golden-pinned）。
-- Python↔Rust parity 不受影响（Python 侧 `Coords` 等价物在 `dsh_evidence.py`，
-  同步移到 Python 的 contracts 层——见 §5 Python 镜像）。
-- **风险：极低**。这是 Phase C 里最安全的一步，**先做**。
+**测试**：`domain/{behavior,waste,compaction}.rs` 里用 `build_dsh_evidence` /
+raw events 的 `#[cfg(test)]` 跟着函数搬去 `agent-vitals-hosts/tests/`（§4 决策点）。
+
+**验收**：`cargo test`/`clippy` 全绿；wasm-pack 重建 + 重拷 `dsh-client/` +
+`scripts/verify-timeline.mjs` / dsh-client 差分；golden 15+15 零漂移（CLI `behavior`
+走 canonical，不受影响）；Python parity（Python 侧只改 `test_classification.py`
+family 归类，函数不搬——§3）。**风险：低**，主要是别忘重建 wasm。
+
+### 2.2 Step 2 —— canonical 归一层 → `agent-vitals-hosts/canonical_usage.rs`
+
+`domain/usage.rs:1523–1795` 的 `canonical_tokens`/`canonical_total_delta`/
+`CANONICAL_DIMS`/`SHAPE_*` —— **生产零调用点**（代码自注 :1529 + 穷举 grep，
+Rust/Python 都只测试用，为未做的「#6 事件桥」预留）。搬去 `agent-vitals-hosts`
+crate 根级（跨宿主 wire 归一，不属单个 `hosts/<h>/`）：
+
+1. 搬 `canonical_tokens`/`canonical_total_delta`/`CANONICAL_DIMS`/`SHAPE_*` +
+   `#[cfg(test)]`。Codex 分支 `use agent_vitals_core::codex_usage`（B2 前）/
+   本 crate `hosts::codex::sessions::usage`（B2 后）；DSH 分支调
+   `agent_vitals_core::domain::usage::token_by_model`（hosts → domain 正向 OK）。
+2. `SOURCE_*` 常量：`token_by_date_model(events, source)` 的 `source` 参数用
+   `SOURCE_DSH_LIVE`/`SOURCE_CODEX`/`SOURCE_CLI`——查一下归属，留 `contracts/` 或
+   `domain/usage.rs`（它们只是标签字符串，非 wire）。
+3. `test_canonical_cost.py` + Rust `canonical_tokens_python_rust_byte_for_byte_parity`
+   跟着搬。`test_classification.py` / clawhub allow-list 登记 `canonical_usage`。
+
+**验收**：`cargo test`/`clippy`/Python `unittest` 全绿；golden 零漂移（无生产消费方）；
+`test_canonical_cost.py` parity 在新位置继续绿。**风险：低**。
+
+### 2.3 至此
+
+`domain/*.rs` 生产代码对 `crate::{dsh_evidence, codex_usage}` **引用归零**（层 1 清）。
+`domain/{usage,duration,subagent,skill}.rs` 里的 DSH-wire **inline 解析**仍在
+（层 2，不阻塞——见 §0），记为债，wire/fold 分离排 Phase D 之后。
+
+### 2.4 Step 3 —— B2：residual 物理迁移
+
+`agent-vitals-core` 的两条 residual（`adapters/hosts/codex/sessions/usage.rs` 1547 行、
+`adapters/hosts/dsh/sessions/evidence.rs` 684 行）迁进 `agent-vitals-hosts`：
+
+1. core `lib.rs` 撤 `pub use adapters::hosts::codex::sessions::usage as codex_usage;`
+   与 `... dsh::sessions::evidence as dsh_evidence;`；core `adapters/` 模块清空/删。
+2. `agent-vitals-hosts/src/hosts/{codex,dsh}/sessions/` 收下真文件（现在是 re-export）。
+3. `residual_host_adapter_directories_are_explicit_phase_c_debt` → `assert_eq!(actual,
+   Vec::<String>::new())` 或删测（core 不再有 `adapters/hosts/`）。
+4. 二进制 `src/agent/*.rs` 的 `agent_vitals_core::{codex_usage,dsh_evidence}` →
+   `agent_vitals_hosts::…`（Phase B1 起二进制已 import `agent_vitals_adapters`，改名即可）。
+5. `test_classification.py` / clawhub / host_contract 路径登记同步。
+
+**验收**：全量门禁 + Python/Rust parity 零漂移。**风险：中**（文件大、面广，但机械）。
+
+### 2.5 Step 4 —— 抽 `agent-vitals-domain` crate
+
+1. `agent-vitals-core/src/domain/` 整体成 `crates/agent-vitals-domain/src/`。
+2. `agent-vitals-core` 退成 `contracts/` + `compatibility/` 薄 crate（arch §0）。
+3. `agent-vitals-hosts` / `agent-vitals-wasm` / 二进制的
+   `agent_vitals_core::domain::X` → `agent_vitals_domain::X`（或 core 顶层留一个
+   版本周期的 `pub use` facade 过渡）。
+4. `dependency_budget.rs` 拆 domain 版（禁 host/runtime/IO 依赖、禁反依赖 hosts）+
+   更新 hosts 版。
+5. `contracts` 依赖方向：`domain → contracts`、`hosts → {domain, contracts}`、
+   `wasm → {domain, hosts(default-features=false)}`。
+
+**验收**：全量 golden/parity/clippy 零漂移。**风险：中**（机械但面大，import 路径海量）。
 
 ---
 
-## 3. C2 —— `match_behavior` / `match_trajectory` raw shim → dsh adapter
-
-### 3.1 现状
+## 3. 附：Step 1 实现细节（执行时照搬）
 
 `domain/behavior.rs::match_behavior(events, workspace_root)` 与
 `domain/trajectory.rs::match_trajectory(events)` 是「raw DSH events → findings」的
@@ -183,7 +284,7 @@ crate 拆分后 `agent-vitals-domain` 的单测**不能**调 `agent_vitals_adapt
 
 ---
 
-## 4. C3 —— canonical 归一层 → `agent-vitals-adapters`
+## 4. 附：Step 2 实现细节（canonical 归一层）
 
 ### 4.1 现状
 
@@ -231,74 +332,85 @@ canonical 桶` 白名单，然后求和 + 守卫。这是 **adapter 的活**，�
 Rust 侧每动一处，Python 侧对应动，`AGENT_VITALS_BIN` 差分 + `test_cli_matrix.py`
 `both()` 看守：
 
-| Rust | Python 对应 | Phase C 动作 |
+**关键**：Python 包 **不跟着拆 crate**（feasibility review §3.3 已拍，Phase A–D 不改
+Python 分层）。Rust 侧每个 Step 动一处，Python 侧对应：
+
+| Rust Step | Python 对应 | Python 动作 |
 |---|---|---|
-| `contracts/coords.rs`、`contracts/event_shape.rs` | `scripts/agent_vitals/` 里 `Coords` 等价物（现在 `agent/dsh_evidence.py` 内）| C1：抽到 Python 的 contracts 层（或顶层共享模块，同 `source_identity.py` 的先例）|
-| `agent-vitals-adapters/hosts/dsh/sessions/audit.rs` | `agent/behavior.py` / `agent/trajectory.py` 的 raw 入口 | C2：Python 侧 raw 入口归属跟 Rust——但 Python 无 crate 边界，**保持文件不动、只更 `test_classification.py` family 归类**（§3.3 的 Python 侧就是「登记」不是「搬 crate」）|
-| `agent-vitals-adapters/canonical_usage.rs` | `agent/usage.py:1340/1377` 的 `canonical_*` | C3：Python 侧同样只登记归类，函数留 `usage.py`（Python 不拆 crate，B1 review §3.3 已定 Phase A–D 不改 Python 分层）|
+| Step 1：raw 审计函数 + `Coords`/`tool_invocation` 归 `hosts/dsh/sessions/` | `agent/{behavior,trajectory,waste,compaction}.py` 的 raw 入口 + `dsh_evidence.py` 的 Coords 等价物 | **文件不动**，只改 `test_classification.py` 的 family 归类（这些模块从 domain-family 归到 dsh-adapter-family）+ clawhub allow-list |
+| Step 2：canonical 归一层 | `agent/usage.py` 的 `canonical_tokens`/`canonical_total_delta`/`canonical_from_*` | 同上，只登记归类 |
+| Step 3：B2 residual | `agent/codex_usage.py`、`agent/dsh_evidence.py` | 已在对应 family，无动作（或路径注释同步）|
+| Step 4：抽 domain crate | — | Python 无 crate 边界，无动作 |
 
-**关键**：Python 包 **不跟着拆 crate**（feasibility review §3.3 已拍）。Phase C 的
-Python 工作 = ①C1 的 `Coords`/`tool_invocation` 下沉成共享模块（真实代码移动，因为
-`compaction.py`/`waste.py` 要 import 它）②C2/C3 只改 `test_classification.py` 的
-family set 归类 + clawhub allow-list，函数不搬文件。
-
----
-
-## 6. 建议执行顺序（每步独立提交、golden 绿）
-
-```
-C1  Coords + tool_invocation → contracts/（Rust + Python 共享模块）        [极低风险，先做]
-     └─ gate: cargo test/clippy + golden 15+15 + parity
-
-C2  match_behavior/match_trajectory raw shim → adapters/hosts/dsh/audit    [低风险 + wasm 重建]
-     ├─ 行为测试按 §3.3(c) 搬去 adapters/tests
-     ├─ wasm lib.rs 改道 + Cargo.toml 加 adapters dep
-     └─ gate: 上述 + wasm-pack build + 重拷 dsh-client/ + dsh-client 差分
-
-C3  canonical 归一层 → adapters/canonical_usage.rs                         [低风险，无生产消费方]
-     ├─ test_canonical_cost.py + Rust parity 测试跟随
-     └─ gate: cargo test + Python unittest + parity
-
-── 至此 domain/*.rs 生产代码零 host 引用 ──
-
-B2  dsh_evidence + codex_usage residual 物理迁进 agent-vitals-adapters     [中风险，文件大]
-     ├─ core lib.rs 撤 2 条 re-export；adapters lib.rs 改直接 mod
-     ├─ residual_host_adapter_directories_are_explicit_phase_c_debt → assert_eq!([]，或删测
-     ├─ codex/sessions/usage.rs (1547 行) + dsh/sessions/evidence.rs (684 行) 搬
-     └─ gate: 全量 + 二进制/wasm import 路径更新 + Python 登记
-
-抽 agent-vitals-domain crate                                              [中风险，机械但面大]
-     ├─ domain/ 整体成 crate；agent-vitals-core 退成 contracts + compatibility（或合并进新 crate + 顶层留 facade）
-     ├─ 二进制/wasm/adapters 的 agent_vitals_core::domain::X → agent_vitals_domain::X（或经 core facade 过渡）
-     ├─ dependency_budget.rs 拆成 domain 版 + 更新 adapters 版
-     └─ gate: 全量 golden/parity/clippy 零漂移
-```
-
-**`cost.rs` 拆分 / `usage.rs` wire-fold 分离** = 独立迭代，建议并入 Phase D
-（Model Catalog / BillingContext / User Profile 一起做，那时 `cost.rs` 的
-Rate Card / Billing Route 拆分才有真实需求驱动）。
+差分守卫：`AGENT_VITALS_BIN` + `test_cli_matrix.py::both()` 每 Step 逐字节比较；
+`test_classification.py` 的 family set 改动本身是受测的（改错即红）。
 
 ---
 
-## 7. Phase C 明确不做
+## 6. 建议执行顺序（C-minimal，每步独立提交、golden 绿）
 
-- 不拆 `cost.rs`（零 host 耦合，domain 内部重构，非阻塞）。
-- 不把 `token_by_model`/`request_metrics`/`hour_buckets`/`token_by_date_model` 的
-  「DSH wire 解析」从 domain 剥出——命名不纯但零跨 crate 耦合，as-is 进
-  `agent-vitals-domain`，wire/fold 分离另开。
+```
+Step 1  DSH raw-events 审计函数 → hosts/dsh/sessions/audit.rs               [低 + wasm 重建]
+        match_behavior · match_trajectory · compaction_events ·
+        detect_structural_waste(+helpers) 迁出 domain；Coords/tool_invocation 留 dsh
+        ├─ 对应 #[cfg(test)] 跟着搬 hosts/tests
+        ├─ wasm lib.rs 4 处改道 agent_vitals_hosts::dsh::sessions::audit::*
+        │  + wasm Cargo.toml 加 agent-vitals-hosts { default-features=false }
+        └─ gate: cargo test/clippy + wasm-pack build + 重拷 dsh-client/ + 差分 + golden 15+15
+
+Step 2  canonical 归一层 → hosts/canonical_usage.rs                          [低，无生产消费方]
+        canonical_tokens · canonical_total_delta · CANONICAL_DIMS · SHAPE_*
+        ├─ test_canonical_cost.py + Rust parity 测试跟随
+        └─ gate: cargo test + Python unittest + parity
+
+── 至此 domain/*.rs 生产代码对 crate::{dsh_evidence,codex_usage} 引用归零 ──
+
+Step 3  B2：residual 物理迁移                                                [中，文件大]
+        codex/sessions/usage.rs (1547) + dsh/sessions/evidence.rs (684) 迁进 hosts
+        ├─ core lib.rs 撤 2 条 re-export；core adapters/ 清空
+        ├─ residual_host_adapter_directories_… → assert_eq!([]) 或删测
+        ├─ 二进制 agent_vitals_core::{codex_usage,dsh_evidence} → agent_vitals_hosts::…
+        └─ gate: 全量 + Python/Rust parity 零漂移
+
+Step 4  抽 agent-vitals-domain crate                                        [中，机械但面大]
+        domain/ 整体成 crate；agent-vitals-core 退成 contracts + compatibility 薄 crate
+        ├─ agent_vitals_core::domain::X → agent_vitals_domain::X（或 core 留过渡 facade）
+        ├─ dependency_budget.rs 拆 domain 版 + 更新 hosts 版
+        └─ gate: 全量 golden/parity/clippy 零漂移
+```
+
+**不在 C-minimal（各自独立迭代）**：
+- **层 2 wire/fold 分离**（`usage/duration/subagent/skill` 的 DSH-wire inline 解析
+  迁进 `hosts/dsh/sessions/`）——建议排 Phase D 之后（`hosts/dsh/sources/` 已落地时）。
+- **`cost.rs` 99KB 拆** Model Resolver/Rate Card/BillingContext/Cost Projection——
+  零 host import，并入 Phase D（有 Model Catalog/User Profile 需求驱动时）。
+
+---
+
+## 7. Phase C（C-minimal）明确不做
+
+- 不拆 `cost.rs`（零 host import，domain 内部重构，并入 Phase D）。
+- 不迁 `usage/duration/subagent/skill` 的 DSH-wire inline 解析（层 2，不阻塞 crate
+  抽出；wire/fold 分离排 Phase D 之后）。
+- `Coords`/`tool_invocation` **不进 `contracts/`**（它们 match DSH 原始事件类型，
+  是 DSH wire helper）——留 `hosts/dsh/sessions/`，跟迁进来的 raw 函数同 crate。
 - 不接 Runtime（Phase D）、不动 Python crate 分层、不碰 MCP。
-- 不改任何折叠语义 / `fact_id` / resume 契约 / 计价数学——Phase C 是**搬家**，
-  一行行为逻辑都不改；任一 golden/parity/reconcile 变红即停。
+- 不改任何折叠语义 / `fact_id` / resume 契约 / 计价数学——是**搬家**，一行行为
+  逻辑都不改；任一 golden/parity/reconcile 变红即停。
 
 ---
 
 ## 8. 待确认（执行前）
 
-1. C1 的 `Coords`/`tool_invocation` 落 `contracts/coords.rs`+`event_shape.rs` 两个新
-   文件，还是并进 `contracts/evidence.rs`？（倾向两个新文件，`evidence.rs` 已 769 行）
-2. §3.3 的 `agent-vitals-core` 测试依赖：选 (c) 测试搬去 adapters —— 确认？
-3. 抽 `agent-vitals-domain` 时 `agent-vitals-core` 的最终形态：
-   (a) 退成 `contracts` + `compatibility` 两模块的薄 crate；
-   (b) 干脆改名/合并，顶层留 `pub use` facade 一个版本周期。
-   （倾向 (a)，与 arch spec §0「拆完前保留 crate 名」一致）
-4. Phase C 用独立分支 `codex/v0.8-phase-c`（同 A/B 惯例），Codex 执行、本会话审阅/验收/合并 —— 确认？
+1. **C-minimal vs C-full**（§0）：推荐 C-minimal（只解 6 个 import + 抽 crate，层 2
+   DSH-wire 债留 domain），确认？
+2. Step 1 的 `#[cfg(test)]`（`domain/{behavior,waste,compaction}.rs` 里用
+   `build_dsh_evidence`/raw events 的）跟函数搬去 `agent-vitals-hosts/tests/`，
+   domain 只留 canonical 测试——确认？
+3. 抽 `agent-vitals-domain` 时 `agent-vitals-core` 最终形态：
+   (a) 退成 `contracts` + `compatibility` 薄 crate（推荐，arch §0）；
+   (b) core 留一个版本周期的 `pub use` facade 过渡。
+4. 执行方式：独立分支 `codex/v0.8-phase-c`（同 A/B 惯例，Codex 执行、本会话审阅/
+   验收/合并），还是本会话直接在 `docs/…` 分支逐 Step 做？
+5. crate 名：`agent-vitals-adapters` → `agent-vitals-hosts`（arch v3.1）在 Step 3
+   一起改，还是留旧名到 Phase D？（倾向 Step 3 一起改，一次到位）
