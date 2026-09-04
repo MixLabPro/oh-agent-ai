@@ -12,6 +12,7 @@ pub mod cost;
 pub mod detectors;
 pub mod duration;
 pub mod findings;
+pub mod mcp;
 pub mod plan;
 pub mod skill;
 pub mod state;

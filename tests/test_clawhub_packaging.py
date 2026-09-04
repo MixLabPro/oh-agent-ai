@@ -48,6 +48,7 @@ ALLOWED_PACKAGE_FILES = {
         "agent/dsh_usage_fact.py",
         "agent/duration.py",
         "agent/host_capability.py",
+        "agent/mcp.py",
         "agent/plan.py", "agent/r2a.py", "agent/skill.py", "agent/state.py",
         "agent/subagent.py",
         "agent/takeover.py",
