@@ -45,3 +45,11 @@ lib/
 
 # Claude Code 会话 scratch（RESUME.md + worktrees 是嵌套 .git 的工作区副本）
 .claude/
+
+# 本机 Agent 工具/skill 管理器的缓存与产物，与本仓库内容无关：
+# .agents/ 是另一套 skill 生态自己的本地缓存目录，skills-lock.json 是它的
+# lockfile，docs/WORKBENCH_TAB_EMPTY_KPI_REPORT.md 是本地分析产物而非设计文档
+# —— 三者曾在 D4（commit 6e1e130）被误提交，此后一律排除。
+.agents/
+/skills-lock.json
+/docs/WORKBENCH_TAB_EMPTY_KPI_REPORT.md
