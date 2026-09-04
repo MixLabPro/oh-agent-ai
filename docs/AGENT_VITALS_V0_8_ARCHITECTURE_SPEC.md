@@ -1,6 +1,8 @@
 # Agent Vitals 目录与模块边界设计
 
-> 状态：目标架构 v3，已拍板；Phase A 完成，Phase B1 已实施（2026-09-04）
+> 状态：目标架构 **v3.1**（2026-09-04：宿主统一为 `agent-vitals-hosts` 单 crate +
+> feature-gated `sources/`，见 §4/§5/§6）；Phase A 完成、Phase B1 已实施、Phase C
+> 代码调研完成（`AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md`）
 > 适用范围：Rust workspace、Tauri、Python 便携实现、宿主接入与测试资产  
 > 关联文档：`ARCHITECTURE.md`、`DELIVERY_ARCHITECTURE.md`、
 > `TAURI_RUNTIME_WORKBENCH_SPEC.md`、`VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md`、
@@ -54,17 +56,28 @@ MCP Surface         外部工具服务的配置与运行健康（后续阶段）
 关键命名：
 
 - `vitals-core`：真正通用的 Vitals Framework，不认识 Agent 或任何宿主；
-- `agent-vitals-domain`：Agent Vitals 的跨宿主领域契约与业务计算；
-- `agent-vitals-adapters`：各 harness 的纯协议适配；
-- `agent-vitals-runtime`：本机数据源、持久化、监听与服务编排；
+- `agent-vitals-domain`：Agent Vitals 的跨宿主领域契约与业务计算（纯）；
+- `agent-vitals-hosts`：**一个宿主一个文件夹**（§4 v3.1）——每个宿主的
+  `sources/`（I/O，`sources` feature 门控）+ `sessions/`/`skills/`（纯）同目录相邻；
+  wasm 用 `default-features = false` 只链纯子树；
+- `agent-vitals-runtime`：**非宿主**的本机机器——state/ledger、watcher、唯一
+  `HomeResolver`、catalog loader、User Profile、service 编排；依赖 `agent-vitals-hosts`
+  的 `sources` feature；
 - `Model Catalog`：模型/provider 身份与版本化价格、套餐定义；
 - `User Profile`：当前用户声明的账户、套餐、费用和计费路由；
 - `agent-vitals`：用户看到的产品名、CLI 命令和安装包名。
 
-现有 `agent-vitals-core` 不直接改名为 `agent-vitals`。根 package 和产品已经使用
-`agent-vitals`，而且这个名字无法表达“领域层”与“通用 Core”的区别。目标状态是把
-它逐步拆成 `agent-vitals-domain` 与 `agent-vitals-adapters`；拆分完成前保留当前 crate
-名称，避免制造一次大规模无语义重构。
+现有 `agent-vitals-core` 不直接改名为 `agent-vitals`。目标状态是拆成
+`agent-vitals-domain`（domain/）+ `agent-vitals-hosts`（现 `agent-vitals-adapters`
+的 `hosts/` 加 `sources/`）+ 薄 `agent-vitals-core`（contracts/ + compatibility/）；
+拆分完成前保留当前 crate 名，避免大规模无语义重构。
+
+> **v3.1 修订（2026-09-04）**：§4 起把 v3 的「`agent-vitals-adapters/hosts/<h>/`（纯）
+> + `agent-vitals-runtime/sources/<h>/`（I/O）双 crate」统一为 `agent-vitals-hosts`
+> 单 crate + feature-gated `sources/`（用户维护性反馈）。**§2 目录树、§3 依赖规则、
+> §8 接入模板、§11 迁移映射、§13 分阶段、§14 守卫里凡出现 `adapters/hosts` +
+> `runtime/sources` 双 crate 表述的，一律以 §4/§5/§6 为准**；这些下游小节的逐字
+> 更新随 Phase C/D 落地时同步，不在本次 doc 改动里全刷。
 
 ---
 
@@ -503,8 +516,12 @@ Tauri UI                 → 直接读取宿主文件或 state
 
 - `vitals-core`：只接受通用、可 WASM、无 I/O 依赖；
 - `agent-vitals-domain`：可依赖 `vitals-core`、serde、纯算法库；
-- `agent-vitals-adapters`：可依赖 domain 和纯解析库，不能依赖 SQLite/watcher；
-- `agent-vitals-runtime`：可使用 `rusqlite`、`ruzstd`、文件监听等 native 依赖；
+- `agent-vitals-hosts`：可依赖 domain / core / 纯解析库；`rusqlite`/`ruzstd`/
+  `walkdir` 是 **optional dep**，仅 `sources` feature 开启时链入（§4.3）。**不许**
+  `tokio`/`notify`/watcher/编排——那些属 runtime。默认 feature 集为空，wasm 用
+  `default-features = false` 只拿纯子树；
+- `agent-vitals-runtime`：`agent-vitals-hosts`（`features = ["sources"]`）+
+  `notify`/watcher/service 编排 + state 存储；
 - `apps/desktop`：依赖 runtime，Tauri command 不持有领域规则。
 
 用户配置和 Catalog 是输入，不是更高权限的业务层：Runtime 只负责读取、校验和版本选择，
@@ -512,34 +529,67 @@ Domain 的 resolver/billing 接收 typed snapshot 后计算，不能在纯函数
 
 ---
 
-## 4. 同一宿主为什么出现两次
+## 4. 一个宿主一个文件夹（v3.1 修订，2026-09-04）
 
-同一宿主分别出现在 `adapters/hosts/` 和 `runtime/sources/` 是有意设计，不是平行实现：
+> **修订**：v3 原方案把同一宿主拆在 `agent-vitals-adapters/hosts/<h>/`（纯）与
+> `agent-vitals-runtime/sources/<h>/`（I/O）两个 crate。用户 2026-09-04 指出这不利
+> 于维护——宿主接入要动两个 crate、藏得深。v3.1 改为**一个宿主一个文件夹**，
+> `sources/`（I/O）与 `sessions/`/`skills/`（纯）作它的子目录，编译期 I/O 边界靠
+> **feature-gate + 源码扫描守卫**保住（§4.3），不靠 crate 边界。
 
 ```text
-runtime::sources::dsh
-  locate → read → decompress → fingerprint
+crates/agent-vitals-hosts/               # 一个 crate，所有宿主
+  Cargo.toml   # ruzstd / rusqlite / walkdir 均 optional，由 "sources" feature 开
+  src/
+    lib.rs
+    registry.rs                          # HostDescriptor 汇总
+    shared/{canonical_json,timestamp,identity}.rs
+    dsh/
+      sources/    { discovery, session_reader, zstd, fingerprint }   # I/O，#[cfg(feature="sources")]
+      sessions/   { wire, evidence, observer, usage, usage_fact }    # 纯
+      skills/     { manifest, visibility, invocation }               # 纯
+      mcp/        { config, events, probe }                          # 后续；probe 属 I/O
+      capability.rs
+    codex/  claude_code/  workbuddy/  openclaw/  hermes/             # 同构
+```
+
+数据流不变，只是同一宿主的两段现在同目录相邻：
+
+```text
+hosts::dsh::sources                       (feature = "sources")
+  locate → read → decompress → fingerprint → SourceDocument
                          │
                          ▼
-adapters::hosts::dsh
-  parse wire → observe → dedupe/delta → UsageFact/Evidence
+hosts::dsh::sessions                       (纯，wasm 可链)
+  parse wire → observe → dedupe/delta → UsageFact / CanonicalEvidence
                          │
                          ▼
 agent-vitals-domain
   cost → findings → session/calendar/overview projection
 ```
 
-### 4.1 同一宿主内部为什么还要区分 skills/sessions/mcp
+### 4.0 为什么不合成一个无条件带 I/O 的 crate —— wasm
 
-目录第一维按宿主组织，便于新增 harness；第二维按证据面组织，防止把“配置能力”和
-“实际行为”混成一个扫描器：
+`agent-vitals-wasm` 必须链接 `hosts::<h>::sessions` 的纯代码（behavior/trajectory
+的 DSH raw shim、evidence、usage fold），但 `ruzstd`/`rusqlite`/`walkdir` 编不到
+`wasm32`。所以 `sources/` 整体 `#[cfg(feature = "sources")]`，I/O 依赖 `optional`：
+
+- **wasm**：`agent-vitals-hosts = { default-features = false }` → `sources/` 不存在，纯子树编译
+- **binary / runtime**：`features = ["sources"]` → 全量
+- feature 关时，误把需要 gated dep 的 I/O 写进 `sessions/` → **纯构建编译失败**
+- 不需要 dep 的 `std::fs`/`std::env`/`std::process` → §4.3 源码扫描守卫兜
+
+### 4.1 同一宿主内部：sources / sessions / skills / mcp
+
+目录第一维按宿主组织（新增 harness 只碰一个文件夹）；第二维分 I/O 与证据面：
 
 ```text
 hosts/dsh/
-├── skills/       SKILL.md、启用/加载/遮蔽、调用关联
-├── sessions/     行为事件、轨迹、usage、cost 事实
-├── mcp/          MCP 配置与运行证据（后续）
-└── capability.rs 三个 surface 分别声明能力
+├── sources/      locate/read/decompress/fingerprint —— I/O，feature-gated
+├── skills/       SKILL.md、启用/加载/遮蔽、调用关联 —— 纯
+├── sessions/     行为事件、轨迹、usage、cost 事实 —— 纯
+├── mcp/          MCP 配置与运行证据（后续）；probe 属 I/O
+└── capability.rs 三个 surface 分别声明能力上限
 ```
 
 Skill 与 Session 的关联发生在 Domain/service，不发生在 reader：Session 中观测到
@@ -547,91 +597,106 @@ Skill 与 Session 的关联发生在 Domain/service，不发生在 reader：Sess
 `SkillVitalRecord` 对账。扫描不到某个 surface 时必须标 unavailable，不能用空数组伪装
 “实测为零”。
 
-### 4.2 Source 与 Adapter 的分工示例
+### 4.2 sources / sessions 的分工示例
 
 以 DSH 为例：
 
 | 代码 | 归属 | 原因 |
 |---|---|---|
-| 查找 `session.jsonl.zstd` | runtime source | 文件系统策略 |
-| 多帧 zstd 解压 | runtime source | I/O/原生依赖 |
-| 识别 `assistant/chunk` usage | host adapter | DSH wire 语义 |
-| 相邻 run shadow 替换 | host adapter | DSH 计量语义 |
-| 生成 DSH `UsageFact` | host adapter | 宿主 → 领域契约边界 |
-| 汇总跨宿主月度 token | domain | 与 DSH 无关 |
-| Tauri 自动刷新 | app/runtime | 生命周期与 UI 编排 |
+| 查找 `session.jsonl.zstd` | `hosts/dsh/sources/` | 文件系统策略（feature-gated） |
+| 多帧 zstd 解压 | `hosts/dsh/sources/zstd.rs` | I/O / 原生依赖（`ruzstd`，feature-gated） |
+| 识别 `assistant/chunk` usage | `hosts/dsh/sessions/wire.rs` | DSH wire 语义（纯） |
+| 相邻 run shadow 替换 | `hosts/dsh/sessions/observer.rs` | DSH 计量语义（纯） |
+| 生成 DSH `UsageFact` | `hosts/dsh/sessions/usage_fact.rs` | 宿主 → 领域契约边界（纯） |
+| 汇总跨宿主月度 token | `agent-vitals-domain` | 与 DSH 无关 |
+| Tauri 自动刷新 | `apps/desktop` / `agent-vitals-runtime` | 生命周期与 UI 编排 |
 
-如果未来为了代码导航希望按宿主垂直聚合，可以在仓库顶层改成
-`hosts/dsh/{adapter,runtime}` 两个 crate，但不能因此取消编译期的 I/O 边界。当前宿主数
-和代码量下，统一的 adapters/runtime 两个 crate 更容易维护，也不会产生大量小 crate。
+`agent-vitals-runtime` 仍存在，但只装**非宿主**机器：state store / ledger、watcher、
+唯一 `HomeResolver`、catalog loader、User Profile，以及把 `hosts::<h>::sources` 产出的
+`SourceDocument` 交给 `hosts::<h>::sessions` 的 service 层。它依赖
+`agent-vitals-hosts`（`features = ["sources"]`）。
+
+### 4.3 编译期 I/O 边界怎么保住（不靠 crate 边界）
+
+1. **feature-gate**：`sources/` 与 `mcp/probe.rs` 整体 `#[cfg(feature = "sources")]`，
+   `ruzstd`/`rusqlite`/`walkdir` 是 `optional` dep。纯构建（wasm、
+   `default-features = false`）里它们不编译——需要 gated dep 的 I/O 误入 `sessions/`
+   即编译失败。
+2. **源码扫描守卫**（`agent-vitals-hosts/tests/host_boundary.rs`，仿
+   `dependency_budget.rs`）：`src/**/*.rs` 里 `std::fs` / `std::process` /
+   `std::env::` / `File::open` / `Connection::open` / `ruzstd` / `rusqlite` 只许出现在
+   路径含 `/sources/` 或 `mcp/probe.rs` 的文件；`sessions/`、`skills/`、`shared/`、
+   `registry.rs`、`capability.rs` 命中即红。
+3. **反向依赖**：`agent-vitals-hosts` 的 `[dependencies]` 否定清单——不许
+   `agent-vitals`（binary）、`tauri`、`notify`、`tokio` 等（`sources` feature 只加
+   读取器需要的最小 I/O 集，不加编排/watcher）。
 
 ---
 
-## 5. Host Adapter 内部契约
+## 5. Host 目录内部契约
 
-每个支持运行时审计的宿主目录按能力选择下列文件；不支持的能力不创建空文件：
+每个宿主一个文件夹，按能力选择下列子目录/文件；不支持的能力不创建空文件：
 
 ```text
 hosts/<host>/
 ├── mod.rs                 对外出口与 descriptor
-├── skills/
+├── sources/               ── I/O，#[cfg(feature = "sources")] ──
+│   ├── discovery.rs       会话根目录、SKILL.md/plugin config、候选文件
+│   ├── session_reader.rs  JSONL / rollout / SQLite 读取
+│   ├── zstd.rs            仅需要时（DSH）
+│   ├── fingerprint.rs     revision / checkpoint 输入
+│   └── error.rs           I/O 错误映射
+├── skills/                ── 纯 ──
 │   ├── manifest.rs        宿主 Skill 元数据
 │   ├── visibility.rs      enabled/loaded/discoverable
 │   ├── shadowing.rs       scope 与同名覆盖
 │   └── invocation.rs      与 Session 调用证据的关联
-├── sessions/
+├── sessions/              ── 纯 ──
 │   ├── wire.rs            宿主会话字段与版本嗅探
 │   ├── evidence.rs        raw → CanonicalEvidence/CanonicalEvent
 │   ├── observer.rs        请求槽、shadow、累计快照
 │   ├── usage.rs           宿主 token 语义
 │   └── usage_fact.rs      observation → UsageFact
-├── mcp/                   后续独立 surface，不塞进 skills/
-│   ├── config.rs
-│   ├── events.rs
-│   └── invocation.rs
+├── mcp/                   后续独立 surface（probe.rs 属 I/O，feature-gated）
 └── capability.rs          三个 surface 分别声明能力上限
 ```
 
 统一要求：
 
-1. 输入是内存数据或 `Read` 抽象，不自行定位用户目录；
-2. 不读取环境变量和全局配置；
-3. 不写 state，不负责 watcher；
-4. raw 字段保持原样，normalized 字段带版本；
-5. 缺失与真实零分开；
-6. cumulative 在 adapter 边界转 delta；
-7. shadow、重复与不可归属必须可解释；
-8. 输出由 domain contract 校验；
-9. 同一输入产生确定性、可逐字节比较的输出；
-10. capability 声明必须进入 host registry 完整性测试。
-11. Skill scanner 不读取 token/cost，Session scanner 不扫描 `SKILL.md`；
-12. MCP 默认只消费配置和已有证据，主动 handshake/probe 必须由 Runtime 显式授权。
+1. `sessions/`/`skills/` 输入是内存数据或 `Read` 抽象，不自行定位用户目录；
+   路径定位/解压/读取只在 `sources/`（feature-gated）；
+2. `sessions/`/`skills/` 不读环境变量、不读全局配置、不写 state、不负责 watcher；
+3. raw 字段保持原样，normalized 字段带版本；
+4. 缺失与真实零分开；
+5. cumulative 在 `sessions/` 边界转 delta；
+6. shadow、重复与不可归属必须可解释；
+7. 输出由 domain contract 校验；
+8. 同一输入产生确定性、可逐字节比较的输出；
+9. capability 声明必须进入 host registry 完整性测试；
+10. Skill scanner 不读 token/cost，Session scanner 不扫描 `SKILL.md`；
+11. MCP 默认只消费配置和已有证据，主动 handshake/probe 由 Runtime 显式授权；
+12. `sources/` 产出统一 `SourceDocument`（§6），不直接产报告。
 
-不建议现在创建一个包办所有行为的 `HostAdapter` 大 trait。不同宿主的数据源和能力差异
-过大，容易形成大量 `Option` 和伪空实现。优先统一数据契约、模块命名和 registry；只有
-在至少三个宿主出现完全相同、稳定的调用生命周期后，才抽最小 trait。
+**Trait 标准化（4 宿主起，v3.1 收窄）**：不做一个包办的 `HostAdapter` 大 trait
+——宿主差异在「**哪些 surface 存在**」（Claude Code 无 runtime probe、WorkBuddy
+roots 来自清单文件），大 trait 逼出空实现。做**按 surface 的小 trait**，宿主只
+impl 它有的那几个：
+
+```text
+trait SessionSource   { fn discover(..) -> Vec<SourceDocument>; fn read(doc) -> RawSession; }   // sources/
+trait SessionAdapter  { fn evidence(raw) -> CanonicalEvidence; fn usage(raw) -> UsageObservations; } // sessions/
+trait SkillSource     { fn inventory(..) -> Vec<RawSkillEntry>; }                                // skills/ + sources
+trait SkillAdapter    { fn record(raw) -> SkillVitalRecord; }
+```
+
+`registry.rs` 的 `HostDescriptor` 汇总每个宿主 impl 了哪些、每个 surface 的能力
+上限——`inventory.rs` 现有「四阶段，缺哪个阶段就是缺哪个能力」的哲学升级成类型。
 
 ---
 
-## 6. Runtime Source 内部契约
+## 6. `sources/` 输出契约
 
-```text
-sources/<host>/
-├── skills/
-│   ├── discovery.rs       SKILL.md、plugin/config、skills/list 来源
-│   └── reader.rs
-├── sessions/
-│   ├── discovery.rs       会话根目录与候选文件
-│   ├── reader.rs          JSONL/rollout/SQLite 读取
-│   ├── fingerprint.rs     revision/checkpoint 输入
-│   └── watcher.rs         仅需要特殊监听时存在
-├── mcp/
-│   ├── config_reader.rs   默认被动读取
-│   └── probe.rs           显式授权的主动探测
-└── error.rs               I/O 错误映射
-```
-
-统一输出不应直接是最终报告，而应是类似：
+`hosts/<h>/sources/` 统一产出，不直接是最终报告：
 
 ```text
 SourceDocument {
@@ -687,38 +752,27 @@ HostDescriptor {
 
 ## 8. 新宿主接入模板
 
-以新增 `new-harness` 为例：
+以新增 `new-harness` 为例——**只碰一个文件夹**：
 
 ```text
-crates/agent-vitals-adapters/src/hosts/new_harness/
-├── mod.rs
-├── skills/                  # 宿主有 Skill Surface 时创建
+crates/agent-vitals-hosts/src/new_harness/
+├── mod.rs                   # 对外出口 + descriptor
+├── sources/                 # 有 I/O 时创建（feature = "sources"）
+│   ├── discovery.rs
+│   ├── session_reader.rs
+│   └── error.rs
+├── skills/                  # 有 Skill Surface 时创建（纯）
 │   ├── manifest.rs
 │   └── visibility.rs
-├── sessions/                # 宿主有 Session Surface 时创建
+├── sessions/                # 有 Session Surface 时创建（纯）
 │   ├── wire.rs
 │   ├── evidence.rs
 │   ├── usage.rs
 │   └── usage_fact.rs
-├── mcp/                     # 后续有 MCP 证据时创建
+├── mcp/                     # 后续（probe.rs 属 I/O）
 └── capability.rs
 
-crates/agent-vitals-runtime/src/sources/new_harness/
-├── skills/
-│   ├── discovery.rs
-│   └── reader.rs
-├── sessions/
-│   ├── discovery.rs
-│   └── reader.rs
-├── mcp/
-└── error.rs
-
-fixtures/new_harness/
-├── README.md
-├── minimal.jsonl
-├── malformed.jsonl
-└── build_fixture.*
-
+fixtures/new_harness/{README.md, minimal.jsonl, malformed.jsonl, build_fixture.*}
 docs/host-integrations/new-harness.md
 ```
 
@@ -726,13 +780,14 @@ docs/host-integrations/new-harness.md
 
 1. 用真实脱敏语料记录 wire contract；
 2. 分别决定 Skill/Session/MCP surface 的能力，不把未知项填零；
-3. 只为真实存在的 surface 实现 source discovery/reader；
-4. 实现对应的纯 wire parser；
-5. Session 可用时生成 CanonicalEvidence；
-6. 宿主提供 usage 时再实现 observation 与 UsageFact；
-7. 注册 HostDescriptor；
-8. 加 Rust 单测、golden、跨语言 parity（仍有 Python 镜像时）；
-9. 最后接 CLI/Tauri 展示。
+3. 只为真实存在的 surface 建子目录：`sources/` impl `SessionSource`/`SkillSource`，
+   `sessions/` impl `SessionAdapter`，`skills/` impl `SkillAdapter`（§5 小 trait）；
+4. 实现纯 wire parser；Session 可用时生成 CanonicalEvidence；有 usage 再做
+   observation 与 UsageFact；
+5. `registry.rs` 注册 `HostDescriptor`（声明 impl 了哪几个 surface）；
+6. 加 Rust 单测、golden、跨语言 parity（仍有 Python 镜像时）；
+   `host_boundary.rs` 守卫自动覆盖新目录（I/O 只许在 `sources/`）；
+7. 最后接 CLI/Tauri 展示。
 
 新增宿主不应要求修改 `vitals-core`。如果为了接入一个 harness 必须在 `vitals-core` 中
 新增宿主字段，说明边界放错，应退回 adapter/domain 重新设计。
@@ -979,7 +1034,13 @@ Phase A 的 runtime 边界采用依赖注入而不是新建一套 fold：
 Installed/Loaded/Triggered 关联，但不能自行扫描 Session 文件。Codex/OpenClaw 的
 runtime probe 仍属于 Skill capability 求证，不被误分类为 Session 日志读取。
 
-### Phase B：抽出 `agent-vitals-adapters`
+### Phase B：抽出宿主 crate
+
+> **v3.1**：B 的产物 crate 从 `agent-vitals-adapters`（纯）演进为
+> `agent-vitals-hosts`（单 crate，feature-gated `sources/`，§4）。B1 已落地的
+> `hosts/<h>/sessions/` 结构**原样保留**——只是后续 B2/C/D 往里加 `sources/` +
+> `sources` feature + `host_boundary.rs` 守卫，并可择时把 crate 名改为
+> `agent-vitals-hosts`（或保留 `-adapters` 名，非阻塞）。
 
 **B1（已完成，2026-09-04）：**
 
@@ -1035,10 +1096,15 @@ fold 或 identity 逻辑来“消除”Cargo 环。
   驱动）。`usage.rs` 的「DSH wire 解析混在 domain」同类，as-is 进 domain crate，
   wire/fold 分离另开。
 
-### Phase D：建立 `agent-vitals-runtime`
+### Phase D：建立 `agent-vitals-runtime` + host `sources/`
 
-- 移动 discovery、reader、zstd、SQLite、state、watcher；
-- 建立唯一 HomeResolver、User Profile/Catalog loader 和 Skill/Session services；
+- **host I/O 落 `hosts/<h>/sources/`**（v3.1）：`src/dsh.rs`（zstd）、
+  `src/agent/workbuddy_session.rs`（sqlite）、`src/agent/*session*.rs`（readers）、
+  `src/agent/discovery.rs` 迁进对应宿主的 `sources/`，`agent-vitals-hosts` 加
+  `sources` feature + `optional` I/O dep + `host_boundary.rs` 守卫；
+- `agent-vitals-runtime` = **非宿主**机器：state/ledger、watcher、唯一 HomeResolver、
+  User Profile/Catalog loader、Skill/Session services（编排 `hosts::<h>::sources` →
+  `hosts::<h>::sessions`）；
 - 承接 v0.7 延期的数据平面：`UsageFact` writer、per-host materialized view、
   R2a `SourceFingerprint` 增量失效、WorkBuddy `UsageFact` 接入；
 - 在出现第二个持久 schema 时实现首个真实 migration，并同时交付原子写入、fsync
@@ -1068,14 +1134,19 @@ fold 或 identity 逻辑来“消除”Cargo 环。
 需要新增自动检查，避免目录只停留在文档层：
 
 1. `vitals-core` 文件和公开符号禁止宿主词汇；
-2. domain 的 Cargo 依赖禁止 runtime/Tauri/SQLite/zstd；
-3. adapters 禁止 `std::fs`、`std::process`、环境变量和 state 写入；
-4. runtime 可以依赖 adapters，反向依赖编译失败；
+2. domain 的 Cargo 依赖禁止 runtime/Tauri/SQLite/zstd/watcher；
+3. `agent-vitals-hosts`：`std::fs`/`std::process`/`std::env`/`File::open`/
+   `Connection::open`/`ruzstd`/`rusqlite` 只许出现在路径含 `/sources/` 或
+   `mcp/probe.rs` 的文件（`host_boundary.rs` 源码扫描）；`sources/` 整体
+   `#[cfg(feature = "sources")]`，I/O dep 为 `optional`；
+4. runtime 依赖 `agent-vitals-hosts`（`features=["sources"]`），反向（hosts→runtime）
+   编译失败；
 5. Tauri/CLI 中禁止重新实现 token/cost/fact_id 公式；
-6. registry、CLI host 枚举、adapter 目录、capability matrix 双向相等；
-7. 每个 adapter 至少有真实脱敏 fixture 与 malformed/unknown coverage；
+6. registry、CLI host 枚举、`hosts/<h>/` 目录、capability matrix 双向相等；
+7. 每个宿主至少有真实脱敏 fixture 与 malformed/unknown coverage；
 8. Python 镜像存在期间，公开 JSON 保持 Python/Rust byte-parity；
-9. WASM 只能链接 `vitals-core`、domain 和 adapters 的纯模块；
+9. WASM（`agent-vitals-hosts` 用 `default-features = false`）只链纯子树——
+   `sources/` 不参与编译，且 wasm crate 图里无 `ruzstd`/`rusqlite`；
 10. 旧 public path 的 re-export 必须有明确删除里程碑；
 11. Skill/Session/MCP 的 capability 和 coverage 分开，scanner 不跨 surface 读取；
 12. Catalog 必须携带版本、币种与有效期，历史价格选择有回归测试；

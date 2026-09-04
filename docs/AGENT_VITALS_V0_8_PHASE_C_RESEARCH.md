@@ -5,6 +5,12 @@
 > 依赖债务的**真实形状**摸清——arch spec §11「拆 `usage.rs` 188KB / `cost.rs`
 > 99KB」把两件事混为一谈，本调研拆开。
 > 基准：`docs/cost-attribution-and-hour-axis-spec` @ `a034394`（Phase A+B1 已合并）
+>
+> **arch v3.1（2026-09-04）**：宿主结构从「`agent-vitals-adapters/hosts/`（纯）+
+> `agent-vitals-runtime/sources/`（I/O）双 crate」改为 `agent-vitals-hosts` **单
+> crate + feature-gated `sources/`**（arch §4）。C1–C3 **不受影响**（它们是「domain
+> 不 import 宿主代码」，与宿主代码怎么组织无关）；下文的「迁 `agent-vitals-adapters`」
+> 读作「迁 `agent-vitals-hosts`（现名 `-adapters`，可择时改名）」。
 
 ---
 
