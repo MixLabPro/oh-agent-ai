@@ -1,15 +1,25 @@
 # Agent Vitals 目录与模块边界设计
 
 > 状态：目标架构 **v3.1**（2026-09-04：宿主统一为 `agent-vitals-hosts` 单 crate +
-> feature-gated `sources/`，见 §4/§5/§6）；**Phase A/B/C 完成 + Phase D 进行中（D1 完成）**
-> ——workspace 现为 `vitals-core` ← `agent-vitals-domain`（`contracts/` + `domain/` +
-> `compatibility/`）← `agent-vitals-adapters`（含 `hosts/dsh/sessions/` 的 DSH wire）
-> ← binary/wasm/src-tauri（§3.1 的图）。`agent-vitals-core` 与中途的
-> `agent-vitals-contracts` 独立 crate 均已撤销；调用方直接 `use agent_vitals_domain::*`。
-> **D1（wire/fold 分离）已完成**：DSH wire 解析出 `domain/`，`domain/` 对宿主 wire
-> 形状彻底不知情。执行记录见 `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6bis–§6quinquies
-> 与 `AGENT_VITALS_V0_8_PHASE_D_RESEARCH.md`。剩 D2–D7（cost.rs 切分、adapters→hosts、
-> host I/O → sources/、agent-vitals-runtime、HomeResolver）。
+> feature-gated `sources/`，见 §4/§5/§6）。**Phase A-E 已全部实施完成并合入
+> `main`**（2026-09-04，`27e2960`…`012065c`）——workspace 现为 `vitals-core` ←
+> `agent-vitals-domain`（`contracts/` + `domain/` + `compatibility/`，单 crate）←
+> `agent-vitals-hosts`（Phase D3 由 `agent-vitals-adapters` 改名；`hosts/<h>/
+> sessions/`=纯 + `hosts/<h>/sources/`=feature-gated I/O）← `agent-vitals-runtime`
+> （Phase D6/D7：state/budget/takeover/session_sources/clock + 唯一
+> `HomeResolver`）← `apps/cli`（二进制，Phase E3 由根 `src/` 迁来）/
+> `agent-vitals-wasm` / `apps/desktop/src-tauri`（Phase E2 由根 `src-tauri/` 迁来）。
+> `agent-vitals-core` 与中途的 `agent-vitals-contracts` 独立 crate 均已撤销；调用方
+> 直接 `use agent_vitals_domain::*`。目录搬迁（Phase E1-E6：`integrations/`
+> `packages/agent-vitals-python/` `assets/`）同样已完成。**本文档下方 §2/§8/§11/§13
+> 等小节仍保留大量 Phase 进行中/`agent-vitals-adapters` 旧称的叙述——这些是历史
+> 实施记录，未逐段刷新到"已实施"时态；当前真实状态以 `CLAUDE.md` 的 Repo layout
+> 段 + `AGENT_VITALS_V0_8_PHASE_{C,D,E,F}_RESEARCH.md` 的完成记录为准。**
+> **Phase F（MCP Surface）**：F1a（会话证据 `mcp__` 命名拆分，零新 I/O）已完成
+> （`4dc0312`）；F1b（读 `~/.claude.json` 的 `mcpServers` 配置）及以后**用户
+> 2026-09-04 拍板暂停，留给用户专门评审**——实测该文件本机真实携带明文 API
+> 凭证，写错默认透出边界的后果不可轻易补救，见
+> `AGENT_VITALS_V0_8_PHASE_F_RESEARCH.md`。
 > 适用范围：Rust workspace、Tauri、Python 便携实现、宿主接入与测试资产  
 > 关联文档：`ARCHITECTURE.md`、`DELIVERY_ARCHITECTURE.md`、
 > `TAURI_RUNTIME_WORKBENCH_SPEC.md`、`VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md`、
@@ -19,13 +29,17 @@
 > Rust/Python/Tauri 代码的架构差距评估。本文描述目标边界，不授权在功能提交中夹带
 > 目录搬迁。
 >
-> v3 实施记录：Phase A 建 `contracts/domain/adapters/compatibility` 所有权目录并以
-> re-export 保旧路径；DSH Session 读取从 Skill inventory 移到 Session source 后注入。
-> Phase B1 抽出 `agent-vitals-adapters` 并迁出叶子 evidence adapter。Phase C（Step 1–4）
-> 断开 `domain → host` 生产耦合、把 `contracts/`+`domain/`+`compatibility/` 收进
-> `agent-vitals-domain`、撤销 `agent-vitals-core` facade。B2（Codex fold + canonical
-> 层物理迁 adapters）随 Step 3 收口。**下一步是 Phase D**（`agent-vitals-runtime` +
-> host `sources/`，首项为 wire/fold 分离）。
+> v3 实施记录（历史叙述，保留原文）：Phase A 建 `contracts/domain/adapters/
+> compatibility` 所有权目录并以 re-export 保旧路径；DSH Session 读取从 Skill
+> inventory 移到 Session source 后注入。Phase B1 抽出 `agent-vitals-adapters` 并
+> 迁出叶子 evidence adapter。Phase C（Step 1–4）断开 `domain → host` 生产耦合、把
+> `contracts/`+`domain/`+`compatibility/` 收进 `agent-vitals-domain`、撤销
+> `agent-vitals-core` facade。B2（Codex fold + canonical 层物理迁 adapters）随
+> Step 3 收口。Phase D（D1-D7）完成 wire/fold 分离、`cost.rs` 切分、
+> `agent-vitals-adapters` → `agent-vitals-hosts` 改名、host I/O → `sources/`、
+> `agent-vitals-runtime` crate、唯一 `HomeResolver`。Phase E（E1-E6）完成
+> `apps/`/`packages/`/`integrations/`/`assets/` 目录搬迁。**执行细节见各自的
+> `AGENT_VITALS_V0_8_PHASE_{C,D,E}_RESEARCH.md` 完成记录，不在本文重复。**
 
 ## 0. 结论
 
@@ -76,10 +90,13 @@ MCP Surface         外部工具服务的配置与运行健康（后续阶段）
 - `User Profile`：当前用户声明的账户、套餐、费用和计费路由；
 - `agent-vitals`：用户看到的产品名、CLI 命令和安装包名。
 
-**已到位**（Phase C 收尾）：`agent-vitals-domain` = `contracts/`（宿主无关词表）+
+**已到位**（Phase A-E 全部完成）：`agent-vitals-domain` = `contracts/`（宿主无关词表）+
 `domain/`（跨宿主计算）+ `compatibility/`（vitals-core 桥）。`agent-vitals-core` 已删除。
-**Phase D 目标**：`agent-vitals-adapters` → `agent-vitals-hosts`（`hosts/<h>/` 加
-feature-gated `sources/`），DSH wire 从 `domain/dsh/` 迁进 `hosts/dsh/sessions/`。
+`agent-vitals-adapters` → `agent-vitals-hosts`（`hosts/<h>/sessions/` 纯 +
+`hosts/<h>/sources/` feature-gated I/O）已完成改名+落地，DSH wire 已从
+`domain/dsh/` 迁进 `hosts/dsh/sessions/`。`agent-vitals-runtime` crate、
+`apps/{cli,desktop/src-tauri}`、`packages/agent-vitals-python/`、
+`integrations/{dsh,dsh-client}/`、`assets/` 均已到位。
 
 > **v3.1 修订（2026-09-04）**：§4 起把 v3 的「`agent-vitals-adapters/hosts/<h>/`（纯）
 > + `agent-vitals-runtime/sources/<h>/`（I/O）双 crate」统一为 `agent-vitals-hosts`
