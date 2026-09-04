@@ -10,8 +10,8 @@
 ## Sub-step 分解
 
 ```
-E1  dsh/ + dsh-client/ → integrations/       ✅ 完成（本提交）
-E2  src-tauri/ → apps/desktop/               [中：Cargo.toml 相对路径 + CI]
+E1  dsh/ + dsh-client/ → integrations/       ✅ 完成（commit b2738ab）
+E2  src-tauri/ → apps/desktop/src-tauri/     ✅ 完成（本提交）
 E3  src/（binary）→ apps/cli/src/            [中：根 Cargo.toml [[bin]] path + r2a_store/discovery 迁 runtime]
 E4  scripts/agent_vitals/ → packages/agent-vitals-python/agent_vitals/   [高：~40 test 的 sys.path、scan.py、include_str!、ClawHub 清单]
 E5  assets/ 归并（templates/icons/pricing → assets/）                   [中]
@@ -36,6 +36,22 @@ E6  CI workflows 路径同步（verify.yml / release.yml / package-clawhub.yml�
 - **门禁全绿**：cargo test 32 binary（Rust 无 `dsh-client/` 硬引用）、
   `integrations/dsh-client/scripts/verify{,-host,-timeline}.mjs`、
   python 1145/226 skip、golden 15+15。
+
+### E2 完成记录（2026-09-04）
+
+`git mv src-tauri apps/desktop/src-tauri`（spec §11：`src-tauri` → `apps/desktop/src-tauri`）。
+
+- `apps/desktop/src-tauri/Cargo.toml`：`path = "../crates/…"` → `"../../../crates/…"`（深两级）。
+- `tauri.conf.json`：`resources` 里的 `"../target/release/agent-vitals"` →
+  `"../../../target/release/agent-vitals"`（CLI 二进制 bundle 成资源，根 `target/` 现在深两级）。
+- `crates/vitals-core/tests/dependency_boundary.rs`：跨 workspace 边界检查
+  `../../src-tauri/Cargo.toml` → `../../apps/desktop/src-tauri/Cargo.toml`。
+- ~8 处 test/script 路径：`tests/test_{host_contract,timeline_lockstep,state_history_rotate}.py`、
+  `scripts/{make_menubar_icon,verify-timeline-geometry,verify-codex-session-timeline,
+  verify-workbench-fold-bridge}.mjs` 的 `src-tauri/` / `../src-tauri/` → `apps/desktop/src-tauri/`。
+- `src-tauri/.gitignore`（`target/` + `gen/`）随目录一起走，无需改。
+- **门禁全绿**：cargo test 32 binary、clippy -D warnings、`apps/desktop/src-tauri cargo check`、
+  `scripts/verify-*.mjs` 3 个、python 1145/226 skip、golden 15+15。
 
 ## 明确不做（同 D 的边界）
 

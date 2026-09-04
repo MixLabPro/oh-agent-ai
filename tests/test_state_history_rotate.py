@@ -5,7 +5,7 @@
 与 scripts/install_swiftbar.sh 一并删除）。这两组 invariant 本来就与 xbar
 无关——它们钉的是 `state.py` 自己的行为（sessions.jsonl 追加、today→month
 跨日 rotate），历史上只是恰好被 xbar 菜单栏第一个暴露出来，Tauri 菜单栏
-tick（`src-tauri/src/lib.rs`，同样调用 `oneline` → `state.py`/`state.rs`
+tick（`apps/desktop/src-tauri/src/lib.rs`，同样调用 `oneline` → `state.py`/`state.rs`
 写链）依赖的是完全相同的两条 invariant，所以测试本身继续留着，只是改名去
 掉「xbar 回归测试」这层不再准确的框架：
 1. sessions.jsonl 行数 ≥ oneline 调用次数

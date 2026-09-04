@@ -10,7 +10,7 @@
 
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { buildTimeline } = require("../src-tauri/ui/timeline.js");
+const { buildTimeline } = require("../apps/desktop/src-tauri/ui/timeline.js");
 
 let failed = 0;
 const ok = (cond, msg) => {

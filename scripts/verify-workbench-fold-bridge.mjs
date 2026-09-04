@@ -23,8 +23,8 @@ const ok = (cond, msg) => {
 };
 
 // ── 事件名两处一致（lib.rs 的 FOLD_EVENT ↔ workbench.js 的 listen 参数）──
-const lib = readFileSync(`${root}/src-tauri/src/lib.rs`, "utf8");
-const wb = readFileSync(`${root}/src-tauri/ui/workbench.js`, "utf8");
+const lib = readFileSync(`${root}/apps/desktop/src-tauri/src/lib.rs`, "utf8");
+const wb = readFileSync(`${root}/apps/desktop/src-tauri/ui/workbench.js`, "utf8");
 const EVENT = "usage-fold-updated";
 console.log("# 事件名两处一致");
 ok(lib.includes(`"${EVENT}"`), "lib.rs 里定义 `usage-fold-updated`（FOLD_EVENT）");

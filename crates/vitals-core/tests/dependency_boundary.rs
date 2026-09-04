@@ -81,7 +81,7 @@ fn src_tauri_does_not_depend_on_vitals_core_directly() {
     // 那时旁边不会有 `src-tauri` 目录，"读不到就当没这回事"比"读不到就崩"
     // 更符合"这个 crate 不该依赖仓库内部布局"的精神——只是这条测试本身活在
     // 这个仓库里，跳过要显式打印出来，不能悄悄过。
-    let src_tauri_manifest_path = manifest_dir().join("../../src-tauri/Cargo.toml");
+    let src_tauri_manifest_path = manifest_dir().join("../../apps/desktop/src-tauri/Cargo.toml");
     let Ok(manifest) = fs::read_to_string(&src_tauri_manifest_path) else {
         eprintln!("skipped: {} not found (fine if vitals-core is checked out standalone)", src_tauri_manifest_path.display());
         return;

@@ -519,7 +519,7 @@ class G10PricingResolutionTests(unittest.TestCase):
 # ────────────────────────── G7：sessFilter 展示层一致性 ──────────────────────
 
 class G7SessFilterTests(unittest.TestCase):
-    """`src-tauri/ui/workbench.html` 的会话筛选 chips 是纯静态标记（无构建期
+    """`apps/desktop/src-tauri/ui/workbench.html` 的会话筛选 chips 是纯静态标记（无构建期
     代码生成），不能像 Rust 那样"从行派生"；这里退而求其次，用源码自扫描
     钉住"chips 集合 == 注册了 session_store 的宿主集合"，防止两边手工维护
     的清单再次分叉（v0.6 spec §6：claude-code 此前缺席过一次 chip，
@@ -527,7 +527,7 @@ class G7SessFilterTests(unittest.TestCase):
     """
 
     def test_workbench_chips_match_session_store_hosts_exactly(self):
-        html = (ROOT / "src-tauri" / "ui" / "workbench.html").read_text(encoding="utf-8")
+        html = (ROOT / "apps" / "desktop" / "src-tauri" / "ui" / "workbench.html").read_text(encoding="utf-8")
         chip_hosts = set(re.findall(r'data-host="([a-z-]+)"', html)) - {"all"}
         expected = {h["id"] for h in host_capability.HOSTS if h["session_store"]}
         self.assertEqual(chip_hosts, expected,
@@ -555,7 +555,7 @@ class KnownGapRegistrationTests(unittest.TestCase):
           改造成共享循环**（三条路径互不相同：state 链/全量 rollout/
           ledger，§2.2 明文拒绝为了共享接口发明假抽象），本表只登记"接了
           没有"这个事实。`tauri.sessions`/`tauri.menubar-cost` 两个 surface
-          **不需要独立登记**——核实 `src-tauri/src/store.rs` 后确认它们是
+          **不需要独立登记**——核实 `apps/desktop/src-tauri/src/store.rs` 后确认它们是
           纯 IPC 透传（`sessions_list`/`sessions_read`/`sessions_findings`
           只拼 argv、spawn CLI 二进制、原样透传输出，`store.rs` 自己的
           `list_args_empty_and_full` 单测已用任意字符串 `"x"` 当

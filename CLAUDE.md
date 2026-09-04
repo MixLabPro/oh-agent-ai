@@ -58,7 +58,7 @@ references/                 # hosts.md (per-host evidence), judgment.md, guide.z
 docs/                       # design docs (ENGINEERING, DSH_INTEGRATION, AGENT_BEHAVIOR_AUDIT, …)
 integrations/dsh/           # DSH-1 profile bundle (registers agent-vitals as a DSH skill) — moved here in Phase E1
 integrations/dsh-client/    # dual-face audit plugin (host projection + wasm + client tab) — moved here in Phase E1
-src-tauri/                  # 菜单栏 app（Tauri 2，**独立 workspace**，不入根 default-members）：
+apps/desktop/src-tauri/     # 菜单栏 app（Tauri 2，**独立 workspace**，Phase E2 从根移进 apps/desktop/）：
                             #   托盘 + 弹出面板展示 今日/本月/预算，计价全部委托 domain::cost（不长第四份拷贝）
 fixtures/ + golden/         # test corpus + byte-for-byte scanner snapshots
 tests/                      # 28 Python test files（含分类守卫 tests/test_classification.py）

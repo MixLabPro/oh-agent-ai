@@ -78,6 +78,6 @@ const png = Buffer.concat([
   chunk("IEND", Buffer.alloc(0)),
 ]);
 
-const out = new URL("../src-tauri/icons/icon-source.png", import.meta.url);
+const out = new URL("../apps/desktop/src-tauri/icons/icon-source.png", import.meta.url);
 writeFileSync(out, png);
 console.log(`wrote ${out.pathname} (${png.length} bytes)`);
