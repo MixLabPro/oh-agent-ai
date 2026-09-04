@@ -15,8 +15,8 @@
 //! **过渡归属**：本模块暂居 vitals-core，只为让已拆 crates 的调用方（binary 的
 //! claude/codex emitter、core 的 usage observer / usage_fact）能同一处引用。这是
 //! Agent UsageFact/source-event 身份契约，不是任意领域都要的通用机制——将来拆出
-//! `agent-vitals-adapters` crate 时，本模块整体迁往
-//! `agent-vitals-adapters/src/shared/source_identity.rs`，不带 vitals-core 尾巴。
+//! `agent-vitals-hosts` crate 时，本模块整体迁往
+//! `agent-vitals-hosts/src/shared/source_identity.rs`，不带 vitals-core 尾巴。
 //!
 //! Python 镜像：`scripts/agent_vitals/source_identity.py`（同字节）。
 //! Stage 1/2 parity 钉测已跨语言验证两侧对同一输入产同字节。

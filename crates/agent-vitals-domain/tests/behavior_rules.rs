@@ -1,12 +1,12 @@
 //! `behavior.rs` 门控 dispatcher 的 canonical-fixture 测试 —— v0.8 Phase D1
 //! 从 `behavior.rs` 的 inline `#[cfg(test)] mod tests` 迁出：这些测试经
-//! `agent_vitals_adapters::dsh_evidence::build_dsh_evidence` 造 `CanonicalSession`
+//! `agent_vitals_hosts::dsh_evidence::build_dsh_evidence` 造 `CanonicalSession`
 //! fixture，跨 crate 传 domain 类型 —— inline test + `[dev-dependencies]` 成环会
 //! 撞 `multiple versions of crate`（Phase C Step 3 记录）。integration test
 //! 里 `agent-vitals-domain` 只编一遍，无碍。只测 gating dispatcher 对
 //! canonical 的三态产出，不重验 evidence 抽取（那是 adapters 自己的测试）。
 
-use agent_vitals_adapters::dsh_evidence::build_dsh_evidence;
+use agent_vitals_hosts::dsh_evidence::build_dsh_evidence;
 use agent_vitals_domain::behavior::{flatten, match_behavior_canonical, rule_outcomes_json};
 use agent_vitals_domain::evidence::{CanonicalSession, Coverage, CoverageCounts, RuleOutcome, Signal};
 use agent_vitals_domain::trajectory;

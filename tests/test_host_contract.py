@@ -86,10 +86,10 @@ class G2ThreeSetSeparationTests(unittest.TestCase):
 # ────────────────────────── G3：语言支持矩阵 ──────────────────────────
 
 _LANGUAGE_SUPPORT_MATRIX = {
-    "dsh": ("crates/agent-vitals-adapters/src/hosts/dsh/sessions/evidence.rs", "dsh_evidence.py"),
-    "codex": ("crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
-    "claude-code": ("crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
-    "workbuddy": ("crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
+    "dsh": ("crates/agent-vitals-hosts/src/hosts/dsh/sessions/evidence.rs", "dsh_evidence.py"),
+    "codex": ("crates/agent-vitals-hosts/src/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
+    "claude-code": ("crates/agent-vitals-hosts/src/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
+    "workbuddy": ("crates/agent-vitals-hosts/src/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
 }
 
 
@@ -367,8 +367,8 @@ class G8SourceSelfScanTests(unittest.TestCase):
 
     def test_claude_code_and_codex_rust_derive_unavailable_from_host_profile(self):
         for name in (
-            "crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs",
-            "crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs",
+            "crates/agent-vitals-hosts/src/hosts/claude_code/sessions/evidence.rs",
+            "crates/agent-vitals-hosts/src/hosts/codex/sessions/evidence.rs",
         ):
             path = ROOT / name
             text = path.read_text(encoding="utf-8")
@@ -381,7 +381,7 @@ class G8SourceSelfScanTests(unittest.TestCase):
                 self.assertIsNone(m, f"{name} 的 is_unavailable 疑似退回了 matches! 字面量表")
 
     def test_dsh_rust_derives_unavailable_from_host_profile(self):
-        path = (ROOT / "crates" / "agent-vitals-adapters" / "src" / "hosts" /
+        path = (ROOT / "crates" / "agent-vitals-hosts" / "src" / "hosts" /
                 "dsh" / "sessions" / "evidence.rs")
         text = path.read_text(encoding="utf-8")
         self.assertIn('host_capability::host_profile("dsh")', text,

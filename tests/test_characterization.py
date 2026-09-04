@@ -3312,7 +3312,7 @@ class TestCodexSessionIndex(unittest.TestCase):
 class CodexCostCharacterization(unittest.TestCase):
     """`codex-cost` 折叠/计价纯函数的精确值钉死。
 
-    这些数字对应 Rust 侧 `crates/agent-vitals-adapters/src/hosts/codex/sessions/usage.rs` 与
+    这些数字对应 Rust 侧 `crates/agent-vitals-hosts/src/hosts/codex/sessions/usage.rs` 与
     `src/codex_cost.rs` 的 `#[cfg(test)]` 钉同一批。夹具与手算期望见
     `fixtures/codex/cost/README.md`。**一个值变 = 折叠/计价行为变**，不是
     四舍五入——`cost_usd` 是 f64 原值（JSON 序列化两侧同最短表示，逐字节一致

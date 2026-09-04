@@ -354,7 +354,7 @@ _TRAJECTORY_CODES = ("SV611", "SV612", "SV613", "SV614")
 # 的是 tool/call，所以是 ToolCalls。SV610 单靠 sandbox/mode 就能出一条
 # finding，所以 ApprovalDecisions 只是 enhances，不是 requires（不在
 # requires 元组里就是 enhances——本文件不做完整 19 信号的 Coverage 模型，
-# 只镜像 Rust crates/agent-vitals-adapters/src/hosts/dsh/sessions/evidence.rs 里这四个信号）。
+# 只镜像 Rust crates/agent-vitals-hosts/src/hosts/dsh/sessions/evidence.rs 里这四个信号）。
 # 与 Rust behavior.rs::rule_specs 逐条对齐，改一边要改另一边。
 RULE_REQUIRES = {
     "SV601": ("ToolCalls",), "SV602": ("ToolCalls",), "SV603": ("ToolCalls",),

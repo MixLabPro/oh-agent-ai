@@ -108,14 +108,25 @@ deps：`agent-vitals-hosts { features=["sources"] }` + `agent-vitals-domain`。
 ## 2. 建议执行顺序 / 进度
 
 ```
-D1  wire/fold 分离          [中 + wasm 重建]   ✅ 完成
+D1  wire/fold 分离          [中 + wasm 重建]   ✅ 完成（commit 6f9af88）
 D2  cost.rs 文件切分        [低，纯 domain]    —— 独立，golden/parity 零漂移
-D3  adapters → hosts 改名   [中，机械面大]    —— 骨架，feature 空壳
+D3  adapters → hosts 改名   [中，机械面大]    ✅ 完成（本提交，纯 rename，无 feature 空壳）
 D4  DSH I/O → sources/      [高，feature-gate 首用]
 D5  其他 host readers       [高，rusqlite 迁移]
 D6  agent-vitals-runtime    [高，state 层迁移]
 D7  HomeResolver 单点       [中，收敛 + 契约测试]
 ```
+
+### D3 完成记录（2026-09-04）
+
+`agent-vitals-adapters` → **`agent-vitals-hosts`**：`git mv` crate 目录、`name`/`lib.name`
+改 `agent_vitals_hosts`、`agent_vitals_adapters` → `agent_vitals_hosts` 全量 rename
+（52 处：binary/wasm/domain dev-dep/src-tauri/tests/Python docstring）、workspace
+`members`/`default-members` + 各 `Cargo.toml` dep 名。**纯改名**——`[features] sources`
+空壳与 `tests/host_boundary.rs` 守卫留给 D4（首个真实 I/O 迁移时一起加，不提前挂空）。
+
+门禁全绿：cargo test（29 binary）、clippy -D warnings、wasm-pack 重建 + verify-*.mjs、
+src-tauri check、python 1145/226 skip、golden 15+15。
 
 ### D1 完成记录（2026-09-04，本会话）
 

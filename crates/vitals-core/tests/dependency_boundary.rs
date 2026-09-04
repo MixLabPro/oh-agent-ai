@@ -21,7 +21,7 @@ use std::path::Path;
 /// §5.2：`vitals-core` 禁止依赖的对象——反过来的方向是允许的（binary/wasm
 /// 依赖它），这条只测这一个 crate 自己的 `[dependencies]`。
 const FORBIDDEN_DEPS: &[&str] =
-    &["agent-vitals-domain", "agent-vitals-adapters", "agent-vitals-wasm", "agent-vitals", "tauri"];
+    &["agent-vitals-domain", "agent-vitals-hosts", "agent-vitals-wasm", "agent-vitals", "tauri"];
 
 /// §4.1：出现在公开类型/模块名字里通常意味着领域语义泄漏进了通用层。只扫
 /// 「名字」，不扫注释/文档字符串——注释里解释"为什么不叫 ToolCalls"完全合

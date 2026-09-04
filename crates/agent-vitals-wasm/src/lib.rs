@@ -25,8 +25,8 @@ pub fn audit_events(events_json: &str, workspace_root: &str) -> String {
     // 跑的是同一份 core 引擎。
     // raw-events → findings 的 DSH shim（phase C 起住 adapter，规则本体仍是 core
     // 的 `match_{behavior,trajectory}_canonical`——从不是第二份拷贝）。
-    let mut findings = agent_vitals_adapters::audit::match_behavior(&events, ws);
-    findings.extend(agent_vitals_adapters::audit::match_trajectory(&events));
+    let mut findings = agent_vitals_hosts::audit::match_behavior(&events, ws);
+    findings.extend(agent_vitals_hosts::audit::match_trajectory(&events));
     serde_json::to_string(&findings).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -106,7 +106,7 @@ pub fn context_composition(events_json: &str) -> String {
 #[wasm_bindgen]
 pub fn compaction_events(events_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
-    let out = agent_vitals_adapters::compaction::compaction_events(&events);
+    let out = agent_vitals_hosts::compaction::compaction_events(&events);
     serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -125,7 +125,7 @@ pub fn subagent_spawns(events_json: &str) -> String {
 pub fn structural_waste(events_json: &str, requests_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
     let requests: Vec<Value> = serde_json::from_str(requests_json).unwrap_or_default();
-    let out = agent_vitals_adapters::waste::detect_structural_waste(&events, &requests);
+    let out = agent_vitals_hosts::waste::detect_structural_waste(&events, &requests);
     serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
 }
 

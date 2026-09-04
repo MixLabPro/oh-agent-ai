@@ -54,14 +54,14 @@ fn g2_scan_cli_host_choices_literal_agrees_across_three_locations() {
 #[test]
 fn g3_every_runtime_host_has_both_language_evidence_modules() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    // Phase B split the leaf adapters into `agent-vitals-adapters`; DSH evidence
+    // Phase B split the leaf adapters into `agent-vitals-hosts`; DSH evidence
     // stays in core as registered layer-2 wire debt (`domain/dsh/`, Phase C).
     // Paths are repo-root-relative now, not relative to one crate's `src`.
     let matrix: [(&str, &str, &str); 4] = [
-        ("dsh", "crates/agent-vitals-adapters/src/hosts/dsh/sessions/evidence.rs", "dsh_evidence.py"),
-        ("codex", "crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
-        ("claude-code", "crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
-        ("workbuddy", "crates/agent-vitals-adapters/src/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
+        ("dsh", "crates/agent-vitals-hosts/src/hosts/dsh/sessions/evidence.rs", "dsh_evidence.py"),
+        ("codex", "crates/agent-vitals-hosts/src/hosts/codex/sessions/evidence.rs", "codex_evidence.py"),
+        ("claude-code", "crates/agent-vitals-hosts/src/hosts/claude_code/sessions/evidence.rs", "claude_evidence.py"),
+        ("workbuddy", "crates/agent-vitals-hosts/src/hosts/workbuddy/sessions/evidence.rs", "workbuddy_evidence.py"),
     ];
     for (host, rust_name, py_name) in matrix {
         let rust_path = root.join(rust_name);
@@ -127,8 +127,8 @@ fn g4_degrade_only_flips_measured_zero_for_declared_codes() {
 fn g8_claude_code_and_codex_derive_unavailable_from_host_profile() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for name in [
-        "crates/agent-vitals-adapters/src/hosts/claude_code/sessions/evidence.rs",
-        "crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs",
+        "crates/agent-vitals-hosts/src/hosts/claude_code/sessions/evidence.rs",
+        "crates/agent-vitals-hosts/src/hosts/codex/sessions/evidence.rs",
     ] {
         let path = root.join(name);
         let text = std::fs::read_to_string(&path).unwrap();
@@ -142,7 +142,7 @@ fn g8_claude_code_and_codex_derive_unavailable_from_host_profile() {
 #[test]
 fn g8_dsh_derives_unavailable_from_host_profile() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let path = root.join("crates/agent-vitals-adapters/src/hosts/dsh/sessions/evidence.rs");
+    let path = root.join("crates/agent-vitals-hosts/src/hosts/dsh/sessions/evidence.rs");
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains(r#"host_capability::host_profile("dsh")"#),
         "dsh_evidence.rs 的五个 unmeasured 信号置零应查 HOSTS 行");

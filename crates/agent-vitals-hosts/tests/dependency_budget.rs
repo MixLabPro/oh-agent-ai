@@ -48,7 +48,7 @@ fn adapters_dependency_budget_is_pure_and_one_way() {
     assert!(
         !dependency_keys(&domain_manifest)
             .iter()
-            .any(|v| v == "agent-vitals-adapters"),
+            .any(|v| v == "agent-vitals-hosts"),
         "domain's [dependencies] must not reference adapters (only the dev-dep back-edge is allowed)"
     );
 }
@@ -117,11 +117,11 @@ fn host_namespace_is_complete_and_surface_explicit() {
 #[test]
 fn flat_facade_and_host_namespaces_resolve_to_the_same_items() {
     assert_eq!(
-        agent_vitals_adapters::codex_usage::CODEX_TOKEN_FIELDS,
-        agent_vitals_adapters::hosts::codex::sessions::usage::CODEX_TOKEN_FIELDS
+        agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS,
+        agent_vitals_hosts::hosts::codex::sessions::usage::CODEX_TOKEN_FIELDS
     );
-    let _: Option<agent_vitals_adapters::claude_code_evidence::ClaudeEvidence> = None;
-    let _: Option<agent_vitals_adapters::hosts::codex::sessions::evidence::CodexEvidence> = None;
-    let _: Option<agent_vitals_adapters::dsh_evidence::DshEvidence> = None;
-    let _: Option<agent_vitals_adapters::workbuddy_evidence::WorkbuddyEvidence> = None;
+    let _: Option<agent_vitals_hosts::claude_code_evidence::ClaudeEvidence> = None;
+    let _: Option<agent_vitals_hosts::hosts::codex::sessions::evidence::CodexEvidence> = None;
+    let _: Option<agent_vitals_hosts::dsh_evidence::DshEvidence> = None;
+    let _: Option<agent_vitals_hosts::workbuddy_evidence::WorkbuddyEvidence> = None;
 }

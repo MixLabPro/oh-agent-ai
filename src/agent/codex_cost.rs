@@ -174,7 +174,7 @@ fn price_bucket(bucket: &Value, entry: &Value, lc: Option<(f64, f64)>) -> f64 {
 /// 5 桶对象 → `[i64; 5]`（桶序与 `CODEX_TOKEN_FIELDS` 一致）。
 fn bucket_fields(bucket: &Value) -> [i64; 5] {
     let mut out = [0i64; 5];
-    for (i, f) in agent_vitals_adapters::codex_usage::CODEX_TOKEN_FIELDS.iter().enumerate() {
+    for (i, f) in agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS.iter().enumerate() {
         out[i] = get_i64(bucket, f);
     }
     out
@@ -182,7 +182,7 @@ fn bucket_fields(bucket: &Value) -> [i64; 5] {
 
 fn tokens_object(t: &[i64; 5]) -> Value {
     let mut obj = Map::new();
-    for (i, f) in agent_vitals_adapters::codex_usage::CODEX_TOKEN_FIELDS.iter().enumerate() {
+    for (i, f) in agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS.iter().enumerate() {
         obj.insert((*f).to_string(), json!(t[i]));
     }
     Value::Object(obj)
@@ -293,7 +293,7 @@ pub fn codex_cost_report(
     // 小时桶先按日聚合（`codex_aggregate_hours`）；
     // 同时记下每个 (model, spd) 的「有日期份额」成本与 token，供 per_model 轴
     // 求 untimed 剩余用。by_date_model 键序 = 聚合的日期升序，days 保持升序。
-    let by_date_model = agent_vitals_adapters::codex_usage::codex_aggregate_hours(by_hour_model);
+    let by_date_model = agent_vitals_hosts::codex_usage::codex_aggregate_hours(by_hour_model);
     let mut dated_cost: HashMap<(String, String), f64> = HashMap::new(); // (model, spd) -> USD 费用（只含有价目桶）
     let mut dated_tokens: HashMap<(String, String), [i64; 5]> = HashMap::new(); // (model, spd) -> [5 桶]
     let mut days: Vec<Value> = Vec::new();
@@ -467,7 +467,7 @@ pub fn render_codex_cost(out: &Value) -> String {
     }
     // reasoning 是 output 的子集，故人读总量只加 4 个独立桶。
     let mut all_tokens: i64 = 0;
-    for f in agent_vitals_adapters::codex_usage::CODEX_TOKEN_FIELDS.iter().take(4) {
+    for f in agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS.iter().take(4) {
         all_tokens += tt.get(*f).and_then(|x| x.as_i64()).unwrap_or(0);
     }
     // 订阅套餐（plan 存在）时，per-token 美元是「按量标价」不是账单——账单 = 套餐

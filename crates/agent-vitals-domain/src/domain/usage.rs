@@ -1526,7 +1526,7 @@ mod tests {
     use crate::evidence::CoverageCounts;
     // canonical 归一层 phase C 迁进 `adapters/canonical_usage.rs`；这些测试
     // 复用本模块的 `reconcile_fixture`，留原处、经 crate 根 re-export 调进来。
-    use agent_vitals_adapters::canonical_usage::{
+    use agent_vitals_hosts::canonical_usage::{
         canonical_tokens, canonical_total_delta, CANONICAL_DIMS,
     };
 

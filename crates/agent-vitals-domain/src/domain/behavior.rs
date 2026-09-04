@@ -712,7 +712,7 @@ pub fn waste_coverage(waste: &Value, coverage: &Coverage) -> Value {
 }
 
 // `match_behavior`（DSH 原始事件 → findings 的兼容 shim）phase C 迁进
-// `agent-vitals-adapters` 的 `hosts/dsh/sessions/audit`（Phase D1）——domain 主体不再碰 DSH
+// `agent-vitals-hosts` 的 `hosts/dsh/sessions/audit`（Phase D1）——domain 主体不再碰 DSH
 // 的 JSON 事件形状。规则本体 `match_behavior_canonical`（吃 `&CanonicalSession`）
 // 留在这里。
 
@@ -764,7 +764,7 @@ mod tests {
     use crate::evidence::CoverageCounts;
     // `match_behavior` 的 raw-shim 已迁 audit；这些 raw-events 测试继续在这里
     // 调它（测试依赖，非生产依赖——crate 拆分后经 dev-dependency 解析）。
-    use agent_vitals_adapters::audit::match_behavior;
+    use agent_vitals_hosts::audit::match_behavior;
 
     fn ev(etype: &str, seq: i64, time: i64, data: Value) -> Value {
         json!({"type": etype, "seq": seq, "time": time, "data": data})

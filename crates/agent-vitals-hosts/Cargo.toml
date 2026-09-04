@@ -1,14 +1,14 @@
 [package]
-name = "agent-vitals-adapters"
+name = "agent-vitals-hosts"
 version = "1.3.0"
 edition = "2021"
 rust-version = "1.74"
-description = "Pure host protocol adapters for Agent Vitals"
+description = "Per-host wire adapters and I/O sources for Agent Vitals"
 repository = "https://github.com/MixLabPro/agent-vitals"
 license = "MIT"
 
 [lib]
-name = "agent_vitals_adapters"
+name = "agent_vitals_hosts"
 path = "src/lib.rs"
 
 [dependencies]

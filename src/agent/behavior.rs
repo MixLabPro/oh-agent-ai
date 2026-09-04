@@ -106,10 +106,10 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string();
-    let dsh_evidence = agent_vitals_adapters::dsh_evidence::build_dsh_evidence(
+    let dsh_evidence = agent_vitals_hosts::dsh_evidence::build_dsh_evidence(
         execution_events, usage_events_raw, cwd_raw.clone(), session_id,
     );
-    let (events, usage_events, _cwd_owned) = agent_vitals_adapters::dsh_evidence::reverse_project(&dsh_evidence);
+    let (events, usage_events, _cwd_owned) = agent_vitals_hosts::dsh_evidence::reverse_project(&dsh_evidence);
     // P3 group①：SV601–610 前置门控 + SV611–614 后置标注，三态都基于**分叉后**
     // 的证据判——但 `dsh_evidence`（上面）是从分叉前的 execution_events 建的，
     // 服务于 compaction/subagent/skill/duration 那些本来就该看到完整历史的
@@ -123,7 +123,7 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     // 从此依赖这一行。
     let post_fork_events = agent_vitals_domain::util::post_fork(&events);
     let post_fork_usage_events = agent_vitals_domain::util::post_fork(&usage_events);
-    let post_fork_evidence = agent_vitals_adapters::dsh_evidence::build_dsh_evidence(
+    let post_fork_evidence = agent_vitals_hosts::dsh_evidence::build_dsh_evidence(
         post_fork_events, post_fork_usage_events, cwd_raw.clone(), String::new(),
     );
     // 单事件规则（SV601–610）与轨迹级检测（SV611–614）都吃同一份分叉后
@@ -149,8 +149,8 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
     let usage = agent_vitals_domain::usage::token_by_model(&usage_events);
     let requests_val = agent_vitals_domain::usage::request_metrics(&usage_events);
     let context = agent_vitals_domain::usage::context_composition(&usage_events);
-    let compaction = agent_vitals_adapters::compaction::compaction_events(&events);
-    let waste = Value::Array(agent_vitals_adapters::waste::detect_structural_waste(&events, requests_val.as_array().unwrap_or(&Vec::new())));
+    let compaction = agent_vitals_hosts::compaction::compaction_events(&events);
+    let waste = Value::Array(agent_vitals_hosts::waste::detect_structural_waste(&events, requests_val.as_array().unwrap_or(&Vec::new())));
     // 分叉前被排除掉的用量。上面每一项都只算分叉之后（post_fork），金额会因此
     // 显著变小；不把排除量说出来，读的人会以为数据坏了。没分叉时是 null。
     let pre_fork = agent_vitals_domain::usage::pre_fork_usage(&usage_events);

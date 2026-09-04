@@ -7,12 +7,12 @@
 //!   `contracts_module_stays_vocabulary_only` 钉住。
 //! - `domain/` — 跨宿主业务计算（behavior/trajectory/cost/usage/detectors/plan/…）。
 //!   **对任何宿主的 wire 事件形状不知情**：DSH wire 解析在 v0.8 Phase D1 迁进
-//!   `agent-vitals-adapters/hosts/dsh/sessions/`。`coords`（`Coords` 坐标顺延）留
+//!   `agent-vitals-hosts/hosts/dsh/sessions/`。`coords`（`Coords` 坐标顺延）留
 //!   这里——只认 `turn`/`step`/`call_id` 抽象字段名，host-agnostic。
 //! - `compatibility/` — 通往 `vitals-core` 引擎的兼容桥。
 //!
 //! v0.8 Phase C：Phase A 在 core 内建 `contracts/domain/compatibility` 逻辑目录；
-//! Step 3 把 Codex fold + canonical 归一层迁进 `agent-vitals-adapters`；Step 4 把
+//! Step 3 把 Codex fold + canonical 归一层迁进 `agent-vitals-hosts`；Step 4 把
 //! `domain/` + `compatibility/` + `contracts/` 整体抽成本 crate，`agent-vitals-core`
 //! 曾作一个版本周期的薄 facade、随即撤销——调用方直接 `use agent_vitals_domain::*`。
 //! Phase D1 把 DSH wire（`evidence`/`audit`/`compaction`/`waste`）迁出 domain。

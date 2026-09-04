@@ -1,6 +1,6 @@
 """DSH execution_events → canonical session 的翻译层（Python 镜像）。
 
-Rust `crates/agent-vitals-adapters/src/hosts/dsh/sessions/evidence.rs::populate_timelines` 的
+Rust `crates/agent-vitals-hosts/src/hosts/dsh/sessions/evidence.rs::populate_timelines` 的
 Python 对应——把 execution_events 翻译成 `canonical_audit.py::audit_projection`
 消费的 5 条 host-neutral timeline（tool_calls/tool_results/approvals/
 sandbox_modes/turns）。v0.6 host-contract spec §7-C / §11-M1 交付：DSH 的

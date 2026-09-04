@@ -28,8 +28,8 @@ use serde_json::{json, Map, Value};
 
 use crate::agent::codex_cost::{codex_cost_report, load_codex_pricing};
 use crate::agent::codex_session::{codex_rollout_files, read_codex_session_log, read_session_index};
-use agent_vitals_adapters::codex_evidence::{build_codex_evidence, codex_evidence_json, CodexEvidence};
-use agent_vitals_adapters::codex_usage::{codex_hour_of, codex_merge_folds};
+use agent_vitals_hosts::codex_evidence::{build_codex_evidence, codex_evidence_json, CodexEvidence};
+use agent_vitals_hosts::codex_usage::{codex_hour_of, codex_merge_folds};
 
 /// 一份 rollout 文件对 `codex-session` 有用的全部信息。degraded 文件（不可读/
 /// 非 JSON/空）→ items 空 + 时间戳 None，但**仍按文件名兜底的 session_id
@@ -298,7 +298,7 @@ pub fn codex_session_audit_json(home: &Path, session_id: &str) -> Option<Value> 
     let mut fold_folds: Vec<Value> = Vec::new();
     for f in &files {
         all_items.extend(f.items.iter().cloned());
-        fold_folds.push(agent_vitals_adapters::codex_usage::codex_fold_file(&f.items));
+        fold_folds.push(agent_vitals_hosts::codex_usage::codex_fold_file(&f.items));
     }
     // 上下文窗口必须在 all_items 被 build_codex_evidence 消耗之前读（最后看见的
     // token_count.info.model_context_window 赢）。
@@ -318,7 +318,7 @@ pub fn codex_session_audit_json(home: &Path, session_id: &str) -> Option<Value> 
         // 空折叠：全零结构（同 main.rs `codex_report_from_merged` 的兜底——调用方
         // 要的是「没有数据」而不是「崩了」，unaccounted/plan 必须透传）。
         let mut tt = Map::new();
-        for f in agent_vitals_adapters::codex_usage::CODEX_TOKEN_FIELDS {
+        for f in agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS {
             tt.insert(f.to_string(), json!(0));
         }
         let mut base = Map::new();

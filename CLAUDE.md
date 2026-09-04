@@ -29,7 +29,7 @@ first, then a Chinese section anchored at `#中文`. When editing behaviour, bot
 ## Repo layout
 
 ```
-Cargo.toml                  # [workspace]: "." + crates/{vitals-core,agent-vitals-domain,agent-vitals-adapters,agent-vitals-wasm}
+Cargo.toml                  # [workspace]: "." + crates/{vitals-core,agent-vitals-domain,agent-vitals-hosts,agent-vitals-wasm}
 src/                        # Rust binary (the `agent-vitals` CLI)
   skills/                   #   静态 SKILL.md 体检（analysis/security/doctor/discovery/…）
   agent/                    #   会话行为/成本审计（behavior/cost/codex_cost/codex_session）
@@ -40,10 +40,11 @@ crates/agent-vitals-domain/ # v0.8 Phase C：PURE computation + 词表契约，s
                             #   （evidence/host_capability/source_identity/usage_fact/r2a，只碰 serde_json）；
                             #   domain/=跨宿主计算（Phase D1 起对任何宿主 wire 事件形状不知情）；
                             #   compatibility/=vitals-core 桥。lib.rs 暴露嵌套 + 扁平两套路径。
-crates/agent-vitals-adapters/ # v0.8 Phase B1：叶子 host 证据适配（claude_code/codex/workbuddy evidence）迁出 core 的纯 crate。
-                            #   Phase C(B2)：Codex usage fold（codex_usage）+ 跨宿主 canonical_usage 归一层。
-                            #   Phase D1：DSH wire 解析（hosts/dsh/sessions/{evidence,audit,compaction,waste}）也迁进来。依赖 domain。
-crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + adapters (audit_events), built with wasm-pack
+crates/agent-vitals-hosts/ # v0.8：一个 crate 装所有宿主的 wire 适配（D3 由 agent-vitals-adapters 改名）。
+                            #   hosts/<h>/sessions/=会话证据（纯，wasm 可链）：claude_code/codex/workbuddy evidence、
+                            #   Codex usage fold、canonical_usage、Phase D1 起的 DSH evidence/audit/compaction/waste。
+                            #   hosts/<h>/{sources/（I/O，feature-gated）,skills/,capability.rs}=D4/D5 填。依赖 domain。
+crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + hosts (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/
 scripts/agent_vitals/       # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
                             #   adapters/（宿主适配器）与 cli/compat/util/paths 留顶层
@@ -73,49 +74,47 @@ The **`agent-vitals-domain` crate is the single source of truth for pure rules**
 wasm crate wraps the same domain, so the browser/Node runs the exact same rules as the
 CLI — never a second copy.
 
-**v0.8 crate split (Phase C complete — `docs/AGENT_VITALS_V0_8_ARCHITECTURE_SPEC.md`).**
-Phase A carved `agent-vitals-core/src` into `contracts/` / `domain/` / `compatibility/`
-logical dirs; Phase B1 moved the leaf host-evidence adapters (Claude/Codex/WorkBuddy
-`*_evidence`) into `agent-vitals-adapters`. **Phase C Step 1-2** hoisted the DSH raw-event
-helpers (`Coords`, `match_behavior`/`match_trajectory` shims, `compaction`/`waste`) out of
-`domain/*.rs` production paths; **Step 3 (B2)** moved `codex_usage` + the cross-host
-`canonical_usage` layer into `agent-vitals-adapters`, and the DSH wire interpreters
-(`evidence`/`audit`/`compaction`/`waste`) into `domain/dsh/` as registered layer-2 debt;
-**Step 4** finished the crate split into **three crates**:
+**v0.8 crate split (Phase C complete, Phase D in progress — `docs/AGENT_VITALS_V0_8_ARCHITECTURE_SPEC.md`).**
+The workspace is now four crates:
 
 - **`vitals-core`** — the host-agnostic engine (unchanged).
 - **`agent-vitals-domain`** — `contracts/` (host-agnostic vocabulary — `evidence`,
   `host_capability`, `source_identity`, `usage_fact`, `r2a`) + `domain/` (pure business
-  computation) + `domain/dsh/` (registered layer-2 DSH-wire debt) + `compatibility/` (the
+  computation — since Phase D1 it knows **no** host wire format) + `compatibility/` (the
   `vitals-core` bridge). Depends on `vitals-core` + `regex` + `serde_json`.
-  `[dev-dependencies] agent-vitals-adapters` for the `domain/usage.rs::tests` that exchange
-  only `serde_json::Value` with `canonical_tokens`; the `build_dsh_evidence` fixture tests
-  stay in `domain/dsh/` (intra-crate) because a `domain → adapters` dev-dep cycle makes
-  Cargo compile domain twice (`multiple versions of crate` for any inline test passing a
-  domain type across the boundary). `lib.rs` re-exports both nested
-  (`agent_vitals_domain::{contracts,domain}::X`) and flat
+  `[dev-dependencies] agent-vitals-hosts` for `domain/usage.rs::tests` (exchange only
+  `serde_json::Value`) and `tests/behavior_rules.rs` (an integration test — domain is
+  compiled once there, so `build_dsh_evidence` fixtures returning `CanonicalSession` are
+  fine; the same call inside an *inline* `#[cfg(test)]` hits `multiple versions of crate`).
+  `lib.rs` re-exports both nested (`agent_vitals_domain::{contracts,domain}::X`) and flat
   (`agent_vitals_domain::{evidence,behavior,cost,…}::X`) paths.
-- **`agent-vitals-adapters`** — host wire adapters (Claude/Codex/WorkBuddy evidence, Codex
-  fold, `canonical_usage`, and — since **v0.8 Phase D1** — DSH session wire
-  `hosts/dsh/sessions/{evidence,audit,compaction,waste}`). Depends on `agent-vitals-domain`.
+- **`agent-vitals-hosts`** (was `agent-vitals-adapters` until Phase D3) — one crate, one
+  folder per host: `hosts/<h>/sessions/` (session evidence — pure, wasm-linkable: all
+  `*_evidence`, Codex fold, `canonical_usage`, and the DSH session wire
+  `{evidence,audit,compaction,waste}` moved here in D1), plus `hosts/<h>/{sources/
+  (feature-gated I/O), skills/, capability.rs}` to be filled by D4/D5. Depends on
+  `agent-vitals-domain`.
 
-`agent-vitals-core` was a one-cycle re-export facade during Step 4 and was removed at
-Step 4's close — the binary / wasm / adapters / `src-tauri` import `agent_vitals_domain::*`
-directly.
+**History**: Phase A carved `agent-vitals-core/src` into `contracts/`/`domain/`/
+`compatibility/` dirs; B1 extracted the adapters crate; B2 (Phase C Step 3) moved
+`codex_usage` + `canonical_usage` into it; Step 4 consolidated `contracts` into
+`agent-vitals-domain` and deleted the one-cycle `agent-vitals-core` facade (the binary /
+wasm / hosts / `src-tauri` import `agent_vitals_domain::*` directly). Phase D1 moved the
+DSH session wire out of domain; D3 renamed the crate. Execution logs:
+`AGENT_VITALS_V0_8_PHASE_{C,D}_RESEARCH.md`.
 
-**Phase D1 (wire/fold separation) moved DSH wire parsing out of `domain/`.** The
-`evidence`/`audit`/`compaction`/`waste` modules (which read DSH raw event shapes like
-`"tool/call"`) now live in `agent-vitals-adapters/src/hosts/dsh/sessions/`;
-`domain/` no longer knows any host wire format. The `build_dsh_evidence` fixture tests
-that could not survive the `domain → adapters` dev-dep cycle as inline tests moved to
-`agent-vitals-domain/tests/behavior_rules.rs` (an integration test — domain is compiled
-once there). `domain/coords.rs` (`Coords` — abstract `turn`/`step`/`call_id` field names,
-host-agnostic) stays in domain. `agent-vitals-domain/tests/dependency_budget.rs`
-(`domain_holds_no_dsh_wire_module` + `domain_production_code_has_no_host_adapter_dependency`)
-pins that domain never regrows a wire module. Other module boundaries — `contracts/` stays
-serde_json-only (`contracts_module_stays_vocabulary_only`), domain takes no
-fs/process/env/clock, adapters is one-way (`adapters → domain`) — are executable in each
-crate's `tests/dependency_budget.rs`.
+**Executable boundary guards** (each crate's `tests/dependency_budget.rs` /
+`crates/vitals-core/tests/dependency_boundary.rs`): `contracts/` stays serde_json-only
+(`contracts_module_stays_vocabulary_only`); `domain/` takes no fs/process/env/clock and
+holds no DSH wire module (`domain_holds_no_dsh_wire_module` +
+`domain_production_code_has_no_host_adapter_dependency`); dependency direction is one-way
+(`hosts → domain → vitals-core`); `vitals-core` names no Agent/host term and depends on no
+`agent-vitals-*` crate.
+
+**Phase D remaining** (`docs/AGENT_VITALS_V0_8_PHASE_D_RESEARCH.md`): D2 `cost.rs` file
+split · D4 DSH I/O (`src/dsh.rs` zstd) → `hosts/dsh/sources/` (feature-gated) · D5 other
+host session readers + `rusqlite` → `hosts/<h>/sources/` · D6 `agent-vitals-runtime` crate
+(state/ledger/takeover) · D7 one `HomeResolver`. Then Phase E (dir moves) / F (MCP).
 
 ## Commands
 
@@ -129,7 +128,7 @@ python3 tests/golden_runner.py --update    # re-freeze after an intended change 
 python3 -m unittest tests.test_invariants  # the 12-invariant acceptance gate
 
 # Rust — ~970 tests: binary (313) + agent-vitals-domain (431 lib + host_contract +
-# dependency_budget + 15 svNNN_parity) + agent-vitals-adapters (56 + dependency_budget)
+# dependency_budget + 15 svNNN_parity) + agent-vitals-hosts (56 + dependency_budget)
 # + vitals-core (53 + boundary/replay/perf/pipeline). The wasm crate has no host-side
 # tests; its build is wasm-pack (below).
 cargo test                                 # default members: binary + the 3 lib crates
