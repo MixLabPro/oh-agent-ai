@@ -109,3 +109,30 @@ workspace-root 命令，不硬编码 crate 列表，新 member 靠 `default-memb
 
 0.3（只读 JSON adapter，把 `r2a_store.rs::host_snapshot` 现有输出组装成
 `MonthlySummary`/`DailySummary`）是下一步。
+
+## 5. 顺序更正：0.3 与 0.4 对调（同 v0.8 E7.5/E7.6 的教训）
+
+动手设计 0.3 时核实依赖方向，发现计划顺序又一次是反的——跟 v0.8 E7.5/E7.6
+撞见的问题同一类，本节按同一纪律记录更正，而不是悄悄改顺序。
+
+`host_snapshot`/`SessionStore`（"今日/本月折叠"的现有实现）目前整个住在
+`apps/cli/src/agent/r2a_store.rs`——DAG 最顶层。`agent-vitals-data`（依赖
+`domain`，未来加 `hosts`）与 `agent-vitals-runtime`（依赖 `hosts + data`）
+都在 `apps/cli` **之下**，谁都不能反过来依赖二进制里的这份逻辑。如果先做
+"0.3 读 adapter"，能拿到这份数据的唯一办法是把组装代码也写进 `apps/cli`
+本身——但那正是 spec §0.1 门槛"CLI 不再拥有宿主 wire 解释或事实写入"要
+消灭的形态，而且 0.4（CLI application-layer extraction）一旦把
+`SessionStore` 搬进 runtime，这段刚写的组装代码又要跟着搬一次，等于重复
+劳动。
+
+更正后的执行序：**0.3 = CLI application-layer extraction（原 0.4）→
+0.4 = 只读 JSON adapter（原 0.3，现在天然长在 runtime 里，可以直接调用
+刚迁移过去的 SessionStore）**。0.5-0.7 的编号与内容不变，只是现在依赖
+0.3/0.4 的顺序而非原表格的 0.3/0.4。
+
+架构判断：`agent-vitals-data::repository` 定义**接口**（trait +
+`agent_vitals_domain::data_contract` 的 DTO），Stage 0 的**实现**
+（读现有 `state.json`/ledger/`SessionStore` 缓存拼出 DTO）放在
+`agent-vitals-runtime`——这是仓库里已经有先例的"契约低、I/O 高"分层
+（`host_capability::HostProfile` 声明能力 vs. 二进制侧
+`HostRuntimeRegistration` 声明实现存在性），不是新发明一层抽象。
