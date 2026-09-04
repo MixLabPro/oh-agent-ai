@@ -44,7 +44,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::skills::discovery::{collect, Ctx, SourceMeta, DEFAULT_ROOTS};
-use crate::skills::host::HostConfig;
+use agent_vitals_hosts::hosts::claude_code::skills::HostConfig;
 use crate::util::norm;
 use agent_vitals_hosts::dsh_sources as dsh;
 use crate::{skills::codex, skills::discovery, skills::openclaw, skills::workbuddy};

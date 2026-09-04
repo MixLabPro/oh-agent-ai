@@ -50,24 +50,11 @@ pub fn norm(p: &Path) -> String {
 /// `content_hash`（字节不同）、`tier1_tokens`（字符数不同）、`body_lines`。
 /// 它只在 CRLF 文件上显形 —— 也就是 Windows 上写的 skill。
 pub fn read_lossy(p: &Path) -> Option<String> {
+    // I/O 在这里；转换逻辑（宽松 UTF-8 + universal newlines）下沉到 domain——
+    // v0.8 Phase E7.6 起 agent-vitals-hosts 读 ~/.claude.json 也要同一份转换，
+    // 见 agent_vitals_domain::util::bytes_to_lossy_normalized 的文档注释。
     let bytes = std::fs::read(p).ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    if !text.contains('\r') {
-        return Some(text.into_owned());
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\r' {
-            if chars.peek() == Some(&'\n') {
-                chars.next();
-            }
-            out.push('\n');
-        } else {
-            out.push(c);
-        }
-    }
-    Some(out)
+    Some(agent_vitals_domain::util::bytes_to_lossy_normalized(&bytes))
 }
 
 /// 粗略 token 估算。**单一真相源在 core**（`agent_vitals_domain::util::est_tokens`），

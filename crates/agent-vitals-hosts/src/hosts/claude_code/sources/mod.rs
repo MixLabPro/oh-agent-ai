@@ -27,6 +27,10 @@ use crate::claude_code_evidence::{
     build_claude_evidence, claude_evidence_json, ClaudeEvidence,
 };
 
+// v0.8 Phase E7.6：Skill 配置 I/O（`~/.claude.json` 读取）与本文件的会话 I/O
+// 是两条独立证据线，分文件放，不往上面那批会话 locate/shape/extract 函数里插。
+pub mod skills;
+
 /// 一个会话文件对 `claude-session` 有用的全部信息（路径本身没有消费者——
 /// 调用方各自从 walk 结果拿路径，这里只携带读出来的元数据）。
 struct FileInfo {

@@ -2008,7 +2008,7 @@ session_store={store} fold={fold}"
         self_root,
     };
 
-    let cfg = skills::host::read_host_config(&home_n);
+    let cfg = agent_vitals_hosts::hosts::claude_code::sources::skills::read_host_config(&home_n);
 
     // Session surface 负责读日志；Skill surface 只消费注入的证据。
     let (dsh_path, dsh_evidence) = agent_vitals_runtime::session_sources::read_dsh_skill_correlation();

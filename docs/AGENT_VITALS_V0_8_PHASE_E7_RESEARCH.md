@@ -154,6 +154,23 @@ E7.6  codex.rs / openclaw.rs / workbuddy.rs / host.rs → hosts/<h>/skills/
       diff 对这批探测代码本身的覆盖率**低于**对纯规则/纯解析代码的覆盖率——
       移动这批代码时哪怕语法正确、golden 也过，仍不能像 E7.1-E7.4 那样把
       "golden 绿"当作"零行为漂移"的完整证明，需要额外读一遍探测逻辑本身。
+
+      **host.rs 已完成**（不在原 E7.6 清单里，调研时顺带发现的同类问题）：
+      早先"零 I/O"的判断（grep `std::fs`/`std::process` 字面量）漏了间接 I/O
+      ——`read_host_config` 内部调 `read_lossy`（读 `~/.claude.json`），grep
+      抓不到。拆法同 E7.3：纯部分（`HostConfig`/`is_truthy`/`to_count`/
+      `lookup_usage`/新写的 `parse_host_config`）进
+      `agent-vitals-hosts::hosts::claude_code::skills`；I/O 部分
+      （`read_host_config` 本体）进新建的 `…::sources::skills`（`sources.rs`
+      顺带升级成 `sources/` 目录，`mod.rs` 是原会话 I/O，`skills.rs` 是新的
+      配置 I/O，两条证据线分文件不混）。副产品：`read_lossy` 的字节→宽松
+      UTF-8+CRLF 归一化逻辑也被迫下沉到
+      `agent_vitals_domain::util::bytes_to_lossy_normalized`——不然
+      `agent-vitals-hosts` 没法复用同一份转换算法，只能手搓一份近似实现，
+      那正是本仓库"never a second copy"要防的事。`claude-code`/
+      `claude-code-all`/`no-host-config` 三个 golden case 直接覆盖
+      `read_host_config` 的真实路径，不是禁用态，golden 绿在这里确实是
+      完整证明（不像 codex/openclaw 的探测代码）。
 E7.5  inventory.rs + discovery.rs 拆分 → runtime/skills/{inventory,scanner}.rs
       discovery.rs 963 行是这次最大最复杂的一块——4 处 I/O 命中不代表只有 4 处
       跟宿主相关，需要通读，可能还要再拆出 hosts/<h>/skills/ 的部分（哪些目录

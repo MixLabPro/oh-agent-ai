@@ -201,6 +201,32 @@ pub fn chars(v: &Value, k: &str) -> usize {
     v.get(k).and_then(|x| x.as_str()).map_or(0, |x| x.chars().count())
 }
 
+/// 字节 → 宽松 UTF-8（非法字节替换为 U+FFFD）+ universal newlines（`\r\n`/`\r`
+/// 都归一成 `\n`）——v0.8 Phase E7.6 从 `apps/cli/src/util.rs::read_lossy` 拆出
+/// 纯转换部分（该函数本身做 `std::fs::read`，是 I/O，留在二进制侧；
+/// `agent-vitals-hosts::hosts::claude_code::sources::skills::read_host_config`
+/// 读 `~/.claude.json` 需要同一份转换逻辑，不能各写一份 —— 两处的字节来源都是
+/// 真实文件，编码/换行异常的处理必须逐字节一致）。
+pub fn bytes_to_lossy_normalized(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    if !text.contains('\r') {
+        return text.into_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// 会话分叉边界：日志头 `session` 事件里的 `seedLength`；没有就是没分叉。
 ///
 /// **为什么需要它**：DSH 里从已有会话「branch into new conversation」派生出的
@@ -388,6 +414,33 @@ mod json_field_accessor_tests {
     #[test]
     fn chars_counts_unicode_scalars_not_bytes() {
         let v = json!({"k": "中文abc"});
-        assert_eq!(chars(&v, "k"), 5, "3 个中文字符 + 3 个 ASCII = 5，不是字节数");
+        assert_eq!(chars(&v, "k"), 5, "3 个中文字符 + 3 个 ASCII 字符 = 5，不是字节数");
+    }
+}
+
+#[cfg(test)]
+mod bytes_to_lossy_normalized_tests {
+    use super::*;
+
+    #[test]
+    fn plain_lf_passes_through_unchanged() {
+        assert_eq!(bytes_to_lossy_normalized(b"a\nb\n"), "a\nb\n");
+    }
+
+    #[test]
+    fn crlf_and_bare_cr_both_normalize_to_lf() {
+        assert_eq!(bytes_to_lossy_normalized(b"a\r\nb\rc"), "a\nb\nc");
+    }
+
+    #[test]
+    fn invalid_utf8_bytes_become_replacement_character() {
+        let out = bytes_to_lossy_normalized(&[b'a', 0xFF, b'b']);
+        assert!(out.contains('\u{FFFD}'));
+        assert!(out.starts_with('a') && out.ends_with('b'));
+    }
+
+    #[test]
+    fn empty_input_is_empty_output() {
+        assert_eq!(bytes_to_lossy_normalized(b""), "");
     }
 }

@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use agent_vitals_domain::skills::frontmatter::parse_frontmatter;
-use crate::skills::host::lookup_usage;
+use agent_vitals_hosts::hosts::claude_code::skills::lookup_usage;
 use crate::skills::security::security_scan;
 use crate::util::{est_tokens, norm, pyround, read_lossy};
 

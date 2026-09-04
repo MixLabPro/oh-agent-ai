@@ -33,7 +33,9 @@ RS_SRC = ROOT / "apps" / "cli" / "src"  # v0.8 Phase E3：二进制从根 src/ �
 # s/i/f/b/chars 取值助手）、E7.3 security（拆出纯规则引擎 security_rules，
 # I/O 部分留 apps/cli 当薄壳，security 本身不搬）迁进 agent-vitals-domain/
 # src/domain/skills/；E7.4 snapshot（本机快照读写，I/O 天然属于 runtime，
-# 不需要像 security 那样拆）迁进 agent-vitals-runtime/src/skills/——都不再在
+# 不需要像 security 那样拆）迁进 agent-vitals-runtime/src/skills/；E7.6 host
+# （Claude Code 宿主配置解释，拆出纯部分到 agent-vitals-hosts::hosts::
+# claude_code::skills，I/O 部分到 …::sources::skills）——都不再在
 # apps/cli/src/skills/，从 RS_SKILLS_FAMILY 里删掉；Python 侧对应模块暂未
 # 跟进搬迁，PY_SKILLS_FAMILY 不变。
 PY_SKILLS_FAMILY = {
@@ -43,7 +45,7 @@ PY_SKILLS_FAMILY = {
 }
 RS_SKILLS_FAMILY = {
     "codex", "diff", "discovery", "doctor", "explain",
-    "host", "inventory", "openclaw", "redact",
+    "inventory", "openclaw", "redact",
     "render", "report", "security", "workbuddy",
 }
 

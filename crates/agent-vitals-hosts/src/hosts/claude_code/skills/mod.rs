@@ -1,14 +1,14 @@
-//! 宿主配置：哪些插件启用了、每个 skill 触发过几次。
+//! Claude Code 的宿主配置解释——**纯**（wasm 可链）。v0.8 Phase E7.6 从
+//! `apps/cli/src/skills/host.rs` 拆出（原文件的 `read_host_config` 真读
+//! `~/.claude.json`，是 I/O，留在 `sources/skills.rs`；这里只认已经读进内存
+//! 的 `serde_json::Value`）。
 //!
 //! 不变量 12 的实现所在：**拿不到就报 unavailable，绝不用装机时间或 mtime
 //! 代替触发数。**缺一列的报告有价值，编一列的没有。
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use serde_json::{Map, Value};
-
-use crate::util::read_lossy;
 
 pub struct HostConfig {
     /// None = 读不到配置，**不是**「读到了但没启用任何插件」。
@@ -31,25 +31,9 @@ fn is_truthy(v: &Value) -> bool {
     }
 }
 
-pub fn read_host_config(home: &str) -> HostConfig {
-    let path = PathBuf::from(home).join(".claude.json");
-    let missing = HostConfig {
-        enabled: None,
-        usage: Map::new(),
-        present: false,
-    };
-    if !path.is_file() {
-        return missing;
-    }
-    let text = match read_lossy(&path) {
-        Some(t) => t,
-        None => return missing,
-    };
-    let doc: Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(_) => return missing,
-    };
-
+/// `~/.claude.json` 已经解析成 `Value` 之后的解释——是不是文件、读不读得到、
+/// JSON 合不合法，都是调用方（`sources/skills.rs::read_host_config`）的事。
+pub fn parse_host_config(doc: &Value) -> HostConfig {
     let mut enabled: HashSet<String> = HashSet::new();
     let mut found_key = false;
     let mut absorb = |v: Option<&Value>| match v {
@@ -193,5 +177,29 @@ mod tests {
     #[test]
     fn unexpected_type_is_skipped() {
         assert_eq!(lookup_usage(&m(json!({"t": "nope"})), "t", None), (0, None, None));
+    }
+
+    #[test]
+    fn parse_host_config_reads_enabled_plugins_and_usage() {
+        let doc = json!({
+            "enabledPlugins": {"a": true, "b": false},
+            "projects": {"/x": {"enabledPlugins": {"c": true}}},
+            "skillUsage": {"a": {"usageCount": 3}},
+        });
+        let cfg = parse_host_config(&doc);
+        assert!(cfg.present);
+        let enabled = cfg.enabled.expect("found enabledPlugins key");
+        assert!(enabled.contains("a"));
+        assert!(!enabled.contains("b"), "falsy value must not be enabled");
+        assert!(enabled.contains("c"), "project-scoped enabledPlugins must merge in");
+        assert_eq!(cfg.usage.get("a").and_then(|v| v.get("usageCount")), Some(&json!(3)));
+    }
+
+    #[test]
+    fn parse_host_config_no_enabled_plugins_key_is_empty_not_none() {
+        // found_key=false → Some(空集合)，不是 None——「读到了但没有这个键」与
+        // 「读不到文件」在报告里含义不同，None 留给 read_host_config 的 I/O 分支。
+        let cfg = parse_host_config(&json!({}));
+        assert_eq!(cfg.enabled, Some(HashSet::new()));
     }
 }
