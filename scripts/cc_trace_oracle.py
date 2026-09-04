@@ -184,28 +184,29 @@ def classify_attribution(logs_dir: Path) -> tuple[Counter, dict]:
     tokens: dict = defaultdict(lambda: [0, 0])  # (tc, th) -> [sum_input, sum_output]
     for path in sorted(logs_dir.rglob("*.jsonl")):
         our = cc = None
-        for line in open(path, encoding="utf-8"):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            t, p = ev.get("type"), ev.get("payload") or {}
-            if t == "session_meta" and p.get("model"):
-                our = cc = p["model"]
-            elif t == "turn_context" and p.get("model"):
-                our = cc = p["model"]
-            elif (t == "event_msg" and p.get("type") == "thread_settings_applied"
-                  and (p.get("thread_settings") or {}).get("model")):
-                cc = p["thread_settings"]["model"]
-            elif (t == "event_msg" and p.get("type") == "token_count"):
-                last = ((p.get("info") or {}).get("last_token_usage") or {})
-                if isinstance(last, dict) and our and cc and our != cc:
-                    counts[(our, cc)] += 1
-                    tokens[(our, cc)][0] += last.get("input_tokens") or 0
-                    tokens[(our, cc)][1] += last.get("output_tokens") or 0
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                t, p = ev.get("type"), ev.get("payload") or {}
+                if t == "session_meta" and p.get("model"):
+                    our = cc = p["model"]
+                elif t == "turn_context" and p.get("model"):
+                    our = cc = p["model"]
+                elif (t == "event_msg" and p.get("type") == "thread_settings_applied"
+                      and (p.get("thread_settings") or {}).get("model")):
+                    cc = p["thread_settings"]["model"]
+                elif (t == "event_msg" and p.get("type") == "token_count"):
+                    last = ((p.get("info") or {}).get("last_token_usage") or {})
+                    if isinstance(last, dict) and our and cc and our != cc:
+                        counts[(our, cc)] += 1
+                        tokens[(our, cc)][0] += last.get("input_tokens") or 0
+                        tokens[(our, cc)][1] += last.get("output_tokens") or 0
     return counts, dict(tokens)
 
 

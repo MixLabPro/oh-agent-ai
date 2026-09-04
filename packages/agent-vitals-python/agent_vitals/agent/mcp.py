@@ -15,15 +15,20 @@ from collections import defaultdict
 def parse_mcp_tool_name(name):
     """`mcp__<server>__<tool>` → `(server, tool)`；不匹配三段式 → `None`。
 
-    拆分点是**第一个** `mcp__` 前缀之后、**最后一个** `__` 处——server/tool 本身
-    允许含 `_`/`-`（例如 `mcp__claude-in-chrome__read_console_messages`）。
+    `mcp__` 前缀之后**必须恰好有一处** `__` 分隔——server/tool 本身允许含单
+    下划线/连字符（例如 `mcp__claude-in-chrome__read_console_messages`），但
+    出现第二处 `__`（例如 `mcp__server__part__tool`）时边界是歧义的，没有约定
+    告诉我们该在哪一处切，判不匹配返回 `None`，不贪心猜一个（旧实现用
+    `rsplit("__", 1)` 只取最后一处，会把 `server__part` 静默当成 server 名——
+    对多数真实名字巧合有效，对歧义输入是猜测不是诚实拒绝）。
     """
     if not name.startswith("mcp__"):
         return None
     rest = name[len("mcp__"):]
-    if "__" not in rest:
+    parts = rest.split("__")
+    if len(parts) != 2:
         return None
-    server, tool = rest.rsplit("__", 1)
+    server, tool = parts
     if not server or not tool:
         return None
     return server, tool

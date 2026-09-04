@@ -28,12 +28,19 @@ class ParseMcpToolNameCase(unittest.TestCase):
         )
 
     def test_server_and_tool_may_contain_underscores_and_hyphens(self):
-        # 实测本环境真实工具名：server 含连字符，tool 含下划线。拆分点必须是
-        # 最后一个 "__"，不能贪心地取第一个（否则 "claude-in-chrome" 会被切碎）。
+        # 实测本环境真实工具名：server 含连字符，tool 含单下划线，但两者都不含
+        # 第二处 "__"，所以恰好一处分隔点、无歧义。
         self.assertEqual(
             parse_mcp_tool_name("mcp__claude-in-chrome__read_console_messages"),
             ("claude-in-chrome", "read_console_messages"),
         )
+
+    def test_ambiguous_four_segment_form_is_rejected(self):
+        # 回归测试：曾经的实现用 rsplit("__", 1) 只找最后一处 "__"，会把
+        # "server__part" 悄悄当成 server 名返回，而不是诚实报告"边界歧义、不
+        # 认识"。真实 MCP 服务器/工具名是否会出现第二处 "__" 没有约定可查，
+        # 宁可拒绝也不猜。
+        self.assertIsNone(parse_mcp_tool_name("mcp__server__part__tool"))
 
     def test_missing_prefix_is_not_mcp(self):
         self.assertIsNone(parse_mcp_tool_name("Bash"))

@@ -29,14 +29,23 @@ use std::collections::BTreeMap;
 /// 少一段、多一段都算不匹配）→ `None`，调用方原样当内置工具处理，不是
 /// MCP 调用，不臆造服务器身份。
 ///
-/// `server`/`tool` 本身允许含 `_`（MCP 服务器名/工具名不保证不含下划线）——
-/// 拆分点是**第一个** `__` 与**最后一个** `__`：前缀 `mcp__` 之后到最后一个
-/// `__` 之前是 server，最后一个 `__` 之后到结尾是 tool。这与本环境实测的
-/// `mcp__claude-in-chrome__read_console_messages`（server 含连字符、tool 含
-/// 下划线）这类真实名字对得上。
+/// `server`/`tool` 本身允许含单下划线/连字符（MCP 服务器名/工具名不保证不含
+/// `_`/`-`），例如本环境实测的 `mcp__claude-in-chrome__read_console_messages`。
+/// 但 `mcp__` 前缀之后**必须恰好有一处** `__` 分隔——如果出现第二处 `__`
+/// （例如 `mcp__server__part__tool`），server 与 tool 的真实边界就是歧义的，
+/// 没有约定告诉我们该在哪一处切，所以整体判不匹配、返回 `None`，而不是贪心
+/// 取最后一处 `__` 猜一个（曾经的实现用 `rsplit_once` 只取最后一处，会把
+/// `server__part` 当成 server 名——这只是巧合地对多数真实名字有效，对歧义
+/// 输入是静默猜测，不是诚实拒绝，`test_ambiguous_four_segment_form_is_rejected`
+/// 钉住这条回归）。
 pub fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
     let rest = name.strip_prefix("mcp__")?;
-    let (server, tool) = rest.rsplit_once("__")?;
+    let mut parts = rest.split("__");
+    let server = parts.next()?;
+    let tool = parts.next()?;
+    if parts.next().is_some() {
+        return None; // 第三段起出现 → 边界歧义，拒绝而不是猜
+    }
     if server.is_empty() || tool.is_empty() {
         return None;
     }
@@ -76,8 +85,8 @@ mod tests {
 
     #[test]
     fn server_and_tool_may_contain_underscores_and_hyphens() {
-        // 实测本环境真实工具名：server 含连字符，tool 含下划线。拆分点必须是
-        // 最后一个 `__`，不能贪心地取第一个（否则 "claude-in-chrome" 会被切碎）。
+        // 实测本环境真实工具名：server 含连字符，tool 含单下划线，但两者都不含
+        // 第二处 "__"，所以恰好一处分隔点、无歧义。
         assert_eq!(
             parse_mcp_tool_name("mcp__claude-in-chrome__read_console_messages"),
             Some(("claude-in-chrome", "read_console_messages"))
@@ -88,6 +97,15 @@ mod tests {
     fn missing_prefix_is_not_mcp() {
         assert_eq!(parse_mcp_tool_name("Bash"), None);
         assert_eq!(parse_mcp_tool_name("Read"), None);
+    }
+
+    #[test]
+    fn ambiguous_four_segment_form_is_rejected() {
+        // 回归测试：曾经的实现用 rsplit_once 只找最后一处 "__"，会把
+        // "server__part" 悄悄当成 server 名返回 Some，而不是诚实报告"边界
+        // 歧义、不认识"。真实 MCP 服务器/工具名是否会出现第二处 "__" 没有
+        // 约定可查，宁可拒绝也不猜。
+        assert_eq!(parse_mcp_tool_name("mcp__server__part__tool"), None);
     }
 
     #[test]
