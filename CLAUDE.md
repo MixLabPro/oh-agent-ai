@@ -29,7 +29,7 @@ first, then a Chinese section anchored at `#中文`. When editing behaviour, bot
 ## Repo layout
 
 ```
-Cargo.toml                  # [workspace]: "." + crates/{vitals-core,agent-vitals-domain,agent-vitals-hosts,agent-vitals-wasm}
+Cargo.toml                  # [workspace]: "." + crates/{vitals-core,agent-vitals-domain,agent-vitals-hosts,agent-vitals-runtime,agent-vitals-wasm}
 src/                        # Rust binary (the `agent-vitals` CLI)
   skills/                   #   静态 SKILL.md 体检（analysis/security/doctor/discovery/…）
   agent/                    #   会话行为/成本审计（behavior/cost/codex_cost/codex_session）
@@ -44,6 +44,8 @@ crates/agent-vitals-hosts/ # v0.8：一个 crate 装所有宿主的 wire 适配�
                             #   hosts/<h>/sessions/=会话证据（纯，wasm 可链）：claude_code/codex/workbuddy evidence、
                             #   Codex usage fold、canonical_usage、Phase D1 起的 DSH evidence/audit/compaction/waste。
                             #   hosts/<h>/{sources/（I/O，feature-gated）,skills/,capability.rs}=D4/D5 填。依赖 domain。
+crates/agent-vitals-runtime/ # v0.8 Phase D7：非宿主本机机器——唯一 HomeResolver（src/home.rs：
+                            #   data_home/snapshot_dir/DSH_HOME 解析）。D6 起还装 state/ledger/discovery。
 crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + hosts (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; the scanner lives in scripts/agent_vitals/
 scripts/agent_vitals/       # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
@@ -116,10 +118,12 @@ holds no DSH wire module (`domain_holds_no_dsh_wire_module` +
 moved to `agent-vitals-hosts/src/hosts/<h>/sources.rs` behind `#[cfg(feature = "sources")]`;
 `ruzstd`/`walkdir`/`rusqlite` are now optional deps of hosts under the `sources` feature;
 the binary enables it, wasm sets `default-features = false`; `split_lines` moved to
-`agent-vitals-domain::util`). **Remaining** (`docs/AGENT_VITALS_V0_8_PHASE_D_RESEARCH.md`):
-D6 `agent-vitals-runtime` crate (state/ledger/takeover/`src/agent/discovery.rs` + the
-`*_usage_fact` / `*_cost` service wiring) · D7 one `HomeResolver`. Then Phase E (dir moves) /
-F (MCP).
+`agent-vitals-domain::util`), D7 (`agent-vitals-runtime` crate created; `data_home` /
+`snapshot_dir` / `DSH_HOME` resolution consolidated into `agent_vitals_runtime::home`).
+**Remaining** (`docs/AGENT_VITALS_V0_8_PHASE_D_RESEARCH.md`): D6 — move
+`src/agent/{state,budget,takeover,r2a_store,discovery,session_sources}.rs` (+ the
+`*_usage_fact` / `*_cost` service wiring) into `agent-vitals-runtime`. Then Phase E (dir
+moves) / F (MCP).
 
 Guard: `agent-vitals-hosts/tests/dependency_budget.rs::io_tokens_only_appear_under_sources`
 — `std::fs`/`ruzstd`/`rusqlite`/… may appear only in files whose path contains `/sources`.

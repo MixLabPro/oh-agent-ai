@@ -163,10 +163,27 @@ D1  wire/fold 分离          [中 + wasm 重建]   ✅ 完成（commit 6f9af88�
 D2  cost.rs 文件切分        [低，纯 domain]    ✅ 完成（本提交：切出 cost/claude.rs）
 D3  adapters → hosts 改名   [中，机械面大]    ✅ 完成（commit c07da01，纯 rename）
 D4  DSH I/O → sources/      [高，feature-gate 首用]  ✅ 完成（commit 6e1e130）
-D5  其他 host readers       [高，rusqlite 迁移]  ✅ 完成（本提交）
-D6  agent-vitals-runtime    [高，state 层迁移]
-D7  HomeResolver 单点       [中，收敛 + 契约测试]
+D5  其他 host readers       [高，rusqlite 迁移]  ✅ 完成（commit 6f48e2e）
+D7  HomeResolver 单点       [中]  ✅ 完成（本提交——**先于 D6**，D6 的 state 模块要用 data_home）
+D6  agent-vitals-runtime    [高，state 层迁移]  —— 剩这一步
 ```
+
+### D7 完成记录（2026-09-04）
+
+新建 **`agent-vitals-runtime`** crate（`src/lib.rs` + `src/home.rs`，std-only）。
+
+- `configured_path` / `data_home_from` / `data_home` / `snapshot_dir_from` /
+  `snapshot_dir` 从 `src/skills/snapshot.rs` 迁进 `agent_vitals_runtime::home`；
+  `dsh_home` 从 `src/agent/discovery.rs` 迁进来。5 个 `data_home_from` 单测跟随。
+- `src/skills/snapshot.rs`：`pub(crate) use agent_vitals_runtime::home::data_home;`
+  + `pub use …::snapshot_dir;`（旧路径 `crate::skills::snapshot::data_home` 不变）。
+  `discovery.rs` 改 `use agent_vitals_runtime::home::dsh_home;`。
+- workspace `members`/`default-members` + 二进制 `Cargo.toml` 加 `agent-vitals-runtime`。
+- 守卫 `agent-vitals-runtime/tests/dependency_budget.rs`：方向单向（禁反依赖 binary/
+  wasm/tauri）+ 日期禁 chrono/time + `home_resolver_is_the_single_source`。
+- Python：`test_paths.py` docstring 指向 → `agent-vitals-runtime` 的 `home::data_home_from`。
+- **门禁全绿**：cargo test 31 binary、clippy -D warnings、wasm/src-tauri check、
+  python 1145/226 skip、golden 15+15。
 
 ### D3 完成记录（2026-09-04）
 

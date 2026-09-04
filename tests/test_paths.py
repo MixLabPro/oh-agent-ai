@@ -4,8 +4,9 @@
 品牌从 Skill Vitals 改成 Agent Vitals 后，数据目录改名不能把既有用户的
 预算/日历/快照弄丢。`scripts/agent_vitals/paths.py` 是 Python 侧的单一
 判定来源，`state.state_dir` / `cache_dir` / `budget._config_path` /
-`snapshots.snapshot_dir` 都路由到它；Rust 侧 `src/snapshot.rs::data_home_from`
-镜像同一语义（那边有同名单测）。本文件钉的是：
+`snapshots.snapshot_dir` 都路由到它；Rust 侧 `agent-vitals-runtime` 的
+`home::data_home_from`（v0.8 Phase D7 前在 `src/skills/snapshot.rs`）镜像同一
+语义，那边有同名单测。本文件钉的是：
 
 1. **不复制、不移动**——只在进程内选一个根，新装落 `~/.agent-vitals`，
    既有 `~/.skill-vitals` 用户继续用自己的旧目录。

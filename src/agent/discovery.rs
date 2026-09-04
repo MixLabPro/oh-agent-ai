@@ -37,6 +37,7 @@ use std::time::SystemTime;
 
 use crate::agent::takeover as tk_io;
 use agent_vitals_domain::takeover as tk;
+use agent_vitals_runtime::home::dsh_home;
 
 /// 发现结果里的一条未折会话。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -61,14 +62,6 @@ pub struct DiscoveryReport {
     pub unfolded: Vec<DiscoveredSession>,
 }
 
-/// `<DSH_HOME>` 根路径解析（env → `~/.dsh` 缺省）。
-pub fn dsh_home() -> Option<PathBuf> {
-    if let Some(h) = std::env::var_os("DSH_HOME") {
-        return Some(PathBuf::from(h));
-    }
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".dsh"))
-}
 
 /// `<DSH_HOME>/sessions` 根路径解析（env → `~/.dsh` 缺省）。
 pub fn sessions_root() -> Option<PathBuf> {

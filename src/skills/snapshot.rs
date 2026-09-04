@@ -11,77 +11,16 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::{i, s};
+// v0.8 Phase D7：home 解析迁进 agent-vitals-runtime。`data_home` 保 `pub(crate)`
+// 语义（`crate::skills::snapshot::data_home` 旧路径），`snapshot_dir` 保 `pub`。
+pub(crate) use agent_vitals_runtime::home::data_home;
+pub use agent_vitals_runtime::home::snapshot_dir;
 
 pub const SNAPSHOT_KEEP: i64 = 30;
 /// §6.2：2 = 工具自身错误（路径不可读、配置非法等）
 const EXIT_TOOL_ERROR: i32 = 2;
 const DIR_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
-
-/// 注入式 env 读取辅助：空字符串视为未设置（与 Python `paths._env_path` 一致）。
-fn configured_path<F>(get_env: &F, name: &str) -> Option<PathBuf>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    get_env(name).filter(|value| !value.is_empty()).map(PathBuf::from)
-}
-
-/// 数据根目录选择（Python 侧镜像：`scripts/agent_vitals/paths.py::data_home`）。
-///
-/// 品牌改名后，`~/.agent-vitals` 是新默认，但不能让既有用户的
-/// `~/.skill-vitals` 预算/日历/快照凭空消失。选择语义逐字对齐 paths.py：
-/// `AGENT_VITALS_HOME`（当前显式覆盖）→ `SKILL_VITALS_HOME`（legacy
-/// 显式覆盖）→ `~/.agent-vitals`（已存在，或两者都不存在）→
-/// `~/.skill-vitals`（只有它存在）。不复制、不移动任何文件。
-fn data_home_from<F>(get_env: &F, home: PathBuf) -> PathBuf
-where
-    F: Fn(&str) -> Option<String>,
-{
-    if let Some(path) = configured_path(get_env, "AGENT_VITALS_HOME") {
-        return path;
-    }
-    if let Some(path) = configured_path(get_env, "SKILL_VITALS_HOME") {
-        return path;
-    }
-
-    let current = home.join(".agent-vitals");
-    let legacy = home.join(".skill-vitals");
-    if current.exists() || !legacy.exists() {
-        current
-    } else {
-        legacy
-    }
-}
-
-/// 数据根目录（与 Python `paths.data_home()` 同一套兼容选择）。`budget.rs` /
-/// R1c 的 `state.rs` 等读写状态的地方共用它，不许再长一份「选哪个根」的逻辑。
-pub(crate) fn data_home() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_default();
-    data_home_from(&|name| std::env::var(name).ok(), PathBuf::from(home))
-}
-
-/// 快照目录。支持 Agent Vitals 变量，并兼容旧 Skill Vitals 覆盖变量。
-pub fn snapshot_dir() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_default();
-    snapshot_dir_from(&|name| std::env::var(name).ok(), PathBuf::from(home))
-}
-
-fn snapshot_dir_from<F>(get_env: &F, home: PathBuf) -> PathBuf
-where
-    F: Fn(&str) -> Option<String>,
-{
-    if let Some(path) = configured_path(get_env, "AGENT_VITALS_SNAPSHOT_DIR") {
-        return path;
-    }
-    if let Some(path) = configured_path(get_env, "SKILL_VITALS_SNAPSHOT_DIR") {
-        return path;
-    }
-    data_home_from(get_env, home).join("snapshots")
-}
 
 /// 已有快照，**旧→新**。文件名是 UTC 紧凑时间戳，字典序即时间序。
 pub fn list_snapshots() -> Vec<PathBuf> {
@@ -393,65 +332,6 @@ pub fn doctor_snapshot(out: &Value, enabled: bool) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    // ── data_home / snapshot_dir 的兼容选择（镜像 tests/test_paths.py）──────
-
-    #[test]
-    fn current_overrides_win_everywhere() {
-        let home = PathBuf::from("/home/tester");
-        let get_env = |name: &str| match name {
-            "AGENT_VITALS_HOME" => Some("/state/current".to_string()),
-            "SKILL_VITALS_HOME" => Some("/state/legacy".to_string()),
-            "AGENT_VITALS_SNAPSHOT_DIR" => Some("/snaps/current".to_string()),
-            "SKILL_VITALS_SNAPSHOT_DIR" => Some("/snaps/legacy".to_string()),
-            _ => None,
-        };
-        assert_eq!(data_home_from(&get_env, home.clone()), PathBuf::from("/state/current"));
-        assert_eq!(snapshot_dir_from(&get_env, home), PathBuf::from("/snaps/current"));
-    }
-
-    #[test]
-    fn legacy_overrides_remain_supported() {
-        let home = PathBuf::from("/home/tester");
-        let get_env = |name: &str| match name {
-            "SKILL_VITALS_HOME" => Some("/state/legacy".to_string()),
-            "SKILL_VITALS_SNAPSHOT_DIR" => Some("/snaps/legacy".to_string()),
-            _ => None,
-        };
-        assert_eq!(data_home_from(&get_env, home.clone()), PathBuf::from("/state/legacy"));
-        assert_eq!(snapshot_dir_from(&get_env, home), PathBuf::from("/snaps/legacy"));
-    }
-
-    #[test]
-    fn fresh_default_uses_agent_vitals_home() {
-        let home = std::env::temp_dir().join("agent-vitals-snapshot-no-defaults");
-        let get_env = |_name: &str| None;
-        assert_eq!(data_home_from(&get_env, home.clone()), home.join(".agent-vitals"));
-        assert_eq!(
-            snapshot_dir_from(&get_env, home),
-            std::env::temp_dir().join("agent-vitals-snapshot-no-defaults")
-                .join(".agent-vitals").join("snapshots")
-        );
-    }
-
-    #[test]
-    fn only_existing_legacy_directory_is_preserved() {
-        let home = std::env::temp_dir().join("agent-vitals-snapshot-legacy-only");
-        let _ = std::fs::create_dir_all(home.join(".skill-vitals"));
-        let get_env = |_name: &str| None;
-        assert_eq!(data_home_from(&get_env, home.clone()), home.join(".skill-vitals"));
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn current_directory_wins_when_both_defaults_exist() {
-        let home = std::env::temp_dir().join("agent-vitals-snapshot-both");
-        let _ = std::fs::create_dir_all(home.join(".agent-vitals"));
-        let _ = std::fs::create_dir_all(home.join(".skill-vitals"));
-        let get_env = |_name: &str| None;
-        assert_eq!(data_home_from(&get_env, home.clone()), home.join(".agent-vitals"));
-        let _ = std::fs::remove_dir_all(&home);
-    }
 
     #[test]
     fn utc_stamp_matches_python_strftime() {
