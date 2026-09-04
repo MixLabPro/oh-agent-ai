@@ -50,13 +50,15 @@ PY_AGENT_FAMILY = {
     "usage_fact", "waste", "workbuddy_evidence", "workbuddy_session_audit",
 }
 RS_AGENT_FAMILY = {
-    "behavior", "budget", "claude_cost", "claude_session", "claude_usage_fact",
-    "codex_cost", "codex_session",
+    "behavior", "budget", "claude_cost", "claude_usage_fact",
+    "codex_cost",
     "codex_session_audit", "codex_usage_fact", "cost", "discovery",
     "dsh_usage_fact",
     "host_runtime_registration",
     "oneline", "plan", "r2a_store",
-    "session_sources", "state", "takeover", "workbuddy_session",
+    "session_sources", "state", "takeover",
+    # v0.8 Phase D4/D5：宿主会话读取器（dsh/claude/codex/workbuddy _session）迁进
+    # agent-vitals-hosts/hosts/<h>/sources.rs（feature = "sources"）——不再在 src/agent/。
 }
 
 

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use agent_vitals_hosts::claude_code_evidence::{
+use crate::claude_code_evidence::{
     build_claude_evidence, claude_evidence_json, ClaudeEvidence,
 };
 

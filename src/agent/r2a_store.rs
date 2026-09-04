@@ -115,7 +115,7 @@ fn claude_cache_path() -> PathBuf {
 /// Codex 源指纹（当前源文件的指纹列表，按 `codex_rollout_files` 的全局路径序）。
 /// 文件名（session 分组）不是指纹的一部分——路径就是源文件的身份，指纹看内容。
 fn codex_source_fingerprints(home: &Path) -> Vec<(String, String)> {
-    crate::agent::codex_session::codex_rollout_files(home)
+    agent_vitals_hosts::codex_session::codex_rollout_files(home)
         .iter()
         .map(|p| (p.to_string_lossy().to_string(), fingerprint_file(p).unwrap_or_default()))
         .collect()
@@ -136,7 +136,7 @@ fn dsh_source_fingerprints(home: &Path) -> Vec<(String, String)> {
 /// 全局路径序）。session_id = 文件 stem——文件名就是分组键，指纹看内容（与 codex
 /// 同一纪律：路径是身份、指纹是内容）。
 fn claude_source_fingerprints(home: &Path) -> Vec<(String, String)> {
-    crate::agent::claude_session::claude_project_files(home)
+    agent_vitals_hosts::claude_session::claude_project_files(home)
         .iter()
         .map(|p| (p.to_string_lossy().to_string(), fingerprint_file(p).unwrap_or_default()))
         .collect()
@@ -385,7 +385,7 @@ fn now_iso_utc() -> String {
 /// 不是 unavailable，是「本次没构建」。要看到两个源的真实状态，走 `SessionStore::all`
 /// （no-filter），它合并两边的状态。
 fn codex_source_statuses(home: &Path, n_sessions: usize) -> Value {
-    let roots = crate::agent::codex_session::codex_session_roots_report(home);
+    let roots = agent_vitals_hosts::codex_session::codex_session_roots_report(home);
     json!({
         "codex": {
             "status": "ok",
@@ -449,7 +449,7 @@ fn dsh_source_statuses(home: &Path, files: &[PathBuf], degraded: &[(String, Stri
 /// 专属粒度）。
 /// `roots` = `claude_session_roots_report`（`~/.claude/projects` 单根报告）。
 fn claude_source_statuses(home: &Path, files_n: usize, built: usize) -> Value {
-    let roots = crate::agent::claude_session::claude_session_roots_report(home);
+    let roots = agent_vitals_hosts::claude_session::claude_session_roots_report(home);
     let status = if files_n == 0 || built > 0 {
         "ok"
     } else {
@@ -687,7 +687,7 @@ impl SessionStore {
         }
 
         // 冷启动 / 旧格式缓存：全量重建。
-        let list = crate::agent::claude_session::claude_session_list(home);
+        let list = agent_vitals_hosts::claude_session::claude_session_list(home);
         let session_ids: Vec<String> = list
             .get("sessions")
             .and_then(Value::as_array)
@@ -1131,7 +1131,7 @@ fn claude_session_id_of(path: &Path) -> String {
 /// workspace_roots 首个，缺席时诚实空串）。revision = 载荷 date_last（codex 同款
 /// 派生，`revision: None`）。
 fn claude_built_session_for(home: &Path, sid: &str, ns: &str, fp_map: &HashMap<&str, &str>) -> Option<BuiltSession> {
-    let payload = crate::agent::claude_session::claude_session_audit_json(home, sid)?;
+    let payload = agent_vitals_hosts::claude_session::claude_session_audit_json(home, sid)?;
     let source_profile = dsh_source_profile(payload.get("cwd").and_then(Value::as_str));
     let paths: Vec<String> = payload
         .get("files")
@@ -1471,8 +1471,8 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
         .filter(|s| host_has_source("codex", s))
         .map(|_| {
             let mut folds: Vec<Value> = Vec::new();
-            for path in crate::agent::codex_session::codex_rollout_files(home) {
-                let parsed = crate::agent::codex_session::read_codex_session_log(&path);
+            for path in agent_vitals_hosts::codex_session::codex_rollout_files(home) {
+                let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(&path);
                 let items = parsed
                     .get("items")
                     .and_then(Value::as_array)

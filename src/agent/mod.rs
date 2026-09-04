@@ -7,10 +7,8 @@
 pub mod behavior;
 pub mod budget;
 pub mod claude_cost;
-pub mod claude_session;
 pub mod claude_usage_fact;
 pub mod codex_cost;
-pub mod codex_session;
 pub mod codex_session_audit;
 pub mod codex_usage_fact;
 pub mod cost;
@@ -23,4 +21,3 @@ pub mod r2a_store;
 pub mod session_sources;
 pub mod state;
 pub mod takeover;
-pub mod workbuddy_session;

@@ -81,7 +81,7 @@ use crate::agent::claude_usage_fact::{
     parse_claude_usage_row, UNATTRIBUTED, UNREADABLE,
 };
 use crate::agent::codex_cost::{civil_from_unix_secs, current_month_beijing};
-use crate::agent::claude_session::claude_project_files;
+use agent_vitals_hosts::claude_session::claude_project_files;
 use crate::agent::state::{atomic_write_json, now_iso_utc, read_json, state_dir};
 use crate::agent::takeover::require_rust_owner;
 

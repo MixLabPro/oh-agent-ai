@@ -25,7 +25,10 @@ pub use hosts::dsh::sessions::{
 };
 pub use hosts::workbuddy::sessions::evidence as workbuddy_evidence;
 
-// D4：DSH 会话读取器（I/O，`sources` feature）。二进制 / runtime 经这个扁平别名
-// 取；纯构建 / wasm 关 feature 时它不存在。
+// D4/D5：宿主会话读取器（I/O，`sources` feature）。二进制 / runtime 经这些扁平
+// 别名取；纯构建 / wasm 关 feature 时它们不存在。
 #[cfg(feature = "sources")]
-pub use hosts::dsh::sources as dsh_sources;
+pub use hosts::{
+    claude_code::sources as claude_session, codex::sources as codex_session,
+    dsh::sources as dsh_sources, workbuddy::sources as workbuddy_session,
+};

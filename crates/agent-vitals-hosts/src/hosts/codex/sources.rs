@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::util::split_lines;
+use agent_vitals_domain::util::split_lines;
 
 fn empty_result() -> Map<String, Value> {
     let mut map = Map::new();

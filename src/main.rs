@@ -1389,7 +1389,7 @@ session_store={store} fold={fold}"
             let home = std::env::var("HOME")
                 .or_else(|_| std::env::var("USERPROFILE"))
                 .unwrap_or_default();
-            let report = agent::codex_session::codex_session_roots_report(Path::new(&home));
+            let report = agent_vitals_hosts::codex_session::codex_session_roots_report(Path::new(&home));
             if let Some(path) = rows_json {
                 let text = serde_json::to_string_pretty(&report).unwrap_or_default();
                 if path == &PathBuf::from("-") {
@@ -1407,7 +1407,7 @@ session_store={store} fold={fold}"
         }
         // clap 的 required_unless_present 保证：roots=false 时 session_log 必在。
         let session_log = session_log.as_ref().expect("session_log required unless --roots");
-        let parsed = agent::codex_session::read_codex_session_log(session_log);
+        let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(session_log);
         if parsed.get("degraded").and_then(|v| v.as_str()).is_some() {
             eprintln!("session log unavailable: unreadable, malformed, or empty");
             std::process::exit(2);
@@ -1443,7 +1443,7 @@ session_store={store} fold={fold}"
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default();
-        let session_index = agent::codex_session::read_session_index(Path::new(&home));
+        let session_index = agent_vitals_hosts::codex_session::read_session_index(Path::new(&home));
         let title = session_index.get(&session_id).cloned();
         let evidence = agent_vitals_hosts::codex_evidence::build_codex_evidence(
             items, session_id, title, history_mode, cli_version, workspace_roots, model,
@@ -1489,8 +1489,8 @@ session_store={store} fold={fold}"
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default();
         let mut folds: Vec<Value> = Vec::new();
-        for path in agent::codex_session::codex_rollout_files(Path::new(&home)) {
-            let parsed = agent::codex_session::read_codex_session_log(&path);
+        for path in agent_vitals_hosts::codex_session::codex_rollout_files(Path::new(&home)) {
+            let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(&path);
             let items: Vec<Value> = parsed
                 .get("items")
                 .and_then(|v| v.as_array())
@@ -1643,7 +1643,7 @@ session_store={store} fold={fold}"
             .unwrap_or_default();
         let home_path = Path::new(&home);
         if *list {
-            let out = agent::claude_session::claude_session_list(home_path);
+            let out = agent_vitals_hosts::claude_session::claude_session_list(home_path);
             if let Some(path) = rows_json {
                 let text = serde_json::to_string_pretty(&out).unwrap_or_default();
                 if path == &PathBuf::from("-") {
@@ -1655,7 +1655,7 @@ session_store={store} fold={fold}"
                     println!("Wrote {}", path.display());
                 }
             } else {
-                print!("{}", agent::claude_session::render_claude_session_list(&out));
+                print!("{}", agent_vitals_hosts::claude_session::render_claude_session_list(&out));
             }
             return;
         }
@@ -1663,7 +1663,7 @@ session_store={store} fold={fold}"
         let session_id = match session {
             Some(s) => s.clone(),
             None => {
-                let list = agent::claude_session::claude_session_list(home_path);
+                let list = agent_vitals_hosts::claude_session::claude_session_list(home_path);
                 let first = list
                     .get("sessions")
                     .and_then(|v| v.as_array())
@@ -1680,7 +1680,7 @@ session_store={store} fold={fold}"
                 }
             }
         };
-        let Some(out) = agent::claude_session::claude_session_audit_json(home_path, &session_id)
+        let Some(out) = agent_vitals_hosts::claude_session::claude_session_audit_json(home_path, &session_id)
         else {
             eprintln!("claude session not found or unreadable: {session_id}");
             std::process::exit(2);
@@ -1899,7 +1899,7 @@ session_store={store} fold={fold}"
             .unwrap_or_default();
         let home_path = Path::new(&home);
         if *list {
-            let out = agent::workbuddy_session::workbuddy_session_list(home_path);
+            let out = agent_vitals_hosts::workbuddy_session::workbuddy_session_list(home_path);
             if let Some(path) = rows_json {
                 let text = serde_json::to_string_pretty(&out).unwrap_or_default();
                 if path == &PathBuf::from("-") {
@@ -1913,7 +1913,7 @@ session_store={store} fold={fold}"
             } else {
                 print!(
                     "{}",
-                    agent::workbuddy_session::render_workbuddy_session_list(&out)
+                    agent_vitals_hosts::workbuddy_session::render_workbuddy_session_list(&out)
                 );
             }
             return;
@@ -1922,7 +1922,7 @@ session_store={store} fold={fold}"
         let session_id = match session {
             Some(s) => s.clone(),
             None => {
-                let list = agent::workbuddy_session::workbuddy_session_list(home_path);
+                let list = agent_vitals_hosts::workbuddy_session::workbuddy_session_list(home_path);
                 let first = list
                     .get("sessions")
                     .and_then(|v| v.as_array())
@@ -1940,7 +1940,7 @@ session_store={store} fold={fold}"
             }
         };
         let Some(out) =
-            agent::workbuddy_session::workbuddy_session_audit_json(home_path, &session_id)
+            agent_vitals_hosts::workbuddy_session::workbuddy_session_audit_json(home_path, &session_id)
         else {
             eprintln!("workbuddy session not found or unreadable: {session_id}");
             std::process::exit(2);

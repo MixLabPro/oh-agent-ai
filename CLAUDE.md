@@ -111,13 +111,15 @@ holds no DSH wire module (`domain_holds_no_dsh_wire_module` +
 (`hosts → domain → vitals-core`); `vitals-core` names no Agent/host term and depends on no
 `agent-vitals-*` crate.
 
-**Phase D done so far**: D1 (wire/fold), D2 (`cost.rs` split), D3 (crate rename), D4
-(`src/dsh.rs` → `agent-vitals-hosts/src/hosts/dsh/sources.rs` behind `#[cfg(feature =
-"sources")]`; `ruzstd` now an optional dep of hosts; binary enables the `sources` feature,
-wasm sets `default-features = false`; `split_lines` moved to `agent-vitals-domain::util`).
-**Remaining** (`docs/AGENT_VITALS_V0_8_PHASE_D_RESEARCH.md`): D5 other host session readers +
-`rusqlite` → `hosts/<h>/sources/` · D6 `agent-vitals-runtime` crate (state/ledger/takeover/
-`src/agent/discovery.rs`) · D7 one `HomeResolver`. Then Phase E (dir moves) / F (MCP).
+**Phase D done so far**: D1 (wire/fold), D2 (`cost.rs` split), D3 (crate rename), D4/D5
+(all host session readers — `src/dsh.rs` + `src/agent/{claude,codex,workbuddy}_session.rs` —
+moved to `agent-vitals-hosts/src/hosts/<h>/sources.rs` behind `#[cfg(feature = "sources")]`;
+`ruzstd`/`walkdir`/`rusqlite` are now optional deps of hosts under the `sources` feature;
+the binary enables it, wasm sets `default-features = false`; `split_lines` moved to
+`agent-vitals-domain::util`). **Remaining** (`docs/AGENT_VITALS_V0_8_PHASE_D_RESEARCH.md`):
+D6 `agent-vitals-runtime` crate (state/ledger/takeover/`src/agent/discovery.rs` + the
+`*_usage_fact` / `*_cost` service wiring) · D7 one `HomeResolver`. Then Phase E (dir moves) /
+F (MCP).
 
 Guard: `agent-vitals-hosts/tests/dependency_budget.rs::io_tokens_only_appear_under_sources`
 — `std::fs`/`ruzstd`/`rusqlite`/… may appear only in files whose path contains `/sources`.

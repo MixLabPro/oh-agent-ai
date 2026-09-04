@@ -118,10 +118,30 @@ Step 3 已验证 `sv6*_parity.rs` 的同款用法）。
 **未迁**：`src/agent/discovery.rs`（DSH session 发现）—— 它 `use crate::agent::takeover`
 + 读 ledger 状态，是 runtime 编排，随 D6 进 `agent-vitals-runtime`（不是 `hosts/dsh/sources/`）。
 
-### D5 —— Codex / Claude / WorkBuddy session readers → `hosts/<h>/sources/`
-`src/agent/{claude_session,codex_session,workbuddy_session}.rs` + discovery 部分
-→ 对应 `hosts/<h>/sources/`。`rusqlite`（WorkBuddy sqlite）迁 hosts optional。
-`{claude,codex,dsh}_usage_fact.rs` 的 I/O 入口同迁，纯 emit 逻辑已在 domain/hosts。
+### D5 —— Codex / Claude / WorkBuddy session readers → `hosts/<h>/sources/` —— ✅ 完成（2026-09-04）
+
+`src/agent/{claude_session,codex_session,workbuddy_session}.rs`（689 + 542 + 486 行）
+**整体** `git mv` → `agent-vitals-hosts/src/hosts/<h>/sources.rs`，`#[cfg(feature = "sources")]`
+在各 `hosts/<h>/mod.rs` 门控。
+
+- `walkdir`（Claude/Codex 会话文件递归枚举）+ `rusqlite`（WorkBuddy sqlite 只读，
+  `bundled`）从二进制 `Cargo.toml` → `agent-vitals-hosts` 的 `optional` +
+  `[features] sources = [..., "dep:walkdir", "dep:rusqlite"]`。
+- 移入文件 import 修正：`agent_vitals_hosts::{claude_code,workbuddy}_evidence` →
+  `crate::…_evidence`；`crate::util::split_lines`（codex）→ `agent_vitals_domain::util::split_lines`。
+- hosts `lib.rs` 扁平别名 `claude_session` / `codex_session` / `workbuddy_session`
+  （`#[cfg(feature = "sources")]`）。二进制 ~20 处 `agent::<h>_session::X` /
+  `crate::agent::<h>_session::X` → `agent_vitals_hosts::<h>_session::X`；`src/agent/mod.rs`
+  删 3 条 `pub mod`。
+- Python：`test_classification.py::RS_AGENT_FAMILY` 去 `claude_session`/`codex_session`/
+  `workbuddy_session`（迁出 `src/agent/`）。
+- **门禁全绿**：cargo test 29 binary、clippy -D warnings、wasm check、src-tauri check、
+  python 1145/226 skip、golden 15+15。
+
+**仍在二进制**：`{claude,codex,dsh}_usage_fact.rs`（emit 入口，读 session text 后
+调 domain 的 UsageFact emitter）、`codex_session_audit.rs`、`claude_cost.rs`/`codex_cost.rs`
+（调 session reader + cost）—— 这些是「读证据 → 调纯计算 → 出报告」的 CLI 接线，
+随 D6 进 `agent-vitals-runtime` 的 service 层，不是 `hosts/<h>/sources/`。
 
 ### D6 —— `agent-vitals-runtime` crate
 新 crate。迁入：`src/agent/state.rs`、`r2a_store.rs`、`takeover.rs`、`budget.rs` 的
@@ -142,8 +162,8 @@ deps：`agent-vitals-hosts { features=["sources"] }` + `agent-vitals-domain`。
 D1  wire/fold 分离          [中 + wasm 重建]   ✅ 完成（commit 6f9af88）
 D2  cost.rs 文件切分        [低，纯 domain]    ✅ 完成（本提交：切出 cost/claude.rs）
 D3  adapters → hosts 改名   [中，机械面大]    ✅ 完成（commit c07da01，纯 rename）
-D4  DSH I/O → sources/      [高，feature-gate 首用]  ✅ 完成（本提交）
-D5  其他 host readers       [高，rusqlite 迁移]
+D4  DSH I/O → sources/      [高，feature-gate 首用]  ✅ 完成（commit 6e1e130）
+D5  其他 host readers       [高，rusqlite 迁移]  ✅ 完成（本提交）
 D6  agent-vitals-runtime    [高，state 层迁移]
 D7  HomeResolver 单点       [中，收敛 + 契约测试]
 ```
