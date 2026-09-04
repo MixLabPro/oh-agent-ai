@@ -104,6 +104,51 @@ E7.7  apps/cli/src/skills/mod.rs 收敛成 apps/cli/src/commands/skills.rs
 后续轮次，与 D2-D7 当初"规模现实：不是一次会话能全部完成"的评估同理，只是
 这次没有独立 worktree 分工，全在主 worktree 逐步做。
 
+## 4. 用户 2026-09-04 第二轮审阅：E7 范围应扩大到 `apps/cli/src/agent/`
+
+Skill Surface 之外，`apps/cli/src/agent/`（历史遗留的"会话产品应用层"，
+约 8745 行）同样混着宿主解析、事实发射、状态写入、会话查询、CLI 展示，边界
+不干净。用户给出的文件级判断（摘要，完整表见 review 原文）：
+
+- **明确的宿主 adapter，该搬**：`claude_usage_fact.rs`/`codex_usage_fact.rs`/
+  `dsh_usage_fact.rs`（三份 UsageFact 发射器，Claude/Codex/DSH → `hosts/<h>/
+  sessions/usage_fact.rs`）。
+- **不是 Host adapter、是 Runtime 的跨宿主服务，体量最大**：`r2a_store.rs`
+  （2708 行——跨 Claude/Codex/DSH 的 session cache/分页/查询/findings，用户
+  原话"是 v0.9 数据底座的核心迁移对象"）。
+- **该拆成"宿主 fold"与"Runtime 写账/投影"两半**：`claude_cost.rs`（逐会话
+  fold + ledger/checkpoint 写入）、`oneline.rs`（DSH 折账 + state 写入 + 报告
+  输出）。
+- **入口位置错、规则不重复**：`behavior.rs`（DSH session 审计的 CLI 薄组合，
+  该挪进 `runtime/session_audit_service.rs`）、`codex_cost.rs`（fold 结果计价，
+  该拆 Domain cost projection + Runtime catalog/projection）、
+  `codex_session_audit.rs`（组装单会话成本/证据/HTML，是跨"成本、证据、报告"
+  的产品投影，**不该进 `hosts/codex`**，该进 Runtime session projection
+  service）。
+- **纯 re-export shim，无价值重复**：`cost.rs`/`plan.rs`——直接删，CLI 改依赖
+  Domain。
+- **registry，不是宿主专属**：`host_runtime_registration.rs` → `agent-vitals-
+  hosts` registry 或 Runtime registry。
+
+**核心原则（用户原话）**："架构关键不是『按文件来源搬家』，而是把能力按可
+复用边界拆开"——宿主特有事实（JSONL/rollout/zstd 格式、token/工具调用识别、
+各宿主 skill roots/MCP 命名）进 `hosts/<h>/`；任何宿主都成立的纯规则（稳定
+ID、成本口径、指标公式、Finding/Issue/Remedy 契约）进 `domain/`；把多宿主
+数据跑成产品能力（扫描编排、写入、缓存、索引、会话查询、预算、coverage、
+重建、同步）进 `runtime/`；用户如何调用和看到它留 `apps/cli`/`apps/desktop`。
+`r2a_store.rs` 的"列出所有会话、跨宿主分页、生成 navigation DTO"是通用
+Runtime 能力，但"如何从 Codex rollout 得到逻辑 session id"必须留在 Codex
+host——**不能把所有 `agent/` 文件都挪进 `hosts/`，那会让每个宿主各自长出
+一套 writer/cache/会话分页/账目逻辑，等于重新制造本来要消灭的重复**。
+
+**范围判断**：这轮分析质量高、方向与 E7.1 已验证的纪律一致（先读文件、别
+假设），但体量比原 E7（仅 Skill Surface）几乎翻倍，且触及的 `r2a_store.rs`
+被用户自己定性为"v0.9 数据底座核心"——已经不完全是"把 v0.8 该做的事补完"，
+而是开始触及下一个大版本的数据面工作。**本轮（截至
+`0b562c4`）不在这个新扩大的范围里再往下执行**——先把分析原文和判断记录进
+本文档，值不值得现在继续做、还是先按当前已完成的 D/E/E7.1/F1a 收一次尾，
+留给用户决定。
+
 ## 3. 不确定项（留给执行到那一步时核实，不在此提前假设）
 
 - DSH 是否需要 `hosts/dsh/skills/`——`apps/cli/src/skills/` 里没有 dsh 专属
