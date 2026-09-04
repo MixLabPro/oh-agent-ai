@@ -111,10 +111,11 @@ holds no DSH wire module (`domain_holds_no_dsh_wire_module` +
 (`hosts → domain → vitals-core`); `vitals-core` names no Agent/host term and depends on no
 `agent-vitals-*` crate.
 
-**Phase D remaining** (`docs/AGENT_VITALS_V0_8_PHASE_D_RESEARCH.md`): D2 `cost.rs` file
-split · D4 DSH I/O (`src/dsh.rs` zstd) → `hosts/dsh/sources/` (feature-gated) · D5 other
-host session readers + `rusqlite` → `hosts/<h>/sources/` · D6 `agent-vitals-runtime` crate
-(state/ledger/takeover) · D7 one `HomeResolver`. Then Phase E (dir moves) / F (MCP).
+**Phase D done so far**: D1 (wire/fold), D2 (`cost.rs` → `cost/mod.rs` + `cost/claude.rs`),
+D3 (crate rename). **Remaining** (`docs/AGENT_VITALS_V0_8_PHASE_D_RESEARCH.md`): D4 DSH I/O
+(`src/dsh.rs` zstd) → `hosts/dsh/sources/` (feature-gated) · D5 other host session readers +
+`rusqlite` → `hosts/<h>/sources/` · D6 `agent-vitals-runtime` crate (state/ledger/takeover) ·
+D7 one `HomeResolver`. Then Phase E (dir moves) / F (MCP).
 
 ## Commands
 
@@ -478,7 +479,7 @@ pricing.json` 是 build 时复制出的运行时份，宿主 `costReport` 投影
 另内嵌一份仅供展示用的模型短名副本——三处由 `tests/test_pricing_lockstep.py` 守）;
 prices are business data, not rules — they change without a golden `--update`. The
 **cost computation itself** (`cost_report`) is a fourth lockstep, one level up from the
-price table: `crates/agent-vitals-domain/src/domain/cost.rs` ↔ `scripts/agent_vitals/agent/cost.py`
+price table: `crates/agent-vitals-domain/src/domain/cost/mod.rs` ↔ `scripts/agent_vitals/agent/cost.py`
 ↔ `dsh-client/src/host/index.ts::costReportFrom` all implement the same
 peak/off-peak-split pricing math over `{by_model, sequence}`; the CLI two-language parity
 is caught by `test_cli_matrix.py`'s `both()` differential, the TS mirror by

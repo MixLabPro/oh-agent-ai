@@ -8,7 +8,7 @@ month.json/today.json。CLAUDE.md 的教训：同一份数据在两个投影上�
 Rust 侧 `cost.rs` 三个纯函数的期望值钉到**具体数值**，与 Python 侧
 `budget._bucket_cost` + `cost.priced_day` 的组合对同一份夹具逐一对应——
 同一夹具、同一组数字，两边各自断言，docstring 互相指认（Rust 侧单测见
-`crates/agent-vitals-domain/src/domain/cost.rs` 的 `bucket_cost_*`/`month_cost_*`/
+`crates/agent-vitals-domain/src/domain/cost/mod.rs` 的 `bucket_cost_*`/`month_cost_*`/
 `today_cost_*`）。
 
 跑法：

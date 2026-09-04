@@ -3,7 +3,7 @@
 
 `priced_day` 是「一份日桶 → 精确/部分计价」的**唯一覆盖率校验入口**（8 月账目
 回归的教训：覆盖不全被当精算报出去，剩余 token 静默消失）。这里把 Python 侧的
-输出钉到**具体数值**，与 `crates/agent-vitals-domain/src/domain/cost.rs` 里三条
+输出钉到**具体数值**，与 `crates/agent-vitals-domain/src/domain/cost/mod.rs` 里三条
 `priced_day_*` 单测的期望值逐一对应——同一份夹具、同一组数字，两边各自断言，
 docstring 互相指认。Rust 侧多一个 `partial` 时 `coverage == covered/day` 的
 分式断言，这里用浮点近似对齐（Python 的除法与 Rust f64 除法逐位一致，但

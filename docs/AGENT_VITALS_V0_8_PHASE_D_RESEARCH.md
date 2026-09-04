@@ -59,13 +59,26 @@ Step 3 已验证 `sv6*_parity.rs` 的同款用法）。
   实际改的是新增 `domain_has_no_dsh_wire_module` 反向断言）。
 - **净效果**：`domain/` 生产代码对 DSH raw 事件形状彻底不知情。
 
-### D2 —— `cost.rs` 拆分（纯 domain 内部，零 host 耦合）
-`domain/cost.rs` 1842 行 → `domain/cost/{mod,pricing,report,series,day,claude,block}.rs`
-（或按 spec 的 `models/`+`billing/`+`projection/`——但那是 §9 的更大重构，Phase D
-只做**文件切分**、语义零改）。`mod.rs` `pub use` 全部子模块，`agent_vitals_domain::cost::X`
-路径不变。Python `cost.py` 不切（无 crate 边界），只同步 docstring。
-- 门禁：`test_cli_matrix.py` 的 `both()` 差分、`test_cost_*`/`test_catalog_pricing`/
-  `test_canonical_cost` 全部 byte-identical；golden 15+15；`dsh-client/scripts/verify-host.mjs`。
+### D2 —— `cost.rs` 拆分（纯 domain 内部，零 host 耦合）—— ✅ 完成（2026-09-04）
+
+`domain/cost.rs`（1842 行）→ `domain/cost/mod.rs`（1442）+ `domain/cost/claude.rs`（409）。
+切最清晰的一条缝：**Claude Code 语料计价（`catalog_2026_09` 第二面）**——`resolve_card_catalog`
+/ `catalog_card` / `flat_rate` / `priced_field` / `card_is_time_varying` / `cache_write_rate`
+/ `first_tier` / `price_claude_model` / `price_claude_map` / `claude_session_cost` /
+`claude_day_cost` / `claude_subscription_uncovered_estimate` / `claude_day_total_tokens`。
+
+- 与 DSH 计价面字节隔离，只用 `super::{get_i64, model_short, norm_model_in}`（子模块可见
+  父模块私有项，无需改可见性）。`resolve_card_catalog` 提 `pub(crate)`（`mod.rs::tests`
+  用）；4 个 `claude_*` pub fn 经 `mod.rs` `pub use claude::{…}` 保 `cost::claude_*` 扁平路径。
+- `include_str!("../../../../scripts/…")` → `../../../../../scripts/…`（深一层）。
+- 语义零改：spec §9 的 `models/`+`billing/`+`projection/` 语义解耦另算（并入 Model
+  Catalog 需求驱动时）。
+- 守卫：`host_contract.rs::g10_price_claude_map_has_exactly_the_three_registered_callers`
+  的源码扫描路径 → `cost/claude.rs`。Python `cost.py` 不切，docstring 里
+  `crates/agent-vitals-domain/src/domain/cost.rs` → `cost/mod.rs`。
+- **门禁全绿**：cargo test 29 binary、clippy -D warnings、`test_cli_matrix` `both()` 差分、
+  `test_cost_*`/`test_catalog_pricing`/`test_canonical_cost`、golden 15+15。wasm 不受影响
+  （`wasm/lib.rs` 不引 `cost`）。
 
 ### D3 —— `agent-vitals-adapters` → `agent-vitals-hosts`
 - crate 改名，lib name `agent_vitals_hosts`。`agent_vitals_adapters::` → `agent_vitals_hosts::`
@@ -109,8 +122,8 @@ deps：`agent-vitals-hosts { features=["sources"] }` + `agent-vitals-domain`。
 
 ```
 D1  wire/fold 分离          [中 + wasm 重建]   ✅ 完成（commit 6f9af88）
-D2  cost.rs 文件切分        [低，纯 domain]    —— 独立，golden/parity 零漂移
-D3  adapters → hosts 改名   [中，机械面大]    ✅ 完成（本提交，纯 rename，无 feature 空壳）
+D2  cost.rs 文件切分        [低，纯 domain]    ✅ 完成（本提交：切出 cost/claude.rs）
+D3  adapters → hosts 改名   [中，机械面大]    ✅ 完成（commit c07da01，纯 rename）
 D4  DSH I/O → sources/      [高，feature-gate 首用]
 D5  其他 host readers       [高，rusqlite 迁移]
 D6  agent-vitals-runtime    [高，state 层迁移]

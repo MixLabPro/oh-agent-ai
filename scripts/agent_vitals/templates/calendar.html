@@ -68,7 +68,7 @@
     JSON——JS 这份硬编码公式只在那个字段不存在时（这个功能上线前的旧
     数据）才会被用到。若价目表（pricing.json）改了，精算路径自动跟着走；
     只有这份 fallback 公式需要手动同步（与
-    scripts/agent_vitals/cost.py::_price + crates/agent-vitals-domain/src/domain/cost.rs
+    scripts/agent_vitals/cost.py::_price + crates/agent-vitals-domain/src/domain/cost/mod.rs
     + dsh-client/src/host/index.ts::costReportFrom 平行）。
     tests/test_pricing_lockstep.py 守价目表源头一致性，fallback 副本目前没
     自动测——这是已知的单点，接受它只是「大致近似」。

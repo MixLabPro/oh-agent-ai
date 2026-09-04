@@ -3,7 +3,7 @@
 
 `cost_series` 是逐请求费用序列（工作台单会话图的「费用」纵轴读它，dsh-client 审计
 tab 读的是同一规则的 TS 镜像 `costSeriesFrom`）。这里把 Python 侧的输出钉到**具体
-数值**，与 `crates/agent-vitals-domain/src/domain/cost.rs` 里三条 `cost_series_*` 单测的期望值
+数值**，与 `crates/agent-vitals-domain/src/domain/cost/mod.rs` 里三条 `cost_series_*` 单测的期望值
 逐一对应——同一份夹具、同一组数字，两边各自断言，docstring 互相指认。CLI 差分
 （`tests/test_cli_matrix.py` 的 `both()`）另从 `behavior --json` 信封里逐字节比对
 `cost_series` 键，这里负责把语义钉死（曲线终值 == `cost_report.total`、null_peak

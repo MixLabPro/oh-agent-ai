@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """catalog_2026_09（Claude Code 语料计价）纯函数钉测。
 
-与 `crates/agent-vitals-domain/src/domain/cost.rs` 里同夹具同数的 inline 测试互守——
+与 `crates/agent-vitals-domain/src/domain/cost/mod.rs` 里同夹具同数的 inline 测试互守——
 同一组数字在两侧各钉一遍（与 tests/test_cost_priced_day.py 同款交叉引用模式），
 命令级差分等 claude-sync 落地后由 test_claude_cost.py 的 `both()` 补。
 

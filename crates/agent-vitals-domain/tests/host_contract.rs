@@ -192,7 +192,9 @@ fn g10_price_claude_map_has_exactly_the_three_registered_callers() {
     // `claude_subscription_uncovered_estimate`（`peak_resolved=true`，复用
     // ledger 的峰谷分辨率，不是又一个下界兜底）。
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let text = std::fs::read_to_string(root.join("crates/agent-vitals-domain/src/domain/cost.rs")).unwrap();
+    // Phase D2：Claude 计价面切进 `cost/claude.rs`——`price_claude_map` 定义 + 3
+    // 个已登记调用点都在这一个文件里。
+    let text = std::fs::read_to_string(root.join("crates/agent-vitals-domain/src/domain/cost/claude.rs")).unwrap();
     let occurrences = text.matches("price_claude_map(").count();
     // 1 处定义签名 + 三个已登记入口各调用 1 次。
     assert_eq!(occurrences, 4,
