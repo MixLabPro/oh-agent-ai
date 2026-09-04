@@ -711,25 +711,9 @@ pub fn waste_coverage(waste: &Value, coverage: &Coverage) -> Value {
     }
 }
 
-/// 兼容 shim：`wasm audit_events` 与差分测试继续调它。内部 = post_fork →
-/// 建 canonical（适配器填时间线）→ 前置门控 dispatch → flatten。产出与旧
-/// `match_behavior` 逐字节一致（SV610 分叉除外，见 `match_behavior_canonical`）。
-///
-/// 纯函数、确定性：同一事件流重放结果逐字节一致。非 object 的条目跳过；
-/// 缺 seq/time 时以 null 落位，绝不伪造 0 次。
-pub fn match_behavior(events: &[Value], workspace_root: Option<&str>) -> Vec<Value> {
-    // 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。从上游会话
-    // branch 出来时抄进日志的那段历史属于上游自己那份审计，在这里再算一遍就是
-    // 对同一笔钱/同一批行为重复计数（见 util::fork_boundary 的实测数据）。
-    let events = &crate::util::post_fork(events)[..];
-    let evidence = crate::dsh_evidence::build_dsh_evidence(
-        events.to_vec(),
-        Vec::new(),
-        workspace_root.map(str::to_owned),
-        String::new(),
-    );
-    flatten(&match_behavior_canonical(&evidence.canonical))
-}
+// `match_behavior`（DSH 原始事件 → findings 的兼容 shim）phase C 迁进
+// `adapters::hosts::dsh::sessions::audit`——domain 不再碰 DSH 的 JSON 事件形状。
+// 规则本体 `match_behavior_canonical`（吃 `&CanonicalSession`）留在这里。
 
 /// 行为审计的 CI 闸门：返回退出码 0（无达标发现）或 1（有）。与 Python
 /// `behavior_gate` 逐字节对齐——`ignore` 逗号分隔规则码按码排除（与 doctor
@@ -777,6 +761,9 @@ mod tests {
     use super::*;
 
     use crate::evidence::CoverageCounts;
+    // `match_behavior` 的 raw-shim 已迁 audit；这些 raw-events 测试继续在这里
+    // 调它（测试依赖，非生产依赖——crate 拆分后经 dev-dependency 解析）。
+    use crate::adapters::hosts::dsh::sessions::audit::match_behavior;
 
     fn ev(etype: &str, seq: i64, time: i64, data: Value) -> Value {
         json!({"type": etype, "seq": seq, "time": time, "data": data})

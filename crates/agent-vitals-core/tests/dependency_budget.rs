@@ -353,14 +353,20 @@ fn nested_paths_and_legacy_facade_resolve_to_the_same_items() {
 /// any new host dependency must fail CI instead of silently expanding the debt.
 #[test]
 fn domain_to_host_compatibility_debt_cannot_grow() {
-    // Phase C Step 1 起 `compaction.rs`/`waste.rs` 已迁出 `domain/`（进
-    // `adapters/hosts/dsh/sessions/`，它们本就在解析 DSH 原始事件）。剩下的
-    // domain→host 债只有 behavior/trajectory 的 raw shim（Step 1b 迁）与 usage
-    // 的 canonical 归一层（Step 2 迁）。
+    // Phase C Step 1 起 `compaction.rs`/`waste.rs`（1a）、`match_{behavior,
+    // trajectory}` raw shim（1b）已迁出 `domain/`（进 `adapters/hosts/dsh/
+    // sessions/`）。剩下的**生产**债只有 `usage.rs` 的 canonical 归一层（Step 2）
+    // 与 `trajectory.rs::coord_map` 的 `Coords`（skill.rs 的 wire 顺延，随
+    // layer-2 清理消除）。behavior/trajectory 的 `crate::dsh_evidence`/
+    // `crate::adapters::hosts` 命中现在**全在 `#[cfg(test)]`**——测试用
+    // `build_dsh_evidence` 造 fixture / 调迁走的 raw shim，非生产依赖，crate
+    // 拆分后经 dev-dependency 解析。
     let allowances = [
-        ("behavior.rs", "crate::dsh_evidence", 4usize),
+        ("behavior.rs", "crate::dsh_evidence", 3usize),
+        ("behavior.rs", "crate::adapters::hosts", 1),
         ("canonical_audit.rs", "crate::host_capability", 1),
-        ("trajectory.rs", "crate::dsh_evidence", 2),
+        ("trajectory.rs", "crate::dsh_evidence", 1),
+        ("trajectory.rs", "crate::adapters::hosts", 1),
         ("usage.rs", "crate::codex_usage", 3),
     ];
     let forbidden = [

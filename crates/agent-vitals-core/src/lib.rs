@@ -18,7 +18,7 @@ pub mod domain;
 // Phase C removes the domain → host dependency.
 pub use adapters::hosts::codex::sessions::usage as codex_usage;
 pub use adapters::hosts::dsh::sessions::{
-    compaction, evidence as dsh_evidence, waste,
+    audit, compaction, evidence as dsh_evidence, waste,
 };
 pub use contracts::{evidence, host_capability, r2a, source_identity, usage_fact};
 pub use domain::{

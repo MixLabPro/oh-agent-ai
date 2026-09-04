@@ -136,23 +136,9 @@ pub(crate) fn coord_map(events: &[Value]) -> std::collections::HashMap<i64, (Val
     map
 }
 
-/// 事件序列 → 轨迹 findings（SV611–614），按码序产出。**兼容 shim**：
-/// wasm `audit_events` 与差分测试继续调这个入口——内部 = post_fork → 建
-/// canonical（适配器填时间线）→ 前置门控 dispatch → flatten，产出与旧实现
-/// 逐字节一致（分叉会话的「上游轨迹不计入本会话」除外，见
-/// `match_trajectory_canonical`）。
-pub fn match_trajectory(events: &[Value]) -> Vec<Value> {
-    // 只看分叉之后的事件——审计回答的是「**这个**会话干了什么」。分叉前缀是
-    // 上游会话的历史，上游自己那份审计会算（同 `match_behavior` shim 的纪律）。
-    let events = &crate::util::post_fork(events)[..];
-    let evidence = crate::dsh_evidence::build_dsh_evidence(
-        events.to_vec(),
-        Vec::new(),
-        None,
-        String::new(),
-    );
-    flatten_trajectory(&match_trajectory_canonical(&evidence.canonical))
-}
+// `match_trajectory`（DSH 原始事件 → findings 的兼容 shim）phase C 迁进
+// `adapters::hosts::dsh::sessions::audit`。规则本体 `match_trajectory_canonical`
+// （吃 `&CanonicalSession`）与 `coord_map`（skill.rs 用的坐标顺延）留在这里。
 
 /// family ④（trajectory，SV611–614）**前置门控**的 dispatcher——先滤后调，
 /// 镜像 `match_behavior_canonical`：`requires` 里任一信号对应的 timeline 为空
@@ -601,6 +587,9 @@ pub fn detect_sv614_legacy(s: &CanonicalSession) -> RuleOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `match_trajectory` 的 raw-shim 已迁 audit；raw-events 测试继续在这里调它
+    // （测试依赖，非生产依赖——crate 拆分后经 dev-dependency 解析）。
+    use crate::adapters::hosts::dsh::sessions::audit::match_trajectory;
 
     fn ev(etype: &str, seq: i64, time: i64, data: Value) -> Value {
         json!({"type": etype, "seq": seq, "time": time, "data": data})

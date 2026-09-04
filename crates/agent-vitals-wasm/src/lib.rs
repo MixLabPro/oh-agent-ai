@@ -23,8 +23,10 @@ pub fn audit_events(events_json: &str, workspace_root: &str) -> String {
     let ws = if workspace_root.is_empty() { None } else { Some(workspace_root) };
     // 单事件规则（SV601–610）在前、轨迹级检测（SV611–614）追加在后——tab 与 CLI
     // 跑的是同一份 core 引擎。
-    let mut findings = agent_vitals_core::behavior::match_behavior(&events, ws);
-    findings.extend(agent_vitals_core::trajectory::match_trajectory(&events));
+    // raw-events → findings 的 DSH shim（phase C 起住 adapter，规则本体仍是 core
+    // 的 `match_{behavior,trajectory}_canonical`——从不是第二份拷贝）。
+    let mut findings = agent_vitals_core::audit::match_behavior(&events, ws);
+    findings.extend(agent_vitals_core::audit::match_trajectory(&events));
     serde_json::to_string(&findings).unwrap_or_else(|_| "[]".to_string())
 }
 
