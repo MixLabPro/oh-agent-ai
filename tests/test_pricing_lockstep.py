@@ -2,7 +2,7 @@
 # dsh-client 现在有两份派生副本，理由不同：
 #   - `src/client/styles/index.ts` 的 PRICING —— 浏览器读不到 repo 文件，只能
 #     内嵌一份，供**展示层**用（模型短名查找）。逐值人工转录，值必须一致。
-#   - `dsh-client/pricing.json` —— 宿主是 Node，跟 CLI 一样能读文件，这份
+#   - `integrations/dsh-client/pricing.json` —— 宿主是 Node，跟 CLI 一样能读文件，这份
 #     是 build 时从源文件**直接复制**（不是转录）过去的运行时资产，宿主的
 #     costReport 投影拿它算钱（host/index.ts::costReportFrom）。既是复制，
 #     理论上不该漂移，但复制这个动作本身可能被忘记执行——这条测试钉的正是
@@ -10,8 +10,8 @@
 #     同一类缺陷的两种成因。
 #
 # 两份 PRICING 提取都要——src/client/styles/index.ts 用 node 求值（对象字面量
-# 本身是合法 JS）；dsh-client/pricing.json 是纯 JSON，直接 json.load。盯的是
-# **签入的源**，不是构建产物：tsup 迁移（9efaafb）把手写的 `dsh-client/client.js`
+# 本身是合法 JS）；integrations/dsh-client/pricing.json 是纯 JSON，直接 json.load。盯的是
+# **签入的源**，不是构建产物：tsup 迁移（9efaafb）把手写的 `integrations/dsh-client/client.js`
 # 换成了 `lib/client.cjs`，而 `lib/` 在 .gitignore 里。这条测试当时仍指着已删除
 # 的 client.js，`readFileSync` 抛异常、`check=True` 把它变成 ERROR——**价格表
 # 护栏从那次迁移起就静默死了**，直到 2026-08-20 的体验评审跑全量测试才发现。
@@ -19,7 +19,7 @@
 # 副本的唯一来源，是正确的靶子。
 #
 # 提取 client.js 的 PRICING 用 node 求值；node 不在环境里时跳过整个 class
-# （CI 的 ubuntu 自带 node，本地通常也有）——`dsh-client/pricing.json` 是
+# （CI 的 ubuntu 自带 node，本地通常也有）——`integrations/dsh-client/pricing.json` 是
 # 纯 JSON，不需要 node，单独一个不带 skip 装饰器的 class 覆盖它。
 
 import json
@@ -30,8 +30,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 PRICING_JSON = REPO / "scripts" / "agent_vitals" / "pricing.json"
-CLIENT_JS = REPO / "dsh-client" / "src" / "client" / "styles" / "index.ts"
-HOST_PRICING_JSON = REPO / "dsh-client" / "pricing.json"
+CLIENT_JS = REPO / "integrations" / "dsh-client" / "src" / "client" / "styles" / "index.ts"
+HOST_PRICING_JSON = REPO / "integrations" / "dsh-client" / "pricing.json"
 
 _has_node = shutil.which("node") is not None
 
@@ -97,17 +97,17 @@ class PricingLockstepTests(unittest.TestCase):
 
 
 class HostPricingCopyLockstepTests(unittest.TestCase):
-    """dsh-client/pricing.json 是 pricing.json 的运行时副本（宿主 costReport
+    """integrations/dsh-client/pricing.json 是 pricing.json 的运行时副本（宿主 costReport
     投影读它算钱），应该逐字节相同——不需要 node，任何环境都跑。"""
 
     def test_host_copy_matches_source_byte_for_byte(self):
         if not HOST_PRICING_JSON.exists():
-            self.fail("dsh-client/pricing.json 缺失——运行时副本没有从 "
+            self.fail("integrations/dsh-client/pricing.json 缺失——运行时副本没有从 "
                       "scripts/agent_vitals/pricing.json 复制过去，host/index.ts "
                       "的 costReport 投影会在 readFileSync 处直接崩")
         self.assertEqual(
             HOST_PRICING_JSON.read_bytes(), PRICING_JSON.read_bytes(),
-            "dsh-client/pricing.json 与 scripts/agent_vitals/pricing.json 内容不同——"
+            "integrations/dsh-client/pricing.json 与 scripts/agent_vitals/pricing.json 内容不同——"
             "改了价目表后忘了重新复制到 dsh-client/，宿主的 costReport 会算出旧价钱")
 
 

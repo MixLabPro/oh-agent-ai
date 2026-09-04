@@ -248,7 +248,7 @@ dsh plugin --profile web add dsh-agent-vitals
 
 The bundle ships the skill instructions only; the scanner runs from the
 `agent-vitals` binary on PATH (or a repo checkout today). See
-[`dsh/README.md`](dsh/README.md).
+[`integrations/dsh/README.md`](integrations/dsh/README.md).
 
 Python 3.8+, standard library only. No Python dependencies. The Codex adapter starts
 the local `codex app-server` over stdio; it falls back to filesystem discovery when
@@ -723,7 +723,7 @@ dsh plugin --profile web add dsh-agent-vitals
 ```
 
 bundle 只带 skill 说明，不带扫描器；扫描由 PATH 上的 `agent-vitals` 二进制执行
-（当前也可用仓库 checkout）。见 [`dsh/README.md`](dsh/README.md)。
+（当前也可用仓库 checkout）。见 [`integrations/dsh/README.md`](integrations/dsh/README.md)。
 
 Python 3.8+，只用标准库。无依赖，不联网。
 

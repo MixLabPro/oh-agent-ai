@@ -17,7 +17,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DSH = ROOT / "dsh"
+DSH = ROOT / "integrations" / "dsh"
 
 FRONTMATTER_RE = re.compile(r"^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$")
 
@@ -75,7 +75,7 @@ class DshBundleTests(unittest.TestCase):
 
     def test_dsh_skill_md_keeps_root_name_and_description(self):
         root_fm, _ = _frontmatter("SKILL.md")
-        dsh_fm, _ = _frontmatter("dsh/SKILL.md")
+        dsh_fm, _ = _frontmatter("integrations/dsh/SKILL.md")
         # 名字与描述是路由表面。两份 SKILL.md 一旦漂移，DSH 的目录就会与前
         # 五个宿主给出不同的路由语义，而且只在装上去之后才被发现。
         self.assertEqual(dsh_fm["name"], root_fm["name"])
@@ -84,7 +84,7 @@ class DshBundleTests(unittest.TestCase):
     def test_both_bodies_list_dsh_as_a_supported_host(self):
         # DSH-2 落地后 dsh 是可体检宿主。两份 SKILL.md 都必须把 dsh 列为受支持
         # 宿主（而非「暂不支持」），否则 agent 会在该扫描 DSH 的时候漏掉它。
-        for path in ("SKILL.md", "dsh/SKILL.md"):
+        for path in ("SKILL.md", "integrations/dsh/SKILL.md"):
             _, body = _frontmatter(path)
             self.assertIn("`dsh`", body, path)
             self.assertNotIn("not yet a health-checked host", body, path)

@@ -38,8 +38,8 @@ target/
 /dist/
 
 # npm 包（dsh/ 与 dsh-client/）的本地依赖
-dsh-client/node_modules/
-dsh/node_modules/
+integrations/dsh-client/node_modules/
+integrations/dsh/node_modules/
 node_modules/
 lib/
 

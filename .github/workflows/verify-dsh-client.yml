@@ -1,6 +1,6 @@
 name: Verify dsh-client
 
-# dsh-client/scripts/verify.mjs 和 verify-host.mjs 本该在构建产物变化时兜底
+# integrations/dsh-client/scripts/verify.mjs 和 verify-host.mjs 本该在构建产物变化时兜底
 # __ModuleLoader__ 交接协议，但在 2026-08 从手写 JS 迁到 tsup 时，两个脚本
 # 里硬编码的产物路径（client.js/index.js）没跟着改到 lib/，也从未接进任何
 # workflow —— 于是两个脚本静默失效，构建产物里连续两个 bug（footer 括号顺序
@@ -12,11 +12,11 @@ on:
   push:
     branches: [main, "refactor/**", "merge/**"]
     paths:
-      - "dsh-client/**"
+      - "integrations/dsh-client/**"
       - ".github/workflows/verify-dsh-client.yml"
   pull_request:
     paths:
-      - "dsh-client/**"
+      - "integrations/dsh-client/**"
       - ".github/workflows/verify-dsh-client.yml"
   workflow_dispatch:
 
@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: dsh-client
+        working-directory: integrations/dsh-client
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
