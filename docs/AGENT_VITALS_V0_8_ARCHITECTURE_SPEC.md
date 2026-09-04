@@ -1017,10 +1017,23 @@ fold 或 identity 逻辑来“消除”Cargo 环。
 
 ### Phase C：抽出 `agent-vitals-domain`
 
-- 移动 UsageFact、SessionKey、跨宿主 cost、Finding 与 projection；
-- 将单体 `cost.rs` 拆为 Model Resolver、Rate Card、BillingContext 与 Cost Projection；
-- 将现有 `agent-vitals-core` 变成临时 facade；
-- 所有调用方切到新 crate 后删除 facade。
+> **代码调研先行**（用户 2026-09-04 要求）：`docs/AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md`。
+> 调研结论修正了本节的范围估计——真实的 `domain → host` 生产耦合是 **6 个点 / ~370 行**
+> （3 组：`Coords`+`tool_invocation` → contracts；`match_behavior`/`match_trajectory`
+> raw shim → dsh adapter；canonical 归一层（生产零调用点）→ adapters），**不是**
+> 「拆 `usage.rs` 188KB」。
+
+- **C1–C3（阻塞项，见调研 §2–4）**：断 `domain → {dsh_evidence, codex_usage}` 的
+  3 组耦合，每组「移动 + 改 import」级、golden 零漂移。
+- **B2**：`dsh_evidence` + `codex_usage` residual 物理迁进 `agent-vitals-adapters`，
+  撤 core lib.rs 的两条 re-export。
+- **抽 crate**：`domain/` 整体成 `agent-vitals-domain`；`agent-vitals-core` 退成
+  `contracts/` + `compatibility/` 薄 crate（arch §0「拆完前保留 crate 名」）。
+- **不在 Phase C**：`cost.rs` 99KB 拆 Model Resolver / Rate Card / BillingContext /
+  Cost Projection —— `cost.rs` 零 host import，是 domain **内部**重构，建议并入
+  Phase D（与 Model Catalog / BillingContext / User Profile 同批，那时才有真实需求
+  驱动）。`usage.rs` 的「DSH wire 解析混在 domain」同类，as-is 进 domain crate，
+  wire/fold 分离另开。
 
 ### Phase D：建立 `agent-vitals-runtime`
 

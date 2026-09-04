@@ -114,6 +114,13 @@ billing/"。这两条**不是**"移动文件"级别的操作：
 
 **建议**：§11 这两行标注"= Phase C 设计项，非搬运"，避免被读成低风险移动。
 
+**2026-09-04 调研修正**（`docs/AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md`）：进一步核实后
+分成两件事——① 抽 `agent-vitals-domain` crate 的**阻塞项**是断 `domain → host`
+的 6 个生产耦合点（~370 行，3 组「移动 + 改 import」），`usage.rs` 里的耦合全在
+**生产零调用**的 canonical 归一层；② `cost.rs` 拆 models/billing、`usage.rs`
+wire/fold 分离**零 host 耦合、不阻塞 crate 抽出**，是 domain 内部重构，建议并入
+Phase D。本条对「非搬运」的判断只对 ② 成立；① 比原估计小得多。
+
 ### 3.3 [澄清] `agent-vitals-adapters` 无 I/O 与 Python 镜像的关系
 
 §9 + §14.8：Python 镜像存在期间公开 JSON 保持 byte-parity。但 v0.8 把 Rust 侧拆成
