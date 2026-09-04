@@ -9,7 +9,7 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use crate::skills::doctor::DEFAULT_OVERLAP_MIN;
-use crate::skills::overlap::{overlap_pairs, OverlapOpts};
+use agent_vitals_domain::skills::overlap::{overlap_pairs, OverlapOpts};
 use crate::util::read_lossy;
 
 /// 复刻 Python 的 `OSError` 文本形态：`[Errno 2] No such file or directory: '<path>'`。

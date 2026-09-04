@@ -7,7 +7,6 @@
 //! 两者都叫 skill，但一个是扫描器、一个是轨迹检测器，永远不该混在一个子树里
 //! （分类守卫测试 tests/test_classification.py 钉住这条边界）。
 
-pub mod analysis;
 pub mod codex;
 pub mod discovery;
 pub mod diff;
@@ -16,7 +15,6 @@ pub mod explain;
 pub mod host;
 pub mod inventory;
 pub mod openclaw;
-pub mod overlap;
 pub mod redact;
 pub mod render;
 pub mod report;

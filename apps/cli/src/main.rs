@@ -23,122 +23,18 @@ use serde_json::{json, Value};
 use skills::discovery::Ctx;
 use util::norm;
 
-/// 覆盖优先级**按宿主而异**，不能只用一张表。
-///
-/// Python 侧曾经是一张全局表，装的是 OpenClaw 的顺序却套用到每个宿主，
-/// 于是 Claude Code 的 personal 与 project 被判反 —— 正是「与多数人直觉相反」
-/// 的那一对。判反的后果不是少一条信息，是把诊断方向整个指错。
-///
-/// DSH 是第一个二维覆盖宿主（HOST_ADAPTER_CONTRACT §DSH）：先比 scope 层
-/// （近层同名直接赢），层内才用 rank 裁决。前五个宿主只有一个隐式层，所以
-/// `level_rank_for` 返回 `(layer, rank)`：它们的 layer 恒为 0、rank 即原标量，
-/// 排序结果逐字节不变。
-pub(crate) fn level_rank_for(host_family: &str, level: &str, layer: &str) -> (u16, u16) {
-    if host_family == "dsh" {
-        return (dsh_layer_ordinal(layer), dsh_rank(level));
-    }
-    (0, scalar_rank(host_family, level))
-}
-
-/// 前五个宿主 / 未知宿主的层内 rank（原标量；u8 拓宽为 u16 以统一二维键）。
-fn scalar_rank(host_family: &str, level: &str) -> u16 {
-    match host_family {
-        // OpenClaw：workspace > project > personal > managed
-        "openclaw" => match level {
-            "workspace" | "enterprise" => 0,
-            "project" => 1,
-            "personal" => 2,
-            "managed" | "plugin" => 3,
-            "other-host" => 8,
-            _ => 9,
-        },
-        // 其余（含未知宿主）按 Claude Code：enterprise > personal > project > plugin
-        _ => match level {
-            "enterprise" => 0,
-            "personal" => 1,
-            "project" => 2,
-            "plugin" => 3,
-            "other-host" => 8,
-            _ => 9,
-        },
-    }
-}
-
-/// DSH 的 discovery roots（**层内** rank，越小越优先）。词表出自契约根表。
-fn dsh_rank(level: &str) -> u16 {
-    match level {
-        "project-dsh" => 100,
-        "project-agents" => 200,
-        "custom" => 300,
-        "user-dsh" => 400,
-        "user-agents" => 500,
-        "bundled" => 600,
-        _ => 999,
-    }
-}
-
-/// DSH 的 scope 层序，**近层在前**。具体 scope 链名由 DSH 适配器接入时对齐；
-/// 未列出的层算最远，保证已知的近层总是赢。
-const DSH_LAYER_ORDER: &[&str] = &[];
-const DSH_LAYER_FAR: u16 = 99;
-
-fn dsh_layer_ordinal(layer: &str) -> u16 {
-    DSH_LAYER_ORDER
-        .iter()
-        .position(|x| *x == layer)
-        .map(|i| i as u16)
-        .unwrap_or(DSH_LAYER_FAR)
-}
-
-/// 从记录里取覆盖层名。前五个宿主只有一个隐式层（返回 ""）。
-/// DSH 的层写在 conflict_domain 第三段（A5：`dsh:<DSH_HOME>:<layer>`）。
-pub(crate) fn layer_of(v: &Value) -> &str {
-    let family = v
-        .get("host_family")
-        .and_then(|x| x.as_str())
-        .or_else(|| v.get("host").and_then(|x| x.as_str()))
-        .unwrap_or("");
-    if family != "dsh" {
-        return "";
-    }
-    let domain = v.get("conflict_domain").and_then(|x| x.as_str()).unwrap_or("");
-    // 取最后一个 ":" 之后的段作层名，容忍 DSH_HOME 里出现冒号（如 Windows 盘符）。
-    domain
-        .strip_prefix("dsh:")
-        .and_then(|rest| rest.rsplit(':').next())
-        .unwrap_or("")
-}
-
-pub(crate) fn level_rank(v: &Value) -> (u16, u16) {
-    let family = v
-        .get("host_family")
-        .and_then(|x| x.as_str())
-        .or_else(|| v.get("host").and_then(|x| x.as_str()))
-        .unwrap_or("");
-    let level = v.get("level").and_then(|x| x.as_str()).unwrap_or("");
-    let layer = layer_of(v);
-    level_rank_for(family, level, layer)
-}
-
-/// Codex 没有可配置的预算旋钮，用实测得到的回退值。
-pub(crate) const CODEX_FALLBACK_DESC_BUDGET: i64 = 8000;
-
-pub(crate) fn severity_rank(s: &str) -> u8 {
-    match s {
-        "critical" => 0,
-        "high" => 1,
-        "medium" => 2,
-        _ => 3,
-    }
-}
-
-pub(crate) fn conflict_rank(s: &str) -> u8 {
-    match s {
-        "high" => 0,
-        "medium" => 1,
-        _ => 2,
-    }
-}
+// v0.8 Phase E7.2：覆盖优先级排序（level_rank/level_rank_for/severity_rank/
+// conflict_rank/CODEX_FALLBACK_DESC_BUDGET）+ JSON 字段取值助手（s/i/f/b/
+// chars）迁进 agent-vitals-domain（纯计算，不认识宿主 wire 格式，本该一直在
+// 那）。`analysis.rs`/`overlap.rs` 同一步跟着搬进 domain，是这批函数在二进制
+// 侧唯一的消费者——搬完之后只有 `layer_of`（discovery.rs 用）与 `s`/`i`/`f`/
+// `b`（doctor/explain/report/snapshot/oneline 用）在 apps/cli 里还有调用点，
+// 保留 re-export 让这些 call site 零改动；其余（`conflict_rank`/`level_rank`/
+// `level_rank_for`/`severity_rank`/`CODEX_FALLBACK_DESC_BUDGET`/`chars`）只在
+// domain 内部被 analysis.rs 用，不再 re-export（`doctor.rs` 恰好有自己独立的
+// `severity_rank` 实现，同名不同函数，不是同一份代码的两个入口）。
+pub(crate) use agent_vitals_domain::skills::ranking::layer_of;
+pub(crate) use agent_vitals_domain::util::{b, f, i, s};
 
 /// 拒绝负数。**不能静默接受后产出垃圾** —— `--budget -1` 会算出
 /// `pct_used: -6300.0` 并原样打进摘要行，一个负百分比被当成测量值输出。
@@ -842,22 +738,6 @@ or specify one with --baseline.");
     print!("{}", text);
     print!("{}", skills::snapshot::doctor_snapshot(doc, auto_snapshot));
     rc
-}
-
-pub(crate) fn s(v: &Value, k: &str) -> String {
-    v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
-}
-pub(crate) fn i(v: &Value, k: &str) -> i64 {
-    v.get(k).and_then(|x| x.as_i64()).unwrap_or(0)
-}
-pub(crate) fn f(v: &Value, k: &str) -> f64 {
-    v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0)
-}
-pub(crate) fn b(v: &Value, k: &str) -> bool {
-    v.get(k).and_then(|x| x.as_bool()).unwrap_or(false)
-}
-pub(crate) fn chars(v: &Value, k: &str) -> usize {
-    v.get(k).and_then(|x| x.as_str()).map_or(0, |x| x.chars().count())
 }
 
 /// `codex-evidence` 的人读呈现——从 `codex_evidence_json` 输出的同一个 Value
@@ -2332,9 +2212,9 @@ session_store={store} fold={fold}"
     }
 
     if let Some(Cmd::Overlap { min, top, rows_json }) = &args.cmd {
-        let o = skills::overlap::OverlapOpts { min: *min, top: *top };
+        let o = agent_vitals_domain::skills::overlap::OverlapOpts { min: *min, top: *top };
         if let Some(path) = rows_json {
-            let rows = skills::overlap::overlap_pairs(&doc, &o);
+            let rows = agent_vitals_domain::skills::overlap::overlap_pairs(&doc, &o);
             let n = rows.as_array().map(|a| a.len()).unwrap_or(0);
             if std::fs::write(path, serde_json::to_string_pretty(&rows).unwrap_or_default()).is_err() {
                 eprintln!("failed to write {}", path.display());
@@ -2343,7 +2223,7 @@ session_store={store} fold={fold}"
             println!("Wrote {}: {} pairs", path.display(), n);
             return;
         }
-        print!("{}", skills::overlap::render_overlap(&doc, &o));
+        print!("{}", agent_vitals_domain::skills::overlap::render_overlap(&doc, &o));
         return;
     }
 

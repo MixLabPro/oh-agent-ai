@@ -8,7 +8,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::skills::overlap::{overlap_pairs, OverlapOpts};
+use agent_vitals_domain::skills::overlap::{overlap_pairs, OverlapOpts};
 use crate::skills::render::{human_last_used, human_tokens};
 use crate::util::wrap;
 use crate::{b, f, i, s};

@@ -78,9 +78,22 @@ skill 执行…名字像扫描器的 `skill.py`/`skill.rs` 属 agent 家族」�
 ```
 E7.1  frontmatter.rs → agent-vitals-domain/src/domain/skills/frontmatter.rs
       最小、最安全的第一步：已核实零 I/O、零宿主专有逻辑，167 行。
+      ✅ 完成（`a4488c2`）。
 E7.2  analysis.rs + overlap.rs → agent-vitals-domain/src/domain/skills/
-      已核实零 I/O，但需要确认是否引用 frontmatter.rs 的类型（E7.1 之后才知道
-      导入路径怎么改）。
+      ✅ 完成。没有引用 frontmatter.rs 的类型（原猜测落空），但比预想更深：
+      两个文件依赖 main.rs 顶层 8 个 `pub(crate)` helper——JSON 取值助手
+      `s`/`i`/`f`/`b`/`chars`（5 个，跨 skills/ 和 agent/ 广泛复用）+ Skill
+      冲突/覆盖排序簇 `level_rank`/`level_rank_for`/`severity_rank`/
+      `conflict_rank`/`CODEX_FALLBACK_DESC_BUDGET`（5 个，仅 analysis.rs 用）
+      + `layer_of`（discovery.rs 也用）。全部先迁：JSON 助手 → `domain::util`，
+      排序簇 → 新增 `domain::skills::ranking`（`domain::skill.rs` 单数已占用，
+      同 E7.1 的命名教训）。main.rs 保留 `pub(crate) use` 让未跟着迁的调用点
+      （doctor.rs/explain.rs/report.rs/snapshot.rs/agent/oneline.rs 用
+      `s`/`i`/`f`/`b`；discovery.rs 用 `layer_of`）零改动；`conflict_rank`/
+      `level_rank`/`level_rank_for`/`CODEX_FALLBACK_DESC_BUDGET`/`chars`
+      搬完后在 apps/cli 里已无调用点，不再 re-export（`doctor.rs` 恰好有自己
+      独立同名的 `severity_rank` 实现，是两个不同函数，不是同一份代码的两个
+      入口，也顺带没被误删）。golden 15+15 逐字节一致，证明纯移动零行为漂移。
 E7.3  security.rs → agent-vitals-domain/src/domain/skills/security_rules.rs
       1 处 I/O 命中需要先读上下文确认是读文件内容（该留在 sources）还是纯粹
       读已经在内存里的字符串（该留在 domain）。

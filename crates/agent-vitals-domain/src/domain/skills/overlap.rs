@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
 
-use crate::{b, s};
+use crate::domain::util::{b, s};
 
 pub struct OverlapOpts {
     pub min: f64,

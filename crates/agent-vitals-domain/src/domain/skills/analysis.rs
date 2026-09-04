@@ -10,9 +10,9 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::util::pyround;
-use crate::{b, chars, conflict_rank, i, level_rank, s, severity_rank,
-            CODEX_FALLBACK_DESC_BUDGET};
+use crate::domain::util::{b, chars, i, pyround, s};
+use crate::domain::skills::ranking::{conflict_rank, level_rank, severity_rank,
+                                      CODEX_FALLBACK_DESC_BUDGET};
 
 /// 同名 skill 的副本。
 pub fn conflicts(scope: &[Value], groups: &[(String, Vec<usize>)]) -> Vec<Value> {

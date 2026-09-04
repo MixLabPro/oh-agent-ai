@@ -179,6 +179,28 @@ mod tests {
 
 use serde_json::Value;
 
+// ────────────────────────── JSON 字段取值助手 ──────────────────────────
+// v0.8 Phase E7.2：从二进制 main.rs 迁来（原 `pub(crate) fn s/i/f/b/chars`）
+// ——纯 `serde_json::Value` 字段读取 + 缺省值，不认识任何宿主/领域词汇，本该
+// 一直在这里。main.rs 改 `pub(crate) use agent_vitals_domain::util::{...}`
+// 保call site零改动（同 D 阶段 split_lines/pyround 的搬法）。
+
+pub fn s(v: &Value, k: &str) -> String {
+    v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+pub fn i(v: &Value, k: &str) -> i64 {
+    v.get(k).and_then(|x| x.as_i64()).unwrap_or(0)
+}
+pub fn f(v: &Value, k: &str) -> f64 {
+    v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0)
+}
+pub fn b(v: &Value, k: &str) -> bool {
+    v.get(k).and_then(|x| x.as_bool()).unwrap_or(false)
+}
+pub fn chars(v: &Value, k: &str) -> usize {
+    v.get(k).and_then(|x| x.as_str()).map_or(0, |x| x.chars().count())
+}
+
 /// 会话分叉边界：日志头 `session` 事件里的 `seedLength`；没有就是没分叉。
 ///
 /// **为什么需要它**：DSH 里从已有会话「branch into new conversation」派生出的
@@ -336,5 +358,36 @@ mod fork_tests {
         ];
         // 日志头自己也没有 seq，同样保留（它就是边界的载体）。
         assert_eq!(post_fork(&events).len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod json_field_accessor_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn missing_key_returns_the_declared_default() {
+        let v = json!({});
+        assert_eq!(s(&v, "k"), "");
+        assert_eq!(i(&v, "k"), 0);
+        assert_eq!(f(&v, "k"), 0.0);
+        assert!(!b(&v, "k"));
+        assert_eq!(chars(&v, "k"), 0);
+    }
+
+    #[test]
+    fn wrong_type_falls_back_to_default_not_a_panic() {
+        // 键存在但类型不对——例如把数字塞进本该是字符串的字段——不能 panic，
+        // 也不能悄悄转型，只能按"没读到"处理。
+        let v = json!({"k": 42});
+        assert_eq!(s(&v, "k"), "");
+        assert!(!b(&v, "k"));
+    }
+
+    #[test]
+    fn chars_counts_unicode_scalars_not_bytes() {
+        let v = json!({"k": "中文abc"});
+        assert_eq!(chars(&v, "k"), 5, "3 个中文字符 + 3 个 ASCII = 5，不是字节数");
     }
 }

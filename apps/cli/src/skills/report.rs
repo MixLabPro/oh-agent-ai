@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Map, Value};
 
-use crate::skills::analysis;
+use agent_vitals_domain::skills::analysis;
 use crate::skills::discovery::group_by_key;
 use crate::skills::host::HostConfig;
 use crate::skills::inventory::Inventory;
