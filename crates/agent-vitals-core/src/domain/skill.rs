@@ -22,7 +22,7 @@
 //! 字段——`tool/call` 通常自带，`user/message` 从不带，两路分开写就是两份逻辑；
 //! `coord_map` 本来就"自带优先，否则顺延"，合并成一条路径更不容易漂移。
 //! `request_seq` 靠 `(turn, step)` 精确匹配回 `request_metrics` 算出的那一行
-//! （与 `waste.rs::find_request` 同一种匹配规则，不是"最近的 seq"）。
+//! （与 `util::find_request` 同一种匹配规则，不是"最近的 seq"）。
 //!
 //! 纪律（backlog T3）：缺失字段进 `missing_fields`，绝不填默认值/0。真实量级
 //! 唯一实测样本：`turn:5 step:3`，call→result 的 `Δt = 18ms`。
@@ -73,7 +73,7 @@ fn coords_for(seq: &Value, map: &std::collections::HashMap<i64, (Value, Value, V
 fn request_seq_for(turn: &Value, step: &Value, requests: &[Value]) -> Option<i64> {
     turn.as_i64()
         .zip(step.as_i64())
-        .and_then(|(t, s)| crate::waste::find_request(requests, t, s))
+        .and_then(|(t, s)| crate::util::find_request(requests, t, s))
         .and_then(|r| r.get("request_seq").and_then(|v| v.as_i64()))
 }
 
@@ -426,7 +426,7 @@ mod tests {
     }
 
     /// `(turn, step)` 精确匹配回 `request_metrics` 的那一行，取其 `request_seq`——
-    /// 与 `waste.rs::find_request` 同一种匹配规则，不是"最近的 seq"。
+    /// 与 `util::find_request` 同一种匹配规则，不是"最近的 seq"。
     #[test]
     fn request_seq_resolves_by_exact_turn_step_match() {
         let events = vec![call(19, 1000, 4, 1, "c1", "x"), result_ok(20, 1010, "c1")];

@@ -158,6 +158,25 @@ pub fn post_fork(events: &[Value]) -> Vec<Value> {
     }
 }
 
+/// 把一次 `(turn, step)` 对回 `usage::request_metrics` 算出的那次请求行——
+/// **精确匹配 turn+step，不是「最近的 seq」**（`skill.rs` 与 `waste.rs` 共用，
+/// 两处都要「该 skill 触发/该失败发生在哪次请求里」，语义完全一致）。
+/// `requests` 必须是 `request_metrics` 的输出。
+pub fn find_request(requests: &[Value], turn: i64, step: i64) -> Option<&Value> {
+    requests
+        .iter()
+        .find(|r| r["turn"].as_i64() == Some(turn) && r["step"].as_i64() == Some(step))
+}
+
+/// `find_request` 命中之后、上下文增量算 after 值用的那次请求：`request_seq`
+/// 严格大于 `after_request_seq` 里最小的一次（`waste.rs::emit_failure_waste` 用）。
+pub fn find_next_request(requests: &[Value], after_request_seq: i64) -> Option<&Value> {
+    requests
+        .iter()
+        .filter(|r| r["request_seq"].as_i64().is_some_and(|n| n > after_request_seq))
+        .min_by_key(|r| r["request_seq"].as_i64().unwrap_or(i64::MAX))
+}
+
 #[cfg(test)]
 mod fork_tests {
     use super::*;

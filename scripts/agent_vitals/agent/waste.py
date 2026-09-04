@@ -23,7 +23,7 @@ V2 覆盖两种模式：
 """
 
 from .behavior import _tool_invocation
-from ..util import est_tokens, post_fork
+from ..util import est_tokens, find_next_request, find_request, post_fork
 
 _MIN_REPEAT_TURNS = 2  # 至少跨 2 个不同 turn 才算"重复"，同一 turn 内多次调用不算
 _MIN_FAILED_RESULTS = 3  # 与 trajectory.py 的 SV613b 阈值一致（概念对齐，各自独立扫描）
@@ -129,24 +129,6 @@ def detect_duplicate_tool_results(events):
     return out
 
 
-def _find_request(requests, turn, step):
-    # 非 dict 行跳过而不是崩——Rust 侧 `Value` 索引对非 object 天然返回
-    # null，两侧要同一条容错纪律（Skill 执行审计 T3 的 skill.py 复用了这个
-    # 函数，喂进来的 requests 不再保证全是良构 dict）。
-    for r in requests:
-        if isinstance(r, dict) and r.get("turn") == turn and r.get("step") == step:
-            return r
-    return None
-
-
-def _find_next_request(requests, after_request_seq):
-    candidates = [r for r in requests
-                  if isinstance(r.get("request_seq"), int) and r["request_seq"] > after_request_seq]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda r: r["request_seq"])
-
-
 def detect_failure_run_waste(events, requests):
     """失败重试的上下文增量：连续 ≥3 次工具失败之后，上下文实际增长了多少。
 
@@ -190,10 +172,10 @@ def _emit_failure_waste(run, requests):
     start_turn, start_step, start_seq, start_time, first_code = run[0]
     end_turn = run[-1][0]
 
-    r_start = _find_request(requests, start_turn, start_step)
+    r_start = find_request(requests, start_turn, start_step)
     if r_start is None or not isinstance(r_start.get("request_seq"), int):
         return None
-    r_after = _find_next_request(requests, r_start["request_seq"])
+    r_after = find_next_request(requests, r_start["request_seq"])
     if r_after is None:
         return None
 

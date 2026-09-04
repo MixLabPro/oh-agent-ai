@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::dsh_evidence::tool_invocation;
-use crate::util::est_tokens;
+use crate::util::{est_tokens, find_next_request, find_request};
 
 const MIN_REPEAT_TURNS: usize = 2; // 至少跨 2 个不同 turn 才算"重复"，同一 turn 内多次调用不算
 const MIN_FAILED_RESULTS: usize = 3; // 与 trajectory.rs 的 SV613b 阈值一致（概念对齐，各自独立扫描）
@@ -245,19 +245,6 @@ fn emit_failure_waste(
         "waste_tokens": waste_tokens,
         "suggestion": "检查失败原因（工具参数、权限或环境问题）；重试前先确认根因，避免同一错误被反复携带进后续上下文。",
     }));
-}
-
-/// `pub(crate)`：`skill.rs`（T3）也用它把一次 skill 触发的 `(turn, step)`
-/// 对回 `request_metrics` 算出的那次请求，取其 `request_seq`。
-pub(crate) fn find_request(requests: &[Value], turn: i64, step: i64) -> Option<&Value> {
-    requests.iter().find(|r| r["turn"].as_i64() == Some(turn) && r["step"].as_i64() == Some(step))
-}
-
-fn find_next_request(requests: &[Value], after_request_seq: i64) -> Option<&Value> {
-    requests
-        .iter()
-        .filter(|r| r["request_seq"].as_i64().is_some_and(|n| n > after_request_seq))
-        .min_by_key(|r| r["request_seq"].as_i64().unwrap_or(i64::MAX))
 }
 
 /// 两个检测器的合集，按 seq 排序追加——与 `match_behavior`/`match_trajectory`

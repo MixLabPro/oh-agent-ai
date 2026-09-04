@@ -24,7 +24,7 @@ T3 表格 = PRD §9 契约的蒸馏）。单一真相源是
 字段——`tool/call` 通常自带，`user/message` 从不带，两路分开写就是两份逻辑；
 `_coord_map` 本来就"自带优先，否则顺延"，合并成一条路径更不容易漂移。
 `request_seq` 靠 `(turn, step)` 精确匹配回 `request_metrics` 算出的那一行
-（与 `waste._find_request` 同一种匹配规则，不是"最近的 seq"）。
+（与 `util.find_request` 同一种匹配规则，不是"最近的 seq"）。
 
 纪律（backlog T3）：缺失字段进 `missing_fields`，绝不填默认值/0。真实量级
 唯一实测样本：`turn:5 step:3`，call→result 的 Δt = 18ms。
@@ -32,8 +32,7 @@ T3 表格 = PRD §9 契约的蒸馏）。单一真相源是
 import json
 
 from .trajectory import _coord_map
-from ..util import post_fork
-from .waste import _find_request
+from ..util import find_request, post_fork
 
 
 def _skill_call_name(data):
@@ -75,7 +74,7 @@ def _request_seq_for(turn, step, requests):
     """按 `(turn, step)` 回 `request_metrics` 找对应请求的 `request_seq`。"""
     if turn is None or step is None:
         return None
-    row = _find_request(requests, turn, step)
+    row = find_request(requests, turn, step)
     if row is None:
         return None
     rs = row.get("request_seq")

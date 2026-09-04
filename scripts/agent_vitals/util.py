@@ -191,3 +191,23 @@ def post_fork(events):
         return list(events)
     return [e for e in events
             if not isinstance(e, dict) or not isinstance(e.get("seq"), int) or e["seq"] >= b]
+
+
+def find_request(requests, turn, step):
+    """把一次 `(turn, step)` 对回 `request_metrics` 那次请求行——精确匹配
+    turn+step，不是"最近的 seq"。`skill.py` 与 `waste.py` 共用，语义一致。
+    非 dict 行跳过而不是崩（喂进来的 requests 不保证全是良构 dict）。"""
+    for r in requests:
+        if isinstance(r, dict) and r.get("turn") == turn and r.get("step") == step:
+            return r
+    return None
+
+
+def find_next_request(requests, after_request_seq):
+    """`find_request` 命中后算上下文增量 after 值用：`request_seq` 严格大于
+    `after_request_seq` 里最小的一次（`waste.py::_emit_failure_waste` 用）。"""
+    candidates = [r for r in requests
+                  if isinstance(r.get("request_seq"), int) and r["request_seq"] > after_request_seq]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda r: r["request_seq"])
