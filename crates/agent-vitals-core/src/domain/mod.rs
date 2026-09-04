@@ -7,7 +7,6 @@
 pub mod behavior;
 pub mod budget;
 pub mod canonical_audit;
-pub mod compaction;
 pub mod cost;
 pub mod detectors;
 pub mod duration;
@@ -20,4 +19,3 @@ pub mod takeover;
 pub mod trajectory;
 pub mod usage;
 pub mod util;
-pub mod waste;

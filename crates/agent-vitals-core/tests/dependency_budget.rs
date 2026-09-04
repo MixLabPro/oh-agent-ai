@@ -353,13 +353,15 @@ fn nested_paths_and_legacy_facade_resolve_to_the_same_items() {
 /// any new host dependency must fail CI instead of silently expanding the debt.
 #[test]
 fn domain_to_host_compatibility_debt_cannot_grow() {
+    // Phase C Step 1 起 `compaction.rs`/`waste.rs` 已迁出 `domain/`（进
+    // `adapters/hosts/dsh/sessions/`，它们本就在解析 DSH 原始事件）。剩下的
+    // domain→host 债只有 behavior/trajectory 的 raw shim（Step 1b 迁）与 usage
+    // 的 canonical 归一层（Step 2 迁）。
     let allowances = [
         ("behavior.rs", "crate::dsh_evidence", 4usize),
         ("canonical_audit.rs", "crate::host_capability", 1),
-        ("compaction.rs", "crate::dsh_evidence", 1),
         ("trajectory.rs", "crate::dsh_evidence", 2),
         ("usage.rs", "crate::codex_usage", 3),
-        ("waste.rs", "crate::dsh_evidence", 1),
     ];
     let forbidden = [
         "crate::claude_code_evidence",

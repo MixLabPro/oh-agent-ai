@@ -17,9 +17,11 @@ pub mod domain;
 // `agent-vitals-adapters` in Phase B. These two residual aliases stay until
 // Phase C removes the domain → host dependency.
 pub use adapters::hosts::codex::sessions::usage as codex_usage;
-pub use adapters::hosts::dsh::sessions::evidence as dsh_evidence;
+pub use adapters::hosts::dsh::sessions::{
+    compaction, evidence as dsh_evidence, waste,
+};
 pub use contracts::{evidence, host_capability, r2a, source_identity, usage_fact};
 pub use domain::{
-    behavior, budget, canonical_audit, compaction, cost, detectors, duration, findings, plan,
-    skill, state, subagent, takeover, trajectory, usage, util, waste,
+    behavior, budget, canonical_audit, cost, detectors, duration, findings, plan, skill, state,
+    subagent, takeover, trajectory, usage, util,
 };
