@@ -259,8 +259,104 @@ v0.8 E7.6 建立的"整体搬迁、逐文件提交"纪律。
 
 Stage 0.3 到此完成。CLAUDE.md 中"r2a_store/discovery 留 apps/cli/src/
 agent/……是合法终态"的旧结论已随本次搬移改写，不再准确，已同步更新。
-下一步是 Stage 0.4：只读 JSON adapter，把刚搬进 `agent-vitals-runtime::
-sessions` 的 `host_snapshot`/`SessionStore` 现有输出，在
-`agent-vitals-data::projection` 里组装成 §1 定义的
-`MonthlySummary`/`DailySummary` DTO；WorkBuddy 显式进 `excluded_hosts`，
-不读它的任何真实数据源。
+
+## 8. Stage 0.4 设计：只读 JSON adapter
+
+### 8.1 依赖图更正：菱形，不是链
+
+动手设计 0.4 之前重读 spec §3.1 的依赖表，发现此前（本文档 §1 与更早的
+对话总结）默认的"`domain ← hosts ← data ← runtime` 线性链"是错的。spec
+原文表格逐行写的是：
+
+| crate | 允许依赖 |
+|---|---|
+| `agent-vitals-domain` | （无） |
+| `agent-vitals-hosts` | Domain |
+| `agent-vitals-data` | **Domain**（+ SQLite 驱动）——不包括 hosts |
+| `agent-vitals-runtime` | **Hosts + Data**（两者并列，不是 data 依赖 hosts） |
+
+真实形状是菱形：`hosts` 与 `data`是 `domain` 之下的两个平行兄弟，谁都不
+认识对方；只有 `runtime`（唯一知道"这台机器上到底接了哪些宿主"的层）
+同时依赖两者，把两边接起来。这个更正的直接后果：**`agent-vitals-data`
+结构上不可能自己完成"读 SessionStore/state.json 拼 DTO"这件事**——它连
+`agent-vitals-hosts` 都够不到，更别说 `agent-vitals-runtime` 里的
+`SessionStore`。§5 那条"contract 低、I/O 高"的判断（接口在 data，Stage 0
+实现在 runtime）不是风格偏好，是这张依赖表唯一能编译通过的形状。
+
+### 8.2 推迟项：`{claude,codex,dsh}_usage_fact.rs` 的宿主归位
+
+spec §5.2 的目标表第一行写"Claude/Codex/DSH 的 wire → UsageFact emitter"
+目标位置是 `hosts/<host>/sessions/`——而这三个文件目前仍在 `apps/cli/
+src/agent/`。本文档 §2 的原表格（0.3 那一行）也把这条纳入过范围，但
+实际执行只做了 SessionStore 机器的搬迁（六文件闭包），没有动这三个
+emitter——这是一处已发生的范围偏差，在此明确记录，而不是留着不提。
+
+**为什么现在不补**：这三个文件是 CLAUDE.md 钉死的 v0.7 UsageFact 发射器
+——Python↔Rust byte-parity lockstep（`tests/test_{claude,codex,dsh}_
+usage_fact.py` 的 `AGENT_VITALS_BIN` 差分）、两份打包白名单
+（`.github/workflows/package-clawhub.yml` + `tests/
+test_clawhub_packaging.py`）共同钉住的模块清单。搬家本身大概率不会破坏
+差分测试（它们经 CLI 子进程调用，不直接 import crate），但会触及这些
+pinned surface，值得单独一轮改动 + 验证，不该顺路塞进这次的读取面工作。
+更关键的是：**Stage 0.4（只读汇总）根本不需要它们**——emitter 写的是
+`UsageFact` JSONL，那是 spec §7 "Stage A：事实写入与恢复"的产出物，
+Stage 0 的 `MonthlySummary`/`DailySummary` 读的是现有的 `month.json`/
+ledger/cost report，两条线此刻不相交。推迟到 Stage A 准备工作时再处理，
+不阻塞 0.4。
+
+### 8.3 `agent-vitals-data::repository` 接口
+
+```rust
+// agent-vitals-data/src/repository.rs
+pub struct MonthlySummaryQuery { pub month: String }
+pub struct DailySummaryQuery { pub date: String }
+
+pub trait SummaryRepository {
+    fn monthly_summary(&self, query: &MonthlySummaryQuery) -> MonthlySummary;
+    fn daily_summary(&self, query: &DailySummaryQuery) -> DailySummary;
+}
+```
+
+Stage 0 只需要 `month`/`date` 两个查询维度；spec 示例里的 `host_scope`/
+`billing_scope` 过滤留给 Stage B（那时才有 SQLite 索引可供按条件查询，
+Stage 0 的实现天生返回"所有已知宿主"，加过滤参数只是摆设）。
+
+### 8.4 Stage 0 的具体实现落在 runtime，一个宿主一个提交
+
+`agent-vitals-runtime` 新增对 `agent-vitals-data` 的依赖，实现
+`SummaryRepository`（具体类型待实现时定，暂定 `JsonSummaryRepository`）。
+按 §6 同样的"整体搬迁、逐步提交"节奏，这次是"逐宿主接线、逐步提交"：
+
+1. **DSH（本轮实现）**：复用 `budget.rs` 已有的 `compute_month`/
+   `read_month`（升级成 `pub(crate)`，供新模块调用，不新写第二份读取
+   逻辑）→ `agent_vitals_domain::cost::month_cost` 已经给出
+   `{total, peak_total}`。记账口径定为 **`BillingBasis::MeteredActual`**
+   ——不是 `MeteredEstimate`：DeepSeek 官方逐 token 价表是 DSH 的真实计费
+   费率（不是第三方猜测价），`priced_day`/`month_cost` 只是把"用了多少
+   token"按"官方多少钱一个 token"相乘，这本身就是可观测的真实费用，不是
+   估算。
+2. **Codex（下一提交）**：接 `sessions::codex_cost::codex_cost_report`。
+3. **Claude Code（再下一提交）**：接 `sessions::claude_ledger` +
+   `agent_vitals_domain::cost::cost_report`。
+4. **WorkBuddy**：永久留在 `excluded_hosts`（用户决定"不做，留待
+   v0.9"——见本文档头部）。
+
+前三步落地前，尚未接线的宿主（Codex/Claude Code）**临时**放进
+`excluded_hosts`——`data_contract.rs` 的文档注释原文就是"已知存在但本
+版本不产出数据的宿主，例如 WorkBuddy 在 v0.9 Stage 0 之前"，本轮的
+Codex/Claude Code 完全符合这个定义，接完各自的提交后就从
+`excluded_hosts` 移进 `by_host`。**这与 WorkBuddy 的排除性质不同**：
+WorkBuddy 是用户决定的永久范围外，Codex/Claude Code 是"这个提交还没写
+到"的临时状态，两者共享同一个字段是因为对 UI 而言效果一样诚实（都不能
+假装有数据），但研究文档要把"为什么排除"的区别记清楚，不能让读者以为
+WorkBuddy 和 Codex 是同一类问题。
+
+### 8.5 Freshness 的 Stage 0 近似
+
+spec 没有给"新鲜窗口"的具体阈值，Stage 0 用一个明说的粗近似：月度数据
+里最晚的日期键若是北京"今天"或"昨天"（覆盖 `rotate_today` 还没跑的
+边界）→ `Fresh`；有数据但最晚日期更早 → `Stale`；`compute_month` 返回
+`None`（本月完全没有记录）→ `Unavailable`（不是"这个月花了 ¥0"）。
+`Partial` 这一档 Stage 0 不产出——它需要"预期应该有但缺了一部分"的判断
+依据（比如宿主本该在线却漏传），Stage 0 没有这个信号来源，留给 Stage B
+接入 source status 之后再区分。
