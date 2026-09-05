@@ -1203,6 +1203,28 @@ fn read_month(month: String) -> Value {
     overview::read_month_json(&month)
 }
 
+/// v0.9 Stage 0.6 工作台 Data Query API（spec §7 目标态"Tauri 只调
+/// monthly_summary 等 API"）：经 `SummaryRepository` trait 调 runtime 的
+/// `JsonSummaryRepository`——薄转发，无定价/无直读 state JSON。`--json` 与
+/// CLI `data coverage` 是**同一份冻结 DTO**（`data_contract.rs::to_json`），
+/// 工作台总览/日历两页的诚实字段（freshness/coverage/excluded_hosts）都从
+/// 这里取，不许前端自己从金额反推"有没有数据"。
+#[tauri::command]
+fn data_monthly_summary(month: String) -> Value {
+    use agent_vitals_data::repository::{MonthlySummaryQuery, SummaryRepository};
+    let repo = agent_vitals_runtime::summary::JsonSummaryRepository;
+    repo.monthly_summary(&MonthlySummaryQuery { month }).to_json()
+}
+
+/// v0.9 Stage 0.6 单日版（北京日 YYYY-MM-DD）。与 `data_monthly_summary`
+/// 同一条 trait 路径、同一份 DTO 契约。
+#[tauri::command]
+fn data_daily_summary(date: String) -> Value {
+    use agent_vitals_data::repository::{DailySummaryQuery, SummaryRepository};
+    let repo = agent_vitals_runtime::summary::JsonSummaryRepository;
+    repo.daily_summary(&DailySummaryQuery { date }).to_json()
+}
+
 /// 工作台「立即同步」按钮：受控 tick 一次（与托盘菜单同一路径）。立即返回，不
 /// 阻塞 IPC；工作台自己在同步结束后重拉 overview。
 #[tauri::command]
@@ -1276,6 +1298,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_overview,
             read_month,
+            data_monthly_summary,
+            data_daily_summary,
             trigger_sync,
             store::sessions_list,
             store::sessions_read,
@@ -1350,6 +1374,24 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stage 0.6 的 Data Query API 面是薄转发，但"薄"也要钉住：DTO 与 CLI
+    /// `data coverage` 同一份 `to_json()`（三宿主 by_host + workbuddy 永久
+    /// excluded + coverage 3/3），托盘侧不许长出第二种形状。真机结构性断言
+    /// （金额值随机器变，形状不随）。
+    #[test]
+    fn data_monthly_summary_dto_matches_the_frozen_contract_shape() {
+        let d = data_monthly_summary(overview::current_month_beijing());
+        let keys: Vec<&String> = d["by_host"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["claude-code", "codex", "dsh"]);
+        assert_eq!(d["excluded_hosts"], serde_json::json!(["workbuddy"]));
+        assert_eq!(d["coverage"]["measured_fields"], 3);
+        assert_eq!(d["coverage"]["total_fields"], 3);
+        // 冻结契约的三条不变式之一在托盘侧同样成立：excluded 与 by_host 不相交。
+        for host in d["excluded_hosts"].as_array().unwrap() {
+            assert!(d["by_host"].get(host.as_str().unwrap()).is_none());
+        }
+    }
 
     fn ov_with(budget: overview::BudgetAlert) -> Overview {
         Overview {
