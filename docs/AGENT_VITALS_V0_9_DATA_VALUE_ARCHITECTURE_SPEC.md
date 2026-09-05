@@ -1,6 +1,7 @@
 # Agent Vitals v0.9 Data Foundation 架构规格
 
-> 状态：架构草案 R3（2026-09-05）  
+> 状态：架构规格 R4（2026-09-05 修订；R3 同日发布。R4 收录当日落地的
+> KPI/计费归属实现、实现状态对照表与剩余工作分期——架构决策与 R3 一致，无推翻）  
 > 前置：干净收口的 v0.8（含 Skill Surface ownership migration）  
 > 后续：`AGENT_VITALS_V0_10_VALUE_LOOP_ARCHITECTURE_SPEC.md`
 
@@ -33,6 +34,28 @@ Stage 0 不要求先完成 SQLite 迁移。它先建立稳定的 Data Query API�
 projection、Claude ledger 和 WorkBuddy source adapter 实现；UI/CLI 自此不再直接读取这些
 文件。随后阶段只替换 Data 内部的写入与索引实现，不改变上层查询契约。
 
+### 0.2 实现状态对照（R4，2026-09-05 收盘）
+
+当日两轮迭代已落地（提交序见 git log `c7d0e06..01f0d9a`），§2.1 清单之外**计划外提前
+完成**的部分一并列入：
+
+| 交付物 | 状态 | 落点 |
+|---|---|---|
+| Stage 0 全部七步（DTO 冻结 / data crate / CLI 收口 / 三宿主接线 / data CLI / Tauri 命令 + 数据源 panel / 四宿主 fixture） | ✅ 已完成并合入 main | `1596836`（执行记录 `AGENT_VITALS_V0_9_STAGE0_RESEARCH.md`） |
+| 计费模式声明层 `billing_modes` + `billing_route_of`（与价卡解耦，无价卡模型可归属） | ✅ | Stage A `c7d0e06` |
+| 权威归属视角 `by_provider`（host ≠ billing source，条目级单币 currency） | ✅ | Stage B `f004756` |
+| `FixedSubscription` 写入方（账期过滤、零用量照摊、只进月不进日）+ `total_actual_spend` 分币 | ✅ | Stage C `68ca4eb` |
+| 总览感知层看板（KPI 行 / 双轨账 / 决策卡 / 本月结论行）+ Token 日历跨宿主逐日 | ✅ | Stage D `6586112`/`f110066` |
+| 名义成本口径（list-price，"名义 GDP"式客观基准） | ✅ 定义 + 实现 | 定义 `ATTRIBUTABLE_WASTE.md` §6.7（提交 `9b279ca`）；实现 = catalog 计价面既有产物被正式命名 |
+| 性能形状：codex fold 进程级 60s memo（`codex_merged_cached`，Arc 命中） | ✅ | `d8c6c83` |
+| 审查修复：`CODE_REVIEW_V0_9_STAGE_A_D_KPI_BILLING` 10 条 + `CODE_REVIEW_V0_9_WORKBENCH_UX` 14 条 | ✅ | `29c0717`/`0096607`/`01f0d9a` |
+| §2.1 其余八项（writer / SQLite 投影 / checkpoint / lease / 生成事务 / HostBillRecord / BillingContext / 故障注入） | ❌ 未动 | 分期见 §7 Stage A–C |
+
+**数据缺口（阻塞实际侧计费精度，等用户输入，非工程阻塞）**：中转商对
+claude-sonnet-5 的 cache_read 单价（决定 claude-* 实际支出 78.9%）、GLM 官方按量
+价卡（77.3M token 报 unpriced）、ChatGPT Plus 月费金额（利用率不可算）、
+名义成本统一展示用的汇率（可先分币不折算）。
+
 ## 1. 用户可见能力
 
 1. 月度总感知成本：固定订阅与按量成本分开，不把 API 等价额伪装成账单。
@@ -43,20 +66,36 @@ projection、Claude ledger 和 WorkBuddy source adapter 实现；UI/CLI 自此�
 
 ## 2. 范围
 
-### 2.1 必做
+### 2.1 必做（R4 分期；状态对照见 §0.2）
+
+**P0 —— 消除已知病灶（Stage A，下一轮主体）**
 
 - `UsageFact` append-only writer、稳定 identity、去重与 reconciliation；
-- `HostBillRecord`：不能验证逐请求 token 时记录可信的宿主账单，而不伪造成 UsageFact；
-- `CanonicalSession` 最小持久化；
-- JSONL 事实与 canonical snapshot 作为审计输入；
-- 可删除、可重建的 SQLite 查询投影；
-- `SourceFingerprint`、checkpoint、replay、增量失效；
-- 跨进程 writer lease；
+  *这是读侧形状歧义的根本解：summary.rs 现按宿主逐个适配 month.json /
+  claude-ledger / codex fold 三种 wire 形状，写入统一后歧义消失（审查 #2/#5 类
+  缺陷的病根）*；
+- `CanonicalSession` 最小持久化 + JSONL 事实作为审计输入；
+- Runtime 共享 evidence/ingest service（Stage 0.3 已收口 CLI 侧，本项补 data 侧）。
+
+**P1 —— 多进程一致性（Stage B 前半，与 SQLite 投影同批）**
+
+- 跨进程 writer lease（托盘 tick 与 CLI 同时写 `month.json` 已有真实冲突面）；
+- `SourceFingerprint`、checkpoint、增量失效；
+- 可删除、可重建的 SQLite 查询投影（替换 Stage 0 的 JSON read adapter；
+  Data Query API 与上层 DTO 不变——§0.1 承诺在此兑现）。
+
+**P2 —— 完整性收口（Stage B 后半 + Stage C）**
+
 - intent → facts → projection → manifest 的可恢复 generation transaction；
-- BillingContext / UserProfile：订阅、按量账户、预算、模型/价格来源和 unresolved；
-- coverage / data-quality projection 与 `data coverage`、`data rebuild-index` CLI；
-- Runtime 共享 evidence/index/projection service；
-- Python 边界守卫、文档主从图和故障注入测试。
+- `HostBillRecord`（WorkBuddy credit_json 是全仓唯一真实宿主账单，落地时
+  BillingBasis::HostBilled 首次获得生产写入方）；
+- BillingContext / UserProfile：订阅、按量账户、预算、模型/价格来源和
+  unresolved（吸收本轮的 `billing_modes` 声明层——见 §4.1）；
+- replay、故障注入测试、`data rebuild-index` CLI；
+- coverage / data-quality projection 完整化（字段已有，投影层缺）。
+
+此前清单中的「JSONL 事实与 canonical snapshot 作为审计输入」并入 P0；「Python
+边界守卫、文档主从图」随各阶段同行交付，不单列。
 
 ### 2.2 明确不做
 
@@ -116,10 +155,17 @@ data.monthly_summary(MonthlySummaryQuery { month, host_scope, billing_scope })?;
 data.coverage_status(CoverageQuery { month, host_scope })?;
 ~~~
 
-`MonthlySummary` 必须同时返回 `total`、`by_host`、`billing_basis`、`coverage`、
-`freshness`、`excluded_hosts` 与 `last_observed_at`。金额不是脱离来源的 scalar；任何 UI
-若只消费金额而丢弃这些字段，视为契约违规。调用者不应知道数据来自 JSON、SQLite 或未来的
-离线分析索引，但不得忽略这些业务语义字段。
+`MonthlySummary` 必须同时返回 `total_summable`、`total_actual_spend`（分币）、
+`by_host`、`by_provider`、`tokens_by_host`、`coverage`、`freshness`、`excluded_hosts`
+与 `last_observed_at`。金额不是脱离来源的 scalar；任何 UI 若只消费金额而丢弃这些
+字段，视为契约违规。调用者不应知道数据来自 JSON、SQLite 或未来的离线分析索引，
+但不得忽略这些业务语义字段。
+
+**该 DTO 已于 Stage 0 冻结并在消费中（Tauri/CLI），Stage B 的 SQLite repository
+必须产出同一形状。** R4 补充：权威计费归属在 `by_provider`（键 `"host/provider"`，
+条目级单币 currency——claude-code 宿主内 anthropic(USD)+minimax(CNY) 同桶跨币
+相加就是编造）；`by_host` 保留币种分栏的旧口径（有测试钉着），新增消费方一律读
+`by_provider`。
 
 ### 3.2 DSH 是参考实现，不是数据模型
 
@@ -188,6 +234,11 @@ lease acquired → intent durable → facts/canonical durable
 
 ## 4. Billing 与成本口径
 
+> R4 注：本节的 Basis 分离表已在 2026-09-05 落地为
+> `data_contract.rs::BillingBasis`（五档枚举 + `summable_into_total`）。
+> 口径的完整词表、实测锚点与诚实性边界以
+> `ATTRIBUTABLE_WASTE.md` §6/§6.7 为权威，此处只写 R4 新增的结构性决定。
+
 `BillingContext` / `UserProfile` 允许用户声明固定订阅套餐、按量账户、预算、模型价格来源和可计量范围。所有投影必须保留以下分离：
 
 | 值 | 含义 | 能否冒充真实账单 |
@@ -198,6 +249,43 @@ lease acquired → intent durable → facts/canonical durable
 | host-billed | 宿主提供的账单/credits 消耗，但无逐请求 token 归因 | 可以按宿主账单口径汇总，不能重标为模型 API 成本 |
 | API equivalent | 套餐消耗的等价 API 标价 | 不可以，只作诊断 |
 | unresolved | 模型或价格不可确认 | 不得归零 |
+
+### 4.1 计费模式声明层（已落地，Stage A）
+
+`pricing.json::catalog_2026_09.billing_modes` 是「这个模型的钱付给谁、按什么方式付」
+的单一判定点（`domain::cost::billing_route_of`）：与价卡**相互独立**（无价卡模型
+glm-* 也能归属——`resolve_card_catalog` 靠价卡反查是已知缺陷面，不得新增依赖它的
+归属逻辑）；声明序即优先级（先专后泛：shengsuanyun 的 0813 专属行必须排在
+deepseek-official 的 `deepseek-v4` 泛行前）；`unknown` 是合法判定结果，不得默认。
+金额在 `subscriptions` 节（`subscription_fee_of`/`declared_subscriptions`），金额
+未声明 → `None`，不得拿挂牌价猜。Stage E 方向：实现 §4.1 计费判定四步链
+（oauthAccount.billingType → 路由层 → quotaLimits 拒绝史 → 才问用户），把 basis
+从 user-declared 升级为 evidence-derived——词表已预留，接入不需改 DTO。
+
+### 4.2 名义成本（收编自 ATTRIBUTABLE_WASTE §6.7，2026-09-05）
+
+`nominal_cost` = 各桶 token × 官方市场标价，不扣套餐/中转折扣/促销——"名义 GDP"式
+跨供应商可比基准，与 6.1 套餐摊销、6.2 按量成本并列感知层第三栏。实测：缓存两桶
+占名义成本 92.8%（命中率 99.18%），`cache_write` 档位假设（1hr vs 5min）差 5.2%，
+展示必须标注。**词表让位**：`nominal_vs_actual_cost` 已改名
+`cache_counterfactual_cost`（"无缓存反事实"，与市场标价实测差 8~10 倍），
+`nominal` 一词专指本节口径，不得回用。派生护栏：订阅利用率倍数 >50× 不得显示
+「值 N 倍」，必须告警「归属待核」——anthropic 380× 实测即声明错误的自检信号。
+
+### 4.3 权威归属与实际支出（已落地，Stage B/C）
+
+权威计费归属 = `by_provider`（每 billing_source 一条、条目级单币）；实际支出 =
+按量实付 + 订阅月费（`total_actual_spend`，分币分栏，跨币不相加——**名义可换算
+（显式声明汇率）、实际是账不可换算**，两者性质不同不冲突 §6.4）。订阅月费摊入
+三条纪律：零用量月份照摊（不付用量也在付）；账期过滤（`billing_period_start`，
+缺省 `reported_at`）；只进月不进日（月费不是日发生额）。
+
+### 4.4 数据缺口（等用户输入）
+
+中转商对 claude-sonnet-5 的 `cache_read` 单价（一个数决定 claude-* 实际支出
+78.9%——三种借卡选法实测差 46 倍，禁止硬凑）；GLM 官方按量价卡；ChatGPT Plus
+月费金额；名义成本统一展示汇率。补齐前相应数字诚实报 unpriced / 「单价未知」
+/ 分币并列。
 
 ## 5. 数据访问接口与 Runtime 编排
 
@@ -289,19 +377,43 @@ v0.9 开工前必须完成 v0.8 E7 的所有权收口。当前 apps/cli/src/agen
 切换至 SQLite；控制台不会把 stale / partial / excluded 当作零或正常；CLI 不再拥有宿主
 wire 解释或事实写入；各宿主的 capability/coverage 与实际注册实现双向对账。
 
-### v0.9.0 Stage A：事实写入与恢复
+### ✅ v0.9.0 Stage 0：Data Access Foundation（2026-09-05 完成）
 
-UsageFact/CanonicalSession writer、lease、generation transaction、故障注入、replay 与 reconciliation。
+七步全部落地并合入 main（`1596836`），门槛逐条达成：上层只依赖 Data Query API；
+stale/partial/excluded 不降级为零或正常（含 DSH 0-token 月回归 `9ccc488`）；
+CLI 宿主 wire 解释收口至 runtime（Stage 0.3 六文件搬迁）；四宿主 capability/
+coverage 双向对账 fixture。执行记录：`AGENT_VITALS_V0_9_STAGE0_RESEARCH.md`。
 
-### v0.9.0 Stage B：索引、计费和覆盖
+### ✅ 计划外插入（2026-09-05，同日）：KPI/计费归属与总览感知层
 
-实现 SQLite schema/migration/rebuild，替换 Stage 0 的 JSON read adapter 为可重建索引；完成
-BillingContext/UserProfile、coverage projection、CLI/Tauri data-source status。Data Query API
-与上层 DTO 不变。
+用户指出总览 KPI 只反映 DSH 一家后展开，最终演化为计费归属重构：计费模式
+声明层（Stage A `c7d0e06`）、by_provider 权威归属（Stage B `f004756`）、
+FixedSubscription 写入方与 total_actual_spend（Stage C `68ca4eb`）、总览
+KPI 行/双轨账/决策卡与跨宿主 Token 日历（Stage D `6586112`/`f110066`）、
+两轮审查修复（`29c0717`/`0096607`/`01f0d9a`）、tab 卡顿性能回归修复
+（`d8c6c83`/`4ed99e7`）。全部在冻结 DTO 上 additive 演进，未破 Stage 0 契约。
+教训沉淀：`CLAUDE.md`「v0.9 成本词表与计费归属」节。
 
-### v0.9.0 Stage C：发布收口
+### v0.9.0 Stage A（P0）：事实写入与恢复
 
-跨实现 parity、CLI/Tauri/HTML DTO 对账、迁移/删除/恢复文档、脱敏导出验证。
+UsageFact/CanonicalSession writer、稳定 identity、去重与 reconciliation、
+Runtime 共享 ingest service。**优先级最高的剩余项**：读侧三种 wire 形状的
+逐个适配（审查 #2/#5 类缺陷的病根）只有写入统一后才能消失。落地时须先处理
+§5.2 遗留的 `{claude,codex,dsh}_usage_fact.rs` 宿主归位（Stage 0.3 曾记录的
+scope gap）。
+
+### v0.9.0 Stage B（P1→P2）：索引、计费和覆盖
+
+SQLite schema/migration/rebuild（P1，与 writer lease、checkpoint、增量失效
+同批——托盘 tick 与 CLI 并写 month.json 的冲突面由 lease 收口），替换 Stage 0
+JSON read adapter；BillingContext/UserProfile 吸收 4.1 声明层（P2）；
+HostBillRecord 落地（WorkBuddy credit_json 首个生产写入方）；coverage
+projection 完整化。Data Query API 与上层 DTO 不变。
+
+### v0.9.0 Stage C（P2）：发布收口
+
+跨实现 parity、CLI/Tauri/HTML DTO 对账、迁移/删除/恢复文档、脱敏导出验证、
+故障注入与 replay 测试。
 
 ### 7.1 Watcher 的进入门槛
 
@@ -318,16 +430,16 @@ v0.9.0 发布条件。当前 Tauri 的五分钟 tick 与手动同步是允许的
 
 ## 8. Definition of Done
 
-v0.9 可发布，当且仅当：
+v0.9 可发布，当且仅当（R4 标注当前达成状态）：
 
-1. 删除 SQLite 后可由事实文件重建等价 projection；
-2. 在 lease、intent、facts、projection、manifest 各提交点注入崩溃，均不双计、不漏计、可恢复；
-3. 双进程竞争遵守同一 writer lease；
-4. 每月成本按 fixed / actual / estimate / equivalent / unresolved 分开，且可下钻来源；
-5. coverage 不把未知伪装成零，所有分母有版本化定义；
-6. CLI、Tauri、HTML 均通过同一 Data query DTO 取数；关键账目、宿主范围、新鲜度与覆盖率一致；
-7. Python/Rust 的公开 JSON 保持必要的 byte-parity，Python 没有新增 writer、ORM 或网络持久化旁路；
-8. v0.10 所需的 Trace/Issue/Action 数据可以只依赖本版事实与 projection，而无需回读 UI 文件。
+1. 删除 SQLite 后可由事实文件重建等价 projection；—— ❌ SQLite 本身未建（Stage B）
+2. 在 lease、intent、facts、projection、manifest 各提交点注入崩溃，均不双计、不漏计、可恢复；—— ❌ Stage A/C
+3. 双进程竞争遵守同一 writer lease；—— ❌ Stage B
+4. 每月成本按 fixed / actual / estimate / equivalent / unresolved 分开，且可下钻来源；—— 🔶 结构已落地（BillingBasis 五档 + by_provider + total_actual_spend），unresolved 明细下钻待补
+5. coverage 不把未知伪装成零，所有分母有版本化定义；—— 🔶 字段级已钉（contract_violations + denominator_version），投影层待完整化
+6. CLI、Tauri、HTML 均通过同一 Data query DTO 取数；关键账目、宿主范围、新鲜度与覆盖率一致；—— ✅ Stage 0 达成并保持
+7. Python/Rust 的公开 JSON 保持必要的 byte-parity，Python 没有新增 writer、ORM 或网络持久化旁路；—— ✅ 持续保持（golden 15/15 + 锁步测试）
+8. v0.10 所需的 Trace/Issue/Action 数据可以只依赖本版事实与 projection，而无需回读 UI 文件。—— ❌ 依赖 Stage A/B
 
 ## 9. 与 v0.10 的交接
 
