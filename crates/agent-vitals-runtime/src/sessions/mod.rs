@@ -6,4 +6,5 @@
 //! 现在按 spec §5.2 的门槛（"CLI 不再拥有宿主 wire 解释或事实写入"）迁到这个
 //! 本机机器 crate。逐文件迁移记录见 STAGE0_RESEARCH §6，一个文件一个提交。
 
+pub mod behavior;
 pub mod codex_cost;

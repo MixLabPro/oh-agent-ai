@@ -8,7 +8,8 @@
 //! 只剩"调 runtime service → 渲染"的 CLI 层，没有自己的扫描/编排逻辑。
 //!
 //! 与 `agent/` 的边界：**「skill 体检」是静态资产审计**（本子树），**「skill
-//! 执行」是会话内审计**（core 的 `skill.rs`，经 `agent::behavior` 折叠）——
+//! 执行」是会话内审计**（core 的 `skill.rs`，经
+//! `agent_vitals_runtime::sessions::behavior` 折叠）——
 //! 两者都叫 skill，但一个是扫描器、一个是轨迹检测器，永远不该混在一个子树里
 //! （分类守卫测试 tests/test_classification.py 钉住这条边界）。
 

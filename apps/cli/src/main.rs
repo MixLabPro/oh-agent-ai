@@ -1048,7 +1048,7 @@ fn main() {
         if let Some(path) = rows_json {
             // `--json` 的 20 键载荷在 behavior.rs::audit_payload（唯一来源）——
             // DSH SessionReport 的 session 载荷就是它，键序逐字节对齐 Python。
-            let Some(payload) = agent::behavior::audit_payload(session_log) else {
+            let Some(payload) = agent_vitals_runtime::sessions::behavior::audit_payload(session_log) else {
                 eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
                 std::process::exit(2);
             };
@@ -1067,7 +1067,7 @@ fn main() {
             }
             return;
         }
-        let Some(audit) = agent::behavior::audit_session_log(session_log) else {
+        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log) else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };
@@ -1096,7 +1096,7 @@ fn main() {
         // behavior_gate 的 docstring）。此前硬编码「有 critical 就退 1」，把
         // --fail-on warning / --ignore SV603 这类全局参数静默吞掉了。成本不
         // 影响退出码——闸门只看风险。
-        std::process::exit(agent::behavior::behavior_gate(findings, &args.fail_on, &args.ignore));
+        std::process::exit(agent_vitals_runtime::sessions::behavior::behavior_gate(findings, &args.fail_on, &args.ignore));
     }
 
     // R1d-tick：oneline 生产者——把一份 DSH 会话日志折成一行摘要 + 今日/本月账
@@ -1166,7 +1166,7 @@ session_store={store} fold={fold}"
     // 输出调用记录（触发方式/加载状态/耗时/位置）。与 behavior 不同：这是 skill 专用，
     // 只出 skill 相关的 invocations 结构，不带 SV601–614 findings。
     if let Some(Cmd::SkillAudit { session_log, rows_json }) = &args.cmd {
-        let Some(audit) = agent::behavior::audit_session_log(session_log) else {
+        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log) else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };
@@ -1213,7 +1213,7 @@ session_store={store} fold={fold}"
     // 这里额外给人读格式加一段"最慢的几条"——这正是这个命令存在的理由，不是
     // 跟 skill-audit 一样只报计数就够了。
     if let Some(Cmd::DurationAudit { session_log, rows_json }) = &args.cmd {
-        let Some(audit) = agent::behavior::audit_session_log(session_log) else {
+        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log) else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };

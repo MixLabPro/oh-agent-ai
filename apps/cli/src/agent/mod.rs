@@ -10,7 +10,6 @@
 //! `agent_vitals_runtime::sessions`（见 `docs/AGENT_VITALS_V0_9_STAGE0_
 //! RESEARCH.md` §6）——本文件的 `pub mod` 清单会随每一步迁移收缩。
 
-pub mod behavior;
 pub mod claude_cost;
 pub mod claude_usage_fact;
 pub mod codex_session_audit;

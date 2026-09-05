@@ -16,7 +16,7 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use crate::agent::behavior::audit_session_log;
+use agent_vitals_runtime::sessions::behavior::audit_session_log;
 use agent_vitals_runtime::sessions::codex_cost::today_beijing;
 use agent_vitals_runtime::state;
 use agent_vitals_runtime::takeover as tk_io;

@@ -1175,7 +1175,7 @@ fn dsh_built_session_for(
     let Some((id, cwd)) = dsh_header(&text) else {
         return Err((path_str, "missing-header".to_string(), fp));
     };
-    let Some(mut payload) = crate::agent::behavior::audit_payload(path) else {
+    let Some(mut payload) = agent_vitals_runtime::sessions::behavior::audit_payload(path) else {
         // 读之间文件被截断/替换（parse 干净但 audit 重建失败）→ 文件级降级。
         return Err((path_str, "file-missing".to_string(), fp));
     };
