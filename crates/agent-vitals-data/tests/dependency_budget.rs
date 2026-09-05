@@ -7,9 +7,11 @@
 //!   真正需要 hosts 的时机待 Stage 0.3 具体设计时再评估；
 //! - 不依赖 `rusqlite`：Stage B 才会加（spec §5.1），届时这条测试要跟着
 //!   放开——那是按计划推进，不是"悄悄长出第二权威源"；
-//! - 不反依赖二进制/wasm/runtime：方向是
-//!   `apps/desktop, apps/cli → agent-vitals-runtime → agent-vitals-data →
-//!   agent-vitals-hosts → agent-vitals-domain`，不是反过来。
+//! - 不反依赖二进制/wasm/runtime：依赖方向是
+//!   `apps/{cli,desktop} → agent-vitals-runtime → agent-vitals-data →
+//!   agent-vitals-domain`，且 `runtime → hosts → domain` 并行成边——
+//!   **data 不依赖 hosts**（本测试钉死），hosts 的 wire 解释经 runtime 或
+//!   上层到达 data，不是反过来。
 
 use std::fs;
 use std::path::Path;

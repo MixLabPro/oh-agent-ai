@@ -151,8 +151,12 @@ pub fn replay(path: &Path) -> Result<Replay, AppendError> {
 /// 修复**（[`TailRepair`]：半行截断 / 缺封口补 '\n'）——修复之后追加面才
 /// 是干净的，否则新 append 会与 crash 残行合并成一条损坏行（新事实被吞，
 /// 下次 open 永远 Corrupt）。之后的每次 `append` 校验 → 查重 → 单行追加。
-/// 同一进程内反复 open 同一文件是安全的（每次都重扫——调用方应持有 writer
-/// 复用，而不是每条 fact open 一次）。
+///
+/// **单写者假设**：同一进程内**顺序地**反复 open 同一文件是安全的（每次都
+/// 重扫——调用方应持有 writer 复用，而不是每条 fact open 一次）；但**两个
+/// `FactWriter` 同时存活**于同一文件不安全——后开者的 seen 是 open 时刻的
+/// 快照，看不见前者新写入的事实，可能双写。P0 的单进程假设不含并发多
+/// writer；跨进程/多 writer 互斥是 Stage B 的 lease（spec §3.5）。
 pub struct FactWriter {
     facts_path: PathBuf,
     seen: HashSet<String>,

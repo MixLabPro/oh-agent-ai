@@ -65,23 +65,44 @@ pub struct HostIngestReport {
 #[derive(Debug, Default, serde::Serialize)]
 pub struct IngestReport {
     pub hosts: Vec<HostIngestReport>,
+    /// 连 `host` 都读不出来（非 JSON object / 缺 `host` 字段）的事实数——
+    /// 无法路由到任何宿主文件，只能报告级计数。与单宿主内的 `invalid`
+    /// 分开：前者连「属于谁」都不知道，后者已落到宿主、只是契约校验没过。
+    #[serde(default)]
+    pub unroutable: usize,
+    /// unroutable 事实的具体问题（最多留 8 条，同 `invalid_problems`）。
+    #[serde(default)]
+    pub unroutable_problems: Vec<String>,
 }
 
 /// 把一批 UsageFact 事实写入 `<data_home>/facts/<host>.jsonl`（按事实自身的
 /// `host` 字段分组）。
 ///
-/// 错误语义：宿主未知 / 已有文件中间坏行 → `Err`（整个调用失败，**不产生
-/// 半提交**——分组后逐宿主写，前面宿主成功后面失败会留下部分成功；调用方
-/// 重跑即可，exactly-once 保证不会双计）。坏事实（契约校验失败）→ 计数并
-/// 跳过，随报告如实上呈。
+/// 三层错误语义（审查 P2 收口：形状层与宿主层分开报）：
+/// - **非 UsageFact 形状**（非 JSON object / 缺 `host`）→ `unroutable` 计数
+///   跳过，随报告如实上呈——与单宿主 `invalid` 同一「报告不 abort」惯例；
+/// - **`host` 值不在封闭词表** → `Err`：这是调用方契约破坏（emitter 恒 stamp
+///   已知宿主），且路径安全立场（不给「任意 JSON 落任意文件」留门）不容忍；
+/// - **已有文件中间坏行** → `Err`（整个调用失败，**不产生半提交**——分组后
+///   逐宿主写，前面宿主成功后面失败会留下部分成功；调用方重跑即可，
+///   exactly-once 保证不会双计）。
 pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, String> {
     // 按宿主分组——BTreeMap 让报告顺序确定化（同一批输入同一份报告）。
     let mut grouped: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+    let mut report = IngestReport::default();
     for fact in facts {
-        let host = fact
-            .get("host")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "fact missing `host` field (not a UsageFact?)".to_string())?;
+        let Some(host) = fact.get("host").and_then(Value::as_str) else {
+            // 连路由键都没有：不是 UsageFact 形状 → 计数跳过（不 abort）。
+            report.unroutable += 1;
+            if report.unroutable_problems.len() < 8 {
+                report.unroutable_problems.push(if fact.is_object() {
+                    "fact missing `host` field".to_string()
+                } else {
+                    "fact is not a JSON object".to_string()
+                });
+            }
+            continue;
+        };
         if !FACT_HOSTS.contains(&host) {
             return Err(format!(
                 "unknown host `{host}` (known: {FACT_HOSTS:?}) — refusing to invent a facts file"
@@ -89,8 +110,6 @@ pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, S
         }
         grouped.entry(host).or_default().push(fact);
     }
-
-    let mut report = IngestReport::default();
     for (host, batch) in grouped {
         let path = facts_path(data_home, host)
             .ok_or_else(|| format!("unknown host `{host}`"))?;
@@ -141,12 +160,9 @@ pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, S
                         return Err(format!("{}: {e}", path.display()));
                     }
                 },
-                _ => {
-                    r.invalid += 1;
-                    if r.invalid_problems.len() < 8 {
-                        r.invalid_problems.push("fact is not a JSON object".to_string());
-                    }
-                }
+                // 分组层已把非 object 吸进 unroutable——到这里必是 object。
+                _ => unreachable!("non-object facts are unroutable, filtered at grouping"),
+
             }
         }
 
@@ -229,14 +245,16 @@ mod tests {
     }
 
     #[test]
-    fn unknown_host_and_non_object_are_refused_or_counted() {
+    fn unknown_host_is_refused_shapes_are_counted() {
         let home = tmp_home("bad");
         // 未知宿主 → 硬错误（不许凭事实内容发明文件名）。
         assert!(ingest_facts(&home, &[json!({"host": "workbuddy"})]).is_err());
-        // 非 object / 缺 host → 计数不 panic。
-        let r = ingest_facts(&home, &[json!([1, 2]), json!({"foo": 1})]).unwrap_err();
-        assert!(r.contains("host"), "{r}");
-        // 非 object（有 host 之外的合法形状缺失）→ invalid 计数。
+        // 非 object / 缺 host → unroutable 计数（报告级，不 abort）。
+        let r = ingest_facts(&home, &[json!([1, 2]), json!({"foo": 1})]).unwrap();
+        assert_eq!(r.unroutable, 2);
+        assert_eq!(r.unroutable_problems.len(), 2);
+        assert!(r.hosts.is_empty(), "没有可路由事实就不该开文件");
+        // 有 host 但契约校验不过 → 单宿主 invalid 计数 + 问题清单。
         let r = ingest_facts(&home, &[json!({"host": "codex", "junk": true})]).unwrap();
         assert_eq!(r.hosts[0].invalid, 1);
         assert!(!r.hosts[0].invalid_problems.is_empty(), "问题清单如实上呈");
