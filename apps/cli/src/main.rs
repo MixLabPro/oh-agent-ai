@@ -1449,7 +1449,7 @@ session_store={store} fold={fold}"
                 eprintln!("--list only supports --json or plain text, not --html");
                 std::process::exit(2);
             }
-            let out = agent::codex_session_audit::codex_session_list(home_path);
+            let out = agent_vitals_runtime::sessions::codex_session_audit::codex_session_list(home_path);
             if let Some(path) = rows_json {
                 let text = serde_json::to_string_pretty(&out).unwrap_or_default();
                 if path == &PathBuf::from("-") {
@@ -1461,7 +1461,7 @@ session_store={store} fold={fold}"
                     println!("Wrote {}", path.display());
                 }
             } else {
-                print!("{}", agent::codex_session_audit::render_codex_session_list(&out));
+                print!("{}", agent_vitals_runtime::sessions::codex_session_audit::render_codex_session_list(&out));
             }
             return;
         }
@@ -1470,7 +1470,7 @@ session_store={store} fold={fold}"
         let session_id = match session {
             Some(s) => s.clone(),
             None => {
-                let list = agent::codex_session_audit::codex_session_list(home_path);
+                let list = agent_vitals_runtime::sessions::codex_session_audit::codex_session_list(home_path);
                 let first = list
                     .get("sessions")
                     .and_then(|v| v.as_array())
@@ -1487,7 +1487,7 @@ session_store={store} fold={fold}"
                 }
             }
         };
-        let Some(out) = agent::codex_session_audit::codex_session_audit_json(home_path, &session_id)
+        let Some(out) = agent_vitals_runtime::sessions::codex_session_audit::codex_session_audit_json(home_path, &session_id)
         else {
             eprintln!("codex session not found: {session_id}");
             std::process::exit(2);
@@ -1506,11 +1506,11 @@ session_store={store} fold={fold}"
             wrote = true;
         }
         if let Some(path) = html {
-            agent::codex_session_audit::render_codex_session_html(path, &out);
+            agent_vitals_runtime::sessions::codex_session_audit::render_codex_session_html(path, &out);
             wrote = true;
         }
         if !wrote {
-            print!("{}", agent::codex_session_audit::render_codex_session(&out));
+            print!("{}", agent_vitals_runtime::sessions::codex_session_audit::render_codex_session(&out));
         }
         return;
     }

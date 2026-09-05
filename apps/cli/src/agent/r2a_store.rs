@@ -51,7 +51,7 @@ use serde_json::{Value, json};
 
 use agent_vitals_domain::findings::{FindingRef, FindingSession, rollup_findings};
 use agent_vitals_domain::r2a::*;
-use crate::agent::codex_session_audit as csa;
+use agent_vitals_runtime::sessions::codex_session_audit as csa;
 use agent_vitals_runtime::takeover;
 use agent_vitals_runtime::home::data_home;
 

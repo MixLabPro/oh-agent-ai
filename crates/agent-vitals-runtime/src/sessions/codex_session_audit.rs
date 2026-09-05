@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use agent_vitals_runtime::sessions::codex_cost::{codex_cost_report, load_codex_pricing};
+use crate::sessions::codex_cost::{codex_cost_report, load_codex_pricing};
 use agent_vitals_hosts::codex_session::{codex_rollout_files, read_codex_session_log, read_session_index};
 use agent_vitals_hosts::codex_evidence::{build_codex_evidence, codex_evidence_json, CodexEvidence};
 use agent_vitals_hosts::codex_usage::{codex_hour_of, codex_merge_folds};
@@ -188,7 +188,7 @@ fn turn_timeline_of(items: &[Value], audit: &Value) -> Value {
 /// 单个源文件 → 它所属的逻辑 session_id。R2a SessionStore 的增量缓存
 /// （`r2a_store.rs`）用它判定"新出现/内容变了的文件属于哪个 session"——代价只
 /// 落在这一个文件上（`file_info` 的一次解析），不是重新扫全部 rollout 文件。
-pub(crate) fn codex_session_id_of(path: &Path) -> String {
+pub fn codex_session_id_of(path: &Path) -> String {
     file_info(path).session_id
 }
 

@@ -9,4 +9,5 @@
 pub mod behavior;
 pub mod claude_ledger;
 pub mod codex_cost;
+pub mod codex_session_audit;
 pub mod discovery;

@@ -12,7 +12,6 @@
 
 pub mod claude_cost;
 pub mod claude_usage_fact;
-pub mod codex_session_audit;
 pub mod codex_usage_fact;
 pub mod cost;
 pub mod dsh_usage_fact;
