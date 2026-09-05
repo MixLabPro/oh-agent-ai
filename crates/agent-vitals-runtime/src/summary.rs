@@ -64,14 +64,24 @@ fn aggregate_freshness(by_host: &BTreeMap<String, HostAmount>) -> Freshness {
 /// 是「没有测到」（`data_contract.rs` 模块头不变式 3 的同一条纪律）。
 fn dsh_host_amount(cost: Option<serde_json::Value>, latest_day: Option<&str>) -> HostAmount {
     let mut amounts_by_basis = BTreeMap::new();
+    // DeepSeek 官方逐 token 价表是 DSH 的真实计费费率（不是第三方猜测价），
+    // `month_cost` 只是把「用了多少 token」按「官方多少钱一个 token」相乘——
+    // 这是可观测的真实费用，定为 MeteredActual，不是 MeteredEstimate（§8.4）。
+    //
+    // **`compute_month` 对"本月有 day 但 day 里 token 全 0"返回 `Some({total:
+    // 0, ...})`** —— 之前直接走 `MeteredActual=0 + Stale(latest_day)` 分支，
+    // 前端渲染成「实测 0.00 + ⚠ 过期 · 观测 YYYY-MM-DD」，数字看着像"测到
+    // 零"、实则是"本月没真实 token 入账"——违反 spec §0.1「不得渲染为 ¥0、
+    // 正常或看似完整的总额」。修：先看 cost 的 total 是否为 0、为 0 → 不入
+    // MeteredActual，只报 freshness（与 codex 无数据/claude 全 unknown 的
+    // 纪律一致）；`has_unresolved=false` 是因为 DSH 的价表里所有模型都计价，
+    // total=0 是 token 全 0 而不是"看见了、没价目"。
     let freshness = match (&cost, latest_day) {
         (Some(c), Some(day)) => {
-            // DeepSeek 官方逐 token 价表是 DSH 的真实计费费率（不是第三方猜测
-            // 价），`month_cost` 只是把「用了多少 token」按「官方多少钱一个
-            // token」相乘——这是可观测的真实费用，定为 MeteredActual，不是
-            // MeteredEstimate（§8.4 的判断）。
             let total = c.get("total").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            amounts_by_basis.insert(BillingBasis::MeteredActual, total);
+            if total > 0.0 {
+                amounts_by_basis.insert(BillingBasis::MeteredActual, total);
+            }
             day_freshness(day)
         }
         _ => Freshness::unavailable(),
@@ -612,6 +622,42 @@ mod tests {
             let miss_day = claude_host_amount("2026-09-03");
             assert!(miss_day.amounts_by_basis.is_empty());
             assert_eq!(miss_day.freshness.state, FreshnessState::Unavailable);
+        });
+    }
+
+    /// 0.6b 落地的回归——DSH 的 `compute_month` 对"本月有 day 但 token 全
+    /// 0"返回 `Some({total: 0,})`。修之前直接进 MeteredActual=0 + Stale
+    /// 分支，前端渲染成「实测 0.00 + 过期 YYYY-MM-DD」——数字看着像"测到
+    /// 零"、实则是"本月没真实 token 入账"，违反 spec §0.1。修：total=0
+    /// 时不入 MeteredActual、保留 freshness；前端自然走到「无可计金额 +
+    /// 过期 · 最后观测 YYYY-MM-DD」。
+    #[test]
+    fn dsh_zero_token_day_does_not_render_as_metered_actual_zero() {
+        with_home(|| {
+            let month = crate::clock::current_month_beijing();
+            let day = crate::clock::today_beijing();
+            crate::state::atomic_write_json(
+                &crate::state::state_dir().join("month.json"),
+                &json!({
+                    "days": {
+                        day: {"by_model": {"deepseek-v4-flash": {
+                            "uncached_input_tokens": 0, "output_tokens": 0,
+                            "cache_read_tokens": 0, "cache_write_tokens": 0,
+                            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                        }}}
+                    }
+                }),
+            );
+            let repo = JsonSummaryRepository;
+            let summary = repo.monthly_summary(&MonthlySummaryQuery { month });
+            let dsh = &summary.by_host["dsh"];
+            // total=0 → 不入 MeteredActual（金额表留空）+ freshness 照报（day
+            // 存在 = 测到日，不是 Unavailable）。
+            assert!(dsh.amounts_by_basis.is_empty(), "got {:?}", dsh.amounts_by_basis);
+            assert!(!dsh.has_unresolved);
+            assert!(dsh.freshness.last_observed_at.is_some());
+            assert_ne!(dsh.freshness.state, FreshnessState::Unavailable);
         });
     }
 
