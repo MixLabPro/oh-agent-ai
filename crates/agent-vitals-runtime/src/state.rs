@@ -139,6 +139,17 @@ pub fn atomic_write_json(path: &Path, data: &Value) {
 /// （`token_by_date_model(events)[今天]`），否则整段会话的账会被收进今天
 /// （70× 事故，见 core `merge_today_state` 注释）。
 pub fn merge_today(hb: &Value, by_model: Option<&Value>) -> PathBuf {
+    // Stage B lease（spec §3.5 / DoD #3）：托盘 tick 与 CLI 并发的
+    // read-modify-write 序列在此互斥——原子 rename 只保单文件，两个进程
+    // 交错 merge 会互相吃掉合并（三倍计数事故的进程间版本）。临界区
+    // 毫秒级：TTL 2s + 等待 3s（等待 > TTL，保证能等到过期偷取窗口）。
+    let _lease = crate::lease::acquire_blocking(
+        &state_dir().join(".state.lock"),
+        "state-write",
+        2_000,
+        3_000,
+    )
+    .unwrap_or_else(|e| panic!("state write lease: {e} — another writer is stuck"));
     let path = state_dir().join("today.json");
     let now = now_iso_utc();
     let today_key = today_beijing();
@@ -163,6 +174,14 @@ pub fn merge_today(hb: &Value, by_model: Option<&Value>) -> PathBuf {
 /// 完整一天（core `merge_month_body` 头注释），跨月后重跑上个月的 oneline 不会
 /// 丢账。
 pub fn merge_month(hb: &Value, by_date_model: Option<&Value>) -> PathBuf {
+    // 同 merge_today：归档迁移 + 月写回是两阶段序列，进程间必须互斥。
+    let _lease = crate::lease::acquire_blocking(
+        &state_dir().join(".state.lock"),
+        "state-write",
+        2_000,
+        3_000,
+    )
+    .unwrap_or_else(|e| panic!("state write lease: {e} — another writer is stuck"));
     let path = state_dir().join("month.json");
     let now = now_iso_utc();
     let current = current_month_beijing();

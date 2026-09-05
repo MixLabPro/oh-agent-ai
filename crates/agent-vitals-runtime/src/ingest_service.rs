@@ -96,6 +96,16 @@ pub struct IngestReport {
 ///   逐宿主写，前面宿主成功后面失败会留下部分成功；调用方重跑即可，
 ///   exactly-once 保证不会双计）。
 pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, String> {
+    // Stage B lease（DoD #3）：JSONL 追加 + 尾面修复 + 索引写是跨进程临界区
+    // ——两个并发 ingest 的尾面截断/封口互相踩踏会写坏文件。临界区毫秒级
+    // （慢的 fold/emit 在锁外）；被占则等 5s，然后如实报 Held。
+    let _lease = crate::lease::acquire_blocking(
+        &data_home.join("facts").join(".ingest.lock"),
+        "facts-ingest",
+        2_000,
+        5_000,
+    )
+    .map_err(|e| format!("facts ingest lease: {e}"))?;
     // 按宿主分组——BTreeMap 让报告顺序确定化（同一批输入同一份报告）。
     let mut grouped: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
     let mut report = IngestReport::default();
