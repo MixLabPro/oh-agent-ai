@@ -14,11 +14,17 @@
 //! - [`projection`] —— 组装 `agent_vitals_domain::data_contract` 的
 //!   `MonthlySummary`/`DailySummary` 等版本化 DTO
 //!
-//! **Stage 0.2 现状**：六个模块目前只是骨架 + 文档；唯一带内容的是
-//! `projection`（重新导出 domain 的契约类型，Stage 0.3 会在这里接上只读
-//! JSON adapter）。`evidence`/`store`/`billing` 要等 Stage A/B 才有真正的
-//! 写入/SQLite 逻辑——这不是遗漏，是 spec §7 阶段安排本身："Stage 0 不要求
-//! 先完成 SQLite 迁移"。
+//! **Stage 0.4 现状**：`projection`（domain 契约类型重新导出）与
+//! `repository`（`SummaryRepository` trait——只有签名，无实现）已落地；
+//! `evidence`/`store`/`billing` 要等 Stage A/B 才有真正的写入/SQLite
+//! 逻辑——这不是遗漏，是 spec §7 阶段安排本身："Stage 0 不要求先完成
+//! SQLite 迁移"。
+//!
+//! **`SummaryRepository` 的实现不在这个 crate 里**：spec §3.1 的依赖表把
+//! 本 crate 的允许依赖限定在 Domain（+ 未来的 SQLite 驱动），不包括
+//! `agent-vitals-hosts`——Stage 0 唯一能读到宿主数据（`SessionStore`/
+//! `budget` 状态）的地方是 `agent-vitals-runtime`，所以 trait 的具体实现
+//! 住在那边（`docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md` §8.1/§8.4）。
 
 pub mod billing;
 pub mod coverage;
