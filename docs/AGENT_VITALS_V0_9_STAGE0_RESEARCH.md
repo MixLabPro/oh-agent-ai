@@ -136,3 +136,79 @@ workspace-root 命令，不硬编码 crate 列表，新 member 靠 `default-memb
 `agent-vitals-runtime`——这是仓库里已经有先例的"契约低、I/O 高"分层
 （`host_capability::HostProfile` 声明能力 vs. 二进制侧
 `HostRuntimeRegistration` 声明实现存在性），不是新发明一层抽象。
+
+## 6. 0.3 依赖闭包核实：6 文件确认 + 1 处必要例外（claude_cost.rs 不整体搬）
+
+用户在上一轮已经拍板"整体搬（推荐）——6 文件当作一个整体迁进 runtime，不做
+render/compute 拆分，每个文件单独 commit + 全量测试"。动手前逐文件 grep
+`crate::`/`use crate::` 核实了每个文件的真实闭包，六个文件确认为：
+`r2a_store.rs`、`codex_session_audit.rs`、`codex_cost.rs`、`discovery.rs`
+（DSH 专用，非已迁移的 `skills::discovery`）、`behavior.rs`、
+`claude_cost.rs`（只要其中一个函数）。前五个逐一核实是**干净的整体搬迁
+候选**：
+
+- `codex_cost.rs`：零 `crate::` 依赖（只有一行注释提到旧路径），纯叶子。
+- `behavior.rs`（248 行，`audit_session_log` + `audit_payload` 两个 I/O
+  入口）：唯一的 `crate::` 依赖是 `crate::agent::cost::{load_pricing,
+  cost_report, cost_series}`——核实 `apps/cli/src/agent/cost.rs` 本身只是
+  `pub use agent_vitals_domain::cost::{...}` 的薄封装（2026-08 cost 迁 core
+  时留下的兼容层），搬移时直接改成 `agent_vitals_domain::cost::*`，等于
+  绕过一层二进制侧转发，不新增依赖。
+- `discovery.rs`（DSH 专用，726 行）：只依赖 `agent_vitals_runtime::{home,
+  takeover}` + `agent_vitals_domain::takeover`（均已就位）；测试用的
+  `crate::util::ENV_LOCK` 需要换成 runtime 自己 `lib.rs` 已存在的
+  `crate::ENV_LOCK`（这颗锁本来就是 v0.8 D6 迁移时特意留的双份之一，
+  注释原文写"二进制侧 `src/util.rs` 有一份同款给留在 binary 的
+  `discovery`/`r2a_store` 测试用"——现在这两个文件都要搬走，binary 侧那份
+  锁在这两个文件搬完后成为死代码，见下方处理）。
+- `codex_session_audit.rs`（501 行）：只依赖 `codex_cost`（本轮同批搬）+
+  已迁移的 `agent_vitals_hosts::{codex_session, codex_evidence,
+  codex_usage}`。
+- `r2a_store.rs`（2708 行）：`crate::` 依赖精确为
+  `codex_session_audit`/`discovery`/`codex_cost`/`behavior::audit_payload`/
+  `claude_cost::claude_ledger_day_tokens` 五项，与此前核实一致，没有第六个
+  隐藏依赖。
+
+**`claude_cost.rs`（1342 行）是唯一不能整体搬的**——不是风格选择，是真实的
+双向耦合会破坏编译：`claude_cost.rs` 从
+`crate::agent::claude_usage_fact::{parse_claude_usage_row, UNATTRIBUTED,
+UNREADABLE}` 取值，而 `claude_usage_fact.rs`（CLAUDE.md 钉死的 v0.7
+UsageFact 发射器之一，Python↔Rust byte-parity lockstep + 两份打包白名单
++ `test_classification.py` 逐字段钉住的模块清单，明确不在这次搬移范围内）
+反过来又从 `claude_cost.rs` 取 `day_from_iso_ts`/`ms_from_iso_ts`/
+`row_tokens`。若整体搬 `claude_cost.rs` 进 runtime，要么把
+`claude_usage_fact.rs` 也拖进去（把 pinned lockstep 模块的搬迁纳入这次
+无关的范围，代价远超收益），要么产生 runtime 反向依赖 apps/cli 的真实
+编译错误——两条路都不对。
+
+核实 `r2a_store.rs` 实际只用到 `claude_cost::claude_ledger_day_tokens`
+一个函数，而这个函数是**完全自包含的纯读取路径**：`claude_ledger_day_tokens`
+→`ledger_day_total_tokens`（委托 `agent_vitals_domain::cost::
+claude_day_total_tokens`）→`ledger_path()`（`agent_vitals_runtime::state::
+state_dir()`），零接触 `claude_usage_fact` 耦合的 fold/rebuild 引擎部分。
+**处理方式**：只把这三个函数（连同必要的 `ledger_path`）抽成 runtime 里
+一个新的小文件 `sessions/claude_ledger.rs`，`claude_cost.rs` 本体（fold
+引擎、`claude_sync`、与 `claude_usage_fact` 耦合的部分）原地留在
+`apps/cli`。这不是"render/compute 拆分"——是沿着一条真实存在、已经因为
+`claude_usage_fact.rs` 被排除在范围外而必然存在的耦合边界切，用户"不做
+拆分"的指示针对的是"同一职责内人为切割渲染与计算"，不适用于"两个本来
+就分属不同生命周期的子系统凑巧共享过一个小读取函数"这种情况。
+
+另有两处连带的可见性/清理事项：
+1. `dsh_usage_fact.rs`（留在 apps/cli）从 `crate::agent::r2a_store::
+   {dsh_header, dsh_source_profile}` 取值——这两个函数目前是
+   `pub(crate)`，`r2a_store.rs` 搬进 runtime 后必须升级成 `pub`，
+   `dsh_usage_fact.rs` 的 import 改成
+   `agent_vitals_runtime::sessions::r2a_store::{dsh_header,
+   dsh_source_profile}`。
+2. `discovery.rs`/`r2a_store.rs` 搬走后，`apps/cli/src/util.rs` 的
+   `ENV_LOCK` 若再无其他调用点会成为死代码——搬完最后一个文件后核实并
+   视情况删除，而不是留一个没人用的 `pub(crate) static`。
+
+**最终搬迁顺序**（叶子先行，`sessions/mod.rs` 逐步登记）：
+`codex_cost.rs` → `behavior.rs` → `discovery.rs` →
+`claude_ledger.rs`（从 `claude_cost.rs` 抽取的 3 个函数）→
+`codex_session_audit.rs` → `r2a_store.rs`。每步单独 commit + 全量测试
+（`cargo build/clippy/test --release` workspace + `cargo check -p
+agent-vitals-wasm` + `apps/desktop/src-tauri cargo check`），完全遵循
+v0.8 E7.6 建立的"整体搬迁、逐文件提交"纪律。
