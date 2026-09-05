@@ -311,6 +311,67 @@ perception_coverage = attributed_and_priceable_tokens / observed_processed_token
 套餐日志只覆盖部分账期时,即使 perception coverage=100%,单位摊销仍是上界——两个
 coverage 不得合并成一个看似精确的数字。
 
+### 6.7 名义成本(list-price 口径,2026-09-05 新增)
+
+6.1 与 6.2 都是「你实际付了多少」口径:套餐摊销受个人月费影响,按量成本受中转折扣
+影响。两者都**不可跨用户、跨时间横比**——同一批 processed_tokens,买套餐的人与走中转
+的人算出来差几十倍。名义成本补这个缺口:用**统一的官方市场标价**衡量同一批 token,
+作用类似名义 GDP 用统一价格衡量产出。
+
+```text
+nominal_cost = Σ 各桶( bucket_tokens × 该桶的官方 list price )
+             = uncached_input × input_uncached
+             + cache_read     × input_cached
+             + cache_write    × cache_write_<档>
+             + output         × output
+
+nominal_cost_per_mtok = nominal_cost / processed_tokens × 1,000,000
+```
+
+**不扣套餐、不扣中转折扣、不扣促销**——这正是「名义」的定义,也是它可比的来源。分母与
+§6 的 `cost/M` 同为 `processed_tokens`,可与 6.1/6.2 并列成第三栏。
+
+**实测构成**(Claude Code ledger 09-01→09-05,claude 族 33.3 亿 processed tokens,
+anthropic 官方卡):
+
+| 桶 | 金额 | 占比 |
+|---|---|---|
+| 缓存读取 | $1,002.07 | 78.9% |
+| 缓存写入 | $176.86 | 13.9% |
+| 输出 | $90.91 | 7.2% |
+| 未缓存输入 | $0.05 | 0.0% |
+
+缓存相关合计 92.8%,命中率 99.18%。**名义成本几乎完全由缓存单价决定**:补任何 provider
+的价卡时,`input_cached` 是唯一必须问准的数,`output` 占 7%、`input_uncached` 占 0%。这也
+给 §7 的下钻路径提供了量化依据——「缓存命中下降」排在诊断首位不是经验判断,是 92.8%。
+
+**cache_write 档位是假设,不是观测**:Anthropic 分 5min/1hr 两档,价差 1.6×;实测 1hr
+$176.86 vs 5min $110.54,**差额占名义总额 5.2%**。会话日志不记录实际 TTL,现有实现取
+1hr(`cost/claude.rs`:Claude Code 自报 costUSD 按 1hr 计,照它走才能当差分 oracle)。展示
+必须标注「cache_write 按 1hr 档计」,不得把 5.2% 的不确定性伪装成精确。
+
+**与 §6.4「不自动换汇」的关系**:名义成本**允许**按显式声明、带日期的汇率折算成单一
+货币展示(标注形如 `@7.1 · 2026-09-05`),不与 §6.4 冲突,因为两者性质不同——**名义是
+度量衡(厘米可换英寸),实际是账(美元不能当人民币加进账本)**。`recognized_total_cost`
+仍严格分币种、不自动换汇。
+
+**派生:名义/实际倍数**(`nominal_cost / actual_cost`)表达套餐或中转带来的折扣杠杆,并
+自带一条护栏:**倍数 > 50× 时不得显示「值 N 倍」,应告警「计费声明与实际用量不符」**。
+实测 anthropic 族 380×——$20/月的 Claude Pro 物理上承载不了 33.3 亿 token,该倍数暴露的
+是 billing_source 声明错误(实为中转路由),不是套利收益。与 §6.3「Host ≠ BillingSource」
+互为印证:倍数异常是归属错误的自检信号。
+
+**诚实性边界**:
+
+- 名义成本**不是账单**,也**不是**「若不优化会花多少」的反事实节省(§8 铁律 4);它是
+  计量尺,不进任何浪费分子(§8 铁律 1)。
+- 无价卡的模型报 `unpriced_tokens`,**不得借用其他卡替代**。实测 claude-sonnet-5 分别按
+  anthropic 官方卡 / v4-pro / v4-flash 计价得 $1,239 / ¥572 / ¥191,**相差 46 倍**——借卡
+  等于编价。
+- 命名冲突:现有 `nominal_vs_actual_cost`(`domain/cost/mod.rs`)里的 `nominal` 指「假设
+  全部输入按 uncached 价算的无缓存反事实」,与本节的市场标价是两回事(实测两者差 8~10
+  倍)。落地时该函数改名 `cache_counterfactual_cost`,把 `nominal` 让给本节口径。
+
 ---
 
 ## 7. 诊断指标:只解释变化,不进入浪费分子
