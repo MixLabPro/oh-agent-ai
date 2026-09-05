@@ -3,14 +3,14 @@
 
 `docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §3 末尾把
 `claude_subscription_uncovered_estimate`（provider 粒度订阅排除估算）
-和 `nominal_vs_actual_cost`（名义 vs 实际单位成本/缓存节约因子）标为
+和 `cache_counterfactual_cost`（名义 vs 实际单位成本/缓存节约因子）标为
 "两行未接 CLI/menubar 表面……是后续会话可以直接捡起的下一步"。本测试
 钉住这两行新接线的端到端行为：
 
 - `state uncovered` 把 month.json by_model 的 DSH 8 桶形状适配为 Claude
   4 型 snake 形状后，喂 `cost.claude_subscription_uncovered_estimate`。
 - `state savings` 直接把 month.json by_model 喂
-  `cost.nominal_vs_actual_cost`（月级无 `providers`，各家模型自然走
+  `cost.cache_counterfactual_cost`（月级无 `providers`，各家模型自然走
   fallback 价卡，与 `priced_day` 对同一份 month.json 的处理一致）。
 
 跑法（与 test_monthly_cost_by_model.py 同款）：
@@ -135,17 +135,17 @@ class UncoveredPureCase(unittest.TestCase):
 
 
 class SavingsPureCase(unittest.TestCase):
-    """纯函数侧：`nominal_vs_actual_cost` 对 month.json by_model 直接喂
+    """纯函数侧：`cache_counterfactual_cost` 对 month.json by_model 直接喂
     后的 ratio 行为——无缓存命中 → 1.0；全缓存命中 → 1/30（spec §3 原文
     引用的具体信号）。"""
 
     def test_ratio_is_one_without_cache_hits(self):
         from agent_vitals.agent import cost as cost_module
         usage = {"by_model": {"deepseek-v4-flash": _bucket(uncached=1_000_000)}}
-        out = cost_module.nominal_vs_actual_cost(usage, PRICING)
+        out = cost_module.cache_counterfactual_cost(usage, PRICING)
         self.assertIsNotNone(out)
         self.assertAlmostEqual(out["ratio"], 1.0)
-        self.assertAlmostEqual(out["actual"], out["nominal"])
+        self.assertAlmostEqual(out["actual"], out["no_cache_counterfactual"])
 
     def test_ratio_reflects_cache_savings(self):
         from agent_vitals.agent import cost as cost_module
@@ -154,7 +154,7 @@ class SavingsPureCase(unittest.TestCase):
         # 会偏离 1/30 这个 spec §3 原文引用的具体信号。
         usage = {"by_model": {"deepseek-v4-flash": _bucket(uncached=0,
                                                              cache_read=1_000_000)}}
-        out = cost_module.nominal_vs_actual_cost(usage, PRICING)
+        out = cost_module.cache_counterfactual_cost(usage, PRICING)
         self.assertIsNotNone(out)
         self.assertAlmostEqual(out["ratio"], 1 / 30, places=9)
 
@@ -228,7 +228,7 @@ class StateUncoveredCli(unittest.TestCase):
 
 class StateSavingsCli(unittest.TestCase):
     """`state savings` 子命令：month.json by_model 直接喂
-    `nominal_vs_actual_cost`——月级无 providers、各家模型走 fallback 价卡。"""
+    `cache_counterfactual_cost`——月级无 providers、各家模型走 fallback 价卡。"""
 
     def _write_month(self, state_dir, month):
         (state_dir / "month.json").write_text(

@@ -777,12 +777,19 @@ def _nominal_price(buckets, model_key, provider_key, pricing):
     return off + peak
 
 
-def nominal_vs_actual_cost(usage, pricing):
-    """名义 vs 实际单位成本（节约因子）——v0.7 spec §3 交付矩阵第三行。
+def cache_counterfactual_cost(usage, pricing):
+    """无缓存反事实 vs 实际单位成本（节约因子）——v0.7 spec §3 交付矩阵第三行。
     `actual` = `cost_report` 的真实计价 `total`（当前定价引擎能表达的
-    "实际"，尚未建模订阅覆盖/路由折扣，见下）；`nominal` = 假设所有 input
-    （含缓存命中部分）都按 uncached 单价算的反事实总价，逐模型用
-    `_nominal_price` 求和。`ratio = actual / nominal`，<1 表示节约。
+    "实际"，尚未建模订阅覆盖/路由折扣，见下）；`no_cache_counterfactual` =
+    假设所有 input（含缓存命中部分）都按 uncached 单价算的反事实总价，逐
+    模型用 `_nominal_price` 求和。`ratio = actual / no_cache_counterfactual`，
+    <1 表示节约。
+
+    **改名记录（2026-09-05）**：原 `nominal_vs_actual_cost`，输出键 `nominal` →
+    `no_cache_counterfactual`。`nominal` 一词让位给 ATTRIBUTABLE_WASTE §6.7
+    的市场标价口径（官方价、不扣套餐/折扣）；本函数的反事实是"要是没缓存
+    会花多少"，与市场标价无关，实测两者差 8~10 倍，共用一词会在同一张报表
+    里打架。Rust 侧同步改名。
 
     **当前唯一建模的节约信号是缓存折扣**（cached 0.05 vs uncached 1.5 =
     1/30）；订阅覆盖、路由折扣、模型替代尚未接入计价引擎，故没有缓存命中
@@ -792,14 +799,14 @@ def nominal_vs_actual_cost(usage, pricing):
 
     usage 为空/无可计价模型 → `None`。
 
-    Rust 平行实现见 `cost.rs::nominal_vs_actual_cost`。
+    Rust 平行实现见 `cost.rs::cache_counterfactual_cost`。
     """
     report = cost_report(usage, pricing)
     if report is None:
         return None
     by_model = (usage or {}).get("by_model") or {}
     providers = (usage or {}).get("providers")
-    nominal = 0.0
+    no_cache = 0.0
     for model, buckets in by_model.items():
         provider = (providers or {}).get(model)
         if not isinstance(provider, str):
@@ -808,16 +815,18 @@ def nominal_vs_actual_cost(usage, pricing):
         if resolved is None:
             continue
         key, provider_key, _basis = resolved
-        nominal += _nominal_price(buckets, key, provider_key, pricing)
+        no_cache += _nominal_price(buckets, key, provider_key, pricing)
     actual = report["total"]
-    ratio = (actual / nominal) if nominal > 0 else None
+    ratio = (actual / no_cache) if no_cache > 0 else None
     return {
         "currency": "CNY",
         "actual": actual,
-        "nominal": nominal,
+        "no_cache_counterfactual": no_cache,
         "ratio": ratio,
         "estimate_disclaimer": (
             "actual 是当前定价引擎的真实计价（未建模订阅覆盖/路由折扣），"
-            "nominal 是假设无缓存命中的反事实基线；ratio<1 表示节约，"
+            "no_cache_counterfactual 是假设无缓存命中的反事实基线"
+            "（不是市场标价的\"名义成本\"，见 ATTRIBUTABLE_WASTE §6.7）；"
+            "ratio<1 表示节约，"
             "当前唯一建模的节约来源是缓存折扣"),
     }

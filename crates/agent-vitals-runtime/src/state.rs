@@ -300,7 +300,7 @@ pub fn uncovered_report() {
 }
 
 /// v0.7 spec §3「名义 vs 实际单位成本（节约因子）」的 CLI 接线：把 month.json
-/// 逐日 by_model 折平成月度粒度后，喂 core 的 `nominal_vs_actual_cost`——
+/// 逐日 by_model 折平成月度粒度后，喂 core 的 `cache_counterfactual_cost`——
 /// 月级数据没有 `providers`（month.json 不存），各家模型自然走 fallback 价卡，
 /// 与 `priced_day` 对同一份 month.json 的处理一致，同一个模型的"实际"和
 /// "名义"在两种 surface 上不会算岔。
@@ -321,7 +321,7 @@ pub fn savings_report() {
         return;
     }
     let pricing = agent_vitals_domain::cost::load_pricing();
-    let savings = agent_vitals_domain::cost::nominal_vs_actual_cost(
+    let savings = agent_vitals_domain::cost::cache_counterfactual_cost(
         &json!({"by_model": rollup}), &pricing);
     println!(
         "{}",

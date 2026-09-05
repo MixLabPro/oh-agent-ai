@@ -29,6 +29,13 @@ pub use claude::{
     claude_subscription_uncovered_estimate,
 };
 
+// v0.9 计费模式声明层（billing_modes）——「钱付给谁、按什么方式付」的判定，
+// 与计价面解耦（无价卡模型 glm-* 也能归属）。2026-09-05。
+mod billing;
+pub use billing::{
+    billing_mode_of, billing_route_of, cache_hit_ratio, subscription_fee_of, BillingMode,
+};
+
 const PRICING_JSON: &str = include_str!("../../../../../assets/pricing.json");
 
 pub fn load_pricing() -> Value {
@@ -168,9 +175,10 @@ fn bucket_price(buckets: &Value, model_key: &str, provider_key: &str, pricing: &
 }
 
 /// 反事实基线：把缓存命中份额（`cache_read`）也按 `uncached` 单价折——
-/// 「假装没发生缓存」的名义单价，用来算缓存节约（v0.7 spec §3「名义 vs
-/// 实际单位成本」交付矩阵第三行）。`cache_write`/`output` 与真实计价一致，
-/// 只有 input 侧的 cached/uncached 二分被抹平。
+/// 「假装没发生缓存」的无缓存反事实单价，用来算缓存节约。`cache_write`/
+/// `output` 与真实计价一致，只有 input 侧的 cached/uncached 二分被抹平。
+/// （原 `nominal_bucket_price`：`nominal` 一词 2026-09-05 让位给
+/// ATTRIBUTABLE_WASTE §6.7 的市场标价口径，两者实测差 8~10 倍。）
 fn nominal_bucket_price(buckets: &Value, model_key: &str, provider_key: &str, pricing: &Value) -> Option<f64> {
     let card = pricing.pointer(&format!("/providers/{provider_key}/models/{model_key}"))?;
     let get = |key: &str| get_i64(buckets, key) as f64 / 1e6;
@@ -186,11 +194,19 @@ fn nominal_bucket_price(buckets: &Value, model_key: &str, provider_key: &str, pr
     Some(off + peak)
 }
 
-/// 名义 vs 实际单位成本（节约因子）——v0.7 spec §3 交付矩阵第三行。`actual` =
-/// `cost_report` 的真实计价 `total`（当前定价引擎能表达的"实际"，尚未建模
-/// 订阅覆盖/路由折扣，见下）；`nominal` = 假设所有 input（含缓存命中部分）
-/// 都按 uncached 单价算的反事实总价，逐模型用 `nominal_bucket_price` 求和。
-/// `ratio = actual / nominal`，<1 表示节约。
+/// 无缓存反事实 vs 实际单位成本（节约因子）——v0.7 spec §3 交付矩阵第三行。
+/// `actual` = `cost_report` 的真实计价 `total`（当前定价引擎能表达的"实际"，
+/// 尚未建模订阅覆盖/路由折扣，见下）；`no_cache_counterfactual` = 假设所有
+/// input（含缓存命中部分）都按 uncached 单价算的反事实总价，逐模型用
+/// `nominal_bucket_price` 求和。`ratio = actual / no_cache_counterfactual`，
+/// <1 表示节约。
+///
+/// **改名记录（2026-09-05）**：原 `cache_counterfactual_cost`，输出键 `nominal` →
+/// `no_cache_counterfactual`。`nominal` 一词让位给 ATTRIBUTABLE_WASTE §6.7 的
+/// 市场标价口径（官方价、不扣套餐/折扣——那是"名义 GDP"式客观基准）；本函数
+/// 的反事实是"要是没缓存会花多少"，与市场标价无关，实测两者差 8~10 倍
+/// （claude 语料 $10,187 vs $1,269），共用一词迟早在同一张报表里打架。
+/// 函数名随之改 `cache_counterfactual_cost`——它本来就叫这个。
 ///
 /// **当前唯一建模的节约信号是缓存折扣**（cached 0.05 vs uncached 1.5 = 1/30）；
 /// 订阅覆盖、路由折扣、模型替代尚未接入计价引擎，故没有缓存命中的语料下
@@ -199,30 +215,31 @@ fn nominal_bucket_price(buckets: &Value, model_key: &str, provider_key: &str, pr
 /// 承载更多信号（v0.7 spec §3 原文）。
 ///
 /// usage 为空/无可计价模型 → `None`。
-pub fn nominal_vs_actual_cost(usage: &Value, pricing: &Value) -> Option<Value> {
+pub fn cache_counterfactual_cost(usage: &Value, pricing: &Value) -> Option<Value> {
     let report = cost_report(usage, pricing)?;
     let by_model = usage.get("by_model").and_then(Value::as_object);
     let providers = usage.get("providers").and_then(Value::as_object);
-    let mut nominal = 0.0f64;
+    let mut no_cache = 0.0f64;
     if let Some(by_model) = by_model {
         for (model, buckets) in by_model {
             let provider = providers.and_then(|m| m.get(model)).and_then(Value::as_str);
             if let Some((key, provider_key, _basis)) = resolve_card(model, provider, pricing) {
                 if let Some(p) = nominal_bucket_price(buckets, &key, &provider_key, pricing) {
-                    nominal += p;
+                    no_cache += p;
                 }
             }
         }
     }
     let actual = report["total"].as_f64().unwrap_or(0.0);
-    let ratio = if nominal > 0.0 { Value::from(actual / nominal) } else { Value::Null };
+    let ratio = if no_cache > 0.0 { Value::from(actual / no_cache) } else { Value::Null };
     Some(json!({
         "currency": "CNY",
         "actual": actual,
-        "nominal": nominal,
+        "no_cache_counterfactual": no_cache,
         "ratio": ratio,
         "estimate_disclaimer": "actual 是当前定价引擎的真实计价（未建模订阅覆盖/路由折扣），\
-nominal 是假设无缓存命中的反事实基线；ratio<1 表示节约，当前唯一建模的节约来源是缓存折扣",
+no_cache_counterfactual 是假设无缓存命中的反事实基线（不是市场标价的\"名义成本\"，\
+见 ATTRIBUTABLE_WASTE §6.7）；ratio<1 表示节约，当前唯一建模的节约来源是缓存折扣",
     }))
 }
 
@@ -748,7 +765,7 @@ mod tests {
     /// v0.7 spec §3 交付矩阵第三行：无缓存命中的语料下 ratio 恒为 1.00
     /// （2026-09-02 实测值，spec 原文引用）——不是本函数的 bug。
     #[test]
-    fn nominal_vs_actual_cost_ratio_is_one_without_cache_hits() {
+    fn cache_counterfactual_cost_ratio_is_one_without_cache_hits() {
         let pricing = load_pricing();
         let usage = serde_json::json!({"by_model": {"deepseek-v4-flash": {
             "uncached_input_tokens": 1_000_000, "output_tokens": 0,
@@ -756,15 +773,15 @@ mod tests {
             "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
             "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
         }}});
-        let out = nominal_vs_actual_cost(&usage, &pricing).unwrap();
+        let out = cache_counterfactual_cost(&usage, &pricing).unwrap();
         assert!((out["ratio"].as_f64().unwrap() - 1.0).abs() < 1e-9);
-        assert!((out["actual"].as_f64().unwrap() - out["nominal"].as_f64().unwrap()).abs() < 1e-9);
+        assert!((out["actual"].as_f64().unwrap() - out["no_cache_counterfactual"].as_f64().unwrap()).abs() < 1e-9);
     }
 
     /// 全部落在缓存命中：实测缓存节约 1/30（cached 0.05 vs uncached 1.5）——
     /// spec §3 原文引用的具体信号，ratio 必须显著偏离 1。
     #[test]
-    fn nominal_vs_actual_cost_ratio_reflects_cache_savings() {
+    fn cache_counterfactual_cost_ratio_reflects_cache_savings() {
         let pricing = load_pricing();
         let usage = serde_json::json!({"by_model": {"deepseek-v4-flash": {
             "uncached_input_tokens": 0, "output_tokens": 0,
@@ -772,7 +789,7 @@ mod tests {
             "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
             "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
         }}});
-        let out = nominal_vs_actual_cost(&usage, &pricing).unwrap();
+        let out = cache_counterfactual_cost(&usage, &pricing).unwrap();
         let ratio = out["ratio"].as_f64().unwrap();
         assert!((ratio - (1.0 / 30.0)).abs() < 1e-9, "ratio={ratio}");
     }

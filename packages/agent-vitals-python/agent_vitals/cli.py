@@ -2013,7 +2013,7 @@ def _main():
                 print(json.dumps({"by_model": {}, "savings": None},
                                  ensure_ascii=False))
                 return
-            savings = cost_module.nominal_vs_actual_cost(
+            savings = cost_module.cache_counterfactual_cost(
                 {"by_model": rollup}, cost_module.load_pricing())
             print(json.dumps({"by_model": rollup, "savings": savings},
                              ensure_ascii=False, indent=2))

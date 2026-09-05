@@ -32,7 +32,7 @@ from agent_vitals.agent.cost import (  # noqa: E402
     claude_session_cost,
     claude_subscription_uncovered_estimate,
     load_pricing,
-    nominal_vs_actual_cost,
+    cache_counterfactual_cost,
 )
 
 
@@ -242,21 +242,21 @@ class NominalVsActualCostCase(unittest.TestCase):
     def test_ratio_is_one_without_cache_hits(self):
         """无缓存命中的语料下 ratio 恒为 1.00（2026-09-02 实测值，spec 原文
         引用）——不是本函数的 bug。"""
-        out = nominal_vs_actual_cost(self._usage(uncached=1_000_000), self.pricing)
+        out = cache_counterfactual_cost(self._usage(uncached=1_000_000), self.pricing)
         self.assertIsNotNone(out)
         self.assertAlmostEqual(out["ratio"], 1.0)
-        self.assertAlmostEqual(out["actual"], out["nominal"])
+        self.assertAlmostEqual(out["actual"], out["no_cache_counterfactual"])
 
     def test_ratio_reflects_cache_savings(self):
         """全部落在缓存命中：实测缓存节约 1/30（cached 0.05 vs uncached
         1.5）——spec §3 原文引用的具体信号，ratio 必须显著偏离 1。"""
-        out = nominal_vs_actual_cost(self._usage(cache_read=1_000_000), self.pricing)
+        out = cache_counterfactual_cost(self._usage(cache_read=1_000_000), self.pricing)
         self.assertIsNotNone(out)
         self.assertAlmostEqual(out["ratio"], 1 / 30)
 
     def test_none_when_no_usage(self):
-        self.assertIsNone(nominal_vs_actual_cost({}, self.pricing))
-        self.assertIsNone(nominal_vs_actual_cost(None, self.pricing))
+        self.assertIsNone(cache_counterfactual_cost({}, self.pricing))
+        self.assertIsNone(cache_counterfactual_cost(None, self.pricing))
 
 
 if __name__ == "__main__":

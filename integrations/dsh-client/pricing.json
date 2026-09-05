@@ -87,7 +87,30 @@
       "minimax-sub": {
         "provider": "minimax", "currency": "CNY", "amount_per_month": 114.0,
         "reported_at": "2026-09-02"
+      },
+      "glm-coding-lite": {
+        "provider": "zhipu-glm", "currency": "CNY", "amount_per_month": 118.0,
+        "reported_at": "2026-09-05",
+        "note": "GLM Coding Plan lite ¥118/月(2026-09-05 口述)。官方按量价卡未录入——glm-* 在名义/按量口径下报 unpriced_tokens,不得借其他卡替代(catalog 借卡实测差 46 倍);实际侧单位摊销可由月费/observed tokens 直算,日志只覆盖部分账期时是上界(ATTRIBUTABLE_WASTE §6.1)。"
       }
+    },
+    "billing_modes": {
+      "_doc": "计费模式声明(basis=user-declared,2026-09-05 口述)。回答「这个模型的钱付给谁、按什么方式付」,与价卡相互独立——无价卡的模型(glm-*)也必须能归属计费方,这是与 resolve_card_catalog(靠价卡反查,glm 因此落 view 外)的本质区别。解析:按本节声明序线性扫描,第一个 models 前缀命中者胜(先专后泛:shengsuanyun 的 0813 专属行必须排在 deepseek-official 的 deepseek-v4 泛行前);匹配规则与 norm_model_in 同(剥 / + starts_with)。mode=subscription 表示用量在套餐窗口内、无边际 token 账单(标价折算只作诊断);metered 表示逐 token 真实计费;金额在 subscriptions 节,本节只声明模式;两节都缺=unknown,不得默认。",
+      "anthropic": {
+        "mode": "subscription", "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+        "_note": "账户层已核实 Pro 订阅(oauthAccount.billingType=apple_subscription);但 2026-09-01 起存在中转路由(见 subscriptions.claude-pro.note 的悬而未决),claude-* 流量的套餐/中转切割日志不可裁定。消费方必须把利用率倍数>50 当归属待核告警,不得当套利展示(实测 380× 即此形态)。"
+      },
+      "minimax": { "mode": "subscription", "models": ["MiniMax-M"] },
+      "zhipu-glm": {
+        "mode": "subscription", "models": ["glm-5.3"],
+        "_note": "GLM Coding Plan lite(2026-09-05)。价卡缺口:glm-* 官方按量价未录入,名义侧报 unpriced——补卡时 input_cached 是唯一必须问准的数(实测占名义成本 78.9%)。"
+      },
+      "openai": {
+        "mode": "subscription", "models": ["gpt-5.6"],
+        "_note": "Codex 全部 60 份 rollout 实测 model_provider=openai、rate_limits.plan_type=plus,单一提供方订阅制。月费金额未声明(subscriptions 无行)——利用率倍数在金额补录前不可算,不得拿 Plus 挂牌价猜。"
+      },
+      "shengsuanyun": { "mode": "metered", "models": ["deepseek-v4-pro-0813"] },
+      "deepseek-official": { "mode": "metered", "models": ["deepseek-v4"] }
     },
     "sources": {
       "anthropic": "https://benchlm.ai/anthropic/api-pricing (2026-09-01 sync, 对照 platform.claude.com)",

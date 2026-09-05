@@ -701,7 +701,7 @@ enum StateAction {
     Uncovered,
     /// v0.7 spec §3 third output view: actual-vs-nominal cache-savings ratio.
     /// Reads month.json by_model, prices the same shape via core
-    /// `nominal_vs_actual_cost` (cache-discount counterfactual). Output JSON:
+    /// `cache_counterfactual_cost` (cache-discount counterfactual). Output JSON:
     /// `by_model` + `savings` (`{actual, nominal, ratio, currency,
     /// estimate_disclaimer}`); both empty/null when no by_model data.
     Savings,
