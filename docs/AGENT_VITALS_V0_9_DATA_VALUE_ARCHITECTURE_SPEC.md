@@ -444,7 +444,7 @@ v0.9.0 发布条件。当前 Tauri 的五分钟 tick 与手动同步是允许的
 v0.9 可发布，当且仅当（R4 标注当前达成状态）：
 
 1. 删除 SQLite 后可由事实文件重建等价 projection；—— ✅ Stage B `2d32ed0`：`data::store::FactsIndex`（fact_id 主键 + raw 全文列），open_or_rebuild 对删库/损坏/旧版本自动从 JSONL 重建（真机验证删库 → `data-rebuild-index` 等价投影）
-2. 在 lease、intent、facts、projection、manifest 各提交点注入崩溃，均不双计、不漏计、可恢复；—— ❌ Stage A/C
+2. 在 lease、intent、facts、projection、manifest 各提交点注入崩溃，均不双计、不漏计、可恢复；—— 🔶 Stage C：facts（尾面修复 + exactly-once 重跑）、projection（rebuild 事务回滚 + 损坏自愈）、lease（TTL 偷取 + 原子 rename）三点有注入测试钉住；**intent/manifest 两点未实现**（P0/P1 写协议未含，如实不声称达成）
 3. 双进程竞争遵守同一 writer lease；—— ✅ Stage B `6b3aadd`：`runtime::lease`（O_EXCL + 原子 rename 陈旧偷取），接线 merge_today/merge_month（托盘 vs CLI 的读改写序列）与 facts ingest/reconcile/rebuild 临界区；Python 写入方按 §7.1 退役路线不纳入
 4. 每月成本按 fixed / actual / estimate / equivalent / unresolved 分开，且可下钻来源；—— ✅ Stage B `9fbf920`：`data-unresolved` 逐模型下钻（billing-route-unknown / billing-mode-unknown / no-price-card / partial-price-basis 四类原因，键与 by_provider 同词表）；五档分离为 Stage B/C `f004756`/`68ca4eb` 落地
 5. coverage 不把未知伪装成零，所有分母有版本化定义；—— 🔶 字段级已钉（contract_violations + denominator_version），投影层待完整化

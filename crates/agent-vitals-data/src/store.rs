@@ -230,40 +230,58 @@ impl FactsIndex {
     /// 同款修复语义计数（`RebuildReport::repaired_tails`）。
     pub fn rebuild_from_jsonl(&self, facts_root: &Path) -> Result<RebuildReport, IndexError> {
         let mut report = RebuildReport::default();
+        // **事务包裹（DoD #2：投影提交点注入崩溃可恢复）**：DELETE 与插入
+        // 同事务——rebuild 中途崩溃回滚到旧索引，绝不会留下「空索引装健康」
+        // 的半提交态（那会让 open 判健康、查询静默返回 0 条——假零）。
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
         self.conn.execute("DELETE FROM facts", [])?;
-        let known: Vec<String> = std::fs::read_dir(facts_root)
-            .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .filter_map(|e| {
-                        let name = e.file_name().to_string_lossy().to_string();
-                        name.strip_suffix(".jsonl").map(String::from)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        for host in known {
-            let path = facts_root.join(format!("{host}.jsonl"));
-            let rep = crate::evidence::replay(&path).map_err(|e| match e {
-                crate::evidence::AppendError::Corrupt { line_no } => {
-                    IndexError::Corrupt { line_no }
+        let outcome = (|| -> Result<RebuildReport, IndexError> {
+            let known: Vec<String> = std::fs::read_dir(facts_root)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter_map(|e| {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            name.strip_suffix(".jsonl").map(String::from)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for host in known {
+                let path = facts_root.join(format!("{host}.jsonl"));
+                let rep = crate::evidence::replay(&path).map_err(|e| match e {
+                    crate::evidence::AppendError::Corrupt { line_no } => {
+                        IndexError::Corrupt { line_no }
+                    }
+                    crate::evidence::AppendError::Io(e) => IndexError::Io(e),
+                    crate::evidence::AppendError::Invalid(_) => {
+                        unreachable!("replay() never validates facts")
+                    }
+                })?;
+                let mut inserted = 0usize;
+                for fact in &rep.facts {
+                    if self.insert_fact(fact)? {
+                        inserted += 1;
+                    }
                 }
-                crate::evidence::AppendError::Io(e) => IndexError::Io(e),
-                crate::evidence::AppendError::Invalid(_) => {
-                    unreachable!("replay() never validates facts")
-                }
-            })?;
-            let mut inserted = 0usize;
-            for fact in &rep.facts {
-                if self.insert_fact(fact)? {
-                    inserted += 1;
-                }
+                report.repaired_tails += rep.tail_repair.is_some() as usize;
+                report.hosts.insert(host, inserted);
+                report.total += inserted;
             }
-            report.repaired_tails += rep.tail_repair.is_some() as usize;
-            report.hosts.insert(host, inserted);
-            report.total += inserted;
+            Ok(report)
+        })();
+        match outcome {
+            Ok(r) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(r)
+            }
+            Err(e) => {
+                // 回滚到 rebuild 前的索引内容——崩溃安全的关键半边（另一半
+                // 是进程死亡时 SQLite journal 自己回滚）。
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
         }
-        Ok(report)
     }
 
     /// 插入一条事实。`Ok(true)` = 新插入；`Ok(false)` = fact_id 已在索引
@@ -528,6 +546,36 @@ mod tests {
                    serde_json::json!(1015), "10 月窗只含 10 月事实");
         assert_eq!(idx.tokens_by_host(None).unwrap()["codex"]["total"],
                    serde_json::json!(2030), "不过滤 = 全量累计");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn failed_rebuild_rolls_back_to_the_previous_index() {
+        // DoD #2 投影提交点：rebuild 中途失败（权威源损坏）→ 事务回滚 →
+        // 索引保持 rebuild 前内容，绝不留下「空索引装健康」的假零态。
+        let home = tmp_db("rollback");
+        let facts_root = home.join("facts");
+        std::fs::create_dir_all(&facts_root).unwrap();
+        std::fs::write(
+            facts_root.join("codex.jsonl"),
+            format!("{}\n", fact("codex", "e1", 100)),
+        )
+        .unwrap();
+        let db = home.join("index.sqlite3");
+        let (idx, _) = FactsIndex::open_or_rebuild(&db, &facts_root).unwrap();
+        assert_eq!(idx.fact_count().unwrap(), 1);
+        drop(idx);
+
+        // 权威源加入一个损坏文件 → rebuild 必败。
+        std::fs::write(facts_root.join("dsh.jsonl"), "{good\nGARBAGE\n{bad\n").unwrap();
+        let (idx, _) = FactsIndex::open_or_rebuild(&db, &facts_root).unwrap();
+        assert!(idx.rebuild_from_jsonl(&facts_root).is_err());
+        // 回滚后旧内容完好。
+        assert_eq!(idx.fact_count().unwrap(), 1, "失败 rebuild 回滚，不空索引");
+        assert_eq!(
+            idx.tokens_by_host(None).unwrap()["codex"]["total"],
+            serde_json::json!(1015)
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 

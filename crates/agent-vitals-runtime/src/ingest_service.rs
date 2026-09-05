@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use agent_vitals_data::evidence::{AppendError, AppendOutcome, FactWriter, replay};
+use agent_vitals_data::evidence::{AppendError, AppendOutcome, FactWriter, replay, retain};
 use agent_vitals_data::store::{default_index_path, FactsIndex};
 use serde_json::Value;
 
@@ -316,6 +316,46 @@ pub fn reconcile_index_vs_dto(
     }))
 }
 
+/// "YYYY-MM" − `months_back` 个月（无 chrono 的月算术：年月展平成 12 进制）。
+fn month_shift(month: &str, months_back: u32) -> String {
+    let y: i64 = month.get(0..4).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let m: i64 = month.get(5..7).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let total = (y * 12 + m - 1 - months_back as i64).max(0);
+    format!("{:04}-{:02}", total / 12, total % 12 + 1)
+}
+
+/// Stage C（spec §6）：UsageFact 13 个月滚动保留。对每个宿主 facts 文件
+/// 执行 `retain`（无日期行保留、原子替换、幂等）。调用方负责持有 lease——
+/// 本函数在 `rebuild_index` 的锁内被调，不在别处自动触发（对权威的重写
+/// 必须是显式维护动作，不藏在每次 ingest 里）。
+pub fn enforce_retention(data_home: &Path, current_month: &str) -> Result<Value, String> {
+    // 比对门槛本身吃 13 个月：cutoff = current − 13。
+    let cutoff = month_shift(current_month, 13);
+    let mut out = serde_json::Map::new();
+    let hosts: Vec<String> = FACT_HOSTS.iter().map(|h| h.to_string()).collect();
+    for host in hosts {
+        let Some(path) = facts_path(data_home, &host) else {
+            continue;
+        };
+        if !path.exists() {
+            continue;
+        }
+        let rep = retain(&path, &cutoff).map_err(|e| format!("{}: {e}", path.display()))?;
+        if rep.dropped > 0 || rep.kept + rep.kept_undated > 0 {
+            out.insert(
+                host,
+                serde_json::json!({
+                    "cutoff_month": cutoff,
+                    "kept": rep.kept,
+                    "dropped": rep.dropped,
+                    "kept_undated": rep.kept_undated,
+                }),
+            );
+        }
+    }
+    Ok(Value::Object(out))
+}
+
 /// Stage B：`data-rebuild-index` 的服务面——删库并从权威 JSONL 全量重放
 /// （spec §5 建议命令；CLI 只做参数解析与渲染，编排在这里）。
 pub fn rebuild_index(
@@ -331,8 +371,15 @@ pub fn rebuild_index(
     )
     .map_err(|e| format!("facts rebuild lease: {e}"))?;
     let facts_dir = data_home.join("facts");
-    let (_idx, report) = FactsIndex::drop_and_rebuild(&default_index_path(data_home), &facts_dir)
-        .map_err(|e| format!("facts index rebuild: {e}"))?;
+    // 重建前先做保留滚动（同一把锁内对权威重写一次，随后索引从重放自然
+    // 反映截断后的权威）。retention 失败不挡 rebuild——保留策略的目标是
+    // 控制规模，不是账目正确性；错误面在返回值里如实上呈。
+    if let Err(e) = enforce_retention(data_home, &crate::clock::current_month_beijing()) {
+        eprintln!("retention warning: {e}");
+    }
+    let (_idx, report) =
+        FactsIndex::drop_and_rebuild(&default_index_path(data_home), &facts_dir)
+            .map_err(|e| format!("facts index rebuild: {e}"))?;
     Ok(report)
 }
 

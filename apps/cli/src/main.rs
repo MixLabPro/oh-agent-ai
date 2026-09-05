@@ -488,6 +488,20 @@ enum Cmd {
     /// monthly cost split by basis AND drillable to its sources). Groups match
     /// by_provider keys; reasons: billing-route-unknown / billing-mode-unknown
     /// / no-price-card / partial-price-basis. Stage B.
+    DataExportPrivate {
+        /// Output directory (created on demand); files land as <host>.jsonl
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Export facts with identity fields pseudonymized (machine_namespace /
+    /// native_session_id / source_profile → stable fnv1a64 pseudonyms, fact_id
+    /// re-stamped through the contract layer). Spec §6: this is a SEPARATE
+    /// write path from data-export-private by design — not a --redacted flag.
+    DataExportRedacted {
+        /// Output directory (created on demand); files land as <host>.jsonl
+        #[arg(long)]
+        out: PathBuf,
+    },
     DataUnresolved {
         /// Month to inspect ("YYYY-MM"; default: current month)
         #[arg(long)]
@@ -2107,6 +2121,41 @@ session_store={store} fold={fold}"
             }
             Err(e) => {
                 eprintln!("data-reconcile failed: {e}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    // data-export-private / data-export-redacted（Stage C，spec §6）：两条
+    // 独立写路径——私有 trace 原样、脱敏导出重导身份。命令面分开正是 spec
+    // 「不能由一个 redacted: bool 决定」的落地。
+    if let Some(Cmd::DataExportPrivate { out }) = &args.cmd {
+        match agent_vitals_runtime::export::export_private(
+            &agent_vitals_runtime::home::data_home(),
+            out,
+        ) {
+            Ok(files) => println!("Private export: {} fact file(s) → {}", files, out.display()),
+            Err(e) => {
+                eprintln!("data-export-private failed: {e}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+    if let Some(Cmd::DataExportRedacted { out }) = &args.cmd {
+        match agent_vitals_runtime::export::export_redacted(
+            &agent_vitals_runtime::home::data_home(),
+            out,
+        ) {
+            Ok((files, n)) => println!(
+                "Redacted export: {} fact(s) in {} file(s) → {}",
+                n,
+                files,
+                out.display()
+            ),
+            Err(e) => {
+                eprintln!("data-export-redacted failed: {e}");
                 std::process::exit(2);
             }
         }

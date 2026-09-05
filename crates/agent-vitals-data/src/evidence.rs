@@ -64,6 +64,16 @@ impl From<std::io::Error> for AppendError {
     }
 }
 
+impl std::fmt::Display for AppendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppendError::Invalid(problems) => write!(f, "invalid fact: {}", problems.join("; ")),
+            AppendError::Corrupt { line_no } => write!(f, "corrupt line {line_no}"),
+            AppendError::Io(e) => write!(f, "io: {e}"),
+        }
+    }
+}
+
 /// 尾面修复动作（crash 中断点的两种形状，spec §3.5「重启恢复必须识别每个
 /// 中断点」）。由 [`replay`] 报告、[`FactWriter::open`] 执行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +151,61 @@ pub fn replay(path: &Path) -> Result<Replay, AppendError> {
                 report.tail_repair = Some(TailRepair::Truncate { offset: valid_end as u64 });
             }
         }
+    }
+    Ok(report)
+}
+
+/// 保留策略报告（spec §6：UsageFact 13 个月滚动）。
+#[derive(Debug, Default, serde::Serialize)]
+pub struct RetainReport {
+    pub kept: usize,
+    pub dropped: usize,
+    /// 没有 event_ts_utc 的事实——**一律保留**：无日期不是丢弃理由
+    /// （丢了就永远找不回；保留只损失"能被月窗过滤"这一点）。
+    pub kept_undated: usize,
+}
+
+/// 把 facts 文件截断到只保留 `cutoff_month`（"YYYY-MM"）及以后的事实。
+///
+/// **这是对权威自身的重写**——append-only 的唯一合法例外，条件全部写在
+/// spec §6：只丢「有日期且日期早于 cutoff」的行；无日期行保留；原子替换
+/// （temp + rename，与 state 写同款）；调用方必须持有 writer lease（本函数
+/// 不拿锁——机制层不做编排决定）。幂等：重复调用第二次 dropped=0。
+pub fn retain(path: &Path, cutoff_month: &str) -> Result<RetainReport, AppendError> {
+    let rep = replay(path)?;
+    let mut report = RetainReport::default();
+    let mut kept_lines: Vec<String> = Vec::with_capacity(rep.facts.len());
+    for fact in &rep.facts {
+        let ts = fact.get("event_ts_utc").and_then(|v| v.as_str()).unwrap_or("");
+        if ts.is_empty() {
+            report.kept_undated += 1;
+            kept_lines.push(fact.to_string());
+            continue;
+        }
+        if ts.get(..7).map_or(true, |ym| ym < cutoff_month) {
+            report.dropped += 1;
+        } else {
+            report.kept += 1;
+            kept_lines.push(fact.to_string());
+        }
+    }
+    // 原子替换：同目录 temp（同文件系统 rename 才原子）+ rename。crash 在
+    // rename 前只留一个 tmp 尾巴，权威文件完好。
+    if report.dropped > 0 {
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let tmp = dir.join(format!(
+            ".{}.retain-tmp.{}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("facts"),
+            std::process::id()
+        ));
+        std::fs::write(&tmp, {
+            let mut s = kept_lines.join("\n");
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s
+        })?;
+        std::fs::rename(&tmp, path)?;
     }
     Ok(report)
 }
@@ -459,6 +524,37 @@ mod tests {
             Err(AppendError::Corrupt { line_no }) => assert_eq!(line_no, 2),
             other => panic!("expected Corrupt, got {other:?}"),
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn retain_drops_only_dated_old_facts_and_is_idempotent() {
+        let path = tmp_path("retain");
+        let mut w = FactWriter::open(&path).unwrap();
+        let mut mk = |event: &str, ts: Option<&str>| {
+            let mut f = base_fields();
+            f.insert("source_event_id".to_string(), json!(event));
+            if let Some(ts) = ts {
+                f.insert("event_ts_utc".to_string(), json!(ts));
+            }
+            w.append(&f).unwrap();
+        };
+        mk("old", Some("2025-01-15T10:00:00.000Z"));
+        mk("recent", Some("2026-09-05T10:00:00.000Z"));
+        mk("undated", None);
+        drop(w);
+
+        // cutoff = 2025-06：old（2025-01）被丢；recent 与 undated 保留。
+        let rep = retain(&path, "2025-06").unwrap();
+        assert_eq!(rep.dropped, 1);
+        assert_eq!(rep.kept, 1);
+        assert_eq!(rep.kept_undated, 1);
+        let after = replay(&path).unwrap();
+        assert_eq!(after.facts.len(), 2);
+        // 幂等：第二次跑 dropped=0。
+        let rep2 = retain(&path, "2025-06").unwrap();
+        assert_eq!(rep2.dropped, 0);
+        assert_eq!(replay(&path).unwrap().facts.len(), 2);
         let _ = std::fs::remove_file(&path);
     }
 
