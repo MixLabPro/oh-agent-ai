@@ -233,9 +233,9 @@ impl FactsIndex {
         // **事务包裹（DoD #2：投影提交点注入崩溃可恢复）**：DELETE 与插入
         // 同事务——rebuild 中途崩溃回滚到旧索引，绝不会留下「空索引装健康」
         // 的半提交态（那会让 open 判健康、查询静默返回 0 条——假零）。
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        self.conn.execute("DELETE FROM facts", [])?;
         let outcome = (|| -> Result<RebuildReport, IndexError> {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+            self.conn.execute("DELETE FROM facts", [])?;
             let known: Vec<String> = std::fs::read_dir(facts_root)
                 .map(|entries| {
                     entries

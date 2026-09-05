@@ -315,8 +315,10 @@ calendar/quota 四个命令——**任何新增的 codex 数据面必须走
 - **崩溃恢复**：facts 尾面（crash 半行）由 `FactWriter::open` 修复（半行
   截断 / 完整 JSON 缺封口补换行）——在半行上直接 append 会把新事实和残行
   合并成损坏行，这是 Stage A 审查抓出的真 bug，测试钉死。
-- **保留滚动**：UsageFact 13 个月（spec §6），`enforce_retention` 在
-  rebuild 时执行；无日期行一律保留；幂等。
+- **保留滚动**：UsageFact 保留最近 13 个自然月（含当月，cutoff =
+  current − 12——fencepost 已钉死），`enforce_retention` 在 rebuild 时
+  执行、报告随 RebuildOutcome 上呈；解析不出 YYYY-MM 的事实**按 undated
+  保留**（绝不把格式不齐当过期丢）；幂等。
 - **导出双路径**（spec §6 明令，不能是一个 `redacted: bool`）：
   `data-export-private`（原样）与 `data-export-redacted`（身份字段 fnv1a64
   伪名化 + fact_id 经契约层重 stamp）是两个独立函数/两个 CLI 子命令。

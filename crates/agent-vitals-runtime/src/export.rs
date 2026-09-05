@@ -6,8 +6,9 @@
 //!
 //! - [`export_private`]：逐字节复制权威 JSONL（含 machine_namespace、
 //!   native_session_id、cwd 派生的 source_profile）——私有 trace 的完整面。
-//! - [`export_redacted`]：重放 → **重导身份**（namespace/会话/路径三个
-//!   可辨识字段规范化为稳定伪名，fnv1a64 保证同输入同伪名、不可反推）→
+//! - [`export_redacted`]：重放 → **重导身份**（namespace/会话/路径/
+//!   **原生事件 id** 四个可辨识字段规范化为稳定伪名，fnv1a64 保证同输入
+//!   同伪名、不可反推）→
 //!   经 `build_usage_fact` 重算 fact_id（身份字段变了，fact_id 必须跟着
 //!   契约层重 stamp——导出件的一致性由契约层背书，不是手改字符串）。
 //!
@@ -57,7 +58,7 @@ pub fn export_redacted(data_home: &Path, out_dir: &Path) -> Result<(usize, usize
             .map_err(|e| format!("{}: {e}", src.display()))?;
         let mut lines = Vec::with_capacity(rep.facts.len());
         for fact in &rep.facts {
-            // 三个可辨识字段规范化；其余字段（token 桶、模型、provider、ts）
+            // 四个可辨识字段规范化；其余字段（token 桶、模型、provider、ts）
             // 原样保留——脱敏导出的分析价值在这些字段上。
             let mut fields = fact
                 .as_object()
@@ -83,6 +84,19 @@ pub fn export_redacted(data_home: &Path, out_dir: &Path) -> Result<(usize, usize
                     );
                 }
             }
+            // **审查 P1**：source_event_id 是第 4 个身份字段（IDENTITY_
+            // INPUT_FIELDS 六元组之一）——claude 侧是原生 message.uuid，
+            // 全局稳定的跨界唯一标识符，明文出导出件就是身份泄漏。
+            if let Some(evt) = fields.get("source_event_id").and_then(|v| v.as_str()) {
+                fields.insert(
+                    "source_event_id".to_string(),
+                    serde_json::json!(pseudonym("evt", evt)),
+                );
+            }
+            // **白名单维护纪律**：以上四个是手工枚举的「可辨识字段」。未来
+            // 某 emitter 开始填 `session_key_ref`/`provider_request_id`/
+            // `account_ref` 等（当前无生产者），就是新的泄漏面——增字段时
+            // 必须对照 USAGE_FACT_FIELDS 重审本函数。
             // 身份字段已变 → fact_id 必须经契约层重算（契约层会覆盖外部传入
             // 的 fact_id——这正是「身份不接受外部声称」的设计在导出侧的复用）。
             let rebuilt = agent_vitals_domain::contracts::usage_fact::build_usage_fact(&fields)
@@ -121,7 +135,12 @@ mod tests {
         f.insert("host".into(), json!("codex"));
         f.insert("source_profile".into(), json!("--Users-admin-project--"));
         f.insert("native_session_id".into(), json!("sess-abcdef"));
-        f.insert("source_event_id".into(), json!("evt-1"));
+        // 真实形状：claude 侧是原生 message.uuid（审查 P1——良性字面量
+        // 抓不住泄漏）。
+        f.insert(
+            "source_event_id".into(),
+            json!("msg_01abc2def3ghi4jkl5mno6pqr7stu8vwx9yz0"),
+        );
         f.insert("observation_kind".into(), json!("token_count"));
         f.insert("uncached_input_tokens".into(), json!(100));
         let fact = build_usage_fact(&f).unwrap();
@@ -148,6 +167,10 @@ mod tests {
         assert!(!red_text.contains("my-secret-ns"), "{red_text}");
         assert!(!red_text.contains("Users-admin-project"), "{red_text}");
         assert!(!red_text.contains("sess-abcdef"), "{red_text}");
+        assert!(
+            !red_text.contains("msg_01abc2def3"),
+            "source_event_id 必须伪名化（审查 P1），{red_text}"
+        );
         assert!(red_text.contains("\"uncached_input_tokens\":100"), "{red_text}");
         // fact_id 已按重导身份重 stamp（与原文不同），但格式仍是 uf1-。
         assert!(red_text.contains("\"fact_id\":\"uf1-"), "{red_text}");

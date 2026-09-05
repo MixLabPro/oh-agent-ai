@@ -2047,25 +2047,33 @@ session_store={store} fold={fold}"
             &agent_vitals_runtime::home::data_home(),
         );
         match report {
-            Ok(r) => {
+            Ok(outcome) => {
                 if *rows_json {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&r).unwrap_or_default()
+                        serde_json::to_string_pretty(&outcome).unwrap_or_default()
                     );
                 } else {
                     println!(
                         "Rebuilt facts index: {} facts across {} host file(s){}",
-                        r.total,
-                        r.hosts.len(),
-                        if r.repaired_tails > 0 {
-                            format!(" ({} crash tail(s) repaired)", r.repaired_tails)
+                        outcome.rebuild.total,
+                        outcome.rebuild.hosts.len(),
+                        if outcome.rebuild.repaired_tails > 0 {
+                            format!(" ({} crash tail(s) repaired)", outcome.rebuild.repaired_tails)
                         } else {
                             String::new()
                         },
                     );
-                    for (host, n) in &r.hosts {
+                    for (host, n) in &outcome.rebuild.hosts {
                         println!("  {host}: {n}");
+                    }
+                    if let Some(ret) = &outcome.retention {
+                        for (host, r) in ret.as_object().map(|m| m.iter()).into_iter().flatten() {
+                            println!(
+                                "  retention[{host}]: kept {} (+{} undated), dropped {} (cutoff {})",
+                                r["kept"], r["kept_undated"], r["dropped"], r["cutoff_month"],
+                            );
+                        }
                     }
                 }
             }

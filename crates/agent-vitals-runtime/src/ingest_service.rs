@@ -329,8 +329,10 @@ fn month_shift(month: &str, months_back: u32) -> String {
 /// 本函数在 `rebuild_index` 的锁内被调，不在别处自动触发（对权威的重写
 /// 必须是显式维护动作，不藏在每次 ingest 里）。
 pub fn enforce_retention(data_home: &Path, current_month: &str) -> Result<Value, String> {
-    // 比对门槛本身吃 13 个月：cutoff = current − 13。
-    let cutoff = month_shift(current_month, 13);
+    // spec §6「UsageFact 13 个月保留」钉死为「保留最近 13 个自然月」
+    // （含当月）→ cutoff = current − 12（两端含）。审查 P2 的 fencepost
+    // （−13 会留出 14 个月的窗）在此收口。
+    let cutoff = month_shift(current_month, 12);
     let mut out = serde_json::Map::new();
     let hosts: Vec<String> = FACT_HOSTS.iter().map(|h| h.to_string()).collect();
     for host in hosts {
@@ -358,9 +360,7 @@ pub fn enforce_retention(data_home: &Path, current_month: &str) -> Result<Value,
 
 /// Stage B：`data-rebuild-index` 的服务面——删库并从权威 JSONL 全量重放
 /// （spec §5 建议命令；CLI 只做参数解析与渲染，编排在这里）。
-pub fn rebuild_index(
-    data_home: &Path,
-) -> Result<agent_vitals_data::store::RebuildReport, String> {
+pub fn rebuild_index(data_home: &Path) -> Result<RebuildOutcome, String> {
     // 与 ingest 互斥（审查 P2-5）：重建期间另一个 ingest 拿旧连接写孤儿
     // inode 是白干 + 竞态。同锁同 TTL。
     let _lease = crate::lease::acquire_blocking(
@@ -373,14 +373,24 @@ pub fn rebuild_index(
     let facts_dir = data_home.join("facts");
     // 重建前先做保留滚动（同一把锁内对权威重写一次，随后索引从重放自然
     // 反映截断后的权威）。retention 失败不挡 rebuild——保留策略的目标是
-    // 控制规模，不是账目正确性；错误面在返回值里如实上呈。
-    if let Err(e) = enforce_retention(data_home, &crate::clock::current_month_beijing()) {
-        eprintln!("retention warning: {e}");
-    }
+    // 控制规模，不是账目正确性；报告/错误面随返回值如实上呈（审查 P2：
+    // 丢掉报告 = 滚动对操作者不可观测）。
+    let retention = enforce_retention(data_home, &crate::clock::current_month_beijing()).ok();
     let (_idx, report) =
         FactsIndex::drop_and_rebuild(&default_index_path(data_home), &facts_dir)
             .map_err(|e| format!("facts index rebuild: {e}"))?;
-    Ok(report)
+    Ok(RebuildOutcome { rebuild: report, retention })
+}
+
+/// `data-rebuild-index` 的完整产出：索引重建报告 + 保留滚动报告。
+#[derive(Debug, serde::Serialize)]
+pub struct RebuildOutcome {
+    #[serde(flatten)]
+    pub rebuild: agent_vitals_data::store::RebuildReport,
+    /// None = 权威里没有需要滚动的宿主文件，或 retention 失败（错误已上
+    /// stderr）——消费方如实区分。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Value>,
 }
 
 #[cfg(test)]
@@ -413,6 +423,16 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn month_shift_arithmetic_is_twelve_base() {
+        // 审查 P2：月算术无单测。钉住跨年 / 1 月 / 0 钳制三个边。
+        assert_eq!(month_shift("2026-09", 12), "2025-09");
+        assert_eq!(month_shift("2026-09", 13), "2025-08");
+        assert_eq!(month_shift("2025-01", 1), "2024-12");
+        assert_eq!(month_shift("2024-02", 14), "2022-12");
+        assert_eq!(month_shift("0000-01", 13), "0000-01", "0 钳制不产生负年");
     }
 
     #[test]

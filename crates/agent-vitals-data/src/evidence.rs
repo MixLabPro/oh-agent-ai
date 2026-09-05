@@ -176,17 +176,32 @@ pub fn retain(path: &Path, cutoff_month: &str) -> Result<RetainReport, AppendErr
     let mut report = RetainReport::default();
     let mut kept_lines: Vec<String> = Vec::with_capacity(rep.facts.len());
     for fact in &rep.facts {
-        let ts = fact.get("event_ts_utc").and_then(|v| v.as_str()).unwrap_or("");
-        if ts.is_empty() {
-            report.kept_undated += 1;
-            kept_lines.push(fact.to_string());
-            continue;
-        }
-        if ts.get(..7).map_or(true, |ym| ym < cutoff_month) {
-            report.dropped += 1;
-        } else {
-            report.kept += 1;
-            kept_lines.push(fact.to_string());
+        // 日期判读必须严格是零填充 "YYYY-MM"（前 7 字节 + 两段数字）。
+        // **审查 P2**：解析不出（year-only、epoch 数字串、非 ASCII）一律按
+        // undated 保留——retain 是对权威的不可逆重写，把「格式不齐」当成
+        // 「过期」就是静默丢数据（epoch 串 "1753000…" 的字符串序恒小于
+        // cutoff，原来的兜底会把它们全部永久删除）。
+        let dated = fact
+            .get("event_ts_utc")
+            .and_then(|v| v.as_str())
+            .and_then(|ts| {
+                let ym = ts.get(..7)?;
+                let (y, m) = ym.split_at(4);
+                let m = m.strip_prefix('-')?;
+                y.parse::<i64>().ok()?;
+                m.parse::<i64>().ok()?;
+                Some(ym.to_string())
+            });
+        match dated {
+            None => {
+                report.kept_undated += 1;
+                kept_lines.push(fact.to_string());
+            }
+            Some(ym) if ym.as_str() < cutoff_month => report.dropped += 1,
+            Some(_) => {
+                report.kept += 1;
+                kept_lines.push(fact.to_string());
+            }
         }
     }
     // 原子替换：同目录 temp（同文件系统 rename 才原子）+ rename。crash 在

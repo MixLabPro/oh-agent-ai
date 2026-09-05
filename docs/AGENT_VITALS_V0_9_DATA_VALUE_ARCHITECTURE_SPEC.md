@@ -352,7 +352,7 @@ v0.9 开工前必须完成 v0.8 E7 的所有权收口。当前 apps/cli/src/agen
 - JSONL 适合审计、append、跨语言 parity 和脱敏导出；
 - SQLite 只承担交互查询，不承担第二份权威事实；
 - DuckDB 只作为显式启用的离线分析/benchmark/export adapter，读取同一份脱敏输入；
-- 原始宿主日志不复制；CanonicalSession 默认 90 天、UsageFact 13 个月、可重建 cache 30 天；
+- 原始宿主日志不复制；CanonicalSession 默认 90 天、UsageFact 保留**最近 13 个自然月**（含当月；fencepost 钉死——cutoff = current − 12，两端含）、可重建 cache 30 天；
 - 私有 trace 与脱敏 export 必须是不同写路径，不能由一个 `redacted: bool` 决定；
 - 用户配置与可重建 state/cache 分目录，配置与导出均不得保存凭据。
 
