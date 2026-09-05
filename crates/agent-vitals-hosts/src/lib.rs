@@ -19,6 +19,7 @@ pub mod hosts;
 pub mod skill_discovery;
 
 // Flat compatibility facade——调用方一个 crate 一个入口。
+pub use hosts::claude_code::sessions::usage as claude_code_usage;
 pub use hosts::claude_code::sessions::evidence as claude_code_evidence;
 pub use hosts::codex::sessions::{evidence as codex_evidence, usage as codex_usage};
 pub use hosts::dsh::sessions::{
@@ -28,8 +29,13 @@ pub use hosts::workbuddy::sessions::evidence as workbuddy_evidence;
 
 // D4/D5：宿主会话读取器（I/O，`sources` feature）。二进制 / runtime 经这些扁平
 // 别名取；纯构建 / wasm 关 feature 时它们不存在。
+// v0.9 Stage A：UsageFact emitter 归位（R4 §5.2 scope gap）——wire → fact 的
+// 生产者从二进制 apps/cli/src/agent/ 迁进各宿主 sources 层。机制层（writer/
+// replay/reconcile）在 agent-vitals-data::evidence，与生产者解耦。
 #[cfg(feature = "sources")]
 pub use hosts::{
-    claude_code::sources as claude_session, codex::sources as codex_session,
+    claude_code::sources::usage_fact as claude_usage_fact,
+    claude_code::sources as claude_session, codex::sources::usage_fact as codex_usage_fact,
+    codex::sources as codex_session, dsh::sources::usage_fact as dsh_usage_fact,
     dsh::sources as dsh_sources, workbuddy::sources as workbuddy_session,
 };

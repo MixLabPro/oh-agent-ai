@@ -9,17 +9,20 @@
 //! `codex_cost`/`behavior`/`discovery`（DSH 专用）/`codex_session_audit`/
 //! `r2a_store` 全部迁进了 `agent_vitals_runtime::sessions`；`claude_cost.rs`
 //! 只搬走了其中的 ledger 只读取值路径（`claude_ledger_day_tokens` 等），
-//! 本体（fold 引擎，与留在这里的 `claude_usage_fact` 双向耦合）仍在这里。
-//! 本子树现在只剩 CLI 独有的 I/O 接线：v0.7 UsageFact 发射器
-//! （`{claude,codex,dsh}_usage_fact`）、成本折叠（`cost`/`claude_cost`）、
+//! fold 引擎本体仍在这里（行级原语已下沉 `agent_vitals_hosts::claude_code_usage`）。
+//!
+//! v0.9 Stage A（R4 §5.2 scope gap 收口）：UsageFact 发射器
+//! `{claude,codex,dsh}_usage_fact` 归位各宿主 `agent-vitals-hosts` 的
+//! sources 层（`hosts/<h>/sources/usage_fact.rs`）——wire → fact 的生产者
+//! 不再由 CLI 拥有；这里 re-export 同一模块，CLI 命令路径不变。
+//! 本子树现在只剩 CLI 独有的 I/O 接线：成本折叠（`cost`/`claude_cost`）、
 //! CLI 展示助手（`oneline`/`plan`）、宿主能力注册表（`host_runtime_
 //! registration`）。
 
 pub mod claude_cost;
-pub mod claude_usage_fact;
-pub mod codex_usage_fact;
 pub mod cost;
-pub mod dsh_usage_fact;
 pub mod host_runtime_registration;
 pub mod oneline;
 pub mod plan;
+
+pub use agent_vitals_hosts::{claude_usage_fact, codex_usage_fact, dsh_usage_fact};

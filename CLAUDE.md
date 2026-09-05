@@ -461,8 +461,10 @@ against the same fixtures, so verify that manually. The **trajectory detectors**
 lockstep; its reconciliation invariant — bucket sums must equal DSH's `tokenUsage` — is
 checked against a real session log in the CLI's `behavior` output.
 
-The **v0.7 UsageFact emitters** (`{claude,codex,dsh}_usage_fact.py` ↔ `src/agent/
-{claude,codex,dsh}_usage_fact.rs`, driven by the `{claude,codex,dsh}-usage-facts` CLIs)
+The **v0.7 UsageFact emitters** (`{claude,codex,dsh}_usage_fact.py` ↔
+`agent-vitals-hosts/hosts/<h>/sources/usage_fact.rs` — v0.9 Stage A 归位出
+apps/cli，CLI 经 `agent_vitals_hosts::*_usage_fact` re-export，driven by the
+`{claude,codex,dsh}-usage-facts` CLIs)
 are Python↔Rust byte-parity locksteps pinned by `AGENT_VITALS_BIN` differential in
 `tests/test_{claude,codex,dsh}_usage_fact.py`. They share ONE identity primitive —
 `crates/agent-vitals-domain/src/contracts/source_identity.rs` (`canonical_json` + `fnv1a64_hex`) ↔

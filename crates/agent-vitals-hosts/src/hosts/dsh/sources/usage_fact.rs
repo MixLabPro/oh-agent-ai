@@ -1,14 +1,17 @@
 //! v0.7 Stage 3 commit 2：DSH 会话 → UsageFact emitter（Rust 镜像，host adapter，
-//! 不进 Core）。
+//! 不进 Core）。v0.9 Stage A 从 apps/cli/src/agent/ 归位本宿主 sources 层
+//! （R4 §5.2 scope gap）——CLI 命令经 `agent_vitals_hosts::dsh_usage_fact`
+//! re-export 走同一实现，字节行为零改动（212 项差分 + golden 15/15 钉住）。
 //!
 //! 镜像 `scripts/agent_vitals/agent/dsh_usage_fact.py`——把一份 DSH 会话文件
 //! （明文 JSONL 或 zstd 多帧）的 **post-fork 逐请求消耗**重放成 `UsageFact` 事实流。
 //! Python↔Rust stdout byte-parity 由 `tests/test_dsh_usage_fact.py` 钉住（同批文件
 //! 两侧 `--json -` 字节相等）。
 //!
-//! **本模块不解释任何 DSH wire shape**——读/解码（`agent_vitals_hosts::dsh_sources::read_session_text`）、
-//! reshape（`parse_session_log`）、身份与 profile（`r2a_store::dsh_header` /
-//! `dsh_source_profile`）、逐槽观测（core `usage::dsh_usage_observations`）、残差
+//! **本模块不解释任何 DSH wire shape**——读/解码（`super::read_session_text`）、
+//! reshape（`parse_session_log`）、身份与 profile（`sessions::header` 的
+//! `dsh_header`/`dsh_source_profile`，runtime r2a_store 是同一实现的 re-export）、
+//! 逐槽观测（core `usage::dsh_usage_observations`）、残差
 //! 折叠（`usage::usage_fold_checkpoint`）、UsageFact 契约（core
 //! `usage_fact::build_usage_fact`）全部复用，一行新解释都不写。**emit surface =
 //! 共享 observer 的相邻槽**：每条 `DshUsageObservation` emit 一个 fact，身份字段由
@@ -31,8 +34,8 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use agent_vitals_runtime::sessions::r2a_store::{dsh_header, dsh_source_profile};
-use agent_vitals_hosts::dsh_sources::{parse_session_log, read_session_text};
+use crate::hosts::dsh::sessions::header::{dsh_header, dsh_source_profile};
+use super::{parse_session_log, read_session_text};
 use agent_vitals_domain::usage::{
     dsh_usage_observations, usage_fold_checkpoint, DshUsageObservation,
 };

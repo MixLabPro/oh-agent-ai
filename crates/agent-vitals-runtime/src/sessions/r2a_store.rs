@@ -820,19 +820,11 @@ fn build_entries(raw: &[PendingEntry], generated_at: &str, source_statuses: &Val
         .collect()
 }
 
-/// 从**已解压文本**读会话头：`id` + `cwd`。`id` 缺失 → None（无法建 SessionKey）。
-/// 只读头行，不重复解压——调用方已用 `read_session_text` 解过一次。
-///
-/// `pub(crate)` 让 dsh UsageFact emitter（`agent::dsh_usage_fact`）复用同一身份
-/// 读法（Python 侧 emitter 复用 `r2a.py::dsh_header`）——identity/attribution 判读
-/// 不许长第二份。
-pub fn dsh_header(text: &str) -> Option<(String, Option<String>)> {
-    let line = text.lines().find(|l| !l.trim().is_empty())?;
-    let v: Value = serde_json::from_str(line.trim()).ok()?;
-    let id = v.get("id").and_then(Value::as_str)?;
-    let cwd = v.get("cwd").and_then(Value::as_str).map(str::to_owned);
-    Some((id.to_string(), cwd))
-}
+// v0.9 Stage A emitter 归位：`dsh_header`/`dsh_source_profile` 的本体下沉到
+// `agent_vitals_hosts::hosts::dsh::sessions::header`（hosts ← runtime 依赖方向
+// 单向，emitter 进 hosts 后 runtime 不能再当宿主）——这里 re-export 保持
+// r2a 内部调用点与本模块对外 API 不动。
+pub use agent_vitals_hosts::hosts::dsh::sessions::header::{dsh_header, dsh_source_profile};
 
 /// DSH 的 SessionRevision（§4.4）= 最大 `seq`（seq 单调不减，样本首 0 / 末 16201）。
 /// 从头到整个文本扫（不是只看末行）：fork 边界事件的 seq 是 null，且「单调不减」
@@ -854,15 +846,6 @@ fn dsh_session_revision(text: &str) -> Option<String> {
     (max >= 0).then(|| max.to_string())
 }
 
-/// DSH 的 source_profile（§1.3）= 会话头 `cwd` 清洗后的项目路径：
-/// `--{cwd.replace('/', "-")}--`。cwd 缺失 → 空串（诚实缺失；native_id 全局唯一，
-/// 空 source_profile 不会撞键）。
-///
-/// `pub(crate)` 同上（emitter 复用，R2a 对齐验收钉住同一四元）。
-pub fn dsh_source_profile(cwd: Option<&str>) -> String {
-    cwd.map(|c| format!("--{}--", c.replace('/', "-")))
-        .unwrap_or_default()
-}
 
 // ── cache 读写（v2：按 session 增量，见文件头注释）────────────────────
 

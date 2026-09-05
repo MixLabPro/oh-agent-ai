@@ -26,13 +26,17 @@
 //! derived-id 原语（canonical/FNV）来自 core `source_identity`（Claude/Codex/
 //! DSH observer/UsageFact ID 共用的同一份，不许长第二份）。
 
+//! v0.9 Stage A：从 apps/cli/src/agent/ 归位本宿主 sources 层（R4 §5.2 scope gap）。
+//! CLI 命令经 `agent_vitals_hosts::codex_usage_fact` re-export 走同一实现，
+//! 字节行为零改动（差分 + golden 钉住）。
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::agent::claude_usage_fact::{SKIP, UNATTRIBUTED, UNREADABLE};
-use agent_vitals_hosts::codex_usage::{CodexTokenOutcome, CodexFoldState};
+use crate::hosts::claude_code::sources::usage_fact::{SKIP, UNATTRIBUTED, UNREADABLE};
+use crate::codex_usage::{CodexTokenOutcome, CodexFoldState};
 use agent_vitals_domain::source_identity::{canonical_json, fnv1a64_hex};
 use agent_vitals_domain::usage_fact::build_usage_fact;
 

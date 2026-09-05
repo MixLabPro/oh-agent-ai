@@ -13,12 +13,17 @@
 //! 本模块的 `parse_claude_usage_row` 同时被 claude_cost.rs 的 fold
 //! `apply_record` 消费（Rust 端单一 row parser，镜像 Python `_apply_record`）。
 
+//! v0.9 Stage A：从 apps/cli/src/agent/ 归位本宿主 sources 层（R4 §5.2 scope gap）。
+//! CLI 命令经 `agent_vitals_hosts::claude_usage_fact` re-export 走同一实现；行级
+//! 原语（`day_from_iso_ts`/`ms_from_iso_ts`/`row_tokens`/键表）下沉纯层
+//! `hosts/claude_code/sessions/usage.rs`，fold 与 emitter 仍共享同一 extractor。
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use crate::agent::claude_cost::{day_from_iso_ts, ms_from_iso_ts, row_tokens};
+use crate::hosts::claude_code::sessions::usage::{day_from_iso_ts, ms_from_iso_ts, row_tokens};
 use agent_vitals_domain::source_identity::{canonical_json, fnv1a64_hex};
 use agent_vitals_domain::usage::is_peak_slot;
 use agent_vitals_domain::usage_fact::build_usage_fact;
@@ -26,9 +31,9 @@ use agent_vitals_domain::usage_fact::build_usage_fact;
 // P0 哨兵常量——与 Python `claude_usage_fact.py` 同源字节。
 // pub(crate)：claude_cost.rs 的 fold `apply_record` 消费本模块 parser 时，
 // 按 reason 字面量匹配，须能看见这些常量。
-pub(crate) const SKIP: &str = "skip";
-pub(crate) const UNREADABLE: &str = "unreadable";
-pub(crate) const UNATTRIBUTED: &str = "unattributed";
+pub const SKIP: &str = "skip";
+pub const UNREADABLE: &str = "unreadable";
+pub const UNATTRIBUTED: &str = "unattributed";
 const OBSERVATION_KIND: &str = "assistant-usage";
 
 /// `claude_jsonl_to_usage_facts` 的 Rust 返回类型——`tests/test_claude_usage_fact.py`
@@ -68,7 +73,7 @@ fn derived_event_id(native_session_id: &str, byte_offset: usize, rec: &Value) ->
 /// `"unattributed"`），保证 attempt 计数跨语言字节相等。fold 的
 /// `apply_record` 与 emitter 共用本函数（R1「共享 extractor」——两端一个
 /// row parser，不允许第二套 wire-shape 解释）。
-pub(crate) fn parse_claude_usage_row(
+pub fn parse_claude_usage_row(
     rec: &Value,
     native_session_id: &str,
     machine_namespace: &str,
@@ -153,25 +158,25 @@ pub(crate) fn parse_claude_usage_row(
 /// `source_event_id`：message.id / 顶层 uuid 原生 id；两者都缺时为空串、
 /// `identity_basis="derived-hash"`，由文件级迭代器填 offset+hash fallback。
 #[derive(Debug, Clone)]
-pub(crate) struct Observation {
-    pub(crate) native_session_id: String,
-    pub(crate) machine_namespace: String,
-    pub(crate) source_profile: String,
-    pub(crate) ts_iso: String,
-    pub(crate) day: String,
+pub struct Observation {
+    pub native_session_id: String,
+    pub machine_namespace: String,
+    pub source_profile: String,
+    pub ts_iso: String,
+    pub day: String,
     /// 镜像 Python NamedTuple 的 `ms`（epoch ms）。fold 只用已算好的 `peak`，
     /// ms 本身不被消费——保留是为了与 Python Observation 逐字段同构。
     #[allow(dead_code)]
-    pub(crate) ms: Option<i64>,
-    pub(crate) peak: bool,
-    pub(crate) model: String,
-    pub(crate) input_tokens: u64,
-    pub(crate) cache_read_tokens: u64,
-    pub(crate) cache_write_tokens: u64,
-    pub(crate) output_tokens: u64,
-    pub(crate) source_event_id: String,
-    pub(crate) identity_basis: String,
-    pub(crate) observation_kind: String,
+    pub ms: Option<i64>,
+    pub peak: bool,
+    pub model: String,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub output_tokens: u64,
+    pub source_event_id: String,
+    pub identity_basis: String,
+    pub observation_kind: String,
 }
 
 impl Observation {

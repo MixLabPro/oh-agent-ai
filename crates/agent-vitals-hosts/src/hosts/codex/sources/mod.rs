@@ -31,6 +31,10 @@ use agent_vitals_domain::util::split_lines;
 // 是两条独立证据线，分文件放。
 pub mod skills;
 
+// v0.9 Stage A emitter 归位（R4 §5.2）：UsageFact emitter 从二进制
+// apps/cli/src/agent/ 迁来——读文件 → 读内存，仍属 I/O 层。
+pub mod usage_fact;
+
 fn empty_result() -> Map<String, Value> {
     let mut map = Map::new();
     map.insert("items".to_string(), Value::Null);

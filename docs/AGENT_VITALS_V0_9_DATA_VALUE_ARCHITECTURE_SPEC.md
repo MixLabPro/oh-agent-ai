@@ -398,9 +398,13 @@ KPI 行/双轨账/决策卡与跨宿主 Token 日历（Stage D `6586112`/`f11006
 
 UsageFact/CanonicalSession writer、稳定 identity、去重与 reconciliation、
 Runtime 共享 ingest service。**优先级最高的剩余项**：读侧三种 wire 形状的
-逐个适配（审查 #2/#5 类缺陷的病根）只有写入统一后才能消失。落地时须先处理
-§5.2 遗留的 `{claude,codex,dsh}_usage_fact.rs` 宿主归位（Stage 0.3 曾记录的
-scope gap）。
+逐个适配（审查 #2/#5 类缺陷的病根）只有写入统一后才能消失。§5.2 遗留的
+`{claude,codex,dsh}_usage_fact.rs` 宿主归位（Stage 0.3 曾记录的 scope gap）
+已完成：emitter 落 `agent-vitals-hosts/hosts/<h>/sources/usage_fact.rs`
+（读文件 → sources 层；行级原语下沉 `claude_code/sessions/usage.rs`、
+`dsh_header`/`dsh_source_profile` 下沉 `dsh/sessions/header.rs`——runtime 对
+宿主词表的所有权就此清零），CLI 经 flat alias re-export，212 项差分 +
+golden 15/15 钉住字节零漂移。
 
 ### v0.9.0 Stage B（P1→P2）：索引、计费和覆盖
 

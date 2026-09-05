@@ -23,6 +23,10 @@ use std::io::{Cursor, Read};
 
 use agent_vitals_domain::util::split_lines;
 
+// v0.9 Stage A emitter 归位（R4 §5.2）：UsageFact emitter 从二进制
+// apps/cli/src/agent/ 迁来——读文件 → 读内存，仍属 I/O 层。
+pub mod usage_fact;
+
 /// DSH 自述 `SESSION_FORMAT_VERSION` 恒为 0、不作兼容承诺；不相符即降级。
 /// 它是头行 `version` 字段，不是 SQLite 后端的 `PRAGMA user_version`（那是表结构版本）。
 const EXPECTED_SESSION_FORMAT_VERSION: i64 = 0;
