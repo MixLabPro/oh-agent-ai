@@ -654,6 +654,207 @@ fn dsh_provider_amount(
     h
 }
 
+/// Stage B（DoD #4 收口）：`has_unresolved` 的**逐模型下钻**——`data-unresolved`
+/// 的服务面。三个宿主各自的 by_model 桶，逐模型判定 unresolved 原因：
+///
+/// - `billing-route-unknown`：`billing_route_of` 认不出归属（DSH/claude 词表；
+///   codex 宿主是 openai 订阅、路由是宿主级的，不做模型级判定）；
+/// - `billing-mode-unknown`：路由命中但模式声明为 unknown（合法状态，不猜）；
+/// - `no-price-card`：模型在本宿主价表里没有卡（unpriced_tokens 的逐模型
+///   展开——聚合数说"有多少看不清"，这里说"是谁看不清"）；
+/// - `partial-price-basis`：卡是时变价、日粒度无峰谷分辨率（`pricing_basis`
+///   = "partial"，与 `has_unresolved` 的既有判定同源）。
+///
+/// 报告键与 `by_provider` 同词表（`host/provider`），消费方可以直接对上。
+pub fn unresolved_detail(month: &str) -> serde_json::Value {
+    use agent_vitals_domain::cost::BillingMode;
+    let pricing = agent_vitals_domain::cost::load_pricing();
+    let mut out: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+
+    // ── claude-code：claude-ledger 窗口逐模型 ──────────────────────────
+    if let Some(ledger) = crate::state::read_json(&crate::sessions::claude_ledger::ledger_path()) {
+        let mut models: BTreeMap<String, [i64; 4]> = BTreeMap::new();
+        let mut priced: std::collections::HashSet<String> = Default::default();
+        let mut partial: std::collections::HashSet<String> = Default::default();
+        if let Some(days) = ledger.get("days").and_then(|d| d.as_object()) {
+            for (date, day) in days {
+                if !date.starts_with(month) {
+                    continue;
+                }
+                let Some(m) = day.as_object() else { continue };
+                for (model, buckets) in m {
+                    let g = |k: &str| {
+                        buckets.get(k).and_then(|v| v.as_i64()).unwrap_or(0)
+                    };
+                    let e = models.entry(model.clone()).or_insert([0, 0, 0, 0]);
+                    e[0] += g("input_tokens");
+                    e[1] += g("cache_read_input_tokens");
+                    e[2] += g("cache_creation_input_tokens");
+                    e[3] += g("output_tokens");
+                }
+                // per_model = 有卡模型（claude_day_cost 的报告）；partial 基
+                // 础逐模型记名（时变卡的日粒度近似，has_unresolved 同源）。
+                if let Some(report) = agent_vitals_domain::cost::claude_day_cost(day, &pricing) {
+                    if let Some(pm) = report.get("per_model").and_then(|v| v.as_object()) {
+                        for (model, entry) in pm {
+                            priced.insert(model.clone());
+                            if entry.get("pricing_basis").and_then(|v| v.as_str())
+                                == Some("partial")
+                            {
+                                partial.insert(model.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (model, t) in &models {
+            // 0-token 行不进下钻：没有可计价的用量，「unresolved」无从谈起
+            // （fold 内部哨兵如 `<synthetic>` 落在这里被一并滤掉）。
+            if t.iter().all(|&v| v == 0) {
+                continue;
+            }
+            let reason = match agent_vitals_domain::cost::billing_route_of(model, &pricing) {
+                None => Some("billing-route-unknown"),
+                Some((_, BillingMode::Unknown)) => Some("billing-mode-unknown"),
+                Some(_) if !priced.contains(model) => Some("no-price-card"),
+                Some(_) if partial.contains(model) => Some("partial-price-basis"),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                let prov = agent_vitals_domain::cost::billing_route_of(model, &pricing)
+                    .map(|(p, _)| p)
+                    .unwrap_or_else(|| "unknown".to_string());
+                out.entry(format!("claude-code/{prov}")).or_default().push(
+                    serde_json::json!({
+                        "model": model,
+                        "reason": reason,
+                        "tokens": t[0] + t[1] + t[2] + t[3],
+                    }),
+                );
+            }
+        }
+    }
+
+    // ── codex/openai：fold by_model vs codex 价表报告 ─────────────────
+    {
+        let merged = codex_merged_cached(&codex_home());
+        let mut filtered = serde_json::Map::new();
+        if let Some(bh) = merged["by_hour_model"].as_object() {
+            for (h, v) in bh {
+                if h.starts_with(month) {
+                    filtered.insert(h.clone(), v.clone());
+                }
+            }
+        }
+        let by_hour = serde_json::Value::Object(filtered);
+        let by_model =
+            agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour, None);
+        let codex_pricing = crate::sessions::codex_cost::load_codex_pricing();
+        let report = crate::sessions::codex_cost::codex_cost_report(
+            &by_hour,
+            &by_model,
+            &merged["unaccounted"],
+            &merged["plan"],
+            &codex_pricing,
+            false,
+        );
+        let priced: std::collections::HashSet<String> = report
+            .as_ref()
+            .and_then(|r| r.get("per_model"))
+            .and_then(|v| v.as_object())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        if let Some(bm) = by_model.as_object() {
+            for (model, buckets) in bm {
+                if priced.contains(model) {
+                    continue;
+                }
+                // codex 宿主路由是宿主级（openai 订阅）——只判价卡。
+                let g = |k: &str| buckets.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+                if [g("uncached_input_tokens"), g("cache_read_tokens"),
+                    g("cache_write_tokens"), g("output_tokens")]
+                .iter().all(|&v| v == 0) {
+                    continue; // 0-token 行无可计价用量，不进下钻
+                }
+                out.entry("codex/openai".to_string()).or_default().push(
+                    serde_json::json!({
+                        "model": model,
+                        "reason": "no-price-card",
+                        "tokens": g("uncached_input_tokens")
+                            + g("cache_read_tokens")
+                            + g("cache_write_tokens")
+                            + g("output_tokens"),
+                    }),
+                );
+            }
+        }
+    }
+
+    // ── dsh/deepseek-official：month.json 逐日 by_model 聚合 ───────────
+    if let Some(days) = crate::budget::read_month(Some(month)) {
+        let mut by_model: serde_json::Map<String, serde_json::Value> = Default::default();
+        let providers: serde_json::Map<String, serde_json::Value> = Default::default();
+        for day in days.as_object().map(|m| m.values()).into_iter().flatten() {
+            if let Some(bm) = day.get("by_model").and_then(|v| v.as_object()) {
+                for (model, buckets) in bm {
+                    let e = by_model.entry(model.clone()).or_insert(serde_json::json!({
+                        "uncached_input_tokens": 0, "cache_read_tokens": 0,
+                        "cache_write_tokens": 0, "output_tokens": 0,
+                    }));
+                    for k in ["uncached_input_tokens", "cache_read_tokens",
+                              "cache_write_tokens", "output_tokens"] {
+                        let cur = e.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+                        let add = buckets.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+                        e[k] = serde_json::json!(cur + add);
+                    }
+                }
+            }
+        }
+        let usage = serde_json::json!({"by_model": by_model, "providers": providers});
+        let report = agent_vitals_domain::cost::cost_report(&usage, &pricing);
+        let priced: std::collections::HashSet<String> = report
+            .as_ref()
+            .and_then(|r| r.get("per_model"))
+            .and_then(|v| v.as_object())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        for (model, buckets) in &by_model {
+            if priced.contains(model) {
+                continue;
+            }
+            let g0 = |k: &str| buckets.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+            if [g0("uncached_input_tokens"), g0("cache_read_tokens"),
+                g0("cache_write_tokens"), g0("output_tokens")]
+            .iter().all(|&v| v == 0) {
+                continue; // 0-token 行无可计价用量，不进下钻
+            }
+            let reason = match agent_vitals_domain::cost::billing_route_of(model, &pricing) {
+                None => "billing-route-unknown",
+                Some((_, BillingMode::Unknown)) => "billing-mode-unknown",
+                Some(_) => "no-price-card",
+            };
+            let g = |k: &str| buckets.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+            out.entry("dsh/deepseek-official".to_string()).or_default().push(
+                serde_json::json!({
+                    "model": model,
+                    "reason": reason,
+                    "tokens": g("uncached_input_tokens")
+                        + g("cache_read_tokens")
+                        + g("cache_write_tokens")
+                        + g("output_tokens"),
+                }),
+            );
+        }
+    }
+
+    let mut obj = serde_json::Map::new();
+    for (k, rows) in out {
+        obj.insert(k, serde_json::Value::Array(rows));
+    }
+    serde_json::Value::Object(obj)
+}
+
 /// by_provider 的 Codex 条目：`billing_mode_of("openai") = subscription` →
 /// 等价标价口径，与 `codex_host_amount` 的判定同源（那边刚改成查声明）。
 fn codex_provider_amount(

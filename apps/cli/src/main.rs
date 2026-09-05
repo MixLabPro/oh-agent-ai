@@ -484,6 +484,18 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
+    /// Drill into unresolved/unpriced usage per model (completes DoD #4:
+    /// monthly cost split by basis AND drillable to its sources). Groups match
+    /// by_provider keys; reasons: billing-route-unknown / billing-mode-unknown
+    /// / no-price-card / partial-price-basis. Stage B.
+    DataUnresolved {
+        /// Month to inspect ("YYYY-MM"; default: current month)
+        #[arg(long)]
+        month: Option<String>,
+        /// Output as JSON
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
     /// `sessions` row is the join anchor across the three joinable surfaces (spec
@@ -2095,6 +2107,37 @@ session_store={store} fold={fold}"
             Err(e) => {
                 eprintln!("data-reconcile failed: {e}");
                 std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    // data-unresolved（Stage B）：has_unresolved 的逐模型下钻（DoD #4）。
+    if let Some(Cmd::DataUnresolved { month, rows_json }) = &args.cmd {
+        let month = month
+            .clone()
+            .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+        let detail = agent_vitals_runtime::summary::unresolved_detail(&month);
+        if *rows_json {
+            let out = serde_json::json!({"month": month, "providers": detail});
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+        } else {
+            println!("Unresolved usage detail (month {month}):");
+            let mut any = false;
+            for (prov, rows) in detail.as_object().map(|m| m.iter()).into_iter().flatten() {
+                for r in rows.as_array().map(|a| a.iter()).into_iter().flatten() {
+                    any = true;
+                    println!(
+                        "  {:<24} {:<28} {:<22} tokens={}",
+                        prov,
+                        r["model"].as_str().unwrap_or("?"),
+                        r["reason"].as_str().unwrap_or("?"),
+                        r["tokens"],
+                    );
+                }
+            }
+            if !any {
+                println!("  (none — all measured usage is priced and routed)");
             }
         }
         return;
