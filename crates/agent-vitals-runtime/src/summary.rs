@@ -14,6 +14,7 @@ use agent_vitals_data::projection::{
     BillingBasis, DailySummary, Freshness, FreshnessState, HostAmount, MonthlySummary,
 };
 use agent_vitals_data::repository::{DailySummaryQuery, MonthlySummaryQuery, SummaryRepository};
+use agent_vitals_domain::cost::BillingMode;
 
 use crate::clock::{today_beijing, yesterday_beijing};
 
@@ -201,12 +202,25 @@ fn codex_host_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAm
         .max()
         .map(day_freshness)
         .unwrap_or_else(Freshness::unavailable);
+    // basis 由 billing_modes 声明决定（Stage B），不再硬编码 ApiEquivalent：
+    // openai 声明 subscription → 等价标价口径（与硬编码时代结果一致，但依据
+    // 从"写死假设"变成"用户声明"；未来把 codex 切到按量 key 只改声明，这里
+    // 自动落 MeteredActual）。plan 快照（plan_type/credits）**不参与**判定：
+    // 它是"当前状态"的单快照、不按日期分桶（hosts/codex/sessions/usage.rs
+    // 的 doc），拿它判历史窗口本身就是错的——快照与声明的冲突检测留给
+    // Stage E 的证据链。
+    let pricing_main = agent_vitals_domain::cost::load_pricing();
+    let (basis, mode_unknown) = match agent_vitals_domain::cost::billing_mode_of("openai", &pricing_main) {
+        BillingMode::Subscription => (BillingBasis::ApiEquivalent, false),
+        BillingMode::Metered => (BillingBasis::MeteredActual, false),
+        BillingMode::Unknown => (BillingBasis::ApiEquivalent, true),
+    };
     let mut amounts_by_basis = BTreeMap::new();
-    amounts_by_basis.insert(BillingBasis::ApiEquivalent, total);
+    amounts_by_basis.insert(basis, total);
     HostAmount {
         host_id: "codex".to_string(),
         amounts_by_basis,
-        has_unresolved: unpriced > 0,
+        has_unresolved: unpriced > 0 || mode_unknown,
         freshness,
     }
 }
@@ -299,6 +313,212 @@ fn claude_host_amount(window_prefix: &str) -> HostAmount {
     }
 }
 
+/// billing_source 视角的单条目聚合（`by_provider` 的值）：basis → 币种 → 金额
+/// 三层。中间那层币种是跨币防线的落点——同一 provider 条目内若出现两种币
+/// （当前价表不存在：目录卡币种按 provider 固定），金额表整体留空 +
+/// `has_unresolved`，绝不跨币相加。
+struct ProviderAcc {
+    by_basis_currency: BTreeMap<BillingBasis, BTreeMap<String, f64>>,
+    unresolved: bool,
+    latest: Option<String>,
+}
+
+impl ProviderAcc {
+    fn new() -> Self {
+        Self {
+            by_basis_currency: BTreeMap::new(),
+            unresolved: false,
+            latest: None,
+        }
+    }
+
+    fn observe(&mut self, day: &str) {
+        if self.latest.as_deref().map_or(true, |d| d < day) {
+            self.latest = Some(day.to_string());
+        }
+    }
+
+    fn add(&mut self, basis: BillingBasis, currency: &str, amount: f64) {
+        *self
+            .by_basis_currency
+            .entry(basis)
+            .or_default()
+            .entry(currency.to_string())
+            .or_insert(0.0) += amount;
+    }
+
+    fn finish(self, key: &str) -> HostAmount {
+        let mut amounts_by_basis = BTreeMap::new();
+        let mut multi_currency = false;
+        for (basis, cur_map) in self.by_basis_currency {
+            if cur_map.len() > 1 {
+                multi_currency = true;
+                break;
+            }
+            if let Some((_, amount)) = cur_map.iter().next() {
+                if *amount > 0.0 {
+                    amounts_by_basis.insert(basis, *amount);
+                }
+            }
+        }
+        if multi_currency {
+            amounts_by_basis.clear();
+        }
+        HostAmount {
+            host_id: key.to_string(),
+            amounts_by_basis,
+            has_unresolved: self.unresolved || multi_currency,
+            freshness: self
+                .latest
+                .as_deref()
+                .map(day_freshness)
+                .unwrap_or_else(Freshness::unavailable),
+        }
+    }
+}
+
+/// claude-code 窗口 → billing_source 视角（`MonthlySummary.by_provider`，
+/// 键 `"claude-code/<provider>"`）。
+///
+/// **为什么 by_host 做不了这个分流**（`claude_host_amount` 保留旧币种分栏的
+/// 理由）：它先聚合掉模型维度只剩 cny/usd 两个标量，而 `amounts_by_basis`
+/// 一档只有一个数——订阅桶里 anthropic 折 USD、minimax 折 CNY，同桶跨币
+/// 相加就是编造。旧实现因此"用币种当 basis"，把有订阅的 MiniMax 判成
+/// `MeteredEstimate`、没订阅的 moonshot 判成 `ApiEquivalent`（两处真实
+/// 误判，2026-09-05 实测确认）。这里逐模型走 `billing_route_of`（Stage A
+/// 的声明表，无价卡模型 glm-* 也能归属），per-provider 条目币种天然单一：
+/// - **Subscription 声明 → `ApiEquivalent`**：套餐内无边际账单，catalog
+///   折算只作诊断（claude-* → anthropic、MiniMax-M* → minimax、glm-* →
+///   zhipu-glm 全部落这档——**MiniMax 由此从 MeteredEstimate 修正为
+///   ApiEquivalent**）。
+/// - **Metered 声明 → `MeteredEstimate`**（不是 Actual）：deepseek 流经
+///   relay，实收价未核实、relay 报恒定低命中使估算是保守上界（§8.4c 原
+///   口径）——声明说了按量，没说按什么价，估算级别不升。
+/// - **无声明或价卡缺失 → 条目 `has_unresolved`**：glm-* 有声明无价卡、
+///   moonshot/kimi 无声明——看见了 token、钱不可归，不当 0 也不编档。
+///   unpriced 聚合（`claude_day_cost` 只给全日 unpriced 总数、不分模型）
+///   按"当日出现过且 token 非零的无卡模型"逐个归属到各自 provider 条目；
+///   完全无声明的落 `claude-code/unknown`，不吞。
+///
+/// `claude-*` 的混合路由（官方订阅 + 中转按量，2026-09-05 用户确认两者都
+/// 在用）ledger 无法切分——整流按声明落 ApiEquivalent，其与实际用量的矛
+/// 盾由消费方（Stage D 的 >50× 利用率护栏）以「归属待核」告警呈现，不在
+/// 数据层假装裁定。
+fn claude_provider_amounts(window_prefix: &str) -> BTreeMap<String, HostAmount> {
+    let mut accs: BTreeMap<String, ProviderAcc> = BTreeMap::new();
+    let ledger = crate::state::read_json(&crate::sessions::claude_ledger::ledger_path());
+    let days = ledger
+        .as_ref()
+        .and_then(|l| l.get("days"))
+        .and_then(|d| d.as_object())
+        .map(|d| {
+            let mut in_window: Vec<(&String, &serde_json::Value)> = d
+                .iter()
+                .filter(|(k, _)| k.starts_with(window_prefix))
+                .collect();
+            in_window.sort_by(|a, b| a.0.cmp(b.0));
+            in_window
+        })
+        .unwrap_or_default();
+    if days.is_empty() {
+        return accs.into_iter().map(|(k, a)| {
+            let host = a.finish(&k);
+            (k, host)
+        })
+        .collect();
+    }
+    let pricing = agent_vitals_domain::cost::load_pricing();
+    for (date, day) in &days {
+        let Some(models) = day.as_object() else {
+            continue;
+        };
+        let report = agent_vitals_domain::cost::claude_day_cost(day, &pricing);
+        let per_model = report
+            .as_ref()
+            .and_then(|r| r.get("per_model"))
+            .and_then(|v| v.as_object());
+        // 有卡模型的归属与计价：per_model 的每条都是 {currency, total,
+        // pricing_basis, priced_with}。
+        if let Some(per_model) = per_model {
+            for (model, entry) in per_model {
+                let (prov, mode) =
+                    agent_vitals_domain::cost::billing_route_of(model, &pricing).unwrap_or((
+                        "unknown".to_string(),
+                        BillingMode::Unknown,
+                    ));
+                let key = format!("claude-code/{prov}");
+                let acc = accs.entry(key.clone()).or_insert_with(ProviderAcc::new);
+                acc.observe(date);
+                let total = entry.get("total").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let currency = entry
+                    .get("currency")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("CNY");
+                let basis = match mode {
+                    BillingMode::Subscription => Some(BillingBasis::ApiEquivalent),
+                    BillingMode::Metered => Some(BillingBasis::MeteredEstimate),
+                    BillingMode::Unknown => None,
+                };
+                match basis {
+                    Some(b) => acc.add(b, currency, total),
+                    // 声明表不认识的模型有钱也无处归——不冒充任何档。
+                    None => acc.unresolved = true,
+                }
+                if entry.get("pricing_basis").and_then(|v| v.as_str()) == Some("partial") {
+                    acc.unresolved = true;
+                }
+            }
+        }
+        // 无卡模型（不在 per_model 里）：glm-*（有声明无价卡）、moonshot
+        // （无声明）、<synthetic> 等。token 非零才算观测——全零模型不是
+        // 消耗（MeasuredZero ≠ Unavailable 的镜像面）。
+        for (model, tokens) in models {
+            if per_model.map(|pm| pm.contains_key(model)).unwrap_or(false) {
+                continue;
+            }
+            let total_tok: f64 = ["input_tokens", "cache_read_input_tokens",
+                "cache_creation_input_tokens", "output_tokens"]
+                .iter()
+                .map(|k| tokens.get(*k).and_then(|v| v.as_f64()).unwrap_or(0.0))
+                .sum();
+            if total_tok <= 0.0 {
+                continue;
+            }
+            let (prov, _) = agent_vitals_domain::cost::billing_route_of(model, &pricing)
+                .unwrap_or(("unknown".to_string(), BillingMode::Unknown));
+            let key = format!("claude-code/{prov}");
+            let acc = accs.entry(key).or_insert_with(ProviderAcc::new);
+            acc.observe(date);
+            acc.unresolved = true;
+        }
+    }
+    accs.into_iter().map(|(k, a)| {
+            let host = a.finish(&k);
+            (k, host)
+        })
+        .collect()
+}
+
+/// by_provider 的 DSH 条目：声明表里 deepseek-official = metered，官方逐
+/// token 价是真实费率——与 `dsh_host_amount` 的 MeteredActual 判定一致，
+/// 条目即宿主条目的镜像（Host = BillingSource 的宿主，键换名片）。
+fn dsh_provider_amount(
+    cost: Option<serde_json::Value>,
+    latest_day: Option<&str>,
+) -> HostAmount {
+    let mut h = dsh_host_amount(cost, latest_day);
+    h.host_id = "dsh/deepseek-official".to_string();
+    h
+}
+
+/// by_provider 的 Codex 条目：`billing_mode_of("openai") = subscription` →
+/// 等价标价口径，与 `codex_host_amount` 的判定同源（那边刚改成查声明）。
+fn codex_provider_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAmount {
+    let mut h = codex_host_amount(home, filter_key, day);
+    h.host_id = "codex/openai".to_string();
+    h
+}
+
 
 /// `days` map 里最晚的日期键（"YYYY-MM-DD" 字符串序等价于日期序）。
 fn latest_day_key(days: &serde_json::Value) -> Option<String> {
@@ -316,21 +536,34 @@ impl SummaryRepository for JsonSummaryRepository {
         let days = crate::budget::read_month(Some(&query.month));
         let cost = crate::budget::compute_month(Some(&query.month));
         let latest_day = days.as_ref().and_then(latest_day_key);
-        by_host.insert("dsh".to_string(), dsh_host_amount(cost, latest_day.as_deref()));
-        by_host.insert(
-            "codex".to_string(),
-            codex_host_amount(&codex_home(), &query.month, None),
-        );
+        let dsh_amount = dsh_host_amount(cost.clone(), latest_day.as_deref());
+        by_host.insert("dsh".to_string(), dsh_amount);
+        let codex_amount = codex_host_amount(&codex_home(), &query.month, None);
+        by_host.insert("codex".to_string(), codex_amount);
         by_host.insert(
             "claude-code".to_string(),
             claude_host_amount(&query.month),
         );
+
+        // billing_source 视角（Stage B）：DSH/Codex 宿主单一提供方，条目即
+        // 宿主条目换键；claude-code 宿主内多提供方，逐模型分流。
+        let mut by_provider = BTreeMap::new();
+        by_provider.insert(
+            "dsh/deepseek-official".to_string(),
+            dsh_provider_amount(cost, latest_day.as_deref()),
+        );
+        by_provider.insert(
+            "codex/openai".to_string(),
+            codex_provider_amount(&codex_home(), &query.month, None),
+        );
+        by_provider.extend(claude_provider_amounts(&query.month));
 
         let freshness = aggregate_freshness(&by_host);
         let last_observed_at = freshness.last_observed_at.clone();
         MonthlySummary {
             month: query.month.clone(),
             by_host,
+            by_provider,
             coverage: agent_vitals_data::projection::CoverageStatus {
                 measured_fields: WIRED_HOSTS.len() as u64,
                 total_fields: (WIRED_HOSTS.len() + NOT_YET_WIRED_HOSTS.len()) as u64,
@@ -356,7 +589,7 @@ impl SummaryRepository for JsonSummaryRepository {
         let mut by_host = BTreeMap::new();
         by_host.insert(
             "dsh".to_string(),
-            dsh_host_amount(cost, day_value.map(|_| query.date.as_str())),
+            dsh_host_amount(cost.clone(), day_value.map(|_| query.date.as_str())),
         );
         // 日切片：过滤键 = 完整日期，金额取该日行（untimed 不混进某一天）。
         by_host.insert(
@@ -369,11 +602,25 @@ impl SummaryRepository for JsonSummaryRepository {
             claude_host_amount(&query.date),
         );
 
+        // billing_source 视角（Stage B）：日粒度只装按量/等价折算流——
+        // 订阅月费不是日发生额，不摊（Stage C 的纪律，写在这里防前移）。
+        let mut by_provider = BTreeMap::new();
+        by_provider.insert(
+            "dsh/deepseek-official".to_string(),
+            dsh_provider_amount(cost, day_value.map(|_| query.date.as_str())),
+        );
+        by_provider.insert(
+            "codex/openai".to_string(),
+            codex_provider_amount(&codex_home(), &query.date, Some(&query.date)),
+        );
+        by_provider.extend(claude_provider_amounts(&query.date));
+
         let freshness = aggregate_freshness(&by_host);
         let last_observed_at = freshness.last_observed_at.clone();
         DailySummary {
             date: query.date.clone(),
             by_host,
+            by_provider,
             coverage: agent_vitals_data::projection::CoverageStatus {
                 measured_fields: WIRED_HOSTS.len() as u64,
                 total_fields: (WIRED_HOSTS.len() + NOT_YET_WIRED_HOSTS.len()) as u64,
@@ -622,6 +869,111 @@ mod tests {
             let miss_day = claude_host_amount("2026-09-03");
             assert!(miss_day.amounts_by_basis.is_empty());
             assert_eq!(miss_day.freshness.state, FreshnessState::Unavailable);
+        });
+    }
+
+    /// Stage B 的核心回归——billing_mode 分流修正两处真实误判：
+    /// - MiniMax-M3 **有订阅**（minimax-sub ¥114/月），旧币种分支把它判成
+    ///   `MeteredEstimate`（按量估算）——by_provider 必须落 `ApiEquivalent`；
+    /// - glm-5.3-flash **有声明无价卡**（zhipu-glm subscription，catalog 无
+    ///   卡）——条目 `has_unresolved`、金额表留空，不当 0 也不借卡；
+    /// - claude-opus-5 → anthropic subscription → `ApiEquivalent`（与旧币种
+    ///   分支结果一致，但依据从币种变成声明）；
+    /// - deepseek-v4-flash → deepseek-official metered → `MeteredEstimate`
+    ///   （relay 实收价未核实，估算级别不升）。
+    #[test]
+    fn claude_provider_amounts_split_by_billing_mode_declaration() {
+        with_home(|| {
+            write_ledger(json!({
+                "claude-opus-5": {"input_tokens": 1_000_000,
+                                  "cache_read_input_tokens": 0,
+                                  "cache_creation_input_tokens": 0,
+                                  "output_tokens": 100_000},
+                "MiniMax-M3": {"input_tokens": 2_000_000,
+                               "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0,
+                               "output_tokens": 200_000},
+                "glm-5.3-flash": {"input_tokens": 500_000,
+                                  "cache_read_input_tokens": 0,
+                                  "cache_creation_input_tokens": 0,
+                                  "output_tokens": 50_000},
+                "deepseek-v4-flash": {"input_tokens": 3_000_000,
+                                      "cache_read_input_tokens": 0,
+                                      "cache_creation_input_tokens": 0,
+                                      "output_tokens": 300_000},
+            }));
+            let by_provider = claude_provider_amounts("2026-09");
+            assert!(by_provider.contains_key("claude-code/anthropic"), "{:?}", by_provider.keys());
+            assert!(by_provider["claude-code/anthropic"].amounts_by_basis
+                .contains_key(&BillingBasis::ApiEquivalent));
+            // MiniMax 修正回归：订阅声明 → ApiEquivalent，绝不落 MeteredEstimate。
+            assert!(by_provider["claude-code/minimax"].amounts_by_basis
+                .contains_key(&BillingBasis::ApiEquivalent), "{:?}", by_provider["claude-code/minimax"]);
+            assert!(!by_provider["claude-code/minimax"].amounts_by_basis
+                .contains_key(&BillingBasis::MeteredEstimate));
+            assert!(!by_provider["claude-code/minimax"].has_unresolved);
+            // glm：有声明无价卡 → 有 token 无钱，unresolved 不归零。
+            let glm = &by_provider["claude-code/zhipu-glm"];
+            assert!(glm.has_unresolved, "{:?}", glm);
+            assert!(glm.amounts_by_basis.is_empty(), "无价卡不得借卡计价: {:?}", glm.amounts_by_basis);
+            assert!(glm.freshness.last_observed_at.is_some(), "观测到了 token，freshness 照报");
+            // deepseek：metered 声明 → MeteredEstimate（relay 上界口径）。
+            assert!(by_provider["claude-code/deepseek-official"].amounts_by_basis
+                .contains_key(&BillingBasis::MeteredEstimate));
+            // 无 unknown 条目：四个模型都有声明归属。
+            assert!(!by_provider.contains_key("claude-code/unknown"), "{:?}", by_provider.keys());
+        });
+    }
+
+    /// 完全无声明的模型落 `claude-code/unknown`（不吞）：unpriced 聚合按
+    /// 逐模型归属不到声明表 → unknown 条目收留，观测与 unresolved 都在。
+    #[test]
+    fn claude_provider_amounts_unknown_declaration_goes_to_unknown_entry() {
+        with_home(|| {
+            write_ledger(json!({
+                "mystery-model": {"input_tokens": 500_000,
+                                  "cache_read_input_tokens": 0,
+                                  "cache_creation_input_tokens": 0,
+                                  "output_tokens": 50_000},
+            }));
+            let by_provider = claude_provider_amounts("2026-09");
+            let unk = &by_provider["claude-code/unknown"];
+            assert!(unk.has_unresolved);
+            assert!(unk.amounts_by_basis.is_empty());
+            assert_eq!(unk.freshness.last_observed_at.as_deref(), Some("2026-09-02T00:00:00Z"));
+        });
+    }
+
+    /// 组装层：monthly summary 的 by_provider 必含三个宿主的 provider 条目、
+    /// 不含 workbuddy（excluded 检查双向成立）、contract_violations 为空、
+    /// by_host 与 by_provider 互不串扰。
+    #[test]
+    fn monthly_summary_fills_by_provider_without_contract_violations() {
+        with_home(|| {
+            let repo = JsonSummaryRepository;
+            let summary =
+                repo.monthly_summary(&MonthlySummaryQuery { month: crate::clock::current_month_beijing() });
+            assert!(summary.contract_violations().is_empty(), "{:?}", summary.contract_violations());
+            assert!(summary.by_provider.contains_key("dsh/deepseek-official"), "{:?}", summary.by_provider.keys());
+            assert!(summary.by_provider.contains_key("codex/openai"));
+            // DSH 条目与宿主条目同额同档（同一 provider 镜像）。
+            let dsh_host = &summary.by_host["dsh"];
+            let dsh_prov = &summary.by_provider["dsh/deepseek-official"];
+            assert_eq!(dsh_host.amounts_by_basis, dsh_prov.amounts_by_basis);
+            // excluded 宿主不得出现在 by_provider（键的宿主部分）。
+            assert!(summary
+                .by_provider
+                .keys()
+                .all(|k| k.split('/').next() != Some("workbuddy")));
+            // by_provider 的条目不回灌 total_summable（总额仍只按 by_host 算，
+            // 否则同一笔钱进两次——month.json 三倍计数事故的结构镜像）。
+            let via_host = summary.total_summable();
+            let host_only_sum: f64 = summary.by_host.values()
+                .map(|h| h.amounts_by_basis.iter()
+                    .filter(|(b, _)| b.summable_into_total())
+                    .map(|(_, v)| v).sum::<f64>())
+                .sum();
+            assert_eq!(via_host, host_only_sum);
         });
     }
 

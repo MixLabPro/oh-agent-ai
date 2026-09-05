@@ -245,6 +245,17 @@ pub struct MonthlySummary {
     /// "YYYY-MM"。
     pub month: String,
     pub by_host: BTreeMap<String, HostAmount>,
+    /// **billing_source 视角**（ATTRIBUTABLE_WASTE §6.3「Host ≠
+    /// BillingSource」的 DTO 落地）：键 `"host/provider"`，每个实际收费方
+    /// 一条。为什么 by_host 装不下这个视角：`HostAmount.amounts_by_basis`
+    /// 是 `BTreeMap<BillingBasis, f64>`，一个 basis 只有一个数——claude-code
+    /// 的订阅桶里 anthropic 折 USD、minimax 折 CNY，同桶跨币相加就是编造
+    /// （2026-09-05 实测逼出的结构缺陷，此前只能用"币种当 basis"的权协，
+    /// 把有订阅的 MiniMax 判成 MeteredEstimate、没订阅的 moonshot 判成
+    /// ApiEquivalent）。per-provider 条目币种天然单一，basis 就是真计费
+    /// 模式（经 `billing_modes` 声明解析）。**权威归属看这里**；`by_host`
+    /// 保留宿主视角的币种分栏（既有冻结口径，托盘/数据源 panel 在读）。
+    pub by_provider: BTreeMap<String, HostAmount>,
     pub coverage: CoverageStatus,
     pub freshness: Freshness,
     /// 已知存在但本版本不产出数据的宿主（例如 WorkBuddy 在 v0.9 Stage 0
@@ -285,12 +296,27 @@ impl MonthlySummary {
                      不能同时贡献数据，那不是排除，是遗漏"
                 ));
             }
+            // by_provider 键形如 "host/provider"：宿主部分被排除却仍有
+            // provider 条目，同一条排除语义的漏网面。
+            if self
+                .by_provider
+                .keys()
+                .any(|k| k.split('/').next() == Some(host.as_str()))
+            {
+                violations.push(format!(
+                    "excluded_hosts 包含 {host}，但 by_provider 里仍有它的条目——\
+                     排除的宿主不能同时贡献数据，那不是排除，是遗漏"
+                ));
+            }
         }
 
         self.coverage.contract_violations(&mut violations, "coverage");
         self.freshness.contract_violations(&mut violations, "freshness");
         for host_amount in self.by_host.values() {
             host_amount.contract_violations(&mut violations);
+        }
+        for provider_amount in self.by_provider.values() {
+            provider_amount.contract_violations(&mut violations);
         }
 
         violations
@@ -299,9 +325,15 @@ impl MonthlySummary {
     pub fn to_json(&self) -> Value {
         let by_host: serde_json::Map<String, Value> =
             self.by_host.iter().map(|(id, amount)| (id.clone(), amount.to_json())).collect();
+        let by_provider: serde_json::Map<String, Value> = self
+            .by_provider
+            .iter()
+            .map(|(id, amount)| (id.clone(), amount.to_json()))
+            .collect();
         json!({
             "month": self.month,
             "by_host": Value::Object(by_host),
+            "by_provider": Value::Object(by_provider),
             "total_summable": self.total_summable(),
             "has_unresolved": self.has_unresolved(),
             "coverage": self.coverage.to_json(),
@@ -320,6 +352,11 @@ pub struct DailySummary {
     /// "YYYY-MM-DD"。
     pub date: String,
     pub by_host: BTreeMap<String, HostAmount>,
+    /// billing_source 视角，键 `"host/provider"`——与 [`MonthlySummary::
+    /// by_provider`] 同一结构同一理由（宿主内多提供方多币种，per-provider
+    /// 条目才是干净归属）。月费摊销**不进日粒度**（订阅费不是日发生额），
+    /// 这里只装按量/等价折算流。
+    pub by_provider: BTreeMap<String, HostAmount>,
     pub coverage: CoverageStatus,
     pub freshness: Freshness,
     pub excluded_hosts: BTreeSet<String>,
@@ -345,11 +382,24 @@ impl DailySummary {
                      不能同时贡献数据，那不是排除，是遗漏"
                 ));
             }
+            if self
+                .by_provider
+                .keys()
+                .any(|k| k.split('/').next() == Some(host.as_str()))
+            {
+                violations.push(format!(
+                    "excluded_hosts 包含 {host}，但 by_provider 里仍有它的条目——\
+                     排除的宿主不能同时贡献数据，那不是排除，是遗漏"
+                ));
+            }
         }
         self.coverage.contract_violations(&mut violations, "coverage");
         self.freshness.contract_violations(&mut violations, "freshness");
         for host_amount in self.by_host.values() {
             host_amount.contract_violations(&mut violations);
+        }
+        for provider_amount in self.by_provider.values() {
+            provider_amount.contract_violations(&mut violations);
         }
         violations
     }
@@ -357,9 +407,15 @@ impl DailySummary {
     pub fn to_json(&self) -> Value {
         let by_host: serde_json::Map<String, Value> =
             self.by_host.iter().map(|(id, amount)| (id.clone(), amount.to_json())).collect();
+        let by_provider: serde_json::Map<String, Value> = self
+            .by_provider
+            .iter()
+            .map(|(id, amount)| (id.clone(), amount.to_json()))
+            .collect();
         json!({
             "date": self.date,
             "by_host": Value::Object(by_host),
+            "by_provider": Value::Object(by_provider),
             "total_summable": self.total_summable(),
             "coverage": self.coverage.to_json(),
             "freshness": self.freshness.to_json(),
@@ -412,6 +468,7 @@ mod tests {
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
             by_host: BTreeMap::from([("dsh".to_string(), empty)]),
+            by_provider: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: Freshness::unavailable(),
             excluded_hosts: BTreeSet::new(),
@@ -467,6 +524,7 @@ mod tests {
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
             by_host,
+            by_provider: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T00:00:00Z"),
             excluded_hosts: BTreeSet::new(),
@@ -485,6 +543,7 @@ mod tests {
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
             by_host,
+            by_provider: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T00:00:00Z"),
             excluded_hosts,
@@ -504,6 +563,7 @@ mod tests {
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
             by_host: BTreeMap::new(),
+            by_provider: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: bad,
             excluded_hosts: BTreeSet::new(),
@@ -530,6 +590,7 @@ mod tests {
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
             by_host: BTreeMap::new(),
+            by_provider: BTreeMap::new(),
             coverage: bad,
             freshness: Freshness::unavailable(),
             excluded_hosts: BTreeSet::new(),
@@ -546,6 +607,7 @@ mod tests {
         let summary = DailySummary {
             date: "2026-09-04".to_string(),
             by_host,
+            by_provider: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T12:00:00Z"),
             excluded_hosts: BTreeSet::new(),
@@ -567,6 +629,7 @@ mod tests {
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
             by_host,
+            by_provider: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T00:00:00Z"),
             excluded_hosts,
