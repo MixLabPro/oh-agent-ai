@@ -1017,3 +1017,19 @@ button.chip.active {
   background: #f4f6fb; font-size: 12px; }
 /* Stage D：日历格子副行（该日耗费，分宿主分币并列——口径各异不相加）。 */
 .cal-cell .cost { font-size: 10px; color: var(--text-2, #778); margin-top: 2px; }
+
+/* ---------- 审查 CODE_REVIEW_V0_9_WORKBENCH_UX 修复 ---------- */
+/* #2 本月结论行：一个结论回答"这个月要付多少"，视觉权重视觉高于单 tile。 */
+.verdict { padding: 8px 12px; margin-bottom: 10px; border-radius: 8px;
+  background: rgba(46, 78, 168, 0.18); border-left: 3px solid #2c4ea8;
+  font-size: 14px; }
+.verdict strong { font-size: 16px; }
+.verdict .verdict-note { color: var(--muted); font-size: 12px; margin-left: 8px; }
+/* #8 未来日：降透明度，与"发生过但没测到"区分。 */
+.cal-cell.future { opacity: 0.35; }
+/* #4 summable 恒 0 时降级行内灰字（原浅底大盒在暗主题像错误横幅）。 */
+.src-meta .summable-zero { color: var(--muted); font-size: 12px; padding: 6px 8px; }
+/* #9 unavailable/降级状态是最新对比度、最需要看清的状态：给足底色与亮字。 */
+.src-list li.no-data { background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px; color: var(--text-1, #dde3ee); }
+.src-list li.no-data .chip { color: #cfd6e4; border-color: #4a5468; }

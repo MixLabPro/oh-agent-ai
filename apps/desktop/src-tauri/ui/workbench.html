@@ -25,6 +25,10 @@
   <main class="wb-main">
     <!-- ============ 总览 ============ -->
     <section id="tab-overview" class="tabpane active">
+      <!-- 本月结论行（审查 UX#2）：页面上四个金额口径并列时，用户没有工具
+           知道哪一个回答"我这个月要付多少"——把四个数字变成一个结论 + 下方
+           展开。由 renderOverview 用 data_monthly_summary 填充。 -->
+      <div class="verdict" id="ov-month-verdict" hidden></div>
       <!-- v0.9 Stage D KPI 行（今日五 tile，ATTRIBUTABLE_WASTE §6/§6.7 感知层）。
            数据源 = data_daily_summary（冻结 DTO：tokens_by_host + by_provider +
            total_actual_spend）。名义 = 官方标价折算（不扣订阅/中转折扣，"名义
@@ -36,8 +40,8 @@
           <div class="amount" id="ov-t-tokens">—</div>
           <div class="sub" id="ov-t-tokens-sub"></div>
         </div>
-        <div class="stat today">
-          <div class="label">今日名义成本</div>
+        <div class="stat nominal">
+          <div class="label">今日名义成本 <span class="chip diagnostic">标价口径 · 非账单</span></div>
           <div class="amount" id="ov-t-nominal">—</div>
           <div class="sub" id="ov-t-nominal-sub">@官方标价 · 不扣套餐/折扣</div>
         </div>
@@ -46,7 +50,7 @@
           <div class="amount" id="ov-t-unit">—</div>
           <div class="sub" id="ov-t-unit-sub"></div>
         </div>
-        <div class="stat">
+        <div class="stat today">
           <div class="label">今日实际支出</div>
           <div class="amount" id="ov-t-actual">—</div>
           <div class="sub" id="ov-t-actual-sub"></div>

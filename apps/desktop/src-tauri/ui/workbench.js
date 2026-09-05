@@ -333,9 +333,13 @@ function nominalFromByProvider(byProvider) {
   return out;
 }
 function fmtCurMap(m) {
-  const parts = Object.entries(m || {}).filter(([, v]) => v > 0)
+  // 币序统一：CNY 优先（中文语境 + 主要支出是 ¥），USD 次之，其余币种按
+  // 键序殿后——审查 #5：此前名义按插入序、实际按 Rust BTreeMap 序、日历头
+  // 写死序，同一屏三种 $/¥ 排列。
+  const rank = (c) => (c === "CNY" ? 0 : c === "USD" ? 1 : 2);
+  return Object.entries(m || {}).filter(([, v]) => v > 0)
+    .sort((a, b) => rank(a[0]) - rank(b[0]) || (a[0] < b[0] ? -1 : 1))
     .map(([c, v]) => fmtCur(v, c || null));
-  return parts;
 }
 function tokensSum(tokensByHost) {
   let unc = 0, read = 0, write = 0, out = 0, total = 0;
@@ -374,6 +378,7 @@ async function renderOverview() {
     document.getElementById("ov-note").textContent =
       "跨宿主数据读取失败：" + errText(e);
   }
+  renderMonthVerdict(monthly);
   renderKpiRow("t", daily);
   renderKpiRow("m", monthly);
   renderDualTrack(monthly);
@@ -531,6 +536,24 @@ async function renderOverview() {
 
 // ---------- Stage D KPI 行 / 双轨账 / 决策卡 ----------
 
+// 本月结论（审查 UX#2）：一个结论回答"这个月要付多少"，其余口径降为明细。
+// 空实付 → 整行隐藏（不渲染一句空的结论占位）。
+function renderMonthVerdict(monthly) {
+  const el = document.getElementById("ov-month-verdict");
+  if (!el) return;
+  const act = fmtCurMap((monthly || {}).total_actual_spend);
+  if (!act.length) { el.hidden = true; return; }
+  el.hidden = false;
+  const subFees = [];
+  for (const h of Object.values((monthly || {}).by_provider || {})) {
+    const fee = (h.amounts_by_basis || {}).fixed_subscription || 0;
+    if (fee > 0) subFees.push(fmtCur(fee, h.currency));
+  }
+  el.innerHTML = "<strong>本月实付 " + act.join(" + ") + "</strong>" +
+    (subFees.length ? "（含订阅月费 " + subFees.join(" + ") + "）" : "") +
+    '<span class="verdict-note">名义/估算数字仅作诊断，不计账单——明细见下。</span>';
+}
+
 // 前缀 t = 今日（daily DTO）、m = 本月（monthly DTO）。全部 tile 的诚实规则：
 // 无数据渲染「无数据」，绝不渲染 0；金额一律带币种（by_provider 条目有
 // currency，写符号不再是编造）；unresolved 不冒充任何金额。
@@ -552,8 +575,14 @@ function renderKpiRow(prefix, dto) {
   const tk = tokensSum(dto.tokens_by_host);
   const nominal = nominalFromByProvider(dto.by_provider);
   const actual = dto.total_actual_spend || {};
+  // #16：巨大 token 数给参照——月度带附本月日均（按今天日号折算）。
+  const dayOfMonth = Number(beijingToday().slice(8)) || 1;
   set("tokens", tk.total > 0 ? fmtTokens(tk.total) : "无数据",
-      tk.total > 0 ? "processed（四桶和）" : "");
+      tk.total > 0
+        ? (prefix === "m"
+            ? "已处理 token（含缓存读写）· 本月日均 " + fmtTokens(Math.round(tk.total / dayOfMonth))
+            : "已处理 token（含缓存读写）")
+        : "");
   // 名义：官方标价折算之和（分币并列）。cache_write 档位假设必须可见
   // （1hr/5min 差额占名义总额 5.2%，会话日志不记录实际 TTL——假设不是观测）。
   const nomParts = fmtCurMap(nominal);
@@ -565,11 +594,16 @@ function renderKpiRow(prefix, dto) {
     set("unit",
       fmtCur(Object.entries(nominal).reduce((a, [c, v]) => a + v, 0) / tk.total * 1e6, "USD") + "/M · 名义",
       "跨币暂未折算：按 USD 桶计（见月度带副行）");
-    const actualSum = Object.entries(actual).reduce((a, [, v]) => a + v, 0);
-    // 副行两段并写（审查 #3：此前先写"跨币暂未折算"又被本行覆写，唯一披露
-    // 混币口径的文案是死代码）。跨币暂未折算必须可见，不装精确。
+    // 实际/M 按币分列，不做跨币求和（审查 #1：空 map 求和得 0 → 副行渲染
+    // "实际 0.00（币种未声明）/M"，与实际 tile 的「无数据」同屏互斥——双标；
+    // 审查 UX#3：混币相加标单一符号是编造）。无实付条目 → 诚实话术。
+    const actPerM = fmtCurMap(Object.fromEntries(
+      Object.entries(actual).map(([c, v]) => [c, v / tk.total * 1e6])
+    )).map((x) => x + "/M");
     document.getElementById(`ov-${prefix}-unit-sub`).textContent =
-      "跨币未折算 · 实际 " + fmtCur(actualSum / tk.total * 1e6, null) + "/M";
+      actPerM.length
+        ? "跨币未折算 · 实际 " + actPerM.join(" + ")
+        : "账单级实付：无（订阅内 + 未出账）";
   } else {
     set("unit", "无数据");
   }
@@ -579,7 +613,7 @@ function renderKpiRow(prefix, dto) {
       actParts.length ? "按量实付 + 订阅月费（分币）" : "");
   set("cache",
     tk.hit != null ? (tk.hit * 100).toFixed(1) + "%" : "无数据",
-    tk.hit != null ? "跨宿主 · 命中决定缓存价占比" : "");
+    tk.hit != null ? (tk.hit * 100).toFixed(1) + "% 的输入走了缓存价（跨宿主）" : "");
 }
 
 // 双轨账：订阅轨（fixed_subscription 条目，利用率 = 标价折算 ÷ 月费）+
@@ -620,13 +654,13 @@ function renderDualTrack(monthly) {
     // 无标价折算（glm 有月费无价卡）→ mult null：保留 unresolved 提示，
     // 不让订阅轨的行看起来"一切正常"。
     const util = h.has_unresolved
-      ? ' <span class="chip hostbilled">含未定价 tokens · 待补价卡</span>'
+      ? ' <span class="chip hostbilled">含未定价 tokens · 部分用量暂无法估价</span>'
       : mult == null ? "" :
       mult > 50
         ? ` <span class="chip diagnostic">⚠ 归属待核（${mult.toFixed(0)}× 与用量矛盾）</span>`
         : mult < 0.5
           ? ` <span class="chip estimate">⚠ 没用够（${mult.toFixed(2)}×）</span>`
-          : ` <span class="chip measured">值 ${mult.toFixed(1)}×</span>`;
+          : ` <span class="chip measured">值回月费 ${mult.toFixed(1)}×</span>`;
     li("", `<span class="src-name">${label}</span>
       <span class="basis"><span class="chip subscription">月费 ${fmtCur(fee, h.currency)}</span>${util}</span>`);
   }
@@ -642,7 +676,7 @@ function renderDualTrack(monthly) {
   if (unresolved.length) li("", `<span class="dual-track">不可归档</span>`);
   for (const [key, h, label] of unresolved) {
     li("", `<span class="src-name">${label}</span>
-      <span class="basis">${h.has_unresolved ? '<span class="chip hostbilled">含未定价 tokens · 待补价卡/声明</span>' : '<span class="chip">无数据</span>'}</span>`);
+      <span class="basis">${h.has_unresolved ? '<span class="chip hostbilled">含未定价 tokens · 部分用量暂无法估价</span>' : '<span class="chip">无数据</span>'}</span>`);
   }
 }
 
@@ -831,7 +865,7 @@ function renderSourcesPanel(dto, prefix) {
           const t = document.createElement("span");
           t.className = "unresolved-tag";
           t.textContent = "含未定价 tokens";
-          t.title = "看见了 token 但价目表认不出模型/卡——金额表留空 + 该标记；既不当 0 也不当没测（spec §4 unresolved 不得归零）";
+          t.title = "看见了 token 但价目表认不出模型——部分用量暂无法估价，不计 0 也不算没测";
           basisEl.appendChild(t);
         }
       }
@@ -851,7 +885,7 @@ function renderSourcesPanel(dto, prefix) {
   const cov = dto.coverage || { measured_fields: 0, total_fields: 0, denominator_version: 1 };
   const covLine = document.createElement("div");
   covLine.textContent = "数据覆盖 " + cov.measured_fields + "/" + cov.total_fields +
-    "（分母 v" + cov.denominator_version + "）";
+"";
   meta.appendChild(covLine);
 
   const excluded = dto.excluded_hosts || [];
@@ -868,14 +902,20 @@ function renderSourcesPanel(dto, prefix) {
   const anyData = keys.some((k) => (byHost[k].freshness || {}).state !== "unavailable");
   const sumLine = document.createElement("div");
   sumLine.className = "summable" + (anyData ? "" : " no-data");
-  if (anyData) {
-    sumLine.textContent = "可汇总总额 " + summable.toFixed(2);
+  if (anyData && summable > 0) {
+    sumLine.textContent = "账单级实付 " + fmtCur(summable, "CNY");
     const note = document.createElement("span");
     note.className = "note";
-    note.textContent = "估算与套餐等价值不计入（spec §4：estimate/api_equivalent 不冒充真实账单）";
+    note.textContent = "估算与套餐等价值不计入账单";
     sumLine.appendChild(note);
+  } else if (anyData) {
+    // 审查 UX#4：DSH stale（非 unavailable）但 summable 恒 0 时渲染大号
+    // "0.00" 浅色盒，与头部 ¥580+$1497 同屏对撞，读起来像"钱没了"。降级
+    // 为行内灰字说明白"为什么是 0"。
+    sumLine.className = "summable-zero";
+    sumLine.textContent = "账单级实付：无（当月各家均为估算/套餐等价口径，或数据过期，未出账单）";
   } else {
-    sumLine.textContent = "可汇总总额：无数据";
+    sumLine.textContent = "账单级实付：无数据";
     const note = document.createElement("span");
     note.className = "note";
     note.textContent = "全部宿主 unavailable；spec §0.1 不得渲染为 ¥0 或看似完整的总额";
@@ -987,6 +1027,11 @@ async function renderCalendar() {
   const lead = new Date(y, m - 1, 1).getDay();
   const dim = new Date(y, m, 0).getDate();
   const today = beijingToday();
+  // DSH 的最后观测日（月级，来自 data_monthly_summary.by_host.dsh）——过期时
+  // 格子 tooltip 说明 ¥ 段缺席的含义（审查 UX#7）。
+  const dshRow = calSourcesDto && calSourcesDto.by_host && calSourcesDto.by_host.dsh;
+  const dshStale = dshRow && dshRow.freshness.state === "stale"
+    ? (dshRow.freshness.last_observed_at || "").slice(0, 10) : null;
 
   for (let i = 0; i < lead; i++) {
     const c = document.createElement("div");
@@ -1001,13 +1046,13 @@ async function renderCalendar() {
     const dayTokens = row ? (row.total_tokens || 0) : 0;
     if (dayTokens > 0) {
       cell.classList.add("has-data");
-      // 副行：该日耗费，分宿主分币并列（口径各异——DSH 实测 / claude relay
-      // 估算 / codex 等价标价——绝不相加成一个"当日总成本"）。
+      // 副行：该日耗费，每段带宿主短前缀（审查 UX#6——三段无宿主的钱串只能
+      // 靠页脚图例反推，全 USD 时连顺序锚都没有）。口径各异不相加。
       const costs = [];
-      if ((row.dsh_cost_cny || 0) > 0) costs.push(fmtCur(row.dsh_cost_cny, "CNY"));
-      if ((row.claude_cost_cny || 0) > 0) costs.push(fmtCur(row.claude_cost_cny, "CNY"));
-      if ((row.claude_cost_usd || 0) > 0) costs.push(fmtCur(row.claude_cost_usd, "USD"));
-      if ((row.codex_cost_usd || 0) > 0) costs.push(fmtCur(row.codex_cost_usd, "USD"));
+      if ((row.dsh_cost_cny || 0) > 0) costs.push("DSH " + fmtCur(row.dsh_cost_cny, "CNY"));
+      if ((row.claude_cost_cny || 0) > 0) costs.push("CC " + fmtCur(row.claude_cost_cny, "CNY"));
+      if ((row.claude_cost_usd || 0) > 0) costs.push("CC " + fmtCur(row.claude_cost_usd, "USD"));
+      if ((row.codex_cost_usd || 0) > 0) costs.push("CX " + fmtCur(row.codex_cost_usd, "USD"));
       const day = document.createElement("div");
       day.className = "d";
       day.textContent = String(d);
@@ -1022,11 +1067,15 @@ async function renderCalendar() {
         cost.textContent = costs.join(" + ");
         cell.appendChild(cost);
       }
+      // tooltip：token 与耗费都按宿主逐行（审查 UX#6：耗费行此前是同一串
+      // 无宿主的 costs）；DSH 过期期间显式说明 ¥ 段缺席 = 未测到（UX#7）。
       cell.title =
-        "DSH " + fmtTokens(row.dsh_tokens || 0) +
-        " · Claude " + fmtTokens(row.claude_tokens || 0) +
-        " · Codex " + fmtTokens(row.codex_tokens || 0) +
-        (costs.length ? "\n耗费（分口径）：" + costs.join(" + ") : "");
+        "DSH " + fmtTokens(row.dsh_tokens || 0) + "（" + fmtCur(row.dsh_cost_cny, "CNY") + "）" +
+        "\nClaude " + fmtTokens(row.claude_tokens || 0) + "（" +
+        [fmtCur(row.claude_cost_cny, "CNY"), fmtCur(row.claude_cost_usd, "USD")].join(" + ") + "）" +
+        "\nCodex " + fmtTokens(row.codex_tokens || 0) + "（" + fmtCur(row.codex_cost_usd, "USD") + "）" +
+        "\n耗费口径：DSH 实测 / Claude relay 估算 / Codex 等价标价，不相加" +
+        (dshStale ? "\n⚠ DSH 数据过期（最后观测 " + dshStale + "）：¥ 段缺席 = 未测到，非零支出" : "");
     } else {
       const day = document.createElement("div");
       day.className = "d";
@@ -1034,6 +1083,9 @@ async function renderCalendar() {
       cell.appendChild(day);
     }
     if (date === today) cell.classList.add("today");
+    // 审查 UX#8：未来日与"没测到"同款渲染，用户无法区分"还没发生"和
+    // "发生过但没测到"——未来日降透明度，不参与无数据解读。
+    if (date > today) cell.classList.add("future");
     grid.appendChild(cell);
   }
   document.getElementById("cal-note").textContent =

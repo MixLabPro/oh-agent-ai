@@ -77,7 +77,8 @@ const daily = {
 };
 sandbox.renderKpiRow("t", daily);
 ok(num("ov-t-tokens") === "1.50B", `tokens 四桶跨宿主合计（got ${num("ov-t-tokens")}）`);
-ok(/^\$[\d.]+/.test(num("ov-t-nominal")), `名义主行是 USD 分栏（got ${num("ov-t-nominal")}）`);
+ok(/^¥[\d.]+ \+ \$[\d.]+$/.test(num("ov-t-nominal")),
+  `名义分栏统一币序 CNY 优先（UX#5，got ${num("ov-t-nominal")}）`);
 ok(num("ov-t-nominal").includes("+") && /¥[\d.]+/.test(num("ov-t-nominal")),
   `名义跨币分栏并列（got ${num("ov-t-nominal")}）`);
 // USD 栏 = api_equivalent 1000 + 180；¥300 是 metered 分栏——fixed_subscription
@@ -113,7 +114,7 @@ elements["ov-dual-empty"] = { hidden: false };
 sandbox.renderDualTrack(monthly);
 const dualHtml = (elements["ov-dual-list"]._kids || []).map((k) => k.innerHTML).join("\n");
 ok(dualHtml.includes("归属待核"), "anthropic 63.9× → 归属待核告警（>50× 护栏）");
-ok(dualHtml.includes("值 1.1×"), "minimax 1.12× 正常显示「值」");
+ok(dualHtml.includes("值回月费 1.1×"), "minimax 1.12× 显示「值回月费 1.1×」（UX#11 展开文案）");
 // glm（有月费、无标价折算、unresolved）在订阅轨里必须显示 unresolved chip
 // ——曾因分类进 subEntries 后丢提示，看起来"一切正常"。
 ok(dualHtml.includes("含未定价 tokens"), "glm 的 unresolved chip（不得显示 ¥0 或假装正常）");
