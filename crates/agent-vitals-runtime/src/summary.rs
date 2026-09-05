@@ -113,7 +113,13 @@ pub fn codex_home() -> std::path::PathBuf {
 }
 
 /// fold 缓存本体——`codex_merged_cached` 写、`codex_fold_cache_clear` 测试穿透。
-static CODEX_FOLD_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (std::time::Instant, serde_json::Value)>>> =
+/// 缓存条目：`(写入时刻, merged 产物)`。Arc 让缓存命中的锁内 clone 退化为
+/// 原子计数（几 MB JSON 的深拷贝会把并发命令串行卡在锁上）。
+type CodexFoldCache = std::collections::HashMap<
+    std::path::PathBuf,
+    (std::time::Instant, std::sync::Arc<serde_json::Value>),
+>;
+static CODEX_FOLD_CACHE: std::sync::OnceLock<std::sync::Mutex<CodexFoldCache>> =
     std::sync::OnceLock::new();
 
 /// Codex fold 的进程级汇聚点，带 60 秒 memo——工作台一次渲染会并发发起
@@ -122,16 +128,21 @@ static CODEX_FOLD_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::
 /// fold）。merged 是全量历史（各命令自己按窗口过滤），所以缓存不需要按月
 /// 键控；按 home 路径键控（测试各用独立 tmp home，互不污染）。TTL 60s 与
 /// quota memo 同一条权衡：rollout 只增不改，60s 复用不构成诚实性问题。
-fn codex_merged_cached(home: &Path) -> serde_json::Value {
+fn codex_merged_cached(home: &Path) -> std::sync::Arc<serde_json::Value> {
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
     let cache = CODEX_FOLD_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, v)) = guard.get(home) {
         if at.elapsed() < Duration::from_secs(60) {
+            // Arc clone（原子计数）而不是 Value 深拷贝：缓存命中必须锁内
+            // 纳秒级——merged 是几 MB 的 JSON，锁内深拷贝会把并发命令串行
+            // 卡在锁上，缓存反而成为新瓶颈。
             return v.clone();
         }
     }
+    drop(guard);
     let mut folds: Vec<serde_json::Value> = Vec::new();
     for path in agent_vitals_hosts::codex_session::codex_rollout_files(home) {
         let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(&path);
@@ -142,8 +153,9 @@ fn codex_merged_cached(home: &Path) -> serde_json::Value {
             .unwrap_or_default();
         folds.push(agent_vitals_hosts::codex_usage::codex_fold_file(&items));
     }
-    let merged = agent_vitals_hosts::codex_usage::codex_merge_folds(&folds);
-    guard.insert(home.to_path_buf(), (Instant::now(), merged.clone()));
+    let merged = Arc::new(agent_vitals_hosts::codex_usage::codex_merge_folds(&folds));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    guard.insert(home.to_path_buf(), (Instant::now(), Arc::clone(&merged)));
     merged
 }
 
