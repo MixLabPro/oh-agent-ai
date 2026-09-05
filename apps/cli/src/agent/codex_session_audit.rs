@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::agent::codex_cost::{codex_cost_report, load_codex_pricing};
+use agent_vitals_runtime::sessions::codex_cost::{codex_cost_report, load_codex_pricing};
 use agent_vitals_hosts::codex_session::{codex_rollout_files, read_codex_session_log, read_session_index};
 use agent_vitals_hosts::codex_evidence::{build_codex_evidence, codex_evidence_json, CodexEvidence};
 use agent_vitals_hosts::codex_usage::{codex_hour_of, codex_merge_folds};

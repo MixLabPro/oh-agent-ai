@@ -80,7 +80,8 @@ use agent_vitals_domain::usage::ms_from_civil;
 use crate::agent::claude_usage_fact::{
     parse_claude_usage_row, UNATTRIBUTED, UNREADABLE,
 };
-use crate::agent::codex_cost::{civil_from_unix_secs, current_month_beijing};
+use agent_vitals_domain::util::civil_from_unix_secs;
+use agent_vitals_runtime::sessions::codex_cost::current_month_beijing;
 use agent_vitals_hosts::claude_session::claude_project_files;
 use agent_vitals_runtime::state::{atomic_write_json, now_iso_utc, read_json, state_dir};
 use agent_vitals_runtime::takeover::require_rust_owner;

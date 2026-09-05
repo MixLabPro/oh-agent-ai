@@ -284,7 +284,7 @@ fn dsh_extract_summary(payload: &Value) -> Summary {
         }
     }
     let utc_date = |ms: i64| -> String {
-        let (y, m, d) = crate::agent::codex_cost::civil_from_unix_secs(ms / 1000, 0);
+        let (y, m, d) = agent_vitals_domain::util::civil_from_unix_secs(ms / 1000, 0);
         format!("{y:04}-{m:02}-{d:02}")
     };
     let date_first = min_ms.map(utc_date);
@@ -365,7 +365,7 @@ pub fn findings_for(key: &SessionKey, payload: &Value) -> Vec<FindingRef> {
 /// pricing_version：价表内容的确定性指纹（业务数据换版 = 换指纹）。两侧都用
 /// 「价表 JSON 紧凑序列化」的 FNV-1a——serde/py 都保插入序，逐字节一致。
 fn pricing_version() -> String {
-    let p = crate::agent::codex_cost::load_codex_pricing();
+    let p = agent_vitals_runtime::sessions::codex_cost::load_codex_pricing();
     let s = serde_json::to_string(&p).unwrap_or_default();
     format!("{:016x}", fnv1a64(s.as_bytes()))
 }

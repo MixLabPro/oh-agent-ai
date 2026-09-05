@@ -926,9 +926,9 @@ fn codex_report_from_merged(
         by_model =
             agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
     }
-    let pricing = agent::codex_cost::load_codex_pricing();
+    let pricing = agent_vitals_runtime::sessions::codex_cost::load_codex_pricing();
     let plan = merged["plan"].clone();
-    let report = agent::codex_cost::codex_cost_report(
+    let report = agent_vitals_runtime::sessions::codex_cost::codex_cost_report(
         &by_hour_model,
         &by_model,
         &merged["unaccounted"],
@@ -962,7 +962,7 @@ fn codex_report_from_merged(
         "month".into(),
         month_out.map(Value::from).unwrap_or(Value::Null),
     );
-    out.insert("today".into(), json!(agent::codex_cost::today_beijing()));
+    out.insert("today".into(), json!(agent_vitals_runtime::sessions::codex_cost::today_beijing()));
     if let Some(rep) = report.as_object() {
         for (k, v) in rep {
             out.insert(k.clone(), v.clone());
@@ -982,7 +982,7 @@ fn codex_calendar_blob(
     month_out: Option<&str>,
     default: &str,
 ) -> Value {
-    let today = agent::codex_cost::today_beijing();
+    let today = agent_vitals_runtime::sessions::codex_cost::today_beijing();
     let mut views = serde_json::Map::new();
     views.insert(
         "today".into(),
@@ -1384,14 +1384,14 @@ session_store={store} fold={fold}"
         // `--today` = 今天（过滤键是完整 YYYY-MM-DD，month 标签取今天所属月）；
         // `--month all` = 全部月份；其余 = 指定月。filter_key=None 即不过滤。
         let (filter_key, month_out): (Option<String>, Option<String>) = if *today {
-            let t = agent::codex_cost::today_beijing();
+            let t = agent_vitals_runtime::sessions::codex_cost::today_beijing();
             (Some(t.clone()), Some(t[..7].to_string()))
         } else {
             match month.as_deref() {
                 Some("all") => (None, None),
                 Some(m) => (Some(m.to_string()), Some(m.to_string())),
                 None => {
-                    let cur = agent::codex_cost::current_month_beijing();
+                    let cur = agent_vitals_runtime::sessions::codex_cost::current_month_beijing();
                     (Some(cur.clone()), Some(cur))
                 }
             }
@@ -1426,7 +1426,7 @@ session_store={store} fold={fold}"
             wrote = true;
         }
         if !wrote {
-            print!("{}", agent::codex_cost::render_codex_cost(&out));
+            print!("{}", agent_vitals_runtime::sessions::codex_cost::render_codex_cost(&out));
         }
         return;
     }
@@ -1885,7 +1885,7 @@ session_store={store} fold={fold}"
                 // `--day` 缺省 = 今天（北京日界，core 折叠的日期桶是 UTC+8 时
                 // 段；spec §5.1）。
                 let day = if day.is_empty() {
-                    agent::codex_cost::today_beijing()
+                    agent_vitals_runtime::sessions::codex_cost::today_beijing()
                 } else {
                     day.clone()
                 };

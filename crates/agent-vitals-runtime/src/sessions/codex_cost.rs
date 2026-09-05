@@ -508,11 +508,15 @@ pub fn render_codex_cost(out: &Value) -> String {
 
 // ── 默认月 / 今天（北京时区）───────────────────────────────────────────────
 // v0.8 Phase D6：`civil_from_unix_secs`（纯）迁进 `agent-vitals-domain::util`，
-// 读时钟的 `current_month_beijing` / `today_beijing` 迁进 `agent-vitals-runtime::
-// clock`。这里 re-export 保 `crate::agent::codex_cost::{...}` 旧路径（多个 CLI
-// handler 用）。「当前月/今天」口径与 DSH state 层一致，两引擎月度视图不打架。
+// 读时钟的 `current_month_beijing` / `today_beijing` 迁进本 crate 的 `clock`
+// 模块。v0.9 Stage 0.3：本文件自己也从 apps/cli 搬进了这个 crate
+// （`agent_vitals_runtime::sessions::codex_cost`），这里 re-export 保
+// `crate::clock::{...}` 一条路径，CLI 侧调用点改走
+// `agent_vitals_runtime::sessions::codex_cost::{today_beijing,
+// current_month_beijing}`。「当前月/今天」口径与 DSH state 层一致，两引擎
+// 月度视图不打架。
 pub(crate) use agent_vitals_domain::util::civil_from_unix_secs;
-pub use agent_vitals_runtime::clock::{current_month_beijing, today_beijing};
+pub use crate::clock::{current_month_beijing, today_beijing};
 
 #[cfg(test)]
 mod tests {
