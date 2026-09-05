@@ -202,7 +202,7 @@ fn nominal_bucket_price(buckets: &Value, model_key: &str, provider_key: &str, pr
 /// `nominal_bucket_price` 求和。`ratio = actual / no_cache_counterfactual`，
 /// <1 表示节约。
 ///
-/// **改名记录（2026-09-05）**：原 `cache_counterfactual_cost`，输出键 `nominal` →
+/// **改名记录（2026-09-05）**：原 `nominal_vs_actual_cost`，输出键 `nominal` →
 /// `no_cache_counterfactual`。`nominal` 一词让位给 ATTRIBUTABLE_WASTE §6.7 的
 /// 市场标价口径（官方价、不扣套餐/折扣——那是"名义 GDP"式客观基准）；本函数
 /// 的反事实是"要是没缓存会花多少"，与市场标价无关，实测两者差 8~10 倍

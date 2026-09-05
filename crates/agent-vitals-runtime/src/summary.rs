@@ -101,8 +101,10 @@ fn dsh_host_amount(cost: Option<serde_json::Value>, latest_day: Option<&str>) ->
 
 /// `codex_home()`：rollout 根的解析与 CLI `codex-cost` handler 同一条
 /// （`HOME` → `USERPROFILE` → 空串；空串 join 出的相对路径不存在 → 枚举为
-/// 空 → Unavailable，绝不报错）。
-fn codex_home() -> std::path::PathBuf {
+/// 空 → Unavailable，绝不报错）。pub：src-tauri 的 `data_codex_quota`/
+/// `read_calendar_month` 复用同一条解析（审查 #4——此前 lib.rs 各自手写
+/// HOME-only，漏 USERPROFILE 回落，Windows 桌面端静默假 Unavailable）。
+pub fn codex_home() -> std::path::PathBuf {
     std::path::PathBuf::from(
         std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
@@ -390,6 +392,8 @@ struct ProviderAcc {
     /// 条目级币种（HostAmount.currency）：per-provider 条目天然单币，出现第
     /// 二种币时置 None 并标 unresolved（finish 里金额表整体留空）。
     currency: Option<String>,
+    /// 币种冲突已发生：冻结 currency=None，后续 add 不再重新认领。
+    currency_conflicted: bool,
     unresolved: bool,
     latest: Option<String>,
 }
@@ -399,6 +403,7 @@ impl ProviderAcc {
         Self {
             by_basis_currency: BTreeMap::new(),
             currency: None,
+            currency_conflicted: false,
             unresolved: false,
             latest: None,
         }
@@ -415,10 +420,14 @@ impl ProviderAcc {
         // （currency=None）+ unresolved——finish 的单币判定靠它，不在这里
         // 对齐就会把 USD 和 CNY 静默装进同一条目冒充单币。
         match &self.currency {
-            None => self.currency = Some(currency.to_string()),
+            None if !self.currency_conflicted => self.currency = Some(currency.to_string()),
             Some(c) if c == currency => {}
-            Some(_) => {
+            _ => {
+                // 冲突后冻结：currency=None 且不再认领——否则后续同币种 add
+                // 会走 None 分支重新认领，条目带着单一 currency 收尾，另一币
+                // 金额在 total_actual_spend 里被按该币桶吞掉（审查 #8）。
                 self.currency = None;
+                self.currency_conflicted = true;
                 self.unresolved = true;
             }
         }
@@ -616,6 +625,40 @@ fn codex_provider_amount(
 /// DSH 窗口（`days` map 或单日值）的 token 计量：DSH 四桶词表直读
 /// （`uncached_input_tokens` 词表，与 claude/codex 不同——见 fixtures/v09
 /// 的 _doc）。`window` 是月份前缀或完整日期。
+/// 单个 DSH day 对象 → token 计量。**两种形状都认**（镜像 `priced_day` 的
+/// 双形状处理）：正常管线的 day 顶层有 `merge_buckets` 折叠出的四桶字段；
+/// 只有 `by_model` 有量、顶层零桶的变形日（跨零点切片等）走 `by_model`
+/// 逐模型累加回退——审查 #2：此前日度路径把单日对象塞进按 {date: day} map
+/// 设计的过滤，字段名键永远不命中窗口前缀 → DSH 的「今日 tokens」恒零
+/// （假零，MeasuredZero≠Unavailable 纪律的违例）。
+fn dsh_day_tokens(day: &serde_json::Value) -> HostTokens {
+    let mut tk = HostTokens::default();
+    let g = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0) as i64;
+    tk.uncached_input = g(day, "uncached_input_tokens");
+    tk.cache_read = g(day, "cache_read_tokens");
+    tk.cache_write = g(day, "cache_write_tokens");
+    tk.output = g(day, "output_tokens");
+    if tk.uncached_input + tk.cache_read + tk.cache_write + tk.output == 0 {
+        // 顶层零桶：by_model 回退（逐模型同词表四桶）。
+        if let Some(models) = day.get("by_model").and_then(|v| v.as_object()) {
+            for (_m, b) in models {
+                tk.uncached_input += g(b, "uncached_input_tokens");
+                tk.cache_read += g(b, "cache_read_tokens");
+                tk.cache_write += g(b, "cache_write_tokens");
+                tk.output += g(b, "output_tokens");
+            }
+        }
+    }
+    tk.total = tk.uncached_input + tk.cache_read + tk.cache_write + tk.output;
+    tk.cache_hit_ratio = agent_vitals_domain::cost::cache_hit_ratio(&json!({
+        "uncached_input_tokens": tk.uncached_input,
+        "cache_read_tokens": tk.cache_read,
+        "cache_write_tokens": tk.cache_write,
+    }));
+    tk
+}
+
+/// DSH 窗口（`days` map 或单日值）的 token 计量：逐日过 [`dsh_day_tokens`]。
 fn dsh_tokens(days: Option<&serde_json::Value>, window: &str) -> HostTokens {
     let mut tk = HostTokens::default();
     if let Some(days) = days.and_then(|d| d.as_object()) {
@@ -623,11 +666,11 @@ fn dsh_tokens(days: Option<&serde_json::Value>, window: &str) -> HostTokens {
             if !date.starts_with(window) {
                 continue;
             }
-            let g = |k: &str| day.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
-            tk.uncached_input += g("uncached_input_tokens");
-            tk.cache_read += g("cache_read_tokens");
-            tk.cache_write += g("cache_write_tokens");
-            tk.output += g("output_tokens");
+            let day_tk = dsh_day_tokens(day);
+            tk.uncached_input += day_tk.uncached_input;
+            tk.cache_read += day_tk.cache_read;
+            tk.cache_write += day_tk.cache_write;
+            tk.output += day_tk.output;
         }
     }
     tk.total = tk.uncached_input + tk.cache_read + tk.cache_write + tk.output;
@@ -671,8 +714,10 @@ fn apply_subscription_fees(
         // 账期未开始不摊（None 理论不可达——declared_subscriptions 已回落
         // reported_at；防御性跳过而不是摊进所有历史）。
         let Some(start) = period_start.as_deref() else { continue };
-        let start_month = &start[..start.len().min(7)];
-        if month < start_month {
+        // chars 而非字节切片：声明混入非 ASCII 时 [..7] 会 panic（billing 的
+        // 脏数据纪律是显式可见，不是 panic）。
+        let start_month: String = start.chars().take(7).collect();
+        if month < start_month.as_str() {
             continue;
         }
         let host = HOST_PROVIDER_MAP
@@ -711,10 +756,13 @@ fn apply_subscription_fees(
 ///
 /// **为什么是独立函数而不是塞进 summary**：plan 是"当前状态"的单快照、不按
 /// 日期分桶（`hosts/codex/sessions/usage.rs` 的 doc），塞进月/日窗口 DTO 会
-/// 把"此刻余量"伪装成窗口数据。返回 `{"plan_type", "primary": {used_percent,
-/// window_minutes, resets_at}, ...}` 原样（`plan_from_rate_limits` 的产物，
-/// 不二次加工）；无 rollout / 无 plan 事件 → None（无 ChatGPT 订阅证据，
-/// 不得编造余量）。
+/// 把"此刻余量"伪装成窗口数据。返回 `plan_from_rate_limits` 的产物原样、
+/// 不二次加工：`{"plan_type", "has_credits",
+/// "limits": {"primary": {"used_percent", "window_minutes", "resets_at"}},
+/// "observed_at"}`——**窗口条在 `limits.primary` 之下、不在顶层**（审查 #1：
+/// doc 曾写错为顶层 `primary`，前端与 verify stub 被同一个错误期望误导，
+/// 决策卡整条失效）。无 rollout / 无 plan 事件 → None（无 ChatGPT 订阅
+/// 证据，不得编造余量）。
 pub fn codex_quota_snapshot(home: &Path) -> Option<serde_json::Value> {
     let mut folds: Vec<serde_json::Value> = Vec::new();
     for path in agent_vitals_hosts::codex_session::codex_rollout_files(home) {
@@ -779,9 +827,7 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     let pricing = agent_vitals_domain::cost::load_pricing();
     if let Some(dsh_days) = crate::budget::read_month(Some(month)).as_ref().and_then(|d| d.as_object()) {
         for (date, day) in dsh_days {
-            let g = |k: &str| day.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
-            let tokens = g("uncached_input_tokens") + g("cache_read_tokens")
-                + g("cache_write_tokens") + g("output_tokens");
+            let tokens = dsh_day_tokens(day).total;
             let cost = agent_vitals_domain::cost::priced_day(day, &pricing)
                 .unwrap_or_else(|| agent_vitals_domain::cost::bucket_cost(day, &pricing));
             let cost_val = cost
@@ -1424,6 +1470,31 @@ mod tests {
                 anthropic.amounts_by_basis
             );
         });
+    }
+
+    /// 审查 #2 的端到端回归——`dsh_tokens` 对**单日对象**（daily_summary 传
+    /// `day_value`）不得再返回恒零：此前按 {date: day} map 的窗口过滤对字段
+    /// 名键永假，「今日 tokens」的 DSH 贡献静默归零（假零）。by_model-only
+    /// 变形日（跨零点切片）也要经 by_model 回退计入。
+    #[test]
+    fn dsh_tokens_daily_path_is_not_structurally_zero() {
+        let day = json!({
+            "by_model": {"deepseek-v4-flash": {
+                "uncached_input_tokens": 1_000_000, "output_tokens": 100_000,
+                "cache_read_tokens": 250_000, "cache_write_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            }},
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "output_tokens": 0, "uncached_input_tokens": 0,
+        });
+        // 日度路径：单日对象直接进（无窗口过滤语义）。
+        let tk = dsh_day_tokens(&day);
+        assert_eq!(tk.total, 1_350_000, "by_model-only 变形日不得计零");
+        // 月度路径：{date: day} map，变形日在窗口内。
+        let days = json!({ "2026-09-05": day });
+        let month_tk = dsh_tokens(Some(&days), "2026-09");
+        assert_eq!(month_tk.total, 1_350_000);
     }
 
     /// 0.6b 落地的回归——DSH 的 `compute_month` 对"本月有 day 但 token 全

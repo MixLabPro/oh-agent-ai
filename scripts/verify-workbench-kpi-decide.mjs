@@ -30,7 +30,8 @@ const wb = readFileSync(`${root}/apps/desktop/src-tauri/ui/workbench.js`, "utf8"
 console.log("# 静态断言（真实文件内容）");
 ok(wb.includes("cache_write 按 1hr 计"), "名义副行带 cache_write 档位假设标注");
 ok(wb.includes("归属待核"), ">50× 的「归属待核」告警文案存在");
-ok(wb.includes("fixed_subscription") === false || wb.includes("fixed_subscription"), "fixed_subscription 字面量在渲染器里被排除于名义之外");
+// （审查 #9：此处原是恒真断言 `X===false || X`，给假绿——名义排除订阅月费的
+// 行为已由下方 renderKpiRow 的 $1180 断言真实覆盖，恒真行删除。）
 
 // ── vm 执行真实文件 ──
 function makeElement() {
@@ -121,14 +122,21 @@ ok(dualHtml.includes("$20.00") && dualHtml.includes("¥114.00"), "月费带币�
 
 console.log("# renderDecideCard（async，等 promise 排空）");
 elements["ov-decide-body"] = { textContent: "", innerHTML: "", appendChild(child) { this._kids ??= []; this._kids.push(child); } };
-sandbox.__quota = { plan_type: "plus", primary: { used_percent: 92, window_minutes: 10080, resets_at: 1786000000 } };
+// stub 形状 = fold plan_from_rate_limits 的真实产物（limits.primary 在下）——
+// 审查 #1：旧 stub 按渲染器的错误期望（顶层 primary）构造，互相印证假绿。
+sandbox.__quota = { plan_type: "plus", has_credits: false,
+  limits: { primary: { used_percent: 92, window_minutes: 10080, resets_at: 1786000000 } },
+  observed_at: "2026-09-05T00:00:00Z" };
 await sandbox.renderDecideCard(monthly);
 let decideHtml = elements["ov-decide-body"].innerHTML + (elements["ov-decide-body"]._kids || []).map((k) => k.textContent).join("");
 ok(decideHtml.includes("92% 剩余") || decideHtml.includes("8% 剩余"), `Codex 窗口条给剩余%（got 截断）`);
 ok(decideHtml.includes("即将限流"), "Codex 剩 8% → 建议行「即将限流」预警态");
 ok(decideHtml.includes("窗口余量不可得"), "Claude Pro 恒标「不可得」（拒绝快照反推不了正向余量）");
 
-sandbox.__quota = { plan_type: "plus", primary: { used_percent: 40, window_minutes: 10080, resets_at: 1786000000 } };
+sandbox.__quota = { plan_type: "plus", has_credits: false,
+  limits: { primary: { used_percent: 40, window_minutes: 10080, resets_at: 1786000000 } },
+  observed_at: "2026-09-05T00:00:00Z" };
+sandbox.renderDecideCard._quotaAt = 0; // 穿透 60s memo（审查 #6 修复引入），否则第二次调用复用 92% 的缓存
 elements["ov-decide-body"] = { textContent: "", innerHTML: "", appendChild(child) { this._kids ??= []; this._kids.push(child); } };
 await sandbox.renderDecideCard(monthly);
 decideHtml = elements["ov-decide-body"].innerHTML + (elements["ov-decide-body"]._kids || []).map((k) => k.textContent).join("");

@@ -565,9 +565,11 @@ function renderKpiRow(prefix, dto) {
     set("unit",
       fmtCur(Object.entries(nominal).reduce((a, [c, v]) => a + v, 0) / tk.total * 1e6, "USD") + "/M · 名义",
       "跨币暂未折算：按 USD 桶计（见月度带副行）");
-    const actualSum = Object.values(actual).reduce((a, b) => a + b, 0);
+    const actualSum = Object.entries(actual).reduce((a, [, v]) => a + v, 0);
+    // 副行两段并写（审查 #3：此前先写"跨币暂未折算"又被本行覆写，唯一披露
+    // 混币口径的文案是死代码）。跨币暂未折算必须可见，不装精确。
     document.getElementById(`ov-${prefix}-unit-sub`).textContent =
-      "实际 " + fmtCur(actualSum / tk.total * 1e6, null) + "/M";
+      "跨币未折算 · 实际 " + fmtCur(actualSum / tk.total * 1e6, null) + "/M";
   } else {
     set("unit", "无数据");
   }
@@ -651,17 +653,28 @@ async function renderDecideCard(monthly) {
   const body = document.getElementById("ov-decide-body");
   body.textContent = "读取中…";
   const byProvider = (monthly && monthly.by_provider) || {};
-  let quota = null;
-  try { quota = await invoke("data_codex_quota"); } catch (e) { quota = null; }
+  // plan 快照 60s memo（审查 #6）：每次 renderOverview 都全量 fold 60 份
+  // rollout 是可感知卡顿；plan 是"当前状态"，60s 内复用不构成诚实性问题，
+  // 过期自动重拉。失败（null/异常）也进缓存，避免故障时每次渲染都重扫。
+  const now = Date.now();
+  if (!renderDecideCard._quota || now - renderDecideCard._quotaAt > 60_000) {
+    try { renderDecideCard._quota = await invoke("data_codex_quota"); }
+    catch (e) { renderDecideCard._quota = null; }
+    renderDecideCard._quotaAt = now;
+  }
+  const quota = renderDecideCard._quota;
   body.textContent = "";
   const rows = [];
   // Codex 窗口条（真 meter）
   let codexState = null;
-  if (quota && quota.primary && typeof quota.primary.used_percent === "number") {
-    const used = quota.primary.used_percent;
+  // plan 快照的真实形状是 limits.primary（fold plan_from_rate_limits 产物），
+  // 不是顶层 primary——审查 #1：旧读法恒 undefined，决策卡整条失效。
+  const codexWin = quota && quota.limits && quota.limits.primary;
+  if (quota && codexWin && typeof codexWin.used_percent === "number") {
+    const used = codexWin.used_percent;
     const remain = Math.max(0, 100 - used);
-    const resetsAt = quota.primary.resets_at
-      ? new Date(quota.primary.resets_at * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+    const resetsAt = codexWin.resets_at
+      ? new Date(codexWin.resets_at * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
       : "未知";
     codexState = remain;
     rows.push(`<li><span class="src-name">Codex（${quota.plan_type || "订阅"}）</span>

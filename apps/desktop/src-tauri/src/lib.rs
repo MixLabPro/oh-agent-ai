@@ -1231,10 +1231,12 @@ fn data_daily_summary(date: String) -> Value {
 /// 造余量）。
 #[tauri::command]
 fn data_codex_quota() -> Option<Value> {
-    // codex rollout 根在 ~/.codex（与 runtime summary.rs::codex_home 同一条
-    // HOME → USERPROFILE 优先序），不在数据根。
-    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    agent_vitals_runtime::summary::codex_quota_snapshot(&home)
+    // codex rollout 根在 ~/.codex，不在数据根——解析复用 runtime 的 codex_home
+    // （HOME → USERPROFILE → 空串，审查 #4：手写 HOME-only 在 Windows 上静默假
+    // Unavailable）。
+    agent_vitals_runtime::summary::codex_quota_snapshot(
+        &agent_vitals_runtime::summary::codex_home(),
+    )
 }
 
 /// Token 日历的逐日跨宿主数据（v0.9 Stage D——此前日历只画 DSH 日轴，
@@ -1242,8 +1244,10 @@ fn data_codex_quota() -> Option<Value> {
 /// 各自 token + 耗费，钱不跨宿主不跨币合并（口径各异，格子副行分币并列）。
 #[tauri::command]
 fn read_calendar_month(month: String) -> Value {
-    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    agent_vitals_runtime::summary::calendar_month(&month, &home)
+    agent_vitals_runtime::summary::calendar_month(
+        &month,
+        &agent_vitals_runtime::summary::codex_home(),
+    )
 }
 
 /// 工作台「立即同步」按钮：受控 tick 一次（与托盘菜单同一路径）。立即返回，不
