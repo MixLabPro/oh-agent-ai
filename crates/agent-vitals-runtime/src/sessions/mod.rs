@@ -7,5 +7,6 @@
 //! 本机机器 crate。逐文件迁移记录见 STAGE0_RESEARCH §6，一个文件一个提交。
 
 pub mod behavior;
+pub mod claude_ledger;
 pub mod codex_cost;
 pub mod discovery;

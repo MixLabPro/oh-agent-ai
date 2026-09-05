@@ -1491,9 +1491,9 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
     // store 是否构建成功——ledger 是 claude-sync（同一批 ~/.claude 文件的独立
     // 账，tick 里先于宿主区刷新）的产物，导航只读它，不跨写。当日缺席 → None →
     // null 三元组（「今天没测到」，不是 0）；「空日不落 ledger」是 claude_cost.rs
-    // 的写侧纪律（见 claude_ledger_day_tokens 的注释）。
+    // 的写侧纪律（见 agent_vitals_runtime::sessions::claude_ledger 的注释）。
     let claude_today_tokens: Value =
-        match crate::agent::claude_cost::claude_ledger_day_tokens(day_key) {
+        match agent_vitals_runtime::sessions::claude_ledger::claude_ledger_day_tokens(day_key) {
             Some(tokens) => json!({
                 "value": tokens,
                 "basis": "ledger",
