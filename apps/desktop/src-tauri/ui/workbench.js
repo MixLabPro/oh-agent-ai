@@ -242,6 +242,7 @@ function subscribeFocusTargetEvent() {
 
 let activeTab = "overview";
 let calMonth = beijingMonth();
+let calSelectedDate = null; // 当日按小时面板选中的日期（null = 今天）
 let calData = null;
 let sessState = { items: [], nextCursor: null, total: null, loaded: false, error: false };
 // 会话列表 host 过滤（spec §7.3）："all" | "dsh" | "codex"。过滤变化重置分页
@@ -1146,13 +1147,106 @@ async function renderCalendar() {
     // 审查 UX#8：未来日与"没测到"同款渲染，用户无法区分"还没发生"和
     // "发生过但没测到"——未来日降透明度，不参与无数据解读。
     if (date > today) cell.classList.add("future");
+    // 当日按小时面板的入口：点任意非未来日 → 下方面板切到该日
+    // （未来日没有"按小时"可看，不响应）。
+    if (date <= today) {
+      cell.classList.add("clickable");
+      cell.onclick = () => {
+        calSelectedDate = date;
+        grid.querySelectorAll(".cal-cell.selected").forEach((el) => el.classList.remove("selected"));
+        cell.classList.add("selected");
+        renderHourly(date);
+      };
+      if (date === (calSelectedDate || today)) cell.classList.add("selected");
+    }
     grid.appendChild(cell);
   }
   document.getElementById("cal-note").textContent =
-    "方格主行 = 该日三宿主 token 总量（DSH + Claude Code + Codex）；副行 = 该日耗费，分宿主分币并列（DSH 实测 / Claude relay 估算 / Codex 等价标价，口径各异不相加）。";
+    "方格主行 = 该日三宿主 token 总量（DSH + Claude Code + Codex）；副行 = 该日耗费，分宿主分币并列（DSH 实测 / Claude relay 估算 / Codex 等价标价，口径各异不相加）。点任意过去日 → 下方面板看该日按小时分布。";
 
   // 月份级跨宿主概览：放在方格之后、note 之前。
   if (calSourcesDto) renderSourcesPanel(calSourcesDto, "cal-sources");
+
+  // 当日按小时（旧 calendar.html 小时格组件的工作台接入）——默认选中今天。
+  renderHourly(calSelectedDate || today);
+}
+
+// 当日按小时分布。数据来源矩阵（read_hourly_distribution 的 hosts_available
+// 值即来源，逐宿主如实渲染）：codex=fold 全量历史；dsh=今日 today-json /
+// 历史日 facts-index（该日会话被 ingest 过才有）；claude=facts-index。
+// 「来源标注让部分覆盖可见」：claude/dsh 的索引小时只含已 ingest 会话，
+// 值偏小不是 bug 是覆盖面——标注写进面板 note。
+async function renderHourly(date) {
+  const grid = document.getElementById("hourly-grid");
+  const note = document.getElementById("hourly-note");
+  const titleDate = document.getElementById("hourly-date");
+  if (!grid) return; // calendar tab 未建（防御；HTML 里有就该在）
+  titleDate.textContent = date + (date === beijingToday() ? "（今天）" : "");
+  grid.innerHTML = "";
+  let resp;
+  try {
+    resp = await invoke("read_hourly_distribution", { date });
+  } catch (e) {
+    note.textContent = "读取失败：" + errText(e);
+    return;
+  }
+  const hours = resp.hours || [];
+  const src = resp.hosts_available || {};
+  const HOSTS = [
+    ["dsh_tokens", "DSH", "hour-dsh"],
+    ["claude_tokens", "CC", "hour-claude"],
+    ["codex_tokens", "CX", "hour-codex"],
+  ];
+  let maxTotal = 0;
+  const totals = hours.map((h) =>
+    HOSTS.reduce((s, [k]) => s + (h[k] || 0), 0)
+  );
+  for (const v of totals) if (v > maxTotal) maxTotal = v;
+  hours.forEach((h, i) => {
+    const cell = document.createElement("div");
+    const total = totals[i];
+    cell.className = "hour-cell" + (total === 0 ? " empty" : "") +
+      (total > 0 && total === maxTotal ? " peak" : "");
+    const hh = String(h.hour).padStart(2, "0");
+    if (total === 0) {
+      // 全宿主该小时都没有测量——空格（虚线），不是 0。
+      cell.title = hh + ":00–" + hh + ":59 北京时间 · 该小时三宿主都没有已测用量";
+    } else {
+      const bar = document.createElement("div");
+      bar.className = "hour-bar";
+      // 分段条：各宿主一段（高度占比 = 该宿主 / 全日峰值），从下往上堆。
+      // 分段高是**各自占总峰值的比**，不是互相归一——一眼能比跨宿主量级。
+      for (const [k, name, cls] of HOSTS) {
+        const v = h[k] || 0;
+        if (v <= 0) continue;
+        const seg = document.createElement("div");
+        seg.className = "hour-seg " + cls;
+        seg.style.height = Math.max(3, Math.round((v / maxTotal) * 52)) + "px";
+        bar.appendChild(seg);
+      }
+      cell.appendChild(bar);
+      const lab = document.createElement("div");
+      lab.className = "hour-label";
+      lab.textContent = hh;
+      cell.appendChild(lab);
+      const lines = HOSTS
+        .map(([k, name]) => [name, h[k]])
+        .filter(([, v]) => v != null && v > 0)
+        .map(([name, v]) => name + " " + fmtTokens(v));
+      cell.title = hh + ":00–" + hh + ":59 北京时间\n" + lines.join("\n");
+    }
+    grid.appendChild(cell);
+  });
+  const srcNote = [];
+  srcNote.push("Codex：全量折算（fold）");
+  srcNote.push(src.dsh === "today-json"
+    ? "DSH：今日实时桶"
+    : src.dsh === "facts-index" ? "DSH：已 ingest 会话的小时重放（部分覆盖可能偏小）"
+    : "DSH：无小时数据（历史日未持久化；该日会话未 ingest）");
+  srcNote.push(src.claude === "facts-index"
+    ? "Claude：已 ingest 会话的小时重放（部分覆盖可能偏小）"
+    : "Claude：无小时数据（ledger 只有日轴；该日会话未 ingest）");
+  note.textContent = srcNote.join(" · ") + "。空格 = 该小时没有已测用量（不是 0）。";
 }
 
 function shiftMonth(delta) {

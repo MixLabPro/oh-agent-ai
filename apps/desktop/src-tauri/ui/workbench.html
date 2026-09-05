@@ -149,6 +149,14 @@
       </div>
       <div id="cal-empty" class="empty" hidden>该月暂无数据</div>
       <div id="cal-grid" class="cal-grid"></div>
+      <!-- 当日按小时（旧 calendar.html 小时格组件的工作台接入，2026-09-06）：
+           点日历任意过去日 → 此面板切到该日。来源矩阵在 note 里如实标注
+           （codex fold / dsh today-json·facts-index / claude facts-index）。 -->
+      <div class="panel hourly">
+        <div class="panel-title">当日按小时 <span id="hourly-date" class="muted"></span></div>
+        <div id="hourly-note" class="note"></div>
+        <div id="hourly-grid" class="hour-grid"></div>
+      </div>
       <!-- ============ 数据源（v0.9 Stage 0.6 日历页月份级诚实状态）============
            由 data_monthly_summary 驱动（与 read_month 并发拉取，失败不拖垮
            方格）：标题行加新鲜度标注，月注记区追加逐宿主月度概览。方格仍

@@ -74,6 +74,18 @@ pub struct RebuildReport {
     pub repaired_tails: usize,
 }
 
+/// "YYYY-MM-DD" → (y, m, d)。None = 格式不齐（调用方报错，不猜）。
+fn parse_ymd(date: &str) -> Option<(i64, u32, u32)> {
+    if date.len() != 10 || date.as_bytes()[4] != b'-' || date.as_bytes()[7] != b'-' {
+        return None;
+    }
+    Some((
+        date.get(0..4)?.parse().ok()?,
+        date.get(5..7)?.parse().ok()?,
+        date.get(8..10)?.parse().ok()?,
+    ))
+}
+
 /// 默认索引路径：`<data_home>/index.sqlite3`。名字明示"这是个可丢弃索引"。
 pub fn default_index_path(data_home: &Path) -> PathBuf {
     data_home.join("index.sqlite3")
@@ -371,6 +383,58 @@ impl FactsIndex {
             );
         }
         Ok(Value::Object(out))
+    }
+
+    /// 单日 × 每宿主的按小时 token 总和（北京小时）——hourly UI 的事实索引
+    /// 查询面。**小时在读取时现算**：事实只带 UTC ISO `event_ts_utc`，北京
+    /// 日 D 的 UTC 窗 = [D-1T16:00Z, DT16:00Z)，窗口内每行 +8h 归小时。ISO
+    /// 零填充格式的字符串序比较即窗口过滤（emitter 恒产 Z 后缀定宽 ts）。
+    ///
+    /// 返回 `{host: {"HH": tokens}}`——只含有量小时；某宿主键缺席 = 该日该
+    /// 宿主没有任何已 ingest 事实（消费方据此回退既有生产面，不渲染假零）。
+    pub fn hours_by_host(&self, date: &str) -> Result<serde_json::Value, IndexError> {
+        // 北京日 D 的 UTC 窗起点 = 前一日的 "T16"。prev 日用 civil/days
+        // round-trip（domain 的 Hinnant 算法），不做字符串手拆。
+        let (y, m, d) = parse_ymd(date).ok_or_else(|| {
+            IndexError::Sqlite(rusqlite::Error::InvalidParameterName(format!(
+                "invalid date `{date}` (want YYYY-MM-DD)"
+            )))
+        })?;
+        let days = agent_vitals_domain::usage::days_from_civil(y, m, d);
+        let prev = agent_vitals_domain::usage::civil_date_from_days(days - 1);
+        let window_start = format!("{prev}T16");
+        let window_end = format!("{date}T16");
+
+        let mut stmt = self.conn.prepare(
+            "SELECT host, event_ts_utc,
+                    SUM(t_uncached_input + t_cache_read + t_cache_write + t_output)
+             FROM facts
+             WHERE event_ts_utc >= ?1 AND event_ts_utc < ?2
+             GROUP BY host, event_ts_utc",
+        )?;
+        fn hour_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, i64)> {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        }
+        let rows = stmt.query_map(rusqlite::params![window_start, window_end], hour_row)?;
+        let mut out: std::collections::BTreeMap<String, [i64; 24]> = Default::default();
+        for row in rows {
+            let (host, ts, total) = row?;
+            // UTC 小时 → 北京小时（+8 取模；窗口已保证落在北京日 D 内）。
+            let utc_hour: i64 = ts.get(11..13).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let bj = (utc_hour + 8) % 24;
+            out.entry(host).or_insert([0i64; 24])[bj as usize] += total;
+        }
+        let mut obj = serde_json::Map::new();
+        for (host, hours) in out {
+            let m: serde_json::Map<String, Value> = hours
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| **v > 0)
+                .map(|(i, v)| (format!("{i:02}"), Value::from(*v)))
+                .collect();
+            obj.insert(host, Value::Object(m));
+        }
+        Ok(Value::Object(obj))
     }
 
     pub fn fact_count(&self) -> Result<u64, IndexError> {

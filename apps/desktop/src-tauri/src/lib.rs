@@ -1250,6 +1250,18 @@ fn read_calendar_month(month: String) -> Value {
     )
 }
 
+/// 单日按小时分布（北京小时）——旧 calendar.html「小时格热力」组件接入
+/// 工作台。来源矩阵见 `summary::hourly_distribution`：codex=fold 全量、
+/// dsh=今日 today-json / 历史日 facts-index、claude=facts-index（该日
+/// 会话被 ingest 过才有——来源标注让部分覆盖在 UI 上可见）。
+#[tauri::command]
+fn read_hourly_distribution(date: String) -> Value {
+    agent_vitals_runtime::summary::hourly_distribution(
+        &date,
+        &agent_vitals_runtime::summary::codex_home(),
+    )
+}
+
 /// 工作台「立即同步」按钮：受控 tick 一次（与托盘菜单同一路径）。立即返回，不
 /// 阻塞 IPC；工作台自己在同步结束后重拉 overview。
 #[tauri::command]
@@ -1311,6 +1323,10 @@ fn capture_workbench_screenshot(app: AppHandle) -> Result<(), String> {
         if ns_window.is_null() {
             return Err("拿不到窗口句柄".to_string());
         }
+        // objc `msg_send!` 宏内部的 cfg 会被 clippy 的 unexpected_cfgs 误报
+        // （宏展开跨 crate 的已知噪音，非本仓库代码）——桌面 crate 自身要能
+        // 过 -D warnings gate，必须在这里压掉。
+        #[allow(unexpected_cfgs)]
         let win_num: i64 = unsafe { msg_send![ns_window, windowNumber] };
         let status = std::process::Command::new("screencapture")
             .args(["-x", "-c", "-o", &format!("-l{}", win_num)])
@@ -1362,6 +1378,7 @@ pub fn run() {
             data_daily_summary,
             data_codex_quota,
             read_calendar_month,
+            read_hourly_distribution,
             trigger_sync,
             store::sessions_list,
             store::sessions_read,
@@ -1486,6 +1503,40 @@ mod tests {
                 && d.get("claude_cost_usd").is_some() && d.get("codex_cost_usd").is_some(),
                 "{date} 缺分币耗费键");
         }
+    }
+
+    /// 当日按小时（旧 calendar.html 小时格组件接入）的数据面：真机形状 +
+    /// 跨面守恒。codex 的小时来自 fold by_hour_model（全量历史），日历格里
+    /// 同一天的 codex_tokens 来自同一 fold 的 by_model——小时和 ≤ 日总量
+    /// （无时间样本的量只在 by_model，usage.rs 头注释），且来源标注合法。
+    #[test]
+    fn read_hourly_distribution_matches_calendar_codex_day() {
+        let month = overview::current_month_beijing();
+        let cal = read_calendar_month(month.clone());
+        let days = cal["days"].as_object().expect("days map");
+        // 找一个 codex 有用量的日子（本机 2026-09 codex 3.27 亿 token，必有）。
+        let (date, day_row) = days.iter()
+            .find(|(_, d)| d["codex_tokens"].as_i64().unwrap_or(0) > 0)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .expect("本机当月必有 codex 用量日");
+        let v = read_hourly_distribution(date.clone());
+        assert_eq!(v["date"], serde_json::json!(date));
+        let hours = v["hours"].as_array().expect("hours array");
+        assert_eq!(hours.len(), 24, "24 小时全量输出（空小时 = null，不裁剪）");
+        // 小时轴之和 ≤ 日历日总量（差 = 无时间样本，usage.rs 诚实缺口）。
+        let hour_sum: i64 = hours.iter()
+            .map(|h| h["codex_tokens"].as_i64().unwrap_or(0)).sum();
+        let cal_total = day_row["codex_tokens"].as_i64().unwrap_or(0);
+        assert!(hour_sum <= cal_total,
+                "codex 小时和 {hour_sum} 不得超过日历日总量 {cal_total}");
+        assert!(hour_sum > 0, "codex 用量日的小时图不得全空（fold 全量历史）");
+        // 来源标注合法（消费方按这个渲染覆盖面提示）。
+        let src = &v["hosts_available"];
+        assert_eq!(src["codex"], serde_json::json!("fold"));
+        assert!(src["dsh"].is_null() || src["dsh"] == "today-json" || src["dsh"] == "facts-index",
+                "dsh 来源非法: {src}");
+        assert!(src["claude"].is_null() || src["claude"] == "facts-index",
+                "claude 来源非法: {src}");
     }
 
     fn ov_with(budget: overview::BudgetAlert) -> Overview {

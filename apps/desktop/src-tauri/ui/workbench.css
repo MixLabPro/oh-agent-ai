@@ -1051,3 +1051,45 @@ button.chip.active {
 .days-list .day-date { color: var(--muted); min-width: 84px; }
 .days-list .day-tokens { font-weight: 600; min-width: 72px; }
 .days-list .day-cost { color: var(--muted); font-size: 12px; }
+
+/* ============ 当日按小时（旧 calendar.html 小时格组件的工作台接入）============ */
+.hour-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 4px;
+}
+.hour-cell {
+  min-height: 74px;
+  border-radius: 6px;
+  padding: 4px 2px 2px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+}
+.hour-cell.empty {
+  border: 1px dashed var(--panel-2, #333);
+  background: transparent;
+}
+.hour-cell.peak {
+  outline: 1px solid var(--accent, #4aa3ff);
+}
+.hour-cell.clickable { cursor: pointer; }
+.hour-cell.clickable:hover { background: rgba(255, 255, 255, 0.04); }
+.hour-cell.selected { outline: 2px solid var(--accent, #4aa3ff); }
+.hour-bar {
+  display: flex;
+  flex-direction: column-reverse; /* 段从下往上堆 */
+  align-items: stretch;
+  width: 70%;
+  gap: 1px;
+}
+.hour-seg { border-radius: 2px; }
+.hour-seg.hour-dsh { background: #4aa3ff; }
+.hour-seg.hour-claude { background: #b58cff; }
+.hour-seg.hour-codex { background: #ffb057; }
+.hour-label {
+  font-size: 10px;
+  color: var(--muted, #8a93a6);
+  margin-top: 2px;
+}
