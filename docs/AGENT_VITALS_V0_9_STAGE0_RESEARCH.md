@@ -359,8 +359,28 @@ Stage 0 的实现天生返回"所有已知宿主"，加过滤参数只是摆设�
      日视图取日行——untimed 不能混进某一天。过滤窗内没有任何小时桶（
      `days` 空）→ Unavailable 不是 $0；`unaccounted` 无时间归属、跨月份
      保留（数据质量哨兵），不能归进任何月份窗，不参与判断。
-3. **Claude Code（再下一提交）**：接 `sessions::claude_ledger` +
-   `agent_vitals_domain::cost::cost_report`。
+3. **Claude Code（Stage 0.4c，已接线）**：读 `sessions::claude_ledger`
+   同一份 `state_dir()/claude-ledger.json`（`days: {日期: {模型: 4 型
+   snake}}` flat 直图），计价走 core 单一决策点
+   `agent_vitals_domain::cost::claude_day_cost`（托盘 overview 的
+   claude 今日/当月估、CLI 会话账同一份读法分界）。窗口内逐日折算后按
+   `currency_totals` 同币合并（claude 无时段价、同币相加安全——托盘
+   `claude_estimates` 原注释），**跨币永不相加**。决定：
+   - **两个 basis 的分栏是托盘既有口径的 DTO 化**（`metered_amount` 注释
+     原文）：CNY 流（deepseek 顶层官方卡按量折算，但 ledger 折叠看不到
+     真实逐请求拆分、relay 恒定低命中使估算是保守上界，托盘合并行因此标
+     `≈`）→ **`MeteredEstimate`**；USD 流（anthropic 目录卡视作套餐覆盖，
+     spec §3.1 原话"混币不能相加"）→ **`ApiEquivalent`**。两个 basis 都
+     不 summable，总额仍只收 DSH 的 MeteredActual。
+   - **`has_unresolved = unpriced_tokens > 0 或任一日 pricing_basis ==
+     "partial"`**（时变卡没有峰谷分辨率）。
+   - **全 unknown 日（有 token、无钱）→ 金额表留空 + `has_unresolved`
+     + freshness 照报**：`CostBasis::Unresolved`"不得归零"的纪律——观测
+     到了但价不可确认，既不当 0 也不当没测。
+   - **已知局限**：ledger 只装当月（`claude_sync` 全量重建时滚动），历史
+     月份诚实报 Unavailable——与 DSH 有 month-archive.json 归档不同，
+     claude 侧确实没有可读的历史数据，不是"有而不读"。
+   - `claude_ledger.rs::ledger_path` 升 `pub(crate)`——路径字面量单点。
 4. **WorkBuddy**：永久留在 `excluded_hosts`（用户决定"不做，留待
    v0.9"——见本文档头部）。
 

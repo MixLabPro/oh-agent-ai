@@ -3,11 +3,9 @@
 //!
 //! 只读——不写 state、不建索引、不启动任何后台任务。逐宿主接线、逐提交
 //! 落地（§8.4）：DSH（读 `budget.rs` 的 month.json）、Codex（读 ~/.codex
-//! rollout 折叠计价）已接线；Claude Code 是后续提交；WorkBuddy 永久留在
-//! `excluded_hosts`（用户 2026-09-05 决定，见本文档触发记录）。尚未接线的
-//! 宿主临时进 `excluded_hosts`——`data_contract.rs` 原话"已知存在但本版本
-//! 不产出数据的宿主"，Claude Code 此刻符合这个定义，接完后就从这里移进
-//! `by_host`。
+//! rollout 折叠计价）、Claude Code（读 claude-ledger.json 逐日账，core
+//! `claude_day_cost` 计价）三个宿主已接线；WorkBuddy 永久留在
+//! `excluded_hosts`（用户 2026-09-05 决定，见本文档触发记录）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -19,9 +17,10 @@ use agent_vitals_data::repository::{DailySummaryQuery, MonthlySummaryQuery, Summ
 
 use crate::clock::{today_beijing, yesterday_beijing};
 
-/// Stage 0 的宿主接线状态：真正读数据的 vs. 还没接的。
-const WIRED_HOSTS: &[&str] = &["codex", "dsh"];
-const NOT_YET_WIRED_HOSTS: &[&str] = &["claude-code"];
+/// Stage 0 的宿主接线状态：真正读数据的 vs. 还没接的。三宿主全接完后
+/// `NOT_YET_WIRED_HOSTS` 为空——`excluded_hosts` 只剩永久范围外的 WorkBuddy。
+const WIRED_HOSTS: &[&str] = &["claude-code", "codex", "dsh"];
+const NOT_YET_WIRED_HOSTS: &[&str] = &[];
 const PERMANENTLY_EXCLUDED_HOSTS: &[&str] = &["workbuddy"];
 
 fn excluded_hosts() -> BTreeSet<String> {
@@ -202,6 +201,95 @@ fn codex_host_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAm
     }
 }
 
+/// Claude Code 的月份/日期窗口 → `HostAmount`（§8.4 的 Claude Code 栏）。
+///
+/// 数据源是 `sessions::claude_ledger` 同一份 `state_dir()/claude-ledger.json`
+/// （`days: {日期: {模型: 4 型 snake tokens}}` flat 直图），计价走 core 单一
+/// 决策点 `agent_vitals_domain::cost::claude_day_cost`（与托盘 overview 的
+/// claude 今日/当月估、CLI 会话账是同一份读法分界，不长第二份计价规则）。
+/// 窗口内逐日折算后按 `currency_totals` 同币合并（claude 无时段价，同币相加
+/// 安全——托盘 `claude_estimates` 的原注释），**跨币永不相加**。
+///
+/// 两个 basis 的分栏是托盘既有口径的 DTO 化（`metered_amount` 的注释原文）：
+/// - **CNY 流 → `MeteredEstimate`**：deepseek 顶层官方卡按量折算，但 claude
+///   ledger 的 token 折叠看不到真实逐请求拆分（relay 报恒定低命中，估算是
+///   保守上界），托盘合并行因此标 `≈`——估算就是估算，不冒充实测账单
+///   （`summable_into_total` 对 MeteredEstimate 是 false）。
+/// - **USD 流 → `ApiEquivalent`**：anthropic 目录卡视作套餐覆盖（spec §3.1
+///   原话「混币不能相加」，USD 流只在行内完全没有 ¥ 侧时才单独浮出）——
+///   套餐消耗的等价 API 标价，只作诊断。
+///
+/// 窗口内没有任何账日 → Unavailable 不是 ¥0。有账日但全部模型都无卡可报
+/// （全 unknown 日：有 token、无钱）→ 金额表留空 + `has_unresolved`——
+/// `CostBasis::Unresolved` 「不得归零」的纪律：观测到了，但价不可确认，
+/// 既不当 0 也不当没测（freshness 照报）。`unpriced_tokens > 0` 或任一日
+/// `pricing_basis == "partial"`（时变卡没有峰谷分辨率）→ `has_unresolved`。
+///
+/// 已知局限：ledger 只装当月（`claude_sync` 全量重建时滚动），历史月份的
+/// 查询诚实报 Unavailable——与 DSH 有 month-archive.json 归档不同，claude
+/// 侧确实没有可读的历史数据，不是"有而不读"。
+fn claude_host_amount(window_prefix: &str) -> HostAmount {
+    let claude_no_data = || HostAmount {
+        host_id: "claude-code".to_string(),
+        amounts_by_basis: BTreeMap::new(),
+        has_unresolved: false,
+        freshness: Freshness::unavailable(),
+    };
+    let ledger = crate::state::read_json(&crate::sessions::claude_ledger::ledger_path());
+    let days = ledger
+        .as_ref()
+        .and_then(|l| l.get("days"))
+        .and_then(|d| d.as_object())
+        .map(|d| {
+            let mut in_window: Vec<(&String, &serde_json::Value)> = d
+                .iter()
+                .filter(|(k, _)| k.starts_with(window_prefix))
+                .collect();
+            // 账日升序：同币求和的浮点顺序确定，跨平台字节一致。
+            in_window.sort_by(|a, b| a.0.cmp(b.0));
+            in_window
+        })
+        .unwrap_or_default();
+    if days.is_empty() {
+        return claude_no_data();
+    }
+    let pricing = agent_vitals_domain::cost::load_pricing();
+    let mut cny = 0.0f64;
+    let mut usd = 0.0f64;
+    let mut unpriced = 0i64;
+    let mut any_partial = false;
+    for (date, day) in &days {
+        if let Some(report) = agent_vitals_domain::cost::claude_day_cost(day, &pricing) {
+            let totals = report.get("currency_totals");
+            cny += totals.and_then(|t| t.get("CNY")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            usd += totals.and_then(|t| t.get("USD")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            unpriced += report
+                .get("unpriced_tokens")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            any_partial |= report.get("pricing_basis").and_then(|v| v.as_str()) == Some("partial");
+        }
+        let _ = date; // 排序键，循环里不用
+    }
+    // freshness 的观测日 = 窗口内**最晚的账日**（含全 unknown 日——观测到
+    // token 就是观测，与有没有折出钱无关）。
+    let latest = days.last().map(|(k, _)| k.as_str());
+    let mut amounts_by_basis = BTreeMap::new();
+    if cny > 0.0 {
+        amounts_by_basis.insert(BillingBasis::MeteredEstimate, cny);
+    }
+    if usd > 0.0 {
+        amounts_by_basis.insert(BillingBasis::ApiEquivalent, usd);
+    }
+    HostAmount {
+        host_id: "claude-code".to_string(),
+        amounts_by_basis,
+        has_unresolved: unpriced > 0 || any_partial,
+        freshness: latest.map(day_freshness).unwrap_or_else(Freshness::unavailable),
+    }
+}
+
+
 /// `days` map 里最晚的日期键（"YYYY-MM-DD" 字符串序等价于日期序）。
 fn latest_day_key(days: &serde_json::Value) -> Option<String> {
     days.as_object()?.keys().max().cloned()
@@ -222,6 +310,10 @@ impl SummaryRepository for JsonSummaryRepository {
         by_host.insert(
             "codex".to_string(),
             codex_host_amount(&codex_home(), &query.month, None),
+        );
+        by_host.insert(
+            "claude-code".to_string(),
+            claude_host_amount(&query.month),
         );
 
         let freshness = aggregate_freshness(&by_host);
@@ -260,6 +352,11 @@ impl SummaryRepository for JsonSummaryRepository {
         by_host.insert(
             "codex".to_string(),
             codex_host_amount(&codex_home(), &query.date, Some(&query.date)),
+        );
+        // claude 账日本身按日期归属，窗口 = 完整日期前缀即得该日。
+        by_host.insert(
+            "claude-code".to_string(),
+            claude_host_amount(&query.date),
         );
 
         let freshness = aggregate_freshness(&by_host);
@@ -309,15 +406,18 @@ mod tests {
             assert!(dsh.amounts_by_basis.is_empty());
             assert_eq!(dsh.freshness.state, FreshnessState::Unavailable);
             // codex 已接线（Stage 0.4b）：进 `by_host`（DSH 无数据的 2020-01，
-            // 这台真机上的 codex 2020-01 也必然无小时桶 → Unavailable），
-            // `excluded_hosts` 只剩 claude-code 与 workbuddy。
+            // 这台真机上的 codex 2020-01 也必然无小时桶 → Unavailable）。
+            // claude-code 也已接线（Stage 0.4c）：ledger 只装当月，2020-01
+            // 必然无账日 → Unavailable。`excluded_hosts` 只剩 workbuddy。
             assert_eq!(summary.by_host["codex"].freshness.state, FreshnessState::Unavailable);
             assert!(summary.by_host["codex"].amounts_by_basis.is_empty());
-            assert!(summary.excluded_hosts.contains("claude-code"));
+            assert_eq!(summary.by_host["claude-code"].freshness.state, FreshnessState::Unavailable);
+            assert!(summary.by_host["claude-code"].amounts_by_basis.is_empty());
             assert!(summary.excluded_hosts.contains("workbuddy"));
             assert!(!summary.excluded_hosts.contains("codex"));
             assert!(!summary.excluded_hosts.contains("dsh"));
-            assert_eq!(summary.coverage.measured_fields, 2);
+            assert!(!summary.excluded_hosts.contains("claude-code"));
+            assert_eq!(summary.coverage.measured_fields, 3);
             assert_eq!(summary.coverage.total_fields, 3);
         });
     }
@@ -422,12 +522,106 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 接线结构（真机）：codex 进 `by_host`、不进 `excluded_hosts`；汇总
-    /// 新鲜度 = 最新被观测到的宿主（不是硬编码 dsh）；codex 的 ApiEquivalent
-    /// 不得混进 `total_summable`（可汇总总额必须等于 dsh 的 MeteredActual，
-    /// codex 再大也不出现）。
+    /// 写一份 claude-ledger.json fixture（`days: {日期: {模型: 4 型 snake}}`
+    /// flat 直图，`claude_sync` 真机形状）。走 `with_home`——`state_dir()` 读
+    /// `AGENT_VITALS_HOME`。模型由调用方给：deepseek-v4-flash（顶层官方 CNY
+    /// 卡）/ claude-opus-5（catalog anthropic USD 卡）/ 未知模型测 unpriced。
+    fn write_ledger(models: serde_json::Value) {
+        let ledger = json!({ "days": { "2026-09-02": models } });
+        crate::state::atomic_write_json(
+            &crate::state::state_dir().join("claude-ledger.json"),
+            &ledger,
+        );
+    }
+
     #[test]
-    fn monthly_summary_wires_codex_without_leaking_into_total() {
+    fn claude_cny_day_is_metered_estimate_not_summable() {
+        with_home(|| {
+            write_ledger(json!({
+                "deepseek-v4-flash": {"input_tokens": 1_000_000,
+                                      "cache_read_input_tokens": 0,
+                                      "cache_creation_input_tokens": 0,
+                                      "output_tokens": 100_000},
+            }));
+            let amount = claude_host_amount("2026-09");
+            assert!(amount.amounts_by_basis.contains_key(&BillingBasis::MeteredEstimate));
+            assert!(amount.amounts_by_basis[&BillingBasis::MeteredEstimate] > 0.0);
+            // 纯 CNY 日没有 USD 流：anthropic 的 ApiEquivalent 档不该出现。
+            assert!(!amount.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent));
+            // 估算不许冒充账单（托盘合并行标 ≈ 的同一纪律）。
+            assert!(!BillingBasis::MeteredEstimate.summable_into_total());
+            assert!(!amount.has_unresolved);
+            assert_eq!(amount.freshness.last_observed_at.as_deref(), Some("2026-09-02T00:00:00Z"));
+            assert_ne!(amount.freshness.state, FreshnessState::Unavailable);
+        });
+    }
+
+    #[test]
+    fn claude_usd_day_is_api_equivalent() {
+        with_home(|| {
+            write_ledger(json!({
+                "claude-opus-5": {"input_tokens": 1_000_000,
+                                  "cache_read_input_tokens": 0,
+                                  "cache_creation_input_tokens": 0,
+                                  "output_tokens": 100_000},
+            }));
+            let amount = claude_host_amount("2026-09");
+            assert!(amount.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent));
+            assert!(amount.amounts_by_basis[&BillingBasis::ApiEquivalent] > 0.0);
+            // 套餐覆盖流不落 MeteredEstimate 档（CNY/USD 分栏 = 托盘口径）。
+            assert!(!amount.amounts_by_basis.contains_key(&BillingBasis::MeteredEstimate));
+            assert!(!amount.has_unresolved);
+        });
+    }
+
+    #[test]
+    fn claude_unknown_model_is_unresolved_not_zero() {
+        with_home(|| {
+            write_ledger(json!({
+                "mystery-model": {"input_tokens": 500_000,
+                                  "cache_read_input_tokens": 0,
+                                  "cache_creation_input_tokens": 0,
+                                  "output_tokens": 50_000},
+            }));
+            let amount = claude_host_amount("2026-09");
+            // 全 unknown 日：有 token、价不可确认——金额表留空（不得归零），
+            // has_unresolved 标记；但账日存在 → freshness 照报，不当没测。
+            assert!(amount.amounts_by_basis.is_empty());
+            assert!(amount.has_unresolved);
+            assert_ne!(amount.freshness.state, FreshnessState::Unavailable);
+            assert_eq!(amount.freshness.last_observed_at.as_deref(), Some("2026-09-02T00:00:00Z"));
+        });
+    }
+
+    #[test]
+    fn claude_window_filter_miss_is_unavailable_not_zero() {
+        with_home(|| {
+            write_ledger(json!({
+                "deepseek-v4-flash": {"input_tokens": 1_000_000,
+                                      "cache_read_input_tokens": 0,
+                                      "cache_creation_input_tokens": 0,
+                                      "output_tokens": 100_000},
+            }));
+            // 月窗口不命中（ledger 只装当月，历史月份诚实报缺）。
+            let miss_month = claude_host_amount("2020-01");
+            assert!(miss_month.amounts_by_basis.is_empty());
+            assert_eq!(miss_month.freshness.state, FreshnessState::Unavailable);
+            // 日窗口：账日命中 → 有钱；相邻日缺席 → Unavailable 不是 ¥0。
+            let hit = claude_host_amount("2026-09-02");
+            assert!(hit.amounts_by_basis[&BillingBasis::MeteredEstimate] > 0.0);
+            let miss_day = claude_host_amount("2026-09-03");
+            assert!(miss_day.amounts_by_basis.is_empty());
+            assert_eq!(miss_day.freshness.state, FreshnessState::Unavailable);
+        });
+    }
+
+    /// 接线结构（真机）：三宿主全进 `by_host`、不进 `excluded_hosts`；汇总
+    /// 新鲜度 = 最新被观测到的宿主（不是硬编码 dsh）；非 summable 的金额
+    /// （codex 的 ApiEquivalent、claude 的 MeteredEstimate/ApiEquivalent）
+    /// 不得混进 `total_summable`——可汇总总额必须恰好等于各宿主 summable
+    /// 档之和，估算与诊断价再大也不出现。
+    #[test]
+    fn monthly_summary_wires_all_hosts_without_leaking_into_total() {
         with_home(|| {
             let repo = JsonSummaryRepository;
             let summary =
@@ -435,7 +629,10 @@ mod tests {
             assert!(summary.contract_violations().is_empty(), "{:?}", summary.contract_violations());
             assert!(summary.by_host.contains_key("codex"));
             assert!(summary.by_host.contains_key("dsh"));
+            assert!(summary.by_host.contains_key("claude-code"));
             assert!(!summary.excluded_hosts.contains("codex"));
+            assert!(!summary.excluded_hosts.contains("claude-code"));
+            assert_eq!(summary.excluded_hosts, BTreeSet::from(["workbuddy".to_string()]));
             // 汇总新鲜度 = 宿主里最新的 last_observed_at（字典序=时间序，两处
             // 格式统一 `YYYY-MM-DDT00:00:00Z`）。
             let max_host = summary
@@ -444,14 +641,19 @@ mod tests {
                 .filter_map(|h| h.freshness.last_observed_at.clone())
                 .max();
             assert_eq!(summary.freshness.last_observed_at, max_host);
-            // spec §4 汇总纪律：ApiEquivalent（诊断价）不得计入总额。
-            let dsh_summable = summary.by_host["dsh"]
-                .amounts_by_basis
-                .iter()
-                .filter(|(b, _)| b.summable_into_total())
-                .map(|(_, v)| v)
+            // spec §4 汇总纪律：总额只收 summable 三档（estimate/诊断价不入）。
+            let host_summable = summary
+                .by_host
+                .values()
+                .map(|h| {
+                    h.amounts_by_basis
+                        .iter()
+                        .filter(|(b, _)| b.summable_into_total())
+                        .map(|(_, v)| v)
+                        .sum::<f64>()
+                })
                 .sum::<f64>();
-            assert_eq!(summary.total_summable(), dsh_summable);
+            assert_eq!(summary.total_summable(), host_summable);
         });
     }
 

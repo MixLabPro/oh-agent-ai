@@ -13,7 +13,9 @@ use agent_vitals_domain::cost::claude_day_total_tokens;
 use crate::state::{read_json, state_dir};
 use serde_json::Value;
 
-fn ledger_path() -> std::path::PathBuf {
+/// ledger 路径单点：`state_dir()/claude-ledger.json`。v0.9 Stage 0.4c 起
+/// `summary.rs` 的 claude 宿主金额也走这里——路径字面量只许出现这一处。
+pub(crate) fn ledger_path() -> std::path::PathBuf {
     state_dir().join("claude-ledger.json")
 }
 
