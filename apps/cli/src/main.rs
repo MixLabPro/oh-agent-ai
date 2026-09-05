@@ -472,6 +472,18 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
+    /// Reconcile the facts index against the summary DTO (tokens_by_host),
+    /// per host: measured / no-facts (facts plane not yet ingested for this
+    /// host — a coverage gap, never rendered as zero) / index-only (anomaly).
+    /// Stage B; closes the reconcile item left open by Stage A.
+    DataReconcile {
+        /// Month to reconcile against ("YYYY-MM"; default: current month)
+        #[arg(long)]
+        month: Option<String>,
+        /// Output the report as JSON
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
     /// `sessions` row is the join anchor across the three joinable surfaces (spec
@@ -2033,6 +2045,55 @@ session_store={store} fold={fold}"
             }
             Err(e) => {
                 eprintln!("data-rebuild-index failed: {e}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    // data-reconcile（Stage B）：facts 索引 vs DTO tokens_by_host 逐宿主对账。
+    // 「没 ingest」= no-facts 缺口，「0 tokens」只在对账成立时出现。
+    if let Some(Cmd::DataReconcile { month, rows_json }) = &args.cmd {
+        let month = month
+            .clone()
+            .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+        let summary = agent_vitals_data::repository::SummaryRepository::monthly_summary(
+            &agent_vitals_runtime::summary::JsonSummaryRepository,
+            &agent_vitals_data::repository::MonthlySummaryQuery { month: month.clone() },
+        );
+        // DTO 侧 tokens_by_host 是 typed BTreeMap<String, HostTokens>——逐宿主
+        // to_json() 成对账面的 {total,...} 形状。
+        let dto_map: serde_json::Map<String, Value> = summary
+            .tokens_by_host
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_json()))
+            .collect();
+        match agent_vitals_runtime::ingest_service::reconcile_index_vs_dto(
+            &agent_vitals_runtime::home::data_home(),
+            &dto_map,
+        ) {
+            Ok(report) => {
+                if *rows_json {
+                    let mut out = report;
+                    out["month"] = serde_json::json!(month);
+                    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+                } else {
+                    println!("Reconcile (facts index vs summary DTO, month {month}):");
+                    for h in report["hosts"].as_array().unwrap_or(&vec![]) {
+                        println!(
+                            "  {:<12} {:<10} index={:<10} dto={:<10} delta={}",
+                            h["host"].as_str().unwrap_or("?"),
+                            h["state"].as_str().unwrap_or("?"),
+                            h["index_total"],
+                            h["dto_total"],
+                            h["delta"],
+                        );
+                    }
+                    println!("reconciled: {}", report["reconciled"]);
+                }
+            }
+            Err(e) => {
+                eprintln!("data-reconcile failed: {e}");
                 std::process::exit(2);
             }
         }

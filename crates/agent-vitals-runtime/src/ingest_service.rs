@@ -238,6 +238,68 @@ pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, S
     Ok(report)
 }
 
+/// Stage B（Stage A 剩余项收口）：facts 索引 vs 消费方 DTO 的全量 reconcile。
+///
+/// `dto_tokens_by_host` = `SummaryRepository::monthly_summary(..).tokens_by_host`
+/// 序列化（`HostTokens::to_json`，键 `total`）。报告三层（诚实性纪律——
+/// **「没 ingest」绝不渲染成「0 tokens」**）：
+/// - `measured`：索引里有该宿主事实 → 数值对账（delta ≠ 0 即 mismatch）；
+/// - `no-facts`：DTO 知道该宿主、索引一条事实都没有 → 数据面未接，缺口
+///   如实标出（这正是本报告的价值：告诉你 facts 平面还没覆盖生产路径）；
+/// - `index-only`：DTO 不知道该宿主但索引有事实（异常状态，也要浮出来）。
+pub fn reconcile_index_vs_dto(
+    data_home: &Path,
+    dto_tokens_by_host: &serde_json::Map<String, Value>,
+) -> Result<Value, String> {
+    let facts_dir = data_home.join("facts");
+    let (idx, _seeded) = FactsIndex::open_or_rebuild(&default_index_path(data_home), &facts_dir)
+        .map_err(|e| format!("facts index: {e}"))?;
+    let index_totals = idx.tokens_by_host().map_err(|e| format!("facts index: {e}"))?;
+
+    let mut hosts = Vec::new();
+    let mut reconciled = true;
+    let mut keys: std::collections::BTreeSet<&String> =
+        dto_tokens_by_host.keys().collect();
+    for k in index_totals.as_object().map(|m| m.keys()).into_iter().flatten() {
+        keys.insert(k);
+    }
+    for host in keys {
+        let host = host.as_str();
+        let idx_total = index_totals
+            .get(host)
+            .and_then(|v| v.get("total"))
+            .and_then(Value::as_i64);
+        let dto_total = dto_tokens_by_host
+            .get(host)
+            .and_then(|v| v.get("total"))
+            .and_then(Value::as_i64);
+        let (state, mismatch) = match (idx_total, dto_total) {
+            (Some(a), Some(b)) if a == 0 && b == 0 => ("measured", false),
+            (Some(a), Some(b)) => ("measured", a != b),
+            (None, Some(_)) => ("no-facts", false), // 缺口，不是对不上
+            (Some(_), None) => ("index-only", true),
+            (None, None) => unreachable!("host from union of keys"),
+        };
+        if mismatch {
+            reconciled = false;
+        }
+        hosts.push(serde_json::json!({
+            "host": host,
+            "state": state,
+            "index_total": idx_total,
+            "dto_total": dto_total,
+            "delta": match (idx_total, dto_total) {
+                (Some(a), Some(b)) => Some(a - b),
+                _ => None,
+            },
+        }));
+    }
+    Ok(serde_json::json!({
+        "reconciled": reconciled,
+        "hosts": hosts,
+    }))
+}
+
 /// Stage B：`data-rebuild-index` 的服务面——删库并从权威 JSONL 全量重放
 /// （spec §5 建议命令；CLI 只做参数解析与渲染，编排在这里）。
 pub fn rebuild_index(
@@ -314,6 +376,45 @@ mod tests {
         let r2 = ingest_facts(&home, &[fact("codex", "e1")]).unwrap();
         assert_eq!(r2.index_inserted, 0);
         assert!(!r2.index_rebuilt);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn reconcile_reports_measured_gap_and_index_only() {
+        let home = tmp_home("recon");
+        // measured：codex 两边一致。
+        ingest_facts(&home, &[fact("codex", "e1")]).unwrap();
+        // fact() 的 uncached=100：DTO 侧给同值。
+        let mut dto = serde_json::Map::new();
+        dto.insert(
+            "codex".to_string(),
+            serde_json::json!({"total": 100, "uncached_input": 100, "cache_read": 0,
+                               "cache_write": 0, "output": 0}),
+        );
+        dto.insert(
+            "dsh".to_string(),
+            serde_json::json!({"total": 555, "uncached_input": 555, "cache_read": 0,
+                               "cache_write": 0, "output": 0}),
+        );
+        let r = reconcile_index_vs_dto(&home, &dto).unwrap();
+        assert_eq!(r["reconciled"], serde_json::json!(true));
+        let by_host: std::collections::BTreeMap<String, Value> = r["hosts"]
+            .as_array().unwrap().iter()
+            .map(|h| (h["host"].as_str().unwrap().to_string(), h.clone()))
+            .collect();
+        assert_eq!(by_host["codex"]["state"], serde_json::json!("measured"));
+        // dsh：DTO 有、索引没有 → no-facts（缺口，不算 mismatch）。
+        assert_eq!(by_host["dsh"]["state"], serde_json::json!("no-facts"));
+        assert_eq!(by_host["dsh"]["index_total"], Value::Null);
+        // index-only：索引有、DTO 没有 → mismatch。
+        ingest_facts(&home, &[fact("dsh", "e2")]).unwrap();
+        let mut dto_no_dsh = dto.clone();
+        dto_no_dsh.remove("dsh");
+        let r2 = reconcile_index_vs_dto(&home, &dto_no_dsh).unwrap();
+        assert_eq!(r2["reconciled"], serde_json::json!(false));
+        let dsh_row = r2["hosts"].as_array().unwrap().iter()
+            .find(|h| h["host"] == "dsh").unwrap();
+        assert_eq!(dsh_row["state"], serde_json::json!("index-only"));
         let _ = std::fs::remove_dir_all(&home);
     }
 
