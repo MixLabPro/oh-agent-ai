@@ -81,6 +81,7 @@
       "_doc": "用户确认的订阅套餐(basis=user-reported-invoice,2026-09-02 口述)。订阅覆盖该提供商全部用量,没有边际 token 账单——摊销单价仅供感知层(总成本/总用量),不得冒充 confirmed waste spend(ATTRIBUTABLE_WASTE.md §6)。计费模式判定链(2026-09-02,按序执行,前三层不依赖用户):①账户层读 ~/.claude.json::oauthAccount.billingType(有订阅值→套餐候选);②路由层读 ANTHROPIC_BASE_URL/AUTH_TOKEN/ANTHROPIC_API_KEY(非官方端点→按量);③事件层扫语料 quotaLimits 拒绝史(five_hour/seven_day 出现→订阅窗口在跑,isUsingOverage=0→撞窗被拒不兜底);④前三层判不出或量与窗口矛盾→才向用户确认一句。session.jsonl 不保留端点,历史路由靠模型名+缓存语义推断(claude-* 且 cache_creation>0→官方端点;deepseek-* 且 cc=0→DeepSeek 端点)。",
       "claude-pro": {
         "provider": "anthropic", "currency": "USD", "amount_per_month": 20.0,
+        "billing_period_start": "2025-07-20",
         "reported_at": "2026-09-02",
         "note": "Claude Pro $20/月(账户层已核实:~/.claude.json oauthAccount.billingType=apple_subscription,hasExtraUsageEnabled=false,超额被拒不兜底)。覆盖核对:Claude Code 语料 claude 族 19,248 事件/月(逻辑 10,861)远超 Pro 5h 窗口限额;语料内 20 条 five_hour/seven_day 配额拒绝(quotaLimits,resetsAt 2026-08-19→09-01,isUsingOverage=0)证明官方端点流量挂在订阅窗口体系下,且拒绝史在 09-01 路由切换处终止;当前路由 ANTHROPIC_BASE_URL=api.deepseek.com 全按量(Pro 不参与)。8 月 claude 流量量级超窗口,必然部分走 API——套餐/按量的切割日志不可裁定,待用户一句话确认(是否设过 ANTHROPIC_API_KEY)。"
       },

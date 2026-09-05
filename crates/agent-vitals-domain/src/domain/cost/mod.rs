@@ -33,7 +33,8 @@ pub use claude::{
 // 与计价面解耦（无价卡模型 glm-* 也能归属）。2026-09-05。
 mod billing;
 pub use billing::{
-    billing_mode_of, billing_route_of, cache_hit_ratio, subscription_fee_of, BillingMode,
+    billing_mode_of, billing_route_of, cache_hit_ratio, declared_subscriptions,
+    subscription_fee_of, BillingMode,
 };
 
 const PRICING_JSON: &str = include_str!("../../../../../assets/pricing.json");

@@ -188,14 +188,22 @@ impl CoverageStatus {
     }
 }
 
-/// 一个宿主在某个范围内的金额，按 [`BillingBasis`] 分桶——绝不是脱离来源的
-/// scalar（spec §3.1："任何 UI 若只消费金额而丢弃这些字段，视为契约违规"）。
+/// 一个宿主（或 billing_source 条目）在某个范围内的金额，按 [`BillingBasis`]
+/// 分桶——绝不是脱离来源的 scalar（spec §3.1："任何 UI 若只消费金额而丢弃
+/// 这些字段，视为契约违规"）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostAmount {
     pub host_id: String,
     /// `BillingBasis::Unresolved` 意义上没有金额，故 key 类型本身就排除了
     /// unresolved——见 `has_unresolved` 字段。
     pub amounts_by_basis: BTreeMap<BillingBasis, f64>,
+    /// 条目级币种。**为什么现在才加**（Stage C 逼出的缺口）：订阅费摊入后
+    /// `FixedSubscription` 的 20/114/118 是裸数字——UI 没法知道是 $20 还是
+    /// ¥20，渲染出来就是编造币种。`by_provider` 条目天然单币（一个
+    /// billing_source 一张价卡）→ `Some`；`by_host` 条目可能混币
+    /// （claude-code 的 CNY 估 + USD 折）→ `None`（币种仍由旧约定承载，
+    /// 不假装声明）。`None` 不代表"没有币种"，代表"本条目未声明单币"。
+    pub currency: Option<String>,
     pub has_unresolved: bool,
     pub freshness: Freshness,
 }
@@ -227,6 +235,7 @@ impl HostAmount {
             "host_id": self.host_id,
             "amounts_by_basis": Value::Object(by_basis),
             "summable_total": self.summable_total(),
+            "currency": self.currency,
             "has_unresolved": self.has_unresolved,
             "freshness": self.freshness.to_json(),
         })
@@ -279,6 +288,22 @@ impl MonthlySummary {
 
     pub fn has_unresolved(&self) -> bool {
         self.by_host.values().any(|h| h.has_unresolved)
+    }
+
+    /// **真实总支出，按币种分栏**（Stage C）：`by_provider` 条目的 summable
+    /// 档（FixedSubscription 月费 + MeteredActual + HostBilled）之和。与
+    /// [`Self::total_summable`]（by_host 视角、冻结语义）并存的原因：订阅
+    /// 费摊在 by_provider 条目上——只算 by_host 会把"这个月真实花了多少"
+    /// 谎报成 0（2026-09 真机：total_summable=0 而订阅费 252 已在付）。
+    /// 跨币**分桶不相加**；键空串 = 条目未声明币种（`HostAmount.currency
+    /// == None`）的金额，不得冒充任何币。空 map = 没有任何真实支出条目。
+    pub fn total_actual_spend(&self) -> BTreeMap<String, f64> {
+        let mut out: BTreeMap<String, f64> = BTreeMap::new();
+        for h in self.by_provider.values() {
+            let key = h.currency.clone().unwrap_or_default();
+            *out.entry(key).or_insert(0.0) += h.summable_total();
+        }
+        out
     }
 
     /// 校验模块头三条不变式，返回违反描述；空 vec = 合规。
@@ -335,6 +360,7 @@ impl MonthlySummary {
             "by_host": Value::Object(by_host),
             "by_provider": Value::Object(by_provider),
             "total_summable": self.total_summable(),
+            "total_actual_spend": self.total_actual_spend(),
             "has_unresolved": self.has_unresolved(),
             "coverage": self.coverage.to_json(),
             "freshness": self.freshness.to_json(),
@@ -371,6 +397,18 @@ impl DailySummary {
             .values()
             .map(HostAmount::summable_total)
             .fold(0.0, |a, b| a + b)
+    }
+
+    /// 真实总支出，按币种分栏——见 [`MonthlySummary::total_actual_spend`]。
+    /// **日粒度的 summable 档只有按量流**（订阅费不摊进日账），所以这里的
+    /// 值恒不包含 FixedSubscription——与月度同名方法对比时不得误读。
+    pub fn total_actual_spend(&self) -> BTreeMap<String, f64> {
+        let mut out: BTreeMap<String, f64> = BTreeMap::new();
+        for h in self.by_provider.values() {
+            let key = h.currency.clone().unwrap_or_default();
+            *out.entry(key).or_insert(0.0) += h.summable_total();
+        }
+        out
     }
 
     pub fn contract_violations(&self) -> Vec<String> {
@@ -417,6 +455,7 @@ impl DailySummary {
             "by_host": Value::Object(by_host),
             "by_provider": Value::Object(by_provider),
             "total_summable": self.total_summable(),
+            "total_actual_spend": self.total_actual_spend(),
             "coverage": self.coverage.to_json(),
             "freshness": self.freshness.to_json(),
             "excluded_hosts": self.excluded_hosts.iter().cloned().collect::<Vec<_>>(),
@@ -443,6 +482,7 @@ mod tests {
         HostAmount {
             host_id: host.to_string(),
             amounts_by_basis,
+            currency: None,
             has_unresolved: false,
             freshness: fresh("2026-09-01T00:00:00Z"),
         }
@@ -457,6 +497,7 @@ mod tests {
         let empty = HostAmount {
             host_id: "dsh".to_string(),
             amounts_by_basis: BTreeMap::new(),
+            currency: None,
             has_unresolved: false,
             freshness: Freshness::unavailable(),
         };
@@ -497,6 +538,7 @@ mod tests {
         let h = HostAmount {
             host_id: "codex".to_string(),
             amounts_by_basis,
+            currency: None,
             has_unresolved: false,
             freshness: fresh("2026-09-01T00:00:00Z"),
         };

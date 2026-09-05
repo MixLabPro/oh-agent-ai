@@ -90,6 +90,7 @@ fn dsh_host_amount(cost: Option<serde_json::Value>, latest_day: Option<&str>) ->
     HostAmount {
         host_id: "dsh".to_string(),
         amounts_by_basis,
+        currency: None,
         has_unresolved: false,
         freshness,
     }
@@ -129,6 +130,7 @@ fn codex_host_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAm
     let codex_no_data = || HostAmount {
         host_id: "codex".to_string(),
         amounts_by_basis: BTreeMap::new(),
+        currency: None,
         has_unresolved: false,
         freshness: Freshness::unavailable(),
     };
@@ -220,6 +222,7 @@ fn codex_host_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAm
     HostAmount {
         host_id: "codex".to_string(),
         amounts_by_basis,
+        currency: None,
         has_unresolved: unpriced > 0 || mode_unknown,
         freshness,
     }
@@ -256,6 +259,7 @@ fn claude_host_amount(window_prefix: &str) -> HostAmount {
     let claude_no_data = || HostAmount {
         host_id: "claude-code".to_string(),
         amounts_by_basis: BTreeMap::new(),
+        currency: None,
         has_unresolved: false,
         freshness: Freshness::unavailable(),
     };
@@ -308,6 +312,7 @@ fn claude_host_amount(window_prefix: &str) -> HostAmount {
     HostAmount {
         host_id: "claude-code".to_string(),
         amounts_by_basis,
+        currency: None,
         has_unresolved: unpriced > 0 || any_partial,
         freshness: latest.map(day_freshness).unwrap_or_else(Freshness::unavailable),
     }
@@ -319,6 +324,9 @@ fn claude_host_amount(window_prefix: &str) -> HostAmount {
 /// `has_unresolved`，绝不跨币相加。
 struct ProviderAcc {
     by_basis_currency: BTreeMap<BillingBasis, BTreeMap<String, f64>>,
+    /// 条目级币种（HostAmount.currency）：per-provider 条目天然单币，出现第
+    /// 二种币时置 None 并标 unresolved（finish 里金额表整体留空）。
+    currency: Option<String>,
     unresolved: bool,
     latest: Option<String>,
 }
@@ -327,6 +335,7 @@ impl ProviderAcc {
     fn new() -> Self {
         Self {
             by_basis_currency: BTreeMap::new(),
+            currency: None,
             unresolved: false,
             latest: None,
         }
@@ -339,6 +348,17 @@ impl ProviderAcc {
     }
 
     fn add(&mut self, basis: BillingBasis, currency: &str, amount: f64) {
+        // 条目币种一致性：per-provider 天然单币，出现第二种币 → 撤销声明
+        // （currency=None）+ unresolved——finish 的单币判定靠它，不在这里
+        // 对齐就会把 USD 和 CNY 静默装进同一条目冒充单币。
+        match &self.currency {
+            None => self.currency = Some(currency.to_string()),
+            Some(c) if c == currency => {}
+            Some(_) => {
+                self.currency = None;
+                self.unresolved = true;
+            }
+        }
         *self
             .by_basis_currency
             .entry(basis)
@@ -347,7 +367,7 @@ impl ProviderAcc {
             .or_insert(0.0) += amount;
     }
 
-    fn finish(self, key: &str) -> HostAmount {
+    fn finish(mut self, key: &str) -> HostAmount {
         let mut amounts_by_basis = BTreeMap::new();
         let mut multi_currency = false;
         for (basis, cur_map) in self.by_basis_currency {
@@ -363,10 +383,13 @@ impl ProviderAcc {
         }
         if multi_currency {
             amounts_by_basis.clear();
+            self.currency = None;
+            self.unresolved = true;
         }
         HostAmount {
             host_id: key.to_string(),
             amounts_by_basis,
+            currency: self.currency,
             has_unresolved: self.unresolved || multi_currency,
             freshness: self
                 .latest
@@ -508,6 +531,7 @@ fn dsh_provider_amount(
 ) -> HostAmount {
     let mut h = dsh_host_amount(cost, latest_day);
     h.host_id = "dsh/deepseek-official".to_string();
+    h.currency = Some("CNY".to_string());
     h
 }
 
@@ -516,8 +540,88 @@ fn dsh_provider_amount(
 fn codex_provider_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAmount {
     let mut h = codex_host_amount(home, filter_key, day);
     h.host_id = "codex/openai".to_string();
+    // ApiEquivalent 折算用的 codex 价卡全表 USD（codex_pricing.json 无币种
+    // 字段、金额即美元——"total cost" 标签的既有语义）。
+    h.currency = Some("USD".to_string());
     h
 }
+
+/// Stage C：把已声明订阅的月费摊进 `by_provider` 的 `FixedSubscription` 档。
+///
+/// **这是「实际支出」缺失的另一半**：此前系统里订阅的钱根本不存在
+/// （`FixedSubscription` 零写入方）——用户每月真金白银付的 $20 + ¥114 +
+/// ¥118 不在任何账面，总额只收 DSH 按量。摊入后 `total_summable()`（它对
+/// FixedSubscription 本来就返回 true，spec §4「固定订阅可以按口径汇总」）
+/// 首次等于真实的月度总支出。
+///
+/// 三条纪律：
+/// 1. **不付用量也在付**——用 `declared_subscriptions` 全量枚举，给没有用
+///    量条目的 provider 补建条目（零用量的月份不能谎报成零支出）。宿主归
+///    属查 [`HOST_PROVIDER_MAP`]；映射不到的声明落 `unattributed/<provider>`
+///    条目可见，不静默丢钱。
+/// 2. **账期过滤**——查询月早于 `billing_period_start`（缺省 `reported_at`）
+///    的月份不摊：GLM 2026-09-05 才买，摊进 8 月就是编造历史支出（claude-pro
+///    填了真机 `oauthAccount.subscriptionCreatedAt=2025-07-20`，所以 8 月照摊）。
+///    `YYYY-MM` 前缀字符串比较即时间序。
+/// 3. **只进月、不进日**——本函数只在 `monthly_summary` 组装路径调用；
+///    月费不是日发生额，按日摊会造出「今天花了 ¥3.93」这种不存在的事实。
+///
+/// 同一 provider 声明重复时 `declared_subscriptions` 的首条语义保证只摊一次。
+fn apply_subscription_fees(
+    by_provider: &mut BTreeMap<String, HostAmount>,
+    month: &str,
+) {
+    let pricing = agent_vitals_domain::cost::load_pricing();
+    for (provider, currency, amount, period_start) in
+        agent_vitals_domain::cost::declared_subscriptions(&pricing)
+    {
+        // 账期未开始不摊（None 理论不可达——declared_subscriptions 已回落
+        // reported_at；防御性跳过而不是摊进所有历史）。
+        let Some(start) = period_start.as_deref() else { continue };
+        let start_month = &start[..start.len().min(7)];
+        if month < start_month {
+            continue;
+        }
+        let host = HOST_PROVIDER_MAP
+            .iter()
+            .find(|(_, providers)| providers.contains(&provider.as_str()))
+            .map(|(host, _)| host.to_string())
+            .unwrap_or_else(|| "unattributed".to_string());
+        let key = format!("{host}/{provider}");
+        let entry = by_provider.entry(key.clone()).or_insert_with(|| HostAmount {
+            host_id: key,
+            amounts_by_basis: BTreeMap::new(),
+            currency: None,
+            has_unresolved: false,
+            freshness: Freshness::unavailable(),
+        });
+        // 同 provider 重复摊的防线不在循环外而在取值语义：declared_
+        // subscriptions 已按「首条」去重（测试钉住），这里每个 provider 恰好
+        // 进一次循环。
+        *entry.amounts_by_basis.entry(BillingBasis::FixedSubscription).or_insert(0.0) += amount;
+        // 币种合并：零用量纯月费条目（如 glm 无 token 的月份）此前 currency
+        // 为 None，月费会掉进 total_actual_spend 的无币桶——用声明币种补齐；
+        // 与条目既有币种冲突（理论形状：同一 provider 两张币种不同的卡）时
+        // 撤销声明 + unresolved，绝不冒充单币。
+        match &entry.currency {
+            None => entry.currency = Some(currency),
+            Some(c) if *c == currency => {}
+            Some(_) => {
+                entry.currency = None;
+                entry.has_unresolved = true;
+            }
+        }
+    }
+}
+
+/// 宿主 → 该宿主可能出现的 billing_source 提供方。接线知识（与
+/// `WIRED_HOSTS` 同类）：新宿主/新提供方接线时同步维护；漏登记的已声明
+/// 订阅会落 `unattributed/<provider>` 条目可见，不会静默消失。
+const HOST_PROVIDER_MAP: &[(&str, &[&str])] = &[
+    ("claude-code", &["anthropic", "minimax", "zhipu-glm", "moonshot"]),
+    ("codex", &["openai"]),
+    ("dsh", &["deepseek-official", "shengsuanyun"]),
+];
 
 
 /// `days` map 里最晚的日期键（"YYYY-MM-DD" 字符串序等价于日期序）。
@@ -557,6 +661,7 @@ impl SummaryRepository for JsonSummaryRepository {
             codex_provider_amount(&codex_home(), &query.month, None),
         );
         by_provider.extend(claude_provider_amounts(&query.month));
+        apply_subscription_fees(&mut by_provider, &query.month);
 
         let freshness = aggregate_freshness(&by_host);
         let last_observed_at = freshness.last_observed_at.clone();
@@ -974,6 +1079,71 @@ mod tests {
                     .map(|(_, v)| v).sum::<f64>())
                 .sum();
             assert_eq!(via_host, host_only_sum);
+        });
+    }
+
+    /// Stage C 核心回归——订阅月费摊进 `FixedSubscription`：
+    /// - 有用量条目（anthropic）在原 `ApiEquivalent` 之上加 `FixedSubscription`；
+    /// - **零用量也补建条目**：订阅费不付用量也在付，空 home 里
+    ///   `claude-code/anthropic` 也要有 ¥0 用量 + $20 月费的条目；
+    /// - 账期过滤：查询月早于 `billing_period_start` 不摊（GLM 2026-09-05
+    ///   才买，摊进 2020-01 是编造历史支出）。
+    #[test]
+    fn subscription_fees_land_in_monthly_fixed_subscription() {
+        with_home(|| {
+            write_ledger(json!({
+                "claude-opus-5": {"input_tokens": 1_000_000,
+                                  "cache_read_input_tokens": 0,
+                                  "cache_creation_input_tokens": 0,
+                                  "output_tokens": 100_000},
+            }));
+            let repo = JsonSummaryRepository;
+            let summary =
+                repo.monthly_summary(&MonthlySummaryQuery { month: crate::clock::current_month_beijing() });
+            assert!(summary.contract_violations().is_empty(), "{:?}", summary.contract_violations());
+            let anthropic = &summary.by_provider["claude-code/anthropic"];
+            assert!(anthropic.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent));
+            assert_eq!(anthropic.amounts_by_basis[&BillingBasis::FixedSubscription], 20.0);
+            // 零用量补建：glm 有声明（2026-09 起效）但本 fixture 无 glm 用量。
+            let glm = &summary.by_provider["claude-code/zhipu-glm"];
+            assert_eq!(glm.amounts_by_basis[&BillingBasis::FixedSubscription], 118.0);
+            assert!(!glm.has_unresolved, "纯月费条目不标 unresolved");
+            // 账期过滤：2020-01 早于一切 period_start → 无任何订阅条目被补建。
+            let old = repo.monthly_summary(&MonthlySummaryQuery { month: "2020-01".to_string() });
+            assert!(!old.by_provider.contains_key("claude-code/anthropic"));
+            assert!(!old.by_provider.contains_key("claude-code/zhipu-glm"));
+            // FixedSubscription 可汇总：月度总额现在含订阅费（spec §4「固定
+            // 订阅可以按口径汇总」——总额首次等于真实月支出）。
+            assert!(BillingBasis::FixedSubscription.summable_into_total());
+            let summable = old.total_summable();
+            assert_eq!(summable, 0.0, "2020-01 无任何数据，总额不含月费");
+        });
+    }
+
+    /// 日粒度**不摊**订阅费（月费不是日发生额——按日摊会造出「今天花了
+    /// ¥3.93」这种不存在的事实）。同一份 fixture，daily 的 anthropic 条目
+    /// 只有 ApiEquivalent，没有 FixedSubscription。
+    #[test]
+    fn subscription_fees_never_leak_into_daily() {
+        with_home(|| {
+            write_ledger(json!({
+                "claude-opus-5": {"input_tokens": 1_000_000,
+                                  "cache_read_input_tokens": 0,
+                                  "cache_creation_input_tokens": 0,
+                                  "output_tokens": 100_000},
+            }));
+            let repo = JsonSummaryRepository;
+            let daily = repo.daily_summary(&DailySummaryQuery {
+                date: "2026-09-02".to_string(),
+            });
+            assert!(daily.contract_violations().is_empty(), "{:?}", daily.contract_violations());
+            let anthropic = &daily.by_provider["claude-code/anthropic"];
+            assert!(anthropic.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent));
+            assert!(
+                !anthropic.amounts_by_basis.contains_key(&BillingBasis::FixedSubscription),
+                "订阅月费不得摊进日账: {:?}",
+                anthropic.amounts_by_basis
+            );
         });
     }
 

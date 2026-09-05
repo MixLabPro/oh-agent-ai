@@ -125,6 +125,51 @@ pub fn subscription_fee_of(provider: &str, pricing: &Value) -> Option<(String, f
     None
 }
 
+/// 全部已声明订阅 `(provider, currency, amount_per_month, period_start)`——
+/// FixedSubscription 摊入方的扫描入口（Stage C）。
+///
+/// **为什么要全量枚举而不是只给已有用量条目补费**：订阅费不付用量也在付
+/// ——claude-code 这个月没用 anthropic 流量，Claude Pro 的 $20 照扣。只给
+/// 有数据的条目加 FixedSubscription 会把"零用量但已付费"的月份谎报成
+/// "零支出"，与 Unavailable≠0 同一条纪律的镜像面。
+///
+/// `period_start`：`billing_period_start` 字段，缺省回落 `reported_at`——
+/// 查询账期早于它的月份**不该摊**这笔费（用户还没买；claude-pro 填了真机
+/// `oauthAccount.subscriptionCreatedAt`，minimax/glm 只有口述确认日）。调用
+/// 方按账期过滤；这里只忠实带出，不做日期判断（domain 不读时钟，也不解析
+/// 月份语义——比较规则属于接线层）。
+pub fn declared_subscriptions(pricing: &Value) -> Vec<(String, String, f64, Option<String>)> {
+    let Some(subs) = pricing
+        .pointer("/catalog_2026_09/subscriptions")
+        .and_then(|v| v.as_object())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (key, sv) in subs {
+        if key.starts_with('_') {
+            continue;
+        }
+        let Some(provider) = sv.get("provider").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(amount) = sv.get("amount_per_month").and_then(|v| v.as_f64()) else {
+            continue; // 金额未声明（openai）——枚举跳过，不产出待摊条目
+        };
+        let currency = sv
+            .get("currency")
+            .and_then(|v| v.as_str())
+            .unwrap_or("CNY");
+        let period_start = sv
+            .get("billing_period_start")
+            .and_then(|v| v.as_str())
+            .or_else(|| sv.get("reported_at").and_then(|v| v.as_str()))
+            .map(String::from);
+        out.push((provider.to_string(), currency.to_string(), amount, period_start));
+    }
+    out
+}
+
 /// 三套键面下的同一个桶：claude snake（ledger/cost-state 转换后）、DSH 四桶
 /// （`uncached_input_tokens` 词表，见 fixtures/v09/dsh/month-day.json 的
 /// _doc——与 claude 词表不通用、混用会让 priced_day 静默算 0）、camel
@@ -251,6 +296,28 @@ mod tests {
         assert_eq!(subscription_fee_of("openai", &p), None);
         // 完全没声明的 provider 同样 None。
         assert_eq!(subscription_fee_of("moonshot", &p), None);
+    }
+
+    #[test]
+    fn declared_subscriptions_enumerates_amounts_with_period_fallback() {
+        let p = pricing();
+        let subs = declared_subscriptions(&p);
+        let providers: Vec<&str> = subs.iter().map(|(pr, ..)| pr.as_str()).collect();
+        // openai 金额未声明：不进待摊清单（枚举的调用方是要摊钱的，产出一条
+        // 金额缺失的条目只会逼调用方再猜一次）。
+        assert!(!providers.contains(&"openai"), "{providers:?}");
+        // claude-pro 带真机账期起点（oauthAccount.subscriptionCreatedAt），
+        // minimax/glm 只有口述确认日 → 回落 reported_at。
+        let claude = subs.iter().find(|(pr, ..)| pr == "anthropic").unwrap();
+        assert_eq!(claude.3.as_deref(), Some("2025-07-20"));
+        let glm = subs.iter().find(|(pr, ..)| pr == "zhipu-glm").unwrap();
+        assert_eq!(glm.3.as_deref(), Some("2026-09-05"));
+        // 去重前提：同一 provider 只出现一次（当前价表无重复声明；将来误配
+        // 两条同名 provider 时，摊入方按这条钉住的语义只摊首条）。
+        let mut seen = std::collections::BTreeSet::new();
+        for (pr, ..) in &subs {
+            assert!(seen.insert(pr.as_str()), "重复声明 {pr}");
+        }
     }
 
     #[test]
