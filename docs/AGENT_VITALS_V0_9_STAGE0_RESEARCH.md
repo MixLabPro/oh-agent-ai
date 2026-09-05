@@ -455,3 +455,49 @@ workspace 1009、wasm + src-tauri check、Python 1155、golden 15/15）。
 类型——依赖方向 apps→data→domain 才有意义），把这份 DTO 端给控制台/
 Tauri；0.5 落地后控制台"总览/日历"两页的数据接入才具备并行条件
 （同一份冻结契约，两页互不阻塞）。
+
+## 10. Stage 0.5 完成记录
+
+**落地**：`agent-vitals data coverage [--month YYYY-MM] [--json]` 与
+`agent-vitals data daily --date YYYY-MM-DD [--json]`（`apps/cli/src/main.rs`
+的 `Data`/`DataAction` + `apps/cli/Cargo.toml` 新增 `agent-vitals-data` 依赖）。
+
+- **命名决定**：spec §3.1 的 API 列了 `coverage_status(CoverageQuery)`，§7
+  建议命令只写了 `data coverage`——Stage 0 的 repository 没有独立
+  coverage 查询，MonthlySummary DTO 本身承载 coverage/excluded_hosts，
+  所以月视图沿用 spec 建议名 `coverage`，不设第二个命令打印同一份 DTO
+  的另一种排版（原 §2 表里写的"monthly-summary"并入 coverage，Daily 走
+  `data daily`）。
+- **trait 边界**：CLI 拿 `Box<dyn SummaryRepository>`，不 new 具体类型、
+  不读任何 state 文件（spec §3.1 依赖表"apps 只消费 Runtime 的版本化
+  DTO"从这一步起对 Data 面成立）。`--json` 就是 `to_json()` 原样——CLI
+  不造第二种 JSON 形状。
+- **文本视图是 CLI 的呈现职责**（spec §3.1：data 层不做 UI 呈现），诚实
+  规则与 DTO 同源：Unavailable → `no data (unavailable)` 绝不渲染 0；
+  金额一律带 basis 标签（estimate/api_equivalent 不冒充账单）；不标货币
+  符号——Stage 0 DTO 刻意不带 currency（0.4c 的决定），文本视图不重新
+  发明。
+- **顺带修掉的 domain 缺陷（负零）**：`data coverage --json` 首次把空
+  宿主的 `summable_total` 序列化出来，实测 Rust 对空迭代器 `Sum<&f64>`
+  产出 **-0.0**、serde_json 原样序列化成 `"-0.0"`——无数据宿主在冻结
+  DTO 里显示负零，读起来像"欠 0 元"。三处 `total_summable`/`summable_
+  total` 改显式 `fold(0.0, …)`，回归测试
+  `empty_summable_is_positive_zero_never_negative_zero` 钉住算术与序列化
+  两面。
+- **验收**：新 `tests/test_data_summary_cli.py`（Rust-only，同 test_r2a
+  二进制用例约定，未设 `AGENT_VITALS_BIN` 整体 skip）4 用例：空环境
+  unavailable/正零/排除表、文本视图不渲染 0、**三宿主全数据端到端**
+  （DSH month.json 8 桶词表 → metered_actual 计入总额；claude ledger →
+  metered_estimate 不计入；codex 真格式 rollout fixture → api_equivalent
+  不计入——0.4a/b/c 三次接线决策经 CLI 的最终对账）、缺席日 unavailable。
+- **过程中踩到的一条既有纪律**：CLI 帮助文本必须纯英文
+  （`test_regressions::test_help_defaults_to_english` 钉 `--help` 无
+  CJK——"help is scanner-owned text"），`data` 命令首版中文 doc comment
+  被它当场拦下；设计注记移入普通 `//` 注释（不进 help）。
+- **gate**：clippy -D warnings、workspace 1010、wasm + src-tauri check、
+  Python 1159（无二进制 232 skip / 有二进制 4 skip 全绿）、golden 15/15。
+
+**下一步**：Stage 0.6——Tauri 面板接 `SummaryRepository`（控制台诚实
+展示：freshness/coverage/excluded_hosts 必须渲染，stale/partial 不得渲染
+成 0 或"正常"）。0.5 落地后，控制台"总览/日历"两页的数据接入已具备
+并行条件（同一份冻结契约）。

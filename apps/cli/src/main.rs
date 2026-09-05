@@ -496,6 +496,46 @@ enum Cmd {
         #[command(subcommand)]
         action: SessionsAction,
     },
+    /// Read-only Data Query API surface (v0.9 Stage 0.5, spec §7's suggested
+    /// `data coverage`). Goes through the `SummaryRepository` trait to the
+    /// runtime's `JsonSummaryRepository` — the CLI never constructs the
+    /// concrete type (spec §3.1 dependency table). `--json` prints the frozen
+    /// `to_json()` DTO verbatim; spec §3.1 makes it a contract violation to
+    /// consume amounts while dropping freshness/coverage/excluded_hosts, so
+    /// both views surface all three.
+    Data {
+        #[command(subcommand)]
+        action: DataAction,
+    },
+}
+
+// `data` 子命令的子动作。Stage 0 的 repository 只有 `monthly_summary`/
+// `daily_summary` 两个查询（spec §3.1 的 `coverage_status(CoverageQuery)` 是
+// Stage B 的独立查询面）——MonthlySummary DTO 本身承载 coverage/excluded_
+// hosts，所以月视图命令沿用 spec 建议名 `coverage`，不另设第二个命令去打印
+// 同一份 DTO 的另一种排版。帮助文本一律英文（test_regressions 钉 `--help`
+// 无 CJK——scanner-owned text 的纪律），中文设计注记只留在这里。
+#[derive(Subcommand)]
+enum DataAction {
+    /// Monthly cross-host summary (coverage, excluded hosts, freshness).
+    /// Missing data renders as "no data", never as zero.
+    Coverage {
+        /// Query a specific month (YYYY-MM) instead of the current Beijing month
+        #[arg(long)]
+        month: Option<String>,
+        /// Print the frozen DTO JSON to stdout (default: compact text view)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Single-day cross-host summary (Beijing date, YYYY-MM-DD).
+    Daily {
+        /// Beijing date to query (YYYY-MM-DD)
+        #[arg(long)]
+        date: String,
+        /// Print the frozen DTO JSON to stdout (default: compact text view)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `sessions` 子命令的子动作（R2a §2.5/§3.3 查询模型）。
@@ -1037,6 +1077,96 @@ fn render_codex_cost_html(
         eprintln!("failed to write {}", output_path.display());
         std::process::exit(2);
     }
+}
+
+/// v0.9 Stage 0.5 的 Data 面文本视图（`data coverage` / `data daily` 的默认
+/// 输出）。呈现是 CLI 的职责（spec §3.1：data 层不做 UI 呈现），但诚实规则
+/// 与 DTO 同源：Unavailable → "no data"，绝不渲染 0（0.6 纪律提前落到 CLI
+/// 面）；金额一律带 basis 标签——estimate/api_equivalent 不冒充真实账单
+/// （spec §4）。不标货币符号：Stage 0 DTO 刻意不带 currency 字段（§8.4/0.4c
+/// 的决定：口径字段承载语义，混币永不相加），文本视图不重新发明。
+fn amount_parts(h: &agent_vitals_data::projection::HostAmount) -> Vec<String> {
+    let mut parts: Vec<String> = h
+        .amounts_by_basis
+        .iter()
+        .map(|(b, v)| format!("{}={:.2}", b.as_str(), v))
+        .collect();
+    if parts.is_empty() {
+        // 有观测、无钱（全 unknown 日）——不是 0，也不是账单（Unresolved
+        // 不得归零，见 summary.rs::claude_host_amount）。
+        parts.push("no priceable amount (unresolved)".to_string());
+    }
+    if h.has_unresolved {
+        parts.push("has unresolved tokens".to_string());
+    }
+    parts
+}
+
+fn freshness_tag(h: &agent_vitals_data::projection::HostAmount) -> String {
+    use agent_vitals_data::projection::FreshnessState;
+    let last = h.freshness.last_observed_at.as_deref().unwrap_or("-");
+    match h.freshness.state {
+        FreshnessState::Fresh => format!("fresh ({last})"),
+        FreshnessState::Stale => format!("stale ({last})"),
+        FreshnessState::Partial => format!("partial ({last})"),
+        // "Unavailable 不能带 last_observed_at"（domain 不变式 3）——防御性
+        // 保留 last 位，但状态词本身已经说明没有观测。
+        FreshnessState::Unavailable => "no data (unavailable)".to_string(),
+    }
+}
+
+fn print_monthly_summary_text(s: &agent_vitals_data::projection::MonthlySummary) {
+    println!("month {}", s.month);
+    for (name, h) in &s.by_host {
+        let amounts = amount_parts(h).join("  ");
+        if h.freshness.state == agent_vitals_data::projection::FreshnessState::Unavailable {
+            println!("  {name:<12} {}", freshness_tag(h));
+        } else {
+            println!("  {name:<12} {amounts}");
+            println!("  {:<12} {}", "", freshness_tag(h));
+        }
+    }
+    println!(
+        "coverage {}/{} (denominator v{})",
+        s.coverage.measured_fields, s.coverage.total_fields, s.coverage.denominator_version
+    );
+    let excluded: Vec<&str> = s.excluded_hosts.iter().map(|x| x.as_str()).collect();
+    if excluded.is_empty() {
+        println!("excluded hosts: (none)");
+    } else {
+        println!("excluded hosts: {}", excluded.join(", "));
+    }
+    println!(
+        "summable total: {:.2} (estimates/diagnostics excluded, see per-host basis)",
+        s.total_summable()
+    );
+}
+
+fn print_daily_summary_text(s: &agent_vitals_data::projection::DailySummary) {
+    println!("date {}", s.date);
+    for (name, h) in &s.by_host {
+        let amounts = amount_parts(h).join("  ");
+        if h.freshness.state == agent_vitals_data::projection::FreshnessState::Unavailable {
+            println!("  {name:<12} {}", freshness_tag(h));
+        } else {
+            println!("  {name:<12} {amounts}");
+            println!("  {:<12} {}", "", freshness_tag(h));
+        }
+    }
+    println!(
+        "coverage {}/{} (denominator v{})",
+        s.coverage.measured_fields, s.coverage.total_fields, s.coverage.denominator_version
+    );
+    let excluded: Vec<&str> = s.excluded_hosts.iter().map(|x| x.as_str()).collect();
+    if excluded.is_empty() {
+        println!("excluded hosts: (none)");
+    } else {
+        println!("excluded hosts: {}", excluded.join(", "));
+    }
+    println!(
+        "summable total: {:.2} (estimates/diagnostics excluded, see per-host basis)",
+        s.total_summable()
+    );
 }
 
 fn main() {
@@ -2075,6 +2205,47 @@ session_store={store} fold={fold}"
                 "note": "This output is redacted for sharing. Run a new scan to obtain the original data.",
             }),
         );
+    }
+
+    // v0.9 Stage 0.5 Data Query API（只读诊断）。数据面经 trait——CLI 拿到
+    // 的是 `Box<dyn SummaryRepository>`，不 new 具体类型、不读任何 state
+    // 文件（spec §3.1 依赖表：apps 只消费 Runtime 的版本化 DTO）。
+    if let Some(Cmd::Data { action }) = &args.cmd {
+        let repo: Box<dyn agent_vitals_data::repository::SummaryRepository> = Box::new(
+            agent_vitals_runtime::summary::JsonSummaryRepository,
+        );
+        match action {
+            DataAction::Coverage { month, json } => {
+                let m = month
+                    .clone()
+                    .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+                let summary = repo.monthly_summary(
+                    &agent_vitals_data::repository::MonthlySummaryQuery { month: m },
+                );
+                if *json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&summary.to_json()).unwrap_or_default()
+                    );
+                } else {
+                    print_monthly_summary_text(&summary);
+                }
+            }
+            DataAction::Daily { date, json } => {
+                let summary = repo.daily_summary(
+                    &agent_vitals_data::repository::DailySummaryQuery { date: date.clone() },
+                );
+                if *json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&summary.to_json()).unwrap_or_default()
+                    );
+                } else {
+                    print_daily_summary_text(&summary);
+                }
+            }
+        }
+        return;
     }
 
     // `agent-vitals` 无参数等价于 `doctor`。判据是有没有给 --json，理由见 Cmd。
