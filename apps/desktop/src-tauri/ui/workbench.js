@@ -360,15 +360,10 @@ async function renderOverview() {
 
   // KPI 行/双轨账/决策卡的数据源 = 冻结 Data Query DTO（Stage D）；DSH 高峰
   // 口径的今日/本月钱已在 by_provider（metered_actual），原 read_overview 的
-  // today/month 字段只服务预算卡的口径标注，不再单独上 KPI。
-  const today = new Date();
-  const bj = (d) => {
-    // 北京日键（UTC+8 无夏令时），与 runtime clock 同一规则
-    const t = new Date(d.getTime() + 8 * 3600 * 1000);
-    return t.toISOString().slice(0, 10);
-  };
-  const todayKey = bj(today);
-  const monthKey = todayKey.slice(0, 7);
+  // today/month 字段只服务预算卡的口径标注，不再单独上 KPI。日键用文件头部
+  // 既有的 beijingToday/beijingMonth（同一份北京日规则，不再内联第二份）。
+  const todayKey = beijingToday();
+  const monthKey = beijingMonth();
   let daily = null, monthly = null;
   try {
     [daily, monthly] = await Promise.all([
