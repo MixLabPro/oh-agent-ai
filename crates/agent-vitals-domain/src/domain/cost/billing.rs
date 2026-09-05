@@ -170,10 +170,12 @@ pub fn declared_subscriptions(pricing: &Value) -> Vec<(String, String, f64, Opti
     out
 }
 
-/// 三套键面下的同一个桶：claude snake（ledger/cost-state 转换后）、DSH 四桶
+/// 四套键面下的同一个桶：claude snake（ledger/cost-state 转换后）、DSH 四桶
 /// （`uncached_input_tokens` 词表，见 fixtures/v09/dsh/month-day.json 的
 /// _doc——与 claude 词表不通用、混用会让 priced_day 静默算 0）、camel
-/// （cost-state modelUsage 原始形状）。取第一个存在的键，全缺 → 0。
+/// （cost-state modelUsage 原始形状）、codex（fold 派生词表，`uncached_
+/// input_tokens` 由 fold 从 input−cached 算好，`cached_input_tokens` 是
+/// cache_read 的 codex 键名）。取第一个存在的键，全缺 → 0。
 fn bucket(tokens: &Value, keys: &[&str]) -> f64 {
     for k in keys {
         if let Some(v) = tokens.get(k).and_then(|v| v.as_f64()) {
@@ -202,6 +204,7 @@ pub fn cache_hit_ratio(tokens: &Value) -> Option<f64> {
             "cache_read_input_tokens",
             "cache_read_tokens",
             "cacheReadInputTokens",
+            "cached_input_tokens",
         ],
     );
     let write = bucket(
@@ -210,6 +213,7 @@ pub fn cache_hit_ratio(tokens: &Value) -> Option<f64> {
             "cache_creation_input_tokens",
             "cache_write_tokens",
             "cacheCreationInputTokens",
+            "cache_write_input_tokens",
         ],
     );
     let denom = uncached + read + write;

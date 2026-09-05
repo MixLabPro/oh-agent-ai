@@ -247,6 +247,39 @@ impl HostAmount {
     }
 }
 
+/// 一个范围（宿主 × 窗口）的 token 计量——感知层的 L0（ATTRIBUTABLE_WASTE
+/// §6：`processed_tokens` 是 cost/M 的分母，「这份钱换来多少处理量」的回答）。
+/// 桶维度统一到四轴（uncached/cache_read/cache_write/output）：宿主词表不同
+/// （DSH 四桶 / Claude 4 型 / Codex 5 桶），由各自 adapter 归一，父子字段有
+/// 包含关系的先去重再进（§6 原话）。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HostTokens {
+    /// 四桶之和 = processed_tokens。
+    pub total: i64,
+    pub uncached_input: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub output: i64,
+    /// 缓存命中率 = cache_read / (uncached + cache_read + cache_write)；
+    /// 输入侧全零 → None（MeasuredZero ≠ Unavailable）。codex 的命中语义
+    /// 弱一档（cached_input_tokens 是响应自报、无 TTL 语义），由展示层决定
+    /// 是否并排——数值本身照报，不在这里装差异。
+    pub cache_hit_ratio: Option<f64>,
+}
+
+impl HostTokens {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "total": self.total,
+            "uncached_input": self.uncached_input,
+            "cache_read": self.cache_read,
+            "cache_write": self.cache_write,
+            "output": self.output,
+            "cache_hit_ratio": self.cache_hit_ratio,
+        })
+    }
+}
+
 /// spec §3.1：`daily_summary`/`monthly_summary` 查询的返回形状。字段齐全性
 /// 本身就是契约的一部分——少一个字段就是丢失一条业务语义，不是"精简"。
 #[derive(Debug, Clone, PartialEq)]
@@ -254,6 +287,10 @@ pub struct MonthlySummary {
     /// "YYYY-MM"。
     pub month: String,
     pub by_host: BTreeMap<String, HostAmount>,
+    /// 各宿主的 token 计量（L0 感知层分母）——与 `by_host` 同键。金额进不
+    /// 去的（无价卡 glm-*）token 照常在这：unpriced 不进金额分母（§6.2），
+    /// 但处理量本身必须可见，否则"这份钱换来多少处理量"对无价部分失明。
+    pub tokens_by_host: BTreeMap<String, HostTokens>,
     /// **billing_source 视角**（ATTRIBUTABLE_WASTE §6.3「Host ≠
     /// BillingSource」的 DTO 落地）：键 `"host/provider"`，每个实际收费方
     /// 一条。为什么 by_host 装不下这个视角：`HostAmount.amounts_by_basis`
@@ -300,8 +337,15 @@ impl MonthlySummary {
     pub fn total_actual_spend(&self) -> BTreeMap<String, f64> {
         let mut out: BTreeMap<String, f64> = BTreeMap::new();
         for h in self.by_provider.values() {
+            let amount = h.summable_total();
+            // 零金额不撑出币桶：`{"": 0.0}` 读起来像"有一笔未知币的 0 支出"，
+            // 实际是"没有真实支出条目"——空 map 才是「无数据」的诚实形状
+            // （fold(0.0) 正零纪律的同一条， negative-zero 教训的镜像面）。
+            if amount == 0.0 {
+                continue;
+            }
             let key = h.currency.clone().unwrap_or_default();
-            *out.entry(key).or_insert(0.0) += h.summable_total();
+            *out.entry(key).or_insert(0.0) += amount;
         }
         out
     }
@@ -358,6 +402,8 @@ impl MonthlySummary {
         json!({
             "month": self.month,
             "by_host": Value::Object(by_host),
+            "tokens_by_host": Value::Object(self.tokens_by_host.iter()
+                .map(|(id, t)| (id.clone(), t.to_json())).collect()),
             "by_provider": Value::Object(by_provider),
             "total_summable": self.total_summable(),
             "total_actual_spend": self.total_actual_spend(),
@@ -378,6 +424,8 @@ pub struct DailySummary {
     /// "YYYY-MM-DD"。
     pub date: String,
     pub by_host: BTreeMap<String, HostAmount>,
+    /// 各宿主的 token 计量，与 [`MonthlySummary::tokens_by_host`] 同构。
+    pub tokens_by_host: BTreeMap<String, HostTokens>,
     /// billing_source 视角，键 `"host/provider"`——与 [`MonthlySummary::
     /// by_provider`] 同一结构同一理由（宿主内多提供方多币种，per-provider
     /// 条目才是干净归属）。月费摊销**不进日粒度**（订阅费不是日发生额），
@@ -405,8 +453,15 @@ impl DailySummary {
     pub fn total_actual_spend(&self) -> BTreeMap<String, f64> {
         let mut out: BTreeMap<String, f64> = BTreeMap::new();
         for h in self.by_provider.values() {
+            let amount = h.summable_total();
+            // 零金额不撑出币桶：`{"": 0.0}` 读起来像"有一笔未知币的 0 支出"，
+            // 实际是"没有真实支出条目"——空 map 才是「无数据」的诚实形状
+            // （fold(0.0) 正零纪律的同一条， negative-zero 教训的镜像面）。
+            if amount == 0.0 {
+                continue;
+            }
             let key = h.currency.clone().unwrap_or_default();
-            *out.entry(key).or_insert(0.0) += h.summable_total();
+            *out.entry(key).or_insert(0.0) += amount;
         }
         out
     }
@@ -453,6 +508,8 @@ impl DailySummary {
         json!({
             "date": self.date,
             "by_host": Value::Object(by_host),
+            "tokens_by_host": Value::Object(self.tokens_by_host.iter()
+                .map(|(id, t)| (id.clone(), t.to_json())).collect()),
             "by_provider": Value::Object(by_provider),
             "total_summable": self.total_summable(),
             "total_actual_spend": self.total_actual_spend(),
@@ -510,6 +567,7 @@ mod tests {
             month: "2026-09".to_string(),
             by_host: BTreeMap::from([("dsh".to_string(), empty)]),
             by_provider: BTreeMap::new(),
+            tokens_by_host: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: Freshness::unavailable(),
             excluded_hosts: BTreeSet::new(),
@@ -567,6 +625,7 @@ mod tests {
             month: "2026-09".to_string(),
             by_host,
             by_provider: BTreeMap::new(),
+            tokens_by_host: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T00:00:00Z"),
             excluded_hosts: BTreeSet::new(),
@@ -586,6 +645,7 @@ mod tests {
             month: "2026-09".to_string(),
             by_host,
             by_provider: BTreeMap::new(),
+            tokens_by_host: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T00:00:00Z"),
             excluded_hosts,
@@ -606,6 +666,7 @@ mod tests {
             month: "2026-09".to_string(),
             by_host: BTreeMap::new(),
             by_provider: BTreeMap::new(),
+            tokens_by_host: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: bad,
             excluded_hosts: BTreeSet::new(),
@@ -632,6 +693,7 @@ mod tests {
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
             by_host: BTreeMap::new(),
+            tokens_by_host: BTreeMap::new(),
             by_provider: BTreeMap::new(),
             coverage: bad,
             freshness: Freshness::unavailable(),
@@ -650,6 +712,7 @@ mod tests {
             date: "2026-09-04".to_string(),
             by_host,
             by_provider: BTreeMap::new(),
+            tokens_by_host: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T12:00:00Z"),
             excluded_hosts: BTreeSet::new(),
@@ -672,6 +735,7 @@ mod tests {
             month: "2026-09".to_string(),
             by_host,
             by_provider: BTreeMap::new(),
+            tokens_by_host: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T00:00:00Z"),
             excluded_hosts,

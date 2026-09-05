@@ -300,35 +300,89 @@ document.addEventListener("visibilitychange", () => {
 
 // ---------- 总览 ----------
 
+// ---------- 总览 KPI helpers（v0.9 Stage D）----------
+// 币种符号：by_provider 条目带 currency（Stage C），写符号不再是编造；
+// null = 条目未声明单币，裸数字 + 「口径未声明」，不冒充任何币。
+function curSymbol(cur) { return cur === "CNY" ? "\u00a5" : cur === "USD" ? "$" : ""; }
+function fmtCur(amount, cur) {
+  const v = (Math.round(amount * 100) / 100).toFixed(2);
+  return curSymbol(cur) + v + (cur ? "" : "（币种未声明）");
+}
+function fmtTokens(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return String(n);
+}
+const PROVIDER_LABEL = {
+  anthropic: "Anthropic", minimax: "MiniMax", "zhipu-glm": "智谱 GLM",
+  openai: "OpenAI", "deepseek-official": "DeepSeek 官方", shengsuanyun: "胜算云",
+  unknown: "未知提供方", unattributed: "未归属",
+};
+// 名义成本 = by_provider 各条目的官方标价折算之和（分币）——FixedSubscription
+// 是月费不是标价折算，排除。
+function nominalFromByProvider(byProvider) {
+  const out = {}; // currency -> sum
+  for (const [key, h] of Object.entries(byProvider || {})) {
+    const cur = h.currency || "";
+    for (const [basis, amt] of Object.entries(h.amounts_by_basis || {})) {
+      if (basis === "fixed_subscription") continue;
+      out[cur] = (out[cur] || 0) + amt;
+    }
+  }
+  return out;
+}
+function fmtCurMap(m) {
+  const parts = Object.entries(m || {}).filter(([, v]) => v > 0)
+    .map(([c, v]) => fmtCur(v, c || null));
+  return parts;
+}
+function tokensSum(tokensByHost) {
+  let unc = 0, read = 0, write = 0, out = 0, total = 0;
+  for (const t of Object.values(tokensByHost || {})) {
+    unc += t.uncached_input || 0; read += t.cache_read || 0;
+    write += t.cache_write || 0; out += t.output || 0; total += t.total || 0;
+  }
+  const denom = unc + read + write;
+  return { total, hit: denom > 0 ? read / denom : null };
+}
+
 async function renderOverview() {
   let ov;
   try {
     ov = await invoke("read_overview");
   } catch (e) {
-    document.getElementById("ov-today-amount").textContent = "读取失败";
+    document.getElementById("ov-t-nominal").textContent = "读取失败";
     document.getElementById("ov-note").textContent = errText(e);
     return;
   }
   syncDot(ov.sync);
 
-  // 今日
-  const todayAmt = document.getElementById("ov-today-amount");
-  const todaySub = document.getElementById("ov-today-sub");
-  if (ov.today) {
-    todayAmt.textContent = fmtMoney(ov.today.total || 0);
-    todaySub.textContent =
-      (ov.today.peak_total || 0) > 0 ? "其中高峰 " + fmtMoney(ov.today.peak_total) : "";
-  } else {
-    todayAmt.textContent = "—";
-    todaySub.textContent = "今天还没有数据";
+  // KPI 行/双轨账/决策卡的数据源 = 冻结 Data Query DTO（Stage D）；DSH 高峰
+  // 口径的今日/本月钱已在 by_provider（metered_actual），原 read_overview 的
+  // today/month 字段只服务预算卡的口径标注，不再单独上 KPI。
+  const today = new Date();
+  const bj = (d) => {
+    // 北京日键（UTC+8 无夏令时），与 runtime clock 同一规则
+    const t = new Date(d.getTime() + 8 * 3600 * 1000);
+    return t.toISOString().slice(0, 10);
+  };
+  const todayKey = bj(today);
+  const monthKey = todayKey.slice(0, 7);
+  let daily = null, monthly = null;
+  try {
+    [daily, monthly] = await Promise.all([
+      invoke("data_daily_summary", { date: todayKey }),
+      invoke("data_monthly_summary", { month: monthKey }),
+    ]);
+  } catch (e) {
+    document.getElementById("ov-note").textContent =
+      "跨宿主数据读取失败：" + errText(e);
   }
-
-  // 本月
-  const monthTotal = ov.month.total || 0;
-  document.getElementById("ov-month-amount").textContent = fmtMoney(monthTotal);
-  const monthPeak = ov.month.peak_total || 0;
-  document.getElementById("ov-month-sub").textContent =
-    monthPeak > 0 ? "其中高峰 " + fmtMoney(monthPeak) : "";
+  renderKpiRow("t", daily);
+  renderKpiRow("m", monthly);
+  renderDualTrack(monthly);
+  renderDecideCard(monthly);
 
   // 预算 —— 只读 alert.json 权威（level/ratio/snooze/reasons），不重算百分比。
   const b = ov.budget || { source: "missing" };
@@ -469,16 +523,193 @@ async function renderOverview() {
     freshness + " · " + ov.estimate_note + " · " + ov.data_home;
   document.getElementById("wb-foot").textContent = ov.data_home + " · " + ov.estimate_note;
 
-  // 数据源 panel（v0.9 Stage 0.6 总览页）：并发拉 data_monthly_summary，
-  // 失败 → panel 写「读取失败」并保留方格等其他 panel（invoke 失败不
-  // 拖垮整页——renderOverview 走到这里说明 read_overview 成功了，钱包
-  // 卡片已显示，钱包以外的诚实状态面板是补全不该让卡片一起消失）。
-  try {
-    const dto = await invoke("data_monthly_summary", { month: beijingMonth() });
-    renderSourcesPanel(dto, "ov-sources");
-  } catch (e2) {
-    renderSourcesPanelFailure(errText(e2), "ov-sources");
+  // 数据源 panel（v0.9 Stage 0.6 总览页）：复用头部拉的同一份 monthly DTO
+  // （data_monthly_summary 每次 invoke 都要全量 fold 60 份 codex rollout，
+  // 同一次渲染里拉两遍是可感知的卡顿）。失败 → panel 写「读取失败」并保留
+  // 其他 panel（invoke 失败不拖垮整页）。
+  if (monthly) {
+    renderSourcesPanel(monthly, "ov-sources");
+  } else {
+    renderSourcesPanelFailure("跨宿主数据读取失败", "ov-sources");
   }
+}
+
+// ---------- Stage D KPI 行 / 双轨账 / 决策卡 ----------
+
+// 前缀 t = 今日（daily DTO）、m = 本月（monthly DTO）。全部 tile 的诚实规则：
+// 无数据渲染「无数据」，绝不渲染 0；金额一律带币种（by_provider 条目有
+// currency，写符号不再是编造）；unresolved 不冒充任何金额。
+function renderKpiRow(prefix, dto) {
+  const set = (id, text, sub) => {
+    const el = document.getElementById(`ov-${prefix}-${id}`);
+    if (!el) return;
+    el.textContent = text;
+    if (sub !== undefined) {
+      const subEl = document.getElementById(`ov-${prefix}-${id}-sub`);
+      if (subEl) subEl.textContent = sub || "";
+    }
+  };
+  if (!dto) {
+    set("tokens", "无数据"); set("nominal", "无数据"); set("unit", "无数据");
+    set("actual", "无数据"); set("cache", "无数据");
+    return;
+  }
+  const tk = tokensSum(dto.tokens_by_host);
+  const nominal = nominalFromByProvider(dto.by_provider);
+  const actual = dto.total_actual_spend || {};
+  set("tokens", tk.total > 0 ? fmtTokens(tk.total) : "无数据",
+      tk.total > 0 ? "processed（四桶和）" : "");
+  // 名义：官方标价折算之和（分币并列）。cache_write 档位假设必须可见
+  // （1hr/5min 差额占名义总额 5.2%，会话日志不记录实际 TTL——假设不是观测）。
+  const nomParts = fmtCurMap(nominal);
+  set("nominal", nomParts.length ? nomParts.join(" + ") : "无数据",
+      nomParts.length ? "@官方标价 · cache_write 按 1hr 计" : "");
+  // 单位：名义/M（主）+ 实际/M（副）。未计价 token 不进金额分母——首版
+  // 以 processed 为近似分母并在副行标注（§6.2 的完整分母留 Stage E）。
+  if (tk.total > 0 && nomParts.length) {
+    set("unit",
+      fmtCur(Object.entries(nominal).reduce((a, [c, v]) => a + v, 0) / tk.total * 1e6, "USD") + "/M · 名义",
+      "跨币暂未折算：按 USD 桶计（见月度带副行）");
+    const actualSum = Object.values(actual).reduce((a, b) => a + b, 0);
+    document.getElementById(`ov-${prefix}-unit-sub`).textContent =
+      "实际 " + fmtCur(actualSum / tk.total * 1e6, null) + "/M";
+  } else {
+    set("unit", "无数据");
+  }
+  // 实际：total_actual_spend 分币分栏（订阅费 + 按量实付，永不跨币合并）。
+  const actParts = fmtCurMap(actual);
+  set("actual", actParts.length ? actParts.join(" + ") : "无数据",
+      actParts.length ? "按量实付 + 订阅月费（分币）" : "");
+  set("cache",
+    tk.hit != null ? (tk.hit * 100).toFixed(1) + "%" : "无数据",
+    tk.hit != null ? "跨宿主 · 命中决定缓存价占比" : "");
+}
+
+// 双轨账：订阅轨（fixed_subscription 条目，利用率 = 标价折算 ÷ 月费）+
+// 按量轨（metered_* 条目，真实支出）。>50× 触发「归属待核」告警（§6.7
+// 护栏：倍数异常是声明错误的自检信号，不是套利收益）。unresolved 条目
+// 只显示「含未定价 tokens」，不当 0。
+function renderDualTrack(monthly) {
+  const list = document.getElementById("ov-dual-list");
+  const empty = document.getElementById("ov-dual-empty");
+  list.textContent = "";
+  const byProvider = (monthly && monthly.by_provider) || {};
+  const entries = Object.entries(byProvider);
+  if (!entries.length) { empty.hidden = false; return; }
+  empty.hidden = true;
+  const subEntries = [];
+  const metered = [];
+  const unresolved = [];
+  for (const [key, h] of entries) {
+    const provider = key.split("/")[1] || key;
+    const label = PROVIDER_LABEL[provider] || provider;
+    const amountEntries = Object.entries(h.amounts_by_basis || {});
+    if (!amountEntries.length && !h.has_unresolved) continue;
+    if (amountEntries.some(([b]) => b === "fixed_subscription")) subEntries.push([key, h, label]);
+    else if (amountEntries.some(([b]) => b.startsWith("metered"))) metered.push([key, h, label]);
+    else unresolved.push([key, h, label]);
+  }
+  const li = (cls, html) => {
+    const li = document.createElement("li");
+    if (cls) li.className = cls;
+    li.innerHTML = html;
+    list.appendChild(li);
+  };
+  if (subEntries.length) li("", `<span class="dual-track">订阅轨 · 已付费产能</span>`);
+  for (const [key, h, label] of subEntries) {
+    const fee = h.amounts_by_basis.fixed_subscription || 0;
+    const listEq = h.amounts_by_basis.api_equivalent || 0;
+    const mult = fee > 0 && listEq > 0 ? listEq / fee : null;
+    // 无标价折算（glm 有月费无价卡）→ mult null：保留 unresolved 提示，
+    // 不让订阅轨的行看起来"一切正常"。
+    const util = h.has_unresolved
+      ? ' <span class="chip hostbilled">含未定价 tokens · 待补价卡</span>'
+      : mult == null ? "" :
+      mult > 50
+        ? ` <span class="chip diagnostic">⚠ 归属待核（${mult.toFixed(0)}× 与用量矛盾）</span>`
+        : mult < 0.5
+          ? ` <span class="chip estimate">⚠ 没用够（${mult.toFixed(2)}×）</span>`
+          : ` <span class="chip measured">值 ${mult.toFixed(1)}×</span>`;
+    li("", `<span class="src-name">${label}</span>
+      <span class="basis"><span class="chip subscription">月费 ${fmtCur(fee, h.currency)}</span>${util}</span>`);
+  }
+  if (metered.length) li("", `<span class="dual-track">按量轨 · 真实支出</span>`);
+  for (const [key, h, label] of metered) {
+    const chips = Object.entries(h.amounts_by_basis)
+      .map(([b, v]) => {
+        const names = { metered_actual: "实测", metered_estimate: "估算（relay 上界）" };
+        return `<span class="chip ${b === "metered_actual" ? "measured" : "estimate"}">${names[b] || b} ${fmtCur(v, h.currency)}</span>`;
+      }).join("");
+    li("", `<span class="src-name">${label}</span><span class="basis">${chips}</span>`);
+  }
+  if (unresolved.length) li("", `<span class="dual-track">不可归档</span>`);
+  for (const [key, h, label] of unresolved) {
+    li("", `<span class="src-name">${label}</span>
+      <span class="basis">${h.has_unresolved ? '<span class="chip hostbilled">含未定价 tokens · 待补价卡/声明</span>' : '<span class="chip">无数据</span>'}</span>`);
+  }
+}
+
+// 决策卡「现在该用谁」：四态建议行 + 各订阅窗口/利用率为一行。Codex 是唯一
+// 正向余量源（data_codex_quota 的 plan 快照）；Claude Pro 余量不可得（quotaLimits
+// 只有拒绝快照，不得反推假百分比）；GLM/MiniMax 无配额证据源 → 只显示利用率。
+async function renderDecideCard(monthly) {
+  const body = document.getElementById("ov-decide-body");
+  body.textContent = "读取中…";
+  const byProvider = (monthly && monthly.by_provider) || {};
+  let quota = null;
+  try { quota = await invoke("data_codex_quota"); } catch (e) { quota = null; }
+  body.textContent = "";
+  const rows = [];
+  // Codex 窗口条（真 meter）
+  let codexState = null;
+  if (quota && quota.primary && typeof quota.primary.used_percent === "number") {
+    const used = quota.primary.used_percent;
+    const remain = Math.max(0, 100 - used);
+    const resetsAt = quota.primary.resets_at
+      ? new Date(quota.primary.resets_at * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+      : "未知";
+    codexState = remain;
+    rows.push(`<li><span class="src-name">Codex（${quota.plan_type || "订阅"}）</span>
+      <span class="basis"><span class="meter"><span class="meter-fill ${remain < 15 ? "danger" : ""}" style="width:${remain}%"></span></span>
+      <span class="fresh ${remain < 15 ? "stale" : ""}">${remain.toFixed(0)}% 剩余 · ↻ ${resetsAt}</span></span></li>`);
+  } else {
+    rows.push(`<li><span class="src-name">Codex</span><span class="basis"><span class="chip">无订阅窗口数据</span></span></li>`);
+  }
+  // Claude Pro：余量不可得（诚实标注）
+  const anthropic = byProvider["claude-code/anthropic"];
+  if (anthropic) {
+    rows.push(`<li><span class="src-name">Claude Pro</span>
+      <span class="basis"><span class="chip">窗口余量不可得（仅撞窗史）</span></span></li>`);
+  }
+  // GLM / MiniMax：无配额证据源，只显示利用率（双轨账里已有，这里给决策提示）
+  for (const key of ["claude-code/zhipu-glm", "claude-code/minimax"]) {
+    const h = byProvider[key];
+    if (!h) continue;
+    const label = PROVIDER_LABEL[key.split("/")[1]] || key;
+    const fee = (h.amounts_by_basis || {}).fixed_subscription || 0;
+    const eq = (h.amounts_by_basis || {}).api_equivalent || 0;
+    if (fee > 0 && eq > 0) {
+      const mult = eq / fee;
+      const low = mult < 0.5;
+      rows.push(`<li><span class="src-name">${label}</span>
+        <span class="basis"><span class="chip ${low ? "estimate" : "measured"}">${low ? "⚠ 没用够" : "值"} ${mult.toFixed(2)}×</span>
+        <span class="fresh">月费 ${fmtCur(fee, h.currency)} · 标价折算 ${fmtCur(eq, h.currency)}</span></span></li>`);
+    }
+  }
+  body.innerHTML = `<ul class="src-list">${rows.join("")}</ul>`;
+  // 建议行（四态状态机）
+  let advice;
+  if (codexState != null && codexState < 15) {
+    advice = `⚠ Codex 窗口剩 ${codexState.toFixed(0)}%，即将限流——建议优先用 Claude Code 或 GLM，约重置后再切回`;
+  } else if (codexState != null && codexState <= 100) {
+    advice = `Codex 窗口余量 ${codexState.toFixed(0)}%，可继续使用`;
+  } else {
+    advice = "等待窗口数据（Codex 快照不可得）";
+  }
+  const adviceEl = document.createElement("div");
+  adviceEl.className = "decide-advice";
+  adviceEl.textContent = "💡 " + advice;
+  body.appendChild(adviceEl);
 }
 
 function syncDot(sync) {

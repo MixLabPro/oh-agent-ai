@@ -997,3 +997,21 @@ button.chip.active {
   font-weight: normal;
   padding-top: 2px;
 }
+
+/* ---------- v0.9 Stage D：KPI 月度带 / 双轨账 / 决策卡 ---------- */
+/* 月度带：与 KPI 行同构的第二行（本月口径）+ 预算小卡。预算口径「仅 DSH」
+   写在 label 里（2026-09-01 两卡互相打架的事故后，口径不一致必须上卡面）。 */
+.cards.month-band { margin-top: 8px; }
+.cards.month-band .stat .amount { font-size: 18px; font-weight: 600; }
+.stat.budget .label { color: var(--text-2, #667); }
+.stat.budget .amount { font-size: 18px; }
+/* 决策卡的窗口 meter：fill 承载严重度（accent → danger），track 是同 ramp
+   浅一档（same-ramp track，状态跨整条 bar 可读）。 */
+.dual .panel-title, .decide .panel-title { margin-bottom: 6px; }
+.dual-track { display: block; font-size: 11px; color: var(--text-2, #667); letter-spacing: .04em; margin: 6px 0 2px; }
+.meter { display: inline-block; width: 120px; height: 8px; border-radius: 4px;
+  background: #dce4f2; overflow: hidden; vertical-align: middle; margin-right: 8px; }
+.meter-fill { display: block; height: 100%; border-radius: 4px; background: #2c4ea8; }
+.meter-fill.danger { background: #b3362b; }
+.decide-advice { margin-top: 8px; padding: 8px 10px; border-radius: 6px;
+  background: #f4f6fb; font-size: 12px; }

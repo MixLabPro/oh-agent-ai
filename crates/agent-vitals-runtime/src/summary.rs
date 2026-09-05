@@ -14,7 +14,10 @@ use agent_vitals_data::projection::{
     BillingBasis, DailySummary, Freshness, FreshnessState, HostAmount, MonthlySummary,
 };
 use agent_vitals_data::repository::{DailySummaryQuery, MonthlySummaryQuery, SummaryRepository};
+use serde_json::json;
+
 use agent_vitals_domain::cost::BillingMode;
+use agent_vitals_domain::data_contract::HostTokens;
 
 use crate::clock::{today_beijing, yesterday_beijing};
 
@@ -126,7 +129,15 @@ fn codex_home() -> std::path::PathBuf {
 /// 不出模型——「看见了、没价目」的诚实上报）。无数据 = 过滤窗内没有任何
 /// 小时桶（`days` 空）→ Unavailable 不是 $0；`unaccounted` 无时间归属、跨
 /// 月份保留（数据质量哨兵），不能归进任何月份窗，不参与判断。
-fn codex_host_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAmount {
+/// 同 [`codex_host_amount`]，顺带产出窗口内的 token 计量（L0 感知层分母，
+/// Stage D）：fold 已把 `uncached_input_tokens` 从 input−cached 派生好，
+/// 四轴归一直读；`reasoning_output_tokens` 并进 output（Codex 5 桶相加 ==
+/// 自报 total_tokens，reasoning 是独立桶，四轴语义下生成类归 output）。
+fn codex_host_amount_with_tokens(
+    home: &Path,
+    filter_key: &str,
+    day: Option<&str>,
+) -> (HostAmount, HostTokens) {
     let codex_no_data = || HostAmount {
         host_id: "codex".to_string(),
         amounts_by_basis: BTreeMap::new(),
@@ -167,7 +178,7 @@ fn codex_host_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAm
         &pricing,
         false,
     ) else {
-        return codex_no_data();
+        return (codex_no_data(), HostTokens::default());
     };
     let days = report
         .get("days")
@@ -175,7 +186,7 @@ fn codex_host_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAm
         .cloned()
         .unwrap_or_default();
     if days.is_empty() {
-        return codex_no_data();
+        return (codex_no_data(), HostTokens::default());
     }
     let total = match day {
         Some(d) => {
@@ -185,7 +196,12 @@ fn codex_host_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAm
             match row {
                 // 结构上不可达（过滤键 == 日期，days 必含该日）——但宁可再走
                 // 一次 Unavailable 也不编 0。
-                None => return codex_no_data(),
+                None => {
+                    return (
+                        codex_no_data(),
+                        HostTokens::default(),
+                    )
+                }
                 Some(r) => r.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0),
             }
         }
@@ -219,13 +235,38 @@ fn codex_host_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAm
     };
     let mut amounts_by_basis = BTreeMap::new();
     amounts_by_basis.insert(basis, total);
-    HostAmount {
-        host_id: "codex".to_string(),
-        amounts_by_basis,
-        currency: None,
-        has_unresolved: unpriced > 0 || mode_unknown,
-        freshness,
+    // tokens：过滤后重算的 by_model（model → speed → 5 桶）——merge 的
+    // by_model 不读小时轴（函数体上方 defect 注释），必须用重算产物。
+    let mut tk = HostTokens::default();
+    if let Some(models) = by_model.as_object() {
+        for (_model, speeds) in models {
+            if let Some(speeds) = speeds.as_object() {
+                for (_speed, b) in speeds {
+                    let g = |k: &str| b.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+                    tk.uncached_input += g("uncached_input_tokens");
+                    tk.cache_read += g("cached_input_tokens");
+                    tk.cache_write += g("cache_write_input_tokens");
+                    tk.output += g("output_tokens") + g("reasoning_output_tokens");
+                }
+            }
+        }
     }
+    tk.total = tk.uncached_input + tk.cache_read + tk.cache_write + tk.output;
+    tk.cache_hit_ratio = agent_vitals_domain::cost::cache_hit_ratio(&json!({
+        "uncached_input_tokens": tk.uncached_input,
+        "cached_input_tokens": tk.cache_read,
+        "cache_write_input_tokens": tk.cache_write,
+    }));
+    (
+        HostAmount {
+            host_id: "codex".to_string(),
+            amounts_by_basis,
+            currency: None,
+            has_unresolved: unpriced > 0 || mode_unknown,
+            freshness,
+        },
+        tk,
+    )
 }
 
 /// Claude Code 的月份/日期窗口 → `HostAmount`（§8.4 的 Claude Code 栏）。
@@ -255,14 +296,16 @@ fn codex_host_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAm
 /// 已知局限：ledger 只装当月（`claude_sync` 全量重建时滚动），历史月份的
 /// 查询诚实报 Unavailable——与 DSH 有 month-archive.json 归档不同，claude
 /// 侧确实没有可读的历史数据，不是"有而不读"。
-fn claude_host_amount(window_prefix: &str) -> HostAmount {
-    let claude_no_data = || HostAmount {
+/// 同 [`claude_host_amount`]，顺带产出窗口内 token 计量（四轴 claude snake
+/// 键直读——ledger 桶就是归一目标词表）。
+fn claude_host_amount_with_tokens(window_prefix: &str) -> (HostAmount, HostTokens) {
+    let claude_no_data = || (HostAmount {
         host_id: "claude-code".to_string(),
         amounts_by_basis: BTreeMap::new(),
         currency: None,
         has_unresolved: false,
         freshness: Freshness::unavailable(),
-    };
+    }, HostTokens::default());
     let ledger = crate::state::read_json(&crate::sessions::claude_ledger::ledger_path());
     let days = ledger
         .as_ref()
@@ -281,12 +324,23 @@ fn claude_host_amount(window_prefix: &str) -> HostAmount {
     if days.is_empty() {
         return claude_no_data();
     }
+    let mut tk = HostTokens::default();
     let pricing = agent_vitals_domain::cost::load_pricing();
     let mut cny = 0.0f64;
     let mut usd = 0.0f64;
     let mut unpriced = 0i64;
     let mut any_partial = false;
     for (date, day) in &days {
+        // tokens：四桶直读（claude snake 键 = 归一目标词表），跨模型累计。
+        if let Some(models) = day.as_object() {
+            for (_m, b) in models {
+                let g = |k: &str| b.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+                tk.uncached_input += g("input_tokens");
+                tk.cache_read += g("cache_read_input_tokens");
+                tk.cache_write += g("cache_creation_input_tokens");
+                tk.output += g("output_tokens");
+            }
+        }
         if let Some(report) = agent_vitals_domain::cost::claude_day_cost(day, &pricing) {
             let totals = report.get("currency_totals");
             cny += totals.and_then(|t| t.get("CNY")).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -309,13 +363,22 @@ fn claude_host_amount(window_prefix: &str) -> HostAmount {
     if usd > 0.0 {
         amounts_by_basis.insert(BillingBasis::ApiEquivalent, usd);
     }
-    HostAmount {
-        host_id: "claude-code".to_string(),
-        amounts_by_basis,
-        currency: None,
-        has_unresolved: unpriced > 0 || any_partial,
-        freshness: latest.map(day_freshness).unwrap_or_else(Freshness::unavailable),
-    }
+    tk.total = tk.uncached_input + tk.cache_read + tk.cache_write + tk.output;
+    tk.cache_hit_ratio = agent_vitals_domain::cost::cache_hit_ratio(&json!({
+        "input_tokens": tk.uncached_input,
+        "cache_read_input_tokens": tk.cache_read,
+        "cache_creation_input_tokens": tk.cache_write,
+    }));
+    (
+        HostAmount {
+            host_id: "claude-code".to_string(),
+            amounts_by_basis,
+            currency: None,
+            has_unresolved: unpriced > 0 || any_partial,
+            freshness: latest.map(day_freshness).unwrap_or_else(Freshness::unavailable),
+        },
+        tk,
+    )
 }
 
 /// billing_source 视角的单条目聚合（`by_provider` 的值）：basis → 币种 → 金额
@@ -537,13 +600,43 @@ fn dsh_provider_amount(
 
 /// by_provider 的 Codex 条目：`billing_mode_of("openai") = subscription` →
 /// 等价标价口径，与 `codex_host_amount` 的判定同源（那边刚改成查声明）。
-fn codex_provider_amount(home: &Path, filter_key: &str, day: Option<&str>) -> HostAmount {
-    let mut h = codex_host_amount(home, filter_key, day);
+fn codex_provider_amount(
+    home: &Path,
+    filter_key: &str,
+    day: Option<&str>,
+) -> (HostAmount, HostTokens) {
+    let (mut h, tk) = codex_host_amount_with_tokens(home, filter_key, day);
     h.host_id = "codex/openai".to_string();
     // ApiEquivalent 折算用的 codex 价卡全表 USD（codex_pricing.json 无币种
     // 字段、金额即美元——"total cost" 标签的既有语义）。
     h.currency = Some("USD".to_string());
-    h
+    (h, tk)
+}
+
+/// DSH 窗口（`days` map 或单日值）的 token 计量：DSH 四桶词表直读
+/// （`uncached_input_tokens` 词表，与 claude/codex 不同——见 fixtures/v09
+/// 的 _doc）。`window` 是月份前缀或完整日期。
+fn dsh_tokens(days: Option<&serde_json::Value>, window: &str) -> HostTokens {
+    let mut tk = HostTokens::default();
+    if let Some(days) = days.and_then(|d| d.as_object()) {
+        for (date, day) in days {
+            if !date.starts_with(window) {
+                continue;
+            }
+            let g = |k: &str| day.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+            tk.uncached_input += g("uncached_input_tokens");
+            tk.cache_read += g("cache_read_tokens");
+            tk.cache_write += g("cache_write_tokens");
+            tk.output += g("output_tokens");
+        }
+    }
+    tk.total = tk.uncached_input + tk.cache_read + tk.cache_write + tk.output;
+    tk.cache_hit_ratio = agent_vitals_domain::cost::cache_hit_ratio(&json!({
+        "uncached_input_tokens": tk.uncached_input,
+        "cache_read_tokens": tk.cache_read,
+        "cache_write_tokens": tk.cache_write,
+    }));
+    tk
 }
 
 /// Stage C：把已声明订阅的月费摊进 `by_provider` 的 `FixedSubscription` 档。
@@ -614,6 +707,31 @@ fn apply_subscription_fees(
     }
 }
 
+/// Codex 当前配额快照（决策卡「现在该用谁」的唯一正向余量源）。
+///
+/// **为什么是独立函数而不是塞进 summary**：plan 是"当前状态"的单快照、不按
+/// 日期分桶（`hosts/codex/sessions/usage.rs` 的 doc），塞进月/日窗口 DTO 会
+/// 把"此刻余量"伪装成窗口数据。返回 `{"plan_type", "primary": {used_percent,
+/// window_minutes, resets_at}, ...}` 原样（`plan_from_rate_limits` 的产物，
+/// 不二次加工）；无 rollout / 无 plan 事件 → None（无 ChatGPT 订阅证据，
+/// 不得编造余量）。
+pub fn codex_quota_snapshot(home: &Path) -> Option<serde_json::Value> {
+    let mut folds: Vec<serde_json::Value> = Vec::new();
+    for path in agent_vitals_hosts::codex_session::codex_rollout_files(home) {
+        let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(&path);
+        let items: Vec<serde_json::Value> = parsed
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        folds.push(agent_vitals_hosts::codex_usage::codex_fold_file(&items));
+    }
+    let merged = agent_vitals_hosts::codex_usage::codex_merge_folds(&folds);
+    let plan = merged.get("plan")?;
+    plan.get("plan_type").and_then(|v| v.as_str())?;
+    Some(plan.clone())
+}
+
 /// 宿主 → 该宿主可能出现的 billing_source 提供方。接线知识（与
 /// `WIRED_HOSTS` 同类）：新宿主/新提供方接线时同步维护；漏登记的已声明
 /// 订阅会落 `unattributed/<provider>` 条目可见，不会静默消失。
@@ -642,12 +760,17 @@ impl SummaryRepository for JsonSummaryRepository {
         let latest_day = days.as_ref().and_then(latest_day_key);
         let dsh_amount = dsh_host_amount(cost.clone(), latest_day.as_deref());
         by_host.insert("dsh".to_string(), dsh_amount);
-        let codex_amount = codex_host_amount(&codex_home(), &query.month, None);
+        let (codex_amount, codex_tk) =
+            codex_host_amount_with_tokens(&codex_home(), &query.month, None);
         by_host.insert("codex".to_string(), codex_amount);
-        by_host.insert(
-            "claude-code".to_string(),
-            claude_host_amount(&query.month),
-        );
+        let (claude_amount, claude_tk) = claude_host_amount_with_tokens(&query.month);
+        by_host.insert("claude-code".to_string(), claude_amount);
+
+        // L0 计量层（Stage D）：与 by_host 同键，KPI 行的 tokens/命中率从这里取。
+        let mut tokens_by_host = BTreeMap::new();
+        tokens_by_host.insert("dsh".to_string(), dsh_tokens(days.as_ref(), &query.month));
+        tokens_by_host.insert("codex".to_string(), codex_tk);
+        tokens_by_host.insert("claude-code".to_string(), claude_tk);
 
         // billing_source 视角（Stage B）：DSH/Codex 宿主单一提供方，条目即
         // 宿主条目换键；claude-code 宿主内多提供方，逐模型分流。
@@ -656,10 +779,9 @@ impl SummaryRepository for JsonSummaryRepository {
             "dsh/deepseek-official".to_string(),
             dsh_provider_amount(cost, latest_day.as_deref()),
         );
-        by_provider.insert(
-            "codex/openai".to_string(),
-            codex_provider_amount(&codex_home(), &query.month, None),
-        );
+        let (codex_prov, _codex_prov_tk) =
+            codex_provider_amount(&codex_home(), &query.month, None);
+        by_provider.insert("codex/openai".to_string(), codex_prov);
         by_provider.extend(claude_provider_amounts(&query.month));
         apply_subscription_fees(&mut by_provider, &query.month);
 
@@ -668,6 +790,7 @@ impl SummaryRepository for JsonSummaryRepository {
         MonthlySummary {
             month: query.month.clone(),
             by_host,
+            tokens_by_host,
             by_provider,
             coverage: agent_vitals_data::projection::CoverageStatus {
                 measured_fields: WIRED_HOSTS.len() as u64,
@@ -697,15 +820,18 @@ impl SummaryRepository for JsonSummaryRepository {
             dsh_host_amount(cost.clone(), day_value.map(|_| query.date.as_str())),
         );
         // 日切片：过滤键 = 完整日期，金额取该日行（untimed 不混进某一天）。
-        by_host.insert(
-            "codex".to_string(),
-            codex_host_amount(&codex_home(), &query.date, Some(&query.date)),
-        );
+        let (codex_amount, codex_tk) =
+            codex_host_amount_with_tokens(&codex_home(), &query.date, Some(&query.date));
+        by_host.insert("codex".to_string(), codex_amount);
         // claude 账日本身按日期归属，窗口 = 完整日期前缀即得该日。
-        by_host.insert(
-            "claude-code".to_string(),
-            claude_host_amount(&query.date),
-        );
+        let (claude_amount, claude_tk) = claude_host_amount_with_tokens(&query.date);
+        by_host.insert("claude-code".to_string(), claude_amount);
+
+        // L0 计量层（Stage D）：单日窗口。
+        let mut tokens_by_host = BTreeMap::new();
+        tokens_by_host.insert("dsh".to_string(), dsh_tokens(day_value, &query.date));
+        tokens_by_host.insert("codex".to_string(), codex_tk);
+        tokens_by_host.insert("claude-code".to_string(), claude_tk);
 
         // billing_source 视角（Stage B）：日粒度只装按量/等价折算流——
         // 订阅月费不是日发生额，不摊（Stage C 的纪律，写在这里防前移）。
@@ -714,10 +840,9 @@ impl SummaryRepository for JsonSummaryRepository {
             "dsh/deepseek-official".to_string(),
             dsh_provider_amount(cost, day_value.map(|_| query.date.as_str())),
         );
-        by_provider.insert(
-            "codex/openai".to_string(),
-            codex_provider_amount(&codex_home(), &query.date, Some(&query.date)),
-        );
+        let (codex_prov, _codex_prov_tk) =
+            codex_provider_amount(&codex_home(), &query.date, Some(&query.date));
+        by_provider.insert("codex/openai".to_string(), codex_prov);
         by_provider.extend(claude_provider_amounts(&query.date));
 
         let freshness = aggregate_freshness(&by_host);
@@ -725,6 +850,7 @@ impl SummaryRepository for JsonSummaryRepository {
         DailySummary {
             date: query.date.clone(),
             by_host,
+            tokens_by_host,
             by_provider,
             coverage: agent_vitals_data::projection::CoverageStatus {
                 measured_fields: WIRED_HOSTS.len() as u64,
@@ -830,7 +956,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("avr-codex-fix-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         write_rollout(&dir, "gpt-5.6-sol");
-        let amount = codex_host_amount(&dir, "2026-09", None);
+        let (amount, _tk) = codex_host_amount_with_tokens(&dir, "2026-09", None);
         assert!(amount.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent));
         let total = amount.amounts_by_basis[&BillingBasis::ApiEquivalent];
         assert!(total > 0.0, "gpt-5.6-sol 在价目表里，550 uncached + 80 output 必有非零价");
@@ -848,7 +974,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("avr-codex-unpriced-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         write_rollout(&dir, "gpt-model-not-in-pricing");
-        let amount = codex_host_amount(&dir, "2026-09", None);
+        let (amount, _tk) = codex_host_amount_with_tokens(&dir, "2026-09", None);
         // 「看见了、没价目」：total 0 + has_unresolved，而不是当没测到。
         assert!(amount.has_unresolved);
         let total = amount.amounts_by_basis[&BillingBasis::ApiEquivalent];
@@ -862,7 +988,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("avr-codex-empty-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         write_rollout(&dir, "gpt-5.6-sol");
-        let amount = codex_host_amount(&dir, "2020-01", None);
+        let (amount, _tk) = codex_host_amount_with_tokens(&dir, "2020-01", None);
         assert!(amount.amounts_by_basis.is_empty());
         assert_eq!(amount.freshness.state, FreshnessState::Unavailable);
         assert!(amount.freshness.last_observed_at.is_none());
@@ -875,11 +1001,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("avr-codex-daily-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         write_rollout(&dir, "gpt-5.6-sol");
-        let hit = codex_host_amount(&dir, "2026-09-02", Some("2026-09-02"));
+        let (hit, hit_tk) =
+            codex_host_amount_with_tokens(&dir, "2026-09-02", Some("2026-09-02"));
         assert!(hit.amounts_by_basis[&BillingBasis::ApiEquivalent] > 0.0);
+        assert!(hit_tk.total > 0, "token 计量与金额同源同窗");
         // 相邻日没有任何小时桶 → Unavailable，不是 $0。
-        let miss = codex_host_amount(&dir, "2026-09-03", Some("2026-09-03"));
+        let (miss, miss_tk) =
+            codex_host_amount_with_tokens(&dir, "2026-09-03", Some("2026-09-03"));
         assert!(miss.amounts_by_basis.is_empty());
+        assert_eq!(miss_tk.total, 0);
         assert_eq!(miss.freshness.state, FreshnessState::Unavailable);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -905,7 +1035,7 @@ mod tests {
                                       "cache_creation_input_tokens": 0,
                                       "output_tokens": 100_000},
             }));
-            let amount = claude_host_amount("2026-09");
+            let amount = claude_host_amount_with_tokens("2026-09").0;
             assert!(amount.amounts_by_basis.contains_key(&BillingBasis::MeteredEstimate));
             assert!(amount.amounts_by_basis[&BillingBasis::MeteredEstimate] > 0.0);
             // 纯 CNY 日没有 USD 流：anthropic 的 ApiEquivalent 档不该出现。
@@ -927,7 +1057,7 @@ mod tests {
                                   "cache_creation_input_tokens": 0,
                                   "output_tokens": 100_000},
             }));
-            let amount = claude_host_amount("2026-09");
+            let amount = claude_host_amount_with_tokens("2026-09").0;
             assert!(amount.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent));
             assert!(amount.amounts_by_basis[&BillingBasis::ApiEquivalent] > 0.0);
             // 套餐覆盖流不落 MeteredEstimate 档（CNY/USD 分栏 = 托盘口径）。
@@ -945,7 +1075,7 @@ mod tests {
                                   "cache_creation_input_tokens": 0,
                                   "output_tokens": 50_000},
             }));
-            let amount = claude_host_amount("2026-09");
+            let amount = claude_host_amount_with_tokens("2026-09").0;
             // 全 unknown 日：有 token、价不可确认——金额表留空（不得归零），
             // has_unresolved 标记；但账日存在 → freshness 照报，不当没测。
             assert!(amount.amounts_by_basis.is_empty());
@@ -965,13 +1095,13 @@ mod tests {
                                       "output_tokens": 100_000},
             }));
             // 月窗口不命中（ledger 只装当月，历史月份诚实报缺）。
-            let miss_month = claude_host_amount("2020-01");
+            let miss_month = claude_host_amount_with_tokens("2020-01").0;
             assert!(miss_month.amounts_by_basis.is_empty());
             assert_eq!(miss_month.freshness.state, FreshnessState::Unavailable);
             // 日窗口：账日命中 → 有钱；相邻日缺席 → Unavailable 不是 ¥0。
-            let hit = claude_host_amount("2026-09-02");
+            let hit = claude_host_amount_with_tokens("2026-09-02").0;
             assert!(hit.amounts_by_basis[&BillingBasis::MeteredEstimate] > 0.0);
-            let miss_day = claude_host_amount("2026-09-03");
+            let miss_day = claude_host_amount_with_tokens("2026-09-03").0;
             assert!(miss_day.amounts_by_basis.is_empty());
             assert_eq!(miss_day.freshness.state, FreshnessState::Unavailable);
         });

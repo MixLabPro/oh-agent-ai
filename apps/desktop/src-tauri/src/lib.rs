@@ -1225,6 +1225,18 @@ fn data_daily_summary(date: String) -> Value {
     repo.daily_summary(&DailySummaryQuery { date }).to_json()
 }
 
+/// 决策卡「现在该用谁」的 Codex 窗口余量（v0.9 Stage D）。plan 是"当前
+/// 状态"的单快照、不按日期分桶——独立命令而不是塞进月/日 summary，语义
+/// 才不混。无 rollout / 无 plan 事件 → null（无 ChatGPT 订阅证据，不得编
+/// 造余量）。
+#[tauri::command]
+fn data_codex_quota() -> Option<Value> {
+    // codex rollout 根在 ~/.codex（与 runtime summary.rs::codex_home 同一条
+    // HOME → USERPROFILE 优先序），不在数据根。
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    agent_vitals_runtime::summary::codex_quota_snapshot(&home)
+}
+
 /// 工作台「立即同步」按钮：受控 tick 一次（与托盘菜单同一路径）。立即返回，不
 /// 阻塞 IPC；工作台自己在同步结束后重拉 overview。
 #[tauri::command]
@@ -1335,6 +1347,7 @@ pub fn run() {
             read_month,
             data_monthly_summary,
             data_daily_summary,
+            data_codex_quota,
             trigger_sync,
             store::sessions_list,
             store::sessions_read,

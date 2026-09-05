@@ -75,6 +75,7 @@ fn projection_reexports_the_domain_contract_types() {
     let m = agent_vitals_data::projection::MonthlySummary {
         month: "2026-09".to_string(),
         by_host: Default::default(),
+        tokens_by_host: Default::default(),
         by_provider: Default::default(),
         coverage: agent_vitals_data::projection::CoverageStatus {
             measured_fields: 0,
