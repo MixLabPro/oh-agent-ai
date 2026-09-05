@@ -335,7 +335,30 @@ Stage 0 的实现天生返回"所有已知宿主"，加过滤参数只是摆设�
    费率（不是第三方猜测价），`priced_day`/`month_cost` 只是把"用了多少
    token"按"官方多少钱一个 token"相乘，这本身就是可观测的真实费用，不是
    估算。
-2. **Codex（下一提交）**：接 `sessions::codex_cost::codex_cost_report`。
+2. **Codex（Stage 0.4b，已接线）**：接 `sessions::codex_cost::
+   codex_cost_report`。取数管线与 CLI `codex-cost` handler 完全同一条：
+   `codex_rollout_files(HOME)`（live+archived 全局路径排序）→
+   `read_codex_session_log` → `codex_fold_file` → `codex_merge_folds` →
+   按 `filter_key` 前缀过滤 `by_hour_model` → **重算 by_model**
+   （`codex_by_model_from_hours`——merge 的 by_model 不读小时轴，拿它折
+   回去是空模型轴，真实 defect，见 `main.rs::codex_report_from_merged`
+   注释）→ 计价。三个决定：
+   - **记账口径 = `ApiEquivalent`**（不是 MeteredActual/Estimate）：Codex
+     消耗的是订阅套餐配额，按官方 API 价目折出的 USD 是"套餐消耗的等价
+     API 标价"——spec §4 原话"只作诊断"，`summable_into_total()` 对它是
+     false，不会混进月度总额冒充真实账单。订阅费本身（FixedSubscription）
+     Stage 0 没有声明来源（用户的 ChatGPT 账单不在本机证据里），不编。
+     USD 与 DSH 的 ¥ 的区别就由口径本身承载：两者永远不会被加到一起，
+     因为可汇总总额只收 summable 三档。
+   - **`has_unresolved = unpriced_tokens > 0`**：报告里有 token、价目表
+     认不出模型（prefix + speed 双键都没命中）→ "看见了、没价目"，金额
+     0 + `has_unresolved`，不当"没测到"也不编价。
+   - **日切片金额取 `days[]` 里 `date == 查询日` 那一行**，不取
+     `total_cost_usd`：untimed 样本没有日期归属（`codex_aggregate_hours`
+     丢它们是设计），月视图取 total（含 untimed 剩余、per_model 已并），
+     日视图取日行——untimed 不能混进某一天。过滤窗内没有任何小时桶（
+     `days` 空）→ Unavailable 不是 $0；`unaccounted` 无时间归属、跨月份
+     保留（数据质量哨兵），不能归进任何月份窗，不参与判断。
 3. **Claude Code（再下一提交）**：接 `sessions::claude_ledger` +
    `agent_vitals_domain::cost::cost_report`。
 4. **WorkBuddy**：永久留在 `excluded_hosts`（用户决定"不做，留待
@@ -360,3 +383,11 @@ spec 没有给"新鲜窗口"的具体阈值，Stage 0 用一个明说的粗近�
 `Partial` 这一档 Stage 0 不产出——它需要"预期应该有但缺了一部分"的判断
 依据（比如宿主本该在线却漏传），Stage 0 没有这个信号来源，留给 Stage B
 接入 source status 之后再区分。
+
+汇总层（`MonthlySummary.freshness`/`DailySummary.freshness`）的口径
+（0.4b 起，多宿主后不再硬编码取 DSH）：**最新被观测到的宿主**的新鲜度
+——按 `last_observed_at` 取最大（各宿主统一 `{day}T00:00:00Z` 格式，
+字典序=时间序），全部宿主 Unavailable → 汇总 Unavailable。单看某一个
+宿主会在另一个宿主更新得更晚时谎报过期或谎报新鲜；汇总回答的是"这份
+数据最近还有没有在更新"。`Unavailable` 宿主必带 `last_observed_at=None`
+（domain 不变式 3），天然不参与 max。
