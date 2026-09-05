@@ -952,8 +952,13 @@ button.chip.active {
   gap: 6px;
 }
 .src-list li .basis .chip {
-  background: var(--line, #eee);
-  color: var(--fg);
+  /* 裸 chip（「月费未声明 · 利用率不可算」「无数据」）：此前是
+     var(--line,#eee) 底 + var(--fg) 字——两个变量都没定义，暗主题下
+     回退成近白底 + 继承的浅字 = 白底白字空白盒（真机截图发现的渲染
+     缺陷）。改成与同族修饰 chip（subscription/estimate/measured）一致
+     的浅底深字——它们本来就是亮色徽章家族，裸 chip 缺的只是显式文字色。 */
+  background: #e8ecf3;
+  color: #38415a;
   border-radius: 4px;
   padding: 2px 8px;
   font-size: 12px;
