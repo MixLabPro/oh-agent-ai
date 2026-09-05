@@ -212,3 +212,55 @@ state_dir()`），零接触 `claude_usage_fact` 耦合的 fold/rebuild 引擎部
 （`cargo build/clippy/test --release` workspace + `cargo check -p
 agent-vitals-wasm` + `apps/desktop/src-tauri cargo check`），完全遵循
 v0.8 E7.6 建立的"整体搬迁、逐文件提交"纪律。
+
+## 7. Stage 0.3 完成记录
+
+六个提交全部落地（`5584e20`/`fdfa779`/`21f31ed`/`1b232b9`/`5a088e9`/
+`3ccafa4`，分支 `v0.9/stage0-data-access-foundation`），每步都是"改路径
+→ 全量测试绿 → 提交"，没有一步需要回退重来。几个执行期才浮现、值得记录
+的细节：
+
+- **crate 自引用陷阱**：文件搬进 `agent-vitals-runtime` 后，文件内部原本
+  写的 `agent_vitals_runtime::foo::bar`（外部路径写法，搬移前从 apps/cli
+  这个不同 crate 看它是合理的）必须改成 `crate::foo::bar`——否则
+  `E0433 unresolved module`（Rust 不认"用完整包名引用自己"，除非显式
+  `extern crate self as`，本仓库没有这么做）。六个文件里 `codex_cost.rs`
+  最先撞见这条（`pub use agent_vitals_runtime::clock::{...}` 必须改成
+  `pub use crate::clock::{...}`），后续每个文件都要过一遍这项检查——最后
+  `r2a_store.rs` 一次性有 9 处 `agent_vitals_runtime::` 自引用要改。
+- **`pub(crate)` 在跨 crate 搬移时会变成真实的可见性收紧**：`r2a_store.rs`
+  的 `dsh_header`/`dsh_source_profile`、`codex_session_audit.rs` 的
+  `codex_session_id_of` 原来是 `pub(crate)`——在旧的单一二进制 crate 里，
+  同 crate 的兄弟模块（`dsh_usage_fact.rs`、`r2a_store.rs` 自己）能看到；
+  搬进 `agent-vitals-runtime` 后，`pub(crate)` 的"crate"变成了新 crate，
+  留在 apps/cli 的调用点立刻编译错误（`E0603 private`）。三处都按需升级
+  成 `pub`——`cargo build` 会在第一次尝试时就把这类遗漏精确报出来，不需要
+  提前枚举，但要记得升级完之后回头看有没有过度放开（这三个都是"确实有
+  跨 crate 消费者"，不是保守放宽）。
+- **死代码是搬移完整性的免费验证器**：`apps/cli/src/util.rs` 的
+  `ENV_LOCK`（v0.8 D6 就为"discovery/r2a_store 的测试要用它"专门保留的
+  二进制侧那份）在最后一个文件（`r2a_store.rs`）搬完后彻底失去消费者，
+  `cargo clippy -D warnings` 当场报 `dead_code` 拒绝编译——不是需要人工
+  巡查才能发现的遗留物，是构建自己在替这次迁移的完整性把关。删掉即可，
+  不必留 `#[allow(dead_code)]`。
+- **claude_cost.rs 的真实耦合边界只在实现时才现形**：调研阶段（§6）已经
+  推断出双向耦合会挡住整体搬移，但直到读函数体才确认
+  `claude_ledger_day_tokens` 恰好是耦合边界之外唯一自包含的读取路径——
+  `ledger_path()` 本身仍被 fold 引擎用、不能整体挪走，只挪三个纯函数 +
+  它们各自的单测。这印证了 §6 的判断："不做拆分"这条用户指示的适用范围
+  是"同一职责内人为切割渲染与计算"，不适用于"两个不同生命周期的子系统
+  恰好共享一个小读取函数"——按真实耦合边界走，而不是教条式坚持"六个文件
+  必须都是整文件 mv"。
+- **测试数字的移动即验证**：每步之后 apps/cli 二进制的测试计数下降、
+  `agent-vitals-runtime` 的测试计数按同一数量上升（如 file 6/6：apps/cli
+  119→95，runtime 79→103，净移动 24 个，与 r2a_store.rs 原有的 24 个
+  `#[test]` 精确对应）——测试总数在整个 Stage 0.3 期间没有变化，只是
+  住的 crate 变了，这是"纯代码搬移、零行为改变"的一个可核对信号。
+
+Stage 0.3 到此完成。CLAUDE.md 中"r2a_store/discovery 留 apps/cli/src/
+agent/……是合法终态"的旧结论已随本次搬移改写，不再准确，已同步更新。
+下一步是 Stage 0.4：只读 JSON adapter，把刚搬进 `agent-vitals-runtime::
+sessions` 的 `host_snapshot`/`SessionStore` 现有输出，在
+`agent-vitals-data::projection` 里组装成 §1 定义的
+`MonthlySummary`/`DailySummary` DTO；WorkBuddy 显式进 `excluded_hosts`，
+不读它的任何真实数据源。

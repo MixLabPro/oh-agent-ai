@@ -34,7 +34,13 @@ Cargo.toml                  # 纯 [workspace] manifest（Phase E3 起；[profile
                             #   apps/cli + crates/{vitals-core,agent-vitals-domain,agent-vitals-hosts,agent-vitals-runtime,agent-vitals-wasm}
 apps/cli/                   # Rust binary crate（the `agent-vitals` CLI），Phase E3 由根 src/ 迁来
   src/skills/               #   静态 SKILL.md 体检（analysis/security/doctor/discovery/…）
-  src/agent/                #   会话行为/成本审计（behavior/cost/codex_cost/codex_session/r2a_store/discovery）
+  src/agent/                #   会话行为/成本审计的 CLI 侧 I/O 接线：v0.7 UsageFact 发射器
+                            #   （{claude,codex,dsh}_usage_fact）、成本折叠（cost/claude_cost，
+                            #   后者只剩 fold 引擎，与 claude_usage_fact 双向耦合）、CLI 展示
+                            #   助手（oneline/plan）、宿主能力注册表（host_runtime_
+                            #   registration）。behavior/codex_cost/codex_session_audit/
+                            #   discovery/r2a_store 已整体迁进
+                            #   agent-vitals-runtime::sessions（v0.9 Stage 0.3）。
   src/util.rs               #   二进制侧 util（split_lines/pyround 等 re-export 自 domain）
 crates/vitals-core/         # 宿主无关的通用审计机制（Event→Trajectory→Detector→Finding→Replay）；不认识 Agent/宿主
 crates/agent-vitals-domain/ # v0.8 Phase C：PURE computation + 词表契约，single source of truth。
@@ -49,7 +55,10 @@ crates/agent-vitals-hosts/ # v0.8：一个 crate 装所有宿主的 wire 适配�
 crates/agent-vitals-runtime/ # v0.8 Phase D6/D7：非宿主本机机器。home（唯一 HomeResolver：
                             #   data_home/snapshot_dir/DSH_HOME）· clock（读时钟的北京日期）· state/budget/takeover
                             #   （state store + ledger）· session_sources（service 接线）。依赖 domain + hosts。
-                            #   r2a_store/discovery 留 apps/cli/src/agent/（与 CLI 成本/审计 handler 交织，是合法终态，不是欠债）。
+                            #   sessions/（v0.9 Stage 0.3）：r2a_store 的 SessionStore 缓存/checkpoint、
+                            #   codex 成本折叠/会话审计、DSH discovery、behavior I/O 入口、claude ledger
+                            #   只读取值——整体从 apps/cli/src/agent/ 迁来，落 spec §5.2「CLI 不再拥有宿主
+                            #   wire 解释或事实写入」门槛（docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md §6）。
 crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + hosts (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; stays here (documented `python3 scripts/scan.py`
                             #   command, and what the ClawHub package ships at scripts/scan.py) —
