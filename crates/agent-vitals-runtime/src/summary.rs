@@ -112,6 +112,51 @@ pub fn codex_home() -> std::path::PathBuf {
     )
 }
 
+/// fold 缓存本体——`codex_merged_cached` 写、`codex_fold_cache_clear` 测试穿透。
+static CODEX_FOLD_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (std::time::Instant, serde_json::Value)>>> =
+    std::sync::OnceLock::new();
+
+/// Codex fold 的进程级汇聚点，带 60 秒 memo——工作台一次渲染会并发发起
+/// 三个命令（daily/monthly/calendar），各自全量枚举 + fold 60 份 rollout
+/// 是可感知卡顿（2026-09-05 用户报告 tab 切换卡死的直接原因：每 tab 三倍
+/// fold）。merged 是全量历史（各命令自己按窗口过滤），所以缓存不需要按月
+/// 键控；按 home 路径键控（测试各用独立 tmp home，互不污染）。TTL 60s 与
+/// quota memo 同一条权衡：rollout 只增不改，60s 复用不构成诚实性问题。
+fn codex_merged_cached(home: &Path) -> serde_json::Value {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    let cache = CODEX_FOLD_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, v)) = guard.get(home) {
+        if at.elapsed() < Duration::from_secs(60) {
+            return v.clone();
+        }
+    }
+    let mut folds: Vec<serde_json::Value> = Vec::new();
+    for path in agent_vitals_hosts::codex_session::codex_rollout_files(home) {
+        let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(&path);
+        let items: Vec<serde_json::Value> = parsed
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        folds.push(agent_vitals_hosts::codex_usage::codex_fold_file(&items));
+    }
+    let merged = agent_vitals_hosts::codex_usage::codex_merge_folds(&folds);
+    guard.insert(home.to_path_buf(), (Instant::now(), merged.clone()));
+    merged
+}
+
+/// 测试穿透缓存用（写完新 rollout 后立即查询的场景）。
+#[doc(hidden)]
+pub fn codex_fold_cache_clear() {
+    if let Some(cache) = CODEX_FOLD_CACHE.get() {
+        cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+
+
 /// Codex 的月份/日期切片 → `HostAmount`（§8.4 的 Codex 栏）。
 ///
 /// 管线与 CLI `codex-cost` / `codex_report_from_merged` 是同一条：枚举
@@ -148,17 +193,7 @@ fn codex_host_amount_with_tokens(
         freshness: Freshness::unavailable(),
     };
 
-    let mut folds: Vec<serde_json::Value> = Vec::new();
-    for path in agent_vitals_hosts::codex_session::codex_rollout_files(home) {
-        let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(&path);
-        let items: Vec<serde_json::Value> = parsed
-            .get("items")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        folds.push(agent_vitals_hosts::codex_usage::codex_fold_file(&items));
-    }
-    let merged = agent_vitals_hosts::codex_usage::codex_merge_folds(&folds);
+    let merged = codex_merged_cached(home);
 
     // 过滤小时轴（BTreeMap 序保持升序），再重算模型轴（上面的 defect 注释）。
     let mut filtered = serde_json::Map::new();
@@ -764,17 +799,7 @@ fn apply_subscription_fees(
 /// 决策卡整条失效）。无 rollout / 无 plan 事件 → None（无 ChatGPT 订阅
 /// 证据，不得编造余量）。
 pub fn codex_quota_snapshot(home: &Path) -> Option<serde_json::Value> {
-    let mut folds: Vec<serde_json::Value> = Vec::new();
-    for path in agent_vitals_hosts::codex_session::codex_rollout_files(home) {
-        let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(&path);
-        let items: Vec<serde_json::Value> = parsed
-            .get("items")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        folds.push(agent_vitals_hosts::codex_usage::codex_fold_file(&items));
-    }
-    let merged = agent_vitals_hosts::codex_usage::codex_merge_folds(&folds);
+    let merged = codex_merged_cached(home);
     let plan = merged.get("plan")?;
     plan.get("plan_type").and_then(|v| v.as_str())?;
     Some(plan.clone())
@@ -876,17 +901,7 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     // Codex：fold → merge → 月过滤小时桶（键 `YYYY-MM-DDTHH`，按日前缀聚合
     // 5 桶 token）；逐日钱取 codex_cost_report 的 days[]（cost_usd，untimed
     // 不混进某一天——codex_host_amount 同一条纪律）。
-    let mut folds: Vec<serde_json::Value> = Vec::new();
-    for path in agent_vitals_hosts::codex_session::codex_rollout_files(codex_home) {
-        let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(&path);
-        let items: Vec<serde_json::Value> = parsed
-            .get("items")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        folds.push(agent_vitals_hosts::codex_usage::codex_fold_file(&items));
-    }
-    let merged = agent_vitals_hosts::codex_usage::codex_merge_folds(&folds);
+    let merged = codex_merged_cached(codex_home);
     let mut filtered = serde_json::Map::new();
     if let Some(bh) = merged["by_hour_model"].as_object() {
         for (h, v) in bh {
@@ -1201,6 +1216,9 @@ mod tests {
         assert!(hit.amounts_by_basis[&BillingBasis::ApiEquivalent] > 0.0);
         assert!(hit_tk.total > 0, "token 计量与金额同源同窗");
         // 相邻日没有任何小时桶 → Unavailable，不是 $0。
+        // codex fold 现在带 60s 进程级 memo（同 home 键控），同一 tmp dir 内
+        // 的第二次调用必须显式穿透，否则拿到 09-02 的缓存假数据。
+        codex_fold_cache_clear();
         let (miss, miss_tk) =
             codex_host_amount_with_tokens(&dir, "2026-09-03", Some("2026-09-03"));
         assert!(miss.amounts_by_basis.is_empty());
