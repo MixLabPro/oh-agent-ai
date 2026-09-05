@@ -468,6 +468,17 @@ async function renderOverview() {
   document.getElementById("ov-note").textContent =
     freshness + " · " + ov.estimate_note + " · " + ov.data_home;
   document.getElementById("wb-foot").textContent = ov.data_home + " · " + ov.estimate_note;
+
+  // 数据源 panel（v0.9 Stage 0.6 总览页）：并发拉 data_monthly_summary，
+  // 失败 → panel 写「读取失败」并保留方格等其他 panel（invoke 失败不
+  // 拖垮整页——renderOverview 走到这里说明 read_overview 成功了，钱包
+  // 卡片已显示，钱包以外的诚实状态面板是补全不该让卡片一起消失）。
+  try {
+    const dto = await invoke("data_monthly_summary", { month: beijingMonth() });
+    renderSourcesPanel(dto, "ov-sources");
+  } catch (e2) {
+    renderSourcesPanelFailure(errText(e2), "ov-sources");
+  }
 }
 
 function syncDot(sync) {
@@ -475,6 +486,173 @@ function syncDot(sync) {
   if (!sync) return;
   dot.className = "sync-dot" + (sync.ok ? " ok" : sync.stage === "never" ? "" : " fail");
   dot.title = sync.message || (sync.ok ? "同步正常" : "同步状态未知");
+}
+
+// v0.9 Stage 0.6 共用渲染器：把 data_monthly_summary 的 DTO 渲染成
+// 「数据源」panel。**核心纪律**（spec §0.1）：
+// - unavailable 宿主固定显示「无数据」，**绝不渲染 0.00**（空宿主 amount
+//   字段是空 map 不是 0，0.00 会让用户把"没测到"误读成"测到 0 元"——
+//   .sum() 产 -0.0 的负零事件就是这条纪律踩出来的，DTO 已修到正零），
+// - 金额一律带 basis 标签：metered_actual→「实测」、metered_estimate→「估算」、
+//   api_equivalent→「套餐等价·诊断」、fixed_subscription→「订阅」、
+//   host_billed→「宿主账单」，不允许裸数字；
+// - **不带货币符号**——DTO 刻意不带 currency：claude 的 CNY 估与 USD 诊
+//   断混在同一 map，前端写 "¥549" 就是编造币种。
+// - staleness 必须挂在宿主行右侧（与数字同排），不许只藏到下方 note：
+//   用户从卡片本身就能判断"是不是真的"，这是 2026-09-01 alert stale
+//   事故里 month.json 与 alert.json 自相矛盾的同款教训。
+const BASIS_LABEL = {
+  metered_actual: { label: "实测", cls: "measured" },
+  metered_estimate: { label: "估算", cls: "estimate" },
+  api_equivalent: { label: "套餐等价·诊断", cls: "diagnostic" },
+  fixed_subscription: { label: "订阅", cls: "subscription" },
+  host_billed: { label: "宿主账单", cls: "hostbilled" },
+};
+// id 顺序：DTO 给的 BTreeMap 键序就是事实序（白盒契约：白盒降级是从这点
+// 开始的——以后 summary 给排序时删这里）。
+const HOST_DISPLAY = {
+  "dsh": "DeepSeek Harness",
+  "claude-code": "Claude Code",
+  "codex": "Codex",
+  "workbuddy": "WorkBuddy",
+};
+
+function freshnessText(state, lastObservedAt) {
+  const at = (lastObservedAt || "").slice(0, 10);
+  switch (state) {
+    case "fresh": return at ? "新鲜 · 观测 " + at : "新鲜";
+    case "stale": return "⚠ 过期 · 最后观测 " + at;
+    case "partial": return "部分覆盖 · 最后观测 " + at;
+    case "unavailable":
+    default: return "无数据";
+  }
+}
+
+function renderSourcesPanel(dto, prefix) {
+  const list = document.getElementById(prefix + "-list");
+  const empty = document.getElementById(prefix + "-empty");
+  const meta = document.getElementById(prefix + "-meta");
+  list.innerHTML = "";
+  meta.innerHTML = "";
+
+  const byHost = dto.by_host || {};
+  const keys = Object.keys(byHost);
+  const allUnavailable = keys.every(
+    (k) => !byHost[k].freshness || byHost[k].freshness.state === "unavailable"
+  );
+
+  if (allUnavailable && (dto.excluded_hosts || []).length > 0
+      && Object.keys(byHost).length === 0) {
+    empty.hidden = false;
+    empty.textContent = "本月无跨宿主数据";
+  } else {
+    empty.hidden = true;
+    for (const id of keys) {
+      const row = byHost[id];
+      const li = document.createElement("li");
+      const fs = (row.freshness || {}).state || "unavailable";
+      const unavailable = fs === "unavailable";
+      li.className = unavailable ? "no-data" : "";
+
+      const name = document.createElement("span");
+      name.className = "host";
+      name.textContent = HOST_DISPLAY[id] || id;
+      li.appendChild(name);
+
+      const basisEl = document.createElement("span");
+      basisEl.className = "basis";
+      if (unavailable) {
+        // 不产 basis chip——chip 会让用户以为"这里有金额"，更糟的是
+        // 把 empty map 渲染成「0.00 实测」（spec §0.1 反面教材）。
+        const span = document.createElement("span");
+        span.className = "chip";
+        span.textContent = "无数据";
+        basisEl.appendChild(span);
+      } else {
+        const entries = Object.entries(row.amounts_by_basis || {});
+        if (entries.length === 0) {
+          // 有观测日但全 unknown（claude 全 unknown 日等）：不算 unavailable，
+          // 也不产金额——chip 标「无可计金额」+ has_unresolved=true 时再加
+          // 红 tag「含未定价 tokens」。
+          const span = document.createElement("span");
+          span.className = "chip";
+          span.textContent = "无可计金额";
+          basisEl.appendChild(span);
+        } else {
+          for (const [b, v] of entries) {
+            const meta2 = BASIS_LABEL[b];
+            if (!meta2) continue;
+            const chip = document.createElement("span");
+            chip.className = "chip " + meta2.cls;
+            chip.textContent = meta2.label + " " + v.toFixed(2);
+            basisEl.appendChild(chip);
+          }
+        }
+        if (row.has_unresolved) {
+          const t = document.createElement("span");
+          t.className = "unresolved-tag";
+          t.textContent = "含未定价 tokens";
+          t.title = "看见了 token 但价目表认不出模型/卡——金额表留空 + 该标记；既不当 0 也不当没测（spec §4 unresolved 不得归零）";
+          basisEl.appendChild(t);
+        }
+      }
+      li.appendChild(basisEl);
+
+      const fr = document.createElement("span");
+      fr.className = "fresh " + fs;
+      fr.textContent = freshnessText(fs, (row.freshness || {}).last_observed_at);
+      li.appendChild(fr);
+
+      list.appendChild(li);
+    }
+  }
+
+  // coverage + excluded + summable。summable 行是诚实窗口外的最后一道：
+  // 即便所有宿主都显示「无数据」，summable 也必须是 0 + 备注，而不是消失。
+  const cov = dto.coverage || { measured_fields: 0, total_fields: 0, denominator_version: 1 };
+  const covLine = document.createElement("div");
+  covLine.textContent = "数据覆盖 " + cov.measured_fields + "/" + cov.total_fields +
+    "（分母 v" + cov.denominator_version + "）";
+  meta.appendChild(covLine);
+
+  const excluded = dto.excluded_hosts || [];
+  const excLine = document.createElement("div");
+  if (excluded.length === 0) {
+    excLine.textContent = "范围外：（无）";
+  } else {
+    excLine.textContent = "范围外：" + excluded.map((h) => HOST_DISPLAY[h] || h).join("、");
+  }
+  meta.appendChild(excLine);
+
+  // summable 行：unavailable 时改显「无数据」红字 + 备注，绝不显 0.00。
+  const summable = dto.total_summable;
+  const anyData = keys.some((k) => (byHost[k].freshness || {}).state !== "unavailable");
+  const sumLine = document.createElement("div");
+  sumLine.className = "summable" + (anyData ? "" : " no-data");
+  if (anyData) {
+    sumLine.textContent = "可汇总总额 " + summable.toFixed(2);
+    const note = document.createElement("span");
+    note.className = "note";
+    note.textContent = "估算与套餐等价值不计入（spec §4：estimate/api_equivalent 不冒充真实账单）";
+    sumLine.appendChild(note);
+  } else {
+    sumLine.textContent = "可汇总总额：无数据";
+    const note = document.createElement("span");
+    note.className = "note";
+    note.textContent = "全部宿主 unavailable；spec §0.1 不得渲染为 ¥0 或看似完整的总额";
+    sumLine.appendChild(note);
+  }
+  meta.appendChild(sumLine);
+}
+
+function renderSourcesPanelFailure(message, prefix) {
+  const list = document.getElementById(prefix + "-list");
+  const empty = document.getElementById(prefix + "-empty");
+  const meta = document.getElementById(prefix + "-meta");
+  list.innerHTML = "";
+  meta.innerHTML = "";
+  empty.hidden = false;
+  empty.textContent = "跨宿主源状态读取失败：" + message;
 }
 
 // ---------- Token 日历 ----------
@@ -499,17 +677,49 @@ async function renderCalendar() {
   calData = resp;
   grid.innerHTML = "";
 
+  // 数据源 panel（v0.9 Stage 0.6 日历页月份级诚实状态）：并发拉
+  // data_monthly_summary，失败不拖垮方格（spec §0.1：日轴与跨宿主源各自
+  // 诚实渲染，不互相替代）。方格走 read_month 的 DSH 日轴数据，月级源
+  // 状态走新命令——两者可能分别有/无数据，不许混为一谈。
+  let calSourcesDto = null;
+  try {
+    calSourcesDto = await invoke("data_monthly_summary", { month: calMonth });
+  } catch (eCal) {
+    renderSourcesPanelFailure(errText(eCal), "cal-sources");
+    calSourcesDto = null;
+  }
+  // cal-total 加新鲜度标注——stale 必须挂在金额旁边，不许只藏到下方 note。
+  const calTotalEl = total;
+  let calSuffix = "";
+  if (calSourcesDto && calSourcesDto.freshness) {
+    const fs = calSourcesDto.freshness.state;
+    const at = (calSourcesDto.freshness.last_observed_at || "").slice(0, 10);
+    if (fs === "fresh") {
+      calSuffix = "（新鲜）";
+    } else if (fs === "stale") {
+      calSuffix = "（数据停在 " + at + "）";
+    } else if (fs === "partial") {
+      calSuffix = "（部分覆盖）";
+    }
+    // unavailable 状态：标题不显示金额（spec §0.1 不渲染 0.00）——交由
+    // 下方 sources panel 的渲染函数统一处理，这里只覆盖"金额存在"分支。
+  }
+
   if (!resp.has_data) {
     empty.hidden = false;
     empty.textContent = "该月暂无数据";
-    total.textContent = "";
+    total.textContent = calSourcesDto && calSourcesDto.freshness.state !== "unavailable"
+      ? "" : calSuffix;
+    if (calSourcesDto) renderSourcesPanel(calSourcesDto, "cal-sources");
     document.getElementById("cal-note").textContent =
-      "历史月数据在 state/month-archive.json；当月无数据 = 还没折进账。";
+      "历史月数据在 state/month-archive.json；当月无数据 = 还没折进账。" +
+      (calSourcesDto ? "" : "");
     return;
   }
   empty.hidden = true;
   total.textContent = fmtMoney(resp.total) +
-    ((resp.peak_total || 0) > 0 ? " · 高峰 " + fmtMoney(resp.peak_total) : "");
+    ((resp.peak_total || 0) > 0 ? " · 高峰 " + fmtMoney(resp.peak_total) : "") +
+    (calSuffix ? " " + calSuffix : "");
 
   const dows = ["日", "一", "二", "三", "四", "五", "六"];
   for (const d of dows) {
@@ -563,6 +773,9 @@ async function renderCalendar() {
   }
   document.getElementById("cal-note").textContent =
     "方格金额为该日总成本；「部分覆盖」= by_model 未覆盖全部 token，按 fallback 价补齐。";
+
+  // 月份级跨宿主概览：放在方格之后、note 之前。
+  if (calSourcesDto) renderSourcesPanel(calSourcesDto, "cal-sources");
 }
 
 function shiftMonth(delta) {
