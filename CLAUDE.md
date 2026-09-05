@@ -79,7 +79,9 @@ docs/                       # design docs (ENGINEERING, DSH_INTEGRATION, AGENT_B
 integrations/dsh/           # DSH-1 profile bundle (registers agent-vitals as a DSH skill) — moved here in Phase E1
 integrations/dsh-client/    # dual-face audit plugin (host projection + wasm + client tab) — moved here in Phase E1
 apps/desktop/src-tauri/     # 菜单栏 app（Tauri 2，**独立 workspace**，Phase E2 从根移进 apps/desktop/）：
-                            #   托盘 + 弹出面板展示 今日/本月/预算，计价全部委托 domain::cost（不长第四份拷贝）
+                            #   托盘 + 工作台（总览 KPI 行/双轨账/决策卡、Token 日历）。
+                            #   金钱与计价委托 domain::cost，跨宿主查询走 runtime 的
+                            #   JsonSummaryRepository（冻结 DTO），不长第四份拷贝
 fixtures/ + golden/         # test corpus + byte-for-byte scanner snapshots
 tests/                      # 28 Python test files（含分类守卫 tests/test_classification.py）
 .github/workflows/          # verify.yml, release.yml, package-clawhub.yml
@@ -266,6 +268,39 @@ regardless of how well it scores on samples. `security_scan()` early-returns
 Split recommendations use **`tier2_core_tokens`, never line count**: measured density varied
 >4× within one library. `.md` in other subdirectories is classified as data corpus; `REPO_META`
 is excluded entirely.
+
+### v0.9 成本词表与计费归属（2026-09-05，权威定义见 docs/ATTRIBUTABLE_WASTE.md §6/§6.7）
+
+「花了多少钱」在本仓库是**四个互不相加的量**，UI 与 DTO 不得混用：`nominal_cost`
+（名义成本，官方标价折算、不扣套餐/中转折扣/促销——"名义 GDP"式客观基准，缓存
+两桶实测占 92.8%）、`metered_spend`（按量实付）、`FixedSubscription`（订阅月费，
+不付用量也在付——零用量月份照摊，GLM 2026-09-05 前不摊）与 `unpriced_tokens`
+（无价卡 token，既不计 0 也不借卡）。**实际支出 = 按量实付 + 订阅月费**，分币
+分栏永不相加；订阅利用率 = 名义/月费，**>50× 是「归属待核」告警而非套利**
+（anthropic 380× 实测即声明错误的自检信号）。词表陷阱：`nominal` 一词已从
+`nominal_vs_actual_cost`（已改名 `cache_counterfactual_cost`——"无缓存反事实"，
+与市场标价差 8~10 倍）让位给 §6.7 口径，不得回用。
+
+归属的粒度是 **(host, provider)** 而非 host：`HostAmount.amounts_by_basis` 一档
+只有一个数，claude-code 宿主内 anthropic(USD)+minimax(CNY) 同桶跨币相加就是
+编造——所以权威归属在 `MonthlySummary.by_provider`（键 `"host/provider"`，条目
+级 currency 单币）；`by_host` 保留币种分栏的旧口径（有测试钉着），**新增消费方
+一律读 by_provider**。计费模式来自 `pricing.json::catalog_2026_09.billing_modes`
+（`billing_route_of`，声明序即优先级、与价卡解耦——无价卡模型 glm-* 也能归属；
+`resolve_card_catalog` 靠价卡反查是已知缺陷面，别新增依赖它的归属逻辑）。
+
+**性能形状（2026-09-05 tab 卡顿事故）**：工作台一次渲染并发发起 daily/monthly/
+calendar/quota 四个命令——**任何新增的 codex 数据面必须走
+`runtime::summary::codex_merged_cached`（进程级 60s memo，按 home 键控）**，
+自建枚举+fold 管线就是每 tab 三倍全量 fold 的回归复刻（60 份 rollout 单次
+2~5s）。命中路径是 Arc——锁内深拷贝几 MB JSON 会把并发命令串行卡在锁上，
+缓存自身变成瓶颈（已修，别改回去）。
+
+**形状来源纪律（Stage A–D 审查 10 条确认缺陷的共同根因）**：渲染器/verify stub
+手写数据期望形状，会与 fold/DTO 的真实形状互相印证着一起错（quota 的
+`limits.primary`、`dsh_tokens` 的单日对象——两者当时 gate 全绿是假绿）。新消费
+方接入 wire 数据前，先读产生方的 fold/序列化代码或 fixture 钉形状；`.mjs` stub
+必须注明形状出处（函数+行号），形状变更同一 PR 同改。
 
 ### Other invariants with tests behind them
 
