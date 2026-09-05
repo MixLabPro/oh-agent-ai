@@ -411,3 +411,47 @@ spec 没有给"新鲜窗口"的具体阈值，Stage 0 用一个明说的粗近�
 宿主会在另一个宿主更新得更晚时谎报过期或谎报新鲜；汇总回答的是"这份
 数据最近还有没有在更新"。`Unavailable` 宿主必带 `last_observed_at=None`
 （domain 不变式 3），天然不参与 max。
+
+## 9. Stage 0.4 完成记录
+
+三个宿主全部接线（逐宿主一提交：0.4a DSH `c3a2fba`、0.4b Codex
+`4ca0cfe`、0.4c Claude Code `3cb2781`），Stage 0.4 关闭。
+
+**接线总表**（§8.4 设计 → 落地的差异见各条）：
+
+| 宿主 | 数据源 | 计价决策点 | basis | has_unresolved |
+|---|---|---|---|---|
+| `dsh` | `budget.rs` 的 month.json / month-archive.json | `domain::cost::month_cost` / `priced_day` | `MeteredActual`（官方逐 token 真实费率） | 恒 false（priced_day 失败走 bucket_cost 兜底，不是 unpriced 语义） |
+| `codex` | `~/.codex/{sessions,archived_sessions}` rollout 折叠 | `sessions::codex_cost::codex_cost_report` | `ApiEquivalent`（订阅套餐的等价 API 标价，只作诊断） | `unpriced_tokens > 0` |
+| `claude-code` | `state_dir()/claude-ledger.json` 逐日账 | `domain::cost::claude_day_cost` | CNY 流 `MeteredEstimate` / USD 流 `ApiEquivalent`（分栏即托盘 `metered_amount` 口径的 DTO 化，跨币永不相加） | `unpriced_tokens > 0` 或任一日 `pricing_basis=partial` |
+| `workbuddy` | — | — | — | —（永久 `excluded_hosts`，用户决定） |
+
+**落地时比 §8 设计多出的三个决定**（原设计未预见的）：
+
+1. **汇总层 freshness 聚合**（0.4b 引入）：多宿主后不能硬编码取 DSH——
+   `aggregate_freshness` 取 `last_observed_at` 最大的宿主（全部 Unavailable
+   → 汇总 Unavailable），详见 §8.5 追加段。
+2. **codex 月过滤后重算 by_model**：与 CLI `codex_report_from_merged` 同一条
+   管线的同一处坑（merge 的 by_model 不读小时轴），注释互指。
+3. **claude 全 unknown 日**（有 token、无钱）：金额表留空 + `has_unresolved`
+   + freshness 照报——`CostBasis::Unresolved`"不得归零"，也不当没测。
+
+**测得的状态**：runtime 115 测试（summary.rs 11 个：DSH 2 + codex 5 +
+claude 4，其中接线结构测试钉"excluded_hosts 只剩 workbuddy、coverage
+3/3、总额只收 summable 档"）；全仓 gate 全绿（clippy -D warnings、
+workspace 1009、wasm + src-tauri check、Python 1155、golden 15/15）。
+
+**诚实性自查**（对照 spec §0.1 的三条数据源状态可见要求）：
+- 无数据 → Unavailable（不是 0）：三宿主各有测试钉住（`*_miss_is_
+  unavailable_not_zero` / `no_month_json_*` / `codex_other_month_*`）。
+- 估算不冒充账单：DSH 之外所有金额都在非 summable 档；`total_summable()`
+  只收 MeteredActual/FixedSubscription/HostBilled——接线结构测试逐字节断言
+  总额 == 各宿主 summable 档之和。
+- 未接线/范围外宿主可见：`excluded_hosts` 恒含 workbuddy，coverage 分母
+  3/3 由 `denominator_version=1` 钉住（Stage B 加宿主时 bump）。
+
+**下一步**：Stage 0.5——`agent-vitals` CLI 增只读 subcommand（经
+`SummaryRepository` trait 调 `JsonSummaryRepository`，CLI 不直接 new 具体
+类型——依赖方向 apps→data→domain 才有意义），把这份 DTO 端给控制台/
+Tauri；0.5 落地后控制台"总览/日历"两页的数据接入才具备并行条件
+（同一份冻结契约，两页互不阻塞）。
