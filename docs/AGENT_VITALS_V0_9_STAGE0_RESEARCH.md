@@ -501,3 +501,72 @@ Tauri；0.5 落地后控制台"总览/日历"两页的数据接入才具备并�
 展示：freshness/coverage/excluded_hosts 必须渲染，stale/partial 不得渲染
 成 0 或"正常"）。0.5 落地后，控制台"总览/日历"两页的数据接入已具备
 并行条件（同一份冻结契约）。
+
+## 11. Stage 0.6 / 0.7 完成记录
+
+**0.6 工作台 Data Query API 接入**：
+
+| 提交 | 内容 |
+ | | |
+ | `267199c` 0.6a | `data_monthly_summary`/`data_daily_summary` Tauri 命令层 —— 薄转发 trait → runtime → `JsonSummaryRepository`，src-tauri 91 测试全绿 |
+ | `a73d625` 0.6b | 总览/Token 日历两页接 `data_monthly_summary` —— 「数据源」panel（宿主行 + basis chip + freshness + coverage + excluded + summable）；7 用例 jsdom 验证 ALL PASSED |
+
+0.6b 的纪律（spec §0.1）：
+- unavailable 宿主固定「无数据」，绝不渲染 0.00；DTO 端 `fold(0.0, ...)` 与渲染端双层保险
+- 金额一律带口径标签、不带货币符号（DTO 不带 currency：claude CNY 估 + USD 诊断混在同一 map，跨币永不相加；写 "¥549" 就是编造币种）
+- staleness 必挂金额旁边：2026-09-01 alert stale 事故里 month.json 与 alert.json 自相矛盾、用户从卡片本身没法判断"是不是真的"的同款教训
+- invoke 失败 → panel 单独显示「跨宿主源状态读取失败：...」，不静默、不拖垮其他卡片
+
+并行执行的小事故：原计划用 subagent 并行做总览/日历两页（0.5/0.6a 落地后用户问"两页并行"），`agent-aa35f5b2`（总览）与 `agent-a4f0e21`（日历）双双在 sandbox 5 小时 API 配额上限处退出（429），worktree 仅有未暂存的初始检查，没有 commit。两个 worktree 已清理（`git worktree remove --force`）。工作收回主树串行做，结果与并行一致——同一份冻结 DTO，两页本身就是同构的，并行的边际收益有限。
+
+**0.7 四宿主最小接入契约**（`f189969`）：
+
+`fixtures/v09/` 三份语料 + `tests/test_v09_onboarding_fixtures.py` 两层守卫：
+- **语料词表层**（无二进制）：DSH 是 8 桶（4 桶 + peak_*）、Claude Code 是 4 型 snake、Codex 是 `last_token_usage` 6 字段——词表漂移（DSH 误用 Claude 字段名导致 priced_day 静默算 0 的真实事故）在这层直接红
+- **二进制对账层**（`AGENT_VITALS_BIN` 约定）：语料装进隔离环境 → `data coverage` 逐宿主断言 basis（dsh=`metered_actual` 计入总额 / claude=`metered_estimate`、codex=`api_equivalent` 不计入）、coverage 3/3；`hosts --json -` 断言 WorkBuddy「声明但排除」两半同时成立（注册表有行 `session_store=false` + `excluded_hosts` 在册）
+
+`fixtures/v09/README.md` 的 §3.3 七行交付物 × 四宿主现状表把 WorkBuddy「声明但排除」显式分开：
+- **声明面**：capability 注册表认识它（`unmeasured_signals`/`degraded_rules` 齐全）
+- **数据面**：`SummaryRepository` 永远把它放进 `excluded_hosts`，`by_host` 里没有它
+
+两侧必须同时断言。注册表删了它的行（"忘记接线"）和 excluded 漏了它（"决定不接"）都会让守卫红掉——回归 vs 清理从来是两回事。
+
+## 12. Stage 0 全段完成状态
+
+**Stage 0（Data Access Foundation）七步全部完成**，分支
+`v0.9/stage0-data-access-foundation` 当前 17 个 commit ahead of main，未 push：
+
+```
+f189969 Stage 0.7 — four-host minimal onboarding contract fixtures
+a73d625 Stage 0.6b — workbench overview/calendar data-source panel
+7a59389 docs Stage 0.4 completion record
+267199c Stage 0.6a — data_monthly_summary/data_daily_summary Tauri commands
+3cb2781 Stage 0.4c — wire Claude Code into JsonSummaryRepository
+4ca0cfe Stage 0.4b — wire Codex into JsonSummaryRepository
+da2cbe8 Stage 0.5 — read-only data coverage/daily CLI over SummaryRepository
+c3a2fba Stage 0.4a — SummaryRepository trait + DSH-wired implementation
++ Stage 0.1-0.3 来自前轮
+```
+
+**依赖方向最终形态**（spec §3.1 表，与 0.4a 的 §8.1 修正一致）：
+```
+        domain ← hosts ← data ← runtime ← apps/desktop, apps/cli
+```
+`domain` 不依赖任何东西；`data` 只依赖 `domain`（不依赖 hosts/runtime/spec §3.1 钉死）；
+`runtime` 同时依赖 hosts 与 data（唯一能实现 SummaryRepository 的层）；
+`apps` 只依赖 runtime（拿 `Box<dyn SummaryRepository>`，不 new 具体类型，
+不读 state JSON）。
+
+**诚实性自查（最终）**：
+- 无数据 → Unavailable（不是 0）：三宿主都有测试钉（`*_miss_is_unavailable_not_zero` / `no_month_json_*`）
+- 估算/诊断不冒充账单：`summable_into_total` 三档 + 测试逐字节断言总额等于各宿主 summable 档之和
+- 未接线/范围外宿主可见：`excluded_hosts` 恒含 workbuddy；coverage 3/3 由 denominator_version=1 钉住
+- 负零修复：`fold(0.0, …)` + 序列化断言（`empty_summable_is_positive_zero_never_negative_zero`）
+- CLI / Tauri / 工作台共用一份冻结 DTO：不许在某一层造第二种 JSON 形状
+- WorkBuddy「声明但排除」两半各自成立
+
+**v0.9 下一阶段（Stage A+）** —— 见 `docs/AGENT_VITALS_V0_10_VALUE_LOOP_ARCHITECTURE_SPEC.md`。
+Stage 0 给的是"读得到"：Data Query API + 冻结 DTO + 三宿主接线 + 控制台诚实展示。
+Stage A 起把 usage_fact 系列搬进 hosts（spec §5.2 这块在 0.3 阶段延后过、本表留有
+scope gap）、SQLite 写盘、HostBillRecord、跨宿主 reconciliation。Stage 0 的 commit
+全部干净、独立可回滚。
