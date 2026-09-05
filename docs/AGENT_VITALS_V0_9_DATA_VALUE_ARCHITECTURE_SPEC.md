@@ -49,7 +49,7 @@ projection、Claude ledger 和 WorkBuddy source adapter 实现；UI/CLI 自此�
 | 名义成本口径（list-price，"名义 GDP"式客观基准） | ✅ 定义 + 实现 | 定义 `ATTRIBUTABLE_WASTE.md` §6.7（提交 `9b279ca`）；实现 = catalog 计价面既有产物被正式命名 |
 | 性能形状：codex fold 进程级 60s memo（`codex_merged_cached`，Arc 命中） | ✅ | `d8c6c83` |
 | 审查修复：`CODE_REVIEW_V0_9_STAGE_A_D_KPI_BILLING` 10 条 + `CODE_REVIEW_V0_9_WORKBENCH_UX` 14 条 | ✅ | `29c0717`/`0096607`/`01f0d9a` |
-| §2.1 其余八项：writer（✅ Stage A `93fbc0d`/ingest 接通）、emitter 归位（✅ `f1850bc`）；SQLite 投影 / checkpoint / lease / 生成事务 / HostBillRecord / BillingContext / 故障注入 | 🔶 writer ✅ 其余 ❌ | 分期见 §7 Stage A–C |
+| §2.1 其余八项：writer（✅ `93fbc0d`）、emitter 归位（✅ `f1850bc`）、ingest service（✅ `0f1d6b5`）、SQLite 投影（✅ `2d32ed0`）、lease（✅ `6b3aadd`）、BillingContext（✅ `9fbf920`）、故障注入（🔶 `3ffe10f`：facts/projection/lease 三点有注入测试）；checkpoint（随 sync_service 推迟）、生成事务 / HostBillRecord（待 WorkBuddy 范围确认） | 🔶 | 分期见 §7 Stage A–C |
 
 **数据缺口（阻塞实际侧计费精度，等用户输入，非工程阻塞）**：中转商对
 claude-sonnet-5 的 cache_read 单价（决定 claude-* 实际支出 78.9%）、GLM 官方按量
