@@ -2224,6 +2224,24 @@ function init() {
     t.addEventListener("click", () => switchTab(t.dataset.tab));
   });
   document.getElementById("wb-refresh").addEventListener("click", loadActiveTab);
+  // FR-11 同款纪律（见 dsh-client audit/actions.ts）：复制类操作不得静默失败——
+  // 按钮文字直接说明成功/失败，不摆一个点了没反应的按钮。
+  document.getElementById("wb-screenshot").addEventListener("click", async () => {
+    const btn = document.getElementById("wb-screenshot");
+    const original = btn.textContent;
+    btn.disabled = true;
+    try {
+      await invoke("capture_workbench_screenshot");
+      btn.textContent = "已复制";
+    } catch (e) {
+      btn.textContent = "失败";
+      console.error(e);
+    }
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.disabled = false;
+    }, 1500);
+  });
   document.getElementById("cal-prev").addEventListener("click", () => shiftMonth(-1));
   document.getElementById("cal-next").addEventListener("click", () => shiftMonth(1));
   document.getElementById("cal-month").addEventListener("change", (ev) => {

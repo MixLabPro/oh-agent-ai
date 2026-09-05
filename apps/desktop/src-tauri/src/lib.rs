@@ -1246,6 +1246,41 @@ fn clear_focus_target(state: tauri::State<'_, FocusTarget>) {
     state.clear();
 }
 
+/// 工作台"截图"按钮：把窗口内容直接拷进系统剪贴板，省得用户手动截图裁剪再贴过来。
+/// 用 `screencapture -l<windowNumber>`（按窗口 ID 截）而不是拿 outer_position/
+/// outer_size 算区域再 `-R x,y,w,h`——后者要在物理像素和 Retina scale factor 之间
+/// 换算，前者让系统自己按窗口分辨率截，不用算。
+/// 注意：这是 macOS 系统权限，不是这段代码能探测的——第一次调用如果没有"屏幕录制"
+/// 权限，`screencapture` 仍然 exit 0，只是拷贝出一张黑图/空图；这里不做静默降级。
+#[tauri::command]
+fn capture_workbench_screenshot(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc::{msg_send, sel, sel_impl};
+        let window = app
+            .get_webview_window("workbench")
+            .ok_or_else(|| "工作台窗口未打开".to_string())?;
+        let ns_window = window.ns_window().map_err(|e| e.to_string())? as *mut objc::runtime::Object;
+        if ns_window.is_null() {
+            return Err("拿不到窗口句柄".to_string());
+        }
+        let win_num: i64 = unsafe { msg_send![ns_window, windowNumber] };
+        let status = std::process::Command::new("screencapture")
+            .args(["-x", "-c", "-o", &format!("-l{}", win_num)])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err("screencapture 失败".to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("截图功能目前只支持 macOS".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1285,6 +1320,7 @@ pub fn run() {
             focus_session,
             peek_focus_target,
             clear_focus_target,
+            capture_workbench_screenshot,
         ])
         .setup(|app| {
             // 菜单栏工具:必须 .accessory,否则 macOS 把它当普通 App 常驻 Dock
