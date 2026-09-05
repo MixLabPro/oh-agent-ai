@@ -421,10 +421,16 @@ JSON read adapter；BillingContext/UserProfile 吸收 4.1 声明层（P2）；
 HostBillRecord 落地（WorkBuddy credit_json 首个生产写入方）；coverage
 projection 完整化。Data Query API 与上层 DTO 不变。
 
-### v0.9.0 Stage C（P2）：发布收口
+### ✅ v0.9.0 Stage C（P2）：发布收口（2026-09-06 完成）
 
-跨实现 parity、CLI/Tauri/HTML DTO 对账、迁移/删除/恢复文档、脱敏导出验证、
-故障注入与 replay 测试。
+保留滚动（UsageFact 最近 13 个自然月，fencepost 钉死；无日期行保留；幂等）、
+故障注入与 replay 测试（rebuild 事务回滚 + 损坏自愈 + facts 尾面修复 +
+lease 原子 rename——DoD #2 三点有测试，intent/manifest 未实现如实标注）、
+脱敏导出**双写路径**（`data-export-private` / `data-export-redacted`，
+四个身份字段伪名化 + fact_id 契约层重 stamp，§6 的「不能由一个 bool 决定」
+落地）、数据面维护文档（CLAUDE.md「v0.9 数据面维护」节）。跨实现 parity
+（golden 15/15 + Python 1164）与 DTO 对账（DoD #6）由既有差分 gate 持续
+看守。审查（P1 脱敏泄漏 + P2×5）已全部修复（`c5841f4`）。
 
 ### 7.1 Watcher 的进入门槛
 
