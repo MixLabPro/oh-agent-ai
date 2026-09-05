@@ -76,7 +76,7 @@ PY_AGENT_FAMILY = {
 }
 RS_AGENT_FAMILY = {
     "claude_cost", "claude_usage_fact",
-    "codex_session_audit", "codex_usage_fact", "cost", "discovery",
+    "codex_session_audit", "codex_usage_fact", "cost",
     "dsh_usage_fact",
     "host_runtime_registration",
     "oneline", "plan", "r2a_store",
@@ -86,8 +86,9 @@ RS_AGENT_FAMILY = {
     # ——都不再在 src/agent/。
     # v0.9 Stage 0.3（docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md §6）：
     # r2a_store 的 6 文件依赖闭包逐个迁进 agent_vitals_runtime::sessions——
-    # codex_cost、behavior 已搬走，从这份清单删掉；discovery/
-    # codex_session_audit/r2a_store 会在各自的搬迁提交里跟着删。
+    # codex_cost、behavior、discovery（DSH 专用的这一个，非已迁移的
+    # skills::discovery）已搬走，从这份清单删掉；codex_session_audit/
+    # r2a_store 会在各自的搬迁提交里跟着删。
 }
 
 

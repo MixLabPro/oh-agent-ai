@@ -126,7 +126,7 @@ fn codex_source_fingerprints(home: &Path) -> Vec<(String, String)> {
 /// 参数（= HOME）是权威根（`home/.codex`、`home/.dsh` 同一条纪律）；`discovery::dsh_home()`
 /// 那套 env 覆盖只服务 tick/oneline 路径，两条路径的根在 DSH_HOME 未设时本就一致。
 fn dsh_source_fingerprints(home: &Path) -> Vec<(String, String)> {
-    crate::agent::discovery::dsh_session_files(&home.join(".dsh"))
+    agent_vitals_runtime::sessions::discovery::dsh_session_files(&home.join(".dsh"))
         .iter()
         .map(|p| (p.to_string_lossy().to_string(), fingerprint_file(p).unwrap_or_default()))
         .collect()
@@ -407,7 +407,7 @@ fn codex_source_statuses(home: &Path, n_sessions: usize) -> Value {
 ///
 /// `roots` = `dsh_session_roots_report`（sessions + storages 两个根的存在性报告）。
 fn dsh_source_statuses(home: &Path, files: &[PathBuf], degraded: &[(String, String)]) -> Value {
-    let roots = crate::agent::discovery::dsh_session_roots_report(&home.join(".dsh"));
+    let roots = agent_vitals_runtime::sessions::discovery::dsh_session_roots_report(&home.join(".dsh"));
     let built = files.len() - degraded.len();
     let status = if files.is_empty() || built > 0 {
         "ok"
@@ -591,8 +591,8 @@ impl SessionStore {
                     }
                 }
                 let dsh_root = home.join(".dsh");
-                let files = crate::agent::discovery::dsh_session_files(&dsh_root);
-                let ws = crate::agent::discovery::read_workspace_index(&dsh_root);
+                let files = agent_vitals_runtime::sessions::discovery::dsh_session_files(&dsh_root);
+                let ws = agent_vitals_runtime::sessions::discovery::read_workspace_index(&dsh_root);
                 // namespace 必须**并行前**固定：`dsh_built_session_for` 若内部现算
                 // `machine_namespace()`，miss 时会写 machine.json——并发首建会得到
                 // 互相不一致的随机 namespace（envelope 键的一部分，直接破坏分页键）。
@@ -622,8 +622,8 @@ impl SessionStore {
 
         // 冷启动 / 旧格式缓存：全量重建（含 degraded 逐文件记录）。
         let dsh_root = home.join(".dsh");
-        let files = crate::agent::discovery::dsh_session_files(&dsh_root);
-        let ws = crate::agent::discovery::read_workspace_index(&dsh_root);
+        let files = agent_vitals_runtime::sessions::discovery::dsh_session_files(&dsh_root);
+        let ws = agent_vitals_runtime::sessions::discovery::read_workspace_index(&dsh_root);
         let ns = takeover::machine_namespace();
         let mut sessions = Vec::new();
         let mut degraded: Vec<DegradedTriple> = Vec::new();
@@ -1157,7 +1157,7 @@ fn claude_built_session_for(home: &Path, sid: &str, ns: &str, fp_map: &HashMap<&
 /// 一并带出是为了让 degraded 记录也能存进 v2 cache，下次内容没变就不用重试。
 fn dsh_built_session_for(
     path: &Path,
-    ws: &crate::agent::discovery::WorkspaceIndex,
+    ws: &agent_vitals_runtime::sessions::discovery::WorkspaceIndex,
     fp_map: &HashMap<&str, &str>,
     ns: &str,
 ) -> Result<BuiltSession, DegradedTriple> {

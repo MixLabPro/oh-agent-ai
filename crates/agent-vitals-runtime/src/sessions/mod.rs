@@ -8,3 +8,4 @@
 
 pub mod behavior;
 pub mod codex_cost;
+pub mod discovery;

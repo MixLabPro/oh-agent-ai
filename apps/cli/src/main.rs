@@ -1147,7 +1147,7 @@ session_store={store} fold={fold}"
     // R1d-tick：discover——列 DSH 会话根下未折的裸 session.jsonl（mtime 最新在前）。
     // 只读：不碰 fencing、不写 state；tick 与验收测试都从这里拿「折哪条」。
     if let Some(Cmd::Discover { rows_json }) = &args.cmd {
-        let report = agent::discovery::discover();
+        let report = agent_vitals_runtime::sessions::discovery::discover();
         let text = serde_json::to_string_pretty(&report).unwrap_or_default();
         if let Some(path) = rows_json {
             if path == &PathBuf::from("-") {
