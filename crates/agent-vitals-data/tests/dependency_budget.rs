@@ -5,8 +5,8 @@
 //! - 不依赖 `agent-vitals-hosts`：Stage 0.3 起会加只读 JSON adapter，那时
 //!   仍不需要 hosts（读的是宿主已经写好的 state JSON，不是宿主 wire），
 //!   真正需要 hosts 的时机待 Stage 0.3 具体设计时再评估；
-//! - 不依赖 `rusqlite`：Stage B 才会加（spec §5.1），届时这条测试要跟着
-//!   放开——那是按计划推进，不是"悄悄长出第二权威源"；
+//! - `rusqlite` 已按计划在 Stage B 引入（spec §5.1，`store.rs` 可重建索引）
+//!   ——从禁用清单移除是按计划推进，不是"悄悄长出第二权威源"；
 //! - 不反依赖二进制/wasm/runtime：依赖方向是
 //!   `apps/{cli,desktop} → agent-vitals-runtime → agent-vitals-data →
 //!   agent-vitals-domain`，且 `runtime → hosts → domain` 并行成边——
@@ -48,26 +48,35 @@ fn dependency_keys(manifest: &str) -> Vec<String> {
 }
 
 #[test]
-fn stage_0_2_has_no_host_io_or_sqlite_dependency_yet() {
+fn data_dependencies_stay_within_domain_serde_and_sqlite() {
     let manifest = fs::read_to_string(manifest_dir().join("Cargo.toml")).expect("read Cargo.toml");
     let keys = dependency_keys(&manifest);
     for forbidden in [
         "agent-vitals-hosts",
-        "rusqlite",
         "agent-vitals",
         "agent-vitals-wasm",
         "agent-vitals-runtime",
         "tauri",
         "chrono",
         "time",
+        // ORM 禁令（spec §5.1）：手写参数化 SQL，不引 Diesel/SeaORM/SQLx。
+        "diesel",
+        "sea-orm",
+        "sqlx",
     ] {
         assert!(
             !keys.iter().any(|k| k == forbidden),
-            "agent-vitals-data/Cargo.toml [dependencies] must not (yet) reference `{forbidden}` — \
-             见本文件头部注释：这条断言标的是 Stage 0.2 现状，Stage 0.3/B 放开需要\
-             同步改这条测试与 Cargo.toml 的注释，不能悄悄放开"
+            "agent-vitals-data/Cargo.toml [dependencies] must not reference `{forbidden}` — \
+             见本文件头部注释：data 只许 domain + serde_json + rusqlite；放开\
+             任何一项都要同步改这条测试与 Cargo.toml 的注释，不能悄悄放开"
         );
     }
+    // rusqlite 必须在场（Stage B 起索引是本 crate 的一部分）——不在场说明
+    // 有人把 store.rs 的依赖拆走了，索引与 JSONL 的同源去重会裂开。
+    assert!(
+        keys.iter().any(|k| k == "rusqlite"),
+        "agent-vitals-data 必须显式依赖 rusqlite（store.rs 可重建索引）"
+    );
 }
 
 /// projection 模块目前只是 domain 契约类型的重新导出——签名稳定即可，还没有

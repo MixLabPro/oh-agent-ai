@@ -11,12 +11,14 @@ license = "MIT"
 name = "agent_vitals_data"
 path = "src/lib.rs"
 
-# v0.9 Stage 0.2：骨架阶段——只依赖 domain 的纯 DTO 契约（data_contract），
-# 不接 agent-vitals-hosts、不接 rusqlite。Stage 0.3 会把只读 JSON adapter 接
-# 进来（仍不需要 SQLite），Stage B 才真正引入 rusqlite（spec §5.1）——那两步
-# 是 spec 明确安排好的阶段，届时放开这里的依赖不算违反本阶段的收紧，是按
-# 计划推进；`tests/dependency_budget.rs` 的收紧断言与本注释要一并更新，
-# 不能悄悄放开。
+# v0.9 Stage B：依赖 = domain（纯 DTO 契约）+ serde_json（facts 机制）+
+# rusqlite（可重建查询索引，spec §5.1 的计划内引入）。仍然**不接**
+# agent-vitals-hosts / runtime / 二进制——依赖方向单向（runtime → data →
+# domain；hosts 与 data 平行、互不依赖），`tests/dependency_budget.rs`
+# 钉住这条边界。rusqlite 用 bundled（与 hosts/cli 同版本 0.31，不新增
+# sqlite3 二进制面）；不引 ORM（spec §5.1 明令）。
 [dependencies]
 agent-vitals-domain = { path = "../agent-vitals-domain" }
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

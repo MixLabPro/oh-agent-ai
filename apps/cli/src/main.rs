@@ -464,6 +464,14 @@ enum Cmd {
         #[arg(long)]
         write: bool,
     },
+    /// Rebuild the SQLite facts index from the authoritative JSONL
+    /// (`<data_home>/facts/<host>.jsonl`). Spec §5.1: SQLite is a deletable,
+    /// rebuildable projection — this is the DoD #1 repair path. Stage B.
+    DataRebuildIndex {
+        /// Output the rebuild report as JSON (default: human summary)
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
     /// `sessions` row is the join anchor across the three joinable surfaces (spec
@@ -1989,6 +1997,44 @@ session_store={store} fold={fold}"
                 agent::dsh_usage_fact::to_human_summary(&result, session_path, &ns)
             );
             print_ingest_summary(&write_report);
+        }
+        return;
+    }
+
+    // data-rebuild-index（Stage B）：删 SQLite 索引 → 从权威 JSONL 全量重放。
+    // 这是 DoD #1（"删除 SQLite 后可由事实文件重建等价 projection"）的
+    // 人工入口；索引层的日常自愈在 ingest_service 里自动发生。
+    if let Some(Cmd::DataRebuildIndex { rows_json }) = &args.cmd {
+        let report = agent_vitals_runtime::ingest_service::rebuild_index(
+            &agent_vitals_runtime::home::data_home(),
+        );
+        match report {
+            Ok(r) => {
+                if *rows_json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&r).unwrap_or_default()
+                    );
+                } else {
+                    println!(
+                        "Rebuilt facts index: {} facts across {} host file(s){}",
+                        r.total,
+                        r.hosts.len(),
+                        if r.repaired_tails > 0 {
+                            format!(" ({} crash tail(s) repaired)", r.repaired_tails)
+                        } else {
+                            String::new()
+                        },
+                    );
+                    for (host, n) in &r.hosts {
+                        println!("  {host}: {n}");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("data-rebuild-index failed: {e}");
+                std::process::exit(2);
+            }
         }
         return;
     }

@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use agent_vitals_data::evidence::{AppendError, AppendOutcome, FactWriter, replay};
+use agent_vitals_data::store::{default_index_path, FactsIndex};
 use serde_json::Value;
 
 /// 事实宿主封闭词表（与三个 emitter 的 `host` stamp 同源）。
@@ -73,6 +74,14 @@ pub struct IngestReport {
     /// unroutable 事实的具体问题（最多留 8 条，同 `invalid_problems`）。
     #[serde(default)]
     pub unroutable_problems: Vec<String>,
+    /// Stage B：本次调用是否触发了索引 rebuild（全新库播种 / 版本迁移 /
+    /// 自愈）——true 说明索引层发生过"从权威源重放"，观察者可以据此判断
+    /// 索引新鲜度。
+    #[serde(default)]
+    pub index_rebuilt: bool,
+    /// Stage B：索引新插入的事实数（INSERT OR IGNORE 后的真新增）。
+    #[serde(default)]
+    pub index_inserted: usize,
 }
 
 /// 把一批 UsageFact 事实写入 `<data_home>/facts/<host>.jsonl`（按事实自身的
@@ -178,6 +187,55 @@ pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, S
         r.total_after = rep.facts.len();
         report.hosts.push(r);
     }
+
+    // Stage B：JSONL（权威）落盘后同步更新可重建索引。索引失败先自愈一次
+    // （整库从 JSONL 重建——DoD #1 的路径），再重试插入；仍失败才 Err
+    // （磁盘级问题）。注意顺序：权威写在前、投影在后，中途失败重跑依然
+    // exactly-once（JSONL 幂等 + 索引 fact_id 主键幂等）。
+    let facts_dir = data_home.join("facts");
+    let (mut index, mut index_rebuilt) =
+        FactsIndex::open_or_rebuild(&default_index_path(data_home), &facts_dir)
+            .map_err(|e| format!("facts index: {e}"))?;
+    let mut index_inserted = 0usize;
+    for fact in facts {
+        match index.insert_fact(fact) {
+            Ok(true) => index_inserted += 1,
+            Ok(false) => {}
+            Err(e) => {
+                // 自愈：索引层坏 ≠ 权威层坏——整库从 JSONL 重建后再试一次。
+                // **必须换上新连接**：drop_and_rebuild 删了旧库文件，继续用
+                // 旧连接会把后续写进孤儿 inode（unlink 后 fd 还活着）。
+                match FactsIndex::drop_and_rebuild(&default_index_path(data_home), &facts_dir) {
+                    Ok((fresh, _report)) => {
+                        let inserted = fresh
+                            .insert_fact(fact)
+                            .map_err(|e2| format!("facts index (rebuild attempted): {e2}; first error: {e}"))?;
+                        index_inserted += inserted as usize;
+                        index_rebuilt = true;
+                        index = fresh;
+                    }
+                    Err(e2) => {
+                        return Err(format!(
+                            "facts index (rebuild attempted): {e2}; first error: {e}"
+                        ))
+                    }
+                }
+            }
+        }
+    }
+    report.index_inserted = index_inserted;
+    report.index_rebuilt = index_rebuilt;
+    Ok(report)
+}
+
+/// Stage B：`data-rebuild-index` 的服务面——删库并从权威 JSONL 全量重放
+/// （spec §5 建议命令；CLI 只做参数解析与渲染，编排在这里）。
+pub fn rebuild_index(
+    data_home: &Path,
+) -> Result<agent_vitals_data::store::RebuildReport, String> {
+    let facts_dir = data_home.join("facts");
+    let (_idx, report) = FactsIndex::drop_and_rebuild(&default_index_path(data_home), &facts_dir)
+        .map_err(|e| format!("facts index rebuild: {e}"))?;
     Ok(report)
 }
 
@@ -225,6 +283,27 @@ mod tests {
         assert_eq!(r2.hosts[0].appended, 0);
         assert_eq!(r2.hosts[0].duplicate, 2);
         assert_eq!(r2.hosts[0].total_after, 2);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn ingest_populates_the_rebuildable_index() {
+        let home = tmp_home("index");
+        ingest_facts(&home, &[fact("codex", "e1"), fact("codex", "e2")]).unwrap();
+        // 索引可从权威源重建出同一份投影（DoD #1 的日常面）。
+        let idx = FactsIndex::open_or_rebuild(
+            &default_index_path(&home),
+            &home.join("facts"),
+        )
+        .unwrap()
+        .0;
+        assert_eq!(idx.fact_count().unwrap(), 2);
+        let tokens = idx.tokens_by_host().unwrap();
+        assert_eq!(tokens["codex"]["uncached_input"], serde_json::json!(200));
+        // 同批重跑：索引零新增（fact_id 主键幂等）。
+        let r2 = ingest_facts(&home, &[fact("codex", "e1")]).unwrap();
+        assert_eq!(r2.index_inserted, 0);
+        assert!(!r2.index_rebuilt);
         let _ = std::fs::remove_dir_all(&home);
     }
 

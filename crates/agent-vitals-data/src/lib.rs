@@ -14,11 +14,11 @@
 //! - [`projection`] —— 组装 `agent_vitals_domain::data_contract` 的
 //!   `MonthlySummary`/`DailySummary` 等版本化 DTO
 //!
-//! **Stage 0.4 现状**：`projection`（domain 契约类型重新导出）与
-//! `repository`（`SummaryRepository` trait——只有签名，无实现）已落地；
-//! `evidence`/`store`/`billing` 要等 Stage A/B 才有真正的写入/SQLite
-//! 逻辑——这不是遗漏，是 spec §7 阶段安排本身："Stage 0 不要求先完成
-//! SQLite 迁移"。
+//! **Stage B 现状**：`evidence`（Stage A：append/replay/尾面修复）、
+//! `store`（Stage B：SQLite 可重建索引——schema_version 不匹配/删库 →
+//! 从 JSONL 全量重放）已落地；`repository` 仍是 trait 签名（SQLite 实现
+//! 与 Stage 0 JSON adapter 的换位是 Stage B 后续步），`billing`/`coverage`
+//! 等待 Stage B 的 P2 批。
 //!
 //! **`SummaryRepository` 的实现不在这个 crate 里**：spec §3.1 的依赖表把
 //! 本 crate 的允许依赖限定在 Domain（+ 未来的 SQLite 驱动），不包括
