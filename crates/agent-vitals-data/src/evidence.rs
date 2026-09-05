@@ -19,10 +19,13 @@
 //!    得到同一 `fact_id`，集合查重就是 exactly-once。open 的 O(n) 扫描在
 //!    P1 SQLite 索引化之前是唯一诚实的方案；文件按 13 个月保留策略滚动
     //!    （spec §6），单文件规模有上界。
-//! 2. **崩溃尾行容忍**：append 单行 JSON 后进程可能死在写入中途，留下半
-//!    行。重放时**最后一行**解析失败 → 视为 crash 残留，跳过并计数上报；
-//!    **中间行**解析失败 → `Corrupt` 错误——那不是崩溃边界，是真实损坏，
-//!    静默跳过就是把损坏伪装成没发生。
+//! 2. **崩溃尾面修复（不是只容忍）**：append 单行 JSON 后进程可能死在写入
+//!    中途，留下半行。半行本身无害，**在半行上继续追加有害**——新事实会与
+//!    残行合并成一条损坏行（新事实被吞、下次 open 永远 Corrupt）。所以
+//!    `open` 重放时判定尾面动作并落实：半行 → 截断回最后一条合法行；完整
+//!    JSON 缺收尾 '\n'（write_all 恰好死在换行前）→ 补 '\n' 封口；**中间
+//!    行**解析失败 → `Corrupt` 错误——那不是崩溃边界，是真实损坏，静默跳
+//!    过就是把损坏伪装成没发生。
 //! 3. **不取时钟**：chrono/time 被本 crate 的 dependency_budget 禁止，且
 //!    事实自带 `event_ts_utc`（宿主事件时间）；写入顺序就是文件序，重放
 //!    排序（`sort_key`）按 `(time_basis, fact_id)` 确定化——同一份文件在
@@ -61,34 +64,82 @@ impl From<std::io::Error> for AppendError {
     }
 }
 
-/// open（或重放）一份 facts 文件的结果：合法事实按文件序 + 崩溃残留计数。
+/// 尾面修复动作（crash 中断点的两种形状，spec §3.5「重启恢复必须识别每个
+/// 中断点」）。由 [`replay`] 报告、[`FactWriter::open`] 执行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailRepair {
+    /// 末行是**完整合法 JSON 但缺收尾换行**：单次 `write_all(line + '\n')`
+    /// 理论上可能恰好写到 '\n' 之前。事实本身没坏——补一个 '\n' 封口即可；
+    /// 截断它反而丢一条好事实。
+    SealNewline,
+    /// 末行是 **crash 半行**（JSON 截断）：截断到最后一条合法行的行尾
+    /// （字节偏移），恢复干净追加面。半行不可读，丢弃不是丢事实。
+    Truncate { offset: u64 },
+}
+
+/// open（或重放）一份 facts 文件的结果：合法事实按文件序 + 尾面修复报告。
 #[derive(Debug, Default)]
 pub struct Replay {
     pub facts: Vec<serde_json::Value>,
-    /// 文件末尾解析失败的行数（crash 半行）。中间坏行直接 Err，不进这里。
-    pub trailing_partial: usize,
+    /// 尾面修复需求；`None` = 文件以换行干净收尾（或为空），无需修复。
+    pub tail_repair: Option<TailRepair>,
 }
 
-/// 逐行解析一份 facts 文件。尾行半行容忍 + 中间坏行报错——见模块头决定 2。
+/// 逐行解析一份 facts 文件，并判定尾面修复动作。中间坏行直接 Err——
+/// 见模块头决定 2。
+///
+/// 与旧版「容忍末条坏行」的差别：容忍不是无害的——半行尾上继续 append 会
+/// 把新事实与残行**合并成一条损坏行**（新事实被吞、下次 open 永远 Corrupt）。
+/// 所以重放必须同时给出修复动作，`open` 落实它，追加面才真正干净。
 pub fn replay(path: &Path) -> Result<Replay, AppendError> {
     let mut report = Replay::default();
-    let Some(text) = std::fs::read_to_string(path).ok() else {
+    let Ok(bytes) = std::fs::read(path) else {
         return Ok(report); // 文件不存在 = 零事实，不是错误
     };
-    let lines: Vec<&str> = text.lines().collect();
-    for (idx, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() {
+    // 按字节扫行（offset 是 truncate 需要的）：每行以 '\n' 终止；`start`
+    // 是当前行首，`valid_end` 是最后一条合法/空白终止行的行尾 offset。
+    let mut start = 0usize;
+    let mut valid_end = 0usize;
+    let mut line_no = 0usize;
+    let mut i = 0usize;
+    let parse = |raw: &[u8]| -> Option<serde_json::Value> {
+        let bad = std::str::from_utf8(raw).ok()?;
+        let bad = bad.strip_suffix('\r').unwrap_or(bad);
+        if bad.trim().is_empty() {
+            return None; // 空行：跳过（None 但不算坏）
+        }
+        serde_json::from_str::<serde_json::Value>(bad).ok()
+    };
+    while i < bytes.len() {
+        if bytes[i] != b'\n' {
+            i += 1;
             continue;
         }
-        match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(v) => report.facts.push(v),
-            Err(_) if idx == lines.len() - 1 => {
-                // 只可能是最后一条非空行时才容忍——idx == len-1 恰好覆盖
-                // 「末行半行」；末尾多个连续坏行会落到中间分支报 Corrupt，
-                // 那种形状不是单次 crash 能产生的，按损坏处理。
-                report.trailing_partial += 1;
+        line_no += 1;
+        match parse(&bytes[start..i]) {
+            Some(v) => {
+                report.facts.push(v);
+                valid_end = i + 1;
             }
-            Err(_) => return Err(AppendError::Corrupt { line_no: idx + 1 }),
+            None if bytes[start..i].iter().all(|b| b.is_ascii_whitespace()) => {
+                valid_end = i + 1; // 空白行是合法表面
+            }
+            None => return Err(AppendError::Corrupt { line_no }),
+        }
+        start = i + 1;
+        i = start;
+    }
+    // 尾段：无 '\n' 终止的最后一段（crash 半行或缺封口的完整行）。
+    let tail = &bytes[start..];
+    if !tail.is_empty() {
+        match parse(tail) {
+            Some(v) => {
+                report.facts.push(v);
+                report.tail_repair = Some(TailRepair::SealNewline);
+            }
+            None => {
+                report.tail_repair = Some(TailRepair::Truncate { offset: valid_end as u64 });
+            }
         }
     }
     Ok(report)
@@ -96,25 +147,49 @@ pub fn replay(path: &Path) -> Result<Replay, AppendError> {
 
 /// append-only `UsageFact` writer。
 ///
-/// `open` 做一次全文件重放构建 `fact_id` 集合（去重的依据），之后的每次
-/// `append` 校验 → 查重 → 单行追加。同一进程内反复 open 同一文件是安全的
-/// （每次都重扫——调用方应持有 writer 复用，而不是每条 fact open 一次）。
+/// `open` 做一次全文件重放构建 `fact_id` 集合（去重的依据），并**落实尾面
+/// 修复**（[`TailRepair`]：半行截断 / 缺封口补 '\n'）——修复之后追加面才
+/// 是干净的，否则新 append 会与 crash 残行合并成一条损坏行（新事实被吞，
+/// 下次 open 永远 Corrupt）。之后的每次 `append` 校验 → 查重 → 单行追加。
+/// 同一进程内反复 open 同一文件是安全的（每次都重扫——调用方应持有 writer
+/// 复用，而不是每条 fact open 一次）。
 pub struct FactWriter {
     facts_path: PathBuf,
     seen: HashSet<String>,
+    tail_repair: Option<TailRepair>,
 }
 
 impl FactWriter {
-    /// 打开（不存在则首次 append 时创建）。构建 seen 集合；中间坏行在此
-    /// 提前暴露——带着一个已损坏的文件继续 append 只会让损坏更难定位。
+    /// 打开（不存在则首次 append 时创建）。构建 seen 集合 + 修复 crash 尾面；
+    /// 中间坏行在此提前暴露——带着一个已损坏的文件继续 append 只会让损坏
+    /// 更难定位。修复动作可通过 [`Self::tail_repair`] 观测（调用方如实上报）。
     pub fn open(path: &Path) -> Result<Self, AppendError> {
-        let replay = replay(path)?;
-        let seen = replay
+        let rep = replay(path)?;
+        let seen = rep
             .facts
             .iter()
             .filter_map(|f| f.get("fact_id").and_then(|v| v.as_str()).map(String::from))
             .collect();
-        Ok(Self { facts_path: path.to_path_buf(), seen })
+        let mut tail_repair = None;
+        if let Some(repair) = rep.tail_repair {
+            match repair {
+                TailRepair::SealNewline => {
+                    let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
+                    f.write_all(b"\n")?;
+                }
+                TailRepair::Truncate { offset } => {
+                    let f = std::fs::OpenOptions::new().write(true).open(path)?;
+                    f.set_len(offset)?;
+                }
+            }
+            tail_repair = Some(repair);
+        }
+        Ok(Self { facts_path: path.to_path_buf(), seen, tail_repair })
+    }
+
+    /// open 时执行的尾面修复（`None` = 文件本来干净）。观测/上报用。
+    pub fn tail_repair(&self) -> Option<TailRepair> {
+        self.tail_repair
     }
 
     /// 校验（`build_usage_fact`：补 `fact_id`/`schema_version`、缺失键置
@@ -292,9 +367,9 @@ mod tests {
     }
 
     #[test]
-    fn trailing_partial_line_is_tolerated_mid_lines_are_corrupt() {
+    fn crash_half_line_is_repaired_on_open_next_append_stays_readable() {
         let path = tmp_path("crash");
-        // 模拟 crash 半行：一条完整 fact + 一条截断的 JSON。
+        // 模拟 crash 半行：一条完整 fact + 一条截断的 JSON（无收尾换行）。
         let mut w = FactWriter::open(&path).unwrap();
         w.append(&base_fields()).unwrap();
         drop(w);
@@ -304,20 +379,80 @@ mod tests {
 
         let rep = replay(&path).unwrap();
         assert_eq!(rep.facts.len(), 1, "完整行照常读回");
-        assert_eq!(rep.trailing_partial, 1, "crash 半行被计数跳过");
-        // 尾行半行后 writer 仍可继续 append（追加在坏行之后——坏行永远只是
-        // 尾行，重放仍然只跳它一个）。
+        let first_newline = std::fs::read_to_string(&path).unwrap().find('\n').unwrap();
+        assert_eq!(
+            rep.tail_repair,
+            Some(TailRepair::Truncate { offset: (first_newline + 1) as u64 }),
+            "报告截断修复动作（截回第一条合法行行尾）"
+        );
+
+        // open 落实修复（截掉半行），随后的 append 落在干净表面上——这条
+        // 断言是本测试的牙：旧实现只「容忍」不修复，append 与残行合并成
+        // 损坏行，e2 被吞、下次 open 永远 Corrupt（测试还绿——只数行数不
+        // 验证可读性的假绿）。
         let mut w = FactWriter::open(&path).unwrap();
+        assert!(matches!(
+            w.tail_repair(),
+            Some(TailRepair::Truncate { .. })
+        ), "open 报告执行了截断修复");
         let mut second = base_fields();
         second.insert("source_event_id".to_string(), json!("evt-2"));
         w.append(&second).unwrap();
+        drop(w);
+
+        // 重开：两条事实都可读、可去重——修复后追加面干净。
+        let mut w = FactWriter::open(&path).unwrap();
+        assert_eq!(w.tail_repair(), None, "修复后文件干净");
+        assert_eq!(w.seen_count(), 2, "e2 必须真实可读，不是被吞在损坏行里");
+        let (out, _) = w.append(&second).unwrap();
+        assert_eq!(out, AppendOutcome::Duplicate, "重放去重照常工作");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn complete_json_without_trailing_newline_is_sealed_not_dropped() {
+        let path = tmp_path("seal");
+        let mut w = FactWriter::open(&path).unwrap();
+        w.append(&base_fields()).unwrap();
+        drop(w);
+        // 模拟 write_all 恰好死在 '\n' 之前：事实完整但文件不封口。
+        let text = std::fs::read_to_string(&path).unwrap();
+        let text = text.strip_suffix('\n').unwrap();
+        std::fs::write(&path, text).unwrap();
+
+        let rep = replay(&path).unwrap();
+        assert_eq!(rep.facts.len(), 1, "末行是完整 JSON，仍读回");
+        assert_eq!(rep.tail_repair, Some(TailRepair::SealNewline));
+
+        // open 封口（补 '\n'）而不是截断——截断会丢一条好事实。
+        let mut w = FactWriter::open(&path).unwrap();
+        assert_eq!(w.tail_repair(), Some(TailRepair::SealNewline));
+        let mut second = base_fields();
+        second.insert("source_event_id".to_string(), json!("evt-2"));
+        w.append(&second).unwrap();
+        drop(w);
+        let rep = replay(&path).unwrap();
+        assert_eq!(rep.facts.len(), 2, "两条事实都可读");
+        assert_eq!(rep.tail_repair, None, "封口后干净收尾");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mid_file_corruption_is_reported_not_skipped() {
+        let path = tmp_path("corrupt");
+        let mut w = FactWriter::open(&path).unwrap();
+        w.append(&base_fields()).unwrap();
+        let mut second = base_fields();
+        second.insert("source_event_id".to_string(), json!("evt-2"));
+        w.append(&second).unwrap();
+        drop(w);
 
         // 中间坏行 = 真实损坏，必须报 Corrupt 而不是静默跳过。
         let mut broken = std::fs::read_to_string(&path).unwrap();
         broken = broken.replace("}\n{", "}\nNOT_JSON\n{");
         std::fs::write(&path, &broken).unwrap();
         match replay(&path) {
-            Err(AppendError::Corrupt { line_no }) => assert!(line_no >= 2),
+            Err(AppendError::Corrupt { line_no }) => assert_eq!(line_no, 2),
             other => panic!("expected Corrupt, got {other:?}"),
         }
         let _ = std::fs::remove_file(&path);

@@ -295,8 +295,14 @@ mod tests {
     use std::io::Write;
 
     fn temp_file(name: &str) -> std::path::PathBuf {
+        // 唯一后缀：多个测试并发同用 `slot.jsonl` 这类名字会互相覆盖
+        // （pid 相同、名字相同），偶发 flake——按调用时刻打点。
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let tmp = std::env::temp_dir().join(format!(
-            "av-dsh-usage-fact-test-{}-{name}",
+            "av-dsh-usage-fact-test-{}-{nanos}-{name}",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&tmp);

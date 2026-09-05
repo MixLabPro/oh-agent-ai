@@ -27,6 +27,7 @@
 pub mod budget;
 pub mod clock;
 pub mod home;
+pub mod ingest_service;
 pub mod session_sources;
 pub mod sessions;
 pub mod skills;

@@ -395,6 +395,12 @@ enum Cmd {
         /// Write the UsageFact JSON to FILE; use - for stdout (default: human summary)
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
+        /// v0.9 Stage A: persist facts through the runtime ingest service into
+        /// <data_home>/facts/<host>.jsonl (exactly-once by fact_id). Rust-only
+        /// by design — Python grows no writer (spec DoD #7); without this flag
+        /// the output stays byte-identical to the Python implementation.
+        #[arg(long)]
+        write: bool,
     },
     /// Audit ONE or MORE Codex rollout JSONL files into per-`token_count`
     /// UsageFact rows (facts + attempts + coverage; v0.7 spec §3 candidate #3
@@ -419,6 +425,12 @@ enum Cmd {
         /// Write the UsageFact JSON to FILE; use - for stdout (default: human summary)
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
+        /// v0.9 Stage A: persist facts through the runtime ingest service into
+        /// <data_home>/facts/<host>.jsonl (exactly-once by fact_id). Rust-only
+        /// by design — Python grows no writer (spec DoD #7); without this flag
+        /// the output stays byte-identical to the Python implementation.
+        #[arg(long)]
+        write: bool,
     },
     /// Audit ONE DSH session file (`.jsonl` or multi-frame `.zstd`) into
     /// per-observation-slot UsageFact rows (facts + coverage; v0.7 spec §3
@@ -445,6 +457,12 @@ enum Cmd {
         /// Write the UsageFact JSON to FILE; use - for stdout (default: human summary)
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
+        /// v0.9 Stage A: persist facts through the runtime ingest service into
+        /// <data_home>/facts/<host>.jsonl (exactly-once by fact_id). Rust-only
+        /// by design — Python grows no writer (spec DoD #7); without this flag
+        /// the output stays byte-identical to the Python implementation.
+        #[arg(long)]
+        write: bool,
     },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
@@ -1727,11 +1745,71 @@ session_store={store} fold={fold}"
         }
     }
 
+    // ── v0.9 Stage A：emit → ingest 端到端接线（R4 §5 ingest_service）────
+    // --write 把 emitter 的事实流经 runtime 共享 ingest service 落盘
+    // `<data_home>/facts/<host>.jsonl`：按事实自身 `host` 分组、fact_id
+    // exactly-once、写后重放自检。**唯一写路径**——sync_service（Stage B）
+    // 也走 ingest_service，不在这里旁路直捅 writer。
+    fn run_ingest(
+        write: bool,
+        cmd: &str,
+        facts: &[serde_json::Value],
+    ) -> Option<agent_vitals_runtime::ingest_service::IngestReport> {
+        if !write {
+            return None;
+        }
+        match agent_vitals_runtime::ingest_service::ingest_facts(
+            &agent_vitals_runtime::home::data_home(),
+            facts,
+        ) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("{cmd} --write failed: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    fn attach_write_report(
+        mut payload: serde_json::Value,
+        report: &Option<agent_vitals_runtime::ingest_service::IngestReport>,
+    ) -> serde_json::Value {
+        if let Some(r) = report {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "write".to_string(),
+                    serde_json::to_value(r).expect("IngestReport serializes"),
+                );
+            }
+        }
+        payload
+    }
+
+    fn print_ingest_summary(report: &Option<agent_vitals_runtime::ingest_service::IngestReport>) {
+        if let Some(r) = report {
+            for h in &r.hosts {
+                println!(
+                    "ingest → {}: +{} appended, {} duplicate, {} invalid, total {}{}",
+                    h.facts_path.display(),
+                    h.appended,
+                    h.duplicate,
+                    h.invalid,
+                    h.total_after,
+                    if h.repaired_tail {
+                        " (repaired crash tail)"
+                    } else {
+                        ""
+                    },
+                );
+            }
+        }
+    }
+
     // claude-usage-facts：单份 Claude JSONL → UsageFact rows（内存 emit，不写
     // state）。R1 拍板：per-message 事实行 + attempts + coverage，`--json -`
     // 输出与 Python `scan.py claude-usage-facts --json -` 字节相等（parity 钉测
     // 在 tests/test_claude_usage_fact.py::ClaudeUsageFactsBothTests）。
-    if let Some(Cmd::ClaudeUsageFacts { session_jsonl, machine_namespace, source_profile, rows_json }) =
+    if let Some(Cmd::ClaudeUsageFacts { session_jsonl, machine_namespace, source_profile, rows_json, write }) =
         &args.cmd
     {
         // machine_namespace 必传且非空（spec §9）。绝不让 CLI 读 takeover 身份来
@@ -1763,9 +1841,11 @@ session_store={store} fold={fold}"
                 std::process::exit(2);
             }
         };
+        let write_report = run_ingest(*write, "claude-usage-facts", &result.facts);
         if let Some(path) = rows_json {
-            let payload = agent::claude_usage_fact::to_payload_value(
-                &result, &sid, &ns, source_profile,
+            let payload = attach_write_report(
+                agent::claude_usage_fact::to_payload_value(&result, &sid, &ns, source_profile),
+                &write_report,
             );
             let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
             if path == &PathBuf::from("-") {
@@ -1787,6 +1867,7 @@ session_store={store} fold={fold}"
                     &result, session_jsonl, &sid, &ns, source_profile
                 )
             );
+            print_ingest_summary(&write_report);
         }
         return;
     }
@@ -1796,7 +1877,7 @@ session_store={store} fold={fold}"
     // event id 按 rollout stem 命名空间——同 stem 的 byte-identical 复本去重、
     // 异 stem 永不误合并。与 Python `scan.py codex-usage-facts --json -` 字节相等
     // （parity 钉测在 tests/test_codex_usage_fact.py）。
-    if let Some(Cmd::CodexUsageFacts { rollouts, machine_namespace, source_profile, rows_json }) =
+    if let Some(Cmd::CodexUsageFacts { rollouts, machine_namespace, source_profile, rows_json, write }) =
         &args.cmd
     {
         // machine_namespace 必传（spec §9）。绝不让 CLI 读 takeover 身份来补齐：
@@ -1823,8 +1904,12 @@ session_store={store} fold={fold}"
                 std::process::exit(2);
             }
         };
+        let write_report = run_ingest(*write, "codex-usage-facts", &result.facts);
         if let Some(path) = rows_json {
-            let payload = agent::codex_usage_fact::to_payload_value(&result, &ns, source_profile);
+            let payload = attach_write_report(
+                agent::codex_usage_fact::to_payload_value(&result, &ns, source_profile),
+                &write_report,
+            );
             let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
             if path == &PathBuf::from("-") {
                 println!("{text}");
@@ -1843,11 +1928,12 @@ session_store={store} fold={fold}"
                 "{}",
                 agent::codex_usage_fact::to_human_summary(&result, rollouts, &ns, source_profile)
             );
+            print_ingest_summary(&write_report);
         }
         return;
     }
 
-    if let Some(Cmd::DshUsageFacts { session_path, machine_namespace, source_profile, rows_json }) = &args.cmd
+    if let Some(Cmd::DshUsageFacts { session_path, machine_namespace, source_profile, rows_json, write }) = &args.cmd
     {
         // machine_namespace 必传（spec §9），同 codex-usage-facts：绝不让 CLI 读
         // takeover 身份补齐（隐式 state 写），缺失或空串即失败（exit 2）。
@@ -1874,11 +1960,16 @@ session_store={store} fold={fold}"
                 std::process::exit(2);
             }
         };
+        let write_report = run_ingest(*write, "dsh-usage-facts", &result.facts);
         if let Some(json_path) = rows_json {
             // --json payload = spec §5 字面 {facts, coverage}（键序固定，Python
-            // handler 的 payload dict 同款）。facts 是 build_usage_fact 输出、
-            // coverage 四键。
-            let payload = agent::dsh_usage_fact::to_payload_value(&result);
+            // handler 的 payload dict 同款；--write 追加 Rust-only 的 `write`
+            // 键，flag 关闭时与 Python 字节相等）。facts 是 build_usage_fact
+            // 输出、coverage 四键。
+            let payload = attach_write_report(
+                agent::dsh_usage_fact::to_payload_value(&result),
+                &write_report,
+            );
             let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
             if json_path == &PathBuf::from("-") {
                 println!("{text}");
@@ -1897,6 +1988,7 @@ session_store={store} fold={fold}"
                 "{}",
                 agent::dsh_usage_fact::to_human_summary(&result, session_path, &ns)
             );
+            print_ingest_summary(&write_report);
         }
         return;
     }

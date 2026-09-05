@@ -49,7 +49,7 @@ projection、Claude ledger 和 WorkBuddy source adapter 实现；UI/CLI 自此�
 | 名义成本口径（list-price，"名义 GDP"式客观基准） | ✅ 定义 + 实现 | 定义 `ATTRIBUTABLE_WASTE.md` §6.7（提交 `9b279ca`）；实现 = catalog 计价面既有产物被正式命名 |
 | 性能形状：codex fold 进程级 60s memo（`codex_merged_cached`，Arc 命中） | ✅ | `d8c6c83` |
 | 审查修复：`CODE_REVIEW_V0_9_STAGE_A_D_KPI_BILLING` 10 条 + `CODE_REVIEW_V0_9_WORKBENCH_UX` 14 条 | ✅ | `29c0717`/`0096607`/`01f0d9a` |
-| §2.1 其余八项（writer / SQLite 投影 / checkpoint / lease / 生成事务 / HostBillRecord / BillingContext / 故障注入） | ❌ 未动 | 分期见 §7 Stage A–C |
+| §2.1 其余八项：writer（✅ Stage A `93fbc0d`/ingest 接通）、emitter 归位（✅ `f1850bc`）；SQLite 投影 / checkpoint / lease / 生成事务 / HostBillRecord / BillingContext / 故障注入 | 🔶 writer ✅ 其余 ❌ | 分期见 §7 Stage A–C |
 
 **数据缺口（阻塞实际侧计费精度，等用户输入，非工程阻塞）**：中转商对
 claude-sonnet-5 的 cache_read 单价（决定 claude-* 实际支出 78.9%）、GLM 官方按量
@@ -394,13 +394,20 @@ KPI 行/双轨账/决策卡与跨宿主 Token 日历（Stage D `6586112`/`f11006
 （`d8c6c83`/`4ed99e7`）。全部在冻结 DTO 上 additive 演进，未破 Stage 0 契约。
 教训沉淀：`CLAUDE.md`「v0.9 成本词表与计费归属」节。
 
-### v0.9.0 Stage A（P0）：事实写入与恢复
+### v0.9.0 Stage A（P0）：事实写入与恢复 —— ✅ 本体完成
 
-UsageFact/CanonicalSession writer、稳定 identity、去重与 reconciliation、
-Runtime 共享 ingest service。**优先级最高的剩余项**：读侧三种 wire 形状的
-逐个适配（审查 #2/#5 类缺陷的病根）只有写入统一后才能消失。§5.2 遗留的
-`{claude,codex,dsh}_usage_fact.rs` 宿主归位（Stage 0.3 曾记录的 scope gap）
-已完成：emitter 落 `agent-vitals-hosts/hosts/<h>/sources/usage_fact.rs`
+UsageFact writer（`agent-vitals-data::evidence`：fact_id exactly-once、
+崩溃尾面**修复**——半行截断/缺封口补换行，open 落实而非只容忍）、稳定
+identity（v0.7 契约层）、去重与 reconciliation（`reconcile_tokens` 报告式）、
+Runtime 共享 ingest service（`agent-vitals-runtime::ingest_service`：宿主
+封闭词表、按事实自身 host 分组成 `<data_home>/facts/<host>.jsonl`、写后
+重放自检）。CLI 端到端：`{claude,codex,dsh}-usage-facts --write`（Rust-only
+——Python 不长 writer，spec DoD #7；flag 关闭时输出与 Python 字节相等）。
+**剩余**：CanonicalSession snapshot writer、facts vs 投影 DTO 的全量
+reconcile（投影在 Stage B 落地后接）。
+
+§5.2 遗留的 `{claude,codex,dsh}_usage_fact.rs` 宿主归位（Stage 0.3 曾记录的
+scope gap）已完成：emitter 落 `agent-vitals-hosts/hosts/<h>/sources/usage_fact.rs`
 （读文件 → sources 层；行级原语下沉 `claude_code/sessions/usage.rs`、
 `dsh_header`/`dsh_source_profile` 下沉 `dsh/sessions/header.rs`——runtime 对
 宿主词表的所有权就此清零），CLI 经 flat alias re-export，212 项差分 +
