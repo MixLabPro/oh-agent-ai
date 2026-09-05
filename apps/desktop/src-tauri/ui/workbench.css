@@ -454,8 +454,22 @@ body {
   padding: 12px 14px;
 }
 
-.detail-section .panel-title {
-  margin-bottom: 8px;
+/* 报告分区标题——比总览页那种小号 muted 的 .panel-title 更重一档，带底边分割
+   线，让 8~10 个堆叠区块读起来像"章节"而不是全部糊成一块（真实截图暴露的问题：
+   区块之间唯一的分界就是一行 12px 灰字）。summary 变体给可折叠区块（规则三态/
+   覆盖率）用，光标提示可点开。 */
+.detail-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--panel-2);
+}
+
+summary.detail-section-title {
+  cursor: pointer;
+  user-select: none;
 }
 
 .detail-meta {
@@ -512,6 +526,78 @@ body {
   color: var(--muted);
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* 「标签 + 比例条 + 值」——成本/上下文构成/工具耗时这类需要看占比的维度，替掉
+   纯文字 kv-row（真实截图里成本/上下文全是右对齐数字，看不出谁占大头）。
+   frac 为 null 时 bar-track 里没有 bar-fill，只剩右对齐的值——分母不明时不画一条
+   假比例。 */
+.bar-row {
+  display: grid;
+  grid-template-columns: minmax(72px, 30%) 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.bar-label {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-track {
+  display: block;
+  height: 6px;
+  background: var(--panel-2);
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 99px;
+}
+
+.bar-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.detail-subsection {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--panel-2);
+}
+
+/* 规则三态 / 覆盖率是"这份数据可不可信"的排查信息，不是"发生了什么"的主叙事——
+   默认折叠，别跟成本/时间线抢第一屏（同 .detail-raw-wrap 的折叠范式，样式共用）。 */
+.detail-raw-wrap summary,
+.detail-collapsible summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 4px 0;
+  user-select: none;
+}
+
+.chip.status-findings {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.chip.status-zero {
+  opacity: 0.55;
+}
+
+.chip.status-unavailable {
+  opacity: 0.4;
+  border-style: dashed;
 }
 
 /* ---------- Findings ---------- */
@@ -727,14 +813,6 @@ button.chip.active {
   word-break: break-all;
 }
 
-.detail-raw-wrap summary {
-  cursor: pointer;
-  color: var(--muted);
-  font-size: 11px;
-  padding: 4px 0;
-  user-select: none;
-}
-
 .row-chevron {
   color: var(--muted);
   margin-left: 6px;
@@ -785,14 +863,20 @@ button.chip.active {
 .tl-chartwrap { position: relative; }
 .tl-chart:focus { outline: 1px solid var(--panel-2); border-radius: 6px; }
 
-/* 事件标记：颜色类设 color，形状取 currentColor。 */
+/* 事件标记：颜色类设 color，形状取 currentColor。
+   waste 原来也用 --accent——和曲线本身同色，事件点糊进曲线/面积填充里分不出来；
+   compaction/subagent 原来都用 --success，两种事件图例颜色完全一样，真实截图能
+   看到这两个问题（几乎全绿）。调色板只有 6 个语义 token，7 种事件 + 1 条曲线凑
+   不出全部互异——退而求其次：风险/慢两种"要马上看到"的事件保留独占色，结构性、
+   非紧急的三种（压缩/切换/子代理）共用 muted 灰、靠形状（方块/细线/三角）互相
+   区分，不再和曲线或彼此撞色。 */
 .tl-ev-risk { color: var(--danger); }
 .tl-ev-risk.tl-sev-warning { color: var(--warn); }
 .tl-ev-risk.tl-sev-info { color: var(--muted); }
-.tl-ev-waste { color: var(--accent); }
-.tl-ev-compaction { color: var(--success); }
+.tl-ev-waste { color: var(--success); }
+.tl-ev-compaction { color: var(--muted); }
 .tl-ev-model { color: var(--muted); }
-.tl-ev-subagent { color: var(--success); }
+.tl-ev-subagent { color: var(--muted); }
 .tl-ev-skill { color: var(--skill); }
 .tl-ev-slow { color: var(--warn); }
 .tl-ev-shape { fill: currentColor; stroke: currentColor; }

@@ -747,14 +747,21 @@ function renderDetailSummary(s) {
   // 字段缺场——逐个判空，不拿 undefined 当字符串拼。成本/Token/Findings 同理。
   cards.appendChild(detailCard("宿主 / 日期",
     (s.host_kind || "—") + " · " + (s.date_span && s.date_span.first ? s.date_span.first.slice(0, 10) : "—")));
-  cards.appendChild(detailCard("成本(USD)", fmtUSD(s.cost_usd)));
-  cards.appendChild(detailCard("Tokens", fmtTokens(s.tokens_total)));
-  cards.appendChild(detailCard("Findings", s.findings_total != null ? String(s.findings_total) : "—"));
+  // DSH 没有 cost_usd（那是 Codex 专属字段，DSH 成本是 CNY），三个字段在这个
+  // 列表行摘要对象上本来就可能缺场——先诚实显示「—」，envelope 到手后
+  // refreshDetailCards 用真实 session 数据把它们补上（也会把 DSH 会话的标签从
+  // 「成本(USD)」换成「成本(CNY)」，不能让一张永远显示「—」的美元卡片冒充
+  // "这次没花钱"）。
+  const costCard = detailCard("成本(USD)", fmtUSD(s.cost_usd), "sess-card-cost");
+  costCard.querySelector(".label").id = "sess-card-cost-label";
+  cards.appendChild(costCard);
+  cards.appendChild(detailCard("Tokens", fmtTokens(s.tokens_total), "sess-card-tokens"));
+  cards.appendChild(detailCard("Findings", s.findings_total != null ? String(s.findings_total) : "—", "sess-card-findings"));
   body.appendChild(cards);
 
   const loading = el("div", "detail-section");
   loading.id = "sess-detail-loading";
-  const lt = el("div", "panel-title");
+  const lt = el("div", "detail-section-title");
   lt.textContent = "完整审计报告";
   loading.appendChild(lt);
   const p = el("div", "muted");
@@ -763,15 +770,63 @@ function renderDetailSummary(s) {
   body.appendChild(loading);
 }
 
-function detailCard(label, value) {
+function detailCard(label, value, valueId) {
   const card = el("div", "detail-card");
   const l = el("div", "label");
   l.textContent = label;
   const v = el("div", "value");
   v.textContent = value;
+  if (valueId) v.id = valueId;
   card.appendChild(l);
   card.appendChild(v);
   return card;
+}
+
+// KPI 卡的数字来自列表行摘要，冷字段本来就可能缺（上面 renderDetailSummary 的
+// 注释）。envelope 到手后用真实 session 数据把卡片补上——避免"正下方的完整报告
+// 已经有 2 条 finding、曲线也涨到了 138.7M，卡片却写着三个破折号"这种自相矛盾
+// （真实截图能看到这个问题）。找不到就保持原样的「—」，不拿 0 冒充测到了。
+function refreshDetailCards(session, host) {
+  const costEl = document.getElementById("sess-card-cost");
+  const tokensEl = document.getElementById("sess-card-tokens");
+  const findingsEl = document.getElementById("sess-card-findings");
+  if (!costEl || !tokensEl || !findingsEl) return;
+
+  if (host === "codex") {
+    const r = session.cost_report;
+    if (r) {
+      costEl.textContent = fmtUSD(r.total_cost_usd);
+      const tk = r.total_tokens || {};
+      tokensEl.textContent = fmtTokens(
+        (tk.uncached_input_tokens || 0) + (tk.cached_input_tokens || 0) + (tk.output_tokens || 0));
+    }
+    const findingsCount = (session.audit && session.audit.summary && session.audit.summary.findings_total != null)
+      ? session.audit.summary.findings_total
+      : (session.audit && Array.isArray(session.audit.findings) ? session.audit.findings.length : null);
+    if (findingsCount != null) findingsEl.textContent = String(findingsCount);
+  } else {
+    if (session.cost) {
+      // total != null 才写卡：costReport 语义里 null 是「估不出」（如全未知模型），
+      // `|| 0` 会把它伪造成 ¥0.00——那张卡宁可继续挂着「—」。
+      if (session.cost.total != null) {
+        const label = document.getElementById("sess-card-cost-label");
+        if (label) label.textContent = "成本(CNY)";
+        costEl.textContent = fmtMoney(session.cost.total);
+      }
+    }
+    // 镜像 tlValueOf("tokens", …)：三个用量字段全缺才算「没测到」，任一有值就
+    // 求和参与——与时间线纵轴同一口径，不在这里另起一套算法。
+    const reqs = Array.isArray(session.requests) ? session.requests : [];
+    let sum = 0, any = false;
+    for (const r of reqs) {
+      const parts = [r.uncached_input_tokens, r.output_tokens, r.cache_read_tokens];
+      if (parts.every((v) => v == null)) continue;
+      any = true;
+      sum += parts.reduce((a, v) => a + (v || 0), 0);
+    }
+    if (any) tokensEl.textContent = fmtTokens(sum);
+    if (Array.isArray(session.findings)) findingsEl.textContent = String(session.findings.length);
+  }
 }
 
 function el(tag, cls) {
@@ -792,10 +847,33 @@ function el(tag, cls) {
 
 function detailSection(title) {
   const sec = el("div", "detail-section");
-  const t = el("div", "panel-title");
+  const t = el("div", "detail-section-title");
   t.textContent = title;
   sec.appendChild(t);
   return sec;
+}
+
+// 一行「标签 + 比例条 + 值」：成本/上下文构成/工具耗时这类要看占比而不只是读数字
+// 的维度用它，不用为每个维度单造一种结构。frac 是调用方算好的 0..1 比例；frac 为
+// null 时不画条，只退化成右对齐的值——分母不明时不编一条假比例（同 kvRow 挨着
+// null-vs-0 的纪律）。
+function barRow(label, value, frac, title) {
+  const row = el("div", "bar-row");
+  const l = el("span", "bar-label");
+  l.textContent = label;
+  if (title) l.title = title;
+  row.appendChild(l);
+  const track = el("span", "bar-track");
+  if (frac != null) {
+    const fill = el("span", "bar-fill");
+    fill.style.width = Math.max(0, Math.min(1, frac)) * 100 + "%";
+    track.appendChild(fill);
+  }
+  row.appendChild(track);
+  const v = el("span", "bar-value");
+  v.textContent = value;
+  row.appendChild(v);
+  return row;
 }
 
 // ---------- 交互式会话时间线（DSH） ----------
@@ -808,7 +886,10 @@ function detailSection(title) {
 // 浏览器只读不重算。定位/取值逻辑是展示层第二份（dsh-client 一份、这里一份），属
 // 既有「每前端一份 data-prep」格局，不构成 CLAUDE.md 的「第四份拷贝」（计算无第二份）。
 
-const TL_GEO = { w: 1000, h: 190, curveTop: 10, curveBottom: 150, eventY: 172, x0: 6, x1: 994 };
+// h 多给 8px（190→198）：eventY 标记底缘（±5 → 177）与 turn 刻度文字顶缘原本只
+// 隔 ~2px，事件聚堆时圆点和 T65/T80 标签视觉上顶在一起（真实截图可见）。.tl-chart
+// 是 height:auto，viewBox 变高就是真实的额外间隔。
+const TL_GEO = { w: 1000, h: 198, curveTop: 10, curveBottom: 150, eventY: 172, x0: 6, x1: 994 };
 // 「慢」事件阈值：工具调用 ≥60s 才算慢（D9 语义的固定阈值；dsh-client 那边由用户在
 // DurationSection 设阈值，工作台固定一个，不额外给设置项）。
 const TL_SLOW_MS = 60 * 1000;
@@ -1343,14 +1424,22 @@ function renderInteractiveTimeline(data) {
     svg.setAttribute("tabindex", "0");
     svg.setAttribute("aria-label", "会话时间线（" + (modeMeta[state.mode] ? modeMeta[state.mode].label : state.mode) + " 纵轴）");
 
+    // 网格线画在量程的 0/50%/100%，不是字面值 0/0.5/1——后者在 tokens/cost 模式
+    // （yMax 上亿）下 (1/yMax)≈0，三条线全塌到底部基线上，顶标 yMax 也跟着被放
+    // 到 yFor(1)≈基线旁：真实截图里「138.7M」挤在底部「0」边上就是这个。context
+    // 模式（值本身是 0..1 比例、yMax≈1）碰巧两套算出同一位置，所以 bug 只在后
+    // 两种模式暴露。
     for (const frac of [0, 0.5, 1]) {
+      const y = yFor(frac * tl.yMax);
       const line = tlSvgEl("line");
       line.setAttribute("class", "tl-grid");
       line.setAttribute("x1", g.x0); line.setAttribute("x2", g.x1);
-      line.setAttribute("y1", yFor(frac)); line.setAttribute("y2", yFor(frac));
+      line.setAttribute("y1", y); line.setAttribute("y2", y);
       svg.appendChild(line);
     }
-    tlSvgText(svg, "tl-axis", g.x0, yFor(1) - 4,
+    // 顶标放顶网格线正下方（同 dsh-native-v2 原型「128K」对顶格线的摆法）；曲线
+    // 左端起点低，左上角内侧不会被线压住。
+    tlSvgText(svg, "tl-axis", g.x0, g.curveTop + 9,
       state.mode === "cost" ? fmtMoney(tl.yMax) : fmtTokens(tl.yMax));
     tlSvgText(svg, "tl-axis", g.x0, g.curveBottom + 11, "0");
 
@@ -1569,10 +1658,13 @@ function dshCostSection(s) {
   const sec = detailSection("成本明细（CNY，估算值）");
   sec.appendChild(kvRow("合计", fmtMoney(s.cost.total || 0)));
   if (s.cost.peak_total) sec.appendChild(kvRow("高峰", fmtMoney(s.cost.peak_total)));
+  const total = s.cost.total || 0;
   for (const [model, m] of Object.entries(s.cost.per_model)) {
     const label = m.short_name || model;
     const sub = m.provider ? " · " + m.provider : "";
-    sec.appendChild(kvRow(label + sub, fmtMoney(m.total || 0), model));
+    // 占比条相对合计——多模型混跑时一眼看出钱花在哪个模型上，不用逐行读数字比较。
+    const frac = total > 0 && m.total != null ? m.total / total : null;
+    sec.appendChild(barRow(label + sub, fmtMoney(m.total || 0), frac, model));
   }
   return sec;
 }
@@ -1581,14 +1673,34 @@ function dshContextSection(s) {
   if (!s.context) return null;
   const c = s.context;
   const sec = detailSection("上下文构成");
-  sec.appendChild(kvRow("system", fmtTokens(c.system_tokens)));
-  sec.appendChild(kvRow("tools", fmtTokens(c.tools_tokens)));
-  sec.appendChild(kvRow("catalog", fmtTokens(c.catalog_tokens) + "（" + (c.catalog_entries || 0) + " 条目）"));
+  const parts = [["system", c.system_tokens], ["tools", c.tools_tokens], ["catalog", c.catalog_tokens]];
+  const sum = parts.reduce((a, [, v]) => a + (v || 0), 0);
+  for (const [label, v] of parts) {
+    const frac = sum > 0 && v != null ? v / sum : null;
+    const suffix = label === "catalog" ? "（" + (c.catalog_entries || 0) + " 条目）" : "";
+    sec.appendChild(barRow(label, fmtTokens(v) + suffix, frac));
+  }
   if (Array.isArray(c.catalog_names) && c.catalog_names.length) {
     // 每个 skill 目录条目各占多少 token——这个仓库的核心命题，别埋在 JSON 里。
+    // 条形相对本会话里最大的那个条目（不是相对 catalog 合计），这样即使 catalog
+    // 只占 system/tools 里的一小份，条目之间谁大谁小依然一目了然。
     const sorted = c.catalog_names.slice().sort((a, b) => (b.tokens || 0) - (a.tokens || 0));
-    for (const n of sorted) {
-      sec.appendChild(kvRow(n.name || "—", fmtTokens(n.tokens)));
+    const max = sorted[0].tokens || 0;
+    const TOP_N = 8;
+    const sub = el("div", "detail-subsection");
+    for (const n of sorted.slice(0, TOP_N)) {
+      const frac = max > 0 && n.tokens != null ? n.tokens / max : null;
+      sub.appendChild(barRow(n.name || "—", fmtTokens(n.tokens), frac));
+    }
+    sec.appendChild(sub);
+    const rest = sorted.slice(TOP_N);
+    if (rest.length) {
+      const det = el("details", "detail-collapsible");
+      const summary = el("summary");
+      summary.textContent = "其余 " + rest.length + " 条目";
+      det.appendChild(summary);
+      for (const n of rest) det.appendChild(kvRow(n.name || "—", fmtTokens(n.tokens)));
+      sec.appendChild(det);
     }
   }
   return sec;
@@ -1637,10 +1749,14 @@ function dshDurationSection(s) {
     .sort((a, b) => b.sum - a.sum)
     .slice(0, 10);
   const sec = detailSection("工具耗时（Top " + top.length + "，共 " + calls.length + " 次调用）");
+  const maxSum = top.length ? top[0].sum : 0;
   for (const t of top) {
-    sec.appendChild(kvRow(
+    // 条形相对 Top 1 的总耗时——哪个工具吃掉大部分时间一眼可见，不用逐行比数字。
+    const frac = maxSum > 0 ? t.sum / maxSum : null;
+    sec.appendChild(barRow(
       t.n + "（" + t.count + " 次，峰值 " + Math.round(t.max) + "ms）",
-      (t.sum / 1000).toFixed(1) + "s"
+      (t.sum / 1000).toFixed(1) + "s",
+      frac
     ));
   }
   return sec;
@@ -1655,17 +1771,32 @@ function dshSubagentsSection(s) {
   return sec;
 }
 
+// 规则三态 / 覆盖率是"这份数据可不可信"的排查信息，不是"发生了什么"的主叙事——
+// 一次会话可以有十几条 SV 规则、六项覆盖率，逐行 kv-row 摆出来会跟成本/时间线抢
+// 同样的视觉权重。做成默认折叠的 <details>（summary 借 .detail-section-title 的
+// 样式，看起来还是一个章节标题，只是可以收起），展开后用 chip 网格代替逐行文字。
 function dshRuleOutcomesSection(s) {
   if (!s.rule_outcomes) return null;
-  const sec = detailSection("规则三态");
+  const entries = Object.entries(s.rule_outcomes);
   // findings / measured_zero / unavailable 三种结局，一次会话里每条 SV 规则落在哪
-  // 一格——诚实的三态不折叠成「没发现」。
-  for (const [rule, o] of Object.entries(s.rule_outcomes)) {
+  // 一格——诚实的三态不折叠成「没发现」，chip 颜色只分这三档，不编第四种。
+  const findingsCount = entries.filter(([, o]) => o && o.status === "findings").length;
+  const det = el("details", "detail-section detail-collapsible");
+  const summary = el("summary", "detail-section-title");
+  summary.textContent = "规则三态（" + entries.length + " 条规则 · " + findingsCount + " 条有 finding）";
+  det.appendChild(summary);
+  const wrap = el("div", "chips");
+  for (const [rule, o] of entries) {
     const status = o && o.status ? o.status : "?";
     const suffix = status === "findings" && o.count ? "（" + o.count + "）" : "";
-    sec.appendChild(kvRow(rule, status + suffix));
+    const cls = status === "findings" ? "status-findings" : status === "measured_zero" ? "status-zero" : "status-unavailable";
+    const chip = el("span", "chip " + cls);
+    chip.textContent = rule + suffix;
+    chip.title = status;
+    wrap.appendChild(chip);
   }
-  return sec;
+  det.appendChild(wrap);
+  return det;
 }
 
 function dshCoverageSection(s) {
@@ -1673,14 +1804,21 @@ function dshCoverageSection(s) {
     "subagents_coverage", "compaction_coverage", "waste_coverage"];
   const present = fields.filter((k) => s[k]);
   if (present.length === 0) return null;
-  const sec = detailSection("覆盖率");
+  const det = el("details", "detail-section detail-collapsible");
+  const summary = el("summary", "detail-section-title");
+  summary.textContent = "覆盖率（" + present.length + " 项）";
+  det.appendChild(summary);
+  const wrap = el("div", "chips");
   for (const k of present) {
     const c = s[k];
     const v = c.status || "?";
     const extra = c.count != null ? " · " + c.count : (c.sample_count != null ? " · " + c.sample_count : "");
-    sec.appendChild(kvRow(k.replace("_coverage", ""), v + extra));
+    const chip = el("span", "chip");
+    chip.textContent = k.replace("_coverage", "") + "：" + v + extra;
+    wrap.appendChild(chip);
   }
-  return sec;
+  det.appendChild(wrap);
+  return det;
 }
 
 function renderDshSections(body, s) {
@@ -1719,8 +1857,11 @@ function codexCostSection(s) {
   sec.appendChild(kvRow("tokens", fmtTokens(
     (tk.uncached_input_tokens || 0) + (tk.cached_input_tokens || 0) + (tk.output_tokens || 0))));
   if (r.per_model) {
+    // 与 dshCostSection 同款占比条（相对合计），多模型混跑时钱花在谁身上一眼可见。
+    const total = r.total_cost_usd;
     for (const [model, m] of Object.entries(r.per_model)) {
-      sec.appendChild(kvRow(m.short_name || model, fmtUSD(m.cost_usd), model));
+      const frac = total != null && total > 0 && m.cost_usd != null ? m.cost_usd / total : null;
+      sec.appendChild(barRow(m.short_name || model, fmtUSD(m.cost_usd), frac, model));
     }
   }
   return sec;
@@ -1830,6 +1971,22 @@ function renderDetailEnvelope(env) {
   const session = env.session || {};
   const host = (env.session_key && env.session_key.host_kind) || session.host_kind || null;
 
+  // envelope 到手先把顶部 KPI 卡补真（列表行摘要里 DSH 会话的 cost/tokens/findings
+  // 全是缺场，冷启动时三张卡全「—」，而正下方报告里明明有真数）。
+  refreshDetailCards(session, host);
+
+  const fsec = findingsSection(session);
+  if (fsec) body.appendChild(fsec);
+
+  if (host === "codex") {
+    renderCodexSections(body, session);
+  } else {
+    renderDshSections(body, session);
+  }
+
+  // 版本元数据（schema/engine/pricing 版本串 + 生成时间戳）是排查用信息，不是
+  // 「这次会话发生了什么」的主叙事——原先它排在 KPI 卡正下方第二块，占着最显眼
+  // 的位置却没人看。挪到 raw JSON 上面，和它同属「诊断层」。
   const meta = detailSection("版本元数据");
   const mm = el("div", "detail-meta");
   mm.textContent = [
@@ -1841,15 +1998,6 @@ function renderDetailEnvelope(env) {
   ].join(" · ");
   meta.appendChild(mm);
   body.appendChild(meta);
-
-  const fsec = findingsSection(session);
-  if (fsec) body.appendChild(fsec);
-
-  if (host === "codex") {
-    renderCodexSections(body, session);
-  } else {
-    renderDshSections(body, session);
-  }
 
   body.appendChild(rawSection(env));
 }
