@@ -1033,3 +1033,16 @@ button.chip.active {
 .src-list li.no-data { background: rgba(255, 255, 255, 0.04);
   border-radius: 6px; color: var(--text-1, #dde3ee); }
 .src-list li.no-data .chip { color: #cfd6e4; border-color: #4a5468; }
+/* 「无数据」不吃 hero 强调色（绿色 = 好状态金额的语义色）。 */
+.amount.muted-amt { color: var(--muted); }
+/* 决策卡建议行：暗主题下亮底 #f4f6fb + 继承浅字 = 浅底浅字不可读（截图暴露）。
+   改用暗底亮字，预警态由文字内容与 ⚠ 表达。 */
+.decide-advice { background: rgba(46, 78, 168, 0.18); color: var(--text-1, #dde3ee);
+  border-left: 3px solid #2c4ea8; }
+/* 决策卡里的 chip（Claude Pro「窗口余量不可得」等）保证可读。 */
+.decide .chip { color: #cfd6e4; border-color: #4a5468; }
+/* 「本月逐日」跨宿主列表行。 */
+.days-list li { display: flex; gap: 12px; align-items: baseline; padding: 4px 0; }
+.days-list .day-date { color: var(--muted); min-width: 84px; }
+.days-list .day-tokens { font-weight: 600; min-width: 72px; }
+.days-list .day-cost { color: var(--muted); font-size: 12px; }

@@ -35,8 +35,16 @@ ok(wb.includes("归属待核"), ">50× 的「归属待核」告警文案存在")
 
 // ── vm 执行真实文件 ──
 function makeElement() {
+  const classes = new Set();
   return { textContent: "", innerHTML: "", hidden: false, style: {},
-    className: "", title: "", appendChild() {}, setAttribute() {} };
+    className: "", title: "", appendChild() {}, setAttribute() {},
+    classList: {
+      add: (c) => classes.add(c),
+      remove: (c) => classes.delete(c),
+      toggle: (c, force) => (force === undefined ? (classes.has(c) ? classes.delete(c) : classes.add(c)) : force ? classes.add(c) : classes.delete(c)),
+      contains: (c) => classes.has(c),
+    },
+  };
 }
 const elements = {};
 const el = (id) => (elements[id] ??= makeElement());

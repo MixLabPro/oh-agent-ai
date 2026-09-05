@@ -368,17 +368,19 @@ async function renderOverview() {
   // 既有的 beijingToday/beijingMonth（同一份北京日规则，不再内联第二份）。
   const todayKey = beijingToday();
   const monthKey = beijingMonth();
-  let daily = null, monthly = null;
+  let daily = null, monthly = null, cal = null;
   try {
-    [daily, monthly] = await Promise.all([
+    [daily, monthly, cal] = await Promise.all([
       invoke("data_daily_summary", { date: todayKey }),
       invoke("data_monthly_summary", { month: monthKey }),
+      invoke("read_calendar_month", { month: monthKey }),
     ]);
   } catch (e) {
     document.getElementById("ov-note").textContent =
       "跨宿主数据读取失败：" + errText(e);
   }
   renderMonthVerdict(monthly);
+  renderOverviewDays(cal);
   renderKpiRow("t", daily);
   renderKpiRow("m", monthly);
   renderDualTrack(monthly);
@@ -534,6 +536,38 @@ async function renderOverview() {
   }
 }
 
+// 「本月逐日」panel：切 read_calendar_month（逐日三宿主 token + 分币耗费）。
+// 旧 read_month 的 DSH-only 日轴在 DSH 零用量月份只剩全零行，与总览页的
+// 跨宿主叙事自相矛盾。costs 每段带宿主前缀（同日历格子）。
+function renderOverviewDays(cal) {
+  const list = document.getElementById("ov-days-list");
+  const empty = document.getElementById("ov-days-empty");
+  if (!list) return;
+  list.textContent = "";
+  const days = (cal && cal.days) || {};
+  const rows = Object.entries(days)
+    .filter(([, d]) => (d.total_tokens || 0) > 0)
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  if (!rows.length) {
+    empty.hidden = false;
+    empty.textContent = "本月还没有 token 用量";
+    return;
+  }
+  empty.hidden = true;
+  for (const [date, d] of rows) {
+    const costs = [];
+    if ((d.dsh_cost_cny || 0) > 0) costs.push("DSH " + fmtCur(d.dsh_cost_cny, "CNY"));
+    if ((d.claude_cost_cny || 0) > 0) costs.push("CC " + fmtCur(d.claude_cost_cny, "CNY"));
+    if ((d.claude_cost_usd || 0) > 0) costs.push("CC " + fmtCur(d.claude_cost_usd, "USD"));
+    if ((d.codex_cost_usd || 0) > 0) costs.push("CX " + fmtCur(d.codex_cost_usd, "USD"));
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="day-date">${date}</span>` +
+      `<span class="day-tokens">${fmtTokens(d.total_tokens)}</span>` +
+      (costs.length ? `<span class="day-cost">${costs.join(" ")}</span>` : "");
+    list.appendChild(li);
+  }
+}
+
 // ---------- Stage D KPI 行 / 双轨账 / 决策卡 ----------
 
 // 本月结论（审查 UX#2）：一个结论回答"这个月要付多少"，其余口径降为明细。
@@ -544,11 +578,15 @@ function renderMonthVerdict(monthly) {
   const act = fmtCurMap((monthly || {}).total_actual_spend);
   if (!act.length) { el.hidden = true; return; }
   el.hidden = false;
-  const subFees = [];
+  const feeMap = {};
   for (const h of Object.values((monthly || {}).by_provider || {})) {
     const fee = (h.amounts_by_basis || {}).fixed_subscription || 0;
-    if (fee > 0) subFees.push(fmtCur(fee, h.currency));
+    if (fee > 0) {
+      const c = h.currency || "";
+      feeMap[c] = (feeMap[c] || 0) + fee; // 同币月费合并后再走统一币序
+    }
   }
+  const subFees = fmtCurMap(feeMap);
   el.innerHTML = "<strong>本月实付 " + act.join(" + ") + "</strong>" +
     (subFees.length ? "（含订阅月费 " + subFees.join(" + ") + "）" : "") +
     '<span class="verdict-note">名义/估算数字仅作诊断，不计账单——明细见下。</span>';
@@ -562,6 +600,9 @@ function renderKpiRow(prefix, dto) {
     const el = document.getElementById(`ov-${prefix}-${id}`);
     if (!el) return;
     el.textContent = text;
+    // 「无数据」不是好状态的金额，不吃 hero 强调色（审查 UX#3 的镜像面：
+    // 绿色在说反话）。
+    el.classList.toggle("muted-amt", text === "无数据");
     if (sub !== undefined) {
       const subEl = document.getElementById(`ov-${prefix}-${id}-sub`);
       if (subEl) subEl.textContent = sub || "";
@@ -591,9 +632,14 @@ function renderKpiRow(prefix, dto) {
   // 单位：名义/M（主）+ 实际/M（副）。未计价 token 不进金额分母——首版
   // 以 processed 为近似分母并在副行标注（§6.2 的完整分母留 Stage E）。
   if (tk.total > 0 && nomParts.length) {
+    // 名义/M 同样分币列——混币相加再标单一符号就是编造（此前只修了实际侧，
+    // 名义侧漏了：截图暴露「$0.31/M · 名义」实为 ¥+$ 相加）。
+    const nomPerM = fmtCurMap(Object.fromEntries(
+      Object.entries(nominal).map(([c, v]) => [c, v / tk.total * 1e6])
+    )).map((x) => x + "/M");
     set("unit",
-      fmtCur(Object.entries(nominal).reduce((a, [c, v]) => a + v, 0) / tk.total * 1e6, "USD") + "/M · 名义",
-      "跨币暂未折算：按 USD 桶计（见月度带副行）");
+      nomPerM.join(" + ") + " · 名义",
+      "@官方标价 · 不扣套餐/折扣");
     // 实际/M 按币分列，不做跨币求和（审查 #1：空 map 求和得 0 → 副行渲染
     // "实际 0.00（币种未声明）/M"，与实际 tile 的「无数据」同屏互斥——双标；
     // 审查 UX#3：混币相加标单一符号是编造）。无实付条目 → 诚实话术。
@@ -636,9 +682,16 @@ function renderDualTrack(monthly) {
     const label = PROVIDER_LABEL[provider] || provider;
     const amountEntries = Object.entries(h.amounts_by_basis || {});
     if (!amountEntries.length && !h.has_unresolved) continue;
-    if (amountEntries.some(([b]) => b === "fixed_subscription")) subEntries.push([key, h, label]);
-    else if (amountEntries.some(([b]) => b.startsWith("metered"))) metered.push([key, h, label]);
-    else unresolved.push([key, h, label]);
+    // 订阅轨收两种条目：有月费的，和 api_equivalent-only（套餐制的标价折算
+    // 口径——codex/openai 月费未声明，落"不可归档/无数据"是分类错误：它有
+    // 真实用量口径，只是利用率算不了）。
+    if (amountEntries.some(([b]) => b === "fixed_subscription" || b === "api_equivalent")) {
+      subEntries.push([key, h, label]);
+    } else if (amountEntries.some(([b]) => b.startsWith("metered"))) {
+      metered.push([key, h, label]);
+    } else {
+      unresolved.push([key, h, label]);
+    }
   }
   const li = (cls, html) => {
     const li = document.createElement("li");
@@ -650,6 +703,13 @@ function renderDualTrack(monthly) {
   for (const [key, h, label] of subEntries) {
     const fee = h.amounts_by_basis.fixed_subscription || 0;
     const listEq = h.amounts_by_basis.api_equivalent || 0;
+    // 无月费声明（openai）：显示等价标价口径本体，利用率明确"算不了"。
+    if (fee === 0 && listEq > 0) {
+      li("", `<span class="src-name">${label}</span>
+        <span class="basis"><span class="chip diagnostic">套餐等价 ${fmtCur(listEq, h.currency)} · 诊断</span>
+        <span class="chip">月费未声明 · 利用率不可算</span></span>`);
+      continue;
+    }
     const mult = fee > 0 && listEq > 0 ? listEq / fee : null;
     // 无标价折算（glm 有月费无价卡）→ mult null：保留 unresolved 提示，
     // 不让订阅轨的行看起来"一切正常"。
