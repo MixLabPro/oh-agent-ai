@@ -6,6 +6,7 @@ version = 3
 name = "agent-vitals"
 version = "1.3.0"
 dependencies = [
+ "agent-vitals-data",
  "agent-vitals-domain",
  "agent-vitals-hosts",
  "agent-vitals-runtime",
@@ -54,6 +55,7 @@ dependencies = [
 name = "agent-vitals-runtime"
 version = "1.3.0"
 dependencies = [
+ "agent-vitals-data",
  "agent-vitals-domain",
  "agent-vitals-hosts",
  "regex",

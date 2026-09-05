@@ -55,6 +55,20 @@
         <ul id="ov-days-list" class="days-list"></ul>
       </div>
 
+      <!-- ============ 数据源（v0.9 Stage 0.6 总览页诚实状态）============
+           由 data_monthly_summary（Stage 0.6a 落地的 Tauri 命令）驱动：
+           每个宿主一行（amounts_by_basis + freshness + has_unresolved），
+           coverage / excluded_hosts 单独两行。spec §0.1「不得渲染为 ¥0、
+           正常或看似完整的总额」——unavailable 宿主固定「无数据」，绝不显
+           示 0.00；金额一律带口径标签，不带货币符号（DTO 不带 currency：
+           claude CNY 估 + USD 诊断混在同一 map，跨币永不相加）。 -->
+      <div class="panel sources">
+        <div class="panel-title">数据源</div>
+        <div id="ov-sources-empty" class="empty" hidden>本月无跨宿主数据</div>
+        <ul id="ov-sources-list" class="src-list"></ul>
+        <div class="src-meta" id="ov-sources-meta"></div>
+      </div>
+
       <div class="note" id="ov-note"></div>
     </section>
 
@@ -68,6 +82,16 @@
       </div>
       <div id="cal-empty" class="empty" hidden>该月暂无数据</div>
       <div id="cal-grid" class="cal-grid"></div>
+      <!-- ============ 数据源（v0.9 Stage 0.6 日历页月份级诚实状态）============
+           由 data_monthly_summary 驱动（与 read_month 并发拉取，失败不拖垮
+           方格）：标题行加新鲜度标注，月注记区追加逐宿主月度概览。方格仍
+           走 read_month 的 DSH 日轴数据——两者各自诚实渲染，不许互相替代。 -->
+      <div class="panel sources">
+        <div class="panel-title">本月跨宿主概览</div>
+        <div id="cal-sources-empty" class="empty" hidden>本月无跨宿主数据</div>
+        <ul id="cal-sources-list" class="src-list"></ul>
+        <div class="src-meta" id="cal-sources-meta"></div>
+      </div>
       <div class="note" id="cal-note"></div>
     </section>
 

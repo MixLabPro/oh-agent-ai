@@ -22,6 +22,13 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 # 计价/聚合本体在 domain —— 菜单栏不许长第四份拷贝（CLAUDE.md 的 cost 锁步）。本
 # crate 只调 domain::cost 的纯函数，不放任何定价/覆盖率判断。
 agent-vitals-domain = { path = "../../../crates/agent-vitals-domain" }
+# v0.9 Stage 0.6：工作台 Data Query API 面（spec §3.1 依赖表：apps 只消费
+# Runtime 的版本化 DTO）。`data_monthly_summary`/`data_daily_summary` 经
+# `SummaryRepository` trait 调 runtime 的 `JsonSummaryRepository`——托盘不
+# new 具体类型、不直读 state JSON（overview.rs 的既有直读是 v1.3 遗留，
+# spec §7 的目标态是"Tauri 只调 daily_summary/monthly_summary 等 API"）。
+agent-vitals-data = { path = "../../../crates/agent-vitals-data" }
+agent-vitals-runtime = { path = "../../../crates/agent-vitals-runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 

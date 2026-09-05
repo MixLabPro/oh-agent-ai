@@ -496,6 +496,46 @@ enum Cmd {
         #[command(subcommand)]
         action: SessionsAction,
     },
+    /// Read-only Data Query API surface (v0.9 Stage 0.5, spec §7's suggested
+    /// `data coverage`). Goes through the `SummaryRepository` trait to the
+    /// runtime's `JsonSummaryRepository` — the CLI never constructs the
+    /// concrete type (spec §3.1 dependency table). `--json` prints the frozen
+    /// `to_json()` DTO verbatim; spec §3.1 makes it a contract violation to
+    /// consume amounts while dropping freshness/coverage/excluded_hosts, so
+    /// both views surface all three.
+    Data {
+        #[command(subcommand)]
+        action: DataAction,
+    },
+}
+
+// `data` 子命令的子动作。Stage 0 的 repository 只有 `monthly_summary`/
+// `daily_summary` 两个查询（spec §3.1 的 `coverage_status(CoverageQuery)` 是
+// Stage B 的独立查询面）——MonthlySummary DTO 本身承载 coverage/excluded_
+// hosts，所以月视图命令沿用 spec 建议名 `coverage`，不另设第二个命令去打印
+// 同一份 DTO 的另一种排版。帮助文本一律英文（test_regressions 钉 `--help`
+// 无 CJK——scanner-owned text 的纪律），中文设计注记只留在这里。
+#[derive(Subcommand)]
+enum DataAction {
+    /// Monthly cross-host summary (coverage, excluded hosts, freshness).
+    /// Missing data renders as "no data", never as zero.
+    Coverage {
+        /// Query a specific month (YYYY-MM) instead of the current Beijing month
+        #[arg(long)]
+        month: Option<String>,
+        /// Print the frozen DTO JSON to stdout (default: compact text view)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Single-day cross-host summary (Beijing date, YYYY-MM-DD).
+    Daily {
+        /// Beijing date to query (YYYY-MM-DD)
+        #[arg(long)]
+        date: String,
+        /// Print the frozen DTO JSON to stdout (default: compact text view)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `sessions` 子命令的子动作（R2a §2.5/§3.3 查询模型）。
@@ -926,9 +966,9 @@ fn codex_report_from_merged(
         by_model =
             agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
     }
-    let pricing = agent::codex_cost::load_codex_pricing();
+    let pricing = agent_vitals_runtime::sessions::codex_cost::load_codex_pricing();
     let plan = merged["plan"].clone();
-    let report = agent::codex_cost::codex_cost_report(
+    let report = agent_vitals_runtime::sessions::codex_cost::codex_cost_report(
         &by_hour_model,
         &by_model,
         &merged["unaccounted"],
@@ -962,7 +1002,7 @@ fn codex_report_from_merged(
         "month".into(),
         month_out.map(Value::from).unwrap_or(Value::Null),
     );
-    out.insert("today".into(), json!(agent::codex_cost::today_beijing()));
+    out.insert("today".into(), json!(agent_vitals_runtime::sessions::codex_cost::today_beijing()));
     if let Some(rep) = report.as_object() {
         for (k, v) in rep {
             out.insert(k.clone(), v.clone());
@@ -982,7 +1022,7 @@ fn codex_calendar_blob(
     month_out: Option<&str>,
     default: &str,
 ) -> Value {
-    let today = agent::codex_cost::today_beijing();
+    let today = agent_vitals_runtime::sessions::codex_cost::today_beijing();
     let mut views = serde_json::Map::new();
     views.insert(
         "today".into(),
@@ -1039,6 +1079,96 @@ fn render_codex_cost_html(
     }
 }
 
+/// v0.9 Stage 0.5 的 Data 面文本视图（`data coverage` / `data daily` 的默认
+/// 输出）。呈现是 CLI 的职责（spec §3.1：data 层不做 UI 呈现），但诚实规则
+/// 与 DTO 同源：Unavailable → "no data"，绝不渲染 0（0.6 纪律提前落到 CLI
+/// 面）；金额一律带 basis 标签——estimate/api_equivalent 不冒充真实账单
+/// （spec §4）。不标货币符号：Stage 0 DTO 刻意不带 currency 字段（§8.4/0.4c
+/// 的决定：口径字段承载语义，混币永不相加），文本视图不重新发明。
+fn amount_parts(h: &agent_vitals_data::projection::HostAmount) -> Vec<String> {
+    let mut parts: Vec<String> = h
+        .amounts_by_basis
+        .iter()
+        .map(|(b, v)| format!("{}={:.2}", b.as_str(), v))
+        .collect();
+    if parts.is_empty() {
+        // 有观测、无钱（全 unknown 日）——不是 0，也不是账单（Unresolved
+        // 不得归零，见 summary.rs::claude_host_amount）。
+        parts.push("no priceable amount (unresolved)".to_string());
+    }
+    if h.has_unresolved {
+        parts.push("has unresolved tokens".to_string());
+    }
+    parts
+}
+
+fn freshness_tag(h: &agent_vitals_data::projection::HostAmount) -> String {
+    use agent_vitals_data::projection::FreshnessState;
+    let last = h.freshness.last_observed_at.as_deref().unwrap_or("-");
+    match h.freshness.state {
+        FreshnessState::Fresh => format!("fresh ({last})"),
+        FreshnessState::Stale => format!("stale ({last})"),
+        FreshnessState::Partial => format!("partial ({last})"),
+        // "Unavailable 不能带 last_observed_at"（domain 不变式 3）——防御性
+        // 保留 last 位，但状态词本身已经说明没有观测。
+        FreshnessState::Unavailable => "no data (unavailable)".to_string(),
+    }
+}
+
+fn print_monthly_summary_text(s: &agent_vitals_data::projection::MonthlySummary) {
+    println!("month {}", s.month);
+    for (name, h) in &s.by_host {
+        let amounts = amount_parts(h).join("  ");
+        if h.freshness.state == agent_vitals_data::projection::FreshnessState::Unavailable {
+            println!("  {name:<12} {}", freshness_tag(h));
+        } else {
+            println!("  {name:<12} {amounts}");
+            println!("  {:<12} {}", "", freshness_tag(h));
+        }
+    }
+    println!(
+        "coverage {}/{} (denominator v{})",
+        s.coverage.measured_fields, s.coverage.total_fields, s.coverage.denominator_version
+    );
+    let excluded: Vec<&str> = s.excluded_hosts.iter().map(|x| x.as_str()).collect();
+    if excluded.is_empty() {
+        println!("excluded hosts: (none)");
+    } else {
+        println!("excluded hosts: {}", excluded.join(", "));
+    }
+    println!(
+        "summable total: {:.2} (estimates/diagnostics excluded, see per-host basis)",
+        s.total_summable()
+    );
+}
+
+fn print_daily_summary_text(s: &agent_vitals_data::projection::DailySummary) {
+    println!("date {}", s.date);
+    for (name, h) in &s.by_host {
+        let amounts = amount_parts(h).join("  ");
+        if h.freshness.state == agent_vitals_data::projection::FreshnessState::Unavailable {
+            println!("  {name:<12} {}", freshness_tag(h));
+        } else {
+            println!("  {name:<12} {amounts}");
+            println!("  {:<12} {}", "", freshness_tag(h));
+        }
+    }
+    println!(
+        "coverage {}/{} (denominator v{})",
+        s.coverage.measured_fields, s.coverage.total_fields, s.coverage.denominator_version
+    );
+    let excluded: Vec<&str> = s.excluded_hosts.iter().map(|x| x.as_str()).collect();
+    if excluded.is_empty() {
+        println!("excluded hosts: (none)");
+    } else {
+        println!("excluded hosts: {}", excluded.join(", "));
+    }
+    println!(
+        "summable total: {:.2} (estimates/diagnostics excluded, see per-host basis)",
+        s.total_summable()
+    );
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -1048,7 +1178,7 @@ fn main() {
         if let Some(path) = rows_json {
             // `--json` 的 20 键载荷在 behavior.rs::audit_payload（唯一来源）——
             // DSH SessionReport 的 session 载荷就是它，键序逐字节对齐 Python。
-            let Some(payload) = agent::behavior::audit_payload(session_log) else {
+            let Some(payload) = agent_vitals_runtime::sessions::behavior::audit_payload(session_log) else {
                 eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
                 std::process::exit(2);
             };
@@ -1067,7 +1197,7 @@ fn main() {
             }
             return;
         }
-        let Some(audit) = agent::behavior::audit_session_log(session_log) else {
+        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log) else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };
@@ -1096,7 +1226,7 @@ fn main() {
         // behavior_gate 的 docstring）。此前硬编码「有 critical 就退 1」，把
         // --fail-on warning / --ignore SV603 这类全局参数静默吞掉了。成本不
         // 影响退出码——闸门只看风险。
-        std::process::exit(agent::behavior::behavior_gate(findings, &args.fail_on, &args.ignore));
+        std::process::exit(agent_vitals_runtime::sessions::behavior::behavior_gate(findings, &args.fail_on, &args.ignore));
     }
 
     // R1d-tick：oneline 生产者——把一份 DSH 会话日志折成一行摘要 + 今日/本月账
@@ -1147,7 +1277,7 @@ session_store={store} fold={fold}"
     // R1d-tick：discover——列 DSH 会话根下未折的裸 session.jsonl（mtime 最新在前）。
     // 只读：不碰 fencing、不写 state；tick 与验收测试都从这里拿「折哪条」。
     if let Some(Cmd::Discover { rows_json }) = &args.cmd {
-        let report = agent::discovery::discover();
+        let report = agent_vitals_runtime::sessions::discovery::discover();
         let text = serde_json::to_string_pretty(&report).unwrap_or_default();
         if let Some(path) = rows_json {
             if path == &PathBuf::from("-") {
@@ -1166,7 +1296,7 @@ session_store={store} fold={fold}"
     // 输出调用记录（触发方式/加载状态/耗时/位置）。与 behavior 不同：这是 skill 专用，
     // 只出 skill 相关的 invocations 结构，不带 SV601–614 findings。
     if let Some(Cmd::SkillAudit { session_log, rows_json }) = &args.cmd {
-        let Some(audit) = agent::behavior::audit_session_log(session_log) else {
+        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log) else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };
@@ -1213,7 +1343,7 @@ session_store={store} fold={fold}"
     // 这里额外给人读格式加一段"最慢的几条"——这正是这个命令存在的理由，不是
     // 跟 skill-audit 一样只报计数就够了。
     if let Some(Cmd::DurationAudit { session_log, rows_json }) = &args.cmd {
-        let Some(audit) = agent::behavior::audit_session_log(session_log) else {
+        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log) else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };
@@ -1384,14 +1514,14 @@ session_store={store} fold={fold}"
         // `--today` = 今天（过滤键是完整 YYYY-MM-DD，month 标签取今天所属月）；
         // `--month all` = 全部月份；其余 = 指定月。filter_key=None 即不过滤。
         let (filter_key, month_out): (Option<String>, Option<String>) = if *today {
-            let t = agent::codex_cost::today_beijing();
+            let t = agent_vitals_runtime::sessions::codex_cost::today_beijing();
             (Some(t.clone()), Some(t[..7].to_string()))
         } else {
             match month.as_deref() {
                 Some("all") => (None, None),
                 Some(m) => (Some(m.to_string()), Some(m.to_string())),
                 None => {
-                    let cur = agent::codex_cost::current_month_beijing();
+                    let cur = agent_vitals_runtime::sessions::codex_cost::current_month_beijing();
                     (Some(cur.clone()), Some(cur))
                 }
             }
@@ -1426,7 +1556,7 @@ session_store={store} fold={fold}"
             wrote = true;
         }
         if !wrote {
-            print!("{}", agent::codex_cost::render_codex_cost(&out));
+            print!("{}", agent_vitals_runtime::sessions::codex_cost::render_codex_cost(&out));
         }
         return;
     }
@@ -1449,7 +1579,7 @@ session_store={store} fold={fold}"
                 eprintln!("--list only supports --json or plain text, not --html");
                 std::process::exit(2);
             }
-            let out = agent::codex_session_audit::codex_session_list(home_path);
+            let out = agent_vitals_runtime::sessions::codex_session_audit::codex_session_list(home_path);
             if let Some(path) = rows_json {
                 let text = serde_json::to_string_pretty(&out).unwrap_or_default();
                 if path == &PathBuf::from("-") {
@@ -1461,7 +1591,7 @@ session_store={store} fold={fold}"
                     println!("Wrote {}", path.display());
                 }
             } else {
-                print!("{}", agent::codex_session_audit::render_codex_session_list(&out));
+                print!("{}", agent_vitals_runtime::sessions::codex_session_audit::render_codex_session_list(&out));
             }
             return;
         }
@@ -1470,7 +1600,7 @@ session_store={store} fold={fold}"
         let session_id = match session {
             Some(s) => s.clone(),
             None => {
-                let list = agent::codex_session_audit::codex_session_list(home_path);
+                let list = agent_vitals_runtime::sessions::codex_session_audit::codex_session_list(home_path);
                 let first = list
                     .get("sessions")
                     .and_then(|v| v.as_array())
@@ -1487,7 +1617,7 @@ session_store={store} fold={fold}"
                 }
             }
         };
-        let Some(out) = agent::codex_session_audit::codex_session_audit_json(home_path, &session_id)
+        let Some(out) = agent_vitals_runtime::sessions::codex_session_audit::codex_session_audit_json(home_path, &session_id)
         else {
             eprintln!("codex session not found: {session_id}");
             std::process::exit(2);
@@ -1506,11 +1636,11 @@ session_store={store} fold={fold}"
             wrote = true;
         }
         if let Some(path) = html {
-            agent::codex_session_audit::render_codex_session_html(path, &out);
+            agent_vitals_runtime::sessions::codex_session_audit::render_codex_session_html(path, &out);
             wrote = true;
         }
         if !wrote {
-            print!("{}", agent::codex_session_audit::render_codex_session(&out));
+            print!("{}", agent_vitals_runtime::sessions::codex_session_audit::render_codex_session(&out));
         }
         return;
     }
@@ -1867,7 +1997,7 @@ session_store={store} fold={fold}"
                     date_to: date_to.clone(),
                     query: query.clone(),
                 };
-                agent::r2a_store::sessions_list(
+                agent_vitals_runtime::sessions::r2a_store::sessions_list(
                     home_path,
                     &filter,
                     *page_size,
@@ -1876,20 +2006,20 @@ session_store={store} fold={fold}"
                 );
             }
             SessionsAction::Read { session_key, revision, json } => {
-                agent::r2a_store::sessions_read(home_path, session_key, revision, *json);
+                agent_vitals_runtime::sessions::r2a_store::sessions_read(home_path, session_key, revision, *json);
             }
             SessionsAction::Findings { json } => {
-                agent::r2a_store::sessions_findings(home_path, *json);
+                agent_vitals_runtime::sessions::r2a_store::sessions_findings(home_path, *json);
             }
             SessionsAction::Navigation { day, timezone, recent, json } => {
                 // `--day` 缺省 = 今天（北京日界，core 折叠的日期桶是 UTC+8 时
                 // 段；spec §5.1）。
                 let day = if day.is_empty() {
-                    agent::codex_cost::today_beijing()
+                    agent_vitals_runtime::sessions::codex_cost::today_beijing()
                 } else {
                     day.clone()
                 };
-                agent::r2a_store::sessions_navigation(home_path, &day, timezone, *recent, *json);
+                agent_vitals_runtime::sessions::r2a_store::sessions_navigation(home_path, &day, timezone, *recent, *json);
             }
         }
         return;
@@ -2075,6 +2205,47 @@ session_store={store} fold={fold}"
                 "note": "This output is redacted for sharing. Run a new scan to obtain the original data.",
             }),
         );
+    }
+
+    // v0.9 Stage 0.5 Data Query API（只读诊断）。数据面经 trait——CLI 拿到
+    // 的是 `Box<dyn SummaryRepository>`，不 new 具体类型、不读任何 state
+    // 文件（spec §3.1 依赖表：apps 只消费 Runtime 的版本化 DTO）。
+    if let Some(Cmd::Data { action }) = &args.cmd {
+        let repo: Box<dyn agent_vitals_data::repository::SummaryRepository> = Box::new(
+            agent_vitals_runtime::summary::JsonSummaryRepository,
+        );
+        match action {
+            DataAction::Coverage { month, json } => {
+                let m = month
+                    .clone()
+                    .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+                let summary = repo.monthly_summary(
+                    &agent_vitals_data::repository::MonthlySummaryQuery { month: m },
+                );
+                if *json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&summary.to_json()).unwrap_or_default()
+                    );
+                } else {
+                    print_monthly_summary_text(&summary);
+                }
+            }
+            DataAction::Daily { date, json } => {
+                let summary = repo.daily_summary(
+                    &agent_vitals_data::repository::DailySummaryQuery { date: date.clone() },
+                );
+                if *json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&summary.to_json()).unwrap_or_default()
+                    );
+                } else {
+                    print_daily_summary_text(&summary);
+                }
+            }
+        }
+        return;
     }
 
     // `agent-vitals` 无参数等价于 `doctor`。判据是有没有给 --json，理由见 Cmd。

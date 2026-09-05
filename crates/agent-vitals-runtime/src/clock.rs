@@ -27,6 +27,15 @@ pub fn today_beijing() -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
+/// 北京时区昨天 → `YYYY-MM-DD`。v0.9 Stage 0.4 起给 `MonthlySummary`/
+/// `DailySummary` 的新鲜度判断用（`rotate_today` 还没跑之前，最新一条真实
+/// 记录可能停在昨天，不算"过期"）——直接减一天的秒数再走同一套 civil
+/// 数学，不新引入日期库。
+pub fn yesterday_beijing() -> String {
+    let (y, m, d) = civil_from_unix_secs(now_unix_secs() - 86_400, BEIJING_OFFSET_SECS);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,5 +47,13 @@ mod tests {
         let d = today_beijing();
         assert!(d.len() == 10 && d.as_bytes()[4] == b'-' && d.as_bytes()[7] == b'-');
         assert!(d.starts_with(&m));
+    }
+
+    #[test]
+    fn yesterday_is_strictly_before_today() {
+        let y = yesterday_beijing();
+        let t = today_beijing();
+        assert!(y.len() == 10 && y.as_bytes()[4] == b'-' && y.as_bytes()[7] == b'-');
+        assert!(y < t, "yesterday {y} should sort strictly before today {t}");
     }
 }

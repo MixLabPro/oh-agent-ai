@@ -35,9 +35,9 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use agent_vitals_runtime::takeover as tk_io;
+use crate::takeover as tk_io;
 use agent_vitals_domain::takeover as tk;
-use agent_vitals_runtime::home::dsh_home;
+use crate::home::dsh_home;
 
 /// 发现结果里的一条未折会话。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -344,7 +344,7 @@ mod tests {
     /// （见 util.rs 注释）。`.unwrap_or_else(poison → into_inner)`：断言在锁内
     /// panic 会把锁毒化，这是测试夹具的锁，夹具不该让一个坏断言连坐后续用例。
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::util::ENV_LOCK
+        crate::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     }

@@ -204,12 +204,17 @@ impl HostAmount {
     /// spec §4"能否汇总"列为真的几档之和——用户会看到的、这个宿主贡献的
     /// 可信总额。**不存字段，每次算**：存字段会重蹈 `month.json` 三倍计数
     /// 事故的覆辙（同一个数字有两个来源，迟早对不上）。
+    ///
+    /// 显式 `fold(0.0, …)` 而不是 `.sum()`：实测（rustc，2026-09）对空迭代器
+    /// `Sum<&f64>` 产出 **-0.0**，`serde_json` 会把它原样序列化成 "-0.0"——
+    /// 无数据宿主的 summable_total 在 `--json` 里显示成负零，读起来像"欠
+    /// 0 元"（Stage 0.5 的 `data coverage --json` 首次把这个形状暴露出来）。
+    /// fold 的恒等元是显式的 +0.0，空表恒得 +0.0。
     pub fn summable_total(&self) -> f64 {
         self.amounts_by_basis
             .iter()
             .filter(|(basis, _)| basis.summable_into_total())
-            .map(|(_, amount)| amount)
-            .sum()
+            .fold(0.0, |acc, (_, amount)| acc + amount)
     }
 
     pub fn to_json(&self) -> Value {
@@ -253,9 +258,12 @@ pub struct MonthlySummary {
 
 impl MonthlySummary {
     /// 所有宿主可汇总金额之和——见 [`HostAmount::summable_total`] 的同一条
-    /// "不存字段、每次算"纪律。
+    /// "不存字段、每次算"纪律（空负零的 fold 理由也在那边）。
     pub fn total_summable(&self) -> f64 {
-        self.by_host.values().map(HostAmount::summable_total).sum()
+        self.by_host
+            .values()
+            .map(HostAmount::summable_total)
+            .fold(0.0, |a, b| a + b)
     }
 
     pub fn has_unresolved(&self) -> bool {
@@ -319,8 +327,13 @@ pub struct DailySummary {
 }
 
 impl DailySummary {
+    /// 同 [`MonthlySummary::total_summable`]（fold 理由见
+    /// [`HostAmount::summable_total`]——空负零）。
     pub fn total_summable(&self) -> f64 {
-        self.by_host.values().map(HostAmount::summable_total).sum()
+        self.by_host
+            .values()
+            .map(HostAmount::summable_total)
+            .fold(0.0, |a, b| a + b)
     }
 
     pub fn contract_violations(&self) -> Vec<String> {
@@ -377,6 +390,35 @@ mod tests {
             has_unresolved: false,
             freshness: fresh("2026-09-01T00:00:00Z"),
         }
+    }
+
+    #[test]
+    fn empty_summable_is_positive_zero_never_negative_zero() {
+        // Stage 0.5 的 `data coverage --json` 暴露：空 `.sum()` 实测产出
+        // -0.0，serde_json 原样序列化成 "-0.0"——无数据宿主在冻结 DTO 里
+        // 显示负零，读起来像"欠 0 元"。fold(0.0, …) 钉住正零；序列化面
+        // 一起断言（修算术不修序列化会漏另一半）。
+        let empty = HostAmount {
+            host_id: "dsh".to_string(),
+            amounts_by_basis: BTreeMap::new(),
+            has_unresolved: false,
+            freshness: Freshness::unavailable(),
+        };
+        assert_eq!(empty.summable_total(), 0.0);
+        assert!(empty.summable_total().is_sign_positive());
+        let text = empty.to_json().to_string();
+        assert!(!text.contains("-0.0"), "{text}");
+
+        let summary = MonthlySummary {
+            month: "2026-09".to_string(),
+            by_host: BTreeMap::from([("dsh".to_string(), empty)]),
+            coverage: coverage_ok(),
+            freshness: Freshness::unavailable(),
+            excluded_hosts: BTreeSet::new(),
+            last_observed_at: None,
+        };
+        assert_eq!(summary.total_summable(), 0.0);
+        assert!(summary.total_summable().is_sign_positive());
     }
 
     #[test]

@@ -5,15 +5,6 @@ use std::path::Path;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-/// 一把进程级测试锁。多个 test 模块（agent::budget、agent::state…）都会
-/// set_var `AGENT_VITALS_HOME` —— 进程全局，模块各自造的局部锁只能串行**本
-/// 模块**，跨模块仍互相踩踏：budget 的 read_month 与 state 的 merge_month 同
-/// 时跑，一方把环境变量掀到自己的夹具根，另一方读写就落到错误目录、断言失败
-/// → 锁内 panic → 锁毒化。凡改 AGENT_VITALS_HOME/SKILL_VITALS_HOME 的测试都
-/// 必须在这把锁里做，不许自己再造一把。
-#[cfg(test)]
-pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// 单一真相源在 domain（`agent_vitals_domain::util::norm`）—— v0.8 Phase E7.6
 /// 起 `agent-vitals-hosts` 的宿主适配器也要用它，不能各写一份。
 pub use agent_vitals_domain::util::norm;

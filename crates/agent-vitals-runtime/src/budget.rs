@@ -157,7 +157,7 @@ fn load_config() -> Value {
 /// 过滤）；历史月读归档（`month-archive.json` 的 `{"months": {"YYYY-MM": {"days"}}}`
 /// 包装）。月份无数据 → None（「缺列不编列」—— 不返回空壳让调用方误以为
 /// 那个月花了 0 元）。
-fn read_month(month: Option<&str>) -> Option<Value> {
+pub(crate) fn read_month(month: Option<&str>) -> Option<Value> {
     let current = current_month_beijing();
     let target = month.map(str::to_owned).unwrap_or_else(|| current.clone());
     if target == current {
@@ -310,7 +310,7 @@ fn render_budget_month(month: &str, result: Option<&Value>) -> String {
 
 /// 指定月 cost —— 读 `read_month`，交给 core `cost::month_cost`。
 /// 镜像 `budget.py::compute_month_cost` 的 I/O 段。
-fn compute_month(month: Option<&str>) -> Option<Value> {
+pub(crate) fn compute_month(month: Option<&str>) -> Option<Value> {
     let days = read_month(month)?;
     let pricing = agent_vitals_domain::cost::load_pricing();
     Some(agent_vitals_domain::cost::month_cost(&days, &pricing))

@@ -23,20 +23,20 @@
 //! 错误以 `Err(String)` 上抛，字符串恒为 `"<code>: <message>"` 且与 Python 的
 //! `DshUsageFactError.__str__` 同源（read 错误码 → 消息映射与 `dsh_usage_fact.py`
 //! 的 `_READ_ERROR_MESSAGES` 逐字一致）。RFC3339-ms-Z 用纯整数（Hinnant
-//! civil-from-days 由 `codex_cost::civil_from_unix_secs` 提供）——不引 chrono、
-//! 不经浮点（§3.6）。
+//! civil-from-days 由 `agent_vitals_domain::util::civil_from_unix_secs`
+//! 提供）——不引 chrono、不经浮点（§3.6）。
 
 use std::collections::HashSet;
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use crate::agent::codex_cost::civil_from_unix_secs;
-use crate::agent::r2a_store::{dsh_header, dsh_source_profile};
+use agent_vitals_runtime::sessions::r2a_store::{dsh_header, dsh_source_profile};
 use agent_vitals_hosts::dsh_sources::{parse_session_log, read_session_text};
 use agent_vitals_domain::usage::{
     dsh_usage_observations, usage_fold_checkpoint, DshUsageObservation,
 };
+use agent_vitals_domain::util::civil_from_unix_secs;
 use agent_vitals_domain::usage_fact::build_usage_fact;
 use agent_vitals_domain::util::post_fork;
 
@@ -68,7 +68,7 @@ fn read_error_message(code: &'static str) -> &'static str {
 
 /// epoch 毫秒 → RFC3339-UTC 固定毫秒 + `Z`（`1970-01-01T00:00:00.000Z`）。纯整数
 /// （`div_euclid`/`rem_euclid`），与 Python `divmod`（floor）在正负输入下同语义。
-/// 日期部分复用 `codex_cost::civil_from_unix_secs(secs, 0)`；time-of-day 用
+/// 日期部分复用 `agent_vitals_domain::util::civil_from_unix_secs(secs, 0)`；time-of-day 用
 /// `secs.rem_euclid(86400)` 补（那个函数只回日期，小时桶另算）。
 fn rfc3339_ms_z(ms: i64) -> String {
     let secs = ms.div_euclid(1000);

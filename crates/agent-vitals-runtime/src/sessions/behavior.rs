@@ -1,9 +1,13 @@
-//! 行为审计规则引擎的二进制侧薄封装。
+//! 行为审计规则引擎的 I/O 薄封装（v0.9 Stage 0.3 起住在
+//! `agent_vitals_runtime::sessions::behavior`，此前在 `apps/cli`——见
+//! `docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md` §6）。
 //!
 //! 纯计算（规则表、`match_behavior`、`usage::token_by_model`、`behavior_gate`）
 //! 住在 `crates/agent-vitals-domain`（单一真相源，CLI / Python / wasm 共用）。这里
-//! 只留 I/O 入口 `audit_session_log`——它读会话日志文件（`agent_vitals_hosts::dsh_sources::read_session_log`），
-//! 把执行事件喂给 core 的 `match_behavior`、把成本账事件喂给 `token_by_model`。
+//! 只留两个 I/O 入口：`audit_session_log`（读会话日志文件
+//! `agent_vitals_hosts::dsh_sources::read_session_log`，把执行事件喂给 core 的
+//! `match_behavior`、把成本账事件喂给 `token_by_model`）与 `audit_payload`
+//! （在此基础上叠加 pricing，拼成 `behavior --json` 的 20 键载荷）。
 
 use std::path::Path;
 
@@ -214,12 +218,12 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
 pub fn audit_payload(path: &Path) -> Option<Value> {
     let audit = audit_session_log(path)?;
     let findings = &audit.findings;
-    let pricing = crate::agent::cost::load_pricing();
-    let cost = crate::agent::cost::cost_report(&audit.usage, &pricing);
+    let pricing = agent_vitals_domain::cost::load_pricing();
+    let cost = agent_vitals_domain::cost::cost_report(&audit.usage, &pricing);
     let pre_fork_cost = if audit.pre_fork.is_null() {
         None
     } else {
-        crate::agent::cost::cost_report(&audit.pre_fork, &pricing)
+        agent_vitals_domain::cost::cost_report(&audit.pre_fork, &pricing)
     };
     let requests_slice: &[serde_json::Value] =
         audit.requests.as_array().map(|v| v.as_slice()).unwrap_or(&[]);
@@ -243,6 +247,6 @@ pub fn audit_payload(path: &Path) -> Option<Value> {
         "subagents_coverage": &audit.subagents_coverage,
         "compaction_coverage": &audit.compaction_coverage,
         "waste_coverage": &audit.waste_coverage,
-        "cost_series": crate::agent::cost::cost_series(requests_slice, &audit.usage["providers"], &pricing),
+        "cost_series": agent_vitals_domain::cost::cost_series(requests_slice, &audit.usage["providers"], &pricing),
     }))
 }

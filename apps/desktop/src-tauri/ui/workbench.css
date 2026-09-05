@@ -924,3 +924,76 @@ button.chip.active {
   0%, 60% { background: color-mix(in srgb, var(--accent) 25%, transparent); }
   100% { background: transparent; }
 }
+
+/* v0.9 Stage 0.6 数据源 panel（总览页 + 日历页共用样式）。每个宿主一行：
+   名称、basis 标签、金额、freshness 文本（fresh/stale/partial/unavailable
+   各一种 class）；没金额时整行不带 .amt 子节点——只显示「无数据」。 */
+.src-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.src-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line, #eee);
+}
+.src-list li:last-child { border-bottom: 0; }
+.src-list li .host {
+  flex: 0 0 130px;
+  color: var(--muted);
+}
+.src-list li .basis {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.src-list li .basis .chip {
+  background: var(--line, #eee);
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.src-list li .basis .chip.estimate { background: #fff4cc; color: #8a6a00; }
+.src-list li .basis .chip.diagnostic { background: #eef3ff; color: #2c4ea8; }
+.src-list li .basis .chip.measured { background: #e7f7ec; color: #1f6c3a; }
+.src-list li .basis .chip.hostbilled { background: #fde6ec; color: #8a1f3d; }
+.src-list li .basis .chip.subscription { background: #ece6f5; color: #4a2a8a; }
+.src-list li .basis .unresolved-tag {
+  background: #fde6ec; color: #8a1f3d;
+  border-radius: 4px; padding: 2px 6px; font-size: 12px;
+}
+.src-list li .fresh {
+  flex: 0 0 200px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+.src-list li .fresh.stale { color: #b3590b; font-weight: 600; }
+.src-list li .fresh.partial { color: #8a6a00; font-weight: 600; }
+.src-list li .fresh.unavailable { color: var(--muted); }
+.src-list li.no-data { color: var(--muted); }
+.src-meta {
+  color: var(--muted);
+  font-size: 12px;
+  padding-top: 8px;
+}
+.src-meta .summable {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: var(--line, #eee);
+  border-radius: 4px;
+}
+.src-meta .summable.no-data { background: #f7e7ea; color: #8a1f3d; }
+.src-meta .summable .note {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: normal;
+  padding-top: 2px;
+}

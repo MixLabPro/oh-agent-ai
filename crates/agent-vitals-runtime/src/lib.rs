@@ -7,22 +7,35 @@
 //! （`agent-vitals-hosts`）。
 //!
 //! v0.8：D7 落 `home`；D6 迁 `clock` / `state` / `budget` / `takeover` /
-//! `session_sources`（`r2a_store` / `discovery` 随 Phase E 的 apps/cli 抽出一起，
-//! 它们与 CLI 成本/审计 handler 交织）；E7.4 迁 `skills::snapshot`（Skill
-//! Surface 的本机快照读写——本机 fs 状态，与 `state`/`budget`/`takeover` 同类，
-//! 是 runtime 的天然归属，不是 hosts 的 sources/，因为它不认识任何宿主）。
+//! `session_sources`；E7.4 迁 `skills::snapshot`（Skill Surface 的本机快照
+//! 读写——本机 fs 状态，与 `state`/`budget`/`takeover` 同类，是 runtime 的
+//! 天然归属，不是 hosts 的 sources/，因为它不认识任何宿主）。
+//!
+//! v0.9 Stage 0.3：`sessions`（`docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md`
+//! §6）——`r2a_store` 的 6 文件依赖闭包（`SessionStore` 缓存/checkpoint、
+//! codex 成本折叠、codex 会话审计、DSH discovery、behavior I/O 入口、claude
+//! ledger 读取）逐文件从 `apps/cli` 搬进来，落 spec §5.2"CLI 不再拥有宿主
+//! wire 解释或事实写入"的门槛。
+//!
+//! v0.9 Stage 0.4：`summary`——`agent-vitals-data::repository::
+//! SummaryRepository` 的 Stage 0 实现（`docs/AGENT_VITALS_V0_9_STAGE0_
+//! RESEARCH.md` §8）。这是本 crate**新增依赖 `agent-vitals-data`**的唯一
+//! 理由：spec §3.1 的依赖表把 `agent-vitals-data` 限定在只依赖 domain，够
+//! 不到这里的 `sessions`/`budget`/`state`，trait 的实现只能落在这个既认识
+//! hosts 又认识 data 的层。
 
 pub mod budget;
 pub mod clock;
 pub mod home;
 pub mod session_sources;
+pub mod sessions;
 pub mod skills;
 pub mod state;
+pub mod summary;
 pub mod takeover;
 
-/// 进程级环境变量锁 —— `state` / `budget` / `takeover` 的 `#[cfg(test)]` 改
-/// `AGENT_VITALS_HOME` 等进程 env，必须串行（模块各自造局部锁只能串行本模块，
-/// 跨模块并行还是踩）。二进制侧 `src/util.rs` 有一份同款给留在 binary 的
-/// `discovery` / `r2a_store` 测试用——两个 test 进程各自独立，不共享。
+/// 进程级环境变量锁 —— `state` / `budget` / `takeover` / `summary` 的
+/// `#[cfg(test)]` 改 `AGENT_VITALS_HOME` 等进程 env，必须串行（模块各自造
+/// 局部锁只能串行本模块，跨模块并行还是踩）。
 #[doc(hidden)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
