@@ -61,7 +61,15 @@ fn now_ms() -> u128 {
 }
 
 /// 单次尝试获取。成功返回守护（Drop = 释放）；被持有且未过期 → `Held`；
-/// 过期锁被偷走重试一次。
+/// 过期锁被**原子 rename 偷取**。
+///
+/// **为什么偷取用 rename 而不是 unlink+create（审查 P1-2）**：unlink 之后、
+/// create 之前是无主窗口——输家在这个窗口读到赢家刚建、还没写完 body 的
+/// 锁文件 → 解析失败 → 也去偷 → **双持锁**（互斥失效，DoD #3 的核心保障
+/// 破产）。rename 是原子的：把陈旧锁**整体搬走**（同一目录内 rename 只改
+/// 目录项，两个偷取者恰好一个成功一个 ENOENT），锁路径上永远不存在
+/// 「无主窗口」；搬走后 create_new 的 AlreadyExists = 别人已放了新锁 →
+/// 如实报 Held。O_EXCL 只保护「路径上无文件时创建」，不保护 unlink 序列。
 pub fn acquire(path: &Path, holder: &str, ttl_ms: u64) -> Result<FileLease, LeaseError> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(LeaseError::Io)?;
@@ -73,7 +81,8 @@ pub fn acquire(path: &Path, holder: &str, ttl_ms: u64) -> Result<FileLease, Leas
         "ttl_ms": ttl_ms,
     });
     let write_lock = |p: &Path| -> Result<(), std::io::Error> {
-        // O_EXCL：create_new 只在文件不存在时成功——原子性的全部来源。
+        // O_EXCL：create_new 只在文件不存在时成功——与 rename 偷取配合后
+        // 「成功创建」即唯一持锁者的全部依据。
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -85,13 +94,14 @@ pub fn acquire(path: &Path, holder: &str, ttl_ms: u64) -> Result<FileLease, Leas
     match write_lock(path) {
         Ok(()) => Ok(FileLease { path: path.to_path_buf() }),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // 已有锁文件：过期 → 偷；未过期 → Held。读不出内容（半行 crash）
-            // 的锁按「无 ttl 信息」处理——保守视为陈旧可偷（空/坏锁文件
-            // 永远等不到合法释放）。
-            let (lock_holder, ttl_remaining) = std::fs::read_to_string(path)
+            // 已有锁文件。判读：可解析 → TTL 到期与否；读不出（crash 半行）→
+            // 按 mtime 年龄判（body 写一半的**新鲜**锁绝不能偷——那是活人的
+            // 创建窗口；只有 mtime 也老了才视为 crash 残留）。
+            let parsed = std::fs::read_to_string(path)
                 .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .map(|v| {
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            let (lock_holder, ttl_remaining) = match parsed {
+                Some(v) => {
                     let acquired = v.get("acquired_at_ms").and_then(|x| x.as_u64()).unwrap_or(0);
                     let ttl = v.get("ttl_ms").and_then(|x| x.as_u64()).unwrap_or(0);
                     let holder = v
@@ -101,16 +111,39 @@ pub fn acquire(path: &Path, holder: &str, ttl_ms: u64) -> Result<FileLease, Leas
                         .to_string();
                     let elapsed = now_ms().saturating_sub(acquired as u128) as u64;
                     (holder, ttl.saturating_sub(elapsed))
-                })
-                .unwrap_or(("unreadable-lock".to_string(), 0));
-            if ttl_remaining > 0 {
-                return Err(LeaseError::Held { holder: lock_holder, ttl_remaining_ms: ttl_remaining });
+                }
+                None => ("unreadable-lock".to_string(), u64::MAX),
+            };
+            // mtime 年龄：unreadable 锁只有老了才可偷（阈值取本调用者自己的
+            // ttl——同一临界区族的量级）。
+            let mtime_age = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| m.elapsed().ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let stale = ttl_remaining == 0 || (ttl_remaining == u64::MAX && mtime_age > ttl_ms);
+            if !stale {
+                return Err(LeaseError::Held { holder: lock_holder, ttl_remaining_ms: ttl_remaining.min(u64::MAX - 1) });
             }
-            // 陈旧（或读不出）：偷。先删再抢——两个偷取者竞争时 O_EXCL 仍
-            // 保证只有一个成功，失败的拿到的锁文件是赢家的（未过期 → Held）。
-            let _ = std::fs::remove_file(path);
-            write_lock(path).map_err(LeaseError::Io)?;
-            Ok(FileLease { path: path.to_path_buf() })
+            // 偷：原子 rename 把陈旧锁整体搬走（无主窗口不存在）。ENOENT =
+            // 同时有别的偷取者/释放者动过 → 回读现状如实报（blocking 会重试）。
+            let stale_path = path.with_extension(format!("stale.{}", now_ms()));
+            if std::fs::rename(path, &stale_path).is_err() {
+                return Err(LeaseError::Held {
+                    holder: "vanishing-lock".to_string(),
+                    ttl_remaining_ms: 0,
+                });
+            }
+            let _ = std::fs::remove_file(&stale_path); // 搬走的残尸清掉（best-effort）
+            match write_lock(path) {
+                Ok(()) => Ok(FileLease { path: path.to_path_buf() }),
+                // rename 与 create 之间被人放了新锁 → 不是我们的，如实 Held。
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    Err(LeaseError::Held { holder: "just-replaced".to_string(), ttl_remaining_ms: ttl_ms })
+                }
+                Err(e) => Err(LeaseError::Io(e)),
+            }
         }
         Err(e) => Err(LeaseError::Io(e)),
     }
@@ -214,11 +247,19 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_lock_file_is_treated_as_stale() {
+    fn unreadable_lock_is_held_while_fresh_stolen_when_aged() {
         let path = tmp_lock("garbage");
-        // crash 半行锁文件：读不出 ttl 信息 → 保守可偷（等不到合法释放）。
+        // crash 半行锁文件（刚写下的）：**不能偷**——那可能是别的进程
+        // create_new 成功、body 还没写完的创建窗口（审查 P1-2：偷了就是双持锁）。
         std::fs::write(&path, "{\"holder\": \"crash").unwrap();
-        let stolen = acquire(&path, "new-proc", 60_000).unwrap();
+        let held = acquire(&path, "new-proc", 60_000).unwrap_err();
+        assert!(
+            matches!(held, LeaseError::Held { .. }),
+            "新鲜的 unreadable 锁必须 Held，got {held:?}"
+        );
+        // 等 mtime 年龄超过偷取阈值（用调用方 ttl 当阈值）→ crash 残留可偷。
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let stolen = acquire(&path, "new-proc", 10).unwrap();
         stolen.release().unwrap();
         let _ = std::fs::remove_file(&path);
     }

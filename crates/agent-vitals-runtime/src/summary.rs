@@ -765,29 +765,14 @@ pub fn unresolved_detail(month: &str) -> serde_json::Value {
             .and_then(|v| v.as_object())
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
-        if let Some(bm) = by_model.as_object() {
-            for (model, buckets) in bm {
-                if priced.contains(model) {
-                    continue;
-                }
-                // codex 宿主路由是宿主级（openai 订阅）——只判价卡。
-                let g = |k: &str| buckets.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
-                if [g("uncached_input_tokens"), g("cache_read_tokens"),
-                    g("cache_write_tokens"), g("output_tokens")]
-                .iter().all(|&v| v == 0) {
-                    continue; // 0-token 行无可计价用量，不进下钻
-                }
-                out.entry("codex/openai".to_string()).or_default().push(
-                    serde_json::json!({
-                        "model": model,
-                        "reason": "no-price-card",
-                        "tokens": g("uncached_input_tokens")
-                            + g("cache_read_tokens")
-                            + g("cache_write_tokens")
-                            + g("output_tokens"),
-                    }),
-                );
-            }
+        // **形状来源纪律（审查 P1-1）**：`by_model` 是两层
+        // `model → speed → 桶对象`，桶键是 `CODEX_TOKEN_FIELDS` 的 5 键
+        // （`cached_input_tokens`/`cache_write_input_tokens`——与 DSH/claude
+        // 的 cache_read 词表不同，直读会静默全 0）。按
+        // `codex_host_amount_with_tokens` 同款两层迭代求和。
+        let rows = codex_unresolved_rows(&by_model, &priced);
+        if !rows.is_empty() {
+            out.entry("codex/openai".to_string()).or_default().extend(rows);
         }
     }
 
@@ -853,6 +838,50 @@ pub fn unresolved_detail(month: &str) -> serde_json::Value {
         obj.insert(k, serde_json::Value::Array(rows));
     }
     serde_json::Value::Object(obj)
+}
+
+/// codex 下钻的纯分类核（可注入真实两层形状做钉测）：`by_model` 是
+/// `model → speed → 桶对象`，桶键 = `CODEX_TOKEN_FIELDS` 5 键（形状来源：
+/// `hosts/codex/sessions/usage.rs::codex_by_model_from_hours`——审查 P1-1
+/// 之前这段直读单层 + 错键名，codex 行永远被 0-token 过滤吞掉）。
+fn codex_unresolved_rows(
+    by_model: &serde_json::Value,
+    priced: &std::collections::HashSet<String>,
+) -> Vec<serde_json::Value> {
+    const CODEX_TOKEN_FIELDS: [&str; 5] = [
+        "uncached_input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "reasoning_output_tokens",
+    ];
+    let mut rows = Vec::new();
+    let Some(bm) = by_model.as_object() else {
+        return rows;
+    };
+    for (model, speeds) in bm {
+        if priced.contains(model) {
+            continue;
+        }
+        // codex 宿主路由是宿主级（openai 订阅）——只判价卡。
+        let mut total: i64 = 0;
+        if let Some(sp) = speeds.as_object() {
+            for bucket in sp.values() {
+                for f in CODEX_TOKEN_FIELDS {
+                    total += bucket.get(f).and_then(|v| v.as_i64()).unwrap_or(0);
+                }
+            }
+        }
+        if total == 0 {
+            continue; // 0-token 行无可计价用量，不进下钻
+        }
+        rows.push(serde_json::json!({
+            "model": model,
+            "reason": "no-price-card",
+            "tokens": total,
+        }));
+    }
+    rows
 }
 
 /// by_provider 的 Codex 条目：`billing_mode_of("openai") = subscription` →
@@ -1450,6 +1479,60 @@ mod tests {
             &crate::state::state_dir().join("claude-ledger.json"),
             &ledger,
         );
+    }
+
+    #[test]
+    fn codex_unresolved_rows_read_the_two_layer_by_model_shape() {
+        // 真实形状（codex_by_model_from_hours 产物）：model → speed → 桶对象，
+        // 桶键 = CODEX_TOKEN_FIELDS（cached_input_tokens 而非 cache_read——
+        // 审查 P1-1 的错键名在这里被钉死）。
+        use agent_vitals_hosts::codex_usage::codex_by_model_from_hours;
+        let by_hour = json!({
+            "2026-09-05T10:00:00.000Z": {
+                "gpt-5.3-mystery": {
+                    "standard": {"uncached_input_tokens": 100, "output_tokens": 20,
+                                 "cached_input_tokens": 300, "cache_write_input_tokens": 5,
+                                 "reasoning_output_tokens": 0}
+                }
+            }
+        });
+        let by_model = codex_by_model_from_hours(&by_hour, None);
+        let priced: std::collections::HashSet<String> = Default::default();
+        let rows = codex_unresolved_rows(&by_model, &priced);
+        assert_eq!(rows.len(), 1, "未计价模型必须浮出——单层/错键读法这里恒空");
+        assert_eq!(rows[0]["model"], json!("gpt-5.3-mystery"));
+        assert_eq!(rows[0]["reason"], json!("no-price-card"));
+        assert_eq!(rows[0]["tokens"], json!(425), "5 桶之和 = 100+20+300+5+0");
+        // priced 模型不进下钻。
+        let mut priced2 = std::collections::HashSet::new();
+        priced2.insert("gpt-5.3-mystery".to_string());
+        assert!(codex_unresolved_rows(&by_model, &priced2).is_empty());
+    }
+
+    #[test]
+    fn unresolved_detail_flags_unrouted_models_via_ledger() {
+        with_home(|| {
+            // no-card 模型（真机 GLM 无价卡同款）：ledger 有量、无路由/无卡。
+            write_ledger(json!({
+                "glm-5.3-flash": {"input_tokens": 1_000,
+                                  "cache_read_input_tokens": 2_000,
+                                  "cache_creation_input_tokens": 0,
+                                  "output_tokens": 100},
+                "<synthetic>": {"input_tokens": 0, "cache_read_input_tokens": 0,
+                                "cache_creation_input_tokens": 0, "output_tokens": 0}
+            }));
+            let detail = unresolved_detail("2026-09");
+            let found = detail.as_object().unwrap().iter()
+                .flat_map(|(_, rows)| rows.as_array().unwrap().iter())
+                .find(|r| r["model"] == json!("glm-5.3-flash"))
+                .unwrap_or_else(|| panic!("expected glm row, got {detail}"));
+            assert_eq!(found["tokens"], json!(3_100));
+            // 0-token 哨兵行不进下钻。
+            let synthetic = detail.as_object().unwrap().iter()
+                .flat_map(|(_, rows)| rows.as_array().unwrap().iter())
+                .find(|r| r["model"] == json!("<synthetic>"));
+            assert!(synthetic.is_none(), "0-token 行不进下钻，got {detail}");
+        });
     }
 
     #[test]

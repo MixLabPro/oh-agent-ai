@@ -186,7 +186,20 @@ impl FactsIndex {
                 Ok((idx, true))
             }
             Ok((idx, false)) => Ok((idx, false)),
-            Err(IndexError::Sqlite(e)) if e.to_string().starts_with("__needs_rebuild__") => {
+            Err(IndexError::Sqlite(e))
+                if e.to_string().starts_with("__needs_rebuild__")
+                    || e.to_string().contains("newer than supported") =>
+            {
+                if e.to_string().contains("newer than supported") {
+                    return Err(IndexError::Sqlite(e)); // 新 schema 是升级问题，重建丢语义
+                }
+                Self::drop_and_rebuild(db_path, facts_root).map(|(idx, _)| (idx, true))
+            }
+            // **审查发现 4（损坏自愈）**：SQLITE_CORRUPT / NOTADB / 其他 open
+            // 期 Sqlite 错误——权威 JSONL 完好时索引可丢弃重建，这是 DoD #1
+            // 的日常形态，不该让用户手跑 data-rebuild-index。重建失败才上抛
+            // （磁盘级问题）。
+            Err(IndexError::Sqlite(_)) => {
                 Self::drop_and_rebuild(db_path, facts_root).map(|(idx, _)| (idx, true))
             }
             Err(e) => Err(e),
@@ -291,26 +304,43 @@ impl FactsIndex {
         Ok(n > 0)
     }
 
-    /// 每宿主四桶 token 总和——`evidence::reconcile_tokens` 的索引侧对账面
-    /// （Stage A 剩余项：facts vs 投影 DTO 的全量 reconcile 在 repository
-    /// 换实现时接上）。键 = host，值 = `{uncached_input, cache_read,
-    /// cache_write, output, total}`。
-    pub fn tokens_by_host(&self) -> Result<Value, IndexError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT host,
-                    SUM(t_uncached_input), SUM(t_cache_read),
-                    SUM(t_cache_write), SUM(t_output)
-             FROM facts GROUP BY host ORDER BY host",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, i64>(4)?,
-            ))
-        })?;
+    /// 每宿主四桶 token 总和——`evidence::reconcile_tokens` 的索引侧对账面。
+    /// 键 = host，值 = `{uncached_input, cache_read, cache_write, output, total}`。
+    ///
+    /// `month: Some("YYYY-MM")` 按事实的 `event_ts_utc` 前缀过滤（ISO 时间
+    /// 串的月份前缀匹配就是月窗）。**审查 P1-3**：不过滤的版本拿全量累计
+    /// 对账按月 DTO，跨月后必然恒 mismatch——对账语义必须是同窗口对同窗口。
+    pub fn tokens_by_host(&self, month: Option<&str>) -> Result<Value, IndexError> {
+        let mut stmt = match month {
+            Some(_) => self.conn.prepare(
+                "SELECT host,
+                        SUM(t_uncached_input), SUM(t_cache_read),
+                        SUM(t_cache_write), SUM(t_output)
+                 FROM facts WHERE event_ts_utc LIKE ?1 || '%'
+                 GROUP BY host ORDER BY host",
+            )?,
+            None => self.conn.prepare(
+                "SELECT host,
+                        SUM(t_uncached_input), SUM(t_cache_read),
+                        SUM(t_cache_write), SUM(t_output)
+                 FROM facts GROUP BY host ORDER BY host",
+            )?,
+        };
+        fn sum_row() -> impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<(String, i64, i64, i64, i64)> {
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            }
+        }
+        let rows = match month {
+            Some(m) => stmt.query_map(rusqlite::params![m], sum_row())?,
+            None => stmt.query_map([], sum_row())?,
+        };
         let mut out = serde_json::Map::new();
         for row in rows {
             let (host, a, b, c, d) = row?;
@@ -427,7 +457,7 @@ mod tests {
         // 首开：全新库 + 权威源在 → 立即播种（这是"索引反映权威"的诚实形状）。
         let (idx, rebuilt) = FactsIndex::open_or_rebuild(&db, &facts_root).unwrap();
         assert!(rebuilt, "全新库必须从 JSONL 播种");
-        let before = idx.tokens_by_host().unwrap();
+        let before = idx.tokens_by_host(None).unwrap();
         assert_eq!(idx.fact_count().unwrap(), 3);
         drop(idx);
 
@@ -441,12 +471,63 @@ mod tests {
         std::fs::remove_file(&db).unwrap();
         let (idx, rebuilt) = FactsIndex::open_or_rebuild(&db, &facts_root).unwrap();
         assert!(rebuilt, "库被删后必须走 rebuild");
-        assert_eq!(idx.tokens_by_host().unwrap(), before, "重建后投影等价");
+        assert_eq!(idx.tokens_by_host(None).unwrap(), before, "重建后投影等价");
         assert_eq!(idx.fact_count().unwrap(), 3);
         // 每宿主计数如实。
         let rep = idx.rebuild_from_jsonl(&facts_root).unwrap();
         assert_eq!(rep.hosts.get("codex"), Some(&2));
         assert_eq!(rep.hosts.get("dsh"), Some(&1));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn corrupted_database_self_heals_from_the_authority() {
+        // 审查发现 4：DoD #1 的日常形态——索引损坏（不是删除）也必须能
+        // 自愈，不该让用户手跑 data-rebuild-index。
+        let home = tmp_db("corrupt");
+        let facts_root = home.join("facts");
+        std::fs::create_dir_all(&facts_root).unwrap();
+        std::fs::write(
+            facts_root.join("codex.jsonl"),
+            format!("{}\n", fact("codex", "e1", 100)),
+        )
+        .unwrap();
+        let db = home.join("index.sqlite3");
+        let (idx, _) = FactsIndex::open_or_rebuild(&db, &facts_root).unwrap();
+        assert_eq!(idx.fact_count().unwrap(), 1);
+        drop(idx);
+
+        // 写坏库文件（SQLite 头魔数破坏 → SQLITE_NOTADB/CORRUPT）。
+        std::fs::write(&db, b"NOT A SQLITE DATABASE AT ALL____garbage bytes").unwrap();
+        let (idx, rebuilt) = FactsIndex::open_or_rebuild(&db, &facts_root).unwrap();
+        assert!(rebuilt, "损坏库必须走重建自愈");
+        assert_eq!(idx.fact_count().unwrap(), 1, "自愈后从权威源拿回等价投影");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn month_filter_scopes_the_reconcile_window() {
+        // 审查 P1-3：tokens_by_host 按月过滤——全量累计对按月 DTO 跨月恒红。
+        let home = tmp_db("month");
+        let facts_root = home.join("facts");
+        std::fs::create_dir_all(&facts_root).unwrap();
+        let mut sep = fact("codex", "sep", 100);
+        sep["event_ts_utc"] = serde_json::json!("2026-09-20T10:00:00.000Z");
+        let mut oct = fact("codex", "oct", 100);
+        oct["event_ts_utc"] = serde_json::json!("2026-10-02T10:00:00.000Z");
+        std::fs::write(
+            facts_root.join("codex.jsonl"),
+            format!("{}\n{}\n", sep, oct),
+        )
+        .unwrap();
+        let db = home.join("index.sqlite3");
+        let (idx, _) = FactsIndex::open_or_rebuild(&db, &facts_root).unwrap();
+        assert_eq!(idx.tokens_by_host(Some("2026-09")).unwrap()["codex"]["total"],
+                   serde_json::json!(1015), "9 月窗只含 9 月事实（uncached 100 + cache 900/10 + output 5）");
+        assert_eq!(idx.tokens_by_host(Some("2026-10")).unwrap()["codex"]["total"],
+                   serde_json::json!(1015), "10 月窗只含 10 月事实");
+        assert_eq!(idx.tokens_by_host(None).unwrap()["codex"]["total"],
+                   serde_json::json!(2030), "不过滤 = 全量累计");
         let _ = std::fs::remove_dir_all(&home);
     }
 

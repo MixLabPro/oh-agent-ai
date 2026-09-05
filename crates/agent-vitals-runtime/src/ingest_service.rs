@@ -99,10 +99,14 @@ pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, S
     // Stage B lease（DoD #3）：JSONL 追加 + 尾面修复 + 索引写是跨进程临界区
     // ——两个并发 ingest 的尾面截断/封口互相踩踏会写坏文件。临界区毫秒级
     // （慢的 fold/emit 在锁外）；被占则等 5s，然后如实报 Held。
+    // TTL 60s：临界区含「索引自愈重建」（全量 JSONL 重放，可能秒级）——
+    // 2s 的短临界区 TTL 会在重建中途过期被偷（审查发现 4），写一半的索引
+    // 会被后来者再 drop 一次（重建幂等，不至于坏账，但白干且有竞态面）。
+    // 60s 覆盖最坏重建时长；crash 残留锁最多阻塞到 TTL 到点被偷。
     let _lease = crate::lease::acquire_blocking(
         &data_home.join("facts").join(".ingest.lock"),
         "facts-ingest",
-        2_000,
+        60_000,
         5_000,
     )
     .map_err(|e| format!("facts ingest lease: {e}"))?;
@@ -249,12 +253,24 @@ pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, S
 /// - `index-only`：DTO 不知道该宿主但索引有事实（异常状态，也要浮出来）。
 pub fn reconcile_index_vs_dto(
     data_home: &Path,
+    month: &str,
     dto_tokens_by_host: &serde_json::Map<String, Value>,
 ) -> Result<Value, String> {
+    // 与 ingest 同锁：并发 rebuild 会把读侧甩到孤儿 inode（审查 P2-5）。
+    let _lease = crate::lease::acquire_blocking(
+        &data_home.join("facts").join(".ingest.lock"),
+        "facts-reconcile",
+        60_000,
+        2_000,
+    )
+    .map_err(|e| format!("facts reconcile lease: {e}"))?;
     let facts_dir = data_home.join("facts");
     let (idx, _seeded) = FactsIndex::open_or_rebuild(&default_index_path(data_home), &facts_dir)
         .map_err(|e| format!("facts index: {e}"))?;
-    let index_totals = idx.tokens_by_host().map_err(|e| format!("facts index: {e}"))?;
+    // **审查 P1-3**：索引侧按月过滤——全量累计对按月 DTO，跨月必恒红。
+    let index_totals = idx
+        .tokens_by_host(Some(month))
+        .map_err(|e| format!("facts index: {e}"))?;
 
     let mut hosts = Vec::new();
     let mut reconciled = true;
@@ -305,6 +321,15 @@ pub fn reconcile_index_vs_dto(
 pub fn rebuild_index(
     data_home: &Path,
 ) -> Result<agent_vitals_data::store::RebuildReport, String> {
+    // 与 ingest 互斥（审查 P2-5）：重建期间另一个 ingest 拿旧连接写孤儿
+    // inode 是白干 + 竞态。同锁同 TTL。
+    let _lease = crate::lease::acquire_blocking(
+        &data_home.join("facts").join(".ingest.lock"),
+        "facts-rebuild",
+        60_000,
+        5_000,
+    )
+    .map_err(|e| format!("facts rebuild lease: {e}"))?;
     let facts_dir = data_home.join("facts");
     let (_idx, report) = FactsIndex::drop_and_rebuild(&default_index_path(data_home), &facts_dir)
         .map_err(|e| format!("facts index rebuild: {e}"))?;
@@ -326,6 +351,9 @@ mod tests {
         fields.insert("source_event_id".into(), json!(event));
         fields.insert("observation_kind".into(), json!("token_count"));
         fields.insert("uncached_input_tokens".into(), json!(100));
+        // event_ts_utc 是索引月窗过滤的键（reconcile P1-3）——固定在 2026-09
+        // 让测试与月份参数对得上。
+        fields.insert("event_ts_utc".into(), json!("2026-09-05T10:00:00.000Z"));
         build_usage_fact(&fields).unwrap()
     }
 
@@ -370,7 +398,7 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(idx.fact_count().unwrap(), 2);
-        let tokens = idx.tokens_by_host().unwrap();
+        let tokens = idx.tokens_by_host(Some("2026-09")).unwrap();
         assert_eq!(tokens["codex"]["uncached_input"], serde_json::json!(200));
         // 同批重跑：索引零新增（fact_id 主键幂等）。
         let r2 = ingest_facts(&home, &[fact("codex", "e1")]).unwrap();
@@ -396,7 +424,7 @@ mod tests {
             serde_json::json!({"total": 555, "uncached_input": 555, "cache_read": 0,
                                "cache_write": 0, "output": 0}),
         );
-        let r = reconcile_index_vs_dto(&home, &dto).unwrap();
+        let r = reconcile_index_vs_dto(&home, "2026-09", &dto).unwrap();
         assert_eq!(r["reconciled"], serde_json::json!(true));
         let by_host: std::collections::BTreeMap<String, Value> = r["hosts"]
             .as_array().unwrap().iter()
@@ -410,7 +438,7 @@ mod tests {
         ingest_facts(&home, &[fact("dsh", "e2")]).unwrap();
         let mut dto_no_dsh = dto.clone();
         dto_no_dsh.remove("dsh");
-        let r2 = reconcile_index_vs_dto(&home, &dto_no_dsh).unwrap();
+        let r2 = reconcile_index_vs_dto(&home, "2026-09", &dto_no_dsh).unwrap();
         assert_eq!(r2["reconciled"], serde_json::json!(false));
         let dsh_row = r2["hosts"].as_array().unwrap().iter()
             .find(|h| h["host"] == "dsh").unwrap();

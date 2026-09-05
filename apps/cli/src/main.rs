@@ -2082,6 +2082,7 @@ session_store={store} fold={fold}"
             .collect();
         match agent_vitals_runtime::ingest_service::reconcile_index_vs_dto(
             &agent_vitals_runtime::home::data_home(),
+            &month,
             &dto_map,
         ) {
             Ok(report) => {
