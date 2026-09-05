@@ -890,9 +890,13 @@ async function renderCalendar() {
   const monthInput = document.getElementById("cal-month");
   monthInput.value = calMonth;
 
+  // v0.9 Stage D：日历数据源切逐日跨宿主（read_calendar_month）——此前只画
+  // DSH 日轴，DSH 零用量月份让 claude/codex 的真实用量在日历上完全不可见
+  // （2026-09 实测：57 亿 token 的月份显示一片空白）。旧 read_month 命令保留
+  // （口径不同勿混用）。
   let resp;
   try {
-    resp = await invoke("read_month", { month: calMonth });
+    resp = await invoke("read_calendar_month", { month: calMonth });
   } catch (e) {
     empty.hidden = false;
     empty.textContent = "读取失败：" + errText(e);
@@ -931,20 +935,31 @@ async function renderCalendar() {
     // 下方 sources panel 的渲染函数统一处理，这里只覆盖"金额存在"分支。
   }
 
-  if (!resp.has_data) {
+  // 逐日 map + 月合计（token 跨宿主可加；钱分币并列，口径各异不合并）。
+  const calDays = resp.days || {};
+  const byDate = calDays;
+  let monthTokens = 0;
+  const monthCosts = {};
+  let hasData = false;
+  for (const row of Object.values(calDays)) {
+    if ((row.total_tokens || 0) > 0) hasData = true;
+    monthTokens += row.total_tokens || 0;
+    for (const k of ["dsh_cost_cny", "claude_cost_cny"]) monthCosts.CNY = (monthCosts.CNY || 0) + (row[k] || 0);
+    for (const k of ["claude_cost_usd", "codex_cost_usd"]) monthCosts.USD = (monthCosts.USD || 0) + (row[k] || 0);
+  }
+  if (!hasData) {
     empty.hidden = false;
     empty.textContent = "该月暂无数据";
     total.textContent = calSourcesDto && calSourcesDto.freshness.state !== "unavailable"
       ? "" : calSuffix;
     if (calSourcesDto) renderSourcesPanel(calSourcesDto, "cal-sources");
     document.getElementById("cal-note").textContent =
-      "历史月数据在 state/month-archive.json；当月无数据 = 还没折进账。" +
-      (calSourcesDto ? "" : "");
+      "三宿主该月都没有 token 入账（历史月数据按各自归档；当月无数据 = 还没折进账）。";
     return;
   }
   empty.hidden = true;
-  total.textContent = fmtMoney(resp.total) +
-    ((resp.peak_total || 0) > 0 ? " · 高峰 " + fmtMoney(resp.peak_total) : "") +
+  total.textContent = fmtTokens(monthTokens) + " tokens · " +
+    fmtCur(monthCosts.CNY, "CNY") + " + " + fmtCur(monthCosts.USD, "USD") +
     (calSuffix ? " " + calSuffix : "");
 
   const dows = ["日", "一", "二", "三", "四", "五", "六"];
@@ -959,8 +974,6 @@ async function renderCalendar() {
   const lead = new Date(y, m - 1, 1).getDay();
   const dim = new Date(y, m, 0).getDate();
   const today = beijingToday();
-  const byDate = {};
-  for (const row of resp.days) byDate[row.date] = row;
 
   for (let i = 0; i < lead; i++) {
     const c = document.createElement("div");
@@ -972,22 +985,35 @@ async function renderCalendar() {
     const cell = document.createElement("div");
     cell.className = "cal-cell";
     const row = byDate[date];
-    if (row) {
+    const dayTokens = row ? (row.total_tokens || 0) : 0;
+    if (dayTokens > 0) {
       cell.classList.add("has-data");
-      if (row.basis === "partial") {
-        cell.classList.add("partial");
-        cell.title = "覆盖率 " + fmtPct(row.coverage || 0) + "（by_model 未覆盖全部 token，按 fallback 价补齐）";
-      } else {
-        cell.title = row.coverage != null ? "覆盖率 " + fmtPct(row.coverage) : "";
-      }
+      // 副行：该日耗费，分宿主分币并列（口径各异——DSH 实测 / claude relay
+      // 估算 / codex 等价标价——绝不相加成一个"当日总成本"）。
+      const costs = [];
+      if ((row.dsh_cost_cny || 0) > 0) costs.push(fmtCur(row.dsh_cost_cny, "CNY"));
+      if ((row.claude_cost_cny || 0) > 0) costs.push(fmtCur(row.claude_cost_cny, "CNY"));
+      if ((row.claude_cost_usd || 0) > 0) costs.push(fmtCur(row.claude_cost_usd, "USD"));
+      if ((row.codex_cost_usd || 0) > 0) costs.push(fmtCur(row.codex_cost_usd, "USD"));
       const day = document.createElement("div");
       day.className = "d";
       day.textContent = String(d);
       const amt = document.createElement("div");
       amt.className = "amt";
-      amt.textContent = fmtMoney(row.total);
+      amt.textContent = fmtTokens(dayTokens);
       cell.appendChild(day);
       cell.appendChild(amt);
+      if (costs.length) {
+        const cost = document.createElement("div");
+        cost.className = "cost";
+        cost.textContent = costs.join(" + ");
+        cell.appendChild(cost);
+      }
+      cell.title =
+        "DSH " + fmtTokens(row.dsh_tokens || 0) +
+        " · Claude " + fmtTokens(row.claude_tokens || 0) +
+        " · Codex " + fmtTokens(row.codex_tokens || 0) +
+        (costs.length ? "\n耗费（分口径）：" + costs.join(" + ") : "");
     } else {
       const day = document.createElement("div");
       day.className = "d";
@@ -998,7 +1024,7 @@ async function renderCalendar() {
     grid.appendChild(cell);
   }
   document.getElementById("cal-note").textContent =
-    "方格金额为该日总成本；「部分覆盖」= by_model 未覆盖全部 token，按 fallback 价补齐。";
+    "方格主行 = 该日三宿主 token 总量（DSH + Claude Code + Codex）；副行 = 该日耗费，分宿主分币并列（DSH 实测 / Claude relay 估算 / Codex 等价标价，口径各异不相加）。";
 
   // 月份级跨宿主概览：放在方格之后、note 之前。
   if (calSourcesDto) renderSourcesPanel(calSourcesDto, "cal-sources");

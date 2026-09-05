@@ -1015,3 +1015,5 @@ button.chip.active {
 .meter-fill.danger { background: #b3362b; }
 .decide-advice { margin-top: 8px; padding: 8px 10px; border-radius: 6px;
   background: #f4f6fb; font-size: 12px; }
+/* Stage D：日历格子副行（该日耗费，分宿主分币并列——口径各异不相加）。 */
+.cal-cell .cost { font-size: 10px; color: var(--text-2, #778); margin-top: 2px; }

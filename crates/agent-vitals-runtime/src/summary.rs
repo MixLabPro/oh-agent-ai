@@ -747,6 +747,155 @@ fn latest_day_key(days: &serde_json::Value) -> Option<String> {
     days.as_object()?.keys().max().cloned()
 }
 
+/// Token 日历的逐日跨宿主数据（v0.9 Stage D——日历此前只画 DSH 日轴，
+/// 2026-09 实测：DSH 全零月让 57 亿 token 的 claude/codex 用量在日历上
+/// 完全不可见，用户看到一片空白）。
+///
+/// 每天三宿主各自计量 + 计价，**钱不跨宿主不跨币合并**（口径各异：DSH
+/// 实测、claude relay 估算、codex 等价标价——格子副行分币并列，主行是
+/// token 总量，token 才是跨宿主可加的量）。返回 `{"month", "days":
+/// {date: {...}}}`，无数据日字段缺省为 0/缺键——调用方以
+/// `total_tokens == 0` 判定"这天没有用量"。
+pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
+    use serde_json::Value;
+    let mut days: serde_json::Map<String, Value> = serde_json::Map::new();
+    fn day_entry<'a>(
+        days: &'a mut serde_json::Map<String, Value>,
+        date: &str,
+    ) -> &'a mut Value {
+        days.entry(date.to_string())
+            .or_insert_with(|| {
+                json!({
+                    "dsh_tokens": 0, "claude_tokens": 0, "codex_tokens": 0,
+                    "total_tokens": 0,
+                    "dsh_cost_cny": 0.0, "claude_cost_cny": 0.0,
+                    "claude_cost_usd": 0.0, "codex_cost_usd": 0.0,
+                })
+            })
+    }
+
+    // DSH：month.json（当月窗口由 read_month 过滤）逐日四桶 + priced_day
+    // （认不出的旧壳形状回落 bucket_cost，与 daily_summary 同一读法）。
+    let pricing = agent_vitals_domain::cost::load_pricing();
+    if let Some(dsh_days) = crate::budget::read_month(Some(month)).as_ref().and_then(|d| d.as_object()) {
+        for (date, day) in dsh_days {
+            let g = |k: &str| day.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+            let tokens = g("uncached_input_tokens") + g("cache_read_tokens")
+                + g("cache_write_tokens") + g("output_tokens");
+            let cost = agent_vitals_domain::cost::priced_day(day, &pricing)
+                .unwrap_or_else(|| agent_vitals_domain::cost::bucket_cost(day, &pricing));
+            let cost_val = cost
+                .get("total")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let e = day_entry(&mut days, date);
+            e["dsh_tokens"] = json!(tokens);
+            e["dsh_cost_cny"] = json!(cost_val);
+        }
+    }
+
+    // Claude：ledger 当月逐日（4 型 snake = 归一词表直读）+ claude_day_cost
+    // 的 currency_totals 分币。
+    if let Some(ledger) = crate::state::read_json(&crate::sessions::claude_ledger::ledger_path())
+        .and_then(|l| l.get("days").and_then(|d| d.as_object()).cloned())
+    {
+        for (date, day) in &ledger {
+            if !date.starts_with(month) {
+                continue;
+            }
+            let mut tokens = 0i64;
+            if let Some(models) = day.as_object() {
+                for (_m, b) in models {
+                    let g = |k: &str| b.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+                    tokens += g("input_tokens") + g("cache_read_input_tokens")
+                        + g("cache_creation_input_tokens") + g("output_tokens");
+                }
+            }
+            let (cny, usd) = agent_vitals_domain::cost::claude_day_cost(day, &pricing)
+                .and_then(|r| {
+                    let t = r.get("currency_totals")?;
+                    Some((
+                        t.get("CNY").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        t.get("USD").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    ))
+                })
+                .unwrap_or((0.0, 0.0));
+            let e = day_entry(&mut days, date);
+            e["claude_tokens"] = json!(tokens);
+            e["claude_cost_cny"] = json!(cny);
+            e["claude_cost_usd"] = json!(usd);
+        }
+    }
+
+    // Codex：fold → merge → 月过滤小时桶（键 `YYYY-MM-DDTHH`，按日前缀聚合
+    // 5 桶 token）；逐日钱取 codex_cost_report 的 days[]（cost_usd，untimed
+    // 不混进某一天——codex_host_amount 同一条纪律）。
+    let mut folds: Vec<serde_json::Value> = Vec::new();
+    for path in agent_vitals_hosts::codex_session::codex_rollout_files(codex_home) {
+        let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(&path);
+        let items: Vec<serde_json::Value> = parsed
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        folds.push(agent_vitals_hosts::codex_usage::codex_fold_file(&items));
+    }
+    let merged = agent_vitals_hosts::codex_usage::codex_merge_folds(&folds);
+    let mut filtered = serde_json::Map::new();
+    if let Some(bh) = merged["by_hour_model"].as_object() {
+        for (h, v) in bh {
+            if h.starts_with(month) {
+                filtered.insert(h.clone(), v.clone());
+            }
+        }
+    }
+    let by_hour_model = serde_json::Value::Object(filtered);
+    for (hour, models) in by_hour_model.as_object().expect("filtered is an object") {
+        let date = &hour[..hour.len().min(10)];
+        let mut tokens = 0i64;
+        if let Some(models) = models.as_object() {
+            for (_m, speeds) in models {
+                if let Some(speeds) = speeds.as_object() {
+                    for (_s, b) in speeds {
+                        let g = |k: &str| b.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+                        tokens += g("uncached_input_tokens") + g("cached_input_tokens")
+                            + g("cache_write_input_tokens") + g("output_tokens")
+                            + g("reasoning_output_tokens");
+                    }
+                }
+            }
+        }
+        let e = day_entry(&mut days, date);
+        e["codex_tokens"] = json!(e.get("codex_tokens").and_then(|v| v.as_i64()).unwrap_or(0) + tokens);
+    }
+    let by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
+    let codex_pricing = crate::sessions::codex_cost::load_codex_pricing();
+    if let Some(report) = crate::sessions::codex_cost::codex_cost_report(
+        &by_hour_model,
+        &by_model,
+        &merged["unaccounted"],
+        &merged["plan"],
+        &codex_pricing,
+        false,
+    ) {
+        if let Some(report_days) = report.get("days").and_then(|v| v.as_array()) {
+            for d in report_days {
+                let Some(date) = d.get("date").and_then(|v| v.as_str()) else { continue };
+                let cost = d.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let e = day_entry(&mut days, date);
+                e["codex_cost_usd"] = json!(cost);
+            }
+        }
+    }
+
+    // total_tokens 最后统一算（三宿主都已落位）。
+    for (_, e) in days.iter_mut() {
+        let g = |k: &str| e.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+        e["total_tokens"] = json!(g("dsh_tokens") + g("claude_tokens") + g("codex_tokens"));
+    }
+    json!({ "month": month, "days": Value::Object(days) })
+}
+
 /// Stage 0 的 `SummaryRepository`：读现有 JSON state（`budget.rs` 的
 /// `month.json`/`month-archive.json`），不建任何新索引。
 pub struct JsonSummaryRepository;

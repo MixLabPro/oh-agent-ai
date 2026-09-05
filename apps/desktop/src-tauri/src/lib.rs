@@ -1237,6 +1237,15 @@ fn data_codex_quota() -> Option<Value> {
     agent_vitals_runtime::summary::codex_quota_snapshot(&home)
 }
 
+/// Token 日历的逐日跨宿主数据（v0.9 Stage D——此前日历只画 DSH 日轴，
+/// DSH 零用量月份让 claude/codex 的真实用量在日历上不可见）。每天三宿主
+/// 各自 token + 耗费，钱不跨宿主不跨币合并（口径各异，格子副行分币并列）。
+#[tauri::command]
+fn read_calendar_month(month: String) -> Value {
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    agent_vitals_runtime::summary::calendar_month(&month, &home)
+}
+
 /// 工作台「立即同步」按钮：受控 tick 一次（与托盘菜单同一路径）。立即返回，不
 /// 阻塞 IPC；工作台自己在同步结束后重拉 overview。
 #[tauri::command]
@@ -1348,6 +1357,7 @@ pub fn run() {
             data_monthly_summary,
             data_daily_summary,
             data_codex_quota,
+            read_calendar_month,
             trigger_sync,
             store::sessions_list,
             store::sessions_read,
@@ -1439,6 +1449,38 @@ mod tests {
         // 冻结契约的三条不变式之一在托盘侧同样成立：excluded 与 by_host 不相交。
         for host in d["excluded_hosts"].as_array().unwrap() {
             assert!(d["by_host"].get(host.as_str().unwrap()).is_none());
+        }
+    }
+
+    /// Stage D 决策卡的数据面：`data_codex_quota` 返回 plan 快照原样
+    /// （`plan_type` 必在——本机 Codex 60 份 rollout 全带 ChatGPT plan 字段）
+    /// 或 null（无 rollout/无 plan 事件，不得编造余量）。函数级断言；invoke
+    /// 路由由真实 app 的决策卡目视验收。
+    #[test]
+    fn data_codex_quota_returns_plan_snapshot_or_null() {
+        let q = data_codex_quota();
+        if let Some(p) = q {
+            assert!(p.get("plan_type").and_then(|v| v.as_str()).is_some(),
+                    "plan 快照缺 plan_type: {p}");
+        }
+        // null 分支 = 无证据，同样合法（不得编造）。
+    }
+
+    /// Token 日历的跨宿主数据面（真机形状）：本机 2026-09 claude/codex 有
+    /// 真实用量（DSH 才全零），日历聚合不得全零；钱的键分币齐全。
+    #[test]
+    fn read_calendar_month_is_cross_host_not_dsh_only() {
+        let v = read_calendar_month(overview::current_month_beijing());
+        let days = v["days"].as_object().expect("days map");
+        let total: i64 = days.values().map(|d| d["total_tokens"].as_i64().unwrap_or(0)).sum();
+        assert!(total > 0, "本机 2026-09 claude/codex 有真实用量，日历不得全零（got {total}）");
+        // 有用量的日子 token 与钱键齐全（分币），形状=日历格子渲染的输入。
+        for (date, d) in days {
+            assert!(d.get("dsh_tokens").is_some() && d.get("claude_tokens").is_some()
+                && d.get("codex_tokens").is_some(), "{date} 缺宿主 token 键");
+            assert!(d.get("dsh_cost_cny").is_some() && d.get("claude_cost_cny").is_some()
+                && d.get("claude_cost_usd").is_some() && d.get("codex_cost_usd").is_some(),
+                "{date} 缺分币耗费键");
         }
     }
 
