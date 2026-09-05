@@ -79,17 +79,16 @@ RS_AGENT_FAMILY = {
     "codex_usage_fact", "cost",
     "dsh_usage_fact",
     "host_runtime_registration",
-    "oneline", "plan", "r2a_store",
+    "oneline", "plan",
     # v0.8 Phase D4/D5：宿主会话读取器（dsh/claude/codex/workbuddy _session）迁进
     # agent-vitals-hosts/hosts/<h>/sources.rs（feature = "sources"）。
     # Phase D6：state / budget / takeover / session_sources 迁进 agent-vitals-runtime。
     # ——都不再在 src/agent/。
     # v0.9 Stage 0.3（docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md §6）：
-    # r2a_store 的 6 文件依赖闭包逐个迁进 agent_vitals_runtime::sessions——
-    # codex_cost、behavior、discovery（DSH 专用的这一个，非已迁移的
-    # skills::discovery）、codex_session_audit 已搬走，从这份清单删掉；
-    # r2a_store 是最后一个，会在它自己的搬迁提交里跟着删（claude_cost 只搬走
-    # 了其中一段读取函数，模块本身仍留在这里，不从清单删）。
+    # r2a_store 的 6 文件依赖闭包全部迁完——codex_cost、behavior、discovery
+    # （DSH 专用的这一个，非已迁移的 skills::discovery）、codex_session_audit、
+    # r2a_store 本体都搬进了 agent_vitals_runtime::sessions（claude_cost 只
+    # 搬走了其中一段 ledger 读取函数，模块本身仍留在这里，不从清单删）。
 }
 
 

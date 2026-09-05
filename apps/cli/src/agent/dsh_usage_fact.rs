@@ -31,7 +31,7 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use crate::agent::r2a_store::{dsh_header, dsh_source_profile};
+use agent_vitals_runtime::sessions::r2a_store::{dsh_header, dsh_source_profile};
 use agent_vitals_hosts::dsh_sources::{parse_session_log, read_session_text};
 use agent_vitals_domain::usage::{
     dsh_usage_observations, usage_fold_checkpoint, DshUsageObservation,

@@ -51,9 +51,9 @@ use serde_json::{Value, json};
 
 use agent_vitals_domain::findings::{FindingRef, FindingSession, rollup_findings};
 use agent_vitals_domain::r2a::*;
-use agent_vitals_runtime::sessions::codex_session_audit as csa;
-use agent_vitals_runtime::takeover;
-use agent_vitals_runtime::home::data_home;
+use crate::sessions::codex_session_audit as csa;
+use crate::takeover;
+use crate::home::data_home;
 
 /// 并行逐会话构建，结果按输入序回填。会话构建互相独立（只读各自源文件 + 共享
 /// 只读的 `fp_map`/`ws`），可并行；但每个 worker 持有当前会话解压后的全文，
@@ -126,7 +126,7 @@ fn codex_source_fingerprints(home: &Path) -> Vec<(String, String)> {
 /// 参数（= HOME）是权威根（`home/.codex`、`home/.dsh` 同一条纪律）；`discovery::dsh_home()`
 /// 那套 env 覆盖只服务 tick/oneline 路径，两条路径的根在 DSH_HOME 未设时本就一致。
 fn dsh_source_fingerprints(home: &Path) -> Vec<(String, String)> {
-    agent_vitals_runtime::sessions::discovery::dsh_session_files(&home.join(".dsh"))
+    crate::sessions::discovery::dsh_session_files(&home.join(".dsh"))
         .iter()
         .map(|p| (p.to_string_lossy().to_string(), fingerprint_file(p).unwrap_or_default()))
         .collect()
@@ -365,7 +365,7 @@ pub fn findings_for(key: &SessionKey, payload: &Value) -> Vec<FindingRef> {
 /// pricing_version：价表内容的确定性指纹（业务数据换版 = 换指纹）。两侧都用
 /// 「价表 JSON 紧凑序列化」的 FNV-1a——serde/py 都保插入序，逐字节一致。
 fn pricing_version() -> String {
-    let p = agent_vitals_runtime::sessions::codex_cost::load_codex_pricing();
+    let p = crate::sessions::codex_cost::load_codex_pricing();
     let s = serde_json::to_string(&p).unwrap_or_default();
     format!("{:016x}", fnv1a64(s.as_bytes()))
 }
@@ -373,7 +373,7 @@ fn pricing_version() -> String {
 /// 秒级 UTC ISO（复用 state 的同一实现，测试对账把 generated_at 归一化，只比
 /// 结构——两进程墙钟不同，字节一致不承诺墙钟字段）。
 fn now_iso_utc() -> String {
-    agent_vitals_runtime::state::now_iso_utc()
+    crate::state::now_iso_utc()
 }
 
 /// Codex 源状态（进 envelope 的 `source_statuses` 与 list DTO）：status + 会话数 +
@@ -407,7 +407,7 @@ fn codex_source_statuses(home: &Path, n_sessions: usize) -> Value {
 ///
 /// `roots` = `dsh_session_roots_report`（sessions + storages 两个根的存在性报告）。
 fn dsh_source_statuses(home: &Path, files: &[PathBuf], degraded: &[(String, String)]) -> Value {
-    let roots = agent_vitals_runtime::sessions::discovery::dsh_session_roots_report(&home.join(".dsh"));
+    let roots = crate::sessions::discovery::dsh_session_roots_report(&home.join(".dsh"));
     let built = files.len() - degraded.len();
     let status = if files.is_empty() || built > 0 {
         "ok"
@@ -591,8 +591,8 @@ impl SessionStore {
                     }
                 }
                 let dsh_root = home.join(".dsh");
-                let files = agent_vitals_runtime::sessions::discovery::dsh_session_files(&dsh_root);
-                let ws = agent_vitals_runtime::sessions::discovery::read_workspace_index(&dsh_root);
+                let files = crate::sessions::discovery::dsh_session_files(&dsh_root);
+                let ws = crate::sessions::discovery::read_workspace_index(&dsh_root);
                 // namespace 必须**并行前**固定：`dsh_built_session_for` 若内部现算
                 // `machine_namespace()`，miss 时会写 machine.json——并发首建会得到
                 // 互相不一致的随机 namespace（envelope 键的一部分，直接破坏分页键）。
@@ -622,8 +622,8 @@ impl SessionStore {
 
         // 冷启动 / 旧格式缓存：全量重建（含 degraded 逐文件记录）。
         let dsh_root = home.join(".dsh");
-        let files = agent_vitals_runtime::sessions::discovery::dsh_session_files(&dsh_root);
-        let ws = agent_vitals_runtime::sessions::discovery::read_workspace_index(&dsh_root);
+        let files = crate::sessions::discovery::dsh_session_files(&dsh_root);
+        let ws = crate::sessions::discovery::read_workspace_index(&dsh_root);
         let ns = takeover::machine_namespace();
         let mut sessions = Vec::new();
         let mut degraded: Vec<DegradedTriple> = Vec::new();
@@ -826,7 +826,7 @@ fn build_entries(raw: &[PendingEntry], generated_at: &str, source_statuses: &Val
 /// `pub(crate)` 让 dsh UsageFact emitter（`agent::dsh_usage_fact`）复用同一身份
 /// 读法（Python 侧 emitter 复用 `r2a.py::dsh_header`）——identity/attribution 判读
 /// 不许长第二份。
-pub(crate) fn dsh_header(text: &str) -> Option<(String, Option<String>)> {
+pub fn dsh_header(text: &str) -> Option<(String, Option<String>)> {
     let line = text.lines().find(|l| !l.trim().is_empty())?;
     let v: Value = serde_json::from_str(line.trim()).ok()?;
     let id = v.get("id").and_then(Value::as_str)?;
@@ -859,7 +859,7 @@ fn dsh_session_revision(text: &str) -> Option<String> {
 /// 空 source_profile 不会撞键）。
 ///
 /// `pub(crate)` 同上（emitter 复用，R2a 对齐验收钉住同一四元）。
-pub(crate) fn dsh_source_profile(cwd: Option<&str>) -> String {
+pub fn dsh_source_profile(cwd: Option<&str>) -> String {
     cwd.map(|c| format!("--{}--", c.replace('/', "-")))
         .unwrap_or_default()
 }
@@ -1157,7 +1157,7 @@ fn claude_built_session_for(home: &Path, sid: &str, ns: &str, fp_map: &HashMap<&
 /// 一并带出是为了让 degraded 记录也能存进 v2 cache，下次内容没变就不用重试。
 fn dsh_built_session_for(
     path: &Path,
-    ws: &agent_vitals_runtime::sessions::discovery::WorkspaceIndex,
+    ws: &crate::sessions::discovery::WorkspaceIndex,
     fp_map: &HashMap<&str, &str>,
     ns: &str,
 ) -> Result<BuiltSession, DegradedTriple> {
@@ -1175,7 +1175,7 @@ fn dsh_built_session_for(
     let Some((id, cwd)) = dsh_header(&text) else {
         return Err((path_str, "missing-header".to_string(), fp));
     };
-    let Some(mut payload) = agent_vitals_runtime::sessions::behavior::audit_payload(path) else {
+    let Some(mut payload) = crate::sessions::behavior::audit_payload(path) else {
         // 读之间文件被截断/替换（parse 干净但 audit 重建失败）→ 文件级降级。
         return Err((path_str, "file-missing".to_string(), fp));
     };
@@ -1448,7 +1448,7 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
     // DSH 今日 token：today.json → core `today_cost`——与 Tauri 顶层钱行同一函数
     // （§5.2 basis=state-file；date stale / 缺场 → None → value=null，不编 0）。
     let pricing = agent_vitals_domain::cost::load_pricing();
-    let today_data = agent_vitals_runtime::state::read_json(&agent_vitals_runtime::state::state_dir().join("today.json"));
+    let today_data = crate::state::read_json(&crate::state::state_dir().join("today.json"));
     let dsh_today_tokens: Value = match today_data
         .as_ref()
         .and_then(|d| agent_vitals_domain::cost::today_cost(d, &pricing, day_key))
@@ -1491,9 +1491,9 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
     // store 是否构建成功——ledger 是 claude-sync（同一批 ~/.claude 文件的独立
     // 账，tick 里先于宿主区刷新）的产物，导航只读它，不跨写。当日缺席 → None →
     // null 三元组（「今天没测到」，不是 0）；「空日不落 ledger」是 claude_cost.rs
-    // 的写侧纪律（见 agent_vitals_runtime::sessions::claude_ledger 的注释）。
+    // 的写侧纪律（见 crate::sessions::claude_ledger 的注释）。
     let claude_today_tokens: Value =
-        match agent_vitals_runtime::sessions::claude_ledger::claude_ledger_day_tokens(day_key) {
+        match crate::sessions::claude_ledger::claude_ledger_day_tokens(day_key) {
             Some(tokens) => json!({
                 "value": tokens,
                 "basis": "ledger",
@@ -1754,7 +1754,7 @@ mod tests {
     /// 测试改 AGENT_VITALS_HOME（machine_namespace 写 machine.json 与 cache 都
     /// 落到 data_home 下）—— 进程级锁与 discovery/state 测试互斥，避免踩踏。
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::util::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// `findings_for`：唯一权威字段谓词，DSH 取 `findings`、Codex 取 `audit.findings`

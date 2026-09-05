@@ -1867,7 +1867,7 @@ session_store={store} fold={fold}"
                     date_to: date_to.clone(),
                     query: query.clone(),
                 };
-                agent::r2a_store::sessions_list(
+                agent_vitals_runtime::sessions::r2a_store::sessions_list(
                     home_path,
                     &filter,
                     *page_size,
@@ -1876,10 +1876,10 @@ session_store={store} fold={fold}"
                 );
             }
             SessionsAction::Read { session_key, revision, json } => {
-                agent::r2a_store::sessions_read(home_path, session_key, revision, *json);
+                agent_vitals_runtime::sessions::r2a_store::sessions_read(home_path, session_key, revision, *json);
             }
             SessionsAction::Findings { json } => {
-                agent::r2a_store::sessions_findings(home_path, *json);
+                agent_vitals_runtime::sessions::r2a_store::sessions_findings(home_path, *json);
             }
             SessionsAction::Navigation { day, timezone, recent, json } => {
                 // `--day` 缺省 = 今天（北京日界，core 折叠的日期桶是 UTC+8 时
@@ -1889,7 +1889,7 @@ session_store={store} fold={fold}"
                 } else {
                     day.clone()
                 };
-                agent::r2a_store::sessions_navigation(home_path, &day, timezone, *recent, *json);
+                agent_vitals_runtime::sessions::r2a_store::sessions_navigation(home_path, &day, timezone, *recent, *json);
             }
         }
         return;
