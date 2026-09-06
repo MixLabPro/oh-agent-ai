@@ -176,9 +176,12 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   parity 不破，但 Phase 4 对账/读切换前必须裁决 SQL 是否要给无日期残差
   一个家（候选：`observation_kind='baseline_residual'` + NULL event_ts，
   schema 已兼容 undated 保留语义）
-- [ ] **3.3 coverage_status** — 每宿主 measured/partial/unavailable 的
-  分母定义落库（spec §4：摘要必须带 coverage/freshness/excluded/
-  last_observed_at/data_version）。
+- [x] **3.3 coverage_status** — ✅ 390d3f8 + 1f1ed4e（2026-09-07，主 agent
+  实施 + subAgent 审查收口）：三维分母 v1（usage/price/sync，
+  COVERAGE_DENOMINATOR_VERSION=1），trait 新增 coverage_status(month)；
+  Sql 侧真实三维、Json 侧二值近似 version=0（两把尺异版不可互比）；
+  summary 级字段（接线宿主数语义）刻意不动。审查确认 spent 口径与
+  price 维单点否决（与 has_unresolved 同源）为设计意图。
   **设计定稿（2026-09-07，主 agent 拍板）**：分母 v1（`denominator_
   version=1`，定义变更必须递增）= 每宿主 3 维：① usage 维——窗口内有
   可解析时间戳的事实存在；② price 维——窗口内全部非零 token 模型能经
@@ -189,9 +192,12 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   start, end)`；`SqlSummaryRepository` 改用它（Json 侧保持静态 3/3 直至
   Phase 4 退休）。诚实约束：窗口零事实的宿主三维全 0/3 + Unavailable；
   「接线了」是能力不是观测，永不计入 measured
-- [ ] **3.4 budget_status** — 预算/告警从 `budget_config` + `usage_facts`
-  聚合计算；`budget_config`/`budget_snoozes` 的显式管理 API（替代
-  alert.json / budget.json）。
+- [x] **3.4 budget_status** — ✅ 390d3f8 + 1f1ed4e（同上循环）：authority
+  CRUD（config/snooze，minor 整数）+ budget_status_sql（CNY summable→
+  pyround minor 全整数判断，level=no_budget/ok/warn/exceeded）+ CLI
+  budget-sql 五动作（既有 budget show 零改动保差分）；seed 门禁两轮收口
+  （默认值 ≠ 用户输入；merged 恒有默认 → 查原始 TOML 键）；snooze ISO
+  解析对齐 domain parse_iso（后缀静默错位 8h 修复）；档位阈值精确钉界。
   **设计定稿（2026-09-07，主 agent 拍板）**：① 配置迁移——首次使用时
   `budget_config` 行缺失且旧 `budget.json` 存在 → 一次性 seed（文档化、
   幂等：行存在后不再读旧文件）；spec §6.2.4「today/alert 不迁移」不适用
