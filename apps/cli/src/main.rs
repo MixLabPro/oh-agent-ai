@@ -518,14 +518,18 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
+    /// Export facts from the SQL authority database (spec §9: both exports are
+    /// generated from SQL queries). Identity fields verbatim; soft-deleted rows
+    /// excluded. Files land as <host>.jsonl
     DataExportPrivate {
         /// Output directory (created on demand); files land as <host>.jsonl
         #[arg(long)]
         out: PathBuf,
     },
     /// Export facts with identity fields pseudonymized (machine_namespace /
-    /// native_session_id / source_profile → stable fnv1a64 pseudonyms, fact_id
-    /// re-stamped through the contract layer). Spec §6: this is a SEPARATE
+    /// native_session_id / source_profile / source_event_id → stable fnv1a64
+    /// pseudonyms, fact_id re-stamped through the contract layer). Same SQL
+    /// source as data-export-private. Spec §6: this is a SEPARATE
     /// write path from data-export-private by design — not a --redacted flag.
     DataExportRedacted {
         /// Output directory (created on demand); files land as <host>.jsonl
@@ -2481,9 +2485,11 @@ session_store={store} fold={fold}"
         return;
     }
 
-    // data-export-private / data-export-redacted（Stage C，spec §6）：两条
-    // 独立写路径——私有 trace 原样、脱敏导出重导身份。命令面分开正是 spec
-    // 「不能由一个 redacted: bool 决定」的落地。
+    // data-export-private / data-export-redacted（Stage C，spec §6；v0.9.1
+    // Phase 3.6 起数据源 = SQL 权威库，spec §9）：两条独立写路径——私有 trace
+    // 原样、脱敏导出重导身份。命令面分开正是 spec「不能由一个 redacted: bool
+    // 决定」的落地。字段映射与锁语义（SQL 快照，不再拿 .ingest.lock）见
+    // runtime::export 模块头。
     if let Some(Cmd::DataExportPrivate { out }) = &args.cmd {
         match agent_vitals_runtime::export::export_private(
             &agent_vitals_runtime::home::data_home(),
