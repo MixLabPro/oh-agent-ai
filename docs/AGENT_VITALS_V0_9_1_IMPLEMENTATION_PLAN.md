@@ -183,9 +183,37 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   - [ ] HTML 模板消费面（`codex-cost --html`）
 - [ ] **3.6 导出切 SQL** — `data-export-private` / `data-export-redacted`
   改从 SQL 查询生成（spec §9）
+- [ ] **3.7 用户查询验收 Q01–Q14（spec §4.2）端到端 fixture** — 2026-09-07
+  盘点（用户问询触发）：矩阵第 9 行此前一直 ⬜，现有覆盖全是单元/契约级，
+  blocker 集无一以 e2e fixture 落地。逐用例现状：
+
+  | 用例 | 现有覆盖（层级） | 缺口 |
+  |---|---|---|
+  | Q01 跨宿主小时曲线 | `codex_by_hour_model` 单元测试 | 跨宿主小时聚合面在 Tier B（未切 SQL）；e2e 无 |
+  | Q02 同模型跨宿主不重不漏 | parity 测试隐式（三宿主同测） | 「各宿主之和 == 总量」未显式断言 |
+  | Q03 北京月界 00:30 归属 | `authority_query` 边界单元测试（±1ms） | e2e fixture 无 |
+  | Q04 峰值小时下钻、会话合计==峰值 | **无** | **前置 3.7a**：authority 库缺最小 `facts_page` 查询面（`SummaryRepository` 现只有 daily/monthly 两个方法，spec §4「最少提供」9 个方法只落 2 个） |
+  | Q05 无价卡 unresolved 不归零 | claude/codex unresolved 单元测试 | e2e fixture 无 |
+  | Q11 宿主 24h 未同步 → stale/partial 显式 | freshness/excluded_hosts 契约测试 | 「单宿主过期不得冒充完整总额」e2e 无 |
+  | Q12 双次导入+中断 → 重跑恒等 | writer 级幂等/回滚测试 | 跨「导入→查询」e2e 无 |
+  | Q13 调价日前后价格版本 | 无 | 依赖 pricing_snapshots 落库（3.4 相邻欠账），非 blocker、显式记欠 |
+  | Q14 同 raw 模型名跨宿主 | unknown→unresolved 单元测试 | 跨宿主同名 fixture 无 |
+  | Q06–Q10 workflow_events | 表已建、无 writer/reader | spec 自身定位 v0.9.1 最小化，随 v0.10 任务图，不阻塞 release |
+
+  另：spec §4 行轴/聚合轴分离纪律明文要求 Phase 3 repository 验收矩阵含
+  「聚合数 ≠ 行级数 + 聚合数 = ledger 数」fixture——单元级已钉
+  （`peaked_days_map` 排除 legacy、`claude_legacy_days` 只读 peak=0），但
+  `SqlSummaryRepository` 层「同日两类行并存不双计」未落。
+
+  执行方案（3.2/3.5/3.6 之后、Phase 3 收口审查之前）：
+  - **3.7a**：authority 库补最小 `facts_page`（host × 时间窗 × cursor 分页），
+    落 `agent_vitals_data::authority_query`，供 Q04 下钻。
+  - **3.7b**：新建 e2e 测试文件（临时 `AGENT_VITALS_HOME` + 权威库 seed 的
+    fixture builder），blocker 集 Q01–Q05、Q11–Q12 + §4 分离纪律 fixture
+    逐条钉判别值；Q14 顺带（成本低）；Q13 挂 3.4 验收；Q06–Q10 记 v0.10。
 
 **验收**：client parity 测试（CLI/Tauri 命令/HTML 由同一 DTO 返回）；
-双轨对账 harness 逐字段通过。
+双轨对账 harness 逐字段通过；3.7 blocker 集 e2e 全绿。
 
 ### 任务书：3.2 / 3.5 / 3.6（2026-09-06，供派发 subagent 前确认）
 
@@ -364,7 +392,7 @@ UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列
 | 6 | reconciliation（全量+增量） | Phase 4：对账报告 | ⬜ |
 | 7 | client parity | Phase 3：三消费面同一 DTO | ⬜ |
 | 8 | performance（不枚举原始日志/索引命中） | Phase 3：EXPLAIN QUERY PLAN 断言 | ⬜ |
-| 9 | 用户查询验收 Q01–Q12 | 端到端 fixture；**Q01–Q05、Q11–Q12 为 release blocker** | ⬜ |
+| 9 | 用户查询验收 Q01–Q12 | 端到端 fixture；**Q01–Q05、Q11–Q12 为 release blocker** | 🔨 落点见 3.7（2026-09-07 盘点：仅有单元级重叠覆盖，e2e fixture 未落） |
 
 ---
 
