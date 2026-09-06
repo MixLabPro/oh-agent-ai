@@ -48,6 +48,37 @@
 
 ## Phase 2：清洗写入与同步（spec §5.1 / §7 Phase 2）
 
+**接口契约（实现前钉死，实现 agent 不得偏离）**：
+
+```rust
+// agent-vitals-data/src/fact_writer_sql.rs —— SQL 写入面（spec §5.1 四步协议）
+pub struct SqlFactWriter<'a> { /* conn + run_id + now_ms */ }
+impl<'a> SqlFactWriter<'a> {
+    pub fn new(conn: &'a Connection, run_id: &str, now_ms: i64) -> Result<Self, AuthorityError>;
+    /// source_files upsert（path_hash = fnv1a64(路径)，不存明文）。返回 source_id。
+    pub fn upsert_source_file(&self, host: &str, path: &Path, size: u64,
+        mtime_ns: u64, native_session_id: Option<&str>, parser_version: i64) -> Result<String, AuthorityError>;
+    /// sessions upsert（session_key = r2a 键构造）。
+    pub fn upsert_session(&self, host: &str, ns: &str, native_id: &str,
+        profile: Option<&str>, last_observed_ms: i64) -> Result<String, AuthorityError>;
+    /// 事实批写入：契约校验（build_usage_fact 同款）→ 合格 INSERT OR CONFLICT
+    /// DO NOTHING；不合格写 data_quality_issues（不静默丢）。重复 = duplicate 计数。
+    pub fn insert_facts(&self, facts: &[Value], source_id: &str,
+        native_session_id: &str) -> Result<SqlInsertReport, AuthorityError>;
+}
+pub struct SqlInsertReport { pub inserted: usize, pub duplicate: usize, pub rejected: usize }
+```
+
+- 事务边界：调用方（runtime sync）`with_immediate_txn` 包「upsert sources/
+  sessions + insert_facts」整段（spec §5.1.4）；`SqlFactWriter` 内部不再开
+  事务（嵌套 BEGIN 是 sqlite 错误）。
+- `sync_facts` 切换：发现/差量逻辑不变；checkpoint 改查 `source_files`；
+  emit 后走 `SqlFactWriter`；**JSONL 停写**（存量文件保留为遗留）。
+- 敏感点：fact 的 `event_ts_ms` 由 ISO ts 解析（复用 store.rs `parse_ymd` 同
+  层 helper）；`event_peak` 复用 `peak_of`（三个尾部形态都已钉测）。
+
+
+
 目标：三宿主 emitter → **SQL writer**；JSON checkpoint → `source_files`；
 lease 包住完整事务。旧 `index.sqlite3` 的 facts 按 §6.2.1 一次性导入。
 

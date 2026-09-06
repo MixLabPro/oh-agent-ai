@@ -27,6 +27,8 @@
 //! 住在那边（`docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md` §8.1/§8.4）。
 
 pub mod authority;
+pub mod fact_writer_sql;
+pub mod legacy_import;
 pub mod billing;
 pub mod coverage;
 pub mod evidence;

@@ -35,6 +35,7 @@ pub mod sessions;
 pub mod skills;
 pub mod state;
 pub mod summary;
+pub mod sql_sync;
 pub mod sync_service;
 pub mod takeover;
 
