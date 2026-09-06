@@ -493,6 +493,18 @@ enum Cmd {
     /// checkpoint) and dedup facts by fact_id. The machine namespace comes
     /// from machine.json (the sync caller IS the machine). Stage B leftover:
     /// this is retirement-path step 1 (spec §5).
+    /// Reconcile the two budget ledgers for a month: state chain
+    /// (month.json fold) vs facts index. `reconciled: true` is the
+    /// precondition for retirement-path step 4 (state JSON retirement).
+    /// Retirement-path step 3 acceptance surface.
+    DataBudgetReconcile {
+        /// Month to reconcile ("YYYY-MM"; default: current month)
+        #[arg(long)]
+        month: Option<String>,
+        /// Output as JSON
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
     SyncFacts {
         /// Output the sync report as JSON
         #[arg(long = "json")]
@@ -2141,6 +2153,36 @@ session_store={store} fold={fold}"
                 eprintln!("data-reconcile failed: {e}");
                 std::process::exit(2);
             }
+        }
+        return;
+    }
+
+    // data budget-reconcile（退休路径 ③ 验收面）：state 链账 vs 索引账。
+    if let Some(Cmd::DataBudgetReconcile { month, rows_json }) = &args.cmd {
+        let month = month
+            .clone()
+            .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+        let report = agent_vitals_runtime::budget::reconcile_budget_sources(&month);
+        if *rows_json {
+            println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+        } else {
+            // cost 是 {total, peak_total} 对象——取 total（此前把对象当
+            // 数字读，永远显示「无」，JSON 面是对的、人读面说谎）。
+            let fmt = |v: &Value| {
+                v.get("total")
+                    .and_then(Value::as_f64)
+                    .map(|x| format!("¥{x:.2}"))
+                    .unwrap_or_else(|| "无".into())
+            };
+            println!("Budget reconcile (month {month}):");
+            println!("  state 链（month.json）: {}", fmt(&report["state_cost"]));
+            println!("  索引（facts）        : {}", fmt(&report["index_cost"]));
+            let note = report["note"].as_str().unwrap_or("");
+            println!(
+                "  reconciled: {}{}",
+                report["reconciled"],
+                if note.is_empty() { String::new() } else { format!("（{note}）") }
+            );
         }
         return;
     }

@@ -505,6 +505,117 @@ impl FactsIndex {
         Ok(Value::Object(obj))
     }
 
+/// DSH 单月的 days map（北京日 × 顶层 8 桶：4 基础 + 4 peak）——**与
+/// month.json 的 days 同形**，喂给同一个 `domain::cost::month_cost` 就得到
+/// 同一把尺的月成本（退休路径 ③：预算/告警的索引数据面。state 链的
+/// month.json days 无 by_model，走 `bucket_cost`——本投影刻意同形，不做
+/// by_model 精化，两边差一分钱都是对账事故）。
+///
+/// 北京日行滚：UTC 小时 ≥16 → 次日（UTC+8 日线，与 hours_by_host 同款）。
+/// 月窗取 UTC [前月末 16:00, 次月 1 日 00:00)——北京月初的凌晨是上月 UTC
+/// 下午，LIKE 前缀过滤会把它们漏掉（hours_by_host 的教训在这里前置规避）。
+pub fn dsh_days_map(&self, month: &str) -> Result<Value, IndexError> {
+    // month 是 7 字符 "YYYY-MM"（parse_ymd 是 10 字符日期——别混）。
+    if month.len() != 7 || month.as_bytes()[4] != b'-' {
+        return Err(IndexError::Sqlite(rusqlite::Error::InvalidParameterName(
+            format!("invalid month `{month}` (want YYYY-MM)"),
+        )));
+    }
+    let (y, m) = match (
+        month.get(0..4).and_then(|s| s.parse::<i64>().ok()),
+        month.get(5..7).and_then(|s| s.parse::<u32>().ok()),
+    ) {
+        (Some(y), Some(m)) => (y, m),
+        _ => {
+            return Err(IndexError::Sqlite(rusqlite::Error::InvalidParameterName(
+                format!("invalid month `{month}` (want YYYY-MM)"),
+            )))
+        }
+    };
+    let first = agent_vitals_domain::usage::days_from_civil(y, m, 1);
+    let prev_day = agent_vitals_domain::usage::civil_date_from_days(first - 1);
+    // 次月 1 日（civil round-trip）。
+    let next_first = agent_vitals_domain::usage::civil_date_from_days(
+        agent_vitals_domain::usage::days_from_civil(
+            if m == 12 { y + 1 } else { y },
+            if m == 12 { 1 } else { m + 1 },
+            1,
+        ),
+    );
+    let window_start = format!("{prev_day}T16");
+    let window_end = format!("{next_first}T00");
+
+    // **必须带 model_id 分组**：state 归档日的 by_model 用 provider 前缀
+    // 模型名（`deepseek/deepseek-v4-pro-0813` 专属贵卡），facts 的 model_id
+    // 同词表——priced_day 走 cost_report 逐模型计价。不带 by_model 会落到
+    // bucket_cost 的 fallback flash 价（双轨对账当场抓到：同 token、钱差
+    // 2.9×）。
+    let mut stmt = self.conn.prepare(
+        "SELECT CASE WHEN CAST(substr(event_ts_utc,12,2) AS INTEGER) >= 16
+                      THEN date(substr(event_ts_utc,1,10), '+1 day')
+                      ELSE substr(event_ts_utc,1,10) END AS bj_day,
+                COALESCE(model_id, 'unknown'), event_peak,
+                SUM(t_uncached_input), SUM(t_cache_read),
+                SUM(t_cache_write), SUM(t_output)
+         FROM facts
+         WHERE host = 'dsh' AND event_ts_utc >= ?1 AND event_ts_utc < ?2
+         GROUP BY bj_day, model_id, event_peak",
+    )?;
+    fn day_row(
+        r: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<(String, String, i64, i64, i64, i64, i64)> {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+    }
+    let rows = stmt.query_map(rusqlite::params![window_start, window_end], day_row)?;
+    let mut days: serde_json::Map<String, Value> = serde_json::Map::new();
+    let base = ["uncached_input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens"];
+    let peakk = ["peak_uncached_input_tokens", "peak_cache_read_tokens", "peak_cache_write_tokens", "peak_output_tokens"];
+    for row in rows {
+        let (day, model, peak, a, b, c, d) = row?;
+        let e = days.entry(day).or_insert_with(|| {
+            serde_json::json!({
+                "uncached_input_tokens": 0, "cache_read_tokens": 0,
+                "cache_write_tokens": 0, "output_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_cache_read_tokens": 0,
+                "peak_cache_write_tokens": 0, "peak_output_tokens": 0,
+                "by_model": {},
+            })
+        });
+        // by_model：per-model 桶（8 键同形）——priced_day 的精确计价输入。
+        {
+            let bm = e.get_mut("by_model").and_then(Value::as_object_mut).expect("by_model is object");
+            let m = bm.entry(model).or_insert_with(|| {
+                serde_json::json!({
+                    "uncached_input_tokens": 0, "cache_read_tokens": 0,
+                    "cache_write_tokens": 0, "output_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_cache_read_tokens": 0,
+                    "peak_cache_write_tokens": 0, "peak_output_tokens": 0,
+                })
+            });
+            for (i, v) in [a, b, c, d].iter().enumerate() {
+                let cur = m.get(base[i]).and_then(Value::as_i64).unwrap_or(0);
+                m[base[i]] = Value::from(cur + v);
+                if peak == 1 {
+                    let cur = m.get(peakk[i]).and_then(Value::as_i64).unwrap_or(0);
+                    m[peakk[i]] = Value::from(cur + v);
+                }
+            }
+        }
+        // 顶层：base 恒加，peak 行再进 peak_ 子桶（state 链语义「base = 全量、
+        // peak_ ⊆ base」，fold add_buckets 同款——把 peak 行只写 peak_ 会让
+        // (base − peak) 拆分错）。
+        for (i, v) in [a, b, c, d].iter().enumerate() {
+            let cur = e.get(base[i]).and_then(Value::as_i64).unwrap_or(0);
+            e[base[i]] = Value::from(cur + v);
+            if peak == 1 {
+                let cur = e.get(peakk[i]).and_then(Value::as_i64).unwrap_or(0);
+                e[peakk[i]] = Value::from(cur + v);
+            }
+        }
+    }
+    Ok(Value::Object(days))
+}
+
     pub fn fact_count(&self) -> Result<u64, IndexError> {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))?)
     }

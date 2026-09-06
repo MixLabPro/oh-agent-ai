@@ -320,6 +320,72 @@ pub(crate) fn compute_month(month: Option<&str>) -> Option<Value> {
 ///
 /// `json` 时输出 `evaluate()` 的完整 alert dict（Python `json.dumps(indent=2)`，
 /// serde_json `to_string_pretty` 逐字节同形）。
+/// 退休路径 ③：**索引数据面**的 DSH 月成本——days map 从 facts 索引投影
+/// （`store::dsh_days_map`，与 month.json days 同形），喂同一个
+/// `domain::cost::month_cost`。零新计价数学：两轨的差只能来自「事实覆盖 ≠
+/// fold 覆盖」，不能来自两套算法。
+///
+/// None = 索引里该月 DSH 没有任何事实（不是「花了 0 元」）。
+pub fn compute_month_from_index(month: &str) -> Option<Value> {
+    let data_home = crate::home::data_home();
+    let (idx, _seeded) = agent_vitals_data::store::FactsIndex::open_or_rebuild(
+        &agent_vitals_data::store::default_index_path(&data_home),
+        &data_home.join("facts"),
+    )
+    .ok()?;
+    let days = idx.dsh_days_map(month).ok()?;
+    // MSRV 1.74：is_none_or 是 1.82 的——用 is_some_and 反写。
+    if days.as_object().is_some_and(|m| m.is_empty()) {
+        return None;
+    }
+    let pricing = agent_vitals_domain::cost::load_pricing();
+    Some(agent_vitals_domain::cost::month_cost(&days, &pricing))
+}
+
+/// **双轨对账（③ 的验收证据）**：state 链账（month.json）vs 索引账（facts）
+/// 同月同尺。`reconciled = true` 是 ④（state JSON 退役）的前置条件——退役
+/// 之前这条必须连续为真。差值的已知来源（如实）：fold 只折「当月新会话」、
+/// 事实重放覆盖全部会话文件，跨月补折/会话删除的窗口期两轨会有临时差。
+pub fn reconcile_budget_sources(month: &str) -> Value {
+    let state = compute_month(Some(month));
+    let index = compute_month_from_index(month);
+    let num = |v: &Option<Value>, k: &str| {
+        v.as_ref().and_then(|x| x.get(k)).and_then(Value::as_f64)
+    };
+    let (s_total, i_total) = (num(&state, "total"), num(&index, "total"));
+    // **显式零 vs 无事实的两态语义**：state 链会给「测到过但零 token」的日
+    // 子留显式行（MeasuredZero），索引只装事实（没用量 = 没 slot = 没行，
+    // Unavailable）——两者经济相等（都是 0 元），结构不同，对账时相等成立
+    // 但带 note；state 有账（非零）而索引无事实 = **覆盖缺口**（会话没被
+    // ingest），对不上，如实 false。
+    let (reconciled, note) = match (s_total, i_total) {
+        (Some(a), Some(b)) => ((a - b).abs() < 0.01, None), // 分级定价浮点和，厘差容忍
+        (Some(0.0), None) => (
+            true,
+            Some("索引无该月事实（无已测 DSH 用量）；state 链为显式零日行——经济相等".to_string()),
+        ),
+        (Some(_), None) => (false, Some("state 有账而索引无事实——facts 覆盖缺口".to_string())),
+        (None, Some(_)) => (false, Some("索引有账而 state 无——fold 覆盖缺口".to_string())),
+        (None, None) => (true, None),
+    };
+    let note = if !reconciled && note.is_none() {
+        Some(format!(
+            "state={} index={} 差超容忍（厘级）",
+            s_total.map(|v| format!("{v:.2}")).unwrap_or_default(),
+            i_total.map(|v| format!("{v:.2}")).unwrap_or_default(),
+        ))
+    } else {
+        note
+    };
+    serde_json::json!({
+        "month": month,
+        "state_cost": state,
+        "index_cost": index,
+        "reconciled": reconciled,
+        "note": note,
+    })
+}
+
 pub fn budget_show(json_out: bool) {
     let cfg = load_config();
     let today_data = read_json(&state_dir().join("today.json"));
@@ -453,6 +519,55 @@ pub fn budget_show_month(month: &str, json_out: bool) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 退休路径 ③ 的验收证据（真机）：索引账 ≡ state 链账。月度双账都有
+    /// 数据的月份（本机 2026-08：DSH 8/14–8/30 有真实用量，state 侧在
+    /// month-archive）两轨必须对上。month.json 缺该月 → 跳过（无 state 账
+    /// 可对，非失败）。失败时打印两轨明细。
+    #[test]
+    fn budget_index_matches_state_chain_on_real_machine() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 找一个 state 链有账的月份：当前月 + 归档月（month-archive.json 的
+        // months 键），取「双轨都有数据」的最新一个月对账。
+        let mut months: Vec<String> = Vec::new();
+        let current = current_month_beijing();
+        months.push(current.clone());
+        if let Some(archive) = crate::state::read_json(&archive_path()) {
+            if let Some(ms) = archive.get("months").and_then(Value::as_object) {
+                months.extend(ms.keys().cloned());
+            }
+        }
+        months.sort();
+        months.dedup();
+        // 倒序找第一个 state **非零**账的月份（零月是显式零日行，对账走
+        // note 规则——真证据是非零月双轨等值）。
+        let mut month: Option<String> = None;
+        for m in months.iter().rev() {
+            if let Some(c) = compute_month(Some(m)) {
+                if c["total"].as_f64().unwrap_or(0.0) > 0.0 {
+                    month = Some(m.clone());
+                    break;
+                }
+            }
+        }
+        let Some(month) = month else {
+            return; // 真机无非零月账 → 无真对账样本，通过（零月规则另有单测）
+        };
+        let month = month.as_str();
+        let state = compute_month(Some(month));
+        let index = compute_month_from_index(month);
+        let report = reconcile_budget_sources(month);
+        eprintln!("reconcile {}: {}", month, serde_json::to_string(&report).unwrap_or_default());
+        let Some(s) = state else {
+            return; // state 链读不到该月（archive 形状漂移等）——单独修，不归本测试
+        };
+        let Some(i) = index else {
+            panic!("state 有账（{month}）而索引无账——facts 覆盖缺口：{report}");
+        };
+        assert_eq!(s["total"], i["total"], "state 链账 ≠ 索引账：{report}");
+        assert_eq!(s["peak_total"], i["peak_total"], "peak 拆分不一致：{report}");
+    }
+
 
     /// 环境锁是进程级的（util::ENV_LOCK），不是本模块局部的 —— state 的测试
     /// 也改 AGENT_VITALS_HOME，各自一把锁就互相踩踏（见 util.rs 注释）。

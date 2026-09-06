@@ -323,8 +323,14 @@ agent-vitals billing validate
 权威。退休按四步走：① ✅ sync_service（2026-09-06 落地 `runtime::sync_service` +
 `sync-facts` CLI，托盘 tick 已接线——facts 平面常态化）；② ✅ facts
 schema v2 补 peak 标志 + source 维度（同日，纯索引侧派生零 emitter 改动）；
-③ 预算/告警搬到索引之上的 Runtime 服务（未动）；④ state JSON 退役（未动，
-兼容读留一个版本周期）。在那之前 JSON 状态链与
+③ ✅ 预算的索引数据面（2026-09-06：`store::dsh_days_map` 投影 +
+`budget::compute_month_from_index`，喂同一个 `domain::cost::month_cost`——
+零新计价数学；**双轨对账** `data budget-reconcile` 真机逐厘相等
+¥1752.4498154 ≡ ¥1752.4498154（2026-08，含 peak 拆分），零月/覆盖缺口的
+两态语义有 note 规则；对账面在开发期当场抓到两个投影 bug：peak 行只写
+子桶（base ⊆ 语义反了）与漏 by_model 分组（pro 专属卡落 fallback flash
+价，钱差 2.9×））；④ state JSON 退役（未动——前置「双轨连续为真」成立
+后开，兼容读留一个版本周期）。在那之前 JSON 状态链与
 facts 链是**并行的两条写路径**（fold 写状态、--write 写事实），不是多头
 维护同一份数据。
 
