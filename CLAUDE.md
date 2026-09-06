@@ -43,6 +43,11 @@ apps/cli/                   # Rust binary crate（the `agent-vitals` CLI），Ph
                             #   agent-vitals-runtime::sessions（v0.9 Stage 0.3）。
   src/util.rs               #   二进制侧 util（split_lines/pyround 等 re-export 自 domain）
 crates/vitals-core/         # 宿主无关的通用审计机制（Event→Trajectory→Detector→Finding→Replay）；不认识 Agent/宿主
+crates/agent-vitals-data/   # v0.9 Stage A/B：数据面本体（spec §3.4/§5.1）。权威 UsageFact JSONL
+                            #   的 writer/replay/保留滚动（evidence）+ SQLite **可重建**索引
+                            #   （store，删库从 JSONL 重建）+ BillingContext（billing）——
+                            #   索引是可丢弃投影，权威在 JSONL；只依赖 domain + rusqlite
+                            #   （tests/dependency_budget.rs 钉边界），实现走 runtime::ingest_service
 crates/agent-vitals-domain/ # v0.8 Phase C：PURE computation + 词表契约，single source of truth。
                             #   src/{contracts,domain,compatibility}/ + lib.rs。contracts/=宿主无关词表
                             #   （evidence/host_capability/source_identity/usage_fact/r2a，只碰 serde_json）；

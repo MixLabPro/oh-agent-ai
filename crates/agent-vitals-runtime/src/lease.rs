@@ -91,8 +91,18 @@ pub fn acquire(path: &Path, holder: &str, ttl_ms: u64) -> Result<FileLease, Leas
         f.sync_all()?;
         Ok(())
     };
+    let identity = (
+        holder.to_string(),
+        std::process::id(),
+        now_ms() as u64,
+    );
     match write_lock(path) {
-        Ok(()) => Ok(FileLease { path: path.to_path_buf() }),
+        Ok(()) => Ok(FileLease {
+            path: path.to_path_buf(),
+            holder: identity.0,
+            pid: identity.1,
+            acquired_at_ms: identity.2,
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // 已有锁文件。判读：可解析 → TTL 到期与否；读不出（crash 半行）→
             // 按 mtime 年龄判（body 写一半的**新鲜**锁绝不能偷——那是活人的
@@ -137,7 +147,12 @@ pub fn acquire(path: &Path, holder: &str, ttl_ms: u64) -> Result<FileLease, Leas
             }
             let _ = std::fs::remove_file(&stale_path); // 搬走的残尸清掉（best-effort）
             match write_lock(path) {
-                Ok(()) => Ok(FileLease { path: path.to_path_buf() }),
+                Ok(()) => Ok(FileLease {
+                    path: path.to_path_buf(),
+                    holder: identity.0,
+                    pid: identity.1,
+                    acquired_at_ms: identity.2,
+                }),
                 // rename 与 create 之间被人放了新锁 → 不是我们的，如实 Held。
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     Err(LeaseError::Held { holder: "just-replaced".to_string(), ttl_remaining_ms: ttl_ms })
@@ -169,19 +184,49 @@ pub fn acquire_blocking(
     }
 }
 
-/// 持有的租约。Drop 兜底释放（ best-effort：释放失败只能静默——TTL 会
-/// 兜住陈旧锁）；正常路径应显式 `release()` 拿到删除结果。
+/// 持有的租约。Drop 兜底释放（best-effort）；正常路径应显式 `release()`
+/// 拿到删除结果。
+///
+/// **释放必须校验归属（审计 #1，DoD #3 的收口）**：TTL 偷取允许别的进程
+/// 在我们临界区超时后把锁偷走——此时锁文件已是别人的，无条件 remove 会
+/// 删掉新持有者的锁、放进第三个进程 = 双持锁。所以两条释放路径都先比对
+/// `holder + pid + acquired_at_ms` 三元组（acquire 时刻的身份快照），不匹配
+/// = 锁已易主，**静默放弃删除**（我们的临界区已结束，放弃是安全的；新持有
+/// 者的锁由它自己释放或由 TTL 兜底）。
 #[derive(Debug)]
 pub struct FileLease {
     path: PathBuf,
+    holder: String,
+    pid: u32,
+    acquired_at_ms: u64,
 }
 
 impl FileLease {
-    /// 显式释放（删除锁文件）。临界区结束即调——不等 Drop。
+    /// 锁文件当前是否还是本租约的（acquire 时刻的身份快照三重匹配）。
+    /// 读不出/解析失败的锁不是我们的（可能是别人 create 到一半的 body）。
+    fn is_mine(&self) -> bool {
+        std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .is_some_and(|v| {
+                v.get("holder").and_then(|x| x.as_str()) == Some(self.holder.as_str())
+                    && v.get("pid").and_then(|x| x.as_u64()) == Some(self.pid as u64)
+                    && v.get("acquired_at_ms").and_then(|x| x.as_u64())
+                        == Some(self.acquired_at_ms)
+            })
+    }
+
+    /// 显式释放（删除锁文件）。临界区结束即调——不等 Drop。锁已易主
+    /// （TTL 超时被偷）→ 静默放弃，**绝不删别人的锁**；返回 Ok（释放的
+    /// 语义目标是「不再持锁」，易主后本就不再持）。
     pub fn release(self) -> Result<(), std::io::Error> {
+        let mine = self.is_mine();
         let path = self.path.clone();
         std::mem::forget(self); // release 自己负责，别让 Drop 再删一次
-        std::fs::remove_file(&path)
+        if mine {
+            std::fs::remove_file(&path)?;
+        }
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
@@ -191,7 +236,9 @@ impl FileLease {
 
 impl Drop for FileLease {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if self.is_mine() {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -278,6 +325,41 @@ mod tests {
         // 持有者释放后，等待者能拿到。
         a.release().unwrap();
         let b = acquire_blocking(&path, "waiter", 60_000, 1_000).unwrap();
+        b.release().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stale_holder_release_does_not_steal_the_new_holders_lock() {
+        // 审计 #1：A 持锁超 TTL → B 偷走 → A 的 release/Drop 不得删 B 的锁
+        // （否则 C 立刻 acquire 成功 = B/C 双持锁，DoD #3 破产）。
+        let path = tmp_lock("ownership");
+        let a = acquire(&path, "proc-a", 10).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        // B 偷走 A 的陈旧锁。
+        let b = acquire(&path, "proc-b", 60_000).unwrap();
+        // A 释放：锁已易主 → 静默放弃，文件（B 的锁）必须还在。
+        a.release().unwrap();
+        assert!(path.exists(), "A 的 release 不得删掉 B 的锁");
+        // C 此刻 acquire 必须 Held（B 仍合法持有）——若 A 的释放删了 B 的锁，
+        // 这里会直接成功 = 双持锁。
+        let err = acquire(&path, "proc-c", 60_000).unwrap_err();
+        assert!(matches!(err, LeaseError::Held { .. }), "B 必须仍持有，got {err:?}");
+        // B 正常释放（锁是自己的）→ 文件删除，C 可获取。
+        b.release().unwrap();
+        let c = acquire(&path, "proc-c", 60_000).unwrap();
+        c.release().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn drop_also_respects_ownership_after_steal() {
+        let path = tmp_lock("drop-ownership");
+        let a = acquire(&path, "proc-a", 10).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let b = acquire(&path, "proc-b", 60_000).unwrap();
+        drop(a); // Drop 兜底同样不得删 B 的锁
+        assert!(path.exists(), "A 的 Drop 不得删掉 B 的锁");
         b.release().unwrap();
         let _ = std::fs::remove_file(&path);
     }

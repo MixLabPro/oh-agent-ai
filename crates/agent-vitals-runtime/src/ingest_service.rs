@@ -375,7 +375,12 @@ pub fn rebuild_index(data_home: &Path) -> Result<RebuildOutcome, String> {
     // 反映截断后的权威）。retention 失败不挡 rebuild——保留策略的目标是
     // 控制规模，不是账目正确性；报告/错误面随返回值如实上呈（审查 P2：
     // 丢掉报告 = 滚动对操作者不可观测）。
-    let retention = enforce_retention(data_home, &crate::clock::current_month_beijing()).ok();
+    // 审计 #2：retention 是对权威 JSONL 的不可逆重写，失败面必须可见——
+    // .ok() 丢弃错误 = 操作者以为滚动做了实际一条没删。失败走 stderr（保持
+    // 不挡 rebuild——保留策略的目标是控制规模，不是账目正确性）。
+    let retention = enforce_retention(data_home, &crate::clock::current_month_beijing())
+        .map_err(|e| eprintln!("retention failed: {e}"))
+        .ok();
     let (_idx, report) =
         FactsIndex::drop_and_rebuild(&default_index_path(data_home), &facts_dir)
             .map_err(|e| format!("facts index rebuild: {e}"))?;
@@ -387,8 +392,8 @@ pub fn rebuild_index(data_home: &Path) -> Result<RebuildOutcome, String> {
 pub struct RebuildOutcome {
     #[serde(flatten)]
     pub rebuild: agent_vitals_data::store::RebuildReport,
-    /// None = 权威里没有需要滚动的宿主文件，或 retention 失败（错误已上
-    /// stderr）——消费方如实区分。
+    /// None = 权威里没有需要滚动的宿主文件，或 retention 失败（失败时错误
+    /// 已上 stderr——审计 #2：不可逆重写的失败面不许静默）。消费方如实区分。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retention: Option<Value>,
 }

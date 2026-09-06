@@ -19,7 +19,18 @@ use std::path::Path;
 use agent_vitals_domain::source_identity::fnv1a64_hex;
 
 /// 私有导出：权威 JSONL 的逐字节复制（含全部身份字段）。
+///
+/// 拿 ingest 锁（审计 #3）：与 reconcile 同一条「读权威前拿锁」纪律——
+/// 并发 ingest 的尾面修复/追加进行中时，无锁导出会拿到非原子截面（两个
+/// 导出件互不一致）。
 pub fn export_private(data_home: &Path, out_dir: &Path) -> Result<usize, String> {
+    let _lease = crate::lease::acquire_blocking(
+        &data_home.join("facts").join(".ingest.lock"),
+        "facts-export",
+        60_000,
+        5_000,
+    )
+    .map_err(|e| format!("facts export lease: {e}"))?;
     let facts_dir = data_home.join("facts");
     std::fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let mut files = 0usize;
@@ -43,8 +54,16 @@ fn pseudonym(prefix: &str, raw: &str) -> String {
     format!("{}-{}", prefix, &fnv1a64_hex(raw.as_bytes())[..12])
 }
 
-/// 脱敏导出：重放 → 重导身份 → 契约层重 stamp fact_id → 写出。
+/// 脱敏导出：重放 → 重导身份 → 契约层重 stamp fact_id → 写出。同
+/// [`export_private`] 拿 ingest 锁（审计 #3）——两条导出路径对同一截面。
 pub fn export_redacted(data_home: &Path, out_dir: &Path) -> Result<(usize, usize), String> {
+    let _lease = crate::lease::acquire_blocking(
+        &data_home.join("facts").join(".ingest.lock"),
+        "facts-export",
+        60_000,
+        5_000,
+    )
+    .map_err(|e| format!("facts export lease: {e}"))?;
     let facts_dir = data_home.join("facts");
     std::fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let mut files = 0usize;
