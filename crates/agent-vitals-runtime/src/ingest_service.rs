@@ -257,13 +257,14 @@ pub fn reconcile_index_vs_dto(
     dto_tokens_by_host: &serde_json::Map<String, Value>,
 ) -> Result<Value, String> {
     // 与 ingest 同锁：并发 rebuild 会把读侧甩到孤儿 inode（审查 P2-5）。
+    let lease_path = data_home.join("facts").join(".ingest.lock");
     let _lease = crate::lease::acquire_blocking(
-        &data_home.join("facts").join(".ingest.lock"),
+        &lease_path,
         "facts-reconcile",
         60_000,
         2_000,
     )
-    .map_err(|e| format!("facts reconcile lease: {e}"))?;
+    .map_err(|e| format!("facts reconcile lease [{}] held: {e}", lease_path.display()))?;
     let facts_dir = data_home.join("facts");
     let (idx, _seeded) = FactsIndex::open_or_rebuild(&default_index_path(data_home), &facts_dir)
         .map_err(|e| format!("facts index: {e}"))?;
@@ -330,9 +331,13 @@ fn month_shift(month: &str, months_back: u32) -> String {
 /// 必须是显式维护动作，不藏在每次 ingest 里）。
 pub fn enforce_retention(data_home: &Path, current_month: &str) -> Result<Value, String> {
     // spec §6「UsageFact 13 个月保留」钉死为「保留最近 13 个自然月」
-    // （含当月）→ cutoff = current − 12（两端含）。审查 P2 的 fencepost
-    // （−13 会留出 14 个月的窗）在此收口。
-    let cutoff = month_shift(current_month, 12);
+    // （含当月）→ cutoff = current − 12（两端含）。fencepost 常量与
+    // authority 侧共享（RETENTION_MONTHS_MINUS_ONE）——两处各持魔法数就是
+    // 对账 mismatch 的确定性来源（审查 P1-3）。
+    let cutoff = month_shift(
+        current_month,
+        crate::sql_sync::RETENTION_MONTHS_MINUS_ONE,
+    );
     let mut out = serde_json::Map::new();
     let hosts: Vec<String> = FACT_HOSTS.iter().map(|h| h.to_string()).collect();
     for host in hosts {
@@ -496,6 +501,9 @@ mod tests {
             serde_json::json!({"total": 555, "uncached_input": 555, "cache_read": 0,
                                "cache_write": 0, "output": 0}),
         );
+        // 真机托盘 tick 可能正持有同一 ……不——home 是 tmp 隔离的；这里
+        // 的 Err 只可能是真实 bug，保留 unwrap。托盘竞态只影响真机对账
+        // 测试（budget 侧），与此无关。
         let r = reconcile_index_vs_dto(&home, "2026-09", &dto).unwrap();
         assert_eq!(r["reconciled"], serde_json::json!(true));
         let by_host: std::collections::BTreeMap<String, Value> = r["hosts"]

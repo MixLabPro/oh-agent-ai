@@ -197,24 +197,41 @@ fn sync_host(
     // 再走旧链 ingest（读面保鲜）——两轨都成功的文件才进 checkpoint
     // （任一轨失败 → 该批下轮重发；fact_id exactly-once 保证重发零双计）。
     // Phase 3 读路径切换完成后撤旧链调用。
-    let mut authority_ok = true;
-    if let Some(db) = db {
-        if !facts.is_empty() {
-            match crate::sql_sync::write_flat_facts_to_authority(
-                db, host, ns, &facts, now,
-            ) {
-                Ok(o) => {
-                    report.sql_inserted = Some(o.inserted);
-                    report.sql_duplicate = Some(o.duplicate);
-                    if !o.errors.is_empty() {
-                        report.errors.extend(o.errors);
+    // **权威侧未写入 = 不进 checkpoint**（外部审计 P1-1）：db=None（打开
+    // 失败：并发 BUSY/损坏/新版本）或写入 Err 时，这批事实权威库永远缺失
+    // ——checkpoint 照走 = 静默漏计且无恢复信号。改为不进 checkpoint：
+    // 下轮重发重试权威（旧链侧 fact_id 幂等吸收，无副作用）。
+    // facts 非空且权威库在 → 必须写成功；权威库不在（open 失败）时同样
+    // 视为未写入——两条失败路径都不进 checkpoint。
+    if !facts.is_empty() {
+        let mut write_ok = true;
+        match db {
+            Some(db) => {
+                match crate::sql_sync::write_flat_facts_to_authority(
+                    db, host, ns, &facts, now,
+                ) {
+                    Ok(o) => {
+                        report.sql_inserted = Some(o.inserted);
+                        report.sql_duplicate = Some(o.duplicate);
+                        if !o.errors.is_empty() {
+                            report.errors.extend(o.errors);
+                        }
+                    }
+                    Err(e) => {
+                        write_ok = false;
+                        report.errors.push(format!("authority: {e}"));
                     }
                 }
-                Err(e) => {
-                    authority_ok = false;
-                    report.errors.push(format!("authority: {e}"));
-                }
             }
+            None => {
+                write_ok = false;
+                report
+                    .errors
+                    .push("authority: db unavailable — facts NOT checkpointed".to_string());
+            }
+        }
+        if !write_ok {
+            return;
         }
     }
     if !facts.is_empty() {
@@ -232,10 +249,7 @@ fn sync_host(
             }
         }
     }
-    if !authority_ok {
-        // 权威侧失败 → 该批文件不进 checkpoint（下轮重发，双轨重新对齐）。
-        return;
-    }
+    // 失败路径已在上面 return——能到这里 = 双轨都成功，checkpoint 安全。
     for (key, fp) in synced_keys {
         report.files_synced += 1;
         checkpoint.insert(
@@ -292,8 +306,10 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         // matches! 直接比 Option<String>（as_deref 会触发 needless lint）。
         if !matches!(&last, Some(d) if d == &bj_day) {
             // Option<String> 与 &str 的比较经 as_deref 归一（clippy 认可的写法）。
-            let cutoff =
-                crate::sql_sync::retention_cutoff_ms(&crate::clock::current_month_beijing(), 13)
+            let cutoff = crate::sql_sync::retention_cutoff_ms(
+                    &crate::clock::current_month_beijing(),
+                    crate::sql_sync::RETENTION_MONTHS_MINUS_ONE,
+                )
                 .unwrap_or(0);
             match db.retention_usage_facts(cutoff) {
                 Ok(n) if n > 0 => {
@@ -380,7 +396,11 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         report.total_duplicate += r.duplicate;
         report.hosts.push(r);
     }
-    save_checkpoint(data_home, &ns, &checkpoint);
+    // checkpoint 无变化时跳过写盘（审查 P1-2 的连带：无谓重建会与迁移
+    // 哨兵逻辑互相触发）。
+    if checkpoint != load_checkpoint(data_home, &ns) {
+        save_checkpoint(data_home, &ns, &checkpoint);
+    }
     Ok(report)
 }
 

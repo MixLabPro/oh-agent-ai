@@ -261,9 +261,12 @@ impl AuthorityDb {
         // 损坏库在第一个语句就会炸——先探一下（PRAGMA 是最便宜的语句），
         // 把 sqlite 的 "not a database"/"malformed" 归为 Corrupt 语义由调用
         // 方走恢复流程，而不是当成普通 Sqlite 错误继续写。
+        // busy_timeout 必须先于 journal_mode：WAL 切换本身要拿锁——并发
+        // open（托盘 tick + CLI）时先设 journal_mode 会直接 BUSY 报错
+        // （审查 P1-1 的触发面之一）。
+        conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
         Self::ensure_schema(&conn, now_ms)?;
         Ok(Self { conn })
     }
@@ -397,6 +400,8 @@ impl AuthorityDb {
             rusqlite::params![cutoff_ms],
         )?)
     }
+
+
 
     /// `BEGIN IMMEDIATE` 事务帮助器：闭包成功 → COMMIT，Err → ROLLBACK 后
     /// 原样上抛。**所有业务写入都必须走这里**（spec §5.1.4——事务边界是
@@ -567,6 +572,42 @@ mod tests {
             "got {err:?}"
         );
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn retention_deletes_only_dated_rows_older_than_cutoff() {
+        let db = tmp_db("retention");
+        let a = AuthorityDb::open(&db, 1_000).unwrap();
+        a.begin_run("run-1", "cli", 1_000).unwrap();
+        a.with_immediate_txn(|conn| {
+            // 三行：旧（< cutoff）、新（≥ cutoff）、无日期（§5.4 不静默删）。
+            for (rid, ts) in [
+                ("f-old", Some(500_i64)),
+                ("f-new", Some(9_999_i64)),
+                ("f-nodate", None),
+            ] {
+                conn.execute(
+                    "INSERT INTO usage_facts(fact_id, host, machine_namespace,
+                         native_session_id, source_event_id, observation_kind,
+                         event_ts_ms, ingested_run_id, created_at_ms, updated_at_ms)
+                     VALUES (?1,'dsh','ns','s',?1,'token_count',?2,'run-1',1,1)",
+                    rusqlite::params![rid, ts],
+                )
+                .unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+        let n = a.retention_usage_facts(5_000).unwrap();
+        assert_eq!(n, 1, "只删 event_ts_ms < cutoff 的行");
+        let left: i64 = a
+            .conn()
+            .query_row("SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 2, "新行与无日期行保留");
+        // 幂等：再跑删 0 行。
+        assert_eq!(a.retention_usage_facts(5_000).unwrap(), 0);
+        std::fs::remove_file(&db).ok();
     }
 
     #[test]

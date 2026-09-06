@@ -37,6 +37,12 @@ pub fn new_run_id(trigger: &str) -> String {
     format!("{trigger}:{}", now_ms())
 }
 
+/// 保留窗月数的 fencepost 常量：spec「保留最近 13 个自然月（含当月）」→
+/// cutoff = current − 12。**legacy（enforce_retention）与 authority
+///（retention_usage_facts）必须同值**——13 vs 12 的窗差会让 §6.3 对账在
+/// 13 个月后必然 mismatch（审查 P1-3）。
+pub const RETENTION_MONTHS_MINUS_ONE: u32 = 12;
+
 /// `sync_runs.trigger` 词表（spec §3.1）。例行 sync = cli；checkpoint 迁移 =
 /// migration（观测/审计用）。
 const TRIGGER_SYNC: &str = "cli";
@@ -116,7 +122,20 @@ pub fn migrate_json_checkpoint(
     data_home: &Path,
     now_ms: i64,
 ) -> Result<usize, AuthorityError> {
-    // 文件不存在 = Ok(0)：不加 run、不开事务——迁移「无事」的语义就是无事。
+    // **持久哨兵**（审查 P1-2）：迁移成功一次即永久标记——否则 sync 结尾
+    // save_checkpoint 无条件重建 JSON 文件，下一轮 sync 又「文件存在」→
+    // 每 5 分钟产一行 migration run（sync_runs 无界增长 + data-status 失明）。
+    let sentinel: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'checkpoint_migrated'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    if sentinel.as_deref() == Some("1") {
+        return Ok(0);
+    }
     let checkpoint = checkpoint_path(data_home);
     let text = match std::fs::read_to_string(&checkpoint) {
         Ok(t) => t,
@@ -180,6 +199,11 @@ pub fn migrate_json_checkpoint(
         .join("facts")
         .join(".ingest-checkpoint.json.migrated");
     std::fs::rename(&checkpoint, &migrated_path).map_err(AuthorityError::from)?;
+
+    db.conn().execute(
+        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('checkpoint_migrated', '1')",
+        [],
+    )?;
 
     db.finish_run(&run_id, "succeeded", None, None, now_ms)?;
     Ok(count)
