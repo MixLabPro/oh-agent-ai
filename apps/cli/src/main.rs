@@ -2998,7 +2998,7 @@ session_store={store} fold={fold}"
     // 换读源等于把对账基准也换了。
     if let Some(Cmd::Data { action }) = &args.cmd {
         let repo: Box<dyn agent_vitals_data::repository::SummaryRepository> = Box::new(
-            agent_vitals_runtime::summary::SqlSummaryRepository,
+            agent_vitals_runtime::summary::SqlSummaryRepository::new(),
         );
         match action {
             DataAction::Coverage { month, json } => {

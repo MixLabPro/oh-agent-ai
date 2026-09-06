@@ -24,7 +24,7 @@ fn main() {
     println!("== month={month} today={today} ==");
 
     let json_repo = JsonSummaryRepository;
-    let sql_repo = SqlSummaryRepository;
+    let sql_repo = SqlSummaryRepository::new();
 
     println!("\n--- monthly_summary({month}) ---");
     let jm = json_repo.monthly_summary(&MonthlySummaryQuery { month: month.clone() });

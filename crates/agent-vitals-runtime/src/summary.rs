@@ -723,7 +723,7 @@ pub fn hourly_distribution(date: &str, codex_home: &Path) -> serde_json::Value {
     // 是禁读清单成员（spec §5.2），product 读面在此全部退役。`codex_home`
     // 参数保留（签名兼容 Tauri 调用点），SQL 路径不再使用。
     let _ = codex_home;
-    let db = SqlSummaryRepository::open_db();
+    let db = SqlSummaryRepository::new().open_db();
     let bounds = agent_vitals_data::authority_query::beijing_day_bounds_ms(date);
     let by_host: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>> =
         match (&db, bounds) {
@@ -1217,7 +1217,7 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     // month.json/ledger/fold 全部退出 product 读面（spec §5.2 禁读清单）。
     // 计价函数与旧路径共用同一批核心（priced_day/claude_day_cost/
     // codex_cost_report），格子里的数字只换来源不换算法。
-    let db = SqlSummaryRepository::open_db();
+    let db = SqlSummaryRepository::new().open_db();
     let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(month);
     let (dsh_days, by_hour_model, claude_days_map) = fetch_windowed(&db, bounds);
 
@@ -1475,11 +1475,29 @@ impl SummaryRepository for JsonSummaryRepository {
 /// 行为一致（每个宿主的 `_from_hours`/`_from_days` 核心函数本来就把"空
 /// 输入"处理成 Unavailable，不是本结构体重新发明的分支）。真正的损坏诊断
 /// 走 `data doctor`/`data status`，不是这条查询路径的职责。
-pub struct SqlSummaryRepository;
+#[derive(Default)]
+pub struct SqlSummaryRepository {
+    /// `None` = 生产路径，库位置来自 `crate::home::data_home()`（进程
+    /// `AGENT_VITALS_HOME`）。`Some` = 参数化：Tauri `read_overview_at(dh)`
+    /// 组装入口与临时库单测显式指定库根，不受进程 env 影响——ZST 时代
+    /// 「组装入口传进来的 dh 被内部忽略、预算卡永远在真机库上跑」是本次
+    /// 会话 Tier B 收尾连续 4 次实现失败的根因。
+    data_home: Option<std::path::PathBuf>,
+}
 
 impl SqlSummaryRepository {
-    fn open_db() -> Option<agent_vitals_data::authority::AuthorityDb> {
-        let data_home = crate::home::data_home();
+    /// 生产构造：库根 = `crate::home::data_home()`。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 参数化构造：显式库根（Tauri 组装入口 / 临时库单测）。
+    pub fn at(data_home: impl Into<std::path::PathBuf>) -> Self {
+        Self { data_home: Some(data_home.into()) }
+    }
+
+    fn open_db(&self) -> Option<agent_vitals_data::authority::AuthorityDb> {
+        let data_home = self.data_home.clone().unwrap_or_else(crate::home::data_home);
         let path = agent_vitals_data::authority::default_authority_path(&data_home);
         agent_vitals_data::authority::AuthorityDb::open(&path, crate::sql_sync::now_ms()).ok()
     }
@@ -1592,7 +1610,7 @@ fn fetch_windowed(
 
 impl SummaryRepository for SqlSummaryRepository {
     fn monthly_summary(&self, query: &MonthlySummaryQuery) -> MonthlySummary {
-        let db = Self::open_db();
+        let db = self.open_db();
         let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(&query.month);
         let (dsh_days, by_hour_model, claude_days_map) = fetch_windowed(&db, bounds);
 
@@ -1656,7 +1674,7 @@ impl SummaryRepository for SqlSummaryRepository {
     }
 
     fn daily_summary(&self, query: &DailySummaryQuery) -> DailySummary {
-        let db = Self::open_db();
+        let db = self.open_db();
         let bounds = agent_vitals_data::authority_query::beijing_day_bounds_ms(&query.date);
         let (dsh_days, by_hour_model, claude_days_map) = fetch_windowed(&db, bounds);
         let day_value = dsh_days.get(&query.date).cloned();
@@ -1728,7 +1746,7 @@ impl SummaryRepository for SqlSummaryRepository {
     /// （三维分母 v1，见该函数 doc）。窗口 = 该月的北京毫秒边界；库打不开
     /// 或窗口非法 → 三维全 0（诚实「测不到覆盖」，不是满覆盖）。
     fn coverage_status(&self, month: &str) -> BTreeMap<String, CoverageStatus> {
-        let db = Self::open_db();
+        let db = self.open_db();
         let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(month);
         let mut out = BTreeMap::new();
         for host in WIRED_HOSTS {
@@ -2504,7 +2522,7 @@ mod tests {
                 )
                 .unwrap();
             drop(db);
-            let repo = SqlSummaryRepository;
+            let repo = SqlSummaryRepository::new();
             let summary = repo.monthly_summary(&MonthlySummaryQuery { month: month.clone() });
             let claude = &summary.by_host["claude-code"];
             assert_eq!(
@@ -2524,7 +2542,7 @@ mod tests {
     #[test]
     fn sql_repository_reports_unavailable_with_no_facts() {
         with_home(|| {
-            let repo = SqlSummaryRepository;
+            let repo = SqlSummaryRepository::new();
             let summary = repo.monthly_summary(&MonthlySummaryQuery { month: "2020-01".to_string() });
             assert!(summary.contract_violations().is_empty(), "{:?}", summary.contract_violations());
             for host in ["dsh", "codex", "claude-code"] {
@@ -2548,7 +2566,7 @@ mod tests {
     #[test]
     fn sql_repository_rejects_a_malformed_window_without_a_guess() {
         with_home(|| {
-            let repo = SqlSummaryRepository;
+            let repo = SqlSummaryRepository::new();
             // 格式非法（不是 YYYY-MM/YYYY-MM-DD）不能编数字——`beijing_month_
             // bounds_ms`/`beijing_day_bounds_ms` 返回 None，退化路径与"这个
             // 窗口没有任何事实"完全一样：诚实的 Unavailable，不是 panic。
@@ -2590,7 +2608,7 @@ mod tests {
 
             let json_summary =
                 JsonSummaryRepository.monthly_summary(&MonthlySummaryQuery { month: month.clone() });
-            let sql_summary = SqlSummaryRepository.monthly_summary(&MonthlySummaryQuery { month });
+            let sql_summary = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
             assert!(sql_summary.contract_violations().is_empty(), "{:?}", sql_summary.contract_violations());
             assert_eq!(
                 json_summary.by_host["dsh"].amounts_by_basis,
@@ -2633,7 +2651,7 @@ mod tests {
             drop(db);
 
             let json_daily = JsonSummaryRepository.daily_summary(&DailySummaryQuery { date: day.clone() });
-            let sql_daily = SqlSummaryRepository.daily_summary(&DailySummaryQuery { date: day });
+            let sql_daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: day });
             assert!(sql_daily.contract_violations().is_empty(), "{:?}", sql_daily.contract_violations());
             assert_eq!(
                 json_daily.by_provider["claude-code/anthropic"].amounts_by_basis,
@@ -2658,7 +2676,7 @@ mod tests {
             seed_fact(&db, "f1", "codex", Some("gpt-5.6-sol"), "token_count", start_ms + 3_600_000, 0, 800_000, 200_000, 50_000, 80_000);
             drop(db);
 
-            let sql_daily = SqlSummaryRepository.daily_summary(&DailySummaryQuery { date: day });
+            let sql_daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: day });
             assert!(sql_daily.contract_violations().is_empty(), "{:?}", sql_daily.contract_violations());
             let codex = &sql_daily.by_host["codex"];
             assert!(codex.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent), "{codex:?}");

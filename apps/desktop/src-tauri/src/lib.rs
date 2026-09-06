@@ -1240,7 +1240,7 @@ fn read_month(month: String) -> Value {
 #[tauri::command]
 fn data_monthly_summary(month: String) -> Value {
     use agent_vitals_data::repository::{MonthlySummaryQuery, SummaryRepository};
-    let repo = agent_vitals_runtime::summary::SqlSummaryRepository;
+    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
     repo.monthly_summary(&MonthlySummaryQuery { month }).to_json()
 }
 
@@ -1249,7 +1249,7 @@ fn data_monthly_summary(month: String) -> Value {
 #[tauri::command]
 fn data_daily_summary(date: String) -> Value {
     use agent_vitals_data::repository::{DailySummaryQuery, SummaryRepository};
-    let repo = agent_vitals_runtime::summary::SqlSummaryRepository;
+    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
     repo.daily_summary(&DailySummaryQuery { date }).to_json()
 }
 

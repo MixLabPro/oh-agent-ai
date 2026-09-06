@@ -26,8 +26,11 @@ fn state_dir() -> PathBuf {
     data_home().join("state")
 }
 
-fn config_path() -> PathBuf {
-    data_home().join("config.toml")
+/// `config.toml` 位置，库根显式传入（Tier B 预算卡参数化：Tauri
+/// `read_overview_at(dh)` 组装入口不走进程 `AGENT_VITALS_HOME`）。生产路径
+/// 的调用方各自传 `data_home()`。
+fn config_path_at(dh: &Path) -> PathBuf {
+    dh.join("config.toml")
 }
 
 fn archive_path() -> PathBuf {
@@ -100,8 +103,13 @@ fn parse_scalar(text: &str) -> Value {
 /// `merged_config`）。缺文件 / 缺节 / 缺字段一律走默认 —— 配置缺失降级而非
 /// 崩溃，与「host 能力缺失时不臆造」同一纪律。
 fn load_config() -> Value {
+    load_config_at(&data_home())
+}
+
+/// `load_config` 的参数化体：库根显式传入。
+fn load_config_at(dh: &Path) -> Value {
     let defaults = agent_vitals_domain::budget::default_budget();
-    let Ok(text) = std::fs::read_to_string(config_path()) else {
+    let Ok(text) = std::fs::read_to_string(config_path_at(dh)) else {
         return defaults;
     };
     let mut parsed = Map::new();
@@ -527,8 +535,12 @@ pub fn budget_show_month(month: &str, json_out: bool) {
 /// `config.toml` 存在 → 读 `[budget]` 节映射 seed（monthly_cny/daily_cny/
 /// warn_at_ratio×10000→bp），幂等——行存在后不再读旧文件。spec §6.2.4
 /// 「today/alert 不迁移」不适用于**配置**：配置是用户输入，不是派生数据。
-/// 返回是否执行了 seed（供 CLI 输出提示）。
-fn seed_budget_config_from_legacy(db: &agent_vitals_data::authority::AuthorityDb) -> bool {
+/// 返回是否执行了 seed（供 CLI 输出提示）。库根显式传入——`budget_status_
+/// sql_at` 的组装入口（Tauri 预算卡）不走进程 `AGENT_VITALS_HOME`。
+fn seed_budget_config_from_legacy(
+    data_home: &Path,
+    db: &agent_vitals_data::authority::AuthorityDb,
+) -> bool {
     match db.budget_config_get() {
         Ok(Some(_)) => return false, // 已配置，旧文件永远退役
         Ok(None) => {}
@@ -537,7 +549,8 @@ fn seed_budget_config_from_legacy(db: &agent_vitals_data::authority::AuthorityDb
     // 只有**旧文件真实存在**才 seed——`load_config()` 对缺文件返回默认值
     // （差分链需要），拿默认值当 seed 源会给从未配置过的机器凭空装上
     // ¥600 预算（no_budget 测试抓出的第一版缺陷：defaults ≠ 用户输入）。
-    if !config_path().exists() {
+    let cfg_path = config_path_at(data_home);
+    if !cfg_path.exists() {
         return false;
     }
     // 审查收口（F2）：`load_config()` 的 merged 产物里 monthly_cny/daily_cny
@@ -545,7 +558,7 @@ fn seed_budget_config_from_legacy(db: &agent_vitals_data::authority::AuthorityDb
     // config.toml 存在但不含 [budget] 节的机器仍会被装上 ¥600。改为看
     // **原始 TOML 文本**里这两个键是否真实出现；键不齐 = 用户没配过预算，
     // 报 no_budget 比替用户编一份诚实。
-    let text = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let text = std::fs::read_to_string(&cfg_path).unwrap_or_default();
     let has = |key: &str| {
         text.lines().any(|l| {
             let l = l.trim();
@@ -555,7 +568,7 @@ fn seed_budget_config_from_legacy(db: &agent_vitals_data::authority::AuthorityDb
     if !has("monthly_cny") || !has("daily_cny") {
         return false;
     }
-    let cfg = load_config();
+    let cfg = load_config_at(data_home);
     let monthly = cfg.get("monthly_cny").and_then(Value::as_f64);
     let daily = cfg.get("daily_cny").and_then(Value::as_f64);
     let warn_ratio = cfg.get("warn_at_ratio").and_then(Value::as_f64);
@@ -587,17 +600,27 @@ fn iso_to_ms_beijing(s: &str) -> Option<i64> {
 /// `level ∈ no_budget | ok | warn | exceeded`（词表与 legacy 链 ok/warn/over
 /// 对齐但 exceeded 用全称——新面自有一份词表，不与差分看守的旧链混）。
 pub fn budget_status_sql(month: &str) -> Option<Value> {
+    budget_status_sql_at(&crate::home::data_home(), month)
+}
+
+/// `budget_status_sql` 的**参数化体**（Tier B 预算卡收尾）：库根显式传入，
+/// 不碰进程 `AGENT_VITALS_HOME`。Tauri `read_overview_at(dh)` 组装入口与
+/// 临时库单测据此对指定库跑预算判定，无需持 `ENV_LOCK`。失败历史：ZST
+/// `SqlSummaryRepository` 只认 `crate::home::data_home()`，组装入口传进来的
+/// `dh` 被内部忽略，预算卡永远在真机库上跑（本次会话连续 4 次实现失败的
+/// 直接原因）。
+pub fn budget_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
     let db = agent_vitals_data::authority::AuthorityDb::open(
-        &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+        &agent_vitals_data::authority::default_authority_path(data_home),
         crate::sql_sync::now_ms(),
     )
     .ok()?;
-    seed_budget_config_from_legacy(&db);
+    seed_budget_config_from_legacy(data_home, &db);
     let cfg = db.budget_config_get().ok().flatten();
 
     let summary = {
         use agent_vitals_data::repository::SummaryRepository;
-        crate::summary::SqlSummaryRepository
+        crate::summary::SqlSummaryRepository::at(data_home)
             .monthly_summary(&agent_vitals_data::repository::MonthlySummaryQuery {
                 month: month.to_string(),
             })
@@ -1136,5 +1159,66 @@ mod tests {
             let v = budget_status_sql(&month).unwrap();
             assert_eq!(v["snoozed_until_ms"], Value::Null, "过期 snooze 视同无");
         }
+    }
+
+    /// 参数化入口（Tier B 预算卡收尾）：`budget_status_sql_at` 显式收
+    /// `data_home`，**不碰进程 env**——Tauri `read_overview_at(dh)` 组装入口和
+    /// 临时库单测据此对指定库跑预算判定，不必持 `ENV_LOCK`、不受并发测试改
+    /// `AGENT_VITALS_HOME` 影响。失败历史：ZST `SqlSummaryRepository` 只认
+    /// `crate::home::data_home()`，组装入口传进来的 `dh` 被内部忽略，预算卡
+    /// 永远在真机库上跑（本次会话连续 4 次实现失败的直接原因）。
+    ///
+    /// **本用例故意不取 `ENV_LOCK`**：若 `budget_status_sql_at` 真的只读传入
+    /// 的 `dir`，并发测试改不改 `AGENT_VITALS_HOME` 都不影响它——能无锁跑通
+    /// 本身就是「参数化到位」的证明。
+    #[test]
+    fn budget_status_sql_at_reads_the_passed_data_home_without_touching_env() {
+        let month = crate::clock::current_month_beijing();
+        let (start, _) =
+            agent_vitals_data::authority_query::beijing_month_bounds_ms(&month).unwrap();
+
+        // 两个独立库、同一份预算配置——只有 `spender` 库里 seed 了 DSH 事实。
+        let fresh = |tag: &str| -> std::path::PathBuf {
+            let d = std::env::temp_dir()
+                .join(format!("av-budget-status-at-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&d),
+                1,
+            )
+            .unwrap();
+            db.budget_config_set(60_000, 3_000, 8_000, 1).unwrap(); // ¥600 / ¥30 / 80%
+            if tag == "spender" {
+                seed_fact_min(
+                    &db, "at1", "dsh", "deepseek-v4-flash", start + 1_000, 1_000_000, 100_000,
+                );
+            }
+            d
+        };
+        let dir_spender = fresh("spender");
+        let dir_empty = fresh("empty");
+
+        // **本用例故意不取 `ENV_LOCK`**：若两次调用都只读各自传入的 dir，并发
+        // 测试改不改 `AGENT_VITALS_HOME` 都不影响结果。若 `SqlSummaryRepository
+        // ::at()` 有 bug、内部退回 env 库，则两次调用读同一个（真机）库、spent
+        // 必然相等，`>` 断言当场翻红——与真机本月有无 DSH 消费无关。
+        let v_spender = budget_status_sql_at(&dir_spender, &month).expect("库可开");
+        let v_empty = budget_status_sql_at(&dir_empty, &month).expect("库可开");
+        assert_eq!(v_spender["data_source"], "sql_authority");
+        assert_eq!(v_spender["monthly_cny_minor"], json!(60_000), "配置读自传入的 dir");
+        // 注意：`spent_empty` 不是 0——`apply_subscription_fees` 会把声明的
+        // CNY 订阅月费（GLM/MiniMax）按月摊进 by_provider，零用量月份照摊
+        // （§6.7「不付用量也在付」）。断言只看**相对量**：seed 了 DSH 事实的
+        // 库必须严格更大。
+        let spent_spender = v_spender["spent_cny_minor"].as_i64().unwrap();
+        let spent_empty = v_empty["spent_cny_minor"].as_i64().unwrap();
+        assert!(
+            spent_spender > spent_empty,
+            "seed 了 DSH 事实的库 spent 必须严格更大——传入的 data_home 被真正使用\
+             （spender={spent_spender} empty={spent_empty}）"
+        );
+        let _ = std::fs::remove_dir_all(&dir_spender);
+        let _ = std::fs::remove_dir_all(&dir_empty);
     }
 }

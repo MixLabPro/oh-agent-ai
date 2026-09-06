@@ -120,7 +120,7 @@ fn q01_q02_two_hosts_two_hours_tokens_land_separately_and_sum() {
     env.fact("c1", "claude-code", "claude-opus-5", s + 9 * 3_600_000, 0, 120, 0);
     env.fact("x1", "codex", "gpt-5.6", s + 10 * 3_600_000, 0, 300, 0);
 
-    let daily = SqlSummaryRepository.daily_summary(&DailySummaryQuery { date: d.clone() });
+    let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d.clone() });
     assert!(daily.contract_violations().is_empty(), "{:?}", daily.contract_violations());
     // 两宿主各自的 token 归属正确（Q01 的两个小时点）。
     assert_eq!(daily.tokens_by_host["claude-code"].uncached_input, 120);
@@ -155,9 +155,9 @@ fn q03_beijing_month_start_0030_stays_in_the_month() {
     let aug = authority_query::peaked_days_map(env.db.conn(), "dsh", aug_start, aug_end).unwrap();
     assert_eq!(aug["2026-08-31"]["uncached_input_tokens"], json!(7));
     // 月查询 DTO 侧同样只认北京月界。
-    let summary = SqlSummaryRepository.monthly_summary(&MonthlySummaryQuery { month: "2026-09".to_string() });
+    let summary = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month: "2026-09".to_string() });
     assert_eq!(summary.tokens_by_host["dsh"].uncached_input, 50);
-    let aug_summary = SqlSummaryRepository.monthly_summary(&MonthlySummaryQuery { month: "2026-08".to_string() });
+    let aug_summary = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month: "2026-08".to_string() });
     assert_eq!(aug_summary.tokens_by_host["dsh"].uncached_input, 7);
     let _ = m_end;
 }
@@ -227,7 +227,7 @@ fn q05_unpriced_model_shows_usage_with_unresolved_not_zero() {
     let s = env.day_start(&d);
     env.fact("u1", "claude-code", "moonshot-kimi-unroutable", s + 1_000, 0, 500, 50);
 
-    let daily = SqlSummaryRepository.daily_summary(&DailySummaryQuery { date: d });
+    let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d });
     // 用量可见：token 照报（unpriced 不进金额分母，但处理量必须可见）。
     assert_eq!(daily.tokens_by_host["claude-code"].uncached_input, 500);
     // 不以 0 冒充：claude 侧 has_unresolved（ Moonshot 无声明无价卡 → 钱不可归）。
@@ -247,7 +247,7 @@ fn q11_stale_host_is_explicitly_missing_not_a_zero() {
     let s = env.day_start(&d);
     env.fact("d1", "dsh", "deepseek-v4-flash", s + 1_000, 0, 10, 1);
 
-    let daily = SqlSummaryRepository.daily_summary(&DailySummaryQuery { date: d.clone() });
+    let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d.clone() });
     // 有数据宿主照报；缺失宿主必须 Unavailable（不是 0）。
     assert_eq!(daily.by_host["dsh"].freshness.state,
                agent_vitals_data::projection::FreshnessState::Fresh);
@@ -278,7 +278,7 @@ fn q12_double_import_with_interrupted_run_is_idempotent_and_rollback_safe() {
     env.fact("r1", "dsh", "deepseek-v4-flash", s + 1_000, 0, 11, 1);
 
     let read_all = |_env: &QEnv| {
-        SqlSummaryRepository.daily_summary(&DailySummaryQuery { date: d.clone() })
+        SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d.clone() })
             .tokens_by_host["dsh"]
             .uncached_input
     };
@@ -324,7 +324,7 @@ fn q14_same_raw_name_across_hosts_or_unmapped_is_explicit() {
     env.fact("m1", "claude-code", "moonshot-gpt-5.6", s + 1_000, 0, 100, 10);
     env.fact("m2", "codex", "gpt-5.6", s + 2_000, 0, 100, 10);
 
-    let daily = SqlSummaryRepository.daily_summary(&DailySummaryQuery { date: d });
+    let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d });
     assert!(daily.by_provider.contains_key("codex/openai"));
     assert!(daily.by_provider.contains_key("claude-code/unknown"));
     // claude 侧 unresolved、无金额；codex 侧 ApiEquivalent 有金额。
@@ -356,7 +356,7 @@ fn separation_discipline_realtime_and_legacy_do_not_add() {
         )
         .unwrap();
 
-    let daily = SqlSummaryRepository.daily_summary(&DailySummaryQuery { date: d.clone() });
+    let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d.clone() });
     // DTO 账单轴 = 实时 + legacy 兜底的**模型级合并**（3.2 收口语义）：
     // model-a 60 + model-b 200 = 260，不双计不漏计。
     assert_eq!(daily.tokens_by_host["claude-code"].uncached_input, 260);
