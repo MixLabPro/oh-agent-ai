@@ -178,10 +178,33 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   schema 已兼容 undated 保留语义）
 - [ ] **3.3 coverage_status** — 每宿主 measured/partial/unavailable 的
   分母定义落库（spec §4：摘要必须带 coverage/freshness/excluded/
-  last_observed_at/data_version）
+  last_observed_at/data_version）。
+  **设计定稿（2026-09-07，主 agent 拍板）**：分母 v1（`denominator_
+  version=1`，定义变更必须递增）= 每宿主 3 维：① usage 维——窗口内有
+  可解析时间戳的事实存在；② price 维——窗口内全部非零 token 模型能经
+  `billing_route_of`/价卡归属（认不出的模型让本维不算 measured，与
+  has_unresolved 同源）；③ sync 维——`source_files` 该宿主最近
+  last_seen_at_ms 落在窗口内。`measured_fields` = 三维命中数、
+  `total_fields = 3`。落点 `authority_query::coverage_status(conn, host,
+  start, end)`；`SqlSummaryRepository` 改用它（Json 侧保持静态 3/3 直至
+  Phase 4 退休）。诚实约束：窗口零事实的宿主三维全 0/3 + Unavailable；
+  「接线了」是能力不是观测，永不计入 measured
 - [ ] **3.4 budget_status** — 预算/告警从 `budget_config` + `usage_facts`
   聚合计算；`budget_config`/`budget_snoozes` 的显式管理 API（替代
-  alert.json / budget.json）
+  alert.json / budget.json）。
+  **设计定稿（2026-09-07，主 agent 拍板）**：① 配置迁移——首次使用时
+  `budget_config` 行缺失且旧 `budget.json` 存在 → 一次性 seed（文档化、
+  幂等：行存在后不再读旧文件）；spec §6.2.4「today/alert 不迁移」不适用
+  ——配置是用户输入不是派生数据。② CRUD API——`AuthorityDb::
+  {budget_config_get, budget_config_set, budget_snooze_get,
+  budget_snooze_set}` 全走 `with_immediate_txn`；CLI `budget config
+  show/set`、`budget snooze set/clear`。③ 计算——预算口径 = CNY 实际支出
+  （by_provider summable 桶的 CNY 列：MeteredActual+FixedSubscription+
+  HostBilled）→ minor 单位一律 `pyround(×100)`（银行家舍入与全仓一致），
+  **判断全部 minor 整数比较、不落浮点**（纪律 2）；ratio vs
+  warning_ratio_bp，snoozed（until_ms > now）输出标记不告警；输出带
+  coverage/freshness（复用 3.3）。④ 替代路径——alert.json/budget.json
+  读取面在 3.5 Tier B 切完后停写（Phase 4 删）
 - [ ] **3.5 读路径切换清单**（逐个消费点切 + 双轨验证）：
   - [ ] `runtime::summary::JsonSummaryRepository` → `SqlSummaryRepository`
   - [ ] `data coverage` / `data daily` CLI
