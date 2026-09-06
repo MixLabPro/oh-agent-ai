@@ -540,12 +540,27 @@ fn seed_budget_config_from_legacy(db: &agent_vitals_data::authority::AuthorityDb
     if !config_path().exists() {
         return false;
     }
+    // 审查收口（F2）：`load_config()` 的 merged 产物里 monthly_cny/daily_cny
+    // 恒有默认值（600/30），「残缺不 seed」的守卫对 merged 永不可达——
+    // config.toml 存在但不含 [budget] 节的机器仍会被装上 ¥600。改为看
+    // **原始 TOML 文本**里这两个键是否真实出现；键不齐 = 用户没配过预算，
+    // 报 no_budget 比替用户编一份诚实。
+    let text = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let has = |key: &str| {
+        text.lines().any(|l| {
+            let l = l.trim();
+            l.starts_with(key) && l[key.len()..].trim_start().starts_with('=')
+        })
+    };
+    if !has("monthly_cny") || !has("daily_cny") {
+        return false;
+    }
     let cfg = load_config();
     let monthly = cfg.get("monthly_cny").and_then(Value::as_f64);
     let daily = cfg.get("daily_cny").and_then(Value::as_f64);
     let warn_ratio = cfg.get("warn_at_ratio").and_then(Value::as_f64);
     let (Some(m), Some(d)) = (monthly, daily) else {
-        return false; // 旧配置残缺 → 不 seed，报 no_budget 比半份配置诚实
+        return false; // 防御性（上面 has 门后理论不可达）
     };
     // pyround(×100)：银行家舍入与全仓一致（util::pyround 的同一理由——预算
     // 百分比恰好落在半分点是真实场景）。
@@ -556,24 +571,15 @@ fn seed_budget_config_from_legacy(db: &agent_vitals_data::authority::AuthorityDb
         .is_ok()
 }
 
-/// ISO 日期时间串 → epoch 毫秒（snooze 的 until 参数）。复用 domain 的
-/// `ms_from_civil`（校验真实日期）；只认 `YYYY-MM-DDTHH:MM:SS(.fff)?Z` 与
-/// 无时区（按北京时间解释——与 Python 链 `_read_snooze` 的 `replace
-/// (tzinfo=_BEIJING)` 同语义）。
+/// ISO 日期时间串 → epoch 毫秒（snooze 的 until 参数）。**直接复用 domain
+/// `budget::parse_iso`**（2026-09-07 审查收口：第一版自制解析只看前 19 字节
+/// 并一律按北京时间减 8h，对 `Z`/`+08:00`/`-05:00` 后缀静默错位 8 小时）。
+/// parse_iso 的语义已完整：无后缀按**北京挂钟**解释（offset=+8h 已内扣，
+/// 返回值即真实 UTC ms，与 Python 链 `_read_snooze` 的
+/// `replace(tzinfo=_BEIJING)` 同语义）、Z=0、显式 ±HH:MM 原样——本函数
+/// 只做转发，不再二次偏移。
 fn iso_to_ms_beijing(s: &str) -> Option<i64> {
-    let b = s.as_bytes();
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || (b[10] != b'T' && b[10] != b' ') {
-        return None;
-    }
-    let y: i64 = s.get(0..4)?.parse().ok()?;
-    let mo: u32 = s.get(5..7)?.parse().ok()?;
-    let d: u32 = s.get(8..10)?.parse().ok()?;
-    let hh: u32 = s.get(11..13)?.parse().ok()?;
-    let mi: u32 = s.get(14..16)?.parse().ok()?;
-    let ss: u32 = s.get(17..19)?.parse().ok()?;
-    // 本地（北京）时间语义：ms_from_civil 产 UTC ms，北京时刻 = UTC − 8h。
-    let utc_ms = agent_vitals_domain::usage::ms_from_civil(y, mo, d, hh, mi, ss)?;
-    Some(utc_ms - 8 * 3_600_000)
+    agent_vitals_domain::budget::parse_iso(s).map(|(ms, _)| ms)
 }
 
 /// 预算状态（Phase 3.4）：SQL 权威面。`None` 输出仅当库打不开（诊断走
@@ -918,8 +924,12 @@ mod tests {
     /// 断言结束：`AGENT_VITALS_HOME` 是进程级 env，提前 drop 就回到真机
     /// HOME，`budget_status_sql` 会在真机库上跑（第一版红的三连）。
     struct BudgetEnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        // **Drop 顺序 = 声明顺序**：`_env` 声明在前 → 先恢复 AGENT_VITALS_
+        // HOME，之后才放进程级 ENV_LOCK。反过来的话，并发测试线程会在
+        // 「锁已放、env 未恢复」的子窗口抢到锁读到上一个测试的临时 home
+        // （审查 F4 的真实竞态）。
         _env: TestEnvGuard,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     /// 每 case 都从一个**保证干净**的权威库开始（`seed_authority_db` 同款
@@ -944,7 +954,7 @@ mod tests {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
         let db = agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap();
-        (BudgetEnvGuard { _lock: lock, _env: env }, db, month)
+        (BudgetEnvGuard { _env: env, _lock: lock }, db, month)
     }
 
     fn seed_fact_min(
@@ -1051,6 +1061,52 @@ mod tests {
             assert_eq!(rb, sp * 10_000 / 60_000, "ratio_bp = spent*10000/monthly 整数除法");
         }
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("av-budget-levels-{}", std::process::id())));
+    }
+
+    /// 档位阈值**精确钉界**（审查 F3：levels 的 OR 断言连 2000bp 的错误
+    /// warn 阈值都能过——直接调 `budget_config_set` 配一个极小月预算，用
+    /// 实测 spent 反推三个精确边界：恰 warn 阈值下/上、恰 100% 下/上）。
+    #[test]
+    fn budget_status_level_thresholds_are_exact() {
+        let (_guard, _db, month) = fresh_budget_env("exact");
+        // 不 seed 事实（spent=0），用**月预算本身**控制 spent/monthly 比例：
+        // spent 恒 0 → ratio_bp 恒 0 → level 恒 ok——不够。反过来：spent
+        // 来自 facts，这里 seed 一笔**已知折算价**的事实再调 budget_config
+        // _set 把 monthly 拨到 spent 的边界倍数上，四次查询钉四个档位。
+        let (start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month).unwrap();
+        seed_fact_min(&_db, "e1", "dsh", "deepseek-v4-flash", start + 1_000, 1_000_000, 100_000);
+        drop(_db);
+        let v = budget_status_sql(&month).unwrap();
+        let spent = v["spent_cny_minor"].as_i64().unwrap();
+        assert!(spent > 0, "seed 事实必须折出正支出（否则本测试失效）");
+        // 四次配置 × 查询：spent/warn 下（ok）、恰 warn 上（warn）、
+        // spent 恰 100% 下（warn）、恰 100% 上（exceeded）。monthly 取值
+        // 让 spent*10000/monthly 落在每档边界两侧各一次。
+        let cases = [
+            (spent * 10_000 / 7_999, "warn 以下（ratio < 8000bp）", "ok"),
+            (spent * 10_000 / 8_000, "恰 warn 阈值（ratio == 8000bp）", "warn"),
+            (spent * 10_000 / 9_999, "超 warn 未满额", "warn"),
+            (spent * 10_000 / 10_000, "恰 100%", "exceeded"),
+        ];
+        for (monthly_minor, label, want) in cases {
+            if monthly_minor <= 0 {
+                continue;
+            }
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+                crate::sql_sync::now_ms(),
+            )
+            .unwrap();
+            db.budget_config_set(monthly_minor, 3_000, 8_000, 1).unwrap();
+            drop(db);
+            let v = budget_status_sql(&month).unwrap();
+            assert_eq!(
+                v["level"].as_str(),
+                Some(want),
+                "{label}: monthly={monthly_minor} spent={spent} got {}",
+                v["level"]
+            );
+        }
     }
 
     #[test]
