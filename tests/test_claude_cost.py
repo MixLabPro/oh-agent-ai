@@ -595,6 +595,31 @@ class ClaudeSyncBothTests(unittest.TestCase):
              "message": {"model": "anthropic/claude-opus-5", "usage": {
                  "input_tokens": 30, "cache_read_input_tokens": 0,
                  "cache_creation_input_tokens": 0, "output_tokens": 3}}},
+            # 2026-09-06 真机对账挖出的去重回归（message.id 重复行）：同一条
+            # 已完成消息（同一 message.id）在真机 session 文件里出现 4 次、
+            # usage 字段逐字节相同——旧算法无条件累加，claude-ledger.json 因此
+            # 高估约 2 倍。这里钉一个最小复现：msg_dedup_a 出现 3 次（只应计
+            # 一次）+ msg_dedup_b 出现 1 次（不同消息，必须单独计入）。
+            {"type": "assistant", "timestamp": "%sT07:00:00.000Z" % today,
+             "message": {"id": "msg_dedup_a", "model": "claude-haiku-test",
+                         "usage": {
+                             "input_tokens": 100, "cache_read_input_tokens": 0,
+                             "cache_creation_input_tokens": 0, "output_tokens": 10}}},
+            {"type": "assistant", "timestamp": "%sT07:00:01.000Z" % today,
+             "message": {"id": "msg_dedup_a", "model": "claude-haiku-test",
+                         "usage": {
+                             "input_tokens": 100, "cache_read_input_tokens": 0,
+                             "cache_creation_input_tokens": 0, "output_tokens": 10}}},
+            {"type": "assistant", "timestamp": "%sT07:00:02.000Z" % today,
+             "message": {"id": "msg_dedup_a", "model": "claude-haiku-test",
+                         "usage": {
+                             "input_tokens": 100, "cache_read_input_tokens": 0,
+                             "cache_creation_input_tokens": 0, "output_tokens": 10}}},
+            {"type": "assistant", "timestamp": "%sT07:00:03.000Z" % today,
+             "message": {"id": "msg_dedup_b", "model": "claude-haiku-test",
+                         "usage": {
+                             "input_tokens": 100, "cache_read_input_tokens": 0,
+                             "cache_creation_input_tokens": 0, "output_tokens": 10}}},
         ])
 
     def _fresh_side(self, tag):
@@ -644,6 +669,22 @@ class ClaudeSyncBothTests(unittest.TestCase):
         self.assertEqual(
             ledger["unaccounted"]["deepseek-v4-flash"]["output_tokens"], 96,
             "baseline 100 − tail_days 行和 4（上月 1 + 今天 1+2）")
+        # message.id 去重（2026-09-06 真机 bug）：sess3 里 msg_dedup_a 出现
+        # 3 次（只计一次）+ msg_dedup_b 出现 1 次（不同消息，单独计入）——
+        # 期望 input_tokens = 100*2 = 200，不是 100*4 = 400。两个 sentinel
+        # 计数都要对：duplicate_usage_rows = 2（msg_dedup_a 的第 2、3 次）。
+        haiku = ledger["days"][_today_bj()]["claude-haiku-test"]
+        self.assertEqual(haiku["input_tokens"], 200,
+                         "重复 message.id 不能被无条件累加；got %r" % haiku)
+        self.assertEqual(haiku["output_tokens"], 20)
+        self.assertIn("duplicate usage rows: 2", py_r.stdout)
+        self.assertIn("duplicate usage rows: 2", rs_r.stdout)
+        fold_rs = json.loads(got_rs["state/claude-fold.json"])
+        self.assertEqual(
+            fold_rs["sessions"]["sess3"]["duplicate_usage_rows"], 2)
+        self.assertEqual(
+            sorted(fold_rs["sessions"]["sess3"]["seen_event_ids"]),
+            ["msg_dedup_a", "msg_dedup_b"])
 
     def test_idempotent_rerun_and_tail_resume(self):
         """重跑零变化（exactly-once）；append 一行后重跑 → resumed 且只折增量，

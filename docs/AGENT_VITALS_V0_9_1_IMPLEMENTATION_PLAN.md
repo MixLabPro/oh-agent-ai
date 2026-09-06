@@ -16,10 +16,10 @@
 | Phase 0 冻结与基线 | ✅ | spec 冻结；基线备份 `~/.agent-vitals/backup-v0.9.1-baseline/`（facts 48,999 条 + 索引库 + state JSON + 对账报告） |
 | Phase 1 schema 与迁移框架 | ✅ | authority.rs（DDL v1 全 12 表 + 版本闸 + 中断清扫 + 事务帮助器 + retention）+ 时钟注入（sql_sync::now_ms）+ 迁移记录（sync_runs/migrations 表） |
 | Phase 2 清洗写入与同步 | ✅ | 三路并发实现合流（c06de2e）+ 审查收口（6776fe0）+ 收口批（b1f8b38）+ 迁移哨兵真 bug 修复（1f67331，rusqlite 参数计数错位导致 migrations 表假绿） |
-| Phase 3 SQL repository 与读路径切换 | 🔨 | 3.1 完成：`authority_query`（69a0d56，usage_facts 反查 DSH/claude/codex 计价桶形状，15 测）+ `SqlSummaryRepository`（e99c23a，SummaryRepository 第二实现，5 个 client-parity 测试）。**真机对账意外发现一条独立真 bug**：见下方「Phase 3.1 真机对账发现」。3.2–3.6 未开始 |
+| Phase 3 SQL repository 与读路径切换 | 🔨 | 3.1 完成：`authority_query`（69a0d56，usage_facts 反查 DSH/claude/codex 计价桶形状，15 测）+ `SqlSummaryRepository`（e99c23a，SummaryRepository 第二实现，5 个 client-parity 测试）。**真机对账意外发现并修复一条独立头部 bug**：见下方「claude ledger 去重 bug」。3.2–3.6 未开始 |
 | Phase 4 双轨验收与旧路径退役 | ⬜ | |
 
-### Phase 3.1 真机对账发现（2026-09-06，非本 Phase 引入）
+### claude ledger 去重 bug——发现、修复、真机验证（2026-09-06，非本 Phase 引入）
 
 `SqlSummaryRepository` 写完后用真机 `~/.agent-vitals` 数据跑
 `crates/agent-vitals-runtime/examples/reconcile_real.rs`（json vs sql 逐宿主
@@ -33,12 +33,22 @@ emitter（喂新 SQL 管线）从 Stage 1c 就按 `message.id`/`uuid` 正确去�
 管线共用同一行解析器 `parse_claude_usage_row`，但去重逻辑只在 emitter 侧，
 fold 侧从未补齐，这是 v0.7 就存在的缺陷，不是本 Phase 引入。
 
-**当前生产影响**：托盘/CLI 的 claude-code 成本显示（读 `claude-ledger.json`）
-可能已经高估约 2 倍；新 SQL `usage_facts` 侧数字是对的。**未修复**——诊断
-详情见 memory `claude-ledger-overcount-bug`，修复面明确（`apply_record` 复用
-`parse_claude_usage_row` 已算出的 `source_event_id` 去重）但触达当前生产可见
-数字，本次会话选择只诊断、不顺手改，留用户决定优先级（独立修 / 随 Phase 4
-退休 ledger 读路径自然解决）。
+**已修复**（用户 2026-09-06 决策：先修此 bug 再继续 Phase 3.2/3.5，避免
+读路径切换时无法区分"SQL 迁移效果"与"旧账修正"）：`apply_record`/
+`_apply_record`（Rust + Python 双侧）按 `source_event_id` 去重，持久化
+`sess["seen_event_ids"]`（增量 resume 也要认得出跨批次重复）；
+`FOLD_SCHEMA_VERSION` 2→3 强制真机全量重折（已写入的重复计数不可逆）。
+新增 3 组测试：同 message.id 重复 3 次只计一次、不同 message.id 都计入、
+真机语料 fixture 扩展进 `tests/test_claude_cost.py` 的 `both()` 差分（byte-parity
+覆盖去重后的正确值）。
+
+**真机验证**（修复前后对比，2026-09 月）：claude-code token 总量
+6,752,783,759 → 3,403,484,732（−49.6%，此前 ≈2.0× 高估）；ApiEquivalent
+（anthropic，USD）$1368.92 → $788.81（−42.4%）；MeteredEstimate（deepseek
+relay，CNY）¥591.68 → ¥216.79（−63.4%）；真机 `claude-sync` 报告
+`duplicate usage rows: 38708`（169 个真实 session 文件）。修复后 json/sql
+两条独立管线的月度 token 差距从 ~49% 收窄到 ~1.7%——两条管线互相印证的
+直接证据。详情见 memory `claude-ledger-overcount-bug`。
 
 ---
 

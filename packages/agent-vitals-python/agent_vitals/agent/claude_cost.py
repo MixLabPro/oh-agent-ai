@@ -33,7 +33,15 @@ from .usage import _is_peak_slot
 # `FOLD_SCHEMA_VERSION` 不匹配（含缺失，等价旧版本 0）时，claude_sync 清空
 # 整份 `sessions`，让每个文件都走 `_fold_one` 的 "new" 分支——不是迁移函数，
 # 是"重新从权威源 ingest"，与 v0.7 spec §4.1"事实 cache 可重建"同一个原则。
-FOLD_SCHEMA_VERSION = 2
+#
+# v3（2026-09-06，`_apply_record` 补 message.id 去重）：v2 及更早的
+# tail_days 是在"同一 assistant 消息重复几行就无条件累加几次"的旧算法下
+# 写的——真机验证同一 message.id 在同一文件里出现 4 次、usage 字段逐字节
+# 相同，2026-09 月度 claude token 因此被系统性高估约 2 倍（见 Rust
+# claude_cost.rs 同一常量的注释、memory claude-ledger-overcount-bug）。
+# 已写入的 tail_days 里这笔重复计数不可逆（没存 seen_event_ids，事后无法
+# 甄别），与 v2 同一补救：强制全量重折。
+FOLD_SCHEMA_VERSION = 3
 
 # 行级 usage 的 4 个计数键（API 全形，真机 100%；写入桶的固定键序）。
 SNAKE_KEYS = ["input_tokens", "cache_read_input_tokens",
@@ -312,6 +320,20 @@ def _apply_record(sess, rec, *, native_session_id, machine_namespace, source_pro
             _inc(sess, "unattributed_rows")
         # SKIP 不增 sentinel（cost-state / 非 dict / 无 usage 都不计）。
         return
+    # 去重（2026-09-06，见 FOLD_SCHEMA_VERSION 的 v3 注释/Rust 同一函数的
+    # 镜像注释）：同一 session 内相同 source_event_id（message.id/uuid）的
+    # 重复行是同一条已完成消息的重复记录，无条件累加会把同一笔已计费用量
+    # 算 2~4 遍。与 emitter（claude_usage_fact.py）"同一 session 重复
+    # source_event_id 只保留一个 fact"完全同一条规则。只在
+    # source_event_id 非空（identity_basis=="native"）时去重——derived-hash
+    # 的空 source_event_id 需要 emitter 那边的文件级字节偏移才能补全，fold
+    # 侧拿不到，保留旧行为（真机语料 uuid 恒存在，未命中这个分支）。
+    if result.source_event_id:
+        seen = sess.setdefault("seen_event_ids", {})
+        if result.source_event_id in seen:
+            _inc(sess, "duplicate_usage_rows")
+            return
+        seen[result.source_event_id] = True
     # Observation → fold tail_days。emit 用的额外字段（message_id 等）
     # 在 commit 2 落地，本函数只读 fold 字段（day / model / tokens_4 / peak）。
     tokens = (result.input_tokens, result.cache_read_tokens,
@@ -588,7 +610,7 @@ def claude_sync(home, shadow=False):
         else:
             skipped += 1
     # 摘要统计（最终态）：基线会话数 / 纯行和会话数 / 两个哨兵计数。
-    with_baseline = row_sum_only = unreadable = unattributed = 0
+    with_baseline = row_sum_only = unreadable = unattributed = duplicate = 0
     for sess in sessions.values():
         if not isinstance(sess, dict):
             continue
@@ -598,6 +620,7 @@ def claude_sync(home, shadow=False):
             row_sum_only += 1
         unreadable += int(sess.get("unreadable_usage_rows") or 0)
         unattributed += int(sess.get("unattributed_rows") or 0)
+        duplicate += int(sess.get("duplicate_usage_rows") or 0)
     folds["schema_version"] = FOLD_SCHEMA_VERSION
     _atomic_write(fp, folds)
     # 全量重建 ledger + 归档 + 残差（幂等；崩溃重跑不会双计）。rebuild_days
@@ -629,7 +652,7 @@ def claude_sync(home, shadow=False):
     print("claude-sync: cost-state baselines: %d sessions; row-sum only: %d"
           % (with_baseline, row_sum_only))
     print("claude-sync: ledger days: %d; unreadable usage rows: %d; "
-          "unattributed rows: %d" % (len(ledger_days), unreadable,
-                                     unattributed))
+          "unattributed rows: %d; duplicate usage rows: %d"
+          % (len(ledger_days), unreadable, unattributed, duplicate))
     print("claude-sync: unaccounted residual: %d models; %d tokens"
           % (len(unaccounted), unaccounted_tokens))

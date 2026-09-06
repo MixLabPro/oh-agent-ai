@@ -48,7 +48,12 @@
 //! ## Checkpoint / ledger / 归档的写序（镜像 month.json 纪律）
 //!
 //! - `claude-fold.json`：`{"sessions": {session_id: {size, mtime_ns, baseline,
-//!   baseline_day, tail_days, unattributed_rows, unreadable_usage_rows}}}`。
+//!   baseline_day, tail_days, seen_event_ids, unattributed_rows,
+//!   unreadable_usage_rows, duplicate_usage_rows}}}`。`seen_event_ids`
+//!   （v3 新增，2026-09-06）是本会话已折过的 `source_event_id`
+//!   （message.id/uuid）集合——增量续折（resume）也要认得出跨批次的重复行，
+//!   emitter 那种"整份重读、内存 HashSet 一次性去重"的做法在这里不成立，
+//!   必须持久化。
 //!   `size`/`mtime_ns` 是**已折到哪**的指纹（同 r2a fingerprint 的只 seek 精神：
 //!   尾读只解析新行）。**无时间戳字段**——mtime/size 就是状态，字节确定性由
 //!   构造保证（同一批输入重跑零变化，idempotency 测试钉）。
@@ -92,7 +97,15 @@ use agent_vitals_runtime::takeover::require_rust_owner;
 /// 等价旧版本 0）时，`claude_sync` 清空整份 `sessions`，让每个文件都走
 /// `fold_one` 的 "new" 分支——不是迁移函数，是"重新从权威源 ingest"，与 v0.7
 /// spec §4.1"事实 cache 可重建"同一个原则。
-const FOLD_SCHEMA_VERSION: u64 = 2;
+///
+/// **v3（2026-09-06，`apply_record` 补 `message.id` 去重）**：v2 及更早的
+/// `tail_days` 是在"同一 assistant 消息重复几行就无条件累加几次"的旧算法
+/// 下写的——真机验证 session-54c5e11f 的 `msg_011CejgZRMhsDR9bzwawJ5q6` 在
+/// 同一文件里出现 4 次、`usage` 字段逐字节相同，2026-09 月度 claude token
+/// 因此被系统性高估约 2 倍（memory `claude-ledger-overcount-bug`）。已写入
+/// 的 `tail_days` 里这笔重复计数是**不可逆**的（没有存 `seen_event_ids`，
+/// 无法事后甄别哪些累加是重复的）——与 v2 同一个补救：强制全量重折。
+const FOLD_SCHEMA_VERSION: u64 = 3;
 
 /// 行级 usage 的 4 个计数键 / 短键旧形状 / 行级读取原语已归位
 /// `agent_vitals_hosts::claude_code_usage`（Stage A emitter 归位的同一批：
@@ -255,6 +268,37 @@ fn apply_record(
                 source_profile,
             ) {
                 Ok(obs) => {
+                    // 去重（2026-09-06 真机对账挖出的头部 bug，见 memory
+                    // `claude-ledger-overcount-bug`）：Claude Code 的 session
+                    // JSONL 会把同一条**已完成**的 assistant 消息重复写出好
+                    // 几行——真机实例 session-54c5e11f 的
+                    // `msg_011CejgZRMhsDR9bzwawJ5q6` 在同一文件里出现 4 次，
+                    // 4 行的 `usage` 字段逐字节相同（不是流式增量快照，是纯
+                    // 重复记录，只有各行自己的顶层 uuid/timestamp 不同）。
+                    // 旧代码对每一行无条件 `bump_tail`，真机 2026-09 月度
+                    // token 因此被系统性高估约 2 倍。
+                    //
+                    // 去重键 = `source_event_id`（message.id，缺席回落顶层
+                    // uuid）——与 emitter（`claude_usage_fact.rs`）"同一
+                    // session 重复 source_event_id 只保留一个 fact"完全同一
+                    // 条规则，两条管线现在算出同一个数。**只在
+                    // `source_event_id` 非空（`identity_basis=="native"`）
+                    // 时去重**：derived-hash 的空 `source_event_id` 需要
+                    // emitter 那边的文件级字节偏移才能补全，fold 侧拿不到，
+                    // 保留旧行为——真机语料 uuid 恒存在，这个分支理论存在、
+                    // 实测未命中，不强行凑一个不可靠的键导致误判去重。
+                    if !obs.source_event_id.is_empty() {
+                        let seen = sess
+                            .entry("seen_event_ids".to_string())
+                            .or_insert_with(|| json!({}))
+                            .as_object_mut()
+                            .expect("seen_event_ids is object");
+                        if seen.contains_key(&obs.source_event_id) {
+                            inc(sess, "duplicate_usage_rows");
+                            return;
+                        }
+                        seen.insert(obs.source_event_id.clone(), Value::Bool(true));
+                    }
                     // 峰谷归属：这一行有真实 ts，分辨率是精确的，不是猜的。
                     // ms/peak 由共享 parser 从同一 ts 算（缺 time 不臆造高峰）。
                     let tail = sess
@@ -603,6 +647,7 @@ pub fn claude_sync(home: &Path, shadow: bool) -> Result<(), String> {
     let mut row_sum_only = 0u64;
     let mut unreadable = 0u64;
     let mut unattributed = 0u64;
+    let mut duplicate = 0u64;
     for sess in sessions.values() {
         let Some(o) = sess.as_object() else {
             continue;
@@ -614,6 +659,7 @@ pub fn claude_sync(home: &Path, shadow: bool) -> Result<(), String> {
         }
         unreadable += o.get("unreadable_usage_rows").and_then(Value::as_u64).unwrap_or(0);
         unattributed += o.get("unattributed_rows").and_then(Value::as_u64).unwrap_or(0);
+        duplicate += o.get("duplicate_usage_rows").and_then(Value::as_u64).unwrap_or(0);
     }
     folds["schema_version"] = json!(FOLD_SCHEMA_VERSION);
     atomic_write_json(&fp, &folds);
@@ -655,7 +701,7 @@ pub fn claude_sync(home: &Path, shadow: bool) -> Result<(), String> {
         "claude-sync: cost-state baselines: {with_baseline} sessions; row-sum only: {row_sum_only}"
     );
     println!(
-        "claude-sync: ledger days: {}; unreadable usage rows: {unreadable}; unattributed rows: {unattributed}",
+        "claude-sync: ledger days: {}; unreadable usage rows: {unreadable}; unattributed rows: {unattributed}; duplicate usage rows: {duplicate}",
         ledger_days.len()
     );
     println!(
@@ -744,6 +790,59 @@ mod tests {
             unaccounted.get("deepseek-v4-flash").unwrap().get("input_tokens"),
             Some(&json!(990))
         );
+    }
+
+    /// 2026-09-06 真机对账挖出的头部 bug 回归（memory
+    /// `claude-ledger-overcount-bug`）：同一条 assistant 消息（同一
+    /// `message.id`）重复出现——真机实例 4 次、usage 字段逐字节相同——旧
+    /// 算法无条件 `bump_tail`，claude-code 月度 token 因此被系统性高估约
+    /// 2 倍。这里钉最小复现：同一 message.id 出现 3 次只应计一次。
+    #[test]
+    fn duplicate_message_id_is_counted_once() {
+        let row = |ts: &str| json!({
+            "type": "assistant", "timestamp": ts,
+            "message": {"id": "msg_dup", "model": "claude-opus-5", "usage": {
+                "input_tokens": 100, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0, "output_tokens": 10}},
+        });
+        let mut sess = Map::new();
+        for ts in ["2026-09-05T04:44:53.062Z", "2026-09-05T04:44:53.587Z",
+                   "2026-09-05T04:44:54.781Z"] {
+            apply_record(&mut sess, &row(ts), "test-sid", "ns-placeholder", "default");
+        }
+        let tail = sess.get("tail_days").unwrap().get("2026-09-05").unwrap()
+            .get("claude-opus-5").unwrap();
+        assert_eq!(tail.get("input_tokens"), Some(&json!(100)), "重复行不能累加两次");
+        assert_eq!(tail.get("output_tokens"), Some(&json!(10)));
+        // 两次重复（3 次出现 − 1 次首见）计成 duplicate sentinel。
+        assert_eq!(sess.get("duplicate_usage_rows"), Some(&json!(2)));
+        assert_eq!(
+            sess.get("seen_event_ids").unwrap().as_object().unwrap().len(),
+            1,
+            "去重集合只应记住一个 message.id"
+        );
+    }
+
+    /// 对照组：不同 `message.id`、相同 usage 的两条行必须都计入——去重键是
+    /// message.id 本身，不是"usage 数值相同就判重复"（那会把两次真实独立
+    /// 的相同用量的调用误判成一次）。
+    #[test]
+    fn different_message_ids_with_identical_usage_both_count() {
+        let row = |id: &str, ts: &str| json!({
+            "type": "assistant", "timestamp": ts,
+            "message": {"id": id, "model": "claude-opus-5", "usage": {
+                "input_tokens": 100, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0, "output_tokens": 10}},
+        });
+        let mut sess = Map::new();
+        apply_record(&mut sess, &row("msg_a", "2026-09-05T04:44:53.062Z"),
+                     "test-sid", "ns-placeholder", "default");
+        apply_record(&mut sess, &row("msg_b", "2026-09-05T04:44:54.062Z"),
+                     "test-sid", "ns-placeholder", "default");
+        let tail = sess.get("tail_days").unwrap().get("2026-09-05").unwrap()
+            .get("claude-opus-5").unwrap();
+        assert_eq!(tail.get("input_tokens"), Some(&json!(200)), "两条不同消息都必须计入");
+        assert_eq!(sess.get("duplicate_usage_rows"), None, "两条都是首见，没有重复");
     }
 
     #[test]
