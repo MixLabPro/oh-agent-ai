@@ -310,7 +310,9 @@ impl<'a> SqlFactWriter<'a> {
 
     /// 批次标记 source（`write_flat_facts_to_authority` 用）：跨文件的
     /// 扁平批次没有单一源文件——落一行合成 source（路径 = `/sync/{host}`，
-    /// 经哈希只留指纹）。返回 source_id = `{host}:sync`（稳定，幂等）。
+    /// 经哈希只留指纹）。返回 source_id = `{host}:{fnv1a64(路径)}`（与
+    /// upsert_source_file 同构；**Phase 3 差量/repair 必须排除此类合成行**
+    /// ——size/mtime 恒 0，按文件指纹判定会把它们当 vanished 假阳性）。
     pub fn upsert_batch_source(&self, host: &str) -> Result<String, AuthorityError> {
         self.upsert_source_file(
             host,
@@ -433,7 +435,34 @@ impl<'a> SqlFactWriter<'a> {
                     self.now_ms,
                 ],
             )?;
-            if n > 0 { report.inserted += 1 } else { report.duplicate += 1 }
+            if n > 0 {
+                report.inserted += 1
+            } else {
+                // **payload 冲突可观测（审查 §5.3 收口）**：同 fact_id 已在库
+                // 且四桶不同 = 源端更正/漂移——DO NOTHING 会静默保留旧值，
+                // 这里落一条质量行让「静默陈旧」浮出来（Phase 3 的更正流
+                // 消费此信号；§6.2.5「冲突必须产出 issue」）。
+                let stored: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT raw FROM facts WHERE fact_id = ?1",
+                        rusqlite::params![r.s("fact_id").unwrap_or_default()],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                let differs = stored
+                    .as_deref()
+                    .map(|s| serde_json::from_str::<Value>(s).map(|old| old != *fact).unwrap_or(true))
+                    .unwrap_or(false);
+                if differs {
+                    self.write_rejected(
+                        &format!("payload_conflict:{}", r.s("fact_id").unwrap_or_default()),
+                        &["same fact_id, different payload — 源端更正需要显式处理流程"
+                            .to_string()],
+                    )?;
+                }
+                report.duplicate += 1;
+            }
         }
         Ok(report)
     }

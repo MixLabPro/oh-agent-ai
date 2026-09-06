@@ -81,7 +81,7 @@ CREATE TABLE sync_runs (
   run_id TEXT PRIMARY KEY,
   started_at_ms INTEGER NOT NULL,
   completed_at_ms INTEGER,
-  trigger TEXT NOT NULL,                 -- cli | tray | migration | repair
+  trigger TEXT NOT NULL,                 -- cli | tray | migration | repair | maintenance
   status TEXT NOT NULL,                  -- running | succeeded | failed | cancelled
   schema_version INTEGER NOT NULL,
   error_code TEXT,

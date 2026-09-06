@@ -76,6 +76,11 @@ pub struct SqlInsertReport { pub inserted: usize, pub duplicate: usize, pub reje
   emit 后走 `SqlFactWriter`；**JSONL 停写**（存量文件保留为遗留）。
 - 敏感点：fact 的 `event_ts_ms` 由 ISO ts 解析（复用 store.rs `parse_ymd` 同
   层 helper）；`event_peak` 复用 `peak_of`（三个尾部形态都已钉测）。
+- **批次合成 source 行排除规则**（审查收口定稿）：`upsert_batch_source` 落
+  的合成行路径 = `/sync/{host}`、size/mtime 恒 0——Phase 3 的差量判定、
+  repair 重放、source 计数必须排除（`source_id LIKE '%:sync'` 或按指纹
+  判 0），并把「迁移窗口内事实的 source_id 指向批次行」记录为已知
+  provenance 限制（fact_id/会话下钻不受影响，文件级溯源在此窗口缺失）。
 
 
 

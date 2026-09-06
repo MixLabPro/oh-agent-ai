@@ -305,23 +305,35 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         });
         // matches! 直接比 Option<String>（as_deref 会触发 needless lint）。
         if !matches!(&last, Some(d) if d == &bj_day) {
-            // Option<String> 与 &str 的比较经 as_deref 归一（clippy 认可的写法）。
+            // 保留滚动也是写入 → maintenance run（spec §5.4「记录 maintenance
+            // run」）+ 事务；失败不盖日戳（审查 P2：静默顺延 24h 是劣化）。
+            let run_id = crate::sql_sync::new_run_id("maintenance");
+            let _ = db.begin_run(&run_id, "maintenance", crate::sql_sync::now_ms());
             let cutoff = crate::sql_sync::retention_cutoff_ms(
                     &crate::clock::current_month_beijing(),
                     crate::sql_sync::RETENTION_MONTHS_MINUS_ONE,
                 )
                 .unwrap_or(0);
-            match db.retention_usage_facts(cutoff) {
-                Ok(n) if n > 0 => {
-                    eprintln!("authority retention: dropped {n} facts (13mo)");
+            let ret = db.retention_usage_facts(cutoff);
+            let _ = db.finish_run(
+                &run_id,
+                if ret.is_ok() { "succeeded" } else { "failed" },
+                ret.as_ref().err().map(|_| "retention_failed".to_string()).as_deref(),
+                ret.as_ref().err().map(|e| e.to_string()).as_deref(),
+                crate::sql_sync::now_ms(),
+            );
+            match ret {
+                Ok(n) => {
+                    crate::state::atomic_write_json(
+                        &ret_path,
+                        &json!({"last_retention_date": bj_day}),
+                    );
+                    if n > 0 {
+                        eprintln!("authority retention: dropped {n} facts (13mo)");
+                    }
                 }
-                Ok(_) => {}
                 Err(e) => eprintln!("authority retention failed: {e}"),
             }
-            crate::state::atomic_write_json(
-                &ret_path,
-                &json!({"last_retention_date": bj_day}),
-            );
         }
     }
 
