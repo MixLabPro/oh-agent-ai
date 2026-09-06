@@ -284,7 +284,7 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
    legacy 专属固定值，`UNIQUE` 约束不会撞实时事实），查询侧
    （`SqlSummaryRepository::merged_claude_days`）已经做「有实时用实时、
    没有才退回 legacy」——导入侧只管把 ledger 全量灌进去，不用自己判重叠。
-5. `migrations` 表的 `checkpoint_json` 可以顺带把 legacy 导入的三个数字也
+5. `migrations` 表的 `checkpoint_json` 可以顺带把 legacy 导入的五个数字也
    塞进去（跟 JSONL 导入的 `{"inserted":...}` 合并成一个对象），不需要
    单开一行 migrations 记录。
 

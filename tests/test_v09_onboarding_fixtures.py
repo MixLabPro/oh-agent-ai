@@ -25,7 +25,7 @@ import time
 import unittest
 from pathlib import Path
 
-from tests.env_helpers import isolated_home_env
+from tests.env_helpers import isolated_home_env, seed_authority_facts
 
 ROOT = Path(__file__).resolve().parent.parent
 V09 = ROOT / "fixtures" / "v09"
@@ -101,23 +101,12 @@ class OnboardingContractBinaryTests(unittest.TestCase):
         return proc.stdout
 
     def _plant_all_three_hosts(self, month):
-        """三份语料装进隔离环境：DSH/Claude 账日取查询月 15 号（固定，避免
-        与 freshness 的今天/昨天判定互相依赖），Codex rollout 时间戳同样改写。
-        返回 (state_dir, 数据日)。"""
-        data = self.home / "data" / "state"
-        data.mkdir(parents=True)
+        """三宿主各一条实时事实种进隔离权威库（Tier A：CLI 读
+        `SqlSummaryRepository`——种子走 facts JSONL + `data-migrate`，state
+        投影文件喂不到新读源）。账日取查询月 15 号（固定，避免与 freshness
+        的今天/昨天判定互相依赖）。返回数据日。"""
         day = month + "-15"
-        dsh = _load("dsh/month-day.json")
-        dsh["days"] = {day: dsh["days"]["1970-01-01"]}
-        (data / "month.json").write_text(json.dumps(dsh))
-        claude = _load("claude-code/ledger-day.json")
-        claude["days"] = {day: claude["days"]["1970-01-01"]}
-        (data / "claude-ledger.json").write_text(json.dumps(claude))
-        codex_dir = self.home / ".codex" / "sessions"
-        codex_dir.mkdir(parents=True)
-        text = (V09 / "codex" / "rollout-minimal.jsonl").read_text().replace(
-            "1970-01-01", day)
-        (codex_dir / "rollout-fixture.jsonl").write_text(text)
+        seed_authority_facts(_BIN, self.home, day)
         return day
 
     def test_three_hosts_land_on_their_contract_basis(self):

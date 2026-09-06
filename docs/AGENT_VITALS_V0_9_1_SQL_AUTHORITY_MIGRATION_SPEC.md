@@ -548,3 +548,28 @@ v0.9.1 的交付不是“新增一个 SQLite 表”，而是完成一次受控�
   migrate）→ Phase 3（SqlSummaryRepository + 全读路径切换）→ Phase 4
   （双轨验收 + 旧路径退役）。每 Phase 完成走既定循环
   （全量测试 → subAgent 审查 → 修复）。
+
+---
+
+## 14. Phase 3 实施期修订记录（2026-09-07）
+
+实施与审查过程中对正文的三处澄清/收窄，均不改变表结构与权威迁移目标：
+
+1. **§6.2(5)「旧 JSON 永不覆盖更具体的 SQL fact」的适用边界**：该规则
+   保护的是**实时行级事实不被旧 JSON 覆盖**（来源不同、具体度不同）。
+   `legacy_aggregate` 行与 ledger JSON 是**同一来源的两个快照**——ledger
+   是 `claude_sync` 全量重建的滚动投影，同 (day, model, peak) 键的桶值
+   合法地会变（FOLD_SCHEMA_VERSION 升级的全量重折即实例），且这些月份
+   原始 JSONL 已轮转、ledger 是唯一 store of record。因此同 kind 重导
+   入遇值变更 → **更新既有行为新值并刷 `ingested_run_id`（last-writer
+   溯源）+ 计入 report.updated**，不是违规；跨 kind 冲突（身份契约下
+   不可达，防御分支）仍写 data-quality issue 且不覆盖。
+2. **coverage 降级标记逐月化**：§6.2.3 的「标记 coverage 降级」落地为
+   **每个实际生成 legacy 行的月份各写一条**（scope_key=该月），不再把
+   跨月批粗化为单条 "all"——消费方（`SqlSummaryRepository` 把被标记
+   月份的 claude 侧 freshness 降为 `Partial`）必须能按月回答「这个月
+   是否被聚合兜底」。
+3. **§9 导出双路径的数据源确认**：原文「二者均从 SQL 查询生成」与
+   Phase 3.6 实施一致；随之的语义澄清：私有导出的「完整面」= 权威库的
+   完整面（`identity_basis` 等 ingest 元数据不出现在导出中；软删除行按
+   §5.4 默认过滤）。

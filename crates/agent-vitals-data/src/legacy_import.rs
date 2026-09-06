@@ -27,9 +27,10 @@
 //! （observation_kind 同时在 UNIQUE 键与 fact_id 派生输入里），保留为防御
 //! （真出现 = 有人绕过契约层手写了同 fact_id 的行）→ 写
 //! `data_quality_issues`（code="legacy_aggregate_conflict"）。导入批结束时
-//! 写一条 coverage 降级标记（code="legacy_aggregate"、scope_type="month"），
-//! 批内 distinct 月份唯一 → scope_key=该月，跨多月 →
-//! "all"——查询方据此把涉及月份/全部月份的处理降级，不把聚合当可重放的
+//! 按**实际生成 legacy 行的月份逐月**写 coverage 降级标记
+//! （code="legacy_aggregate"、scope_type="month"、scope_key=该月；2026-09-07
+//! 审查收口：不再粗化为跨月批一条 "all"——消费方必须能回答「这个月是否被
+//! 聚合兜底」），查询方据此把涉及月份的处理降级，不把聚合当可重放的
 //! 逐行事实。
 //!
 //! **事实身份委托 `contracts::usage_fact::build_usage_fact`**——fact_id 由
@@ -81,6 +82,10 @@ pub struct LegacyImportReport {
     /// 跨 kind 防御分支：既有行的 observation_kind 不是 legacy_aggregate（身份
     /// 契约下不可能出现）→ 写 data_quality_issues，不覆盖也不吸收。
     pub conflicts: usize,
+    /// 拒入行数（非法日期/负 token/桶形状错——写 data_quality_issues 的
+    /// 同时计数，2026-09-07 审查收口：此前 rejected 恒 0 而 issues 有行，
+    /// 迁移摘要与质量面互相矛盾）。
+    pub rejected: usize,
 }
 
 /// 导入 claude ledger 聚合（当前月文件 + month-archive 的 days）为
@@ -158,6 +163,10 @@ pub fn import_claude_ledger_days(
                             &format!("{day}:{model}:{peak}"),
                             problems,
                         )?;
+                        // 拒入行计入 rejected（2026-09-07 审查收口：此前只写
+                        // issue 不计数，checkpoint 的 rejected 键只剩 JSONL
+                        // 侧的数，迁移摘要与 issues 面互相矛盾）。
+                        report.rejected += 1;
                         if peak == 0 {
                             // base（全量）行都过不了校验 → 同一对里的 peak 子行
                             // 就成了没有主体的孤儿子集（peak ⊆ base，子集不能脱离
@@ -318,14 +327,16 @@ fn touch_fact(
             let n = conn.execute(
                 "UPDATE usage_facts
                  SET uncached_input_tokens = ?1, cache_read_tokens = ?2,
-                     cache_write_tokens = ?3, output_tokens = ?4, updated_at_ms = ?5
-                 WHERE fact_id = ?6",
+                     cache_write_tokens = ?3, output_tokens = ?4, updated_at_ms = ?5,
+                     ingested_run_id = ?6
+                 WHERE fact_id = ?7",
                 rusqlite::params![
                     fact.bucket[0],
                     fact.bucket[1],
                     fact.bucket[2],
                     fact.bucket[3],
                     now_ms,
+                    run_id,
                     fact_id,
                 ],
             )?;
@@ -410,27 +421,29 @@ fn mark_coverage_degradation(
     now_ms: i64,
     months: &BTreeSet<String>,
 ) -> Result<(), AuthorityError> {
-    let scope_key = if months.len() == 1 {
-        months.iter().next().expect("len==1 必有").clone()
-    } else {
-        "all".to_string()
-    };
-    let detail = json!({
-        "host": LEGACY_HOST,
-        "observation_kind": LEGACY_KIND,
-        "months": months,
-        "note": "claude-ledger 深历史以 legacy 聚合导入：底层会话文件已轮转/压缩，无法从现存 raw 源重放；本 scope 的 coverage 应作降级标注（spec §6.2.3）",
-    });
-    write_issue(
-        conn,
-        &format!("legacy_aggregate:{scope_key}"),
-        "month",
-        &scope_key,
-        "legacy_aggregate",
-        "info",
-        now_ms,
-        &detail,
-    )
+    // 逐月写标记（2026-09-07 审查收口：旧实现跨月批粗化为 scope_key="all"，
+    // 消费方因此无法回答「这个月是否被聚合兜底」——current month 有实时行
+    // 也被连带标进 all，过度标注与漏标注都不可取）。UNIQUE(scope_type,
+    // scope_key, code) 保证重跑幂等吸收。
+    for month in months {
+        let detail = json!({
+            "host": LEGACY_HOST,
+            "observation_kind": LEGACY_KIND,
+            "months": [month],
+            "note": "claude-ledger 深历史以 legacy 聚合导入：底层会话文件已轮转/压缩，无法从现存 raw 源重放；本 scope 的 coverage 应作降级标注（spec §6.2.3）",
+        });
+        write_issue(
+            conn,
+            &format!("legacy_aggregate:{month}"),
+            "month",
+            month,
+            "legacy_aggregate",
+            "info",
+            now_ms,
+            &detail,
+        )?;
+    }
+    Ok(())
 }
 
 fn bucket_map(b: [i64; 4]) -> Value {
@@ -761,9 +774,32 @@ mod tests {
         assert_eq!(out, 999, "同 kind 同源快照 → SQL 值随 ledger 刷新");
         assert_eq!(upd, 2_000, "updated_at_ms 滚到本次导入时钟，created 稳定");
 
-        // 更新后原样重跑 → 全 duplicate（幂等），不再产生 updated。
+        // 更新路径的审计痕迹（2026-09-07 审查收口）：ingested_run_id 必须滚
+        // 到本次 run（last-writer 溯源——事后能回答「这行最后一次被哪次导入
+        // 改写」，否则 UPDATE 后仍指向首跑 run，值与溯源脱节）。
+        db.begin_run("run-2", "migration", 4_000).unwrap();
+        let v3 = json!({
+            "2026-09-01": {"m1": {
+                "input_tokens": 100, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0, "output_tokens": 555}}
+        });
+        db.with_immediate_txn(|c| import_claude_ledger_days(c, "run-2", 5_000, &v3))
+            .unwrap();
+        let (rid, out2): (String, i64) = db
+            .conn()
+            .query_row(
+                "SELECT ingested_run_id, output_tokens FROM usage_facts
+                 WHERE source_event_id='2026-09-01:m1:0'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((rid.as_str(), out2), ("run-2", 555), "UPDATE 刷新 ingested_run_id");
+
+        // 更新后原样重跑（最新值 v3、同 run-2）→ 全 duplicate（幂等），不再
+        // 产生 updated。
         let rep2 = db
-            .with_immediate_txn(|c| import_claude_ledger_days(c, "run", 3_000, &v2))
+            .with_immediate_txn(|c| import_claude_ledger_days(c, "run-2", 6_000, &v3))
             .unwrap();
         assert_eq!(
             (rep2.imported, rep2.duplicate, rep2.updated, rep2.conflicts),
@@ -927,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_mark_all_when_batch_straddles_months() {
+    fn coverage_marks_each_month_when_batch_straddles_months() {
         let root = tmp_dir("covall");
         let db = AuthorityDb::open(&root.join("av.sqlite3"), 1_000).unwrap();
         db.begin_run("run", "migration", 1_000).unwrap();
@@ -938,10 +974,22 @@ mod tests {
                                    "cache_creation_input_tokens": 0, "output_tokens": 1}}
         });
         db.with_immediate_txn(|c| import_claude_ledger_days(c, "run", 1_000, &days)).unwrap();
-        let n: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM data_quality_issues WHERE code='legacy_aggregate' AND scope_key='all'",
-            [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 1, "跨月批 → all 标记");
+        // 2026-09-07 审查收口：跨月批从粗化 scope_key='all' 改为**逐月**写
+        // 标记——消费方（SqlSummaryRepository 的 freshness 降级）必须能回答
+        // 「这个月是否被聚合兜底」，'all' 会让有实时行的当月被连带标进去。
+        let mut keys: Vec<String> = db
+            .conn()
+            .prepare(
+                "SELECT scope_key FROM data_quality_issues
+                 WHERE code='legacy_aggregate' ORDER BY scope_key",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["2026-08", "2026-09"], "跨月批 → 逐月标记");
         std::fs::remove_dir_all(root).ok();
     }
 

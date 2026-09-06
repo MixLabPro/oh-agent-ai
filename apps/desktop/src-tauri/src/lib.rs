@@ -1231,23 +1231,25 @@ fn read_month(month: String) -> Value {
 
 /// v0.9 Stage 0.6 工作台 Data Query API（spec §7 目标态"Tauri 只调
 /// monthly_summary 等 API"）：经 `SummaryRepository` trait 调 runtime 的
-/// `JsonSummaryRepository`——薄转发，无定价/无直读 state JSON。`--json` 与
+/// repository——Phase 3.5 Tier A 起读 SQL 权威库
+/// （`SqlSummaryRepository`，含 legacy_aggregate 深历史），与 CLI `data
+/// coverage` 同源。薄转发，无定价/无直读 state JSON。`--json` 与
 /// CLI `data coverage` 是**同一份冻结 DTO**（`data_contract.rs::to_json`），
 /// 工作台总览/日历两页的诚实字段（freshness/coverage/excluded_hosts）都从
 /// 这里取，不许前端自己从金额反推"有没有数据"。
 #[tauri::command]
 fn data_monthly_summary(month: String) -> Value {
     use agent_vitals_data::repository::{MonthlySummaryQuery, SummaryRepository};
-    let repo = agent_vitals_runtime::summary::JsonSummaryRepository;
+    let repo = agent_vitals_runtime::summary::SqlSummaryRepository;
     repo.monthly_summary(&MonthlySummaryQuery { month }).to_json()
 }
 
 /// v0.9 Stage 0.6 单日版（北京日 YYYY-MM-DD）。与 `data_monthly_summary`
-/// 同一条 trait 路径、同一份 DTO 契约。
+/// 同一条 trait 路径、同一份 DTO 契约（同为 SQL 权威库读源）。
 #[tauri::command]
 fn data_daily_summary(date: String) -> Value {
     use agent_vitals_data::repository::{DailySummaryQuery, SummaryRepository};
-    let repo = agent_vitals_runtime::summary::JsonSummaryRepository;
+    let repo = agent_vitals_runtime::summary::SqlSummaryRepository;
     repo.daily_summary(&DailySummaryQuery { date }).to_json()
 }
 

@@ -1575,12 +1575,66 @@ fn merged_claude_days(
     start_ms: i64,
     end_ms: i64,
 ) -> BTreeMap<String, serde_json::Value> {
+    // **模型级合并**（2026-09-07 审查收口）：旧实现 `days.extend(realtime)`
+    // 是整日替换——同日只要任一模型有实时行，该日全部 legacy 聚合（含其他
+    // 模型的桶）被整体丢弃，「A 实时 + B legacy」表达不了，B 无标记消失。
+    // 改为按 (日, 模型) 选源：legacy 铺底，实时按模型键覆盖——同键不双计
+    // （每 (日,模型) 只有一个来源），异键互补（轮转掉 B 的会话文件时 B 的
+    // 聚合仍可见）。真机核验：ledger days 与 SQL 行级只差 ~1.7%，当前损失
+    // 趋近于零，但结构上必须正确——轮转发生时这里就是唯一防线。
     let mut days = agent_vitals_data::authority_query::claude_legacy_days(conn, start_ms, end_ms)
         .unwrap_or_default();
-    days.extend(
-        agent_vitals_data::authority_query::claude_days(conn, start_ms, end_ms).unwrap_or_default(),
-    );
+    let realtime = agent_vitals_data::authority_query::claude_days(conn, start_ms, end_ms)
+        .unwrap_or_default();
+    for (day, models) in realtime {
+        let entry = days
+            .entry(day)
+            .or_insert_with(|| serde_json::json!({}));
+        let obj = entry.as_object_mut().expect("claude day entry is object");
+        if let Some(models) = models.as_object() {
+            for (model, buckets) in models {
+                obj.insert(model.clone(), buckets.clone());
+            }
+        }
+    }
     days
+}
+
+/// 该月（或该日所属月）的 claude 数据是否带 legacy_aggregate 兜底标记
+/// （`data_quality_issues` 里未解决的 `code='legacy_aggregate'` 行，
+/// scope_key = 具体月份或 'all'）。命中 → 摘要侧 claude 的 freshness 降为
+/// `Partial`——「这个月有聚合兜底的成分」必须在 UI 可见（审查收口：标记
+/// 此前只写不读，spec §6.2.3「查询方据此降级」没有消费方，legacy 月份照常
+/// 渲染 Fresh）。
+fn claude_legacy_backed(
+    conn: &rusqlite::Connection,
+    month: &str,
+) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM data_quality_issues
+         WHERE resolved_at_ms IS NULL AND code = 'legacy_aggregate'
+           AND scope_type = 'month'
+           AND (scope_key = ?1 OR scope_key = 'all')",
+        rusqlite::params![month],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+/// claude 宿主条目的 freshness 按 legacy 兜底标记降级（Fresh/Stale →
+/// Partial；Unavailable 保持——「从没观测到」不因标记变成「部分观测到」）。
+fn degrade_claude_freshness_if_legacy_backed(
+    conn: &rusqlite::Connection,
+    month: &str,
+    amount: &mut HostAmount,
+) {
+    if amount.freshness.state == FreshnessState::Unavailable {
+        return;
+    }
+    if claude_legacy_backed(conn, month) {
+        amount.freshness.state = FreshnessState::Partial;
+    }
 }
 
 /// 打开库 + 算好窗口边界后，三宿主共用的原始数据抓取——月/日两条路径都是
@@ -1629,6 +1683,14 @@ impl SummaryRepository for SqlSummaryRepository {
         by_host.insert("codex".to_string(), codex_amount);
         let (claude_amount, claude_tk) = claude_host_amount_with_tokens_from_days(&claude_days_map);
         by_host.insert("claude-code".to_string(), claude_amount);
+        // legacy 兜底标记的消费方（degrade_claude_freshness_if_legacy_backed）：
+        // 被聚合兜底的月份 claude 侧降为 Partial，必须在 aggregate_freshness
+        // 之前生效，聚合新鲜度才能反映它。
+        if let Some(db) = &db {
+            if let Some(claude_entry) = by_host.get_mut("claude-code") {
+                degrade_claude_freshness_if_legacy_backed(db.conn(), &query.month, claude_entry);
+            }
+        }
 
         let mut tokens_by_host = BTreeMap::new();
         tokens_by_host.insert("dsh".to_string(), dsh_tokens(Some(&dsh_days), &query.month));
@@ -1688,6 +1750,13 @@ impl SummaryRepository for SqlSummaryRepository {
         by_host.insert("codex".to_string(), codex_amount);
         let (claude_amount, claude_tk) = claude_host_amount_with_tokens_from_days(&claude_days_map);
         by_host.insert("claude-code".to_string(), claude_amount);
+        // 日粒度的降级标记按「该日所属月」查（标记是 month scope 的）。
+        if let Some(db) = &db {
+            let month_of_date: String = query.date.chars().take(7).collect();
+            if let Some(claude_entry) = by_host.get_mut("claude-code") {
+                degrade_claude_freshness_if_legacy_backed(db.conn(), &month_of_date, claude_entry);
+            }
+        }
 
         let mut tokens_by_host = BTreeMap::new();
         tokens_by_host.insert(
@@ -2423,6 +2492,72 @@ mod tests {
                 ],
             )
             .unwrap();
+    }
+
+    /// 2026-09-07 审查收口（模型级合并）：同日「A 有实时行 + B 只有 legacy
+    /// 聚合」时，整日替换会把 B 无标记丢掉——按 (日, 模型) 选源（实时赢、
+    /// 异模型互补）才是既不双计也不漏的结构。
+    #[test]
+    fn merged_claude_days_keeps_legacy_models_missing_from_realtime() {
+        with_home(|| {
+            let db = seed_authority_db();
+            let (start, end) =
+                agent_vitals_data::authority_query::beijing_day_bounds_ms("2026-08-11").unwrap();
+            // legacy 聚合：A=100、B=200（event_peak=0 的 base 行）。
+            seed_fact(&db, "lg-a", "claude-code", Some("model-a"), "legacy_aggregate", start + 1_000, 0, 100, 0, 0, 0);
+            seed_fact(&db, "lg-b", "claude-code", Some("model-b"), "legacy_aggregate", start + 2_000, 0, 200, 0, 0, 0);
+            // 实时行只覆盖 A（B 的会话文件已轮转的场景）。
+            seed_fact(&db, "rt-a", "claude-code", Some("model-a"), "assistant-usage", start + 3_000, 0, 50, 0, 0, 0);
+            let merged = merged_claude_days(db.conn(), start, end);
+            drop(db);
+            let day = &merged["2026-08-11"];
+            assert_eq!(
+                day["model-a"]["input_tokens"], json!(50),
+                "同模型实时行赢，不与 legacy 相加"
+            );
+            assert_eq!(
+                day["model-b"]["input_tokens"], json!(200),
+                "实时缺席的模型保留 legacy 聚合，不随整日被丢弃"
+            );
+        });
+    }
+
+    /// 2026-09-07 审查收口（标记消费方）：legacy 兜底月份的 claude 条目
+    /// freshness 必须降为 Partial——降级标记此前只写不读，spec §6.2.3
+    /// 「查询方据此降级」没有消费方，聚合兜底的月份照常渲染 Fresh。
+    #[test]
+    fn legacy_backed_month_degrades_claude_freshness_to_partial() {
+        with_home(|| {
+            let month = crate::clock::current_month_beijing();
+            let day = crate::clock::today_beijing();
+            let db = seed_authority_db();
+            let (start, _) = agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap();
+            seed_fact(&db, "rt-a", "claude-code", Some("claude-opus-5"), "assistant-usage", start + 1_000, 0, 10, 0, 0, 1);
+            db.conn()
+                .execute(
+                    "INSERT INTO data_quality_issues(issue_id, scope_type, scope_key, code,
+                         severity, first_seen_at_ms, last_seen_at_ms, detail_json)
+                     VALUES ('legacy_aggregate:x', 'month', ?1, 'legacy_aggregate',
+                             'info', 1, 1, '{}')",
+                    rusqlite::params![month],
+                )
+                .unwrap();
+            drop(db);
+            let repo = SqlSummaryRepository;
+            let summary = repo.monthly_summary(&MonthlySummaryQuery { month: month.clone() });
+            let claude = &summary.by_host["claude-code"];
+            assert_eq!(
+                claude.freshness.state,
+                FreshnessState::Partial,
+                "被 legacy 标记覆盖的月份 claude 侧不得渲染 Fresh"
+            );
+            assert!(
+                claude.freshness.last_observed_at.is_some(),
+                "Partial 保留 last_observed_at（观测过，只是部分是聚合兜底）"
+            );
+            // 其他宿主不受 claude 的标记影响。
+            assert_eq!(summary.by_host["codex"].freshness.state, FreshnessState::Unavailable);
+        });
     }
 
     #[test]

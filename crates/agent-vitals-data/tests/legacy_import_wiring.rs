@@ -158,16 +158,19 @@ fn data_migrate_two_pass_wiring_is_coexistent_idempotent_and_updatable() {
     );
 
     // coverage 降级标记进 data_quality_issues；批跨 2026-07/2026-09 两个月 →
-    // scope_key="all"（单条）。
-    let (scope_key, count): (String, i64) = conn
-        .query_row(
-            "SELECT scope_key, COUNT(*) FROM data_quality_issues
-             WHERE code = 'legacy_aggregate'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+    // 逐月各一条（2026-09-07 审查收口：不再粗化为 "all"，消费方按月降级）。
+    let mut keys: Vec<String> = conn
+        .prepare(
+            "SELECT scope_key FROM data_quality_issues
+             WHERE code = 'legacy_aggregate' ORDER BY scope_key",
         )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!((scope_key.as_str(), count), ("all", 1));
+    keys.sort();
+    assert_eq!(keys, vec!["2026-07", "2026-09"], "跨月批逐月写标记");
 
     // 查询侧读得到深历史（legacy 只走 event_peak=0 的 base 行）。
     let days = agent_vitals_data::authority_query::claude_legacy_days(conn, 0, 4_102_444_800_000)

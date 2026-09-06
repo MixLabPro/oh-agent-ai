@@ -1,6 +1,9 @@
 """Cross-platform subprocess environment helpers for isolated-home tests."""
 
+import datetime
+import json
 import os
+import subprocess
 from pathlib import Path
 
 
@@ -32,3 +35,54 @@ def isolated_home_env(home):
         env["AGENT_VITALS_DISABLE_" + adapter] = "1"
     env["AGENT_VITALS_DISABLE_OPENCLAW_BUNDLED"] = "1"
     return env
+
+
+def beijing_day_to_utc_iso(day):
+    """北京日历日 `YYYY-MM-DD` 的零点 → UTC ISO 时间戳（事件落进该北京日）。"""
+    wall = datetime.datetime.strptime(day, "%Y-%m-%d")
+    return (wall - datetime.timedelta(hours=8)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def seed_authority_facts(binary, home, day, uncached_input=1_000_000, output=100_000):
+    """把三宿主各一条实时事实经公开迁移入口种进隔离 SQL 权威库。
+
+    v0.9.1 Phase 3.5 Tier A 起 `data coverage` / `data daily` 经
+    `SummaryRepository` 读 `SqlSummaryRepository`（权威库），不再读 state 投影
+    文件——所以测试种子从「手写 month.json / claude-ledger.json / rollout」
+    换成「facts JSONL + `data-migrate`」（spec 6.2.1 的公开迁移入口，
+    same-fact_id 幂等）。行形状与
+    `crates/agent-vitals-data/tests/legacy_import_wiring.rs` 的 `live_fact`
+    一致（fact_id 由契约层派生，不信任外部 id）。模型名都在价目表内：
+    deepseek-v4-flash 出 DSH 实测账单档与 claude CNY 估算档，gpt-5.6-sol 出
+    codex 套餐等价诊断档——三宿主 basis 各就各位的断言原样保留。
+    """
+    facts_dir = Path(home) / "data" / "facts"
+    facts_dir.mkdir(parents=True, exist_ok=True)
+    ts = beijing_day_to_utc_iso(day)
+    for host, session, model in (
+        ("claude-code", "sess-seed-claude", "deepseek-v4-flash"),
+        ("codex", "sess-seed-codex", "gpt-5.6-sol"),
+        ("dsh", "sess-seed-dsh", "deepseek-v4-flash"),
+    ):
+        fact = {
+            "host": host,
+            "machine_namespace": "default",
+            "source_profile": "default",
+            "native_session_id": session,
+            "source_event_id": session + "-e1",
+            "observation_kind": "token_count",
+            "event_ts_utc": ts,
+            "model_id": model,
+            "uncached_input_tokens": uncached_input,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": output,
+        }
+        (facts_dir / (host + ".jsonl")).write_text(json.dumps(fact) + "\n")
+    env = isolated_home_env(home)
+    env["AGENT_VITALS_HOME"] = str(Path(home) / "data")
+    proc = subprocess.run(
+        [str(binary), "data-migrate"], env=env, capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        raise AssertionError("data-migrate failed: " + proc.stderr)

@@ -600,11 +600,14 @@ enum Cmd {
     },
     /// Read-only Data Query API surface (v0.9 Stage 0.5, spec §7's suggested
     /// `data coverage`). Goes through the `SummaryRepository` trait to the
-    /// runtime's `JsonSummaryRepository` — the CLI never constructs the
-    /// concrete type (spec §3.1 dependency table). `--json` prints the frozen
-    /// `to_json()` DTO verbatim; spec §3.1 makes it a contract violation to
-    /// consume amounts while dropping freshness/coverage/excluded_hosts, so
-    /// both views surface all three.
+    /// runtime's repository — Phase 3.5 Tier A 起 CLI 构造的是
+    /// `SqlSummaryRepository`（读权威库 `agent-vitals.sqlite3`，含
+    /// legacy_aggregate 深历史），Phase 4 退休 `JsonSummaryRepository` 前两者
+    /// 并存。CLI 只经 trait，不 new 具体类型到调用点之外（spec §3.1
+    /// dependency table）。`--json` prints the frozen `to_json()` DTO
+    /// verbatim; spec §3.1 makes it a contract violation to consume amounts
+    /// while dropping freshness/coverage/excluded_hosts, so both views surface
+    /// all three.
     Data {
         #[command(subcommand)]
         action: DataAction,
@@ -2860,11 +2863,15 @@ session_store={store} fold={fold}"
     }
 
     // v0.9 Stage 0.5 Data Query API（只读诊断）。数据面经 trait——CLI 拿到
-    // 的是 `Box<dyn SummaryRepository>`，不 new 具体类型、不读任何 state
-    // 文件（spec §3.1 依赖表：apps 只消费 Runtime 的版本化 DTO）。
+    // 的是 `Box<dyn SummaryRepository>`，不 new 具体类型到调用点之外、不读
+    // 任何 state 文件（spec §3.1 依赖表：apps 只消费 Runtime 的版本化 DTO）。
+    // Phase 3.5 Tier A：读源切到 SQL 权威库（`SqlSummaryRepository`，含
+    // legacy_aggregate 深历史按日合并）——`Cmd::DataReconcile` 的
+    // `JsonSummaryRepository` 保持不动，它对账的就是旧 index 投影 vs DTO，
+    // 换读源等于把对账基准也换了。
     if let Some(Cmd::Data { action }) = &args.cmd {
         let repo: Box<dyn agent_vitals_data::repository::SummaryRepository> = Box::new(
-            agent_vitals_runtime::summary::JsonSummaryRepository,
+            agent_vitals_runtime::summary::SqlSummaryRepository,
         );
         match action {
             DataAction::Coverage { month, json } => {
