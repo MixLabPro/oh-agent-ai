@@ -16,10 +16,19 @@
 //! observation_kind 排除本类行——查询面契约）。
 //!
 //! 幂等：fact_id 由契约层身份字段派生，同键重跑 = 幂等吸收；ledger 日桶
-//! 变化（同键不同值）→ **不覆盖**，写 `data_quality_issues`
-//! （code="legacy_aggregate_conflict"）——§6.2.5「旧 JSON 永不覆盖更具体的
-//! SQL fact」。导入批结束时写一条 coverage 降级标记（code="legacy_aggregate"、
-//! scope_type="month"），批内 distinct 月份唯一 → scope_key=该月，跨多月 →
+//! 变化（同键不同值）→ **更新既有 legacy 行的四桶 + updated_at_ms**、计入
+//! report.updated——ledger 是 `claude_sync` 每次**全量重建**的滚动投影，同键
+//! 值合法地会变（FOLD_SCHEMA_VERSION 2→3 的全量重折就是实例），且这些月份
+//! 往往原始 JSONL 已轮转、ledger 是唯一 store of record，「永不覆盖」= SQL
+//! 永远留着旧快照的数字，静默且不可纠正。§6.2.5「旧 JSON 永不覆盖更具体的
+//! SQL fact」保护的是**实时行级事实不被 legacy 聚合覆盖**，不是 legacy-vs-
+//! legacy 的同源快照刷新——旧 JSON 覆盖更具体的 SQL fact 的前提是两者来源
+//! 不同，这里更新的是同一来源的旧快照。跨 kind 冲突路径在身份契约下不存在
+//! （observation_kind 同时在 UNIQUE 键与 fact_id 派生输入里），保留为防御
+//! （真出现 = 有人绕过契约层手写了同 fact_id 的行）→ 写
+//! `data_quality_issues`（code="legacy_aggregate_conflict"）。导入批结束时
+//! 写一条 coverage 降级标记（code="legacy_aggregate"、scope_type="month"），
+//! 批内 distinct 月份唯一 → scope_key=该月，跨多月 →
 //! "all"——查询方据此把涉及月份/全部月份的处理降级，不把聚合当可重放的
 //! 逐行事实。
 //!
@@ -66,7 +75,11 @@ pub struct LegacyImportReport {
     pub imported: usize,
     /// 幂等吸收（同 fact_id 已在库且值一致）。
     pub duplicate: usize,
-    /// 同键不同值（ledger 变化）→ 记 data_quality_issues，不覆盖。
+    /// 同键不同值且既有行同为 legacy_aggregate → UPDATE 四桶 + updated_at_ms
+    /// （ledger 是全量重建的滚动投影，同源快照刷新，见模块注释）。
+    pub updated: usize,
+    /// 跨 kind 防御分支：既有行的 observation_kind 不是 legacy_aggregate（身份
+    /// 契约下不可能出现）→ 写 data_quality_issues，不覆盖也不吸收。
     pub conflicts: usize,
 }
 
@@ -133,6 +146,7 @@ pub fn import_claude_ledger_days(
                         match touch_fact(conn, run_id, now_ms, &fact)? {
                             ImportOutcome::Inserted => report.imported += 1,
                             ImportOutcome::Duplicate => report.duplicate += 1,
+                            ImportOutcome::Updated => report.updated += 1,
                             ImportOutcome::Conflict => report.conflicts += 1,
                         }
                         months.insert(day[..7].to_string());
@@ -215,18 +229,29 @@ impl LegacyFact {
     }
 }
 
-/// 幂等/冲突落库返回态。
+/// 幂等/更新/冲突落库返回态。
 enum ImportOutcome {
     Inserted,
     Duplicate,
+    Updated,
     Conflict,
 }
 
-/// 幂等/冲突判定 + 落库。
+/// 幂等/更新/冲突判定 + 落库。
 /// - fact_id 不在库 → INSERT → Inserted。
 /// - fact_id 在库且四桶一致 → Duplicate（幂等吸收，无写入）。
-/// - fact_id 在库但四桶值变 → **不覆盖**既有行，写 `legacy_aggregate_conflict`
-///   issue（scope_type="fact"）→ Conflict（spec §6.2.5）。
+/// - fact_id 在库、四桶值变、既有行同为 legacy_aggregate → **UPDATE 四桶 +
+///   updated_at_ms** → Updated。ledger 是 `claude_sync` 每次**全量重建**的
+///   滚动投影，同键值合法地会变（FOLD_SCHEMA_VERSION 2→3 的全量重折就是
+///   实例），且这些月份往往原始 JSONL 已轮转、ledger 是唯一 store of
+///   record——不更新就是「旧快照永占 SQL」的静默不可纠正分歧。§6.2.5「旧
+///   JSON 永不覆盖更具体的 SQL fact」保护的是**实时行级事实不被 legacy
+///   聚合覆盖**（两者来源不同），不适用于 legacy-vs-legacy 的同源快照刷新。
+/// - 既有行是别的 observation_kind → 写 `legacy_aggregate_conflict`
+///   issue（scope_type="fact"）→ Conflict。这条路径在身份契约下不存在
+///   （observation_kind 同时在 UNIQUE 五元组与 fact_id 派生输入里），纯防御：
+///   真出现 = 有人绕过契约层手写了同 fact_id 的行，必须浮出来——既不当
+///   update 静默改写，也不当 duplicate 吸收。
 fn touch_fact(
     conn: &Connection,
     run_id: &str,
@@ -234,12 +259,18 @@ fn touch_fact(
     fact: &LegacyFact,
 ) -> Result<ImportOutcome, AuthorityError> {
     let fact_id = fact.fact_id();
-    let existing: Option<[i64; 4]> = conn
+    let existing: Option<(String, [i64; 4])> = conn
         .query_row(
-            "SELECT uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens
+            "SELECT observation_kind, uncached_input_tokens, cache_read_tokens,
+                    cache_write_tokens, output_tokens
              FROM usage_facts WHERE fact_id = ?1",
             rusqlite::params![fact_id],
-            |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?],
+                ))
+            },
         )
         .optional()?;
     match existing {
@@ -282,29 +313,56 @@ fn touch_fact(
             }
             Ok(ImportOutcome::Inserted)
         }
-        Some(old) if old == fact.bucket => Ok(ImportOutcome::Duplicate),
-        Some(old) => {
-            write_conflict_issue(conn, now_ms, fact, old)?;
+        Some((_kind, old)) if old == fact.bucket => Ok(ImportOutcome::Duplicate),
+        Some((kind, _old)) if kind == LEGACY_KIND => {
+            let n = conn.execute(
+                "UPDATE usage_facts
+                 SET uncached_input_tokens = ?1, cache_read_tokens = ?2,
+                     cache_write_tokens = ?3, output_tokens = ?4, updated_at_ms = ?5
+                 WHERE fact_id = ?6",
+                rusqlite::params![
+                    fact.bucket[0],
+                    fact.bucket[1],
+                    fact.bucket[2],
+                    fact.bucket[3],
+                    now_ms,
+                    fact_id,
+                ],
+            )?;
+            // 同事务刚 SELECT 到该行；0 行 = 契约外并发写入，诚实上抛。
+            if n == 0 {
+                return Err(AuthorityError::Sqlite(
+                    rusqlite::Error::InvalidParameterName(format!(
+                        "__legacy_import_update_noop__:{fact_id}"
+                    )),
+                ));
+            }
+            Ok(ImportOutcome::Updated)
+        }
+        Some((kind, old)) => {
+            write_conflict_issue(conn, now_ms, fact, old, &kind)?;
             Ok(ImportOutcome::Conflict)
         }
     }
 }
 
-/// 值变冲突 → `legacy_aggregate_conflict` issue。detail 携带现有桶值 + 本次
-/// 桶值，供对账/人工刷新排查。
+/// 跨 kind 防御分支 → `legacy_aggregate_conflict` issue。身份契约下不可能
+/// 触发；detail 携带既有 kind + 桶值 + 本次桶值，供人工排查契约外写入。
 fn write_conflict_issue(
     conn: &Connection,
     now_ms: i64,
     fact: &LegacyFact,
     existing: [i64; 4],
+    existing_kind: &str,
 ) -> Result<(), AuthorityError> {
     let detail = json!({
         "host": LEGACY_HOST,
         "observation_kind": LEGACY_KIND,
         "fact_id": fact.fact_id(),
+        "existing_kind": existing_kind,
         "existing_buckets": bucket_map(existing),
         "incoming_buckets": bucket_map(fact.bucket),
-        "note": "ledger JSON day/model 桶值较既有 SQL 行变化；按 spec §6.2.5 旧 JSON 永不覆盖更具体的 SQL fact，既有行保持不动",
+        "note": "同 fact_id 已有非 legacy_aggregate 行——身份契约下不可能（observation_kind 在 fact_id 派生输入里），疑似契约外写入；按 spec §6.2.5 旧 JSON 永不覆盖更具体的 SQL fact，既有行保持不动",
     });
     write_issue(
         conn,
@@ -661,7 +719,13 @@ mod tests {
     }
 
     #[test]
-    fn import_value_conflict_does_not_overwrite() {
+    fn import_value_change_updates_legacy_row_then_rerun_is_duplicate() {
+        // Phase 3.2 审查修复：旧语义（同键不同值 → conflict + 永不覆盖）让
+        // SQL 永远留着旧快照——ledger 是 claude_sync 全量重建的滚动投影，同
+        // (day, model, peak) 键的桶值合法地会变（FOLD_SCHEMA_VERSION 2→3 的
+        // 全量重折就是实例），且这些月份的原始 JSONL 已轮转、ledger 是唯一
+        // store of record，冲突不更新 = 静默且不可纠正的分歧。同 kind 的值
+        // 变 → 更新为新值并计 updated。
         let root = tmp_dir("conflict");
         let db = AuthorityDb::open(&root.join("av.sqlite3"), 1_000).unwrap();
         db.begin_run("run", "migration", 1_000).unwrap();
@@ -671,38 +735,111 @@ mod tests {
                 "cache_creation_input_tokens": 0, "output_tokens": 10}}
         });
         db.with_immediate_txn(|c| import_claude_ledger_days(c, "run", 1_000, &v1)).unwrap();
-        // 同 (day, m1, 0) 的 output_tokens 变了：不覆盖既有行，报告 conflict。
+        // 同 (day, m1, 0) 的 output_tokens 变了：更新既有行为新值，计 updated。
         let v2 = json!({
             "2026-09-01": {"m1": {
                 "input_tokens": 100, "cache_read_input_tokens": 0,
                 "cache_creation_input_tokens": 0, "output_tokens": 999}}
         });
-        let conflicted = db
-            .with_immediate_txn(|c| import_claude_ledger_days(c, "run", 1_000, &v2))
+        let rep = db
+            .with_immediate_txn(|c| import_claude_ledger_days(c, "run", 2_000, &v2))
             .unwrap();
         assert_eq!(
-            (conflicted.imported, conflicted.duplicate, conflicted.conflicts),
-            (0, 1, 1),
-            "peak=1 行（a）未变 dup；peak=0 行变了 → conflict"
+            (rep.imported, rep.duplicate, rep.updated, rep.conflicts),
+            (0, 1, 1, 0),
+            "peak=1 行未变 dup；peak=0 行值变 → updated"
         );
-        let out: i64 = db
+        let (out, upd): (i64, i64) = db
             .conn()
             .query_row(
-                "SELECT output_tokens FROM usage_facts WHERE source_event_id='2026-09-01:m1:0'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(out, 10, "旧 JSON 永不覆盖更权威的 SQL fact");
-        let (code, sev): (String, String) = db
-            .conn()
-            .query_row(
-                "SELECT code, severity FROM data_quality_issues WHERE code='legacy_aggregate_conflict'",
+                "SELECT output_tokens, updated_at_ms FROM usage_facts
+                 WHERE source_event_id='2026-09-01:m1:0'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!((code.as_str(), sev.as_str()), ("legacy_aggregate_conflict", "warning"));
+        assert_eq!(out, 999, "同 kind 同源快照 → SQL 值随 ledger 刷新");
+        assert_eq!(upd, 2_000, "updated_at_ms 滚到本次导入时钟，created 稳定");
+
+        // 更新后原样重跑 → 全 duplicate（幂等），不再产生 updated。
+        let rep2 = db
+            .with_immediate_txn(|c| import_claude_ledger_days(c, "run", 3_000, &v2))
+            .unwrap();
+        assert_eq!(
+            (rep2.imported, rep2.duplicate, rep2.updated, rep2.conflicts),
+            (0, 2, 0, 0)
+        );
+        let issues: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM data_quality_issues",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(issues, 1, "更新路径只留 coverage 降级标记，无 conflict issue");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn cross_kind_row_is_conflict_not_update() {
+        // 防御分支：observation_kind 不同的既有行（身份契约下不可能——
+        // kind 在 fact_id 派生输入里）不走 update 静默改写，也不当 duplicate
+        // 吸收，而是写 legacy_aggregate_conflict issue 浮出来（§6.2.5 保护
+        // 「非 legacy 来源的更具体 SQL fact 不被旧 JSON 覆盖」的那条真边界）。
+        let root = tmp_dir("crosskind");
+        let db = AuthorityDb::open(&root.join("av.sqlite3"), 1_000).unwrap();
+        db.begin_run("run", "migration", 1_000).unwrap();
+        let days = json!({
+            "2026-09-01": {"m1": {
+                "input_tokens": 100, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0, "output_tokens": 10}}
+        });
+        // 以本批 legacy 行的 fact_id 手写一条别的 kind 的行（绕过契约层）。
+        let borrowed_id = agent_vitals_domain::usage_fact::fact_id(
+            "legacy",
+            "claude-code",
+            "ledger",
+            "day:2026-09-01",
+            "2026-09-01:m1:0",
+            "legacy_aggregate",
+        );
+        db.conn()
+            .execute(
+                "INSERT INTO usage_facts(
+                     fact_id, host, machine_namespace, native_session_id, source_event_id,
+                     observation_kind, source_profile, model_id, event_ts_ms, event_peak,
+                     uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                     output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1,'claude-code','legacy','day:2026-09-01','2026-09-01:m1:0',
+                     'token_count','default','m1',0,0,7,0,0,0,'run',1,1)",
+                rusqlite::params![borrowed_id],
+            )
+            .unwrap();
+        let rep = db
+            .with_immediate_txn(|c| import_claude_ledger_days(c, "run", 2_000, &days))
+            .unwrap();
+        assert_eq!(rep.updated, 0, "跨 kind 不走 update");
+        assert_eq!(rep.conflicts, 1, "契约外写入必须浮出来");
+        assert_eq!(rep.imported, 1, "peak=1 行照常入账，批不被中断");
+        let out: i64 = db
+            .conn()
+            .query_row(
+                "SELECT uncached_input_tokens FROM usage_facts WHERE fact_id = ?1",
+                rusqlite::params![borrowed_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(out, 7, "既有行保持不动");
+        let n: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM data_quality_issues WHERE code='legacy_aggregate_conflict'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
         std::fs::remove_dir_all(root).ok();
     }
 

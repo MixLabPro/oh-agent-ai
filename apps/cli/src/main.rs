@@ -2260,7 +2260,16 @@ session_store={store} fold={fold}"
             eprintln!("data-migrate failed: {e}");
             std::process::exit(2);
         }
-        let mut total = (0usize, 0usize, 0usize);
+        // 迁移总量（JSONL + legacy ledger 合并同一口径——收尾行与 migrations
+        // checkpoint 都从这读）。
+        struct Totals {
+            inserted: usize,
+            duplicate: usize,
+            rejected: usize,
+            updated: usize,
+            conflicts: usize,
+        }
+        let mut total = Totals { inserted: 0, duplicate: 0, rejected: 0, updated: 0, conflicts: 0 };
         for host in ["claude-code", "codex", "dsh"] {
             let path = data_home.join("facts").join(format!("{host}.jsonl"));
             if !path.exists() {
@@ -2279,9 +2288,9 @@ session_store={store} fold={fold}"
                         "  {host}: +{} inserted, {} duplicate, {} rejected",
                         r.inserted, r.duplicate, r.rejected
                     );
-                    total.0 += r.inserted;
-                    total.1 += r.duplicate;
-                    total.2 += r.rejected;
+                    total.inserted += r.inserted;
+                    total.duplicate += r.duplicate;
+                    total.rejected += r.rejected;
                 }
                 Err(e) => {
                     let _ = db.finish_run(
@@ -2292,6 +2301,63 @@ session_store={store} fold={fold}"
                         agent_vitals_runtime::sql_sync::now_ms(),
                     );
                     eprintln!("data-migrate failed ({host}): {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        // Phase 3.2（spec §6.2.3）：claude ledger 深历史 → legacy_aggregate。
+        // 这些账在 JSONL 里**没有对应行**——claude 客户端会压缩/轮转会话文件，
+        // 历史行物理消失后 ledger 里仍有账（R4 §5.2a：ledger 是这部分账的
+        // store of record）。不用判断「该日是否已有实时事实」：legacy 身份
+        // 五元组（machine_namespace="legacy" / native_session_id="day:{day}"）
+        // 与实时事实完全不重叠，查询侧 SqlSummaryRepository::merged_claude_days
+        // 先铺 legacy 再被实时行按日覆盖（有实时用实时、没有才退深历史）。
+        let ledger_days = match agent_vitals_data::legacy_import::load_claude_ledger_days(
+            &agent_vitals_runtime::state::state_dir(),
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                // 坏 ledger（非法 JSON 等）与 JSONL 导入失败同款处理：run 记
+                // failed 后退出——吞掉它就是「看似迁移成功、深历史实际没进库」。
+                let _ = db.finish_run(
+                    &run_id,
+                    "failed",
+                    Some("import_failed"),
+                    Some(&e.to_string()),
+                    agent_vitals_runtime::sql_sync::now_ms(),
+                );
+                eprintln!("data-migrate failed (claude-ledger): {e}");
+                std::process::exit(2);
+            }
+        };
+        if ledger_days.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
+            match db.with_immediate_txn(|conn| {
+                agent_vitals_data::legacy_import::import_claude_ledger_days(
+                    conn,
+                    &run_id,
+                    agent_vitals_runtime::sql_sync::now_ms(),
+                    &ledger_days,
+                )
+            }) {
+                Ok(r) => {
+                    println!(
+                        "  claude-ledger: +{} inserted, {} duplicate, {} updated, {} conflicts",
+                        r.imported, r.duplicate, r.updated, r.conflicts
+                    );
+                    total.inserted += r.imported;
+                    total.duplicate += r.duplicate;
+                    total.updated += r.updated;
+                    total.conflicts += r.conflicts;
+                }
+                Err(e) => {
+                    let _ = db.finish_run(
+                        &run_id,
+                        "failed",
+                        Some("import_failed"),
+                        Some(&e.to_string()),
+                        agent_vitals_runtime::sql_sync::now_ms(),
+                    );
+                    eprintln!("data-migrate failed (claude-ledger): {e}");
                     std::process::exit(2);
                 }
             }
@@ -2312,12 +2378,17 @@ session_store={store} fold={fold}"
                 agent_vitals_runtime::sql_sync::now_ms(),
                 agent_vitals_runtime::sql_sync::now_ms(),
                 format!("sql-authority-v{}", agent_vitals_data::authority::SCHEMA_VERSION),
-                json!({"inserted": total.0, "duplicate": total.1, "rejected": total.2}).to_string(),
+                json!({
+                    "inserted": total.inserted, "duplicate": total.duplicate,
+                    "rejected": total.rejected, "updated": total.updated,
+                    "conflicts": total.conflicts,
+                })
+                .to_string(),
             ],
         );
         println!(
-            "Migration done: +{} inserted, {} duplicate, {} rejected",
-            total.0, total.1, total.2
+            "Migration done: +{} inserted, {} duplicate, {} rejected, {} updated, {} conflicts",
+            total.inserted, total.duplicate, total.rejected, total.updated, total.conflicts
         );
         return;
     }
