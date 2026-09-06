@@ -1,36 +1,31 @@
-//! v0.9.1 Phase 2（spec §5.1）：SQL 事实写入面——`usage_facts` 的唯一写入口。
+//! v0.9.1 Phase 2（spec §5.1）：`usage_facts` 的唯一 SQL 写入口。
 //!
-//! **接口契约已钉死**（`docs/AGENT_VITALS_V0_9_1_IMPLEMENTATION_PLAN.md`
-//! Phase 2 节）：实现 agent 按 §5.1 四步协议填充，不得改签名。
+//! 接口契约钉死在 `docs/AGENT_VITALS_V0_9_1_IMPLEMENTATION_PLAN.md`
+//! Phase 2 节，本文件实现不得改签名。
 //!
-//! 事务边界：`SqlFactWriter` **不开事务**——调用方（runtime sync）用
-//! `AuthorityDb::with_immediate_txn` 包「upsert sources/sessions +
-//! insert_facts」整段（spec §5.1.4）；嵌套 BEGIN 是 SQLite 错误。
+//! 事务边界：`SqlFactWriter` **不开事务**——调用方用 `with_immediate_txn`
+//! 包「upsert sources/sessions + insert_facts」整段（spec §5.1.4），嵌套
+//! BEGIN 是 SQLite 错误。
 //!
-//! 校验纪律（spec §5.1.3）：不合格 candidate **不静默丢**——写
-//! `data_quality_issues`（scope_type="fact"，code 如 `invalid_fact`），
-//! 合格项才进 `usage_facts`。幂等键 = 既有 `fact_id`；第二道防线 =
-//! 表上的 UNIQUE 五元组（`INSERT ON CONFLICT DO NOTHING`）。
+//! 校验纪律（spec §5.1.3）：不合格 candidate 不静默丢，写
+//! `data_quality_issues`（scope_type="fact"），合格项才进 `usage_facts`。
 
 use std::path::Path;
 
 use rusqlite::Connection;
+use serde_json::Value;
 
 use crate::authority::AuthorityError;
 
 /// 一次 insert_facts 的结果（spec §5.1.4 的可观测结果）。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SqlInsertReport {
-    /// 新插入的事实数。
     pub inserted: usize,
-    /// fact_id 已存在（幂等吸收：重放/双管道/重复事件）。
     pub duplicate: usize,
-    /// 契约校验失败、已写 `data_quality_issues` 的事实数。
     pub rejected: usize,
 }
 
-/// SQL 事实写入器。绑定一个 `sync_runs.run_id`（`ingested_run_id` 外键）与
-/// 注入时钟（data crate 不读时钟——与 authority.rs 同款纪律）。
+/// SQL 事实写入器。绑定 sync_runs 批次与注入时钟。
 #[derive(Debug)]
 pub struct SqlFactWriter<'a> {
     conn: &'a Connection,
@@ -38,22 +33,118 @@ pub struct SqlFactWriter<'a> {
     now_ms: i64,
 }
 
+/// ISO 事实时间戳 → UTC 毫秒。解析链路与 `store::peak_of` 同款（19 字节
+/// 定宽前缀 + 尾部：小数秒任意、Z/z → 偏移 0、±HH:MM → 偏移归一）。
+/// 格式不齐全 → None（记 invalid，不猜时间）。
+pub(crate) fn iso_to_ms(ts: &str) -> Option<i64> {
+    let b = ts.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
+        return None;
+    }
+    let y = ts.get(0..4)?.parse::<i64>().ok()?;
+    let mo = ts.get(5..7)?.parse::<u32>().ok()?;
+    let d = ts.get(8..10)?.parse::<u32>().ok()?;
+    let hh = ts.get(11..13)?.parse::<i64>().ok()?;
+    let mi = ts.get(14..16)?.parse::<i64>().ok()?;
+    let ss = ts.get(17..19)?.parse::<i64>().ok()?;
+    if !(1..=12).contains(&mo) || d < 1 {
+        return None;
+    }
+    let mut rest = &ts[19..];
+    let mut offset_min: i64 = 0;
+    if rest.ends_with('Z') || rest.ends_with('z') {
+        rest = &rest[..rest.len() - 1];
+    } else if let Some(pos) = rest.rfind(['+', '-']) {
+        let (frac, off) = rest.split_at(pos);
+        match (
+            off.get(1..3).and_then(|s| s.parse::<i64>().ok()),
+            off.get(4..6).and_then(|s| s.parse::<i64>().ok()),
+            off.len() == 6,
+        ) {
+            (Some(oh), Some(om), true) => {
+                let sign = if off.starts_with('-') { -1 } else { 1 };
+                offset_min = sign * (oh * 60 + om);
+                rest = frac;
+            }
+            _ => return None,
+        }
+    }
+    if !rest.is_empty() && !rest.bytes().all(|c| c.is_ascii_digit() || c == b'.') {
+        return None;
+    }
+    agent_vitals_domain::usage::ms_from_civil(y, mo, d, hh as u32, mi as u32, ss as u32)
+        .map(|ms| ms - offset_min * 60_000)
+}
+
+/// r2a 会话键：`{host}:{ns}:{profile}:{native_id}`，profile 缺省 "default"。
+/// `upsert_session` 与 `insert_facts` 走同一函数保证外键一致。
+fn session_key(
+    host: &str,
+    machine_namespace: &str,
+    native_session_id: &str,
+    source_profile: Option<&str>,
+) -> String {
+    format!(
+        "{host}:{machine_namespace}:{}:{native_session_id}",
+        source_profile.unwrap_or("default")
+    )
+}
+
+/// fact 文档逐字读字段（空串视为无；缺失/Null 数值 → 0）。
+struct FactReader<'a> {
+    obj: &'a serde_json::Map<String, Value>,
+}
+
+impl<'a> FactReader<'a> {
+    fn s(&self, k: &str) -> Option<&'a str> {
+        self.obj
+            .get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    }
+    fn i(&self, k: &str) -> i64 {
+        self.obj.get(k).and_then(Value::as_i64).unwrap_or(0)
+    }
+}
+
+/// 任意 Value 的稳定摘要 hash（无 fact_id / 连对象都不是时的 scope_key）。
+fn stable_hash(v: &Value) -> String {
+    agent_vitals_domain::source_identity::fnv1a64_hex(
+        serde_json::to_string(v).unwrap_or_default().as_bytes(),
+    )
+}
+
 impl<'a> SqlFactWriter<'a> {
-    /// 绑定连接 + 批次 + 注入时钟。`run_id` 必须已存在（调用方先
-    /// `AuthorityDb::begin_run`——外键约束会拒绝未知的 run_id）。
+    /// 绑定连接 + 批次 + 注入时钟。预检 run_id 存在（外键防线前置）。
     pub fn new(
         conn: &'a Connection,
         run_id: &str,
         now_ms: i64,
     ) -> Result<Self, AuthorityError> {
-        let _ = (conn, run_id, now_ms);
-        unimplemented!("Phase 2.1：校验 run_id 存在（外键预检），绑定字段")
+        // `ingested_run_id REFERENCES sync_runs` 在 INSERT 时才失败；
+        // 前置成显式错误让调用方在写任何事实前就知道 run 不存在。
+        let exists: i64 = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_runs WHERE run_id = ?1)",
+            rusqlite::params![run_id],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Err(AuthorityError::Sqlite(
+                rusqlite::Error::InvalidParameterName(format!(
+                    "__run_id_not_found__:{run_id}"
+                )),
+            ));
+        }
+        Ok(Self {
+            conn,
+            run_id: run_id.to_string(),
+            now_ms,
+        })
     }
 
-    /// `source_files` upsert（spec §3.2）。`path_hash` = 路径的 fnv1a64 十六
-    /// 进制（**不存明文路径**——路径属隐私面）。返回 source_id（= path_hash，
-    /// 同 (host, path_hash) 下唯一）。首见写 `first_seen_at_ms`，再见更新
-    /// `last_seen_at_ms`/指纹字段。`source_id` 生成规则：`{host}:{path_hash}`。
+    /// source_files upsert。path_hash = fnv1a64(路径)，明文路径不进库。
+    /// 返回 source_id = `{host}:{path_hash}`。首见 INSERT 全量，再见只更新
+    /// last_seen_at_ms + (size, mtime) 指纹（含 parser/native 刷新）。
     pub fn upsert_source_file(
         &self,
         host: &str,
@@ -63,15 +154,39 @@ impl<'a> SqlFactWriter<'a> {
         native_session_id: Option<&str>,
         parser_version: i64,
     ) -> Result<String, AuthorityError> {
-        let _ = (
-            host, path, size_bytes, mtime_ns, native_session_id, parser_version,
+        let path_hash = agent_vitals_domain::source_identity::fnv1a64_hex(
+            path.to_string_lossy().as_bytes(),
         );
-        unimplemented!("Phase 2.2：source_files upsert——首次 INSERT，再见 UPDATE last_seen_at_ms/指纹")
+        let source_id = format!("{host}:{path_hash}");
+        self.conn.execute(
+            "INSERT INTO source_files(
+                 source_id, host, path_hash, native_session_id,
+                 size_bytes, mtime_ns, content_fingerprint, parser_version,
+                 first_seen_at_ms, last_seen_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,NULL,?7,?8,?8)
+             ON CONFLICT(host, path_hash) DO UPDATE SET
+                 size_bytes = excluded.size_bytes,
+                 mtime_ns = excluded.mtime_ns,
+                 native_session_id = excluded.native_session_id,
+                 parser_version = excluded.parser_version,
+                 last_seen_at_ms = excluded.last_seen_at_ms",
+            rusqlite::params![
+                source_id,
+                host,
+                path_hash,
+                native_session_id,
+                size_bytes as i64,
+                mtime_ns as i64,
+                parser_version,
+                self.now_ms,
+            ],
+        )?;
+        Ok(source_id)
     }
 
-    /// `sessions` upsert（spec §3.2 最小 CanonicalSession 索引）。
-    /// `session_key` = r2a 键构造 `{host}:{ns}:{profile}:{native_id}`（与
-    /// 既有 SessionKey 展示串同形）。`last_observed_at_ms` 恒更新。
+    /// sessions upsert：session_key 键构造与 insert_facts 一致；冲突按
+    /// UNIQUE(host, machine_namespace, native_session_id) 更新 last_observed，
+    /// started_at_ms 仅首见写。
     pub fn upsert_session(
         &self,
         host: &str,
@@ -80,45 +195,413 @@ impl<'a> SqlFactWriter<'a> {
         source_profile: Option<&str>,
         last_observed_ms: i64,
     ) -> Result<String, AuthorityError> {
-        let _ = (host, machine_namespace, native_session_id, source_profile, last_observed_ms);
-        unimplemented!("Phase 2.3：sessions upsert——ON CONFLICT(host, machine_namespace, native_session_id) DO UPDATE")
+        let key = session_key(host, machine_namespace, native_session_id, source_profile);
+        self.conn.execute(
+            "INSERT INTO sessions(
+                 session_key, host, native_session_id, machine_namespace,
+                 source_profile, started_at_ms, last_observed_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?6)
+             ON CONFLICT(host, machine_namespace, native_session_id) DO UPDATE SET
+                 source_profile = COALESCE(excluded.source_profile, sessions.source_profile),
+                 last_observed_at_ms = excluded.last_observed_at_ms",
+            rusqlite::params![
+                key,
+                host,
+                native_session_id,
+                machine_namespace,
+                source_profile,
+                last_observed_ms,
+            ],
+        )?;
+        Ok(key)
     }
 
-    /// 事实批写入（spec §5.1.3/5.1.4）。每个 candidate：
-    /// 1. 契约校验（`build_usage_fact` 同款 + 身份字段在场 + token 非负——
-    ///    DDL CHECK 是最后防线，这里先拦）；
-    /// 2. 不合格 → 写 `data_quality_issues`（scope_type="fact"、
-    ///    scope_key=fact_id 或 candidate 摘要、code="invalid_fact"、
-    ///    detail_json=问题清单）→ `rejected += 1`；
-    /// 3. 合格 → `INSERT INTO usage_facts ... ON CONFLICT DO NOTHING`
-    ///    （列映射见本文件下方常量 `FACT_COLUMN_MAPPING` 的文档）。
-    ///
-    /// `native_session_id` 按事实批的会话维度传（调用方按会话分批调用；
-    /// 单批内混多会话 = 调用方 bug，这里按批断言）。
+    /// 事实批写入。每 candidate：契约校验（build_usage_fact 同款）→ 不合格
+    /// 写 data_quality_issues（id = fact_invalid:{fact_id 或摘要 hash}），
+    /// 合格项 INSERT INTO usage_facts ON CONFLICT DO NOTHING。
+    /// 混多 native_session_id → Err（调用方 bug，按批断言）。
     pub fn insert_facts(
         &self,
         facts: &[serde_json::Value],
         source_id: &str,
         native_session_id: &str,
     ) -> Result<SqlInsertReport, AuthorityError> {
-        let _ = (facts, source_id, native_session_id);
-        unimplemented!(
-            "Phase 2.1：校验→quality issues→INSERT OR CONFLICT DO NOTHING→报告"
-        )
+        let mut report = SqlInsertReport::default();
+        for fact in facts {
+            let obj = match fact.as_object() {
+                Some(o) => o,
+                None => {
+                    self.write_rejected(
+                        &stable_hash(fact),
+                        &["candidate must be a JSON object".to_string()],
+                    )?;
+                    report.rejected += 1;
+                    continue;
+                }
+            };
+            // 批内会话断言：事实携带的 native_session_id 必须等于 batch 参数。
+            if let Some(sid) = obj
+                .get("native_session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                if sid != native_session_id {
+                    return Err(AuthorityError::Sqlite(
+                        rusqlite::Error::InvalidParameterName(format!(
+                            "__mixed_session_batch__:{sid} != {native_session_id}"
+                        )),
+                    ));
+                }
+            }
+
+            let mut problems: Vec<String> = Vec::new();
+            let mut doc: Option<Value> = None;
+            let mut ts_ms: Option<i64> = None;
+
+            // 1) 契约校验（身份四边形 + token 非负）
+            match agent_vitals_domain::usage_fact::build_usage_fact(obj) {
+                Ok(d) => {
+                    // 2) 时间戳必须可 parse——无时间戳的事实不入账
+                    match obj.get("event_ts_utc").and_then(Value::as_str) {
+                        Some(ts) if !ts.is_empty() => match iso_to_ms(ts) {
+                            Some(ms) => {
+                                doc = Some(d);
+                                ts_ms = Some(ms);
+                            }
+                            None => problems.push(format!("unparseable event_ts_utc: `{ts}`")),
+                        },
+                        _ => problems.push("missing or empty event_ts_utc".to_string()),
+                    }
+                }
+                Err(p) => problems.extend(p),
+            }
+
+            let Some(built) = doc else {
+                let scope = obj
+                    .get("fact_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| stable_hash(fact));
+                self.write_rejected(&scope, &problems)?;
+                report.rejected += 1;
+                continue;
+            };
+            let r = FactReader { obj: built.as_object().expect("build 产物必为对象") };
+            let host = r.s("host").unwrap_or_default().to_string();
+            let ns = r.s("machine_namespace").unwrap_or_default().to_string();
+            let sid = r.s("native_session_id").unwrap_or_default().to_string();
+            let profile = r.s("source_profile");
+            let skey = session_key(&host, &ns, &sid, profile);
+            let ts_ms = ts_ms.expect("doc 只在事件时间可 parse 时才 Some——此处必有毫秒"); // 见上方校验：doc 非 None 即 ts 已 parse
+            let peak = crate::store::peak_of(r.s("event_ts_utc").unwrap_or_default());
+            let model_id = r.s("model_id").or_else(|| r.s("model_raw")).map(str::to_string);
+            let provider_id = r.s("provider_id").or_else(|| r.s("billing_source")).map(str::to_string);
+
+            let n = self.conn.execute(
+                "INSERT INTO usage_facts(
+                     fact_id, host, machine_namespace, native_session_id, session_key,
+                     source_event_id, observation_kind, source_profile,
+                     provider_id, model_id, event_ts_ms, event_peak,
+                     uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                     source_id, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+                 ON CONFLICT DO NOTHING",
+                rusqlite::params![
+                    r.s("fact_id").unwrap_or_default(),
+                    host, ns, sid, skey,
+                    r.s("source_event_id").unwrap_or_default(),
+                    r.s("observation_kind").unwrap_or_default(),
+                    r.s("source_profile"),
+                    provider_id,
+                    model_id,
+                    ts_ms,
+                    peak,
+                    r.i("uncached_input_tokens"),
+                    r.i("cache_read_tokens"),
+                    r.i("cache_write_tokens"),
+                    r.i("output_tokens"),
+                    source_id,
+                    self.run_id,
+                    self.now_ms,
+                    self.now_ms,
+                ],
+            )?;
+            if n > 0 { report.inserted += 1 } else { report.duplicate += 1 }
+        }
+        Ok(report)
+    }
+
+    /// 不合格 candidate 写 data_quality_issues（scope_type=fact）。issue_id =
+    /// `fact_invalid:{scope_key}`；ON CONFLICT 更新 last_seen_at_ms。
+    fn write_rejected(&self, scope_key: &str, problems: &[String]) -> Result<(), AuthorityError> {
+        let issue_id = format!("fact_invalid:{scope_key}");
+        let detail = serde_json::json!(problems).to_string();
+        self.conn.execute(
+            "INSERT INTO data_quality_issues(
+                 issue_id, scope_type, scope_key, code, severity,
+                 first_seen_at_ms, last_seen_at_ms, detail_json)
+             VALUES (?1, 'fact', ?2, 'invalid_fact', 'warning', ?3, ?3, ?4)
+             ON CONFLICT(issue_id) DO UPDATE SET
+                 last_seen_at_ms = excluded.last_seen_at_ms",
+            rusqlite::params![issue_id, scope_key, self.now_ms, detail],
+        )?;
+        Ok(())
     }
 }
 
-// fact JSON → `usage_facts` 列映射（插入时使用）：
-// | fact 字段 | 列 | 说明 |
-// |---|---|---|
-// | `fact_id` | fact_id | 契约层 6 元组 fnv1a64 |
-// | `host` / `machine_namespace` / `native_session_id` / `source_event_id` / `observation_kind` | 同名列 | UNIQUE 五元组 |
-// | `source_profile` | source_profile | |
-// | `model_id` ?? `model_raw` | model_id | 与旧 store 同款回退 |
-// | `provider_id` ?? `billing_source` | provider_id | |
-// | `event_ts_utc`（ISO） | event_ts_ms | 解析为 UTC 毫秒——ISO→ms helper 从 store.rs 提升复用 |
-// | （`event_ts_utc` 经 `peak_of`） | event_peak | 三尾部形态已钉测 |
-// | `uncached_input_tokens` 等 4 桶 | t_* 4 列 | 负值在校验层拒绝（DDL CHECK 兜底） |
-//
-// `session_key`/`source_id`/`ingested_run_id`/`created_at_ms`/`updated_at_ms`
-// 由 writer 绑定值填；`deleted_at_ms` 恒 NULL（soft delete 是 Phase 2 后续）。
+// 列映射索引：`{host}:{path_hash}`；`session_key` 用 source_key；
+// `ingested_run_id`=run_id；created/updated=now；deleted 恒 NULL。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tmp_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "avd-ftw-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn open_db(tag: &str) -> (crate::authority::AuthorityDb, std::path::PathBuf) {
+        let path = tmp_path(tag);
+        let db = crate::authority::AuthorityDb::open(&path, 1_000).unwrap();
+        db.begin_run("run-1", "cli", 1_000).unwrap();
+        (db, path)
+    }
+
+    fn mk_fact(event_id: &str) -> Value {
+        json!({
+            "host": "claude-code",
+            "machine_namespace": "ns-m",
+            "source_profile": "default",
+            "native_session_id": "sess-a",
+            "source_event_id": event_id,
+            "observation_kind": "token_count",
+            "event_ts_utc": "2026-09-05T10:00:00.000Z",
+            "model_id": "claude-opus-4",
+            "uncached_input_tokens": 100,
+            "cache_read_tokens": 50,
+            "cache_write_tokens": 10,
+            "output_tokens": 5,
+        })
+    }
+
+    /// §5.1.4 单事务：source upsert + session upsert + insert_facts 一次就位。
+    fn apply_txn(
+        db: &crate::authority::AuthorityDb,
+        now_ms: i64,
+        session: &str,
+        facts: &[Value],
+    ) -> Result<(SqlInsertReport, String), AuthorityError> {
+        db.with_immediate_txn(|conn| {
+            let w = SqlFactWriter::new(conn, "run-1", now_ms)?;
+            let src = w.upsert_source_file(
+                "claude-code",
+                std::path::Path::new("/home/u/raw/cc.jsonl"),
+                100,
+                1,
+                Some(session),
+                1,
+            )?;
+            w.upsert_session("claude-code", "ns-m", session, Some("default"), now_ms)?;
+            let report = w.insert_facts(facts, &src, session)?;
+            Ok((report, src))
+        })
+    }
+
+    #[test]
+    fn replay_of_same_event_is_idempotent_duplicate_is_counted() {
+        // 重放幂等：同 fact 只落一行（INSERT ON CONFLICT DO NOTHING），
+        // 第二遍必须计 duplicate 而不是 re-insert。
+        let (db, path) = open_db("idem");
+        let f = mk_fact("e1");
+        let (r1, _) = apply_txn(&db, 1_500, "sess-a", std::slice::from_ref(&f)).unwrap();
+        assert_eq!((r1.inserted, r1.duplicate, r1.rejected), (1, 0, 0));
+        let (r2, _) = apply_txn(&db, 1_600, "sess-a", std::slice::from_ref(&f)).unwrap();
+        assert_eq!(r2.inserted, 0, "重放不重插");
+        assert_eq!(r2.duplicate, 1);
+        let total: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 1, "同 fact 只落一行");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn five_tuple_conflict_is_duplicate_even_with_foreign_fact_id() {
+        // UNIQUE(host,ns,ses,event,kind) 是 second 防线：即使 fact_id 被
+        // 外部 hash 规则污染，同五元组也只记一次（不产生罪证双账）。
+        let (db, path) = open_db("five");
+        let mut f = mk_fact("e1");
+        f["fact_id"] = Value::String("borrowed-id".to_string());
+        let (r1, _) = apply_txn(&db, 1_500, "sess-a", &[f]).unwrap();
+        assert_eq!(r1.inserted, 1);
+        let mut g = mk_fact("e1");
+        g["fact_id"] = Value::String("another-hash".to_string());
+        let (r2, _) = apply_txn(&db, 1_600, "sess-a", &[g]).unwrap();
+        assert_eq!(r2.inserted, 0);
+        assert_eq!(r2.duplicate, 1, "五元组命中即重复");
+        let total: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn source_file_conflict_keeps_first_seen_frozen() {
+        // first_seen_at_ms = 历史证据：幂等 upsert 再见只能滚动
+        // last_seen，绝不改 first_seen（可复现 checkpoint 语义）。
+        let (db, path) = open_db("sc");
+        db.with_immediate_txn(|conn| {
+            let w1 = SqlFactWriter::new(conn, "run-1", 1_200)?;
+            let a = w1.upsert_source_file(
+                "claude-code", std::path::Path::new("/h/x.jsonl"), 10, 11, None, 1)?;
+            let w2 = SqlFactWriter::new(conn, "run-1", 8_300)?;
+            let b = w2.upsert_source_file(
+                "claude-code", std::path::Path::new("/h/x.jsonl"), 20, 22, None, 1)?;
+            assert_eq!(a, b, "同 (host,path) 必须同 source_id");
+            Ok(())
+        }).unwrap();
+        let (first, last): (i64, i64) = db.conn().query_row(
+            "SELECT first_seen_at_ms, last_seen_at_ms FROM source_files", [],
+            |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(first, 1_200, "first_seen 首次定格");
+        assert_eq!(last, 8_300, "last_seen 滚到最近观测");
+        let n: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM source_files", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "只建一行");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn session_conflict_updates_last_observed_not_started() {
+        // started_at_ms = 首见；last_observed_at_ms = 最近观测。冲突 upsert
+        // 只顶 last_observed，首见时钟是历史、不得改写。
+        let (db, path) = open_db("sess");
+        db.with_immediate_txn(|conn| {
+            let w1 = SqlFactWriter::new(conn, "run-1", 2_000)?;
+            w1.upsert_session("claude-code", "full-ns", "s9", None, 2_000)?;
+            let w2 = SqlFactWriter::new(conn, "run-1", 9_500)?;
+            w2.upsert_session("claude-code", "full-ns", "s9", None, 9_500)?;
+            Ok(())
+        }).unwrap();
+        let (k, started, last): (String, i64, i64) = db.conn().query_row(
+            "SELECT session_key, started_at_ms, last_observed_at_ms FROM sessions", [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!(k, "claude-code:full-ns:default:s9", "profile None → default");
+        assert_eq!(started, 2_000, "started 首见定格");
+        assert_eq!(last, 9_500, "last_observed 顶到最近");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn rejected_fact_writes_quality_issue_not_usage_row() {
+        // 负 token 是契约违规：不得入 usage_facts（DDL CHECK 兜底前先拦），
+        // 必须落 data_quality_issues 可审计（不静默丢）。
+        let (db, path) = open_db("rej");
+        let mut f = mk_fact("neg");
+        f["output_tokens"] = Value::from(-7);
+        let (r, _) = apply_txn(&db, 1_500, "sess-a", &[f]).unwrap();
+        assert_eq!((r.inserted, r.rejected, r.duplicate), (0, 1, 0));
+        let n: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "不合格事实不得入 usage_facts");
+        let (code, sev): (String, String) = db.conn().query_row(
+            "SELECT code, severity FROM data_quality_issues", [],
+            |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(code, "invalid_fact");
+        assert_eq!(sev, "warning");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn repeated_rejection_updates_same_issue_row() {
+        // 同问题连拒两次：issue 行必须只存在一条（ON CONFLICT 更新
+        // last_seen），不许无限增行。
+        let (db, path) = open_db("accum");
+        let mut f = mk_fact("e2");
+        f["cache_read_tokens"] = Value::from(-1);
+        for now in [1_500, 1_800] {
+            let (r, _) = apply_txn(&db, now, "sess-a", std::slice::from_ref(&f)).unwrap();
+            assert_eq!(r.rejected, 1);
+        }
+        let n: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM data_quality_issues", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "同事实连拒两次也只一条质量行");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mixed_session_batch_is_an_error_and_rolls_back() {
+        // 调用方 bug：一整个 batch 必须属于同一个 native_session_id。
+        // 混会话整批报错且事务一致回滚，不允许半入库。
+        let (db, path) = open_db("mixed");
+        let mut f = mk_fact("e3");
+        f["native_session_id"] = Value::from("sess-other");
+        let res = apply_txn(&db, 1_500, "sess-a", &[f]);
+        assert!(res.is_err(), "混会话必须报错");
+        assert!(res.unwrap_err().to_string().contains("__mixed_session_batch__"));
+        let n: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "批错整段事务回滚");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn unparseable_timestamp_rejects_the_fact() {
+        // 无时间戳/时间戳不可 parse 的事实不得入账——保存 event_ts_ms 为
+        // 猜测值会污染所有时间窗口聚合（spec §4 的时间校验在此落地）。
+        let (db, path) = open_db("ts");
+        let mut f = mk_fact("ts");
+        f["event_ts_utc"] = Value::from("garbage");
+        let (r, _) = apply_txn(&db, 1_500, "sess-a", &[f]).unwrap();
+        assert_eq!(r.rejected, 1, "不可 parse 的时间戳事实必须 invalid");
+        let n: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn unknown_run_id_construction_fails() {
+        // new() 的外键预检：绑定幽灵 run_id 的 writer 必须在构造期失败，
+        // 而不是让 INSERT 打到外键上才报错。
+        let (db, path) = open_db("run");
+        let err = SqlFactWriter::new(db.conn(), "ghost", 1).unwrap_err();
+        assert!(err.to_string().contains("__run_id_not_found__"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn accepted_row_wires_session_source_run_ts_peak() {
+        // 抓回归：insert 行必须携带 writer 绑定的 session_key/source_id/
+        // run_id，并且 event_ts_ms / event_peak 与既有 store 同一把尺。
+        let (db, path) = open_db("wire");
+        let (r, src) = apply_txn(&db, 1_500, "sess-a", &[mk_fact("u")]).unwrap();
+        assert_eq!(r.inserted, 1);
+        let (k, s, run, ts, pk): (String, String, String, i64, i64) = db.conn().query_row(
+            "SELECT session_key, source_id, ingested_run_id, event_ts_ms, event_peak
+             FROM usage_facts",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).unwrap();
+        assert_eq!(k, "claude-code:ns-m:default:sess-a");
+        assert_eq!(s, src);
+        assert_eq!(run, "run-1");
+        let expect_ms = iso_to_ms("2026-09-05T10:00:00.000Z").unwrap();
+        assert_eq!(ts, expect_ms, "event_ts_ms 是 UTC 毫秒");
+        let expect_peak = crate::store::peak_of("2026-09-05T10:00:00.000Z");
+        assert_eq!(pk, expect_peak, "event_peak 与 store 同尺");
+        std::fs::remove_file(&path).ok();
+    }
+}

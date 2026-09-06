@@ -90,7 +90,7 @@ pub struct RebuildReport {
 /// 先减掉偏移再算，否则同一事件在索引与 fold 两侧报不同的 peak（预算
 /// 分母会落这个偏差）。偏移格式不齐 → 0（宁可少算峰值不臆造，与
 /// usage.rs `is_peak` 的保守方向同款）。
-fn peak_of(ts: &str) -> i64 {
+pub(crate) fn peak_of(ts: &str) -> i64 {
     let b = ts.as_bytes();
     if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
         return 0;
