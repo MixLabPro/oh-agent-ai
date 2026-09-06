@@ -451,9 +451,9 @@ mod tests {
         let (start, end) = beijing_day_bounds_ms("2026-09-05").unwrap();
         // event_peak 直接注入（本模块只测查询/reshape，不重算
         // `is_peak_slot`——那是 emitter 的职责）：两条 peak=0、一条 peak=1。
-        insert_fact(&db, "f1", "dsh", Some("deepseek-v4-pro"), "turn", start + 3600_000, 0, 100, 10, 5, 20);
-        insert_fact(&db, "f2", "dsh", Some("deepseek-v4-pro"), "turn", start + 4000_000, 1, 50, 0, 0, 10);
-        insert_fact(&db, "f3", "dsh", None, "turn", start + 5000_000, 0, 7, 0, 0, 1); // 无模型归属
+        insert_fact(&db, "f1", "dsh", Some("deepseek-v4-pro"), "turn", start + 3_600_000, 0, 100, 10, 5, 20);
+        insert_fact(&db, "f2", "dsh", Some("deepseek-v4-pro"), "turn", start + 4_000_000, 1, 50, 0, 0, 10);
+        insert_fact(&db, "f3", "dsh", None, "turn", start + 5_000_000, 0, 7, 0, 0, 1); // 无模型归属
         let days = peaked_days_map(db.conn(), "dsh", start, end).unwrap();
         let day = &days["2026-09-05"];
         // 顶层总量 = 全部三条之和（含无归属行）。

@@ -1539,6 +1539,193 @@ impl SummaryRepository for JsonSummaryRepository {
     }
 }
 
+/// v0.9.1 Phase 3.1（`AGENT_VITALS_V0_9_1_SQL_AUTHORITY_MIGRATION_SPEC.md`
+/// §5.2）：`SummaryRepository` 的 SQL 权威库实现——`usage_facts` 取代
+/// month.json/ledger/codex fold 作为读源。**计价规则一个字不改**：DSH 走
+/// `dsh_host_amount`/`dsh_provider_amount`/`dsh_tokens`/`dsh_day_tokens`
+/// （无缝复用，它们本就只认 `{total,peak_total}`/`{date:day}` 这两种
+/// `Value` 形状，不关心谁产出的），codex/claude 走上面拆出来的
+/// `_from_hours`/`_from_days` 核心——三条计价管线与 `JsonSummaryRepository`
+/// 完全同源，唯一的区别是 [`agent_vitals_data::authority_query`] 从
+/// `usage_facts` 反查出同形状的输入，而不是解析 JSON 文件/折叠 rollout。
+///
+/// **权威库打不开（损坏/新版本）时不 panic、也不报错**——`SummaryRepository`
+/// 的 trait 签名不带 `Result`（Stage 0 定的形状，Phase 3 沿用），这里退化
+/// 成"这个窗口的三个宿主都没有数据"，与 JSON 路径在 month.json 缺失时的
+/// 行为一致（每个宿主的 `_from_hours`/`_from_days` 核心函数本来就把"空
+/// 输入"处理成 Unavailable，不是本结构体重新发明的分支）。真正的损坏诊断
+/// 走 `data doctor`/`data status`，不是这条查询路径的职责。
+pub struct SqlSummaryRepository;
+
+impl SqlSummaryRepository {
+    fn open_db() -> Option<agent_vitals_data::authority::AuthorityDb> {
+        let data_home = crate::home::data_home();
+        let path = agent_vitals_data::authority::default_authority_path(&data_home);
+        agent_vitals_data::authority::AuthorityDb::open(&path, crate::sql_sync::now_ms()).ok()
+    }
+}
+
+/// claude 窗口内的账日：实时行级事实优先，`legacy_aggregate` 深历史只填
+/// 实时缺席的日期——先铺 legacy 再用实时 `extend` 覆盖同键，`BTreeMap::
+/// extend` 后写赢，天然实现"有实时用实时、没有才退回 ledger 深历史"
+/// （spec §6.2.3：ledger 是现文件重放不到的那部分账的 store of record，
+/// 不是与实时并列的第二份真相——两者本就不该在同一天都有数据）。
+fn merged_claude_days(
+    conn: &rusqlite::Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut days = agent_vitals_data::authority_query::claude_legacy_days(conn, start_ms, end_ms)
+        .unwrap_or_default();
+    days.extend(
+        agent_vitals_data::authority_query::claude_days(conn, start_ms, end_ms).unwrap_or_default(),
+    );
+    days
+}
+
+/// 打开库 + 算好窗口边界后，三宿主共用的原始数据抓取——月/日两条路径都是
+/// 「先拿这三份，再喂各自计价函数」，抽出来避免 monthly/daily 各写一份
+/// 一模一样的 `match (&db, bounds) { … }`。库打不开或窗口非法（无效
+/// 月份/日期字符串）一律退化成空输入，见结构体文档。
+fn fetch_windowed(
+    db: &Option<agent_vitals_data::authority::AuthorityDb>,
+    bounds: Option<(i64, i64)>,
+) -> (serde_json::Value, serde_json::Value, BTreeMap<String, serde_json::Value>) {
+    match (db, bounds) {
+        (Some(db), Some((start, end))) => {
+            let conn = db.conn();
+            (
+                agent_vitals_data::authority_query::peaked_days_map(conn, "dsh", start, end)
+                    .unwrap_or_else(|_| json!({})),
+                agent_vitals_data::authority_query::codex_by_hour_model(conn, start, end)
+                    .unwrap_or_else(|_| json!({})),
+                merged_claude_days(conn, start, end),
+            )
+        }
+        _ => (json!({}), json!({}), BTreeMap::new()),
+    }
+}
+
+impl SummaryRepository for SqlSummaryRepository {
+    fn monthly_summary(&self, query: &MonthlySummaryQuery) -> MonthlySummary {
+        let db = Self::open_db();
+        let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(&query.month);
+        let (dsh_days, by_hour_model, claude_days_map) = fetch_windowed(&db, bounds);
+
+        let pricing = agent_vitals_domain::cost::load_pricing();
+        let latest_day = dsh_days.as_object().and_then(|m| m.keys().next_back().cloned());
+        let dsh_cost = match dsh_days.as_object() {
+            Some(m) if !m.is_empty() => Some(agent_vitals_domain::cost::month_cost(&dsh_days, &pricing)),
+            _ => None,
+        };
+        let mut by_host = BTreeMap::new();
+        by_host.insert("dsh".to_string(), dsh_host_amount(dsh_cost.clone(), latest_day.as_deref()));
+        let (codex_amount, codex_tk) = codex_host_amount_with_tokens_from_hours(
+            &by_hour_model,
+            &serde_json::Value::Null,
+            &serde_json::Value::Null,
+            None,
+        );
+        by_host.insert("codex".to_string(), codex_amount);
+        let (claude_amount, claude_tk) = claude_host_amount_with_tokens_from_days(&claude_days_map);
+        by_host.insert("claude-code".to_string(), claude_amount);
+
+        let mut tokens_by_host = BTreeMap::new();
+        tokens_by_host.insert("dsh".to_string(), dsh_tokens(Some(&dsh_days), &query.month));
+        tokens_by_host.insert("codex".to_string(), codex_tk);
+        tokens_by_host.insert("claude-code".to_string(), claude_tk);
+
+        let mut by_provider = BTreeMap::new();
+        by_provider.insert(
+            "dsh/deepseek-official".to_string(),
+            dsh_provider_amount(dsh_cost, latest_day.as_deref()),
+        );
+        let (codex_prov, _codex_prov_tk) = codex_provider_amount_from_hours(&by_hour_model, None);
+        by_provider.insert("codex/openai".to_string(), codex_prov);
+        by_provider.extend(claude_provider_amounts_from_days(&claude_days_map));
+        apply_subscription_fees(&mut by_provider, &query.month);
+
+        let freshness = aggregate_freshness(&by_host);
+        let last_observed_at = freshness.last_observed_at.clone();
+        MonthlySummary {
+            month: query.month.clone(),
+            by_host,
+            tokens_by_host,
+            by_provider,
+            coverage: agent_vitals_data::projection::CoverageStatus {
+                measured_fields: WIRED_HOSTS.len() as u64,
+                total_fields: (WIRED_HOSTS.len() + NOT_YET_WIRED_HOSTS.len()) as u64,
+                denominator_version: 1,
+            },
+            freshness,
+            excluded_hosts: excluded_hosts(),
+            last_observed_at,
+        }
+    }
+
+    fn daily_summary(&self, query: &DailySummaryQuery) -> DailySummary {
+        let db = Self::open_db();
+        let bounds = agent_vitals_data::authority_query::beijing_day_bounds_ms(&query.date);
+        let (dsh_days, by_hour_model, claude_days_map) = fetch_windowed(&db, bounds);
+        let day_value = dsh_days.get(&query.date).cloned();
+
+        let pricing = agent_vitals_domain::cost::load_pricing();
+        let cost = day_value.as_ref().map(|d| {
+            agent_vitals_domain::cost::priced_day(d, &pricing)
+                .unwrap_or_else(|| agent_vitals_domain::cost::bucket_cost(d, &pricing))
+        });
+        let mut by_host = BTreeMap::new();
+        by_host.insert(
+            "dsh".to_string(),
+            dsh_host_amount(cost.clone(), day_value.as_ref().map(|_| query.date.as_str())),
+        );
+        let (codex_amount, codex_tk) = codex_host_amount_with_tokens_from_hours(
+            &by_hour_model,
+            &serde_json::Value::Null,
+            &serde_json::Value::Null,
+            Some(&query.date),
+        );
+        by_host.insert("codex".to_string(), codex_amount);
+        let (claude_amount, claude_tk) = claude_host_amount_with_tokens_from_days(&claude_days_map);
+        by_host.insert("claude-code".to_string(), claude_amount);
+
+        let mut tokens_by_host = BTreeMap::new();
+        tokens_by_host.insert(
+            "dsh".to_string(),
+            day_value.as_ref().map(dsh_day_tokens).unwrap_or_default(),
+        );
+        tokens_by_host.insert("codex".to_string(), codex_tk);
+        tokens_by_host.insert("claude-code".to_string(), claude_tk);
+
+        let mut by_provider = BTreeMap::new();
+        by_provider.insert(
+            "dsh/deepseek-official".to_string(),
+            dsh_provider_amount(cost, day_value.as_ref().map(|_| query.date.as_str())),
+        );
+        let (codex_prov, _codex_prov_tk) =
+            codex_provider_amount_from_hours(&by_hour_model, Some(&query.date));
+        by_provider.insert("codex/openai".to_string(), codex_prov);
+        by_provider.extend(claude_provider_amounts_from_days(&claude_days_map));
+
+        let freshness = aggregate_freshness(&by_host);
+        let last_observed_at = freshness.last_observed_at.clone();
+        DailySummary {
+            date: query.date.clone(),
+            by_host,
+            tokens_by_host,
+            by_provider,
+            coverage: agent_vitals_data::projection::CoverageStatus {
+                measured_fields: WIRED_HOSTS.len() as u64,
+                total_fields: (WIRED_HOSTS.len() + NOT_YET_WIRED_HOSTS.len()) as u64,
+                denominator_version: 1,
+            },
+            freshness,
+            excluded_hosts: excluded_hosts(),
+            last_observed_at,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2185,6 +2372,201 @@ mod tests {
             assert_eq!(dsh.freshness.state, FreshnessState::Fresh);
             assert!(dsh.amounts_by_basis.contains_key(&BillingBasis::MeteredActual));
             assert!(summary.total_summable() > 0.0);
+        });
+    }
+
+    // ── SqlSummaryRepository（Phase 3.1）────────────────────────────────
+
+    /// 每次都在一个**保证干净**的库上开始——`with_home` 的目录清理是尽力而为
+    /// （`let _ = remove_dir_all`，失败不追责），残留的 `agent-vitals.sqlite3`
+    /// 会让下一个测试的 `fact_id`（PRIMARY KEY，全表唯一，不分宿主）撞车；
+    /// 显式先删库文件（含 WAL/SHM 旁路文件）比依赖目录级清理更可靠。
+    fn seed_authority_db() -> agent_vitals_data::authority::AuthorityDb {
+        let data_home = crate::home::data_home();
+        let path = agent_vitals_data::authority::default_authority_path(&data_home);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_fact(
+        db: &agent_vitals_data::authority::AuthorityDb,
+        fact_id: &str,
+        host: &str,
+        model_id: Option<&str>,
+        observation_kind: &str,
+        event_ts_ms: i64,
+        event_peak: i64,
+        u: i64,
+        cr: i64,
+        cw: i64,
+        o: i64,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                 VALUES ('run', 1, 'cli', 'succeeded', 1) ON CONFLICT(run_id) DO NOTHING",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                     source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
+                     event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                     output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'm', 'sess', ?1, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'run', 1, 1)",
+                rusqlite::params![
+                    fact_id, host, observation_kind, model_id, event_ts_ms, event_peak, u, cr, cw, o
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn sql_repository_reports_unavailable_with_no_facts() {
+        with_home(|| {
+            let repo = SqlSummaryRepository;
+            let summary = repo.monthly_summary(&MonthlySummaryQuery { month: "2020-01".to_string() });
+            assert!(summary.contract_violations().is_empty(), "{:?}", summary.contract_violations());
+            for host in ["dsh", "codex", "claude-code"] {
+                assert_eq!(
+                    summary.by_host[host].freshness.state,
+                    FreshnessState::Unavailable,
+                    "host={host}"
+                );
+                assert!(summary.by_host[host].amounts_by_basis.is_empty(), "host={host}");
+            }
+            assert!(!summary.excluded_hosts.contains("dsh"));
+            assert!(summary.excluded_hosts.contains("workbuddy"));
+            assert_eq!(summary.coverage.measured_fields, 3);
+
+            let daily = repo.daily_summary(&DailySummaryQuery { date: "2020-01-01".to_string() });
+            assert!(daily.contract_violations().is_empty(), "{:?}", daily.contract_violations());
+            assert_eq!(daily.by_host["dsh"].freshness.state, FreshnessState::Unavailable);
+        });
+    }
+
+    #[test]
+    fn sql_repository_rejects_a_malformed_window_without_a_guess() {
+        with_home(|| {
+            let repo = SqlSummaryRepository;
+            // 格式非法（不是 YYYY-MM/YYYY-MM-DD）不能编数字——`beijing_month_
+            // bounds_ms`/`beijing_day_bounds_ms` 返回 None，退化路径与"这个
+            // 窗口没有任何事实"完全一样：诚实的 Unavailable，不是 panic。
+            let summary = repo.monthly_summary(&MonthlySummaryQuery { month: "2026-9".to_string() });
+            assert_eq!(summary.by_host["dsh"].freshness.state, FreshnessState::Unavailable);
+            let daily = repo.daily_summary(&DailySummaryQuery { date: "not-a-date".to_string() });
+            assert_eq!(daily.by_host["dsh"].freshness.state, FreshnessState::Unavailable);
+        });
+    }
+
+    /// spec §7 Phase 3「client parity」的最小落点：同一批 token，一份走
+    /// month.json（`JsonSummaryRepository`）、一份走 `usage_facts`
+    /// （`SqlSummaryRepository`），两条完全独立的计价管线必须算出相同的
+    /// 金额/token/新鲜度——这正是切换读路径前必须成立的对账条件（用户
+    /// 2026-09-06 的确认："必须做一次本机真实数据迁移与校验"）。
+    #[test]
+    fn sql_repository_dsh_month_matches_json_repository_on_equivalent_data() {
+        with_home(|| {
+            let month = crate::clock::current_month_beijing();
+            let day = crate::clock::today_beijing();
+            crate::state::atomic_write_json(
+                &crate::state::state_dir().join("month.json"),
+                &json!({"days": {day.clone(): {"by_model": {"deepseek-v4-flash": {
+                    "uncached_input_tokens": 1_000_000, "output_tokens": 100_000,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                }}}}}),
+            );
+            // 同一天同一模型的同一批 token，拆两条事实（模拟两次真实调用）：
+            // 700_000+300_000 uncached、60_000+40_000 output，与上面 JSON
+            // 侧的 1_000_000/100_000 严格相等。
+            let (day_start_ms, _) =
+                agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap();
+            let db = seed_authority_db();
+            seed_fact(&db, "f1", "dsh", Some("deepseek-v4-flash"), "turn", day_start_ms + 1_000, 0, 700_000, 0, 0, 60_000);
+            seed_fact(&db, "f2", "dsh", Some("deepseek-v4-flash"), "turn", day_start_ms + 2_000, 0, 300_000, 0, 0, 40_000);
+            drop(db);
+
+            let json_summary =
+                JsonSummaryRepository.monthly_summary(&MonthlySummaryQuery { month: month.clone() });
+            let sql_summary = SqlSummaryRepository.monthly_summary(&MonthlySummaryQuery { month });
+            assert!(sql_summary.contract_violations().is_empty(), "{:?}", sql_summary.contract_violations());
+            assert_eq!(
+                json_summary.by_host["dsh"].amounts_by_basis,
+                sql_summary.by_host["dsh"].amounts_by_basis,
+                "两条管线的 DSH 金额必须逐分相等"
+            );
+            assert_eq!(
+                json_summary.tokens_by_host["dsh"].total,
+                sql_summary.tokens_by_host["dsh"].total,
+            );
+            assert_eq!(
+                json_summary.by_host["dsh"].freshness.state,
+                sql_summary.by_host["dsh"].freshness.state,
+            );
+            assert!(sql_summary.total_summable() > 0.0);
+            assert_eq!(json_summary.total_summable(), sql_summary.total_summable());
+        });
+    }
+
+    /// claude 侧的 client parity：ledger JSON 与实时 SQL 事实各喂一条同样
+    /// 的 (model, 4桶) 数据，`claude_day_cost` 是同一个函数——分歧只可能
+    /// 来自形状拼装错误，不是计价规则本身。
+    #[test]
+    fn sql_repository_claude_day_matches_json_repository_on_equivalent_data() {
+        with_home(|| {
+            // `write_ledger` 固定写 "2026-09-02"（见其定义）——不能用
+            // `today_beijing()`，否则 JSON 侧当天没有账日、daily_summary
+            // 不做零用量订阅补建（那是 monthly 专属），会拿不到 per_model
+            // 条目而 panic。
+            let day = "2026-09-02".to_string();
+            write_ledger(json!({
+                "claude-opus-5": {
+                    "input_tokens": 1_000_000, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0, "output_tokens": 100_000,
+                },
+            }));
+            let (start_ms, _) = agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap();
+            let db = seed_authority_db();
+            seed_fact(&db, "f1", "claude-code", Some("claude-opus-5"), "message", start_ms + 1_000, 0, 1_000_000, 0, 0, 100_000);
+            drop(db);
+
+            let json_daily = JsonSummaryRepository.daily_summary(&DailySummaryQuery { date: day.clone() });
+            let sql_daily = SqlSummaryRepository.daily_summary(&DailySummaryQuery { date: day });
+            assert!(sql_daily.contract_violations().is_empty(), "{:?}", sql_daily.contract_violations());
+            assert_eq!(
+                json_daily.by_provider["claude-code/anthropic"].amounts_by_basis,
+                sql_daily.by_provider["claude-code/anthropic"].amounts_by_basis,
+            );
+            assert_eq!(
+                json_daily.tokens_by_host["claude-code"].total,
+                sql_daily.tokens_by_host["claude-code"].total,
+            );
+        });
+    }
+
+    /// codex 侧：真实事实只带 `model_raw`、无 speed 维度——`codex_by_hour_
+    /// model` 恒填 "standard"（真机也从未观测到别的值，见模块头 `_note`）。
+    /// 断言金额落在 ApiEquivalent（openai 声明 subscription）且非零。
+    #[test]
+    fn sql_repository_codex_day_reports_api_equivalent_amount() {
+        with_home(|| {
+            let day = crate::clock::today_beijing();
+            let (start_ms, _) = agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap();
+            let db = seed_authority_db();
+            seed_fact(&db, "f1", "codex", Some("gpt-5.6-sol"), "token_count", start_ms + 3_600_000, 0, 800_000, 200_000, 50_000, 80_000);
+            drop(db);
+
+            let sql_daily = SqlSummaryRepository.daily_summary(&DailySummaryQuery { date: day });
+            assert!(sql_daily.contract_violations().is_empty(), "{:?}", sql_daily.contract_violations());
+            let codex = &sql_daily.by_host["codex"];
+            assert!(codex.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent), "{codex:?}");
+            assert!(sql_daily.tokens_by_host["codex"].total > 0);
         });
     }
 }
