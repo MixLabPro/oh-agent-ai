@@ -1195,6 +1195,7 @@ fn latest_day_key(days: &serde_json::Value) -> Option<String> {
 /// `total_tokens == 0` 判定"这天没有用量"。
 pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     use serde_json::Value;
+    let _ = codex_home; // 签名兼容 Tauri 调用点（3.5 Tier B 切 SQL 后不再读 fold）
     let mut days: serde_json::Map<String, Value> = serde_json::Map::new();
     fn day_entry<'a>(
         days: &'a mut serde_json::Map<String, Value>,
@@ -1211,71 +1212,58 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
             })
     }
 
-    // DSH：month.json（当月窗口由 read_month 过滤）逐日四桶 + priced_day
-    // （认不出的旧壳形状回落 bucket_cost，与 daily_summary 同一读法）。
+    // v0.9.1 Phase 3.5 Tier B：三宿主数据源统一为 SQL 权威库（与
+    // SqlSummaryRepository::monthly_summary 同一条 fetch_windowed 管线）——
+    // month.json/ledger/fold 全部退出 product 读面（spec §5.2 禁读清单）。
+    // 计价函数与旧路径共用同一批核心（priced_day/claude_day_cost/
+    // codex_cost_report），格子里的数字只换来源不换算法。
+    let db = SqlSummaryRepository::open_db();
+    let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(month);
+    let (dsh_days, by_hour_model, claude_days_map) = fetch_windowed(&db, bounds);
+
     let pricing = agent_vitals_domain::cost::load_pricing();
-    if let Some(dsh_days) = crate::budget::read_month(Some(month)).as_ref().and_then(|d| d.as_object()) {
-        for (date, day) in dsh_days {
+
+    // DSH：peaked_days_map（8 键含 peak_* + by_model）逐日 priced_day。
+    if let Some(dsh) = dsh_days.as_object() {
+        for (date, day) in dsh {
             let tokens = dsh_day_tokens(day).total;
             let cost = agent_vitals_domain::cost::priced_day(day, &pricing)
                 .unwrap_or_else(|| agent_vitals_domain::cost::bucket_cost(day, &pricing));
-            let cost_val = cost
-                .get("total")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
             let e = day_entry(&mut days, date);
             e["dsh_tokens"] = json!(tokens);
-            e["dsh_cost_cny"] = json!(cost_val);
+            e["dsh_cost_cny"] = json!(cost.get("total").and_then(|v| v.as_f64()).unwrap_or(0.0));
         }
     }
 
-    // Claude：ledger 当月逐日（4 型 snake = 归一词表直读）+ claude_day_cost
-    // 的 currency_totals 分币。
-    if let Some(ledger) = crate::state::read_json(&crate::sessions::claude_ledger::ledger_path())
-        .and_then(|l| l.get("days").and_then(|d| d.as_object()).cloned())
-    {
-        for (date, day) in &ledger {
-            if !date.starts_with(month) {
-                continue;
+    // Claude：merged_claude_days（实时事实优先、legacy_aggregate 深历史按
+    // 模型补缺）逐日 claude_day_cost 分币 + 四桶 token。
+    for (date, day) in &claude_days_map {
+        let mut tokens = 0i64;
+        if let Some(models) = day.as_object() {
+            for (_m, b) in models {
+                let g = |k: &str| b.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+                tokens += g("input_tokens") + g("cache_read_input_tokens")
+                    + g("cache_creation_input_tokens") + g("output_tokens");
             }
-            let mut tokens = 0i64;
-            if let Some(models) = day.as_object() {
-                for (_m, b) in models {
-                    let g = |k: &str| b.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
-                    tokens += g("input_tokens") + g("cache_read_input_tokens")
-                        + g("cache_creation_input_tokens") + g("output_tokens");
-                }
-            }
-            let (cny, usd) = agent_vitals_domain::cost::claude_day_cost(day, &pricing)
-                .and_then(|r| {
-                    let t = r.get("currency_totals")?;
-                    Some((
-                        t.get("CNY").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        t.get("USD").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                    ))
-                })
-                .unwrap_or((0.0, 0.0));
-            let e = day_entry(&mut days, date);
-            e["claude_tokens"] = json!(tokens);
-            e["claude_cost_cny"] = json!(cny);
-            e["claude_cost_usd"] = json!(usd);
         }
+        let (cny, usd) = agent_vitals_domain::cost::claude_day_cost(day, &pricing)
+            .and_then(|r| {
+                let t = r.get("currency_totals")?;
+                Some((
+                    t.get("CNY").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    t.get("USD").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                ))
+            })
+            .unwrap_or((0.0, 0.0));
+        let e = day_entry(&mut days, date);
+        e["claude_tokens"] = json!(tokens);
+        e["claude_cost_cny"] = json!(cny);
+        e["claude_cost_usd"] = json!(usd);
     }
 
-    // Codex：fold → merge → 月过滤小时桶（键 `YYYY-MM-DDTHH`，按日前缀聚合
-    // 5 桶 token）；逐日钱取 codex_cost_report 的 days[]（cost_usd，untimed
-    // 不混进某一天——codex_host_amount 同一条纪律）。
-    let merged = codex_merged_cached(codex_home);
-    let mut filtered = serde_json::Map::new();
-    if let Some(bh) = merged["by_hour_model"].as_object() {
-        for (h, v) in bh {
-            if h.starts_with(month) {
-                filtered.insert(h.clone(), v.clone());
-            }
-        }
-    }
-    let by_hour_model = serde_json::Value::Object(filtered);
-    for (hour, models) in by_hour_model.as_object().expect("filtered is an object") {
+    // Codex：SQL 小时桶按日聚合 token；逐日钱走 codex_cost_report 的 days[]
+    // （cost_usd，untimed 剩余按 per_model 并——与旧路径同一函数同一守恒）。
+    for (hour, models) in by_hour_model.as_object().expect("by_hour_model is an object") {
         let date = &hour[..hour.len().min(10)];
         let mut tokens = 0i64;
         if let Some(models) = models.as_object() {
@@ -1298,8 +1286,8 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     if let Some(report) = crate::sessions::codex_cost::codex_cost_report(
         &by_hour_model,
         &by_model,
-        &merged["unaccounted"],
-        &merged["plan"],
+        &serde_json::Value::Null,
+        &serde_json::Value::Null,
         &codex_pricing,
         false,
     ) {
@@ -1320,6 +1308,8 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     }
     json!({ "month": month, "days": Value::Object(days) })
 }
+
+
 
 /// Stage 0 的 `SummaryRepository`：读现有 JSON state（`budget.rs` 的
 /// `month.json`/`month-archive.json`），不建任何新索引。
