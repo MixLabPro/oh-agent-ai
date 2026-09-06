@@ -518,6 +518,50 @@ pub fn facts_page_window(
     Ok((rows, has_more))
 }
 
+/// 三宿主统一的北京小时轴（3.5 Tier B：`hourly_distribution` 的 SQL 数据源
+/// ——取代旧 facts-index 投影，行级事实本就都在 `usage_facts`，旧索引是
+/// 可丢弃投影、权威读面没有理由绕它）。返回 `{host: {"HH": tokens}}`，
+/// tokens = 四桶之和，只装非零小时（与旧 `hours_by_host` 同形）。DSH 的
+/// 峰谷维度在小时轴上不保留（小时分布是「活跃度」视图；峰谷计价走
+/// [`peaked_days_map`]）。
+pub fn hourly_by_host(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<BTreeMap<String, BTreeMap<String, i64>>, AuthorityError> {
+    let mut stmt = conn.prepare(
+        "SELECT host,
+                CAST(((event_ts_ms + ?1) / ?2) % 24 AS TEXT) AS bj_hour,
+                SUM(uncached_input_tokens + cache_read_tokens
+                    + cache_write_tokens + output_tokens)
+         FROM usage_facts
+         WHERE observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+         GROUP BY host, bj_hour",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        },
+    )?;
+    let mut out: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
+    for row in rows {
+        let (host, hour, total) = row?;
+        if total > 0 {
+            out.entry(host)
+                .or_default()
+                .insert(format!("{:0>2}", hour), total);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,6 +762,28 @@ mod tests {
         let (start, end) = beijing_month_bounds_ms("2026-09").unwrap();
         let by_hour = codex_by_hour_model(db.conn(), start, end).unwrap();
         assert!(by_hour.as_object().unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hourly_by_host_buckets_all_hosts_into_beijing_hours() {
+        let path = tmp_db("hourly");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (start, end) = beijing_day_bounds_ms("2026-09-05").unwrap();
+        // 三宿主各自一条：北京 01:00（UTC 17:00 前一日——用 day_start 直接
+        // 加小时即北京语义）、北京 08:00、北京 23:00。legacy 行必须排除。
+        insert_fact(&db, "h1", "claude-code", Some("m"), "turn", start + 3_600_000, 0, 10, 0, 0, 5);
+        insert_fact(&db, "h2", "codex", Some("m"), "token_count", start + 8 * 3_600_000, 0, 20, 0, 0, 2);
+        insert_fact(&db, "h3", "dsh", Some("m"), "turn", start + 23 * 3_600_000, 0, 30, 0, 0, 3);
+        insert_fact(&db, "h4", "dsh", Some("m"), "legacy_aggregate", start + 3_600_000, 0, 999, 0, 0, 0);
+        let out = hourly_by_host(db.conn(), start, end).unwrap();
+        assert_eq!(out["claude-code"]["01"], 15, "四桶之和");
+        assert_eq!(out["codex"]["08"], 22);
+        assert_eq!(out["dsh"]["23"], 33);
+        assert!(!out["dsh"].contains_key("01"), "legacy 行不进小时轴");
+        // 零填充键形态（"01" 非 "1"）。
+        assert!(out["claude-code"].contains_key("01") && !out["claude-code"].contains_key("1"));
         let _ = std::fs::remove_file(&path);
     }
 

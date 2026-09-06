@@ -716,141 +716,47 @@ fn dsh_provider_amount(
 /// DTO 上都落 null，区分交给宿主级 `hosts_available`；「无小时轴」与
 /// 「有轴没用量」不在小时粒度上区分（无诚实收益，徒增形状复杂度）。
 pub fn hourly_distribution(date: &str, codex_home: &Path) -> serde_json::Value {
-    // ── DSH：today.json 的 buckets（仅当日可用）──
-    let state_dir = crate::state::state_dir();
-    let today = crate::state::read_json(&state_dir.join("today.json"));
-    // DSH 小时值物化成 map（不返回借用闭包——生命周期纠缠，且 24 桶成本
-    // 可忽略）。
-    let (dsh_available, dsh_hours): (bool, Option<std::collections::BTreeMap<String, i64>>) =
-        today
-            .as_ref()
-            .and_then(|tj| {
-                let day = tj.get("date").and_then(serde_json::Value::as_str)?;
-                if day != date {
-                    return None;
-                }
-                Some(tj)
-            })
-            .map_or((false, None), |tj| {
-                let buckets = tj.get("buckets").and_then(serde_json::Value::as_object);
-                let mut hours = std::collections::BTreeMap::new();
-                for hh in 0..24 {
-                    if let Some(b) = buckets.and_then(|m| {
-                        m.get(&hh.to_string()).or_else(|| m.get(&format!("{hh:02}")))
-                    }) {
-                        let total: i64 = ["uncached_input_tokens", "cache_read_tokens",
-                                          "cache_write_tokens", "output_tokens"]
-                        .iter()
-                        .map(|k| b.get(*k).and_then(serde_json::Value::as_i64).unwrap_or(0))
-                        .sum();
-                        hours.insert(format!("{hh:02}"), total);
-                    }
-                }
-                (true, Some(hours))
-            });
-
-    // ── 事实索引（所有宿主的小时都从这里来——只要事实 ingest 过）────
-    // claude 的 ledger 只有日轴、DSH 历史日无小时轴，索引是这两家唯一
-    // 的小时来源；codex 的 fold 全量且完整，作为 codex 的权威（索引只有
-    // 手动 --write 过的会话，用它反而会少算）。
-    let facts_dir = codex_home.parent().map(|_| ()).and(Some(())); // 占位，下方用 data_home
-    let _ = facts_dir;
-    let data_home = crate::home::data_home();
-    let index_hours = agent_vitals_data::store::FactsIndex::open_or_rebuild(
-        &agent_vitals_data::store::default_index_path(&data_home),
-        &data_home.join("facts"),
-    )
-    .ok()
-    .and_then(|(idx, _)| idx.hours_by_host(date).ok())
-    .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-    let idx_host = |host: &str| -> Option<std::collections::BTreeMap<String, i64>> {
-        index_hours
-            .get(host)
-            .and_then(serde_json::Value::as_object)
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| v.as_i64().map(|n| (k.clone(), n)))
-                    .collect()
-            })
-    };
-    let claude_hours = idx_host("claude-code");
-    let dsh_index_hours = idx_host("dsh");
-
-    // ── Codex：fold by_hour_model 按 `{date}T` 前缀过滤（走 60s memo——
-    // 性能形状纪律，禁止自建枚举+fold 管线）──
-    let merged = codex_merged_cached(codex_home);
-    let prefix = format!("{date}T");
-    let codex_hours: std::collections::BTreeMap<String, i64> = merged
-        .get("by_hour_model")
-        .and_then(serde_json::Value::as_object)
-        .map(|hm| {
-            hm.iter()
-                .filter(|(k, _)| k.starts_with(&prefix))
-                .map(|(k, models)| {
-                    let total: i64 = models
-                        .as_object()
-                        .map(|m| {
-                            m.values()
-                                .filter_map(|speeds| speeds.as_object())
-                                .flat_map(|sp| sp.values())
-                                .map(codex_hour_total)
-                                .sum::<i64>()
-                        })
-                        .unwrap_or(0);
-                    (k.trim_start_matches(&prefix).to_string(), total)
-                })
-                .filter(|(_, v)| *v > 0)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let dsh_source: Option<&str> = if dsh_available {
-        Some("today-json")
-    } else if dsh_index_hours.as_ref().is_some_and(|m| !m.is_empty()) {
-        Some("facts-index")
-    } else {
-        None
-    };
-    let claude_source: Option<&str> = if claude_hours.as_ref().is_some_and(|m| !m.is_empty()) {
-        Some("facts-index")
-    } else {
-        None
+    // v0.9.1 Phase 3.5 Tier B：数据源从「today.json + 旧 facts-index + codex
+    // fold 三路拼装」整体切换到 SQL 权威库——行级事实本就都在 `usage_facts`
+    // （`authority_query::hourly_by_host` 三宿主统一），旧 facts-index 是可
+    // 丢弃投影，权威读面没有理由绕它再走一遍 JSONL 重建；today.json/fold
+    // 是禁读清单成员（spec §5.2），product 读面在此全部退役。`codex_home`
+    // 参数保留（签名兼容 Tauri 调用点），SQL 路径不再使用。
+    let _ = codex_home;
+    let db = SqlSummaryRepository::open_db();
+    let bounds = agent_vitals_data::authority_query::beijing_day_bounds_ms(date);
+    let by_host: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>> =
+        match (&db, bounds) {
+            (Some(db), Some((start, end))) => {
+                agent_vitals_data::authority_query::hourly_by_host(db.conn(), start, end)
+                    .unwrap_or_default()
+            }
+            _ => Default::default(),
+        };
+    // 来源标注如实切换：全部来自权威库的行级事实（legacy_aggregate 不进
+    // 小时轴——它是日轴账单不是会话证据）。库打不开 = 全宿主缺席。
+    let source = |host: &str| -> Option<&str> {
+        by_host.get(host).filter(|m| !m.is_empty()).map(|_| "sql-facts")
     };
     let mut hours = Vec::with_capacity(24);
     for hh in 0..24 {
         let key = format!("{hh:02}");
-        // DSH buckets 的键无零填充（真机 "0"）；Codex trim 后是 "H"/"HH" 混合
-        // ——两种键都试（trim_start_matches 只去了日期前缀）。
-        let dsh_today = dsh_hours.as_ref().and_then(|m| m.get(&key).copied());
-        let dsh_indexed = dsh_index_hours.as_ref().and_then(|m| m.get(&key).copied());
-        let dsh = dsh_today.or(dsh_indexed);
-        let codex = codex_hours.get(&key).copied().or_else(|| codex_hours.get(&hh.to_string()).copied());
-        let claude = claude_hours.as_ref().and_then(|m| m.get(&key).copied());
         hours.push(serde_json::json!({
             "hour": hh,
-            "dsh_tokens": dsh,
-            "codex_tokens": codex,
-            "claude_tokens": claude,
+            "dsh_tokens": by_host.get("dsh").and_then(|m| m.get(&key)).copied(),
+            "codex_tokens": by_host.get("codex").and_then(|m| m.get(&key)).copied(),
+            "claude_tokens": by_host.get("claude-code").and_then(|m| m.get(&key)).copied(),
         }));
     }
     serde_json::json!({
         "date": date,
         "hosts_available": {
-            "dsh": dsh_source,
-            "codex": if codex_hours.is_empty() { None } else { Some("fold") },
-            "claude": claude_source,
+            "dsh": source("dsh"),
+            "codex": source("codex"),
+            "claude": source("claude-code"),
         },
         "hours": hours,
     })
-}
-
-/// Codex 5 桶求和（字段名常量直接引 hosts 的 `CODEX_TOKEN_FIELDS`——
-/// runtime 依赖 hosts，不复制字符串，键名漂移会在编译期跟着走）。
-fn codex_hour_total(bucket: &serde_json::Value) -> i64 {
-    agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS
-        .iter()
-        .filter_map(|f| bucket.get(*f).and_then(serde_json::Value::as_i64))
-        .sum()
 }
 
 /// Stage B（DoD #4 收口）：`has_unresolved` 的**逐模型下钻**——`data-unresolved`

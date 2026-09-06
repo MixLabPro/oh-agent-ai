@@ -1558,12 +1558,13 @@ mod tests {
         assert!(hour_sum <= cal_total,
                 "codex 小时和 {hour_sum} 不得超过日历日总量 {cal_total}");
         assert!(hour_sum > 0, "codex 用量日的小时图不得全空（fold 全量历史）");
-        // 来源标注合法（消费方按这个渲染覆盖面提示）。
+        // 来源标注合法（消费方按这个渲染覆盖面提示）。Phase 3.5 Tier B：
+        // 三宿主统一 `sql-facts`（hourly_distribution 切权威库后唯一来源）。
         let src = &v["hosts_available"];
-        assert_eq!(src["codex"], serde_json::json!("fold"));
-        assert!(src["dsh"].is_null() || src["dsh"] == "today-json" || src["dsh"] == "facts-index",
+        assert_eq!(src["codex"], serde_json::json!("sql-facts"), "codex 来源切 SQL 后统一标注");
+        assert!(src["dsh"].is_null() || src["dsh"] == "sql-facts",
                 "dsh 来源非法: {src}");
-        assert!(src["claude"].is_null() || src["claude"] == "facts-index",
+        assert!(src["claude"].is_null() || src["claude"] == "sql-facts",
                 "claude 来源非法: {src}");
     }
 
