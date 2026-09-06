@@ -14,8 +14,8 @@
 | Phase | 状态 | 说明 |
 |---|---|---|
 | Phase 0 冻结与基线 | ✅ | spec 冻结；基线备份 `~/.agent-vitals/backup-v0.9.1-baseline/`（facts 48,999 条 + 索引库 + state JSON + 对账报告） |
-| Phase 1 schema 与迁移框架 | 🔨 | `agent-vitals-data/src/authority.rs` 已落地（DDL v1 全 12 表 + 版本闸 + 中断清扫 + 事务帮助器，8 测试全绿）；迁移 runner 的数据迁移记录、`sync-facts` 接线待做 |
-| Phase 2 清洗写入与同步 | ⬜ | |
+| Phase 1 schema 与迁移框架 | ✅ | authority.rs（DDL v1 全 12 表 + 版本闸 + 中断清扫 + 事务帮助器 + retention）+ 时钟注入（sql_sync::now_ms）+ 迁移记录（sync_runs/migrations 表） |
+| Phase 2 清洗写入与同步 | 🔨 | 三路并发实现合流（c06de2e）+ 审查收口（6776fe0）+ 收口批（b1f8b38：双写/存量迁移 49,321/data status/authority 保留）；审查 agent 复核中 |
 | Phase 3 SQL repository 与读路径切换 | ⬜ | |
 | Phase 4 双轨验收与旧路径退役 | ⬜ | |
 
@@ -36,10 +36,10 @@
 - [x] **1.3 中断批次清扫** — open 时 running → cancelled（`error_code=interrupted`）
 - [x] **1.4 事务帮助器** — `with_immediate_txn`（Err → ROLLBACK）；全部业务
   写入必须走它
-- [ ] **1.5 时钟纪律接线** — `*_at_ms` 全部由 runtime 注入（data crate 不读
-  时钟）；`runtime` 侧包一个 `now_ms()` 注入点
-- [ ] **1.6 数据迁移记录** — `migrations` 表的写入帮助器（legacy import 与
-  DDL 版本分离，spec §3.5）
+- [x] **1.5 时钟纪律接线** — `sql_sync::now_ms()` 是 runtime 唯一读时钟
+  点；data crate 全部 `*_at_ms` 由调用方注入
+- [x] **1.6 数据迁移记录** — `migrations` 表已建（DDL 与数据迁移分离）；
+  legacy import 的迁移记录走 sync_runs（trigger=migration）
 - [ ] **1.7 损坏恢复文档化** — `data doctor` 的报告项预留（schema version /
   完整性 / 恢复路径提示；Phase 2 落命令）
 
@@ -92,11 +92,12 @@ lease 包住完整事务。旧 `index.sqlite3` 的 facts 按 §6.2.1 一次性�
   不存明文路径，spec §3.2）；JSON checkpoint 文件退役
 - [ ] **2.3 sessions 最小索引** — emitter 的身份字段 upsert `sessions`
   （session_key = 既有 r2a 键构造），`usage_facts.session_key` 关联
-- [ ] **2.4 `sync_facts` 切 SQL writer** — `runtime::sync_service` 的
-  `ingest_facts` 调用替换为「SQL writer + sync_runs 记录」；JSONL 追加
-  停止（facts/*.jsonl 保留为遗留文件不再写）
-- [ ] **2.5 一次性导入** — 旧 index.sqlite3 + facts/*.jsonl 的存量按
-  §6.2.1 导入新库（fact_id 幂等吸收重叠）；旧 `store` 退役标记
+- [x] **2.4 双写（迁移窗口 §6.1）** — `sync_facts` emit 一次，同一批事实
+  先写 SQL 权威（write_flat_facts_to_authority）再走旧链 ingest；两轨都
+  成功才进 checkpoint。JSONL 停写推迟到 Phase 4（旧读面切换完成后）
+- [x] **2.5 一次性导入** — `data-migrate`：facts/*.jsonl 重放入权威库
+  （真机 49,321 条，重跑全 duplicate 幂等）；旧 `store`（index.sqlite3）
+  保留至 Phase 3 读切换后退役
 - [ ] **2.6 命令面** — `data sync`（= 现 sync-facts 的 SQL 版）/
   `data status`（sync_runs + 来源 + 质量摘要）/ `data repair`（重放指定
   来源）/ `data migrate`（§6.1 升级状态机的手动入口）
