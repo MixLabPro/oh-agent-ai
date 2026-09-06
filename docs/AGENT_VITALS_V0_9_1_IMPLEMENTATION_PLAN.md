@@ -240,6 +240,10 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
     test_cli_matrix 157 全绿）。TDD：失败测试先行（两临时库同配置、无锁断言
     spent 严格更大）。为什么单独一提交：ZST 只认 `crate::home::data_home()`
     是本会话预算卡连续 4 次实现失败的根因，先把这个坑填平再接线。
+  - [x] **预算口径改按量**（下一提交）：`budget_status_sql` 支出分子从
+    `summable_total()`（含 FixedSubscription）改成 `MeteredActual + HostBilled`，
+    **排除订阅月费**；JSON 键 `spent_cny_minor` → `metered_cny_minor`。见下
+    「预算口径（PM 决策 2026-09-07）」。
   - [ ] **预算卡接线**（`overview::read_overview_at` → `budget_status_sql_at`）
     ——**不是「wire 一个调用」，是把 `domain::budget::evaluate_alert` 移到
     SQL 面**：托盘日预算行（`lib.rs::daily_budget_text`）要 `effective_daily_
@@ -252,8 +256,37 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
     alert.json——留作 alert 端口整体切。overview.rs ~15 个写 alert.json 的
     Tauri 单测随之重写。
   - [ ] `budget show` / alert 计算（同上 `evaluate_alert` SQL 端口，与预算卡
-    接线是同一件事的两个消费方）
+    接线是同一件事的两个消费方；口径按下节「按量」）
   - [ ] HTML 模板消费面（`codex-cost --html`）
+
+  #### 预算口径（PM 决策 2026-09-07，PM熊叔评审）
+
+  **预算 = 跨宿主「按量实付」的成本闸门。** 不是全宿主总预算（含订阅），也
+  不是 token 预算。
+
+  | 花钱类型 | basis | 本月还会变 | 用户当下能干预 | 进预算告警 |
+  |---|---|---|---|---|
+  | 按量实付 | `MeteredActual` | 是（越用越多） | 换模型/少跑/开缓存/避峰 | ✅ |
+  | 宿主账单 | `HostBilled` | 是（用量变动） | 同上 | ✅ |
+  | 订阅月费 | `FixedSubscription` | 否（月初已付） | 只能下月退订 | ❌ 完整面板单列「本月订阅 ¥X（已付）」 |
+  | 无价卡 token | —— | 未知 | 补价卡映射 | ❌ 进「数据可信度」 |
+
+  - **理由**：告警职责是对「越用越多、且当下能拧」的花钱设闸门。订阅是常数，
+    摊进每 5 分钟刷新的分子 = 月初凭空涨一截然后整月杵着，是告警剧场。
+    adaptive floor（7 日均 ×1.5）与 peak_share 反博弈本就是按量概念（订阅
+    没有「日均」、峰谷差只发生在按量计费上）——这本身证明预算是按量口径。
+  - **跨币**：CNY 主栏，非零 USD 按量流加副栏 / 显式标注「仅 CNY 按量」，
+    绝不用一个 ¥ 数字盖住多币现实。USD 按量若起量→加独立 USD 预算行。
+  - **token 预算**：不做主口径（单价非常数，Opus vs Flash 差数十倍；用户脑子
+    里是「还剩 ¥200」不是「还剩 40M token」）。作 per-model 高级下钻视图。
+  - **「只是 DSH」是缺陷**：历史遗留（DSH 曾是唯一有真实 CNY 按量的宿主）。
+    切 SQL 后 `budget_status_sql` 的分子已是跨 by_provider 的 CNY 按量之和。
+  - **落地**：`budget_status_sql` 分子排除 FixedSubscription（已改，
+    `metered_cny_minor`）；`evaluate_alert` SQL 端口喂「跨宿主按量日/月窗」
+    而非 DSH-only；托盘完整面板加「本月订阅 ¥X（已付，不计入按量预算）」行。
+  - **验收指标**：告警「有效触发率」（触发后 24h 内确实降调用/换模型）≥40%；
+    「告警后无动作」率 ≤30%；跨币遗漏投诉 = 0；托盘逐日分子之和 ≡ 月度
+    metered 分子（±未计时样本，`token_by_date_model` 已有纪律）。
 - [x] **3.6 导出切 SQL** — ✅ 5a9504d（2026-09-07，subagent 实施）：双路径结构
   保留（各自 `BEGIN DEFERRED` 一致截面、无共享中间产物），JSONL 读实现整体
   删除；字段映射表显式入模块文档（`model_id` 列回填 `model_raw`、

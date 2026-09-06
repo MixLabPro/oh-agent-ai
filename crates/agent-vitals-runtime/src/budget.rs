@@ -527,9 +527,17 @@ pub fn budget_show_month(month: &str, json_out: bool) {
 // 预算/告警从 `budget_config` + `usage_facts` 聚合计算（spec §7 Phase 3）。
 // 与上面的 `budget_show`（Python 差分看守的 legacy 链）是**并行新面**：
 // 配置源自权威库 `budget_config` 单行表（首次使用时从旧 config.toml 一次性
-// seed），支出源自 `SqlSummaryRepository::monthly_summary` 的真实支出 CNY
-// 列。**判断全部 minor 整数比较**（纪律 2「金额不落浮点」——pyround 一次
-// 之后不再回浮点）。
+// seed），支出源自 `SqlSummaryRepository::monthly_summary` 的 by_provider
+// CNY 列——但**只取按量档**（`MeteredActual + HostBilled`），排除
+// `FixedSubscription`。**判断全部 minor 整数比较**（纪律 2「金额不落浮点」
+// ——pyround 一次之后不再回浮点）。
+//
+// 口径 = **跨宿主「按量实付」的成本闸门**（PM 决策 2026-09-07）：预算告警
+// 的职责是对「越用越多、且用户当下能干预」的花钱设闸门——那就是按量实付。
+// 订阅月费月初已付、不因用户行为而变，摊进每 5 分钟刷新的告警分子只会让
+// 月初那天数字凭空涨一截然后整月杵着。订阅在完整面板单列「本月订阅
+// ¥X（已付）」，不进这条。跨币分栏不相加——USD 按量流由未来 USD 预算行
+// 承载。token 是下钻单位不是预算口径（单价非常数，Opus 与 Flash 差数十倍）。
 
 /// 旧配置一次性 seed（Phase 3.4 设计定稿）：`budget_config` 行缺失且旧
 /// `config.toml` 存在 → 读 `[budget]` 节映射 seed（monthly_cny/daily_cny/
@@ -625,16 +633,27 @@ pub fn budget_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
                 month: month.to_string(),
             })
     };
-    // 真实支出 = by_provider summable 桶的 CNY 列（FixedSubscription +
-    // MeteredActual + HostBilled；Money 用分币分栏，跨币不相加——USD 订阅
-    // 费不能冒充 CNY 预算的消耗）。零条目 → 0（不编造币桶）。
-    let spent_cny_f64: f64 = summary
+    // 预算 = **跨宿主「按量实付」的成本闸门**（PM 决策 2026-09-07，见
+    // docs/AGENT_VITALS_V0_9_1_IMPLEMENTATION_PLAN.md「预算口径」）：
+    // by_provider 的 CNY 列里取 `MeteredActual + HostBilled`——**排除
+    // FixedSubscription**。理由：订阅月费月初已付、不因用户当下行为而变，
+    // 摊进每 5 分钟刷新的告警分子 = 拿一个拧不动的常数挤占闸门的判断空间
+    // （月初那天数字凭空涨一截然后整月杵着）。订阅在完整面板单列一行
+    // 「本月订阅 ¥X（已付）」，不进这条。跨币仍分栏不相加——USD 按量流
+    // 由未来的 USD 预算行承载，不冒充 CNY 消耗。零条目 → 0（不编造币桶）。
+    let metered_cny_f64: f64 = summary
         .by_provider
         .values()
         .filter(|h| h.currency.as_deref() == Some("CNY"))
-        .map(|h| h.summable_total())
+        .map(|h| {
+            h.summable_total()
+                - h.amounts_by_basis
+                    .get(&agent_vitals_data::projection::BillingBasis::FixedSubscription)
+                    .copied()
+                    .unwrap_or(0.0)
+        })
         .sum();
-    let spent_minor = agent_vitals_domain::util::pyround(spent_cny_f64 * 100.0, 0) as i64;
+    let spent_minor = agent_vitals_domain::util::pyround(metered_cny_f64 * 100.0, 0) as i64;
 
     // snooze：snoozes 行存在且 until_ms > now → 抑制告警输出标记。
     let now_ms = crate::sql_sync::now_ms();
@@ -667,7 +686,7 @@ pub fn budget_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
         "monthly_cny_minor": cfg.as_ref().map(|c| c.monthly_cny_minor),
         "daily_cny_minor": cfg.as_ref().map(|c| c.daily_cny_minor),
         "warning_ratio_bp": cfg.as_ref().map(|c| c.warning_ratio_bp),
-        "spent_cny_minor": spent_minor,
+        "metered_cny_minor": spent_minor,
         "ratio_bp": ratio_bp,
         "snoozed_until_ms": snooze_until,
         "coverage": summary.coverage.to_json(),
@@ -1040,13 +1059,12 @@ mod tests {
 
     #[test]
     fn budget_status_levels_cross_warn_and_exceeded_on_minor_integers() {
-        // CNY 桶：DSH（deepseek-official 声明 metered → MeteredActual 落
-        // summable）+ 月费摊销会混入（GLM/MiniMax/anthropic 订阅在价表里
-        // 有声明），所以用「无订阅声明影响的月份」+ 精确控制 spent 的方式
-        // 不稳——这里直接对 dsh 宿主 seed 大额事实，档位断言用「随事实增长
-        // 跨档」的相对断言，不硬编码金额对 600 的绝对比例。
+        // CNY 按量桶 = DSH（deepseek-official 声明 metered → MeteredActual）。
+        // 订阅月费（GLM/MiniMax/anthropic）是 `FixedSubscription` 档，按量
+        // 口径切换后**不进预算分子**（PM 决策 2026-09-07）——分子干净等于
+        // 事实折算，档位断言仍用「随事实增长跨档」的相对断言。
         let (_guard, db, month) = fresh_budget_env("levels");
-        // 预算 ¥600 → 无订阅月份 dsh MeteredActual ≈ 事实折算。
+        // 预算 ¥600 → dsh MeteredActual ≈ 事实折算（订阅不垫底）。
         let (start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month).unwrap();
         seed_fact_min(&db, "f1", "dsh", "deepseek-v4-flash", start + 1_000, 100_000_000, 10_000_000);
         db.budget_config_set(60_000, 3_000, 8_000, 1).unwrap();
@@ -1066,8 +1084,8 @@ mod tests {
             );
         }
         let v_high = budget_status_sql(&month).unwrap();
-        let spent_low = v_low["spent_cny_minor"].as_i64().unwrap();
-        let spent_high = v_high["spent_cny_minor"].as_i64().unwrap();
+        let spent_low = v_low["metered_cny_minor"].as_i64().unwrap();
+        let spent_high = v_high["metered_cny_minor"].as_i64().unwrap();
         assert!(spent_high > spent_low, "更多事实 → 更多支出");
         assert!(
             v_high["level"].as_str() == Some("exceeded")
@@ -1078,7 +1096,7 @@ mod tests {
         assert!(v_low["level"].as_str() == Some("ok") || v_low["level"].as_str() == Some("warn"));
         // minor 判断链：ratio_bp 与 spent/monthly 的整数关系自洽。
         if let (Some(sp), Some(rb)) = (
-            v_high["spent_cny_minor"].as_i64(),
+            v_high["metered_cny_minor"].as_i64(),
             v_high["ratio_bp"].as_i64(),
         ) {
             assert_eq!(rb, sp * 10_000 / 60_000, "ratio_bp = spent*10000/monthly 整数除法");
@@ -1097,11 +1115,15 @@ mod tests {
         // 来自 facts，这里 seed 一笔**已知折算价**的事实再调 budget_config
         // _set 把 monthly 拨到 spent 的边界倍数上，四次查询钉四个档位。
         let (start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month).unwrap();
-        seed_fact_min(&_db, "e1", "dsh", "deepseek-v4-flash", start + 1_000, 1_000_000, 100_000);
+        // seed 量要**足够大**：四个边界都靠 `monthly = spent*10000/bp` 反推，
+        // 整数除法在 spent 小时不可逆（spent≈195 时量化误差把 warn 下界推过
+        // 阈值）——按量口径切换后订阅 ¥232 不再垫底，必须自己把 spent 顶到
+        // 数千分（¥数十）级别，`/7999` 与 `/8000` 才区分得开。
+        seed_fact_min(&_db, "e1", "dsh", "deepseek-v4-flash", start + 1_000, 1_000_000_000, 100_000_000);
         drop(_db);
         let v = budget_status_sql(&month).unwrap();
-        let spent = v["spent_cny_minor"].as_i64().unwrap();
-        assert!(spent > 0, "seed 事实必须折出正支出（否则本测试失效）");
+        let spent = v["metered_cny_minor"].as_i64().unwrap();
+        assert!(spent > 10_000, "seed 事实必须折出足量正支出（否则边界反推不可逆），got {spent}");
         // 四次配置 × 查询：spent/warn 下（ok）、恰 warn 上（warn）、
         // spent 恰 100% 下（warn）、恰 100% 上（exceeded）。monthly 取值
         // 让 spent*10000/monthly 落在每档边界两侧各一次。
@@ -1207,16 +1229,17 @@ mod tests {
         let v_empty = budget_status_sql_at(&dir_empty, &month).expect("库可开");
         assert_eq!(v_spender["data_source"], "sql_authority");
         assert_eq!(v_spender["monthly_cny_minor"], json!(60_000), "配置读自传入的 dir");
-        // 注意：`spent_empty` 不是 0——`apply_subscription_fees` 会把声明的
-        // CNY 订阅月费（GLM/MiniMax）按月摊进 by_provider，零用量月份照摊
-        // （§6.7「不付用量也在付」）。断言只看**相对量**：seed 了 DSH 事实的
-        // 库必须严格更大。
-        let spent_spender = v_spender["spent_cny_minor"].as_i64().unwrap();
-        let spent_empty = v_empty["spent_cny_minor"].as_i64().unwrap();
+        let spent_spender = v_spender["metered_cny_minor"].as_i64().unwrap();
+        let spent_empty = v_empty["metered_cny_minor"].as_i64().unwrap();
+        // 按量口径（PM 决策 2026-09-07）：无事实的库 metered = 0——`apply_
+        // subscription_fees` 摊进的 CNY 订阅月费（GLM/MiniMax，实测 ¥232）
+        // 是 `FixedSubscription` 档，**被排除**在预算分子外。改这条前它是
+        // 23200（订阅摊销冒充按量消耗）。
+        assert_eq!(spent_empty, 0, "无按量事实 → metered 分子必须为 0，订阅月费不算");
         assert!(
             spent_spender > spent_empty,
-            "seed 了 DSH 事实的库 spent 必须严格更大——传入的 data_home 被真正使用\
-             （spender={spent_spender} empty={spent_empty}）"
+            "seed 了 DSH 按量事实的库 metered 必须严格更大——传入的 data_home 被真正\
+             使用（spender={spent_spender} empty={spent_empty}）"
         );
         let _ = std::fs::remove_dir_all(&dir_spender);
         let _ = std::fs::remove_dir_all(&dir_empty);
