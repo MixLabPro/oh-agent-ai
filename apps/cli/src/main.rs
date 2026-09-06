@@ -2348,12 +2348,16 @@ session_store={store} fold={fold}"
             }) {
                 Ok(r) => {
                     println!(
-                        "  claude-ledger: +{} inserted, {} duplicate, {} updated, {} conflicts",
-                        r.imported, r.duplicate, r.updated, r.conflicts
+                        "  claude-ledger: +{} inserted, {} duplicate, {} updated, {} rejected, {} conflicts",
+                        r.imported, r.duplicate, r.updated, r.rejected, r.conflicts
                     );
                     total.inserted += r.imported;
                     total.duplicate += r.duplicate;
                     total.updated += r.updated;
+                    // 拒入行并入总 rejected（2026-09-07 审查收口：否则
+                    // checkpoint 的 rejected 键只剩 JSONL 侧的数，迁移摘要
+                    // 与 data_quality_issues 面互相矛盾）。
+                    total.rejected += r.rejected;
                     total.conflicts += r.conflicts;
                 }
                 Err(e) => {
