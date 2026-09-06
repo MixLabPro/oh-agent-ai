@@ -17,7 +17,7 @@
 //! 按条件查询，Stage 0 的实现天生返回"所有已知宿主"，现在加过滤参数只是
 //! 摆设，不是提前设计。
 
-use crate::projection::{DailySummary, MonthlySummary};
+use crate::projection::{CoverageStatus, DailySummary, MonthlySummary};
 
 /// "YYYY-MM"。
 pub struct MonthlySummaryQuery {
@@ -32,4 +32,9 @@ pub struct DailySummaryQuery {
 pub trait SummaryRepository {
     fn monthly_summary(&self, query: &MonthlySummaryQuery) -> MonthlySummary;
     fn daily_summary(&self, query: &DailySummaryQuery) -> DailySummary;
+
+    /// 逐宿主三维 coverage（spec §4 的 `coverage_status(month, host_scope)`
+    /// 查询）。键 = wired 宿主 id。`denominator_version` 因实现而异（SQL
+    /// 侧 = 1 三维分母；JSON 侧 = 0 近似口径），两把尺不可无声互比。
+    fn coverage_status(&self, month: &str) -> std::collections::BTreeMap<String, CoverageStatus>;
 }

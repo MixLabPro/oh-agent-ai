@@ -361,6 +361,94 @@ pub fn codex_by_hour_model(
     Ok(Value::Object(hours.into_iter().map(|(k, v)| (k, Value::Object(v))).collect()))
 }
 
+/// coverage 分母版本（Phase 3.3 设计定稿）：三维定义（usage / price / sync）
+/// 的演进刻度。定义变更必须递增——旧快照的覆盖率与新快照不可无声互比
+/// （data_contract::CoverageStatus 的同一条纪律）。
+pub const COVERAGE_DENOMINATOR_VERSION: u32 = 1;
+
+/// 一个宿主在 `[start_ms, end_ms)` 窗口内的三维 coverage（measured, total）。
+/// `total` 恒 3，`measured` ∈ 0..=3；窗口零事实 → (0, 0, 0)——「从没观测到」
+/// 是三维全空，不是三维全满。分母定义见 [`COVERAGE_DENOMINATOR_VERSION`]：
+///
+/// - **usage 维**：窗口内有可解析时间戳的事实（`event_ts_ms IS NOT NULL`、
+///   未软删除）。「接线了」是能力不是观测，永不计入。
+/// - **price 维**：窗口内 token 非零的每个 distinct 模型都能经
+///   `billing_route_of` 归属到已知 provider。认不出的模型（glm-* 无价卡、
+///   moonshot 无声明）让本维不算 measured——与 `has_unresolved` 同源，
+///   「看见了 token、钱不可归」就是覆盖缺口。
+/// - **sync 维**（refinement，2026-09-07）：`source_files` 该宿主的
+///   `MAX(last_seen_at_ms) >= MAX(窗口内 event_ts_ms)`——窗口内最后一次
+///   事件已被某次同步观测到。历史月份自然成立；托盘停摆时当前窗口归 0。
+///   不读时钟（data crate 纪律），比较双方都来自库内。
+///
+/// 返回 `(measured, total)`；`denominator_version` 由调用方配
+/// [`COVERAGE_DENOMINATOR_VERSION`]。
+pub fn coverage_status(
+    conn: &Connection,
+    host: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<(u64, u64), AuthorityError> {
+    const TOTAL: u64 = 3;
+    // usage 维 + price 维的模型清单一次查询拿齐。
+    let usage_measured: i64 = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM usage_facts
+             WHERE host = ?1 AND deleted_at_ms IS NULL
+               AND event_ts_ms IS NOT NULL AND event_ts_ms >= ?2 AND event_ts_ms < ?3)",
+        rusqlite::params![host, start_ms, end_ms],
+        |r| r.get(0),
+    )?;
+    if usage_measured == 0 {
+        return Ok((0, TOTAL));
+    }
+    // price 维：窗口内 token 非零的 distinct model_id 逐个过声明表。
+    // model_id 为 NULL 的行不参与（未归属 → 与 peaked_days_map 的 fallback
+    // 缺口同语义；当前 emitter 恒填 model_raw 所以库内为空）。
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT model_id FROM usage_facts
+         WHERE host = ?1 AND deleted_at_ms IS NULL AND model_id IS NOT NULL
+           AND event_ts_ms >= ?2 AND event_ts_ms < ?3
+           AND (uncached_input_tokens + cache_read_tokens
+                + cache_write_tokens + output_tokens) > 0",
+    )?;
+    let models: Vec<String> = stmt
+        .query_map(rusqlite::params![host, start_ms, end_ms], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let mut measured: u64 = 1; // usage 维已确认
+    if !models.is_empty() {
+        let pricing = agent_vitals_domain::cost::load_pricing();
+        let all_routed = models.iter().all(|m| {
+            agent_vitals_domain::cost::billing_route_of(m, &pricing).is_some()
+        });
+        if all_routed {
+            measured += 1;
+        }
+    }
+    // sync 维：该宿主最近一次同步观测 ≥ 窗口内最后一次事件。
+    let max_event: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(event_ts_ms) FROM usage_facts
+             WHERE host = ?1 AND deleted_at_ms IS NULL
+               AND event_ts_ms IS NOT NULL AND event_ts_ms >= ?2 AND event_ts_ms < ?3",
+            rusqlite::params![host, start_ms, end_ms],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    let max_seen: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(last_seen_at_ms) FROM source_files WHERE host = ?1",
+            rusqlite::params![host],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    if let (Some(ev), Some(seen)) = (max_event, max_seen) {
+        if seen >= ev {
+            measured += 1;
+        }
+    }
+    Ok((measured, TOTAL))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +649,55 @@ mod tests {
         let (start, end) = beijing_month_bounds_ms("2026-09").unwrap();
         let by_hour = codex_by_hour_model(db.conn(), start, end).unwrap();
         assert!(by_hour.as_object().unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn coverage_status_empty_window_is_zero_not_full() {
+        // 「从没观测到」是三维全空——不是三维全满（接线了 ≠ 观测到）。
+        let path = tmp_db("cov0");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let (start, end) = beijing_month_bounds_ms("2020-01").unwrap();
+        assert_eq!(coverage_status(db.conn(), "dsh", start, end).unwrap(), (0, 3));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn coverage_status_usage_sync_dimensions_and_unpriced_model() {
+        let path = tmp_db("cov3");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (start, end) = beijing_month_bounds_ms("2026-09").unwrap();
+        // 已知模型（deepseek 官方卡）→ usage+price 双维命中；token 全零的
+        // 模型不参与 price 维（无消耗无价可评）。
+        insert_fact(&db, "f1", "dsh", Some("deepseek-v4-flash"), "turn", start + 1_000, 0, 100, 0, 0, 10);
+        insert_fact(&db, "f2", "dsh", Some("zero-model"), "turn", start + 2_000, 0, 0, 0, 0, 0);
+        // sync 维：source_files.last_seen_at_ms ≥ 窗口内最后事件。
+        db.conn()
+            .execute(
+                "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+                     parser_version, first_seen_at_ms, last_seen_at_ms)
+                 VALUES ('src1', 'dsh', 'h1', 1, 1, 1, 1, ?1)",
+                rusqlite::params![start + 2_000],
+            )
+            .unwrap();
+        let (m, t) = coverage_status(db.conn(), "dsh", start, end).unwrap();
+        assert_eq!((m, t), (3, 3), "usage+price+sync 三维全命中");
+        // sync 维缺口：last_seen 落后于窗口内最后事件（此时 max_event 仍是
+        // f2 的 start+2000）→ 降 1。
+        db.conn()
+            .execute(
+                "UPDATE source_files SET last_seen_at_ms = ?1 WHERE source_id='src1'",
+                rusqlite::params![start],
+            )
+            .unwrap();
+        let (m2, _) = coverage_status(db.conn(), "dsh", start, end).unwrap();
+        assert_eq!(m2, 2, "usage+price 命中但 sync 落后 → 2/3");
+        // price 维缺口：出现声明表认不出的**有量**模型（顺带推进了 max_event
+        // ——此时 sync 维本来就落空，price 缺口让 2 → 1）。
+        insert_fact(&db, "f3", "dsh", Some("moonshot-kimi-x"), "turn", start + 3_000, 0, 50, 0, 0, 5);
+        let (m3, _) = coverage_status(db.conn(), "dsh", start, end).unwrap();
+        assert_eq!(m3, 1, "无路由模型让 price 维也落空");
         let _ = std::fs::remove_file(&path);
     }
 }

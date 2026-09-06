@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use agent_vitals_data::projection::{
-    BillingBasis, DailySummary, Freshness, FreshnessState, HostAmount, MonthlySummary,
+    BillingBasis, CoverageStatus, DailySummary, Freshness, FreshnessState, HostAmount, MonthlySummary,
 };
 use agent_vitals_data::repository::{DailySummaryQuery, MonthlySummaryQuery, SummaryRepository};
 use serde_json::json;
@@ -1537,6 +1537,30 @@ impl SummaryRepository for JsonSummaryRepository {
             last_observed_at,
         }
     }
+
+    /// JSON 路径的诚实近似（2026-09-07 Phase 3.3）：三维分母需要事实级
+    /// 数据，JSON 链没有——退而求其次按「该宿主这个月有没有可观测数据」
+    /// 二值近似（Unavailable → 0/3，否则 3/3）。**denominator_version = 0**
+    /// 刻意区别于 SQL 侧的 1：两把尺子不同，旧快照/新快照的覆盖率不可无声
+    /// 互比（data_contract::CoverageStatus 的同一条纪律）——消费方拿到
+    /// version=0 就知道这是接线级粗粒度，不是三维实测。
+    fn coverage_status(&self, month: &str) -> BTreeMap<String, CoverageStatus> {
+        let summary = self.monthly_summary(&MonthlySummaryQuery { month: month.to_string() });
+        WIRED_HOSTS
+            .iter()
+            .map(|h| {
+                let measured = if summary.by_host[*h].freshness.state == FreshnessState::Unavailable {
+                    0
+                } else {
+                    3
+                };
+                (
+                    (*h).to_string(),
+                    CoverageStatus { measured_fields: measured, total_fields: 3, denominator_version: 0 },
+                )
+            })
+            .collect()
+    }
 }
 
 /// v0.9.1 Phase 3.1（`AGENT_VITALS_V0_9_1_SQL_AUTHORITY_MIGRATION_SPEC.md`
@@ -1792,6 +1816,37 @@ impl SummaryRepository for SqlSummaryRepository {
             excluded_hosts: excluded_hosts(),
             last_observed_at,
         }
+    }
+
+    /// SQL 权威实现：逐 wired 宿主跑 `authority_query::coverage_status`
+    /// （三维分母 v1，见该函数 doc）。窗口 = 该月的北京毫秒边界；库打不开
+    /// 或窗口非法 → 三维全 0（诚实「测不到覆盖」，不是满覆盖）。
+    fn coverage_status(&self, month: &str) -> BTreeMap<String, CoverageStatus> {
+        let db = Self::open_db();
+        let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(month);
+        let mut out = BTreeMap::new();
+        for host in WIRED_HOSTS {
+            let (measured, total) = match (&db, bounds) {
+                (Some(db), Some((start, end))) => agent_vitals_data::authority_query::coverage_status(
+                    db.conn(),
+                    host,
+                    start,
+                    end,
+                )
+                .unwrap_or((0, 3)),
+                _ => (0, 3),
+            };
+            out.insert(
+                (*host).to_string(),
+                CoverageStatus {
+                    measured_fields: measured,
+                    total_fields: total,
+                    denominator_version:
+                        agent_vitals_data::authority_query::COVERAGE_DENOMINATOR_VERSION,
+                },
+            );
+        }
+        out
     }
 }
 

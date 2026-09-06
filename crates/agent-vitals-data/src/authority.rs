@@ -242,6 +242,18 @@ CREATE INDEX workflow_events_error_time
   WHERE error_fingerprint IS NOT NULL;
 "#;
 
+/// v0.9.1 Phase 3.4：`budget_config` 单行（config_id=1）的 typed 视图。
+/// 金额一律**最小货币单位整数**（纪律 2「金额不落浮点」——展示层再换算）；
+/// `warning_ratio_bp` 是万分比（8000 = 80%，seed 时由 config.toml 的
+/// `warn_at_ratio: 0.8` × 10000 得来）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetConfig {
+    pub monthly_cny_minor: i64,
+    pub daily_cny_minor: i64,
+    pub warning_ratio_bp: i64,
+    pub updated_at_ms: i64,
+}
+
 /// 权威库连接。**非 Sync**（rusqlite `Connection` 语义同旧 store）；每线程
 /// 自开。open 时：`foreign_keys=ON`（spec §3 前言）+ WAL + `busy_timeout`
 /// + DDL 版本闸 + 中断批次清扫（§3.1）。
@@ -402,6 +414,90 @@ impl AuthorityDb {
     }
 
 
+
+    // ─────── v0.9.1 Phase 3.4：budget_config / budget_snoozes 显式管理 API
+    // （spec §5.3「账单和预算配置为显式管理 API」；单行表 config_id/snooze_id
+    // 恒 1，upsert 语义）。金额全是 minor 整数；判断在消费方，全整数比较。
+
+    /// 读预算配置。None = 从未配置（消费方决定回落默认或报 no_budget）。
+    pub fn budget_config_get(&self) -> Result<Option<BudgetConfig>, AuthorityError> {
+        let r = self.conn.query_row(
+            "SELECT monthly_cny_minor, daily_cny_minor, warning_ratio_bp, updated_at_ms
+             FROM budget_config WHERE config_id = 1",
+            [],
+            |r| {
+                Ok(BudgetConfig {
+                    monthly_cny_minor: r.get(0)?,
+                    daily_cny_minor: r.get(1)?,
+                    warning_ratio_bp: r.get(2)?,
+                    updated_at_ms: r.get(3)?,
+                })
+            },
+        );
+        match r {
+            Ok(c) => Ok(Some(c)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// 写预算配置（单行 upsert）。`updated_at_ms` 由调用方注入（时钟纪律）。
+    pub fn budget_config_set(
+        &self,
+        monthly_cny_minor: i64,
+        daily_cny_minor: i64,
+        warning_ratio_bp: i64,
+        now_ms: i64,
+    ) -> Result<(), AuthorityError> {
+        self.conn.execute(
+            "INSERT INTO budget_config(config_id, monthly_cny_minor, daily_cny_minor,
+                 warning_ratio_bp, updated_at_ms)
+             VALUES (1, ?1, ?2, ?3, ?4)
+             ON CONFLICT(config_id) DO UPDATE SET
+                 monthly_cny_minor = excluded.monthly_cny_minor,
+                 daily_cny_minor = excluded.daily_cny_minor,
+                 warning_ratio_bp = excluded.warning_ratio_bp,
+                 updated_at_ms = excluded.updated_at_ms",
+            rusqlite::params![monthly_cny_minor, daily_cny_minor, warning_ratio_bp, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// 读 snooze（`until_ms`）。None = 从未设置；已过期的不清除（判断在
+    /// 消费方——「过期自动失效」与 Python 链 `now >= until` 同语义），返回
+    /// 原值让消费方比较，避免这里读时钟。
+    pub fn budget_snooze_get(&self) -> Result<Option<i64>, AuthorityError> {
+        self.conn
+            .query_row(
+                "SELECT until_ms FROM budget_snoozes WHERE snooze_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other.into()),
+            })
+    }
+
+    /// 写 snooze（单行 upsert）。`until_ms` = 毫秒时间戳（调用方由 ISO 解析）。
+    pub fn budget_snooze_set(&self, until_ms: i64, now_ms: i64) -> Result<(), AuthorityError> {
+        self.conn.execute(
+            "INSERT INTO budget_snoozes(snooze_id, until_ms, updated_at_ms)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(snooze_id) DO UPDATE SET
+                 until_ms = excluded.until_ms, updated_at_ms = excluded.updated_at_ms",
+            rusqlite::params![until_ms, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// 清除 snooze（物理删单行——「撤销」不是「设为过去」，删了就是干净状态）。
+    pub fn budget_snooze_clear(&self) -> Result<(), AuthorityError> {
+        self.conn
+            .execute("DELETE FROM budget_snoozes WHERE snooze_id = 1", [])?;
+        Ok(())
+    }
 
     /// `BEGIN IMMEDIATE` 事务帮助器：闭包成功 → COMMIT，Err → ROLLBACK 后
     /// 原样上抛。**所有业务写入都必须走这里**（spec §5.1.4——事务边界是
@@ -634,6 +730,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(n, 0, "回滚后不得有半提交残留");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn budget_config_crud_roundtrip_and_overwrite() {
+        let db = tmp_db("bcfg");
+        let a = AuthorityDb::open(&db, 1_000).unwrap();
+        assert!(a.budget_config_get().unwrap().is_none(), "新库无配置");
+        a.budget_config_set(60_000, 3_000, 8_000, 2_000).unwrap();
+        let c = a.budget_config_get().unwrap().expect("seed 后有配置");
+        assert_eq!(
+            (c.monthly_cny_minor, c.daily_cny_minor, c.warning_ratio_bp, c.updated_at_ms),
+            (60_000, 3_000, 8_000, 2_000)
+        );
+        // upsert 覆盖 + updated_at_ms 滚动（第二次 set 的时钟是 3_000）。
+        a.budget_config_set(61_000, 3_100, 9_000, 3_000).unwrap();
+        let c2 = a.budget_config_get().unwrap().unwrap();
+        assert_eq!((c2.monthly_cny_minor, c2.daily_cny_minor, c2.warning_ratio_bp, c2.updated_at_ms),
+                   (61_000, 3_100, 9_000, 3_000));
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn budget_snooze_set_get_clear() {
+        let db = tmp_db("bsnz");
+        let a = AuthorityDb::open(&db, 1_000).unwrap();
+        assert!(a.budget_snooze_get().unwrap().is_none());
+        a.budget_snooze_set(9_999, 1_000).unwrap();
+        assert_eq!(a.budget_snooze_get().unwrap(), Some(9_999));
+        a.budget_snooze_set(8_888, 2_000).unwrap();
+        assert_eq!(a.budget_snooze_get().unwrap(), Some(8_888), "upsert 覆盖");
+        a.budget_snooze_clear().unwrap();
+        assert!(a.budget_snooze_get().unwrap().is_none(), "clear 后干净");
+        // clear 再 clear 幂等。
+        a.budget_snooze_clear().unwrap();
         let _ = std::fs::remove_file(&db);
     }
 }

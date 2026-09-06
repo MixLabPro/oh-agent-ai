@@ -515,6 +515,153 @@ pub fn budget_show_month(month: &str, json_out: bool) {
     }
 }
 
+// ────────────────── v0.9.1 Phase 3.4：budget_status_sql ──────────────────
+// 预算/告警从 `budget_config` + `usage_facts` 聚合计算（spec §7 Phase 3）。
+// 与上面的 `budget_show`（Python 差分看守的 legacy 链）是**并行新面**：
+// 配置源自权威库 `budget_config` 单行表（首次使用时从旧 config.toml 一次性
+// seed），支出源自 `SqlSummaryRepository::monthly_summary` 的真实支出 CNY
+// 列。**判断全部 minor 整数比较**（纪律 2「金额不落浮点」——pyround 一次
+// 之后不再回浮点）。
+
+/// 旧配置一次性 seed（Phase 3.4 设计定稿）：`budget_config` 行缺失且旧
+/// `config.toml` 存在 → 读 `[budget]` 节映射 seed（monthly_cny/daily_cny/
+/// warn_at_ratio×10000→bp），幂等——行存在后不再读旧文件。spec §6.2.4
+/// 「today/alert 不迁移」不适用于**配置**：配置是用户输入，不是派生数据。
+/// 返回是否执行了 seed（供 CLI 输出提示）。
+fn seed_budget_config_from_legacy(db: &agent_vitals_data::authority::AuthorityDb) -> bool {
+    match db.budget_config_get() {
+        Ok(Some(_)) => return false, // 已配置，旧文件永远退役
+        Ok(None) => {}
+        Err(_) => return false,
+    }
+    // 只有**旧文件真实存在**才 seed——`load_config()` 对缺文件返回默认值
+    // （差分链需要），拿默认值当 seed 源会给从未配置过的机器凭空装上
+    // ¥600 预算（no_budget 测试抓出的第一版缺陷：defaults ≠ 用户输入）。
+    if !config_path().exists() {
+        return false;
+    }
+    let cfg = load_config();
+    let monthly = cfg.get("monthly_cny").and_then(Value::as_f64);
+    let daily = cfg.get("daily_cny").and_then(Value::as_f64);
+    let warn_ratio = cfg.get("warn_at_ratio").and_then(Value::as_f64);
+    let (Some(m), Some(d)) = (monthly, daily) else {
+        return false; // 旧配置残缺 → 不 seed，报 no_budget 比半份配置诚实
+    };
+    // pyround(×100)：银行家舍入与全仓一致（util::pyround 的同一理由——预算
+    // 百分比恰好落在半分点是真实场景）。
+    let m_minor = agent_vitals_domain::util::pyround(m * 100.0, 0) as i64;
+    let d_minor = agent_vitals_domain::util::pyround(d * 100.0, 0) as i64;
+    let bp = agent_vitals_domain::util::pyround(warn_ratio.unwrap_or(0.8) * 10_000.0, 0) as i64;
+    db.budget_config_set(m_minor, d_minor, bp, crate::sql_sync::now_ms())
+        .is_ok()
+}
+
+/// ISO 日期时间串 → epoch 毫秒（snooze 的 until 参数）。复用 domain 的
+/// `ms_from_civil`（校验真实日期）；只认 `YYYY-MM-DDTHH:MM:SS(.fff)?Z` 与
+/// 无时区（按北京时间解释——与 Python 链 `_read_snooze` 的 `replace
+/// (tzinfo=_BEIJING)` 同语义）。
+fn iso_to_ms_beijing(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || (b[10] != b'T' && b[10] != b' ') {
+        return None;
+    }
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let mo: u32 = s.get(5..7)?.parse().ok()?;
+    let d: u32 = s.get(8..10)?.parse().ok()?;
+    let hh: u32 = s.get(11..13)?.parse().ok()?;
+    let mi: u32 = s.get(14..16)?.parse().ok()?;
+    let ss: u32 = s.get(17..19)?.parse().ok()?;
+    // 本地（北京）时间语义：ms_from_civil 产 UTC ms，北京时刻 = UTC − 8h。
+    let utc_ms = agent_vitals_domain::usage::ms_from_civil(y, mo, d, hh, mi, ss)?;
+    Some(utc_ms - 8 * 3_600_000)
+}
+
+/// 预算状态（Phase 3.4）：SQL 权威面。`None` 输出仅当库打不开（诊断走
+/// `data status`，这条查询路径不做损坏恢复）。返回 shape 见模块头：
+/// `level ∈ no_budget | ok | warn | exceeded`（词表与 legacy 链 ok/warn/over
+/// 对齐但 exceeded 用全称——新面自有一份词表，不与差分看守的旧链混）。
+pub fn budget_status_sql(month: &str) -> Option<Value> {
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+        crate::sql_sync::now_ms(),
+    )
+    .ok()?;
+    seed_budget_config_from_legacy(&db);
+    let cfg = db.budget_config_get().ok().flatten();
+
+    let summary = {
+        use agent_vitals_data::repository::SummaryRepository;
+        crate::summary::SqlSummaryRepository
+            .monthly_summary(&agent_vitals_data::repository::MonthlySummaryQuery {
+                month: month.to_string(),
+            })
+    };
+    // 真实支出 = by_provider summable 桶的 CNY 列（FixedSubscription +
+    // MeteredActual + HostBilled；Money 用分币分栏，跨币不相加——USD 订阅
+    // 费不能冒充 CNY 预算的消耗）。零条目 → 0（不编造币桶）。
+    let spent_cny_f64: f64 = summary
+        .by_provider
+        .values()
+        .filter(|h| h.currency.as_deref() == Some("CNY"))
+        .map(|h| h.summable_total())
+        .sum();
+    let spent_minor = agent_vitals_domain::util::pyround(spent_cny_f64 * 100.0, 0) as i64;
+
+    // snooze：snoozes 行存在且 until_ms > now → 抑制告警输出标记。
+    let now_ms = crate::sql_sync::now_ms();
+    let snooze_until = db.budget_snooze_get().ok().flatten().filter(|&until| until > now_ms);
+
+    let (level, ratio_bp) = match &cfg {
+        None => ("no_budget", None),
+        Some(c) => {
+            if c.monthly_cny_minor <= 0 {
+                // 配置了 0/负预算 = 语法上合法但无判断意义，同 no_budget
+                // 语义但 config 字段照报（消费方能区分「没配」和「配了 0」）。
+                ("no_budget", None)
+            } else {
+                let r = spent_minor * 10_000 / c.monthly_cny_minor;
+                let lvl = if r >= 10_000 {
+                    "exceeded"
+                } else if r >= c.warning_ratio_bp {
+                    "warn"
+                } else {
+                    "ok"
+                };
+                (lvl, Some(r))
+            }
+        }
+    };
+
+    Some(json!({
+        "month": month,
+        "level": level,
+        "monthly_cny_minor": cfg.as_ref().map(|c| c.monthly_cny_minor),
+        "daily_cny_minor": cfg.as_ref().map(|c| c.daily_cny_minor),
+        "warning_ratio_bp": cfg.as_ref().map(|c| c.warning_ratio_bp),
+        "spent_cny_minor": spent_minor,
+        "ratio_bp": ratio_bp,
+        "snoozed_until_ms": snooze_until,
+        "coverage": summary.coverage.to_json(),
+        "freshness": summary.freshness.to_json(),
+        "data_source": "sql_authority",
+    }))
+}
+
+/// snooze 写入口（CLI `budget-sql snooze-set` 用）：解析 ISO 串 → 落库。
+/// 解析失败 = `Err(串)`（CLI 报错 exit 2，不猜时区不编默认）。
+pub fn budget_snooze_set_sql(until_iso: &str) -> Result<i64, String> {
+    let until_ms = iso_to_ms_beijing(until_iso)
+        .ok_or_else(|| format!("unparseable --until `{until_iso}` (want YYYY-MM-DDTHH:MM:SS)"))?;
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+        crate::sql_sync::now_ms(),
+    )
+    .map_err(|e| e.to_string())?;
+    let now = crate::sql_sync::now_ms();
+    db.budget_snooze_set(until_ms, now).map_err(|e| e.to_string())?;
+    Ok(until_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,5 +907,178 @@ mod tests {
         assert!(compute_month(Some("1999-01")).is_none());
         drop(_guard);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Phase 3.4：budget_status_sql ────────────────────────────────────
+
+    /// env guard + ENV_LOCK 的合并持有：TestEnvGuard 改的是进程 env，并发
+    /// 测试各拿各的 guard 会互相踩；锁必须**与 guard 同生命周期**——放进
+    /// 同一个 RAII 结构（曾试过 `mem::forget(lock)` 把锁永久钉死，整个测试
+    /// 进程所有用 env 的测试全部挂起——错误解法留此存照）。guard 必须活到
+    /// 断言结束：`AGENT_VITALS_HOME` 是进程级 env，提前 drop 就回到真机
+    /// HOME，`budget_status_sql` 会在真机库上跑（第一版红的三连）。
+    struct BudgetEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _env: TestEnvGuard,
+    }
+
+    /// 每 case 都从一个**保证干净**的权威库开始（`seed_authority_db` 同款
+    /// 纪律——with_home 的目录清理是尽力而为，残留库会让 config seed 幂等
+    /// 语义失效）。
+    fn fresh_budget_env(
+        tag: &str,
+    ) -> (
+        BudgetEnvGuard,
+        agent_vitals_data::authority::AuthorityDb,
+        String,
+    ) {
+        let lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("av-budget-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let env = TestEnvGuard::set(&dir);
+        let month = crate::clock::current_month_beijing();
+        let path =
+            agent_vitals_data::authority::default_authority_path(&crate::home::data_home());
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        let db = agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap();
+        (BudgetEnvGuard { _lock: lock, _env: env }, db, month)
+    }
+
+    fn seed_fact_min(
+        db: &agent_vitals_data::authority::AuthorityDb,
+        fact_id: &str,
+        host: &str,
+        model: &str,
+        ts_ms: i64,
+        u: i64,
+        o: i64,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                 VALUES ('run', 1, 'cli', 'succeeded', 1) ON CONFLICT(run_id) DO NOTHING",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                     source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
+                     event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                     output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'm', 's', ?1, 'turn', NULL, ?3, ?4, 0, ?5, 0, 0, ?6, 'run', 1, 1)",
+                rusqlite::params![fact_id, host, model, ts_ms, u, o],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn budget_status_no_budget_without_config_or_legacy() {
+        let (_guard, _db, month) = fresh_budget_env("nobudget");
+        let v = budget_status_sql(&month).expect("库可开");
+        assert_eq!(v["level"], "no_budget");
+        assert_eq!(v["monthly_cny_minor"], Value::Null);
+        assert_eq!(v["data_source"], "sql_authority");
+    }
+
+    #[test]
+    fn budget_status_seeds_once_from_legacy_config_and_is_idempotent() {
+        let (_guard, _db, month) = fresh_budget_env("seed");
+        // 旧 config.toml：monthly ¥600.00 / daily ¥30.00 / warn 0.8。
+        let cfg = crate::home::data_home().join("config.toml");
+        std::fs::write(
+            &cfg,
+            "[budget]\nmonthly_cny = 600.0\ndaily_cny = 30.0\nwarn_at_ratio = 0.8\n",
+        )
+        .unwrap();
+        // 第一次 status：seed 发生（600.00 → 60000 minor；0.8 → 8000 bp）。
+        let v1 = budget_status_sql(&month).unwrap();
+        assert_eq!(v1["monthly_cny_minor"], json!(60_000));
+        assert_eq!(v1["daily_cny_minor"], json!(3_000));
+        assert_eq!(v1["warning_ratio_bp"], json!(8_000));
+        // 改旧文件再查：行已存在 → 不再读旧文件（幂等 seed 的语义）。
+        std::fs::write(&cfg, "[budget]\nmonthly_cny = 1.0\ndaily_cny = 1.0\n").unwrap();
+        let v2 = budget_status_sql(&month).unwrap();
+        assert_eq!(v2["monthly_cny_minor"], json!(60_000), "行存在后旧文件退役");
+    }
+
+    #[test]
+    fn budget_status_levels_cross_warn_and_exceeded_on_minor_integers() {
+        // CNY 桶：DSH（deepseek-official 声明 metered → MeteredActual 落
+        // summable）+ 月费摊销会混入（GLM/MiniMax/anthropic 订阅在价表里
+        // 有声明），所以用「无订阅声明影响的月份」+ 精确控制 spent 的方式
+        // 不稳——这里直接对 dsh 宿主 seed 大额事实，档位断言用「随事实增长
+        // 跨档」的相对断言，不硬编码金额对 600 的绝对比例。
+        let (_guard, db, month) = fresh_budget_env("levels");
+        // 预算 ¥600 → 无订阅月份 dsh MeteredActual ≈ 事实折算。
+        let (start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month).unwrap();
+        seed_fact_min(&db, "f1", "dsh", "deepseek-v4-flash", start + 1_000, 100_000_000, 10_000_000);
+        db.budget_config_set(60_000, 3_000, 8_000, 1).unwrap();
+        let v_low = budget_status_sql(&month).unwrap();
+        // 事实量大到把 DSH 支出顶过 warn（≥80%）与 exceeded（≥100%）：
+        // flash 卡便宜，直接 seed 巨量 cache_read（峰值单价不参与，这里走
+        // priced_day 需要 by_model 形状——直接给足量级即可跨档）。
+        for i in 0..40 {
+            seed_fact_min(
+                &db,
+                &format!("bulk{i}"),
+                "dsh",
+                "deepseek-v4-flash",
+                start + 2_000 + i,
+                900_000_000,
+                90_000_000,
+            );
+        }
+        let v_high = budget_status_sql(&month).unwrap();
+        let spent_low = v_low["spent_cny_minor"].as_i64().unwrap();
+        let spent_high = v_high["spent_cny_minor"].as_i64().unwrap();
+        assert!(spent_high > spent_low, "更多事实 → 更多支出");
+        assert!(
+            v_high["level"].as_str() == Some("exceeded")
+                || v_high["level"].as_str() == Some("warn"),
+            "大额支出必须落 warn/exceeded 档，got {}",
+            v_high["level"]
+        );
+        assert!(v_low["level"].as_str() == Some("ok") || v_low["level"].as_str() == Some("warn"));
+        // minor 判断链：ratio_bp 与 spent/monthly 的整数关系自洽。
+        if let (Some(sp), Some(rb)) = (
+            v_high["spent_cny_minor"].as_i64(),
+            v_high["ratio_bp"].as_i64(),
+        ) {
+            assert_eq!(rb, sp * 10_000 / 60_000, "ratio_bp = spent*10000/monthly 整数除法");
+        }
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("av-budget-levels-{}", std::process::id())));
+    }
+
+    #[test]
+    fn budget_status_snooze_suppresses_but_reports() {
+        // 两段 env 必须**串行**（先整体 drop 第一组的 guard 再进第二组）：
+        // fresh_budget_env 拿进程级 ENV_LOCK，_guard 活着时再调就是自己锁
+        // 自己（本测试第一版挂死的直接原因，sample 栈钉在
+        // pthread_mutex_lock_wait 上）。
+        let far = crate::sql_sync::now_ms() + 86_400_000;
+        {
+            let (_guard, db, month) = fresh_budget_env("snooze");
+            db.budget_config_set(60_000, 3_000, 8_000, 1).unwrap();
+            // snooze 到远未来：status 报 snoozed_until_ms；snooze 行优先于
+            // 超支判断的呈现（level 仍如实，抑制由消费方决定）。
+            db.budget_snooze_set(far, 1).unwrap();
+            drop(db);
+            // guard 还活着：budget_status_sql 在同一 env 内重开库。
+            let v = budget_status_sql(&month).unwrap();
+            assert_eq!(v["snoozed_until_ms"], json!(far));
+        }
+        // 过期 snooze（过去时刻）不抑制：独立 env。
+        {
+            let (_guard, db, month) = fresh_budget_env("snooze2");
+            db.budget_config_set(60_000, 3_000, 8_000, 1).unwrap();
+            db.budget_snooze_set(crate::sql_sync::now_ms() - 1_000, 1).unwrap();
+            drop(db);
+            let v = budget_status_sql(&month).unwrap();
+            assert_eq!(v["snoozed_until_ms"], Value::Null, "过期 snooze 视同无");
+        }
     }
 }

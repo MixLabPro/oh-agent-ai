@@ -580,6 +580,28 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// v0.9.1 Phase 3.4 SQL budget surface: explicit management API over the
+    /// authority DB's `budget_config`/`budget_snoozes` (spec §5.3), replacing
+    /// alert.json/budget.json reads. Amounts are CNY minor units (整数分).
+    BudgetSql {
+        #[arg(value_parser = ["status", "config-show", "config-set", "snooze-set", "snooze-clear"])]
+        action: String,
+        /// status/config-show: query this month (YYYY-MM) instead of the current one
+        #[arg(long)]
+        month: Option<String>,
+        /// config-set: monthly budget in CNY minor (¥600.00 = 60000)
+        #[arg(long)]
+        monthly_cny_minor: Option<i64>,
+        /// config-set: daily budget in CNY minor
+        #[arg(long)]
+        daily_cny_minor: Option<i64>,
+        /// config-set: warning ratio in basis points (80% = 8000)
+        #[arg(long)]
+        warning_ratio_bp: Option<i64>,
+        /// snooze-set: snooze until this ISO datetime (Beijing time, e.g. 2026-09-10T08:00:00)
+        #[arg(long)]
+        until: Option<String>,
+    },
     /// Drive the Rust state write chain. R1c: the pure merge rules live in
     /// core::state (single source of truth), this subcommand is the I/O + time
     /// wiring; the differential in tests/test_cli_matrix.py drives it against
@@ -2700,6 +2722,107 @@ session_store={store} fold={fold}"
             // R1c 加写路径时替换成真分支。
             other => {
                 eprintln!("budget action not implemented in Rust yet: {other}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    // v0.9.1 Phase 3.4 SQL 预算面：budget_config/budget_snoozes 显式管理 API
+    // + budget_status_sql（替代 alert.json/budget.json 的读面；Tier B 切完
+    // 托盘预算卡后旧链停写）。金额全 minor 整数；错误路径 exit 2。
+    if let Some(Cmd::BudgetSql { action, month, monthly_cny_minor, daily_cny_minor, warning_ratio_bp, until }) = &args.cmd {
+        let db = || -> agent_vitals_data::authority::AuthorityDb {
+            match agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(
+                    &agent_vitals_runtime::home::data_home(),
+                ),
+                agent_vitals_runtime::sql_sync::now_ms(),
+            ) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("budget-sql failed: {e}");
+                    std::process::exit(2);
+                }
+            }
+        };
+        match action.as_str() {
+            "status" => {
+                let m = month.clone().unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+                match agent_vitals_runtime::budget::budget_status_sql(&m) {
+                    Some(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                    None => {
+                        eprintln!("budget-sql status failed: authority DB unavailable");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "config-show" => {
+                let d = db();
+                match d.budget_config_get() {
+                    Ok(Some(c)) => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "monthly_cny_minor": c.monthly_cny_minor,
+                            "daily_cny_minor": c.daily_cny_minor,
+                            "warning_ratio_bp": c.warning_ratio_bp,
+                            "updated_at_ms": c.updated_at_ms,
+                        }))
+                        .unwrap_or_default()
+                    ),
+                    Ok(None) => println!("(no budget config — use config-set or let status seed from legacy config.toml)"),
+                    Err(e) => {
+                        eprintln!("budget-sql config-show failed: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "config-set" => {
+                let (Some(m), Some(d)) = (monthly_cny_minor, daily_cny_minor) else {
+                    eprintln!("config-set requires --monthly-cny-minor and --daily-cny-minor");
+                    std::process::exit(2);
+                };
+                if *m < 0 || *d < 0 || warning_ratio_bp.is_some_and(|w| !(0..=10_000).contains(&w)) {
+                    eprintln!("config-set: amounts must be non-negative; warning-ratio-bp within 0..=10000");
+                    std::process::exit(2);
+                }
+                let d0 = db();
+                match d0.budget_config_set(*m, *d, warning_ratio_bp.unwrap_or(8_000), agent_vitals_runtime::sql_sync::now_ms()) {
+                    Ok(()) => println!("budget config saved: monthly={m} daily={d} warn_bp={}", warning_ratio_bp.unwrap_or(8_000)),
+                    Err(e) => {
+                        eprintln!("budget-sql config-set failed: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "snooze-set" => {
+                let Some(u) = until else {
+                    eprintln!("snooze-set requires --until <ISO datetime>");
+                    std::process::exit(2);
+                };
+                // 解析在 runtime 侧做（iso_to_ms_beijing 未导出——这里经
+                // budget_status_sql 的伴生入口直接传串，由 runtime 解析并
+                // 落库；解析失败如实报错不猜时区）。
+                match agent_vitals_runtime::budget::budget_snooze_set_sql(u) {
+                    Ok(ms) => println!("snoozed until {u} (until_ms={ms})"),
+                    Err(e) => {
+                        eprintln!("budget-sql snooze-set failed: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "snooze-clear" => {
+                let d0 = db();
+                match d0.budget_snooze_clear() {
+                    Ok(()) => println!("snooze cleared"),
+                    Err(e) => {
+                        eprintln!("budget-sql snooze-clear failed: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            other => {
+                eprintln!("budget-sql action not implemented: {other}");
                 std::process::exit(2);
             }
         }
