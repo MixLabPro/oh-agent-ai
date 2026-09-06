@@ -187,6 +187,154 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
 **验收**：client parity 测试（CLI/Tauri 命令/HTML 由同一 DTO 返回）；
 双轨对账 harness 逐字段通过。
 
+### 任务书：3.2 / 3.5 / 3.6（2026-09-06，供派发 subagent 前确认）
+
+#### 3.2 legacy_aggregate 导入接线
+
+**范围**：把已经写好、有单测、但从未被任何命令调用的
+`agent_vitals_data::legacy_import::import_claude_ledger_days` 接进
+`data-migrate`。纯接线，不改算法。
+
+**落点**：`apps/cli/src/main.rs`，`Cmd::DataMigrate` 分支（约 2246-2322 行）。
+现有代码在 `for host in ["claude-code", "codex", "dsh"]` 的 JSONL 导入循环
+结束、`db.finish_run(...)` 之前收尾。
+
+**步骤**：
+1. 循环结束后，加一段：`agent_vitals_data::legacy_import::
+   load_claude_ledger_days(&agent_vitals_runtime::state::state_dir())` 读
+   `claude-ledger.json` + `claude-ledger-archive.json` 合并出的 `{day:
+   {model: 4桶}}`（当前月优先于归档，函数已实现）。
+2. 若非空对象，`db.with_immediate_txn(|conn| legacy_import::
+   import_claude_ledger_days(conn, &run_id, now_ms, &days))`，把
+   `LegacyImportReport{imported, duplicate, conflicts}` 累进汇总输出（新加
+   一行 `println!`，格式参照现有 `"  {host}: +{} inserted, ..."`）。
+3. 读文件失败（`AuthorityError::Io`，如非法 JSON）与 JSONL 导入失败同一
+   处理：`finish_run("failed", ...)` + `exit(2)`——不能吞。
+4. **不需要判断"这天是否已有实时事实"**——两者身份字段完全不重叠
+   （`native_session_id="day:{day}"` + `machine_namespace="legacy"` 是
+   legacy 专属固定值，`UNIQUE` 约束不会撞实时事实），查询侧
+   （`SqlSummaryRepository::merged_claude_days`）已经做「有实时用实时、
+   没有才退回 legacy」——导入侧只管把 ledger 全量灌进去，不用自己判重叠。
+5. `migrations` 表的 `checkpoint_json` 可以顺带把 legacy 导入的三个数字也
+   塞进去（跟 JSONL 导入的 `{"inserted":...}` 合并成一个对象），不需要
+   单开一行 migrations 记录。
+
+**验收**：
+- 新增一条集成测试（或扩展现有 `data-migrate` 冒烟）：临时 data home 里放
+  一份 `facts/claude-code.jsonl`（几条真实事实）+ `state/claude-ledger.json`
+  （几天历史，其中至少一天与 jsonl 事实的日期不重叠），跑 `data-migrate`
+  后 `usage_facts` 表里应同时出现 `observation_kind='assistant-usage'`（或
+  实际用的 kind 名）与 `observation_kind='legacy_aggregate'` 两类行，且
+  `SELECT COUNT(*) FROM data_quality_issues WHERE code LIKE 'legacy_aggregate%'`
+  能看到 coverage 降级标记（`mark_coverage_degradation` 已实现）。
+- 重跑 `data-migrate` 两次，第二次 legacy 部分应全 duplicate（幂等）。
+- 真机（`~/.agent-vitals`）跑一次 `data-migrate`，确认 `usage_facts` 出现
+  `legacy_aggregate` 行且 `SqlSummaryRepository` 对历史月份（当前月之前、
+  ledger 已滚出但归档还在的月份）不再报 Unavailable。
+- `cargo test --release` 全量 + `cargo clippy --release --all-targets -D warnings`。
+
+**注意**：本次会话刚修完 `claude-ledger.json` 的重复计数 bug（见
+「claude ledger 去重 bug」章节）——真机的 `claude-ledger.json`/
+`claude-ledger-archive.json` 现在已经是修复后的正确值，3.2 接线时不需要
+再关心这条历史 bug。
+
+---
+
+#### 3.5 读路径切换清单——先分两层，再派发
+
+**关键澄清（写任务书前查代码发现的落差，与规划文档原有清单不同）**：
+清单里六个消费点，**只有前两类真的经过 `SummaryRepository` trait**、切换
+是一行改动；**后三类（calendar/hourly、budget/alert、HTML）根本不走这条
+trait**，是各自直接读 JSON 状态文件/codex fold 的独立函数——切到 SQL
+是和 `SqlSummaryRepository` 同等量级的新实现工作，不是"改一行调用"。
+派发前务必按下面两层分别处理，不要把 3.5 当成一个均质任务整体丢出去。
+
+**Tier A（真·一行切换，适合直接派发）**：
+
+| 消费点 | 文件:行 | 改法 |
+|---|---|---|
+| `data coverage` / `data daily` CLI | `apps/cli/src/main.rs:2789-2790` | `Box::new(agent_vitals_runtime::summary::JsonSummaryRepository)` → `SqlSummaryRepository` |
+| Tauri `data_monthly_summary` | `apps/desktop/src-tauri/src/lib.rs:1239` | 同上 |
+| Tauri `data_daily_summary` | `apps/desktop/src-tauri/src/lib.rs:1248` | 同上 |
+
+`apps/cli/src/main.rs:2129`（`Cmd::DataReconcile`）**故意不在这份清单
+里**——它比较的是「facts 索引 vs DTO」，用途是验证旧 index.sqlite3 投影
+本身的一致性，不是终端用户消费面；保持读 `JsonSummaryRepository` 不动，
+除非 Phase 4 决定连这条诊断命令也一起退休。
+
+Tier A 验收：client parity——同一份真机数据，切换前后 CLI/Tauri 输出
+byte-diff 应只有本来就存在的「json vs sql 已知残差」（本次会话
+`reconcile_real.rs` 已量出：claude token 差 ~1.7%、codex 差 ~0.3%，来自
+SQL facts 同步覆盖率/未计时事件，不是新 bug）；`cargo test --release` +
+clippy 全绿。**这三行切完之后必须重跑一次 `reconcile_real.rs` 确认残差
+没有扩大**——扩大说明切换本身引入了新问题，不是已知残差。
+
+**Tier B（需要新实现，工作量与 `SqlSummaryRepository` 本体相当，不建议
+现在派发给不熟悉本次会话上下文的 subagent）**：
+
+1. **`calendar_month`/`hourly_distribution`**
+   （`crates/agent-vitals-runtime/src/summary.rs`，Tauri
+   `read_calendar_month`/`read_hourly_distribution` 调用）——直接读 DSH
+   month/today.json、codex fold、claude ledger，逐日/逐小时组装，完全在
+   `SummaryRepository` trait 之外。SQL 版需要仿照本次会话
+   `authority_query.rs` 的模式：DSH 已经有 `peaked_days_map`
+   可以直接复用出日轴；小时轴（`hourly_distribution`）需要新写一个
+   `authority_query::hourly_by_host`（三宿主，参照 `codex_by_hour_model`
+   的整数除法算北京小时，claude/dsh 也要各自补一版）。
+2. **`budget show` / alert**
+   （`crates/agent-vitals-runtime/src/budget.rs::{budget_show,
+   budget_show_month, evaluate_alert}`）——DSH-only，读
+   `month.json`/`today.json`/`alert.json`。切 SQL 前必须先做 **3.4**
+   （`budget_config`/`budget_snoozes` 表的 CRUD API）——alert 阈值现在存在
+   `budget.json`，没有 SQL 对应物，3.4 不做，3.5 这块无法切。
+3. **HTML 模板消费面**（`codex-cost --html` →
+   `render_codex_cost_html`/`codex_calendar_blob`，`apps/cli/src/main.rs`
+   约 1146 行起）——内联进模板的 JSON 直接来自 codex fold 的 `merged`
+   对象，不经过任何 repository。
+
+**建议**：3.5 只派发 Tier A；Tier B 三项等 3.3/3.4 落地、或由我本人（已有
+`authority_query`/`SqlSummaryRepository` 的完整上下文）继续做，避免 subagent
+冷启动重新踩一遍北京时区算术、峰谷分离这类本次会话已经趟出结论的坑。
+
+---
+
+#### 3.6 导出切 SQL——先决问题，不要直接派发实现
+
+**范围**：`crates/agent-vitals-runtime/src/export.rs` 的
+`export_private`/`export_redacted`，当前都读 `facts/<host>.jsonl` 原文件
+（`export_private` 逐字节复制；`export_redacted` 经 `evidence::replay` 重放
+后重导身份）。
+
+**必须先回答的问题（不是实现细节，是方向判断）**：`usage_facts` 表的列
+是原始 UsageFact JSON 字段的**子集**——`identity_basis`/`time_basis`/
+`source_usage_semantics`/`model_raw` vs `model_id` 的区分/
+`normalization_version`/`schema_version`/`event_ts_utc`（字符串）这些字段
+在写入 SQL 时就没有对应列（`fact_writer_sql.rs` 只抽取了计价/查询需要
+的列）。如果 3.6 真的把导出源换成 SQL 表，`export_private`
+（"私有 trace 的完整面"，模块头原话）会从**逐字节精确复制**退化成
+**从残缺投影重建的近似**——这是保真度倒退，且与 `export.rs` 模块头
+"两条路径写各自的输出目录，绝不共用中间产物"暗含的"JSONL 是完整原始
+证据"这条设定冲突。
+
+**建议先确认再派发**：
+- 若 spec §9 的本意是"JSONL 作为私有导出的权威源永久保留"（即使 SQL
+  成为查询权威后，JSONL 仍是 evidence 层，不退役）——3.6 可能根本不需要
+  改 `export_private`，只需要在文档/spec 里把这条决策明确写下来，检查
+  项变成"确认现状符合预期"而不是"实现改动"。
+- 若 spec §9 真的要求两个导出函数都改读 SQL——需要先决定
+  `export_private` 能接受的保真度损失范围（哪些字段允许在导出里消失），
+  这是产品/隐私决策，不是工程细节，我建议先问用户再让 subagent 动手，
+  避免做出一个之后要推翻重来的实现。
+- `export_redacted` 的伪名化逻辑（`pseudonym`/身份字段重导）与"读源是
+  JSONL 还是 SQL"正交——不管往哪个方向走，这部分代码不用大改。
+
+**如果确认要切 SQL**：读 `usage_facts WHERE deleted_at_ms IS NULL`（私有
+导出可能还要决定是否包含软删除行——这也是需要先问的点，`export_private`
+当前的"逐字节复制"语义下，被删除的行从未被排除，因为 JSONL 是
+append-only 没有删除概念），按 host 分文件写出，字段名映射回原
+UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列，
+`event_ts_utc` 需要从 `event_ts_ms` 反算 ISO 字符串）。
+
 ## Phase 4：双轨验收与旧路径退役（spec §6.3 / §7 Phase 4 / §10）
 
 - [ ] **4.1 机器可读对账报告** — SQL vs legacy 按 host × month × bucket
