@@ -2297,6 +2297,24 @@ session_store={store} fold={fold}"
             }
         }
         let _ = db.finish_run(&run_id, "succeeded", None, None, agent_vitals_runtime::sql_sync::now_ms());
+        // spec §6.1：迁移必须记录在 migrations 表（与 DDL 版本分离）——
+        // checkpoint 可重跑的锚点。
+        let _ = db.conn().execute(
+            "INSERT INTO migrations(migration_id, started_at_ms, completed_at_ms,
+                 status, source_version, target_version, checkpoint_json, error_detail)
+             VALUES (?1, ?2, ?3, 'completed', 'jsonl-legacy', ?4, ?5, NULL)
+             ON CONFLICT(migration_id) DO UPDATE SET
+                 completed_at_ms = excluded.completed_at_ms,
+                 status = excluded.status,
+                 checkpoint_json = excluded.checkpoint_json",
+            rusqlite::params![
+                run_id,
+                agent_vitals_runtime::sql_sync::now_ms(),
+                agent_vitals_runtime::sql_sync::now_ms(),
+                format!("sql-authority-v{}", agent_vitals_data::authority::SCHEMA_VERSION),
+                json!({"inserted": total.0, "duplicate": total.1, "rejected": total.2}).to_string(),
+            ],
+        );
         println!(
             "Migration done: +{} inserted, {} duplicate, {} rejected",
             total.0, total.1, total.2
