@@ -49,7 +49,7 @@ projection、Claude ledger 和 WorkBuddy source adapter 实现；UI/CLI 自此�
 | 名义成本口径（list-price，"名义 GDP"式客观基准） | ✅ 定义 + 实现 | 定义 `ATTRIBUTABLE_WASTE.md` §6.7（提交 `9b279ca`）；实现 = catalog 计价面既有产物被正式命名 |
 | 性能形状：codex fold 进程级 60s memo（`codex_merged_cached`，Arc 命中） | ✅ | `d8c6c83` |
 | 审查修复：`CODE_REVIEW_V0_9_STAGE_A_D_KPI_BILLING` 10 条 + `CODE_REVIEW_V0_9_WORKBENCH_UX` 14 条 | ✅ | `29c0717`/`0096607`/`01f0d9a` |
-| §2.1 其余八项：writer（✅ `93fbc0d`）、emitter 归位（✅ `f1850bc`）、ingest service（✅ `0f1d6b5`）、SQLite 投影（✅ `2d32ed0`）、lease（✅ `6b3aadd`）、BillingContext（✅ `9fbf920`）、故障注入（🔶 `3ffe10f`：facts/projection/lease 三点有注入测试）；checkpoint（随 sync_service 推迟）、生成事务 / HostBillRecord（待 WorkBuddy 范围确认） | 🔶 | 分期见 §7 Stage A–C |
+| §2.1 其余八项：writer（✅ `93fbc0d`）、emitter 归位（✅ `f1850bc`）、ingest service（✅ `0f1d6b5`）、SQLite 投影（✅ `2d32ed0`）、lease（✅ `6b3aadd`）、BillingContext（✅ `9fbf920`）、checkpoint（✅ `e03e712`，随 sync_service）、故障注入（🔶 `3ffe10f`：facts/projection/lease 三点有注入测试）；**SummaryRepository 索引实现（替换 Stage 0 read adapter）—— ❌ 未达成（v0.10 主线，见 §5.2a）**；生成事务 / HostBillRecord（待 WorkBuddy 范围确认） | 🔶 | 分期见 §7 Stage A–C |
 
 **数据缺口（阻塞实际侧计费精度，等用户输入，非工程阻塞）**：中转商对
 claude-sonnet-5 的 cache_read 单价（决定 claude-* 实际支出 78.9%）、GLM 官方按量
@@ -347,6 +347,43 @@ v0.9 的权威事实仍是 JSONL；SQLite 只承担可删除、可重建的本�
 - repository 的 typed query 是唯一取数接口，手写、参数化 SQL 可审计且适合有限 schema；
 - DuckDB 仍只可作为显式离线分析/导出 adapter，不可成为实时状态库或第二权威源；
 - 将来若需要云同步，再在 Data 之上增加 sync adapter；不得改变 Host/Runtime/UI 的查询契约。
+
+### 5.2a 统一查询源的差距（2026-09-06 外部审计 P1 确认，v0.10 主线）
+
+**现状**：`JsonSummaryRepository` 仍直读 month.json / claude ledger / codex
+fold——facts 索引只在 DSH 预算对账（`data budget-reconcile`）与小时分布
+面板被消费，不驱动 CLI/Tauri/HTML 的日/月汇总。Stage B「替换 Stage 0
+JSON read adapter」目标**未达成**，v0.9 数据访问维度保持未完成。
+
+**三宿主的索引覆盖实测（2026-09-06 真机）**：
+- **DSH**：双轨逐厘相等（¥1752.45，`data budget-reconcile`）——索引可全权
+  接管 ✅；
+- **Codex**：差 0.25%（fold 的 untimed 残差样本不产 fact）——小且方向
+  保守，索引接管需在投影里如实标注残差缺口；
+- **Claude**：差 48%（索引 3.02B vs ledger 6.3B）。**根因不是 cost-state
+  基线**（真机现存会话文件里没有 cost-state 行——该假设已被实测推翻），
+  而是**文件轮转不对称**：ledger 跨时间累积（checkpoint + 逐日），claude
+  客户端会压缩/轮转会话文件，历史行物理消失后 ledger 里仍有账，facts
+  重放只见现存文件。**结论：claude 的深历史不可从现文件重建，ledger 是
+  这部分账的 store of record。**
+
+**分阶段补全计划（轴分离设计，2026-09-06 定稿）**：
+
+核心模式：**fold 的日投影作为「日轴事实」进索引（observation_kind=
+`day-summary`，event_ts_utc = 北京日 12:00Z 代表点），行级/槽级 facts
+保持「会话轴」证据**。两轴用途分离，日/月汇总只读日轴事实——这绕开了
+「行 facts 与 ledger-day 同账双计」的死结（ledger 的历史日在轮转后不存在
+行级对应物，任何 (day, model) 去重规则都救不了缺口的行）。查询面按
+observation_kind 显式分轴：小时分布只读行/槽 facts（day-summary 的代表
+点不污染小时桶），日/月汇总只读 day-summary。
+
+1. **day-summary ingest**：claude ledger 逐日 by_model、codex fold
+   by_model-per-day（覆盖 untimed 残差）、DSH 沿用月账已证明等值的
+   slot facts（`data budget-reconcile` 已钉）；
+2. **SummaryRepository 索引实现**：日/月汇总读 day-summary 事实，DTO
+   逐字段与现实现对账（复用 budget-reconcile 的双轨 harness 模式）；
+3. **切换**：双轨连续为真后，JsonSummaryRepository 退役（兼容读留一个
+   版本周期）。
 
 ### 5.2 CLI application-layer extraction
 

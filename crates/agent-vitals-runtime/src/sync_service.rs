@@ -23,7 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// checkpoint 版本（形状变更时递增；旧文件整体作废，全量重发由 exactly-once
 /// 兜底）。
@@ -229,6 +229,32 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         crate::takeover::machine_namespace()
     };
     let mut checkpoint = load_checkpoint(data_home, &ns);
+
+    // **保留滚动常态化（外部审计 P2）**：此前只有手动 data-rebuild-index
+    // 触发——用户从不手动重建时权威 JSONL 无限增长，13 个月滚动承诺落空。
+    // 按「本地日」节流（checkpoint 记 last_retention_date）：每天首轮 sync
+    // 跑一次，5 分钟 tick 的其余轮次零成本。
+    {
+        let bj_day = crate::clock::today_beijing();
+        let last = checkpoint
+            .get("_meta")
+            .and_then(|m| m.get("last_retention_date"))
+            .and_then(Value::as_str);
+        if last != Some(bj_day.as_str()) {
+            if let Err(e) = crate::ingest_service::enforce_retention(
+                data_home,
+                &crate::clock::current_month_beijing(),
+            ) {
+                eprintln!("retention failed: {e}");
+            }
+            let meta = checkpoint
+                .entry("_meta".to_string())
+                .or_insert_with(|| json!({}));
+            if let Some(m) = meta.as_object_mut() {
+                m.insert("last_retention_date".to_string(), json!(bj_day));
+            }
+        }
+    }
     let mut report = SyncReport::default();
 
     // 各宿主 locate 面直取（hosts sources 的既有函数，不在这里重写枚举）。
