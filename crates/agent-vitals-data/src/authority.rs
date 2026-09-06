@@ -386,6 +386,18 @@ impl AuthorityDb {
         Ok(())
     }
 
+    /// 保留滚动（spec §5.4）：物理清理 13 个自然月前的 usage_facts 行。
+    /// `cutoff_iso_prefix` = "YYYY-MM"（event_ts_ms 由调用方换成 ISO 前缀
+    /// 比较不便——这里直接收 UTC 毫秒下界 `cutoff_ms`：event_ts_ms < cutoff
+    /// 的行删除）。无日期（event_ts_ms NULL）与 deleted 行的清理走显式
+    /// 修复流程（spec §5.4「不能静默删除」），本函数不碰。
+    pub fn retention_usage_facts(&self, cutoff_ms: i64) -> Result<usize, AuthorityError> {
+        Ok(self.conn.execute(
+            "DELETE FROM usage_facts WHERE event_ts_ms IS NOT NULL AND event_ts_ms < ?1",
+            rusqlite::params![cutoff_ms],
+        )?)
+    }
+
     /// `BEGIN IMMEDIATE` 事务帮助器：闭包成功 → COMMIT，Err → ROLLBACK 后
     /// 原样上抛。**所有业务写入都必须走这里**（spec §5.1.4——事务边界是
     /// 写入协议的一部分，不是调用方的自由裁量）。

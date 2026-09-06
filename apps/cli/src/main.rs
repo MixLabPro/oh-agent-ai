@@ -484,15 +484,28 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
-    /// Drill into unresolved/unpriced usage per model (completes DoD #4:
-    /// monthly cost split by basis AND drillable to its sources). Groups match
-    /// by_provider keys; reasons: billing-route-unknown / billing-mode-unknown
-    /// / no-price-card / partial-price-basis. Stage B.
-    /// Routine facts sync across all three hosts (locate → checkpoint diff →
-    /// emit → ingest). Idempotent: re-runs skip unchanged files (size+mtime_ns
-    /// checkpoint) and dedup facts by fact_id. The machine namespace comes
-    /// from machine.json (the sync caller IS the machine). Stage B leftover:
-    /// this is retirement-path step 1 (spec §5).
+    /// Routine facts sync across all three hosts (locate, checkpoint diff,
+    /// emit, then SQL authority + legacy dual-write). Idempotent: re-runs
+    /// skip unchanged files (source_files fingerprints) and dedup facts by
+    /// fact_id. The machine namespace comes from machine.json (the sync
+    /// caller IS the machine). v0.9.1 retirement-path step 1.
+    SyncFacts {
+        /// Output the sync report as JSON
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
+    /// One-time import of the legacy facts JSONL into the SQL authority DB
+    /// (spec 6.2.1: JSONL is the highest-fidelity migration source; same
+    /// fact_id = idempotent). Safe to re-run.
+    DataMigrate,
+    /// Authority DB status: schema version, recent sync runs, source
+    /// counts, data-quality summary (spec 9, authority part of data
+    /// doctor).
+    DataStatus {
+        /// Output as JSON
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
     /// Reconcile the two budget ledgers for a month: state chain
     /// (month.json fold) vs facts index. `reconciled: true` is the
     /// precondition for retirement-path step 4 (state JSON retirement).
@@ -502,11 +515,6 @@ enum Cmd {
         #[arg(long)]
         month: Option<String>,
         /// Output as JSON
-        #[arg(long = "json")]
-        rows_json: bool,
-    },
-    SyncFacts {
-        /// Output the sync report as JSON
         #[arg(long = "json")]
         rows_json: bool,
     },
@@ -524,6 +532,10 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Drill into unresolved/unpriced usage per model (completes DoD #4:
+    /// monthly cost split by basis AND drillable to its sources). Groups
+    /// match by_provider keys; reasons: billing-route-unknown /
+    /// billing-mode-unknown / no-price-card / partial-price-basis. Stage B.
     DataUnresolved {
         /// Month to inspect ("YYYY-MM"; default: current month)
         #[arg(long)]
@@ -2223,6 +2235,157 @@ session_store={store} fold={fold}"
             }
             Err(e) => {
                 eprintln!("sync-facts failed: {e}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    // data-migrate / data-status（v0.9.1 Phase 2 收口）：存量迁移与权威库
+    // 状态面。migrate 幂等（fact_id 主键），可重复执行直到全 duplicate。
+    if let Some(Cmd::DataMigrate) = &args.cmd {
+        let data_home = agent_vitals_runtime::home::data_home();
+        let db = match agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&data_home),
+            agent_vitals_runtime::sql_sync::now_ms(),
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("data-migrate failed: {e}");
+                std::process::exit(2);
+            }
+        };
+        let run_id = agent_vitals_runtime::sql_sync::new_run_id("migration");
+        if let Err(e) = db.begin_run(&run_id, "migration", agent_vitals_runtime::sql_sync::now_ms()) {
+            eprintln!("data-migrate failed: {e}");
+            std::process::exit(2);
+        }
+        let mut total = (0usize, 0usize, 0usize);
+        for host in ["claude-code", "codex", "dsh"] {
+            let path = data_home.join("facts").join(format!("{host}.jsonl"));
+            if !path.exists() {
+                continue;
+            }
+            match db.with_immediate_txn(|conn| {
+                let writer = agent_vitals_data::fact_writer_sql::SqlFactWriter::new(
+                    conn,
+                    &run_id,
+                    agent_vitals_runtime::sql_sync::now_ms(),
+                )?;
+                writer.import_facts_jsonl(host, &path)
+            }) {
+                Ok(r) => {
+                    println!(
+                        "  {host}: +{} inserted, {} duplicate, {} rejected",
+                        r.inserted, r.duplicate, r.rejected
+                    );
+                    total.0 += r.inserted;
+                    total.1 += r.duplicate;
+                    total.2 += r.rejected;
+                }
+                Err(e) => {
+                    let _ = db.finish_run(
+                        &run_id,
+                        "failed",
+                        Some("import_failed"),
+                        Some(&e.to_string()),
+                        agent_vitals_runtime::sql_sync::now_ms(),
+                    );
+                    eprintln!("data-migrate failed ({host}): {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        let _ = db.finish_run(&run_id, "succeeded", None, None, agent_vitals_runtime::sql_sync::now_ms());
+        println!(
+            "Migration done: +{} inserted, {} duplicate, {} rejected",
+            total.0, total.1, total.2
+        );
+        return;
+    }
+    if let Some(Cmd::DataStatus { rows_json }) = &args.cmd {
+        let data_home = agent_vitals_runtime::home::data_home();
+        let out = (|| -> Result<Value, String> {
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&data_home),
+                agent_vitals_runtime::sql_sync::now_ms(),
+            )
+            .map_err(|e| e.to_string())?;
+            let conn = db.conn();
+            let schema: String = conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or_else(|_| "?".into());
+            let facts: i64 = conn
+                .query_row("SELECT COUNT(*) FROM usage_facts WHERE deleted_at_ms IS NULL", [], |r| r.get(0))
+                .unwrap_or(0);
+            let sources: i64 = conn
+                .query_row("SELECT COUNT(*) FROM source_files", [], |r| r.get(0))
+                .unwrap_or(0);
+            let sessions: i64 = conn
+                .query_row("SELECT COUNT(*) FROM sessions WHERE deleted_at_ms IS NULL", [], |r| r.get(0))
+                .unwrap_or(0);
+            let issues: i64 = conn
+                .query_row("SELECT COUNT(*) FROM data_quality_issues WHERE resolved_at_ms IS NULL", [], |r| r.get(0))
+                .unwrap_or(0);
+            let mut runs = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT run_id, trigger, status, started_at_ms, error_code FROM sync_runs
+                 ORDER BY started_at_ms DESC LIMIT 5",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok(json!({
+                        "run_id": r.get::<_, String>(0)?,
+                        "trigger": r.get::<_, String>(1)?,
+                        "status": r.get::<_, String>(2)?,
+                        "started_at_ms": r.get::<_, i64>(3)?,
+                        "error_code": r.get::<_, Option<String>>(4)?,
+                    }))
+                }) {
+                    for row in rows.filter_map(Result::ok) {
+                        runs.push(row);
+                    }
+                }
+            }
+            Ok(json!({
+                "schema_version": schema,
+                "facts": facts,
+                "sources": sources,
+                "sessions": sessions,
+                "open_quality_issues": issues,
+                "recent_runs": runs,
+            }))
+        })();
+        match out {
+            Ok(v) => {
+                if *rows_json {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                } else {
+                    println!(
+                        "Authority DB ({}): schema v{}, facts {}, sources {}, sessions {}, open issues {}",
+                        data_home.display(),
+                        v["schema_version"].as_str().unwrap_or("?"),
+                        v["facts"],
+                        v["sources"],
+                        v["sessions"],
+                        v["open_quality_issues"],
+                    );
+                    if let Some(runs) = v["recent_runs"].as_array() {
+                        for r in runs {
+                            println!(
+                                "  run {} [{}] {} (at {}){}",
+                                r["run_id"], r["trigger"], r["status"], r["started_at_ms"],
+                                r["error_code"].as_str().map(|c| format!(" err={c}")).unwrap_or_default(),
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("data-status failed: {e}");
                 std::process::exit(2);
             }
         }

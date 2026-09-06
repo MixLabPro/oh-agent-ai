@@ -86,6 +86,10 @@ pub struct HostSyncReport {
     pub files_skipped: usize,
     pub appended: usize,
     pub duplicate: usize,
+    /// 迁移期双写（spec §6.1）：权威库侧新插入数。None = 权威库未启用
+    /// （打开失败，错误已上 stderr）。
+    pub sql_inserted: Option<usize>,
+    pub sql_duplicate: Option<usize>,
     pub errors: Vec<String>,
 }
 
@@ -104,11 +108,13 @@ fn sync_host(
     host: &str,
     data_home: &Path,
     ns: &str,
+    db: Option<&agent_vitals_data::authority::AuthorityDb>,
     files: Vec<PathBuf>,
     checkpoint: &mut serde_json::Map<String, Value>,
     report: &mut HostSyncReport,
 ) {
     report.files_seen = files.len();
+    let now = crate::sql_sync::now_ms();
     let mut dirty: Vec<(PathBuf, (u64, u64))> = Vec::new();
     for path in files {
         let fp = fingerprint(&path);
@@ -187,6 +193,30 @@ fn sync_host(
         }
     }
 
+    // **迁移期双写（spec §6.1）**：同一批 emit 事实先写权威库（SQL），
+    // 再走旧链 ingest（读面保鲜）——两轨都成功的文件才进 checkpoint
+    // （任一轨失败 → 该批下轮重发；fact_id exactly-once 保证重发零双计）。
+    // Phase 3 读路径切换完成后撤旧链调用。
+    let mut authority_ok = true;
+    if let Some(db) = db {
+        if !facts.is_empty() {
+            match crate::sql_sync::write_flat_facts_to_authority(
+                db, host, ns, &facts, now,
+            ) {
+                Ok(o) => {
+                    report.sql_inserted = Some(o.inserted);
+                    report.sql_duplicate = Some(o.duplicate);
+                    if !o.errors.is_empty() {
+                        report.errors.extend(o.errors);
+                    }
+                }
+                Err(e) => {
+                    authority_ok = false;
+                    report.errors.push(format!("authority: {e}"));
+                }
+            }
+        }
+    }
     if !facts.is_empty() {
         match crate::ingest_service::ingest_facts(data_home, &facts) {
             Ok(r) => {
@@ -201,6 +231,10 @@ fn sync_host(
                 return;
             }
         }
+    }
+    if !authority_ok {
+        // 权威侧失败 → 该批文件不进 checkpoint（下轮重发，双轨重新对齐）。
+        return;
     }
     for (key, fp) in synced_keys {
         report.files_synced += 1;
@@ -230,6 +264,51 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
     };
     let mut checkpoint = load_checkpoint(data_home, &ns);
 
+    // **权威库（v0.9.1）**：checkpoint 迁移 + 每日保留（13 个月，§5.4）。
+    // 打开失败不挡旧链（错误上 stderr，报告面 sql_* 字段为 None 如实呈现）。
+    let authority = match agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(data_home),
+        crate::sql_sync::now_ms(),
+    ) {
+        Ok(a) => Some(a),
+        Err(e) => {
+            eprintln!("authority open failed: {e}");
+            None
+        }
+    };
+    if let Some(db) = &authority {
+        if let Err(e) =
+            crate::sql_sync::migrate_json_checkpoint(db, data_home, crate::sql_sync::now_ms())
+        {
+            eprintln!("checkpoint migration failed: {e}");
+        }
+        let bj_day = crate::clock::today_beijing();
+        let ret_path = data_home.join("facts").join(".authority-retention.json");
+        let last: Option<String> = crate::state::read_json(&ret_path).and_then(|v| {
+            v.get("last_retention_date")
+                .and_then(Value::as_str)
+                .map(String::from)
+        });
+        // matches! 直接比 Option<String>（as_deref 会触发 needless lint）。
+        if !matches!(&last, Some(d) if d == &bj_day) {
+            // Option<String> 与 &str 的比较经 as_deref 归一（clippy 认可的写法）。
+            let cutoff =
+                crate::sql_sync::retention_cutoff_ms(&crate::clock::current_month_beijing(), 13)
+                .unwrap_or(0);
+            match db.retention_usage_facts(cutoff) {
+                Ok(n) if n > 0 => {
+                    eprintln!("authority retention: dropped {n} facts (13mo)");
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("authority retention failed: {e}"),
+            }
+            crate::state::atomic_write_json(
+                &ret_path,
+                &json!({"last_retention_date": bj_day}),
+            );
+        }
+    }
+
     // **保留滚动常态化（外部审计 P2）**：此前只有手动 data-rebuild-index
     // 触发——用户从不手动重建时权威 JSONL 无限增长，13 个月滚动承诺落空。
     // 按「本地日」节流（checkpoint 记 last_retention_date）：每天首轮 sync
@@ -240,7 +319,9 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             .get("_meta")
             .and_then(|m| m.get("last_retention_date"))
             .and_then(Value::as_str);
-        if last != Some(bj_day.as_str()) {
+        // matches! 直接比 Option<String>（as_deref 会触发 needless lint）。
+        if !matches!(&last, Some(d) if d == &bj_day) {
+            // Option<String> 与 &str 的比较经 as_deref 归一（clippy 认可的写法）。
             if let Err(e) = crate::ingest_service::enforce_retention(
                 data_home,
                 &crate::clock::current_month_beijing(),
@@ -286,7 +367,15 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             host: host.to_string(),
             ..Default::default()
         };
-        sync_host(host, data_home, &ns, files, &mut checkpoint, &mut r);
+        sync_host(
+            host,
+            data_home,
+            &ns,
+            authority.as_ref(),
+            files,
+            &mut checkpoint,
+            &mut r,
+        );
         report.total_appended += r.appended;
         report.total_duplicate += r.duplicate;
         report.hosts.push(r);

@@ -200,6 +200,182 @@ pub struct SqlSyncOutcome {
     pub errors: Vec<String>,
 }
 
+/// **迁移期双写的权威侧写入**（spec §6.1 迁移窗口）：调用方（sync_facts）
+/// emit 一次，同一批事实既走旧链（ingest_facts，存量读面保鲜）也走本函数
+/// （权威库）。`files` = (路径, 指纹, 该文件 facts)——emit 只发生一次，
+/// 本函数不做 I/O。
+///
+/// Phase 3 读路径切换完成、`sql_authority_enabled` 设立后，旧链调用撤除，
+/// 本函数成为唯一写入（届时可并入 `sync_host_sql`）。
+pub fn write_facts_to_authority(
+    db: &AuthorityDb,
+    host: &str,
+    machine_namespace: &str,
+    files: &[(std::path::PathBuf, (u64, u64), Vec<Value>)],
+    now: i64,
+) -> Result<SqlSyncOutcome, String> {
+    let run_id = new_run_id(TRIGGER_SYNC);
+    db.begin_run(&run_id, TRIGGER_SYNC, now)
+        .map_err(|e| format!("begin_run {run_id}: {e}"))?;
+
+    let mut outcome = SqlSyncOutcome::default();
+    let result: Result<(), AuthorityError> = db.with_immediate_txn(|conn| {
+        let mut writer: Option<SqlFactWriter<'_>> = None;
+        for (path, (size_bytes, mtime_ns), facts) in files {
+            if writer.is_none() {
+                writer = Some(SqlFactWriter::new(conn, &run_id, now)?);
+            }
+            let w = writer.as_ref().expect("writer 在首次使用前初始化");
+            let mut distinct: Vec<&str> = Vec::new();
+            for f in facts {
+                if let Some(sid) = native_session_of(f) {
+                    if !distinct.contains(&sid) {
+                        distinct.push(sid);
+                    }
+                }
+            }
+            let file_sid: Option<&str> = if distinct.len() == 1 {
+                Some(distinct[0])
+            } else {
+                None
+            };
+            let source_id = w.upsert_source_file(
+                host,
+                path,
+                *size_bytes,
+                *mtime_ns,
+                file_sid,
+                PARSER_VERSION,
+            )?;
+            if facts.is_empty() {
+                outcome.files_synced += 1;
+                continue;
+            }
+            let (groups, missing) = group_facts_by_session(facts);
+            for f in &missing {
+                conn.execute(
+                    "INSERT INTO data_quality_issues(
+                         issue_id, scope_type, scope_key, code, severity,
+                         first_seen_at_ms, last_seen_at_ms, detail_json)
+                     VALUES (?1, 'fact', ?2, 'missing_native_session_id', 'warning',
+                             ?3, ?3, ?4)
+                     ON CONFLICT(scope_type, scope_key, code)
+                     DO UPDATE SET last_seen_at_ms = excluded.last_seen_at_ms",
+                    rusqlite::params![
+                        format!(
+                            "missing_sid:{}",
+                            f.get("fact_id").and_then(Value::as_str).unwrap_or("unknown")
+                        ),
+                        source_id,
+                        now,
+                        format!("fact 缺 native_session_id：{}", f),
+                    ],
+                )
+                .map_err(AuthorityError::from)?;
+                outcome.rejected += 1;
+            }
+            for (sid, profile, group) in groups {
+                w.upsert_session(host, machine_namespace, &sid, Some(&profile), now)?;
+                let report = w.insert_facts(&group, &source_id, &sid)?;
+                outcome.inserted += report.inserted;
+                outcome.duplicate += report.duplicate;
+                outcome.rejected += report.rejected;
+            }
+            outcome.files_synced += 1;
+        }
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => {
+            db.finish_run(&run_id, "succeeded", None, None, now)
+                .map_err(|e| format!("finish_run: {e}"))?;
+            Ok(outcome)
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            let _ = db.finish_run(&run_id, "failed", Some(ERR_DB_ERROR), Some(&msg), now);
+            Err(msg)
+        }
+    }
+}
+
+/// 迁移期双写的**扁平批次**变体：宿主 emitter 产出的整批 facts（可能跨
+/// 多文件）一次写入。source 落为批次标记行 `{host}:sync`（批次级 provenance；
+/// 会话下钻靠事实自身的 native_session_id）。事务纪律同 write_facts_to_authority。
+pub fn write_flat_facts_to_authority(
+    db: &AuthorityDb,
+    host: &str,
+    machine_namespace: &str,
+    facts: &[Value],
+    now: i64,
+) -> Result<SqlSyncOutcome, String> {
+    let run_id = new_run_id(TRIGGER_SYNC);
+    db.begin_run(&run_id, TRIGGER_SYNC, now)
+        .map_err(|e| format!("begin_run {run_id}: {e}"))?;
+
+    let mut outcome = SqlSyncOutcome::default();
+    let result: Result<(), AuthorityError> = db.with_immediate_txn(|conn| {
+        let writer = SqlFactWriter::new(conn, &run_id, now)?;
+        let source_id = writer.upsert_batch_source(host)?;
+        let (groups, missing) = group_facts_by_session(facts);
+        for f in &missing {
+            conn.execute(
+                "INSERT INTO data_quality_issues(
+                     issue_id, scope_type, scope_key, code, severity,
+                     first_seen_at_ms, last_seen_at_ms, detail_json)
+                 VALUES (?1, 'fact', ?2, 'missing_native_session_id', 'warning',
+                         ?3, ?3, ?4)
+                 ON CONFLICT(scope_type, scope_key, code)
+                 DO UPDATE SET last_seen_at_ms = excluded.last_seen_at_ms",
+                rusqlite::params![
+                    format!(
+                        "missing_sid:{}",
+                        f.get("fact_id").and_then(Value::as_str).unwrap_or("unknown")
+                    ),
+                    source_id,
+                    now,
+                    format!("fact 缺 native_session_id：{}", f),
+                ],
+            )
+            .map_err(AuthorityError::from)?;
+            outcome.rejected += 1;
+        }
+        for (sid, profile, group) in groups {
+            writer.upsert_session(host, machine_namespace, &sid, Some(&profile), now)?;
+            let report = writer.insert_facts(&group, &source_id, &sid)?;
+            outcome.inserted += report.inserted;
+            outcome.duplicate += report.duplicate;
+            outcome.rejected += report.rejected;
+        }
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => {
+            db.finish_run(&run_id, "succeeded", None, None, now)
+                .map_err(|e| format!("finish_run: {e}"))?;
+            Ok(outcome)
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            let _ = db.finish_run(&run_id, "failed", Some(ERR_DB_ERROR), Some(&msg), now);
+            Err(msg)
+        }
+    }
+}
+
+/// 保留滚动的 cutoff（UTC ms）：`months_back` 个月前的月初 00:00（UTC）。
+/// 月算术用 domain 的 civil 表（与 `dsh_days_map` 同源），不引 chrono。
+pub fn retention_cutoff_ms(current_month: &str, months_back: u32) -> Option<i64> {
+    let (y, m) = (
+        current_month.get(0..4)?.parse::<i64>().ok()?,
+        current_month.get(5..7)?.parse::<u32>().ok()?,
+    );
+    let total = (y * 12 + m as i64 - 1 - months_back as i64).max(0);
+    agent_vitals_domain::usage::ms_from_civil(total / 12, (total % 12 + 1) as u32, 1, 0, 0, 0)
+}
+
 /// 对单宿主执行 SQL 写入。
 ///
 /// `dirty` = (路径, (size, mtime_ns)) 差集——**调用方算好**（sync_service 的

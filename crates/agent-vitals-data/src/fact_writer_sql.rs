@@ -223,6 +223,105 @@ impl<'a> SqlFactWriter<'a> {
         Ok(key)
     }
 
+    /// 存量迁移（spec §6.2.1）：facts JSONL 重放 → 权威库。**JSONL 是迁移期
+    /// 最高保真源**（已清洗、有 fact_id）——同 fact_id 重放全部 duplicate，
+    /// 幂等可重跑。JSONL 文件本身注册为 source（来源标记）。整文件一批会
+    /// 混多会话 → 按 native_session_id 分组逐批走 `insert_facts`（同一校验
+    /// 与幂等路径，不另开第二套写入）。
+    /// 必须已在一个事务内（调用方 with_immediate_txn）。
+    pub fn import_facts_jsonl(
+        &self,
+        host: &str,
+        jsonl_path: &Path,
+    ) -> Result<SqlInsertReport, AuthorityError> {
+        use crate::evidence::replay;
+        let rep = replay(jsonl_path).map_err(|e| match e {
+            crate::evidence::AppendError::Corrupt { line_no } => AuthorityError::Sqlite(
+                rusqlite::Error::InvalidParameterName(format!(
+                    "facts jsonl corrupt line {line_no} — 先修源再迁移"
+                )),
+            ),
+            crate::evidence::AppendError::Io(e) => AuthorityError::Io(e),
+            crate::evidence::AppendError::Invalid(_) => {
+                unreachable!("replay() never validates facts")
+            }
+        })?;
+
+        // JSONL 文件注册为 source（迁移期输入的来源标记；路径哈希入
+        // source_files，明文不进库）。
+        let meta = std::fs::metadata(jsonl_path).ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = meta
+            .and_then(|m| m.modified().ok())
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let source_id = self.upsert_source_file(host, jsonl_path, size, mtime, None, 1)?;
+
+        // 按 (native_session_id, machine_namespace, source_profile) 分组——
+        // insert_facts 逐事实算 session_key 外键，sessions 行必须先以**同键**
+        // upsert（迁移路径与 sql_sync 的会话预处理同纪律）。
+        let mut groups: std::collections::BTreeMap<
+            (String, String, String),
+            Vec<serde_json::Value>,
+        > = std::collections::BTreeMap::new();
+        let mut orphans: Vec<serde_json::Value> = Vec::new();
+        for fact in &rep.facts {
+            let sid = fact.get("native_session_id").and_then(Value::as_str);
+            let ns = fact.get("machine_namespace").and_then(Value::as_str);
+            match (sid, ns) {
+                (Some(sid), Some(ns)) if !sid.is_empty() => {
+                    let profile = fact
+                        .get("source_profile")
+                        .and_then(Value::as_str)
+                        .unwrap_or("default");
+                    groups
+                        .entry((sid.to_string(), ns.to_string(), profile.to_string()))
+                        .or_default()
+                        .push(fact.clone());
+                }
+                _ => orphans.push(fact.clone()),
+            }
+        }
+
+        let mut report = SqlInsertReport::default();
+        for ((sid, ns, profile), group) in groups {
+            self.upsert_session(host, &ns, &sid, Some(&profile), self.now_ms)?;
+            let r = self.insert_facts(&group, &source_id, &sid)?;
+            report.inserted += r.inserted;
+            report.duplicate += r.duplicate;
+            report.rejected += r.rejected;
+        }
+        // 孤儿（缺 native_session_id）：老 JSONL 版 ingest 允许（native 缺失
+        // 不致命），迁移期同样不丢账——它们挂在文件 stem 会话下。
+        if !orphans.is_empty() {
+            let stem = jsonl_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let r = self.insert_facts(&orphans, &source_id, &stem)?;
+            report.inserted += r.inserted;
+            report.duplicate += r.duplicate;
+            report.rejected += r.rejected;
+        }
+        Ok(report)
+    }
+
+    /// 批次标记 source（`write_flat_facts_to_authority` 用）：跨文件的
+    /// 扁平批次没有单一源文件——落一行合成 source（路径 = `/sync/{host}`，
+    /// 经哈希只留指纹）。返回 source_id = `{host}:sync`（稳定，幂等）。
+    pub fn upsert_batch_source(&self, host: &str) -> Result<String, AuthorityError> {
+        self.upsert_source_file(
+            host,
+            Path::new(&format!("/sync/{host}")),
+            0,
+            0,
+            None,
+            1,
+        )
+    }
+
     /// 事实批写入。每 candidate：契约校验（build_usage_fact 同款）→ 不合格
     /// 写 data_quality_issues（id = fact_invalid:{fact_id 或摘要 hash}），
     /// 合格项 INSERT INTO usage_facts ON CONFLICT DO NOTHING。
