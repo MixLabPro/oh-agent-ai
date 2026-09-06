@@ -15,9 +15,30 @@
 |---|---|---|
 | Phase 0 冻结与基线 | ✅ | spec 冻结；基线备份 `~/.agent-vitals/backup-v0.9.1-baseline/`（facts 48,999 条 + 索引库 + state JSON + 对账报告） |
 | Phase 1 schema 与迁移框架 | ✅ | authority.rs（DDL v1 全 12 表 + 版本闸 + 中断清扫 + 事务帮助器 + retention）+ 时钟注入（sql_sync::now_ms）+ 迁移记录（sync_runs/migrations 表） |
-| Phase 2 清洗写入与同步 | 🔨 | 三路并发实现合流（c06de2e）+ 审查收口（6776fe0）+ 收口批（b1f8b38：双写/存量迁移 49,321/data status/authority 保留）；审查 agent 复核中 |
-| Phase 3 SQL repository 与读路径切换 | ⬜ | |
+| Phase 2 清洗写入与同步 | ✅ | 三路并发实现合流（c06de2e）+ 审查收口（6776fe0）+ 收口批（b1f8b38）+ 迁移哨兵真 bug 修复（1f67331，rusqlite 参数计数错位导致 migrations 表假绿） |
+| Phase 3 SQL repository 与读路径切换 | 🔨 | 3.1 完成：`authority_query`（69a0d56，usage_facts 反查 DSH/claude/codex 计价桶形状，15 测）+ `SqlSummaryRepository`（e99c23a，SummaryRepository 第二实现，5 个 client-parity 测试）。**真机对账意外发现一条独立真 bug**：见下方「Phase 3.1 真机对账发现」。3.2–3.6 未开始 |
 | Phase 4 双轨验收与旧路径退役 | ⬜ | |
+
+### Phase 3.1 真机对账发现（2026-09-06，非本 Phase 引入）
+
+`SqlSummaryRepository` 写完后用真机 `~/.agent-vitals` 数据跑
+`crates/agent-vitals-runtime/examples/reconcile_real.rs`（json vs sql 逐宿主
+对比），claude-code 月度 token 相差近 2 倍。排查定位到 **`apps/cli/src/agent/
+claude_cost.rs::apply_record`（`claude_sync` 重建 `claude-ledger.json` 的 fold
+核心）没有按 `message.id` 去重**——Claude Code 的 session JSONL 会把同一条
+已完成的 assistant 消息重复写出多行（真机实例逐字节验证：同一 `message.id`
+出现 4 次，`usage` 字段完全相同，只有各行自己的 `uuid`/`timestamp` 不同），
+`apply_record` 对每一行无条件累加，系统性高估真实花费。v0.7 UsageFact
+emitter（喂新 SQL 管线）从 Stage 1c 就按 `message.id`/`uuid` 正确去重——两条
+管线共用同一行解析器 `parse_claude_usage_row`，但去重逻辑只在 emitter 侧，
+fold 侧从未补齐，这是 v0.7 就存在的缺陷，不是本 Phase 引入。
+
+**当前生产影响**：托盘/CLI 的 claude-code 成本显示（读 `claude-ledger.json`）
+可能已经高估约 2 倍；新 SQL `usage_facts` 侧数字是对的。**未修复**——诊断
+详情见 memory `claude-ledger-overcount-bug`，修复面明确（`apply_record` 复用
+`parse_claude_usage_row` 已算出的 `source_event_id` 去重）但触达当前生产可见
+数字，本次会话选择只诊断、不顺手改，留用户决定优先级（独立修 / 随 Phase 4
+退休 ledger 读路径自然解决）。
 
 ---
 
@@ -120,15 +141,23 @@ lease 包住完整事务。旧 `index.sqlite3` 的 facts 按 §6.2.1 一次性�
 目标：**所有产品查询只走 `SqlSummaryRepository`**。禁止运行时读取
 month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
 
-- [ ] **3.1 `SqlSummaryRepository`** — 实现 `SummaryRepository` trait
+- [x] **3.1 `SqlSummaryRepository`** — 实现 `SummaryRepository` trait
   （daily/monthly）：tokens 从 `usage_facts` 聚合（host × 日/月 ×
   model/provider，event_ts_ms → 北京日/月窗口）；金额走
-  `domain::cost` 同一计价面（事实桶 × pricing_snapshots），DSH peak 按
-  `event_peak` 列
+  `domain::cost` 同一计价面，DSH peak 按 `event_peak` 列。
+  `crates/agent-vitals-data/src/authority_query.rs`（反查层）+
+  `SqlSummaryRepository`（`summary.rs`）；5 个真实数据 client-parity 测试
+  + 真机对账脚本 `examples/reconcile_real.rs`。**pricing_snapshots 未接入**
+  ——当前仍读 `domain::cost::load_pricing()`（与 JSON 路径同一张活价表），
+  价格快照版本化是独立的 3.4 相邻工作，非阻断项
 - [ ] **3.2 legacy_aggregate 导入** — claude ledger 深历史（轮转丢失的行）
   按 §6.2.3 导入：`source_kind=legacy_aggregate` + coverage 降级标记，
   不伪造为行级事实（见 R4 §5.2a 的根因结论：claude 深历史不可从现文件
-  重放，ledger 是 store of record）
+  重放，ledger 是 store of record）。🔶 **读路径已就绪**
+  （`authority_query::claude_legacy_days` + `SqlSummaryRepository` 的
+  `merged_claude_days` 已消费）；**写路径未接线**——`legacy_import::
+  import_claude_ledger_days` 函数本体在 Phase 1 就写好且有单测，但没有
+  任何 CLI 命令调用它，真机库里目前没有一条 `legacy_aggregate` 行
 - [ ] **3.3 coverage_status** — 每宿主 measured/partial/unavailable 的
   分母定义落库（spec §4：摘要必须带 coverage/freshness/excluded/
   last_observed_at/data_version）
