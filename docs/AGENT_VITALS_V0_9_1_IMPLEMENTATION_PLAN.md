@@ -233,8 +233,26 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
 - [ ] **3.5 Tier B**（逐个消费点切 + 双轨验证）：
   - [x] `runtime::summary::JsonSummaryRepository` → `SqlSummaryRepository`（Tier A 已切三个 trait 消费点）
   - [x] `data coverage` / `data daily` CLI（Tier A）
-  - [ ] Tauri：`read_calendar_month` / `read_hourly_distribution` / 预算卡（calendar/hourly 不走 trait，需 authority_query 补小时轴；预算卡依赖 3.4）
-  - [ ] `budget show` / alert 计算（依赖 3.4）
+  - [x] Tauri：`read_hourly_distribution`（4823db3）、`read_calendar_month`（ce856db）
+  - [x] **预算卡地基**（2e72958）：`SqlSummaryRepository` 参数化（ZST → `data_home:
+    Option<PathBuf>`，`::new()`/`::at(dh)`）+ `budget::budget_status_sql_at(dh, month)`；
+    `budget_status_sql` 退成薄封装，外部行为逐字节不变（golden 15/15 +
+    test_cli_matrix 157 全绿）。TDD：失败测试先行（两临时库同配置、无锁断言
+    spent 严格更大）。为什么单独一提交：ZST 只认 `crate::home::data_home()`
+    是本会话预算卡连续 4 次实现失败的根因，先把这个坑填平再接线。
+  - [ ] **预算卡接线**（`overview::read_overview_at` → `budget_status_sql_at`）
+    ——**不是「wire 一个调用」，是把 `domain::budget::evaluate_alert` 移到
+    SQL 面**：托盘日预算行（`lib.rs::daily_budget_text`）要 `effective_daily_
+    budget`（7 日均 × adaptive_multiplier 的 adaptive floor）、`ratio`（今日
+    占比）、`today_cost`、peak_share，`budget_status_sql` 全没有（它只有月度
+    ratio + snooze）。`evaluate_alert` 是 domain 里 Python 差分看守的纯函数
+    （`test_cli_matrix budget show`），SQL 版要喂 `peaked_days_map` 月窗 +
+    合成「今日」对象，且 Python 侧同步。月度行（`budget_status_text_at`）单切
+    是半迁移、会造出 monthly 读 SQL / daily 读 alert.json 的混合体，还退不了
+    alert.json——留作 alert 端口整体切。overview.rs ~15 个写 alert.json 的
+    Tauri 单测随之重写。
+  - [ ] `budget show` / alert 计算（同上 `evaluate_alert` SQL 端口，与预算卡
+    接线是同一件事的两个消费方）
   - [ ] HTML 模板消费面（`codex-cost --html`）
 - [x] **3.6 导出切 SQL** — ✅ 5a9504d（2026-09-07，subagent 实施）：双路径结构
   保留（各自 `BEGIN DEFERRED` 一致截面、无共享中间产物），JSONL 读实现整体
