@@ -1624,6 +1624,16 @@ fn merged_claude_days(
     days
 }
 
+/// 测试穿透（integration 测试 `q_acceptance.rs` 的分离纪律用例）。
+#[doc(hidden)]
+pub fn merged_claude_days_for_tests(
+    conn: &rusqlite::Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> BTreeMap<String, serde_json::Value> {
+    merged_claude_days(conn, start_ms, end_ms)
+}
+
 /// 该月（或该日所属月）的 claude 数据是否带 legacy_aggregate 兜底标记
 /// （`data_quality_issues` 里未解决的 `code='legacy_aggregate'` 行，
 /// scope_key = 具体月份或 'all'）。命中 → 摘要侧 claude 的 freshness 降为
