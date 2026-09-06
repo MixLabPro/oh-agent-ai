@@ -630,6 +630,37 @@ mod tests {
     }
 
     #[test]
+    fn invalid_peak_row_leaves_base_imported_without_orphan_peak() {
+        // 审查钉测：base（peak=0）行校验通过、peak 行失败（负 peak token）
+        // 时——base 照常入账，peak 行拒入且不留孤儿。查询面按「base 全量 −
+        // peak 子集」拆价，peak 缺失 = 该模型峰值子桶未量测（诚实），不是
+        // 对账残量。
+        let root = tmp_dir("peak-orphan");
+        let db = AuthorityDb::open(&root.join("av.sqlite3"), 1_000).unwrap();
+        db.begin_run("run", "migration", 1_000).unwrap();
+        let days = json!({
+            "2026-09-01": {"m1": {
+                "input_tokens": 100, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0, "output_tokens": 10,
+                "peak_input_tokens": -5, "peak_cache_read_input_tokens": 0,
+                "peak_cache_creation_input_tokens": 0, "peak_output_tokens": 0}}
+        });
+        let report = db
+            .with_immediate_txn(|c| import_claude_ledger_days(c, "run", 1_000, &days))
+            .unwrap();
+        assert_eq!(report.imported, 1, "仅 base 行入账");
+        let peaks: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM usage_facts WHERE source_event_id LIKE '%:1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(peaks, 0, "peak 行被拒，无孤儿");
+    }
+
+    #[test]
     fn import_value_conflict_does_not_overwrite() {
         let root = tmp_dir("conflict");
         let db = AuthorityDb::open(&root.join("av.sqlite3"), 1_000).unwrap();

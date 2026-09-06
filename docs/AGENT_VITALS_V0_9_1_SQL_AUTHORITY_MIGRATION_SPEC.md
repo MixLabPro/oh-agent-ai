@@ -149,7 +149,70 @@ CREATE INDEX usage_facts_provider_model_time
 
 `fact_id` 继续由既有 UsageFact 身份规则产生。`UNIQUE(...)` 是第二道防线：同一事实即使出现 hash 规则回归，也不能悄悄重复入账。事实修正采用 tombstone + 新事实，或受控 `UPDATE` 写入 `fact_revisions`；初版选择前者以保持审计可追溯。
 
-### 3.4 账单、价格与预算
+### 3.4 模型、供应商、价格、账单与预算
+
+模型和供应商必须写入 SQL，不能只作为 `usage_facts` 中的自由文本。用户需要按供应商、模型及其价格版本解释历史成本；若只保存事件中的字符串和当前价卡，模型改名、供应商路由变化或调价后，历史账将无法重放。
+
+```sql
+CREATE TABLE providers (
+  provider_id TEXT PRIMARY KEY,           -- 稳定 ID，例如 openai / anthropic
+  display_name TEXT NOT NULL,
+  status TEXT NOT NULL,                   -- active | retired | unknown
+  created_at_ms INTEGER NOT NULL,
+  retired_at_ms INTEGER
+);
+
+CREATE TABLE models (
+  model_id TEXT PRIMARY KEY,              -- 内部 canonical ID，不以展示名充当主键
+  provider_id TEXT NOT NULL REFERENCES providers(provider_id),
+  canonical_name TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  model_family TEXT,
+  status TEXT NOT NULL,                   -- active | retired | unknown
+  created_at_ms INTEGER NOT NULL,
+  retired_at_ms INTEGER,
+  UNIQUE(provider_id, canonical_name)
+);
+
+CREATE TABLE model_aliases (
+  alias_id TEXT PRIMARY KEY,
+  host TEXT,                              -- NULL = 跨宿主别名
+  raw_model_name TEXT NOT NULL,
+  model_id TEXT NOT NULL REFERENCES models(model_id),
+  valid_from_ms INTEGER,
+  valid_to_ms INTEGER,
+  UNIQUE(host, raw_model_name, valid_from_ms)
+);
+
+CREATE TABLE pricing_versions (
+  pricing_version TEXT PRIMARY KEY,
+  source_kind TEXT NOT NULL,              -- official | user_configured | imported
+  source_reference TEXT,
+  captured_at_ms INTEGER NOT NULL,
+  effective_from_ms INTEGER NOT NULL,
+  effective_to_ms INTEGER,
+  created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE model_prices (
+  price_id TEXT PRIMARY KEY,
+  pricing_version TEXT NOT NULL REFERENCES pricing_versions(pricing_version),
+  model_id TEXT NOT NULL REFERENCES models(model_id),
+  currency TEXT NOT NULL,
+  unit_tokens INTEGER NOT NULL,           -- 通常为 1,000,000
+  uncached_input_minor INTEGER,
+  cache_read_minor INTEGER,
+  cache_write_minor INTEGER,
+  output_minor INTEGER,
+  effective_from_ms INTEGER NOT NULL,
+  effective_to_ms INTEGER,
+  UNIQUE(pricing_version, model_id, currency)
+);
+```
+
+写入 `usage_facts` 时必须先完成原始模型名 → `model_aliases` → canonical `models` 的解析；无法解析时使用受控的 `unknown` 模型/供应商记录，并同步生成 `data_quality_issue`。不可悄悄创建任意拼写的新模型行。
+
+价格按“最小货币单位 / `unit_tokens`”保存，禁止浮点。查询历史成本时必须按事实时间选择当时生效的价格版本；没有匹配价卡则输出 `unresolved`。用户自定义套餐、代理商价格和官方公开价格必须以不同 `source_kind` 并列展示，不能互相覆盖。
 
 ```sql
 CREATE TABLE host_bills (
@@ -166,13 +229,6 @@ CREATE TABLE host_bills (
   updated_at_ms INTEGER NOT NULL,
   deleted_at_ms INTEGER,
   UNIQUE(host, provider_id, billing_period, billing_basis, evidence_ref)
-);
-
-CREATE TABLE pricing_snapshots (
-  pricing_version TEXT PRIMARY KEY,
-  captured_at_ms INTEGER NOT NULL,
-  source_kind TEXT NOT NULL,
-  payload_json TEXT NOT NULL
 );
 
 CREATE TABLE budget_config (
@@ -274,6 +330,15 @@ CREATE INDEX workflow_events_error_time
 
 每个摘要必须同时返回金额、币种、basis、tokens、coverage、freshness、excluded hosts、`last_observed_at` 与 `data_version`。金额不能脱离来源/口径单独返回。
 
+**行轴/聚合轴分离纪律（审查收口，2026-09-06）**：`usage_facts` 里
+`observation_kind = 'legacy_aggregate'` 的行（§6.2.3 的 ledger 深历史聚合）
+与实时行级事实**不得在同一条聚合查询里相加**——前者是「日轴账单真值」、
+后者是「会话轴证据」，同日并存时相加必然双计。所有日/月/小时聚合查询必须
+`WHERE observation_kind != 'legacy_aggregate'`（小时分布天然排除：该类行
+的 `event_ts_ms` 是北京日 12:00 代表点）；ledger 聚合行只经专用的日/月
+读取路径消费。Phase 3 的 repository 验收矩阵必须含「聚合数 ≠ 行级数 +
+聚合数 = ledger 数」的 fixture。
+
 ### 4.1 面向用户的查询目录
 
 | 查询能力 | 用户看到什么 | 典型筛选 | 必须支持的下钻 |
@@ -304,8 +369,10 @@ CREATE INDEX workflow_events_error_time
 | Q10 | 一个会话有模型切换、Skill 失败与成本峰值 | “为什么任务拖延” | 时间线按时间排序，并将失败/峰值关联到会话，不读取对话正文 |
 | Q11 | 某宿主 24 小时未同步 | “今日总览” | 结果标为 partial/stale，明确缺失宿主；不可显示“完整总额” |
 | Q12 | 导入同一来源两次并在中途模拟中断 | 重跑任意月/日查询 | token、成本、调用次数与首次成功导入完全一致，无半提交 |
+| Q13 | 同一模型在 9 月 1 日调价，且历史事件跨越调价日 | “本月成本排行” | 调价日前后分别使用正确价格版本；历史成本不会被当前价卡覆盖 |
+| Q14 | 同一个原始模型名在不同宿主映射到不同 canonical 模型 | “按模型/供应商对比” | 归属准确；无法映射的项目显式显示 unknown/unresolved，不被并入相似名称 |
 
-Q01–Q05 是首批可见价值；Q06–Q10 依赖 `workflow_events`；Q11–Q12 是所有查询成立的可信度底线。
+Q01–Q05 是首批可见价值；Q06–Q10 依赖 `workflow_events`；Q11–Q14 是所有查询成立的可信度底线。
 
 ## 5. CRUD 契约
 
@@ -419,7 +486,7 @@ detect legacy
 6. reconciliation：全量与增量 SQL-vs-legacy；任何差异必须给出可行动原因。
 7. client parity：CLI、Tauri 命令、HTML payload 都由同一 DTO 返回。
 8. performance：常见月查询不枚举宿主原始日志；索引命中计划与数据库大小增长受控。
-9. 用户查询验收：Q01–Q12 必须作为端到端 fixture 运行；其中 Q01–Q05、Q11–Q12 为 v0.9.1 release blocker，Q06–Q10 在 `workflow_events` 接入后成为 blocker。
+9. 用户查询验收：Q01–Q14 必须作为端到端 fixture 运行；其中 Q01–Q05、Q11–Q14 为 v0.9.1 release blocker，Q06–Q10 在 `workflow_events` 接入后成为 blocker。
 
 发布前的人工验收：真实机器迁移、断电/kill 后恢复、删除旧 JSON 后继续正常查询、删除 SQLite 后按恢复策略明确告警而不是回落到另一条隐式账本。
 

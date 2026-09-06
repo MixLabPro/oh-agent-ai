@@ -22,6 +22,8 @@ path = "src/lib.rs"
 # **不加** `notify`/watcher/`tokio`/`chrono`（那是 feature 或纪律禁项，不是结构重构）。
 [dependencies]
 agent-vitals-data = { path = "../agent-vitals-data" }
+# data 质量表的参数化写入（sql_sync 的 missing_sid issue）——同版本 0.31
+rusqlite = { version = "0.31", features = ["bundled"] }
 agent-vitals-domain = { path = "../agent-vitals-domain" }
 agent-vitals-hosts = { path = "../agent-vitals-hosts", features = ["sources"] }
 serde = "1"

@@ -69,31 +69,36 @@ fn native_session_of(fact: &Value) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// 一批 facts → 按 native_session_id 分组。`fact_writer_sql::insert_facts`
-/// 按「一批一个会话」断言（混会话 = 调用方 bug，Err 上抛），所以必须先按
-/// 会话拆开再逐个调用。返回 `(session_id, 组内 facts, 组内首个 source_profile)`。
+/// 一批 facts → 按 `(native_session_id, 归一 profile)` 分组 + 缺身份残组。
 ///
-/// 防御：事实缺 native_session_id（`build_usage_fact` 合法路径上不该发生）时
-/// 落到 `fallback_sid`（文件 stem），不凭空造会话。
-fn group_facts_by_session(
-    facts: &[Value],
-    fallback_sid: &str,
-) -> Vec<(String, Vec<Value>, Option<String>)> {
-    let mut groups: Vec<(String, Vec<Value>, Option<String>)> = Vec::new();
+/// - **profile 参与分组**（审查 P2）：`fact_writer_sql::session_key` 逐事实
+///   按 profile 算外键——组内 profile 异构时，第二个事实算出的键与组首
+///   upsert 的 sessions 行不同 → 外键炸批。归一规则 = `unwrap_or("default")`
+///   （与 writer 的键构造同款），组键含 profile 后逐事实键与组行严格一致。
+/// - 返回的 `missing` = 缺 native_session_id 的事实——**调用方记 quality
+///   issue + rejected，不得据此造 session**（审查 P2：fallback stem 会留下
+///   永无 usage 引用的孤儿会话行）。
+type SessionGroups = Vec<(String, String, Vec<Value>)>;
+
+fn group_facts_by_session(facts: &[Value]) -> (SessionGroups, Vec<Value>) {
+    let mut groups: Vec<(String, String, Vec<Value>)> = Vec::new();
+    let mut missing: Vec<Value> = Vec::new();
     for fact in facts {
-        let sid = native_session_of(fact)
-            .map(str::to_string)
-            .unwrap_or_else(|| fallback_sid.to_string());
+        let Some(sid) = native_session_of(fact) else {
+            missing.push(fact.clone());
+            continue;
+        };
         let profile = fact
             .get("source_profile")
             .and_then(Value::as_str)
-            .map(String::from);
-        match groups.iter_mut().find(|(k, _, _)| *k == sid) {
-            Some((_, v, _)) => v.push(fact.clone()),
-            None => groups.push((sid, vec![fact.clone()], profile)),
+            .unwrap_or("default")
+            .to_string();
+        match groups.iter_mut().find(|(k, p, _)| *k == sid && *p == profile) {
+            Some((_, _, v)) => v.push(fact.clone()),
+            None => groups.push((sid.to_string(), profile, vec![fact.clone()])),
         }
     }
-    groups
+    (groups, missing)
 }
 
 /// JSON checkpoint（`.ingest-checkpoint.json`）→ `source_files` 的一次性
@@ -226,19 +231,25 @@ pub fn sync_host_sql(
     db.begin_run(&run_id, TRIGGER_SYNC, now)
         .map_err(|e| format!("begin_run {run_id}: {e}"))?;
 
+    // **emit 在事务外**（审查 P2）：emit 是宿主日志 I/O + 解析（毫秒到秒
+    // 级），关进 BEGIN IMMEDIATE 会把写锁横跨 I/O 持有——并发读被无谓阻塞。
+    // 先全部 emit 进内存，事务只包 DB 写入（spec §5.1.4 的事务语义指
+    // 「写入原子性」，不要求把源读取也关进去）。文件级 emit 错误收集进
+    // errors、不计 synced（重试语义与 JSONL 版一致）。
+    let mut emitted: Vec<(std::path::PathBuf, u64, u64, Vec<Value>)> = Vec::new();
     let mut outcome = SqlSyncOutcome::default();
+    for (path, (size_bytes, mtime_ns)) in dirty {
+        match emit(path) {
+            Ok(f) => emitted.push((path.clone(), *size_bytes, *mtime_ns, f)),
+            Err(e) => outcome.errors.push(format!("{}: {e}", path.display())),
+        }
+    }
+
     let result: Result<(), AuthorityError> = db.with_immediate_txn(|conn| {
         // writer 惰性构造：若所有文件都在 emit 阶段失败（合法错误路径），
         // 一个 DB 写入都不发生——`new()` 的 run 预检不该成为失效点。
         let mut writer: Option<SqlFactWriter<'_>> = None;
-        for (path, (size_bytes, mtime_ns)) in dirty {
-            let facts = match emit(path) {
-                Ok(f) => f,
-                Err(e) => {
-                    outcome.errors.push(format!("{}: {e}", path.display()));
-                    continue;
-                }
-            };
+        for (path, size_bytes, mtime_ns, facts) in &emitted {
             if writer.is_none() {
                 writer = Some(SqlFactWriter::new(conn, &run_id, now)?);
             }
@@ -249,7 +260,7 @@ pub fn sync_host_sql(
             // 单一会话带下去（claude/codex/dsh 一文件一会话），无/多会话则
             // None（源文件面的 native id 只是「主会话」提示，非强约束）。
             let mut distinct: Vec<&str> = Vec::new();
-            for f in &facts {
+            for f in facts {
                 if let Some(sid) = native_session_of(f) {
                     if !distinct.contains(&sid) {
                         distinct.push(sid);
@@ -269,16 +280,37 @@ pub fn sync_host_sql(
                 outcome.files_synced += 1;
                 continue;
             }
-            let fallback_sid = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(str::to_string)
-                .unwrap_or_default();
-            for (sid, group, profile) in group_facts_by_session(&facts, &fallback_sid) {
+            let (groups, missing) = group_facts_by_session(facts);
+            // 缺 native_session_id 的事实 → quality issue + rejected，
+            // **不造 session**（审查 P2：fallback stem 孤儿会话行）。
+            for f in &missing {
+                conn.execute(
+                    "INSERT INTO data_quality_issues(
+                         issue_id, scope_type, scope_key, code, severity,
+                         first_seen_at_ms, last_seen_at_ms, detail_json)
+                     VALUES (?1, 'fact', ?2, 'missing_native_session_id', 'warning',
+                             ?3, ?3, ?4)
+                     ON CONFLICT(scope_type, scope_key, code)
+                     DO UPDATE SET last_seen_at_ms = excluded.last_seen_at_ms",
+                    rusqlite::params![
+                        format!(
+                            "missing_sid:{}",
+                            f.get("fact_id").and_then(Value::as_str).unwrap_or("unknown")
+                        ),
+                        source_id,
+                        now,
+                        format!("fact 缺 native_session_id：{}", f),
+                    ],
+                )
+                .map_err(AuthorityError::from)?;
+                outcome.rejected += 1;
+            }
+            for (sid, profile, group) in groups {
                 let sid_ref = sid.as_str();
-                // 会话 upsert：会话身份与事实 batch 参数一致（insert_facts 的
-                // 按批断言需要），profile 用事实自身携带的首个。
-                w.upsert_session(host, machine_namespace, sid_ref, profile.as_deref(), now)?;
+                let profile_ref = profile.as_str();
+                // 会话 upsert：profile 用分组归一值（与 writer 键构造同款
+                // 缺省），insert 阶段逐事实键与组行字节一致。
+                w.upsert_session(host, machine_namespace, sid_ref, Some(profile_ref), now)?;
                 let report = w.insert_facts(&group, &source_id, sid_ref)?;
                 outcome.inserted += report.inserted;
                 outcome.duplicate += report.duplicate;
@@ -451,18 +483,27 @@ mod tests {
         let f1 = serde_json::json!({"native_session_id": "s-a", "source_profile": "default"});
         let f2 = serde_json::json!({"native_session_id": "s-a"});
         let f3 = serde_json::json!({"native_session_id": "s-b"});
-        let groups = group_facts_by_session(&[f1, f2, f3], "fallback");
+        let (groups, missing) = group_facts_by_session(&[f1.clone(), f2.clone(), f3.clone()]);
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].0, "s-a");
-        assert_eq!(groups[0].1.len(), 2);
-        assert_eq!(groups[0].2.as_deref(), Some("default"));
+        assert_eq!(groups[0].1, "default", "无 profile 归一为 default");
+        assert_eq!(groups[0].2.len(), 2);
         assert_eq!(groups[1].0, "s-b");
-        assert_eq!(groups[1].2, None, "无 source_profile 时保持 None");
+        assert!(missing.is_empty());
 
-        // 缺 native_session_id（不应发生的防御路径）落到 fallback
-        let f4 = serde_json::json!({"native_session_id": ""});
-        let groups2 = group_facts_by_session(&[f4], "stem-fb");
-        assert_eq!(groups2[0].0, "stem-fb");
+        // **profile 异构同 sid 拆两组**（审查 P2：组内异构会让逐事实外键
+        // 与组行不一致 → 外键炸批）。
+        let f4 = serde_json::json!({"native_session_id": "s-a", "source_profile": "other"});
+        let (groups2, missing2) = group_facts_by_session(&[f1, f4]);
+        assert_eq!(groups2.len(), 2, "profile 异构拆组");
+        assert_eq!(groups2[1].1, "other");
+        assert!(missing2.is_empty());
+
+        // 缺 native_session_id（防御路径）→ missing 桶，**不造会话**。
+        let f5 = serde_json::json!({"native_session_id": ""});
+        let (groups3, missing3) = group_facts_by_session(&[f5]);
+        assert!(groups3.is_empty());
+        assert_eq!(missing3.len(), 1);
     }
 
     // ---- 端到端：writer 由并行 Agent 实现，未落地前 run 会 panic -- 这里

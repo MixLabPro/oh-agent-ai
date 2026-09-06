@@ -81,59 +81,13 @@ pub struct RebuildReport {
     pub repaired_tails: usize,
 }
 
-/// ISO 事实时间戳 → 是否高峰（1/0）。派生链：
-/// `YYYY-MM-DDTHH:MM:SS` 前缀 → `domain::usage::ms_from_civil`（Hinnant）→
-/// `is_peak_slot`（北京 9-12/14-18 工作日，与 fold 侧 peak_* 桶同一把尺）。
-///
-/// **偏移归一（审查 P2-2）**：`is_peak_slot` 收 UTC ms——Z 结尾照直算；
-/// RFC3339 `±HH:MM` 偏移（codex 顶层 timestamp 原样透传，可能带非零偏移）
-/// 先减掉偏移再算，否则同一事件在索引与 fold 两侧报不同的 peak（预算
-/// 分母会落这个偏差）。偏移格式不齐 → 0（宁可少算峰值不臆造，与
-/// usage.rs `is_peak` 的保守方向同款）。
+/// ISO 事实时间戳 → 是否高峰（1/0）。派生链：**时间解析统一走
+/// `fact_writer_sql::iso_to_ms`**（审查 P2：此处原有一份逐行同构的复制
+/// 解析器，改一处漏一处即双账）→ `is_peak_slot`（北京 9-12/14-18 工作日，
+/// 与 fold 侧 peak_* 桶同一把尺）。解析失败/缺 ts → 0：宁可少算峰值不臆造。
 pub(crate) fn peak_of(ts: &str) -> i64 {
-    let b = ts.as_bytes();
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
-        return 0;
-    }
-    let (Some(y), Some(mo), Some(d), Some(hh), Some(mi), Some(ss)) = (
-        ts.get(0..4).and_then(|s| s.parse::<i64>().ok()),
-        ts.get(5..7).and_then(|s| s.parse::<u32>().ok()),
-        ts.get(8..10).and_then(|s| s.parse::<u32>().ok()),
-        ts.get(11..13).and_then(|s| s.parse::<i64>().ok()),
-        ts.get(14..16).and_then(|s| s.parse::<i64>().ok()),
-        ts.get(17..19).and_then(|s| s.parse::<i64>().ok()),
-    ) else {
-        return 0;
-    };
-    // 尾部（秒后）：小数秒（`.fff`）任意、`Z`/`z` 收尾 → 偏移 0；
-    // `±HH:MM` → 偏移分钟。形如 `.000Z`（claude 真机 100%）与 `.965Z` 都要
-    // 认——上一版只认「19 字节后恰好是 Z」，把带毫秒的事实全判成 0。
-    let mut rest = &ts[19..];
-    let mut offset_min: i64 = 0;
-    if rest.ends_with('Z') || rest.ends_with('z') {
-        rest = &rest[..rest.len() - 1];
-    } else if let Some(pos) = rest.rfind(['+', '-']) {
-        let (frac, off) = rest.split_at(pos);
-        match (
-            off.get(1..3).and_then(|s| s.parse::<i64>().ok()),
-            off.get(4..6).and_then(|s| s.parse::<i64>().ok()),
-            off.len() == 6,
-        ) {
-            (Some(oh), Some(om), true) => {
-                let sign = if off.starts_with('-') { -1 } else { 1 };
-                offset_min = sign * (oh * 60 + om);
-                rest = frac;
-            }
-            _ => return 0,
-        }
-    }
-    // 剩余必须全是小数秒（数字与点）；其余形状（时区缩写等）不猜。
-    if !rest.is_empty() && !rest.bytes().all(|c| c.is_ascii_digit() || c == b'.') {
-        return 0;
-    }
-    match agent_vitals_domain::usage::ms_from_civil(y, mo, d, hh as u32, mi as u32, ss as u32) {
-        // 偏移减回 UTC：本地钟 18:00+08:00 = UTC 10:00。
-        Some(ms) => i64::from(agent_vitals_domain::usage::is_peak_slot(ms - offset_min * 60_000)),
+    match crate::fact_writer_sql::iso_to_ms(ts) {
+        Some(ms) => i64::from(agent_vitals_domain::usage::is_peak_slot(ms)),
         None => 0,
     }
 }

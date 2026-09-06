@@ -76,18 +76,25 @@ pub(crate) fn iso_to_ms(ts: &str) -> Option<i64> {
         .map(|ms| ms - offset_min * 60_000)
 }
 
-/// r2a 会话键：`{host}:{ns}:{profile}:{native_id}`，profile 缺省 "default"。
-/// `upsert_session` 与 `insert_facts` 走同一函数保证外键一致。
+/// r2a 会话键——**长度前缀自定界**（`SessionKey::ledger_key`，域契约的
+/// 同一构造）。审查 P1：朴素 `{host}:{ns}:{profile}:{sid}` 拼接会让
+/// `("ab","c")` 与 `("a","bc")` 撞同一个 key（宿主原生 id 含 `:` 是自由
+/// 形状），且 Phase 3 的会话下钻要用 r2a 键重建——必须与全仓同一构造。
+/// `upsert_session` 与 `insert_facts` 走同一函数保证外键一致；profile 缺省
+/// "default"（与既有 r2a 消费方同款）。
 fn session_key(
     host: &str,
     machine_namespace: &str,
     native_session_id: &str,
     source_profile: Option<&str>,
 ) -> String {
-    format!(
-        "{host}:{machine_namespace}:{}:{native_session_id}",
-        source_profile.unwrap_or("default")
+    agent_vitals_domain::contracts::r2a::SessionKey::new(
+        host,
+        native_session_id,
+        source_profile.unwrap_or("default"),
+        machine_namespace,
     )
+    .ledger_key()
 }
 
 /// fact 文档逐字读字段（空串视为无；缺失/Null 数值 → 0）。
@@ -498,7 +505,7 @@ mod tests {
         let (k, started, last): (String, i64, i64) = db.conn().query_row(
             "SELECT session_key, started_at_ms, last_observed_at_ms FROM sessions", [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
-        assert_eq!(k, "claude-code:full-ns:default:s9", "profile None → default");
+        assert_eq!(k, "11:claude-code|2:s9|7:default|7:full-ns", "profile None → default");
         assert_eq!(started, 2_000, "started 首见定格");
         assert_eq!(last, 9_500, "last_observed 顶到最近");
         std::fs::remove_file(&path).ok();
@@ -573,6 +580,18 @@ mod tests {
     }
 
     #[test]
+    fn session_key_is_collision_free_for_colon_bearing_ids() {
+        // 审查 P1：朴素拼接让 ("ab","c") 与 ("a","bc") 撞键——长度前缀
+        // 自定界（r2a ledger_key）天然无法伪造碰撞。
+        let k1 = session_key("codex", "ns", "ab", Some("c"));
+        let k2 = session_key("codex", "ns", "a", Some("bc"));
+        assert_ne!(k1, k2, "不同字段切分不得撞键：{k1} vs {k2}");
+        let k3 = session_key("codex", "ns", "a:b", Some("profile"));
+        let k4 = session_key("codex", "ns", "a", Some("profile"));
+        assert_ne!(k3, k4);
+    }
+
+    #[test]
     fn unknown_run_id_construction_fails() {
         // new() 的外键预检：绑定幽灵 run_id 的 writer 必须在构造期失败，
         // 而不是让 INSERT 打到外键上才报错。
@@ -595,7 +614,7 @@ mod tests {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         ).unwrap();
-        assert_eq!(k, "claude-code:ns-m:default:sess-a");
+        assert_eq!(k, "11:claude-code|6:sess-a|7:default|4:ns-m");
         assert_eq!(s, src);
         assert_eq!(run, "run-1");
         let expect_ms = iso_to_ms("2026-09-05T10:00:00.000Z").unwrap();
