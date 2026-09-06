@@ -197,17 +197,10 @@ fn codex_host_amount_with_tokens(
     filter_key: &str,
     day: Option<&str>,
 ) -> (HostAmount, HostTokens) {
-    let codex_no_data = || HostAmount {
-        host_id: "codex".to_string(),
-        amounts_by_basis: BTreeMap::new(),
-        currency: None,
-        has_unresolved: false,
-        freshness: Freshness::unavailable(),
-    };
-
     let merged = codex_merged_cached(home);
 
-    // 过滤小时轴（BTreeMap 序保持升序），再重算模型轴（上面的 defect 注释）。
+    // 过滤小时轴（BTreeMap 序保持升序），核心函数再重算模型轴（下面的
+    // defect 注释）。
     let mut filtered = serde_json::Map::new();
     if let Some(bh) = merged["by_hour_model"].as_object() {
         for (h, v) in bh {
@@ -217,13 +210,44 @@ fn codex_host_amount_with_tokens(
         }
     }
     let by_hour_model = serde_json::Value::Object(filtered);
-    let by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
-    let pricing = crate::sessions::codex_cost::load_codex_pricing();
-    let Some(report) = crate::sessions::codex_cost::codex_cost_report(
+    codex_host_amount_with_tokens_from_hours(
         &by_hour_model,
-        &by_model,
         &merged["unaccounted"],
         &merged["plan"],
+        day,
+    )
+}
+
+/// [`codex_host_amount_with_tokens`] 的核心：只认 `by_hour_model` 这一份
+/// 输入，不关心它是从 codex fold（此函数的调用方）还是从 SQL `usage_facts`
+/// 聚合出来的（`SqlSummaryRepository`，`agent_vitals_data::authority_query::
+/// codex_by_hour_model`）——两条路径喂同一把计价尺，不长第二份 Codex 计价
+/// 规则。`unaccounted`/`plan` 对 SQL 路径不可得（SQL 事实里没有原始 fold
+/// 状态），传 `Value::Null` 是安全的：`codex_cost_report` 只把它们原样透传
+/// 进输出（`out.insert("unaccounted_usage", …)`/`out.insert("plan", …)`），
+/// 从不参与 `total_cost_usd`/`days`/`unpriced_tokens` 的计算，而本函数只读
+/// 这三个字段。
+fn codex_host_amount_with_tokens_from_hours(
+    by_hour_model: &serde_json::Value,
+    unaccounted: &serde_json::Value,
+    plan: &serde_json::Value,
+    day: Option<&str>,
+) -> (HostAmount, HostTokens) {
+    let codex_no_data = || HostAmount {
+        host_id: "codex".to_string(),
+        amounts_by_basis: BTreeMap::new(),
+        currency: None,
+        has_unresolved: false,
+        freshness: Freshness::unavailable(),
+    };
+
+    let by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(by_hour_model, None);
+    let pricing = crate::sessions::codex_cost::load_codex_pricing();
+    let Some(report) = crate::sessions::codex_cost::codex_cost_report(
+        by_hour_model,
+        &by_model,
+        unaccounted,
+        plan,
         &pricing,
         false,
     ) else {
@@ -348,6 +372,30 @@ fn codex_host_amount_with_tokens(
 /// 同 [`claude_host_amount`]，顺带产出窗口内 token 计量（四轴 claude snake
 /// 键直读——ledger 桶就是归一目标词表）。
 fn claude_host_amount_with_tokens(window_prefix: &str) -> (HostAmount, HostTokens) {
+    let ledger = crate::state::read_json(&crate::sessions::claude_ledger::ledger_path());
+    let days: BTreeMap<String, serde_json::Value> = ledger
+        .as_ref()
+        .and_then(|l| l.get("days"))
+        .and_then(|d| d.as_object())
+        .map(|d| {
+            d.iter()
+                .filter(|(k, _)| k.starts_with(window_prefix))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    claude_host_amount_with_tokens_from_days(&days)
+}
+
+/// [`claude_host_amount_with_tokens`] 的核心：只认「窗口内账日 → `{model:
+/// 4 桶}`」这份 map，不关心它来自 ledger JSON 还是 SQL `usage_facts` 聚合
+/// （`SqlSummaryRepository`，`agent_vitals_data::authority_query::
+/// {claude_days,claude_legacy_days}`）——两条路径喂同一把 `claude_day_cost`
+/// 计价尺。`BTreeMap` 天然按日期升序迭代，与原实现显式 `sort_by` 的排序
+/// 纪律（"同币求和的浮点顺序确定，跨平台字节一致"）等价。
+fn claude_host_amount_with_tokens_from_days(
+    days: &BTreeMap<String, serde_json::Value>,
+) -> (HostAmount, HostTokens) {
     let claude_no_data = || (HostAmount {
         host_id: "claude-code".to_string(),
         amounts_by_basis: BTreeMap::new(),
@@ -355,21 +403,6 @@ fn claude_host_amount_with_tokens(window_prefix: &str) -> (HostAmount, HostToken
         has_unresolved: false,
         freshness: Freshness::unavailable(),
     }, HostTokens::default());
-    let ledger = crate::state::read_json(&crate::sessions::claude_ledger::ledger_path());
-    let days = ledger
-        .as_ref()
-        .and_then(|l| l.get("days"))
-        .and_then(|d| d.as_object())
-        .map(|d| {
-            let mut in_window: Vec<(&String, &serde_json::Value)> = d
-                .iter()
-                .filter(|(k, _)| k.starts_with(window_prefix))
-                .collect();
-            // 账日升序：同币求和的浮点顺序确定，跨平台字节一致。
-            in_window.sort_by(|a, b| a.0.cmp(b.0));
-            in_window
-        })
-        .unwrap_or_default();
     if days.is_empty() {
         return claude_no_data();
     }
@@ -379,7 +412,7 @@ fn claude_host_amount_with_tokens(window_prefix: &str) -> (HostAmount, HostToken
     let mut usd = 0.0f64;
     let mut unpriced = 0i64;
     let mut any_partial = false;
-    for (date, day) in &days {
+    for day in days.values() {
         // tokens：四桶直读（claude snake 键 = 归一目标词表），跨模型累计。
         if let Some(models) = day.as_object() {
             for (_m, b) in models {
@@ -400,11 +433,10 @@ fn claude_host_amount_with_tokens(window_prefix: &str) -> (HostAmount, HostToken
                 .unwrap_or(0);
             any_partial |= report.get("pricing_basis").and_then(|v| v.as_str()) == Some("partial");
         }
-        let _ = date; // 排序键，循环里不用
     }
     // freshness 的观测日 = 窗口内**最晚的账日**（含全 unknown 日——观测到
     // token 就是观测，与有没有折出钱无关）。
-    let latest = days.last().map(|(k, _)| k.as_str());
+    let latest = days.keys().next_back().map(|k| k.as_str());
     let mut amounts_by_basis = BTreeMap::new();
     if cny > 0.0 {
         amounts_by_basis.insert(BillingBasis::MeteredEstimate, cny);
@@ -547,21 +579,28 @@ impl ProviderAcc {
 /// 盾由消费方（Stage D 的 >50× 利用率护栏）以「归属待核」告警呈现，不在
 /// 数据层假装裁定。
 fn claude_provider_amounts(window_prefix: &str) -> BTreeMap<String, HostAmount> {
-    let mut accs: BTreeMap<String, ProviderAcc> = BTreeMap::new();
     let ledger = crate::state::read_json(&crate::sessions::claude_ledger::ledger_path());
-    let days = ledger
+    let days: BTreeMap<String, serde_json::Value> = ledger
         .as_ref()
         .and_then(|l| l.get("days"))
         .and_then(|d| d.as_object())
         .map(|d| {
-            let mut in_window: Vec<(&String, &serde_json::Value)> = d
-                .iter()
+            d.iter()
                 .filter(|(k, _)| k.starts_with(window_prefix))
-                .collect();
-            in_window.sort_by(|a, b| a.0.cmp(b.0));
-            in_window
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
         })
         .unwrap_or_default();
+    claude_provider_amounts_from_days(&days)
+}
+
+/// [`claude_provider_amounts`] 的核心——同一份「窗口内账日 → `{model: 4
+/// 桶}`」输入，来源无关（ledger JSON 或 SQL 聚合），理由见
+/// [`claude_host_amount_with_tokens_from_days`]。
+fn claude_provider_amounts_from_days(
+    days: &BTreeMap<String, serde_json::Value>,
+) -> BTreeMap<String, HostAmount> {
+    let mut accs: BTreeMap<String, ProviderAcc> = BTreeMap::new();
     if days.is_empty() {
         return accs.into_iter().map(|(k, a)| {
             let host = a.finish(&k);
@@ -570,7 +609,7 @@ fn claude_provider_amounts(window_prefix: &str) -> BTreeMap<String, HostAmount> 
         .collect();
     }
     let pricing = agent_vitals_domain::cost::load_pricing();
-    for (date, day) in &days {
+    for (date, day) in days {
         let Some(models) = day.as_object() else {
             continue;
         };
@@ -1059,6 +1098,23 @@ fn codex_provider_amount(
     (h, tk)
 }
 
+/// [`codex_provider_amount`] 的 SQL 版本——同一份 `by_hour_model` 输入换个
+/// 来源，见 [`codex_host_amount_with_tokens_from_hours`] 的理由。
+fn codex_provider_amount_from_hours(
+    by_hour_model: &serde_json::Value,
+    day: Option<&str>,
+) -> (HostAmount, HostTokens) {
+    let (mut h, tk) = codex_host_amount_with_tokens_from_hours(
+        by_hour_model,
+        &serde_json::Value::Null,
+        &serde_json::Value::Null,
+        day,
+    );
+    h.host_id = "codex/openai".to_string();
+    h.currency = Some("USD".to_string());
+    (h, tk)
+}
+
 /// DSH 窗口（`days` map 或单日值）的 token 计量：DSH 四桶词表直读
 /// （`uncached_input_tokens` 词表，与 claude/codex 不同——见 fixtures/v09
 /// 的 _doc）。`window` 是月份前缀或完整日期。
@@ -1441,7 +1497,14 @@ impl SummaryRepository for JsonSummaryRepository {
 
         // L0 计量层（Stage D）：单日窗口。
         let mut tokens_by_host = BTreeMap::new();
-        tokens_by_host.insert("dsh".to_string(), dsh_tokens(day_value, &query.date));
+        // `day_value` 是**单日对象**，不是 `{date: day}` map——`dsh_tokens`
+        // 的窗口过滤按 map 键设计，喂单日对象会拿它的顶层桶键名（如
+        // "uncached_input_tokens"）去比"以 query.date 开头"，恒不匹配，
+        // DSH 今日 tokens 因此假零（`CODE_REVIEW_V0_9_STAGE_A_D_KPI_BILLING.md`
+        // 头部 bug #2；`dsh_day_tokens` 当时已经为这个缺口造出来，但这处
+        // 调用点没有跟着切，回归一直存在到现在）。单日对象直接进
+        // `dsh_day_tokens`，不经窗口过滤。
+        tokens_by_host.insert("dsh".to_string(), day_value.map(dsh_day_tokens).unwrap_or_default());
         tokens_by_host.insert("codex".to_string(), codex_tk);
         tokens_by_host.insert("claude-code".to_string(), claude_tk);
 
@@ -1969,6 +2032,40 @@ mod tests {
         let days = json!({ "2026-09-05": day });
         let month_tk = dsh_tokens(Some(&days), "2026-09");
         assert_eq!(month_tk.total, 1_350_000);
+    }
+
+    /// 上一条测的是私有函数；这条钉住**实际调用点**
+    /// （`JsonSummaryRepository::daily_summary`）——`CODE_REVIEW_V0_9_STAGE_
+    /// A_D_KPI_BILLING.md` 头部 bug #2 的完整回归：`dsh_day_tokens` 造出来
+    /// 之后没有一条测试真的走 `daily_summary` 这条公开路径去断言 DSH 的
+    /// `tokens_by_host` 非零，调用点因此漏改，恒零一直没被抓到。
+    #[test]
+    fn daily_summary_reports_nonzero_dsh_tokens_for_a_real_day() {
+        with_home(|| {
+            let day = crate::clock::today_beijing();
+            crate::state::atomic_write_json(
+                &crate::state::state_dir().join("month.json"),
+                &json!({
+                    "days": {
+                        day.clone(): {
+                            "uncached_input_tokens": 1_000_000,
+                            "cache_read_tokens": 250_000,
+                            "cache_write_tokens": 0,
+                            "output_tokens": 100_000,
+                            "peak_uncached_input_tokens": 0,
+                            "peak_output_tokens": 0,
+                            "peak_cache_read_tokens": 0,
+                            "peak_cache_write_tokens": 0,
+                        }
+                    }
+                }),
+            );
+            let repo = JsonSummaryRepository;
+            let daily = repo.daily_summary(&DailySummaryQuery { date: day });
+            let dsh_tk = &daily.tokens_by_host["dsh"];
+            assert_eq!(dsh_tk.total, 1_350_000, "DSH 今日 token 不得假零");
+            assert_eq!(dsh_tk.uncached_input, 1_000_000);
+        });
     }
 
     /// 0.6b 落地的回归——DSH 的 `compute_month` 对"本月有 day 但 token 全
