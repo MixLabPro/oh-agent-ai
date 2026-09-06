@@ -45,12 +45,18 @@ fn fingerprint(path: &Path) -> Option<(u64, u64)> {
     Some((meta.len(), mtime.as_nanos() as u64))
 }
 
-fn load_checkpoint(data_home: &Path) -> serde_json::Map<String, Value> {
+fn load_checkpoint(data_home: &Path, ns: &str) -> serde_json::Map<String, Value> {
     crate::state::read_json(&checkpoint_path(data_home))
         .and_then(|v| {
             // 版本不匹配 → 整体作废（全量重发，exactly-once 兜底）。
-            if v.get("schema_version").and_then(Value::as_u64)
-                == Some(CHECKPOINT_SCHEMA_VERSION)
+            // **machine_namespace 变化也整体作废（审查 P2-3b）**：machine.json
+            // 重置后旧 ns 的 checkpoint 会让所有文件静默 skip，新 ns 的事实
+            // 永不为旧文件产出——ns 是事实身份的一部分，必须与 checkpoint
+            // 同代。陈旧条目（文件已删）不清理：dedup 兜底，已知无害累积。
+            let ns_ok = v.get("machine_namespace").and_then(Value::as_str) == Some(ns);
+            if ns_ok
+                && v.get("schema_version").and_then(Value::as_u64)
+                    == Some(CHECKPOINT_SCHEMA_VERSION)
             {
                 v.get("files").and_then(Value::as_object).cloned()
             } else {
@@ -60,9 +66,10 @@ fn load_checkpoint(data_home: &Path) -> serde_json::Map<String, Value> {
         .unwrap_or_default()
 }
 
-fn save_checkpoint(data_home: &Path, files: &serde_json::Map<String, Value>) {
+fn save_checkpoint(data_home: &Path, ns: &str, files: &serde_json::Map<String, Value>) {
     let doc = serde_json::json!({
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "machine_namespace": ns,
         "files": Value::Object(files.clone()),
     });
     crate::state::atomic_write_json(&checkpoint_path(data_home), &doc);
@@ -96,6 +103,7 @@ pub struct SyncReport {
 fn sync_host(
     host: &str,
     data_home: &Path,
+    ns: &str,
     files: Vec<PathBuf>,
     checkpoint: &mut serde_json::Map<String, Value>,
     report: &mut HostSyncReport,
@@ -106,6 +114,11 @@ fn sync_host(
         let fp = fingerprint(&path);
         let key = path.to_string_lossy().to_string();
         let recorded = checkpoint.get(&key).and_then(|v| {
+            // host 比对（审查 P2-3b）：同名文件在两个宿主发现面出现（理论
+            // 形状）时不得互相当作已同步。
+            if v.get("host").and_then(Value::as_str) != Some(host) {
+                return None;
+            }
             let size = v.get("size").and_then(Value::as_u64)?;
             let mtime = v.get("mtime_ns").and_then(|x| x.as_u64())?;
             Some((size, mtime))
@@ -119,12 +132,34 @@ fn sync_host(
         }
     }
 
-    // namespace：机器身份（模块头说明为什么这里可以由服务自取）。
-    let ns = crate::takeover::machine_namespace();
-
     let mut facts: Vec<Value> = Vec::new();
     let mut synced_keys: Vec<(String, (u64, u64))> = Vec::new();
+    // codex 的 emitter 跨文件 `seen` 去重只在**单次调用内**成立（live/
+    // archived 同 stem 双收靠它）——差量集必须一批喂进去，逐文件调用会把
+    // 去重丢给 ingest 层（账不错但 duplicate 通胀 + 双倍 emit；tick 常驻后
+    // 每 5 分钟付一次，审查 P2-1）。claude/dsh 是单文件语义，逐文件隔离错误。
+    let codex_dirty: Vec<PathBuf> = dirty.iter().map(|(p, _)| p.clone()).collect();
+    if host == "codex" && !codex_dirty.is_empty() {
+        match agent_vitals_hosts::codex_usage_fact::codex_rollouts_to_usage_facts(
+            &codex_dirty, ns, "default",
+        ) {
+            Ok(r) => {
+                facts.extend(r.facts);
+                for (path, fp) in &dirty {
+                    synced_keys.push((path.to_string_lossy().to_string(), *fp));
+                }
+            }
+            Err(e) => {
+                // 批量 Err = 任一文件读失败（read 层错误）——全部重试，
+                // 错误如实上呈。
+                report.errors.push(format!("codex batch: {e}"));
+            }
+        }
+    }
     for (path, fp) in &dirty {
+        if host == "codex" {
+            continue; // 已批量处理
+        }
         let emit: Result<Vec<Value>, String> = match host {
             "claude-code" => {
                 let sid = path
@@ -133,18 +168,12 @@ fn sync_host(
                     .unwrap_or_default()
                     .to_string();
                 agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts(
-                    path, &ns, "default", &sid,
+                    path, ns, "default", &sid,
                 )
                 .map(|r| r.facts)
             }
-            "codex" => agent_vitals_hosts::codex_usage_fact::codex_rollouts_to_usage_facts(
-                std::slice::from_ref(path),
-                &ns,
-                "default",
-            )
-            .map(|r| r.facts),
             "dsh" => agent_vitals_hosts::dsh_usage_fact::dsh_session_to_usage_facts(
-                path, &ns, None,
+                path, ns, None,
             )
             .map(|r| r.facts),
             other => Err(format!("unknown host `{other}`")),
@@ -184,7 +213,22 @@ fn sync_host(
 
 /// 三宿主例行同步入口。幂等：重复调用第二次基本全 skipped / duplicate。
 pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
-    let mut checkpoint = load_checkpoint(data_home);
+    // **machine_namespace 首建单飞（审查 P2-3）**：machine.json 缺失时两个
+    // 进程同时首启（托盘 tick + 外部 cron）会各自生成不同 ns、写各自的
+    // machine.json（rename 竞态一方覆盖）→ 同一批文件的事实按两个 ns 拆开
+    // 入库。把 bootstrap 关进 facts 锁（machine.json 快路径存在时锁是无谓
+    // 成本，纳秒级；仅首次首启真正串行）。
+    let ns = {
+        let _g = crate::lease::acquire_blocking(
+            &data_home.join("facts").join(".ingest.lock"),
+            "facts-ns-bootstrap",
+            60_000,
+            10_000,
+        )
+        .map_err(|e| format!("facts ns bootstrap lease: {e}"))?;
+        crate::takeover::machine_namespace()
+    };
+    let mut checkpoint = load_checkpoint(data_home, &ns);
     let mut report = SyncReport::default();
 
     // 各宿主 locate 面直取（hosts sources 的既有函数，不在这里重写枚举）。
@@ -216,12 +260,12 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             host: host.to_string(),
             ..Default::default()
         };
-        sync_host(host, data_home, files, &mut checkpoint, &mut r);
+        sync_host(host, data_home, &ns, files, &mut checkpoint, &mut r);
         report.total_appended += r.appended;
         report.total_duplicate += r.duplicate;
         report.hosts.push(r);
     }
-    save_checkpoint(data_home, &checkpoint);
+    save_checkpoint(data_home, &ns, &checkpoint);
     Ok(report)
 }
 

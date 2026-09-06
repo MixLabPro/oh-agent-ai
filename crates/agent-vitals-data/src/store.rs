@@ -84,8 +84,12 @@ pub struct RebuildReport {
 /// ISO 事实时间戳 → 是否高峰（1/0）。派生链：
 /// `YYYY-MM-DDTHH:MM:SS` 前缀 → `domain::usage::ms_from_civil`（Hinnant）→
 /// `is_peak_slot`（北京 9-12/14-18 工作日，与 fold 侧 peak_* 桶同一把尺）。
-/// 解析失败/缺 ts → 0：**宁可少算峰值也不臆造**（与 usage.rs `is_peak`
-/// 的保守方向同款）。
+///
+/// **偏移归一（审查 P2-2）**：`is_peak_slot` 收 UTC ms——Z 结尾照直算；
+/// RFC3339 `±HH:MM` 偏移（codex 顶层 timestamp 原样透传，可能带非零偏移）
+/// 先减掉偏移再算，否则同一事件在索引与 fold 两侧报不同的 peak（预算
+/// 分母会落这个偏差）。偏移格式不齐 → 0（宁可少算峰值不臆造，与
+/// usage.rs `is_peak` 的保守方向同款）。
 fn peak_of(ts: &str) -> i64 {
     let b = ts.as_bytes();
     if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
@@ -101,8 +105,35 @@ fn peak_of(ts: &str) -> i64 {
     ) else {
         return 0;
     };
+    // 尾部（秒后）：小数秒（`.fff`）任意、`Z`/`z` 收尾 → 偏移 0；
+    // `±HH:MM` → 偏移分钟。形如 `.000Z`（claude 真机 100%）与 `.965Z` 都要
+    // 认——上一版只认「19 字节后恰好是 Z」，把带毫秒的事实全判成 0。
+    let mut rest = &ts[19..];
+    let mut offset_min: i64 = 0;
+    if rest.ends_with('Z') || rest.ends_with('z') {
+        rest = &rest[..rest.len() - 1];
+    } else if let Some(pos) = rest.rfind(['+', '-']) {
+        let (frac, off) = rest.split_at(pos);
+        match (
+            off.get(1..3).and_then(|s| s.parse::<i64>().ok()),
+            off.get(4..6).and_then(|s| s.parse::<i64>().ok()),
+            off.len() == 6,
+        ) {
+            (Some(oh), Some(om), true) => {
+                let sign = if off.starts_with('-') { -1 } else { 1 };
+                offset_min = sign * (oh * 60 + om);
+                rest = frac;
+            }
+            _ => return 0,
+        }
+    }
+    // 剩余必须全是小数秒（数字与点）；其余形状（时区缩写等）不猜。
+    if !rest.is_empty() && !rest.bytes().all(|c| c.is_ascii_digit() || c == b'.') {
+        return 0;
+    }
     match agent_vitals_domain::usage::ms_from_civil(y, mo, d, hh as u32, mi as u32, ss as u32) {
-        Some(ms) => i64::from(agent_vitals_domain::usage::is_peak_slot(ms)),
+        // 偏移减回 UTC：本地钟 18:00+08:00 = UTC 10:00。
+        Some(ms) => i64::from(agent_vitals_domain::usage::is_peak_slot(ms - offset_min * 60_000)),
         None => 0,
     }
 }
@@ -711,6 +742,35 @@ mod tests {
         assert_eq!(get("peak").2.as_deref(), Some("--Users-admin-proj--"));
         assert_eq!(get("off").1, 0, "深夜 = 空闲");
         assert_eq!(get("bad").1, 0, "坏 ts 宁可少算峰值不臆造");
+        // 偏移归一（审查 P2-2）：+08:00 的 18:00 = UTC 10:00（周四非高峰——
+        // 北京 02:00 周五？不对：18:00-08:00=10:00Z=北京 18:00=非高峰窗）；
+        // 与同 UTC 时刻的 Z 形式必须报同一个 peak。
+        let mut with_off = fact("dsh", "withoff", 10);
+        with_off["event_ts_utc"] = json!("2026-09-03T18:00:00+08:00");
+        idx.insert_fact(&with_off).unwrap();
+        let mut as_z = fact("dsh", "asz", 10);
+        as_z["event_ts_utc"] = json!("2026-09-03T10:00:00Z");
+        idx.insert_fact(&as_z).unwrap();
+        // 毫秒形态（claude 真机 100% 是 .965Z / .000Z）——上一版 tail 校验
+        // 把它们全判 0，这里钉住。
+        let mut msz = fact("dsh", "msz-peak", 10);
+        msz["event_ts_utc"] = json!("2026-09-03T02:00:00.965Z");
+        idx.insert_fact(&msz).unwrap();
+        let rows2: Vec<(String, i64)> = {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT source_event_id, event_peak FROM facts WHERE source_event_id IN ('withoff','asz','msz-peak')")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect()
+        };
+        let p1 = rows2.iter().find(|(id, _)| id == "withoff").unwrap().1;
+        let p2 = rows2.iter().find(|(id, _)| id == "asz").unwrap().1;
+        assert_eq!(p1, p2, "同 UTC 时刻的偏移形式与 Z 形式必须同 peak");
+        let p3 = rows2.iter().find(|(id, _)| id == "msz-peak").unwrap().1;
+        assert_eq!(p3, 1, "带毫秒的 Z 形式照常派生 peak");
         let _ = std::fs::remove_file(&db);
     }
 
