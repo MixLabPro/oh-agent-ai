@@ -320,9 +320,11 @@ agent-vitals billing validate
 它们不是 SQL 索引的重复——是 DSH oneline fold 的**状态链**（8 桶含 peak
 峰谷拆分、by_source、预算/告警的 rotate/snooze 语义），这些维度 facts/
 索引当前都没有；而索引按 §3.4 是可删除投影，把状态语义搬进去就变成第二
-权威。退休按四步走（v0.10 候选）：① sync_service 常态 ingest；② facts
-schema v2 补 peak 标志 + source 维度；③ 预算/告警搬到索引之上的 Runtime
-服务；④ state JSON 退役（兼容读留一个版本周期）。在那之前 JSON 状态链与
+权威。退休按四步走：① ✅ sync_service（2026-09-06 落地 `runtime::sync_service` +
+`sync-facts` CLI；托盘 tick 接线待做——做完才算「常态」）；② ✅ facts
+schema v2 补 peak 标志 + source 维度（同日，纯索引侧派生零 emitter 改动）；
+③ 预算/告警搬到索引之上的 Runtime 服务（未动）；④ state JSON 退役（未动，
+兼容读留一个版本周期）。在那之前 JSON 状态链与
 facts 链是**并行的两条写路径**（fold 写状态、--write 写事实），不是多头
 维护同一份数据。
 
@@ -472,7 +474,7 @@ v0.9 可发布，当且仅当（R4 标注当前达成状态）：
 
 v0.9 产出稳定的事实、canonical 输入、成本口径、coverage 与查询接口；v0.10 在此基础上建立任务轨迹、诊断、方案、行动和收益验证。没有 v0.9 的 data readiness，不得在 v0.10 将趋势、节省或自动建议表述为可信结论。
 
-## 附录 A：SQLite 索引 Schema（v1，2026-09-06 定稿）
+## 附录 A：SQLite 索引 Schema（v2，2026-09-06 定稿）
 
 > 唯一 DDL 源 = `crates/agent-vitals-data/src/store.rs::ensure_schema`（本文档
 > 是它的镜像，改动必须两处同步 + `INDEX_SCHEMA_VERSION` 递增）。SQLite 是
@@ -483,7 +485,7 @@ v0.9 产出稳定的事实、canonical 输入、成本口径、coverage 与查�
 
 ```sql
 CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
--- schema_version = '1'
+-- schema_version = '2'
 
 CREATE TABLE facts(
     fact_id            TEXT PRIMARY KEY,   -- 契约层 6 元组 fnv1a64（uf1-…）；去重容器，不产生身份
@@ -495,6 +497,8 @@ CREATE TABLE facts(
     event_ts_utc       TEXT,               -- 宿主事件时间（UTC ISO）；月/小时窗都在读取时按它切
     model_id           TEXT,               -- model_id ?? model_raw
     provider_id        TEXT,               -- provider_id ?? billing_source
+    source_profile     TEXT,               -- fact 自带 source_profile（DSH by_source 视角的索引落位）
+    event_peak         INTEGER NOT NULL DEFAULT 0,  -- 插入时 is_peak_slot(event_ts_utc) 派生；坏 ts → 0
     t_uncached_input   INTEGER NOT NULL DEFAULT 0,
     t_cache_read       INTEGER NOT NULL DEFAULT 0,
     t_cache_write      INTEGER NOT NULL DEFAULT 0,
@@ -524,8 +528,8 @@ CREATE INDEX facts_session  ON facts(host, native_session_id); -- 会话下钻
 
 | 维度 | 触发条件 | 形状 |
 |---|---|---|
-| peak 峰谷标志 | month.json 退休路径第 ② 步（§5） | facts 加 `peak` 列或 peak 事实行 |
-| by_source | 同上 | provider_id 已覆盖大半，补 source 维度即可 |
+| ~~peak 峰谷标志~~ | ✅ v2 已落地（插入时派生，零 emitter 改动） | `event_peak` 列 |
+| ~~by_source~~ | ✅ v2 已落地 | `source_profile` 列 |
 | HostBillRecord | WorkBuddy credit_json 写入方落地 | 独立 `host_bills` 表（宿主账单口径，不冒充 API 成本） |
 | canonical snapshot | §3.4 第三层落地 | 独立 `sessions` 表 + 90 天保留 |
 | checkpoint/lease 表 | 多进程 ingest 常态化 | 独立表或继续文件锁（P0 文件锁够用） |

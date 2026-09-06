@@ -488,6 +488,16 @@ enum Cmd {
     /// monthly cost split by basis AND drillable to its sources). Groups match
     /// by_provider keys; reasons: billing-route-unknown / billing-mode-unknown
     /// / no-price-card / partial-price-basis. Stage B.
+    /// Routine facts sync across all three hosts (locate → checkpoint diff →
+    /// emit → ingest). Idempotent: re-runs skip unchanged files (size+mtime_ns
+    /// checkpoint) and dedup facts by fact_id. The machine namespace comes
+    /// from machine.json (the sync caller IS the machine). Stage B leftover:
+    /// this is retirement-path step 1 (spec §5).
+    SyncFacts {
+        /// Output the sync report as JSON
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
     DataExportPrivate {
         /// Output directory (created on demand); files land as <host>.jsonl
         #[arg(long)]
@@ -2129,6 +2139,48 @@ session_store={store} fold={fold}"
             }
             Err(e) => {
                 eprintln!("data-reconcile failed: {e}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    // sync-facts（Stage B 遗留收口）：三宿主例行 ingest——退休路径第 ① 步。
+    // 托盘 tick 未来也调这一条（不各自长文件枚举）。
+    if let Some(Cmd::SyncFacts { rows_json }) = &args.cmd {
+        match agent_vitals_runtime::sync_service::sync_facts(
+            &agent_vitals_runtime::home::data_home(),
+        ) {
+            Ok(report) => {
+                if *rows_json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).unwrap_or_default()
+                    );
+                } else {
+                    println!(
+                        "Facts sync: +{} appended, {} duplicate",
+                        report.total_appended, report.total_duplicate
+                    );
+                    for h in &report.hosts {
+                        println!(
+                            "  {:<12} seen {} synced {} skipped {} (+{} dup{})",
+                            h.host,
+                            h.files_seen,
+                            h.files_synced,
+                            h.files_skipped,
+                            h.appended,
+                            if h.errors.is_empty() {
+                                String::new()
+                            } else {
+                                format!("; {} error(s)", h.errors.len())
+                            },
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("sync-facts failed: {e}");
                 std::process::exit(2);
             }
         }

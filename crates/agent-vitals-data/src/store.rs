@@ -29,7 +29,14 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 /// 当前索引 schema 版本。任何不匹配 → 整库重建（决定 2）。
-pub const INDEX_SCHEMA_VERSION: u32 = 1;
+///
+/// v2（2026-09-06）：`event_peak` + `source_profile` 两列——**都在插入时从
+/// 事实既有字段派生**（peak = `domain::usage::is_peak_slot(event_ts_utc)`，
+/// source = fact 自己的 `source_profile`），不要求 emitter 重发：v1 JSONL
+/// 重放即得 v2 索引（附录 A evolution 纪律「不破坏 JSONL 重建等价性」）。
+/// peak 是预算/告警搬上索引（§5 退休路径第 ③ 步）的分母维度；source 是
+/// DSH `by_source` 视角的索引侧落位。
+pub const INDEX_SCHEMA_VERSION: u32 = 2;
 
 /// 索引打开/查询错误。`Corrupt` = SQLite 层损坏（重建是修复路径）。
 #[derive(Debug)]
@@ -72,6 +79,32 @@ pub struct RebuildReport {
     pub total: usize,
     /// rebuild 过程中执行的尾面修复次数（crash 残留，与 evidence 同语义）。
     pub repaired_tails: usize,
+}
+
+/// ISO 事实时间戳 → 是否高峰（1/0）。派生链：
+/// `YYYY-MM-DDTHH:MM:SS` 前缀 → `domain::usage::ms_from_civil`（Hinnant）→
+/// `is_peak_slot`（北京 9-12/14-18 工作日，与 fold 侧 peak_* 桶同一把尺）。
+/// 解析失败/缺 ts → 0：**宁可少算峰值也不臆造**（与 usage.rs `is_peak`
+/// 的保守方向同款）。
+fn peak_of(ts: &str) -> i64 {
+    let b = ts.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
+        return 0;
+    }
+    let (Some(y), Some(mo), Some(d), Some(hh), Some(mi), Some(ss)) = (
+        ts.get(0..4).and_then(|s| s.parse::<i64>().ok()),
+        ts.get(5..7).and_then(|s| s.parse::<u32>().ok()),
+        ts.get(8..10).and_then(|s| s.parse::<u32>().ok()),
+        ts.get(11..13).and_then(|s| s.parse::<i64>().ok()),
+        ts.get(14..16).and_then(|s| s.parse::<i64>().ok()),
+        ts.get(17..19).and_then(|s| s.parse::<i64>().ok()),
+    ) else {
+        return 0;
+    };
+    match agent_vitals_domain::usage::ms_from_civil(y, mo, d, hh as u32, mi as u32, ss as u32) {
+        Some(ms) => i64::from(agent_vitals_domain::usage::is_peak_slot(ms)),
+        None => 0,
+    }
 }
 
 /// "YYYY-MM-DD" → (y, m, d)。None = 格式不齐（调用方报错，不猜）。
@@ -171,6 +204,8 @@ impl FactsIndex {
                  event_ts_utc       TEXT,
                  model_id           TEXT,
                  provider_id        TEXT,
+                 source_profile     TEXT,
+                 event_peak         INTEGER NOT NULL DEFAULT 0,
                  t_uncached_input   INTEGER NOT NULL DEFAULT 0,
                  t_cache_read       INTEGER NOT NULL DEFAULT 0,
                  t_cache_write      INTEGER NOT NULL DEFAULT 0,
@@ -311,9 +346,9 @@ impl FactsIndex {
             "INSERT OR IGNORE INTO facts(
                  fact_id, host, machine_namespace, native_session_id,
                  source_event_id, observation_kind, event_ts_utc,
-                 model_id, provider_id,
+                 model_id, provider_id, source_profile, event_peak,
                  t_uncached_input, t_cache_read, t_cache_write, t_output, raw)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             rusqlite::params![
                 fact_id,
                 get("host").unwrap_or_default(),
@@ -324,6 +359,8 @@ impl FactsIndex {
                 get("event_ts_utc"),
                 get("model_id").or(get("model_raw")),
                 get("provider_id").or(get("billing_source")),
+                get("source_profile"),
+                peak_of(get("event_ts_utc").unwrap_or_default()),
                 tok("uncached_input_tokens"),
                 tok("cache_read_tokens"),
                 tok("cache_write_tokens"),
@@ -640,6 +677,84 @@ mod tests {
             idx.tokens_by_host(None).unwrap()["codex"]["total"],
             serde_json::json!(1015)
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn v2_derives_peak_and_source_profile_at_insert() {
+        let db = tmp_db("v2");
+        let idx = FactsIndex::open_raw(&db).unwrap().0;
+        let mut peak = fact("dsh", "peak", 10);
+        peak["event_ts_utc"] = json!("2026-09-03T02:00:00.000Z"); // 周四；02:00Z = 北京 10 点 = 高峰（is_peak_slot 收 UTC ms，内部转北京）
+        peak["source_profile"] = json!("--Users-admin-proj--");
+        let mut off = fact("dsh", "off", 10);
+        off["event_ts_utc"] = json!("2026-09-04T23:00:00.000Z"); // 深夜 = 空闲
+        idx.insert_fact(&peak).unwrap();
+        idx.insert_fact(&off).unwrap();
+        // 坏 ts → 0（宁可少算峰值不臆造）。
+        let mut bad = fact("dsh", "bad", 10);
+        bad["event_ts_utc"] = json!("not-a-ts");
+        idx.insert_fact(&bad).unwrap();
+        // event_peak/source_profile 是**投影列**（不在 raw fact JSON 里）——
+        // 直接查列。
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT source_event_id, event_peak, source_profile FROM facts ORDER BY source_event_id")
+            .unwrap();
+        let rows: Vec<(String, i64, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        let get = |e: &str| rows.iter().find(|(id, _, _)| id == e).unwrap();
+        assert_eq!(get("peak").1, 1, "02:00Z = 北京周四 10 点 = 高峰（9-3 周四；9-4 周五全天空闲）");
+        assert_eq!(get("peak").2.as_deref(), Some("--Users-admin-proj--"));
+        assert_eq!(get("off").1, 0, "深夜 = 空闲");
+        assert_eq!(get("bad").1, 0, "坏 ts 宁可少算峰值不臆造");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v1_database_is_rebuilt_to_v2_from_the_authority() {
+        let home = tmp_db("v1v2");
+        let facts_root = home.join("facts");
+        std::fs::create_dir_all(&facts_root).unwrap();
+        std::fs::write(
+            facts_root.join("codex.jsonl"),
+            format!("{}\n", fact("codex", "e1", 100)),
+        )
+        .unwrap();
+        let db = home.join("index.sqlite3");
+        let (idx, _) = FactsIndex::open_or_rebuild(&db, &facts_root).unwrap();
+        assert_eq!(idx.fact_count().unwrap(), 1);
+        drop(idx);
+        // 手工把版本行降回 1 → open_or_rebuild 必须走重建，且重建后 v2 列
+        // 由重放重新派生（v1 JSONL 不需要重发）。
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE schema_meta SET value='1' WHERE key='schema_version'", []).unwrap();
+        drop(conn);
+        let (idx, rebuilt) = FactsIndex::open_or_rebuild(&db, &facts_root).unwrap();
+        assert!(rebuilt, "旧版本必须触发重建");
+        assert_eq!(idx.fact_count().unwrap(), 1);
+        // v2 列由重放重新派生——查投影列而不是 raw（raw 是事实原文）。
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let has_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('facts') WHERE name = 'event_peak'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        assert!(has_col, "重建后的表必须是 v2 形状");
+        let ver: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ver, "2");
         let _ = std::fs::remove_dir_all(&home);
     }
 

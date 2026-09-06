@@ -35,6 +35,7 @@ pub mod sessions;
 pub mod skills;
 pub mod state;
 pub mod summary;
+pub mod sync_service;
 pub mod takeover;
 
 /// 进程级环境变量锁 —— `state` / `budget` / `takeover` / `summary` 的
@@ -42,3 +43,4 @@ pub mod takeover;
 /// 局部锁只能串行本模块，跨模块并行还是踩）。
 #[doc(hidden)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
