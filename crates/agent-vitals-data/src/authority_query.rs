@@ -449,6 +449,75 @@ pub fn coverage_status(
     Ok((measured, TOTAL))
 }
 
+/// Q04 下钻的最小事实分页（3.7a，spec §4 `facts_page(filters, cursor)` 的
+/// 窗口切片版）：`[start_ms, end_ms)` × host × 可选小时过滤，按
+/// `(event_ts_ms, fact_id)` 稳定排序，cursor 分页（`limit` 行 + 下一页
+/// 起点键）。**排除 legacy_aggregate**——下钻消费的是行级事实，聚合行是
+/// 日轴账单不是会话证据（§4 分离纪律）。行形状 = Q04 需要的最小集：
+/// fact_id/native_session_id（会话聚合键）/model_id/事件时间/四桶——
+/// 「会话 token 合计严格等于峰值」的下钻靠 native_session_id 分组。
+#[derive(Debug, Clone)]
+pub struct FactPageRow {
+    pub fact_id: String,
+    pub native_session_id: String,
+    pub model_id: Option<String>,
+    pub event_ts_ms: i64,
+    pub uncached_input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub output_tokens: i64,
+}
+
+/// cursor = 上一页最后一行的 `(event_ts_ms, fact_id)`（键集分页，无 OFFSET
+/// 漂移）；`None` = 首页。返回 (rows, has_more)。
+pub fn facts_page_window(
+    conn: &Connection,
+    host: &str,
+    start_ms: i64,
+    end_ms: i64,
+    after_ts: Option<i64>,
+    after_fact_id: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<FactPageRow>, bool), AuthorityError> {
+    let mut stmt = conn.prepare(
+        "SELECT fact_id, native_session_id, model_id, event_ts_ms,
+                uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens
+         FROM usage_facts
+         WHERE host = ?1 AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?2 AND event_ts_ms < ?3
+           AND (event_ts_ms, fact_id) > (?4, ?5)
+         ORDER BY event_ts_ms, fact_id
+         LIMIT ?6",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            host,
+            start_ms,
+            end_ms,
+            after_ts.unwrap_or(i64::MIN),
+            after_fact_id.unwrap_or(""),
+            limit as i64 + 1, // 多取一行判 has_more
+        ],
+        |r| {
+            Ok(FactPageRow {
+                fact_id: r.get(0)?,
+                native_session_id: r.get(1)?,
+                model_id: r.get(2)?,
+                event_ts_ms: r.get(3)?,
+                uncached_input_tokens: r.get(4)?,
+                cache_read_tokens: r.get(5)?,
+                cache_write_tokens: r.get(6)?,
+                output_tokens: r.get(7)?,
+            })
+        },
+    )?;
+    let mut rows: Vec<FactPageRow> = rows.collect::<Result<_, _>>()?;
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    Ok((rows, has_more))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,6 +718,39 @@ mod tests {
         let (start, end) = beijing_month_bounds_ms("2026-09").unwrap();
         let by_hour = codex_by_hour_model(db.conn(), start, end).unwrap();
         assert!(by_hour.as_object().unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn facts_page_window_is_stable_and_cursor_paginates_without_drift() {
+        let path = tmp_db("facts-page");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (start, end) = beijing_day_bounds_ms("2026-09-05").unwrap();
+        // 同一毫秒两条事实（键集分页的并列场景）+ 一条 legacy（必须排除）。
+        insert_fact(&db, "b", "dsh", Some("m"), "turn", start + 1_000, 0, 1, 0, 0, 1);
+        insert_fact(&db, "a", "dsh", Some("m"), "turn", start + 1_000, 0, 2, 0, 0, 2);
+        insert_fact(&db, "c", "dsh", Some("m"), "turn", start + 2_000, 0, 3, 0, 0, 3);
+        insert_fact(&db, "lg", "dsh", Some("m"), "legacy_aggregate", start + 1_500, 0, 999, 0, 0, 0);
+        // 首页 limit=2：按 (ts, fact_id) 升序 → a, b；has_more。
+        let (p1, more1) = facts_page_window(db.conn(), "dsh", start, end, None, None, 2).unwrap();
+        assert!(more1);
+        let ids1: Vec<&str> = p1.iter().map(|r| r.fact_id.as_str()).collect();
+        assert_eq!(ids1, vec!["a", "b"], "同毫秒按 fact_id 决胜；legacy 排除");
+        // 用首页尾行做 cursor → c；无更多。
+        let last = p1.last().unwrap();
+        let (p2, more2) = facts_page_window(
+            db.conn(), "dsh", start, end,
+            Some(last.event_ts_ms), Some(&last.fact_id), 2,
+        )
+        .unwrap();
+        assert!(!more2);
+        let ids2: Vec<&str> = p2.iter().map(|r| r.fact_id.as_str()).collect();
+        assert_eq!(ids2, vec!["c"], "cursor 后无漂移无重复");
+        // 窗口外事实不可见（开区间上界）。
+        insert_fact(&db, "d", "dsh", Some("m"), "turn", end, 0, 4, 0, 0, 4);
+        let (p3, _) = facts_page_window(db.conn(), "dsh", start, end, None, None, 10).unwrap();
+        assert_eq!(p3.len(), 3, "event_ts_ms == end 落在窗外");
         let _ = std::fs::remove_file(&path);
     }
 
