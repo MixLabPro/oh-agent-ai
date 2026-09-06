@@ -248,9 +248,12 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   insert_facts` 的 payload_conflict 信号自 Phase 2 落地起是死代码（查询
   旧 index 库的 `facts` 表，恒 no-such-table 被 `.ok()` 吞掉、无测试覆盖）
   ——已改为对 `usage_facts` 四桶列直读比较并补回归测试
-- [ ] **3.7 用户查询验收 Q01–Q14（spec §4.2）端到端 fixture** — 2026-09-07
-  盘点（用户问询触发）：矩阵第 9 行此前一直 ⬜，现有覆盖全是单元/契约级，
-  blocker 集无一以 e2e fixture 落地。逐用例现状：
+- [x] **3.7 用户查询验收 Q01–Q14（spec §4.2）端到端 fixture** — ✅
+  8bef871（3.7a facts_page_window）+ b082a79（3.7b e2e，2026-09-07 主 agent
+  实施）：blocker 集 Q01–Q05、Q11–Q12 + Q14 + §4 分离纪律全部以 e2e fixture
+  钉住（`crates/agent-vitals-runtime/tests/q_acceptance.rs`，走公开 trait
+  面）；Q06–Q10 记 v0.10；Q13 挂 pricing_snapshots 欠账。原盘点表保留如下。
+  逐用例现状（实施前）：
 
   | 用例 | 现有覆盖（层级） | 缺口 |
   |---|---|---|
