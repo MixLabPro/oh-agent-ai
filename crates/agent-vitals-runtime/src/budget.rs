@@ -362,7 +362,7 @@ pub fn reconcile_budget_sources(month: &str) -> Value {
         (Some(a), Some(b)) => ((a - b).abs() < 0.01, None), // 分级定价浮点和，厘差容忍
         (Some(0.0), None) => (
             true,
-            Some("索引无该月事实（无已测 DSH 用量）；state 链为显式零日行——经济相等".to_string()),
+            Some("索引无该月事实（无已测 DSH 用量，或该月会话尚未 ingest——跑 sync-facts 后复查）；state 链为显式零日行——经济相等".to_string()),
         ),
         (Some(_), None) => (false, Some("state 有账而索引无事实——facts 覆盖缺口".to_string())),
         (None, Some(_)) => (false, Some("索引有账而 state 无——fold 覆盖缺口".to_string())),
@@ -564,8 +564,14 @@ mod tests {
         let Some(i) = index else {
             panic!("state 有账（{month}）而索引无账——facts 覆盖缺口：{report}");
         };
-        assert_eq!(s["total"], i["total"], "state 链账 ≠ 索引账：{report}");
-        assert_eq!(s["peak_total"], i["peak_total"], "peak 拆分不一致：{report}");
+        // 容差断言（审查 F2）：两轨独立 float 求和，插入序变化可差
+        // last-ulp——用与 reconcile 相同的厘级容忍，不比位相等。
+        let st = s["total"].as_f64().unwrap_or(0.0);
+        let it = i["total"].as_f64().unwrap_or(0.0);
+        assert!((st - it).abs() < 0.01, "state 链账 ≠ 索引账：{report}");
+        let sp = s["peak_total"].as_f64().unwrap_or(0.0);
+        let ip = i["peak_total"].as_f64().unwrap_or(0.0);
+        assert!((sp - ip).abs() < 0.01, "peak 拆分不一致：{report}");
     }
 
 

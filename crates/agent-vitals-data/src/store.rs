@@ -512,8 +512,12 @@ impl FactsIndex {
 /// by_model 精化，两边差一分钱都是对账事故）。
 ///
 /// 北京日行滚：UTC 小时 ≥16 → 次日（UTC+8 日线，与 hours_by_host 同款）。
-/// 月窗取 UTC [前月末 16:00, 次月 1 日 00:00)——北京月初的凌晨是上月 UTC
-/// 下午，LIKE 前缀过滤会把它们漏掉（hours_by_host 的教训在这里前置规避）。
+/// 月窗 = UTC [前月末 16:00, 本月末 16:00)（审查 F1 收口）。
+///
+/// **前提：本查询只喂 host='dsh'**——DSH 事实的 `event_ts_utc` 恒为 Z 结尾
+/// 定宽（`dsh_usage_fact` 的源保证）；本函数的日行滚与窗口都按 UTC 串直读，
+/// 不解析偏移（`peak_of` 才做偏移归一）。若未来要复用给带偏移的宿主，必须
+/// 先归一偏移，否则日归属会静默错一天。
 pub fn dsh_days_map(&self, month: &str) -> Result<Value, IndexError> {
     // month 是 7 字符 "YYYY-MM"（parse_ymd 是 10 字符日期——别混）。
     if month.len() != 7 || month.as_bytes()[4] != b'-' {
@@ -534,16 +538,18 @@ pub fn dsh_days_map(&self, month: &str) -> Result<Value, IndexError> {
     };
     let first = agent_vitals_domain::usage::days_from_civil(y, m, 1);
     let prev_day = agent_vitals_domain::usage::civil_date_from_days(first - 1);
-    // 次月 1 日（civil round-trip）。
-    let next_first = agent_vitals_domain::usage::civil_date_from_days(
-        agent_vitals_domain::usage::days_from_civil(
-            if m == 12 { y + 1 } else { y },
-            if m == 12 { 1 } else { m + 1 },
-            1,
-        ),
+    let next_first = agent_vitals_domain::usage::days_from_civil(
+        if m == 12 { y + 1 } else { y },
+        if m == 12 { 1 } else { m + 1 },
+        1,
     );
+    // 北京月 M = UTC [M-1 的 T16, M 的月末 T16)。**上界是本月末日 T16**
+    // （= 北京次月 1 日 00:00）——写成次月 1 日 T00 会把北京次月 1 日
+    // 00:00–08:00 的用量划进本月 map（+1 day 行滚），同批事件又在次月
+    // map 里 = 跨月双计（审查 F1；hours_by_host 的单日窗同款边界）。
+    let month_last = agent_vitals_domain::usage::civil_date_from_days(next_first - 1);
     let window_start = format!("{prev_day}T16");
-    let window_end = format!("{next_first}T00");
+    let window_end = format!("{month_last}T16");
 
     // **必须带 model_id 分组**：state 归档日的 by_model 用 provider 前缀
     // 模型名（`deepseek/deepseek-v4-pro-0813` 专属贵卡），facts 的 model_id
@@ -559,7 +565,8 @@ pub fn dsh_days_map(&self, month: &str) -> Result<Value, IndexError> {
                 SUM(t_cache_write), SUM(t_output)
          FROM facts
          WHERE host = 'dsh' AND event_ts_utc >= ?1 AND event_ts_utc < ?2
-         GROUP BY bj_day, model_id, event_peak",
+         GROUP BY bj_day, model_id, event_peak
+         ORDER BY bj_day, model_id, event_peak",
     )?;
     fn day_row(
         r: &rusqlite::Row<'_>,
@@ -926,6 +933,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ver, "2");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn dsh_days_map_month_window_ends_at_month_last_t16() {
+        // 审查 F1：北京月的 UTC 窗终点是本月末日 T16（不是次月 1 日 T00）
+        // ——跨月凌晨用量只归次月，不得双计。
+        let home = tmp_db("monthwin");
+        let facts_root = home.join("facts");
+        std::fs::create_dir_all(&facts_root).unwrap();
+        // 北京 09-01 02:00 = UTC 08-31T18 → 归 09-01，只进 9 月 map。
+        let mut aug31 = fact("dsh", "edge", 100);
+        aug31["event_ts_utc"] = json!("2026-08-31T18:00:00.000Z");
+        std::fs::write(
+            facts_root.join("dsh.jsonl"),
+            format!("{}\n", aug31),
+        )
+        .unwrap();
+        let db = home.join("index.sqlite3");
+        let (idx, _) = FactsIndex::open_or_rebuild(&db, &facts_root).unwrap();
+        let aug = idx.dsh_days_map("2026-08").unwrap();
+        assert!(aug.as_object().map(|m| m.is_empty()).unwrap_or(true),
+                "08-31T18Z = 北京 09-01，不得落进 8 月 map：{aug}");
+        let sep = idx.dsh_days_map("2026-09").unwrap();
+        assert_eq!(sep["2026-09-01"]["uncached_input_tokens"], json!(100),
+                   "跨月凌晨用量归北京日 09-01：{sep}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
