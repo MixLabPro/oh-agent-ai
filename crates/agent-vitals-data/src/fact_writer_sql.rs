@@ -442,19 +442,30 @@ impl<'a> SqlFactWriter<'a> {
                 // 且四桶不同 = 源端更正/漂移——DO NOTHING 会静默保留旧值，
                 // 这里落一条质量行让「静默陈旧」浮出来（Phase 3 的更正流
                 // 消费此信号；§6.2.5「冲突必须产出 issue」）。
-                let stored: Option<String> = self
+                //
+                // 修复（2026-09-07，3.6 agent 范围外发现）：旧实现查询
+                // `SELECT raw FROM facts …`——权威库没有 `facts` 表（那是旧
+                // index 库 store.rs 的 schema，也没有 raw 列），查询恒报
+                // no such table 被 `.ok()` 吞掉 → differs 恒 false，信号
+                // 自落地起从未触发过（且无测试覆盖，死信号静默存活）。
+                // 现改为对 `usage_facts` 四桶列直读比较——与 INSERT 写入的
+                // 正是同一组值，"payload 不同"判定口径不变。
+                let stored_differs: Option<bool> = self
                     .conn
                     .query_row(
-                        "SELECT raw FROM facts WHERE fact_id = ?1",
+                        "SELECT uncached_input_tokens, cache_read_tokens,
+                                cache_write_tokens, output_tokens
+                         FROM usage_facts WHERE fact_id = ?1",
                         rusqlite::params![r.s("fact_id").unwrap_or_default()],
-                        |r| r.get(0),
+                        |row| {
+                            Ok(row.get::<_, i64>(0)? != r.i("uncached_input_tokens")
+                                || row.get::<_, i64>(1)? != r.i("cache_read_tokens")
+                                || row.get::<_, i64>(2)? != r.i("cache_write_tokens")
+                                || row.get::<_, i64>(3)? != r.i("output_tokens"))
+                        },
                     )
                     .ok();
-                let differs = stored
-                    .as_deref()
-                    .map(|s| serde_json::from_str::<Value>(s).map(|old| old != *fact).unwrap_or(true))
-                    .unwrap_or(false);
-                if differs {
+                if stored_differs == Some(true) {
                     self.write_rejected(
                         &format!("payload_conflict:{}", r.s("fact_id").unwrap_or_default()),
                         &["same fact_id, different payload — 源端更正需要显式处理流程"
@@ -567,6 +578,47 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(total, 1, "同 fact 只落一行");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn payload_conflict_signal_fires_on_same_id_different_buckets() {
+        // 2026-09-07 修复回归：信号此前查询不存在的 `facts` 表（旧 index 库
+        // 的 schema），恒 no-such-table 被 `.ok()` 吞掉 → differs 恒 false，
+        // 死信号且无测试覆盖静默存活（3.6 agent 范围外发现）。钉死两个面：
+        // 同值重放 → duplicate 但无质量行；同 fact_id 桶值不同（源端更正/
+        // 漂移）→ 仍 duplicate（DO NOTHING 保旧值）但必须浮出
+        // payload_conflict 质量行。
+        let (db, path) = open_db("payload");
+        let f = mk_fact("e1");
+        let (r1, _) = apply_txn(&db, 1_500, "sess-a", std::slice::from_ref(&f)).unwrap();
+        assert_eq!((r1.inserted, r1.duplicate), (1, 0));
+        // 同值重放：duplicate，无 payload_conflict 行。
+        let (r2, _) = apply_txn(&db, 1_600, "sess-a", std::slice::from_ref(&f)).unwrap();
+        assert_eq!((r2.inserted, r2.duplicate), (0, 1));
+        let conflicts: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM data_quality_issues WHERE scope_key LIKE 'payload_conflict:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(conflicts, 0, "同值重放不是冲突");
+        // 同 fact_id（身份六元组未变）、桶值不同：源端更正/漂移。
+        let mut g = mk_fact("e1");
+        g["output_tokens"] = json!(999);
+        let (r3, _) = apply_txn(&db, 1_700, "sess-a", std::slice::from_ref(&g)).unwrap();
+        assert_eq!((r3.inserted, r3.duplicate), (0, 1), "DO NOTHING 不覆盖旧值");
+        let conflicts: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM data_quality_issues WHERE scope_key LIKE 'payload_conflict:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(conflicts, 1, "四桶不同必须浮出 payload_conflict 信号");
         std::fs::remove_file(&path).ok();
     }
 

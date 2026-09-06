@@ -160,14 +160,22 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   + 真机对账脚本 `examples/reconcile_real.rs`。**pricing_snapshots 未接入**
   ——当前仍读 `domain::cost::load_pricing()`（与 JSON 路径同一张活价表），
   价格快照版本化是独立的 3.4 相邻工作，非阻断项
-- [ ] **3.2 legacy_aggregate 导入** — claude ledger 深历史（轮转丢失的行）
-  按 §6.2.3 导入：`source_kind=legacy_aggregate` + coverage 降级标记，
-  不伪造为行级事实（见 R4 §5.2a 的根因结论：claude 深历史不可从现文件
-  重放，ledger 是 store of record）。🔶 **读路径已就绪**
-  （`authority_query::claude_legacy_days` + `SqlSummaryRepository` 的
-  `merged_claude_days` 已消费）；**写路径未接线**——`legacy_import::
-  import_claude_ledger_days` 函数本体在 Phase 1 就写好且有单测，但没有
-  任何 CLI 命令调用它，真机库里目前没有一条 `legacy_aggregate` 行
+- [x] **3.2 legacy_aggregate 导入** — ✅ 8436b37（2026-09-07，subagent 实施）：
+  接线 `data-migrate`（load_claude_ledger_days → with_immediate_txn →
+  import_claude_ledger_days，错误路径与 JSONL 导入同款 failed+exit 2）；
+  **审查发现的语义修复一并落地**：legacy 同键值变更从「conflict 永不覆盖」
+  改为「UPDATE 新值 + 计 updated」（同源快照刷新——ledger 是全量重建的
+  滚动投影，永不覆盖会让 SQL 永久留旧高估值；§6.2.5 只保护实时行级事实），
+  跨 kind 冲突防御分支保留。真机验证：236 条 legacy_aggregate 入库、重跑
+  全 duplicate 幂等、coverage 降级标记落库。**诚实观察**：本机 ledger 35 天
+  全部同时有实时事实（legacy_only_days=0），legacy 行当前在合并视图不可见
+  ——价值在未来轮转月（实时行物理消失后按日回退）。**新暴露的设计缺口
+  （Phase 4 待决）**：ledger 的 `unaccounted` 残差池（cost-state 基线
+  −行级和，本机 ~3.5B tokens、无日期）在 SQL 权威库没有表示——JSON 链
+  「days+unaccounted」≈6.9B vs SQL merged 3.46B；DTO 两侧都只读 days 所以
+  parity 不破，但 Phase 4 对账/读切换前必须裁决 SQL 是否要给无日期残差
+  一个家（候选：`observation_kind='baseline_residual'` + NULL event_ts，
+  schema 已兼容 undated 保留语义）
 - [ ] **3.3 coverage_status** — 每宿主 measured/partial/unavailable 的
   分母定义落库（spec §4：摘要必须带 coverage/freshness/excluded/
   last_observed_at/data_version）
@@ -181,8 +189,18 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
     `read_calendar_month` / `read_hourly_distribution` / 预算卡
   - [ ] `budget show` / alert 计算
   - [ ] HTML 模板消费面（`codex-cost --html`）
-- [ ] **3.6 导出切 SQL** — `data-export-private` / `data-export-redacted`
-  改从 SQL 查询生成（spec §9）
+- [x] **3.6 导出切 SQL** — ✅ 5a9504d（2026-09-07，subagent 实施）：双路径结构
+  保留（各自 `BEGIN DEFERRED` 一致截面、无共享中间产物），JSONL 读实现整体
+  删除；字段映射表显式入模块文档（`model_id` 列回填 `model_raw`、
+  `event_ts_ms` 反算 emitter 格式 ISO、ingest 元数据键不再出现且已验证不
+  影响 fact_id 哈希基）；redacted round-trip 全文档相等测试钉 restamp 正确
+  性；行序 = fact_id 字典序保证字节确定性。spec §9 核对无矛盾（原文明确
+  二者均从 SQL 生成）。语义变更记录：软删除行不导出（authority 新行为）、
+  「完整面」= 权威库完整面。1129 测试全绿 + CLI 端到端冒烟。
+  **附带收获（范围外发现 → 主 agent 已修）**：`fact_writer_sql::
+  insert_facts` 的 payload_conflict 信号自 Phase 2 落地起是死代码（查询
+  旧 index 库的 `facts` 表，恒 no-such-table 被 `.ok()` 吞掉、无测试覆盖）
+  ——已改为对 `usage_facts` 四桶列直读比较并补回归测试
 - [ ] **3.7 用户查询验收 Q01–Q14（spec §4.2）端到端 fixture** — 2026-09-07
   盘点（用户问询触发）：矩阵第 9 行此前一直 ⬜，现有覆盖全是单元/契约级，
   blocker 集无一以 e2e fixture 落地。逐用例现状：
