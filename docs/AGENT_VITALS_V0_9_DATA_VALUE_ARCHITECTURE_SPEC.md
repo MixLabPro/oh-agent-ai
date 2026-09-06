@@ -321,7 +321,7 @@ agent-vitals billing validate
 峰谷拆分、by_source、预算/告警的 rotate/snooze 语义），这些维度 facts/
 索引当前都没有；而索引按 §3.4 是可删除投影，把状态语义搬进去就变成第二
 权威。退休按四步走：① ✅ sync_service（2026-09-06 落地 `runtime::sync_service` +
-`sync-facts` CLI；托盘 tick 接线待做——做完才算「常态」）；② ✅ facts
+`sync-facts` CLI，托盘 tick 已接线——facts 平面常态化）；② ✅ facts
 schema v2 补 peak 标志 + source 维度（同日，纯索引侧派生零 emitter 改动）；
 ③ 预算/告警搬到索引之上的 Runtime 服务（未动）；④ state JSON 退役（未动，
 兼容读留一个版本周期）。在那之前 JSON 状态链与

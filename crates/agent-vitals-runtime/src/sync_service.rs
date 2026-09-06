@@ -17,8 +17,9 @@
 //! 命令「不许 CLI 编造身份」的纪律，而 sync service 的调用者身份就是机器
 //! 本身（machine.json 持久化 UUID，重装明示新 profile，不静默重排历史）。
 //!
-//! **不在此处的**：调度（何时跑——托盘 tick / 外部 cron 的事）、watcher
-//! （§7.1 门槛未触发）、SQLite 投影更新（`ingest_facts` 内已同步索引）。
+//! **调用方**：托盘 tick（desktop `run_facts_sync`，claude-sync 成功后叠跑）
+//! 与 CLI `sync-facts`。**不在此处的**：watcher（§7.1 门槛未触发）、SQLite
+//! 投影更新（`ingest_facts` 内已同步索引）。
 
 use std::path::{Path, PathBuf};
 

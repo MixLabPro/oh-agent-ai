@@ -896,6 +896,28 @@ fn run_claude_sync(bin: &std::path::Path) -> Option<String> {
     }
 }
 
+/// Facts 例行 ingest（tick 顺序：DSH discover/oneline → claude-sync →
+/// `sync-facts` → 宿主区刷新）——退休路径第 ① 步的「常态化」半步：托盘
+/// tick 是 facts 平面的生产驱动源。best-effort 同 claude-sync：失败留痕不
+/// abort（facts 是新增平面，state 链照常刷新）。幂等双保险：checkpoint
+/// 指纹跳过未变文件 + fact_id exactly-once（重跑零变化）。
+fn run_facts_sync(bin: &std::path::Path) -> Option<String> {
+    let home = overview::data_home();
+    let out = std::process::Command::new(bin)
+        .arg("sync-facts")
+        .env("AGENT_VITALS_HOME", &home)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => None,
+        Ok(o) => Some(format!(
+            "sync-facts 失败（{}）：{}",
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Some(format!("sync-facts spawn 失败：{e}")),
+    }
+}
+
 /// fold 完成事件名。与工作台 `src-tauri/ui/workbench.js` 顶部的
 /// `listen("usage-fold-updated", …)` 一一对应——改名/改负载字段必须两处同步改
 /// （workbench.js 的事件桥注释里反向引用了这个名字与负载）。
@@ -1047,6 +1069,10 @@ fn sync_tick(app: &AppHandle) {
         if let Some(bin) = resolve_binary() {
             if let Some(err) = run_claude_sync(&bin) {
                 status = SyncStatus::fail("claude-sync", err);
+            } else if let Some(err) = run_facts_sync(&bin) {
+                // claude-sync 成功才叠跑 facts（同一「state 根/二进制问题
+                // 不叠跑」逻辑）；失败留痕不 abort（facts 是新增平面）。
+                status = SyncStatus::fail("sync-facts", err);
             }
         }
     }
