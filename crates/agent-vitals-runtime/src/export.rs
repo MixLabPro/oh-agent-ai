@@ -27,7 +27,11 @@
 //! `identity_basis` 缺失**不影响 fact_id 正确性**：`usage_fact::fact_id` 的哈
 //! 希基是六元组身份字段（machine_namespace / host / source_profile /
 //! native_session_id / source_event_id / observation_kind），`identity_basis`
-//! 只是随文档存储的声明，builder 缺省补 `"native"`（round-trip 测试钉住）。
+//! 只是随文档存储的声明。**导出时显式剥掉这个键**（[`strip_unrecoverable_keys`]，
+//! 2026-09-07 审查 F1）：builder 会缺省补 `"native"`，而真机语料里 codex 事实
+//! 恒为 `derived-hash`（token_count 无原生 id）、claude/DSH 的 fallback 行也是
+//! ——导出虚构的 `native` 等于把 §2.1「hash fallback 必须显式标注」的要求静默
+//! 翻转，比缺键严重。剥键后回灌仍幂等（重放时 builder 重新补缺省，不在哈希基）。
 //!
 //! ## 列 → JSON 键映射表（全仓唯一一份）
 //!
@@ -42,7 +46,7 @@
 //! | `source_profile` | `source_profile` | redacted 非空伪名化；NULL/空 → Err（契约必填身份，契约门写入路径不可能落这种行） |
 //! | `model_id` | `model_raw` | 三个 emitter 只填 `model_raw`，writer 折叠进 `model_id` 列（`fact_writer_sql.rs` 的 `model_id().or_else(model_raw())`）——反向不可分辨，按 emitter 原键名回填 |
 //! | `provider_id` | `provider_id` | writer 同样折叠了 `billing_source`，反向不可分辨，按列名回填；NULL 不出键 |
-//! | `event_ts_ms` | `event_ts_utc` | 反算 `YYYY-MM-DDTHH:MM:SS.mmmZ`（emitter 原格式，[`event_ts_utc_from_ms`]）；NULL 不出键 |
+//! | `event_ts_ms` | `event_ts_utc` | 反算 `YYYY-MM-DDTHH:MM:SS.mmmZ`（[`event_ts_utc_from_ms`]）；NULL 不出键。**保真度说明**（2026-09-07 审查 F2）：亚秒精度在 ingest 时已被 writer 的 `iso_to_ms` 截断（毫秒列只存整秒倍数），此格式仅与 DSH 的 `rfc3339_ms_z` 逐字节同形——codex 的 `.404Z` 导出为 `.000Z`、claude 的无毫秒格式补 `.000`；峰谷/归日/月窗不受影响，回灌得同毫秒，但与 JSONL 时代导出件 diff 时每行 ts 都会不同 |
 //! | 四个 token 列 | 四个 token 键 | `uncached_input_tokens` / `cache_read_tokens` / `cache_write_tokens` / `output_tokens` 原样 |
 //! | `event_peak` | （不出键） | `store::peak_of(event_ts_utc)` 纯函数可复算——导出不另存派生值 |
 //! | `session_key` / `source_id` / `ingested_run_id` / `created_at_ms` / `updated_at_ms` / `deleted_at_ms` | （不出键） | SQL 侧 provenance/簿记列，不属于 UsageFact 词表 |
@@ -259,18 +263,40 @@ pub fn export_private(data_home: &Path, out_dir: &Path) -> Result<usize, String>
         }
         let mut lines = Vec::with_capacity(fields.len());
         for f in &fields {
-            let doc = build_usage_fact(f).map_err(|p| {
+            let mut doc = build_usage_fact(f).map_err(|p| {
                 format!("authority row (host {host}): {p:?} — 库内存在契约不可重建的行，先查 data_quality_issues")
             })?;
+            strip_unrecoverable_keys(&mut doc);
             lines.push(doc.to_string());
         }
         let dst = out_dir.join(format!("{host}.jsonl"));
         write_lines(&dst, &lines)?;
         files += 1;
     }
+    if files == 0 {
+        // 空库导出 = 零字节文件 + exit 0，操作者极易当成成功备份（3.6 审查
+        // F3：迁移期一台没跑过 sync/migrate 的机器上恰好会踩）。不报错——
+        // 空库导空件语义上没错——但必须喊一声。
+        eprintln!(
+            "warning: authority DB holds 0 facts for all hosts — export is empty; \
+             run 'sync-facts' / 'data-migrate' first if this is unexpected"
+        );
+    }
     tx.commit()
         .map_err(|e| format!("authority snapshot commit: {e}"))?;
     Ok(files)
+}
+
+/// 导出前剥掉「SQL 不携带、契约层却会补出非空缺省值」的键。目前只有
+/// `identity_basis`：builder 缺省填 `"native"`，而真机语料里 codex 事实恒为
+/// `derived-hash`（token_count 无原生 id）、claude/DSH 的 fallback 行也是
+/// ——导出一份虚构的 `native` 比不出这个键严重得多（§2.1 要求 hash fallback
+/// 必须显式标注，导出路径不得静默翻转）。剥掉后回灌仍幂等：重放路径
+/// `build_usage_fact` 会重新补缺省，`identity_basis` 不在 fact_id 哈希基里。
+fn strip_unrecoverable_keys(doc: &mut Value) {
+    if let Some(obj) = doc.as_object_mut() {
+        obj.remove("identity_basis");
+    }
 }
 
 /// 脱敏导出：同一 SQL 读法（但各自开自己的事务截面）→ 重导身份（namespace/
@@ -295,9 +321,10 @@ pub fn export_redacted(data_home: &Path, out_dir: &Path) -> Result<(usize, usize
         let mut lines = Vec::with_capacity(fields.len());
         for mut f in fields {
             pseudonymize_identity(&mut f);
-            let doc = build_usage_fact(&f).map_err(|p| {
+            let mut doc = build_usage_fact(&f).map_err(|p| {
                 format!("authority row (host {host}): {p:?} — 脱敏重建失败，先查 data_quality_issues")
             })?;
+            strip_unrecoverable_keys(&mut doc);
             lines.push(doc.to_string());
         }
         let dst = out_dir.join(format!("{host}.jsonl"));
@@ -404,9 +431,14 @@ mod tests {
         assert_eq!(doc["output_tokens"], json!(5));
         // 身份未动 → 契约层复算的 fact_id 与库内值相等（回灌幂等的前提）。
         assert_eq!(doc["fact_id"], fact["fact_id"]);
-        // SQL 不存 identity_basis → builder 缺省；缺省值不影响 fact_id（哈希基
-        // 是六元组身份，见模块头）。
-        assert_eq!(doc["identity_basis"], json!("native"));
+        // SQL 不存 identity_basis → 剥键而非导出 builder 的 "native" 缺省
+        // （真机 codex 事实恒为 derived-hash，虚构 native 是把必须显式的
+        // hash-fallback 声明静默翻转——3.6 审查 F1）。缺省值不影响 fact_id
+        // （哈希基是六元组身份，见模块头）。
+        assert!(
+            doc.get("identity_basis").is_none(),
+            "identity_basis 必须剥掉，不得导出虚构的 native 缺省"
+        );
         assert_eq!(doc["schema_version"], json!(1));
         // 「不存在的键不要伪造」+ 契约层补 null：SQL 侧没有的词表键 = null。
         assert_eq!(doc["turn"], Value::Null);
@@ -590,7 +622,12 @@ mod tests {
         manual.insert("cache_read_tokens".into(), json!(50));
         manual.insert("cache_write_tokens".into(), json!(10));
         manual.insert("output_tokens".into(), json!(5));
-        let expected = build_usage_fact(&manual).unwrap();
+        let mut expected = build_usage_fact(&manual).unwrap();
+        // 导出侧剥 identity_basis（见 strip_unrecoverable_keys）——期望产物
+        // 同步剥掉，全文档相等才对得上。
+        if let Some(obj) = expected.as_object_mut() {
+            obj.remove("identity_basis");
+        }
 
         assert_eq!(
             doc, expected,

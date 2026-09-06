@@ -205,12 +205,30 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   warning_ratio_bp，snoozed（until_ms > now）输出标记不告警；输出带
   coverage/freshness（复用 3.3）。④ 替代路径——alert.json/budget.json
   读取面在 3.5 Tier B 切完后停写（Phase 4 删）
-- [ ] **3.5 读路径切换清单**（逐个消费点切 + 双轨验证）：
-  - [ ] `runtime::summary::JsonSummaryRepository` → `SqlSummaryRepository`
-  - [ ] `data coverage` / `data daily` CLI
-  - [ ] Tauri：`data_monthly_summary` / `data_daily_summary` /
-    `read_calendar_month` / `read_hourly_distribution` / 预算卡
-  - [ ] `budget show` / alert 计算
+- [x] **3.5 Tier A** — ✅ e56abc8（2026-09-07，subagent 实施并与 3.2 收口批
+  同提交）：三处 trait 消费点切 `SqlSummaryRepository`（CLI `Cmd::Data`
+  分发、Tauri `data_monthly_summary`/`data_daily_summary`）；
+  `DataReconcile` 刻意保持 Json（对账基准）；受影响 python e2e 种子改走
+  facts JSONL + `data-migrate`（断言零改动，9/9 绿）。真机验证全绿：
+  total_actual_spend 逐位一致、2026-08 dsh metered 1752.4498 逐位一致、
+  contract_violations 双侧全空、Tauri 93 测试全绿。
+  **重要纠偏（部署层，2026-09-07 01:11 主 agent 处置）**：3.5 agent 报告的
+  「当月 claude tokens JSON 6.96B vs SQL 3.46B = unaccounted 池」归因有误
+  ——实测 `claude-fold.json` schema_version 回落为 2、ledger days 充气到
+  7.01B：**去重修复的部署缺口**。修复后二进制只存在于 target/release，
+  `/Applications/agent-vitals.app/Contents/Resources/bin/agent-vitals`
+  （9-6 15:26 旧构建）与 `~/.local/bin/agent-vitals`（9-1）每次托盘 tick
+  都用 v2 算法清 fold 重折充气，与新二进制乒乓。已把当前构建装进两处 +
+  重跑 claude-sync 恢复（days 3.52B、fold v3、duplicate 39,056）。教训
+  入 CLAUDE.md 级纪律：**改 fold/ledger 语义的提交必须同步重装全部部署
+  点（App bundle 内置 CLI + PATH 上的拷贝），否则新旧二进制对同一状态
+  文件写出版本乒乓**。unaccounted 残差池（~3.5B）仍是独立的 Phase 4 待决
+  项，与本次 50% 无关
+- [ ] **3.5 Tier B**（逐个消费点切 + 双轨验证）：
+  - [x] `runtime::summary::JsonSummaryRepository` → `SqlSummaryRepository`（Tier A 已切三个 trait 消费点）
+  - [x] `data coverage` / `data daily` CLI（Tier A）
+  - [ ] Tauri：`read_calendar_month` / `read_hourly_distribution` / 预算卡（calendar/hourly 不走 trait，需 authority_query 补小时轴；预算卡依赖 3.4）
+  - [ ] `budget show` / alert 计算（依赖 3.4）
   - [ ] HTML 模板消费面（`codex-cost --html`）
 - [x] **3.6 导出切 SQL** — ✅ 5a9504d（2026-09-07，subagent 实施）：双路径结构
   保留（各自 `BEGIN DEFERRED` 一致截面、无共享中间产物），JSONL 读实现整体
