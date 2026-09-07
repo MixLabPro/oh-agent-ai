@@ -188,6 +188,7 @@ fn today_title(ov: &Overview) -> String {
         ov.today.as_ref().and_then(|t| t["total"].as_f64()),
         claude_currency(&ov.claude_today, "CNY"),
         claude_currency(&ov.claude_today, "USD"),
+        fx_rate(ov),
     );
     match money {
         Some(m) => format!("今日 {} · {}", fmt_tokens(today_merged_tokens(ov)), m),
@@ -243,18 +244,37 @@ fn claude_currency(claude: &Option<Value>, key: &str) -> f64 {
 /// 后估占主导就写 `≈¥37.17`，`≈` 即诚实标注；纯 DSH 段（claude 无 CNY 价流）保持
 /// 实测精度、不带 ≈，一笔实测 ¥ 不被标成估。
 ///
-/// anthropic USD 流按 spec §3.1 视作套餐、**不进 ¥ 主账**（混币不能相加）；只有整
-/// 行完全没有 ¥ 侧（DSH 也没折到账、claude 无 CNY 价流）时才单独浮出 `≈$B`——
-/// measured 的东西不消失（v1.2 后缀那条纪律的继承：纯 anthropic 日至少还有一行
-/// 可读的钱）。两币皆无 → None：调用方渲染 —，不摆 `¥0`（缺列报缺）。
-fn metered_amount(dsh_cny: Option<f64>, claude_cny: f64, claude_usd: f64) -> Option<String> {
-    match (dsh_cny, claude_cny > 0.0) {
-        (Some(d), true) => Some(format!("≈{}", fmt_money(d + claude_cny))),
-        (Some(d), false) => Some(fmt_money(d)),
-        (None, true) => Some(format!("≈{}", fmt_money(claude_cny))),
-        (None, false) if claude_usd > 0.0 => Some(format!("≈{}", fmt_usd(claude_usd))),
-        _ => None,
+/// anthropic USD 流：**有汇率估算时按 `usd_cny_rate` 折进 ¥ 主账**（整段带 `≈`，
+/// hover 里前端把 `¥X` 展开回 `$A 折 + ¥B`）——这是 PM 决策 2026-09-07 的速览层
+/// 便利，`fx_estimate` 是估算不是口径，预算/导出/对账仍分币。**无汇率**（价表无
+/// `fx_estimate` 节）时退回旧行为：USD 不进 ¥ 主账（混币不能相加），只在整行完全
+/// 没有 ¥ 侧时单独浮出 `≈$B`（measured 不消失）。两币皆无 → None：调用方渲染
+/// —，不摆 `¥0`（缺列报缺）。
+fn metered_amount(
+    dsh_cny: Option<f64>,
+    claude_cny: f64,
+    claude_usd: f64,
+    usd_cny_rate: Option<f64>,
+) -> Option<String> {
+    // USD 折算分量：仅当有汇率且确有 USD 流。无汇率 → None，USD 走旧的
+    // 「只在没有任何 ¥ 侧时单独浮出」路径。
+    let usd_as_cny = usd_cny_rate.filter(|_| claude_usd > 0.0).map(|r| claude_usd * r);
+    // 估算 ¥ 分量 = claude 的 CNY 估 + USD 折算。任一非零 → 整段带 `≈`。
+    let cny_est = claude_cny + usd_as_cny.unwrap_or(0.0);
+    let has_est = cny_est > 0.0;
+    match dsh_cny {
+        Some(d) if has_est => Some(format!("≈{}", fmt_money(d + cny_est))),
+        Some(d) => Some(fmt_money(d)), // 纯 DSH 实测（无估算分量；无汇率时 USD 在此被丢弃——旧纪律）
+        None if has_est => Some(format!("≈{}", fmt_money(cny_est))),
+        None if claude_usd > 0.0 => Some(format!("≈{}", fmt_usd(claude_usd))),
+        None => None,
     }
+}
+
+/// 速览层混币折算汇率（`Overview.fx.usd_cny`）——None = 价表无 `fx_estimate` 节，
+/// 折算不发生、退回分币旧行为。
+fn fx_rate(ov: &Overview) -> Option<f64> {
+    ov.fx.as_ref().and_then(|f| f.get("usd_cny")).and_then(serde_json::Value::as_f64)
 }
 
 /// 今日合并 token（v1.3）：DSH 当日实测 + Claude Code 当日 ledger（core
@@ -564,6 +584,7 @@ fn money_rows_text(ov: &Overview) -> (String, String) {
         ov.today.as_ref().and_then(|t| t["total"].as_f64()),
         claude_currency(&ov.claude_today, "CNY"),
         claude_currency(&ov.claude_today, "USD"),
+        fx_rate(ov),
     );
     let today_text = match today_money {
         Some(m) => format!(
@@ -592,6 +613,7 @@ fn money_rows_text(ov: &Overview) -> (String, String) {
         if month_has_days { Some(month_total) } else { None },
         claude_currency(&ov.claude_month, "CNY"),
         claude_currency(&ov.claude_month, "USD"),
+        fx_rate(ov),
     );
     // month_money 只在两宿主当月都没有任何按量钱时是 None → ¥0（当月还没花，
     // 「月初 ¥0」是现状不是编造；预算行挂了过期标记兜底）。
@@ -1590,6 +1612,9 @@ mod tests {
             claude_today_tokens: None,
             claude_uncovered_month: None,
             month_savings: None,
+            // 镜像 read_overview 在真机上的产物（pricing.json 有 fx_estimate 节）：
+            // 速览层混币折算按此汇率。`fx: None` 的降级路径由专门用例钉。
+            fx: Some(serde_json::json!({"usd_cny": 7.15, "as_of": "2026-09"})),
         }
     }
 
@@ -1612,11 +1637,15 @@ mod tests {
         mix.claude_today = Some(serde_json::json!({"currency_totals": {"CNY": 6.0, "USD": 0.0}}));
         mix.claude_today_tokens = Some(100_000);
         assert_eq!(today_title(&mix), "今日 1.5M · ≈¥18.34");
-        // 纯 anthropic USD 日、DSH 缺场 → USD 浮出（measured 不消失）。
+        // 纯 anthropic USD 日、DSH 缺场：有 fx_estimate（ov_with 默认 7.15）→ 折进
+        // ¥ 主账，速览层给一个统一「≈¥」数（原始分币在 DTO 里供 hover）。
         let mut usd = ov_with(overview::BudgetAlert::default());
         usd.claude_today = Some(serde_json::json!({"currency_totals": {"CNY": 0.0, "USD": 3.0}}));
         usd.claude_today_tokens = Some(500_000);
-        assert_eq!(today_title(&usd), "今日 500K · ≈$3");
+        assert_eq!(today_title(&usd), "今日 500K · ≈¥21.45", "3 USD × 7.15 折算");
+        // 无 fx_estimate（价表旧版 / 缺节）→ 退回分币旧行为：USD 单独浮出，不折算。
+        usd.fx = None;
+        assert_eq!(today_title(&usd), "今日 500K · ≈$3", "无汇率不折算，USD 原样");
     }
 
     #[test]
@@ -1726,30 +1755,45 @@ mod tests {
 
     /// 合并按量总账金额主段（v1.3，spec §3.1/§4）真值表。核心语义：
     /// · CNY = DSH 实测 + Claude catalog 估 相加，任何估分量并入 → 整段 `≈`；
-    /// · 纯 DSH 段（claude 无 CNY 价流）实测精度、不带 ≈——同一笔实测 ¥ 不标成估；
-    /// · anthropic USD 不进 ¥ 主账（套餐，§3.1），只在整行没有 ¥ 侧时单独浮出 ≈$；
+    /// · 纯 DSH 段（claude 无价流）实测精度、不带 ≈——同一笔实测 ¥ 不标成估；
+    /// · anthropic USD：**有 fx_estimate 汇率 → 按率折进 ¥ 主账（带 ≈，hover 展开
+    ///   原始分币）**（PM 决策 2026-09-07 速览层便利，非口径）；**无汇率 → 退回
+    ///   旧行为**（USD 不进 ¥ 主账，只在整行没有 ¥ 侧时单独浮出 ≈$）；
     /// · 两币皆无 → None（调用方渲染 —，不摆 ¥0）。
     #[test]
     fn metered_amount_truth_table() {
-        // 纯 DSH 实测：claude 无 CNY 价流 → 不带 ≈（实测不标成估）；含测到 0。
-        assert_eq!(metered_amount(Some(12.34), 0.0, 0.0), Some("¥12.34".to_string()));
-        assert_eq!(metered_amount(Some(0.0), 0.0, 0.0), Some("¥0".to_string()));
-        // DSH 缺场 + claude CNY 估 → 估占主导，≈¥X（v1.2 是 ¥0 + 追加列——用户
-        // 读成「真没花钱」的元凶，见 money_rows_text doc）。
-        assert_eq!(metered_amount(None, 37.17, 0.0), Some("≈¥37.17".to_string()));
+        let r = Some(7.15); // fx_estimate.USD_CNY
+        // 纯 DSH 实测：claude 无价流 → 不带 ≈（实测不标成估）；含测到 0。
+        assert_eq!(metered_amount(Some(12.34), 0.0, 0.0, r), Some("¥12.34".to_string()));
+        assert_eq!(metered_amount(Some(0.0), 0.0, 0.0, r), Some("¥0".to_string()));
+        // DSH 缺场 + claude CNY 估 → 估占主导，≈¥X。
+        assert_eq!(metered_amount(None, 37.17, 0.0, r), Some("≈¥37.17".to_string()));
         // 混合：DSH 实测 ¥12.34 + claude 估 ¥6 → 相加 + ≈（含估分量）。
-        assert_eq!(metered_amount(Some(12.34), 6.0, 0.0), Some("≈¥18.34".to_string()));
-        assert_eq!(metered_amount(Some(0.0), 6.0, 0.0), Some("≈¥6".to_string()));
-        // 纯 anthropic USD 日、DSH 缺场 → ≈$（measured 不消失）；CNY 侧一旦有
-        // 内容（哪怕是 DSH 测到的 ¥0），USD 套餐流就不进主段。
-        assert_eq!(metered_amount(None, 0.0, 3.0), Some("≈$3".to_string()));
-        assert_eq!(metered_amount(Some(0.0), 0.0, 3.0), Some("¥0".to_string()));
-        assert_eq!(metered_amount(Some(12.34), 0.0, 3.0), Some("¥12.34".to_string()));
-        // 两币皆无（DSH 缺场 + claude 无价流 / 无账）→ None，不摆 ¥0。
-        assert_eq!(metered_amount(None, 0.0, 0.0), None);
-        // 数字走 fmt_money/fmt_usd 同款修剪（大额/小额）。
-        assert_eq!(metered_amount(None, 200.0, 0.0), Some("≈¥200".to_string()));
-        assert_eq!(metered_amount(None, 0.0, 0.52), Some("≈$0.52".to_string()));
+        assert_eq!(metered_amount(Some(12.34), 6.0, 0.0, r), Some("≈¥18.34".to_string()));
+        assert_eq!(metered_amount(Some(0.0), 6.0, 0.0, r), Some("≈¥6".to_string()));
+
+        // ── USD 折算（PM 决策 2026-09-07：速览层有汇率 → 折进 ¥ 主账，带 ≈）──
+        // 纯 anthropic USD 日、DSH 缺场：3 × 7.15 = 21.45 折进主账。
+        assert_eq!(metered_amount(None, 0.0, 3.0, r), Some("≈¥21.45".to_string()));
+        // CNY 侧有内容（DSH 测到 ¥0）+ USD → 不再丢 USD：¥0 + 21.45。
+        assert_eq!(metered_amount(Some(0.0), 0.0, 3.0, r), Some("≈¥21.45".to_string()));
+        // DSH 实测 + claude USD → 全部折成一个 ≈¥（12.34 + 21.45 = 33.79）。
+        assert_eq!(metered_amount(Some(12.34), 0.0, 3.0, r), Some("≈¥33.79".to_string()));
+        // 三分量齐：DSH 实 + claude CNY 估 + claude USD 折。
+        assert_eq!(metered_amount(Some(12.34), 6.0, 3.0, r), Some("≈¥39.79".to_string()));
+
+        // ── 无汇率（价表无 fx_estimate 节）→ 退回分币旧行为 ──
+        // USD 只在没有任何 ¥ 侧时单独浮出；有 ¥ 侧则 USD 被丢弃（混币不能相加）。
+        assert_eq!(metered_amount(None, 0.0, 3.0, None), Some("≈$3".to_string()));
+        assert_eq!(metered_amount(Some(0.0), 0.0, 3.0, None), Some("¥0".to_string()));
+        assert_eq!(metered_amount(Some(12.34), 0.0, 3.0, None), Some("¥12.34".to_string()));
+
+        // 两币皆无 → None，不摆 ¥0。
+        assert_eq!(metered_amount(None, 0.0, 0.0, r), None);
+        assert_eq!(metered_amount(None, 0.0, 0.0, None), None);
+        // 数字走 fmt_money/fmt_usd 同款修剪。
+        assert_eq!(metered_amount(None, 200.0, 0.0, r), Some("≈¥200".to_string()));
+        assert_eq!(metered_amount(None, 0.0, 0.52, None), Some("≈$0.52".to_string()));
     }
 
     /// claude_currency 读报告的 currency_totals 单侧金额：缺场/该币键缺场/值非数

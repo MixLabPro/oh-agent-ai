@@ -371,6 +371,10 @@ pub struct Overview {
     /// bug——这是"当前能表达的节约来源只有缓存"这一事实的忠实反映。月无 by_model
     /// → None。
     pub month_savings: Option<Value>,
+    /// 展示层货币折算估算（`assets/pricing.json::fx_estimate` → `{usd_cny, as_of}`）
+    /// 或 None。**只给速览层**把混币金额并成一个 `≈` 数——预算/导出/对账永远
+    /// 分币。前端 hover 据此把 `≈¥X` 展开成原始分币。
+    pub fx: Option<Value>,
 }
 
 /// 数据根（镜像 `paths.py::data_home` / `snapshot.rs::data_home_from` 的优先序）：
@@ -468,6 +472,19 @@ fn monthly_budget_cny(data_home: &Path) -> f64 {
         }
     }
     600.0
+}
+
+/// 展示层货币折算估算（`assets/pricing.json::fx_estimate`）→ `{usd_cny, as_of}`
+/// 或 None（价表无此节 / 值非数）。**只给速览层**把混币金额并成一个 `≈` 数给
+/// 用户一个感觉——预算 ratio / 实际支出 / 导出 / 对账永远分币不相加。前端
+/// hover 用它把 `≈¥X` 展开成「$A 折 + ¥B 实」。
+fn fx_estimate(pricing: &Value) -> Option<Value> {
+    let fx = pricing.get("fx_estimate")?;
+    let usd_cny = fx.get("USD_CNY").and_then(Value::as_f64).filter(|r| *r > 0.0)?;
+    Some(json!({
+        "usd_cny": usd_cny,
+        "as_of": fx.get("as_of").and_then(Value::as_str),
+    }))
 }
 
 /// 读 alert.json 的预算权威字段（`budget.evaluate()` 落盘）。**只读字段，不重算
@@ -633,6 +650,7 @@ fn read_overview_at(dh: &Path) -> Overview {
         claude_today_tokens,
         claude_uncovered_month,
         month_savings,
+        fx: fx_estimate(&pricing),
     }
 }
 
@@ -1178,7 +1196,25 @@ mod tests {
         assert!(ov.claude_today.is_none());
         assert!(ov.claude_month.is_none());
         assert!(ov.claude_today_tokens.is_none());
+        // fx 来自 pricing.json（内嵌，与 state 无关）——空 state 也有。
+        assert_eq!(
+            ov.fx.as_ref().and_then(|f| f.get("usd_cny")).and_then(Value::as_f64),
+            Some(7.15),
+        );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `fx_estimate` 提取：pricing.json 有 `fx_estimate` 节 → `{usd_cny, as_of}`；
+    /// 缺节 / 值非正 → None（展示层据此退回分币旧行为，不折算）。
+    #[test]
+    fn fx_estimate_reads_rate_or_degrades() {
+        let p = load_pricing();
+        let fx = fx_estimate(&p).expect("pricing.json 有 fx_estimate 节");
+        assert_eq!(fx["usd_cny"].as_f64(), Some(7.15));
+        assert_eq!(fx["as_of"].as_str(), Some("2026-09"));
+        assert!(fx_estimate(&json!({})).is_none(), "无节 → None");
+        assert!(fx_estimate(&json!({"fx_estimate": {"USD_CNY": 0}})).is_none(), "非正汇率 → None");
+        assert!(fx_estimate(&json!({"fx_estimate": {"as_of": "x"}})).is_none(), "缺 USD_CNY → None");
     }
 
     /// claude_estimates 纯函数：flat 直图日（rebuild_days 真机形状，含全零的

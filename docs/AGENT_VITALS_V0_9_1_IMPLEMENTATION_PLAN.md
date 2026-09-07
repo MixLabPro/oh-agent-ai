@@ -287,6 +287,24 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   - **验收指标**：告警「有效触发率」（触发后 24h 内确实降调用/换模型）≥40%；
     「告警后无动作」率 ≤30%；跨币遗漏投诉 = 0；托盘逐日分子之和 ≡ 月度
     metered 分子（±未计时样本，`token_by_date_model` 已有纪律）。
+
+  #### 货币折算（PM 决策 2026-09-07，续）
+
+  速览层可以把混币金额并成一个 `≈¥` 数（PM熊叔评审）——**是估算标签不是口径**：
+
+  - 汇率是**版本化数据**：`assets/pricing.json::fx_estimate {USD_CNY, as_of}`
+    （+ dsh-client 运行时副本，`test_pricing_lockstep` 字节比对）。随 release 更新，
+    不硬编码常数（6.7 已过时，2026 spot ≈7.1–7.2，本仓库取 7.15）。
+  - **只进速览层**：托盘标题 / 菜单「今日·本月按量成本」行。带 `≈` 前缀，
+    hover / 详情 / DTO 里永远保留原始分币。**不进**预算 ratio / 实际支出 / 导出 /
+    对账 / `budget-sql` —— 那些永远分币不相加。
+  - **已落地**（下一提交 `?`）：`overview::fx_estimate()` 提取 + `Overview.fx`
+    字段（`{usd_cny, as_of}`）；`lib.rs::metered_amount` 加 `usd_cny_rate` 形参——
+    有汇率 → anthropic USD 按率折进 ¥ 主账（此前混币时 USD 被整个丢弃，
+    「只是 DSH」缺陷的一个面）；无 `fx_estimate` 节 → 退回分币旧行为。
+  - **待做**：前端 hover 把 `≈¥X` 展开成「$A 折 + ¥B 实」（消费 `Overview.fx` +
+    `claude_today/claude_month` 已有的 currency_totals）；`as_of` 过期时展示层弱化；
+    「主币」改成用户设置（当前默认 CNY，语言≠货币基准）。
 - [x] **3.6 导出切 SQL** — ✅ 5a9504d（2026-09-07，subagent 实施）：双路径结构
   保留（各自 `BEGIN DEFERRED` 一致截面、无共享中间产物），JSONL 读实现整体
   删除；字段映射表显式入模块文档（`model_id` 列回填 `model_raw`、

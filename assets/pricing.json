@@ -30,6 +30,11 @@
     }
   },
   "cache_write_per_million": 0,
+  "fx_estimate": {
+    "_doc": "展示层货币折算估算(basis=user-set)。**仅供速览层**把混币金额并成一个「≈」数给用户一个感觉——绝不进预算 ratio / 实际支出 / 导出 / 对账,那些永远分币不相加(ATTRIBUTABLE_WASTE §6.7 分币纪律)。实际结算汇率取决于用户的支付方式(卡 FX 手续费/中转/促销),与此值可差 3~8%;凡用到此值的展示必须带 `≈` 前缀且 hover 可见原始分币。随 release 更新,as_of 过期时展示层应弱化或提示。",
+    "USD_CNY": 7.15,
+    "as_of": "2026-09"
+  },
   "catalog_2026_09": {
     "_doc": "四族价目表(Claude Code 语料计价用,2026-09-02 采集)。basis=catalog-provider——原厂/官方文档价,不是用户账单;与 providers 的用途不同:providers 是 DSH 运行时计价,本节是跨宿主语料计价。单位:每百万 token,currency 按提供商。平峰同价的模型不设 peak/off_peak。注意:Sonnet 5 于 2026-09-01 起从促销价 $2/$10 涨到 $3/$15;MiniMax M3 整请求按输入长度分档(cliff 非梯度);Kimi 缓存写入价(¥25/M)仅见转售页,官方未确认。DeepSeek 两模型已在 providers 段(2026-08-30 核实,与官方 USD 换算一致),不重复。",
     "providers": {
