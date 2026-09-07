@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use agent_vitals_data::projection::{
-    BillingBasis, CoverageStatus, DailySummary, Freshness, FreshnessState, HostAmount, MonthlySummary,
+    BillingBasis, CoverageStatus, DailySummary, Freshness, FreshnessState, HostAmount,
+    MonthlySummary,
 };
 use agent_vitals_data::repository::{DailySummaryQuery, MonthlySummaryQuery, SummaryRepository};
 use serde_json::json;
@@ -81,7 +82,10 @@ impl PricingCards {
             return Self::current();
         };
         match (v.get("pricing"), v.get("codex_pricing")) {
-            (Some(main), Some(codex)) => Self { main: main.clone(), codex: codex.clone() },
+            (Some(main), Some(codex)) => Self {
+                main: main.clone(),
+                codex: codex.clone(),
+            },
             // 老快照只存了一半 → 整体退当前卡，不半用（半用会让 DSH 按历史卡、
             // codex 按当前卡，跨宿主总额失去单一时点语义）。
             _ => Self::current(),
@@ -99,7 +103,10 @@ fn day_freshness(day_key: &str) -> Freshness {
     } else {
         FreshnessState::Stale
     };
-    Freshness { state, last_observed_at: Some(format!("{day_key}T00:00:00Z")) }
+    Freshness {
+        state,
+        last_observed_at: Some(format!("{day_key}T00:00:00Z")),
+    }
 }
 
 /// 汇总层的新鲜度 = **最新被观测到的宿主**的新鲜度。汇总回答的是「这份数据
@@ -136,7 +143,10 @@ fn dsh_host_amount(cost: Option<serde_json::Value>, latest_day: Option<&str>) ->
     // total=0 是 token 全 0 而不是"看见了、没价目"。
     let freshness = match (&cost, latest_day) {
         (Some(c), Some(day)) => {
-            let total = c.get("total").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+            let total = c
+                .get("total")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
             if total > 0.0 {
                 amounts_by_basis.insert(BillingBasis::MeteredActual, total);
             }
@@ -221,9 +231,6 @@ pub fn codex_fold_cache_clear() {
     }
 }
 
-
-
-
 /// Codex 用量 `by_hour_model` → `HostAmount`（§8.4 的 Codex 栏）。喂进来的
 /// `by_hour_model` 从 SQL `usage_facts` 聚合（`SqlSummaryRepository`，
 /// `agent_vitals_data::authority_query::codex_by_hour_model`）——Phase 4.3
@@ -275,12 +282,7 @@ fn codex_host_amount_with_tokens_from_hours(
             match row {
                 // 结构上不可达（过滤键 == 日期，days 必含该日）——但宁可再走
                 // 一次 Unavailable 也不编 0。
-                None => {
-                    return (
-                        codex_no_data(),
-                        HostTokens::default(),
-                    )
-                }
+                None => return (codex_no_data(), HostTokens::default()),
                 Some(r) => r.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0),
             }
         }
@@ -306,11 +308,12 @@ fn codex_host_amount_with_tokens_from_hours(
     // 它是"当前状态"的单快照、不按日期分桶（hosts/codex/sessions/usage.rs
     // 的 doc），拿它判历史窗口本身就是错的——快照与声明的冲突检测留给
     // Stage E 的证据链。
-    let (basis, mode_unknown) = match agent_vitals_domain::cost::billing_mode_of("openai", &cards.main) {
-        BillingMode::Subscription => (BillingBasis::ApiEquivalent, false),
-        BillingMode::Metered => (BillingBasis::MeteredActual, false),
-        BillingMode::Unknown => (BillingBasis::ApiEquivalent, true),
-    };
+    let (basis, mode_unknown) =
+        match agent_vitals_domain::cost::billing_mode_of("openai", &cards.main) {
+            BillingMode::Subscription => (BillingBasis::ApiEquivalent, false),
+            BillingMode::Metered => (BillingBasis::MeteredActual, false),
+            BillingMode::Unknown => (BillingBasis::ApiEquivalent, true),
+        };
     let mut amounts_by_basis = BTreeMap::new();
     amounts_by_basis.insert(basis, total);
     // tokens：过滤后重算的 by_model（model → speed → 5 桶）——merge 的
@@ -355,13 +358,18 @@ fn claude_host_amount_with_tokens_from_days(
     days: &BTreeMap<String, serde_json::Value>,
     cards: &PricingCards,
 ) -> (HostAmount, HostTokens) {
-    let claude_no_data = || (HostAmount {
-        host_id: "claude-code".to_string(),
-        amounts_by_basis: BTreeMap::new(),
-        currency: None,
-        has_unresolved: false,
-        freshness: Freshness::unavailable(),
-    }, HostTokens::default());
+    let claude_no_data = || {
+        (
+            HostAmount {
+                host_id: "claude-code".to_string(),
+                amounts_by_basis: BTreeMap::new(),
+                currency: None,
+                has_unresolved: false,
+                freshness: Freshness::unavailable(),
+            },
+            HostTokens::default(),
+        )
+    };
     if days.is_empty() {
         return claude_no_data();
     }
@@ -384,8 +392,14 @@ fn claude_host_amount_with_tokens_from_days(
         }
         if let Some(report) = agent_vitals_domain::cost::claude_day_cost(day, &pricing) {
             let totals = report.get("currency_totals");
-            cny += totals.and_then(|t| t.get("CNY")).and_then(|v| v.as_f64()).unwrap_or(0.0);
-            usd += totals.and_then(|t| t.get("USD")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            cny += totals
+                .and_then(|t| t.get("CNY"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            usd += totals
+                .and_then(|t| t.get("USD"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
             unpriced += report
                 .get("unpriced_tokens")
                 .and_then(|v| v.as_i64())
@@ -415,7 +429,9 @@ fn claude_host_amount_with_tokens_from_days(
             amounts_by_basis,
             currency: None,
             has_unresolved: unpriced > 0 || any_partial,
-            freshness: latest.map(day_freshness).unwrap_or_else(Freshness::unavailable),
+            freshness: latest
+                .map(day_freshness)
+                .unwrap_or_else(Freshness::unavailable),
         },
         tk,
     )
@@ -518,11 +534,13 @@ fn claude_provider_amounts_from_days(
 ) -> BTreeMap<String, HostAmount> {
     let mut accs: BTreeMap<String, ProviderAcc> = BTreeMap::new();
     if days.is_empty() {
-        return accs.into_iter().map(|(k, a)| {
-            let host = a.finish(&k);
-            (k, host)
-        })
-        .collect();
+        return accs
+            .into_iter()
+            .map(|(k, a)| {
+                let host = a.finish(&k);
+                (k, host)
+            })
+            .collect();
     }
     let pricing = cards.main.clone();
     for (date, day) in days {
@@ -538,11 +556,8 @@ fn claude_provider_amounts_from_days(
         // pricing_basis, priced_with}。
         if let Some(per_model) = per_model {
             for (model, entry) in per_model {
-                let (prov, mode) =
-                    agent_vitals_domain::cost::billing_route_of(model, &pricing).unwrap_or((
-                        "unknown".to_string(),
-                        BillingMode::Unknown,
-                    ));
+                let (prov, mode) = agent_vitals_domain::cost::billing_route_of(model, &pricing)
+                    .unwrap_or(("unknown".to_string(), BillingMode::Unknown));
                 let key = format!("claude-code/{prov}");
                 let acc = accs.entry(key.clone()).or_insert_with(ProviderAcc::new);
                 acc.observe(date);
@@ -573,11 +588,15 @@ fn claude_provider_amounts_from_days(
             if per_model.map(|pm| pm.contains_key(model)).unwrap_or(false) {
                 continue;
             }
-            let total_tok: f64 = ["input_tokens", "cache_read_input_tokens",
-                "cache_creation_input_tokens", "output_tokens"]
-                .iter()
-                .map(|k| tokens.get(*k).and_then(|v| v.as_f64()).unwrap_or(0.0))
-                .sum();
+            let total_tok: f64 = [
+                "input_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+                "output_tokens",
+            ]
+            .iter()
+            .map(|k| tokens.get(*k).and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .sum();
             if total_tok <= 0.0 {
                 continue;
             }
@@ -589,7 +608,8 @@ fn claude_provider_amounts_from_days(
             acc.unresolved = true;
         }
     }
-    accs.into_iter().map(|(k, a)| {
+    accs.into_iter()
+        .map(|(k, a)| {
             let host = a.finish(&k);
             (k, host)
         })
@@ -599,10 +619,7 @@ fn claude_provider_amounts_from_days(
 /// by_provider 的 DSH 条目：声明表里 deepseek-official = metered，官方逐
 /// token 价是真实费率——与 `dsh_host_amount` 的 MeteredActual 判定一致，
 /// 条目即宿主条目的镜像（Host = BillingSource 的宿主，键换名片）。
-fn dsh_provider_amount(
-    cost: Option<serde_json::Value>,
-    latest_day: Option<&str>,
-) -> HostAmount {
+fn dsh_provider_amount(cost: Option<serde_json::Value>, latest_day: Option<&str>) -> HostAmount {
     let mut h = dsh_host_amount(cost, latest_day);
     h.host_id = "dsh/deepseek-official".to_string();
     h.currency = Some("CNY".to_string());
@@ -652,7 +669,10 @@ pub fn hourly_distribution(date: &str, codex_home: &Path) -> serde_json::Value {
     // 来源标注如实切换：全部来自权威库的行级事实（legacy_aggregate 不进
     // 小时轴——它是日轴账单不是会话证据）。库打不开 = 全宿主缺席。
     let source = |host: &str| -> Option<&str> {
-        by_host.get(host).filter(|m| !m.is_empty()).map(|_| "sql-facts")
+        by_host
+            .get(host)
+            .filter(|m| !m.is_empty())
+            .map(|_| "sql-facts")
     };
     let mut hours = Vec::with_capacity(24);
     for hh in 0..24 {
@@ -689,169 +709,160 @@ pub fn hourly_distribution(date: &str, codex_home: &Path) -> serde_json::Value {
 /// 报告键与 `by_provider` 同词表（`host/provider`），消费方可以直接对上。
 pub fn unresolved_detail(month: &str) -> serde_json::Value {
     use agent_vitals_domain::cost::BillingMode;
-    let pricing = agent_vitals_domain::cost::load_pricing();
     let mut out: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    let db = SqlSummaryRepository::new().open_db();
+    let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(month);
+    let cards = PricingCards::asof(&db, bounds.map(|(_, end)| end));
+    let pricing = cards.main.clone();
+    let (dsh_days, by_hour, claude_days) = fetch_windowed(&db, bounds);
 
-    // ── claude-code：claude-ledger 窗口逐模型 ──────────────────────────
-    if let Some(ledger) = crate::state::read_json(&crate::sessions::claude_ledger::ledger_path()) {
-        let mut models: BTreeMap<String, [i64; 4]> = BTreeMap::new();
-        let mut priced: std::collections::HashSet<String> = Default::default();
-        let mut partial: std::collections::HashSet<String> = Default::default();
-        if let Some(days) = ledger.get("days").and_then(|d| d.as_object()) {
-            for (date, day) in days {
-                if !date.starts_with(month) {
-                    continue;
-                }
-                let Some(m) = day.as_object() else { continue };
-                for (model, buckets) in m {
-                    let g = |k: &str| {
-                        buckets.get(k).and_then(|v| v.as_i64()).unwrap_or(0)
-                    };
-                    let e = models.entry(model.clone()).or_insert([0, 0, 0, 0]);
-                    e[0] += g("input_tokens");
-                    e[1] += g("cache_read_input_tokens");
-                    e[2] += g("cache_creation_input_tokens");
-                    e[3] += g("output_tokens");
-                }
-                // per_model = 有卡模型（claude_day_cost 的报告）；partial 基
-                // 础逐模型记名（时变卡的日粒度近似，has_unresolved 同源）。
-                if let Some(report) = agent_vitals_domain::cost::claude_day_cost(day, &pricing) {
-                    if let Some(pm) = report.get("per_model").and_then(|v| v.as_object()) {
-                        for (model, entry) in pm {
-                            priced.insert(model.clone());
-                            if entry.get("pricing_basis").and_then(|v| v.as_str())
-                                == Some("partial")
-                            {
-                                partial.insert(model.clone());
-                            }
-                        }
+    // ── claude-code：SQL 的实时事实优先 + 深历史聚合兜底，逐模型汇总 ────
+    let mut claude_models: BTreeMap<String, [i64; 4]> = BTreeMap::new();
+    let mut claude_priced: std::collections::HashSet<String> = Default::default();
+    let mut claude_partial: std::collections::HashSet<String> = Default::default();
+    for day in claude_days.values() {
+        let Some(models) = day.as_object() else {
+            continue;
+        };
+        for (model, buckets) in models {
+            let g = |k: &str| buckets.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+            let entry = claude_models.entry(model.clone()).or_insert([0, 0, 0, 0]);
+            entry[0] += g("input_tokens");
+            entry[1] += g("cache_read_input_tokens");
+            entry[2] += g("cache_creation_input_tokens");
+            entry[3] += g("output_tokens");
+        }
+        // per_model = 有卡模型（claude_day_cost 的报告）；partial 基础逐模型
+        // 记名（时变卡的日粒度近似，has_unresolved 同源）。
+        if let Some(report) = agent_vitals_domain::cost::claude_day_cost(day, &pricing) {
+            if let Some(per_model) = report.get("per_model").and_then(|v| v.as_object()) {
+                for (model, entry) in per_model {
+                    claude_priced.insert(model.clone());
+                    if entry.get("pricing_basis").and_then(|v| v.as_str()) == Some("partial") {
+                        claude_partial.insert(model.clone());
                     }
                 }
             }
         }
-        for (model, t) in &models {
-            // 0-token 行不进下钻：没有可计价的用量，「unresolved」无从谈起
-            // （fold 内部哨兵如 `<synthetic>` 落在这里被一并滤掉）。
-            if t.iter().all(|&v| v == 0) {
-                continue;
-            }
-            let reason = match agent_vitals_domain::cost::billing_route_of(model, &pricing) {
-                None => Some("billing-route-unknown"),
-                Some((_, BillingMode::Unknown)) => Some("billing-mode-unknown"),
-                Some(_) if !priced.contains(model) => Some("no-price-card"),
-                Some(_) if partial.contains(model) => Some("partial-price-basis"),
-                _ => None,
-            };
-            if let Some(reason) = reason {
-                let prov = agent_vitals_domain::cost::billing_route_of(model, &pricing)
-                    .map(|(p, _)| p)
-                    .unwrap_or_else(|| "unknown".to_string());
-                out.entry(format!("claude-code/{prov}")).or_default().push(
-                    serde_json::json!({
-                        "model": model,
-                        "reason": reason,
-                        "tokens": t[0] + t[1] + t[2] + t[3],
-                    }),
-                );
-            }
+    }
+    for (model, tokens) in &claude_models {
+        // 0-token 行不进下钻：没有可计价的用量，「unresolved」无从谈起。
+        if tokens.iter().all(|&v| v == 0) {
+            continue;
+        }
+        let reason = match agent_vitals_domain::cost::billing_route_of(model, &pricing) {
+            None => Some("billing-route-unknown"),
+            Some((_, BillingMode::Unknown)) => Some("billing-mode-unknown"),
+            Some(_) if !claude_priced.contains(model) => Some("no-price-card"),
+            Some(_) if claude_partial.contains(model) => Some("partial-price-basis"),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            let provider = agent_vitals_domain::cost::billing_route_of(model, &pricing)
+                .map(|(provider, _)| provider)
+                .unwrap_or_else(|| "unknown".to_string());
+            out.entry(format!("claude-code/{provider}"))
+                .or_default()
+                .push(serde_json::json!({
+                    "model": model,
+                    "reason": reason,
+                    "tokens": tokens[0] + tokens[1] + tokens[2] + tokens[3],
+                }));
         }
     }
 
-    // ── codex/openai：fold by_model vs codex 价表报告 ─────────────────
+    // ── codex/openai：SQL 小时桶 vs 同一份 codex 价表 ──────────────────
+    let codex_by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour, None);
+    let codex_report = crate::sessions::codex_cost::codex_cost_report(
+        &by_hour,
+        &codex_by_model,
+        &serde_json::Value::Null,
+        &serde_json::Value::Null,
+        &cards.codex,
+        false,
+    );
+    let codex_priced: std::collections::HashSet<String> = codex_report
+        .as_ref()
+        .and_then(|report| report.get("per_model"))
+        .and_then(|value| value.as_object())
+        .map(|models| models.keys().cloned().collect())
+        .unwrap_or_default();
+    let codex_rows = codex_unresolved_rows(&codex_by_model, &codex_priced);
+    if !codex_rows.is_empty() {
+        out.entry("codex/openai".to_string())
+            .or_default()
+            .extend(codex_rows);
+    }
+
+    // ── dsh/deepseek-official：SQL 日桶逐模型聚合 ──────────────────────
+    let mut dsh_by_model: serde_json::Map<String, serde_json::Value> = Default::default();
+    for day in dsh_days
+        .as_object()
+        .map(|days| days.values())
+        .into_iter()
+        .flatten()
     {
-        let merged = codex_merged_cached(&codex_home());
-        let mut filtered = serde_json::Map::new();
-        if let Some(bh) = merged["by_hour_model"].as_object() {
-            for (h, v) in bh {
-                if h.starts_with(month) {
-                    filtered.insert(h.clone(), v.clone());
-                }
-            }
-        }
-        let by_hour = serde_json::Value::Object(filtered);
-        let by_model =
-            agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour, None);
-        let codex_pricing = crate::sessions::codex_cost::load_codex_pricing();
-        let report = crate::sessions::codex_cost::codex_cost_report(
-            &by_hour,
-            &by_model,
-            &merged["unaccounted"],
-            &merged["plan"],
-            &codex_pricing,
-            false,
-        );
-        let priced: std::collections::HashSet<String> = report
-            .as_ref()
-            .and_then(|r| r.get("per_model"))
-            .and_then(|v| v.as_object())
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default();
-        // **形状来源纪律（审查 P1-1）**：`by_model` 是两层
-        // `model → speed → 桶对象`，桶键是 `CODEX_TOKEN_FIELDS` 的 5 键
-        // （`cached_input_tokens`/`cache_write_input_tokens`——与 DSH/claude
-        // 的 cache_read 词表不同，直读会静默全 0）。按
-        // `codex_host_amount_with_tokens` 同款两层迭代求和。
-        let rows = codex_unresolved_rows(&by_model, &priced);
-        if !rows.is_empty() {
-            out.entry("codex/openai".to_string()).or_default().extend(rows);
-        }
-    }
-
-    // ── dsh/deepseek-official：month.json 逐日 by_model 聚合 ───────────
-    if let Some(days) = crate::budget::read_month(Some(month)) {
-        let mut by_model: serde_json::Map<String, serde_json::Value> = Default::default();
-        let providers: serde_json::Map<String, serde_json::Value> = Default::default();
-        for day in days.as_object().map(|m| m.values()).into_iter().flatten() {
-            if let Some(bm) = day.get("by_model").and_then(|v| v.as_object()) {
-                for (model, buckets) in bm {
-                    let e = by_model.entry(model.clone()).or_insert(serde_json::json!({
+        if let Some(models) = day.get("by_model").and_then(|value| value.as_object()) {
+            for (model, buckets) in models {
+                let entry = dsh_by_model
+                    .entry(model.clone())
+                    .or_insert(serde_json::json!({
                         "uncached_input_tokens": 0, "cache_read_tokens": 0,
                         "cache_write_tokens": 0, "output_tokens": 0,
                     }));
-                    for k in ["uncached_input_tokens", "cache_read_tokens",
-                              "cache_write_tokens", "output_tokens"] {
-                        let cur = e.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
-                        let add = buckets.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
-                        e[k] = serde_json::json!(cur + add);
-                    }
+                for key in [
+                    "uncached_input_tokens",
+                    "cache_read_tokens",
+                    "cache_write_tokens",
+                    "output_tokens",
+                ] {
+                    let current = entry.get(key).and_then(|value| value.as_i64()).unwrap_or(0);
+                    let added = buckets
+                        .get(key)
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or(0);
+                    entry[key] = serde_json::json!(current + added);
                 }
             }
         }
-        let usage = serde_json::json!({"by_model": by_model, "providers": providers});
-        let report = agent_vitals_domain::cost::cost_report(&usage, &pricing);
-        let priced: std::collections::HashSet<String> = report
+    }
+    let dsh_usage = serde_json::json!({"by_model": dsh_by_model, "providers": {}});
+    let dsh_priced: std::collections::HashSet<String> =
+        agent_vitals_domain::cost::cost_report(&dsh_usage, &pricing)
             .as_ref()
-            .and_then(|r| r.get("per_model"))
-            .and_then(|v| v.as_object())
-            .map(|m| m.keys().cloned().collect())
+            .and_then(|report| report.get("per_model"))
+            .and_then(|value| value.as_object())
+            .map(|models| models.keys().cloned().collect())
             .unwrap_or_default();
-        for (model, buckets) in &by_model {
-            if priced.contains(model) {
-                continue;
-            }
-            let g0 = |k: &str| buckets.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
-            if [g0("uncached_input_tokens"), g0("cache_read_tokens"),
-                g0("cache_write_tokens"), g0("output_tokens")]
-            .iter().all(|&v| v == 0) {
-                continue; // 0-token 行无可计价用量，不进下钻
-            }
-            let reason = match agent_vitals_domain::cost::billing_route_of(model, &pricing) {
-                None => "billing-route-unknown",
-                Some((_, BillingMode::Unknown)) => "billing-mode-unknown",
-                Some(_) => "no-price-card",
-            };
-            let g = |k: &str| buckets.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
-            out.entry("dsh/deepseek-official".to_string()).or_default().push(
-                serde_json::json!({
-                    "model": model,
-                    "reason": reason,
-                    "tokens": g("uncached_input_tokens")
-                        + g("cache_read_tokens")
-                        + g("cache_write_tokens")
-                        + g("output_tokens"),
-                }),
-            );
+    for (model, buckets) in &dsh_by_model {
+        if dsh_priced.contains(model) {
+            continue;
         }
+        let tokens = |key: &str| {
+            buckets
+                .get(key)
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0)
+        };
+        let total = tokens("uncached_input_tokens")
+            + tokens("cache_read_tokens")
+            + tokens("cache_write_tokens")
+            + tokens("output_tokens");
+        if total == 0 {
+            continue;
+        }
+        let reason = match agent_vitals_domain::cost::billing_route_of(model, &pricing) {
+            None => "billing-route-unknown",
+            Some((_, BillingMode::Unknown)) => "billing-mode-unknown",
+            Some(_) => "no-price-card",
+        };
+        out.entry("dsh/deepseek-official".to_string())
+            .or_default()
+            .push(serde_json::json!({
+                "model": model,
+                "reason": reason,
+                "tokens": total,
+            }));
     }
 
     let mut obj = serde_json::Map::new();
@@ -935,7 +946,8 @@ fn codex_provider_amount_from_hours(
 /// （假零，MeasuredZero≠Unavailable 纪律的违例）。
 fn dsh_day_tokens(day: &serde_json::Value) -> HostTokens {
     let mut tk = HostTokens::default();
-    let g = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0) as i64;
+    let g =
+        |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0) as i64;
     tk.uncached_input = g(day, "uncached_input_tokens");
     tk.cache_read = g(day, "cache_read_tokens");
     tk.cache_write = g(day, "cache_write_tokens");
@@ -1016,7 +1028,9 @@ fn apply_subscription_fees(
     {
         // 账期未开始不摊（None 理论不可达——declared_subscriptions 已回落
         // reported_at；防御性跳过而不是摊进所有历史）。
-        let Some(start) = period_start.as_deref() else { continue };
+        let Some(start) = period_start.as_deref() else {
+            continue;
+        };
         // chars 而非字节切片：声明混入非 ASCII 时 [..7] 会 panic（billing 的
         // 脏数据纪律是显式可见，不是 panic）。
         let start_month: String = start.chars().take(7).collect();
@@ -1029,17 +1043,22 @@ fn apply_subscription_fees(
             .map(|(host, _)| host.to_string())
             .unwrap_or_else(|| "unattributed".to_string());
         let key = format!("{host}/{provider}");
-        let entry = by_provider.entry(key.clone()).or_insert_with(|| HostAmount {
-            host_id: key,
-            amounts_by_basis: BTreeMap::new(),
-            currency: None,
-            has_unresolved: false,
-            freshness: Freshness::unavailable(),
-        });
+        let entry = by_provider
+            .entry(key.clone())
+            .or_insert_with(|| HostAmount {
+                host_id: key,
+                amounts_by_basis: BTreeMap::new(),
+                currency: None,
+                has_unresolved: false,
+                freshness: Freshness::unavailable(),
+            });
         // 同 provider 重复摊的防线不在循环外而在取值语义：declared_
         // subscriptions 已按「首条」去重（测试钉住），这里每个 provider 恰好
         // 进一次循环。
-        *entry.amounts_by_basis.entry(BillingBasis::FixedSubscription).or_insert(0.0) += amount;
+        *entry
+            .amounts_by_basis
+            .entry(BillingBasis::FixedSubscription)
+            .or_insert(0.0) += amount;
         // 币种合并：零用量纯月费条目（如 glm 无 token 的月份）此前 currency
         // 为 None，月费会掉进 total_actual_spend 的无币桶——用声明币种补齐；
         // 与条目既有币种冲突（理论形状：同一 provider 两张币种不同的卡）时
@@ -1081,13 +1100,15 @@ fn apply_host_bills(
             continue;
         };
         let key = format!("{host}/{provider}");
-        let entry = by_provider.entry(key.clone()).or_insert_with(|| HostAmount {
-            host_id: key,
-            amounts_by_basis: BTreeMap::new(),
-            currency: None,
-            has_unresolved: false,
-            freshness: Freshness::unavailable(),
-        });
+        let entry = by_provider
+            .entry(key.clone())
+            .or_insert_with(|| HostAmount {
+                host_id: key,
+                amounts_by_basis: BTreeMap::new(),
+                currency: None,
+                has_unresolved: false,
+                freshness: Freshness::unavailable(),
+            });
         *entry.amounts_by_basis.entry(basis).or_insert(0.0) += amount_minor as f64 / 100.0;
         match &entry.currency {
             None => entry.currency = Some(currency),
@@ -1122,11 +1143,13 @@ pub fn codex_quota_snapshot(home: &Path) -> Option<serde_json::Value> {
 /// `WIRED_HOSTS` 同类）：新宿主/新提供方接线时同步维护；漏登记的已声明
 /// 订阅会落 `unattributed/<provider>` 条目可见，不会静默消失。
 const HOST_PROVIDER_MAP: &[(&str, &[&str])] = &[
-    ("claude-code", &["anthropic", "minimax", "zhipu-glm", "moonshot"]),
+    (
+        "claude-code",
+        &["anthropic", "minimax", "zhipu-glm", "moonshot"],
+    ),
     ("codex", &["openai"]),
     ("dsh", &["deepseek-official", "shengsuanyun"]),
 ];
-
 
 /// Token 日历的逐日跨宿主数据（v0.9 Stage D——日历此前只画 DSH 日轴，
 /// 2026-09 实测：DSH 全零月让 57 亿 token 的 claude/codex 用量在日历上
@@ -1187,19 +1210,15 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     use serde_json::Value;
     let _ = codex_home; // 签名兼容 Tauri 调用点（3.5 Tier B 切 SQL 后不再读 fold）
     let mut days: serde_json::Map<String, Value> = serde_json::Map::new();
-    fn day_entry<'a>(
-        days: &'a mut serde_json::Map<String, Value>,
-        date: &str,
-    ) -> &'a mut Value {
-        days.entry(date.to_string())
-            .or_insert_with(|| {
-                json!({
-                    "dsh_tokens": 0, "claude_tokens": 0, "codex_tokens": 0,
-                    "total_tokens": 0,
-                    "dsh_cost_cny": 0.0, "claude_cost_cny": 0.0,
-                    "claude_cost_usd": 0.0, "codex_cost_usd": 0.0,
-                })
+    fn day_entry<'a>(days: &'a mut serde_json::Map<String, Value>, date: &str) -> &'a mut Value {
+        days.entry(date.to_string()).or_insert_with(|| {
+            json!({
+                "dsh_tokens": 0, "claude_tokens": 0, "codex_tokens": 0,
+                "total_tokens": 0,
+                "dsh_cost_cny": 0.0, "claude_cost_cny": 0.0,
+                "claude_cost_usd": 0.0, "codex_cost_usd": 0.0,
             })
+        })
     }
 
     // v0.9.1 Phase 3.5 Tier B：三宿主数据源统一为 SQL 权威库（与
@@ -1235,8 +1254,10 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
         if let Some(models) = day.as_object() {
             for (_m, b) in models {
                 let g = |k: &str| b.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
-                tokens += g("input_tokens") + g("cache_read_input_tokens")
-                    + g("cache_creation_input_tokens") + g("output_tokens");
+                tokens += g("input_tokens")
+                    + g("cache_read_input_tokens")
+                    + g("cache_creation_input_tokens")
+                    + g("output_tokens");
             }
         }
         let (cny, usd) = agent_vitals_domain::cost::claude_day_cost(day, &pricing)
@@ -1256,7 +1277,10 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
 
     // Codex：SQL 小时桶按日聚合 token；逐日钱走 codex_cost_report 的 days[]
     // （cost_usd，untimed 剩余按 per_model 并——与旧路径同一函数同一守恒）。
-    for (hour, models) in by_hour_model.as_object().expect("by_hour_model is an object") {
+    for (hour, models) in by_hour_model
+        .as_object()
+        .expect("by_hour_model is an object")
+    {
         let date = &hour[..hour.len().min(10)];
         let mut tokens = 0i64;
         if let Some(models) = models.as_object() {
@@ -1264,15 +1288,18 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
                 if let Some(speeds) = speeds.as_object() {
                     for (_s, b) in speeds {
                         let g = |k: &str| b.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
-                        tokens += g("uncached_input_tokens") + g("cached_input_tokens")
-                            + g("cache_write_input_tokens") + g("output_tokens")
+                        tokens += g("uncached_input_tokens")
+                            + g("cached_input_tokens")
+                            + g("cache_write_input_tokens")
+                            + g("output_tokens")
                             + g("reasoning_output_tokens");
                     }
                 }
             }
         }
         let e = day_entry(&mut days, date);
-        e["codex_tokens"] = json!(e.get("codex_tokens").and_then(|v| v.as_i64()).unwrap_or(0) + tokens);
+        e["codex_tokens"] =
+            json!(e.get("codex_tokens").and_then(|v| v.as_i64()).unwrap_or(0) + tokens);
     }
     let by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
     if let Some(report) = crate::sessions::codex_cost::codex_cost_report(
@@ -1285,7 +1312,9 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     ) {
         if let Some(report_days) = report.get("days").and_then(|v| v.as_array()) {
             for d in report_days {
-                let Some(date) = d.get("date").and_then(|v| v.as_str()) else { continue };
+                let Some(date) = d.get("date").and_then(|v| v.as_str()) else {
+                    continue;
+                };
                 let cost = d.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let e = day_entry(&mut days, date);
                 e["codex_cost_usd"] = json!(cost);
@@ -1335,30 +1364,29 @@ pub fn codex_merged_from_sql(data_home: &Path) -> (serde_json::Value, Option<Str
     // `!exists` 必须在 open 之前判：`AuthorityDb::open` 对缺文件会**建库**
     // （全 DDL），之后就分不清「从没同步」和「同步了但 codex 无用量」。
     let missing = !path.exists();
-    let by_hour_model = match agent_vitals_data::authority::AuthorityDb::open(
-        &path,
-        crate::sql_sync::now_ms(),
-    ) {
-        Ok(db) => agent_vitals_data::authority_query::codex_by_hour_model(db.conn(), 0, i64::MAX)
-            .unwrap_or_else(|_| json!({})),
-        Err(e) => {
-            return (
-                empty(),
-                Some(format!(
-                    "authority DB at {} could not be opened ({e}); reporting empty codex cost",
-                    path.display()
-                )),
-            );
-        }
-    };
+    let by_hour_model =
+        match agent_vitals_data::authority::AuthorityDb::open(&path, crate::sql_sync::now_ms()) {
+            Ok(db) => {
+                agent_vitals_data::authority_query::codex_by_hour_model(db.conn(), 0, i64::MAX)
+                    .unwrap_or_else(|_| json!({}))
+            }
+            Err(e) => {
+                return (
+                    empty(),
+                    Some(format!(
+                        "authority DB at {} could not be opened ({e}); reporting empty codex cost",
+                        path.display()
+                    )),
+                );
+            }
+        };
     let note = missing.then(|| {
         format!(
             "authority DB not found at {} — run `agent-vitals sync-facts` to populate it; reporting empty codex cost",
             path.display()
         )
     });
-    let by_model =
-        agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
+    let by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
     (
         json!({
             "by_hour_model": by_hour_model,
@@ -1404,11 +1432,16 @@ impl SqlSummaryRepository {
 
     /// 参数化构造：显式库根（Tauri 组装入口 / 临时库单测）。
     pub fn at(data_home: impl Into<std::path::PathBuf>) -> Self {
-        Self { data_home: Some(data_home.into()) }
+        Self {
+            data_home: Some(data_home.into()),
+        }
     }
 
     fn open_db(&self) -> Option<agent_vitals_data::authority::AuthorityDb> {
-        let data_home = self.data_home.clone().unwrap_or_else(crate::home::data_home);
+        let data_home = self
+            .data_home
+            .clone()
+            .unwrap_or_else(crate::home::data_home);
         let path = agent_vitals_data::authority::default_authority_path(&data_home);
         agent_vitals_data::authority::AuthorityDb::open(&path, crate::sql_sync::now_ms()).ok()
     }
@@ -1433,12 +1466,10 @@ fn merged_claude_days(
     // 趋近于零，但结构上必须正确——轮转发生时这里就是唯一防线。
     let mut days = agent_vitals_data::authority_query::claude_legacy_days(conn, start_ms, end_ms)
         .unwrap_or_default();
-    let realtime = agent_vitals_data::authority_query::claude_days(conn, start_ms, end_ms)
-        .unwrap_or_default();
+    let realtime =
+        agent_vitals_data::authority_query::claude_days(conn, start_ms, end_ms).unwrap_or_default();
     for (day, models) in realtime {
-        let entry = days
-            .entry(day)
-            .or_insert_with(|| serde_json::json!({}));
+        let entry = days.entry(day).or_insert_with(|| serde_json::json!({}));
         let obj = entry.as_object_mut().expect("claude day entry is object");
         if let Some(models) = models.as_object() {
             for (model, buckets) in models {
@@ -1465,10 +1496,7 @@ pub fn merged_claude_days_for_tests(
 /// `Partial`——「这个月有聚合兜底的成分」必须在 UI 可见（审查收口：标记
 /// 此前只写不读，spec §6.2.3「查询方据此降级」没有消费方，legacy 月份照常
 /// 渲染 Fresh）。
-fn claude_legacy_backed(
-    conn: &rusqlite::Connection,
-    month: &str,
-) -> bool {
+fn claude_legacy_backed(conn: &rusqlite::Connection, month: &str) -> bool {
     conn.query_row(
         "SELECT COUNT(*) FROM data_quality_issues
          WHERE resolved_at_ms IS NULL AND code = 'legacy_aggregate'
@@ -1503,7 +1531,11 @@ fn degrade_claude_freshness_if_legacy_backed(
 fn fetch_windowed(
     db: &Option<agent_vitals_data::authority::AuthorityDb>,
     bounds: Option<(i64, i64)>,
-) -> (serde_json::Value, serde_json::Value, BTreeMap<String, serde_json::Value>) {
+) -> (
+    serde_json::Value,
+    serde_json::Value,
+    BTreeMap<String, serde_json::Value>,
+) {
     match (db, bounds) {
         (Some(db), Some((start, end))) => {
             let conn = db.conn();
@@ -1529,13 +1561,20 @@ impl SummaryRepository for SqlSummaryRepository {
         // 重算历史。库无第二份快照时 == 当前嵌入卡（no-op）。
         let cards = PricingCards::asof(&db, bounds.map(|(_, end)| end));
         let pricing = cards.main.clone();
-        let latest_day = dsh_days.as_object().and_then(|m| m.keys().next_back().cloned());
+        let latest_day = dsh_days
+            .as_object()
+            .and_then(|m| m.keys().next_back().cloned());
         let dsh_cost = match dsh_days.as_object() {
-            Some(m) if !m.is_empty() => Some(agent_vitals_domain::cost::month_cost(&dsh_days, &pricing)),
+            Some(m) if !m.is_empty() => {
+                Some(agent_vitals_domain::cost::month_cost(&dsh_days, &pricing))
+            }
             _ => None,
         };
         let mut by_host = BTreeMap::new();
-        by_host.insert("dsh".to_string(), dsh_host_amount(dsh_cost.clone(), latest_day.as_deref()));
+        by_host.insert(
+            "dsh".to_string(),
+            dsh_host_amount(dsh_cost.clone(), latest_day.as_deref()),
+        );
         let (codex_amount, codex_tk) = codex_host_amount_with_tokens_from_hours(
             &by_hour_model,
             &serde_json::Value::Null,
@@ -1611,7 +1650,10 @@ impl SummaryRepository for SqlSummaryRepository {
         let mut by_host = BTreeMap::new();
         by_host.insert(
             "dsh".to_string(),
-            dsh_host_amount(cost.clone(), day_value.as_ref().map(|_| query.date.as_str())),
+            dsh_host_amount(
+                cost.clone(),
+                day_value.as_ref().map(|_| query.date.as_str()),
+            ),
         );
         let (codex_amount, codex_tk) = codex_host_amount_with_tokens_from_hours(
             &by_hour_model,
@@ -1677,13 +1719,10 @@ impl SummaryRepository for SqlSummaryRepository {
         let mut out = BTreeMap::new();
         for host in WIRED_HOSTS {
             let (measured, total) = match (&db, bounds) {
-                (Some(db), Some((start, end))) => agent_vitals_data::authority_query::coverage_status(
-                    db.conn(),
-                    host,
-                    start,
-                    end,
-                )
-                .unwrap_or((0, 3)),
+                (Some(db), Some((start, end))) => {
+                    agent_vitals_data::authority_query::coverage_status(db.conn(), host, start, end)
+                        .unwrap_or((0, 3))
+                }
                 _ => (0, 3),
             };
             out.insert(
@@ -1719,18 +1758,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 写一份 claude-ledger.json fixture（`days: {日期: {模型: 4 型 snake}}`
-    /// flat 直图，`claude_sync` 真机形状）。走 `with_home`——`state_dir()` 读
-    /// `AGENT_VITALS_HOME`。模型由调用方给：deepseek-v4-flash（顶层官方 CNY
-    /// 卡）/ claude-opus-5（catalog anthropic USD 卡）/ 未知模型测 unpriced。
-    fn write_ledger(models: serde_json::Value) {
-        let ledger = json!({ "days": { "2026-09-02": models } });
-        crate::state::atomic_write_json(
-            &crate::state::state_dir().join("claude-ledger.json"),
-            &ledger,
-        );
-    }
-
     #[test]
     fn codex_unresolved_rows_read_the_two_layer_by_model_shape() {
         // 真实形状（codex_by_model_from_hours 产物）：model → speed → 桶对象，
@@ -1760,25 +1787,55 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_detail_flags_unrouted_models_via_ledger() {
+    fn unresolved_detail_flags_unrouted_models_from_sql() {
         with_home(|| {
-            // no-card 模型（真机 GLM 无价卡同款）：ledger 有量、无路由/无卡。
-            write_ledger(json!({
-                "glm-5.3-flash": {"input_tokens": 1_000,
-                                  "cache_read_input_tokens": 2_000,
-                                  "cache_creation_input_tokens": 0,
-                                  "output_tokens": 100},
-                "<synthetic>": {"input_tokens": 0, "cache_read_input_tokens": 0,
-                                "cache_creation_input_tokens": 0, "output_tokens": 0}
-            }));
+            // no-card 模型（真机 GLM 无价卡同款）：SQL 事实有量、无路由/无卡。
+            let db = seed_authority_db();
+            let ts = agent_vitals_data::authority_query::beijing_day_bounds_ms("2026-09-02")
+                .unwrap()
+                .0
+                + 12 * 3_600_000;
+            seed_fact(
+                &db,
+                "glm-unpriced",
+                "claude-code",
+                Some("glm-5.3-flash"),
+                "message",
+                ts,
+                0,
+                1_000,
+                2_000,
+                0,
+                100,
+            );
+            seed_fact(
+                &db,
+                "synthetic-zero",
+                "claude-code",
+                Some("<synthetic>"),
+                "message",
+                ts,
+                0,
+                0,
+                0,
+                0,
+                0,
+            );
+            drop(db);
             let detail = unresolved_detail("2026-09");
-            let found = detail.as_object().unwrap().iter()
+            let found = detail
+                .as_object()
+                .unwrap()
+                .iter()
                 .flat_map(|(_, rows)| rows.as_array().unwrap().iter())
                 .find(|r| r["model"] == json!("glm-5.3-flash"))
                 .unwrap_or_else(|| panic!("expected glm row, got {detail}"));
             assert_eq!(found["tokens"], json!(3_100));
             // 0-token 哨兵行不进下钻。
-            let synthetic = detail.as_object().unwrap().iter()
+            let synthetic = detail
+                .as_object()
+                .unwrap()
+                .iter()
                 .flat_map(|(_, rows)| rows.as_array().unwrap().iter())
                 .find(|r| r["model"] == json!("<synthetic>"));
             assert!(synthetic.is_none(), "0-token 行不进下钻，got {detail}");
@@ -1792,7 +1849,10 @@ mod tests {
     /// 各测试种 fact 用同一个。
     fn current_month_noon_ms() -> i64 {
         let m = crate::clock::current_month_beijing();
-        agent_vitals_data::authority_query::beijing_month_bounds_ms(&m).unwrap().0 + 12 * 3_600_000
+        agent_vitals_data::authority_query::beijing_month_bounds_ms(&m)
+            .unwrap()
+            .0
+            + 12 * 3_600_000
     }
 
     #[test]
@@ -1801,13 +1861,58 @@ mod tests {
             let month = crate::clock::current_month_beijing();
             let ts = current_month_noon_ms();
             let db = seed_authority_db();
-            seed_fact(&db, "d1", "dsh", Some("deepseek-v4-flash"), "turn", ts, 0, 1_000_000, 0, 0, 100_000);
-            seed_fact(&db, "x1", "codex", Some("gpt-5.6-sol"), "token_count", ts, 0, 800_000, 200_000, 50_000, 80_000);
-            seed_fact(&db, "c1", "claude-code", Some("claude-opus-5"), "message", ts, 0, 1_000_000, 0, 0, 100_000);
+            seed_fact(
+                &db,
+                "d1",
+                "dsh",
+                Some("deepseek-v4-flash"),
+                "turn",
+                ts,
+                0,
+                1_000_000,
+                0,
+                0,
+                100_000,
+            );
+            seed_fact(
+                &db,
+                "x1",
+                "codex",
+                Some("gpt-5.6-sol"),
+                "token_count",
+                ts,
+                0,
+                800_000,
+                200_000,
+                50_000,
+                80_000,
+            );
+            seed_fact(
+                &db,
+                "c1",
+                "claude-code",
+                Some("claude-opus-5"),
+                "message",
+                ts,
+                0,
+                1_000_000,
+                0,
+                0,
+                100_000,
+            );
             drop(db);
-            let summary = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
-            assert!(summary.contract_violations().is_empty(), "{:?}", summary.contract_violations());
-            assert!(summary.by_provider.contains_key("dsh/deepseek-official"), "{:?}", summary.by_provider.keys());
+            let summary =
+                SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
+            assert!(
+                summary.contract_violations().is_empty(),
+                "{:?}",
+                summary.contract_violations()
+            );
+            assert!(
+                summary.by_provider.contains_key("dsh/deepseek-official"),
+                "{:?}",
+                summary.by_provider.keys()
+            );
             assert!(summary.by_provider.contains_key("codex/openai"));
             // DSH 条目与宿主条目同额同档（同一 provider 镜像）。
             let dsh_host = &summary.by_host["dsh"];
@@ -1821,10 +1926,16 @@ mod tests {
             // by_provider 的条目不回灌 total_summable（总额仍只按 by_host 算，
             // 否则同一笔钱进两次——month.json 三倍计数事故的结构镜像）。
             let via_host = summary.total_summable();
-            let host_only_sum: f64 = summary.by_host.values()
-                .map(|h| h.amounts_by_basis.iter()
-                    .filter(|(b, _)| b.summable_into_total())
-                    .map(|(_, v)| v).sum::<f64>())
+            let host_only_sum: f64 = summary
+                .by_host
+                .values()
+                .map(|h| {
+                    h.amounts_by_basis
+                        .iter()
+                        .filter(|(b, _)| b.summable_into_total())
+                        .map(|(_, v)| v)
+                        .sum::<f64>()
+                })
                 .sum();
             assert_eq!(via_host, host_only_sum);
         });
@@ -1841,21 +1952,46 @@ mod tests {
         with_home(|| {
             let month = crate::clock::current_month_beijing();
             let db = seed_authority_db();
-            seed_fact(&db, "c1", "claude-code", Some("claude-opus-5"), "message",
-                      current_month_noon_ms(), 0, 1_000_000, 0, 0, 100_000);
+            seed_fact(
+                &db,
+                "c1",
+                "claude-code",
+                Some("claude-opus-5"),
+                "message",
+                current_month_noon_ms(),
+                0,
+                1_000_000,
+                0,
+                0,
+                100_000,
+            );
             drop(db);
-            let summary = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
-            assert!(summary.contract_violations().is_empty(), "{:?}", summary.contract_violations());
+            let summary =
+                SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
+            assert!(
+                summary.contract_violations().is_empty(),
+                "{:?}",
+                summary.contract_violations()
+            );
             let anthropic = &summary.by_provider["claude-code/anthropic"];
-            assert!(anthropic.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent));
-            assert_eq!(anthropic.amounts_by_basis[&BillingBasis::FixedSubscription], 20.0);
+            assert!(anthropic
+                .amounts_by_basis
+                .contains_key(&BillingBasis::ApiEquivalent));
+            assert_eq!(
+                anthropic.amounts_by_basis[&BillingBasis::FixedSubscription],
+                20.0
+            );
             // 零用量补建：glm 有声明（2026-09 起效）但本 fixture 无 glm 用量。
             let glm = &summary.by_provider["claude-code/zhipu-glm"];
-            assert_eq!(glm.amounts_by_basis[&BillingBasis::FixedSubscription], 118.0);
+            assert_eq!(
+                glm.amounts_by_basis[&BillingBasis::FixedSubscription],
+                118.0
+            );
             assert!(!glm.has_unresolved, "纯月费条目不标 unresolved");
             // 账期过滤：2020-01 早于一切 period_start → 无任何订阅条目被补建。
-            let old = SqlSummaryRepository::new()
-                .monthly_summary(&MonthlySummaryQuery { month: "2020-01".to_string() });
+            let old = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery {
+                month: "2020-01".to_string(),
+            });
             assert!(!old.by_provider.contains_key("claude-code/anthropic"));
             assert!(!old.by_provider.contains_key("claude-code/zhipu-glm"));
             // FixedSubscription 可汇总：月度总额现在含订阅费（spec §4「固定
@@ -1873,19 +2009,41 @@ mod tests {
     fn subscription_fees_never_leak_into_daily() {
         with_home(|| {
             let day = "2026-09-02";
-            let ts = agent_vitals_data::authority_query::beijing_day_bounds_ms(day).unwrap().0
+            let ts = agent_vitals_data::authority_query::beijing_day_bounds_ms(day)
+                .unwrap()
+                .0
                 + 12 * 3_600_000;
             let db = seed_authority_db();
-            seed_fact(&db, "c1", "claude-code", Some("claude-opus-5"), "message",
-                      ts, 0, 1_000_000, 0, 0, 100_000);
+            seed_fact(
+                &db,
+                "c1",
+                "claude-code",
+                Some("claude-opus-5"),
+                "message",
+                ts,
+                0,
+                1_000_000,
+                0,
+                0,
+                100_000,
+            );
             drop(db);
-            let daily = SqlSummaryRepository::new()
-                .daily_summary(&DailySummaryQuery { date: day.to_string() });
-            assert!(daily.contract_violations().is_empty(), "{:?}", daily.contract_violations());
-            let anthropic = &daily.by_provider["claude-code/anthropic"];
-            assert!(anthropic.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent));
+            let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery {
+                date: day.to_string(),
+            });
             assert!(
-                !anthropic.amounts_by_basis.contains_key(&BillingBasis::FixedSubscription),
+                daily.contract_violations().is_empty(),
+                "{:?}",
+                daily.contract_violations()
+            );
+            let anthropic = &daily.by_provider["claude-code/anthropic"];
+            assert!(anthropic
+                .amounts_by_basis
+                .contains_key(&BillingBasis::ApiEquivalent));
+            assert!(
+                !anthropic
+                    .amounts_by_basis
+                    .contains_key(&BillingBasis::FixedSubscription),
                 "订阅月费不得摊进日账: {:?}",
                 anthropic.amounts_by_basis
             );
@@ -1926,14 +2084,26 @@ mod tests {
     fn daily_summary_reports_nonzero_dsh_tokens_for_a_real_day() {
         with_home(|| {
             let day = crate::clock::today_beijing();
-            let ts = agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap().0
+            let ts = agent_vitals_data::authority_query::beijing_day_bounds_ms(&day)
+                .unwrap()
+                .0
                 + 3_600_000;
             let db = seed_authority_db();
-            seed_fact(&db, "d1", "dsh", Some("deepseek-v4-flash"), "turn", ts, 0,
-                      1_000_000, 250_000, 0, 100_000);
+            seed_fact(
+                &db,
+                "d1",
+                "dsh",
+                Some("deepseek-v4-flash"),
+                "turn",
+                ts,
+                0,
+                1_000_000,
+                250_000,
+                0,
+                100_000,
+            );
             drop(db);
-            let daily = SqlSummaryRepository::new()
-                .daily_summary(&DailySummaryQuery { date: day });
+            let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: day });
             let dsh_tk = &daily.tokens_by_host["dsh"];
             assert_eq!(dsh_tk.total, 1_350_000, "DSH 今日 token 不得假零");
             assert_eq!(dsh_tk.uncached_input, 1_000_000);
@@ -1952,14 +2122,30 @@ mod tests {
             let month = crate::clock::current_month_beijing();
             // 有 day（观测到）但四桶全 0（MeasuredZero，不是 Unavailable）。
             let db = seed_authority_db();
-            seed_fact(&db, "d0", "dsh", Some("deepseek-v4-flash"), "turn",
-                      current_month_noon_ms(), 0, 0, 0, 0, 0);
+            seed_fact(
+                &db,
+                "d0",
+                "dsh",
+                Some("deepseek-v4-flash"),
+                "turn",
+                current_month_noon_ms(),
+                0,
+                0,
+                0,
+                0,
+                0,
+            );
             drop(db);
-            let summary = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
+            let summary =
+                SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
             let dsh = &summary.by_host["dsh"];
             // total=0 → 不入 MeteredActual（金额表留空）+ freshness 照报（day
             // 存在 = 测到日，不是 Unavailable）。
-            assert!(dsh.amounts_by_basis.is_empty(), "got {:?}", dsh.amounts_by_basis);
+            assert!(
+                dsh.amounts_by_basis.is_empty(),
+                "got {:?}",
+                dsh.amounts_by_basis
+            );
             assert!(!dsh.has_unresolved);
             assert!(dsh.freshness.last_observed_at.is_some());
             assert_ne!(dsh.freshness.state, FreshnessState::Unavailable);
@@ -1979,18 +2165,62 @@ mod tests {
             let db = seed_authority_db();
             // 三宿主各一笔：dsh 出 MeteredActual（summable），codex 出
             // ApiEquivalent（非 summable），claude 出 MeteredEstimate（非 summable）。
-            seed_fact(&db, "d1", "dsh", Some("deepseek-v4-flash"), "turn", ts, 0, 1_000_000, 0, 0, 100_000);
-            seed_fact(&db, "x1", "codex", Some("gpt-5.6-sol"), "token_count", ts, 0, 800_000, 200_000, 50_000, 80_000);
-            seed_fact(&db, "c1", "claude-code", Some("deepseek-v4-flash"), "message", ts, 0, 1_000_000, 0, 0, 100_000);
+            seed_fact(
+                &db,
+                "d1",
+                "dsh",
+                Some("deepseek-v4-flash"),
+                "turn",
+                ts,
+                0,
+                1_000_000,
+                0,
+                0,
+                100_000,
+            );
+            seed_fact(
+                &db,
+                "x1",
+                "codex",
+                Some("gpt-5.6-sol"),
+                "token_count",
+                ts,
+                0,
+                800_000,
+                200_000,
+                50_000,
+                80_000,
+            );
+            seed_fact(
+                &db,
+                "c1",
+                "claude-code",
+                Some("deepseek-v4-flash"),
+                "message",
+                ts,
+                0,
+                1_000_000,
+                0,
+                0,
+                100_000,
+            );
             drop(db);
-            let summary = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
-            assert!(summary.contract_violations().is_empty(), "{:?}", summary.contract_violations());
+            let summary =
+                SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
+            assert!(
+                summary.contract_violations().is_empty(),
+                "{:?}",
+                summary.contract_violations()
+            );
             assert!(summary.by_host.contains_key("codex"));
             assert!(summary.by_host.contains_key("dsh"));
             assert!(summary.by_host.contains_key("claude-code"));
             assert!(!summary.excluded_hosts.contains("codex"));
             assert!(!summary.excluded_hosts.contains("claude-code"));
-            assert_eq!(summary.excluded_hosts, BTreeSet::from(["workbuddy".to_string()]));
+            assert_eq!(
+                summary.excluded_hosts,
+                BTreeSet::from(["workbuddy".to_string()])
+            );
             // 汇总新鲜度 = 宿主里最新的 last_observed_at（字典序=时间序，两处
             // 格式统一 `YYYY-MM-DDT00:00:00Z`）。
             let max_host = summary
@@ -2020,17 +2250,37 @@ mod tests {
         with_home(|| {
             let month = crate::clock::current_month_beijing();
             let day = crate::clock::today_beijing();
-            let ts = agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap().0
+            let ts = agent_vitals_data::authority_query::beijing_day_bounds_ms(&day)
+                .unwrap()
+                .0
                 + 3_600_000;
             let db = seed_authority_db();
-            seed_fact(&db, "d1", "dsh", Some("deepseek-v4-flash"), "turn", ts, 0,
-                      1_000_000, 0, 0, 100_000);
+            seed_fact(
+                &db,
+                "d1",
+                "dsh",
+                Some("deepseek-v4-flash"),
+                "turn",
+                ts,
+                0,
+                1_000_000,
+                0,
+                0,
+                100_000,
+            );
             drop(db);
-            let summary = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
-            assert!(summary.contract_violations().is_empty(), "{:?}", summary.contract_violations());
+            let summary =
+                SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
+            assert!(
+                summary.contract_violations().is_empty(),
+                "{:?}",
+                summary.contract_violations()
+            );
             let dsh = &summary.by_host["dsh"];
             assert_eq!(dsh.freshness.state, FreshnessState::Fresh);
-            assert!(dsh.amounts_by_basis.contains_key(&BillingBasis::MeteredActual));
+            assert!(dsh
+                .amounts_by_basis
+                .contains_key(&BillingBasis::MeteredActual));
             assert!(summary.total_summable() > 0.0);
         });
     }
@@ -2092,14 +2342,28 @@ mod tests {
         with_home(|| {
             let db = seed_authority_db();
             db.host_bill_put(
-                "wb:wb:2026-09:host_billed:", "workbuddy", "workbuddy", "2026-09",
-                "host_billed", 21_500, "CNY", "credit_json", 1,
+                "wb:wb:2026-09:host_billed:",
+                "workbuddy",
+                "workbuddy",
+                "2026-09",
+                "host_billed",
+                21_500,
+                "CNY",
+                "credit_json",
+                1,
             )
             .unwrap();
             // 另一档进已存在的 provider 条目（叠加，不覆盖）。
             db.host_bill_put(
-                "wb:wb:2026-09:fixed_subscription:", "workbuddy", "workbuddy", "2026-09",
-                "fixed_subscription", 5_000, "CNY", "", 1,
+                "wb:wb:2026-09:fixed_subscription:",
+                "workbuddy",
+                "workbuddy",
+                "2026-09",
+                "fixed_subscription",
+                5_000,
+                "CNY",
+                "",
+                1,
             )
             .unwrap();
 
@@ -2137,19 +2401,57 @@ mod tests {
             let (start, end) =
                 agent_vitals_data::authority_query::beijing_day_bounds_ms("2026-08-11").unwrap();
             // legacy 聚合：A=100、B=200（event_peak=0 的 base 行）。
-            seed_fact(&db, "lg-a", "claude-code", Some("model-a"), "legacy_aggregate", start + 1_000, 0, 100, 0, 0, 0);
-            seed_fact(&db, "lg-b", "claude-code", Some("model-b"), "legacy_aggregate", start + 2_000, 0, 200, 0, 0, 0);
+            seed_fact(
+                &db,
+                "lg-a",
+                "claude-code",
+                Some("model-a"),
+                "legacy_aggregate",
+                start + 1_000,
+                0,
+                100,
+                0,
+                0,
+                0,
+            );
+            seed_fact(
+                &db,
+                "lg-b",
+                "claude-code",
+                Some("model-b"),
+                "legacy_aggregate",
+                start + 2_000,
+                0,
+                200,
+                0,
+                0,
+                0,
+            );
             // 实时行只覆盖 A（B 的会话文件已轮转的场景）。
-            seed_fact(&db, "rt-a", "claude-code", Some("model-a"), "assistant-usage", start + 3_000, 0, 50, 0, 0, 0);
+            seed_fact(
+                &db,
+                "rt-a",
+                "claude-code",
+                Some("model-a"),
+                "assistant-usage",
+                start + 3_000,
+                0,
+                50,
+                0,
+                0,
+                0,
+            );
             let merged = merged_claude_days(db.conn(), start, end);
             drop(db);
             let day = &merged["2026-08-11"];
             assert_eq!(
-                day["model-a"]["input_tokens"], json!(50),
+                day["model-a"]["input_tokens"],
+                json!(50),
                 "同模型实时行赢，不与 legacy 相加"
             );
             assert_eq!(
-                day["model-b"]["input_tokens"], json!(200),
+                day["model-b"]["input_tokens"],
+                json!(200),
                 "实时缺席的模型保留 legacy 聚合，不随整日被丢弃"
             );
         });
@@ -2164,8 +2466,21 @@ mod tests {
             let month = crate::clock::current_month_beijing();
             let day = crate::clock::today_beijing();
             let db = seed_authority_db();
-            let (start, _) = agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap();
-            seed_fact(&db, "rt-a", "claude-code", Some("claude-opus-5"), "assistant-usage", start + 1_000, 0, 10, 0, 0, 1);
+            let (start, _) =
+                agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap();
+            seed_fact(
+                &db,
+                "rt-a",
+                "claude-code",
+                Some("claude-opus-5"),
+                "assistant-usage",
+                start + 1_000,
+                0,
+                10,
+                0,
+                0,
+                1,
+            );
             db.conn()
                 .execute(
                     "INSERT INTO data_quality_issues(issue_id, scope_type, scope_key, code,
@@ -2177,7 +2492,9 @@ mod tests {
                 .unwrap();
             drop(db);
             let repo = SqlSummaryRepository::new();
-            let summary = repo.monthly_summary(&MonthlySummaryQuery { month: month.clone() });
+            let summary = repo.monthly_summary(&MonthlySummaryQuery {
+                month: month.clone(),
+            });
             let claude = &summary.by_host["claude-code"];
             assert_eq!(
                 claude.freshness.state,
@@ -2189,7 +2506,10 @@ mod tests {
                 "Partial 保留 last_observed_at（观测过，只是部分是聚合兜底）"
             );
             // 其他宿主不受 claude 的标记影响。
-            assert_eq!(summary.by_host["codex"].freshness.state, FreshnessState::Unavailable);
+            assert_eq!(
+                summary.by_host["codex"].freshness.state,
+                FreshnessState::Unavailable
+            );
         });
     }
 
@@ -2197,23 +2517,41 @@ mod tests {
     fn sql_repository_reports_unavailable_with_no_facts() {
         with_home(|| {
             let repo = SqlSummaryRepository::new();
-            let summary = repo.monthly_summary(&MonthlySummaryQuery { month: "2020-01".to_string() });
-            assert!(summary.contract_violations().is_empty(), "{:?}", summary.contract_violations());
+            let summary = repo.monthly_summary(&MonthlySummaryQuery {
+                month: "2020-01".to_string(),
+            });
+            assert!(
+                summary.contract_violations().is_empty(),
+                "{:?}",
+                summary.contract_violations()
+            );
             for host in ["dsh", "codex", "claude-code"] {
                 assert_eq!(
                     summary.by_host[host].freshness.state,
                     FreshnessState::Unavailable,
                     "host={host}"
                 );
-                assert!(summary.by_host[host].amounts_by_basis.is_empty(), "host={host}");
+                assert!(
+                    summary.by_host[host].amounts_by_basis.is_empty(),
+                    "host={host}"
+                );
             }
             assert!(!summary.excluded_hosts.contains("dsh"));
             assert!(summary.excluded_hosts.contains("workbuddy"));
             assert_eq!(summary.coverage.measured_fields, 3);
 
-            let daily = repo.daily_summary(&DailySummaryQuery { date: "2020-01-01".to_string() });
-            assert!(daily.contract_violations().is_empty(), "{:?}", daily.contract_violations());
-            assert_eq!(daily.by_host["dsh"].freshness.state, FreshnessState::Unavailable);
+            let daily = repo.daily_summary(&DailySummaryQuery {
+                date: "2020-01-01".to_string(),
+            });
+            assert!(
+                daily.contract_violations().is_empty(),
+                "{:?}",
+                daily.contract_violations()
+            );
+            assert_eq!(
+                daily.by_host["dsh"].freshness.state,
+                FreshnessState::Unavailable
+            );
         });
     }
 
@@ -2224,10 +2562,20 @@ mod tests {
             // 格式非法（不是 YYYY-MM/YYYY-MM-DD）不能编数字——`beijing_month_
             // bounds_ms`/`beijing_day_bounds_ms` 返回 None，退化路径与"这个
             // 窗口没有任何事实"完全一样：诚实的 Unavailable，不是 panic。
-            let summary = repo.monthly_summary(&MonthlySummaryQuery { month: "2026-9".to_string() });
-            assert_eq!(summary.by_host["dsh"].freshness.state, FreshnessState::Unavailable);
-            let daily = repo.daily_summary(&DailySummaryQuery { date: "not-a-date".to_string() });
-            assert_eq!(daily.by_host["dsh"].freshness.state, FreshnessState::Unavailable);
+            let summary = repo.monthly_summary(&MonthlySummaryQuery {
+                month: "2026-9".to_string(),
+            });
+            assert_eq!(
+                summary.by_host["dsh"].freshness.state,
+                FreshnessState::Unavailable
+            );
+            let daily = repo.daily_summary(&DailySummaryQuery {
+                date: "not-a-date".to_string(),
+            });
+            assert_eq!(
+                daily.by_host["dsh"].freshness.state,
+                FreshnessState::Unavailable
+            );
         });
     }
 
@@ -2238,15 +2586,38 @@ mod tests {
     fn sql_repository_codex_day_reports_api_equivalent_amount() {
         with_home(|| {
             let day = crate::clock::today_beijing();
-            let (start_ms, _) = agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap();
+            let (start_ms, _) =
+                agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap();
             let db = seed_authority_db();
-            seed_fact(&db, "f1", "codex", Some("gpt-5.6-sol"), "token_count", start_ms + 3_600_000, 0, 800_000, 200_000, 50_000, 80_000);
+            seed_fact(
+                &db,
+                "f1",
+                "codex",
+                Some("gpt-5.6-sol"),
+                "token_count",
+                start_ms + 3_600_000,
+                0,
+                800_000,
+                200_000,
+                50_000,
+                80_000,
+            );
             drop(db);
 
-            let sql_daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: day });
-            assert!(sql_daily.contract_violations().is_empty(), "{:?}", sql_daily.contract_violations());
+            let sql_daily =
+                SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: day });
+            assert!(
+                sql_daily.contract_violations().is_empty(),
+                "{:?}",
+                sql_daily.contract_violations()
+            );
             let codex = &sql_daily.by_host["codex"];
-            assert!(codex.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent), "{codex:?}");
+            assert!(
+                codex
+                    .amounts_by_basis
+                    .contains_key(&BillingBasis::ApiEquivalent),
+                "{codex:?}"
+            );
             assert!(sql_daily.tokens_by_host["codex"].total > 0);
         });
     }
@@ -2282,8 +2653,19 @@ mod tests {
                 agent_vitals_data::authority_query::beijing_month_bounds_ms(past).unwrap();
             let db = seed_authority_db();
             // 1M uncached、全 off-peak（event_peak=0）、deepseek-v4-flash。
-            seed_fact(&db, "j1", "dsh", Some("deepseek-v4-flash"), "turn",
-                      p_start + 12 * 3_600_000, 0, 1_000_000, 0, 0, 0);
+            seed_fact(
+                &db,
+                "j1",
+                "dsh",
+                Some("deepseek-v4-flash"),
+                "turn",
+                p_start + 12 * 3_600_000,
+                0,
+                1_000_000,
+                0,
+                0,
+                0,
+            );
 
             // 早快照：uncached off_peak 砍到 0.5（当前卡是 1.5）。captured 在
             // 7 月开始之前 → asof(7 月末) 命中它。
@@ -2295,18 +2677,21 @@ mod tests {
                 "codex_pricing": crate::sessions::codex_cost::load_codex_pricing(),
             })
             .to_string();
-            db.pricing_snapshot_put("v-old", "test", &snap_old, p_start - 1_000).unwrap();
+            db.pricing_snapshot_put("v-old", "test", &snap_old, p_start - 1_000)
+                .unwrap();
             // 近快照 = 当前卡，captured 在「现在」→ 只对当前/未来月生效。
             let snap_now = json!({
                 "pricing": agent_vitals_domain::cost::load_pricing(),
                 "codex_pricing": crate::sessions::codex_cost::load_codex_pricing(),
             })
             .to_string();
-            db.pricing_snapshot_put("v-now", "test", &snap_now, crate::sql_sync::now_ms()).unwrap();
+            db.pricing_snapshot_put("v-now", "test", &snap_now, crate::sql_sync::now_ms())
+                .unwrap();
             drop(db);
 
-            let s = SqlSummaryRepository::new()
-                .monthly_summary(&MonthlySummaryQuery { month: past.to_string() });
+            let s = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery {
+                month: past.to_string(),
+            });
             let dsh = &s.by_host["dsh"];
             let metered = dsh
                 .amounts_by_basis
@@ -2332,27 +2717,50 @@ mod tests {
             let (p_start, _) =
                 agent_vitals_data::authority_query::beijing_month_bounds_ms(past).unwrap();
             let db = seed_authority_db();
-            seed_fact(&db, "a", "dsh", Some("deepseek-v4-flash"), "turn",
-                      p_start + 5 * 86_400_000 + 3_600_000, 0, 600_000, 0, 0, 40_000);
-            seed_fact(&db, "b", "dsh", Some("deepseek-v4-flash"), "turn",
-                      p_start + 18 * 86_400_000 + 3_600_000, 0, 400_000, 0, 0, 20_000);
+            seed_fact(
+                &db,
+                "a",
+                "dsh",
+                Some("deepseek-v4-flash"),
+                "turn",
+                p_start + 5 * 86_400_000 + 3_600_000,
+                0,
+                600_000,
+                0,
+                0,
+                40_000,
+            );
+            seed_fact(
+                &db,
+                "b",
+                "dsh",
+                Some("deepseek-v4-flash"),
+                "turn",
+                p_start + 18 * 86_400_000 + 3_600_000,
+                0,
+                400_000,
+                0,
+                0,
+                20_000,
+            );
             let mut cheap = agent_vitals_domain::cost::load_pricing();
             cheap["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"]
                 ["input_uncached"]["off_peak"] = json!(0.4);
-            cheap["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"]
-                ["output"]["off_peak"] = json!(1.2);
+            cheap["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"]["output"]
+                ["off_peak"] = json!(1.2);
             let snap = json!({
                 "pricing": cheap,
                 "codex_pricing": crate::sessions::codex_cost::load_codex_pricing(),
             })
             .to_string();
-            db.pricing_snapshot_put("v-old", "test", &snap, p_start - 1_000).unwrap();
+            db.pricing_snapshot_put("v-old", "test", &snap, p_start - 1_000)
+                .unwrap();
             drop(db);
 
-            let monthly = SqlSummaryRepository::new()
-                .monthly_summary(&MonthlySummaryQuery { month: past.to_string() });
-            let monthly_dsh = monthly
-                .by_host["dsh"]
+            let monthly = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery {
+                month: past.to_string(),
+            });
+            let monthly_dsh = monthly.by_host["dsh"]
                 .amounts_by_basis
                 .get(&BillingBasis::MeteredActual)
                 .copied()

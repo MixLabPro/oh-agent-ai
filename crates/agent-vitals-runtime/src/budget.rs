@@ -1,8 +1,7 @@
 //! 预算告警的 **I/O + 渲染侧**（CLI `budget show`）。
 //!
 //! 决策段在 core（`agent_vitals_domain::budget::evaluate_alert`），本模块只做：
-//! 读 config.toml / today.json / month.json / month-archive.json / budget.json、
-//! 北京日期/now 生成、文本与 JSON 渲染。与 `cost.rs` 同款边界 —— 计算本体
+//! 读 SQL 预算配置、北京日期/now 生成、文本与 JSON 渲染。与 `cost.rs` 同款边界 —— 计算本体
 //! 单一真相源在 core，这里不重写任何算术（连 7 日均、自适应 floor 都在 core）。
 //!
 //! 逐字节一致性由 `tests/test_cli_matrix.py::CliMatrix` 的
@@ -17,31 +16,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use crate::clock::{current_month_beijing, today_beijing};
-use crate::home::data_home;
-
-/// 数据根 `state/` 目录 —— 与 Python `state.state_dir()` 同路径
-/// （`paths.data_home() / "state"`）。这里只读不建目录（纯读路径，不许有写
-/// 副作用 —— xbar 每 5 分钟 tick 都调它）。
-fn state_dir() -> PathBuf {
-    data_home().join("state")
-}
 
 /// `config.toml` 位置，库根显式传入（Tier B 预算卡参数化：Tauri
 /// `read_overview_at(dh)` 组装入口不走进程 `AGENT_VITALS_HOME`）。生产路径
 /// 的调用方各自传 `data_home()`。
 fn config_path_at(dh: &Path) -> PathBuf {
     dh.join("config.toml")
-}
-
-fn archive_path() -> PathBuf {
-    state_dir().join("month-archive.json")
-}
-
-/// 读 JSON 文件；缺文件 / 解析失败 → None（与 Python `state._read` 同款
-/// 「缺列 None」语义 —— 不编 0，不崩溃）。
-fn read_json(p: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(p).ok()?;
-    serde_json::from_str(&text).ok()
 }
 
 fn now_unix() -> i64 {
@@ -158,50 +138,6 @@ fn load_config_at(dh: &Path) -> Value {
         parsed.insert(key, parse_scalar(val));
     }
     agent_vitals_domain::budget::merged_config(&Value::Object(parsed))
-}
-
-/// 复刻 `state.py::read_month` —— 返回「已过滤到目标月」的 `days` map。
-///
-/// `month=None` → 当前真实月（读 month.json 并按 `_month_key(d) == target`
-/// 过滤）；历史月读归档（`month-archive.json` 的 `{"months": {"YYYY-MM": {"days"}}}`
-/// 包装）。月份无数据 → None（「缺列不编列」—— 不返回空壳让调用方误以为
-/// 那个月花了 0 元）。
-pub(crate) fn read_month(month: Option<&str>) -> Option<Value> {
-    let current = current_month_beijing();
-    let target = month.map(str::to_owned).unwrap_or_else(|| current.clone());
-    if target == current {
-        let data = read_json(&state_dir().join("month.json")).unwrap_or_else(|| json!({}));
-        let mut days = Map::new();
-        if let Some(obj) = data.get("days").and_then(|v| v.as_object()) {
-            for (d, b) in obj {
-                // Python `_month_key(d)` = `str(d)[:7]`；字符切片而非字节切片，
-                // 对非 ASCII 键安全（日期键总是 ASCII，但保持镜像语义）。
-                if d.chars().take(7).collect::<String>() == target {
-                    days.insert(d.clone(), b.clone());
-                }
-            }
-        }
-        if days.is_empty() {
-            return None;
-        }
-        Some(Value::Object(days))
-    } else {
-        let archive = read_json(&archive_path())?;
-        let entry = archive
-            .get("months")
-            .and_then(|v| v.as_object())
-            .and_then(|m| m.get(&target))
-            .and_then(|e| e.as_object())?;
-        let days = entry.get("days").and_then(|v| v.as_object())?;
-        if days.is_empty() {
-            return None;
-        }
-        let mut out = Map::new();
-        for (d, b) in days {
-            out.insert(d.clone(), b.clone());
-        }
-        Some(Value::Object(out))
-    }
 }
 
 /// `budget show` 文本输出 —— 逐字节镜像 `cli.py` 的 show handler（不含
@@ -754,47 +690,6 @@ mod tests {
         write(&home.join("config.toml"), "[scan]\nmax_depth = 5\n");
         let cfg2 = load_config();
         assert_eq!(cfg2["daily_cny"], 30.0); // 默认回来
-        drop(_guard);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 日期过滤、缺月 None —— 与 `state.read_month` 同语义。
-    #[test]
-    fn read_month_filters_to_target_and_returns_none_for_empty() {
-        let _env = crate::ENV_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!("av-budget-rm-{}", std::process::id()));
-        let home = tmp_home(&dir);
-        let _guard = TestEnvGuard::set(&home);
-        let current = current_month_beijing();
-        let write_month = |days: &str| write(&state_dir().join("month.json"), days);
-        // 当月一天 + 上/下月一天 → 只留当月
-        let d_cur = format!("{current}-15");
-        let (y, m) = current.split_once('-').unwrap();
-        let prev = if m == "01" {
-            format!("{}-12", y.parse::<i64>().unwrap() - 1)
-        } else {
-            format!("{}-{:02}", y, m.parse::<i64>().unwrap() - 1)
-        };
-        write_month(&format!(
-            r#"{{"month": "{current}", "days": {{"{d_cur}": {{}}, "{prev}-20": {{}}}}}}"#
-        ));
-        let days = read_month(None).unwrap();
-        let obj = days.as_object().unwrap();
-        assert_eq!(obj.len(), 1);
-        assert!(obj.contains_key(&d_cur));
-        // 无数据 → None（不是空壳）
-        write_month(r#"{"days": {}}"#);
-        assert!(read_month(None).is_none());
-        // 历史月：归档包装
-        write(
-            &archive_path(),
-            &format!(r#"{{"months": {{"{prev}": {{"days": {{"{prev}-20": {{}}}}}}}}}}"#),
-        );
-        let days = read_month(Some(&prev)).unwrap();
-        assert!(days
-            .as_object()
-            .unwrap()
-            .contains_key(&format!("{prev}-20")));
         drop(_guard);
         let _ = std::fs::remove_dir_all(&dir);
     }
