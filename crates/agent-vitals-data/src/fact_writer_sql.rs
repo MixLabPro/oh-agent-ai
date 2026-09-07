@@ -33,9 +33,19 @@ pub struct SqlFactWriter<'a> {
     now_ms: i64,
 }
 
-/// ISO 事实时间戳 → UTC 毫秒。解析链路与 `store::peak_of` 同款（19 字节
-/// 定宽前缀 + 尾部：小数秒任意、Z/z → 偏移 0、±HH:MM → 偏移归一）。
-/// 格式不齐全 → None（记 invalid，不猜时间）。
+/// ISO 事实时间戳 → 是否高峰（1/0）。派生链：`iso_to_ms` → `is_peak_slot`
+/// （北京 9-12/14-18 工作日，与 fold 侧 peak_* 桶同一把尺）。解析失败/缺 ts
+/// → 0：宁可少算峰值不臆造。（Phase 4.3 从退役的 `store` 模块移来——它此前
+/// 与 `iso_to_ms` 分居两处，现在合并到唯一调用点旁。）
+pub(crate) fn peak_of(ts: &str) -> i64 {
+    match iso_to_ms(ts) {
+        Some(ms) => i64::from(agent_vitals_domain::usage::is_peak_slot(ms)),
+        None => 0,
+    }
+}
+
+/// ISO 事实时间戳 → UTC 毫秒。尾部：小数秒任意、Z/z → 偏移 0、±HH:MM →
+/// 偏移归一）。格式不齐全 → None（记 invalid，不猜时间）。
 pub(crate) fn iso_to_ms(ts: &str) -> Option<i64> {
     let b = ts.as_bytes();
     if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
@@ -402,7 +412,7 @@ impl<'a> SqlFactWriter<'a> {
             let profile = r.s("source_profile");
             let skey = session_key(&host, &ns, &sid, profile);
             let ts_ms = ts_ms.expect("doc 只在事件时间可 parse 时才 Some——此处必有毫秒"); // 见上方校验：doc 非 None 即 ts 已 parse
-            let peak = crate::store::peak_of(r.s("event_ts_utc").unwrap_or_default());
+            let peak = peak_of(r.s("event_ts_utc").unwrap_or_default());
             let model_id = r.s("model_id").or_else(|| r.s("model_raw")).map(str::to_string);
             let provider_id = r.s("provider_id").or_else(|| r.s("billing_source")).map(str::to_string);
 
@@ -799,7 +809,7 @@ mod tests {
         assert_eq!(run, "run-1");
         let expect_ms = iso_to_ms("2026-09-05T10:00:00.000Z").unwrap();
         assert_eq!(ts, expect_ms, "event_ts_ms 是 UTC 毫秒");
-        let expect_peak = crate::store::peak_of("2026-09-05T10:00:00.000Z");
+        let expect_peak = peak_of("2026-09-05T10:00:00.000Z");
         assert_eq!(pk, expect_peak, "event_peak 与 store 同尺");
         std::fs::remove_file(&path).ok();
     }

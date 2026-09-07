@@ -465,14 +465,6 @@ enum Cmd {
         #[arg(long)]
         write: bool,
     },
-    /// Rebuild the SQLite facts index from the authoritative JSONL
-    /// (`<data_home>/facts/<host>.jsonl`). Spec §5.1: SQLite is a deletable,
-    /// rebuildable projection — this is the DoD #1 repair path. Stage B.
-    DataRebuildIndex {
-        /// Output the rebuild report as JSON (default: human summary)
-        #[arg(long = "json")]
-        rows_json: bool,
-    },
     /// Routine facts sync across all three hosts (locate, checkpoint diff,
     /// emit, then SQL authority + legacy dual-write). Idempotent: re-runs
     /// skip unchanged files (source_files fingerprints) and dedup facts by
@@ -2136,52 +2128,6 @@ session_store={store} fold={fold}"
         return;
     }
 
-    // data-rebuild-index（Stage B）：删 SQLite 索引 → 从权威 JSONL 全量重放。
-    // 这是 DoD #1（"删除 SQLite 后可由事实文件重建等价 projection"）的
-    // 人工入口；索引层的日常自愈在 ingest_service 里自动发生。
-    if let Some(Cmd::DataRebuildIndex { rows_json }) = &args.cmd {
-        let report = agent_vitals_runtime::ingest_service::rebuild_index(
-            &agent_vitals_runtime::home::data_home(),
-        );
-        match report {
-            Ok(outcome) => {
-                if *rows_json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&outcome).unwrap_or_default()
-                    );
-                } else {
-                    println!(
-                        "Rebuilt facts index: {} facts across {} host file(s){}",
-                        outcome.rebuild.total,
-                        outcome.rebuild.hosts.len(),
-                        if outcome.rebuild.repaired_tails > 0 {
-                            format!(" ({} crash tail(s) repaired)", outcome.rebuild.repaired_tails)
-                        } else {
-                            String::new()
-                        },
-                    );
-                    for (host, n) in &outcome.rebuild.hosts {
-                        println!("  {host}: {n}");
-                    }
-                    if let Some(ret) = &outcome.retention {
-                        for (host, r) in ret.as_object().map(|m| m.iter()).into_iter().flatten() {
-                            println!(
-                                "  retention[{host}]: kept {} (+{} undated), dropped {} (cutoff {})",
-                                r["kept"], r["kept_undated"], r["dropped"], r["cutoff_month"],
-                            );
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("data-rebuild-index failed: {e}");
-                std::process::exit(2);
-            }
-        }
-        return;
-    }
-
     // sync-facts（Stage B 遗留收口）：三宿主例行 ingest——退休路径第 ① 步。
     // 托盘 tick 未来也调这一条（不各自长文件枚举）。
     if let Some(Cmd::SyncFacts { rows_json }) = &args.cmd {
@@ -2502,7 +2448,7 @@ session_store={store} fold={fold}"
                 "critical"
             } else if !integrity.eq_ignore_ascii_case("ok") {
                 hints.push(format!("SQLite integrity_check: {integrity}"));
-                hints.push("the authority DB does NOT self-heal — rebuild the index with `agent-vitals data-rebuild-index` (replays the authoritative facts JSONL)".into());
+                hints.push("the authority DB does NOT self-heal — rebuild from the authoritative facts JSONL: `rm ~/.agent-vitals/agent-vitals.sqlite3*` then `agent-vitals data-migrate`".into());
                 "critical"
             } else if enabled && facts == 0 {
                 hints.push("sql_authority_enabled=true but the authority DB has zero facts — run `agent-vitals sync-facts`; do not read zero as 'no spend'".into());

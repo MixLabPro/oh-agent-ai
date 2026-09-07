@@ -28,7 +28,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use agent_vitals_data::evidence::{AppendError, AppendOutcome, FactWriter, replay, retain};
-use agent_vitals_data::store::{default_index_path, FactsIndex};
 use serde_json::Value;
 
 /// 事实宿主封闭词表（与三个 emitter 的 `host` stamp 同源）。
@@ -74,14 +73,6 @@ pub struct IngestReport {
     /// unroutable 事实的具体问题（最多留 8 条，同 `invalid_problems`）。
     #[serde(default)]
     pub unroutable_problems: Vec<String>,
-    /// Stage B：本次调用是否触发了索引 rebuild（全新库播种 / 版本迁移 /
-    /// 自愈）——true 说明索引层发生过"从权威源重放"，观察者可以据此判断
-    /// 索引新鲜度。
-    #[serde(default)]
-    pub index_rebuilt: bool,
-    /// Stage B：索引新插入的事实数（INSERT OR IGNORE 后的真新增）。
-    #[serde(default)]
-    pub index_inserted: usize,
 }
 
 /// 把一批 UsageFact 事实写入 `<data_home>/facts/<host>.jsonl`（按事实自身的
@@ -202,43 +193,10 @@ pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, S
         report.hosts.push(r);
     }
 
-    // Stage B：JSONL（权威）落盘后同步更新可重建索引。索引失败先自愈一次
-    // （整库从 JSONL 重建——DoD #1 的路径），再重试插入；仍失败才 Err
-    // （磁盘级问题）。注意顺序：权威写在前、投影在后，中途失败重跑依然
-    // exactly-once（JSONL 幂等 + 索引 fact_id 主键幂等）。
-    let facts_dir = data_home.join("facts");
-    let (mut index, mut index_rebuilt) =
-        FactsIndex::open_or_rebuild(&default_index_path(data_home), &facts_dir)
-            .map_err(|e| format!("facts index: {e}"))?;
-    let mut index_inserted = 0usize;
-    for fact in facts {
-        match index.insert_fact(fact) {
-            Ok(true) => index_inserted += 1,
-            Ok(false) => {}
-            Err(e) => {
-                // 自愈：索引层坏 ≠ 权威层坏——整库从 JSONL 重建后再试一次。
-                // **必须换上新连接**：drop_and_rebuild 删了旧库文件，继续用
-                // 旧连接会把后续写进孤儿 inode（unlink 后 fd 还活着）。
-                match FactsIndex::drop_and_rebuild(&default_index_path(data_home), &facts_dir) {
-                    Ok((fresh, _report)) => {
-                        let inserted = fresh
-                            .insert_fact(fact)
-                            .map_err(|e2| format!("facts index (rebuild attempted): {e2}; first error: {e}"))?;
-                        index_inserted += inserted as usize;
-                        index_rebuilt = true;
-                        index = fresh;
-                    }
-                    Err(e2) => {
-                        return Err(format!(
-                            "facts index (rebuild attempted): {e2}; first error: {e}"
-                        ))
-                    }
-                }
-            }
-        }
-    }
-    report.index_inserted = index_inserted;
-    report.index_rebuilt = index_rebuilt;
+    // Phase 4.3：旧 `index.sqlite3` 投影已退役——facts JSONL 落盘即完成。
+    // SQL 权威库（`agent-vitals.sqlite3`）由 `sync_service::write_flat_facts_to_
+    // authority` 在本函数之前独立写入（`sync_facts` 的双写顺序：权威在前、
+    // JSONL 在后），不在此处。
     Ok(report)
 }
 
@@ -252,8 +210,8 @@ fn month_shift(month: &str, months_back: u32) -> String {
 
 /// Stage C（spec §6）：UsageFact 13 个月滚动保留。对每个宿主 facts 文件
 /// 执行 `retain`（无日期行保留、原子替换、幂等）。调用方负责持有 lease——
-/// 本函数在 `rebuild_index` 的锁内被调，不在别处自动触发（对权威的重写
-/// 必须是显式维护动作，不藏在每次 ingest 里）。
+/// `sync_facts` 每天首轮在 `.ingest.lock` 内调一次（对权威 JSONL 的重写
+/// 是显式维护动作，节流到日粒度，不藏在每次 ingest 里）。
 pub fn enforce_retention(data_home: &Path, current_month: &str) -> Result<Value, String> {
     // spec §6「UsageFact 13 个月保留」钉死为「保留最近 13 个自然月」
     // （含当月）→ cutoff = current − 12（两端含）。fencepost 常量与
@@ -286,46 +244,6 @@ pub fn enforce_retention(data_home: &Path, current_month: &str) -> Result<Value,
         }
     }
     Ok(Value::Object(out))
-}
-
-/// Stage B：`data-rebuild-index` 的服务面——删库并从权威 JSONL 全量重放
-/// （spec §5 建议命令；CLI 只做参数解析与渲染，编排在这里）。
-pub fn rebuild_index(data_home: &Path) -> Result<RebuildOutcome, String> {
-    // 与 ingest 互斥（审查 P2-5）：重建期间另一个 ingest 拿旧连接写孤儿
-    // inode 是白干 + 竞态。同锁同 TTL。
-    let _lease = crate::lease::acquire_blocking(
-        &data_home.join("facts").join(".ingest.lock"),
-        "facts-rebuild",
-        60_000,
-        5_000,
-    )
-    .map_err(|e| format!("facts rebuild lease: {e}"))?;
-    let facts_dir = data_home.join("facts");
-    // 重建前先做保留滚动（同一把锁内对权威重写一次，随后索引从重放自然
-    // 反映截断后的权威）。retention 失败不挡 rebuild——保留策略的目标是
-    // 控制规模，不是账目正确性；报告/错误面随返回值如实上呈（审查 P2：
-    // 丢掉报告 = 滚动对操作者不可观测）。
-    // 审计 #2：retention 是对权威 JSONL 的不可逆重写，失败面必须可见——
-    // .ok() 丢弃错误 = 操作者以为滚动做了实际一条没删。失败走 stderr（保持
-    // 不挡 rebuild——保留策略的目标是控制规模，不是账目正确性）。
-    let retention = enforce_retention(data_home, &crate::clock::current_month_beijing())
-        .map_err(|e| eprintln!("retention failed: {e}"))
-        .ok();
-    let (_idx, report) =
-        FactsIndex::drop_and_rebuild(&default_index_path(data_home), &facts_dir)
-            .map_err(|e| format!("facts index rebuild: {e}"))?;
-    Ok(RebuildOutcome { rebuild: report, retention })
-}
-
-/// `data-rebuild-index` 的完整产出：索引重建报告 + 保留滚动报告。
-#[derive(Debug, serde::Serialize)]
-pub struct RebuildOutcome {
-    #[serde(flatten)]
-    pub rebuild: agent_vitals_data::store::RebuildReport,
-    /// None = 权威里没有需要滚动的宿主文件，或 retention 失败（失败时错误
-    /// 已上 stderr——审计 #2：不可逆重写的失败面不许静默）。消费方如实区分。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retention: Option<Value>,
 }
 
 #[cfg(test)]
@@ -385,27 +303,6 @@ mod tests {
         assert_eq!(r2.hosts[0].appended, 0);
         assert_eq!(r2.hosts[0].duplicate, 2);
         assert_eq!(r2.hosts[0].total_after, 2);
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn ingest_populates_the_rebuildable_index() {
-        let home = tmp_home("index");
-        ingest_facts(&home, &[fact("codex", "e1"), fact("codex", "e2")]).unwrap();
-        // 索引可从权威源重建出同一份投影（DoD #1 的日常面）。
-        let idx = FactsIndex::open_or_rebuild(
-            &default_index_path(&home),
-            &home.join("facts"),
-        )
-        .unwrap()
-        .0;
-        assert_eq!(idx.fact_count().unwrap(), 2);
-        let tokens = idx.tokens_by_host(Some("2026-09")).unwrap();
-        assert_eq!(tokens["codex"]["uncached_input"], serde_json::json!(200));
-        // 同批重跑：索引零新增（fact_id 主键幂等）。
-        let r2 = ingest_facts(&home, &[fact("codex", "e1")]).unwrap();
-        assert_eq!(r2.index_inserted, 0);
-        assert!(!r2.index_rebuilt);
         let _ = std::fs::remove_dir_all(&home);
     }
 

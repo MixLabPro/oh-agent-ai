@@ -5,7 +5,7 @@
 //! - 不依赖 `agent-vitals-hosts`：Stage 0.3 起会加只读 JSON adapter，那时
 //!   仍不需要 hosts（读的是宿主已经写好的 state JSON，不是宿主 wire），
 //!   真正需要 hosts 的时机待 Stage 0.3 具体设计时再评估；
-//! - `rusqlite` 已按计划在 Stage B 引入（spec §5.1，`store.rs` 可重建索引）
+//! - `rusqlite` 已按计划引入（spec §5.1，v0.9.1 SQL 权威库 `authority.rs`）
 //!   ——从禁用清单移除是按计划推进，不是"悄悄长出第二权威源"；
 //! - 不反依赖二进制/wasm/runtime：依赖方向是
 //!   `apps/{cli,desktop} → agent-vitals-runtime → agent-vitals-data →
@@ -71,11 +71,10 @@ fn data_dependencies_stay_within_domain_serde_and_sqlite() {
              任何一项都要同步改这条测试与 Cargo.toml 的注释，不能悄悄放开"
         );
     }
-    // rusqlite 必须在场（Stage B 起索引是本 crate 的一部分）——不在场说明
-    // 有人把 store.rs 的依赖拆走了，索引与 JSONL 的同源去重会裂开。
+    // rusqlite 必须在场——v0.9.1 SQL 权威库 `authority.rs` 是本 crate 的核心。
     assert!(
         keys.iter().any(|k| k == "rusqlite"),
-        "agent-vitals-data 必须显式依赖 rusqlite（store.rs 可重建索引）"
+        "agent-vitals-data 必须显式依赖 rusqlite（authority.rs SQL 权威库）"
     );
 }
 

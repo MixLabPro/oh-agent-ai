@@ -7,18 +7,18 @@
 //! 明写 UI 呈现/同步调度不归这里管）。六个子模块对应 spec §5 的目录树：
 //!
 //! - [`evidence`]   —— append / replay / reconciliation（Stage A）
-//! - [`store`]      —— SQLite schema / migration / transaction（Stage B）
+//! - [`authority`]  —— v0.9.1 SQL 权威库 `agent-vitals.sqlite3`（schema /
+//!   迁移 / 事务 / 保留；**不自愈**——损坏需 `rm + data-migrate` 重建）
+//! - [`authority_query`] —— `usage_facts` → 各宿主计价桶形状的反查
+//! - [`fact_writer_sql`] —— `usage_facts` 的唯一 SQL 写入口
 //! - [`repository`] —— typed query/mutation 边界，上层唯一入口
 //! - [`billing`]    —— `BillingContext` / cost basis（Stage B）
 //! - [`coverage`]   —— source/denominator coverage 的跨宿主汇总
 //! - [`projection`] —— 组装 `agent_vitals_domain::data_contract` 的
 //!   `MonthlySummary`/`DailySummary` 等版本化 DTO
 //!
-//! **Stage B 现状**：`evidence`（Stage A：append/replay/尾面修复）、
-//! `store`（Stage B：SQLite 可重建索引——schema_version 不匹配/删库 →
-//! 从 JSONL 全量重放）已落地；`repository` 仍是 trait 签名（SQLite 实现
-//! 与 Stage 0 JSON adapter 的换位是 Stage B 后续步），`billing`/`coverage`
-//! 等待 Stage B 的 P2 批。
+//! **v0.9.1 Phase 4.3**：Stage A/B 的旧 `store`（`index.sqlite3` 可丢弃投影）
+//! 已退役——`authority` 是唯一 SQLite 层。
 //!
 //! **`SummaryRepository` 的实现不在这个 crate 里**：spec §3.1 的依赖表把
 //! 本 crate 的允许依赖限定在 Domain（+ 未来的 SQLite 驱动），不包括
@@ -35,4 +35,3 @@ pub mod coverage;
 pub mod evidence;
 pub mod projection;
 pub mod repository;
-pub mod store;
