@@ -4,7 +4,7 @@
 > 日期：2026-09-07  
 > 状态：待评审  
 > 依赖：`AGENT_VITALS_V0_9_1_SQL_AUTHORITY_MIGRATION_SPEC.md`  
-> 目标版本：v0.9.1 内部开发版；达到发布门槛后随 v1.0.0 提供本机只读能力
+> 目标版本：v0.9.1 提供内部 MVP；v0.9.2/v0.10 补齐解释能力；达到发布门槛后随 v1.0.0 提供本机只读能力
 
 ## 1. 一句话定义
 
@@ -166,6 +166,22 @@ Data MCP ── CLI ── Tauri ── HTML
 - 首版不允许调用方更改时区，避免同一“今天”产生不同答案。
 
 ## 7. 工具清单
+
+交付版本不是一次性承诺。当前 SQL 已能可靠支撑 v0.9.1 核心查询；成本归因仍需完成历史价格重放，问题与 Skill 查询仍需 `workflow_events` writer/reader。工具按以下门槛启用：
+
+| 工具 | 首次启用 | 前置条件 |
+|---|---|---|
+| `data_status` | v0.9.1 internal MVP | authority schema 与健康查询 |
+| `usage_hourly` | v0.9.1 internal MVP | `usage_facts` 小时查询 |
+| `summary_daily` | v0.9.1 internal MVP | SQL Summary Repository |
+| `summary_monthly` | v0.9.1 internal MVP | SQL Summary Repository |
+| `data_quality_issues` | v0.9.1 internal MVP | 脱敏 issue reader |
+| `authority_reconcile` | v0.9.1 internal only | legacy 双轨仍在迁移期可用 |
+| `cost_breakdown` | v0.9.2 | 按事实时间重放价格版本 |
+| `sessions_search` / `session_detail` | v0.9.2 | 稳定 session_ref、会话聚合查询 |
+| `issues_summary` / `skills_summary` | v0.10 | `workflow_events` writer、reader 与覆盖度 |
+
+未达到前置条件的工具不得用空实现提前注册。客户端可通过 MCP capability 列表判断可用能力。
 
 ### 7.1 `data_status`
 
@@ -443,7 +459,7 @@ Data MCP ── CLI ── Tauri ── HTML
 
 内部版本使用本机真实数据执行，但报告只保存聚合和哈希引用：
 
-1. 对今天、本月、跨月边界分别运行 U01–U10。
+1. 对今天、本月、跨月边界运行当前阶段已启用的 U 用例；到 v1.0.0 前完成 U01–U10。
 2. 将 MCP 与 CLI/Tauri 结果逐值比较。
 3. 对异常差异下钻到脱敏事实 ID；禁止复制原始对话到测试报告。
 4. 所有差异必须分类为 `exact`、`explained` 或 `mismatch`。
@@ -463,27 +479,35 @@ Data MCP ── CLI ── Tauri ── HTML
 
 - 实现 `data-mcp serve`、stdio 生命周期和 capability 列表。
 - 实现 `data_status`、`usage_hourly`、`summary_daily`、`summary_monthly`。
+- 实现脱敏后的 `data_quality_issues`。
 - 完成 M01–M05、M08–M14。
 
 退出条件：Agent 能可靠回答使用曲线、日/月汇总和数据可信度。
 
-### Phase M2：解释与下钻
-
-- 实现 `cost_breakdown`、`sessions_search`、`session_detail`。
-- 实现 `issues_summary`、`skills_summary`、`data_quality_issues`。
-- 完成脱敏、稳定分页和证据覆盖测试。
-
-退出条件：Agent 能从异常曲线下钻到会话、成本原因、重复问题和 Skill 证据。
-
-### Phase M3：迁移验收能力
+### Phase M2：v0.9.1 迁移验收能力
 
 - internal profile 实现 `authority_reconcile`。
 - MCP、CLI、Tauri 三消费面对账。
-- 用真实本机数据完成 U01–U10，并关闭所有未解释 mismatch。
+- 用真实本机数据完成当前已具备证据的 U01、U02、U08、U09，并关闭所有未解释 mismatch。
 
-退出条件：Data MCP 可以作为 v0.9.1 SQL 权威迁移的自动验收接口。
+退出条件：Data MCP 可以作为 v0.9.1 SQL 权威迁移的自动验收接口；M0–M2 即 v0.9.1 Data MCP MVP。
 
-### Phase M4：v1.0.0 发布准备
+### Phase M3：v0.9.2 成本解释与会话下钻
+
+- 实现 `cost_breakdown`、`sessions_search`、`session_detail`。
+- 完成历史价格版本重放、脱敏、稳定分页和证据覆盖测试。
+
+退出条件：Agent 能从异常曲线下钻到会话并解释成本变化；完成 U03–U05、U10。
+
+### Phase M4：v0.10 问题与 Skill 洞察
+
+- 接通 `workflow_events` writer、reader 和覆盖度。
+- 实现 `issues_summary`、`skills_summary`。
+- 完成重复问题、Skill 分子/分母、未知态和证据覆盖测试。
+
+退出条件：完成 U06–U07；Agent 能基于证据回答重复问题和 Skill 健康度。
+
+### Phase M5：v1.0.0 发布准备
 
 - 公开构建确认不注册内部工具。
 - 安装、发现、升级、schema 不兼容和卸载路径验证。
@@ -511,7 +535,7 @@ Data MCP v1 完成必须同时满足：
 
 - **v0.8**：外部 MCP 使用证据与健康分析；不是本 Data MCP 的前置依赖，未完成部分继续独立管理。
 - **v0.9**：提供事实模型、清洗与产品汇总能力；剩余产品功能可与 Data MCP 契约阶段并行，但不能绕过统一 repository。
-- **v0.9.1**：SQL 权威迁移是 Data MCP 的数据前提；M0–M3 是迁移验收和读路径收口的放大器。
+- **v0.9.1**：SQL 权威迁移是 Data MCP 的数据前提；M0–M2 是迁移验收和读路径收口的放大器。
 - **v0.9.2**：可在稳定事实之上强化异常解释、质量守门、可观测性和性能；不得反向改变已发布的 MCP v1 语义。
 - **v0.10**：TraceGraph、Issue、Action 等更高层能力可新增工具或 v2 字段，但必须基于明确证据，不污染 v1 的用量与成本事实。
 
@@ -524,4 +548,3 @@ Data MCP v1 完成必须同时满足：
 5. SQL 尚为候选权威时允许内部查询，但必须显式标记 `candidate`。
 6. 会话下钻使用不可反推的 `session_ref`，不暴露原生标识。
 7. 缺失证据必须表现为 partial/unavailable/unknown，永不伪装成零。
-
