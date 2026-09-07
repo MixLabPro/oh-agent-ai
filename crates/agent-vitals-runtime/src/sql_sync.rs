@@ -22,6 +22,7 @@ use std::path::Path;
 
 use agent_vitals_data::authority::{AuthorityDb, AuthorityError};
 use agent_vitals_data::fact_writer_sql::SqlFactWriter;
+use rusqlite::OptionalExtension;
 use serde_json::Value;
 
 /// 注入时钟（Phase 1.5）：runtime 是唯一读时钟层。
@@ -78,6 +79,11 @@ const TRIGGER_MIGRATION: &str = "migration";
 /// 与 `usage_fact.rs::CURRENT_SCHEMA_VERSION` 的演进纪律一致。
 const PARSER_VERSION: i64 = 1;
 
+/// 当前事实解析器版本；同步差量必须把它和文件指纹一起比较。
+pub const fn parser_version() -> i64 {
+    PARSER_VERSION
+}
+
 /// `finish_run.error_code` 的稳定词（错误细节进 error_detail，code 可机器判）。
 const ERR_ALL_FILES_FAILED: &str = "all_files_failed";
 const ERR_DB_ERROR: &str = "db_error";
@@ -125,7 +131,10 @@ fn group_facts_by_session(facts: &[Value]) -> (SessionGroups, Vec<Value>) {
             .and_then(Value::as_str)
             .unwrap_or("default")
             .to_string();
-        match groups.iter_mut().find(|(k, p, _)| *k == sid && *p == profile) {
+        match groups
+            .iter_mut()
+            .find(|(k, p, _)| *k == sid && *p == profile)
+        {
             Some((_, _, v)) => v.push(fact.clone()),
             None => groups.push((sid.to_string(), profile, vec![fact.clone()])),
         }
@@ -250,6 +259,110 @@ pub struct SqlSyncOutcome {
     pub errors: Vec<String>,
 }
 
+/// SQL 权威库中的源文件指纹。例行同步用它决定是否需要重解析；没有行就是 dirty。
+///
+/// 路径只在进程内参与 FNV-1a，SQL 永远只保存 `path_hash`，与 writer 的
+/// `upsert_source_file` 完全同源。`None` 不是错误，也不代表文件不存在——它只
+/// 表示此前没有一次成功同步把该路径提交到 authority。
+pub fn source_file_fingerprint(
+    db: &AuthorityDb,
+    host: &str,
+    path: &Path,
+) -> Result<Option<(u64, u64, i64)>, AuthorityError> {
+    let path_hash =
+        agent_vitals_domain::source_identity::fnv1a64_hex(path.to_string_lossy().as_bytes());
+    db.conn()
+        .query_row(
+            "SELECT size_bytes, mtime_ns, parser_version FROM source_files
+             WHERE host = ?1 AND path_hash = ?2",
+            rusqlite::params![host, path_hash],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(AuthorityError::from)
+}
+
+/// SQL-only batch writer for emitters whose facts span multiple source files
+/// (notably Codex). Every successfully emitted source still gets its own
+/// `source_files` fingerprint row; facts may share the batch source because
+/// their wire format does not preserve a one-file mapping.
+pub fn write_flat_facts_with_sources(
+    db: &AuthorityDb,
+    host: &str,
+    machine_namespace: &str,
+    sources: &[(std::path::PathBuf, (u64, u64))],
+    facts: &[Value],
+    now: i64,
+) -> Result<SqlSyncOutcome, String> {
+    let run_id = new_run_id(TRIGGER_SYNC);
+    db.begin_run(&run_id, TRIGGER_SYNC, now)
+        .map_err(|e| format!("begin_run {run_id}: {e}"))?;
+
+    let mut outcome = SqlSyncOutcome::default();
+    let result: Result<(), AuthorityError> = db.with_immediate_txn(|conn| {
+        let writer = SqlFactWriter::new(conn, &run_id, now)?;
+        for (path, (size_bytes, mtime_ns)) in sources {
+            writer.upsert_source_file(host, path, *size_bytes, *mtime_ns, None, PARSER_VERSION)?;
+            outcome.files_synced += 1;
+        }
+        if facts.is_empty() {
+            return Ok(());
+        }
+        let source_id = writer.upsert_batch_source(host)?;
+        let (groups, missing) = group_facts_by_session(facts);
+        for fact in &missing {
+            conn.execute(
+                "INSERT INTO data_quality_issues(
+                     issue_id, scope_type, scope_key, code, severity,
+                     first_seen_at_ms, last_seen_at_ms, detail_json)
+                 VALUES (?1, 'fact', ?2, 'missing_native_session_id', 'warning',
+                         ?3, ?3, ?4)
+                 ON CONFLICT(scope_type, scope_key, code)
+                 DO UPDATE SET last_seen_at_ms = excluded.last_seen_at_ms",
+                rusqlite::params![
+                    format!(
+                        "missing_sid:{}",
+                        fact.get("fact_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                    ),
+                    source_id,
+                    now,
+                    format!("fact 缺 native_session_id：{fact}"),
+                ],
+            )
+            .map_err(AuthorityError::from)?;
+            outcome.rejected += 1;
+        }
+        for (sid, profile, group) in groups {
+            writer.upsert_session(host, machine_namespace, &sid, Some(&profile), now)?;
+            let report = writer.insert_facts(&group, &source_id, &sid)?;
+            outcome.inserted += report.inserted;
+            outcome.duplicate += report.duplicate;
+            outcome.rejected += report.rejected;
+        }
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => db
+            .finish_run(&run_id, "succeeded", None, None, now)
+            .map_err(|e| format!("finish_run: {e}"))
+            .map(|_| outcome),
+        Err(e) => {
+            let message = e.to_string();
+            let _ = db.finish_run(&run_id, "failed", Some(ERR_DB_ERROR), Some(&message), now);
+            Err(message)
+        }
+    }
+}
+
 /// **迁移期双写的权威侧写入**（spec §6.1 迁移窗口）：调用方（sync_facts）
 /// emit 一次，同一批事实既走旧链（ingest_facts，存量读面保鲜）也走本函数
 /// （权威库）。`files` = (路径, 指纹, 该文件 facts)——emit 只发生一次，
@@ -289,14 +402,8 @@ pub fn write_facts_to_authority(
             } else {
                 None
             };
-            let source_id = w.upsert_source_file(
-                host,
-                path,
-                *size_bytes,
-                *mtime_ns,
-                file_sid,
-                PARSER_VERSION,
-            )?;
+            let source_id =
+                w.upsert_source_file(host, path, *size_bytes, *mtime_ns, file_sid, PARSER_VERSION)?;
             if facts.is_empty() {
                 outcome.files_synced += 1;
                 continue;
@@ -314,7 +421,9 @@ pub fn write_facts_to_authority(
                     rusqlite::params![
                         format!(
                             "missing_sid:{}",
-                            f.get("fact_id").and_then(Value::as_str).unwrap_or("unknown")
+                            f.get("fact_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown")
                         ),
                         source_id,
                         now,
@@ -381,7 +490,9 @@ pub fn write_flat_facts_to_authority(
                 rusqlite::params![
                     format!(
                         "missing_sid:{}",
-                        f.get("fact_id").and_then(Value::as_str).unwrap_or("unknown")
+                        f.get("fact_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
                     ),
                     source_id,
                     now,
@@ -521,7 +632,9 @@ pub fn sync_host_sql(
                     rusqlite::params![
                         format!(
                             "missing_sid:{}",
-                            f.get("fact_id").and_then(Value::as_str).unwrap_or("unknown")
+                            f.get("fact_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown")
                         ),
                         source_id,
                         now,
@@ -735,7 +848,7 @@ mod tests {
     // ---- 端到端：writer 由并行 Agent 实现，未落地前 run 会 panic -- 这里
     // 端到端（writer 已落地，spec §8.2 矩阵）：
 
-        #[test]
+    #[test]
     fn migrate_checkpoint_populates_source_files_and_renames_file() {
         let home = tmp_home("mige2e");
         std::fs::create_dir_all(home.join("facts")).unwrap();
@@ -776,7 +889,7 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
     }
 
-        #[test]
+    #[test]
     fn migrate_renamed_checkpoint_is_noop_on_second_call() {
         let home = tmp_home("migidem");
         std::fs::create_dir_all(home.join("facts")).unwrap();
@@ -798,7 +911,7 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
     }
 
-        #[test]
+    #[test]
     fn sync_hosts_wraps_facts_source_session_in_one_transaction() {
         use agent_vitals_domain::usage_fact::build_usage_fact;
 

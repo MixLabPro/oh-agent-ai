@@ -17,7 +17,7 @@
 | Phase 1 schema 与迁移框架 | ✅ | authority.rs（DDL v1 全 12 表 + 版本闸 + 中断清扫 + 事务帮助器 + retention）+ 时钟注入（sql_sync::now_ms）+ 迁移记录（sync_runs/migrations 表）。**1.7 损坏恢复文档化**：`data-status` 加 `PRAGMA integrity_check` + `health`/`hints`（critical → 退出码 1），58c38b8 |
 | Phase 2 清洗写入与同步 | ✅ | 三路并发实现合流（c06de2e）+ 审查收口（6776fe0）+ 收口批（b1f8b38）+ 迁移哨兵真 bug 修复（1f67331）。2.1–2.3/2.6/2.7 复选框此前滞后——功能随三路合流全部落地，本次盘点补勾（命令名是 `data-*` 前缀，非 `data <sub>`）。2.8（host_bills + pricing_snapshots）cf04121/64aa87d |
 | Phase 3 SQL repository 与读路径切换 | ✅ | 3.1–3.7 全部完成（见各条）。Tier B 逐消费点切完 + Q01–Q14 端到端 fixture（b082a79）。**Q13 价格历史重放**（`PricingCards::asof`，`SqlSummaryRepository`/`calendar_month` 按查询窗口月末时点选历史价卡）3eecf09——3.5 Tier B 的最后一个后续项收口 |
-| Phase 4 双轨验收与旧路径退役 | 🔨 | 4.1（77a59ab）+ 4.2（e339cce）+ 4.4 可自动化部分（58c38b8）✅。**4.3 旧路径退役**：用户 2026-09-07 决定提前执行——Stage 1–5a 完成（ad4e33e/b5ca48c/98602a7/8498023），`JsonSummaryRepository` + `data-reconcile*` + `budget show` legacy + `index.sqlite3`/`store` 全部退役，`SummaryRepository` 只剩 SQL 一个实现。**Stage 5b-a 已完成**：DSH tick 仅写导航快照，旧业务 state 的写入口与主二进制命令已删。**仍待**：`data-unresolved` 迁出 ledger/fold 与 checkpoint 的 SQL 化；真机翻开关 + 观察期（用户本机，spec §6.1 需备份）。 |
+| Phase 4 双轨验收与旧路径退役 | 🔨 | 4.1（77a59ab）+ 4.2（e339cce）+ 4.4 可自动化部分（58c38b8）✅。**4.3 旧路径退役**：用户 2026-09-07 决定提前执行——Stage 1–5a 完成（ad4e33e/b5ca48c/98602a7/8498023），`JsonSummaryRepository` + `data-reconcile*` + `budget show` legacy + `index.sqlite3`/`store` 全部退役，`SummaryRepository` 只剩 SQL 一个实现。**Stage 5b-a/5b-b 已完成**：DSH tick 仅写导航快照，旧业务 state 的写入口与主二进制命令已删；例行同步以 SQL `source_files` 做差量索引，JSON checkpoint 只在首启迁移后改名留档。**仍待**：`data-unresolved` 迁出 ledger/fold；真机翻开关 + 观察期（用户本机，spec §6.1 需备份）。 |
 
 ### claude ledger 去重 bug——发现、修复、真机验证（2026-09-06，非本 Phase 引入）
 
@@ -605,8 +605,11 @@ UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列
     budget 写入口、`evaluate_alert_from_state` / `evaluate_alert_after_fold`、
     `takeover::fold_session` 的 merge/write_alert 分支和主二进制的旧 state
     命令。`test_oneline_lockstep` 改为只对导航协议做 Python mirror 差分，并新增
-    「旧业务 JSON 不得复活」断言。**5b-b 仍待**：`data-unresolved` 迁出
-    ledger/codex fold、以及 JSON checkpoint 的 SQL 化。**
+    「旧业务 JSON 不得复活」断言。**5b-b（本次）已完成**：例行 `sync-facts`
+    用 `source_files(host,path_hash,size_bytes,mtime_ns)` 作为唯一差量索引，
+    source 元数据和 facts 在同一 SQL 事务提交；旧 `.ingest-checkpoint.json`
+    只在首启迁入后改名为 `.migrated`，运行时不再读写。**5b-c 仍待**：
+    `data-unresolved` 迁出 ledger/codex fold。**
   - [ ] **Stage 6** — 文档 + plan + spec §10 sweep（本次）+ 合并分支到 main。
 - [x] **4.4 人工验收（可自动化部分，58c38b8）** — `tests/test_data_status_
   health.py`（5 例 AGENT_VITALS_BIN 二进制用例）：删库 → critical 退出 1

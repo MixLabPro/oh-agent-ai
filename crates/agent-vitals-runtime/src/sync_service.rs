@@ -1,16 +1,15 @@
 //! Stage B 遗留收口：Runtime 共享 sync service —— 三宿主**例行** facts ingest。
 //!
-//! `ingest_service` 是「一批事实怎么落盘」；本模块回答「**哪些会话文件该被
-//! emit**」：文件发现（各宿主 sources 的 locate 面）→ checkpoint 差量 →
-//! emitter → ingest。这是 month.json/today.json 退休路径（§5）的第 ① 步——
+//! 本模块回答「**哪些会话文件该被 emit**」：文件发现（各宿主 sources 的
+//! locate 面）→ `source_files` SQL 指纹差量 → emitter → authority 写入。这是
+//! month.json/today.json 退休路径（§5）的第 ① 步——
 //! facts 平面从「手动 `--write` 诊断」升级为「可例行驱动的生产流」（托盘
 //! tick / CLI 定时都调这里，不各自长文件枚举）。
 //!
-//! **checkpoint 是纯性能优化，不是正确性来源**：指纹 `(size, mtime_ns)`
-//! 与 `claude_cost` fold checkpoint 同款；checkpoint 丢失/回退的最坏后果是
-//! 重发 → writer 层 fact_id exactly-once 全部 Duplicate，账目零影响。所以
-//! checkpoint 更新放在 ingest **之后**（崩溃在两者之间 = 下次重发，安全），
-//! 失败的文件不进 checkpoint（下次重试，错误随报告如实上呈）。
+//! **`source_files` 是纯性能优化，不是正确性来源**：指纹 `(size, mtime_ns)`
+//! 丢失/回退的最坏后果是重发 → writer 层 fact_id exactly-once 全部 Duplicate，
+//! 账目零影响。源文件元数据与事实同一 SQL 事务提交；失败文件没有指纹行，
+//! 下次必然重试。
 //!
 //! **namespace**：例行服务用 `takeover::machine_namespace()`（机器身份，
 //! 跨次运行稳定）——与 CLI `--write` 要求调用方显式传入不冲突：那是诊断
@@ -19,19 +18,11 @@
 //!
 //! **调用方**：托盘 tick（desktop `run_facts_sync`，claude-sync 成功后叠跑）
 //! 与 CLI `sync-facts`。**不在此处的**：watcher（§7.1 门槛未触发）、SQLite
-//! 投影更新（`ingest_facts` 内已同步索引）。
+//! 旧 JSON 投影更新（已退役）。
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
-
-/// checkpoint 版本（形状变更时递增；旧文件整体作废，全量重发由 exactly-once
-/// 兜底）。
-const CHECKPOINT_SCHEMA_VERSION: u64 = 1;
-
-fn checkpoint_path(data_home: &Path) -> PathBuf {
-    data_home.join("facts").join(".ingest-checkpoint.json")
-}
 
 /// 单文件指纹（size + mtime 纳秒）——与 `claude_cost` fold checkpoint 同款。
 /// **无时间戳字段**：指纹就是状态，字节确定性由构造保证。
@@ -45,37 +36,7 @@ fn fingerprint(path: &Path) -> Option<(u64, u64)> {
     Some((meta.len(), mtime.as_nanos() as u64))
 }
 
-fn load_checkpoint(data_home: &Path, ns: &str) -> serde_json::Map<String, Value> {
-    crate::state::read_json(&checkpoint_path(data_home))
-        .and_then(|v| {
-            // 版本不匹配 → 整体作废（全量重发，exactly-once 兜底）。
-            // **machine_namespace 变化也整体作废（审查 P2-3b）**：machine.json
-            // 重置后旧 ns 的 checkpoint 会让所有文件静默 skip，新 ns 的事实
-            // 永不为旧文件产出——ns 是事实身份的一部分，必须与 checkpoint
-            // 同代。陈旧条目（文件已删）不清理：dedup 兜底，已知无害累积。
-            let ns_ok = v.get("machine_namespace").and_then(Value::as_str) == Some(ns);
-            if ns_ok
-                && v.get("schema_version").and_then(Value::as_u64)
-                    == Some(CHECKPOINT_SCHEMA_VERSION)
-            {
-                v.get("files").and_then(Value::as_object).cloned()
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
-}
-
-fn save_checkpoint(data_home: &Path, ns: &str, files: &serde_json::Map<String, Value>) {
-    let doc = serde_json::json!({
-        "schema_version": CHECKPOINT_SCHEMA_VERSION,
-        "machine_namespace": ns,
-        "files": Value::Object(files.clone()),
-    });
-    crate::state::atomic_write_json(&checkpoint_path(data_home), &doc);
-}
-
-/// 单宿主同步结果。`errors` 是「该文件本轮没 ingest、没进 checkpoint」的
+/// 单宿主同步结果。`errors` 是「该文件本轮没写进 authority」的
 /// 明细——下次 sync 会重试它们（永久坏文件会每次重试并每次出现在这里，
 /// 这是诚实噪声：坏文件不该被静默遗忘）。
 #[derive(Debug, Default, serde::Serialize)]
@@ -101,36 +62,31 @@ pub struct SyncReport {
     pub total_duplicate: usize,
 }
 
-/// 对单个宿主执行「发现 → 差量 → emit → ingest → checkpoint」。
+/// 对单个宿主执行「发现 → SQL 差量 → emit → authority 写入」。
 /// `emit` 的宿主差异收敛在这个闭包里：输入差量文件集，输出事实批（或
 /// 逐文件错误）。
 fn sync_host(
     host: &str,
-    data_home: &Path,
     ns: &str,
-    db: Option<&agent_vitals_data::authority::AuthorityDb>,
+    db: &agent_vitals_data::authority::AuthorityDb,
     files: Vec<PathBuf>,
-    checkpoint: &mut serde_json::Map<String, Value>,
     report: &mut HostSyncReport,
-) {
+) -> Result<(), String> {
     report.files_seen = files.len();
     let now = crate::sql_sync::now_ms();
     let mut dirty: Vec<(PathBuf, (u64, u64))> = Vec::new();
     for path in files {
         let fp = fingerprint(&path);
-        let key = path.to_string_lossy().to_string();
-        let recorded = checkpoint.get(&key).and_then(|v| {
-            // host 比对（审查 P2-3b）：同名文件在两个宿主发现面出现（理论
-            // 形状）时不得互相当作已同步。
-            if v.get("host").and_then(Value::as_str) != Some(host) {
-                return None;
-            }
-            let size = v.get("size").and_then(Value::as_u64)?;
-            let mtime = v.get("mtime_ns").and_then(|x| x.as_u64())?;
-            Some((size, mtime))
-        });
+        let recorded = crate::sql_sync::source_file_fingerprint(db, host, &path)
+            .map_err(|e| format!("source_files fingerprint: {e}"))?;
         match (fp, recorded) {
-            (Some(fp), Some(r)) if r == fp => report.files_skipped += 1, // 未变，跳过
+            // 解析器升级即使源文件字节不变也必须重放；fact_id 幂等吸收
+            // 未变事实，新增解析结果会正常写入。
+            (Some(fp), Some((size, mtime, parser_version)))
+                if (size, mtime) == fp && parser_version == crate::sql_sync::parser_version() =>
+            {
+                report.files_skipped += 1
+            }
             (Some(fp), _) => dirty.push((path, fp)),
             (None, _) => report
                 .errors
@@ -139,7 +95,7 @@ fn sync_host(
     }
 
     let mut facts: Vec<Value> = Vec::new();
-    let mut synced_keys: Vec<(String, (u64, u64))> = Vec::new();
+    let mut synced_sources: Vec<(PathBuf, (u64, u64))> = Vec::new();
     // codex 的 emitter 跨文件 `seen` 去重只在**单次调用内**成立（live/
     // archived 同 stem 双收靠它）——差量集必须一批喂进去，逐文件调用会把
     // 去重丢给 ingest 层（账不错但 duplicate 通胀 + 双倍 emit；tick 常驻后
@@ -147,13 +103,13 @@ fn sync_host(
     let codex_dirty: Vec<PathBuf> = dirty.iter().map(|(p, _)| p.clone()).collect();
     if host == "codex" && !codex_dirty.is_empty() {
         match agent_vitals_hosts::codex_usage_fact::codex_rollouts_to_usage_facts(
-            &codex_dirty, ns, "default",
+            &codex_dirty,
+            ns,
+            "default",
         ) {
             Ok(r) => {
                 facts.extend(r.facts);
-                for (path, fp) in &dirty {
-                    synced_keys.push((path.to_string_lossy().to_string(), *fp));
-                }
+                synced_sources.extend(dirty.iter().cloned());
             }
             Err(e) => {
                 // 批量 Err = 任一文件读失败（read 层错误）——全部重试，
@@ -178,85 +134,36 @@ fn sync_host(
                 )
                 .map(|r| r.facts)
             }
-            "dsh" => agent_vitals_hosts::dsh_usage_fact::dsh_session_to_usage_facts(
-                path, ns, None,
-            )
-            .map(|r| r.facts),
+            "dsh" => agent_vitals_hosts::dsh_usage_fact::dsh_session_to_usage_facts(path, ns, None)
+                .map(|r| r.facts),
             other => Err(format!("unknown host `{other}`")),
         };
         match emit {
             Ok(f) => {
                 facts.extend(f);
-                synced_keys.push((path.to_string_lossy().to_string(), *fp));
+                synced_sources.push((path.clone(), *fp));
             }
             Err(e) => report.errors.push(format!("{}: {e}", path.display())),
         }
     }
 
-    // **迁移期双写（spec §6.1）**：同一批 emit 事实先写权威库（SQL），
-    // 再走旧链 ingest（读面保鲜）——两轨都成功的文件才进 checkpoint
-    // （任一轨失败 → 该批下轮重发；fact_id exactly-once 保证重发零双计）。
-    // Phase 3 读路径切换完成后撤旧链调用。
-    // **权威侧未写入 = 不进 checkpoint**（外部审计 P1-1）：db=None（打开
-    // 失败：并发 BUSY/损坏/新版本）或写入 Err 时，这批事实权威库永远缺失
-    // ——checkpoint 照走 = 静默漏计且无恢复信号。改为不进 checkpoint：
-    // 下轮重发重试权威（旧链侧 fact_id 幂等吸收，无副作用）。
-    // facts 非空且权威库在 → 必须写成功；权威库不在（open 失败）时同样
-    // 视为未写入——两条失败路径都不进 checkpoint。
-    if !facts.is_empty() {
-        let mut write_ok = true;
-        match db {
-            Some(db) => {
-                match crate::sql_sync::write_flat_facts_to_authority(
-                    db, host, ns, &facts, now,
-                ) {
-                    Ok(o) => {
-                        report.sql_inserted = Some(o.inserted);
-                        report.sql_duplicate = Some(o.duplicate);
-                        if !o.errors.is_empty() {
-                            report.errors.extend(o.errors);
-                        }
-                    }
-                    Err(e) => {
-                        write_ok = false;
-                        report.errors.push(format!("authority: {e}"));
-                    }
-                }
-            }
-            None => {
-                write_ok = false;
-                report
-                    .errors
-                    .push("authority: db unavailable — facts NOT checkpointed".to_string());
-            }
-        }
-        if !write_ok {
-            return;
-        }
+    if !synced_sources.is_empty() {
+        let outcome = crate::sql_sync::write_flat_facts_with_sources(
+            db,
+            host,
+            ns,
+            &synced_sources,
+            &facts,
+            now,
+        )?;
+        report.files_synced += outcome.files_synced;
+        report.appended = outcome.inserted;
+        report.duplicate = outcome.duplicate;
+        report.sql_inserted = Some(outcome.inserted);
+        report.sql_duplicate = Some(outcome.duplicate);
+        report.errors.extend(outcome.errors);
     }
-    if !facts.is_empty() {
-        match crate::ingest_service::ingest_facts(data_home, &facts) {
-            Ok(r) => {
-                if let Some(h) = r.hosts.iter().find(|h| h.host == host) {
-                    report.appended = h.appended;
-                    report.duplicate = h.duplicate;
-                }
-            }
-            Err(e) => {
-                // ingest 失败（索引/磁盘）→ 本轮全部不进 checkpoint，下次重试。
-                report.errors.push(format!("ingest: {e}"));
-                return;
-            }
-        }
-    }
-    // 失败路径已在上面 return——能到这里 = 双轨都成功，checkpoint 安全。
-    for (key, fp) in synced_keys {
-        report.files_synced += 1;
-        checkpoint.insert(
-            key,
-            serde_json::json!({"size": fp.0, "mtime_ns": fp.1, "host": host}),
-        );
-    }
+    Ok(())
 }
 
 /// 三宿主例行同步入口。幂等：重复调用第二次基本全 skipped / duplicate。
@@ -276,26 +183,20 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         .map_err(|e| format!("facts ns bootstrap lease: {e}"))?;
         crate::takeover::machine_namespace()
     };
-    let mut checkpoint = load_checkpoint(data_home, &ns);
-
-    // **权威库（v0.9.1）**：checkpoint 迁移 + 每日保留（13 个月，§5.4）。
-    // 打开失败不挡旧链（错误上 stderr，报告面 sql_* 字段为 None 如实呈现）。
-    let authority = match agent_vitals_data::authority::AuthorityDb::open(
+    // SQL authority 既是事实库也是例行同步的唯一差量索引。打开失败就失败，不能
+    // 回落 JSON checkpoint 或旧 ingest 链，否则会制造「看似同步成功、SQL 未写」。
+    let authority = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
         crate::sql_sync::now_ms(),
-    ) {
-        Ok(a) => Some(a),
-        Err(e) => {
-            eprintln!("authority open failed: {e}");
-            None
-        }
-    };
-    if let Some(db) = &authority {
-        if let Err(e) =
-            crate::sql_sync::migrate_json_checkpoint(db, data_home, crate::sql_sync::now_ms())
-        {
-            eprintln!("checkpoint migration failed: {e}");
-        }
+    )
+    .map_err(|e| format!("authority open failed: {e}"))?;
+    if let Err(e) =
+        crate::sql_sync::migrate_json_checkpoint(&authority, data_home, crate::sql_sync::now_ms())
+    {
+        return Err(format!("checkpoint migration failed: {e}"));
+    }
+    {
+        let db = &authority;
         let bj_day = crate::clock::today_beijing();
         let ret_path = data_home.join("facts").join(".authority-retention.json");
         let last: Option<String> = crate::state::read_json(&ret_path).and_then(|v| {
@@ -310,15 +211,18 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             let run_id = crate::sql_sync::new_run_id("maintenance");
             let _ = db.begin_run(&run_id, "maintenance", crate::sql_sync::now_ms());
             let cutoff = crate::sql_sync::retention_cutoff_ms(
-                    &crate::clock::current_month_beijing(),
-                    crate::sql_sync::RETENTION_MONTHS_MINUS_ONE,
-                )
-                .unwrap_or(0);
+                &crate::clock::current_month_beijing(),
+                crate::sql_sync::RETENTION_MONTHS_MINUS_ONE,
+            )
+            .unwrap_or(0);
             let ret = db.retention_usage_facts(cutoff);
             let _ = db.finish_run(
                 &run_id,
                 if ret.is_ok() { "succeeded" } else { "failed" },
-                ret.as_ref().err().map(|_| "retention_failed".to_string()).as_deref(),
+                ret.as_ref()
+                    .err()
+                    .map(|_| "retention_failed".to_string())
+                    .as_deref(),
                 ret.as_ref().err().map(|e| e.to_string()).as_deref(),
                 crate::sql_sync::now_ms(),
             );
@@ -333,34 +237,6 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
                     }
                 }
                 Err(e) => eprintln!("authority retention failed: {e}"),
-            }
-        }
-    }
-
-    // **保留滚动常态化（外部审计 P2）**：此前只有手动 data-rebuild-index
-    // 触发——用户从不手动重建时权威 JSONL 无限增长，13 个月滚动承诺落空。
-    // 按「本地日」节流（checkpoint 记 last_retention_date）：每天首轮 sync
-    // 跑一次，5 分钟 tick 的其余轮次零成本。
-    {
-        let bj_day = crate::clock::today_beijing();
-        let last = checkpoint
-            .get("_meta")
-            .and_then(|m| m.get("last_retention_date"))
-            .and_then(Value::as_str);
-        // matches! 直接比 Option<String>（as_deref 会触发 needless lint）。
-        if !matches!(&last, Some(d) if d == &bj_day) {
-            // Option<String> 与 &str 的比较经 as_deref 归一（clippy 认可的写法）。
-            if let Err(e) = crate::ingest_service::enforce_retention(
-                data_home,
-                &crate::clock::current_month_beijing(),
-            ) {
-                eprintln!("retention failed: {e}");
-            }
-            let meta = checkpoint
-                .entry("_meta".to_string())
-                .or_insert_with(|| json!({}));
-            if let Some(m) = meta.as_object_mut() {
-                m.insert("last_retention_date".to_string(), json!(bj_day));
             }
         }
     }
@@ -379,9 +255,7 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         ),
         (
             "codex",
-            agent_vitals_hosts::codex_session::codex_rollout_files(
-                &crate::summary::codex_home(),
-            ),
+            agent_vitals_hosts::codex_session::codex_rollout_files(&crate::summary::codex_home()),
         ),
         (
             "dsh",
@@ -395,29 +269,14 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             host: host.to_string(),
             ..Default::default()
         };
-        sync_host(
-            host,
-            data_home,
-            &ns,
-            authority.as_ref(),
-            files,
-            &mut checkpoint,
-            &mut r,
-        );
+        sync_host(host, &ns, &authority, files, &mut r)?;
         report.total_appended += r.appended;
         report.total_duplicate += r.duplicate;
         report.hosts.push(r);
     }
-    // checkpoint 无变化时跳过写盘（审查 P1-2 的连带：无谓重建会与迁移
-    // 哨兵逻辑互相触发）。
-    if checkpoint != load_checkpoint(data_home, &ns) {
-        save_checkpoint(data_home, &ns, &checkpoint);
-    }
     // Phase 2.8：落当前价格快照（§5.3）。幂等——价卡不变则无新版本。
-    if let Some(db) = &authority {
-        if let Err(e) = crate::sql_sync::snapshot_current_pricing(db) {
-            eprintln!("sync-facts warning (pricing snapshot): {e}");
-        }
+    if let Err(e) = crate::sql_sync::snapshot_current_pricing(&authority) {
+        eprintln!("sync-facts warning (pricing snapshot): {e}");
     }
     Ok(report)
 }
@@ -457,7 +316,12 @@ mod tests {
 
     /// 一份最小 codex rollout（一条 token_count）。
     fn codex_rollout(home: &Path) -> PathBuf {
-        let dir = home.join(".codex").join("sessions").join("2026").join("09").join("05");
+        let dir = home
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("09")
+            .join("05");
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("rollout-2026-09-05T17-00-00-abc.jsonl");
         std::fs::write(
@@ -514,7 +378,7 @@ mod tests {
             assert_eq!(cx.files_synced, 1, "首次全量：codex 1 文件");
             assert!(r1.total_appended > 0);
 
-            // 第二次：全部 skipped（checkpoint 指纹命中），零新增。
+            // 第二次：全部 skipped（SQL source_files 指纹命中），零新增。
             let r2 = sync_facts(&data).unwrap();
             for h in &r2.hosts {
                 assert_eq!(h.files_synced, 0, "{host} 二次不应有处理", host = h.host);
@@ -540,24 +404,68 @@ mod tests {
     }
 
     #[test]
-    fn failing_files_are_reported_not_checkpointed() {
+    fn parser_version_change_replays_an_unchanged_source() {
+        with_isolated_home(|home| {
+            let source = claude_session(home);
+            let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
+            let first = sync_facts(&data).unwrap();
+            assert_eq!(first.hosts[0].files_synced, 1);
+
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&data),
+                crate::sql_sync::now_ms(),
+            )
+            .unwrap();
+            let path_hash = agent_vitals_domain::source_identity::fnv1a64_hex(
+                source.to_string_lossy().as_bytes(),
+            );
+            db.conn()
+                .execute(
+                    "UPDATE source_files SET parser_version = parser_version - 1
+                     WHERE host = 'claude-code' AND path_hash = ?1",
+                    rusqlite::params![path_hash],
+                )
+                .unwrap();
+
+            let second = sync_facts(&data).unwrap();
+            let claude = second
+                .hosts
+                .iter()
+                .find(|host| host.host == "claude-code")
+                .unwrap();
+            assert_eq!(claude.files_synced, 1, "解析器升级必须重放原文件");
+            assert_eq!(claude.appended, 0, "原事实仍由 fact_id 幂等吸收");
+            assert_eq!(claude.duplicate, 2);
+        });
+    }
+
+    #[test]
+    fn failing_files_are_reported_and_not_recorded_in_sql() {
         with_isolated_home(|home| {
             let dir = home.join(".claude/projects/p-bad");
             std::fs::create_dir_all(&dir).unwrap();
             // 不可读会导致 Err（read 失败走 Err 串）；用一个坏 JSON 行文件
-            // ——emitter 对坏行抛错 → 该文件必须不进 checkpoint。
+            // ——emitter 对坏行抛错 → 该文件不能写入 source_files。
             let p = dir.join("bad.jsonl");
             std::fs::write(&p, "{not json\n").unwrap();
             let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
             let r = sync_facts(&data).unwrap();
             let cl = r.hosts.iter().find(|h| h.host == "claude-code").unwrap();
             assert!(!cl.errors.is_empty(), "坏文件必须出现在 errors 里");
-            // checkpoint 里没有坏文件 → 下次 sync 仍然重试它（仍然报错）。
-            let cp = crate::state::read_json(&checkpoint_path(&data)).unwrap();
-            assert!(
-                !cp["files"].as_object().unwrap().iter().any(|(k, _)| k.contains("bad.jsonl")),
-                "失败的文件不得进 checkpoint"
-            );
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&data),
+                crate::sql_sync::now_ms(),
+            )
+            .unwrap();
+            let n: i64 = db
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM source_files WHERE host = 'claude-code'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "失败文件不得留下 SQL 指纹，才能被下轮重试");
             let r2 = sync_facts(&data).unwrap();
             let cl2 = r2.hosts.iter().find(|h| h.host == "claude-code").unwrap();
             assert!(!cl2.errors.is_empty(), "下次 sync 重试坏文件（诚实噪声）");
