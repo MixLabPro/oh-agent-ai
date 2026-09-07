@@ -298,6 +298,7 @@ pub fn write_flat_facts_with_sources(
     machine_namespace: &str,
     sources: &[(std::path::PathBuf, (u64, u64))],
     facts: &[Value],
+    runtime_snapshot: Option<&Value>,
     now: i64,
 ) -> Result<SqlSyncOutcome, String> {
     let run_id = new_run_id(TRIGGER_SYNC);
@@ -311,10 +312,46 @@ pub fn write_flat_facts_with_sources(
             writer.upsert_source_file(host, path, *size_bytes, *mtime_ns, None, PARSER_VERSION)?;
             outcome.files_synced += 1;
         }
-        if facts.is_empty() {
+        if facts.is_empty() && runtime_snapshot.is_none() {
             return Ok(());
         }
         let source_id = writer.upsert_batch_source(host)?;
+        if let Some(snapshot) = runtime_snapshot {
+            let observed_at = snapshot
+                .get("observed_at")
+                .and_then(Value::as_str)
+                .and_then(agent_vitals_domain::budget::parse_iso)
+                .map(|(seconds, _)| seconds.saturating_mul(1_000))
+                .ok_or_else(|| {
+                    AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                        "__invalid_runtime_snapshot_observed_at__".to_string(),
+                    ))
+                })?;
+            conn.execute(
+                "INSERT INTO host_runtime_snapshots(
+                     host, snapshot_kind, payload_json, observed_at_ms, source_id,
+                     ingested_run_id, updated_at_ms)
+                 VALUES (?1, 'codex_quota', ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(host, snapshot_kind) DO UPDATE SET
+                     payload_json = excluded.payload_json,
+                     observed_at_ms = excluded.observed_at_ms,
+                     source_id = excluded.source_id,
+                     ingested_run_id = excluded.ingested_run_id,
+                     updated_at_ms = excluded.updated_at_ms
+                 WHERE excluded.observed_at_ms >= host_runtime_snapshots.observed_at_ms",
+                rusqlite::params![
+                    host,
+                    serde_json::to_string(snapshot).unwrap_or_default(),
+                    observed_at,
+                    source_id,
+                    run_id,
+                    now,
+                ],
+            )?;
+        }
+        if facts.is_empty() {
+            return Ok(());
+        }
         let (groups, missing) = group_facts_by_session(facts);
         for fact in &missing {
             conn.execute(

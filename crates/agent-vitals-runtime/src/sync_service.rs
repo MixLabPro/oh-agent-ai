@@ -95,6 +95,7 @@ fn sync_host(
     }
 
     let mut facts: Vec<Value> = Vec::new();
+    let mut runtime_snapshot: Option<Value> = None;
     let mut synced_sources: Vec<(PathBuf, (u64, u64))> = Vec::new();
     // codex 的 emitter 跨文件 `seen` 去重只在**单次调用内**成立（live/
     // archived 同 stem 双收靠它）——差量集必须一批喂进去，逐文件调用会把
@@ -108,6 +109,7 @@ fn sync_host(
             "default",
         ) {
             Ok(r) => {
+                runtime_snapshot = r.quota_snapshot;
                 facts.extend(r.facts);
                 synced_sources.extend(dirty.iter().cloned());
             }
@@ -154,6 +156,7 @@ fn sync_host(
             ns,
             &synced_sources,
             &facts,
+            runtime_snapshot.as_ref(),
             now,
         )?;
         report.files_synced += outcome.files_synced;
@@ -329,7 +332,7 @@ mod tests {
             concat!(
                 r#"{"timestamp":"2026-09-05T17:00:00.000Z","type":"session_meta","payload":{"id":"cx-1","cwd":"/tmp/w"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-09-05T17:01:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20,"reasoning_output_tokens":0},"last_token_usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20,"reasoning_output_tokens":0},"model_context_window":272000}}}"#,
+                r#"{"timestamp":"2026-09-05T17:01:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20,"reasoning_output_tokens":0},"last_token_usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20,"reasoning_output_tokens":0},"model_context_window":272000},"rate_limits":{"plan_type":"plus","credits":{"has_credits":false},"primary":{"used_percent":67,"window_minutes":300,"resets_at":1788602460}}}}"#,
                 "\n",
             ),
         )
@@ -377,6 +380,19 @@ mod tests {
             assert_eq!(cl.appended, 2, "两条 usage 事实");
             assert_eq!(cx.files_synced, 1, "首次全量：codex 1 文件");
             assert!(r1.total_appended > 0);
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&data),
+                crate::sql_sync::now_ms(),
+            )
+            .unwrap();
+            let (quota, _) = db
+                .runtime_snapshot_get("codex", "codex_quota")
+                .unwrap()
+                .expect("codex rate_limits 必须与同步事实同批落 SQL");
+            assert_eq!(
+                serde_json::from_str::<Value>(&quota).unwrap()["plan_type"],
+                "plus"
+            );
 
             // 第二次：全部 skipped（SQL source_files 指纹命中），零新增。
             let r2 = sync_facts(&data).unwrap();

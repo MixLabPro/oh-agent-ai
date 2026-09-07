@@ -586,10 +586,10 @@ v0.9.1 的交付不是“新增一个 SQLite 表”，而是完成一次受控�
 | `JsonSummaryRepository` | ✅ 删除 | Stage 2（b5ca48c）——struct + impl + 4 个 legacy 读 wrapper（claude/codex ledger·fold 读层）；`SummaryRepository` 只剩 `SqlSummaryRepository` |
 | `month.json`/`month-archive.json`/`today.json` 作业务读源 | ✅ 退役 | `SqlSummaryRepository` 与 `budget show` 都只读 SQL；Stage 5b 删除业务 state 写入口，DSH tick 仅保留导航快照 |
 | `alert.json` 作预算计算来源 | ✅ 退役 | `evaluate_alert_from_sql` 只读 authority；Stage 5b 删除 oneline 的 alert 写入 |
-| ledger / codex fold 在产品查询路径的直接读取 | 🔶 尚有配额面 | Stage 2 删除 repository wrapper，Stage 5b-c 已把 `data-unresolved` 改为 authority，5b-d 已把 `sessions navigation` 的三宿主今日 token 改为 authority；`data_codex_quota` 仍读 Codex fold，必须作为独立实时状态收口 |
+| ledger / codex fold 在产品查询路径的直接读取 | ✅ 退役 | Stage 2 删除 repository wrapper，Stage 5b-c 把 `data-unresolved` 改为 authority，5b-d 把 `sessions navigation` 的三宿主今日 token 改为 authority；Codex quota 以 schema v2 `host_runtime_snapshots/codex_quota` 在同步事务写入、桌面端只读 SQL |
 | JSON checkpoint | ✅ 退役 | `sync_facts` 以 `source_files` 作为唯一差量索引；旧 checkpoint 仅首启迁入后改名留档，运行时不再读写 |
 | "SQLite 可由 JSONL 重建" 的权威语义 | ✅ 退役 | Stage 5a（8498023）——删旧 `agent_vitals_data::store` / `index.sqlite3` / `FactsIndex` / `data-rebuild-index`。权威库**不自愈**，恢复 = `rm agent-vitals.sqlite3* && data-migrate` |
-| legacy 代码只留 importer/export/fixture | 🔶 | `legacy_import` 保留（`data-migrate --with-legacy-ledger` opt-in）；旧业务 state 的 merge/alert 写链已退役，但 Stage 5b-d 的导航 token/配额读路径尚未迁出 |
+| legacy 代码只留 importer/export/fixture | ✅ | `legacy_import` 保留（`data-migrate --with-legacy-ledger` opt-in）；旧业务 state 的 merge/alert 写链、导航 token 与配额读路径均已迁出 |
 
 **Stage 1**（ad4e33e）另删了 SQL-vs-legacy 对账机器（`reconcile_authority_
 vs_legacy` / `data-reconcile-authority` / `data-budget-reconcile` /
@@ -597,5 +597,5 @@ vs_legacy` / `data-reconcile-authority` / `data-budget-reconcile` /
 reconcile_real.rs`）——§10 未列（属迁移期脚手架），迁移收敛后不再需要。
 `data authority enable` 门槛改查权威库健康（integrity + facts + last-run）。
 
-**真机翻开关 + 观察期**仍是用户本机的事（spec §6.1 需备份）；但在此之前仍须
-完成 Stage 5b-d 的导航 token/配额读路径迁移。
+**真机翻开关 + 观察期**仍是用户本机的事（spec §6.1 需备份）；代码侧 Stage
+5b-d 已完成。

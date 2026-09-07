@@ -24,7 +24,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 /// 当前 DDL 版本。spec §3 的表结构变更递增；`migrations` 表（§3.5）记录的
 /// 是**数据迁移**（legacy import 等），与 DDL 版本刻意分开。
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -44,7 +44,10 @@ pub type HostBillRow = (String, String, String, i64, String);
 pub enum AuthorityError {
     Sqlite(rusqlite::Error),
     /// 库的 schema 版本比本二进制新——升级二进制，不降级重建。
-    NewerSchema { found: i64, supported: i64 },
+    NewerSchema {
+        found: i64,
+        supported: i64,
+    },
     Io(std::io::Error),
 }
 
@@ -245,6 +248,32 @@ CREATE INDEX workflow_events_capability_time
 CREATE INDEX workflow_events_error_time
   ON workflow_events(error_fingerprint, event_ts_ms)
   WHERE error_fingerprint IS NOT NULL;
+
+-- v2：非账务但面向产品展示的宿主实时状态。不能塞进 usage_facts（不是用量），
+-- 也不能继续由 UI 直接读宿主日志；payload 保留来源的完整、脱敏 JSON 形状。
+CREATE TABLE host_runtime_snapshots (
+  host TEXT NOT NULL,
+  snapshot_kind TEXT NOT NULL,            -- 目前：codex_quota
+  payload_json TEXT NOT NULL,
+  observed_at_ms INTEGER NOT NULL,
+  source_id TEXT REFERENCES source_files(source_id),
+  ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(host, snapshot_kind)
+);
+"#;
+
+const MIGRATE_V1_TO_V2: &str = r#"
+CREATE TABLE host_runtime_snapshots (
+  host TEXT NOT NULL,
+  snapshot_kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  observed_at_ms INTEGER NOT NULL,
+  source_id TEXT REFERENCES source_files(source_id),
+  ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(host, snapshot_kind)
+);
 "#;
 
 /// v0.9.1 Phase 3.4：`budget_config` 单行（config_id=1）的 typed 视图。
@@ -318,9 +347,24 @@ impl AuthorityDb {
                 })
             }
             Some(v) if v == SCHEMA_VERSION => {}
+            Some(1) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(MIGRATE_V1_TO_V2);
+                match migration {
+                    Ok(()) => {
+                        conn.execute(
+                            "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
+                            rusqlite::params![SCHEMA_VERSION.to_string()],
+                        )?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(error.into());
+                    }
+                }
+            }
             Some(old) => {
-                // 未来版本升级路径：按版本阶梯执行迁移步骤。v1 是第一版，
-                // 不存在合法的 old < 1（空库走 None 分支）；防御性报错。
                 return Err(AuthorityError::Sqlite(
                     rusqlite::Error::InvalidParameterName(format!(
                         "__unsupported_legacy_version__:{old}"
@@ -417,8 +461,6 @@ impl AuthorityDb {
             rusqlite::params![cutoff_ms],
         )?)
     }
-
-
 
     // ─────── v0.9.1 Phase 3.4：budget_config / budget_snoozes 显式管理 API
     // （spec §5.3「账单和预算配置为显式管理 API」；单行表 config_id/snooze_id
@@ -558,10 +600,7 @@ impl AuthorityDb {
     /// `captured_at_ms <= at_ms` 里最新的一份——「按事件时间点选价卡版本」
     /// （Q13：调价日前后分别用正确版本）。没有更早的快照 → None（不拿更晚的
     /// 版本冒充历史）。
-    pub fn pricing_snapshot_asof(
-        &self,
-        at_ms: i64,
-    ) -> Result<Option<String>, AuthorityError> {
+    pub fn pricing_snapshot_asof(&self, at_ms: i64) -> Result<Option<String>, AuthorityError> {
         Ok(self
             .conn
             .query_row(
@@ -606,7 +645,8 @@ impl AuthorityDb {
         evidence_ref: &str,
         now_ms: i64,
     ) -> Result<(), AuthorityError> {
-        let bad = |m: &str| AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(m.to_string()));
+        let bad =
+            |m: &str| AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(m.to_string()));
         if billing_period.len() != 7
             || billing_period.as_bytes()[4] != b'-'
             || !billing_period[..4].bytes().all(|c| c.is_ascii_digit())
@@ -616,7 +656,11 @@ impl AuthorityDb {
         }
         if !matches!(
             billing_basis,
-            "fixed_subscription" | "host_billed" | "metered_actual" | "metered_estimate" | "api_equivalent"
+            "fixed_subscription"
+                | "host_billed"
+                | "metered_actual"
+                | "metered_estimate"
+                | "api_equivalent"
         ) {
             return Err(bad("billing_basis not in the five-basis vocabulary"));
         }
@@ -704,6 +748,24 @@ impl AuthorityDb {
 
     /// 只读连接访问（查询面在 Phase 3 接 repository；Phase 2 的 writer 也
     /// 走 with_immediate_txn——这个 getter 仅供测试与迁移框架）。
+    /// 读取一份宿主实时快照；调用方负责反序列化，并把损坏 payload 当数据质量
+    /// 问题而不是回落读取原始日志。
+    pub fn runtime_snapshot_get(
+        &self,
+        host: &str,
+        snapshot_kind: &str,
+    ) -> Result<Option<(String, i64)>, AuthorityError> {
+        self.conn
+            .query_row(
+                "SELECT payload_json, observed_at_ms FROM host_runtime_snapshots
+                 WHERE host = ?1 AND snapshot_kind = ?2",
+                rusqlite::params![host, snapshot_kind],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(AuthorityError::from)
+    }
+
     pub fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -732,9 +794,7 @@ mod tests {
             // 全部表存在。
             let tables: Vec<String> = a
                 .conn()
-                .prepare(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
-                )
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
                 .unwrap()
                 .query_map([], |r| r.get(0))
                 .unwrap()
@@ -753,6 +813,7 @@ mod tests {
                 "data_quality_issues",
                 "migrations",
                 "workflow_events",
+                "host_runtime_snapshots",
             ] {
                 assert!(tables.iter().any(|x| x == t), "缺表 {t}: {tables:?}");
             }
@@ -768,7 +829,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(ver, "1");
+        assert_eq!(ver, "2");
         let _ = std::fs::remove_file(&db);
     }
 
@@ -778,7 +839,8 @@ mod tests {
         let a = AuthorityDb::open(&db, 1_000).unwrap();
         a.begin_run("run-1", "tray", 1_000).unwrap();
         a.begin_run("run-2", "cli", 1_100).unwrap();
-        a.finish_run("run-2", "succeeded", None, None, 1_200).unwrap();
+        a.finish_run("run-2", "succeeded", None, None, 1_200)
+            .unwrap();
         drop(a);
         // 模拟 crash：run-1 停在 running。重新 open → 清扫为 cancelled。
         let a2 = AuthorityDb::open(&db, 9_000).unwrap();
@@ -802,6 +864,41 @@ mod tests {
             )
             .unwrap();
         assert_eq!(s2, "succeeded");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v1_database_migrates_to_runtime_snapshots_v2() {
+        let db = tmp_db("v1-to-v2");
+        let initial = AuthorityDb::open(&db, 1_000).unwrap();
+        drop(initial);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "DROP TABLE host_runtime_snapshots;
+             UPDATE schema_meta SET value = '1' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+        drop(conn);
+
+        let upgraded = AuthorityDb::open(&db, 2_000).unwrap();
+        let version: String = upgraded
+            .conn()
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "2");
+        let exists: i64 = upgraded
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'host_runtime_snapshots'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1);
         let _ = std::fs::remove_file(&db);
     }
 
@@ -901,16 +998,18 @@ mod tests {
                 [],
             )
             .map_err(AuthorityError::from)?;
-            Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
-                "boom".to_string(),
-            )))
+            Err(AuthorityError::Sqlite(
+                rusqlite::Error::InvalidParameterName("boom".to_string()),
+            ))
         });
         assert!(err.is_err());
         let n: i64 = a
             .conn()
-            .query_row("SELECT COUNT(*) FROM sync_runs WHERE run_id = 'run-2'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM sync_runs WHERE run_id = 'run-2'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 0, "回滚后不得有半提交残留");
         let _ = std::fs::remove_file(&db);
@@ -924,14 +1023,26 @@ mod tests {
         a.budget_config_set(60_000, 3_000, 8_000, 2_000).unwrap();
         let c = a.budget_config_get().unwrap().expect("seed 后有配置");
         assert_eq!(
-            (c.monthly_cny_minor, c.daily_cny_minor, c.warning_ratio_bp, c.updated_at_ms),
+            (
+                c.monthly_cny_minor,
+                c.daily_cny_minor,
+                c.warning_ratio_bp,
+                c.updated_at_ms
+            ),
             (60_000, 3_000, 8_000, 2_000)
         );
         // upsert 覆盖 + updated_at_ms 滚动（第二次 set 的时钟是 3_000）。
         a.budget_config_set(61_000, 3_100, 9_000, 3_000).unwrap();
         let c2 = a.budget_config_get().unwrap().unwrap();
-        assert_eq!((c2.monthly_cny_minor, c2.daily_cny_minor, c2.warning_ratio_bp, c2.updated_at_ms),
-                   (61_000, 3_100, 9_000, 3_000));
+        assert_eq!(
+            (
+                c2.monthly_cny_minor,
+                c2.daily_cny_minor,
+                c2.warning_ratio_bp,
+                c2.updated_at_ms
+            ),
+            (61_000, 3_100, 9_000, 3_000)
+        );
         let _ = std::fs::remove_file(&db);
     }
 
@@ -959,19 +1070,41 @@ mod tests {
         let a = AuthorityDb::open(&db, 1_000).unwrap();
         assert_eq!(a.pricing_snapshot_count().unwrap(), 0);
         assert!(a.pricing_snapshot_latest().unwrap().is_none());
-        assert!(a.pricing_snapshot_asof(9_999).unwrap().is_none(), "无更早版本 → None");
+        assert!(
+            a.pricing_snapshot_asof(9_999).unwrap().is_none(),
+            "无更早版本 → None"
+        );
 
-        assert!(a.pricing_snapshot_put("v-aug", "embedded-assets", "{\"m\":1}", 1_000).unwrap());
-        assert!(!a.pricing_snapshot_put("v-aug", "embedded-assets", "{\"m\":1}", 5_000).unwrap(),
-                "同 version 再写 → DO NOTHING（内容不可变）");
-        assert!(a.pricing_snapshot_put("v-sep", "embedded-assets", "{\"m\":2}", 3_000).unwrap());
+        assert!(a
+            .pricing_snapshot_put("v-aug", "embedded-assets", "{\"m\":1}", 1_000)
+            .unwrap());
+        assert!(
+            !a.pricing_snapshot_put("v-aug", "embedded-assets", "{\"m\":1}", 5_000)
+                .unwrap(),
+            "同 version 再写 → DO NOTHING（内容不可变）"
+        );
+        assert!(a
+            .pricing_snapshot_put("v-sep", "embedded-assets", "{\"m\":2}", 3_000)
+            .unwrap());
         assert_eq!(a.pricing_snapshot_count().unwrap(), 2);
 
-        assert_eq!(a.pricing_snapshot_get("v-sep").unwrap().as_deref(), Some("{\"m\":2}"));
-        assert_eq!(a.pricing_snapshot_latest().unwrap(), Some(("v-sep".into(), 3_000)));
+        assert_eq!(
+            a.pricing_snapshot_get("v-sep").unwrap().as_deref(),
+            Some("{\"m\":2}")
+        );
+        assert_eq!(
+            a.pricing_snapshot_latest().unwrap(),
+            Some(("v-sep".into(), 3_000))
+        );
         // asof 调价前 → 用旧版本；调价后 → 新版本；更早 → None。
-        assert_eq!(a.pricing_snapshot_asof(2_000).unwrap().as_deref(), Some("{\"m\":1}"));
-        assert_eq!(a.pricing_snapshot_asof(4_000).unwrap().as_deref(), Some("{\"m\":2}"));
+        assert_eq!(
+            a.pricing_snapshot_asof(2_000).unwrap().as_deref(),
+            Some("{\"m\":1}")
+        );
+        assert_eq!(
+            a.pricing_snapshot_asof(4_000).unwrap().as_deref(),
+            Some("{\"m\":2}")
+        );
         assert!(a.pricing_snapshot_asof(500).unwrap().is_none());
         let _ = std::fs::remove_file(&db);
     }
@@ -985,29 +1118,102 @@ mod tests {
         assert_eq!(a.host_bill_count().unwrap(), 0);
 
         // 四项校验——每条都必须 Err（不猜、不默认）。
-        assert!(a.host_bill_put("x", "wb", "wb", "2026-9", "host_billed", 100, "CNY", "", 1).is_err(),
-                "period 非 YYYY-MM");
-        assert!(a.host_bill_put("x", "wb", "wb", "2026-09", "credits", 100, "CNY", "", 1).is_err(),
-                "basis 不在五档词表");
-        assert!(a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", -1, "CNY", "", 1).is_err(),
-                "amount_minor < 0");
-        assert!(a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", 100, "  ", "", 1).is_err(),
-                "currency 空");
+        assert!(
+            a.host_bill_put("x", "wb", "wb", "2026-9", "host_billed", 100, "CNY", "", 1)
+                .is_err(),
+            "period 非 YYYY-MM"
+        );
+        assert!(
+            a.host_bill_put("x", "wb", "wb", "2026-09", "credits", 100, "CNY", "", 1)
+                .is_err(),
+            "basis 不在五档词表"
+        );
+        assert!(
+            a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", -1, "CNY", "", 1)
+                .is_err(),
+            "amount_minor < 0"
+        );
+        assert!(
+            a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", 100, "  ", "", 1)
+                .is_err(),
+            "currency 空"
+        );
 
         // 正常录入 + 同键 upsert 更正金额。
-        a.host_bill_put("b1", "workbuddy", "workbuddy", "2026-09", "host_billed", 21_500, "CNY", "credit_json", 1_000).unwrap();
+        a.host_bill_put(
+            "b1",
+            "workbuddy",
+            "workbuddy",
+            "2026-09",
+            "host_billed",
+            21_500,
+            "CNY",
+            "credit_json",
+            1_000,
+        )
+        .unwrap();
         assert_eq!(a.host_bill_count().unwrap(), 1);
-        a.host_bill_put("b1", "workbuddy", "workbuddy", "2026-09", "host_billed", 30_000, "CNY", "credit_json", 2_000).unwrap();
-        assert_eq!(a.host_bill_count().unwrap(), 1, "同 (host,provider,period,basis,evidence) → upsert 不新增");
+        a.host_bill_put(
+            "b1",
+            "workbuddy",
+            "workbuddy",
+            "2026-09",
+            "host_billed",
+            30_000,
+            "CNY",
+            "credit_json",
+            2_000,
+        )
+        .unwrap();
+        assert_eq!(
+            a.host_bill_count().unwrap(),
+            1,
+            "同 (host,provider,period,basis,evidence) → upsert 不新增"
+        );
 
         // evidence_ref 空串同样能 upsert（不撞 PRIMARY KEY）。
-        a.host_bill_put("b2:", "wb2", "wb2", "2026-09", "host_billed", 500, "CNY", "", 1).unwrap();
-        a.host_bill_put("b2:", "wb2", "wb2", "2026-09", "host_billed", 700, "CNY", "", 2).unwrap();
-        assert_eq!(a.host_bill_count().unwrap(), 2, "空 evidence 也 upsert 而非新增/报错");
+        a.host_bill_put(
+            "b2:",
+            "wb2",
+            "wb2",
+            "2026-09",
+            "host_billed",
+            500,
+            "CNY",
+            "",
+            1,
+        )
+        .unwrap();
+        a.host_bill_put(
+            "b2:",
+            "wb2",
+            "wb2",
+            "2026-09",
+            "host_billed",
+            700,
+            "CNY",
+            "",
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            a.host_bill_count().unwrap(),
+            2,
+            "空 evidence 也 upsert 而非新增/报错"
+        );
         a.host_bill_delete("b2:", 9).unwrap();
 
         let rows = a.host_bills_for_period("2026-09").unwrap();
-        assert_eq!(rows, vec![("workbuddy".to_string(), "workbuddy".to_string(), "host_billed".to_string(), 30_000, "CNY".to_string())]);
+        assert_eq!(
+            rows,
+            vec![(
+                "workbuddy".to_string(),
+                "workbuddy".to_string(),
+                "host_billed".to_string(),
+                30_000,
+                "CNY".to_string()
+            )]
+        );
         assert!(a.host_bills_for_period("2026-08").unwrap().is_empty());
 
         // soft delete → for_period 不再回它；重复 delete 返回 false。
@@ -1017,7 +1223,18 @@ mod tests {
         assert_eq!(a.host_bill_count().unwrap(), 0);
 
         // upsert 到已 soft-deleted 的键 → 复活（deleted_at_ms = NULL）。
-        a.host_bill_put("b1", "workbuddy", "workbuddy", "2026-09", "host_billed", 12_000, "CNY", "credit_json", 5_000).unwrap();
+        a.host_bill_put(
+            "b1",
+            "workbuddy",
+            "workbuddy",
+            "2026-09",
+            "host_billed",
+            12_000,
+            "CNY",
+            "credit_json",
+            5_000,
+        )
+        .unwrap();
         assert_eq!(a.host_bill_count().unwrap(), 1, "同键再录 → 复活");
         let _ = std::fs::remove_file(&db);
     }

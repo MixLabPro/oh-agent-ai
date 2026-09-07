@@ -35,8 +35,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
+use crate::codex_usage::{CodexFoldState, CodexTokenOutcome};
 use crate::hosts::claude_code::sources::usage_fact::{SKIP, UNATTRIBUTED, UNREADABLE};
-use crate::codex_usage::{CodexTokenOutcome, CodexFoldState};
 use agent_vitals_domain::source_identity::{canonical_json, fnv1a64_hex};
 use agent_vitals_domain::usage_fact::build_usage_fact;
 
@@ -51,6 +51,9 @@ const OBSERVATION_KIND: &str = "assistant-usage";
 #[derive(Debug)]
 pub struct UsageFactEmitResult {
     pub facts: Vec<Value>,
+    /// 与同一次事实发射共享同一状态机得出的当前配额快照；它不是 UsageFact，
+    /// 由 runtime 单独写入 `host_runtime_snapshots`。
+    pub quota_snapshot: Option<Value>,
     pub attempts: HashMap<String, i64>,
     pub total_token_count_events: i64,
     pub skip_rows: i64,
@@ -77,7 +80,11 @@ fn raw_line_segments(data: &[u8]) -> Vec<(usize, &[u8])> {
             }
             b'\r' => {
                 out.push((start, &data[start..i]));
-                i += if i + 1 < data.len() && data[i + 1] == b'\n' { 2 } else { 1 };
+                i += if i + 1 < data.len() && data[i + 1] == b'\n' {
+                    2
+                } else {
+                    1
+                };
                 start = i;
             }
             _ => i += 1,
@@ -148,7 +155,11 @@ fn resolve_native_session_id(path: &Path, items: &[(usize, Value)]) -> String {
     }
     match session_id {
         Some(sid) => sid,
-        None => path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string(),
+        None => path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 
@@ -203,7 +214,11 @@ fn consumed_to_usage_fact(
     // "native"；真无时间戳 → None（诚实「无观测时间」，不冒充 estimated）。
     fields.insert(
         "time_basis".into(),
-        if event_ts_utc.is_some() { json!("native") } else { Value::Null },
+        if event_ts_utc.is_some() {
+            json!("native")
+        } else {
+            Value::Null
+        },
     );
     // last_token_usage 是 per-request 增量；复读快照已在 §3.5.2 消解，绝不把
     // 累计 total_token_usage 当 delta 发。
@@ -249,16 +264,20 @@ pub fn codex_rollouts_to_usage_facts(
     let mut bad_id = 0i64;
     let mut malformed = 0i64;
     let mut seen: HashSet<String> = HashSet::new();
+    let mut folds: Vec<Value> = Vec::new();
     for p in paths {
-        let data = std::fs::read(p)
-            .map_err(|e| format!("read {}: {}", p.display(), e))?; // OSError → 上抛
+        let data = std::fs::read(p).map_err(|e| format!("read {}: {}", p.display(), e))?; // OSError → 上抛
         let (items, degraded) = parse_rollout_bytes(&data);
         if degraded.is_some() {
             malformed += 1;
             continue;
         }
         let native_session_id = resolve_native_session_id(p, &items);
-        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+        let stem = p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
         let mut state = CodexFoldState::new();
         for (offset, item) in items {
             match state.apply(&item) {
@@ -280,7 +299,11 @@ pub fn codex_rollouts_to_usage_facts(
                     *attempts.get_mut(UNATTRIBUTED).unwrap() += 1;
                     skip_rows += 1;
                 }
-                CodexTokenOutcome::Consumed { facts: f, model, event_ts_utc } => {
+                CodexTokenOutcome::Consumed {
+                    facts: f,
+                    model,
+                    event_ts_utc,
+                } => {
                     total += 1;
                     // Consumed：可折进 by_model = 可 emit（§2.3 发射集定义）。
                     let source_event_id = derived_event_id(&stem, offset, &item);
@@ -292,8 +315,13 @@ pub fn codex_rollouts_to_usage_facts(
                     }
                     seen.insert(source_event_id.clone());
                     match consumed_to_usage_fact(
-                        &f, &model, &event_ts_utc, &source_event_id,
-                        &native_session_id, machine_namespace, source_profile,
+                        &f,
+                        &model,
+                        &event_ts_utc,
+                        &source_event_id,
+                        &native_session_id,
+                        machine_namespace,
+                        source_profile,
                     ) {
                         Some(fact) => facts.push(fact),
                         None => {
@@ -305,6 +333,7 @@ pub fn codex_rollouts_to_usage_facts(
                 }
             }
         }
+        folds.push(state.finish());
     }
     if duplicate > 0 {
         attempts.insert("duplicate".to_string(), duplicate);
@@ -314,6 +343,10 @@ pub fn codex_rollouts_to_usage_facts(
     }
     Ok(UsageFactEmitResult {
         facts,
+        quota_snapshot: crate::codex_usage::codex_merge_folds(&folds)
+            .get("plan")
+            .cloned()
+            .filter(|plan| !plan.is_null()),
         attempts,
         total_token_count_events: total,
         skip_rows,
@@ -349,7 +382,10 @@ pub fn to_payload_value(
     }
     out.insert("attempts".to_string(), Value::Object(attempts_obj));
     let mut cov = Map::new();
-    cov.insert("total_token_count_events".to_string(), json!(result.total_token_count_events));
+    cov.insert(
+        "total_token_count_events".to_string(),
+        json!(result.total_token_count_events),
+    );
     cov.insert("fact_rows".to_string(), json!(result.facts.len()));
     cov.insert("skip_rows".to_string(), json!(result.skip_rows));
     out.insert("coverage".to_string(), Value::Object(cov));
@@ -366,7 +402,10 @@ pub fn to_human_summary(
     machine_namespace: &str,
     source_profile: &str,
 ) -> String {
-    let paths: Vec<String> = source_paths.iter().map(|p| p.display().to_string()).collect();
+    let paths: Vec<String> = source_paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
     let mut attempts_parts: Vec<String> = Vec::new();
     for k in [SKIP, UNREADABLE, UNATTRIBUTED] {
         attempts_parts.push(format!(
@@ -398,8 +437,7 @@ pub fn to_human_summary(
 mod tests {
     use super::*;
 
-    static TEMP_DIR_NONCE: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
+    static TEMP_DIR_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     fn line(rec: serde_json::Value) -> String {
         format!("{}\n", serde_json::to_string(&rec).unwrap())
@@ -424,8 +462,10 @@ mod tests {
     fn rollout_lines() -> Vec<String> {
         vec![
             line(json!({"type":"session_meta","payload":{"session_id":"ses-abc123"}})),
-            line(json!({"timestamp":"2026-09-03T00:00:00.000Z","type":"turn_context",
-                        "payload":{"model":"gpt-5-codex","speed":"high"}})),
+            line(
+                json!({"timestamp":"2026-09-03T00:00:00.000Z","type":"turn_context",
+                        "payload":{"model":"gpt-5-codex","speed":"high"}}),
+            ),
             line(json!({"type":"event_msg","payload":{"type":"token_count",
                         "timestamp":"2026-09-03T01:02:03.000Z",
                         "rate_limits":{"primary":{"used_percent":67.0}},
@@ -449,7 +489,8 @@ mod tests {
         let tmp = temp_dir();
         let p = tmp.join("rollout-sol.jsonl");
         std::fs::write(&p, rollout_lines().join("")).unwrap();
-        let r = codex_rollouts_to_usage_facts(std::slice::from_ref(&p), "ns-test", "default").unwrap();
+        let r =
+            codex_rollouts_to_usage_facts(std::slice::from_ref(&p), "ns-test", "default").unwrap();
         assert_eq!(r.facts.len(), 2, "两次非复读 token_count → 2 fact");
         assert_eq!(r.total_token_count_events, 2);
         assert_eq!(r.skip_rows, 0);
@@ -457,25 +498,57 @@ mod tests {
         assert_eq!(r.attempts.get("bad_id"), None);
         let f0 = &r.facts[0];
         assert_eq!(f0.get("host").and_then(Value::as_str), Some("codex"));
-        assert_eq!(f0.get("native_session_id").and_then(Value::as_str), Some("ses-abc123"));
-        assert_eq!(f0.get("identity_basis").and_then(Value::as_str), Some("derived-hash"));
-        assert_eq!(f0.get("model_raw").and_then(Value::as_str), Some("gpt-5-codex"));
+        assert_eq!(
+            f0.get("native_session_id").and_then(Value::as_str),
+            Some("ses-abc123")
+        );
+        assert_eq!(
+            f0.get("identity_basis").and_then(Value::as_str),
+            Some("derived-hash")
+        );
+        assert_eq!(
+            f0.get("model_raw").and_then(Value::as_str),
+            Some("gpt-5-codex")
+        );
         assert_eq!(f0.get("time_basis").and_then(Value::as_str), Some("native"));
         // 5→4（决策 A）：uncached=input−cached−cw=60；reasoning 15 已在 output 内，
         // 绝不再叠。
-        assert_eq!(f0.get("uncached_input_tokens").and_then(Value::as_i64), Some(60));
-        assert_eq!(f0.get("cache_read_tokens").and_then(Value::as_i64), Some(30));
-        assert_eq!(f0.get("cache_write_tokens").and_then(Value::as_i64), Some(10));
+        assert_eq!(
+            f0.get("uncached_input_tokens").and_then(Value::as_i64),
+            Some(60)
+        );
+        assert_eq!(
+            f0.get("cache_read_tokens").and_then(Value::as_i64),
+            Some(30)
+        );
+        assert_eq!(
+            f0.get("cache_write_tokens").and_then(Value::as_i64),
+            Some(10)
+        );
         assert_eq!(f0.get("output_tokens").and_then(Value::as_i64), Some(40));
         // derived id = <stem>:<offset>:<16hex>（行首偏移：0 号 session_meta 行后，
         // token_count 是第 3 行、offset 落在其行首）。
-        let sid = f0.get("source_event_id").and_then(Value::as_str).unwrap_or("");
-        assert!(sid.starts_with("rollout-sol:"), "derived id 应含 stem：{sid}");
-        assert!(!sid.contains('.') && sid.len() > "rollout-sol:0:".len() + 16,
-                "derived id 带 16 hex hash：{sid}");
+        let sid = f0
+            .get("source_event_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(
+            sid.starts_with("rollout-sol:"),
+            "derived id 应含 stem：{sid}"
+        );
+        assert!(
+            !sid.contains('.') && sid.len() > "rollout-sol:0:".len() + 16,
+            "derived id 带 16 hex hash：{sid}"
+        );
         // fact_id 跨两 fact 唯一
-        let fa = r.facts[0].get("fact_id").and_then(Value::as_str).unwrap_or("");
-        let fb = r.facts[1].get("fact_id").and_then(Value::as_str).unwrap_or("");
+        let fa = r.facts[0]
+            .get("fact_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let fb = r.facts[1]
+            .get("fact_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         assert_ne!(fa, fb);
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -486,17 +559,31 @@ mod tests {
         let tmp = temp_dir();
         let p = tmp.join("rollout-sol.jsonl");
         std::fs::write(&p, rollout_lines().join("")).unwrap();
-        let r1 = codex_rollouts_to_usage_facts(std::slice::from_ref(&p), "ns-test", "default").unwrap();
+        let r1 =
+            codex_rollouts_to_usage_facts(std::slice::from_ref(&p), "ns-test", "default").unwrap();
         let r2 = codex_rollouts_to_usage_facts(&[p], "ns-test", "default").unwrap();
         let get = |r: &UsageFactEmitResult| -> Vec<(String, String)> {
-            r.facts.iter()
-                .map(|f| (
-                    f.get("source_event_id").and_then(Value::as_str).unwrap_or("").to_string(),
-                    f.get("fact_id").and_then(Value::as_str).unwrap_or("").to_string(),
-                ))
+            r.facts
+                .iter()
+                .map(|f| {
+                    (
+                        f.get("source_event_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        f.get("fact_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    )
+                })
                 .collect()
         };
-        assert_eq!(get(&r1), get(&r2), "重扫同文件 derived id + fact_id 必须稳定");
+        assert_eq!(
+            get(&r1),
+            get(&r2),
+            "重扫同文件 derived id + fact_id 必须稳定"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -512,12 +599,18 @@ mod tests {
         let bytes = rollout_lines().join("");
         std::fs::write(live.join("rollout-sol.jsonl"), &bytes).unwrap();
         std::fs::write(arch.join("rollout-sol.jsonl"), &bytes).unwrap();
-        let paths = vec![live.join("rollout-sol.jsonl"), arch.join("rollout-sol.jsonl")];
+        let paths = vec![
+            live.join("rollout-sol.jsonl"),
+            arch.join("rollout-sol.jsonl"),
+        ];
         let r = codex_rollouts_to_usage_facts(&paths, "ns-test", "default").unwrap();
         assert_eq!(r.facts.len(), 2, "同 stem 双收：复本行 dedup，fact 不翻倍");
         assert_eq!(r.attempts.get("duplicate").copied().unwrap_or(0), 2);
         assert_eq!(r.skip_rows, 2);
-        assert_eq!(r.total_token_count_events, 4, "四次非复读 token_count（每份 2）");
+        assert_eq!(
+            r.total_token_count_events, 4,
+            "四次非复读 token_count（每份 2）"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -531,13 +624,28 @@ mod tests {
         std::fs::write(&a, &bytes).unwrap();
         std::fs::write(&b, &bytes).unwrap();
         let r = codex_rollouts_to_usage_facts(&[a, b], "ns-test", "default").unwrap();
-        assert_eq!(r.facts.len(), 4, "两 stem 各 2 fact，不因同形同 offset 合并");
+        assert_eq!(
+            r.facts.len(),
+            4,
+            "两 stem 各 2 fact，不因同形同 offset 合并"
+        );
         assert_eq!(r.attempts.get("duplicate"), None);
         // 无 session_meta 无关——这里 session_meta 在，但两文件 stem 兜底不同
-        let sids: std::collections::HashSet<String> = r.facts.iter()
-            .map(|f| f.get("source_event_id").and_then(Value::as_str).unwrap_or("").to_string())
+        let sids: std::collections::HashSet<String> = r
+            .facts
+            .iter()
+            .map(|f| {
+                f.get("source_event_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            })
             .collect();
-        assert_eq!(sids.len(), 4, "四条 source_event_id 全唯一（stem 命名空间隔离）");
+        assert_eq!(
+            sids.len(),
+            4,
+            "四条 source_event_id 全唯一（stem 命名空间隔离）"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 
