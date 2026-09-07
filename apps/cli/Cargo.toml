@@ -37,6 +37,12 @@ walkdir = "2"
 # 不违反它（ruzstd 同款决策）。core crate 保持纯净，I/O 只在这里。
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+# Data MCP 内部工具（`authority_audit` / `query_sql_readonly`，spec §8）。
+# **编译期** gate——公开构建不含（比运行时 `--profile` 判断更可证，spec §13
+# M0 D4）。增量 1 只声明；`authority_audit` 在增量 6 落地。
+[features]
+mcp-internal = []
+
 # 仅开发期依赖，**不进二进制**。与 Python 侧的 hypothesis 同一性质：
 # 仓库的「零依赖」约束针对的是被分发的扫描器，不是测试工具。
 [dev-dependencies]

@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 /// 当前 DDL 版本。spec §3 的表结构变更递增；`migrations` 表（§3.5）记录的
 /// 是**数据迁移**（legacy import 等），与 DDL 版本刻意分开。
@@ -49,6 +49,17 @@ pub enum AuthorityError {
         supported: i64,
     },
     Io(std::io::Error),
+    /// `open_readonly` 专用（spec §9.3：只读取数面不建库）——文件不存在。
+    /// 与 `open` 的「不存在则建库」刻意相反：只读消费者遇到缺库必须如实报
+    /// 错，不能悄悄造一个空库端出 facts=0。
+    MissingFile,
+    /// `open_readonly` 专用——不是 SQLite 文件 / 文件损坏 / 半建库
+    /// （`schema_meta` 读不出）。
+    Corrupt,
+    /// `open_readonly` 专用——库的 schema 版本比本二进制旧，需要产品迁移。
+    /// （`open` 里这条走 `__unsupported_legacy_version__` 防御分支；只读面
+    /// 单列一个 typed 变体，供错误码映射成 `schema_migration_required`。）
+    OlderSchema { found: i64 },
 }
 
 impl From<rusqlite::Error> for AuthorityError {
@@ -72,6 +83,14 @@ impl std::fmt::Display for AuthorityError {
                 "authority schema v{found} is newer than supported v{supported} — 升级二进制"
             ),
             AuthorityError::Io(e) => write!(f, "authority io: {e}"),
+            AuthorityError::MissingFile => write!(f, "authority db file does not exist"),
+            AuthorityError::Corrupt => {
+                write!(f, "authority db is not readable (not a SQLite file, corrupt, or half-built)")
+            }
+            AuthorityError::OlderSchema { found } => write!(
+                f,
+                "authority schema v{found} is older than supported v{SCHEMA_VERSION} — run product migration"
+            ),
         }
     }
 }
@@ -315,6 +334,46 @@ impl AuthorityDb {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Self::ensure_schema(&conn, now_ms)?;
         Ok(Self { conn })
+    }
+
+    /// **只读取数面**（Data MCP `data-mcp serve`，spec §9.3）：`SQLITE_OPEN_READ_ONLY`——
+    /// 不建库、不跑 DDL、不 migration、不清扫中断批次。缺文件 / 损坏 / schema
+    /// 版本不符各返回 typed 错误，供调用方映射成 spec §11 的稳定错误码
+    /// （`database_missing` / `database_unreadable` / `schema_too_new` /
+    /// `schema_migration_required`）。
+    ///
+    /// 与 [`Self::open`] 的「不存在则建库」刻意相反：只读消费者遇到缺库/损坏
+    /// 必须如实报错——在 `sql_authority_enabled` 下，一个被悄悄新建的空库
+    /// 端出 facts=0 会被读成「没花钱」（spec §5.3 / 1.7 的灾难态）。
+    pub fn open_readonly(db_path: &Path) -> Result<Self, AuthorityError> {
+        if !db_path.exists() {
+            return Err(AuthorityError::MissingFile);
+        }
+        let conn = Connection::open_with_flags(
+            db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|_| AuthorityError::Corrupt)?;
+        conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
+        // 损坏 / 非 SQLite / 半建库探测：`schema_meta` 读不出就不是我们的库。
+        // （`PRAGMA integrity_check` 更彻底但慢——留给 `data_status` 自己跑，
+        // 它是 doctor 工具，其余工具在这一步 fail-fast 即可。）
+        let found: i64 = match conn.query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(s) => s.parse().map_err(|_| AuthorityError::Corrupt)?,
+            Err(_) => return Err(AuthorityError::Corrupt),
+        };
+        match found.cmp(&SCHEMA_VERSION) {
+            std::cmp::Ordering::Equal => Ok(Self { conn }),
+            std::cmp::Ordering::Greater => Err(AuthorityError::NewerSchema {
+                found,
+                supported: SCHEMA_VERSION,
+            }),
+            std::cmp::Ordering::Less => Err(AuthorityError::OlderSchema { found }),
+        }
     }
 
     fn ensure_schema(conn: &Connection, now_ms: i64) -> Result<(), AuthorityError> {
@@ -948,6 +1007,85 @@ mod tests {
             "got {err:?}"
         );
         let _ = std::fs::remove_file(&db);
+    }
+
+    // ── open_readonly（Data MCP 只读取数面，spec §9.3）────────────────
+
+    #[test]
+    fn open_readonly_missing_file_is_typed() {
+        let db = tmp_db("ro-missing");
+        assert!(matches!(
+            AuthorityDb::open_readonly(&db).unwrap_err(),
+            AuthorityError::MissingFile
+        ));
+        // 缺文件时**不建库**（与 `open` 的关键区别）。
+        assert!(!db.exists());
+    }
+
+    #[test]
+    fn open_readonly_opens_a_valid_db_and_forbids_writes() {
+        let db = tmp_db("ro-valid");
+        AuthorityDb::open(&db, 1_000).unwrap(); // 先正常建库
+        let ro = AuthorityDb::open_readonly(&db).unwrap();
+        // 只读连接：写语句必须失败。
+        let write = ro
+            .conn()
+            .execute("INSERT INTO schema_meta(key, value) VALUES('x','y')", []);
+        assert!(write.is_err(), "read-only connection must reject writes");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn open_readonly_reports_corrupt_for_garbage_and_half_built() {
+        let garbage = tmp_db("ro-garbage");
+        std::fs::write(&garbage, b"NOT A SQLITE DATABASE").unwrap();
+        assert!(matches!(
+            AuthorityDb::open_readonly(&garbage).unwrap_err(),
+            AuthorityError::Corrupt
+        ));
+        let _ = std::fs::remove_file(&garbage);
+
+        let half = tmp_db("ro-half");
+        rusqlite::Connection::open(&half)
+            .unwrap()
+            .execute_batch("CREATE TABLE usage_facts (fact_id TEXT PRIMARY KEY);")
+            .unwrap();
+        assert!(matches!(
+            AuthorityDb::open_readonly(&half).unwrap_err(),
+            AuthorityError::Corrupt
+        ));
+        let _ = std::fs::remove_file(&half);
+    }
+
+    #[test]
+    fn open_readonly_distinguishes_newer_and_older_schema() {
+        let newer = tmp_db("ro-newer");
+        rusqlite::Connection::open(&newer)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO schema_meta VALUES('schema_version', '99');",
+            )
+            .unwrap();
+        assert!(matches!(
+            AuthorityDb::open_readonly(&newer).unwrap_err(),
+            AuthorityError::NewerSchema { found: 99, .. }
+        ));
+        let _ = std::fs::remove_file(&newer);
+
+        let older = tmp_db("ro-older");
+        rusqlite::Connection::open(&older)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO schema_meta VALUES('schema_version', '0');",
+            )
+            .unwrap();
+        assert!(matches!(
+            AuthorityDb::open_readonly(&older).unwrap_err(),
+            AuthorityError::OlderSchema { found: 0 }
+        ));
+        let _ = std::fs::remove_file(&older);
     }
 
     #[test]

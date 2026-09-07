@@ -30,6 +30,7 @@ pub mod home;
 pub mod export;
 pub mod ingest_service;
 pub mod lease;
+pub mod mcp;
 pub mod session_sources;
 pub mod sessions;
 pub mod skills;
