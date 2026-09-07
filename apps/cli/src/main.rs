@@ -586,11 +586,11 @@ enum Cmd {
         rows_json: Option<PathBuf>,
     },
     /// Inspect the spend budget alert (thresholds + current alert level).
-    /// R1b: read path only (`show`); write actions (`set`/`enable`/`disable`/
-    /// `snooze`/`unsnooze`) land with R1c's Rust state-writer, so this subcommand
-    /// intentionally refuses them for now rather than half-implementing them.
+    /// Since Phase 4.3 the read path is the SQL authority DB (same source as
+    /// `budget-sql`); `budget show` is kept as the familiar entry point.
+    /// Write actions (`set`/`snooze`/…) live under `budget-sql`.
     Budget {
-        /// show — 只读告警态（R1b）
+        /// show — 只读告警态（读 SQL 权威库）
         #[arg(value_parser = ["show"])]
         action: String,
         /// Query a specific month (YYYY-MM) instead of the current one
@@ -2863,9 +2863,9 @@ session_store={store} fold={fold}"
         return;
     }
 
-    // 预算告警只读路径（R1b）。决策在 core（evaluate_alert），这里只接线：
-    // 读输入 → 调 core → 文本/JSON 渲染。`budget show --month` 是纯月查询，
-    // 跟阈值/告警无关，走 budget_show_month。set/snooze 等写路径随 R1c 落地。
+    // 预算告警只读路径。Phase 4.3：`budget_show`/`budget_show_month` 读 SQL
+    // 权威库（`evaluate_alert_from_sql` / `month_cost_sql`），不再读 today.json
+    // / month.json（spec §5.2 禁读清单）。决策仍在 core（`evaluate_alert`）。
     if let Some(Cmd::Budget { action, month, json }) = &args.cmd {
         match action.as_str() {
             "show" => {

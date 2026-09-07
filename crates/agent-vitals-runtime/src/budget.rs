@@ -316,33 +316,56 @@ fn render_budget_month(month: &str, result: Option<&Value>) -> String {
     }
 }
 
-/// 指定月 cost —— 读 `read_month`，交给 core `cost::month_cost`。
-/// 镜像 `budget.py::compute_month_cost` 的 I/O 段。
-pub(crate) fn compute_month(month: Option<&str>) -> Option<Value> {
-    let days = read_month(month)?;
+/// 指定月的 DSH 成本 `{total, peak_total}` —— Phase 4.3 起读 SQL 权威库
+/// （`peaked_days_map("dsh", 月窗)` → core `cost::month_cost`），不再读
+/// month.json / month-archive.json。无该月 DSH 事实 → None（不是「花了 0」）。
+pub fn month_cost_sql(month: &str) -> Option<Value> {
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+        crate::sql_sync::now_ms(),
+    )
+    .ok()?;
+    let (start, end) = agent_vitals_data::authority_query::beijing_month_bounds_ms(month)?;
+    let days = agent_vitals_data::authority_query::peaked_days_map(db.conn(), "dsh", start, end)
+        .ok()?;
+    if days.as_object().is_some_and(|m| m.is_empty()) {
+        return None;
+    }
     let pricing = agent_vitals_domain::cost::load_pricing();
     Some(agent_vitals_domain::cost::month_cost(&days, &pricing))
 }
 
+/// SQL 权威库里的预算配置（`budget_config` 单行表；首用时从旧 config.toml
+/// 一次性 seed），merge 成 `render_budget_show` 认的 8-key 形状。库打不开 /
+/// 无行 → `default_budget`。`evaluate_alert_from_sql` 内部同款推导，这里只是
+/// 把它暴露给渲染面（那边不返回 cfg）。
+pub fn budget_config_sql(data_home: &Path) -> Value {
+    match agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(data_home),
+        crate::sql_sync::now_ms(),
+    ) {
+        Ok(db) => {
+            seed_budget_config_from_legacy(data_home, &db);
+            match db.budget_config_get().ok().flatten() {
+                Some(c) => sql_budget_config_value(&c),
+                None => agent_vitals_domain::budget::default_budget(),
+            }
+        }
+        Err(_) => agent_vitals_domain::budget::default_budget(),
+    }
+}
+
+/// `budget show` —— Phase 4.3 起读 SQL 权威库（`evaluate_alert_from_sql`），
+/// 不再读 today.json / month.json / budget.json（spec §5.2 禁读清单）。
+/// 输出形状与 legacy 逐 key 相同（`evaluate_alert` 的 dict / `render_budget_
+/// show` 的文本），只换数据源。
 pub fn budget_show(json_out: bool) {
-    let cfg = load_config();
-    let today_data = read_json(&state_dir().join("today.json"));
-    let month_days = read_month(None);
-    let pricing = agent_vitals_domain::cost::load_pricing();
-    let snooze = read_snooze();
-    let alert = agent_vitals_domain::budget::evaluate_alert(
-        &cfg,
-        today_data.as_ref(),
-        month_days.as_ref(),
-        &pricing,
-        &today_beijing(),
-        snooze.as_deref(),
-        now_unix(),
-    );
+    let dh = crate::home::data_home();
+    let alert = evaluate_alert_from_sql(&dh);
     if json_out {
         println!("{}", serde_json::to_string_pretty(&alert).unwrap_or_default());
     } else {
-        print!("{}", render_budget_show(&cfg, &alert));
+        print!("{}", render_budget_show(&budget_config_sql(&dh), &alert));
     }
 }
 
@@ -430,9 +453,9 @@ pub fn evaluate_alert_after_fold(
     )
 }
 
-/// `budget show --month M` 主入口：直接问 `compute_month`，跟阈值/告警无关。
+/// `budget show --month M` 主入口：DSH 该月成本，跟阈值/告警无关。
 pub fn budget_show_month(month: &str, json_out: bool) {
-    let result = compute_month(Some(month));
+    let result = month_cost_sql(month);
     if json_out {
         match &result {
             // None 用 Python 的**紧凑**形式（`json.dumps` 无 indent 时 separators
@@ -925,11 +948,11 @@ mod tests {
             serde_json::to_string(month).unwrap_or_default()
         );
         assert_eq!(s, r#"{"month": "1999-01", "cost": null}"#);
-        // 无数据月 → None（compute_month 直接给 None，不是空壳）
+        // 无数据月 → None（`month_cost_sql` 空库直接给 None，不是空壳）
         let dir = std::env::temp_dir().join(format!("av-budget-mn-{}", std::process::id()));
         let home = tmp_home(&dir);
         let _guard = TestEnvGuard::set(&home);
-        assert!(compute_month(Some("1999-01")).is_none());
+        assert!(month_cost_sql("1999-01").is_none());
         drop(_guard);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1310,6 +1333,27 @@ mod tests {
         let a = evaluate_alert_from_sql(&dir);
         assert_eq!(a["level"], "over", "过期 snooze 不压制");
         assert_eq!(a["snoozed_until"], Value::Null);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Phase 4.3：`budget show --month M`（`month_cost_sql`）从 SQL 权威库
+    /// 折 DSH 该月成本，`{total, peak_total}` 形状不变；无该月事实 → None。
+    #[test]
+    fn month_cost_sql_prices_dsh_month_from_facts() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (dir, db) = fresh_sql_home("monthcost");
+        let month = crate::clock::current_month_beijing();
+        let (start, _) =
+            agent_vitals_data::authority_query::beijing_month_bounds_ms(&month).unwrap();
+        seed_fact_min(&db, "m1", "dsh", "deepseek-v4-flash", start + 3_600_000,
+                      100_000_000, 10_000_000);
+        drop(db);
+        let _guard = TestEnvGuard::set(&dir);
+        let cost = month_cost_sql(&month).expect("有 DSH 事实 → Some");
+        assert!(cost["total"].as_f64().unwrap() > 0.0);
+        assert!(cost.get("peak_total").is_some(), "形状含 peak_total");
+        assert!(month_cost_sql("1999-01").is_none(), "无该月事实 → None");
+        drop(_guard);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -2344,72 +2344,12 @@ class CliMatrix(unittest.TestCase):
                 self.assertEqual(codes[0], codes[1], "退出码不一致 host=%s" % h)
 
 
-    # ── budget show（R1b 差分）───────────────────────────────
-    def test_budget_show_differential(self):
-        """`budget show` 读路径的双实现差分 —— R1b 迁移的验收门。
-
-        Python `budget.evaluate()` 还留在 budget.py，Rust 的
-        `evaluate_alert` 是 core 里的同一棵树；对同一份夹具，JSON 输出
-        （indent=2）与文本输出必须逐字节一致。写路径（set/enable/snooze）
-        是 R1c 的事，这里只比读路径。
-
-        夹具造一个「今日 ¥51.00 破日预算 ¥50 → over」：peak 份额
-        5M/20M 让 peak_total 非零但 peak_share < 0.6，不触发 peak 升级，
-        level 由 ratio 判定。月数据走 fallback 定价（无 by_model 的老式
-        日桶，且落在 7 天窗口之外，自适应 floor 不介入）。
-        """
-        from datetime import datetime, timedelta, timezone
-        beijing = timezone(timedelta(hours=8))
-        today = datetime.now(beijing).date().isoformat()
-        month = today[:7]
-
-        home = self.tmp / ".agent-vitals"
-        state = home / "state"
-        state.mkdir(parents=True, exist_ok=True)
-        (home / "config.toml").write_text(
-            "[budget]\ndaily_cny = 50\npeak_share_max = 0.6\n", encoding="utf-8")
-
-        by_model = {
-            "deepseek-v4-flash": {
-                "uncached_input_tokens": 20000000,
-                "cache_read_tokens": 0,
-                "cache_write_tokens": 0,
-                "output_tokens": 3000000,
-                "peak_uncached_input_tokens": 5000000,
-                "peak_cache_read_tokens": 0,
-                "peak_cache_write_tokens": 0,
-                "peak_output_tokens": 0,
-            }
-        }
-        (state / "today.json").write_text(
-            json.dumps({"date": today, "by_model": by_model}), encoding="utf-8")
-
-        # 老式日桶（无 by_model）→ `bucket_cost` fallback flash 定价
-        day_bucket = {
-            "uncached_input_tokens": 2000000,
-            "output_tokens": 200000,
-            "cache_read_tokens": 0,
-            "cache_write_tokens": 0,
-            "peak_uncached_input_tokens": 0,
-            "peak_output_tokens": 0,
-            "peak_cache_read_tokens": 0,
-            "peak_cache_write_tokens": 0,
-        }
-        d1, d2 = today[:-2] + "01", today[:-2] + "02"
-        (state / "month.json").write_text(
-            json.dumps({"month": month, "days": {d1: dict(day_bucket),
-                                                 d2: dict(day_bucket)}}),
-            encoding="utf-8")
-
-        # 三个读面逐字节一致
-        self.both("budget", "show", "--json")
-        self.both("budget", "show")
-        self.both("budget", "show", "--month", month, "--json")
-        # None 分支（无数据月）—— 手拼的紧凑 JSON 形状
-        self.both("budget", "show", "--month", "1999-01", "--json")
-        # 无 today.json（缺数据）→ level ok + 说明性 reasons
-        (state / "today.json").unlink()
-        self.both("budget", "show", "--json")
+    # `budget show` 的 py↔rs 差分随 Phase 4.3 退役：Rust `budget show` 改读
+    # SQL 权威库（`evaluate_alert_from_sql` / `month_cost_sql`），Python
+    # `budget show`（ClawHub in-host skill 形态）仍读 month.json——两侧数据源
+    # 不同、不再逐字节可比。Python 侧覆盖在 tests/test_budget.py（直调
+    # `agent_vitals.budget`），Rust 侧在 budget.rs 的 `evaluate_alert_from_sql_*`
+    # / `month_cost_sql_prices_dsh_month_from_facts` 单测。
 
 
 class DshScanCountsSessionLogEvidence(CliMatrix):
