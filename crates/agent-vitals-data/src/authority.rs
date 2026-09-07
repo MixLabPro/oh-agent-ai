@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 /// 当前 DDL 版本。spec §3 的表结构变更递增；`migrations` 表（§3.5）记录的
 /// 是**数据迁移**（legacy import 等），与 DDL 版本刻意分开。
@@ -499,6 +499,82 @@ impl AuthorityDb {
         Ok(())
     }
 
+    // ─────── v0.9.1 Phase 2.8：pricing_snapshots（spec §5.3 价格快照）───────
+    // 历史查询以记录的 pricing version 重放，不能用当前价卡覆盖历史解释
+    // （§5.3）。一个 version 的内容不可变：`pricing_version` 是 payload 的
+    // 内容指纹，同指纹 = 同 payload = 幂等吸收（DO NOTHING）。
+
+    /// 落一份价格快照。`pricing_version` 由调用方按 payload 内容派生
+    /// （`fnv1a64_hex(canonical_json)`）。已存在 → DO NOTHING（内容不可变）。
+    pub fn pricing_snapshot_put(
+        &self,
+        pricing_version: &str,
+        source_kind: &str,
+        payload_json: &str,
+        captured_at_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        let changed = self.conn.execute(
+            "INSERT INTO pricing_snapshots(pricing_version, captured_at_ms, source_kind, payload_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(pricing_version) DO NOTHING",
+            rusqlite::params![pricing_version, captured_at_ms, source_kind, payload_json],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// 某 version 的 payload（历史重放入口）。
+    pub fn pricing_snapshot_get(
+        &self,
+        pricing_version: &str,
+    ) -> Result<Option<String>, AuthorityError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT payload_json FROM pricing_snapshots WHERE pricing_version = ?1",
+                rusqlite::params![pricing_version],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// `captured_at_ms` 最新的快照 `(version, captured_at_ms)`，或 None（从未落）。
+    pub fn pricing_snapshot_latest(&self) -> Result<Option<(String, i64)>, AuthorityError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT pricing_version, captured_at_ms FROM pricing_snapshots
+                 ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// `captured_at_ms <= at_ms` 里最新的一份——「按事件时间点选价卡版本」
+    /// （Q13：调价日前后分别用正确版本）。没有更早的快照 → None（不拿更晚的
+    /// 版本冒充历史）。
+    pub fn pricing_snapshot_asof(
+        &self,
+        at_ms: i64,
+    ) -> Result<Option<String>, AuthorityError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT payload_json FROM pricing_snapshots
+                 WHERE captured_at_ms <= ?1
+                 ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1",
+                rusqlite::params![at_ms],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    pub fn pricing_snapshot_count(&self) -> Result<i64, AuthorityError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM pricing_snapshots", [], |r| r.get(0))?)
+    }
+
     /// `BEGIN IMMEDIATE` 事务帮助器：闭包成功 → COMMIT，Err → ROLLBACK 后
     /// 原样上抛。**所有业务写入都必须走这里**（spec §5.1.4——事务边界是
     /// 写入协议的一部分，不是调用方的自由裁量）。
@@ -765,6 +841,31 @@ mod tests {
         assert!(a.budget_snooze_get().unwrap().is_none(), "clear 后干净");
         // clear 再 clear 幂等。
         a.budget_snooze_clear().unwrap();
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// Phase 2.8：`pricing_snapshots` 写入方——同 version 幂等（内容不可变）、
+    /// `asof` 按事件时间点选最新的更早版本、`latest` 取最新捕获。
+    #[test]
+    fn pricing_snapshots_put_get_asof_latest() {
+        let db = tmp_db("pxsnap");
+        let a = AuthorityDb::open(&db, 1_000).unwrap();
+        assert_eq!(a.pricing_snapshot_count().unwrap(), 0);
+        assert!(a.pricing_snapshot_latest().unwrap().is_none());
+        assert!(a.pricing_snapshot_asof(9_999).unwrap().is_none(), "无更早版本 → None");
+
+        assert!(a.pricing_snapshot_put("v-aug", "embedded-assets", "{\"m\":1}", 1_000).unwrap());
+        assert!(!a.pricing_snapshot_put("v-aug", "embedded-assets", "{\"m\":1}", 5_000).unwrap(),
+                "同 version 再写 → DO NOTHING（内容不可变）");
+        assert!(a.pricing_snapshot_put("v-sep", "embedded-assets", "{\"m\":2}", 3_000).unwrap());
+        assert_eq!(a.pricing_snapshot_count().unwrap(), 2);
+
+        assert_eq!(a.pricing_snapshot_get("v-sep").unwrap().as_deref(), Some("{\"m\":2}"));
+        assert_eq!(a.pricing_snapshot_latest().unwrap(), Some(("v-sep".into(), 3_000)));
+        // asof 调价前 → 用旧版本；调价后 → 新版本；更早 → None。
+        assert_eq!(a.pricing_snapshot_asof(2_000).unwrap().as_deref(), Some("{\"m\":1}"));
+        assert_eq!(a.pricing_snapshot_asof(4_000).unwrap().as_deref(), Some("{\"m\":2}"));
+        assert!(a.pricing_snapshot_asof(500).unwrap().is_none());
         let _ = std::fs::remove_file(&db);
     }
 }

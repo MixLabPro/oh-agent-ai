@@ -2494,6 +2494,12 @@ session_store={store} fold={fold}"
             }
             Err(e) => eprintln!("data-migrate warning (claude-ledger unaccounted, unreadable): {e}"),
         }
+        // Phase 2.8：落当前价格快照（§5.3：历史查询按记录的 pricing version 重放）。
+        match agent_vitals_runtime::sql_sync::snapshot_current_pricing(&db) {
+            Ok(true) => println!("  pricing snapshot: new version captured"),
+            Ok(false) => {}
+            Err(e) => eprintln!("data-migrate warning (pricing snapshot): {e}"),
+        }
         let _ = db.finish_run(&run_id, "succeeded", None, None, agent_vitals_runtime::sql_sync::now_ms());
         // spec §6.1：迁移必须记录在 migrations 表（与 DDL 版本分离）——
         // checkpoint 可重跑的锚点。
@@ -2594,6 +2600,7 @@ session_store={store} fold={fold}"
                 "open_quality_issues": issues,
                 "open_quality_issues_by_code": issues_by_code,
                 "sql_authority_enabled": agent_vitals_runtime::sql_authority::is_enabled(&data_home),
+                "pricing_snapshots": conn.query_row("SELECT COUNT(*) FROM pricing_snapshots", [], |r| r.get::<_, i64>(0)).unwrap_or(0),
                 "recent_runs": runs,
             }))
         })();

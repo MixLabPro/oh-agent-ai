@@ -413,6 +413,12 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
     if checkpoint != load_checkpoint(data_home, &ns) {
         save_checkpoint(data_home, &ns, &checkpoint);
     }
+    // Phase 2.8：落当前价格快照（§5.3）。幂等——价卡不变则无新版本。
+    if let Some(db) = &authority {
+        if let Err(e) = crate::sql_sync::snapshot_current_pricing(db) {
+            eprintln!("sync-facts warning (pricing snapshot): {e}");
+        }
+    }
     Ok(report)
 }
 

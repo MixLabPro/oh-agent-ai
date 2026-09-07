@@ -37,6 +37,32 @@ pub fn new_run_id(trigger: &str) -> String {
     format!("{trigger}:{}", now_ms())
 }
 
+/// v0.9.1 Phase 2.8（spec §5.3）：落一份**当前**价格快照进 `pricing_snapshots`。
+/// `pricing_version` = `{pricing.json, codex_pricing.json}` 合并对象的
+/// `fnv1a64_hex(canonical_json)`——内容指纹，价卡变则版本变。已存在 → 幂等
+/// 吸收（返回 `false`）。`data-migrate` / `sync-facts` 每次调用一次，DB 里
+/// 总有当前版本 + 历次运行留下的历史版本（Q13：调价日前后重放正确版本，
+/// 消费面 `authority::pricing_snapshot_asof`）。
+pub fn snapshot_current_pricing(db: &AuthorityDb) -> Result<bool, AuthorityError> {
+    let combined = serde_json::json!({
+        "pricing": agent_vitals_domain::cost::load_pricing(),
+        "codex_pricing": crate::sessions::codex_cost::load_codex_pricing(),
+    });
+    let mut canon = String::new();
+    agent_vitals_domain::source_identity::canonical_json(&combined, &mut canon);
+    let version = agent_vitals_domain::source_identity::fnv1a64_hex(canon.as_bytes());
+    let now = now_ms();
+    db.with_immediate_txn(|conn| {
+        let changed = conn.execute(
+            "INSERT INTO pricing_snapshots(pricing_version, captured_at_ms, source_kind, payload_json)
+             VALUES (?1, ?2, 'embedded-assets', ?3)
+             ON CONFLICT(pricing_version) DO NOTHING",
+            rusqlite::params![version, now, canon],
+        )?;
+        Ok(changed > 0)
+    })
+}
+
 /// 保留窗月数的 fencepost 常量：spec「保留最近 13 个自然月（含当月）」→
 /// cutoff = current − 12。**legacy（enforce_retention）与 authority
 ///（retention_usage_facts）必须同值**——13 vs 12 的窗差会让 §6.3 对账在
