@@ -68,6 +68,22 @@ impl BillingBasis {
             Self::ApiEquivalent => "api_equivalent",
         }
     }
+
+    /// `as_str` 的逆——从持久化/CLI 读回来的 snake_case 还原成 basis。不认识
+    /// 的字符串返回 `None`（`host_bills` 表里的 basis 由 `host_bill_put` 校验
+    /// 过五档词表，理论上不会命中，但读侧不做"猜一个默认"这种事）。名字不用
+    /// `from_str`——那会和 `std::str::FromStr` 撞（clippy::should_implement_trait），
+    /// 而我们要的是 `Option` 而非 `Result<_, ()>`。
+    pub fn from_wire(s: &str) -> Option<Self> {
+        Some(match s {
+            "fixed_subscription" => Self::FixedSubscription,
+            "metered_actual" => Self::MeteredActual,
+            "metered_estimate" => Self::MeteredEstimate,
+            "host_billed" => Self::HostBilled,
+            "api_equivalent" => Self::ApiEquivalent,
+            _ => return None,
+        })
+    }
 }
 
 /// spec §0.1：每一项成本必须可见的口径，比 `BillingBasis` 粗一档——回答
@@ -575,6 +591,21 @@ mod tests {
         };
         assert_eq!(summary.total_summable(), 0.0);
         assert!(summary.total_summable().is_sign_positive());
+    }
+
+    #[test]
+    fn billing_basis_from_str_roundtrips_as_str() {
+        for b in [
+            BillingBasis::FixedSubscription,
+            BillingBasis::MeteredActual,
+            BillingBasis::MeteredEstimate,
+            BillingBasis::HostBilled,
+            BillingBasis::ApiEquivalent,
+        ] {
+            assert_eq!(BillingBasis::from_wire(b.as_str()), Some(b));
+        }
+        assert_eq!(BillingBasis::from_wire("credits"), None);
+        assert_eq!(BillingBasis::from_wire(""), None);
     }
 
     #[test]

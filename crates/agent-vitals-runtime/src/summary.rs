@@ -1151,6 +1151,51 @@ fn apply_subscription_fees(
     }
 }
 
+/// Phase 2.8（spec §5.3）：用户显式录入的 `host_bills` 行 → `by_provider` 对应
+/// 条目的 basis 桶。键 `{host}/{provider}`，与 `apply_subscription_fees` 同款
+/// 「找不到条目就新建、有就叠加」。跨币不相加——同 provider 同 basis 出现
+/// 第二币种（理论上不该）→ 撤 currency + unresolved。`data host-bill set` 的
+/// 唯一消费面。
+///
+/// **在 `apply_subscription_fees` 之后跑**：主用途是 `host_billed`（WorkBuddy
+/// credit_json、中转对账单——价卡派生不出来的），不与订阅声明重叠。若用户
+/// 又把已在 `pricing.json` 声明的订阅重复录成 `fixed_subscription` host_bill，
+/// 两者会叠进同一桶——那是录入责任（spec §5.3：这条路径专给非价卡来源），
+/// 不在这里去重。
+fn apply_host_bills(
+    by_provider: &mut BTreeMap<String, HostAmount>,
+    db: &agent_vitals_data::authority::AuthorityDb,
+    month: &str,
+) {
+    let rows = match db.host_bills_for_period(month) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for (host, provider, basis_str, amount_minor, currency) in rows {
+        let Some(basis) = agent_vitals_domain::data_contract::BillingBasis::from_wire(&basis_str)
+        else {
+            continue;
+        };
+        let key = format!("{host}/{provider}");
+        let entry = by_provider.entry(key.clone()).or_insert_with(|| HostAmount {
+            host_id: key,
+            amounts_by_basis: BTreeMap::new(),
+            currency: None,
+            has_unresolved: false,
+            freshness: Freshness::unavailable(),
+        });
+        *entry.amounts_by_basis.entry(basis).or_insert(0.0) += amount_minor as f64 / 100.0;
+        match &entry.currency {
+            None => entry.currency = Some(currency),
+            Some(c) if *c == currency => {}
+            Some(_) => {
+                entry.currency = None;
+                entry.has_unresolved = true;
+            }
+        }
+    }
+}
+
 /// Codex 当前配额快照（决策卡「现在该用谁」的唯一正向余量源）。
 ///
 /// **为什么是独立函数而不是塞进 summary**：plan 是"当前状态"的单快照、不按
@@ -1553,17 +1598,35 @@ pub fn persist_reconcile_exceptions(data_home: &Path, report: &serde_json::Value
     )
     .map_err(|e| e.to_string())?;
     let now = crate::sql_sync::now_ms();
-    let rows: Vec<&serde_json::Value> = report["tokens_by_host"]
-        .as_array()
-        .map(|a| a.iter().filter(|r| r["verdict"] != "exact").collect())
-        .unwrap_or_default();
+    let all_rows: Vec<&serde_json::Value> =
+        report["tokens_by_host"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
     db.with_immediate_txn(|conn| {
-        for r in &rows {
+        // 每个 host 按当次裁决对齐两条 code 的存在性——**关键**：一个 scope 从
+        // mismatch 转 explained（§6.3 例外补进来）后，旧的 reconcile_mismatch
+        // 行必须被 resolve，否则 data-status 永远挂一条假警告（真机 2026-08/
+        // claude-code 就是这样留了一条陈旧 mismatch）。resolve sibling code 而
+        // 不是只在 all-exact 时清场。
+        let resolve = |conn: &rusqlite::Connection, scope: &str, code: &str| -> rusqlite::Result<usize> {
+            conn.execute(
+                "UPDATE data_quality_issues SET resolved_at_ms = ?1
+                 WHERE scope_type = 'month' AND scope_key = ?2 AND code = ?3
+                   AND resolved_at_ms IS NULL",
+                rusqlite::params![now, scope, code],
+            )
+        };
+        for r in &all_rows {
             let host = r["host"].as_str().unwrap_or("?");
-            let (code, sev) = if r["verdict"] == "explained" {
-                ("reconcile_exception", "info")
+            let scope = format!("{month}/{host}");
+            let verdict = r["verdict"].as_str().unwrap_or("");
+            if verdict == "exact" {
+                resolve(conn, &scope, "reconcile_exception")?;
+                resolve(conn, &scope, "reconcile_mismatch")?;
+                continue;
+            }
+            let (code, sev, sibling) = if verdict == "explained" {
+                ("reconcile_exception", "info", "reconcile_mismatch")
             } else {
-                ("reconcile_mismatch", "warning")
+                ("reconcile_mismatch", "warning", "reconcile_exception")
             };
             conn.execute(
                 "INSERT INTO data_quality_issues(issue_id, scope_type, scope_key, code,
@@ -1574,7 +1637,7 @@ pub fn persist_reconcile_exceptions(data_home: &Path, report: &serde_json::Value
                      detail_json = excluded.detail_json, resolved_at_ms = NULL",
                 rusqlite::params![
                     format!("{code}:{month}:{host}"),
-                    format!("{month}/{host}"),
+                    scope,
                     code, sev, now,
                     json!({"host": host, "abs_delta_tokens": r["abs_delta_tokens"],
                            "buckets": r["buckets"], "explanation": r["explanation"],
@@ -1582,14 +1645,7 @@ pub fn persist_reconcile_exceptions(data_home: &Path, report: &serde_json::Value
                     .to_string(),
                 ],
             )?;
-        }
-        if rows.is_empty() {
-            conn.execute(
-                "UPDATE data_quality_issues SET resolved_at_ms = ?1
-                 WHERE code IN ('reconcile_exception','reconcile_mismatch')
-                   AND scope_key LIKE ?2 AND resolved_at_ms IS NULL",
-                rusqlite::params![now, format!("{month}/%")],
-            )?;
+            resolve(conn, &scope, sibling)?;
         }
         Ok(())
     })
@@ -2010,6 +2066,11 @@ impl SummaryRepository for SqlSummaryRepository {
         by_provider.insert("codex/openai".to_string(), codex_prov);
         by_provider.extend(claude_provider_amounts_from_days(&claude_days_map));
         apply_subscription_fees(&mut by_provider, &query.month);
+        // Phase 2.8：用户显式录入的宿主账单（WorkBuddy 积分 / 中转对账单…）→
+        // by_provider 对应条目的 basis 桶（`data host-bill set`）。
+        if let Some(db) = &db {
+            apply_host_bills(&mut by_provider, db, &query.month);
+        }
 
         let freshness = aggregate_freshness(&by_host);
         let last_observed_at = freshness.last_observed_at.clone();
@@ -2829,6 +2890,48 @@ mod tests {
             .unwrap();
     }
 
+    /// Phase 2.8：`data host-bill set` 录入的行进 `by_provider` 的 basis 桶。
+    /// 找不到条目就新建（WorkBuddy 从不产 usage_fact），有就叠加；跨币不相加。
+    #[test]
+    fn apply_host_bills_folds_user_entered_rows_into_by_provider() {
+        with_home(|| {
+            let db = seed_authority_db();
+            db.host_bill_put(
+                "wb:wb:2026-09:host_billed:", "workbuddy", "workbuddy", "2026-09",
+                "host_billed", 21_500, "CNY", "credit_json", 1,
+            )
+            .unwrap();
+            // 另一档进已存在的 provider 条目（叠加，不覆盖）。
+            db.host_bill_put(
+                "wb:wb:2026-09:fixed_subscription:", "workbuddy", "workbuddy", "2026-09",
+                "fixed_subscription", 5_000, "CNY", "", 1,
+            )
+            .unwrap();
+
+            let mut by_provider: BTreeMap<String, HostAmount> = BTreeMap::new();
+            apply_host_bills(&mut by_provider, &db, "2026-09");
+
+            let e = by_provider.get("workbuddy/workbuddy").expect("新建条目");
+            assert_eq!(e.currency.as_deref(), Some("CNY"));
+            assert!(!e.has_unresolved);
+            assert_eq!(
+                e.amounts_by_basis
+                    .get(&agent_vitals_domain::data_contract::BillingBasis::HostBilled),
+                Some(&215.0)
+            );
+            assert_eq!(
+                e.amounts_by_basis
+                    .get(&agent_vitals_domain::data_contract::BillingBasis::FixedSubscription),
+                Some(&50.0)
+            );
+
+            // 别的月份不串。
+            let mut other: BTreeMap<String, HostAmount> = BTreeMap::new();
+            apply_host_bills(&mut other, &db, "2026-08");
+            assert!(other.is_empty());
+        });
+    }
+
     /// 2026-09-07 审查收口（模型级合并）：同日「A 有实时行 + B 只有 legacy
     /// 聚合」时，整日替换会把 B 无标记丢掉——按 (日, 模型) 选源（实时赢、
     /// 异模型互补）才是既不双计也不漏的结构。
@@ -3097,11 +3200,35 @@ mod tests {
                 &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
                 1,
             ).unwrap();
-            let n: i64 = db.conn().query_row(
-                "SELECT COUNT(*) FROM data_quality_issues WHERE code='reconcile_mismatch'
-                   AND scope_key = ?1 AND resolved_at_ms IS NULL",
-                rusqlite::params![format!("{month}/dsh")], |r| r.get(0)).unwrap();
-            assert_eq!(n, 1, "dsh mismatch 落一条 issue");
+            let open_mismatch = |db: &agent_vitals_data::authority::AuthorityDb| -> i64 {
+                db.conn().query_row(
+                    "SELECT COUNT(*) FROM data_quality_issues WHERE code='reconcile_mismatch'
+                       AND scope_key = ?1 AND resolved_at_ms IS NULL",
+                    rusqlite::params![format!("{month}/dsh")], |r| r.get(0)).unwrap()
+            };
+            assert_eq!(open_mismatch(&db), 1, "dsh mismatch 落一条 issue");
+            drop(db);
+
+            // 缺口补上（legacy 追平那 500K）→ dsh 回 exact → 陈旧 mismatch 行
+            // 必须被 resolve（这次会话抓出的真机 bug：转 explained/exact 后旧
+            // mismatch 一直挂着）。
+            crate::state::atomic_write_json(
+                &crate::state::state_dir().join("month.json"),
+                &json!({ "days": { day.clone(): json!({
+                    "uncached_input_tokens": 1_500_000, "cache_read_tokens": 250_000,
+                    "cache_write_tokens": 0, "output_tokens": 100_000,
+                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+                }) } }),
+            );
+            let r3 = reconcile_authority_vs_legacy(&month);
+            assert_eq!(dsh_verdict(&r3), "exact", "legacy 追平 → dsh exact");
+            persist_reconcile_exceptions(&crate::home::data_home(), &r3).unwrap();
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+                1,
+            ).unwrap();
+            assert_eq!(open_mismatch(&db), 0, "回 exact 后陈旧 mismatch 行被 resolve");
         });
     }
 }

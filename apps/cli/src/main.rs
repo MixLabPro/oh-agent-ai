@@ -521,6 +521,41 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
+    /// Phase 2.8 (spec 5.3): explicit host-bill management. Host bills (WorkBuddy
+    /// credit, subscription invoices, relay statements) are user-entered, not
+    /// derived from our price cards. `set` upserts one; `list --month` shows a
+    /// period; `delete --id` soft-deletes. Amounts are minor units (integer).
+    DataHostBill {
+        #[arg(value_parser = ["set", "list", "delete"])]
+        action: String,
+        /// set/list/delete: billing period YYYY-MM (default: current for list)
+        #[arg(long)]
+        month: Option<String>,
+        /// set: host (e.g. workbuddy)
+        #[arg(long)]
+        host: Option<String>,
+        /// set: provider id (e.g. workbuddy)
+        #[arg(long)]
+        provider: Option<String>,
+        /// set: billing basis (host_billed | fixed_subscription | metered_actual | ...)
+        #[arg(long)]
+        basis: Option<String>,
+        /// set: amount in minor units (¥1.00 = 100)
+        #[arg(long = "amount-minor")]
+        amount_minor: Option<i64>,
+        /// set: currency (e.g. CNY, USD)
+        #[arg(long)]
+        currency: Option<String>,
+        /// set: free-text evidence reference (also part of the dedup key)
+        #[arg(long)]
+        evidence: Option<String>,
+        /// delete: the bill_id to soft-delete
+        #[arg(long = "id")]
+        bill_id: Option<String>,
+        /// Output JSON
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
     /// Reconcile the two budget ledgers for a month: state chain
     /// (month.json fold) vs facts index. `reconciled: true` is the
     /// precondition for retirement-path step 4 (state JSON retirement).
@@ -2601,6 +2636,7 @@ session_store={store} fold={fold}"
                 "open_quality_issues_by_code": issues_by_code,
                 "sql_authority_enabled": agent_vitals_runtime::sql_authority::is_enabled(&data_home),
                 "pricing_snapshots": conn.query_row("SELECT COUNT(*) FROM pricing_snapshots", [], |r| r.get::<_, i64>(0)).unwrap_or(0),
+                "host_bills": conn.query_row("SELECT COUNT(*) FROM host_bills WHERE deleted_at_ms IS NULL", [], |r| r.get::<_, i64>(0)).unwrap_or(0),
                 "recent_runs": runs,
             }))
         })();
@@ -2637,6 +2673,95 @@ session_store={store} fold={fold}"
             }
             Err(e) => {
                 eprintln!("data-status failed: {e}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    // data host-bill（Phase 2.8，spec §5.3 显式管理 API）
+    if let Some(Cmd::DataHostBill {
+        action, month, host, provider, basis, amount_minor, currency, evidence, bill_id, rows_json,
+    }) = &args.cmd
+    {
+        let db = match agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(
+                &agent_vitals_runtime::home::data_home(),
+            ),
+            agent_vitals_runtime::sql_sync::now_ms(),
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("data host-bill: authority DB unavailable: {e}");
+                std::process::exit(2);
+            }
+        };
+        let now = agent_vitals_runtime::sql_sync::now_ms();
+        match action.as_str() {
+            "set" => {
+                let (Some(h), Some(p), Some(per), Some(b), Some(amt), Some(cur)) = (
+                    host.as_deref(), provider.as_deref(), month.as_deref(),
+                    basis.as_deref(), *amount_minor, currency.as_deref(),
+                ) else {
+                    eprintln!("data host-bill set: --host --provider --month --basis --amount-minor --currency are all required");
+                    std::process::exit(2);
+                };
+                let ev = evidence.as_deref().unwrap_or("");
+                let id = format!("{h}:{p}:{per}:{b}:{ev}");
+                match db.with_immediate_txn(|_c| {
+                    db.host_bill_put(&id, h, p, per, b, amt, cur, ev, now)
+                }) {
+                    Ok(()) => println!("host bill saved: {id} = {amt} {cur} ({b})"),
+                    Err(e) => {
+                        eprintln!("data host-bill set failed: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "list" => {
+                let per = month.clone().unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+                match db.host_bills_for_period(&per) {
+                    Ok(rows) => {
+                        if *rows_json {
+                            let arr: Vec<Value> = rows.iter().map(|(h, p, b, a, c)| json!({
+                                "host": h, "provider": p, "basis": b, "amount_minor": a, "currency": c,
+                            })).collect();
+                            println!("{}", serde_json::to_string_pretty(&json!({"month": per, "bills": arr})).unwrap_or_default());
+                        } else {
+                            println!("Host bills ({per}):");
+                            for (h, p, b, a, c) in &rows {
+                                println!("  {h}/{p} {b}: {a} {c}");
+                            }
+                            if rows.is_empty() {
+                                println!("  (none)");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("data host-bill list failed: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "delete" => {
+                let Some(id) = bill_id.as_deref() else {
+                    eprintln!("data host-bill delete: --id required");
+                    std::process::exit(2);
+                };
+                match db.with_immediate_txn(|_c| db.host_bill_delete(id, now)) {
+                    Ok(true) => println!("host bill {id} soft-deleted"),
+                    Ok(false) => {
+                        eprintln!("data host-bill delete: no active bill with id {id}");
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("data host-bill delete failed: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            other => {
+                eprintln!("data host-bill: unknown action {other}");
                 std::process::exit(2);
             }
         }

@@ -32,6 +32,11 @@ pub fn default_authority_path(data_home: &Path) -> PathBuf {
     data_home.join("agent-vitals.sqlite3")
 }
 
+/// `host_bills_for_period` 的一行：`(host, provider_id, billing_basis,
+/// amount_minor, currency)`。`amount_minor` 是最小货币单位整数——金额从不
+/// 以浮点入库（spec §5.3），折算在展示层。
+pub type HostBillRow = (String, String, String, i64, String);
+
 /// 权威库错误。`Corrupt` **不再自愈**——恢复路径是「用户备份 + 原始日志
 /// 重放」，静默删库重建会把权威库变成可被悄悄替换的第二本账（spec §1.1.3
 /// 的反面教材）。
@@ -575,6 +580,108 @@ impl AuthorityDb {
             .query_row("SELECT COUNT(*) FROM pricing_snapshots", [], |r| r.get(0))?)
     }
 
+    // ─────── v0.9.1 Phase 2.8：host_bills（spec §5.3 显式管理 API）───────
+    // 宿主自身账单（WorkBuddy 积分、订阅月费、中转对账单…）——**不是**从我们
+    // 的价卡派生，由用户显式录入，更新必须验证币种/账期/金额范围（§5.3）。
+
+    /// 录一条宿主账单。`bill_id` = `{host}:{provider}:{period}:{basis}:{evidence_ref}`
+    /// 的稳定构造（调用方给），同键 upsert（更正金额）。`amount_minor` 最小
+    /// 货币单位整数（¥1.00 = 100）。校验：period `YYYY-MM`、basis 五档之一、
+    /// amount_minor ≥ 0、currency 非空——不合格 `Err`（不猜不默认）。
+    ///
+    /// `evidence_ref` 是 `&str` 而不是 `Option`——空串就是"没有凭证引用"，**绝不存
+    /// NULL**：SQLite 的 UNIQUE 里 NULL 互不相等，NULL 的 evidence_ref 会让
+    /// `ON CONFLICT` 落空、同一 bill_id 第二次录入撞 PRIMARY KEY 报错而不是 upsert
+    /// （`bill_id` 构造里的 `{evidence_ref}` 段同样是空串，两侧对齐）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn host_bill_put(
+        &self,
+        bill_id: &str,
+        host: &str,
+        provider_id: &str,
+        billing_period: &str,
+        billing_basis: &str,
+        amount_minor: i64,
+        currency: &str,
+        evidence_ref: &str,
+        now_ms: i64,
+    ) -> Result<(), AuthorityError> {
+        let bad = |m: &str| AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(m.to_string()));
+        if billing_period.len() != 7
+            || billing_period.as_bytes()[4] != b'-'
+            || !billing_period[..4].bytes().all(|c| c.is_ascii_digit())
+            || !billing_period[5..].bytes().all(|c| c.is_ascii_digit())
+        {
+            return Err(bad("billing_period must be YYYY-MM"));
+        }
+        if !matches!(
+            billing_basis,
+            "fixed_subscription" | "host_billed" | "metered_actual" | "metered_estimate" | "api_equivalent"
+        ) {
+            return Err(bad("billing_basis not in the five-basis vocabulary"));
+        }
+        if amount_minor < 0 {
+            return Err(bad("amount_minor must be >= 0"));
+        }
+        if currency.trim().is_empty() {
+            return Err(bad("currency required"));
+        }
+        self.conn.execute(
+            "INSERT INTO host_bills(bill_id, host, provider_id, billing_period, billing_basis,
+                 amount_minor, currency, evidence_ref, created_at_ms, updated_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9)
+             ON CONFLICT(host, provider_id, billing_period, billing_basis, evidence_ref) DO UPDATE SET
+                 amount_minor = excluded.amount_minor, currency = excluded.currency,
+                 updated_at_ms = excluded.updated_at_ms, deleted_at_ms = NULL",
+            rusqlite::params![
+                bill_id, host, provider_id, billing_period, billing_basis,
+                amount_minor, currency, evidence_ref, now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 某账期的所有活账单行 `(host, provider_id, basis, amount_minor, currency)`。
+    pub fn host_bills_for_period(
+        &self,
+        billing_period: &str,
+    ) -> Result<Vec<HostBillRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT host, provider_id, billing_basis, amount_minor, currency FROM host_bills
+             WHERE billing_period = ?1 AND deleted_at_ms IS NULL
+             ORDER BY host, provider_id, billing_basis",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![billing_period], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// soft delete（查询默认过滤 `deleted_at_ms IS NULL`）。
+    pub fn host_bill_delete(&self, bill_id: &str, now_ms: i64) -> Result<bool, AuthorityError> {
+        let n = self.conn.execute(
+            "UPDATE host_bills SET deleted_at_ms = ?2 WHERE bill_id = ?1 AND deleted_at_ms IS NULL",
+            rusqlite::params![bill_id, now_ms],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn host_bill_count(&self) -> Result<i64, AuthorityError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM host_bills WHERE deleted_at_ms IS NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// `BEGIN IMMEDIATE` 事务帮助器：闭包成功 → COMMIT，Err → ROLLBACK 后
     /// 原样上抛。**所有业务写入都必须走这里**（spec §5.1.4——事务边界是
     /// 写入协议的一部分，不是调用方的自由裁量）。
@@ -866,6 +973,52 @@ mod tests {
         assert_eq!(a.pricing_snapshot_asof(2_000).unwrap().as_deref(), Some("{\"m\":1}"));
         assert_eq!(a.pricing_snapshot_asof(4_000).unwrap().as_deref(), Some("{\"m\":2}"));
         assert!(a.pricing_snapshot_asof(500).unwrap().is_none());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// Phase 2.8：`host_bills` 写入方——校验四项（period/basis/amount/currency）、
+    /// 同键 upsert（更正金额，deleted 复活）、`for_period` 只回活行、soft delete。
+    #[test]
+    fn host_bill_put_validates_and_upserts() {
+        let db = tmp_db("hbill");
+        let a = AuthorityDb::open(&db, 1_000).unwrap();
+        assert_eq!(a.host_bill_count().unwrap(), 0);
+
+        // 四项校验——每条都必须 Err（不猜、不默认）。
+        assert!(a.host_bill_put("x", "wb", "wb", "2026-9", "host_billed", 100, "CNY", "", 1).is_err(),
+                "period 非 YYYY-MM");
+        assert!(a.host_bill_put("x", "wb", "wb", "2026-09", "credits", 100, "CNY", "", 1).is_err(),
+                "basis 不在五档词表");
+        assert!(a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", -1, "CNY", "", 1).is_err(),
+                "amount_minor < 0");
+        assert!(a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", 100, "  ", "", 1).is_err(),
+                "currency 空");
+
+        // 正常录入 + 同键 upsert 更正金额。
+        a.host_bill_put("b1", "workbuddy", "workbuddy", "2026-09", "host_billed", 21_500, "CNY", "credit_json", 1_000).unwrap();
+        assert_eq!(a.host_bill_count().unwrap(), 1);
+        a.host_bill_put("b1", "workbuddy", "workbuddy", "2026-09", "host_billed", 30_000, "CNY", "credit_json", 2_000).unwrap();
+        assert_eq!(a.host_bill_count().unwrap(), 1, "同 (host,provider,period,basis,evidence) → upsert 不新增");
+
+        // evidence_ref 空串同样能 upsert（不撞 PRIMARY KEY）。
+        a.host_bill_put("b2:", "wb2", "wb2", "2026-09", "host_billed", 500, "CNY", "", 1).unwrap();
+        a.host_bill_put("b2:", "wb2", "wb2", "2026-09", "host_billed", 700, "CNY", "", 2).unwrap();
+        assert_eq!(a.host_bill_count().unwrap(), 2, "空 evidence 也 upsert 而非新增/报错");
+        a.host_bill_delete("b2:", 9).unwrap();
+
+        let rows = a.host_bills_for_period("2026-09").unwrap();
+        assert_eq!(rows, vec![("workbuddy".to_string(), "workbuddy".to_string(), "host_billed".to_string(), 30_000, "CNY".to_string())]);
+        assert!(a.host_bills_for_period("2026-08").unwrap().is_empty());
+
+        // soft delete → for_period 不再回它；重复 delete 返回 false。
+        assert!(a.host_bill_delete("b1", 3_000).unwrap());
+        assert!(!a.host_bill_delete("b1", 4_000).unwrap());
+        assert!(a.host_bills_for_period("2026-09").unwrap().is_empty());
+        assert_eq!(a.host_bill_count().unwrap(), 0);
+
+        // upsert 到已 soft-deleted 的键 → 复活（deleted_at_ms = NULL）。
+        a.host_bill_put("b1", "workbuddy", "workbuddy", "2026-09", "host_billed", 12_000, "CNY", "credit_json", 5_000).unwrap();
+        assert_eq!(a.host_bill_count().unwrap(), 1, "同键再录 → 复活");
         let _ = std::fs::remove_file(&db);
     }
 }

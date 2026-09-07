@@ -139,9 +139,24 @@ lease 包住完整事务。旧 `index.sqlite3` 的 facts 按 §6.2.1 一次性�
   来源）/ `data migrate`（§6.1 升级状态机的手动入口）
 - [ ] **2.7 lease 接线** — 现有 `.ingest.lock` 包住「发现→解析→事务写入」
   全程（spec §5.1.4）；并发双进程语义与现批次一致
-- [ ] **2.8 HostBillRecord + 价格快照** — `host_bills` 写入方
-  （WorkBuddy credit_json 首个，**范围待用户确认**）+
-  `pricing_snapshots`（load_pricing 的版本化落库，历史查询按版本重放）
+- [x] **2.8 HostBillRecord + 价格快照** — ✅
+  - `pricing_snapshots`（cf04121）：`sql_sync::snapshot_current_pricing`
+    在 `data-migrate` / `sync-facts` 各落一次当前版本；`authority::
+    pricing_snapshot_asof/latest/get` 是历史重放读原语。**Q13
+    「调价日前后按版本重放」的存储 + 读侧齐了，`SqlSummaryRepository`
+    仍读活价表——按事件时间点选版本是显式记欠的后续项，非 blocker。**
+  - `host_bills` 写入方：`authority::host_bill_put/host_bills_for_period/
+    host_bill_delete`（YYYY-MM + 五档 basis + amount_minor≥0 + currency
+    非空四项校验，同键 upsert，soft delete）；CLI `data-host-bill
+    {set,list,delete}`（spec §5.3 显式管理 API，不由 UI 直写表）；
+    `summary::apply_host_bills` 把活账单行折进 `MonthlySummary.by_provider`
+    对应 `{host}/{provider}` 条目的 basis 桶（跨币不相加，冲突撤 currency
+    + unresolved）。WorkBuddy credit_json 是首个消费方——录入仍是人工
+    （`workbuddy-session` 读到的 credit_json 值 → `data-host-bill set
+    --basis host_billed`），自动接线是后续项。
+  - 附带：`persist_reconcile_exceptions` 修 scope 从 mismatch 转
+    exact/explained 后陈旧 `reconcile_mismatch` 行不 resolve 的 bug
+    （真机 2026-08/claude-code 挂了一条假警告）。
 
 **验收**：同一事件重放/文件修改/截断/坏行/并发同步的测试矩阵（spec §8.2）；
 `sync_runs` 与 `data_quality_issues` 如实记录。
@@ -354,7 +369,7 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   | Q05 无价卡 unresolved 不归零 | claude/codex unresolved 单元测试 | e2e fixture 无 |
   | Q11 宿主 24h 未同步 → stale/partial 显式 | freshness/excluded_hosts 契约测试 | 「单宿主过期不得冒充完整总额」e2e 无 |
   | Q12 双次导入+中断 → 重跑恒等 | writer 级幂等/回滚测试 | 跨「导入→查询」e2e 无 |
-  | Q13 调价日前后价格版本 | 无 | 依赖 pricing_snapshots 落库（3.4 相邻欠账），非 blocker、显式记欠 |
+  | Q13 调价日前后价格版本 | `pricing_snapshots` 写入方 + `pricing_snapshot_asof` 读原语（2.8，cf04121） | `SqlSummaryRepository` 按事件时间点选版本重放未接（存储/读侧已齐），非 blocker、显式记欠 |
   | Q14 同 raw 模型名跨宿主 | unknown→unresolved 单元测试 | 跨宿主同名 fixture 无 |
   | Q06–Q10 workflow_events | 表已建、无 writer/reader | spec 自身定位 v0.9.1 最小化，随 v0.10 任务图，不阻塞 release |
 
