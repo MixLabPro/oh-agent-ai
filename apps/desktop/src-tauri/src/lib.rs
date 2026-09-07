@@ -412,6 +412,15 @@ fn daily_budget_text(ov: &Overview, now_secs: i64) -> Option<String> {
     }
 }
 
+/// 本月订阅行：`本月订阅：¥232（已付，不计入按量预算）`，或 None（无订阅 →
+/// 整行不显示，不摆「¥0」）。PM 决策 2026-09-07：订阅是月初已付的常数，**单
+/// 列**在预算行下方——让用户看得见这笔钱、但知道它不是按量预算的闸门（摊进
+/// 每 5 分钟刷新的告警分子只会让月初凭空涨一截然后整月杵着）。
+fn subscription_line_text(ov: &Overview) -> Option<String> {
+    let cny = ov.subscription_cny_month?;
+    Some(format!("本月订阅：{}（已付，不计入按量预算）", fmt_money(cny)))
+}
+
 /// 同步状态一行：**成功也显示**，不是只在失败时才出现。
 ///
 /// "上次成功同步是几点"是判断菜单里这些数字新不新的最直接信号——比预算行末尾
@@ -653,6 +662,11 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
         &host_menu_rows(&ov.hosts, ov.hosts_generated_at.as_deref(), now_secs),
     )?;
     builder = builder.separator().item(&budget_item);
+    // 本月订阅（PM 决策 2026-09-07）：紧跟按量预算行，单列——「已付、不计入
+    // 按量预算」。无订阅 → 整行不显示。
+    if let Some(t) = subscription_line_text(ov) {
+        builder = builder.item(&MenuItem::with_id(app, "subscription", t, true, None::<&str>)?);
+    }
     // 同步状态常驻（成功也显示）——托盘是主入口，"数字是什么时候的"必须在这里
     // 一眼可见，不该等到打开工作台才发现同步早就断了。
     builder = builder.item(&MenuItem::with_id(
@@ -1172,7 +1186,7 @@ fn show_workbench(app: &AppHandle) {
 /// 分发）；平铺「最近会话」行已删，「recent」id 不再存在。
 fn tab_for_menu_id(id: &str) -> Option<&'static str> {
     match id {
-        "today" | "daily" | "month" | "budget" => Some("overview"),
+        "today" | "daily" | "month" | "budget" | "subscription" => Some("overview"),
         "sync" => Some("sources"),
         _ => None,
     }
@@ -1615,6 +1629,7 @@ mod tests {
             // 镜像 read_overview 在真机上的产物（pricing.json 有 fx_estimate 节）：
             // 速览层混币折算按此汇率。`fx: None` 的降级路径由专门用例钉。
             fx: Some(serde_json::json!({"usd_cny": 7.15, "as_of": "2026-09"})),
+            subscription_cny_month: None,
         }
     }
 
@@ -1646,6 +1661,21 @@ mod tests {
         // 无 fx_estimate（价表旧版 / 缺节）→ 退回分币旧行为：USD 单独浮出，不折算。
         usd.fx = None;
         assert_eq!(today_title(&usd), "今日 500K · ≈$3", "无汇率不折算，USD 原样");
+    }
+
+    /// 本月订阅行（PM 决策 2026-09-07）：有 CNY 订阅 → 单列「已付、不计入按量
+    /// 预算」；无订阅 → None（整行不显示，不摆 ¥0）。
+    #[test]
+    fn subscription_line_shows_paid_note_or_hides() {
+        let mut ov = ov_with(overview::BudgetAlert::default());
+        assert_eq!(subscription_line_text(&ov), None, "无订阅 → 整行不显示");
+        ov.subscription_cny_month = Some(232.0);
+        assert_eq!(
+            subscription_line_text(&ov).unwrap(),
+            "本月订阅：¥232（已付，不计入按量预算）"
+        );
+        ov.subscription_cny_month = Some(0.0); // (total>0).then_some 保证不会是这个，防御性
+        assert_eq!(subscription_line_text(&ov), Some("本月订阅：¥0（已付，不计入按量预算）".into()));
     }
 
     #[test]
@@ -2096,7 +2126,7 @@ mod tests {
     /// 数字，sync 是数据源页；workbench/refresh 不是导航行；`recent` 已随平铺行
     /// 删除（宿主导航的 L2 深链走 WorkbenchTarget，不走 tab 映射）。
     fn tab_for_menu_id_maps_info_rows_to_workbench_tabs() {
-        for id in ["today", "daily", "month", "budget"] {
+        for id in ["today", "daily", "month", "budget", "subscription"] {
             assert_eq!(tab_for_menu_id(id), Some("overview"), "id={id} 应跳总览");
         }
         assert_eq!(tab_for_menu_id("sync"), Some("sources"));

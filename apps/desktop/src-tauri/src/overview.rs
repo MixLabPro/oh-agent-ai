@@ -374,6 +374,10 @@ pub struct Overview {
     /// 或 None。**只给速览层**把混币金额并成一个 `≈` 数——预算/导出/对账永远
     /// 分币。前端 hover 据此把 `≈¥X` 展开成原始分币。
     pub fx: Option<Value>,
+    /// 本月已生效的 CNY 订阅月费之和（GLM/MiniMax…），或 None（无订阅）。
+    /// **单列**，不进按量预算（PM 决策 2026-09-07）——订阅是月初已付的常数，
+    /// 摊进每 5 分钟刷新的告警分子只会让月初凭空涨一截然后整月杵着。
+    pub subscription_cny_month: Option<f64>,
 }
 
 /// 数据根（镜像 `paths.py::data_home` / `snapshot.rs::data_home_from` 的优先序）：
@@ -484,6 +488,30 @@ fn fx_estimate(pricing: &Value) -> Option<Value> {
         "usd_cny": usd_cny,
         "as_of": fx.get("as_of").and_then(Value::as_str),
     }))
+}
+
+/// 本月已生效的 **CNY 订阅月费之和**（`pricing.json::catalog_2026_09.
+/// subscriptions` 里 `currency == "CNY"` 且账期起点 ≤ 当前北京月的条目）。
+/// 纯 `pricing.json` 计算，不碰 SQL——订阅是声明数据不是派生数据。月份过滤
+/// 与 `summary::apply_subscription_fees` 逐字节同款（`chars().take(7)` +
+/// `month < start_month` 跳过）。零条目 → None（「没有订阅」≠「¥0」，托盘
+/// 整行不显示）。PM 决策 2026-09-07：订阅**单列**，不进按量预算分子。
+fn monthly_cny_subscriptions(pricing: &Value, month: &str) -> Option<f64> {
+    let mut total = 0.0;
+    for (_provider, currency, amount, period_start) in
+        agent_vitals_domain::cost::declared_subscriptions(pricing)
+    {
+        if currency != "CNY" {
+            continue;
+        }
+        let Some(start) = period_start.as_deref() else { continue };
+        let start_month: String = start.chars().take(7).collect();
+        if month < start_month.as_str() {
+            continue;
+        }
+        total += amount;
+    }
+    (total > 0.0).then_some(total)
 }
 
 /// 预算卡：从 SQL 权威库**实时算**（`runtime::budget::evaluate_alert_from_sql`），
@@ -639,6 +667,7 @@ fn read_overview_at(dh: &Path) -> Overview {
         claude_uncovered_month,
         month_savings,
         fx: fx_estimate(&pricing),
+        subscription_cny_month: monthly_cny_subscriptions(&pricing, &cur_month),
     }
 }
 
@@ -1168,6 +1197,20 @@ mod tests {
         assert!(fx_estimate(&json!({})).is_none(), "无节 → None");
         assert!(fx_estimate(&json!({"fx_estimate": {"USD_CNY": 0}})).is_none(), "非正汇率 → None");
         assert!(fx_estimate(&json!({"fx_estimate": {"as_of": "x"}})).is_none(), "缺 USD_CNY → None");
+    }
+
+    /// 本月订阅总额：真机 pricing.json 声明了 CNY 订阅（GLM/MiniMax）→ 当前月
+    /// 有正数；账期起点之前的月份 → None（订阅还没开始，不摊）。月份过滤与
+    /// `summary::apply_subscription_fees` 同款。
+    #[test]
+    fn monthly_cny_subscriptions_respects_billing_period_start() {
+        let p = load_pricing();
+        let now = monthly_cny_subscriptions(&p, &current_month_beijing());
+        assert!(now.is_some_and(|v| v > 0.0), "当前月应有已生效的 CNY 订阅，got {now:?}");
+        // 远古月份：所有订阅账期都还没开始 → 不摊。
+        assert_eq!(monthly_cny_subscriptions(&p, "2000-01"), None);
+        // 无 subscriptions 节 → None（不 panic）。
+        assert_eq!(monthly_cny_subscriptions(&json!({}), "2026-09"), None);
     }
 
     /// claude_estimates 纯函数：flat 直图日（rebuild_days 真机形状，含全零的
