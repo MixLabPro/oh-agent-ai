@@ -499,6 +499,20 @@ enum Cmd {
     /// (spec 6.2.1: JSONL is the highest-fidelity migration source; same
     /// fact_id = idempotent). Safe to re-run.
     DataMigrate,
+    /// Phase 4.1 (spec 6.3): machine-readable reconcile of the SQL authority DB
+    /// against the legacy state JSON, per host x bucket (tokens, strict equal)
+    /// and per provider x basis x currency (amounts, minor units). Diffs are
+    /// exact / explained (delta within a recorded exception, e.g. undated
+    /// residual) / mismatch. `reconciled: true` iff all exact-or-explained —
+    /// this is the read side of the Phase 4.2 switch gate. Exit 1 on mismatch.
+    DataReconcileAuthority {
+        /// Month to reconcile ("YYYY-MM"; default: current month)
+        #[arg(long)]
+        month: Option<String>,
+        /// Output the report as JSON
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
     /// Authority DB status: schema version, recent sync runs, source
     /// counts, data-quality summary (spec 9, authority part of data
     /// doctor).
@@ -2224,6 +2238,52 @@ session_store={store} fold={fold}"
                 report["reconciled"],
                 if note.is_empty() { String::new() } else { format!("（{note}）") }
             );
+        }
+        return;
+    }
+
+    // data-reconcile-authority（Phase 4.1，spec §6.3）：SQL 权威库 vs legacy
+    // state JSON 逐 host×bucket / provider×basis×currency 对账。mismatch → 退出 1。
+    if let Some(Cmd::DataReconcileAuthority { month, rows_json }) = &args.cmd {
+        let month = month
+            .clone()
+            .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+        let report = agent_vitals_runtime::summary::reconcile_authority_vs_legacy(&month);
+        // §6.3：例外落 data_quality_issues（data-status 可见）。写失败不拦报告。
+        if let Err(e) = agent_vitals_runtime::summary::persist_reconcile_exceptions(
+            &agent_vitals_runtime::home::data_home(),
+            &report,
+        ) {
+            eprintln!("note: reconcile exceptions not persisted: {e}");
+        }
+        if *rows_json {
+            println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+        } else {
+            println!("Authority vs legacy reconcile (month {month}):");
+            for r in report["tokens_by_host"].as_array().unwrap_or(&vec![]) {
+                println!(
+                    "  tokens {:<12} {:<9} abs_delta={}",
+                    r["host"].as_str().unwrap_or("?"),
+                    r["verdict"].as_str().unwrap_or("?"),
+                    r["abs_delta_tokens"],
+                );
+            }
+            for r in report["amounts_by_provider_basis"].as_array().unwrap_or(&vec![]) {
+                if r["verdict"] != "exact" {
+                    println!(
+                        "  amount {:<24} {:<18} sql={} legacy={} ({})",
+                        r["provider"].as_str().unwrap_or("?"),
+                        r["basis"].as_str().unwrap_or("?"),
+                        r["sql_minor"],
+                        r["legacy_minor"],
+                        r["verdict"].as_str().unwrap_or("?"),
+                    );
+                }
+            }
+            println!("reconciled: {}", report["reconciled"]);
+        }
+        if report["reconciled"] != serde_json::json!(true) {
+            std::process::exit(1);
         }
         return;
     }

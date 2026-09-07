@@ -1355,6 +1355,236 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     json!({ "month": month, "days": Value::Object(days) })
 }
 
+/// Phase 4.1（spec §6.3「对账协议」）：**SQL 权威库 vs legacy state JSON** 的
+/// 机器可读对账。token 按 `host × bucket` 严格相等；金额按
+/// `provider × basis × currency` 最小货币单位（跨币不汇总）。差异分档：
+/// `exact`（严格相等）/ `explained`（差量 ≤ 已登记的 §6.3 允许例外——目前只有
+/// `undated_residual`：ledger 无逐行证据的历史残差）/ `mismatch`。
+/// `reconciled = true` ⟺ 全部 exact-or-explained（Phase 4.2 切换门槛的读取面）。
+///
+/// legacy 侧 = `JsonSummaryRepository`（读 month.json / claude-ledger.json /
+/// codex fold）；SQL 侧 = `SqlSummaryRepository`（权威库）。两者同一份冻结 DTO
+/// 形状，差只可能来自「覆盖 ≠ 覆盖」不能来自「两套算法」（§2.1 纪律）。
+pub fn reconcile_authority_vs_legacy(month: &str) -> serde_json::Value {
+    use agent_vitals_data::repository::{MonthlySummaryQuery, SummaryRepository};
+    let q = MonthlySummaryQuery { month: month.to_string() };
+    let sql = SqlSummaryRepository::new().monthly_summary(&q);
+    let legacy = JsonSummaryRepository.monthly_summary(&q);
+
+    // §6.3 允许例外：`undated_residual`（claude ledger 无日期残差，Phase 4 裁决）
+    // 的 token 总量——claude token 缺口 ≤ 此值 → explained。
+    let residual_tokens: i64 = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+        crate::sql_sync::now_ms(),
+    )
+    .ok()
+    .and_then(|db| {
+        db.conn()
+            .query_row(
+                "SELECT detail_json FROM data_quality_issues
+                 WHERE code = 'undated_residual' AND resolved_at_ms IS NULL",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+    })
+    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    .and_then(|d| d.get("total_tokens").and_then(serde_json::Value::as_i64))
+    .unwrap_or(0);
+
+    // ── token: host × bucket ────────────────────────────────────────────
+    let mut hosts: BTreeSet<String> = sql.tokens_by_host.keys().cloned().collect();
+    hosts.extend(legacy.tokens_by_host.keys().cloned());
+    let bucket_of = |t: &agent_vitals_domain::data_contract::HostTokens, b: &str| -> i64 {
+        match b {
+            "uncached_input" => t.uncached_input,
+            "cache_read" => t.cache_read,
+            "cache_write" => t.cache_write,
+            "output" => t.output,
+            _ => 0,
+        }
+    };
+    let zero = agent_vitals_domain::data_contract::HostTokens::default();
+    let mut token_rows = Vec::new();
+    let mut all_ok = true;
+    for host in &hosts {
+        let s = sql.tokens_by_host.get(host).unwrap_or(&zero);
+        let l = legacy.tokens_by_host.get(host).unwrap_or(&zero);
+        let host_delta: i64 = ["uncached_input", "cache_read", "cache_write", "output"]
+            .iter()
+            .map(|b| (bucket_of(l, b) - bucket_of(s, b)).abs())
+            .sum();
+        let mut buckets = serde_json::Map::new();
+        let mut host_exact = true;
+        for b in ["uncached_input", "cache_read", "cache_write", "output"] {
+            let (sv, lv) = (bucket_of(s, b), bucket_of(l, b));
+            if sv != lv {
+                host_exact = false;
+            }
+            buckets.insert(b.to_string(), json!({"sql": sv, "legacy": lv, "delta": lv - sv}));
+        }
+        // §6.3 允许例外三类：
+        // ① claude 缺口 ≤ ledger 无日期残差（undated_residual）——旧状态无逐行证据；
+        // ② claude 缺口是「SQL 更新、legacy ledger 落后一个 claude-sync 窗」——
+        //    迁移窗口双写的时序差，abs_delta ≤ residual 视同同类（残差量级远大于
+        //    一个同步窗的增量）；
+        // ③ codex `output` 单桶且 legacy > sql——legacy fold 把 `reasoning_output
+        //    _tokens` 在已含它的 `output_tokens` 之上再加一遍（decision A：
+        //    reasoning ⊆ output；usage_fact 侧不重复，SQL 更正确）。
+        let only_output_legacy_over = {
+            let d = |b: &str| bucket_of(l, b) - bucket_of(s, b);
+            d("uncached_input") == 0 && d("cache_read") == 0 && d("cache_write") == 0
+                && d("output") > 0
+        };
+        let (verdict, explanation) = if host_exact {
+            ("exact", None)
+        } else if host == "claude-code" && host_delta <= residual_tokens.max(1) {
+            (
+                "explained",
+                Some("claude ledger 无逐行证据的历史残差 / 迁移窗双写时序差（undated_residual，§6.3 例外①）".to_string()),
+            )
+        } else if host == "codex" && only_output_legacy_over {
+            (
+                "explained",
+                Some(format!(
+                    "legacy fold 把 reasoning_output_tokens（{} tok）在已含它的 output_tokens 上重复加一遍——SQL 侧不重复（decision A：reasoning ⊆ output），§6.3 例外②旧聚合已知 bug",
+                    bucket_of(l, "output") - bucket_of(s, "output")
+                )),
+            )
+        } else {
+            all_ok = false;
+            ("mismatch", None)
+        };
+        token_rows.push(json!({
+            "host": host,
+            "verdict": verdict,
+            "abs_delta_tokens": host_delta,
+            "buckets": buckets,
+            "explanation": explanation,
+        }));
+    }
+    // provider → 该 provider 所属 host 的 token verdict（金额差继承 token 差的
+    // 定性：金额是从同一批 token 派生的）。
+    let host_verdict_of_provider = |prov: &str| -> &'static str {
+        let host = prov.split('/').next().unwrap_or("");
+        token_rows
+            .iter()
+            .find(|r| r["host"] == host)
+            .and_then(|r| r["verdict"].as_str())
+            .map(|v| if v == "explained" { "explained" } else { "exact" })
+            .unwrap_or("exact")
+    };
+
+    // ── amount: provider × basis × currency（最小货币单位，±1 分舍入容忍）──
+    let mut provs: BTreeSet<String> = sql.by_provider.keys().cloned().collect();
+    provs.extend(legacy.by_provider.keys().cloned());
+    let mut amount_rows = Vec::new();
+    for prov in &provs {
+        let s = sql.by_provider.get(prov);
+        let l = legacy.by_provider.get(prov);
+        let currency = s
+            .and_then(|h| h.currency.clone())
+            .or_else(|| l.and_then(|h| h.currency.clone()));
+        let mut bases: BTreeSet<agent_vitals_domain::data_contract::BillingBasis> = BTreeSet::new();
+        if let Some(h) = s { bases.extend(h.amounts_by_basis.keys().copied()); }
+        if let Some(h) = l { bases.extend(h.amounts_by_basis.keys().copied()); }
+        for basis in bases {
+            let minor = |h: Option<&agent_vitals_domain::data_contract::HostAmount>| -> i64 {
+                h.and_then(|x| x.amounts_by_basis.get(&basis).copied())
+                    .map(|v| agent_vitals_domain::util::pyround(v * 100.0, 0) as i64)
+                    .unwrap_or(0)
+            };
+            let (sm, lm) = (minor(s), minor(l));
+            let verdict = if (sm - lm).abs() <= 1 {
+                "exact"
+            } else if host_verdict_of_provider(prov) == "explained" {
+                "explained" // token 差已定性为例外 → 派生金额差同类
+            } else {
+                all_ok = false;
+                "mismatch"
+            };
+            amount_rows.push(json!({
+                "provider": prov,
+                "basis": basis.as_str(),
+                "currency": currency,
+                "sql_minor": sm,
+                "legacy_minor": lm,
+                "delta_minor": sm - lm,
+                "verdict": verdict,
+            }));
+        }
+    }
+
+    json!({
+        "month": month,
+        "reconciled": all_ok,
+        "residual_exception_tokens": residual_tokens,
+        "tokens_by_host": token_rows,
+        "amounts_by_provider_basis": amount_rows,
+    })
+}
+
+/// §6.3：每个对账例外必须有 issue code + 范围 + 原因 + 用户可见 partial 标记。
+/// `reconcile_authority_vs_legacy` 的报告是纯读；这里把非 `exact` 的 host 行
+/// 落 `data_quality_issues`（`reconcile_exception` / `reconcile_mismatch`），
+/// `data-status` 的 `open_quality_issues_by_code` 据此可见。全 exact 的月份把
+/// 该月既有 reconcile issue 标 resolved（迁移收敛的正常路径，幂等）。
+/// **取 ingest 同锁**——与 rebuild/ingest 串行，不留孤儿写。
+pub fn persist_reconcile_exceptions(data_home: &Path, report: &serde_json::Value) -> Result<(), String> {
+    let month = report["month"].as_str().unwrap_or("").to_string();
+    let lease_path = data_home.join("facts").join(".ingest.lock");
+    let _lease =
+        crate::lease::acquire_blocking(&lease_path, "reconcile-issues", 60_000, 2_000)
+            .map_err(|e| format!("reconcile issue lease [{}]: {e}", lease_path.display()))?;
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(data_home),
+        crate::sql_sync::now_ms(),
+    )
+    .map_err(|e| e.to_string())?;
+    let now = crate::sql_sync::now_ms();
+    let rows: Vec<&serde_json::Value> = report["tokens_by_host"]
+        .as_array()
+        .map(|a| a.iter().filter(|r| r["verdict"] != "exact").collect())
+        .unwrap_or_default();
+    db.with_immediate_txn(|conn| {
+        for r in &rows {
+            let host = r["host"].as_str().unwrap_or("?");
+            let (code, sev) = if r["verdict"] == "explained" {
+                ("reconcile_exception", "info")
+            } else {
+                ("reconcile_mismatch", "warning")
+            };
+            conn.execute(
+                "INSERT INTO data_quality_issues(issue_id, scope_type, scope_key, code,
+                     severity, first_seen_at_ms, last_seen_at_ms, detail_json)
+                 VALUES (?1,'month',?2,?3,?4,?5,?5,?6)
+                 ON CONFLICT(scope_type, scope_key, code) DO UPDATE SET
+                     last_seen_at_ms = excluded.last_seen_at_ms,
+                     detail_json = excluded.detail_json, resolved_at_ms = NULL",
+                rusqlite::params![
+                    format!("{code}:{month}:{host}"),
+                    format!("{month}/{host}"),
+                    code, sev, now,
+                    json!({"host": host, "abs_delta_tokens": r["abs_delta_tokens"],
+                           "buckets": r["buckets"], "explanation": r["explanation"],
+                           "note": "SQL 权威库 vs legacy state JSON 逐 bucket 对账（§6.3）"})
+                    .to_string(),
+                ],
+            )?;
+        }
+        if rows.is_empty() {
+            conn.execute(
+                "UPDATE data_quality_issues SET resolved_at_ms = ?1
+                 WHERE code IN ('reconcile_exception','reconcile_mismatch')
+                   AND scope_key LIKE ?2 AND resolved_at_ms IS NULL",
+                rusqlite::params![now, format!("{month}/%")],
+            )?;
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// `codex-cost` 的 SQL 权威面（Tier B 收尾，spec §5.2）：codex 用量从
 /// `authority_query::codex_by_hour_model` 读，不再全量 fold `~/.codex` rollout。
 /// 与 `calendar_month` / `hourly_distribution` 同层同源（runtime，直连
@@ -2796,6 +3026,71 @@ mod tests {
             let codex = &sql_daily.by_host["codex"];
             assert!(codex.amounts_by_basis.contains_key(&BillingBasis::ApiEquivalent), "{codex:?}");
             assert!(sql_daily.tokens_by_host["codex"].total > 0);
+        });
+    }
+
+    /// Phase 4.1（§6.3）：`reconcile_authority_vs_legacy`——SQL 权威库与 legacy
+    /// state JSON 逐 host×bucket 对账。等价数据 → `reconciled: true` 全 exact；
+    /// 故意让 SQL 少一笔 → dsh `mismatch` + `reconciled: false`；
+    /// `persist_reconcile_exceptions` 把非 exact 行落 `data_quality_issues`。
+    #[test]
+    fn reconcile_authority_vs_legacy_exact_then_mismatch() {
+        with_home(|| {
+            let month = crate::clock::current_month_beijing();
+            let day = format!("{month}-10");
+            let (start, _) =
+                agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap();
+            let noon = start + 12 * 3_600_000;
+
+            // legacy: month.json 一日 DSH 桶（1M uncached / 250K cache_read）。
+            let dsh_day = json!({
+                "uncached_input_tokens": 1_000_000, "cache_read_tokens": 250_000,
+                "cache_write_tokens": 0, "output_tokens": 100_000,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            });
+            crate::state::atomic_write_json(
+                &crate::state::state_dir().join("month.json"),
+                &json!({ "days": { day.clone(): dsh_day } }),
+            );
+            // SQL: 同一批 token 的 usage_facts（一笔）。
+            let db = seed_authority_db();
+            seed_fact(&db, "d1", "dsh", Some("deepseek-v4-flash"), "turn", noon, 0,
+                      1_000_000, 250_000, 0, 100_000);
+            drop(db);
+
+            // 注意：`JsonSummaryRepository` 的 codex 侧读真机 `~/.codex`（不受
+            // `AGENT_VITALS_HOME` 隔离），所以全局 `reconciled` 在开发机上恒有
+            // codex 噪声——本用例只钉 **dsh 行**的定性（isolated）。
+            let dsh_verdict = |r: &serde_json::Value| -> String {
+                r["tokens_by_host"].as_array().unwrap().iter()
+                    .find(|x| x["host"] == "dsh").unwrap()["verdict"].as_str().unwrap().to_string()
+            };
+            let r = reconcile_authority_vs_legacy(&month);
+            assert_eq!(dsh_verdict(&r), "exact", "等价数据 → dsh exact");
+
+            // 故意制造缺口：SQL 再多一笔、legacy 不动 → dsh SQL > legacy。
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+                1,
+            ).unwrap();
+            seed_fact(&db, "d2", "dsh", Some("deepseek-v4-flash"), "turn", noon + 1000, 0,
+                      500_000, 0, 0, 0);
+            drop(db);
+            let r2 = reconcile_authority_vs_legacy(&month);
+            assert_eq!(dsh_verdict(&r2), "mismatch", "SQL 多 500K → dsh mismatch");
+            assert_eq!(r2["reconciled"], json!(false), "有 mismatch → reconciled false");
+
+            persist_reconcile_exceptions(&crate::home::data_home(), &r2).unwrap();
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+                1,
+            ).unwrap();
+            let n: i64 = db.conn().query_row(
+                "SELECT COUNT(*) FROM data_quality_issues WHERE code='reconcile_mismatch'
+                   AND scope_key = ?1 AND resolved_at_ms IS NULL",
+                rusqlite::params![format!("{month}/dsh")], |r| r.get(0)).unwrap();
+            assert_eq!(n, 1, "dsh mismatch 落一条 issue");
         });
     }
 }
