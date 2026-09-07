@@ -17,7 +17,7 @@
 | Phase 1 schema 与迁移框架 | ✅ | authority.rs（DDL v1 全 12 表 + 版本闸 + 中断清扫 + 事务帮助器 + retention）+ 时钟注入（sql_sync::now_ms）+ 迁移记录（sync_runs/migrations 表）。**1.7 损坏恢复文档化**：`data-status` 加 `PRAGMA integrity_check` + `health`/`hints`（critical → 退出码 1），58c38b8 |
 | Phase 2 清洗写入与同步 | ✅ | 三路并发实现合流（c06de2e）+ 审查收口（6776fe0）+ 收口批（b1f8b38）+ 迁移哨兵真 bug 修复（1f67331）。2.1–2.3/2.6/2.7 复选框此前滞后——功能随三路合流全部落地，本次盘点补勾（命令名是 `data-*` 前缀，非 `data <sub>`）。2.8（host_bills + pricing_snapshots）cf04121/64aa87d |
 | Phase 3 SQL repository 与读路径切换 | ✅ | 3.1–3.7 全部完成（见各条）。Tier B 逐消费点切完 + Q01–Q14 端到端 fixture（b082a79）。**Q13 价格历史重放**（`PricingCards::asof`，`SqlSummaryRepository`/`calendar_month` 按查询窗口月末时点选历史价卡）3eecf09——3.5 Tier B 的最后一个后续项收口 |
-| Phase 4 双轨验收与旧路径退役 | 🔨 | 4.1 机器可读对账（77a59ab）+ 4.2 `sql_authority_enabled` 门槛/停写机制（e339cce）✅。4.4 可自动化部分（删库→critical 不静默零、删旧 JSON 仍从 SQL 出数）58c38b8 ✅。**未完成**：4.3 旧路径退役（门槛 = 真机开关稳定 + 观察期，跨会话）；4.4 真机迁移演练（runbook 见 §「真机启用 runbook」，用户本机执行）；真机翻开关本身（spec §6.1 需用户先备份） |
+| Phase 4 双轨验收与旧路径退役 | 🔨 | 4.1（77a59ab）+ 4.2（e339cce）+ 4.4 可自动化部分（58c38b8）✅。**4.3 旧路径退役**：用户 2026-09-07 决定提前执行——分支 `v0.9.1-phase-4.3-retire-legacy` Stage 1–5a 完成（ad4e33e/b5ca48c/98602a7/8498023），`JsonSummaryRepository` + `data-reconcile*` + `budget show` legacy + `index.sqlite3`/`store` 全部退役，`SummaryRepository` 只剩 SQL 一个实现。**未完成**：Stage 5b（DSH oneline tick 的 state.rs merge，需先把 oneline 重写成快照-only，独立后续项）；真机翻开关 + 观察期（用户本机，spec §6.1 需备份） |
 
 ### claude ledger 去重 bug——发现、修复、真机验证（2026-09-06，非本 Phase 引入）
 
@@ -75,7 +75,8 @@ relay，CNY）¥591.68 → ¥216.79（−63.4%）；真机 `claude-sync` 报告
   的权威库部分）加 `PRAGMA integrity_check` → `integrity` 字段 + `health`
   ∈ ok/warn/critical + `hints[]` 恢复路径（库刚被建且 sql_authority_enabled
   → critical + `sync-facts`/`disable`；integrity 失败 → critical +
-  `data-rebuild-index`「权威库不自愈」；facts==0 且 enabled → critical）。
+  「权威库不自愈——`rm agent-vitals.sqlite3* && data-migrate` 重建」；
+  facts==0 且 enabled → critical）。
   critical → 退出码 1，open 失败 → 退出码 2 + stderr。
 
 **验收**：空安装 / 重复 open / 中断清扫 / 损坏报错 / 半建拒绝 / 新版本拒绝
@@ -574,12 +575,39 @@ UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列
   快照照常）。旧文件保留不删（spec §6.1 备份窗口）。**默认 OFF**——
   真机翻开关需用户先做备份确认（spec §6.1）。差分链（`test_oneline_
   lockstep`/`test_claude_cost` claude-sync）测试夹具无标记 → 不受影响。
-- [ ] **4.3 退役清单执行**（spec §10）— 删 `JsonSummaryRepository`、
-  month.json/today.json/alert.json 业务读、ledger/fold 的查询路径直读、
-  JSON checkpoint、以及「SQLite 可由 JSONL 重建」的权威语义；legacy 代码
-  只留 importer/export/测试 fixture。**门槛：`sql_authority_enabled` 稳定
-  开启一段观察期后**（跨会话——观察期由用户在真机启用后开始计时，见
-  §「真机启用 runbook」）。**未开始，不翻开关不删旧读者。**
+- [🔶] **4.3 退役清单执行**（spec §10）— 用户 2026-09-07 决定提前执行（翻
+  开关 + 纯 SQL 重导入），分 6 stage 在分支 `v0.9.1-phase-4.3-retire-legacy`：
+  - [x] **Stage 1**（ad4e33e）— 退役 `reconcile_authority_vs_legacy` /
+    `persist_reconcile_exceptions` / `reconcile_budget_sources` /
+    `compute_month_from_index` + CLI `data-reconcile-authority` /
+    `data-budget-reconcile` + `examples/reconcile_real.rs`。`data authority
+    enable` 门槛改查权威库健康（integrity + facts + last-run）。
+  - [x] **Stage 2**（b5ca48c）— 删 `summary::JsonSummaryRepository` +
+    impl + 4 个 legacy 读 wrapper（claude/codex ledger·fold 读层）+ CLI
+    `data-reconcile` + `ingest_service::reconcile_index_vs_dto`。~987 行；
+    2 条 client-parity 测删除、7 条组装层不变式迁到 `SqlSummaryRepository`
+    + `seed_fact`。`SummaryRepository` 只剩 SQL 一个实现。
+  - [x] **Stage 3**（98602a7）— `budget show` / `budget show --month M` 读
+    SQL 权威库（`evaluate_alert_from_sql` / `month_cost_sql` + 新
+    `budget_config_sql`）；删 `compute_month`。`test_cli_matrix::
+    test_budget_show_differential` 退役（Rust SQL vs Python month.json 不再
+    逐字节可比；Python `budget show` 保留给 ClawHub，覆盖在 test_budget.py）。
+  - [x] **Stage 4**（b5ca48c）— `data-migrate` 的 `legacy_aggregate` ledger
+    深历史导入改 opt-in（`--with-legacy-ledger`，默认 off）。`legacy_import`
+    模块保留（spec §10「只留 importer」）。`sync-facts` 本就不碰 ledger。
+  - [x] **Stage 5a**（8498023）— 退役旧 `index.sqlite3` / `store` 模块 +
+    `FactsIndex` + `ingest_facts` 的索引写块 + `rebuild_index` /
+    `RebuildOutcome` + CLI `data-rebuild-index`。`peak_of` 移进
+    `fact_writer_sql`。13 个月保留（`enforce_retention`）保留、`sync_facts`
+    每天首轮自动跑。权威损坏恢复 = `rm agent-vitals.sqlite3* && data-migrate`。
+  - [ ] **Stage 5b** — DSH `oneline` tick 的 `state.rs` merge 写
+    （month.json/today.json/ledger）+ `evaluate_alert_from_state` /
+    `evaluate_alert_after_fold` + `takeover::fold_session` 的 merge/write_alert
+    分支。**需要先把 `oneline` 重写成「只产导航快照」**（`oneline.json` /
+    `sessions.jsonl`），differential-locked（`test_oneline_lockstep` + Python
+    `state.py` 镜像）。比 Stage 1–5a 加起来还大——独立后续项。**在
+    `sql_authority_enabled` 下 Phase 4.2 已冻结其写盘，不阻塞「纯 SQL 读」。**
+  - [ ] **Stage 6** — 文档 + plan + spec §10 sweep（本次）+ 合并分支到 main。
 - [x] **4.4 人工验收（可自动化部分，58c38b8）** — `tests/test_data_status_
   health.py`（5 例 AGENT_VITALS_BIN 二进制用例）：删库 → critical 退出 1
   不静默零、非 SQLite 内容 → 退出 2 + stderr、截断库 → integrity critical、
@@ -603,7 +631,7 @@ UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列
 | 3 | transaction 故障注入（facts/bills/checkpoint/run 各提交点） | `authority::immediate_txn_rolls_back_on_error` + `fact_writer_sql::mixed_session_batch_..._rolls_back` + `store::failed_rebuild_rolls_back_to_previous_index` | 🔶 通用回滚 + rebuild 回滚有；逐提交点注入（bills/checkpoint 单独）未穷举 |
 | 4 | CRUD（soft delete/retention/分页 cursor） | `authority::retention_deletes_only_dated_rows` + `host_bill_put`（soft delete + 复活）+ `authority_query::facts_page_window_is_stable_and_cursor_paginates` + `store::pagination_is_ordered_and_sliced` | ✅ |
 | 5 | query（时区边界/峰谷/跨月/跨币/unresolved） | `authority_query`（12：月/日边界 / 峰谷分桶 / legacy 排除 / untimed 排除 / coverage 三维）+ `q03`（北京月首 00:30）+ `q05`（unpriced）+ `summary` 跨币 ProviderAcc | ✅ |
-| 6 | reconciliation（全量+增量） | `summary::reconcile_authority_vs_legacy_exact_then_mismatch` + `reconcile_explains_amount_divergence_from_pricing_replay` + `q12_double_import_with_interrupted_run`（增量幂等）+ `store::month_filter_scopes_the_reconcile_window` | ✅ 全量 + 增量幂等；`data-reconcile`（index vs DTO）+ `data-reconcile-authority`（SQL vs legacy）两条都有测试 |
+| 6 | reconciliation（全量+增量） | `q12_double_import_with_interrupted_run`（增量幂等 + 回滚）+ `data-reconcile` 命令（迁移期用过）| 🔶 Phase 4.3 退役了 SQL-vs-legacy / index-vs-DTO 两条对账（legacy 侧已删）；增量幂等 + 中断回滚仍有测试。迁移收敛后对账不再是常设面 |
 | 7 | client parity | `summary::sql_repository_{dsh_month,claude_day,codex_day}_matches_json_repository` + `q_acceptance::separation_discipline` | ✅ |
 | 8 | performance（不枚举原始日志/索引命中） | `authority_query::windowed_queries_hit_the_host_time_index_never_full_scan`（306af6e，EXPLAIN QUERY PLAN 逐条断言命中 `usage_facts_host_time`、不 SCAN） | ✅ |
 | 9 | 用户查询验收 Q01–Q14 | `crates/agent-vitals-runtime/tests/q_acceptance.rs`（q01–q05/q11/q12/q14 e2e）+ `summary` 内 Q13 4 例 | ✅ Q01–Q05/Q11–Q12 blocker 集 e2e 齐（b082a79）；Q13 lib 级 |
@@ -636,14 +664,14 @@ agent-vitals data-status                # health: ok / integrity: ok / facts 数
 ### 3. 逐月对账（当月 + 上月 + 抽查一个历史月）
 
 ```bash
-agent-vitals data-reconcile-authority --month "$(date +%Y-%m)" --json
-agent-vitals data-reconcile-authority --month "$(date -v-1m +%Y-%m)" --json   # macOS
-agent-vitals data-budget-reconcile --month "$(date +%Y-%m)"
+agent-vitals data-status --json        # health: ok / integrity: ok
+agent-vitals data monthly --month "$(date +%Y-%m)" --json   # 逐宿主数字与体感核对
+agent-vitals budget show               # DSH 按量预算态
 ```
 
-判据：每条 `reconciled: true`（全 `exact` 或 `explained`）。出现 `mismatch`
-就停——看 `tokens_by_host` / `amounts_by_provider_basis` 里哪条红，是真差异
-还是缺一条 §6.3 例外规则。**别用 `--force` 跳过 mismatch。**
+判据：`data-status` health=ok、integrity=ok、facts 数量级合理；`data monthly`
+的逐宿主数字与你对本月花销的体感一致。Phase 4.3 起没有 legacy 第二实现
+可对账——核对靠 `data-status` 健康 + 人眼看数字。
 
 ### 4. 翻开关
 
@@ -665,7 +693,7 @@ ledger）**停止更新**，导航快照（oneline.json/sessions.jsonl/claude-fo
 - 任何时候想回退：`agent-vitals data authority disable` → 立即恢复双写，
   legacy JSON 重新成为权威（观察期内旧文件没删，回退无损）。
 
-观察期无异常 → 回到 Phase 4.3，删 `JsonSummaryRepository` 等旧读路径。
+观察期无异常 → 回到 Phase 4.3 Stage 5b（DSH oneline tick 重写成快照-only）。
 异常 → `disable` + 从 `~/.agent-vitals.backup-*` 恢复，带现场回来。
 
 ### 6. 真机演练（4.4 的自动化测不到的部分）
@@ -717,8 +745,8 @@ AGENT_VITALS_BIN=$PWD/target/release/agent-vitals python3 -m unittest discover t
 AGENT_VITALS_BIN=$PWD/target/release/agent-vitals python3 tests/golden_runner.py
 
 # 双轨对账（迁移期持续观测）
-./target/release/agent-vitals data-budget-reconcile --month 2026-08
-./target/release/agent-vitals data-reconcile --month 2026-09
+./target/release/agent-vitals data-status --json
+./target/release/agent-vitals data monthly --month 2026-09 --json
 
 # App 编译安装（Phase 切换点）
 cd apps/desktop/src-tauri && cargo tauri build --bundles app

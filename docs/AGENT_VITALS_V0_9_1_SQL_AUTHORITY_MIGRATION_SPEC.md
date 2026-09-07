@@ -573,3 +573,29 @@ v0.9.1 的交付不是“新增一个 SQLite 表”，而是完成一次受控�
    Phase 3.6 实施一致；随之的语义澄清：私有导出的「完整面」= 权威库的
    完整面（`identity_basis` 等 ingest 元数据不出现在导出中；软删除行按
    §5.4 默认过滤）。
+
+---
+
+## 15. §10 删除清单执行记录（2026-09-07，Phase 4.3）
+
+用户 2026-09-07 决定不等观察期、提前执行 §10——分支
+`v0.9.1-phase-4.3-retire-legacy`，分 6 stage：
+
+| §10 条目 | 状态 | 落点 |
+|---|---|---|
+| `JsonSummaryRepository` | ✅ 删除 | Stage 2（b5ca48c）——struct + impl + 4 个 legacy 读 wrapper（claude/codex ledger·fold 读层）；`SummaryRepository` 只剩 `SqlSummaryRepository` |
+| `month.json`/`month-archive.json`/`today.json` 作业务读源 | ✅ 无 production 读 | `SqlSummaryRepository` 从不读；`budget show` 切 SQL（Stage 3，98602a7）。**仍被 `state.rs`/`oneline` 写**（Stage 5b） |
+| `alert.json` 作预算计算来源 | ✅ 无 production 读 | `evaluate_alert_from_sql`（Tier B + Stage 3）。`oneline` 仍写（Stage 5b，`sql_authority_enabled` 下冻结） |
+| ledger / codex fold 在产品查询路径的直接读取 | 🔶 大部分删除 | Stage 2 删了 `SummaryRepository` 侧的 wrapper。**`summary::unresolved_detail`（`data-unresolved` CLI）仍读 ledger + codex fold**——Stage 5b 一并迁 authority |
+| JSON checkpoint | 🔶 迁移方在、仍是 live | `sql_sync::migrate_json_checkpoint` 把它迁进 `source_files`，但 `sync_facts` 仍以 JSON checkpoint 为准。Stage 5b |
+| "SQLite 可由 JSONL 重建" 的权威语义 | ✅ 退役 | Stage 5a（8498023）——删旧 `agent_vitals_data::store` / `index.sqlite3` / `FactsIndex` / `data-rebuild-index`。权威库**不自愈**，恢复 = `rm agent-vitals.sqlite3* && data-migrate` |
+| legacy 代码只留 importer/export/fixture | 🔶 | `legacy_import` 保留（`data-migrate --with-legacy-ledger` opt-in，Stage 4）。`state.rs` merge + `oneline` alert 计算 = **Stage 5b**（需先把 `oneline` 重写成「只产 `oneline.json`/`sessions.jsonl` 导航快照」，differential-locked，比 Stage 1–5a 加起来还大） |
+
+**Stage 1**（ad4e33e）另删了 SQL-vs-legacy 对账机器（`reconcile_authority_
+vs_legacy` / `data-reconcile-authority` / `data-budget-reconcile` /
+`reconcile_budget_sources` / `compute_month_from_index` / `examples/
+reconcile_real.rs`）——§10 未列（属迁移期脚手架），迁移收敛后不再需要。
+`data authority enable` 门槛改查权威库健康（integrity + facts + last-run）。
+
+**真机翻开关 + 观察期**仍是用户本机的事（spec §6.1 需备份）。Stage 5b 建议
+在观察期确认无异常后再做。

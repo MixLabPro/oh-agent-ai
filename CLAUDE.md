@@ -86,7 +86,7 @@ integrations/dsh-client/    # dual-face audit plugin (host projection + wasm + c
 apps/desktop/src-tauri/     # 菜单栏 app（Tauri 2，**独立 workspace**，Phase E2 从根移进 apps/desktop/）：
                             #   托盘 + 工作台（总览 KPI 行/双轨账/决策卡、Token 日历）。
                             #   金钱与计价委托 domain::cost，跨宿主查询走 runtime 的
-                            #   JsonSummaryRepository（冻结 DTO），不长第四份拷贝
+                            #   SqlSummaryRepository（冻结 DTO；Phase 4.3 后是唯一实现），不长第四份拷贝
 fixtures/ + golden/         # test corpus + byte-for-byte scanner snapshots
 tests/                      # 28 Python test files（含分类守卫 tests/test_classification.py）
 .github/workflows/          # verify.yml, release.yml, package-clawhub.yml
@@ -307,34 +307,43 @@ calendar/quota 四个命令——**任何新增的 codex 数据面必须走
 方接入 wire 数据前，先读产生方的 fold/序列化代码或 fixture 钉形状；`.mjs` stub
 必须注明形状出处（函数+行号），形状变更同一 PR 同改。
 
-### v0.9 数据面维护（Stage A-C 落地的操作面）
+### v0.9.1 数据面维护（SQL 权威库操作面；Phase 4.3 后）
 
-- **布局**：权威 = `<data_home>/facts/<host>.jsonl`（append-only，宿主封闭
-  词表 claude-code/codex/dsh）；投影 = `<data_home>/index.sqlite3`
-  （**可丢弃**——删库/损坏/旧版本在 open 时自动从 JSONL 重建，`data-rebuild-index`
-  是人工入口）。rebuild 在事务内，中途失败回滚旧索引，绝不留空索引假零。
+- **布局**：`<data_home>/facts/<host>.jsonl`（append-only 权威源，宿主封闭
+  词表 claude-code/codex/dsh）+ `<data_home>/agent-vitals.sqlite3`（v0.9.1
+  SQL 权威库——所有读经它）。**权威库不自愈**（与已退役的旧 `index.sqlite3`
+  投影的本质区别）：`PRAGMA integrity_check` 失败 → `data-status` 报
+  `health: critical`；恢复 = `rm agent-vitals.sqlite3* && agent-vitals
+  data-migrate`（从 facts JSONL 幂等重放）。
 - **writer lease**（`runtime::lease`）：O_EXCL + **原子 rename 陈旧偷取**
-  （unlink+create 有无主窗口会双持锁——别改回去）；接线 merge_today/
-  merge_month 与 facts ingest/reconcile/rebuild。TTL 60s 覆盖自愈重建的
-  最坏时长；临界区必须短，慢 fold/emit 在锁外。
+  （unlink+create 有无主窗口会双持锁——别改回去）；接线 facts ingest /
+  authority 写 / retention。TTL 60s；临界区必须短，慢 fold/emit 在锁外。
 - **崩溃恢复**：facts 尾面（crash 半行）由 `FactWriter::open` 修复（半行
   截断 / 完整 JSON 缺封口补换行）——在半行上直接 append 会把新事实和残行
   合并成损坏行，这是 Stage A 审查抓出的真 bug，测试钉死。
 - **保留滚动**：UsageFact 保留最近 13 个自然月（含当月，cutoff =
-  current − 12——fencepost 已钉死），`enforce_retention` 在 rebuild 时
-  执行、报告随 RebuildOutcome 上呈；解析不出 YYYY-MM 的事实**按 undated
-  保留**（绝不把格式不齐当过期丢）；幂等。
+  current − 12——fencepost 已钉死）。`ingest_service::enforce_retention`
+  滚 facts JSONL + `authority::retention_usage_facts` 滚权威库，两处共享
+  `sql_sync::RETENTION_MONTHS_MINUS_ONE`；`sync_facts` 每天首轮在
+  `.ingest.lock` 内自动跑一次。解析不出 YYYY-MM 的事实**按 undated 保留**。
 - **导出双路径**（spec §6 明令，不能是一个 `redacted: bool`）：
   `data-export-private`（原样）与 `data-export-redacted`（身份字段 fnv1a64
   伪名化 + fact_id 经契约层重 stamp）是两个独立函数/两个 CLI 子命令。
-- **对账**：`data-reconcile --month` 索引 vs DTO 逐宿主三态（measured /
-  no-facts 缺口绝不渲染成 0 / index-only 异常）；**同月窗对同月窗**——
-  索引侧不过滤月就是全量累计对按月 DTO，跨月恒红（审查 P1-3 教训）。
-- **诊断三命令**：`data-rebuild-index` / `data-reconcile` / `data-unresolved`
-  （逐模型下钻 unresolved：billing-route-unknown / billing-mode-unknown /
-  no-price-card / partial-price-basis）。CLI help 是英文-only 面
-  （test_regressions::test_help_defaults_to_english 钉住）——命令 doc 注释
-  写中文会被差分测试打红。
+- **诊断命令**：`data-status`（schema / integrity / health / 质量摘要——
+  spec §9 data doctor 的权威库部分）/ `data-unresolved`（逐模型下钻
+  unresolved：billing-route-unknown / billing-mode-unknown / no-price-card /
+  partial-price-basis）。CLI help 是英文-only 面
+  （test_regressions::test_help_defaults_to_english 钉住）。
+- **Phase 4.3 退役**（分支 `v0.9.1-phase-4.3-retire-legacy`，用户 2026-09-07
+  提前执行）：`summary::JsonSummaryRepository` + 4 个 legacy 读 wrapper、CLI
+  `data-reconcile` / `data-reconcile-authority` / `data-budget-reconcile` /
+  `data-rebuild-index`、旧 `agent_vitals_data::store`（`index.sqlite3` /
+  `FactsIndex`）、legacy `budget show`（→ SQL）、`data-migrate` 的
+  `legacy_aggregate` ledger 导入（→ `--with-legacy-ledger` opt-in）全部退役。
+  `SummaryRepository` 只剩 `SqlSummaryRepository` 一个实现。**Stage 5b 待做**：
+  DSH `oneline` tick 的 `state.rs` merge 写（month.json/today.json/ledger）+
+  `evaluate_alert_from_state`/`_after_fold`——需先把 `oneline` 重写成「只产
+  导航快照」；`sql_authority_enabled` 已冻结其写盘（Phase 4.2），不阻塞纯 SQL 读。
 
 ### Other invariants with tests behind them
 
