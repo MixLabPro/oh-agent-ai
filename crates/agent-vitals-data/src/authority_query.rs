@@ -37,6 +37,67 @@ const BEIJING_OFFSET_MS: i64 = 8 * 3_600_000;
 const DAY_MS: i64 = 86_400_000;
 const HOUR_MS: i64 = 3_600_000;
 
+// v0.9.1 测试矩阵 §8 行 8「performance（不枚举原始日志/索引命中）」：所有
+// 窗口化聚合查询的 SQL 抽成 `const`，`prepare()` 与 `tests/query_plan.rs` 的
+// `EXPLAIN QUERY PLAN` 断言共用同一字符串——两处零漂移。断言内容：`host` +
+// `event_ts_ms` 范围必须命中部分索引 `usage_facts_host_time`（`WHERE
+// deleted_at_ms IS NULL` 与查询谓词一致），绝不 `SCAN usage_facts`（全表）。
+
+/// [`peaked_days_map`]：DSH 峰谷分桶（`(day, model, event_peak)` 三维聚合）。
+pub(crate) const SQL_PEAKED_DAYS_MAP: &str = "SELECT (event_ts_ms + ?1) / ?2 AS day_idx,
+                model_id, event_peak,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens)
+         FROM usage_facts
+         WHERE host = ?3 AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?4 AND event_ts_ms < ?5
+         GROUP BY day_idx, model_id, event_peak";
+
+/// [`claude_days`]：claude 实时行级事实的逐日 `{model: 4 桶}`。
+pub(crate) const SQL_CLAUDE_DAYS: &str = "SELECT (event_ts_ms + ?1) / ?2 AS day_idx,
+                model_id,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens)
+         FROM usage_facts
+         WHERE host = 'claude-code' AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+         GROUP BY day_idx, model_id";
+
+/// [`claude_legacy_days`]：claude 深历史聚合（`event_peak=0` 全量行）。
+pub(crate) const SQL_CLAUDE_LEGACY_DAYS: &str = "SELECT (event_ts_ms + ?1) / ?2 AS day_idx,
+                model_id,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens)
+         FROM usage_facts
+         WHERE host = 'claude-code' AND observation_kind = 'legacy_aggregate'
+           AND event_peak = 0 AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+         GROUP BY day_idx, model_id";
+
+/// [`codex_by_hour_model`]：codex 实时行级事实的逐北京小时 `{model: 5 桶}`。
+pub(crate) const SQL_CODEX_BY_HOUR_MODEL: &str = "SELECT (event_ts_ms + ?1) / ?2 AS hour_idx,
+                model_id,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens)
+         FROM usage_facts
+         WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+         GROUP BY hour_idx, model_id";
+
+/// [`facts_page_window`]：键集分页（`(event_ts_ms, fact_id)` 游标，无 OFFSET）。
+pub(crate) const SQL_FACTS_PAGE_WINDOW: &str = "SELECT fact_id, native_session_id, model_id, event_ts_ms,
+                uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens
+         FROM usage_facts
+         WHERE host = ?1 AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?2 AND event_ts_ms < ?3
+           AND (event_ts_ms, fact_id) > (?4, ?5)
+         ORDER BY event_ts_ms, fact_id
+         LIMIT ?6";
+
 /// Beijing 民历日 `(y, m, d)` 的零点 → UTC 毫秒。`ms_from_civil` 已做真实
 /// 日期校验（02-30 之类非法日期返回 `None`），本函数原样传导。
 fn beijing_midnight_ms(y: i64, m: u32, d: u32) -> Option<i64> {
@@ -125,17 +186,7 @@ pub fn peaked_days_map(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<Value, AuthorityError> {
-    let mut stmt = conn.prepare(
-        "SELECT (event_ts_ms + ?1) / ?2 AS day_idx,
-                model_id, event_peak,
-                SUM(uncached_input_tokens), SUM(cache_read_tokens),
-                SUM(cache_write_tokens), SUM(output_tokens)
-         FROM usage_facts
-         WHERE host = ?3 AND observation_kind != 'legacy_aggregate'
-           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
-           AND event_ts_ms >= ?4 AND event_ts_ms < ?5
-         GROUP BY day_idx, model_id, event_peak",
-    )?;
+    let mut stmt = conn.prepare(SQL_PEAKED_DAYS_MAP)?;
     let rows = stmt.query_map(
         rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, host, start_ms, end_ms],
         |r| {
@@ -205,17 +256,7 @@ pub fn claude_days(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<BTreeMap<String, Value>, AuthorityError> {
-    let mut stmt = conn.prepare(
-        "SELECT (event_ts_ms + ?1) / ?2 AS day_idx,
-                model_id,
-                SUM(uncached_input_tokens), SUM(cache_read_tokens),
-                SUM(cache_write_tokens), SUM(output_tokens)
-         FROM usage_facts
-         WHERE host = 'claude-code' AND observation_kind != 'legacy_aggregate'
-           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
-           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-         GROUP BY day_idx, model_id",
-    )?;
+    let mut stmt = conn.prepare(SQL_CLAUDE_DAYS)?;
     let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, start_ms, end_ms], |r| {
         Ok((
             r.get::<_, i64>(0)?,
@@ -262,17 +303,7 @@ pub fn claude_legacy_days(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<BTreeMap<String, Value>, AuthorityError> {
-    let mut stmt = conn.prepare(
-        "SELECT (event_ts_ms + ?1) / ?2 AS day_idx,
-                model_id,
-                SUM(uncached_input_tokens), SUM(cache_read_tokens),
-                SUM(cache_write_tokens), SUM(output_tokens)
-         FROM usage_facts
-         WHERE host = 'claude-code' AND observation_kind = 'legacy_aggregate'
-           AND event_peak = 0 AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
-           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-         GROUP BY day_idx, model_id",
-    )?;
+    let mut stmt = conn.prepare(SQL_CLAUDE_LEGACY_DAYS)?;
     let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, start_ms, end_ms], |r| {
         Ok((
             r.get::<_, i64>(0)?,
@@ -315,17 +346,7 @@ pub fn codex_by_hour_model(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<Value, AuthorityError> {
-    let mut stmt = conn.prepare(
-        "SELECT (event_ts_ms + ?1) / ?2 AS hour_idx,
-                model_id,
-                SUM(uncached_input_tokens), SUM(cache_read_tokens),
-                SUM(cache_write_tokens), SUM(output_tokens)
-         FROM usage_facts
-         WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
-           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
-           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-         GROUP BY hour_idx, model_id",
-    )?;
+    let mut stmt = conn.prepare(SQL_CODEX_BY_HOUR_MODEL)?;
     let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms], |r| {
         Ok((
             r.get::<_, i64>(0)?,
@@ -479,17 +500,7 @@ pub fn facts_page_window(
     after_fact_id: Option<&str>,
     limit: usize,
 ) -> Result<(Vec<FactPageRow>, bool), AuthorityError> {
-    let mut stmt = conn.prepare(
-        "SELECT fact_id, native_session_id, model_id, event_ts_ms,
-                uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens
-         FROM usage_facts
-         WHERE host = ?1 AND observation_kind != 'legacy_aggregate'
-           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
-           AND event_ts_ms >= ?2 AND event_ts_ms < ?3
-           AND (event_ts_ms, fact_id) > (?4, ?5)
-         ORDER BY event_ts_ms, fact_id
-         LIMIT ?6",
-    )?;
+    let mut stmt = conn.prepare(SQL_FACTS_PAGE_WINDOW)?;
     let rows = stmt.query_map(
         rusqlite::params![
             host,
@@ -866,6 +877,72 @@ mod tests {
         insert_fact(&db, "f3", "dsh", Some("moonshot-kimi-x"), "turn", start + 3_000, 0, 50, 0, 0, 5);
         let (m3, _) = coverage_status(db.conn(), "dsh", start, end).unwrap();
         assert_eq!(m3, 1, "无路由模型让 price 维也落空");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// v0.9.1 测试矩阵 §8 行 8「performance（不枚举原始日志/索引命中）」。
+    ///
+    /// SQL 权威库的整个存在理由是「查询不枚举原始日志」——每个窗口化聚合
+    /// 必须命中 `usage_facts_host_time`（`(host, event_ts_ms)` 部分索引），
+    /// 绝不 `SCAN usage_facts`（全表）。一个错的查询会**静默**退化成全表扫
+    /// （功能对、性能崩），没有异常没有红测——只有真机 5 万行时的卡顿，正是
+    /// 2026-09-05 tab 卡顿事故的形状。这条断言把「退化」变成编译期就该发现
+    /// 的红。SQL 与 `prepare()` 共用 `SQL_*` const，零漂移。
+    #[test]
+    fn windowed_queries_hit_the_host_time_index_never_full_scan() {
+        let path = tmp_db("qplan");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        // 三宿主各塞几行——EXPLAIN QUERY PLAN 不依赖行数，但有数据时 SQLite
+        // 更可能选真实计划而非退化到 "SCAN"（空表任何查询都 SCAN）。
+        let (s, _e) = beijing_day_bounds_ms("2026-09-05").unwrap();
+        for (i, host) in ["dsh", "claude-code", "codex"].iter().enumerate() {
+            insert_fact(&db, &format!("f{i}a"), host, Some("m"), "turn", s + 3_600_000, 0, 100, 0, 0, 10);
+            insert_fact(&db, &format!("f{i}b"), host, Some("m"), "turn", s + 7_200_000, 1, 50, 0, 0, 5);
+        }
+        insert_fact(&db, "lg", "claude-code", Some("m"), "legacy_aggregate", s + 1_000, 0, 9, 0, 0, 0);
+        db.conn().execute("ANALYZE", []).unwrap();
+
+        let end = s + DAY_MS;
+        let plan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> String {
+            let mut stmt = db
+                .conn()
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let rows: Vec<String> = stmt
+                .query_map(params, |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            rows.join(" | ")
+        };
+
+        let day_params: [&dyn rusqlite::ToSql; 4] = [&BEIJING_OFFSET_MS, &DAY_MS, &s, &end];
+        let hour_params: [&dyn rusqlite::ToSql; 4] = [&BEIJING_OFFSET_MS, &HOUR_MS, &s, &end];
+        let peak_params: [&dyn rusqlite::ToSql; 5] =
+            [&BEIJING_OFFSET_MS, &DAY_MS, &"dsh", &s, &end];
+        let page_after_ts = i64::MIN;
+        let page_after_id = "";
+        let page_limit = 50_i64;
+        let page_params: [&dyn rusqlite::ToSql; 6] =
+            [&"dsh", &s, &end, &page_after_ts, &page_after_id, &page_limit];
+
+        for (name, sql, params) in [
+            ("peaked_days_map", SQL_PEAKED_DAYS_MAP, &peak_params[..]),
+            ("claude_days", SQL_CLAUDE_DAYS, &day_params[..]),
+            ("claude_legacy_days", SQL_CLAUDE_LEGACY_DAYS, &day_params[..]),
+            ("codex_by_hour_model", SQL_CODEX_BY_HOUR_MODEL, &hour_params[..]),
+            ("facts_page_window", SQL_FACTS_PAGE_WINDOW, &page_params[..]),
+        ] {
+            let p = plan(sql, params);
+            assert!(
+                p.contains("USING INDEX usage_facts_host_time"),
+                "{name} 必须命中 usage_facts_host_time——计划：{p}"
+            );
+            assert!(
+                !p.contains("SCAN usage_facts"),
+                "{name} 不得全表扫 usage_facts——计划：{p}"
+            );
+        }
         let _ = std::fs::remove_file(&path);
     }
 }
