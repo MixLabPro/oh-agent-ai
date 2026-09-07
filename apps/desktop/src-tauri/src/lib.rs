@@ -1257,13 +1257,6 @@ fn read_overview() -> Value {
     serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null)
 }
 
-/// 工作台日历：任意月逐日 + 月总额。薄转发 `overview::read_month_json`——定价与
-/// 月读取边界都在 overview/core，命令不碰。非法 month 与「该月无数据」同形
-/// （has_data:false），前端据此显示「该月暂无数据」。
-#[tauri::command]
-fn read_month(month: String) -> Value {
-    overview::read_month_json(&month)
-}
 
 /// v0.9 Stage 0.6 工作台 Data Query API（spec §7 目标态"Tauri 只调
 /// monthly_summary 等 API"）：经 `SummaryRepository` trait 调 runtime 的
@@ -1437,7 +1430,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             read_overview,
-            read_month,
             data_monthly_summary,
             data_daily_summary,
             data_codex_quota,

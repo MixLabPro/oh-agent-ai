@@ -1,9 +1,11 @@
-//! 菜单栏后端数据组装：读数据根的 month.json/today.json + 根下 config.toml 预算，
-//! 喂给 core 的 cost 折叠，产出一个纯展示 JSON。
+//! 菜单栏后端数据组装：从 SQL 权威库取「今日/本月 DSH 桶 + Claude 逐日账」
+//! （`runtime::summary::overview_bundle`，Phase 4 §5.2：不再直读
+//! `state/{today,month,claude-ledger}.json`）+ 根下 config.toml 预算，喂给 core
+//! 的 cost 折叠，产出一个纯展示 JSON。
 //!
 //! **计算本体在 core**（`agent_vitals_domain::cost::{priced_day, month_cost,
-//! today_cost, bucket_cost}`），这里只有文件 I/O 与组装——CLAUDE.md 教训：同一份
-//! month.json 在日历/budget/菜单栏各写一份「有没有 by_model 就……」的判断，报出
+//! today_cost, bucket_cost}`），这里只有组装——CLAUDE.md 教训：同一份
+//! month 数据在日历/budget/菜单栏各写一份「有没有 by_model 就……」的判断，报出
 //! ¥4.50 vs ¥18.00 两个价。菜单栏不重写任何定价，只调 core 的单一覆盖率校验入口。
 //!
 //! data_home 解析与北京日期键是**管道不是规则**：Python 侧 `paths.py`/`state.py`
@@ -555,30 +557,27 @@ pub fn read_overview() -> Overview {
 /// 参数化的组装入口——数据根由调用方指定，单测往临时目录写 month.json/today.json
 /// 就能端到端验证组装（读文件 → core 折叠 → 展示 JSON），不必碰真实环境变量。
 fn read_overview_at(dh: &Path) -> Overview {
-    let state = dh.join("state");
     let pricing = load_pricing();
     let today = today_beijing();
-
-    // 今日：date 必须真的是今天 —— core 的 `today_cost` 判（stale → None，不是
-    // 把昨天的账当今天的报）。date 缺场的老数据也交给 core 决定。
-    let today_val = read_json(&state.join("today.json"))
-        .and_then(|d| today_cost(&d, &pricing, &today));
-
-    // 本月：month.json 的 days map → core `month_cost`；读不到/无 days → {0,0}，
-    // 不臆造。**必须按当月过滤**——`month.json` 只在下一次真的有新数据要写时
-    // 才会把跨月的旧内容迁进 `month-archive.json`（`merge_month` 的迁移是
-    // 写触发的，不是时间触发的）；如果日历月已经翻页但还没有任何新会话被折过
-    // 一次账，`month.json` 会原封不动停在上个月，不过滤就会把上个月的总额当
-    // "本月"展示。真实事故（2026-09-01）：当天 DSH 无新会话可折，`month.json`
-    // 仍是 8 月内容，总览把 ¥1752.4 标成"本月"、预算卡片显示 292% 超支——数字
-    // 全部真实存在，只是贴错了月份标签。`read_month_days_at`（日历 tab 的 IPC）
-    // 早就有这条"读哪个月只认哪个月的键"的防御性过滤（见其文档注释），这里之前
-    // 没有——现在共用同一个 `filter_days_to_month`，不再各写一份判断。
     let cur_month = current_month_beijing();
-    let month_val = read_json(&state.join("month.json"))
-        .and_then(|m| m.get("days").cloned())
-        .map(|d| filter_days_to_month(&d, &cur_month))
-        .unwrap_or_else(|| json!({}));
+
+    // Phase 4 §5.2：菜单栏不再直读 state/{today,month,claude-ledger}.json——
+    // 三份数据从 SQL 权威库取（`runtime::summary::overview_bundle`，开库一次），
+    // 与旧 state JSON 同形，喂**同一批** core 折叠函数（today_cost / month_cost
+    // / claude_estimates / rollup_by_model），不重写任何计价。SQL 按北京月窗查，
+    // 旧「month.json 停在上个月被当本月」的漂移（2026-09-01 事故）结构上不可能。
+    let bundle = agent_vitals_runtime::summary::overview_bundle(dh);
+
+    // 今日：SQL 的 DSH 今日桶（按北京日 key 查出，天生就是「今天」的——无
+    // 旧 today.json 的 date-stale 问题）。无 DSH 今日用量 → None（不是「花了 0」）。
+    let today_val = bundle
+        .dsh_today
+        .as_ref()
+        .and_then(|d| today_cost(d, &pricing, &today));
+
+    // 本月：DSH 逐日 map → core `month_cost`。SQL 月窗已过滤，`filter_days_to_
+    // month` 留作防御性无操作层（键必然在当月）。
+    let month_val = filter_days_to_month(&bundle.dsh_month_days, &cur_month);
     let month = month_cost(&month_val, &pricing);
 
     // 逐日行：`priced_day`（唯一覆盖率校验入口）→ 无 by_model 的日子退回
@@ -600,16 +599,14 @@ fn read_overview_at(dh: &Path) -> Overview {
     // 字节契约，托盘只渲染（spec §5.3「托盘不做任何排序/求和/日界换算」）。
     let hosts_snap = read_hosts_at(dh);
 
-    // Claude Code 估（账卡分列，D2）：读 claude-ledger.json 逐日账 → core
-    // `claude_day_cost`（flat 直图，rebuild_days 真机形状）折钱。账文件缺/解析
-    // 失败 → (None, None)（诚实「无账可报」，不把缺账当估 0）。当月聚合按
-    // `cur_month` 过滤——ledger 写时已滚动只装当月（claude_sync 全量重建），读时
-    // 仍只认当月键：日历翻页但还没跑过新一轮 claude-sync 时 ledger 可能还停在上
-    // 个月，不过滤就会把上个月的折算当"本月"贴标签（month.json month-stale 事故
-    // 的同款纪律；flat 日结构不同，`filter_days_to_month` 不适用）。
-    let claude_days = read_json(&state.join("claude-ledger.json"))
-        .and_then(|l| l.get("days").cloned())
-        .and_then(|d| d.as_object().cloned())
+    // Claude Code 估（账卡分列，D2）：SQL 的 claude 逐日账（`claude-ledger.json`
+    // days 同形：实时行级事实优先 + legacy_aggregate 深历史按模型补缺）→ core
+    // `claude_day_cost` 折钱。无账日 → (None, None)（诚实「无账可报」，不把缺账
+    // 当估 0）。`claude_estimates` 内部按 `today` / `cur_month` 前缀过滤。
+    let claude_days = bundle
+        .claude_month_days
+        .as_object()
+        .cloned()
         .unwrap_or_default();
     let (claude_today, claude_month, claude_today_tokens) =
         claude_estimates(&claude_days, &today, &cur_month, &pricing);
@@ -750,60 +747,6 @@ pub fn current_month_beijing() -> String {
     today_beijing()[..7].to_string()
 }
 
-/// 月键合法性：`YYYY-MM`（len 7、第 5 字符 '-'、余为数字）。IPC 是外部面，一个
-/// 乱串不该 panic、也不该被当成有数据处理——非法键与「该月无数据」同形。
-fn is_month_key(s: &str) -> bool {
-    let b = s.as_bytes();
-    b.len() == 7
-        && b[4] == b'-'
-        && b[..4].iter().all(|c| c.is_ascii_digit())
-        && b[5..].iter().all(|c| c.is_ascii_digit())
-}
-
-/// 任意月逐日数据。当月 → `state/month.json` 的 days（防御性按 month 过滤——
-/// month.json 理论上只装当月，但历史遗留可能混入外月行，读哪个月就只认哪个月的
-/// 键，镜像二进制 `budget.rs::read_month` 的语义）；历史 → `state/month-archive.json`
-/// 的 `/months/{month}/days`。返回（当月 days map，逐日行）——map 已过滤到该月，
-/// 所以 `month_cost(map)` 与逐行求和必然一致。没有该月数据 → `None`（不是
-/// `Some+空`：前端据此显示「该月暂无数据」，不摆全零结构）。
-///
-/// **第三份镜像**：二进制 `budget.rs::read_month` 私有且 src-tauri 是独立
-/// workspace import 不到，这里与 data_home/北京日期键同款「管道不是规则」的镜像
-/// 位置，单测钉死，后续可收进 core。
-pub fn read_month_days_at(dh: &Path, month: &str, pricing: &Value) -> Option<(Value, Vec<DayRow>)> {
-    if !is_month_key(month) {
-        return None;
-    }
-    let state = dh.join("state");
-    let raw = if month == current_month_beijing() {
-        read_json(&state.join("month.json"))
-            .and_then(|m| m.get("days").cloned())
-            .unwrap_or_else(|| json!({}))
-    } else {
-        read_json(&state.join("month-archive.json"))
-            .and_then(|a| {
-                a.get("months")
-                    .and_then(|ms| ms.get(month))
-                    .and_then(|mo| mo.get("days"))
-                    .cloned()
-            })
-            .unwrap_or_else(|| json!({}))
-    };
-    let filtered = filter_days_to_month(&raw, month);
-    let mut rows = Vec::new();
-    if let Some(map) = filtered.as_object() {
-        for (date, day) in map {
-            rows.push(day_to_row(date, day, pricing));
-        }
-    }
-    rows.sort_by(|a, b| a.date.cmp(&b.date));
-    if rows.is_empty() {
-        None
-    } else {
-        Some((filtered, rows))
-    }
-}
-
 /// 把一份 days map 过滤到只保留属于 `month`（"YYYY-MM"）的键。两种情况会让
 /// `month.json`/`month-archive.json` 混入不属于目标月的行：①历史遗留脏数据；
 /// ②日历月已经翻页，但 `merge_month` 的滚档迁移是写触发的，还没有新数据落盘
@@ -824,43 +767,60 @@ fn filter_days_to_month(raw: &Value, month: &str) -> Value {
     Value::Object(filtered)
 }
 
-/// 工作台日历 IPC 的响应组装。Some → `{month, days, total, peak_total,
-/// has_data:true}`，月总额走 core `month_cost`（与总览同一入口，不重加行）；
-/// None → `{month, days:[], total:null, peak_total:null, has_data:false}`——
-/// 诚实空，前端显示「该月暂无数据」，不出现 ¥0 格子。
-pub fn month_response(month: &str, result: Option<(Value, Vec<DayRow>)>, pricing: &Value) -> Value {
-    match result {
-        Some((raw, rows)) => {
-            let totals = month_cost(&raw, pricing);
-            json!({
-                "month": month,
-                "days": rows,
-                "total": totals["total"].as_f64().unwrap_or(0.0),
-                "peak_total": totals["peak_total"].as_f64().unwrap_or(0.0),
-                "has_data": true,
-            })
-        }
-        None => json!({
-            "month": month,
-            "days": [],
-            "total": Value::Null,
-            "peak_total": Value::Null,
-            "has_data": false,
-        }),
-    }
-}
-
-/// 工作台日历 IPC 的 Rust 侧一次性组装：读月 + 定价 + 响应。命令只薄转发这里，
-/// pricing 的加载留在 overview（`load_pricing` 已在这层 import）——IPC 命令不
-/// 碰定价细节。
-pub fn read_month_json(month: &str) -> Value {
-    let pricing = load_pricing();
-    month_response(month, read_month_days_at(&data_home(), month, &pricing), &pricing)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 4 §5.2：`read_overview_at` 改读 SQL 权威库后，组装级测试
+    /// seed `usage_facts` 行而不是写 state/*.json。DSH 行 = 8 桶词表
+    /// （`uncached_input_tokens`…）；claude 行同表不同 host。`u/cr/cw/o` 是
+    /// 4 桶 token，`ts_ms` 决定北京日 key。整数直接拼进 SQL（测试用、零注入面）。
+    fn seed_overview_db(dir: &Path) -> agent_vitals_data::authority::AuthorityDb {
+        let db = agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(dir),
+            1,
+        )
+        .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                 VALUES ('r', 1, 'cli', 'succeeded', 1) ON CONFLICT(run_id) DO NOTHING",
+                [],
+            )
+            .unwrap();
+        db
+    }
+
+    fn seed_fact(
+        db: &agent_vitals_data::authority::AuthorityDb,
+        id: &str,
+        host: &str,
+        model: &str,
+        ts_ms: i64,
+        (u, cr, cw, o): (i64, i64, i64, i64),
+    ) {
+        db.conn()
+            .execute(
+                &format!(
+                    "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                         source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
+                         event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                         output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                     VALUES ('{id}', '{host}', 'm', 's', '{id}', 'turn', NULL, '{model}',
+                             {ts_ms}, 0, {u}, {cr}, {cw}, {o}, 'r', 1, 1)"
+                ),
+                [],
+            )
+            .unwrap();
+    }
+
+    /// 北京日 `YYYY-MM-DD` → 该日北京中午的 UTC 毫秒（稳落在同一北京日，
+    /// 不碰日界）。
+    fn bj_noon_ms(date: &str) -> i64 {
+        let (start, _) =
+            agent_vitals_data::authority_query::beijing_day_bounds_ms(date).unwrap();
+        start + 12 * 3_600_000
+    }
 
     /// v0.6 host-contract spec §6/§11-M3（G7）：托盘的兜底行不再是本文件的
     /// 硬编码三行，而是从 core `host_capability::HOSTS` 派生——遍历
@@ -965,109 +925,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 组装级测试：临时数据根里放 month.json（exact 日 + legacy 日）+ today.json
-    /// （今天的 date）+ config.toml，`read_overview_at` 应该产出与 core 单测同一组
-    /// 数字——今日 1.5、本月 4.5（1.5 + 3.0）、两行逐日（按日期排序）、预算 888。
-    /// 夹具逐字来自 core `cost.rs` 的 `month_cost_sums_exact_and_legacy_days`。
-    ///
-    /// 日期用 `current_month_beijing()` 动态拼，不写死 "2026-08"——写死过一次，
-    /// 真实时钟从 2026-08 跳到 2026-09 之后这条测试本该跟着 `read_overview_at`
-    /// 新加的当月过滤一起变红（月份不匹配 → 过滤成 0），但夹具本来就该跟着"今天"
-    /// 走，不是钉在某个写死的月份上（`read_month_days_at_filters_current_month`
-    /// 已经是这个写法，这里补齐）。
+    /// 组装级测试（Phase 4 §5.2：改 seed SQL 权威库）：seed 今日 + 两个当月日的
+    /// DSH `usage_facts`，`read_overview_at` 应产出与 core 计价一致的数字——
+    /// deepseek-v4-flash uncached off_peak ¥1.5/M：今日 1M → ¥1.5、本月三日
+    /// (1+1+2)M → ¥6.0、逐日行按日期排序、预算读 config.toml 的 888。
+    /// SQL 事实恒带 model_id → 每日 `basis = "exact"`（旧 month.json 无 by_model
+    /// 的「partial/legacy」形态在 SQL 面结构上不存在）。
     #[test]
-    fn read_overview_assembles_state_into_expected_numbers() {
-        let tmp = std::env::temp_dir().join("sv-menubar-overview-test");
+    fn read_overview_assembles_sql_facts_into_expected_numbers() {
+        let tmp = std::env::temp_dir().join("sv-menubar-overview-sql-test");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("state")).unwrap();
-
-        let cm = current_month_beijing();
-        let legacy = serde_json::json!({
-            "uncached_input_tokens": 1000000, "output_tokens": 0,
-            "cache_read_tokens": 0, "cache_write_tokens": 0,
-            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-        });
-        let exact_day = serde_json::json!({
-            "uncached_input_tokens": 1000000, "output_tokens": 0,
-            "cache_read_tokens": 0, "cache_write_tokens": 0,
-            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-            "by_model": {"deepseek-v4-flash": legacy},
-        });
-        let month = serde_json::json!({
-            "month": cm,
-            "days": {
-                format!("{cm}-01"): exact_day,
-                format!("{cm}-02"): serde_json::json!({ "uncached_input_tokens": 2000000, "output_tokens": 0,
-                    "cache_read_tokens": 0, "cache_write_tokens": 0,
-                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0 }),
-            },
-        });
-        std::fs::write(tmp.join("state").join("month.json"), month.to_string()).unwrap();
-
-        // today.json 的 date 用 today_beijing()（与 app 运行时同一个「今天」）。
-        let today = today_beijing();
-        let today_json = serde_json::json!({
-            "date": today,
-            "by_model": {"deepseek-v4-flash": legacy},
-        });
-        std::fs::write(tmp.join("state").join("today.json"), today_json.to_string()).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("config.toml"), "[budget]\nmonthly_cny = 888\n").unwrap();
 
+        let cm = current_month_beijing();
+        let today = today_beijing();
+        // 两个 ≠ 今天的当月日（{05,15,25} 里至多一个等于今天）。
+        let others: Vec<String> = ["05", "15", "25"]
+            .iter()
+            .map(|d| format!("{cm}-{d}"))
+            .filter(|d| d != &today)
+            .take(2)
+            .collect();
+        let db = seed_overview_db(&tmp);
+        seed_fact(&db, "t", "dsh", "deepseek-v4-flash", bj_noon_ms(&today), (1_000_000, 0, 0, 0));
+        seed_fact(&db, "a", "dsh", "deepseek-v4-flash", bj_noon_ms(&others[0]), (1_000_000, 0, 0, 0));
+        seed_fact(&db, "b", "dsh", "deepseek-v4-flash", bj_noon_ms(&others[1]), (2_000_000, 0, 0, 0));
+        drop(db);
+
         let ov = read_overview_at(&tmp);
-        let today_total = ov.today.expect("today.json 的 date 就是今天").get("total").unwrap().as_f64().unwrap();
+        let today_total = ov.today.expect("今日有事实").get("total").unwrap().as_f64().unwrap();
         assert!((today_total - 1.5).abs() < 1e-9, "今日应 1.5，got {today_total}");
         let month_total = ov.month.get("total").unwrap().as_f64().unwrap();
-        assert!((month_total - 4.5).abs() < 1e-9, "本月应 4.5（1.5+3.0），got {month_total}");
-        assert_eq!(ov.days.len(), 2);
-        assert_eq!(ov.days[0].date, format!("{cm}-01"));
-        assert_eq!(ov.days[0].basis.as_deref(), Some("exact"));
-        assert_eq!(ov.days[1].date, format!("{cm}-02"));
-        assert_eq!(ov.days[1].basis, None);
-        assert!((ov.days[1].total - 3.0).abs() < 1e-9);
+        assert!((month_total - 6.0).abs() < 1e-9, "本月应 6.0（1.5+1.5+3.0），got {month_total}");
+        assert_eq!(ov.days.len(), 3, "三个当月日");
+        assert!(ov.days.iter().all(|d| d.basis.as_deref() == Some("exact")),
+                "SQL 事实恒带 model → 每日 exact");
+        assert!(ov.days.windows(2).all(|w| w[0].date <= w[1].date), "按日期升序");
         assert_eq!(ov.budget_monthly_cny, 888.0);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// **真机回归**（2026-09-01）：`month.json` 停在上个月（日历翻页了，但还没
-    /// 有新数据触发过 `merge_month` 的滚档迁移），`read_overview_at` 必须把
-    /// "本月"过滤成空，不能把上个月的总额当本月展示——之前正是这样：8 月账目
-    /// ¥1752.4、预算卡片显示 292% 超支，而当天其实还没有任何一笔本月支出。
+    /// **真机回归**（2026-09-01 的 SQL 面版本）：库里有上个月的 DSH 事实，
+    /// `read_overview_at` 的「本月」必须只认当月窗——旧事故是 `month.json`
+    /// 停在上个月被整份当本月展示（¥1752.4、292% 超支）。SQL 按北京月窗查，
+    /// 结构上不可能，这条钉住月窗归属。
     #[test]
-    fn read_overview_does_not_show_last_months_total_as_this_month() {
-        let tmp = std::env::temp_dir().join("sv-menubar-overview-stale-month-test");
+    fn read_overview_month_is_current_window_only() {
+        let tmp = std::env::temp_dir().join("sv-menubar-overview-monthwin-test");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
 
-        // 拿"上个月"造一份还停在原地的 month.json——不管真实当前月是几月，
-        // 上一个日历月总能算出来，不用写死具体年月。
         let cm = current_month_beijing();
-        let (y, m): (i64, i64) = {
-            let mut it = cm.split('-');
-            (it.next().unwrap().parse().unwrap(), it.next().unwrap().parse().unwrap())
-        };
-        let (py, pm) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
-        let prev_month = format!("{py:04}-{pm:02}");
-
-        let day = serde_json::json!({
-            "uncached_input_tokens": 1000000, "output_tokens": 0,
-            "cache_read_tokens": 0, "cache_write_tokens": 0,
-            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-        });
-        let month = serde_json::json!({
-            "month": prev_month,
-            "days": { format!("{prev_month}-15"): day },
-        });
-        std::fs::write(tmp.join("state").join("month.json"), month.to_string()).unwrap();
+        let (start, _) =
+            agent_vitals_data::authority_query::beijing_month_bounds_ms(&cm).unwrap();
+        let db = seed_overview_db(&tmp);
+        // 上个月最后一刻（月窗起点前 1 秒）——量给大，漏进来立刻看得出。
+        seed_fact(&db, "prev", "dsh", "deepseek-v4-flash", start - 1_000, (900_000_000, 0, 0, 0));
+        drop(db);
 
         let ov = read_overview_at(&tmp);
-        let month_total = ov.month.get("total").unwrap().as_f64().unwrap();
-        assert_eq!(month_total, 0.0, "上月滚存的 month.json 不该被当成本月总额展示");
-        assert!(ov.days.is_empty(), "上月的逐日行不该出现在本月逐日列表里");
+        assert_eq!(ov.month.get("total").unwrap().as_f64().unwrap(), 0.0,
+                   "上月事实不得进本月总额");
+        assert!(ov.days.is_empty(), "上月的逐日行不得出现在本月逐日列表");
+        assert!(ov.today.is_none(), "今天无事实 → None");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1264,39 +1186,34 @@ mod tests {
         assert!(t_e.is_none() && m_e.is_none() && tk_e.is_none());
     }
 
-    /// 端到端：claude-ledger.json（写当日 flat 直图 + 当月 + 上月残留）→
-    /// read_overview_at 的 claude_today/claude_month 落位，上月残留不进"本月"。
+    /// 端到端（Phase 4 §5.2：改 seed SQL）：库里有当日 + 上月的 claude 事实 →
+    /// `read_overview_at` 的 `claude_today`/`claude_month` 落位，上月事实不进
+    /// "本月"（SQL 月窗）。claude 事实 (u,cr,cw,o) 映射 ledger 的
+    /// (input_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+    /// output_tokens)——500K+50K = 550K token；claude-sonnet-5 是 USD 卡。
     #[test]
-    fn read_overview_embeds_claude_ledger_estimates() {
-        let tmp = std::env::temp_dir().join("sv-menubar-claude-ledger-overview-test");
+    fn read_overview_embeds_claude_estimates_from_sql() {
+        let tmp = std::env::temp_dir().join("sv-menubar-claude-sql-overview-test");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("state")).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
         let today = today_beijing();
-        let other_month = if &today[5..7] == "01" {
-            format!("{}-12", &today[..4])
-        } else {
-            format!("{:04}-{:02}", today[..4].parse::<i32>().unwrap(),
-                    today[5..7].parse::<u32>().unwrap() - 1)
-        };
-        let day = json!({"claude-sonnet-5": {
-            "input_tokens": 500_000, "cache_read_input_tokens": 0,
-            "cache_creation_input_tokens": 0, "output_tokens": 50_000}});
-        let mut days_map = serde_json::Map::new();
-        days_map.insert(today.clone(), day.clone());
-        days_map.insert(format!("{other_month}-15"), day);
-        let ledger = json!({"days": days_map});
-        std::fs::write(
-            tmp.join("state").join("claude-ledger.json"),
-            serde_json::to_string(&ledger).unwrap(),
-        )
-        .unwrap();
+        let cm = current_month_beijing();
+        let (start, _) =
+            agent_vitals_data::authority_query::beijing_month_bounds_ms(&cm).unwrap();
+        let db = seed_overview_db(&tmp);
+        seed_fact(&db, "ct", "claude-code", "claude-sonnet-5", bj_noon_ms(&today),
+                  (500_000, 0, 0, 50_000));
+        // 上个月一笔——不得进本月聚合。
+        seed_fact(&db, "cp", "claude-code", "claude-sonnet-5", start - 1_000,
+                  (999_000, 0, 0, 99_000));
+        drop(db);
+
         let ov = read_overview_at(&tmp);
-        let today_r = ov.claude_today.expect("当日 ledger 必须折出估");
+        let today_r = ov.claude_today.expect("当日事实必须折出估");
         assert!(today_r["currency_totals"]["USD"].as_f64().unwrap() > 0.0);
         assert_eq!(ov.claude_today_tokens, Some(550_000), "token 与钱同源同日结构");
         let month_r = ov.claude_month.expect("当月必须有一日");
-        assert_eq!(month_r["days"].as_u64().unwrap(), 1, "上月残留 15 日不进本月");
-        assert!((month_r["currency_totals"]["CNY"].as_f64().unwrap() - 0.0).abs() < 1e-9);
+        assert_eq!(month_r["days"].as_u64().unwrap(), 1, "上月那笔不进本月");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1624,161 +1541,6 @@ mod tests {
         assert!((l.total - 1.5).abs() < 1e-9);
     }
 
-    /// 当月读取：month.json 里混进外月行也要被滤掉——读哪个月就只认哪个月的键
-    /// （镜像二进制 read_month 的防御语义）。行按日期排序，过滤后的 map 只含当月
-    /// 两日 → `month_cost(raw)` 与逐行求和必然一致。
-    #[test]
-    fn read_month_days_at_filters_current_month() {
-        let cm = current_month_beijing();
-        let tmp = std::env::temp_dir().join("sv-menubar-read-month-current-test");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("state")).unwrap();
-        let day = serde_json::json!({
-            "uncached_input_tokens": 1000000, "output_tokens": 0,
-            "cache_read_tokens": 0, "cache_write_tokens": 0,
-            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-        });
-        let month = serde_json::json!({
-            "month": cm,
-            "days": {
-                format!("{cm}-01"): day.clone(),
-                format!("{cm}-15"): day.clone(),
-                "1999-01-01": day.clone(),
-            },
-        });
-        std::fs::write(tmp.join("state").join("month.json"), month.to_string()).unwrap();
-        let pricing = load_pricing();
-        let (raw, rows) = read_month_days_at(&tmp, &cm, &pricing).expect("当月有数据");
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].date, format!("{cm}-01"));
-        assert_eq!(rows[1].date, format!("{cm}-15"));
-        assert_eq!(raw.as_object().unwrap().len(), 2, "过滤后 map 只含当月两日");
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// partial 保真：日历逐日行对 partial 日必须保留 basis=="partial" 与 coverage
-    /// 数值，不许把部分覆盖抹平成 exact——这是 8 月账目的原 bug。走历史分支
-    /// （1999-01 ≠ 当前月）验证归档读取也保真。
-    #[test]
-    fn read_month_days_at_preserves_partial_coverage() {
-        let tmp = std::env::temp_dir().join("sv-menubar-read-month-partial-test");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("state")).unwrap();
-        let partial_day = serde_json::json!({
-            "uncached_input_tokens": 1000000, "output_tokens": 0,
-            "cache_read_tokens": 0, "cache_write_tokens": 0,
-            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-            "by_model": {"deepseek-v4-flash": {
-                "uncached_input_tokens": 300000, "output_tokens": 0,
-                "cache_read_tokens": 0, "cache_write_tokens": 0,
-                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-            }},
-        });
-        let archive = serde_json::json!({
-            "months": {"1999-01": {"days": {"1999-01-05": partial_day}, "archived_at": "x"}},
-        });
-        std::fs::write(tmp.join("state").join("month-archive.json"), archive.to_string()).unwrap();
-        let pricing = load_pricing();
-        let (_, rows) = read_month_days_at(&tmp, "1999-01", &pricing).expect("历史月有数据");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].date, "1999-01-05");
-        assert_eq!(rows[0].basis.as_deref(), Some("partial"));
-        assert!((rows[0].coverage.unwrap() - 0.3).abs() < 1e-9);
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// 历史月读取：month-archive.json 的 `/months/{month}/days` 读得到；缺月 → None
-    /// （不是 Some+空）。
-    #[test]
-    fn read_month_days_at_reads_archive_and_missing_is_none() {
-        let tmp = std::env::temp_dir().join("sv-menubar-read-month-archive-test");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("state")).unwrap();
-        let day = serde_json::json!({
-            "uncached_input_tokens": 1000000, "output_tokens": 0,
-            "cache_read_tokens": 0, "cache_write_tokens": 0,
-            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-        });
-        let archive = serde_json::json!({
-            "schema_version": "1",
-            "months": {
-                "1999-01": {"days": {"1999-01-10": day.clone()}, "archived_at": "x"},
-            },
-        });
-        std::fs::write(tmp.join("state").join("month-archive.json"), archive.to_string()).unwrap();
-        let pricing = load_pricing();
-        let (raw, rows) = read_month_days_at(&tmp, "1999-01", &pricing).expect("归档月有数据");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].date, "1999-01-10");
-        assert_eq!(raw.as_object().unwrap().len(), 1);
-        assert!(read_month_days_at(&tmp, "1999-02", &pricing).is_none(), "缺月 → None");
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// 空月诚实：days 为空 → None（不是 Some+空）。当月与历史各测一条。
-    #[test]
-    fn read_month_days_at_empty_month_is_none() {
-        let tmp = std::env::temp_dir().join("sv-menubar-read-month-empty-test");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("state")).unwrap();
-        std::fs::write(tmp.join("state").join("month.json"), r#"{"month":"x","days":{}}"#).unwrap();
-        let pricing = load_pricing();
-        assert!(read_month_days_at(&tmp, &current_month_beijing(), &pricing).is_none());
-        let archive = r#"{"months":{"1999-03":{"days":{},"archived_at":"x"}}}"#;
-        std::fs::write(tmp.join("state").join("month-archive.json"), archive).unwrap();
-        assert!(read_month_days_at(&tmp, "1999-03", &pricing).is_none());
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// month_response 形状：Some → total 等于对过滤后 map 的 month_cost、has_data
-    /// true；None → has_data false、total null——前端据此显示「该月暂无数据」，
-    /// 绝不出现 ¥0 格子。
-    #[test]
-    fn month_response_shape_some_and_none() {
-        let pricing = load_pricing();
-        let none = month_response("2026-08", None, &pricing);
-        assert_eq!(none["has_data"], serde_json::json!(false));
-        assert_eq!(none["total"], serde_json::Value::Null);
-        assert_eq!(none["peak_total"], serde_json::Value::Null);
-        assert_eq!(none["days"].as_array().unwrap().len(), 0);
-
-        let day = serde_json::json!({
-            "uncached_input_tokens": 1000000, "output_tokens": 0,
-            "cache_read_tokens": 0, "cache_write_tokens": 0,
-            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-        });
-        let raw = serde_json::json!({"2026-08-01": day.clone(), "2026-08-02": day});
-        let mut rows = Vec::new();
-        for (date, d) in raw.as_object().unwrap() {
-            rows.push(day_to_row(date, d, &pricing));
-        }
-        rows.sort_by(|a, b| a.date.cmp(&b.date));
-        let some = month_response("2026-08", Some((raw.clone(), rows)), &pricing);
-        assert_eq!(some["has_data"], serde_json::json!(true));
-        let expect = month_cost(&raw, &pricing);
-        assert!((some["total"].as_f64().unwrap() - expect["total"].as_f64().unwrap()).abs() < 1e-9);
-        assert_eq!(some["days"].as_array().unwrap().len(), 2);
-    }
-
-    /// is_month_key 防御：合法 `YYYY-MM` 通过；长度不对/分隔符错/含非数字 → 拒绝。
-    #[test]
-    fn is_month_key_accepts_valid_rejects_garbage() {
-        assert!(is_month_key("2026-08"));
-        assert!(is_month_key("1999-01"));
-        assert!(!is_month_key("2026-8"));
-        assert!(!is_month_key("2026-081"));
-        assert!(!is_month_key("2026/08"));
-        assert!(!is_month_key("202608"));
-        assert!(!is_month_key("abc-def"));
-        assert!(!is_month_key(""));
-        assert!(!is_month_key("2026-"));
-    }
-
     /// current_month_beijing 就是 today_beijing() 的月键——日历默认月跟着「北京
     /// 今天」走，不引日期库。
     #[test]
@@ -1792,121 +1554,61 @@ mod tests {
     // claude_subscription_uncovered_estimate, cache_counterfactual_cost}` 同一条
     // 路径，月无 by_model → (None, None) 同款诚实降级（不摆全零结构）。
 
-    /// 月份没有 by_model（老数据 / 当月无会话）→ 两视图都 None，与
-    /// `claude_month` 的诚实降级一致。
+    /// 当月无 DSH 事实 → month_rollup 空 → 两视图都 None（诚实降级，不摆全零
+    /// 结构）。旧「有顶层 8 桶但无 by_model」的老形状在 SQL 面不存在——
+    /// `peaked_days_map` 恒带 by_model。
     #[test]
-    fn read_overview_v07_uncovered_and_savings_both_null_when_no_by_model() {
-        let tmp = std::env::temp_dir().join("sv-menubar-v07-empty-test");
+    fn read_overview_v07_uncovered_and_savings_both_null_when_no_facts() {
+        let tmp = std::env::temp_dir().join("sv-menubar-v07-empty-sql-test");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("state")).unwrap();
-        let cm = current_month_beijing();
-        // 只有 8 桶顶层字段、没 by_model（老形状）
-        let month = serde_json::json!({
-            "month": cm,
-            "days": {
-                format!("{cm}-01"): {
-                    "uncached_input_tokens": 1000000, "output_tokens": 0,
-                    "cache_read_tokens": 0, "cache_write_tokens": 0,
-                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-                },
-            },
-        });
-        std::fs::write(tmp.join("state").join("month.json"), month.to_string()).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
+        drop(seed_overview_db(&tmp)); // 建库但不 seed 事实
         let ov = read_overview_at(&tmp);
-        assert!(ov.claude_uncovered_month.is_none(),
-                "无 by_model 时 uncovered 必须 None，不摆全零结构");
-        assert!(ov.month_savings.is_none(),
-                "无 by_model 时 savings 必须 None，不摆全零结构");
+        assert!(ov.claude_uncovered_month.is_none(), "无事实 → uncovered None");
+        assert!(ov.month_savings.is_none(), "无事实 → savings None");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// anthropic 在 catalog_2026_09.subscriptions 登记 → claude-opus-5 不进
-    /// uncovered 视图（整 provider 视为已订阅覆盖，spec §3 原文措辞）。deepseek
-    /// 未订阅 → 全 provider 进 uncovered。
+    /// uncovered 视图（整 provider 视为已订阅覆盖）；deepseek 未订阅 → 进。
+    /// v0.7 菜单栏视图吃的是 DSH `by_model` rollup（`peaked_days_map` 恒带
+    /// by_model），seed 两个 model 的 dsh 事实。
     #[test]
     fn read_overview_v07_uncovered_excludes_subscribed_provider() {
-        let tmp = std::env::temp_dir().join("sv-menubar-v07-uncovered-test");
+        let tmp = std::env::temp_dir().join("sv-menubar-v07-uncovered-sql-test");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("state")).unwrap();
-        let cm = current_month_beijing();
-        let month = serde_json::json!({
-            "month": cm,
-            "days": {
-                format!("{cm}-01"): {
-                    "uncached_input_tokens": 0, "output_tokens": 0,
-                    "cache_read_tokens": 0, "cache_write_tokens": 0,
-                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-                    "by_model": {
-                        "claude-opus-5": {
-                            "uncached_input_tokens": 1000000, "output_tokens": 0,
-                            "cache_read_tokens": 0, "cache_write_tokens": 0,
-                            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-                            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-                        },
-                        "deepseek-v4-flash": {
-                            "uncached_input_tokens": 1000000, "output_tokens": 0,
-                            "cache_read_tokens": 0, "cache_write_tokens": 0,
-                            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-                            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-                        },
-                    },
-                },
-            },
-        });
-        std::fs::write(tmp.join("state").join("month.json"), month.to_string()).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
+        let d = format!("{}-10", current_month_beijing());
+        let db = seed_overview_db(&tmp);
+        seed_fact(&db, "o", "dsh", "claude-opus-5", bj_noon_ms(&d), (1_000_000, 0, 0, 0));
+        seed_fact(&db, "f", "dsh", "deepseek-v4-flash", bj_noon_ms(&d), (1_000_000, 0, 0, 0));
+        drop(db);
         let ov = read_overview_at(&tmp);
-        let uncovered = ov.claude_uncovered_month.expect(
-            "deepseek 未订阅 → uncovered 必须存在（anthropic 订阅的 claude-opus-5 不出现）");
+        let uncovered = ov.claude_uncovered_month.expect("deepseek 未订阅 → uncovered 必须存在");
         assert_eq!(uncovered["pricing_basis"], "estimated-subscription-exclusion");
-        // anthropic 订阅的 claude-opus-5 不在 per_model 里（已订阅覆盖）
         assert!(uncovered["per_model"].get("claude-opus-5").is_none(),
-                "claude-opus-5 已订阅 → 不应出现在 uncovered.per_model");
-        // deepseek 未订阅 → 必须在
+                "claude-opus-5 已订阅 → 不在 uncovered.per_model");
         assert!(uncovered["per_model"].get("deepseek-v4-flash").is_some(),
-                "deepseek-v4-flash 未订阅 → 必须出现在 uncovered.per_model");
+                "deepseek-v4-flash 未订阅 → 在 uncovered.per_model");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 全 1M cache_read → ratio = 1/30（cached 0.05 vs uncached 1.5，spec §3
-    /// 原文引用的具体信号）。月级无 providers、各家模型走 fallback 价卡——与
-    /// `priced_day` 对同一份 month.json 的处理一致。
+    /// 全 1M cache_read → savings ratio = 1/30（cached 0.05 vs uncached 1.5）。
     #[test]
     fn read_overview_v07_savings_ratio_is_1_over_30_for_cache_only() {
-        let tmp = std::env::temp_dir().join("sv-menubar-v07-savings-test");
+        let tmp = std::env::temp_dir().join("sv-menubar-v07-savings-sql-test");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("state")).unwrap();
-        let cm = current_month_beijing();
-        // 全 cache_read、其它 8 桶字段 0：ratio = 1/30。`uncached_input_tokens`
-        // 必须显式 0（不是默认 100），否则 uncached 残余贡献会偏离 1/30。
-        let month = serde_json::json!({
-            "month": cm,
-            "days": {
-                format!("{cm}-01"): {
-                    "uncached_input_tokens": 0, "output_tokens": 0,
-                    "cache_read_tokens": 1000000, "cache_write_tokens": 0,
-                    "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-                    "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-                    "by_model": {
-                        "deepseek-v4-flash": {
-                            "uncached_input_tokens": 0, "output_tokens": 0,
-                            "cache_read_tokens": 1000000, "cache_write_tokens": 0,
-                            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-                            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
-                        },
-                    },
-                },
-            },
-        });
-        std::fs::write(tmp.join("state").join("month.json"), month.to_string()).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
+        let d = format!("{}-10", current_month_beijing());
+        let db = seed_overview_db(&tmp);
+        // uncached 0、全 cache_read。
+        seed_fact(&db, "cr", "dsh", "deepseek-v4-flash", bj_noon_ms(&d), (0, 1_000_000, 0, 0));
+        drop(db);
         let ov = read_overview_at(&tmp);
-        let savings = ov.month_savings.expect(
-            "by_model 存在 → savings 必须 Some");
+        let savings = ov.month_savings.expect("有 by_model → savings Some");
         assert_eq!(savings["currency"], "CNY");
         let ratio = savings["ratio"].as_f64().expect("ratio 必须是数字");
-        assert!((ratio - 1.0 / 30.0).abs() < 1e-9,
-                "全 cache_read → ratio 必须 = 1/30，got {ratio}");
+        assert!((ratio - 1.0 / 30.0).abs() < 1e-9, "全 cache_read → ratio = 1/30，got {ratio}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

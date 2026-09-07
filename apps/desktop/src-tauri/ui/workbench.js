@@ -1,7 +1,7 @@
 // 工作台主窗口前端：三页 总览 / Token 日历 / 会话（列表+详情）。
 // 纯 HTML/CSS/JS，无打包器 —— `withGlobalTauri: true` 让全局 `window.__TAURI__`
-// 可用。数据只来自后端命令（read_overview / read_month / sessions_list /
-// sessions_read），任何金额/覆盖率都不在本文件计算——core 算好、这里格式化展示
+// 可用。数据只来自后端命令（read_overview / read_calendar_month /
+// read_hourly_distribution / sessions_list / sessions_read），任何金额/覆盖率都不在本文件计算——core 算好、这里格式化展示
 // （CLAUDE.md 的 cost 教训：前端不许长第二份定价）。
 "use strict";
 
@@ -537,9 +537,9 @@ async function renderOverview() {
   }
 }
 
-// 「本月逐日」panel：切 read_calendar_month（逐日三宿主 token + 分币耗费）。
+// 「本月逐日」panel：read_calendar_month（逐日三宿主 token + 分币耗费）。
 // 旧 read_month 的 DSH-only 日轴在 DSH 零用量月份只剩全零行，与总览页的
-// 跨宿主叙事自相矛盾。costs 每段带宿主前缀（同日历格子）。
+// 跨宿主叙事自相矛盾——v0.9.1 Phase 4 已退役该命令。costs 每段带宿主前缀。
 function renderOverviewDays(cal) {
   const list = document.getElementById("ov-days-list");
   const empty = document.getElementById("ov-days-empty");
@@ -1006,8 +1006,8 @@ async function renderCalendar() {
 
   // v0.9 Stage D：日历数据源切逐日跨宿主（read_calendar_month）——此前只画
   // DSH 日轴，DSH 零用量月份让 claude/codex 的真实用量在日历上完全不可见
-  // （2026-09 实测：57 亿 token 的月份显示一片空白）。旧 read_month 命令保留
-  // （口径不同勿混用）。
+  // （2026-09 实测：57 亿 token 的月份显示一片空白）。旧 read_month 命令
+  // v0.9.1 Phase 4 已退役。
   let resp;
   try {
     resp = await invoke("read_calendar_month", { month: calMonth });
@@ -1024,7 +1024,7 @@ async function renderCalendar() {
   // 数据源 panel（v0.9 Stage 0.6 日历页月份级诚实状态）：并发拉
   // data_monthly_summary，失败不拖垮方格（spec §0.1：日轴与跨宿主源各自
   // 诚实渲染，不互相替代）。方格走 read_month 的 DSH 日轴数据，月级源
-  // 状态走新命令——两者可能分别有/无数据，不许混为一谈。
+  // 状态走 data_monthly_summary——方格与月级源可能分别有/无数据，不许混为一谈。
   let calSourcesDto = null;
   try {
     calSourcesDto = await invoke("data_monthly_summary", { month: calMonth });

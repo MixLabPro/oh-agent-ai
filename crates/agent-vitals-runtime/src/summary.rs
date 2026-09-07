@@ -1190,6 +1190,52 @@ fn latest_day_key(days: &serde_json::Value) -> Option<String> {
 ///
 /// 每天三宿主各自计量 + 计价，**钱不跨宿主不跨币合并**（口径各异：DSH
 /// 实测、claude relay 估算、codex 等价标价——格子副行分币并列，主行是
+/// 托盘 `read_overview` 的 SQL 权威数据面（Phase 4 §5.2：菜单栏不再直读
+/// `state/{today,month,claude-ledger}.json`）。开库一次，返回三份与旧 state
+/// JSON **同形**的原始数据，供 Tauri 侧的 core 折叠函数（`today_cost` /
+/// `month_cost` / `claude_estimates` / `rollup_by_model`）消费——不重写任何
+/// 计价。与 `calendar_month` / `hourly_distribution` 同层同源。
+pub struct OverviewBundle {
+    /// DSH 今日桶（`month.json` days 单日同形：8 桶 + `by_model`）或 None
+    /// （今日无 DSH 用量——不是「花了 0」）。
+    pub dsh_today: Option<serde_json::Value>,
+    /// DSH 当月逐日 map（`month.json` `days` 同形，SQL 北京月窗已过滤）。
+    pub dsh_month_days: serde_json::Value,
+    /// Claude 当月逐日账（`claude-ledger.json` `days` 同形：
+    /// `{date:{model:{input_tokens,cache_read_input_tokens,
+    /// cache_creation_input_tokens,output_tokens}}}`，实时事实优先 +
+    /// legacy_aggregate 深历史按模型补缺）。
+    pub claude_month_days: serde_json::Value,
+}
+
+pub fn overview_bundle(data_home: &Path) -> OverviewBundle {
+    let today_key = crate::clock::today_beijing();
+    let month = crate::clock::current_month_beijing();
+    let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(data_home),
+        crate::sql_sync::now_ms(),
+    )
+    .ok();
+    let (dsh_days, claude_days) = match (&db, bounds) {
+        (Some(db), Some((start, end))) => {
+            let conn = db.conn();
+            let dsh = agent_vitals_data::authority_query::peaked_days_map(conn, "dsh", start, end)
+                .unwrap_or_else(|_| json!({}));
+            let claude: serde_json::Map<String, serde_json::Value> =
+                merged_claude_days(conn, start, end).into_iter().collect();
+            (dsh, serde_json::Value::Object(claude))
+        }
+        _ => (json!({}), json!({})),
+    };
+    let dsh_today = dsh_days.get(&today_key).cloned();
+    OverviewBundle {
+        dsh_today,
+        dsh_month_days: dsh_days,
+        claude_month_days: claude_days,
+    }
+}
+
 /// token 总量，token 才是跨宿主可加的量）。返回 `{"month", "days":
 /// {date: {...}}}`，无数据日字段缺省为 0/缺键——调用方以
 /// `total_tokens == 0` 判定"这天没有用量"。

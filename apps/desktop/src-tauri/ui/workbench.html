@@ -158,9 +158,9 @@
         <div id="hourly-grid" class="hour-grid"></div>
       </div>
       <!-- ============ 数据源（v0.9 Stage 0.6 日历页月份级诚实状态）============
-           由 data_monthly_summary 驱动（与 read_month 并发拉取，失败不拖垮
-           方格）：标题行加新鲜度标注，月注记区追加逐宿主月度概览。方格仍
-           走 read_month 的 DSH 日轴数据——两者各自诚实渲染，不许互相替代。 -->
+           由 data_monthly_summary 驱动（与 read_calendar_month 并发拉取，失败
+           不拖垮方格）：标题行加新鲜度标注，月注记区追加逐宿主月度概览。方格
+           走 read_calendar_month 的逐日跨宿主数据——两者各自诚实渲染，不许互相替代。 -->
       <div class="panel sources">
         <div class="panel-title">本月跨宿主概览</div>
         <div id="cal-sources-empty" class="empty" hidden>本月无跨宿主数据</div>
