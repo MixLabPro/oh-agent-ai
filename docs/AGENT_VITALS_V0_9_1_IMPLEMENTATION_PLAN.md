@@ -262,14 +262,20 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
     `overview::monthly_cny_subscriptions`（纯 pricing.json 计算，月份过滤同
     `apply_subscription_fees`）。托盘按量预算行下方单列「本月订阅
     ¥232（已付，不计入按量预算）」。
-  - [ ] **HTML 模板消费面**（`codex-cost --html`）——**不是小改**：
-    `render_codex_cost_html`/`codex_calendar_blob` 内联的是 codex 原始 rollout
-    全量 fold 的 `merged` 对象。`codex-cost --json` 受 `test_cli_matrix::
-    test_codex_cost_differential` 逐字节差分看守——只切 Rust 侧数据源到 SQL
-    （`authority_query::codex_by_hour_model` 三窗 → `codex_report_from_merged`）
-    会让 Python↔Rust `--json` 当场背离。是**协调 Python+Rust 的整命令迁移
-    + 差分基准更新**，与 §7.1 Python 收缩 RFC 同一条线；`unaccounted`/`plan`
-    两个字段 SQL 面无对应物，需先定降级口径。独立专注项，非「继续当前项」。
+  - [x] **HTML 模板消费面 / codex-cost 切 SQL**（7ae69b7，PM 拍板「整命令迁移
+    + 退役 Python 侧」）：`codex-cost`（`--json`/`--html`/文本）从 rollout 全量
+    fold 改读 `runtime::summary::codex_merged_from_sql`（→ `authority_query::
+    codex_by_hour_model` 全窗，`codex_report_from_merged` 的 `filter_key` 做
+    视图过滤）。Python 侧整命令删除（`codex_cost.py` 模块 + `codex_fold_merged`
+    等留给 Python-only `calendar`——其 SQL 迁移是 §5.2 独立后续项）。5 个
+    `test_codex_cost_*` py==rs 差分删除，calendar 交叉测试退成结构冒烟，新增
+    Rust `codex_sql_tests`（读事实/降级/订阅标注 + `Some(filter_key)` 月过滤
+    守恒）+ Python e2e 冒烟。SQL 面降级：`unaccounted=[]`（哨兵是 fold 独有）、
+    `plan` 只带 `plan_type:"plus"`（pricing.json `billing_modes.openai._note`
+    实测不变量，保「(按量标价)」诚实标注，限额快照丢失待后续）、库缺失时
+    stderr 提示 `sync-facts`。subagent 审查 6 条 should-fix 全处置。
+    附带修 pre-existing `test_help_defaults_to_english` 红（`budget-sql`/`data`
+    的中文 doc 混进 `--help`）。
 
   #### 预算口径（PM 决策 2026-09-07，PM熊叔评审）
 
