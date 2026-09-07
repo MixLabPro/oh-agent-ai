@@ -36,8 +36,8 @@ spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个
 
 | # | 增量 | spec 对应 | 状态 |
 |---|---|---|---|
-| **1** | 传输层 + envelope + `data_status` | M1 起步 | 🔨 |
-| 2 | `MoneyMinor` 精确投影 + `usage_hourly`（宿主轴 + model/provider 轴 + 逐小时成本） | M1 | ⬜ |
+| **1** | 传输层 + envelope + `data_status` | M1 起步 | ✅ (`dcb672e` + `5b8e38e`) |
+| 2 | `MoneyMinor` 精确投影 + `usage_hourly`（宿主轴 + model/provider 轴 + 逐小时成本） + S2/S4/S5/S7 review follow-ups | M1 | ⬜ |
 | 3 | `summary_daily` + `summary_monthly`（含会话数 / 活跃小时 / 逐日趋势 / 月底预测 / 占比新查询） | M1 | ⬜ |
 | 4 | `data_quality_issues` + code-aware 脱敏 allowlist | M1 | ⬜ |
 | 5 | M1 收口：M01–M08 / M13–M18 契约测试 + 三消费面 parity（M15）+ 真机 U01/U02/U08 | M1 退出 | ⬜ |
@@ -46,6 +46,20 @@ spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个
 | 8+ | M3：`cost_breakdown` / `sessions_search` / `session_detail` + session 索引 v2 + 历史价重放 | M3 | ⬜ |
 | … | M4：`workflow_events` 管线 + `issues_summary` / `skills_summary` | M4 | ⬜ |
 | … | M5：公开/内部构建分离 + 打包 + 发布文档 | M5 | ⬜ |
+
+### 增量 1 review disposition（subAgent `a25df914c9a1c27ec`）
+
+| # | 严重度 | 处置 |
+|---|---|---|
+| S1 损坏库走错路径（corrupt/schema 不符先前返回带 `unavailable` 的成功响应） | should-fix → **已修（合入前）** | `data_status::run` 直接 `Err(ToolError::new("database_unreadable" \| "schema_migration_required", ...))`；新增 `corrupt_db_is_a_business_error_not_silent_unavailable` + `schema_mismatch_is_a_business_error` 两单测；真机 smoke 已验（isError=True + database_unreadable）。 |
+| S2 `AuthorityHandle::authority_state` 返回类型误导 | should-fix → **延后** | 增量 2 改成 `Result<&'static str, UnavailableReason>` 或让现有工具直接走 `authority_state_for(data_home)` helper。 |
+| S3 `error_envelope` 硬编码 `"1"` 与 `ENVELOPE_SCHEMA_VERSION` 不同源 | should-fix → **已修（合入前）** | 改用常量 + `error_envelope_uses_envelope_schema_version_constant` 单测。 |
+| S4 `authority_revision.max_observed_at` 缺 `observation_kind != 'legacy_aggregate'` 过滤 | should-fix → **延后** | 增量 2 修（`MAX(event_ts_ms) FROM usage_facts WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'`）。 |
+| S5 `validate_args` 对未设 `additionalProperties:false` 放行 | should-fix → **延后** | 增量 2 加 `assert_eq!` fail-fast（debug_assert）+ 启动期 lint。 |
+| S6 `by_host[*].facts` 排除 legacy_aggregate 但 `data_status` 用户期望全表 | should-fix → **延后** | 增量 2 拆 `live_facts` / `legacy_aggregates` 两栏。 |
+| S7 `PRAGMA integrity_check` 每次调用都跑零缓存 | should-fix → **延后** | 增量 2 加频次 warn；增量 5/6 接 `data-status-health` watcher 时再做进程级 60s memo（与 `runtime::summary::codex_merged_cached` 同形）。 |
+| N1 `schema_version()` 损坏时静默回零 | nit → **延后** | 增量 2 直接 `Err` 让 `error_envelope` 接管。 |
+| N2 `mcp-internal` feature 在 `apps/cli/Cargo.toml` 占位 | nit → 接受 | 增量 6 落地时加 `#[cfg(feature = "mcp-internal")]` 引用即可。 |
 
 ---
 
@@ -91,7 +105,12 @@ spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个
 - 全量 `cargo test` + `cargo clippy --release --all-targets -- -D warnings` + golden 15/15
   + `AGENT_VITALS_BIN` python 差分不回归。
 
-### 收口
+### 收口（已完成，2026-09-07）
 
 subAgent 审查（envelope 契约、错误映射、只读边界、CLI/MCP 去重是否真的同源、
-stdout 纪律）→ 修复 → commit。
+stdout 纪律）→ 修复 S1/S3 → commit `dcb672e` + `5b8e38e`。
+
+- 全量 cargo test + clippy -D warnings 全绿
+- golden 15/15 字节一致
+- Python AGENT_VITALS_BIN 差分 1161 测试 OK
+- 真机 smoke：handshake / `tools/list` 携带 inputSchema+outputSchema / `tools/call data_status` 端出完整 envelope（`schema_version` / `data_version` / `authority_state` / `authority_revision` / `coverage` / `freshness` / `warnings` / `data`）/ 损坏库返回 `isError:true` + `database_unreadable`
