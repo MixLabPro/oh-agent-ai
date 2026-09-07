@@ -499,20 +499,6 @@ enum Cmd {
     /// (spec 6.2.1: JSONL is the highest-fidelity migration source; same
     /// fact_id = idempotent). Safe to re-run.
     DataMigrate,
-    /// Phase 4.1 (spec 6.3): machine-readable reconcile of the SQL authority DB
-    /// against the legacy state JSON, per host x bucket (tokens, strict equal)
-    /// and per provider x basis x currency (amounts, minor units). Diffs are
-    /// exact / explained (delta within a recorded exception, e.g. undated
-    /// residual) / mismatch. `reconciled: true` iff all exact-or-explained —
-    /// this is the read side of the Phase 4.2 switch gate. Exit 1 on mismatch.
-    DataReconcileAuthority {
-        /// Month to reconcile ("YYYY-MM"; default: current month)
-        #[arg(long)]
-        month: Option<String>,
-        /// Output the report as JSON
-        #[arg(long = "json")]
-        rows_json: bool,
-    },
     /// Authority DB status: schema version, recent sync runs, source
     /// counts, data-quality summary (spec 9, authority part of data
     /// doctor).
@@ -553,18 +539,6 @@ enum Cmd {
         #[arg(long = "id")]
         bill_id: Option<String>,
         /// Output JSON
-        #[arg(long = "json")]
-        rows_json: bool,
-    },
-    /// Reconcile the two budget ledgers for a month: state chain
-    /// (month.json fold) vs facts index. `reconciled: true` is the
-    /// precondition for retirement-path step 4 (state JSON retirement).
-    /// Retirement-path step 3 acceptance surface.
-    DataBudgetReconcile {
-        /// Month to reconcile ("YYYY-MM"; default: current month)
-        #[arg(long)]
-        month: Option<String>,
-        /// Output as JSON
         #[arg(long = "json")]
         rows_json: bool,
     },
@@ -718,13 +692,13 @@ enum DataAction {
     /// Phase 4.2 (spec 6.1/6.3): the `sql_authority_enabled` switch. When set,
     /// the SQL authority DB is the sole runtime authority and legacy state-JSON
     /// writes (today/month/alert.json, claude ledger) are frozen — old files are
-    /// kept but no longer updated. `enable` gates on `data-reconcile-authority`
-    /// passing for the current AND previous month (all exact-or-explained);
-    /// `--force` overrides. `disable` returns to dual-write.
+    /// kept but no longer updated. `enable` gates on authority-DB health
+    /// (integrity ok, facts present, last sync run succeeded); `--force`
+    /// overrides. `disable` returns to dual-write.
     Authority {
         #[arg(value_parser = ["status", "enable", "disable"])]
         action: String,
-        /// enable: set the flag even if reconcile has open mismatches
+        /// enable: set the flag even if the authority DB is not healthy
         #[arg(long)]
         force: bool,
         /// Print JSON
@@ -2263,82 +2237,6 @@ session_store={store} fold={fold}"
         return;
     }
 
-    // data budget-reconcile（退休路径 ③ 验收面）：state 链账 vs 索引账。
-    if let Some(Cmd::DataBudgetReconcile { month, rows_json }) = &args.cmd {
-        let month = month
-            .clone()
-            .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
-        let report = agent_vitals_runtime::budget::reconcile_budget_sources(&month);
-        if *rows_json {
-            println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
-        } else {
-            // cost 是 {total, peak_total} 对象——取 total（此前把对象当
-            // 数字读，永远显示「无」，JSON 面是对的、人读面说谎）。
-            let fmt = |v: &Value| {
-                v.get("total")
-                    .and_then(Value::as_f64)
-                    .map(|x| format!("¥{x:.2}"))
-                    .unwrap_or_else(|| "无".into())
-            };
-            println!("Budget reconcile (month {month}):");
-            println!("  state 链（month.json）: {}", fmt(&report["state_cost"]));
-            println!("  索引（facts）        : {}", fmt(&report["index_cost"]));
-            let note = report["note"].as_str().unwrap_or("");
-            println!(
-                "  reconciled: {}{}",
-                report["reconciled"],
-                if note.is_empty() { String::new() } else { format!("（{note}）") }
-            );
-        }
-        return;
-    }
-
-    // data-reconcile-authority（Phase 4.1，spec §6.3）：SQL 权威库 vs legacy
-    // state JSON 逐 host×bucket / provider×basis×currency 对账。mismatch → 退出 1。
-    if let Some(Cmd::DataReconcileAuthority { month, rows_json }) = &args.cmd {
-        let month = month
-            .clone()
-            .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
-        let report = agent_vitals_runtime::summary::reconcile_authority_vs_legacy(&month);
-        // §6.3：例外落 data_quality_issues（data-status 可见）。写失败不拦报告。
-        if let Err(e) = agent_vitals_runtime::summary::persist_reconcile_exceptions(
-            &agent_vitals_runtime::home::data_home(),
-            &report,
-        ) {
-            eprintln!("note: reconcile exceptions not persisted: {e}");
-        }
-        if *rows_json {
-            println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
-        } else {
-            println!("Authority vs legacy reconcile (month {month}):");
-            for r in report["tokens_by_host"].as_array().unwrap_or(&vec![]) {
-                println!(
-                    "  tokens {:<12} {:<9} abs_delta={}",
-                    r["host"].as_str().unwrap_or("?"),
-                    r["verdict"].as_str().unwrap_or("?"),
-                    r["abs_delta_tokens"],
-                );
-            }
-            for r in report["amounts_by_provider_basis"].as_array().unwrap_or(&vec![]) {
-                if r["verdict"] != "exact" {
-                    println!(
-                        "  amount {:<24} {:<18} sql={} legacy={} ({})",
-                        r["provider"].as_str().unwrap_or("?"),
-                        r["basis"].as_str().unwrap_or("?"),
-                        r["sql_minor"],
-                        r["legacy_minor"],
-                        r["verdict"].as_str().unwrap_or("?"),
-                    );
-                }
-            }
-            println!("reconciled: {}", report["reconciled"]);
-        }
-        if report["reconciled"] != serde_json::json!(true) {
-            std::process::exit(1);
-        }
-        return;
-    }
-
     // sync-facts（Stage B 遗留收口）：三宿主例行 ingest——退休路径第 ① 步。
     // 托盘 tick 未来也调这一条（不各自长文件枚举）。
     if let Some(Cmd::SyncFacts { rows_json }) = &args.cmd {
@@ -3361,47 +3259,71 @@ session_store={store} fold={fold}"
                         }
                     }
                     "enable" => {
-                        let cur = agent_vitals_runtime::clock::current_month_beijing();
-                        let prev = {
-                            let (y, m): (i64, i64) = (
-                                cur[..4].parse().unwrap_or(0),
-                                cur[5..7].parse().unwrap_or(1),
-                            );
-                            let (py, pm) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
-                            format!("{py:04}-{pm:02}")
+                        // Phase 4.3 起没有 legacy 第二实现可对账——门槛改成
+                        // 「权威库自身健康」：可打开 + integrity ok + 有事实 +
+                        // 最近一次 sync run 成功。空/损坏/从没同步的库不许翻开关
+                        // （翻了 = 旧 JSON 冻结 + 权威库是空的 = 静默零花销）。
+                        let health = (|| -> Result<serde_json::Value, String> {
+                            let db = agent_vitals_data::authority::AuthorityDb::open(
+                                &agent_vitals_data::authority::default_authority_path(&dh),
+                                agent_vitals_runtime::sql_sync::now_ms(),
+                            )
+                            .map_err(|e| e.to_string())?;
+                            let conn = db.conn();
+                            let integrity: String = conn
+                                .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+                                .unwrap_or_else(|e| format!("integrity_check failed: {e}"));
+                            let facts: i64 = conn
+                                .query_row(
+                                    "SELECT COUNT(*) FROM usage_facts WHERE deleted_at_ms IS NULL",
+                                    [], |r| r.get(0),
+                                )
+                                .unwrap_or(0);
+                            let last_run: Option<String> = conn
+                                .query_row(
+                                    "SELECT status FROM sync_runs ORDER BY started_at_ms DESC LIMIT 1",
+                                    [], |r| r.get(0),
+                                )
+                                .ok();
+                            Ok(serde_json::json!({
+                                "integrity": integrity,
+                                "facts": facts,
+                                "last_run": last_run,
+                            }))
+                        })();
+                        let (ok, health) = match &health {
+                            Ok(h) => (
+                                h["integrity"] == serde_json::json!("ok")
+                                    && h["facts"].as_i64().unwrap_or(0) > 0
+                                    && h["last_run"] == serde_json::json!("succeeded"),
+                                h.clone(),
+                            ),
+                            Err(e) => (false, serde_json::json!({"error": e})),
                         };
-                        let mut checks = Vec::new();
-                        let mut all_pass = true;
-                        for month in [&prev, &cur] {
-                            let r = agent_vitals_runtime::summary::reconcile_authority_vs_legacy(month);
-                            let _ = agent_vitals_runtime::summary::persist_reconcile_exceptions(&dh, &r);
-                            let ok = r["reconciled"] == serde_json::json!(true);
-                            all_pass &= ok;
-                            checks.push(serde_json::json!({"month": month, "reconciled": ok}));
-                        }
-                        if !all_pass && !*force {
+                        if !ok && !*force {
                             eprintln!(
-                                "data authority enable: reconcile did NOT pass for {prev} + {cur} \
-                                 (run `data-reconcile-authority --month M` for detail). Fix the \
-                                 mismatch or pass --force. NOT enabling."
+                                "data authority enable: authority DB is not healthy \
+                                 (need integrity=ok, facts>0, last sync run succeeded — \
+                                 run `agent-vitals sync-facts` then `agent-vitals data-status`). \
+                                 Pass --force to override. NOT enabling."
                             );
                             println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                                "enabled": false, "checks": checks,
+                                "enabled": false, "health": health,
                             })).unwrap_or_default());
                             std::process::exit(1);
                         }
                         agent_vitals_runtime::sql_authority::enable(
                             &dh,
-                            serde_json::json!({"checks": checks, "forced": !all_pass && *force}),
+                            serde_json::json!({"health": health, "forced": !ok && *force}),
                         )
                         .unwrap_or_else(|e| {
                             eprintln!("data authority enable failed: {e}");
                             std::process::exit(2);
                         });
                         println!(
-                            "sql_authority_enabled = true (reconcile {}). Legacy state-JSON writes \
+                            "sql_authority_enabled = true (health {}). Legacy state-JSON writes \
                              are now frozen; old files kept, not updated.",
-                            if all_pass { "passed" } else { "FORCED past mismatch" },
+                            if ok { "ok" } else { "FORCED past unhealthy DB" },
                         );
                         if *json {
                             println!("{}", serde_json::to_string_pretty(

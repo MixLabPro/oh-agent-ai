@@ -11,9 +11,10 @@
 //! reconcile}`）。**不删旧文件**（spec §6.1：备份确认窗口内旧文件保留）——
 //! 只是不再更新它们。`disable` 删标记即回退到双写。
 //!
-//! 门槛：`data authority enable` 先跑 `summary::reconcile_authority_vs_legacy`
-//! 对当月 + 上月，两个月都 `reconciled: true`（全 exact-or-explained）才允许
-//! 设标记（`--force` 越过，用于已知例外场景）。
+//! 门槛（Phase 4.3 起）：没有 legacy 第二实现可对账——`data authority enable`
+//! 改成检查**权威库自身健康**：可打开 + `PRAGMA integrity_check = ok` + 有
+//! 事实行 + 最近一次 sync run `succeeded`（`--force` 越过）。空/损坏/从没同步
+//! 的库不许翻开关——翻了 = 旧 JSON 冻结 + 权威库空 = 静默零花销。
 
 use std::path::{Path, PathBuf};
 
