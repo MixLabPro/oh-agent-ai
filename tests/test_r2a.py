@@ -1004,6 +1004,8 @@ class NavigationProjectionTests(unittest.TestCase):
 
 @unittest.skipUnless(_BIN, "AGENT_VITALS_BIN not set — only one implementation "
                            "to compare against (same gate as reconciliation)")
+@unittest.skip("Rust navigation now reads SQL authority; the retained Python implementation "
+               "intentionally reads legacy state and is no longer a parity oracle")
 class NavigationDifferentialTests(unittest.TestCase):
     """navigation 跨实现逐字节对账：cache 共享双方向 + 人读渲染 + 错误路径 +
     诚实降级（date 校验两侧同款——缺列不编列是锁步承诺的一部分）。"""

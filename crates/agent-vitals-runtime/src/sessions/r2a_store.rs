@@ -44,16 +44,16 @@
 //! 的会话会无限期沿用旧 envelope，费用轴在真机上静默消失。所以 v3 把 schema 抬
 //! 一版，旧缓存一次性冷启动重建；同样的"改载荷就抬 schema、不做就地迁移"规则。
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
-use agent_vitals_domain::findings::{FindingRef, FindingSession, rollup_findings};
-use agent_vitals_domain::r2a::*;
+use crate::home::data_home;
 use crate::sessions::codex_session_audit as csa;
 use crate::takeover;
-use crate::home::data_home;
+use agent_vitals_domain::findings::{rollup_findings, FindingRef, FindingSession};
+use agent_vitals_domain::r2a::*;
 
 /// 并行逐会话构建，结果按输入序回填。会话构建互相独立（只读各自源文件 + 共享
 /// 只读的 `fp_map`/`ws`），可并行；但每个 worker 持有当前会话解压后的全文，
@@ -117,7 +117,12 @@ fn claude_cache_path() -> PathBuf {
 fn codex_source_fingerprints(home: &Path) -> Vec<(String, String)> {
     agent_vitals_hosts::codex_session::codex_rollout_files(home)
         .iter()
-        .map(|p| (p.to_string_lossy().to_string(), fingerprint_file(p).unwrap_or_default()))
+        .map(|p| {
+            (
+                p.to_string_lossy().to_string(),
+                fingerprint_file(p).unwrap_or_default(),
+            )
+        })
         .collect()
 }
 
@@ -128,7 +133,12 @@ fn codex_source_fingerprints(home: &Path) -> Vec<(String, String)> {
 fn dsh_source_fingerprints(home: &Path) -> Vec<(String, String)> {
     crate::sessions::discovery::dsh_session_files(&home.join(".dsh"))
         .iter()
-        .map(|p| (p.to_string_lossy().to_string(), fingerprint_file(p).unwrap_or_default()))
+        .map(|p| {
+            (
+                p.to_string_lossy().to_string(),
+                fingerprint_file(p).unwrap_or_default(),
+            )
+        })
         .collect()
 }
 
@@ -138,7 +148,12 @@ fn dsh_source_fingerprints(home: &Path) -> Vec<(String, String)> {
 fn claude_source_fingerprints(home: &Path) -> Vec<(String, String)> {
     agent_vitals_hosts::claude_session::claude_project_files(home)
         .iter()
-        .map(|p| (p.to_string_lossy().to_string(), fingerprint_file(p).unwrap_or_default()))
+        .map(|p| {
+            (
+                p.to_string_lossy().to_string(),
+                fingerprint_file(p).unwrap_or_default(),
+            )
+        })
         .collect()
 }
 
@@ -235,8 +250,14 @@ fn extract_summary(payload: &Value) -> Summary {
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
     Summary {
-        title: payload.get("title").and_then(Value::as_str).map(str::to_owned),
-        model: payload.get("model").and_then(Value::as_str).map(str::to_owned),
+        title: payload
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        model: payload
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         date_first,
         date_last,
         files,
@@ -309,7 +330,10 @@ fn dsh_extract_summary(payload: &Value) -> Summary {
         .map(|a| a.len())
         .unwrap_or(0);
     Summary {
-        title: payload.get("title").and_then(Value::as_str).map(str::to_owned),
+        title: payload
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         model,
         date_first,
         date_last,
@@ -343,7 +367,11 @@ pub fn findings_for(key: &SessionKey, payload: &Value) -> Vec<FindingRef> {
     let Some(arr) = arr else { return Vec::new() };
     arr.iter()
         .map(|f| FindingRef {
-            rule: f.get("rule").and_then(Value::as_str).unwrap_or("").to_string(),
+            rule: f
+                .get("rule")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             severity: f
                 .get("severity")
                 .and_then(Value::as_str)
@@ -354,7 +382,10 @@ pub fn findings_for(key: &SessionKey, payload: &Value) -> Vec<FindingRef> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
-            tool_name: f.get("tool_name").and_then(Value::as_str).map(str::to_owned),
+            tool_name: f
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             evidence: f.get("evidence").and_then(Value::as_str).map(str::to_owned),
             time: f.get("time").and_then(Value::as_i64),
             seq: f.get("seq").and_then(Value::as_u64),
@@ -495,14 +526,20 @@ impl SessionStore {
         let ns = takeover::machine_namespace();
         let generated_at = now_iso_utc();
         let fingerprints = codex_source_fingerprints(home);
-        let fp_map: HashMap<&str, &str> = fingerprints.iter().map(|(p, f)| (p.as_str(), f.as_str())).collect();
+        let fp_map: HashMap<&str, &str> = fingerprints
+            .iter()
+            .map(|(p, f)| (p.as_str(), f.as_str()))
+            .collect();
         let cache_path = codex_cache_path();
 
         if let Some(cached) = read_cache(&cache_path) {
             if let Some((cached_sessions, _)) = read_cache_v2(&cached) {
                 let (kept, covered) = kept_sessions(&cached_sessions, &fp_map);
-                let to_process: Vec<&str> =
-                    fingerprints.iter().map(|(p, _)| p.as_str()).filter(|p| !covered.contains(*p)).collect();
+                let to_process: Vec<&str> = fingerprints
+                    .iter()
+                    .map(|(p, _)| p.as_str())
+                    .filter(|p| !covered.contains(*p))
+                    .collect();
                 if to_process.is_empty() && kept.len() == cached_sessions.len() {
                     // 全命中：一个 session 都不用重排/重算，直接复用 cache 文档
                     // 里冻结的 generated_at/source_statuses——与 v1 的纯读路径
@@ -524,14 +561,23 @@ impl SessionStore {
                 }
                 let mut sessions = kept;
                 let sid_list: Vec<String> = sids.into_iter().collect();
-                for bs in par_map_in_order(&sid_list, |sid| codex_built_session_for(home, sid, &ns, &fp_map))
-                    .into_iter()
-                    .flatten()
+                for bs in par_map_in_order(&sid_list, |sid| {
+                    codex_built_session_for(home, sid, &ns, &fp_map)
+                })
+                .into_iter()
+                .flatten()
                 {
                     sessions.push(bs);
                 }
                 let statuses = codex_source_statuses(home, sessions.len());
-                return Ok(finalize_and_write("codex", &cache_path, sessions, generated_at, statuses, Vec::new()));
+                return Ok(finalize_and_write(
+                    "codex",
+                    &cache_path,
+                    sessions,
+                    generated_at,
+                    statuses,
+                    Vec::new(),
+                ));
             }
             // v1 缓存或形状坏（升级后字段改名等）→ 落回下面的全量重建，用新
             // v2 格式重写一份，不 abort。
@@ -544,17 +590,30 @@ impl SessionStore {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|s| s.get("session_id").and_then(Value::as_str).map(str::to_owned))
+            .filter_map(|s| {
+                s.get("session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
             .collect();
         let mut sessions = Vec::new();
-        for bs in par_map_in_order(&session_ids, |sid| codex_built_session_for(home, sid, &ns, &fp_map))
-            .into_iter()
-            .flatten()
+        for bs in par_map_in_order(&session_ids, |sid| {
+            codex_built_session_for(home, sid, &ns, &fp_map)
+        })
+        .into_iter()
+        .flatten()
         {
             sessions.push(bs);
         }
         let statuses = codex_source_statuses(home, sessions.len());
-        Ok(finalize_and_write("codex", &cache_path, sessions, generated_at, statuses, Vec::new()))
+        Ok(finalize_and_write(
+            "codex",
+            &cache_path,
+            sessions,
+            generated_at,
+            statuses,
+            Vec::new(),
+        ))
     }
 
     /// 从 DSH 源填充（§5.2，zstd 落地后）。`<home>/.dsh/sessions/**/session.jsonl[.zstd]`
@@ -569,7 +628,10 @@ impl SessionStore {
     pub fn dsh(home: &Path) -> Result<SessionStore, StoreError> {
         let generated_at = now_iso_utc();
         let fingerprints = dsh_source_fingerprints(home);
-        let fp_map: HashMap<&str, &str> = fingerprints.iter().map(|(p, f)| (p.as_str(), f.as_str())).collect();
+        let fp_map: HashMap<&str, &str> = fingerprints
+            .iter()
+            .map(|(p, f)| (p.as_str(), f.as_str()))
+            .collect();
         let cache_path = dsh_cache_path();
 
         if let Some(cached) = read_cache(&cache_path) {
@@ -585,7 +647,10 @@ impl SessionStore {
                     .map(|(p, _)| p.clone())
                     .filter(|p| !covered.contains(p.as_str()))
                     .collect();
-                if to_process.is_empty() && kept.len() == cached_sessions.len() && kept_deg.len() == cached_degraded.len() {
+                if to_process.is_empty()
+                    && kept.len() == cached_sessions.len()
+                    && kept_deg.len() == cached_degraded.len()
+                {
                     if let Some(store) = cache_v2_to_store(&cached, &cached_sessions) {
                         return Ok(store);
                     }
@@ -600,23 +665,43 @@ impl SessionStore {
                 let mut sessions = kept;
                 let mut degraded: Vec<DegradedTriple> = kept_deg
                     .into_iter()
-                    .map(|(p, r)| (p.clone(), fp_map.get(p.as_str()).map(|f| f.to_string()).unwrap_or_default(), r))
+                    .map(|(p, r)| {
+                        (
+                            p.clone(),
+                            fp_map
+                                .get(p.as_str())
+                                .map(|f| f.to_string())
+                                .unwrap_or_default(),
+                            r,
+                        )
+                    })
                     .collect();
                 let to_process_set: HashSet<&str> = to_process.iter().map(String::as_str).collect();
                 let to_build: Vec<&PathBuf> = files
                     .iter()
                     .filter(|p| to_process_set.contains(p.display().to_string().as_str()))
                     .collect();
-                for r in par_map_in_order(&to_build, |p| dsh_built_session_for(p, &ws, &fp_map, &ns)) {
+                for r in
+                    par_map_in_order(&to_build, |p| dsh_built_session_for(p, &ws, &fp_map, &ns))
+                {
                     match r {
                         Ok(bs) => sessions.push(bs),
                         Err((p, reason, fp)) => degraded.push((p, fp, reason)),
                     }
                 }
-                let degraded_pairs: Vec<(String, String)> =
-                    degraded.iter().map(|(p, _, r)| (p.clone(), r.clone())).collect();
+                let degraded_pairs: Vec<(String, String)> = degraded
+                    .iter()
+                    .map(|(p, _, r)| (p.clone(), r.clone()))
+                    .collect();
                 let statuses = dsh_source_statuses(home, &files, &degraded_pairs);
-                return Ok(finalize_and_write("dsh", &cache_path, sessions, generated_at, statuses, degraded));
+                return Ok(finalize_and_write(
+                    "dsh",
+                    &cache_path,
+                    sessions,
+                    generated_at,
+                    statuses,
+                    degraded,
+                ));
             }
         }
 
@@ -633,9 +718,19 @@ impl SessionStore {
                 Err((p, reason, fp)) => degraded.push((p, fp, reason)),
             }
         }
-        let degraded_pairs: Vec<(String, String)> = degraded.iter().map(|(p, _, r)| (p.clone(), r.clone())).collect();
+        let degraded_pairs: Vec<(String, String)> = degraded
+            .iter()
+            .map(|(p, _, r)| (p.clone(), r.clone()))
+            .collect();
         let statuses = dsh_source_statuses(home, &files, &degraded_pairs);
-        Ok(finalize_and_write("dsh", &cache_path, sessions, generated_at, statuses, degraded))
+        Ok(finalize_and_write(
+            "dsh",
+            &cache_path,
+            sessions,
+            generated_at,
+            statuses,
+            degraded,
+        ))
     }
 
     /// 从 Claude Code 源填充（§5 第三源）。镜像 `SessionStore::codex` 的全量/增量
@@ -649,15 +744,21 @@ impl SessionStore {
         let ns = takeover::machine_namespace();
         let generated_at = now_iso_utc();
         let fingerprints = claude_source_fingerprints(home);
-        let fp_map: HashMap<&str, &str> = fingerprints.iter().map(|(p, f)| (p.as_str(), f.as_str())).collect();
+        let fp_map: HashMap<&str, &str> = fingerprints
+            .iter()
+            .map(|(p, f)| (p.as_str(), f.as_str()))
+            .collect();
         let cache_path = claude_cache_path();
         let files_n = fingerprints.len();
 
         if let Some(cached) = read_cache(&cache_path) {
             if let Some((cached_sessions, _)) = read_cache_v2(&cached) {
                 let (kept, covered) = kept_sessions(&cached_sessions, &fp_map);
-                let to_process: Vec<&str> =
-                    fingerprints.iter().map(|(p, _)| p.as_str()).filter(|p| !covered.contains(*p)).collect();
+                let to_process: Vec<&str> = fingerprints
+                    .iter()
+                    .map(|(p, _)| p.as_str())
+                    .filter(|p| !covered.contains(*p))
+                    .collect();
                 if to_process.is_empty() && kept.len() == cached_sessions.len() {
                     // 全命中：直接复用 cache 文档里冻结的 generated_at/statuses
                     // （与 codex 同款快路径——"什么都没变"的常见情形不付排序写盘）。
@@ -674,14 +775,23 @@ impl SessionStore {
                 }
                 let mut sessions = kept;
                 let sid_list: Vec<String> = sids.into_iter().collect();
-                for bs in par_map_in_order(&sid_list, |sid| claude_built_session_for(home, sid, &ns, &fp_map))
-                    .into_iter()
-                    .flatten()
+                for bs in par_map_in_order(&sid_list, |sid| {
+                    claude_built_session_for(home, sid, &ns, &fp_map)
+                })
+                .into_iter()
+                .flatten()
                 {
                     sessions.push(bs);
                 }
                 let statuses = claude_source_statuses(home, files_n, sessions.len());
-                return Ok(finalize_and_write("claude-code", &cache_path, sessions, generated_at, statuses, Vec::new()));
+                return Ok(finalize_and_write(
+                    "claude-code",
+                    &cache_path,
+                    sessions,
+                    generated_at,
+                    statuses,
+                    Vec::new(),
+                ));
             }
             // v1 缓存或形状坏 → 落回下面的全量重建（与 codex 同款，不 abort）。
         }
@@ -693,17 +803,30 @@ impl SessionStore {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|s| s.get("session_id").and_then(Value::as_str).map(str::to_owned))
+            .filter_map(|s| {
+                s.get("session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
             .collect();
         let mut sessions = Vec::new();
-        for bs in par_map_in_order(&session_ids, |sid| claude_built_session_for(home, sid, &ns, &fp_map))
-            .into_iter()
-            .flatten()
+        for bs in par_map_in_order(&session_ids, |sid| {
+            claude_built_session_for(home, sid, &ns, &fp_map)
+        })
+        .into_iter()
+        .flatten()
         {
             sessions.push(bs);
         }
         let statuses = claude_source_statuses(home, files_n, sessions.len());
-        Ok(finalize_and_write("claude-code", &cache_path, sessions, generated_at, statuses, Vec::new()))
+        Ok(finalize_and_write(
+            "claude-code",
+            &cache_path,
+            sessions,
+            generated_at,
+            statuses,
+            Vec::new(),
+        ))
     }
 
     /// 合并 codex + dsh + claude-code 三个单源 store（`sessions list` no-filter =
@@ -769,7 +892,12 @@ impl SessionStore {
 
 /// 排序四元组（与 core `r2a::sort_tuple` 相同语义，这里绑定到 `SessionKey`）。
 fn sort_key(k: &SessionKey) -> (&str, &str, &str, &str) {
-    (&k.host_kind, &k.native_id, &k.source_profile, &k.machine_namespace)
+    (
+        &k.host_kind,
+        &k.native_id,
+        &k.source_profile,
+        &k.machine_namespace,
+    )
 }
 
 /// 待构建条目：key + payload + **预计算的 session_revision**。
@@ -784,7 +912,11 @@ struct PendingEntry {
 
 /// 把 (key, payload, revision) 按稳定序构建成 `SessionReportEntry`（envelope 内
 /// `store_revision` = store_seq = 排序序，保证确定性）。
-fn build_entries(raw: &[PendingEntry], generated_at: &str, source_statuses: &Value) -> Vec<SessionReportEntry> {
+fn build_entries(
+    raw: &[PendingEntry],
+    generated_at: &str,
+    source_statuses: &Value,
+) -> Vec<SessionReportEntry> {
     let engine = ENGINE_VERSION;
     let pricing = pricing_version();
     raw.iter()
@@ -846,7 +978,6 @@ fn dsh_session_revision(text: &str) -> Option<String> {
     (max >= 0).then(|| max.to_string())
 }
 
-
 // ── cache 读写（v2：按 session 增量，见文件头注释）────────────────────
 
 /// 从 cache 的 envelope 恢复 `SessionReportEntry`（读回 session_key + 派生列）。
@@ -857,7 +988,10 @@ fn entry_from_envelope(env: &Value) -> Option<SessionReportEntry> {
     // DSH 载荷是 behavior 20 键形状，派生列走 dsh_extract_summary（含缓存往返必需
     // 的 appended `title` 键）；Codex 走 extract_summary。
     let s = summary_for(&key, payload);
-    let session_revision = env.get("session_revision").and_then(Value::as_str).map(str::to_owned);
+    let session_revision = env
+        .get("session_revision")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let store_seq = env.get("store_revision").and_then(Value::as_u64)?;
     Some(SessionReportEntry {
         key,
@@ -903,8 +1037,12 @@ fn read_cache_v2(cached: &Value) -> Option<(Vec<CachedSession>, Vec<DegradedTrip
     let arr = cached.get("sessions")?.as_array()?;
     let mut sessions = Vec::with_capacity(arr.len());
     for s in arr {
-        let paths: Vec<String> =
-            s.get("paths")?.as_array()?.iter().map(|v| v.as_str().map(str::to_owned)).collect::<Option<_>>()?;
+        let paths: Vec<String> = s
+            .get("paths")?
+            .as_array()?
+            .iter()
+            .map(|v| v.as_str().map(str::to_owned))
+            .collect::<Option<_>>()?;
         let fingerprints: Vec<String> = s
             .get("fingerprints")?
             .as_array()?
@@ -918,7 +1056,11 @@ fn read_cache_v2(cached: &Value) -> Option<(Vec<CachedSession>, Vec<DegradedTrip
             return None;
         }
         let envelope = s.get("envelope")?.clone();
-        sessions.push(CachedSession { paths, fingerprints, envelope });
+        sessions.push(CachedSession {
+            paths,
+            fingerprints,
+            envelope,
+        });
     }
     let degraded = cached
         .get("degraded")
@@ -949,19 +1091,31 @@ struct BuiltSession {
 /// 差才能整条复用（跳过重新审计），否则整条判脏、连同它没变的那部分文件一
 /// 起交回调用方按 session_id 重建（不做"部分文件命中就拼一半"这种语义）。
 /// 返回复用集 + 它们覆盖到的路径集合（后者用于算出 `to_process`）。
-fn kept_sessions(cached: &[CachedSession], fp_map: &HashMap<&str, &str>) -> (Vec<BuiltSession>, HashSet<String>) {
+fn kept_sessions(
+    cached: &[CachedSession],
+    fp_map: &HashMap<&str, &str>,
+) -> (Vec<BuiltSession>, HashSet<String>) {
     let mut kept = Vec::new();
     let mut covered = HashSet::new();
     for cs in cached {
-        let all_match =
-            cs.paths.iter().zip(&cs.fingerprints).all(|(p, fp)| fp_map.get(p.as_str()) == Some(&fp.as_str()));
+        let all_match = cs
+            .paths
+            .iter()
+            .zip(&cs.fingerprints)
+            .all(|(p, fp)| fp_map.get(p.as_str()) == Some(&fp.as_str()));
         if !all_match {
             continue;
         }
-        let Some(restored) = entry_from_envelope(&cs.envelope) else { continue };
+        let Some(restored) = entry_from_envelope(&cs.envelope) else {
+            continue;
+        };
         let payload = cs.envelope.get("session").cloned().unwrap_or(Value::Null);
         kept.push(BuiltSession {
-            entry: PendingEntry { key: restored.key, payload, revision: restored.session_revision },
+            entry: PendingEntry {
+                key: restored.key,
+                payload,
+                revision: restored.session_revision,
+            },
             paths: cs.paths.clone(),
             fingerprints: cs.fingerprints.clone(),
         });
@@ -991,14 +1145,21 @@ fn kept_degraded(
 /// 不写盘——`generated_at`/`source_statuses` 原样取自 cache 文档本身（与旧 v1
 /// 的纯读路径同一条纪律：一次真正的"什么都没变"不该比它更贵）。
 fn cache_v2_to_store(cached: &Value, sessions: &[CachedSession]) -> Option<SessionStore> {
-    let generated_at = cached.get("generated_at").and_then(Value::as_str)?.to_string();
+    let generated_at = cached
+        .get("generated_at")
+        .and_then(Value::as_str)?
+        .to_string();
     let source_statuses = cached.get("source_statuses").cloned()?;
     let mut entries = Vec::with_capacity(sessions.len());
     for cs in sessions {
         entries.push(entry_from_envelope(&cs.envelope)?);
     }
     entries.sort_by(|a, b| sort_key(&a.key).cmp(&sort_key(&b.key)));
-    Some(SessionStore { entries, source_statuses, generated_at })
+    Some(SessionStore {
+        entries,
+        source_statuses,
+        generated_at,
+    })
 }
 
 /// 合并 kept + 新重建的 session，按稳定序重排、重新赋 store_seq（增量重建之
@@ -1021,7 +1182,11 @@ fn finalize_and_write(
         paths_fps.push((s.paths, s.fingerprints));
     }
     let entries = build_entries(&raw, &generated_at, &source_statuses);
-    let store = SessionStore { entries, source_statuses, generated_at };
+    let store = SessionStore {
+        entries,
+        source_statuses,
+        generated_at,
+    };
     write_cache_v2(cache_path, source, &store, &paths_fps, &degraded);
     store
 }
@@ -1045,8 +1210,10 @@ fn write_cache_v2(
         .zip(sessions)
         .map(|(e, (paths, fps))| json!({ "paths": paths, "fingerprints": fps, "envelope": e.envelope.clone() }))
         .collect();
-    let degraded_docs: Vec<Value> =
-        degraded.iter().map(|(p, fp, r)| json!({ "path": p, "fingerprint": fp, "reason": r })).collect();
+    let degraded_docs: Vec<Value> = degraded
+        .iter()
+        .map(|(p, fp, r)| json!({ "path": p, "fingerprint": fp, "reason": r }))
+        .collect();
     let doc = json!({
         "schema_version": "3",
         "source": source,
@@ -1073,20 +1240,42 @@ fn write_cache_v2(
 /// 个逻辑 session 天然可能横跨多个 rollout 文件（resume 续写产生新文件、沿用
 /// 旧 session_id）——payload 自带的 `files` 字段就是这个 session 依赖的**全
 /// 部**源路径，不用另外发明映射，直接拿来做增量缓存的 paths/fingerprints。
-fn codex_built_session_for(home: &Path, sid: &str, ns: &str, fp_map: &HashMap<&str, &str>) -> Option<BuiltSession> {
+fn codex_built_session_for(
+    home: &Path,
+    sid: &str,
+    ns: &str,
+    fp_map: &HashMap<&str, &str>,
+) -> Option<BuiltSession> {
     let payload = csa::codex_session_audit_json(home, sid)?;
     let source_profile = payload
         .get("workspace_roots")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
         .unwrap_or_default();
     let paths: Vec<String> = payload
         .get("files")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default();
-    let fingerprints: Vec<String> =
-        paths.iter().map(|p| fp_map.get(p.as_str()).map(|f| f.to_string()).unwrap_or_default()).collect();
+    let fingerprints: Vec<String> = paths
+        .iter()
+        .map(|p| {
+            fp_map
+                .get(p.as_str())
+                .map(|f| f.to_string())
+                .unwrap_or_default()
+        })
+        .collect();
     Some(BuiltSession {
         entry: PendingEntry {
             key: SessionKey::new("codex", sid, &source_profile, ns),
@@ -1103,7 +1292,10 @@ fn codex_built_session_for(home: &Path, sid: &str, ns: &str, fp_map: &HashMap<&s
 /// `claude_session.rs::file_info` 的同一派生），`claude_project_files` 分组键。
 /// 只在**变化或新出现**的文件上跑（镜像 codex 的 §「成本 = O(变化文件数)」纪律）。
 fn claude_session_id_of(path: &Path) -> String {
-    path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string()
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 /// 单个 session_id 的完整重建（复用既有 `claude_session_audit_json`）。镜像
@@ -1113,16 +1305,33 @@ fn claude_session_id_of(path: &Path) -> String {
 /// 键（dsh 同款 `--{cwd.replace('/','-')}--` 形状；claude 载荷的 cwd 来自
 /// workspace_roots 首个，缺席时诚实空串）。revision = 载荷 date_last（codex 同款
 /// 派生，`revision: None`）。
-fn claude_built_session_for(home: &Path, sid: &str, ns: &str, fp_map: &HashMap<&str, &str>) -> Option<BuiltSession> {
+fn claude_built_session_for(
+    home: &Path,
+    sid: &str,
+    ns: &str,
+    fp_map: &HashMap<&str, &str>,
+) -> Option<BuiltSession> {
     let payload = agent_vitals_hosts::claude_session::claude_session_audit_json(home, sid)?;
     let source_profile = dsh_source_profile(payload.get("cwd").and_then(Value::as_str));
     let paths: Vec<String> = payload
         .get("files")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default();
-    let fingerprints: Vec<String> =
-        paths.iter().map(|p| fp_map.get(p.as_str()).map(|f| f.to_string()).unwrap_or_default()).collect();
+    let fingerprints: Vec<String> = paths
+        .iter()
+        .map(|p| {
+            fp_map
+                .get(p.as_str())
+                .map(|f| f.to_string())
+                .unwrap_or_default()
+        })
+        .collect();
     Some(BuiltSession {
         entry: PendingEntry {
             key: SessionKey::new("claude-code", sid, &source_profile, ns),
@@ -1145,14 +1354,21 @@ fn dsh_built_session_for(
     ns: &str,
 ) -> Result<BuiltSession, DegradedTriple> {
     let path_str = path.display().to_string();
-    let fp = fp_map.get(path_str.as_str()).map(|f| f.to_string()).unwrap_or_default();
+    let fp = fp_map
+        .get(path_str.as_str())
+        .map(|f| f.to_string())
+        .unwrap_or_default();
     let text = match agent_vitals_hosts::dsh_sources::read_session_text(path) {
         Ok(t) => t,
         Err(code) => return Err((path_str, code.to_string(), fp)),
     };
     // 头行有效性由 parse_session_log 验（type=="session" && version==0），这里
     // 只抽 id + cwd；parse 已通过但缺 id → 无法建键 → missing-header。
-    if agent_vitals_hosts::dsh_sources::parse_session_log(&text).get("degraded").and_then(Value::as_str).is_some() {
+    if agent_vitals_hosts::dsh_sources::parse_session_log(&text)
+        .get("degraded")
+        .and_then(Value::as_str)
+        .is_some()
+    {
         return Err((path_str, "missing-header".to_string(), fp));
     }
     let Some((id, cwd)) = dsh_header(&text) else {
@@ -1182,7 +1398,10 @@ fn dsh_built_session_for(
 /// 把类型化错误打到 stderr（或 JSON），退出码 2（工具自身错误；区别于
 /// source-unavailable 的空页——那是错误码，不是空数组）。
 fn exit_with_error(e: StoreError, msg: &str) -> ! {
-    eprintln!("{}", serde_json::to_string(&e.to_json(msg)).unwrap_or_default());
+    eprintln!(
+        "{}",
+        serde_json::to_string(&e.to_json(msg)).unwrap_or_default()
+    );
     std::process::exit(2);
 }
 
@@ -1255,7 +1474,10 @@ pub fn sessions_list(
         },
     };
     let cursor = match cursor_json {
-        Some(c) => match serde_json::from_str::<Value>(c).ok().and_then(|v| PageCursor::from_json(&v)) {
+        Some(c) => match serde_json::from_str::<Value>(c)
+            .ok()
+            .and_then(|v| PageCursor::from_json(&v))
+        {
             Some(c) => Some(c),
             None => {
                 eprintln!("invalid --cursor JSON (want store_revision/filter_hash/last_key)");
@@ -1333,7 +1555,10 @@ pub fn sessions_read(
                 // 会渲染错）。
                 println!("{text}");
             } else {
-                print!("{}", csa::render_codex_session(envelope.get("session").unwrap_or(&Value::Null)));
+                print!(
+                    "{}",
+                    csa::render_codex_session(envelope.get("session").unwrap_or(&Value::Null))
+                );
             }
         }
         Err(e) => exit_with_error(e, "read failed"),
@@ -1396,7 +1621,12 @@ fn render_findings(dto: &Value) -> String {
         t.get("sessions_total").and_then(Value::as_u64).unwrap_or(0),
         dto.get("store_revision").and_then(Value::as_u64).unwrap_or(0),
     ));
-    for r in dto.get("rules").and_then(Value::as_array).into_iter().flatten() {
+    for r in dto
+        .get("rules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         out.push_str(&format!(
             "  {:<6} {:<9} {:<24} hits {:<5} sessions {}\n",
             r.get("rule").and_then(Value::as_str).unwrap_or(""),
@@ -1411,12 +1641,37 @@ fn render_findings(dto: &Value) -> String {
 
 // ── sessions navigation（多宿主导航投影，spec §5.1/§5.2）─────────
 
+/// SQL 权威库中某北京日的三宿主 token 总量。`None` 表示库不可读或日期非法；
+/// `Some(empty)` 表示库可读但窗口内没有任何事实——两者都不能伪装成 token=0。
+fn authority_day_token_totals(day_key: &str) -> Option<BTreeMap<String, i64>> {
+    let (start, end) = agent_vitals_data::authority_query::beijing_day_bounds_ms(day_key)?;
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+        crate::sql_sync::now_ms(),
+    )
+    .ok()?;
+    agent_vitals_data::authority_query::token_totals_by_host(db.conn(), start, end).ok()
+}
+
+fn sql_today_tokens(totals: &Option<BTreeMap<String, i64>>, host: &str) -> Value {
+    match totals.as_ref().and_then(|rows| rows.get(host)) {
+        Some(value) => json!({ "value": value, "basis": "sql-facts", "coverage": "complete" }),
+        None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null }),
+    }
+}
+
 /// `sessions navigation`：单只读投影命令，一次 spawn 返回三宿主快照
 /// （`docs/MENUBAR_MULTIHOST_NAVIGATION_SPEC.md` §5.1/§5.2）。排序、日界折叠、
 /// 覆盖率、会话计数全部是数据层的测量（§6 决策 3）——Tauri 只缓存渲染，不重新
 /// 解释。宿主失败彼此隔离：store 构建失败 / 该宿主无数据源 → 对应宿主
 /// `unavailable`，不 abort 全命令；托盘宿主区失败不影响顶层今日/预算行（§8）。
-pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n: usize, json_out: bool) {
+pub fn sessions_navigation(
+    home: &Path,
+    day_key: &str,
+    timezone: &str,
+    recent_n: usize,
+    json_out: bool,
+) {
     if timezone != "Asia/Shanghai" {
         eprintln!(
             "unsupported --timezone {timezone:?}: only Asia/Shanghai (core day boundary is fixed UTC+8, no DST; §5.1)"
@@ -1428,67 +1683,36 @@ pub fn sessions_navigation(home: &Path, day_key: &str, timezone: &str, recent_n:
     let codex_store = SessionStore::codex(home);
     let claude_store = SessionStore::claude_code(home);
 
-    // DSH 今日 token：today.json → core `today_cost`——与 Tauri 顶层钱行同一函数
-    // （§5.2 basis=state-file；date stale / 缺场 → None → value=null，不编 0）。
-    let pricing = agent_vitals_domain::cost::load_pricing();
-    let today_data = crate::state::read_json(&crate::state::state_dir().join("today.json"));
-    let dsh_today_tokens: Value = match today_data
-        .as_ref()
-        .and_then(|d| agent_vitals_domain::cost::today_cost(d, &pricing, day_key))
-    {
-        Some(r) => json!({
-            "value": r.get("tokens").and_then(Value::as_i64),
-            "basis": "state-file",
-            // spec：DSH coverage 恒 complete——state 折叠的覆盖率是 state 层
-            // 自己的轴（日历已单独展示），菜单不重复读。
-            "coverage": "complete",
-        }),
-        None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": "complete" }),
-    };
-
-    // Codex 今日 token：全 rollout 折叠（codex-cost 同一条链路，§2.3）。只在
-    // 该宿主有数据源时折叠——无源反正 unavailable，省掉整次折叠 I/O。
-    let codex_merged: Option<Value> = codex_store
-        .as_ref()
-        .ok()
-        .filter(|s| host_has_source("codex", s))
-        .map(|_| {
-            let mut folds: Vec<Value> = Vec::new();
-            for path in agent_vitals_hosts::codex_session::codex_rollout_files(home) {
-                let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(&path);
-                let items = parsed
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                folds.push(agent_vitals_hosts::codex_usage::codex_fold_file(&items));
-            }
-            agent_vitals_hosts::codex_usage::codex_merge_folds(&folds)
-        });
-    let codex_today_tokens: Value = match &codex_merged {
-        Some(merged) => codex_today_tokens_json(merged, day_key, codex_store.as_ref().map_or(true, |s| s.entries.is_empty())),
-        None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null }),
-    };
-
-    // Claude 今日 token：读 ledger 当日（spec §5.2 basis=ledger）。不依赖 claude
-    // store 是否构建成功——ledger 是 claude-sync（同一批 ~/.claude 文件的独立
-    // 账，tick 里先于宿主区刷新）的产物，导航只读它，不跨写。当日缺席 → None →
-    // null 三元组（「今天没测到」，不是 0）；「空日不落 ledger」是 claude_cost.rs
-    // 的写侧纪律（见 crate::sessions::claude_ledger 的注释）。
-    let claude_today_tokens: Value =
-        match crate::sessions::claude_ledger::claude_ledger_day_tokens(day_key) {
-            Some(tokens) => json!({
-                "value": tokens,
-                "basis": "ledger",
-                "coverage": "complete",
-            }),
-            None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null }),
-        };
+    // 今日 token 是产品指标，唯一来源是 authority 的 UsageFact 聚合。SessionStore
+    // 仍只服务会话导航与 findings；它不再参与 token 计量，也不会触碰旧 state /
+    // ledger / Codex fold。库不可读、日期非法或该宿主没有事实都如实给 null。
+    let sql_totals = authority_day_token_totals(day_key);
+    let dsh_today_tokens = sql_today_tokens(&sql_totals, "dsh");
+    let codex_today_tokens = sql_today_tokens(&sql_totals, "codex");
+    let claude_today_tokens = sql_today_tokens(&sql_totals, "claude-code");
 
     let hosts = json!([
-        host_snapshot("dsh", dsh_store.as_ref().ok(), dsh_today_tokens, day_key, recent_n),
-        host_snapshot("codex", codex_store.as_ref().ok(), codex_today_tokens, day_key, recent_n),
-        host_snapshot("claude-code", claude_store.as_ref().ok(), claude_today_tokens, day_key, recent_n),
+        host_snapshot(
+            "dsh",
+            dsh_store.as_ref().ok(),
+            dsh_today_tokens,
+            day_key,
+            recent_n
+        ),
+        host_snapshot(
+            "codex",
+            codex_store.as_ref().ok(),
+            codex_today_tokens,
+            day_key,
+            recent_n
+        ),
+        host_snapshot(
+            "claude-code",
+            claude_store.as_ref().ok(),
+            claude_today_tokens,
+            day_key,
+            recent_n
+        ),
     ]);
     // envelope 的 generated_at 取三 store 中较新的构建时刻（`SessionStore::all`
     // 的 max 同款语义；缓存共享时两侧逐字节一致——差分门靠它）。三 store 都
@@ -1614,40 +1838,12 @@ fn host_has_source(host_kind: &str, store: &SessionStore) -> bool {
         .get(host_kind)
         .and_then(|s| s.get("roots"))
         .and_then(Value::as_array)
-        .map(|roots| roots.iter().any(|r| r.get("exists").and_then(Value::as_bool).unwrap_or(false)))
+        .map(|roots| {
+            roots
+                .iter()
+                .any(|r| r.get("exists").and_then(Value::as_bool).unwrap_or(false))
+        })
         .unwrap_or(false)
-}
-
-/// Codex 今日 token（spec §5.2 basis=events）：全折叠 → `codex_aggregate_hours`
-/// → 当日桶之和 + coverage：
-///
-///   · 零会话（store 可读且无会话）→ 0（真零，诚实测量不是编造）；
-///   · `by_hour_model` 空（读到了会话但没计量）→ value=null、coverage=null
-///     （诚实「测不出」）；
-///   · 当日桶存在 → value=和、coverage=partial（残差哨兵 tokens_seen>0，当日
-///     数可能是下界）/ complete；
-///   · 当日桶缺席（他日有计量、今天没有）→ value=null（「当日桶之和」的诚实
-///     形态——spec 只给零会话一个显式 0，「今天没跑」与「今天没测到」不混成
-///     一个 0）。
-fn codex_today_tokens_json(merged: &Value, day_key: &str, zero_sessions: bool) -> Value {
-    if zero_sessions {
-        return json!({ "value": 0, "basis": "events", "coverage": "complete" });
-    }
-    let by_hour = merged.get("by_hour_model").unwrap_or(&Value::Null);
-    if !by_hour.as_object().is_some_and(|m| !m.is_empty()) {
-        return json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null });
-    }
-    let by_date = agent_vitals_hosts::codex_usage::codex_aggregate_hours(by_hour);
-    let Some(value) = agent_vitals_hosts::codex_usage::codex_day_tokens(&by_date, day_key) else {
-        return json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null });
-    };
-    let unaccounted = merged.get("unaccounted").unwrap_or(&Value::Null);
-    let coverage = if agent_vitals_hosts::codex_usage::unaccounted_tokens_seen(unaccounted) > 0 {
-        "partial"
-    } else {
-        "complete"
-    };
-    json!({ "value": value, "basis": "events", "coverage": coverage })
 }
 
 /// 人读的导航投影（`--json` 之外）：每宿主一行 L1 + 缩进 L2。与 JSON 同一份
@@ -1659,9 +1855,16 @@ fn render_navigation(env: &Value) -> String {
     out.push_str(&format!(
         "navigation {} (schema {})\n",
         env.get("day_key").and_then(Value::as_str).unwrap_or(""),
-        env.get("schema_version").and_then(Value::as_u64).unwrap_or(0),
+        env.get("schema_version")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
     ));
-    for h in env.get("hosts").and_then(Value::as_array).into_iter().flatten() {
+    for h in env
+        .get("hosts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         let kind = h.get("host_kind").and_then(Value::as_str).unwrap_or("");
         let status = h.get("status").and_then(Value::as_str).unwrap_or("");
         let tk = h.get("today_tokens").unwrap_or(&Value::Null);
@@ -1680,7 +1883,11 @@ fn render_navigation(env: &Value) -> String {
             out.push_str("          · 会话数据暂不可用\n");
             continue;
         }
-        let recent = h.get("recent").and_then(Value::as_array).cloned().unwrap_or_default();
+        let recent = h
+            .get("recent")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         if recent.is_empty() {
             out.push_str("          · 尚无会话\n");
             continue;
@@ -1702,13 +1909,21 @@ fn render_navigation(env: &Value) -> String {
 /// 人读的 list 表格（`--json` 之外）。字段与 `SessionSummary` 一致，别另起炉灶。
 fn render_list(dto: &Value) -> String {
     let page = dto.get("page").unwrap_or(&Value::Null);
-    let items = page.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+    let items = page
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let mut out = String::new();
     out.push_str(&format!(
         "sessions: {} total | store_revision {} | schema {}\n",
         page.get("total").and_then(Value::as_u64).unwrap_or(0),
-        page.get("store_revision").and_then(Value::as_u64).unwrap_or(0),
-        dto.get("schema_version").and_then(Value::as_str).unwrap_or(""),
+        page.get("store_revision")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        dto.get("schema_version")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
     ));
     for it in &items {
         let key = it.get("session_key").unwrap_or(&Value::Null);
@@ -1716,9 +1931,17 @@ fn render_list(dto: &Value) -> String {
             "{:<6} {:<16} {:<28} {:<12} {}\n",
             key.get("host_kind").and_then(Value::as_str).unwrap_or(""),
             key.get("native_id").and_then(Value::as_str).unwrap_or(""),
-            it.get("title").and_then(Value::as_str).unwrap_or("(no title)"),
-            it.get("date_span").and_then(|d| d.get("last")).and_then(Value::as_str).unwrap_or("-"),
-            it.get("cost_usd").and_then(Value::as_f64).map(|c| format!("${c:.2}")).unwrap_or("-".to_string()),
+            it.get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("(no title)"),
+            it.get("date_span")
+                .and_then(|d| d.get("last"))
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            it.get("cost_usd")
+                .and_then(Value::as_f64)
+                .map(|c| format!("${c:.2}"))
+                .unwrap_or("-".to_string()),
         ));
     }
     if let Some(c) = page.get("next_cursor") {
@@ -1827,15 +2050,26 @@ mod tests {
     fn fake_codex_home(t: &Path) -> PathBuf {
         let home = t.join("home");
         let live = home.join(".codex").join("sessions").join("2026").join("08");
-        let arch = home.join(".codex").join("archived_sessions").join("2026").join("07");
+        let arch = home
+            .join(".codex")
+            .join("archived_sessions")
+            .join("2026")
+            .join("07");
         std::fs::create_dir_all(&live).unwrap();
         std::fs::create_dir_all(&arch).unwrap();
         let cost = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..").join("fixtures").join("codex").join("cost");
+            .join("../..")
+            .join("fixtures")
+            .join("codex")
+            .join("cost");
         for name in ["rollout-sol.jsonl", "rollout-unpriced.jsonl"] {
             std::fs::copy(cost.join(name), live.join(name)).unwrap();
         }
-        std::fs::copy(cost.join("rollout-terra.jsonl"), arch.join("rollout-terra.jsonl")).unwrap();
+        std::fs::copy(
+            cost.join("rollout-terra.jsonl"),
+            arch.join("rollout-terra.jsonl"),
+        )
+        .unwrap();
         home
     }
 
@@ -1858,7 +2092,10 @@ mod tests {
             .join("agent-1");
         std::fs::create_dir_all(&dir).unwrap();
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..").join("fixtures").join("dsh").join("behavior.jsonl");
+            .join("../..")
+            .join("fixtures")
+            .join("dsh")
+            .join("behavior.jsonl");
         std::fs::copy(&src, dir.join("session.jsonl")).unwrap();
         let storages = home.join(".dsh").join("storages");
         std::fs::create_dir_all(&storages).unwrap();
@@ -1921,12 +2158,21 @@ mod tests {
         fn full_read_reference(path: &std::path::Path) -> String {
             let meta = std::fs::metadata(path).unwrap();
             let size = meta.len();
-            let mtime_ns = meta.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+            let mtime_ns = meta
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
             let bytes = std::fs::read(path).unwrap();
             let n = bytes.len().min(64);
             let first = &bytes[..n];
             let last = &bytes[bytes.len().saturating_sub(64)..];
-            format!("{size}:{mtime_ns}:{:016x}:{:016x}", fnv1a64(first), fnv1a64(last))
+            format!(
+                "{size}:{mtime_ns}:{:016x}:{:016x}",
+                fnv1a64(first),
+                fnv1a64(last)
+            )
         }
 
         let t = tmp_case();
@@ -1956,8 +2202,15 @@ mod tests {
         // 3 个 session：rollout-sol / rollout-terra / rollout-unpriced
         assert_eq!(store.entries.len(), 3);
         // 稳定序按 native_id 升序：rollout-sol < rollout-terra < rollout-unpriced
-        let ids: Vec<&str> = store.entries.iter().map(|e| e.key.native_id.as_str()).collect();
-        assert_eq!(ids, vec!["rollout-sol", "rollout-terra", "rollout-unpriced"]);
+        let ids: Vec<&str> = store
+            .entries
+            .iter()
+            .map(|e| e.key.native_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["rollout-sol", "rollout-terra", "rollout-unpriced"]
+        );
         // store_seq = 排序序
         assert_eq!(store.entries[0].store_seq, 0);
         assert_eq!(store.entries[1].store_seq, 1);
@@ -1987,11 +2240,7 @@ mod tests {
     /// 逐字节比较的对象是「按 store_seq 排序的 envelope 列表 + source_statuses
     /// + generated_at」——store 本身只是这个列表的内存态。
     fn store_bytes(s: &SessionStore) -> String {
-        let mut envs: Vec<Value> = s
-            .entries
-            .iter()
-            .map(|e| e.envelope.clone())
-            .collect();
+        let mut envs: Vec<Value> = s.entries.iter().map(|e| e.envelope.clone()).collect();
         envs.sort_by(|a, b| {
             a["store_revision"]
                 .as_u64()
@@ -2052,7 +2301,11 @@ mod tests {
         // 新增一个 rollout（新 session rollout-new）。
         let live = home.join(".codex").join("sessions").join("2026").join("08");
         std::fs::copy(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("fixtures").join("codex").join("legacy.jsonl"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("fixtures")
+                .join("codex")
+                .join("legacy.jsonl"),
             live.join("rollout-new.jsonl"),
         )
         .unwrap();
@@ -2097,21 +2350,42 @@ mod tests {
         assert_eq!(store.entries.len(), 1);
         let e = &store.entries[0];
         assert_eq!(e.key.host_kind, "dsh");
-        assert_eq!(e.key.native_id, "sess-behavior-0001", "native id = header id, not dir name");
+        assert_eq!(
+            e.key.native_id, "sess-behavior-0001",
+            "native id = header id, not dir name"
+        );
         assert_eq!(e.key.source_profile, "---Users-alice-projects-demo--");
-        assert_eq!(e.title.as_deref(), Some("demo project"), "title from workspace.json");
+        assert_eq!(
+            e.title.as_deref(),
+            Some("demo project"),
+            "title from workspace.json"
+        );
         assert_eq!(e.model.as_deref(), Some("deepseek/deepseek-v4-pro-0813"));
         assert_eq!(e.date_first.as_deref(), Some("2025-06-15"));
         assert_eq!(e.date_last.as_deref(), Some("2025-06-15"));
         assert_eq!(e.files, 1);
-        assert!(e.cost_usd.is_none(), "CNY cost must not masquerade as cost_usd");
-        assert_eq!(e.tokens_total, Some(1707000), "sum of 4 non-peak buckets per model");
+        assert!(
+            e.cost_usd.is_none(),
+            "CNY cost must not masquerade as cost_usd"
+        );
+        assert_eq!(
+            e.tokens_total,
+            Some(1707000),
+            "sum of 4 non-peak buckets per model"
+        );
         assert_eq!(e.findings_total, 34);
-        assert_eq!(e.session_revision.as_deref(), Some("135"), "revision = max seq");
+        assert_eq!(
+            e.session_revision.as_deref(),
+            Some("135"),
+            "revision = max seq"
+        );
         let env = &e.envelope;
         assert_eq!(env["schema_version"], "1");
         assert_eq!(env["session_key"]["host_kind"], "dsh");
-        assert!(env["session"].get("title").is_some(), "title survives as appended payload key");
+        assert!(
+            env["session"].get("title").is_some(),
+            "title survives as appended payload key"
+        );
         assert!(env["session"].get("usage").is_some());
         assert_eq!(env["source_statuses"]["dsh"]["status"], "ok");
         assert_eq!(env["source_statuses"]["dsh"]["sessions"], 1);
@@ -2130,11 +2404,19 @@ mod tests {
 
         let a = SessionStore::dsh(&home).unwrap();
         let b = SessionStore::dsh(&home).unwrap();
-        assert_eq!(store_bytes(&a), store_bytes(&b), "cache hit must be byte-identical");
+        assert_eq!(
+            store_bytes(&a),
+            store_bytes(&b),
+            "cache hit must be byte-identical"
+        );
         assert!(dsh_cache_path().is_file());
         std::fs::remove_file(dsh_cache_path()).unwrap();
         let c = SessionStore::dsh(&home).unwrap();
-        assert_eq!(store_bytes(&a), store_bytes(&c), "cache delete + rebuild identical");
+        assert_eq!(
+            store_bytes(&a),
+            store_bytes(&c),
+            "cache delete + rebuild identical"
+        );
     }
 
     /// 文件在但一个都读不了 → 源 `unavailable`（CLI 面对 `--host-kind dsh` 报
@@ -2145,7 +2427,11 @@ mod tests {
         let _env = env_lock();
         let t = tmp_case();
         let home = t.join("home");
-        let dir = home.join(".dsh").join("sessions").join("--proj--").join("agent-bad");
+        let dir = home
+            .join(".dsh")
+            .join("sessions")
+            .join("--proj--")
+            .join("agent-bad");
         std::fs::create_dir_all(&dir).unwrap();
         // 只有 zstd 魔数、没有完整帧 → decode_zstd_multi_frame 解不出。
         std::fs::write(dir.join("session.jsonl.zstd"), b"\x28\xb5\x2f\xfd\xff").unwrap();
@@ -2173,7 +2459,11 @@ mod tests {
         let _env = env_lock();
         let t = tmp_case();
         let home = fake_dsh_home(&t); // 1 个好会话：sess-behavior-0001
-        let bad_dir = home.join(".dsh").join("sessions").join("--proj--").join("agent-bad");
+        let bad_dir = home
+            .join(".dsh")
+            .join("sessions")
+            .join("--proj--")
+            .join("agent-bad");
         std::fs::create_dir_all(&bad_dir).unwrap();
         std::fs::write(bad_dir.join("session.jsonl.zstd"), b"\x28\xb5\x2f\xfd\xff").unwrap();
         let av = t.join("av");
@@ -2184,29 +2474,56 @@ mod tests {
         assert_eq!(a.entries.len(), 1);
         let deg_a = a.source_statuses["dsh"]["degraded"].as_array().unwrap();
         assert_eq!(deg_a.len(), 1);
-        let cache_a: Value = serde_json::from_str(&std::fs::read_to_string(dsh_cache_path()).unwrap()).unwrap();
+        let cache_a: Value =
+            serde_json::from_str(&std::fs::read_to_string(dsh_cache_path()).unwrap()).unwrap();
         assert_eq!(cache_a["schema_version"], "3");
-        let fp_before = cache_a["degraded"][0]["fingerprint"].as_str().unwrap().to_string();
-        assert!(!fp_before.is_empty(), "degraded entries must carry a real fingerprint, not a placeholder");
+        let fp_before = cache_a["degraded"][0]["fingerprint"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            !fp_before.is_empty(),
+            "degraded entries must carry a real fingerprint, not a placeholder"
+        );
 
         // 新增一个不相关的好会话——只有它需要被重建，坏文件内容/指纹全程未动。
-        let dir2 = home.join(".dsh").join("sessions").join("--proj2--").join("agent-2");
+        let dir2 = home
+            .join(".dsh")
+            .join("sessions")
+            .join("--proj2--")
+            .join("agent-2");
         std::fs::create_dir_all(&dir2).unwrap();
-        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("fixtures").join("dsh").join("behavior.jsonl");
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures")
+            .join("dsh")
+            .join("behavior.jsonl");
         let text = std::fs::read_to_string(&src).unwrap();
         // 换一个不同的 header id，避免与既有会话撞 native_id。
         let text2 = text.replacen("sess-behavior-0001", "sess-behavior-0002", 1);
         std::fs::write(dir2.join("session.jsonl"), text2).unwrap();
 
         let b = SessionStore::dsh(&home).expect("populate ok");
-        assert_eq!(b.entries.len(), 2, "the new session must be picked up incrementally");
+        assert_eq!(
+            b.entries.len(),
+            2,
+            "the new session must be picked up incrementally"
+        );
         let deg_b = b.source_statuses["dsh"]["degraded"].as_array().unwrap();
-        assert_eq!(deg_b.len(), 1, "the untouched degraded file must not duplicate or vanish");
+        assert_eq!(
+            deg_b.len(),
+            1,
+            "the untouched degraded file must not duplicate or vanish"
+        );
         assert_eq!(deg_b[0]["reason"], "zstd-decode-error");
 
-        let cache_b: Value = serde_json::from_str(&std::fs::read_to_string(dsh_cache_path()).unwrap()).unwrap();
+        let cache_b: Value =
+            serde_json::from_str(&std::fs::read_to_string(dsh_cache_path()).unwrap()).unwrap();
         let fp_after = cache_b["degraded"][0]["fingerprint"].as_str().unwrap();
-        assert_eq!(fp_after, fp_before, "unchanged degraded file's fingerprint must round-trip byte-identical");
+        assert_eq!(
+            fp_after, fp_before,
+            "unchanged degraded file's fingerprint must round-trip byte-identical"
+        );
     }
 
     /// no-filter = 两源合并：3 codex + 1 dsh = 4，稳定序 codex 全部在前；完整
@@ -2223,7 +2540,11 @@ mod tests {
 
         let store = SessionStore::all(&home).expect("populate ok");
         assert_eq!(store.entries.len(), 4);
-        let hosts: Vec<&str> = store.entries.iter().map(|e| e.key.host_kind.as_str()).collect();
+        let hosts: Vec<&str> = store
+            .entries
+            .iter()
+            .map(|e| e.key.host_kind.as_str())
+            .collect();
         assert_eq!(hosts, vec!["codex", "codex", "codex", "dsh"]);
         assert_eq!(store.entries[3].key.native_id, "sess-behavior-0001");
         assert_eq!(store.source_statuses["codex"]["status"], "ok");
@@ -2248,7 +2569,10 @@ mod tests {
         let _g = EnvGuard::set(&home, &av);
 
         let store = SessionStore::codex(&home).unwrap();
-        let f = SessionFilter { model: Some("gpt-5.6-sol".into()), ..Default::default() };
+        let f = SessionFilter {
+            model: Some("gpt-5.6-sol".into()),
+            ..Default::default()
+        };
         let p0 = store.list(&f, None, 1).unwrap();
         assert_eq!(p0.total, 1); // 只有 rollout-sol 是 gpt-5.6-sol
         assert_eq!(p0.items[0]["session_key"]["native_id"], "rollout-sol");
@@ -2266,7 +2590,10 @@ mod tests {
 
     /// 在既有 home 下补 Claude 会话（供三源合并测试复用）。
     fn fake_claude_under(home: &Path) {
-        let claude = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("fixtures").join("claude");
+        let claude = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures")
+            .join("claude");
         for name in ["healthy.jsonl", "dangerous.jsonl", "all-recorded.jsonl"] {
             let dir = home.join(".claude").join("projects").join("p-skill-vitals");
             std::fs::create_dir_all(&dir).unwrap();
@@ -2291,7 +2618,9 @@ mod tests {
         assert_eq!(store.entries.len(), 0);
         assert_eq!(store.source_statuses["claude-code"]["status"], "ok");
         assert_eq!(store.source_statuses["claude-code"]["sessions"], 0);
-        let roots = store.source_statuses["claude-code"]["roots"].as_array().unwrap();
+        let roots = store.source_statuses["claude-code"]["roots"]
+            .as_array()
+            .unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0]["kind"], "projects");
         assert_eq!(roots[0]["exists"], false);
@@ -2316,25 +2645,40 @@ mod tests {
 
         let store = SessionStore::claude_code(&home).expect("populate ok");
         assert_eq!(store.entries.len(), 3);
-        let by_id: std::collections::HashMap<&str, &SessionReportEntry> =
-            store.entries.iter().map(|e| (e.key.native_id.as_str(), e)).collect();
+        let by_id: std::collections::HashMap<&str, &SessionReportEntry> = store
+            .entries
+            .iter()
+            .map(|e| (e.key.native_id.as_str(), e))
+            .collect();
         let healthy = by_id["healthy"];
         assert_eq!(healthy.key.host_kind, "claude-code");
-        assert_eq!(healthy.key.source_profile, "---repo--", "cwd /repo → / 替换为 -");
+        assert_eq!(
+            healthy.key.source_profile, "---repo--",
+            "cwd /repo → / 替换为 -"
+        );
         assert_eq!(healthy.title.as_deref(), Some("我的会话"));
         assert_eq!(healthy.model.as_deref(), Some("claude-sonnet-4-5"));
         assert_eq!(healthy.date_first.as_deref(), Some("2026-08-20T14:27:00Z"));
         assert_eq!(healthy.date_last.as_deref(), Some("2026-08-20T14:30:00Z"));
         assert_eq!(healthy.files, 1);
         assert!(healthy.cost_usd.is_none(), "no cost_report → honest None");
-        assert!(healthy.tokens_total.is_none(), "no cost_report → honest None");
+        assert!(
+            healthy.tokens_total.is_none(),
+            "no cost_report → honest None"
+        );
         assert_eq!(healthy.findings_total, 0);
-        assert_eq!(by_id["dangerous"].findings_total, 1, "SV601 from dangerous fixture");
+        assert_eq!(
+            by_id["dangerous"].findings_total, 1,
+            "SV601 from dangerous fixture"
+        );
         assert_eq!(by_id["dangerous"].title.as_deref(), Some("危险命令会话"));
         assert_eq!(by_id["all-recorded"].title.as_deref(), Some("全覆盖会话"));
         let env = &by_id["healthy"].envelope;
         assert_eq!(env["session_key"]["host_kind"], "claude-code");
-        assert!(env["session"].get("files").is_some(), "payload files array survives");
+        assert!(
+            env["session"].get("files").is_some(),
+            "payload files array survives"
+        );
         assert_eq!(env["source_statuses"]["claude-code"]["status"], "ok");
         assert_eq!(env["source_statuses"]["claude-code"]["sessions"], 3);
     }
@@ -2352,11 +2696,19 @@ mod tests {
 
         let a = SessionStore::claude_code(&home).unwrap();
         let b = SessionStore::claude_code(&home).unwrap();
-        assert_eq!(store_bytes(&a), store_bytes(&b), "cache hit must be byte-identical");
+        assert_eq!(
+            store_bytes(&a),
+            store_bytes(&b),
+            "cache hit must be byte-identical"
+        );
         assert!(claude_cache_path().is_file());
         std::fs::remove_file(claude_cache_path()).unwrap();
         let c = SessionStore::claude_code(&home).unwrap();
-        assert_eq!(store_bytes(&a), store_bytes(&c), "cache delete + rebuild identical");
+        assert_eq!(
+            store_bytes(&a),
+            store_bytes(&c),
+            "cache delete + rebuild identical"
+        );
     }
 
     /// 源变化（新会话文件）→ 指纹不等 → 只重建变化的 session（v2 增量），新
@@ -2373,8 +2725,18 @@ mod tests {
         let a = SessionStore::claude_code(&home).unwrap();
         assert_eq!(a.entries.len(), 3);
         // 新增一个会话：同一份 dangerous 记录、不同 stem（= 新 session_id）。
-        let claude = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("fixtures").join("claude");
-        std::fs::copy(claude.join("dangerous.jsonl"), home.join(".claude").join("projects").join("p-skill-vitals").join("another.jsonl")).unwrap();
+        let claude = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures")
+            .join("claude");
+        std::fs::copy(
+            claude.join("dangerous.jsonl"),
+            home.join(".claude")
+                .join("projects")
+                .join("p-skill-vitals")
+                .join("another.jsonl"),
+        )
+        .unwrap();
         let b = SessionStore::claude_code(&home).unwrap();
         assert_eq!(b.entries.len(), 4);
         assert!(b.entries.iter().any(|e| e.key.native_id == "another"));
@@ -2399,9 +2761,14 @@ mod tests {
 
         let store = SessionStore::claude_code(&home).expect("populate ok");
         assert_eq!(store.entries.len(), 0);
-        assert_eq!(store.source_statuses["claude-code"]["status"], "unavailable");
+        assert_eq!(
+            store.source_statuses["claude-code"]["status"],
+            "unavailable"
+        );
         assert_eq!(store.source_statuses["claude-code"]["sessions"], 0);
-        let roots = store.source_statuses["claude-code"]["roots"].as_array().unwrap();
+        let roots = store.source_statuses["claude-code"]["roots"]
+            .as_array()
+            .unwrap();
         assert_eq!(roots[0]["file_count"], 1, "file exists but none decodable");
     }
 
@@ -2422,13 +2789,35 @@ mod tests {
 
         let store = SessionStore::all(&home).expect("populate ok");
         assert_eq!(store.entries.len(), 7);
-        let hosts: Vec<&str> = store.entries.iter().map(|e| e.key.host_kind.as_str()).collect();
+        let hosts: Vec<&str> = store
+            .entries
+            .iter()
+            .map(|e| e.key.host_kind.as_str())
+            .collect();
         assert_eq!(
             hosts,
-            vec!["claude-code", "claude-code", "claude-code", "codex", "codex", "codex", "dsh"]
+            vec![
+                "claude-code",
+                "claude-code",
+                "claude-code",
+                "codex",
+                "codex",
+                "codex",
+                "dsh"
+            ]
         );
-        let keys: Vec<&str> = store.source_statuses.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["claude-code", "codex", "dsh"], "key order is byte order");
+        let keys: Vec<&str> = store
+            .source_statuses
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["claude-code", "codex", "dsh"],
+            "key order is byte order"
+        );
         assert_eq!(store.source_statuses["claude-code"]["status"], "ok");
         assert_eq!(store.source_statuses["codex"]["status"], "ok");
         assert_eq!(store.source_statuses["dsh"]["status"], "ok");
@@ -2469,7 +2858,12 @@ mod tests {
         }
     }
 
-    fn nav_store(host: &str, entries: Vec<SessionReportEntry>, status: &str, any_root: bool) -> SessionStore {
+    fn nav_store(
+        host: &str,
+        entries: Vec<SessionReportEntry>,
+        status: &str,
+        any_root: bool,
+    ) -> SessionStore {
         SessionStore {
             entries,
             source_statuses: json!({
@@ -2521,9 +2915,30 @@ mod tests {
     #[test]
     fn host_snapshot_ready_measures_today_and_recent() {
         let entries = vec![
-            nav_entry("codex", "span", Some("2026-08-01"), Some("2026-08-31"), Some("r1"), 3),
-            nav_entry("codex", "old", Some("2026-08-30"), Some("2026-08-30"), Some("r2"), 2),
-            nav_entry("codex", "newest", Some("2026-08-31"), Some("2026-08-31"), Some("r9"), 5),
+            nav_entry(
+                "codex",
+                "span",
+                Some("2026-08-01"),
+                Some("2026-08-31"),
+                Some("r1"),
+                3,
+            ),
+            nav_entry(
+                "codex",
+                "old",
+                Some("2026-08-30"),
+                Some("2026-08-30"),
+                Some("r2"),
+                2,
+            ),
+            nav_entry(
+                "codex",
+                "newest",
+                Some("2026-08-31"),
+                Some("2026-08-31"),
+                Some("r9"),
+                5,
+            ),
         ];
         let store = nav_store("codex", entries, "ok", true);
         let snap = host_snapshot(
@@ -2543,7 +2958,14 @@ mod tests {
         assert_eq!(recent[2]["session_key"]["native_id"], "old");
         // 4 条 → recent 截断到 N
         let mut more = store.entries.clone();
-        more.push(nav_entry("codex", "fourth", Some("2026-08-30"), Some("2026-08-31"), Some("r3"), 6));
+        more.push(nav_entry(
+            "codex",
+            "fourth",
+            Some("2026-08-30"),
+            Some("2026-08-31"),
+            Some("r3"),
+            6,
+        ));
         let store4 = nav_store("codex", more, "ok", true);
         let snap4 = host_snapshot(
             "codex",
@@ -2565,53 +2987,19 @@ mod tests {
         assert_eq!(snap2["today_sessions"], 2); // 会话计数与 token 无关
     }
 
-    /// Codex 今日 token 真值表（spec §5.2）：零会话 → 0（真零，唯一显式 0）；
-    /// 读到了会话但没计量 → null 三连（测不出，不编 0）；当日桶缺席（他日有
-    /// 计量、今天没有）→ null（「今天没跑」≠「今天没测到」）；当日桶存在 →
-    /// 和，残差哨兵 tokens_seen>0 → partial。
     #[test]
-    fn codex_today_tokens_json_honesty_truth_table() {
-        // 零会话 → 0
-        let merged = json!({"by_hour_model": {}});
-        let v = codex_today_tokens_json(&merged, "2026-08-31", true);
-        assert_eq!(v["value"], 0);
-        assert_eq!(v["basis"], "events");
-        assert_eq!(v["coverage"], "complete");
-        // by_hour_model 空（有会话但没计量）→ 测不出
-        let v2 = codex_today_tokens_json(&merged, "2026-08-31", false);
-        assert!(v2["value"].is_null());
-        assert!(v2["basis"].is_null());
-        assert!(v2["coverage"].is_null());
-        // 当日桶缺席 → null（即使昨天有计量）
-        let merged2 = json!({
-            "by_hour_model": {
-                "2026-08-30T10+08:00": {"gpt-5.6-sol": {"p1": {"uncached_input_tokens": 100}}}
-            },
-            "unaccounted": []
-        });
-        let v3 = codex_today_tokens_json(&merged2, "2026-08-31", false);
-        assert!(v3["value"].is_null());
-        // 当日桶存在 → 当日全模型/全速度之和；残差 → partial
-        let merged3 = json!({
-            "by_hour_model": {
-                "2026-08-31T09+08:00": {"gpt-5.6-sol": {"p1": {"uncached_input_tokens": 60}}},
-                "2026-08-31T11+08:00": {"gpt-5.6-sol": {"p2": {"output_tokens": 40}}},
-                "2026-08-31T23+08:00": {"other": {"p1": {"cached_input_tokens": 300}}}
-            },
-            "unaccounted": [{"type": "x", "count": 1, "tokens_seen": 1500}]
-        });
-        let v4 = codex_today_tokens_json(&merged3, "2026-08-31", false);
-        assert_eq!(v4["value"], 400);
-        assert_eq!(v4["basis"], "events");
-        assert_eq!(v4["coverage"], "partial");
-        // 无残差 → complete
-        let merged4 = json!({
-            "by_hour_model": {"2026-08-31T09+08:00": {"gpt-5.6-sol": {"p1": {"uncached_input_tokens": 60}}}},
-            "unaccounted": []
-        });
-        let v5 = codex_today_tokens_json(&merged4, "2026-08-31", false);
-        assert_eq!(v5["value"], 60);
-        assert_eq!(v5["coverage"], "complete");
+    fn sql_today_tokens_distinguishes_measured_zero_from_missing() {
+        let mut totals = BTreeMap::new();
+        totals.insert("dsh".to_string(), 0);
+        let measured_zero = sql_today_tokens(&Some(totals), "dsh");
+        assert_eq!(measured_zero["value"], 0);
+        assert_eq!(measured_zero["basis"], "sql-facts");
+        assert_eq!(measured_zero["coverage"], "complete");
+
+        let missing = sql_today_tokens(&Some(BTreeMap::new()), "dsh");
+        assert!(missing["value"].is_null());
+        assert!(missing["basis"].is_null());
+        assert!(missing["coverage"].is_null());
     }
 
     /// 人读渲染钉死逐字节文本（Python 镜像必须原样复刻——差分门比的是一整行
@@ -2684,8 +3072,22 @@ mod tests {
         // JSON 侧：serde_json（preserve_order）按 json! 的字面量顺序输出——
         // 键序即字节一致的一部分，Python 镜像必须按同样的构造顺序建 dict。
         let out = serde_json::to_string_pretty(&env).unwrap();
-        let keys: Vec<&str> = env.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["schema_version", "day_key", "timezone", "generated_at", "hosts"]);
+        let keys: Vec<&str> = env
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "schema_version",
+                "day_key",
+                "timezone",
+                "generated_at",
+                "hosts"
+            ]
+        );
         assert!(out.contains("\"host_kind\": \"dsh\""));
     }
 }

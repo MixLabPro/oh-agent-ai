@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use crate::clock::{current_month_beijing, today_beijing};
+#[cfg(test)]
+use crate::home::data_home;
 
 /// `config.toml` 位置，库根显式传入（Tier B 预算卡参数化：Tauri
 /// `read_overview_at(dh)` 组装入口不走进程 `AGENT_VITALS_HOME`）。生产路径

@@ -88,7 +88,8 @@ pub(crate) const SQL_CODEX_BY_HOUR_MODEL: &str = "SELECT (event_ts_ms + ?1) / ?2
          GROUP BY hour_idx, model_id";
 
 /// [`facts_page_window`]：键集分页（`(event_ts_ms, fact_id)` 游标，无 OFFSET）。
-pub(crate) const SQL_FACTS_PAGE_WINDOW: &str = "SELECT fact_id, native_session_id, model_id, event_ts_ms,
+pub(crate) const SQL_FACTS_PAGE_WINDOW: &str =
+    "SELECT fact_id, native_session_id, model_id, event_ts_ms,
                 uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens
          FROM usage_facts
          WHERE host = ?1 AND observation_kind != 'legacy_aggregate'
@@ -106,7 +107,10 @@ fn beijing_midnight_ms(y: i64, m: u32, d: u32) -> Option<i64> {
 }
 
 fn parse_ymd(date: &str) -> Option<(i64, u32, u32)> {
-    if date.len() != 10 || date.as_bytes().get(4) != Some(&b'-') || date.as_bytes().get(7) != Some(&b'-') {
+    if date.len() != 10
+        || date.as_bytes().get(4) != Some(&b'-')
+        || date.as_bytes().get(7) != Some(&b'-')
+    {
         return None;
     }
     let y: i64 = date.get(0..4)?.parse().ok()?;
@@ -139,8 +143,12 @@ pub fn beijing_month_bounds_ms(month: &str) -> Option<(i64, i64)> {
     Some((start, end))
 }
 
-const BASE_KEYS: [&str; 4] =
-    ["uncached_input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens"];
+const BASE_KEYS: [&str; 4] = [
+    "uncached_input_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "output_tokens",
+];
 const PEAK_KEYS: [&str; 4] = [
     "peak_uncached_input_tokens",
     "peak_cache_read_tokens",
@@ -223,9 +231,15 @@ pub fn peaked_days_map(
             acc.peak.add(u, cr, cw, o);
         }
         if let Some(model) = model {
-            acc.by_model_total.entry(model.clone()).or_default().add(u, cr, cw, o);
+            acc.by_model_total
+                .entry(model.clone())
+                .or_default()
+                .add(u, cr, cw, o);
             if peak == 1 {
-                acc.by_model_peak.entry(model).or_default().add(u, cr, cw, o);
+                acc.by_model_peak
+                    .entry(model)
+                    .or_default()
+                    .add(u, cr, cw, o);
             }
         }
     }
@@ -239,7 +253,11 @@ pub fn peaked_days_map(
         for (model, total) in &acc.by_model_total {
             let mut m = Map::new();
             total.merge_into(&BASE_KEYS, &mut m);
-            acc.by_model_peak.get(model).copied().unwrap_or_default().merge_into(&PEAK_KEYS, &mut m);
+            acc.by_model_peak
+                .get(model)
+                .copied()
+                .unwrap_or_default()
+                .merge_into(&PEAK_KEYS, &mut m);
             by_model.insert(model.clone(), Value::Object(m));
         }
         day_obj.insert("by_model".to_string(), Value::Object(by_model));
@@ -257,16 +275,19 @@ pub fn claude_days(
     end_ms: i64,
 ) -> Result<BTreeMap<String, Value>, AuthorityError> {
     let mut stmt = conn.prepare(SQL_CLAUDE_DAYS)?;
-    let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, start_ms, end_ms], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, Option<String>>(1)?,
-            r.get::<_, i64>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, i64>(4)?,
-            r.get::<_, i64>(5)?,
-        ))
-    })?;
+    let rows = stmt.query_map(
+        rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, start_ms, end_ms],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        },
+    )?;
     let mut days: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
     for row in rows {
         let (day_idx, model, u, cr, cw, o) = row?;
@@ -276,10 +297,14 @@ pub fn claude_days(
         // model_raw，见 hosts/claude_code/sources/usage_fact.rs）。
         let Some(model) = model else { continue };
         let date = civil_date_from_days(day_idx);
-        let bucket = days.entry(date).or_default().entry(model).or_insert_with(|| {
-            json!({"input_tokens": 0, "cache_read_input_tokens": 0,
+        let bucket = days
+            .entry(date)
+            .or_default()
+            .entry(model)
+            .or_insert_with(|| {
+                json!({"input_tokens": 0, "cache_read_input_tokens": 0,
                    "cache_creation_input_tokens": 0, "output_tokens": 0})
-        });
+            });
         for (key, v) in [
             ("input_tokens", u),
             ("cache_read_input_tokens", cr),
@@ -290,7 +315,10 @@ pub fn claude_days(
             bucket[key] = json!(cur + v);
         }
     }
-    Ok(days.into_iter().map(|(d, m)| (d, Value::Object(m))).collect())
+    Ok(days
+        .into_iter()
+        .map(|(d, m)| (d, Value::Object(m)))
+        .collect())
 }
 
 /// claude 深历史聚合（`observation_kind='legacy_aggregate'`，spec §6.2.3）：
@@ -304,16 +332,19 @@ pub fn claude_legacy_days(
     end_ms: i64,
 ) -> Result<BTreeMap<String, Value>, AuthorityError> {
     let mut stmt = conn.prepare(SQL_CLAUDE_LEGACY_DAYS)?;
-    let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, start_ms, end_ms], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, Option<String>>(1)?,
-            r.get::<_, i64>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, i64>(4)?,
-            r.get::<_, i64>(5)?,
-        ))
-    })?;
+    let rows = stmt.query_map(
+        rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, start_ms, end_ms],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        },
+    )?;
     let mut days: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
     for row in rows {
         let (day_idx, model, u, cr, cw, o) = row?;
@@ -325,7 +356,10 @@ pub fn claude_legacy_days(
                    "cache_creation_input_tokens": cw, "output_tokens": o}),
         );
     }
-    Ok(days.into_iter().map(|(d, m)| (d, Value::Object(m))).collect())
+    Ok(days
+        .into_iter()
+        .map(|(d, m)| (d, Value::Object(m)))
+        .collect())
 }
 
 /// codex 的实时行级事实 → `by_hour_model` 形状（`{"YYYY-MM-DDTHH":
@@ -347,16 +381,19 @@ pub fn codex_by_hour_model(
     end_ms: i64,
 ) -> Result<Value, AuthorityError> {
     let mut stmt = conn.prepare(SQL_CODEX_BY_HOUR_MODEL)?;
-    let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, Option<String>>(1)?,
-            r.get::<_, i64>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, i64>(4)?,
-            r.get::<_, i64>(5)?,
-        ))
-    })?;
+    let rows = stmt.query_map(
+        rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        },
+    )?;
     let mut hours: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
     for row in rows {
         let (hour_idx, model, u, cr, cw, o) = row?;
@@ -379,7 +416,12 @@ pub fn codex_by_hour_model(
         );
         *entry = Value::Object(speeds);
     }
-    Ok(Value::Object(hours.into_iter().map(|(k, v)| (k, Value::Object(v))).collect()))
+    Ok(Value::Object(
+        hours
+            .into_iter()
+            .map(|(k, v)| (k, Value::Object(v)))
+            .collect(),
+    ))
 }
 
 /// coverage 分母版本（Phase 3.3 设计定稿）：三维定义（usage / price / sync）
@@ -438,9 +480,9 @@ pub fn coverage_status(
     let mut measured: u64 = 1; // usage 维已确认
     if !models.is_empty() {
         let pricing = agent_vitals_domain::cost::load_pricing();
-        let all_routed = models.iter().all(|m| {
-            agent_vitals_domain::cost::billing_route_of(m, &pricing).is_some()
-        });
+        let all_routed = models
+            .iter()
+            .all(|m| agent_vitals_domain::cost::billing_route_of(m, &pricing).is_some());
         if all_routed {
             measured += 1;
         }
@@ -573,6 +615,31 @@ pub fn hourly_by_host(
     Ok(out)
 }
 
+/// 一个北京日窗口内各宿主的 token 总量。与 [`hourly_by_host`] 不同，这里保留
+/// token 恰为零的事实行：调用方因此可以区分“已同步且真零”（map 中为 0）和
+/// “该宿主在窗口内没有任何 SQL 事实”（缺键，必须渲染为 unavailable/unknown，
+/// 不能编成 0）。
+pub fn token_totals_by_host(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<BTreeMap<String, i64>, AuthorityError> {
+    let mut stmt = conn.prepare(
+        "SELECT host,
+                SUM(uncached_input_tokens + cache_read_tokens
+                    + cache_write_tokens + output_tokens)
+         FROM usage_facts
+         WHERE observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?1 AND event_ts_ms < ?2
+         GROUP BY host",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![start_ms, end_ms], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    rows.collect::<Result<_, _>>().map_err(AuthorityError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,7 +654,10 @@ mod tests {
         std::env::temp_dir().join(format!(
             "avd-query-{tag}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ))
     }
 
@@ -663,9 +733,45 @@ mod tests {
         let (start, end) = beijing_day_bounds_ms("2026-09-05").unwrap();
         // event_peak 直接注入（本模块只测查询/reshape，不重算
         // `is_peak_slot`——那是 emitter 的职责）：两条 peak=0、一条 peak=1。
-        insert_fact(&db, "f1", "dsh", Some("deepseek-v4-pro"), "turn", start + 3_600_000, 0, 100, 10, 5, 20);
-        insert_fact(&db, "f2", "dsh", Some("deepseek-v4-pro"), "turn", start + 4_000_000, 1, 50, 0, 0, 10);
-        insert_fact(&db, "f3", "dsh", None, "turn", start + 5_000_000, 0, 7, 0, 0, 1); // 无模型归属
+        insert_fact(
+            &db,
+            "f1",
+            "dsh",
+            Some("deepseek-v4-pro"),
+            "turn",
+            start + 3_600_000,
+            0,
+            100,
+            10,
+            5,
+            20,
+        );
+        insert_fact(
+            &db,
+            "f2",
+            "dsh",
+            Some("deepseek-v4-pro"),
+            "turn",
+            start + 4_000_000,
+            1,
+            50,
+            0,
+            0,
+            10,
+        );
+        insert_fact(
+            &db,
+            "f3",
+            "dsh",
+            None,
+            "turn",
+            start + 5_000_000,
+            0,
+            7,
+            0,
+            0,
+            1,
+        ); // 无模型归属
         let days = peaked_days_map(db.conn(), "dsh", start, end).unwrap();
         let day = &days["2026-09-05"];
         // 顶层总量 = 全部三条之和（含无归属行）。
@@ -678,7 +784,19 @@ mod tests {
         assert!(days["2026-09-05"]["by_model"].get("unknown").is_none());
 
         // 窗口外的事实不应该出现。
-        insert_fact(&db, "f4", "dsh", Some("x"), "turn", end + 1, 0, 999, 0, 0, 0);
+        insert_fact(
+            &db,
+            "f4",
+            "dsh",
+            Some("x"),
+            "turn",
+            end + 1,
+            0,
+            999,
+            0,
+            0,
+            0,
+        );
         let days2 = peaked_days_map(db.conn(), "dsh", start, end).unwrap();
         assert_eq!(days2["2026-09-05"]["uncached_input_tokens"], json!(157));
 
@@ -692,8 +810,32 @@ mod tests {
         let path = tmp_db("dsh-legacy");
         let db = AuthorityDb::open(&path, 1).unwrap();
         let (start, end) = beijing_day_bounds_ms("2026-09-05").unwrap();
-        insert_fact(&db, "f1", "dsh", Some("m"), "turn", start + 1000, 0, 10, 0, 0, 0);
-        insert_fact(&db, "f2", "dsh", Some("m"), "legacy_aggregate", start + 1000, 0, 999, 0, 0, 0);
+        insert_fact(
+            &db,
+            "f1",
+            "dsh",
+            Some("m"),
+            "turn",
+            start + 1000,
+            0,
+            10,
+            0,
+            0,
+            0,
+        );
+        insert_fact(
+            &db,
+            "f2",
+            "dsh",
+            Some("m"),
+            "legacy_aggregate",
+            start + 1000,
+            0,
+            999,
+            0,
+            0,
+            0,
+        );
         let days = peaked_days_map(db.conn(), "dsh", start, end).unwrap();
         assert_eq!(days["2026-09-05"]["uncached_input_tokens"], json!(10));
         let _ = std::fs::remove_file(&path);
@@ -707,8 +849,32 @@ mod tests {
         // 一条 peak=0、一条 peak=1——claude 计价不分峰谷，两条都要计入同一
         // 模型总量（与 DSH 的 `peaked_days_map` 行为对照，防止误把 claude
         // 的 event_peak 当"只算 0"处理——那是 legacy_aggregate 专属编码）。
-        insert_fact(&db, "f1", "claude-code", Some("claude-opus-4"), "message", start + 1000, 0, 100, 20, 5, 30);
-        insert_fact(&db, "f2", "claude-code", Some("claude-opus-4"), "message", start + 2000, 1, 50, 0, 0, 10);
+        insert_fact(
+            &db,
+            "f1",
+            "claude-code",
+            Some("claude-opus-4"),
+            "message",
+            start + 1000,
+            0,
+            100,
+            20,
+            5,
+            30,
+        );
+        insert_fact(
+            &db,
+            "f2",
+            "claude-code",
+            Some("claude-opus-4"),
+            "message",
+            start + 2000,
+            1,
+            50,
+            0,
+            0,
+            10,
+        );
         let days = claude_days(db.conn(), start, end).unwrap();
         let bucket = &days["2026-09-05"]["claude-opus-4"];
         assert_eq!(bucket["input_tokens"], json!(150));
@@ -723,11 +889,39 @@ mod tests {
         let path = tmp_db("claude-legacy");
         let db = AuthorityDb::open(&path, 1).unwrap();
         let (start, end) = beijing_day_bounds_ms("2026-01-05").unwrap();
-        insert_fact(&db, "f1", "claude-code", Some("claude-opus-4"), "legacy_aggregate", start, 0, 1000, 100, 50, 200);
-        insert_fact(&db, "f2", "claude-code", Some("claude-opus-4"), "legacy_aggregate", start, 1, 300, 0, 0, 60);
+        insert_fact(
+            &db,
+            "f1",
+            "claude-code",
+            Some("claude-opus-4"),
+            "legacy_aggregate",
+            start,
+            0,
+            1000,
+            100,
+            50,
+            200,
+        );
+        insert_fact(
+            &db,
+            "f2",
+            "claude-code",
+            Some("claude-opus-4"),
+            "legacy_aggregate",
+            start,
+            1,
+            300,
+            0,
+            0,
+            60,
+        );
         let days = claude_legacy_days(db.conn(), start, end).unwrap();
         let bucket = &days["2026-01-05"]["claude-opus-4"];
-        assert_eq!(bucket["input_tokens"], json!(1000), "只读 base 行，不叠加峰值子集");
+        assert_eq!(
+            bucket["input_tokens"],
+            json!(1000),
+            "只读 base 行，不叠加峰值子集"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -736,7 +930,19 @@ mod tests {
         let path = tmp_db("codex");
         let db = AuthorityDb::open(&path, 1).unwrap();
         let (start, _) = beijing_day_bounds_ms("2026-09-05").unwrap();
-        insert_fact(&db, "f1", "codex", Some("gpt-5.6-sol"), "token_count", start + 3_600_000, 0, 800, 200, 50, 80);
+        insert_fact(
+            &db,
+            "f1",
+            "codex",
+            Some("gpt-5.6-sol"),
+            "token_count",
+            start + 3_600_000,
+            0,
+            800,
+            200,
+            50,
+            80,
+        );
         let by_hour = codex_by_hour_model(db.conn(), start, start + DAY_MS).unwrap();
         // 北京 01:00 的小时键。
         let bucket = &by_hour["2026-09-05T01"]["gpt-5.6-sol"]["standard"];
@@ -784,10 +990,58 @@ mod tests {
         let (start, end) = beijing_day_bounds_ms("2026-09-05").unwrap();
         // 三宿主各自一条：北京 01:00（UTC 17:00 前一日——用 day_start 直接
         // 加小时即北京语义）、北京 08:00、北京 23:00。legacy 行必须排除。
-        insert_fact(&db, "h1", "claude-code", Some("m"), "turn", start + 3_600_000, 0, 10, 0, 0, 5);
-        insert_fact(&db, "h2", "codex", Some("m"), "token_count", start + 8 * 3_600_000, 0, 20, 0, 0, 2);
-        insert_fact(&db, "h3", "dsh", Some("m"), "turn", start + 23 * 3_600_000, 0, 30, 0, 0, 3);
-        insert_fact(&db, "h4", "dsh", Some("m"), "legacy_aggregate", start + 3_600_000, 0, 999, 0, 0, 0);
+        insert_fact(
+            &db,
+            "h1",
+            "claude-code",
+            Some("m"),
+            "turn",
+            start + 3_600_000,
+            0,
+            10,
+            0,
+            0,
+            5,
+        );
+        insert_fact(
+            &db,
+            "h2",
+            "codex",
+            Some("m"),
+            "token_count",
+            start + 8 * 3_600_000,
+            0,
+            20,
+            0,
+            0,
+            2,
+        );
+        insert_fact(
+            &db,
+            "h3",
+            "dsh",
+            Some("m"),
+            "turn",
+            start + 23 * 3_600_000,
+            0,
+            30,
+            0,
+            0,
+            3,
+        );
+        insert_fact(
+            &db,
+            "h4",
+            "dsh",
+            Some("m"),
+            "legacy_aggregate",
+            start + 3_600_000,
+            0,
+            999,
+            0,
+            0,
+            0,
+        );
         let out = hourly_by_host(db.conn(), start, end).unwrap();
         assert_eq!(out["claude-code"]["01"], 15, "四桶之和");
         assert_eq!(out["codex"]["08"], 22);
@@ -799,16 +1053,118 @@ mod tests {
     }
 
     #[test]
+    fn token_totals_by_host_keeps_zero_rows_and_excludes_legacy_aggregates() {
+        let path = tmp_db("token-totals");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let (start, end) = beijing_day_bounds_ms("2026-09-05").unwrap();
+        insert_fact(
+            &db,
+            "live",
+            "dsh",
+            Some("m"),
+            "turn",
+            start + 1,
+            0,
+            10,
+            20,
+            0,
+            3,
+        );
+        insert_fact(
+            &db,
+            "zero",
+            "codex",
+            Some("m"),
+            "turn",
+            start + 2,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+        insert_fact(
+            &db,
+            "legacy",
+            "claude-code",
+            Some("m"),
+            "legacy_aggregate",
+            start + 3,
+            0,
+            999,
+            0,
+            0,
+            0,
+        );
+        let totals = token_totals_by_host(db.conn(), start, end).unwrap();
+        assert_eq!(totals.get("dsh"), Some(&33));
+        assert_eq!(totals.get("codex"), Some(&0), "真零必须保留为一行");
+        assert!(
+            !totals.contains_key("claude-code"),
+            "深历史聚合不是当日实时 token"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn facts_page_window_is_stable_and_cursor_paginates_without_drift() {
         let path = tmp_db("facts-page");
         let db = AuthorityDb::open(&path, 1).unwrap();
         db.begin_run("run", "cli", 1).unwrap();
         let (start, end) = beijing_day_bounds_ms("2026-09-05").unwrap();
         // 同一毫秒两条事实（键集分页的并列场景）+ 一条 legacy（必须排除）。
-        insert_fact(&db, "b", "dsh", Some("m"), "turn", start + 1_000, 0, 1, 0, 0, 1);
-        insert_fact(&db, "a", "dsh", Some("m"), "turn", start + 1_000, 0, 2, 0, 0, 2);
-        insert_fact(&db, "c", "dsh", Some("m"), "turn", start + 2_000, 0, 3, 0, 0, 3);
-        insert_fact(&db, "lg", "dsh", Some("m"), "legacy_aggregate", start + 1_500, 0, 999, 0, 0, 0);
+        insert_fact(
+            &db,
+            "b",
+            "dsh",
+            Some("m"),
+            "turn",
+            start + 1_000,
+            0,
+            1,
+            0,
+            0,
+            1,
+        );
+        insert_fact(
+            &db,
+            "a",
+            "dsh",
+            Some("m"),
+            "turn",
+            start + 1_000,
+            0,
+            2,
+            0,
+            0,
+            2,
+        );
+        insert_fact(
+            &db,
+            "c",
+            "dsh",
+            Some("m"),
+            "turn",
+            start + 2_000,
+            0,
+            3,
+            0,
+            0,
+            3,
+        );
+        insert_fact(
+            &db,
+            "lg",
+            "dsh",
+            Some("m"),
+            "legacy_aggregate",
+            start + 1_500,
+            0,
+            999,
+            0,
+            0,
+            0,
+        );
         // 首页 limit=2：按 (ts, fact_id) 升序 → a, b；has_more。
         let (p1, more1) = facts_page_window(db.conn(), "dsh", start, end, None, None, 2).unwrap();
         assert!(more1);
@@ -817,8 +1173,13 @@ mod tests {
         // 用首页尾行做 cursor → c；无更多。
         let last = p1.last().unwrap();
         let (p2, more2) = facts_page_window(
-            db.conn(), "dsh", start, end,
-            Some(last.event_ts_ms), Some(&last.fact_id), 2,
+            db.conn(),
+            "dsh",
+            start,
+            end,
+            Some(last.event_ts_ms),
+            Some(&last.fact_id),
+            2,
         )
         .unwrap();
         assert!(!more2);
@@ -837,7 +1198,10 @@ mod tests {
         let path = tmp_db("cov0");
         let db = AuthorityDb::open(&path, 1).unwrap();
         let (start, end) = beijing_month_bounds_ms("2020-01").unwrap();
-        assert_eq!(coverage_status(db.conn(), "dsh", start, end).unwrap(), (0, 3));
+        assert_eq!(
+            coverage_status(db.conn(), "dsh", start, end).unwrap(),
+            (0, 3)
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -849,8 +1213,32 @@ mod tests {
         let (start, end) = beijing_month_bounds_ms("2026-09").unwrap();
         // 已知模型（deepseek 官方卡）→ usage+price 双维命中；token 全零的
         // 模型不参与 price 维（无消耗无价可评）。
-        insert_fact(&db, "f1", "dsh", Some("deepseek-v4-flash"), "turn", start + 1_000, 0, 100, 0, 0, 10);
-        insert_fact(&db, "f2", "dsh", Some("zero-model"), "turn", start + 2_000, 0, 0, 0, 0, 0);
+        insert_fact(
+            &db,
+            "f1",
+            "dsh",
+            Some("deepseek-v4-flash"),
+            "turn",
+            start + 1_000,
+            0,
+            100,
+            0,
+            0,
+            10,
+        );
+        insert_fact(
+            &db,
+            "f2",
+            "dsh",
+            Some("zero-model"),
+            "turn",
+            start + 2_000,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         // sync 维：source_files.last_seen_at_ms ≥ 窗口内最后事件。
         db.conn()
             .execute(
@@ -874,7 +1262,19 @@ mod tests {
         assert_eq!(m2, 2, "usage+price 命中但 sync 落后 → 2/3");
         // price 维缺口：出现声明表认不出的**有量**模型（顺带推进了 max_event
         // ——此时 sync 维本来就落空，price 缺口让 2 → 1）。
-        insert_fact(&db, "f3", "dsh", Some("moonshot-kimi-x"), "turn", start + 3_000, 0, 50, 0, 0, 5);
+        insert_fact(
+            &db,
+            "f3",
+            "dsh",
+            Some("moonshot-kimi-x"),
+            "turn",
+            start + 3_000,
+            0,
+            50,
+            0,
+            0,
+            5,
+        );
         let (m3, _) = coverage_status(db.conn(), "dsh", start, end).unwrap();
         assert_eq!(m3, 1, "无路由模型让 price 维也落空");
         let _ = std::fs::remove_file(&path);
@@ -896,10 +1296,46 @@ mod tests {
         // 更可能选真实计划而非退化到 "SCAN"（空表任何查询都 SCAN）。
         let (s, _e) = beijing_day_bounds_ms("2026-09-05").unwrap();
         for (i, host) in ["dsh", "claude-code", "codex"].iter().enumerate() {
-            insert_fact(&db, &format!("f{i}a"), host, Some("m"), "turn", s + 3_600_000, 0, 100, 0, 0, 10);
-            insert_fact(&db, &format!("f{i}b"), host, Some("m"), "turn", s + 7_200_000, 1, 50, 0, 0, 5);
+            insert_fact(
+                &db,
+                &format!("f{i}a"),
+                host,
+                Some("m"),
+                "turn",
+                s + 3_600_000,
+                0,
+                100,
+                0,
+                0,
+                10,
+            );
+            insert_fact(
+                &db,
+                &format!("f{i}b"),
+                host,
+                Some("m"),
+                "turn",
+                s + 7_200_000,
+                1,
+                50,
+                0,
+                0,
+                5,
+            );
         }
-        insert_fact(&db, "lg", "claude-code", Some("m"), "legacy_aggregate", s + 1_000, 0, 9, 0, 0, 0);
+        insert_fact(
+            &db,
+            "lg",
+            "claude-code",
+            Some("m"),
+            "legacy_aggregate",
+            s + 1_000,
+            0,
+            9,
+            0,
+            0,
+            0,
+        );
         db.conn().execute("ANALYZE", []).unwrap();
 
         let end = s + DAY_MS;
@@ -923,14 +1359,28 @@ mod tests {
         let page_after_ts = i64::MIN;
         let page_after_id = "";
         let page_limit = 50_i64;
-        let page_params: [&dyn rusqlite::ToSql; 6] =
-            [&"dsh", &s, &end, &page_after_ts, &page_after_id, &page_limit];
+        let page_params: [&dyn rusqlite::ToSql; 6] = [
+            &"dsh",
+            &s,
+            &end,
+            &page_after_ts,
+            &page_after_id,
+            &page_limit,
+        ];
 
         for (name, sql, params) in [
             ("peaked_days_map", SQL_PEAKED_DAYS_MAP, &peak_params[..]),
             ("claude_days", SQL_CLAUDE_DAYS, &day_params[..]),
-            ("claude_legacy_days", SQL_CLAUDE_LEGACY_DAYS, &day_params[..]),
-            ("codex_by_hour_model", SQL_CODEX_BY_HOUR_MODEL, &hour_params[..]),
+            (
+                "claude_legacy_days",
+                SQL_CLAUDE_LEGACY_DAYS,
+                &day_params[..],
+            ),
+            (
+                "codex_by_hour_model",
+                SQL_CODEX_BY_HOUR_MODEL,
+                &hour_params[..],
+            ),
             ("facts_page_window", SQL_FACTS_PAGE_WINDOW, &page_params[..]),
         ] {
             let p = plan(sql, params);
