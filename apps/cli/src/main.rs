@@ -2567,13 +2567,22 @@ session_store={store} fold={fold}"
     }
     if let Some(Cmd::DataStatus { rows_json }) = &args.cmd {
         let data_home = agent_vitals_runtime::home::data_home();
+        let db_path = agent_vitals_data::authority::default_authority_path(&data_home);
+        // `AuthorityDb::open` 对缺文件会**建库**（全 DDL）——必须在 open 之前
+        // 判存在，否则「刚被删/从没同步过」和「同步了但没有事实」在 open 之后
+        // 长得一模一样（facts=0），而前者在 sql_authority_enabled 下是灾难态
+        // （旧 JSON 写入已冻结、权威库刚被清空 → 零绝不是「没花钱」）。
+        let db_existed = db_path.exists();
         let out = (|| -> Result<Value, String> {
             let db = agent_vitals_data::authority::AuthorityDb::open(
-                &agent_vitals_data::authority::default_authority_path(&data_home),
+                &db_path,
                 agent_vitals_runtime::sql_sync::now_ms(),
             )
             .map_err(|e| e.to_string())?;
             let conn = db.conn();
+            let integrity: String = conn
+                .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+                .unwrap_or_else(|e| format!("integrity_check failed: {e}"));
             let schema: String = conn
                 .query_row(
                     "SELECT value FROM schema_meta WHERE key = 'schema_version'",
@@ -2627,28 +2636,62 @@ session_store={store} fold={fold}"
                     }
                 }
             }
+            let enabled = agent_vitals_runtime::sql_authority::is_enabled(&data_home);
+            let last_run_bad = runs.first().is_some_and(|r| {
+                matches!(r["status"].as_str(), Some("failed") | Some("running"))
+            });
+
+            // 1.7 损坏恢复 / 4.4「删库不回落」：health + 恢复路径提示。
+            // 权威库不自愈（与旧 index.sqlite3 的本质区别，spec §5.1）——
+            // 损坏/清空必须诚实报 critical + 明确的人工恢复入口，绝不静默
+            // 端出 facts=0 当成「没花钱」。
+            let mut hints: Vec<String> = Vec::new();
+            let health = if !db_existed && enabled {
+                hints.push("authority DB was just created (was missing) while sql_authority_enabled=true — legacy state-JSON writes are FROZEN, so a fresh empty DB means lost history, not zero spend".into());
+                hints.push("recover: `agent-vitals sync-facts` to repopulate from session logs, then `agent-vitals data-migrate` if you kept the legacy facts JSONL".into());
+                hints.push("or `agent-vitals data authority disable` to resume dual-write (legacy state JSON becomes authoritative again)".into());
+                "critical"
+            } else if !integrity.eq_ignore_ascii_case("ok") {
+                hints.push(format!("SQLite integrity_check: {integrity}"));
+                hints.push("the authority DB does NOT self-heal — rebuild the index with `agent-vitals data-rebuild-index` (replays the authoritative facts JSONL)".into());
+                "critical"
+            } else if enabled && facts == 0 {
+                hints.push("sql_authority_enabled=true but the authority DB has zero facts — run `agent-vitals sync-facts`; do not read zero as 'no spend'".into());
+                "critical"
+            } else if last_run_bad {
+                hints.push("most recent sync run did not succeed — check `error_code` above and re-run `agent-vitals sync-facts`".into());
+                "warn"
+            } else {
+                "ok"
+            };
+
             Ok(json!({
                 "schema_version": schema,
+                "integrity": integrity,
                 "facts": facts,
                 "sources": sources,
                 "sessions": sessions,
                 "open_quality_issues": issues,
                 "open_quality_issues_by_code": issues_by_code,
-                "sql_authority_enabled": agent_vitals_runtime::sql_authority::is_enabled(&data_home),
+                "sql_authority_enabled": enabled,
                 "pricing_snapshots": conn.query_row("SELECT COUNT(*) FROM pricing_snapshots", [], |r| r.get::<_, i64>(0)).unwrap_or(0),
                 "host_bills": conn.query_row("SELECT COUNT(*) FROM host_bills WHERE deleted_at_ms IS NULL", [], |r| r.get::<_, i64>(0)).unwrap_or(0),
                 "recent_runs": runs,
+                "health": health,
+                "hints": hints,
             }))
         })();
         match out {
             Ok(v) => {
+                let health = v["health"].as_str().unwrap_or("ok");
                 if *rows_json {
                     println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
                 } else {
                     println!(
-                        "Authority DB ({}): schema v{}, facts {}, sources {}, sessions {}, open issues {}, sql_authority_enabled {}",
+                        "Authority DB ({}): schema v{}, integrity {}, facts {}, sources {}, sessions {}, open issues {}, sql_authority_enabled {}",
                         data_home.display(),
                         v["schema_version"].as_str().unwrap_or("?"),
+                        v["integrity"].as_str().unwrap_or("?"),
                         v["facts"],
                         v["sources"],
                         v["sessions"],
@@ -2669,6 +2712,17 @@ session_store={store} fold={fold}"
                             );
                         }
                     }
+                    println!("  health: {health}");
+                    if let Some(hints) = v["hints"].as_array() {
+                        for h in hints {
+                            eprintln!("  ! {}", h.as_str().unwrap_or_default());
+                        }
+                    }
+                }
+                // 4.4：critical（库被删/损坏/enabled 但空）→ 非零退出，脚本
+                // 可判；「明确告警不回落」的机器可读信号。
+                if health == "critical" {
+                    std::process::exit(1);
                 }
             }
             Err(e) => {
