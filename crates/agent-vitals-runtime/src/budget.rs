@@ -592,15 +592,16 @@ fn seed_budget_config_from_legacy(
         .is_ok()
 }
 
-/// ISO 日期时间串 → epoch 毫秒（snooze 的 until 参数）。**直接复用 domain
-/// `budget::parse_iso`**（2026-09-07 审查收口：第一版自制解析只看前 19 字节
-/// 并一律按北京时间减 8h，对 `Z`/`+08:00`/`-05:00` 后缀静默错位 8 小时）。
-/// parse_iso 的语义已完整：无后缀按**北京挂钟**解释（offset=+8h 已内扣，
-/// 返回值即真实 UTC ms，与 Python 链 `_read_snooze` 的
-/// `replace(tzinfo=_BEIJING)` 同语义）、Z=0、显式 ±HH:MM 原样——本函数
-/// 只做转发，不再二次偏移。
+/// ISO 日期时间串 → epoch **毫秒**（snooze 的 `until_ms` 列，`budget_snoozes`
+/// 契约单位）。**复用 domain `budget::parse_iso`**（2026-09-07 审查收口：第一版
+/// 自制解析只看前 19 字节并一律按北京时间减 8h，对 `Z`/`+08:00` 后缀静默错位
+/// 8 小时）。parse_iso 语义已完整：无后缀按**北京挂钟**解释（offset 已内扣）、
+/// Z=0、显式 ±HH:MM 原样。**`parse_iso` 返回 epoch 秒**——本函数 ×1000 转毫秒
+/// （3.4 首版漏了这一步，CLI `budget-sql snooze-set` 把秒写进 `until_ms` 毫秒
+/// 列、读回来一律早于 `now_ms()` → snooze 永远显示已过期；回归测试
+/// `iso_to_ms_beijing_returns_milliseconds` 钉住）。
 fn iso_to_ms_beijing(s: &str) -> Option<i64> {
-    agent_vitals_domain::budget::parse_iso(s).map(|(ms, _)| ms)
+    agent_vitals_domain::budget::parse_iso(s).map(|(secs, _)| secs * 1000)
 }
 
 /// 预算状态（Phase 3.4）：SQL 权威面。`None` 输出仅当库打不开（诊断走
@@ -693,6 +694,106 @@ pub fn budget_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
         "freshness": summary.freshness.to_json(),
         "data_source": "sql_authority",
     }))
+}
+
+// ───────────── v0.9.1 Tier B：evaluate_alert 切 SQL（alert / 托盘预算卡） ─────────────
+
+/// SQL `budget_config` → `evaluate_alert` 期待的 config Value（与 config.toml
+/// `[budget]` merged 后同形）。3 个核心字段（monthly/daily/warn）来自权威库单
+/// 行表；`adaptive_*` / `peak_share_max` / `enabled` 从 `default_budget` 补——
+/// 这几项 `budget_config` 表还没有列（db714f0 的 seed 与 spec §3.4 只搬了这 3
+/// 个），自定义 `adaptive_multiplier` 的用户暂时走默认，补列是后续项。
+fn sql_budget_config_value(c: &agent_vitals_data::authority::BudgetConfig) -> Value {
+    agent_vitals_domain::budget::merged_config(&json!({
+        "monthly_cny": c.monthly_cny_minor as f64 / 100.0,
+        "daily_cny": c.daily_cny_minor as f64 / 100.0,
+        "warn_at_ratio": c.warning_ratio_bp as f64 / 10_000.0,
+    }))
+}
+
+/// epoch ms → ISO UTC 串（`evaluate_alert` 的 snooze 参数按串收，内部
+/// `parse_iso` 认显式 `+00:00` 后缀）。镜像 `state::now_iso_utc` 的格式段。
+fn ms_to_iso_utc(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let (y, m, d) = agent_vitals_domain::util::civil_from_unix_secs(secs, 0);
+    let sod = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (sod / 3600, (sod % 3600) / 60, sod % 60);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}+00:00")
+}
+
+/// `evaluate_alert_from_state` 的 **SQL 权威面**（Tier B 收尾）：预算/告警从
+/// SQL 权威库算，不读 `today.json` / `month.json` / `alert.json` / `budget.json`
+/// （spec §5.2 禁读清单）。返回形状 = `domain::budget::evaluate_alert` 逐 key
+/// 相同（`level`/`ratio`/`month_ratio`/`effective_daily_budget`/`reasons`/
+/// `snoozed_until`/`today_cost`/`month_cost`/`monthly_cny`/`peak_over`/
+/// `adaptive_floor_applied`），托盘/CLI 直接消费。
+///
+/// **口径 = 跨宿主「按量实付」CNY**（PM 决策 2026-09-07）。当前 CNY
+/// MeteredActual 的唯一来源是 DSH（deepseek-official / shengsuanyun），与
+/// `budget_status_sql` 的 `metered_cny_minor` 同一条 by_provider CNY-summable
+/// 边界——claude relay 的 CNY 是 MeteredEstimate（`summable_into_total` 为
+/// false）、codex 是 ApiEquivalent、minimax/glm 是 FixedSubscription，都不进
+/// 按量预算。第二个 CNY MeteredActual 源出现时这里扩成多宿主 days 合并（届时
+/// 两侧背离即「有新按量源」信号）。
+///
+/// `month_days` = DSH `peaked_days_map`（当月北京毫秒窗），与 `month.json` 的
+/// `days` 同形——直接喂**不改一行**的 `evaluate_alert`（今日 = 该 map 里今天
+/// 那条 entry；`today_cost` 对无 `date` 键的 entry 直接按 by_model 计价）。
+/// 库打不开 / 无配置 → 走 `default_budget`（¥30/¥600），evaluate 照常降级。
+pub fn evaluate_alert_from_sql(data_home: &Path) -> Value {
+    let pricing = agent_vitals_domain::cost::load_pricing();
+    let today_key = today_beijing();
+    let now = now_unix();
+
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(data_home),
+        crate::sql_sync::now_ms(),
+    ) else {
+        // 库打不开 → 与 today/month 全 None 同款诚实降级（不臆造预算判定）。
+        return agent_vitals_domain::budget::evaluate_alert(
+            &agent_vitals_domain::budget::default_budget(),
+            None,
+            None,
+            &pricing,
+            &today_key,
+            None,
+            now,
+        );
+    };
+    seed_budget_config_from_legacy(data_home, &db);
+    let cfg = match db.budget_config_get().ok().flatten() {
+        Some(c) => sql_budget_config_value(&c),
+        None => agent_vitals_domain::budget::default_budget(),
+    };
+
+    let month = current_month_beijing();
+    let dsh_days = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month)
+        .map(|(s, e)| {
+            agent_vitals_data::authority_query::peaked_days_map(db.conn(), "dsh", s, e)
+                .unwrap_or_else(|_| json!({}))
+        })
+        .unwrap_or_else(|| json!({}));
+    // 空 map → None（`read_month` 的「缺列 None」语义：None → month_cost None，
+    // 空壳 → 0 元，evaluate 里两者不同）。
+    let month_days = match dsh_days.as_object() {
+        Some(m) if !m.is_empty() => Some(dsh_days.clone()),
+        _ => None,
+    };
+    let today_data = month_days.as_ref().and_then(|m| m.get(&today_key).cloned());
+
+    // snooze：表里存的是 until_ms；过期与否交给 evaluate_alert（它按 now_unix
+    // 重判，过期串 → snoozed_until=None）。无行 → None。
+    let snooze_iso = db.budget_snooze_get().ok().flatten().map(ms_to_iso_utc);
+
+    agent_vitals_domain::budget::evaluate_alert(
+        &cfg,
+        today_data.as_ref(),
+        month_days.as_ref(),
+        &pricing,
+        &today_key,
+        snooze_iso.as_deref(),
+        now,
+    )
 }
 
 /// snooze 写入口（CLI `budget-sql snooze-set` 用）：解析 ISO 串 → 落库。
@@ -1243,5 +1344,121 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir_spender);
         let _ = std::fs::remove_dir_all(&dir_empty);
+    }
+
+    // ── Tier B：evaluate_alert_from_sql（alert / 托盘预算卡 切 SQL）─────────
+
+    fn fresh_sql_home(tag: &str) -> (std::path::PathBuf, agent_vitals_data::authority::AuthorityDb) {
+        let d = std::env::temp_dir().join(format!("av-alert-sql-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let db = agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&d),
+            1,
+        )
+        .unwrap();
+        (d, db)
+    }
+
+    /// 空库 → `default_budget`（¥30/¥600）+ 无今日/本月数据的诚实降级：level
+    /// ok、today_cost/month_cost null、reasons 提「没有今日数据」。不碰 env。
+    #[test]
+    fn evaluate_alert_from_sql_empty_db_degrades_honestly() {
+        let (dir, _db) = fresh_sql_home("empty");
+        let a = evaluate_alert_from_sql(&dir);
+        assert_eq!(a["level"], "ok", "无数据 = 无告警，不臆造");
+        assert_eq!(a["today_cost"], Value::Null);
+        assert_eq!(a["month_cost"], Value::Null);
+        assert_eq!(a["monthly_cny"], json!(600.0), "default_budget 月预算");
+        assert_eq!(a["effective_daily_budget"], json!(30.0));
+        assert!(
+            a["reasons"].as_array().unwrap().iter().any(|r| r
+                .as_str()
+                .unwrap_or("")
+                .contains("no today")),
+            "reasons: {}",
+            a["reasons"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// seed 大额 DSH 今日按量事实 + 极小月/日预算 → 跨过 over 档；`month_cost` /
+    /// `today_cost` 是 DSH `peaked_days_map` 经 `evaluate_alert` 内部计价的结果
+    /// （不是 by_provider 聚合，但同一条 priced_day 管线，数值同源）。
+    #[test]
+    fn evaluate_alert_from_sql_prices_dsh_today_and_month_from_facts() {
+        let (dir, db) = fresh_sql_home("spender");
+        let today = crate::clock::today_beijing();
+        let (start, _) =
+            agent_vitals_data::authority_query::beijing_day_bounds_ms(&today).unwrap();
+        // 今天的一笔大额按量事实（flash 卡便宜，量给足跨档）。
+        seed_fact_min(&db, "t1", "dsh", "deepseek-v4-flash", start + 1_000, 500_000_000, 50_000_000);
+        // 极小预算：monthly ¥1 / daily ¥0.5 → 必然 over。
+        db.budget_config_set(100, 50, 8_000, 1).unwrap();
+        drop(db);
+
+        let a = evaluate_alert_from_sql(&dir);
+        let today_cost = a["today_cost"].as_f64().unwrap();
+        assert!(today_cost > 0.0, "今日按量事实必须折出正成本，got {today_cost}");
+        assert_eq!(a["month_cost"].as_f64().unwrap(), today_cost, "本月只有今天一笔 → 相等");
+        assert_eq!(a["level"], "over", "支出远超 ¥1 月预算");
+        assert!(a["month_ratio"].as_f64().unwrap() >= 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// snooze 到远未来 → warn/over 被压成 `snoozed`（near 仍可见）；过期 snooze
+    /// 不压制。表里存 until_ms，`evaluate_alert` 按 now 重判。
+    #[test]
+    fn evaluate_alert_from_sql_snooze_suppresses_then_expires() {
+        let (dir, db) = fresh_sql_home("snooze");
+        let today = crate::clock::today_beijing();
+        let (start, _) =
+            agent_vitals_data::authority_query::beijing_day_bounds_ms(&today).unwrap();
+        seed_fact_min(&db, "s1", "dsh", "deepseek-v4-flash", start + 1_000, 500_000_000, 50_000_000);
+        db.budget_config_set(100, 50, 8_000, 1).unwrap();
+        // 远未来 snooze（now + 1 天）。
+        db.budget_snooze_set(crate::sql_sync::now_ms() + 86_400_000, 1).unwrap();
+        drop(db);
+        let a = evaluate_alert_from_sql(&dir);
+        assert_eq!(a["level"], "snoozed", "warn/over 被 snooze 压制");
+        assert!(a["snoozed_until"].is_string());
+
+        // 过期 snooze：重开库改 until 到过去。
+        let db = agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&dir),
+            1,
+        )
+        .unwrap();
+        db.budget_snooze_set(crate::sql_sync::now_ms() - 1_000, 1).unwrap();
+        drop(db);
+        let a = evaluate_alert_from_sql(&dir);
+        assert_eq!(a["level"], "over", "过期 snooze 不压制");
+        assert_eq!(a["snoozed_until"], Value::Null);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ms_to_iso_utc_round_trips_through_parse_iso() {
+        // 2026-09-08T04:05:06Z = 1788840306 秒 = 1788840306000 ms
+        let ms = 1_788_840_306_000i64;
+        let iso = ms_to_iso_utc(ms);
+        assert_eq!(iso, "2026-09-08T04:05:06+00:00");
+        let (back_secs, explicit) =
+            agent_vitals_domain::budget::parse_iso(&iso).expect("parse_iso 认显式 offset");
+        assert!(explicit);
+        assert_eq!(back_secs, ms / 1000, "parse_iso 返回秒");
+    }
+
+    /// 回归（3.4 附带 bug）：`iso_to_ms_beijing` 必须返回**毫秒**——`parse_iso`
+    /// 出的是秒，漏了 ×1000 会把秒写进 `budget_snoozes.until_ms` 毫秒列，
+    /// `budget_status_sql` / `evaluate_alert_from_sql` 读回来恒早于 now_ms、
+    /// snooze 永远显示已过期。
+    #[test]
+    fn iso_to_ms_beijing_returns_milliseconds() {
+        // 2026-09-08T04:05:06+00:00 → 1788840306 秒 → ×1000 毫秒
+        let ms = iso_to_ms_beijing("2026-09-08T04:05:06+00:00").unwrap();
+        assert_eq!(ms, 1_788_840_306_000);
+        // 与 now_ms() 同量级：>1e12 而非 ~1.7e9（漏 ×1000 就是后者）。
+        assert!(ms > 1_000_000_000_000, "毫秒量级，got {ms}");
     }
 }

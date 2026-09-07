@@ -584,7 +584,7 @@ enum Cmd {
     /// authority DB's `budget_config`/`budget_snoozes` (spec §5.3), replacing
     /// alert.json/budget.json reads. Amounts are CNY minor units (整数分).
     BudgetSql {
-        #[arg(value_parser = ["status", "config-show", "config-set", "snooze-set", "snooze-clear"])]
+        #[arg(value_parser = ["status", "alert", "config-show", "config-set", "snooze-set", "snooze-clear"])]
         action: String,
         /// status/config-show: query this month (YYYY-MM) instead of the current one
         #[arg(long)]
@@ -2756,6 +2756,14 @@ session_store={store} fold={fold}"
                         std::process::exit(2);
                     }
                 }
+            }
+            "alert" => {
+                // SQL 权威面的 `budget show` 等价物：evaluate_alert 从权威库算
+                // （跨宿主按量 CNY 口径），不读 today.json/month.json/alert.json。
+                let v = agent_vitals_runtime::budget::evaluate_alert_from_sql(
+                    &agent_vitals_runtime::home::data_home(),
+                );
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             }
             "config-show" => {
                 let d = db();
