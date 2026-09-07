@@ -169,13 +169,16 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   跨 kind 冲突防御分支保留。真机验证：236 条 legacy_aggregate 入库、重跑
   全 duplicate 幂等、coverage 降级标记落库。**诚实观察**：本机 ledger 35 天
   全部同时有实时事实（legacy_only_days=0），legacy 行当前在合并视图不可见
-  ——价值在未来轮转月（实时行物理消失后按日回退）。**新暴露的设计缺口
-  （Phase 4 待决）**：ledger 的 `unaccounted` 残差池（cost-state 基线
-  −行级和，本机 ~3.5B tokens、无日期）在 SQL 权威库没有表示——JSON 链
-  「days+unaccounted」≈6.9B vs SQL merged 3.46B；DTO 两侧都只读 days 所以
-  parity 不破，但 Phase 4 对账/读切换前必须裁决 SQL 是否要给无日期残差
-  一个家（候选：`observation_kind='baseline_residual'` + NULL event_ts，
-  schema 已兼容 undated 保留语义）
+  ——价值在未来轮转月（实时行物理消失后按日回退）。
+  **`unaccounted` 残差池裁决（已定，Phase 4）**：ledger 的
+  `unaccounted`（cost-state 基线 −行级和，真机 3.575B tokens、**无日期**）
+  **不进 `usage_facts`**——没有日期，编一个北京日就是 fabrication。也不静默
+  丢（§5.4「无日期或质量异常事实不能静默删除，必须先标记」）。折中：
+  `data-migrate` 时把整个残差池汇总成**一条 `data_quality_issues`**
+  （`code='undated_residual'`，逐模型 token 写 detail_json）。`data-status`
+  的 `open_quality_issues_by_code` 按名可见；Phase 4.1 对账的 SQL vs ledger
+  token 缺口 = 这条残差，显式可解释。实现：`legacy_import::
+  {load,import}_claude_ledger_unaccounted` + `data-migrate` 接线。
 - [x] **3.3 coverage_status** — ✅ 390d3f8 + 1f1ed4e（2026-09-07，主 agent
   实施 + subAgent 审查收口）：三维分母 v1（usage/price/sync，
   COVERAGE_DENOMINATOR_VERSION=1），trait 新增 coverage_status(month)；

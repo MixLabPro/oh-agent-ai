@@ -525,6 +525,72 @@ pub fn load_claude_ledger_days(state_dir: &Path) -> Result<serde_json::Value, Au
     Ok(Value::Object(merged))
 }
 
+/// claude ledger 的 `unaccounted` 池（`{model: {4 型 snake 桶}}`）——cost-state
+/// 累计基线减去逐行事实和的**无日期**残差（`claude_cost.py::_rebuild_days`：
+/// 压缩/截断丢失了逐行 ts 证据的早期历史，「不知道何时发生的，不能假装知道」）。
+/// 缺文件 / 缺键 → `{}`。归档文件不带 `unaccounted`（残差是当前 fold 的产物），
+/// 只读 `claude-ledger.json`。
+pub fn load_claude_ledger_unaccounted(state_dir: &Path) -> Result<serde_json::Value, AuthorityError> {
+    match read_ledger_json(state_dir, "claude-ledger.json")? {
+        Some(v) => Ok(v.get("unaccounted").cloned().unwrap_or_else(|| json!({}))),
+        None => Ok(json!({})),
+    }
+}
+
+/// **裁决（v0.9.1 Phase 4，spec §5.4）**：ledger 的无日期残差**不进 `usage_facts`**
+/// ——它没有日期，编一个北京日就是 fabrication。也不能静默丢（§5.4「无日期或
+/// 质量异常事实不能静默删除，必须先标记」）。折中：`data-migrate` 时把整个残差
+/// 池汇总成**一条 `data_quality_issues`**（`code='undated_residual'`），逐模型
+/// token 数写进 `detail_json`。作用：① `data-status`/`data-unresolved` 可见；
+/// ② SQL vs ledger 对账（Phase 4.1）的 token 缺口 = 这条残差，显式可解释，不是
+/// 神秘 mismatch。返回残差 token 总量（0 = 无残差，不写 issue）。幂等
+/// （`ON CONFLICT` 刷新 detail + last_seen）。
+pub fn import_claude_ledger_unaccounted(
+    conn: &Connection,
+    now_ms: i64,
+    unaccounted: &serde_json::Value,
+) -> Result<u64, AuthorityError> {
+    let Some(models) = unaccounted.as_object() else {
+        return Ok(0);
+    };
+    let bucket = |m: &Value, k: &str| -> i64 {
+        m.get(k).and_then(Value::as_i64).unwrap_or(0)
+    };
+    let mut by_model: Map<String, Value> = Map::new();
+    let mut total: i64 = 0;
+    for (model, t4) in models {
+        let sum: i64 = LEDGER_BUCKET_KEYS
+            .iter()
+            .map(|(snake, _)| bucket(t4, snake).max(0))
+            .sum();
+        if sum > 0 {
+            by_model.insert(model.clone(), json!(sum));
+            total += sum;
+        }
+    }
+    if total <= 0 {
+        return Ok(0);
+    }
+    let detail = json!({
+        "host": LEGACY_HOST,
+        "by_model_tokens": by_model,
+        "total_tokens": total,
+        "source": "claude-ledger.json::unaccounted",
+        "note": "cost-state 累计基线减去逐行事实和的无日期残差（压缩/截断丢失逐行 ts 证据的早期历史）。裁决（Phase 4/§5.4）：不编日期塞进 usage_facts，记为覆盖缺口——SQL vs ledger 对账的 token 差 = 此值。",
+    });
+    write_issue(
+        conn,
+        "undated_residual:claude-ledger",
+        "source",
+        "claude-ledger.json#unaccounted",
+        "undated_residual",
+        "info",
+        now_ms,
+        &detail,
+    )?;
+    Ok(total as u64)
+}
+
 /// 读 ledger/archive 文件。缺失 → Ok(None)；存在但非法 JSON / 顶层非对象 →
 /// Err。
 fn read_ledger_json(state_dir: &Path, name: &str) -> Result<Option<Value>, AuthorityError> {
@@ -1039,6 +1105,87 @@ mod tests {
         let dir = tmp_dir("missing");
         let days = load_claude_ledger_days(&dir).unwrap();
         assert_eq!(days, json!({}));
+        assert_eq!(load_claude_ledger_unaccounted(&dir).unwrap(), json!({}));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 裁决（Phase 4/§5.4）：ledger 的 `unaccounted` 无日期残差不进
+    /// `usage_facts`（不编日期），记为**一条** `undated_residual` issue，
+    /// 逐模型 token 写 detail。幂等：再跑刷新 detail、不新增行。总量为 0 →
+    /// 不写 issue。
+    #[test]
+    fn unaccounted_residual_becomes_one_coverage_gap_issue_not_facts() {
+        let dir = tmp_dir("unacc");
+        let db = crate::authority::AuthorityDb::open(
+            &crate::authority::default_authority_path(&dir),
+            1,
+        )
+        .unwrap();
+        let unacc = json!({
+            "MiniMax-M3": {
+                "input_tokens": 1_650_000, "cache_read_input_tokens": 76_341_316,
+                "cache_creation_input_tokens": 0, "output_tokens": 285_264,
+            },
+            "MiniMax-M2": {
+                "input_tokens": 334_923, "cache_read_input_tokens": 6_289,
+                "cache_creation_input_tokens": 0, "output_tokens": 104_765,
+            },
+            "all-zero-model": {
+                "input_tokens": 0, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0, "output_tokens": 0,
+            },
+        });
+        let want_total: i64 = 1_650_000 + 76_341_316 + 285_264 + 334_923 + 6_289 + 104_765;
+        let recorded = db
+            .with_immediate_txn(|c| import_claude_ledger_unaccounted(c, 5_000, &unacc))
+            .unwrap();
+        assert_eq!(recorded as i64, want_total);
+
+        let conn = db.conn();
+        // 恰一条 issue，code = undated_residual。
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM data_quality_issues WHERE code = 'undated_residual'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        // usage_facts 一行都没写（残差不编造成事实）。
+        let facts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(facts, 0, "残差绝不进 usage_facts");
+        // detail 里逐模型 + 总量，全零模型不出现。
+        let detail: String = conn
+            .query_row(
+                "SELECT detail_json FROM data_quality_issues WHERE code = 'undated_residual'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let d: Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(d["total_tokens"].as_i64().unwrap(), want_total);
+        assert!(d["by_model_tokens"].get("all-zero-model").is_none());
+        assert_eq!(d["by_model_tokens"]["MiniMax-M2"].as_i64().unwrap(), 445_977);
+
+        // 幂等：再跑 → 仍一条。
+        db.with_immediate_txn(|c| import_claude_ledger_unaccounted(c, 6_000, &unacc)).unwrap();
+        let n2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM data_quality_issues WHERE code = 'undated_residual'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n2, 1);
+
+        // 空池 → 不写 issue。
+        assert_eq!(
+            db.with_immediate_txn(|c| import_claude_ledger_unaccounted(c, 7_000, &json!({})))
+                .unwrap(),
+            0
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

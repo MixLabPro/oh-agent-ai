@@ -2395,6 +2395,29 @@ session_store={store} fold={fold}"
                 }
             }
         }
+        // ledger 的无日期残差池（`unaccounted`）：不编日期塞 usage_facts，记为
+        // 一条 `undated_residual` 覆盖缺口 issue（spec §5.4：无日期事实不静默
+        // 丢弃；裁决见 legacy_import::import_claude_ledger_unaccounted）。
+        match agent_vitals_data::legacy_import::load_claude_ledger_unaccounted(
+            &agent_vitals_runtime::state::state_dir(),
+        ) {
+            Ok(unacc) => {
+                match db.with_immediate_txn(|conn| {
+                    agent_vitals_data::legacy_import::import_claude_ledger_unaccounted(
+                        conn,
+                        agent_vitals_runtime::sql_sync::now_ms(),
+                        &unacc,
+                    )
+                }) {
+                    Ok(0) => {}
+                    Ok(tokens) => println!(
+                        "  claude-ledger unaccounted: {tokens} undated residual tokens recorded as a coverage-gap issue (not facts)"
+                    ),
+                    Err(e) => eprintln!("data-migrate warning (claude-ledger unaccounted): {e}"),
+                }
+            }
+            Err(e) => eprintln!("data-migrate warning (claude-ledger unaccounted, unreadable): {e}"),
+        }
         let _ = db.finish_run(&run_id, "succeeded", None, None, agent_vitals_runtime::sql_sync::now_ms());
         // spec §6.1：迁移必须记录在 migrations 表（与 DDL 版本分离）——
         // checkpoint 可重跑的锚点。
@@ -2453,6 +2476,21 @@ session_store={store} fold={fold}"
             let issues: i64 = conn
                 .query_row("SELECT COUNT(*) FROM data_quality_issues WHERE resolved_at_ms IS NULL", [], |r| r.get(0))
                 .unwrap_or(0);
+            // 逐 code 明细：`undated_residual`（ledger 无日期残差）、
+            // `legacy_aggregate`（聚合兜底月份）等按名可见，不只是一个总数。
+            let mut issues_by_code: serde_json::Map<String, Value> = serde_json::Map::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT code, COUNT(*) FROM data_quality_issues
+                 WHERE resolved_at_ms IS NULL GROUP BY code ORDER BY code",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                }) {
+                    for (code, n) in rows.filter_map(Result::ok) {
+                        issues_by_code.insert(code, json!(n));
+                    }
+                }
+            }
             let mut runs = Vec::new();
             if let Ok(mut stmt) = conn.prepare(
                 "SELECT run_id, trigger, status, started_at_ms, error_code FROM sync_runs
@@ -2478,6 +2516,7 @@ session_store={store} fold={fold}"
                 "sources": sources,
                 "sessions": sessions,
                 "open_quality_issues": issues,
+                "open_quality_issues_by_code": issues_by_code,
                 "recent_runs": runs,
             }))
         })();
@@ -2495,6 +2534,11 @@ session_store={store} fold={fold}"
                         v["sessions"],
                         v["open_quality_issues"],
                     );
+                    if let Some(by_code) = v["open_quality_issues_by_code"].as_object() {
+                        for (code, n) in by_code {
+                            println!("  issue [{code}]: {n}");
+                        }
+                    }
                     if let Some(runs) = v["recent_runs"].as_array() {
                         for r in runs {
                             println!(
