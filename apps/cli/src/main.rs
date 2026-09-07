@@ -473,18 +473,6 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
-    /// Reconcile the facts index against the summary DTO (tokens_by_host),
-    /// per host: measured / no-facts (facts plane not yet ingested for this
-    /// host — a coverage gap, never rendered as zero) / index-only (anomaly).
-    /// Stage B; closes the reconcile item left open by Stage A.
-    DataReconcile {
-        /// Month to reconcile against ("YYYY-MM"; default: current month)
-        #[arg(long)]
-        month: Option<String>,
-        /// Output the report as JSON
-        #[arg(long = "json")]
-        rows_json: bool,
-    },
     /// Routine facts sync across all three hosts (locate, checkpoint diff,
     /// emit, then SQL authority + legacy dual-write). Idempotent: re-runs
     /// skip unchanged files (source_files fingerprints) and dedup facts by
@@ -497,8 +485,16 @@ enum Cmd {
     },
     /// One-time import of the legacy facts JSONL into the SQL authority DB
     /// (spec 6.2.1: JSONL is the highest-fidelity migration source; same
-    /// fact_id = idempotent). Safe to re-run.
-    DataMigrate,
+    /// fact_id = idempotent). Safe to re-run. By default imports ONLY the
+    /// raw per-message facts JSONL; pass --with-legacy-ledger to also fold
+    /// the claude-ledger deep-history aggregates (observation_kind=
+    /// legacy_aggregate) for days whose session files have already rotated
+    /// away.
+    DataMigrate {
+        /// Also import claude-ledger.json deep-history as legacy_aggregate rows
+        #[arg(long = "with-legacy-ledger")]
+        with_legacy_ledger: bool,
+    },
     /// Authority DB status: schema version, recent sync runs, source
     /// counts, data-quality summary (spec 9, authority part of data
     /// doctor).
@@ -648,13 +644,12 @@ enum Cmd {
     },
     /// Read-only Data Query API surface (v0.9 Stage 0.5, spec §7's suggested
     /// `data coverage`). Goes through the `SummaryRepository` trait to the
-    /// runtime's repository — since Phase 3.5 Tier A the CLI constructs
-    /// `SqlSummaryRepository` (reads the authority DB `agent-vitals.sqlite3`,
-    /// incl. legacy_aggregate deep history); `JsonSummaryRepository` coexists
-    /// until Phase 4 retires it. The CLI only goes through the trait, never
-    /// naming the concrete type past the call site (spec §3.1 dependency
-    /// table). `--json` prints the frozen `to_json()` DTO verbatim; spec §3.1
-    /// makes it a contract violation to consume amounts while dropping
+    /// runtime's repository — `SqlSummaryRepository` (reads the authority DB
+    /// `agent-vitals.sqlite3`); the legacy `JsonSummaryRepository` was retired
+    /// in Phase 4.3. The CLI only goes through the trait, never naming the
+    /// concrete type past the call site (spec §3.1 dependency table). `--json`
+    /// prints the frozen `to_json()` DTO verbatim; spec §3.1 makes it a
+    /// contract violation to consume amounts while dropping
     /// freshness/coverage/excluded_hosts, so both views surface all three.
     Data {
         #[command(subcommand)]
@@ -2187,56 +2182,6 @@ session_store={store} fold={fold}"
         return;
     }
 
-    // data-reconcile（Stage B）：facts 索引 vs DTO tokens_by_host 逐宿主对账。
-    // 「没 ingest」= no-facts 缺口，「0 tokens」只在对账成立时出现。
-    if let Some(Cmd::DataReconcile { month, rows_json }) = &args.cmd {
-        let month = month
-            .clone()
-            .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
-        let summary = agent_vitals_data::repository::SummaryRepository::monthly_summary(
-            &agent_vitals_runtime::summary::JsonSummaryRepository,
-            &agent_vitals_data::repository::MonthlySummaryQuery { month: month.clone() },
-        );
-        // DTO 侧 tokens_by_host 是 typed BTreeMap<String, HostTokens>——逐宿主
-        // to_json() 成对账面的 {total,...} 形状。
-        let dto_map: serde_json::Map<String, Value> = summary
-            .tokens_by_host
-            .iter()
-            .map(|(k, v)| (k.clone(), v.to_json()))
-            .collect();
-        match agent_vitals_runtime::ingest_service::reconcile_index_vs_dto(
-            &agent_vitals_runtime::home::data_home(),
-            &month,
-            &dto_map,
-        ) {
-            Ok(report) => {
-                if *rows_json {
-                    let mut out = report;
-                    out["month"] = serde_json::json!(month);
-                    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
-                } else {
-                    println!("Reconcile (facts index vs summary DTO, month {month}):");
-                    for h in report["hosts"].as_array().unwrap_or(&vec![]) {
-                        println!(
-                            "  {:<12} {:<10} index={:<10} dto={:<10} delta={}",
-                            h["host"].as_str().unwrap_or("?"),
-                            h["state"].as_str().unwrap_or("?"),
-                            h["index_total"],
-                            h["dto_total"],
-                            h["delta"],
-                        );
-                    }
-                    println!("reconciled: {}", report["reconciled"]);
-                }
-            }
-            Err(e) => {
-                eprintln!("data-reconcile failed: {e}");
-                std::process::exit(2);
-            }
-        }
-        return;
-    }
-
     // sync-facts（Stage B 遗留收口）：三宿主例行 ingest——退休路径第 ① 步。
     // 托盘 tick 未来也调这一条（不各自长文件枚举）。
     if let Some(Cmd::SyncFacts { rows_json }) = &args.cmd {
@@ -2281,7 +2226,7 @@ session_store={store} fold={fold}"
 
     // data-migrate / data-status（v0.9.1 Phase 2 收口）：存量迁移与权威库
     // 状态面。migrate 幂等（fact_id 主键），可重复执行直到全 duplicate。
-    if let Some(Cmd::DataMigrate) = &args.cmd {
+    if let Some(Cmd::DataMigrate { with_legacy_ledger }) = &args.cmd {
         let data_home = agent_vitals_runtime::home::data_home();
         let db = match agent_vitals_data::authority::AuthorityDb::open(
             &agent_vitals_data::authority::default_authority_path(&data_home),
@@ -2343,6 +2288,11 @@ session_store={store} fold={fold}"
                 }
             }
         }
+        // Phase 4.3 Stage 4：claude ledger 深历史导入默认关闭（用户
+        // 2026-09-07 决定：纯原始日志重导入，不要 legacy 兜底）。
+        // `--with-legacy-ledger` 显式打开——`legacy_import` 模块保留
+        // （spec §10「legacy 代码只留 importer」），只是不再是默认路径。
+        if *with_legacy_ledger {
         // Phase 3.2（spec §6.2.3）：claude ledger 深历史 → legacy_aggregate。
         // 这些账在 JSONL 里**没有对应行**——claude 客户端会压缩/轮转会话文件，
         // 历史行物理消失后 ledger 里仍有账（R4 §5.2a：ledger 是这部分账的
@@ -2427,6 +2377,7 @@ session_store={store} fold={fold}"
             }
             Err(e) => eprintln!("data-migrate warning (claude-ledger unaccounted, unreadable): {e}"),
         }
+        } // end `if *with_legacy_ledger`
         // Phase 2.8：落当前价格快照（§5.3：历史查询按记录的 pricing version 重放）。
         match agent_vitals_runtime::sql_sync::snapshot_current_pricing(&db) {
             Ok(true) => println!("  pricing snapshot: new version captured"),
@@ -3206,10 +3157,8 @@ session_store={store} fold={fold}"
     // v0.9 Stage 0.5 Data Query API（只读诊断）。数据面经 trait——CLI 拿到
     // 的是 `Box<dyn SummaryRepository>`，不 new 具体类型到调用点之外、不读
     // 任何 state 文件（spec §3.1 依赖表：apps 只消费 Runtime 的版本化 DTO）。
-    // Phase 3.5 Tier A：读源切到 SQL 权威库（`SqlSummaryRepository`，含
-    // legacy_aggregate 深历史按日合并）——`Cmd::DataReconcile` 的
-    // `JsonSummaryRepository` 保持不动，它对账的就是旧 index 投影 vs DTO，
-    // 换读源等于把对账基准也换了。
+    // Phase 4.3：`SummaryRepository` 只剩 `SqlSummaryRepository` 一个实现，
+    // legacy `JsonSummaryRepository` 已删——读源只有 SQL 权威库一处。
     if let Some(Cmd::Data { action }) = &args.cmd {
         let repo: Box<dyn agent_vitals_data::repository::SummaryRepository> = Box::new(
             agent_vitals_runtime::summary::SqlSummaryRepository::new(),

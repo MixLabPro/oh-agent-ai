@@ -242,81 +242,6 @@ pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, S
     Ok(report)
 }
 
-/// Stage B（Stage A 剩余项收口）：facts 索引 vs 消费方 DTO 的全量 reconcile。
-///
-/// `dto_tokens_by_host` = `SummaryRepository::monthly_summary(..).tokens_by_host`
-/// 序列化（`HostTokens::to_json`，键 `total`）。报告三层（诚实性纪律——
-/// **「没 ingest」绝不渲染成「0 tokens」**）：
-/// - `measured`：索引里有该宿主事实 → 数值对账（delta ≠ 0 即 mismatch）；
-/// - `no-facts`：DTO 知道该宿主、索引一条事实都没有 → 数据面未接，缺口
-///   如实标出（这正是本报告的价值：告诉你 facts 平面还没覆盖生产路径）；
-/// - `index-only`：DTO 不知道该宿主但索引有事实（异常状态，也要浮出来）。
-pub fn reconcile_index_vs_dto(
-    data_home: &Path,
-    month: &str,
-    dto_tokens_by_host: &serde_json::Map<String, Value>,
-) -> Result<Value, String> {
-    // 与 ingest 同锁：并发 rebuild 会把读侧甩到孤儿 inode（审查 P2-5）。
-    let lease_path = data_home.join("facts").join(".ingest.lock");
-    let _lease = crate::lease::acquire_blocking(
-        &lease_path,
-        "facts-reconcile",
-        60_000,
-        2_000,
-    )
-    .map_err(|e| format!("facts reconcile lease [{}] held: {e}", lease_path.display()))?;
-    let facts_dir = data_home.join("facts");
-    let (idx, _seeded) = FactsIndex::open_or_rebuild(&default_index_path(data_home), &facts_dir)
-        .map_err(|e| format!("facts index: {e}"))?;
-    // **审查 P1-3**：索引侧按月过滤——全量累计对按月 DTO，跨月必恒红。
-    let index_totals = idx
-        .tokens_by_host(Some(month))
-        .map_err(|e| format!("facts index: {e}"))?;
-
-    let mut hosts = Vec::new();
-    let mut reconciled = true;
-    let mut keys: std::collections::BTreeSet<&String> =
-        dto_tokens_by_host.keys().collect();
-    for k in index_totals.as_object().map(|m| m.keys()).into_iter().flatten() {
-        keys.insert(k);
-    }
-    for host in keys {
-        let host = host.as_str();
-        let idx_total = index_totals
-            .get(host)
-            .and_then(|v| v.get("total"))
-            .and_then(Value::as_i64);
-        let dto_total = dto_tokens_by_host
-            .get(host)
-            .and_then(|v| v.get("total"))
-            .and_then(Value::as_i64);
-        let (state, mismatch) = match (idx_total, dto_total) {
-            (Some(a), Some(b)) if a == 0 && b == 0 => ("measured", false),
-            (Some(a), Some(b)) => ("measured", a != b),
-            (None, Some(_)) => ("no-facts", false), // 缺口，不是对不上
-            (Some(_), None) => ("index-only", true),
-            (None, None) => unreachable!("host from union of keys"),
-        };
-        if mismatch {
-            reconciled = false;
-        }
-        hosts.push(serde_json::json!({
-            "host": host,
-            "state": state,
-            "index_total": idx_total,
-            "dto_total": dto_total,
-            "delta": match (idx_total, dto_total) {
-                (Some(a), Some(b)) => Some(a - b),
-                _ => None,
-            },
-        }));
-    }
-    Ok(serde_json::json!({
-        "reconciled": reconciled,
-        "hosts": hosts,
-    }))
-}
-
 /// "YYYY-MM" − `months_back` 个月（无 chrono 的月算术：年月展平成 12 进制）。
 fn month_shift(month: &str, months_back: u32) -> String {
     let y: i64 = month.get(0..4).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -481,48 +406,6 @@ mod tests {
         let r2 = ingest_facts(&home, &[fact("codex", "e1")]).unwrap();
         assert_eq!(r2.index_inserted, 0);
         assert!(!r2.index_rebuilt);
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn reconcile_reports_measured_gap_and_index_only() {
-        let home = tmp_home("recon");
-        // measured：codex 两边一致。
-        ingest_facts(&home, &[fact("codex", "e1")]).unwrap();
-        // fact() 的 uncached=100：DTO 侧给同值。
-        let mut dto = serde_json::Map::new();
-        dto.insert(
-            "codex".to_string(),
-            serde_json::json!({"total": 100, "uncached_input": 100, "cache_read": 0,
-                               "cache_write": 0, "output": 0}),
-        );
-        dto.insert(
-            "dsh".to_string(),
-            serde_json::json!({"total": 555, "uncached_input": 555, "cache_read": 0,
-                               "cache_write": 0, "output": 0}),
-        );
-        // 真机托盘 tick 可能正持有同一 ……不——home 是 tmp 隔离的；这里
-        // 的 Err 只可能是真实 bug，保留 unwrap。托盘竞态只影响真机对账
-        // 测试（budget 侧），与此无关。
-        let r = reconcile_index_vs_dto(&home, "2026-09", &dto).unwrap();
-        assert_eq!(r["reconciled"], serde_json::json!(true));
-        let by_host: std::collections::BTreeMap<String, Value> = r["hosts"]
-            .as_array().unwrap().iter()
-            .map(|h| (h["host"].as_str().unwrap().to_string(), h.clone()))
-            .collect();
-        assert_eq!(by_host["codex"]["state"], serde_json::json!("measured"));
-        // dsh：DTO 有、索引没有 → no-facts（缺口，不算 mismatch）。
-        assert_eq!(by_host["dsh"]["state"], serde_json::json!("no-facts"));
-        assert_eq!(by_host["dsh"]["index_total"], Value::Null);
-        // index-only：索引有、DTO 没有 → mismatch。
-        ingest_facts(&home, &[fact("dsh", "e2")]).unwrap();
-        let mut dto_no_dsh = dto.clone();
-        dto_no_dsh.remove("dsh");
-        let r2 = reconcile_index_vs_dto(&home, "2026-09", &dto_no_dsh).unwrap();
-        assert_eq!(r2["reconciled"], serde_json::json!(false));
-        let dsh_row = r2["hosts"].as_array().unwrap().iter()
-            .find(|h| h["host"] == "dsh").unwrap();
-        assert_eq!(dsh_row["state"], serde_json::json!("index-only"));
         let _ = std::fs::remove_dir_all(&home);
     }
 
