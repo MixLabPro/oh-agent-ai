@@ -471,7 +471,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 
 - `group_by` 仅允许 `model`、`provider`、`host`。
 - 单次最多查询 31 天；使用 `date` 时返回 24 个小时桶，包括零值桶。
-- `cost` 按币种和计费口径分列（`MoneyMinor`），不能形成虚假的单一总金额。
+- `metrics` 允许 `["total_tokens", "output_tokens"]`（增量 2）；`"cost"` 推迟到 `cost_breakdown`（M3）——逐小时计价的 SQL 路径需要在事实时点选价版（`PricingCards::asof` 当前仅窗口级），且不能把 v0.9.2 之前用户看到的 M01 守恒测试夹具重写。
 - **`models` 字段 `kind` 词表（M0 D3 裁决）**：v0.9.1 只支持 `"host_raw"`，对应 `usage_facts.model_id` 的宿主 raw 值（按 `hosts` 限定）；其它 `kind` 值（含 `"canonical"`）在该版本中**非法**，schema 用 `enum: ["host_raw"]` 强约束。canonical 归一表就绪后 v0.9.2+ 增 `"canonical"` 作为**新** `kind` 值，**不**改 `"host_raw"` 语义。
 - **响应序列的 `identity_kind` 字段**：每个序列显式带 `identity_kind: "host_raw"`；下游消费者据此决定聚合方式（不能假定后续字段兼容其它身份）。
 
@@ -800,8 +800,8 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | # | 裁决 | 依据 / 落点 | owner | ack |
 |---|---|---|---|---|
 | **D1** | **手写**最小 JSON-RPC 2.0 over stdio（stdlib + `serde_json`）。**不**引入 `rmcp` / `tokio`（MSRV 1.74 + 分发物零第三方）。`protocol_version = "2025-06-18"`；framing = 逐行 JSON（`\n` 分隔，UTF-8，单条消息不跨行）；能力声明只 `tools`；方法集 `initialize` / `notifications/initialized` / `tools/list` / `tools/call` / `ping`；`tools/call` 成功载荷用 `structuredContent`（承载 envelope）+ `content[].text` 等价 JSON 文本块；业务错误 = `isError:true` + envelope `error`（**不**塞 JSON-RPC error）；JSON-RPC error 仅用于协议层（未知方法 / 解析失败 / 参数缺失）。 | spec §6.4；增量 1 已落地（`apps/cli/src/mcp.rs`） | `@claude-impl` | ⬜ |
-| **D2** | `MoneyMinor { amount_minor: i64, currency, basis }`（§5.1.1）。最细上报维度一次 `pyround(× 10^minor_digits)`，父层 = 子项整数和（守恒由构造）。`minor_digits` 来自 currency（CNY/USD=2，JPY=0）。落点 `agent-vitals-data::authority_query` / `agent-vitals-runtime::summary`，MCP / CLI / Tauri 同源读。**所有带金额工具的前置**。 | spec §5.1.1；增量 2 落地 | `@claude-impl` | ⬜ |
-| **D3** | v1 按 `(host, raw_model, billing_route)`（§5 规则 4）。过滤字段 `models: [{kind, host, value}]`，**v1 只支持 `kind="host_raw"`**；canonical 归一表**不**进 v0.9.1。响应每个序列显式 `identity_kind: "host_raw"`。 | spec §5.1 规则 4、§7.2；增量 2 落地 | `@claude-impl` | ⬜ |
+| **D2** | `MoneyMinor { amount_minor: i64, currency, basis }`（§5.1.1）。最细上报维度一次 `pyround(× 10^minor_digits)`，父层 = 子项整数和（守恒由构造）。`minor_digits` 来自 currency（CNY/USD=2，JPY=0）。落点 `agent-vitals-data::authority_query` / `agent-vitals-runtime::summary`，MCP / CLI / Tauri 同源读。**所有带金额工具的前置**。 | spec §5.1.1；增量 2 落地（`agent_vitals_runtime::money::from_f64` 银行家舍入 + `sum_minor` 跨币返 None；domain `MoneyMinor::to_json/from_json`；11 单测全绿） | `@claude-impl` | ✅ |
+| **D3** | v1 按 `(host, raw_model, billing_route)`（§5 规则 4）。过滤字段 `models: [{kind, host, value}]`，**v1 只支持 `kind="host_raw"`**；canonical 归一表**不**进 v0.9.1。响应每个序列显式 `identity_kind: "host_raw"`。 | spec §5.1 规则 4、§7.2；增量 2 落地（`usage_hourly` input schema `models[].kind enum=["host_raw"]`；每个序列 key 带 `identity_kind`；未知 kind 静默过滤 + 测试 `unknown_model_kind_is_silently_ignored`） | `@claude-impl` | ✅ |
 | **D4** | cargo feature `mcp-internal`（`apps/cli`），公开构建**编译期排除** `authority_audit` / `query_sql_readonly` / `reimport_verify`。 | spec §8；增量 6 落地时加 `#[cfg(feature = "mcp-internal")]` | `@claude-impl` | ⬜ |
 | **D5** | `session_ref` salt：`<data_home>/.mcp-session-salt`（32 字节随机，权限 `0600`），首次 `data-mcp serve` 时生成。HMAC-SHA256（`sha2` 已是依赖）。**不进权威库**。 | spec §9.2；增量 6（session 工具） | `@claude-impl` | ⬜ |
 | **D6** | **拆分**：MCP 内只读 `authority_audit`（守恒 / 重复 / 覆盖 / `authority_revision` 自检）+ **MCP 外**隔离命令 `agent-vitals data reimport-verify`（临时库重导入比对）。快照对账模式 → M3 才接（要补 `snapshot.manifest.json` + `pricing_snapshots` / `host_bills` 副本）。 | spec §8.1；增量 6 + 7 | `@claude-impl` | ⬜ |

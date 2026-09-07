@@ -114,3 +114,66 @@ stdout 纪律）→ 修复 S1/S3 → commit `dcb672e` + `5b8e38e`。
 - golden 15/15 字节一致
 - Python AGENT_VITALS_BIN 差分 1161 测试 OK
 - 真机 smoke：handshake / `tools/list` 携带 inputSchema+outputSchema / `tools/call data_status` 端出完整 envelope（`schema_version` / `data_version` / `authority_state` / `authority_revision` / `coverage` / `freshness` / `warnings` / `data`）/ 损坏库返回 `isError:true` + `database_unreadable`
+
+---
+
+## 增量 2：`MoneyMinor` 精确投影 + `usage_hourly`（含 review S2/S4/S5/S7 follow-ups）
+
+**目标**：把 spec §5.1.1 `MoneyMinor` 三元组（amount_minor 整数 + currency + basis）
+作为权威读面统一投影落地，MCP / CLI / Tauri 三消费面同源读（不再各自乘回分）；
+并把第一个时间窗口工具 `usage_hourly` 端到端跑通——宿主 / model / provider 三轴
++ 逐小时 `MoneyMinor` 成本（24 桶含零）。同时并入增量 1 review 的 4 处
+should-fix（S2 / S4 / S5 / S7）：
+
+- S2 `AuthorityHandle::authority_state` 改成 `Result<&'static str, UnavailableReason>`
+- S4 `authority_revision.max_observed_at` SQL 排除 `observation_kind='legacy_aggregate'`
+- S5 `validate_args` 对未设 `additionalProperties:false` 强制 fail-fast
+- S7 `data_status` 调用频次 > N 记 stderr warn（worker 60s memo 留到增量 5/6）
+
+### 落点
+
+- **`crates/agent-vitals-domain/src/domain/data_contract.rs`**：新增 `MoneyMinor`
+  类型 + JSON 序列化 + 构造器（Rust 风格伪类型，运行时落 `agent-vitals-runtime`
+  下，不引新 crate）。
+- **`crates/agent-vitals-runtime/src/money.rs`**（新模块）：
+  - `pub fn minor_digits_for(currency: &str) -> u32`（CNY/USD=2, JPY=0, 其它查 ISO 4217 表 + 兜底 2）。
+  - `pub fn from_f64(value: f64, currency: &str, basis: BillingBasis) -> MoneyMinor`（一次 `pyround(× 10^minor_digits)`；NaN/Inf 输入 → 业务错误 `internal_error`，不静默）。
+  - `pub fn sum_minor(items: &[MoneyMinor]) -> Option<MoneyMinor>`（同 `currency` + `basis` 求和；跨币返回 `None` + warn，**不**伪造总金额）。
+- **`crates/agent-vitals-data/src/authority_query.rs`**：
+  - 新增 `hourly_by_host_and_model(conn, start_ms, end_ms, hosts, models) -> Result<BTreeMap<(String, String, String), HourlyCell>, AuthorityError>`——三宿主「小时 × host × raw_model」聚合 + token 之和 + cost（`MoneyMinor` 字段）。复用 `hourly_by_host` 的窗口算术（`(event_ts_ms + BEIJING_OFFSET_MS) / HOUR_MS % 24`）。
+  - **修正 S4**：`authority_state_for` / `authority_revision` 内的 SQL 加 `observation_kind != 'legacy_aggregate'`（目前 envelope + per_host 都过滤了，只有 revision 还漏）。
+  - 已有 `hourly_by_host` 加 `cost` 字段——可选；M1 阶段先用 model 轴查，宿主轴的 cost 留给后续工具。
+- **`crates/agent-vitals-runtime/src/mcp/usage_hourly.rs`**（新工具）：
+  - `ToolSpec`（inputSchema：`{date: YYYY-MM-DD, group_by: enum, hosts?, models?, metrics?, as_of_run_id?}`，所有参数 `additionalProperties: false`）。
+  - `run(args, data_home) -> Result<Value, ToolError>`：
+    1. 参数解析 + schema 校验（参数错误 → `invalid_argument`）。
+    2. `AuthorityHandle::open(data_home)` 取只读 conn（**先**改正 S2：返回 `Result` 而非 panic）。
+    3. 调 `hourly_by_host_and_model`（或 `hourly_by_host` for `group_by=host`）拼 envelope。
+    4. 窗口拉满 24 桶含零值（缺桶填 `null` + warning）。
+    5. `as_of_run_id` 处理按 §6.4.1：drift → `warnings:[{code:"snapshot_drift",...}]`，不存在 → `invalid_argument`。
+- **`crates/agent-vitals-runtime/src/mcp/mod.rs`**：
+  - `authority_revision` 加 `legacy_aggregate` 过滤（**S4 fix**——已落 + 测试 `authority_revision_max_observed_excludes_legacy_aggregate`）。
+  - `validate_args` 改成 **runtime** `assert`-类返回（**S5 fix**——`debug_assert_eq!` 在 release 是 no-op，不能用）。
+  - **`AuthorityHandle::authority_state` 改 `Result<&'static str, UnavailableReason>`（S2）——延后**：保留 `&'static str`，调用点（`data_status`/`usage_hourly`）走 helper `authority_state_for(data_home)`——已对齐 spec §6.1 的两态（库能打开 ⇒ `enabled`/`candidate`）；不可达态在打开时 fail-fast。
+  - 频次日志：超过 50 calls / 分钟 → stderr warn（**S7 fix**——延后到增量 5/6 worker memo 那次）。
+- **`crates/agent-vitals-runtime/src/mcp/mod.rs::tool_specs()`**：注册 `usage_hourly`。
+- **`apps/cli/src/main.rs`**：现有 `Cmd::Data { action: DataAction::Coverage | Daily | Authority }` 不变；`data-mcp serve` 通过 `tool_specs()` 自动暴露 `usage_hourly`——CLI 端不需要新子命令。
+- **测试**：
+  - `money` 模块：`minor_digits_for("CNY")==2`、`from_f64(0.125, "CNY", MeteredActual).amount_minor==13`（银行家舍入；0.125 → 12.5 → 13）。
+  - `hourly_by_host_and_model`：3 宿主 × 2 模型 × 24 桶 fixture，守恒（小时累加 == 日累计）+ 北京小时边界。
+  - `usage_hourly`：空库（24 个 `null` + `coverage.covered_to=null`）+ drift warn + invalid_argument（多余字段、坏 enum、坏日期）+ 真机 fixture 守恒。
+  - `validate_args`：缺 `additionalProperties:false` 触发 panic（debug_assert）。
+  - `authority_revision`：fixture 含 legacy_aggregate 行时 `max_observed_at` ≠ legacy 行的 `event_ts_ms`。
+- **文档**：实施计划本节同步记录 M0 D2 ack（`MoneyMinor` 落地）+ D3 ack（`models.kind="host_raw"` + `identity_kind` 落地）。
+
+### 验收
+
+- Rust 单元：`money::minor_digits_for` 覆盖 `CNY/USD/JPY/EUR`；`from_f64` 银行家舍入；`sum_minor` 跨币返 None。
+- Rust 集成：`usage_hourly` 三宿主 × 双模型 × 24 桶 fixture，每小时与日累计守恒。
+- 三消费面 parity：MCP `usage_hourly.data.totals_by_currency_basis` 与 `data coverage` / `data daily`（按日累计聚合）逐值 `amount_minor` 相等。
+- 错误路径：corrupt DB → `isError:true` + `database_unreadable`（与 data_status 同形态，已 S1 验证）；缺 `additionalProperties:false` → debug_assert panic 触发（**S5**）；`as_of_run_id` drift → `warnings:[snapshot_drift]`。
+- 全量 gate：`cargo test --workspace`、`cargo clippy --workspace --all-targets -D warnings`、golden 15/15、`AGENT_VITALS_BIN` 差分 + 真机 U01/U02（小时曲线 24 桶 / 峰值小时）。
+
+### 收口
+
+subAgent 审查（MoneyMinor 三消费面逐值相等、`from_f64` 舍入点、`hourly_by_host_and_model` 索引命中、`as_of_run_id` drift 检测、`validate_args` fail-fast 强度、`usage_hourly` 输出 schema 闭合） → 修复 → commit。

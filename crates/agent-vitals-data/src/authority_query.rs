@@ -87,6 +87,28 @@ pub(crate) const SQL_CODEX_BY_HOUR_MODEL: &str = "SELECT (event_ts_ms + ?1) / ?2
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
          GROUP BY hour_idx, model_id";
 
+/// [`hourly_by_host_model`] 三宿主 × 模型 × 小时聚合（增量 2 `usage_hourly`
+/// 工具的 SQL 数据源）。从函数体抽出来便于 EXPLAIN QUERY PLAN 测试断言。
+///
+/// **单宿主** SQL：`host = ?5` 走 `usage_facts_host_time` 索引（与
+/// `codex_by_hour_model` / `claude_days` 同款）。三宿主聚合由 fn 把三个
+/// 单宿主查询的结果 in-memory 合并——OR + IN + positional params 三种
+/// 写法 SQLite planner 都会退化成 SCAN + temp B-tree（实测，2026-09-05
+/// tab 卡顿事故形状）。wired 宿主就 3 个（claude-code / codex / dsh），
+/// in-memory 合并成本可忽略；多于 3 个需要重新评估。
+pub(crate) const SQL_HOURLY_BY_HOST_MODEL: &str = "SELECT host, COALESCE(model_id, '<unknown>'),
+                CAST(((event_ts_ms + ?1) / ?2) % 24 AS TEXT) AS bj_hour,
+                SUM(uncached_input_tokens),
+                SUM(cache_read_tokens),
+                SUM(cache_write_tokens),
+                SUM(output_tokens)
+         FROM usage_facts
+         WHERE observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+           AND host = ?5
+         GROUP BY host, model_id, bj_hour";
+
 /// [`facts_page_window`]：键集分页（`(event_ts_ms, fact_id)` 游标，无 OFFSET）。
 pub(crate) const SQL_FACTS_PAGE_WINDOW: &str =
     "SELECT fact_id, native_session_id, model_id, event_ts_ms,
@@ -638,6 +660,102 @@ pub fn token_totals_by_host(
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
     })?;
     rows.collect::<Result<_, _>>().map_err(AuthorityError::from)
+}
+
+/// `(host, model)` 序列在 24 个北京小时桶上的 token 分计。
+pub type HostModelHourBuckets = BTreeMap<String, HourlyCell>;
+
+/// `hourly_by_host_model` 返回值类型——`(host, model)` → 24 桶 map。
+pub type HostModelHourly = BTreeMap<(String, String), HostModelHourBuckets>;
+
+/// `usage_hourly` 工具（spec §7.2）的 SQL 数据源：`(host, model, hour)` 三维
+/// 聚合 + 四桶分计。`legacy_aggregate` 始终排除（聚合兜底行不可作小时轴可信值，
+/// 与 `hourly_by_host` 同一条窗口过滤纪律）。
+///
+/// 返回 `HostModelHourly`——`hourly_by_host` 同款 (key, value) 形状 + `model`
+/// 第二维。`model_id` 是宿主 raw 值（spec §5.1 规则 4 + D3，`usage_facts.model_id`
+/// 暂未归一为 canonical）。
+pub fn hourly_by_host_model(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    hosts: &[String],
+) -> Result<HostModelHourly, AuthorityError> {
+    // 单宿主查询（`host = ?` 命中 `usage_facts_host_time` 索引）——三宿主
+    // 聚合用 in-memory 合并。详见 `SQL_HOURLY_BY_HOST_MODEL` 的注释。
+    let wired: &[&str] = &["claude-code", "codex", "dsh"];
+    let selected: Vec<&str> = wired
+        .iter()
+        .filter(|w| hosts.is_empty() || hosts.iter().any(|h| h == *w))
+        .copied()
+        .collect();
+    if selected.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut out: HostModelHourly = BTreeMap::new();
+    for host in selected {
+        let mut stmt = conn.prepare(SQL_HOURLY_BY_HOST_MODEL)?;
+        let rows = stmt.query_map(
+            rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms, host],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            let (host, model, hour, uncached, cache_read, cache_write, output) = row?;
+            let cell = HourlyCell { uncached_input_tokens: uncached, cache_read_tokens: cache_read, cache_write_tokens: cache_write, output_tokens: output };
+            out.entry((host, model)).or_default().insert(format!("{:0>2}", hour), cell);
+        }
+    }
+    Ok(out)
+}
+
+/// `(host, hour)` 单元——四桶原始计数 + 派生 `total`。`cache_hit_ratio` 与
+/// `HourlyCell` 的 `HourlyCell::to_json()` 在响应层算（spec §6.2 诚实
+/// 返回原则：输入侧全零 → `null`，不外推 0）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HourlyCell {
+    pub uncached_input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub output_tokens: i64,
+}
+
+impl HourlyCell {
+    /// 四桶之和 = 总 token（M0 §5.1.1 守恒由构造）。
+    pub fn total(&self) -> i64 {
+        self.uncached_input_tokens + self.cache_read_tokens + self.cache_write_tokens + self.output_tokens
+    }
+
+    /// cache_hit_ratio = cache_read / (uncached + cache_read + cache_write)；
+    /// 输入侧全零 → `None`（不是 0）。
+    pub fn cache_hit_ratio(&self) -> Option<f64> {
+        let input = self.uncached_input_tokens + self.cache_read_tokens + self.cache_write_tokens;
+        if input == 0 {
+            None
+        } else {
+            Some(self.cache_read_tokens as f64 / input as f64)
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({
+            "uncached_input_tokens": self.uncached_input_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "output_tokens": self.output_tokens,
+            "total": self.total(),
+            "cache_hit_ratio": self.cache_hit_ratio(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1359,28 +1477,20 @@ mod tests {
         let page_after_ts = i64::MIN;
         let page_after_id = "";
         let page_limit = 50_i64;
-        let page_params: [&dyn rusqlite::ToSql; 6] = [
-            &"dsh",
-            &s,
-            &end,
-            &page_after_ts,
-            &page_after_id,
-            &page_limit,
-        ];
+        let page_params: [&dyn rusqlite::ToSql; 6] =
+            [&"dsh", &s, &end, &page_after_ts, &page_after_id, &page_limit];
+        // `hourly_by_host_model` = 单宿主 SQL + 在 fn 内 in-memory 合并 3 宿主。
+        // EXPLAIN 只测一条 host 字面量是否命中索引——三宿主合并是 fn 行为，
+        // 不在 SQL planner 视野内。
+        let hourly_h_params: [&dyn rusqlite::ToSql; 5] =
+            [&BEIJING_OFFSET_MS, &HOUR_MS, &s, &end, &"claude-code"];
 
         for (name, sql, params) in [
             ("peaked_days_map", SQL_PEAKED_DAYS_MAP, &peak_params[..]),
             ("claude_days", SQL_CLAUDE_DAYS, &day_params[..]),
-            (
-                "claude_legacy_days",
-                SQL_CLAUDE_LEGACY_DAYS,
-                &day_params[..],
-            ),
-            (
-                "codex_by_hour_model",
-                SQL_CODEX_BY_HOUR_MODEL,
-                &hour_params[..],
-            ),
+            ("claude_legacy_days", SQL_CLAUDE_LEGACY_DAYS, &day_params[..]),
+            ("codex_by_hour_model", SQL_CODEX_BY_HOUR_MODEL, &hour_params[..]),
+            ("hourly_by_host_model", SQL_HOURLY_BY_HOST_MODEL, &hourly_h_params[..]),
             ("facts_page_window", SQL_FACTS_PAGE_WINDOW, &page_params[..]),
         ] {
             let p = plan(sql, params);

@@ -84,6 +84,51 @@ impl BillingBasis {
             _ => return None,
         })
     }
+
+    /// 5 档的硬常量——给 schema enum 用，避免误增新档悄无声息。
+    pub const fn variant_count() -> usize { 5 }
+}
+
+/// spec §5.1.1 + §13 M0 D2：MCP、CLI、Tauri 三消费面同源读的最小货币单位
+/// 整数三元组。**不**存展示层 `f64`（spec §5.1 规则 5）；生产者只在该做
+/// 一次 `pyround` 的最细上报粒度 round 一次，父层金额 = 子项整数和
+///（守恒由构造）。
+///
+/// 这是一个**纯数据类型**——不读时钟、不引第三方、不认识宿主 wire 格式。
+/// `from_f64` / `sum_minor` / `minor_digits_for` 在 runtime crate 实现
+///（它们有浮点舍入 / IO 状态），domain 这层只暴露数据形状。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoneyMinor {
+    pub amount_minor: i64,
+    pub currency: String,
+    pub basis: BillingBasis,
+}
+
+impl MoneyMinor {
+    /// spec §5.1.1 JSON 形状——`amount_minor` 是 i64（最小货币单位整数）、
+    /// `currency` ISO 4217 字符串（"CNY" / "USD" / …）、`basis` 来自
+    /// `BillingBasis::as_str()` 的 snake_case。
+    pub fn to_json(&self) -> Value {
+        json!({
+            "amount_minor": self.amount_minor,
+            "currency": self.currency,
+            "basis": self.basis.as_str(),
+        })
+    }
+
+    /// `to_json` 的逆——读侧把 envelope 里的 `MoneyMinor` 还原成结构体。
+    /// `amount_minor` 必须是非负整数（金钱不出现负值；负值 → `None`，由
+    /// 调用方报业务错误）；`basis` 必须在 `BillingBasis::from_wire` 词表里。
+    pub fn from_json(v: &Value) -> Option<Self> {
+        let amount = v.get("amount_minor")?.as_i64()?;
+        if amount < 0 {
+            return None;
+        }
+        let currency = v.get("currency")?.as_str()?.to_string();
+        let basis_str = v.get("basis")?.as_str()?;
+        let basis = BillingBasis::from_wire(basis_str)?;
+        Some(Self { amount_minor: amount, currency, basis })
+    }
 }
 
 /// spec §0.1：每一项成本必须可见的口径，比 `BillingBasis` 粗一档——回答

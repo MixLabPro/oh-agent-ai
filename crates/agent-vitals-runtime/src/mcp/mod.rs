@@ -17,6 +17,7 @@
 //! 读取方式在这里为后续工具钉死。
 
 mod data_status;
+mod usage_hourly;
 
 use std::path::{Path, PathBuf};
 
@@ -196,6 +197,12 @@ fn schema_version(conn: &Connection) -> i64 {
 /// spec §6.1 `authority_revision`：本次答案基于哪一批已提交数据。
 /// = 最近一次 `sync_runs.status='succeeded'` 的 run + 其提交时间 +
 /// 查询窗口内（或全库）事实的 `MAX(event_ts_ms)`。
+///
+/// **S4 fix（增量 1 review）**：`max_observed_at` SQL 必须 `WHERE
+/// observation_kind != 'legacy_aggregate'`——legacy 是聚合兜底行，
+/// `event_ts_ms` 是北京日 12:00 代表点；混进去会把 `max_observed_at`
+/// 推到 `covered_to` 之后，破坏 spec §6.1「本次答案基于哪一批已提交
+/// 数据」的不变量。这条过滤与 `per_host_breakdown` / `hourly_by_host` 同。
 fn authority_revision(conn: &Connection, max_observed_at_ms: Option<i64>) -> Value {
     let last = conn
         .query_row(
@@ -208,7 +215,9 @@ fn authority_revision(conn: &Connection, max_observed_at_ms: Option<i64>) -> Val
         .ok();
     let max_observed = max_observed_at_ms.or_else(|| {
         conn.query_row(
-            "SELECT MAX(event_ts_ms) FROM usage_facts WHERE deleted_at_ms IS NULL",
+            "SELECT MAX(event_ts_ms) FROM usage_facts
+             WHERE deleted_at_ms IS NULL
+               AND observation_kind != 'legacy_aggregate'",
             [],
             |r| r.get::<_, Option<i64>>(0),
         )
@@ -273,7 +282,7 @@ pub struct ToolSpec {
 
 /// 当前构建注册的工具。传输层据此渲染 `tools/list` 并校验 `tools/call` 的名字。
 pub fn tool_specs() -> Vec<ToolSpec> {
-    vec![data_status::spec()]
+    vec![data_status::spec(), usage_hourly::spec()]
 }
 
 /// CLI `data-status` 的数据面——与 MCP `data_status` 工具**同源**（spec §5
@@ -293,6 +302,7 @@ pub fn dispatch(name: &str, args: &Value, data_home: &Path) -> Result<Value, Too
     validate_args(&spec, args)?;
     match name {
         "data_status" => data_status::run(args, data_home),
+        "usage_hourly" => usage_hourly::run(args, data_home),
         other => Err(ToolError::new("internal_error", format!("tool `{other}` registered but not wired"))),
     }
 }
@@ -300,23 +310,38 @@ pub fn dispatch(name: &str, args: &Value, data_home: &Path) -> Result<Value, Too
 /// 极简参数校验（spec §6.4：`additionalProperties: false` + 未知字段 →
 /// `invalid_argument`）。**不做**完整 JSON Schema——只挡「不是对象」和「多余
 /// 字段」两类，够 M08 注入防护；参数一多再引 schema crate。
+///
+/// **S5 fix（增量 1 review）**：首行 `debug_assert!` 每个注册工具的 schema
+/// 都把 `additionalProperties` 设为 `false`——**没设就是 fail-fast**，
+/// 否则未来某个工具忘了标就会被静默放行多余字段，构成注入漏洞。
 fn validate_args(spec: &ToolSpec, args: &Value) -> Result<(), ToolError> {
+    // S5 fix (increment 1 review, increment 2 落地)：**runtime** check（不是
+    // debug_assert!）——release 构建必须也强制 `additionalProperties:false`，
+    // 否则未来某工具忘了标会被静默放行多余字段，构成注入漏洞。
+    // `debug_assert!` 在 release 是 no-op，不能用。
+    if spec.input_schema.get("additionalProperties") != Some(&Value::Bool(false)) {
+        return Err(ToolError::new(
+            "internal_error",
+            format!(
+                "tool `{}` inputSchema must set additionalProperties:false (spec §6.4 / M08) — fix the tool registration",
+                spec.name
+            ),
+        ));
+    }
     let obj = args
         .as_object()
         .ok_or_else(|| ToolError::new("invalid_argument", "`arguments` must be a JSON object"))?;
-    if spec.input_schema.get("additionalProperties") == Some(&Value::Bool(false)) {
-        let known: std::collections::BTreeSet<&str> = spec
-            .input_schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .map(|p| p.keys().map(String::as_str).collect())
-            .unwrap_or_default();
-        if let Some(extra) = obj.keys().find(|k| !known.contains(k.as_str())) {
-            return Err(ToolError::new(
-                "invalid_argument",
-                format!("unknown argument `{extra}` for tool `{}`", spec.name),
-            ));
-        }
+    let known: std::collections::BTreeSet<&str> = spec
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|p| p.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    if let Some(extra) = obj.keys().find(|k| !known.contains(k.as_str())) {
+        return Err(ToolError::new(
+            "invalid_argument",
+            format!("unknown argument `{extra}` for tool `{}`", spec.name),
+        ));
     }
     Ok(())
 }
@@ -324,6 +349,73 @@ fn validate_args(spec: &ToolSpec, args: &Value) -> Result<(), ToolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_vitals_data::authority::AuthorityDb;
+
+    #[test]
+    fn authority_revision_max_observed_excludes_legacy_aggregate() {
+        // S4 fix (increment 1 review, increment 2 落地)：legacy_aggregate 行
+        // 的 `event_ts_ms` 是北京日 12:00 代表点——不能被 `max_observed_at`
+        // 当作可信快照的"最新观察时间"。回归测试。
+        let home = std::env::temp_dir().join(format!(
+            "avmcp-revfix-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
+
+        // 两条事实：
+        // - 实时行，event_ts_ms = 2026-09-07 03:00 北京（≈ Unix 1.757e12 ms）
+        // - legacy_aggregate 行，event_ts_ms = 2026-09-08 12:00 北京（故意比实时晚 1 天）
+        // 期望 max_observed_at = 实时行的 event_ts_ms，**不是** legacy 的。
+        let real_ts: i64 = 1_757_000_000_000;
+        let legacy_ts: i64 = 1_757_100_800_000; // +30h 后
+        let conn = db.conn();
+        // 直接 INSERT 走 SQL——绕过 writer 校验（这是测试，不是生产写入）。
+        conn.execute(
+            "INSERT INTO sync_runs(run_id, started_at_ms, completed_at_ms, trigger, status, schema_version)
+             VALUES ('run1', ?1, ?1, 'cli', 'succeeded', 1)",
+            rusqlite::params![1_700_000_000_000_i64],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+                                     parser_version, first_seen_at_ms, last_seen_at_ms,
+                                     last_successful_run_id)
+             VALUES ('src-real', 'claude-code', 'h-real', 0, 0, 1, ?1, ?1, 'run1'),
+                    ('src-legacy', 'claude-code', 'h-legacy', 0, 0, 1, ?2, ?2, 'run1')",
+            rusqlite::params![real_ts, legacy_ts],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+             VALUES ('sess-real', 'claude-code', 'real-1', 'test', ?1), ('sess-legacy', 'claude-code', 'legacy-1', 'test', ?2)",
+            rusqlite::params![real_ts, legacy_ts],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                                     observation_kind, event_ts_ms, output_tokens,
+                                     source_id, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES ('f-real', 'claude-code', 'test', 'real-1', 'e1', 'assistant-usage', ?1, 100,
+                     'src-real', 'run1', ?1, ?1),
+                    ('f-legacy', 'claude-code', 'test', 'legacy-1', 'e2', 'legacy_aggregate', ?2, 200,
+                     'src-legacy', 'run1', ?2, ?2)",
+            rusqlite::params![real_ts, legacy_ts],
+        ).unwrap();
+
+        let env = build_envelope(conn, "candidate", None, coverage_not_applicable(), vec![], json!({}));
+        // committed_at = sync_run 的 started_at_ms = 2023-11-15 北京；不影响
+        // S4 fix 的核心断言（`max_observed_at` 必须等于**实时行**的
+        // event_ts_ms，不能被 legacy_aggregate 行拉到 30h 后）。
+        let _committed_at = env["authority_revision"]["committed_at"].as_str().unwrap();
+        let max_observed = env["authority_revision"]["max_observed_at"].as_str().unwrap();
+        assert_eq!(max_observed, ms_to_rfc3339_beijing(real_ts),
+            "max_observed_at must reflect real rows, not legacy_aggregate (legacy ts={legacy_ts}, max_observed={max_observed})");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn rfc3339_beijing_formats_epoch_zero() {
