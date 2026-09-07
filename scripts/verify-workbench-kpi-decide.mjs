@@ -25,6 +25,7 @@ const ok = (cond, msg) => {
 };
 
 const wb = readFileSync(`${root}/apps/desktop/src-tauri/ui/workbench.js`, "utf8");
+const html = readFileSync(`${root}/apps/desktop/src-tauri/ui/workbench.html`, "utf8");
 
 // 静态断言：关键诚实性文案在真实文件里
 console.log("# 静态断言（真实文件内容）");
@@ -32,6 +33,15 @@ ok(wb.includes("cache_write 按 1hr 计"), "名义副行带 cache_write 档位�
 ok(wb.includes("归属待核"), ">50× 的「归属待核」告警文案存在");
 // （审查 #9：此处原是恒真断言 `X===false || X`，给假绿——名义排除订阅月费的
 // 行为已由下方 renderKpiRow 的 $1180 断言真实覆盖，恒真行删除。）
+
+// 预算卡：后端 Phase 4.3 起返回 source:"sql"（SQL 权威库实时算），前端此前只
+// 认 "alert" → 一直落进「等预算数据」兜底（screenshot 事故）。现两态都是权威。
+ok(wb.includes('b.source !== "alert" && b.source !== "sql"'),
+  "预算卡兜底判定同时排除 alert 与 sql（sql 是权威不是缺场）");
+ok(wb.includes("budgetLive"), "source:\"sql\" 走「实时算」新鲜度文案，不说「尚未产出」");
+// 预算口径 = 跨宿主按量实付（PM 决策 2026-09-07）——「仅 DSH」是历史遗留缺陷。
+ok(html.includes("跨宿主按量实付") && !html.includes("仅 DSH 实测"),
+  "预算卡 label 改「跨宿主按量实付」，不再写「仅 DSH 实测」");
 
 // ── vm 执行真实文件 ──
 function makeElement() {
@@ -43,6 +53,8 @@ function makeElement() {
       remove: (c) => classes.delete(c),
       toggle: (c, force) => (force === undefined ? (classes.has(c) ? classes.delete(c) : classes.add(c)) : force ? classes.add(c) : classes.delete(c)),
       contains: (c) => classes.has(c),
+      // classList 有 for..of 迭代器，workbench.js 用 [...el.classList] 遍历。
+      [Symbol.iterator]: function* () { for (const c of classes) yield c; },
     },
   };
 }
@@ -68,6 +80,8 @@ vm.runInContext(wb, sandbox);
 sandbox.__quota = null;
 
 const num = (id) => elements[id]?.textContent ?? "";
+const sub = (id) => elements[id + "-sub"]?.textContent ?? "";
+const ttl = (id) => elements[id]?.title ?? "";
 console.log("# renderKpiRow");
 // 合成 DTO：形状 = 真实冻结 DTO（Stage B/C 后：by_provider 条目带 currency）
 const daily = {
@@ -97,6 +111,45 @@ ok(!num("ov-t-nominal").includes("118.00"), "订阅月费 ¥118 没有混进名�
 ok(num("ov-t-actual") === "¥118.00", `实际 = total_actual_spend 分币（got ${num("ov-t-actual")}）`);
 // 跨宿主合成 = Σread/Σ(unc+read+write) = 1390M/1500M = 92.7%
 ok(num("ov-t-cache") === "92.7%", `命中率跨宿主合成 1390/1500（got ${num("ov-t-cache")}）`);
+
+console.log("# renderKpiRow · 速览层混币折算（Overview.fx，PM 决策 2026-09-07）");
+// 名义/单位成本：有汇率 + 混币 → 并成一个 ≈¥（原始分币进 hover）。
+// 名义 = {USD 1180, CNY 300}；7.15 → cny = 300 + 1180×7.15 = 8737。
+// FX 形状出处：apps/desktop/src-tauri/src/overview.rs::fx_estimate → {usd_cny, as_of}
+// （assets/pricing.json::fx_estimate 的 USD_CNY / as_of 提取）。
+const FX = { usd_cny: 7.15, as_of: "2026-09" };
+sandbox.renderKpiRow("t", daily, FX);
+ok(num("ov-t-nominal") === "≈¥8737.00",
+  `名义混币按 7.15 折算成一个 ≈¥（got ${num("ov-t-nominal")}）`);
+ok(ttl("ov-t-nominal").includes("¥300.00") && ttl("ov-t-nominal").includes("$1180.00"),
+  `名义 hover 保留原始分币（got "${ttl("ov-t-nominal")}"）`);
+ok(sub("ov-t-nominal").includes("7.15") && sub("ov-t-nominal").includes("2026-09"),
+  `名义副行标注折算汇率 + as_of（got "${sub("ov-t-nominal")}"）`);
+ok(num("ov-t-unit").startsWith("≈¥") && num("ov-t-unit").includes("/M · 名义"),
+  `单位成本名义/M 也折算成 ≈¥/M（got ${num("ov-t-unit")}）`);
+ok(ttl("ov-t-unit").includes("/M"), `单位 hover 保留分币/M（got "${ttl("ov-t-unit")}"）`);
+// 实际侧永远分币——fx 不进实付（PM 决策）。
+ok(num("ov-t-actual") === "¥118.00" && !num("ov-t-actual").includes("≈"),
+  `实际支出不折算、保持分币（got ${num("ov-t-actual")}）`);
+ok(sub("ov-t-unit").includes("实际") && !/≈¥\d+\/M · 名义/.test(sub("ov-t-unit")),
+  `单位副行的实际/M 分币不折（got "${sub("ov-t-unit")}"）`);
+ok(sub("ov-t-unit").includes("（分币不折）"),
+  `副行实际侧标注「分币不折」区分折算态（got "${sub("ov-t-unit")}"）`);
+
+// 降级①：无汇率（价表旧版 / fx:null）→ 退回分币旧行为，不加 ≈。
+sandbox.renderKpiRow("t", daily, null);
+ok(/^¥[\d.]+ \+ \$[\d.]+$/.test(num("ov-t-nominal")) && !num("ov-t-nominal").includes("≈"),
+  `无汇率退回分币并列（got ${num("ov-t-nominal")}）`);
+ok(ttl("ov-t-nominal") === "", "无折算时清掉上一轮的 hover title");
+
+// 降级②：单币（只有 CNY）+ 有汇率 → 不折算、不加 ≈（不凭空长符号）。
+const cnyOnly = {
+  by_provider: { "dsh/deepseek-official": { amounts_by_basis: { metered_actual: 5 }, currency: "CNY", has_unresolved: false } },
+  total_actual_spend: { CNY: 5 },
+  tokens_by_host: { dsh: { total: 1_000_000, uncached_input: 1_000_000, cache_read: 0, cache_write: 0, output: 0 } },
+};
+sandbox.renderKpiRow("t", cnyOnly, FX);
+ok(num("ov-t-nominal") === "¥5.00", `单币 CNY + 有汇率 → 不折算不加 ≈（got ${num("ov-t-nominal")}）`);
 
 // 无数据 → 「无数据」绝不 0
 sandbox.renderKpiRow("t", null);
@@ -151,5 +204,5 @@ await sandbox.renderDecideCard(monthly);
 decideHtml = elements["ov-decide-body"].innerHTML + (elements["ov-decide-body"]._kids || []).map((k) => k.textContent).join("");
 ok(decideHtml.includes("可继续使用"), "Codex 剩 60% → 健康态");
 
-console.log(failed ? `\n${failed} 项失败` : "\n全部通过");
-process.exit(failed ? 1 : 0);
+if (failed) { console.error("\n" + failed + " 项断言失败"); process.exit(1); }
+console.log("\n通过。");

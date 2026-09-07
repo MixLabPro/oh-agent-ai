@@ -342,6 +342,32 @@ function fmtCurMap(m) {
     .sort((a, b) => rank(a[0]) - rank(b[0]) || (a[0] < b[0] ? -1 : 1))
     .map(([c, v]) => fmtCur(v, c || null));
 }
+// 速览层混币折算（PM 决策 2026-09-07）：把 {CNY, USD, …} 金额 map 按
+// `assets/pricing.json::fx_estimate` 的汇率（`Overview.fx = {usd_cny, as_of}`）
+// 并成一个 `≈¥` 数——**是估算标签不是口径**。只用于名义 / 单位成本（速览层）；
+// 实际支出 / 预算 / 双轨账 / 本月结论行永远分币不相加（那些是账单级口径）。
+// 返回 null → 调用方退回分币旧行为，触发条件：无汇率 · map 为空 · 只有 CNY 一种
+//（无需折算，不凭空长 `≈`）· 出现认不出的币种（宁可分币也不编一个折算数）。
+function fxMerge(curMap, fx) {
+  const rate = fx && Number(fx.usd_cny);
+  if (!rate || !(rate > 0)) return null;
+  const entries = Object.entries(curMap || {}).filter(([, v]) => v > 0);
+  if (!entries.length) return null;
+  if (entries.every(([c]) => c === "CNY")) return null; // 单币无需折算
+  let cny = 0;
+  for (const [c, v] of entries) {
+    if (c === "CNY") cny += v;
+    else if (c === "USD") cny += v * rate;
+    else return null; // 认不出的币 → 分币，不折
+  }
+  return { cny, parts: fmtCurMap(curMap), rate, asOf: fx.as_of || null };
+}
+// `≈¥X`（折算总额）。原始分币走调用方的 hover title。
+function fmtFxApprox(m) { return "≈" + fmtCur(m.cny, "CNY"); }
+// 折算口径的人话副行片段：「混币按 ≈7.15 折算（2026-09）」。
+function fxNote(m) {
+  return "混币按 ≈" + m.rate + " 折算" + (m.asOf ? "（" + m.asOf + "）" : "");
+}
 function tokensSum(tokensByHost) {
   let unc = 0, read = 0, write = 0, out = 0, total = 0;
   for (const t of Object.values(tokensByHost || {})) {
@@ -382,13 +408,19 @@ async function renderOverview() {
   }
   renderMonthVerdict(monthly);
   renderOverviewDays(cal);
-  renderKpiRow("t", daily);
-  renderKpiRow("m", monthly);
+  renderKpiRow("t", daily, ov.fx);
+  renderKpiRow("m", monthly, ov.fx);
   renderDualTrack(monthly);
   renderDecideCard(monthly);
 
-  // 预算 —— 只读 alert.json 权威（level/ratio/snooze/reasons），不重算百分比。
+  // 预算 —— 读后端权威（level/ratio/snooze/reasons），不重算百分比。口径 =
+  // 跨宿主「按量实付」CNY（PM 决策 2026-09-07）。`source` 两态都是权威：
+  // "alert" = 旧 alert.json 快照（带 generated_at，可能过期）；"sql" = SQL
+  // 权威库**实时算**（无快照时刻 → generated_at null，结构上不会过期，新鲜度
+  // 归下方「上次同步」行）。Phase 4.3 托盘已切 "sql"，工作台这里此前漏改，
+  // 一直落进「等预算数据」兜底（screenshot 事故）。"missing" 才是真降级。
   const b = ov.budget || { source: "missing" };
+  const budgetLive = b.source === "sql"; // 实时算：无 generated_at 不代表「没产出」
   const fill = document.getElementById("ov-budget-fill");
   const budgetSub = document.getElementById("ov-budget-sub");
   const budgetAmt = document.getElementById("ov-budget-amount");
@@ -406,7 +438,7 @@ async function renderOverview() {
     freshHHMM = t.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
     stale = Date.now() - t.getTime() > 5 * 60 * 1000;
   }
-  if (b.source !== "alert" || !b.level) {
+  if ((b.source !== "alert" && b.source !== "sql") || !b.level) {
     fill.style.width = "0%";
     fill.className = "fill";
     budgetAmt.textContent = "—";
@@ -446,6 +478,10 @@ async function renderOverview() {
   let freshness = "";
   if (b.generated_at) {
     freshness = (stale ? "⚠ 数据过期（更新于 " : "数据更新于 ") + freshHHMM + "）";
+  } else if (budgetLive) {
+    // 实时算无快照时刻——新鲜度由下方「上次同步」行统一承载（facts 同步是
+    // 另一条回路），这里不说「尚未产出」（会误读成坏了）。
+    freshness = "预算实时算（跨宿主按量）";
   } else {
     freshness = "预算数据尚未产出";
   }
@@ -596,11 +632,15 @@ function renderMonthVerdict(monthly) {
 // 前缀 t = 今日（daily DTO）、m = 本月（monthly DTO）。全部 tile 的诚实规则：
 // 无数据渲染「无数据」，绝不渲染 0；金额一律带币种（by_provider 条目有
 // currency，写符号不再是编造）；unresolved 不冒充任何金额。
-function renderKpiRow(prefix, dto) {
-  const set = (id, text, sub) => {
+// `fx`（`Overview.fx = {usd_cny, as_of}` 或 undefined）只喂**速览层**的名义 /
+// 单位成本：有汇率 + 混币 → 并成一个 `≈¥`，原始分币进 hover title。实际支出
+// tile 不吃 fx（PM 决策 2026-09-07：实付分币不折算）。无 fx → 分币旧行为。
+function renderKpiRow(prefix, dto, fx) {
+  const set = (id, text, sub, title) => {
     const el = document.getElementById(`ov-${prefix}-${id}`);
     if (!el) return;
     el.textContent = text;
+    el.title = title || ""; // 分币展开挂 hover；未传 → 清掉上一轮的
     // 「无数据」不是好状态的金额，不吃 hero 强调色（审查 UX#3 的镜像面：
     // 绿色在说反话）。
     el.classList.toggle("muted-amt", text === "无数据");
@@ -625,32 +665,51 @@ function renderKpiRow(prefix, dto) {
             ? "已处理 token（含缓存读写）· 本月日均 " + fmtTokens(Math.round(tk.total / dayOfMonth))
             : "已处理 token（含缓存读写）")
         : "");
-  // 名义：官方标价折算之和（分币并列）。cache_write 档位假设必须可见
-  // （1hr/5min 差额占名义总额 5.2%，会话日志不记录实际 TTL——假设不是观测）。
+  // 名义：官方标价折算之和。cache_write 档位假设必须可见（1hr/5min 差额占
+  // 名义总额 5.2%，会话日志不记录实际 TTL——假设不是观测）。混币且有汇率 →
+  // 速览层并成 `≈¥`（原始分币进 hover）；否则分币并列。
   const nomParts = fmtCurMap(nominal);
-  set("nominal", nomParts.length ? nomParts.join(" + ") : "无数据",
-      nomParts.length ? "@官方标价 · cache_write 按 1hr 计" : "");
+  const nomFx = fxMerge(nominal, fx);
+  if (nomFx) {
+    set("nominal", fmtFxApprox(nomFx),
+        "@官方标价 · cache_write 按 1hr 计 · " + fxNote(nomFx),
+        "原始分币 " + nomFx.parts.join(" + "));
+  } else {
+    set("nominal", nomParts.length ? nomParts.join(" + ") : "无数据",
+        nomParts.length ? "@官方标价 · cache_write 按 1hr 计" : "");
+  }
   // 单位：名义/M（主）+ 实际/M（副）。未计价 token 不进金额分母——首版
   // 以 processed 为近似分母并在副行标注（§6.2 的完整分母留 Stage E）。
   if (tk.total > 0 && nomParts.length) {
-    // 名义/M 同样分币列——混币相加再标单一符号就是编造（此前只修了实际侧，
-    // 名义侧漏了：截图暴露「$0.31/M · 名义」实为 ¥+$ 相加）。
-    const nomPerM = fmtCurMap(Object.fromEntries(
+    // 名义/M：混币且有汇率 → `≈¥/M`（原始分币进 hover）；否则分币列——混币
+    // 相加再标单一符号就是编造（截图曾暴露「$0.31/M · 名义」实为 ¥+$ 相加）。
+    const nomPerMap = Object.fromEntries(
       Object.entries(nominal).map(([c, v]) => [c, v / tk.total * 1e6])
-    )).map((x) => x + "/M");
-    set("unit",
-      nomPerM.join(" + ") + " · 名义",
-      "@官方标价 · 不扣套餐/折扣");
+    );
+    const perMFx = fxMerge(nomPerMap, fx);
+    // sub 由下方实际/M 那行统一写（此前这里传的 sub 立即被覆盖，是死参数）。
+    if (perMFx) {
+      set("unit", fmtFxApprox(perMFx) + "/M · 名义", undefined,
+        "原始分币 " + fmtCurMap(nomPerMap).map((x) => x + "/M").join(" + "));
+    } else {
+      const nomPerM = fmtCurMap(nomPerMap).map((x) => x + "/M");
+      set("unit", nomPerM.join(" + ") + " · 名义");
+    }
     // 实际/M 按币分列，不做跨币求和（审查 #1：空 map 求和得 0 → 副行渲染
     // "实际 0.00（币种未声明）/M"，与实际 tile 的「无数据」同屏互斥——双标；
-    // 审查 UX#3：混币相加标单一符号是编造）。无实付条目 → 诚实话术。
+    // 审查 UX#3：混币相加标单一符号是编造）。**实际侧永远分币**——PM 决策
+    // 2026-09-07：fx 折算只进速览层名义/单位，不进实付。无实付条目 → 诚实话术。
     const actPerM = fmtCurMap(Object.fromEntries(
       Object.entries(actual).map(([c, v]) => [c, v / tk.total * 1e6])
     )).map((x) => x + "/M");
-    document.getElementById(`ov-${prefix}-unit-sub`).textContent =
-      actPerM.length
-        ? "跨币未折算 · 实际 " + actPerM.join(" + ")
-        : "账单级实付：无（订阅内 + 未出账）";
+    const actTail = actPerM.length
+      ? "实际 " + actPerM.join(" + ")
+      : "账单级实付：无（订阅内 + 未出账）";
+    // 名义主数是折算值时，副行说明折算口径——不能只靠 `≈` 一个字符；实际侧
+    // 明确「分币不折」，与名义的折算态区分开。
+    document.getElementById(`ov-${prefix}-unit-sub`).textContent = perMFx
+      ? "名义 " + fxNote(perMFx) + " · " + actTail + (actPerM.length ? "（分币不折）" : "")
+      : (actPerM.length ? "跨币未折算 · " + actTail : actTail);
   } else {
     set("unit", "无数据");
   }
