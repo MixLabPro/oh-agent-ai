@@ -306,10 +306,11 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
-    /// Price Codex rollout token usage (USD) into a per-model / per-day cost
-    /// report (cc-trace research §D landing, docs/CC_TRACE_APPLICATION.md §5 item 4).
-    /// Stateless single call: scan all rollouts (live + archived) → fold
-    /// last_token_usage → price against codex_pricing.json (USD) → text/JSON/HTML.
+    /// Price Codex token usage (USD) into a per-model / per-day cost report
+    /// (cc-trace research §D landing, docs/CC_TRACE_APPLICATION.md §5 item 4).
+    /// Reads the SQL authority DB (populated by `sync-facts`); priced against
+    /// codex_pricing.json (USD). Text / JSON / HTML. Codex is a ChatGPT
+    /// subscription, so the USD figure is list-price, not a bill.
     CodexCost {
         /// Restrict the report to one calendar month; `all` = every month
         #[arg(long = "month")]
@@ -582,7 +583,9 @@ enum Cmd {
     },
     /// v0.9.1 Phase 3.4 SQL budget surface: explicit management API over the
     /// authority DB's `budget_config`/`budget_snoozes` (spec §5.3), replacing
-    /// alert.json/budget.json reads. Amounts are CNY minor units (整数分).
+    /// alert.json/budget.json reads. Amounts are CNY minor units (integer cents).
+    /// `alert` computes the full budget alert from the authority DB (SQL
+    /// equivalent of `budget show`), cross-host metered CNY.
     BudgetSql {
         #[arg(value_parser = ["status", "alert", "config-show", "config-set", "snooze-set", "snooze-clear"])]
         action: String,
@@ -622,14 +625,14 @@ enum Cmd {
     },
     /// Read-only Data Query API surface (v0.9 Stage 0.5, spec §7's suggested
     /// `data coverage`). Goes through the `SummaryRepository` trait to the
-    /// runtime's repository — Phase 3.5 Tier A 起 CLI 构造的是
-    /// `SqlSummaryRepository`（读权威库 `agent-vitals.sqlite3`，含
-    /// legacy_aggregate 深历史），Phase 4 退休 `JsonSummaryRepository` 前两者
-    /// 并存。CLI 只经 trait，不 new 具体类型到调用点之外（spec §3.1
-    /// dependency table）。`--json` prints the frozen `to_json()` DTO
-    /// verbatim; spec §3.1 makes it a contract violation to consume amounts
-    /// while dropping freshness/coverage/excluded_hosts, so both views surface
-    /// all three.
+    /// runtime's repository — since Phase 3.5 Tier A the CLI constructs
+    /// `SqlSummaryRepository` (reads the authority DB `agent-vitals.sqlite3`,
+    /// incl. legacy_aggregate deep history); `JsonSummaryRepository` coexists
+    /// until Phase 4 retires it. The CLI only goes through the trait, never
+    /// naming the concrete type past the call site (spec §3.1 dependency
+    /// table). `--json` prints the frozen `to_json()` DTO verbatim; spec §3.1
+    /// makes it a contract violation to consume amounts while dropping
+    /// freshness/coverage/excluded_hosts, so both views surface all three.
     Data {
         #[command(subcommand)]
         action: DataAction,
@@ -1608,14 +1611,17 @@ session_store={store} fold={fold}"
         return;
     }
 
-    // Codex 成本折叠 + 计价（cc-trace 研究 §D 落地）。与 Python cli.py 的
-    // codex-cost handler 同一种结构。无状态单次调用：扫 rollout → 折叠 →
-    // 计价 → 文本/JSON/HTML 三路。时间轴是**小时桶**（统一多桶折叠契约，见
-    // docs/UNIFIED_COST_VIEW.md）。`--month` 过滤小时轴后**重算** by_model
-    // （codex_by_model_from_hours 把过滤后的小时求和折回模型轴，不是
-    // merge_folds——merge 只读 fold 的 by_model 字段，拿它折回去是空模型轴），
-    // 保证 days 与 per_model 对得上；unaccounted 无时间归属，跨月份保留（数据
-    // 质量哨兵，不参与归月）。`--today` 时报告带 `hours`（小时热力图数据）。
+    // Codex 成本报告（cc-trace 研究 §D 落地）。**v0.9.1 Tier B（spec §5.2）**：
+    // codex 用量从 SQL 权威库读（`runtime::summary::codex_merged_from_sql` →
+    // `authority_query::codex_by_hour_model`），不再全量 fold `~/.codex` rollout；
+    // Python 侧 `codex-cost` 已整命令退役（ClawHub stdlib-only、无权威库），此
+    // 路径 Rust-only。无状态单次调用：SQL 全窗查 → 计价 → 文本/JSON/HTML 三路。
+    // 时间轴是**小时桶**（统一多桶折叠契约，见 docs/UNIFIED_COST_VIEW.md）。
+    // `--month` 过滤小时轴后**重算** by_model（`codex_by_model_from_hours` 把过滤
+    // 后的小时求和折回模型轴），保证 days 与 per_model 对得上。SQL 面降级：
+    // `unaccounted` 恒 `[]`（残差哨兵是 rollout fold 独有）、`plan` 只有 tier
+    // tag（限额快照丢失，见 `codex_merged_from_sql` doc）。`--today` 时报告带
+    // `hours`（小时热力图数据）。
     if let Some(Cmd::CodexCost {
         month,
         today,
@@ -1623,20 +1629,14 @@ session_store={store} fold={fold}"
         html,
     }) = &args.cmd
     {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_default();
-        let mut folds: Vec<Value> = Vec::new();
-        for path in agent_vitals_hosts::codex_session::codex_rollout_files(Path::new(&home)) {
-            let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(&path);
-            let items: Vec<Value> = parsed
-                .get("items")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            folds.push(agent_vitals_hosts::codex_usage::codex_fold_file(&items));
+        let (merged, note) = agent_vitals_runtime::summary::codex_merged_from_sql(
+            &agent_vitals_runtime::home::data_home(),
+        );
+        // 库缺失/打不开 → stderr 提示：不把「空报告」当成「codex 没花钱」端出去
+        // （二进制-only 安装从没跑过 sync-facts 时就是这个形态）。
+        if let Some(note) = note {
+            eprintln!("note: {note}");
         }
-        let merged = agent_vitals_hosts::codex_usage::codex_merge_folds(&folds);
         // 月份解析（北京口径，与 Python `cli.py` 同源）：默认 = 当前自然月；
         // `--today` = 今天（过滤键是完整 YYYY-MM-DD，month 标签取今天所属月）；
         // `--month all` = 全部月份；其余 = 指定月。filter_key=None 即不过滤。
@@ -3292,5 +3292,140 @@ description budget {}, trigger data {}, {} split candidates, {} security finding
             self.flagged,
             self.all_cited,
         )
+    }
+}
+
+#[cfg(test)]
+mod codex_sql_tests {
+    use super::*;
+
+    fn fresh_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("av-codex-sql-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// codex 按量事实一笔（gpt-5.6-sol，价目表里有价）。`ts_ms` 决定北京小时桶。
+    fn seed_codex_fact(db: &agent_vitals_data::authority::AuthorityDb, id: &str, ts_ms: i64, u: i64) {
+        db.conn()
+            .execute(
+                "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                 VALUES ('r', 1, 'cli', 'succeeded', 1) ON CONFLICT(run_id) DO NOTHING",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                &format!(
+                    "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                         source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
+                         event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                         output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                     VALUES ('{id}', 'codex', 'm', 's', '{id}', 'token_count', NULL,
+                             'gpt-5.6-sol', {ts_ms}, 0, {u}, 200000, 50000, 80000, 'r', 1, 1)"
+                ),
+                [],
+            )
+            .unwrap();
+    }
+
+    /// `codex_merged_from_sql`（Tier B：`codex-cost` 切 SQL 权威库）：
+    /// - `by_hour_model` / `by_model` 从 `usage_facts` 的 codex 行读出、经
+    ///   `codex_report_from_merged` 折出正数成本；
+    /// - `unaccounted` = `[]`（残差哨兵是 rollout fold 独有）、`plan` 只带
+    ///   `plan_type: "plus"`（pricing.json billing_modes.openai._note 声明的
+    ///   实测不变量，用于保住「(按量标价)」诚实标注，不带月费/限额）；
+    /// - 库缺失 → note 非 None（CLI 打 stderr，不把空报告当「没花钱」）。
+    #[test]
+    fn codex_merged_from_sql_reads_facts_and_degrades_unaccounted_plan() {
+        let dir = fresh_dir("degrade");
+
+        // 空库（尚未建）→ note 提示 sync-facts；merged 兜底但 plan tag 在。
+        let (empty, note) = agent_vitals_runtime::summary::codex_merged_from_sql(&dir);
+        assert!(note.is_some(), "库文件不存在 → 必须给 stderr 提示");
+        assert_eq!(empty["unaccounted"], json!([]));
+        assert_eq!(empty["plan"]["plan_type"], "plus");
+
+        let db = agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&dir),
+            1,
+        )
+        .unwrap();
+        // 1788393601000 ms = 2026-09-03T00:00:01Z → 北京 2026-09-03T08。
+        seed_codex_fact(&db, "c1", 1_788_393_601_000, 800_000);
+        drop(db);
+
+        let (merged, note) = agent_vitals_runtime::summary::codex_merged_from_sql(&dir);
+        assert!(note.is_none(), "库已建且可开 → 无提示");
+        assert_eq!(merged["unaccounted"], json!([]));
+        assert_eq!(merged["plan"]["plan_type"], "plus");
+        assert!(
+            merged["by_hour_model"]["2026-09-03T08"]["gpt-5.6-sol"].is_object(),
+            "北京小时桶应含 seed 的模型：{}",
+            merged["by_hour_model"]
+        );
+        // 走真实报告路径：total_cost_usd 为正、per_model 有 sol、unaccounted 空、
+        // plan 透传（→ render 侧走 "(按量标价)" 标注）。
+        let report = codex_report_from_merged(&merged, None, None, false);
+        assert!(report["total_cost_usd"].as_f64().unwrap() > 0.0);
+        assert!(report["per_model"]["gpt-5.6-sol"].is_object());
+        assert_eq!(report["unaccounted_usage"], json!([]));
+        assert_eq!(report["plan"]["plan_type"], "plus");
+        // 订阅标注保住：render 文本含「按量标价」而非裸「total cost」。
+        let text = agent_vitals_runtime::sessions::codex_cost::render_codex_cost(&report);
+        assert!(text.contains("按量标价"), "codex 订阅 → USD 总额必须标「按量标价」：{text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **`Some(filter_key)` 分支覆盖**（删掉的 `test_codex_cost_month_filter_
+    /// reconciles` 的 Rust-only 替身）：seed 跨两个北京月的 codex 事实，
+    /// `codex_report_from_merged` 按月过滤后——
+    /// - `per_model` 非空、`total_cost_usd > 0`（月过滤不得把报告静默清零，
+    ///   这是真实 shipped defect 的回归）；
+    /// - 守恒：`sum(days.cost_usd) == total_cost_usd`（过滤后 by_model 由
+    ///   `codex_by_model_from_hours` 从过滤后小时重算，days 与 per_model 对得上）；
+    /// - 过滤后 total < 全窗 total（另一个月的事实确实被排掉了）。
+    #[test]
+    fn codex_report_month_filter_reconciles_and_does_not_zero() {
+        let dir = fresh_dir("monthfilter");
+        let db = agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&dir),
+            1,
+        )
+        .unwrap();
+        // 1786881600000 ms → 北京 2026-08-16T20；1788393601000 → 北京 2026-09-03T08。
+        seed_codex_fact(&db, "aug", 1_786_881_600_000, 500_000);
+        seed_codex_fact(&db, "sep", 1_788_393_601_000, 900_000);
+        drop(db);
+
+        let (merged, _) = agent_vitals_runtime::summary::codex_merged_from_sql(&dir);
+        let all = codex_report_from_merged(&merged, None, None, false);
+        let sep = codex_report_from_merged(&merged, Some("2026-09"), Some("2026-09"), false);
+
+        let sep_total = sep["total_cost_usd"].as_f64().unwrap();
+        assert!(sep_total > 0.0, "月过滤后报告不得静默清零");
+        assert!(!sep["per_model"].as_object().unwrap().is_empty());
+        let sep_days_sum: f64 = sep["days"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["cost_usd"].as_f64().unwrap_or(0.0))
+            .sum();
+        assert!(
+            (sep_days_sum - sep_total).abs() < 1e-9,
+            "守恒：sum(days)={sep_days_sum} != total={sep_total}"
+        );
+        assert!(
+            sep_total < all["total_cost_usd"].as_f64().unwrap(),
+            "9 月窗必须比全窗小（8 月那笔被排掉）"
+        );
+        // 8 月的日期不得出现在 9 月过滤后的 days 里。
+        for d in sep["days"].as_array().unwrap() {
+            assert!(d["date"].as_str().unwrap().starts_with("2026-09"));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

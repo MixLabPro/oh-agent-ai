@@ -1309,6 +1309,75 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     json!({ "month": month, "days": Value::Object(days) })
 }
 
+/// `codex-cost` 的 SQL 权威面（Tier B 收尾，spec §5.2）：codex 用量从
+/// `authority_query::codex_by_hour_model` 读，不再全量 fold `~/.codex` rollout。
+/// 与 `calendar_month` / `hourly_distribution` 同层同源（runtime，直连
+/// `AuthorityDb`——`budget.rs::evaluate_alert_from_sql` 也是这个模式），CLI 只
+/// 调不自己开库。
+///
+/// 返回 `(merged, note)`：`merged` 与旧 rollout fold 同形
+/// （`{by_hour_model, by_model, unaccounted, plan}`）供 `codex_report_from_merged`
+/// 直接消费——全窗一次查，视图过滤仍由 `codex_report_from_merged` 的
+/// `filter_key` 做。`note` 非 `None` 时 = 库缺失/打不开，CLI 应打 stderr 提示，
+/// 避免把「空报告」当成「codex 没花钱」端出去（二进制-only 安装从没跑过
+/// `sync-facts` 时就是这个形态）。
+///
+/// **SQL 面降级（如实记）**：
+/// - `unaccounted` = `[]`——rollout fold 独有的残差哨兵（「未消费但含 token
+///   字段名的事件」），`usage_facts` 是已清洗事实、无此概念。
+/// - `plan` = `{"plan_type":"plus"}`——**不是 fabrication**：`pricing.json`
+///   `catalog_2026_09.billing_modes.openai._note` 声明「全部 60 份 rollout
+///   实测 rate_limits.plan_type=plus，单一提供方订阅制」。只带 tier tag、不带
+///   月费/限额（那才是 `_note` 明令禁止的「拿 Plus 挂牌价猜」）。作用是让
+///   `render_codex_cost` 的 USD 总额保持「(按量标价)」诚实标注——codex 是
+///   订阅，per-token USD 是名义折算不是账单（`_note` + ATTRIBUTABLE_WASTE §6.7）。
+///   plan 的**限额快照**（used_percent 等）SQL 面确实丢了，落 SQL 是后续项。
+pub fn codex_merged_from_sql(data_home: &Path) -> (serde_json::Value, Option<String>) {
+    let empty = || {
+        json!({
+            "by_hour_model": {}, "by_model": {},
+            "unaccounted": [], "plan": { "plan_type": "plus" },
+        })
+    };
+    let path = agent_vitals_data::authority::default_authority_path(data_home);
+    // `!exists` 必须在 open 之前判：`AuthorityDb::open` 对缺文件会**建库**
+    // （全 DDL），之后就分不清「从没同步」和「同步了但 codex 无用量」。
+    let missing = !path.exists();
+    let by_hour_model = match agent_vitals_data::authority::AuthorityDb::open(
+        &path,
+        crate::sql_sync::now_ms(),
+    ) {
+        Ok(db) => agent_vitals_data::authority_query::codex_by_hour_model(db.conn(), 0, i64::MAX)
+            .unwrap_or_else(|_| json!({})),
+        Err(e) => {
+            return (
+                empty(),
+                Some(format!(
+                    "authority DB at {} could not be opened ({e}); reporting empty codex cost",
+                    path.display()
+                )),
+            );
+        }
+    };
+    let note = missing.then(|| {
+        format!(
+            "authority DB not found at {} — run `agent-vitals sync-facts` to populate it; reporting empty codex cost",
+            path.display()
+        )
+    });
+    let by_model =
+        agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
+    (
+        json!({
+            "by_hour_model": by_hour_model,
+            "by_model": by_model,
+            "unaccounted": [],
+            "plan": { "plan_type": "plus" },
+        }),
+        note,
+    )
+}
+
 
 
 /// Stage 0 的 `SummaryRepository`：读现有 JSON state（`budget.rs` 的

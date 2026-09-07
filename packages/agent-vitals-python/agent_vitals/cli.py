@@ -616,42 +616,6 @@ def _render_plan_human(payload):
     return "\n".join(parts) + "\n"
 
 
-def _render_codex_cost_html(output_path, merged, month_key, month_out, default):
-    """`codex-cost --html`：复用统一看板模板 calendar.html（退役独立
-    codex_cost.html——一套视觉模板，不是两套，见 docs/UNIFIED_COST_VIEW.md）。
-
-    只内联 codex 块 + `AGENT_VITALS_DEFAULT_HOST='codex'`，不内联 DSH 块
-    （codex-cost 是 codex 视角的看板；`_render_calendar_html` 才是跨宿主看板）。
-    块内视图用调用方给的 month_key/month_out（请求月 / 当前月 / all），
-    default 决定无 `?file=` 时打开的 tab。**JS 只渲染 server 已算好的
-    per_model / days / cost**——模板不内嵌价格表，计价永远只有
-    `codex_cost_report` 一处（JS 里再放一份价格就是第四份副本，同 calendar 的
-    `_augment_calendar_cost` 想消灭的漂移）。Rust 侧 `render_codex_cost_html`
-    做同一件事（模板用 include_str 内嵌、注入逻辑同构；HTML 文件不参与差分，
-    只需两边产出等价可解析的页面）。
-    """
-    template = Path(__file__).resolve().parents[3] / "assets" / "templates" / "calendar.html"
-    if not template.is_file():
-        raise FileNotFoundError(
-            "calendar template not found at %s (run M4 first)" % template)
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    html = template.read_text(encoding="utf-8")
-    blob = codex_calendar_blob(merged, month_key, month_out, default)
-    json_text = json.dumps(blob, ensure_ascii=False)
-    # JSON 里可能含 </script> / <!-- —— 必须转义，否则浏览器解析到这就崩
-    # （与 _render_calendar_html 同一条铁律）。
-    json_text_safe = (json_text.replace("</script", "<\\/script")
-                      .replace("<!--", "<\\!--"))
-    inject = ("<script id=\"agent-vitals-data-codex\" type=\"application/json\">"
-              + json_text_safe + "</script>")
-    html = html.replace("</head>", inject + "\n</head>", 1)
-    html = html.replace(
-        "</head>",
-        "<script>window.AGENT_VITALS_DEFAULT_HOST = 'codex';</script>\n</head>", 1)
-    out.write_text(html, encoding="utf-8")
-
-
 def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", action="version",
@@ -781,25 +745,12 @@ def _main():
                               "of auditing one log — archived_sessions existence is "
                               "probed, never an error")
     p_codex.add_argument("--json", help="Write coverage JSON to FILE; use - for stdout")
-    # cc-trace 研究 §D defer 的一块新能力（docs/CC_TRACE_APPLICATION.md §5 第 4 项）：
-    # Codex 成本折叠 + 仪表盘。与 codex-evidence 不同，这是**成本**审计——扫所有
-    # rollout（live + archived）的 last_token_usage 折叠成 5 桶 × 模型 × 日期，
-    # 按 codex_pricing.json（USD）计价。无状态单次调用，不落 month.json。
-    # 货币是 USD（cc-trace 价格表权威价，零汇率猜测），与 DSH 的 ¥ 区分。
-    p_codex_cost = sub.add_parser("codex-cost",
-                                  help="Price Codex rollout token usage (USD) "
-                                       "into a per-model / per-day cost report")
-    p_codex_cost.add_argument("--month", metavar="YYYY-MM", default=None,
-                              help="Restrict the report to one calendar month; "
-                                   "'all' = every month. Default (no flags) is the "
-                                   "current calendar month")
-    p_codex_cost.add_argument("--today", action="store_true",
-                              help="Restrict the report to today only (mutually "
-                                   "exclusive with --month)")
-    p_codex_cost.add_argument("--json", metavar="FILE",
-                              help="Write the report JSON to FILE; use - for stdout")
-    p_codex_cost.add_argument("--html", metavar="FILE",
-                              help="Write a self-contained HTML dashboard to FILE")
+    # `codex-cost` 命令已退役（v0.9.1 Tier B，spec §5.2）：codex 成本报告改从
+    # SQL 权威库（`authority_query::codex_by_hour_model`）读，不再全量 fold
+    # `~/.codex` rollout。该数据源是 Rust `agent_vitals_data`（rusqlite）——
+    # ClawHub in-host skill 这一份是 stdlib-only、没有权威库，无法迁移，故整
+    # 命令只由 Rust 二进制提供。`codex_cost.py` 模块本身保留（`calendar` 命令
+    # 与 `codex-session` 仍用其纯函数）。
     # Codex 单会话审计：逐 session 成本 + 出处覆盖并集（套 DSH 审计 tab 版式）。
     # codex-cost 在折叠时把 session 身份聚合掉，codex-evidence 给出处但不含成本；
     # 这里把该 session 的文件们折叠→合并→计价，再把 evidence 覆盖取并集，拼回
@@ -1315,69 +1266,6 @@ def _main():
             return
         print(_render_codex_evidence(
             codex_evidence_module.codex_evidence_json(evidence)), end="")
-        return
-
-    # Codex 成本折叠 + 计价（cc-trace 研究 §D 落地）。与 Rust 侧 main.rs 的
-    # CodexCost 子命令同一种结构。无状态单次调用：扫 rollout → 折叠 →
-    # 计价 → 文本/JSON/HTML 三路。时间轴是**小时桶**（统一多桶折叠契约，见
-    # docs/UNIFIED_COST_VIEW.md）。`--month` 过滤小时轴后**重算** by_model
-    # （codex_by_model_from_hours 把过滤后的小时求和折回模型轴，不是
-    # merge_folds——merge 只读 fold 的 by_model 字段，拿它折回去是空模型轴），
-    # 保证 days 与 per_model 对得上；unaccounted 无时间归属，跨月份保留（数据
-    # 质量哨兵，不参与归月）。`--today` 时报告带 `hours`（小时热力图数据）。
-    if getattr(args, "cmd", None) == "codex-cost":
-        # `--today` 与 `--month` 互斥（Rust 侧 clap conflicts_with 同款；保持两侧
-        # 对非法输入一致地报错，而不是今天静默赢）。
-        if args.today and args.month:
-            print("error: the argument '--today' cannot be used with '--month'",
-                  file=sys.stderr)
-            sys.exit(2)
-        # 月份解析（北京口径，与 Rust `main.rs` 同源）：默认 = 当前自然月；
-        # `--today` = 今天（过滤键是完整 YYYY-MM-DD，month 标签取今天所属月）；
-        # `--month all` = 全部月份；其余 = 指定月。filter_key=None 即不过滤。
-        if args.today:
-            filter_key = codex_cost_module.today_beijing()
-            month_out = filter_key[:7]
-        elif args.month == "all":
-            filter_key = None
-            month_out = None
-        elif args.month:
-            filter_key = args.month
-            month_out = args.month
-        else:
-            cur = codex_cost_module.current_month_beijing()
-            filter_key = cur
-            month_out = cur
-        merged = codex_fold_merged()
-        want_hours = bool(args.today)
-        out = codex_report_from_merged(merged, filter_key, month_out, want_hours)
-        wrote = False
-        if args.json:
-            text = json.dumps(out, ensure_ascii=False, indent=2)
-            if args.json == "-":
-                print(text)
-            else:
-                try:
-                    Path(args.json).write_text(text, encoding="utf-8")
-                except OSError:
-                    print("failed to write %s" % args.json, file=sys.stderr)
-                    sys.exit(2)
-                print("Wrote %s" % args.json)
-            wrote = True
-        if args.html:
-            # `--html` 复用统一看板模板（codex 视角）：default 随请求——请求月
-            # → "month"、全部 → "all"、今天 → "today"、无请求 → "month"。
-            if args.today:
-                default_view = "today"
-            elif args.month == "all":
-                default_view = "all"
-            else:
-                default_view = "month"
-            _render_codex_cost_html(args.html, merged,
-                                    filter_key, month_out, default_view)
-            wrote = True
-        if not wrote:
-            print(codex_cost_module.render_codex_cost(out), end="")
         return
 
     # Codex 单会话审计：逐 session 成本 + 出处覆盖并集。与 Rust main.rs 的

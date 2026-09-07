@@ -1332,184 +1332,37 @@ class CliMatrix(unittest.TestCase):
         shutil.copy(cost_fx / "rollout-unpriced.jsonl", live / "rollout-unpriced.jsonl")
         shutil.copy(cost_fx / "rollout-terra.jsonl", arch / "rollout-terra.jsonl")
 
-    def test_codex_cost_differential(self):
-        """`codex-cost --month all`（全量）与 `--month 2026-08`：py==rs 逐字节（both()
-        兜底），且金额等于手算值——sol 两桶（基础费率合计 2.356）+ terra 0.3885 +
-        luna 0.0897 = 2.8342；聚合桶不能证明单请求长上下文，故不套附加费。月过滤后
-        terra/luna 出局 → 2.356。缺省（不传月）=
-        当前自然月（北京口径），不再是全量——全量要显式 `--month all`。"""
-        self._codex_cost_roots()
-        code, out, err = self.both("codex-cost", "--month", "all", "--json", "-")
-        self.assertEqual(code, 0)
-        report = json.loads(out)
+    # `codex-cost` 命令已退役（v0.9.1 Tier B）：Rust 侧改从 SQL 权威库读
+    # （`authority_query::codex_by_hour_model`），Python 侧（ClawHub stdlib-only、
+    # 无权威库）整命令移除。原 5 个 py==rs 差分用例随之删除——纯函数守恒/计价
+    # 由 test_characterization 的 codex_cost_report 用例继续钉；SQL 路径的
+    # Rust 侧覆盖见 apps/cli 的 codex_merged_from_sql 单测。`_codex_cost_roots`
+    # 夹具保留（codex-session 与 calendar 测试复用）。
+
+    def test_codex_cost_rust_only_smoke_empty_db(self):
+        """`codex-cost` 现在是 Rust-only（读 SQL 权威库）。这条只钉 e2e 形状：
+        空/缺库 → 退出 0、stdout 是可解析 JSON（host=codex/currency=USD/
+        total_cost_usd 数字）、stderr 带一句 `sync-facts` 提示（不把空报告当
+        「codex 没花钱」端出去）。数值正确性在 apps/cli 的 codex_merged_from_sql
+        单测里跑。"""
+        env = isolated_home_env(self.tmp)
+        env["AGENT_VITALS_HOME"] = str(self.tmp / "data-cc-smoke")
+        r = subprocess.run([_BIN, "codex-cost", "--json", "-"],
+                           cwd=str(self.tmp / "workdir"), env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        report = json.loads(r.stdout)
         self.assertEqual(report["host"], "codex")
         self.assertEqual(report["currency"], "USD")
-        # 归档会话必须先于 live（全局路径排序）→ 模型首现序钉住
-        self.assertEqual(list(report["per_model"].keys()),
-                         ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "codex-auto-review"])
-        self.assertAlmostEqual(report["total_cost_usd"], 2.8342, places=9)
-        self.assertAlmostEqual(report["per_model"]["gpt-5.6-sol"]["cost_usd"], 2.356, places=9)
-        self.assertEqual(report["unpriced_tokens"], 6000)
-        # 残差哨兵跨月保留
-        self.assertEqual([u["type"] for u in report["unaccounted_usage"]],
-                         ["token_count_before_turn_context", "token_count_invalid_last_usage"])
-        # 配额快照：跨文件 merge 取 observed_at 最新（unpriced 08-03 的 77%，
-        # 不是 sol 08-02 的 67%）；observed_at 前进到 12:05 的降级快照但 limits
-        # 保留 77%（降级快照不抹配额条）。`both()` 已逐字节比过 py↔rs 的 plan 块。
-        self.assertEqual(report["plan"]["plan_type"], "plus")
-        self.assertAlmostEqual(report["plan"]["limits"]["primary"]["used_percent"], 77.0)
-        self.assertEqual(report["plan"]["observed_at"], "2026-08-03T12:05:00Z")
-
-        code, out, err = self.both("codex-cost", "--month", "2026-08", "--json", "-")
-        self.assertEqual(code, 0)
-        report = json.loads(out)
-        self.assertEqual(report["month"], "2026-08")
-        self.assertAlmostEqual(report["total_cost_usd"], 2.356, places=9)
-        self.assertEqual(list(report["per_model"].keys()),
-                         ["gpt-5.6-sol", "codex-auto-review"])
-        self.assertEqual(report["unpriced_tokens"], 6000,
-                         "auto-review 的 08-03 桶在月内，unpriced 不该被过滤掉")
-
-    def test_codex_cost_month_filter_reconciles(self):
-        """守恒：`sum(days.cost_usd) == total_cost_usd` 在**过滤前后**都精确成立。
-
-        这是真实 defect 的回归：`--month` 过滤时间轴（小时桶）后，旧实现拿
-        codex_merge_folds 折回 by_model——merge 只读 fold 的 `by_model` 字段、不读
-        时间轴，得到空模型轴，整份月报告静默变全零（per_model 空 + unpriced 0 →
-        返回 None → 全零兜底），一个「看不见的错」。修后 by_model 由
-        codex_by_model_from_hours 从过滤后的小时桶重算，days 与 per_model 永远对得上。
-        """
-        self._codex_cost_roots()
-        # () 已不再是「全量」——缺省现在是当前自然月，改用显式 --month all 才等价
-        # 于旧的无过滤路径（守恒断言与具体哪个月无关，但要确定性）。
-        for extra in (("--month", "all"), ("--month", "2026-08"),
-                      ("--month", "2026-07")):
-            with self.subTest(month=extra[1]):
-                code, out, err = self.both("codex-cost", *extra, "--json", "-")
-                self.assertEqual(code, 0)
-                report = json.loads(out)
-                self.assertAlmostEqual(
-                    report["total_cost_usd"],
-                    sum(d["cost_usd"] for d in report["days"]), places=9,
-                    msg="sum(days) != total_cost_usd（month=%r）" % (extra,))
-
-    def test_codex_cost_default_month_and_today_fields(self):
-        """缺省（不传月）= 当前自然月（北京口径，与 DSH state.py 的 _BEIJING 一致），
-        `today` 字段 = 北京今天。断言解析语义而非 fixture 内容：month/today 是北京
-        口径的正确字符串、days 只落在 month 内。py==rs 逐字节（both() 兜底，含
-        today 字段）。"""
-        from datetime import datetime, timedelta, timezone
-        beijing = timezone(timedelta(hours=8))
-        now = datetime.now(beijing)
-        ref_month = now.strftime("%Y-%m")
-        ref_today = now.date().isoformat()
-        self._codex_cost_roots()
-        code, out, err = self.both("codex-cost", "--json", "-")
-        self.assertEqual(code, 0)
-        report = json.loads(out)
-        self.assertEqual(report["month"], ref_month)
-        self.assertEqual(report["today"], ref_today)
-        for d in report["days"]:
-            self.assertTrue(d["date"].startswith(ref_month),
-                            "default 是本月视图，days 不应越界: %s" % d["date"])
-
-    def test_codex_cost_today_filter(self):
-        """`--today`：过滤键 = 今天（北京 YYYY-MM-DD），month 标签 = 今天所属月；
-        days 里不会出现今天以外的日期。py==rs 逐字节（both() 兜底）。"""
-        from datetime import datetime, timedelta, timezone
-        beijing = timezone(timedelta(hours=8))
-        now = datetime.now(beijing)
-        ref_today = now.date().isoformat()
-        ref_month = now.strftime("%Y-%m")
-        self._codex_cost_roots()
-        code, out, err = self.both("codex-cost", "--today", "--json", "-")
-        self.assertEqual(code, 0)
-        report = json.loads(out)
-        self.assertEqual(report["today"], ref_today)
-        self.assertEqual(report["month"], ref_month)
-        for d in report["days"]:
-            self.assertEqual(d["date"], ref_today,
-                             "--today 只应命中今天: %s" % d["date"])
-
-    def test_codex_cost_today_hours_differential(self):
-        """`--today` 的**非空** `hours` 轴跨语言差分。
-
-        夹具时间戳（08-01..08-03）永远碰不上今天（北京口径），所以现有 `--today`
-        差分只覆盖空小时路径（fallback 的 `hours: []`）。这里**现造一份今天打戳**
-        的 rollout，把 `want_hours` 的非空路径也钉进 both()：py==rs 逐字节（both()
-        兜底）+ hours 非空 + `sum(hours.cost_usd) == days == total_cost_usd`
-        三轴对账。这是 hours 轴唯一一份跨语言测试——空路径让 `--today` 恒为空，
-        单语言测试各只守一边，两边一起漂的时候没有人拦。
-
-        夹具时间戳是 **UTC** 的 `ref_today + T04/T05`（凌晨）——`codex_hour_of` 把
-        UTC 时间戳 +8 折成**北京**小时键，T04/T05 正好落回北京同一天的 T12/T13
-        （东八区 08:00-15:59 的 UTC 小时与北京同日），所以 hours 的日期前缀必然
-        等于北京今天，`--today` 按 `YYYY-MM-DD` 前缀匹配稳命中，与测试运行时刻
-        （含北京 00:00-07:59 的日界线）无关。断言钉死 **UTC→北京 的 +8 映射**
-        （2026-08-29 修：此前小时键直接用 UTC 前缀，日历把 UTC 小时当北京小时
-        渲染——今天 08:59 的消费显示成「00:00」）。
-        """
-        from datetime import datetime, timedelta, timezone
-        beijing = timezone(timedelta(hours=8))
-        ref_today = datetime.now(beijing).date().isoformat()
-        ref_month = ref_today[:7]
-        live = self.tmp / ".codex" / "sessions" / "2026" / "08"
-        live.mkdir(parents=True, exist_ok=True)
-
-        def obj(t):
-            (ti, to, tc, tw, tr, tt) = t
-            return {"input_tokens": ti, "output_tokens": to,
-                    "cached_input_tokens": tc, "cache_write_input_tokens": tw,
-                    "reasoning_output_tokens": tr, "total_tokens": tt}
-
-        def tkn(ts, total):
-            return {"timestamp": ts, "type": "event_msg", "payload": {
-                "type": "token_count",
-                "info": {"total_token_usage": obj(total), "last_token_usage": obj(total),
-                         "model_context_window": 258400}}}
-
-        def tc(ts):
-            return {"timestamp": ts, "type": "turn_context",
-                    "payload": {"model": "gpt-5.6-sol"}}
-
-        # 每个小时一个独立 total 签名（否则连续去重会跳过第二个桶）。单小时
-        # input_total 100K/120K、当日聚合 220K，都低于 272000 → 不触发 LC，
-        # 手算价才能保持简单。
-        # UTC ref_today T04/T05 → 北京 ref_today T12/T13（+8，同日）。
-        h12, h13 = ref_today + "T04", ref_today + "T05"
-        bj12, bj13 = ref_today + "T12", ref_today + "T13"
-        events = [
-            tc(h12 + ":00:00Z"),
-            tkn(h12 + ":00:01Z", (100000, 50000, 0, 0, 0, 150000)),
-            tc(h13 + ":00:00Z"),
-            tkn(h13 + ":00:01Z", (120000, 60000, 0, 0, 0, 180000)),
-        ]
-        (live / "rollout-today.jsonl").write_text(
-            "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
-
-        code, out, err = self.both("codex-cost", "--today", "--json", "-")
-        self.assertEqual(code, 0)
-        report = json.loads(out)
-        self.assertEqual(report["today"], ref_today)
-        self.assertEqual(report["month"], ref_month)
-        hours = report["hours"]
-        self.assertEqual(len(hours), 2, "今天打戳的 rollout 必须产出非空 hours")
-        self.assertEqual([h["hour"] for h in hours], [bj12, bj13],
-                         "UTC T04/T05 必须折成北京同一天 T12/T13（+8）")
-        for h in hours:
-            self.assertTrue(h["hour"].startswith(ref_today))
-        self.assertEqual(len(report["days"]), 1)
-        self.assertEqual(report["days"][0]["date"], ref_today)
-        # 三轴对账：sum(hours) == days == total（全部样本带时间 → untimed 剩余 0）。
-        hour_sum = sum(h["cost_usd"] for h in hours)
-        self.assertAlmostEqual(hour_sum, report["total_cost_usd"], places=9)
-        self.assertAlmostEqual(
-            report["days"][0]["cost_usd"], report["total_cost_usd"], places=9)
-        # 手算价（2026-08 降价后的定价表：uncached $4/M、output $20/M）：
-        # 0.1M·4 + 0.05M·20 = 1.4；0.12M·4 + 0.06M·20 = 1.68 → 3.08
-        # （无 longContext、无 unpriced；旧的 $5/$30 → 4.4 是降价前的手算，差分
-        # 在 2026-08-30 抓到引擎已经换表、断言还停在旧价）。
-        self.assertAlmostEqual(report["total_cost_usd"], 3.08, places=9)
+        self.assertIsInstance(report["total_cost_usd"], (int, float))
+        self.assertIn("sync-facts", r.stderr,
+                      "缺库时必须提示 sync-facts，而不是静默端出 $0")
+        # 文本路径也不崩（无 --json/--html）。
+        r2 = subprocess.run([_BIN, "codex-cost"],
+                            cwd=str(self.tmp / "workdir"), env=env,
+                            capture_output=True, text=True)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("host: codex", r2.stdout)
 
     # ── codex-session（Codex 单会话审计：逐 session 成本 + 出处覆盖）────────
     # 复用 _codex_cost_roots() 的三份夹具：文件名即 session_id（夹具无
@@ -2373,16 +2226,15 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["cost"],
                          {"tokens": 777, "cny": 0.01, "host_billed": True})
 
-    def test_calendar_codex_blob_views_match_rust_reports(self):
-        """统一看板内联的 codex 3 视图 = Rust `codex-cost --json` 三个过滤的
-        报告（docs/UNIFIED_COST_VIEW.md 的 1 号宿主契约）。
+    def test_calendar_codex_blob_is_a_wellformed_three_view_report(self):
+        """统一看板（Python-only `calendar`）内联的 codex 数据块结构 = 3 视图
+        （today/month/all），每个视图是一份完整 codex 成本报告（per_model / days /
+        total_cost_usd）——`codex_calendar_blob` 直接 `codex_report_from_merged`
+        每视图一次，不自己另算（源码 cli.py 三行可见）。
 
-        calendar 是 Python-only（Rust 没有 calendar 命令）——把日历嵌入路径
-        和 CLI 报告路径对账的**唯一**方式是：日历内联的 views.month/all/today
-        分别等于 `codex-cost --json`（缺省=当前月）/ `--month all` / `--today`
-        的报告。`both()` 已逐字节钉过 py==rs 的 --json，这里再证日历嵌入复用
-        的是同一份生成逻辑（`codex_calendar_blob` → `codex_report_from_merged`
-        → `codex_cost_report`），而不是日历路径自己又长出一份近似。
+        v0.9.1 Tier B：`codex-cost` 命令已从 Python 移除（Rust 侧改读 SQL 权威库），
+        原来拿 `both("codex-cost")` 逐字节交叉对账的路径不再存在。`calendar` 本身
+        （仍读 rollout fold）的 SQL 迁移是 §5.2 的独立后续项，这里退成结构性冒烟。
         """
         self._codex_cost_roots()
         cal = self.tmp / "cal.html"
@@ -2398,20 +2250,21 @@ class CliMatrix(unittest.TestCase):
                       html, re.DOTALL)
         self.assertIsNotNone(m, "calendar 必须内联 codex 数据块")
         blob = json.loads(m.group(1))
+        self.assertEqual(blob["host"], "codex")
+        self.assertEqual(blob["currency"], "USD")
         self.assertEqual(set(blob["views"].keys()), {"today", "month", "all"})
-
-        # 缺省 = 当前自然月（北京口径）→ views.month
-        code, out, _ = self.both("codex-cost", "--json", "-")
-        self.assertEqual(code, 0)
-        self.assertEqual(blob["views"]["month"], json.loads(out))
-        # 全量 → views.all
-        code, out, _ = self.both("codex-cost", "--month", "all", "--json", "-")
-        self.assertEqual(code, 0)
-        self.assertEqual(blob["views"]["all"], json.loads(out))
-        # 今天（want_hours=True，含 hours 键）→ views.today
-        code, out, _ = self.both("codex-cost", "--today", "--json", "-")
-        self.assertEqual(code, 0)
-        self.assertEqual(blob["views"]["today"], json.loads(out))
+        for name, view in blob["views"].items():
+            for key in ("host", "currency", "per_model", "days", "total_cost_usd",
+                        "unpriced_tokens"):
+                self.assertIn(key, view, "views.%s 缺 %s（不是完整报告）" % (name, key))
+        # today 视图 want_hours=True → 带 hours 键；month/all 不带。
+        self.assertIn("hours", blob["views"]["today"])
+        self.assertNotIn("hours", blob["views"]["month"])
+        # all 视图不过滤 → total 覆盖三份夹具（sol 2.356 + terra 0.3885 + luna
+        # 0.0897 = 2.8342），month/today 视图 ≤ all（时间过滤只会更小）。
+        self.assertAlmostEqual(blob["views"]["all"]["total_cost_usd"], 2.8342, places=9)
+        self.assertLessEqual(blob["views"]["month"]["total_cost_usd"],
+                             blob["views"]["all"]["total_cost_usd"] + 1e-9)
 
     def test_codex_evidence_title_lookup(self):
         """`session_index.jsonl` 标题 join 差分（py==rs 逐字节，both() 兜底）：
