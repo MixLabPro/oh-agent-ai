@@ -35,6 +35,67 @@ fn excluded_hosts() -> BTreeSet<String> {
         .collect()
 }
 
+/// v0.9.1 Q13（spec §5.3「价格历史重放」）：一次查询窗口用的价卡组。
+///
+/// SQL 权威读路径按**查询窗口的时间点**选价卡版本——历史月用当时的卡，不拿
+/// 今天的卡重算历史（`authority::pricing_snapshot_asof`）。库里没有 `≤` 该时
+/// 点的快照（查询早于第一次 sync）→ 退回当前嵌入卡。**「只有一份快照」时
+/// `asof` 恒返回那一份、与 `load_pricing()` 逐字节相同**——所以本接线对当前
+/// 真机数据是 no-op，只有真实调价 + 重新 sync 落下第二份快照后才分叉。
+///
+/// **粒度 = 窗口级**（月查询用月末毫秒、日查询用日末毫秒），不是逐日：
+/// `calendar_month` 与 `monthly_summary` 必须对同一个月折出相等的总额
+/// （`usage.rs` 的 `token_by_date_model` 对账纪律），两者用不同 asof 粒度会
+/// 在调价月破坏这条等式。调价发生在月中时整月按月末卡计价——逐日重放是
+/// 独立后续项（plan 已记「非 blocker」）。
+pub struct PricingCards {
+    /// `assets/pricing.json` 形状（DSH / claude 计价 + 订阅声明 + billing_modes）。
+    pub main: serde_json::Value,
+    /// `assets/codex_pricing.json` 形状（codex per-model USD 卡）。
+    pub codex: serde_json::Value,
+}
+
+impl PricingCards {
+    /// 当前嵌入价卡。历史查询无快照可依、以及 legacy 读路径全都用这个。
+    pub fn current() -> Self {
+        Self {
+            main: agent_vitals_domain::cost::load_pricing(),
+            codex: crate::sessions::codex_cost::load_codex_pricing(),
+        }
+    }
+
+    /// `at_ms` 时点有效的历史价卡快照；库不可读 / 无更早快照 / 快照形状不认
+    /// → [`Self::current`]（绝不拿更晚的版本冒充历史，`pricing_snapshot_asof`
+    /// 已保证这点；这里只处理「一份都没有」的回退）。
+    pub fn asof(
+        db: &Option<agent_vitals_data::authority::AuthorityDb>,
+        at_ms: Option<i64>,
+    ) -> Self {
+        let (Some(db), Some(at)) = (db.as_ref(), at_ms) else {
+            return Self::current();
+        };
+        let Ok(Some(payload)) = db.pricing_snapshot_asof(at) else {
+            return Self::current();
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            return Self::current();
+        };
+        match (v.get("pricing"), v.get("codex_pricing")) {
+            (Some(main), Some(codex)) => Self { main: main.clone(), codex: codex.clone() },
+            // 老快照只存了一半 → 整体退当前卡，不半用（半用会让 DSH 按历史卡、
+            // codex 按当前卡，跨宿主总额失去单一时点语义）。
+            _ => Self::current(),
+        }
+    }
+
+    /// 本组是否 ≠ 当前嵌入卡（reconcile 据此把「历史重放导致的金额差」判为
+    /// explained 而非 mismatch——token 侧不受计价影响，真实漂移仍会被抓）。
+    fn differs_from_current(&self) -> bool {
+        let cur = Self::current();
+        self.main != cur.main || self.codex != cur.codex
+    }
+}
+
 /// `YYYY-MM-DD` 日键 → 新鲜度（今天/昨天 = Fresh，更早 = Stale）。Stage 0 的
 /// 近似口径（§8.5）：Partial 需要「源本身还活着吗」的信号，Stage B 才有。
 /// `last_observed_at` 统一 `{day}T00:00:00Z`——汇总层聚合按字符串序取最大，
@@ -210,11 +271,14 @@ fn codex_host_amount_with_tokens(
         }
     }
     let by_hour_model = serde_json::Value::Object(filtered);
+    // 折叠缓存路径（legacy `JsonSummaryRepository`）——当前卡即可，历史重放
+    // 只发生在 SQL 权威读路径（`PricingCards::asof`）。
     codex_host_amount_with_tokens_from_hours(
         &by_hour_model,
         &merged["unaccounted"],
         &merged["plan"],
         day,
+        &PricingCards::current(),
     )
 }
 
@@ -232,6 +296,7 @@ fn codex_host_amount_with_tokens_from_hours(
     unaccounted: &serde_json::Value,
     plan: &serde_json::Value,
     day: Option<&str>,
+    cards: &PricingCards,
 ) -> (HostAmount, HostTokens) {
     let codex_no_data = || HostAmount {
         host_id: "codex".to_string(),
@@ -242,13 +307,12 @@ fn codex_host_amount_with_tokens_from_hours(
     };
 
     let by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(by_hour_model, None);
-    let pricing = crate::sessions::codex_cost::load_codex_pricing();
     let Some(report) = crate::sessions::codex_cost::codex_cost_report(
         by_hour_model,
         &by_model,
         unaccounted,
         plan,
-        &pricing,
+        &cards.codex,
         false,
     ) else {
         return (codex_no_data(), HostTokens::default());
@@ -300,8 +364,7 @@ fn codex_host_amount_with_tokens_from_hours(
     // 它是"当前状态"的单快照、不按日期分桶（hosts/codex/sessions/usage.rs
     // 的 doc），拿它判历史窗口本身就是错的——快照与声明的冲突检测留给
     // Stage E 的证据链。
-    let pricing_main = agent_vitals_domain::cost::load_pricing();
-    let (basis, mode_unknown) = match agent_vitals_domain::cost::billing_mode_of("openai", &pricing_main) {
+    let (basis, mode_unknown) = match agent_vitals_domain::cost::billing_mode_of("openai", &cards.main) {
         BillingMode::Subscription => (BillingBasis::ApiEquivalent, false),
         BillingMode::Metered => (BillingBasis::MeteredActual, false),
         BillingMode::Unknown => (BillingBasis::ApiEquivalent, true),
@@ -384,7 +447,7 @@ fn claude_host_amount_with_tokens(window_prefix: &str) -> (HostAmount, HostToken
                 .collect()
         })
         .unwrap_or_default();
-    claude_host_amount_with_tokens_from_days(&days)
+    claude_host_amount_with_tokens_from_days(&days, &PricingCards::current())
 }
 
 /// [`claude_host_amount_with_tokens`] 的核心：只认「窗口内账日 → `{model:
@@ -395,6 +458,7 @@ fn claude_host_amount_with_tokens(window_prefix: &str) -> (HostAmount, HostToken
 /// 纪律（"同币求和的浮点顺序确定，跨平台字节一致"）等价。
 fn claude_host_amount_with_tokens_from_days(
     days: &BTreeMap<String, serde_json::Value>,
+    cards: &PricingCards,
 ) -> (HostAmount, HostTokens) {
     let claude_no_data = || (HostAmount {
         host_id: "claude-code".to_string(),
@@ -407,7 +471,7 @@ fn claude_host_amount_with_tokens_from_days(
         return claude_no_data();
     }
     let mut tk = HostTokens::default();
-    let pricing = agent_vitals_domain::cost::load_pricing();
+    let pricing = cards.main.clone();
     let mut cny = 0.0f64;
     let mut usd = 0.0f64;
     let mut unpriced = 0i64;
@@ -591,7 +655,7 @@ fn claude_provider_amounts(window_prefix: &str) -> BTreeMap<String, HostAmount> 
                 .collect()
         })
         .unwrap_or_default();
-    claude_provider_amounts_from_days(&days)
+    claude_provider_amounts_from_days(&days, &PricingCards::current())
 }
 
 /// [`claude_provider_amounts`] 的核心——同一份「窗口内账日 → `{model: 4
@@ -599,6 +663,7 @@ fn claude_provider_amounts(window_prefix: &str) -> BTreeMap<String, HostAmount> 
 /// [`claude_host_amount_with_tokens_from_days`]。
 fn claude_provider_amounts_from_days(
     days: &BTreeMap<String, serde_json::Value>,
+    cards: &PricingCards,
 ) -> BTreeMap<String, HostAmount> {
     let mut accs: BTreeMap<String, ProviderAcc> = BTreeMap::new();
     if days.is_empty() {
@@ -608,7 +673,7 @@ fn claude_provider_amounts_from_days(
         })
         .collect();
     }
-    let pricing = agent_vitals_domain::cost::load_pricing();
+    let pricing = cards.main.clone();
     for (date, day) in days {
         let Some(models) = day.as_object() else {
             continue;
@@ -1009,12 +1074,14 @@ fn codex_provider_amount(
 fn codex_provider_amount_from_hours(
     by_hour_model: &serde_json::Value,
     day: Option<&str>,
+    cards: &PricingCards,
 ) -> (HostAmount, HostTokens) {
     let (mut h, tk) = codex_host_amount_with_tokens_from_hours(
         by_hour_model,
         &serde_json::Value::Null,
         &serde_json::Value::Null,
         day,
+        cards,
     );
     h.host_id = "codex/openai".to_string();
     h.currency = Some("USD".to_string());
@@ -1105,8 +1172,9 @@ fn dsh_tokens(days: Option<&serde_json::Value>, window: &str) -> HostTokens {
 fn apply_subscription_fees(
     by_provider: &mut BTreeMap<String, HostAmount>,
     month: &str,
+    cards: &PricingCards,
 ) {
-    let pricing = agent_vitals_domain::cost::load_pricing();
+    let pricing = cards.main.clone();
     for (provider, currency, amount, period_start) in
         agent_vitals_domain::cost::declared_subscriptions(&pricing)
     {
@@ -1312,7 +1380,10 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(month);
     let (dsh_days, by_hour_model, claude_days_map) = fetch_windowed(&db, bounds);
 
-    let pricing = agent_vitals_domain::cost::load_pricing();
+    // Q13：月末时点的历史价卡（`monthly_summary` 用同一时点——两者对同月折出
+    // 的总额必须相等，见 `PricingCards` doc）。
+    let cards = PricingCards::asof(&db, bounds.map(|(_, end)| end));
+    let pricing = cards.main.clone();
 
     // DSH：peaked_days_map（8 键含 peak_* + by_model）逐日 priced_day。
     if let Some(dsh) = dsh_days.as_object() {
@@ -1373,13 +1444,12 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
         e["codex_tokens"] = json!(e.get("codex_tokens").and_then(|v| v.as_i64()).unwrap_or(0) + tokens);
     }
     let by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
-    let codex_pricing = crate::sessions::codex_cost::load_codex_pricing();
     if let Some(report) = crate::sessions::codex_cost::codex_cost_report(
         &by_hour_model,
         &by_model,
         &serde_json::Value::Null,
         &serde_json::Value::Null,
-        &codex_pricing,
+        &cards.codex,
         false,
     ) {
         if let Some(report_days) = report.get("days").and_then(|v| v.as_array()) {
@@ -1436,6 +1506,22 @@ pub fn reconcile_authority_vs_legacy(month: &str) -> serde_json::Value {
     .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
     .and_then(|d| d.get("total_tokens").and_then(serde_json::Value::as_i64))
     .unwrap_or(0);
+
+    // §6.3 允许例外：Q13 历史价卡重放。SQL 侧按查询月月末的历史快照计价，
+    // legacy 侧恒用当前嵌入卡——调价 + 重新 sync 之后查历史月，两者金额本就
+    // 该差（SQL 更正确）。token 侧不受计价影响，真实漂移仍会被 token 行抓到。
+    // 「只有一份快照」时 asof == 当前卡 → `pricing_replayed = false`，本例外
+    // 不触发，`data authority enable` 的当月/上月对账不受影响。
+    let pricing_replayed = {
+        let db = agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+            crate::sql_sync::now_ms(),
+        )
+        .ok();
+        agent_vitals_data::authority_query::beijing_month_bounds_ms(month)
+            .map(|(_, end)| PricingCards::asof(&db, Some(end)).differs_from_current())
+            .unwrap_or(false)
+    };
 
     // ── token: host × bucket ────────────────────────────────────────────
     let mut hosts: BTreeSet<String> = sql.tokens_by_host.keys().cloned().collect();
@@ -1553,8 +1639,10 @@ pub fn reconcile_authority_vs_legacy(month: &str) -> serde_json::Value {
             let (sm, lm) = (minor(s), minor(l));
             let verdict = if (sm - lm).abs() <= 1 {
                 "exact"
-            } else if host_verdict_of_provider(prov) == "explained" {
-                "explained" // token 差已定性为例外 → 派生金额差同类
+            } else if host_verdict_of_provider(prov) == "explained" || pricing_replayed {
+                // token 差已定性为例外 → 派生金额差同类；或 Q13 历史价卡重放
+                // （SQL 按历史卡、legacy 按当前卡，§6.3 例外）。
+                "explained"
             } else {
                 all_ok = false;
                 "mismatch"
@@ -1759,7 +1847,8 @@ impl SummaryRepository for JsonSummaryRepository {
             codex_provider_amount(&codex_home(), &query.month, None);
         by_provider.insert("codex/openai".to_string(), codex_prov);
         by_provider.extend(claude_provider_amounts(&query.month));
-        apply_subscription_fees(&mut by_provider, &query.month);
+        // legacy 读路径：订阅费按当前声明卡摊（无历史快照概念，与迁移前一致）。
+        apply_subscription_fees(&mut by_provider, &query.month, &PricingCards::current());
 
         let freshness = aggregate_freshness(&by_host);
         let last_observed_at = freshness.last_observed_at.clone();
@@ -2026,7 +2115,10 @@ impl SummaryRepository for SqlSummaryRepository {
         let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(&query.month);
         let (dsh_days, by_hour_model, claude_days_map) = fetch_windowed(&db, bounds);
 
-        let pricing = agent_vitals_domain::cost::load_pricing();
+        // Q13（spec §5.3）：按查询月的月末时点选历史价卡版本，不拿今天的卡
+        // 重算历史。库无第二份快照时 == 当前嵌入卡（no-op）。
+        let cards = PricingCards::asof(&db, bounds.map(|(_, end)| end));
+        let pricing = cards.main.clone();
         let latest_day = dsh_days.as_object().and_then(|m| m.keys().next_back().cloned());
         let dsh_cost = match dsh_days.as_object() {
             Some(m) if !m.is_empty() => Some(agent_vitals_domain::cost::month_cost(&dsh_days, &pricing)),
@@ -2039,9 +2131,11 @@ impl SummaryRepository for SqlSummaryRepository {
             &serde_json::Value::Null,
             &serde_json::Value::Null,
             None,
+            &cards,
         );
         by_host.insert("codex".to_string(), codex_amount);
-        let (claude_amount, claude_tk) = claude_host_amount_with_tokens_from_days(&claude_days_map);
+        let (claude_amount, claude_tk) =
+            claude_host_amount_with_tokens_from_days(&claude_days_map, &cards);
         by_host.insert("claude-code".to_string(), claude_amount);
         // legacy 兜底标记的消费方（degrade_claude_freshness_if_legacy_backed）：
         // 被聚合兜底的月份 claude 侧降为 Partial，必须在 aggregate_freshness
@@ -2062,10 +2156,11 @@ impl SummaryRepository for SqlSummaryRepository {
             "dsh/deepseek-official".to_string(),
             dsh_provider_amount(dsh_cost, latest_day.as_deref()),
         );
-        let (codex_prov, _codex_prov_tk) = codex_provider_amount_from_hours(&by_hour_model, None);
+        let (codex_prov, _codex_prov_tk) =
+            codex_provider_amount_from_hours(&by_hour_model, None, &cards);
         by_provider.insert("codex/openai".to_string(), codex_prov);
-        by_provider.extend(claude_provider_amounts_from_days(&claude_days_map));
-        apply_subscription_fees(&mut by_provider, &query.month);
+        by_provider.extend(claude_provider_amounts_from_days(&claude_days_map, &cards));
+        apply_subscription_fees(&mut by_provider, &query.month, &cards);
         // Phase 2.8：用户显式录入的宿主账单（WorkBuddy 积分 / 中转对账单…）→
         // by_provider 对应条目的 basis 桶（`data host-bill set`）。
         if let Some(db) = &db {
@@ -2096,7 +2191,9 @@ impl SummaryRepository for SqlSummaryRepository {
         let (dsh_days, by_hour_model, claude_days_map) = fetch_windowed(&db, bounds);
         let day_value = dsh_days.get(&query.date).cloned();
 
-        let pricing = agent_vitals_domain::cost::load_pricing();
+        // Q13：按该日的日末时点选历史价卡（月查询用月末——同一 asof 原语）。
+        let cards = PricingCards::asof(&db, bounds.map(|(_, end)| end));
+        let pricing = cards.main.clone();
         let cost = day_value.as_ref().map(|d| {
             agent_vitals_domain::cost::priced_day(d, &pricing)
                 .unwrap_or_else(|| agent_vitals_domain::cost::bucket_cost(d, &pricing))
@@ -2111,9 +2208,11 @@ impl SummaryRepository for SqlSummaryRepository {
             &serde_json::Value::Null,
             &serde_json::Value::Null,
             Some(&query.date),
+            &cards,
         );
         by_host.insert("codex".to_string(), codex_amount);
-        let (claude_amount, claude_tk) = claude_host_amount_with_tokens_from_days(&claude_days_map);
+        let (claude_amount, claude_tk) =
+            claude_host_amount_with_tokens_from_days(&claude_days_map, &cards);
         by_host.insert("claude-code".to_string(), claude_amount);
         // 日粒度的降级标记按「该日所属月」查（标记是 month scope 的）。
         if let Some(db) = &db {
@@ -2137,9 +2236,9 @@ impl SummaryRepository for SqlSummaryRepository {
             dsh_provider_amount(cost, day_value.as_ref().map(|_| query.date.as_str())),
         );
         let (codex_prov, _codex_prov_tk) =
-            codex_provider_amount_from_hours(&by_hour_model, Some(&query.date));
+            codex_provider_amount_from_hours(&by_hour_model, Some(&query.date), &cards);
         by_provider.insert("codex/openai".to_string(), codex_prov);
-        by_provider.extend(claude_provider_amounts_from_days(&claude_days_map));
+        by_provider.extend(claude_provider_amounts_from_days(&claude_days_map, &cards));
 
         let freshness = aggregate_freshness(&by_host);
         let last_observed_at = freshness.last_observed_at.clone();
@@ -3229,6 +3328,183 @@ mod tests {
                 1,
             ).unwrap();
             assert_eq!(open_mismatch(&db), 0, "回 exact 后陈旧 mismatch 行被 resolve");
+        });
+    }
+
+    // ─────────── v0.9.1 Q13：价格历史重放（spec §5.3） ───────────
+
+    /// 库里没有任何快照（或时点为 None）→ [`PricingCards::asof`] 退回当前嵌
+    /// 入卡，逐字节相同。这是「二进制-only 安装从没 sync 过」和「查询早于第
+    /// 一次 sync」的常态，绝不能因为拿不到快照就报错或算零。
+    #[test]
+    fn pricing_cards_asof_falls_back_to_current_when_no_snapshot() {
+        with_home(|| {
+            let cur = PricingCards::current();
+            assert_eq!(PricingCards::asof(&None, Some(1)).main, cur.main);
+            assert_eq!(PricingCards::asof(&None, None).main, cur.main);
+
+            let db = seed_authority_db();
+            // 快照表为空 → asof 任何时点都退当前卡。
+            let got = PricingCards::asof(&Some(db), Some(crate::sql_sync::now_ms()));
+            assert_eq!(got.main, cur.main);
+            assert_eq!(got.codex, cur.codex);
+            assert!(!got.differs_from_current());
+        });
+    }
+
+    /// 调价后查历史月：`monthly_summary` 必须用**当时的**价卡，不拿今天的卡
+    /// 重算历史。构造两份快照（早=便宜、近=当前），断言 2 个月前的 DSH 金额
+    /// 按便宜卡折算。
+    #[test]
+    fn monthly_summary_replays_historical_pricing_snapshot() {
+        with_home(|| {
+            let past = "2026-07"; // 早于当前月（2026-09）
+            let (p_start, p_end) =
+                agent_vitals_data::authority_query::beijing_month_bounds_ms(past).unwrap();
+            let db = seed_authority_db();
+            // 1M uncached、全 off-peak（event_peak=0）、deepseek-v4-flash。
+            seed_fact(&db, "j1", "dsh", Some("deepseek-v4-flash"), "turn",
+                      p_start + 12 * 3_600_000, 0, 1_000_000, 0, 0, 0);
+
+            // 早快照：uncached off_peak 砍到 0.5（当前卡是 1.5）。captured 在
+            // 7 月开始之前 → asof(7 月末) 命中它。
+            let mut cheap = agent_vitals_domain::cost::load_pricing();
+            cheap["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"]
+                ["input_uncached"]["off_peak"] = json!(0.5);
+            let snap_old = json!({
+                "pricing": cheap,
+                "codex_pricing": crate::sessions::codex_cost::load_codex_pricing(),
+            })
+            .to_string();
+            db.pricing_snapshot_put("v-old", "test", &snap_old, p_start - 1_000).unwrap();
+            // 近快照 = 当前卡，captured 在「现在」→ 只对当前/未来月生效。
+            let snap_now = json!({
+                "pricing": agent_vitals_domain::cost::load_pricing(),
+                "codex_pricing": crate::sessions::codex_cost::load_codex_pricing(),
+            })
+            .to_string();
+            db.pricing_snapshot_put("v-now", "test", &snap_now, crate::sql_sync::now_ms()).unwrap();
+            drop(db);
+
+            let s = SqlSummaryRepository::new()
+                .monthly_summary(&MonthlySummaryQuery { month: past.to_string() });
+            let dsh = &s.by_host["dsh"];
+            let metered = dsh
+                .amounts_by_basis
+                .get(&BillingBasis::MeteredActual)
+                .copied()
+                .expect("DSH 按量档");
+            // 便宜卡：1.0M * 0.5/M ≈ ¥0.5；当前卡会是 ¥1.5。
+            assert!(
+                (metered - 0.5).abs() < 0.02,
+                "历史月按便宜快照计价，得 {metered}（当前卡会是 ~1.5）"
+            );
+            let _ = p_end;
+        });
+    }
+
+    /// Q13 的对账不变式：`calendar_month`（按日轴）与 `monthly_summary`
+    /// （按宿主轴）对同一个历史月、在价格重放下，DSH 月度金额仍必须相等
+    /// （`usage.rs` 的 `token_by_date_model` 纪律——两条轴一份能力）。
+    #[test]
+    fn calendar_and_monthly_agree_on_dsh_under_pricing_replay() {
+        with_home(|| {
+            let past = "2026-06";
+            let (p_start, _) =
+                agent_vitals_data::authority_query::beijing_month_bounds_ms(past).unwrap();
+            let db = seed_authority_db();
+            seed_fact(&db, "a", "dsh", Some("deepseek-v4-flash"), "turn",
+                      p_start + 5 * 86_400_000 + 3_600_000, 0, 600_000, 0, 0, 40_000);
+            seed_fact(&db, "b", "dsh", Some("deepseek-v4-flash"), "turn",
+                      p_start + 18 * 86_400_000 + 3_600_000, 0, 400_000, 0, 0, 20_000);
+            let mut cheap = agent_vitals_domain::cost::load_pricing();
+            cheap["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"]
+                ["input_uncached"]["off_peak"] = json!(0.4);
+            cheap["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"]
+                ["output"]["off_peak"] = json!(1.2);
+            let snap = json!({
+                "pricing": cheap,
+                "codex_pricing": crate::sessions::codex_cost::load_codex_pricing(),
+            })
+            .to_string();
+            db.pricing_snapshot_put("v-old", "test", &snap, p_start - 1_000).unwrap();
+            drop(db);
+
+            let monthly = SqlSummaryRepository::new()
+                .monthly_summary(&MonthlySummaryQuery { month: past.to_string() });
+            let monthly_dsh = monthly
+                .by_host["dsh"]
+                .amounts_by_basis
+                .get(&BillingBasis::MeteredActual)
+                .copied()
+                .expect("DSH 按量档");
+
+            let cal = calendar_month(past, &codex_home());
+            let cal_dsh: f64 = cal["days"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|d| d["dsh_cost_cny"].as_f64().unwrap_or(0.0))
+                .sum();
+
+            assert!(
+                (monthly_dsh - cal_dsh).abs() < 0.01,
+                "日轴合计 {cal_dsh} 必须 == 宿主轴 {monthly_dsh}（重放下也不例外）"
+            );
+            // 且确实用了便宜卡：1.0M*0.4 + 60K*1.2 = 0.4 + 0.072 = 0.472。
+            assert!(monthly_dsh < 1.0, "便宜快照生效，得 {monthly_dsh}");
+        });
+    }
+
+    /// 价格重放导致的 SQL vs legacy 金额差 → reconcile 判 `explained` 而非
+    /// `mismatch`（token 侧不受影响，仍 exact）；`reconciled` 保持 true，
+    /// `data authority enable` 不会因为「用户调过价」而卡住。
+    #[test]
+    fn reconcile_explains_amount_divergence_from_pricing_replay() {
+        with_home(|| {
+            let month = crate::clock::current_month_beijing();
+            let day = format!("{month}-10");
+            let (start, _) =
+                agent_vitals_data::authority_query::beijing_day_bounds_ms(&day).unwrap();
+            let noon = start + 12 * 3_600_000;
+            let dsh_day = json!({
+                "uncached_input_tokens": 1_000_000, "cache_read_tokens": 0,
+                "cache_write_tokens": 0, "output_tokens": 0,
+                "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
+                "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0,
+            });
+            crate::state::atomic_write_json(
+                &crate::state::state_dir().join("month.json"),
+                &json!({ "days": { day.clone(): dsh_day } }),
+            );
+            let db = seed_authority_db();
+            seed_fact(&db, "d1", "dsh", Some("deepseek-v4-flash"), "turn", noon, 0,
+                      1_000_000, 0, 0, 0);
+            // 当前月末快照 = 砍价卡 → SQL 侧按 0.5 折、legacy 按 1.5 折。
+            let mut cheap = agent_vitals_domain::cost::load_pricing();
+            cheap["providers"]["deepseek-official"]["models"]["deepseek-v4-flash"]
+                ["input_uncached"]["off_peak"] = json!(0.5);
+            let snap = json!({
+                "pricing": cheap,
+                "codex_pricing": crate::sessions::codex_cost::load_codex_pricing(),
+            })
+            .to_string();
+            db.pricing_snapshot_put("v-cheap", "test", &snap, crate::sql_sync::now_ms()).unwrap();
+            drop(db);
+
+            let r = reconcile_authority_vs_legacy(&month);
+            let row = |axis: &str, key: &str, keyv: &str| -> serde_json::Value {
+                r[axis].as_array().unwrap().iter()
+                    .find(|x| x[key].as_str() == Some(keyv)).cloned().unwrap()
+            };
+            assert_eq!(
+                row("tokens_by_host", "host", "dsh")["verdict"], json!("exact"),
+                "token 不受计价影响 → 仍 exact"
+            );
+            let amt = r["amounts_by_provider_basis"].as_array().unwrap().iter()
+                .find(|x| x["provider"] == "dsh/deepseek-official").cloned().unwrap();
+            assert_eq!(amt["verdict"], json!("explained"), "金额差是历史重放 → explained");
+            assert_ne!(amt["sql_minor"], amt["legacy_minor"], "两侧确实用了不同价卡");
         });
     }
 }
