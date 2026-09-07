@@ -171,6 +171,17 @@ pub fn error_envelope(err: &ToolError) -> Value {
     })
 }
 
+#[cfg(test)]
+mod error_envelope_tests {
+    use super::*;
+    #[test]
+    fn error_envelope_uses_envelope_schema_version_constant() {
+        // S3 fix: 与 `build_envelope` 同源——bump 常量时成功/错误路径同时变。
+        let env = error_envelope(&ToolError::new("database_missing", "x"));
+        assert_eq!(env["schema_version"], ENVELOPE_SCHEMA_VERSION);
+    }
+}
+
 fn schema_version(conn: &Connection) -> i64 {
     conn.query_row(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'",

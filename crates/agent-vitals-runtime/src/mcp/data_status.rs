@@ -57,35 +57,37 @@ pub fn run(_args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let enabled = crate::sql_authority::is_enabled(data_home);
     let report = collect_report(&conn, true, enabled);
 
-    // authority_state：库能打开但 integrity 坏 / schema 不符 → unavailable。
+    // 损坏 / schema 不符 = **业务错误**（spec §7.1：「integrity != ok →
+    // envelope authority_state=unavailable + 错误码 database_unreadable」——
+    // 即 `isError: true` + envelope 内 `error.code: "database_unreadable"`，
+    // 不是带 `unavailable` 标记的成功响应）。返回错误把这条契约对齐到
+    // Python `tests/test_data_status_health.py` 的 `corrupt → critical + 退出 1`。
     let integrity_ok = report["integrity"].as_str() == Some("ok");
     let schema_ok = report["schema_version"].as_str()
         == Some(&agent_vitals_data::authority::SCHEMA_VERSION.to_string());
-    let authority_state = if !integrity_ok || !schema_ok {
-        "unavailable"
-    } else if enabled {
-        "enabled"
-    } else {
-        "candidate"
-    };
-
-    let mut warnings = Vec::new();
     if !integrity_ok {
-        warnings.push(json!({
-            "code": "database_integrity",
-            "message": format!("PRAGMA integrity_check: {}", report["integrity"].as_str().unwrap_or("?")),
-        }));
+        return Err(ToolError::new(
+            "database_unreadable",
+            format!(
+                "PRAGMA integrity_check failed: {} — keep the DB file for diagnosis, do NOT rebuild (the authority DB does not self-heal)",
+                report["integrity"].as_str().unwrap_or("?")
+            ),
+        ));
     }
     if !schema_ok {
-        warnings.push(json!({
-            "code": "schema_mismatch",
-            "message": format!(
+        return Err(ToolError::new(
+            "schema_migration_required",
+            format!(
                 "authority schema is v{}, this build supports v{}",
                 report["schema_version"].as_str().unwrap_or("?"),
                 agent_vitals_data::authority::SCHEMA_VERSION
             ),
-        }));
+        ));
     }
+
+    let authority_state = if enabled { "enabled" } else { "candidate" };
+
+    let mut warnings = Vec::new();
     if report["health"].as_str() == Some("critical") {
         for h in report["hints"].as_array().into_iter().flatten() {
             warnings.push(json!({ "code": "health_critical", "message": h }));
@@ -322,6 +324,40 @@ mod tests {
         let mcp_env = run(&json!({}), &home).unwrap();
         assert_eq!(mcp_env["data"], cli_side);
 
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn corrupt_db_is_a_business_error_not_silent_unavailable() {
+        // S1 fix: spec §7.1 「integrity != ok → 错误码 database_unreadable」
+        // 必须是业务错误（Err），不是带 `authority_state: "unavailable"` 的
+        // 成功响应。后者会让 Python `tests/test_data_status_health.py` 的
+        // 「corrupt → critical + exit 1」契约在 Rust 侧不复刻。
+        let home = tmp_home("corrupt");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        std::fs::write(&path, b"NOT A SQLITE DATABASE").unwrap();
+
+        let err = run(&json!({}), &home).unwrap_err();
+        assert_eq!(err.code, "database_unreadable");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn schema_mismatch_is_a_business_error() {
+        let home = tmp_home("schema-mismatch");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO schema_meta VALUES('schema_version', '99');",
+            )
+            .unwrap();
+
+        let err = run(&json!({}), &home).unwrap_err();
+        assert_eq!(err.code, "schema_migration_required");
         let _ = std::fs::remove_dir_all(&home);
     }
 
