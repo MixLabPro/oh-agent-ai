@@ -29,16 +29,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-# 北京日期键（UTC+8 无 DST）——today.json 的 date 必须等于它，read_overview
-# 的 today_cost 才认「今天」（stale → None，不把昨天的账报成今天的）。
-_BJ = timezone(timedelta(hours=8))
-
-
-def _today_bj():
-    return datetime.now(_BJ).strftime("%Y-%m-%d")
 
 ROOT = Path(__file__).resolve().parent.parent
 _BIN = os.environ.get("AGENT_VITALS_BIN")
@@ -59,7 +50,13 @@ _TS_FIELDS = {"folded_at", "last_fold_at", "generated_at", "archived_at"}
 #   cache/codex-fold.json —— `_render_calendar_html` 内部扫**真机** ~/.codex 的缓存，
 #                           宿主相关、不可复现，Rust oneline 无对应产物；
 #   *.lock —— Python 的 flock 副作用。
-_DELTA_FILES = {"state/calendar.html", "cache/codex-fold.json"}
+_DELTA_FILES = {
+    "state/calendar.html", "cache/codex-fold.json",
+    # v0.9.1 Stage 5b：Rust tick 只维护导航快照，业务账统一由 SQL authority
+    # 产生/读取。Python 兼容 CLI 仍会写这些历史 state 文件，不能再拿它们做 parity。
+    "state/today.json", "state/month.json", "state/month-archive.json",
+    "state/alert.json", "state/budget.json",
+}
 
 
 def _scrub(v):
@@ -72,20 +69,37 @@ def _scrub(v):
 
 def _state_files(home: Path):
     out = []
-    for root, _, files in os.walk(home):
-        for f in files:
-            if f.endswith(".lock"):
-                continue
-            rel = str(Path(root).relative_to(home) / f)
-            if rel in _DELTA_FILES:
-                continue
-            out.append(rel)
+    # 只比较 agent-vitals 约定的持久化面。HOME 已隔离后 Python 会建立自身的
+    # `Library/Caches/.../__pycache__`，它不属于产品 state，也不该成为契约。
+    state_root = home / "state"
+    for entry in home.iterdir():
+        if entry.is_file():
+            rel = entry.name
+            if rel not in _DELTA_FILES:
+                out.append(rel)
+    if state_root.is_dir():
+        for root, _, files in os.walk(state_root):
+            for f in files:
+                if f.endswith(".lock"):
+                    continue
+                rel = str(Path(root).relative_to(home) / f)
+                if rel in _DELTA_FILES:
+                    continue
+                out.append(rel)
     return sorted(out)
+
+
+def _navigation_stdout(text: str) -> str:
+    """剔除旧 state 预算行；Rust tick 不再从/写 alert.json。"""
+    return "\n".join(line for line in text.splitlines() if not line.startswith("budget:"))
 
 
 def _run(cmd, home: Path, log: Path):
     env = dict(os.environ)
     env["AGENT_VITALS_HOME"] = str(home)
+    # Python 的兼容日历渲染会经 Path.home() 探测 Codex 缓存；不隔离 HOME 会在
+    # 真机用户目录全量扫描，既拖慢测试也让 fixture 不可复现。
+    env["HOME"] = str(home)
     env["AGENT_VITALS_SNAPSHOT_DIR"] = str(home / "snap")
     # 不让 Python 初始化扫到真机宿主（isolated_home_env 同款禁用）。
     for adapter in ("CODEX_RUNTIME", "OPENCLAW_RUNTIME", "WORKBUDDY_BUILTINS"):
@@ -116,9 +130,8 @@ class OnelineLockstepTests(unittest.TestCase):
         (home / "machine.json").write_text(_NS_SEED, encoding="utf-8")
         return home
 
-    def test_python_rust_state_and_stdout_byte_equal(self):
-        """同一份真实会话日志：两侧折进独立 HOME，state 文件逐字节相等
-        （时间戳掩码），stdout 逐字节相等（HOME 掩码）。"""
+    def test_python_rust_navigation_snapshot_and_stdout_byte_equal(self):
+        """导航快照仍与 Python mirror 一致；旧业务账不属于 Rust tick 协议。"""
         py_home, rs_home = self._fresh_home(), self._fresh_home()
         py = _run(PY_CMD + ["oneline"], py_home, self.log)
         # Rust 用 --shadow 对齐 epoch 基线（见模块 docstring）。
@@ -127,13 +140,13 @@ class OnelineLockstepTests(unittest.TestCase):
                          "退出码不一致：py=%d rs=%d\npy stderr:\n%s\nrs stderr:\n%s"
                          % (py.returncode, rs.returncode, py.stderr, rs.stderr))
         self.assertEqual(
-            py.stdout.replace(str(py_home), "<HOME>"),
-            rs.stdout.replace(str(rs_home), "<HOME>"),
-            "stdout 不一致",
+            _navigation_stdout(py.stdout.replace(str(py_home), "<HOME>")),
+            _navigation_stdout(rs.stdout.replace(str(rs_home), "<HOME>")),
+            "导航 stdout 不一致",
         )
 
         py_files, rs_files = _state_files(py_home), _state_files(rs_home)
-        self.assertEqual(py_files, rs_files, "state 文件集不一致")
+        self.assertEqual(py_files, rs_files, "导航 state 文件集不一致")
         for f in py_files:
             a = _scrub(json.loads((py_home / f).read_text(encoding="utf-8")))
             b = _scrub(json.loads((rs_home / f).read_text(encoding="utf-8")))
@@ -188,8 +201,8 @@ class OnelineLockstepTests(unittest.TestCase):
         oneline = json.loads((home / "state" / "oneline.json").read_text())
         self.assertEqual(oneline["session_id"], "resume")
 
-    def test_takeover_then_fold_writes_all_authoritative_files(self):
-        """§4.2 前置：takeover rust 之后生产路径放行，today/oneline/alert 齐。"""
+    def test_takeover_then_fold_writes_navigation_files_only(self):
+        """Stage 5b：接管后只写导航快照和去重元数据，绝不重建旧业务账。"""
         home = self._fresh_home()
         env = dict(os.environ)
         env["AGENT_VITALS_HOME"] = str(home)
@@ -198,20 +211,20 @@ class OnelineLockstepTests(unittest.TestCase):
         self.assertIn("owner switched to rust", r.stdout)
         r = _run([_BIN, "oneline"], home, self.log)
         self.assertEqual(r.returncode, 0, r.stderr)
-        for f in ("oneline.json", "today.json", "alert.json",
-                  "month.json", "sessions.jsonl", "session-ledger.json",
+        for f in ("oneline.json", "sessions.jsonl", "session-ledger.json",
                   "writer-manifest.json"):
             self.assertTrue((home / "state" / f).is_file(),
                             "takeover 后缺 %s" % f)
         manifest = json.loads((home / "state" / "writer-manifest.json").read_text())
         self.assertEqual(manifest["owner"], "rust")
         self.assertEqual(manifest["epoch"], 2)  # takeover(1) + fold(2)
+        for f in ("today.json", "month.json", "month-archive.json", "alert.json"):
+            self.assertFalse((home / "state" / f).exists(), "不应再写 %s" % f)
 
-    def test_takeover_discover_fold_updates_state_that_ui_reads(self):
+    def test_takeover_discover_fold_updates_navigation_snapshot_only(self):
         """§4.2 端到端验收：隔离 AGENT_VITALS_HOME + 假 DSH 根（真实格式日志）→
         `state takeover rust` → `discover`（拿到最新未折）→ `oneline --session-id`
-        → state 文件更新，且正是 read_overview 读的那几份（today.json 的 date 是
-        北京今天、by_model 非空；month.json 有 days；alert.json 有 level）。"""
+        → 只更新导航快照；业务数据由 SQL 查询面提供。"""
         home = self._fresh_home()
         fake = self.tmp / "fake-dsh"
         sess_dir = fake / "sessions" / "ws" / "sess-acc"
@@ -220,20 +233,10 @@ class OnelineLockstepTests(unittest.TestCase):
         lines = self.LOG.read_text().splitlines()
         # 只换 header 的 id（agentId 目录名），其余 schema 字段原样保留——
         # 少了 version/createdAt/cwd 那组，DSH adapter 判「schema mismatch」。
-        # 夹具 usage 事件落在 2025-06-15（真实历史会话），原样折进去 today.json
-        # 恒空——R1c 的运行时-today 教训：夹具是历史数据，别指望它天然落在今天。
-        # 把每个事件的时间整体平移到北京今天零点（保留相对偏移；事件形状不变 →
-        # schema-match 保证），token 桶才会落进今天。这是本测试演示「today 非空 +
-        # by_model 出数字」的唯一方式，不是改断言迁就夹具。
+        # 夹具保持真实历史时间；tick 不再承担日/月业务账的落盘职责。
         header = json.loads(lines[0])
-        shift = int(datetime.combine(
-            datetime.now(_BJ).date(), datetime.min.time(),
-            tzinfo=_BJ).timestamp() * 1000) - int(header["createdAt"])
         for i, line in enumerate(lines):
             e = json.loads(line)
-            for k in ("createdAt", "time"):
-                if k in e and isinstance(e[k], int):
-                    e[k] += shift
             if i == 0:
                 e["id"] = "sess-acc"
             lines[i] = json.dumps(e)
@@ -241,6 +244,7 @@ class OnelineLockstepTests(unittest.TestCase):
 
         env = dict(os.environ)
         env["AGENT_VITALS_HOME"] = str(home)
+        env["HOME"] = str(home)
         env["DSH_HOME"] = str(fake)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(home / "snap")
         for adapter in ("CODEX_RUNTIME", "OPENCLAW_RUNTIME", "WORKBUDDY_BUILTINS"):
@@ -264,31 +268,16 @@ class OnelineLockstepTests(unittest.TestCase):
         found = Path(report["unfolded"][0]["path"]).resolve()
         self.assertEqual(found, log.resolve(), "discover 应指到 fake 根里那条日志")
 
-        # oneline 折账 —— session-id 从 discover 传过来（DSH 落盘名恒 session.jsonl）。
+        # oneline 折导航快照 —— session-id 从 discover 传过来。
         r = run("oneline", str(found), "--session-id", "sess-acc")
         self.assertEqual(r.returncode, 0, r.stderr)
 
-        # 7 份权威文件齐 —— 正是 read_overview / 菜单栏读的那几份。
-        for f in ("oneline.json", "today.json", "alert.json",
-                  "month.json", "sessions.jsonl", "session-ledger.json",
+        for f in ("oneline.json", "sessions.jsonl", "session-ledger.json",
                   "writer-manifest.json"):
             self.assertTrue((home / "state" / f).is_file(), "折完缺 %s" % f)
 
-        # UI 反映（read_overview 消费这些文件）：
-        #   today.json 的 date == 北京今天，by_model 非空 → today_cost 不判 stale；
-        #   month.json 有 days → month_cost 出真数字；
-        #   alert.json 有 level → budget 状态行有权威来源。
-        today = json.loads((home / "state" / "today.json").read_text())
-        self.assertEqual(today["date"], _today_bj(),
-                         "today.json 的 date 必须是北京今天（read_overview 判 stale）")
-        by_model = today["by_model"]
-        self.assertTrue(by_model, "today.json 的 by_model 不能是空壳")
-        self.assertGreater(
-            by_model["deepseek-v4-flash"]["uncached_input_tokens"], 0)
-        month = json.loads((home / "state" / "month.json").read_text())
-        self.assertIn("days", month)
-        alert = json.loads((home / "state" / "alert.json").read_text())
-        self.assertIn("level", alert)
+        for f in ("today.json", "month.json", "month-archive.json", "alert.json"):
+            self.assertFalse((home / "state" / f).exists(), "旧业务 state 不得被 tick 复活")
         oneline = json.loads((home / "state" / "oneline.json").read_text())
         self.assertEqual(oneline["session_id"], "sess-acc")
 

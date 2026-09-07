@@ -11,8 +11,8 @@
 
 // 子树：skills/（静态 SKILL.md 体检）+ agent/（会话行为/成本审计）。
 // dsh.rs 与 util.rs 是两世界共享，留在顶层。
-mod skills;
 mod agent;
+mod skills;
 mod util;
 
 use std::path::{Path, PathBuf};
@@ -52,8 +52,12 @@ fn non_negative(s: &str) -> Result<i64, String> {
 }
 
 #[derive(Parser)]
-#[command(name = "agent-vitals", version, about = "Agent Skills health-check scanner",
-          allow_negative_numbers = true)]
+#[command(
+    name = "agent-vitals",
+    version,
+    about = "Agent Skills health-check scanner",
+    allow_negative_numbers = true
+)]
 struct Args {
     /// Analyze one host; default: scan every supported host separately
     #[arg(long, global = true, default_value = "all",
@@ -226,10 +230,10 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
-    /// Fold a DSH session log into oneline.json + today.json/month.json +
-    /// alert.json + sessions.jsonl (R1d-tick producer; byte-for-byte mirror of
-    /// Python `scan.py oneline`). Fenced: state owner must be `rust` (takeover)
-    /// unless --shadow. Writer fencing fails fast before the audit cost.
+    /// Fold a DSH session log into navigation snapshots (oneline.json +
+    /// sessions.jsonl). Business usage/cost data is written and read only via
+    /// the SQL authority. Fenced: state owner must be `rust` (takeover) unless
+    /// --shadow. Writer fencing fails fast before the audit cost.
     Oneline {
         /// Path to the DSH session JSONL log (single file, not a directory)
         session_log: PathBuf,
@@ -239,8 +243,8 @@ enum Cmd {
         /// dedup key). Default: file stem, byte-mirroring Python scan.py.
         #[arg(long = "session-id")]
         session_id: Option<String>,
-        /// Skip folding hour buckets into today.json/month.json (still writes
-        /// oneline.json + sessions.jsonl + alert.json + ledger)
+        /// Compatibility flag retained for old scripts. SQL-authority mode has
+        /// no legacy merge step, so it has no effect.
         #[arg(long)]
         no_merge: bool,
         /// Rehearse on a copy: skip writer fencing (like `state fold-session --shadow`)
@@ -775,51 +779,17 @@ enum SessionsAction {
 /// 逐字节对账 Python 侧。
 #[derive(Subcommand)]
 enum StateAction {
-    /// Fold hour buckets into today.json (Python `state.merge_today`).
-    /// `--by-model` is today's slice of token_by_date_model; when the slice
-    /// for today is absent, omit it (Python merges with `None`).
-    MergeToday {
-        /// hour-buckets JSON (the `hb` object from usage.hour_buckets)
-        hb: PathBuf,
-        /// today's by_model JSON (by_date_model[today]); optional
-        #[arg(long)]
-        by_model: Option<PathBuf>,
-    },
-    /// Fold hour buckets + by_date_model into month.json, migrating stale days
-    /// to month-archive.json first (Python `state.merge_month`, two-phase).
-    MergeMonth {
-        /// hour-buckets JSON
-        hb: PathBuf,
-        /// by_date_model JSON (usage.token_by_date_model output)
-        #[arg(long)]
-        by_date_model: Option<PathBuf>,
-    },
     /// Write oneline.json (the tick's display summary; Python `state.write_oneline`)
-    WriteOneline {
-        summary: PathBuf,
-    },
+    WriteOneline { summary: PathBuf },
     /// Append one summary row to sessions.jsonl (Python `state.append_session_history`)
-    AppendHistory {
-        summary: PathBuf,
-    },
-    /// Write alert.json (Python `state.write_alert`)
-    WriteAlert {
-        alert: PathBuf,
-    },
-    /// Set budget snooze → budget.json (Python `budget.set_snooze`)
-    Snooze {
-        until_iso: String,
-        reason: String,
-    },
-    /// Clear budget snooze → remove budget.json (Python `budget.clear_snooze`)
-    Unsnooze,
+    AppendHistory { summary: PathBuf },
     /// Session-level dedup fold (R1d §4.2/§4.3): fold a session's pre-computed
-    /// audit output into today/month/oneline/alert/sessions.jsonl exactly once.
+    /// navigation snapshot into oneline/sessions.jsonl exactly once.
     /// Fenced: refuses unless the writer-manifest owner is "rust" (run
     /// `state takeover rust` first, or pass --shadow to rehearse on a copy).
     FoldSession {
-        /// fold-req JSON (session_id/host_kind/machine_namespace/oneline/
-        /// hour_buckets/by_model_today/by_date_model/alert)
+        /// fold-req JSON (session_id/host_kind/machine_namespace/oneline).
+        /// Any old business-ledger fields are ignored.
         req: PathBuf,
         /// Shadow mode: skip the owner check and fold into whatever
         /// AGENT_VITALS_HOME points at (non-authority rehearsal copy).
@@ -836,31 +806,6 @@ enum StateAction {
     /// Print (creating if needed) the machine namespace — SessionKey's third
     /// component, persisted in machine.json (app-owned config, §4.3).
     MachineNamespace,
-    /// Read-only per-source breakdown of the current month (month.json's
-    /// per-day by_source rolled up + priced). JSON on stdout: `by_source`
-    /// (source → model → 8-bucket) and `by_source_cost` (source → price), or
-    /// both empty when the month has no by_source data — never fabricated.
-    BySource,
-    /// Read-only per-model monthly cost breakdown of the current month
-    /// (month.json's per-day by_model rolled up + priced; v0.7 spec §3 first
-    /// landed output view). JSON on stdout: `by_model` (model → 8-bucket) and
-    /// `by_model_cost` (model → price), or both empty when the month has no
-    /// by_model data — never fabricated.
-    ByModel,
-    /// v0.7 spec §3 second output view: provider-grain "未落入已声明订阅覆盖
-    /// 范围" estimate (Claude Code catalog pricing surface). Reads month.json
-    /// by_model, maps the 8-bucket DSH shape → Claude 4-type snake shape
-    /// (peak_* dropped), then prices via core `claude_subscription_uncovered_
-    /// estimate`. Output JSON: `by_model` (Claude 4-type) + `uncovered`
-    /// (`price_claude_map` with `pricing_basis="estimated-subscription-
-    /// exclusion"`); both empty/null when no by_model data.
-    Uncovered,
-    /// v0.7 spec §3 third output view: actual-vs-nominal cache-savings ratio.
-    /// Reads month.json by_model, prices the same shape via core
-    /// `cache_counterfactual_cost` (cache-discount counterfactual). Output JSON:
-    /// `by_model` + `savings` (`{actual, nominal, ratio, currency,
-    /// estimate_disclaimer}`); both empty/null when no by_model data.
-    Savings,
 }
 
 /// 探测「扫描器自身所在的 skill 目录」。
@@ -892,28 +837,39 @@ fn detect_self_root() -> Option<PathBuf> {
 /// **顺序是有意的。**闸门结论要紧跟报告（读者刚看完发现），存档放最后
 /// （它是副作用，不是结论）。存档失败不影响闸门的退出码 —— 一个写不了快照的
 /// CI runner 不该因此把构建判成通过或失败。
-fn run_doctor(doc: &Value, args: &Args, min: f64, auto_snapshot: bool,
-              baseline: Option<&std::path::Path>) -> i32 {
-    print!("{}", skills::doctor::render_doctor(doc, &skills::doctor::DoctorOpts {
-        split_threshold: args.split_threshold,
-        min,
-        version: env!("CARGO_PKG_VERSION"),
-    }));
+fn run_doctor(
+    doc: &Value,
+    args: &Args,
+    min: f64,
+    auto_snapshot: bool,
+    baseline: Option<&std::path::Path>,
+) -> i32 {
+    print!(
+        "{}",
+        skills::doctor::render_doctor(
+            doc,
+            &skills::doctor::DoctorOpts {
+                split_threshold: args.split_threshold,
+                min,
+                version: env!("CARGO_PKG_VERSION"),
+            }
+        )
+    );
     let ds = skills::doctor::diagnose(doc, args.split_threshold, min);
 
     let mut base_ds: Option<Vec<Value>> = None;
     if args.new_only {
         let path = match baseline {
             None => {
-                eprintln!("--new-only needs a baseline: run `agent-vitals snapshot` first, \
-or specify one with --baseline.");
+                eprintln!(
+                    "--new-only needs a baseline: run `agent-vitals snapshot` first, \
+or specify one with --baseline."
+                );
                 return skills::doctor::EXIT_TOOL_ERROR;
             }
             Some(p) => p,
         };
-        let prev: Value = match util::read_lossy(path)
-            .and_then(|t| serde_json::from_str(&t).ok())
-        {
+        let prev: Value = match util::read_lossy(path).and_then(|t| serde_json::from_str(&t).ok()) {
             None => {
                 eprintln!("--new-only could not read baseline {}", path.display());
                 return skills::doctor::EXIT_TOOL_ERROR;
@@ -925,15 +881,25 @@ or specify one with --baseline.");
         base_ds = Some(skills::doctor::diagnose(&prev, args.split_threshold, min));
     }
 
-    let ignore: Vec<String> = args.ignore.split(',')
+    let ignore: Vec<String> = args
+        .ignore
+        .split(',')
         .map(|x| x.trim().to_uppercase())
         .filter(|x| !x.is_empty())
         .collect();
     let (text, rc) = skills::doctor::render_gate(
-        &ds, &skills::doctor::GateOpts { fail_on: args.fail_on.clone(), ignore },
-        base_ds.as_deref());
+        &ds,
+        &skills::doctor::GateOpts {
+            fail_on: args.fail_on.clone(),
+            ignore,
+        },
+        base_ds.as_deref(),
+    );
     print!("{}", text);
-    print!("{}", agent_vitals_runtime::skills::snapshot::doctor_snapshot(doc, auto_snapshot));
+    print!(
+        "{}",
+        agent_vitals_runtime::skills::snapshot::doctor_snapshot(doc, auto_snapshot)
+    );
     rc
 }
 
@@ -964,10 +930,16 @@ fn render_codex_evidence(out: &Value) -> String {
         .unwrap_or_default();
 
     let mut s = String::new();
-    s.push_str(&format!("host: {}\n", dash(Some(&Value::String("codex".into())))));
+    s.push_str(&format!(
+        "host: {}\n",
+        dash(Some(&Value::String("codex".into())))
+    ));
     s.push_str(&format!("session: {}\n", dash(out.get("session_id"))));
     s.push_str(&format!("title: {}\n", dash(out.get("title"))));
-    s.push_str(&format!("history_mode: {}\n", dash(out.get("history_mode"))));
+    s.push_str(&format!(
+        "history_mode: {}\n",
+        dash(out.get("history_mode"))
+    ));
     s.push_str(&format!("cli_version: {}\n", dash(out.get("cli_version"))));
     s.push_str(&format!("model: {}\n", dash(out.get("model"))));
     s.push_str(&format!("workspace_roots: {roots}\n"));
@@ -984,15 +956,23 @@ fn render_codex_evidence(out: &Value) -> String {
                     c.get("lossy").and_then(|v| v.as_u64()).unwrap_or(0),
                     c.get("unmetered").and_then(|v| v.as_u64()).unwrap_or(0),
                 );
-                s.push_str(&format!("  {name:<20} measured={m} derived={d} lossy={l} unmetered={u}\n"));
+                s.push_str(&format!(
+                    "  {name:<20} measured={m} derived={d} lossy={l} unmetered={u}\n"
+                ));
             }
         }
     }
     s.push('\n');
     s.push_str(&format!(
         "attempts: {}    notes: {}\n",
-        out.get("attempts").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
-        out.get("notes").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        out.get("attempts")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0),
+        out.get("notes")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0),
     ));
     s
 }
@@ -1010,9 +990,19 @@ fn render_codex_roots(out: &Value) -> String {
             ) else {
                 continue;
             };
-            if entry.get("exists").and_then(|v| v.as_bool()).unwrap_or(false) {
-                let fc = entry.get("file_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                let tb = entry.get("total_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            if entry
+                .get("exists")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                let fc = entry
+                    .get("file_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let tb = entry
+                    .get("total_bytes")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 s.push_str(&format!("{kind:<8} {path}  ({fc} rollouts, {tb} bytes)\n"));
             } else {
                 s.push_str(&format!("{kind:<8} {path}  (absent)\n"));
@@ -1027,15 +1017,25 @@ fn render_codex_roots(out: &Value) -> String {
 /// 渲染只做呈现：null 一律落 `—`（没测到就标没测到，不假装 0），summary 不汇总
 /// token（per-startup 与 per-trigger 单位不可通约）。
 fn render_plan(out: &Value) -> String {
-    let host = out.get("host_selection").and_then(|v| v.as_str()).unwrap_or("");
+    let host = out
+        .get("host_selection")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let startup = out.get("startup_rate_per_month").and_then(|v| v.as_i64());
-    let refs: Vec<&str> = out.get("diagnosis_refs")
+    let refs: Vec<&str> = out
+        .get("diagnosis_refs")
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
         .unwrap_or_default();
     let summary = out.get("summary").unwrap_or(&Value::Null);
-    let n = summary.get("item_count").and_then(|v| v.as_i64()).unwrap_or(0);
-    let savings = summary.get("savings_items").and_then(|v| v.as_i64()).unwrap_or(0);
+    let n = summary
+        .get("item_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let savings = summary
+        .get("savings_items")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
 
     let mut s = String::new();
     s.push_str(&format!("host: {host}\n"));
@@ -1074,7 +1074,8 @@ fn render_plan(out: &Value) -> String {
                 }
                 _ => s.push_str("   lifetime triggers measured: —\n"),
             }
-            let drefs: Vec<&str> = it.get("diagnosis_refs")
+            let drefs: Vec<&str> = it
+                .get("diagnosis_refs")
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
                 .unwrap_or_default();
@@ -1119,8 +1120,7 @@ fn codex_report_from_merged(
         // 重算模型轴：merge 的 by_model 只读 fold 的 by_model 字段，不读
         // by_hour_model——拿 merge 折回去得到的是空模型轴（真实 defect：
         // --month 整份报告静默变全零）。
-        by_model =
-            agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
+        by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
     }
     let pricing = agent_vitals_runtime::sessions::codex_cost::load_codex_pricing();
     let plan = merged["plan"].clone();
@@ -1158,7 +1158,10 @@ fn codex_report_from_merged(
         "month".into(),
         month_out.map(Value::from).unwrap_or(Value::Null),
     );
-    out.insert("today".into(), json!(agent_vitals_runtime::sessions::codex_cost::today_beijing()));
+    out.insert(
+        "today".into(),
+        json!(agent_vitals_runtime::sessions::codex_cost::today_beijing()),
+    );
     if let Some(rep) = report.as_object() {
         for (k, v) in rep {
             out.insert(k.clone(), v.clone());
@@ -1219,9 +1222,8 @@ fn render_codex_cost_html(
     let safe = json_text
         .replace("</script", "<\\/script")
         .replace("<!--", "<\\!--");
-    let inject = format!(
-        "<script id=\"agent-vitals-data-codex\" type=\"application/json\">{safe}</script>"
-    );
+    let inject =
+        format!("<script id=\"agent-vitals-data-codex\" type=\"application/json\">{safe}</script>");
     let host_inject = "<script>window.AGENT_VITALS_DEFAULT_HOST = 'codex';</script>";
     let html = TEMPLATE
         .replacen("</head>", &format!("{inject}\n</head>"), 1)
@@ -1330,11 +1332,17 @@ fn main() {
 
     // 行为审计：审计一份 DSH 会话日志的执行轨迹，**不跑 skill 扫描**。
     // 独立取证命令（读会话日志 → 规则引擎 → findings），在扫描之前短路。
-    if let Some(Cmd::Behavior { session_log, rows_json }) = &args.cmd {
+    if let Some(Cmd::Behavior {
+        session_log,
+        rows_json,
+    }) = &args.cmd
+    {
         if let Some(path) = rows_json {
             // `--json` 的 20 键载荷在 behavior.rs::audit_payload（唯一来源）——
             // DSH SessionReport 的 session 载荷就是它，键序逐字节对齐 Python。
-            let Some(payload) = agent_vitals_runtime::sessions::behavior::audit_payload(session_log) else {
+            let Some(payload) =
+                agent_vitals_runtime::sessions::behavior::audit_payload(session_log)
+            else {
                 eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
                 std::process::exit(2);
             };
@@ -1353,19 +1361,27 @@ fn main() {
             }
             return;
         }
-        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log) else {
+        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log)
+        else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };
         let findings = &audit.findings;
         for f in findings {
             let sev = f.get("severity").and_then(|v| v.as_str()).unwrap_or("");
-            let glyph = match sev { "critical" => "✕", "warning" => "⚠", _ => "·" };
+            let glyph = match sev {
+                "critical" => "✕",
+                "warning" => "⚠",
+                _ => "·",
+            };
             let rule = f.get("rule").and_then(|v| v.as_str()).unwrap_or("");
             let cat = f.get("category").and_then(|v| v.as_str()).unwrap_or("");
             let ev = f.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
-            let seq_s = f.get("seq").and_then(|v| v.as_i64())
-                .map(|n| n.to_string()).unwrap_or_else(|| "None".to_string());
+            let seq_s = f
+                .get("seq")
+                .and_then(|v| v.as_i64())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "None".to_string());
             println!("{glyph} {rule} {cat} {ev} (seq {seq_s})");
         }
         // 成本块：findings 之后空行 + 费用估算（纯展示层，见 cost.rs）。无
@@ -1382,13 +1398,23 @@ fn main() {
         // behavior_gate 的 docstring）。此前硬编码「有 critical 就退 1」，把
         // --fail-on warning / --ignore SV603 这类全局参数静默吞掉了。成本不
         // 影响退出码——闸门只看风险。
-        std::process::exit(agent_vitals_runtime::sessions::behavior::behavior_gate(findings, &args.fail_on, &args.ignore));
+        std::process::exit(agent_vitals_runtime::sessions::behavior::behavior_gate(
+            findings,
+            &args.fail_on,
+            &args.ignore,
+        ));
     }
 
-    // R1d-tick：oneline 生产者——把一份 DSH 会话日志折成一行摘要 + 今日/本月账
-    // + 预算告警，并在 ledger 记 key。在扫描之前短路（与 behavior 同款），
+    // R1d-tick：oneline 生产者——把一份 DSH 会话日志折成导航摘要，并在 ledger
+    // 记 key。业务账仅由 SQL authority 提供。在扫描之前短路（与 behavior 同款），
     // fencing/审计失败 exit 2 不落盘；dedup 命中则正常退出（无输出以外副作用）。
-    if let Some(Cmd::Oneline { session_log, session_id, no_merge, shadow }) = &args.cmd {
+    if let Some(Cmd::Oneline {
+        session_log,
+        session_id,
+        no_merge,
+        shadow,
+    }) = &args.cmd
+    {
         match agent::oneline::oneline(session_log, session_id.as_deref(), *no_merge, *shadow) {
             Ok(_) => return,
             Err(msg) => {
@@ -1417,7 +1443,10 @@ fn main() {
             for h in out["hosts"].as_array().cloned().unwrap_or_default() {
                 let id = h["id"].as_str().unwrap_or("?");
                 let display = h["display"].as_str().unwrap_or("?");
-                let unmeasured = h["unmeasured_signals"].as_array().map(|a| a.len()).unwrap_or(0);
+                let unmeasured = h["unmeasured_signals"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .unwrap_or(0);
                 let degraded = h["degraded_rules"].as_array().map(|a| a.len()).unwrap_or(0);
                 let store = h["session_store"].as_bool().unwrap_or(false);
                 let fold = h["fold"].as_str().unwrap_or("none");
@@ -1451,8 +1480,13 @@ session_store={store} fold={fold}"
     // T11：Skill 执行审计——从会话日志抽取 skill-invocation / tool/call(name=skill) 事件，
     // 输出调用记录（触发方式/加载状态/耗时/位置）。与 behavior 不同：这是 skill 专用，
     // 只出 skill 相关的 invocations 结构，不带 SV601–614 findings。
-    if let Some(Cmd::SkillAudit { session_log, rows_json }) = &args.cmd {
-        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log) else {
+    if let Some(Cmd::SkillAudit {
+        session_log,
+        rows_json,
+    }) = &args.cmd
+    {
+        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log)
+        else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };
@@ -1479,8 +1513,14 @@ session_store={store} fold={fold}"
         let mut by_mode = std::collections::HashMap::new();
         let mut by_status = std::collections::HashMap::new();
         for inv in &invs {
-            let m = inv.get("trigger_mode").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let s = inv.get("load_status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let m = inv
+                .get("trigger_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let s = inv
+                .get("load_status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             *by_mode.entry(m).or_insert(0) += 1;
             *by_status.entry(s).or_insert(0) += 1;
         }
@@ -1498,8 +1538,13 @@ session_store={store} fold={fold}"
     // 与 skill-audit 同一种结构（独立子命令 + `--json` 输出同一份 core 结果），
     // 这里额外给人读格式加一段"最慢的几条"——这正是这个命令存在的理由，不是
     // 跟 skill-audit 一样只报计数就够了。
-    if let Some(Cmd::DurationAudit { session_log, rows_json }) = &args.cmd {
-        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log) else {
+    if let Some(Cmd::DurationAudit {
+        session_log,
+        rows_json,
+    }) = &args.cmd
+    {
+        let Some(audit) = agent_vitals_runtime::sessions::behavior::audit_session_log(session_log)
+        else {
             eprintln!("session log unavailable: unreadable, malformed, or schema mismatch");
             std::process::exit(2);
         };
@@ -1516,31 +1561,59 @@ session_store={store} fold={fold}"
             }
             return;
         }
-        let arr = |key: &str| duration.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let arr = |key: &str| {
+            duration
+                .get(key)
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+        };
         let tool_calls = arr("tool_calls");
         let turns = arr("turns");
         let steps = arr("steps");
         let approvals = arr("approvals");
-        let hooks = duration.pointer("/hooks/executions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        if tool_calls.is_empty() && turns.is_empty() && steps.is_empty() && approvals.is_empty() && hooks.is_empty() {
+        let hooks = duration
+            .pointer("/hooks/executions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if tool_calls.is_empty()
+            && turns.is_empty()
+            && steps.is_empty()
+            && approvals.is_empty()
+            && hooks.is_empty()
+        {
             println!("No duration data found in session log.");
             return;
         }
         println!(
             "Tool calls: {} · Turns: {} · Steps: {} · Approvals: {} · Hook executions: {}",
-            tool_calls.len(), turns.len(), steps.len(), approvals.len(), hooks.len()
+            tool_calls.len(),
+            turns.len(),
+            steps.len(),
+            approvals.len(),
+            hooks.len()
         );
         // 最慢的几条工具调用——duration_ms 缺失（incomplete/failed 没等到结果）
         // 的排到最后，不是当成 0（那样反而会排到最前，读成"最快"）。
         let mut slow = tool_calls;
         slow.sort_by_key(|r| std::cmp::Reverse(r.get("duration_ms").and_then(|v| v.as_i64())));
-        let timed: Vec<_> = slow.into_iter().filter(|r| r.get("duration_ms").and_then(|v| v.as_i64()).is_some()).collect();
+        let timed: Vec<_> = slow
+            .into_iter()
+            .filter(|r| r.get("duration_ms").and_then(|v| v.as_i64()).is_some())
+            .collect();
         if !timed.is_empty() {
             println!("\nSlowest tool calls:");
             for row in timed.iter().take(5) {
-                let name = row.get("tool_name").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+                let name = row
+                    .get("tool_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
                 let ms = row.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(0);
-                let status = row.get("load_status").and_then(|v| v.as_str()).unwrap_or("?");
+                let status = row
+                    .get("load_status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 println!("  {name} — {ms}ms ({status})");
             }
         }
@@ -1551,12 +1624,18 @@ session_store={store} fold={fold}"
     // 的 "sound" 证明。输出 §13 coverage，不是 findings——Codex 还没有 SV601–614
     // 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--host codex`
     // 是安装时探针的表面，与这个子命令无关（命名冲突见 codex_session.rs 顶部注释）。
-    if let Some(Cmd::CodexEvidence { session_log, roots, rows_json }) = &args.cmd {
+    if let Some(Cmd::CodexEvidence {
+        session_log,
+        roots,
+        rows_json,
+    }) = &args.cmd
+    {
         if *roots {
             let home = std::env::var("HOME")
                 .or_else(|_| std::env::var("USERPROFILE"))
                 .unwrap_or_default();
-            let report = agent_vitals_hosts::codex_session::codex_session_roots_report(Path::new(&home));
+            let report =
+                agent_vitals_hosts::codex_session::codex_session_roots_report(Path::new(&home));
             if let Some(path) = rows_json {
                 let text = serde_json::to_string_pretty(&report).unwrap_or_default();
                 if path == &PathBuf::from("-") {
@@ -1573,7 +1652,9 @@ session_store={store} fold={fold}"
             return;
         }
         // clap 的 required_unless_present 保证：roots=false 时 session_log 必在。
-        let session_log = session_log.as_ref().expect("session_log required unless --roots");
+        let session_log = session_log
+            .as_ref()
+            .expect("session_log required unless --roots");
         let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(session_log);
         if parsed.get("degraded").and_then(|v| v.as_str()).is_some() {
             eprintln!("session log unavailable: unreadable, malformed, or empty");
@@ -1597,13 +1678,26 @@ session_store={store} fold={fold}"
                     .unwrap_or("unknown")
                     .to_string()
             });
-        let history_mode = parsed.get("history_mode").and_then(|v| v.as_str()).map(str::to_owned);
-        let cli_version = parsed.get("cli_version").and_then(|v| v.as_str()).map(str::to_owned);
-        let model = parsed.get("model").and_then(|v| v.as_str()).map(str::to_owned);
+        let history_mode = parsed
+            .get("history_mode")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let cli_version = parsed
+            .get("cli_version")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let model = parsed
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
         let workspace_roots: Vec<String> = parsed
             .get("workspace_roots")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|r| r.as_str().map(str::to_owned)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|r| r.as_str().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default();
         // 标题从 ~/.codex/session_index.jsonl 查（索引缺失/不在索引 → None，存在性
         // 探测，绝不报错）。`session_id` 这里还要移进 build，先借引用查表。
@@ -1613,7 +1707,13 @@ session_store={store} fold={fold}"
         let session_index = agent_vitals_hosts::codex_session::read_session_index(Path::new(&home));
         let title = session_index.get(&session_id).cloned();
         let evidence = agent_vitals_hosts::codex_evidence::build_codex_evidence(
-            items, session_id, title, history_mode, cli_version, workspace_roots, model,
+            items,
+            session_id,
+            title,
+            history_mode,
+            cli_version,
+            workspace_roots,
+            model,
         );
         if let Some(path) = rows_json {
             let out = agent_vitals_hosts::codex_evidence::codex_evidence_json(&evidence);
@@ -1633,7 +1733,12 @@ session_store={store} fold={fold}"
             }
             return;
         }
-        print!("{}", render_codex_evidence(&agent_vitals_hosts::codex_evidence::codex_evidence_json(&evidence)));
+        print!(
+            "{}",
+            render_codex_evidence(&agent_vitals_hosts::codex_evidence::codex_evidence_json(
+                &evidence
+            ))
+        );
         return;
     }
 
@@ -1684,7 +1789,11 @@ session_store={store} fold={fold}"
         // 3 视图 blob 同一份逻辑，见 `codex_report_from_merged`）。
         let want_hours = *today;
         let out = codex_report_from_merged(
-            &merged, filter_key.as_deref(), month_out.as_deref(), want_hours);
+            &merged,
+            filter_key.as_deref(),
+            month_out.as_deref(),
+            want_hours,
+        );
         let mut wrote = false;
         if let Some(path) = rows_json {
             let text = serde_json::to_string_pretty(&out).unwrap_or_default();
@@ -1701,15 +1810,27 @@ session_store={store} fold={fold}"
         if let Some(path) = html {
             // `--html` 复用统一看板模板（codex 视角）：default 随请求——请求月
             // → "month"、全部 → "all"、今天 → "today"、无请求 → "month"。
-            let default_view = if *today { "today" }
-                else if month.as_deref() == Some("all") { "all" }
-                else { "month" };
+            let default_view = if *today {
+                "today"
+            } else if month.as_deref() == Some("all") {
+                "all"
+            } else {
+                "month"
+            };
             render_codex_cost_html(
-                path, &merged, filter_key.as_deref(), month_out.as_deref(), default_view);
+                path,
+                &merged,
+                filter_key.as_deref(),
+                month_out.as_deref(),
+                default_view,
+            );
             wrote = true;
         }
         if !wrote {
-            print!("{}", agent_vitals_runtime::sessions::codex_cost::render_codex_cost(&out));
+            print!(
+                "{}",
+                agent_vitals_runtime::sessions::codex_cost::render_codex_cost(&out)
+            );
         }
         return;
     }
@@ -1722,7 +1843,13 @@ session_store={store} fold={fold}"
     // `--html`/`--json`/文本三路。无状态单次调用。HTML 是新模板
     // codex_session.html（套 DSH 审计 tab 的版式，docs/DSH_INTEGRATION.md 的
     // .sv-* 视觉约定），JSON 经 `</script`/`<!--` 转义后内联。
-    if let Some(Cmd::CodexSession { list, session, rows_json, html }) = &args.cmd {
+    if let Some(Cmd::CodexSession {
+        list,
+        session,
+        rows_json,
+        html,
+    }) = &args.cmd
+    {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default();
@@ -1732,7 +1859,8 @@ session_store={store} fold={fold}"
                 eprintln!("--list only supports --json or plain text, not --html");
                 std::process::exit(2);
             }
-            let out = agent_vitals_runtime::sessions::codex_session_audit::codex_session_list(home_path);
+            let out =
+                agent_vitals_runtime::sessions::codex_session_audit::codex_session_list(home_path);
             if let Some(path) = rows_json {
                 let text = serde_json::to_string_pretty(&out).unwrap_or_default();
                 if path == &PathBuf::from("-") {
@@ -1744,7 +1872,12 @@ session_store={store} fold={fold}"
                     println!("Wrote {}", path.display());
                 }
             } else {
-                print!("{}", agent_vitals_runtime::sessions::codex_session_audit::render_codex_session_list(&out));
+                print!(
+                    "{}",
+                    agent_vitals_runtime::sessions::codex_session_audit::render_codex_session_list(
+                        &out
+                    )
+                );
             }
             return;
         }
@@ -1753,7 +1886,9 @@ session_store={store} fold={fold}"
         let session_id = match session {
             Some(s) => s.clone(),
             None => {
-                let list = agent_vitals_runtime::sessions::codex_session_audit::codex_session_list(home_path);
+                let list = agent_vitals_runtime::sessions::codex_session_audit::codex_session_list(
+                    home_path,
+                );
                 let first = list
                     .get("sessions")
                     .and_then(|v| v.as_array())
@@ -1770,7 +1905,11 @@ session_store={store} fold={fold}"
                 }
             }
         };
-        let Some(out) = agent_vitals_runtime::sessions::codex_session_audit::codex_session_audit_json(home_path, &session_id)
+        let Some(out) =
+            agent_vitals_runtime::sessions::codex_session_audit::codex_session_audit_json(
+                home_path,
+                &session_id,
+            )
         else {
             eprintln!("codex session not found: {session_id}");
             std::process::exit(2);
@@ -1789,11 +1928,16 @@ session_store={store} fold={fold}"
             wrote = true;
         }
         if let Some(path) = html {
-            agent_vitals_runtime::sessions::codex_session_audit::render_codex_session_html(path, &out);
+            agent_vitals_runtime::sessions::codex_session_audit::render_codex_session_html(
+                path, &out,
+            );
             wrote = true;
         }
         if !wrote {
-            print!("{}", agent_vitals_runtime::sessions::codex_session_audit::render_codex_session(&out));
+            print!(
+                "{}",
+                agent_vitals_runtime::sessions::codex_session_audit::render_codex_session(&out)
+            );
         }
         return;
     }
@@ -1801,7 +1945,12 @@ session_store={store} fold={fold}"
     // Claude Code 会话审计。与 codex-session 同款 home 解析与缺省 --session =
     // 最新；SV607/608 的 Unavailable 覆盖在 claude_session.rs（host-capability
     // degradation，§12）。
-    if let Some(Cmd::ClaudeSession { list, session, rows_json }) = &args.cmd {
+    if let Some(Cmd::ClaudeSession {
+        list,
+        session,
+        rows_json,
+    }) = &args.cmd
+    {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default();
@@ -1819,7 +1968,10 @@ session_store={store} fold={fold}"
                     println!("Wrote {}", path.display());
                 }
             } else {
-                print!("{}", agent_vitals_hosts::claude_session::render_claude_session_list(&out));
+                print!(
+                    "{}",
+                    agent_vitals_hosts::claude_session::render_claude_session_list(&out)
+                );
             }
             return;
         }
@@ -1844,7 +1996,8 @@ session_store={store} fold={fold}"
                 }
             }
         };
-        let Some(out) = agent_vitals_hosts::claude_session::claude_session_audit_json(home_path, &session_id)
+        let Some(out) =
+            agent_vitals_hosts::claude_session::claude_session_audit_json(home_path, &session_id)
         else {
             eprintln!("claude session not found or unreadable: {session_id}");
             std::process::exit(2);
@@ -1944,8 +2097,13 @@ session_store={store} fold={fold}"
     // state）。R1 拍板：per-message 事实行 + attempts + coverage，`--json -`
     // 输出与 Python `scan.py claude-usage-facts --json -` 字节相等（parity 钉测
     // 在 tests/test_claude_usage_fact.py::ClaudeUsageFactsBothTests）。
-    if let Some(Cmd::ClaudeUsageFacts { session_jsonl, machine_namespace, source_profile, rows_json, write }) =
-        &args.cmd
+    if let Some(Cmd::ClaudeUsageFacts {
+        session_jsonl,
+        machine_namespace,
+        source_profile,
+        rows_json,
+        write,
+    }) = &args.cmd
     {
         // machine_namespace 必传且非空（spec §9）。绝不让 CLI 读 takeover 身份来
         // 补齐：那是一次隐式 state 写，而 claude-usage-facts 是只读诊断。
@@ -1989,17 +2147,17 @@ session_store={store} fold={fold}"
                 eprintln!("failed to write {}", path.display());
                 std::process::exit(2);
             } else {
-                println!(
-                    "Wrote {}: {} facts",
-                    path.display(),
-                    result.facts.len()
-                );
+                println!("Wrote {}: {} facts", path.display(), result.facts.len());
             }
         } else {
             print!(
                 "{}",
                 agent::claude_usage_fact::to_human_summary(
-                    &result, session_jsonl, &sid, &ns, source_profile
+                    &result,
+                    session_jsonl,
+                    &sid,
+                    &ns,
+                    source_profile
                 )
             );
             print_ingest_summary(&write_report);
@@ -2012,8 +2170,13 @@ session_store={store} fold={fold}"
     // event id 按 rollout stem 命名空间——同 stem 的 byte-identical 复本去重、
     // 异 stem 永不误合并。与 Python `scan.py codex-usage-facts --json -` 字节相等
     // （parity 钉测在 tests/test_codex_usage_fact.py）。
-    if let Some(Cmd::CodexUsageFacts { rollouts, machine_namespace, source_profile, rows_json, write }) =
-        &args.cmd
+    if let Some(Cmd::CodexUsageFacts {
+        rollouts,
+        machine_namespace,
+        source_profile,
+        rows_json,
+        write,
+    }) = &args.cmd
     {
         // machine_namespace 必传（spec §9）。绝不让 CLI 读 takeover 身份来补齐：
         // 那是一次隐式 state 写（bootstrap machine.json），而 codex-usage-facts
@@ -2052,11 +2215,7 @@ session_store={store} fold={fold}"
                 eprintln!("failed to write {}", path.display());
                 std::process::exit(2);
             } else {
-                println!(
-                    "Wrote {}: {} facts",
-                    path.display(),
-                    result.facts.len()
-                );
+                println!("Wrote {}: {} facts", path.display(), result.facts.len());
             }
         } else {
             print!(
@@ -2068,7 +2227,13 @@ session_store={store} fold={fold}"
         return;
     }
 
-    if let Some(Cmd::DshUsageFacts { session_path, machine_namespace, source_profile, rows_json, write }) = &args.cmd
+    if let Some(Cmd::DshUsageFacts {
+        session_path,
+        machine_namespace,
+        source_profile,
+        rows_json,
+        write,
+    }) = &args.cmd
     {
         // machine_namespace 必传（spec §9），同 codex-usage-facts：绝不让 CLI 读
         // takeover 身份补齐（隐式 state 写），缺失或空串即失败（exit 2）。
@@ -2185,7 +2350,11 @@ session_store={store} fold={fold}"
             }
         };
         let run_id = agent_vitals_runtime::sql_sync::new_run_id("migration");
-        if let Err(e) = db.begin_run(&run_id, "migration", agent_vitals_runtime::sql_sync::now_ms()) {
+        if let Err(e) = db.begin_run(
+            &run_id,
+            "migration",
+            agent_vitals_runtime::sql_sync::now_ms(),
+        ) {
             eprintln!("data-migrate failed: {e}");
             std::process::exit(2);
         }
@@ -2198,7 +2367,13 @@ session_store={store} fold={fold}"
             updated: usize,
             conflicts: usize,
         }
-        let mut total = Totals { inserted: 0, duplicate: 0, rejected: 0, updated: 0, conflicts: 0 };
+        let mut total = Totals {
+            inserted: 0,
+            duplicate: 0,
+            rejected: 0,
+            updated: 0,
+            conflicts: 0,
+        };
         for host in ["claude-code", "codex", "dsh"] {
             let path = data_home.join("facts").join(format!("{host}.jsonl"));
             if !path.exists() {
@@ -2239,55 +2414,20 @@ session_store={store} fold={fold}"
         // `--with-legacy-ledger` 显式打开——`legacy_import` 模块保留
         // （spec §10「legacy 代码只留 importer」），只是不再是默认路径。
         if *with_legacy_ledger {
-        // Phase 3.2（spec §6.2.3）：claude ledger 深历史 → legacy_aggregate。
-        // 这些账在 JSONL 里**没有对应行**——claude 客户端会压缩/轮转会话文件，
-        // 历史行物理消失后 ledger 里仍有账（R4 §5.2a：ledger 是这部分账的
-        // store of record）。不用判断「该日是否已有实时事实」：legacy 身份
-        // 五元组（machine_namespace="legacy" / native_session_id="day:{day}"）
-        // 与实时事实完全不重叠，查询侧 SqlSummaryRepository::merged_claude_days
-        // 先铺 legacy 再被实时行按日覆盖（有实时用实时、没有才退深历史）。
-        let ledger_days = match agent_vitals_data::legacy_import::load_claude_ledger_days(
-            &agent_vitals_runtime::state::state_dir(),
-        ) {
-            Ok(d) => d,
-            Err(e) => {
-                // 坏 ledger（非法 JSON 等）与 JSONL 导入失败同款处理：run 记
-                // failed 后退出——吞掉它就是「看似迁移成功、深历史实际没进库」。
-                let _ = db.finish_run(
-                    &run_id,
-                    "failed",
-                    Some("import_failed"),
-                    Some(&e.to_string()),
-                    agent_vitals_runtime::sql_sync::now_ms(),
-                );
-                eprintln!("data-migrate failed (claude-ledger): {e}");
-                std::process::exit(2);
-            }
-        };
-        if ledger_days.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
-            match db.with_immediate_txn(|conn| {
-                agent_vitals_data::legacy_import::import_claude_ledger_days(
-                    conn,
-                    &run_id,
-                    agent_vitals_runtime::sql_sync::now_ms(),
-                    &ledger_days,
-                )
-            }) {
-                Ok(r) => {
-                    println!(
-                        "  claude-ledger: +{} inserted, {} duplicate, {} updated, {} rejected, {} conflicts",
-                        r.imported, r.duplicate, r.updated, r.rejected, r.conflicts
-                    );
-                    total.inserted += r.imported;
-                    total.duplicate += r.duplicate;
-                    total.updated += r.updated;
-                    // 拒入行并入总 rejected（2026-09-07 审查收口：否则
-                    // checkpoint 的 rejected 键只剩 JSONL 侧的数，迁移摘要
-                    // 与 data_quality_issues 面互相矛盾）。
-                    total.rejected += r.rejected;
-                    total.conflicts += r.conflicts;
-                }
+            // Phase 3.2（spec §6.2.3）：claude ledger 深历史 → legacy_aggregate。
+            // 这些账在 JSONL 里**没有对应行**——claude 客户端会压缩/轮转会话文件，
+            // 历史行物理消失后 ledger 里仍有账（R4 §5.2a：ledger 是这部分账的
+            // store of record）。不用判断「该日是否已有实时事实」：legacy 身份
+            // 五元组（machine_namespace="legacy" / native_session_id="day:{day}"）
+            // 与实时事实完全不重叠，查询侧 SqlSummaryRepository::merged_claude_days
+            // 先铺 legacy 再被实时行按日覆盖（有实时用实时、没有才退深历史）。
+            let ledger_days = match agent_vitals_data::legacy_import::load_claude_ledger_days(
+                &agent_vitals_runtime::state::state_dir(),
+            ) {
+                Ok(d) => d,
                 Err(e) => {
+                    // 坏 ledger（非法 JSON 等）与 JSONL 导入失败同款处理：run 记
+                    // failed 后退出——吞掉它就是「看似迁移成功、深历史实际没进库」。
                     let _ = db.finish_run(
                         &run_id,
                         "failed",
@@ -2298,16 +2438,55 @@ session_store={store} fold={fold}"
                     eprintln!("data-migrate failed (claude-ledger): {e}");
                     std::process::exit(2);
                 }
-            }
-        }
-        // ledger 的无日期残差池（`unaccounted`）：不编日期塞 usage_facts，记为
-        // 一条 `undated_residual` 覆盖缺口 issue（spec §5.4：无日期事实不静默
-        // 丢弃；裁决见 legacy_import::import_claude_ledger_unaccounted）。
-        match agent_vitals_data::legacy_import::load_claude_ledger_unaccounted(
-            &agent_vitals_runtime::state::state_dir(),
-        ) {
-            Ok(unacc) => {
+            };
+            if ledger_days
+                .as_object()
+                .map(|m| !m.is_empty())
+                .unwrap_or(false)
+            {
                 match db.with_immediate_txn(|conn| {
+                    agent_vitals_data::legacy_import::import_claude_ledger_days(
+                        conn,
+                        &run_id,
+                        agent_vitals_runtime::sql_sync::now_ms(),
+                        &ledger_days,
+                    )
+                }) {
+                    Ok(r) => {
+                        println!(
+                        "  claude-ledger: +{} inserted, {} duplicate, {} updated, {} rejected, {} conflicts",
+                        r.imported, r.duplicate, r.updated, r.rejected, r.conflicts
+                    );
+                        total.inserted += r.imported;
+                        total.duplicate += r.duplicate;
+                        total.updated += r.updated;
+                        // 拒入行并入总 rejected（2026-09-07 审查收口：否则
+                        // checkpoint 的 rejected 键只剩 JSONL 侧的数，迁移摘要
+                        // 与 data_quality_issues 面互相矛盾）。
+                        total.rejected += r.rejected;
+                        total.conflicts += r.conflicts;
+                    }
+                    Err(e) => {
+                        let _ = db.finish_run(
+                            &run_id,
+                            "failed",
+                            Some("import_failed"),
+                            Some(&e.to_string()),
+                            agent_vitals_runtime::sql_sync::now_ms(),
+                        );
+                        eprintln!("data-migrate failed (claude-ledger): {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            // ledger 的无日期残差池（`unaccounted`）：不编日期塞 usage_facts，记为
+            // 一条 `undated_residual` 覆盖缺口 issue（spec §5.4：无日期事实不静默
+            // 丢弃；裁决见 legacy_import::import_claude_ledger_unaccounted）。
+            match agent_vitals_data::legacy_import::load_claude_ledger_unaccounted(
+                &agent_vitals_runtime::state::state_dir(),
+            ) {
+                Ok(unacc) => {
+                    match db.with_immediate_txn(|conn| {
                     agent_vitals_data::legacy_import::import_claude_ledger_unaccounted(
                         conn,
                         agent_vitals_runtime::sql_sync::now_ms(),
@@ -2320,17 +2499,25 @@ session_store={store} fold={fold}"
                     ),
                     Err(e) => eprintln!("data-migrate warning (claude-ledger unaccounted): {e}"),
                 }
+                }
+                Err(e) => {
+                    eprintln!("data-migrate warning (claude-ledger unaccounted, unreadable): {e}")
+                }
             }
-            Err(e) => eprintln!("data-migrate warning (claude-ledger unaccounted, unreadable): {e}"),
-        }
         } // end `if *with_legacy_ledger`
-        // Phase 2.8：落当前价格快照（§5.3：历史查询按记录的 pricing version 重放）。
+          // Phase 2.8：落当前价格快照（§5.3：历史查询按记录的 pricing version 重放）。
         match agent_vitals_runtime::sql_sync::snapshot_current_pricing(&db) {
             Ok(true) => println!("  pricing snapshot: new version captured"),
             Ok(false) => {}
             Err(e) => eprintln!("data-migrate warning (pricing snapshot): {e}"),
         }
-        let _ = db.finish_run(&run_id, "succeeded", None, None, agent_vitals_runtime::sql_sync::now_ms());
+        let _ = db.finish_run(
+            &run_id,
+            "succeeded",
+            None,
+            None,
+            agent_vitals_runtime::sql_sync::now_ms(),
+        );
         // spec §6.1：迁移必须记录在 migrations 表（与 DDL 版本分离）——
         // checkpoint 可重跑的锚点。
         let _ = db.conn().execute(
@@ -2345,7 +2532,10 @@ session_store={store} fold={fold}"
                 run_id,
                 agent_vitals_runtime::sql_sync::now_ms(),
                 agent_vitals_runtime::sql_sync::now_ms(),
-                format!("sql-authority-v{}", agent_vitals_data::authority::SCHEMA_VERSION),
+                format!(
+                    "sql-authority-v{}",
+                    agent_vitals_data::authority::SCHEMA_VERSION
+                ),
                 json!({
                     "inserted": total.inserted, "duplicate": total.duplicate,
                     "rejected": total.rejected, "updated": total.updated,
@@ -2386,16 +2576,28 @@ session_store={store} fold={fold}"
                 )
                 .unwrap_or_else(|_| "?".into());
             let facts: i64 = conn
-                .query_row("SELECT COUNT(*) FROM usage_facts WHERE deleted_at_ms IS NULL", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM usage_facts WHERE deleted_at_ms IS NULL",
+                    [],
+                    |r| r.get(0),
+                )
                 .unwrap_or(0);
             let sources: i64 = conn
                 .query_row("SELECT COUNT(*) FROM source_files", [], |r| r.get(0))
                 .unwrap_or(0);
             let sessions: i64 = conn
-                .query_row("SELECT COUNT(*) FROM sessions WHERE deleted_at_ms IS NULL", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions WHERE deleted_at_ms IS NULL",
+                    [],
+                    |r| r.get(0),
+                )
                 .unwrap_or(0);
             let issues: i64 = conn
-                .query_row("SELECT COUNT(*) FROM data_quality_issues WHERE resolved_at_ms IS NULL", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM data_quality_issues WHERE resolved_at_ms IS NULL",
+                    [],
+                    |r| r.get(0),
+                )
                 .unwrap_or(0);
             // 逐 code 明细：`undated_residual`（ledger 无日期残差）、
             // `legacy_aggregate`（聚合兜底月份）等按名可见，不只是一个总数。
@@ -2404,9 +2606,9 @@ session_store={store} fold={fold}"
                 "SELECT code, COUNT(*) FROM data_quality_issues
                  WHERE resolved_at_ms IS NULL GROUP BY code ORDER BY code",
             ) {
-                if let Ok(rows) = stmt.query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-                }) {
+                if let Ok(rows) =
+                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                {
                     for (code, n) in rows.filter_map(Result::ok) {
                         issues_by_code.insert(code, json!(n));
                     }
@@ -2432,9 +2634,9 @@ session_store={store} fold={fold}"
                 }
             }
             let enabled = agent_vitals_runtime::sql_authority::is_enabled(&data_home);
-            let last_run_bad = runs.first().is_some_and(|r| {
-                matches!(r["status"].as_str(), Some("failed") | Some("running"))
-            });
+            let last_run_bad = runs
+                .first()
+                .is_some_and(|r| matches!(r["status"].as_str(), Some("failed") | Some("running")));
 
             // 1.7 损坏恢复 / 4.4「删库不回落」：health + 恢复路径提示。
             // 权威库不自愈（与旧 index.sqlite3 的本质区别，spec §5.1）——
@@ -2502,8 +2704,14 @@ session_store={store} fold={fold}"
                         for r in runs {
                             println!(
                                 "  run {} [{}] {} (at {}){}",
-                                r["run_id"], r["trigger"], r["status"], r["started_at_ms"],
-                                r["error_code"].as_str().map(|c| format!(" err={c}")).unwrap_or_default(),
+                                r["run_id"],
+                                r["trigger"],
+                                r["status"],
+                                r["started_at_ms"],
+                                r["error_code"]
+                                    .as_str()
+                                    .map(|c| format!(" err={c}"))
+                                    .unwrap_or_default(),
                             );
                         }
                     }
@@ -2530,7 +2738,16 @@ session_store={store} fold={fold}"
 
     // data host-bill（Phase 2.8，spec §5.3 显式管理 API）
     if let Some(Cmd::DataHostBill {
-        action, month, host, provider, basis, amount_minor, currency, evidence, bill_id, rows_json,
+        action,
+        month,
+        host,
+        provider,
+        basis,
+        amount_minor,
+        currency,
+        evidence,
+        bill_id,
+        rows_json,
     }) = &args.cmd
     {
         let db = match agent_vitals_data::authority::AuthorityDb::open(
@@ -2549,17 +2766,21 @@ session_store={store} fold={fold}"
         match action.as_str() {
             "set" => {
                 let (Some(h), Some(p), Some(per), Some(b), Some(amt), Some(cur)) = (
-                    host.as_deref(), provider.as_deref(), month.as_deref(),
-                    basis.as_deref(), *amount_minor, currency.as_deref(),
+                    host.as_deref(),
+                    provider.as_deref(),
+                    month.as_deref(),
+                    basis.as_deref(),
+                    *amount_minor,
+                    currency.as_deref(),
                 ) else {
                     eprintln!("data host-bill set: --host --provider --month --basis --amount-minor --currency are all required");
                     std::process::exit(2);
                 };
                 let ev = evidence.as_deref().unwrap_or("");
                 let id = format!("{h}:{p}:{per}:{b}:{ev}");
-                match db.with_immediate_txn(|_c| {
-                    db.host_bill_put(&id, h, p, per, b, amt, cur, ev, now)
-                }) {
+                match db
+                    .with_immediate_txn(|_c| db.host_bill_put(&id, h, p, per, b, amt, cur, ev, now))
+                {
                     Ok(()) => println!("host bill saved: {id} = {amt} {cur} ({b})"),
                     Err(e) => {
                         eprintln!("data host-bill set failed: {e}");
@@ -2568,14 +2789,20 @@ session_store={store} fold={fold}"
                 }
             }
             "list" => {
-                let per = month.clone().unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+                let per = month
+                    .clone()
+                    .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
                 match db.host_bills_for_period(&per) {
                     Ok(rows) => {
                         if *rows_json {
                             let arr: Vec<Value> = rows.iter().map(|(h, p, b, a, c)| json!({
                                 "host": h, "provider": p, "basis": b, "amount_minor": a, "currency": c,
                             })).collect();
-                            println!("{}", serde_json::to_string_pretty(&json!({"month": per, "bills": arr})).unwrap_or_default());
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&json!({"month": per, "bills": arr}))
+                                    .unwrap_or_default()
+                            );
                         } else {
                             println!("Host bills ({per}):");
                             for (h, p, b, a, c) in &rows {
@@ -2688,7 +2915,12 @@ session_store={store} fold={fold}"
     // WorkBuddy 会话审计。与 claude/codex-session 同款 home 解析与缺省 --session =
     // 最新；SV604/605 的 Unavailable 覆盖在 workbuddy_session.rs（host-capability
     // degradation，spec §3.1）。db 无行且 audit-log 无记录 → 不存在（exit 2）。
-    if let Some(Cmd::WorkbuddySession { list, session, rows_json }) = &args.cmd {
+    if let Some(Cmd::WorkbuddySession {
+        list,
+        session,
+        rows_json,
+    }) = &args.cmd
+    {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default();
@@ -2734,9 +2966,10 @@ session_store={store} fold={fold}"
                 }
             }
         };
-        let Some(out) =
-            agent_vitals_hosts::workbuddy_session::workbuddy_session_audit_json(home_path, &session_id)
-        else {
+        let Some(out) = agent_vitals_hosts::workbuddy_session::workbuddy_session_audit_json(
+            home_path,
+            &session_id,
+        ) else {
             eprintln!("workbuddy session not found or unreadable: {session_id}");
             std::process::exit(2);
         };
@@ -2782,20 +3015,30 @@ session_store={store} fold={fold}"
                     query: query.clone(),
                 };
                 agent_vitals_runtime::sessions::r2a_store::sessions_list(
-                    home_path,
-                    &filter,
-                    *page_size,
-                    cursor,
-                    *json,
+                    home_path, &filter, *page_size, cursor, *json,
                 );
             }
-            SessionsAction::Read { session_key, revision, json } => {
-                agent_vitals_runtime::sessions::r2a_store::sessions_read(home_path, session_key, revision, *json);
+            SessionsAction::Read {
+                session_key,
+                revision,
+                json,
+            } => {
+                agent_vitals_runtime::sessions::r2a_store::sessions_read(
+                    home_path,
+                    session_key,
+                    revision,
+                    *json,
+                );
             }
             SessionsAction::Findings { json } => {
                 agent_vitals_runtime::sessions::r2a_store::sessions_findings(home_path, *json);
             }
-            SessionsAction::Navigation { day, timezone, recent, json } => {
+            SessionsAction::Navigation {
+                day,
+                timezone,
+                recent,
+                json,
+            } => {
                 // `--day` 缺省 = 今天（北京日界，core 折叠的日期桶是 UTC+8 时
                 // 段；spec §5.1）。
                 let day = if day.is_empty() {
@@ -2803,7 +3046,9 @@ session_store={store} fold={fold}"
                 } else {
                     day.clone()
                 };
-                agent_vitals_runtime::sessions::r2a_store::sessions_navigation(home_path, &day, timezone, *recent, *json);
+                agent_vitals_runtime::sessions::r2a_store::sessions_navigation(
+                    home_path, &day, timezone, *recent, *json,
+                );
             }
         }
         return;
@@ -2812,7 +3057,12 @@ session_store={store} fold={fold}"
     // 预算告警只读路径。Phase 4.3：`budget_show`/`budget_show_month` 读 SQL
     // 权威库（`evaluate_alert_from_sql` / `month_cost_sql`），不再读 today.json
     // / month.json（spec §5.2 禁读清单）。决策仍在 core（`evaluate_alert`）。
-    if let Some(Cmd::Budget { action, month, json }) = &args.cmd {
+    if let Some(Cmd::Budget {
+        action,
+        month,
+        json,
+    }) = &args.cmd
+    {
         match action.as_str() {
             "show" => {
                 if let Some(m) = month {
@@ -2834,7 +3084,15 @@ session_store={store} fold={fold}"
     // v0.9.1 Phase 3.4 SQL 预算面：budget_config/budget_snoozes 显式管理 API
     // + budget_status_sql（替代 alert.json/budget.json 的读面；Tier B 切完
     // 托盘预算卡后旧链停写）。金额全 minor 整数；错误路径 exit 2。
-    if let Some(Cmd::BudgetSql { action, month, monthly_cny_minor, daily_cny_minor, warning_ratio_bp, until }) = &args.cmd {
+    if let Some(Cmd::BudgetSql {
+        action,
+        month,
+        monthly_cny_minor,
+        daily_cny_minor,
+        warning_ratio_bp,
+        until,
+    }) = &args.cmd
+    {
         let db = || -> agent_vitals_data::authority::AuthorityDb {
             match agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(
@@ -2851,7 +3109,9 @@ session_store={store} fold={fold}"
         };
         match action.as_str() {
             "status" => {
-                let m = month.clone().unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+                let m = month
+                    .clone()
+                    .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
                 match agent_vitals_runtime::budget::budget_status_sql(&m) {
                     Some(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
                     None => {
@@ -2893,13 +3153,22 @@ session_store={store} fold={fold}"
                     eprintln!("config-set requires --monthly-cny-minor and --daily-cny-minor");
                     std::process::exit(2);
                 };
-                if *m < 0 || *d < 0 || warning_ratio_bp.is_some_and(|w| !(0..=10_000).contains(&w)) {
+                if *m < 0 || *d < 0 || warning_ratio_bp.is_some_and(|w| !(0..=10_000).contains(&w))
+                {
                     eprintln!("config-set: amounts must be non-negative; warning-ratio-bp within 0..=10000");
                     std::process::exit(2);
                 }
                 let d0 = db();
-                match d0.budget_config_set(*m, *d, warning_ratio_bp.unwrap_or(8_000), agent_vitals_runtime::sql_sync::now_ms()) {
-                    Ok(()) => println!("budget config saved: monthly={m} daily={d} warn_bp={}", warning_ratio_bp.unwrap_or(8_000)),
+                match d0.budget_config_set(
+                    *m,
+                    *d,
+                    warning_ratio_bp.unwrap_or(8_000),
+                    agent_vitals_runtime::sql_sync::now_ms(),
+                ) {
+                    Ok(()) => println!(
+                        "budget config saved: monthly={m} daily={d} warn_bp={}",
+                        warning_ratio_bp.unwrap_or(8_000)
+                    ),
                     Err(e) => {
                         eprintln!("budget-sql config-set failed: {e}");
                         std::process::exit(2);
@@ -2940,9 +3209,7 @@ session_store={store} fold={fold}"
         return;
     }
 
-    // 状态写链（R1c）。输入都是已经算好的 JSON 文件，CLI 只做「读文件 → 调
-    // 写函数 → 落盘」。文件缺 / 坏 → 走 Python 同款诚实路径（读不到就不写那
-    // 个字段），不在 CLI 层补默认值。
+    // 导航状态写链。业务数据不可由此命令写入或读取：SQL authority 是唯一来源。
     if let Some(Cmd::State { action }) = &args.cmd {
         use agent_vitals_runtime::state as st;
         let read_input = |p: &PathBuf| -> serde_json::Value {
@@ -2955,33 +3222,13 @@ session_store={store} fold={fold}"
                 std::process::exit(2);
             })
         };
-        let opt = |p: &Option<PathBuf>| p.as_ref().map(read_input);
         match action {
-            StateAction::MergeToday { hb, by_model } => {
-                st::merge_today(&read_input(hb), opt(by_model).as_ref());
-            }
-            StateAction::MergeMonth { hb, by_date_model } => {
-                st::merge_month(&read_input(hb), opt(by_date_model).as_ref());
-            }
             StateAction::WriteOneline { summary } => {
                 st::write_oneline(&read_input(summary));
             }
             StateAction::AppendHistory { summary } => {
                 st::append_session_history(&read_input(summary));
             }
-            StateAction::WriteAlert { alert } => {
-                st::write_alert(&read_input(alert));
-            }
-            StateAction::Snooze { until_iso, reason } => {
-                match st::set_snooze(until_iso, reason) {
-                    Some(_) => {}
-                    None => {
-                        eprintln!("invalid ISO time: {until_iso}");
-                        std::process::exit(2);
-                    }
-                }
-            }
-            StateAction::Unsnooze => st::clear_snooze(),
             StateAction::FoldSession { req, shadow } => {
                 use agent_vitals_runtime::takeover::FoldOutcome;
                 match agent_vitals_runtime::takeover::fold_session(&read_input(req), *shadow) {
@@ -3002,10 +3249,6 @@ session_store={store} fold={fold}"
             StateAction::MachineNamespace => {
                 println!("{}", agent_vitals_runtime::takeover::machine_namespace());
             }
-            StateAction::BySource => st::by_source_report(),
-            StateAction::ByModel => st::by_model_report(),
-            StateAction::Uncovered => st::uncovered_report(),
-            StateAction::Savings => st::savings_report(),
         }
         return;
     }
@@ -3014,7 +3257,9 @@ session_store={store} fold={fold}"
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
     let home_n = norm(&PathBuf::from(&home));
-    let cwd_n = std::env::current_dir().map(|p| norm(&p)).unwrap_or_default();
+    let cwd_n = std::env::current_dir()
+        .map(|p| norm(&p))
+        .unwrap_or_default();
 
     // 默认预算取自环境变量。口径随 Claude Code 版本变化，故做成可配置。
     let default_budget: i64 = std::env::var("SLASH_COMMAND_TOOL_CHAR_BUDGET")
@@ -3035,7 +3280,8 @@ session_store={store} fold={fold}"
     let cfg = agent_vitals_hosts::hosts::claude_code::sources::skills::read_host_config(&home_n);
 
     // Session surface 负责读日志；Skill surface 只消费注入的证据。
-    let (dsh_path, dsh_evidence) = agent_vitals_runtime::session_sources::read_dsh_skill_correlation();
+    let (dsh_path, dsh_evidence) =
+        agent_vitals_runtime::session_sources::read_dsh_skill_correlation();
     let inv = agent_vitals_runtime::skills::inventory::take(
         &agent_vitals_runtime::skills::inventory::Selection {
             host: &args.host,
@@ -3064,19 +3310,28 @@ session_store={store} fold={fold}"
     });
     let mut doc = rep.doc;
 
-
     // 快照要在**算完 diff 之后**才写，否则这一次会拿自己当基线，变化段永远
     // 是空的 —— 一个看起来在工作、实际什么都没比的功能。
     let auto_snapshot = matches!(&args.cmd, None | Some(Cmd::Doctor { .. }))
         && !args.no_snapshot
         && args.json.is_none()
-        && !matches!(&args.cmd, Some(Cmd::Doctor { rows_json: Some(_), .. }));
+        && !matches!(
+            &args.cmd,
+            Some(Cmd::Doctor {
+                rows_json: Some(_),
+                ..
+            })
+        );
     let baseline: Option<PathBuf> = args.baseline.clone().or_else(|| {
         match &args.cmd {
-            Some(Cmd::Diff { file, .. }) => file.clone().or_else(agent_vitals_runtime::skills::snapshot::latest_snapshot),
+            Some(Cmd::Diff { file, .. }) => file
+                .clone()
+                .or_else(agent_vitals_runtime::skills::snapshot::latest_snapshot),
             // --new-only 也要找基线。**不能只挂在 auto_snapshot 上** ——
             // `--no-snapshot` 的语义是「别写」，不是「别比」。
-            _ if auto_snapshot || args.new_only => agent_vitals_runtime::skills::snapshot::latest_snapshot(),
+            _ if auto_snapshot || args.new_only => {
+                agent_vitals_runtime::skills::snapshot::latest_snapshot()
+            }
             _ => None,
         }
     });
@@ -3106,17 +3361,17 @@ session_store={store} fold={fold}"
     // Phase 4.3：`SummaryRepository` 只剩 `SqlSummaryRepository` 一个实现，
     // legacy `JsonSummaryRepository` 已删——读源只有 SQL 权威库一处。
     if let Some(Cmd::Data { action }) = &args.cmd {
-        let repo: Box<dyn agent_vitals_data::repository::SummaryRepository> = Box::new(
-            agent_vitals_runtime::summary::SqlSummaryRepository::new(),
-        );
+        let repo: Box<dyn agent_vitals_data::repository::SummaryRepository> =
+            Box::new(agent_vitals_runtime::summary::SqlSummaryRepository::new());
         match action {
             DataAction::Coverage { month, json } => {
                 let m = month
                     .clone()
                     .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
-                let summary = repo.monthly_summary(
-                    &agent_vitals_data::repository::MonthlySummaryQuery { month: m },
-                );
+                let summary =
+                    repo.monthly_summary(&agent_vitals_data::repository::MonthlySummaryQuery {
+                        month: m,
+                    });
                 if *json {
                     println!(
                         "{}",
@@ -3127,9 +3382,10 @@ session_store={store} fold={fold}"
                 }
             }
             DataAction::Daily { date, json } => {
-                let summary = repo.daily_summary(
-                    &agent_vitals_data::repository::DailySummaryQuery { date: date.clone() },
-                );
+                let summary =
+                    repo.daily_summary(&agent_vitals_data::repository::DailySummaryQuery {
+                        date: date.clone(),
+                    });
                 if *json {
                     println!(
                         "{}",
@@ -3139,7 +3395,11 @@ session_store={store} fold={fold}"
                     print_daily_summary_text(&summary);
                 }
             }
-            DataAction::Authority { action, force, json } => {
+            DataAction::Authority {
+                action,
+                force,
+                json,
+            } => {
                 let dh = agent_vitals_runtime::home::data_home();
                 match action.as_str() {
                     "status" => {
@@ -3171,7 +3431,8 @@ session_store={store} fold={fold}"
                             let facts: i64 = conn
                                 .query_row(
                                     "SELECT COUNT(*) FROM usage_facts WHERE deleted_at_ms IS NULL",
-                                    [], |r| r.get(0),
+                                    [],
+                                    |r| r.get(0),
                                 )
                                 .unwrap_or(0);
                             let last_run: Option<String> = conn
@@ -3202,9 +3463,13 @@ session_store={store} fold={fold}"
                                  run `agent-vitals sync-facts` then `agent-vitals data-status`). \
                                  Pass --force to override. NOT enabling."
                             );
-                            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                                "enabled": false, "health": health,
-                            })).unwrap_or_default());
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "enabled": false, "health": health,
+                                }))
+                                .unwrap_or_default()
+                            );
                             std::process::exit(1);
                         }
                         agent_vitals_runtime::sql_authority::enable(
@@ -3221,9 +3486,13 @@ session_store={store} fold={fold}"
                             if ok { "ok" } else { "FORCED past unhealthy DB" },
                         );
                         if *json {
-                            println!("{}", serde_json::to_string_pretty(
-                                &agent_vitals_runtime::sql_authority::status(&dh)
-                            ).unwrap_or_default());
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(
+                                    &agent_vitals_runtime::sql_authority::status(&dh)
+                                )
+                                .unwrap_or_default()
+                            );
                         }
                     }
                     "disable" => {
@@ -3245,16 +3514,28 @@ session_store={store} fold={fold}"
 
     // `agent-vitals` 无参数等价于 `doctor`。判据是有没有给 --json，理由见 Cmd。
     if args.cmd.is_none() && args.json.is_none() {
-        std::process::exit(run_doctor(&doc, &args, skills::doctor::DEFAULT_OVERLAP_MIN,
-                                      auto_snapshot, baseline.as_deref()));
+        std::process::exit(run_doctor(
+            &doc,
+            &args,
+            skills::doctor::DEFAULT_OVERLAP_MIN,
+            auto_snapshot,
+            baseline.as_deref(),
+        ));
     }
 
     if let Some(Cmd::Snapshot { keep }) = &args.cmd {
-        let (text, rc) = agent_vitals_runtime::skills::snapshot::render_snapshot(&doc, &agent_vitals_runtime::skills::snapshot::SnapshotOpts {
-            keep: *keep,
-            redacted: args.redact || args.redact_names,
-        });
-        if rc == 0 { print!("{}", text); } else { eprint!("{}", text); }
+        let (text, rc) = agent_vitals_runtime::skills::snapshot::render_snapshot(
+            &doc,
+            &agent_vitals_runtime::skills::snapshot::SnapshotOpts {
+                keep: *keep,
+                redacted: args.redact || args.redact_names,
+            },
+        );
+        if rc == 0 {
+            print!("{}", text);
+        } else {
+            eprint!("{}", text);
+        }
         std::process::exit(rc);
     }
 
@@ -3266,7 +3547,9 @@ session_store={store} fold={fold}"
                     std::process::exit(1);
                 }
                 Some(d) => {
-                    if std::fs::write(path, serde_json::to_string_pretty(d).unwrap_or_default()).is_err() {
+                    if std::fs::write(path, serde_json::to_string_pretty(d).unwrap_or_default())
+                        .is_err()
+                    {
                         eprintln!("failed to write {}", path.display());
                         std::process::exit(2);
                     }
@@ -3275,11 +3558,16 @@ session_store={store} fold={fold}"
                 }
             }
         }
-        let gate = doc.pointer("/trigger_data/zombie_min_age_days")
+        let gate = doc
+            .pointer("/trigger_data/zombie_min_age_days")
             .and_then(|v| v.as_i64())
             .unwrap_or(args.zombie_age);
         let (text, to_stderr, rc) = agent_vitals_runtime::skills::snapshot::render_diff(&doc, gate);
-        if to_stderr { eprint!("{}", text); } else { print!("{}", text); }
+        if to_stderr {
+            eprint!("{}", text);
+        } else {
+            print!("{}", text);
+        }
         std::process::exit(rc);
     }
 
@@ -3296,18 +3584,32 @@ session_store={store} fold={fold}"
                     .map(|(c, n, w)| serde_json::json!({"code": c, "name": n, "reason": w}))
                     .collect::<Vec<_>>(),
             });
-            if std::fs::write(path, serde_json::to_string_pretty(&payload).unwrap_or_default()).is_err() {
+            if std::fs::write(
+                path,
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            )
+            .is_err()
+            {
                 eprintln!("failed to write {}", path.display());
                 std::process::exit(2);
             }
             println!("Wrote {}: {} diagnostics", path.display(), n);
             return;
         }
-        std::process::exit(run_doctor(&doc, &args, *min, auto_snapshot,
-                                      baseline.as_deref()));
+        std::process::exit(run_doctor(
+            &doc,
+            &args,
+            *min,
+            auto_snapshot,
+            baseline.as_deref(),
+        ));
     }
 
-    if let Some(Cmd::Plan { startup_rate, rows_json }) = &args.cmd {
+    if let Some(Cmd::Plan {
+        startup_rate,
+        rows_json,
+    }) = &args.cmd
+    {
         // 纯派生：build_plan 只读已扫好的 doc，不触发 auto_snapshot（plan 是
         // 报告的一个视图，不是一次新扫描）。
         let payload = agent::plan::build_plan(&doc, *startup_rate);
@@ -3328,12 +3630,21 @@ session_store={store} fold={fold}"
         return;
     }
 
-    if let Some(Cmd::Explain { name, min, rows_json }) = &args.cmd {
+    if let Some(Cmd::Explain {
+        name,
+        min,
+        rows_json,
+    }) = &args.cmd
+    {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
-        let o = skills::explain::ExplainOpts { name: name.clone(), min: *min, now };
+        let o = skills::explain::ExplainOpts {
+            name: name.clone(),
+            min: *min,
+            now,
+        };
         match skills::explain::render_explain(&doc, &o, rows_json.is_some()) {
             // 找不到那个名字要以非零退出：脚本调用方靠退出码判断，打印一行
             // 「没找到」然后返回 0 会被当成「查过了，没问题」。
@@ -3342,8 +3653,15 @@ session_store={store} fold={fold}"
                 std::process::exit(1);
             }
             skills::explain::ExplainOut::Json(payload, n) => {
-                let path = rows_json.as_ref().expect("Json branch implies rows_json is present");
-                if std::fs::write(path, serde_json::to_string_pretty(&payload).unwrap_or_default()).is_err() {
+                let path = rows_json
+                    .as_ref()
+                    .expect("Json branch implies rows_json is present");
+                if std::fs::write(
+                    path,
+                    serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                )
+                .is_err()
+                {
                     eprintln!("failed to write {}", path.display());
                     std::process::exit(2);
                 }
@@ -3354,43 +3672,84 @@ session_store={store} fold={fold}"
         return;
     }
 
-    if let Some(Cmd::List { unused, shadowed, stale, sort, top, rows_json }) = &args.cmd {
+    if let Some(Cmd::List {
+        unused,
+        shadowed,
+        stale,
+        sort,
+        top,
+        rows_json,
+    }) = &args.cmd
+    {
         if let Some(path) = rows_json {
-            let rows = skills::render::list_rows(&doc, &skills::render::ListOpts {
-                unused: *unused, shadowed: *shadowed, stale: *stale,
-                sort: sort.clone(), top: *top,
-            });
+            let rows = skills::render::list_rows(
+                &doc,
+                &skills::render::ListOpts {
+                    unused: *unused,
+                    shadowed: *shadowed,
+                    stale: *stale,
+                    sort: sort.clone(),
+                    top: *top,
+                },
+            );
             let n = rows.as_array().map(|a| a.len()).unwrap_or(0);
-            if std::fs::write(path, serde_json::to_string_pretty(&rows).unwrap_or_default()).is_err() {
+            if std::fs::write(
+                path,
+                serde_json::to_string_pretty(&rows).unwrap_or_default(),
+            )
+            .is_err()
+            {
                 eprintln!("failed to write {}", path.display());
                 std::process::exit(2);
             }
             println!("Wrote {}: {} rows", path.display(), n);
             return;
         }
-        print!("{}", skills::render::render_list(&doc, &skills::render::ListOpts {
-            unused: *unused,
-            shadowed: *shadowed,
-            stale: *stale,
-            sort: sort.clone(),
-            top: *top,
-        }));
+        print!(
+            "{}",
+            skills::render::render_list(
+                &doc,
+                &skills::render::ListOpts {
+                    unused: *unused,
+                    shadowed: *shadowed,
+                    stale: *stale,
+                    sort: sort.clone(),
+                    top: *top,
+                }
+            )
+        );
         return;
     }
 
-    if let Some(Cmd::Overlap { min, top, rows_json }) = &args.cmd {
-        let o = agent_vitals_domain::skills::overlap::OverlapOpts { min: *min, top: *top };
+    if let Some(Cmd::Overlap {
+        min,
+        top,
+        rows_json,
+    }) = &args.cmd
+    {
+        let o = agent_vitals_domain::skills::overlap::OverlapOpts {
+            min: *min,
+            top: *top,
+        };
         if let Some(path) = rows_json {
             let rows = agent_vitals_domain::skills::overlap::overlap_pairs(&doc, &o);
             let n = rows.as_array().map(|a| a.len()).unwrap_or(0);
-            if std::fs::write(path, serde_json::to_string_pretty(&rows).unwrap_or_default()).is_err() {
+            if std::fs::write(
+                path,
+                serde_json::to_string_pretty(&rows).unwrap_or_default(),
+            )
+            .is_err()
+            {
                 eprintln!("failed to write {}", path.display());
                 std::process::exit(2);
             }
             println!("Wrote {}: {} pairs", path.display(), n);
             return;
         }
-        print!("{}", agent_vitals_domain::skills::overlap::render_overlap(&doc, &o));
+        print!(
+            "{}",
+            agent_vitals_domain::skills::overlap::render_overlap(&doc, &o)
+        );
         return;
     }
 
@@ -3408,8 +3767,12 @@ session_store={store} fold={fold}"
     let budget_text = if budget_available {
         format!(
             "{}% ({})",
-            bd.and_then(|b| b.get("pct_used")).cloned().unwrap_or(Value::Null),
-            bd.and_then(|b| b.get("scope")).and_then(|v| v.as_str()).unwrap_or("")
+            bd.and_then(|b| b.get("pct_used"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            bd.and_then(|b| b.get("scope"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
         )
     } else if args.host == "openclaw" {
         "configurable (not set for this instance)".to_string()
@@ -3488,7 +3851,11 @@ description budget {}, trigger data {}, {} split candidates, {} security finding
             active,
             self.tier1_total,
             self.budget_text,
-            if self.trigger_available { "available" } else { "unavailable" },
+            if self.trigger_available {
+                "available"
+            } else {
+                "unavailable"
+            },
             self.oversized,
             self.flagged,
             self.all_cited,
@@ -3508,7 +3875,12 @@ mod codex_sql_tests {
     }
 
     /// codex 按量事实一笔（gpt-5.6-sol，价目表里有价）。`ts_ms` 决定北京小时桶。
-    fn seed_codex_fact(db: &agent_vitals_data::authority::AuthorityDb, id: &str, ts_ms: i64, u: i64) {
+    fn seed_codex_fact(
+        db: &agent_vitals_data::authority::AuthorityDb,
+        id: &str,
+        ts_ms: i64,
+        u: i64,
+    ) {
         db.conn()
             .execute(
                 "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
@@ -3575,7 +3947,10 @@ mod codex_sql_tests {
         assert_eq!(report["plan"]["plan_type"], "plus");
         // 订阅标注保住：render 文本含「按量标价」而非裸「total cost」。
         let text = agent_vitals_runtime::sessions::codex_cost::render_codex_cost(&report);
-        assert!(text.contains("按量标价"), "codex 订阅 → USD 总额必须标「按量标价」：{text}");
+        assert!(
+            text.contains("按量标价"),
+            "codex 订阅 → USD 总额必须标「按量标价」：{text}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

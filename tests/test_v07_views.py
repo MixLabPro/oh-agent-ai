@@ -204,9 +204,8 @@ class StateUncoveredCli(unittest.TestCase):
                              "estimated-subscription-exclusion")
 
     @unittest.skipUnless(BIN, "AGENT_VITALS_BIN not set — differential skipped")
-    def test_python_rust_byte_equal(self):
-        """同一份 month.json：`scan.py state uncovered` 与 Rust
-        `agent-vitals state uncovered` stdout 逐字节相等。"""
+    def test_rust_retires_json_month_reader(self):
+        """v0.9.1：主二进制拒绝从 month.json 推导订阅估算。"""
         with _TmpHome() as h:
             state_dir = Path(h.tmp) / "state"
             state_dir.mkdir(parents=True, exist_ok=True)
@@ -217,13 +216,9 @@ class StateUncoveredCli(unittest.TestCase):
                                                  cache_read=500_000),
                 }}},
             })
-            py = _run(["state", "uncovered"], env=h.env)
             rs = _run(["state", "uncovered"], env=h.env, binary=True)
-            self.assertEqual(py.returncode, 0, py.stderr)
-            self.assertEqual(rs.returncode, 0, rs.stderr)
-            self.assertEqual(py.stdout, rs.stdout,
-                             "state uncovered stdout 不一致：\npy:\n%s\nrs:\n%s"
-                             % (py.stdout, rs.stdout))
+            self.assertEqual(rs.returncode, 2)
+            self.assertIn("unrecognized subcommand 'uncovered'", rs.stderr)
 
 
 class StateSavingsCli(unittest.TestCase):
@@ -263,9 +258,8 @@ class StateSavingsCli(unittest.TestCase):
             self.assertEqual(out["savings"]["currency"], "CNY")
 
     @unittest.skipUnless(BIN, "AGENT_VITALS_BIN not set — differential skipped")
-    def test_python_rust_byte_equal(self):
-        """同一份 month.json：`scan.py state savings` 与 Rust
-        `agent-vitals state savings` stdout 逐字节相等。"""
+    def test_rust_retires_json_month_reader(self):
+        """v0.9.1：主二进制拒绝从 month.json 推导缓存节约。"""
         with _TmpHome() as h:
             state_dir = Path(h.tmp) / "state"
             state_dir.mkdir(parents=True, exist_ok=True)
@@ -275,13 +269,9 @@ class StateSavingsCli(unittest.TestCase):
                     "deepseek-v4-flash": _bucket(uncached=1_000_000),
                 }}},
             })
-            py = _run(["state", "savings"], env=h.env)
             rs = _run(["state", "savings"], env=h.env, binary=True)
-            self.assertEqual(py.returncode, 0, py.stderr)
-            self.assertEqual(rs.returncode, 0, rs.stderr)
-            self.assertEqual(py.stdout, rs.stdout,
-                             "state savings stdout 不一致：\npy:\n%s\nrs:\n%s"
-                             % (py.stdout, rs.stdout))
+            self.assertEqual(rs.returncode, 2)
+            self.assertIn("unrecognized subcommand 'savings'", rs.stderr)
 
 
 if __name__ == "__main__":

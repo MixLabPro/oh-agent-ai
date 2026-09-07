@@ -165,9 +165,8 @@ class StateByModelCli(unittest.TestCase):
             self.assertIsNone(out["by_model_cost"])
 
     @unittest.skipUnless(BIN, "AGENT_VITALS_BIN not set — differential skipped")
-    def test_python_rust_byte_equal(self):
-        """同一份 month.json：`scan.py state by-model` 与 Rust
-        `agent-vitals state by-model` stdout 逐字节相等。"""
+    def test_rust_retires_json_month_reader(self):
+        """v0.9.1：主二进制不再提供从 month.json 读取业务数据的入口。"""
         with _TmpHome() as h:
             state_dir = Path(h.tmp) / "state"
             state_dir.mkdir(parents=True, exist_ok=True)
@@ -183,13 +182,9 @@ class StateByModelCli(unittest.TestCase):
             }
             (state_dir / "month.json").write_text(
                 json.dumps(month, ensure_ascii=False), encoding="utf-8")
-            py = _run(["state", "by-model"], env=h.env)
             rs = _run(["state", "by-model"], env=h.env, binary=True)
-            self.assertEqual(py.returncode, 0, py.stderr)
-            self.assertEqual(rs.returncode, 0, rs.stderr)
-            self.assertEqual(py.stdout, rs.stdout,
-                             "state by-model stdout 不一致：\npy:\n%s\nrs:\n%s"
-                             % (py.stdout, rs.stdout))
+            self.assertEqual(rs.returncode, 2)
+            self.assertIn("unrecognized subcommand 'by-model'", rs.stderr)
 
 
 if __name__ == "__main__":

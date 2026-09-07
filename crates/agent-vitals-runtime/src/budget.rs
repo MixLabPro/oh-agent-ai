@@ -102,6 +102,7 @@ fn parse_scalar(text: &str) -> Value {
 /// `budget.py::load_config`（极简 TOML 解析，不引 toml 依赖；merge 段在 core
 /// `merged_config`）。缺文件 / 缺节 / 缺字段一律走默认 —— 配置缺失降级而非
 /// 崩溃，与「host 能力缺失时不臆造」同一纪律。
+#[cfg(test)]
 fn load_config() -> Value {
     load_config_at(&data_home())
 }
@@ -203,22 +204,6 @@ pub(crate) fn read_month(month: Option<&str>) -> Option<Value> {
     }
 }
 
-/// 复刻 `budget.py::_read_snooze` 的「读串」部分：budget.json 里非空字符串的
-/// `snoozed_until` 原样返回（解析/过期判断交给 core `parse_iso`）。
-///
-/// Python 侧在这里用 `datetime.fromisoformat` 校验（ValueError → None），core
-/// 的 `parse_iso` 承担同一校验 —— 解析不了的串等价于「没有 snooze」。已知
-/// 分叉：Python `fromisoformat` 接受空格分隔的 `"2026-08-28 14:53:00"`，core
-/// 只认 `T` 分隔；写链 `set_snooze` 永远写 `isoformat()`（`T`），不在夹具里。
-fn read_snooze() -> Option<String> {
-    let data = read_json(&state_dir().join("budget.json"))?;
-    let s = data.get("snoozed_until").and_then(Value::as_str)?;
-    if s.is_empty() {
-        return None; // `if not s` —— 空串 / 缺场等价
-    }
-    Some(s.to_string())
-}
-
 /// `budget show` 文本输出 —— 逐字节镜像 `cli.py` 的 show handler（不含
 /// `--month`，那走 `render_budget_month`）。
 fn render_budget_show(cfg: &Value, alert: &Value) -> String {
@@ -228,8 +213,14 @@ fn render_budget_show(cfg: &Value, alert: &Value) -> String {
     w.push_str(&format!("daily_cny:         {}\n", p(&cfg["daily_cny"])));
     w.push_str(&format!("weekly_cny:        {}\n", p(&cfg["weekly_cny"])));
     w.push_str(&format!("monthly_cny:       {}\n", p(&cfg["monthly_cny"])));
-    w.push_str(&format!("peak_share_max:    {}\n", p(&cfg["peak_share_max"])));
-    w.push_str(&format!("adaptive_floor:    {}\n", p(&cfg["adaptive_floor"])));
+    w.push_str(&format!(
+        "peak_share_max:    {}\n",
+        p(&cfg["peak_share_max"])
+    ));
+    w.push_str(&format!(
+        "adaptive_floor:    {}\n",
+        p(&cfg["adaptive_floor"])
+    ));
     w.push_str(&format!(
         "adaptive_window:   {} days\n",
         p(&cfg["adaptive_window_days"])
@@ -326,8 +317,8 @@ pub fn month_cost_sql(month: &str) -> Option<Value> {
     )
     .ok()?;
     let (start, end) = agent_vitals_data::authority_query::beijing_month_bounds_ms(month)?;
-    let days = agent_vitals_data::authority_query::peaked_days_map(db.conn(), "dsh", start, end)
-        .ok()?;
+    let days =
+        agent_vitals_data::authority_query::peaked_days_map(db.conn(), "dsh", start, end).ok()?;
     if days.as_object().is_some_and(|m| m.is_empty()) {
         return None;
     }
@@ -363,94 +354,13 @@ pub fn budget_show(json_out: bool) {
     let dh = crate::home::data_home();
     let alert = evaluate_alert_from_sql(&dh);
     if json_out {
-        println!("{}", serde_json::to_string_pretty(&alert).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&alert).unwrap_or_default()
+        );
     } else {
         print!("{}", render_budget_show(&budget_config_sql(&dh), &alert));
     }
-}
-
-/// `budget.evaluate()` 的 I/O 组装（不渲染、不 print）—— oneline 生产者用它
-/// 落盘 alert.json，与 `budget_show` 同一份组装，只有一个调用面，不各写一份
-/// 互相不一致（R1a 的 xbar「阈值改了菜单栏不生效」教训）。
-pub fn evaluate_alert_from_state() -> Value {
-    let cfg = load_config();
-    let today_data = read_json(&state_dir().join("today.json"));
-    let month_days = read_month(None);
-    let pricing = agent_vitals_domain::cost::load_pricing();
-    let snooze = read_snooze();
-    agent_vitals_domain::budget::evaluate_alert(
-        &cfg,
-        today_data.as_ref(),
-        month_days.as_ref(),
-        &pricing,
-        &today_beijing(),
-        snooze.as_deref(),
-        now_unix(),
-    )
-}
-
-/// oneline 的 alert：Python `evaluate()` 读的是 **merge 完之后**的
-/// today.json / month.json（cli.py 先 merge 再 evaluate），而 fold-req 在
-/// fold_session 落盘之前组装 —— 所以用 core 的纯 state 函数在内存里模拟这一次
-/// fold 的 merge（rotate → merge_today_state；stale 迁档 → merge_month_body），
-/// 再评估。模拟用的就是 fold_session 落盘时同一个函数，不是第二份规则。
-///
-/// `by_model_today` = `token_by_date_model(events)[今天]`（可能 None）；`by_date_model`
-/// = 整份多日 dict。与 fold-req 传给 fold_session 的同一对切片。
-pub fn evaluate_alert_after_fold(
-    hb: &Value,
-    by_model_today: Option<&Value>,
-    by_date_model: &Value,
-) -> Value {
-    let cfg = load_config();
-    let pricing = agent_vitals_domain::cost::load_pricing();
-    let snooze = read_snooze();
-    let today_key = today_beijing();
-    let current = current_month_beijing();
-    let now = crate::state::now_iso_utc();
-
-    // 模拟 merge_today：rotate（跨 BJ 0:00）→ merge_today_state。
-    let existing_today = read_json(&state_dir().join("today.json")).unwrap_or_else(|| json!({}));
-    let rotated = match agent_vitals_domain::state::rotate_today_state(&existing_today, &today_key, &now)
-    {
-        Some(r) => r,
-        None => existing_today,
-    };
-    let merged_today =
-        agent_vitals_domain::state::merge_today_state(&rotated, hb, by_model_today, &today_key, &now);
-
-    // 模拟 merge_month：stale 先迁档，再 merge_month_body → 新的月 days。
-    let existing_month = read_json(&state_dir().join("month.json")).unwrap_or_else(|| json!({}));
-    let mut archive = read_json(&state_dir().join("month-archive.json")).unwrap_or_else(|| json!({}));
-    let stale = agent_vitals_domain::state::stale_days(&existing_month, &current);
-    if stale.as_object().is_some_and(|m| !m.is_empty()) {
-        archive = agent_vitals_domain::state::add_days_to_archive(&archive, &stale, &now);
-    }
-    let body = agent_vitals_domain::state::merge_month_body(
-        &existing_month,
-        hb,
-        Some(by_date_model),
-        &current,
-        &now,
-        &archive,
-    );
-    // merge_month_body 已经把历史月拆进 backfill、month_json["days"] 只剩当前月；
-    // 空月 → None（`read_month` 的「缺列 None」语义，空壳与 None 在 evaluate 里
-    // 不同：None → month_cost None，空壳 → 0 元）。
-    let month_days = match body.month_json.get("days") {
-        Some(Value::Object(m)) if !m.is_empty() => Some(Value::Object(m.clone())),
-        _ => None,
-    };
-
-    agent_vitals_domain::budget::evaluate_alert(
-        &cfg,
-        Some(&merged_today),
-        month_days.as_ref(),
-        &pricing,
-        &today_key,
-        snooze.as_deref(),
-        now_unix(),
-    )
 }
 
 /// `budget show --month M` 主入口：DSH 该月成本，跟阈值/告警无关。
@@ -582,10 +492,11 @@ pub fn budget_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
 
     let summary = {
         use agent_vitals_data::repository::SummaryRepository;
-        crate::summary::SqlSummaryRepository::at(data_home)
-            .monthly_summary(&agent_vitals_data::repository::MonthlySummaryQuery {
+        crate::summary::SqlSummaryRepository::at(data_home).monthly_summary(
+            &agent_vitals_data::repository::MonthlySummaryQuery {
                 month: month.to_string(),
-            })
+            },
+        )
     };
     // 预算 = **跨宿主「按量实付」的成本闸门**（PM 决策 2026-09-07，见
     // docs/AGENT_VITALS_V0_9_1_IMPLEMENTATION_PLAN.md「预算口径」）：
@@ -611,7 +522,11 @@ pub fn budget_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
 
     // snooze：snoozes 行存在且 until_ms > now → 抑制告警输出标记。
     let now_ms = crate::sql_sync::now_ms();
-    let snooze_until = db.budget_snooze_get().ok().flatten().filter(|&until| until > now_ms);
+    let snooze_until = db
+        .budget_snooze_get()
+        .ok()
+        .flatten()
+        .filter(|&until| until > now_ms);
 
     let (level, ratio_bp) = match &cfg {
         None => ("no_budget", None),
@@ -674,7 +589,7 @@ fn ms_to_iso_utc(ms: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}+00:00")
 }
 
-/// `evaluate_alert_from_state` 的 **SQL 权威面**（Tier B 收尾）：预算/告警从
+/// 预算/告警的 **SQL 权威面**（Tier B 收尾）：从
 /// SQL 权威库算，不读 `today.json` / `month.json` / `alert.json` / `budget.json`
 /// （spec §5.2 禁读清单）。返回形状 = `domain::budget::evaluate_alert` 逐 key
 /// 相同（`level`/`ratio`/`month_ratio`/`effective_daily_budget`/`reasons`/
@@ -760,7 +675,8 @@ pub fn budget_snooze_set_sql(until_iso: &str) -> Result<i64, String> {
     )
     .map_err(|e| e.to_string())?;
     let now = crate::sql_sync::now_ms();
-    db.budget_snooze_set(until_ms, now).map_err(|e| e.to_string())?;
+    db.budget_snooze_set(until_ms, now)
+        .map_err(|e| e.to_string())?;
     Ok(until_ms)
 }
 
@@ -768,7 +684,6 @@ pub fn budget_snooze_set_sql(until_iso: &str) -> Result<i64, String> {
 mod tests {
     use super::*;
     use serde_json::json;
-
 
     /// 环境锁是进程级的（util::ENV_LOCK），不是本模块局部的 —— state 的测试
     /// 也改 AGENT_VITALS_HOME，各自一把锁就互相踩踏（见 util.rs 注释）。
@@ -826,7 +741,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("av-budget-test-{}", std::process::id()));
         let home = tmp_home(&dir);
         let _guard = TestEnvGuard::set(&home);
-        write(&home.join("config.toml"), "[budget]\ndaily_cny = 50\npeak_share_max = 0.6\n");
+        write(
+            &home.join("config.toml"),
+            "[budget]\ndaily_cny = 50\npeak_share_max = 0.6\n",
+        );
         let cfg = load_config();
         assert_eq!(cfg["daily_cny"], 50); // int 保留
         assert_eq!(cfg["peak_share_max"], 0.6);
@@ -873,7 +791,10 @@ mod tests {
             &format!(r#"{{"months": {{"{prev}": {{"days": {{"{prev}-20": {{}}}}}}}}}}"#),
         );
         let days = read_month(Some(&prev)).unwrap();
-        assert!(days.as_object().unwrap().contains_key(&format!("{prev}-20")));
+        assert!(days
+            .as_object()
+            .unwrap()
+            .contains_key(&format!("{prev}-20")));
         drop(_guard);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -990,13 +911,19 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let env = TestEnvGuard::set(&dir);
         let month = crate::clock::current_month_beijing();
-        let path =
-            agent_vitals_data::authority::default_authority_path(&crate::home::data_home());
+        let path = agent_vitals_data::authority::default_authority_path(&crate::home::data_home());
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
         let db = agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap();
-        (BudgetEnvGuard { _env: env, _lock: lock }, db, month)
+        (
+            BudgetEnvGuard {
+                _env: env,
+                _lock: lock,
+            },
+            db,
+            month,
+        )
     }
 
     fn seed_fact_min(
@@ -1065,8 +992,17 @@ mod tests {
         // 事实折算，档位断言仍用「随事实增长跨档」的相对断言。
         let (_guard, db, month) = fresh_budget_env("levels");
         // 预算 ¥600 → dsh MeteredActual ≈ 事实折算（订阅不垫底）。
-        let (start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month).unwrap();
-        seed_fact_min(&db, "f1", "dsh", "deepseek-v4-flash", start + 1_000, 100_000_000, 10_000_000);
+        let (start, _) =
+            agent_vitals_data::authority_query::beijing_month_bounds_ms(&month).unwrap();
+        seed_fact_min(
+            &db,
+            "f1",
+            "dsh",
+            "deepseek-v4-flash",
+            start + 1_000,
+            100_000_000,
+            10_000_000,
+        );
         db.budget_config_set(60_000, 3_000, 8_000, 1).unwrap();
         let v_low = budget_status_sql(&month).unwrap();
         // 事实量大到把 DSH 支出顶过 warn（≥80%）与 exceeded（≥100%）：
@@ -1099,9 +1035,15 @@ mod tests {
             v_high["metered_cny_minor"].as_i64(),
             v_high["ratio_bp"].as_i64(),
         ) {
-            assert_eq!(rb, sp * 10_000 / 60_000, "ratio_bp = spent*10000/monthly 整数除法");
+            assert_eq!(
+                rb,
+                sp * 10_000 / 60_000,
+                "ratio_bp = spent*10000/monthly 整数除法"
+            );
         }
-        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("av-budget-levels-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("av-budget-levels-{}", std::process::id())),
+        );
     }
 
     /// 档位阈值**精确钉界**（审查 F3：levels 的 OR 断言连 2000bp 的错误
@@ -1114,22 +1056,38 @@ mod tests {
         // spent 恒 0 → ratio_bp 恒 0 → level 恒 ok——不够。反过来：spent
         // 来自 facts，这里 seed 一笔**已知折算价**的事实再调 budget_config
         // _set 把 monthly 拨到 spent 的边界倍数上，四次查询钉四个档位。
-        let (start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month).unwrap();
+        let (start, _) =
+            agent_vitals_data::authority_query::beijing_month_bounds_ms(&month).unwrap();
         // seed 量要**足够大**：四个边界都靠 `monthly = spent*10000/bp` 反推，
         // 整数除法在 spent 小时不可逆（spent≈195 时量化误差把 warn 下界推过
         // 阈值）——按量口径切换后订阅 ¥232 不再垫底，必须自己把 spent 顶到
         // 数千分（¥数十）级别，`/7999` 与 `/8000` 才区分得开。
-        seed_fact_min(&_db, "e1", "dsh", "deepseek-v4-flash", start + 1_000, 1_000_000_000, 100_000_000);
+        seed_fact_min(
+            &_db,
+            "e1",
+            "dsh",
+            "deepseek-v4-flash",
+            start + 1_000,
+            1_000_000_000,
+            100_000_000,
+        );
         drop(_db);
         let v = budget_status_sql(&month).unwrap();
         let spent = v["metered_cny_minor"].as_i64().unwrap();
-        assert!(spent > 10_000, "seed 事实必须折出足量正支出（否则边界反推不可逆），got {spent}");
+        assert!(
+            spent > 10_000,
+            "seed 事实必须折出足量正支出（否则边界反推不可逆），got {spent}"
+        );
         // 四次配置 × 查询：spent/warn 下（ok）、恰 warn 上（warn）、
         // spent 恰 100% 下（warn）、恰 100% 上（exceeded）。monthly 取值
         // 让 spent*10000/monthly 落在每档边界两侧各一次。
         let cases = [
             (spent * 10_000 / 7_999, "warn 以下（ratio < 8000bp）", "ok"),
-            (spent * 10_000 / 8_000, "恰 warn 阈值（ratio == 8000bp）", "warn"),
+            (
+                spent * 10_000 / 8_000,
+                "恰 warn 阈值（ratio == 8000bp）",
+                "warn",
+            ),
             (spent * 10_000 / 9_999, "超 warn 未满额", "warn"),
             (spent * 10_000 / 10_000, "恰 100%", "exceeded"),
         ];
@@ -1142,7 +1100,8 @@ mod tests {
                 crate::sql_sync::now_ms(),
             )
             .unwrap();
-            db.budget_config_set(monthly_minor, 3_000, 8_000, 1).unwrap();
+            db.budget_config_set(monthly_minor, 3_000, 8_000, 1)
+                .unwrap();
             drop(db);
             let v = budget_status_sql(&month).unwrap();
             assert_eq!(
@@ -1176,7 +1135,8 @@ mod tests {
         {
             let (_guard, db, month) = fresh_budget_env("snooze2");
             db.budget_config_set(60_000, 3_000, 8_000, 1).unwrap();
-            db.budget_snooze_set(crate::sql_sync::now_ms() - 1_000, 1).unwrap();
+            db.budget_snooze_set(crate::sql_sync::now_ms() - 1_000, 1)
+                .unwrap();
             drop(db);
             let v = budget_status_sql(&month).unwrap();
             assert_eq!(v["snoozed_until_ms"], Value::Null, "过期 snooze 视同无");
@@ -1213,7 +1173,13 @@ mod tests {
             db.budget_config_set(60_000, 3_000, 8_000, 1).unwrap(); // ¥600 / ¥30 / 80%
             if tag == "spender" {
                 seed_fact_min(
-                    &db, "at1", "dsh", "deepseek-v4-flash", start + 1_000, 1_000_000, 100_000,
+                    &db,
+                    "at1",
+                    "dsh",
+                    "deepseek-v4-flash",
+                    start + 1_000,
+                    1_000_000,
+                    100_000,
                 );
             }
             d
@@ -1228,14 +1194,21 @@ mod tests {
         let v_spender = budget_status_sql_at(&dir_spender, &month).expect("库可开");
         let v_empty = budget_status_sql_at(&dir_empty, &month).expect("库可开");
         assert_eq!(v_spender["data_source"], "sql_authority");
-        assert_eq!(v_spender["monthly_cny_minor"], json!(60_000), "配置读自传入的 dir");
+        assert_eq!(
+            v_spender["monthly_cny_minor"],
+            json!(60_000),
+            "配置读自传入的 dir"
+        );
         let spent_spender = v_spender["metered_cny_minor"].as_i64().unwrap();
         let spent_empty = v_empty["metered_cny_minor"].as_i64().unwrap();
         // 按量口径（PM 决策 2026-09-07）：无事实的库 metered = 0——`apply_
         // subscription_fees` 摊进的 CNY 订阅月费（GLM/MiniMax，实测 ¥232）
         // 是 `FixedSubscription` 档，**被排除**在预算分子外。改这条前它是
         // 23200（订阅摊销冒充按量消耗）。
-        assert_eq!(spent_empty, 0, "无按量事实 → metered 分子必须为 0，订阅月费不算");
+        assert_eq!(
+            spent_empty, 0,
+            "无按量事实 → metered 分子必须为 0，订阅月费不算"
+        );
         assert!(
             spent_spender > spent_empty,
             "seed 了 DSH 按量事实的库 metered 必须严格更大——传入的 data_home 被真正\
@@ -1247,7 +1220,12 @@ mod tests {
 
     // ── Tier B：evaluate_alert_from_sql（alert / 托盘预算卡 切 SQL）─────────
 
-    fn fresh_sql_home(tag: &str) -> (std::path::PathBuf, agent_vitals_data::authority::AuthorityDb) {
+    fn fresh_sql_home(
+        tag: &str,
+    ) -> (
+        std::path::PathBuf,
+        agent_vitals_data::authority::AuthorityDb,
+    ) {
         let d = std::env::temp_dir().join(format!("av-alert-sql-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
@@ -1271,10 +1249,11 @@ mod tests {
         assert_eq!(a["monthly_cny"], json!(600.0), "default_budget 月预算");
         assert_eq!(a["effective_daily_budget"], json!(30.0));
         assert!(
-            a["reasons"].as_array().unwrap().iter().any(|r| r
-                .as_str()
-                .unwrap_or("")
-                .contains("no today")),
+            a["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r.as_str().unwrap_or("").contains("no today")),
             "reasons: {}",
             a["reasons"]
         );
@@ -1288,18 +1267,32 @@ mod tests {
     fn evaluate_alert_from_sql_prices_dsh_today_and_month_from_facts() {
         let (dir, db) = fresh_sql_home("spender");
         let today = crate::clock::today_beijing();
-        let (start, _) =
-            agent_vitals_data::authority_query::beijing_day_bounds_ms(&today).unwrap();
+        let (start, _) = agent_vitals_data::authority_query::beijing_day_bounds_ms(&today).unwrap();
         // 今天的一笔大额按量事实（flash 卡便宜，量给足跨档）。
-        seed_fact_min(&db, "t1", "dsh", "deepseek-v4-flash", start + 1_000, 500_000_000, 50_000_000);
+        seed_fact_min(
+            &db,
+            "t1",
+            "dsh",
+            "deepseek-v4-flash",
+            start + 1_000,
+            500_000_000,
+            50_000_000,
+        );
         // 极小预算：monthly ¥1 / daily ¥0.5 → 必然 over。
         db.budget_config_set(100, 50, 8_000, 1).unwrap();
         drop(db);
 
         let a = evaluate_alert_from_sql(&dir);
         let today_cost = a["today_cost"].as_f64().unwrap();
-        assert!(today_cost > 0.0, "今日按量事实必须折出正成本，got {today_cost}");
-        assert_eq!(a["month_cost"].as_f64().unwrap(), today_cost, "本月只有今天一笔 → 相等");
+        assert!(
+            today_cost > 0.0,
+            "今日按量事实必须折出正成本，got {today_cost}"
+        );
+        assert_eq!(
+            a["month_cost"].as_f64().unwrap(),
+            today_cost,
+            "本月只有今天一笔 → 相等"
+        );
         assert_eq!(a["level"], "over", "支出远超 ¥1 月预算");
         assert!(a["month_ratio"].as_f64().unwrap() >= 1.0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1311,12 +1304,20 @@ mod tests {
     fn evaluate_alert_from_sql_snooze_suppresses_then_expires() {
         let (dir, db) = fresh_sql_home("snooze");
         let today = crate::clock::today_beijing();
-        let (start, _) =
-            agent_vitals_data::authority_query::beijing_day_bounds_ms(&today).unwrap();
-        seed_fact_min(&db, "s1", "dsh", "deepseek-v4-flash", start + 1_000, 500_000_000, 50_000_000);
+        let (start, _) = agent_vitals_data::authority_query::beijing_day_bounds_ms(&today).unwrap();
+        seed_fact_min(
+            &db,
+            "s1",
+            "dsh",
+            "deepseek-v4-flash",
+            start + 1_000,
+            500_000_000,
+            50_000_000,
+        );
         db.budget_config_set(100, 50, 8_000, 1).unwrap();
         // 远未来 snooze（now + 1 天）。
-        db.budget_snooze_set(crate::sql_sync::now_ms() + 86_400_000, 1).unwrap();
+        db.budget_snooze_set(crate::sql_sync::now_ms() + 86_400_000, 1)
+            .unwrap();
         drop(db);
         let a = evaluate_alert_from_sql(&dir);
         assert_eq!(a["level"], "snoozed", "warn/over 被 snooze 压制");
@@ -1328,7 +1329,8 @@ mod tests {
             1,
         )
         .unwrap();
-        db.budget_snooze_set(crate::sql_sync::now_ms() - 1_000, 1).unwrap();
+        db.budget_snooze_set(crate::sql_sync::now_ms() - 1_000, 1)
+            .unwrap();
         drop(db);
         let a = evaluate_alert_from_sql(&dir);
         assert_eq!(a["level"], "over", "过期 snooze 不压制");
@@ -1345,8 +1347,15 @@ mod tests {
         let month = crate::clock::current_month_beijing();
         let (start, _) =
             agent_vitals_data::authority_query::beijing_month_bounds_ms(&month).unwrap();
-        seed_fact_min(&db, "m1", "dsh", "deepseek-v4-flash", start + 3_600_000,
-                      100_000_000, 10_000_000);
+        seed_fact_min(
+            &db,
+            "m1",
+            "dsh",
+            "deepseek-v4-flash",
+            start + 3_600_000,
+            100_000_000,
+            10_000_000,
+        );
         drop(db);
         let _guard = TestEnvGuard::set(&dir);
         let cost = month_cost_sql(&month).expect("有 DSH 事实 → Some");

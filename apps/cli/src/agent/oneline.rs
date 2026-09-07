@@ -1,8 +1,10 @@
-//! R1d-tick 的 oneline 生产者：把一份 DSH 会话日志折成「一行摘要」（oneline.json
-//! 快照 + sessions.jsonl 历史行）+ 今日/本月账（today.json / month.json）+ 预算
-//! 告警（alert.json），最后在 ledger 记 key、manifest 代际 +1 —— **逐字节镜像
-//! Python `scan.py oneline`（`scripts/agent_vitals/cli.py:1149-1305`）**，是
-//! R1d 切到 Rust 之后 xbar 5min tick 唯一调用的写链入口。
+//! R1d-tick 的 oneline 生产者：把一份 DSH 会话日志折成「一行摘要」
+//! （`oneline.json` 快照 + `sessions.jsonl` 导航历史），最后在 ledger 记 key、
+//! manifest 代际 +1。
+//!
+//! v0.9.1 Phase 4.3 Stage 5b 起，日/月账与预算告警只从 SQL 权威库读取；tick
+//! **绝不再写** `today.json` / `month.json` / `month-archive.json` / `alert.json`。
+//! Python 的旧 `scan.py oneline` 仍可为旧分发运行，但不再是本应用的数据写入契约。
 //!
 //! Python 与 Rust 的差分由 `tests/test_oneline_lockstep.py` 钉住：同一份真实
 //! 格式会话日志，两个实现各自折进**独立** HOME，state 文件逐字节相等（四个
@@ -16,12 +18,11 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use agent_vitals_runtime::sessions::behavior::audit_session_log;
-use agent_vitals_runtime::sessions::codex_cost::today_beijing;
-use agent_vitals_runtime::state;
-use agent_vitals_runtime::takeover as tk_io;
 use agent_vitals_domain::takeover as tk;
 use agent_vitals_domain::usage;
+use agent_vitals_runtime::sessions::behavior::audit_session_log;
+use agent_vitals_runtime::state;
+use agent_vitals_runtime::takeover as tk_io;
 
 /// oneline 一次运行的结果。
 #[derive(Debug, PartialEq, Eq)]
@@ -39,24 +40,19 @@ pub enum OnelineOutcome {
 ///      省得审计半天才拒」）；
 ///   2. `audit_session_log` 拿 findings + usage（token_by_model）；
 ///   3. `cost_report` 定价；
-///   4. 双读 events 算 `hour_buckets` + `token_by_date_model`（双读换「不破坏
-///      audit_session_log 签名」的简洁，oneline 是 5min tick 而非实时路径）；
+///   4. 读 events 算小时分布（只供导航摘要，不是业务账）；
 ///   5. tokens_total / tokens_peak（4 桶全量，与 hour_buckets 同源）；
 ///   6. session_id = 文件 stem，去重门（folded_in_ledger）—— 已折 → dedup；
 ///   7. 组 summary（**键序 = Python dict 字面量序**，sessions.jsonl 靠它）；
-///   8. alert —— **必须反映 fold 之后的状态**（Python `evaluate()` 读的是
-///      merge 完的 today.json/month.json），`--no-merge` 才读未 merge 态；
-///   9. 组装 fold-req（`--no-merge` 时**省略** hour_buckets / by_model_today /
-///      by_date_model —— fold_session 见 hour_buckets 就 merge），调 `fold_session`
-///      （fenced + exactly-once）落盘；
-///  10. 人读报告（Python 同款格式）。
+///   8. 组装只含导航快照的 fold-req，调 `fold_session`（fenced + exactly-once）落盘；
+///   9. 人读报告。
 ///
 /// calendar.html 刷新**不在** R1d 范围：那是展示层产物，Python 用
 /// `_render_calendar_html` 刷、Rust 侧不产 —— 行为差量如实上报，不假装等价。
 pub fn oneline(
     path: &Path,
     session_id_override: Option<&str>,
-    no_merge: bool,
+    _no_merge: bool,
     shadow: bool,
 ) -> Result<OnelineOutcome, String> {
     // 1. fencing
@@ -76,7 +72,7 @@ pub fn oneline(
         json!({"total": 0, "peak_total": 0, "unpriced_tokens": 0, "currency": "CNY"})
     });
 
-    // 4. 双读 events —— hour_buckets 与 token_by_date_model 都吃 usage_events。
+    // 4. events 只用于导航摘要的小时分布；业务账由 sync 写入 SQL 权威库。
     let session = agent_vitals_hosts::dsh_sources::read_session_log(path);
     let events: Vec<Value> = session
         .get("usage_events")
@@ -108,14 +104,12 @@ pub fn oneline(
     //    传 `--session-id <agentId>` 覆盖 —— DSH 落盘名恒为 `session.jsonl`，
     //    stem 恒 "session"，会把所有会话撞进同一个 dedup key（§4.3 的碰撞
     //    教训：native id 必须来自 source identity，不是文件名）。
-    let session_id = session_id_override
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
+    let session_id = session_id_override.map(str::to_owned).unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    });
     let ns = tk_io::machine_namespace();
     let key = tk::session_key("dsh", &session_id, &ns);
     if tk_io::folded_in_ledger(&key) {
@@ -143,49 +137,14 @@ pub fn oneline(
         "hour_buckets_summary": hour_buckets_summary(&hb),
     });
 
-    // 9. 两个状态文件都喂按 (date, model) 折的那一份（token_by_date_model），
-    //    不是整段 by_model —— 70× 事故：跨日长会话 hour 桶被滤成只今天的量、
-    //    by_model 却是整段，同一个 today.json 两个字段差 70 倍。--no-merge 时
-    //    Python 连 by_date_model 都不算。
-    let (by_date_model, by_model_today) = if no_merge {
-        (Value::Null, Value::Null)
-    } else {
-        // oneline 是 CLI 喂入路径（tick/手动审计都走这条命令）——标 `cli`。
-        // 来源只能来自调用方显式标注：把一次 oneline 喂的会话标成
-        // `dsh-live`（watcher 增量）或 `codex`（导入）都是**编造**，诊断
-        // 「同一批被喂了几次」时会被一个假来源键污染。
-        let bdm = usage::token_by_date_model(&events, usage::SOURCE_CLI);
-        let today_key = today_beijing();
-        let today = bdm.get(&today_key).cloned().unwrap_or(Value::Null);
-        (bdm, today)
-    };
-
-    // 10. alert —— Python 先 merge 再 evaluate，这里在内存里模拟 merge（同一组
-    //     core 纯函数）再评估；--no-merge 时 evaluate 读未 merge 态。
-    let alert = if no_merge {
-        agent_vitals_runtime::budget::evaluate_alert_from_state()
-    } else {
-        agent_vitals_runtime::budget::evaluate_alert_after_fold(
-            &hb,
-            by_model_today.as_object().map(|_| &by_model_today),
-            &by_date_model,
-        )
-    };
-
-    // 11. fold-req → fold_session。--no-merge 省略三个 merge 键（fold_session
-    //     见 hour_buckets 就 merge），oneline/alert/ledger 照旧。
+    // 9. fold-req → fold_session。它只允许导航字段；旧账本字段即使有外部调用者
+    //    传入也由 fold_session 忽略，确保 SQL 是唯一业务数据源。
     let mut req = Map::new();
     req.insert("session_id".into(), json!(session_id));
     req.insert("session_log".into(), json!(path.display().to_string()));
     req.insert("host_kind".into(), json!("dsh"));
     req.insert("machine_namespace".into(), json!(ns));
     req.insert("oneline".into(), summary);
-    if !no_merge {
-        req.insert("hour_buckets".into(), hb);
-        req.insert("by_model_today".into(), by_model_today);
-        req.insert("by_date_model".into(), by_date_model);
-    }
-    req.insert("alert".into(), alert);
     let req = Value::Object(req);
 
     let outcome = tk_io::fold_session(&req, shadow)?;
@@ -311,7 +270,12 @@ fn print_report(req: &Value, state_path: &Path) {
         summary["findings_total"].as_i64().unwrap_or(0),
         s("findings_max_severity")
     );
-    if req.get("alert").and_then(|a| a.get("level")).and_then(Value::as_str) != Some("disabled") {
+    if req
+        .get("alert")
+        .and_then(|a| a.get("level"))
+        .and_then(Value::as_str)
+        != Some("disabled")
+    {
         println!(
             "budget:     {}",
             req.get("alert")
@@ -381,10 +345,7 @@ mod tests {
         assert_eq!(s["bucket_count"], 2);
         assert_eq!(s["min_date"], "2026-08-30");
         assert_eq!(s["max_date"], "2026-08-30");
-        assert_eq!(
-            s["tz_name"],
-            "Asia/Shanghai (UTC+8 fixed, no DST)"
-        );
+        assert_eq!(s["tz_name"], "Asia/Shanghai (UTC+8 fixed, no DST)");
         let empty = json!({"buckets": [], "tz_name": "t"});
         let s = hour_buckets_summary(&empty);
         assert_eq!(s["bucket_count"], 0);

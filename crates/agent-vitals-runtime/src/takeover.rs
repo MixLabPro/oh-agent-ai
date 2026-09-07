@@ -5,8 +5,8 @@
 //!
 //!   · `writer-manifest.json` / `session-ledger.json` / `machine.json` 的读写
 //!     （全部原子写，复用 `agent::state` 的 `atomic_write_json`）；
-//!   · `fold_session` —— 把一次会话审计的产物（fold-req）按 §4.3 语义折进
-//!     状态文件：**fencing → dedup → fold → ledger 记 → manifest 提交**；
+//!   · `fold_session` —— 把一次会话审计的导航快照按 §4.3 语义落盘：
+//!     **fencing → dedup → snapshot → ledger 记 → manifest 提交**；
 //!   · `takeover` / `machine_namespace` 的 CLI 入口。
 //!
 //! fold-req 的 JSON 形状（生产者/测试喂，字段缺了就不写那个文件，与 R1c
@@ -19,13 +19,14 @@
 //!   "host_kind": "dsh",              // 缺省 "cli"
 //!   "machine_namespace": "ns-…",     // 必填：SessionKey 三要素之一（持久化
 //!                                    //   见 `machine_namespace()`，tick 负责取）
-//!   "oneline": {…},                  // write_oneline + append_session_history
-//!   "hour_buckets": {…},             // merge_today（今天切片）+ merge_month
-//!   "by_model_today": {…} | null,
-//!   "by_date_model": {…} | null,
-//!   "alert": {…} | null              // 可选 write_alert
+//!   "oneline": {…}                   // write_oneline + append_session_history
 //! }
 //! ```
+//!
+//! v0.9.1 Stage 5b 后这是一个**闭合的导航快照协议**。旧调用方即使仍附带
+//! `hour_buckets` / `by_model_today` / `by_date_model` / `alert`，也一律忽略；
+//! `today.json` / `month.json` / `month-archive.json` / `alert.json` 的业务账已由
+//! SQL 权威库取代，不能被 tick 重新写活。
 //!
 //! 写序是「**state 文件先折 → ledger 记 key → manifest 提交**」：manifest 是提交
 //! 点，ledger 是去重依据。崩溃窗口（state 文件已写、ledger 未记 → 下个 tick 重折
@@ -175,14 +176,14 @@ pub fn fold_session(req: &Value, shadow: bool) -> Result<FoldOutcome, String> {
         .unwrap_or("cli");
     let native_id = req.get("session_id").and_then(Value::as_str).unwrap_or("");
     if native_id.is_empty() {
-        return Err("fold-session: session_id is required (producer derives it, §4.3)"
-            .to_string());
+        return Err("fold-session: session_id is required (producer derives it, §4.3)".to_string());
     }
     let ns = req
         .get("machine_namespace")
         .and_then(Value::as_str)
-        .ok_or_else(|| "fold-session: machine_namespace required (state machine-namespace)"
-            .to_string())?;
+        .ok_or_else(|| {
+            "fold-session: machine_namespace required (state machine-namespace)".to_string()
+        })?;
     let key = tk::session_key(host_kind, native_id, ns);
 
     let ledger = read_ledger();
@@ -197,23 +198,8 @@ pub fn fold_session(req: &Value, shadow: bool) -> Result<FoldOutcome, String> {
         super::state::write_oneline(oneline);
         super::state::append_session_history(oneline);
     }
-    // Phase 4.2（spec §6.1「freeze legacy writes」）：`sql_authority_enabled`
-    // 后，`today.json` / `month.json` / `month-archive.json` / `alert.json`
-    // （§5.2 业务读源）不再更新——SQL 权威库是唯一权威，`sync-facts` 已捕获
-    // 用量。`oneline.json` / `sessions.jsonl` 是导航快照，照常写（上面）。
-    let freeze = super::sql_authority::is_enabled_default();
-    if !freeze {
-        if let Some(hb) = req.get("hour_buckets") {
-            let by_model_today = req.get("by_model_today").filter(|v| v.is_object());
-            super::state::merge_today(hb, by_model_today);
-            if let Some(bdm) = req.get("by_date_model").filter(|v| v.is_object()) {
-                super::state::merge_month(hb, Some(bdm));
-            }
-        }
-        if let Some(alert) = req.get("alert").filter(|v| v.is_object()) {
-            super::state::write_alert(alert);
-        }
-    }
+    // 不再写旧账本：这条硬边界不依赖 `.sql-authority-enabled` 标记。标记仅保留
+    // 兼容性/状态展示用途；一旦代码读面切到 SQL，导航 tick 不得制造第二套账。
 
     // 提交点：ledger 先记（去重依据），manifest 后提交（代际 +1）。
     let entry = tk::ledger_entry(host_kind, native_id, ns, &now, epoch + 1);
@@ -261,9 +247,7 @@ mod tests {
     /// 毒化再 lock 就 Err —— 这是**测试夹具**的锁，夹具不该让一个坏断言
     /// 连坐后续所有用例，直接取回即可（每个测试自带 env 恢复 guard）。
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     struct TestEnvGuard {
@@ -298,8 +282,7 @@ mod tests {
     }
 
     /// 一份 fold-req：session s1，10 token。`session_id` 可改（多会话）。
-    /// 日期用**运行时北京今天**（`merge_today`/`merge_month` 按北京日期过滤，
-    /// 写死日期会在非 08-30 那天被当成非今日整条丢弃 —— R1c 同款教训）。
+    /// 日期只用于导航摘要；业务日期/金额由 SQL 权威库查询。
     fn req(session_id: &str, tokens: u64) -> Value {
         let today = today_beijing();
         let oneline = json!({
@@ -317,29 +300,12 @@ mod tests {
             "hour_buckets_summary": {"bucket_count": 1, "min_date": today.clone(),
                                      "max_date": today.clone(), "tz_name": "Asia/Shanghai"},
         });
-        let by_model_today = json!({"deepseek-v4-flash": {
-            "uncached_input_tokens": tokens,
-            "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0,
-            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0}});
-        let by_date_model = json!({today.clone(): {"deepseek-v4-flash": {
-            "uncached_input_tokens": tokens,
-            "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0,
-            "peak_uncached_input_tokens": 0, "peak_output_tokens": 0,
-            "peak_cache_read_tokens": 0, "peak_cache_write_tokens": 0}}});
         json!({
             "session_id": session_id,
             "session_log": format!("/logs/{session_id}.jsonl"),
             "host_kind": "dsh",
             "machine_namespace": "ns-abc",
             "oneline": oneline,
-            "hour_buckets": {"buckets": [
-                {"date": today.clone(), "hour": 9, "uncached_input_tokens": tokens}
-            ]},
-            "by_model_today": by_model_today,
-            "by_date_model": by_date_model,
-            "alert": {"level": "warning", "daily_pct": 10.0, "daily_cny": 5.0,
-                      "monthly_pct": 1.0, "monthly_cny": 20.0},
         })
     }
 
@@ -379,11 +345,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&t);
     }
 
-    /// Phase 4.2：`sql_authority_enabled` 后 `fold_session` 跳过 today.json /
-    /// month.json / alert.json（§5.2 业务读源），仍写 oneline.json（导航快照）
-    /// + ledger（去重账）。disable 后恢复双写。
+    /// Stage 5b：导航 tick 永不写回旧业务账；这个边界不依赖 authority marker，
+    /// 因而也不会在 disable 时意外恢复第二写者。
     #[test]
-    fn fold_session_freezes_legacy_state_json_when_sql_authority_enabled() {
+    fn fold_session_never_writes_retired_legacy_state_json() {
         let _env = env_lock();
         let t = std::env::temp_dir().join(format!("av-takeover-freeze-{}", std::process::id()));
         let home = tmp_home(&t);
@@ -391,20 +356,37 @@ mod tests {
         takeover("rust");
         let state = crate::state::state_dir();
 
-        crate::sql_authority::enable(&crate::home::data_home(), json!({})).unwrap();
         fold_session(&req("s1", 10), false).unwrap();
-        assert!(!state.join("today.json").exists(), "冻结：today.json 不写");
-        assert!(!state.join("month.json").exists(), "冻结：month.json 不写");
-        assert!(!state.join("alert.json").exists(), "冻结：alert.json 不写");
-        assert!(state.join("oneline.json").exists(), "导航快照 oneline.json 照常写");
+        assert!(
+            !state.join("today.json").exists(),
+            "today.json 已退役，不能写"
+        );
+        assert!(
+            !state.join("month.json").exists(),
+            "month.json 已退役，不能写"
+        );
+        assert!(
+            !state.join("month-archive.json").exists(),
+            "archive 已退役，不能写"
+        );
+        assert!(
+            !state.join("alert.json").exists(),
+            "alert.json 已退役，不能写"
+        );
+        assert!(
+            state.join("oneline.json").exists(),
+            "导航快照 oneline.json 照常写"
+        );
         // ledger 记了 s1（去重仍生效）。
-        assert!(tk::ledger_folded(&read_ledger(), &tk::session_key("dsh", "s1", "ns-abc")));
+        assert!(tk::ledger_folded(
+            &read_ledger(),
+            &tk::session_key("dsh", "s1", "ns-abc")
+        ));
 
-        crate::sql_authority::disable(&crate::home::data_home()).unwrap();
         fold_session(&req("s2", 20), false).unwrap();
-        assert!(state.join("today.json").exists(), "disable 后 today.json 恢复写");
-        assert!(state.join("month.json").exists());
-        assert!(state.join("alert.json").exists());
+        assert!(!state.join("today.json").exists(), "不允许恢复旧账本写入");
+        assert!(!state.join("month.json").exists());
+        assert!(!state.join("alert.json").exists());
         let _ = std::fs::remove_dir_all(&t);
     }
 
@@ -418,7 +400,10 @@ mod tests {
         let r = fold_session(&req("s1", 10), true).unwrap();
         assert_eq!(r, FoldOutcome::Folded);
         let l = read_ledger();
-        assert!(tk::ledger_folded(&l, &tk::session_key("dsh", "s1", "ns-abc")));
+        assert!(tk::ledger_folded(
+            &l,
+            &tk::session_key("dsh", "s1", "ns-abc")
+        ));
         let _ = std::fs::remove_dir_all(&t);
     }
 
@@ -442,14 +427,6 @@ mod tests {
             fold_session(&r, false).unwrap(),
             FoldOutcome::SkippedAlreadyFolded
         );
-        // today.json 只折了一次（10，不是 30）
-        let today = read(&state_dir().join("today.json"));
-        assert_eq!(today["buckets"]["9"]["uncached_input_tokens"], 10);
-        let month = read(&state_dir().join("month.json"));
-        assert_eq!(
-            month["days"][today_beijing()]["uncached_input_tokens"],
-            10
-        );
         // sessions.jsonl 只追加了一行
         let lines = std::fs::read_to_string(state_dir().join("sessions.jsonl")).unwrap();
         assert_eq!(lines.trim_end().lines().count(), 1);
@@ -468,9 +445,8 @@ mod tests {
         takeover("rust");
         fold_session(&req("s1", 10), false).unwrap();
         fold_session(&req("s2", 5), false).unwrap();
-        let today = read(&state_dir().join("today.json"));
-        // 两个会话各自去重，桶累加 10 + 5
-        assert_eq!(today["buckets"]["9"]["uncached_input_tokens"], 15);
+        let lines = std::fs::read_to_string(state_dir().join("sessions.jsonl")).unwrap();
+        assert_eq!(lines.trim_end().lines().count(), 2, "两个导航会话各一行");
         let l = read_ledger();
         assert_eq!(l["entries"].as_object().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&t);
@@ -486,11 +462,14 @@ mod tests {
         let _g = TestEnvGuard::set(&home);
         // Rust fold s1（代际 2）
         takeover("rust");
-        assert_eq!(fold_session(&req("s1", 10), false).unwrap(), FoldOutcome::Folded);
-        let today_before = read(&state_dir().join("today.json"));
-        let month_before = read(&state_dir().join("month.json"));
+        assert_eq!(
+            fold_session(&req("s1", 10), false).unwrap(),
+            FoldOutcome::Folded
+        );
+        let oneline_before = read(&state_dir().join("oneline.json"));
         let ledger_before = read_ledger();
-        let s1_epoch = ledger_before["entries"][tk::session_key("dsh", "s1", "ns-abc")]["epoch"].clone();
+        let s1_epoch =
+            ledger_before["entries"][tk::session_key("dsh", "s1", "ns-abc")]["epoch"].clone();
         // 接管失败 → 回退 Python（代际 3）
         takeover("python");
         assert_eq!(tk::manifest_owner(&read_manifest()), "python");
@@ -505,9 +484,8 @@ mod tests {
             ledger_after["entries"][tk::session_key("dsh", "s1", "ns-abc")]["epoch"],
             s1_epoch
         );
-        // 状态一字未动
-        assert_eq!(read(&state_dir().join("today.json")), today_before);
-        assert_eq!(read(&state_dir().join("month.json")), month_before);
+        // 已折会话不会重写导航快照。
+        assert_eq!(read(&state_dir().join("oneline.json")), oneline_before);
         let _ = std::fs::remove_dir_all(&t);
     }
 
@@ -516,10 +494,8 @@ mod tests {
     #[test]
     fn shadow_replay_matches_authority_after_cutover() {
         // 权威：接管 rust 后 fold s1、s2。影子：从权威复制 → --shadow 折 s3。
-        // 同一份 fold-req 折进两份同源的 state，today/month/ledger/manifest
-        // 除时间戳外逐字节一致 —— 这就是「Rust 写者与（接管前）Python 写者
-        // 产出同构」的物证；时间戳（folded_at/last_fold_at/generated_at）由
-        // `mark_fold`/`ledger_entry`/state 写链各自打，必然不同，打码后比。
+        // 同一份 fold-req 折进两份同源的导航 state，oneline/history/ledger/manifest
+        // 除时间戳外逐字节一致。业务账不在此协议内。
         let _env = env_lock();
         let t = std::env::temp_dir().join(format!("av-takeover-{}", std::process::id()));
         let home = tmp_home(&t);
