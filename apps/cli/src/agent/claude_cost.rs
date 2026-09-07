@@ -675,24 +675,31 @@ pub fn claude_sync(home: &Path, shadow: bool) -> Result<(), String> {
     // 盖一个新 archived_at，若每轮无条件写，零变化的幂等重跑也会改写整个
     // 文件（真机冻结语料复跑抓到：fold/ledger 字节不变、archive 每轮都变）。
     // archived_at 记录的是「真正归档那次」的时刻，不是「本轮核对过」。
-    if !archive_days.is_empty() {
-        let existing = read_json(&ledger_archive_path()).unwrap_or_else(|| json!({}));
-        let candidate = agent_vitals_domain::state::add_days_to_archive(
-            &existing, &json!(archive_days), &now);
-        if strip_archive_ts(&candidate) != strip_archive_ts(&existing) {
-            atomic_write_json(&ledger_archive_path(), &candidate);
-        }
-    }
-    // `unaccounted` 恒写（哪怕空 object）——同一条纪律：缺席必须是"测过是空"，
-    // 不是"没写这个键"。
     let unaccounted_tokens: u64 = unaccounted
         .values()
         .flat_map(|t| SNAKE_KEYS.iter().filter_map(|k| t.get(*k).and_then(Value::as_u64)))
         .sum();
-    atomic_write_json(
-        &ledger_path(),
-        &json!({ "days": ledger_days, "unaccounted": unaccounted }),
-    );
+    // Phase 4.2（spec §6.1）：`sql_authority_enabled` 后 `claude-ledger.json` /
+    // `-archive.json`（§5.2 业务读源）不再更新——SQL 权威库是唯一权威，
+    // `sync-facts` 的 claude UsageFact + `data-migrate` 的 legacy_aggregate
+    // 已捕获。`claude-fold.json`（checkpoint，上面 line ~665）照常写。
+    if agent_vitals_runtime::sql_authority::is_enabled_default() {
+        println!("claude-sync: sql-authority enabled — legacy ledger writes frozen (claude-fold checkpoint still updated)");
+    } else {
+        if !archive_days.is_empty() {
+            let existing = read_json(&ledger_archive_path()).unwrap_or_else(|| json!({}));
+            let candidate = agent_vitals_domain::state::add_days_to_archive(
+                &existing, &json!(archive_days), &now);
+            if strip_archive_ts(&candidate) != strip_archive_ts(&existing) {
+                atomic_write_json(&ledger_archive_path(), &candidate);
+            }
+        }
+        // `unaccounted` 恒写（哪怕空 object）——缺席必须是"测过是空"，不是"没写这个键"。
+        atomic_write_json(
+            &ledger_path(),
+            &json!({ "days": ledger_days, "unaccounted": unaccounted }),
+        );
+    }
     println!(
         "claude-sync: scanned {scanned} files; folded {} (new {fresh}, resumed {resumed}); skipped {skipped}; failed {failed}",
         fresh + resumed

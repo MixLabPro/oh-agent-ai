@@ -1423,11 +1423,17 @@ pub fn reconcile_authority_vs_legacy(month: &str) -> serde_json::Value {
             }
             buckets.insert(b.to_string(), json!({"sql": sv, "legacy": lv, "delta": lv - sv}));
         }
-        // §6.3 允许例外三类：
-        // ① claude 缺口 ≤ ledger 无日期残差（undated_residual）——旧状态无逐行证据；
-        // ② claude 缺口是「SQL 更新、legacy ledger 落后一个 claude-sync 窗」——
-        //    迁移窗口双写的时序差，abs_delta ≤ residual 视同同类（残差量级远大于
-        //    一个同步窗的增量）；
+        let l_total: i64 =
+            ["uncached_input", "cache_read", "cache_write", "output"].iter().map(|b| bucket_of(l, b)).sum();
+        let s_total: i64 =
+            ["uncached_input", "cache_read", "cache_write", "output"].iter().map(|b| bucket_of(s, b)).sum();
+        let is_current_month = month == crate::clock::current_month_beijing();
+        // §6.3 允许例外：
+        // ① claude 历史月：legacy state 链**不保留历史 claude**（`summary.rs`
+        //    模块头：与 DSH month-archive 不同，claude 历史月诚实报 Unavailable），
+        //    SQL 侧的数据来自 `legacy_aggregate` 迁移（= claude-ledger-archive 同源）
+        //    → legacy=0 而 SQL>0 是「旧状态缺少原始证据」，SQL 严格更完整。
+        // ② claude 当月缺口 ≤ ledger 无日期残差（undated_residual）/ 迁移窗双写时序差。
         // ③ codex `output` 单桶且 legacy > sql——legacy fold 把 `reasoning_output
         //    _tokens` 在已含它的 `output_tokens` 之上再加一遍（decision A：
         //    reasoning ⊆ output；usage_fact 侧不重复，SQL 更正确）。
@@ -1438,10 +1444,15 @@ pub fn reconcile_authority_vs_legacy(month: &str) -> serde_json::Value {
         };
         let (verdict, explanation) = if host_exact {
             ("exact", None)
-        } else if host == "claude-code" && host_delta <= residual_tokens.max(1) {
+        } else if host == "claude-code" && !is_current_month && l_total == 0 && s_total > 0 {
             (
                 "explained",
-                Some("claude ledger 无逐行证据的历史残差 / 迁移窗双写时序差（undated_residual，§6.3 例外①）".to_string()),
+                Some("legacy state 链不保留历史 claude（模块头：与 DSH month-archive 不同）；SQL 侧数据来自 legacy_aggregate 迁移（claude-ledger-archive 同源），严格更完整（§6.3 例外「旧状态缺少原始证据」）".to_string()),
+            )
+        } else if host == "claude-code" && is_current_month && host_delta <= residual_tokens.max(1) {
+            (
+                "explained",
+                Some("claude ledger 无逐行证据的历史残差 / 迁移窗双写时序差（undated_residual，§6.3 例外）".to_string()),
             )
         } else if host == "codex" && only_output_legacy_over {
             (

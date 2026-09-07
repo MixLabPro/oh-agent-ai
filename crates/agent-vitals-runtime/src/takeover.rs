@@ -197,15 +197,22 @@ pub fn fold_session(req: &Value, shadow: bool) -> Result<FoldOutcome, String> {
         super::state::write_oneline(oneline);
         super::state::append_session_history(oneline);
     }
-    if let Some(hb) = req.get("hour_buckets") {
-        let by_model_today = req.get("by_model_today").filter(|v| v.is_object());
-        super::state::merge_today(hb, by_model_today);
-        if let Some(bdm) = req.get("by_date_model").filter(|v| v.is_object()) {
-            super::state::merge_month(hb, Some(bdm));
+    // Phase 4.2（spec §6.1「freeze legacy writes」）：`sql_authority_enabled`
+    // 后，`today.json` / `month.json` / `month-archive.json` / `alert.json`
+    // （§5.2 业务读源）不再更新——SQL 权威库是唯一权威，`sync-facts` 已捕获
+    // 用量。`oneline.json` / `sessions.jsonl` 是导航快照，照常写（上面）。
+    let freeze = super::sql_authority::is_enabled_default();
+    if !freeze {
+        if let Some(hb) = req.get("hour_buckets") {
+            let by_model_today = req.get("by_model_today").filter(|v| v.is_object());
+            super::state::merge_today(hb, by_model_today);
+            if let Some(bdm) = req.get("by_date_model").filter(|v| v.is_object()) {
+                super::state::merge_month(hb, Some(bdm));
+            }
         }
-    }
-    if let Some(alert) = req.get("alert").filter(|v| v.is_object()) {
-        super::state::write_alert(alert);
+        if let Some(alert) = req.get("alert").filter(|v| v.is_object()) {
+            super::state::write_alert(alert);
+        }
     }
 
     // 提交点：ledger 先记（去重依据），manifest 后提交（代际 +1）。
@@ -369,6 +376,35 @@ mod tests {
         let l = read_ledger();
         let key = tk::session_key("dsh", "s1", "ns-abc");
         assert!(tk::ledger_folded(&l, &key));
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// Phase 4.2：`sql_authority_enabled` 后 `fold_session` 跳过 today.json /
+    /// month.json / alert.json（§5.2 业务读源），仍写 oneline.json（导航快照）
+    /// + ledger（去重账）。disable 后恢复双写。
+    #[test]
+    fn fold_session_freezes_legacy_state_json_when_sql_authority_enabled() {
+        let _env = env_lock();
+        let t = std::env::temp_dir().join(format!("av-takeover-freeze-{}", std::process::id()));
+        let home = tmp_home(&t);
+        let _g = TestEnvGuard::set(&home);
+        takeover("rust");
+        let state = crate::state::state_dir();
+
+        crate::sql_authority::enable(&crate::home::data_home(), json!({})).unwrap();
+        fold_session(&req("s1", 10), false).unwrap();
+        assert!(!state.join("today.json").exists(), "冻结：today.json 不写");
+        assert!(!state.join("month.json").exists(), "冻结：month.json 不写");
+        assert!(!state.join("alert.json").exists(), "冻结：alert.json 不写");
+        assert!(state.join("oneline.json").exists(), "导航快照 oneline.json 照常写");
+        // ledger 记了 s1（去重仍生效）。
+        assert!(tk::ledger_folded(&read_ledger(), &tk::session_key("dsh", "s1", "ns-abc")));
+
+        crate::sql_authority::disable(&crate::home::data_home()).unwrap();
+        fold_session(&req("s2", 20), false).unwrap();
+        assert!(state.join("today.json").exists(), "disable 后 today.json 恢复写");
+        assert!(state.join("month.json").exists());
+        assert!(state.join("alert.json").exists());
         let _ = std::fs::remove_dir_all(&t);
     }
 

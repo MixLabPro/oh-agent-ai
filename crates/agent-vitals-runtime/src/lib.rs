@@ -33,6 +33,7 @@ pub mod lease;
 pub mod session_sources;
 pub mod sessions;
 pub mod skills;
+pub mod sql_authority;
 pub mod state;
 pub mod summary;
 pub mod sql_sync;

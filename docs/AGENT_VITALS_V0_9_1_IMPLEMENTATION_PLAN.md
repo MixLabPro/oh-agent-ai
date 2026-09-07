@@ -523,16 +523,30 @@ UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列
 
 ## Phase 4：双轨验收与旧路径退役（spec §6.3 / §7 Phase 4 / §10）
 
-- [ ] **4.1 机器可读对账报告** — SQL vs legacy 按 host × month × bucket
-  严格相等；金额按 currency × basis × provider 比最小货币单位；例外必须
-  有 issue code + partial 标记
-- [ ] **4.2 切换门槛** — 「连续一次全量导入 + 至少一次增量同步均通过对
-  账」→ 设 `sql_authority_enabled` → 停写旧 state JSON；否则保持
-  legacy-only，不允许半切换
+- [x] **4.1 机器可读对账报告**（77a59ab）— `data-reconcile-authority
+  [--month] [--json]`：`SqlSummaryRepository` vs `JsonSummaryRepository`
+  逐 `host × bucket`（token 严格相等）+ `provider × basis × currency`
+  （金额最小货币单位）。分档 exact / explained（§6.3 允许例外：claude
+  历史月 legacy 不保留—SQL 有 legacy_aggregate 更完整 / 当月缺口 ≤
+  undated_residual / codex reasoning 双计 legacy bug）/ mismatch。
+  `reconciled` = 全 exact-or-explained → 退出 0。`persist_reconcile_
+  exceptions` 落 `data_quality_issues`（§6.3「每个例外必须有 issue code」），
+  `data-status` `open_quality_issues_by_code` 可见。真机 2026-08/09 均
+  `reconciled: true`。
+- [x] **4.2 切换门槛 + 停写机制**（下一提交）— `runtime::sql_authority`：
+  标记文件 `<data_home>/.sql-authority-enabled`。`data authority
+  {status,enable,disable}`：`enable` 先跑 4.1 对账当月+上月，两个月都
+  `reconciled: true` 才设标记（`--force` 越过）。标记存在 ⟺
+  `fold_session` 跳过 merge_today/merge_month/write_alert、`claude-sync`
+  跳过 ledger/archive 写（`oneline.json`/`sessions.jsonl`/`claude-fold.json`
+  快照照常）。旧文件保留不删（spec §6.1 备份窗口）。**默认 OFF**——
+  真机翻开关需用户先做备份确认（spec §6.1）。差分链（`test_oneline_
+  lockstep`/`test_claude_cost` claude-sync）测试夹具无标记 → 不受影响。
 - [ ] **4.3 退役清单执行**（spec §10）— 删 `JsonSummaryRepository`、
   month.json/today.json/alert.json 业务读、ledger/fold 的查询路径直读、
   JSON checkpoint、以及「SQLite 可由 JSONL 重建」的权威语义；legacy 代码
-  只留 importer/export/测试 fixture
+  只留 importer/export/测试 fixture。**门槛：`sql_authority_enabled` 稳定
+  开启一段观察期后**（本会话只到 4.2 机制，不翻开关不删旧读者）。
 - [ ] **4.4 人工验收** — 真机迁移、kill 后恢复、删旧 JSON 继续查询、删
   SQLite 后明确告警不回落
 

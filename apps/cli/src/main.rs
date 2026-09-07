@@ -680,6 +680,22 @@ enum DataAction {
         #[arg(long)]
         json: bool,
     },
+    /// Phase 4.2 (spec 6.1/6.3): the `sql_authority_enabled` switch. When set,
+    /// the SQL authority DB is the sole runtime authority and legacy state-JSON
+    /// writes (today/month/alert.json, claude ledger) are frozen — old files are
+    /// kept but no longer updated. `enable` gates on `data-reconcile-authority`
+    /// passing for the current AND previous month (all exact-or-explained);
+    /// `--force` overrides. `disable` returns to dual-write.
+    Authority {
+        #[arg(value_parser = ["status", "enable", "disable"])]
+        action: String,
+        /// enable: set the flag even if reconcile has open mismatches
+        #[arg(long)]
+        force: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `sessions` 子命令的子动作（R2a §2.5/§3.3 查询模型）。
@@ -2577,6 +2593,7 @@ session_store={store} fold={fold}"
                 "sessions": sessions,
                 "open_quality_issues": issues,
                 "open_quality_issues_by_code": issues_by_code,
+                "sql_authority_enabled": agent_vitals_runtime::sql_authority::is_enabled(&data_home),
                 "recent_runs": runs,
             }))
         })();
@@ -2586,13 +2603,14 @@ session_store={store} fold={fold}"
                     println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
                 } else {
                     println!(
-                        "Authority DB ({}): schema v{}, facts {}, sources {}, sessions {}, open issues {}",
+                        "Authority DB ({}): schema v{}, facts {}, sources {}, sessions {}, open issues {}, sql_authority_enabled {}",
                         data_home.display(),
                         v["schema_version"].as_str().unwrap_or("?"),
                         v["facts"],
                         v["sources"],
                         v["sessions"],
                         v["open_quality_issues"],
+                        v["sql_authority_enabled"],
                     );
                     if let Some(by_code) = v["open_quality_issues_by_code"].as_object() {
                         for (code, n) in by_code {
@@ -3140,6 +3158,82 @@ session_store={store} fold={fold}"
                     );
                 } else {
                     print_daily_summary_text(&summary);
+                }
+            }
+            DataAction::Authority { action, force, json } => {
+                let dh = agent_vitals_runtime::home::data_home();
+                match action.as_str() {
+                    "status" => {
+                        let st = agent_vitals_runtime::sql_authority::status(&dh);
+                        if *json {
+                            println!("{}", serde_json::to_string_pretty(&st).unwrap_or_default());
+                        } else {
+                            println!("sql_authority_enabled: {}", st["sql_authority_enabled"]);
+                            if let Some(at) = st["marker"]["enabled_at"].as_str() {
+                                println!("  enabled_at: {at}");
+                            }
+                        }
+                    }
+                    "enable" => {
+                        let cur = agent_vitals_runtime::clock::current_month_beijing();
+                        let prev = {
+                            let (y, m): (i64, i64) = (
+                                cur[..4].parse().unwrap_or(0),
+                                cur[5..7].parse().unwrap_or(1),
+                            );
+                            let (py, pm) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+                            format!("{py:04}-{pm:02}")
+                        };
+                        let mut checks = Vec::new();
+                        let mut all_pass = true;
+                        for month in [&prev, &cur] {
+                            let r = agent_vitals_runtime::summary::reconcile_authority_vs_legacy(month);
+                            let _ = agent_vitals_runtime::summary::persist_reconcile_exceptions(&dh, &r);
+                            let ok = r["reconciled"] == serde_json::json!(true);
+                            all_pass &= ok;
+                            checks.push(serde_json::json!({"month": month, "reconciled": ok}));
+                        }
+                        if !all_pass && !*force {
+                            eprintln!(
+                                "data authority enable: reconcile did NOT pass for {prev} + {cur} \
+                                 (run `data-reconcile-authority --month M` for detail). Fix the \
+                                 mismatch or pass --force. NOT enabling."
+                            );
+                            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                                "enabled": false, "checks": checks,
+                            })).unwrap_or_default());
+                            std::process::exit(1);
+                        }
+                        agent_vitals_runtime::sql_authority::enable(
+                            &dh,
+                            serde_json::json!({"checks": checks, "forced": !all_pass && *force}),
+                        )
+                        .unwrap_or_else(|e| {
+                            eprintln!("data authority enable failed: {e}");
+                            std::process::exit(2);
+                        });
+                        println!(
+                            "sql_authority_enabled = true (reconcile {}). Legacy state-JSON writes \
+                             are now frozen; old files kept, not updated.",
+                            if all_pass { "passed" } else { "FORCED past mismatch" },
+                        );
+                        if *json {
+                            println!("{}", serde_json::to_string_pretty(
+                                &agent_vitals_runtime::sql_authority::status(&dh)
+                            ).unwrap_or_default());
+                        }
+                    }
+                    "disable" => {
+                        agent_vitals_runtime::sql_authority::disable(&dh).unwrap_or_else(|e| {
+                            eprintln!("data authority disable failed: {e}");
+                            std::process::exit(2);
+                        });
+                        println!("sql_authority_enabled = false — back to dual-write (legacy state JSON updated again).");
+                    }
+                    other => {
+                        eprintln!("data authority: unknown action {other}");
+                        std::process::exit(2);
+                    }
                 }
             }
         }
