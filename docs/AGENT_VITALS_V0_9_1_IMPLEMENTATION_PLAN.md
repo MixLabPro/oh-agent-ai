@@ -244,20 +244,32 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
     `summable_total()`（含 FixedSubscription）改成 `MeteredActual + HostBilled`，
     **排除订阅月费**；JSON 键 `spent_cny_minor` → `metered_cny_minor`。见下
     「预算口径（PM 决策 2026-09-07）」。
-  - [ ] **预算卡接线**（`overview::read_overview_at` → `budget_status_sql_at`）
-    ——**不是「wire 一个调用」，是把 `domain::budget::evaluate_alert` 移到
-    SQL 面**：托盘日预算行（`lib.rs::daily_budget_text`）要 `effective_daily_
-    budget`（7 日均 × adaptive_multiplier 的 adaptive floor）、`ratio`（今日
-    占比）、`today_cost`、peak_share，`budget_status_sql` 全没有（它只有月度
-    ratio + snooze）。`evaluate_alert` 是 domain 里 Python 差分看守的纯函数
-    （`test_cli_matrix budget show`），SQL 版要喂 `peaked_days_map` 月窗 +
-    合成「今日」对象，且 Python 侧同步。月度行（`budget_status_text_at`）单切
-    是半迁移、会造出 monthly 读 SQL / daily 读 alert.json 的混合体，还退不了
-    alert.json——留作 alert 端口整体切。overview.rs ~15 个写 alert.json 的
-    Tauri 单测随之重写。
-  - [ ] `budget show` / alert 计算（同上 `evaluate_alert` SQL 端口，与预算卡
-    接线是同一件事的两个消费方；口径按下节「按量」）
-  - [ ] HTML 模板消费面（`codex-cost --html`）
+  - [x] **evaluate_alert 切 SQL**（f749e8e）：`runtime::budget::evaluate_alert_
+    from_sql(dh)`——**不改 domain `evaluate_alert` 一行**（因此不碰 Python 差分）。
+    `month_days` = DSH `peaked_days_map`（当月北京毫秒窗，与 month.json days
+    同形），`today_data` = 该 map 里今天 entry，直接喂。config 从
+    `budget_config`（3 字段 → merged_config 补默认），snooze 从
+    `budget_snoozes.until_ms` → ISO。CLI `budget-sql alert`（SQL 版
+    `budget show`）。附带修 3.4 遗留 bug：`iso_to_ms_beijing` 漏 秒→毫秒
+    ×1000（CLI snooze-set 写的 snooze 恒显示已过期）。
+  - [x] **托盘预算卡接线**（afed41f）：`overview::read_overview_at` 的预算卡从
+    读 `alert.json` 改成 `evaluate_alert_from_sql(dh)` 实时算。`read_budget_
+    alert`/`alert_beijing_month` + month-stale 校正整段删除（SQL 按当月窗查，
+    「评估月 ≠ 当前月」漂移结构上不可能）。`source="sql"`、`generated_at=None`
+    （实时算无快照时刻，新鲜度归托盘「上次同步」行）。删 4 个测 alert.json
+    的用例 + 新 wiring 测试（当月/上月事实分离 + 月窗归属）。
+  - [x] **托盘「本月订阅」行**（`?`）：`Overview.subscription_cny_month` =
+    `overview::monthly_cny_subscriptions`（纯 pricing.json 计算，月份过滤同
+    `apply_subscription_fees`）。托盘按量预算行下方单列「本月订阅
+    ¥232（已付，不计入按量预算）」。
+  - [ ] **HTML 模板消费面**（`codex-cost --html`）——**不是小改**：
+    `render_codex_cost_html`/`codex_calendar_blob` 内联的是 codex 原始 rollout
+    全量 fold 的 `merged` 对象。`codex-cost --json` 受 `test_cli_matrix::
+    test_codex_cost_differential` 逐字节差分看守——只切 Rust 侧数据源到 SQL
+    （`authority_query::codex_by_hour_model` 三窗 → `codex_report_from_merged`）
+    会让 Python↔Rust `--json` 当场背离。是**协调 Python+Rust 的整命令迁移
+    + 差分基准更新**，与 §7.1 Python 收缩 RFC 同一条线；`unaccounted`/`plan`
+    两个字段 SQL 面无对应物，需先定降级口径。独立专注项，非「继续当前项」。
 
   #### 预算口径（PM 决策 2026-09-07，PM熊叔评审）
 
