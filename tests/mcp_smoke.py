@@ -363,6 +363,131 @@ def main():
               "EXACT" if not bad else "MISMATCH",
               f"公开 tools/list = {tools}\n违规工具 = {bad or '无'}")
 
+    # ── S5 sessions_search / session_detail 三消费面 parity ──────────────
+    # spec §6 + PR #2：MCP `tools/call`、CLI `sessions search/detail --json`、
+    # Tauri IPC `sessions_list/read` 三者必须产出**逐字节相同的 envelope**。
+    # envelope schema 见 crates/agent-vitals-runtime/src/mcp/mod.rs::build_envelope
+    # （= `result.structuredContent`）。CLI `--json` 直接打 envelope，MCP 包一层
+    # JSON-RPC，剥 `result.structuredContent` 后形状相等。
+    #
+    # **normalize**：唯一合理随调用时间变化的字段是 `generated_at`（每次打包
+    # envelope 重 stamp）；`authority_revision.committed_at` / `max_observed_at`
+    # 在权威库里是定值，正常情况下两条 consumer 取出来应当一致，**不**列入
+    # 规范化集——若不一致是 bug，不应被吞掉。
+    def _strip_call_time(env):
+        """剥掉 envelope 里只反映调用时刻的字段；`authority_revision` 全留。"""
+        if not isinstance(env, dict):
+            return env
+        e = {k: v for k, v in env.items() if k != "generated_at"}
+        return e
+
+    def _extract_envelope(mcp_result):
+        """MCP `tools/call` 响应剥到 envelope 本身——和 CLI `--json` 输出等价。"""
+        if not mcp_result or mcp_result.get("isError"):
+            return None
+        sc = mcp_result.get("structuredContent") or {}
+        return _strip_call_time(sc)
+
+    def _has_cost_minor_field(env):
+        """每条 session 必须有 `cost_minor` 字段（对象或 null），不能缺字段。"""
+        data = env.get("data") or {}
+        for s in (data.get("sessions") or []):
+            if "cost_minor" not in s:
+                return False
+        return True
+
+    def _window_invariant(env):
+        """Q04 守恒：sessions token 之和 == window_total_tokens（无 has_more 时）。"""
+        d = env.get("data") or {}
+        if d.get("has_more"):
+            return True  # 截断页面和是合法的
+        s = sum((x.get("tokens") or {}).get("total", 0) for x in (d.get("sessions") or []))
+        return s == d.get("window_total_tokens")
+
+    # 选今日有数据的 host——按 Q01/Q02 已经算的 `host_tot` 排序，挑数据最多
+    # 的那个；都没有则 fallback `claude-code`（plan §2 默认宿主）。
+    candidate_hosts = sorted(
+        (h for h, t in host_tot.items() if t and t > 0),
+        key=lambda h: -host_tot.get(h, 0),
+    )
+    test_host = candidate_hosts[0] if candidate_hosts else "claude-code"
+
+    # 取足够大的 page 让 window_total_tokens 一次性全收——has_more=true 会让
+    # window_invariant 退化为 True 失去校验意义。MAX_LIMIT=500。
+    s5_limit = 500
+    s5_args = {"date": today, "hosts": [test_host], "limit": s5_limit}
+    rsp_mcp, _, _ = c.call("sessions_search", s5_args)
+    # CLI 子命令名是 `sessions list`（PR #2.3 保持外层命令名稳定）；flag 映射：
+    # MCP `limit` → CLI `--page-size`；MCP `hosts[]` → CLI `--host-kind`。
+    rsp_cli = cli_json(args.bin, args.home,
+                       "sessions", "list", "--json",
+                       "--day", today,
+                       "--host-kind", test_host,
+                       "--page-size", str(s5_limit))
+
+    env_mcp = _extract_envelope(rsp_mcp)
+    # CLI envelope 是 bare envelope（PR #2.3：dispatch_sessions 直接打 envelope）。
+    env_cli = _strip_call_time(rsp_cli) if isinstance(rsp_cli, dict) else None
+
+    s5_search_ok = (
+        env_mcp is not None and env_cli is not None
+        and env_mcp == env_cli
+        and _has_cost_minor_field(env_mcp)
+        and _has_cost_minor_field(env_cli)
+        and _window_invariant(env_mcp)
+    )
+    s5_sessions_n = len((env_mcp or {}).get("data", {}).get("sessions") or [])
+    s5_window_tot = (env_mcp or {}).get("data", {}).get("window_total_tokens")
+    R.add("S5.1",
+          "sessions_search(date, hosts, limit) MCP ↔ CLI envelope 字节相等 + cost_minor 字段 + Q04 守恒",
+          "EXACT" if s5_search_ok else "MISMATCH",
+          f"sessions_search({test_host}, {today}, limit={s5_limit}): "
+          f"MCP↔CLI byte-equal={env_mcp == env_cli} "
+          f"cost_minor_field={_has_cost_minor_field(env_mcp)} "
+          f"window_invariant={_window_invariant(env_mcp)} "
+          f"sessions={s5_sessions_n} window_total={s5_window_tot}")
+
+    R.add("S5.2",
+          "sessions_list Tauri IPC ↔ CLI envelope 字节相等",
+          "BLOCKED",
+          f"PR #3 计划改 `apps/desktop/src-tauri/src/store.rs::list_args` "
+          f"argv 与新 CLI 对齐。当前 store.rs 子命令面/flag 与新 dispatch "
+          f"一致（也是 `sessions list --json --host-kind --page-size`），"
+          f"但 IPC 层未迁移，plan §3 PR #3 收口后三面对账变 EXACT。"
+          f"S5.1 已验 CLI 自身的 envelope 与 MCP 字节相等——先把 CLI ↔ MCP "
+          f"这条线钉死，IPC 在 PR #3 阶段单独验。")
+
+    # ── S5.3 session_detail parity（按 session_ref）──────────────────────
+    # 取 S5.1 第一条会话做下钻（若 S5.1 失败则跳过——避免假阴性串联）。
+    if env_mcp and (env_mcp.get("data") or {}).get("sessions"):
+        first = env_mcp["data"]["sessions"][0]
+        sref = first["session_ref"]
+        # MCP `limit` → CLI `--page-size`。
+        det_mcp, _, _ = c.call("session_detail", {"session_ref": sref, "limit": 50})
+        det_cli = cli_json(args.bin, args.home,
+                           "sessions", "read", "--json",
+                           "--session-ref", sref,
+                           "--page-size", "50")
+        env_dmcp = _extract_envelope(det_mcp)
+        env_dcli = _strip_call_time(det_cli) if isinstance(det_cli, dict) else None
+
+        s5_detail_ok = (
+            env_dmcp is not None and env_dcli is not None
+            and env_dmcp == env_dcli
+            and "cost_minor" in (env_dmcp.get("data") or {})
+        )
+        R.add("S5.3",
+              "session_detail(session_ref) MCP ↔ CLI envelope 字节相等 + cost_minor 字段",
+              "EXACT" if s5_detail_ok else "MISMATCH",
+              f"session_detail({sref[:14]}..): "
+              f"MCP↔CLI byte-equal={env_dmcp == env_dcli} "
+              f"cost_minor_present={'cost_minor' in (env_dmcp.get('data') or {})}")
+    else:
+        R.add("S5.3", "session_detail(session_ref) MCP ↔ CLI envelope 字节相等",
+              "PARTIAL",
+              f"S5.1 未返回 sessions（{today} {test_host} 可能为空），跳过下钻；"
+              f"挑选其它有数据的宿主重跑即得 EXACT。")
+
     sys.exit(R.summary())
 
 

@@ -34,7 +34,7 @@ pub fn spec() -> ToolSpec {
         }),
         output_schema: json!({
             "type": "object",
-            "description": "spec §6 envelope; data = { session_ref, host, first_event_at, last_event_at, event_count, model_ids, tokens{}, timeline[], has_more, next_cursor }."
+            "description": "spec §6 envelope; data = { session_ref, host, first_event_at, last_event_at, event_count, model_ids, tokens{}, cost_minor, timeline[], has_more, next_cursor }. cost_minor is the price-table-derived metered_estimate (usage_facts × pricing_snapshots JOIN, basis=MeteredEstimate) or null when no snapshot covers the session or no model is priced."
         }),
     }
 }
@@ -181,6 +181,14 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         .filter(|_| has_more)
         .map(|f| make_cursor(f.event_ts_ms, &f.fact_id));
 
+    // PR #2.2：cost_minor 字段——usage_facts × pricing_snapshots JOIN 后的
+    // 会话级 metered_estimate（spec §4 不冒充）。失败降级为 null：与
+    // r2a_store 的 cost 列同等语义——可以缺失但不能编造。
+    let cost_minor = authority_query::session_cost_minor(conn, &session_key)
+        .ok()
+        .flatten()
+        .map(|mm| mm.to_json());
+
     let data = json!({
         "session_ref": session_ref,
         "host": host,
@@ -196,6 +204,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             "output_tokens": o,
             "total": u + cr + cw + o,
         },
+        "cost_minor": cost_minor,
         "timeline": timeline,
         "has_more": has_more,
         "next_cursor": next_cursor,
@@ -302,6 +311,38 @@ mod tests {
         let env2 = run(&json!({ "session_ref": sref, "limit": 2, "cursor": cur }), &home).unwrap();
         assert_eq!(env2["data"]["timeline"].as_array().unwrap().len(), 1);
         assert_eq!(env2["data"]["has_more"], false);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // PR #2.2：session_detail envelope 加 `cost_minor`——无定价快照时为 null，
+    // 有快照时是按价表估算的 {amount_minor, currency, basis=MeteredEstimate}。
+    #[test]
+    fn detail_envelope_exposes_cost_minor_field() {
+        let home = tmp_home("cost");
+        let (_skey, sref) = seed_session(&home);
+        let payload = r#"{"fallback_provider":"deepseek-official","providers":{"deepseek-official":{"models":{"deepseek-v4-pro":{"input_uncached":{"off_peak":4.5,"peak":9.0}}}}}}"#;
+        // pricing_snapshot 必须先于 event_ts 落，asof 才命中。
+        AuthorityDb::open(&agent_vitals_data::authority::default_authority_path(&home), 1)
+            .unwrap()
+            .pricing_snapshot_put("v1", "cli_seed", payload, 1)
+            .unwrap();
+        let env = run(&json!({ "session_ref": sref }), &home).unwrap();
+        let cm = &env["data"]["cost_minor"];
+        assert!(cm.is_object(), "有价卡覆盖 → 字段为对象");
+        assert_eq!(cm["currency"], "CNY");
+        assert_eq!(cm["basis"], "metered_estimate");
+        assert!(cm["amount_minor"].is_i64());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn detail_cost_minor_is_null_when_no_pricing_snapshot() {
+        let home = tmp_home("cost-null");
+        let (_skey, sref) = seed_session(&home);
+        // 不插价卡。
+        let env = run(&json!({ "session_ref": sref }), &home).unwrap();
+        assert!(env["data"]["cost_minor"].is_null(),
+            "无价卡覆盖 → null（不冒充零成本）");
         let _ = std::fs::remove_dir_all(&home);
     }
 

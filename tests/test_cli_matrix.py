@@ -1953,6 +1953,12 @@ class CliMatrix(unittest.TestCase):
     # 双方向 + 三源合并 + 错误路径）；这里用 both() 补一档「同一条命令、同一
     # 个隔离 home（cache 落 tmp 的 data_home）」下的逐字节对账。
 
+    @unittest.skip(
+        "v0.9.1 SQL authority migration (PR #2.3)：`sessions list` CLI "
+        "改走 `mcp::dispatch`，入参从 `--host-kind <kind>` 改为 `--day <date> "
+        "--host-kind <kind>`（envelope 形状从 r2a DTO 改为 MCP envelope）。"
+        "该测试依赖旧 r2a 入参/形状——按 plan PR #5 整文件删除，本 PR 临时 skip。"
+    )
     def test_sessions_list_claude_host_kind_differential(self):
         """`sessions list --host-kind claude-code`：3 个 fixture 会话（healthy /
         dangerous / all-recorded），排序按 sort_key（native_id 字典序）。cache
@@ -1970,6 +1976,12 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(ids, ["all-recorded", "dangerous", "healthy"])
         self.assertEqual(dto["source_statuses"]["claude-code"]["status"], "ok")
 
+    @unittest.skip(
+        "v0.9.1 SQL authority migration (PR #2.3)：`sessions read` CLI "
+        "改走 `mcp::dispatch`，入参从 `--session-key <JSON>` 改为 "
+        "`--session-ref <sr_hex>`（HMAC from `sessions_search`，旧 SessionKey "
+        "JSON 形状已退役）。按 plan PR #5 整文件删除，本 PR 临时 skip。"
+    )
     def test_sessions_read_claude_differential(self):
         """`sessions read` 的 claude-code key：envelope 完整（schema_version /
         source_statuses / session 载荷带 files 数组），两个实现逐字节一致。"""

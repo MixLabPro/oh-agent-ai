@@ -662,6 +662,42 @@ pub fn token_totals_by_host(
     rows.collect::<Result<_, _>>().map_err(AuthorityError::from)
 }
 
+/// PR #2.3：`sessions navigation` 今日 token 的只读快照——按 host 聚合
+/// `usage_facts` 在指定北京日内的 4 桶之和。返回 `None` = 库不可读（与
+/// r2a_store `authority_day_token_totals` 同语义）。
+///
+/// 与 `token_totals_by_host` 同款 SQL，只是把 [start,end) ms 解析收敛到
+/// 这里，避免每个调用方各自做 `beijing_day_bounds_ms` 的 null 检查再 +1 行。
+pub fn day_token_totals_by_host(
+    data_home: &std::path::Path,
+    date: &str,
+) -> Option<BTreeMap<String, i64>> {
+    let (start_ms, end_ms) = beijing_day_bounds_ms(date)?;
+    let path = crate::authority::default_authority_path(data_home);
+    let db = crate::authority::AuthorityDb::open_readonly(&path).ok()?;
+    token_totals_by_host(db.conn(), start_ms, end_ms).ok()
+}
+
+/// PR #2.3：`sessions navigation` 今日 session 数（distinct `session_key`），
+/// 按 host 分组。SQL 权威库不可读 → 返回 `None`（CLI 降级到 0 而不是冒充）。
+pub fn day_session_count(data_home: &std::path::Path, date: &str, host: &str) -> Option<i64> {
+    let (start_ms, end_ms) = beijing_day_bounds_ms(date)?;
+    let path = crate::authority::default_authority_path(data_home);
+    let db = crate::authority::AuthorityDb::open_readonly(&path).ok()?;
+    let n: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(DISTINCT session_key) FROM usage_facts
+             WHERE observation_kind != 'legacy_aggregate'
+               AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+               AND host = ?1 AND event_ts_ms >= ?2 AND event_ts_ms < ?3",
+            rusqlite::params![host, start_ms, end_ms],
+            |r| r.get(0),
+        )
+        .ok()?;
+    Some(n)
+}
+
 /// `(host, model)` 序列在 24 个北京小时桶上的 token 分计。
 pub type HostModelHourBuckets = BTreeMap<String, HourlyCell>;
 
@@ -958,6 +994,174 @@ pub fn all_session_keys(conn: &Connection) -> Result<Vec<String>, AuthorityError
     let mut stmt = conn.prepare("SELECT session_key FROM sessions WHERE deleted_at_ms IS NULL")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     rows.collect::<Result<_, _>>().map_err(AuthorityError::from)
+}
+
+// ─────── v0.9.1 最后一公里（PR #2）：sessions_search / session_detail envelope
+// 加 `cost_minor` 字段──走 `usage_facts × pricing_snapshots` JOIN，按事件时间
+// 选历史价卡（Q13），按模型 8 桶折成 `cost_report` 期望的 `by_model` 形状
+// 再过 `agent_vitals_domain::cost::cost_report` 派生成本。
+//
+// **不在这里长第二份计价规则**：8 桶折算、peak/off-peak 拆分、未知模型归
+// `unpriced_tokens`、baseline/fallback 标记——全是 `cost_report` 已经做对
+// 的事；本函数只负责"从 SQL 拉数据喂给它"。`CostReport` 跑空 → `None`
+// （与 `cost_report` 同语义，spec §0.1 不得伪造零成本）。
+
+/// `session_cost_minor`：把一个会话的 8 桶 token 数 + 事件时间喂给
+/// `cost_report` 用的中间聚合。**仅含实时行级事实**（与本模块其他查询同款：
+/// `observation_kind != 'legacy_aggregate'`）——claude 深历史的 legacy_aggregate
+/// 行不在这里加和，那是 `claude_day_cost` 的事（口径不同、价卡路径不同）。
+///
+/// `MAX(event_ts_ms)` 一并带出——用它去 `pricing_snapshot_asof` 选历史价卡
+/// 版本（Q13：调价日前后分别用正确的价表）。
+pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT COALESCE(model_id, '<unknown>') AS model,
+                event_peak,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens),
+                MAX(event_ts_ms)
+         FROM usage_facts
+         WHERE session_key = ?1
+           AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+         GROUP BY model_id, event_peak";
+
+/// 一个会话的 cost_minor（按价表**估算**的 metered_actual）。
+///
+/// 路径：`usage_facts` 折成 8 桶 → 选 `pricing_snapshot.asof(MAX(event_ts_ms))`
+/// → `cost_report(usage, snapshot)` → 把 `total: f64` 一次 pyround 转最小货币
+/// 单位整数（与 `agent_vitals_runtime::money::from_f64` 同样的舍入规则——
+/// 这里内联一份以避免 `agent-vitals-data` 反向依赖 `agent-vitals-runtime`，
+/// 依赖方向还是 `runtime → data → domain`）。
+///
+/// 返回 `None` 的语义（spec §0.1 不冒充）：
+/// - 该会话无 `usage_facts` 行（无事实即无成本，与 `cost_report` 同语义）
+/// - 没有任何 `pricing_snapshot` 能覆盖到 `MAX(event_ts_ms)`
+/// - 价格表里没有任何模型可计价（`cost_report` 自身返 None）
+/// - `total` 不是有限非负数（NaN/Inf/负→不冒充）
+///
+/// `BillingBasis::MeteredEstimate`：与 `host_bills` 的 `MeteredActual` 不同
+/// 档位（spec §4 不冒充）。调用方拿到 basis 必须如实透出到 DTO，
+/// 不与 `host_bills` 加和进 `summable_total`。
+pub fn session_cost_minor(
+    conn: &Connection,
+    session_key: &str,
+) -> Result<Option<agent_vitals_domain::data_contract::MoneyMinor>, AuthorityError> {
+    use agent_vitals_domain::data_contract::{BillingBasis, MoneyMinor};
+    use std::collections::BTreeMap;
+
+    // 1. 聚合 8 桶 + peak 拆分 + max ts。`(model, event_peak)` 两轴 group by，
+    //    Rust 端再按 model 合并 peak / off_peak 拆分。
+    let mut stmt = conn.prepare(SQL_SESSION_COST_BUCKETS)?;
+    let rows = stmt.query_map(
+        rusqlite::params![session_key],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        },
+    )?;
+    // model → {off_peak 4 桶, peak 4 桶}
+    #[derive(Default)]
+    struct Split {
+        u_off: i64, cr_off: i64, cw_off: i64, o_off: i64,
+        u_peak: i64, cr_peak: i64, cw_peak: i64, o_peak: i64,
+    }
+    let mut by_model: BTreeMap<String, Split> = BTreeMap::new();
+    let mut max_ts: i64 = 0;
+    for row in rows {
+        let (model, peak, u, cr, cw, o, ts) = row?;
+        let entry = by_model.entry(model).or_default();
+        if peak != 0 {
+            entry.u_peak += u;
+            entry.cr_peak += cr;
+            entry.cw_peak += cw;
+            entry.o_peak += o;
+        } else {
+            entry.u_off += u;
+            entry.cr_off += cr;
+            entry.cw_off += cw;
+            entry.o_off += o;
+        }
+        if ts > max_ts {
+            max_ts = ts;
+        }
+    }
+    if by_model.is_empty() || max_ts == 0 {
+        return Ok(None);
+    }
+
+    // 2. 选历史价卡：调价日前后用正确版本（Q13）。
+    let snap_payload: Option<String> = conn
+        .query_row(
+            "SELECT payload_json FROM pricing_snapshots
+             WHERE captured_at_ms <= ?1
+             ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1",
+            rusqlite::params![max_ts],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(snap_payload) = snap_payload else {
+        return Ok(None);
+    };
+    let snap_pricing: serde_json::Value = match serde_json::from_str(&snap_payload) {
+        Ok(v) => v,
+        Err(_) => return Ok(None), // 脏价卡不致命：会话本身有数据，cost 字段为 None
+    };
+
+    // 3. 折成 cost_report 期望的 by_model 形状：每个模型的 8 个基础字段
+    //    （uncached_input + cache_read + cache_write + output 的总桶 + 高峰子桶）。
+    let mut by_model_json = serde_json::Map::new();
+    for (model, s) in &by_model {
+        by_model_json.insert(
+            model.clone(),
+            json!({
+                "uncached_input_tokens": s.u_off + s.u_peak,
+                "cache_read_tokens": s.cr_off + s.cr_peak,
+                "cache_write_tokens": s.cw_off + s.cw_peak,
+                "output_tokens": s.o_off + s.o_peak,
+                "peak_uncached_input_tokens": s.u_peak,
+                "peak_cache_read_tokens": s.cr_peak,
+                "peak_cache_write_tokens": s.cw_peak,
+                "peak_output_tokens": s.o_peak,
+            }),
+        );
+    }
+    let usage = json!({ "by_model": by_model_json });
+
+    // 4. 跑核心计价——不在这里长第二份规则。
+    let report = match agent_vitals_domain::cost::cost_report(&usage, &snap_pricing) {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    let total = report["total"].as_f64().unwrap_or(0.0);
+    if !total.is_finite() || total < 0.0 {
+        return Ok(None);
+    }
+    // cost_report 当前硬编码 currency="CNY"（DSH-style pricing.json 结构）。
+    // pricing_snapshots 若将来落其它币种价卡，cost_report 会回填相应 currency；
+    // 这里透出 report 里的 currency，不二次假设。
+    let currency = report["currency"].as_str().unwrap_or("CNY");
+    let n = match currency.to_ascii_uppercase().as_str() {
+        "CNY" | "USD" | "EUR" | "GBP" | "HKD" | "SGD" | "AUD" | "CAD" | "CHF" | "NZD" => 2,
+        "JPY" | "KRW" => 0,
+        "KWD" | "BHD" | "OMR" => 3,
+        // 未知币种不走主路径，避免 0.125 ¥ 误归到 0.125 元的精度——返回 None，
+        // 由调用方报 warning 而不是交一个精度未定义的 MoneyMinor 出去。
+        _ => return Ok(None),
+    };
+    let rounded = agent_vitals_domain::util::pyround(total, n);
+    let amount_minor = (rounded * 10f64.powi(n as i32)).round() as i64;
+    Ok(Some(MoneyMinor {
+        amount_minor,
+        currency: currency.to_string(),
+        basis: BillingBasis::MeteredEstimate,
+    }))
 }
 
 #[cfg(test)]
@@ -1840,5 +2044,286 @@ mod tests {
         assert!(session_row(db.conn(), "kX").unwrap().is_some());
         assert!(session_row(db.conn(), "kNope").unwrap().is_none());
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ─────── PR #2.1：session_cost_minor ───────
+    //
+    // 关键不变量（spec §0.1 不冒充）：
+    // (1) JOIN 路径——usage_facts.peak=true/false 各聚合 → cost_report 期望的 8 桶
+    //     形状 → pricing_snapshot.asof(MAX(event_ts_ms)) 选历史价卡（Q13）。
+    // (2) 任意一环失败（无事实 / 无价卡 / 价卡脏 / 无可计模型）→ 返 None，
+    //     不冒充零成本。
+    // (3) BillingBasis::MeteredEstimate——与 host_bills 的 MeteredActual 不同
+    //     档位，DTO 上层不得求和进 summable_total。
+
+    /// 一份精简 `assets/pricing.json` 片段，模型名直接对得上 fallback_provider
+    /// 的 `deepseek-v4-pro` 表项——`norm_model_in` 会把 `dsh/deepseek-v4-pro-0813`
+    /// 之类的真实模型名归一化到这里。`input_uncached.off_peak = 4.5` 元/M token
+    /// 是 OFF 价的客观基准，断言用它倒推 cost_minor 的精度与单位。
+    const TEST_PRICING_FRAGMENT: &str = r#"{
+        "fallback_provider": "deepseek-official",
+        "providers": {
+            "deepseek-official": {
+                "models": {
+                    "deepseek-v4-pro": {
+                        "input_uncached": { "off_peak": 4.5, "peak": 9.0 },
+                        "input_cached":  { "off_peak": 0.15, "peak": 0.30 },
+                        "output":        { "off_peak": 13.5, "peak": 27.0 }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    #[test]
+    fn session_cost_minor_joins_pricing_snapshot_at_event_ts() {
+        // 用例：会话事件峰期分布 + 历史价卡覆盖到 MAX(event_ts_ms)，
+        // 期望 cost_minor = (u_off*4.5 + u_peak*9.0 + o_off*13.5) / 1e6，
+        // 单位 CNY，basis = MeteredEstimate。
+        let path = tmp_db("cm-join");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (day_start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
+        // model 用 `dsh/deepseek-v4-pro-0813`，norm_model_in 会归一化到
+        // `deepseek-v4-pro` 卡键。
+        let skey = "skey-cm-1";
+        db.conn().execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+             VALUES (?1, 'dsh', 'native-cm-1', 'm', 'default', 1)",
+            rusqlite::params![skey],
+        ).unwrap();
+        // `insert_fact` 测试助手不写 session_key（其他测试只关心 hourly/聚合，
+        // 不需要 join 到 sessions）。本测试要 join 到 sessions 用 skey 过滤，
+        // 所以直接走完整 INSERT——把 session_key 写对。
+        let mut ins = db.conn().prepare(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                 session_key, source_event_id, observation_kind, provider_id, model_id,
+                 event_ts_ms, event_peak, uncached_input_tokens, cache_read_tokens,
+                 cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES (?1, 'dsh', 'm', 'native-cm-1', ?2, ?1, ?3, NULL, ?4, ?5, ?6, ?7, 0, 0, ?8, 'run', 1, 1)"
+        ).unwrap();
+        ins.execute(rusqlite::params![
+            "f1", skey, "assistant-usage", "dsh/deepseek-v4-pro-0813",
+            day_start + 3_600_000, 0_i64, 1000000_i64, 0_i64
+        ]).unwrap();
+        ins.execute(rusqlite::params![
+            "f2", skey, "assistant-usage", "dsh/deepseek-v4-pro-0813",
+            day_start + 5 * 3_600_000, 1_i64, 500000_i64, 0_i64
+        ]).unwrap();
+        ins.execute(rusqlite::params![
+            "f3", skey, "assistant-usage", "dsh/deepseek-v4-pro-0813",
+            day_start + 9 * 3_600_000, 0_i64, 0_i64, 200000_i64
+        ]).unwrap();
+        // legacy_aggregate 行：必须被排除。
+        ins.execute(rusqlite::params![
+            "f_legacy", skey, "legacy_aggregate", "dsh/deepseek-v4-pro-0813",
+            day_start + 4 * 3_600_000, 0_i64, 9999999_i64, 0_i64
+        ]).unwrap();
+        drop(ins);
+        // 价卡：captured_at_ms < max(event_ts) 才能被 SELECT ... WHERE
+        // captured_at_ms <= max_ts 命中。
+        db.pricing_snapshot_put(
+            "v1", "cli_seed",
+            TEST_PRICING_FRAGMENT,
+            day_start - 7 * DAY_MS,
+        ).unwrap();
+
+        let mm = session_cost_minor(db.conn(), skey)
+            .unwrap()
+            .expect("有事实 + 有价卡 + 有可计模型 → 应有 MoneyMinor");
+        assert_eq!(mm.currency, "CNY");
+        assert_eq!(mm.basis, agent_vitals_domain::data_contract::BillingBasis::MeteredEstimate);
+        // 手算：bucket_price 一次性合并 (model, peak) 两轴。
+        //   总 uncached_input = 1_000_000 (f1 off) + 500_000 (f2 peak) = 1_500_000
+        //   总 peak_uncached_input = 500_000 (f2)
+        //   u_off = 1_500_000 - 500_000 = 1_000_000  ← 这里 4.5/1e6
+        //   u_peak = 500_000                          ← 这里 9.0/1e6
+        //   总 output = 200_000, peak_output = 0 → o_off = 200_000  ← 13.5/1e6
+        //   total = 1_000_000*4.5/1e6 + 500_000*9.0/1e6 + 200_000*13.5/1e6
+        //         = 4.5 + 4.5 + 2.7 = 11.70 元 → 1170 分（CNY=2）
+        assert_eq!(mm.amount_minor, 1170, "8 桶折算 + peak 拆分 + 舍入到分");
+
+        // 任何不含 native id 的字符串——DTO 不泄宿主词表。
+        let j = mm.to_json().to_string();
+        assert!(!j.contains("native-cm-1"));
+        assert!(!j.contains("dsh/deepseek-v4-pro-0813"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_cost_minor_returns_none_when_no_pricing_snapshot() {
+        let path = tmp_db("cm-no-snap");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (day_start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
+        let skey = "skey-cm-2";
+        db.conn().execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+             VALUES (?1, 'dsh', 'native-cm-2', 'm', 'default', 1)",
+            rusqlite::params![skey],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                 session_key, source_event_id, observation_kind, provider_id, model_id,
+                 event_ts_ms, event_peak, uncached_input_tokens, cache_read_tokens,
+                 cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES ('f1', 'dsh', 'm', 'native-cm-2', ?1, 'f1', 'assistant-usage', NULL, 'm', ?2, 0, 1000000, 0, 0, 0, 'run', 1, 1)",
+            rusqlite::params![skey, day_start + 3_600_000],
+        ).unwrap();
+        // 故意不插 pricing_snapshot——模拟「事实已 ingest 但价卡还没采集」的
+        // 真实过渡态。JOIN 应返 None，不冒充零成本。
+        let r = session_cost_minor(db.conn(), skey).unwrap();
+        assert!(r.is_none(), "无价卡覆盖 → None（不冒充 0）");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_cost_minor_returns_zero_minor_when_cost_report_uncharged() {
+        // `cost_report` 在**未知模型**时不会返 None——所有 token 进 unpriced 桶，
+        // 但 `per_model.is_empty() && unpriced != 0` 仍让 cost_report 返
+        // Some(report_total=0, unpriced_tokens=N)。我们透出 `Some(
+        // MoneyMinor{amount_minor=0, currency, basis})` 而不是 None——
+        // 与 cost_report 同语义（无 priced cost，但 unpriced 不冒充零）。
+        //
+        // 同样覆盖：脏价卡（JSON parse 失败）→ None，不冒充。
+        let path = tmp_db("cm-unpriced");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (day_start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
+        let skey = "skey-cm-3";
+        db.conn().execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+             VALUES (?1, 'dsh', 'native-cm-3', 'm', 'default', 1)",
+            rusqlite::params![skey],
+        ).unwrap();
+        // 模型名落进所有 provider 的卡都查不到的位置。
+        db.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                 session_key, source_event_id, observation_kind, provider_id, model_id,
+                 event_ts_ms, event_peak, uncached_input_tokens, cache_read_tokens,
+                 cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES ('f1', 'dsh', 'm', 'native-cm-3', ?1, 'f1', 'assistant-usage', NULL, 'totally/unknown-model-xyz', ?2, 0, 1000, 0, 0, 0, 'run', 1, 1)",
+            rusqlite::params![skey, day_start + 3_600_000],
+        ).unwrap();
+        // 价卡覆盖到 max_ts：合法 JSON，但任何模型都查不到。
+        db.pricing_snapshot_put(
+            "v_unpriced", "cli_seed",
+            TEST_PRICING_FRAGMENT,
+            day_start - DAY_MS,
+        ).unwrap();
+        let r = session_cost_minor(db.conn(), skey)
+            .unwrap()
+            .expect("未计价模型下 cost_report 返 Some(report_total=0)，我们也 Some(0)");
+        assert_eq!(r.amount_minor, 0, "无可计模型 → 0 minor（不是 None，不是负数）");
+        assert_eq!(r.currency, "CNY");
+        assert_eq!(r.basis, agent_vitals_domain::data_contract::BillingBasis::MeteredEstimate);
+
+        // 第二档：JSON 脏价卡。payload_json 存进去是合法字符串但不能 JSON parse，
+        // 我们的内联 `serde_json::from_str(&snap_payload)` 失败 → None。
+        // 这里直接走已插入路径，模拟「写入端已 commit 但内容坏」的情况。
+        db.conn().execute(
+            "DELETE FROM pricing_snapshots WHERE pricing_version = 'v_unpriced'",
+            [],
+        ).unwrap();
+        db.pricing_snapshot_put(
+            "v_corrupt", "cli_seed",
+            "{this is not valid json",
+            day_start - DAY_MS,
+        ).unwrap();
+        let r2 = session_cost_minor(db.conn(), skey).unwrap();
+        assert!(r2.is_none(), "脏价卡 → None（不冒充 0，不向上抛）");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── PR #2.3：CLI `sessions navigation` 的 SQL 只读快照 ─────────────
+
+    #[test]
+    fn day_token_totals_by_host_groups_and_sums_within_beijing_day() {
+        // 2026-09-08 北京 10:00 / 14:00 各一条 fact（同 host 累加）；
+        // 跨日那条（次日 01:00）不进 09-08 的桶。
+        let dir = tmp_db("navig_total");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = crate::authority::default_authority_path(&dir);
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let (start, _) = beijing_day_bounds_ms("2026-09-08").unwrap();
+        insert_fact(&db, "f1", "dsh", Some("m"), "assistant-usage", start + 10 * 3_600_000, 0, 100, 0, 0, 0);
+        insert_fact(&db, "f2", "dsh", Some("m"), "assistant-usage", start + 14 * 3_600_000, 0, 200, 0, 0, 0);
+        insert_fact(&db, "f3", "claude-code", Some("m"), "assistant-usage", start + 1 * 3_600_000, 0, 50, 0, 0, 0);
+        // 跨日 fact：2026-09-09 北京 01:00 → 不计入 09-08 桶
+        insert_fact(&db, "f4", "dsh", Some("m"), "assistant-usage", start + DAY_MS + 1 * 3_600_000, 0, 999, 0, 0, 0);
+        drop(db);
+        let totals = day_token_totals_by_host(&dir, "2026-09-08").expect("库可读");
+        assert_eq!(totals.get("dsh").copied(), Some(300), "10:00 + 14:00 = 300");
+        assert_eq!(totals.get("claude-code").copied(), Some(50));
+        // 跨日 fact 不计入（2026-09-08 的 end 是次日 00:00，[start,end) 半开）。
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn day_token_totals_by_host_returns_none_when_authority_db_missing() {
+        // 库文件不存在 → None（CLI 降级到 `{value:null, basis:null}`，不冒充 0）。
+        let dir = tmp_db("navig_missing");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 不开库，路径存在但库文件不存在
+        let result = day_token_totals_by_host(&dir, "2026-09-08");
+        assert!(result.is_none(), "无库 → None（不向上抛）");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn day_session_count_distinguishes_sessions_within_one_host() {
+        // 同一 host 三条 fact 两条不同 session_key；其它 host 不计入。
+        let dir = tmp_db("navig_count");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = crate::authority::default_authority_path(&dir);
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.conn().execute(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES ('run', 1, 'cli', 'succeeded', 1) ON CONFLICT(run_id) DO NOTHING",
+            [],
+        ).unwrap();
+        // 先建 sessions 行（usage_facts.session_key FK → sessions.session_key，
+        // 且 (host, machine_namespace, native_session_id) 唯一）
+        for (skey, host, nat) in [
+            ("3:dsh|10:s1|2:n", "dsh", "nat-s1"),
+            ("3:dsh|10:s2|2:n", "dsh", "nat-s2"),
+            ("3:codex|10:s3|2:n", "codex", "nat-s3"),
+        ] {
+            db.conn().execute(
+                "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace,
+                     source_profile, last_observed_at_ms)
+                 VALUES (?1, ?2, ?3, 'm', 'default', 1)
+                 ON CONFLICT(session_key) DO NOTHING",
+                rusqlite::params![skey, host, nat],
+            ).unwrap();
+        }
+        let (start, _) = beijing_day_bounds_ms("2026-09-08").unwrap();
+        for (fact_id, host, skey) in [
+            ("f1", "dsh", "3:dsh|10:s1|2:n"),
+            ("f2", "dsh", "3:dsh|10:s1|2:n"),
+            ("f3", "dsh", "3:dsh|10:s2|2:n"),
+            ("f4", "codex", "3:codex|10:s3|2:n"),
+        ] {
+            db.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                     session_key, source_event_id, observation_kind, provider_id, model_id,
+                     event_ts_ms, event_peak, uncached_input_tokens, cache_read_tokens,
+                     cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'm', ?4, ?3, ?1, 'assistant-usage', NULL, 'm', ?5, 0,
+                         100, 0, 0, 0, 'run', 1, 1)",
+                rusqlite::params![fact_id, host, skey, &skey[5..skey.len()-4], start + 60_000],
+            ).unwrap();
+        }
+        drop(db);
+        let dsh_n = day_session_count(&dir, "2026-09-08", "dsh").unwrap();
+        let codex_n = day_session_count(&dir, "2026-09-08", "codex").unwrap();
+        let claude_n = day_session_count(&dir, "2026-09-08", "claude-code").unwrap();
+        assert_eq!(dsh_n, 2, "dsh 两条不同 session_key → 2 sessions");
+        assert_eq!(codex_n, 1, "codex 一条 session → 1");
+        assert_eq!(claude_n, 0, "claude-code 无事实 → 0");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -727,77 +727,91 @@ enum DataAction {
     },
 }
 
-/// `sessions` 子命令的子动作（R2a §2.5/§3.3 查询模型）。
+/// `sessions` 子命令的子动作（v0.9.1 SQL 权威库收口：list/read/navigation
+/// 改走 `mcp::dispatch`，envelope 与 MCP `tools/call` 同源）。
+///
+/// - `List`：`mcp::sessions_search(date|month, hosts?, hour?, min_tokens?, limit, cursor)`
+///   —— 参数名与 MCP 输入 schema 一致；`--day` 与 `--month` 二选一。
+/// - `Read`：`mcp::session_detail(session_ref, limit?, cursor?)` —— `session_ref`
+///   是 MCP 返回的 HMAC（`sr_<32hex>`），不是原生 session key。
+/// - `Findings`：**仍走 `r2a_store::sessions_findings`**——DSH / Codex 行为
+///   findings 来自 session envelope 的 `findings` / `audit.findings` 字段
+///   （DSH wire 事件预先在 ingest 阶段算好），而 `usage_facts × pricing_snapshots`
+///   JOIN 不含 workflow 事件。完整迁移到 mcp::dispatch 待 M4 `workflow_events`
+///   工具落地（task #19）。
+/// - `Navigation`：今日 token 走 SQL 权威库（`authority_day_token_totals`，
+///   与 r2a_store `sessions_navigation` 同源），`recent[]` 改成
+///   `mcp::dispatch("sessions_search", {date, limit})`。
 #[derive(Subcommand)]
 enum SessionsAction {
-    /// List sessions: versioned list DTO + cursor-paginated page (filter by
-    /// host/model/date-range/query). `--json` prints the DTO to stdout; the
-    /// default is a human table.
+    /// List sessions active in a Beijing day or month (optional hour drill-down,
+    /// optional host / min_tokens filter). Output envelope is byte-identical to
+    /// the MCP `sessions_search` tool result.
     List {
-        /// Filter by host kind (only `codex` is readable in Phase 1; `dsh`
-        /// returns a typed `source-unavailable` error, never an empty page).
-        /// Named `--host-kind` because `--host` is the scanner's global arg
-        /// (default "all").
-        #[arg(long = "host-kind")]
-        host_kind: Option<String>,
-        /// Filter by model (exact)
+        /// Beijing day YYYY-MM-DD (exactly one of --day / --month)
         #[arg(long)]
-        model: Option<String>,
-        /// Date lower bound (YYYY-MM-DD, inclusive; matches the session span)
-        #[arg(long = "from")]
-        date_from: Option<String>,
-        /// Date upper bound (YYYY-MM-DD, inclusive)
-        #[arg(long = "to")]
-        date_to: Option<String>,
-        /// Free-text query against session_id / title
-        #[arg(long = "query")]
-        query: Option<String>,
-        /// Page size; default 50
+        day: Option<String>,
+        /// Beijing month YYYY-MM (exactly one of --day / --month)
+        #[arg(long)]
+        month: Option<String>,
+        /// Restrict to this Beijing hour (0..=23). Requires --day.
+        #[arg(long)]
+        hour: Option<u32>,
+        /// Filter by host kind (repeatable: `--host-kind claude-code --host-kind codex`)
+        #[arg(long = "host-kind", value_name = "HOST")]
+        host_kind: Vec<String>,
+        /// Drop sessions whose window total is below this
+        #[arg(long)]
+        min_tokens: Option<i64>,
+        /// Page size; default 50, max 500
         #[arg(long, default_value_t = 50)]
         page_size: usize,
-        /// Cursor JSON from a previous page's next_cursor
+        /// Opaque cursor from a previous page's `data.next_cursor`
         #[arg(long)]
         cursor: Option<String>,
-        /// Print the versioned DTO as JSON to stdout
+        /// Print the envelope JSON to stdout
         #[arg(long)]
         json: bool,
     },
-    /// Read ONE session envelope by session_key (+ optional session_revision).
+    /// Read ONE session timeline by `session_ref` (HMAC, from `sessions list`).
+    /// Output envelope is byte-identical to the MCP `session_detail` tool result.
     Read {
-        /// session_key JSON (host_kind/native_id/source_profile/machine_namespace)
-        #[arg(long = "session-key")]
-        session_key: String,
-        /// Require this session_revision; a mismatch is `stale-revision`
+        /// Opaque session_ref (sr_<32hex>) from `sessions list`
+        #[arg(long = "session-ref")]
+        session_ref: String,
+        /// Timeline page size; default 200, max 1000
+        #[arg(long, default_value_t = 200)]
+        page_size: usize,
+        /// Opaque cursor from a previous page's `data.next_cursor`
         #[arg(long)]
-        revision: Option<String>,
-        /// Print the envelope as JSON to stdout
+        cursor: Option<String>,
+        /// Print the envelope JSON to stdout
         #[arg(long)]
         json: bool,
     },
-    /// Aggregate findings across ALL sessions (both sources), rule-level rollup.
+    /// Aggregate findings across ALL sessions (DSH + Codex + claude-code),
+    /// rule-level rollup. **Pre-computed findings**（DSH wire 事件在 ingest
+    /// 阶段评估、存进 envelope）——不是从 usage_facts 实时 fold。
     Findings {
         /// Print the versioned rollup DTO as JSON to stdout
         #[arg(long)]
         json: bool,
     },
-    /// Multi-host navigation projection (docs/MENUBAR_MULTIHOST_NAVIGATION_SPEC.md
-    /// §5.1/§5.2): one spawn, both host snapshots — today tokens + today session
-    /// count + recent N deep-link rows. The Tauri menu bar caches the envelope and
-    /// only re-renders (§6 决策 3); all measurement (sorting, day boundary,
-    /// coverage) happens here in the data layer.
+    /// Multi-host navigation projection (today tokens + today session count +
+    /// recent N deep-link rows per host). The Tauri menu bar caches this envelope
+    /// and only re-renders (§6 决策 3）；today_tokens 走 SQL 权威库，
+    /// recent[] 走 `mcp::sessions_search`。
     Navigation {
-        /// Day to project (YYYY-MM-DD, Beijing day boundary — the core fold's
-        /// date buckets are UTC+8 hours, no DST). Defaults to today (Beijing).
+        /// Day to project (YYYY-MM-DD, Beijing day boundary). Defaults to today.
         #[arg(long, default_value = "")]
         day: String,
-        /// Timezone of the projected day. Only `Asia/Shanghai` is supported (the
-        /// core day boundary is fixed UTC+8, no DST; §5.1).
+        /// Timezone of the projected day. Only `Asia/Shanghai` is supported.
         #[arg(long, default_value = "Asia/Shanghai")]
         timezone: String,
-        /// How many recent rows per host; default 5 (§5.1)
+        /// How many recent rows per host; default 5
         #[arg(long, default_value_t = 5)]
         recent: usize,
-        /// Print the versioned envelope as JSON to stdout
+        /// Print the envelope JSON to stdout
         #[arg(long)]
         json: bool,
     },
@@ -2965,49 +2979,92 @@ session_store={store} fold={fold}"
         return;
     }
 
-    // R2a SessionStore 查询面（只读）。home 解析与 codex-session 同款；查询本体
-    // 在 core，r2a_store 只做 I/O + 组装 + 类型化错误码。
+    // v0.9.1 SQL 权威库收口（PR #2）：`sessions list` / `read` / `navigation`
+    // 改走 `mcp::dispatch`，envelope 与 MCP `tools/call` 同源；`findings` 仍
+    // 走 r2a_store（DSH/Codex findings 来自 session envelope 的 pre-computed
+    // 字段，usage_facts 不含 workflow 事件；task #19 等 M4 workflow_events 工具）。
     if let Some(Cmd::Sessions { action }) = &args.cmd {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_default();
-        let home_path = Path::new(&home);
+        let data_home = agent_vitals_runtime::home::data_home();
         match action {
             SessionsAction::List {
+                day,
+                month,
+                hour,
                 host_kind,
-                model,
-                date_from,
-                date_to,
-                query,
+                min_tokens,
                 page_size,
                 cursor,
                 json,
             } => {
-                let filter = agent_vitals_domain::r2a::SessionFilter {
-                    host_kind: host_kind.clone(),
-                    model: model.clone(),
-                    date_from: date_from.clone(),
-                    date_to: date_to.clone(),
-                    query: query.clone(),
-                };
-                agent_vitals_runtime::sessions::r2a_store::sessions_list(
-                    home_path, &filter, *page_size, cursor, *json,
+                // 严格校验 --day / --month 二选一（与 MCP schema `additionalProperties: false`
+                // 同语义；`mcp::dispatch` 自己也会拒，但 CLI 早一步给清晰错误更友好）。
+                match (day.as_deref(), month.as_deref()) {
+                    (None, None) | (Some(_), Some(_)) => {
+                        eprintln!(
+                            "exactly one of --day / --month is required (Beijing date YYYY-MM-DD or month YYYY-MM)"
+                        );
+                        std::process::exit(2);
+                    }
+                    _ => {}
+                }
+                let mut args = serde_json::Map::new();
+                if let Some(d) = day {
+                    args.insert("date".into(), Value::String(d.clone()));
+                }
+                if let Some(m) = month {
+                    args.insert("month".into(), Value::String(m.clone()));
+                }
+                if let Some(h) = hour {
+                    args.insert("hour".into(), Value::Number((*h).into()));
+                }
+                if !host_kind.is_empty() {
+                    args.insert(
+                        "hosts".into(),
+                        Value::Array(host_kind.iter().cloned().map(Value::String).collect()),
+                    );
+                }
+                if let Some(mt) = min_tokens {
+                    args.insert("min_tokens".into(), Value::Number((*mt).into()));
+                }
+                args.insert(
+                    "limit".into(),
+                    Value::Number(serde_json::Number::from(*page_size)),
                 );
+                if let Some(c) = cursor {
+                    args.insert("cursor".into(), Value::String(c.clone()));
+                }
+                dispatch_sessions("sessions_search", Value::Object(args), *json, &data_home);
             }
             SessionsAction::Read {
-                session_key,
-                revision,
+                session_ref,
+                page_size,
+                cursor,
                 json,
             } => {
-                agent_vitals_runtime::sessions::r2a_store::sessions_read(
-                    home_path,
-                    session_key,
-                    revision,
-                    *json,
+                let mut args = serde_json::Map::new();
+                args.insert(
+                    "session_ref".into(),
+                    Value::String(session_ref.clone()),
                 );
+                args.insert(
+                    "limit".into(),
+                    Value::Number(serde_json::Number::from(*page_size)),
+                );
+                if let Some(c) = cursor {
+                    args.insert("cursor".into(), Value::String(c.clone()));
+                }
+                dispatch_sessions("session_detail", Value::Object(args), *json, &data_home);
             }
             SessionsAction::Findings { json } => {
-                agent_vitals_runtime::sessions::r2a_store::sessions_findings(home_path, *json);
+                // 临时保留 r2a_store 路径——见 task #19（M4 workflow_events 落地后切）。
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_default();
+                let home_path = Path::new(&home);
+                agent_vitals_runtime::sessions::r2a_store::sessions_findings(
+                    home_path,
+                    *json,
+                );
             }
             SessionsAction::Navigation {
                 day,
@@ -3015,16 +3072,19 @@ session_store={store} fold={fold}"
                 recent,
                 json,
             } => {
-                // `--day` 缺省 = 今天（北京日界，core 折叠的日期桶是 UTC+8 时
-                // 段；spec §5.1）。
+                // `--day` 缺省 = 今天（北京日界；与 r2a_store 旧实现同语义）。
                 let day = if day.is_empty() {
                     agent_vitals_runtime::sessions::codex_cost::today_beijing()
                 } else {
                     day.clone()
                 };
-                agent_vitals_runtime::sessions::r2a_store::sessions_navigation(
-                    home_path, &day, timezone, *recent, *json,
-                );
+                if timezone != "Asia/Shanghai" {
+                    eprintln!(
+                        "unsupported --timezone {timezone:?}: only Asia/Shanghai (core day boundary is fixed UTC+8, no DST)"
+                    );
+                    std::process::exit(2);
+                }
+                sessions_navigation_v2(&day, *recent, *json, &data_home);
             }
         }
         return;
@@ -3836,6 +3896,202 @@ description budget {}, trigger data {}, {} split candidates, {} security finding
             self.flagged,
             self.all_cited,
         )
+    }
+}
+
+// ────────────── PR #2.3: mcp::dispatch 薄封装 + navigation v2 ──────────────
+//
+// CLI `sessions list` / `read` 与 MCP `tools/call` 输出 envelope 逐字节一致
+// （同一份 `mcp::dispatch`，同一份 `mcp::build_envelope`）。这意味着 workbench
+// Tauri IPC 与 CLI 子进程拿到的 JSON 在 schema_version / coverage / freshness
+// / data 形状上完全一致——mcp_smoke.py S5 三消费面 parity 守门。
+//
+// 失败路径：与 MCP transport 同款 `error_envelope`（authority_state=unavailable
+// + error.code）——不写 JSON-RPC error，不破坏 envelope schema。
+
+/// `mcp::dispatch` 的 CLI 薄封装：`--json` 时直接 pretty-print envelope；非
+/// `--json` 时给一个简短的人读摘要（host / session 数 / 时间窗），envelope
+/// 的全量字段仍在 JSON 路径里。
+///
+/// 错误：把 `ToolError` 折成 `error_envelope` 再 print——spec §11 稳定错误码
+/// 透传，不写 JSON-RPC 错误（envelope schema 不破）。
+fn dispatch_sessions(name: &'static str, args: Value, json_out: bool, data_home: &Path) {
+    use agent_vitals_runtime::mcp;
+    match mcp::dispatch(name, &args, data_home) {
+        Ok(envelope) => {
+            let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
+            if json_out {
+                println!("{text}");
+            } else {
+                print_sessions_summary(name, &envelope);
+            }
+        }
+        Err(err) => {
+            eprintln!("agent-vitals sessions {name}: [{}] {}", err.code, err.message);
+            let env = mcp::error_envelope(&err);
+            let text = serde_json::to_string_pretty(&env).unwrap_or_default();
+            println!("{text}");
+            // 与 `data_status` 同样的退出码语义：参数错 = 2，库不可读 = 3，
+            // 内部错 = 1。但目前 ToolError 还没分类，所有错误退 3（DB/库层面）。
+            std::process::exit(3);
+        }
+    }
+}
+
+/// envelope → 人读摘要：sessions_search 给时间窗 + 命中数；session_detail 给
+/// host + 时间线长度 + total。非 `--json` 模式用，避免一坨 JSON 砸脸。
+fn print_sessions_summary(name: &'static str, env: &Value) {
+    let data = &env["data"];
+    match name {
+        "sessions_search" => {
+            let window = &data["window"];
+            let label = window.get("label").and_then(Value::as_str).unwrap_or("?");
+            let from = window.get("from").and_then(Value::as_str).unwrap_or("?");
+            let to = window.get("to").and_then(Value::as_str).unwrap_or("?");
+            let n = data["sessions"].as_array().map(|a| a.len()).unwrap_or(0);
+            let total = data["window_total_tokens"].as_i64().unwrap_or(0);
+            let has_more = data["has_more"].as_bool().unwrap_or(false);
+            println!(
+                "sessions {label}: {n} session(s), {total} tokens ({from} → {to}){}",
+                if has_more { " [more pages]" } else { "" }
+            );
+        }
+        "session_detail" => {
+            let host = data.get("host").and_then(Value::as_str).unwrap_or("?");
+            let n = data["event_count"].as_i64().unwrap_or(0);
+            let total = data["tokens"]["total"].as_i64().unwrap_or(0);
+            let tl = data["timeline"].as_array().map(|a| a.len()).unwrap_or(0);
+            println!("session {host}: {n} events, {total} tokens, timeline page = {tl}");
+        }
+        _ => {
+            // 不应到这里——CLI 只 dispatch 上面的两个工具名。
+            let _ = env;
+        }
+    }
+}
+
+/// `sessions navigation` 的 v2 实现：今日 token 走 SQL 权威库（与 r2a_store
+/// `sessions_navigation` 同源：`authority_day_token_totals`），`recent[]` 走
+/// `mcp::sessions_search({date, limit})`。三宿主行结构与旧 envelope 对齐
+/// （Tauri 菜单栏渲染端 0 行改动，`fmtUSD(null) → "—"` 接受 null cost）。
+///
+/// 失败降级（spec §0.1 不冒充）：单宿主失败 → 该宿主行 `unavailable`；top-level
+/// 失败 → envelope 整体退到 `error_envelope` 形态。
+fn sessions_navigation_v2(day_key: &str, recent_n: usize, json_out: bool, data_home: &Path) {
+    use agent_vitals_runtime::mcp;
+    let data_home = data_home.to_path_buf();
+
+    // today_tokens：单次只读事务，逐 host 从 SQL 聚合出来。
+    let sql_totals = agent_vitals_data::authority_query::day_token_totals_by_host(&data_home, day_key);
+    let mut hosts: Vec<Value> = Vec::with_capacity(3);
+    for host in ["dsh", "codex", "claude-code"] {
+        let today_tokens = match sql_totals.as_ref() {
+            Some(rows) => match rows.get(host) {
+                Some(v) => json!({ "value": v, "basis": "sql-facts", "coverage": "complete" }),
+                None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null }),
+            },
+            None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null }),
+        };
+        // recent[]：走 mcp::sessions_search，limit = recent_n；限本宿主。
+        // 库不可读 / 该日无事实 → 空数组（envelope 形态保留，不冒充）。
+        let mut search_args = serde_json::Map::new();
+        search_args.insert("date".into(), Value::String(day_key.to_string()));
+        search_args.insert(
+            "hosts".into(),
+            Value::Array(vec![Value::String(host.to_string())]),
+        );
+        search_args.insert(
+            "limit".into(),
+            Value::Number(serde_json::Number::from(recent_n)),
+        );
+        let recent = match mcp::dispatch("sessions_search", &Value::Object(search_args), &data_home) {
+            Ok(env) => env["data"]["sessions"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mut s| {
+                    // 形状对齐旧 navigation envelope：
+                    //   - `session_key` → `session_ref`（HMAC，菜单栏深链即可）；
+                    //   - `tokens_total` / `model` / `date_first` / `date_last` 重命名。
+                    let key = s["session_ref"].take();
+                    let tokens_total = s["tokens"]["total"].take();
+                    let first = s["first_event_at"].take();
+                    let last = s["last_event_at"].take();
+                    let model_id = s["model_ids"]
+                        .as_array()
+                        .and_then(|a| a.first().and_then(Value::as_str))
+                        .map(str::to_string);
+                    json!({
+                        "session_key": key,
+                        "title": Value::Null,
+                        "model": model_id,
+                        "tokens_total": tokens_total,
+                        "date_first": first,
+                        "date_last": last,
+                        "cost_minor": s["cost_minor"].take(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            Err(_) => Vec::new(), // 单宿主失败 → 该宿主行降级，不污染其他宿主
+        };
+        let status = if today_tokens.get("value").and_then(Value::as_i64).is_some() {
+            "ready"
+        } else {
+            "partial"
+        };
+        // today_sessions：SQL 在单 host 单日内的 session 数（distinct
+        // session_key），与 r2a_store「今日碰过的会话」计数同语义。
+        let today_sessions = agent_vitals_data::authority_query::day_session_count(
+            &data_home,
+            day_key,
+            host,
+        )
+        .unwrap_or(0);
+        hosts.push(json!({
+            "host_kind": host,
+            "status": status,
+            "today_tokens": today_tokens,
+            "today_sessions": today_sessions,
+            "recent": recent,
+            // `store_revision` 字段保留为 null（v0.9.1 SQL 权威库收口后这
+            // 个字段不再有源——r2a_store v2 cache 的 max store_seq 已退役）。
+            // Tauri 渲染端不会读这个字段；保留占位保持 envelope 形状兼容。
+            "store_revision": Value::Null,
+        }));
+    }
+    let envelope = json!({
+        "schema_version": 1,
+        "day_key": day_key,
+        "timezone": "Asia/Shanghai",
+        "generated_at": agent_vitals_runtime::state::now_iso_utc(),
+        "hosts": hosts,
+    });
+    let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
+    if json_out {
+        println!("{text}");
+    } else {
+        print_navigation_summary(&envelope);
+    }
+}
+
+fn print_navigation_summary(env: &Value) {
+    let day = env.get("day_key").and_then(Value::as_str).unwrap_or("?");
+    println!("navigation {day}");
+    if let Some(arr) = env.get("hosts").and_then(Value::as_array) {
+        for h in arr {
+            let host = h.get("host_kind").and_then(Value::as_str).unwrap_or("?");
+            let status = h.get("status").and_then(Value::as_str).unwrap_or("?");
+            let today = h
+                .get("today_tokens")
+                .and_then(|t| t.get("value"))
+                .and_then(Value::as_i64)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "—".to_string());
+            let n = h.get("today_sessions").and_then(Value::as_i64).unwrap_or(0);
+            let recent = h.get("recent").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+            println!("  {host} [{status}] today={today} tokens, {n} sessions, {recent} recent");
+        }
     }
 }
 
