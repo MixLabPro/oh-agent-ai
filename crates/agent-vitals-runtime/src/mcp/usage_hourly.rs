@@ -1,9 +1,12 @@
 //! `usage_hourly` 工具（spec §7.2）——回答模型 / 宿主 / provider 的小时分布。
 //!
-//! 实现注记（增量 2）：
-//! - `group_by=host` 直接复用 `authority_query::hourly_by_host`（已就绪面）；
-//! - `group_by=model` / `group_by=provider` 走新加的 `hourly_by_host_model`
-//!   （`authority_query.rs`），把 `(host, model, hour)` 三维聚合并装进 24 桶。
+//! 实现注记（增量 2；`group_by` 路径在真机验证后统一，2026-09-08）：
+//! - 三个 `group_by` 都走 `authority_query::hourly_by_host_model`（真四桶 +
+//!   `(host, model, hour)` 三维聚合 + 24 桶）。`group_by=host` 把 model 维折叠掉。
+//!   曾经 host 轴走 `hourly_by_host`（Stage 5b 导航查询，只回单个 i64 总量），
+//!   总量被塞进 `output_tokens` 槽 → `total_output_tokens == total_tokens`，逐桶
+//!   同样失真——已改。`hourly_by_host_model` 空 host 列表即全 wired 宿主，所以
+//!   `group_by=model` 不带 `hosts` 参数也不再静默返回空 series。
 //! - **`metrics="cost"` 推迟到 `cost_breakdown`（M3）**：spec §7.2 已校正
 //!   ——逐小时计价要求事实时点选价版（`PricingCards::asof` 当前仅窗口级），
 //!   强行 round 到小时会破坏 M01 守恒测试夹具的 fixture。
@@ -289,24 +292,31 @@ fn series_by_host(
     end_ms: i64,
     host_filter: &[String],
 ) -> Result<Vec<SeriesEntry>, ToolError> {
-    let map = authority_query::hourly_by_host(conn, start_ms, end_ms).map_err(too)?;
-    Ok(map
+    // host 轴 = model 轴按 host 折叠。用 `hourly_by_host_model`（真四桶）而非
+    // `hourly_by_host`（Stage 5b 导航查询只回单个 i64 总量——塞进 output_tokens
+    // 会让 `total_output_tokens` 变成 `total_tokens` 的复制品，逐桶同样失真）。
+    // `hourly_by_host_model` 空 host_filter 即全 wired，无需在这里补默认。
+    let map =
+        authority_query::hourly_by_host_model(conn, start_ms, end_ms, host_filter).map_err(too)?;
+    let mut by_host: BTreeMap<String, BTreeMap<String, HourlyCell>> = BTreeMap::new();
+    for ((host, _model), buckets) in map {
+        let cells = by_host.entry(host).or_default();
+        for (hour, cell) in buckets {
+            let acc = cells.entry(hour).or_insert(HourlyCell {
+                uncached_input_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                output_tokens: 0,
+            });
+            acc.uncached_input_tokens += cell.uncached_input_tokens;
+            acc.cache_read_tokens += cell.cache_read_tokens;
+            acc.cache_write_tokens += cell.cache_write_tokens;
+            acc.output_tokens += cell.output_tokens;
+        }
+    }
+    Ok(by_host
         .into_iter()
-        .filter(|(host, _)| host_filter.is_empty() || host_filter.iter().any(|h| h == host))
-        .map(|(host, hours)| {
-            let cell_map = hours
-                .into_iter()
-                .map(|(h, total)| {
-                    (h, HourlyCell {
-                        uncached_input_tokens: 0,
-                        cache_read_tokens: 0,
-                        cache_write_tokens: 0,
-                        output_tokens: total,
-                    })
-                })
-                .collect();
-            ((host, "*".to_string()), cell_map)
-        })
+        .map(|(host, cells)| ((host, "*".to_string()), cells))
         .collect())
 }
 
@@ -317,12 +327,11 @@ fn series_by_model(
     host_filter: &[String],
     model_filter: &[(String, String)],
 ) -> Result<Vec<SeriesEntry>, ToolError> {
-    // 索引命中要求非空 host 列表——`host_filter` 为空时退化为 "无 host 命中"
-    // （查询结果为空 + warning）。调用方（`run`）需要在传入前确保 `host_filter`
-    // 非空，否则发警告。这里用空 → 返回空数据 + warning。
-    if host_filter.is_empty() {
-        return Ok(Vec::new());
-    }
+    // `hourly_by_host_model` 本身对空 host_filter 就展开成全 wired 宿主（单宿主
+    // SQL + 内存合并）——曾经这里有一个 `if host_filter.is_empty() { return
+    // Ok(vec![]) }` 的守卫，让 `group_by=model` 不带 `hosts` 参数时**静默返回
+    // 空 series**，违反 schema 里「empty/missing = all known hosts」的承诺，也
+    // 违反「缺证据不能伪装成零」。删掉。
     let map =
         authority_query::hourly_by_host_model(conn, start_ms, end_ms, host_filter).map_err(too)?;
     let mut out: Vec<SeriesEntry> = map
@@ -551,6 +560,91 @@ mod tests {
             "drift → warning (not error): {}",
             env["warnings"],
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_fact(
+        db: &AuthorityDb,
+        fid: &str,
+        host: &str,
+        model: &str,
+        ts_ms: i64,
+        u: i64,
+        cr: i64,
+        cw: i64,
+        o: i64,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                 VALUES ('run', 1, 'cli', 'succeeded', 2) ON CONFLICT(run_id) DO NOTHING",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                     source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
+                     event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                     output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'm', 'sess', ?1, 'assistant-usage', NULL, ?3, ?4, 0,
+                     ?5, ?6, ?7, ?8, 'run', 1, 1)",
+                rusqlite::params![fid, host, model, ts_ms, u, cr, cw, o],
+            )
+            .unwrap();
+    }
+
+    /// 真机验证抓出的两个缺陷（2026-09-08）：
+    /// (A) `group_by=host` 曾把每小时单个 i64 总量塞进 `output_tokens` 槽 →
+    ///     `total_output_tokens == total_tokens`、逐桶亦然；
+    /// (B) `group_by=model` 不带 `hosts` 参数曾静默返回空 series。
+    #[test]
+    fn host_axis_reports_real_output_split_and_model_axis_needs_no_hosts_arg() {
+        let home = tmp_home("axis-fix");
+        seed_db(&home);
+        let db = AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&home),
+            1_700_000_000_000,
+        )
+        .unwrap();
+        // 2026-09-07 09:00 北京 —— 大量 cache_read（claude 典型），小 output。
+        let (start, _end) = beijing_day_bounds_ms("2026-09-07").unwrap();
+        let nine = start + 9 * 3_600_000;
+        seed_fact(&db, "f1", "claude-code", "claude-sonnet-5", nine, 1_000, 900_000, 100, 5_000);
+        seed_fact(&db, "f2", "codex", "gpt-5-codex", nine + 60_000, 2_000, 10_000, 0, 3_000);
+        drop(db);
+
+        // (A) host 轴：output 是总量的一小部分，不是复制品。
+        let env = run(&json!({ "date": "2026-09-07", "group_by": "host" }), &home).unwrap();
+        let series = env["data"]["series"].as_array().unwrap();
+        assert_eq!(series.len(), 2, "claude-code + codex");
+        let cc = series
+            .iter()
+            .find(|s| s["key"]["host"] == "claude-code")
+            .unwrap();
+        let total = cc["total_tokens"].as_i64().unwrap();
+        let out = cc["total_output_tokens"].as_i64().unwrap();
+        assert_eq!(total, 1_000 + 900_000 + 100 + 5_000);
+        assert_eq!(out, 5_000, "output 槽必须是真 output，不是四桶之和");
+        assert!(out < total);
+        // 逐桶也不失真：09 点桶的 output_tokens == 5000，不是桶总量。
+        let h09 = cc["hours"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["hour"] == "09")
+            .unwrap();
+        assert_eq!(h09["output_tokens"].as_i64().unwrap(), 5_000);
+        assert_eq!(h09["total_tokens"].as_i64().unwrap(), 906_100);
+
+        // (B) model 轴，无 `hosts` 参数 → 仍返回所有 wired 宿主的 model 序列。
+        let env = run(&json!({ "date": "2026-09-07", "group_by": "model" }), &home).unwrap();
+        let series = env["data"]["series"].as_array().unwrap();
+        assert_eq!(series.len(), 2, "两个宿主各一个 model，不带 hosts 参数不该是空");
+        assert!(series.iter().any(|s| s["key"]["model"] == "claude-sonnet-5"));
+        assert!(series.iter().any(|s| s["key"]["model"] == "gpt-5-codex"));
+
         let _ = std::fs::remove_dir_all(&home);
     }
 }

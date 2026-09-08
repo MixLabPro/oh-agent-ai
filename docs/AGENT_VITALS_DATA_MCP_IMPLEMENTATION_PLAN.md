@@ -37,10 +37,22 @@ spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个
 > **2026-09-08**：增量 1 / 2 / 7.5 已 rebase 到 `main`（在 v0.9.1 SQL 权威迁移
 > Phase 4.3 全部落地之后），与 schema v2（`host_runtime_snapshots`）+ Stage 5b
 > 退役对齐：`data_status` 走 `mcp::data_status_report`（CLI/MCP 同源）、损坏恢复
-> 提示改为 `rm sqlite3* && data-migrate`、脱敏 view 版本无关幂等重建。全 gate
-> 绿（`cargo test` + `clippy -D warnings` 双 feature + `unittest discover tests`
-> + golden + e2e）。**M1 尚未完成**：增量 3 / 4 / 5 未开始；M0 D1–D10 只有
-> D2/D3/D4/D9 ack。
+> 提示改为 `rm sqlite3* && data-migrate`、脱敏 view 版本无关幂等重建。
+>
+> **真机验证抓出增量 2 的两个缺陷（已修）**：① `usage_hourly group_by=host`
+> 曾走 `hourly_by_host`（导航查询只回单个 i64 总量），总量被塞进 `output_tokens`
+> 槽 → `total_output_tokens == total_tokens`、逐桶亦然；② `group_by=model` 不带
+> `hosts` 参数曾静默返回空 series（违反 schema「empty = all hosts」承诺 + 诚实
+> 返回原则）。两个 `group_by` 现统一走 `hourly_by_host_model`（真四桶 + 空 host
+> 列表即全 wired）。真机对账：`usage_hourly` 逐宿主总量 + output 与 CLI `data
+> daily --date` 逐值相等；host 轴 == model 轴按宿主求和（守恒）。回归测试
+> `host_axis_reports_real_output_split_and_model_axis_needs_no_hosts_arg`。
+>
+> 全 gate 绿（`cargo test` + `clippy -D warnings` 双 feature + `unittest discover
+> tests` + golden）。**M1 尚未完成**：增量 3 / 4 / 5 未开始；M0 D1–D10 只有
+> D2/D3/D4/D9 ack。`usage_hourly` 的 `metrics="cost"`（MoneyMinor 逐小时）按
+> spec §7.2 校正推迟到 `cost_breakdown`（M3）；`group_by=provider` v1 与 model
+> 等价（provider_id 归一表 §3.4 未建，schema 描述已注明）。
 
 | # | 增量 | spec 对应 | 状态 |
 |---|---|---|---|
