@@ -292,13 +292,21 @@ pub fn source_file_fingerprint(
 /// (notably Codex). Every successfully emitted source still gets its own
 /// `source_files` fingerprint row; facts may share the batch source because
 /// their wire format does not preserve a one-file mapping.
-pub fn write_flat_facts_with_sources(
+pub(crate) struct RuntimeSnapshotWrite<'a> {
+    /// 已清洗的产品快照；没有可用 plan 时保持 None，产品读面会诚实返回 None。
+    pub snapshot: Option<&'a Value>,
+    /// schema 升级的一次性回填完成标记。它与本批 source 指纹同一事务提交，
+    /// 因而不会在写入失败后错误地阻止下一轮重试。
+    pub backfill_marker: Option<&'a str>,
+}
+
+pub(crate) fn write_flat_facts_with_sources(
     db: &AuthorityDb,
     host: &str,
     machine_namespace: &str,
     sources: &[(std::path::PathBuf, (u64, u64))],
     facts: &[Value],
-    runtime_snapshot: Option<&Value>,
+    runtime_snapshot: Option<RuntimeSnapshotWrite<'_>>,
     now: i64,
 ) -> Result<SqlSyncOutcome, String> {
     let run_id = new_run_id(TRIGGER_SYNC);
@@ -312,11 +320,25 @@ pub fn write_flat_facts_with_sources(
             writer.upsert_source_file(host, path, *size_bytes, *mtime_ns, None, PARSER_VERSION)?;
             outcome.files_synced += 1;
         }
-        if facts.is_empty() && runtime_snapshot.is_none() {
+        if let Some(meta_key) = runtime_snapshot
+            .as_ref()
+            .and_then(|write| write.backfill_marker)
+        {
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES(?1, '1')",
+                [meta_key],
+            )?;
+        }
+        if facts.is_empty()
+            && runtime_snapshot
+                .as_ref()
+                .and_then(|write| write.snapshot)
+                .is_none()
+        {
             return Ok(());
         }
         let source_id = writer.upsert_batch_source(host)?;
-        if let Some(snapshot) = runtime_snapshot {
+        if let Some(snapshot) = runtime_snapshot.as_ref().and_then(|write| write.snapshot) {
             let observed_at = snapshot
                 .get("observed_at")
                 .and_then(Value::as_str)

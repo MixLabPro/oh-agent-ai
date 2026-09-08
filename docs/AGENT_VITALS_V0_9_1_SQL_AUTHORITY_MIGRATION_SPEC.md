@@ -313,6 +313,31 @@ CREATE INDEX workflow_events_error_time
 
 边界：不保存 prompt、工具参数、原始报错全文或对话正文。`error_fingerprint` 与 `invocation_fingerprint` 必须由脱敏规则生成；需要人工排查时，用户回到本机原始来源查看细节。
 
+### 3.7 宿主实时快照（schema v2）
+
+有些产品状态不是用量事实，也不能让桌面端绕过 authority 直接扫描宿主日志。
+例如 Codex 的“当前套餐、已用比例、重置时间”是单一的实时快照，而不是可按日
+相加的 token。schema v2 为这类状态提供独立表：
+
+```sql
+CREATE TABLE host_runtime_snapshots (
+  host TEXT NOT NULL,
+  snapshot_kind TEXT NOT NULL,            -- 当前：codex_quota
+  payload_json TEXT NOT NULL,             -- 已清洗、脱敏的产品 DTO
+  observed_at_ms INTEGER NOT NULL,
+  source_id TEXT REFERENCES source_files(source_id),
+  ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(host, snapshot_kind)
+);
+```
+
+快照与触发它的 `source_files`、`sync_runs` 在同一事务写入；较旧的观察时间
+不得覆盖较新的值。既有 schema v1 库升级后，Codex rollout 即使指纹未变也会被
+重放一次以补齐该派生快照；该回填完成标记只服务同步，不参与任何用户查询。
+产品读面只从本表读 `codex_quota`，没有可用套餐证据时返回 unavailable，绝不
+回退扫描 `~/.codex`。
+
 ## 4. SQL 查询模型
 
 不把金额/聚合复制成第二份可变真相。以 `usage_facts`、`host_bills`、价格快照和预算配置为基础建立 repository 查询；复杂查询可使用 SQL view，但 view 不持久化可写状态。

@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 /// 单文件指纹（size + mtime 纳秒）——与 `claude_cost` fold checkpoint 同款。
@@ -74,6 +75,25 @@ fn sync_host(
 ) -> Result<(), String> {
     report.files_seen = files.len();
     let now = crate::sql_sync::now_ms();
+    // schema v2 新增了 Codex 当前配额快照。升级已有权威库时，旧 source_files
+    // 指纹会让所有 rollout 都被跳过，因而必须强制重放一次，不能把「日志未变」
+    // 误当成「新派生状态已经存在」。没有 rate_limits 的历史也只重放一次：同一
+    // 事务留下 schema_meta 标记，避免以后每个 tick 扫完整个 rollout 历史。
+    let runtime_snapshot_backfill_needed = if host == "codex" {
+        let already_backfilled: Option<i64> = db
+            .conn()
+            .query_row(
+                "SELECT 1 FROM schema_meta
+                 WHERE key = 'codex_quota_snapshot_backfilled_v2'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("read Codex quota backfill marker: {e}"))?;
+        already_backfilled.is_none()
+    } else {
+        false
+    };
     let mut dirty: Vec<(PathBuf, (u64, u64))> = Vec::new();
     for path in files {
         let fp = fingerprint(&path);
@@ -83,7 +103,9 @@ fn sync_host(
             // 解析器升级即使源文件字节不变也必须重放；fact_id 幂等吸收
             // 未变事实，新增解析结果会正常写入。
             (Some(fp), Some((size, mtime, parser_version)))
-                if (size, mtime) == fp && parser_version == crate::sql_sync::parser_version() =>
+                if (size, mtime) == fp
+                    && parser_version == crate::sql_sync::parser_version()
+                    && !runtime_snapshot_backfill_needed =>
             {
                 report.files_skipped += 1
             }
@@ -150,13 +172,19 @@ fn sync_host(
     }
 
     if !synced_sources.is_empty() {
+        let snapshot_write = (runtime_snapshot.is_some() || runtime_snapshot_backfill_needed)
+            .then_some(crate::sql_sync::RuntimeSnapshotWrite {
+                snapshot: runtime_snapshot.as_ref(),
+                backfill_marker: runtime_snapshot_backfill_needed
+                    .then_some("codex_quota_snapshot_backfilled_v2"),
+            });
         let outcome = crate::sql_sync::write_flat_facts_with_sources(
             db,
             host,
             ns,
             &synced_sources,
             &facts,
-            runtime_snapshot.as_ref(),
+            snapshot_write,
             now,
         )?;
         report.files_synced += outcome.files_synced;
@@ -416,6 +444,60 @@ mod tests {
             assert_eq!(cl3.files_synced, 1, "变化文件重新处理");
             assert_eq!(cl3.appended, 1, "只有新行是新事实");
             assert_eq!(cl3.duplicate, 2, "旧行 fact_id 相同，幂等吞掉");
+        });
+    }
+
+    #[test]
+    fn codex_quota_schema_backfill_replays_unchanged_rollout_once() {
+        with_isolated_home(|home| {
+            let rollout = codex_rollout(home);
+            let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
+            sync_facts(&data).unwrap();
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&data),
+                crate::sql_sync::now_ms(),
+            )
+            .unwrap();
+
+            // 模拟由 schema v1 升级而来：原 rollout 指纹已经存在，但 v2 的
+            // 派生快照及其 backfill 标记都尚未写入。
+            db.conn()
+                .execute(
+                    "DELETE FROM host_runtime_snapshots
+                     WHERE host = 'codex' AND snapshot_kind = 'codex_quota'",
+                    [],
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "DELETE FROM schema_meta
+                     WHERE key = 'codex_quota_snapshot_backfilled_v2'",
+                    [],
+                )
+                .unwrap();
+
+            let replay = sync_facts(&data).unwrap();
+            let codex = replay.hosts.iter().find(|h| h.host == "codex").unwrap();
+            assert_eq!(codex.files_seen, 1);
+            assert_eq!(codex.files_synced, 1, "unchanged rollout 必须为 v2 补快照");
+            assert!(db
+                .runtime_snapshot_get("codex", "codex_quota")
+                .unwrap()
+                .is_some());
+            assert!(db
+                .conn()
+                .query_row(
+                    "SELECT 1 FROM schema_meta
+                     WHERE key = 'codex_quota_snapshot_backfilled_v2'",
+                    [],
+                    |_| Ok(true),
+                )
+                .unwrap());
+
+            let stable = sync_facts(&data).unwrap();
+            let codex = stable.hosts.iter().find(|h| h.host == "codex").unwrap();
+            assert_eq!(codex.files_synced, 0, "backfill 后恢复普通 SQL 差量同步");
+            assert!(rollout.exists());
         });
     }
 
