@@ -176,7 +176,7 @@ pub fn collect_report(conn: &Connection, db_existed: bool, enabled: bool) -> Val
         "critical"
     } else if !integrity.eq_ignore_ascii_case("ok") {
         hints.push(json!(format!("SQLite integrity_check: {integrity}")));
-        hints.push(json!("the authority DB does NOT self-heal — rebuild the index with `agent-vitals data-rebuild-index` (replays the authoritative facts JSONL)"));
+        hints.push(json!("the authority DB does NOT self-heal — rebuild from the authoritative facts JSONL: `rm ~/.agent-vitals/agent-vitals.sqlite3*` then `agent-vitals data-migrate`"));
         "critical"
     } else if enabled && facts == 0 {
         hints.push(json!("sql_authority_enabled=true but the authority DB has zero facts — run `agent-vitals sync-facts`; do not read zero as 'no spend'"));

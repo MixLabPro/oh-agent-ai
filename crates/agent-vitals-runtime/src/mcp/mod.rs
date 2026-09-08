@@ -284,6 +284,8 @@ pub struct ToolSpec {
 
 /// 当前构建注册的工具。传输层据此渲染 `tools/list` 并校验 `tools/call` 的名字。
 pub fn tool_specs() -> Vec<ToolSpec> {
+    // `mut` 只在 `mcp-internal` 构建里用到（下方 push）；公开构建不加工具。
+    #[cfg_attr(not(feature = "mcp-internal"), allow(unused_mut))]
     let mut out = vec![data_status::spec(), usage_hourly::spec()];
     #[cfg(feature = "mcp-internal")]
     {

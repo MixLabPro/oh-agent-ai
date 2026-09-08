@@ -34,17 +34,24 @@ spec 把 D1–D10 列为「冻结前必须拍板」。本节按 spec 的推荐�
 
 spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个都过完整循环。
 
+> **2026-09-08**：增量 1 / 2 / 7.5 已 rebase 到 `main`（在 v0.9.1 SQL 权威迁移
+> Phase 4.3 全部落地之后），与 schema v2（`host_runtime_snapshots`）+ Stage 5b
+> 退役对齐：`data_status` 走 `mcp::data_status_report`（CLI/MCP 同源）、损坏恢复
+> 提示改为 `rm sqlite3* && data-migrate`、脱敏 view 版本无关幂等重建。全 gate
+> 绿（`cargo test` + `clippy -D warnings` 双 feature + `unittest discover tests`
+> + golden + e2e）。**M1 尚未完成**：增量 3 / 4 / 5 未开始；M0 D1–D10 只有
+> D2/D3/D4/D9 ack。
+
 | # | 增量 | spec 对应 | 状态 |
 |---|---|---|---|
-| **1** | 传输层 + envelope + `data_status` | M1 起步 | ✅ (`dcb672e` + `5b8e38e`) |
-| 2 | `MoneyMinor` 精确投影 + `usage_hourly`（宿主轴 + model/provider 轴 + 逐小时成本） + S2/S4/S5/S7 review follow-ups | M1 | ⬜ |
+| **1** | 传输层 + envelope + `data_status` | M1 起步 | ✅ (rebased `fde1c09` + `e2da5d6`) |
+| **2** | `MoneyMinor` 精确投影 + `usage_hourly`（宿主轴 + model/provider 轴 + 逐小时成本） + S2/S4/S5/S7 review follow-ups | M1 | ✅ (rebased `4bf7433`) |
 | 3 | `summary_daily` + `summary_monthly`（含会话数 / 活跃小时 / 逐日趋势 / 月底预测 / 占比新查询） | M1 | ⬜ |
 | 4 | `data_quality_issues` + code-aware 脱敏 allowlist | M1 | ⬜ |
 | 5 | M1 收口：M01–M08 / M13–M18 契约测试 + 三消费面 parity（M15）+ 真机 U01/U02/U08 | M1 退出 | ⬜ |
 | 6 | `authority_revision` `as_of_run_id` 钉截面 + `authority_audit`（`mcp-internal`）| M2 | ⬜ |
 | 7 | `reimport_verify`（CLI 子命令）+ U09a/U09b 真机 | M2 退出 | ⬜ |
-| **7.5** | **`query_sql_readonly`（内部 MCP 工具，让其他 Agent 调试用）** | M2 并行 | 🔨 |
-| 8+ | M3：`cost_breakdown` / `sessions_search` / `session_detail` + session 索引 v2 + 历史价重放 | M3 | ⬜ |
+| **7.5** | **`query_sql_readonly`（内部 MCP 工具，让其他 Agent 调试用）** | M2 并行 | ✅ (rebased `e73a46a`，`mcp-internal` only) |
 | 8+ | M3：`cost_breakdown` / `sessions_search` / `session_detail` + session 索引 v2 + 历史价重放 | M3 | ⬜ |
 | … | M4：`workflow_events` 管线 + `issues_summary` / `skills_summary` | M4 | ⬜ |
 | … | M5：公开/内部构建分离 + 打包 + 发布文档 | M5 | ⬜ |
