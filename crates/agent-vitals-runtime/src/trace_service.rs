@@ -46,9 +46,12 @@ struct MemoEntry {
 type HomeStore = RwLock<HashMap<String, MemoEntry>>;
 
 /// 进程级 memo，按 `data_home` 键控（同一台机器上可能有多个 data_home）。
-static MEMO: OnceLock<Mutex<HashMap<PathBuf, HomeStore>>> = OnceLock::new();
+/// 值是 `Arc<HomeStore>`：外层 Mutex 只在「取/插 per-home 库」瞬间持有，
+/// **绝不跨构建持有**（review P3：否则新会话的构建会在全局锁上把所有 home
+/// 串行化）。
+static MEMO: OnceLock<Mutex<HashMap<PathBuf, Arc<HomeStore>>>> = OnceLock::new();
 
-fn memo_store() -> &'static Mutex<HashMap<PathBuf, RwLock<HashMap<String, MemoEntry>>>> {
+fn memo_store() -> &'static Mutex<HashMap<PathBuf, Arc<HomeStore>>> {
     MEMO.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -153,8 +156,12 @@ pub fn trace_graph_for_canonical(
     let ledger = key.ledger_key();
     let current = fact_counter(conn, &ledger).map_err(TraceLookupError::Query)?;
 
-    let mut stores = memo_store().lock().expect("memo store poisoned");
-    let store = stores.entry(data_home.to_path_buf()).or_default();
+    // 外层锁只到「拿到 per-home 库的 Arc」为止——构建（可能毫秒级）不在
+    // 任何全局锁内。
+    let store = {
+        let mut stores = memo_store().lock().expect("memo store poisoned");
+        Arc::clone(stores.entry(data_home.to_path_buf()).or_default())
+    };
     {
         let guard = store.read().expect("memo entry lock poisoned");
         if let Some(entry) = guard.get(&ledger) {
@@ -164,8 +171,13 @@ pub fn trace_graph_for_canonical(
         }
     }
 
-    // 锁外构建（可能毫秒级——`build_trace_graph` 是 O(节点数) 纯函数），回填
-    // 在写锁内只做赋值。
+    // 构建（`build_trace_graph` 是 O(节点数) 纯函数），回填只在 per-home 写锁内
+    // 做赋值。
+    //
+    // 已知边界（review P2，按 spec 接受）：TTL 内若同一会话的 CanonicalSession
+    // 内容变化但 fact 计数器不变（新增 turn 不产新 fact 的场景），命中路径
+    // 返回的是旧图——失效键是 spec §7 门槛 4 钦定的 (COUNT, MAX(rowid))，
+    // 消费方传入新 canonical 时以「计数器未变 = 事实面未变」为准。
     let graph = Arc::new(build_fresh(canonical, key));
     let mut guard = store.write().expect("memo entry lock poisoned");
     guard.insert(

@@ -137,6 +137,9 @@ fn tool_call_candidates(session: &CanonicalSession) -> Vec<Candidate> {
                 Some(r) => (r.time, tool_result_status(r.observation.failed, &r.observation.error_code)),
                 None => (None, None),
             };
+            // 无 call_id 时的合成 fallback：只用于图内去重与展示定位，**不是
+            // join 键**（spec §2.1「跨 scope join 只走 native」的 native 指
+            // 宿主原生 id；合成 id 永不参与跨 scope 关联）。
             let native = e
                 .call_id
                 .clone()
@@ -258,9 +261,12 @@ pub fn build_trace_graph(session: &CanonicalSession, session_key: SessionKey) ->
         }
     }
 
+    // spec §2.1：missing_time = started_at_ms **或** ended_at_ms 缺失（一个节点
+    // 最多计 1）。不能写成 AND——只有起止都缺才计会漏报「有开始没结束」的
+    // 未闭合节点，恰好是诚实性要浮出来的那种（review P1 修正）。
     let missing_time = nodes
         .iter()
-        .filter(|n| n.started_at_ms.is_none() && n.ended_at_ms.is_none())
+        .filter(|n| n.started_at_ms.is_none() || n.ended_at_ms.is_none())
         .count() as u32;
     let missing_status = nodes.iter().filter(|n| n.status.is_none()).count() as u32;
     let unmetered_nodes = nodes
