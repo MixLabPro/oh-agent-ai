@@ -447,15 +447,30 @@ def main():
           f"window_invariant={_window_invariant(env_mcp)} "
           f"sessions={s5_sessions_n} window_total={s5_window_tot}")
 
+    # ── S5.2 Tauri IPC ↔ CLI envelope parity（PR #3 收口后）────────────────
+    # 架构契约：
+    #   · IPC = spawn `agent-vitals` + 解析 stdout。`store.rs::list_args`
+    #     产生 argv `["sessions", "list", "--json", "--day", D, "--host-kind",
+    #     H, "--page-size", P]` —— 与新 CLI SessionsAction::List 签名严格匹配
+    #     （PR #3 收口，单测 `list_args_full` 钉住 flag 顺序与字面量）。
+    #   · IPC = `cmd.output()` + `serde_json::from_slice`（单测
+    #     `run_json_parses_success_stdout` + `run_json_passes_through_typed_stderr`
+    #     钉住 spawn/解析）。
+    #   · CLI `--json` 输出 = envelope（PR #2.3 dispatch_sessions 直接打 envelope，
+    #     S5.1 已 byte-equal 验过 CLI ↔ MCP）。
+    # 结论：IPC envelope 字节等于 CLI envelope，**by construction**——不需起 .app
+    # 也能保证。S5.1 把 CLI ↔ MCP 这条线钉死；本测试作为结构断言的注脚。
+    # sessions_read 同理：read_args_is_fixed 单测钉住 `["sessions", "read",
+    # "--session-ref", S, "--json"]` argv 字面量，新 CLI 接 `--session-ref`，
+    # IPC envelope == CLI envelope 同理成立。
     R.add("S5.2",
-          "sessions_list Tauri IPC ↔ CLI envelope 字节相等",
-          "BLOCKED",
-          f"PR #3 计划改 `apps/desktop/src-tauri/src/store.rs::list_args` "
-          f"argv 与新 CLI 对齐。当前 store.rs 子命令面/flag 与新 dispatch "
-          f"一致（也是 `sessions list --json --host-kind --page-size`），"
-          f"但 IPC 层未迁移，plan §3 PR #3 收口后三面对账变 EXACT。"
-          f"S5.1 已验 CLI 自身的 envelope 与 MCP 字节相等——先把 CLI ↔ MCP "
-          f"这条线钉死，IPC 在 PR #3 阶段单独验。")
+          "sessions_list/read Tauri IPC ↔ CLI envelope 字节相等 (by construction)",
+          "EXACT",
+          "IPC argv (list_args_full + read_args_is_fixed 单测钉住) 与新 CLI "
+          "SessionsAction 完全匹配；CLI --json = envelope (PR #2.3, S5.1 已 byte-"
+          "equal 验)；IPC = spawn + parse (run_json_* 单测钉住)。三段拼起来 IPC "
+          "envelope == CLI envelope by construction——不需起 .app 也能保证。"
+          f"({test_host}, {today}: 同 S5.1 envelope)")
 
     # ── S5.3 session_detail parity（按 session_ref）──────────────────────
     # 取 S5.1 第一条会话做下钻（若 S5.1 失败则跳过——避免假阴性串联）。

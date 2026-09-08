@@ -1153,20 +1153,31 @@ fn sync_now(app: &AppHandle) {
     });
 }
 
-/// 后台预热 R2a store：app 启动就 spawn 一轮 `sessions list`（page-size 1 已是
-/// 最小响应），让 store cache 在用户点会话/finding tab 之前就绪——冷启动两源
-/// 631MB/115 文件的构建 30s+，用户「第一次打开会话 tab 卡住十几秒」的等待就
-/// 来自它。best-effort：二进制缺失/数据根不可写静默吞掉，用户点击时再正常走
-/// async 路径；`StoreBuildLock` 保证与用户点击并发时后者等前者写完，直接命中
-/// cache（也把 machine_namespace 首建串成一次，跨进程并建会得到不一致的 ns）。
-fn warm_r2a_store(app: &AppHandle) {
+/// 后台预热 SQL 权威库 readonly handle：app 启动就 spawn 一轮 `data-status --json`，
+/// 让权威库 SQLite 文件句柄在用户点会话/findings tab 之前就绪——v0.9.1 起
+/// sessions 数据唯一来源是 SQL 权威库（`agent-vitals.sqlite3` schema v2），
+/// 旧 r2a_store jsonl 重放路径已退役（PR #3 收口，PR #4 feature gate，
+/// PR #5 整文件删除）。
+///
+/// **data-status 比 sessions list 更轻**——它只读 schema 版本 + 跑
+/// `PRAGMA integrity_check` + 计数 facts / sessions，不返回大 list DTO；
+/// 权威库 readonly open 本就 sub-second，预热目的是让权威库的 SQLite
+/// 文件预热进 page cache 与（若有）wal checkpoint 落盘，避免首次
+/// sessions list 头几页的 PRAGMA / planner 抖动。
+///
+/// best-effort：二进制缺失/数据根不可写静默吞掉，用户点击时再正常走
+/// async 路径；`StoreBuildLock` 保证与用户点击并发时后者等前者写完——
+/// 这里没有可写的 cache，但锁依然有意义：避免 cold open 与
+/// mcp_sessions_search 同时打开各跑一次 `PRAGMA integrity_check` 触发
+/// 不必要的临时连接抖动）。
+fn warm_authority_db(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let lock = app.state::<store::StoreBuildLock>().inner().clone();
         let _guard = lock.acquire();
         let Some(bin) = resolve_binary() else { return };
         let mut cmd = std::process::Command::new(&bin);
-        cmd.args(["sessions", "list", "--json", "--page-size", "1"]);
+        cmd.args(["data-status", "--json"]);
         cmd.env("AGENT_VITALS_HOME", overview::data_home());
         let _ = cmd.output();
     });
@@ -1499,8 +1510,10 @@ pub fn run() {
                 let _ = t.set_title(Some(today_title(&ov)));
             }
             start_refresh_tick(app.handle().clone());
-            // R2a store 后台预热：不等用户首点才付冷构建钱（见 warm_r2a_store）。
-            warm_r2a_store(app.handle());
+            // SQL 权威库后台预热：app 启动就 spawn 一轮 data-status（sub-second）
+            // 让权威库 SQLite handle + page cache 在用户点会话/findings tab 之前
+            // 就绪，避免首点 PRAGMA / planner 抖动（见 warm_authority_db 函数注释）。
+            warm_authority_db(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())

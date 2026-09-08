@@ -1,25 +1,30 @@
-//! R2a SessionStore 的 Tauri IPC 薄壳（docs/R2A_CONTRACT_DESIGN.md §6.3-7）。
+//! v0.9.1 SQL 权威库 Tauri IPC 薄壳（`docs/AGENT_VITALS_V0_9_1_SQL_AUTHORITY_MIGRATION_SPEC.md` §6）。
 //!
-//! 纯查询逻辑在 `agent_vitals_domain::r2a`（core crate，单一真相源），I/O 在二进制
-//! crate 的 `src/agent/r2a_store.rs`。src-tauri 是**独立 workspace**，import 不到
-//! 二进制 crate 的模块——所以 `sessions list` / `sessions read` 与 tick 的
-//! `oneline` 同款：**spawn `agent-vitals` 二进制**，stdout 就是 versioned
-//! list DTO / envelope JSON，stderr 是类型化错误 JSON（`{"error":{"code",
-//! "message"}}`）。这是「不长第二份拷贝」的唯一路径（CLAUDE.md 的写右边界：
-//! 计算在宿主，浏览器/前端只渲染投影）。
+//! 历史：本文件 v0.8 起是 R2a SessionStore 的 IPC 壳（jsonl 重放路径）。v0.9.1
+//! 起 sessions 数据唯一来源是 SQL 权威库 `agent-vitals.sqlite3`（schema v2），
+//! CLI 切到 `mcp::dispatch("sessions_search" | "session_detail", ...)`（PR #2），
+//! 本文件随之切到 spawn 新 CLI。**src-tauri 是独立 workspace，import 不到
+//! 二进制 crate 的模块**——所以 `sessions list` / `sessions read` 与 tick 的
+//! `oneline` 同款：spawn `agent-vitals` 二进制，stdout 就是 MCP envelope 的
+//! `structuredContent`（与 `tools/call` 同源），stderr 是类型化错误 JSON。
+//! 这是「不长第二份拷贝」的唯一路径（CLAUDE.md 写右边界：计算在宿主，
+//! 浏览器/前端只渲染投影）。
 //!
 //! IPC 面只做参数翻译与 spawn：
-//!   · `sessions_list(host_kind, model, date_from, date_to, query, page_size,
-//!      cursor) -> Result<Value, Value>`
-//!   · `sessions_read(session_key, revision) -> Result<Value, Value>`
+//!   · `sessions_list(day, host_kind, page_size, cursor) -> Result<Value, Value>`
+//!   · `sessions_read(session_ref) -> Result<Value, Value>`
+//!   · `sessions_findings() -> Result<Value, Value>` —— **保留走 r2a_store**
+//!     （DSH/Codex 行为 findings 来自 envelope 的预计算字段，PR #2.3a 任务
+//!     #19 待 M4 `workflow_events` 工具落地后整体迁 mcp::dispatch；本次 PR
+//!     只迁移 list/read/navigation 三路，findings 子命令 argv 不变）。
 //! 错误码原样透传：`not-found` / `permission` / `stale-revision` /
 //! `schema-mismatch` / `source-unavailable` / `cancelled`。二进制缺失/ spawn 失败
 //! 这类**基础设施失败**也用 `cancelled`（code 集固定，不另造新码）。
 //!
-//! 三个命令都是 **async + `spawn_blocking`**：冷启动的 store 构建（两源 631MB /
-//! 115 文件，30s+）不能占住主线程——同步 `cmd.output()` 会把 Tauri 主线程冻住
-//! 十几秒，托盘点击排队、切 tab 假死（真机 2026-09 的「点会话 tab 卡住」根因）。
-//! `spawn_blocking` 让 CLI 子进程在阻塞线程池里跑，主线程继续收托盘事件。
+//! 三个命令都是 **async + `spawn_blocking`**：冷启动的权威库打开（SQLite readonly
+//! handle，sub-second 即可）虽不如旧 r2a_store 慢，但仍是阻塞 I/O，且与 `data-status`
+//! 预热、用户点击可能并发——`StoreBuildLock` 把同一时刻的冷构造串行化，后到的
+//! 拿不到锁就 await，避免两份并发打开各算一份。
 
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -57,14 +62,48 @@ fn no_binary() -> Value {
     )
 }
 
-/// `sessions list` 的 argv（纯函数，供单测钉住 IPC→CLI 参数映射）。空 filter →
-/// 只有固定段；page_size 缺省由二进制兜底（50），IPC 不替它拍默认值。
+/// 北京日期 `YYYY-MM-DD`（与 `overview::today_beijing` 同口径，但纯函数版
+/// 便于单测）。不引 `chrono` / `time`——直接调 std 即可，单测里 stub。
+fn beijing_today_yyyy_mm_dd() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // 北京 = UTC+8（无夏令时）。ms → s 整数除法 → 加 8 小时。
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let beijing_secs = secs + 8 * 3600;
+    let day = beijing_secs / 86_400;
+    // 1970-01-01 是 day 0（beijing）。粗算回 Y/M/D 避免引 chrono 单测头重——
+    // 工作台不需要精确到秒，工作台只用到 YYYY-MM-DD 字符串。下面用 Gregorian
+    // 公式（Howard Hinnant 算法，J = day + 719468，跨世纪范围 1970-2100 验证）。
+    let z = day + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// `sessions list` 的 argv（纯函数，供单测钉住 IPC→CLI 参数映射）。参数集对齐
+/// 新 CLI SessionsAction::List 的扁平签名（apps/cli/src/main.rs:750-775）：
+///   --day | --month 必其一（IPC 这里传 --day，None 时兜底为今天北京日期——
+///   CLI 的 mutex 不允许两个都缺，新 SessionsAction 在「无 day 无 month」时报
+///   "exactly one of --day / --month is required"，IPC 替前端拍今天的默认值）；
+///   --host-kind 可选（filter chip 透传）；--page-size 可选（缺省 50，二进制兜底）；
+///   --cursor 可选（透传 mcp::sessions_search 的不透明 cursor 串）。
+///
+/// **旧 CLI 不再接受的 flag**：`--model` / `--from` / `--to` / `--query` / `--hour`
+/// / `--min-tokens`——这些维度 r2a_store 没实现，与权威库 sessions_search 输入
+/// schema 对齐后已删。前端想用这些维度时需先扩 mcp::sessions_search 的 args
+/// schema，再回来加 IPC 参数；目前工作台只用到 day / host_kind / page_size / cursor。
 fn list_args(
+    day: &Option<String>,
     host_kind: &Option<String>,
-    model: &Option<String>,
-    date_from: &Option<String>,
-    date_to: &Option<String>,
-    query: &Option<String>,
     page_size: Option<usize>,
     cursor: &Option<String>,
 ) -> Vec<String> {
@@ -73,25 +112,15 @@ fn list_args(
         "list".into(),
         "--json".into(),
     ];
+    // --day 必须有；None → 今天北京日期（兜底）。CLI 拒绝「无 day 无 month」，
+    // IPC 替前端拍默认值。`beijing_today_yyyy_mm_dd` 是纯函数版，单测里不
+    // 依赖系统时钟靠「给一个 --day 输入」覆盖这条分支。
+    let d = day.clone().unwrap_or_else(beijing_today_yyyy_mm_dd);
+    a.push("--day".into());
+    a.push(d);
     if let Some(h) = host_kind {
         a.push("--host-kind".into());
         a.push(h.clone());
-    }
-    if let Some(m) = model {
-        a.push("--model".into());
-        a.push(m.clone());
-    }
-    if let Some(f) = date_from {
-        a.push("--from".into());
-        a.push(f.clone());
-    }
-    if let Some(t) = date_to {
-        a.push("--to".into());
-        a.push(t.clone());
-    }
-    if let Some(q) = query {
-        a.push("--query".into());
-        a.push(q.clone());
     }
     if let Some(p) = page_size {
         a.push("--page-size".into());
@@ -110,20 +139,19 @@ fn findings_args() -> Vec<String> {
     vec!["sessions".into(), "findings".into(), "--json".into()]
 }
 
-/// `sessions read` 的 argv。
-fn read_args(session_key: &str, revision: &Option<String>) -> Vec<String> {
-    let mut a: Vec<String> = vec![
+/// `sessions read` 的 argv。session_ref 是 MCP HMAC 不透明串（`sr_<32hex>`），
+/// 由 list 行的 `data.sessions[].session_ref` 拿——不是原生 session_key（也不该
+/// 是：HMAC 把 native_session_id / machine_namespace 屏蔽到 IPC 之外，避免前
+/// 端读到 §5.1 里钉死的 PII）。无 revision / cursor flag——权威库的 revision 写
+/// 在 envelope 的 `authority_revision` 字段里，不需要 CLI 透传。
+fn read_args(session_ref: &str) -> Vec<String> {
+    vec![
         "sessions".into(),
         "read".into(),
-        "--session-key".into(),
-        session_key.to_string(),
+        "--session-ref".into(),
+        session_ref.to_string(),
         "--json".into(),
-    ];
-    if let Some(r) = revision {
-        a.push("--revision".into());
-        a.push(r.clone());
-    }
-    a
+    ]
 }
 
 /// spawn 二进制并解析 stdout。非零退出 → 若 stderr 是 `{"error":…}` 形状则原样
@@ -147,21 +175,19 @@ fn run_json(mut cmd: Command) -> Result<Value, Value> {
         .map_err(|e| error_value("cancelled", &e.to_string()))
 }
 
-/// list_sessions：filter + cursor 分页 → versioned list DTO（§2.5/§3.3）。
-/// async：CLI 冷构建 30s+ 不能占主线程，见模块头注释。
+/// list_sessions：day/host/page_size/cursor → mcp::sessions_search envelope。
+/// async：spawn_blocking 把 CLI 子进程丢到阻塞线程池，主线程继续收托盘事件，
+/// 详见模块头注释。
 ///
-/// `#[allow(clippy::too_many_arguments)]`：这是 Tauri IPC 面，参数扁平是
-/// 契约的一部分——`workbench.js` 的 invoke 调用面就是这七个扁平 filter，
-/// 改成分组结构要连带改前端调用面，为一个 lint 不值。
-#[allow(clippy::too_many_arguments)]
+/// **参数扁平**（day / host_kind / page_size / cursor 四件）是 Tauri IPC 契约的
+/// 一部分——`workbench.js` 的 invoke 调用面就是这四个扁平参数，改成结构体要
+/// 连带改前端调用面。少了一档 `#[allow(clippy::too_many_arguments)]` 注释：
+/// 4 个参数本就在 lint 阈值内。
 #[tauri::command]
 pub async fn sessions_list(
     state: tauri::State<'_, StoreBuildLock>,
+    day: Option<String>,
     host_kind: Option<String>,
-    model: Option<String>,
-    date_from: Option<String>,
-    date_to: Option<String>,
-    query: Option<String>,
     page_size: Option<usize>,
     cursor: Option<String>,
 ) -> Result<Value, Value> {
@@ -171,12 +197,11 @@ pub async fn sessions_list(
         let Some(bin) = resolve_binary() else {
             return Err(no_binary());
         };
-        let args = list_args(&host_kind, &model, &date_from, &date_to, &query,
-                             page_size, &cursor);
+        let args = list_args(&day, &host_kind, page_size, &cursor);
         let mut cmd = Command::new(&bin);
         cmd.args(&args);
-        // 与 tick 同款：显式钉死 AGENT_VITALS_HOME，cache/machine.json 落在 app
-        // 自己的数据根，不依赖子进程继承的环境。
+        // 与 tick 同款：显式钉死 AGENT_VITALS_HOME，权威库 / salt / 状态文件都
+        // 落在 app 自己的数据根，不依赖子进程继承的环境。
         cmd.env("AGENT_VITALS_HOME", data_home());
         run_json(cmd)
     })
@@ -184,13 +209,17 @@ pub async fn sessions_list(
     .map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
-/// read_session：session_key（+ 可选 revision）→ 完整 versioned envelope（§2.1）。
-/// async：会话读取依赖同一份冷构建，走同一把锁 + spawn_blocking。
+/// read_session：session_ref（HMAC）→ 完整 mcp::session_detail envelope。
+/// async：与 sessions_list 同锁同池子（`StoreBuildLock` + `spawn_blocking`）。
+///
+/// **session_ref 是不透明串**（`sr_<32hex>`），来自 list 行的
+/// `data.sessions[].session_ref`。前端不再持有 native_session_id / host_kind /
+/// machine_namespace——HMAC 把 PII 屏蔽到 IPC 边界外，是 §5.1 的核心约束之一
+/// （spec §0.3「数据面 PII 边界」）。
 #[tauri::command]
 pub async fn sessions_read(
     state: tauri::State<'_, StoreBuildLock>,
-    session_key: Value,
-    revision: Option<String>,
+    session_ref: String,
 ) -> Result<Value, Value> {
     let lock = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -198,9 +227,7 @@ pub async fn sessions_read(
         let Some(bin) = resolve_binary() else {
             return Err(no_binary());
         };
-        let key_json = serde_json::to_string(&session_key)
-            .map_err(|e| error_value("cancelled", &e.to_string()))?;
-        let args = read_args(&key_json, &revision);
+        let args = read_args(&session_ref);
         let mut cmd = Command::new(&bin);
         cmd.args(&args);
         cmd.env("AGENT_VITALS_HOME", data_home());
@@ -236,37 +263,68 @@ pub async fn sessions_findings(
 mod tests {
     use super::*;
 
-    /// 空 filter → 固定段（无多余 flag）；全字段 → 按序全出。这是 IPC 薄壳的
-    /// 全部职责——参数翻译不对，前端点得再准也打到错命令上。
+    /// list_args 字段集是 v0.9.1 收口后的精简版：旧 CLI 用的 `--model` / `--from`
+    /// / `--to` / `--query` 已删（权威库 sessions_search 不收这四件；list_args 模块头
+    /// 注释解释为什么）。本测试盯住「只能出这四个 flag + --day 兜底」，防 PR 后
+    /// 有人手快把旧 flag 加回来。
+    ///
+    /// 「空 filter」分支今天北京日期不是字面常量——拆成两条：(a) 全字段用显式
+    /// day 字面量钉住 argv 顺序；(b) `day: None` 分支断言「`--day` 始终在场、
+    /// 值是 YYYY-MM-DD」，不锁具体日期（系统时钟会让这条用例 false-fail）。
     #[test]
-    fn list_args_empty_and_full() {
-        let none = &None;
-        assert_eq!(list_args(none, none, none, none, none, None, none),
-                   vec!["sessions", "list", "--json"]);
+    fn list_args_full() {
         let some = &Some("x".to_string());
         assert_eq!(
-            list_args(some, some, some, some, some, Some(7),
-                      &Some("c".to_string())),
+            list_args(some, some, Some(7), &Some("c".to_string())),
             vec!["sessions", "list", "--json",
-                 "--host-kind", "x", "--model", "x", "--from", "x",
-                 "--to", "x", "--query", "x", "--page-size", "7",
+                 "--day", "x", "--host-kind", "x", "--page-size", "7",
                  "--cursor", "c"]
         );
     }
 
-    /// read argv：key 必带 + revision 可选。
+    /// `day: None` → argv 必须含 `--day` + YYYY-MM-DD 字串（兜底为今天）。
+    /// CLI 拒绝「无 day 无 month」（mutex 不允许两个都缺）；IPC 不替前端
+    /// 报错而是补一个今天的 `--day` —— 这一行是契约面。
     #[test]
-    fn read_args_with_and_without_revision() {
-        let none = &None;
+    fn list_args_default_day_is_today() {
+        let a = list_args(&None, &None, None, &None);
+        // 第一段固定
+        assert_eq!(&a[0..3], &["sessions", "list", "--json"]);
+        // --day 必须紧跟固定段（位置由 list_args 保证）
+        assert_eq!(a[3], "--day");
+        // 值是 YYYY-MM-DD 格式（不锁具体日期——系统时钟会让这条用例 false-fail）
+        let d = &a[4];
+        assert_eq!(d.len(), 10);
+        assert_eq!(&d[4..5], "-");
+        assert_eq!(&d[7..8], "-");
+        for c in d.chars() {
+            assert!(c.is_ascii_digit() || c == '-', "non-digit/dash in day: {d}");
+        }
+    }
+
+    /// 单测自己用的常量时钟：让 `list_args_default_day_is_today_clock_pinned` 不依赖
+    /// 真实系统时间（避免跨日 CI 抖动）。当前 list_args 内部直接调 std time；这
+    /// 里**只**断言「今天日期格式正确」（不锁字面量），跨日仍绿。
+    #[test]
+    fn beijing_today_returns_yyyy_mm_dd_format() {
+        let d = beijing_today_yyyy_mm_dd();
+        assert_eq!(d.len(), 10);
+        assert_eq!(&d[4..5], "-");
+        assert_eq!(&d[7..8], "-");
+        // YYYY 部分应是 2020~2099 区间（现实日期范围）
+        let y: i32 = d[0..4].parse().expect("year must parse");
+        assert!((2020..=2099).contains(&y), "year out of expected range: {y}");
+    }
+
+    /// read argv：固定段（session_ref 必带 + 无 revision flag）。
+    /// session_ref 是 HMAC 不透明串，原生 session_key 在 v0.9.1 不再穿过 IPC
+    /// 边界——前端不应再持有 native_session_id / machine_namespace（PII）。
+    #[test]
+    fn read_args_is_fixed() {
         assert_eq!(
-            read_args("{\"native_id\":\"s1\"}", none),
-            vec!["sessions", "read", "--session-key", "{\"native_id\":\"s1\"}",
+            read_args("sr_abcdef1234567890"),
+            vec!["sessions", "read", "--session-ref", "sr_abcdef1234567890",
                  "--json"]
-        );
-        assert_eq!(
-            read_args("k", &Some("2026-08-30".to_string())),
-            vec!["sessions", "read", "--session-key", "k", "--json",
-                 "--revision", "2026-08-30"]
         );
     }
 

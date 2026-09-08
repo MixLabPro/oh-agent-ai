@@ -23,6 +23,22 @@ function fmtUSD(x) {
   return "$" + x.toFixed(2);
 }
 
+// v0.9.1 起 cost 列输入是 `cost_minor: {amount_minor, currency} | null`（spec §0.1：
+// 金额一律 i64 minor units 整数，存储层无浮点）。null → "—"（不冒充 ¥0.00）；
+// 命中 → currency 走 USD/CNY 各自显示，amount_minor / 100 得元，浮点只在这一步
+// 出 renderer——存储与 IPC 全程整数。
+function fmtCostMinor(cm) {
+  if (cm == null) return "—";
+  const minor = cm.amount_minor;
+  const cur = cm.currency;
+  if (typeof minor !== "number" || !cur) return "—";
+  const yuan = minor / 100;
+  if (cur === "USD") return fmtUSD(yuan);
+  if (cur === "CNY") return fmtMoney(yuan);
+  // 未知币种：显示币种代码 + 元值（避免被 fmtUSD/fmtMoney 之一误标）
+  return cur + " " + yuan.toFixed(2);
+}
+
 // token 缩写：≥1M "1.4M"、≥1K "8.2K"（<10K 一位小数）、<1K 原样 —— 镜像 lib.rs::fmt_tokens。
 function fmtTokens(n) {
   if (n == null) return "—";
@@ -1357,19 +1373,27 @@ async function fetchSessionsPage(gen) {
   sessFetching = true;
   try {
     const args = { pageSize: 50 };
-    // host 过滤（spec §7.3）：非 all 时把 host_kind 传给 IPC（参数在 store.rs
-    // 已存在；Tauri 2 命令参数 JS 侧 camelCase，hostKind ← host_kind，
-    // 同 pageSize/sessionKey）。过滤变化时调用方负责重置分页。
+    // host 过滤（spec §7.3）：非 all 时把 host_kind 传给 IPC（Tauri 2 命令参数 JS
+    // 侧 camelCase，hostKind ← host_kind）。过滤变化时调用方负责重置分页。
     if (sessFilter !== "all") args.hostKind = sessFilter;
-    if (sessState.nextCursor) args.cursor = JSON.stringify(sessState.nextCursor);
+    // cursor：v0.9.1 起是 mcp::sessions_search 的不透明串（`<total>:<key_len>:<key>`），
+    // 直接透传，不需要 JSON.stringify（旧 r2a_store cursor 是 JSON 对象，
+    // 那是 jsonl 重放路径里存的 filter_hash/store_revision，已退役）。
+    if (sessState.nextCursor) args.cursor = sessState.nextCursor;
     const resp = await invoke("sessions_list", args);
-    // DTO 把分页嵌在顶层 `page` 下（r2a list DTO §2.5），`resp` 本身是 envelope
-    // 容器。读错层会恒显「暂无会话」的假空——这是真机实证的缺陷，不是风格问题。
-    const page = resp.page || {};
+    // envelope shape（v0.9.1）：`resp.data.sessions[]` + `resp.data.next_cursor` +
+    // `resp.data.has_more` + `resp.data.window_total_tokens`。
+    // 旧 r2a list DTO 把分页嵌在 `resp.page.{items,next_cursor,total}` —— 那个
+    // wrapper 已退役，读错层会恒显「暂无会话」的假空（真机实证的缺陷）。
+    const data = resp.data || {};
     if (gen != null && gen !== sessPrefetchGen) return false; // 中途被 reset → 丢本页
-    sessState.items = sessState.items.concat(page.items || []);
-    sessState.nextCursor = page.next_cursor || null;
-    sessState.total = page.total != null ? page.total : sessState.items.length;
+    sessState.items = sessState.items.concat(data.sessions || []);
+    sessState.nextCursor = data.next_cursor || null;
+    // `window_total_tokens` 是窗口内全部会话的 token 总和（不是当前页之和），
+    // 比 r2a 的 page.total 更有意义——告诉用户「今天共有多少 token 在跑」。
+    sessState.total = data.window_total_tokens != null
+      ? data.window_total_tokens
+      : sessState.items.length;
     sessState.error = false;
     renderSessions();
     return true;
@@ -1432,13 +1456,37 @@ function renderSessions() {
     chev.textContent = "›";
     titleCell.appendChild(chev);
     tr.appendChild(titleCell);
-    tr.appendChild(td(s.host_kind || "—"));
-    tr.appendChild(td(s.model || "—"));
-    const span = s.date_span;
-    tr.appendChild(td(span && span.first ? span.first + (span.last && span.last !== span.first ? " … " + span.last : "") : "—"));
-    tr.appendChild(tdNum(fmtTokens(s.tokens_total)));
-    tr.appendChild(tdNum(fmtUSD(s.cost_usd)));
-    tr.appendChild(tdNum(s.findings_total != null ? String(s.findings_total) : "—"));
+    // v0.9.1 envelope 字段映射（mcp::sessions_search）：
+    //   host_kind       → host                       （旧 r2a DTO）
+    //   model (str)     → model_ids[0] || "—"         （Vec<String>；多模型取首个
+    //                                                显示，详情 envelope.data
+    //                                                .model_ids[] 里有完整清单）
+    //   date_span.first → first_event_at             （RFC3339 Beijing）
+    //   date_span.last  → last_event_at              （同）
+    //   tokens_total    → tokens.total               （4 buckets 求和已落 envelope）
+    //   cost_usd (f64)  → cost_minor.amount_minor/100 （i64 minor / 100；新路径是
+    //                                                usage_facts × pricing_snapshots
+    //                                                JOIN 的 metered_estimate，
+    //                                                §6.7 跨币相加自动 null——
+    //                                                此时 cost 列诚实地「—」，
+    //                                                不拿 ¥0.00 冒充没花钱）
+    //   findings_total  → null                       （不在权威库 envelope 里；
+    //                                                findings 跨会话汇总从 findings
+    //                                                tab 看，单会话 finding 数等 M4
+    //                                                workflow_events 工具落地后回填）
+    tr.appendChild(td(s.host || "—"));
+    tr.appendChild(td((Array.isArray(s.model_ids) && s.model_ids.length) ? s.model_ids[0] : "—"));
+    const span = (s.first_event_at && s.last_event_at)
+      ? s.first_event_at.slice(0, 10) + (s.first_event_at !== s.last_event_at ? " … " + s.last_event_at.slice(0, 10) : "")
+      : (s.first_event_at ? s.first_event_at.slice(0, 10) : null);
+    tr.appendChild(td(span || "—"));
+    const tokensTotal = (s.tokens && typeof s.tokens.total === "number") ? s.tokens.total : null;
+    tr.appendChild(tdNum(fmtTokens(tokensTotal)));
+    // cost_minor 形状: {amount_minor: i64, currency: "USD"|"CNY"} | null
+    // 旧 fmtUSD 收 float|null —— 加小 helper 把 amount_minor 转显示串；
+    // null → "—"，命中 → "$1.23" / "¥1.23"（按 currency 走；与 fmtUSD/fmtMoney 同款）。
+    tr.appendChild(tdNum(fmtCostMinor(s.cost_minor)));
+    tr.appendChild(tdNum("—"));
     tr.addEventListener("click", () => showSession(s));
     body.appendChild(tr);
   }
@@ -1459,9 +1507,13 @@ function tdNum(text) {
 
 function titleText(s) {
   if (s.title) return s.title;
-  // 无标题（Codex 标题命中 87% 不是 100%）→ 用 native_id 兜底，诚实不臆造标题。
-  const id = s.session_key && s.session_key.native_id;
-  if (id) return String(id);
+  // 无标题（Codex 标题命中 87% 不是 100%）→ 用 session_ref 兜底，诚实不臆造标题。
+  // 旧 r2a DTO 用 `s.session_key.native_id`（原始会话 id）；v0.9.1 起 list 行只剩
+  // HMAC `session_ref`，把 native_session_id 屏蔽到 IPC 边界外（spec §0.3 PII）。
+  // session_ref 是 `sr_<32hex>`，截后 8 位当显示够用，整串也短到不会撑坏列宽。
+  if (s.session_ref) return s.session_ref.length > 12
+    ? "…" + s.session_ref.slice(-8)
+    : s.session_ref;
   return "（无标题）";
 }
 
@@ -1471,7 +1523,9 @@ async function showSession(s) {
   document.getElementById("sess-detail-banner").hidden = true;
   renderDetailSummary(s);
   try {
-    const env = await invoke("sessions_read", { sessionKey: s.session_key });
+    // v0.9.1 IPC：session_ref 是 HMAC 不透明串（来自 list 行 data.sessions[].session_ref），
+    // 不是 native session_key（spec §0.3 PII：原生 session_key 不再穿过 IPC）。
+    const env = await invoke("sessions_read", { sessionRef: s.session_ref });
     renderDetailEnvelope(env);
   } catch (e) {
     // 详情错误不挂「重载」按钮——那个按钮重载的是列表，跟详情无关；用户自己
@@ -1485,21 +1539,27 @@ function renderDetailSummary(s) {
   body.innerHTML = "";
   const cards = el("div", "detail-cards");
   cards.appendChild(detailCard("标题", titleText(s)));
-  cards.appendChild(detailCard("模型", s.model || "—"));
-  // 从 findings 跳过来时 s 只有 session_key/title/model/host_kind，date_span 等
-  // 字段缺场——逐个判空，不拿 undefined 当字符串拼。成本/Token/Findings 同理。
+  // v0.9.1 list 行只有 host + model_ids[]，单模型取首个，多模型在详情 envelope
+  // .data.model_ids[] 里有完整清单。
+  cards.appendChild(detailCard("模型",
+    (Array.isArray(s.model_ids) && s.model_ids.length) ? s.model_ids.join(", ") : "—"));
+  // date_span → first_event_at / last_event_at（RFC3339 Beijing）
   cards.appendChild(detailCard("宿主 / 日期",
-    (s.host_kind || "—") + " · " + (s.date_span && s.date_span.first ? s.date_span.first.slice(0, 10) : "—")));
-  // DSH 没有 cost_usd（那是 Codex 专属字段，DSH 成本是 CNY），三个字段在这个
-  // 列表行摘要对象上本来就可能缺场——先诚实显示「—」，envelope 到手后
-  // refreshDetailCards 用真实 session 数据把它们补上（也会把 DSH 会话的标签从
-  // 「成本(USD)」换成「成本(CNY)」，不能让一张永远显示「—」的美元卡片冒充
-  // "这次没花钱"）。
-  const costCard = detailCard("成本(USD)", fmtUSD(s.cost_usd), "sess-card-cost");
+    (s.host || "—") + " · " + (s.first_event_at ? s.first_event_at.slice(0, 10) : "—")));
+  // cost 列：list 行只有 cost_minor（i64 minor / 100），格式化交给 fmtCostMinor。
+  // 命中时按 currency 标 USD/CNY；null → "—"（不拿 ¥0.00 冒充没花钱）。
+  // envelope 到手后 refreshDetailCards 用真实 session 数据把卡片补上（envelope
+  // .data.tokens.total 完整；envelope .data.cost_minor 同样 currency-aware）。
+  const costCard = detailCard("成本", fmtCostMinor(s.cost_minor), "sess-card-cost");
   costCard.querySelector(".label").id = "sess-card-cost-label";
   cards.appendChild(costCard);
-  cards.appendChild(detailCard("Tokens", fmtTokens(s.tokens_total), "sess-card-tokens"));
-  cards.appendChild(detailCard("Findings", s.findings_total != null ? String(s.findings_total) : "—", "sess-card-findings"));
+  const tokensTotal = (s.tokens && typeof s.tokens.total === "number") ? s.tokens.total : null;
+  cards.appendChild(detailCard("Tokens", fmtTokens(tokensTotal), "sess-card-tokens"));
+  // 单会话 finding 数：v0.9.1 envelope 不携带（旧 r2a 预计算，SQL 权威库没有
+  // workflow 事件维度）。list 行此列恒为 "—"，详情 envelope 同款。Findings tab
+  // 跨会话汇总仍可用（仍走 r2a_store，PR #2.3a 任务 #19 待 M4 workflow_events
+  // 工具落地后整段迁 mcp::dispatch）。
+  cards.appendChild(detailCard("Findings", "—", "sess-card-findings"));
   body.appendChild(cards);
 
   const loading = el("div", "detail-section");
@@ -1527,49 +1587,36 @@ function detailCard(label, value, valueId) {
 
 // KPI 卡的数字来自列表行摘要，冷字段本来就可能缺（上面 renderDetailSummary 的
 // 注释）。envelope 到手后用真实 session 数据把卡片补上——避免"正下方的完整报告
-// 已经有 2 条 finding、曲线也涨到了 138.7M，卡片却写着三个破折号"这种自相矛盾
-// （真实截图能看到这个问题）。找不到就保持原样的「—」，不拿 0 冒充测到了。
-function refreshDetailCards(session, host) {
+// 已经有真实数字，卡片却写着三个破折号"这种自相矛盾（真机截图能看到这问题）。
+//
+// **v0.9.1 envelope 字段**：旧 r2a `session.cost_report` / `session.audit.findings`
+// / `session.cost.total` / `session.requests[]` / `session.findings[]` 全部已退役
+// ——那些字段来自 jsonl 重放，权威库 mcp::session_detail envelope 不含它们。
+// 新 envelope 只给：
+//   data.tokens.total        (4 buckets 求和已落 envelope)
+//   data.cost_minor          (i64 minor / 100; currency-aware)
+//   data.event_count / data.model_ids
+// Findings 单会话数等 M4 `workflow_events` 工具落地后回填（任务 #19）。
+function refreshDetailCards(session) {
   const costEl = document.getElementById("sess-card-cost");
   const tokensEl = document.getElementById("sess-card-tokens");
   const findingsEl = document.getElementById("sess-card-findings");
   if (!costEl || !tokensEl || !findingsEl) return;
 
-  if (host === "codex") {
-    const r = session.cost_report;
-    if (r) {
-      costEl.textContent = fmtUSD(r.total_cost_usd);
-      const tk = r.total_tokens || {};
-      tokensEl.textContent = fmtTokens(
-        (tk.uncached_input_tokens || 0) + (tk.cached_input_tokens || 0) + (tk.output_tokens || 0));
-    }
-    const findingsCount = (session.audit && session.audit.summary && session.audit.summary.findings_total != null)
-      ? session.audit.summary.findings_total
-      : (session.audit && Array.isArray(session.audit.findings) ? session.audit.findings.length : null);
-    if (findingsCount != null) findingsEl.textContent = String(findingsCount);
-  } else {
-    if (session.cost) {
-      // total != null 才写卡：costReport 语义里 null 是「估不出」（如全未知模型），
-      // `|| 0` 会把它伪造成 ¥0.00——那张卡宁可继续挂着「—」。
-      if (session.cost.total != null) {
-        const label = document.getElementById("sess-card-cost-label");
-        if (label) label.textContent = "成本(CNY)";
-        costEl.textContent = fmtMoney(session.cost.total);
-      }
-    }
-    // 镜像 tlValueOf("tokens", …)：三个用量字段全缺才算「没测到」，任一有值就
-    // 求和参与——与时间线纵轴同一口径，不在这里另起一套算法。
-    const reqs = Array.isArray(session.requests) ? session.requests : [];
-    let sum = 0, any = false;
-    for (const r of reqs) {
-      const parts = [r.uncached_input_tokens, r.output_tokens, r.cache_read_tokens];
-      if (parts.every((v) => v == null)) continue;
-      any = true;
-      sum += parts.reduce((a, v) => a + (v || 0), 0);
-    }
-    if (any) tokensEl.textContent = fmtTokens(sum);
-    if (Array.isArray(session.findings)) findingsEl.textContent = String(session.findings.length);
+  // tokens：envelope 已落 4 buckets 求和
+  if (session.tokens && typeof session.tokens.total === "number") {
+    tokensEl.textContent = fmtTokens(session.tokens.total);
   }
+  // cost：cost_minor.currency 决定显示成 USD 还是 CNY（不只是数值单位）
+  if (session.cost_minor != null) {
+    const label = document.getElementById("sess-card-cost-label");
+    if (label) {
+      label.textContent = session.cost_minor.currency === "USD" ? "成本(USD)" : "成本(CNY)";
+    }
+    costEl.textContent = fmtCostMinor(session.cost_minor);
+  }
+  // findings：单会话 finding 数不在权威库 envelope 里——M4 之前保持 "—"
+  // （renderDetailSummary 已把卡片初始写成 "—"）
 }
 
 function el(tag, cls) {
@@ -2711,38 +2758,154 @@ function renderDetailEnvelope(env) {
   const loading = document.getElementById("sess-detail-loading");
   if (loading) loading.remove();
 
-  const session = env.session || {};
-  const host = (env.session_key && env.session_key.host_kind) || session.host_kind || null;
+  // v0.9.1 envelope shape（mcp::session_detail）：
+  //   {schema_version, data_version, authority_state, authority_revision,
+  //    generated_at, timezone, coverage, freshness, warnings,
+  //    data: {session_ref, host, first_event_at, last_event_at, event_count,
+  //           model_ids[], identity_kind, tokens{4 buckets + total},
+  //           cost_minor, timeline[{event_at, model_id, observation_kind,
+  //           peak, fact_id, tokens}], has_more, next_cursor, note}}
+  //
+  // 旧 r2a envelope `env.session.{cost, requests, findings, audit, ...}` 已退役
+  // ——那些字段是 jsonl 重放路径里的 DSH/Codex 专属 envelope sections，
+  // 不在权威库 envelope 里。本函数把 envelope 直接渲染：summary + timeline 表 +
+  // 元数据，不再调 renderCodexSections/renderDshSections/findingsSection
+  // （那些函数读 OLD shape 字段，全 undefined 会渲染成空壳）。
+  const data = env.data || {};
 
-  // envelope 到手先把顶部 KPI 卡补真（列表行摘要里 DSH 会话的 cost/tokens/findings
-  // 全是缺场，冷启动时三张卡全「—」，而正下方报告里明明有真数）。
-  refreshDetailCards(session, host);
+  // envelope 到手先把顶部 KPI 卡补真（list 行可能 model_ids[0]/cost_minor 是
+  // 缺场值，envelope.data 是权威源——以它为准）
+  refreshDetailCards(data);
 
-  const fsec = findingsSection(session);
-  if (fsec) body.appendChild(fsec);
+  // 降级 banner：旧 DSH/Codex 专属分区（cost_report / audit.findings / requests
+  // / findings[] / context / waste / compaction / duration / subagents /
+  // rule_outcomes / *_coverage）字段不在权威库 envelope 里。这些是 r2a_store
+  // 路径预计算 + DSH/Codex 各自 wire 适配层算的，权威库目前只承载 usage_facts。
+  // 等 M4 `workflow_events` MCP 工具落地后（PR #2.3a，task #19）整段回填，
+  // 那时这条 banner 由 schema 字段判定自动消失。
+  body.appendChild(downgradeBanner());
 
-  if (host === "codex") {
-    renderCodexSections(body, session);
-  } else {
-    renderDshSections(body, session);
-  }
+  // summary panel：host / event_count / model_ids / 时间范围 / token 4 桶 / cost_minor
+  body.appendChild(renderDetailSummaryPanel(data));
 
-  // 版本元数据（schema/engine/pricing 版本串 + 生成时间戳）是排查用信息，不是
-  // 「这次会话发生了什么」的主叙事——原先它排在 KPI 卡正下方第二块，占着最显眼
-  // 的位置却没人看。挪到 raw JSON 上面，和它同属「诊断层」。
-  const meta = detailSection("版本元数据");
-  const mm = el("div", "detail-meta");
-  mm.textContent = [
-    "schema " + (env.schema_version || "—"),
-    "engine " + (env.engine_version || "—"),
-    "pricing " + (env.pricing_version || "—"),
-    "生成于 " + (env.generated_at || "—"),
-    "revision " + (env.session_revision || "—"),
-  ].join(" · ");
-  meta.appendChild(mm);
-  body.appendChild(meta);
+  // timeline table：按 event_at 排序的事实流（每条 fact 一行）
+  const tl = Array.isArray(data.timeline) ? data.timeline : [];
+  body.appendChild(renderDetailTimelineTable(tl, data.has_more));
+
+  // 元数据：schema / data version / authority_revision（权威库 commit 标记）/
+  // generated_at / authority_state —— 排查用信息，不是「这次会话发生了什么」。
+  body.appendChild(renderDetailMeta(env, data));
 
   body.appendChild(rawSection(env));
+}
+
+// v0.9.1 详情视图降级 banner：旧 r2a envelope 的 DSH/Codex 专属分区不在权威库
+// envelope 里。保留 banner 直到 M4 workflow_events 工具落地后由代码删这条
+// appendChild 自动消失。
+function downgradeBanner() {
+  const sec = el("div", "detail-section");
+  const t = el("div", "detail-section-title");
+  t.textContent = "详情视图（v0.9.1 降级）";
+  const body = el("div", "muted");
+  body.textContent = "会话详情从 SQL 权威库 envelope 渲染（host / tokens 4 桶 / cost_minor / 时间线 fact 流）。" +
+    "旧 r2a envelope 的 DSH/Codex 专属分区（cost_report / audit.findings / requests / findings[] / " +
+    "context / waste / compaction / duration / subagents / rule_outcomes 等）" +
+    "等 M4 workflow_events MCP 工具落地后回填（PR #2.3a task #19）。" +
+    "Findings 跨会话汇总请切「Findings」tab。";
+  sec.appendChild(t);
+  sec.appendChild(body);
+  return sec;
+}
+
+// 详情 summary panel：4 桶 tokens + cost_minor（权威）+ 模型列表 + 时间范围。
+// 是 envelope.data 的真实形状，不是 list 行的冷字段。
+function renderDetailSummaryPanel(d) {
+  const sec = el("div", "detail-section");
+  const t = el("div", "detail-section-title");
+  t.textContent = "会话概览（权威库 envelope）";
+  sec.appendChild(t);
+  const tk = d.tokens || {};
+  const lines = [];
+  lines.push("host · " + (d.host || "—"));
+  lines.push("events · " + (d.event_count != null ? d.event_count : "—"));
+  lines.push("models · " + (Array.isArray(d.model_ids) && d.model_ids.length ? d.model_ids.join(", ") : "—"));
+  lines.push("时间 · " + (d.first_event_at || "—") + " … " + (d.last_event_at || "—"));
+  lines.push("uncached_input · " + fmtTokens(tk.uncached_input_tokens));
+  lines.push("cache_read · " + fmtTokens(tk.cache_read_tokens));
+  lines.push("cache_write · " + fmtTokens(tk.cache_write_tokens));
+  lines.push("output · " + fmtTokens(tk.output_tokens));
+  lines.push("total · " + fmtTokens(tk.total));
+  lines.push("cost · " + fmtCostMinor(d.cost_minor));
+  const p = el("div", "detail-meta");
+  p.textContent = lines.join(" · ");
+  sec.appendChild(p);
+  return sec;
+}
+
+// 详情 timeline table：envelope.data.timeline[] 每条事实一行。
+// 字段（mcp::session_detail 写入）：
+//   event_at (RFC3339 Beijing), model_id, identity_kind, observation_kind,
+//   peak (0/1), fact_id, tokens{uncached_input/cache_read/cache_write/output/total}
+//
+// 列精简：时间 / 模型 / observation / peak / total（5 列够用，detail 总宽度
+// 1100~1200px，再多列把表格挤窄反不如折叠面板）。model_ids 标"-"代表无
+// 模型 id（如纯 message-only 事件）；peak=1 标 ⭐ 强调。
+function renderDetailTimelineTable(timeline, hasMore) {
+  const sec = el("div", "detail-section");
+  const t = el("div", "detail-section-title");
+  t.textContent = "时间线（" + timeline.length + " 条事实" + (hasMore ? " · 已截断" : "") + "）";
+  sec.appendChild(t);
+  if (timeline.length === 0) {
+    const p = el("div", "muted");
+    p.textContent = "（无事实数据）";
+    sec.appendChild(p);
+    return sec;
+  }
+  const table = el("table", "detail-timeline");
+  const thead = el("thead");
+  const trh = el("tr");
+  for (const h of ["时间", "模型", "observation", "peak", "total"]) {
+    const th = el("th");
+    th.textContent = h;
+    trh.appendChild(th);
+  }
+  thead.appendChild(trh);
+  table.appendChild(thead);
+  const tbody = el("tbody");
+  for (const f of timeline) {
+    const tr = el("tr");
+    tr.appendChild(td((f.event_at || "").slice(11, 19) || "—"));
+    tr.appendChild(td(f.model_id || "—"));
+    tr.appendChild(td(f.observation_kind || "—"));
+    const peakTd = el("td");
+    peakTd.textContent = f.peak === 1 ? "⭐" : "·";
+    tr.appendChild(peakTd);
+    const tk = f.tokens || {};
+    tr.appendChild(tdNum(fmtTokens(tk.total)));
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  sec.appendChild(table);
+  return sec;
+}
+
+function renderDetailMeta(env, data) {
+  const sec = detailSection("版本元数据（权威库 envelope）");
+  const mm = el("div", "detail-meta");
+  // authority_revision.committed_at / max_observed_at 是 DB 固定字段（PR #2.4
+  // S5 守：与 MCP/CLI 字节相等），不在调用时刻变 —— 直接读，不归一化。
+  const rev = env.authority_revision || {};
+  mm.textContent = [
+    "schema " + (env.schema_version || "—"),
+    "data " + (env.data_version || "—"),
+    "authority " + (env.authority_state || "—"),
+    "committed " + (rev.committed_at || "—"),
+    "max_observed " + (rev.max_observed_at || "—"),
+    "生成于 " + (env.generated_at || "—"),
+    "session_ref " + (data.session_ref || "—"),
+  ].join(" · ");
+  sec.appendChild(mm);
+  return sec;
 }
 
 // ---------- Findings（跨会话汇总） ----------
