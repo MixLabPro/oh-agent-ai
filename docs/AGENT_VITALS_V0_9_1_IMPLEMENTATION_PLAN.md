@@ -666,6 +666,14 @@ UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列
 spec §6.1 要求**用户先确认备份**再翻 `sql_authority_enabled`——代码侧不代做。
 下面每步给命令 + 通过判据；任何一步不通过就停下，别硬翻开关。
 
+> **2026-09-08 部署状态**：本机 `~/.agent-vitals/agent-vitals.sqlite3` 已在开发
+> 测试中迁到 schema v2（`sql_authority_enabled=true`，54873 facts，health ok）。
+> `/Applications/agent-vitals.app`（内置 CLI）+ `~/.local/bin/agent-vitals` 均已
+> 用 `main@cf637ad` 的构建重装（`cargo tauri build --bundles app` → 替换 .app +
+> `cp target/release/agent-vitals`）——旧 v1 二进制会对 v2 库报 `NewerSchema`。
+> 教训同 §3.5 部署纪律：**schema/fold 语义变更必须同步重装所有部署点**。
+> 备份因此只是补做（迁移已发生）；下面的逐月核对 + 观察期仍需走。
+
 ### 1. 备份（不可跳过）
 
 ```bash
