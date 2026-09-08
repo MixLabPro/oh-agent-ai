@@ -1,5 +1,22 @@
 """R2a SessionStore 的 **Python 镜像**（`docs/R2A_CONTRACT_DESIGN.md`）。
 
+⚠️  **DEPRECATED**（v0.9.1 PR #4）—— 计划 v0.9.3 删除（PR #5）。
+模块级标记 `__legacy_r2a__ = True`：供 `tests/test_clawhub_packaging.py`
+与 `tests/test_classification.py` 的 allowlist 检查用，等 PR #5 一并退役。
+
+v0.9.1 起 sessions 数据唯一来源是 SQL 权威库 `agent-vitals.sqlite3`
+（schema v2），Rust CLI `apps/cli/src/main.rs` 的 `SessionsAction::{List,
+Read,Navigation}` 已切到 `mcp::dispatch`（PR #2）。**Python CLI dispatch
+（`packages/agent-vitals-python/agent_vitals/cli.py:1602-1641`）当前仍调
+本模块**——本 PR #4 仅加标记，不改 dispatch；dispatch 切 sqlite3 直连
+wrapper 是 PR #4.5 / PR #5 准备工作（`tests/test_dsh_usage_fact.py:54`
+的 `dsh_source_profile` import 是当前唯一不能删的依赖，PR #5 前抽到独立
+小模块）。
+
+Rust 镜像侧（`crates/agent-vitals-runtime/src/sessions/r2a_store.rs`）
+已 behind `legacy-r2a` feature gate（PR #4 commit abd5abb）。Python 侧
+**没有**对应 feature gate——Python 单二进制，feature 只能放在 Rust。
+
 与 Rust 两侧同构：纯规则（SessionKey / 版本闸 / filter / cursor / 分页 /
 类型化错误）在本模块，I/O（Codex 填充 + 自有 cache）也在本模块 —— 因为 Python
 侧没有「core crate / binary」的 crate 边界，二元结构是文件级的。字节对齐由
@@ -18,6 +35,8 @@ machine namespace = `agent.takeover.machine_namespace`（同一份
 2. per-filter StoreRevision = 命中集最大 store_seq；
 3. 版本矩阵 MIN=0 / MAX=1 / CURRENT=1。
 """
+
+__legacy_r2a__ = True
 
 import functools
 import json

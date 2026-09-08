@@ -184,6 +184,90 @@ class ClassificationGuardTests(unittest.TestCase):
         self.assertNotIn("read_session_evidence", inventory)
         self.assertIn("SessionEvidenceInput", inventory)
 
+    def test_python_r2a_module_carries_legacy_marker(self):
+        """v0.9.1 PR #4：r2a.py 加 `__legacy_r2a__ = True` 模块标记——
+
+        钉住两件事：
+        1. PR #5 删 r2a.py 前**不能**让 marker 静默消失（否则 `tests/
+           test_clawhub_packaging.py` 的 allowlist 会失去「为什么还在
+           agent family」的依据，变成历史包袱）
+        2. 任何把 `__legacy_r2a__` 改回 `False` / 删掉的尝试会立刻红，
+           因为 PR #5 的退出路径需要它存在作为最后一道 gate 信号
+        """
+        import importlib
+        r2a_mod = importlib.import_module("agent_vitals.agent.r2a")
+        self.assertTrue(
+            getattr(r2a_mod, "__legacy_r2a__", False),
+            "r2a.py must carry __legacy_r2a__ = True (v0.9.1 PR #4); "
+            "PR #5 删 r2a.py 前不能让它消失"
+        )
+
+    def test_runtime_r2a_store_under_legacy_feature_gate(self):
+        """v0.9.1 PR #4：r2a_store.rs 整文件 behind `legacy-r2a` feature。
+
+        钉住三层：
+        1. `[features]` 段声明 `legacy-r2a = []`
+        2. `sessions/mod.rs` 用 `#[cfg(feature = "legacy-r2a")] pub mod r2a_store;`
+           gate（feature 关时整个 module 不编入）
+        3. 文件头有 DEPRECATED banner——下次有人路过能立刻看到退出路径
+        """
+        toml = (
+            ROOT / "crates" / "agent-vitals-runtime" / "Cargo.toml"
+        ).read_text(encoding="utf-8")
+        # 用简单的行内子串匹配（assertRegex 的 MULTILINE 行为容易踩坑——
+        # `^` 默认锚字符串起点，而 `legacy-r2a` 不在第一行就 false-fail）。
+        # 我们只关心「feature 被声明」，具体格式不锁。
+        self.assertIn(
+            "legacy-r2a = []",
+            toml,
+            msg="agent-vitals-runtime/Cargo.toml 必须声明 legacy-r2a feature "
+                "(v0.9.1 PR #4)，缺失 → r2a_store.rs 不再可被 CLI 显式 enable",
+        )
+
+        mod = (
+            ROOT / "crates" / "agent-vitals-runtime" / "src" / "sessions" / "mod.rs"
+        ).read_text(encoding="utf-8")
+        # 钉住两件事：cfg 行 + r2a_store 行。两者跨行（rustfmt 不强制合并
+        # attribute + item），分两条 assertIn。
+        self.assertIn(
+            "#[cfg(feature = \"legacy-r2a\")]",
+            mod,
+            "sessions/mod.rs 必须有 `#[cfg(feature = \"legacy-r2a\")]` "
+            "attribute 在 r2a_store 模块声明之前",
+        )
+        self.assertIn(
+            "pub mod r2a_store;",
+            mod,
+            "sessions/mod.rs 必须仍然声明 `pub mod r2a_store;`（behind feature）",
+        )
+
+        r2a_store = (
+            ROOT / "crates" / "agent-vitals-runtime" / "src" / "sessions" / "r2a_store.rs"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "DEPRECATED",
+            r2a_store[:600],
+            "r2a_store.rs 文件头 600 字符内必须有 DEPRECATED banner",
+        )
+
+    def test_cli_cargo_enables_legacy_r2a_feature(self):
+        """v0.9.1 PR #4：`apps/cli/Cargo.toml` 必须显式 enable legacy-r2a。
+
+        钉住 CLI `SessionsAction::Findings`（r2a_store 唯一仍被 Rust
+        引用的入口，task #19 等 M4 `workflow_events` 落地后切
+        mcp::dispatch）能继续 build——runtime 默认 feature 不开 legacy-r2a
+        时,只有 CLI 显式 enable 才能保持本次升级无回退。
+        """
+        cli_toml = (
+            ROOT / "apps" / "cli" / "Cargo.toml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "features = [\"legacy-r2a\"]",
+            cli_toml,
+            "apps/cli/Cargo.toml 必须显式 enable legacy-r2a feature "
+            "(v0.9.1 PR #4)：CLI SessionsAction::Findings 仍在 r2a_store 上",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
