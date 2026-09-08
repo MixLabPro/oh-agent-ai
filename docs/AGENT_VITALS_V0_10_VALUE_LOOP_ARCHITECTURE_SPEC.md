@@ -1,6 +1,6 @@
 # Agent Vitals v0.10 Value Loop 架构规格
 
-> 状态：架构草案 **R2.2**（2026-09-08；R2/R2.1 同日，R1 为 2026-09-04）
+> 状态：架构草案 **R2.3**（2026-09-08；R2/R2.1/R2.2 同日，R1 为 2026-09-04）
 > 前置：`AGENT_VITALS_V0_9_DATA_VALUE_ARCHITECTURE_SPEC.md` 已发布并通过其 Definition of Done；
 > v0.9.1 SQL 权威库（schema v2）已落 main。
 > 定位：把可信数据转化为普通用户可理解、可执行、可验证收益的问题解决闭环。
@@ -56,7 +56,10 @@ pub struct TraceNode {
     pub ordinal: u64,                    // **权威执行顺序**；scope 内严格递增，跨 scope 不可比
     pub native: String,                  // 宿主原生事件 id（Seq|Uuid|CallId|TurnId）；**跨 scope join 只走它**
     // ──────────────────────────────────────────────────────────────────
-    pub node_type: TraceNodeType,        // user_task / assistant_turn / model_invocation / tool_call / subagent / compaction / retry / outcome
+    pub node_type: TraceNodeType,        // user_task / assistant_turn / model_invocation / tool_call /
+                                         //   subagent / compaction / retry / outcome / model_change
+                                         //   （model_change：Pi 单会话实测 4 模型 5 次切换，W1 需按模型族
+                                         //    分别计算并排除切换边界——§2.4.1）
     pub fact_id: String,                 // 引用的 UsageFact.fact_id（v0.9 已落地，形如 "uf1-<hex>"）
     pub evidence_ref: String,            // 引用的 evidence_ref（空串占位，见 §10.6 空串规则的适用边界）
     pub parent_node_id: Option<String>,  // 不存在的 parent 在 TraceCoverage 里标 missing（§0 原则）
@@ -323,6 +326,123 @@ session / 跨 session 常驻），且**当前日志没有 token-span 级血缘**
 形态），Claude Code / Codex 缺失的维度按既有纪律报 `Unavailable` 而非 `MeasuredZero`。
 **这项工作 R1/R2 均未提及，是 v0.10-B 排期里最容易被漏掉的一块。**
 
+### 2.5 宿主接入契约：三层参与度（**R2.3 新增**）
+
+R1/R2 的 §7 v0.10-A 门槛写「至少三宿主」，但**三宿主不等于多宿主**——那正好是
+`ingest_service::FACT_HOSTS` 里硬编码的三个。spec 从未定义「第四个宿主怎么接」，也没
+定义「接不进来的宿主看到什么」。本节补上。
+
+#### 2.5.1 事实：数据面的宿主词表当前是封闭的
+
+```rust
+// crates/agent-vitals-runtime/src/ingest_service.rs:34
+pub const FACT_HOSTS: [&str; 3] = ["claude-code", "codex", "dsh"];
+//  :122  未知 host → Err("unknown host `{host}` — refusing to invent a facts file")
+```
+
+这条拒绝是**对的**（不为不认识的宿主凭空造事实文件），但它意味着 v0.10 的
+TraceGraph / metrics / savings / outcome **全部只对这三个宿主开放**——因为它们都建在
+`UsageFact` 之上。UsageFact emitter 也只有三份
+（`hosts/{claude_code,codex,dsh}/sources/usage_fact.rs`）。
+
+#### 2.5.2 三层参与度（新宿主按能力落在哪层，就得到哪层）
+
+| 层 | 宿主要提供什么 | 得到 v0.10 的什么 | 受 `FACT_HOSTS` 限制？ |
+|---|---|---|---|
+| **T1 账单级** | 一份可录入的账单金额（订阅费 / 宿主积分 / 中转对账单） | Overview 的**感知层**成本、订阅利用率、跨宿主总花费 | **否**——`host_bills` 表的 `host` 列不校验 FACT_HOSTS |
+| **T2 证据级** | 一个可解析成 `CanonicalSession` 的会话日志 | Traces（图 + 时间线 + coverage）、Issues 里所有 `requires` 得到满足的 SV 规则 | **否**——走 `HostProfile` 声明式降级 |
+| **T3 事实级** | 一个 `UsageFact` emitter + 进 `FACT_HOSTS` | Metrics、potential/validated/realized savings、Outcome、Remedy 闭环 | **是** |
+
+**T1 已经可用，不需要改代码**：`AuthorityDb::host_bill_put`（`authority.rs:757`）只校验
+`billing_period` 是 `YYYY-MM`、`billing_basis` 属五档词表
+（`fixed_subscription` / `host_billed` / `metered_actual` / `metered_estimate` /
+`api_equivalent`）、`amount_minor ≥ 0`、`currency` 非空——**`host` 是自由字符串**。
+该函数的注释本身就点名了这个用途：「宿主自身账单（WorkBuddy 积分、订阅月费、中转对账
+单…）——**不是**从我们的价卡派生，由用户显式录入」。
+
+`host_billed` 这一档正是为**按积分/额度计费、不暴露逐模型 token** 的宿主准备的。
+
+**T2 的降级是声明式的，不是硬编码**：`contracts/host_capability.rs::HOSTS` 里每个宿主
+声明自己的 `unmeasured_signals` + `degraded_rules`，规则按 `requires` 信号门控，缺信号报
+`Unavailable`（不是 `MeasuredZero`）。**新增宿主只需加一条 `HostProfile`，不需要改任何
+一条 SV 规则**——这是本仓库设计得最对的一处，v0.10 直接继承。
+
+#### 2.5.3 v0.10 各能力的最低宿主要求
+
+| v0.10 能力 | 最低要求 | 达不到时的诚实退化 |
+|---|---|---|
+| Sessions 列表 | session store + `session_key` | 该宿主整体不出现（不是显示 0 个会话） |
+| TraceGraph 节点 | `CanonicalSession` + `(scope, ordinal)`（§2.1.1） | 无法建图 → 该宿主无 Traces tab |
+| TraceGraph 因果边 | parent 信号或可 join 的 `native` | 边计入 `missing_parent`，图退化成有序列表 |
+| 时间线 y 轴 | 任一 `values` 序列 | 只画事件标记，不画线（**不画 0 值线**） |
+| Metrics（token 口径） | `Signal::Usage` = measured | metric = `unavailable` |
+| Metrics（money 口径） | usage + 价卡 + billing mode 可解析 | `unpriced_tokens`，不借卡不计 0 |
+| Issues（SV601–614） | 各规则自己的 `requires` 信号 | 逐规则 `Unavailable`（已有机制） |
+| Issues（SV-COST 浪费族） | 目前**只有 DSH 有**（§2.4.5） | 其余宿主该族恒空——需跨宿主化 |
+| `potential` savings | `measured` + attribution 可证明（§2.4.1） | 只能产 `opportunity` / `suspected` |
+| `realized` savings | 可重复测量的 baseline 窗 + 同 `metric_version`/`pricing_snapshot_id`（§2.3） | 不出数，`savings_coverage = unavailable` |
+| Remedy 执行 | 宿主有**可逆**的配置面 | `diagnostic-only`（§4） |
+
+#### 2.5.4 现有宿主的定位
+
+| 宿主 | T1 | T2 | T3 | 说明 |
+|---|---|---|---|---|
+| **claude-code** | ✅ | ✅ | ✅ | 7 个 signal unmeasured（含 ContextWindow / QuotaConsumption）；SV607/608 已声明降级 |
+| **codex** | ✅ | ✅ | ✅ | `ThreadHistoryMode` 产生 Legacy/Paginated **两套不兼容词汇**，新宿主接入时注意这不是特例而是常态 |
+| **dsh** | ✅ | ✅ | ✅ | 唯一有 `StepBoundaries`；也是唯一有 SV-COST 浪费规则的 |
+| **workbuddy** | ✅ **可用** | ⚠️ 部分 | ❌ **明确排除** | 见下 |
+| **openclaw** | ✅ | ❌ | ❌ | 目前只有 `sources/skills.rs`（安装时扫描），**无会话证据面** |
+| **pi** | ✅ | ✅ | ✅ **候选** | 本机实测 1 会话即满足 T3 全部字段；见 `docs/PI_HOST_ASSESSMENT.md`。语料仅 1 会话，转正前须扩语料 |
+
+**Pi 是第一个自报成本的宿主，它暴露了 spec 的两个缺口**（详见该评估文档 §4）：
+
+1. **`pricing_basis = provider-reported` 这条路径没走通。** §2.4.1 的词表里有这一档，但
+   §2.2 的成本管线默认所有金额都由**我们的价卡**算出。Pi 的
+   `message.usage.cost.{input,output,cacheRead,cacheWrite,total}` 是宿主自报实付。
+   **待 PM 确认的建议**：宿主自报为权威（它本就排在 `pricing_basis` 词表最前），我们的
+   价卡值降为对账第二数，差额进 `data_quality_issues` 而**不是静默取其一**——与 v0.9
+   「权威在 JSONL、索引是可丢弃投影」同构。
+2. **一次会话 4 个模型 + 5 次显式 `model_change`**，使「模型切换」从边缘情况变成常态。
+   §2.4.1 的 W1 要求「按模型族分别计算、排除模型切换边界」，Pi 让这条成为默认路径。
+   好消息是切换边界**不用猜**（一等事件），但 **§2.1 的 `TraceNodeType` 需增
+   `model_change`**——现有枚举里没有。
+
+**WorkBuddy 的准确状态**（这是问得最多的一个）：
+
+- **T3 被明确排除**——用户决定 2026-09-03，WorkBuddy 不进 UsageFact 这条线。技术上也接不
+  进：没有 `usage_fact.rs`，`HostProfile` 声明 `session_store: false` / `fold: None`，
+  且 `Signal::Usage` 就在它的 `unmeasured_signals` 里。
+- **它的计量单位是 credits 不是 token**（`session_usage.credit_json`），`Cost` 的
+  `Credits` 档在 v0.10 无承载类型（与 §12 第 45 条的 `Quota` 同一个缺口）。
+- **但 T1 完全可用**：实测宿主积分账单 4307.76 ≈ ¥215（官方加量包价 1000 积分 = ¥50），
+  按 `billing_basis='host_billed'` 录入 `host_bills` 即可进 Overview 的跨宿主总花费。
+- **T2 部分可用**：12 个 signal unmeasured、SV604/605 已声明降级；但它有**别人没有的**
+  `NetworkAccess`（measured）、`SandboxModes`（measured）、hash 链的 `ApprovalDecisions`
+  ——**弱宿主不是全弱**，接入时不要按「能力总量」一刀切。
+
+#### 2.5.5 接入一个新宿主（如 Pi）的清单
+
+按目标层级取前 N 步，**不必一次做到 T3**：
+
+1. **T1**：确定计费形态 → 选 `billing_basis` 五档之一 → 调 `host_bill_put`。零代码改动。
+2. **T2**：
+   a. 找到会话存储并**枚举试过哪些 store**（WorkBuddy 的 `traces/` 曾整轮被漏掉，
+      文档据此立规矩：adapter 报 `unavailable` 必须说明试过哪些 store）；
+   b. 写 `hosts/pi/sessions/evidence.rs`，产 `CanonicalSession`；
+   c. 在 `HOSTS` 加一条 `HostProfile`，**如实填 `unmeasured_signals`**——填少了就是用读不到
+      的东西刷覆盖（`evidence.rs` 的红线）；
+   d. 确认线性化信号（叶路径 / 回滚 / 分支前缀），无信号则 `linearization` 报 unavailable
+      而不是默认画全部（§2.1.1）。
+3. **T3**：
+   a. 写 `hosts/pi/sources/usage_fact.rs`，Python 侧同构一份（byte-parity 差分门）；
+   b. 把 `"pi"` 加进 `FACT_HOSTS`（**这是一个封闭词表的显式扩容，不是配置项**）；
+   c. 价卡进 `assets/pricing.json` 的 `billing_modes`，否则模型落 `unpriced_tokens`；
+   d. 补 `tests/test_pi_usage_fact.py` 差分测试。
+
+**先决判断**：如果 Pi 不暴露 per-request 的 token 用量，**T3 就不该做**——按 T1 记账单、
+T2 做行为审计，是诚实且完整的产品形态；硬凑 T3 会掉进 `MeasuredZero` 冒充 `measured` 的
+坑，正是本仓库整套纪律要防的东西。
+
 ## 3. 评估策略
 
 程序评估优先：重复尝试、重复工具调用、失败率、无效读写、上下文增长、模型错配、cache/usage 守恒与覆盖异常等，优先用结构、状态机、统计和守恒律判断。
@@ -547,7 +667,8 @@ CLI/Tauri 只发 command、请求授权并展示 DTO；不得复制 token/cost/f
 **门槛：**
 
 1. 三宿主从 `CanonicalSession`（`contracts/evidence.rs`）派生确定性图，**不重读 raw
-   event**，输入源唯一；
+   event**，输入源唯一。「三宿主」= `FACT_HOSTS` 的三个，**不是「多宿主」的同义词**；
+   第四个宿主按 §2.5 的三层参与度接入，达不到 T3 的宿主按 §2.5.3 诚实退化；
 2. 缺失关系（parent / time / status）显式在 `TraceCoverage` 里计数并标 `unavailable`，
    **不得用 mtime / 数组顺序补造**；
 3. CLI / Tauri IPC / HTML 三处对同一 `session_ref` 输出的 TraceGraph 节点列表
@@ -1147,3 +1268,39 @@ TraceGraph 同样一个都没有——两份文档独立地漏掉了同一层。
 | 43 | 撞名警告：`usage_fact.rs` 的 `time_basis:"native"` 是 basis 取值，与 `TraceNode.native`（宿主原生事件 id）是两个概念 | §2.1.1 | 对账 §1.3 |
 | 44 | 订正 `TRAJECTORY_TIMELINE_SPEC.md` 状态头——「已全部落地」只对几何层成立 | 该文档头部 | 对账 §1.2 |
 | 45 | **待办（未决）**：`Cost` 的 `Quota` 档在 v0.10 无承载类型，而 §2.2.1 硬规则 2 的「订阅型收益 = 配额余量」正是它——需接进 §2.2.1 或显式声明延后 | §2.2.1 | F-T7（P2） |
+
+### R2.2 → R2.3（宿主接入契约）
+
+R1/R2 的 v0.10-A 门槛写「至少三宿主」，但那正好是 `FACT_HOSTS` 里硬编码的三个；
+spec 从未定义「第四个宿主怎么接」「接不进来的宿主看到什么」。R2.3 补上这一层。
+
+| # | 改动 | 位置 | 依据 |
+|---|---|---|---|
+| 46 | 新增 §2.5：**三层参与度**（T1 账单级 / T2 证据级 / T3 事实级），明确只有 T3 受 `FACT_HOSTS` 封闭词表限制 | §2.5.2 | `ingest_service.rs:34,122` |
+| 47 | 点明 **T1 已可用、零代码改动**：`host_bill_put`（`authority.rs:757`）不校验 host，`billing_basis` 的 `host_billed` 档正为按积分/额度计费的宿主准备 | §2.5.2 | `authority.rs:743-800` |
+| 48 | 点明 **T2 的降级是声明式的**：新宿主只需加一条 `HostProfile`（`unmeasured_signals` + `degraded_rules`），**不需要改任何一条 SV 规则** | §2.5.2 | `host_capability.rs::HOSTS` |
+| 49 | 新增 §2.5.3：v0.10 **每项能力的最低宿主要求 + 达不到时的诚实退化**（11 行表） | §2.5.3 | RUNTIME_EVIDENCE_CONTRACT §13 |
+| 50 | 新增 §2.5.4：五个现有宿主的 T1/T2/T3 定位。**WorkBuddy = T1 可用 / T2 部分 / T3 明确排除**（用户决定 2026-09-03，且无 emitter、`session_store:false`、`fold:None`、`Signal::Usage` 在 unmeasured 里）；**OpenClaw 只有安装时扫描，无会话证据面** | §2.5.4 | `host_capability.rs` + hosts 目录实测 |
+| 51 | 记下「**弱宿主不是全弱**」：WorkBuddy 有别人没有的 `NetworkAccess` / `SandboxModes` / hash 链 `ApprovalDecisions`，接入时不得按「能力总量」一刀切 | §2.5.4 | §13 矩阵 |
+| 52 | 新增 §2.5.5 新宿主接入清单（T1/T2/T3 逐步），含**先决判断**：宿主不暴露 per-request token 就不该做 T3——硬凑会掉进 `MeasuredZero` 冒充 `measured` | §2.5.5 | evidence.rs 红线 |
+| 53 | §7 v0.10-A 门槛 1 补一句：「三宿主」≠「多宿主」，第四个宿主走 §2.5 | §7 | 本节 |
+| 54 | 记下 Codex 的 Legacy/Paginated **两套不兼容词汇是常态不是特例**，新宿主接入时按此预期 | §2.5.4 | §13 矩阵双列 |
+
+> **与 §12 第 45 条合并的待决项**：`Cost` 四档里 `Credits`（WorkBuddy 积分）与 `Quota`
+> （订阅配额余量）在 v0.10 均无承载类型。`Credits` 可由 T1 的 `host_bills.host_billed`
+> 覆盖；`Quota` 仍缺——它正是 §2.2.1 硬规则 2「订阅型收益 = 配额余量」所需要的类型。
+
+### R2.3 补记（Pi 宿主实测）
+
+用 `~/.pi/agent/sessions/` 的真实语料验证 §2.5 的三层框架，评估见
+`docs/PI_HOST_ASSESSMENT.md`。**框架成立**：Pi 不需要改任何 SV 规则或 spec 结构就能定位，
+按 §2.5.5 逐步接入即可。但它同时暴露两个真缺口：
+
+| # | 改动 | 位置 | 依据 |
+|---|---|---|---|
+| 55 | §2.5.4 加入 Pi 行（T1/T2/T3 全绿候选，语料仅 1 会话待扩） | §2.5.4 | 本机实测 93 行 |
+| 56 | **`TraceNodeType` 增 `model_change`**——Pi 单会话 4 模型 5 次切换，模型切换是常态不是边缘情况；W1 要求排除切换边界（§2.4.1），边界必须在图上有节点 | §2.1 | 实测 |
+| 57 | **待 PM 确认：`provider-reported` 成本的权威性**。Pi 是第一个自报 per-message 实付成本的宿主，§2.2 的成本管线却默认金额都由我们的价卡算出。建议宿主自报为权威、价卡值降为对账第二数、差额进 `data_quality_issues`，不静默取其一 | §2.2 / §2.4.1 | 评估 §4.1 |
+
+> **接入优先级建议**：Pi 的 `~/.pi/agent/skills/*/SKILL.md`（4 个 skill）可以**先于**会话面
+> 接入——那是本仓库的本职（静态体检），零风险、最先见效，且不受 `FACT_HOSTS` 限制。
