@@ -34,6 +34,9 @@ VERIFY_SCRIPTS = [
     # 工作台总览 KPI 行 / 双轨账 / 决策卡 + 速览层混币折算（Overview.fx）+
     # 预算卡 source:"sql" 兜底判定。同理由接进这条测试：verify 脚本没人跑 = 不存在。
     REPO / "scripts" / "verify-workbench-kpi-decide.mjs",
+    # v0.10.0 Traces 渲染壳：真实 workbench.js × 真实 timeline.js × 真实 CLI
+    # DTO 的完整渲染路径 + namespace 前端拦截 + 几何唯一份 grep。同理由。
+    REPO / "scripts" / "verify-workbench-traces.mjs",
 ]
 
 _has_node = shutil.which("node") is not None

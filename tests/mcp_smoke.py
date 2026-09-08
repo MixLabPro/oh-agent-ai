@@ -503,6 +503,57 @@ def main():
               f"S5.1 未返回 sessions（{today} {test_host} 可能为空），跳过下钻；"
               f"挑选其它有数据的宿主重跑即得 EXACT。")
 
+    # ── S6 session_trace 三消费面 parity（v0.10.0 spec §7 门槛 3）─────────────
+    # MCP `session_trace` 与 CLI `trace --json` 对**同一份入库 fixture** 必须产出
+    # 逐字节相同的 TraceGraph（envelope 剥掉后 data 相等）。fixture 用仓库自带的
+    # `fixtures/dsh/session.jsonl.zstd`——确定性、不依赖真机当日有没有会话；
+    # machine_namespace 用固定 ns-smoke（CLI 纪律：身份段显式给，不发明）。
+    import os as _os
+    s6_fixture = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                               "fixtures", "dsh", "session.jsonl.zstd")
+    if _os.path.exists(s6_fixture):
+        s6_args = {"path": s6_fixture, "host": "dsh",
+                   "machine_namespace": "ns-smoke", "output": "graph"}
+        s6_mcp, _, _ = c.call("session_trace", s6_args)
+        s6_cli = cli_json(args.bin, args.home,
+                          "trace", s6_fixture,
+                          "--host", "dsh",
+                          "--machine-namespace", "ns-smoke",
+                          "--json", "-")
+        env_s6_mcp = _extract_envelope(s6_mcp)
+        data_mcp = (env_s6_mcp or {}).get("data")
+        data_cli = s6_cli if isinstance(s6_cli, dict) and "nodes" in s6_cli else None
+        s6_ok = (data_mcp is not None and data_cli is not None and data_mcp == data_cli)
+        s6_nodes = len((data_mcp or {}).get("nodes") or [])
+        R.add("S6.1",
+              "session_trace MCP ↔ CLI trace --json 的 TraceGraph 逐字节相等",
+              "EXACT" if s6_ok else "MISMATCH",
+              f"fixture=fixtures/dsh/session.jsonl.zstd(dsh, ns-smoke) nodes={s6_nodes} "
+              f"equal={data_mcp == data_cli}")
+
+        # S6.2：timeline_series 投影可达且事件守恒（unplaced_events 计数 + 事件
+        # 全体 targetId 能对回图的 tool_call 节点——两层语义的输入端责任）。
+        s6b_args = dict(s6_args, output="timeline_series")
+        s6b_mcp, _, _ = c.call("session_trace", s6b_args)
+        s6b_data = (_extract_envelope(s6b_mcp) or {}).get("data") or {}
+        s6b_pts = len(s6b_data.get("points") or [])
+        s6b_evs = len(s6b_data.get("events") or [])
+        s6b_unplaced = s6b_data.get("unplaced_events")
+        # 事件 targetId ⊆ 图的 tool_call node_id（锚定关系可回查）。
+        call_ids = {n.get("node_id") for n in (data_mcp or {}).get("nodes", [])
+                    if n.get("node_type") == "tool_call"}
+        ev_ids = {e.get("targetId") for e in s6b_data.get("events") or []}
+        s6b_ok = (s6b_pts > 0 and s6b_evs > 0 and s6b_unplaced is not None
+                  and ev_ids.issubset(call_ids))
+        R.add("S6.2",
+              "timeline_series 投影：points/events 非空 + unplaced_events 显式 + 事件锚定可回查",
+              "EXACT" if s6b_ok else "MISMATCH",
+              f"points={s6b_pts} events={s6b_evs} unplaced={s6b_unplaced} "
+              f"targets_anchored={ev_ids.issubset(call_ids)}")
+    else:
+        R.add("S6.1", "session_trace MCP ↔ CLI trace --json 字节相等",
+              "PARTIAL", "fixtures/dsh/session.jsonl.zstd 不存在——从仓库根运行本脚本")
+
     sys.exit(R.summary())
 
 

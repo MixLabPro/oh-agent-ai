@@ -18,6 +18,7 @@
 
 mod data_status;
 mod session_detail;
+mod session_trace;
 mod session_ref;
 mod sessions_search;
 mod usage_hourly;
@@ -368,6 +369,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         usage_hourly::spec(),
         sessions_search::spec(),
         session_detail::spec(),
+        session_trace::spec(),
     ];
     #[cfg(feature = "mcp-internal")]
     {
@@ -396,6 +398,7 @@ pub fn dispatch(name: &str, args: &Value, data_home: &Path) -> Result<Value, Too
         "usage_hourly" => usage_hourly::run(args, data_home),
         "sessions_search" => sessions_search::run(args, data_home),
         "session_detail" => session_detail::run(args, data_home),
+        "session_trace" => session_trace::run(args, data_home),
         #[cfg(feature = "mcp-internal")]
         "query_sql_readonly" => query_sql_readonly::run(args, data_home),
         other => Err(ToolError::new("internal_error", format!("tool `{other}` registered but not wired"))),
