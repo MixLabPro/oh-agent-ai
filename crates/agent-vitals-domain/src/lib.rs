@@ -25,10 +25,10 @@ pub mod domain;
 
 // 词表扁平别名——`domain/*.rs` 与 `compatibility/*.rs` 用 `crate::evidence` /
 // `crate::host_capability` 等引契约。
-pub use contracts::{evidence, host_capability, r2a, source_identity, usage_fact};
+pub use contracts::{evidence, host_capability, r2a, source_identity, trace_graph, usage_fact};
 
 // domain 计算模块的扁平别名——Phase C 迁出前 `agent_vitals_domain::behavior::*` 等。
 pub use domain::{
     behavior, budget, canonical_audit, coords, cost, data_contract, detectors, duration, findings,
-    mcp, plan, skill, skills, state, subagent, takeover, trajectory, usage, util,
+    mcp, plan, skill, skills, state, subagent, takeover, trace, trajectory, usage, util,
 };
