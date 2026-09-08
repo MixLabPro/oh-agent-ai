@@ -54,6 +54,22 @@ fn make_cursor(ts: i64, fact_id: &str) -> String {
     format!("{ts}:{}:{fact_id}", fact_id.len())
 }
 
+/// `parse_cursor` 的 `pub` 包装——CLI 二进制侧把 `session_detail` 返回的
+/// `next_cursor` 直接透传给同工具的下一调用时复用同一段解析逻辑。**注意**：
+/// `session_detail` 的 cursor 形状（`<ts>:<fact_id_len>:<fact_id>`）与
+/// `sessions_search` 的 cursor（`<total>:<session_key_len>:<session_key>`）
+/// **不通用**——CLI 不能在两个工具之间互换 cursor。错误形态与 MCP envelope
+/// 一致（spec §11 `invalid_argument`）。
+pub fn parse_detail_cursor(c: &str) -> Result<(i64, String), ToolError> {
+    parse_cursor(c).ok_or_else(|| ToolError::new("invalid_argument", "malformed `cursor`"))
+}
+
+/// `make_cursor` 的 `pub` 包装——CLI 侧若需要从已知的 `(ts, fact_id)` 复刻
+/// 一个 cursor 时复用。一般 CLI 用不到，保留给将来需要时。
+pub fn make_detail_cursor(ts: i64, fact_id: &str) -> String {
+    make_cursor(ts, fact_id)
+}
+
 pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let session_ref = args
         .get("session_ref")
@@ -287,5 +303,50 @@ mod tests {
         assert_eq!(env2["data"]["timeline"].as_array().unwrap().len(), 1);
         assert_eq!(env2["data"]["has_more"], false);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // PR #1 (mcp 0.9.1 SQL authority 收口)：CLI 二进制侧会直接调
+    // `parse_detail_cursor` / `make_detail_cursor` 透传 cursor；钉住
+    // round-trip + 错误形态 + 与 sessions_search cursor 不通用。
+    #[test]
+    fn parse_detail_cursor_roundtrip_and_errors() {
+        // fact_id 可能含连字符/下划线（hex64）。
+        let fid = "f_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let ts = 1_757_000_000_123_i64;
+        let cursor = make_detail_cursor(ts, fid);
+        let (got_ts, got_id) = parse_detail_cursor(&cursor).expect("roundtrip ok");
+        assert_eq!(got_ts, ts);
+        assert_eq!(got_id, fid);
+
+        // 长度前缀与实际 fact_id 长度不一致 → invalid_argument。
+        let bad_len = format!("{ts}:{}:{fid}", fid.len() + 1);
+        let err = parse_detail_cursor(&bad_len).unwrap_err();
+        assert_eq!(err.code, "invalid_argument");
+        assert_eq!(err.message, "malformed `cursor`");
+
+        // 形态错位 / 缺段 / 非数字——都应是同一 invalid_argument。
+        for bad in ["", "100", "100:5", "abc:5:xyz", "100:abc:xyz"] {
+            let err = parse_detail_cursor(bad).unwrap_err();
+            assert_eq!(err.code, "invalid_argument", "input={bad:?}");
+        }
+    }
+
+    #[test]
+    fn detail_and_search_cursors_are_not_interchangeable() {
+        // 关键不变量：CLI 不能把 sessions_search 的 cursor 喂给 session_detail
+        // （反之亦然）。格式看起来都是 `<n>:<len>:<body>`，但语义不同；
+        // 透传会被对端工具的解析误读为合法 cursor，导致下游 SQL 默默接受
+        // 错误的 `(after_total, after_key)` / `(after_ts, after_id)`。
+        use super::super::{make_search_cursor, parse_detail_cursor};
+        let search_cursor = make_search_cursor(999, "5:codex|2:s1|5:/repo|6:ns-abc");
+        // 给 detail 解析：它的语义是 (ts, fact_id) —— 把 `999` 当 `ts`、把
+        // `5:codex|2:s1|5:/repo|6:ns-abc` 当 fact_id；解析不会出错（长度前缀对
+        // 得上），但**语义错位**。这条断言钉住「解析通过 ≠ 语义通过」——
+        // CLI 调用方必须按工具选用 cursor。
+        let (parsed_ts, parsed_fid) = parse_detail_cursor(&search_cursor).expect("格式上能解析");
+        assert_eq!(parsed_ts, 999);
+        assert_eq!(parsed_fid, "5:codex|2:s1|5:/repo|6:ns-abc");
+        // 这条单测不直接禁止，但会与 review checklist 协同：CLI 侧 PR #2
+        // 应禁止把任一 cursor 透传给另一工具。
     }
 }

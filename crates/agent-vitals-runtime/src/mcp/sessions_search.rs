@@ -62,6 +62,21 @@ fn make_cursor(total: i64, session_key: &str) -> String {
     format!("{total}:{}:{session_key}", session_key.len())
 }
 
+/// `parse_cursor` 的 `pub` 包装——CLI 二进制侧把 `sessions_search` 返回的
+/// `next_cursor` 直接透传给同工具的下一调用时复用同一段解析逻辑。内部工具仍走
+/// private 版以保留 module 边界。返回 `Result` 而非 `Option`，调用方拿到的
+/// 错误形态与 MCP envelope 一致（spec §11 `invalid_argument`）。
+pub fn parse_search_cursor(c: &str) -> Result<(i64, String), ToolError> {
+    parse_cursor(c).ok_or_else(|| ToolError::new("invalid_argument", "malformed `cursor`"))
+}
+
+/// `make_cursor` 的 `pub` 包装——CLI 侧若需要从已知的 `(total, session_key)`
+/// 复刻一个 cursor（例如不重新跑整次 `sessions_search`、只续页）时复用。
+/// 一般 CLI 用不到（cursor 都是 MCP envelope 直接给），保留给将来需要时。
+pub fn make_search_cursor(total: i64, session_key: &str) -> String {
+    make_cursor(total, session_key)
+}
+
 pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let (start_ms, end_ms, window_label, has_date) = match (
         args.get("date").and_then(Value::as_str),
@@ -301,5 +316,32 @@ mod tests {
             "invalid_argument"
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // PR #1 (mcp 0.9.1 SQL authority 收口)：CLI 二进制侧会直接调
+    // `parse_search_cursor` / `make_search_cursor` 来透传 cursor；这里钉住
+    // round-trip + 错误形态，避免重写时漂移。
+    #[test]
+    fn parse_search_cursor_roundtrip_and_errors() {
+        // 含冒号的 session_key（典型 `5:codex|2:s1|5:/repo|6:ns-abc`）——长度前缀
+        // 是为了不让内嵌冒号误分隔；round-trip 必须稳定。
+        let key = "5:codex|2:s1|5:/repo|6:ns-abc";
+        let total = 1234_i64;
+        let cursor = make_search_cursor(total, key);
+        let (got_total, got_key) = parse_search_cursor(&cursor).expect("roundtrip ok");
+        assert_eq!(got_total, total);
+        assert_eq!(got_key, key);
+
+        // 长度前缀与实际 key 长度不一致 → `invalid_argument`。
+        let bad_len = format!("{total}:{}:{key}", key.len() + 1);
+        let err = parse_search_cursor(&bad_len).unwrap_err();
+        assert_eq!(err.code, "invalid_argument");
+        assert_eq!(err.message, "malformed `cursor`");
+
+        // 缺段、非数字、纯空——三种形态都应是同一 invalid_argument 错误。
+        for bad in ["", "100", "100:5", "abc:5:xyz", "100:abc:xyz"] {
+            let err = parse_search_cursor(bad).unwrap_err();
+            assert_eq!(err.code, "invalid_argument", "input={bad:?}");
+        }
     }
 }

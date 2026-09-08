@@ -24,6 +24,13 @@ mod usage_hourly;
 #[cfg(feature = "mcp-internal")]
 mod query_sql_readonly;
 
+// PR #1 (mcp 0.9.1 SQL authority 收口)：把 cursor 解析/生成的 `pub` 包装
+// 在模块顶层再 re-export 一次，CLI 二进制侧可以 `use agent_vitals_runtime::
+// mcp::{parse_search_cursor, make_search_cursor, parse_detail_cursor,
+// make_detail_cursor}` 直接拿，无需穿透到子模块（子模块仍是 private）。
+pub use session_detail::{make_detail_cursor, parse_detail_cursor};
+pub use sessions_search::{make_search_cursor, parse_search_cursor};
+
 use std::path::{Path, PathBuf};
 
 use agent_vitals_data::authority::{AuthorityDb, AuthorityError};
@@ -211,6 +218,18 @@ pub(super) fn check_as_of_run_id(
             }
         }
     }
+}
+
+/// `check_as_of_run_id` 的 `pub` 包装——CLI 二进制侧在自家工具（如
+/// `sessions list` / `data daily`）实现 `as_of_run_id` 守门时复用同一段
+/// 三态逻辑，避免各写一份漂移（spec §6.4.1）。内部 MCP 工具仍走
+/// `pub(super)` 版以保留 module 边界。
+pub fn check_as_of_run_id_pub(
+    conn: &Connection,
+    args: &Value,
+    warnings: &mut Vec<Value>,
+) -> Result<(), ToolError> {
+    check_as_of_run_id(conn, args, warnings)
 }
 
 /// 业务错误的 envelope 形状（spec §6.4：`tools/call` 结果 `isError: true` +
@@ -556,5 +575,48 @@ mod tests {
             map_open_error(AuthorityError::OlderSchema { found: 0 }).code,
             "schema_migration_required"
         );
+    }
+
+    // PR #1 (mcp 0.9.1 SQL authority 收口)：CLI 二进制侧复用 mcp 模块的
+    // 内部 helper（`check_as_of_run_id` / cursor 解析），确认 wrapper 行为
+    // 与内部版一致——这是 PR #2 「CLI 切 mcp::dispatch」的前置不变式。
+    #[test]
+    fn check_as_of_run_id_pub_wrapper_agrees_with_internal() {
+        // 不传 `as_of_run_id` → 两版都 Ok(())，warnings 不变。
+        let mut w_internal: Vec<Value> = Vec::new();
+        let mut w_pub: Vec<Value> = Vec::new();
+        // 无 conn 也能跑这条快路径——前两个分支只看 `args`，不查 conn。
+        let no_conn = || {
+            // 拿一个空打开的 db——不必真有数据。
+            let home = std::env::temp_dir().join(format!(
+                "avmcp-asof-empty-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&home).unwrap();
+            let path = agent_vitals_data::authority::default_authority_path(&home);
+            let db = AuthorityDb::open(&path, 1).unwrap();
+            (db, home)
+        };
+        let (db, home) = no_conn();
+        check_as_of_run_id(db.conn(), &json!({}), &mut w_internal).unwrap();
+        check_as_of_run_id_pub(db.conn(), &json!({}), &mut w_pub).unwrap();
+        assert_eq!(w_internal, w_pub);
+        assert!(w_internal.is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+
+        // 传了一个 run_id 但库里无任何 sync_runs → 两版都 invalid_argument + 同 message。
+        let (db, home) = no_conn();
+        let mut w_int = Vec::new();
+        let mut w_pub = Vec::new();
+        let err_int = check_as_of_run_id(db.conn(), &json!({"as_of_run_id": "run-x"}), &mut w_int).unwrap_err();
+        let err_pub = check_as_of_run_id_pub(db.conn(), &json!({"as_of_run_id": "run-x"}), &mut w_pub).unwrap_err();
+        assert_eq!(err_int.code, err_pub.code);
+        assert_eq!(err_int.code, "invalid_argument");
+        assert_eq!(err_int.message, err_pub.message);
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
