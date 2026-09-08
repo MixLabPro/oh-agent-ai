@@ -1,6 +1,6 @@
 # Agent Vitals v0.10 Value Loop 架构规格
 
-> 状态：架构草案 **R2**（2026-09-08；R1 为 2026-09-04）
+> 状态：架构草案 **R2.1**（2026-09-08；R2 同日，R1 为 2026-09-04）
 > 前置：`AGENT_VITALS_V0_9_DATA_VALUE_ARCHITECTURE_SPEC.md` 已发布并通过其 Definition of Done；
 > v0.9.1 SQL 权威库（schema v2）已落 main。
 > 定位：把可信数据转化为普通用户可理解、可执行、可验证收益的问题解决闭环。
@@ -139,6 +139,12 @@ unresolved 口径（`ATTRIBUTABLE_WASTE.md` §6/§6.7）。
    `counterfactual_note` 说明跨币（§10.6）。
 5. `unpriced_tokens` 不参与任何 savings 派生——它本身已是无价卡 token，强行代入会编造节省。
 6. **每一个 savings 数字都必须能下钻到产生它的 `fact_id` 集合**（§9 DoD 第 11 条）。
+7. **不同 issue_type 的 `potential` 之间也不得相加**（§2.4.2）——这是 `ATTRIBUTABLE_WASTE`
+   §2 已经论证过的结论，比第 3 条更强：三档不能相加是因为语义不同，跨类别不能相加是因为
+   **归因粒度不同且没有 token-span 级血缘**。Savings 页面的「合计」在 `WasteClaim` 互斥
+   证明落地前**不存在**（§2.4.3）。
+8. **`potential` 是否允许存在，由该 issue 的 basis 三元组决定**（§2.4.1）——不是所有 issue
+   都配有 potential savings。绝大多数只能产 `opportunity` / `suspected`，不进任何分子。
 
 #### 2.2.2 remedy catalog 的种子来自 v0.9 `plan`
 
@@ -159,6 +165,108 @@ trim-description / shadow），由 `agent_vitals_domain::plan::build_plan(report
 **不出数**，`savings_coverage` 标 `unavailable`。理由：`assets/pricing.json` 是业务数据、
 改价不需要 golden `--update`，用 9 月价卡去减 7 月 baseline 得到的 realized savings 是
 编造的。
+
+### 2.4 浪费词表继承 `ATTRIBUTABLE_WASTE.md`（**R2.1 新增，不得另起炉灶**）
+
+`docs/ATTRIBUTABLE_WASTE.md`（修订稿 v3，2026-09-02）是**浪费定义的真相源**，其 v1 被
+评审推翻的三处 P0 与本 spec R1 犯的是同类错误。v0.10 的 `IssueInstance` / `issue_type` /
+savings **全部继承该文档的词表**，不新造。
+
+#### 2.4.1 basis 三维 + classification 四态
+
+R2 原先只给了一个 `savings_coverage` 三态，那是「覆盖多全」；**证据等级是另一个正交维度**，
+必须一并落库（`ATTRIBUTABLE_WASTE` §3）：
+
+```text
+measurement_basis: measured | derived | estimated | unavailable
+attribution_basis: evidence-confirmed | inferred | benchmark-counterfactual
+                 | human-confirmed | none
+pricing_basis:     provider-reported | catalog-provider | catalog-fallback
+                 | user-reported-invoice | subscription-allocated | unpriced
+classification:    confirmed | opportunity | suspected | review
+```
+
+**准入规则（§8 铁律第 1 条）**：只有 `measurement_basis = measured` **且**
+`attribution_basis ∈ {evidence-confirmed, human-confirmed}` 的 claim 可以进入「确认浪费」
+分子、并因此拥有 money 口径的 `potential`。其余一律落 `opportunity`（估算机会）或
+`suspected`（告警）或 `review`（待复核），**永远不在分子里**。
+
+各 issue 族的当前 basis 真值表（照抄 `ATTRIBUTABLE_WASTE` §3，实现时不得放宽）：
+
+| issue 族 | measurement | attribution | 能否进确认分子 |
+|---|---|---|---|
+| W1 缓存低命中 | measured（命中率本身） | inferred（「本可命中」是推测） | **否**，默认 suspected 告警 |
+| SV-COST-01 重复相同结果 | **estimated**（`est_tokens × (n−1)`） | inferred（「第一次是必要」是假设） | **否**，估算机会 |
+| SV-COST-02 失败重试上下文增长 | **measured**（request_metrics 差值） | **inferred**（期间含 assistant 输出等） | **否**，估算机会 |
+| W3 长尾 session | derived | **human-confirmed**（复核后） | 仅复核确认的**具体请求/金额**进 |
+| W4 常驻上下文（僵尸 Skill） | estimated | none | **否**，估算机会 |
+| DuplicateProviderRequest | measured | evidence-confirmed | **是** |
+
+> **对 §4「首批 remedy」的直接后果**：R2 §4 点名的「禁用长期未触发且证据充分的 Skill」
+> 属于 **W4，basis = (estimated, none)**——它**不能产出 money 口径的确认节省**。
+> 它仍是合理的首批 remedy（动作可逆、可预览），但其收益必须呈现为
+> `classification=opportunity` 的**估算机会**，且 `attribution_basis=none` 必须在 UI 上
+> 可见。`ATTRIBUTABLE_WASTE` §4 的诚实性边界写死了理由：`tier1_tokens` 是 tokenizer 估算；
+> `loaded` 只证明 **catalog-visible**，不证明正文被读；`skillUsage=0` 是终身零触发，
+> **不证明该 skill 没有发现/约束/安全价值**。
+
+#### 2.4.2 issue_type 的封闭词表（不新造）
+
+v0.10 的 `issue_type` 从既有分类派生，**不发明新族**：
+
+| issue_type | 来源 | 现状 |
+|---|---|---|
+| `cache_inefficiency_suspect` | W1 | 需 eligibility 实现（§2.4.4 第 3 条） |
+| `repeated_identical_result` | SV-COST-01（`waste.rs` 已实现） | **DSH-only**，需跨宿主化 |
+| `retry_context_growth` | SV-COST-02（`waste.rs` 已实现） | **DSH-only**，需跨宿主化 |
+| `repeated_tool_call` | SV611（`trajectory.rs`） | 行为告警，**不计费用** |
+| `duplicate_provider_request` | W2 拆分项 | 唯一可进确认分子的族，未实现 |
+| `resident_opportunity` | W4（`plan::build_plan` 的 zombie 项） | 估算机会 |
+| `review_queue` | W3 | 需人工确认记录结构（§2.4.4 第 4 条） |
+| `accounting_shadow` | W2 拆分项 | **永远不算浪费**——Codex `custom_tool_call{exec}` ↔ `CommandExecution` 是同一逻辑执行的两份日志，ingestion 去重，成本为零 |
+
+`accounting_shadow` 必须显式存在于词表里且恒为零，而不是「不实现」——它是一个**主动排除**
+的会计类别，写进词表才能防止后来者把影子记录当成双倍计费（§8 铁律第 2 条）。
+
+#### 2.4.3 跨类别不可相加，`WasteClaim` 是合计的前提
+
+`ATTRIBUTABLE_WASTE` §2 已论证：四类归因粒度不同（请求级输入 token / 工具执行 / 整个
+session / 跨 session 常驻），且**当前日志没有 token-span 级血缘**——重复工具结果会进入
+后续输入（同时落入 W1），skill 描述也可能属于 cached/uncached 输入，因此无法知道某段
+输入成本究竟属于哪一类，`W1→W2→W3→W4` 优先扣减顺序无法实现。
+
+因此 **Savings 页面在 `WasteClaim` 落地前不提供跨 issue_type 的「合计」数字**，只按族
+并列展示。合计的前提是 `ATTRIBUTABLE_WASTE` §9 未落地第 1 条：`WasteClaim` 统一声明
+（core 类型）+ **互斥证明测试**（证明多个 claim 不占用同一笔 request/token amount）。
+`WasteClaim` 的字段见该文档 §2，v0.10 直接复用，**不重新设计**。
+
+#### 2.4.4 `ATTRIBUTABLE_WASTE` §9 未落地清单 = v0.10 的前置 backlog
+
+该文档 §9 列了 8 条未落地项，其中 5 条是 v0.10-B/C 的**硬前置**：
+
+| # | 未落地项 | v0.10 归属 |
+|---|---|---|
+| 1 | `WasteClaim` 统一声明 + 互斥证明测试 | **v0.10-B 前置**（§2.4.3；无它则无合计） |
+| 2 | 审计覆盖率计算（eligible audited cost） | **v0.10-B 前置**（§5 护栏；无它则浪费率分母不诚实） |
+| 3 | W1 eligibility + 90% 降级为可配告警阈值 | v0.10-B（`cache_inefficiency_suspect` 可用性前提） |
+| 4 | W3 人工确认记录结构 | **v0.10-B 前置**（§10.2.7；IssueInstance 的复核工作流） |
+| 5 | W4 exposure count + `catalog-visible ≠ body loaded` 展示拆分 | v0.10-B（首批 remedy 的诚实性前提，§2.4.1） |
+| 6 | BillingSource + 套餐金额输入位 | 部分已落（`pricing.json` 的 `subscriptions`）；账单确认待 |
+| 7 | 月度感知成本投影（套餐/按量分卡） | v0.10-A Overview（§5） |
+| 8 | 历史价格稳定性（pricing card effective date + `pricing_version`） | **已在 R2 §2.3 落为 `pricing_snapshot_id`**——两处独立推出同一结论，互相印证 |
+
+#### 2.4.5 已实现的 waste 规则目前只覆盖一个宿主（**实施风险**）
+
+`SV-COST-01` / `SV-COST-02` 的实现位于
+**`crates/agent-vitals-hosts/src/hosts/dsh/sessions/waste.rs`** ↔
+`packages/agent-vitals-python/agent_vitals/agent/waste.py`（字节级 parity，wasm 导出
+`structural_waste`）——即**只有 DSH 宿主有**。`ATTRIBUTABLE_WASTE` 全篇建立在这两条规则上，
+但 v0.10-A 的门槛是**三宿主**确定性图。
+
+因此 v0.10-B 必须显式包含「waste 规则跨宿主化」的工作量：把 `waste.rs` 从
+`hosts/dsh/sessions/` 提升为跨宿主纯规则（输入是 `CanonicalSession`，与 SV601–SV614 同
+形态），Claude Code / Codex 缺失的维度按既有纪律报 `Unavailable` 而非 `MeasuredZero`。
+**这项工作 R1/R2 均未提及，是 v0.10-B 排期里最容易被漏掉的一块。**
 
 ## 3. 评估策略
 
@@ -228,6 +336,54 @@ Settings   宿主、套餐/按量、数据源、隐私、LLM 授权与预算
 
 净变化：5 tab → 6 tab（Token 日历并入 Overview，新增 Traces / Savings）。Tauri 工作台
 HTML 是单一渲染端，新增 tab 必须在 layout 上预留位置。
+
+### 5.1 三层指标与 tab 的对应（继承 `ATTRIBUTABLE_WASTE` §1）
+
+该文档已定义「感知 — 诊断 — 归因」三层，各回答一个问题、各有不负责的事。v0.10 的 tab
+划分**就是这三层**，不要重新发明：
+
+| 层 | 用户问题 | 主指标 | **不负责什么** | v0.10 tab |
+|---|---|---|---|---|
+| **感知层** | 本月花了多少、换来多少模型处理量？ | 月度感知成本、cost/M processed tokens、套餐/按量拆分 | **不证明某笔钱浪费** | Overview |
+| **诊断层** | 为什么单位成本变高/变低？ | 缓存率、模型/provider 结构、高峰占比、fresh/output 四桶 | **不直接进入浪费分子** | Traces |
+| **归因层** | 哪些请求/会话/常驻资源值得优化？ | 确认浪费、估算机会、待复核异常、SV 证据 | **不冒充账单或反事实节省** | Issues / Savings |
+
+**Overview 不得展示归因层数字。** R2 §5 原先给 Overview 加了「可避免浪费」tile——按本表，
+那是归因层的量，放进感知层就是「感知冒充归因」（§8 铁律第 9 条）。Overview 的浪费相关
+呈现只能是**跳转入口**（「N 个待处理问题 →」），数字本体留在 Issues/Savings。
+
+`ATTRIBUTABLE_WASTE` §7 给出的下钻路径即 Overview → Traces 的交互设计，直接复用：
+
+```text
+单位处理成本上升
+├─ 更贵模型/provider 占比上升
+├─ 缓存命中下降
+├─ 高峰时段占比上升
+├─ output 占比上升
+└─ 套餐观察用量下降（固定费被更少 token 摊销）
+```
+
+### 5.2 两个护栏必须同屏（**硬约束**）
+
+`ATTRIBUTABLE_WASTE` §1 写死：*用总成本/总用量直接作分母，一个什么都测不到的宿主会得到
+漂亮的 0%，所以审计覆盖率必须同屏*。落到 v0.10：
+
+- **Overview 的感知成本旁必须有「数据覆盖率」**（感知层护栏）；
+- **Savings 的任何比率旁必须有「审计覆盖率」**（归因层护栏，= eligible audited
+  population / observed population）。
+
+浪费率的分母是 **eligible audited spend/usage**，**不是总成本**。`eligible` 按「该规则 +
+该 provider/billing mode 所需字段 + 事件能归因到请求」判定，**不是机械要求四桶全有**；
+provider 不适用的桶不因缺场被误判为不合格。
+
+比率的单位随 billing mode 变，UI 可统一叫「确认浪费率」但**必须同时标 `basis`**：
+
+```text
+按量: confirmed waste spend  / eligible audited spend    → basis=spend
+订阅: confirmed avoidable usage / eligible audited usage → basis=usage
+```
+
+**固定套餐没有边际 token 账单，不得先把套餐费摊成伪单价再冒充 confirmed waste spend。**
 
 **不改 DSH 插件的 projection 名。** `behaviorFindings` 是 host/client 两半之间的契约
 （`integrations/dsh-client/src/host/index.ts` 注册 + `client/index.cts` 的 `useProjection`
@@ -380,7 +536,7 @@ CLI/Tauri 只发 command、请求授权并展示 DTO；不得复制 token/cost/f
 
 ### 阶段规模提示
 
-§6.2 一次列了 10 个新 service + 5 张状态表 + 3 个新 tab + 执行/回滚闭环。参照 v0.9 →
+§6.2 一次列了 10 个新 service + 6 张状态表 + 3 个新 tab + 执行/回滚闭环。参照 v0.9 →
 v0.9.1 的实际节奏（数据面三阶段 + 三轮审查循环 + 一次 SQL 权威库迁移，且 Stage 5b /
 Data MCP M1 仍未收口），这是 2–3 个版本的量。**v0.10-A 必须能单独发布并有独立价值**
 （只做 TraceGraph + Traces tab + coverage 降级显示，不依赖 Issues/Savings）。
@@ -420,6 +576,30 @@ Data MCP M1 仍未收口），这是 2–3 个版本的量。**v0.10-A 必须能
 11. **savings 的每一个数字都必须能下钻到产生它的 `fact_id` 集合。** 不能下钻的数字就是
     不能对账的数字——这是把 §2.2.1 那类口径错误挡在发布之外的唯一可操作手段。
 
+### 9.1 继承 `ATTRIBUTABLE_WASTE` §8 的诚实性铁律（**R2.1 新增**）
+
+以下 9 条是该文档已写死的实现级约束，v0.10 全部继承；每一条都对应本 spec 曾经或可能
+犯的错：
+
+1. **证据不足 = 不计**。分子只收 `measured`（attribution 可证明）或稳定 `human-confirmed`；
+   其余进「估算机会」「待复核」，**永远不在分子**（§2.4.1）。
+2. **触发证据缺失 ≠ 零触发**（W4）；**首个请求无前缀 ≠ 缓存 bug**（W1）；**长尾 ≠ 全浪费**
+   （W3）；**影子记录 ≠ 双倍计费**（`accounting_shadow`，§2.4.2）。
+3. **标签不因措辞转化**——basis 三字段分离，「命中率低」是观察，「缓存坏了」是结论，
+   互相不许代写。
+4. **反事实隔离**——允许展示明确标为 `estimated` / `benchmark-counterfactual` 的机会，
+   但**绝不把「若不优化会花 X」写成生产实付节省或放进 confirmed 分子**。
+   *（R1 的 `potential = nominal_cost − metered_spend` 正是违反本条，见 §2.2.1 硬规则 1。）*
+5. **baseline 必须带语料期标签**——DSH 08-18 前数据（bug 期）不进任何计算；Claude Code
+   语料无已知事故分界，只做结构不做前后对照。v0.10 的 `outcome_measurements.baseline_*`
+   窗口必须能声明其语料期，落在 bug 期的 baseline 不得用于 realized 计算。
+6. **无基线不告警（FR-05）**——结构性浪费（SV-COST）与相对浪费（缓存）分开；混进来
+   用户会觉得系统冤枉自己的正常行为。
+7. **分母诚实**——浪费率不用总成本作分母，审计覆盖率必须同屏（§5.2）。
+8. **Host ≠ BillingSource**——执行入口不决定收费方；混合路由逐 usage 归属，归属未知就
+   `unavailable`。这与 v0.9 的「归属粒度是 (host, provider) 而非 host」同源。
+9. **感知不冒充归因**——cost/M 是摊销/混合效率指标，不能单凭变高变低证明浪费（§5.1）。
+
 ## 10. v0.10 schema v3 增量
 
 > 本节定义 v0.10 在 v0.9.1 schema v2 之上的持久化增量；派生数据（TraceGraph /
@@ -442,7 +622,7 @@ Data MCP M1 仍未收口），这是 2–3 个版本的量。**v0.10-A 必须能
   （`source_identity` 隐私护栏）。issue / receipt / outcome 不带这个维度，多机同步或导出
   时会串。
 
-### 10.2 新增表（5 张状态表 + 1 张可选 cache）
+### 10.2 新增表（6 张状态表 + 1 张可选 cache）
 
 > remedy catalog **不入库**，见 §10.8。
 
@@ -462,6 +642,13 @@ CREATE TABLE issue_instances (
     summary TEXT,
     root_cause TEXT,
     instance_fingerprint TEXT NOT NULL,    -- fnv1a64_hex(canonical_json(UsageFact[]))
+    -- basis 三维 + classification 四态（§2.4.1，继承 ATTRIBUTABLE_WASTE §3）
+    measurement_basis TEXT NOT NULL,       -- measured / derived / estimated / unavailable
+    CHECK (measurement_basis IN ('measured','derived','estimated','unavailable')),
+    attribution_basis TEXT NOT NULL,       -- evidence-confirmed / inferred / benchmark-counterfactual / human-confirmed / none
+    CHECK (attribution_basis IN ('evidence-confirmed','inferred','benchmark-counterfactual','human-confirmed','none')),
+    classification TEXT NOT NULL,          -- confirmed / opportunity / suspected / review
+    CHECK (classification IN ('confirmed','opportunity','suspected','review')),
     opened_at_ms INTEGER NOT NULL,
     closed_at_ms INTEGER,
     metadata_json TEXT,
@@ -568,6 +755,10 @@ CREATE TABLE outcome_measurements (
     observed_tokens INTEGER,
     -- 严格只填一档：potential / validated / realized 绝不三档相加（§9 DoD 第 6 条）
     savings_basis TEXT NOT NULL,           -- 'nominal_cost' / 'metered_spend'
+    pricing_basis TEXT NOT NULL,           -- §2.4.1：provider-reported / catalog-provider /
+                                           --   catalog-fallback / user-reported-invoice /
+                                           --   subscription-allocated / unpriced
+    corpus_period TEXT,                    -- §9.1 铁律 5：语料期标签；bug 期 baseline 不得用于 realized
     savings_kind TEXT NOT NULL,            -- 'potential' / 'validated' / 'realized'
     CHECK (savings_kind IN ('potential','validated','realized')),
     savings_value_minor INTEGER,           -- NULL 仅表示「未测量」
@@ -610,6 +801,37 @@ CREATE INDEX idx_llm_cache_expires ON llm_evaluator_cache(expires_at_ms);
 > feature 只 gate 读写路径。**schema 版本必须唯一决定表集合。** 若按 §7 建议延后到 v0.11，
 > 则它属于 schema v4，不进 v3。
 
+#### 10.2.7 `waste_reviews`（v0.10-B，W3 人工确认记录）
+
+`ATTRIBUTABLE_WASTE` §4 的 W3 明确：人工确认后记录的是**明确的浪费请求或金额**，不是
+「整个异常 session」；且**不带 revision 与 reviewer 的确认记录，在 session 更新、价格表
+更新或重复审核后无法复现**。该文档 §9 未落地第 4 条即本表。
+
+```sql
+CREATE TABLE waste_reviews (
+    review_id TEXT PRIMARY KEY,            -- fnv1a64_hex(canonical_json(...))
+    machine_namespace TEXT NOT NULL,
+    issue_id TEXT NOT NULL,
+    session_key TEXT NOT NULL,
+    session_revision TEXT NOT NULL,        -- 无 revision 则复核不可复现
+    confirmed_request_ids_json TEXT NOT NULL,  -- 具体请求，不是整个 session
+    confirmed_amount_minor INTEGER,
+    confirmed_currency TEXT,
+    confirmed_tokens INTEGER,
+    pricing_basis TEXT NOT NULL,           -- §2.4.1
+    pricing_snapshot_id TEXT,              -- §2.3：价表更新后仍可复现
+    reviewer TEXT NOT NULL,                -- 人类标识须 hash（§10.6）
+    reviewed_at_ms INTEGER NOT NULL,
+    rationale TEXT,
+    UNIQUE(issue_id, session_key, session_revision, reviewer),
+    FOREIGN KEY (issue_id) REFERENCES issue_instances(issue_id)
+);
+CREATE INDEX idx_review_issue ON waste_reviews(issue_id);
+```
+
+**这是 `attribution_basis='human-confirmed'` 的唯一合法来源**：没有对应
+`waste_reviews` 行的 issue，不得把 `classification` 置为 `confirmed`（§2.4.1 准入规则）。
+
 ### 10.3 派生数据不入 schema（性能与权威性双约束）
 
 | 契约 | 不入 schema 的原因 | memo/缓存策略 |
@@ -640,7 +862,8 @@ v0.10 的落地动作：
 1. `SCHEMA_VERSION` 常量 2 → 3；
 2. 在 `ensure_schema` 的 `Ordering::Less` 分支实现 v2 → v3 迁移：`CREATE TABLE`
    `issue_instances` / `issue_status_transitions` / `issue_remedies` / `action_receipts` /
-   `outcome_measurements` + indexes（若 §10.2.6 随 v3 落地则一并无条件建表）；
+   `outcome_measurements` / `waste_reviews` + indexes（若 §10.2.6 随 v3 落地则一并无条件
+   建表）；
 3. 迁移过程写 `migrations` 表（checkpoint / error_detail，v0.9.1 已有）；
 4. `UPDATE schema_meta SET value='3' WHERE key='schema_version'`；
 5. `data-migrate` 子命令接线；
@@ -664,6 +887,7 @@ v0.9.1 retention 规则（13 个自然月，含当月，cutoff = current − 12�
 | `issue_remedies` | 13 个月 |
 | `action_receipts` | 13 个月 |
 | `outcome_measurements` | 13 个月 |
+| `waste_reviews` | **不过期**——人工复核记录是 `confirmed` 分子的唯一凭据，清掉等于让历史确认浪费无法复现 |
 | `llm_evaluator_cache` | 按 `expires_at_ms` 独立 sweep，不走 13 个月 fencepost |
 
 `sync_facts` 每天首轮在 `.ingest.lock` 内自动跑一次 sweep；
@@ -775,7 +999,7 @@ R1 §11 是一份「待合并 patch」影子章节：同一件事在文档里有
 CLAUDE.md 的「性能形状」段目前也还写着 `codex_merged_cached`，同属 v0.9.1 SQL 迁移后的
 遗留，需一并订正。
 
-## 12. R1 → R2 changelog
+## 12. changelog
 
 | # | 改动 | 位置 | 来源 finding |
 |---|---|---|---|
@@ -800,3 +1024,28 @@ CLAUDE.md 的「性能形状」段目前也还写着 `codex_merged_cached`，同
 | 19 | 新增 §10.9 导出双路径覆盖新表 | §10.9 | 补充项 |
 | 20 | DoD 新增第 11 条「savings 可下钻到 fact_id」；新增 `source_fact_ids_json` 字段 | §9 / §10.2.5 | 补充项 |
 | 21 | 范围建议：v0.10-D 降 v0.11 候选、v0.10-C 首批 1 条 remedy、DoD 第 10 条 3 → 1（**待 PM 拍板**） | §7 / §9 | 范围 |
+
+### R2 → R2.1（接入 `ATTRIBUTABLE_WASTE.md` 修订稿 v3）
+
+R2 把「浪费」当成一个待定义的新概念来写，但 `docs/ATTRIBUTABLE_WASTE.md`（2026-09-02）
+已经是该概念的**真相源**，且其 v1 被评审推翻的三处 P0 与本 spec R1 犯的是同类错误。
+R2.1 全面继承其词表与铁律，**不另起炉灶**。
+
+| # | 改动 | 位置 | 来源 |
+|---|---|---|---|
+| 22 | 新增 §2.4：basis 三维（measurement / attribution / pricing）+ classification 四态，含逐 issue 族 basis 真值表与「进确认分子」准入规则 | §2.4.1 | ATTR §3 / §8 铁律 1 |
+| 23 | `potential` 新增硬规则 7/8：**跨 issue_type 也不得相加**（归因粒度不同 + 无 token-span 血缘）；`potential` 是否允许存在由 basis 三元组决定 | §2.2.1 / §2.4.3 | ATTR §2 |
+| 24 | issue_type 改为**封闭词表**（8 族，从 W1–W4 / SV-COST / SV611 派生），含恒为零的 `accounting_shadow`（主动排除的会计类别，防止影子记录被当双倍计费） | §2.4.2 | ATTR §4 |
+| 25 | 点明 §4 首批 remedy「禁用僵尸 Skill」属 W4、basis=(estimated, none)，**不能产 money 口径确认节省**，只能呈现为估算机会 | §2.4.1 | ATTR §4 W4 |
+| 26 | 新增 §5.1 三层指标（感知/诊断/归因）↔ tab 对应；**撤销 R2 给 Overview 加的「可避免浪费」数字 tile**（感知层不得展示归因层数字），改为跳转入口 | §5.1 | ATTR §1 / §8 铁律 9 |
+| 27 | 新增 §5.2 两个护栏必须同屏；浪费率分母是 eligible audited spend/usage **不是总成本**；比率须标 `basis=spend\|usage`；套餐费不得摊成伪单价 | §5.2 | ATTR §1 / §8 铁律 7 |
+| 28 | 新增 §9.1：继承 9 条诚实性铁律为 DoD。其中铁律 4「反事实隔离」独立证实了 F1 的判断；铁律 5「baseline 须带语料期标签」为新增约束 | §9.1 | ATTR §8 |
+| 29 | `issue_instances` 增 `measurement_basis` / `attribution_basis` / `classification` 三列 + CHECK | §10.2.1 | ATTR §3 |
+| 30 | `outcome_measurements` 增 `pricing_basis` / `corpus_period` | §10.2.5 | ATTR §3 / §8 铁律 5 |
+| 31 | 新增 §10.2.7 `waste_reviews` 表（session_revision / confirmed_request_ids / reviewer / reviewed_at）——`human-confirmed` 的唯一合法来源，retention 豁免 | §10.2.7 / §10.5 | ATTR §4 W3 / §9 未落地 4 |
+| 32 | 新增 §2.4.4：把 ATTR §9 的 8 条未落地项映射为 v0.10 前置 backlog（其中 5 条是 B/C 硬前置） | §2.4.4 | ATTR §9 |
+| 33 | **新增实施风险 §2.4.5**：`SV-COST-01/02` 的实现只在 `hosts/dsh/sessions/waste.rs`（DSH-only），而 v0.10-A 门槛是三宿主——waste 规则跨宿主化是 v0.10-B 里最易漏排的工作量，R1/R2 均未提及 | §2.4.5 | 代码核实 |
+
+> **互相印证的一条**：ATTR §9 未落地第 8 条「pricing card 加 effective date + 月投影引用
+> `pricing_version`，防止当前价表静默重写历史」与 R2 审查 F4 独立推出的
+> `pricing_snapshot_id` 是同一结论——两条不同路径得到同一约束，可信度较高，建议优先实现。
