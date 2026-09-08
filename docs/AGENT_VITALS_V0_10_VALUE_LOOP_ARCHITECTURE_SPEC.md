@@ -1,6 +1,6 @@
 # Agent Vitals v0.10 Value Loop 架构规格
 
-> 状态：架构草案 **R2.1**（2026-09-08；R2 同日，R1 为 2026-09-04）
+> 状态：架构草案 **R2.2**（2026-09-08；R2/R2.1 同日，R1 为 2026-09-04）
 > 前置：`AGENT_VITALS_V0_9_DATA_VALUE_ARCHITECTURE_SPEC.md` 已发布并通过其 Definition of Done；
 > v0.9.1 SQL 权威库（schema v2）已落 main。
 > 定位：把可信数据转化为普通用户可理解、可执行、可验证收益的问题解决闭环。
@@ -50,15 +50,24 @@ pub struct TraceGraph {
 }
 
 pub struct TraceNode {
-    pub node_id: String,                 // fnv1a64_hex(canonical_json(...))，与 UsageFact.fact_id 同源语义
+    pub node_id: String,                 // fnv1a64_hex(canonical_json(...))：稳定主键，仅用于幂等
+    // ── 序：与 vitals-core::CanonicalEvent 同义（§2.1.1）──────────────────
+    pub scope: String,                   // 编号空间：主会话 "main" / 子代理
+    pub ordinal: u64,                    // **权威执行顺序**；scope 内严格递增，跨 scope 不可比
+    pub native: String,                  // 宿主原生事件 id（Seq|Uuid|CallId|TurnId）；**跨 scope join 只走它**
+    // ──────────────────────────────────────────────────────────────────
     pub node_type: TraceNodeType,        // user_task / assistant_turn / model_invocation / tool_call / subagent / compaction / retry / outcome
     pub fact_id: String,                 // 引用的 UsageFact.fact_id（v0.9 已落地，形如 "uf1-<hex>"）
     pub evidence_ref: String,            // 引用的 evidence_ref（空串占位，见 §10.6 空串规则的适用边界）
     pub parent_node_id: Option<String>,  // 不存在的 parent 在 TraceCoverage 里标 missing（§0 原则）
-    pub started_at_ms: Option<i64>,      // 不存在时 None，**不得用 mtime / 数组顺序补造**（§0 + §8 + §9）
+    pub branch_state: BranchState,       // live / abandoned / unknown —— 废弃分叉进 unmetered，**不归零**
+    pub started_at_ms: Option<i64>,      // **仅用于展示与时间分桶，不参与排序**；缺失时 None，
+                                         //   不得用 mtime / 数组顺序补造（§0 + §8 + §9）
     pub ended_at_ms: Option<i64>,
     pub status: Option<TraceStatus>,     // ok / error / timeout / cancelled / unknown
-    pub metadata: serde_json::Value,
+    pub provenance: Provenance,          // measured / derived / lossy —— lossy 不得与 measured 同置信度
+    pub values: BTreeMap<String, f64>,   // 量值；**缺的键不出现**（不是填 0/null）
+    pub metadata: serde_json::Value,     // 非量值的附加信息
 }
 
 pub struct TraceEdge {
@@ -68,18 +77,64 @@ pub struct TraceEdge {
     pub fact_id: String,                 // 引用的 UsageFact.fact_id
     pub evidence_ref: String,            // 空串占位
     pub edge_type: TraceEdgeType,        // causal / temporal / data_flow / control_flow
+    pub provenance: Provenance,          // subagent 父子边尤其需要——DSH parentSession 实测 5/19 可靠
 }
 
 pub struct TraceCoverage {
     pub missing_parent: u32,             // 节点存在但 parent_node_id 不可解析
     pub missing_time: u32,               // started_at_ms 或 ended_at_ms 缺失（一个节点最多计 1）
     pub missing_status: u32,             // status 字段缺失
+    pub unmetered_nodes: u32,            // branch_state = abandoned/unknown —— 缺口出现在覆盖率里
     pub total_nodes: u32,
     pub total_edges: u32,
 }
 ```
 
-`fact_id` 与 v0.9 `source_identity::fnv1a64_hex` 同源——图节点/边**不得自造 ID**。
+`fact_id` 与 v0.9 `source_identity::fnv1a64_hex` 同源。**「不得自造 ID」的准确含义是
+「不得自造 join 键」**：`node_id` 是我们合成的稳定主键（幂等用），而**跨 scope 的关联
+只能走 `native`**（宿主自己的 id），绝不走 `ordinal` 或哈希——子代理会话是另一个编号空间。
+
+#### 2.1.1 序与线性化继承 `TRAJECTORY_TIMELINE_SPEC.md`（**R2.2 新增**）
+
+完整对账见 `docs/TRACEGRAPH_TIMELINE_RECONCILIATION.md`。要点：
+
+- **时间戳永不参与排序。** 权威顺序是 `(scope, ordinal)`，与 `vitals-core::CanonicalEvent`
+  同义（`crates/vitals-core/src/event.rs`：`ordinal: u64` + `occurred_at_ms: Option<i64>`
+  「只用于展示和时间窗口，不参与排序」，单测 `occurred_at_ms_missing_is_not_zero` 钉着）。
+  理由：时钟漂移 / resume 续写 / backfill 补录会让时间戳缺失或乱序。
+- **`TraceGraph` 是树，不选线性化；线性化在投影函数上声明。** 三个宿主日志里都躺着用户
+  放弃过的路径，画线前必须先决定画哪条。`branch_state` 记录哪些分支废弃，
+  `TraceCoverage.unmetered_nodes` 让缺口出现在覆盖率里——**不归零、不静默合并**。
+- **线性化信号是读来的，不是发明的**：Claude Code 的 `leafUuid`（实测 281 条 `last-prompt`
+  全带）+ `isSidechain`；Codex 的 `thread_rolled_back`；DSH 的 `seedLength` 前缀。
+- **撞名警告**：`hosts/*/sources/usage_fact.rs` 里的 `time_basis: "native"` /
+  `identity_basis: "native"` 是 **basis 取值**（「时间戳来自宿主原生字段」），与本节
+  `TraceNode.native`（宿主原生事件 id）**是两个概念**，勿混。
+- **`task_id` 必须按三分法区分**，不要再引入一个含糊字段：`/goal` 斜杠命令是**文本**
+  （需 parse `<command-args>`，lossy）；结构化 task 跟踪（Claude Code `TaskCreate`、
+  WorkBuddy `tasks/*.json`）语义是「待办列表」不是「会话目标」，作独立列表维度；
+  Codex 的 `task` **就是 turn**。`TraceNode.task_id` 只承载最后一种（= turn）。
+
+#### 2.1.2 timeline_series 是 TraceGraph 的投影，几何**不得新写第二份**
+
+```text
+TraceGraph  --project(linearization)-->  timeline_series  --buildGeometry-->  SVG
+  （树，分析）          v0.10 新增纯函数        （线，绘图）      **已落地，勿动**
+```
+
+`buildGeometry` / `buildTimeline` 已经是**唯一一份**几何实现
+（`apps/desktop/src-tauri/ui/timeline.js`，字节锁步副本
+`integrations/dsh-client/src/client/timeline-shared.cjs`，由
+`scripts/verify-timeline-geometry.mjs` + `tests/test_timeline_lockstep.py` 守）。它的存在
+理由就是 2026-09-01 之前仓库里有两份各画各的折线图、语义还不同。
+
+**§5 的 Traces tab 必须调用它**，v0.10 只新增「TraceGraph → geometry spec」的数据准备
+函数。**新增第二份几何 = 复刻「比例尺算错了不报错、只有人眼看出来」的原始风险**
+（见 §7 v0.10-A 门槛 5）。
+
+几何层已钉死的两条不变量自动继承：**事件点一个不丢**（`eventsIn === eventsOut`，曲线可
+抽稀、事件标记不参与聚合）；**缺数据留缺口不连直线**（不把 null 当 0，不跨未测量的缺口
+插值）。
 
 **不设单值 `coverage_ratio`。** 三个缺失计数必须原样呈现：一个 0..1 的比率会诱导跨会话
 求平均，而本仓库的纪律是「部分覆盖必须打标，不得按精确值聚合」（`cost.rs::priced_day`
@@ -463,6 +518,21 @@ agent-vitals-runtime/
   projection_service.rs
 ```
 
+> **`vitals-core/graph.rs` 有边界风险**：`TRAJECTORY_TIMELINE_SPEC` §6 明写「**vitals-core
+> 不碰时间线**」，且 `crates/vitals-core/tests/dependency_boundary.rs` 的
+> `module_file_names_are_domain_free` / `public_item_identifiers_are_domain_free` 两条断言
+> 在守——`graph.rs` 里只要出现 domain/呈现词汇（trace、session、turn、timeline、hour…）
+> 就会红。因此 `graph.rs` 只放**无语义的图原语**（节点/边/可达性/拓扑序），
+> **任何 trace 语义留在 `agent-vitals-domain`**。
+
+### 6.3 三层归属（继承 `TRAJECTORY_TIMELINE_SPEC` §6）
+
+| 层 | 干什么 | 归属 | v0.10 落点 |
+|---|---|---|---|
+| **数据准备** | 原始事件 → TraceGraph → geometry spec（折 token、分桶、选叶路径、映射 ordinal/native） | 宿主适配器 + envelope（Rust 侧） | `hosts/<h>/sessions/trace.rs` + `runtime/trace_service.rs` |
+| **几何** | points+events → SVG（比例尺、聚合、缺口断开） | 共享 client `.js` 纯函数 | **已存在，不新增**（§2.1.2） |
+| **渲染壳** | SVG → DOM/React/模板 | 每前端一份 | Traces tab |
+
 CLI/Tauri 只发 command、请求授权并展示 DTO；不得复制 token/cost/fact identity、诊断或定价公式。
 
 ## 7. 实施阶段
@@ -485,6 +555,12 @@ CLI/Tauri 只发 command、请求授权并展示 DTO；不得复制 token/cost/f
    守，模式同 S5 sessions 三消费面 parity）；
 4. TraceGraph memo：`Arc<RwLock<HashMap<session_ref, TraceGraph>>>`，60s TTL，按 home 键控。
    **失效条件 = `usage_facts` 表的 `(COUNT(*), MAX(rowid)) WHERE session_key = ?`**。
+5. **Traces tab 的时间线复用既有几何**（`apps/desktop/src-tauri/ui/timeline.js` 的
+   `buildGeometry` / `buildTimeline`），只新增「TraceGraph → geometry spec」数据准备函数；
+   **仓库内几何实现数量必须保持为 1**（§2.1.2）。验收：`scripts/verify-timeline-geometry.mjs`
+   与 `tests/test_timeline_lockstep.py` 全绿，且 grep 不出第二个比例尺实现。
+6. 节点排序走 `(scope, ordinal)`，**不得按 `started_at_ms` 排序**（§2.1.1）；
+   `branch_state != live` 的节点计入 `TraceCoverage.unmetered_nodes`。
 
 > **memo 的两个陷阱（R2 修正，必须有守卫测试）**
 > - **不得用 `MAX(fact_id)` 做变更检测。** `fact_id` 是 `"uf1-" + fnv1a64_hex(...)`
@@ -1049,3 +1125,25 @@ R2.1 全面继承其词表与铁律，**不另起炉灶**。
 > **互相印证的一条**：ATTR §9 未落地第 8 条「pricing card 加 effective date + 月投影引用
 > `pricing_version`，防止当前价表静默重写历史」与 R2 审查 F4 独立推出的
 > `pricing_snapshot_id` 是同一结论——两条不同路径得到同一约束，可信度较高，建议优先实现。
+
+### R2.1 → R2.2（TraceGraph ↔ timeline_series 对账）
+
+完整对账见 `docs/TRACEGRAPH_TIMELINE_RECONCILIATION.md`。核心结论：**TraceGraph 是
+timeline_series 的原像**，timeline_series = `project(TraceGraph, linearization)`；而
+`TRAJECTORY_TIMELINE_SPEC` §4 设计过、但**实现侧从未落地**的 5 个诚实性字段，R2.1 的
+TraceGraph 同样一个都没有——两份文档独立地漏掉了同一层。
+
+| # | 改动 | 位置 | 来源 |
+|---|---|---|---|
+| 34 | `TraceNode` 增 `scope` / `ordinal` / `native`——**权威顺序是 `(scope, ordinal)`，时间戳永不参与排序**（时钟漂移/resume/backfill）；`started_at_ms` 降级为展示与分桶副属性 | §2.1 / §2.1.1 | F-T1（P0） |
+| 35 | `TraceNode` 增 `branch_state`、`TraceCoverage` 增 `unmetered_nodes`——三宿主日志都有用户放弃的路径，废弃分叉进 unmetered **不归零不静默合并**；线性化信号读宿主的（`leafUuid`/`thread_rolled_back`/`seedLength`），不发明 | §2.1 / §2.1.1 | F-T2（P0） |
+| 36 | 澄清「不得自造 ID」= **不得自造 join 键**：`node_id` 是合成主键（幂等用），跨 scope 关联**只走 `native`** | §2.1 | F-T3 |
+| 37 | 量值从 `metadata` 拆出为 `values`，**缺的键不出现**（不是填 0/null）——`Unavailable ≠ MeasuredZero` 的呈现侧镜像 | §2.1 | F-T4 |
+| 38 | `TraceNode` / `TraceEdge` 各增 `provenance`（measured/derived/lossy）——node 级 provenance 与 §2.4.1 的 issue 级 basis 三元组**不能互相代替**；DSH `parentSession` 实测 5/19 可靠，subagent 边尤其需要 | §2.1 | F-T5 / F-T6 |
+| 39 | **新增 §2.1.2 + §7 门槛 5：Traces tab 必须复用既有 `buildGeometry`，仓库内几何实现数量保持为 1**。2026-09-01 刚把两份折线图收敛成一份，新增即复刻「比例尺算错了不报错」的原始风险 | §2.1.2 / §7 | 对账 §3 |
+| 40 | §7 门槛 6：节点排序走 `(scope, ordinal)` 不得按时间戳；`branch_state != live` 计入 unmetered | §7 | F-T1/F-T2 |
+| 41 | 新增 §6.3 三层归属表（数据准备/几何/渲染壳）；**`vitals-core/graph.rs` 只放无语义图原语**——`dependency_boundary.rs` 的两条 domain-free 断言会因 trace/timeline 词汇变红 | §6.2 / §6.3 | 对账 §3 |
+| 42 | `task_id` 按三分法区分（`/goal` 文本 / 结构化 task 跟踪 / Codex task=turn），只承载 turn，不再引入含糊字段 | §2.1.1 | 对账 §4 附注 |
+| 43 | 撞名警告：`usage_fact.rs` 的 `time_basis:"native"` 是 basis 取值，与 `TraceNode.native`（宿主原生事件 id）是两个概念 | §2.1.1 | 对账 §1.3 |
+| 44 | 订正 `TRAJECTORY_TIMELINE_SPEC.md` 状态头——「已全部落地」只对几何层成立 | 该文档头部 | 对账 §1.2 |
+| 45 | **待办（未决）**：`Cost` 的 `Quota` 档在 v0.10 无承载类型，而 §2.2.1 硬规则 2 的「订阅型收益 = 配额余量」正是它——需接进 §2.2.1 或显式声明延后 | §2.2.1 | F-T7（P2） |
