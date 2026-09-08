@@ -384,7 +384,20 @@ TraceGraph / metrics / savings / outcome **全部只对这三个宿主开放**�
 | `realized` savings | 可重复测量的 baseline 窗 + 同 `metric_version`/`pricing_snapshot_id`（§2.3） | 不出数，`savings_coverage = unavailable` |
 | Remedy 执行 | 宿主有**可逆**的配置面 | `diagnostic-only`（§4） |
 
-#### 2.5.4 现有宿主的定位
+#### 2.5.4 目标产品线与宿主定位
+
+**产品范围（2026-09-08 定）**：核心是 **coding agent / work agent** 产品线——
+`claude-code` · `codex` · `pi` · `cline` · `opencode`。其余宿主按用途分两类：
+
+| 类别 | 宿主 | 处置 |
+|---|---|---|
+| **核心目标** | claude-code · codex · pi · cline · opencode | 按 §2.5.5 逐个接到 T3 |
+| **已接入基座** | dsh | 已在 `FACT_HOSTS`，SV-COST 浪费规则的唯一实现宿主（§2.4.5）——**不在此次收敛范围内退役，但其独有能力需跨宿主化** |
+| **仅供参考** | hermes · workbuddy · openclaw | **不作为接入目标**；价值在于其数据模型对本 spec 的反向验证（见下），以及作为「弱/异形宿主」的降级测试对象 |
+
+> **参考类宿主的用法**：它们暴露的缺口已并入本 spec（Hermes → §2.5.3 工作区降级行、
+> §12 第 61 条双列成本；WorkBuddy → §2.5.2 T1 账单级路径）。**不要为它们写 adapter**，
+> 但在设计核心宿主的降级路径时用它们当反例。
 
 | 宿主 | T1 | T2 | T3 | 说明 |
 |---|---|---|---|---|
@@ -392,7 +405,9 @@ TraceGraph / metrics / savings / outcome **全部只对这三个宿主开放**�
 | **codex** | ✅ | ✅ | ✅ | `ThreadHistoryMode` 产生 Legacy/Paginated **两套不兼容词汇**，新宿主接入时注意这不是特例而是常态 |
 | **dsh** | ✅ | ✅ | ✅ | 唯一有 `StepBoundaries`；也是唯一有 SV-COST 浪费规则的 |
 | **workbuddy** | ✅ **可用** | ⚠️ 部分 | ❌ **明确排除** | 见下 |
-| **openclaw** | ✅ | ❌ | ❌ | 目前只有 `sources/skills.rs`（安装时扫描），**无会话证据面** |
+| **openclaw** | ✅ | ❌ | ❌ | 参考类。只有 `sources/skills.rs`（安装时扫描），无会话证据面；本机目录存在但**文件数 0** |
+| **cline** | ✅ | ✅ | ✅ **核心目标** | 本机实测；见 `docs/CLINE_HOST_ASSESSMENT.md`。**子代理模型是五宿主里最干净的**（`is_subagent`/`parent_agent_id`/`subagent_spawn_queue`/`aggregatedAgentsCost`），per-message 自报成本。语料仅 1 会话 6 消息、零工具调用 |
+| **opencode** | ？ | ？ | ？ **核心目标** | **本机未安装**，已枚举 `~/.opencode` · `~/.local/share/opencode` · `~/.config/opencode` · `~/Library/Application Support/opencode` 与 VS Code globalStorage 均无。按纪律不写二手形状——需先产语料 |
 | **pi** | ✅ | ✅ | ✅ **候选** | 本机实测 1 会话即满足 T3 全部字段；见 `docs/PI_HOST_ASSESSMENT.md`。语料仅 1 会话，转正前须扩语料 |
 | **hermes** | ⚠️ 退化 | ✅ 强 | ✅ **可行** | 本机实测 15 会话 / 2,092 消息（`state.db` schema v23）；见 `docs/HERMES_HOST_ASSESSMENT.md`。**schema 富、数据缺**：成本列全 0、`pricing_version` 填充数 0，但 5 桶 token 填得很满且 `pricing.json` 已认识 `MiniMax-M3` |
 
@@ -1350,3 +1365,22 @@ Hermes），评估见 `docs/HERMES_HOST_ASSESSMENT.md`。三层框架再次成�
 > 数量级差距，直接对着 `unpriced_tokens` 缺口。**但它属 `catalog-fallback`**（§2.4.1
 > `pricing_basis` 里最弱的已计价档），**不得冒充 `provider-reported` 或 `catalog-provider`**；
 > 读本地已缓存文件不违反「扫描时不拉第三方代码」，但数据质量责任必须标在 basis 上。
+
+### R2.3 补记三（产品范围收敛 + Cline 实测）
+
+用户 2026-09-08 定产品范围：核心是 coding agent / work agent 产品线
+（claude-code · codex · pi · cline · opencode），hermes / workbuddy / openclaw 降为
+**参考类**（不写 adapter，用作降级设计的反例）。
+
+| # | 改动 | 位置 | 依据 |
+|---|---|---|---|
+| 62 | §2.5.4 改写为「目标产品线与宿主定位」，三分为核心目标 / 已接入基座 / 仅供参考 | §2.5.4 | 产品决策 |
+| 63 | 加入 Cline 行（T1/T2/T3 全绿，核心目标）。**其子代理模型是所有宿主里最干净的**——`is_subagent` / `parent_agent_id` / `agent_id` / `conversation_id` + `subagent_spawn_queue` 表 + `aggregatedAgentsCost` 子代理成本汇总；建议作为 §2.1 `TraceEdge` subagent 边的**参考实现**（对照 DSH `parentSession` 实测 5/19 可靠） | §2.5.4 / §2.1 | `docs/CLINE_HOST_ASSESSMENT.md` |
+| 64 | 加入 opencode 行，标注**本机未安装**并列出已枚举的 4 条路径——按纪律不写二手形状 | §2.5.4 | 实测 |
+| 65 | **新增接入规则：Cline 的 `metadata` 块含过时重复字段，与权威值冲突**（同一记录里 `metadata.modelId=claude-sonnet-4.6` vs 权威 `modelInfo.id=claude-sonnet-5`；`metadata.tokensIn=2` vs 权威 `usage.inputTokens=4763`）。权威取 `modelInfo` + `metadata.usage`，其余一律不读，**必须带 fixture 钉死**——「形状来源纪律」的活例 | 评估 §3 | 实测 |
+| 66 | **Host ≠ BillingSource 的教科书案例**：Cline 的 `model="anthropic/claude-sonnet-5"` 但 `provider="shengsuanyun"`（中转）。按 `anthropic/` 前缀归到 Anthropic 计价就是编造；归属必须走 `provider`，且 `pricing.json` 目前**无 `shengsuanyun` billing route**，接入前需补，否则落 `billing-route-unknown` | §2.4.1 | 实测 |
+
+> **DSH 的处置待确认**：它不在用户列的产品线里，但已在 `FACT_HOSTS`、且是 SV-COST
+> 浪费规则（§2.4.5）的**唯一实现宿主**。本 spec 暂按「已接入基座、不退役」处理；
+> 若产品上确定收敛掉 DSH，则 §2.4.5 的「waste 规则跨宿主化」从优化项升级为**阻塞项**
+> ——否则整个浪费族会随 DSH 一起消失。
