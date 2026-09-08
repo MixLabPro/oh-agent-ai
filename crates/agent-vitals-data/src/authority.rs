@@ -22,8 +22,14 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
+use crate::safe_query::authority_callback;
+
 /// 当前 DDL 版本。spec §3 的表结构变更递增；`migrations` 表（§3.5）记录的
 /// 是**数据迁移**（legacy import 等），与 DDL 版本刻意分开。
+///
+/// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
+/// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
+/// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
 pub const SCHEMA_VERSION: i64 = 2;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
@@ -295,6 +301,32 @@ CREATE TABLE host_runtime_snapshots (
 );
 "#;
 
+/// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
+/// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
+/// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
+/// 这种不必要的迁移负担。
+const VIEWS_V1: &str = r#"
+CREATE VIEW IF NOT EXISTS v_facts_safe AS
+  SELECT fact_id, host, observation_kind, source_profile,
+         provider_id, model_id, event_ts_ms, event_peak,
+         uncached_input_tokens, cache_read_tokens,
+         cache_write_tokens, output_tokens,
+         ingested_run_id, created_at_ms, updated_at_ms, deleted_at_ms
+  FROM usage_facts;
+CREATE VIEW IF NOT EXISTS v_sessions_safe AS
+  SELECT session_key, host, source_profile,
+         started_at_ms, ended_at_ms, last_observed_at_ms, deleted_at_ms
+  FROM sessions;
+CREATE VIEW IF NOT EXISTS v_data_quality_safe AS
+  SELECT issue_id, scope_type, scope_key, code, severity,
+         first_seen_at_ms, last_seen_at_ms, resolved_at_ms
+  FROM data_quality_issues;
+CREATE VIEW IF NOT EXISTS v_sync_runs_safe AS
+  SELECT run_id, started_at_ms, completed_at_ms, trigger, status,
+         schema_version, error_code
+  FROM sync_runs;
+"#;
+
 /// v0.9.1 Phase 3.4：`budget_config` 单行（config_id=1）的 typed 视图。
 /// 金额一律**最小货币单位整数**（纪律 2「金额不落浮点」——展示层再换算）；
 /// `warning_ratio_bp` 是万分比（8000 = 80%，seed 时由 config.toml 的
@@ -376,6 +408,29 @@ impl AuthorityDb {
         }
     }
 
+    /// **只读 + authorizer 守护的连接**（增量 7.5 `query_sql_readonly` 专用）——
+    /// `SQLITE_OPEN_READ_ONLY` + 挂 SQLite `sqlite3_set_authorizer` 回调，按
+    /// 来源表 + 来源列拒绝敏感字段（spec §8.2 P1-5：作者层拒绝是第一层防线，
+    /// 结果列名扫描仅第二层）。
+    ///
+    /// **不在 v1 兼容承诺内**：仅 `mcp-internal` 构建调用；公开构建不挂这个
+    /// 工具。Caller 必须在执行前/后 close this connection。
+    pub fn make_query_sql_readonly_connection(db_path: &Path) -> Result<Connection, AuthorityError> {
+        if !db_path.exists() {
+            return Err(AuthorityError::MissingFile);
+        }
+        let conn = Connection::open_with_flags(
+            db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|_| AuthorityError::Corrupt)?;
+        conn.busy_timeout(std::time::Duration::from_millis(3_000))?;
+        // 用 raw connection 挂 authorizer——`rusqlite::Connection::authorizer`
+        // 接受 `FnMut(AuthContext) -> Authorization + Send + RefUnwindSafe + 'static`。
+        conn.authorizer(Some(authority_callback));
+        Ok(conn)
+    }
+
     fn ensure_schema(conn: &Connection, now_ms: i64) -> Result<(), AuthorityError> {
         // 版本行在 SCHEMA_V1 里随全量 DDL 一起建——这里只**读**：schema_meta
         // 表不存在 = 全新库（None）。不能先无条件建表再跑全量 DDL（后者会
@@ -405,7 +460,11 @@ impl AuthorityDb {
                     supported: SCHEMA_VERSION,
                 })
             }
-            Some(v) if v == SCHEMA_VERSION => {}
+            Some(v) if v == SCHEMA_VERSION => {
+                // 增量 7.5：脱敏只读 view（`query_sql_readonly` 的来源层屏障）。
+                // 版本无关的只读加法——`CREATE VIEW IF NOT EXISTS` 幂等。
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(1) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 let migration = conn.execute_batch(MIGRATE_V1_TO_V2);
@@ -422,6 +481,7 @@ impl AuthorityDb {
                         return Err(error.into());
                     }
                 }
+                conn.execute_batch(VIEWS_V1)?;
             }
             Some(old) => {
                 return Err(AuthorityError::Sqlite(
@@ -450,6 +510,8 @@ impl AuthorityDb {
                 }
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 conn.execute_batch(SCHEMA_V1)?;
+                // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
+                conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
                     "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?1)",
                     rusqlite::params![SCHEMA_VERSION.to_string()],
@@ -1055,6 +1117,27 @@ mod tests {
             AuthorityError::Corrupt
         ));
         let _ = std::fs::remove_file(&half);
+    }
+
+    #[test]
+    fn existing_v1_db_picks_up_safe_views_on_reopen() {
+        // 增量 7.5：v1 库已存在的情况下，再开一次应该把 v_*_safe view
+        // 幂等加进去（review 增量 7.5：migrate 路径不阻塞）。
+        let path = tmp_db("v1-views");
+        let db = AuthorityDb::open(&path, 1_000).unwrap();
+        // 先关掉 + 重新打开。
+        drop(db);
+        let db2 = AuthorityDb::open(&path, 1_001).unwrap();
+        let n: i64 = db2
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name IN ('v_facts_safe', 'v_sessions_safe', 'v_data_quality_safe', 'v_sync_runs_safe')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 4, "v_*_safe views 应在二次 open 时被幂等加进去");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

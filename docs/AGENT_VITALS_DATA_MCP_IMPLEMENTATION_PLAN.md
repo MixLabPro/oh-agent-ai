@@ -43,6 +43,8 @@ spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个
 | 5 | M1 收口：M01–M08 / M13–M18 契约测试 + 三消费面 parity（M15）+ 真机 U01/U02/U08 | M1 退出 | ⬜ |
 | 6 | `authority_revision` `as_of_run_id` 钉截面 + `authority_audit`（`mcp-internal`）| M2 | ⬜ |
 | 7 | `reimport_verify`（CLI 子命令）+ U09a/U09b 真机 | M2 退出 | ⬜ |
+| **7.5** | **`query_sql_readonly`（内部 MCP 工具，让其他 Agent 调试用）** | M2 并行 | 🔨 |
+| 8+ | M3：`cost_breakdown` / `sessions_search` / `session_detail` + session 索引 v2 + 历史价重放 | M3 | ⬜ |
 | 8+ | M3：`cost_breakdown` / `sessions_search` / `session_detail` + session 索引 v2 + 历史价重放 | M3 | ⬜ |
 | … | M4：`workflow_events` 管线 + `issues_summary` / `skills_summary` | M4 | ⬜ |
 | … | M5：公开/内部构建分离 + 打包 + 发布文档 | M5 | ⬜ |
@@ -177,3 +179,69 @@ should-fix（S2 / S4 / S5 / S7）：
 ### 收口
 
 subAgent 审查（MoneyMinor 三消费面逐值相等、`from_f64` 舍入点、`hourly_by_host_and_model` 索引命中、`as_of_run_id` drift 检测、`validate_args` fail-fast 强度、`usage_hourly` 输出 schema 闭合） → 修复 → commit。
+
+---
+
+## 增量 7.5：`query_sql_readonly`（内部 MCP 工具）
+
+**目标**：让其他 Agent 在 review / 调试 SQL 路径时不依赖 shell 直连权威库——通过 MCP 走受限的只读 SELECT。**仅 `mcp-internal` feature 构建**（不在 v1 兼容承诺内，公开二进制不含此工具——用户 2026-09-07 决定提前做，让 debug Agent 立即可用）。
+
+**审查基调**（用户 2026-09-08 校正）：**给本地的 Agent 做数据分析**——所以**不必过度严格**。
+
+- 写入类（`Insert` / `Update` / `Delete` / 任何 DDL / 事务 / PRAGMA / ATTACH）**仍必须 deny**——这是数据完整性的底线；`mcp-internal` feature 的存在就是显式声明「开发 Agent 用」。
+- 敏感列 deny：保留。Agent 看 `native_session_id` / `path_hash` 没有业务价值，反而可能被发散——这是隐私边界。
+- 函数 deny 收紧到「能写文件 / 装扩展 / 改变行为的」：`load_extension` / `readfile` / `writefile` / `edit`（SQLite 3.38+ virtual table）。**放行** `random` / `randomblob` / `zeroblob`（分析 Agent 想看随机抽样 / 哈希特征——合理）+ `json_*` 表达式（运营查询常用）。
+- 字符串字面量 / 注释里的 `LIMIT` 误匹配：当前实现是字符级子串匹配，已经在 `colimit_audit` 词边界上做了 guard。**进一步严格（双引号转义扫描）**超出"本地 Agent 工具"的范围，先不做。
+- 1 MiB 行数 / 时间预算保留——是 prod safety guard，**不**因为"放宽"就关。
+
+> **底线**：authorizer 的写入 deny + 敏感列 deny 必须保持；其它收紧项（函数黑名单、字符串转义扫描）按"是不是真会带来安全风险"判断，不是按"理论上能绕过"判断。
+
+**威胁模型**（spec §8.2）：
+- 调用者可能用 `AS` / 表达式 / 字符串拼接 / `json_extract` 把 `native_session_id` / `path_hash` / `machine_namespace` 等敏感字段改名后返回——所以**仅结果列名扫描**不够（增量 1 review P1-5 已警示）。
+- 来源层 authorizer（`SQLITE_READ` 回调）按 **来源表 + 列名** 拒绝，是**唯一可靠的**屏障。
+- 退路：所有合法查询只能命中一组**脱敏只读 view**（`v_facts_safe` / `v_sessions_safe` / `v_data_quality_safe` / `v_sync_runs_safe`），view 定义里就 `SELECT` 不含敏感列。
+- 结果列名扫描只作为「view 内部某列意外被改」的第二层防线。
+
+### 落点
+
+- **`crates/agent-vitals-data/src/authority.rs`**：新增 `pub fn make_readonly_connection(db_path) -> Result<Connection, AuthorityError>` ——在 `open_readonly` 基础上挂 `sqlite3_set_authorizer`：
+  - `SQLITE_READ` on `usage_facts.native_session_id` / `usage_facts.source_event_id` / `usage_facts.source_id`（与 `source_files.path_hash` 拼接可反推路径）→ deny
+  - `SQLITE_READ` on `sessions.native_session_id` / `sessions.machine_namespace` / `sessions.session_key` / `source_files.path_hash` → deny
+  - `SQLITE_INSERT` / `SQLITE_UPDATE` / `SQLITE_DELETE` / `SQLITE_PRAGMA` / `SQLITE_ATTACH` / `SQLITE_DETACH` / `SQLITE_TRANSACTION` / `SQLITE_SAVEPOINT` / `SQLITE_REPLACE` → 一律 deny
+  - `SQLITE_FUNCTION` on 任何非 `sqlite3_builtin_*` 函数 → deny（禁 `load_extension` / 自定义函数；SQLite 内置 whitelist：`avg/sum/count/min/max/abs/round/group_concat/json_extract/json_array_length/typeof/coalesce/nullif/ifnull/upper/lower/length/substr/replace/trim/ltrim/rtrim/printf/strftime/datetime/zeroblob/random/unicode/abs/sign/round/floor/ceil`——其它都 deny）
+  - `SQLITE_SELECT` 限定：col-attr 至少有一个来自 `usage_facts` / `sessions` / `source_files` / `pricing_snapshots` / `host_bills` / `sync_runs` / `data_quality_issues` / `migrations` / `budget_config` / `budget_snoozes` / `workflow_events` **或** v_* view；其它来源 deny
+- **`crates/agent-vitals-data/src/safe_views.rs`**（新模块）：建库时同步建（DDL 入 `SCHEMA_V1` const 里和现有 12 表一起）。
+  - `v_facts_safe`：SELECT 14 列（不含 `native_session_id` / `machine_namespace` / `source_event_id` / `source_id` / `session_key`）
+  - `v_sessions_safe`：SELECT 6 列（不含 `native_session_id` / `machine_namespace`）
+  - `v_data_quality_safe`：SELECT 8 列（不含 `detail_json`——可能含 raw 模型名或路径片段）
+  - `v_sync_runs_safe`：SELECT 7 列（不含 `error_detail`）
+- **`crates/agent-vitals-runtime/src/mcp/query_sql_readonly.rs`**（新工具，仅 `#[cfg(feature = "mcp-internal")]`）：
+  - `ToolSpec`：input = `{ sql: string, max_rows?: int (default 200, max 200), timeout_ms?: int (default 3000, max 30000) }`，`additionalProperties: false`
+  - `run(args, data_home) -> Result<Value, ToolError>`：
+  1. **预处理**：`sqlite3_prepare_v2`（rusqlite `prepare`）一次——本身就是单语句且不允许 `;` 多语句（SQLite prepare 的 documented 行为）。校验首 token 非 `EXPLAIN`/`ATTACH`/`PRAGMA` 关键字（不区分大小写）。
+  2. **执行**：另开只读连接 + authorizer + `busy_timeout(3000)`；`query_map` 取行。
+  3. **行数限制**：prepare 时挂 `LIMIT max_rows` 自动追加——SQLite prepare 阶段裁剪，**不让出超过 max_rows 的行**。用户传原 `LIMIT 10000` → 改写为 `LIMIT max_rows`。
+  4. **响应体限制**：估算 JSON 序列化字节数 > 1MiB → 截断 + `warnings:[{code:"result_truncated", ...}]`。
+  5. 返回 `data = { columns: [string], rows: [[Value]], row_count, sql_safe (改写后), elapsed_ms }`，envelope 套 spec §6。
+- **`crates/agent-vitals-runtime/src/mcp/mod.rs`**：
+  - `#[cfg(feature = "mcp-internal")] mod query_sql_readonly;` + 工具注册 + 分发（都包 cfg）。
+- **测试**（**测试本身也包 cfg**——公开构建不编译）：
+  - 安全（9 条）：`SELECT native_session_id FROM usage_facts` / `SELECT * FROM usage_facts` / `INSERT INTO usage_facts ...` / `DELETE FROM usage_facts WHERE 1=1` / `UPDATE usage_facts SET ...` / `SELECT load_extension('/tmp/x')` / `SELECT 1; SELECT 2` / `SELECT * FROM pragma_compile_options()` / `SELECT * FROM sqlite_master` → 都拒
+  - 功能：合法 `SELECT count(*) FROM v_facts_safe` / `SELECT host, SUM(...) FROM v_facts_safe GROUP BY host` / `WITH cte AS (...) SELECT ... FROM v_facts_safe` → 都通过
+  - 上限：`SELECT * FROM v_facts_safe` 改写 LIMIT 200 → 不返 201+ 行
+  - 脱敏：所有 view 输出 JSON Schema 反查，**不**含 `native_session_id` / `machine_namespace` / `path_hash` 字段名
+- **审查重点（subAgent 必看）**：
+  - authorizer callback 是不是真的 deny 了所有写入类 + 所有敏感列
+  - 内置函数 whitelist 是否漏了 `load_extension` / `json_*` / `random` / `unicode` 之类
+  - 多语句拒绝：`prepare` 默认拒绝 `;` 多语句——写测试断言
+  - LIMIT 改写逻辑：用户原 SQL 不带 LIMIT 时正确追加；带 LIMIT 大于 max_rows 时正确截到 max_rows（`min(user_limit, max_rows)`）
+  - 作者列名：v_* view 实际 SELECT 列表与 authorizer deny 列对比
+
+**验收**：
+- cargo test：authorizer 安全矩阵 + 合法查询 + 行数 / 体积极限 + view 脱敏 + cfg 守卫（公开构建 `cargo build --release -p agent-vitals` 无此工具）
+- clippy `-D warnings` clean（含 `--features mcp-internal`）
+- 真机：`cargo run --features mcp-internal -- data-mcp serve`；`tools/list` 多出 `query_sql_readonly`；合法 `SELECT * FROM v_facts_safe LIMIT 10` 返10 行；`SELECT native_session_id FROM usage_facts` 拒；`INSERT INTO ...` 拒
+- 公开构建验证：`cargo tree -e features --depth 1 -p agent-vitals` 不含 query_sql_readonly 模块符号；`tools/list` JSON 不含此工具名
+- 真机 leak 测试：调 `SELECT * FROM v_facts_safe`，grep响应含 `native_session_id` → 必须零命中
+
+**收口**：subAgent 重点审 authorizer callback 完整性（spec §8.2 P1-5）→ 修复 → commit（commit message 标注 `[mcp-internal]`，让 reviewer 一眼看到这个工具不进 v1 兼容承诺）。

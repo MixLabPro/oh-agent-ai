@@ -18,6 +18,8 @@
 
 mod data_status;
 mod usage_hourly;
+#[cfg(feature = "mcp-internal")]
+mod query_sql_readonly;
 
 use std::path::{Path, PathBuf};
 
@@ -282,7 +284,12 @@ pub struct ToolSpec {
 
 /// 当前构建注册的工具。传输层据此渲染 `tools/list` 并校验 `tools/call` 的名字。
 pub fn tool_specs() -> Vec<ToolSpec> {
-    vec![data_status::spec(), usage_hourly::spec()]
+    let mut out = vec![data_status::spec(), usage_hourly::spec()];
+    #[cfg(feature = "mcp-internal")]
+    {
+        out.push(query_sql_readonly::spec());
+    }
+    out
 }
 
 /// CLI `data-status` 的数据面——与 MCP `data_status` 工具**同源**（spec §5
@@ -303,6 +310,8 @@ pub fn dispatch(name: &str, args: &Value, data_home: &Path) -> Result<Value, Too
     match name {
         "data_status" => data_status::run(args, data_home),
         "usage_hourly" => usage_hourly::run(args, data_home),
+        #[cfg(feature = "mcp-internal")]
+        "query_sql_readonly" => query_sql_readonly::run(args, data_home),
         other => Err(ToolError::new("internal_error", format!("tool `{other}` registered but not wired"))),
     }
 }

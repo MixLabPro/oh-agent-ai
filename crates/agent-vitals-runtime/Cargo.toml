@@ -20,6 +20,13 @@ path = "src/lib.rs"
 # 因此住在这里（唯一同时看得到 hosts 与 data 的 crate），不是 data 自己实现
 # （docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md §8.1）。
 # **不加** `notify`/watcher/`tokio`/`chrono`（那是 feature 或纪律禁项，不是结构重构）。
+
+# 内部 MCP 工具门控（增量 7.5 `query_sql_readonly` / 增量 6 `authority_audit`）。
+# 公开构建（默认 feature = []）不含这些工具——spec §8.2 / M0 D4 的承诺。
+# 调试 Agent 用 `cargo run --features mcp-internal -- data-mcp serve`。
+[features]
+mcp-internal = []
+
 [dependencies]
 agent-vitals-data = { path = "../agent-vitals-data" }
 # data 质量表的参数化写入（sql_sync 的 missing_sid issue）——同版本 0.31

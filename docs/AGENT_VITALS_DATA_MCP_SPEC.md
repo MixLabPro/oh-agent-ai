@@ -596,7 +596,52 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 
 输出：脱敏 issue ID、类别、严重度、影响范围、首次/最近发生时间、出现次数、状态和建议的人类操作。禁止返回可能含路径、Prompt 或密钥的原始 payload。
 
-**实现注记（draft-2）**：`data_quality_issues.detail_json` 当前按各 issue `code` 的需要原样存储（`undated_residual` 存逐模型 token；`missing_sid` 存来源提示；`legacy_aggregate*` 存 coverage 降级信息），可能含模型 raw 名或路径片段。reader 必须过一层 **code-aware allowlist 脱敏**（净新增）——按 `code` 白名单放行已知安全字段，绝不整体回吐 `detail_json`。未知 `code` 默认只放行结构化计数，不放行任何自由文本。
+**实现注记（draft-2）**：`data_quality_issues.detail_json` 当前按各 issue `code` 的需要原样存储（`undated_residual` 存逐模型 token；`missing_sid` 存来源提示；`legacy_aggregate*` 存 coverage 降版信息），可能含模型 raw 名或路径片段。reader 必须过一层 **code-aware allowlist 脱敏**（净新增）——按 `code` 白名单放行已知安全字段，绝不整体回吐 `detail_json`。未知 `code` 默认只放行结构化计数，不放行任何自由文本。
+
+### 7.11 `query_sql_readonly`（内部调试工具——`mcp-internal` feature only）
+
+**仅 mcp-internal 构建**——公开二进制不含此工具。**不在 v1 兼容承诺内**。让其他 Agent 在 review / 调试 SQL 路径时不依赖 shell 直连权威库。
+
+**威胁模型（spec §8.2 P1-5）**：调用者可能用 `AS` / 表达式 / `json_extract` 把敏感字段改名后返回——所以**仅结果列名扫描不够**。本工具走**双层防线**：
+
+1. **来源层 authorizer**（`agent_vitals_data::safe_query::authority_callback`）——按 `SQLITE_READ` 回调按来源表 + 来源列拒绝敏感字段：
+   - `usage_facts.{native_session_id, source_event_id, source_id}`
+   - `sessions.{native_session_id, machine_namespace, session_key}`
+   - `source_files.{path_hash, source_id}`
+   - `data_quality_issues.{detail_json}`
+   - `sync_runs.{error_detail}`
+   - `migrations.{checkpoint_json, error_detail}`
+   - 写入类（`Insert` / `Update` / `Delete` + temp 变体）、DDL（`Create*` / `Drop*` / `Alter*` / `Reindex` / `Analyze` / `CreateVtable` / `DropVtable`）、`Pragma` / `Attach` / `Detach` / `Transaction` / `Savepoint` 一律 deny。
+   - 危险函数 `load_extension` / `random` / `randomblob` / `zeroblob` / `readonly` deny；其它内建函数（聚合 / `coalesce` / `json_extract` 等）allow。
+   - `Unknown` action + `#[non_exhaustive]` 通配一律 deny（fail-safe）。
+
+2. **脱敏只读 view**（`v_facts_safe` / `v_sessions_safe` / `v_data_quality_safe` / `v_sync_runs_safe`）——view 定义里就**不**SELECT 敏感列。即便 authorizer 漏掉，view 也不暴露。
+
+**输入**：
+
+```json
+{
+  "sql": "SELECT host, SUM(output_tokens) AS total FROM v_facts_safe GROUP BY host",
+  "max_rows": 200,
+  "timeout_ms": 3000
+}
+```
+
+`sql` 必须单条 `SELECT` 或 `WITH ... SELECT`（多语句不在 `prepare` 范围被 authorizer 拒；本工具前置的 `rewrite_with_limit` 在多语句 / 中间 `;` 时不改写）。`max_rows` 默认 200，cap 200。`timeout_ms` 默认 3000，cap 30000（通过 `busy_timeout` 实现——SQLite 真正 wall-clock 守卫要 `progress_handler`，本期不做）。
+
+**约束 / 上限**：
+- 自动 LIMIT 改写：用户 SQL 不带 LIMIT → 追加 `LIMIT max_rows`；带 LIMIT 且 > max_rows → 截到 max_rows；带 LIMIT 且 ≤ max_rows → 不动。
+- 列名 token-level 词边界检查（防 `colimit_audit` 误中 `LIMIT`）。
+- 响应体 1 MiB 估算上限——超过则按行截断到 80% 并加 `warnings:[{code:"result_truncated",...}]`。
+
+**输出**：`envelope`（spec §6）+ `data = { sql_safe, columns: [string], row_count, row_count_cap, elapsed_ms, rows: [[Value]] }`。
+
+**业务错误**（spec §11）：
+- `database_missing` / `database_unreadable` / `schema_too_new` / `schema_migration_required`（库打不开 / 损坏 / schema 不符）——业务错误
+- `invalid_argument`（prepare/execute 失败，authorizer deny，SQL 语法错）——业务错误
+- `internal_error`（其它）——兜底
+
+**审查重点（增量 7.5 review 必看）**：authorizer callback 完整性（每一类 SQLITE_* action 都有 deny 路径）；SENSITIVE_READ_COLUMNS 是否漏了源表敏感列；函数 deny 黑名单是否漏 `load_extension` 之类；LIMIT 改写不会误中字符串字面量 / 注释 / AS 别名；view 定义里实际 SELECT 列表不含敏感列；公开构建 `tools/list` 不含此工具。
 
 ## 8. 内部开发工具
 
@@ -802,12 +847,12 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | **D1** | **手写**最小 JSON-RPC 2.0 over stdio（stdlib + `serde_json`）。**不**引入 `rmcp` / `tokio`（MSRV 1.74 + 分发物零第三方）。`protocol_version = "2025-06-18"`；framing = 逐行 JSON（`\n` 分隔，UTF-8，单条消息不跨行）；能力声明只 `tools`；方法集 `initialize` / `notifications/initialized` / `tools/list` / `tools/call` / `ping`；`tools/call` 成功载荷用 `structuredContent`（承载 envelope）+ `content[].text` 等价 JSON 文本块；业务错误 = `isError:true` + envelope `error`（**不**塞 JSON-RPC error）；JSON-RPC error 仅用于协议层（未知方法 / 解析失败 / 参数缺失）。 | spec §6.4；增量 1 已落地（`apps/cli/src/mcp.rs`） | `@claude-impl` | ⬜ |
 | **D2** | `MoneyMinor { amount_minor: i64, currency, basis }`（§5.1.1）。最细上报维度一次 `pyround(× 10^minor_digits)`，父层 = 子项整数和（守恒由构造）。`minor_digits` 来自 currency（CNY/USD=2，JPY=0）。落点 `agent-vitals-data::authority_query` / `agent-vitals-runtime::summary`，MCP / CLI / Tauri 同源读。**所有带金额工具的前置**。 | spec §5.1.1；增量 2 落地（`agent_vitals_runtime::money::from_f64` 银行家舍入 + `sum_minor` 跨币返 None；domain `MoneyMinor::to_json/from_json`；11 单测全绿） | `@claude-impl` | ✅ |
 | **D3** | v1 按 `(host, raw_model, billing_route)`（§5 规则 4）。过滤字段 `models: [{kind, host, value}]`，**v1 只支持 `kind="host_raw"`**；canonical 归一表**不**进 v0.9.1。响应每个序列显式 `identity_kind: "host_raw"`。 | spec §5.1 规则 4、§7.2；增量 2 落地（`usage_hourly` input schema `models[].kind enum=["host_raw"]`；每个序列 key 带 `identity_kind`；未知 kind 静默过滤 + 测试 `unknown_model_kind_is_silently_ignored`） | `@claude-impl` | ✅ |
-| **D4** | cargo feature `mcp-internal`（`apps/cli`），公开构建**编译期排除** `authority_audit` / `query_sql_readonly` / `reimport_verify`。 | spec §8；增量 6 落地时加 `#[cfg(feature = "mcp-internal")]` | `@claude-impl` | ⬜ |
+| **D4** | cargo feature `mcp-internal`（`apps/cli` → `agent-vitals-runtime/mcp-internal`），公开构建**编译期排除** `authority_audit` / `query_sql_readonly` / `reimport_verify`。已在增量 7.5 落地（apps/cli `tools/list` 公开=2 / feature=3）。 | spec §8；增量 6 落地时再加 `authority_audit` / `reimport_verify` | `@claude-impl` | ✅ |
 | **D5** | `session_ref` salt：`<data_home>/.mcp-session-salt`（32 字节随机，权限 `0600`），首次 `data-mcp serve` 时生成。HMAC-SHA256（`sha2` 已是依赖）。**不进权威库**。 | spec §9.2；增量 6（session 工具） | `@claude-impl` | ⬜ |
 | **D6** | **拆分**：MCP 内只读 `authority_audit`（守恒 / 重复 / 覆盖 / `authority_revision` 自检）+ **MCP 外**隔离命令 `agent-vitals data reimport-verify`（临时库重导入比对）。快照对账模式 → M3 才接（要补 `snapshot.manifest.json` + `pricing_snapshots` / `host_bills` 副本）。 | spec §8.1；增量 6 + 7 | `@claude-impl` | ⬜ |
 | **D7** | envelope `authority_revision` = `{last_completed_run_id, committed_at, max_observed_at}`。`max_observed_at` SQL 行级口径见 §6.1（**排除 `legacy_aggregate`**）。`as_of_run_id` 入参：v1 仅识别并 `warnings: [{code:"snapshot_drift", ...}]`，**不**假装钉住旧截面（假装比 drift 更危险）；钉截面 = M2 任务。 | spec §6.1 / §6.4.1；增量 6 落地（钉截面 + warn） | `@claude-impl` | ⬜ |
 | **D8** | `summary_daily` / `summary_monthly` 输出**保留** spec §7.3/§7.4 承诺的完整字段（会话数 / 活跃小时 / `group_by=model` / 维度过滤 / 逐日趋势 / 月底预测 / 成本占比）。这些**不是**冻结 DTO 的字段——列进增量 3 作为**新增聚合查询**（不是薄封装）。工作量按「新增查询 + 测试」计。 | spec §7.3/§7.4；增量 3 落地 | `@claude-impl` | ⬜ |
-| **D9** | `query_sql_readonly`（若落地）：**不**走结果列名扫描（`AS` / 表达式 / JSON 提取绕过风险）→ SQLite `authorizer` 按来源表 + 列拒绝 + 脱敏 view allowlist。**默认不实现**（不在 v1 兼容承诺内），需要时单独评审。 | spec §8.2；延后 | `@claude-impl` | ⬜ |
+| **D9** | `query_sql_readonly` 已在增量 7.5 落地（用户 2026-09-07 决定提前做，让其他 Agent 调试可用）。SQLite `authorizer` 按来源表 + 列拒绝 + 4 个脱敏只读 view（`v_facts_safe` / `v_sessions_safe` / `v_data_quality_safe` / `v_sync_runs_safe`）+ 危险函数 deny 黑名单 + `mcp-internal` 编译期 gating。**结果列名扫描不作唯一防线**（spec §8.2 P1-5 警示）。 | spec §8.2；增量 7.5 落地 | `@claude-impl` | ✅ |
 | **D10** | 每个 M1 工具的 `inputSchema` / `outputSchema` 在 M0 结束时已随工具落地（增量 1 的 `data_status` 已生成；增量 2/3/4 各自生成），全部以 `serde_json::Value` 常量注册到 `tools/list`。冻结条件：每个 schema 在 `cargo test` 里被加载 + 结构自检通过。 | spec §6.4；每个增量同步 | `@claude-impl` | ⬜ |
 
 退出条件：评审对 D1–D10 逐条 ack；§6.4 每条有确定值（D1 已锁定）；每个 M1 工具有可校验 JSON Schema（增量 1 起逐个生成）；D1–D10 表内 ⬜ 全变 ✅；任何未决语义都有后续版本（不在 spec 里留隐式默认）。
