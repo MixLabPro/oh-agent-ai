@@ -5,3 +5,7 @@
 //! 路径匹配（"路径含 `/sources`"）——它确实是 I/O 层，理应被同一条守卫钉住。
 
 pub mod canonical_input;
+
+// 猴子测试（用户拍板）——只活在 test 编译里，不进任何产物。
+#[cfg(test)]
+mod monkey_tests;
