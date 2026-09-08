@@ -395,7 +395,7 @@ TraceGraph / metrics / savings / outcome **全部只对这三个宿主开放**�
 | **仅供参考** | hermes · workbuddy · openclaw | **不作为接入目标**；价值在于其数据模型对本 spec 的反向验证（见下），以及作为「弱/异形宿主」的降级测试对象 |
 
 > **参考类宿主的用法**：它们暴露的缺口已并入本 spec（Hermes → §2.5.3 工作区降级行、
-> §12 第 61 条双列成本；WorkBuddy → §2.5.2 T1 账单级路径）。**不要为它们写 adapter**，
+> §13 第 61 条双列成本；WorkBuddy → §2.5.2 T1 账单级路径）。**不要为它们写 adapter**，
 > 但在设计核心宿主的降级路径时用它们当反例。
 
 **DSH 是核心目标，且是唯一有第四层的宿主**（`docs/DSH_HOST_ASSESSMENT.md`）：
@@ -465,7 +465,7 @@ billing_mode, task)`——比 v0.9 定的 `(host, provider)` 还细一级，多�
   进：没有 `usage_fact.rs`，`HostProfile` 声明 `session_store: false` / `fold: None`，
   且 `Signal::Usage` 就在它的 `unmeasured_signals` 里。
 - **它的计量单位是 credits 不是 token**（`session_usage.credit_json`），`Cost` 的
-  `Credits` 档在 v0.10 无承载类型（与 §12 第 45 条的 `Quota` 同一个缺口）。
+  `Credits` 档在 v0.10 无承载类型（与 §13 第 45 条的 `Quota` 同一个缺口）。
 - **但 T1 完全可用**：实测宿主积分账单 4307.76 ≈ ¥215（官方加量包价 1000 积分 = ¥50），
   按 `billing_basis='host_billed'` 录入 `host_bills` 即可进 Overview 的跨宿主总花费。
 - **T2 部分可用**：12 个 signal unmeasured、SV604/605 已声明降级；但它有**别人没有的**
@@ -1254,7 +1254,76 @@ R1 §11 是一份「待合并 patch」影子章节：同一件事在文档里有
 CLAUDE.md 的「性能形状」段目前也还写着 `codex_merged_cached`，同属 v0.9.1 SQL 迁移后的
 遗留，需一并订正。
 
-## 12. changelog
+## 12. 六宿主评估后的结论（2026-09-08）
+
+R1 → R2.3 累计 71 条修改，全部围绕「让 spec 诚实」；六个宿主的一手实测
+（claude-code / codex / dsh / pi / cline / hermes）之后，结论是**结构问题已经解决，
+剩下的瓶颈不是架构，是证据**。
+
+### 12.1 可以开工的：v0.10-A
+
+**Trace & Metrics 已具备实施条件。** 它依赖的三样东西在所有核心宿主上都成立：
+`CanonicalSession` 已落地、token 桶齐全、`(scope, ordinal)` 定序规则已与
+`TRAJECTORY_TIMELINE_SPEC` 对齐（§2.1.1），且几何层复用既有 `buildGeometry`
+（§2.1.2）不新增风险面。**建议立即开始，不必等其余决策。**
+
+### 12.2 不该开工的：v0.10-B / C，且阻塞项不是 spec
+
+| 阻塞 | 事实 | 后果 |
+|---|---|---|
+| **浪费族只有 1/6 宿主** | SV-COST-01/02 只实现在 `hosts/dsh/sessions/waste.rs` | Savings 页面在 claude-code / codex / pi / cline 上**是空的**——而 Savings 是 §0 北极星 |
+| **两个核心宿主语料不足** | Pi = 1 会话 93 行；Cline = 1 会话 6 消息、**零工具调用** | 按这种语料写 adapter 就是照 fixture 编程；本仓库有明确前科（Codex 的假结论来自旧 fixture、渲染器手写形状「假绿」） |
+| **子代理可靠性差异未量化** | Cline 干净（`is_subagent` + `parent_agent_id` + queue）· DSH 实测 5/19 · Codex 只数不取 · Hermes 有列但 0 填充 · Pi 未观察 | `TraceGraph.parent_node_id` 只在 1 个宿主是 measured，其余需降级——降级规则尚未逐宿主写死 |
+
+**这三条都不是写 spec 能解决的。** 结论：**v0.10-B 前应先做一轮语料建设**——
+用每个核心宿主做一周真实工作，再复核 §2.5.4 的 `※` provisional 项。这比继续改 spec
+便宜，也是唯一能解除阻塞的动作。
+
+### 12.3 唯一仍然开放的架构决策：**谁拥有计价权**
+
+这条已从「Pi 的个案」变成**趋势**：
+
+| 宿主 | 自报成本 |
+|---|---|
+| **pi** | ✅ per-message `usage.cost{input,output,cacheRead,cacheWrite,total}` |
+| **cline** | ✅ per-message `metrics.cost` + 会话级 `totalCost` / `aggregatedAgentsCost` |
+| **hermes** | ⚠️ 有 `estimated_cost_usd` / `actual_cost_usd` / `cost_source` 列，**但全 0 未填** |
+| claude-code / codex / dsh | ❌ 需我们用价卡算 |
+
+**六个宿主里三个已经或即将自报成本。** 而 spec §2.2 现在写的是「cost metric 必须从
+`domain::cost` 派生」——即**我们是计价权威**。这个立场正在变成少数派。
+
+`pricing_basis` 词表（§2.4.1）里 `provider-reported` **本就排在 `catalog-provider`
+之前**，所以词表是对的，**是管线没跟上**。
+
+> **建议（§13 第 57 条，待 PM 拍板）**：宿主自报为权威，我们的价卡值降为**对账第二数**，
+> 差额进 `data_quality_issues`，**不静默取其一**——与 v0.9「权威在 JSONL、索引是可丢弃
+> 投影」同构。影响面：§2.2 · §2.4.1 · §10.2.5。**这是唯一还会改变数据模型的决策，
+> 应在 v0.10-B 动工前定。**
+
+### 12.4 宿主评估反向验证了 spec 的两条核心规则
+
+不是新增约束，是把「假设」升级成「实证」：
+
+1. **§10.3「派生数据不物化、命中走 `Arc`」**——DSH 走了相反的路：投影物化到盘，
+   实测 `storages/` **1.76 GB** 派生自 `sessions/` **67 MB**（**26×**），单会话投影
+   最大 **183 MB**。而 2026-09-05 卡顿事故起因只是「几 MB JSON」。
+2. **§9.1 铁律 8「Host ≠ BillingSource」**——Cline 的
+   `model="anthropic/claude-sonnet-5"` 但 `provider="shengsuanyun"`（中转）。
+   按模型名前缀归到 Anthropic 计价就是编造。
+
+另有两条**接入期数据陷阱**已写死为规则：Cline 的 `metadata` 块含与权威值冲突的过时字段
+（§13 第 65 条）· Hermes 的 skill 三层嵌套致扁平扫描少报 87%（§13 第 60 条）。
+
+### 12.5 文档卫生
+
+本 spec 已 1,400+ 行、§12 changelog 71 条，超过部分正文章节的长度。
+**建议 v0.10-A 首个 PR 时合并为 R3**：changelog 折叠成「R1→R2.3 摘要」一段，
+正文保持单一叙述。理由与 §13 第 17 条（§11 影子章节）同源——**多份真相必然漂移**。
+
+---
+
+## 13. changelog
 
 | # | 改动 | 位置 | 来源 finding |
 |---|---|---|---|
@@ -1344,7 +1413,7 @@ spec 从未定义「第四个宿主怎么接」「接不进来的宿主看到什
 | 53 | §7 v0.10-A 门槛 1 补一句：「三宿主」≠「多宿主」，第四个宿主走 §2.5 | §7 | 本节 |
 | 54 | 记下 Codex 的 Legacy/Paginated **两套不兼容词汇是常态不是特例**，新宿主接入时按此预期 | §2.5.4 | §13 矩阵双列 |
 
-> **与 §12 第 45 条合并的待决项**：`Cost` 四档里 `Credits`（WorkBuddy 积分）与 `Quota`
+> **与 §13 第 45 条合并的待决项**：`Cost` 四档里 `Credits`（WorkBuddy 积分）与 `Quota`
 > （订阅配额余量）在 v0.10 均无承载类型。`Credits` 可由 T1 的 `host_bills.host_billed`
 > 覆盖；`Quota` 仍缺——它正是 §2.2.1 硬规则 2「订阅型收益 = 配额余量」所需要的类型。
 

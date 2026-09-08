@@ -92,7 +92,19 @@ updatedAt}`。**归档会话是显式标记的**——其他宿主要靠扫目�
 
 ---
 
-## 2. 当前故障：审计 tab 的两条链都是死的
+## 2. 故障与修复（**已于 2026-09-08 修复并验证**）
+
+> **修复结果**：`~/.dsh/profiles/web/package.json` 已改为新包名 + `integrations/`
+> 新路径，**两个 bundle 都改用 `link:`**（原 `dsh` 用 `file:` 会复制并僵化，正是
+> 「1.3.0 有两份不同内容」的根因）；三处残留（旧 `file:` 副本、两条死 symlink）已清；
+> `pnpm install` 重装通过。验证：两个 bundle 均可解析、包名/版本/入口/`cordis.patch.yml`
+> 齐全、客户端产物（`lib/client.cjs` 222 KB · wasm 2.1 MB · `pricing.json`）就位、
+> 无残留死链；插件自带的 `verify.mjs` / `verify-host.mjs` / `verify-timeline.mjs`
+> 三套断言全部通过。备份在 `package.json.bak-20260908-dshfix`。
+>
+> §2.2 第 2 条（版本↔内容守卫）**仍未做**——那是仓库侧的 CI 工作，不是本次安装修复。
+
+### 2.0 修复前的故障（存档）
 
 Phase E1 把 `dsh/` → `integrations/dsh/`、`dsh-client/` → `integrations/dsh-client/`，
 但**已安装的 profile 仍指向旧路径**：
