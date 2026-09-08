@@ -1373,6 +1373,12 @@ async function fetchSessionsPage(gen) {
   sessFetching = true;
   try {
     const args = { pageSize: 50 };
+    // 月份窗口（修「上个月会话看不到」）：picker 选了 YYYY-MM 时透传给 IPC，
+    // store.rs list_args 优先 month（更粗、用户主动选择）走 --month 路径。
+    // picker 为空 → 不传 month → IPC 用 day 兜底为今天（旧契约）。
+    // day 字段目前没用（保留 IPC 入参面，未来若加 day picker 再启用）。
+    const monthVal = document.getElementById("sess-month").value;
+    if (monthVal) args.month = monthVal;
     // host 过滤（spec §7.3）：非 all 时把 host_kind 传给 IPC（Tauri 2 命令参数 JS
     // 侧 camelCase，hostKind ← host_kind）。过滤变化时调用方负责重置分页。
     if (sessFilter !== "all") args.hostKind = sessFilter;
@@ -1439,7 +1445,13 @@ function renderSessions() {
   const more = document.getElementById("sess-more");
   body.innerHTML = "";
 
-  count.textContent = sessState.total != null ? "共 " + sessState.total + " 个会话 · 点任意行看报告" : "";
+  // 月份上下文加到计数后缀，让用户清楚看到「这个数是哪个月」（避免把 2026-08
+  // 的 50 条误读成「今天居然跑了 50 条」）。picker 为空 → 显示「今日」。
+  const monthEl = document.getElementById("sess-month");
+  const suffix = monthEl && monthEl.value ? monthEl.value : "今日";
+  count.textContent = sessState.total != null
+    ? suffix + " 共 " + sessState.total + " 个会话 · 点任意行看报告"
+    : "";
   if (sessState.items.length === 0) {
     // error 时隐藏空态：横幅已经说明了数据源问题，不要再摆「暂无会话」冒充真空。
     empty.hidden = sessState.error;
@@ -3313,6 +3325,14 @@ function init() {
   });
   document.getElementById("sess-more").addEventListener("click", () => loadSessions(false));
   document.getElementById("sess-reload").addEventListener("click", () => loadSessions(true));
+  // 月份 picker（修「点会话 tab 只看到今天」bug）：change 事件重置分页 +
+  // 重载（cursor 是 per-window 的，跨月 cursor 无意义——store.rs list_args 不
+  // 检查 cursor 与 month 是否匹配，混传会让用户以为在翻页实则乱跳）。
+  // picker 默认值 = 当前北京月份，保持「开 tab 立刻看到数据」的体感；
+  // 用户主动清空 picker → IPC 收 month=undefined → store.rs 兜底为 --day 今天。
+  const sessMonthEl = document.getElementById("sess-month");
+  sessMonthEl.value = beijingMonth();
+  sessMonthEl.addEventListener("change", () => loadSessions(true));
   document.getElementById("sess-back").addEventListener("click", () => {
     document.getElementById("sess-detail-view").hidden = true;
     document.getElementById("sess-list-view").hidden = false;

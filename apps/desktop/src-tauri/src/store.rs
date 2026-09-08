@@ -91,18 +91,24 @@ fn beijing_today_yyyy_mm_dd() -> String {
 
 /// `sessions list` 的 argv（纯函数，供单测钉住 IPC→CLI 参数映射）。参数集对齐
 /// 新 CLI SessionsAction::List 的扁平签名（apps/cli/src/main.rs:750-775）：
-///   --day | --month 必其一（IPC 这里传 --day，None 时兜底为今天北京日期——
+///   --day | --month 必其一（IPC 这里传 day/month，None 时兜底为今天北京日期——
 ///   CLI 的 mutex 不允许两个都缺，新 SessionsAction 在「无 day 无 month」时报
 ///   "exactly one of --day / --month is required"，IPC 替前端拍今天的默认值）；
 ///   --host-kind 可选（filter chip 透传）；--page-size 可选（缺省 50，二进制兜底）；
 ///   --cursor 可选（透传 mcp::sessions_search 的不透明 cursor 串）。
 ///
+/// **day vs month**：前端 month picker 选了 2026-08 → IPC 透传 `month: "2026-08"`
+/// → CLI 走 `--month` 路径，返回该月全部会话。day 模式返回单日窗口（按小时聚合）。
+/// 同传两个时优先 month（更粗、user 主动选的）——这条排序按前端语义定，单测钉死。
+///
 /// **旧 CLI 不再接受的 flag**：`--model` / `--from` / `--to` / `--query` / `--hour`
 /// / `--min-tokens`——这些维度 r2a_store 没实现，与权威库 sessions_search 输入
 /// schema 对齐后已删。前端想用这些维度时需先扩 mcp::sessions_search 的 args
-/// schema，再回来加 IPC 参数；目前工作台只用到 day / host_kind / page_size / cursor。
+/// schema，再回来加 IPC 参数；目前工作台只用到 day / month / host_kind /
+/// page_size / cursor。
 fn list_args(
     day: &Option<String>,
+    month: &Option<String>,
     host_kind: &Option<String>,
     page_size: Option<usize>,
     cursor: &Option<String>,
@@ -112,12 +118,18 @@ fn list_args(
         "list".into(),
         "--json".into(),
     ];
-    // --day 必须有；None → 今天北京日期（兜底）。CLI 拒绝「无 day 无 month」，
-    // IPC 替前端拍默认值。`beijing_today_yyyy_mm_dd` 是纯函数版，单测里不
-    // 依赖系统时钟靠「给一个 --day 输入」覆盖这条分支。
-    let d = day.clone().unwrap_or_else(beijing_today_yyyy_mm_dd);
-    a.push("--day".into());
-    a.push(d);
+    // month 优先 day：用户主动从 month picker 选了某月，意图是「该月全部」，
+    // day 单窗口只是默认兜底。前端 day picker 选日期时只发 day、month picker
+    // 选月时只发 month——同传两个是 IPC bug，这层用 month 兜住不报错。
+    // 两个都 None → 今天北京日期（保持 v0.9.1 旧契约：开 tab 直接看到当天）。
+    if let Some(m) = month.clone() {
+        a.push("--month".into());
+        a.push(m);
+    } else {
+        let d = day.clone().unwrap_or_else(beijing_today_yyyy_mm_dd);
+        a.push("--day".into());
+        a.push(d);
+    }
     if let Some(h) = host_kind {
         a.push("--host-kind".into());
         a.push(h.clone());
@@ -175,18 +187,23 @@ fn run_json(mut cmd: Command) -> Result<Value, Value> {
         .map_err(|e| error_value("cancelled", &e.to_string()))
 }
 
-/// list_sessions：day/host/page_size/cursor → mcp::sessions_search envelope。
+/// list_sessions：day/month/host/page_size/cursor → mcp::sessions_search envelope。
 /// async：spawn_blocking 把 CLI 子进程丢到阻塞线程池，主线程继续收托盘事件，
 /// 详见模块头注释。
 ///
-/// **参数扁平**（day / host_kind / page_size / cursor 四件）是 Tauri IPC 契约的
-/// 一部分——`workbench.js` 的 invoke 调用面就是这四个扁平参数，改成结构体要
-/// 连带改前端调用面。少了一档 `#[allow(clippy::too_many_arguments)]` 注释：
-/// 4 个参数本就在 lint 阈值内。
+/// **参数扁平**（day / month / host_kind / page_size / cursor 五件）是 Tauri
+/// IPC 契约的一部分——`workbench.js` 的 invoke 调用面就是这五个扁平参数，
+/// 改成结构体要连带改前端调用面。5 个参数本就在 lint 阈值内。
+///
+/// month 是工作台 picker 的扩展（v0.9.1 旧契约只发 day，修「点 tab 只看到今
+/// 天、上个月会话看不到」的 bug）：前端从 `<input type="month">` 读到
+/// `YYYY-MM` 字符串透传。两个都给时 store.rs `list_args` 优先 month（更粗、
+/// 用户主动选择）。
 #[tauri::command]
 pub async fn sessions_list(
     state: tauri::State<'_, StoreBuildLock>,
     day: Option<String>,
+    month: Option<String>,
     host_kind: Option<String>,
     page_size: Option<usize>,
     cursor: Option<String>,
@@ -197,7 +214,7 @@ pub async fn sessions_list(
         let Some(bin) = resolve_binary() else {
             return Err(no_binary());
         };
-        let args = list_args(&day, &host_kind, page_size, &cursor);
+        let args = list_args(&day, &month, &host_kind, page_size, &cursor);
         let mut cmd = Command::new(&bin);
         cmd.args(&args);
         // 与 tick 同款：显式钉死 AGENT_VITALS_HOME，权威库 / salt / 状态文件都
@@ -265,29 +282,74 @@ mod tests {
 
     /// list_args 字段集是 v0.9.1 收口后的精简版：旧 CLI 用的 `--model` / `--from`
     /// / `--to` / `--query` 已删（权威库 sessions_search 不收这四件；list_args 模块头
-    /// 注释解释为什么）。本测试盯住「只能出这四个 flag + --day 兜底」，防 PR 后
+    /// 注释解释为什么）。本测试盯住「只能出这四个 flag + day/month 兜底」，防 PR 后
     /// 有人手快把旧 flag 加回来。
     ///
     /// 「空 filter」分支今天北京日期不是字面常量——拆成两条：(a) 全字段用显式
-    /// day 字面量钉住 argv 顺序；(b) `day: None` 分支断言「`--day` 始终在场、
+    /// day 字面量钉住 argv 顺序；(b) `day/month: None` 分支断言「`--day` 始终在场、
     /// 值是 YYYY-MM-DD」，不锁具体日期（系统时钟会让这条用例 false-fail）。
     #[test]
     fn list_args_full() {
         let some = &Some("x".to_string());
         assert_eq!(
-            list_args(some, some, Some(7), &Some("c".to_string())),
+            list_args(some, &None, some, Some(7), &Some("c".to_string())),
             vec!["sessions", "list", "--json",
                  "--day", "x", "--host-kind", "x", "--page-size", "7",
                  "--cursor", "c"]
         );
     }
 
-    /// `day: None` → argv 必须含 `--day` + YYYY-MM-DD 字串（兜底为今天）。
-    /// CLI 拒绝「无 day 无 month」（mutex 不允许两个都缺）；IPC 不替前端
-    /// 报错而是补一个今天的 `--day` —— 这一行是契约面。
+    /// `month` 模式：用户从前端 month picker 选了一个月 → IPC 透传 `month` →
+    /// argv 必须有 `--month YYYY-MM`，没有 `--day`。这是修「工作台会话 tab 只
+    /// 看得到今天」的关键——month 是 day 的替代窗口，不是补充。
+    #[test]
+    fn list_args_month_mode_emits_month_flag_only() {
+        assert_eq!(
+            list_args(&None, &Some("2026-08".to_string()), &None, None, &None),
+            vec!["sessions", "list", "--json", "--month", "2026-08"]
+        );
+    }
+
+    /// month + day 同传：month 优先（更粗、用户主动选择；day 是默认兜底）。
+    /// 这条排序锁住 IPC bug 容错面——前端若哪天误传两个，行为可预测。
+    #[test]
+    fn list_args_month_takes_precedence_over_day() {
+        assert_eq!(
+            list_args(
+                &Some("2026-08-15".to_string()),
+                &Some("2026-08".to_string()),
+                &None, None, &None,
+            ),
+            vec!["sessions", "list", "--json",
+                 "--month", "2026-08"]
+        );
+    }
+
+    /// month 模式 + 其它过滤：host-kind / page-size / cursor 仍可叠加。
+    /// 钉住「month 不是全替换、是个独立的窗口选择」。
+    #[test]
+    fn list_args_month_with_filters() {
+        assert_eq!(
+            list_args(
+                &None,
+                &Some("2026-08".to_string()),
+                &Some("dsh".to_string()),
+                Some(100),
+                &None,
+            ),
+            vec!["sessions", "list", "--json",
+                 "--month", "2026-08",
+                 "--host-kind", "dsh",
+                 "--page-size", "100"]
+        );
+    }
+
+    /// `day: None` 且 `month: None` → argv 必须含 `--day` + YYYY-MM-DD 字串
+    /// （兜底为今天）。CLI 拒绝「无 day 无 month」（mutex 不允许两个都缺）；
+    /// IPC 不替前端报错而是补一个今天的 `--day` —— 这一行是契约面。
     #[test]
     fn list_args_default_day_is_today() {
-        let a = list_args(&None, &None, None, &None);
+        let a = list_args(&None, &None, &None, None, &None);
         // 第一段固定
         assert_eq!(&a[0..3], &["sessions", "list", "--json"]);
         // --day 必须紧跟固定段（位置由 list_args 保证）

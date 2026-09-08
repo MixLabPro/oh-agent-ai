@@ -283,6 +283,20 @@ body {
   filter: invert(0.7);
 }
 
+/* 会话 tab 的月份 picker（修「会话 tab 只看得到今天、上个月看不到」bug）：
+   与日历的 .cal-month-input 同款，复用一套深色面板边框 + 内嵌 picker 图标。 */
+.picker {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--panel-2);
+  border-radius: 6px;
+  font-size: 13px;
+  padding: 3px 8px;
+}
+.picker::-webkit-calendar-picker-indicator {
+  filter: invert(0.7);
+}
+
 .cal-total {
   margin-left: auto;
   font-weight: 600;
