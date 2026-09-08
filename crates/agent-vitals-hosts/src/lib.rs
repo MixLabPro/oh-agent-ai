@@ -17,6 +17,14 @@
 pub mod canonical_usage;
 pub mod hosts;
 pub mod skill_discovery;
+// v0.10.0：多宿主「路径 -> CanonicalSession」入口（spec §7 门槛 1 的前提，此前
+// 只有 DSH 有）。I/O，随 `dsh_sources` 等同一条 `sources` feature 边界；路径
+// 含 `/sources` 是故意的，落进 `io_tokens_only_appear_under_sources` 守卫。
+#[cfg(feature = "sources")]
+pub mod sources;
+
+#[cfg(feature = "sources")]
+pub use sources::canonical_input;
 
 // Flat compatibility facade——调用方一个 crate 一个入口。
 pub use hosts::claude_code::sessions::usage as claude_code_usage;
