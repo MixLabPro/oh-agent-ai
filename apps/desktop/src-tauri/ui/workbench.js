@@ -3386,21 +3386,17 @@ document.addEventListener("DOMContentLoaded", init);
   }
 
   async function renderTrace() {
-    const path = $("trace-path").value.trim();
-    const host = $("trace-host").value;
-    const ns = $("trace-ns").value.trim();
+    const sessionRef = $("trace-session-ref").value.trim();
     traceBanner("");
-    if (!path) { traceBanner("请填写会话文件路径"); return; }
-    if (!ns) {
-      // spec §9：身份段永不发明——namespace 缺失是输入错误，不是可默认项。
-      traceBanner("请填写 machine namespace（身份段必填，CLI 同一条纪律）");
+    if (!sessionRef) {
+      traceBanner("请填写 Sessions 列表返回的会话引用");
       return;
     }
     $("trace-render").disabled = true;
     $("trace-render").textContent = "渲染中…";
     try {
       const r = await invoke("session_trace", {
-        path, host, machineNamespace: ns, output: "timeline_series",
+        sessionRef, output: "timeline_series",
       });
       if (r && r.error) {
         traceBanner(`轨迹不可用：${r.error.message || r.error.code}`);
@@ -3411,7 +3407,7 @@ document.addEventListener("DOMContentLoaded", init);
       if (!data.points || !data.points.length) {
         $("trace-timeline").innerHTML = "";
         $("trace-empty").hidden = false;
-        $("trace-empty").textContent = "该文件没有可绘制的 turn 样本（可能不是这个宿主的会话日志，或没有任何 turn 边界）";
+        $("trace-empty").textContent = "该会话没有可绘制的 turn 样本（可能源日志已清理，或没有任何 turn 边界）";
         $("trace-coverage").textContent = "";
         return;
       }
@@ -3420,7 +3416,7 @@ document.addEventListener("DOMContentLoaded", init);
       // 留缺口不连直线——本页只负责把 envelope.data 原样递给它。
       $("trace-timeline").innerHTML = window.TimelineGeometry.buildTimeline(data);
       const ipc = await invoke("session_trace", {
-        path, host, machineNamespace: ns, output: "graph",
+        sessionRef, output: "graph",
       });
       const graph = ipc && !ipc.error ? ipc.data : null;
       $("trace-coverage").textContent = graph ? traceCoverageText(graph) : "";
@@ -3440,7 +3436,7 @@ document.addEventListener("DOMContentLoaded", init);
   document.addEventListener("DOMContentLoaded", () => {
     const btn = $("trace-render");
     if (btn) btn.addEventListener("click", renderTrace);
-    const nsInput = $("trace-ns");
-    if (nsInput) nsInput.addEventListener("keydown", (e) => { if (e.key === "Enter") renderTrace(); });
+    const sessionRefInput = $("trace-session-ref");
+    if (sessionRefInput) sessionRefInput.addEventListener("keydown", (e) => { if (e.key === "Enter") renderTrace(); });
   });
 })();

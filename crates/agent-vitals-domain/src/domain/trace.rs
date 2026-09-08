@@ -134,16 +134,21 @@ fn tool_call_candidates(session: &CanonicalSession) -> Vec<Candidate> {
             let obs = &e.observation;
             let matched_result = e.call_id.as_deref().and_then(|cid| result_by_call.get(cid));
             let (ended_at_ms, status) = match matched_result {
-                Some(r) => (r.time, tool_result_status(r.observation.failed, &r.observation.error_code)),
+                Some(r) => (
+                    r.time,
+                    tool_result_status(r.observation.failed, &r.observation.error_code),
+                ),
                 None => (None, None),
             };
             // 无 call_id 时的合成 fallback：只用于图内去重与展示定位，**不是
             // join 键**（spec §2.1「跨 scope join 只走 native」的 native 指
             // 宿主原生 id；合成 id 永不参与跨 scope 关联）。
-            let native = e
-                .call_id
-                .clone()
-                .unwrap_or_else(|| format!("tool-call-seq-{}-{idx}", e.seq.map_or_else(|| "none".to_string(), |s| s.to_string())));
+            let native = e.call_id.clone().unwrap_or_else(|| {
+                format!(
+                    "tool-call-seq-{}-{idx}",
+                    e.seq.map_or_else(|| "none".to_string(), |s| s.to_string())
+                )
+            });
             Candidate {
                 seq: e.seq,
                 timeline_priority: 1,
@@ -168,8 +173,18 @@ fn tool_call_candidates(session: &CanonicalSession) -> Vec<Candidate> {
 /// 全部来自输入已有的字段，不引入 mtime / 数组扫描顺序。
 fn sort_candidates(mut cands: Vec<Candidate>) -> Vec<Candidate> {
     cands.sort_by(|a, b| {
-        let a_key = (a.seq.is_none(), a.seq.unwrap_or(i64::MAX), a.timeline_priority, a.entry_ordinal);
-        let b_key = (b.seq.is_none(), b.seq.unwrap_or(i64::MAX), b.timeline_priority, b.entry_ordinal);
+        let a_key = (
+            a.seq.is_none(),
+            a.seq.unwrap_or(i64::MAX),
+            a.timeline_priority,
+            a.entry_ordinal,
+        );
+        let b_key = (
+            b.seq.is_none(),
+            b.seq.unwrap_or(i64::MAX),
+            b.timeline_priority,
+            b.entry_ordinal,
+        );
         a_key.cmp(&b_key)
     });
     cands
@@ -206,7 +221,9 @@ pub fn build_trace_graph(session: &CanonicalSession, session_key: SessionKey) ->
         }));
         if c.is_turn_root {
             if let Some(t) = c.turn_no {
-                turn_node_id_by_no.entry(t).or_insert_with(|| node_id.clone());
+                turn_node_id_by_no
+                    .entry(t)
+                    .or_insert_with(|| node_id.clone());
             }
         }
         nodes.push(TraceNode {
@@ -216,7 +233,19 @@ pub fn build_trace_graph(session: &CanonicalSession, session_key: SessionKey) ->
             native: c.native.clone(),
             node_type: c.node_type,
             fact_id: String::new(),
-            evidence_ref: String::new(),
+            // canonical timeline 本身就是非用量节点的可重放证据；值是 opaque
+            // 坐标而非宿主原生 id，避免把 native id 当跨节点 join 键泄露出去。
+            evidence_ref: format!(
+                "ce1-{}",
+                stable_id(&json!({
+                    "host": host_id,
+                    "session_key": session_key.to_json(),
+                    "scope": "main",
+                    "ordinal": ordinal,
+                    "native": c.native,
+                    "node_type": c.node_type.as_str(),
+                }))
+            ),
             parent_node_id: None, // 第二趟回填
             branch_state: BranchState::Live,
             started_at_ms: c.started_at_ms,
@@ -248,7 +277,8 @@ pub fn build_trace_graph(session: &CanonicalSession, session_key: SessionKey) ->
                     from_node_id: parent_id.clone(),
                     to_node_id: nodes[i].node_id.clone(),
                     fact_id: String::new(),
-                    evidence_ref: String::new(),
+                    // edge 的依据是 child canonical event；它可由同一输入重放。
+                    evidence_ref: nodes[i].evidence_ref.clone(),
                     edge_type: TraceEdgeType::ControlFlow,
                     provenance: nodes[i].provenance,
                 });
@@ -300,6 +330,14 @@ pub fn build_trace_graph(session: &CanonicalSession, session_key: SessionKey) ->
         nodes,
         edges,
         coverage,
+        metrics: json!({
+            "model_invocation_count": null,
+            "token_total": null,
+            "tool_call_count": session.tool_calls.entries.len(),
+            "failed_tool_call_count": null,
+            "known_tool_duration_ms": null,
+            "cost_minor": null,
+        }),
         input_fingerprint,
     }
 }
@@ -449,9 +487,14 @@ mod tests_project_timeline_series {
             nodes: vec![],
             edges: vec![],
             coverage: TraceCoverage::default(),
+            metrics: json!({}),
             input_fingerprint: "f".into(),
         };
-        assert!(project_timeline_series(&graph, crate::contracts::evidence::Linearization::AllRecorded).is_err());
+        assert!(project_timeline_series(
+            &graph,
+            crate::contracts::evidence::Linearization::AllRecorded
+        )
+        .is_err());
     }
 
     #[test]
@@ -464,9 +507,12 @@ mod tests_project_timeline_series {
             nodes: vec![],
             edges: vec![],
             coverage: TraceCoverage::default(),
+            metrics: json!({}),
             input_fingerprint: "f".into(),
         };
-        let v = project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath).unwrap();
+        let v =
+            project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath)
+                .unwrap();
         assert_eq!(v["linearization"], json!("leaf"));
         assert_eq!(v["points"], json!([]));
         assert_eq!(v["events"], json!([]));
@@ -521,20 +567,30 @@ mod tests_project_timeline_series {
             nodes: vec![turn_node, call_node],
             edges: vec![],
             coverage: TraceCoverage::default(),
+            metrics: json!({}),
             input_fingerprint: "f".into(),
         };
-        let v = project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath).unwrap();
+        let v =
+            project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath)
+                .unwrap();
         let points = v["points"].as_array().unwrap();
         let events = v["events"].as_array().unwrap();
         assert_eq!(points.len(), 1, "只有 turn 节点进曲线层");
         assert_eq!(points[0]["values"]["tool_call_count"], json!(3.0));
         assert_eq!(points[0]["task_id"], json!("turn-1"));
         assert_eq!(events.len(), 1, "tool_call 一个不丢");
-        assert_eq!(events[0]["ordinal"], json!(0), "事件锚定到父 turn 的 point ordinal——不是自己的节点 ordinal");
+        assert_eq!(
+            events[0]["ordinal"],
+            json!(0),
+            "事件锚定到父 turn 的 point ordinal——不是自己的节点 ordinal"
+        );
         assert_eq!(events[0]["kind"], json!("tool")); // status=None 不是 error，不冒充风险
         assert_eq!(events[0]["label"], json!("read"));
         assert_eq!(events[0]["targetId"], json!("c1"));
-        assert_eq!(v["series"], json!([{"name": "tool_call_count", "cumulative": false}]));
+        assert_eq!(
+            v["series"],
+            json!([{"name": "tool_call_count", "cumulative": false}])
+        );
         assert_eq!(v["unplaced_events"], json!(0));
     }
 
@@ -584,9 +640,12 @@ mod tests_project_timeline_series {
             nodes: vec![turn_node, call_node],
             edges: vec![],
             coverage: TraceCoverage::default(),
+            metrics: json!({}),
             input_fingerprint: "f".into(),
         };
-        let v = project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath).unwrap();
+        let v =
+            project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath)
+                .unwrap();
         let events = v["events"].as_array().unwrap();
         assert_eq!(events[0]["kind"], json!("risk"));
         assert_eq!(events[0]["severity"], json!("critical"));
@@ -627,10 +686,17 @@ mod tests_project_timeline_series_unplaced {
             nodes: vec![call_node],
             edges: vec![],
             coverage: TraceCoverage::default(),
+            metrics: json!({}),
             input_fingerprint: "f".into(),
         };
-        let v = project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath).unwrap();
-        assert_eq!(v["events"].as_array().unwrap().len(), 0, "不进 events——锚不了位置就绝不编位置");
+        let v =
+            project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath)
+                .unwrap();
+        assert_eq!(
+            v["events"].as_array().unwrap().len(),
+            0,
+            "不进 events——锚不了位置就绝不编位置"
+        );
         assert_eq!(v["unplaced_events"], json!(1), "但计数必须可见，绝不静默");
     }
 }

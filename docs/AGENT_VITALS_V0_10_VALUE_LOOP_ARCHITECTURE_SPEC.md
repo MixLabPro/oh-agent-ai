@@ -48,6 +48,7 @@ pub struct TraceGraph {
     pub nodes: Vec<TraceNode>,
     pub edges: Vec<TraceEdge>,
     pub coverage: TraceCoverage,
+    pub metrics: serde_json::Value,     // model invocation/token/cost/tool timing/failure；未知值为 null
     pub input_fingerprint: String,
 }
 
@@ -62,8 +63,8 @@ pub struct TraceNode {
                                          //   subagent / compaction / retry / outcome / model_change
                                          //   （model_change：Pi 单会话实测 4 模型 5 次切换，W1 需按模型族
                                          //    分别计算并排除切换边界——§2.4.1）
-    pub fact_id: String,                 // 引用的 UsageFact.fact_id（v0.9 已落地，形如 "uf1-<hex>"）
-    pub evidence_ref: String,            // 引用的 evidence_ref（空串占位，见 §10.6 空串规则的适用边界）
+    pub fact_id: String,                 // SQL ModelInvocation 引用 UsageFact.fact_id；canonical 节点为空
+    pub evidence_ref: String,            // canonical 坐标或 "uf1:<fact_id>"；不以时间猜测 join
     pub parent_node_id: Option<String>,  // 不存在的 parent 在 TraceCoverage 里标 missing（§0 原则）
     pub branch_state: BranchState,       // live / abandoned / unknown —— 废弃分叉进 unmetered，**不归零**
     pub started_at_ms: Option<i64>,      // **仅用于展示与时间分桶，不参与排序**；缺失时 None，
@@ -79,8 +80,8 @@ pub struct TraceEdge {
     pub edge_id: String,                 // fnv1a64_hex(canonical_json(...))
     pub from_node_id: String,
     pub to_node_id: String,
-    pub fact_id: String,                 // 引用的 UsageFact.fact_id
-    pub evidence_ref: String,            // 空串占位
+    pub fact_id: String,                 // 边已有直接 UsageFact 证据时才填写
+    pub evidence_ref: String,            // 产生边的 canonical evidence 坐标
     pub edge_type: TraceEdgeType,        // causal / temporal / data_flow / control_flow
     pub provenance: Provenance,          // subagent 父子边尤其需要——DSH parentSession 实测 5/19 可靠
 }
@@ -95,6 +96,9 @@ pub struct TraceCoverage {
 }
 ```
 
+运行时会把每条实时 `usage_facts` 记录加成独立 `model_invocation` 节点，填真实
+`fact_id`、`uf1:<fact_id>` evidence_ref 和模型 token 桶；**不会**按相近时间硬接到
+assistant turn 或 tool call。canonical 节点则有稳定的 opaque canonical evidence 坐标。
 `fact_id` 与 v0.9 `source_identity::fnv1a64_hex` 同源。**「不得自造 ID」的准确含义是
 「不得自造 join 键」**：`node_id` 是我们合成的稳定主键（幂等用），而**跨 scope 的关联
 只能走 `native`**（宿主自己的 id），绝不走 `ordinal` 或哈希——子代理会话是另一个编号空间。
@@ -737,7 +741,8 @@ v0.11.0 加 Issues 后是完整的"诊断"产品；金额与动作分别再往�
 
 ### v0.10.0（原 A）：Trace & Metrics
 
-- Claude Code、Codex、DSH 的确定性 TraceGraph builder；
+- Claude Code、Codex、DSH 的确定性 TraceGraph builder；每个图额外叠加 SQL authority
+  的 `model_invocation` 事实节点（没有可验证因果证据时不编 parent）；
 - Invocation / tool timing / model / cost / failure metrics；
 - Sessions、Traces 查询 DTO、时间线与节点图；
 - coverage 与降级显示。
@@ -749,10 +754,11 @@ v0.11.0 加 Issues 后是完整的"诊断"产品；金额与动作分别再往�
    第四个宿主按 §2.5 的三层参与度接入，达不到 T3 的宿主按 §2.5.3 诚实退化；
 2. 缺失关系（parent / time / status）显式在 `TraceCoverage` 里计数并标 `unavailable`，
    **不得用 mtime / 数组顺序补造**；
-3. CLI / Tauri IPC / HTML 三处对同一 `session_ref` 输出的 TraceGraph 节点列表
-   byte-identical（由 `tests/test_cli_matrix.py::both()` + `tests/mcp_smoke.py` 新增 S6 块
-   守，模式同 S5 sessions 三消费面 parity）；
-4. TraceGraph memo：`Arc<RwLock<HashMap<session_ref, TraceGraph>>>`，60s TTL，按 home 键控。
+3. CLI `trace-ref --session-ref`、Tauri IPC、MCP/HTML 对同一 `session_ref` 输出的
+   TraceGraph 节点列表 byte-identical。公开下钻**不接收路径**：仅在本机三宿主固定
+   目录按 authority 的 SessionKey 反查源文件；源已清理时返回 `source_unavailable`，
+   不得以 SQL token 事实伪造完整轨迹；
+4. TraceGraph memo：`Arc<RwLock<HashMap<ledger_key, TraceGraph>>>`，60s TTL，按 home 键控。
    **失效条件 = `usage_facts` 表的 `(COUNT(*), MAX(rowid)) WHERE session_key = ?`**。
 5. **Traces tab 的时间线复用既有几何**（`apps/desktop/src-tauri/ui/timeline.js` 的
    `buildGeometry` / `buildTimeline`），只新增「TraceGraph → geometry spec」数据准备函数；

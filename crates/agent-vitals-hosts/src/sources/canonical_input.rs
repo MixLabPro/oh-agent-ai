@@ -14,7 +14,7 @@
 //! `hosts::dsh::sources::read_session_log` 同一条边界）。
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agent_vitals_domain::contracts::evidence::CanonicalSession;
 use serde_json::Value;
@@ -43,7 +43,10 @@ impl std::fmt::Display for CanonicalInputError {
             }
             CanonicalInputError::FileUnavailable(e) => write!(f, "file unavailable: {e}"),
             CanonicalInputError::NoParsableRecords => {
-                write!(f, "no parsable records — the file is not in this host's wire format")
+                write!(
+                    f,
+                    "no parsable records — the file is not in this host's wire format"
+                )
             }
         }
     }
@@ -78,6 +81,130 @@ fn session_id_from_path(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
+/// DSH 的日志文件名固定为 `session.jsonl[.zstd]`，并不携带逻辑会话 id；真实
+/// id 在其父目录名（与 DSH discovery 的 zstd 回退规则一致）。其他路径仍保留
+/// stem 兜底，方便诊断工具读取临时 fixture。
+fn dsh_session_id_from_path(path: &Path) -> String {
+    if let Ok(text) = dsh_sources::read_session_text(path) {
+        if let Some((id, _)) = crate::hosts::dsh::sessions::header::dsh_header(&text) {
+            if !id.is_empty() {
+                return id;
+            }
+        }
+    }
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if matches!(name, "session.jsonl" | "session.jsonl.zstd") {
+        if let Some(id) = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+        {
+            return id.to_string();
+        }
+    }
+    session_id_from_path(path)
+}
+
+/// DSH 的 native session id 以日志头为权威；路径目录名只是日志损坏或不可读时
+/// 的诊断兜底。供 runtime 的受控源定位使用，避免目录移动后 session_ref 无法
+/// 下钻。返回错误时上层会明确报 source unavailable，不把路径名猜测成身份。
+pub fn dsh_native_session_id_for_path(path: &Path) -> Result<String, CanonicalInputError> {
+    let text = dsh_sources::read_session_text(path)
+        .map_err(|code| CanonicalInputError::FileUnavailable(code.to_string()))?;
+    let Some((id, _)) = crate::hosts::dsh::sessions::header::dsh_header(&text) else {
+        return Err(CanonicalInputError::NoParsableRecords);
+    };
+    if id.is_empty() {
+        return Err(CanonicalInputError::NoParsableRecords);
+    }
+    Ok(id)
+}
+
+/// 多个同一逻辑会话的源文件 → 一份 CanonicalSession。
+///
+/// Codex 可以把一个逻辑 session 续写到多个 `rollout-*.jsonl`；只读第一份会
+/// 让 TraceGraph 与 SQL 中按逻辑 session 归属的 usage facts 不一致。这里在
+/// **确认这些文件都属于同一 native session 后**由上层传入，按稳定路径序合并
+/// 记录，再只做一次 canonical projection。它不会将路径或原始内容泄漏给调用方。
+pub fn canonical_session_for_paths(
+    paths: &[PathBuf],
+    host: &str,
+    session_id: String,
+) -> Result<CanonicalSession, CanonicalInputError> {
+    if paths.is_empty() {
+        return Err(CanonicalInputError::FileUnavailable(
+            "no source files".to_string(),
+        ));
+    }
+    match host {
+        "dsh" => {
+            let mut execution_events = Vec::new();
+            let mut usage_events = Vec::new();
+            let mut cwd = None;
+            for path in paths {
+                let session = dsh_sources::read_session_log(path);
+                if let Some(code) = session.get("degraded").and_then(|v| v.as_str()) {
+                    return Err(CanonicalInputError::FileUnavailable(code.to_string()));
+                }
+                execution_events.extend(
+                    session
+                        .get("execution_events")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                usage_events.extend(
+                    session
+                        .get("usage_events")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                if cwd.is_none() {
+                    cwd = session
+                        .get("cwd")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                }
+            }
+            Ok(
+                dsh_evidence::build_dsh_evidence(execution_events, usage_events, cwd, session_id)
+                    .canonical,
+            )
+        }
+        "claude-code" | "codex" => {
+            let mut records = Vec::new();
+            for path in paths {
+                let text = fs::read_to_string(path)
+                    .map_err(|e| CanonicalInputError::FileUnavailable(e.to_string()))?;
+                let (file_records, _bad) = read_jsonl_lines(&text);
+                records.extend(file_records);
+            }
+            if records.is_empty() {
+                return Err(CanonicalInputError::NoParsableRecords);
+            }
+            if host == "claude-code" {
+                Ok(claude_code_evidence::build_claude_evidence(records, session_id).canonical)
+            } else {
+                Ok(codex_evidence::build_codex_evidence(
+                    records,
+                    session_id,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    None,
+                )
+                .canonical)
+            }
+        }
+        other => Err(CanonicalInputError::UnknownHost(other.to_string())),
+    }
+}
+
 /// 给定宿主 id + 会话文件路径，产出 `CanonicalSession`（spec §7 门槛 1 的入口）。
 ///
 /// 三宿主分派：
@@ -93,57 +220,12 @@ pub fn canonical_session_for_path(
     path: &Path,
     host: &str,
 ) -> Result<CanonicalSession, CanonicalInputError> {
-    match host {
-        "dsh" => {
-            let session = dsh_sources::read_session_log(path);
-            if let Some(code) = session.get("degraded").and_then(|v| v.as_str()) {
-                return Err(CanonicalInputError::FileUnavailable(code.to_string()));
-            }
-            let execution_events: Vec<Value> = session
-                .get("execution_events")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let usage_events: Vec<Value> = session
-                .get("usage_events")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let cwd = session.get("cwd").and_then(|v| v.as_str()).map(str::to_owned);
-            let session_id = session_id_from_path(path);
-            Ok(dsh_evidence::build_dsh_evidence(execution_events, usage_events, cwd, session_id).canonical)
-        }
-        "claude-code" => {
-            let text = fs::read_to_string(path)
-                .map_err(|e| CanonicalInputError::FileUnavailable(e.to_string()))?;
-            let (records, _bad) = read_jsonl_lines(&text);
-            if records.is_empty() {
-                return Err(CanonicalInputError::NoParsableRecords);
-            }
-            let session_id = session_id_from_path(path);
-            Ok(claude_code_evidence::build_claude_evidence(records, session_id).canonical)
-        }
-        "codex" => {
-            let text = fs::read_to_string(path)
-                .map_err(|e| CanonicalInputError::FileUnavailable(e.to_string()))?;
-            let (records, _bad) = read_jsonl_lines(&text);
-            if records.is_empty() {
-                return Err(CanonicalInputError::NoParsableRecords);
-            }
-            let session_id = session_id_from_path(path);
-            Ok(codex_evidence::build_codex_evidence(
-                records,
-                session_id,
-                None, // title：仅 provenance，session_index.jsonl 查询是 CLI 层的事
-                None, // history_mode：仅 provenance，解析逻辑自己按事件形状判定
-                None, // cli_version：仅 provenance
-                Vec::new(), // workspace_roots：单文件读取拿不到，留空诚实反映
-                None, // model：可从 turn_context 事件抽，本轮先诚实留空不猜
-            )
-            .canonical)
-        }
-        other => Err(CanonicalInputError::UnknownHost(other.to_string())),
-    }
+    let session_id = if host == "dsh" {
+        dsh_session_id_from_path(path)
+    } else {
+        session_id_from_path(path)
+    };
+    canonical_session_for_paths(&[path.to_path_buf()], host, session_id)
 }
 
 #[cfg(test)]
@@ -153,9 +235,13 @@ mod tests {
 
     fn tmp_file(name: &str, content: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "agent-vitals-canonical-input-test-{}-{}",
+            "agent-vitals-canonical-input-test-{}-{}-{}",
             std::process::id(),
-            name
+            name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join(name);
@@ -166,9 +252,7 @@ mod tests {
 
     // `CanonicalSession` 没有 `Debug`（domain 契约类型没有派生它），所以
     // `.unwrap_err()` 用不了——手写这个小 helper 代替。
-    fn expect_err(
-        r: Result<CanonicalSession, CanonicalInputError>,
-    ) -> CanonicalInputError {
+    fn expect_err(r: Result<CanonicalSession, CanonicalInputError>) -> CanonicalInputError {
         match r {
             Ok(_) => panic!("expected an error, got Ok(CanonicalSession)"),
             Err(e) => e,
@@ -179,7 +263,10 @@ mod tests {
     fn unknown_host_is_rejected_not_silently_guessed() {
         let p = tmp_file("x.jsonl", "");
         let err = expect_err(canonical_session_for_path(&p, "not-a-real-host"));
-        assert_eq!(err, CanonicalInputError::UnknownHost("not-a-real-host".to_string()));
+        assert_eq!(
+            err,
+            CanonicalInputError::UnknownHost("not-a-real-host".to_string())
+        );
     }
 
     #[test]
@@ -198,7 +285,10 @@ mod tests {
         let p = tmp_file("session.jsonl", &lines.join("\n"));
         let session = canonical_session_for_path(&p, "claude-code").unwrap();
         assert_eq!(session.meta.host_id, "claude-code");
-        assert!(!session.tool_calls.entries.is_empty(), "Bash tool_use 应该抽出一条 tool_call");
+        assert!(
+            !session.tool_calls.entries.is_empty(),
+            "Bash tool_use 应该抽出一条 tool_call"
+        );
     }
 
     #[test]
@@ -210,6 +300,19 @@ mod tests {
         let p = tmp_file("rollout.jsonl", &lines.join("\n"));
         let session = canonical_session_for_path(&p, "codex").unwrap();
         assert_eq!(session.meta.host_id, "codex");
+    }
+
+    #[test]
+    fn dsh_fixed_filename_uses_parent_directory_as_logical_session_id() {
+        let p = tmp_file(
+            "session.jsonl",
+            "{\"type\":\"session\",\"version\":0,\"id\":\"sess-real\",\"cwd\":\"/tmp\"}\n",
+        );
+        let session = canonical_session_for_path(&p, "dsh").unwrap();
+        assert_eq!(
+            session.meta.session_id, "sess-real",
+            "DSH header id, not the fixed filename or directory, is the logical session key"
+        );
     }
 
     #[test]

@@ -10,11 +10,11 @@
 //! 不是漏做，是 `CanonicalSession` 现有形状还没有对应的信号——冒充比留白
 //! 更糟（`evidence.rs`「adapter 不得用读不到的东西刷覆盖」同一条纪律）：
 //!
-//! 1. `TraceNode::fact_id` 恒为空串。`CanonicalSession::TimelineEntry` 不携带
-//!    `UsageFact.fact_id` 引用——那是另一条独立管线（ingest 时按
-//!    `(turn,step,call_id)` 落的事实流），要在 `trace_service`（运行时层，
-//!    有 SQL 访问权限）里按坐标反查 `usage_facts` 表才能补上，纯函数层做不到
-//!    也不该做（不能在 domain crate 里引入 SQL 依赖）。
+//! 1. 纯 builder 只构造 canonical evidence 节点：`fact_id` 留空、
+//!    `evidence_ref` 为可重放的 canonical 坐标。运行时 `trace_service` 再把
+//!    authority 中存在的每条 `UsageFact` 加成 `ModelInvocation` 节点（其
+//!    `fact_id` 非空）。两层不混：domain 不依赖 SQL，也绝不根据时间猜测某个
+//!    tool/turn 对应哪一条 fact。
 //! 2. `TraceNode::branch_state` 目前恒为 `Live`。`CanonicalSession` 的时间线
 //!    是适配器"抽取"阶段已经选好的一条路径（`populate_timelines` 只填这一条），
 //!    还没有把 `leafUuid`/`isSidechain`/`thread_rolled_back`/`seedLength`
@@ -175,9 +175,11 @@ pub struct TraceNode {
     /// 宿主原生事件 id（Seq|Uuid|CallId|TurnId）——跨 scope join 只走它。
     pub native: String,
     pub node_type: TraceNodeType,
-    /// 引用的 `UsageFact.fact_id`；v0.10.0 恒为空串（诚实性边界 1）。
+    /// 引用的 `UsageFact.fact_id`；canonical evidence 节点为空，运行时追加的
+    /// `model_invocation` 节点必须填真实 fact id（见模块顶部诚实性边界 1）。
     pub fact_id: String,
-    /// 引用的 evidence_ref；空串占位（§10.6 空串规则的适用边界）。
+    /// 引用的 evidence_ref；canonical 节点是稳定的 opaque 坐标，SQL fact 节点
+    /// 是 `uf1:<fact_id>`。空串只允许表示宿主确实没有该证据。
     pub evidence_ref: String,
     pub parent_node_id: Option<String>,
     /// v0.10.0 恒为 `Live`（诚实性边界 2）。
@@ -292,12 +294,15 @@ pub struct TraceGraph {
     pub nodes: Vec<TraceNode>,
     pub edges: Vec<TraceEdge>,
     pub coverage: TraceCoverage,
+    /// 会话级只读指标。由 runtime 在 authority facts 存在时补齐；没有价格或
+    /// 没有事实时相应字段明确为 null/缺席，绝不伪造零成本或零调用。
+    pub metrics: Value,
     /// 输入的指纹——同一 `CanonicalSession` 重放必须产出同一指纹（幂等/缓存
     /// 失效判定的锚点之一，配合 `trace_service` 的 memo 层）。
     pub input_fingerprint: String,
 }
 
-pub const TRACE_GRAPH_SCHEMA_VERSION: u16 = 1;
+pub const TRACE_GRAPH_SCHEMA_VERSION: u16 = 2;
 
 impl TraceGraph {
     pub fn to_json(&self) -> Value {
@@ -309,6 +314,7 @@ impl TraceGraph {
             "nodes": self.nodes.iter().map(TraceNode::to_json).collect::<Vec<_>>(),
             "edges": self.edges.iter().map(TraceEdge::to_json).collect::<Vec<_>>(),
             "coverage": self.coverage.to_json(),
+            "metrics": self.metrics,
             "input_fingerprint": self.input_fingerprint,
         })
     }
@@ -344,7 +350,11 @@ mod tests {
         let cov = TraceCoverage::default();
         let v = cov.to_json();
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 6, "TraceCoverage 序列化必须恰好六个字段：{obj:?}");
+        assert_eq!(
+            obj.len(),
+            6,
+            "TraceCoverage 序列化必须恰好六个字段：{obj:?}"
+        );
         assert!(!obj.contains_key("coverage_ratio"));
     }
 

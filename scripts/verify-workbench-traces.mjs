@@ -7,8 +7,8 @@
 //    invoke 参数；HTML 的 tab id ↔ JS 的 DOM id（错一个字母渲染壳就是哑的）。
 // 2. 用**真实 CLI DTO**（release 二进制对入库 fixture 跑 trace --timeline-series
 //    的输出）过真实 buildTimeline——渲染壳消费的形状就是 IPC 会给的形状。
-// 3. Traces tab 的行为接线存在：renderTrace 绑定、namespace 必填校验（spec §9
-//    身份段不发明——前端也要拦，不是只靠后端）、unplaced_events 显式展示路径。
+// 3. Traces tab 的行为接线存在：renderTrace 绑定、session_ref 必填校验（公开下钻
+//    不接受任意路径）、unplaced_events 显式展示路径。
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { execFileSync } from "node:child_process";
@@ -29,7 +29,7 @@ console.log("# 事件/命令名两处一致");
 ok(/fn session_trace\(/.test(lib), "lib.rs 定义 session_trace command");
 ok(/invoke_handler[\s\S]*session_trace,/.test(lib), "session_trace 注册进 generate_handler");
 ok(wb.includes('invoke("session_trace"'), "workbench.js invoke session_trace");
-for (const id of ["trace-path", "trace-host", "trace-ns", "trace-render", "trace-banner", "trace-timeline", "trace-empty", "trace-coverage"]) {
+for (const id of ["trace-session-ref", "trace-render", "trace-banner", "trace-timeline", "trace-empty", "trace-coverage"]) {
   ok(html.includes(`id="${id}"`), `HTML 有 #${id}`);
   ok(wb.includes(`"${id}"`), `workbench.js 引用 #${id}`);
 }
@@ -56,16 +56,14 @@ const elements = {};
 function makeEl(id) {
   return {
     id,
-    value: id === "trace-path" ? fixture
-      : id === "trace-ns" ? "ns-ui"
-      : id === "trace-host" ? "dsh"   // select 桩的默认选中项 = 真实 HTML 的第一个 option
+    value: id === "trace-session-ref" ? "sr_fixture_only_for_ui_contract"
       : "",
     textContent: "", innerHTML: "", hidden: false, disabled: false,
     addEventListener(ev, fn) { (listeners[`${id}:${ev}`] ||= []).push(fn); },
     keydown: null,
   };
 }
-for (const id of ["trace-path", "trace-host", "trace-ns", "trace-render", "trace-banner", "trace-timeline", "trace-empty", "trace-coverage"]) {
+for (const id of ["trace-session-ref", "trace-render", "trace-banner", "trace-timeline", "trace-empty", "trace-coverage"]) {
   elements[id] = makeEl(id);
 }
 const sandbox = {
@@ -86,10 +84,10 @@ const sandbox = {
     try {
       // --timeline-series 是布尔 flag 不吃值，"--json FILE" 才吃——照真实 CLI
       // 面拼参数，不发明（这里吃过的亏：多塞一个 "-" 直接 clap 报错）。
-      const cliArgs = [
-        "trace", args.path, "--host", args.host,
-        "--machine-namespace", args.machineNamespace,
-      ];
+      // 这里的 fixture 只用来验证 timeline geometry；UI 调用本身必须携带
+      // opaque sessionRef，真实 IPC 再在受控宿主目录反查源文件。
+      if (!args.sessionRef) throw new Error("missing sessionRef");
+      const cliArgs = ["trace", fixture, "--host", "dsh", "--machine-namespace", "ns-ui"];
       if (args.output === "graph") cliArgs.push("--json", "-");
       else cliArgs.push("--timeline-series");
       const out = execFileSync(bin, cliArgs, { encoding: "utf8" });
@@ -128,10 +126,10 @@ ok(!elements["trace-banner"].hidden === false || elements["trace-banner"].textCo
   "无错误时 banner 不出现");
 ok(elements["trace-coverage"].textContent.includes("节点"), "coverage 六计数原样呈现（无单值比率）");
 
-// namespace 缺失 → 前端拦截，不发起 invoke（spec §9 身份段不发明）。
-elements["trace-ns"].value = "";
+// session_ref 缺失 → 前端拦截，不发起 invoke（公开下钻不允许退化为路径读取）。
+elements["trace-session-ref"].value = "";
 await handlers[0]();
-ok(elements["trace-banner"].textContent.includes("namespace"), "namespace 缺失被前端拦截并提示");
+ok(elements["trace-banner"].textContent.includes("会话引用"), "session_ref 缺失被前端拦截并提示");
 
 console.log(failed ? `\n${failed} FAIL` : "\n全部通过。");
 process.exit(failed ? 1 : 0);

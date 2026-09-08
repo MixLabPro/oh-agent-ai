@@ -15,7 +15,7 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Map, Value};
 
-use super::{build_envelope, coverage_not_applicable, ToolError};
+use super::{build_envelope, coverage_not_applicable, stale_hosts, ToolError};
 
 pub fn spec() -> super::ToolSpec {
     super::ToolSpec {
@@ -94,11 +94,27 @@ pub fn run(_args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         }
     }
 
+    // 无时间窗的 doctor 也必须把「有宿主但最近实时事实已过期」显式折成
+    // partial；否则 consumer 容易把旧数据误读为当前零用量。没有任何已知宿主
+    // 时仍保留 not_applicable，避免把空库编成一次覆盖失败。
+    let known_hosts = report["by_host"]
+        .as_object()
+        .is_some_and(|hosts| !hosts.is_empty());
+    let stale_hosts = stale_hosts(&conn, crate::sql_sync::now_ms());
+    let coverage = if known_hosts {
+        json!({
+            "status": if stale_hosts.is_empty() { "complete" } else { "partial" },
+            "missing_hosts": stale_hosts,
+        })
+    } else {
+        coverage_not_applicable()
+    };
+
     Ok(build_envelope(
         &conn,
         authority_state,
         None,
-        coverage_not_applicable(),
+        coverage,
         warnings,
         report,
     ))
@@ -373,6 +389,51 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("zero facts")));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn stale_host_is_reported_in_freshness_and_doctor_coverage() {
+        let home = tmp_home("stale-host");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
+        let now = crate::sql_sync::now_ms();
+        let old = now - super::super::FRESHNESS_STALE_AFTER_MS - 1;
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO sync_runs(run_id, started_at_ms, completed_at_ms, trigger, status, schema_version)
+             VALUES ('run-stale', ?1, ?1, 'test', 'succeeded', 1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        for (host, fact_id, source_id, event_ts) in [
+            ("dsh", "fact-old", "source-old", old),
+            ("codex", "fact-current", "source-current", now),
+        ] {
+            conn.execute(
+                "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+                                          parser_version, first_seen_at_ms, last_seen_at_ms,
+                                          last_successful_run_id)
+                 VALUES (?1, ?2, ?1, 0, 0, 1, ?3, ?3, 'run-stale')",
+                rusqlite::params![source_id, host, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                                         source_event_id, observation_kind, event_ts_ms,
+                                         source_id, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'test', ?1, ?1, 'assistant-usage', ?3, ?4,
+                         'run-stale', ?3, ?3)",
+                rusqlite::params![fact_id, host, event_ts, source_id],
+            )
+            .unwrap();
+        }
+
+        let env = run(&json!({}), &home).unwrap();
+        assert_eq!(env["freshness"]["stale_hosts"], json!(["dsh"]));
+        assert_eq!(env["coverage"]["status"], "partial");
+        assert_eq!(env["coverage"]["missing_hosts"], json!(["dsh"]));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

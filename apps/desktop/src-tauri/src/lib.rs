@@ -1348,17 +1348,11 @@ fn trigger_sync(app: AppHandle) {
 /// 冷 IO（与 sessions_* 同一条纪律）。
 #[tauri::command]
 async fn session_trace(
-    path: String,
-    host: String,
-    machine_namespace: String,
-    source_profile: Option<String>,
+    session_ref: String,
     output: Option<String>,
 ) -> Value {
     let args = serde_json::json!({
-        "path": path,
-        "host": host,
-        "machine_namespace": machine_namespace,
-        "source_profile": source_profile.unwrap_or_else(|| "default".to_string()),
+        "session_ref": session_ref,
         "output": output.unwrap_or_else(|| "timeline_series".to_string()),
     });
     let data_home = overview::data_home();

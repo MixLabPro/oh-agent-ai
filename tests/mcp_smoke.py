@@ -258,15 +258,15 @@ def main():
             except Exception:
                 pass
     envelope_stale = ds["freshness"]["stale_hosts"]
-    # envelope 的 stale_hosts 是硬编码 []（mod.rs::freshness）——data 在 by_host 里
-    # 但没被折成 stale 标记。这是 Q11 的已知落地缺口，不是数据 mismatch。
-    verdict = "EXACT" if not stale_by_data and not envelope_stale else "EXPLAINED"
+    # stale_hosts 以最新实时事实为准；last_seen_at 是扫描新鲜度，宿主可被成功
+    # 扫描但没有新 usage，因此它不能替代「数据是否陈旧」的判定。
+    verdict = "EXACT" if sorted(stale_by_data) == sorted(envelope_stale) else "MISMATCH"
     R.add("Q11", "某宿主 24h 未同步 → 结果标 stale/partial、列明缺失宿主",
           verdict,
-          f"data_status.freshness.stale_hosts = {envelope_stale}（硬编码 []）\n"
+          f"data_status.freshness.stale_hosts = {envelope_stale}\n"
           f"按 by_host.covered_to（最近事实）算应 stale = {stale_by_data or '无'}\n"
           f"按 by_host.last_seen_at（最近扫描）算应 stale = {stale_by_scan or '无'}\n"
-          f"→ envelope 未把 by_host 折成 stale 标记，consumer 只能自己算。缺口#F1。")
+          f"→ envelope 按最近实时事实折成 stale 标记；扫描新鲜度另行呈现。")
 
     # ── Q12 重跑导入恒等 ───────────────────────────────────
     # MCP 外命令：两个临时库各重放一遍（round B 崩溃后重跑），逐宿主×月比对。
@@ -503,33 +503,24 @@ def main():
               f"S5.1 未返回 sessions（{today} {test_host} 可能为空），跳过下钻；"
               f"挑选其它有数据的宿主重跑即得 EXACT。")
 
-    # ── S6 session_trace 三消费面 parity（v0.10.0 spec §7 门槛 3）─────────────
-    # MCP `session_trace` 与 CLI `trace --json` 对**同一份入库 fixture** 必须产出
-    # 逐字节相同的 TraceGraph（envelope 剥掉后 data 相等）。fixture 用仓库自带的
-    # `fixtures/dsh/session.jsonl.zstd`——确定性、不依赖真机当日有没有会话；
-    # machine_namespace 用固定 ns-smoke（CLI 纪律：身份段显式给，不发明）。
-    import os as _os
-    s6_fixture = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                               "fixtures", "dsh", "session.jsonl.zstd")
-    if _os.path.exists(s6_fixture):
-        s6_args = {"path": s6_fixture, "host": "dsh",
-                   "machine_namespace": "ns-smoke", "output": "graph"}
+    # ── S6 session_trace 安全下钻（v0.10.0 spec §7 门槛 3）──────────────────
+    # 公开 MCP 只接受 sessions_search 给出的 opaque session_ref；它在固定宿主根
+    # 内反查源文件，绝不接受任意本地路径。这里选择当次查询的一条会话验证安全
+    # 下钻和其 timeline 投影；源文件已被清理时返回 PARTIAL/source_unavailable，
+    # 不能把 SQL token 事实伪装成完整执行轨迹。
+    if env_mcp and (env_mcp.get("data") or {}).get("sessions"):
+        sref = env_mcp["data"]["sessions"][0]["session_ref"]
+        s6_args = {"session_ref": sref, "output": "graph"}
         s6_mcp, _, _ = c.call("session_trace", s6_args)
-        s6_cli = cli_json(args.bin, args.home,
-                          "trace", s6_fixture,
-                          "--host", "dsh",
-                          "--machine-namespace", "ns-smoke",
-                          "--json", "-")
         env_s6_mcp = _extract_envelope(s6_mcp)
         data_mcp = (env_s6_mcp or {}).get("data")
-        data_cli = s6_cli if isinstance(s6_cli, dict) and "nodes" in s6_cli else None
-        s6_ok = (data_mcp is not None and data_cli is not None and data_mcp == data_cli)
+        s6_err = (s6_mcp or {}).get("structuredContent", {}).get("error") or {}
+        s6_ok = (data_mcp is not None and not s6_err)
         s6_nodes = len((data_mcp or {}).get("nodes") or [])
         R.add("S6.1",
-              "session_trace MCP ↔ CLI trace --json 的 TraceGraph 逐字节相等",
-              "EXACT" if s6_ok else "MISMATCH",
-              f"fixture=fixtures/dsh/session.jsonl.zstd(dsh, ns-smoke) nodes={s6_nodes} "
-              f"equal={data_mcp == data_cli}")
+              "session_trace(session_ref) 安全下钻（不接受任意本地路径）",
+              "EXACT" if s6_ok else "PARTIAL",
+              f"session_ref={sref[:14]}.. nodes={s6_nodes} error={s6_err or None}")
 
         # S6.2：timeline_series 投影可达且事件守恒（unplaced_events 计数 + 事件
         # 全体 targetId 能对回图的 tool_call 节点——两层语义的输入端责任）。
@@ -539,9 +530,17 @@ def main():
         s6b_pts = len(s6b_data.get("points") or [])
         s6b_evs = len(s6b_data.get("events") or [])
         s6b_unplaced = s6b_data.get("unplaced_events")
-        # 事件 targetId ⊆ 图的 tool_call node_id（锚定关系可回查）。
-        call_ids = {n.get("node_id") for n in (data_mcp or {}).get("nodes", [])
-                    if n.get("node_type") == "tool_call"}
+        # 会话日志可能在 graph 与 timeline 两次独立请求之间追加。取前后两个
+        # graph 快照的并集来消除这段真实并发窗口；若 target 不在任一快照中，才是
+        # timeline 产出了孤儿锚点。纯函数层另有精确的同快照投影单测。
+        s6c_mcp, _, _ = c.call("session_trace", s6_args)
+        data_after = (_extract_envelope(s6c_mcp) or {}).get("data") or {}
+        call_ids = {
+            n.get("node_id")
+            for graph in (data_mcp or {}, data_after)
+            for n in graph.get("nodes", [])
+            if n.get("node_type") == "tool_call"
+        }
         ev_ids = {e.get("targetId") for e in s6b_data.get("events") or []}
         s6b_ok = (s6b_pts > 0 and s6b_evs > 0 and s6b_unplaced is not None
                   and ev_ids.issubset(call_ids))
@@ -551,8 +550,8 @@ def main():
               f"points={s6b_pts} events={s6b_evs} unplaced={s6b_unplaced} "
               f"targets_anchored={ev_ids.issubset(call_ids)}")
     else:
-        R.add("S6.1", "session_trace MCP ↔ CLI trace --json 字节相等",
-              "PARTIAL", "fixtures/dsh/session.jsonl.zstd 不存在——从仓库根运行本脚本")
+        R.add("S6.1", "session_trace(session_ref) 安全下钻",
+              "PARTIAL", "当前窗口没有可下钻的 session_ref；选择有会话的日期/宿主重跑即可。")
 
     sys.exit(R.summary())
 

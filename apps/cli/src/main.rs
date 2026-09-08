@@ -320,6 +320,20 @@ enum Cmd {
         #[arg(long = "timeline-series")]
         timeline_series: bool,
     },
+    /// Build a TraceGraph for a session returned by `sessions list` without
+    /// exposing or accepting a raw source path. This is the public v0.10
+    /// drill-down path; `trace <file>` remains a local diagnostic utility.
+    TraceRef {
+        /// Opaque session_ref from `sessions list` / sessions_search.
+        #[arg(long)]
+        session_ref: String,
+        /// Write JSON to FILE; use - for stdout (default: stdout).
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+        /// Return timeline_series instead of the full TraceGraph.
+        #[arg(long = "timeline-series")]
+        timeline_series: bool,
+    },
     /// Audit a Codex rollout log into a CanonicalSession with §13 coverage
     /// (P4 "sound" proof — Legacy + Paginated fold into the shared 19-signal model).
     ///
@@ -1612,6 +1626,45 @@ session_store={store} fold={fold}"
         return;
     }
 
+    // v0.10.0 的公开下钻入口：只收 sessions_search 给出的 opaque session_ref。
+    // 它直接复用 runtime MCP dispatcher，因此 SQL facts、价卡成本、canonical
+    // evidence 与桌面端/MCP 完全同源；绝不把 caller-supplied path 送进公开接口。
+    if let Some(Cmd::TraceRef { session_ref, rows_json, timeline_series }) = &args.cmd {
+        let output = if *timeline_series { "timeline_series" } else { "graph" };
+        let data_home = agent_vitals_runtime::home::data_home();
+        let envelope = match agent_vitals_runtime::mcp::dispatch(
+            "session_trace",
+            &json!({"session_ref": session_ref, "output": output}),
+            &data_home,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        let Some(data) = envelope.get("data") else {
+            eprintln!("session_trace returned an invalid envelope");
+            std::process::exit(2);
+        };
+        let text = serde_json::to_string_pretty(data).unwrap_or_default();
+        if let Some(path) = rows_json {
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}", path.display());
+            }
+        } else {
+            println!("{text}");
+        }
+        return;
+    }
+
+    // `trace <file>` 保留为本地诊断入口：它允许直接检查尚未进入 authority 的
+    // 文件，因此不承诺 SQL metrics parity；产品下钻请用上面的 `trace-ref`。
     // v0.10.0：TraceGraph 子命令——只读诊断，spec §7 v0.10.0 门槛 1/2/6 的 CLI 面。
     // `machine_namespace` 与 {claude,codex,dsh}-usage-facts 同一条纪律：CLI 不
     // 发明身份段（缺失 exit 2），fact_id/图 id 的重放稳定性靠调用方显式给值。

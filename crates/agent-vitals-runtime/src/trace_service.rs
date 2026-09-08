@@ -24,8 +24,12 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use agent_vitals_domain::contracts::r2a::SessionKey;
-use agent_vitals_domain::contracts::trace_graph::TraceGraph;
+use agent_vitals_domain::contracts::source_identity::{canonical_json, fnv1a64_hex};
+use agent_vitals_domain::contracts::trace_graph::{
+    BranchState, TraceGraph, TraceNode, TraceNodeType, TraceStatus,
+};
 use agent_vitals_domain::domain::trace::build_trace_graph;
+use serde_json::{json, Value};
 
 /// spec §7 门槛 4：60s TTL。
 pub const MEMO_TTL: Duration = Duration::from_secs(60);
@@ -58,7 +62,10 @@ fn memo_store() -> &'static Mutex<HashMap<PathBuf, Arc<HomeStore>>> {
 /// `(COUNT(*), MAX(rowid)) WHERE session_key = ?`——变更检测计数器。
 /// `MAX(rowid)` 是物理插入顺序，新写入必然（对自增 rowid）单调不减且通常
 /// 严格增大；COUNT 抓删除。两个一起才能同时抓住「追加」与「retention 清理」。
-fn fact_counter(conn: &rusqlite::Connection, session_key: &str) -> Result<(i64, Option<i64>), String> {
+fn fact_counter(
+    conn: &rusqlite::Connection,
+    session_key: &str,
+) -> Result<(i64, Option<i64>), String> {
     conn.query_row(
         "SELECT COUNT(*), MAX(rowid) FROM usage_facts WHERE session_key = ?1 AND deleted_at_ms IS NULL",
         rusqlite::params![session_key],
@@ -85,7 +92,9 @@ pub enum TraceLookupError {
 impl std::fmt::Display for TraceLookupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TraceLookupError::UnknownHost(h) => write!(f, "unknown host `{h}` (trace hosts: claude-code/codex/dsh)"),
+            TraceLookupError::UnknownHost(h) => {
+                write!(f, "unknown host `{h}` (trace hosts: claude-code/codex/dsh)")
+            }
             TraceLookupError::AuthorityUnavailable(e) => write!(f, "authority unavailable: {e}"),
             TraceLookupError::SessionNotFound => write!(f, "session not found in authority"),
             TraceLookupError::Query(e) => write!(f, "authority query: {e}"),
@@ -121,24 +130,260 @@ fn session_row(
     })
 }
 
-/// 全量重算：SQL 会话行 → ledger 键 → 文件路径？——**路径不可得**。
+/// 在受控宿主目录中定位 `key` 的源文件。返回的路径只在本模块内部使用，绝不
+/// 进入 MCP/CLI JSON；这保留 authority DB 不持久化原始路径的隐私边界，同时让
+/// `session_ref` 成为真正可下钻的公共标识。
+fn source_paths_for_session(
+    host_home: &Path,
+    dsh_root: &Path,
+    key: &SessionKey,
+) -> Result<Vec<PathBuf>, TraceLookupError> {
+    let paths: Vec<PathBuf> = match key.host_kind.as_str() {
+        "claude-code" => agent_vitals_hosts::claude_session::claude_project_files(host_home)
+            .into_iter()
+            .filter(|path| {
+                path.file_stem().and_then(|s| s.to_str()) == Some(key.native_id.as_str())
+            })
+            .collect(),
+        "codex" => agent_vitals_hosts::codex_session::codex_rollout_files(host_home)
+            .into_iter()
+            .filter(|path| {
+                crate::sessions::codex_session_audit::codex_session_id_of(path) == key.native_id
+            })
+            .collect(),
+        "dsh" => crate::sessions::discovery::dsh_session_files(dsh_root)
+            .into_iter()
+            .filter(|path| {
+                agent_vitals_hosts::canonical_input::dsh_native_session_id_for_path(path)
+                    .ok()
+                    .as_deref()
+                    == Some(key.native_id.as_str())
+            })
+            .collect(),
+        other => return Err(TraceLookupError::UnknownHost(other.to_string())),
+    };
+    if paths.is_empty() {
+        return Err(TraceLookupError::SourceUnavailable(
+            "no matching source remains under this host's configured directory".to_string(),
+        ));
+    }
+    Ok(paths)
+}
+
+/// 从显式根目录建立一份 canonical session。这一可注入入口供测试使用；生产
+/// `canonical_for_local_session` 只从 HOME / DSH_HOME 的固定宿主目录调用它。
+pub fn canonical_for_session_from_roots(
+    host_home: &Path,
+    dsh_root: &Path,
+    key: &SessionKey,
+) -> Result<agent_vitals_domain::contracts::evidence::CanonicalSession, TraceLookupError> {
+    let paths = source_paths_for_session(host_home, dsh_root, key)?;
+    agent_vitals_hosts::canonical_input::canonical_session_for_paths(
+        &paths,
+        &key.host_kind,
+        key.native_id.clone(),
+    )
+    .map_err(|e| TraceLookupError::SourceUnavailable(e.to_string()))
+}
+
+/// 生产入口：`session_ref` 先被解析为 `SessionKey`，再只在当前用户三宿主的
+/// 固定数据目录扫描。找不到源（已清理、移动、权限失效）是显式
+/// `SourceUnavailable`，绝不能悄悄拿 SQL token 事实伪造一张完整执行图。
+pub fn canonical_for_local_session(
+    key: &SessionKey,
+) -> Result<agent_vitals_domain::contracts::evidence::CanonicalSession, TraceLookupError> {
+    let host_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| TraceLookupError::SourceUnavailable("HOME is not configured".to_string()))?;
+    let dsh_root = crate::home::dsh_home().ok_or_else(|| {
+        TraceLookupError::SourceUnavailable("DSH_HOME and HOME are not configured".to_string())
+    })?;
+    canonical_for_session_from_roots(&host_home, &dsh_root, key)
+}
+
+/// SQL 身份到源文件的受控反查在 `canonical_for_local_session` 完成；本函数仍
+/// 只负责 canonical → TraceGraph 的 memo/失效和 SQL fact 拼接，保持可测试的
+/// 职责边界。
+#[derive(Debug)]
+struct UsageFactRef {
+    fact_id: String,
+    model_id: Option<String>,
+    event_ts_ms: i64,
+    uncached_input_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    output_tokens: i64,
+}
+
+fn stable_id(value: &Value) -> String {
+    let mut out = String::new();
+    canonical_json(value, &mut out);
+    fnv1a64_hex(out.as_bytes())
+}
+
+/// 权威库中该会话全部实时 usage fact。排序只为 deterministic graph identity，
+/// **不是**执行顺序：TraceGraph 的 usage scope 不声称这些 token events 与
+/// canonical tool/turn 有因果 parent（没有证据就留空）。
+fn usage_facts_for_session(
+    conn: &rusqlite::Connection,
+    session_key: &str,
+) -> Result<Vec<UsageFactRef>, TraceLookupError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT fact_id, model_id, event_ts_ms,
+                    uncached_input_tokens, cache_read_tokens,
+                    cache_write_tokens, output_tokens
+             FROM usage_facts
+             WHERE session_key = ?1
+               AND observation_kind != 'legacy_aggregate'
+               AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+             ORDER BY fact_id",
+        )
+        .map_err(|e| TraceLookupError::Query(e.to_string()))?;
+    let rows = stmt
+        .query_map(rusqlite::params![session_key], |r| {
+            Ok(UsageFactRef {
+                fact_id: r.get(0)?,
+                model_id: r.get(1)?,
+                event_ts_ms: r.get(2)?,
+                uncached_input_tokens: r.get(3)?,
+                cache_read_tokens: r.get(4)?,
+                cache_write_tokens: r.get(5)?,
+                output_tokens: r.get(6)?,
+            })
+        })
+        .map_err(|e| TraceLookupError::Query(e.to_string()))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| TraceLookupError::Query(e.to_string()))
+}
+
+/// 把 SQL authority 的可计量事实接入 canonical trace。
 ///
-/// 权威库**有意不存本地路径**（`source_files.path_hash`，注释明写「不暴露本地
-/// 路径」——隐私护栏）。因此服务层入口是 `trace_graph_for_canonical`：调用方
-/// **自带** `CanonicalSession`（已经通过文件枚举读出的那份），本函数只负责
-/// memo 命中/失效判定，构建完全在 `domain::trace::build_trace_graph`。
-///
-/// 「从 session_ref 反查文件路径再重读文件」这一步**当前不存在**，这是有意
-/// 的：session_ref 只能解析回 `session_key`（HMAC 单向），而 session_key 到
-/// 本地路径的映射被隐私护栏故意切断。CLI 侧的调用方（拥有文件枚举上下文）
-/// 应把「枚举到的路径」直接喂 `canonical_input::canonical_session_for_path`，
-/// 再把 `CanonicalSession` 交给本服务层——spec §6.3 的「数据准备归宿主适配器」
-/// 指的正是这个分工，服务层不做文件发现。
+/// 这里**不**按相近时间把 fact 硬挂到 assistant turn/tool call：不同宿主的
+/// token 事件和工具事件没有一条跨宿主可靠的 join 规则。每个 fact 因此成为
+/// 独立 `usage` scope 的 ModelInvocation，有真实 `fact_id`；其 parent 缺席是
+/// 已知、可见的因果缺口，不是被时间猜测掩盖。
+fn attach_usage_facts(
+    mut graph: TraceGraph,
+    facts: Vec<UsageFactRef>,
+    cost_minor: Option<Value>,
+) -> TraceGraph {
+    let mut token_total = 0i64;
+    let mut models = std::collections::BTreeSet::new();
+    let mut by_model = std::collections::BTreeMap::<String, (usize, i64)>::new();
+    for (ordinal, fact) in facts.iter().enumerate() {
+        let total = fact.uncached_input_tokens
+            + fact.cache_read_tokens
+            + fact.cache_write_tokens
+            + fact.output_tokens;
+        token_total += total;
+        let model = fact
+            .model_id
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_string());
+        models.insert(model.clone());
+        let model_totals = by_model.entry(model).or_default();
+        model_totals.0 += 1;
+        model_totals.1 += total;
+        let mut values = std::collections::BTreeMap::new();
+        values.insert(
+            "uncached_input_tokens".to_string(),
+            fact.uncached_input_tokens as f64,
+        );
+        values.insert(
+            "cache_read_tokens".to_string(),
+            fact.cache_read_tokens as f64,
+        );
+        values.insert(
+            "cache_write_tokens".to_string(),
+            fact.cache_write_tokens as f64,
+        );
+        values.insert("output_tokens".to_string(), fact.output_tokens as f64);
+        values.insert("total_tokens".to_string(), total as f64);
+        graph.nodes.push(TraceNode {
+            node_id: stable_id(&json!({
+                "kind": "usage_fact_node",
+                "session_key": graph.session_key.to_json(),
+                "fact_id": fact.fact_id,
+            })),
+            scope: "usage".to_string(),
+            ordinal: ordinal as u64,
+            native: format!("usage-{}", ordinal),
+            node_type: TraceNodeType::ModelInvocation,
+            fact_id: fact.fact_id.clone(),
+            evidence_ref: format!("uf1:{}", fact.fact_id),
+            parent_node_id: None,
+            branch_state: BranchState::Live,
+            started_at_ms: Some(fact.event_ts_ms),
+            ended_at_ms: Some(fact.event_ts_ms),
+            // usage fact 是一次被成功清洗入权威库的计量观察；它不代表整个
+            // assistant turn 成功，只代表该模型调用的用量记录可用。
+            status: Some(TraceStatus::Ok),
+            provenance: agent_vitals_domain::evidence::Provenance::Measured,
+            values,
+            metadata: json!({"model_id": fact.model_id}),
+        });
+    }
+
+    let known_tool_durations: Vec<i64> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == TraceNodeType::ToolCall)
+        .filter_map(|node| match (node.started_at_ms, node.ended_at_ms) {
+            (Some(start), Some(end)) if end >= start => Some(end - start),
+            _ => None,
+        })
+        .collect();
+    let tool_nodes: Vec<&TraceNode> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == TraceNodeType::ToolCall)
+        .collect();
+    let failed_tool_call_count = tool_nodes
+        .iter()
+        .any(|node| node.status.is_some())
+        .then(|| {
+            tool_nodes
+                .iter()
+                .filter(|node| node.status == Some(TraceStatus::Error))
+                .count()
+        });
+    graph.metrics = json!({
+        "model_invocation_count": facts.len(),
+        "token_total": token_total,
+        "model_ids": models.into_iter().collect::<Vec<_>>(),
+        "by_model": by_model.into_iter().map(|(model_id, (invocation_count, token_total))| {
+            json!({
+                "model_id": model_id,
+                "invocation_count": invocation_count,
+                "token_total": token_total,
+            })
+        }).collect::<Vec<_>>(),
+        "tool_call_count": tool_nodes.len(),
+        "failed_tool_call_count": failed_tool_call_count,
+        "known_tool_duration_ms": (!known_tool_durations.is_empty()).then(|| known_tool_durations.iter().sum::<i64>()),
+        "cost_minor": cost_minor,
+    });
+    graph.coverage.total_nodes = graph.nodes.len() as u32;
+    graph.input_fingerprint = stable_id(&json!({
+        "canonical": graph.input_fingerprint,
+        "usage_fact_ids": facts.iter().map(|fact| &fact.fact_id).collect::<Vec<_>>(),
+    }));
+    graph
+}
+
 fn build_fresh(
     canonical: &agent_vitals_domain::contracts::evidence::CanonicalSession,
     key: &SessionKey,
-) -> TraceGraph {
-    build_trace_graph(canonical, key.clone())
+    conn: &rusqlite::Connection,
+) -> Result<TraceGraph, TraceLookupError> {
+    let graph = build_trace_graph(canonical, key.clone());
+    let facts = usage_facts_for_session(conn, &key.ledger_key())?;
+    let cost_minor =
+        agent_vitals_data::authority_query::session_cost_minor(conn, &key.ledger_key())
+            .map_err(|e| TraceLookupError::Query(e.to_string()))?
+            .map(|value| value.to_json());
+    Ok(attach_usage_facts(graph, facts, cost_minor))
 }
 
 /// memo 查询入口：传入会话的 `CanonicalSession`（调用方已通过文件枚举读出），
@@ -178,11 +423,15 @@ pub fn trace_graph_for_canonical(
     // 内容变化但 fact 计数器不变（新增 turn 不产新 fact 的场景），命中路径
     // 返回的是旧图——失效键是 spec §7 门槛 4 钦定的 (COUNT, MAX(rowid))，
     // 消费方传入新 canonical 时以「计数器未变 = 事实面未变」为准。
-    let graph = Arc::new(build_fresh(canonical, key));
+    let graph = Arc::new(build_fresh(canonical, key, conn)?);
     let mut guard = store.write().expect("memo entry lock poisoned");
     guard.insert(
         ledger,
-        MemoEntry { graph: Arc::clone(&graph), fact_counter: current, cached_at: Instant::now() },
+        MemoEntry {
+            graph: Arc::clone(&graph),
+            fact_counter: current,
+            cached_at: Instant::now(),
+        },
     );
     Ok(graph)
 }
@@ -194,7 +443,9 @@ pub fn session_key_for(
 ) -> Result<SessionKey, TraceLookupError> {
     match session_row(conn, session_key)? {
         None => Err(TraceLookupError::SessionNotFound),
-        Some((host, native_id, profile, ns)) => Ok(SessionKey::new(&host, &native_id, &profile, &ns)),
+        Some((host, native_id, profile, ns)) => {
+            Ok(SessionKey::new(&host, &native_id, &profile, &ns))
+        }
     }
 }
 
@@ -215,13 +466,16 @@ mod tests {
         let d = std::env::temp_dir().join(format!(
             "agent-vitals-trace-svc-{}-{}-{tag}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
 
-    /// 内存 SQLite + 最小 schema（sessions + usage_facts 的键列）——不依赖
+    /// 内存 SQLite + 最小 schema（sessions + usage_facts + pricing_snapshots）——不依赖
     /// `AuthorityDb::open_readonly`（那要求真实库文件 + schema 校验），这里只
     /// 测 memo/计数器逻辑，不测权威库打开路径（那是 mcp 层测试的职责）。
     fn mem_conn() -> rusqlite::Connection {
@@ -232,9 +486,19 @@ mod tests {
                 native_session_id TEXT NOT NULL, machine_namespace TEXT NOT NULL,
                 source_profile TEXT);
              CREATE TABLE usage_facts (
-                rowid_alias INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_key TEXT NOT NULL, fact_id TEXT NOT NULL,
-                deleted_at_ms INTEGER);",
+                model_id TEXT, event_ts_ms INTEGER,
+                uncached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                event_peak INTEGER NOT NULL DEFAULT 0,
+                observation_kind TEXT NOT NULL DEFAULT 'assistant-usage',
+                deleted_at_ms INTEGER);
+             CREATE TABLE pricing_snapshots (
+                captured_at_ms INTEGER NOT NULL,
+                pricing_version TEXT NOT NULL,
+                payload_json TEXT NOT NULL);",
         )
         .unwrap();
         conn
@@ -253,7 +517,7 @@ mod tests {
 
     fn insert_fact(conn: &rusqlite::Connection, session_key: &str, fact_id: &str) {
         conn.execute(
-            "INSERT INTO usage_facts(session_key, fact_id) VALUES (?1, ?2)",
+            "INSERT INTO usage_facts(session_key, fact_id, event_ts_ms) VALUES (?1, ?2, 1)",
             rusqlite::params![session_key, fact_id],
         )
         .unwrap();
@@ -276,7 +540,10 @@ mod tests {
 
         let g1 = trace_graph_for_canonical(&home, &key, &canonical, &conn).unwrap();
         let g2 = trace_graph_for_canonical(&home, &key, &canonical, &conn).unwrap();
-        assert!(Arc::ptr_eq(&g1, &g2), "TTL 内 + 计数器未变必须命中同一份 Arc——命中路径不得深拷贝");
+        assert!(
+            Arc::ptr_eq(&g1, &g2),
+            "TTL 内 + 计数器未变必须命中同一份 Arc——命中路径不得深拷贝"
+        );
     }
 
     #[test]
@@ -298,7 +565,10 @@ mod tests {
         insert_fact(&conn, &ledger, "uf1-0000000000000000");
         let g2 = trace_graph_for_canonical(&home, &key, &canonical, &conn).unwrap();
 
-        assert!(!Arc::ptr_eq(&g1, &g2), "新 fact 写入后 memo 必须失效——即使新 fact_id 的字典序更小");
+        assert!(
+            !Arc::ptr_eq(&g1, &g2),
+            "新 fact 写入后 memo 必须失效——即使新 fact_id 的字典序更小"
+        );
     }
 
     #[test]
@@ -312,10 +582,16 @@ mod tests {
         let canonical = sample_canonical("s1");
         let g1 = trace_graph_for_canonical(&home, &key, &canonical, &conn).unwrap();
 
-        conn.execute("DELETE FROM usage_facts WHERE fact_id = 'uf1-aaaaaaaaaaaaaaaa'", [])
-            .unwrap();
+        conn.execute(
+            "DELETE FROM usage_facts WHERE fact_id = 'uf1-aaaaaaaaaaaaaaaa'",
+            [],
+        )
+        .unwrap();
         let g2 = trace_graph_for_canonical(&home, &key, &canonical, &conn).unwrap();
-        assert!(!Arc::ptr_eq(&g1, &g2), "retention 删除也要失效——COUNT 抓删除，MAX(rowid) 抓追加");
+        assert!(
+            !Arc::ptr_eq(&g1, &g2),
+            "retention 删除也要失效——COUNT 抓删除，MAX(rowid) 抓追加"
+        );
     }
 
     #[test]
@@ -328,7 +604,10 @@ mod tests {
 
         let ga = trace_graph_for_canonical(&home_a, &key, &canonical, &conn).unwrap();
         let gb = trace_graph_for_canonical(&home_b, &key, &canonical, &conn).unwrap();
-        assert!(!Arc::ptr_eq(&ga, &gb), "按 data_home 键控——不同 home 的 memo 独立");
+        assert!(
+            !Arc::ptr_eq(&ga, &gb),
+            "按 data_home 键控——不同 home 的 memo 独立"
+        );
     }
 
     #[test]
@@ -351,5 +630,100 @@ mod tests {
         assert!(TRACE_HOSTS.contains(&"claude-code"));
         assert!(TRACE_HOSTS.contains(&"codex"));
         assert!(TRACE_HOSTS.contains(&"dsh"));
+    }
+
+    #[test]
+    fn usage_facts_are_traceable_model_nodes_with_complete_metrics() {
+        let home = tmp_data_home("usage-metrics");
+        let conn = mem_conn();
+        let key = seed_session(&conn, "dsh", "s1");
+        let ledger = key.ledger_key();
+        conn.execute(
+            "INSERT INTO usage_facts(
+                session_key, fact_id, model_id, event_ts_ms,
+                uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens
+             ) VALUES (?1, 'uf1-a', 'gpt-test', 1234, 11, 2, 3, 4)",
+            rusqlite::params![ledger],
+        )
+        .unwrap();
+
+        let graph = trace_graph_for_canonical(&home, &key, &sample_canonical("s1"), &conn).unwrap();
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.fact_id == "uf1-a")
+            .expect("每条 SQL usage fact 都必须有一个可下钻节点");
+        assert_eq!(node.node_type, TraceNodeType::ModelInvocation);
+        assert_eq!(node.evidence_ref, "uf1:uf1-a");
+        assert_eq!(
+            node.parent_node_id, None,
+            "没有因果证据不得按时间臆造 parent"
+        );
+        assert_eq!(node.values.get("total_tokens"), Some(&20.0));
+        assert_eq!(graph.metrics["model_invocation_count"], 1);
+        assert_eq!(graph.metrics["token_total"], 20);
+        assert_eq!(
+            graph.metrics["by_model"],
+            json!([{
+                "model_id": "gpt-test", "invocation_count": 1, "token_total": 20
+            }])
+        );
+        assert_eq!(
+            graph.metrics["cost_minor"],
+            Value::Null,
+            "没有价卡必须诚实为空，不得伪造零成本"
+        );
+    }
+
+    #[test]
+    fn controlled_source_lookup_resolves_all_three_hosts_without_exposing_paths() {
+        let root = tmp_data_home("source-lookup");
+        let dsh_root = root.join("dsh");
+        let claude = root.join(".claude/projects/demo/claude-s1.jsonl");
+        let codex = root.join(".codex/sessions/2026/rollout-a.jsonl");
+        // 目录名故意与 header id 不同：反查必须以 DSH header 为权威，不能把
+        // 可移动路径的末段当作 SessionKey。
+        let dsh = dsh_root.join("sessions/demo/moved-directory/session.jsonl");
+        for path in [&claude, &codex, &dsh] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&claude, concat!(
+            r#"{"type":"user","uuid":"u","timestamp":"2026-01-01T00:00:00.000Z","message":{"id":"u","content":"hi"}}"#, "\n",
+            r#"{"type":"assistant","uuid":"a","timestamp":"2026-01-01T00:00:01.000Z","message":{"id":"a","content":"ok"}}"#,
+        )).unwrap();
+        std::fs::write(
+            &codex,
+            concat!(
+                r#"{"type":"session_meta","payload":{"session_id":"codex-s1"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}"#,
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &dsh,
+            r#"{"type":"session","version":0,"id":"dsh-s1","cwd":"/tmp"}"#,
+        )
+        .unwrap();
+
+        for key in [
+            SessionKey::new("claude-code", "claude-s1", "default", "ns"),
+            SessionKey::new("codex", "codex-s1", "default", "ns"),
+            SessionKey::new("dsh", "dsh-s1", "default", "ns"),
+        ] {
+            let canonical = canonical_for_session_from_roots(&root, &dsh_root, &key).unwrap();
+            assert_eq!(canonical.meta.host_id, key.host_kind);
+            assert_eq!(canonical.meta.session_id, key.native_id);
+        }
+
+        let missing = match canonical_for_session_from_roots(
+            &root,
+            &dsh_root,
+            &SessionKey::new("dsh", "gone", "default", "ns"),
+        ) {
+            Ok(_) => panic!("missing source must not produce a fake canonical session"),
+            Err(error) => error,
+        };
+        assert!(matches!(missing, TraceLookupError::SourceUnavailable(_)));
     }
 }
