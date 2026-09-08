@@ -391,13 +391,22 @@ TraceGraph / metrics / savings / outcome **全部只对这三个宿主开放**�
 
 | 类别 | 宿主 | 处置 |
 |---|---|---|
-| **核心目标** | claude-code · codex · pi · cline · opencode | 按 §2.5.5 逐个接到 T3 |
-| **已接入基座** | dsh | 已在 `FACT_HOSTS`，SV-COST 浪费规则的唯一实现宿主（§2.4.5）——**不在此次收敛范围内退役，但其独有能力需跨宿主化** |
+| **核心目标** | claude-code · codex · pi · cline · opencode · **dsh** | 按 §2.5.5 逐个接到 T3 |
 | **仅供参考** | hermes · workbuddy · openclaw | **不作为接入目标**；价值在于其数据模型对本 spec 的反向验证（见下），以及作为「弱/异形宿主」的降级测试对象 |
 
 > **参考类宿主的用法**：它们暴露的缺口已并入本 spec（Hermes → §2.5.3 工作区降级行、
 > §12 第 61 条双列成本；WorkBuddy → §2.5.2 T1 账单级路径）。**不要为它们写 adapter**，
 > 但在设计核心宿主的降级路径时用它们当反例。
+
+**DSH 是核心目标，且是唯一有第四层的宿主**（`docs/DSH_HOST_ASSESSMENT.md`）：
+其余四个核心宿主我们都是**事后读日志**，而 agent-vitals 在 DSH 里是注册进
+`dsh.profile.bundles` 的一等 cordis 插件，与 `@deepseek-ai/dsh-base` 并列。
+因此除 T1/T2/T3 外它还有：
+
+> **T4 宿主内呈现**——v0.10 的 Issues / Savings 可经既有 dual-face 插件直接进 DSH 的
+> 「审计」tab，**不必只活在 Tauri 工作台里**。这是其他核心宿主都没有的分发通道。
+> 前提：修复当前的安装故障（E1 目录迁移后，profile 的两条 symlink 都指向已删除的
+> `skill-vitals/dsh-client`，审计 tab 实测是坏的）。
 
 | 宿主 | T1 | T2 | T3 | 说明 |
 |---|---|---|---|---|
@@ -1084,6 +1093,12 @@ CREATE INDEX idx_review_issue ON waste_reviews(issue_id);
 **性能形状纪律**：派生层 memo 必须走 `Arc`——锁内深拷贝几 MB JSON 会把并发命令串行卡在
 锁上（2026-09-05 工作台 tab 卡顿事故同形态，已修）。
 
+**这条规则有实证依据，不是假设**：DSH 自己的插件走了相反的路——把投影**物化到磁盘**，
+实测 `storages/` 的投影 **1.76 GB** 派生自 `sessions/` 权威源 **67 MB**，
+**放大 26×**，单会话投影缓存最大 **183 MB**。而上述卡顿事故的起因只是「几 MB JSON」。
+所以 v0.10 的 TraceGraph **既不得物化到盘，命中路径也不得深拷贝**
+（`docs/DSH_HOST_ASSESSMENT.md` §1.2）。
+
 ### 10.4 schema 版本升级路径
 
 > **R2 修正：本仓库不用 `PRAGMA user_version`。** R1 整节的机制在代码里不存在——全仓库
@@ -1380,7 +1395,29 @@ Hermes），评估见 `docs/HERMES_HOST_ASSESSMENT.md`。三层框架再次成�
 | 65 | **新增接入规则：Cline 的 `metadata` 块含过时重复字段，与权威值冲突**（同一记录里 `metadata.modelId=claude-sonnet-4.6` vs 权威 `modelInfo.id=claude-sonnet-5`；`metadata.tokensIn=2` vs 权威 `usage.inputTokens=4763`）。权威取 `modelInfo` + `metadata.usage`，其余一律不读，**必须带 fixture 钉死**——「形状来源纪律」的活例 | 评估 §3 | 实测 |
 | 66 | **Host ≠ BillingSource 的教科书案例**：Cline 的 `model="anthropic/claude-sonnet-5"` 但 `provider="shengsuanyun"`（中转）。按 `anthropic/` 前缀归到 Anthropic 计价就是编造；归属必须走 `provider`，且 `pricing.json` 目前**无 `shengsuanyun` billing route**，接入前需补，否则落 `billing-route-unknown` | §2.4.1 | 实测 |
 
-> **DSH 的处置待确认**：它不在用户列的产品线里，但已在 `FACT_HOSTS`、且是 SV-COST
-> 浪费规则（§2.4.5）的**唯一实现宿主**。本 spec 暂按「已接入基座、不退役」处理；
-> 若产品上确定收敛掉 DSH，则 §2.4.5 的「waste 规则跨宿主化」从优化项升级为**阻塞项**
-> ——否则整个浪费族会随 DSH 一起消失。
+> **DSH 的处置已确认（2026-09-08）**：它是**核心产品线宿主**，不退役。因此
+> §2.4.5 的「waste 规则跨宿主化」保持为优化项而非阻塞项——但**四个核心宿主里另三个
+> （claude-code / codex / pi / cline）拿不到 SV-COST 浪费族，Savings 页面在它们上面
+> 会是空的**，跨宿主化仍应排进 v0.10-B。
+
+### R2.3 补记四（DSH 定位更正 + 实测）
+
+用户 2026-09-08 更正：**DSH 是核心产品线宿主**，不是「已接入基座」。实测见
+`docs/DSH_HOST_ASSESSMENT.md`——它与其余四个核心宿主有五处结构性不同。
+
+| # | 改动 | 位置 | 依据 |
+|---|---|---|---|
+| 67 | §2.5.4 把 dsh 并入**核心目标**行；删除「若收敛掉 DSH 则 waste 跨宿主化升为阻塞项」的待定项 | §2.5.4 | 产品决策 |
+| 68 | **新增 T4「宿主内呈现」**：agent-vitals 在 DSH 里是注册进 `dsh.profile.bundles` 的一等 cordis 插件（与 `@deepseek-ai/dsh-base` 并列），其余四个核心宿主我们只是事后读日志。v0.10 的 Issues/Savings 可经既有 dual-face 插件直接进 DSH「审计」tab，不必只活在 Tauri 里 | §2.5.4 | `~/.dsh/profiles/web/package.json` |
+| 69 | **§10.3 的「不物化 + Arc」规则补上实证依据**：DSH 走了相反的路（投影物化到盘），实测 `storages/` 投影 **1.76 GB** 派生自 `sessions/` 权威源 **67 MB**——**放大 26×**，单会话投影最大 **183 MB**；而 2026-09-05 卡顿事故起因只是「几 MB JSON」 | §10.3 | 实测 |
+| 70 | 记下 DSH 另三处独有：**多帧 zstd 压缩增量存储**（唯一需解压的核心宿主）· **唯一 `StepBoundaries = measured`**（turn+step 双层粒度）· **唯一实现 SV-COST 浪费族** | §2.5.4 | §13 矩阵 + 实测 |
+| 71 | 保留 §2.4.5 为 v0.10-B 优化项，但点明后果：**四个核心宿主里另三个 Savings 页面会是空的** | §2.4.5 | 本次 |
+
+> **当前故障（阻塞 T4，需先修）**：Phase E1 把 `dsh/` → `integrations/dsh/`、
+> `dsh-client/` → `integrations/dsh-client/`，但已安装的 profile 仍指向旧路径——
+> `dsh-skill-vitals-audit` 与 fallback 的 `dsh-agent-vitals-audit` **两条 symlink 都
+> 指向已删除的 `skill-vitals/dsh-client`，审计 tab 实测是坏的**。且安装态在三轴同时
+> 陈旧：包名（`dsh-skill-vitals` vs 仓库 `dsh-agent-vitals`）、路径、内容
+> （`index.js` 与仓库不同却是**同一个版本号 1.3.0**）。
+> **建议加守卫**：本仓库在 `pricing.json` 三副本、wasm↔CLI 都有锁步测试，
+> **唯独插件安装态没有任何守卫**，靠人记得重装——1.3.0 现有两份不同内容即是后果。
