@@ -309,9 +309,9 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | `summary_monthly` | v0.9.1 MVP | 🔶 同上 + `budget_status_sql`；**逐日趋势 / 月底预测 / 成本占比 % 需新增**（P1-4，逐日趋势可基于 `peaked_days_map`） |
 | `data_quality_issues` | v0.9.1 MVP | 🔶 `data_quality_issues` 表已在；`detail_json` 的 code-aware 脱敏 allowlist 需新写 |
 | `authority_audit` | v0.9.1 internal only | 🔶 MCP 内只读——守恒 / 重复 / 覆盖 / `authority_revision` 一致性自检（不做重导入）。见 §8.1 |
-| `reimport_verify` | v0.9.1 internal only（**MCP 外**） | ⬜ 隔离命令：临时库重跑 `data-migrate` / `sync-facts` 并逐值比较。不是 MCP 工具（只读工具无法重导入，P1-2） |
+| `reimport_verify` | v0.9.1（**MCP 外**） | ✅ **落地（`4c7f75b`）**：`agent-vitals data-reimport-verify [--json]`——两临时库各重放（round B 崩溃后重跑），逐宿主 × 北京月比对；不碰生产库。不是 MCP 工具（P1-2）。 |
 | `cost_breakdown` | v0.9.2 | ⬜ 逐事实 / 逐日历史价格重放（当前仅窗口级）+ 变化因子分解引擎 |
-| `sessions_search` / `session_detail` | v0.9.2 | ⬜ `session_ref` HMAC 基元 + `sessions` 表补 `started`/`ended` + 会话级聚合查询（「session 索引 v2」子阶段） |
+| `sessions_search` / `session_detail` | v0.9.1（提前） | ✅ **落地（`7c68ab4`）**：`session_ref` = HMAC-SHA256(salt, session_key)（salt `<data_home>/.mcp-session-salt` 0600，不进库）；`sessions_in_window` 逐会话聚合（时间边界读时从 `MIN/MAX(event_ts_ms)` 派生，不补 schema 列）+ `session_facts_timeline`。时间线的失败/错误事件轴留 M4（`workflow_events`）。 |
 | `issues_summary` / `skills_summary` | v0.10 | ⬜ `workflow_events` 完整 writer + reader + 覆盖度管线（独立于 MCP 的工作量，随 v0.10 任务图立项） |
 
 未达到前置条件的工具不得用空实现提前注册。客户端可通过 `tools/list` 判断可用能力。
@@ -809,12 +809,12 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | U02 | 今天各宿主什么时候最活跃？ | `usage_hourly(group_by=host)` | 宿主曲线与日汇总守恒 |
 | U03 | 本月哪个模型最贵？ | `cost_breakdown` | 币种/口径分离、价格版本可解释 |
 | U04 | 为什么本周成本上升？ | `cost_breakdown(compare=true)` | 用量/组合/缓存/价格/账单因子及未解释余额 |
-| U05 | 高峰由哪些会话构成？ | `sessions_search` → `session_detail` | 能下钻且不泄露内容和原生标识 |
+| U05 | 高峰由哪些会话构成？ | `sessions_search` → `session_detail` | 能下钻且不泄露内容和原生标识 —— ✅ 真机验证（`7c68ab4`）：`sessions_search(hour=peak)` 逐会话 total 之和 == `usage_hourly` 峰值小时 total；`session_detail` 反解 `session_ref`，leak 扫描零命中 |
 | U06 | 哪些问题反复出现？ | `issues_summary` | 次数、影响会话、成本、趋势、证据范围 |
 | U07 | 哪些 Skill 有问题？ | `skills_summary` | 分子分母、失败率、未知态，不做越权推断 |
 | U08 | 这个结论可信吗？ | 任一查询 + `data_status` | 新鲜度、缺口、未定价、`authority_revision` 和 authority 状态可见 |
 | U09a | SQL 权威库当前自洽吗？ | internal `authority_audit` | 守恒 / 无重复 / 覆盖一致 / 已登记例外逐条列出，exact/explained/mismatch 可区分 |
-| U09b | 重跑导入会不会改账？ | `reimport_verify`（MCP 外） | 临时库两遍导入逐值恒等（Q12）；不碰生产库 |
+| U09b | 重跑导入会不会改账？ | `reimport_verify`（MCP 外） | 临时库两遍导入逐值恒等（Q12）；不碰生产库 —— ✅ 真机（`4c7f75b`）：`data-reimport-verify` byte-identical，round B 含崩溃 + 幂等重跑 |
 | U10 | 调价前后的历史成本对吗？ | `cost_breakdown` | 按事实时间选择价格版本，不用当前价覆盖历史（前置：逐日/逐事实价版重放，见 §7.5 注记） |
 
 用户验收 fixture 必须包含：三个宿主、至少两个供应商、同一 raw 模型名跨宿主映射到不同归属、跨价格快照（`pricing_snapshots` 至少两版，覆盖一个调价日）、缓存 token、DSH 峰谷、重复事件、未定价模型（`billing_route` 认不出）、缺失来源、跨月边界和北京时间日界线。（draft-2：`model_aliases` / `pricing_versions` 归一表未落地，fixture 用 raw 模型名 + `pricing_snapshots` 表达同等场景。）
@@ -848,7 +848,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | **D2** | `MoneyMinor { amount_minor: i64, currency, basis }`（§5.1.1）。最细上报维度一次 `pyround(× 10^minor_digits)`，父层 = 子项整数和（守恒由构造）。`minor_digits` 来自 currency（CNY/USD=2，JPY=0）。落点 `agent-vitals-data::authority_query` / `agent-vitals-runtime::summary`，MCP / CLI / Tauri 同源读。**所有带金额工具的前置**。 | spec §5.1.1；增量 2 落地（`agent_vitals_runtime::money::from_f64` 银行家舍入 + `sum_minor` 跨币返 None；domain `MoneyMinor::to_json/from_json`；11 单测全绿） | `@claude-impl` | ✅ |
 | **D3** | v1 按 `(host, raw_model, billing_route)`（§5 规则 4）。过滤字段 `models: [{kind, host, value}]`，**v1 只支持 `kind="host_raw"`**；canonical 归一表**不**进 v0.9.1。响应每个序列显式 `identity_kind: "host_raw"`。 | spec §5.1 规则 4、§7.2；增量 2 落地（`usage_hourly` input schema `models[].kind enum=["host_raw"]`；每个序列 key 带 `identity_kind`；未知 kind 静默过滤 + 测试 `unknown_model_kind_is_silently_ignored`） | `@claude-impl` | ✅ |
 | **D4** | cargo feature `mcp-internal`（`apps/cli` → `agent-vitals-runtime/mcp-internal`），公开构建**编译期排除** `authority_audit` / `query_sql_readonly` / `reimport_verify`。已在增量 7.5 落地（apps/cli `tools/list` 公开=2 / feature=3）。 | spec §8；增量 6 落地时再加 `authority_audit` / `reimport_verify` | `@claude-impl` | ✅ |
-| **D5** | `session_ref` salt：`<data_home>/.mcp-session-salt`（32 字节随机，权限 `0600`），首次 `data-mcp serve` 时生成。HMAC-SHA256（`sha2` 已是依赖）。**不进权威库**。 | spec §9.2；增量 6（session 工具） | `@claude-impl` | ⬜ |
+| **D5** | `session_ref` salt：`<data_home>/.mcp-session-salt`（32 字节随机，权限 `0600`），首次调用 session 工具时生成。HMAC-SHA256（`sha2` 已是依赖，手写 HMAC，不新增 `hmac` crate）。**不进权威库**。反解 = 对 `sessions` 表逐行算 HMAC 匹配。已在 `7c68ab4` 落地（`mcp/session_ref.rs`，RFC 4231 测试向量钉住）。 | spec §9.2；`7c68ab4` | `@claude-impl` | ✅ |
 | **D6** | **拆分**：MCP 内只读 `authority_audit`（守恒 / 重复 / 覆盖 / `authority_revision` 自检）+ **MCP 外**隔离命令 `agent-vitals data reimport-verify`（临时库重导入比对）。快照对账模式 → M3 才接（要补 `snapshot.manifest.json` + `pricing_snapshots` / `host_bills` 副本）。 | spec §8.1；增量 6 + 7 | `@claude-impl` | ⬜ |
 | **D7** | envelope `authority_revision` = `{last_completed_run_id, committed_at, max_observed_at}`。`max_observed_at` SQL 行级口径见 §6.1（**排除 `legacy_aggregate`**）。`as_of_run_id` 入参：v1 仅识别并 `warnings: [{code:"snapshot_drift", ...}]`，**不**假装钉住旧截面（假装比 drift 更危险）；钉截面 = M2 任务。 | spec §6.1 / §6.4.1；增量 6 落地（钉截面 + warn） | `@claude-impl` | ⬜ |
 | **D8** | `summary_daily` / `summary_monthly` 输出**保留** spec §7.3/§7.4 承诺的完整字段（会话数 / 活跃小时 / `group_by=model` / 维度过滤 / 逐日趋势 / 月底预测 / 成本占比）。这些**不是**冻结 DTO 的字段——列进增量 3 作为**新增聚合查询**（不是薄封装）。工作量按「新增查询 + 测试」计。 | spec §7.3/§7.4；增量 3 落地 | `@claude-impl` | ⬜ |
