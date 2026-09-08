@@ -1040,6 +1040,9 @@ button.chip.active {
 .src-list li.no-data .chip { color: #cfd6e4; border-color: #4a5468; }
 /* 「无数据」不吃 hero 强调色（绿色 = 好状态金额的语义色）。 */
 .amount.muted-amt { color: var(--muted); }
+/* `≈¥` 折算数带 hover 展开原始分币（PM 决策 2026-09-07 要求 hover 可见）——
+   help 光标提示可悬停，虚下划线是可发现性的最低成本信号。 */
+.amount[title]:not([title=""]) { cursor: help; text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
 /* 决策卡建议行：暗主题下亮底 #f4f6fb + 继承浅字 = 浅底浅字不可读（截图暴露）。
    改用暗底亮字，预警态由文字内容与 ⚠ 表达。 */
 .decide-advice { background: rgba(46, 78, 168, 0.18); color: var(--text-1, #dde3ee);

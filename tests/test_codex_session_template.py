@@ -31,6 +31,9 @@ VERIFY_SCRIPTS = [
     REPO / "scripts" / "verify-codex-session-timeline.mjs",
     REPO / "scripts" / "verify-codex-session-findings.mjs",
     REPO / "scripts" / "verify-timeline-geometry.mjs",
+    # 工作台总览 KPI 行 / 双轨账 / 决策卡 + 速览层混币折算（Overview.fx）+
+    # 预算卡 source:"sql" 兜底判定。同理由接进这条测试：verify 脚本没人跑 = 不存在。
+    REPO / "scripts" / "verify-workbench-kpi-decide.mjs",
 ]
 
 _has_node = shutil.which("node") is not None

@@ -62,8 +62,10 @@
         </div>
       </div>
 
-      <!-- 月度带（同构四 tile）+ 预算小卡（口径：仅 DSH 实测——2026-09-01
-           月度卡与预算卡互相打架的事故后，口径不一致必须写在卡面上）。 -->
+      <!-- 月度带（同构四 tile）+ 预算小卡。预算口径 = 跨宿主「按量实付」CNY
+           （PM 决策 2026-09-07，排除订阅月费——见 budget-scope-metered-only）；
+           当前唯一 CNY 按量源是 DSH，但分子已是跨 by_provider 之和，不再是
+           「仅 DSH」。2026-09-01 月度卡/预算卡打架事故后，口径写在卡面上。 -->
       <div class="cards month-band">
         <div class="stat">
           <div class="label">本月 tokens</div>
@@ -86,7 +88,7 @@
           <div class="sub" id="ov-m-actual-sub"></div>
         </div>
         <div class="stat budget">
-          <div class="label">预算 · 仅 DSH 实测</div>
+          <div class="label" title="跨宿主「按量实付」CNY——排除订阅月费（月初已付的常数）。当前唯一 CNY 按量源是 DSH。">预算 · 跨宿主按量实付</div>
           <div class="amount" id="ov-budget-amount">—</div>
           <div class="bar"><div class="fill" id="ov-budget-fill"></div></div>
           <div class="sub" id="ov-budget-sub"></div>
