@@ -1,3 +1,22 @@
+//! ⚠️  **DEPRECATED**（v0.9.1 PR #4）—— 计划 v0.9.3 删除（PR #5）。
+//!
+//! v0.9.1 起 sessions 数据唯一来源是 SQL 权威库 `agent-vitals.sqlite3`
+//! （schema v2），Q04 的 `mcp::sessions_search` / `mcp::session_detail` 工具是
+//! 单一权威入口。本文件整文件 behind `legacy-r2a` feature gate（见
+//! `Cargo.toml` 的 `[features] legacy-r2a = []` 与 `sessions/mod.rs` 的
+//! `#[cfg(feature = "legacy-r2a")] pub mod r2a_store;`）。**当前还在用的入口**：
+//! - `apps/cli/src/main.rs:3064` —— `SessionsAction::Findings` 子命令内部调
+//!   `r2a_store::sessions_findings`，task #19 等 M4 `workflow_events` 工具
+//!   落地后改 `mcp::dispatch("workflow_events", ...)`。
+//! - Python mirror `packages/agent-vitals-python/agent_vitals/agent/r2a.py`
+//!   的 `__legacy_r2a__ = True` 入口；PR #4 起 Python CLI dispatch（cli.py）
+//!   改走 `mcp::sessions_search` 等价的 sqlite3 直连 wrapper，r2a.py 只剩
+//!   `dsh_source_profile` 一个被 `tests/test_dsh_usage_fact.py` 导入的 helper。
+//!
+//! 删除路径（PR #5 拍板）：删本文件 + `r2a.py` + ~70 个 Python 测试 +
+//! `host_runtime_registration.rs::session_store` 字段；workspace 编译
+//! `--no-default-features` 即 PR #5 完成度的零号门禁。
+//!
 //! R2a SessionStore 的 **I/O 层**（`docs/R2A_CONTRACT_DESIGN.md`）。
 //!
 //! 纯规则（SessionKey / 版本闸 / filter / cursor / 分页 / 类型化错误）在

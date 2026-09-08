@@ -24,8 +24,17 @@ path = "src/lib.rs"
 # 内部 MCP 工具门控（增量 7.5 `query_sql_readonly` / 增量 6 `authority_audit`）。
 # 公开构建（默认 feature = []）不含这些工具——spec §8.2 / M0 D4 的承诺。
 # 调试 Agent 用 `cargo run --features mcp-internal -- data-mcp serve`。
+#
+# `legacy-r2a`：v0.9.1 PR #4 起，jsonl 回放路径（`sessions/r2a_store.rs` 的
+# `SessionStore` + `extract_summary` + `cache_v2_*` + `sessions_list/read/
+# findings/navigation`）整体 behind this feature。CLI 显式 enable（保本次
+# 升级无回退——`sessions findings` 在 M4 `workflow_events` 工具落地前还得走
+# jsonl 路径，见 task #19）；desktop / wasm 默认不开（它们已迁到
+# `mcp::dispatch("sessions_search" | "session_detail", ...)`，spec §3.1）。
+# v0.9.2 改默认关 → v0.9.3 删整个文件（PR #5）。
 [features]
 mcp-internal = []
+legacy-r2a = []
 
 [dependencies]
 agent-vitals-data = { path = "../agent-vitals-data" }

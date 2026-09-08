@@ -18,7 +18,7 @@ agent-vitals-domain = { path = "../../crates/agent-vitals-domain" }
 # 调 runtime 的 `JsonSummaryRepository`——CLI 拿 trait 对象，不 new 具体类型
 # （spec §3.1 依赖表：apps 只消费 Runtime/Data 的版本化 DTO）。
 agent-vitals-data = { path = "../../crates/agent-vitals-data" }
-agent-vitals-runtime = { path = "../../crates/agent-vitals-runtime" }
+agent-vitals-runtime = { path = "../../crates/agent-vitals-runtime", features = ["legacy-r2a"] }
 clap = { version = "4", features = ["derive"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
