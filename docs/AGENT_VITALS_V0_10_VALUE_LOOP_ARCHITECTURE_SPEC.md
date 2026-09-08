@@ -1,6 +1,8 @@
-# Agent Vitals v0.10 Value Loop 架构规格
+# Agent Vitals Value Loop 架构规格（v0.10.0 – v0.13.0）
 
-> 状态：架构草案 **R2.3**（2026-09-08；R2/R2.1/R2.2 同日，R1 为 2026-09-04）
+> 状态：架构草案 **R2.4**（2026-09-08；R2–R2.3 同日，R1 为 2026-09-04）
+> 范围：原 v0.10 单版含 A–D 四阶段，R2.4 拆为 **v0.10.0 / v0.11.0 / v0.12.0 / v0.13.0**
+> 四个版本，按「一版只新增一类风险」切（§7.0 版本地图）。
 > 前置：`AGENT_VITALS_V0_9_DATA_VALUE_ARCHITECTURE_SPEC.md` 已发布并通过其 Definition of Done；
 > v0.9.1 SQL 权威库（schema v2）已落 main。
 > 定位：把可信数据转化为普通用户可理解、可执行、可验证收益的问题解决闭环。
@@ -133,7 +135,7 @@ TraceGraph  --project(linearization)-->  timeline_series  --buildGeometry-->  SV
 
 **§5 的 Traces tab 必须调用它**，v0.10 只新增「TraceGraph → geometry spec」的数据准备
 函数。**新增第二份几何 = 复刻「比例尺算错了不报错、只有人眼看出来」的原始风险**
-（见 §7 v0.10-A 门槛 5）。
+（见 §7 v0.10.0 门槛 5）。
 
 几何层已钉死的两条不变量自动继承：**事件点一个不丢**（`eventsIn === eventsOut`，曲线可
 抽稀、事件标记不参与聚合）；**缺数据留缺口不连直线**（不把 null 当 0，不跨未测量的缺口
@@ -208,7 +210,7 @@ unresolved 口径（`ATTRIBUTABLE_WASTE.md` §6/§6.7）。
 
 v0.9 `agent-vitals plan` 已输出 ranked savings 列表（zombie / oversized /
 trim-description / shadow），由 `agent_vitals_domain::plan::build_plan(report, startup_rate)`
-纯函数实现。v0.10-B **不重写排名规则，直接复用**为 remedy catalog 的种子数据；catalog
+纯函数实现。v0.12.0 **不重写排名规则，直接复用**为 remedy catalog 的种子数据；catalog
 条目的 `applicable_issue_types` 填对应 issue_type id。
 
 ### 2.3 版本戳（**R2 新增**）
@@ -300,17 +302,17 @@ session / 跨 session 常驻），且**当前日志没有 token-span 级血缘**
 
 #### 2.4.4 `ATTRIBUTABLE_WASTE` §9 未落地清单 = v0.10 的前置 backlog
 
-该文档 §9 列了 8 条未落地项，其中 5 条是 v0.10-B/C 的**硬前置**：
+该文档 §9 列了 8 条未落地项，其中 5 条是 v0.12.0 / v0.13.0 的**硬前置**：
 
 | # | 未落地项 | v0.10 归属 |
 |---|---|---|
-| 1 | `WasteClaim` 统一声明 + 互斥证明测试 | **v0.10-B 前置**（§2.4.3；无它则无合计） |
-| 2 | 审计覆盖率计算（eligible audited cost） | **v0.10-B 前置**（§5 护栏；无它则浪费率分母不诚实） |
-| 3 | W1 eligibility + 90% 降级为可配告警阈值 | v0.10-B（`cache_inefficiency_suspect` 可用性前提） |
-| 4 | W3 人工确认记录结构 | **v0.10-B 前置**（§10.2.7；IssueInstance 的复核工作流） |
-| 5 | W4 exposure count + `catalog-visible ≠ body loaded` 展示拆分 | v0.10-B（首批 remedy 的诚实性前提，§2.4.1） |
+| 1 | `WasteClaim` 统一声明 + 互斥证明测试 | **v0.12.0 前置**（§2.4.3；无它则无合计） |
+| 2 | 审计覆盖率计算（eligible audited cost） | **v0.12.0 前置**（§5 护栏；无它则浪费率分母不诚实） |
+| 3 | W1 eligibility + 90% 降级为可配告警阈值 | v0.12.0（`cache_inefficiency_suspect` 可用性前提） |
+| 4 | W3 人工确认记录结构 | **v0.12.0 前置**（§10.2.7；IssueInstance 的复核工作流） |
+| 5 | W4 exposure count + `catalog-visible ≠ body loaded` 展示拆分 | v0.12.0（首批 remedy 的诚实性前提，§2.4.1） |
 | 6 | BillingSource + 套餐金额输入位 | 部分已落（`pricing.json` 的 `subscriptions`）；账单确认待 |
-| 7 | 月度感知成本投影（套餐/按量分卡） | v0.10-A Overview（§5） |
+| 7 | 月度感知成本投影（套餐/按量分卡） | v0.10.0 Overview（§5） |
 | 8 | 历史价格稳定性（pricing card effective date + `pricing_version`） | **已在 R2 §2.3 落为 `pricing_snapshot_id`**——两处独立推出同一结论，互相印证 |
 
 #### 2.4.5 已实现的 waste 规则目前只覆盖一个宿主（**实施风险**）
@@ -319,16 +321,16 @@ session / 跨 session 常驻），且**当前日志没有 token-span 级血缘**
 **`crates/agent-vitals-hosts/src/hosts/dsh/sessions/waste.rs`** ↔
 `packages/agent-vitals-python/agent_vitals/agent/waste.py`（字节级 parity，wasm 导出
 `structural_waste`）——即**只有 DSH 宿主有**。`ATTRIBUTABLE_WASTE` 全篇建立在这两条规则上，
-但 v0.10-A 的门槛是**三宿主**确定性图。
+但 v0.10.0 的门槛是**三宿主**确定性图。
 
-因此 v0.10-B 必须显式包含「waste 规则跨宿主化」的工作量：把 `waste.rs` 从
+因此 v0.12.0 必须显式包含「waste 规则跨宿主化」的工作量：把 `waste.rs` 从
 `hosts/dsh/sessions/` 提升为跨宿主纯规则（输入是 `CanonicalSession`，与 SV601–SV614 同
 形态），Claude Code / Codex 缺失的维度按既有纪律报 `Unavailable` 而非 `MeasuredZero`。
-**这项工作 R1/R2 均未提及，是 v0.10-B 排期里最容易被漏掉的一块。**
+**这项工作 R1/R2 均未提及，是 v0.12.0 排期里最容易被漏掉的一块。**
 
 ### 2.5 宿主接入契约：三层参与度（**R2.3 新增**）
 
-R1/R2 的 §7 v0.10-A 门槛写「至少三宿主」，但**三宿主不等于多宿主**——那正好是
+R1/R2 的 §7 v0.10.0 门槛写「至少三宿主」，但**三宿主不等于多宿主**——那正好是
 `ingest_service::FACT_HOSTS` 里硬编码的三个。spec 从未定义「第四个宿主怎么接」，也没
 定义「接不进来的宿主看到什么」。本节补上。
 
@@ -438,7 +440,7 @@ billing_mode, task)`——比 v0.9 定的 `(host, provider)` 还细一级，多�
 2. **`estimated` / `actual` 双列可能优于「单列 + basis 标签」（P2，待评估）**。
    §10.2.5 的 `outcome_measurements` 用单列 `savings_value_minor` + `savings_basis` 标签
    区分名义/实付；Hermes 用两列 + basis 字段解释各自来源。单列靠标签区分正是 §10.7
-   第 1 条担心的 `SUM` 误聚合温床，建议在 v0.10-C 前评估是否改双列。
+   第 1 条担心的 `SUM` 误聚合温床，建议在 v0.13.0 前评估是否改双列。
 
 > **接入 Hermes 前必须先解决的一个陷阱**：它的 skill 是**三层嵌套 bundle**，实测
 > `SKILL.md` 分布为「第 1 层 12 · 第 2 层 76 · 第 3 层 4 = 92 个」。按
@@ -501,20 +503,20 @@ T2 做行为审计，是诚实且完整的产品形态；硬凑 T3 会掉进 `Me
 
 **v0.9 锚点**：已实现的 SV601–SV614 共 14 条规则（`crates/agent-vitals-domain/src/domain/
 behavior.rs` + `trajectory.rs` + `detectors/` ↔ `packages/agent-vitals-python/agent_vitals/
-agent/behavior.py` ↔ wasm `audit_events`）是 v0.10 程序评估的种子；v0.10-B 升级为
+agent/behavior.py` ↔ wasm `audit_events`）是 v0.10 程序评估的种子；v0.11.0 升级为
 IssueInstance 聚合（§10.2.1），**不重写规则**。Python ↔ Rust ↔ wasm 三方锁步继续；
 differential gate `AGENT_VITALS_BIN` 守 byte-identical，新增任何 evaluator 必须同构三份。
 
 LLM evaluator 仅用于程序规则无法覆盖的语义问题；默认关闭、须授权和预算、只产生评估证据，不能直接执行修改或把正文默认发往外部服务。
 
-**LLM evaluator 输入脱敏管线（v0.10-D 前置门槛，须新建）**：
+**LLM evaluator 输入脱敏管线（LLM 版前置门槛，须新建）**：
 
 1. **不得复用扫描器的 `redact()`。** `packages/agent-vitals-python/agent_vitals/compat.py:39`
    的 `redact(obj, names=False, name_map=None, *, home_n=None, cwd_n=None)` 是为**扫描报告**
    （skill 名、路径、description）设计的，其属性测试保证的是「报告里不残留真实 skill 名」。
    LLM evaluator 的输入是**会话正文 / 工具结果 / 提示词**——凭证、客户数据、文件内容是完全
    不同的敏感面。复用它会得到一条**看起来被守卫覆盖、实际没覆盖**的脱敏路径。
-2. 因此 v0.10-D 必须新建一条**会话正文脱敏管线**，与扫描器 redact 并列，**各自有属性测试**
+2. 因此 LLM 版必须新建一条**会话正文脱敏管线**，与扫描器 redact 并列，**各自有属性测试**
    （模式对齐 `tests/test_properties.py`：任意深度任意字段不得残留原文）。
 3. 脱敏后 payload → `source_identity::canonical_json` 序列化 → `fnv1a64_hex` 得
    `redacted_input_fingerprint`（同时是缓存键，§10.2.6）。
@@ -530,7 +532,7 @@ LLM evaluator 仅用于程序规则无法覆盖的语义问题；默认关闭、
 1. 至少一个可执行、低风险的 remedy；或
 2. 明确 `diagnostic-only`，说明为什么当前不能安全自动处理。
 
-v0.10-B 起，remedy 候选必须先在 **remedy catalog**（§10.8，`assets/remedies.json`）里有
+v0.12.0 起，remedy 候选必须先在 **remedy catalog**（§10.8，`assets/remedies.json`）里有
 条目；ranked 顺序继承 `plan::build_plan` 纯函数，新加 remedy 时同构实现 Python ↔ Rust ↔
 wasm 三方锁步。
 
@@ -553,13 +555,13 @@ Settings   宿主、套餐/按量、数据源、隐私、LLM 授权与预算
 
 | v0.10 tab | 当前 v0.9 tab | 动作 | 阶段 |
 |---|---|---|---|
-| Overview | 总览 | 复用 + 升级（加可避免浪费、已实现节省、数据覆盖） | v0.10-A |
-| Overview（内） | **Token 日历** | **并入 Overview**（月度成本的可视化下钻，与月度数字同区） | v0.10-A |
+| Overview | 总览 | 复用 + 升级（加可避免浪费、已实现节省、数据覆盖） | v0.10.0 |
+| Overview（内） | **Token 日历** | **并入 Overview**（月度成本的可视化下钻，与月度数字同区） | v0.10.0 |
 | Sessions | 会话 | 复用（`mcp::sessions_search` 已落 main） | v0.9.1 收口 |
-| **Traces** | ❌ 无 | **新增**：节点图、时间线、coverage 降级显示 | v0.10-A |
-| **Issues** | Findings | 改名 + 升级：Finding → IssueInstance 聚合（按根因归并） | v0.10-B |
-| **Savings** | ❌ 无 | **新增**：remedy catalog + potential / validated / realized 三档 | v0.10-B/C |
-| **Settings** | 数据源 | 改名 + 升级：加隐私 / LLM 授权与预算开关 | v0.10-D |
+| **Traces** | ❌ 无 | **新增**：节点图、时间线、coverage 降级显示 | v0.10.0 |
+| **Issues** | Findings | 改名 + 升级：Finding → IssueInstance 聚合（按根因归并） | v0.11.0 |
+| **Savings** | ❌ 无 | **新增**：remedy catalog + potential / validated / realized 三档 | v0.12.0 / v0.13.0 |
+| **Settings** | 数据源 | 改名 + 升级：加隐私 / LLM 授权与预算开关 | LLM 版 |
 
 净变化：5 tab → 6 tab（Token 日历并入 Overview，新增 Traces / Savings）。Tauri 工作台
 HTML 是单一渲染端，新增 tab 必须在 layout 上预留位置。
@@ -654,7 +656,7 @@ crates/agent-vitals-domain/src/
                                  #   today_cost / cost_series（**唯一是目录的**）
   domain/usage.rs                # token_by_model / token_by_date_model / UsageFoldState
   domain/behavior.rs + trajectory.rs + detectors/   # SV601–SV614
-  domain/plan.rs                 # build_plan（v0.10-B remedy catalog 种子）
+  domain/plan.rs                 # build_plan（v0.12.0 remedy catalog 种子）
 
 crates/agent-vitals-hosts/src/hosts/<h>/sessions/
   # claude_code / codex / dsh 的 evidence.rs（CanonicalSession producer）
@@ -682,7 +684,7 @@ agent-vitals-runtime/
   metrics_service.rs
   validation_service.rs
   evaluation_service.rs
-  llm_evaluation_service.rs      # v0.10-D（见 §7 范围说明）
+  llm_evaluation_service.rs      # LLM 版（见 §7）
   issue_service.rs
   remedy_service.rs
   action_service.rs
@@ -707,9 +709,33 @@ agent-vitals-runtime/
 
 CLI/Tauri 只发 command、请求授权并展示 DTO；不得复制 token/cost/fact identity、诊断或定价公式。
 
-## 7. 实施阶段
+## 7. 版本拆分与实施阶段
 
-### v0.10-A：Trace & Metrics
+> **R2.4 决策（2026-09-08）**：原 v0.10 一版含 A–D 四阶段，按 §7「阶段规模提示」与
+> §12.2 的结论**拆成四个版本**。拆分原则是「**一个版本只新增一类风险**」——不是按
+> 工作量切块，而是按「这一版第一次让系统能做什么它以前不能做的危险的事」切。
+
+### 7.0 版本地图
+
+| 版本 | 一句话 | **新增的风险类别** | schema | 阻塞状态 |
+|---|---|---|---|---|
+| **v0.10.0** | **看得见**——轨迹与指标 | **无**：纯派生、只读、不落盘 | **v2 不变** | ✅ **可立即开工** |
+| **v0.11.0** | **说得清**——问题归并 | 持久化状态（**不含金额、不含动作**） | v3 | ✅ **不被证据阻塞** |
+| **v0.12.0** | **算得准**——收益归因 | **金额主张** | v4 | ⚠️ 三项前置未完成 |
+| **v0.13.0** | **改得动**——执行与验证 | **写动作 / 不可逆** | 无变更 | 依赖 v0.12 |
+| 之后 | LLM 补盲 | 数据外发 | v5 | 独立 feature |
+
+**这个切法的价值不只是"块更小"**：原 v0.10-B 里「Issues 归并」与「Savings 归因」被
+捆在一起，而 §12.2 查明**只有后者被证据阻塞**——SV601–614 在所有核心宿主上都能跑，
+被卡住的是只有 1/6 宿主实现的 SV-COST 浪费族。拆开之后 **v0.11.0 可以立刻排期**，
+不必等语料建设和计价权决策。
+
+**每版独立可发布**：v0.10.0 只有 Traces tab 也是完整产品（回答 §1 的前三个用户问题）；
+v0.11.0 加 Issues 后是完整的"诊断"产品；金额与动作分别再往后。
+
+---
+
+### v0.10.0（原 A）：Trace & Metrics
 
 - Claude Code、Codex、DSH 的确定性 TraceGraph builder；
 - Invocation / tool timing / model / cost / failure metrics；
@@ -749,46 +775,82 @@ CLI/Tauri 只发 command、请求授权并展示 DTO；不得复制 token/cost/f
 >   变成瓶颈（2026-09-05 工作台 tab 卡顿事故，已修，别改回去）。
 >
 > v0.9.1 之后**没有现成的 60s memo 可以照抄**：`runtime::summary::codex_merged_from_sql`
-> （`summary.rs:1305`）已改为直接读 SQL 权威库、不带 memo。TraceGraph memo 是 v0.10-A
+> （`summary.rs:1305`）已改为直接读 SQL 权威库、不带 memo。TraceGraph memo 是 v0.10.0
 > 新建的东西，按上述四条自行实现；可参考 `sessions/r2a_store.rs` 既有的 checkpoint 形状。
 
-### v0.10-B：Issues & Remedies
+### v0.11.0（原 B 的前半）：Issues —— 只归并，不谈钱
 
-- EvaluationResult、IssueInstance、根因归并；
-- 程序 evaluator（种子 = SV601–SV614）；
-- remedy catalog、preview 与 potential savings；
-- Issues / Savings 页面。
+- `EvaluationResult`、`IssueInstance`、按根因归并；
+- 程序 evaluator，**种子 = 已落地的 SV601–SV614**（不重写规则）；
+- **Issues 页面**（Findings 改名 + 升级）；
+- schema v3：`issue_instances` + `issue_status_transitions`。
 
-**门槛：**稳定问题族 remedy coverage 100%，其余显式 diagnostic-only。
+**本版一律 `diagnostic-only`——不产 remedy、不产任何金额。**
 
-### v0.10-C：Action & Outcome
+**门槛：**
+1. 同一输入重放不重复写 issue（§9 DoD 第 7 条，`UNIQUE(machine_namespace, host,
+   instance_fingerprint)`）；
+2. 每条 issue 带 basis 三元组 + `classification`（§2.4.1），且**绝大多数落
+   `opportunity` / `suspected`**——`confirmed` 在本版**没有合法来源**（`waste_reviews`
+   要到 v0.12.0 才有），因此本版 `classification='confirmed'` 的行数必须为 **0**；
+3. issue 能下钻到产生它的 `fact_id` 集合。
 
-- 授权、preview、apply、rollback 与 ActionReceipt；
-- baseline/comparison、actual outcome 与 realized savings；
+> **为什么值得单独一版**：它是第一次往库里写**状态**（issue 有生命周期、会被
+> acknowledge/close）。状态机的幂等与去重是独立于金额的风险面，先单独跑稳。
+
+### v0.12.0（原 B 的后半）：Savings —— 只估算，不执行
+
+- **waste 规则跨宿主化**（§2.4.5，本版硬前置）；
+- remedy catalog（`assets/remedies.json`，种子 = `plan::build_plan`）；
+- `potential` savings + preview；
+- **Savings 页面**（三档分栏 + 审计覆盖率同屏，§5.2）；
+- schema v4：`issue_remedies` + `waste_reviews` + `outcome_measurements` +
+  `action_receipts`（后者建表但不写，见 §10.4）。
+
+**门槛：**稳定问题族 remedy coverage 100%，其余显式 `diagnostic-only`；
+`potential` 的派生严格按 §2.2.1（**不得用 `nominal_cost − metered_spend`**）；
+跨 issue_type **不出合计**（§2.4.3，除非 `WasteClaim` 互斥证明已落地）。
+
+**三项开工前置**（§12.2 / §12.3）：
+1. **计价权归属决策**（§13 第 57 条）——六宿主里三个已自报成本，会改数据模型；
+2. **语料建设**——Pi / Cline 各只有 1 个会话，不足以写 adapter；
+3. **waste 跨宿主化**——否则四个核心宿主里三个的 Savings 页面是空的。
+
+### v0.13.0（原 C）：Action & Outcome
+
+
+- 授权、preview、apply、rollback 与 `ActionReceipt`；
+- baseline/comparison、actual outcome 与 `realized` savings；
 - 低风险方案端到端闭环。
+- **无 schema 变更**——v4 已建好 `action_receipts`，本版只启用写路径。
 
 **门槛：**发现 → 预览 → 授权执行 → 回执 → 结果验证可重放、可回滚。
 
-> **范围待 PM 拍板（R2 提出）**：v0.10-C 是本版本唯一不可逆面。建议首批只做 §4 点名的
+> **范围待 PM 拍板（R2 提出）**：v0.13.0 是唯一不可逆的版本。建议首批只做 §4 点名的
 > 「禁用长期未触发且证据充分的 Skill」**一条**，把 preview→approve→apply→receipt→verify
 > 骨架跑通再扩 catalog；§9 DoD 第 10 条的「至少三个」相应降为「至少一个」，另两条挪
 > v0.10.1。
 
-### v0.10-D：可选 LLM 补盲
+### 之后：可选 LLM 补盲
 
 独立 feature；不阻塞 A–C。需实现 evaluator registry、**新建的会话正文脱敏管线（§3）**、
 预算、缓存、schema validation 和明确 unavailable 状态。
 
-> **范围待 PM 拍板（R2 提出）**：建议整体降为 **v0.11 候选**。理由：它需要新建一条带
+> **已定（R2.4）**：不进 v0.10–v0.13 任一版，作为独立 feature 另行立项。理由：它需要新建一条带
 > 属性测试的脱敏管线（§3，非复用），而 §3 自己声明它「默认关闭、不阻塞 A–C」——那就不
-> 应占用 schema v3 的版本位。若确认延后，§10.2.6 的 `llm_evaluator_cache` 一并延后。
+> 应占用前面版本的 schema 位。`llm_evaluator_cache` 随它走 schema v5。
 
-### 阶段规模提示
+### 7.5 拆分带来的三个直接好处
 
-§6.2 一次列了 10 个新 service + 6 张状态表 + 3 个新 tab + 执行/回滚闭环。参照 v0.9 →
-v0.9.1 的实际节奏（数据面三阶段 + 三轮审查循环 + 一次 SQL 权威库迁移，且 Stage 5b /
-Data MCP M1 仍未收口），这是 2–3 个版本的量。**v0.10-A 必须能单独发布并有独立价值**
-（只做 TraceGraph + Traces tab + coverage 降级显示，不依赖 Issues/Savings）。
+1. **v0.10.0 不动 schema。** 它需要的全部数据都是从 `UsageFact` / `CanonicalSession`
+   现算的派生量（§10.3），**一张新表都不需要**——迁移风险为零，可以先发。
+2. **不可逆动作被隔离到最后一版。** v0.13.0 是唯一会改用户环境的版本，可以给它单独的
+   评审与灰度节奏，不被前三版的进度绑架。
+3. **被证据阻塞的工作被隔离到 v0.12.0。** 语料建设与计价权决策只挡这一版，
+   v0.10.0 / v0.11.0 可以并行推进。
+
+原「阶段规模提示」的判断依然成立并已落实：§6.2 的 10 个 service + 6 张状态表 +
+3 个新 tab + 执行回滚闭环，参照 v0.9 → v0.9.1 的真实节奏就是 2–3 个版本的量。
 
 ## 8. 明确不做
 
@@ -800,7 +862,7 @@ Data MCP M1 仍未收口），这是 2–3 个版本的量。**v0.10-A 必须能
 - **不引入新的运行时状态库**（v0.9.1 已落地的 SQLite 权威库**是**本版本的事实来源，
   不在此列——原 R1 措辞「不把 DuckDB 引入为运行时第二状态库」易被误读为要清掉 SQLite）；
   TraceGraph builder 不维护独立持久层，所有派生数据从 UsageFact 重算，memo 仅在内存层
-  （§7 v0.10-A 门槛 4 + §10.3）；
+  （§7 v0.10.0 门槛 4 + §10.3）；
 - 不在数据里存可执行内容（SQL 字符串、脚本）——remedy 的执行走代码注册 handler（§10.8）；
 - 不以文件 watcher 的有无作为本版本发布条件。watcher 仅在 v0.9 durable ingest 稳定后另行立项。
 
@@ -821,7 +883,7 @@ Data MCP M1 仍未收口），这是 2–3 个版本的量。**v0.10-A 必须能
 8. CLI、Tauri、HTML 的关键 projection 一致；
 9. LLM 默认关闭仍可完整使用产品，开启后费用可见且绝不直接触发修改；
 10. 至少一个低风险方案端到端验证实际结果，不能只展示预计节省（原为「三个」，见 §7
-    v0.10-C 范围说明）；
+    v0.13.0 范围说明）；
 11. **savings 的每一个数字都必须能下钻到产生它的 `fact_id` 集合。** 不能下钻的数字就是
     不能对账的数字——这是把 §2.2.1 那类口径错误挡在发布之外的唯一可操作手段。
 
@@ -849,11 +911,11 @@ Data MCP M1 仍未收口），这是 2–3 个版本的量。**v0.10-A 必须能
    `unavailable`。这与 v0.9 的「归属粒度是 (host, provider) 而非 host」同源。
 9. **感知不冒充归因**——cost/M 是摊销/混合效率指标，不能单凭变高变低证明浪费（§5.1）。
 
-## 10. v0.10 schema v3 增量
+## 10. schema 增量（v3 / v4 / v5，按版本分期见 §10.4）
 
-> 本节定义 v0.10 在 v0.9.1 schema v2 之上的持久化增量；派生数据（TraceGraph /
+> 本节定义 v0.10.0–v0.13.0 在 v0.9.1 schema v2 之上的持久化增量；派生数据（TraceGraph /
 > MetricDefinition result / EvaluationResult / TraceCoverage）一律不入 schema，从
-> UsageFact 重算。
+> UsageFact 重算。**`v0.10.0` 本身不新增任何表**（schema 停在 v2）。
 
 ### 10.1 设计原则（与 v0.9.1 数据面对齐）
 
@@ -864,7 +926,7 @@ Data MCP M1 仍未收口），这是 2–3 个版本的量。**v0.10-A 必须能
 - **幂等键统一**：所有新表主键与 `UNIQUE` constraint 用
   `fnv1a64_hex(canonical_json(...))` 派生，规则与 `source_identity::canonical_json` 一致
   ——§9 DoD 第 7 条在 schema 层的落地。
-- **派生数据不持久化**：走「现算 + 60s memo」（§7 v0.10-A 门槛 4；失效条件见那里的修正）。
+- **派生数据不持久化**：走「现算 + 60s memo」（§7 v0.10.0 门槛 4；失效条件见那里的修正）。
 - **schema bump 是纯增量**：v0.10 不修改 v0.9.1 schema v2 任何已有表，迁移函数只
   `CREATE TABLE / INDEX`。
 - **新表一律带 `machine_namespace`**：v0.9 的事实层按 `machine_namespace` 隔离
@@ -875,7 +937,7 @@ Data MCP M1 仍未收口），这是 2–3 个版本的量。**v0.10-A 必须能
 
 > remedy catalog **不入库**，见 §10.8。
 
-#### 10.2.1 `issue_instances`（v0.10-B，根因归并）
+#### 10.2.1 `issue_instances`（v0.11.0，根因归并）
 
 ```sql
 CREATE TABLE issue_instances (
@@ -913,7 +975,7 @@ CREATE INDEX idx_issue_session ON issue_instances(session_key);
 > acknowledged / closed / wontfix 四行，状态流转会被实现成 INSERT 而非 UPDATE——**恰好是
 > DoD 第 7 条的反面**。现在 `status` 是可变列，走 UPDATE。
 
-#### 10.2.2 `issue_status_transitions`（v0.10-B，状态历史）
+#### 10.2.2 `issue_status_transitions`（v0.11.0，状态历史）
 
 ```sql
 CREATE TABLE issue_status_transitions (
@@ -931,7 +993,7 @@ CREATE INDEX idx_transition_issue ON issue_status_transitions(issue_id, at_ms);
 
 状态历史要留就留在这里，**不塞进幂等键**。
 
-#### 10.2.3 `issue_remedies`（v0.10-B，Issue ↔ Remedy 关联）
+#### 10.2.3 `issue_remedies`（v0.12.0，Issue ↔ Remedy 关联）
 
 ```sql
 CREATE TABLE issue_remedies (
@@ -954,7 +1016,7 @@ CREATE TABLE issue_remedies (
 
 `potential` 按 §2.2.1 派生（**不是** `nominal_cost − metered_spend`）。
 
-#### 10.2.4 `action_receipts`（v0.10-C）
+#### 10.2.4 `action_receipts`（v0.12.0 建表 / v0.13.0 启用写入）
 
 ```sql
 CREATE TABLE action_receipts (
@@ -979,7 +1041,7 @@ CREATE INDEX idx_action_issue ON action_receipts(issue_id);
 CREATE INDEX idx_action_executed_at ON action_receipts(executed_at_ms);
 ```
 
-#### 10.2.5 `outcome_measurements`（v0.10-C，三档严格分离）
+#### 10.2.5 `outcome_measurements`（v0.12.0，三档严格分离）
 
 ```sql
 CREATE TABLE outcome_measurements (
@@ -1027,7 +1089,7 @@ CREATE INDEX idx_outcome_issue ON outcome_measurements(issue_id);
 CREATE INDEX idx_outcome_kind ON outcome_measurements(savings_kind);
 ```
 
-#### 10.2.6 `llm_evaluator_cache`（v0.10-D / 建议延后至 v0.11，见 §7）
+#### 10.2.6 `llm_evaluator_cache`（LLM 版，schema v5——见 §7）
 
 ```sql
 CREATE TABLE llm_evaluator_cache (
@@ -1050,7 +1112,7 @@ CREATE INDEX idx_llm_cache_expires ON llm_evaluator_cache(expires_at_ms);
 > feature 只 gate 读写路径。**schema 版本必须唯一决定表集合。** 若按 §7 建议延后到 v0.11，
 > 则它属于 schema v4，不进 v3。
 
-#### 10.2.7 `waste_reviews`（v0.10-B，W3 人工确认记录）
+#### 10.2.7 `waste_reviews`（v0.12.0，W3 人工确认记录）
 
 `ATTRIBUTABLE_WASTE` §4 的 W3 明确：人工确认后记录的是**明确的浪费请求或金额**，不是
 「整个异常 session」；且**不带 revision 与 reviewer 的确认记录，在 session 更新、价格表
@@ -1085,7 +1147,7 @@ CREATE INDEX idx_review_issue ON waste_reviews(issue_id);
 
 | 契约 | 不入 schema 的原因 | memo/缓存策略 |
 |---|---|---|
-| `TraceGraph` | 从 CanonicalSession + usage_facts 现算 | 见 §7 v0.10-A 门槛 4（含失效条件的两个陷阱） |
+| `TraceGraph` | 从 CanonicalSession + usage_facts 现算 | 见 §7 v0.10.0 门槛 4（含失效条件的两个陷阱） |
 | `MetricDefinition` result | 必须从 `domain::{cost,usage,evidence}` 派生（§2.2） | 60s memo，按 `(metric_id, metric_version, params_fingerprint, home)` 键控 |
 | `EvaluationResult` | program evaluator（SV 规则）已是纯函数 | 同上 |
 | `TraceCoverage` | 等价 v0.9 `evidence::Coverage`，从 CanonicalSession.coverage 派生 | 无需 memo，构造代价 O(1) |
@@ -1112,17 +1174,30 @@ CREATE INDEX idx_review_issue ON waste_reviews(issue_id);
   当前走 :98 的 `"authority schema v{found} is older than supported v{SCHEMA_VERSION}
   — run product migration"` 错误路径。
 
-v0.10 的落地动作：
+**按版本分期（R2.4，与 §7.0 版本地图一一对应）**：
 
-1. `SCHEMA_VERSION` 常量 2 → 3；
-2. 在 `ensure_schema` 的 `Ordering::Less` 分支实现 v2 → v3 迁移：`CREATE TABLE`
-   `issue_instances` / `issue_status_transitions` / `issue_remedies` / `action_receipts` /
-   `outcome_measurements` / `waste_reviews` + indexes（若 §10.2.6 随 v3 落地则一并无条件
-   建表）；
+| 版本 | `SCHEMA_VERSION` | 本版 `CREATE TABLE` |
+|---|---|---|
+| **v0.10.0** | **2（不变）** | **无**——TraceGraph 全部现算，一张表都不需要（§10.3） |
+| **v0.11.0** | 2 → **3** | `issue_instances` · `issue_status_transitions` |
+| **v0.12.0** | 3 → **4** | `issue_remedies` · `waste_reviews` · `outcome_measurements` · **`action_receipts`** |
+| **v0.13.0** | 4（不变） | 无——只启用 `action_receipts` 的写路径 |
+| LLM | 4 → **5** | `llm_evaluator_cache` |
+
+> **为什么 `action_receipts` 提前到 v4 建表**：`outcome_measurements.receipt_id` 声明了
+> `FOREIGN KEY … REFERENCES action_receipts(receipt_id)`。SQLite 允许建表时引用尚不存在的
+> 表，但开启 `foreign_keys` 后写入即报错——**FK 顺序要求两张表同批建**。这与 §10.2.6 的
+> F10 修正同一条原则：**建表不做条件化，用不用由读写路径 gate**；schema 版本必须唯一
+> 决定表集合。
+
+每次 bump 的落地动作相同：
+
+1. 递增 `SCHEMA_VERSION` 常量；
+2. 在 `ensure_schema` 的 `Ordering::Less` 分支实现该档迁移（只 `CREATE TABLE / INDEX`）；
 3. 迁移过程写 `migrations` 表（checkpoint / error_detail，v0.9.1 已有）；
-4. `UPDATE schema_meta SET value='3' WHERE key='schema_version'`；
+4. `UPDATE schema_meta SET value=<n> WHERE key='schema_version'`；
 5. `data-migrate` 子命令接线；
-6. **不动** v0.9.1 schema v2 任何已有表。
+6. **不动任何已有表**——每一档都是纯增量。
 
 **部署纪律**：每次 schema bump 必走
 `cp -r ~/.agent-vitals ~/.agent-vitals.backup-$(date +%Y%m%d-%H%M%S)` +
@@ -1170,7 +1245,7 @@ SQLite 的 `UNIQUE` 把多个 NULL 视为互不相同，可空列进了 UNIQUE �
 
 这条规则**不是全局的**，不要 cargo-cult 到所有可空列上。
 
-### 10.7 关键风险（v0.10-B/C review 时逐条检查）
+### 10.7 关键风险（v0.12.0 / v0.13.0 review 时逐条检查）
 
 1. **`issue_remedies.potential_savings_*` 与 `outcome_measurements.savings_*` 口径严格
    区分**：前者是 pre-execution 估算（`kind='potential'`），后者是 post-execution 测量
@@ -1260,24 +1335,33 @@ R1 → R2.3 累计 71 条修改，全部围绕「让 spec 诚实」；六个宿�
 （claude-code / codex / dsh / pi / cline / hermes）之后，结论是**结构问题已经解决，
 剩下的瓶颈不是架构，是证据**。
 
-### 12.1 可以开工的：v0.10-A
+### 12.1 可以开工的：v0.10.0 与 v0.11.0
 
-**Trace & Metrics 已具备实施条件。** 它依赖的三样东西在所有核心宿主上都成立：
+**v0.10.0（Trace & Metrics）已具备实施条件。** 它依赖的三样东西在所有核心宿主上都成立：
 `CanonicalSession` 已落地、token 桶齐全、`(scope, ordinal)` 定序规则已与
 `TRAJECTORY_TIMELINE_SPEC` 对齐（§2.1.1），且几何层复用既有 `buildGeometry`
-（§2.1.2）不新增风险面。**建议立即开始，不必等其余决策。**
+（§2.1.2）不新增风险面。**它还不动 schema**（§10.4），迁移风险为零。
 
-### 12.2 不该开工的：v0.10-B / C，且阻塞项不是 spec
+**v0.11.0（Issues）同样不被阻塞**——这是 R2.4 拆分挖出来的：原 v0.10-B 把「Issues 归并」
+与「Savings 归因」捆在一起，而下面 §12.2 查明**只有后者被证据卡住**。IssueInstance 的
+输入是已落地的 SV601–614，在所有核心宿主上都能跑；被卡的是只有 1/6 宿主实现的 SV-COST。
+
+**两版都建议立即排期，不必等其余决策。**
+
+### 12.2 被阻塞的：v0.12.0（Savings），且阻塞项不是 spec
 
 | 阻塞 | 事实 | 后果 |
 |---|---|---|
 | **浪费族只有 1/6 宿主** | SV-COST-01/02 只实现在 `hosts/dsh/sessions/waste.rs` | Savings 页面在 claude-code / codex / pi / cline 上**是空的**——而 Savings 是 §0 北极星 |
-| **两个核心宿主语料不足** | Pi = 1 会话 93 行；Cline = 1 会话 6 消息、**零工具调用** | 按这种语料写 adapter 就是照 fixture 编程；本仓库有明确前科（Codex 的假结论来自旧 fixture、渲染器手写形状「假绿」） |
+| **两个核心宿主语料不足** | Pi = 1 会话 93 行；Cline = 1 会话 6 消息、**零工具调用** | 按这种语料写 adapter 就是照 fixture 编程；本仓库有明确前科（Codex 的假结论来自旧 fixture、渲染器手写形状「假绿」）。**同样挡 v0.11.0 的 pi/cline adapter，但不挡 v0.11.0 在 claude-code/codex/dsh 上先发** |
 | **子代理可靠性差异未量化** | Cline 干净（`is_subagent` + `parent_agent_id` + queue）· DSH 实测 5/19 · Codex 只数不取 · Hermes 有列但 0 填充 · Pi 未观察 | `TraceGraph.parent_node_id` 只在 1 个宿主是 measured，其余需降级——降级规则尚未逐宿主写死 |
 
-**这三条都不是写 spec 能解决的。** 结论：**v0.10-B 前应先做一轮语料建设**——
+**这三条都不是写 spec 能解决的。** 结论：**v0.12.0 前应先做一轮语料建设**——
 用每个核心宿主做一周真实工作，再复核 §2.5.4 的 `※` provisional 项。这比继续改 spec
 便宜，也是唯一能解除阻塞的动作。
+
+**R2.4 拆分后这三条只挡 v0.12.0 一版**：v0.10.0 与 v0.11.0 可以并行推进，
+语料建设可以在它们开发期间同步进行——这正是拆版本换来的最大收益。
 
 ### 12.3 唯一仍然开放的架构决策：**谁拥有计价权**
 
@@ -1299,7 +1383,7 @@ R1 → R2.3 累计 71 条修改，全部围绕「让 spec 诚实」；六个宿�
 > **建议（§13 第 57 条，待 PM 拍板）**：宿主自报为权威，我们的价卡值降为**对账第二数**，
 > 差额进 `data_quality_issues`，**不静默取其一**——与 v0.9「权威在 JSONL、索引是可丢弃
 > 投影」同构。影响面：§2.2 · §2.4.1 · §10.2.5。**这是唯一还会改变数据模型的决策，
-> 应在 v0.10-B 动工前定。**
+> 应在 v0.12.0 动工前定**（拆分后它不再挡 v0.10.0 / v0.11.0）。
 
 ### 12.4 宿主评估反向验证了 spec 的两条核心规则
 
@@ -1318,7 +1402,7 @@ R1 → R2.3 累计 71 条修改，全部围绕「让 spec 诚实」；六个宿�
 ### 12.5 文档卫生
 
 本 spec 已 1,400+ 行、§12 changelog 71 条，超过部分正文章节的长度。
-**建议 v0.10-A 首个 PR 时合并为 R3**：changelog 折叠成「R1→R2.3 摘要」一段，
+**建议 v0.10.0 首个 PR 时合并为 R3**：changelog 折叠成「R1→R2.3 摘要」一段，
 正文保持单一叙述。理由与 §13 第 17 条（§11 影子章节）同源——**多份真相必然漂移**。
 
 ---
@@ -1490,3 +1574,20 @@ Hermes），评估见 `docs/HERMES_HOST_ASSESSMENT.md`。三层框架再次成�
 > （`index.js` 与仓库不同却是**同一个版本号 1.3.0**）。
 > **建议加守卫**：本仓库在 `pricing.json` 三副本、wasm↔CLI 都有锁步测试，
 > **唯独插件安装态没有任何守卫**，靠人记得重装——1.3.0 现有两份不同内容即是后果。
+
+### R2.3 → R2.4（拆成四个版本）
+
+原 v0.10 一版含 A–D 四阶段，按 §7「阶段规模提示」与 §12.2 的结论拆开。
+**拆分原则不是按工作量切块，而是按「这一版第一次让系统能做什么它以前不能做的危险的事」。**
+
+| # | 改动 | 位置 | 理由 |
+|---|---|---|---|
+| 72 | §7 改写为「版本拆分与实施阶段」，新增 §7.0 版本地图：**v0.10.0 看得见 / v0.11.0 说得清 / v0.12.0 算得准 / v0.13.0 改得动**，一版只新增一类风险（无 → 持久化状态 → 金额主张 → 写动作） | §7.0 | 风险隔离 |
+| 73 | **原 B 拆成两版**——这是拆分最大的收益：`Issues 归并` 与 `Savings 归因` 原本捆在一起，但只有后者被证据阻塞（SV601–614 全宿主可跑，SV-COST 只有 1/6）。拆开后 **v0.11.0 立即可排期** | §7 / §12.1 | §12.2 |
+| 74 | **v0.10.0 不动 schema**：TraceGraph 全部现算，一张新表都不需要，迁移风险为零 | §10.4 | §10.3 |
+| 75 | schema 分期：v0.10.0 = v2 不变 · v0.11.0 → v3（`issue_instances` + `issue_status_transitions`）· v0.12.0 → v4（`issue_remedies` + `waste_reviews` + `outcome_measurements` + `action_receipts`）· v0.13.0 无变更 · LLM → v5 | §10.4 | — |
+| 76 | **`action_receipts` 提前到 v4 建表**：`outcome_measurements.receipt_id` 的 FK 指向它，SQLite 开启 `foreign_keys` 后写入即报错——FK 顺序要求同批建。同 F10 原则：建表不条件化，用不用由读写路径 gate | §10.4 | FK 顺序 |
+| 77 | **v0.11.0 硬门槛：`classification='confirmed'` 行数必须为 0**——`waste_reviews`（human-confirmed 的唯一合法来源）要到 v0.12.0 才存在，本版无任何合法的 confirmed 来源 | §7 | §2.4.1 |
+| 78 | LLM 从「建议降为 v0.11 候选」改为**已定：不进 v0.10–v0.13 任一版**，独立立项，schema v5 | §7 | — |
+| 79 | 三项前置（计价权决策 / 语料建设 / waste 跨宿主化）明确**只挡 v0.12.0**，v0.10.0 与 v0.11.0 可并行推进，语料建设在其开发期同步进行 | §12.2 / §12.3 | 拆分收益 |
+| 80 | 文档标题与状态头改为覆盖 v0.10.0 – v0.13.0 | 头部 | — |
