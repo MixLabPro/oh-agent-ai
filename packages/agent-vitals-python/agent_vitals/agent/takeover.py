@@ -167,8 +167,14 @@ def fold_session_req(req, shadow=False):
     """Rust `fold_session` 驱动的 Python 镜像（差分 A/B 用）。
 
     返回 `(outcome, detail)`，outcome ∈ {"folded", "skipped", "refused"}。
-    写序与 Rust 一致：state 文件 → ledger 记 key → manifest 提交（提交点）。
+    写序与 Rust 一致：导航快照 → ledger 记 key → manifest 提交（提交点）。
     影子模式跳过 owner 检查（§4.2 shadow replay：在非权威副本上排练）。
+
+    v0.9.1 Stage 5b 后这是一个**闭合的导航快照协议**：只落
+    `oneline.json` / `sessions.jsonl`。旧调用方即使仍附带 `hour_buckets` /
+    `by_model_today` / `by_date_model` / `alert`，也一律忽略——`today.json` /
+    `month.json` / `month-archive.json` / `alert.json` 的业务账已由 SQL 权威库
+    取代，不能被 tick 重新写活（Rust `takeover.rs::fold_session` 同款边界）。
     """
     manifest = read_manifest()
     if not shadow and not owner_allows(manifest, RS_OWNER):
@@ -191,16 +197,6 @@ def fold_session_req(req, shadow=False):
     if isinstance(oneline, dict):
         state_mod.write_oneline(oneline)
         state_mod.append_session_history(oneline)
-    hb = req.get("hour_buckets")
-    if isinstance(hb, dict):
-        bmt = req.get("by_model_today")
-        state_mod.merge_today(hb, by_model=bmt if isinstance(bmt, dict) else None)
-        bdm = req.get("by_date_model")
-        if isinstance(bdm, dict):
-            state_mod.merge_month(hb, by_date_model=bdm)
-    alert = req.get("alert")
-    if isinstance(alert, dict):
-        state_mod.write_alert(alert)
     entry = ledger_entry(host_kind, native_id, ns, now, epoch + 1)
     write_ledger(ledger_record(ledger, key, entry))
     write_manifest(mark_fold(manifest, now))

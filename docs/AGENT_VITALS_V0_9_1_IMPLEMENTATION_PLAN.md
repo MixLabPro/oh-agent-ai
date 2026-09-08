@@ -9,7 +9,7 @@
 
 ---
 
-## 0. 当前进度快照（2026-09-07 更新）
+## 0. 当前进度快照（2026-09-08 更新）
 
 | Phase | 状态 | 说明 |
 |---|---|---|
@@ -17,7 +17,7 @@
 | Phase 1 schema 与迁移框架 | ✅ | authority.rs（DDL v1 全 12 表 + 版本闸 + 中断清扫 + 事务帮助器 + retention）+ 时钟注入（sql_sync::now_ms）+ 迁移记录（sync_runs/migrations 表）。**1.7 损坏恢复文档化**：`data-status` 加 `PRAGMA integrity_check` + `health`/`hints`（critical → 退出码 1），58c38b8 |
 | Phase 2 清洗写入与同步 | ✅ | 三路并发实现合流（c06de2e）+ 审查收口（6776fe0）+ 收口批（b1f8b38）+ 迁移哨兵真 bug 修复（1f67331）。2.1–2.3/2.6/2.7 复选框此前滞后——功能随三路合流全部落地，本次盘点补勾（命令名是 `data-*` 前缀，非 `data <sub>`）。2.8（host_bills + pricing_snapshots）cf04121/64aa87d |
 | Phase 3 SQL repository 与读路径切换 | ✅ | 3.1–3.7 全部完成（见各条）。Tier B 逐消费点切完 + Q01–Q14 端到端 fixture（b082a79）。**Q13 价格历史重放**（`PricingCards::asof`，`SqlSummaryRepository`/`calendar_month` 按查询窗口月末时点选历史价卡）3eecf09——3.5 Tier B 的最后一个后续项收口 |
-| Phase 4 双轨验收与旧路径退役 | 🔨 | 4.1（77a59ab）+ 4.2（e339cce）+ 4.4 可自动化部分（58c38b8）✅。**4.3 旧路径退役**：用户 2026-09-07 决定提前执行——Stage 1–5a 完成（ad4e33e/b5ca48c/98602a7/8498023），`JsonSummaryRepository` + `data-reconcile*` + `budget show` legacy + `index.sqlite3`/`store` 全部退役，`SummaryRepository` 只剩 SQL 一个实现。**Stage 5b 已完成**（4c0fba9/cf71a22/本次）：DSH tick 只写导航快照；旧业务 state 写入口与主二进制命令已删；例行同步以 SQL `source_files` 做唯一差量索引；`data-unresolved`、会话导航今日 token 和 Codex 当前配额均读 authority。配额以 schema v2 的 `host_runtime_snapshots` 独立存储，不混入用量事实。**仍待**：真机备份、启用和观察期（用户本机，spec §6.1 需确认）。 |
+| Phase 4 双轨验收与旧路径退役 | 🔨（仅剩真机观察期） | 4.1（77a59ab）+ 4.2（e339cce）+ 4.4 可自动化部分（58c38b8）✅。**4.3 旧路径退役全部落 `main`**：Stage 1–5a（ad4e33e/b5ca48c/98602a7/8498023）+ Stage 5b（4c0fba9/cf71a22/a1e4851/c503563/370e495 + 本次差分收口）+ Stage 6。`JsonSummaryRepository` / `data-reconcile*` / legacy `budget show` / `index.sqlite3` / `store` / DSH tick 的业务 state 写链 / 主二进制 `state merge-*` 子命令 / `behavior --json` 的 `hour_buckets` 全部退役；`SummaryRepository` 只剩 SQL；例行同步以 SQL `source_files` 做唯一差量索引；`data-unresolved` / 会话导航今日 token / Codex 配额（schema v2 `host_runtime_snapshots`）均读 authority。Python mirror + 全部差分/lockstep 测试已对齐（`cargo test` + `clippy -D warnings` + `unittest discover tests` 1151 + golden 15/15 + `e2e_smoke` 全绿）。**仍待（用户本机）**：spec §6.1 备份 → `data-migrate` → 逐月核对 → `data authority enable` → ≥1–2 周观察期（4.4 最后一项）。 |
 
 ### claude ledger 去重 bug——发现、修复、真机验证（2026-09-06，非本 Phase 引入）
 
@@ -575,8 +575,9 @@ UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列
   快照照常）。旧文件保留不删（spec §6.1 备份窗口）。**默认 OFF**——
   真机翻开关需用户先做备份确认（spec §6.1）。差分链（`test_oneline_
   lockstep`/`test_claude_cost` claude-sync）测试夹具无标记 → 不受影响。
-- [🔶] **4.3 退役清单执行**（spec §10）— 用户 2026-09-07 决定提前执行（翻
-  开关 + 纯 SQL 重导入），分 6 stage 在分支 `v0.9.1-phase-4.3-retire-legacy`：
+- [x] **4.3 退役清单执行**（spec §10）— 用户 2026-09-07 决定提前执行（翻
+  开关 + 纯 SQL 重导入），分 6 stage 落 `main`（代码全绿；真机启用 + 观察期
+  见 4.4 最后一项）：
   - [x] **Stage 1**（ad4e33e）— 退役 `reconcile_authority_vs_legacy` /
     `persist_reconcile_exceptions` / `reconcile_budget_sources` /
     `compute_month_from_index` + CLI `data-reconcile-authority` /
@@ -600,20 +601,35 @@ UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列
     `RebuildOutcome` + CLI `data-rebuild-index`。`peak_of` 移进
     `fact_writer_sql`。13 个月保留（`enforce_retention`）保留、`sync_facts`
     每天首轮自动跑。权威损坏恢复 = `rm agent-vitals.sqlite3* && data-migrate`。
-  - [🔨] **Stage 5b** — **5b-a**：DSH `oneline` 重写为只产
-    `oneline.json` / `sessions.jsonl` 导航快照；删除 `state.rs` 的日/月/告警/
-    budget 写入口、`evaluate_alert_from_state` / `evaluate_alert_after_fold`、
-    `takeover::fold_session` 的 merge/write_alert 分支和主二进制的旧 state
-    命令。`test_oneline_lockstep` 改为只对导航协议做 Python mirror 差分，并新增
-    「旧业务 JSON 不得复活」断言。**5b-b（本次）已完成**：例行 `sync-facts`
+  - [x] **Stage 5b** — **5b-a（4c0fba9 + 本次收口）**：DSH `oneline` 只产
+    `oneline.json` / `sessions.jsonl` 导航快照；`state.rs` 的日/月/告警/budget
+    写入口（`merge_today` / `merge_month` / `write_alert` / `set_snooze` /
+    `by_source_report` / …）、`evaluate_alert_from_state` /
+    `evaluate_alert_after_fold`、`takeover::fold_session` 的 merge/write_alert
+    分支、`behavior --json` 的 `hour_buckets` 键、主二进制的 `state
+    merge-today/merge-month/write-alert/snooze/unsnooze/by-source/by-model` 子命令
+    **全部删除**。Python 侧：`takeover.py::fold_session_req` mirror 对齐成
+    「只落导航快照」；`state.py` 的 merge/alert/snooze 函数保留给 ClawHub 兼容
+    CLI（`test_state.py` / `test_state_history_rotate.py` / `test_budget.py`
+    覆盖），但不再进 Rust↔Python 差分。差分测试收口：`test_oneline_lockstep`
+    只比导航协议 + 「旧业务 JSON 不得复活」断言；`test_state_write_chain` 的
+    `StateWriteChainDiff`（对端 Rust 子命令已删）整层移除、保留 Python-only
+    `StateMergeCharacterization`；`test_takeover_lockstep` 的 `TakeoverShadowDiff`
+    / `TakeoverFencingExactlyOnce` 改比 `sessions.jsonl` + ledger（不再读
+    `today.json` / `month.json`）；`e2e_smoke.py` M1/M5 改比 `usage` 折叠、
+    删去已退役的 xbar M7。**Python 差分门全绿**（`unittest discover tests`
+    1151 例 + golden 15/15 + `e2e_smoke` ALL OK）。
+    **5b-b（cf71a22）**：例行 `sync-facts`
     用 `source_files(host,path_hash,size_bytes,mtime_ns)` 作为唯一差量索引，
     source 元数据和 facts 在同一 SQL 事务提交；旧 `.ingest-checkpoint.json`
-    只在首启迁入后改名为 `.migrated`，运行时不再读写。**5b-c**：
+    只在首启迁入后改名为 `.migrated`，运行时不再读写。**5b-c（a1e4851）**：
     `data-unresolved` 复用 authority 的三宿主窗口查询和同一份历史价格卡，
-    不再读取 ledger/codex fold/month JSON。**5b-d（本次部分完成）**：
-    `sessions navigation` 的三宿主今日 token 已改为 authority 聚合；Codex 配额已
-    作为 schema v2 `host_runtime_snapshots` 的 `codex_quota` 快照，在同一次
-    `sync-facts` 事务写入、桌面端只读 SQL。不能把它混入 UsageFact。
+    不再读取 ledger/codex fold/month JSON。**5b-d（c503563 + 370e495 + 本次
+    schema v2 backfill 收口）**：`sessions navigation` 的三宿主今日 token 改为
+    authority 聚合；Codex 配额作为 schema v2 `host_runtime_snapshots` 的
+    `codex_quota` 快照，在同一次 `sync-facts` 事务写入、桌面端只读 SQL——
+    schema v1→v2 升级时强制重放一次 Codex rollout 补齐该派生快照（`schema_meta`
+    标记保证只补一次）。配额不混入 UsageFact（形状/写语义/聚合三方面都不同）。
   - [x] **Stage 6** — 文档 + plan + spec §10 sweep + 收口。
 - [x] **4.4 人工验收（可自动化部分，58c38b8）** — `tests/test_data_status_
   health.py`（5 例 AGENT_VITALS_BIN 二进制用例）：删库 → critical 退出 1

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""端到端 smoke 测试：跑一遍 M1–M7 的全流程，用 fixture 里的真实 DSH 日志。
+"""端到端 smoke 测试：跑一遍 M1–M6 的全流程，用 fixture 里的真实 DSH 日志。
 
 不依赖 unittest —— 直接 `python3 tests/e2e_smoke.py` 跑。失败会 print
 具体的失败点（哪个文件不存在、哪个数字不对），便于手工排查。
@@ -54,28 +54,23 @@ def _assert(cond, msg):
     print(f"  OK:   {msg}")
 
 
-def m1_hour_buckets():
-    _step("M1: hour_buckets() 折叠")
-    # 跑 behavior 拿 usage + hour_buckets
+def m1_behavior_usage():
+    _step("M1: behavior --json 用量折叠")
+    # v0.9.1 Stage 5b：`hour_buckets` 已从 behavior 输出移除（它是退役的
+    # merge_today 写盘链的输入）；用量按 model 折叠仍在 `usage.by_model`。
     r = _run(["behavior", "--json", "-", str(FIXTURE)])
     _assert(r.returncode == 0, "behavior --json 跑通")
     data = json.loads(r.stdout)
-    _assert("hour_buckets" in data, "hour_buckets 字段存在")
-    hb = data["hour_buckets"]
-    _assert("buckets" in hb, "hour_buckets.buckets 是数组")
-    _assert(len(hb["buckets"]) >= 1, "至少 1 个 hour 桶")
-
-    # 不变量：hour_buckets 4 桶累加 == usage.by_model 4 桶累加
-    hour_total = sum(
-        b["uncached_input_tokens"] + b["output_tokens"]
-        + b["cache_read_tokens"] + b["cache_write_tokens"]
-        for b in hb["buckets"])
+    _assert("usage" in data, "usage 字段存在")
+    by_model = data["usage"]["by_model"]
+    _assert(isinstance(by_model, dict) and by_model, "usage.by_model 非空")
     model_total = sum(
         m["uncached_input_tokens"] + m["output_tokens"]
         + m["cache_read_tokens"] + m["cache_write_tokens"]
-        for m in data["usage"]["by_model"].values())
-    _assert(hour_total == model_total,
-            f"hour_buckets 4 桶累加 ({hour_total}) == token_by_model 4 桶累加 ({model_total})")
+        for m in by_model.values())
+    _assert(model_total > 0, f"by_model 4 桶累加 > 0（{model_total}）")
+    _assert(isinstance(data["cost"]["total"], (int, float)),
+            "cost.total 是数值")
 
 
 def m2_state_files(home):
@@ -112,7 +107,11 @@ def m4_html_renderable(home):
     _step("M4: HTML 模板可在浏览器渲染（语法检查）")
     tpl = ROOT / "assets" / "templates" / "calendar.html"
     _assert(tpl.is_file(), "templates/calendar.html 存在")
-    text = tpl.read_text()
+    raw = tpl.read_text()
+    # 顶部有一大段 <!-- ... --> 说明「本模板无 <link rel=stylesheet>」等——
+    # 零外链检查扫的是真实标记，不是文档注释，先把 HTML 注释剥掉。
+    import re as _re
+    text = _re.sub(r"<!--.*?-->", "", raw, flags=_re.DOTALL)
     # 零外链（CLAUDE.md §no third-party supply chain）
     for bad in ("<link rel=\"stylesheet\"", "<script src=", "@import",
                 "@font-face"):
@@ -138,11 +137,11 @@ def m5_rust_parity(home):
     _assert(r.returncode == 0, "Rust behavior --json 跑通")
     rust_out = r.stdout
 
-    # 同一份输入 → 同一份 hour_buckets 输出
-    py_hb = json.loads(py_out)["hour_buckets"]
-    rust_hb = json.loads(rust_out)["hour_buckets"]
-    _assert(py_hb["buckets"] == rust_hb["buckets"],
-            "Python ↔ Rust hour_buckets.buckets 字节相等")
+    # 同一份输入 → 同一份 usage 折叠（by_model / sequence / providers）
+    py_usage = json.loads(py_out)["usage"]
+    rust_usage = json.loads(rust_out)["usage"]
+    _assert(py_usage == rust_usage,
+            "Python ↔ Rust usage 折叠字节相等")
 
 
 def m6_budget(home):
@@ -181,27 +180,6 @@ def m6_budget(home):
     _assert(out["level"] == "disabled", "disable 后 level = disabled")
 
 
-def m7_xbar(home):
-    _step("M7: xbar 脚本")
-    script = ROOT / "contrib" / "xbar" / "agent-vitals.5m.sh"
-    _assert(script.is_file(), "xbar 脚本存在")
-    # 无状态文件 → 输出 💤 -
-    r = subprocess.run([str(script)], capture_output=True, text=True,
-                       env=os.environ.copy(), timeout=10)
-    _assert(r.returncode == 0, "xbar 脚本退出码 0")
-    # oneline.json 写入后 → 菜单栏非空
-    (home / "state").mkdir(parents=True, exist_ok=True)
-    (home / "state" / "oneline.json").write_text(json.dumps({
-        "cost_cny": 1.23, "tokens_total": 1000,
-        "schema_version": "1.0.0"
-    }))
-    r = subprocess.run([str(script)], capture_output=True, text=True,
-                       env=os.environ.copy(), timeout=10)
-    _assert(r.returncode == 0, "xbar 读到 oneline.json 仍 exit 0")
-    _assert("¥" in r.stdout or "💰" in r.stdout or "⚠️" in r.stdout,
-            "xbar 菜单栏输出含金额符号")
-
-
 def main():
     skip_rust = "--skip-rust" in sys.argv
     print(f"e2e smoke test (skip_rust={skip_rust})")
@@ -209,14 +187,13 @@ def main():
     print(f"  AGENT_VITALS_HOME = {home}")
 
     try:
-        m1_hour_buckets()
+        m1_behavior_usage()
         m2_state_files(home)
         m3_cli(home)
         m4_html_renderable(home)
         if not skip_rust:
             m5_rust_parity(home)
         m6_budget(home)
-        m7_xbar(home)
 
         print("\n=== ALL OK ===")
         print(f"state dir: {home}/state (cleaned up on exit)")

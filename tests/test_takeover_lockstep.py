@@ -8,16 +8,18 @@
 1. `TakeoverCharacterization`（恒跑）—— 把 mirror 的纯函数输出钉到具体数值，
    与 core/takeover.rs 的单测期望值逐一对应（test_cost_priced_day 同款交叉
    锁定）：Python 与 Rust 各自断言同一组数字，docstring 互相指认。
-2. `TakeoverShadowDiff`（需 AGENT_VITALS_BIN）—— 同一份 fold-req（日期在运行
-   时按北京「今天」生成），Python `fold_session_req(shadow=True)` 进程内折进
-   py-home、Rust `state fold-session --shadow` 子进程折进 rs-home，打码
-   `folded_at`/`last_fold_at`/`generated_at`/`archived_at` 后**逐文件字节
-   相等** + 文件集合相等。这就是 §4.2 shadow replay 的物证：Rust 写者与
-   （接管前的）Python 写者产出同构 —— 两边一旦漂移这里就红。
+2. `TakeoverShadowDiff`（需 AGENT_VITALS_BIN）—— 同一份 fold-req，Python
+   `fold_session_req(shadow=True)` 进程内折进 py-home、Rust `state
+   fold-session --shadow` 子进程折进 rs-home，打码 `folded_at`/`last_fold_at`/
+   `generated_at`/`archived_at` 后**逐文件字节相等** + 文件集合相等。这就是
+   §4.2 shadow replay 的物证：Rust 写者与（接管前的）Python 写者产出同构 ——
+   两边一旦漂移这里就红。v0.9.1 Stage 5b 后 fold 是闭合的导航快照协议，只落
+   `oneline.json` / `sessions.jsonl`；today/month/alert 的账由 SQL 权威库管理。
 3. `TakeoverFencingExactlyOnce`（需 AGENT_VITALS_BIN）—— 四件套走真实 Rust
    驱动：fencing（接管前拒绝、Python CLI 退休门）、cutover（`state takeover
-   rust` 后放行）、exactly-once（同 session 多 tick 只折一次）、rollback
-   （切回 python 再切回 rust，ledger 原 epoch 证明没重放）。
+   rust` 后放行）、exactly-once（同 session 多 tick 只折一次，去重物证落在
+   sessions.jsonl + ledger）、rollback（切回 python 再切回 rust，ledger 原
+   epoch 证明没重放）。
 
 跑法（差分部分需要 AGENT_VITALS_BIN，与 test_cli_matrix 同款注入）：
     AGENT_VITALS_BIN=target/release/agent-vitals python3 -m unittest tests.test_takeover_lockstep -v
@@ -50,17 +52,6 @@ if _BIN:
     _BIN = str(Path(_BIN).resolve())
 _BJ = timezone(timedelta(hours=8))
 
-BUCKET_FIELDS = (
-    "uncached_input_tokens", "output_tokens",
-    "cache_read_tokens", "cache_write_tokens",
-    "peak_uncached_input_tokens", "peak_output_tokens",
-    "peak_cache_read_tokens", "peak_cache_write_tokens",
-)
-
-
-def _zero_bucket():
-    return {f: 0 for f in BUCKET_FIELDS}
-
 
 def bj_now():
     return datetime.now(_BJ)
@@ -79,11 +70,14 @@ def _mask_ts(text):
 
 def _fold_req(session_id, tokens):
     """一份 fold-req：与 `agent-vitals-runtime/src/takeover.rs` 测试里 `req()` 同形状同键序
-    （sessions.jsonl 保序追加，键序不同字节就不同）。日期用运行时北京今天——
-    写死日期会在非 08-30 那天被 merge 当成非今日整条丢弃（R1c 同款教训）。"""
+    （sessions.jsonl 保序追加，键序不同字节就不同）。
+
+    v0.9.1 Stage 5b 后是一个闭合的导航快照协议——只带 `oneline`。旧的
+    `hour_buckets` / `by_model_today` / `by_date_model` / `alert` 字段即使附上
+    也一律被忽略（业务账由 SQL 权威库管理），这里索性不再构造。日期只用于
+    导航摘要展示。"""
     today = today_str()
     model = "deepseek-v4-flash"
-    bucket = dict(_zero_bucket(), uncached_input_tokens=tokens)
     oneline = {
         "session_id": session_id,
         "session_log": "/logs/%s.jsonl" % session_id,
@@ -107,12 +101,6 @@ def _fold_req(session_id, tokens):
         "host_kind": "dsh",
         "machine_namespace": "ns-abc",
         "oneline": oneline,
-        "hour_buckets": {"buckets": [
-            {"date": today, "hour": 9, "uncached_input_tokens": tokens}]},
-        "by_model_today": {model: bucket},
-        "by_date_model": {today: {model: bucket}},
-        "alert": {"level": "warning", "daily_pct": 10.0, "daily_cny": 5.0,
-                  "monthly_pct": 1.0, "monthly_cny": 20.0},
     }
 
 
@@ -268,10 +256,8 @@ class TakeoverShadowDiff(unittest.TestCase):
         return r
 
     def test_shadow_fold_matches_python_mirror(self):
-        """同一份 req 折进 py-home / rs-home → 文件集合 + 打码后字节全等。"""
-        today = today_str()
+        """同一份 req 折进 py-home / rs-home → 导航快照文件集合 + 打码后字节全等。"""
         req = _fold_req("s1", 10)
-        self.assertEqual(req["hour_buckets"]["buckets"][0]["date"], today)
 
         outcome, detail = self._py_fold_shadow(req)
         self.assertEqual(outcome, "folded", detail)
@@ -401,43 +387,44 @@ class TakeoverFencingExactlyOnce(unittest.TestCase):
                          {"writer-manifest.json"},
                          "被挡的 oneline 不得写任何审计输出")
 
+    def _history_lines(self, home_rel="rs-home"):
+        p = self._state_dir(home_rel) / "sessions.jsonl"
+        return p.read_text(encoding="utf-8").strip().splitlines()
+
     def test_cutover_then_fold_and_exactly_once(self):
         """`takeover rust` 后 fold 成功；同 session 再 tick 两次 → 全 skipped，
-        today/month/sessions.jsonl 只折一次（§4.2 验收：不重复累加）。"""
+        导航快照只折一次（§4.2 验收：不重复累加）。Stage 5b 后 tick 不写
+        today.json / month.json，去重物证落在 sessions.jsonl + ledger。"""
         self._run("state", "takeover", "rust")
         self.assertEqual(self._fold("s1", 10)["outcome"], "folded")
         self.assertEqual(self._fold("s1", 10)["outcome"], "skipped")
         self.assertEqual(self._fold("s1", 10)["outcome"], "skipped")
-        # 10，不是 30
-        today = self._read_json("today.json")
-        self.assertEqual(today["buckets"]["9"]["uncached_input_tokens"], 10)
-        month = self._read_json("month.json")
-        self.assertEqual(
-            month["days"][today_str()]["uncached_input_tokens"], 10)
-        lines = (self._state_dir() / "sessions.jsonl").read_text(
-            encoding="utf-8").strip().splitlines()
-        self.assertEqual(len(lines), 1)
+        # 导航历史只追加一行（不是三行）
+        self.assertEqual(len(self._history_lines()), 1)
         ledger = self._read_json("session-ledger.json")
         self.assertEqual(len(ledger["entries"]), 1)
+        # 旧业务账不得被 tick 复活
+        for f in ("today.json", "month.json", "month-archive.json", "alert.json"):
+            self.assertFalse((self._state_dir() / f).exists(),
+                             "tick 不应写 %s（已由 SQL 权威库取代）" % f)
 
     def test_distinct_sessions_fold_separately(self):
-        """两个不同 session 各自折，桶累加、ledger 两条。"""
+        """两个不同 session 各自折，导航历史两行、ledger 两条。"""
         self._run("state", "takeover", "rust")
         self.assertEqual(self._fold("s1", 10)["outcome"], "folded")
         self.assertEqual(self._fold("s2", 5)["outcome"], "folded")
-        today = self._read_json("today.json")
-        self.assertEqual(today["buckets"]["9"]["uncached_input_tokens"], 15)
+        self.assertEqual(len(self._history_lines()), 2)
         ledger = self._read_json("session-ledger.json")
         self.assertEqual(len(ledger["entries"]), 2)
 
     def test_rollback_then_rereplay_does_not_double_count(self):
         """cutover → fold s1（代际 2）→ 接管失败切回 python → 再切回 rust →
-        fold s1 被 ledger 挡掉（skipped），today/month 一字未动，s1 的 epoch
+        fold s1 被 ledger 挡掉（skipped），导航快照一字未动，s1 的 epoch
         仍是 2 —— 可测 rollback（§4.2）的机器证据。"""
         self._run("state", "takeover", "rust")
         self.assertEqual(self._fold("s1", 10)["outcome"], "folded")
-        today_before = self._read_json("today.json")
-        month_before = self._read_json("month.json")
+        oneline_before = self._read_json("oneline.json")
+        history_before = self._history_lines()
         ledger_before = self._read_json("session-ledger.json")
         key = takeover.session_key("dsh", "s1", "ns-abc")
         s1_epoch = ledger_before["entries"][key]["epoch"]
@@ -447,8 +434,8 @@ class TakeoverFencingExactlyOnce(unittest.TestCase):
                          "python")
         self._run("state", "takeover", "rust")
         self.assertEqual(self._fold("s1", 10)["outcome"], "skipped")
-        self.assertEqual(self._read_json("today.json"), today_before)
-        self.assertEqual(self._read_json("month.json"), month_before)
+        self.assertEqual(self._read_json("oneline.json"), oneline_before)
+        self.assertEqual(self._history_lines(), history_before)
         ledger_after = self._read_json("session-ledger.json")
         self.assertEqual(ledger_after["entries"][key]["epoch"], s1_epoch)
         self.assertEqual(len(ledger_after["entries"]), 1)
