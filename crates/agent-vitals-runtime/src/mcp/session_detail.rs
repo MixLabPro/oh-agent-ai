@@ -1,0 +1,291 @@
+//! `session_detail` 工具（spec §7.7 / Q04 / Q10 / U05）——一个会话的行级时间线
+//! （用量事实按时间排序）。入参是 `sessions_search` 返回的 `session_ref`；服务端
+//! 对 `sessions` 表逐行算 HMAC 找出对应 `session_key`（本机量级，微秒级）。
+//!
+//! 时间线 = `usage_facts` 行：模型切换、逐事件 token、高峰时段标记。**不含**
+//! 对话正文 / prompt / 工具原始参数 / 原生 session id / 路径。
+//!
+//! Q10「会话时间线关联失败/峰值」的失败/错误事件富化需要 `workflow_events`
+//! （M4）——本工具的时间线是 usage 维，`workflow_events` 就绪后加一条并列轴。
+
+use std::path::Path;
+
+use serde_json::{json, Value};
+
+use super::{authority_state_for, build_envelope, ms_to_rfc3339_beijing, AuthorityHandle, ToolError, ToolSpec};
+use agent_vitals_data::authority_query;
+
+const DEFAULT_LIMIT: usize = 200;
+const MAX_LIMIT: usize = 1000;
+
+pub fn spec() -> ToolSpec {
+    ToolSpec {
+        name: "session_detail",
+        description: "Given an opaque session_ref (from sessions_search), return that session's usage timeline: time-ordered facts with model id, token buckets, peak-slot flag and observation kind, plus session totals. Never returns conversation text, prompts, raw tool args, native session ids or file paths. Fault/error timeline enrichment needs workflow_events (M4).",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "session_ref": { "type": "string", "description": "Opaque per-install session id from sessions_search.session_ref." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Timeline page size (default 200, max 1000)." },
+                "cursor": { "type": "string", "description": "Opaque cursor from a previous page's data.next_cursor." }
+            },
+            "required": ["session_ref"],
+            "additionalProperties": false
+        }),
+        output_schema: json!({
+            "type": "object",
+            "description": "spec §6 envelope; data = { session_ref, host, first_event_at, last_event_at, event_count, model_ids, tokens{}, timeline[], has_more, next_cursor }."
+        }),
+    }
+}
+
+fn parse_cursor(c: &str) -> Option<(i64, String)> {
+    let (ts_s, rest) = c.split_once(':')?;
+    let ts: i64 = ts_s.parse().ok()?;
+    let (len_s, id) = rest.split_once(':')?;
+    let len: usize = len_s.parse().ok()?;
+    if id.len() != len {
+        return None;
+    }
+    Some((ts, id.to_string()))
+}
+
+fn make_cursor(ts: i64, fact_id: &str) -> String {
+    format!("{ts}:{}:{fact_id}", fact_id.len())
+}
+
+pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
+    let session_ref = args
+        .get("session_ref")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ToolError::new("invalid_argument", "`session_ref` is required"))?;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|n| (n as usize).clamp(1, MAX_LIMIT))
+        .unwrap_or(DEFAULT_LIMIT);
+    let cursor = match args.get("cursor").and_then(Value::as_str) {
+        None => None,
+        Some(c) => Some(
+            parse_cursor(c).ok_or_else(|| ToolError::new("invalid_argument", "malformed `cursor`"))?,
+        ),
+    };
+
+    let handle = AuthorityHandle::open(data_home)?;
+    let conn = handle.conn();
+    let mut warnings = Vec::new();
+    super::check_as_of_run_id(conn, args, &mut warnings)?;
+
+    let salt = super::session_ref::load_or_create_salt(data_home)?;
+    let keys = authority_query::all_session_keys(conn)
+        .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?;
+    let session_key = super::session_ref::resolve(&salt, session_ref, keys).ok_or_else(|| {
+        ToolError::new(
+            "invalid_argument",
+            "unknown session_ref — it may be from a different machine, or the session was deleted, or the salt was rotated",
+        )
+    })?;
+
+    let (host, _profile) = authority_query::session_row(conn, &session_key)
+        .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?
+        .ok_or_else(|| ToolError::new("invalid_argument", "session_ref resolved but the session row is gone"))?;
+
+    let (after_ts, after_id) = match &cursor {
+        Some((t, i)) => (Some(*t), Some(i.as_str())),
+        None => (None, None),
+    };
+    let (facts, has_more) =
+        authority_query::session_facts_timeline(conn, &session_key, after_ts, after_id, limit)
+            .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?;
+
+    // 会话总计（全量，不受分页影响）——从一份大 limit 的重查里折，或直接 SQL
+    // 聚合。这里走聚合 SQL（`sessions_in_window` 的单会话情形太重），直接 query。
+    let (mut u, mut cr, mut cw, mut o, mut n, mut first, mut last): (i64, i64, i64, i64, i64, Option<i64>, Option<i64>) =
+        (0, 0, 0, 0, 0, None, None);
+    let mut models: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT COALESCE(model_id,'<unknown>'), event_ts_ms,
+                        uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens
+                 FROM usage_facts
+                 WHERE session_key = ?1 AND observation_kind != 'legacy_aggregate'
+                   AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL",
+            )
+            .map_err(|e| ToolError::new("internal_error", e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![session_key], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|e| ToolError::new("internal_error", e.to_string()))?;
+        for row in rows {
+            let (m, ts, a, b, c, d) = row.map_err(|e| ToolError::new("internal_error", e.to_string()))?;
+            models.insert(m);
+            n += 1;
+            u += a;
+            cr += b;
+            cw += c;
+            o += d;
+            first = Some(first.map_or(ts, |x: i64| x.min(ts)));
+            last = Some(last.map_or(ts, |x: i64| x.max(ts)));
+        }
+    }
+
+    let timeline: Vec<Value> = facts
+        .iter()
+        .map(|f| {
+            json!({
+                "event_at": ms_to_rfc3339_beijing(f.event_ts_ms),
+                "model_id": f.model_id,
+                "identity_kind": "host_raw",
+                "observation_kind": f.observation_kind,
+                "peak": f.event_peak,
+                "fact_id": f.fact_id,
+                "tokens": {
+                    "uncached_input_tokens": f.uncached_input_tokens,
+                    "cache_read_tokens": f.cache_read_tokens,
+                    "cache_write_tokens": f.cache_write_tokens,
+                    "output_tokens": f.output_tokens,
+                    "total": f.uncached_input_tokens + f.cache_read_tokens + f.cache_write_tokens + f.output_tokens,
+                },
+            })
+        })
+        .collect();
+
+    let next_cursor = facts
+        .last()
+        .filter(|_| has_more)
+        .map(|f| make_cursor(f.event_ts_ms, &f.fact_id));
+
+    let data = json!({
+        "session_ref": session_ref,
+        "host": host,
+        "first_event_at": first.map(ms_to_rfc3339_beijing),
+        "last_event_at": last.map(ms_to_rfc3339_beijing),
+        "event_count": n,
+        "model_ids": models.into_iter().collect::<Vec<_>>(),
+        "identity_kind": "host_raw",
+        "tokens": {
+            "uncached_input_tokens": u,
+            "cache_read_tokens": cr,
+            "cache_write_tokens": cw,
+            "output_tokens": o,
+            "total": u + cr + cw + o,
+        },
+        "timeline": timeline,
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+        "note": "usage timeline only; fault/error events need workflow_events (M4)",
+    });
+
+    Ok(build_envelope(
+        conn,
+        authority_state_for(data_home),
+        last,
+        super::coverage_not_applicable(),
+        warnings,
+        data,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_vitals_data::authority::AuthorityDb;
+    use agent_vitals_data::authority_query::beijing_day_bounds_ms;
+
+    fn tmp_home(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "avmcp-sd-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ))
+    }
+
+    fn seed_session(home: &std::path::Path) -> (String, String) {
+        std::fs::create_dir_all(home).unwrap();
+        let db = AuthorityDb::open(&agent_vitals_data::authority::default_authority_path(home), 1).unwrap();
+        let skey = "3:dsh|10:priv-abc-99|2:ns";
+        db.conn().execute(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version) VALUES ('run',1,'cli','succeeded',2)",
+            [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+             VALUES (?1, 'dsh', 'priv-abc-99', 'ns', 'default', 1)",
+            rusqlite::params![skey],
+        ).unwrap();
+        let (start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
+        for (i, (m, peak, tok)) in [("m-a", 0, 100), ("m-a", 0, 50), ("m-b", 1, 200)].iter().enumerate() {
+            db.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key,
+                     source_event_id, observation_kind, model_id, event_ts_ms, event_peak,
+                     uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                     ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'dsh', 'ns', 'priv-abc-99', ?2, ?1, 'assistant-usage', ?3, ?4, ?5, ?6, 0, 0, 0, 'run', 1, 1)",
+                rusqlite::params![format!("d{i}"), skey, m, start + (i as i64) * 3_600_000, peak, tok],
+            ).unwrap();
+        }
+        drop(db);
+        // 拿一个真 session_ref
+        let salt = super::super::session_ref::load_or_create_salt(home).unwrap();
+        (skey.to_string(), super::super::session_ref::session_ref(&salt, skey))
+    }
+
+    #[test]
+    fn resolves_ref_builds_timeline_and_never_leaks_native() {
+        let home = tmp_home("ok");
+        let (_skey, sref) = seed_session(&home);
+        let env = run(&json!({ "session_ref": sref }), &home).unwrap();
+        let d = &env["data"];
+        assert_eq!(d["host"], "dsh");
+        assert_eq!(d["event_count"], 3);
+        assert_eq!(d["tokens"]["total"], 350);
+        assert_eq!(d["model_ids"], json!(["m-a", "m-b"]));
+        let tl = d["timeline"].as_array().unwrap();
+        assert_eq!(tl.len(), 3);
+        assert_eq!(tl[2]["peak"], true);
+        assert_eq!(tl[0]["model_id"], "m-a");
+        assert_eq!(tl[2]["model_id"], "m-b");
+        // 时间线时间序。
+        assert!(tl[0]["event_at"].as_str().unwrap() < tl[1]["event_at"].as_str().unwrap());
+        let txt = env.to_string();
+        assert!(!txt.contains("priv-abc-99"), "原生 id 泄漏: {txt}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn unknown_ref_is_invalid_argument() {
+        let home = tmp_home("bad");
+        seed_session(&home);
+        let err = run(&json!({ "session_ref": "sr_00000000000000000000000000000000" }), &home).unwrap_err();
+        assert_eq!(err.code, "invalid_argument");
+        assert_eq!(run(&json!({}), &home).unwrap_err().code, "invalid_argument");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn timeline_paginates() {
+        let home = tmp_home("pg");
+        let (_k, sref) = seed_session(&home);
+        let env = run(&json!({ "session_ref": sref.clone(), "limit": 2 }), &home).unwrap();
+        assert_eq!(env["data"]["timeline"].as_array().unwrap().len(), 2);
+        assert_eq!(env["data"]["has_more"], true);
+        // 总计不受分页影响。
+        assert_eq!(env["data"]["tokens"]["total"], 350);
+        assert_eq!(env["data"]["event_count"], 3);
+        let cur = env["data"]["next_cursor"].as_str().unwrap().to_string();
+        let env2 = run(&json!({ "session_ref": sref, "limit": 2, "cursor": cur }), &home).unwrap();
+        assert_eq!(env2["data"]["timeline"].as_array().unwrap().len(), 1);
+        assert_eq!(env2["data"]["has_more"], false);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}

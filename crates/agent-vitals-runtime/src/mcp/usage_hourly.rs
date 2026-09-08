@@ -97,59 +97,8 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let conn = handle.conn();
 
     let mut warnings = Vec::new();
-
-    // spec §6.4.1 `as_of_run_id` drift 检测。三态必须区分：
-    // (a) 没传 → 不检查；
-    // (b) 传了但 != 当前最新成功 run_id，且该 run_id **不存在** → `invalid_argument`；
-    // (c) 传了但 != 当前最新成功 run_id，但该 run_id **存在**（drift）→ 返回当前数据 + warnings。
-    // 早期实现把 (b)(c) 合并成 drift warning——会把 `as_of_run_id="never"` 当 drift
-    // 放过，丢掉 `invalid_argument` 语义。fix 在此 commit。
-    if let Some(req) = args.get("as_of_run_id").and_then(Value::as_str) {
-        let current = conn
-            .query_row(
-                "SELECT run_id FROM sync_runs WHERE status='succeeded'
-                 ORDER BY COALESCE(completed_at_ms, started_at_ms) DESC LIMIT 1",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .ok();
-        match current {
-            None => {
-                return Err(ToolError::new(
-                    "invalid_argument",
-                    format!("as_of_run_id `{req}` requested but no successful sync run exists yet"),
-                ));
-            }
-            Some(cur) if cur == req => {
-                // 匹配，无警告。
-            }
-            Some(cur) => {
-                // 不等于最新——判断 request 这个 run_id 是否曾经发生过。
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM sync_runs WHERE run_id = ?1)",
-                        rusqlite::params![req],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(false);
-                if exists {
-                    warnings.push(json!({
-                        "code": "snapshot_drift",
-                        "message": format!(
-                            "as_of_run_id={req} but current is {cur} — strict cross-tool consistency not yet enforced (M2)"
-                        ),
-                        "requested": req,
-                        "current": cur,
-                    }));
-                } else {
-                    return Err(ToolError::new(
-                        "invalid_argument",
-                        format!("as_of_run_id `{req}` is not present in this authority DB"),
-                    ));
-                }
-            }
-        }
-    }
+    // spec §6.4.1 `as_of_run_id` 三态——共享助手（`mcp::check_as_of_run_id`）。
+    super::check_as_of_run_id(conn, args, &mut warnings)?;
 
     // 模型 / 宿主 / provider 过滤转 SQL WHERE 子句。
     let host_filter: Vec<String> = args

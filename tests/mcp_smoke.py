@@ -198,8 +198,28 @@ def main():
           f"{month_first} totals={btot}\n与 CLI data-daily 逐宿主: {bparity}（00 点桶 = UTC 前一天晚上，归属北京当日）")
 
     # ── Q04 峰值下钻到会话 ──────────────────────────────────
-    R.add("Q04", "峰值小时下钻列出构成会话，token 合计==峰值", "BLOCKED",
-          "sessions_search / session_detail = M3；session_ref HMAC 基元 (D5) 未落地。")
+    # usage_hourly 给峰值小时 → sessions_search(hour=peak) 给该小时会话构成，
+    # 逐会话 total 之和必须**严格等于**该小时 usage_hourly total。
+    q04_verdicts, q04_notes = [], []
+    for s in hd["series"]:
+        host, peak = s["key"]["host"], s["peak_hour"]
+        peak_total = next((h["total_tokens"] for h in s["hours"] if h["hour"] == peak), 0)
+        ss, _, _ = c.call("sessions_search", {"date": today, "hour": int(peak), "hosts": [host]})
+        sd = ss["structuredContent"]["data"]
+        sess_sum = sum(x["tokens"]["total"] for x in sd["sessions"])
+        ok = (sess_sum == peak_total == sd["window_total_tokens"]) and not sd["has_more"]
+        q04_verdicts.append(ok)
+        q04_notes.append(f"{host} peak={peak}: {len(sd['sessions'])} 会话 sum={sess_sum} == usage_hourly {peak_total} → {ok}")
+        # 下钻一层：session_detail 反解 session_ref，不泄露原生 id
+        if sd["sessions"]:
+            sref = sd["sessions"][0]["session_ref"]
+            det, _, _ = c.call("session_detail", {"session_ref": sref})
+            dd = det["structuredContent"]["data"]
+            leaked = any(p in json.dumps(det) for p in ["native_session_id", "/Users/", "machine_namespace", "session_key"])
+            q04_verdicts.append(dd["host"] == host and dd["event_count"] > 0 and not leaked)
+            q04_notes.append(f"  session_detail({sref[:12]}..): host={dd['host']} events={dd['event_count']} timeline={len(dd['timeline'])} leak={leaked}")
+    R.add("Q04", "峰值小时下钻列出构成会话，token 合计 == 峰值",
+          "EXACT" if all(q04_verdicts) else "MISMATCH", "\n".join(q04_notes))
 
     # ── Q05 缺价卡模型不归零 ────────────────────────────────
     unresolved = cli_json(args.bin, args.home, "data-unresolved", "--json")
@@ -249,8 +269,26 @@ def main():
           f"→ envelope 未把 by_host 折成 stale 标记，consumer 只能自己算。缺口#F1。")
 
     # ── Q12 重跑导入恒等 ───────────────────────────────────
-    R.add("Q12", "重复导入 + 中途中断 → 重跑查询逐值恒等", "BLOCKED",
-          "reimport_verify (MCP 外命令) = M2 增量 7；MCP 内无此能力（只读工具不做重导入）。")
+    # MCP 外命令：两个临时库各重放一遍（round B 崩溃后重跑），逐宿主×月比对。
+    import os as _os
+    _env = dict(_os.environ)
+    if args.home:
+        _env["AGENT_VITALS_HOME"] = args.home
+    rv = subprocess.run([args.bin, "data-reimport-verify", "--json"],
+                        capture_output=True, text=True, timeout=120, env=_env)
+    try:
+        rvd = json.loads(rv.stdout)
+        ok = rvd.get("verified") and rvd.get("facts_round_a") == rvd.get("facts_round_b") \
+            and not rvd.get("diffs") and rvd.get("interrupted_runs_swept", 0) >= 1
+        R.add("Q12", "重复导入 + 中途中断 → 重跑查询逐值恒等",
+              "EXACT" if ok else "MISMATCH",
+              f"data-reimport-verify: verified={rvd.get('verified')} "
+              f"facts A={rvd.get('facts_round_a')} B={rvd.get('facts_round_b')} "
+              f"host-months={rvd.get('buckets_compared')} swept_interrupted={rvd.get('interrupted_runs_swept')} "
+              f"diffs={len(rvd.get('diffs', []))} (rc={rv.returncode})")
+    except Exception as e:
+        R.add("Q12", "重复导入 + 中途中断 → 重跑查询逐值恒等", "MISMATCH",
+              f"data-reimport-verify 解析失败: {e}\nstdout={rv.stdout[:300]} stderr={rv.stderr[:300]}")
 
     # ── Q13 调价日前后价格版本 ──────────────────────────────
     if args.internal:
@@ -313,11 +351,17 @@ def main():
         R.add("M19b", "query_sql_readonly 合法 view 查询放行", "EXACT" if ok_query and "rows" in ok_query else "MISMATCH",
               f"SELECT ... FROM v_facts_safe GROUP BY host → {ok_query.get('rows') if ok_query and 'rows' in ok_query else ok_query}")
 
-    # 公开构建工具清单（只有 --bin 是公开构建时有意义）
+    # 公开构建工具清单（只有 --bin 是公开构建时有意义）。M12 的要求是「没有
+    # 任意 SQL / 写入 / 同步 / 迁移 / repair 工具」，不是「恰好 N 个」——只读
+    # 查询工具（sessions_search / session_detail …）可以随版本增加。
     if not args.internal:
-        R.add("M12", "公开构建不含 SQL/写入/同步/repair 工具",
-              "EXACT" if tools == ["data_status", "usage_hourly"] else "MISMATCH",
-              f"公开 tools/list = {tools}")
+        forbidden_substr = ("query_sql", "sql_readonly", "write", "insert", "update", "delete",
+                            "sync", "migrate", "repair", "rebuild", "reimport", "authority_audit")
+        bad = [t for t in tools if any(f in t for f in forbidden_substr)]
+        # 每个工具的 inputSchema 也不能有裸 `sql` 参数。
+        R.add("M12", "公开构建不含任意 SQL / 写入 / 同步 / repair 工具",
+              "EXACT" if not bad else "MISMATCH",
+              f"公开 tools/list = {tools}\n违规工具 = {bad or '无'}")
 
     sys.exit(R.summary())
 

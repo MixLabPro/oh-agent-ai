@@ -26,7 +26,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
 use agent_vitals_domain::usage::{civil_date_from_days, ms_from_civil};
@@ -758,6 +758,208 @@ impl HourlyCell {
     }
 }
 
+// ─────────────────────── Q04 会话下钻 ───────────────────────
+
+/// 一个会话在查询窗口（可再按北京小时过滤）内的聚合。`session_key` 内嵌宿主
+/// 原生 id——**调用方（MCP 工具）必须 HMAC 成 `session_ref`，绝不原样返回**。
+#[derive(Debug, Clone)]
+pub struct SessionAgg {
+    pub session_key: String,
+    pub host: String,
+    pub first_event_ms: i64,
+    pub last_event_ms: i64,
+    pub event_count: i64,
+    pub uncached_input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub output_tokens: i64,
+    /// 其中落在 DSH 高峰时段的 token（`event_peak != 0`）。
+    pub peak_tokens: i64,
+    pub model_ids: Vec<String>,
+}
+
+impl SessionAgg {
+    pub fn total(&self) -> i64 {
+        self.uncached_input_tokens
+            + self.cache_read_tokens
+            + self.cache_write_tokens
+            + self.output_tokens
+    }
+}
+
+/// 单宿主 SQL（`host = ?1` 命中 `usage_facts_host_time`）。`?4 < 0` = 不按小时
+/// 过滤；否则只算 `bj_hour == ?4` 的事实——**Q04 峰值下钻**要的正是「该小时
+/// 的会话构成」，SUM 因此自动被 WHERE 收窄到那一小时。
+const SQL_SESSIONS_IN_WINDOW: &str = "SELECT session_key, host,
+            MIN(event_ts_ms), MAX(event_ts_ms), COUNT(*),
+            SUM(uncached_input_tokens), SUM(cache_read_tokens),
+            SUM(cache_write_tokens), SUM(output_tokens),
+            SUM(CASE WHEN event_peak != 0 THEN
+                (uncached_input_tokens + cache_read_tokens
+                 + cache_write_tokens + output_tokens) ELSE 0 END),
+            GROUP_CONCAT(DISTINCT COALESCE(model_id, '<unknown>'))
+     FROM usage_facts
+     WHERE host = ?1
+       AND observation_kind != 'legacy_aggregate'
+       AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+       AND session_key IS NOT NULL
+       AND event_ts_ms >= ?2 AND event_ts_ms < ?3
+       AND (?4 < 0 OR (((event_ts_ms + ?5) / ?6) % 24) = ?4)
+     GROUP BY session_key";
+
+/// 窗口内的会话聚合，跨 wired 宿主合并。`hour` = 北京小时过滤（`None` = 不过滤）；
+/// `min_tokens` = HAVING 门槛；按 `total` 降序 + `session_key` 升序稳定排序，
+/// keyset 分页（cursor = 上一页尾行的 `(total, session_key)`）。返回 (rows,
+/// has_more, window_total_tokens)——`window_total_tokens` 让调用方核对
+/// 「所有会话之和 == 窗口/峰值总量」（Q04 不变式）。
+#[allow(clippy::too_many_arguments)]
+pub fn sessions_in_window(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    hosts: &[String],
+    hour: Option<u32>,
+    min_tokens: i64,
+    after_total: Option<i64>,
+    after_key: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<SessionAgg>, bool, i64), AuthorityError> {
+    let wired: &[&str] = &["claude-code", "codex", "dsh"];
+    let selected: Vec<&str> = wired
+        .iter()
+        .filter(|w| hosts.is_empty() || hosts.iter().any(|h| h == *w))
+        .copied()
+        .collect();
+    let hour_param: i64 = hour.map(|h| h as i64).unwrap_or(-1);
+
+    let mut all: Vec<SessionAgg> = Vec::new();
+    for host in selected {
+        let mut stmt = conn.prepare(SQL_SESSIONS_IN_WINDOW)?;
+        let rows = stmt.query_map(
+            rusqlite::params![host, start_ms, end_ms, hour_param, BEIJING_OFFSET_MS, HOUR_MS],
+            |r| {
+                let models: Option<String> = r.get(10)?;
+                Ok(SessionAgg {
+                    session_key: r.get(0)?,
+                    host: r.get(1)?,
+                    first_event_ms: r.get(2)?,
+                    last_event_ms: r.get(3)?,
+                    event_count: r.get(4)?,
+                    uncached_input_tokens: r.get(5)?,
+                    cache_read_tokens: r.get(6)?,
+                    cache_write_tokens: r.get(7)?,
+                    output_tokens: r.get(8)?,
+                    peak_tokens: r.get(9)?,
+                    model_ids: models
+                        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+                        .unwrap_or_default(),
+                })
+            },
+        )?;
+        for row in rows {
+            all.push(row?);
+        }
+    }
+
+    let window_total: i64 = all.iter().map(SessionAgg::total).sum();
+
+    all.retain(|s| s.total() >= min_tokens);
+    // total 降序、session_key 升序——稳定、可 keyset 分页。
+    all.sort_by(|x, y| y.total().cmp(&x.total()).then_with(|| x.session_key.cmp(&y.session_key)));
+    if let (Some(at), Some(ak)) = (after_total, after_key) {
+        all.retain(|s| s.total() < at || (s.total() == at && s.session_key.as_str() > ak));
+    }
+    let has_more = all.len() > limit;
+    all.truncate(limit);
+    Ok((all, has_more, window_total))
+}
+
+/// 一个会话的行级事实时间线（`session_detail`）。按 `(event_ts_ms, fact_id)`
+/// keyset 分页。排除 `legacy_aggregate`（聚合行不是会话证据，§4 分离纪律）。
+#[derive(Debug, Clone)]
+pub struct TimelineFact {
+    pub fact_id: String,
+    pub model_id: Option<String>,
+    pub event_ts_ms: i64,
+    pub event_peak: bool,
+    pub uncached_input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub output_tokens: i64,
+    pub observation_kind: String,
+}
+
+const SQL_SESSION_TIMELINE: &str = "SELECT fact_id, model_id, event_ts_ms, event_peak,
+            uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+            observation_kind
+     FROM usage_facts
+     WHERE session_key = ?1
+       AND observation_kind != 'legacy_aggregate'
+       AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+       AND (event_ts_ms, fact_id) > (?2, ?3)
+     ORDER BY event_ts_ms, fact_id
+     LIMIT ?4";
+
+/// 返回 (facts, has_more)。`session_key` 由调用方从 `session_ref` 反解得到。
+pub fn session_facts_timeline(
+    conn: &Connection,
+    session_key: &str,
+    after_ts: Option<i64>,
+    after_fact_id: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<TimelineFact>, bool), AuthorityError> {
+    let mut stmt = conn.prepare(SQL_SESSION_TIMELINE)?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            session_key,
+            after_ts.unwrap_or(i64::MIN),
+            after_fact_id.unwrap_or(""),
+            limit as i64 + 1,
+        ],
+        |r| {
+            Ok(TimelineFact {
+                fact_id: r.get(0)?,
+                model_id: r.get(1)?,
+                event_ts_ms: r.get(2)?,
+                event_peak: r.get::<_, i64>(3)? != 0,
+                uncached_input_tokens: r.get(4)?,
+                cache_read_tokens: r.get(5)?,
+                cache_write_tokens: r.get(6)?,
+                output_tokens: r.get(7)?,
+                observation_kind: r.get(8)?,
+            })
+        },
+    )?;
+    let mut rows: Vec<TimelineFact> = rows.collect::<Result<_, _>>()?;
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    Ok((rows, has_more))
+}
+
+/// 会话行的宿主 + 元数据（`session_detail` 组 envelope 用）。`None` = 会话不存在
+/// 或已 soft-delete。
+pub fn session_row(
+    conn: &Connection,
+    session_key: &str,
+) -> Result<Option<(String, Option<String>)>, AuthorityError> {
+    conn.query_row(
+        "SELECT host, source_profile FROM sessions
+         WHERE session_key = ?1 AND deleted_at_ms IS NULL",
+        rusqlite::params![session_key],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+    )
+    .optional()
+    .map_err(AuthorityError::from)
+}
+
+/// `session_detail` 反解 `session_ref` 用的候选 `session_key` 全集。本机量级
+/// （真机 ~300），逐个算 HMAC 找匹配是微秒级。
+pub fn all_session_keys(conn: &Connection) -> Result<Vec<String>, AuthorityError> {
+    let mut stmt = conn.prepare("SELECT session_key FROM sessions WHERE deleted_at_ms IS NULL")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect::<Result<_, _>>().map_err(AuthorityError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1484,6 +1686,9 @@ mod tests {
         // 不在 SQL planner 视野内。
         let hourly_h_params: [&dyn rusqlite::ToSql; 5] =
             [&BEIJING_OFFSET_MS, &HOUR_MS, &s, &end, &"claude-code"];
+        let no_hour: i64 = -1;
+        let sessions_params: [&dyn rusqlite::ToSql; 6] =
+            [&"dsh", &s, &end, &no_hour, &BEIJING_OFFSET_MS, &HOUR_MS];
 
         for (name, sql, params) in [
             ("peaked_days_map", SQL_PEAKED_DAYS_MAP, &peak_params[..]),
@@ -1492,6 +1697,7 @@ mod tests {
             ("codex_by_hour_model", SQL_CODEX_BY_HOUR_MODEL, &hour_params[..]),
             ("hourly_by_host_model", SQL_HOURLY_BY_HOST_MODEL, &hourly_h_params[..]),
             ("facts_page_window", SQL_FACTS_PAGE_WINDOW, &page_params[..]),
+            ("sessions_in_window", SQL_SESSIONS_IN_WINDOW, &sessions_params[..]),
         ] {
             let p = plan(sql, params);
             assert!(
@@ -1503,6 +1709,136 @@ mod tests {
                 "{name} 不得全表扫 usage_facts——计划：{p}"
             );
         }
+
+        // session_detail 时间线走 session_key 索引（不是 host_time）。
+        let tl_ts = i64::MIN;
+        let tl_id = "";
+        let tl_limit = 50_i64;
+        let tl_params: [&dyn rusqlite::ToSql; 4] = [&"3:dsh|1:s|1:n", &tl_ts, &tl_id, &tl_limit];
+        let p = plan(SQL_SESSION_TIMELINE, &tl_params[..]);
+        assert!(
+            p.contains("USING INDEX usage_facts_session_time"),
+            "session_facts_timeline 必须命中 usage_facts_session_time——计划：{p}"
+        );
+        assert!(!p.contains("SCAN usage_facts"), "计划：{p}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_session_fact(
+        db: &AuthorityDb,
+        fact_id: &str,
+        host: &str,
+        session_key: &str,
+        model_id: &str,
+        event_ts_ms: i64,
+        event_peak: i64,
+        tokens: i64,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                 VALUES ('run', 1, 'cli', 'succeeded', 2) ON CONFLICT(run_id) DO NOTHING",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace,
+                     source_profile, last_observed_at_ms)
+                 VALUES (?1, ?2, ?3, 'm', 'default', 1) ON CONFLICT(session_key) DO NOTHING",
+                rusqlite::params![session_key, host, format!("native-{session_key}")],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                     session_key, source_event_id, observation_kind, model_id, event_ts_ms,
+                     event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                     output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'm', ?3, ?4, ?1, 'assistant-usage', ?5, ?6, ?7, ?8, 0, 0, 0,
+                         'run', 1, 1)",
+                rusqlite::params![
+                    fact_id, host, format!("native-{session_key}"), session_key, model_id,
+                    event_ts_ms, event_peak, tokens
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn sessions_in_window_aggregates_and_hour_filter_sums_to_the_hour() {
+        let path = tmp_db("sess-agg");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let (start, end) = beijing_day_bounds_ms("2026-09-07").unwrap();
+        let h9 = start + 9 * HOUR_MS;
+        let h22 = start + 22 * HOUR_MS;
+        // sA: 09点 100 + 22点 300；sB: 22点 500；sC(codex): 09点 40。
+        insert_session_fact(&db, "f1", "claude-code", "kA", "m-a", h9, 0, 100);
+        insert_session_fact(&db, "f2", "claude-code", "kA", "m-a", h22, 0, 300);
+        insert_session_fact(&db, "f3", "claude-code", "kB", "m-b", h22 + 60_000, 0, 500);
+        insert_session_fact(&db, "f4", "codex", "kC", "m-c", h9 + 60_000, 0, 40);
+
+        // 无小时过滤：3 会话，window_total = 940。
+        let (rows, more, wt) =
+            sessions_in_window(db.conn(), start, end, &[], None, 0, None, None, 50).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(!more);
+        assert_eq!(wt, 940);
+        // total 降序：kA(400) > kB(500)? no — kB=500 > kA=400. 顺序 kB, kA, kC。
+        assert_eq!(rows[0].session_key, "kB");
+        assert_eq!(rows[0].total(), 500);
+        assert_eq!(rows[1].session_key, "kA");
+        assert_eq!(rows[1].total(), 400);
+        assert_eq!(rows[1].event_count, 2);
+        assert_eq!(rows[1].first_event_ms, h9);
+        assert_eq!(rows[1].last_event_ms, h22);
+
+        // 22 点过滤：kA 贡献 300、kB 贡献 500 → sum == 800（== usage_hourly 22点 total）。
+        let (rows, _, wt22) =
+            sessions_in_window(db.conn(), start, end, &[], Some(22), 0, None, None, 50).unwrap();
+        assert_eq!(wt22, 800, "Q04 不变式：会话之和 == 峰值小时总量");
+        assert_eq!(rows.iter().map(|s| s.total()).sum::<i64>(), 800);
+        assert!(rows.iter().all(|s| s.host == "claude-code"));
+
+        // host 过滤 + min_tokens。
+        let (rows, _, _) =
+            sessions_in_window(db.conn(), start, end, &["codex".into()], None, 0, None, None, 50)
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_key, "kC");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_timeline_is_time_ordered_and_paginates() {
+        let path = tmp_db("sess-tl");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let (start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
+        for (i, id) in ["a", "b", "c", "d"].iter().enumerate() {
+            insert_session_fact(
+                &db, id, "dsh", "kX", "m", start + (i as i64) * HOUR_MS,
+                if i == 2 { 1 } else { 0 }, 10,
+            );
+        }
+        // 别的会话的行不能混进来。
+        insert_session_fact(&db, "z", "dsh", "kOther", "m", start, 0, 999);
+
+        let (p1, more) = session_facts_timeline(db.conn(), "kX", None, None, 2).unwrap();
+        assert_eq!(p1.iter().map(|f| f.fact_id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert!(more);
+        let last = &p1[1];
+        let (p2, more) = session_facts_timeline(
+            db.conn(), "kX", Some(last.event_ts_ms), Some(&last.fact_id), 10,
+        )
+        .unwrap();
+        assert_eq!(p2.iter().map(|f| f.fact_id.as_str()).collect::<Vec<_>>(), ["c", "d"]);
+        assert!(!more);
+        assert!(p2[0].event_peak, "c 在高峰时段");
+
+        assert!(session_row(db.conn(), "kX").unwrap().is_some());
+        assert!(session_row(db.conn(), "kNope").unwrap().is_none());
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -53,6 +53,14 @@ spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个
 > D2/D3/D4/D9 ack。`usage_hourly` 的 `metrics="cost"`（MoneyMinor 逐小时）按
 > spec §7.2 校正推迟到 `cost_breakdown`（M3）；`group_by=provider` v1 与 model
 > 等价（provider_id 归一表 §3.4 未建，schema 描述已注明）。
+>
+> **2026-09-08 续**：用户要求提前做 Q04 + Q12（`docs/AGENT_VITALS_DATA_MCP_
+> SMOKE_TEST_SPEC.md` 缺口 #F4 / #F6）。落地：`data-reimport-verify` CLI（增量 7）、
+> `sessions_search` + `session_detail` + `session_ref` HMAC 基元（增量 8a，M3 前置
+> 提前）。真机冒烟：Q04 峰值下钻逐会话 token 之和 == `usage_hourly` 峰值小时
+> total（claude 22点 4 会话 225857332 / codex 12点 1 会话 10239273）；Q12
+> `data-reimport-verify` byte-identical。EXACT 11 / EXPLAINED 1 / PARTIAL 2 /
+> BLOCKED 6（Q06–Q10 / Q13）/ MISMATCH 0。
 
 | # | 增量 | spec 对应 | 状态 |
 |---|---|---|---|
@@ -60,11 +68,12 @@ spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个
 | **2** | `MoneyMinor` 精确投影 + `usage_hourly`（宿主轴 + model/provider 轴 + 逐小时成本） + S2/S4/S5/S7 review follow-ups | M1 | ✅ (rebased `4bf7433`) |
 | 3 | `summary_daily` + `summary_monthly`（含会话数 / 活跃小时 / 逐日趋势 / 月底预测 / 占比新查询） | M1 | ⬜ |
 | 4 | `data_quality_issues` + code-aware 脱敏 allowlist | M1 | ⬜ |
-| 5 | M1 收口：M01–M08 / M13–M18 契约测试 + 三消费面 parity（M15）+ 真机 U01/U02/U08 | M1 退出 | ⬜ |
+| 5 | M1 收口：M01–M08 / M13–M18 契约测试 + 三消费面 parity（M15）+ 真机 U01/U02/U08 + 缺口 #F1（`freshness.stale_hosts` 落地） | M1 退出 | ⬜ |
 | 6 | `authority_revision` `as_of_run_id` 钉截面 + `authority_audit`（`mcp-internal`）| M2 | ⬜ |
-| 7 | `reimport_verify`（CLI 子命令）+ U09a/U09b 真机 | M2 退出 | ⬜ |
+| **7** | **`reimport_verify`（`agent-vitals data-reimport-verify` CLI，MCP 外）** —— 用户 2026-09-08 提前做（Q12） | M2 退出 | ✅ (`4c7f75b`) |
 | **7.5** | **`query_sql_readonly`（内部 MCP 工具，让其他 Agent 调试用）** | M2 并行 | ✅ (rebased `e73a46a`，`mcp-internal` only) |
-| 8+ | M3：`cost_breakdown` / `sessions_search` / `session_detail` + session 索引 v2 + 历史价重放 | M3 | ⬜ |
+| **8a** | **`sessions_search` + `session_detail` + `session_ref` HMAC 基元（D5）+ session 索引 v1** —— 用户 2026-09-08 提前做（Q04）。时间线的失败/错误事件富化留 M4（`workflow_events`）。 | M3 前置 | ✅ (`?`) |
+| 8+ | M3：`cost_breakdown` + 变化因子分解 + 历史价重放（`authority_query` 按事实时点选价版） | M3 | ⬜ |
 | … | M4：`workflow_events` 管线 + `issues_summary` / `skills_summary` | M4 | ⬜ |
 | … | M5：公开/内部构建分离 + 打包 + 发布文档 | M5 | ⬜ |
 

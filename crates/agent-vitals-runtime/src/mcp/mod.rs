@@ -17,6 +17,9 @@
 //! 读取方式在这里为后续工具钉死。
 
 mod data_status;
+mod session_detail;
+mod session_ref;
+mod sessions_search;
 mod usage_hourly;
 #[cfg(feature = "mcp-internal")]
 mod query_sql_readonly;
@@ -155,6 +158,61 @@ pub fn coverage_not_applicable() -> Value {
     json!({ "status": "not_applicable", "missing_hosts": [] })
 }
 
+/// spec §6.4.1 `as_of_run_id` 三态。共享给所有带时间窗的工具，防止各写一份漂移。
+/// - 没传 → `Ok(())`，不检查；
+/// - 传了 == 当前最新成功 run → `Ok(())`；
+/// - 传了、存在、但 != 最新（drift）→ push `snapshot_drift` warning，`Ok(())`（返回当前数据）；
+/// - 传了但从没这个 run（或一次成功同步都没有）→ `Err(invalid_argument)`。
+pub(super) fn check_as_of_run_id(
+    conn: &Connection,
+    args: &Value,
+    warnings: &mut Vec<Value>,
+) -> Result<(), ToolError> {
+    let Some(req) = args.get("as_of_run_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT run_id FROM sync_runs WHERE status='succeeded'
+             ORDER BY COALESCE(completed_at_ms, started_at_ms) DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    match current {
+        None => Err(ToolError::new(
+            "invalid_argument",
+            format!("as_of_run_id `{req}` requested but no successful sync run exists yet"),
+        )),
+        Some(cur) if cur == req => Ok(()),
+        Some(cur) => {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sync_runs WHERE run_id = ?1)",
+                    rusqlite::params![req],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if exists {
+                warnings.push(json!({
+                    "code": "snapshot_drift",
+                    "message": format!(
+                        "as_of_run_id={req} but current is {cur} — strict cross-tool consistency not yet enforced (M2)"
+                    ),
+                    "requested": req,
+                    "current": cur,
+                }));
+                Ok(())
+            } else {
+                Err(ToolError::new(
+                    "invalid_argument",
+                    format!("as_of_run_id `{req}` is not present in this authority DB"),
+                ))
+            }
+        }
+    }
+}
+
 /// 业务错误的 envelope 形状（spec §6.4：`tools/call` 结果 `isError: true` +
 /// envelope 内 `error`——**不塞 JSON-RPC error**）。库打不开时组不出完整
 /// envelope，这里给一个最小可用形状：`authority_state=unavailable` + `error`。
@@ -286,7 +344,12 @@ pub struct ToolSpec {
 pub fn tool_specs() -> Vec<ToolSpec> {
     // `mut` 只在 `mcp-internal` 构建里用到（下方 push）；公开构建不加工具。
     #[cfg_attr(not(feature = "mcp-internal"), allow(unused_mut))]
-    let mut out = vec![data_status::spec(), usage_hourly::spec()];
+    let mut out = vec![
+        data_status::spec(),
+        usage_hourly::spec(),
+        sessions_search::spec(),
+        session_detail::spec(),
+    ];
     #[cfg(feature = "mcp-internal")]
     {
         out.push(query_sql_readonly::spec());
@@ -312,6 +375,8 @@ pub fn dispatch(name: &str, args: &Value, data_home: &Path) -> Result<Value, Too
     match name {
         "data_status" => data_status::run(args, data_home),
         "usage_hourly" => usage_hourly::run(args, data_home),
+        "sessions_search" => sessions_search::run(args, data_home),
+        "session_detail" => session_detail::run(args, data_home),
         #[cfg(feature = "mcp-internal")]
         "query_sql_readonly" => query_sql_readonly::run(args, data_home),
         other => Err(ToolError::new("internal_error", format!("tool `{other}` registered but not wired"))),

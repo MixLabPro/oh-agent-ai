@@ -1,6 +1,6 @@
 # Agent Vitals Data MCP 真机可用性冒烟测试规格
 
-> 状态：v1（2026-09-08）——首轮真机执行完成，随 Data MCP 增量推进滚动更新。
+> 状态：v2（2026-09-08）——Q04（会话下钻）+ Q12（重导入自洽）落地并纳入冒烟。
 > 脚本：`tests/mcp_smoke.py`。上位规格：`AGENT_VITALS_DATA_MCP_SPEC.md`。
 
 ## 0. 目的与定位
@@ -76,7 +76,7 @@ agent-vitals sync-facts    # 让 freshness 是新的
 | **Q01** 今天各模型小时曲线 | `usage_hourly(group_by=model)` | 同 ✅ | `data daily --date <today> --json` | 每序列 24 桶；`peak_hour` 在场且是最大桶；model 轴按 host 求和 == host 轴（守恒）；MCP 逐宿主 total == CLI `tokens_by_host` | **EXACT** |
 | **Q02** 今天各宿主小时曲线 + 峰值 | `usage_hourly(group_by=host)` | 同 ✅ | `data daily` | 宿主曲线分开；`totals_by_host` 之和 == 全局；`peak_hour_by_host` 自洽 | **EXACT** |
 | **Q03** 北京月/日界归属 | `usage_hourly` / `summary_monthly` | `usage_hourly(date=<月初>)` ✅ | `data daily --date <月初>` | 月初 00 点桶（= UTC 前一天晚上）归属北京当日；逐宿主 total == CLI | **EXACT** |
-| **Q04** 峰值下钻到会话，token 合计==峰值 | `sessions_search` → `session_detail` | — | — | 下钻列出构成会话；会话 token 合计严格等于峰值；不泄露正文/原生 ID | **BLOCKED**（M3；`session_ref` HMAC 基元 D5 未落地） |
+| **Q04** 峰值下钻到会话，token 合计==峰值 | `sessions_search` → `session_detail` | 同 ✅ | — | `usage_hourly` 给 `peak_hour` → `sessions_search(date, hour=peak)` 逐会话 total 之和 == 该小时 `usage_hourly` total == `data.window_total_tokens`，且 `has_more=false`；`session_detail(session_ref)` 反解 + 时间线；响应无原生 id / 路径 / `session_key` | **EXACT** |
 | **Q05** 缺价卡模型不归零 | `cost_breakdown` | `data-unresolved --json` + `query_sql_readonly(v_data_quality_safe)` | `data-unresolved` | 用量可见；成本 `unresolved`，不以 0 或估算冒充实付 | **PARTIAL**（用量维 ✅ via SQL；成本 `unresolved` 判定只在 CLI / `cost_breakdown` M3） |
 
 ### 4.2 Q06–Q10：依赖 `workflow_events`
@@ -98,7 +98,7 @@ reader）——spec §13 M4 前置，"工作量与 behavior 检测线相当"，�
 | Q | 目标工具 | 今日可跑 | 判据 | 判定 |
 |---|---|---|---|---|
 | **Q11** 宿主 24h 未同步 → 标 stale/partial、列明缺失宿主 | envelope `freshness.stale_hosts` + `coverage.missing_hosts` | `data_status` → `by_host.covered_to` / `last_seen_at` | envelope 把过期宿主折成显式标记 | **EXPLAINED**（缺口 #F1：`freshness.stale_hosts` 硬编码 `[]`，`by_host` 有原始数据但没折成标记；真机 dsh 事实停在 2026-08-31，8 天过期，envelope 不标） |
-| **Q12** 重复导入 + 中途中断 → 重跑查询逐值恒等 | `reimport_verify`（MCP 外命令） | — | 临时库两遍导入逐值恒等，不碰生产库 | **BLOCKED**（M2 增量 7；只读 MCP 工具刻意不做重导入，spec 决策 12） |
+| **Q12** 重复导入 + 中途中断 → 重跑查询逐值恒等 | `reimport_verify`（MCP 外命令） | `agent-vitals data-reimport-verify --json` ✅ | 两临时库各重放（round B 迁完首宿主"崩溃"→ 重开清扫 → 完整迁移 → 幂等重跑），逐宿主 × 北京月 `COUNT + 四桶 SUM` 全等；`interrupted_runs_swept ≥ 1`；**绝不碰生产库** | **EXACT** |
 | **Q13** 调价日前后用正确价格版本 | `cost_breakdown` | `query_sql_readonly(pricing_snapshots)` | 调价日前后分别用对应 `pricing_snapshots` 版本；历史不被当前价卡覆盖 | **BLOCKED**（M3 硬前置：`authority_query` 按事实时点选价版；真机 `pricing_snapshots` 只有 1 版） |
 | **Q14** 同 raw 模型名跨宿主 | `usage_hourly` / `cost_breakdown` 的 `identity_kind` | `usage_hourly(group_by=model)` ✅ | 每序列显式 `identity_kind`；无法映射标 `unresolved`，不并入相似名 | **PARTIAL**（`identity_kind: "host_raw"` 每序列在场，key 带 `host` 消歧 ✅；canonical 归一 = v0.9.2+；`unresolved` 语义在 `data-unresolved` / M3） |
 
@@ -116,7 +116,7 @@ reader）——spec §13 M4 前置，"工作量与 behavior 检测线相当"，�
 | ID | 检查 | 判据 | 判定 |
 |---|---|---|---|
 | **M07** 敏感字段 | 扫 `data_status` + `usage_hourly` 全响应文本 | 不含 `native_session_id` / `path_hash` / `machine_namespace` / `session_key` / `source_event_id` / `/Users/` | **EXACT**（零命中） |
-| **M12** 公开工具清单 | 公开构建 `tools/list` | 恰为 `["data_status", "usage_hourly"]`——无任意 SQL / 写入 / 同步 / repair | **EXACT** |
+| **M12** 公开工具清单 | 公开构建 `tools/list` | **不含任意 SQL / 写入 / 同步 / 迁移 / repair / `authority_audit`** 工具（不是「恰好 N 个」——只读查询工具可随版本增加：真机 `[data_status, usage_hourly, sessions_search, session_detail]`，`query_sql_readonly` 仅 `mcp-internal`） | **EXACT** |
 | **M18** 线协议 | JSON-RPC 序列 | `initialize` 前发别的 → JSON-RPC error（真机 `-32002`）；未知方法 → `-32601`；未知工具 → `-32602`；坏日期 / 多余字段 / 坏枚举 → `isError` + `invalid_argument`；stdin EOF → exit 0；stdout 无非协议行 | **EXACT** |
 | **M19** `query_sql_readonly` 来源列拒绝（`--internal`） | authorizer 冒烟 | `SELECT native_session_id AS x` / `INSERT …` / `SELECT * FROM usage_facts` 全部 `invalid_argument`；`SELECT … FROM v_facts_safe GROUP BY host` 放行 | **EXACT** |
 
@@ -137,26 +137,38 @@ python3 tests/mcp_smoke.py --bin <bin> [--internal] [--home <dir>]
 **何时重跑**：每次 Data MCP 增量收口；每次改 `authority_query` 的窗口/聚合 SQL；
 真机启用观察期内每周一次。
 
-## 7. 2026-09-08 首轮真机结果
+## 7. 真机结果
 
-`~/.agent-vitals`（schema v2，54,873→54,941 facts，`sql_authority_enabled=true`），
-`--internal` 构建：
+`~/.agent-vitals`（schema v2，~54,900 facts，`sql_authority_enabled=true`）。
+
+### 7.2 第二轮（2026-09-08，Q04 + Q12 落地后），`--internal` 构建
 
 | 判定 | 数量 | 用例 |
 |---|---|---|
-| EXACT | 9 | Q01 Q02 Q03 · S4.1 S4.4（+ S4.2/S4.3 归 EXACT）· M07 M18 M19 M19b |
+| EXACT | 11 | Q01 Q02 Q03 **Q04** **Q12** · S4.1 S4.4（S4.2/S4.3 归 EXACT）· M07 M18 M19 M19b |
 | EXPLAINED | 1 | Q11（缺口 #F1） |
 | PARTIAL | 2 | Q05 Q14 |
-| BLOCKED | 8 | Q04 · Q06–Q10 · Q12 Q13 |
+| BLOCKED | 6 | Q06–Q10 · Q13 |
 | MISMATCH | **0** | — |
 
-公开构建：EXACT 8 / EXPLAINED 1 / PARTIAL 2 / BLOCKED 8（少 `--internal` 专属的
-M19/M19b，多 M12）。
+公开构建：EXACT 10 / EXPLAINED 1 / PARTIAL 2 / BLOCKED 6（少 `--internal` 专属的
+M19/M19b，多 M12；Q04/Q12 都在公开面）。
 
-**逐值对账样本**（Q01/Q02，2026-09-07）：MCP `usage_hourly` 逐宿主
-`total` + `total_output_tokens` 与 `agent-vitals data daily --date 2026-09-07
---json` **逐位相等**（claude-code total `1227310463` / output `1975245`；
-codex total `28194124`；dsh 两侧均无 0 行）。
+**Q04 逐值对账**（2026-09-07 峰值小时）：`usage_hourly(group_by=host)` 给
+`peak_hour` → `sessions_search(date, hour=peak, hosts=[h])` 逐会话 `tokens.total`
+之和 **== 该小时 `usage_hourly` total == `data.window_total_tokens`**，`has_more
+=false`：claude-code 峰 22 点 = 4 会话 `225857332`；codex 峰 12 点 = 1 会话
+`10239273`。`session_detail(session_ref)` 反解 + 时间线，响应 leak 扫描零命中。
+
+**Q12**：`data-reimport-verify` VERIFIED — byte-identical，2 rounds / 6
+host-months / facts 逐值相等 / `interrupted_runs_swept=1`。
+
+### 7.1 首轮（2026-09-08，Q01–Q03 + 协议）
+
+**逐值对账样本**（Q01/Q02，2026-09-07）：MCP `usage_hourly` 逐宿主 `total` +
+`total_output_tokens` 与 `agent-vitals data daily --date 2026-09-07 --json`
+**逐位相等**（claude-code total `1227310463` / output `1975245`；codex total
+`28194124`；dsh 两侧均无 0 行）。
 
 **首轮修的真机 bug**（`d3251ea`）：`usage_hourly group_by=host` 曾走
 `hourly_by_host`（导航查询只回单个 i64），总量塞进 `output_tokens` 槽 →
@@ -170,18 +182,19 @@ codex total `28194124`；dsh 两侧均无 0 行）。
 | **F1** | `freshness.stale_hosts` 硬编码 `[]`；`coverage.status` 不因单宿主过期降 `partial` | `data_status.by_host` 有 `covered_to` / `last_seen_at` 原始数据，consumer 自己算 | M1 收口（增量 5）——envelope 把 `by_host` 按阈值（24h？可配）折成 `stale_hosts` + `coverage=partial`，钉 M05 契约测试 |
 | **F2** | 无金额工具 → Q05 成本维、S2「花了多少」「哪个最贵（钱）」「实付/等价/订阅分离」全部只能走 CLII | `usage_hourly` 只有 token；`MoneyMinor` 类型 + `money.rs` 在，无消费面 | 增量 3（`summary_daily`/`summary_monthly`）+ M3（`cost_breakdown`） |
 | **F3** | 无 `data_quality_issues` 工具 → Q05/S2.4 只能 `query_sql_readonly` 数 code，不能逐模型下钻 unresolved 原因 | `v_data_quality_safe` view 在（且刻意不含 `detail_json`） | 增量 4（`data_quality_issues` + code-aware 脱敏 allowlist） |
-| **F4** | Q04/S1.4 会话下钻 | `usage_facts.session_key` 外键在，无 `session_ref` HMAC，`sessions` 表 `started_at_ms`/`ended_at_ms` 多空 | M3「session 索引 v2」子阶段 + `sessions_search` / `session_detail` |
-| **F5** | Q06–Q10 问题 / Skill 洞察 | `workflow_events` 表已建，无 writer/reader | M4（`workflow_events` 管线独立立项，随 v0.10）+ `issues_summary` / `skills_summary` |
-| **F6** | Q12 重导入幂等验收 | — | M2 增量 7：`agent-vitals data reimport-verify`（MCP 外隔离命令） |
+| ~~**F4**~~ | ~~Q04/S1.4 会话下钻~~ | ✅ **已关闭（2026-09-08）**：`session_ref` HMAC-SHA256 基元（`<data_home>/.mcp-session-salt`，0600）+ `sessions_search`（窗口/小时 × 逐会话聚合，keyset 分页，`window_total_tokens` 供守恒核对）+ `session_detail`（反解 ref → usage 时间线）。`started_at_ms`/`ended_at_ms` 从 `MIN/MAX(event_ts_ms)` 读时派生，不依赖那两列。**待**：`session_detail` 时间线的失败/错误事件富化 = F5（`workflow_events`）。 | — |
+| **F5** | Q06–Q10 问题 / Skill 洞察（含 `session_detail` 的失败事件轴） | `workflow_events` 表已建，无 writer/reader | M4（`workflow_events` 管线独立立项，随 v0.10）+ `issues_summary` / `skills_summary` |
+| ~~**F6**~~ | ~~Q12 重导入幂等验收~~ | ✅ **已关闭（2026-09-08）**：`agent-vitals data-reimport-verify [--json]`（MCP 外隔离命令，`runtime::reimport_verify`）。 | — |
 | **F7** | Q13 历史价版重放 | `pricing_snapshots` 写入方 + `asof` 读原语在，只有 1 版快照；`cost_breakdown` 按事实时点选价版未落 | M3 硬前置：`authority_query` 补按事实时点选价版能力 |
 | **F8** | `usage_hourly group_by=provider` 与 `model` 等价 | `provider_id` 归一表 §3.4 未建；schema 描述已注明"identical here" | v0.9.2+ canonical 归一 |
 
 ## 9. 通过门槛
 
-- **当前阶段（M0–M1 部分）**：Q01 / Q02 / Q03 / S4.* / M07 / M12 / M18 全 `EXACT`；
-  `MISMATCH` == 0。BLOCKED 项与缺口表逐条对得上。← **2026-09-08 达成**。
+- **当前阶段**：Q01–Q04 / Q12 / S4.* / M07 / M12 / M18 / M19 全 `EXACT`；
+  `MISMATCH` == 0。BLOCKED 项（Q06–Q10 / Q13）与缺口表逐条对得上。
+  ← **2026-09-08 达成**。
 - **M1 收口**：F1 关闭（`stale_hosts` 落地）；增量 3/4 落地后 Q05 升 `EXACT`，
   新增 `summary_daily`/`summary_monthly` 行，三消费面 parity（M15）纳入。
-- **M2 收口**：Q12 升可跑（`reimport_verify`）；`authority_audit` 纳入。
+- **M2 收口**：`authority_audit` 纳入。
 - **v1.0.0（M5）**：Q01–Q14 全部 `EXACT` 或 `EXPLAINED`；无未关闭 `mismatch`
   （`AGENT_VITALS_DATA_MCP_SPEC.md` §14 DoD 末条）。
