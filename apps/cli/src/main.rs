@@ -314,6 +314,11 @@ enum Cmd {
         /// Write the TraceGraph JSON to FILE; use - for stdout (default: summary)
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
+        /// Project the graph into the timeline_series spec (input shape of
+        /// ui/timeline.js buildGeometry) instead of the raw graph — data
+        /// preparation only, the geometry itself stays the single shared one
+        #[arg(long = "timeline-series")]
+        timeline_series: bool,
     },
     /// Audit a Codex rollout log into a CanonicalSession with §13 coverage
     /// (P4 "sound" proof — Legacy + Paginated fold into the shared 19-signal model).
@@ -1619,6 +1624,7 @@ session_store={store} fold={fold}"
         machine_namespace,
         source_profile,
         rows_json,
+        timeline_series,
     }) = &args.cmd
     {
         let Some(ns) = machine_namespace.as_deref().filter(|s| !s.is_empty()) else {
@@ -1648,6 +1654,30 @@ session_store={store} fold={fold}"
         };
         let graph =
             agent_vitals_domain::domain::trace::build_trace_graph(&canonical, key);
+        if *timeline_series {
+            // 形状 = 既有 buildGeometry 的输入契约（spec §2.1.2：几何不写第二份，
+            // 这里只产数据准备）。AllRecorded 未暴露成 CLI 参数——v0.10.0 的图
+            // 只有 adapter 选定的一条路径，域层会诚实拒绝。
+            let series = agent_vitals_domain::domain::trace::project_timeline_series(
+                &graph,
+                agent_vitals_domain::evidence::Linearization::LeafPath,
+            )
+            .expect("LeafPath projection cannot fail by contract");
+            let text = serde_json::to_string_pretty(&series).unwrap_or_default();
+            if let Some(path) = rows_json {
+                if path == &PathBuf::from("-") {
+                    println!("{text}");
+                } else if std::fs::write(path, &text).is_err() {
+                    eprintln!("failed to write {}", path.display());
+                    std::process::exit(2);
+                } else {
+                    println!("Wrote {}", path.display());
+                }
+            } else {
+                println!("{text}");
+            }
+            return;
+        }
         if let Some(path) = rows_json {
             let text = serde_json::to_string_pretty(&graph.to_json()).unwrap_or_default();
             if path == &PathBuf::from("-") {

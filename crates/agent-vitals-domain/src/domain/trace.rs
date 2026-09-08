@@ -304,3 +304,327 @@ pub fn build_trace_graph(session: &CanonicalSession, session_key: SessionKey) ->
 // test 若同时依赖 `agent-vitals-hosts`（[dev-dependencies]），会在
 // `cargo test --lib` 时撞「multiple versions of crate」，因为 hosts crate
 // 自己又反向依赖 domain。集成测试（`tests/` 下独立编译单元）不受影响。
+
+// ────────────────────────── timeline_series 投影 ──────────────────────────
+
+/// `TraceGraph → timeline_series`（spec §2.1.2：几何**不得新写第二份**，本函数
+/// 只做数据准备——产出喂既有 `buildGeometry`
+/// （`apps/desktop/src-tauri/ui/timeline.js`）的 spec 形状。形状以该文件
+/// `buildGeometry` docstring 为准，不从记忆抄）：
+///
+/// ```js
+/// spec = {
+///   points: [{ ordinal, task_id?, values: { name: number|null } }],  // 按 ordinal 升序
+///   events: [{ ordinal, kind, label?, severity?, targetId? }],
+///   series: [{ name, label?, cumulative? }],
+/// }
+/// ```
+///
+/// 两层语义（spec §2.1.2 继承的几何不变量）：
+/// - **曲线**：`AssistantTurn` 节点的 `values`——v0.10.0 只有 `tool_call_count`
+///   一条序列（TraceGraph 当前唯一的量值，事实链接是诚实性边界 1）；
+/// - **事件标记**：`ToolCall` 节点成为第二图层——曲线可抽稀、事件**永不**
+///   参与（`eventsIn === eventsOut` 由几何层钉着）。
+///
+/// `linearization` 是投影参数不是图属性（spec §2.1.1）——v0.10.0 的图只装得下
+/// 一条已选定路径（诚实性边界 2），所以 `AllRecorded` 在本函数**报错**而不是
+/// 静默按 LeafPath 画：有参数没数据必须浮出来，这正是两态 API 的意义。
+pub fn project_timeline_series(
+    graph: &TraceGraph,
+    linearization: crate::contracts::evidence::Linearization,
+) -> Result<Value, &'static str> {
+    use crate::contracts::evidence::Linearization;
+    if matches!(linearization, Linearization::AllRecorded) {
+        // v0.10.0 的 CanonicalSession 只承载 adapter 选定的一条路径；请求
+        // AllRecorded 是在向一个不存在的数据面要数据——诚实拒绝，不是降级画。
+        return Err(
+            "linearization=AllRecorded is not available: the TraceGraph carries only the \
+             adapter-selected path (branch_state is Live for every node; abandoned branches \
+             have no signal source yet)",
+        );
+    }
+
+    // buildGeometry 的 docstring 钉着事件定位规则：「定位不到 ordinal 的事件 →
+    // 跳过（不画在猜的位置）」——事件要被画出来，其 ordinal 必须命中某个 point。
+    // 所以事件锚定到**父 turn 的 point ordinal**（曲线样本），不是 tool_call
+    // 自己的节点 ordinal（那不是曲线样本，事件会被几何层静默丢弃）。
+    let point_ordinal_by_node: std::collections::HashMap<&str, u64> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.node_type == TraceNodeType::AssistantTurn)
+        .map(|n| (n.node_id.as_str(), n.ordinal))
+        .collect();
+
+    let mut points: Vec<Value> = Vec::new();
+    let mut events: Vec<Value> = Vec::new();
+    // 父 turn 解析不了的 tool_call：不能进 `events`（会被几何层丢掉 = 静默
+    // 失踪，违反 eventsIn===eventsOut 的输入端责任），也不能编一个位置。落到
+    // 显式的 `unplaced_events` 计数——unaccounted sentinel 同一形状：不完整
+    // 必须可见。
+    let mut unplaced_events: u32 = 0;
+
+    for n in &graph.nodes {
+        match n.node_type {
+            TraceNodeType::AssistantTurn => {
+                // values 缺键不出现——tool_call_count 恒有（构建函数保证），
+                // 这里仍然按"有才放"写，防未来加键时把缺键静默成 0。
+                let mut values = serde_json::Map::new();
+                for (k, v) in &n.values {
+                    values.insert(k.clone(), json!(v));
+                }
+                points.push(json!({
+                    "ordinal": n.ordinal,
+                    "task_id": n.native,   // turn 节点的 native 就是 turn-N（三分法：task=turn）
+                    "values": Value::Object(values),
+                }));
+            }
+            TraceNodeType::ToolCall => {
+                let anchor = n
+                    .parent_node_id
+                    .as_deref()
+                    .and_then(|pid| point_ordinal_by_node.get(pid));
+                let Some(&ordinal) = anchor else {
+                    unplaced_events += 1;
+                    continue;
+                };
+                let is_error = matches!(n.status, Some(TraceStatus::Error));
+                let name = n.metadata.get("name").and_then(Value::as_str).unwrap_or("");
+                events.push(json!({
+                    "ordinal": ordinal,
+                    "kind": if is_error { "risk" } else { "tool" },
+                    "label": name,
+                    "severity": if is_error { "critical" } else { "info" },
+                    "targetId": n.node_id,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    // series 清单从实际点里收（与 buildGeometry 的 seriesNames 缺省路径一致，
+    // 但显式声明是形状契约——消费方不必反推）。BTreeSet 保键序确定。
+    let mut series_names: std::collections::BTreeSet<&str> = Default::default();
+    for p in &points {
+        if let Some(obj) = p.get("values").and_then(Value::as_object) {
+            for k in obj.keys() {
+                series_names.insert(k.as_str());
+            }
+        }
+    }
+    let series: Vec<Value> = series_names
+        .iter()
+        .map(|name| json!({ "name": name, "cumulative": false }))
+        .collect();
+
+    Ok(json!({
+        "linearization": "leaf",           // 显式声明（spec §2.1.1：不是默认值，是选择）
+        "points": points,                  // 图节点已按 (scope, ordinal) 排序，直接继承
+        "events": events,
+        "series": series,
+        // 未能锚定到任何曲线样本的 tool_call 数——消费方必须展示（unaccounted
+        // sentinel 语义：不完整可见，绝不静默）。
+        "unplaced_events": unplaced_events,
+    }))
+}
+
+#[cfg(test)]
+mod tests_project_timeline_series {
+    use super::*;
+
+    /// AllRecorded 必须报错而不是静默按 leaf 画——v0.10.0 图里只有一条路径，
+    /// 骗用户"画了全部记录"就是 §8「不伪造」红线的呈现侧版本。
+    #[test]
+    fn all_recorded_is_rejected_not_silently_drawn_as_leaf() {
+        let graph = TraceGraph {
+            schema_version: TRACE_GRAPH_SCHEMA_VERSION,
+            graph_id: "g".into(),
+            session_key: SessionKey::new("dsh", "s", "p", "ns"),
+            task_id: None,
+            nodes: vec![],
+            edges: vec![],
+            coverage: TraceCoverage::default(),
+            input_fingerprint: "f".into(),
+        };
+        assert!(project_timeline_series(&graph, crate::contracts::evidence::Linearization::AllRecorded).is_err());
+    }
+
+    #[test]
+    fn empty_graph_projects_to_empty_spec_with_explicit_leaf() {
+        let graph = TraceGraph {
+            schema_version: TRACE_GRAPH_SCHEMA_VERSION,
+            graph_id: "g".into(),
+            session_key: SessionKey::new("dsh", "s", "p", "ns"),
+            task_id: None,
+            nodes: vec![],
+            edges: vec![],
+            coverage: TraceCoverage::default(),
+            input_fingerprint: "f".into(),
+        };
+        let v = project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath).unwrap();
+        assert_eq!(v["linearization"], json!("leaf"));
+        assert_eq!(v["points"], json!([]));
+        assert_eq!(v["events"], json!([]));
+        assert_eq!(v["series"], json!([]));
+    }
+
+    #[test]
+    fn tool_call_nodes_become_events_never_points() {
+        // 两层语义的钉子：事件层一个不丢（几何层 eventsIn===eventsOut 的输入端
+        // 责任在这），同时事件节点不出现在 points 里冒充曲线样本。
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("tool_call_count".to_string(), 3.0);
+        let turn_node = TraceNode {
+            node_id: "t1".into(),
+            scope: "main".into(),
+            ordinal: 0,
+            native: "turn-1".into(),
+            node_type: TraceNodeType::AssistantTurn,
+            fact_id: String::new(),
+            evidence_ref: String::new(),
+            parent_node_id: None,
+            branch_state: BranchState::Live,
+            started_at_ms: Some(1000),
+            ended_at_ms: Some(1001),
+            status: Some(TraceStatus::Ok),
+            provenance: Provenance::Measured,
+            values,
+            metadata: json!({}),
+        };
+        let call_node = TraceNode {
+            node_id: "c1".into(),
+            scope: "main".into(),
+            ordinal: 1,
+            native: "call_1".into(),
+            node_type: TraceNodeType::ToolCall,
+            fact_id: String::new(),
+            evidence_ref: String::new(),
+            parent_node_id: Some("t1".into()),
+            branch_state: BranchState::Live,
+            started_at_ms: Some(1001),
+            ended_at_ms: None,
+            status: None,
+            provenance: Provenance::Measured,
+            values: std::collections::BTreeMap::new(),
+            metadata: json!({"name": "read"}),
+        };
+        let graph = TraceGraph {
+            schema_version: TRACE_GRAPH_SCHEMA_VERSION,
+            graph_id: "g".into(),
+            session_key: SessionKey::new("dsh", "s", "p", "ns"),
+            task_id: None,
+            nodes: vec![turn_node, call_node],
+            edges: vec![],
+            coverage: TraceCoverage::default(),
+            input_fingerprint: "f".into(),
+        };
+        let v = project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath).unwrap();
+        let points = v["points"].as_array().unwrap();
+        let events = v["events"].as_array().unwrap();
+        assert_eq!(points.len(), 1, "只有 turn 节点进曲线层");
+        assert_eq!(points[0]["values"]["tool_call_count"], json!(3.0));
+        assert_eq!(points[0]["task_id"], json!("turn-1"));
+        assert_eq!(events.len(), 1, "tool_call 一个不丢");
+        assert_eq!(events[0]["ordinal"], json!(0), "事件锚定到父 turn 的 point ordinal——不是自己的节点 ordinal");
+        assert_eq!(events[0]["kind"], json!("tool")); // status=None 不是 error，不冒充风险
+        assert_eq!(events[0]["label"], json!("read"));
+        assert_eq!(events[0]["targetId"], json!("c1"));
+        assert_eq!(v["series"], json!([{"name": "tool_call_count", "cumulative": false}]));
+        assert_eq!(v["unplaced_events"], json!(0));
+    }
+
+    #[test]
+    fn error_status_tool_call_is_marked_risk_not_tool() {
+        // 有父 turn（可锚定）的 error tool_call 才会进 events——orphan 走
+        // unplaced（另一条测试钉）。这里要测的是 kind/severity 的标记。
+        let turn_node = TraceNode {
+            node_id: "t1".into(),
+            scope: "main".into(),
+            ordinal: 0,
+            native: "turn-1".into(),
+            node_type: TraceNodeType::AssistantTurn,
+            fact_id: String::new(),
+            evidence_ref: String::new(),
+            parent_node_id: None,
+            branch_state: BranchState::Live,
+            started_at_ms: Some(1000),
+            ended_at_ms: None,
+            status: None,
+            provenance: Provenance::Measured,
+            values: std::collections::BTreeMap::new(),
+            metadata: json!({}),
+        };
+        let call_node = TraceNode {
+            node_id: "c1".into(),
+            scope: "main".into(),
+            ordinal: 1,
+            native: "call_1".into(),
+            node_type: TraceNodeType::ToolCall,
+            fact_id: String::new(),
+            evidence_ref: String::new(),
+            parent_node_id: Some("t1".into()),
+            branch_state: BranchState::Live,
+            started_at_ms: Some(1001),
+            ended_at_ms: None,
+            status: Some(TraceStatus::Error),
+            provenance: Provenance::Measured,
+            values: std::collections::BTreeMap::new(),
+            metadata: json!({"name": "bash"}),
+        };
+        let graph = TraceGraph {
+            schema_version: TRACE_GRAPH_SCHEMA_VERSION,
+            graph_id: "g".into(),
+            session_key: SessionKey::new("dsh", "s", "p", "ns"),
+            task_id: None,
+            nodes: vec![turn_node, call_node],
+            edges: vec![],
+            coverage: TraceCoverage::default(),
+            input_fingerprint: "f".into(),
+        };
+        let v = project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath).unwrap();
+        let events = v["events"].as_array().unwrap();
+        assert_eq!(events[0]["kind"], json!("risk"));
+        assert_eq!(events[0]["severity"], json!("critical"));
+    }
+}
+
+#[cfg(test)]
+mod tests_project_timeline_series_unplaced {
+    use super::*;
+
+    /// 父 turn 解析不了的 tool_call 不能静默消失——不进 events（会被几何层
+    /// 丢弃 = 违反 eventsIn===eventsOut 的输入端责任），进 unplaced_events
+    /// 计数。unaccounted sentinel 的呈现侧镜像。
+    #[test]
+    fn orphan_tool_call_goes_to_unplaced_count_not_silently_dropped() {
+        let call_node = TraceNode {
+            node_id: "c1".into(),
+            scope: "main".into(),
+            ordinal: 0,
+            native: "call_1".into(),
+            node_type: TraceNodeType::ToolCall,
+            fact_id: String::new(),
+            evidence_ref: String::new(),
+            parent_node_id: None, // 无父节点 = 无法锚定
+            branch_state: BranchState::Live,
+            started_at_ms: Some(1001),
+            ended_at_ms: None,
+            status: Some(TraceStatus::Error),
+            provenance: Provenance::Measured,
+            values: std::collections::BTreeMap::new(),
+            metadata: json!({"name": "bash"}),
+        };
+        let graph = TraceGraph {
+            schema_version: TRACE_GRAPH_SCHEMA_VERSION,
+            graph_id: "g".into(),
+            session_key: SessionKey::new("dsh", "s", "p", "ns"),
+            task_id: None,
+            nodes: vec![call_node],
+            edges: vec![],
+            coverage: TraceCoverage::default(),
+            input_fingerprint: "f".into(),
+        };
+        let v = project_timeline_series(&graph, crate::contracts::evidence::Linearization::LeafPath).unwrap();
+        assert_eq!(v["events"].as_array().unwrap().len(), 0, "不进 events——锚不了位置就绝不编位置");
+        assert_eq!(v["unplaced_events"], json!(1), "但计数必须可见，绝不静默");
+    }
+}
