@@ -32,6 +32,7 @@ pub mod ingest_service;
 pub mod lease;
 pub mod mcp;
 pub mod money;
+pub mod reimport_verify;
 pub mod session_sources;
 pub mod sessions;
 pub mod skills;

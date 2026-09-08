@@ -565,6 +565,18 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
+    /// Re-import the authoritative facts/*.jsonl into TWO throwaway temp DBs
+    /// (one round crashes after the first host, then reopens + re-migrates
+    /// idempotently) and diff the per-host, per-Beijing-month aggregates.
+    /// Proves Q12: re-running any month/day query is byte-identical to the
+    /// first successful import, no half-commits. Never touches the live DB.
+    /// This is the MCP-external half of migration self-check (spec §8.1.2);
+    /// the read-only MCP does not do re-imports.
+    DataReimportVerify {
+        /// Output the full machine-readable report as JSON
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
     /// `sessions` row is the join anchor across the three joinable surfaces (spec
@@ -2832,6 +2844,45 @@ session_store={store} fold={fold}"
             }
             if !any {
                 println!("  (none — all measured usage is priced and routed)");
+            }
+        }
+        return;
+    }
+
+    // data-reimport-verify（spec §8.1.2 / Q12）：两个临时库重放比对，不碰生产库。
+    // reconciled → exit 0；发现未解释差异 → exit 1（open data quality issue）；
+    // 跑不起来（facts 损坏等）→ exit 2。
+    if let Some(Cmd::DataReimportVerify { rows_json }) = &args.cmd {
+        let data_home = agent_vitals_runtime::home::data_home();
+        match agent_vitals_runtime::reimport_verify::run(&data_home) {
+            Ok(report) => {
+                if *rows_json {
+                    println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+                } else {
+                    let verified = report["verified"].as_bool().unwrap_or(false);
+                    println!(
+                        "Reimport verify: {} ({} rounds, {} host-months, facts A={} B={}, swept interrupted={})",
+                        if verified { "VERIFIED — byte-identical" } else { "MISMATCH" },
+                        report["rounds"],
+                        report["buckets_compared"],
+                        report["facts_round_a"],
+                        report["facts_round_b"],
+                        report["interrupted_runs_swept"],
+                    );
+                    for d in report["diffs"].as_array().map(|a| a.iter()).into_iter().flatten() {
+                        println!(
+                            "  DIFF {}/{}: A={} B={}",
+                            d["host"], d["bj_month"], d["round_a"], d["round_b"]
+                        );
+                    }
+                }
+                if !report["verified"].as_bool().unwrap_or(false) {
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("data-reimport-verify failed: {e}");
+                std::process::exit(2);
             }
         }
         return;
