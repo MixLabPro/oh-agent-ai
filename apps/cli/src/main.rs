@@ -293,6 +293,28 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Build the deterministic TraceGraph for one session file (v0.10.0).
+    /// Read-only diagnostic: emits the graph JSON (nodes / edges / coverage),
+    /// writes no state. Nodes are ordered by (scope, ordinal) — never by
+    /// timestamp; missing parent/time/status are counted in coverage, never
+    /// fabricated. Three-host closed vocabulary: claude-code / codex / dsh.
+    Trace {
+        /// Path to a session file (jsonl; dsh accepts .zstd)
+        session_file: PathBuf,
+        /// Which host's wire format to parse (claude-code / codex / dsh)
+        #[arg(long, value_parser = ["claude-code", "codex", "dsh"])]
+        host: String,
+        /// machine_namespace component of SessionKey — required (spec §9);
+        /// the CLI never invents one (missing exits 2)
+        #[arg(long)]
+        machine_namespace: Option<String>,
+        /// source_profile component of SessionKey (default: 'default')
+        #[arg(long, default_value = "default")]
+        source_profile: String,
+        /// Write the TraceGraph JSON to FILE; use - for stdout (default: summary)
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+    },
     /// Audit a Codex rollout log into a CanonicalSession with §13 coverage
     /// (P4 "sound" proof — Legacy + Paginated fold into the shared 19-signal model).
     ///
@@ -1582,6 +1604,83 @@ session_store={store} fold={fold}"
         for (s, n) in &by_status {
             println!("  {}: {}", s, n);
         }
+        return;
+    }
+
+    // v0.10.0：TraceGraph 子命令——只读诊断，spec §7 v0.10.0 门槛 1/2/6 的 CLI 面。
+    // `machine_namespace` 与 {claude,codex,dsh}-usage-facts 同一条纪律：CLI 不
+    // 发明身份段（缺失 exit 2），fact_id/图 id 的重放稳定性靠调用方显式给值。
+    // memo 层（trace_service）在这里不启用：子命令是一次性进程，进程级 memo
+    // 没有第二次命中机会——缓存住进图里反而是纯开销。memo 是给常驻消费面
+    // （Tauri / MCP server）用的。
+    if let Some(Cmd::Trace {
+        session_file,
+        host,
+        machine_namespace,
+        source_profile,
+        rows_json,
+    }) = &args.cmd
+    {
+        let Some(ns) = machine_namespace.as_deref().filter(|s| !s.is_empty()) else {
+            eprintln!("--machine-namespace is required (spec §9: the CLI never invents identity segments)");
+            std::process::exit(2);
+        };
+        let native_id = session_file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let key = agent_vitals_domain::contracts::r2a::SessionKey::new(
+            host,
+            &native_id,
+            source_profile,
+            ns,
+        );
+        let canonical = match agent_vitals_hosts::canonical_input::canonical_session_for_path(
+            session_file,
+            host,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("session source unavailable: {e}");
+                std::process::exit(2);
+            }
+        };
+        let graph =
+            agent_vitals_domain::domain::trace::build_trace_graph(&canonical, key);
+        if let Some(path) = rows_json {
+            let text = serde_json::to_string_pretty(&graph.to_json()).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}", path.display());
+            }
+            return;
+        }
+        // 人读摘要：节点类型计数 + coverage 六计数 + 头两个/尾一个节点的
+        // 原生 id——摘要足够回答「这会话里发生了什么、图缺什么」。
+        let cov = &graph.coverage;
+        println!(
+            "TraceGraph {} host={} nodes={} edges={}",
+            graph.graph_id,
+            host,
+            cov.total_nodes,
+            cov.total_edges
+        );
+        let mut by_type: std::collections::BTreeMap<&str, u32> = Default::default();
+        for n in &graph.nodes {
+            *by_type.entry(n.node_type.as_str()).or_insert(0) += 1;
+        }
+        for (t, n) in &by_type {
+            println!("  {t}: {n}");
+        }
+        println!(
+            "coverage: missing_parent={} missing_time={} missing_status={} unmetered_nodes={}",
+            cov.missing_parent, cov.missing_time, cov.missing_status, cov.unmetered_nodes
+        );
         return;
     }
 

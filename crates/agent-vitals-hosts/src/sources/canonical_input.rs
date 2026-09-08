@@ -35,6 +35,20 @@ pub enum CanonicalInputError {
     NoParsableRecords,
 }
 
+impl std::fmt::Display for CanonicalInputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CanonicalInputError::UnknownHost(h) => {
+                write!(f, "unknown host `{h}` (trace hosts: claude-code/codex/dsh)")
+            }
+            CanonicalInputError::FileUnavailable(e) => write!(f, "file unavailable: {e}"),
+            CanonicalInputError::NoParsableRecords => {
+                write!(f, "no parsable records — the file is not in this host's wire format")
+            }
+        }
+    }
+}
+
 /// 逐行 JSONL 读取，跳过空行；解析失败的行**计数但不中止**——诚实报告
 /// 「这个文件有多少行读不出来」，而不是让一行坏数据吞掉整个会话（同
 /// `read_degradation` 系列纪律：损坏的语料要浮出来，不能被吃掉）。返回
