@@ -39,6 +39,7 @@ pub mod skills;
 pub mod sql_authority;
 pub mod state;
 pub mod summary;
+pub mod trace_service;
 pub mod sql_sync;
 pub mod sync_service;
 pub mod takeover;
