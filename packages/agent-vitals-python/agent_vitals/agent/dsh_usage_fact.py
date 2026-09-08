@@ -32,7 +32,8 @@ from typing import NamedTuple, Optional
 
 from ..adapters.dsh import read_session_text, parse_session_log
 from ..util import post_fork
-from .r2a import dsh_header, dsh_source_profile
+from .r2a import dsh_header  # noqa: F401  (PR #5 后改回独立 import)
+from ..adapters.dsh_source_profile import dsh_source_profile
 from .usage import dsh_usage_observations, usage_fold_checkpoint
 from .usage_fact import build_usage_fact
 

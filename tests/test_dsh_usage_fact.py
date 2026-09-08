@@ -51,7 +51,7 @@ from agent_vitals.agent.dsh_usage_fact import (  # noqa: E402
     DshUsageFactError,
     dsh_session_to_usage_facts,
 )
-from agent_vitals.agent.r2a import dsh_source_profile  # noqa: E402
+from agent_vitals.adapters.dsh_source_profile import dsh_source_profile  # noqa: E402  (PR #4.5: 抽离自 agent/r2a.py)
 from agent_vitals.agent.usage import request_metrics, token_by_model  # noqa: E402
 from agent_vitals.source_identity import canonical_json, fnv1a64_hex  # noqa: E402
 

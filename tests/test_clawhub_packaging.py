@@ -49,7 +49,8 @@ ALLOWED_PACKAGE_FILES = {
         "agent/duration.py",
         "agent/host_capability.py",
         "agent/mcp.py",
-        "agent/plan.py", "agent/r2a.py", "agent/skill.py", "agent/state.py",
+        "agent/plan.py", "agent/r2a.py", "agent/sessions_sql.py",
+        "agent/skill.py", "agent/state.py",
         "agent/subagent.py",
         "agent/takeover.py",
         "agent/trajectory.py", "agent/usage.py", "agent/usage_fact.py",
@@ -60,6 +61,7 @@ ALLOWED_PACKAGE_FILES = {
         "adapters/codex_session.py",
         "adapters/openclaw.py", "adapters/workbuddy.py", "adapters/hermes.py",
         "adapters/dsh.py", "adapters/claude_session.py",
+        "adapters/dsh_source_profile.py",
         "adapters/workbuddy_session.py",
     )
 }

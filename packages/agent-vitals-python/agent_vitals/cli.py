@@ -34,6 +34,7 @@ from agent_vitals import host_capability as host_capability_module
 from agent_vitals.inventory import build_inventory
 from agent_vitals.lifecycle import render_list
 from agent_vitals.overlap import DEFAULT_OVERLAP_MIN, render_overlap
+from agent_vitals.paths import data_home
 from agent_vitals.plan import build_plan
 import agent_vitals.redact as redact_module
 from agent_vitals.report import build_report
@@ -909,48 +910,66 @@ def _main():
                                           "most recent session")
     p_workbuddy_session.add_argument("--json", metavar="FILE",
                                      help="Write the audit JSON to FILE; use - for stdout")
-    # ──── R2a SessionStore 查询面（§2.5/§3.3）───────────────────
-    # 只读：填充 Codex 源（Phase 1 唯一可读源）→ 版本化 DTO + cursor 分页。
-    # `--host-kind` 不是 `--host`：后者是扫描期的 global 参数（默认 "all"）。
+    # ──── Sessions 查询面（v0.9.1 PR #4.5：切 sessions_sql 直连权威库）──
+    # 走 `mcp::sessions_search` / `mcp::session_detail` byte-mirror wrapper
+    # （`agent_vitals.agent.sessions_sql`）。CLI 仅是 envelope 搬运工——
+    # cursor / arg 全部透传给 wrapper,不在 CLI 侧再解析。
     p_sessions = sub.add_parser("sessions",
-                                help="R2a SessionStore query surface (versioned "
-                                     "read model over SessionReport envelopes)")
+                                help="Sessions query surface (SQL authority DB, "
+                                     "spec §6 envelope — session_ref HMAChides "
+                                     "native id; cost_minor via usage_facts × "
+                                     "pricing_snapshots JOIN)")
     sess_sub = p_sessions.add_subparsers(dest="sessions_action")
-    p_slist = sess_sub.add_parser("list", help="List sessions: versioned DTO + "
-                                  "cursor-paginated page")
-    p_slist.add_argument("--host-kind", default=None,
-                         help="Filter by host kind (only `codex` is readable "
-                              "in Phase 1; `dsh` returns a typed "
-                              "source-unavailable error, never an empty page)")
-    p_slist.add_argument("--model", default=None,
-                         help="Filter by model (exact)")
-    p_slist.add_argument("--from", dest="date_from", default=None,
-                         help="Date lower bound (YYYY-MM-DD, inclusive)")
-    p_slist.add_argument("--to", dest="date_to", default=None,
-                         help="Date upper bound (YYYY-MM-DD, inclusive)")
-    p_slist.add_argument("--query", default=None,
-                         help="Free-text query against session_id / title")
+    p_slist = sess_sub.add_parser(
+        "list",
+        help="List sessions in a day/month window (Beijing time) — "
+             "byte-mirror of mcp::sessions_search",
+    )
+    p_slist.add_argument("--day", default=None,
+                         help="Day window (YYYY-MM-DD, Beijing). Mutually "
+                              "exclusive with --month.")
+    p_slist.add_argument("--month", default=None,
+                         help="Month window (YYYY-MM, Beijing). Mutually "
+                              "exclusive with --day.")
+    p_slist.add_argument("--hour", type=int, default=None,
+                         help="Hour-of-day filter 0..=23 (requires --day, not --month)")
+    p_slist.add_argument("--host-kind", action="append", default=None,
+                         help="Filter by host (repeatable). Wired: claude-code / "
+                              "codex / dsh")
+    p_slist.add_argument("--min-tokens", type=int, default=0,
+                         help="Drop sessions with total tokens < N")
     p_slist.add_argument("--page-size", type=int, default=50,
-                         help="Page size; default 50")
+                         help="Page size; default 50, max 500")
     p_slist.add_argument("--cursor", default=None,
-                         help="Cursor JSON from a previous page's next_cursor")
+                         help="Opaque cursor from a previous page's next_cursor "
+                              "(<total>:<key_len>:<key>)")
+    p_slist.add_argument("--as-of-run-id", default=None,
+                         help="Strict cross-tool consistency check (drift = "
+                              "warning, unknown = invalid_argument)")
     p_slist.add_argument("--json", action="store_true",
-                         help="Print the versioned DTO as JSON to stdout")
-    p_sread = sess_sub.add_parser("read", help="Read one session envelope by "
-                                  "session_key (+ optional revision)")
-    p_sread.add_argument("--session-key", required=True,
-                         help="session_key JSON (host_kind/native_id/"
-                              "source_profile/machine_namespace)")
-    p_sread.add_argument("--revision", default=None,
-                         help="Require this session_revision; a mismatch is "
-                              "stale-revision")
+                         help="Print the envelope as JSON to stdout")
+    p_sread = sess_sub.add_parser(
+        "read",
+        help="Read one session by HMAC session_ref — byte-mirror of "
+             "mcp::session_detail",
+    )
+    p_sread.add_argument("--session-ref", required=True,
+                         help="HMAC session_ref (sr_<32 hex>); from `sessions "
+                              "list` envelope data.sessions[].session_ref")
+    p_sread.add_argument("--page-size", type=int, default=200,
+                         help="Timeline page size; default 200, max 1000")
+    p_sread.add_argument("--cursor", default=None,
+                         help="Opaque cursor from a previous page's next_cursor "
+                              "(<ts>:<fact_id_len>:<fact_id>)")
+    p_sread.add_argument("--as-of-run-id", default=None,
+                         help="Strict cross-tool consistency check")
     p_sread.add_argument("--json", action="store_true",
                          help="Print the envelope as JSON to stdout")
     p_snav = sess_sub.add_parser(
         "navigation",
-        help="Multi-host navigation projection (MENUBAR_MULTIHOST_NAVIGATION_"
-             "SPEC §5.1/§5.2): one spawn, both host snapshots for the Tauri "
-             "menu bar (today tokens + today sessions + recent N)")
+        help="Multi-host navigation projection (Tauri menu bar: today tokens + "
+             "today sessions + recent N rows per host)",
+    )
     p_snav.add_argument("--day", default="",
                         help="Day to project (YYYY-MM-DD, Beijing day boundary; "
                              "defaults to today)")
@@ -1600,47 +1619,102 @@ def _main():
             print(text)
         return
 
-    # ──── R2a sessions handler（镜像 Rust `sessions list`/`sessions read`）────
-    # 纯查询 + 自有 cache；`home` 由 r2a.codex() 内默认 Path.home() 解析（与
-    # Rust 从 HOME/USERPROFILE 解析同一路径）。
+    # ──── Sessions handler（v0.9.1 PR #4.5：sessions_sql 直连权威库）──
+    # 透传 argparse 结果到 `agent_vitals.agent.sessions_sql.{sessions_search,
+    # session_detail, sessions_navigation}`——三个函数都返回 dict,JSON 序列
+    # 化后落到 stdout。CLI 仅是 envelope 搬运工,不在此层做字段筛选 / 转换 /
+    # 过滤(Rust CLI `apps/cli/src/main.rs` SessionsAction 同款薄壳)。
     if getattr(args, "cmd", None) == "sessions":
-        from agent_vitals.agent import r2a as r2a_mod
+        from agent_vitals.agent import sessions_sql
         action = getattr(args, "sessions_action", None)
+        home = data_home()
         if action == "list":
-            r2a_mod.sessions_list(
-                None,
-                getattr(args, "host_kind", None),
-                getattr(args, "model", None),
-                getattr(args, "date_from", None),
-                getattr(args, "date_to", None),
-                getattr(args, "query", None),
-                getattr(args, "page_size", 50),
-                getattr(args, "cursor", None),
-                getattr(args, "json", False),
-            )
+            payload = {
+                "date": getattr(args, "day", None),
+                "month": getattr(args, "month", None),
+                "hour": getattr(args, "hour", None),
+                "hosts": getattr(args, "host_kind", None) or [],
+                "min_tokens": getattr(args, "min_tokens", 0) or 0,
+                "limit": getattr(args, "page_size", 50) or 50,
+                "cursor": getattr(args, "cursor", None),
+                "as_of_run_id": getattr(args, "as_of_run_id", None),
+            }
+            env = sessions_sql.sessions_search(payload, home)
         elif action == "read":
-            r2a_mod.sessions_read(
-                None,
-                getattr(args, "session_key", ""),
-                getattr(args, "revision", None),
-                getattr(args, "json", False),
-            )
+            payload = {
+                "session_ref": getattr(args, "session_ref", ""),
+                "limit": getattr(args, "page_size", 200) or 200,
+                "cursor": getattr(args, "cursor", None),
+                "as_of_run_id": getattr(args, "as_of_run_id", None),
+            }
+            env = sessions_sql.session_detail(payload, home)
         elif action == "navigation":
-            # `--day` 缺省 = 今天（北京日界，core 折叠的日期桶是 UTC+8 时
-            # 段；spec §5.1）——与 Rust 主入口同款缺省。
+            # `--day` 缺省 = 今天（北京日界,core 折叠的日期桶是 UTC+8 段;
+            # spec §5.1）——与 Rust 主入口同款缺省。
             day = getattr(args, "day", "")
             if not day:
                 day = codex_cost_module.today_beijing()
-            r2a_mod.sessions_navigation(
-                None,
-                day,
-                getattr(args, "timezone", "Asia/Shanghai"),
-                getattr(args, "recent", 5),
-                getattr(args, "json", False),
+            nav = sessions_sql.sessions_navigation(
+                day, getattr(args, "recent", 5), home,
             )
+            # envelope 序列化
+            if getattr(args, "json", False):
+                print(json.dumps(nav, ensure_ascii=False, indent=2))
+            else:
+                # 人读 fallback：列 hosts[] 每 host 今日 token / 会话数
+                # + recent 行;非 workbench 调路径,简单展示即可。
+                print("navigation %s" % nav.get("day_key", day))
+                for h in nav.get("hosts", []):
+                    tok = h.get("today_tokens", {})
+                    val = tok.get("value") if isinstance(tok, dict) else None
+                    today = ("—" if val is None else str(val))
+                    print("  %-12s [%s] today=%s tokens, %d sessions, %d recent" % (
+                        h.get("host_kind"), h.get("status"), today,
+                        h.get("today_sessions", 0), len(h.get("recent", [])),
+                    ))
+            return
         else:
             print("sessions: unknown action %r" % action, file=sys.stderr)
             sys.exit(2)
+        # envelope 路径：list / read 走 JSON 序列化
+        if env.get("error") and not env.get("data"):
+            # 错误 envelope 也要原样输出(--json),但 exit 码非零
+            print(json.dumps(env, ensure_ascii=False, indent=2))
+            sys.exit(1)
+        if getattr(args, "json", False):
+            print(json.dumps(env, ensure_ascii=False, indent=2))
+        else:
+            # 人读 fallback：sessions[] 表 / timeline 表
+            data = env.get("data") or {}
+            window = data.get("window") or {}
+            print("window: %s" % window.get("label"))
+            if "sessions" in data:
+                print("%-35s  %-10s  %-10s  %s" % (
+                    "session_ref", "host", "tokens", "events",
+                ))
+                for s in data["sessions"]:
+                    tot = (s["tokens"]["uncached_input_tokens"]
+                           + s["tokens"]["cache_read_tokens"]
+                           + s["tokens"]["cache_write_tokens"]
+                           + s["tokens"]["output_tokens"])
+                    print("%-35s  %-10s  %-10d  %d" % (
+                        s["session_ref"], s["host"], tot, s["event_count"],
+                    ))
+            elif "timeline" in data:
+                print("session_ref=%s host=%s total=%d events=%d" % (
+                    data.get("session_ref"),
+                    data.get("host"),
+                    data.get("tokens", {}).get("total", 0),
+                    data.get("event_count", 0),
+                ))
+                for f in data["timeline"]:
+                    tot = sum(f["tokens"].get(k, 0) for k in (
+                        "uncached_input_tokens", "cache_read_tokens",
+                        "cache_write_tokens", "output_tokens",
+                    ))
+                    print("  %s  %-20s  tokens=%d" % (
+                        f["event_at"], (f.get("model_id") or "<unknown>")[:20], tot,
+                    ))
         return
 
     # ──── M3 oneline handler ──────────────────────────────────────
