@@ -29,6 +29,7 @@
 pub mod authority;
 pub mod authority_query;
 pub mod fact_writer_sql;
+pub mod safe_query;
 pub mod legacy_import;
 pub mod billing;
 pub mod coverage;

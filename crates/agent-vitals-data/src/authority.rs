@@ -20,10 +20,16 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
+
+use crate::safe_query::authority_callback;
 
 /// 当前 DDL 版本。spec §3 的表结构变更递增；`migrations` 表（§3.5）记录的
 /// 是**数据迁移**（legacy import 等），与 DDL 版本刻意分开。
+///
+/// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
+/// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
+/// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
 pub const SCHEMA_VERSION: i64 = 2;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
@@ -49,6 +55,17 @@ pub enum AuthorityError {
         supported: i64,
     },
     Io(std::io::Error),
+    /// `open_readonly` 专用（spec §9.3：只读取数面不建库）——文件不存在。
+    /// 与 `open` 的「不存在则建库」刻意相反：只读消费者遇到缺库必须如实报
+    /// 错，不能悄悄造一个空库端出 facts=0。
+    MissingFile,
+    /// `open_readonly` 专用——不是 SQLite 文件 / 文件损坏 / 半建库
+    /// （`schema_meta` 读不出）。
+    Corrupt,
+    /// `open_readonly` 专用——库的 schema 版本比本二进制旧，需要产品迁移。
+    /// （`open` 里这条走 `__unsupported_legacy_version__` 防御分支；只读面
+    /// 单列一个 typed 变体，供错误码映射成 `schema_migration_required`。）
+    OlderSchema { found: i64 },
 }
 
 impl From<rusqlite::Error> for AuthorityError {
@@ -72,6 +89,14 @@ impl std::fmt::Display for AuthorityError {
                 "authority schema v{found} is newer than supported v{supported} — 升级二进制"
             ),
             AuthorityError::Io(e) => write!(f, "authority io: {e}"),
+            AuthorityError::MissingFile => write!(f, "authority db file does not exist"),
+            AuthorityError::Corrupt => {
+                write!(f, "authority db is not readable (not a SQLite file, corrupt, or half-built)")
+            }
+            AuthorityError::OlderSchema { found } => write!(
+                f,
+                "authority schema v{found} is older than supported v{SCHEMA_VERSION} — run product migration"
+            ),
         }
     }
 }
@@ -276,6 +301,32 @@ CREATE TABLE host_runtime_snapshots (
 );
 "#;
 
+/// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
+/// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
+/// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
+/// 这种不必要的迁移负担。
+const VIEWS_V1: &str = r#"
+CREATE VIEW IF NOT EXISTS v_facts_safe AS
+  SELECT fact_id, host, observation_kind, source_profile,
+         provider_id, model_id, event_ts_ms, event_peak,
+         uncached_input_tokens, cache_read_tokens,
+         cache_write_tokens, output_tokens,
+         ingested_run_id, created_at_ms, updated_at_ms, deleted_at_ms
+  FROM usage_facts;
+CREATE VIEW IF NOT EXISTS v_sessions_safe AS
+  SELECT session_key, host, source_profile,
+         started_at_ms, ended_at_ms, last_observed_at_ms, deleted_at_ms
+  FROM sessions;
+CREATE VIEW IF NOT EXISTS v_data_quality_safe AS
+  SELECT issue_id, scope_type, scope_key, code, severity,
+         first_seen_at_ms, last_seen_at_ms, resolved_at_ms
+  FROM data_quality_issues;
+CREATE VIEW IF NOT EXISTS v_sync_runs_safe AS
+  SELECT run_id, started_at_ms, completed_at_ms, trigger, status,
+         schema_version, error_code
+  FROM sync_runs;
+"#;
+
 /// v0.9.1 Phase 3.4：`budget_config` 单行（config_id=1）的 typed 视图。
 /// 金额一律**最小货币单位整数**（纪律 2「金额不落浮点」——展示层再换算）；
 /// `warning_ratio_bp` 是万分比（8000 = 80%，seed 时由 config.toml 的
@@ -317,6 +368,69 @@ impl AuthorityDb {
         Ok(Self { conn })
     }
 
+    /// **只读取数面**（Data MCP `data-mcp serve`，spec §9.3）：`SQLITE_OPEN_READ_ONLY`——
+    /// 不建库、不跑 DDL、不 migration、不清扫中断批次。缺文件 / 损坏 / schema
+    /// 版本不符各返回 typed 错误，供调用方映射成 spec §11 的稳定错误码
+    /// （`database_missing` / `database_unreadable` / `schema_too_new` /
+    /// `schema_migration_required`）。
+    ///
+    /// 与 [`Self::open`] 的「不存在则建库」刻意相反：只读消费者遇到缺库/损坏
+    /// 必须如实报错——在 `sql_authority_enabled` 下，一个被悄悄新建的空库
+    /// 端出 facts=0 会被读成「没花钱」（spec §5.3 / 1.7 的灾难态）。
+    pub fn open_readonly(db_path: &Path) -> Result<Self, AuthorityError> {
+        if !db_path.exists() {
+            return Err(AuthorityError::MissingFile);
+        }
+        let conn = Connection::open_with_flags(
+            db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|_| AuthorityError::Corrupt)?;
+        conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
+        // 损坏 / 非 SQLite / 半建库探测：`schema_meta` 读不出就不是我们的库。
+        // （`PRAGMA integrity_check` 更彻底但慢——留给 `data_status` 自己跑，
+        // 它是 doctor 工具，其余工具在这一步 fail-fast 即可。）
+        let found: i64 = match conn.query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(s) => s.parse().map_err(|_| AuthorityError::Corrupt)?,
+            Err(_) => return Err(AuthorityError::Corrupt),
+        };
+        match found.cmp(&SCHEMA_VERSION) {
+            std::cmp::Ordering::Equal => Ok(Self { conn }),
+            std::cmp::Ordering::Greater => Err(AuthorityError::NewerSchema {
+                found,
+                supported: SCHEMA_VERSION,
+            }),
+            std::cmp::Ordering::Less => Err(AuthorityError::OlderSchema { found }),
+        }
+    }
+
+    /// **只读 + authorizer 守护的连接**（增量 7.5 `query_sql_readonly` 专用）——
+    /// `SQLITE_OPEN_READ_ONLY` + 挂 SQLite `sqlite3_set_authorizer` 回调，按
+    /// 来源表 + 来源列拒绝敏感字段（spec §8.2 P1-5：作者层拒绝是第一层防线，
+    /// 结果列名扫描仅第二层）。
+    ///
+    /// **不在 v1 兼容承诺内**：仅 `mcp-internal` 构建调用；公开构建不挂这个
+    /// 工具。Caller 必须在执行前/后 close this connection。
+    pub fn make_query_sql_readonly_connection(db_path: &Path) -> Result<Connection, AuthorityError> {
+        if !db_path.exists() {
+            return Err(AuthorityError::MissingFile);
+        }
+        let conn = Connection::open_with_flags(
+            db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|_| AuthorityError::Corrupt)?;
+        conn.busy_timeout(std::time::Duration::from_millis(3_000))?;
+        // 用 raw connection 挂 authorizer——`rusqlite::Connection::authorizer`
+        // 接受 `FnMut(AuthContext) -> Authorization + Send + RefUnwindSafe + 'static`。
+        conn.authorizer(Some(authority_callback));
+        Ok(conn)
+    }
+
     fn ensure_schema(conn: &Connection, now_ms: i64) -> Result<(), AuthorityError> {
         // 版本行在 SCHEMA_V1 里随全量 DDL 一起建——这里只**读**：schema_meta
         // 表不存在 = 全新库（None）。不能先无条件建表再跑全量 DDL（后者会
@@ -346,7 +460,11 @@ impl AuthorityDb {
                     supported: SCHEMA_VERSION,
                 })
             }
-            Some(v) if v == SCHEMA_VERSION => {}
+            Some(v) if v == SCHEMA_VERSION => {
+                // 增量 7.5：脱敏只读 view（`query_sql_readonly` 的来源层屏障）。
+                // 版本无关的只读加法——`CREATE VIEW IF NOT EXISTS` 幂等。
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(1) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 let migration = conn.execute_batch(MIGRATE_V1_TO_V2);
@@ -363,6 +481,7 @@ impl AuthorityDb {
                         return Err(error.into());
                     }
                 }
+                conn.execute_batch(VIEWS_V1)?;
             }
             Some(old) => {
                 return Err(AuthorityError::Sqlite(
@@ -391,6 +510,8 @@ impl AuthorityDb {
                 }
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 conn.execute_batch(SCHEMA_V1)?;
+                // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
+                conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
                     "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?1)",
                     rusqlite::params![SCHEMA_VERSION.to_string()],
@@ -948,6 +1069,106 @@ mod tests {
             "got {err:?}"
         );
         let _ = std::fs::remove_file(&db);
+    }
+
+    // ── open_readonly（Data MCP 只读取数面，spec §9.3）────────────────
+
+    #[test]
+    fn open_readonly_missing_file_is_typed() {
+        let db = tmp_db("ro-missing");
+        assert!(matches!(
+            AuthorityDb::open_readonly(&db).unwrap_err(),
+            AuthorityError::MissingFile
+        ));
+        // 缺文件时**不建库**（与 `open` 的关键区别）。
+        assert!(!db.exists());
+    }
+
+    #[test]
+    fn open_readonly_opens_a_valid_db_and_forbids_writes() {
+        let db = tmp_db("ro-valid");
+        AuthorityDb::open(&db, 1_000).unwrap(); // 先正常建库
+        let ro = AuthorityDb::open_readonly(&db).unwrap();
+        // 只读连接：写语句必须失败。
+        let write = ro
+            .conn()
+            .execute("INSERT INTO schema_meta(key, value) VALUES('x','y')", []);
+        assert!(write.is_err(), "read-only connection must reject writes");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn open_readonly_reports_corrupt_for_garbage_and_half_built() {
+        let garbage = tmp_db("ro-garbage");
+        std::fs::write(&garbage, b"NOT A SQLITE DATABASE").unwrap();
+        assert!(matches!(
+            AuthorityDb::open_readonly(&garbage).unwrap_err(),
+            AuthorityError::Corrupt
+        ));
+        let _ = std::fs::remove_file(&garbage);
+
+        let half = tmp_db("ro-half");
+        rusqlite::Connection::open(&half)
+            .unwrap()
+            .execute_batch("CREATE TABLE usage_facts (fact_id TEXT PRIMARY KEY);")
+            .unwrap();
+        assert!(matches!(
+            AuthorityDb::open_readonly(&half).unwrap_err(),
+            AuthorityError::Corrupt
+        ));
+        let _ = std::fs::remove_file(&half);
+    }
+
+    #[test]
+    fn existing_v1_db_picks_up_safe_views_on_reopen() {
+        // 增量 7.5：v1 库已存在的情况下，再开一次应该把 v_*_safe view
+        // 幂等加进去（review 增量 7.5：migrate 路径不阻塞）。
+        let path = tmp_db("v1-views");
+        let db = AuthorityDb::open(&path, 1_000).unwrap();
+        // 先关掉 + 重新打开。
+        drop(db);
+        let db2 = AuthorityDb::open(&path, 1_001).unwrap();
+        let n: i64 = db2
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name IN ('v_facts_safe', 'v_sessions_safe', 'v_data_quality_safe', 'v_sync_runs_safe')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 4, "v_*_safe views 应在二次 open 时被幂等加进去");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_readonly_distinguishes_newer_and_older_schema() {
+        let newer = tmp_db("ro-newer");
+        rusqlite::Connection::open(&newer)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO schema_meta VALUES('schema_version', '99');",
+            )
+            .unwrap();
+        assert!(matches!(
+            AuthorityDb::open_readonly(&newer).unwrap_err(),
+            AuthorityError::NewerSchema { found: 99, .. }
+        ));
+        let _ = std::fs::remove_file(&newer);
+
+        let older = tmp_db("ro-older");
+        rusqlite::Connection::open(&older)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO schema_meta VALUES('schema_version', '0');",
+            )
+            .unwrap();
+        assert!(matches!(
+            AuthorityDb::open_readonly(&older).unwrap_err(),
+            AuthorityError::OlderSchema { found: 0 }
+        ));
+        let _ = std::fs::remove_file(&older);
     }
 
     #[test]

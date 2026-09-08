@@ -12,6 +12,7 @@
 // 子树：skills/（静态 SKILL.md 体检）+ agent/（会话行为/成本审计）。
 // dsh.rs 与 util.rs 是两世界共享，留在顶层。
 mod agent;
+mod mcp;
 mod skills;
 mod util;
 
@@ -651,6 +652,22 @@ enum Cmd {
         #[command(subcommand)]
         action: DataAction,
     },
+    /// Data MCP: local, read-only, stdio MCP server over the SQL authority DB
+    /// (docs/AGENT_VITALS_DATA_MCP_SPEC.md). `serve` speaks JSON-RPC 2.0 on
+    /// stdin/stdout; logs go to stderr; it opens the DB read-only and never
+    /// creates or migrates it.
+    DataMcp {
+        #[command(subcommand)]
+        action: DataMcpAction,
+    },
+}
+
+/// `data-mcp` sub-actions.
+#[derive(Subcommand)]
+enum DataMcpAction {
+    /// Run the stdio MCP server (JSON-RPC 2.0, line-delimited). Blocks until
+    /// stdin is closed, then exits 0.
+    Serve,
 }
 
 // `data` 子命令的子动作。Stage 0 的 repository 只有 `monthly_summary`/
@@ -1329,6 +1346,14 @@ fn print_daily_summary_text(s: &agent_vitals_data::projection::DailySummary) {
 
 fn main() {
     let args = Args::parse();
+
+    // Data MCP：本机 stdio server，永不返回（stdin EOF → exit 0）。在扫描
+    // 之前短路——它不碰 skill 扫描，只对 SQL 权威库做只读查询。
+    if let Some(Cmd::DataMcp { action }) = &args.cmd {
+        match action {
+            DataMcpAction::Serve => mcp::serve(),
+        }
+    }
 
     // 行为审计：审计一份 DSH 会话日志的执行轨迹，**不跑 skill 扫描**。
     // 独立取证命令（读会话日志 → 规则引擎 → findings），在扫描之前短路。
@@ -2559,124 +2584,24 @@ session_store={store} fold={fold}"
         // （旧 JSON 写入已冻结、权威库刚被清空 → 零绝不是「没花钱」）。
         let db_existed = db_path.exists();
         let out = (|| -> Result<Value, String> {
+            // CLI 侧沿用 `AuthorityDb::open`（缺文件建库 + 清扫中断批次）——
+            // `db_existed` 已在 open 之前判过，「刚被删 vs 从没同步」的区分不丢。
+            // 数据组装与 MCP `data_status` 工具同源（`mcp::data_status_report`），
+            // spec §5「同一 repository / 同一 DTO」。
             let db = agent_vitals_data::authority::AuthorityDb::open(
                 &db_path,
                 agent_vitals_runtime::sql_sync::now_ms(),
             )
             .map_err(|e| e.to_string())?;
-            let conn = db.conn();
-            let integrity: String = conn
-                .query_row("PRAGMA integrity_check", [], |r| r.get(0))
-                .unwrap_or_else(|e| format!("integrity_check failed: {e}"));
-            let schema: String = conn
-                .query_row(
-                    "SELECT value FROM schema_meta WHERE key = 'schema_version'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or_else(|_| "?".into());
-            let facts: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM usage_facts WHERE deleted_at_ms IS NULL",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            let sources: i64 = conn
-                .query_row("SELECT COUNT(*) FROM source_files", [], |r| r.get(0))
-                .unwrap_or(0);
-            let sessions: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM sessions WHERE deleted_at_ms IS NULL",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            let issues: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM data_quality_issues WHERE resolved_at_ms IS NULL",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            // 逐 code 明细：`undated_residual`（ledger 无日期残差）、
-            // `legacy_aggregate`（聚合兜底月份）等按名可见，不只是一个总数。
-            let mut issues_by_code: serde_json::Map<String, Value> = serde_json::Map::new();
-            if let Ok(mut stmt) = conn.prepare(
-                "SELECT code, COUNT(*) FROM data_quality_issues
-                 WHERE resolved_at_ms IS NULL GROUP BY code ORDER BY code",
-            ) {
-                if let Ok(rows) =
-                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-                {
-                    for (code, n) in rows.filter_map(Result::ok) {
-                        issues_by_code.insert(code, json!(n));
-                    }
-                }
-            }
-            let mut runs = Vec::new();
-            if let Ok(mut stmt) = conn.prepare(
-                "SELECT run_id, trigger, status, started_at_ms, error_code FROM sync_runs
-                 ORDER BY started_at_ms DESC LIMIT 5",
-            ) {
-                if let Ok(rows) = stmt.query_map([], |r| {
-                    Ok(json!({
-                        "run_id": r.get::<_, String>(0)?,
-                        "trigger": r.get::<_, String>(1)?,
-                        "status": r.get::<_, String>(2)?,
-                        "started_at_ms": r.get::<_, i64>(3)?,
-                        "error_code": r.get::<_, Option<String>>(4)?,
-                    }))
-                }) {
-                    for row in rows.filter_map(Result::ok) {
-                        runs.push(row);
-                    }
-                }
-            }
+            // CLI `data-status` 与 MCP `data_status` 工具同源：都走
+            // `mcp::data_status_report`（spec §5「同一 repository / 同一 DTO」）。
+            // 损坏恢复 / 「删库不回落」的 health + hints 逻辑也在那一份里。
             let enabled = agent_vitals_runtime::sql_authority::is_enabled(&data_home);
-            let last_run_bad = runs
-                .first()
-                .is_some_and(|r| matches!(r["status"].as_str(), Some("failed") | Some("running")));
-
-            // 1.7 损坏恢复 / 4.4「删库不回落」：health + 恢复路径提示。
-            // 权威库不自愈（与旧 index.sqlite3 的本质区别，spec §5.1）——
-            // 损坏/清空必须诚实报 critical + 明确的人工恢复入口，绝不静默
-            // 端出 facts=0 当成「没花钱」。
-            let mut hints: Vec<String> = Vec::new();
-            let health = if !db_existed && enabled {
-                hints.push("authority DB was just created (was missing) while sql_authority_enabled=true — legacy state-JSON writes are FROZEN, so a fresh empty DB means lost history, not zero spend".into());
-                hints.push("recover: `agent-vitals sync-facts` to repopulate from session logs, then `agent-vitals data-migrate` if you kept the legacy facts JSONL".into());
-                hints.push("or `agent-vitals data authority disable` to resume dual-write (legacy state JSON becomes authoritative again)".into());
-                "critical"
-            } else if !integrity.eq_ignore_ascii_case("ok") {
-                hints.push(format!("SQLite integrity_check: {integrity}"));
-                hints.push("the authority DB does NOT self-heal — rebuild from the authoritative facts JSONL: `rm ~/.agent-vitals/agent-vitals.sqlite3*` then `agent-vitals data-migrate`".into());
-                "critical"
-            } else if enabled && facts == 0 {
-                hints.push("sql_authority_enabled=true but the authority DB has zero facts — run `agent-vitals sync-facts`; do not read zero as 'no spend'".into());
-                "critical"
-            } else if last_run_bad {
-                hints.push("most recent sync run did not succeed — check `error_code` above and re-run `agent-vitals sync-facts`".into());
-                "warn"
-            } else {
-                "ok"
-            };
-
-            Ok(json!({
-                "schema_version": schema,
-                "integrity": integrity,
-                "facts": facts,
-                "sources": sources,
-                "sessions": sessions,
-                "open_quality_issues": issues,
-                "open_quality_issues_by_code": issues_by_code,
-                "sql_authority_enabled": enabled,
-                "pricing_snapshots": conn.query_row("SELECT COUNT(*) FROM pricing_snapshots", [], |r| r.get::<_, i64>(0)).unwrap_or(0),
-                "host_bills": conn.query_row("SELECT COUNT(*) FROM host_bills WHERE deleted_at_ms IS NULL", [], |r| r.get::<_, i64>(0)).unwrap_or(0),
-                "recent_runs": runs,
-                "health": health,
-                "hints": hints,
-            }))
+            Ok(agent_vitals_runtime::mcp::data_status_report(
+                db.conn(),
+                db_existed,
+                enabled,
+            ))
         })();
         match out {
             Ok(v) => {
