@@ -372,6 +372,7 @@ TraceGraph / metrics / savings / outcome **全部只对这三个宿主开放**�
 | v0.10 能力 | 最低要求 | 达不到时的诚实退化 |
 |---|---|---|
 | Sessions 列表 | session store + `session_key` | 该宿主整体不出现（不是显示 0 个会话） |
+| 工作区归属 / 项目下钻 | workspace root（`cwd` / `git_repo_root`） | **依赖它的规则显式降级，不得用 `cwd` 猜 repo root**；聊天平台来源的会话（如 Hermes 的 discord）本就无工作区，身份维度是 `(user_id, chat_id, thread_id)` |
 | TraceGraph 节点 | `CanonicalSession` + `(scope, ordinal)`（§2.1.1） | 无法建图 → 该宿主无 Traces tab |
 | TraceGraph 因果边 | parent 信号或可 join 的 `native` | 边计入 `missing_parent`，图退化成有序列表 |
 | 时间线 y 轴 | 任一 `values` 序列 | 只画事件标记，不画线（**不画 0 值线**） |
@@ -393,6 +394,33 @@ TraceGraph / metrics / savings / outcome **全部只对这三个宿主开放**�
 | **workbuddy** | ✅ **可用** | ⚠️ 部分 | ❌ **明确排除** | 见下 |
 | **openclaw** | ✅ | ❌ | ❌ | 目前只有 `sources/skills.rs`（安装时扫描），**无会话证据面** |
 | **pi** | ✅ | ✅ | ✅ **候选** | 本机实测 1 会话即满足 T3 全部字段；见 `docs/PI_HOST_ASSESSMENT.md`。语料仅 1 会话，转正前须扩语料 |
+| **hermes** | ⚠️ 退化 | ✅ 强 | ✅ **可行** | 本机实测 15 会话 / 2,092 消息（`state.db` schema v23）；见 `docs/HERMES_HOST_ASSESSMENT.md`。**schema 富、数据缺**：成本列全 0、`pricing_version` 填充数 0，但 5 桶 token 填得很满且 `pricing.json` 已认识 `MiniMax-M3` |
+
+**Hermes 的数据模型与本仓库 v0.9 的归属决策独立重合**：它的
+`session_model_usage` 主键是 `(session_id, model, billing_provider, billing_base_url,
+billing_mode, task)`——比 v0.9 定的 `(host, provider)` 还细一级，多出的 `base_url`
+恰好解决「同一 provider 走不同中转」；且 `estimated_cost_usd` / `actual_cost_usd` 分列
++ `cost_status` / `cost_source` / **`pricing_version`**，正是 §2.3 与
+`ATTRIBUTABLE_WASTE` §9 未落地第 8 条要的形状。**但这些字段一个都没被填**——与本仓库
+`timeline_series`「设计了、从未落地」同型。
+
+**Hermes 暴露的两个缺口**（详见该评估 §6）：
+
+1. **聊天平台来源的会话没有工作区（P1）**。`sessions.source` ∈ {cli, discord, desktop,
+   tui}，discord 会话的身份维度是 `(user_id, chat_id, chat_type, thread_id)`，与 cwd 正交；
+   实测 `git_repo_root` 填充数 **0/15**、`cwd` 只有 8/15。§2.5.3 的能力表缺「无工作区
+   宿主」这一行——**补规则：workspace root 缺失时依赖它的规则显式降级，不得用 `cwd`
+   猜 repo root**（SV605 已有绝对路径启发式降级路径，沿用）。
+2. **`estimated` / `actual` 双列可能优于「单列 + basis 标签」（P2，待评估）**。
+   §10.2.5 的 `outcome_measurements` 用单列 `savings_value_minor` + `savings_basis` 标签
+   区分名义/实付；Hermes 用两列 + basis 字段解释各自来源。单列靠标签区分正是 §10.7
+   第 1 条担心的 `SUM` 误聚合温床，建议在 v0.10-C 前评估是否改双列。
+
+> **接入 Hermes 前必须先解决的一个陷阱**：它的 skill 是**三层嵌套 bundle**，实测
+> `SKILL.md` 分布为「第 1 层 12 · 第 2 层 76 · 第 3 层 4 = 92 个」。按
+> `skills/<name>/SKILL.md` 扁平假设扫描只得 12 个，**少报 87%**——与
+> `RUNTIME_EVIDENCE_CONTRACT` §14.6「WorkBuddy 的 `traces/` 整轮被漏掉」同型。
+> 现有 dedup 键 `(namespace, name)` 不够，需**路径式身份**，否则跨 bundle 同名子技能撞键。
 
 **Pi 是第一个自报成本的宿主，它暴露了 spec 的两个缺口**（详见该评估文档 §4）：
 
@@ -1304,3 +1332,21 @@ spec 从未定义「第四个宿主怎么接」「接不进来的宿主看到什
 
 > **接入优先级建议**：Pi 的 `~/.pi/agent/skills/*/SKILL.md`（4 个 skill）可以**先于**会话面
 > 接入——那是本仓库的本职（静态体检），零风险、最先见效，且不受 `FACT_HOSTS` 限制。
+
+### R2.3 补记二（Hermes 宿主实测）
+
+`~/.hermes/` 的第一手实测（`RUNTIME_EVIDENCE_CONTRACT` §13 此前因无实例而缺席
+Hermes），评估见 `docs/HERMES_HOST_ASSESSMENT.md`。三层框架再次成立，另得 4 条：
+
+| # | 改动 | 位置 | 依据 |
+|---|---|---|---|
+| 58 | §2.5.4 加入 Hermes 行（T1 退化 / T2 强 / T3 可行）；记下它与 v0.9 归属决策的独立重合（主键含 `base_url`，比 `(host, provider)` 更细）与「schema 富、数据缺」 | §2.5.4 | `state.db` schema v23 实测 |
+| 59 | **§2.5.3 能力表新增「工作区归属」行**：workspace root 缺失时依赖它的规则显式降级，**不得用 `cwd` 猜 repo root**。Hermes 实测 `git_repo_root` 填充 0/15、`cwd` 8/15，discord 会话的身份维度与 cwd 正交 | §2.5.3 | 评估 §6.1 |
+| 60 | **接入前置：嵌套 skill 需路径式身份。** Hermes 的 `SKILL.md` 三层嵌套（12/76/4 = 92），扁平扫描只得 12，**少报 87%**；现有 dedup 键 `(namespace, name)` 会让跨 bundle 同名子技能撞键 | §2.5.4 | 实测深度分布 |
+| 61 | **待评估（v0.10-C 前）：`estimated`/`actual` 双列 vs 单列 + basis 标签。** Hermes 两个成本各占一列 + `cost_status`/`cost_source` 解释来源；本 spec 用单列 + `savings_basis` 标签，而靠标签区分正是 §10.7 第 1 条担心的 `SUM` 误聚合温床 | §10.2.5 | 评估 §6.2 |
+
+> **一条机会**：`~/.hermes/models_dev_cache.json` 是 models.dev 的本地缓存镜像——
+> **213 provider / 7,561 模型 / 7,126 带价**，对照 `assets/pricing.json` 的四族目录是
+> 数量级差距，直接对着 `unpriced_tokens` 缺口。**但它属 `catalog-fallback`**（§2.4.1
+> `pricing_basis` 里最弱的已计价档），**不得冒充 `provider-reported` 或 `catalog-provider`**；
+> 读本地已缓存文件不违反「扫描时不拉第三方代码」，但数据质量责任必须标在 basis 上。
