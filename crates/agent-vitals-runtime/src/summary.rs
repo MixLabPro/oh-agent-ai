@@ -901,12 +901,27 @@ fn codex_provider_amounts_from_sql(
         if provider == "openai" {
             out.insert(key, codex_provider_amount_from_hours(&hours, day, cards).0);
         } else {
+            // Custom/third-party routes are not OpenAI subscription usage, but
+            // they still receive a fair-market estimate from the model card.
+            // Keep it in the non-summable estimate bucket and mark unresolved;
+            // never silently drop the tokens or label the estimate as actual.
             let model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&hours, None);
-            let has_tokens = model.to_string().contains("uncached_input_tokens");
-            if has_tokens {
+            if model.to_string().contains("uncached_input_tokens") {
+                let (priced, _tokens) = codex_host_amount_with_tokens_from_hours(
+                    &hours,
+                    &serde_json::Value::Null,
+                    &serde_json::Value::Null,
+                    day,
+                    cards,
+                );
+                let estimate = priced.summable_total();
+                let mut amounts_by_basis = BTreeMap::new();
+                if estimate > 0.0 {
+                    amounts_by_basis.insert(BillingBasis::MeteredEstimate, estimate);
+                }
                 out.insert(key.clone(), HostAmount {
                     host_id: key,
-                    amounts_by_basis: BTreeMap::new(),
+                    amounts_by_basis,
                     currency: Some("USD".to_string()),
                     has_unresolved: true,
                     freshness: day.map(day_freshness).unwrap_or_else(|| Freshness { state: FreshnessState::Partial, last_observed_at: Some("sql-facts".to_string()) }),
