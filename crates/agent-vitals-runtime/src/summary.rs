@@ -1781,7 +1781,8 @@ impl SummaryRepository for SqlSummaryRepository {
         for host in WIRED_HOSTS {
             let (measured, total) = match (&db, bounds) {
                 (Some(db), Some((start, end))) => {
-                    agent_vitals_data::authority_query::coverage_status(db.conn(), host, start, end)
+                    agent_vitals_data::coverage::status(db, host, start, end)
+                        .map(|s| (s.measured_fields, s.total_fields))
                         .unwrap_or((0, 3))
                 }
                 _ => (0, 3),
