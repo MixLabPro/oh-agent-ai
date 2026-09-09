@@ -133,11 +133,7 @@ fn stable_hash(v: &Value) -> String {
 
 impl<'a> SqlFactWriter<'a> {
     /// 绑定连接 + 批次 + 注入时钟。预检 run_id 存在（外键防线前置）。
-    pub fn new(
-        conn: &'a Connection,
-        run_id: &str,
-        now_ms: i64,
-    ) -> Result<Self, AuthorityError> {
+    pub fn new(conn: &'a Connection, run_id: &str, now_ms: i64) -> Result<Self, AuthorityError> {
         // `ingested_run_id REFERENCES sync_runs` 在 INSERT 时才失败；
         // 前置成显式错误让调用方在写任何事实前就知道 run 不存在。
         let exists: i64 = conn.query_row(
@@ -147,9 +143,7 @@ impl<'a> SqlFactWriter<'a> {
         )?;
         if exists == 0 {
             return Err(AuthorityError::Sqlite(
-                rusqlite::Error::InvalidParameterName(format!(
-                    "__run_id_not_found__:{run_id}"
-                )),
+                rusqlite::Error::InvalidParameterName(format!("__run_id_not_found__:{run_id}")),
             ));
         }
         Ok(Self {
@@ -171,9 +165,8 @@ impl<'a> SqlFactWriter<'a> {
         native_session_id: Option<&str>,
         parser_version: i64,
     ) -> Result<String, AuthorityError> {
-        let path_hash = agent_vitals_domain::source_identity::fnv1a64_hex(
-            path.to_string_lossy().as_bytes(),
-        );
+        let path_hash =
+            agent_vitals_domain::source_identity::fnv1a64_hex(path.to_string_lossy().as_bytes());
         let source_id = format!("{host}:{path_hash}");
         self.conn.execute(
             "INSERT INTO source_files(
@@ -246,11 +239,11 @@ impl<'a> SqlFactWriter<'a> {
     ) -> Result<SqlInsertReport, AuthorityError> {
         use crate::evidence::replay;
         let rep = replay(jsonl_path).map_err(|e| match e {
-            crate::evidence::AppendError::Corrupt { line_no } => AuthorityError::Sqlite(
-                rusqlite::Error::InvalidParameterName(format!(
+            crate::evidence::AppendError::Corrupt { line_no } => {
+                AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(format!(
                     "facts jsonl corrupt line {line_no} — 先修源再迁移"
-                )),
-            ),
+                )))
+            }
             crate::evidence::AppendError::Io(e) => AuthorityError::Io(e),
             crate::evidence::AppendError::Invalid(_) => {
                 unreachable!("replay() never validates facts")
@@ -324,14 +317,7 @@ impl<'a> SqlFactWriter<'a> {
     /// upsert_source_file 同构；**Phase 3 差量/repair 必须排除此类合成行**
     /// ——size/mtime 恒 0，按文件指纹判定会把它们当 vanished 假阳性）。
     pub fn upsert_batch_source(&self, host: &str) -> Result<String, AuthorityError> {
-        self.upsert_source_file(
-            host,
-            Path::new(&format!("/sync/{host}")),
-            0,
-            0,
-            None,
-            1,
-        )
+        self.upsert_source_file(host, Path::new(&format!("/sync/{host}")), 0, 0, None, 1)
     }
 
     /// 事实批写入。每 candidate：契约校验（build_usage_fact 同款）→ 不合格
@@ -405,7 +391,9 @@ impl<'a> SqlFactWriter<'a> {
                 report.rejected += 1;
                 continue;
             };
-            let r = FactReader { obj: built.as_object().expect("build 产物必为对象") };
+            let r = FactReader {
+                obj: built.as_object().expect("build 产物必为对象"),
+            };
             let host = r.s("host").unwrap_or_default().to_string();
             let ns = r.s("machine_namespace").unwrap_or_default().to_string();
             let sid = r.s("native_session_id").unwrap_or_default().to_string();
@@ -413,17 +401,31 @@ impl<'a> SqlFactWriter<'a> {
             let skey = session_key(&host, &ns, &sid, profile);
             let ts_ms = ts_ms.expect("doc 只在事件时间可 parse 时才 Some——此处必有毫秒"); // 见上方校验：doc 非 None 即 ts 已 parse
             let peak = peak_of(r.s("event_ts_utc").unwrap_or_default());
-            let model_id = r.s("model_id").or_else(|| r.s("model_raw")).map(str::to_string);
-            let provider_id = r.s("provider_id").or_else(|| r.s("billing_source")).map(str::to_string);
+            let model_id = r
+                .s("model_id")
+                .or_else(|| r.s("model_raw"))
+                .map(str::to_string);
+            let provider_id = r.s("provider_id").map(str::to_string);
+            let provider_raw = r.s("provider_raw").map(str::to_string);
+            let billing_source = r.s("billing_source").map(str::to_string);
+            let billing_mode = r.s("billing_mode").map(str::to_string);
+            let pricing_basis = r.s("pricing_basis").map(str::to_string);
+            let evidence_basis = r.s("evidence_basis").map(str::to_string);
+            let normalization_version = r.s("normalization_version").map(str::to_string);
+            let route_evidence_id = r.s("route_evidence_id").map(str::to_string);
+            let attribution_version = r.s("attribution_version").map(str::to_string);
 
             let n = self.conn.execute(
                 "INSERT INTO usage_facts(
                      fact_id, host, machine_namespace, native_session_id, session_key,
                      source_event_id, observation_kind, source_profile,
-                     provider_id, model_id, event_ts_ms, event_peak,
+                     provider_id, provider_raw, billing_source, billing_mode,
+                     pricing_basis, evidence_basis, normalization_version,
+                     route_evidence_id, attribution_version,
+                     model_id, event_ts_ms, event_peak,
                      uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      source_id, ingested_run_id, created_at_ms, updated_at_ms)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
                  ON CONFLICT DO NOTHING",
                 rusqlite::params![
                     r.s("fact_id").unwrap_or_default(),
@@ -432,6 +434,14 @@ impl<'a> SqlFactWriter<'a> {
                     r.s("observation_kind").unwrap_or_default(),
                     r.s("source_profile"),
                     provider_id,
+                    provider_raw,
+                    billing_source,
+                    billing_mode,
+                    pricing_basis,
+                    evidence_basis,
+                    normalization_version,
+                    route_evidence_id,
+                    attribution_version,
                     model_id,
                     ts_ms,
                     peak,
@@ -445,6 +455,38 @@ impl<'a> SqlFactWriter<'a> {
                     self.now_ms,
                 ],
             )?;
+            if n == 0 {
+                // A replay may discover stronger provider evidence for an
+                // already stored fact. Enrich nullable attribution columns by
+                // fact_id without changing the immutable fact identity.
+                self.conn.execute(
+                    "UPDATE usage_facts SET
+                       provider_id = COALESCE(provider_id, ?2),
+                       provider_raw = COALESCE(provider_raw, ?3),
+                       billing_source = COALESCE(billing_source, ?4),
+                       billing_mode = COALESCE(billing_mode, ?5),
+                       pricing_basis = COALESCE(pricing_basis, ?6),
+                       evidence_basis = COALESCE(evidence_basis, ?7),
+                       normalization_version = COALESCE(normalization_version, ?8),
+                       route_evidence_id = COALESCE(route_evidence_id, ?9),
+                       attribution_version = COALESCE(attribution_version, ?10),
+                       updated_at_ms = ?11
+                     WHERE fact_id = ?1",
+                    rusqlite::params![
+                        r.s("fact_id").unwrap_or_default(),
+                        provider_id,
+                        provider_raw,
+                        billing_source,
+                        billing_mode,
+                        pricing_basis,
+                        evidence_basis,
+                        normalization_version,
+                        route_evidence_id,
+                        attribution_version,
+                        self.now_ms,
+                    ],
+                )?;
+            }
             if n > 0 {
                 report.inserted += 1
             } else {
@@ -478,8 +520,10 @@ impl<'a> SqlFactWriter<'a> {
                 if stored_differs == Some(true) {
                     self.write_rejected(
                         &format!("payload_conflict:{}", r.s("fact_id").unwrap_or_default()),
-                        &["same fact_id, different payload — 源端更正需要显式处理流程"
-                            .to_string()],
+                        &[
+                            "same fact_id, different payload — 源端更正需要显式处理流程"
+                                .to_string(),
+                        ],
                     )?;
                 }
                 report.duplicate += 1;
@@ -662,20 +706,40 @@ mod tests {
         db.with_immediate_txn(|conn| {
             let w1 = SqlFactWriter::new(conn, "run-1", 1_200)?;
             let a = w1.upsert_source_file(
-                "claude-code", std::path::Path::new("/h/x.jsonl"), 10, 11, None, 1)?;
+                "claude-code",
+                std::path::Path::new("/h/x.jsonl"),
+                10,
+                11,
+                None,
+                1,
+            )?;
             let w2 = SqlFactWriter::new(conn, "run-1", 8_300)?;
             let b = w2.upsert_source_file(
-                "claude-code", std::path::Path::new("/h/x.jsonl"), 20, 22, None, 1)?;
+                "claude-code",
+                std::path::Path::new("/h/x.jsonl"),
+                20,
+                22,
+                None,
+                1,
+            )?;
             assert_eq!(a, b, "同 (host,path) 必须同 source_id");
             Ok(())
-        }).unwrap();
-        let (first, last): (i64, i64) = db.conn().query_row(
-            "SELECT first_seen_at_ms, last_seen_at_ms FROM source_files", [],
-            |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        })
+        .unwrap();
+        let (first, last): (i64, i64) = db
+            .conn()
+            .query_row(
+                "SELECT first_seen_at_ms, last_seen_at_ms FROM source_files",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(first, 1_200, "first_seen 首次定格");
         assert_eq!(last, 8_300, "last_seen 滚到最近观测");
-        let n: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM source_files", [], |r| r.get(0)).unwrap();
+        let n: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM source_files", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1, "只建一行");
         std::fs::remove_file(&path).ok();
     }
@@ -691,11 +755,20 @@ mod tests {
             let w2 = SqlFactWriter::new(conn, "run-1", 9_500)?;
             w2.upsert_session("claude-code", "full-ns", "s9", None, 9_500)?;
             Ok(())
-        }).unwrap();
-        let (k, started, last): (String, i64, i64) = db.conn().query_row(
-            "SELECT session_key, started_at_ms, last_observed_at_ms FROM sessions", [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
-        assert_eq!(k, "11:claude-code|2:s9|7:default|7:full-ns", "profile None → default");
+        })
+        .unwrap();
+        let (k, started, last): (String, i64, i64) = db
+            .conn()
+            .query_row(
+                "SELECT session_key, started_at_ms, last_observed_at_ms FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            k, "11:claude-code|2:s9|7:default|7:full-ns",
+            "profile None → default"
+        );
         assert_eq!(started, 2_000, "started 首见定格");
         assert_eq!(last, 9_500, "last_observed 顶到最近");
         std::fs::remove_file(&path).ok();
@@ -710,12 +783,17 @@ mod tests {
         f["output_tokens"] = Value::from(-7);
         let (r, _) = apply_txn(&db, 1_500, "sess-a", &[f]).unwrap();
         assert_eq!((r.inserted, r.rejected, r.duplicate), (0, 1, 0));
-        let n: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0)).unwrap();
+        let n: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 0, "不合格事实不得入 usage_facts");
-        let (code, sev): (String, String) = db.conn().query_row(
-            "SELECT code, severity FROM data_quality_issues", [],
-            |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        let (code, sev): (String, String) = db
+            .conn()
+            .query_row("SELECT code, severity FROM data_quality_issues", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
         assert_eq!(code, "invalid_fact");
         assert_eq!(sev, "warning");
         std::fs::remove_file(&path).ok();
@@ -732,8 +810,10 @@ mod tests {
             let (r, _) = apply_txn(&db, now, "sess-a", std::slice::from_ref(&f)).unwrap();
             assert_eq!(r.rejected, 1);
         }
-        let n: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM data_quality_issues", [], |r| r.get(0)).unwrap();
+        let n: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM data_quality_issues", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1, "同事实连拒两次也只一条质量行");
         std::fs::remove_file(&path).ok();
     }
@@ -747,9 +827,14 @@ mod tests {
         f["native_session_id"] = Value::from("sess-other");
         let res = apply_txn(&db, 1_500, "sess-a", &[f]);
         assert!(res.is_err(), "混会话必须报错");
-        assert!(res.unwrap_err().to_string().contains("__mixed_session_batch__"));
-        let n: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0)).unwrap();
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("__mixed_session_batch__"));
+        let n: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 0, "批错整段事务回滚");
         std::fs::remove_file(&path).ok();
     }
@@ -763,8 +848,10 @@ mod tests {
         f["event_ts_utc"] = Value::from("garbage");
         let (r, _) = apply_txn(&db, 1_500, "sess-a", &[f]).unwrap();
         assert_eq!(r.rejected, 1, "不可 parse 的时间戳事实必须 invalid");
-        let n: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0)).unwrap();
+        let n: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM usage_facts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 0);
         std::fs::remove_file(&path).ok();
     }
@@ -798,12 +885,15 @@ mod tests {
         let (db, path) = open_db("wire");
         let (r, src) = apply_txn(&db, 1_500, "sess-a", &[mk_fact("u")]).unwrap();
         assert_eq!(r.inserted, 1);
-        let (k, s, run, ts, pk): (String, String, String, i64, i64) = db.conn().query_row(
-            "SELECT session_key, source_id, ingested_run_id, event_ts_ms, event_peak
+        let (k, s, run, ts, pk): (String, String, String, i64, i64) = db
+            .conn()
+            .query_row(
+                "SELECT session_key, source_id, ingested_run_id, event_ts_ms, event_peak
              FROM usage_facts",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        ).unwrap();
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
         assert_eq!(k, "11:claude-code|6:sess-a|7:default|4:ns-m");
         assert_eq!(s, src);
         assert_eq!(run, "run-1");
