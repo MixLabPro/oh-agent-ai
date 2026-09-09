@@ -300,6 +300,7 @@ pub(crate) struct RuntimeSnapshotWrite<'a> {
     pub backfill_marker: Option<&'a str>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_flat_facts_with_sources(
     db: &AuthorityDb,
     host: &str,
