@@ -80,8 +80,10 @@ use serde_json::{Map, Value, json};
 /// 导出列清单（与模块头映射表一一对应）。新增列 = 新增映射行 + 重审 redacted
 /// 的身份白名单，不是顺手加个字段。
 const EXPORT_COLUMNS: &str = "fact_id, host, machine_namespace, native_session_id, \
-     source_event_id, observation_kind, source_profile, provider_id, model_id, \
-     event_ts_ms, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens";
+     source_event_id, observation_kind, source_profile, provider_id, provider_raw, \
+     billing_source, billing_mode, pricing_basis, evidence_basis, normalization_version, \
+     route_evidence_id, attribution_version, model_id, event_ts_ms, uncached_input_tokens, \
+     cache_read_tokens, cache_write_tokens, output_tokens";
 
 /// 打开权威库（注入时钟，本 crate 不读时钟的纪律由 `sql_sync::now_ms` 承担）。
 fn open_authority(
@@ -155,6 +157,11 @@ fn row_to_fields(r: &rusqlite::Row<'_>) -> Result<Map<String, Value>, String> {
     }
     if let Some(p) = get_opt("provider_id")?.filter(|s| !s.is_empty()) {
         fields.insert("provider_id".into(), json!(p));
+    }
+    for key in ["provider_raw", "billing_source", "billing_mode", "pricing_basis", "evidence_basis", "normalization_version", "route_evidence_id", "attribution_version"] {
+        if let Some(v) = get_opt(key)?.filter(|s| !s.is_empty()) {
+            fields.insert(key.to_string(), json!(v));
+        }
     }
     // event_ts_ms 是 writer 对 event_ts_utc 的正向 parse；契约门写入路径必填
     // 可 parse 时间，NULL 行理论上不存在（防御：不出键，不编时间）。

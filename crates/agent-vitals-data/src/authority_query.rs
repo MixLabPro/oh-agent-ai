@@ -109,6 +109,16 @@ pub(crate) const SQL_HOURLY_BY_HOST_MODEL: &str = "SELECT host, COALESCE(model_i
            AND host = ?5
          GROUP BY host, model_id, bj_hour";
 
+pub(crate) const SQL_HOURLY_BY_HOST_PROVIDER: &str = "SELECT host, COALESCE(provider_id, '<unknown>'),
+                CAST(((event_ts_ms + ?1) / ?2) % 24 AS TEXT) AS bj_hour,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens)
+         FROM usage_facts
+         WHERE observation_kind != 'legacy_aggregate' AND deleted_at_ms IS NULL
+           AND event_ts_ms IS NOT NULL AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+           AND host = ?5
+         GROUP BY host, provider_id, bj_hour";
+
 /// [`facts_page_window`]：键集分页（`(event_ts_ms, fact_id)` 游标，无 OFFSET）。
 pub(crate) const SQL_FACTS_PAGE_WINDOW: &str =
     "SELECT fact_id, native_session_id, model_id, event_ts_ms,
@@ -750,6 +760,36 @@ pub fn hourly_by_host_model(
             let (host, model, hour, uncached, cache_read, cache_write, output) = row?;
             let cell = HourlyCell { uncached_input_tokens: uncached, cache_read_tokens: cache_read, cache_write_tokens: cache_write, output_tokens: output };
             out.entry((host, model)).or_default().insert(format!("{:0>2}", hour), cell);
+        }
+    }
+    Ok(out)
+}
+
+pub fn hourly_by_host_provider(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    hosts: &[String],
+) -> Result<HostModelHourly, AuthorityError> {
+    let selected: Vec<String> = if hosts.is_empty() {
+        conn.prepare("SELECT DISTINCT host FROM usage_facts WHERE deleted_at_ms IS NULL ORDER BY host")?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<String>, _>>()?
+    } else { hosts.to_vec() };
+    let mut out: HostModelHourly = BTreeMap::new();
+    for host in selected {
+        let mut stmt = conn.prepare(SQL_HOURLY_BY_HOST_PROVIDER)?;
+        let rows = stmt.query_map(
+            rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms, host],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?)),
+        )?;
+        for row in rows {
+            let (host, provider, hour, uncached, cache_read, cache_write, output) = row?;
+            out.entry((host, provider)).or_default().insert(format!("{:0>2}", hour), HourlyCell {
+                uncached_input_tokens: uncached, cache_read_tokens: cache_read,
+                cache_write_tokens: cache_write, output_tokens: output,
+            });
         }
     }
     Ok(out)

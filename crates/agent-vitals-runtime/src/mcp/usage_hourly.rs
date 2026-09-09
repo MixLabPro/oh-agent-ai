@@ -43,7 +43,7 @@ pub fn spec() -> ToolSpec {
                 "group_by": {
                     "type": "string",
                     "enum": ["host", "model", "provider"],
-                    "description": "Dimension to aggregate by. `model` and `provider` are identical here (provider_id is not currently stored separately from the model — see spec §5.3 §3.4 not yet built)."
+                    "description": "Dimension to aggregate by. `provider` uses provider_id; missing evidence is grouped under <unknown>."
                 },
                 "hosts": {
                     "type": "array",
@@ -127,7 +127,8 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
 
     let series = match group_by {
         "host" => series_by_host(conn, start_ms, end_ms, &host_filter)?,
-        "model" | "provider" => series_by_model(conn, start_ms, end_ms, &host_filter, &model_filter)?,
+        "model" => series_by_model(conn, start_ms, end_ms, &host_filter, &model_filter)?,
+        "provider" => series_by_provider(conn, start_ms, end_ms, &host_filter)?,
         other => {
             return Err(ToolError::new(
                 "invalid_argument",
@@ -180,11 +181,12 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         json!({
             "key": match group_by {
                 "host" => json!({ "host": host }),
-                "model" | "provider" => json!({
+                "model" => json!({
                     "host": host,
                     "model": model,
                     "identity_kind": "host_raw",
                 }),
+                "provider" => json!({ "host": host, "provider": model }),
                 _ => unreachable!(),
             },
             "hours": hours,
@@ -304,6 +306,16 @@ fn series_by_model(
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+fn series_by_provider(
+    conn: &rusqlite::Connection,
+    start_ms: i64,
+    end_ms: i64,
+    host_filter: &[String],
+) -> Result<Vec<SeriesEntry>, ToolError> {
+    let map = authority_query::hourly_by_host_provider(conn, start_ms, end_ms, host_filter).map_err(too)?;
+    Ok(map.into_iter().collect())
 }
 
 fn compute_totals_by_host(series: &[SeriesEntry]) -> BTreeMap<String, i64> {
@@ -594,6 +606,24 @@ mod tests {
         assert!(series.iter().any(|s| s["key"]["model"] == "claude-sonnet-5"));
         assert!(series.iter().any(|s| s["key"]["model"] == "gpt-5-codex"));
 
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn provider_axis_keeps_cogfoundry_separate_from_openai() {
+        let home = tmp_home("provider-axis");
+        seed_db(&home);
+        let db = AuthorityDb::open(&agent_vitals_data::authority::default_authority_path(&home), 1_700_000_000_000).unwrap();
+        let (start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
+        seed_fact(&db, "openai-f", "codex", "gpt-5.6-sol", start + 3_600_000, 10, 0, 0, 1);
+        seed_fact(&db, "cog-f", "codex", "gpt-5.6-sol", start + 3_600_000, 20, 0, 0, 2);
+        db.conn().execute("UPDATE usage_facts SET provider_id = CASE fact_id WHEN 'openai-f' THEN 'openai' ELSE 'cogfoundry.ai' END", []).unwrap();
+        drop(db);
+        let env = run(&json!({"date":"2026-09-07","group_by":"provider"}), &home).unwrap();
+        let series = env["data"]["series"].as_array().unwrap();
+        assert_eq!(series.len(), 2);
+        assert!(series.iter().any(|s| s["key"]["provider"] == "openai" && s["total_tokens"] == 11));
+        assert!(series.iter().any(|s| s["key"]["provider"] == "cogfoundry.ai" && s["total_tokens"] == 22));
         let _ = std::fs::remove_dir_all(&home);
     }
 }
