@@ -170,15 +170,13 @@ pub fn resolve_billing_attribution(
                 | EvidenceBasis::Missing
         )
         || (model_provider == Some("custom"));
-    let has_provider = provider_id.is_some();
     BillingAttribution {
         provider_id,
         provider_raw: raw,
-        billing_mode: if has_provider || model_provider == Some("custom") {
-            BillingMode::Metered
-        } else {
-            BillingMode::Unknown
-        },
+        // Missing/conflicting provider evidence is still a metered estimate;
+        // Unknown is reserved for presentation of absent identity, not a free
+        // or unpriced billing mode.
+        billing_mode: BillingMode::Metered,
         pricing_basis: if unresolved {
             "metered_estimate"
         } else {
@@ -233,6 +231,14 @@ mod tests {
     #[test]
     fn custom_without_route_is_unresolved_metered() {
         let a = resolve_billing_attribution(Some("custom"), None);
+        assert_eq!(a.billing_mode, BillingMode::Metered);
+        assert_eq!(a.pricing_basis, "metered_estimate");
+        assert!(a.has_unresolved);
+    }
+
+    #[test]
+    fn missing_provider_is_unresolved_metered_not_free() {
+        let a = resolve_billing_attribution(None, None);
         assert_eq!(a.billing_mode, BillingMode::Metered);
         assert_eq!(a.pricing_basis, "metered_estimate");
         assert!(a.has_unresolved);

@@ -298,7 +298,7 @@ def _consumed_to_usage_fact(
         evidence_basis = route_evidence_basis
     elif model_provider == "custom" or model_provider is None:
         provider_id = normalized_route
-        billing_mode = "metered" if provider_id or model_provider == "custom" else "unknown"
+        billing_mode = "metered"
         unresolved = True
         pricing_basis = "metered_estimate"
         evidence_basis = route_evidence_basis

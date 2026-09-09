@@ -228,7 +228,7 @@ def _observation_to_usage_fact(obs, machine_namespace, native_session_id, profil
         "billing_source": (
             obs.provider_raw.lower() if isinstance(obs.provider_raw, str) and obs.provider_raw.strip() else None
         ),
-        "billing_mode": "metered" if obs.provider_raw else "unknown",
+        "billing_mode": "metered",
         "pricing_basis": "metered_estimate" if obs.provider_raw else "metered_estimate",
         "evidence_basis": "session-native" if obs.provider_raw else "missing",
         "normalization_version": "provider-v0.11",
