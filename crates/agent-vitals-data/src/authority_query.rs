@@ -456,6 +456,43 @@ pub fn codex_by_hour_model(
     ))
 }
 
+/// Codex facts grouped by provider first, then in the legacy by-hour/model
+/// shape. This keeps provider attribution from being folded into OpenAI costs.
+pub fn codex_by_hour_provider_model(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<BTreeMap<String, Value>, AuthorityError> {
+    let mut stmt = conn.prepare(
+        "SELECT CAST(((event_ts_ms + ?1) / ?2) AS INTEGER), provider_id, model_id,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens)
+         FROM usage_facts
+         WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+         GROUP BY ((event_ts_ms + ?1) / ?2), provider_id, model_id"
+    )?;
+    let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?,
+            r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?))
+    })?;
+    let mut out: BTreeMap<String, BTreeMap<String, Map<String, Value>>> = BTreeMap::new();
+    for row in rows {
+        let (hour_idx, provider, model, u, cr, cw, o) = row?;
+        let provider = provider.unwrap_or_else(|| "<unknown>".to_string());
+        let Some(model) = model else { continue };
+        let key = format!("{}T{:02}", civil_date_from_days(hour_idx.div_euclid(24)), hour_idx.rem_euclid(24));
+        let entry = out.entry(provider).or_default().entry(key).or_default();
+        entry.insert(model, json!({"standard": {
+            "uncached_input_tokens": u, "cached_input_tokens": cr,
+            "cache_write_input_tokens": cw, "output_tokens": o,
+            "reasoning_output_tokens": 0
+        }}));
+    }
+    Ok(out.into_iter().map(|(p, h)| (p, Value::Object(h.into_iter().map(|(k,v)| (k, Value::Object(v))).collect()))).collect())
+}
+
 /// coverage 分母版本（Phase 3.3 设计定稿）：三维定义（usage / price / sync）
 /// 的演进刻度。定义变更必须递增——旧快照的覆盖率与新快照不可无声互比
 /// （data_contract::CoverageStatus 的同一条纪律）。

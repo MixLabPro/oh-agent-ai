@@ -880,6 +880,43 @@ fn codex_provider_amount_from_hours(
     (h, tk)
 }
 
+/// Provider-aware Codex projection. OpenAI keeps the subscription/nominal
+/// pricing path; custom or unknown routes are isolated and remain unresolved
+/// instead of being silently priced as OpenAI.
+fn codex_provider_amounts_from_sql(
+    db: &Option<agent_vitals_data::authority::AuthorityDb>,
+    bounds: Option<(i64, i64)>,
+    day: Option<&str>,
+    fallback: &serde_json::Value,
+    cards: &PricingCards,
+) -> BTreeMap<String, HostAmount> {
+    let Some((start, end)) = bounds else {
+        return BTreeMap::from([(String::from("codex/openai"), codex_provider_amount_from_hours(fallback, day, cards).0)]);
+    };
+    let Some(db) = db else { return BTreeMap::new(); };
+    let grouped = agent_vitals_data::authority_query::codex_by_hour_provider_model(db.conn(), start, end).unwrap_or_default();
+    let mut out = BTreeMap::new();
+    for (provider, hours) in grouped {
+        let key = format!("codex/{provider}");
+        if provider == "openai" {
+            out.insert(key, codex_provider_amount_from_hours(&hours, day, cards).0);
+        } else {
+            let model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&hours, None);
+            let has_tokens = model.to_string().contains("uncached_input_tokens");
+            if has_tokens {
+                out.insert(key.clone(), HostAmount {
+                    host_id: key,
+                    amounts_by_basis: BTreeMap::new(),
+                    currency: Some("USD".to_string()),
+                    has_unresolved: true,
+                    freshness: day.map(day_freshness).unwrap_or_else(|| Freshness { state: FreshnessState::Partial, last_observed_at: Some("sql-facts".to_string()) }),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// DSH 窗口（`days` map 或单日值）的 token 计量：DSH 四桶词表直读
 /// （`uncached_input_tokens` 词表，与 claude/codex 不同——见 fixtures/v09
 /// 的 _doc）。`window` 是月份前缀或完整日期。
@@ -1554,9 +1591,9 @@ impl SummaryRepository for SqlSummaryRepository {
             "dsh/deepseek-official".to_string(),
             dsh_provider_amount(dsh_cost, latest_day.as_deref()),
         );
-        let (codex_prov, _codex_prov_tk) =
-            codex_provider_amount_from_hours(&by_hour_model, None, &cards);
-        by_provider.insert("codex/openai".to_string(), codex_prov);
+        by_provider.extend(codex_provider_amounts_from_sql(
+            &db, bounds, None, &by_hour_model, &cards,
+        ));
         by_provider.extend(claude_provider_amounts_from_days(&claude_days_map, &cards));
         apply_subscription_fees(&mut by_provider, &query.month, &cards);
         // Phase 2.8：用户显式录入的宿主账单（WorkBuddy 积分 / 中转对账单…）→
@@ -1636,9 +1673,9 @@ impl SummaryRepository for SqlSummaryRepository {
             "dsh/deepseek-official".to_string(),
             dsh_provider_amount(cost, day_value.as_ref().map(|_| query.date.as_str())),
         );
-        let (codex_prov, _codex_prov_tk) =
-            codex_provider_amount_from_hours(&by_hour_model, Some(&query.date), &cards);
-        by_provider.insert("codex/openai".to_string(), codex_prov);
+        by_provider.extend(codex_provider_amounts_from_sql(
+            &db, bounds, Some(&query.date), &by_hour_model, &cards,
+        ));
         by_provider.extend(claude_provider_amounts_from_days(&claude_days_map, &cards));
 
         let freshness = aggregate_freshness(&by_host);
@@ -1862,7 +1899,10 @@ mod tests {
                 "{:?}",
                 summary.by_provider.keys()
             );
-            assert!(summary.by_provider.contains_key("codex/openai"));
+            assert!(summary.by_provider.contains_key("codex/openai")
+                || summary.by_provider.contains_key("codex/<unknown>"),
+                "Codex facts without provider evidence must remain unresolved: {:?}",
+                summary.by_provider.keys());
             // DSH 条目与宿主条目同额同档（同一 provider 镜像）。
             let dsh_host = &summary.by_host["dsh"];
             let dsh_prov = &summary.by_provider["dsh/deepseek-official"];
