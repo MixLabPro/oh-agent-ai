@@ -148,15 +148,16 @@ pub fn resolve_billing_attribution(
     let route_conflicts = matches!(route_basis, EvidenceBasis::Conflict)
         || (route_basis.strength() >= EvidenceBasis::SessionNative.strength()
             && route_provider.as_deref().is_some_and(|p| p != "openai"));
-    let is_official_subscription =
-        model_provider == Some("openai") && route.is_some() && !route_conflicts;
+    let is_official_subscription = model_provider == Some("openai")
+        && matches!(route_basis, EvidenceBasis::SessionNative)
+        && !route_conflicts;
     if is_official_subscription {
         return BillingAttribution {
             provider_id,
             provider_raw: raw,
             billing_mode: BillingMode::Subscription,
             pricing_basis: "session-provider".to_string(),
-            evidence_basis: EvidenceBasis::SessionNative,
+            evidence_basis: route_basis,
             has_unresolved: false,
         };
     }
@@ -216,9 +217,9 @@ mod tests {
         let a =
             resolve_billing_attribution(Some("openai"), Some(&cog(EvidenceBasis::ConfigCurrent)));
         assert_eq!(a.provider_id.as_deref(), Some("openai"));
-        assert_eq!(a.billing_mode, BillingMode::Subscription);
-        assert!(!a.has_unresolved);
-        assert_eq!(a.evidence_basis, EvidenceBasis::SessionNative);
+        assert_eq!(a.billing_mode, BillingMode::Metered);
+        assert!(a.has_unresolved);
+        assert_eq!(a.evidence_basis, EvidenceBasis::ConfigCurrent);
     }
 
     #[test]

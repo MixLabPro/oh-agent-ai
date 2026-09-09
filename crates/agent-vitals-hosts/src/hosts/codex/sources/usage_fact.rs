@@ -784,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_session_with_cogfoundry_route_emits_metered_attribution() {
+    fn custom_session_without_route_ignores_current_config_hint() {
         let tmp = temp_dir();
         let p = tmp.join("rollout-cog.jsonl");
         let mut lines = rollout_lines();
@@ -805,10 +805,10 @@ mod tests {
             Some(&route),
         )
         .unwrap();
-        assert_eq!(result.facts[0]["provider_id"], "cogfoundry.ai");
+        assert!(result.facts[0]["provider_id"].is_null());
         assert_eq!(result.facts[0]["billing_mode"], "metered");
         assert_eq!(result.facts[0]["pricing_basis"], "metered_estimate");
-        assert_eq!(result.facts[0]["evidence_basis"], "config-current");
+        assert_eq!(result.facts[0]["evidence_basis"], "missing");
     }
 
     #[test]

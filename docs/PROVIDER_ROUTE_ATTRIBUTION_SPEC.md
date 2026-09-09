@@ -122,6 +122,9 @@ has_unresolved    = true
 ```
 
 `has_unresolved` 表示计费金额或历史路由仍可能不完整；即使 provider identity 已明确，也不能把估算冒充实际账单。
+在 v0.11 数据库兼容范围内，`has_unresolved` 与 `pricing_method` 由统一 summary/read-model
+根据 `billing_mode`、`pricing_basis`、`evidence_basis` 和是否命中价卡派生；不得把派生的
+估算字段回写成事实账单。后续 schema 版本再考虑将其物化到 `usage_facts`。
 
 ## 5. Session log 写入契约
 

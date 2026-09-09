@@ -345,36 +345,6 @@ pub(crate) fn write_flat_facts_with_sources(
                 ],
             )?;
         }
-        // Route evidence is session-native and therefore belongs to the fact
-        // that observed it.  Persist every distinct evidence id from the batch
-        // instead of attaching one current-config route to all historical rows.
-        let mut fact_routes = std::collections::HashSet::new();
-        for fact in facts {
-            let Some(evidence_id) = fact.get("route_evidence_id").and_then(Value::as_str) else {
-                continue;
-            };
-            if !fact_routes.insert(evidence_id.to_string()) {
-                continue;
-            }
-            conn.execute(
-                "INSERT OR IGNORE INTO route_evidence(
-                   evidence_id, host, machine_namespace, provider_raw, endpoint_host,
-                   evidence_basis, observed_at_ms, ingested_run_id)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![
-                    evidence_id,
-                    fact.get("host").and_then(Value::as_str).unwrap_or(host),
-                    machine_namespace,
-                    fact.get("provider_raw").and_then(Value::as_str),
-                    fact.get("endpoint_host").and_then(Value::as_str),
-                    fact.get("evidence_basis")
-                        .and_then(Value::as_str)
-                        .unwrap_or("missing"),
-                    now,
-                    run_id,
-                ],
-            )?;
-        }
         for (path, (size_bytes, mtime_ns)) in sources {
             writer.upsert_source_file(host, path, *size_bytes, *mtime_ns, None, PARSER_VERSION)?;
             outcome.files_synced += 1;
@@ -397,6 +367,39 @@ pub(crate) fn write_flat_facts_with_sources(
             return Ok(());
         }
         let source_id = writer.upsert_batch_source(host)?;
+        // Route evidence is session-native and belongs to the fact that
+        // observed it. Persist its session and source links before inserting
+        // usage_facts so the FK trigger can validate every evidence id.
+        let mut fact_routes = std::collections::HashSet::new();
+        for fact in facts {
+            let Some(evidence_id) = fact.get("route_evidence_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if !fact_routes.insert(evidence_id.to_string()) {
+                continue;
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO route_evidence(
+                   evidence_id, host, machine_namespace, native_session_id,
+                   provider_raw, endpoint_host, evidence_basis, observed_at_ms,
+                   source_id, ingested_run_id)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    evidence_id,
+                    fact.get("host").and_then(Value::as_str).unwrap_or(host),
+                    machine_namespace,
+                    fact.get("native_session_id").and_then(Value::as_str),
+                    fact.get("provider_raw").and_then(Value::as_str),
+                    fact.get("endpoint_host").and_then(Value::as_str),
+                    fact.get("evidence_basis")
+                        .and_then(Value::as_str)
+                        .unwrap_or("missing"),
+                    now,
+                    source_id,
+                    run_id,
+                ],
+            )?;
+        }
         if let Some(snapshot) = runtime_snapshot.as_ref().and_then(|write| write.snapshot) {
             let observed_at = snapshot
                 .get("observed_at")
@@ -432,6 +435,31 @@ pub(crate) fn write_flat_facts_with_sources(
         }
         if facts.is_empty() {
             return Ok(());
+        }
+        for fact in facts
+            .iter()
+            .filter(|fact| fact.get("evidence_basis").and_then(Value::as_str) == Some("conflict"))
+        {
+            let fact_id = fact
+                .get("fact_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            conn.execute(
+                "INSERT INTO data_quality_issues(
+                     issue_id, scope_type, scope_key, code, severity,
+                     first_seen_at_ms, last_seen_at_ms, detail_json)
+                 VALUES (?1, 'fact', ?2, 'conflicting_route_evidence', 'warning',
+                         ?3, ?3, ?4)
+                 ON CONFLICT(scope_type, scope_key, code)
+                 DO UPDATE SET last_seen_at_ms = excluded.last_seen_at_ms,
+                               detail_json = excluded.detail_json",
+                rusqlite::params![
+                    format!("route-conflict:{fact_id}"),
+                    fact_id,
+                    now,
+                    serde_json::to_string(fact).unwrap_or_default(),
+                ],
+            )?;
         }
         let (groups, missing) = group_facts_by_session(facts);
         for fact in &missing {
