@@ -3655,7 +3655,7 @@ session_store={store} fold={fold}"
                 let conserved = before_ids.iter().all(|id| after_ids.iter().any(|x| x == id));
                 let conflict_count: i64 = conn.query_row(
                     "SELECT COUNT(*) FROM data_quality_issues
-                     WHERE resolved_at_ms IS NULL AND detail_json LIKE '%attribution_conflict%'",
+                     WHERE resolved_at_ms IS NULL AND scope_key LIKE 'attribution_conflict:%'",
                     [], |r| r.get(0)
                 ).unwrap_or(0);
                 if !conserved {
