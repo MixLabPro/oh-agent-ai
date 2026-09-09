@@ -42,6 +42,7 @@ use agent_vitals_domain::usage::{
 use agent_vitals_domain::util::civil_from_unix_secs;
 use agent_vitals_domain::usage_fact::build_usage_fact;
 use agent_vitals_domain::util::post_fork;
+use agent_vitals_provider::{resolve_billing_attribution, EvidenceBasis, RouteEvidence};
 
 const HOST: &str = "dsh";
 const OBSERVATION_KIND: &str = "assistant-usage";
@@ -141,6 +142,19 @@ fn observation_to_usage_fact(
     // （正常 = 支配样本那刻 active config；compaction = 自带否则回落）——绝无
     // `__ambiguous__`（那是聚合层的派生状态，不进 fact）。
     fields.insert("provider_raw".into(), opt_str(&obs.provider_raw));
+    let route = obs.provider_raw.as_ref().map(|provider_raw| RouteEvidence {
+        provider_raw: Some(provider_raw.clone()),
+        endpoint_host: None,
+        evidence_basis: EvidenceBasis::SessionNative,
+    });
+    let attribution = resolve_billing_attribution(obs.provider_raw.as_deref(), route.as_ref());
+    fields.insert("provider_id".into(), json!(attribution.provider_id));
+    fields.insert("billing_source".into(), json!(attribution.provider_id));
+    fields.insert("billing_mode".into(), json!(attribution.billing_mode.as_str()));
+    fields.insert("pricing_basis".into(), json!(attribution.pricing_basis));
+    fields.insert("evidence_basis".into(), json!(attribution.evidence_basis.as_str()));
+    fields.insert("normalization_version".into(), json!("provider-v0.11"));
+    fields.insert("attribution_version".into(), json!("provider-v0.11"));
     fields.insert("model_raw".into(), opt_str(&obs.model_raw));
     fields.insert("uncached_input_tokens".into(), opt_i64(obs.uncached_input_tokens));
     fields.insert("cache_read_tokens".into(), opt_i64(obs.cache_read_tokens));

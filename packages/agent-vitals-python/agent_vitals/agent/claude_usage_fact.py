@@ -264,6 +264,16 @@ def _observation_to_usage_fact(
         # 只描述 source_event_id 的来源，不决定 time_basis。
         "time_basis": "native",
         "source_usage_semantics": "delta",
+        # Claude logs currently lack route evidence; do not infer Anthropic
+        # from a model name. Preserve usage as unresolved metered estimate.
+        "provider_raw": None,
+        "provider_id": None,
+        "billing_source": None,
+        "billing_mode": "metered",
+        "pricing_basis": "metered_estimate",
+        "evidence_basis": "missing",
+        "normalization_version": "provider-v0.11",
+        "attribution_version": "provider-v0.11",
         # provider/model 归属（Stage 1c）：只保留原始证据 `model_raw`。
         # DATA_PLANE §2.1「raw 值不可改；规范化 id 由带版本的映射产生」——
         # Stage 1 没有 resolver，model_id/model_normalized/provider_id/

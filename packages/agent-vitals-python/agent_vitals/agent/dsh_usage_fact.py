@@ -222,6 +222,17 @@ def _observation_to_usage_fact(obs, machine_namespace, native_session_id, profil
         # provider/model 原始证据（§3.4）：observer 已收敛成原始字符串或 None——
         # 绝无 __ambiguous__（那是 token_by_model 聚合层的派生状态，不进 fact）。
         "provider_raw": obs.provider_raw,
+        "provider_id": (
+            obs.provider_raw.lower() if isinstance(obs.provider_raw, str) and obs.provider_raw.strip() else None
+        ),
+        "billing_source": (
+            obs.provider_raw.lower() if isinstance(obs.provider_raw, str) and obs.provider_raw.strip() else None
+        ),
+        "billing_mode": "metered" if obs.provider_raw else "unknown",
+        "pricing_basis": "metered_estimate" if obs.provider_raw else "metered_estimate",
+        "evidence_basis": "session-native" if obs.provider_raw else "missing",
+        "normalization_version": "provider-v0.11",
+        "attribution_version": "provider-v0.11",
         "model_raw": obs.model_raw,
         "uncached_input_tokens": obs.uncached_input_tokens,
         "cache_read_tokens": obs.cache_read_tokens,

@@ -200,6 +200,18 @@ impl Observation {
         // 时发射（否则 unattributed skip），事件时间证据恒为原生。
         fields.insert("time_basis".into(), json!("native"));
         fields.insert("source_usage_semantics".into(), json!("delta"));
+        // Claude session logs currently expose model usage but no reliable
+        // provider route evidence. Keep the usage, classify it conservatively
+        // as an unresolved metered estimate, and never infer Anthropic from
+        // the model name.
+        fields.insert("provider_raw".into(), Value::Null);
+        fields.insert("provider_id".into(), Value::Null);
+        fields.insert("billing_source".into(), Value::Null);
+        fields.insert("billing_mode".into(), json!("metered"));
+        fields.insert("pricing_basis".into(), json!("metered_estimate"));
+        fields.insert("evidence_basis".into(), json!("missing"));
+        fields.insert("normalization_version".into(), json!("provider-v0.11"));
+        fields.insert("attribution_version".into(), json!("provider-v0.11"));
         // provider/model 归属（Stage 1c）：只保留原始证据 `model_raw`。DATA_PLANE
         // §2.1「raw 值不可改；规范化 id 由带版本的映射产生」——没有 resolver 就
         // 不填 model_id/model_normalized/provider_id/provider_raw/normalization_version
