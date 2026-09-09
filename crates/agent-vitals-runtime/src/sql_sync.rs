@@ -579,6 +579,32 @@ pub fn write_facts_to_authority(
                 .map_err(AuthorityError::from)?;
                 outcome.rejected += 1;
             }
+            for fact in facts
+                .iter()
+                .filter(|fact| fact.get("evidence_basis").and_then(Value::as_str) == Some("conflict"))
+            {
+                let fact_id = fact
+                    .get("fact_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                conn.execute(
+                    "INSERT INTO data_quality_issues(
+                         issue_id, scope_type, scope_key, code, severity,
+                         first_seen_at_ms, last_seen_at_ms, detail_json)
+                     VALUES (?1, 'fact', ?2, 'conflicting_route_evidence', 'warning',
+                             ?3, ?3, ?4)
+                     ON CONFLICT(scope_type, scope_key, code)
+                     DO UPDATE SET last_seen_at_ms = excluded.last_seen_at_ms,
+                                   detail_json = excluded.detail_json",
+                    rusqlite::params![
+                        format!("route-conflict:{fact_id}"),
+                        fact_id,
+                        now,
+                        serde_json::to_string(fact).unwrap_or_default(),
+                    ],
+                )
+                .map_err(AuthorityError::from)?;
+            }
             for (sid, profile, group) in groups {
                 w.upsert_session(host, machine_namespace, &sid, Some(&profile), now)?;
                 let report = w.insert_facts(&group, &source_id, &sid)?;
@@ -789,6 +815,32 @@ pub fn sync_host_sql(
                 )
                 .map_err(AuthorityError::from)?;
                 outcome.rejected += 1;
+            }
+            for fact in facts
+                .iter()
+                .filter(|fact| fact.get("evidence_basis").and_then(Value::as_str) == Some("conflict"))
+            {
+                let fact_id = fact
+                    .get("fact_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                conn.execute(
+                    "INSERT INTO data_quality_issues(
+                         issue_id, scope_type, scope_key, code, severity,
+                         first_seen_at_ms, last_seen_at_ms, detail_json)
+                     VALUES (?1, 'fact', ?2, 'conflicting_route_evidence', 'warning',
+                             ?3, ?3, ?4)
+                     ON CONFLICT(scope_type, scope_key, code)
+                     DO UPDATE SET last_seen_at_ms = excluded.last_seen_at_ms,
+                                   detail_json = excluded.detail_json",
+                    rusqlite::params![
+                        format!("route-conflict:{fact_id}"),
+                        fact_id,
+                        now,
+                        serde_json::to_string(fact).unwrap_or_default(),
+                    ],
+                )
+                .map_err(AuthorityError::from)?;
             }
             for (sid, profile, group) in groups {
                 let sid_ref = sid.as_str();
@@ -1118,6 +1170,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "succeeded");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn conflicting_route_fact_creates_quality_issue() {
+        use agent_vitals_domain::usage_fact::build_usage_fact;
+
+        let home = tmp_home("routeconflict");
+        let db = open_db(&home);
+        let mut fields = serde_json::Map::new();
+        fields.insert("machine_namespace".into(), serde_json::json!("ns-conflict"));
+        fields.insert("host".into(), serde_json::json!("codex"));
+        fields.insert("source_profile".into(), serde_json::json!("default"));
+        fields.insert("native_session_id".into(), serde_json::json!("sess-conflict"));
+        fields.insert("source_event_id".into(), serde_json::json!("evt-conflict"));
+        fields.insert("observation_kind".into(), serde_json::json!("token_count"));
+        fields.insert("event_ts_utc".into(), serde_json::json!("2026-09-06T10:00:00.000Z"));
+        fields.insert("model_raw".into(), serde_json::json!("gpt-5.6-sol"));
+        fields.insert("provider_id".into(), serde_json::json!("openai"));
+        fields.insert("provider_raw".into(), serde_json::json!("openai"));
+        fields.insert("endpoint_host".into(), serde_json::json!("router.cogfoundry.ai"));
+        fields.insert("evidence_basis".into(), serde_json::json!("conflict"));
+        fields.insert("billing_mode".into(), serde_json::json!("metered"));
+        fields.insert("pricing_basis".into(), serde_json::json!("metered_estimate"));
+        fields.insert("uncached_input_tokens".into(), serde_json::json!(10));
+        fields.insert("output_tokens".into(), serde_json::json!(4));
+        let fact = build_usage_fact(&fields).unwrap();
+        let fact_id = fact["fact_id"].as_str().unwrap().to_string();
+        assert_eq!(fact["evidence_basis"], "conflict");
+        let dirty = vec![(home.join("sess-conflict.jsonl"), (1u64, 2u64))];
+        sync_host_sql(&db, &home, "codex", "ns-conflict", &dirty, |_| {
+            Ok(vec![fact.clone()])
+        })
+        .unwrap();
+        let issue: (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT scope_key, code FROM data_quality_issues ORDER BY issue_id LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(issue.0, fact_id);
+        assert_eq!(issue.1, "conflicting_route_evidence");
         std::fs::remove_dir_all(&home).unwrap();
     }
 }
