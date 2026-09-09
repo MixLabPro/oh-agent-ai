@@ -337,7 +337,7 @@ mod tests {
         let (start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
         fact(&db, "fc1", "dsh", "3:dsh|10:abc-1234567|2:n", start + 3_600_000, 500);
         // 价卡覆盖到 event_ts；fallback_provider 的 deepseek-v4-pro 模型。
-        let payload = r#"{"fallback_provider":"deepseek-official","providers":{"deepseek-official":{"models":{"deepseek-v4-pro":{"input_uncached":{"off_peak":4.5,"peak":9.0}}}}}}"#;
+        let payload = r#"{"fallback_provider":"deepseek-official","providers":{"deepseek-official":{"models":{"m-x":{"input_uncached":{"off_peak":4.5,"peak":9.0}}}}}}"#;
         db.pricing_snapshot_put(
             "v1", "cli_seed", payload, start - 86_400_000,
         ).unwrap();

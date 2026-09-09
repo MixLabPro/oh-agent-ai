@@ -320,7 +320,7 @@ mod tests {
     fn detail_envelope_exposes_cost_minor_field() {
         let home = tmp_home("cost");
         let (_skey, sref) = seed_session(&home);
-        let payload = r#"{"fallback_provider":"deepseek-official","providers":{"deepseek-official":{"models":{"deepseek-v4-pro":{"input_uncached":{"off_peak":4.5,"peak":9.0}}}}}}"#;
+        let payload = r#"{"fallback_provider":"deepseek-official","providers":{"deepseek-official":{"models":{"m-a":{"input_uncached":{"off_peak":4.5,"peak":9.0}},"m-b":{"input_uncached":{"off_peak":4.5,"peak":9.0}}}}}}"#;
         // pricing_snapshot 必须先于 event_ts 落，asof 才命中。
         AuthorityDb::open(&agent_vitals_data::authority::default_authority_path(&home), 1)
             .unwrap()
