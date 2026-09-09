@@ -24,10 +24,12 @@ use serde_json::{json, Value};
 // v0.8 Phase D2：Claude Code 语料计价（`catalog_2026_09` 第二面）切进子模块，
 // 语义零改。扁平 re-export 保 `agent_vitals_domain::cost::claude_*` 路径不变。
 mod claude;
+mod codex;
 pub use claude::{
     claude_day_cost, claude_day_total_tokens, claude_session_cost,
     claude_subscription_uncovered_estimate,
 };
+pub use codex::{codex_price_bucket, codex_resolve_entry, load_codex_pricing};
 
 // v0.9 计费模式声明层（billing_modes）——「钱付给谁、按什么方式付」的判定，
 // 与计价面解耦（无价卡模型 glm-* 也能归属）。2026-09-05。

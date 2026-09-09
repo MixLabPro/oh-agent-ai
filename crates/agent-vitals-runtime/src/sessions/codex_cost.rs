@@ -37,10 +37,8 @@ use std::collections::HashMap;
 
 use serde_json::{json, Map, Value};
 
-const CODEX_PRICING_JSON: &str = include_str!("../../../../assets/codex_pricing.json");
-
 pub fn load_codex_pricing() -> Value {
-    serde_json::from_str(CODEX_PRICING_JSON).unwrap_or_else(|_| Value::Object(Default::default()))
+    agent_vitals_domain::cost::load_codex_pricing()
 }
 
 fn strip_zero(x: f64) -> String {
@@ -82,105 +80,24 @@ fn get_i64(v: &Value, key: &str) -> i64 {
     v.get(key).and_then(|x| x.as_i64()).unwrap_or(0)
 }
 
-/// 价格表条目里的金额是**字符串**（cc-trace 原样，避免浮点漂移），解析成 f64。
-fn rate(entry: &Value, key: &str) -> f64 {
-    entry
-        .get(key)
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.0)
-}
-
 /// `(model, speed)` → 价格表条目：**最长 modelPrefix 匹配**（`gpt-5.6-sol` 命中
 /// sol 行而非 `gpt-5.6` 泛化行）。同长度时先出现的条目赢（catalog 数组序即作者
 /// 意图，确定性匹配）。Codex session 的 `model_raw` 可能带 provider 路由前缀
 /// （如 `openai/gpt-5.6-sol`），匹配前只剥掉前缀；输出仍保留原始模型名。
 /// 找不到 → None（unpriced）。
 fn resolve_entry<'a>(model: &str, speed: &str, entries: &'a [Value]) -> Option<&'a Value> {
-    let match_model = model.rsplit('/').next().unwrap_or(model);
-    let mut best: Option<&Value> = None;
-    let mut best_len = 0usize;
-    for e in entries {
-        if e.get("speed").and_then(|v| v.as_str()) != Some(speed) {
-            continue;
-        }
-        let prefix = e.get("modelPrefix").and_then(|v| v.as_str()).unwrap_or("");
-        if prefix.len() > best_len && match_model.starts_with(prefix) {
-            best_len = prefix.len();
-            best = Some(e);
-        }
-    }
-    best
+    agent_vitals_domain::cost::codex_resolve_entry(model, speed, entries)
 }
 
 /// longContext 乘数判定。官方门槛属于单次请求，聚合后的小时/日桶不足以提供证据；
 /// 没有 `perRequestLongContextEvidence:true` 一律返回 None，避免把累计用量误收为
 /// 长上下文附加费。
-fn lc_multipliers(bucket: &Value, entry: &Value) -> Option<(f64, f64)> {
-    // Folded hour/day buckets cannot establish the official per-request >272K
-    // condition.  Only enable the surcharge when an adapter has preserved that
-    // request-level evidence explicitly.
-    if entry
-        .get("perRequestLongContextEvidence")
-        .and_then(|v| v.as_bool())
-        != Some(true)
-    {
-        return None;
-    }
-    let threshold = entry
-        .get("longContextThresholdTokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    // `longContextPriced` 缺省 true：standard 行靠「有 threshold + 有乘数」触发；
-    // fast 行显式 `false` → fast + longContext 不乘（catalog 里 fast 行都带这个
-    // false，见 codex_pricing.json `_note`）。
-    let lc_priced = entry
-        .get("longContextPriced")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let uncached = get_i64(bucket, "uncached_input_tokens") as f64;
-    let cached = get_i64(bucket, "cached_input_tokens") as f64;
-    let cache_write = get_i64(bucket, "cache_write_input_tokens") as f64;
-    let input_total = uncached + cached + cache_write;
-    if threshold > 0 && input_total > threshold as f64 && lc_priced {
-        let lc_in = entry
-            .get("longContextInputMultiplierBps")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(20000) as f64
-            / 10000.0;
-        let lc_out = entry
-            .get("longContextOutputMultiplierBps")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(15000) as f64
-            / 10000.0;
-        Some((lc_in, lc_out))
-    } else {
-        None
-    }
-}
-
 /// 一个 5 桶对象 × 价格条目 → USD 费用。`reasoning` 桶存在但不参与计价——它已
 /// 含在 `output` 里（折叠侧的校验保证 `output >= reasoning`），再乘一次就是双计。
 /// `lc`（可选）= 已验证的请求级长上下文乘数；None 时只在条目明确拥有请求级证据时
 /// 尝试判定（见 `lc_multipliers`）。
 fn price_bucket(bucket: &Value, entry: &Value, lc: Option<(f64, f64)>) -> f64 {
-    let uncached = get_i64(bucket, "uncached_input_tokens") as f64;
-    let cached = get_i64(bucket, "cached_input_tokens") as f64;
-    let cache_write = get_i64(bucket, "cache_write_input_tokens") as f64;
-    let output = get_i64(bucket, "output_tokens") as f64;
-    let mut input_cost = uncached * rate(entry, "uncachedInputUsdPerMTok")
-        + cached * rate(entry, "cacheReadUsdPerMTok")
-        + cache_write * rate(entry, "cacheWrite5mUsdPerMTok");
-    let mut output_cost = output * rate(entry, "outputUsdPerMTok");
-    let lc = match lc {
-        Some(lc) => Some(lc),
-        None => lc_multipliers(bucket, entry),
-    };
-    if let Some((lc_in, lc_out)) = lc {
-        input_cost *= lc_in;
-        output_cost *= lc_out;
-    }
-    (input_cost + output_cost) / 1e6
+    agent_vitals_domain::cost::codex_price_bucket(bucket, entry, lc)
 }
 
 /// 5 桶对象 → `[i64; 5]`（桶序与 `CODEX_TOKEN_FIELDS` 一致）。

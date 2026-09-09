@@ -161,7 +161,8 @@ pub fn resolve_billing_attribution(
             has_unresolved: false,
         };
     }
-    let unresolved = provider_id.is_none()
+    let unresolved = route_conflicts
+        || provider_id.is_none()
         || matches!(
             route_basis,
             EvidenceBasis::ConfigCurrent
@@ -218,6 +219,19 @@ mod tests {
         assert_eq!(a.billing_mode, BillingMode::Metered);
         assert!(a.has_unresolved);
         assert_eq!(a.evidence_basis, EvidenceBasis::ConfigCurrent);
+    }
+
+    #[test]
+    fn openai_marker_with_custom_session_endpoint_is_unresolved() {
+        let route = RouteEvidence {
+            provider_raw: None,
+            endpoint_host: Some("router.cogfoundry.ai".into()),
+            evidence_basis: EvidenceBasis::SessionNative,
+        };
+        let a = resolve_billing_attribution(Some("openai"), Some(&route));
+        assert_eq!(a.billing_mode, BillingMode::Metered);
+        assert_eq!(a.pricing_basis, "metered_estimate");
+        assert!(a.has_unresolved);
     }
 
     #[test]
