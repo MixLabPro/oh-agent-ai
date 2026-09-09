@@ -1664,18 +1664,21 @@ fn persist_findings_as_issues(
                 opened_at_ms: finding.time.unwrap_or_else(crate::sql_sync::now_ms),
                 metadata_json: &metadata,
             };
-            if let Ok(issue_id) = agent_vitals_data::issues::upsert_issue(db.conn(), &input) {
-                let status: Option<String> = db.conn().query_row(
+            let _ = db.with_immediate_txn(|conn| {
+                let issue_id = agent_vitals_data::issues::upsert_issue(conn, &input)
+                    .map_err(agent_vitals_data::authority::AuthorityError::Sqlite)?;
+                let status: Option<String> = conn.query_row(
                     "SELECT status FROM issue_instances WHERE issue_id = ?1", [&issue_id], |r| r.get(0)
                 ).ok();
                 if matches!(status.as_deref(), Some("closed" | "wontfix" | "acknowledged")) {
-                    let _ = agent_vitals_data::issues::transition_issue(
-                        db.conn(), &issue_id, "open", crate::sql_sync::now_ms(),
+                    agent_vitals_data::issues::transition_issue(
+                        conn, &issue_id, "open", crate::sql_sync::now_ms(),
                         "reappeared", "legacy-finding", &evidence_fingerprint,
                         "legacy-finding", "v0.11", &fingerprint,
-                    );
+                    ).map_err(agent_vitals_data::authority::AuthorityError::Sqlite)?;
                 }
-            }
+                Ok(())
+            });
         }
     }
 }
