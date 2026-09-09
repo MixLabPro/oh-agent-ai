@@ -3625,6 +3625,20 @@ session_store={store} fold={fold}"
                 let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
                     .unwrap_or_else(|e| { eprintln!("provider replay failed: {e}"); std::process::exit(2); });
                 let conn = db.conn();
+                let before_ids: Vec<String> = conn.prepare("SELECT fact_id FROM usage_facts WHERE deleted_at_ms IS NULL")
+                    .and_then(|mut s| s.query_map([], |r| r.get(0)).and_then(|rows| rows.collect()))
+                    .unwrap_or_else(|e| { eprintln!("provider replay query failed: {e}"); std::process::exit(2); });
+                let before_count = before_ids.len() as i64;
+                drop(db);
+                let sync = agent_vitals_runtime::sync_service::sync_facts(&dh)
+                    .unwrap_or_else(|e| { eprintln!("provider replay sync failed: {e}"); std::process::exit(2); });
+                if sync.hosts.iter().any(|h| !h.errors.is_empty()) {
+                    eprintln!("provider replay encountered unreadable source files");
+                    std::process::exit(2);
+                }
+                let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+                    .unwrap_or_else(|e| { eprintln!("provider replay reopen failed: {e}"); std::process::exit(2); });
+                let conn = db.conn();
                 let row = conn.query_row(
                     "SELECT COUNT(*), COALESCE(SUM(uncached_input_tokens),0),
                             COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
@@ -3635,11 +3649,16 @@ session_store={store} fold={fold}"
                     [], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,i64>(1)?, r.get::<_,i64>(2)?, r.get::<_,i64>(3)?, r.get::<_,i64>(4)?, r.get::<_,i64>(5)?, r.get::<_,i64>(6)?))
                 ).unwrap_or_else(|e| { eprintln!("provider replay query failed: {e}"); std::process::exit(2); });
                 let (facts, uncached, cache_read, cache_write, output, cogfoundry, unknown) = row;
+                let after_ids: Vec<String> = conn.prepare("SELECT fact_id FROM usage_facts WHERE deleted_at_ms IS NULL")
+                    .and_then(|mut s| s.query_map([], |r| r.get(0)).and_then(|rows| rows.collect()))
+                    .unwrap_or_else(|e| { eprintln!("provider replay id query failed: {e}"); std::process::exit(2); });
+                let conserved = before_ids.iter().all(|id| after_ids.iter().any(|x| x == id));
                 let report_value = serde_json::json!({
-                    "replay_run": format!("audit-{}", agent_vitals_runtime::sql_sync::now_ms()),
+                    "replay_run": format!("replay-{}", agent_vitals_runtime::sql_sync::now_ms()),
                     "parser_version": "v0.11-provider-attribution",
-                    "before_fact_count": facts, "after_fact_count": facts,
-                    "fact_id_conservation": true,
+                    "before_fact_count": before_count, "after_fact_count": facts,
+                    "fact_id_conservation": conserved,
+                    "sync_report": sync,
                     "token_totals": { "uncached_input_tokens": uncached, "cache_read_tokens": cache_read, "cache_write_tokens": cache_write, "output_tokens": output },
                     "provider_distribution": { "cogfoundry.ai": cogfoundry, "unknown": unknown },
                     "conflict_count": 0, "unresolved_count": unknown,
