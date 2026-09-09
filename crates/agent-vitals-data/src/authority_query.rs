@@ -1103,7 +1103,7 @@ pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT host, provider_id, COA
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
          GROUP BY model_id, event_peak";
 
-/// 一个会话的 cost_minor（按价表**估算**的 metered_actual）。
+/// 一个单 provider 会话的 cost_minor（按价表的 metered estimate）。
 ///
 /// 路径：`usage_facts` 折成 8 桶 → 选 `pricing_snapshot.asof(MAX(event_ts_ms))`
 /// → `cost_report(usage, snapshot)` → 把 `total: f64` 一次 pyround 转最小货币
@@ -1124,7 +1124,7 @@ pub fn session_cost_minor(
     conn: &Connection,
     session_key: &str,
 ) -> Result<Option<agent_vitals_domain::data_contract::MoneyMinor>, AuthorityError> {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     // 1. 聚合 8 桶 + peak 拆分 + max ts。`(model, event_peak)` 两轴 group by，
     //    Rust 端再按 model 合并 peak / off_peak 拆分。
@@ -1153,11 +1153,13 @@ pub fn session_cost_minor(
     }
     let mut by_model: BTreeMap<String, Split> = BTreeMap::new();
     let mut codex_unknown: BTreeMap<String, Split> = BTreeMap::new();
+    let mut providers: BTreeSet<String> = BTreeSet::new();
     let mut host: Option<String> = None;
     let mut max_ts: i64 = 0;
     for row in rows {
         let (row_host, provider, model, peak, u, cr, cw, o, ts) = row?;
         host = Some(row_host.clone());
+        providers.insert(provider.as_deref().unwrap_or("<unknown>").to_string());
         let model_key = model.clone();
         let entry = by_model.entry(model).or_default();
         if peak != 0 {
@@ -1190,6 +1192,12 @@ pub fn session_cost_minor(
         }
     }
     if by_model.is_empty() || max_ts == 0 {
+        return Ok(None);
+    }
+    // 旧 `MoneyMinor` 只承载一个币种/计费依据。跨 provider 会话必须由 v0.12
+    // 的 provider 分桶 DTO 表达；在它接线前宁可 unavailable，也绝不把同名
+    // 模型按某一方价卡相加后伪装成单一成本。
+    if providers.len() != 1 {
         return Ok(None);
     }
 
@@ -2298,6 +2306,32 @@ mod tests {
         assert_eq!(mm.basis, agent_vitals_domain::data_contract::BillingBasis::MeteredEstimate);
         assert_eq!(mm.amount_minor, 167, "0.2 + 0.02 + 0.25 + 1.2 USD = $1.67");
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_cost_minor_does_not_merge_same_model_across_providers() {
+        let path = tmp_db("cm-cross-provider");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (day_start, _) = beijing_day_bounds_ms("2026-09-09").unwrap();
+        let skey = "skey-cross-provider";
+        db.conn().execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+             VALUES (?1, 'codex', 'native-cross-provider', 'm', 'default', 1)",
+            rusqlite::params![skey],
+        ).unwrap();
+        for (fact_id, provider) in [("f-openai", "openai"), ("f-cogfoundry", "cogfoundry.ai")] {
+            db.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                     session_key, source_event_id, observation_kind, provider_id, model_id,
+                     event_ts_ms, event_peak, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'codex', 'm', 'native-cross-provider', ?2, ?1, 'token_count', ?3,
+                         'openai/gpt-5.6-luna', ?4, 0, 1, 'run', 1, 1)",
+                rusqlite::params![fact_id, skey, provider, day_start + 3_600_000],
+            ).unwrap();
+        }
+        assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
         let _ = std::fs::remove_file(&path);
     }
 
