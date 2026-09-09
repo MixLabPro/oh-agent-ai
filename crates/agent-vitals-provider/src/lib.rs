@@ -75,7 +75,12 @@ pub fn normalize_provider(
     if endpoint.contains("router.cogfoundry.ai") || endpoint == "cogfoundry.ai" {
         return Some("cogfoundry.ai".to_string());
     }
-    match provider_raw.map(str::trim).filter(|v| !v.is_empty()) {
+    match provider_raw
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("openai") => Some("openai".to_string()),
         Some(raw) => Some(raw.to_string()),
         None => None,
@@ -105,14 +110,15 @@ pub fn resolve_billing_attribution(
     let route_conflicts = matches!(route_basis, EvidenceBasis::Conflict)
         || (route_basis.strength() >= EvidenceBasis::SessionNative.strength()
             && route_provider.as_deref().is_some_and(|p| p != "openai"));
-    let is_official_subscription = model_provider == Some("openai") && !route_conflicts;
+    let is_official_subscription =
+        model_provider == Some("openai") && route.is_some() && !route_conflicts;
     if is_official_subscription {
         return BillingAttribution {
             provider_id,
             provider_raw: raw,
             billing_mode: BillingMode::Subscription,
             pricing_basis: "session-provider".to_string(),
-            evidence_basis: route_basis,
+            evidence_basis: EvidenceBasis::SessionNative,
             has_unresolved: false,
         };
     }
@@ -129,7 +135,7 @@ pub fn resolve_billing_attribution(
     BillingAttribution {
         provider_id,
         provider_raw: raw,
-        billing_mode: if has_provider {
+        billing_mode: if has_provider || model_provider == Some("custom") {
             BillingMode::Metered
         } else {
             BillingMode::Unknown
@@ -174,6 +180,23 @@ mod tests {
         assert_eq!(a.provider_id.as_deref(), Some("openai"));
         assert_eq!(a.billing_mode, BillingMode::Subscription);
         assert!(!a.has_unresolved);
+        assert_eq!(a.evidence_basis, EvidenceBasis::SessionNative);
+    }
+
+    #[test]
+    fn openai_without_route_is_unresolved_metered() {
+        let a = resolve_billing_attribution(Some("openai"), None);
+        assert_eq!(a.billing_mode, BillingMode::Metered);
+        assert_eq!(a.pricing_basis, "metered_estimate");
+        assert!(a.has_unresolved);
+    }
+
+    #[test]
+    fn custom_without_route_is_unresolved_metered() {
+        let a = resolve_billing_attribution(Some("custom"), None);
+        assert_eq!(a.billing_mode, BillingMode::Metered);
+        assert_eq!(a.pricing_basis, "metered_estimate");
+        assert!(a.has_unresolved);
     }
 
     #[test]

@@ -30,7 +30,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -65,7 +65,9 @@ pub enum AuthorityError {
     /// `open_readonly` 专用——库的 schema 版本比本二进制旧，需要产品迁移。
     /// （`open` 里这条走 `__unsupported_legacy_version__` 防御分支；只读面
     /// 单列一个 typed 变体，供错误码映射成 `schema_migration_required`。）
-    OlderSchema { found: i64 },
+    OlderSchema {
+        found: i64,
+    },
 }
 
 impl From<rusqlite::Error> for AuthorityError {
@@ -301,6 +303,79 @@ CREATE TABLE host_runtime_snapshots (
 );
 "#;
 
+const SCHEMA_V3_ADD: &str = r#"
+ALTER TABLE usage_facts ADD COLUMN provider_raw TEXT;
+ALTER TABLE usage_facts ADD COLUMN billing_source TEXT;
+ALTER TABLE usage_facts ADD COLUMN billing_mode TEXT;
+ALTER TABLE usage_facts ADD COLUMN pricing_basis TEXT;
+ALTER TABLE usage_facts ADD COLUMN evidence_basis TEXT;
+ALTER TABLE usage_facts ADD COLUMN normalization_version TEXT;
+ALTER TABLE usage_facts ADD COLUMN route_evidence_id TEXT;
+ALTER TABLE usage_facts ADD COLUMN attribution_version TEXT;
+
+CREATE TABLE route_evidence (
+  evidence_id TEXT PRIMARY KEY,
+  host TEXT NOT NULL,
+  machine_namespace TEXT NOT NULL,
+  native_session_id TEXT,
+  provider_raw TEXT,
+  endpoint_host TEXT,
+  account_ref TEXT,
+  plan_type TEXT,
+  quota_window TEXT,
+  evidence_basis TEXT NOT NULL,
+  observed_at_ms INTEGER,
+  source_id TEXT REFERENCES source_files(source_id),
+  ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id)
+);
+CREATE INDEX route_evidence_session ON route_evidence(host, machine_namespace, native_session_id);
+CREATE TRIGGER usage_facts_route_evidence_insert_fk
+BEFORE INSERT ON usage_facts
+WHEN NEW.route_evidence_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM route_evidence WHERE evidence_id = NEW.route_evidence_id)
+BEGIN
+  SELECT RAISE(ABORT, 'usage_facts.route_evidence_id does not reference route_evidence');
+END;
+CREATE TRIGGER usage_facts_route_evidence_update_fk
+BEFORE UPDATE OF route_evidence_id ON usage_facts
+WHEN NEW.route_evidence_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM route_evidence WHERE evidence_id = NEW.route_evidence_id)
+BEGIN
+  SELECT RAISE(ABORT, 'usage_facts.route_evidence_id does not reference route_evidence');
+END;
+
+CREATE TABLE issue_instances (
+  issue_id TEXT PRIMARY KEY,
+  machine_namespace TEXT NOT NULL,
+  host TEXT NOT NULL,
+  session_key TEXT,
+  issue_type TEXT NOT NULL,
+  instance_fingerprint TEXT NOT NULL,
+  status TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  evaluator_id TEXT NOT NULL,
+  evaluator_version TEXT NOT NULL,
+  evidence_fingerprint TEXT NOT NULL,
+  opened_at_ms INTEGER NOT NULL,
+  closed_at_ms INTEGER,
+  metadata_json TEXT NOT NULL,
+  UNIQUE(machine_namespace, issue_type, instance_fingerprint)
+);
+
+CREATE TABLE issue_status_transitions (
+  transition_id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL REFERENCES issue_instances(issue_id),
+  from_status TEXT,
+  to_status TEXT NOT NULL,
+  transitioned_at_ms INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  evidence_fingerprint TEXT NOT NULL,
+  UNIQUE(issue_id, transition_id)
+);
+CREATE INDEX issue_transitions_issue_time ON issue_status_transitions(issue_id, transitioned_at_ms, transition_id);
+"#;
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -308,7 +383,10 @@ CREATE TABLE host_runtime_snapshots (
 const VIEWS_V1: &str = r#"
 CREATE VIEW IF NOT EXISTS v_facts_safe AS
   SELECT fact_id, host, observation_kind, source_profile,
-         provider_id, model_id, event_ts_ms, event_peak,
+         provider_id, provider_raw, billing_source, billing_mode,
+         pricing_basis, evidence_basis, normalization_version,
+         route_evidence_id, attribution_version,
+         model_id, event_ts_ms, event_peak,
          uncached_input_tokens, cache_read_tokens,
          cache_write_tokens, output_tokens,
          ingested_run_id, created_at_ms, updated_at_ms, deleted_at_ms
@@ -415,7 +493,9 @@ impl AuthorityDb {
     ///
     /// **不在 v1 兼容承诺内**：仅 `mcp-internal` 构建调用；公开构建不挂这个
     /// 工具。Caller 必须在执行前/后 close this connection。
-    pub fn make_query_sql_readonly_connection(db_path: &Path) -> Result<Connection, AuthorityError> {
+    pub fn make_query_sql_readonly_connection(
+        db_path: &Path,
+    ) -> Result<Connection, AuthorityError> {
         if !db_path.exists() {
             return Err(AuthorityError::MissingFile);
         }
@@ -463,6 +543,26 @@ impl AuthorityDb {
             Some(v) if v == SCHEMA_VERSION => {
                 // 增量 7.5：脱敏只读 view（`query_sql_readonly` 的来源层屏障）。
                 // 版本无关的只读加法——`CREATE VIEW IF NOT EXISTS` 幂等。
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(2) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V3_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute(
+                            "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
+                            rusqlite::params![SCHEMA_VERSION.to_string()],
+                        )?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(error.into());
+                    }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
             Some(1) => {
@@ -470,6 +570,10 @@ impl AuthorityDb {
                 let migration = conn.execute_batch(MIGRATE_V1_TO_V2);
                 match migration {
                     Ok(()) => {
+                        if let Err(error) = conn.execute_batch(SCHEMA_V3_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
                         conn.execute(
                             "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
                             rusqlite::params![SCHEMA_VERSION.to_string()],
@@ -510,6 +614,7 @@ impl AuthorityDb {
                 }
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 conn.execute_batch(SCHEMA_V1)?;
+                conn.execute_batch(SCHEMA_V3_ADD)?;
                 // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
                 conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
@@ -935,6 +1040,9 @@ mod tests {
                 "migrations",
                 "workflow_events",
                 "host_runtime_snapshots",
+                "route_evidence",
+                "issue_instances",
+                "issue_status_transitions",
             ] {
                 assert!(tables.iter().any(|x| x == t), "缺表 {t}: {tables:?}");
             }
@@ -950,7 +1058,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(ver, "2");
+        assert_eq!(ver, "3");
         let _ = std::fs::remove_file(&db);
     }
 
@@ -989,16 +1097,19 @@ mod tests {
     }
 
     #[test]
-    fn v1_database_migrates_to_runtime_snapshots_v2() {
+    fn v1_database_migrates_to_schema_v3() {
         let db = tmp_db("v1-to-v2");
-        let initial = AuthorityDb::open(&db, 1_000).unwrap();
-        drop(initial);
         let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute_batch(
-            "DROP TABLE host_runtime_snapshots;
-             UPDATE schema_meta SET value = '1' WHERE key = 'schema_version';",
+        conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.execute(
+            "INSERT INTO schema_meta(key, value) VALUES('schema_version', '1')",
+            [],
         )
         .unwrap();
+        conn.execute_batch("DROP TABLE host_runtime_snapshots;")
+            .unwrap();
+        conn.execute_batch("COMMIT;").unwrap();
         drop(conn);
 
         let upgraded = AuthorityDb::open(&db, 2_000).unwrap();
@@ -1010,7 +1121,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
         let exists: i64 = upgraded
             .conn()
             .query_row(
@@ -1020,6 +1131,74 @@ mod tests {
             )
             .unwrap();
         assert_eq!(exists, 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v2_database_migrates_to_schema_v3_and_preserves_facts() {
+        let db = tmp_db("v2-to-v3");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.execute_batch("INSERT INTO schema_meta(key, value) VALUES('schema_version', '2');")
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES('migration-fixture', 1, 'migration', 'succeeded', 2);
+             INSERT INTO usage_facts(
+               fact_id, host, machine_namespace, native_session_id, source_event_id,
+               observation_kind, uncached_input_tokens, cache_read_tokens,
+               cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES('fact-preserve', 'codex', 'ns', 'session', 'event', 'assistant-usage',
+                    11, 22, 33, 44, 'migration-fixture', 1, 1);",
+        )
+        .unwrap();
+        conn.execute_batch("COMMIT;").unwrap();
+        drop(conn);
+
+        let upgraded = AuthorityDb::open(&db, 2_000).unwrap();
+        let version: String = upgraded
+            .conn()
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "3");
+        for column in [
+            "provider_raw",
+            "billing_source",
+            "billing_mode",
+            "pricing_basis",
+            "evidence_basis",
+            "normalization_version",
+            "route_evidence_id",
+            "attribution_version",
+        ] {
+            let found: i64 = upgraded
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('usage_facts') WHERE name = ?1",
+                    [column],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "missing v3 column {column}");
+        }
+        let preserved: (i64, i64, i64, i64, i64) = upgraded
+            .conn()
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(uncached_input_tokens), 0),
+                        COALESCE(SUM(cache_read_tokens), 0),
+                        COALESCE(SUM(cache_write_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0)
+                 FROM usage_facts WHERE fact_id = 'fact-preserve'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, (1, 11, 22, 33, 44));
         let _ = std::fs::remove_file(&db);
     }
 
