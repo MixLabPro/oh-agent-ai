@@ -826,7 +826,7 @@ function renderDualTrack(monthly) {
             ? "公允价估算"
             : h.pricing_method === "fair-market-fallback"
               ? "原厂价回退估算"
-              : "按量估算",
+              : "估算（relay 上界）",
         };
         return `<span class="chip ${b === "metered_actual" ? "measured" : "estimate"}">${names[b] || b} ${fmtCur(v, h.currency)}</span>`;
       }).join("");
