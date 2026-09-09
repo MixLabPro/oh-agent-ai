@@ -3653,6 +3653,15 @@ session_store={store} fold={fold}"
                     .and_then(|mut s| s.query_map([], |r| r.get(0)).and_then(|rows| rows.collect()))
                     .unwrap_or_else(|e| { eprintln!("provider replay id query failed: {e}"); std::process::exit(2); });
                 let conserved = before_ids.iter().all(|id| after_ids.iter().any(|x| x == id));
+                let conflict_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM data_quality_issues
+                     WHERE resolved_at_ms IS NULL AND detail_json LIKE '%attribution_conflict%'",
+                    [], |r| r.get(0)
+                ).unwrap_or(0);
+                if !conserved {
+                    eprintln!("provider replay failed: fact_id conservation check failed");
+                    std::process::exit(2);
+                }
                 let report_value = serde_json::json!({
                     "replay_run": format!("replay-{}", agent_vitals_runtime::sql_sync::now_ms()),
                     "parser_version": "v0.11-provider-attribution",
@@ -3661,7 +3670,7 @@ session_store={store} fold={fold}"
                     "sync_report": sync,
                     "token_totals": { "uncached_input_tokens": uncached, "cache_read_tokens": cache_read, "cache_write_tokens": cache_write, "output_tokens": output },
                     "provider_distribution": { "cogfoundry.ai": cogfoundry, "unknown": unknown },
-                    "conflict_count": 0, "unresolved_count": unknown,
+                    "conflict_count": conflict_count, "unresolved_count": unknown,
                     "recovered_cogfoundry_facts": cogfoundry,
                     "unrecoverable_unknown_facts": unknown,
                 });
