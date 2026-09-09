@@ -190,6 +190,7 @@ fn derived_event_id(rollout_source_id: &str, byte_offset: usize, rec: &Value) ->
 /// cached → cache_read、cache_write → cache_write、output → output（reasoning
 /// ⊆ output，**绝不叠加** facts[4]——叠加即双计）。5→4 逐字段与 Python
 /// `_consumed_to_usage_fact` 一致。
+#[allow(clippy::too_many_arguments)]
 fn consumed_to_usage_fact(
     facts: &[i64; 5],
     model: &str,

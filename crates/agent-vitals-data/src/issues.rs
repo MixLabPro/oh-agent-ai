@@ -65,6 +65,7 @@ pub fn upsert_issue(conn: &Connection, input: &IssueInput<'_>) -> rusqlite::Resu
     Ok(issue_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn transition_issue(
     conn: &Connection,
     issue_id: &str,

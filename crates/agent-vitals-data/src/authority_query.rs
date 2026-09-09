@@ -2330,9 +2330,9 @@ mod tests {
         let (start, _) = beijing_day_bounds_ms("2026-09-08").unwrap();
         insert_fact(&db, "f1", "dsh", Some("m"), "assistant-usage", start + 10 * 3_600_000, 0, 100, 0, 0, 0);
         insert_fact(&db, "f2", "dsh", Some("m"), "assistant-usage", start + 14 * 3_600_000, 0, 200, 0, 0, 0);
-        insert_fact(&db, "f3", "claude-code", Some("m"), "assistant-usage", start + 1 * 3_600_000, 0, 50, 0, 0, 0);
+        insert_fact(&db, "f3", "claude-code", Some("m"), "assistant-usage", start + 3_600_000, 0, 50, 0, 0, 0);
         // 跨日 fact：2026-09-09 北京 01:00 → 不计入 09-08 桶
-        insert_fact(&db, "f4", "dsh", Some("m"), "assistant-usage", start + DAY_MS + 1 * 3_600_000, 0, 999, 0, 0, 0);
+        insert_fact(&db, "f4", "dsh", Some("m"), "assistant-usage", start + DAY_MS + 3_600_000, 0, 999, 0, 0, 0);
         drop(db);
         let totals = day_token_totals_by_host(&dir, "2026-09-08").expect("库可读");
         assert_eq!(totals.get("dsh").copied(), Some(300), "10:00 + 14:00 = 300");
