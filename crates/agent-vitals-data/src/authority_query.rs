@@ -1092,7 +1092,7 @@ pub fn all_session_keys(conn: &Connection) -> Result<Vec<String>, AuthorityError
 ///
 /// `MAX(event_ts_ms)` 一并带出——用它去 `pricing_snapshot_asof` 选历史价卡
 /// 版本（Q13：调价日前后分别用正确的价表）。
-pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT COALESCE(model_id, '<unknown>') AS model,
+pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT host, provider_id, COALESCE(model_id, '<unknown>') AS model,
                 event_peak,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens),
@@ -1135,12 +1135,14 @@ pub fn session_cost_minor(
         |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?,
                 r.get::<_, i64>(4)?,
                 r.get::<_, i64>(5)?,
                 r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
             ))
         },
     )?;
@@ -1151,9 +1153,13 @@ pub fn session_cost_minor(
         u_peak: i64, cr_peak: i64, cw_peak: i64, o_peak: i64,
     }
     let mut by_model: BTreeMap<String, Split> = BTreeMap::new();
+    let mut codex_unknown: BTreeMap<String, Split> = BTreeMap::new();
+    let mut host: Option<String> = None;
     let mut max_ts: i64 = 0;
     for row in rows {
-        let (model, peak, u, cr, cw, o, ts) = row?;
+        let (row_host, provider, model, peak, u, cr, cw, o, ts) = row?;
+        host = Some(row_host.clone());
+        let model_key = model.clone();
         let entry = by_model.entry(model).or_default();
         if peak != 0 {
             entry.u_peak += u;
@@ -1168,6 +1174,20 @@ pub fn session_cost_minor(
         }
         if ts > max_ts {
             max_ts = ts;
+        }
+        if row_host == "codex" && provider.as_deref() != Some("openai") {
+            let entry = codex_unknown.entry(model_key).or_default();
+            if peak != 0 {
+                entry.u_peak += u;
+                entry.cr_peak += cr;
+                entry.cw_peak += cw;
+                entry.o_peak += o;
+            } else {
+                entry.u_off += u;
+                entry.cr_off += cr;
+                entry.cw_off += cw;
+                entry.o_off += o;
+            }
         }
     }
     if by_model.is_empty() || max_ts == 0 {
@@ -1191,6 +1211,49 @@ pub fn session_cost_minor(
         Ok(v) => v,
         Err(_) => return Ok(None), // 脏价卡不致命：会话本身有数据，cost 字段为 None
     };
+
+    // Codex unknown/custom routes use the official USD card from the same
+    // immutable snapshot. Explicit OpenAI subscription facts are excluded.
+    if host.as_deref() == Some("codex") && !codex_unknown.is_empty() {
+        let codex_pricing = snap_pricing.get("codex_pricing").unwrap_or(&snap_pricing);
+        let entries = codex_pricing
+            .get("entries")
+            .and_then(|v| v.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut total_usd = 0.0;
+        let mut codex_unpriced_tokens = 0i64;
+        for (model, s) in &codex_unknown {
+            let Some(entry) = agent_vitals_domain::cost::codex_resolve_entry(model, "standard", entries)
+            else {
+                codex_unpriced_tokens += s.u_off + s.cr_off + s.cw_off + s.o_off
+                    + s.u_peak + s.cr_peak + s.cw_peak + s.o_peak;
+                continue;
+            };
+            total_usd += agent_vitals_domain::cost::codex_price_bucket(
+                &json!({
+                    "uncached_input_tokens": s.u_off + s.u_peak,
+                    "cached_input_tokens": s.cr_off + s.cr_peak,
+                    "cache_write_input_tokens": s.cw_off + s.cw_peak,
+                    "output_tokens": s.o_off + s.o_peak,
+                    "reasoning_output_tokens": 0,
+                }),
+                entry,
+                None,
+            );
+        }
+        if codex_unpriced_tokens > 0 {
+            return Ok(None);
+        }
+        if total_usd.is_finite() && total_usd > 0.0 {
+            return Ok(Some(MoneyMinor {
+                amount_minor: (agent_vitals_domain::util::pyround(total_usd, 2) * 100.0).round()
+                    as i64,
+                currency: "USD".to_string(),
+                basis: BillingBasis::MeteredEstimate,
+            }));
+        }
+    }
 
     // 3. 折成 cost_report 期望的 by_model 形状：每个模型的 8 个基础字段
     //    （uncached_input + cache_read + cache_write + output 的总桶 + 高峰子桶）。
@@ -1217,6 +1280,12 @@ pub fn session_cost_minor(
         Some(r) => r,
         None => return Ok(None),
     };
+
+    // A nullable cost field cannot carry a partial estimate. Never turn an
+    // unpriced report into a misleading zero/partial amount.
+    if report["unpriced_tokens"].as_i64().unwrap_or(0) > 0 {
+        return Ok(None);
+    }
 
     let total = report["total"].as_f64().unwrap_or(0.0);
     if !total.is_finite() || total < 0.0 {
@@ -2231,6 +2300,44 @@ mod tests {
     }
 
     #[test]
+    fn session_cost_minor_prices_unknown_codex_with_official_snapshot_card() {
+        let path = tmp_db("cm-codex-unknown");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (day_start, _) = beijing_day_bounds_ms("2026-09-09").unwrap();
+        let skey = "skey-codex-unknown";
+        db.conn().execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+             VALUES (?1, 'codex', 'native-codex-unknown', 'm', 'default', 1)",
+            rusqlite::params![skey],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                 session_key, source_event_id, observation_kind, provider_id, model_id,
+                 event_ts_ms, event_peak, uncached_input_tokens, cache_read_tokens,
+                 cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES ('f1', 'codex', 'm', 'native-codex-unknown', ?1, 'f1', 'token_count', NULL,
+                     'openai/gpt-5.6-luna', ?2, 0, 1000000, 1000000, 1000000, 1000000, 'run', 1, 1)",
+            rusqlite::params![skey, day_start + 3_600_000],
+        ).unwrap();
+        let pricing = r#"{
+          "codex_pricing": {"entries": [{
+            "modelPrefix": "gpt-5.6-luna", "speed": "standard",
+            "uncachedInputUsdPerMTok": "0.2", "cacheReadUsdPerMTok": "0.02",
+            "cacheWrite5mUsdPerMTok": "0.25", "outputUsdPerMTok": "1.2"
+          }]}
+        }"#;
+        db.pricing_snapshot_put("v-codex", "cli_seed", pricing, day_start - DAY_MS).unwrap();
+
+        let mm = session_cost_minor(db.conn(), skey).unwrap().expect("unknown Codex must be estimated");
+        assert_eq!(mm.currency, "USD");
+        assert_eq!(mm.basis, agent_vitals_domain::data_contract::BillingBasis::MeteredEstimate);
+        assert_eq!(mm.amount_minor, 167, "0.2 + 0.02 + 0.25 + 1.2 USD = $1.67");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn session_cost_minor_returns_none_when_no_pricing_snapshot() {
         let path = tmp_db("cm-no-snap");
         let db = AuthorityDb::open(&path, 1).unwrap();
@@ -2259,7 +2366,7 @@ mod tests {
     }
 
     #[test]
-    fn session_cost_minor_returns_zero_minor_when_cost_report_uncharged() {
+    fn session_cost_minor_returns_none_when_cost_report_unpriced() {
         // `cost_report` 在**未知模型**时不会返 None——所有 token 进 unpriced 桶，
         // 但 `per_model.is_empty() && unpriced != 0` 仍让 cost_report 返
         // Some(report_total=0, unpriced_tokens=N)。我们透出 `Some(
@@ -2292,12 +2399,8 @@ mod tests {
             TEST_PRICING_FRAGMENT,
             day_start - DAY_MS,
         ).unwrap();
-        let r = session_cost_minor(db.conn(), skey)
-            .unwrap()
-            .expect("未计价模型下 cost_report 返 Some(report_total=0)，我们也 Some(0)");
-        assert_eq!(r.amount_minor, 0, "无可计模型 → 0 minor（不是 None，不是负数）");
-        assert_eq!(r.currency, "CNY");
-        assert_eq!(r.basis, agent_vitals_domain::data_contract::BillingBasis::MeteredEstimate);
+        let r = session_cost_minor(db.conn(), skey).unwrap();
+        assert!(r.is_none(), "未计价 token → None（不冒充 0 或 partial cost）");
 
         // 第二档：JSON 脏价卡。payload_json 存进去是合法字符串但不能 JSON parse，
         // 我们的内联 `serde_json::from_str(&snap_payload)` 失败 → None。

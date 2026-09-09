@@ -487,6 +487,7 @@ mod tests {
                 source_profile TEXT);
              CREATE TABLE usage_facts (
                 session_key TEXT NOT NULL, fact_id TEXT NOT NULL,
+                host TEXT NOT NULL DEFAULT 'dsh', provider_id TEXT,
                 model_id TEXT, event_ts_ms INTEGER,
                 uncached_input_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,

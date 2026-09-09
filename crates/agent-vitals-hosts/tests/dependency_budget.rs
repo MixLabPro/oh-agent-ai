@@ -42,7 +42,13 @@ fn adapters_dependency_budget_is_pure_and_one_way() {
     let manifest = fs::read_to_string(manifest_dir().join("Cargo.toml")).unwrap();
     let actual: std::collections::BTreeSet<String> = dependency_keys(&manifest).into_iter().collect();
     // 纯依赖 —— 恒在。
-    for req in ["agent-vitals-domain", "regex", "serde_json", "vitals-core"] {
+    for req in [
+        "agent-vitals-domain",
+        "agent-vitals-provider",
+        "regex",
+        "serde_json",
+        "vitals-core",
+    ] {
         assert!(actual.contains(req), "hosts 必须依赖 `{req}`");
     }
     // feature-gated I/O 读取器依赖：允许，但必须 `optional`（`[features] sources`
@@ -55,7 +61,14 @@ fn adapters_dependency_budget_is_pure_and_one_way() {
             !forbidden_deps.contains(&key.as_str()),
             "hosts/Cargo.toml [dependencies] 不许有 `{key}`（编排/watcher/binary 属 runtime/app）"
         );
-        let known = ["agent-vitals-domain", "regex", "serde_json", "vitals-core"].contains(&key.as_str())
+        let known = [
+            "agent-vitals-domain",
+            "agent-vitals-provider",
+            "regex",
+            "serde_json",
+            "vitals-core",
+        ]
+            .contains(&key.as_str())
             || io_optional.contains(&key.as_str());
         assert!(known, "hosts 出现未登记依赖 `{key}`——若是新 I/O 读取器，标 optional 并加进 io_optional");
     }

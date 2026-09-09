@@ -323,6 +323,15 @@ fn q14_same_raw_name_across_hosts_or_unmapped_is_explicit() {
     // codex 侧的 gpt-5.6（有声明 openai）。「gpt」相似前缀不得并桶。
     env.fact("m1", "claude-code", "moonshot-gpt-5.6", s + 1_000, 0, 100, 10);
     env.fact("m2", "codex", "gpt-5.6", s + 2_000, 0, 100, 10);
+    // A NULL provider_id is intentionally unresolved under v0.11 and must
+    // not be inferred from the model name alone.
+    env.db
+        .conn()
+        .execute(
+            "UPDATE usage_facts SET provider_id = 'openai' WHERE fact_id = 'm2'",
+            [],
+        )
+        .unwrap();
 
     let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d });
     assert!(daily.by_provider.contains_key("codex/openai"));

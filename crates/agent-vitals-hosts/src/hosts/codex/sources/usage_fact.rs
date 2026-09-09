@@ -245,11 +245,10 @@ fn route_states_before(
     let mut states = Vec::new();
     for (offset, item) in items {
         let payload = item.get("payload");
-        let explicit = if item.get("type").and_then(Value::as_str) == Some("session_meta") {
-            payload.and_then(route_evidence_from)
-        } else if payload.and_then(|v| v.get("type")).and_then(Value::as_str)
-            == Some("route_changed")
-        {
+        let is_route_payload = item.get("type").and_then(Value::as_str) == Some("session_meta")
+            || payload.and_then(|v| v.get("type")).and_then(Value::as_str)
+                == Some("route_changed");
+        let explicit = if is_route_payload {
             payload.and_then(route_evidence_from)
         } else {
             payload
@@ -828,7 +827,7 @@ mod tests {
                 "timestamp":ts,"info":{"total_token_usage":{"total_tokens":total},
                 "last_token_usage":{"input_tokens":100,"output_tokens":10}}}}))
         };
-        let rows = vec![
+        let rows = [
             line(
                 json!({"type":"session_meta","payload":{"session_id":"ses-switch",
                 "model_provider":"custom","route":{"provider_id":"cogfoundry.ai",
