@@ -3643,8 +3643,8 @@ session_store={store} fold={fold}"
                     "SELECT COUNT(*), COALESCE(SUM(uncached_input_tokens),0),
                             COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
                             COALESCE(SUM(output_tokens),0),
-                            SUM(CASE WHEN provider_id = 'cogfoundry.ai' THEN 1 ELSE 0 END),
-                            SUM(CASE WHEN provider_id IS NULL THEN 1 ELSE 0 END)
+                            COALESCE(SUM(CASE WHEN provider_id = 'cogfoundry.ai' THEN 1 ELSE 0 END),0),
+                            COALESCE(SUM(CASE WHEN provider_id IS NULL THEN 1 ELSE 0 END),0)
                      FROM usage_facts WHERE deleted_at_ms IS NULL",
                     [], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,i64>(1)?, r.get::<_,i64>(2)?, r.get::<_,i64>(3)?, r.get::<_,i64>(4)?, r.get::<_,i64>(5)?, r.get::<_,i64>(6)?))
                 ).unwrap_or_else(|e| { eprintln!("provider replay query failed: {e}"); std::process::exit(2); });
