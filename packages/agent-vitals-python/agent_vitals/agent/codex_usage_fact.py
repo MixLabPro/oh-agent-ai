@@ -288,8 +288,10 @@ def _consumed_to_usage_fact(
     facts = outcome.facts  # type: ignore[union-attr]  # Consumed 才走到这里
     endpoint = (route_endpoint_host or "").lower()
     normalized_route = route_provider_raw.lower() if isinstance(route_provider_raw, str) else None
-    if "cogfoundry.ai" in endpoint:
+    if endpoint == "cogfoundry.ai" or endpoint.endswith(".cogfoundry.ai"):
         normalized_route = "cogfoundry.ai"
+    elif endpoint == "api.openai.com" or endpoint.endswith(".api.openai.com"):
+        normalized_route = "openai"
     # Official subscription classification requires a session-native route that
     # also resolves to the official OpenAI endpoint.  An explicit conflict (or
     # a custom endpoint) must remain metered/unresolved even when the session's
@@ -309,7 +311,12 @@ def _consumed_to_usage_fact(
         pricing_basis = "metered_estimate"
         evidence_basis = route_evidence_basis
     else:
-        provider_id, billing_mode, pricing_basis, unresolved = model_provider, "metered", "route-observed", False
+        provider_id = model_provider
+        billing_mode = "metered"
+        unresolved = route_evidence_basis in {
+            "missing", "conflict", "config-current", "env-current"
+        }
+        pricing_basis = "metered_estimate" if unresolved else "route-observed"
         evidence_basis = route_evidence_basis
     fields = {
         "machine_namespace": machine_namespace,

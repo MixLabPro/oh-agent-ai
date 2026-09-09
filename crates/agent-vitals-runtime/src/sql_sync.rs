@@ -579,10 +579,9 @@ pub fn write_facts_to_authority(
                 .map_err(AuthorityError::from)?;
                 outcome.rejected += 1;
             }
-            for fact in facts
-                .iter()
-                .filter(|fact| fact.get("evidence_basis").and_then(Value::as_str) == Some("conflict"))
-            {
+            for fact in facts.iter().filter(|fact| {
+                fact.get("evidence_basis").and_then(Value::as_str) == Some("conflict")
+            }) {
                 let fact_id = fact
                     .get("fact_id")
                     .and_then(Value::as_str)
@@ -816,10 +815,9 @@ pub fn sync_host_sql(
                 .map_err(AuthorityError::from)?;
                 outcome.rejected += 1;
             }
-            for fact in facts
-                .iter()
-                .filter(|fact| fact.get("evidence_basis").and_then(Value::as_str) == Some("conflict"))
-            {
+            for fact in facts.iter().filter(|fact| {
+                fact.get("evidence_basis").and_then(Value::as_str) == Some("conflict")
+            }) {
                 let fact_id = fact
                     .get("fact_id")
                     .and_then(Value::as_str)
@@ -1183,17 +1181,29 @@ mod tests {
         fields.insert("machine_namespace".into(), serde_json::json!("ns-conflict"));
         fields.insert("host".into(), serde_json::json!("codex"));
         fields.insert("source_profile".into(), serde_json::json!("default"));
-        fields.insert("native_session_id".into(), serde_json::json!("sess-conflict"));
+        fields.insert(
+            "native_session_id".into(),
+            serde_json::json!("sess-conflict"),
+        );
         fields.insert("source_event_id".into(), serde_json::json!("evt-conflict"));
         fields.insert("observation_kind".into(), serde_json::json!("token_count"));
-        fields.insert("event_ts_utc".into(), serde_json::json!("2026-09-06T10:00:00.000Z"));
+        fields.insert(
+            "event_ts_utc".into(),
+            serde_json::json!("2026-09-06T10:00:00.000Z"),
+        );
         fields.insert("model_raw".into(), serde_json::json!("gpt-5.6-sol"));
         fields.insert("provider_id".into(), serde_json::json!("openai"));
         fields.insert("provider_raw".into(), serde_json::json!("openai"));
-        fields.insert("endpoint_host".into(), serde_json::json!("router.cogfoundry.ai"));
+        fields.insert(
+            "endpoint_host".into(),
+            serde_json::json!("router.cogfoundry.ai"),
+        );
         fields.insert("evidence_basis".into(), serde_json::json!("conflict"));
         fields.insert("billing_mode".into(), serde_json::json!("metered"));
-        fields.insert("pricing_basis".into(), serde_json::json!("metered_estimate"));
+        fields.insert(
+            "pricing_basis".into(),
+            serde_json::json!("metered_estimate"),
+        );
         fields.insert("uncached_input_tokens".into(), serde_json::json!(10));
         fields.insert("output_tokens".into(), serde_json::json!(4));
         let fact = build_usage_fact(&fields).unwrap();
