@@ -55,6 +55,7 @@ USAGE_FACT_FIELDS = (
     "host", "source_profile", "source_event_id", "source_revision", "adapter_version",
     # 模型归属
     "provider_raw", "model_raw", "provider_id", "model_id", "normalization_version",
+    "route_evidence_id", "attribution_version",
     # 时间
     "event_ts_utc", "event_tz_basis", "time_basis",
     # 去重语义

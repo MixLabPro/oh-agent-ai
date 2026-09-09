@@ -456,6 +456,53 @@ impl<'a> SqlFactWriter<'a> {
                 ],
             )?;
             if n == 0 {
+                let attribution_conflict: bool = self
+                    .conn
+                    .query_row(
+                        "SELECT provider_id, provider_raw, billing_source, billing_mode,
+                                pricing_basis, evidence_basis, normalization_version,
+                                route_evidence_id, attribution_version
+                         FROM usage_facts WHERE fact_id = ?1",
+                        rusqlite::params![r.s("fact_id").unwrap_or_default()],
+                        |row| {
+                            let existing: [Option<String>; 9] = [
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                                row.get(6)?,
+                                row.get(7)?,
+                                row.get(8)?,
+                            ];
+                            let incoming = [
+                                provider_id.clone(),
+                                provider_raw.clone(),
+                                billing_source.clone(),
+                                billing_mode.clone(),
+                                pricing_basis.clone(),
+                                evidence_basis.clone(),
+                                normalization_version.clone(),
+                                route_evidence_id.clone(),
+                                attribution_version.clone(),
+                            ];
+                            Ok(existing
+                                .iter()
+                                .zip(incoming.iter())
+                                .any(|(old, new)| old.is_some() && new.is_some() && old != new))
+                        },
+                    )
+                    .unwrap_or(false);
+                if attribution_conflict {
+                    self.write_rejected(
+                        &format!(
+                            "attribution_conflict:{}",
+                            r.s("fact_id").unwrap_or_default()
+                        ),
+                        &["provider/billing evidence conflicts with stored fact".to_string()],
+                    )?;
+                }
                 // A replay may discover stronger provider evidence for an
                 // already stored fact. Enrich nullable attribution columns by
                 // fact_id without changing the immutable fact identity.
