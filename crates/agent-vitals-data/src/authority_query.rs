@@ -719,12 +719,13 @@ pub fn hourly_by_host_model(
 ) -> Result<HostModelHourly, AuthorityError> {
     // 单宿主查询（`host = ?` 命中 `usage_facts_host_time` 索引）——三宿主
     // 聚合用 in-memory 合并。详见 `SQL_HOURLY_BY_HOST_MODEL` 的注释。
-    let wired: &[&str] = &["claude-code", "codex", "dsh"];
-    let selected: Vec<&str> = wired
-        .iter()
-        .filter(|w| hosts.is_empty() || hosts.iter().any(|h| h == *w))
-        .copied()
-        .collect();
+    let selected: Vec<String> = if hosts.is_empty() {
+        conn.prepare("SELECT DISTINCT host FROM usage_facts WHERE deleted_at_ms IS NULL ORDER BY host")?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<String>, _>>()?
+    } else {
+        hosts.to_vec()
+    };
     if selected.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -860,12 +861,13 @@ pub fn sessions_in_window(
     after_key: Option<&str>,
     limit: usize,
 ) -> Result<(Vec<SessionAgg>, bool, i64), AuthorityError> {
-    let wired: &[&str] = &["claude-code", "codex", "dsh"];
-    let selected: Vec<&str> = wired
-        .iter()
-        .filter(|w| hosts.is_empty() || hosts.iter().any(|h| h == *w))
-        .copied()
-        .collect();
+    let selected: Vec<String> = if hosts.is_empty() {
+        conn.prepare("SELECT DISTINCT host FROM usage_facts WHERE deleted_at_ms IS NULL ORDER BY host")?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<String>, _>>()?
+    } else {
+        hosts.to_vec()
+    };
     let hour_param: i64 = hour.map(|h| h as i64).unwrap_or(-1);
 
     let mut all: Vec<SessionAgg> = Vec::new();
