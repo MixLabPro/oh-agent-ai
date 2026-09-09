@@ -273,13 +273,13 @@ pub fn collect_report(conn: &Connection, db_existed: bool, enabled: bool) -> Val
         .unwrap_or(0);
     let pricing_latest = conn
         .query_row(
-            "SELECT pricing_version, captured_at_ms FROM pricing_snapshots
+            "SELECT pricing_version, captured_at_ms, source_kind FROM pricing_snapshots
              ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1",
             [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)),
         )
         .ok();
-    let pricing_payload = pricing_latest.as_ref().and_then(|(version, _)| {
+    let pricing_payload = pricing_latest.as_ref().and_then(|(version, _, _)| {
         conn.query_row(
             "SELECT payload_json FROM pricing_snapshots WHERE pricing_version = ?1",
             rusqlite::params![version],
@@ -291,7 +291,7 @@ pub fn collect_report(conn: &Connection, db_existed: bool, enabled: bool) -> Val
     let unpriced_tokens = unpriced_tokens(conn, pricing_payload.as_ref());
     let pricing_stale = pricing_latest
         .as_ref()
-        .map(|(_, captured_at_ms)| {
+        .map(|(_, captured_at_ms, _)| {
             crate::sql_sync::now_ms().saturating_sub(*captured_at_ms) > 30 * 24 * 60 * 60 * 1_000
         })
         .unwrap_or(true);
@@ -379,8 +379,9 @@ pub fn collect_report(conn: &Connection, db_existed: bool, enabled: bool) -> Val
         "pricing_snapshots": pricing_snapshots,
         "pricing": {
             "snapshot_count": pricing_snapshots,
-            "latest_version": pricing_latest.as_ref().map(|(v, _)| v),
-            "latest_captured_at_ms": pricing_latest.as_ref().map(|(_, ts)| ts),
+            "latest_version": pricing_latest.as_ref().map(|(v, _, _)| v),
+            "latest_captured_at_ms": pricing_latest.as_ref().map(|(_, ts, _)| ts),
+            "latest_source_kind": pricing_latest.as_ref().map(|(_, _, source)| source),
             "stale": pricing_stale,
         },
         "unresolved_tokens": unresolved_tokens,
@@ -573,6 +574,7 @@ mod tests {
 
         assert_eq!(report["pricing"]["snapshot_count"], 0);
         assert_eq!(report["pricing"]["latest_version"], Value::Null);
+        assert_eq!(report["pricing"]["latest_source_kind"], Value::Null);
         assert_eq!(report["pricing"]["stale"], true);
         assert_eq!(report["unresolved_tokens"], 0);
         assert_eq!(report["unpriced_tokens"], 0);
