@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 const CODEX_PRICING_JSON: &str = include_str!("../../../../assets/codex_pricing.json");
 
@@ -69,7 +69,11 @@ fn format_number(n: i64) -> String {
 /// 金额 → `$12.34` / `$123.4`。≥100 一位小数否则两位，去尾零。与
 /// `cost.rs::format_money` 同一 spec，前缀换成 `$`（USD）。
 fn format_usd(x: f64) -> String {
-    let s = if x >= 100.0 { format!("{:.1}", x) } else { format!("{:.2}", x) };
+    let s = if x >= 100.0 {
+        format!("{:.1}", x)
+    } else {
+        format!("{:.2}", x)
+    };
     let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
     format!("${s}")
 }
@@ -89,8 +93,11 @@ fn rate(entry: &Value, key: &str) -> f64 {
 
 /// `(model, speed)` → 价格表条目：**最长 modelPrefix 匹配**（`gpt-5.6-sol` 命中
 /// sol 行而非 `gpt-5.6` 泛化行）。同长度时先出现的条目赢（catalog 数组序即作者
-/// 意图，确定性匹配）。找不到 → None（unpriced）。
+/// 意图，确定性匹配）。Codex session 的 `model_raw` 可能带 provider 路由前缀
+/// （如 `openai/gpt-5.6-sol`），匹配前只剥掉前缀；输出仍保留原始模型名。
+/// 找不到 → None（unpriced）。
 fn resolve_entry<'a>(model: &str, speed: &str, entries: &'a [Value]) -> Option<&'a Value> {
+    let match_model = model.rsplit('/').next().unwrap_or(model);
     let mut best: Option<&Value> = None;
     let mut best_len = 0usize;
     for e in entries {
@@ -98,7 +105,7 @@ fn resolve_entry<'a>(model: &str, speed: &str, entries: &'a [Value]) -> Option<&
             continue;
         }
         let prefix = e.get("modelPrefix").and_then(|v| v.as_str()).unwrap_or("");
-        if prefix.len() > best_len && model.starts_with(prefix) {
+        if prefix.len() > best_len && match_model.starts_with(prefix) {
             best_len = prefix.len();
             best = Some(e);
         }
@@ -113,7 +120,11 @@ fn lc_multipliers(bucket: &Value, entry: &Value) -> Option<(f64, f64)> {
     // Folded hour/day buckets cannot establish the official per-request >272K
     // condition.  Only enable the surcharge when an adapter has preserved that
     // request-level evidence explicitly.
-    if entry.get("perRequestLongContextEvidence").and_then(|v| v.as_bool()) != Some(true) {
+    if entry
+        .get("perRequestLongContextEvidence")
+        .and_then(|v| v.as_bool())
+        != Some(true)
+    {
         return None;
     }
     let threshold = entry
@@ -175,7 +186,10 @@ fn price_bucket(bucket: &Value, entry: &Value, lc: Option<(f64, f64)>) -> f64 {
 /// 5 桶对象 → `[i64; 5]`（桶序与 `CODEX_TOKEN_FIELDS` 一致）。
 fn bucket_fields(bucket: &Value) -> [i64; 5] {
     let mut out = [0i64; 5];
-    for (i, f) in agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS.iter().enumerate() {
+    for (i, f) in agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS
+        .iter()
+        .enumerate()
+    {
         out[i] = get_i64(bucket, f);
     }
     out
@@ -183,7 +197,10 @@ fn bucket_fields(bucket: &Value) -> [i64; 5] {
 
 fn tokens_object(t: &[i64; 5]) -> Value {
     let mut obj = Map::new();
-    for (i, f) in agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS.iter().enumerate() {
+    for (i, f) in agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS
+        .iter()
+        .enumerate()
+    {
         obj.insert((*f).to_string(), json!(t[i]));
     }
     Value::Object(obj)
@@ -206,7 +223,11 @@ fn window_label(wm: i64) -> String {
 fn pct_text(up: f64) -> String {
     let s = format!("{up:.3}");
     let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
-    if s.is_empty() { "0".to_string() } else { s }
+    if s.is_empty() {
+        "0".to_string()
+    } else {
+        s
+    }
 }
 
 /// resets_at（Unix 秒）→ 北京时区人读重置时间：今天 → `HH:MM`，否则 →
@@ -220,7 +241,11 @@ fn reset_beijing_text_at(resets_at: i64, today: &str) -> String {
     let (y, m, d) = civil_from_unix_secs(resets_at, off);
     let hhmm = format!("{:02}:{:02}", sod / 3600, (sod % 3600) / 60);
     let key = format!("{y:04}-{m:02}-{d:02}");
-    if key == today { hhmm } else { format!("{m}月{d}日 {hhmm}") }
+    if key == today {
+        hhmm
+    } else {
+        format!("{m}月{d}日 {hhmm}")
+    }
 }
 
 fn reset_beijing_text(resets_at: i64) -> String {
@@ -243,8 +268,13 @@ fn plan_line(plan: Option<&Value>) -> Option<String> {
     if let Some(limits) = plan.get("limits").and_then(|v| v.as_object()) {
         for (_name, win) in limits {
             let Some(win) = win.as_object() else { continue };
-            let Some(up) = win.get("used_percent").and_then(|v| v.as_f64()) else { continue };
-            let wm = win.get("window_minutes").and_then(|v| v.as_i64()).unwrap_or(0);
+            let Some(up) = win.get("used_percent").and_then(|v| v.as_f64()) else {
+                continue;
+            };
+            let wm = win
+                .get("window_minutes")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
             let remaining = (100.0 - up).max(0.0);
             let mut piece = format!("{} 剩余{}%", window_label(wm), pct_text(remaining));
             if let Some(resets) = win.get("resets_at").and_then(|v| v.as_i64()) {
@@ -300,11 +330,15 @@ pub fn codex_cost_report(
     let mut days: Vec<Value> = Vec::new();
     if let Some(bd) = by_date_model.as_object() {
         for (date, date_map) in bd {
-            let Some(date_map) = date_map.as_object() else { continue };
+            let Some(date_map) = date_map.as_object() else {
+                continue;
+            };
             let mut cost: f64 = 0.0;
             let mut toks: i64 = 0;
             for (model, speeds) in date_map {
-                let Some(speeds) = speeds.as_object() else { continue };
+                let Some(speeds) = speeds.as_object() else {
+                    continue;
+                };
                 for (spd, bucket) in speeds {
                     let facts = bucket_fields(bucket);
                     for f in facts.iter().take(4) {
@@ -339,11 +373,15 @@ pub fn codex_cost_report(
             let mut hour_keys: Vec<&String> = bh.keys().collect();
             hour_keys.sort();
             for h in hour_keys {
-                let Some(hour_map) = bh.get(h).and_then(|v| v.as_object()) else { continue };
+                let Some(hour_map) = bh.get(h).and_then(|v| v.as_object()) else {
+                    continue;
+                };
                 let mut cost: f64 = 0.0;
                 let mut toks: i64 = 0;
                 for (model, speeds) in hour_map {
-                    let Some(speeds) = speeds.as_object() else { continue };
+                    let Some(speeds) = speeds.as_object() else {
+                        continue;
+                    };
                     for (spd, bucket) in speeds {
                         let facts = bucket_fields(bucket);
                         for f in facts.iter().take(4) {
@@ -370,7 +408,9 @@ pub fn codex_cost_report(
     let mut total_tokens = [0i64; 5];
     let mut per_model = Map::new();
     for (model, speeds) in bm {
-        let Some(speeds) = speeds.as_object() else { continue };
+        let Some(speeds) = speeds.as_object() else {
+            continue;
+        };
         let mut tokens = [0i64; 5];
         let mut cost: f64 = 0.0;
         let mut all_priced = true;
@@ -441,8 +481,14 @@ pub fn render_codex_cost(out: &Value) -> String {
         .unwrap_or("USD");
     let host = out.get("host").and_then(|v| v.as_str());
     let month = out.get("month").and_then(|v| v.as_str());
-    let total = out.get("total_cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let unpriced = out.get("unpriced_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let total = out
+        .get("total_cost_usd")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let unpriced = out
+        .get("unpriced_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let per_model = out
         .get("per_model")
         .and_then(|v| v.as_object())
@@ -468,12 +514,19 @@ pub fn render_codex_cost(out: &Value) -> String {
     }
     // reasoning 是 output 的子集，故人读总量只加 4 个独立桶。
     let mut all_tokens: i64 = 0;
-    for f in agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS.iter().take(4) {
+    for f in agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS
+        .iter()
+        .take(4)
+    {
         all_tokens += tt.get(*f).and_then(|x| x.as_i64()).unwrap_or(0);
     }
     // 订阅套餐（plan 存在）时，per-token 美元是「按量标价」不是账单——账单 = 套餐
     // 固定费。诚实标注，别让用户把标价当成实际支出。
-    let label = if plan_line.is_some() { "total cost (按量标价)" } else { "total cost" };
+    let label = if plan_line.is_some() {
+        "total cost (按量标价)"
+    } else {
+        "total cost"
+    };
     let mut line = format!("{label}: {}", format_usd(total));
     if all_tokens > 0 {
         line += &format!(" · total tokens: {}", format_number(all_tokens));
@@ -481,16 +534,29 @@ pub fn render_codex_cost(out: &Value) -> String {
     parts.push(line + "\n");
     // 按折叠的模型首现序展示（per_model 的插入序即 by_model 序）。
     for (model, entry) in &per_model {
-        let cost = entry.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let speeds = entry.get("speed").and_then(|v| v.as_str()).unwrap_or("standard");
-        if entry.get("priced").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let cost = entry
+            .get("cost_usd")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let speeds = entry
+            .get("speed")
+            .and_then(|v| v.as_str())
+            .unwrap_or("standard");
+        if entry
+            .get("priced")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             parts.push(format!("  {model}  {}  ({speeds})\n", format_usd(cost)));
         } else {
             parts.push(format!("  {model}  unpriced  ({speeds})\n"));
         }
     }
     if unpriced > 0 {
-        parts.push(format!("另有 {} tokens 模型未计价\n", format_number(unpriced)));
+        parts.push(format!(
+            "另有 {} tokens 模型未计价\n",
+            format_number(unpriced)
+        ));
     }
     let ua = out
         .get("unaccounted_usage")
@@ -501,7 +567,10 @@ pub fn render_codex_cost(out: &Value) -> String {
         let t = e.get("type").and_then(|v| v.as_str()).unwrap_or("?");
         let c = e.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
         let s = e.get("tokens_seen").and_then(|v| v.as_i64()).unwrap_or(0);
-        parts.push(format!("未接住 {c} × {t}（看见 {} tokens）\n", format_number(s)));
+        parts.push(format!(
+            "未接住 {c} × {t}（看见 {} tokens）\n",
+            format_number(s)
+        ));
     }
     parts.concat()
 }
@@ -515,8 +584,8 @@ pub fn render_codex_cost(out: &Value) -> String {
 // `agent_vitals_runtime::sessions::codex_cost::{today_beijing,
 // current_month_beijing}`。「当前月/今天」口径与 DSH state 层一致，两引擎
 // 月度视图不打架。
-pub(crate) use agent_vitals_domain::util::civil_from_unix_secs;
 pub use crate::clock::{current_month_beijing, today_beijing};
+pub(crate) use agent_vitals_domain::util::civil_from_unix_secs;
 
 #[cfg(test)]
 mod tests {
@@ -541,15 +610,20 @@ mod tests {
 
     #[test]
     fn resolve_entry_longest_prefix_wins() {
-        let entries = serde_json::from_str::<Value>(r#"[
+        let entries = serde_json::from_str::<Value>(
+            r#"[
             {"modelPrefix":"gpt-5.6","speed":"standard"},
             {"modelPrefix":"gpt-5.6-sol","speed":"standard"}
-        ]"#).unwrap();
+        ]"#,
+        )
+        .unwrap();
         let arr = entries.as_array().unwrap();
         let r = resolve_entry("gpt-5.6-sol", "standard", arr).unwrap();
         assert_eq!(r["modelPrefix"], "gpt-5.6-sol");
         let r = resolve_entry("gpt-5.6-terra", "standard", arr).unwrap();
         assert_eq!(r["modelPrefix"], "gpt-5.6");
+        let r = resolve_entry("openai/gpt-5.6-sol", "standard", arr).unwrap();
+        assert_eq!(r["modelPrefix"], "gpt-5.6-sol");
         // speed 不匹配 → None
         assert!(resolve_entry("gpt-5.6-sol", "fast", arr).is_none());
         // 无条目 → None（unpriced）
@@ -607,7 +681,9 @@ mod tests {
     fn price_bucket_long_context_priced_false_skips() {
         // fast 行显式 longContextPriced:false → 即使超阈值也不乘。
         let mut e = entry("gpt-5.6-sol", "fast");
-        e.as_object_mut().unwrap().insert("longContextPriced".into(), json!(false));
+        e.as_object_mut()
+            .unwrap()
+            .insert("longContextPriced".into(), json!(false));
         let bucket = json!({
             "uncached_input_tokens": 500000,
             "output_tokens": 100000,
@@ -660,7 +736,15 @@ mod tests {
             }
         });
         let pricing = load_codex_pricing();
-        let report = codex_cost_report(&by_hour_model, &by_model, &json!([]), &json!(null), &pricing, false).unwrap();
+        let report = codex_cost_report(
+            &by_hour_model,
+            &by_model,
+            &json!([]),
+            &json!(null),
+            &pricing,
+            false,
+        )
+        .unwrap();
         // by_date 之和 == by_model → 总价与 days 之和精确相等（守恒）。
         let total = report["total_cost_usd"].as_f64().unwrap();
         let mut day_sum = 0.0;
@@ -705,13 +789,24 @@ mod tests {
             "2026-08-02T00": { "gpt-5.6-sol": { "standard": day_bucket } },
         });
         let pricing = load_codex_pricing();
-        let report = codex_cost_report(&by_hour_model, &by_model, &json!([]), &json!(null), &pricing, false).unwrap();
+        let report = codex_cost_report(
+            &by_hour_model,
+            &by_model,
+            &json!([]),
+            &json!(null),
+            &pricing,
+            false,
+        )
+        .unwrap();
         let total = report["total_cost_usd"].as_f64().unwrap();
         let mut day_sum = 0.0;
         for d in report["days"].as_array().unwrap() {
             day_sum += d["cost_usd"].as_f64().unwrap();
         }
-        assert!((total - day_sum).abs() < 1e-9, "total {total} != days {day_sum}");
+        assert!(
+            (total - day_sum).abs() < 1e-9,
+            "total {total} != days {day_sum}"
+        );
         // 每天按现价 = 0.1M·4 + 0.1M·0.4 + 0.05M·20 = 1.44，两天 2.88。
         assert!((total - 2.88).abs() < 1e-9, "got {total}");
         assert_eq!(report["days"].as_array().unwrap().len(), 2);
@@ -743,12 +838,25 @@ mod tests {
             } } }
         });
         let pricing = load_codex_pricing();
-        let report = codex_cost_report(&by_hour_model, &by_model, &json!([]), &json!(null), &pricing, false).unwrap();
+        let report = codex_cost_report(
+            &by_hour_model,
+            &by_model,
+            &json!([]),
+            &json!(null),
+            &pricing,
+            false,
+        )
+        .unwrap();
         let total = report["total_cost_usd"].as_f64().unwrap();
-        let day_sum = report["days"].as_array().unwrap()[0]["cost_usd"].as_f64().unwrap();
+        let day_sum = report["days"].as_array().unwrap()[0]["cost_usd"]
+            .as_f64()
+            .unwrap();
         // dated 1.44 + untimed 1.44 = 2.88；days 只有 1.44。
         assert!((total - 2.88).abs() < 1e-9, "got {total}");
-        assert!((total - day_sum - 1.44).abs() < 1e-9, "conservation with untimed broken");
+        assert!(
+            (total - day_sum - 1.44).abs() < 1e-9,
+            "conservation with untimed broken"
+        );
     }
 
     #[test]
@@ -765,7 +873,15 @@ mod tests {
             }
         });
         let pricing = load_codex_pricing();
-        let report = codex_cost_report(&json!({}), &by_model, &json!([]), &json!(null), &pricing, false).unwrap();
+        let report = codex_cost_report(
+            &json!({}),
+            &by_model,
+            &json!([]),
+            &json!(null),
+            &pricing,
+            false,
+        )
+        .unwrap();
         assert_eq!(report["total_cost_usd"], 0.0);
         assert_eq!(report["unpriced_tokens"], 5100);
         let pm = &report["per_model"]["codex-auto-review"];
@@ -775,7 +891,17 @@ mod tests {
     #[test]
     fn report_none_when_nothing_to_price() {
         let pricing = load_codex_pricing();
-        assert_eq!(codex_cost_report(&json!({}), &json!({}), &json!([]), &json!(null), &pricing, false), None);
+        assert_eq!(
+            codex_cost_report(
+                &json!({}),
+                &json!({}),
+                &json!([]),
+                &json!(null),
+                &pricing,
+                false
+            ),
+            None
+        );
     }
 
     #[test]
@@ -806,9 +932,15 @@ mod tests {
         // UTC+8（与 codex_cost.py::_reset_beijing_text_at 同 spec）。「今天 → HH:MM、
         // 否则 → M月D日 HH:MM」两个分支各钉一次，与运行当天无关。
         assert_eq!(reset_beijing_text_at(1787900000, "2026-08-28"), "14:53");
-        assert_eq!(reset_beijing_text_at(1787900000, "2026-08-29"), "8月28日 14:53");
+        assert_eq!(
+            reset_beijing_text_at(1787900000, "2026-08-29"),
+            "8月28日 14:53"
+        );
         assert_eq!(reset_beijing_text_at(1788351817, "2026-09-02"), "20:23");
-        assert_eq!(reset_beijing_text_at(1788351817, "2026-09-03"), "9月2日 20:23");
+        assert_eq!(
+            reset_beijing_text_at(1788351817, "2026-09-03"),
+            "9月2日 20:23"
+        );
     }
 
     #[test]
@@ -848,13 +980,23 @@ mod tests {
                 }
             }
         });
-        let plan = json!({"plan_type": "plus", "has_credits": false, "observed_at": "2026-08-19T..."});
+        let plan =
+            json!({"plan_type": "plus", "has_credits": false, "observed_at": "2026-08-19T..."});
         let pricing = load_codex_pricing();
-        let report = codex_cost_report(&json!({}), &by_model, &json!([]), &plan, &pricing, false).unwrap();
+        let report =
+            codex_cost_report(&json!({}), &by_model, &json!([]), &plan, &pricing, false).unwrap();
         // plan 原样透传，不解释。
         assert_eq!(report["plan"], plan);
         // 没有 plan 时 → null（而非缺失）。
-        let r2 = codex_cost_report(&json!({}), &by_model, &json!([]), &json!(null), &pricing, false).unwrap();
+        let r2 = codex_cost_report(
+            &json!({}),
+            &by_model,
+            &json!([]),
+            &json!(null),
+            &pricing,
+            false,
+        )
+        .unwrap();
         assert!(r2["plan"].is_null());
     }
 
@@ -885,7 +1027,15 @@ mod tests {
             } }
         });
         let pricing = load_codex_pricing();
-        let report = codex_cost_report(&by_hour_model, &by_model, &json!([]), &json!(null), &pricing, true).unwrap();
+        let report = codex_cost_report(
+            &by_hour_model,
+            &by_model,
+            &json!([]),
+            &json!(null),
+            &pricing,
+            true,
+        )
+        .unwrap();
         // hours 键只在 want_hours 时出现。
         assert!(report.get("hours").is_some());
         let hours = report["hours"].as_array().unwrap();
@@ -896,7 +1046,9 @@ mod tests {
         assert_eq!(hours[0]["hour"], "2026-08-01T00");
         assert_eq!(hours[1]["hour"], "2026-08-01T01");
         // days 轴同样不推断 LC：0.3M·4 + 0.2M·20 = 5.2。
-        let day = report["days"].as_array().unwrap()[0]["cost_usd"].as_f64().unwrap();
+        let day = report["days"].as_array().unwrap()[0]["cost_usd"]
+            .as_f64()
+            .unwrap();
         assert!((day - 5.2).abs() < 1e-9, "got {day}");
         // 守恒：sum(hours) == sum(days) == total。
         let mut hour_sum = 0.0;
@@ -904,10 +1056,24 @@ mod tests {
             hour_sum += h["cost_usd"].as_f64().unwrap();
         }
         let total = report["total_cost_usd"].as_f64().unwrap();
-        assert!((hour_sum - day).abs() < 1e-9, "hours {hour_sum} != days {day}");
-        assert!((hour_sum - total).abs() < 1e-9, "hours {hour_sum} != total {total}");
+        assert!(
+            (hour_sum - day).abs() < 1e-9,
+            "hours {hour_sum} != days {day}"
+        );
+        assert!(
+            (hour_sum - total).abs() < 1e-9,
+            "hours {hour_sum} != total {total}"
+        );
         // 无 want_hours 时 hours 键必须缺席（--month --json 字节恒等）。
-        let r2 = codex_cost_report(&by_hour_model, &by_model, &json!([]), &json!(null), &pricing, false).unwrap();
+        let r2 = codex_cost_report(
+            &by_hour_model,
+            &by_model,
+            &json!([]),
+            &json!(null),
+            &pricing,
+            false,
+        )
+        .unwrap();
         assert!(r2.get("hours").is_none());
     }
 
@@ -931,7 +1097,10 @@ mod tests {
         });
         let text = render_codex_cost(&out);
         // 67% → 剩余 33%；重置文本今天分支由 reset_beijing_text_at 单测钉住。
-        assert!(text.contains("plan: plus（订阅套餐） · 5小时 剩余33%（重置"), "{text}");
+        assert!(
+            text.contains("plan: plus（订阅套餐） · 5小时 剩余33%（重置"),
+            "{text}"
+        );
         assert!(text.contains("快照@2026-08-19T..."), "{text}");
         assert!(text.contains("total cost (按量标价): $5.54"));
         // 无 plan → 旧标签。

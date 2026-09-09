@@ -84,7 +84,10 @@ def _rate(entry, key):
 def _resolve_entry(model, speed, entries):
     """`(model, speed)` → 价格表条目：**最长 modelPrefix 匹配**（`gpt-5.6-sol` 命中
     sol 行而非 `gpt-5.6` 泛化行）。同长度时先出现的条目赢（catalog 数组序即作者
-    意图）。找不到 → None（unpriced）。"""
+    意图）。Codex session 的 `model_raw` 可能带 provider 路由前缀
+    （如 `openai/gpt-5.6-sol`），匹配前只剥掉前缀；输出仍保留原始模型名。
+    找不到 → None（unpriced）。"""
+    match_model = str(model).rsplit("/", 1)[-1]
     best = None
     best_len = 0
     for e in entries:
@@ -93,7 +96,7 @@ def _resolve_entry(model, speed, entries):
         prefix = e.get("modelPrefix")
         if not isinstance(prefix, str):
             continue
-        if len(prefix) > best_len and str(model).startswith(prefix):
+        if len(prefix) > best_len and match_model.startswith(prefix):
             best_len = len(prefix)
             best = e
     return best

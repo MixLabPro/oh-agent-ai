@@ -95,6 +95,9 @@ provider + model 的明确价卡
 
 ### 4.2 UsageFact 归因字段
 
+事实行同时保留 `endpoint_host` 与稳定的 `route_evidence_id`；前者是原始路由证据，后者将
+token fact 关联到该 session snapshot，不能用一批事实共享的 current-config id 替代。
+
 有 session-native endpoint：
 
 ```text
@@ -176,6 +179,18 @@ Codex emitter 应在 `session_meta` 中写入非敏感 route snapshot：
 
 ## 6. Host adapter 实现
 
+### 6.0 分层边界
+
+宿主特有的 wire/session 解析必须位于 `agent-vitals-hosts/src/hosts/<host>/`：
+
+- session 行格式、provider 字段路径、route timeline、host-specific normalization input：host adapter；
+- provider matcher、价卡回退、缓存/输入/输出计价公式：`agent-vitals-domain` 的通用 cost/provider 层；
+- SQL 写入、汇总、UI DTO：data/runtime/desktop，只消费统一 DTO，不重新解释 host wire。
+
+现有 `crates/agent-vitals-runtime/src/sessions/codex_cost.rs` 是历史兼容入口，包含 Codex 专用
+fold 与价卡逻辑。实施时应将 route/provider 解析迁出 runtime；公平价解析抽到 domain，runtime
+只保留兼容包装或调用统一 cost projection，禁止新增 provider-specific 判断。
+
 ### 6.1 Codex
 
 修改：
@@ -237,10 +252,8 @@ openai 官方 endpoint → openai
 
 不新增账单表，不迁移旧事实的 provider identity。新增 emitter 后：
 
-```bash
-cargo run -p agent-vitals -- data replay-provider-evidence \
-  --report artifacts/v0.11/provider-route-replay.json
-```
+重放沿用现有 host sync/reprocess 入口，不新增账单表或 provider 专用 SQL；实现必须把
+session-native route snapshot 逐事实写入 `route_evidence_id`，并可从原始 session log 重建。
 
 重放必须验证：
 

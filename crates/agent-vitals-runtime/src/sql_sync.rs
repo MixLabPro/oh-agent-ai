@@ -345,6 +345,36 @@ pub(crate) fn write_flat_facts_with_sources(
                 ],
             )?;
         }
+        // Route evidence is session-native and therefore belongs to the fact
+        // that observed it.  Persist every distinct evidence id from the batch
+        // instead of attaching one current-config route to all historical rows.
+        let mut fact_routes = std::collections::HashSet::new();
+        for fact in facts {
+            let Some(evidence_id) = fact.get("route_evidence_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if !fact_routes.insert(evidence_id.to_string()) {
+                continue;
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO route_evidence(
+                   evidence_id, host, machine_namespace, provider_raw, endpoint_host,
+                   evidence_basis, observed_at_ms, ingested_run_id)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    evidence_id,
+                    fact.get("host").and_then(Value::as_str).unwrap_or(host),
+                    machine_namespace,
+                    fact.get("provider_raw").and_then(Value::as_str),
+                    fact.get("endpoint_host").and_then(Value::as_str),
+                    fact.get("evidence_basis")
+                        .and_then(Value::as_str)
+                        .unwrap_or("missing"),
+                    now,
+                    run_id,
+                ],
+            )?;
+        }
         for (path, (size_bytes, mtime_ns)) in sources {
             writer.upsert_source_file(host, path, *size_bytes, *mtime_ns, None, PARSER_VERSION)?;
             outcome.files_synced += 1;

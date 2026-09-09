@@ -81,9 +81,12 @@ pub fn normalize_provider(
     provider_raw: Option<&str>,
     endpoint_host: Option<&str>,
 ) -> Option<String> {
-    let endpoint = endpoint_host.unwrap_or_default().to_ascii_lowercase();
-    if endpoint.contains("router.cogfoundry.ai") || endpoint == "cogfoundry.ai" {
+    let endpoint = normalize_host(endpoint_host.unwrap_or_default());
+    if is_cogfoundry_host(&endpoint) {
         return Some("cogfoundry.ai".to_string());
+    }
+    if is_openai_host(&endpoint) {
+        return Some("openai".to_string());
     }
     match provider_raw
         .map(str::trim)
@@ -95,6 +98,31 @@ pub fn normalize_provider(
         Some(raw) => Some(raw.to_string()),
         None => None,
     }
+}
+
+/// Host matching is deliberately boundary-aware: a URL/host may carry a port,
+/// trailing dot, or a subdomain, but an unrelated host containing the provider
+/// name must never be classified as that provider.
+fn normalize_host(raw: &str) -> String {
+    let mut value = raw.trim().to_ascii_lowercase();
+    if let Some((_, rest)) = value.split_once("://") {
+        value = rest.to_string();
+    }
+    value = value.split('/').next().unwrap_or(&value).to_string();
+    if let Some((host, port)) = value.rsplit_once(':') {
+        if port.chars().all(|c| c.is_ascii_digit()) {
+            value = host.to_string();
+        }
+    }
+    value.trim_end_matches('.').to_string()
+}
+
+fn is_cogfoundry_host(host: &str) -> bool {
+    host == "cogfoundry.ai" || host.ends_with(".cogfoundry.ai")
+}
+
+fn is_openai_host(host: &str) -> bool {
+    host == "api.openai.com" || host.ends_with(".api.openai.com")
 }
 
 /// Resolves identity first, then applies v0.11's conservative billing semantics.
@@ -221,5 +249,21 @@ mod tests {
         );
         assert_eq!(a.billing_mode, BillingMode::Subscription);
         assert!(!a.has_unresolved);
+    }
+
+    #[test]
+    fn normalizes_provider_hosts_without_false_positive() {
+        assert_eq!(
+            normalize_provider(None, Some("https://beta-router.cogfoundry.ai:443/v1")),
+            Some("cogfoundry.ai".to_string())
+        );
+        assert_eq!(
+            normalize_provider(None, Some("api.openai.com.")),
+            Some("openai".to_string())
+        );
+        assert_eq!(
+            normalize_provider(None, Some("cogfoundry.ai.example.com")),
+            None
+        );
     }
 }

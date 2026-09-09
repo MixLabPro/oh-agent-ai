@@ -164,6 +164,145 @@ fn resolve_native_session_id(path: &Path, items: &[(usize, Value)]) -> String {
     }
 }
 
+fn route_evidence_from(value: &Value) -> Option<RouteEvidence> {
+    let object = value.as_object()?;
+    let route = object
+        .get("route")
+        .and_then(Value::as_object)
+        .unwrap_or(object);
+    let provider_raw = route
+        .get("provider_id")
+        .or_else(|| route.get("provider_raw"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let endpoint = route
+        .get("endpoint_host")
+        .or_else(|| route.get("base_url"))
+        .or_else(|| route.get("endpoint"))
+        .and_then(Value::as_str)
+        .and_then(|raw| {
+            let without_scheme = raw.split_once("//").map(|(_, rest)| rest).unwrap_or(raw);
+            let host = without_scheme.split('/').next().unwrap_or(without_scheme);
+            let host = host
+                .rsplit_once(':')
+                .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
+                .map(|(host, _)| host)
+                .unwrap_or(host);
+            (!host.is_empty()).then(|| host.to_string())
+        });
+    if provider_raw.is_none() && endpoint.is_none() {
+        return None;
+    }
+    let evidence_basis = if let (Some(raw), Some(host)) = (&provider_raw, &endpoint) {
+        let normalized = agent_vitals_provider::normalize_provider(Some(raw), Some(host));
+        let raw_is_known = matches!(
+            raw.to_ascii_lowercase().as_str(),
+            "openai" | "cogfoundry.ai"
+        );
+        if raw_is_known && normalized.as_deref() != Some(&raw.to_ascii_lowercase()) {
+            agent_vitals_provider::EvidenceBasis::Conflict
+        } else {
+            agent_vitals_provider::EvidenceBasis::SessionNative
+        }
+    } else {
+        agent_vitals_provider::EvidenceBasis::SessionNative
+    };
+    Some(RouteEvidence {
+        provider_raw,
+        endpoint_host: endpoint,
+        evidence_basis,
+    })
+}
+
+fn route_evidence_id(native_session_id: &str, route: &RouteEvidence) -> String {
+    let key = format!(
+        "{}|{}|{}|{}",
+        native_session_id,
+        route.provider_raw.as_deref().unwrap_or(""),
+        route.endpoint_host.as_deref().unwrap_or(""),
+        route.evidence_basis.as_str()
+    );
+    format!("route:{}", fnv1a64_hex(key.as_bytes()))
+}
+
+fn route_states_before(
+    items: &[(usize, Value)],
+    _fallback: Option<&RouteEvidence>,
+) -> Vec<(usize, Option<RouteEvidence>)> {
+    // Historical attribution is session-only.  Keep the parameter for source
+    // compatibility, but never seed a rollout with current config/env state.
+    let mut current = None;
+    let mut states = Vec::new();
+    for (offset, item) in items {
+        let payload = item.get("payload");
+        let explicit = if item.get("type").and_then(Value::as_str) == Some("session_meta") {
+            payload.and_then(route_evidence_from)
+        } else if payload.and_then(|v| v.get("type")).and_then(Value::as_str)
+            == Some("route_changed")
+        {
+            payload.and_then(route_evidence_from)
+        } else {
+            payload
+                .and_then(|v| v.get("thread_settings"))
+                .and_then(route_evidence_from)
+        };
+        if explicit.is_some() {
+            current = explicit;
+        }
+        states.push((*offset, current.clone()));
+    }
+    states
+}
+
+fn route_at(states: &[(usize, Option<RouteEvidence>)], offset: usize) -> Option<RouteEvidence> {
+    let mut current = None;
+    for (event_offset, route) in states {
+        if *event_offset > offset {
+            break;
+        }
+        current = route.clone();
+    }
+    current
+}
+
+fn provider_states_before(items: &[(usize, Value)]) -> Vec<(usize, Option<String>)> {
+    let mut current = None;
+    let mut states = Vec::new();
+    for (offset, item) in items {
+        let payload = item.get("payload");
+        if item.get("type").and_then(Value::as_str) == Some("session_meta") {
+            if let Some(provider) = payload
+                .and_then(|v| v.get("model_provider"))
+                .and_then(Value::as_str)
+            {
+                current = Some(provider.to_string());
+            }
+        }
+        if let Some(provider) = payload
+            .and_then(|v| v.get("thread_settings"))
+            .and_then(|v| v.get("model_provider_id"))
+            .and_then(Value::as_str)
+        {
+            current = Some(provider.to_string());
+        }
+        states.push((*offset, current.clone()));
+    }
+    states
+}
+
+fn provider_at(states: &[(usize, Option<String>)], offset: usize) -> Option<String> {
+    let mut current = None;
+    for (event_offset, provider) in states {
+        if *event_offset > offset {
+            break;
+        }
+        current = provider.clone();
+    }
+    current
+}
+
 /// spec §3.3：`rollout_source_id(:path.stem) + byte_offset + fnv1a64(canonical_row)`。
 ///
 /// `byte_offset` 只在单个物理 rollout 文件内唯一——命名空间必须是 **stem** 而非
@@ -230,7 +369,17 @@ fn consumed_to_usage_fact(
     let attribution = resolve_billing_attribution(model_provider, route);
     fields.insert("model_raw".into(), json!(model));
     fields.insert("provider_raw".into(), json!(attribution.provider_raw));
+    fields.insert(
+        "endpoint_host".into(),
+        json!(route.and_then(|r| r.endpoint_host.clone())),
+    );
     fields.insert("provider_id".into(), json!(attribution.provider_id));
+    fields.insert(
+        "route_evidence_id".into(),
+        route
+            .map(|r| json!(route_evidence_id(native_session_id, r)))
+            .unwrap_or(Value::Null),
+    );
     fields.insert("billing_source".into(), json!(attribution.provider_id));
     fields.insert(
         "billing_mode".into(),
@@ -299,6 +448,8 @@ pub fn codex_rollouts_to_usage_facts_with_route(
             continue;
         }
         let native_session_id = resolve_native_session_id(p, &items);
+        let route_states = route_states_before(&items, route);
+        let provider_states = provider_states_before(&items);
         let model_provider = items.iter().find_map(|item| {
             if item.1.get("type").and_then(Value::as_str) == Some("session_meta") {
                 item.1
@@ -356,6 +507,9 @@ pub fn codex_rollouts_to_usage_facts_with_route(
                         continue;
                     }
                     seen.insert(source_event_id.clone());
+                    let route_at_event = route_at(&route_states, offset);
+                    let model_provider_at =
+                        provider_at(&provider_states, offset).or_else(|| model_provider.clone());
                     match consumed_to_usage_fact(
                         &f,
                         &model,
@@ -364,8 +518,8 @@ pub fn codex_rollouts_to_usage_facts_with_route(
                         &native_session_id,
                         machine_namespace,
                         source_profile,
-                        model_provider.as_deref(),
-                        route,
+                        model_provider_at.as_deref(),
+                        route_at_event.as_ref(),
                     ) {
                         Some(fact) => facts.push(fact),
                         None => {
@@ -595,6 +749,38 @@ mod tests {
             .unwrap_or("");
         assert_ne!(fa, fb);
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn session_route_evidence_overrides_current_hint_per_rollout() {
+        let tmp = temp_dir();
+        let p = tmp.join("rollout-cog.jsonl");
+        let mut rows = rollout_lines();
+        rows[0] = line(json!({
+            "type": "session_meta",
+            "payload": {
+                "session_id": "ses-cog",
+                "model_provider": "custom",
+                "route": {"provider_id": "cogfoundry.ai", "endpoint_host": "router.cogfoundry.ai"}
+            }
+        }));
+        std::fs::write(&p, rows.join("")).unwrap();
+        let current = RouteEvidence {
+            provider_raw: Some("custom".into()),
+            endpoint_host: Some("router.other.example".into()),
+            evidence_basis: agent_vitals_provider::EvidenceBasis::ConfigCurrent,
+        };
+        let result = codex_rollouts_to_usage_facts_with_route(
+            std::slice::from_ref(&p),
+            "ns-test",
+            "default",
+            Some(&current),
+        )
+        .unwrap();
+        assert_eq!(result.facts.len(), 2);
+        assert_eq!(result.facts[0]["provider_id"], "cogfoundry.ai");
+        assert_eq!(result.facts[0]["evidence_basis"], "session-native");
+        let _ = std::fs::remove_dir_all(tmp);
     }
 
     #[test]

@@ -24,6 +24,7 @@ Rust 平行实现见 `src/agent/codex_usage_fact.rs`。
 import json
 from pathlib import Path
 from typing import NamedTuple, Optional
+from urllib.parse import urlparse
 
 from ..source_identity import canonical_json, fnv1a64_hex
 from .codex_usage import (
@@ -150,6 +151,103 @@ def _resolve_model_provider(items) -> Optional[str]:
     return provider
 
 
+def _route_evidence_from(value):
+    """Extract explicit route evidence; custom alone is not route evidence."""
+    if not isinstance(value, dict):
+        return None
+    route = value.get("route") if isinstance(value.get("route"), dict) else value
+    provider = route.get("provider_id") or route.get("provider_raw")
+    endpoint = route.get("endpoint_host")
+    if not isinstance(endpoint, str):
+        endpoint = route.get("base_url") or route.get("endpoint")
+    if isinstance(endpoint, str):
+        parsed = urlparse(endpoint)
+        endpoint = (parsed.hostname or endpoint.split("/", 1)[0]).lower().rstrip(".")
+    if not isinstance(provider, str):
+        provider = None
+    if not isinstance(endpoint, str):
+        endpoint = None
+    if provider is None and endpoint is None:
+        return None
+    basis = "session-native"
+    if provider and endpoint:
+        raw = provider.lower()
+        known = raw in {"openai", "cogfoundry.ai"}
+        endpoint_provider = (
+            "cogfoundry.ai" if endpoint == "cogfoundry.ai" or endpoint.endswith(".cogfoundry.ai")
+            else "openai" if endpoint == "api.openai.com" or endpoint.endswith(".api.openai.com")
+            else None
+        )
+        if known and endpoint_provider != raw:
+            basis = "conflict"
+    return provider, endpoint, basis
+
+
+def _route_state_before(items, fallback_endpoint_host=None, fallback_basis="missing"):
+    """Build ordered route snapshots keyed by source byte offset."""
+    states = []
+    provider = None
+    # Historical attribution is session-only.  Keep arguments for compatibility
+    # with older callers, but never seed a rollout from current config/env.
+    endpoint = None
+    basis = "missing"
+    for offset, item in items:
+        payload = item.get("payload") if isinstance(item, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        explicit = None
+        if item.get("type") == "session_meta":
+            explicit = _route_evidence_from(payload)
+        elif payload.get("type") == "route_changed":
+            explicit = _route_evidence_from(payload)
+        elif isinstance(payload.get("thread_settings"), dict):
+            explicit = _route_evidence_from(payload["thread_settings"])
+        if explicit is not None:
+            provider, endpoint, basis = explicit
+        states.append((offset, provider, endpoint, basis))
+    return states
+
+
+def _route_at(states, offset):
+    current = (None, None, "missing")
+    for event_offset, provider, endpoint, basis in states:
+        if event_offset > offset:
+            break
+        current = (provider, endpoint, basis)
+    return current
+
+
+def _route_evidence_id(native_session_id, provider_raw, endpoint_host, evidence_basis):
+    key = "{}|{}|{}|{}".format(
+        native_session_id, provider_raw or "", endpoint_host or "", evidence_basis
+    )
+    return "route:" + fnv1a64_hex(key)
+
+
+def _provider_states_before(items):
+    states = []
+    provider = None
+    for offset, item in items:
+        payload = item.get("payload") if isinstance(item, dict) else None
+        if isinstance(payload, dict):
+            if item.get("type") == "session_meta" and isinstance(payload.get("model_provider"), str):
+                provider = payload["model_provider"]
+            settings = payload.get("thread_settings")
+            if isinstance(settings, dict) and isinstance(settings.get("model_provider_id"), str):
+                provider = settings["model_provider_id"]
+        states.append((offset, provider))
+    return states
+
+
+def _provider_at(states, offset):
+    current = None
+    for event_offset, provider in states:
+        if event_offset > offset:
+            break
+        current = provider
+    return current
+
+
 def _derived_event_id(rollout_source_id: str, byte_offset: int, rec: dict) -> str:
     """spec §3.3：`rollout_source_id(:path.stem) + byte_offset + fnv1a64(canonical_row)`。
 
@@ -175,6 +273,7 @@ def _consumed_to_usage_fact(
     machine_namespace: str,
     source_profile: str,
     model_provider: Optional[str] = None,
+    route_provider_raw: Optional[str] = None,
     route_endpoint_host: Optional[str] = None,
     route_evidence_basis: str = "missing",
 ) -> Optional[dict]:
@@ -188,11 +287,9 @@ def _consumed_to_usage_fact(
     """
     facts = outcome.facts  # type: ignore[union-attr]  # Consumed 才走到这里
     endpoint = (route_endpoint_host or "").lower()
-    normalized_route = (
-        "cogfoundry.ai"
-        if "router.cogfoundry.ai" in endpoint
-        else None
-    )
+    normalized_route = route_provider_raw.lower() if isinstance(route_provider_raw, str) else None
+    if "cogfoundry.ai" in endpoint:
+        normalized_route = "cogfoundry.ai"
     if model_provider == "openai" and route_endpoint_host is not None:
         provider_id, billing_mode, pricing_basis, unresolved = "openai", "subscription", "session-provider", False
         evidence_basis = "session-native"
@@ -231,7 +328,18 @@ def _consumed_to_usage_fact(
         # model_id/provider_id/normalization_version（Stage 1 同款，不硬编码）。
         "model_raw": outcome.model,
         "provider_raw": model_provider,
+        "endpoint_host": route_endpoint_host,
         "provider_id": provider_id,
+        "route_evidence_id": (
+            _route_evidence_id(
+                native_session_id,
+                route_provider_raw,
+                route_endpoint_host,
+                route_evidence_basis,
+            )
+            if route_endpoint_host is not None or route_provider_raw is not None
+            else None
+        ),
         "billing_source": provider_id,
         "billing_mode": billing_mode,
         "pricing_basis": pricing_basis,
@@ -288,6 +396,8 @@ def codex_rollouts_to_usage_facts(
             continue
         native_session_id = _resolve_native_session_id(p, items)
         model_provider = _resolve_model_provider(items)
+        route_states = _route_state_before(items, route_endpoint_host, route_evidence_basis)
+        provider_states = _provider_states_before(items)
         state = CodexFoldState()
         for offset, item in items:
             outcome = state.apply(item)
@@ -315,14 +425,17 @@ def codex_rollouts_to_usage_facts(
                 skip_rows += 1
                 continue
             seen.add(source_event_id)
+            route_provider_raw_at, route_endpoint_host_at, route_basis_at = _route_at(route_states, offset)
+            model_provider_at = _provider_at(provider_states, offset) or model_provider
             fact = _consumed_to_usage_fact(
                 outcome, source_event_id,
                 native_session_id=native_session_id,
                 machine_namespace=machine_namespace,
                 source_profile=source_profile,
-                model_provider=model_provider,
-                route_endpoint_host=route_endpoint_host,
-                route_evidence_basis=route_evidence_basis,
+                model_provider=model_provider_at,
+                route_provider_raw=route_provider_raw_at,
+                route_endpoint_host=route_endpoint_host_at,
+                route_evidence_basis=route_basis_at,
             )
             if fact is None:
                 bad_id += 1

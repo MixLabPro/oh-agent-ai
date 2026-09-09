@@ -128,6 +128,24 @@ class CodexUsageFactEmitterCase(unittest.TestCase):
                             f["source_event_id"])
             self.assertTrue(f["fact_id"].startswith("uf1-"), f["fact_id"])
 
+    def test_session_route_evidence_overrides_current_hint(self):
+        """Explicit session route wins over any diagnostic current-route hint."""
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = _single_consume(1000, 150, cached=400, cache_write=100, reasoning=30)
+            rows[0]["payload"]["model_provider"] = "custom"
+            rows[0]["payload"]["route"] = {
+                "provider_id": "cogfoundry.ai",
+                "endpoint_host": "router.cogfoundry.ai",
+            }
+            p = _write(tmp, "route.jsonl", rows)
+            r = codex_rollouts_to_usage_facts(
+                [p], machine_namespace="ns-route", source_profile="default",
+                route_endpoint_host="router.other.example",
+                route_evidence_basis="config-current",
+            )
+            self.assertEqual(r.facts[0]["provider_id"], "cogfoundry.ai")
+            self.assertEqual(r.facts[0]["evidence_basis"], "session-native")
+
     def test_reasoning_gt_output_is_unreadable(self):
         """acceptance #2b：reasoning > output 是自相矛盾的事件 → unreadable，不
         emit（镜像 codex fold 的 `token_count_invalid_last_usage` 哨兵）。"""
