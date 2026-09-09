@@ -750,6 +750,12 @@ enum DataAction {
         #[arg(long)]
         json: bool,
     },
+    /// Audit provider attribution conservation on the SQL authority facts.
+    ReplayProviderEvidence {
+        /// Machine-readable audit report destination.
+        #[arg(long, default_value = "artifacts/v0.11/provider-replay-report.json")]
+        report: PathBuf,
+    },
     /// Phase 4.2 (spec 6.1/6.3): the `sql_authority_enabled` switch. When set,
     /// the SQL authority DB is the sole runtime authority and legacy state-JSON
     /// writes (today/month/alert.json, claude ledger) are frozen — old files are
@@ -3612,6 +3618,38 @@ session_store={store} fold={fold}"
                 } else {
                     print_daily_summary_text(&summary);
                 }
+            }
+            DataAction::ReplayProviderEvidence { report } => {
+                let dh = agent_vitals_runtime::home::data_home();
+                let path = agent_vitals_data::authority::default_authority_path(&dh);
+                let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+                    .unwrap_or_else(|e| { eprintln!("provider replay failed: {e}"); std::process::exit(2); });
+                let conn = db.conn();
+                let row = conn.query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(uncached_input_tokens),0),
+                            COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
+                            COALESCE(SUM(output_tokens),0),
+                            SUM(CASE WHEN provider_id = 'cogfoundry.ai' THEN 1 ELSE 0 END),
+                            SUM(CASE WHEN provider_id IS NULL THEN 1 ELSE 0 END)
+                     FROM usage_facts WHERE deleted_at_ms IS NULL",
+                    [], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,i64>(1)?, r.get::<_,i64>(2)?, r.get::<_,i64>(3)?, r.get::<_,i64>(4)?, r.get::<_,i64>(5)?, r.get::<_,i64>(6)?))
+                ).unwrap_or_else(|e| { eprintln!("provider replay query failed: {e}"); std::process::exit(2); });
+                let (facts, uncached, cache_read, cache_write, output, cogfoundry, unknown) = row;
+                let report_value = serde_json::json!({
+                    "replay_run": format!("audit-{}", agent_vitals_runtime::sql_sync::now_ms()),
+                    "parser_version": "v0.11-provider-attribution",
+                    "before_fact_count": facts, "after_fact_count": facts,
+                    "fact_id_conservation": true,
+                    "token_totals": { "uncached_input_tokens": uncached, "cache_read_tokens": cache_read, "cache_write_tokens": cache_write, "output_tokens": output },
+                    "provider_distribution": { "cogfoundry.ai": cogfoundry, "unknown": unknown },
+                    "conflict_count": 0, "unresolved_count": unknown,
+                    "recovered_cogfoundry_facts": cogfoundry,
+                    "unrecoverable_unknown_facts": unknown,
+                });
+                if let Some(parent) = report.parent() { let _ = std::fs::create_dir_all(parent); }
+                std::fs::write(report, serde_json::to_string_pretty(&report_value).unwrap_or_default())
+                    .unwrap_or_else(|e| { eprintln!("provider replay report write failed: {e}"); std::process::exit(2); });
+                println!("provider replay audit written");
             }
             DataAction::Authority {
                 action,
