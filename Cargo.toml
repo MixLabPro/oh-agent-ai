@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/cli", "crates/agent-vitals-data", "crates/agent-vitals-hosts", "crates/agent-vitals-domain", "crates/agent-vitals-runtime", "crates/agent-vitals-wasm", "crates/vitals-core"]
+members = ["apps/cli", "crates/agent-vitals-data", "crates/agent-vitals-hosts", "crates/agent-vitals-domain", "crates/agent-vitals-runtime", "crates/agent-vitals-provider", "crates/agent-vitals-wasm", "crates/vitals-core"]
 # wasm crate 只在 `wasm-pack build --target wasm32` 下构建，不参与宿主侧的
 # 默认 test/build/clippy —— 否则 `cargo test` 会为 aarch64-apple-darwin 编译
 # wasm-bindgen 入口，既无意义又可能触发非 wasm 目标的告警。

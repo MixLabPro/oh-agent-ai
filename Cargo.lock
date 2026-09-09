@@ -54,6 +54,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-vitals-provider"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "agent-vitals-runtime"
 version = "1.3.0"
 dependencies = [
