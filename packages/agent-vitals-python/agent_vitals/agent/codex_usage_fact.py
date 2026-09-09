@@ -191,7 +191,7 @@ def _consumed_to_usage_fact(
     normalized_route = (
         "cogfoundry.ai"
         if "router.cogfoundry.ai" in endpoint
-        else (model_provider if model_provider else None)
+        else None
     )
     if model_provider == "openai" and route_endpoint_host is not None:
         provider_id, billing_mode, pricing_basis, unresolved = "openai", "subscription", "session-provider", False
