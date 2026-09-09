@@ -149,6 +149,8 @@ pub fn resolve_billing_attribution(
         || (route_basis.strength() >= EvidenceBasis::SessionNative.strength()
             && route_provider.as_deref().is_some_and(|p| p != "openai"));
     let is_official_subscription = model_provider == Some("openai")
+        && route.and_then(|r| r.endpoint_host.as_deref()).is_some()
+        && route_provider.as_deref() == Some("openai")
         && matches!(route_basis, EvidenceBasis::SessionNative)
         && !route_conflicts;
     if is_official_subscription {
@@ -161,7 +163,10 @@ pub fn resolve_billing_attribution(
             has_unresolved: false,
         };
     }
+    let official_route_missing = model_provider == Some("openai")
+        && route.and_then(|r| r.endpoint_host.as_deref()).is_none();
     let unresolved = route_conflicts
+        || official_route_missing
         || provider_id.is_none()
         || matches!(
             route_basis,
@@ -226,6 +231,19 @@ mod tests {
         let route = RouteEvidence {
             provider_raw: None,
             endpoint_host: Some("router.cogfoundry.ai".into()),
+            evidence_basis: EvidenceBasis::SessionNative,
+        };
+        let a = resolve_billing_attribution(Some("openai"), Some(&route));
+        assert_eq!(a.billing_mode, BillingMode::Metered);
+        assert_eq!(a.pricing_basis, "metered_estimate");
+        assert!(a.has_unresolved);
+    }
+
+    #[test]
+    fn provider_only_openai_route_is_not_subscription() {
+        let route = RouteEvidence {
+            provider_raw: Some("openai".into()),
+            endpoint_host: None,
             evidence_basis: EvidenceBasis::SessionNative,
         };
         let a = resolve_billing_attribution(Some("openai"), Some(&route));

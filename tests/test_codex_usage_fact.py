@@ -212,6 +212,19 @@ class CodexUsageFactEmitterCase(unittest.TestCase):
             self.assertEqual(r.facts[0]["pricing_basis"], "metered_estimate")
             self.assertEqual(r.facts[0]["evidence_basis"], "missing")
 
+    def test_provider_only_openai_route_is_not_subscription(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = _single_consume(100, 10, cached=0, cache_write=0)
+            rows[0]["payload"].update({
+                "model_provider": "openai",
+                "route": {"provider_id": "openai"},
+            })
+            p = _write(tmp, "provider-only.jsonl", rows)
+            r = codex_rollouts_to_usage_facts([p], machine_namespace="ns-provider-only",
+                                              source_profile="default")
+            self.assertEqual(r.facts[0]["billing_mode"], "metered")
+            self.assertEqual(r.facts[0]["pricing_basis"], "metered_estimate")
+
     def test_reasoning_gt_output_is_unreadable(self):
         """acceptance #2b：reasoning > output 是自相矛盾的事件 → unreadable，不
         emit（镜像 codex fold 的 `token_count_invalid_last_usage` 哨兵）。"""
