@@ -36,3 +36,4 @@ pub mod coverage;
 pub mod evidence;
 pub mod projection;
 pub mod repository;
+pub mod issues;

@@ -371,6 +371,9 @@ CREATE TABLE issue_status_transitions (
   reason TEXT NOT NULL,
   actor TEXT NOT NULL,
   evidence_fingerprint TEXT NOT NULL,
+  evaluator_id TEXT NOT NULL,
+  evaluator_version TEXT NOT NULL,
+  input_fingerprint TEXT NOT NULL,
   UNIQUE(issue_id, transition_id)
 );
 CREATE INDEX issue_transitions_issue_time ON issue_status_transitions(issue_id, transitioned_at_ms, transition_id);

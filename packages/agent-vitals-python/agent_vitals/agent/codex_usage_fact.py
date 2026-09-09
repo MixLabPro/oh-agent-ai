@@ -188,12 +188,19 @@ def _consumed_to_usage_fact(
     """
     facts = outcome.facts  # type: ignore[union-attr]  # Consumed 才走到这里
     endpoint = (route_endpoint_host or "").lower()
-    normalized_route = "cogfoundry.ai" if "router.cogfoundry.ai" in endpoint else route_endpoint_host
+    normalized_route = (
+        "cogfoundry.ai"
+        if "router.cogfoundry.ai" in endpoint
+        else (model_provider if model_provider else None)
+    )
     if model_provider == "openai" and route_endpoint_host is not None:
         provider_id, billing_mode, pricing_basis, unresolved = "openai", "subscription", "session-provider", False
         evidence_basis = "session-native"
+    elif model_provider == "openai":
+        provider_id, billing_mode, pricing_basis, unresolved = "openai", "metered", "metered_estimate", True
+        evidence_basis = route_evidence_basis
     elif model_provider == "custom" or model_provider is None:
-        provider_id = normalized_route or model_provider
+        provider_id = normalized_route
         billing_mode = "metered" if provider_id or model_provider == "custom" else "unknown"
         unresolved = True
         pricing_basis = "metered_estimate"
