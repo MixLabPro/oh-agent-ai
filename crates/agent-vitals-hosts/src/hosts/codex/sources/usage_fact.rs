@@ -201,7 +201,14 @@ fn route_evidence_from(value: &Value) -> Option<RouteEvidence> {
             raw.to_ascii_lowercase().as_str(),
             "openai" | "cogfoundry.ai"
         );
-        if raw_is_known && normalized.as_deref() != Some(&raw.to_ascii_lowercase()) {
+        let host_lower = host.to_ascii_lowercase();
+        let endpoint_is_known = host_lower == "api.openai.com"
+            || host_lower.ends_with(".api.openai.com")
+            || host_lower == "cogfoundry.ai"
+            || host_lower.ends_with(".cogfoundry.ai");
+        if raw_is_known
+            && (!endpoint_is_known || normalized.as_deref() != Some(&raw.to_ascii_lowercase()))
+        {
             agent_vitals_provider::EvidenceBasis::Conflict
         } else {
             agent_vitals_provider::EvidenceBasis::SessionNative
@@ -863,6 +870,25 @@ mod tests {
         assert_eq!(result.facts[0]["evidence_basis"], "conflict");
         assert_eq!(result.facts[0]["billing_mode"], "metered");
         assert_eq!(result.facts[0]["pricing_basis"], "metered_estimate");
+        std::fs::remove_dir_all(tmp).ok();
+    }
+
+    #[test]
+    fn known_provider_with_unknown_endpoint_is_marked_conflict() {
+        let tmp = temp_dir();
+        let p = tmp.join("rollout-unknown-endpoint.jsonl");
+        let mut rows = rollout_lines();
+        rows[0] = line(
+            json!({"type":"session_meta","payload":{"session_id":"ses-evil",
+            "model_provider":"openai","route":{"provider_id":"openai",
+            "endpoint_host":"evil.example.com"}}}),
+        );
+        std::fs::write(&p, rows.join("")).unwrap();
+        let result =
+            codex_rollouts_to_usage_facts(std::slice::from_ref(&p), "ns-test", "default").unwrap();
+        assert_eq!(result.facts[0]["evidence_basis"], "conflict");
+        assert_eq!(result.facts[0]["pricing_basis"], "metered_estimate");
+        assert_eq!(result.facts[0]["billing_mode"], "metered");
         std::fs::remove_dir_all(tmp).ok();
     }
 
