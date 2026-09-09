@@ -290,7 +290,13 @@ def _consumed_to_usage_fact(
     normalized_route = route_provider_raw.lower() if isinstance(route_provider_raw, str) else None
     if "cogfoundry.ai" in endpoint:
         normalized_route = "cogfoundry.ai"
-    if model_provider == "openai" and route_endpoint_host is not None:
+    # Official subscription classification requires a session-native route that
+    # also resolves to the official OpenAI endpoint.  An explicit conflict (or
+    # a custom endpoint) must remain metered/unresolved even when the session's
+    # model_provider marker says openai.
+    if (model_provider == "openai" and route_endpoint_host is not None
+            and route_evidence_basis == "session-native"
+            and normalized_route == "openai"):
         provider_id, billing_mode, pricing_basis, unresolved = "openai", "subscription", "session-provider", False
         evidence_basis = "session-native"
     elif model_provider == "openai":

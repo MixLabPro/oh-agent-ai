@@ -812,6 +812,52 @@ mod tests {
     }
 
     #[test]
+    fn route_changed_reassigns_later_token_facts() {
+        let tmp = temp_dir();
+        let p = tmp.join("rollout-switch.jsonl");
+        let token = |ts: &str, total: i64| {
+            line(json!({"type":"event_msg","payload":{"type":"token_count",
+                "timestamp":ts,"info":{"total_token_usage":{"total_tokens":total},
+                "last_token_usage":{"input_tokens":100,"output_tokens":10}}}}))
+        };
+        let rows = vec![
+            line(json!({"type":"session_meta","payload":{"session_id":"ses-switch",
+                "model_provider":"custom","route":{"provider_id":"cogfoundry.ai",
+                "endpoint_host":"router.cogfoundry.ai"}}})),
+            line(json!({"type":"turn_context","payload":{"model":"gpt-5.6-sol","speed":"standard"}})),
+            token("2026-09-03T01:00:00.000Z", 110),
+            line(json!({"type":"event_msg","payload":{"type":"route_changed",
+                "provider_raw":"custom","provider_id":"openai","endpoint_host":"api.openai.com"}})),
+            token("2026-09-03T01:01:00.000Z", 220),
+        ];
+        std::fs::write(&p, rows.join("")).unwrap();
+        let result = codex_rollouts_to_usage_facts(std::slice::from_ref(&p), "ns-test", "default")
+            .unwrap();
+        assert_eq!(result.facts.len(), 2);
+        assert_eq!(result.facts[0]["provider_id"], "cogfoundry.ai");
+        assert_eq!(result.facts[1]["provider_id"], "openai");
+        assert_ne!(result.facts[0]["route_evidence_id"], result.facts[1]["route_evidence_id"]);
+        std::fs::remove_dir_all(tmp).ok();
+    }
+
+    #[test]
+    fn conflicting_session_route_is_marked_conflict() {
+        let tmp = temp_dir();
+        let p = tmp.join("rollout-conflict.jsonl");
+        let mut rows = rollout_lines();
+        rows[0] = line(json!({"type":"session_meta","payload":{"session_id":"ses-conflict",
+            "model_provider":"openai","route":{"provider_id":"openai",
+            "endpoint_host":"router.cogfoundry.ai"}}}));
+        std::fs::write(&p, rows.join("")).unwrap();
+        let result = codex_rollouts_to_usage_facts(std::slice::from_ref(&p), "ns-test", "default")
+            .unwrap();
+        assert_eq!(result.facts[0]["evidence_basis"], "conflict");
+        assert_eq!(result.facts[0]["billing_mode"], "metered");
+        assert_eq!(result.facts[0]["pricing_basis"], "metered_estimate");
+        std::fs::remove_dir_all(tmp).ok();
+    }
+
+    #[test]
     fn rescan_same_file_stable_fact_and_source_event_ids() {
         // 验收 6.7（同一文件重复读取稳定）：两次读取 → 同 fact_id / 同 source_event_id。
         let tmp = temp_dir();

@@ -146,6 +146,45 @@ class CodexUsageFactEmitterCase(unittest.TestCase):
             self.assertEqual(r.facts[0]["provider_id"], "cogfoundry.ai")
             self.assertEqual(r.facts[0]["evidence_basis"], "session-native")
 
+    def test_route_changed_reassigns_later_token_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = _single_consume(100, 10, cached=0, cache_write=0)
+            rows[0]["payload"].update({
+                "model_provider": "custom",
+                "route": {"provider_id": "cogfoundry.ai",
+                          "endpoint_host": "router.cogfoundry.ai"},
+            })
+            rows.append({"type": "event_msg", "payload": {
+                "type": "route_changed", "provider_raw": "custom",
+                "provider_id": "openai", "endpoint_host": "api.openai.com"}})
+            rows.append({"type": "event_msg", "payload": {
+                "type": "token_count", "timestamp": "2026-09-02T00:01:00.000Z",
+                "info": {"total_token_usage": {"total_tokens": 220},
+                         "last_token_usage": {"input_tokens": 100, "output_tokens": 10}}}})
+            p = _write(tmp, "route-switch.jsonl", rows)
+            r = codex_rollouts_to_usage_facts([p], machine_namespace="ns-switch",
+                                              source_profile="default")
+            self.assertEqual(len(r.facts), 2)
+            self.assertEqual(r.facts[0]["provider_id"], "cogfoundry.ai")
+            self.assertEqual(r.facts[1]["provider_id"], "openai")
+            self.assertNotEqual(r.facts[0]["route_evidence_id"],
+                                r.facts[1]["route_evidence_id"])
+
+    def test_conflicting_session_route_is_marked_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = _single_consume(100, 10, cached=0, cache_write=0)
+            rows[0]["payload"].update({
+                "model_provider": "openai",
+                "route": {"provider_id": "openai",
+                          "endpoint_host": "router.cogfoundry.ai"},
+            })
+            p = _write(tmp, "route-conflict.jsonl", rows)
+            r = codex_rollouts_to_usage_facts([p], machine_namespace="ns-conflict",
+                                              source_profile="default")
+            self.assertEqual(r.facts[0]["evidence_basis"], "conflict")
+            self.assertEqual(r.facts[0]["billing_mode"], "metered")
+            self.assertEqual(r.facts[0]["pricing_basis"], "metered_estimate")
+
     def test_reasoning_gt_output_is_unreadable(self):
         """acceptance #2b：reasoning > output 是自相矛盾的事件 → unreadable，不
         emit（镜像 codex fold 的 `token_count_invalid_last_usage` 哨兵）。"""
