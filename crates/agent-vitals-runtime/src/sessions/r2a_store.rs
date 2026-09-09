@@ -1649,6 +1649,10 @@ fn persist_findings_as_issues(
                 "time": finding.time,
                 "seq": finding.seq,
                 "source": "sessions_findings",
+                "remedy": {
+                    "remedy_id": agent_vitals_data::issues::remedy_for(&finding.rule).remedy_id,
+                    "diagnostic_only": agent_vitals_data::issues::remedy_for(&finding.rule).diagnostic_only,
+                },
             }).to_string();
             let input = agent_vitals_data::issues::IssueInput {
                 machine_namespace: &entry.key.machine_namespace,

@@ -18,6 +18,22 @@ pub struct IssueInput<'a> {
     pub metadata_json: &'a str,
 }
 
+/// v0.11 read-only remedy catalog; it never contains executable payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemedyCandidate {
+    pub remedy_id: &'static str,
+    pub diagnostic_only: bool,
+}
+
+pub fn remedy_for(issue_type: &str) -> RemedyCandidate {
+    match issue_type {
+        "retry_loop" => RemedyCandidate { remedy_id: "inspect-retry-policy", diagnostic_only: false },
+        "context_overflow" => RemedyCandidate { remedy_id: "reduce-context-window", diagnostic_only: false },
+        "tool_failure" => RemedyCandidate { remedy_id: "inspect-tool-error", diagnostic_only: false },
+        _ => RemedyCandidate { remedy_id: "diagnostic-only", diagnostic_only: true },
+    }
+}
+
 pub fn stable_issue_id(input: &IssueInput<'_>) -> String {
     stable_hash(&format!(
         "{}\0{}\0{}",
@@ -248,5 +264,12 @@ mod tests {
             .unwrap();
         assert_eq!(n, 2);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn remedy_catalog_is_code_only_and_has_diagnostic_fallback() {
+        assert!(!remedy_for("retry_loop").diagnostic_only);
+        assert!(remedy_for("future_rule").diagnostic_only);
+        assert_eq!(remedy_for("future_rule").remedy_id, "diagnostic-only");
     }
 }

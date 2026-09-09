@@ -3630,7 +3630,7 @@ session_store={store} fold={fold}"
                     .unwrap_or_else(|e| { eprintln!("provider replay query failed: {e}"); std::process::exit(2); });
                 let before_count = before_ids.len() as i64;
                 drop(db);
-                let sync = agent_vitals_runtime::sync_service::sync_facts(&dh)
+                let sync = agent_vitals_runtime::sync_service::force_codex_provider_replay(&dh)
                     .unwrap_or_else(|e| { eprintln!("provider replay sync failed: {e}"); std::process::exit(2); });
                 if sync.hosts.iter().any(|h| !h.errors.is_empty()) {
                     eprintln!("provider replay encountered unreadable source files");

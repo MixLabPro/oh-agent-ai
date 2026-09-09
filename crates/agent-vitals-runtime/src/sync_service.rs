@@ -338,6 +338,23 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
     Ok(report)
 }
 
+/// Force a Codex source replay for attribution migrations. This deliberately
+/// invalidates only the Codex parser checkpoints; the normal sync path then
+/// re-reads unchanged rollout files and preserves idempotent fact identities.
+pub fn force_codex_provider_replay(data_home: &Path) -> Result<SyncReport, String> {
+    let path = agent_vitals_data::authority::default_authority_path(data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, crate::sql_sync::now_ms())
+        .map_err(|e| format!("open authority for replay: {e}"))?;
+    db.with_immediate_txn(|conn| {
+        conn.execute(
+            "UPDATE source_files SET parser_version = parser_version - 1 WHERE host = 'codex'",
+            [],
+        ).map(|_| ()).map_err(agent_vitals_data::authority::AuthorityError::Sqlite)
+    }).map_err(|e| format!("invalidate Codex checkpoints: {e}"))?;
+    drop(db);
+    sync_facts(data_home)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
