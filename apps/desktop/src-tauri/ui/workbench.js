@@ -777,14 +777,14 @@ function renderDualTrack(monthly) {
     li.innerHTML = html;
     list.appendChild(li);
   };
+  const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[ch]));
   const attributionChips = (h) => {
-    const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (ch) => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    }[ch]));
     const out = [];
     if (h.evidence_basis) out.push(`<span class="chip diagnostic">证据 ${escapeHtml(h.evidence_basis)}</span>`);
     if (h.pricing_method) out.push(`<span class="chip">计价 ${escapeHtml(h.pricing_method)}</span>`);
@@ -797,7 +797,7 @@ function renderDualTrack(monthly) {
     const listEq = h.amounts_by_basis.api_equivalent || 0;
     // 无月费声明（openai）：显示等价标价口径本体，利用率明确"算不了"。
     if (fee === 0 && listEq > 0) {
-      li("", `<span class="src-name">${label}</span>
+      li("", `<span class="src-name">${escapeHtml(label)}</span>
         <span class="basis"><span class="chip diagnostic">套餐等价 ${fmtCur(listEq, h.currency)} · 诊断</span>
         <span class="chip">月费未声明 · 利用率不可算</span></span>`);
       continue;
@@ -813,7 +813,7 @@ function renderDualTrack(monthly) {
         : mult < 0.5
           ? ` <span class="chip estimate">⚠ 没用够（${mult.toFixed(2)}×）</span>`
           : ` <span class="chip measured">值回月费 ${mult.toFixed(1)}×</span>`;
-    li("", `<span class="src-name">${label}</span>
+    li("", `<span class="src-name">${escapeHtml(label)}</span>
       <span class="basis"><span class="chip subscription">月费 ${fmtCur(fee, h.currency)}</span>${util}</span>`);
   }
   if (metered.length) li("", `<span class="dual-track">按量轨 · 真实支出</span>`);
@@ -830,11 +830,11 @@ function renderDualTrack(monthly) {
         };
         return `<span class="chip ${b === "metered_actual" ? "measured" : "estimate"}">${names[b] || b} ${fmtCur(v, h.currency)}</span>`;
       }).join("");
-    li("", `<span class="src-name">${label}</span><span class="basis">${chips} ${attributionChips(h)}</span>`);
+    li("", `<span class="src-name">${escapeHtml(label)}</span><span class="basis">${chips} ${attributionChips(h)}</span>`);
   }
   if (unresolved.length) li("", `<span class="dual-track">不可归档</span>`);
   for (const [key, h, label] of unresolved) {
-    li("", `<span class="src-name">${label}</span>
+    li("", `<span class="src-name">${escapeHtml(label)}</span>
       <span class="basis">${h.has_unresolved ? '<span class="chip hostbilled">含未定价 tokens · 部分用量暂无法估价</span>' : '<span class="chip">无数据</span>'} ${attributionChips(h)}</span>`);
   }
 }
