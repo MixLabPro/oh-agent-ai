@@ -290,6 +290,8 @@ async function loadActiveTab() {
   // Findings / 数据源同款懒加载（CLI 汇总较重，见 state 注释）。
   else if (activeTab === "findings") { if (!findState.loaded) loadFindings(); }
   else if (activeTab === "sources") { if (!srcState.loaded) loadSources(); }
+  // Traces 无自动加载：渲染是显式动作（要用户提供文件路径 + namespace——身份段
+  // 不发明，spec §9），空态文案常显直到用户点「渲染轨迹」。
 }
 
 // 聚焦刷新：与弹窗同款 —— 窗口每次重新获得焦点都重拉（hide 不是 close，数据要新鲜）。
@@ -3357,3 +3359,84 @@ function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+
+// ───────────────────────── Traces（v0.10.0）─────────────────────────────────
+// 数据面 = session_trace IPC（in-process mcp::dispatch，envelope 三面同源）；
+// 几何 = window.TimelineGeometry.buildTimeline（**共享唯一份**——本页不写任何
+// 比例尺/抽稀/事件定位逻辑，spec §2.1.2）。金额/覆盖从不在这里计算：envelope
+// 给什么展示什么，unavailable 展示「无数据」，绝不渲染 0。
+(function () {
+  const $ = (id) => document.getElementById(id);
+
+  function traceBanner(msg) {
+    const el = $("trace-banner");
+    if (!msg) { el.hidden = true; el.textContent = ""; return; }
+    el.hidden = false;
+    el.textContent = msg;
+  }
+
+  function traceCoverageText(graph) {
+    // 六计数原样呈现（§2.1.2：不设单值比率——一个 0..1 数字会诱导跨会话平均，
+    // 而部分覆盖必须打标，这是 priced_day 的 partial 教训的呈现侧镜像）。
+    const c = graph.coverage || {};
+    return `节点 ${c.total_nodes ?? "—"} · 边 ${c.total_edges ?? "—"} · `
+      + `缺父 ${c.missing_parent ?? "—"} · 缺时 ${c.missing_time ?? "—"} · `
+      + `缺状态 ${c.missing_status ?? "—"} · 废弃分支 ${c.unmetered_nodes ?? "—"}`;
+  }
+
+  async function renderTrace() {
+    const sessionRef = $("trace-session-ref").value.trim();
+    traceBanner("");
+    if (!sessionRef) {
+      traceBanner("请填写 Sessions 列表返回的会话引用");
+      return;
+    }
+    $("trace-render").disabled = true;
+    $("trace-render").textContent = "渲染中…";
+    try {
+      const r = await invoke("session_trace", {
+        sessionRef, output: "timeline_series",
+      });
+      if (r && r.error) {
+        traceBanner(`轨迹不可用：${r.error.message || r.error.code}`);
+        return;
+      }
+      const data = (r && r.data) || {};
+      const unplaced = data.unplaced_events;
+      if (!data.points || !data.points.length) {
+        $("trace-timeline").innerHTML = "";
+        $("trace-empty").hidden = false;
+        $("trace-empty").textContent = "该会话没有可绘制的 turn 样本（可能源日志已清理，或没有任何 turn 边界）";
+        $("trace-coverage").textContent = "";
+        return;
+      }
+      $("trace-empty").hidden = true;
+      // 共享几何：事件层一个不丢（eventsIn===eventsOut 由几何层钉着），缺数据
+      // 留缺口不连直线——本页只负责把 envelope.data 原样递给它。
+      $("trace-timeline").innerHTML = window.TimelineGeometry.buildTimeline(data);
+      const ipc = await invoke("session_trace", {
+        sessionRef, output: "graph",
+      });
+      const graph = ipc && !ipc.error ? ipc.data : null;
+      $("trace-coverage").textContent = graph ? traceCoverageText(graph) : "";
+      // unplaced_events：锚不到曲线样本的事件数——unaccounted sentinel 的呈现
+      // 侧镜像，非 0 必须可见（spec §10.6 同语义：绝不静默）。
+      if (unplaced) {
+        traceBanner(`注意：${unplaced} 个工具调用锚不到任何 turn（缺 turn 边界），未画入时间线——数量如实呈现，位置不编造`);
+      }
+    } catch (e) {
+      traceBanner(`调用失败：${e}`);
+    } finally {
+      $("trace-render").disabled = false;
+      $("trace-render").textContent = "渲染轨迹";
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    const btn = $("trace-render");
+    if (btn) btn.addEventListener("click", renderTrace);
+    const sessionRefInput = $("trace-session-ref");
+    if (sessionRefInput) sessionRefInput.addEventListener("keydown", (e) => { if (e.key === "Enter") renderTrace(); });
+  });
+})();

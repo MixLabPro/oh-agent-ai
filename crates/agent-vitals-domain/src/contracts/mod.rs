@@ -7,4 +7,5 @@ pub mod evidence;
 pub mod host_capability;
 pub mod r2a;
 pub mod source_identity;
+pub mod trace_graph;
 pub mod usage_fact;

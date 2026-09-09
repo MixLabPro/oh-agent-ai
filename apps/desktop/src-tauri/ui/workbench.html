@@ -12,6 +12,7 @@
       <button class="tab active" data-tab="overview">总览</button>
       <button class="tab" data-tab="calendar">Token 日历</button>
       <button class="tab" data-tab="sessions">会话</button>
+      <button class="tab" data-tab="traces">Traces</button>
       <button class="tab" data-tab="findings">Findings</button>
       <button class="tab" data-tab="sources">数据源</button>
     </nav>
@@ -221,6 +222,25 @@
         <div id="sess-detail-banner" class="banner" hidden></div>
         <div id="sess-detail-body"></div>
       </div>
+    </section>
+
+    <!-- ============ Traces（v0.10.0）============ -->
+    <!-- 单会话轨迹下钻：数据面 = session_trace IPC（in-process mcp::dispatch，
+         envelope 与 CLI/MCP 三面同源，door-3 parity）；几何 = 共享 timeline.js 的
+         buildTimeline（spec §2.1.2：几何实现数量保持 1，本页只做数据消费）。
+         覆盖率六计数原样呈现（spec §2.1.2：不设单值 coverage_ratio）；unplaced_events
+         非 0 时显式展示——锚不到曲线样本的事件数，绝不静默。 -->
+    <section id="tab-traces" class="tabpane">
+      <div class="find-toolbar">
+        <input type="text" id="trace-session-ref" class="picker" style="min-width:320px"
+               placeholder="会话引用（从 Sessions 列表复制）" spellcheck="false" />
+        <button id="trace-render" class="btn">渲染轨迹</button>
+        <span class="flex-spacer"></span>
+        <span class="muted" id="trace-coverage"></span>
+      </div>
+      <div id="trace-banner" class="banner" hidden></div>
+      <div id="trace-timeline"></div>
+      <div id="trace-empty" class="empty">输入 Sessions 列表中的会话引用以渲染单会话轨迹（节点图与事件按 (scope, ordinal) 排序；缺失信息计数呈现，不补造）</div>
     </section>
 
     <!-- ============ Findings ============ -->

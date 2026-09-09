@@ -293,6 +293,47 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Build the deterministic TraceGraph for one session file (v0.10.0).
+    /// Read-only diagnostic: emits the graph JSON (nodes / edges / coverage),
+    /// writes no state. Nodes are ordered by (scope, ordinal) — never by
+    /// timestamp; missing parent/time/status are counted in coverage, never
+    /// fabricated. Three-host closed vocabulary: claude-code / codex / dsh.
+    Trace {
+        /// Path to a session file (jsonl; dsh accepts .zstd)
+        session_file: PathBuf,
+        /// Which host's wire format to parse (claude-code / codex / dsh)
+        #[arg(long, value_parser = ["claude-code", "codex", "dsh"])]
+        host: String,
+        /// machine_namespace component of SessionKey — required (spec §9);
+        /// the CLI never invents one (missing exits 2)
+        #[arg(long)]
+        machine_namespace: Option<String>,
+        /// source_profile component of SessionKey (default: 'default')
+        #[arg(long, default_value = "default")]
+        source_profile: String,
+        /// Write the TraceGraph JSON to FILE; use - for stdout (default: summary)
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+        /// Project the graph into the timeline_series spec (input shape of
+        /// ui/timeline.js buildGeometry) instead of the raw graph — data
+        /// preparation only, the geometry itself stays the single shared one
+        #[arg(long = "timeline-series")]
+        timeline_series: bool,
+    },
+    /// Build a TraceGraph for a session returned by `sessions list` without
+    /// exposing or accepting a raw source path. This is the public v0.10
+    /// drill-down path; `trace <file>` remains a local diagnostic utility.
+    TraceRef {
+        /// Opaque session_ref from `sessions list` / sessions_search.
+        #[arg(long)]
+        session_ref: String,
+        /// Write JSON to FILE; use - for stdout (default: stdout).
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+        /// Return timeline_series instead of the full TraceGraph.
+        #[arg(long = "timeline-series")]
+        timeline_series: bool,
+    },
     /// Audit a Codex rollout log into a CanonicalSession with §13 coverage
     /// (P4 "sound" proof — Legacy + Paginated fold into the shared 19-signal model).
     ///
@@ -1582,6 +1623,147 @@ session_store={store} fold={fold}"
         for (s, n) in &by_status {
             println!("  {}: {}", s, n);
         }
+        return;
+    }
+
+    // v0.10.0 的公开下钻入口：只收 sessions_search 给出的 opaque session_ref。
+    // 它直接复用 runtime MCP dispatcher，因此 SQL facts、价卡成本、canonical
+    // evidence 与桌面端/MCP 完全同源；绝不把 caller-supplied path 送进公开接口。
+    if let Some(Cmd::TraceRef { session_ref, rows_json, timeline_series }) = &args.cmd {
+        let output = if *timeline_series { "timeline_series" } else { "graph" };
+        let data_home = agent_vitals_runtime::home::data_home();
+        let envelope = match agent_vitals_runtime::mcp::dispatch(
+            "session_trace",
+            &json!({"session_ref": session_ref, "output": output}),
+            &data_home,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        let Some(data) = envelope.get("data") else {
+            eprintln!("session_trace returned an invalid envelope");
+            std::process::exit(2);
+        };
+        let text = serde_json::to_string_pretty(data).unwrap_or_default();
+        if let Some(path) = rows_json {
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}", path.display());
+            }
+        } else {
+            println!("{text}");
+        }
+        return;
+    }
+
+    // `trace <file>` 保留为本地诊断入口：它允许直接检查尚未进入 authority 的
+    // 文件，因此不承诺 SQL metrics parity；产品下钻请用上面的 `trace-ref`。
+    // v0.10.0：TraceGraph 子命令——只读诊断，spec §7 v0.10.0 门槛 1/2/6 的 CLI 面。
+    // `machine_namespace` 与 {claude,codex,dsh}-usage-facts 同一条纪律：CLI 不
+    // 发明身份段（缺失 exit 2），fact_id/图 id 的重放稳定性靠调用方显式给值。
+    // memo 层（trace_service）在这里不启用：子命令是一次性进程，进程级 memo
+    // 没有第二次命中机会——缓存住进图里反而是纯开销。memo 是给常驻消费面
+    // （Tauri / MCP server）用的。
+    if let Some(Cmd::Trace {
+        session_file,
+        host,
+        machine_namespace,
+        source_profile,
+        rows_json,
+        timeline_series,
+    }) = &args.cmd
+    {
+        let Some(ns) = machine_namespace.as_deref().filter(|s| !s.is_empty()) else {
+            eprintln!("--machine-namespace is required (spec §9: the CLI never invents identity segments)");
+            std::process::exit(2);
+        };
+        let native_id = session_file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let key = agent_vitals_domain::contracts::r2a::SessionKey::new(
+            host,
+            &native_id,
+            source_profile,
+            ns,
+        );
+        let canonical = match agent_vitals_hosts::canonical_input::canonical_session_for_path(
+            session_file,
+            host,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("session source unavailable: {e}");
+                std::process::exit(2);
+            }
+        };
+        let graph =
+            agent_vitals_domain::domain::trace::build_trace_graph(&canonical, key);
+        if *timeline_series {
+            // 形状 = 既有 buildGeometry 的输入契约（spec §2.1.2：几何不写第二份，
+            // 这里只产数据准备）。AllRecorded 未暴露成 CLI 参数——v0.10.0 的图
+            // 只有 adapter 选定的一条路径，域层会诚实拒绝。
+            let series = agent_vitals_domain::domain::trace::project_timeline_series(
+                &graph,
+                agent_vitals_domain::evidence::Linearization::LeafPath,
+            )
+            .expect("LeafPath projection cannot fail by contract");
+            let text = serde_json::to_string_pretty(&series).unwrap_or_default();
+            if let Some(path) = rows_json {
+                if path == &PathBuf::from("-") {
+                    println!("{text}");
+                } else if std::fs::write(path, &text).is_err() {
+                    eprintln!("failed to write {}", path.display());
+                    std::process::exit(2);
+                } else {
+                    println!("Wrote {}", path.display());
+                }
+            } else {
+                println!("{text}");
+            }
+            return;
+        }
+        if let Some(path) = rows_json {
+            let text = serde_json::to_string_pretty(&graph.to_json()).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}", path.display());
+            }
+            return;
+        }
+        // 人读摘要：节点类型计数 + coverage 六计数 + 头两个/尾一个节点的
+        // 原生 id——摘要足够回答「这会话里发生了什么、图缺什么」。
+        let cov = &graph.coverage;
+        println!(
+            "TraceGraph {} host={} nodes={} edges={}",
+            graph.graph_id,
+            host,
+            cov.total_nodes,
+            cov.total_edges
+        );
+        let mut by_type: std::collections::BTreeMap<&str, u32> = Default::default();
+        for n in &graph.nodes {
+            *by_type.entry(n.node_type.as_str()).or_insert(0) += 1;
+        }
+        for (t, n) in &by_type {
+            println!("  {t}: {n}");
+        }
+        println!(
+            "coverage: missing_parent={} missing_time={} missing_status={} unmetered_nodes={}",
+            cov.missing_parent, cov.missing_time, cov.missing_status, cov.unmetered_nodes
+        );
         return;
     }
 

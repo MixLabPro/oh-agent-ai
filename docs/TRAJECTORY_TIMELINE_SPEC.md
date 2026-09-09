@@ -1,5 +1,15 @@
 # 轨迹时间线设计说明（Timeline Series Contract）
 
+> **状态订正（2026-09-08，`docs/TRACEGRAPH_TIMELINE_RECONCILIATION.md` 实测）**：
+> 下面这句「已全部落地」**只对几何层成立**。实测：`timeline_series` 这个名字在全仓库
+> （.rs/.py/.ts/.js/.cjs）**引用数为 0**——落地的是它下游的几何消费面（§4 的 points/
+> events/values 形状 + §5 不变量），**§4 数据契约本身承载诚实性语义的 5 个字段
+> `linearization` / `scope` / `native` / `ts` / `events[].provenance` 均未落地**。
+> `ordinal`（含 `tests/test_timeline_ordinals.py` 的唯一性契约）、`task_id`、`values`
+> （缺键不出现）已落地。v0.10 的 `TraceGraph` 将补齐这 5 个字段并把
+> `timeline_series` 定义为 `project(TraceGraph, linearization)` 的输出类型
+> （v0.10 spec §2.1.1 / §2.1.2）。
+>
 > 状态：**已全部落地（2026-09-01）**——§4 契约 + §5 不变量 + §6 的「几何只写一份」
 >       已实现（`src-tauri/ui/timeline.js` + `scripts/verify-timeline-geometry.mjs`，
 >       13 项断言由 `tests/test_codex_session_template.py` 调 node 执行），三个消费

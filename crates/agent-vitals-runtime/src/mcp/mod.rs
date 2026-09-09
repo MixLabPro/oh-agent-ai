@@ -18,6 +18,7 @@
 
 mod data_status;
 mod session_detail;
+mod session_trace;
 mod session_ref;
 mod sessions_search;
 mod usage_hourly;
@@ -314,8 +315,50 @@ fn authority_revision(conn: &Connection, max_observed_at_ms: Option<i64>) -> Val
     }
 }
 
-/// spec §6 `freshness`。`stale_hosts` 的逐宿主阈值判定在带时间窗的工具里做；
-/// `data_status` 把逐宿主最近观测时间放进 `data`，这里只报「上次成功同步」。
+/// `data_status` 及所有标准 envelope 的活跃数据新鲜度阈值。它回答的是「该
+/// 宿主最近一条实时 usage 事实是否已超过一天」；最近一次扫描时间另由
+/// `data.by_host.*.last_seen_at` 表示，二者不能混为一谈。
+pub(crate) const FRESHNESS_STALE_AFTER_MS: i64 = 24 * 60 * 60 * 1_000;
+
+/// 返回存在于实时事实或扫描源中的宿主，且其最后一条实时 usage fact 已超过
+/// 24 小时（没有任何实时事实同样视为 stale）。顺序由 SQL 固定为 host 升序，
+/// 以保证 CLI / MCP envelope 可逐字节对账。
+pub(crate) fn stale_hosts(conn: &Connection, now_ms: i64) -> Vec<String> {
+    let mut stmt = match conn.prepare(
+        "SELECT host, MAX(event_ts_ms) AS last_fact_at_ms
+         FROM usage_facts
+         WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'
+         GROUP BY host
+         UNION
+         SELECT host, NULL
+         FROM source_files
+         WHERE host NOT IN (
+           SELECT DISTINCT host FROM usage_facts
+           WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'
+         )
+         ORDER BY host",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Vec::new(),
+    };
+    let rows = match stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+    }) {
+        Ok(rows) => rows,
+        Err(_) => return Vec::new(),
+    };
+    rows.flatten()
+        .filter_map(|(host, last_fact_at_ms)| {
+            (last_fact_at_ms
+                .map(|at| now_ms.saturating_sub(at) > FRESHNESS_STALE_AFTER_MS)
+                .unwrap_or(true))
+            .then_some(host)
+        })
+        .collect()
+}
+
+/// spec §6 `freshness`。`stale_hosts` 由最新实时事实折成显式状态，避免只把
+/// 原始 `covered_to` 留给每个 consumer 自己计算而发生口径漂移。
 fn freshness(conn: &Connection) -> Value {
     let last = conn
         .query_row(
@@ -328,7 +371,7 @@ fn freshness(conn: &Connection) -> Value {
         .flatten();
     json!({
         "last_successful_sync_at": last.map(ms_to_rfc3339_beijing),
-        "stale_hosts": [],
+        "stale_hosts": stale_hosts(conn, crate::sql_sync::now_ms()),
     })
 }
 
@@ -368,6 +411,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         usage_hourly::spec(),
         sessions_search::spec(),
         session_detail::spec(),
+        session_trace::spec(),
     ];
     #[cfg(feature = "mcp-internal")]
     {
@@ -396,6 +440,7 @@ pub fn dispatch(name: &str, args: &Value, data_home: &Path) -> Result<Value, Too
         "usage_hourly" => usage_hourly::run(args, data_home),
         "sessions_search" => sessions_search::run(args, data_home),
         "session_detail" => session_detail::run(args, data_home),
+        "session_trace" => session_trace::run(args, data_home),
         #[cfg(feature = "mcp-internal")]
         "query_sql_readonly" => query_sql_readonly::run(args, data_home),
         other => Err(ToolError::new("internal_error", format!("tool `{other}` registered but not wired"))),
@@ -555,6 +600,22 @@ mod tests {
         let err = dispatch("data_status", &json!({ "sneaky": 1 }), Path::new("/nope"))
             .unwrap_err();
         assert_eq!(err.code, "invalid_argument");
+    }
+
+    #[test]
+    fn session_trace_rejects_the_retired_raw_path_interface_before_any_file_read() {
+        let err = dispatch(
+            "session_trace",
+            &json!({
+                "path": "/etc/passwd",
+                "host": "dsh",
+                "machine_namespace": "not-used",
+            }),
+            Path::new("/nonexistent-data-home"),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "invalid_argument");
+        assert!(err.message.contains("unknown argument `path`"));
     }
 
     #[test]

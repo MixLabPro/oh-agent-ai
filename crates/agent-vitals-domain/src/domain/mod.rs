@@ -20,6 +20,7 @@ pub mod skills;
 pub mod state;
 pub mod subagent;
 pub mod takeover;
+pub mod trace;
 pub mod trajectory;
 pub mod usage;
 pub mod util;

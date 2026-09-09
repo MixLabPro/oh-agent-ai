@@ -1337,6 +1337,35 @@ fn trigger_sync(app: AppHandle) {
     sync_now(&app);
 }
 
+/// v0.10.0 Traces tab 的数据面（spec §7 门槛 3 的 Tauri IPC 消费面）：薄转发到
+/// runtime 的 MCP `session_trace` 工具——**in-process** 而非 store.rs 的 spawn
+/// CLI，两个理由：(1) 数据面是纯函数 + memo（常驻进程里同会话反复下钻命中同
+/// 一份 `Arc<TraceGraph>`，spawn 每次冷启动反而更慢）；(2) envelope 形状与 MCP
+/// / CLI 三面同源（`mcp::build_envelope`），door-3 parity 由构造保证。
+///
+/// 错误面：MCP `ToolError` → `{error: {code, message}}`（与 store.rs 的类型化
+/// 错误透传同形状），前端按 code 分支展示。`spawn_blocking`：首次权威库打开是
+/// 冷 IO（与 sessions_* 同一条纪律）。
+#[tauri::command]
+async fn session_trace(
+    session_ref: String,
+    output: Option<String>,
+) -> Value {
+    let args = serde_json::json!({
+        "session_ref": session_ref,
+        "output": output.unwrap_or_else(|| "timeline_series".to_string()),
+    });
+    let data_home = overview::data_home();
+    tauri::async_runtime::spawn_blocking(move || {
+        match agent_vitals_runtime::mcp::dispatch("session_trace", &args, &data_home) {
+            Ok(v) => v,
+            Err(e) => serde_json::json!({"error": {"code": e.code, "message": e.message}}),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| serde_json::json!({"error": {"code": "cancelled", "message": "join error"}}))
+}
+
 /// 工作台 pull：**非破坏性**读导航目标（窗口未建/未可见时菜单点击的目标留在这里，等
 /// init/focus 时消费；`peek` 不消费，apply 成功后由 `clear_nav_target` 显式清）。
 #[tauri::command]
@@ -1447,6 +1476,7 @@ pub fn run() {
             read_calendar_month,
             read_hourly_distribution,
             trigger_sync,
+            session_trace,
             store::sessions_list,
             store::sessions_read,
             store::sessions_findings,

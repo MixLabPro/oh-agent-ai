@@ -97,7 +97,7 @@ reader）——spec §13 M4 前置，"工作量与 behavior 检测线相当"，�
 
 | Q | 目标工具 | 今日可跑 | 判据 | 判定 |
 |---|---|---|---|---|
-| **Q11** 宿主 24h 未同步 → 标 stale/partial、列明缺失宿主 | envelope `freshness.stale_hosts` + `coverage.missing_hosts` | `data_status` → `by_host.covered_to` / `last_seen_at` | envelope 把过期宿主折成显式标记 | **EXPLAINED**（缺口 #F1：`freshness.stale_hosts` 硬编码 `[]`，`by_host` 有原始数据但没折成标记；真机 dsh 事实停在 2026-08-31，8 天过期，envelope 不标） |
+| **Q11** 宿主 24h 未同步 → 标 stale/partial、列明缺失宿主 | envelope `freshness.stale_hosts` + `coverage.missing_hosts` | `data_status` → `by_host.covered_to` / `last_seen_at` | envelope 按最后一条实时事实将过期宿主折成显式标记；扫描时间单独呈现 | **EXACT** |
 | **Q12** 重复导入 + 中途中断 → 重跑查询逐值恒等 | `reimport_verify`（MCP 外命令） | `agent-vitals data-reimport-verify --json` ✅ | 两临时库各重放（round B 迁完首宿主"崩溃"→ 重开清扫 → 完整迁移 → 幂等重跑），逐宿主 × 北京月 `COUNT + 四桶 SUM` 全等；`interrupted_runs_swept ≥ 1`；**绝不碰生产库** | **EXACT** |
 | **Q13** 调价日前后用正确价格版本 | `cost_breakdown` | `query_sql_readonly(pricing_snapshots)` | 调价日前后分别用对应 `pricing_snapshots` 版本；历史不被当前价卡覆盖 | **BLOCKED**（M3 硬前置：`authority_query` 按事实时点选价版；真机 `pricing_snapshots` 只有 1 版） |
 | **Q14** 同 raw 模型名跨宿主 | `usage_hourly` / `cost_breakdown` 的 `identity_kind` | `usage_hourly(group_by=model)` ✅ | 每序列显式 `identity_kind`；无法映射标 `unresolved`，不并入相似名 | **PARTIAL**（`identity_kind: "host_raw"` 每序列在场，key 带 `host` 消歧 ✅；canonical 归一 = v0.9.2+；`unresolved` 语义在 `data-unresolved` / M3） |
@@ -179,7 +179,7 @@ host-months / facts 逐值相等 / `interrupted_runs_swept=1`。
 
 | # | 缺口 | 现状 | 解锁 |
 |---|---|---|---|
-| **F1** | `freshness.stale_hosts` 硬编码 `[]`；`coverage.status` 不因单宿主过期降 `partial` | `data_status.by_host` 有 `covered_to` / `last_seen_at` 原始数据，consumer 自己算 | M1 收口（增量 5）——envelope 把 `by_host` 按阈值（24h？可配）折成 `stale_hosts` + `coverage=partial`，钉 M05 契约测试 |
+| ~~**F1**~~ | ~~`freshness.stale_hosts` 未折叠逐宿主过期状态~~ | ✅ 已关闭：以最后一条实时事实的 24h 阈值生成 `stale_hosts`，`data_status.coverage` 同步降为 `partial`，并由单测与 Q11 真机冒烟守住；`last_seen_at` 仍独立表示扫描新鲜度 | — |
 | **F2** | 无金额工具 → Q05 成本维、S2「花了多少」「哪个最贵（钱）」「实付/等价/订阅分离」全部只能走 CLII | `usage_hourly` 只有 token；`MoneyMinor` 类型 + `money.rs` 在，无消费面 | 增量 3（`summary_daily`/`summary_monthly`）+ M3（`cost_breakdown`） |
 | **F3** | 无 `data_quality_issues` 工具 → Q05/S2.4 只能 `query_sql_readonly` 数 code，不能逐模型下钻 unresolved 原因 | `v_data_quality_safe` view 在（且刻意不含 `detail_json`） | 增量 4（`data_quality_issues` + code-aware 脱敏 allowlist） |
 | ~~**F4**~~ | ~~Q04/S1.4 会话下钻~~ | ✅ **已关闭（2026-09-08）**：`session_ref` HMAC-SHA256 基元（`<data_home>/.mcp-session-salt`，0600）+ `sessions_search`（窗口/小时 × 逐会话聚合，keyset 分页，`window_total_tokens` 供守恒核对）+ `session_detail`（反解 ref → usage 时间线）。`started_at_ms`/`ended_at_ms` 从 `MIN/MAX(event_ts_ms)` 读时派生，不依赖那两列。**待**：`session_detail` 时间线的失败/错误事件富化 = F5（`workflow_events`）。 | — |
@@ -190,10 +190,10 @@ host-months / facts 逐值相等 / `interrupted_runs_swept=1`。
 
 ## 9. 通过门槛
 
-- **当前阶段**：Q01–Q04 / Q12 / S4.* / M07 / M12 / M18 / M19 全 `EXACT`；
+- **当前阶段**：Q01–Q04 / Q11 / Q12 / S4.* / M07 / M12 / M18 / M19 全 `EXACT`；
   `MISMATCH` == 0。BLOCKED 项（Q06–Q10 / Q13）与缺口表逐条对得上。
   ← **2026-09-08 达成**。
-- **M1 收口**：F1 关闭（`stale_hosts` 落地）；增量 3/4 落地后 Q05 升 `EXACT`，
+- **M1 收口**：F1 已关闭（`stale_hosts` 落地）；增量 3/4 落地后 Q05 升 `EXACT`，
   新增 `summary_daily`/`summary_monthly` 行，三消费面 parity（M15）纳入。
 - **M2 收口**：`authority_audit` 纳入。
 - **v1.0.0（M5）**：Q01–Q14 全部 `EXACT` 或 `EXPLAINED`；无未关闭 `mismatch`
