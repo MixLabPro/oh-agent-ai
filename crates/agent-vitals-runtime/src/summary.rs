@@ -2403,6 +2403,162 @@ mod tests {
             .unwrap();
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn seed_provider_fact(
+        db: &agent_vitals_data::authority::AuthorityDb,
+        fact_id: &str,
+        host: &str,
+        provider_id: &str,
+        model_id: &str,
+        event_ts_ms: i64,
+        u: i64,
+        cr: i64,
+        cw: i64,
+        o: i64,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                 VALUES ('provider-run', 1, 'cli', 'succeeded', 1)
+                 ON CONFLICT(run_id) DO NOTHING",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO usage_facts(
+                     fact_id, host, machine_namespace, native_session_id,
+                     source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
+                     event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                     output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'm', 'provider-session', ?1, 'token_count', ?3, ?4,
+                         ?5, ?5, ?6, ?7, ?8, ?9, 'provider-run', 1, 1)",
+                rusqlite::params![fact_id, host, provider_id, model_id, event_ts_ms, u, cr, cw, o],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn custom_codex_summary_keeps_fair_market_estimate_out_of_total() {
+        with_home(|| {
+            let month = crate::clock::current_month_beijing();
+            let db = seed_authority_db();
+            seed_provider_fact(
+                &db,
+                "custom-codex-1",
+                "codex",
+                "cogfoundry.ai",
+                "gpt-5.6-sol",
+                current_month_noon_ms(),
+                1_000_000,
+                0,
+                0,
+                100_000,
+            );
+            drop(db);
+
+            let summary =
+                SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
+            let custom = summary
+                .by_provider
+                .get("codex/cogfoundry.ai")
+                .expect("custom provider must remain visible in the read model");
+            let estimate = custom
+                .amounts_by_basis
+                .get(&BillingBasis::MeteredEstimate)
+                .copied()
+                .unwrap_or(0.0);
+            assert!(estimate > 0.0, "custom route estimate was dropped: {custom:?}");
+            assert!(custom.has_unresolved);
+            assert_eq!(custom.pricing_method.as_deref(), Some("fair-market-fallback"));
+            assert_ne!(custom.evidence_basis.as_deref(), Some("session-native"));
+            assert!(!custom
+                .amounts_by_basis
+                .contains_key(&BillingBasis::ApiEquivalent));
+            assert_eq!(summary.total_summable(), 0.0);
+        });
+    }
+
+    #[test]
+    fn custom_codex_mixed_provider_rows_stay_separate() {
+        with_home(|| {
+            let month = crate::clock::current_month_beijing();
+            let db = seed_authority_db();
+            let ts = current_month_noon_ms();
+            seed_provider_fact(
+                &db,
+                "custom-codex-mixed",
+                "codex",
+                "cogfoundry.ai",
+                "gpt-5.6-sol",
+                ts,
+                500_000,
+                100_000,
+                0,
+                50_000,
+            );
+            seed_provider_fact(
+                &db,
+                "openai-codex-mixed",
+                "codex",
+                "openai",
+                "gpt-5.6-sol",
+                ts,
+                500_000,
+                100_000,
+                0,
+                50_000,
+            );
+            drop(db);
+
+            let summary =
+                SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
+            let custom = summary.by_provider.get("codex/cogfoundry.ai").unwrap();
+            let openai = summary.by_provider.get("codex/openai").unwrap();
+            assert!(custom.has_unresolved);
+            assert!(custom
+                .amounts_by_basis
+                .contains_key(&BillingBasis::MeteredEstimate));
+            assert!(openai
+                .amounts_by_basis
+                .contains_key(&BillingBasis::ApiEquivalent));
+            assert!(!custom
+                .amounts_by_basis
+                .contains_key(&BillingBasis::ApiEquivalent));
+        });
+    }
+
+    #[test]
+    fn custom_codex_without_model_card_remains_visible_as_unpriced() {
+        with_home(|| {
+            let month = crate::clock::current_month_beijing();
+            let db = seed_authority_db();
+            seed_provider_fact(
+                &db,
+                "custom-codex-no-card",
+                "codex",
+                "cogfoundry.ai",
+                "gpt-unknown-no-card",
+                current_month_noon_ms(),
+                1_000_000,
+                0,
+                0,
+                10_000,
+            );
+            drop(db);
+
+            let summary =
+                SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
+            let custom = summary.by_provider.get("codex/cogfoundry.ai").unwrap();
+            assert!(custom.amounts_by_basis.is_empty());
+            assert!(custom.has_unresolved);
+            assert_eq!(
+                custom.unresolved_reason.as_deref(),
+                Some("provider-specific-card-unavailable")
+            );
+        });
+    }
+
     #[test]
     fn codex_quota_snapshot_reads_authority_without_a_rollout_fallback() {
         with_home(|| {
