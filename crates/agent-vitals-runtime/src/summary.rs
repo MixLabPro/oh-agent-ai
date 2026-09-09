@@ -159,7 +159,9 @@ fn dsh_host_amount(cost: Option<serde_json::Value>, latest_day: Option<&str>) ->
         amounts_by_basis,
         currency: None,
         has_unresolved: false,
-        evidence_basis: Some("session-native".to_string()),
+        // This summary is built from aggregated cost data; it does not itself
+        // prove that every contributing row carried session-native evidence.
+        evidence_basis: None,
         pricing_method: Some("provider-card".to_string()),
         unresolved_reason: None,
         freshness,
@@ -479,11 +481,10 @@ impl ProviderAcc {
             amounts_by_basis,
             currency: self.currency,
             has_unresolved: self.unresolved || multi_currency,
-            evidence_basis: if self.unresolved || multi_currency {
-                Some("missing".to_string())
-            } else {
-                Some("session-native".to_string())
-            },
+            // Aggregation preserves provider/pricing buckets but not a proof
+            // that all rows had the same route-evidence basis.
+            evidence_basis: (self.unresolved || multi_currency)
+                .then(|| "missing".to_string()),
             pricing_method: Some("fair-market".to_string()),
             unresolved_reason: (self.unresolved || multi_currency)
                 .then(|| "provider-or-currency-unresolved".to_string()),
@@ -959,7 +960,9 @@ fn codex_provider_amounts_from_sql(
                     amounts_by_basis,
                     currency: Some("USD".to_string()),
                     has_unresolved: true,
-                    evidence_basis: Some("session-native".to_string()),
+                    // The SQL summary cannot establish session-native route
+                    // evidence for the whole aggregate.
+                    evidence_basis: Some("missing".to_string()),
                     pricing_method: Some("fair-market-fallback".to_string()),
                     unresolved_reason: Some("provider-specific-card-unavailable".to_string()),
                     freshness: day.map(day_freshness).unwrap_or_else(|| Freshness { state: FreshnessState::Partial, last_observed_at: Some("sql-facts".to_string()) }),

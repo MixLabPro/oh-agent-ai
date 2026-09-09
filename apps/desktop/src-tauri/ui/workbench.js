@@ -778,10 +778,17 @@ function renderDualTrack(monthly) {
     list.appendChild(li);
   };
   const attributionChips = (h) => {
+    const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (ch) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    }[ch]));
     const out = [];
-    if (h.evidence_basis) out.push(`<span class="chip diagnostic">证据 ${h.evidence_basis}</span>`);
-    if (h.pricing_method) out.push(`<span class="chip">计价 ${h.pricing_method}</span>`);
-    if (h.unresolved_reason) out.push(`<span class="chip hostbilled">原因 ${h.unresolved_reason}</span>`);
+    if (h.evidence_basis) out.push(`<span class="chip diagnostic">证据 ${escapeHtml(h.evidence_basis)}</span>`);
+    if (h.pricing_method) out.push(`<span class="chip">计价 ${escapeHtml(h.pricing_method)}</span>`);
+    if (h.unresolved_reason) out.push(`<span class="chip hostbilled">原因 ${escapeHtml(h.unresolved_reason)}</span>`);
     return out.join(" ");
   };
   if (subEntries.length) li("", `<span class="dual-track">订阅轨 · 已付费产能</span>`);
@@ -813,7 +820,14 @@ function renderDualTrack(monthly) {
   for (const [key, h, label] of metered) {
     const chips = Object.entries(h.amounts_by_basis)
       .map(([b, v]) => {
-        const names = { metered_actual: "实测", metered_estimate: "估算（relay 上界）" };
+        const names = {
+          metered_actual: "实测",
+          metered_estimate: h.pricing_method === "fair-market"
+            ? "公允价估算"
+            : h.pricing_method === "fair-market-fallback"
+              ? "原厂价回退估算"
+              : "按量估算",
+        };
         return `<span class="chip ${b === "metered_actual" ? "measured" : "estimate"}">${names[b] || b} ${fmtCur(v, h.currency)}</span>`;
       }).join("");
     li("", `<span class="src-name">${label}</span><span class="basis">${chips} ${attributionChips(h)}</span>`);
