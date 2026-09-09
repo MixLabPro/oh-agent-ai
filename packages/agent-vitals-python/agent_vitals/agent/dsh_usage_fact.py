@@ -32,6 +32,7 @@ from typing import NamedTuple, Optional
 
 from ..adapters.dsh import read_session_text, parse_session_log
 from ..util import post_fork
+from ..source_identity import fnv1a64_hex
 from .r2a import dsh_header  # noqa: F401  (PR #5 后改回独立 import)
 from ..adapters.dsh_source_profile import dsh_source_profile
 from .usage import dsh_usage_observations, usage_fold_checkpoint
@@ -223,6 +224,13 @@ def _observation_to_usage_fact(obs, machine_namespace, native_session_id, profil
         # 绝无 __ambiguous__（那是 token_by_model 聚合层的派生状态，不进 fact）。
         "provider_raw": obs.provider_raw,
         "provider_id": obs.provider_raw if isinstance(obs.provider_raw, str) and obs.provider_raw.strip() else None,
+        "route_evidence_id": (
+            "route:{}".format(fnv1a64_hex("{}|{}|{}".format(
+                native_session_id, obs.provider_raw, "session-native"
+            )))
+            if isinstance(obs.provider_raw, str) and obs.provider_raw.strip()
+            else None
+        ),
         "billing_source": obs.provider_raw if isinstance(obs.provider_raw, str) and obs.provider_raw.strip() else None,
         "billing_mode": "metered",
         "pricing_basis": "route-observed" if obs.provider_raw else "metered_estimate",

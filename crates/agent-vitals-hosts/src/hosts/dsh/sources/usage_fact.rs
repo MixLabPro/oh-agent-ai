@@ -42,6 +42,7 @@ use agent_vitals_domain::usage::{
 use agent_vitals_domain::util::civil_from_unix_secs;
 use agent_vitals_domain::usage_fact::build_usage_fact;
 use agent_vitals_domain::util::post_fork;
+use agent_vitals_domain::source_identity::fnv1a64_hex;
 use agent_vitals_provider::{resolve_billing_attribution, EvidenceBasis, RouteEvidence};
 
 const HOST: &str = "dsh";
@@ -149,6 +150,16 @@ fn observation_to_usage_fact(
     });
     let attribution = resolve_billing_attribution(obs.provider_raw.as_deref(), route.as_ref());
     fields.insert("provider_id".into(), json!(attribution.provider_id));
+    let route_evidence_id = obs.provider_raw.as_ref().map(|provider_raw| {
+        let key = format!(
+            "{}|{}|{}",
+            native_session_id,
+            provider_raw,
+            attribution.evidence_basis.as_str()
+        );
+        format!("route:{}", fnv1a64_hex(key.as_bytes()))
+    });
+    fields.insert("route_evidence_id".into(), json!(route_evidence_id));
     fields.insert("billing_source".into(), json!(attribution.provider_id));
     fields.insert("billing_mode".into(), json!(attribution.billing_mode.as_str()));
     fields.insert("pricing_basis".into(), json!(attribution.pricing_basis));
