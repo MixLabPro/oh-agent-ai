@@ -28,7 +28,7 @@ pub fn spec() -> super::ToolSpec {
         }),
         output_schema: json!({
             "type": "object",
-            "description": "The standard response envelope (schema_version, data_version, authority_state, authority_revision, coverage, freshness, warnings, data). `data` carries: schema_version, integrity, facts, sources, sessions, open_quality_issues(+_by_code), sql_authority_enabled, pricing_snapshots, host_bills, recent_runs, by_host, health, hints."
+            "description": "The standard response envelope (schema_version, data_version, authority_state, authority_revision, coverage, freshness, warnings, data). `data` carries: schema_version, integrity, facts, sources, sessions, open_quality_issues(+_by_code), sql_authority_enabled, pricing_snapshots, pricing health, unresolved_tokens, unpriced_tokens, host_bills, recent_runs, by_host, health, hints."
         }),
     }
 }
@@ -120,6 +120,116 @@ pub fn run(_args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     ))
 }
 
+fn fact_tokens(uncached: i64, cache_read: i64, cache_write: i64, output: i64) -> i64 {
+    uncached + cache_read + cache_write + output
+}
+
+/// Count facts that the currently effective immutable pricing snapshot cannot
+/// price. This deliberately uses the same domain pricing resolvers as the
+/// product projections instead of treating `provider_id IS NULL` as a price
+/// miss: an unknown provider may still be estimable from a model card.
+fn unpriced_tokens(conn: &Connection, payload: Option<&Value>) -> i64 {
+    let Some(payload) = payload else {
+        return conn
+            .query_row(
+                "SELECT COALESCE(SUM(uncached_input_tokens + cache_read_tokens +
+                        cache_write_tokens + output_tokens), 0)
+                 FROM usage_facts
+                 WHERE deleted_at_ms IS NULL
+                   AND observation_kind != 'legacy_aggregate'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+    };
+    let main = payload.get("pricing").unwrap_or(payload);
+    let codex = payload.get("codex_pricing").unwrap_or(payload);
+    let entries = codex
+        .get("entries")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut total_unpriced = 0i64;
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT host, provider_id, model_id, uncached_input_tokens,
+                cache_read_tokens, cache_write_tokens, output_tokens
+         FROM usage_facts
+         WHERE deleted_at_ms IS NULL
+           AND observation_kind != 'legacy_aggregate'",
+    ) else {
+        return 0;
+    };
+    let Ok(rows) = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, i64>(5)?,
+            r.get::<_, i64>(6)?,
+        ))
+    }) else {
+        return 0;
+    };
+    for row in rows.flatten() {
+        let (host, provider, model, uncached, cache_read, cache_write, output) = row;
+        let tokens = fact_tokens(uncached, cache_read, cache_write, output);
+        let Some(model) = model else {
+            total_unpriced += tokens;
+            continue;
+        };
+        let priced = if host == "codex" {
+            agent_vitals_domain::cost::codex_resolve_entry(&model, "standard", entries).is_some()
+        } else if host == "claude-code" {
+            let report = agent_vitals_domain::cost::claude_day_cost(
+                &json!({
+                    model.clone(): {
+                        "input_tokens": uncached,
+                        "cache_read_input_tokens": cache_read,
+                        "cache_creation_input_tokens": cache_write,
+                        "output_tokens": output
+                    }
+                }),
+                main,
+            );
+            report
+                .as_ref()
+                .and_then(|v| v.get("unpriced_tokens"))
+                .and_then(Value::as_i64)
+                == Some(0)
+        } else {
+            let mut providers = serde_json::Map::new();
+            if let Some(provider) = provider.as_deref() {
+                providers.insert(model.clone(), Value::String(provider.to_string()));
+            }
+            let report = agent_vitals_domain::cost::cost_report(
+                &json!({
+                    "by_model": {
+                        model.clone(): {
+                            "uncached_input_tokens": uncached,
+                            "cache_read_tokens": cache_read,
+                            "cache_write_tokens": cache_write,
+                            "output_tokens": output
+                        }
+                    },
+                    "providers": providers
+                }),
+                main,
+            );
+            report
+                .as_ref()
+                .and_then(|v| v.get("unpriced_tokens"))
+                .and_then(Value::as_i64)
+                == Some(0)
+        };
+        if !priced {
+            total_unpriced += tokens;
+        }
+    }
+    total_unpriced
+}
+
 /// 权威库状态报告——CLI `data-status` 与 MCP `data_status` 的共享数据面。
 ///
 /// `db_existed`：调用方 open **之前**文件是否存在（CLI 用 `AuthorityDb::open`
@@ -144,6 +254,47 @@ pub fn collect_report(conn: &Connection, db_existed: bool, enabled: bool) -> Val
     let issues = count("SELECT COUNT(*) FROM data_quality_issues WHERE resolved_at_ms IS NULL");
     let pricing_snapshots = count("SELECT COUNT(*) FROM pricing_snapshots");
     let host_bills = count("SELECT COUNT(*) FROM host_bills WHERE deleted_at_ms IS NULL");
+    let unresolved_tokens = conn
+        .query_row(
+            "SELECT COALESCE(SUM(uncached_input_tokens + cache_read_tokens +
+                    cache_write_tokens + output_tokens), 0)
+             FROM usage_facts AS f
+             WHERE f.deleted_at_ms IS NULL
+               AND f.observation_kind != 'legacy_aggregate'
+               AND (f.provider_id IS NULL OR EXISTS (
+                    SELECT 1 FROM data_quality_issues AS q
+                    WHERE q.scope_key = f.fact_id
+                      AND q.code = 'conflicting_route_evidence'
+                      AND q.resolved_at_ms IS NULL
+               ))",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    let pricing_latest = conn
+        .query_row(
+            "SELECT pricing_version, captured_at_ms FROM pricing_snapshots
+             ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .ok();
+    let pricing_payload = pricing_latest.as_ref().and_then(|(version, _)| {
+        conn.query_row(
+            "SELECT payload_json FROM pricing_snapshots WHERE pricing_version = ?1",
+            rusqlite::params![version],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    });
+    let unpriced_tokens = unpriced_tokens(conn, pricing_payload.as_ref());
+    let pricing_stale = pricing_latest
+        .as_ref()
+        .map(|(_, captured_at_ms)| {
+            crate::sql_sync::now_ms().saturating_sub(*captured_at_ms) > 30 * 24 * 60 * 60 * 1_000
+        })
+        .unwrap_or(true);
 
     let mut issues_by_code: Map<String, Value> = Map::new();
     if let Ok(mut stmt) = conn.prepare(
@@ -214,6 +365,14 @@ pub fn collect_report(conn: &Connection, db_existed: bool, enabled: bool) -> Val
         "open_quality_issues_by_code": Value::Object(issues_by_code),
         "sql_authority_enabled": enabled,
         "pricing_snapshots": pricing_snapshots,
+        "pricing": {
+            "snapshot_count": pricing_snapshots,
+            "latest_version": pricing_latest.as_ref().map(|(v, _)| v),
+            "latest_captured_at_ms": pricing_latest.as_ref().map(|(_, ts)| ts),
+            "stale": pricing_stale,
+        },
+        "unresolved_tokens": unresolved_tokens,
+        "unpriced_tokens": unpriced_tokens,
         "host_bills": host_bills,
         "recent_runs": runs,
         "by_host": by_host,
@@ -389,6 +548,117 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("zero facts")));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn collect_report_exposes_pricing_and_token_quality_metrics() {
+        let home = tmp_home("quality-metrics");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
+        let report = collect_report(db.conn(), true, false);
+
+        assert_eq!(report["pricing"]["snapshot_count"], 0);
+        assert_eq!(report["pricing"]["latest_version"], Value::Null);
+        assert_eq!(report["pricing"]["stale"], true);
+        assert_eq!(report["unresolved_tokens"], 0);
+        assert_eq!(report["unpriced_tokens"], 0);
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn collect_report_counts_unknown_fact_tokens_as_unresolved_and_unpriced() {
+        let home = tmp_home("quality-fact");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                 VALUES ('run-quality', 1, 'cli', 'succeeded', 2)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace,
+                 source_profile, last_observed_at_ms)
+                 VALUES ('quality-session', 'codex', 'native-quality', 'machine', 'default', 1)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                 session_key, source_event_id, observation_kind, provider_id, model_id,
+                 event_ts_ms, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                 output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES ('quality-fact', 'codex', 'machine', 'native-quality', 'quality-session',
+                 'quality-event', 'assistant-usage', NULL, NULL, 1, 100, 200, 300, 400,
+                 'run-quality', 1, 1)",
+                [],
+            )
+            .unwrap();
+
+        let report = collect_report(db.conn(), true, false);
+        assert_eq!(report["unresolved_tokens"], 1_000);
+        assert_eq!(report["unpriced_tokens"], 1_000);
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn collect_report_counts_model_specific_unpriced_tokens() {
+        let home = tmp_home("quality-model");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                 VALUES ('run', 1, 'cli', 'succeeded', 2)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO sessions(session_key, host, native_session_id,
+                    machine_namespace, source_profile, last_observed_at_ms)
+                 VALUES ('s', 'codex', 'native', 'm', 'default', 1)",
+                [],
+            )
+            .unwrap();
+        for (id, model, tokens) in [("known", "openai/gpt-5.6-luna", 3i64), ("unknown", "gpt-never-listed", 7i64)] {
+            db.conn()
+                .execute(
+                    "INSERT INTO usage_facts(
+                        fact_id, host, machine_namespace, native_session_id,
+                        session_key, source_event_id, observation_kind,
+                        provider_id, model_id, event_ts_ms, event_peak,
+                        uncached_input_tokens, cache_read_tokens,
+                        cache_write_tokens, output_tokens,
+                        ingested_run_id, created_at_ms, updated_at_ms)
+                     VALUES (?1, 'codex', 'm', 'native', 's', ?1,
+                        'assistant-usage', NULL, ?2, 1, 0, ?3, 0, 0, 0,
+                        'run', 1, 1)",
+                    rusqlite::params![id, model, tokens],
+                )
+                .unwrap();
+        }
+        db.pricing_snapshot_put(
+            "codex-card",
+            "test",
+            r#"{"codex_pricing":{"entries":[{"modelPrefix":"gpt-5.6-luna","speed":"standard","uncachedInputUsdPerMTok":"0.2","cacheReadUsdPerMTok":"0.02","cacheWrite5mUsdPerMTok":"0.25","outputUsdPerMTok":"1.2"}]}}"#,
+            1,
+        )
+        .unwrap();
+
+        let report = collect_report(db.conn(), true, false);
+        assert_eq!(report["unpriced_tokens"], 7);
+        assert_eq!(report["unresolved_tokens"], 10);
+
         let _ = std::fs::remove_dir_all(&home);
     }
 
