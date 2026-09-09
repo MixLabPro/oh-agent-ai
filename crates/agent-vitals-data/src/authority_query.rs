@@ -1236,12 +1236,23 @@ pub fn session_cost_minor(
         }
     }
 
-    // 3. 折成 cost_report 期望的 by_model 形状：每个模型的 8 个基础字段
-    //    （uncached_input + cache_read + cache_write + output 的总桶 + 高峰子桶）。
+    // 3. 按宿主折成统一成本引擎需要的 by_model 形状。DSH 使用四个
+    //    uncached/cache_read/cache_write/output 字段；Claude 使用其原生的
+    //    input/cache_read_input/cache_creation_input/output 字段。
     let mut by_model_json = serde_json::Map::new();
     for (model, s) in &by_model {
-        by_model_json.insert(
-            model.clone(),
+        let value = if host.as_deref() == Some("claude-code") {
+            json!({
+                "input_tokens": s.u_off + s.u_peak,
+                "cache_read_input_tokens": s.cr_off + s.cr_peak,
+                "cache_creation_input_tokens": s.cw_off + s.cw_peak,
+                "output_tokens": s.o_off + s.o_peak,
+                "peak_input_tokens": s.u_peak,
+                "peak_cache_read_input_tokens": s.cr_peak,
+                "peak_cache_creation_input_tokens": s.cw_peak,
+                "peak_output_tokens": s.o_peak,
+            })
+        } else {
             json!({
                 "uncached_input_tokens": s.u_off + s.u_peak,
                 "cache_read_tokens": s.cr_off + s.cr_peak,
@@ -1251,8 +1262,9 @@ pub fn session_cost_minor(
                 "peak_cache_read_tokens": s.cr_peak,
                 "peak_cache_write_tokens": s.cw_peak,
                 "peak_output_tokens": s.o_peak,
-            }),
-        );
+            })
+        };
+        by_model_json.insert(model.clone(), value);
     }
     let usage = json!({ "by_model": by_model_json });
 

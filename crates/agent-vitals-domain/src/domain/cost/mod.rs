@@ -802,8 +802,52 @@ pub fn cost_block(usage: &Value, pricing: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::data_contract::BillingBasis;
     // Phase D2：Claude 面切进 `claude` 子模块——测试用的私有项（`pub(crate)`）显式引。
     use super::claude::resolve_card_catalog;
+
+    #[test]
+    fn metered_estimate_minor_prices_codex_unknown_route_from_snapshot() {
+        let snapshot = serde_json::json!({
+            "codex_pricing": load_codex_pricing(),
+        });
+        let usage = serde_json::json!({"by_model": {"openai/gpt-5.6-luna": {
+            "uncached_input_tokens": 1_000_000,
+            "cached_input_tokens": 1_000_000,
+            "cache_write_input_tokens": 1_000_000,
+            "output_tokens": 1_000_000,
+        }}});
+        let money = metered_estimate_minor("codex", &usage, &snapshot)
+            .expect("all Codex buckets should use the snapshot card");
+        assert_eq!(money.amount_minor, 167);
+        assert_eq!(money.currency, "USD");
+        assert_eq!(money.basis, BillingBasis::MeteredEstimate);
+    }
+
+    #[test]
+    fn metered_estimate_minor_prices_dsh_from_same_snapshot() {
+        let snapshot = serde_json::json!({"pricing": load_pricing()});
+        let usage = serde_json::json!({"by_model": {"deepseek-v4-flash": {
+            "uncached_input_tokens": 1_000_000,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": 0,
+        }}});
+        let money = metered_estimate_minor("dsh", &usage, &snapshot)
+            .expect("DeepSeek model should use the DSH snapshot card");
+        assert_eq!(money.amount_minor, 150);
+        assert_eq!(money.currency, "CNY");
+        assert_eq!(money.basis, BillingBasis::MeteredEstimate);
+    }
+
+    #[test]
+    fn metered_estimate_minor_rejects_unpriced_models() {
+        let snapshot = serde_json::json!({"pricing": load_pricing()});
+        let usage = serde_json::json!({"by_model": {"unknown/model": {
+            "uncached_input_tokens": 1_000_000,
+        }}});
+        assert_eq!(metered_estimate_minor("dsh", &usage, &snapshot), None);
+    }
 
     /// v0.7 spec §3 交付矩阵第二行：deepseek-official 没有 catalog_2026_09
     /// 订阅登记 → 全部落进"未落入已声明订阅覆盖范围"视图；与 cost.py 同名
@@ -964,6 +1008,24 @@ mod tests {
         let report = cost_report(&usage, &pricing).unwrap();
         assert_eq!(report["per_model"].as_object().unwrap().len(), 0);
         assert_eq!(report["unpriced_tokens"], 1000);
+    }
+
+    #[test]
+    fn metered_estimate_minor_uses_claude_native_token_fields() {
+        let snapshot = json!({"pricing": load_pricing()});
+        let usage = json!({"by_model": {"claude-sonnet-5": {
+            "input_tokens": 1_000_000,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 0,
+            "peak_input_tokens": 0,
+            "peak_cache_read_input_tokens": 0,
+            "peak_output_tokens": 0,
+        }}});
+        let cost = metered_estimate_minor("claude-code", &usage, &snapshot)
+            .expect("known Claude model should be priceable");
+        assert!(cost.amount_minor > 0);
+        assert_eq!(cost.basis, BillingBasis::MeteredEstimate);
     }
 
     /// `cost_series` 的逐请求累计，终值必须和 `cost_report` 的 `total` 对得上——
