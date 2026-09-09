@@ -17,7 +17,7 @@ Agent Vitals maintains a Python compatibility implementation and a Rust workspac
 
 ## Coding Style & Naming Conventions
 
-Do not run `rustfmt` directly on an individual Rust file. This has previously reformatted hundreds of unrelated lines and obscured a small functional change. For Rust edits, preserve the surrounding formatting, inspect `git diff --stat` and the full diff immediately after editing, and use targeted manual formatting. If a repository-wide formatter check is needed, use it only as a read-only check (`cargo fmt --all -- --check`); do not auto-format files as part of an implementation unless the user explicitly requests a formatting-only change.
+Do not run `rustfmt`, and do not run any auto-formatting command on an individual Rust file. This has previously reformatted hundreds of unrelated lines and obscured a small functional change. For Rust edits, preserve the surrounding formatting, inspect `git diff --stat` and the full diff immediately after editing, and use targeted manual formatting. A repository-wide formatter check may be used only as a read-only check (`cargo fmt --all -- --check`); it must not rewrite files unless the user explicitly requests a formatting-only change.
 
 Rust modules and functions use `snake_case`; types use `PascalCase`. Python uses four-space indentation, `snake_case`, standard-library-first solutions, and compatibility with Python 3.9 CI. Keep host-specific I/O in adapters/host crates and deterministic policy logic in core/domain modules. Preserve explicit JSON field ordering where output participates in golden tests.
 
