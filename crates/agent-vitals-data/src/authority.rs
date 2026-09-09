@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
+use agent_vitals_domain::billing::{BillingTemplateKind, PricingSource};
+
 use crate::safe_query::authority_callback;
 
 /// 当前 DDL 版本。spec §3 的表结构变更递增；`migrations` 表（§3.5）记录的
@@ -30,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -42,6 +44,8 @@ pub fn default_authority_path(data_home: &Path) -> PathBuf {
 /// amount_minor, currency)`。`amount_minor` 是最小货币单位整数——金额从不
 /// 以浮点入库（spec §5.3），折算在展示层。
 pub type HostBillRow = (String, String, String, i64, String);
+
+type BillingTemplateRow = (String, Option<String>, String, String, i64, Option<i64>);
 
 /// 权威库错误。`Corrupt` **不再自愈**——恢复路径是「用户备份 + 原始日志
 /// 重放」，静默删库重建会把权威库变成可被悄悄替换的第二本账（spec §1.1.3
@@ -379,6 +383,87 @@ CREATE TABLE issue_status_transitions (
 CREATE INDEX issue_transitions_issue_time ON issue_status_transitions(issue_id, transitioned_at_ms, transition_id);
 "#;
 
+// v0.12：计费合同、catalog 和金额测量都必须版本化。所有对历史 facts 的新
+// 关联均可空：迁移绝不凭当前模板猜测旧 session 的合同。
+const SCHEMA_V4_ADD: &str = r#"
+ALTER TABLE usage_facts ADD COLUMN billing_template_id TEXT;
+ALTER TABLE pricing_snapshots ADD COLUMN catalog_version TEXT;
+ALTER TABLE pricing_snapshots ADD COLUMN billing_template_id TEXT;
+
+CREATE TABLE provider_catalog_snapshots (
+  catalog_version TEXT PRIMARY KEY,
+  captured_at_ms INTEGER NOT NULL,
+  source_kind TEXT NOT NULL,
+  snapshot_id TEXT NOT NULL UNIQUE,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE billing_templates (
+  billing_template_id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL,
+  account_ref TEXT,
+  template_kind TEXT NOT NULL,
+  pricing_source TEXT NOT NULL,
+  effective_from_ms INTEGER NOT NULL,
+  effective_to_ms INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  CHECK (effective_to_ms IS NULL OR effective_to_ms >= effective_from_ms)
+);
+CREATE INDEX billing_templates_provider_window
+  ON billing_templates(provider_id, account_ref, effective_from_ms, effective_to_ms);
+
+CREATE TABLE billing_template_snapshots (
+  snapshot_id TEXT PRIMARY KEY,
+  billing_template_id TEXT NOT NULL REFERENCES billing_templates(billing_template_id),
+  catalog_version TEXT REFERENCES provider_catalog_snapshots(catalog_version),
+  captured_at_ms INTEGER NOT NULL,
+  payload_json TEXT NOT NULL,
+  UNIQUE(billing_template_id, catalog_version, snapshot_id)
+);
+CREATE INDEX billing_template_snapshots_template_time
+  ON billing_template_snapshots(billing_template_id, captured_at_ms);
+
+CREATE TABLE outcome_measurements (
+  measurement_id TEXT PRIMARY KEY,
+  fact_set_fingerprint TEXT NOT NULL,
+  algorithm_version TEXT NOT NULL,
+  basis TEXT NOT NULL,
+  amount_minor INTEGER,
+  currency TEXT,
+  measured_at_ms INTEGER NOT NULL,
+  payload_json TEXT NOT NULL,
+  CHECK ((amount_minor IS NULL AND currency IS NULL) OR (amount_minor IS NOT NULL AND currency IS NOT NULL))
+);
+
+CREATE TABLE savings_records (
+  savings_id TEXT PRIMARY KEY,
+  measurement_id TEXT NOT NULL REFERENCES outcome_measurements(measurement_id),
+  billing_template_snapshot_id TEXT REFERENCES billing_template_snapshots(snapshot_id),
+  pricing_version TEXT REFERENCES pricing_snapshots(pricing_version),
+  amount_minor INTEGER NOT NULL,
+  currency TEXT NOT NULL,
+  savings_basis TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  CHECK (savings_basis IN ('estimated', 'actual', 'realized'))
+);
+CREATE INDEX savings_records_measurement ON savings_records(measurement_id);
+
+CREATE TRIGGER usage_facts_billing_template_insert_fk
+BEFORE INSERT ON usage_facts
+WHEN NEW.billing_template_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM billing_templates WHERE billing_template_id = NEW.billing_template_id)
+BEGIN
+  SELECT RAISE(ABORT, 'usage_facts.billing_template_id does not reference billing_templates');
+END;
+CREATE TRIGGER usage_facts_billing_template_update_fk
+BEFORE UPDATE OF billing_template_id ON usage_facts
+WHEN NEW.billing_template_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM billing_templates WHERE billing_template_id = NEW.billing_template_id)
+BEGIN
+  SELECT RAISE(ABORT, 'usage_facts.billing_template_id does not reference billing_templates');
+END;
+"#;
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -549,11 +634,34 @@ impl AuthorityDb {
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
+            Some(3) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V4_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute(
+                            "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
+                            rusqlite::params![SCHEMA_VERSION.to_string()],
+                        )?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(error.into());
+                    }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(2) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 let migration = conn.execute_batch(SCHEMA_V3_ADD);
                 match migration {
                     Ok(()) => {
+                        if let Err(error) = conn.execute_batch(SCHEMA_V4_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
                         conn.execute(
                             "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
                             rusqlite::params![SCHEMA_VERSION.to_string()],
@@ -574,6 +682,10 @@ impl AuthorityDb {
                 match migration {
                     Ok(()) => {
                         if let Err(error) = conn.execute_batch(SCHEMA_V3_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V4_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -618,6 +730,7 @@ impl AuthorityDb {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 conn.execute_batch(SCHEMA_V1)?;
                 conn.execute_batch(SCHEMA_V3_ADD)?;
+                conn.execute_batch(SCHEMA_V4_ADD)?;
                 // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
                 conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
@@ -848,6 +961,134 @@ impl AuthorityDb {
             .query_row("SELECT COUNT(*) FROM pricing_snapshots", [], |r| r.get(0))?)
     }
 
+    // ─────── v0.12：billing catalog/template snapshots ────────────────────
+
+    /// 写入 catalog 快照。`catalog_version` 和 `snapshot_id` 都是不可变身份；
+    /// 相同 version 的不同 payload 是调用方错误，不能静默改写历史计费解释。
+    pub fn provider_catalog_snapshot_put(
+        &self,
+        catalog_version: &str,
+        snapshot_id: &str,
+        source_kind: &str,
+        payload_json: &str,
+        captured_at_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if catalog_version.is_empty() || snapshot_id.is_empty() || source_kind.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "catalog_version, snapshot_id, and source_kind are required".to_string(),
+            )
+            .into());
+        }
+        let existing: Option<(String, String)> = self.conn.query_row(
+            "SELECT snapshot_id, payload_json FROM provider_catalog_snapshots WHERE catalog_version = ?1",
+            rusqlite::params![catalog_version],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        if let Some((existing_id, existing_payload)) = existing {
+            if existing_id == snapshot_id && existing_payload == payload_json {
+                return Ok(false);
+            }
+            return Err(rusqlite::Error::InvalidParameterName(
+                "catalog_version already names a different immutable snapshot".to_string(),
+            ).into());
+        }
+        self.conn.execute(
+            "INSERT INTO provider_catalog_snapshots(
+               catalog_version, captured_at_ms, source_kind, snapshot_id, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![catalog_version, captured_at_ms, source_kind, snapshot_id, payload_json],
+        )?;
+        Ok(true)
+    }
+
+    /// 落入一个模板定义。更新合同必须使用新的 template id；这里不接受覆盖。
+    #[allow(clippy::too_many_arguments)]
+    pub fn billing_template_put(
+        &self,
+        billing_template_id: &str,
+        provider_id: &str,
+        account_ref: Option<&str>,
+        template_kind: &str,
+        pricing_source: &str,
+        effective_from_ms: i64,
+        effective_to_ms: Option<i64>,
+        created_at_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if billing_template_id.is_empty() || provider_id.is_empty()
+            || BillingTemplateKind::parse(template_kind).is_none()
+            || PricingSource::parse(pricing_source).is_none()
+            || effective_to_ms.is_some_and(|end| end < effective_from_ms) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid immutable billing template".to_string(),
+            ).into());
+        }
+        let existing: Option<BillingTemplateRow> = self.conn.query_row(
+            "SELECT provider_id, account_ref, template_kind, pricing_source, effective_from_ms, effective_to_ms
+             FROM billing_templates WHERE billing_template_id = ?1",
+            rusqlite::params![billing_template_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        ).optional()?;
+        if let Some(existing) = existing {
+            let expected = (provider_id.to_string(), account_ref.map(str::to_string),
+                template_kind.to_string(), pricing_source.to_string(), effective_from_ms, effective_to_ms);
+            if existing == expected {
+                return Ok(false);
+            }
+            return Err(rusqlite::Error::InvalidParameterName(
+                "billing_template_id already names a different immutable template".to_string(),
+            ).into());
+        }
+        let changed = self.conn.execute(
+            "INSERT INTO billing_templates(
+               billing_template_id, provider_id, account_ref, template_kind, pricing_source,
+               effective_from_ms, effective_to_ms, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(billing_template_id) DO NOTHING",
+            rusqlite::params![billing_template_id, provider_id, account_ref, template_kind,
+                pricing_source, effective_from_ms, effective_to_ms, created_at_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// 保存模板在一个 catalog 版本下的冻结形态，供历史金额重放使用。
+    pub fn billing_template_snapshot_put(
+        &self,
+        snapshot_id: &str,
+        billing_template_id: &str,
+        catalog_version: Option<&str>,
+        payload_json: &str,
+        captured_at_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if snapshot_id.is_empty() || billing_template_id.is_empty() || payload_json.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "template snapshot id, template id, and payload are required".to_string(),
+            ).into());
+        }
+        let existing: Option<(String, Option<String>, String)> = self.conn.query_row(
+            "SELECT billing_template_id, catalog_version, payload_json
+             FROM billing_template_snapshots WHERE snapshot_id = ?1",
+            rusqlite::params![snapshot_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).optional()?;
+        if let Some(existing) = existing {
+            let expected = (billing_template_id.to_string(), catalog_version.map(str::to_string), payload_json.to_string());
+            if existing == expected {
+                return Ok(false);
+            }
+            return Err(rusqlite::Error::InvalidParameterName(
+                "snapshot_id already names a different immutable template snapshot".to_string(),
+            ).into());
+        }
+        let changed = self.conn.execute(
+            "INSERT INTO billing_template_snapshots(
+               snapshot_id, billing_template_id, catalog_version, captured_at_ms, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(snapshot_id) DO NOTHING",
+            rusqlite::params![snapshot_id, billing_template_id, catalog_version, captured_at_ms, payload_json],
+        )?;
+        Ok(changed > 0)
+    }
+
     // ─────── v0.9.1 Phase 2.8：host_bills（spec §5.3 显式管理 API）───────
     // 宿主自身账单（WorkBuddy 积分、订阅月费、中转对账单…）——**不是**从我们
     // 的价卡派生，由用户显式录入，更新必须验证币种/账期/金额范围（§5.3）。
@@ -1046,6 +1287,11 @@ mod tests {
                 "route_evidence",
                 "issue_instances",
                 "issue_status_transitions",
+                "provider_catalog_snapshots",
+                "billing_templates",
+                "billing_template_snapshots",
+                "outcome_measurements",
+                "savings_records",
             ] {
                 assert!(tables.iter().any(|x| x == t), "缺表 {t}: {tables:?}");
             }
@@ -1061,7 +1307,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(ver, "3");
+        assert_eq!(ver, "4");
         let _ = std::fs::remove_file(&db);
     }
 
@@ -1100,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_database_migrates_to_schema_v3() {
+    fn v1_database_migrates_to_schema_v4() {
         let db = tmp_db("v1-to-v2");
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
@@ -1124,7 +1370,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
         let exists: i64 = upgraded
             .conn()
             .query_row(
@@ -1138,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_database_migrates_to_schema_v3_and_preserves_facts() {
+    fn v2_database_migrates_to_schema_v4_and_preserves_facts() {
         let db = tmp_db("v2-to-v3");
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
@@ -1168,7 +1414,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
         for column in [
             "provider_raw",
             "billing_source",
@@ -1178,6 +1424,7 @@ mod tests {
             "normalization_version",
             "route_evidence_id",
             "attribution_version",
+            "billing_template_id",
         ] {
             let found: i64 = upgraded
                 .conn()
@@ -1187,7 +1434,7 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(found, 1, "missing v3 column {column}");
+            assert_eq!(found, 1, "missing migrated column {column}");
         }
         let preserved: (i64, i64, i64, i64, i64) = upgraded
             .conn()
@@ -1202,6 +1449,81 @@ mod tests {
             )
             .unwrap();
         assert_eq!(preserved, (1, 11, 22, 33, 44));
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v3_database_migrates_to_v4_without_assigning_historical_templates() {
+        let db = tmp_db("v3-to-v4");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.execute_batch(SCHEMA_V3_ADD).unwrap();
+        conn.execute_batch("INSERT INTO schema_meta(key, value) VALUES('schema_version', '3');")
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES('migration-fixture', 1, 'migration', 'succeeded', 3);
+             INSERT INTO usage_facts(
+               fact_id, host, machine_namespace, native_session_id, source_event_id,
+               observation_kind, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES('fact-v3', 'codex', 'ns', 'session', 'event', 'assistant-usage',
+                    88, 'migration-fixture', 1, 1);",
+        ).unwrap();
+        conn.execute_batch("COMMIT;").unwrap();
+        drop(conn);
+
+        let upgraded = AuthorityDb::open(&db, 2_000).unwrap();
+        let template_id: Option<String> = upgraded.conn().query_row(
+            "SELECT billing_template_id FROM usage_facts WHERE fact_id = 'fact-v3'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(template_id, None);
+        for table in ["provider_catalog_snapshots", "billing_templates", "billing_template_snapshots",
+            "outcome_measurements", "savings_records"] {
+            let found: i64 = upgraded.conn().query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(found, 1, "missing v4 table {table}");
+        }
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_catalog_and_template_snapshots_are_immutable_and_referential() {
+        let db = tmp_db("billing-snapshots");
+        let authority = AuthorityDb::open(&db, 1_000).unwrap();
+        assert!(authority.provider_catalog_snapshot_put(
+            "catalog-1", "bc1-abc", "official", "{\"providers\":[]}", 1_000,
+        ).unwrap());
+        assert!(!authority.provider_catalog_snapshot_put(
+            "catalog-1", "bc1-abc", "official", "{\"providers\":[]}", 2_000,
+        ).unwrap());
+        assert!(authority.provider_catalog_snapshot_put(
+            "catalog-1", "bc1-other", "official", "{}", 2_000,
+        ).is_err());
+        assert!(authority.billing_template_put(
+            "template-1", "openai", Some("acct-hash"), "metered_api", "official", 0, None, 1_000,
+        ).unwrap());
+        assert!(!authority.billing_template_put(
+            "template-1", "openai", Some("acct-hash"), "metered_api", "official", 0, None, 2_000,
+        ).unwrap());
+        assert!(authority.billing_template_put(
+            "template-1", "openai", Some("acct-hash"), "custom", "official", 0, None, 2_000,
+        ).is_err());
+        assert!(authority.billing_template_put(
+            "template-invalid", "openai", None, "subscription", "official", 0, None, 1_000,
+        ).is_err());
+        assert!(authority.billing_template_snapshot_put(
+            "bts1-abc", "template-1", Some("catalog-1"), "{\"kind\":\"metered_api\"}", 1_000,
+        ).unwrap());
+        assert!(authority.billing_template_snapshot_put(
+            "bts1-abc", "template-1", Some("catalog-1"), "{}", 2_000,
+        ).is_err());
+        assert!(authority.billing_template_snapshot_put(
+            "bad", "missing", Some("catalog-1"), "{}", 1_000,
+        ).is_err());
         let _ = std::fs::remove_file(&db);
     }
 
