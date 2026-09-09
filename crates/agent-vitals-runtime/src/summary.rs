@@ -917,6 +917,30 @@ fn codex_provider_amounts_from_sql(
     out
 }
 
+fn codex_host_amount_provider_safe(
+    db: &Option<agent_vitals_data::authority::AuthorityDb>,
+    bounds: Option<(i64, i64)>,
+    by_hour_model: &serde_json::Value,
+    day: Option<&str>,
+    cards: &PricingCards,
+) -> (HostAmount, HostTokens) {
+    let mixed = bounds.and_then(|(start, end)| db.as_ref().and_then(|db| {
+        agent_vitals_data::authority_query::codex_by_hour_provider_model(db.conn(), start, end).ok()
+    })).map(|m| m.keys().any(|p| p != "openai")).unwrap_or(false);
+    let (mut amount, tokens) = codex_host_amount_with_tokens_from_hours(
+        by_hour_model, &serde_json::Value::Null, &serde_json::Value::Null, day, cards,
+    );
+    if mixed {
+        amount.amounts_by_basis.clear();
+        amount.has_unresolved = true;
+        amount.freshness = day.map(day_freshness).unwrap_or(Freshness {
+            state: FreshnessState::Partial,
+            last_observed_at: Some("sql-facts".to_string()),
+        });
+    }
+    (amount, tokens)
+}
+
 /// DSH 窗口（`days` map 或单日值）的 token 计量：DSH 四桶词表直读
 /// （`uncached_input_tokens` 词表，与 claude/codex 不同——见 fixtures/v09
 /// 的 _doc）。`window` 是月份前缀或完整日期。
@@ -1561,12 +1585,8 @@ impl SummaryRepository for SqlSummaryRepository {
             "dsh".to_string(),
             dsh_host_amount(dsh_cost.clone(), latest_day.as_deref()),
         );
-        let (codex_amount, codex_tk) = codex_host_amount_with_tokens_from_hours(
-            &by_hour_model,
-            &serde_json::Value::Null,
-            &serde_json::Value::Null,
-            None,
-            &cards,
+        let (codex_amount, codex_tk) = codex_host_amount_provider_safe(
+            &db, bounds, &by_hour_model, None, &cards,
         );
         by_host.insert("codex".to_string(), codex_amount);
         let (claude_amount, claude_tk) =
@@ -1641,12 +1661,8 @@ impl SummaryRepository for SqlSummaryRepository {
                 day_value.as_ref().map(|_| query.date.as_str()),
             ),
         );
-        let (codex_amount, codex_tk) = codex_host_amount_with_tokens_from_hours(
-            &by_hour_model,
-            &serde_json::Value::Null,
-            &serde_json::Value::Null,
-            Some(&query.date),
-            &cards,
+        let (codex_amount, codex_tk) = codex_host_amount_provider_safe(
+            &db, bounds, &by_hour_model, Some(&query.date), &cards,
         );
         by_host.insert("codex".to_string(), codex_amount);
         let (claude_amount, claude_tk) =
@@ -2629,12 +2645,7 @@ mod tests {
                 sql_daily.contract_violations()
             );
             let codex = &sql_daily.by_host["codex"];
-            assert!(
-                codex
-                    .amounts_by_basis
-                    .contains_key(&BillingBasis::ApiEquivalent),
-                "{codex:?}"
-            );
+            assert!(codex.has_unresolved, "missing provider evidence must not be priced as OpenAI: {codex:?}");
             assert!(sql_daily.tokens_by_host["codex"].total > 0);
         });
     }
