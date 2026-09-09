@@ -208,14 +208,22 @@ v0.11.0 发布前必须：
 7. stale host、invalid facts 或 unpriced tokens 未在总览中可见。
 8. 发布物版本不是 `0.11.0`，或未能从干净构建复现。
 
-## 10. 当前结论
+## 10. 当前实现状态（2026-09-10）
 
-v0.11.0 当前属于“核心归因已完成、产品成本链路未完全收口”，不能标记为最终完成。
+已完成并有测试/构建证据的项目：
 
-必须优先完成的顺序：
+1. provider、billing 和 unknown 路由降级规则已进入 SQL authority。
+2. 两份兼容源价表已在运行时合并为带指纹的 `pricing_snapshots`，历史快照保持不可变。
+3. MCP `sessions_search/session_detail.cost_minor`、CLI/Tauri 共享 domain metered estimate；Codex unknown 使用 USD 原厂卡，Claude 使用原生 token 字段。
+4. `data_status` 报告 pricing snapshot、stale、unresolved token、unpriced token，并由控制台显示质量告警。
+5. App 版本、bundle、安装运行和验证脚本已对齐 `0.11.0`；当前安装路径为 `/Applications/agent-vitals.app`。
+6. workspace Rust、desktop Rust、Python、golden、Clippy 和 JS 语法检查通过。
 
-1. 统一两份价格配置和成本引擎。
-2. 将 MCP `cost_minor` 迁移到统一引擎。
-3. 补 GLM 原厂按量价格和价格快照更新机制。
-4. 让控制台显示估算/未计价/数据质量告警。
-5. 补三消费面 parity、版本号、tag 和最终安装包验收。
+仍不得宣称“所有硬性验收项完成”的项目：
+
+1. 尚未实现从官方价格页/API 自动抓取、变更审核和失败回退的联网同步器；当前快照来源仍为 `embedded-assets`。
+2. GLM 原厂 pay-as-you-go 价卡尚未取得可复核的官方输入/缓存/输出费率，因此 GLM unknown 必须继续显示 `unpriced/no-price-card`，不得借用其他模型价格。
+3. 尚未创建 `v0.11.0` tag；发布 tag 应在上述价格同步和 GLM 价卡决策完成后创建。
+4. 真机中的 DSH stale 和既有 `invalid_fact` 必须继续在总览中显示为 partial/quality warning，不能以安装包成功掩盖。
+
+因此，当前准确结论是：**v0.11.0 核心实现与发布候选包已完成，但价格自动同步、GLM 原厂价卡和正式 tag 仍是发布阻断项。**
