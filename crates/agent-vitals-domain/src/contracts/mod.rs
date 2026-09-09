@@ -4,6 +4,7 @@
 //! interpret a host wire format and must remain free of I/O.
 
 pub mod evidence;
+pub mod billing;
 pub mod host_capability;
 pub mod r2a;
 pub mod source_identity;
