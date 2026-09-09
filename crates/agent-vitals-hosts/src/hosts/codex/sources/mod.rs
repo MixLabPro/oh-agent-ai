@@ -30,6 +30,7 @@ use agent_vitals_domain::util::split_lines;
 // v0.8 Phase E7.6：Skill 配置 I/O（app-server 子进程探测）与本文件的会话 I/O
 // 是两条独立证据线，分文件放。
 pub mod skills;
+pub mod route_evidence;
 
 // v0.9 Stage A emitter 归位（R4 §5.2）：UsageFact emitter 从二进制
 // apps/cli/src/agent/ 迁来——读文件 → 读内存，仍属 I/O 层。

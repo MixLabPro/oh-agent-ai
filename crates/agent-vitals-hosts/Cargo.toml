@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 agent-vitals-domain = { path = "../agent-vitals-domain" }
+agent-vitals-provider = { path = "../agent-vitals-provider" }
 regex = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 vitals-core = { path = "../vitals-core" }

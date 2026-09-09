@@ -135,6 +135,21 @@ def _resolve_native_session_id(path, items) -> str:
     return Path(path).stem
 
 
+def _resolve_model_provider(items) -> Optional[str]:
+    """Return the session-native Codex provider marker, if present."""
+    provider = None
+    for _offset, item in items:
+        if item.get("type") == "session_meta":
+            payload = item.get("payload")
+            if isinstance(payload, dict) and isinstance(payload.get("model_provider"), str):
+                provider = payload["model_provider"]
+        payload = item.get("payload")
+        settings = payload.get("thread_settings") if isinstance(payload, dict) else None
+        if isinstance(settings, dict) and isinstance(settings.get("model_provider_id"), str):
+            provider = settings["model_provider_id"]
+    return provider
+
+
 def _derived_event_id(rollout_source_id: str, byte_offset: int, rec: dict) -> str:
     """spec §3.3：`rollout_source_id(:path.stem) + byte_offset + fnv1a64(canonical_row)`。
 
@@ -159,6 +174,9 @@ def _consumed_to_usage_fact(
     native_session_id: str,
     machine_namespace: str,
     source_profile: str,
+    model_provider: Optional[str] = None,
+    route_endpoint_host: Optional[str] = None,
+    route_evidence_basis: str = "missing",
 ) -> Optional[dict]:
     """Consumed 事件 → UsageFact dict（`build_usage_fact` 输出）。None → builder
     防御性拒绝（`bad_id` 哨兵——builder 是唯一校验方，不许绕开它自证身份合法）。
@@ -169,6 +187,20 @@ def _consumed_to_usage_fact(
     ⊆ output，**绝不叠加** facts[4]——叠加即双计）。
     """
     facts = outcome.facts  # type: ignore[union-attr]  # Consumed 才走到这里
+    endpoint = (route_endpoint_host or "").lower()
+    normalized_route = "cogfoundry.ai" if "router.cogfoundry.ai" in endpoint else route_endpoint_host
+    if model_provider == "openai" and route_endpoint_host is not None:
+        provider_id, billing_mode, pricing_basis, unresolved = "openai", "subscription", "session-provider", False
+        evidence_basis = "session-native"
+    elif model_provider == "custom" or model_provider is None:
+        provider_id = normalized_route or model_provider
+        billing_mode = "metered" if provider_id or model_provider == "custom" else "unknown"
+        unresolved = True
+        pricing_basis = "metered_estimate"
+        evidence_basis = route_evidence_basis
+    else:
+        provider_id, billing_mode, pricing_basis, unresolved = model_provider, "metered", "route-observed", False
+        evidence_basis = route_evidence_basis
     fields = {
         "machine_namespace": machine_namespace,
         "host": HOST,
@@ -191,6 +223,14 @@ def _consumed_to_usage_fact(
         # turn_context 游标值，token_count 自身不带 model）。没有 resolver 就不填
         # model_id/provider_id/normalization_version（Stage 1 同款，不硬编码）。
         "model_raw": outcome.model,
+        "provider_raw": model_provider,
+        "provider_id": provider_id,
+        "billing_source": provider_id,
+        "billing_mode": billing_mode,
+        "pricing_basis": pricing_basis,
+        "evidence_basis": evidence_basis,
+        "normalization_version": "provider-v0.11",
+        "attribution_version": "provider-v0.11",
         "uncached_input_tokens": facts[0],
         "cache_read_tokens": facts[2],
         "cache_write_tokens": facts[3],
@@ -207,6 +247,8 @@ def codex_rollouts_to_usage_facts(
     *,
     machine_namespace: str,
     source_profile: str,
+    route_endpoint_host: Optional[str] = None,
+    route_evidence_basis: str = "missing",
 ) -> UsageFactEmitResult:
     """整批 rollout 文件 → `(facts, attempts, coverage, malformed)`。
 
@@ -238,6 +280,7 @@ def codex_rollouts_to_usage_facts(
             malformed += 1
             continue
         native_session_id = _resolve_native_session_id(p, items)
+        model_provider = _resolve_model_provider(items)
         state = CodexFoldState()
         for offset, item in items:
             outcome = state.apply(item)
@@ -270,6 +313,9 @@ def codex_rollouts_to_usage_facts(
                 native_session_id=native_session_id,
                 machine_namespace=machine_namespace,
                 source_profile=source_profile,
+                model_provider=model_provider,
+                route_endpoint_host=route_endpoint_host,
+                route_evidence_basis=route_evidence_basis,
             )
             if fact is None:
                 bad_id += 1

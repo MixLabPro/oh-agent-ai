@@ -33,6 +33,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use agent_vitals_provider::{resolve_billing_attribution, RouteEvidence};
 use serde_json::{json, Map, Value};
 
 use crate::codex_usage::{CodexFoldState, CodexTokenOutcome};
@@ -197,6 +198,8 @@ fn consumed_to_usage_fact(
     native_session_id: &str,
     machine_namespace: &str,
     source_profile: &str,
+    model_provider: Option<&str>,
+    route: Option<&RouteEvidence>,
 ) -> Option<Value> {
     let mut fields = Map::new();
     fields.insert("machine_namespace".into(), json!(machine_namespace));
@@ -223,10 +226,22 @@ fn consumed_to_usage_fact(
     // last_token_usage 是 per-request 增量；复读快照已在 §3.5.2 消解，绝不把
     // 累计 total_token_usage 当 delta 发。
     fields.insert("source_usage_semantics".into(), json!("delta"));
-    // provider/model 归属：只留原始证据 model_raw（token_count 归到的 turn_context
-    // 游标值）。没有 resolver 就不填 model_id/provider_id/normalization_version
-    // （Stage 1 同款，不硬编码）。
+    let attribution = resolve_billing_attribution(model_provider, route);
     fields.insert("model_raw".into(), json!(model));
+    fields.insert("provider_raw".into(), json!(attribution.provider_raw));
+    fields.insert("provider_id".into(), json!(attribution.provider_id));
+    fields.insert("billing_source".into(), json!(attribution.provider_id));
+    fields.insert(
+        "billing_mode".into(),
+        json!(attribution.billing_mode.as_str()),
+    );
+    fields.insert("pricing_basis".into(), json!(attribution.pricing_basis));
+    fields.insert(
+        "evidence_basis".into(),
+        json!(attribution.evidence_basis.as_str()),
+    );
+    fields.insert("normalization_version".into(), json!("provider-v0.11"));
+    fields.insert("attribution_version".into(), json!("provider-v0.11"));
     fields.insert("uncached_input_tokens".into(), json!(facts[0]));
     fields.insert("cache_read_tokens".into(), json!(facts[2]));
     fields.insert("cache_write_tokens".into(), json!(facts[3]));
@@ -253,6 +268,16 @@ pub fn codex_rollouts_to_usage_facts(
     machine_namespace: &str,
     source_profile: &str,
 ) -> Result<UsageFactEmitResult, String> {
+    codex_rollouts_to_usage_facts_with_route(paths, machine_namespace, source_profile, None)
+}
+
+/// Variant used by Runtime when a current Codex route hint is available.
+pub fn codex_rollouts_to_usage_facts_with_route(
+    paths: &[PathBuf],
+    machine_namespace: &str,
+    source_profile: &str,
+    route: Option<&RouteEvidence>,
+) -> Result<UsageFactEmitResult, String> {
     let mut facts: Vec<Value> = Vec::new();
     let mut attempts: HashMap<String, i64> = HashMap::new();
     attempts.insert(SKIP.to_string(), 0);
@@ -273,6 +298,22 @@ pub fn codex_rollouts_to_usage_facts(
             continue;
         }
         let native_session_id = resolve_native_session_id(p, &items);
+        let model_provider = items.iter().find_map(|item| {
+            if item.1.get("type").and_then(Value::as_str) == Some("session_meta") {
+                item.1
+                    .get("payload")
+                    .and_then(|v| v.get("model_provider"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            } else {
+                item.1
+                    .get("payload")
+                    .and_then(|v| v.get("thread_settings"))
+                    .and_then(|v| v.get("model_provider_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }
+        });
         let stem = p
             .file_stem()
             .and_then(|s| s.to_str())
@@ -322,6 +363,8 @@ pub fn codex_rollouts_to_usage_facts(
                         &native_session_id,
                         machine_namespace,
                         source_profile,
+                        model_provider.as_deref(),
+                        route,
                     ) {
                         Some(fact) => facts.push(fact),
                         None => {
@@ -551,6 +594,34 @@ mod tests {
             .unwrap_or("");
         assert_ne!(fa, fb);
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn custom_session_with_cogfoundry_route_emits_metered_attribution() {
+        let tmp = temp_dir();
+        let p = tmp.join("rollout-cog.jsonl");
+        let mut lines = rollout_lines();
+        lines[0] = line(json!({
+            "type": "session_meta",
+            "payload": {"session_id": "ses-cog", "model_provider": "custom"}
+        }));
+        std::fs::write(&p, lines.join("")).unwrap();
+        let route = RouteEvidence {
+            provider_raw: Some("custom".into()),
+            endpoint_host: Some("router.cogfoundry.ai".into()),
+            evidence_basis: agent_vitals_provider::EvidenceBasis::ConfigCurrent,
+        };
+        let result = codex_rollouts_to_usage_facts_with_route(
+            std::slice::from_ref(&p),
+            "ns-test",
+            "default",
+            Some(&route),
+        )
+        .unwrap();
+        assert_eq!(result.facts[0]["provider_id"], "cogfoundry.ai");
+        assert_eq!(result.facts[0]["billing_mode"], "metered");
+        assert_eq!(result.facts[0]["pricing_basis"], "metered_estimate");
+        assert_eq!(result.facts[0]["evidence_basis"], "config-current");
     }
 
     #[test]

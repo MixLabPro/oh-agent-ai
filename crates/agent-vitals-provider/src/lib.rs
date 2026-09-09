@@ -56,6 +56,16 @@ pub enum BillingMode {
     Unknown,
 }
 
+impl BillingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Subscription => "subscription",
+            Self::Metered => "metered",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BillingAttribution {
     pub provider_id: Option<String>,

@@ -306,6 +306,7 @@ pub(crate) fn write_flat_facts_with_sources(
     machine_namespace: &str,
     sources: &[(std::path::PathBuf, (u64, u64))],
     facts: &[Value],
+    route_evidence: Option<&agent_vitals_provider::RouteEvidence>,
     runtime_snapshot: Option<RuntimeSnapshotWrite<'_>>,
     now: i64,
 ) -> Result<SqlSyncOutcome, String> {
@@ -316,6 +317,33 @@ pub(crate) fn write_flat_facts_with_sources(
     let mut outcome = SqlSyncOutcome::default();
     let result: Result<(), AuthorityError> = db.with_immediate_txn(|conn| {
         let writer = SqlFactWriter::new(conn, &run_id, now)?;
+        if let Some(route) = route_evidence {
+            let evidence_key = format!(
+                "codex|{}|{}|{}",
+                machine_namespace,
+                route.provider_raw.as_deref().unwrap_or(""),
+                route.endpoint_host.as_deref().unwrap_or("")
+            );
+            let evidence_id = format!(
+                "route:{}",
+                agent_vitals_domain::source_identity::fnv1a64_hex(evidence_key.as_bytes())
+            );
+            conn.execute(
+                "INSERT OR IGNORE INTO route_evidence(
+                   evidence_id, host, machine_namespace, provider_raw, endpoint_host,
+                   evidence_basis, observed_at_ms, ingested_run_id)
+                 VALUES(?1, 'codex', ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    evidence_id,
+                    machine_namespace,
+                    route.provider_raw,
+                    route.endpoint_host,
+                    route.evidence_basis.as_str(),
+                    now,
+                    run_id,
+                ],
+            )?;
+        }
         for (path, (size_bytes, mtime_ns)) in sources {
             writer.upsert_source_file(host, path, *size_bytes, *mtime_ns, None, PARSER_VERSION)?;
             outcome.files_synced += 1;

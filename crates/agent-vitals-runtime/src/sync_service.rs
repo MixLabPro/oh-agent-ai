@@ -119,16 +119,24 @@ fn sync_host(
     let mut facts: Vec<Value> = Vec::new();
     let mut runtime_snapshot: Option<Value> = None;
     let mut synced_sources: Vec<(PathBuf, (u64, u64))> = Vec::new();
+    let current_route = (host == "codex")
+        .then(|| {
+            agent_vitals_hosts::codex_session::route_evidence::current_route_evidence(
+                &crate::summary::codex_home(),
+            )
+        })
+        .flatten();
     // codex 的 emitter 跨文件 `seen` 去重只在**单次调用内**成立（live/
     // archived 同 stem 双收靠它）——差量集必须一批喂进去，逐文件调用会把
     // 去重丢给 ingest 层（账不错但 duplicate 通胀 + 双倍 emit；tick 常驻后
     // 每 5 分钟付一次，审查 P2-1）。claude/dsh 是单文件语义，逐文件隔离错误。
     let codex_dirty: Vec<PathBuf> = dirty.iter().map(|(p, _)| p.clone()).collect();
     if host == "codex" && !codex_dirty.is_empty() {
-        match agent_vitals_hosts::codex_usage_fact::codex_rollouts_to_usage_facts(
+        match agent_vitals_hosts::codex_usage_fact::codex_rollouts_to_usage_facts_with_route(
             &codex_dirty,
             ns,
             "default",
+            current_route.as_ref(),
         ) {
             Ok(r) => {
                 runtime_snapshot = r.quota_snapshot;
@@ -139,6 +147,23 @@ fn sync_host(
                 // 批量 Err = 任一文件读失败（read 层错误）——全部重试，
                 // 错误如实上呈。
                 report.errors.push(format!("codex batch: {e}"));
+            }
+        }
+    }
+    if let Some(route) = current_route.as_ref() {
+        let route_key = format!(
+            "codex|{}|{}|{}",
+            ns,
+            route.provider_raw.as_deref().unwrap_or(""),
+            route.endpoint_host.as_deref().unwrap_or("")
+        );
+        let evidence_id = format!(
+            "route:{}",
+            agent_vitals_domain::source_identity::fnv1a64_hex(route_key.as_bytes())
+        );
+        for fact in &mut facts {
+            if let Some(obj) = fact.as_object_mut() {
+                obj.insert("route_evidence_id".into(), json!(evidence_id));
             }
         }
     }
@@ -184,6 +209,7 @@ fn sync_host(
             ns,
             &synced_sources,
             &facts,
+            current_route.as_ref(),
             snapshot_write,
             now,
         )?;
