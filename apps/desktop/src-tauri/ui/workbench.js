@@ -2922,7 +2922,7 @@ function renderDetailMeta(env, data) {
   return sec;
 }
 
-// ---------- Findings（跨会话汇总） ----------
+// ---------- Issues（跨会话汇总；保留旧 findings IPC 兼容层） ----------
 
 // finding.time 是 epoch ms（DSH 有、Codex 恒 null）。null → —，诚实不臆造。
 function fmtFindingTime(ms) {
@@ -3116,7 +3116,7 @@ function renderFindingsDetail() {
   body.appendChild(frag);
 }
 
-// 从 Findings 明细跳转到该会话详情：切到会话 tab 的详情视图，用 finding 里能
+// 从 Issues 明细跳转到该会话详情：切到会话 tab 的详情视图，用 issue 里能
 // 拿到的字段（session_key/title/model/host_kind）拼一个最小 list item 交给
 // showSession。成本/token/findings 三个 summary 卡片会诚实地显示「—」（finding
 // 不含这些），完整数字在下方报告分区里。

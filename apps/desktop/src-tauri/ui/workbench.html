@@ -13,7 +13,7 @@
       <button class="tab" data-tab="calendar">Token 日历</button>
       <button class="tab" data-tab="sessions">会话</button>
       <button class="tab" data-tab="traces">Traces</button>
-      <button class="tab" data-tab="findings">Findings</button>
+      <button class="tab" data-tab="findings">Issues</button>
       <button class="tab" data-tab="sources">数据源</button>
     </nav>
     <span class="wb-head-right">
@@ -243,7 +243,7 @@
       <div id="trace-empty" class="empty">输入 Sessions 列表中的会话引用以渲染单会话轨迹（节点图与事件按 (scope, ordinal) 排序；缺失信息计数呈现，不补造）</div>
     </section>
 
-    <!-- ============ Findings ============ -->
+    <!-- ============ Issues（兼容旧 findings IPC/DOM 标识） ============ -->
     <section id="tab-findings" class="tabpane">
       <div class="find-toolbar">
         <span class="muted" id="find-summary"></span>
@@ -255,7 +255,7 @@
 
       <div class="cards cards-4">
         <div class="stat">
-          <div class="label">总发现</div>
+          <div class="label">总问题</div>
           <div class="amount" id="find-total">—</div>
           <div class="sub" id="find-total-sub"></div>
         </div>
