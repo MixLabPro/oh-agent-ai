@@ -348,6 +348,18 @@ pub fn collect_report(conn: &Connection, db_existed: bool, enabled: bool) -> Val
     } else if enabled && facts == 0 {
         hints.push(json!("sql_authority_enabled=true but the authority DB has zero facts — run `agent-vitals sync-facts`; do not read zero as 'no spend'"));
         "critical"
+    } else if pricing_stale && facts > 0 {
+        hints.push(json!(format!(
+            "pricing snapshot is stale or unavailable — {} unresolved tokens and {} unpriced tokens require review",
+            unresolved_tokens, unpriced_tokens
+        )));
+        "warn"
+    } else if unresolved_tokens > 0 || unpriced_tokens > 0 {
+        hints.push(json!(format!(
+            "cost attribution is unresolved: {} tokens have uncertain provider evidence and {} tokens have no matching price card",
+            unresolved_tokens, unpriced_tokens
+        )));
+        "warn"
     } else if last_run_bad {
         hints.push(json!("most recent sync run did not succeed — check `error_code` above and re-run `agent-vitals sync-facts`"));
         "warn"
@@ -605,6 +617,7 @@ mod tests {
         let report = collect_report(db.conn(), true, false);
         assert_eq!(report["unresolved_tokens"], 1_000);
         assert_eq!(report["unpriced_tokens"], 1_000);
+        assert_eq!(report["health"], "warn");
 
         let _ = std::fs::remove_dir_all(&home);
     }
