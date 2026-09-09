@@ -125,6 +125,8 @@ has_unresolved    = true
 在 v0.11 数据库兼容范围内，`has_unresolved` 与 `pricing_method` 由统一 summary/read-model
 根据 `billing_mode`、`pricing_basis`、`evidence_basis` 和是否命中价卡派生；不得把派生的
 估算字段回写成事实账单。后续 schema 版本再考虑将其物化到 `usage_facts`。
+当前 summary DTO 同时输出 `evidence_basis`、`pricing_method`、`unresolved_reason`，桌面
+dual-track 视图必须展示这些字段，避免只显示一个无上下文的“未解析”标签。
 
 ## 5. Session log 写入契约
 
