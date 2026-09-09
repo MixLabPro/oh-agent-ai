@@ -266,6 +266,11 @@ pub struct HostAmount {
     /// 不假装声明）。`None` 不代表"没有币种"，代表"本条目未声明单币"。
     pub currency: Option<String>,
     pub has_unresolved: bool,
+    /// Provider route evidence used by the read model. Kept separate from
+    /// `host_id`/billing basis so an estimate is never rendered as a real bill.
+    pub evidence_basis: Option<String>,
+    pub pricing_method: Option<String>,
+    pub unresolved_reason: Option<String>,
     pub freshness: Freshness,
 }
 
@@ -298,6 +303,9 @@ impl HostAmount {
             "summable_total": self.summable_total(),
             "currency": self.currency,
             "has_unresolved": self.has_unresolved,
+            "evidence_basis": self.evidence_basis,
+            "pricing_method": self.pricing_method,
+            "unresolved_reason": self.unresolved_reason,
             "freshness": self.freshness.to_json(),
         })
     }
@@ -602,6 +610,9 @@ mod tests {
             amounts_by_basis,
             currency: None,
             has_unresolved: false,
+            evidence_basis: None,
+            pricing_method: None,
+            unresolved_reason: None,
             freshness: fresh("2026-09-01T00:00:00Z"),
         }
     }
@@ -617,6 +628,9 @@ mod tests {
             amounts_by_basis: BTreeMap::new(),
             currency: None,
             has_unresolved: false,
+            evidence_basis: None,
+            pricing_method: None,
+            unresolved_reason: None,
             freshness: Freshness::unavailable(),
         };
         assert_eq!(empty.summable_total(), 0.0);
@@ -674,6 +688,9 @@ mod tests {
             amounts_by_basis,
             currency: None,
             has_unresolved: false,
+            evidence_basis: None,
+            pricing_method: None,
+            unresolved_reason: None,
             freshness: fresh("2026-09-01T00:00:00Z"),
         };
         assert_eq!(h.summable_total(), 10.0);

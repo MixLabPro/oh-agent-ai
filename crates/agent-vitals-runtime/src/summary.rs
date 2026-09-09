@@ -159,6 +159,9 @@ fn dsh_host_amount(cost: Option<serde_json::Value>, latest_day: Option<&str>) ->
         amounts_by_basis,
         currency: None,
         has_unresolved: false,
+        evidence_basis: Some("session-native".to_string()),
+        pricing_method: Some("provider-card".to_string()),
+        unresolved_reason: None,
         freshness,
     }
 }
@@ -197,6 +200,9 @@ fn codex_host_amount_with_tokens_from_hours(
         amounts_by_basis: BTreeMap::new(),
         currency: None,
         has_unresolved: false,
+        evidence_basis: None,
+        pricing_method: None,
+        unresolved_reason: None,
         freshness: Freshness::unavailable(),
     };
 
@@ -289,6 +295,10 @@ fn codex_host_amount_with_tokens_from_hours(
             amounts_by_basis,
             currency: None,
             has_unresolved: unpriced > 0 || mode_unknown,
+            evidence_basis: None,
+            pricing_method: Some("provider-card".to_string()),
+            unresolved_reason: (unpriced > 0 || mode_unknown)
+                .then(|| "missing-or-unpriced-route-evidence".to_string()),
             freshness,
         },
         tk,
@@ -310,6 +320,9 @@ fn claude_host_amount_with_tokens_from_days(
                 amounts_by_basis: BTreeMap::new(),
                 currency: None,
                 has_unresolved: false,
+                evidence_basis: Some("missing".to_string()),
+                pricing_method: Some("fair-market-fallback".to_string()),
+                unresolved_reason: None,
                 freshness: Freshness::unavailable(),
             },
             HostTokens::default(),
@@ -374,6 +387,10 @@ fn claude_host_amount_with_tokens_from_days(
             amounts_by_basis,
             currency: None,
             has_unresolved: unpriced > 0 || any_partial,
+            evidence_basis: Some("missing".to_string()),
+            pricing_method: Some("fair-market-fallback".to_string()),
+            unresolved_reason: (unpriced > 0 || any_partial)
+                .then(|| "missing-provider-route-evidence".to_string()),
             freshness: latest
                 .map(day_freshness)
                 .unwrap_or_else(Freshness::unavailable),
@@ -462,6 +479,14 @@ impl ProviderAcc {
             amounts_by_basis,
             currency: self.currency,
             has_unresolved: self.unresolved || multi_currency,
+            evidence_basis: if self.unresolved || multi_currency {
+                Some("missing".to_string())
+            } else {
+                Some("session-native".to_string())
+            },
+            pricing_method: Some("fair-market".to_string()),
+            unresolved_reason: (self.unresolved || multi_currency)
+                .then(|| "provider-or-currency-unresolved".to_string()),
             freshness: self
                 .latest
                 .as_deref()
@@ -914,7 +939,17 @@ fn codex_provider_amounts_from_sql(
                     day,
                     cards,
                 );
-                let estimate = priced.summable_total();
+                // The helper deliberately labels its raw model-card result as
+                // ApiEquivalent for the OpenAI path.  Here it is only a fair
+                // market estimate for a custom route, so read the amount
+                // directly and re-home it into the non-summable estimate
+                // bucket instead of using summable_total() (which excludes
+                // ApiEquivalent by design).
+                let estimate = priced
+                    .amounts_by_basis
+                    .get(&BillingBasis::ApiEquivalent)
+                    .copied()
+                    .unwrap_or(0.0);
                 let mut amounts_by_basis = BTreeMap::new();
                 if estimate > 0.0 {
                     amounts_by_basis.insert(BillingBasis::MeteredEstimate, estimate);
@@ -924,6 +959,9 @@ fn codex_provider_amounts_from_sql(
                     amounts_by_basis,
                     currency: Some("USD".to_string()),
                     has_unresolved: true,
+                    evidence_basis: Some("session-native".to_string()),
+                    pricing_method: Some("fair-market-fallback".to_string()),
+                    unresolved_reason: Some("provider-specific-card-unavailable".to_string()),
                     freshness: day.map(day_freshness).unwrap_or_else(|| Freshness { state: FreshnessState::Partial, last_observed_at: Some("sql-facts".to_string()) }),
                 });
             }
@@ -1071,6 +1109,9 @@ fn apply_subscription_fees(
                 amounts_by_basis: BTreeMap::new(),
                 currency: None,
                 has_unresolved: false,
+                evidence_basis: None,
+                pricing_method: None,
+                unresolved_reason: None,
                 freshness: Freshness::unavailable(),
             });
         // 同 provider 重复摊的防线不在循环外而在取值语义：declared_
@@ -1128,6 +1169,9 @@ fn apply_host_bills(
                 amounts_by_basis: BTreeMap::new(),
                 currency: None,
                 has_unresolved: false,
+                evidence_basis: None,
+                pricing_method: None,
+                unresolved_reason: None,
                 freshness: Freshness::unavailable(),
             });
         *entry.amounts_by_basis.entry(basis).or_insert(0.0) += amount_minor as f64 / 100.0;

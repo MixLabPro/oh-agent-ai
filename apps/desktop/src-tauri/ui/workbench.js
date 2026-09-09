@@ -777,6 +777,13 @@ function renderDualTrack(monthly) {
     li.innerHTML = html;
     list.appendChild(li);
   };
+  const attributionChips = (h) => {
+    const out = [];
+    if (h.evidence_basis) out.push(`<span class="chip diagnostic">证据 ${h.evidence_basis}</span>`);
+    if (h.pricing_method) out.push(`<span class="chip">计价 ${h.pricing_method}</span>`);
+    if (h.unresolved_reason) out.push(`<span class="chip hostbilled">原因 ${h.unresolved_reason}</span>`);
+    return out.join(" ");
+  };
   if (subEntries.length) li("", `<span class="dual-track">订阅轨 · 已付费产能</span>`);
   for (const [key, h, label] of subEntries) {
     const fee = h.amounts_by_basis.fixed_subscription || 0;
@@ -809,12 +816,12 @@ function renderDualTrack(monthly) {
         const names = { metered_actual: "实测", metered_estimate: "估算（relay 上界）" };
         return `<span class="chip ${b === "metered_actual" ? "measured" : "estimate"}">${names[b] || b} ${fmtCur(v, h.currency)}</span>`;
       }).join("");
-    li("", `<span class="src-name">${label}</span><span class="basis">${chips}</span>`);
+    li("", `<span class="src-name">${label}</span><span class="basis">${chips} ${attributionChips(h)}</span>`);
   }
   if (unresolved.length) li("", `<span class="dual-track">不可归档</span>`);
   for (const [key, h, label] of unresolved) {
     li("", `<span class="src-name">${label}</span>
-      <span class="basis">${h.has_unresolved ? '<span class="chip hostbilled">含未定价 tokens · 部分用量暂无法估价</span>' : '<span class="chip">无数据</span>'}</span>`);
+      <span class="basis">${h.has_unresolved ? '<span class="chip hostbilled">含未定价 tokens · 部分用量暂无法估价</span>' : '<span class="chip">无数据</span>'} ${attributionChips(h)}</span>`);
   }
 }
 
