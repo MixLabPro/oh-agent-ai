@@ -383,6 +383,12 @@ body {
   font-size: 12px;
 }
 
+.quality-banner {
+  margin: 8px 0 12px;
+  border-color: var(--warn, #ffad47);
+  color: var(--warn, #ffad47);
+}
+
 .table-wrap {
   overflow: auto;
 }

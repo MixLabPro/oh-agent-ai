@@ -424,6 +424,13 @@ async function renderOverview() {
     document.getElementById("ov-note").textContent =
       "跨宿主数据读取失败：" + errText(e);
   }
+  let quality = null;
+  try {
+    quality = await invoke("data_status");
+  } catch (e) {
+    quality = { status: "unavailable", reason: errText(e) };
+  }
+  renderQualityStatus(quality);
   renderMonthVerdict(monthly);
   renderOverviewDays(cal);
   renderKpiRow("t", daily, ov.fx);
@@ -589,6 +596,33 @@ async function renderOverview() {
   } else {
     renderSourcesPanelFailure("跨宿主数据读取失败", "ov-sources");
   }
+}
+
+function renderQualityStatus(status) {
+  const banner = document.getElementById("ov-quality-banner");
+  if (!banner) return;
+  banner.hidden = true;
+  banner.textContent = "";
+  if (!status || status.status !== "ok") {
+    banner.hidden = false;
+    banner.textContent = "⚠ 权威数据状态不可用：" + ((status && status.reason) || "未知原因");
+    return;
+  }
+  const d = status.data || {};
+  const parts = [];
+  if (d.pricing && d.pricing.stale) parts.push("价格快照过期或缺失");
+  if (Number(d.unresolved_tokens || 0) > 0) {
+    parts.push("未确定 provider " + fmtTokens(d.unresolved_tokens) + " tokens");
+  }
+  if (Number(d.unpriced_tokens || 0) > 0) {
+    parts.push("未计价 " + fmtTokens(d.unpriced_tokens) + " tokens");
+  }
+  if (d.health === "critical") {
+    parts.unshift("权威数据健康状态 critical");
+  }
+  if (!parts.length) return;
+  banner.hidden = false;
+  banner.textContent = "⚠ " + parts.join(" · ") + "。金额可能为估算/部分覆盖，请查看数据状态。";
 }
 
 // 「本月逐日」panel：read_calendar_month（逐日三宿主 token + 分币耗费）。

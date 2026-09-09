@@ -1124,7 +1124,6 @@ pub fn session_cost_minor(
     conn: &Connection,
     session_key: &str,
 ) -> Result<Option<agent_vitals_domain::data_contract::MoneyMinor>, AuthorityError> {
-    use agent_vitals_domain::data_contract::{BillingBasis, MoneyMinor};
     use std::collections::BTreeMap;
 
     // 1. 聚合 8 桶 + peak 拆分 + max ts。`(model, event_peak)` 两轴 group by，
@@ -1215,43 +1214,25 @@ pub fn session_cost_minor(
     // Codex unknown/custom routes use the official USD card from the same
     // immutable snapshot. Explicit OpenAI subscription facts are excluded.
     if host.as_deref() == Some("codex") && !codex_unknown.is_empty() {
-        let codex_pricing = snap_pricing.get("codex_pricing").unwrap_or(&snap_pricing);
-        let entries = codex_pricing
-            .get("entries")
-            .and_then(|v| v.as_array())
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let mut total_usd = 0.0;
-        let mut codex_unpriced_tokens = 0i64;
+        let mut codex_models = serde_json::Map::new();
         for (model, s) in &codex_unknown {
-            let Some(entry) = agent_vitals_domain::cost::codex_resolve_entry(model, "standard", entries)
-            else {
-                codex_unpriced_tokens += s.u_off + s.cr_off + s.cw_off + s.o_off
-                    + s.u_peak + s.cr_peak + s.cw_peak + s.o_peak;
-                continue;
-            };
-            total_usd += agent_vitals_domain::cost::codex_price_bucket(
-                &json!({
+            codex_models.insert(
+                model.clone(),
+                json!({
                     "uncached_input_tokens": s.u_off + s.u_peak,
                     "cached_input_tokens": s.cr_off + s.cr_peak,
                     "cache_write_input_tokens": s.cw_off + s.cw_peak,
                     "output_tokens": s.o_off + s.o_peak,
                     "reasoning_output_tokens": 0,
                 }),
-                entry,
-                None,
             );
         }
-        if codex_unpriced_tokens > 0 {
-            return Ok(None);
-        }
-        if total_usd.is_finite() && total_usd > 0.0 {
-            return Ok(Some(MoneyMinor {
-                amount_minor: (agent_vitals_domain::util::pyround(total_usd, 2) * 100.0).round()
-                    as i64,
-                currency: "USD".to_string(),
-                basis: BillingBasis::MeteredEstimate,
-            }));
+        if let Some(cost) = agent_vitals_domain::cost::metered_estimate_minor(
+            "codex",
+            &json!({ "by_model": codex_models }),
+            &snap_pricing,
+        ) {
+            return Ok(Some(cost));
         }
     }
 
@@ -1275,41 +1256,12 @@ pub fn session_cost_minor(
     }
     let usage = json!({ "by_model": by_model_json });
 
-    // 4. 跑核心计价——不在这里长第二份规则。
-    let report = match agent_vitals_domain::cost::cost_report(&usage, &snap_pricing) {
-        Some(r) => r,
-        None => return Ok(None),
-    };
-
-    // A nullable cost field cannot carry a partial estimate. Never turn an
-    // unpriced report into a misleading zero/partial amount.
-    if report["unpriced_tokens"].as_i64().unwrap_or(0) > 0 {
-        return Ok(None);
-    }
-
-    let total = report["total"].as_f64().unwrap_or(0.0);
-    if !total.is_finite() || total < 0.0 {
-        return Ok(None);
-    }
-    // cost_report 当前硬编码 currency="CNY"（DSH-style pricing.json 结构）。
-    // pricing_snapshots 若将来落其它币种价卡，cost_report 会回填相应 currency；
-    // 这里透出 report 里的 currency，不二次假设。
-    let currency = report["currency"].as_str().unwrap_or("CNY");
-    let n = match currency.to_ascii_uppercase().as_str() {
-        "CNY" | "USD" | "EUR" | "GBP" | "HKD" | "SGD" | "AUD" | "CAD" | "CHF" | "NZD" => 2,
-        "JPY" | "KRW" => 0,
-        "KWD" | "BHD" | "OMR" => 3,
-        // 未知币种不走主路径，避免 0.125 ¥ 误归到 0.125 元的精度——返回 None，
-        // 由调用方报 warning 而不是交一个精度未定义的 MoneyMinor 出去。
-        _ => return Ok(None),
-    };
-    let rounded = agent_vitals_domain::util::pyround(total, n);
-    let amount_minor = (rounded * 10f64.powi(n as i32)).round() as i64;
-    Ok(Some(MoneyMinor {
-        amount_minor,
-        currency: currency.to_string(),
-        basis: BillingBasis::MeteredEstimate,
-    }))
+    // 4. 统一成本引擎：data 层只负责 SQL 聚合，不重复金额转换规则。
+    Ok(agent_vitals_domain::cost::metered_estimate_minor(
+        host.as_deref().unwrap_or("dsh"),
+        &usage,
+        &snap_pricing,
+    ))
 }
 
 #[cfg(test)]

@@ -1268,6 +1268,25 @@ fn read_overview() -> Value {
     serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null)
 }
 
+/// 工作台总览的权威质量状态。金额仍由 summary DTO 提供；这里仅转发
+/// `data_status` 的只读健康、价格快照和 token 归因状态，避免前端自行推断。
+#[tauri::command]
+fn data_status() -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({
+            "status": "unavailable",
+            "reason": "authority database is missing or unreadable"
+        });
+    };
+    let enabled = agent_vitals_runtime::sql_authority::is_enabled(&data_home);
+    serde_json::json!({
+        "status": "ok",
+        "data": agent_vitals_runtime::mcp::data_status_report(&db.conn(), true, enabled)
+    })
+}
+
 
 /// v0.9 Stage 0.6 工作台 Data Query API（spec §7 目标态"Tauri 只调
 /// monthly_summary 等 API"）：经 `SummaryRepository` trait 调 runtime 的
@@ -1470,6 +1489,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             read_overview,
+            data_status,
             data_monthly_summary,
             data_daily_summary,
             data_codex_quota,

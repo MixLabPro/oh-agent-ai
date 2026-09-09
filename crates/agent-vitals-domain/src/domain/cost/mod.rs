@@ -31,6 +31,81 @@ pub use claude::{
 };
 pub use codex::{codex_price_bucket, codex_resolve_entry, load_codex_pricing};
 
+/// Price one already-aggregated metered usage projection from the immutable
+/// combined snapshot used by SQL, MCP, CLI, and Tauri. Callers own fact
+/// selection and windowing; this function owns host dispatch, price matching,
+/// unpriced rejection, currency precision, and the single minor-unit round.
+///
+/// `usage` must contain a `by_model` object. For Codex, the caller passes only
+/// non-subscription/unknown-route facts; explicit OpenAI subscription facts do
+/// not become a token bill through this function.
+pub fn metered_estimate_minor(
+    host: &str,
+    usage: &Value,
+    snapshot: &Value,
+) -> Option<crate::domain::data_contract::MoneyMinor> {
+    use crate::domain::data_contract::{BillingBasis, MoneyMinor};
+
+    let mut total = 0.0f64;
+    let currency: String;
+    if host == "codex" {
+        let codex = snapshot.get("codex_pricing").unwrap_or(snapshot);
+        let entries = codex.get("entries").and_then(Value::as_array)?;
+        for (model, buckets) in usage.get("by_model")?.as_object()? {
+            let entry = codex_resolve_entry(model, "standard", entries)?;
+            total += codex_price_bucket(buckets, entry, None);
+        }
+        currency = "USD".to_string();
+    } else {
+        let pricing = snapshot.get("pricing").unwrap_or(snapshot);
+        if host == "claude-code" {
+            let report = claude_day_cost(usage, pricing)?;
+            if report.get("unpriced_tokens").and_then(Value::as_i64).unwrap_or(0) > 0 {
+                return None;
+            }
+            let totals = report.get("currency_totals")?;
+            let cny = totals.get("CNY").and_then(Value::as_f64).unwrap_or(0.0);
+            let usd = totals.get("USD").and_then(Value::as_f64).unwrap_or(0.0);
+            if cny > 0.0 && usd > 0.0 {
+                return None;
+            }
+            total = if usd > 0.0 { usd } else { cny };
+            currency = if usd > 0.0 { "USD".to_string() } else { "CNY".to_string() };
+        } else {
+            let report = cost_report(usage, pricing)?;
+            if report
+                .get("unpriced_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                > 0
+            {
+                return None;
+            }
+            total = report.get("total").and_then(Value::as_f64)?;
+            currency = report
+                .get("currency")
+                .and_then(Value::as_str)
+                .unwrap_or("CNY")
+                .to_string();
+        }
+    }
+    if !total.is_finite() || total <= 0.0 {
+        return None;
+    }
+    let digits = match currency.to_ascii_uppercase().as_str() {
+        "JPY" | "KRW" => 0,
+        "KWD" | "BHD" | "OMR" => 3,
+        "CNY" | "USD" | "EUR" | "GBP" | "HKD" | "SGD" | "AUD" | "CAD" | "CHF" | "NZD" => 2,
+        _ => return None,
+    };
+    let rounded = crate::util::pyround(total, digits);
+    Some(MoneyMinor {
+        amount_minor: (rounded * 10f64.powi(digits as i32)).round() as i64,
+        currency,
+        basis: BillingBasis::MeteredEstimate,
+    })
+}
+
 // v0.9 计费模式声明层（billing_modes）——「钱付给谁、按什么方式付」的判定，
 // 与计价面解耦（无价卡模型 glm-* 也能归属）。2026-09-05。
 mod billing;
