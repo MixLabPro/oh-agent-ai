@@ -202,6 +202,7 @@ fn route_evidence_from(value: &Value) -> Option<RouteEvidence> {
             "openai" | "cogfoundry.ai"
         );
         let host_lower = host.to_ascii_lowercase();
+        let host_lower = host_lower.trim_end_matches('.');
         let endpoint_is_known = host_lower == "api.openai.com"
             || host_lower.ends_with(".api.openai.com")
             || host_lower == "cogfoundry.ai"
@@ -889,6 +890,24 @@ mod tests {
         assert_eq!(result.facts[0]["evidence_basis"], "conflict");
         assert_eq!(result.facts[0]["pricing_basis"], "metered_estimate");
         assert_eq!(result.facts[0]["billing_mode"], "metered");
+        std::fs::remove_dir_all(tmp).ok();
+    }
+
+    #[test]
+    fn official_endpoint_trailing_dot_remains_session_native() {
+        let tmp = temp_dir();
+        let p = tmp.join("rollout-openai-dot.jsonl");
+        let mut rows = rollout_lines();
+        rows[0] = line(
+            json!({"type":"session_meta","payload":{"session_id":"ses-dot",
+            "model_provider":"openai","route":{"provider_id":"openai",
+            "endpoint_host":"api.openai.com."}}}),
+        );
+        std::fs::write(&p, rows.join("")).unwrap();
+        let result =
+            codex_rollouts_to_usage_facts(std::slice::from_ref(&p), "ns-test", "default").unwrap();
+        assert_eq!(result.facts[0]["evidence_basis"], "session-native");
+        assert_eq!(result.facts[0]["pricing_basis"], "session-provider");
         std::fs::remove_dir_all(tmp).ok();
     }
 
