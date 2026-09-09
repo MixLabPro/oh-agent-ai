@@ -38,7 +38,7 @@ pub fn new_run_id(trigger: &str) -> String {
     format!("{trigger}:{}", now_ms())
 }
 
-/// v0.9.1 Phase 2.8（spec §5.3）：落一份**当前**价格快照进 `pricing_snapshots`。
+/// v0.12：落一份**当前**价格快照及其 catalog provenance。
 /// `pricing_version` = `{pricing.json, codex_pricing.json}` 合并对象的
 /// `fnv1a64_hex(canonical_json)`——内容指纹，价卡变则版本变。已存在 → 幂等
 /// 吸收（返回 `false`）。`data-migrate` / `sync-facts` 每次调用一次，DB 里
@@ -52,13 +52,22 @@ pub fn snapshot_current_pricing(db: &AuthorityDb) -> Result<bool, AuthorityError
     let mut canon = String::new();
     agent_vitals_domain::source_identity::canonical_json(&combined, &mut canon);
     let version = agent_vitals_domain::source_identity::fnv1a64_hex(canon.as_bytes());
+    let catalog_version = format!("bc1-{version}");
     let now = now_ms();
     db.with_immediate_txn(|conn| {
+        conn.execute(
+            "INSERT INTO provider_catalog_snapshots(
+               catalog_version, captured_at_ms, source_kind, snapshot_id, payload_json)
+             VALUES (?1, ?2, 'embedded-assets', ?3, ?4)
+             ON CONFLICT(catalog_version) DO NOTHING",
+            rusqlite::params![catalog_version, now, catalog_version, canon],
+        )?;
         let changed = conn.execute(
-            "INSERT INTO pricing_snapshots(pricing_version, captured_at_ms, source_kind, payload_json)
-             VALUES (?1, ?2, 'embedded-assets', ?3)
+            "INSERT INTO pricing_snapshots(
+               pricing_version, captured_at_ms, source_kind, payload_json, catalog_version, billing_template_id)
+             VALUES (?1, ?2, 'embedded-assets', ?3, ?4, NULL)
              ON CONFLICT(pricing_version) DO NOTHING",
-            rusqlite::params![version, now, canon],
+            rusqlite::params![version, now, canon, catalog_version],
         )?;
         Ok(changed > 0)
     })
@@ -920,6 +929,23 @@ mod tests {
             "run_id 后缀应为毫秒时间戳: {id}"
         );
         assert!(new_run_id("migration").starts_with("migration:"));
+    }
+
+    #[test]
+    fn current_pricing_snapshot_carries_immutable_catalog_provenance() {
+        let home = tmp_home("pricing-catalog");
+        let db = open_db(&home);
+        assert!(snapshot_current_pricing(&db).unwrap());
+        assert!(!snapshot_current_pricing(&db).unwrap());
+        let row: (String, String, String) = db.conn().query_row(
+            "SELECT p.pricing_version, p.catalog_version, c.snapshot_id
+             FROM pricing_snapshots p
+             JOIN provider_catalog_snapshots c ON c.catalog_version = p.catalog_version",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(row.1, row.2);
+        assert_eq!(row.1, format!("bc1-{}", row.0));
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]
