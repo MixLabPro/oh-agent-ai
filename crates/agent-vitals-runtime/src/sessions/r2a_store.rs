@@ -1615,12 +1615,57 @@ pub fn sessions_findings(home: &Path, json_out: bool) {
         })
         .collect();
     let rollup = rollup_findings(&sessions);
+    persist_findings_as_issues(&store.entries, &extracted);
     let dto = rollup.to_json(&pricing_version(), &store.generated_at);
     let text = serde_json::to_string_pretty(&dto).unwrap_or_default();
     if json_out {
         println!("{text}");
     } else {
         print!("{}", render_findings(&dto));
+    }
+}
+
+/// Bridge legacy evaluator output into the v0.11 Issue authority. The finding
+/// payload remains the compatibility DTO, while the stable Issue row becomes
+/// the durable identity used by future Issues/MCP consumers.
+fn persist_findings_as_issues(
+    entries: &[SessionReportEntry],
+    extracted: &[Vec<FindingRef>],
+) {
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
+        crate::sql_sync::now_ms(),
+    ) else { return };
+    for (entry, findings) in entries.iter().zip(extracted) {
+        for finding in findings {
+            let evidence = finding.evidence.as_deref().unwrap_or("");
+            let seq = finding.seq.map(|v| v.to_string()).unwrap_or_default();
+            let fingerprint = format!("{}\0{}\0{}\0{}", entry.key.native_id, finding.rule, seq, evidence);
+            let evidence_fingerprint = format!("fnv1a64:{}", agent_vitals_domain::source_identity::fnv1a64_hex(evidence.as_bytes()));
+            let metadata = serde_json::json!({
+                "category": finding.category,
+                "tool_name": finding.tool_name,
+                "evidence": finding.evidence,
+                "time": finding.time,
+                "seq": finding.seq,
+                "source": "sessions_findings",
+            }).to_string();
+            let input = agent_vitals_data::issues::IssueInput {
+                machine_namespace: &entry.key.machine_namespace,
+                host: &entry.key.host_kind,
+                session_key: Some(&entry.key.native_id),
+                issue_type: &finding.rule,
+                instance_fingerprint: &fingerprint,
+                status: "open",
+                severity: &finding.severity,
+                evaluator_id: "legacy-finding",
+                evaluator_version: "v0.11",
+                evidence_fingerprint: &evidence_fingerprint,
+                opened_at_ms: finding.time.unwrap_or_else(crate::sql_sync::now_ms),
+                metadata_json: &metadata,
+            };
+            let _ = agent_vitals_data::issues::upsert_issue(db.conn(), &input);
+        }
     }
 }
 

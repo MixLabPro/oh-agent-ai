@@ -1480,6 +1480,7 @@ pub fn run() {
             store::sessions_list,
             store::sessions_read,
             store::sessions_findings,
+            store::sessions_issues,
             peek_nav_target,
             clear_nav_target,
             focus_session,

@@ -2938,6 +2938,7 @@ function fmtFindingTime(ms) {
 // 有 workspace.json 标题）。不进 source_profile——那串太长，明细只够放标签。
 function findingSessionLabel(f) {
   if (f.title) return f.title;
+  if (typeof f.session_key === "string") return f.session_key;
   const id = f.session_key && f.session_key.native_id;
   return id ? String(id) : "（无标题）";
 }
@@ -2953,7 +2954,7 @@ async function loadFindings(reset) {
   const loadingEl = document.getElementById("find-loading");
   loadingEl.hidden = false;
   try {
-    const data = await invoke("sessions_findings");
+    const data = await invoke("sessions_issues");
     findState.data = data;
     findState.error = false;
     renderFindings();
@@ -2989,7 +2990,8 @@ function renderFindings() {
   }
   banner.hidden = true;
   const t = findState.data.totals || {};
-  const total = t.findings || 0;
+  const rows = issueRows();
+  const total = t.issues != null ? t.issues : (t.findings || rows.length);
 
   document.getElementById("find-total").textContent = String(total);
   document.getElementById("find-total-sub").textContent =
@@ -3006,7 +3008,7 @@ function renderFindings() {
   const chips = document.getElementById("find-chips");
   chips.innerHTML = "";
   const bySrc = {};
-  for (const f of findState.data.findings || []) {
+  for (const f of rows) {
     const k = f.host_kind || "?";
     bySrc[k] = (bySrc[k] || 0) + 1;
   }
@@ -3020,7 +3022,7 @@ function renderFindings() {
   }
 
   // 规则表。
-  const rules = findState.data.rules || [];
+  const rules = findState.data.rules || issueRules(rows);
   const rulesBody = document.getElementById("find-rules-body");
   const rulesEmpty = document.getElementById("find-rules-empty");
   rulesBody.innerHTML = "";
@@ -3068,7 +3070,7 @@ function renderFindings() {
 
 // 只重画明细表：筛选下拉 change 时调，不碰卡片/规则表。
 function renderFindingsDetail() {
-  const rows = findState.data ? (findState.data.findings || []) : [];
+  const rows = issueRows();
   const sev = findState.sev;
   const rule = findState.rule;
   const filtered = rows.filter((f) =>
@@ -3114,6 +3116,22 @@ function renderFindingsDetail() {
     frag.appendChild(tr);
   }
   body.appendChild(frag);
+}
+
+function issueRows() {
+  if (!findState.data) return [];
+  return Array.isArray(findState.data.issues) ? findState.data.issues : (findState.data.findings || []);
+}
+
+function issueRules(rows) {
+  const byRule = {};
+  for (const row of rows) {
+    const key = row.rule || row.issue_type || "unknown";
+    const cur = byRule[key] || { rule: key, severity: row.severity || "info", hits: 0, sessions: 0 };
+    cur.hits += 1;
+    byRule[key] = cur;
+  }
+  return Object.values(byRule);
 }
 
 // 从 Issues 明细跳转到该会话详情：切到会话 tab 的详情视图，用 issue 里能

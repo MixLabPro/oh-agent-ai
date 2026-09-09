@@ -276,6 +276,51 @@ pub async fn sessions_findings(
     .map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
+/// v0.11 Issues projection. Refreshes the legacy evaluator once (which also
+/// writes stable issue_instances) then reads the authority tables directly.
+#[tauri::command]
+pub async fn sessions_issues(
+    state: tauri::State<'_, StoreBuildLock>,
+) -> Result<Value, Value> {
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        if let Some(bin) = resolve_binary() {
+            let mut cmd = Command::new(bin);
+            cmd.args(findings_args());
+            cmd.env("AGENT_VITALS_HOME", data_home());
+            let _ = run_json(cmd);
+        }
+        let path = agent_vitals_data::authority::default_authority_path(&data_home());
+        let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+            .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        let conn = db.conn();
+        let mut stmt = conn.prepare(
+            "SELECT issue_id, host, session_key, issue_type, status, severity,
+                    evidence_fingerprint, opened_at_ms, closed_at_ms, metadata_json
+             FROM issue_instances ORDER BY severity, opened_at_ms, issue_id"
+        ).map_err(|e| error_value("authority_query", &e.to_string()))?;
+        let rows = stmt.query_map([], |r| {
+            let metadata: String = r.get(9)?;
+            let metadata = serde_json::from_str::<Value>(&metadata).unwrap_or_else(|_| serde_json::json!({}));
+            Ok(serde_json::json!({
+                "issue_id": r.get::<_, String>(0)?, "host_kind": r.get::<_, String>(1)?,
+                "session_key": r.get::<_, Option<String>>(2)?, "rule": r.get::<_, String>(3)?,
+                "status": r.get::<_, String>(4)?, "severity": r.get::<_, String>(5)?,
+                "evidence": r.get::<_, String>(6)?, "opened_at_ms": r.get::<_, i64>(7)?,
+                "closed_at_ms": r.get::<_, Option<i64>>(8)?, "metadata": metadata,
+            }))
+        }).map_err(|e| error_value("authority_query", &e.to_string()))?;
+        let mut issues = Vec::new();
+        for row in rows { issues.push(row.map_err(|e| error_value("authority_query", &e.to_string()))?); }
+        let count = |severity: &str| issues.iter().filter(|v| v["severity"] == severity).count();
+        Ok(serde_json::json!({
+            "totals": { "issues": issues.len(), "findings": issues.len(), "critical": count("critical"), "warning": count("warning"), "info": count("info") },
+            "issues": issues, "findings": [], "source": "issue_instances"
+        }))
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
