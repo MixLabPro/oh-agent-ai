@@ -34,7 +34,7 @@ pub fn spec() -> ToolSpec {
         }),
         output_schema: json!({
             "type": "object",
-            "description": "spec §6 envelope; data = { session_ref, host, first_event_at, last_event_at, event_count, model_ids, tokens{}, cost_minor, timeline[], has_more, next_cursor }. cost_minor is the price-table-derived metered_estimate (usage_facts × pricing_snapshots JOIN, basis=MeteredEstimate) or null when no snapshot covers the session or no model is priced."
+            "description": "spec §6 envelope; data = { session_ref, host, first_event_at, last_event_at, event_count, model_ids, tokens{}, cost_minor, billing_breakdown[], timeline[], has_more, next_cursor }. billing_breakdown is independently grouped by provider, model, peak slot, template and pricing snapshot; it preserves unresolved custom routes rather than merging their costs."
         }),
     }
 }
@@ -188,6 +188,8 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         .ok()
         .flatten()
         .map(|mm| mm.to_json());
+    let billing_breakdown = authority_query::session_billing_buckets(conn, &session_key)
+        .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?;
 
     let data = json!({
         "session_ref": session_ref,
@@ -205,6 +207,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             "total": u + cr + cw + o,
         },
         "cost_minor": cost_minor,
+        "billing_breakdown": billing_breakdown,
         "timeline": timeline,
         "has_more": has_more,
         "next_cursor": next_cursor,
@@ -275,6 +278,10 @@ mod tests {
         assert_eq!(d["event_count"], 3);
         assert_eq!(d["tokens"]["total"], 350);
         assert_eq!(d["model_ids"], json!(["m-a", "m-b"]));
+        let buckets = d["billing_breakdown"].as_array().unwrap();
+        assert_eq!(buckets.len(), 2, "model + peak axes stay independently visible");
+        assert_eq!(buckets[0]["tokens"]["total"], 150);
+        assert_eq!(buckets[1]["tokens"]["total"], 200);
         let tl = d["timeline"].as_array().unwrap();
         assert_eq!(tl.len(), 3);
         assert_eq!(tl[2]["peak"], true);

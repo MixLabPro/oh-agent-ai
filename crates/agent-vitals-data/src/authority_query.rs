@@ -1075,6 +1075,78 @@ pub fn all_session_keys(conn: &Connection) -> Result<Vec<String>, AuthorityError
     rows.collect::<Result<_, _>>().map_err(AuthorityError::from)
 }
 
+/// v0.12 会话成本的可追溯分桶。这里仅聚合权威事实及其计费归属，不在 data
+/// 层复制价格规则；调用方可将每个独立桶交给 domain 成本引擎。分组中保留
+/// `provider_raw`，因为无法安全归一化的 custom 路由仍必须可见，不能并入
+/// `<unknown>` 或 OpenAI。
+pub fn session_billing_buckets(
+    conn: &Connection,
+    session_key: &str,
+) -> Result<Vec<Value>, AuthorityError> {
+    let mut stmt = conn.prepare(
+        "SELECT provider_id, provider_raw, COALESCE(model_id, '<unknown>'),
+                billing_template_id, COALESCE(billing_mode, 'unknown'),
+                COALESCE(pricing_basis, 'unavailable'), event_peak,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens), MAX(event_ts_ms)
+         FROM usage_facts
+         WHERE session_key = ?1 AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+         GROUP BY provider_id, provider_raw, model_id, billing_template_id,
+                  billing_mode, pricing_basis, event_peak
+         ORDER BY provider_id, provider_raw, model_id, billing_template_id, event_peak",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![session_key], |r| {
+        Ok((
+            r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?,
+            r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?,
+            r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, i64>(6)?,
+            r.get::<_, i64>(7)?, r.get::<_, i64>(8)?, r.get::<_, i64>(9)?,
+            r.get::<_, i64>(10)?, r.get::<_, i64>(11)?,
+        ))
+    })?;
+    let mut buckets = Vec::new();
+    for row in rows {
+        let (provider_id, provider_raw, model_id, template_id, billing_mode, pricing_basis,
+            peak, uncached, cache_read, cache_write, output, last_event_ms) = row?;
+        let pricing_version: Option<String> = conn.query_row(
+            "SELECT pricing_version FROM pricing_snapshots
+             WHERE captured_at_ms <= ?1 ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1",
+            rusqlite::params![last_event_ms], |r| r.get(0),
+        ).optional()?;
+        let unresolved_reason = if billing_mode == "subscription" {
+            Some("subscription token usage is not a per-token bill".to_string())
+        } else if pricing_basis == "metered_estimate" && provider_id.as_deref() != Some("openai") {
+            Some("provider-specific price card unavailable; official-card fallback estimate required".to_string())
+        } else if pricing_version.is_none() {
+            Some("no pricing snapshot covers this event time".to_string())
+        } else {
+            None
+        };
+        buckets.push(json!({
+            "provider_id": provider_id,
+            "provider_raw": provider_raw,
+            "model_id": model_id,
+            "billing_template_id": template_id,
+            "billing_mode": billing_mode,
+            "pricing_basis": pricing_basis,
+            "pricing_version": pricing_version,
+            "peak": peak != 0,
+            "last_event_at_ms": last_event_ms,
+            "tokens": {
+                "uncached_input_tokens": uncached,
+                "cache_read_tokens": cache_read,
+                "cache_write_tokens": cache_write,
+                "output_tokens": output,
+                "total": uncached + cache_read + cache_write + output,
+            },
+            "has_unresolved": unresolved_reason.is_some(),
+            "unresolved_reason": unresolved_reason,
+        }));
+    }
+    Ok(buckets)
+}
+
 // ─────── v0.9.1 最后一公里（PR #2）：sessions_search / session_detail envelope
 // 加 `cost_minor` 字段──走 `usage_facts × pricing_snapshots` JOIN，按事件时间
 // 选历史价卡（Q13），按模型 8 桶折成 `cost_report` 期望的 `by_model` 形状
