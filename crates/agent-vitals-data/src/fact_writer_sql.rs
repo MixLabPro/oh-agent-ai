@@ -410,6 +410,7 @@ impl<'a> SqlFactWriter<'a> {
             let billing_source = r.s("billing_source").map(str::to_string);
             let billing_mode = r.s("billing_mode").map(str::to_string);
             let pricing_basis = r.s("pricing_basis").map(str::to_string);
+            let billing_template_id = r.s("billing_template_id").map(str::to_string);
             let evidence_basis = r.s("evidence_basis").map(str::to_string);
             let normalization_version = r.s("normalization_version").map(str::to_string);
             let route_evidence_id = r.s("route_evidence_id").map(str::to_string);
@@ -420,12 +421,12 @@ impl<'a> SqlFactWriter<'a> {
                      fact_id, host, machine_namespace, native_session_id, session_key,
                      source_event_id, observation_kind, source_profile,
                      provider_id, provider_raw, billing_source, billing_mode,
-                     pricing_basis, evidence_basis, normalization_version,
+                     pricing_basis, billing_template_id, evidence_basis, normalization_version,
                      route_evidence_id, attribution_version,
                      model_id, event_ts_ms, event_peak,
                      uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      source_id, ingested_run_id, created_at_ms, updated_at_ms)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
                  ON CONFLICT DO NOTHING",
                 rusqlite::params![
                     r.s("fact_id").unwrap_or_default(),
@@ -438,6 +439,7 @@ impl<'a> SqlFactWriter<'a> {
                     billing_source,
                     billing_mode,
                     pricing_basis,
+                    billing_template_id,
                     evidence_basis,
                     normalization_version,
                     route_evidence_id,

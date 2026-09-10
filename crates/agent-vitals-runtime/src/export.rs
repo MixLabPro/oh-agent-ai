@@ -81,7 +81,7 @@ use serde_json::{Map, Value, json};
 /// 的身份白名单，不是顺手加个字段。
 const EXPORT_COLUMNS: &str = "fact_id, host, machine_namespace, native_session_id, \
      source_event_id, observation_kind, source_profile, provider_id, provider_raw, \
-     billing_source, billing_mode, pricing_basis, evidence_basis, normalization_version, \
+     billing_source, billing_mode, pricing_basis, billing_template_id, evidence_basis, normalization_version, \
      route_evidence_id, attribution_version, model_id, event_ts_ms, uncached_input_tokens, \
      cache_read_tokens, cache_write_tokens, output_tokens";
 
@@ -158,7 +158,7 @@ fn row_to_fields(r: &rusqlite::Row<'_>) -> Result<Map<String, Value>, String> {
     if let Some(p) = get_opt("provider_id")?.filter(|s| !s.is_empty()) {
         fields.insert("provider_id".into(), json!(p));
     }
-    for key in ["provider_raw", "billing_source", "billing_mode", "pricing_basis", "evidence_basis", "normalization_version", "route_evidence_id", "attribution_version"] {
+    for key in ["provider_raw", "billing_source", "billing_mode", "pricing_basis", "billing_template_id", "evidence_basis", "normalization_version", "route_evidence_id", "attribution_version"] {
         if let Some(v) = get_opt(key)?.filter(|s| !s.is_empty()) {
             fields.insert(key.to_string(), json!(v));
         }

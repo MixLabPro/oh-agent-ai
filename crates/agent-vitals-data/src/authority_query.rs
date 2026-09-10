@@ -1084,38 +1084,41 @@ pub fn session_billing_buckets(
     session_key: &str,
 ) -> Result<Vec<Value>, AuthorityError> {
     let mut stmt = conn.prepare(
-        "SELECT host, provider_id, provider_raw, COALESCE(model_id, '<unknown>'),
-                billing_template_id, COALESCE(billing_mode, 'unknown'),
-                COALESCE(pricing_basis, 'unavailable'), event_peak,
+        "SELECT f.host, f.provider_id, f.provider_raw, COALESCE(f.model_id, '<unknown>'),
+                f.billing_template_id, COALESCE(f.billing_mode, 'unknown'),
+                COALESCE(f.pricing_basis, 'unavailable'), COALESCE(f.evidence_basis, 'missing'),
+                f.event_peak, ps.pricing_version, ps.payload_json,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
-                SUM(cache_write_tokens), SUM(output_tokens), MAX(event_ts_ms)
-         FROM usage_facts
-         WHERE session_key = ?1 AND observation_kind != 'legacy_aggregate'
-           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
-         GROUP BY provider_id, provider_raw, model_id, billing_template_id,
-                  billing_mode, pricing_basis, event_peak
-         ORDER BY provider_id, provider_raw, model_id, billing_template_id, event_peak",
+                SUM(cache_write_tokens), SUM(output_tokens), MAX(f.event_ts_ms)
+         FROM usage_facts AS f
+         LEFT JOIN pricing_snapshots AS ps ON ps.pricing_version = (
+             SELECT pricing_version FROM pricing_snapshots
+             WHERE captured_at_ms <= f.event_ts_ms
+             ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1
+         )
+         WHERE f.session_key = ?1 AND f.observation_kind != 'legacy_aggregate'
+           AND f.deleted_at_ms IS NULL AND f.event_ts_ms IS NOT NULL
+         GROUP BY f.host, f.provider_id, f.provider_raw, f.model_id, f.billing_template_id,
+                  f.billing_mode, f.pricing_basis, f.evidence_basis, f.event_peak,
+                  ps.pricing_version, ps.payload_json
+         ORDER BY f.provider_id, f.provider_raw, f.model_id, f.billing_template_id, event_peak, ps.pricing_version",
     )?;
     let rows = stmt.query_map(rusqlite::params![session_key], |r| {
         Ok((
             r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?,
             r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?,
             r.get::<_, Option<String>>(4)?, r.get::<_, String>(5)?,
-            r.get::<_, String>(6)?, r.get::<_, i64>(7)?, r.get::<_, i64>(8)?,
-            r.get::<_, i64>(9)?, r.get::<_, i64>(10)?, r.get::<_, i64>(11)?,
-            r.get::<_, i64>(12)?,
+            r.get::<_, String>(6)?, r.get::<_, String>(7)?, r.get::<_, i64>(8)?,
+            r.get::<_, Option<String>>(9)?, r.get::<_, Option<String>>(10)?,
+            r.get::<_, i64>(11)?, r.get::<_, i64>(12)?, r.get::<_, i64>(13)?,
+            r.get::<_, i64>(14)?, r.get::<_, i64>(15)?,
         ))
     })?;
     let mut buckets = Vec::new();
     for row in rows {
         let (host, provider_id, provider_raw, model_id, template_id, billing_mode, pricing_basis,
-            peak, uncached, cache_read, cache_write, output, last_event_ms) = row?;
-        let pricing_snapshot: Option<(String, String)> = conn.query_row(
-            "SELECT pricing_version, payload_json FROM pricing_snapshots
-             WHERE captured_at_ms <= ?1 ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1",
-            rusqlite::params![last_event_ms], |r| Ok((r.get(0)?, r.get(1)?)),
-        ).optional()?;
-        let pricing_version = pricing_snapshot.as_ref().map(|(version, _)| version.clone());
+            evidence_basis, peak, pricing_version, pricing_payload, uncached, cache_read,
+            cache_write, output, last_event_ms) = row?;
         let usage = if host == "claude-code" {
             json!({"by_model": { model_id.clone(): {
                 "input_tokens": uncached, "cache_read_input_tokens": cache_read,
@@ -1139,27 +1142,27 @@ pub fn session_billing_buckets(
                 "peak_cache_read_tokens": if peak != 0 { cache_read } else { 0 },
                 "peak_cache_write_tokens": if peak != 0 { cache_write } else { 0 },
                 "peak_output_tokens": if peak != 0 { output } else { 0 },
-            }}})
+            }}, "providers": { model_id.clone(): provider_id.clone() }})
         };
         let cost_minor = if billing_mode == "subscription" {
             None
         } else {
-            pricing_snapshot.as_ref().and_then(|(_, payload)| {
+            pricing_payload.as_deref().and_then(|payload| {
                 serde_json::from_str::<Value>(payload).ok().and_then(|snapshot| {
                     agent_vitals_domain::cost::metered_estimate_minor(&host, &usage, &snapshot)
                 })
             }).map(|cost| cost.to_json())
         };
         let pricing_source = if cost_minor.is_some() {
-            if provider_id.as_deref() == Some("openai") { Some("official") } else { Some("fallback_official") }
+            if evidence_basis == "explicit-official-route" { Some("official") } else { Some("fallback_official") }
         } else { None };
         let unresolved_reason = if billing_mode == "subscription" {
             Some("subscription token usage is not a per-token bill".to_string())
-        } else if pricing_snapshot.is_none() {
+        } else if pricing_payload.is_none() {
             Some("no pricing snapshot covers this event time".to_string())
         } else if cost_minor.is_none() {
             Some("no compatible price card for this provider/model bucket".to_string())
-        } else if pricing_basis == "metered_estimate" && provider_id.as_deref() != Some("openai") {
+        } else if pricing_basis == "metered_estimate" || evidence_basis != "explicit-official-route" {
             Some("provider-specific price card unavailable; official-card fallback estimate required".to_string())
         } else {
             None
@@ -1171,6 +1174,7 @@ pub fn session_billing_buckets(
             "billing_template_id": template_id,
             "billing_mode": billing_mode,
             "pricing_basis": pricing_basis,
+            "evidence_basis": evidence_basis,
             "pricing_version": pricing_version,
             "pricing_source": pricing_source,
             "cost_minor": cost_minor,
@@ -1207,7 +1211,7 @@ pub fn session_billing_buckets(
 ///
 /// `MAX(event_ts_ms)` 一并带出——用它去 `pricing_snapshot_asof` 选历史价卡
 /// 版本（Q13：调价日前后分别用正确的价表）。
-pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT host, provider_id, COALESCE(billing_mode, 'unknown'), COALESCE(model_id, '<unknown>') AS model,
+pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT host, provider_id, COALESCE(model_id, '<unknown>') AS model,
                 event_peak,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens),
@@ -1216,7 +1220,7 @@ pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT host, provider_id, COA
          WHERE session_key = ?1
            AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
-         GROUP BY provider_id, billing_mode, model_id, event_peak";
+         GROUP BY provider_id, model_id, event_peak";
 
 /// 一个单 provider 会话的 cost_minor（按价表的 metered estimate）。
 ///
@@ -1239,6 +1243,46 @@ pub fn session_cost_minor(
     conn: &Connection,
     session_key: &str,
 ) -> Result<Option<agent_vitals_domain::data_contract::MoneyMinor>, AuthorityError> {
+    use std::collections::BTreeSet;
+
+    let buckets = match session_billing_buckets(conn, session_key) {
+        Ok(buckets) => buckets,
+        // A few read-only trace fixtures intentionally model the pre-v3 authority
+        // shape. Keep the compatibility scalar available there; production opens
+        // migrate before querying and therefore always takes the fact-snapshot path.
+        Err(error) if error.to_string().contains("no such column") => return session_cost_minor_legacy(conn, session_key),
+        Err(error) => return Err(error),
+    };
+    let providers: BTreeSet<String> = buckets.iter()
+        .filter(|bucket| bucket["billing_mode"] != "subscription")
+        .map(|bucket| bucket["provider_id"].as_str()
+            .or_else(|| bucket["provider_raw"].as_str())
+            .unwrap_or("<unknown>").to_string())
+        .collect();
+    if providers.len() != 1 {
+        return Ok(None);
+    }
+    let mut total: Option<agent_vitals_domain::data_contract::MoneyMinor> = None;
+    for bucket in buckets {
+        let Some(cost) = bucket.get("cost_minor")
+            .and_then(agent_vitals_domain::data_contract::MoneyMinor::from_json) else { continue };
+        match &mut total {
+            None => total = Some(cost),
+            Some(sum) if sum.currency == cost.currency && sum.basis == cost.basis => {
+                sum.amount_minor = sum.amount_minor.checked_add(cost.amount_minor)
+                    .ok_or_else(|| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+            }
+            Some(_) => return Ok(None),
+        }
+    }
+    Ok(total)
+}
+
+#[allow(dead_code)]
+fn session_cost_minor_legacy(
+    conn: &Connection,
+    session_key: &str,
+) -> Result<Option<agent_vitals_domain::data_contract::MoneyMinor>, AuthorityError> {
     use std::collections::{BTreeMap, BTreeSet};
 
     // 1. 聚合 8 桶 + peak 拆分 + max ts。`(model, event_peak)` 两轴 group by，
@@ -1251,13 +1295,12 @@ pub fn session_cost_minor(
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?,
                 r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
+                r.get::<_, i64>(3)?,
                 r.get::<_, i64>(4)?,
                 r.get::<_, i64>(5)?,
                 r.get::<_, i64>(6)?,
                 r.get::<_, i64>(7)?,
                 r.get::<_, i64>(8)?,
-                r.get::<_, i64>(9)?,
             ))
         },
     )?;
@@ -1273,10 +1316,7 @@ pub fn session_cost_minor(
     let mut host: Option<String> = None;
     let mut max_ts: i64 = 0;
     for row in rows {
-        let (row_host, provider, billing_mode, model, peak, u, cr, cw, o, ts) = row?;
-        if billing_mode == "subscription" {
-            continue;
-        }
+        let (row_host, provider, model, peak, u, cr, cw, o, ts) = row?;
         host = Some(row_host.clone());
         providers.insert(provider.as_deref().unwrap_or("<unknown>").to_string());
         let model_key = model.clone();
@@ -2468,7 +2508,9 @@ mod tests {
         assert_eq!(custom["cost_minor"]["amount_minor"], 22, "$0.20 + $0.02");
         assert_eq!(custom["has_unresolved"], true);
         let official = buckets.iter().find(|b| b["provider_id"] == "openai").unwrap();
-        assert_eq!(official["pricing_source"], "official");
+        assert_eq!(official["pricing_source"], "fallback_official",
+            "provider_id alone is not official-route evidence");
+        assert_eq!(official["has_unresolved"], true);
         assert_eq!(official["cost_minor"]["amount_minor"], 20);
         let _ = std::fs::remove_file(&path);
     }

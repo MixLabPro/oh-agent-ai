@@ -282,8 +282,12 @@ function switchTab(name) {
 }
 
 async function loadActiveTab() {
-  if (activeTab === "overview") await renderOverview();
-  else if (activeTab === "calendar") await renderCalendar();
+  // 总览/日历的所有入口（切 tab、刷新按钮、窗口 focus、fold 事件）必须共用
+  // wbPull：否则连续点刷新或频繁切回窗口仍会绕开事件桥的合并器，重叠查询同一
+  // 份 SQL 数据。sessions/findings/sources 保留各自的懒加载语义，不进这里。
+  if (activeTab === "overview" || activeTab === "calendar") {
+    await refreshActiveTab();
+  }
   // 会话页懒加载：首进一次，之后只在「重载列表 / 加载更多」时拉。切 tab 不重拉
   // 也不追加——反复 overview↔sessions 切着看，分页游标不能被一次切换吞掉一页。
   else if (activeTab === "sessions") { if (!sessState.loaded) loadSessions(); }
@@ -303,8 +307,7 @@ window.addEventListener("focus", () => {
   // pull 切 tab 后又按旧 activeTab 刷新。
   pullNavTarget();
   pullFocusTarget();
-  if (activeTab === "overview") renderOverview();
-  else if (activeTab === "calendar") renderCalendar();
+  refreshActiveTab();
 });
 
 // 可见性恢复（隐藏/显示、切走再切回）也是「窗口变得可见」——`show()` 后 focus

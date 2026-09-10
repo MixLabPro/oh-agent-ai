@@ -89,6 +89,7 @@ pub const USAGE_FACT_FIELDS: &[&str] = &[
     "billing_source",
     "billing_mode",
     "pricing_basis",
+    "billing_template_id",
     // 宿主金额
     "amount_decimal",
     "currency",

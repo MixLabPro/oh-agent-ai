@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -465,6 +465,14 @@ BEGIN
 END;
 "#;
 
+// `data_status` 的未决 provider 归因使用相关子查询。只索引未解决的问题，
+// 使查询谓词命中索引，又不为历史审计记录增加索引成本。
+const SCHEMA_V5_ADD: &str = r#"
+CREATE INDEX IF NOT EXISTS data_quality_issues_open_code_scope
+  ON data_quality_issues(code, scope_key)
+  WHERE resolved_at_ms IS NULL;
+"#;
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -635,11 +643,34 @@ impl AuthorityDb {
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
+            Some(4) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V5_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute(
+                            "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
+                            rusqlite::params![SCHEMA_VERSION.to_string()],
+                        )?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(error.into());
+                    }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(3) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 let migration = conn.execute_batch(SCHEMA_V4_ADD);
                 match migration {
                     Ok(()) => {
+                        if let Err(error) = conn.execute_batch(SCHEMA_V5_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
                         conn.execute(
                             "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
                             rusqlite::params![SCHEMA_VERSION.to_string()],
@@ -660,6 +691,10 @@ impl AuthorityDb {
                 match migration {
                     Ok(()) => {
                         if let Err(error) = conn.execute_batch(SCHEMA_V4_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V5_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -687,6 +722,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V4_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V5_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -732,6 +771,7 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V1)?;
                 conn.execute_batch(SCHEMA_V3_ADD)?;
                 conn.execute_batch(SCHEMA_V4_ADD)?;
+                conn.execute_batch(SCHEMA_V5_ADD)?;
                 // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
                 conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
@@ -1170,6 +1210,23 @@ impl AuthorityDb {
                 "actual or realized savings require an equally evidenced measurement".to_string(),
             ).into());
         }
+        let existing = self.conn.query_row(
+            "SELECT measurement_id, billing_template_snapshot_id, pricing_version,
+                    amount_minor, currency, savings_basis
+             FROM savings_records WHERE savings_id = ?1",
+            rusqlite::params![savings_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        ).optional()?;
+        if let Some(existing) = existing {
+            let incoming = (measurement_id.to_string(), billing_template_snapshot_id.map(str::to_string),
+                pricing_version.map(str::to_string), amount_minor, currency.to_string(), savings_basis.to_string());
+            if existing == incoming {
+                return Ok(false);
+            }
+            return Err(rusqlite::Error::InvalidParameterName(
+                "savings_id already names a different immutable savings record".to_string(),
+            ).into());
+        }
         let changed = self.conn.execute(
             "INSERT INTO savings_records(
                savings_id, measurement_id, billing_template_snapshot_id, pricing_version,
@@ -1400,7 +1457,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(ver, "4");
+        assert_eq!(ver, SCHEMA_VERSION.to_string());
         let _ = std::fs::remove_file(&db);
     }
 
@@ -1439,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_database_migrates_to_schema_v4() {
+    fn v1_database_migrates_to_current_schema() {
         let db = tmp_db("v1-to-v2");
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
@@ -1463,7 +1520,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, SCHEMA_VERSION.to_string());
         let exists: i64 = upgraded
             .conn()
             .query_row(
@@ -1477,7 +1534,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_database_migrates_to_schema_v4_and_preserves_facts() {
+    fn v2_database_migrates_to_current_schema_and_preserves_facts() {
         let db = tmp_db("v2-to-v3");
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
@@ -1507,7 +1564,17 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        let index_exists: i64 = upgraded
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'data_quality_issues_open_code_scope'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_exists, 1, "missing data-status correlation index");
         for column in [
             "provider_raw",
             "billing_source",
