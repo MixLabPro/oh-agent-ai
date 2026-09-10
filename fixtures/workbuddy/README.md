@@ -52,10 +52,11 @@ Two sessions:
   rotation note: `findings_total=4` (SV609×3 info, SV610×1 allowed-once
   warning), `rules_unavailable=6`, cost `{tokens:12000, credits:0.0,
   cash_cny:null, nominal_cny:0.0, nominal_basis:"…", host_billed:true}` — a
-  non-credit-track session (`credit_json={}`): the `0.0` is a real measurement
-  (platform credit ledger genuinely unused), and the audit output carries an
-  extra `notes` entry saying the real spend is on the user's own API account
-  and not observable here.
+  session not billed to credits (`credit_json={}`): the `0.0` is a real
+  measurement (platform credit ledger genuinely unused), and the audit output
+  carries an extra `notes` entry stating that the *cause* is not determinable
+  here (self-configured route / promotional free tier / host-side non-billing
+  are indistinguishable) — it never asserts which one.
 
 The Rust side (`crates/agent-vitals-hosts/src/hosts/workbuddy/sessions/evidence.rs` +
 `crates/agent-vitals-hosts/src/hosts/workbuddy/sources/mod.rs`) reads the same sqlite db (rusqlite, bundled)

@@ -1135,7 +1135,15 @@ class TestWorkbuddyCostBlockReportsCreditsNotCny(unittest.TestCase):
         self.assertEqual(cost["nominal_basis"],
                          "pack-price-public:1000cr=50CNY@2026-07-01")
 
-    def test_non_credit_track_zero_is_a_measurement_carried_by_a_note(self):
+    def test_unbilled_to_credits_zero_is_a_measurement_and_the_note_names_no_cause(self):
+        """spec §2.1：零积分会话的 note **绝不指认成因**。
+
+        A3 首版的 note 断言「the real spend is on the user's own API account
+        (self-configured key + endpoint)」——真机当场证伪：`hy3` 是平台内置模型、
+        根本没有自配路由可走，却有零积分会话；用户 2026-09-11 给出真相是**平台
+        推广自家模型的限免**（真免费，不存在那笔支出）。零积分至少三种成因
+        （自配路由 / 限免促销 / 宿主未记账）且本机不可分辨。适配器的职责到
+        「未计入积分」为止，再往下是用户声明的领域。"""
         report = self._audit(
             "s1", [self._SESSION], [("s1", 12000, 10, 1788167100000, "{}")])
         cost = report["cost"]
@@ -1143,8 +1151,16 @@ class TestWorkbuddyCostBlockReportsCreditsNotCny(unittest.TestCase):
         self.assertEqual(cost["nominal_cny"], 0.0)
         self.assertIsNone(cost["cash_cny"])
         self.assertNotIn("cny", cost)
-        self.assertTrue(any("not observable from this machine" in n
-                            for n in report["notes"]), report["notes"])
+        unbilled = [n for n in report["notes"]
+                    if n.startswith("session not billed to credits")]
+        self.assertEqual(len(unbilled), 1, report["notes"])
+        self.assertIn("NOT determinable", unbilled[0])
+        # 三种成因都要点名为「不可分辨」，且不得单独指认其中任何一种。
+        for cause in ("self-configured route", "promotional free tier",
+                      "host-side non-billing"):
+            self.assertIn(cause, unbilled[0])
+        self.assertNotIn("own API account", unbilled[0])
+        self.assertNotIn("self-configured key", unbilled[0])
 
 
 class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):

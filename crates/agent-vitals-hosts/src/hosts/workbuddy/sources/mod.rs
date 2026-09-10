@@ -527,7 +527,7 @@ fn to_cents(value: &Value) -> i64 {
 }
 
 /// credit_json 里所有 requestId 值求和 → 厘（i64）。空串/空格串/非法 JSON/非对象
-/// → 0。`cost_of` 与 `is_non_credit_track` 共用这一把求和，别各写一份。
+/// → 0。`cost_of` 与 `is_unbilled_to_credits` 共用这一把求和，别各写一份。
 fn credit_cents(cj: Option<&str>) -> i64 {
     let mut cents = 0_i64;
     if let Some(cj) = cj {
@@ -551,10 +551,16 @@ const WB_NOMINAL_BASIS: &str = "pack-price-public:1000cr=50CNY@2026-07-01";
 /// 非积分轨会话（`used` 有值、credit 求和为 0）的诚实注记。`credits: 0.0` 是**真
 /// 测量**（平台积分轨确实没消耗），不是「没花钱」——该会话在用户自配 API 账户上的
 /// 真实花费本机不可观测，这条 note 承担那层意思（spec §6.1、§11 第 14 条）。
-const WB_NON_CREDIT_TRACK_NOTE: &str =
-    "non-credit-track session: platform credit ledger unused (credits: 0.0 is a real \
-measurement); the real spend is on the user's own API account (self-configured key \
-+ endpoint) and is not observable from this machine";
+// spec §2.1：**绝不指认成因**。旧串断言「钱花在用户自有 API 账户」——真机
+// 当场证伪：`hy3` 是平台内置模型、根本没有自配路由可走，却有零积分会话，
+// 用户 2026-09-11 给出真相是**平台推广自家模型的限免**（真免费，不存在那笔
+// 支出）。零积分至少三种成因（自配路由 / 限免促销 / 宿主未记账）且本机不可
+// 分辨，适配器的职责到「未计入积分」为止，再往下是用户声明的领域。
+const WB_UNBILLED_TO_CREDITS_NOTE: &str =
+    "session not billed to credits: the platform credit ledger recorded no consumption \
+(credits: 0.0 is a real measurement). The cause is NOT determinable from this machine \
+— a self-configured route, a promotional free tier, and host-side non-billing are \
+indistinguishable here.";
 
 /// spec §6.1 成本块，键序 `{tokens, credits, cash_cny, nominal_cny, nominal_basis,
 /// host_billed}`（字节一致，Python 镜像逐字节对齐，不能重排）。tokens = `used`
@@ -588,7 +594,7 @@ fn cost_of(meta: &WorkbuddySessionMeta) -> Option<Value> {
 
 /// 非积分轨判定：`used` 有值但 credit 求和为 0（credit_json 空/缺/空对象）。与
 /// `cost_of` 的「整块 None」降级互斥——那条还要求 `used` 也缺失。
-fn is_non_credit_track(meta: &WorkbuddySessionMeta) -> bool {
+fn is_unbilled_to_credits(meta: &WorkbuddySessionMeta) -> bool {
     meta.used.is_some() && credit_cents(meta.credit_json.as_deref()) == 0
 }
 
@@ -658,8 +664,8 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
     // 非积分轨会话：`credits: 0.0` 是真测量，但真实开销在用户自配 API 账户、本机
     // 不可见——由 note 承担那层意思，不由数字冒充（spec §11 第 14 条）。
     let mut notes = ev["notes"].as_array().cloned().unwrap_or_default();
-    if is_non_credit_track(&meta) {
-        notes.push(json!(WB_NON_CREDIT_TRACK_NOTE));
+    if is_unbilled_to_credits(&meta) {
+        notes.push(json!(WB_UNBILLED_TO_CREDITS_NOTE));
     }
 
     Some(json!({

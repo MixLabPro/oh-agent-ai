@@ -2227,9 +2227,12 @@ class CliMatrix(unittest.TestCase):
             "is an honest MeasuredZero, never a translation.",
             "audit-log hash chain verified from seq=100: oldest records may be rotated "
             "(first prevHash has no predecessor)",
-            "non-credit-track session: platform credit ledger unused (credits: 0.0 is a "
-            "real measurement); the real spend is on the user's own API account "
-            "(self-configured key + endpoint) and is not observable from this machine",
+            # spec §2.1：note 绝不指认零积分的成因——旧串断言「钱花在自配 API 账户」，
+            # 被真机 hy3 限免会话（平台送的、根本没那笔支出）当场证伪。
+            "session not billed to credits: the platform credit ledger recorded no "
+            "consumption (credits: 0.0 is a real measurement). The cause is NOT "
+            "determinable from this machine \u2014 a self-configured route, a promotional "
+            "free tier, and host-side non-billing are indistinguishable here.",
         ])
         self.assertEqual(report["cost"], {
             "tokens": 12000,

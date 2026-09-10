@@ -174,7 +174,7 @@ def _to_cents(value):
 
 def _credit_cents(cj):
     """credit_json 里所有 requestId 值求和 → 厘（int）。空串/空格串/非法 JSON/非
-    对象 → 0。`_cost_of` 与 `_is_non_credit_track` 共用这一把求和。"""
+    对象 → 0。`_cost_of` 与 `_is_unbilled_to_credits` 共用这一把求和。"""
     cents = 0
     parsed = None
     if isinstance(cj, str) and cj.strip():
@@ -195,10 +195,15 @@ _WB_NOMINAL_BASIS = "pack-price-public:1000cr=50CNY@2026-07-01"
 # 非积分轨会话（`used` 有值、credit 求和 0）的诚实注记。`credits: 0.0` 是真测量
 # （平台积分轨确实没消耗），不是「没花钱」——真实开销在用户自配 API 账户、本机不可
 # 观测，这条 note 承担那层意思（spec §6.1、§11 第 14 条）。
-_WB_NON_CREDIT_TRACK_NOTE = (
-    "non-credit-track session: platform credit ledger unused (credits: 0.0 is a real "
-    "measurement); the real spend is on the user's own API account (self-configured key "
-    "+ endpoint) and is not observable from this machine"
+# spec §2.1：**绝不指认成因**。旧串断言「钱花在用户自有 API 账户」——真机当场
+# 证伪：`hy3` 是平台内置模型、根本没有自配路由可走，却有零积分会话，用户
+# 2026-09-11 给出真相是**平台推广自家模型的限免**（真免费，不存在那笔支出）。
+# 零积分至少三种成因且本机不可分辨，适配器的职责到「未计入积分」为止。
+_WB_UNBILLED_TO_CREDITS_NOTE = (
+    "session not billed to credits: the platform credit ledger recorded no "
+    "consumption (credits: 0.0 is a real measurement). The cause is NOT "
+    "determinable from this machine \u2014 a self-configured route, a promotional "
+    "free tier, and host-side non-billing are indistinguishable here."
 )
 
 
@@ -229,7 +234,7 @@ def _cost_of(meta):
     }
 
 
-def _is_non_credit_track(meta):
+def _is_unbilled_to_credits(meta):
     """`used` 有值但 credit 求和为 0（credit_json 空/缺/空对象）。与 `_cost_of` 的
     「整块 None」降级互斥——那条还要求 `used` 也缺失。"""
     return meta.get("used") is not None and _credit_cents(meta.get("credit_json")) == 0
@@ -291,8 +296,8 @@ def workbuddy_session_audit_json(home, session_id):
     # 非积分轨会话：`credits: 0.0` 是真测量，但真实开销在用户自配 API 账户、本机
     # 不可见——由 note 承担那层意思，不由数字冒充（spec §11 第 14 条）。
     notes = list(ev["notes"])
-    if _is_non_credit_track(meta):
-        notes.append(_WB_NON_CREDIT_TRACK_NOTE)
+    if _is_unbilled_to_credits(meta):
+        notes.append(_WB_UNBILLED_TO_CREDITS_NOTE)
 
     return {
         "host": "workbuddy",

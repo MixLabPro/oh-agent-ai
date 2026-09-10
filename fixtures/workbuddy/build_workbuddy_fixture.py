@@ -319,8 +319,11 @@ def self_verify(root):
         "host_billed": True,
     }, cost
     full = workbuddy_session_audit.workbuddy_session_audit_json(root.parent, "s2")
-    assert any("not observable from this machine" in n for n in full["notes"]), \
-        full["notes"]
+    # spec §2.1：note 只说「未计入积分，成因不判定」，绝不指认是自配路由。
+    unbilled = [n for n in full["notes"] if n.startswith("session not billed to credits")]
+    assert len(unbilled) == 1, full["notes"]
+    assert "NOT determinable" in unbilled[0] and "own API account" not in unbilled[0], \
+        unbilled[0]
 
 
 def main():
