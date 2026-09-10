@@ -1096,34 +1096,42 @@ fn emit_fold_event(app: &AppHandle) {
 /// 跳过托盘更新的分支（这正是「多数正常路径连 state 重读都不做」的修复：无未折
 /// 会话/二进制缺失/discover 失败也要刷新，把外部更新带进托盘）。
 fn sync_tick(app: &AppHandle) {
-    let mut status = perform_sync();
-    // Claude 账尾折（tick 顺序 §8：DSH discover/oneline → claude-sync → 宿主
-    // 区）。DSH 同步已失败时不叠跑 claude-sync——fold 线失败通常意味着 state
-    // 根/二进制问题，claude 账同根也会失败，一次失败留一个原因。claude-sync 失
-    // 败不 abort tick（宿主区照刷），但 status 换成 fail 留痕（见 run_claude_sync）。
-    if status.ok {
-        if let Some(bin) = resolve_binary() {
-            if let Some(err) = run_claude_sync(&bin) {
-                status = SyncStatus::fail("claude-sync", err);
-            } else if let Some(err) = run_facts_sync(&bin) {
-                // claude-sync 成功才叠跑 facts（同一「state 根/二进制问题
-                // 不叠跑」逻辑）；失败留痕不 abort（facts 是新增平面）。
-                status = SyncStatus::fail("sync-facts", err);
-            }
-        }
-    }
+    let initial = perform_sync();
+    let folded = should_emit_fold_event(&initial);
+    // 一宿主失败不能阻塞其他宿主的导入；共享二进制缺失仍由 resolve 状态报告。
+    let (status, facts_ready) = match resolve_binary() {
+        Some(bin) => finish_sync_stages(initial, || run_claude_sync(&bin), || run_facts_sync(&bin)),
+        None => (initial, false),
+    };
     overview::save_sync_status(&status);
     // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
     refresh_hosts();
     refresh(app);
-    // fold 成功落盘 → 广播给工作台（去抖合并，见 emit_fold_event）。只覆盖真正
-    // 的 fold：discover 成功但「无未折会话」没有新数据落盘，广播只会让工作台
-    // 白拉一遍旧数字；失败同理。webview 未就绪时 emit 是空操作，由下一次
-    // tick/手动同步兜底——事件桥不是唯一通路，只是让工作台「立刻」更新的加速带。
-    if should_emit_fold_event(&status) {
+    // DSH fold 或事实同步成功后广播；其他来源的失败不隐藏本轮可用结果。
+    // sync-facts 暂未返回新增计数，因此成功扫描也会刷新；webview 未就绪时由
+    // 下一次加载读取最新结果，事件桥不承担持久化。
+    if folded || facts_ready {
         emit_fold_event(app);
     }
+}
+
+/// 按序执行独立导入阶段并保留全部失败原因。成功导入的 facts 即使处于部分
+/// 失败的一轮，也需要通知工作台读取新结果。
+fn finish_sync_stages(
+    initial: SyncStatus,
+    claude: impl FnOnce() -> Option<String>,
+    facts: impl FnOnce() -> Option<String>,
+) -> (SyncStatus, bool) {
+    let mut failures = Vec::new();
+    if !initial.ok { failures.push(format!("{}: {}", initial.stage, initial.message)); }
+    if let Some(err) = claude() { failures.push(format!("claude-sync: {err}")); }
+    let facts_error = facts();
+    let facts_ready = facts_error.is_none();
+    if let Some(err) = facts_error { failures.push(format!("sync-facts: {err}")); }
+    let status = if failures.is_empty() { initial }
+        else { SyncStatus::fail("partial", failures.join("；")) };
+    (status, facts_ready)
 }
 
 /// 每 5 分钟一轮：发现最新未折 DSH 会话 → spawn `agent-vitals oneline` 折账 →
@@ -1574,6 +1582,44 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_sync_stages_continue_after_source_failure() {
+        let called = std::cell::RefCell::new(Vec::new());
+        let (status, ready) = finish_sync_stages(
+            SyncStatus::fail("discover", "DSH unavailable".into()),
+            || { called.borrow_mut().push("claude"); Some("permission denied".into()) },
+            || { called.borrow_mut().push("facts"); None },
+        );
+        assert_eq!(*called.borrow(), vec!["claude", "facts"]);
+        assert!(!status.ok);
+        assert_eq!(status.stage, "partial");
+        assert!(status.message.contains("DSH unavailable"));
+        assert!(status.message.contains("permission denied"));
+        assert!(ready);
+    }
+
+    #[test]
+    fn independent_sync_stages_retain_facts_failure() {
+        let (status, ready) = finish_sync_stages(
+            SyncStatus::ok("discover", "no DSH records".into()),
+            || None,
+            || Some("disk full".into()),
+        );
+        assert!(!status.ok);
+        assert!(status.message.contains("sync-facts: disk full"));
+        assert!(!ready);
+    }
+
+    #[test]
+    fn independent_sync_stages_preserve_success_status() {
+        let (status, ready) = finish_sync_stages(
+            SyncStatus::ok("fold", "imported".into()), || None, || None,
+        );
+        assert!(status.ok);
+        assert_eq!(status.stage, "fold");
+        assert!(ready);
+    }
 
     /// Stage 0.6 的 Data Query API 面是薄转发，但"薄"也要钉住：DTO 与 CLI
     /// `data coverage` 同一份 `to_json()`（三宿主 by_host + workbuddy 永久
