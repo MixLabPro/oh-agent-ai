@@ -234,14 +234,14 @@ v0.11.0 发布前必须：
 2. 两份兼容源价表已在运行时合并为带指纹的 `pricing_snapshots`，历史快照保持不可变。
 3. MCP `sessions_search/session_detail.cost_minor`、CLI/Tauri 共享 domain metered estimate；Codex unknown 使用 USD 原厂卡，Claude 使用原生 token 字段。
 4. `data_status` 报告 pricing snapshot、stale、unresolved token、unpriced token，并由控制台显示质量告警。
-5. App 版本、bundle、安装运行和验证脚本已对齐 `0.11.0`；当前安装路径为 `/Applications/agent-vitals.app`。
+5. App 版本、bundle、安装运行和验证脚本已对齐 `0.11.0`；当前安装路径为 `/Applications/agent-vitals.app`，本次构建提交为 `1c811d8`。
 6. workspace Rust、desktop Rust、Python、golden、Clippy 和 JS 语法检查通过。
 
 仍不得宣称“所有硬性验收项完成”的项目：
 
 1. 尚未实现从官方价格页/API 自动抓取、变更审核和失败回退的联网同步器；当前快照来源仍为 `embedded-assets`。
 2. GLM 原厂 pay-as-you-go 价卡尚未取得可复核的官方输入/缓存/输出费率，因此 GLM unknown 必须继续显示 `unpriced/no-price-card`，不得借用其他模型价格。
-3. 本地 `v0.11.0` tag 已创建并指向最终发布记录；它不代表下列价格数据缺口已经消失。
+3. 现有本地 `v0.11.0` annotated tag 仍指向旧提交 `72fa1be`，未包含本次 `main` 收口提交 `1c811d8`；在明确是否允许移动已有发布 tag 前，不能把 tag 视为最终发布记录。
 4. 真机中的 DSH stale 和既有 `invalid_fact` 必须继续在总览中显示为 partial/quality warning，不能以安装包成功掩盖。
 
-因此，当前准确结论是：**v0.11.0 核心实现、发布包和本地 tag 已完成；价格自动同步与 GLM 原厂价卡仍是数据口径阻断项，不能把当前包宣称为完整价格能力的最终版。**
+因此，当前准确结论是：**v0.11.0 核心实现和已安装发布包已完成；价格自动同步、GLM 原厂价卡以及现有 tag 与最终提交对齐仍未完成，不能把当前状态宣称为完整发布闭环。**
