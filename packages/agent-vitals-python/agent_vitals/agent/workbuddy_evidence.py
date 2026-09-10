@@ -33,7 +33,16 @@ title}`。db 缺失的列 → 对应信号降级 Unavailable（缺列报缺，�
 非零数字出来。
 """
 
+import math
+
 from agent_vitals.agent.claude_evidence import parse_iso
+
+# epoch 秒的固定合法性窗口（spec §10 A6）：`[2000-01-01, 2100-01-01)`。
+# `adapters/workbuddy_session.py` 那侧在 I/O 层、能读时钟，用的是 `now + 24h`
+# 上界；这个模块是纯的（Rust 镜像可链进 wasm），读不了时钟，退一步用固定的
+# 2100 上界，与 Rust `evidence.rs::{WB_TS_MIN_SECS, WB_TS_MAX_SECS}` 同值。
+_WB_TS_MIN_SECS = 946684800    # 2000-01-01T00:00:00Z
+_WB_TS_MAX_SECS = 4102444800   # 2100-01-01T00:00:00Z
 
 # 20 个 Signal 的声明序——`signals` 数组 / `coverage` 字典的输出顺序都靠这份显式
 # 表对齐（与 Rust `workbuddy_evidence.rs::ALL_SIGNALS` 同表同序），不靠 Python
@@ -139,7 +148,8 @@ _TRACES_ATTEMPT = {
 
 def _timeline_entry(observation, seq, time, call_id, ordinal):
     """一条 timeline entry 的构造器。`turn`/`step` 恒 None——WorkBuddy 无 turn/step
-    结构；`time` = audit-log timestamp 的 unix 秒（`parse_iso`，无效则 None）。"""
+    结构；`time` = audit-log timestamp 归一后的 unix 秒（字符串走 `parse_iso`、
+    整数/浮点按 epoch 毫秒解释，见 `_parse_time`；无效则 None）。"""
     return {"observation": observation, "seq": seq, "time": time, "turn": None,
             "step": None, "call_id": call_id, "ordinal": ordinal}
 
@@ -215,11 +225,38 @@ def _approval_tool(record):
 
 
 def _parse_time(record):
+    """audit-log `timestamp` → 该 entry 的 `time`（unix 秒；`time` 字段是
+    整数或 None，从来不是 ISO 串）。
+
+    - **字符串** → 既有 `parse_iso` 路径，**原样不回归**。
+    - **整数/浮点** → 按 epoch **毫秒**解释（真机 `~/.workbuddy/audit-log/*.jsonl`
+      的 `timestamp` 是 13 位 epoch-ms 整数，2026-09-10 实测），floor-除 1000 归一
+      到秒——与 Rust `evidence.rs::parse_time` 的 `i64::div_euclid(1000)` /
+      `(f / 1000.0).floor()` 逐字节对齐；落在固定窗口 `[2000-01-01, 2100-01-01)`
+      之外 → None（纯层无 `attempts` 汇，只 null）。
+    - **其余类型（bool/null/object）/缺失** → None。
+
+    旧实现只收字符串（`isinstance(ts, str)`），整数一律 None——于是有 findings 的
+    会话里每条 finding 的 `time` 是 null（评审 A6：与 Rust 同一 commit，否则
+    `both()` 差分转红）。**不做秒/毫秒位数嗅探**（spec §6.2 rule 5）。"""
     ts = record.get("timestamp")
-    if not isinstance(ts, str):
+    if isinstance(ts, str):
+        parsed = parse_iso(ts)
+        return parsed[0] if parsed is not None else None
+    # bool 是 int 的子类——必须先短路（否则 True // 1000 = 0 → 归一成 1970）。
+    if isinstance(ts, bool):
         return None
-    parsed = parse_iso(ts)
-    return parsed[0] if parsed is not None else None
+    if isinstance(ts, int):
+        secs = ts // 1000
+    elif isinstance(ts, float):
+        if not math.isfinite(ts):
+            return None
+        secs = math.floor(ts / 1000.0)
+    else:
+        return None
+    if secs < _WB_TS_MIN_SECS or secs >= _WB_TS_MAX_SECS:
+        return None
+    return secs
 
 
 def _chain_note(records):

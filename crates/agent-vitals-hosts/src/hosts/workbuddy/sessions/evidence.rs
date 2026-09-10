@@ -171,7 +171,8 @@ fn traces_attempt() -> SourceAttempt {
 }
 
 /// 一条 timeline entry 的构造器。`turn`/`step` 恒 None——WorkBuddy 无 turn/step
-/// 结构；`time` = audit-log timestamp 的 unix 秒（`parse_iso`，无效则 None）。
+/// 结构；`time` = audit-log timestamp 归一后的 unix 秒（字符串走 `parse_iso`、
+/// 整数/浮点按 epoch 毫秒解释，见 `parse_time`；无效则 None）。
 /// 所有 entry 都是 `Measured`——它们来自真实 audit-log 记录，不是 derive 出来的。
 fn timeline_entry<T>(
     observation: T,
@@ -276,9 +277,51 @@ fn approval_tool(record: &Value) -> String {
     }
 }
 
+/// epoch 秒的固定合法性窗口下界 —— `2000-01-01T00:00:00Z`。
+const WB_TS_MIN_SECS: i64 = 946_684_800;
+/// epoch 秒的固定合法性窗口上界（半开）—— `2100-01-01T00:00:00Z`。
+///
+/// `sources/mod.rs::normalize_wb_ts` 那侧在 `/sources` 层、能读时钟，用的是
+/// `now + 24h` 上界。这里是纯 crate（可链进 wasm）、**读不了时钟**，所以退一步
+/// 用固定的 2100 上界——spec §10 A6 明写「纯层用固定上下界，不用 now 窗口」。
+const WB_TS_MAX_SECS: i64 = 4_102_444_800;
+
+/// audit-log `timestamp` → 该 entry 的 `time`（`TimelineEntry.time` 是 unix
+/// 秒 `Option<i64>`，不是 ISO 串）。
+///
+/// **字符串**走既有 `parse_iso` 路径，**原样不回归**（其他宿主与旧 fixture 的
+/// ISO 串形状不变）。**整数/浮点**按 epoch **毫秒**解释——真机
+/// `~/.workbuddy/audit-log/*.jsonl` 的 `timestamp` 是 13 位 epoch-ms 整数
+/// （2026-09-10 实测），旧实现只收 `Value::as_str`、整数一律读成 None，于是有
+/// findings 的会话里每条 finding 的 `time` 都是 null。floor-除 1000 归一到秒，
+/// 与 `sources/mod.rs::normalize_wb_ts` 同一公式（`i64::div_euclid(1000)` /
+/// `(f / 1000.0).floor()`），不另发明第二套。
+///
+/// 合法性窗口是**固定**的 `[2000-01-01, 2100-01-01)`（见 `WB_TS_MAX_SECS`
+/// doc：纯层读不了时钟）。窗口外 → `None`；纯层没有 `attempts` 汇——只 null，
+/// 与今天非字符串输入的行为一致（越界进 attempts 的那条纪律留在 `/sources`）。
+///
+/// **不做「10 位当秒、13 位当毫秒」的位数嗅探**（spec §6.2 rule 5）：真机只
+/// 观测到毫秒，在没有证据的地方发明秒/毫秒判别会把 2001 年的毫秒戳误当 1970
+/// 年的秒戳。bool / null / object / 字段缺失 → `None`。
 fn parse_time(record: &Value) -> Option<i64> {
-    let ts = record.get("timestamp").and_then(Value::as_str)?;
-    parse_iso(ts).map(|(s, _)| s)
+    match record.get("timestamp") {
+        Some(Value::String(s)) => parse_iso(s).map(|(secs, _)| secs),
+        Some(Value::Number(n)) => {
+            let secs = match n.as_i64() {
+                Some(i) => i.div_euclid(1000),
+                None => {
+                    let f = n.as_f64()?;
+                    if !f.is_finite() {
+                        return None;
+                    }
+                    (f / 1000.0).floor() as i64
+                }
+            };
+            (WB_TS_MIN_SECS..WB_TS_MAX_SECS).contains(&secs).then_some(secs)
+        }
+        _ => None,
+    }
 }
 
 /// audit-log `prevHash→hash` 链的完整性 note（spec §2.3/§4）。只做**结构校验**
@@ -812,5 +855,42 @@ mod tests {
             chain_note(&records).as_deref(),
             Some("audit-log hash chain verified from seq=5: oldest records may be rotated \
                   (first prevHash has no predecessor)"));
+    }
+
+    #[test]
+    fn parse_time_reads_integer_epoch_ms_the_real_machine_shape() {
+        // 真机 `~/.workbuddy/audit-log/*.jsonl` 的 `timestamp` 是 13 位 epoch-ms
+        // 整数——旧实现 `and_then(Value::as_str)` 把它读成 None，于是有 findings
+        // 的会话里每条 finding 的 `time` 是 null（评审 A6：Rust-only 改会打破
+        // 与 Python `_parse_time` 的差分，双侧同一 commit）。
+        assert_eq!(
+            parse_time(&json!({"timestamp": 1_788_170_400_000_i64})),
+            Some(1_788_170_400)
+        );
+        // 浮点同路径（floor 除 1000），与 Python `math.floor(v / 1000.0)` 对齐。
+        assert_eq!(
+            parse_time(&json!({"timestamp": 1_788_170_400_500.0_f64})),
+            Some(1_788_170_400)
+        );
+        // 字符串路径原样不回归。
+        assert_eq!(
+            parse_time(&json!({"timestamp": "2026-08-31T10:00:00Z"})),
+            parse_iso("2026-08-31T10:00:00Z").map(|(s, _)| s)
+        );
+    }
+
+    #[test]
+    fn parse_time_rejects_out_of_fixed_window_and_non_numeric() {
+        // 纯 crate 读不了时钟——窗口是固定的 [2000-01-01, 2100-01-01)。
+        // 999ms → 1970（< 2000）、253402300800000ms → 10000 年（>= 2100）：均 None。
+        assert_eq!(parse_time(&json!({"timestamp": 999_i64})), None);
+        assert_eq!(parse_time(&json!({"timestamp": 253_402_300_800_000_i64})), None);
+        // 位数嗅探禁令：10 位数字按毫秒解释 = 1970，不是「当秒」。
+        assert_eq!(parse_time(&json!({"timestamp": 1_788_170_400_i64})), None);
+        // bool / null / object / 缺失 → None（bool 不是 Number）。
+        assert_eq!(parse_time(&json!({"timestamp": true})), None);
+        assert_eq!(parse_time(&json!({"timestamp": Value::Null})), None);
+        assert_eq!(parse_time(&json!({"timestamp": {"nested": 1}})), None);
+        assert_eq!(parse_time(&json!({})), None);
     }
 }

@@ -2189,6 +2189,12 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(len(sv610), 1)
         self.assertEqual(sv610[0]["severity"], "warning")
         self.assertEqual(sv610[0]["evidence"], "allowed-once")
+        # A6：audit-log `timestamp` 是 epoch-ms 整数（真机形状）——`parse_time`
+        # 归一后 finding 的 `time` 是 unix 秒（不再是 null）。call1 的两条记录
+        # timestamp=1788170400000ms → 1788170400s；call2 → 1788170460；call3 →
+        # 1788170520。双侧同一归一（`both()` 兜底），这里逐值钉死。
+        self.assertEqual([f["time"] for f in a["findings"]],
+                         [1788170400, 1788170400, 1788170460, 1788170520])
         rules = a["rule_outcomes"]
         for code in ("SV604", "SV605", "SV607", "SV608", "SV612", "SV613"):
             self.assertEqual(rules[code]["status"], "unavailable", code)

@@ -1014,6 +1014,71 @@ class TestWorkbuddyIntegerEpochMsTimestamps(unittest.TestCase):
                          ("2026-08-31T09:00:00Z", False))
 
 
+class TestWorkbuddyEvidenceTimeFieldParsesIntegerEpochMs(unittest.TestCase):
+    """A6（spec §10）：`hosts/workbuddy/sessions/evidence.rs::parse_time` ↔
+    `agent/workbuddy_evidence.py::_parse_time` 曾只收字符串
+    （`and_then(Value::as_str)` / `isinstance(ts, str)`）——真机
+    `~/.workbuddy/audit-log/*.jsonl` 的 `timestamp` 是 13 位 epoch-ms 整数，于是
+    每条 audit-log 记录派生的 timeline entry `time` 都是 None，一路带进
+    `audit` 投影里每条 finding 的 `"time": null`。
+
+    A3 试过只改 Rust 一侧，打破了 4 条 `test_cli_matrix` 差分——`TimelineEntry.time`
+    进 `audit` 投影输出，Rust 发整数、Python 仍发 null。所以整数归一必须**双侧
+    同一 commit**（本类钉住），值逐字节一致。
+
+    纯 crate（Rust 镜像可链进 wasm）读不了时钟，所以合法性窗口是**固定**的
+    `[2000-01-01T00:00:00Z, 2100-01-01T00:00:00Z)`——不是 `/sources` 层那条
+    `now+24h`。窗口外 → None（纯层无 `attempts` 汇，只 null）。`time` 归一只喂
+    finding 的 `time` 展示字段；timeline 按 `sequence` 排序、覆盖计数与 finding
+    条数都不动（spec §10 A6：measurement must not change）。"""
+
+    def _s2_findings(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        src = ROOT / "fixtures" / "workbuddy" / "workdir"
+        shutil.copytree(src, tmp, dirs_exist_ok=True)
+        (tmp / "workdir").mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(
+            SCAN_CMD + ["workbuddy-session", "--session", "s2", "--json", "-"],
+            cwd=str(tmp / "workdir"), env=isolated_home_env(tmp),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)["audit"]
+
+    def test_integer_epoch_ms_record_gets_a_real_time_not_null(self):
+        """s2 fixture 的 audit-log `timestamp` 是 epoch-ms 整数
+        （1788170400000 = 2026-08-31T10:00:00Z）。修复前每条 finding 的
+        `time` 是 null；修复后是归一的 unix 秒（与字符串 `parse_iso` 路径同单位）。
+        finding 条数（4）与 rules_unavailable（6）不变——只有 `time` 从 null 变实值。"""
+        audit = self._s2_findings()
+        self.assertEqual(audit["summary"]["findings_total"], 4)
+        self.assertEqual(audit["summary"]["rules_unavailable"], 6)
+        times = [f["time"] for f in audit["findings"]]
+        self.assertEqual(times, [1788170400, 1788170400, 1788170460, 1788170520])
+        self.assertTrue(all(isinstance(t, int) for t in times))
+
+    def test_parse_time_unit_rules_string_integer_float_and_out_of_bounds(self):
+        """`_parse_time` 直调：字符串走 `parse_iso` 不回归；整数/浮点按毫秒 floor
+        除 1000；固定窗口外（999ms=1970、253402300800000ms=10000 年）→ None；
+        bool/None/dict → None。Rust `evidence.rs::parse_time` 单测同表。"""
+        sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
+        from agent_vitals.agent.workbuddy_evidence import _parse_time  # noqa: PLC0415
+        from agent_vitals.agent.claude_evidence import parse_iso  # noqa: PLC0415
+        self.assertEqual(_parse_time({"timestamp": 1788170400000}), 1788170400)
+        self.assertEqual(_parse_time({"timestamp": 1788170400500.0}), 1788170400)
+        self.assertEqual(_parse_time({"timestamp": "2026-08-31T10:00:00Z"}),
+                         parse_iso("2026-08-31T10:00:00Z")[0])
+        # 越界 → None（纯层不进 attempts）。
+        self.assertIsNone(_parse_time({"timestamp": 999}))
+        self.assertIsNone(_parse_time({"timestamp": 253402300800000}))
+        # 位数嗅探禁令：10 位按毫秒 = 1970 → 越界 None，不当秒。
+        self.assertIsNone(_parse_time({"timestamp": 1788170400}))
+        self.assertIsNone(_parse_time({"timestamp": True}))
+        self.assertIsNone(_parse_time({"timestamp": None}))
+        self.assertIsNone(_parse_time({"timestamp": {"nested": 1}}))
+        self.assertIsNone(_parse_time({}))
+
+
 class TestWorkbuddyCostBlockReportsCreditsNotCny(unittest.TestCase):
     """2026-09-10：`workbuddy-session --json` 的 `cost` 块把 `credit_json` 求和塞进
     一个叫 `cny` 的键、旁边站着 `host_billed: true`——任何下游都当人民币读，而真机
