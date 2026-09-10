@@ -1283,7 +1283,7 @@ fn data_status() -> Value {
     let enabled = agent_vitals_runtime::sql_authority::is_enabled(&data_home);
     serde_json::json!({
         "status": "ok",
-        "data": agent_vitals_runtime::mcp::data_status_report(&db.conn(), true, enabled)
+        "data": agent_vitals_runtime::mcp::data_status_report(db.conn(), true, enabled)
     })
 }
 

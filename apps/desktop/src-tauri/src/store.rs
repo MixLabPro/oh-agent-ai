@@ -26,6 +26,7 @@
 //! 预热、用户点击可能并发——`StoreBuildLock` 把同一时刻的冷构造串行化，后到的
 //! 拿不到锁就 await，避免两份并发打开各算一份。
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -312,13 +313,46 @@ pub async fn sessions_issues(
             }))
         }).map_err(|e| error_value("authority_query", &e.to_string()))?;
         let mut issues = Vec::new();
-        for row in rows { issues.push(row.map_err(|e| error_value("authority_query", &e.to_string()))?); }
+        for row in rows {
+            let mut issue = row.map_err(|e| error_value("authority_query", &e.to_string()))?;
+            let metadata = issue.get("metadata").cloned().unwrap_or(Value::Null);
+            issue["category"] = metadata.get("category").cloned().unwrap_or(Value::Null);
+            issue["tool_name"] = metadata.get("tool_name").cloned().unwrap_or(Value::Null);
+            issue["time"] = metadata.get("time").cloned()
+                .unwrap_or_else(|| issue.get("opened_at_ms").cloned().unwrap_or(Value::Null));
+            issues.push(issue);
+        }
         let count = |severity: &str| issues.iter().filter(|v| v["severity"] == severity).count();
+        let (rules, sessions_with) = issue_rollup(&issues);
         Ok(serde_json::json!({
-            "totals": { "issues": issues.len(), "findings": issues.len(), "critical": count("critical"), "warning": count("warning"), "info": count("info") },
-            "issues": issues, "findings": [], "source": "issue_instances"
+            "totals": { "issues": issues.len(), "findings": issues.len(), "critical": count("critical"), "warning": count("warning"), "info": count("info"), "sessions": sessions_with, "sessions_total": sessions_with },
+            "rules": rules, "issues": issues, "findings": [], "source": "issue_instances"
         }))
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+fn issue_rollup(issues: &[Value]) -> (Vec<Value>, usize) {
+    let mut by_rule: BTreeMap<String, (String, Option<String>, usize, BTreeSet<String>)> = BTreeMap::new();
+    let mut sessions = BTreeSet::new();
+    for issue in issues {
+        let rule = issue["rule"].as_str().unwrap_or("unknown").to_string();
+        let severity = issue["severity"].as_str().unwrap_or("info").to_string();
+        let category = issue["category"].as_str().map(str::to_string);
+        let session = issue["session_key"].as_str().map(str::to_string);
+        let entry = by_rule.entry(rule).or_insert_with(|| (severity.clone(), category.clone(), 0, BTreeSet::new()));
+        entry.2 += 1;
+        if let Some(session) = session {
+            sessions.insert(session.clone());
+            entry.3.insert(session);
+        }
+    }
+    let rows = by_rule.into_iter().map(|(rule, (severity, category, hits, sessions))| {
+        serde_json::json!({
+            "rule": rule, "severity": severity, "category": category,
+            "hits": hits, "sessions": sessions.len(),
+        })
+    }).collect();
+    (rows, sessions.len())
 }
 
 #[cfg(test)]

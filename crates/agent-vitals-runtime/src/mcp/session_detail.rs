@@ -34,7 +34,7 @@ pub fn spec() -> ToolSpec {
         }),
         output_schema: json!({
             "type": "object",
-            "description": "spec §6 envelope; data = { session_ref, host, first_event_at, last_event_at, event_count, model_ids, tokens{}, cost_minor, billing_breakdown[], timeline[], has_more, next_cursor }. billing_breakdown is independently grouped by provider, model, peak slot, template and pricing snapshot; it preserves unresolved custom routes rather than merging their costs."
+            "description": "spec §6 envelope; data = { session_ref, host, first_event_at, last_event_at, event_count, model_ids, tokens{}, cost_minor, cost_status, billing_breakdown[], timeline[], has_more, next_cursor }. cost_status explains any null amount; billing_breakdown is independently grouped by provider, model, peak slot, template and pricing snapshot; it preserves unresolved custom routes rather than merging their costs."
         }),
     }
 }
@@ -181,13 +181,10 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         .filter(|_| has_more)
         .map(|f| make_cursor(f.event_ts_ms, &f.fact_id));
 
-    // PR #2.2：cost_minor 字段——usage_facts × pricing_snapshots JOIN 后的
-    // 会话级 metered_estimate（spec §4 不冒充）。失败降级为 null：与
-    // r2a_store 的 cost 列同等语义——可以缺失但不能编造。
-    let cost_minor = authority_query::session_cost_minor(conn, &session_key)
-        .ok()
-        .flatten()
-        .map(|mm| mm.to_json());
+    // 会话成本统一投影：金额兼容字段与 null 原因、价格版本、来源、证据状态
+    // 同时返回，避免客户端把订阅/缺价误读成零成本。
+    let cost_view = authority_query::session_cost_view(conn, &session_key)
+        .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?;
     let billing_breakdown = authority_query::session_billing_buckets(conn, &session_key)
         .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?;
 
@@ -206,7 +203,13 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             "output_tokens": o,
             "total": u + cr + cw + o,
         },
-        "cost_minor": cost_minor,
+        "cost_minor": cost_view["cost_minor"],
+        "cost_status": {
+            "state": cost_view["status"],
+            "reason": cost_view["reason"],
+            "has_unresolved": cost_view["has_unresolved"],
+            "pricing_versions": cost_view["pricing_versions"],
+        },
         "billing_breakdown": billing_breakdown,
         "timeline": timeline,
         "has_more": has_more,
@@ -339,6 +342,9 @@ mod tests {
         assert_eq!(cm["currency"], "CNY");
         assert_eq!(cm["basis"], "metered_estimate");
         assert!(cm["amount_minor"].is_i64());
+        assert_eq!(cm["pricing_versions"], json!(["v1"]));
+        assert_eq!(cm["pricing_source"], "fallback_official");
+        assert_eq!(env["data"]["cost_status"]["state"], "estimated");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -350,6 +356,8 @@ mod tests {
         let env = run(&json!({ "session_ref": sref }), &home).unwrap();
         assert!(env["data"]["cost_minor"].is_null(),
             "无价卡覆盖 → null（不冒充零成本）");
+        assert_eq!(env["data"]["cost_status"]["state"], "unavailable");
+        assert_eq!(env["data"]["cost_status"]["reason"], "no-pricing-snapshot");
         let _ = std::fs::remove_dir_all(&home);
     }
 

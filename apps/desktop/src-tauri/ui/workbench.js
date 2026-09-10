@@ -39,6 +39,36 @@ function fmtCostMinor(cm) {
   return cur + " " + yuan.toFixed(2);
 }
 
+// 成本为空时必须把原因展示出来：订阅 token 不是逐 token 账单，缺价卡/价卡
+// 快照也不等于免费。cost_status 来自 SQL authority 的统一会话投影。
+function fmtCostStatus(status) {
+  if (!status) return "成本不可用 · 未知原因";
+  const labels = {
+    subscription: "订阅用量 · 无逐 token 账单",
+    unpriced: "未计价 · 无原厂价格卡",
+    unavailable: "成本不可用",
+    estimated: "按量估算",
+  };
+  const reasons = {
+    "no-usage-facts": "没有用量事实",
+    "no-pricing-snapshot": "没有覆盖事件时间的价格快照",
+    "no-price-card": "没有匹配的原厂价格卡",
+    "multiple-provider-costs-require-breakdown": "多个 provider，需分桶查看",
+    "subscription-token-usage-is-not-a-per-token-bill": "订阅 token 不产生逐 token 账单",
+    "cost-query-failed": "成本查询失败",
+  };
+  const state = labels[status.state] || "成本不可用";
+  const reason = reasons[status.reason] || status.reason || "未知原因";
+  return state + " · " + reason;
+}
+
+function fmtSessionCost(session) {
+  if (session && session.cost_minor != null) {
+    return fmtCostMinor(session.cost_minor) + (session.cost_minor.basis === "metered_estimate" ? " · 估算" : "");
+  }
+  return fmtCostStatus(session && session.cost_status);
+}
+
 // token 缩写：≥1M "1.4M"、≥1K "8.2K"（<10K 一位小数）、<1K 原样 —— 镜像 lib.rs::fmt_tokens。
 function fmtTokens(n) {
   if (n == null) return "—";
@@ -294,8 +324,6 @@ async function loadActiveTab() {
   // Findings / 数据源同款懒加载（CLI 汇总较重，见 state 注释）。
   else if (activeTab === "findings") { if (!findState.loaded) loadFindings(); }
   else if (activeTab === "sources") { if (!srcState.loaded) loadSources(); }
-  // Traces 无自动加载：渲染是显式动作（要用户提供文件路径 + namespace——身份段
-  // 不发明，spec §9），空态文案常显直到用户点「渲染轨迹」。
 }
 
 // 聚焦刷新：与弹窗同款 —— 窗口每次重新获得焦点都重拉（hide 不是 close，数据要新鲜）。
@@ -1455,10 +1483,10 @@ async function fetchSessionsPage(gen) {
     if (gen != null && gen !== sessPrefetchGen) return false; // 中途被 reset → 丢本页
     sessState.items = sessState.items.concat(data.sessions || []);
     sessState.nextCursor = data.next_cursor || null;
-    // `window_total_tokens` 是窗口内全部会话的 token 总和（不是当前页之和），
-    // 比 r2a 的 page.total 更有意义——告诉用户「今天共有多少 token 在跑」。
-    sessState.total = data.window_total_tokens != null
-      ? data.window_total_tokens
+    // 会话数与 token 总量是不同指标。此前错误地把 window_total_tokens 直接
+    // 写进会话计数，导致 UI 显示「23 亿个会话」。
+    sessState.total = data.window_session_count != null
+      ? data.window_session_count
       : sessState.items.length;
     sessState.error = false;
     renderSessions();
@@ -1557,7 +1585,7 @@ function renderSessions() {
     // cost_minor 形状: {amount_minor: i64, currency: "USD"|"CNY"} | null
     // 旧 fmtUSD 收 float|null —— 加小 helper 把 amount_minor 转显示串；
     // null → "—"，命中 → "$1.23" / "¥1.23"（按 currency 走；与 fmtUSD/fmtMoney 同款）。
-    tr.appendChild(tdNum(fmtCostMinor(s.cost_minor)));
+    tr.appendChild(tdNum(fmtSessionCost(s)));
     tr.appendChild(tdNum("—"));
     tr.addEventListener("click", () => showSession(s));
     body.appendChild(tr);
@@ -1622,7 +1650,7 @@ function renderDetailSummary(s) {
   // 命中时按 currency 标 USD/CNY；null → "—"（不拿 ¥0.00 冒充没花钱）。
   // envelope 到手后 refreshDetailCards 用真实 session 数据把卡片补上（envelope
   // .data.tokens.total 完整；envelope .data.cost_minor 同样 currency-aware）。
-  const costCard = detailCard("成本", fmtCostMinor(s.cost_minor), "sess-card-cost");
+  const costCard = detailCard("估算成本", fmtSessionCost(s), "sess-card-cost");
   costCard.querySelector(".label").id = "sess-card-cost-label";
   cards.appendChild(costCard);
   const tokensTotal = (s.tokens && typeof s.tokens.total === "number") ? s.tokens.total : null;
@@ -1683,9 +1711,13 @@ function refreshDetailCards(session) {
   if (session.cost_minor != null) {
     const label = document.getElementById("sess-card-cost-label");
     if (label) {
-      label.textContent = session.cost_minor.currency === "USD" ? "成本(USD)" : "成本(CNY)";
+      label.textContent = session.cost_minor.currency === "USD" ? "估算成本(USD)" : "估算成本(CNY)";
     }
     costEl.textContent = fmtCostMinor(session.cost_minor);
+  } else {
+    const label = document.getElementById("sess-card-cost-label");
+    if (label) label.textContent = "成本状态";
+    costEl.textContent = fmtCostStatus(session.cost_status);
   }
   // findings：单会话 finding 数不在权威库 envelope 里——M4 之前保持 "—"
   // （renderDetailSummary 已把卡片初始写成 "—"）
@@ -2849,19 +2881,14 @@ function renderDetailEnvelope(env) {
   // 缺场值，envelope.data 是权威源——以它为准）
   refreshDetailCards(data);
 
-  // 降级 banner：旧 DSH/Codex 专属分区（cost_report / audit.findings / requests
-  // / findings[] / context / waste / compaction / duration / subagents /
-  // rule_outcomes / *_coverage）字段不在权威库 envelope 里。这些是 r2a_store
-  // 路径预计算 + DSH/Codex 各自 wire 适配层算的，权威库目前只承载 usage_facts。
-  // 等 M4 `workflow_events` MCP 工具落地后（PR #2.3a，task #19）整段回填，
-  // 那时这条 banner 由 schema 字段判定自动消失。
-  body.appendChild(downgradeBanner());
-
   // summary panel：host / event_count / model_ids / 时间范围 / token 4 桶 / cost_minor
   body.appendChild(renderDetailSummaryPanel(data));
+  body.appendChild(renderBillingBreakdown(data.billing_breakdown));
 
   // timeline table：按 event_at 排序的事实流（每条 fact 一行）
   const tl = Array.isArray(data.timeline) ? data.timeline : [];
+  body.appendChild(renderDetailTracePlaceholder(data.session_ref));
+  loadDetailTrace(data.session_ref);
   body.appendChild(renderDetailTimelineTable(tl, data.has_more));
 
   // 元数据：schema / data version / authority_revision（权威库 commit 标记）/
@@ -2869,6 +2896,96 @@ function renderDetailEnvelope(env) {
   body.appendChild(renderDetailMeta(env, data));
 
   body.appendChild(rawSection(env));
+}
+
+function renderBillingBreakdown(buckets) {
+  const sec = detailSection("计费归因与估算依据");
+  const rows = Array.isArray(buckets) ? buckets : [];
+  if (rows.length === 0) {
+    const p = el("div", "muted");
+    p.textContent = "没有可审计的计费桶；不会把它显示为零成本。";
+    sec.appendChild(p);
+    return sec;
+  }
+  const table = el("table", "detail-timeline");
+  const head = el("thead");
+  const headRow = el("tr");
+  for (const label of ["Provider / 模型", "计费口径", "价格来源", "估算成本", "状态"]) {
+    const th = el("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  head.appendChild(headRow);
+  table.appendChild(head);
+  const body = el("tbody");
+  for (const b of rows) {
+    const tr = el("tr");
+    tr.appendChild(td((b.provider_raw || b.provider_id || "<unknown>") + " · " + (b.model_id || "<unknown>")));
+    tr.appendChild(td((b.billing_mode || "unknown") + " · " + (b.pricing_basis || "unavailable")));
+    tr.appendChild(td((b.pricing_source || "无可用价格") + (b.pricing_version ? " · " + b.pricing_version.slice(0, 12) : "")));
+    tr.appendChild(tdNum(b.cost_minor ? fmtCostMinor(b.cost_minor) + " · 估算" : "—"));
+    const status = b.billing_mode === "subscription"
+      ? (b.unresolved_reason || "订阅 token 不按量计费")
+      : (b.has_unresolved ? (b.unresolved_reason || "归因未决") : "可审计");
+    tr.appendChild(td(status));
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+  sec.appendChild(table);
+  return sec;
+}
+
+function renderDetailTracePlaceholder(sessionRef) {
+  const sec = detailSection("会话轨迹图");
+  const target = el("div", "detail-trace");
+  target.id = "sess-detail-trace";
+  target.dataset.sessionRef = sessionRef || "";
+  target.textContent = "轨迹加载中…";
+  sec.appendChild(target);
+  return sec;
+}
+
+async function loadDetailTrace(sessionRef) {
+  const target = document.getElementById("sess-detail-trace");
+  if (!target || !sessionRef) {
+    if (target) target.textContent = "轨迹不可用：缺少安全会话引用。";
+    return;
+  }
+  try {
+    const [seriesEnv, graphEnv] = await Promise.all([
+      invoke("session_trace", { sessionRef, output: "timeline_series" }),
+      invoke("session_trace", { sessionRef, output: "graph" }),
+    ]);
+    if (target.dataset.sessionRef !== sessionRef) return;
+    if (seriesEnv && seriesEnv.error) {
+      target.textContent = "轨迹不可用：" + (seriesEnv.error.message || seriesEnv.error.code);
+      return;
+    }
+    const series = (seriesEnv && seriesEnv.data) || {};
+    if (!Array.isArray(series.points) || series.points.length === 0) {
+      target.textContent = "该会话没有可绘制的 turn 样本；事实时间线仍在下方保留。";
+      return;
+    }
+    target.innerHTML = window.TimelineGeometry.buildTimeline(series);
+    const graph = graphEnv && !graphEnv.error ? graphEnv.data : null;
+    const meta = el("div", "detail-meta");
+    meta.textContent = graph ? detailTraceCoverageText(graph) : "轨迹覆盖率不可用";
+    if (series.unplaced_events) {
+      meta.textContent += " · " + series.unplaced_events + " 个事件没有可定位的 turn";
+    }
+    target.appendChild(meta);
+  } catch (e) {
+    if (target.dataset.sessionRef === sessionRef) {
+      target.textContent = "轨迹加载失败：" + errText(e);
+    }
+  }
+}
+
+function detailTraceCoverageText(graph) {
+  const c = graph.coverage || {};
+  return "节点 " + (c.total_nodes ?? "—") + " · 边 " + (c.total_edges ?? "—") +
+    " · 缺父 " + (c.missing_parent ?? "—") + " · 缺时 " + (c.missing_time ?? "—") +
+    " · 缺状态 " + (c.missing_status ?? "—") + " · 废弃分支 " + (c.unmetered_nodes ?? "—");
 }
 
 // v0.9.1 详情视图降级 banner：旧 r2a envelope 的 DSH/Codex 专属分区不在权威库
@@ -2907,7 +3024,7 @@ function renderDetailSummaryPanel(d) {
   lines.push("cache_write · " + fmtTokens(tk.cache_write_tokens));
   lines.push("output · " + fmtTokens(tk.output_tokens));
   lines.push("total · " + fmtTokens(tk.total));
-  lines.push("cost · " + fmtCostMinor(d.cost_minor));
+  lines.push("cost · " + fmtSessionCost(d));
   const p = el("div", "detail-meta");
   p.textContent = lines.join(" · ");
   sec.appendChild(p);
@@ -3435,84 +3552,3 @@ function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
-
-
-// ───────────────────────── Traces（v0.10.0）─────────────────────────────────
-// 数据面 = session_trace IPC（in-process mcp::dispatch，envelope 三面同源）；
-// 几何 = window.TimelineGeometry.buildTimeline（**共享唯一份**——本页不写任何
-// 比例尺/抽稀/事件定位逻辑，spec §2.1.2）。金额/覆盖从不在这里计算：envelope
-// 给什么展示什么，unavailable 展示「无数据」，绝不渲染 0。
-(function () {
-  const $ = (id) => document.getElementById(id);
-
-  function traceBanner(msg) {
-    const el = $("trace-banner");
-    if (!msg) { el.hidden = true; el.textContent = ""; return; }
-    el.hidden = false;
-    el.textContent = msg;
-  }
-
-  function traceCoverageText(graph) {
-    // 六计数原样呈现（§2.1.2：不设单值比率——一个 0..1 数字会诱导跨会话平均，
-    // 而部分覆盖必须打标，这是 priced_day 的 partial 教训的呈现侧镜像）。
-    const c = graph.coverage || {};
-    return `节点 ${c.total_nodes ?? "—"} · 边 ${c.total_edges ?? "—"} · `
-      + `缺父 ${c.missing_parent ?? "—"} · 缺时 ${c.missing_time ?? "—"} · `
-      + `缺状态 ${c.missing_status ?? "—"} · 废弃分支 ${c.unmetered_nodes ?? "—"}`;
-  }
-
-  async function renderTrace() {
-    const sessionRef = $("trace-session-ref").value.trim();
-    traceBanner("");
-    if (!sessionRef) {
-      traceBanner("请填写 Sessions 列表返回的会话引用");
-      return;
-    }
-    $("trace-render").disabled = true;
-    $("trace-render").textContent = "渲染中…";
-    try {
-      const r = await invoke("session_trace", {
-        sessionRef, output: "timeline_series",
-      });
-      if (r && r.error) {
-        traceBanner(`轨迹不可用：${r.error.message || r.error.code}`);
-        return;
-      }
-      const data = (r && r.data) || {};
-      const unplaced = data.unplaced_events;
-      if (!data.points || !data.points.length) {
-        $("trace-timeline").innerHTML = "";
-        $("trace-empty").hidden = false;
-        $("trace-empty").textContent = "该会话没有可绘制的 turn 样本（可能源日志已清理，或没有任何 turn 边界）";
-        $("trace-coverage").textContent = "";
-        return;
-      }
-      $("trace-empty").hidden = true;
-      // 共享几何：事件层一个不丢（eventsIn===eventsOut 由几何层钉着），缺数据
-      // 留缺口不连直线——本页只负责把 envelope.data 原样递给它。
-      $("trace-timeline").innerHTML = window.TimelineGeometry.buildTimeline(data);
-      const ipc = await invoke("session_trace", {
-        sessionRef, output: "graph",
-      });
-      const graph = ipc && !ipc.error ? ipc.data : null;
-      $("trace-coverage").textContent = graph ? traceCoverageText(graph) : "";
-      // unplaced_events：锚不到曲线样本的事件数——unaccounted sentinel 的呈现
-      // 侧镜像，非 0 必须可见（spec §10.6 同语义：绝不静默）。
-      if (unplaced) {
-        traceBanner(`注意：${unplaced} 个工具调用锚不到任何 turn（缺 turn 边界），未画入时间线——数量如实呈现，位置不编造`);
-      }
-    } catch (e) {
-      traceBanner(`调用失败：${e}`);
-    } finally {
-      $("trace-render").disabled = false;
-      $("trace-render").textContent = "渲染轨迹";
-    }
-  }
-
-  document.addEventListener("DOMContentLoaded", () => {
-    const btn = $("trace-render");
-    if (btn) btn.addEventListener("click", renderTrace);
-    const sessionRefInput = $("trace-session-ref");
-    if (sessionRefInput) sessionRefInput.addEventListener("keydown", (e) => { if (e.key === "Enter") renderTrace(); });
-  });
-})();

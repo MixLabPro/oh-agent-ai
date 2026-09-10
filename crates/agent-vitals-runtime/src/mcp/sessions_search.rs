@@ -41,7 +41,7 @@ pub fn spec() -> ToolSpec {
         }),
         output_schema: json!({
             "type": "object",
-            "description": "spec §6 envelope; data = { window, sessions[], window_total_tokens, has_more, next_cursor }. Per-session tokens/peak_tokens are aggregated; cost_minor is the price-table-derived metered_estimate (usage_facts × pricing_snapshots JOIN, basis=MeteredEstimate) or null when no snapshot covers the session or no model is priced."
+            "description": "spec §6 envelope; data = { window, sessions[], window_total_tokens, window_session_count, has_more, next_cursor }. Per-session tokens/peak_tokens are aggregated; cost_minor is the price-table-derived metered_estimate with pricing provenance, while cost_status explains subscription, unpriced, mixed-provider, or unavailable nulls."
         }),
     }
 }
@@ -143,7 +143,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         Some((t, k)) => (Some(*t), Some(k.as_str())),
         None => (None, None),
     };
-    let (rows, has_more, window_total) = authority_query::sessions_in_window(
+    let (rows, has_more, window_total, window_session_count) = authority_query::sessions_in_window(
         conn, start_ms, end_ms, &hosts, hour, min_tokens, after_total, after_key, limit,
     )
     .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?;
@@ -164,14 +164,18 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let sessions: Vec<Value> = rows
         .iter()
         .map(|s| {
-            // PR #2.2：cost_minor 字段——usage_facts × pricing_snapshots JOIN
-            // 后的会话级 metered_estimate（spec §4 不冒充）。**失败降级为
-            // null，不抛**：与 r2a_store 一致，cost 列可以缺失但不能编造。
+            // 会话成本统一投影：保留 cost_minor 兼容字段，同时把 null 的原因
+            // 和金额的价格版本/来源/证据状态放在同级 cost_status 里。
             // 单会话 ~100 行 → 微秒级；50 个会话/页 ≈ 5ms 内（真机量级）。
-            let cost_minor = authority_query::session_cost_minor(conn, &s.session_key)
+            let cost_view = authority_query::session_cost_view(conn, &s.session_key)
                 .ok()
-                .flatten()
-                .map(|mm| mm.to_json());
+                .unwrap_or_else(|| json!({
+                    "cost_minor": null,
+                    "status": "unavailable",
+                    "reason": "cost-query-failed",
+                    "has_unresolved": true,
+                    "pricing_versions": [],
+                }));
             json!({
                 "session_ref": super::session_ref::session_ref(&salt, &s.session_key),
                 "host": s.host,
@@ -188,7 +192,13 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
                     "total": s.total(),
                 },
                 "peak_tokens": s.peak_tokens,
-                "cost_minor": cost_minor,
+                "cost_minor": cost_view["cost_minor"],
+                "cost_status": {
+                    "state": cost_view["status"],
+                    "reason": cost_view["reason"],
+                    "has_unresolved": cost_view["has_unresolved"],
+                    "pricing_versions": cost_view["pricing_versions"],
+                },
             })
         })
         .collect();
@@ -202,6 +212,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         },
         "sessions": sessions,
         "window_total_tokens": window_total,
+        "window_session_count": window_session_count,
         "has_more": has_more,
         "next_cursor": next_cursor,
     });
@@ -349,6 +360,9 @@ mod tests {
         assert_eq!(s0["cost_minor"]["currency"], "CNY");
         assert_eq!(s0["cost_minor"]["basis"], "metered_estimate");
         assert!(s0["cost_minor"]["amount_minor"].is_i64());
+        assert_eq!(s0["cost_minor"]["pricing_versions"], json!(["v1"]));
+        assert_eq!(s0["cost_minor"]["pricing_source"], "fallback_official");
+        assert_eq!(s0["cost_status"]["state"], "estimated");
 
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -365,6 +379,31 @@ mod tests {
         let env = run(&json!({ "date": "2026-09-07" }), &home).unwrap();
         assert!(env["data"]["sessions"][0]["cost_minor"].is_null(),
             "无价卡覆盖 → null（spec §0.1 不冒充零）");
+        assert_eq!(env["data"]["sessions"][0]["cost_status"]["state"], "unavailable");
+        assert_eq!(env["data"]["sessions"][0]["cost_status"]["reason"], "no-pricing-snapshot");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn cost_status_explains_subscription_null() {
+        let home = tmp_home("cost-status");
+        let db = seed(&home);
+        let (start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
+        fact(&db, "sub", "codex", "3:codex|3:sub|1:n", start + 3_600_000, 500);
+        db.conn().execute(
+            "UPDATE usage_facts SET provider_id='openai', billing_mode='subscription',
+                    pricing_basis='subscription', evidence_basis='explicit-official-route'
+             WHERE fact_id='sub'",
+            [],
+        ).unwrap();
+        drop(db);
+
+        let env = run(&json!({ "date": "2026-09-07" }), &home).unwrap();
+        let session = &env["data"]["sessions"][0];
+        assert!(session["cost_minor"].is_null());
+        assert_eq!(session["cost_status"]["state"], "subscription");
+        assert_eq!(session["cost_status"]["reason"], "subscription-token-usage-is-not-a-per-token-bill");
+        assert_eq!(session["cost_status"]["has_unresolved"], false);
         let _ = std::fs::remove_dir_all(&home);
     }
 

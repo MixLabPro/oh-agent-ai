@@ -924,7 +924,7 @@ const SQL_SESSIONS_IN_WINDOW: &str = "SELECT session_key, host,
 /// 窗口内的会话聚合，跨 wired 宿主合并。`hour` = 北京小时过滤（`None` = 不过滤）；
 /// `min_tokens` = HAVING 门槛；按 `total` 降序 + `session_key` 升序稳定排序，
 /// keyset 分页（cursor = 上一页尾行的 `(total, session_key)`）。返回 (rows,
-/// has_more, window_total_tokens)——`window_total_tokens` 让调用方核对
+/// has_more, window_total_tokens, window_session_count)——`window_total_tokens` 让调用方核对
 /// 「所有会话之和 == 窗口/峰值总量」（Q04 不变式）。
 #[allow(clippy::too_many_arguments)]
 pub fn sessions_in_window(
@@ -937,7 +937,7 @@ pub fn sessions_in_window(
     after_total: Option<i64>,
     after_key: Option<&str>,
     limit: usize,
-) -> Result<(Vec<SessionAgg>, bool, i64), AuthorityError> {
+) -> Result<(Vec<SessionAgg>, bool, i64, usize), AuthorityError> {
     let selected: Vec<String> = if hosts.is_empty() {
         conn.prepare("SELECT DISTINCT host FROM usage_facts WHERE deleted_at_ms IS NULL ORDER BY host")?
             .query_map([], |r| r.get(0))?
@@ -977,6 +977,7 @@ pub fn sessions_in_window(
     }
 
     let window_total: i64 = all.iter().map(SessionAgg::total).sum();
+    let window_session_count = all.len();
 
     all.retain(|s| s.total() >= min_tokens);
     // total 降序、session_key 升序——稳定、可 keyset 分页。
@@ -986,7 +987,7 @@ pub fn sessions_in_window(
     }
     let has_more = all.len() > limit;
     all.truncate(limit);
-    Ok((all, has_more, window_total))
+    Ok((all, has_more, window_total, window_session_count))
 }
 
 /// 一个会话的行级事实时间线（`session_detail`）。按 `(event_ts_ms, fact_id)`
@@ -1187,11 +1188,112 @@ pub fn session_billing_buckets(
                 "output_tokens": output,
                 "total": uncached + cache_read + cache_write + output,
             },
-            "has_unresolved": unresolved_reason.is_some(),
+            // Subscription usage is explicitly classified and therefore is not
+            // an unresolved attribution. Keep the explanatory reason, but do
+            // not let it masquerade as route/price uncertainty.
+            "has_unresolved": billing_mode != "subscription" && unresolved_reason.is_some(),
             "unresolved_reason": unresolved_reason,
         }));
     }
     Ok(buckets)
+}
+
+/// 会话成本的统一解释投影，供公开 MCP 会话 DTO 使用。
+///
+/// `cost_minor` 保留旧字段名以兼容现有客户端；`status` / `reason` 解决
+/// `cost_minor = null` 的歧义；有金额时把历史价格版本、来源和证据状态附在
+/// 同一个金额对象上。这样订阅 token、混合 provider、缺价卡都不会被 UI 当成
+/// 免费或查询失败。
+pub fn session_cost_view(
+    conn: &Connection,
+    session_key: &str,
+) -> Result<Value, AuthorityError> {
+    let buckets = session_billing_buckets(conn, session_key)?;
+    let token_total: i64 = buckets
+        .iter()
+        .filter_map(|bucket| bucket.get("tokens").and_then(|tokens| tokens.get("total")))
+        .filter_map(Value::as_i64)
+        .sum();
+    let has_unresolved = buckets
+        .iter()
+        .filter(|bucket| bucket["billing_mode"] != "subscription")
+        .any(|bucket| bucket["has_unresolved"].as_bool().unwrap_or(false));
+    let all_subscription = !buckets.is_empty()
+        && buckets
+            .iter()
+            .all(|bucket| bucket["billing_mode"] == "subscription");
+    let non_subscription_providers: std::collections::BTreeSet<String> = buckets
+        .iter()
+        .filter(|bucket| bucket["billing_mode"] != "subscription")
+        .map(|bucket| {
+            bucket["provider_id"]
+                .as_str()
+                .or_else(|| bucket["provider_raw"].as_str())
+                .unwrap_or("<unknown>")
+                .to_string()
+        })
+        .collect();
+
+    let mut cost_minor = session_cost_minor(conn, session_key)?
+        .map(|money| money.to_json());
+    let pricing_versions: std::collections::BTreeSet<String> = buckets
+        .iter()
+        .filter_map(|bucket| bucket["pricing_version"].as_str())
+        .map(str::to_string)
+        .collect();
+    if let Some(cost) = cost_minor.as_mut() {
+        cost["pricing_versions"] = json!(pricing_versions.iter().collect::<Vec<_>>());
+        cost["pricing_source"] = json!(if has_unresolved {
+            "fallback_official"
+        } else {
+            "official"
+        });
+        cost["evidence_basis"] = json!(if has_unresolved {
+            "route-or-provider-unresolved"
+        } else {
+            "explicit-official-route"
+        });
+        cost["has_unresolved"] = json!(has_unresolved);
+    }
+
+    let (state, reason) = if buckets.is_empty() || token_total == 0 {
+        ("unavailable", "no-usage-facts")
+    } else if all_subscription {
+        ("subscription", "subscription-token-usage-is-not-a-per-token-bill")
+    } else if cost_minor.is_some() {
+        ("estimated", if has_unresolved {
+            "official-card-fallback-estimate"
+        } else {
+            "metered-estimate"
+        })
+    } else if non_subscription_providers.len() > 1 {
+        ("unavailable", "multiple-provider-costs-require-breakdown")
+    } else if buckets.iter().any(|bucket| {
+        bucket["unresolved_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("pricing snapshot"))
+    }) {
+        ("unavailable", "no-pricing-snapshot")
+    } else if buckets.iter().any(|bucket| {
+        bucket["unresolved_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("price card"))
+    }) {
+        ("unpriced", "no-price-card")
+    } else {
+        ("unavailable", "cost-unavailable")
+    };
+
+    let status_has_unresolved = has_unresolved
+        || state == "unpriced"
+        || (state == "unavailable" && token_total > 0);
+    Ok(json!({
+        "cost_minor": cost_minor,
+        "status": state,
+        "reason": reason,
+        "has_unresolved": status_has_unresolved,
+        "pricing_versions": pricing_versions.iter().collect::<Vec<_>>(),
+    }))
 }
 
 // ─────── v0.9.1 最后一公里（PR #2）：sessions_search / session_detail envelope
@@ -2264,11 +2366,12 @@ mod tests {
         insert_session_fact(&db, "f4", "codex", "kC", "m-c", h9 + 60_000, 0, 40);
 
         // 无小时过滤：3 会话，window_total = 940。
-        let (rows, more, wt) =
+        let (rows, more, wt, count) =
             sessions_in_window(db.conn(), start, end, &[], None, 0, None, None, 50).unwrap();
         assert_eq!(rows.len(), 3);
         assert!(!more);
         assert_eq!(wt, 940);
+        assert_eq!(count, 3);
         // total 降序：kA(400) > kB(500)? no — kB=500 > kA=400. 顺序 kB, kA, kC。
         assert_eq!(rows[0].session_key, "kB");
         assert_eq!(rows[0].total(), 500);
@@ -2279,14 +2382,15 @@ mod tests {
         assert_eq!(rows[1].last_event_ms, h22);
 
         // 22 点过滤：kA 贡献 300、kB 贡献 500 → sum == 800（== usage_hourly 22点 total）。
-        let (rows, _, wt22) =
+        let (rows, _, wt22, count22) =
             sessions_in_window(db.conn(), start, end, &[], Some(22), 0, None, None, 50).unwrap();
         assert_eq!(wt22, 800, "Q04 不变式：会话之和 == 峰值小时总量");
+        assert_eq!(count22, 2);
         assert_eq!(rows.iter().map(|s| s.total()).sum::<i64>(), 800);
         assert!(rows.iter().all(|s| s.host == "claude-code"));
 
         // host 过滤 + min_tokens。
-        let (rows, _, _) =
+        let (rows, _, _, _) =
             sessions_in_window(db.conn(), start, end, &["codex".into()], None, 0, None, None, 50)
                 .unwrap();
         assert_eq!(rows.len(), 1);

@@ -137,6 +137,24 @@ pricing_snapshot {
 - 不能出现“有 token、cost 为 0/null 但无原因”；
 - 无价格时返回 unavailable，不得伪装为零。
 
+兼容字段 `cost_minor` 允许为空，但同级必须返回：
+
+```json
+{
+  "cost_status": {
+    "state": "estimated | subscription | unpriced | unavailable",
+    "reason": "stable-machine-readable-code",
+    "has_unresolved": true,
+    "pricing_versions": ["..." ]
+  }
+}
+```
+
+有金额时，`cost_minor` 还必须携带 `pricing_versions`、`pricing_source`、
+`evidence_basis` 和 `has_unresolved`。订阅用量的 `cost_minor` 为 null 是合法的，
+但 `cost_status.state=subscription` 且原因必须明确说明“无逐 token 账单”；缺价卡
+和无快照分别使用 `unpriced/no-price-card` 与 `unavailable/no-pricing-snapshot`。
+
 ### 5.3 MCP 状态
 
 `data_status` 必须同时报告：
