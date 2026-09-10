@@ -23,7 +23,19 @@
 - 结束：2026-09-10 13:26 UTC 左右，约7分钟；未触发30分钟熔断。修改相关测试连续失败0次；独立基线失败1次，针对性复现1次，待后续修复。
 - 原始日志：`/tmp/agent-vitals-v1-desktop-loop1.log`、`/tmp/agent-vitals-v1-rust-baseline.log`、`/tmp/agent-vitals-v1-python-baseline.log`、`/tmp/agent-vitals-v1-desktop-clippy-loop1.log`。
 
-## 后续优先缺口（独立agent静态核查）
+## Loop 2 · 会话详情轨迹回归验证
+
+- 开始：2026-09-10 13:26 UTC；30分钟熔断截止13:56 UTC。
+- 上轮分类：progress，已有代码/清单提交及独立验收证据。
+- 分析：轨迹已嵌入会话详情，旧验证器依赖已移除的独立Traces tab。
+- 执行：从真实`renderDetailEnvelope`入口验证详情容器创建和`loadDetailTrace`调用，保留真实CLI fixture DTO与真实TimelineGeometry；精确验证`timeline_series`与`graph`两种请求，并覆盖安全引用、缺引用不发IPC、错误响应、Promise拒绝、无样本和过期响应。
+- 首次运行发现测试定位写成sess-detail（实际sess-detail-view），纠正后Node验证和Python模板测试通过。修改连续失败最大1次，当前0次。
+- 完整Python回归：1129 tests通过，201 skipped；日志`/tmp/agent-vitals-v1-loop2-python.log`。
+- 首次独立审查指出旧DOM桩让过期响应测试可能假通过、未动态验证详情入口、未精确区分两种输出。已用互斥`textContent`/`innerHTML`语义修正DOM桩，并增加入口、输出类型和Promise拒绝断言。
+- 独立验收：Zeno agent `01a08b80-7a79-7691-a8f4-cf4e5ebd574b`复验后明确`ACCEPTED`；其运行Node语法检查、完整脚本和diff检查均通过，确认四个阻断项全部关闭且未删除有效覆盖。
+- 本轮仅修复既有轨迹契约的回归验证，不足以证明FR-08整项完成，因此未勾选完整PRD条款。
+
+## 后续优先缺口（继续）
 
 1. 数据源页读取 sessions_list 中不存在的 source_statuses，缺字段降为空且只遍历两个宿主；需专用状态契约。
 2. Codex/Claude目录扫描吞掉读取错误，无法区分无数据与权限失败。
