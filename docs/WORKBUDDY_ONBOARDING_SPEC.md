@@ -1,6 +1,10 @@
 # WorkBuddy 接入规格（Phase A–D）
 
 > 撰写 2026-09-10。真机语料实测基线见 §2（本次重测，非引用旧数字）。
+> **状态（2026-09-10）：Phase A 全部收口（A1–A6 见 §10，均已 commit 且门禁通过）。**
+> §3 的三条实测缺陷——`cost.cny` 把积分当人民币、`date_span` 真机恒 null、fixture
+> 是纸面 schema——**均已修复**；`cost` 块现为 §6.1 的 6 键形状。Phase B/C/D 仍是
+> 决策门（§7.4 建议路径 2，即不做；§9 明确不做）。
 > 关联：[WORKBUDDY_INTEGRATION.md](./WORKBUDDY_INTEGRATION.md)（2026-09-02 调研 +
 > 会话行为适配器，**已落地**）· [ATTRIBUTABLE_WASTE.md](./ATTRIBUTABLE_WASTE.md)
 > §6/§6.6/§6.7（成本词表与名义口径）· [AGENT_VITALS_V0_9_DATA_VALUE_ARCHITECTURE_SPEC.md](./AGENT_VITALS_V0_9_DATA_VALUE_ARCHITECTURE_SPEC.md)
@@ -33,9 +37,10 @@
 
 1. **WorkBuddy 已接了一半**：静态 skill 体检 + 会话行为审计已落地；v0.9 数据面是
    刻意的「声明但排除」（用户 2026-09-05 决定，`fixtures/v09/workbuddy/EXCLUDED.md`）。
-2. **已落地的那一半现在报错误的数字**（§3 三条实测缺陷）：`cost.cny` 把积分当人民币
+2. **已落地的那一半曾报错误的数字**（§3 三条实测缺陷）：`cost.cny` 把积分当人民币
    （约 20× 高估）、`date_span` 真机恒 null、fixture 是纸面 schema。**与接不接数据面
-   无关，是既有代码的 bug**，Phase A 独立修。
+   无关，是既有代码的 bug**，Phase A 独立修——**三条均已在 Phase A（A1–A6）修复并
+   commit**（详见 §10）。
 3. **「会话面」与「事实面」在当前架构下不可分**（§7.1 的 SQL 证据）：统一
    `sessions list` 是对 `usage_facts` 的 GROUP BY，一个会话出现在统一面**当且仅当**
    它有至少一条带时间戳的非聚合 UsageFact。所以「先接会话、再谈成本」的分层没有落点。
@@ -440,7 +445,7 @@ invoices…) are **user-entered, not derived from our price cards**」。
       `tests/test_cli_matrix.py` 六条 workbuddy 差分在新 fixture 上重新逐字节一致；
       新增回归：整数时间戳可解析 · 越界时间戳报 null 且进 attempts · `cost` 不含
       `cny` 键 · `nominal_cny` 不出现在任何**实付**汇总 DTO 里。
-- [ ] **A5 · 文档勘误**（§6.3）
+- [x] **A5 · 文档勘误**（§6.3）
       `WORKBUDDY_INTEGRATION.md` §9 两处 + §2.1 表一处 + §9 输出契约段；
       本篇状态行更新。
 - [x] **A6 · evidence.rs 整数时间戳 lockstep**（A3 推迟项）
