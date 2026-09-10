@@ -2123,8 +2123,11 @@ class CliMatrix(unittest.TestCase):
                          "no evidence for required signal(s) in this session")
         for code in ("SV601", "SV602", "SV603", "SV606", "SV610", "SV611", "SV614"):
             self.assertEqual(rules[code]["status"], "measured_zero", code)
+        # cny = credit_json 求和（A1 起 fixture 用真机量级 22.53+19.48=42.01；
+        # 旧值 0.05 来自 0.02+0.03，正是「把积分当人民币」单位 bug 的复刻，§3.1）。
+        # 键名仍是 `cny`——A3 的 cash_cny/nominal_cny 二分尚未做。
         self.assertEqual(report["cost"],
-                         {"tokens": 5000, "cny": 0.05, "host_billed": True})
+                         {"tokens": 5000, "cny": 42.01, "host_billed": True})
         # 信号序 = ALL_SIGNALS 序（Signals 数组的顺序是输出契约的一部分）。
         self.assertEqual(report["signals"],
                          ["ToolCalls", "TurnBoundaries", "UsageAggregate",

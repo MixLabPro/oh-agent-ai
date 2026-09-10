@@ -117,6 +117,41 @@ def _render_list(out):
     return s
 
 
+def _timestamp_attempts(db_rec, records, now_secs):
+    """spec §6.2 rule 3：db `created_at`/`updated_at` 与 audit-log `timestamp` 里
+    归一后越界的 epoch-ms 值——报 null 之外还要留一条 `attempts` 痕迹
+    （§14.4：skipped and recorded, never treated as corruption）。**只有
+    OutOfWindow 进 attempts**：字符串照走 ISO，其它类型静默 null。
+
+    Rust 镜像 `sources/mod.rs::timestamp_attempts`，逐字节对齐（顺序：先 db 两列，
+    再 audit-log 记录序）。"""
+    out = []
+
+    def mk(source_id, kind, field, raw):
+        return {
+            "source_id": source_id,
+            "kind": kind,
+            "surface": "SessionLog",
+            "available": False,
+            "error": ("%s: epoch-ms timestamp %s normalizes outside the validity "
+                      "window [2000-01-01T00:00:00Z, now+24h]; treated as "
+                      "unparseable" % (field, json.dumps(raw))),
+            "observed_span": None,
+        }
+
+    for field in ("created_at", "updated_at"):
+        raw = db_rec.get(field) if isinstance(db_rec, dict) else None
+        _, oow = workbuddy_session.normalize_wb_ts(raw, now_secs)
+        if oow:
+            out.append(mk("workbuddy.db", "Sqlite", "sessions.%s" % field, raw))
+    for rec in records:
+        raw = rec.get("timestamp") if isinstance(rec, dict) else None
+        _, oow = workbuddy_session.normalize_wb_ts(raw, now_secs)
+        if oow:
+            out.append(mk("workbuddy.audit-log", "LogFile", "audit-log timestamp", raw))
+    return out
+
+
 def _to_cents(value):
     """credit_json 单条 ¥ → 厘（int）。按厘累计再除 100，规避浮点逐条相加的漂移；
     int/float/数字字符串都认（真实 credit_json 里值可能是字符串），布尔与
@@ -198,6 +233,8 @@ def workbuddy_session_audit_json(home, session_id):
                     "observed_span": None,
                 })
                 break
+    attempts.extend(_timestamp_attempts(db_rec, records,
+                                        workbuddy_session.now_unix_secs()))
 
     # `file` = 主账本文件（审计据以计算的 audit-log）；db 独苗会话无审计记录 →
     # db 路径兜底（会话锚点所在）。date_span = audit-log 记录 min/max，无记录 →

@@ -39,7 +39,9 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use agent_vitals_domain::util::civil_from_unix_secs;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
@@ -70,6 +72,126 @@ pub type AuditLog = (
     BTreeMap<String, PathBuf>,
     Vec<(PathBuf, String)>,
 );
+
+/// epoch 秒（2000-01-01 起）的合法性下界——`946684800`。
+const WB_TS_MIN_SECS: i64 = 946_684_800;
+
+/// 读时钟：当前 unix 秒。合法性窗口的上界是 `now + 24h`（spec §6.2 rule 3）。
+/// 只在 `/sources` 层读时钟（`io_tokens_only_appear_under_sources` 守卫允许）。
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// epoch 秒 → `YYYY-MM-DDTHH:MM:SSZ`（UTC，秒精度）。Hinnant civil-from-days
+/// （`agent_vitals_domain::util`），不引 chrono；Python 镜像用 `time.gmtime`，
+/// 合法窗口内（2000..now+24h）两者是同一套 proleptic Gregorian，逐字节一致。
+fn epoch_secs_to_iso(secs: i64) -> String {
+    let (y, mo, d) = civil_from_unix_secs(secs, 0);
+    let sod = secs.rem_euclid(86_400);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y,
+        mo,
+        d,
+        sod / 3600,
+        (sod % 3600) / 60,
+        sod % 60
+    )
+}
+
+/// 一处时间戳归一的三态结果（spec §6.2）。
+enum TsNorm {
+    /// 可用的 ISO 串：字符串**原样**（走既有路径，不回归其他宿主/旧形状），
+    /// 或整数/浮点按毫秒归一且落在合法窗口内。
+    Value(String),
+    /// 整数/浮点，归一后落在合法窗口 `[2000-01-01T00:00:00Z, now+24h]` 之外
+    /// —— 报 `null`，且必须在 `attempts` 里留一条痕迹（§14.4）。
+    OutOfWindow,
+    /// 其余类型（bool/null/object）或字段缺失 —— 报 `null`，**不进 attempts**
+    /// （那不是「试过但失败」，是「这个位置根本没有时间戳」）。
+    Absent,
+}
+
+/// WorkBuddy 时间戳归一（spec §6.2）——`audit-log.timestamp` /
+/// `sessions.created_at` / `updated_at` 三处同一规则。
+///
+/// 曾经三处都只收字符串（`Value::as_str` / `_is_iso_ts`），真机三处却都是 13 位
+/// epoch-ms 整数（2026-09-10 实测），于是 `date_span` 恒 null、`--list` 日期列
+/// 全空——统一会话面的 SQL 硬条件是 `event_ts_ms IS NOT NULL`，没有时间戳的事实
+/// 等于不存在（spec §3.2）。
+///
+/// **不做「10 位当秒、13 位当毫秒」的位数嗅探**（spec §6.2 rule 5）：真机只观测
+/// 到毫秒，在没有证据的地方发明一条秒/毫秒判别规则会把 2001 年的毫秒戳
+/// （10 位）误当成 1970 年的秒戳。
+fn normalize_wb_ts(v: Option<&Value>, now_secs: i64) -> TsNorm {
+    match v {
+        Some(Value::String(s)) => TsNorm::Value(s.clone()),
+        Some(Value::Number(n)) => {
+            // 按毫秒解释。整数走 `i64` 精确路径，浮点向下取整——两者都与
+            // Python 的 `int // 1000` / `math.floor(f / 1000.0)` 对齐。
+            let secs = match n.as_i64() {
+                Some(i) => i.div_euclid(1000),
+                None => match n.as_f64() {
+                    Some(f) if f.is_finite() => (f / 1000.0).floor() as i64,
+                    _ => return TsNorm::OutOfWindow,
+                },
+            };
+            if secs < WB_TS_MIN_SECS || secs > now_secs + 86_400 {
+                TsNorm::OutOfWindow
+            } else {
+                TsNorm::Value(epoch_secs_to_iso(secs))
+            }
+        }
+        _ => TsNorm::Absent,
+    }
+}
+
+/// spec §6.2 rule 3：db `created_at`/`updated_at` 与 audit-log `timestamp` 里
+/// 归一后越界的 epoch-ms 值——报 null 之外还要留一条 `attempts` 痕迹
+/// （§14.4：skipped and recorded, never treated as corruption）。**只有
+/// OutOfWindow 进 attempts**：字符串照走 ISO，其它类型静默 null。
+fn timestamp_attempts(db_rec: Option<&Value>, records: &[Value], now_secs: i64) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mk = |source_id: &str, kind: &str, field: &str, raw: &Value| {
+        json!({
+            "source_id": source_id,
+            "kind": kind,
+            "surface": "SessionLog",
+            "available": false,
+            "error": format!(
+                "{field}: epoch-ms timestamp {raw} normalizes outside the validity \
+                 window [2000-01-01T00:00:00Z, now+24h]; treated as unparseable"
+            ),
+            "observed_span": Value::Null,
+        })
+    };
+    for field in ["created_at", "updated_at"] {
+        let raw = db_rec.and_then(|r| r.get(field));
+        if matches!(normalize_wb_ts(raw, now_secs), TsNorm::OutOfWindow) {
+            out.push(mk(
+                "workbuddy.db",
+                "Sqlite",
+                &format!("sessions.{field}"),
+                raw.unwrap_or(&Value::Null),
+            ));
+        }
+    }
+    for rec in records {
+        let raw = rec.get("timestamp");
+        if matches!(normalize_wb_ts(raw, now_secs), TsNorm::OutOfWindow) {
+            out.push(mk(
+                "workbuddy.audit-log",
+                "LogFile",
+                "audit-log timestamp",
+                raw.unwrap_or(&Value::Null),
+            ));
+        }
+    }
+    out
+}
 
 fn sqlite_val_to_json(v: SqlValue) -> Value {
     match v {
@@ -252,14 +374,21 @@ pub fn workbuddy_session_meta(
             .and_then(|r| r.get(key))
             .and_then(Value::as_i64)
     };
+    // 时间戳列按 spec §6.2 归一：真机 created_at/updated_at 是 epoch-ms 整数，
+    // `str_field` 会把它们读成 None（这就是 `--list` 日期列全空的根因）。
+    let now_secs = now_unix_secs();
+    let ts_field = |key: &str| match normalize_wb_ts(db_rec.and_then(|r| r.get(key)), now_secs) {
+        TsNorm::Value(s) => Some(s),
+        TsNorm::OutOfWindow | TsNorm::Absent => None,
+    };
     let mut meta = WorkbuddySessionMeta {
         permission_mode: str_field("permission_mode"),
         use_sandbox_cli: int_field("use_sandbox_cli"),
         model: str_field("model"),
         cwd: str_field("cwd"),
         title: str_field("title"),
-        created_at: str_field("created_at"),
-        updated_at: str_field("updated_at"),
+        created_at: ts_field("created_at"),
+        updated_at: ts_field("updated_at"),
         used: None,
         credit_json: None,
         file_mutations: 0,
@@ -281,9 +410,16 @@ pub fn workbuddy_session_meta(
 /// 时间序）；无记录 → db 行 created_at/updated_at 兜底。都没有 → `{"first": null,
 /// "last": null}`。
 pub fn date_span_of(records: &[Value], meta: &WorkbuddySessionMeta) -> Value {
-    let mut stamps: Vec<&str> = records
+    // spec §6.2：字符串原样，整数按毫秒归一，越界/其它类型丢弃（越界另由
+    // `timestamp_attempts` 记进 attempts）。`meta.{created_at,updated_at}` 已在
+    // `workbuddy_session_meta` 归一过，兜底路径直接用。
+    let now_secs = now_unix_secs();
+    let mut stamps: Vec<String> = records
         .iter()
-        .filter_map(|r| r.get("timestamp").and_then(Value::as_str))
+        .filter_map(|r| match normalize_wb_ts(r.get("timestamp"), now_secs) {
+            TsNorm::Value(s) => Some(s),
+            TsNorm::OutOfWindow | TsNorm::Absent => None,
+        })
         .collect();
     if !stamps.is_empty() {
         stamps.sort_unstable();
@@ -432,6 +568,9 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
 
     let meta = workbuddy_session_meta(&root, session_id, db_rec, db_usage.as_ref());
     let date_span = date_span_of(&records, &meta);
+    // spec §6.2 rule 3：越界 epoch-ms 时间戳报 null 之外，留一条 attempts 痕迹。
+    // 必须在 `records` 被 `build_workbuddy_evidence` move 走之前算。
+    let ts_attempts = timestamp_attempts(db_rec, &records, now_unix_secs());
     let evidence = build_workbuddy_evidence(records, session_id.to_string(), &meta);
     let ev = workbuddy_evidence_json(&evidence);
     let audit = workbuddy_audit_projection(&evidence);
@@ -461,6 +600,7 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
             }
         }
     }
+    attempts.extend(ts_attempts);
 
     // `file` = 主账本文件（审计据以计算的 audit-log）；db 独苗会话无审计记录 → db
     // 路径兜底（会话锚点所在）。

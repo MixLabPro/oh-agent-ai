@@ -38,19 +38,29 @@ The script is deterministic (fixed timestamps / hashes) and self-verifying:
 after writing it re-opens the home and runs the real evidence + audit
 projection, asserting the exact §10 coverage counts, the three-state contract,
 and the §9 cost block.
+
+**Shape 对齐真机（2026-09-10 实测）**：`sessions.created_at` / `updated_at` /
+`session_usage.updated_at` / audit-log `timestamp` 都是 13 位 epoch-ms 整数
+（不是 ISO 串）；`session_usage` 有 `updated_at` 列；credit 量级是「每请求几十
+积分」（不是 0.0x）。旧 fixture 的纸面 schema 让 `date_span` 恒 null 却全绿——
+与实现同错互证（§3.2/§3.3）。
 """
 
+import calendar
 import json
 import os
 import shutil
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
-SCRIPTS = str(HERE.parent.parent / "scripts")
-if SCRIPTS not in sys.path:
-    sys.path.insert(0, SCRIPTS)
+# v0.8 Phase E4 起 `agent_vitals` 包在 packages/agent-vitals-python/（旧路径
+# scripts/ 只剩 scan.py 薄壳）——builder 的 sys.path 当时漏改，一并修正。
+_PACKAGE_DIR = str(HERE.parent.parent / "packages" / "agent-vitals-python")
+if _PACKAGE_DIR not in sys.path:
+    sys.path.insert(0, _PACKAGE_DIR)
 
 from agent_vitals.agent import workbuddy_evidence, workbuddy_session_audit  # noqa: E402
 from agent_vitals.adapters import workbuddy_session  # noqa: E402
@@ -59,6 +69,18 @@ from agent_vitals.adapters import workbuddy_session  # noqa: E402
 def j(obj):
     """Serialize compactly, deterministic key order, no ASCII escaping."""
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _ms(iso):
+    """Fixed ISO-8601 (UTC) → epoch **milliseconds** (13-digit int).
+
+    真机 `sessions.created_at` / `sessions.updated_at` /
+    `session_usage.updated_at` / audit-log `timestamp` 四处都是 13 位 epoch-ms
+    整数（2026-09-10 实测 `~/.workbuddy/workbuddy.db`）。纸面 ISO 串让差分门禁在
+    字符串解析路径上空转——`date_span` 恒 null 却全绿（§3.2/§3.3，与 2026-09-02
+    词表漂移同款教训：fixture 是「真机形状」的代理，写错型就是让门禁测错东西）。
+    纯函数（只依赖入参字符串），deterministic。"""
+    return calendar.timegm(time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ")) * 1000
 
 
 def audit_record(session_id, event_type, sequence, prev_hash, cur_hash,
@@ -91,13 +113,13 @@ def s1_records():
     全限定名；WebFetch 裸名 + category=network）。"""
     return [
         audit_record("s1", "command-safety.sandbox-executed", 1, "", "h1",
-                     "2026-08-31T09:01:00Z", "r1", "call-a", "command-safety",
+                     _ms("2026-08-31T09:01:00Z"), "r1", "call-a", "command-safety",
                      "allowed", "ls -la", None, None),
         audit_record("s1", "command-safety.sandbox-executed", 2, "h1", "h2",
-                     "2026-08-31T09:02:00Z", "r1", "call-b", "command-safety",
+                     _ms("2026-08-31T09:02:00Z"), "r1", "call-b", "command-safety",
                      "allowed", "cat README.md", None, None),
         audit_record("s1", "WebFetch", 3, "h2", "h3",
-                     "2026-08-31T09:03:00Z", "r2", "call-c", "network",
+                     _ms("2026-08-31T09:03:00Z"), "r2", "call-c", "network",
                      "allowed", None, None, {"target": "https://example.com"}),
     ]
 
@@ -109,28 +131,32 @@ def s2_records():
     分轴（纸面词 'commandApproved'/'commandRejected' 真机零命中）。"""
     return [
         audit_record("s2", "Bash", 100, "5a5a...rotated", "h100",
-                     "2026-08-31T10:00:00Z", "r1", "call1", "approval",
+                     _ms("2026-08-31T10:00:00Z"), "r1", "call1", "approval",
                      "approved", "rm -rf /tmp/cache", "删除临时缓存目录", None),
         audit_record("s2", "Bash", 101, "h100", "h101",
-                     "2026-08-31T10:01:00Z", "r2", "call2", "rejection",
+                     _ms("2026-08-31T10:01:00Z"), "r2", "call2", "rejection",
                      "rejected", "sudo rm -rf /var/log/x", "需要 root 权限清理日志", None),
         audit_record("s2", "file-safety.bulk-delete.rejected", 102, "h101", "h102",
-                     "2026-08-31T10:02:00Z", "r3", "call3", "file-safety",
+                     _ms("2026-08-31T10:02:00Z"), "r3", "call3", "file-safety",
                      "rejected", None, "批量删除 42 个文件", None),
         audit_record("s2", "command-safety.sandbox-executed", 103, "h102", "h103",
-                     "2026-08-31T10:03:00Z", "r4", "call4", "command-safety",
+                     _ms("2026-08-31T10:03:00Z"), "r4", "call4", "command-safety",
                      "allowed", "ls -la", None, None),
     ]
 
 
 def _connect_db(db_path):
     conn = sqlite3.connect(str(db_path))
+    # 列类型对齐真机（2026-09-10 实测）：`created_at` / `updated_at` 是 INTEGER
+    # （epoch-ms），不是 TEXT；`session_usage` 有 `updated_at INTEGER` 列（在
+    # `credit_json` 之前），旧 fixture 整列缺失。真机 `sessions` 有 30 列——适配器
+    # 走 `SELECT *` + 按列名取，不必全建，但**建的列类型必须与真机一致**（§3.3）。
     conn.executescript(
         "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT, "
         "cwd TEXT, permission_mode TEXT, use_sandbox_cli INTEGER, "
-        "created_at TEXT, updated_at TEXT);"
+        "created_at INTEGER, updated_at INTEGER);"
         "CREATE TABLE session_usage (session_id TEXT PRIMARY KEY, "
-        "used INTEGER, size INTEGER, credit_json TEXT);")
+        "used INTEGER, size INTEGER, updated_at INTEGER, credit_json TEXT);")
     return conn
 
 
@@ -158,20 +184,24 @@ def write_workbuddy_home(base):
             "INSERT INTO sessions (id, title, model, cwd, permission_mode, "
             "use_sandbox_cli, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
             ("s1", "健康会话", "deepseek-v4-flash", "/repo", "fullAccess", 1,
-             "2026-08-31T09:00:00Z", "2026-08-31T09:05:00Z"))
+             _ms("2026-08-31T09:00:00Z"), _ms("2026-08-31T09:05:00Z")))
         conn.execute(
             "INSERT INTO sessions (id, title, model, cwd, permission_mode, "
             "use_sandbox_cli, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
             ("s2", "审批流程会话", "deepseek-v4-flash", "/repo", "bypassPermissions",
-             1, "2026-08-31T10:00:00Z", "2026-08-31T10:05:00Z"))
+             1, _ms("2026-08-31T10:00:00Z"), _ms("2026-08-31T10:05:00Z")))
+        # credit 量级对齐真机：单请求积分中位 ~22（旧 fixture 的 0.02/0.03 反过来
+        # 印证了「把积分当人民币」的单位 bug，§3.1）。s1 两条 requestId 求和
+        # 42.01 credit；`_to_cents` 按厘累计（22.53→2253、19.48→1948）。
         conn.execute(
-            "INSERT INTO session_usage (session_id, used, size, credit_json) "
-            "VALUES (?,?,?,?)",
-            ("s1", 5000, 12345, '{"r1":0.02,"r2":0.03}'))
+            "INSERT INTO session_usage (session_id, used, size, updated_at, "
+            "credit_json) VALUES (?,?,?,?,?)",
+            ("s1", 5000, 12345, _ms("2026-08-31T09:05:00Z"),
+             '{"r1":22.53,"r2":19.48}'))
         conn.execute(
-            "INSERT INTO session_usage (session_id, used, size, credit_json) "
-            "VALUES (?,?,?,?)",
-            ("s2", 12000, 90000, "{}"))
+            "INSERT INTO session_usage (session_id, used, size, updated_at, "
+            "credit_json) VALUES (?,?,?,?,?)",
+            ("s2", 12000, 90000, _ms("2026-08-31T10:05:00Z"), "{}"))
         conn.commit()
     finally:
         conn.close()
@@ -239,7 +269,10 @@ def self_verify(root):
                   "RUNTIME_EVIDENCE_CONTRACT §14.4"),
         "observed_span": None,
     }], ev["attempts"]
-    assert cost == {"tokens": 5000, "cny": 0.05, "host_billed": True}, cost
+    # credit_json {"r1":22.53,"r2":19.48} → 按厘累计 2253+1948 = 4201 → 42.01。
+    # 字段名仍是 `cny`（A3 的 cash_cny/nominal_cny 二分尚未做）——A1 只把量级
+    # 从 0.0x 抬到真机的「每请求几十积分」。
+    assert cost == {"tokens": 5000, "cny": 42.01, "host_billed": True}, cost
 
     # ── s2 审批流程会话 ──────────────────────────────────────────
     records, ev, audit, cost = _load_session(root, "s2")

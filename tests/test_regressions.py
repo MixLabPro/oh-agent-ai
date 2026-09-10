@@ -922,5 +922,97 @@ class TestWorkbuddyEvidenceVocabularyIsTheRealMachineVocabulary(unittest.TestCas
         self.assertEqual(cov["ApprovalDecisions"]["measured"], 1)
 
 
+class TestWorkbuddyIntegerEpochMsTimestamps(unittest.TestCase):
+    """2026-09-10 真机实测：`~/.workbuddy/workbuddy.db` 的 sessions.created_at /
+    updated_at 与 audit-log 的 timestamp 都是 13 位 epoch-ms 整数，**不是 ISO 串**
+    （旧 fixture 写纸面 ISO，与实现同错互证，§3.3）。既有 date_span_of /
+    workbuddy_session_meta 只收字符串（Rust `Value::as_str` / Python `_is_iso_ts`），
+    整数一律读成 None——`workbuddy-session --list` 的日期列在真机上恒 `- → -`、
+    `date_span` 恒 null；而统一会话面的 SQL 硬条件是 `event_ts_ms IS NOT NULL`
+    （spec §3.2/§7.1），没有时间戳的事实等于不存在。
+
+    修复（spec §6.2）：整数按毫秒归一成 `YYYY-MM-DDTHH:MM:SSZ` UTC；越界
+    （<2000-01-01 或 >now+24h）报 null **且**进 `attempts`；不做秒/毫秒位数嗅探。
+    `SCAN_CMD` 在 CI 差分下指向 Rust 二进制，两侧逐字节同一断言。"""
+
+    _COLS_SESSIONS = ("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, "
+                      "model TEXT, cwd TEXT, permission_mode TEXT, "
+                      "use_sandbox_cli INTEGER, created_at INTEGER, "
+                      "updated_at INTEGER);")
+    _COLS_USAGE = ("CREATE TABLE session_usage (session_id TEXT PRIMARY KEY, "
+                   "used INTEGER, size INTEGER, updated_at INTEGER, "
+                   "credit_json TEXT);")
+
+    def _make_home(self, sessions, usage):
+        import sqlite3  # noqa: PLC0415
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = tmp / ".workbuddy"
+        (root / "audit-log").mkdir(parents=True)
+        (tmp / "workdir").mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(root / "workbuddy.db"))
+        conn.executescript(self._COLS_SESSIONS + self._COLS_USAGE)
+        conn.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)", sessions)
+        conn.executemany("INSERT INTO session_usage VALUES (?,?,?,?,?)", usage)
+        conn.commit()
+        conn.close()
+        return tmp
+
+    def _audit(self, tmp, session_id):
+        r = subprocess.run(
+            SCAN_CMD + ["workbuddy-session", "--session", session_id, "--json", "-"],
+            cwd=str(tmp / "workdir"), env=isolated_home_env(tmp),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_integer_epoch_ms_timestamp_parses_to_a_real_date(self):
+        """真机形状：db 时间戳是 epoch-ms 整数 → `date_span` 必须是归一后的 UTC ISO，
+        不再是 null（`--list` 日期列不再 `- → -`）。"""
+        # 1788166800000 = 2026-08-31T09:00:00Z, 1788167100000 = 09:05:00Z
+        tmp = self._make_home(
+            [("s1", "t", "deepseek-v4-flash", "/repo", "fullAccess", 1,
+              1788166800000, 1788167100000)],
+            [("s1", 10, 10, 1788167100000, "{}")])
+        report = self._audit(tmp, "s1")
+        self.assertEqual(
+            report["date_span"],
+            {"first": "2026-08-31T09:00:00Z", "last": "2026-08-31T09:05:00Z"})
+        # 越界哨兵不得被这条合法数据误触发。
+        self.assertEqual([a["source_id"] for a in report["attempts"]],
+                         ["workbuddy.traces"])
+
+    def test_out_of_window_integer_reports_null_and_lands_in_attempts(self):
+        """越界 epoch-ms（999ms=1970、253402300800000ms=10000 年）→ `date_span`
+        为 null（绝不填一个 1970/10000 年的假日期），**且**每列各留一条
+        `attempts` 痕迹（§14.4：skipped and recorded）。"""
+        tmp = self._make_home(
+            [("bad", "t", "deepseek-v4-flash", "/repo", "fullAccess", 1,
+              999, 253402300800000)],
+            [("bad", 10, 10, 999, "{}")])
+        report = self._audit(tmp, "bad")
+        self.assertEqual(report["date_span"], {"first": None, "last": None})
+        db_ts = [a for a in report["attempts"] if a["source_id"] == "workbuddy.db"]
+        self.assertEqual(len(db_ts), 2)
+        self.assertTrue(all(a["available"] is False for a in db_ts))
+        self.assertIn("sessions.created_at", db_ts[0]["error"])
+        self.assertIn("sessions.updated_at", db_ts[1]["error"])
+        self.assertIn("outside the validity window", db_ts[0]["error"])
+
+    def test_no_seconds_vs_millis_digit_sniffing(self):
+        """spec §6.2 rule 5：不按位数猜秒/毫秒。`978307200`（10 位；当秒是 2001 年，
+        当毫秒是 1970-01-12）一律按毫秒解释 → 落在 2000 前 → 越界报 null，绝不
+        因为"看着像秒戳"就当成 2001 年。字符串路径不回归。"""
+        sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
+        from agent_vitals.adapters import workbuddy_session as ws  # noqa: PLC0415
+        now = ws.now_unix_secs()
+        self.assertEqual(ws.normalize_wb_ts(978307200, now), (None, True))
+        self.assertEqual(ws.normalize_wb_ts("2026-08-31T09:00:00Z", now),
+                         ("2026-08-31T09:00:00Z", False))
+        self.assertEqual(ws.normalize_wb_ts(True, now), (None, False))
+        self.assertEqual(ws.normalize_wb_ts(1788166800000, now),
+                         ("2026-08-31T09:00:00Z", False))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

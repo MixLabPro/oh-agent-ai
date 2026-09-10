@@ -417,12 +417,12 @@ invoices…) are **user-entered, not derived from our price cards**」。
 
 **Phase A**（§7 两条路径的共同前置，独立可交付；修的是既有 bug，不依赖任何口径决策）
 
-- [ ] **A1 · fixture 承载真机形状**（§3.3/§6.4-3）
+- [x] **A1 · fixture 承载真机形状**（§3.3/§6.4-3）
       `fixtures/workbuddy/build_workbuddy_fixture.py`：`sessions.created_at`/`updated_at`
       改 INTEGER、`session_usage` 补 `updated_at` 列、audit-log `timestamp` 改 epoch-ms
       整数、credit 值改真机量级；builder 自校验数字同步。**必须最先做**——在 ISO 串
       fixture 上做整数兼容，测试既无法转红也无法转绿。
-- [ ] **A2 · 时间戳归一**（§6.2）
+- [x] **A2 · 时间戳归一**（§6.2）
       `hosts/workbuddy/sources/mod.rs` 的 `date_span_of` + `workbuddy_session_meta`
       ↔ `adapters/workbuddy_session.py` / `agent/workbuddy_session_audit.py`。
       字符串走旧路径、整数按毫秒、越界报 null 并进 attempts、不做秒/毫秒嗅探。

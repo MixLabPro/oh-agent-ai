@@ -23,9 +23,15 @@ rusqlite bundled，spec §1.4——这里是 Python stdlib `sqlite3`，同一份
 并记 degraded（坏行属于哪个 session 无法指认，不该编进任何会话）；会话无 audit-log
 记录但 db 有行 → 真会话，照审（决策账本为空是诚实结果，不是不可读）。"""
 import json
+import math
 import sqlite3
+import time
 
 from pathlib import Path
+
+# epoch 秒（2000-01-01 起）的合法性下界。spec §6.2 rule 3 的窗口 =
+# [2000-01-01T00:00:00Z, now+24h]。
+_WB_TS_MIN_SECS = 946684800
 
 
 def workbuddy_root(home=None):
@@ -160,14 +166,21 @@ def workbuddy_session_meta(root, session_id, db_rec, db_usage):
     """把一个会话的跨表面数据组装成 evidence 层的 `session_meta`。db 行缺失 →
     相关列 None（audit-log 独苗会话照审，元数据降级）；`db_usage is None`（db 整库
     降级）→ used/credit_json None。`file_mutations` 永远有个 int（0 或真实计数）。"""
+    # 时间戳列按 spec §6.2 归一：真机 created_at/updated_at 是 epoch-ms 整数，
+    # `_val(..., str)` 会把它们读成 None（这就是 `--list` 日期列全空的根因）。
+    now_secs = now_unix_secs()
+    ts_created, _ = normalize_wb_ts(db_rec.get("created_at")
+                                    if isinstance(db_rec, dict) else None, now_secs)
+    ts_updated, _ = normalize_wb_ts(db_rec.get("updated_at")
+                                    if isinstance(db_rec, dict) else None, now_secs)
     meta = {
         "permission_mode": _val(db_rec, "permission_mode", str),
         "use_sandbox_cli": _val(db_rec, "use_sandbox_cli", int),
         "model": _val(db_rec, "model", str),
         "cwd": _val(db_rec, "cwd", str),
         "title": _val(db_rec, "title", str),
-        "created_at": _val(db_rec, "created_at", str),
-        "updated_at": _val(db_rec, "updated_at", str),
+        "created_at": ts_created,
+        "updated_at": ts_updated,
         "used": None,
         "credit_json": None,
     }
@@ -181,16 +194,66 @@ def workbuddy_session_meta(root, session_id, db_rec, db_usage):
     return meta
 
 
-def _is_iso_ts(value):
-    return value if isinstance(value, str) else None
+def now_unix_secs():
+    """读时钟：当前 unix 秒。合法性窗口上界 = `now + 24h`（spec §6.2 rule 3）。
+    Rust 镜像 `sources/mod.rs::now_unix_secs`。"""
+    return int(time.time())
+
+
+def _epoch_secs_to_iso(secs):
+    """epoch 秒 → `YYYY-MM-DDTHH:MM:SSZ`（UTC，秒精度）。`time.gmtime` 是
+    proleptic Gregorian，与 Rust 的 Hinnant `civil_from_unix_secs` 在合法窗口内
+    （2000..now+24h）逐字节一致。"""
+    t = time.gmtime(secs)
+    return "%04d-%02d-%02dT%02d:%02d:%02dZ" % (
+        t.tm_year, t.tm_mon, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec)
+
+
+def normalize_wb_ts(value, now_secs):
+    """WorkBuddy 时间戳归一（spec §6.2）——`audit-log.timestamp` /
+    `sessions.created_at` / `updated_at` 三处同一规则。返回 `(iso_or_None,
+    out_of_window)`：
+
+    - **字符串** → 原样（走既有路径，不回归其他宿主/旧形状），`out_of_window=False`。
+    - **整数/浮点** → 按毫秒解释，归一成 `YYYY-MM-DDTHH:MM:SSZ`；落在
+      `[2000-01-01T00:00:00Z, now+24h]` 之外 → `(None, True)`（报 null 且进 attempts）。
+    - **其余类型（bool/null/object）/缺失** → `(None, False)`（报 null，不进 attempts）。
+
+    曾经三处都只收字符串（`_is_iso_ts` / `Value::as_str`），真机三处却都是 13 位
+    epoch-ms 整数（2026-09-10 实测），于是 `date_span` 恒 null、`--list` 日期列全空。
+    **不做秒/毫秒位数嗅探**（spec §6.2 rule 5）：真机只观测到毫秒。
+
+    Rust 镜像 `sources/mod.rs::normalize_wb_ts`，逐字节对齐。"""
+    if isinstance(value, str):
+        return value, False
+    # bool 是 int 的子类——必须先短路（否则 True → 归一成 1970 年）。
+    if isinstance(value, bool):
+        return None, False
+    if isinstance(value, int):
+        secs = value // 1000
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            return None, True
+        secs = math.floor(value / 1000.0)
+    else:
+        return None, False
+    if secs < _WB_TS_MIN_SECS or secs > now_secs + 86400:
+        return None, True
+    return _epoch_secs_to_iso(secs), False
 
 
 def date_span_of(records, meta):
-    """会话活动时间跨度：audit-log 记录 timestamp 的 min/max（跨文件全取，ISO 串
-    字典序 = 时间序）；无记录 → db 行 created_at/updated_at 兜底。都没有 → None。"""
-    stamps = [_is_iso_ts(r.get("timestamp"))
-              for r in records if isinstance(r, dict)]
-    stamps = [s for s in stamps if s is not None]
+    """会话活动时间跨度：audit-log 记录 timestamp 的 min/max（跨文件全取，归一后
+    ISO 串字典序 = 时间序）；无记录 → db 行 created_at/updated_at 兜底（已在
+    `workbuddy_session_meta` 归一）。都没有 → None。"""
+    now_secs = now_unix_secs()
+    stamps = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        iso, _ = normalize_wb_ts(r.get("timestamp"), now_secs)
+        if iso is not None:
+            stamps.append(iso)
     if stamps:
         return {"first": min(stamps), "last": max(stamps)}
     first = meta.get("created_at")
