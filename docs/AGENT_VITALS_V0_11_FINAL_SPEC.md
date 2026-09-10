@@ -108,7 +108,7 @@ pricing_snapshot {
   "amount_minor": 72847,
   "currency": "CNY",
   "basis": "metered_estimate",
-  "pricing_version": "...",
+  "pricing_versions": ["..."],
   "pricing_source": "official",
   "has_unresolved": true
 }
@@ -128,7 +128,9 @@ pricing_snapshot {
 
 ### 5.2 成本路径收口
 
-废弃当前 `session_cost_minor → pricing.json → cost_report` 的旧实现，但保留 MCP 的 `cost_minor` 字段兼容性。
+公开 MCP 不再直接走 `session_cost_minor → pricing.json → cost_report` 的旧调用链；统一入口是
+`session_cost_view`。内部可以保留 `session_cost_minor` 作为兼容/复用 helper，但它只能读取
+SQL 的历史 `pricing_snapshots`，不得回读 `pricing.json`。
 
 `sessions_search` 和 `session_detail` 的 `cost_minor` 必须调用统一成本引擎，并满足：
 
