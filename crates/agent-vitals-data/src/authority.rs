@@ -46,6 +46,7 @@ pub fn default_authority_path(data_home: &Path) -> PathBuf {
 pub type HostBillRow = (String, String, String, i64, String);
 
 type BillingTemplateRow = (String, Option<String>, String, String, i64, Option<i64>);
+type OutcomeMeasurementRow = (String, String, String, Option<i64>, Option<String>, String);
 
 /// 权威库错误。`Corrupt` **不再自愈**——恢复路径是「用户备份 + 原始日志
 /// 重放」，静默删库重建会把权威库变成可被悄悄替换的第二本账（spec §1.1.3
@@ -1089,6 +1090,98 @@ impl AuthorityDb {
         Ok(changed > 0)
     }
 
+    /// 写入一份可复算的 outcome measurement。相同 ID 只能重放完全相同的
+    /// 证据，不允许以新算法或新金额覆盖历史 measurement。
+    #[allow(clippy::too_many_arguments)]
+    pub fn outcome_measurement_put(
+        &self,
+        measurement_id: &str,
+        fact_set_fingerprint: &str,
+        algorithm_version: &str,
+        basis: &str,
+        amount_minor: Option<i64>,
+        currency: Option<&str>,
+        measured_at_ms: i64,
+        payload_json: &str,
+    ) -> Result<bool, AuthorityError> {
+        if measurement_id.is_empty() || fact_set_fingerprint.is_empty() || algorithm_version.is_empty()
+            || !matches!(basis, "estimated" | "actual" | "realized")
+            || amount_minor.is_some_and(|amount| amount < 0)
+            || (amount_minor.is_some() != currency.is_some())
+            || currency.is_some_and(str::is_empty) || payload_json.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid outcome measurement".to_string(),
+            ).into());
+        }
+        let existing: Option<OutcomeMeasurementRow> = self.conn.query_row(
+            "SELECT fact_set_fingerprint, algorithm_version, basis, amount_minor, currency, payload_json
+             FROM outcome_measurements WHERE measurement_id = ?1",
+            rusqlite::params![measurement_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        ).optional()?;
+        if let Some(existing) = existing {
+            let expected = (fact_set_fingerprint.to_string(), algorithm_version.to_string(), basis.to_string(),
+                amount_minor, currency.map(str::to_string), payload_json.to_string());
+            if existing == expected {
+                return Ok(false);
+            }
+            return Err(rusqlite::Error::InvalidParameterName(
+                "measurement_id already names a different immutable outcome".to_string(),
+            ).into());
+        }
+        let changed = self.conn.execute(
+            "INSERT INTO outcome_measurements(
+               measurement_id, fact_set_fingerprint, algorithm_version, basis, amount_minor,
+               currency, measured_at_ms, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![measurement_id, fact_set_fingerprint, algorithm_version, basis,
+                amount_minor, currency, measured_at_ms, payload_json],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// 写入 Savings 记录。estimated 永远不能被写作 actual/realized；后两者
+    /// 必须引用同口径 measurement，防止 API 价差伪装成已实现节省。
+    #[allow(clippy::too_many_arguments)]
+    pub fn savings_record_put(
+        &self,
+        savings_id: &str,
+        measurement_id: &str,
+        billing_template_snapshot_id: Option<&str>,
+        pricing_version: Option<&str>,
+        amount_minor: i64,
+        currency: &str,
+        savings_basis: &str,
+        created_at_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if savings_id.is_empty() || measurement_id.is_empty() || amount_minor < 0 || currency.is_empty()
+            || !matches!(savings_basis, "estimated" | "actual" | "realized") {
+            return Err(rusqlite::Error::InvalidParameterName("invalid savings record".to_string()).into());
+        }
+        let measurement_basis: Option<String> = self.conn.query_row(
+            "SELECT basis FROM outcome_measurements WHERE measurement_id = ?1",
+            rusqlite::params![measurement_id], |r| r.get(0),
+        ).optional()?;
+        let Some(measurement_basis) = measurement_basis else {
+            return Err(rusqlite::Error::InvalidParameterName("savings measurement does not exist".to_string()).into());
+        };
+        if savings_basis != "estimated" && measurement_basis != savings_basis {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "actual or realized savings require an equally evidenced measurement".to_string(),
+            ).into());
+        }
+        let changed = self.conn.execute(
+            "INSERT INTO savings_records(
+               savings_id, measurement_id, billing_template_snapshot_id, pricing_version,
+               amount_minor, currency, savings_basis, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(savings_id) DO NOTHING",
+            rusqlite::params![savings_id, measurement_id, billing_template_snapshot_id,
+                pricing_version, amount_minor, currency, savings_basis, created_at_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
     // ─────── v0.9.1 Phase 2.8：host_bills（spec §5.3 显式管理 API）───────
     // 宿主自身账单（WorkBuddy 积分、订阅月费、中转对账单…）——**不是**从我们
     // 的价卡派生，由用户显式录入，更新必须验证币种/账期/金额范围（§5.3）。
@@ -1524,6 +1617,28 @@ mod tests {
         assert!(authority.billing_template_snapshot_put(
             "bad", "missing", Some("catalog-1"), "{}", 1_000,
         ).is_err());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn savings_cannot_upgrade_an_estimate_to_actual_or_realized() {
+        let db = tmp_db("savings-evidence");
+        let authority = AuthorityDb::open(&db, 1_000).unwrap();
+        assert!(authority.outcome_measurement_put(
+            "outcome-est", "facts-1", "cost-v1", "estimated", Some(123), Some("USD"), 1_000, "{}",
+        ).unwrap());
+        assert!(authority.savings_record_put(
+            "saving-est", "outcome-est", None, None, 123, "USD", "estimated", 1_000,
+        ).unwrap());
+        assert!(authority.savings_record_put(
+            "saving-actual", "outcome-est", None, None, 123, "USD", "actual", 1_000,
+        ).is_err());
+        assert!(authority.outcome_measurement_put(
+            "outcome-actual", "facts-2", "invoice-v1", "actual", Some(456), Some("USD"), 2_000, "{}",
+        ).unwrap());
+        assert!(authority.savings_record_put(
+            "saving-actual", "outcome-actual", None, None, 456, "USD", "actual", 2_000,
+        ).unwrap());
         let _ = std::fs::remove_file(&db);
     }
 
