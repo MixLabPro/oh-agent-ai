@@ -427,9 +427,15 @@ invoices…) are **user-entered, not derived from our price cards**」。
       ↔ `adapters/workbuddy_session.py` / `agent/workbuddy_session_audit.py`。
       字符串走旧路径、整数按毫秒、越界报 null 并进 attempts、不做秒/毫秒嗅探。
       **双侧同一 commit**。
-- [ ] **A3 · `cost` 块改契约**（§6.1）
+- [x] **A3 · `cost` 块改契约**（§6.1）
       `cost_of` ↔ Python 镜像：`cny` → `cash_cny`(恒 null) + `nominal_cny` +
       `nominal_basis`；`credits` 取代原 `cny` 的求和值。键序两侧逐字节一致。
+      非积分轨会话多发一条 `notes`（真实开销在用户自配 API 账户、本机不可见）。
+      A4 的部分交付：`nominal_cny` 只活在 workbuddy 会话适配器、`PERMANENTLY_
+      EXCLUDED_HOSTS` 仍含 workbuddy——回归钉住（`TestNominalCnyNeverEntersASpendSummaryDto`）。
+      evidence.rs 的整数时间戳 fold-in **推迟**：`TimelineEntry.time` 实际会进
+      `audit` 投影输出，单改 Rust 会打破 Python↔Rust 差分，需 `workbuddy_evidence.py`
+      的 `_parse_time` 同步——超出 A3 范围，留作独立项。
 - [ ] **A4 · 差分重新冻结 + 新增回归**（§6.4-4/5）
       `tests/test_cli_matrix.py` 六条 workbuddy 差分在新 fixture 上重新逐字节一致；
       新增回归：整数时间戳可解析 · 越界时间戳报 null 且进 attempts · `cost` 不含

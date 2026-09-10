@@ -1014,5 +1014,104 @@ class TestWorkbuddyIntegerEpochMsTimestamps(unittest.TestCase):
                          ("2026-08-31T09:00:00Z", False))
 
 
+class TestWorkbuddyCostBlockReportsCreditsNotCny(unittest.TestCase):
+    """2026-09-10：`workbuddy-session --json` 的 `cost` 块把 `credit_json` 求和塞进
+    一个叫 `cny` 的键、旁边站着 `host_billed: true`——任何下游都当人民币读，而真机
+    单请求积分中位 ~22、1000 积分才 ¥50，约 20× 高估（spec §3.1/§6.1）。
+
+    修复（A3）：`cny` 键消失 → `credits`（诚实单位名，同一求和值，单位 = 积分）
+    + `cash_cny`（现金口径实付，**恒 null**——本机无支付证据，填 0 是断言「确实没
+    花」，我们不知道，§11 第 12 条）+ `nominal_cny`（`credits × 0.05`，公开兑换价，
+    落**名义栏**，永不进实付/预算分子，§5.1）+ `nominal_basis`（可追溯汇率串）。
+    非积分轨会话（used 有值、credit_json 空）→ credits/nominal_cny 均 0.0 是真测量，
+    真实开销在用户自配 API 账户、本机不可见——由一条 `notes` 承担，不由数字冒充
+    （§11 第 14 条）。`SCAN_CMD` 在 CI 差分下指向 Rust 二进制，两侧同一断言。"""
+
+    def _audit(self, session_id, sessions, usage):
+        import sqlite3  # noqa: PLC0415
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = tmp / ".workbuddy"
+        (root / "audit-log").mkdir(parents=True)
+        (tmp / "workdir").mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(root / "workbuddy.db"))
+        conn.executescript(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT, "
+            "cwd TEXT, permission_mode TEXT, use_sandbox_cli INTEGER, "
+            "created_at INTEGER, updated_at INTEGER);"
+            "CREATE TABLE session_usage (session_id TEXT PRIMARY KEY, used INTEGER, "
+            "size INTEGER, updated_at INTEGER, credit_json TEXT);")
+        conn.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)", sessions)
+        conn.executemany("INSERT INTO session_usage VALUES (?,?,?,?,?)", usage)
+        conn.commit()
+        conn.close()
+        r = subprocess.run(
+            SCAN_CMD + ["workbuddy-session", "--session", session_id, "--json", "-"],
+            cwd=str(tmp / "workdir"), env=isolated_home_env(tmp),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    _SESSION = ("s1", "t", "deepseek-v4-flash", "/repo", "fullAccess", 1,
+                1788166800000, 1788167100000)
+
+    def test_credit_track_cost_block_has_no_cny_key(self):
+        report = self._audit(
+            "s1", [self._SESSION],
+            [("s1", 5000, 10, 1788167100000, '{"r1":22.53,"r2":19.48}')])
+        cost = report["cost"]
+        self.assertNotIn("cny", cost)
+        self.assertEqual(list(cost.keys()),
+                         ["tokens", "credits", "cash_cny", "nominal_cny",
+                          "nominal_basis", "host_billed"])
+        self.assertIsNone(cost["cash_cny"])
+        self.assertEqual(cost["credits"], 42.01)
+        self.assertEqual(cost["nominal_cny"], round(42.01 * 0.05, 2))
+        self.assertEqual(cost["nominal_basis"],
+                         "pack-price-public:1000cr=50CNY@2026-07-01")
+
+    def test_non_credit_track_zero_is_a_measurement_carried_by_a_note(self):
+        report = self._audit(
+            "s1", [self._SESSION], [("s1", 12000, 10, 1788167100000, "{}")])
+        cost = report["cost"]
+        self.assertEqual(cost["credits"], 0.0)
+        self.assertEqual(cost["nominal_cny"], 0.0)
+        self.assertIsNone(cost["cash_cny"])
+        self.assertNotIn("cny", cost)
+        self.assertTrue(any("not observable from this machine" in n
+                            for n in report["notes"]), report["notes"])
+
+
+class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
+    """A4（spec §6.4-5）：`nominal_cny`（名义栏，credits × 兑换价）绝不能出现在
+    真实**实付**汇总 DTO 里——它是尺，不是账（`ATTRIBUTABLE_WASTE.md` §6.7）。
+    WorkBuddy 在 `PERMANENTLY_EXCLUDED_HOSTS` 里，结构上就到不了 by_host/by_provider；
+    A3 改了它的 `cost` 块，这条断言那道排除仍成立，且新键 `nominal_cny` 只活在
+    workbuddy 的会话适配器里、没漏进任何汇总/DTO/预算代码。"""
+
+    def test_workbuddy_stays_in_the_permanent_exclusion_list(self):
+        summary_rs = (ROOT / "crates" / "agent-vitals-runtime" / "src"
+                      / "summary.rs").read_text(encoding="utf-8")
+        self.assertIn('PERMANENTLY_EXCLUDED_HOSTS: &[&str] = &["workbuddy"]',
+                      summary_rs)
+        self.assertNotIn("nominal_cny", summary_rs)
+
+    def test_nominal_cny_key_is_confined_to_the_workbuddy_session_adapter(self):
+        r = subprocess.run(
+            ["grep", "-rl", "nominal_cny", "--include=*.rs", "--include=*.py",
+             str(ROOT / "crates"), str(ROOT / "apps"),
+             str(ROOT / "packages" / "agent-vitals-python" / "agent_vitals")],
+            capture_output=True, text=True)
+        hits = {Path(p).resolve() for p in r.stdout.split()}
+        allowed = {
+            (ROOT / "crates" / "agent-vitals-hosts" / "src" / "hosts" / "workbuddy"
+             / "sources" / "mod.rs").resolve(),
+            (ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "agent"
+             / "workbuddy_session_audit.py").resolve(),
+        }
+        self.assertEqual(hits - allowed, set(),
+                         "nominal_cny 漏进了非 workbuddy-adapter 代码：%s" % (hits - allowed))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

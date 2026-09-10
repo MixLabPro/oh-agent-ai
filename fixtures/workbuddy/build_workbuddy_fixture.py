@@ -269,10 +269,18 @@ def self_verify(root):
                   "RUNTIME_EVIDENCE_CONTRACT §14.4"),
         "observed_span": None,
     }], ev["attempts"]
-    # credit_json {"r1":22.53,"r2":19.48} → 按厘累计 2253+1948 = 4201 → 42.01。
-    # 字段名仍是 `cny`（A3 的 cash_cny/nominal_cny 二分尚未做）——A1 只把量级
-    # 从 0.0x 抬到真机的「每请求几十积分」。
-    assert cost == {"tokens": 5000, "cny": 42.01, "host_billed": True}, cost
+    # credit_json {"r1":22.53,"r2":19.48} → 按厘累计 2253+1948 = 4201 credit → 42.01。
+    # A3 起 `cny` 键消失：`credits`（积分，非货币）+ `cash_cny`（恒 None，本机无支付
+    # 证据）+ `nominal_cny` = 42.01 × 0.05 → 厘累计 round(4201×0.05)=210 → 2.1 +
+    # `nominal_basis`（可追溯兑换价串）。
+    assert cost == {
+        "tokens": 5000,
+        "credits": 42.01,
+        "cash_cny": None,
+        "nominal_cny": 2.1,
+        "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
+        "host_billed": True,
+    }, cost
 
     # ── s2 审批流程会话 ──────────────────────────────────────────
     records, ev, audit, cost = _load_session(root, "s2")
@@ -299,7 +307,20 @@ def self_verify(root):
     assert [f["evidence"] for f in sv609] == [
         "删除临时缓存目录", "需要 root 权限清理日志", "批量删除 42 个文件"], sv609
     assert any("oldest records may be rotated" in n for n in ev["notes"]), ev["notes"]
-    assert cost == {"tokens": 12000, "cny": 0.0, "host_billed": True}, cost
+    # s2 是非积分轨（used=12000、credit_json={}）：`credits`/`nominal_cny` 均 0.0 是
+    # 真测量（平台积分轨确实没消耗），不是「没花钱」——审计输出会多一条 note 说明
+    # 真实开销在用户自配 API 账户、本机不可见（§6.1、§11 第 14 条）。
+    assert cost == {
+        "tokens": 12000,
+        "credits": 0.0,
+        "cash_cny": None,
+        "nominal_cny": 0.0,
+        "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
+        "host_billed": True,
+    }, cost
+    full = workbuddy_session_audit.workbuddy_session_audit_json(root.parent, "s2")
+    assert any("not observable from this machine" in n for n in full["notes"]), \
+        full["notes"]
 
 
 def main():

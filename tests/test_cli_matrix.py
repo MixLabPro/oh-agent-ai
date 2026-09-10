@@ -2067,8 +2067,9 @@ class CliMatrix(unittest.TestCase):
         host-capability override；可跑规则 SV601-603/606/610/611/614 空转零命中。
         SV604/605 的 Unavailable 把 rules_unavailable 从 5 推到 7（degrade 后
         重算）。coverage 与 timeline 同源：3 tool_calls（2 bash + 1 web_fetch）、
-        2 sandbox 模式、1 网络访问、distinct requestId 派生 2 turn。成本块吃
-        宿主账单：used=5000 + credit_json 求和 ¥0.05。"""
+        2 sandbox 模式、1 网络访问、distinct requestId 派生 2 turn。成本块（A3）：
+        used=5000 tokens + credit_json 求和 42.01 **积分**（非人民币）+ cash_cny
+        恒 null + nominal_cny=2.1（积分×0.05，名义栏）。"""
         self._workbuddy_home()
         code, out, err = self.both("workbuddy-session", "--session", "s1", "--json", "-")
         self.assertEqual(code, 0)
@@ -2123,11 +2124,21 @@ class CliMatrix(unittest.TestCase):
                          "no evidence for required signal(s) in this session")
         for code in ("SV601", "SV602", "SV603", "SV606", "SV610", "SV611", "SV614"):
             self.assertEqual(rules[code]["status"], "measured_zero", code)
-        # cny = credit_json 求和（A1 起 fixture 用真机量级 22.53+19.48=42.01；
-        # 旧值 0.05 来自 0.02+0.03，正是「把积分当人民币」单位 bug 的复刻，§3.1）。
-        # 键名仍是 `cny`——A3 的 cash_cny/nominal_cny 二分尚未做。
-        self.assertEqual(report["cost"],
-                         {"tokens": 5000, "cny": 42.01, "host_billed": True})
+        # A3：`cny` 键消失。credit_json 求和是**积分**（22.53+19.48=42.01），
+        # 不是人民币——旧字段名把 1000cr=¥50 的积分当货币，约 20× 高估（§3.1/§6.1）。
+        # `cash_cny` 恒 null（本机无支付证据，绝不填 0）；`nominal_cny` = 42.01×0.05
+        # → 厘累计 round(4201×0.05)=210 → 2.1（名义栏，永不进实付栏/预算分子）。
+        self.assertEqual(list(report["cost"].keys()),
+                         ["tokens", "credits", "cash_cny", "nominal_cny",
+                          "nominal_basis", "host_billed"])
+        self.assertEqual(report["cost"], {
+            "tokens": 5000,
+            "credits": 42.01,
+            "cash_cny": None,
+            "nominal_cny": 2.1,
+            "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
+            "host_billed": True,
+        })
         # 信号序 = ALL_SIGNALS 序（Signals 数组的顺序是输出契约的一部分）。
         self.assertEqual(report["signals"],
                          ["ToolCalls", "TurnBoundaries", "UsageAggregate",
@@ -2155,8 +2166,10 @@ class CliMatrix(unittest.TestCase):
         """`workbuddy-session --session s2`：审批轴。3 条审批记录（approved /
         rejected / bulk-delete rejected）→ SV609×3 info；commandApproved 的
         decided allowed-once → SV610×1 warning（family ① 按 seq 排序，两条
-        seq=0 的记录稳定保 SV609 在前）。轮转链头 → rotation note。成本块：
-        credit_json 空对象 → ¥0.0（宿主记了 0，不是我们算不出）。"""
+        seq=0 的记录稳定保 SV609 在前）。轮转链头 → rotation note。成本块（A3）：
+        credit_json 空对象 → 非积分轨会话，credits/nominal_cny 均 0.0 是真测量
+        （平台积分轨确实没消耗），审计输出多一条 note 说明真实开销在用户自配 API
+        账户、本机不可见。"""
         self._workbuddy_home()
         code, out, err = self.both("workbuddy-session", "--session", "s2", "--json", "-")
         self.assertEqual(code, 0)
@@ -2183,8 +2196,17 @@ class CliMatrix(unittest.TestCase):
             self.assertEqual(rules[code]["status"], "measured_zero", code)
         self.assertTrue(any("oldest records may be rotated" in n
                             for n in report["notes"]))
-        self.assertEqual(report["cost"],
-                         {"tokens": 12000, "cny": 0.0, "host_billed": True})
+        self.assertTrue(any("not observable from this machine" in n
+                            for n in report["notes"]),
+                        report["notes"])
+        self.assertEqual(report["cost"], {
+            "tokens": 12000,
+            "credits": 0.0,
+            "cash_cny": None,
+            "nominal_cny": 0.0,
+            "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
+            "host_billed": True,
+        })
 
     def test_workbuddy_session_defaults_to_latest(self):
         """缺省 --session = 最新（updated_at 最晚）→ 与显式指定 s2 一致。"""
@@ -2216,7 +2238,8 @@ class CliMatrix(unittest.TestCase):
     def test_workbuddy_session_db_only_session_audits_empty_records(self):
         """db 有行但 audit-log 无记录 → 照审（决策账本为空是诚实结果，不是
         不可读）：无任何证据 → 14 条规则全 Unavailable（不得 MeasuredZero）。
-        db 独苗会话的 file 落到 db 路径兜底；成本块照吃 usage 行。"""
+        db 独苗会话的 file 落到 db 路径兜底；成本块照吃 usage 行（A3：credits=0.01
+        积分，nominal_cny=round(1厘×0.05)=0，cash_cny 恒 null）。"""
         self._workbuddy_home()
         import sqlite3
         db = self.tmp / ".workbuddy" / "workbuddy.db"
@@ -2238,8 +2261,14 @@ class CliMatrix(unittest.TestCase):
         self.assertTrue(report["file"].endswith("workbuddy.db"))
         self.assertEqual(report["audit"]["summary"]["findings_total"], 0)
         self.assertEqual(report["audit"]["summary"]["rules_unavailable"], 14)
-        self.assertEqual(report["cost"],
-                         {"tokens": 777, "cny": 0.01, "host_billed": True})
+        self.assertEqual(report["cost"], {
+            "tokens": 777,
+            "credits": 0.01,
+            "cash_cny": None,
+            "nominal_cny": 0.0,
+            "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
+            "host_billed": True,
+        })
 
     def test_calendar_codex_blob_is_a_wellformed_three_view_report(self):
         """统一看板（Python-only `calendar`）内联的 codex 数据块结构 = 3 视图

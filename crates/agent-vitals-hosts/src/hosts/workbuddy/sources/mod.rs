@@ -31,10 +31,15 @@
 //! golden 字节零改动。SV609/610/614 不需要 override：approvals/sandbox timeline 各自
 //! 非空时家族①/家族④ 门控正常放行，空时正常 Unavailable。
 //!
-//! **成本块直接吃宿主账单**（spec §9）：`session_usage.used`（tokens）+ 解析
-//! `credit_json` 求和（¥，按厘累计防浮点漂移），`host_billed: true` 标明这不是我们
-//! 按 pricing.json 重算的、而是宿主自己记的账。**pricing.json 零参与**——不长第四份
-//! 价格拷贝（spec §11 项 6）。
+//! **成本块直接吃宿主账单**（spec §6.1/§9）：`session_usage.used`（tokens）+ 解析
+//! `credit_json` 求和——但那求和是**积分（credit），不是人民币**。旧字段名 `cny`
+//! 把积分当货币，1000 积分才 ¥50、单请求积分中位 ~22，约 20× 高估（spec §3.1）。
+//! 新契约：`credits`（诚实单位名，取代旧 `cny` 的同一求和值）+ `cash_cny`（现金口径
+//! 实付，**恒 null**——本机无支付证据，填 0 是断言「确实没花」，我们不知道，§11 第
+//! 12 条）+ `nominal_cny`（`credits × 0.05`，公开加量包兑换价折算，落**名义栏**，
+//! §5.1；永不进实付栏/预算分子）+ `nominal_basis`（可追溯的「什么价、什么日期」串）。
+//! `host_billed: true` 标明这不是我们按 pricing.json 重算的、而是宿主自己记的账。
+//! **pricing.json 零参与**——兑换价不是模型价卡，不长第四份价格拷贝（spec §11 项 6）。
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -497,7 +502,7 @@ pub fn render_workbuddy_session_list(out: &Value) -> String {
     s
 }
 
-/// credit_json 单条 ¥ → 厘（i64）。按厘累计再除 100，规避浮点逐条相加的漂移；
+/// credit_json 单条**积分**值 → 厘（i64）。按厘累计再除 100，规避浮点逐条相加的漂移；
 /// int/float/数字字符串都认（真实 credit_json 里值可能是字符串），布尔与非数字 → 0
 /// （记账缺口报缺，不把垃圾算进成本）。Python `round` 是银行家舍入、Rust `.round()`
 /// 是四舍五入——差异只在 x.5 上，fixture 与真实账单都没有，可接受。
@@ -521,19 +526,9 @@ fn to_cents(value: &Value) -> i64 {
     }
 }
 
-/// spec §9 成本块：`{tokens, cny, host_billed: true}`。tokens = `used`（聚合 token，
-/// 无逐请求 Usage）；cny = credit_json 求和（宿主自身账单，¥）。usage 行缺失 → None
-/// （诚实缺失，不编 0——0 是「确实没花」的真测量，只在 usage 行存在时才可能）。
-/// `credit_json` 空串算「没有」，空格串算「有但解析出 0」——与 Python truthiness 一致。
-fn cost_of(meta: &WorkbuddySessionMeta) -> Option<Value> {
-    let cj = meta.credit_json.as_deref();
-    if meta.used.is_none() && cj.map(|s| s.is_empty()).unwrap_or(true) {
-        return None;
-    }
-    let tokens = match meta.used {
-        Some(u) if u >= 0 => u,
-        _ => 0,
-    };
+/// credit_json 里所有 requestId 值求和 → 厘（i64）。空串/空格串/非法 JSON/非对象
+/// → 0。`cost_of` 与 `is_non_credit_track` 共用这一把求和，别各写一份。
+fn credit_cents(cj: Option<&str>) -> i64 {
     let mut cents = 0_i64;
     if let Some(cj) = cj {
         if !cj.trim().is_empty() {
@@ -546,7 +541,55 @@ fn cost_of(meta: &WorkbuddySessionMeta) -> Option<Value> {
             }
         }
     }
-    Some(json!({ "tokens": tokens, "cny": cents as f64 / 100.0, "host_billed": true }))
+    cents
+}
+
+/// 公开加量包兑换价：1000 积分 = 50 CNY，2026-07-01 起。只是**名义栏**的度量换算
+/// （§5.1/§6.1）——不是价卡，不进实付栏或预算分子。汇率变了改这个串，不改静默数字。
+const WB_NOMINAL_BASIS: &str = "pack-price-public:1000cr=50CNY@2026-07-01";
+
+/// 非积分轨会话（`used` 有值、credit 求和为 0）的诚实注记。`credits: 0.0` 是**真
+/// 测量**（平台积分轨确实没消耗），不是「没花钱」——该会话在用户自配 API 账户上的
+/// 真实花费本机不可观测，这条 note 承担那层意思（spec §6.1、§11 第 14 条）。
+const WB_NON_CREDIT_TRACK_NOTE: &str =
+    "non-credit-track session: platform credit ledger unused (credits: 0.0 is a real \
+measurement); the real spend is on the user's own API account (self-configured key \
++ endpoint) and is not observable from this machine";
+
+/// spec §6.1 成本块，键序 `{tokens, credits, cash_cny, nominal_cny, nominal_basis,
+/// host_billed}`（字节一致，Python 镜像逐字节对齐，不能重排）。tokens = `used`
+/// （聚合 token，无逐请求 Usage）；credits = credit_json 求和（**积分**，不是货币）；
+/// cash_cny 恒 null（本机无支付证据，绝不填 0）；nominal_cny = credits × 0.05
+/// （名义栏输入，不可进实付栏/预算分子）。usage 行缺失且 credit_json 空 → None
+/// （诚实缺失，不编 0）。`credit_json` 空串算「没有」，空格串算「有但解析出 0」。
+fn cost_of(meta: &WorkbuddySessionMeta) -> Option<Value> {
+    let cj = meta.credit_json.as_deref();
+    if meta.used.is_none() && cj.map(|s| s.is_empty()).unwrap_or(true) {
+        return None;
+    }
+    let tokens = match meta.used {
+        Some(u) if u >= 0 => u,
+        _ => 0,
+    };
+    let cents = credit_cents(cj);
+    // 名义人民币 = credits × 0.05；按厘累计（cents × 0.05）再 round，与 credit 求和
+    // 同一防浮点漂移手法。Python `round` 是银行家舍入、Rust `.round()` 半数向上——
+    // 差异只在 x.5，兑换价 × 整数厘不落 x.5（fixture 与真实账单均无），可接受。
+    let nominal_cents = (cents as f64 * 0.05).round() as i64;
+    Some(json!({
+        "tokens": tokens,
+        "credits": cents as f64 / 100.0,
+        "cash_cny": Value::Null,
+        "nominal_cny": nominal_cents as f64 / 100.0,
+        "nominal_basis": WB_NOMINAL_BASIS,
+        "host_billed": true,
+    }))
+}
+
+/// 非积分轨判定：`used` 有值但 credit 求和为 0（credit_json 空/缺/空对象）。与
+/// `cost_of` 的「整块 None」降级互斥——那条还要求 `used` 也缺失。
+fn is_non_credit_track(meta: &WorkbuddySessionMeta) -> bool {
+    meta.used.is_some() && credit_cents(meta.credit_json.as_deref()) == 0
 }
 
 /// `workbuddy-session` 单会话审计：coverage（§13 逐信号）+ SV601–614 findings + 成本
@@ -612,6 +655,13 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         None
     };
 
+    // 非积分轨会话：`credits: 0.0` 是真测量，但真实开销在用户自配 API 账户、本机
+    // 不可见——由 note 承担那层意思，不由数字冒充（spec §11 第 14 条）。
+    let mut notes = ev["notes"].as_array().cloned().unwrap_or_default();
+    if is_non_credit_track(&meta) {
+        notes.push(json!(WB_NON_CREDIT_TRACK_NOTE));
+    }
+
     Some(json!({
         "host": "workbuddy",
         "session_id": session_id,
@@ -625,6 +675,6 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         "signals": ev["signals"].clone(),
         "attempts": attempts,
         "cost": cost_of(&meta),
-        "notes": ev["notes"].clone(),
+        "notes": notes,
     }))
 }

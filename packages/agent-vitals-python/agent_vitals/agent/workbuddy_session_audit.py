@@ -23,10 +23,15 @@ SV604/605 的 override 放在本模块（dispatcher 层）、不在 `canonical_a
 rule_outcomes 做 override、重算 `summary.rules_unavailable`（Claude 侧健康会话
 3 → 5 同款；WorkBuddy 侧健康会话 5 → 7）。
 
-**成本块直接吃宿主账单**（spec §9）：`session_usage.used`（tokens）+ 解析
-`credit_json` 求和（¥，按厘累计防浮点漂移），`host_billed: true` 标明这不是我们
-按 pricing.json 重算的、而是宿主自己记的账。**pricing.json 零参与**——不长第四份
-价格拷贝（spec §11 项 6）。
+**成本块直接吃宿主账单**（spec §6.1/§9）：`session_usage.used`（tokens）+ 解析
+`credit_json` 求和——但那求和是**积分（credit），不是人民币**。旧字段名 `cny` 把
+积分当货币，1000 积分才 ¥50、单请求积分中位 ~22，约 20× 高估（spec §3.1）。新契约
+`{tokens, credits, cash_cny, nominal_cny, nominal_basis, host_billed}`：`credits`
+（诚实单位名，取代旧 `cny` 的同一求和值）+ `cash_cny`（现金口径实付，**恒 None**——
+本机无支付证据，填 0 是断言「确实没花」，我们不知道，§11 第 12 条）+ `nominal_cny`
+（`credits × 0.05`，公开加量包兑换价折算，落**名义栏**，永不进实付栏/预算分子）+
+`nominal_basis`（可追溯的「什么价、什么日期」串）。**pricing.json 零参与**——兑换价
+不是模型价卡，不长第四份价格拷贝（spec §11 项 6）。
 """
 import functools
 import json
@@ -153,7 +158,7 @@ def _timestamp_attempts(db_rec, records, now_secs):
 
 
 def _to_cents(value):
-    """credit_json 单条 ¥ → 厘（int）。按厘累计再除 100，规避浮点逐条相加的漂移；
+    """credit_json 单条**积分**值 → 厘（int）。按厘累计再除 100，规避浮点逐条相加的漂移；
     int/float/数字字符串都认（真实 credit_json 里值可能是字符串），布尔与
     非数字 → 0（记账缺口报缺，不把垃圾算进成本）。"""
     if isinstance(value, bool):
@@ -167,16 +172,9 @@ def _to_cents(value):
     return int(round(f * 100))
 
 
-def _cost_of(meta):
-    """spec §9 成本块：`{tokens, cny, host_billed: true}`。tokens = `used`（聚合
-    token，无逐请求 Usage）；cny = credit_json 求和（宿主自身账单，¥）。usage 行
-    缺失 → None（诚实缺失，不编 0——0 是「确实没花」的真测量，只在 usage 行存在
-    时才可能）。"""
-    used = meta.get("used")
-    cj = meta.get("credit_json")
-    if used is None and not cj:
-        return None
-    tokens = used if isinstance(used, int) and used >= 0 else 0
+def _credit_cents(cj):
+    """credit_json 里所有 requestId 值求和 → 厘（int）。空串/空格串/非法 JSON/非
+    对象 → 0。`_cost_of` 与 `_is_non_credit_track` 共用这一把求和。"""
     cents = 0
     parsed = None
     if isinstance(cj, str) and cj.strip():
@@ -187,7 +185,54 @@ def _cost_of(meta):
     if isinstance(parsed, dict):
         for v in parsed.values():
             cents += _to_cents(v)
-    return {"tokens": tokens, "cny": cents / 100.0, "host_billed": True}
+    return cents
+
+
+# 公开加量包兑换价：1000 积分 = 50 CNY，2026-07-01 起。名义栏度量换算（§5.1/§6.1），
+# 不是价卡、不进实付栏或预算分子。汇率变了改这个串，不改静默数字。
+_WB_NOMINAL_BASIS = "pack-price-public:1000cr=50CNY@2026-07-01"
+
+# 非积分轨会话（`used` 有值、credit 求和 0）的诚实注记。`credits: 0.0` 是真测量
+# （平台积分轨确实没消耗），不是「没花钱」——真实开销在用户自配 API 账户、本机不可
+# 观测，这条 note 承担那层意思（spec §6.1、§11 第 14 条）。
+_WB_NON_CREDIT_TRACK_NOTE = (
+    "non-credit-track session: platform credit ledger unused (credits: 0.0 is a real "
+    "measurement); the real spend is on the user's own API account (self-configured key "
+    "+ endpoint) and is not observable from this machine"
+)
+
+
+def _cost_of(meta):
+    """spec §6.1 成本块，键序 `{tokens, credits, cash_cny, nominal_cny,
+    nominal_basis, host_billed}`（字节一致，Rust 镜像逐字节对齐，不能重排）。
+    tokens = `used`（聚合 token，无逐请求 Usage）；credits = credit_json 求和
+    （**积分**，不是货币）；cash_cny 恒 None（本机无支付证据，绝不填 0）；
+    nominal_cny = credits × 0.05（名义栏输入，不可进实付栏/预算分子）。usage 行
+    缺失且 credit_json 空 → None（诚实缺失，不编 0）。"""
+    used = meta.get("used")
+    cj = meta.get("credit_json")
+    if used is None and not cj:
+        return None
+    tokens = used if isinstance(used, int) and used >= 0 else 0
+    cents = _credit_cents(cj)
+    # 名义人民币 = credits × 0.05；按厘累计（cents × 0.05）再 round，与 credit 求和
+    # 同一防浮点漂移手法。Python `round` 银行家舍入 vs Rust `.round()` 半数向上——
+    # 差异只在 x.5，兑换价 × 整数厘不落 x.5（fixture 与真实账单均无），可接受。
+    nominal_cents = int(round(cents * 0.05))
+    return {
+        "tokens": tokens,
+        "credits": cents / 100.0,
+        "cash_cny": None,
+        "nominal_cny": nominal_cents / 100.0,
+        "nominal_basis": _WB_NOMINAL_BASIS,
+        "host_billed": True,
+    }
+
+
+def _is_non_credit_track(meta):
+    """`used` 有值但 credit 求和为 0（credit_json 空/缺/空对象）。与 `_cost_of` 的
+    「整块 None」降级互斥——那条还要求 `used` 也缺失。"""
+    return meta.get("used") is not None and _credit_cents(meta.get("credit_json")) == 0
 
 
 def workbuddy_session_audit_json(home, session_id):
@@ -243,6 +288,12 @@ def workbuddy_session_audit_json(home, session_id):
                                             if db_rec is not None else None)
     date_span = workbuddy_session.date_span_of(records, meta)
 
+    # 非积分轨会话：`credits: 0.0` 是真测量，但真实开销在用户自配 API 账户、本机
+    # 不可见——由 note 承担那层意思，不由数字冒充（spec §11 第 14 条）。
+    notes = list(ev["notes"])
+    if _is_non_credit_track(meta):
+        notes.append(_WB_NON_CREDIT_TRACK_NOTE)
+
     return {
         "host": "workbuddy",
         "session_id": session_id,
@@ -256,5 +307,5 @@ def workbuddy_session_audit_json(home, session_id):
         "signals": ev["signals"],
         "attempts": attempts,
         "cost": _cost_of(meta),
-        "notes": ev["notes"],
+        "notes": notes,
     }
