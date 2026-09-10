@@ -334,7 +334,7 @@ pub struct Overview {
     pub today: Option<Value>,
     pub month: Value,
     pub days: Vec<DayRow>,
-    pub budget_monthly_cny: f64,
+    pub budget_monthly_cny: Option<f64>,
     pub budget: BudgetAlert,
     /// 最近一次折账的会话（oneline.json）。托盘菜单展示「上一次跑完花了多少」。
     pub recent: RecentSession,
@@ -450,13 +450,11 @@ fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
-/// config.toml `[budget] monthly_cny`，缺省 600（与 `budget.py::default_budget` 的
-/// monthly_cny 同值）。极简解析镜像 `budget.py` 的 `_parse_scalar` 范围：只认
+/// 旧 config.toml `[budget] monthly_cny`。不存在或无有效用户值时返回None，
+/// 不能把旧模板默认¥600冒充用户设置。极简解析只认
 /// `[budget]` 节里的 snake_case 标量，不引 toml 依赖。
-fn monthly_budget_cny(data_home: &Path) -> f64 {
-    let Some(text) = std::fs::read_to_string(data_home.join("config.toml")).ok() else {
-        return 600.0;
-    };
+fn monthly_budget_cny(data_home: &Path) -> Option<f64> {
+    let text = std::fs::read_to_string(data_home.join("config.toml")).ok()?;
     let mut in_budget = false;
     for line in text.lines() {
         let t = line.trim();
@@ -470,13 +468,13 @@ fn monthly_budget_cny(data_home: &Path) -> f64 {
                 let val = t[eq + 1..].trim();
                 if key == "monthly_cny" {
                     if let Ok(x) = val.trim_end_matches(',').parse::<f64>() {
-                        return x;
+                        return Some(x);
                     }
                 }
             }
         }
     }
-    600.0
+    None
 }
 
 /// 展示层货币折算估算（`assets/pricing.json::fx_estimate`）→ `{usd_cny, as_of}`
@@ -651,7 +649,7 @@ fn read_overview_at(dh: &Path) -> Overview {
         today: today_val,
         month,
         days,
-        budget_monthly_cny: monthly_budget_cny(dh),
+        budget_monthly_cny: budget.monthly_cny.or_else(|| monthly_budget_cny(dh)),
         budget,
         recent: read_recent_session(dh),
         sync: load_sync_status(dh),
@@ -898,15 +896,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// config.toml 缺省预算 = 600（与 budget.py 的 default_budget.monthly_cny）。
+    /// 新安装没有用户预算声明时必须是None，不能继承模板默认值。
     /// 临时目录名带用途后缀——cargo test 并行执行，两条预算测试必须各用各的目录，
     /// 否则一条 remove_dir_all 会删掉另一条刚写好的 config.toml。
     #[test]
-    fn monthly_budget_defaults_to_600() {
+    fn monthly_budget_is_unset_without_user_config() {
         let tmp = std::env::temp_dir().join("sv-menubar-budget-default-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        assert_eq!(monthly_budget_cny(&tmp), 600.0);
+        assert_eq!(monthly_budget_cny(&tmp), None);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -921,7 +919,7 @@ mod tests {
             "[other]\nmonthly_cny = 1\n[budget]\nmonthly_cny = 888\n",
         )
         .unwrap();
-        assert_eq!(monthly_budget_cny(&tmp), 888.0);
+        assert_eq!(monthly_budget_cny(&tmp), Some(888.0));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -962,7 +960,7 @@ mod tests {
         assert!(ov.days.iter().all(|d| d.basis.as_deref() == Some("exact")),
                 "SQL 事实恒带 model → 每日 exact");
         assert!(ov.days.windows(2).all(|w| w[0].date <= w[1].date), "按日期升序");
-        assert_eq!(ov.budget_monthly_cny, 888.0);
+        assert_eq!(ov.budget_monthly_cny, Some(888.0));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -995,7 +993,7 @@ mod tests {
     }
 
     /// 空态诚实：数据根没有任何 state 文件 → today None（不是 0 元）、month {0,0}、
-    /// days 空、预算回默认 600。不摆全零结构冒充「今天花了 0 元」。
+    /// days 空、预算保持未设置。不摆全零结构冒充「今天花了 0 元」。
     #[test]
     fn read_overview_empty_state_is_honest() {
         let tmp = std::env::temp_dir().join("sv-menubar-overview-empty-test");
@@ -1005,16 +1003,15 @@ mod tests {
         assert!(ov.today.is_none());
         assert_eq!(ov.month.get("total").unwrap().as_f64().unwrap(), 0.0);
         assert!(ov.days.is_empty());
-        assert_eq!(ov.budget_monthly_cny, 600.0);
-        // 预算卡实时算自 SQL 权威库（Tier B 收尾）：空库 → default_budget 评估，
-        // level ok（无数据 = 无告警）、month/today 成本 null（不臆造 0 元）、
-        // monthly_cny 默认 600、source "sql"、无快照时刻 generated_at None。
+        assert_eq!(ov.budget_monthly_cny, None);
+        // 预算卡实时算自 SQL 权威库：空库没有用户配置 → no_budget；成本仍可
+        // 统计，但预算分母、比例和日预算均为空。
         assert_eq!(ov.budget.source, "sql");
-        assert_eq!(ov.budget.level.as_deref(), Some("ok"));
+        assert_eq!(ov.budget.level.as_deref(), Some("no_budget"));
         assert_eq!(ov.budget.month_cost, None, "无按量事实不摆 0 元");
         assert_eq!(ov.budget.month_ratio, None);
-        assert_eq!(ov.budget.monthly_cny, Some(600.0));
-        assert_eq!(ov.budget.effective_daily_budget, Some(30.0));
+        assert_eq!(ov.budget.monthly_cny, None);
+        assert_eq!(ov.budget.effective_daily_budget, None);
         assert_eq!(ov.budget.generated_at, None, "实时算无快照时刻");
         // 无 claude-ledger.json → claude 估两侧 None（诚实「没账可报」，不摆估 0）。
         assert!(ov.claude_today.is_none());

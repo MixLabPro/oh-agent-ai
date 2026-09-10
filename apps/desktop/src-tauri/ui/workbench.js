@@ -499,6 +499,11 @@ async function renderOverview() {
     fill.className = "fill";
     budgetAmt.textContent = "—";
     budgetSub.textContent = "等预算数据（跑一次 oneline）";
+  } else if (b.level === "no_budget") {
+    fill.style.width = "0%";
+    fill.className = "fill";
+    budgetAmt.textContent = "—";
+    budgetSub.textContent = "尚未设置预算 · 成本统计不受影响";
   } else {
     const ratio = Math.min(1, b.month_ratio ?? b.ratio ?? 0);
     const daily =

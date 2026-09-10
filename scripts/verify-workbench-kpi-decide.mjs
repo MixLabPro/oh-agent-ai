@@ -63,7 +63,12 @@ const el = (id) => (elements[id] ??= makeElement());
 const sandbox = {
   window: {
     __TAURI__: {
-      core: { invoke: async (cmd) => (cmd === "data_codex_quota" ? sandbox.__quota : null) },
+      core: { invoke: async (cmd) => {
+        if (cmd === "data_codex_quota") return sandbox.__quota;
+        if (cmd === "read_overview") return sandbox.__overview;
+        if (cmd === "data_status") return { status: "unavailable", reason: "fixture" };
+        return null;
+      } },
       event: { listen: async () => () => {} },
     },
     addEventListener: () => {},
@@ -203,6 +208,21 @@ elements["ov-decide-body"] = { textContent: "", innerHTML: "", appendChild(child
 await sandbox.renderDecideCard(monthly);
 decideHtml = elements["ov-decide-body"].innerHTML + (elements["ov-decide-body"]._kids || []).map((k) => k.textContent).join("");
 ok(decideHtml.includes("可继续使用"), "Codex 剩 60% → 健康态");
+
+console.log("# renderOverview · 未设置预算");
+sandbox.__overview = {
+  budget: { source: "sql", level: "no_budget", month_cost: 42,
+    monthly_cny: null, month_ratio: null, effective_daily_budget: null,
+    reasons: ["budget_not_configured"] },
+  budget_monthly_cny: null, sync: { ok: true, at: "", message: "ok" },
+  days: [], fx: null, estimate_note: "fixture", data_home: "<fixture>",
+};
+await sandbox.renderOverview();
+ok(num("ov-budget-amount") === "—", "未设置预算不显示0%或默认比例");
+ok(num("ov-budget-sub").includes("尚未设置预算") && num("ov-budget-sub").includes("成本统计不受影响"),
+  "未设置预算明确提示且不隐藏成本统计能力");
+ok(!num("ov-budget-sub").includes("600") && !num("ov-budget-sub").includes("30"),
+  "首次安装不泄漏模板默认预算");
 
 if (failed) { console.error("\n" + failed + " 项断言失败"); process.exit(1); }
 console.log("\n通过。");

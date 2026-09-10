@@ -136,11 +136,12 @@ fn budget_status_text_at(ov: &Overview, now_secs: i64) -> String {
     let b = &ov.budget;
     // 预算分母：alert.json 的 monthly_cny 是 evaluate() 算 ratio 用的那份，
     // 与它同屏显示的必须一致；缺场才退回 config。
-    let denom = b.monthly_cny.unwrap_or(ov.budget_monthly_cny);
+    let denom = b.monthly_cny.or(ov.budget_monthly_cny);
     let mc = fmt_money(b.month_cost.unwrap_or(0.0));
-    let denom_money = fmt_money(denom);
+    let denom_money = denom.map(fmt_money).unwrap_or_else(|| "未设置".into());
     let base = match (b.source.as_str(), b.level.as_deref()) {
         ("missing", _) => "预算：等预算数据（跑一次 oneline）".to_string(),
+        (_, Some("no_budget")) => "预算：未设置（成本仍按实际口径统计）".to_string(),
         (_, Some("over")) => format!("🚨 预算超支：{mc}（月 {denom_money}）"),
         (_, Some("snoozed")) => match &b.snoozed_until {
             Some(u) => format!("🔕 预算静默至 {u}"),
@@ -1822,7 +1823,7 @@ mod tests {
             today: None,
             month: serde_json::json!({"total": 0.0}),
             days: vec![],
-            budget_monthly_cny: 600.0,
+            budget_monthly_cny: Some(600.0),
             budget,
             recent: overview::RecentSession::default(),
             sync: SyncStatus::default(),
@@ -2411,6 +2412,22 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(budget_status_text_at(&ov, FIXTURE_AT_SECS), "✓ 预算：¥12.79 / ¥600");
+    }
+
+    #[test]
+    fn budget_line_no_budget_never_prints_a_default_amount_or_percent() {
+        let budget = overview::BudgetAlert {
+            source: "sql".into(),
+            level: Some("no_budget".into()),
+            month_cost: Some(42.0),
+            ..Default::default()
+        };
+        let mut ov = ov_with(budget);
+        ov.budget_monthly_cny = None;
+        let line = budget_status_text_at(&ov, 0);
+        assert_eq!(line, "预算：未设置（成本仍按实际口径统计）");
+        assert!(!line.contains("600"));
+        assert!(!line.contains('%'));
     }
 
     /// AGENT_VITALS_BIN 优先于自身目录与 PATH（env 指向的文件存在就用它）。
