@@ -443,6 +443,12 @@ invoices…) are **user-entered, not derived from our price cards**」。
 - [ ] **A5 · 文档勘误**（§6.3）
       `WORKBUDDY_INTEGRATION.md` §9 两处 + §2.1 表一处 + §9 输出契约段；
       本篇状态行更新。
+- [ ] **A6 · evidence.rs 整数时间戳 lockstep**（A3 推迟项）
+      `hosts/workbuddy/sessions/evidence.rs::parse_time` ↔
+      `packages/agent-vitals-python/agent_vitals/agent/workbuddy_evidence.py::_parse_time`：
+      整数/浮点按毫秒归一，固定上下界 `[2000-01-01, 2100-01-01)`（纯 crate 读不了时钟，
+      不用 now 窗口）。`TimelineEntry.time` 会进 `audit` 投影，**双侧同一 commit** 且
+      会移动差分——A4 的最终重冻覆盖它。
 
 **验收门禁**（每项 commit 前必跑，A5 仅需前两条）
 
