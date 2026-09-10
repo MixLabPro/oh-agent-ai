@@ -1084,7 +1084,7 @@ pub fn session_billing_buckets(
     session_key: &str,
 ) -> Result<Vec<Value>, AuthorityError> {
     let mut stmt = conn.prepare(
-        "SELECT provider_id, provider_raw, COALESCE(model_id, '<unknown>'),
+        "SELECT host, provider_id, provider_raw, COALESCE(model_id, '<unknown>'),
                 billing_template_id, COALESCE(billing_mode, 'unknown'),
                 COALESCE(pricing_basis, 'unavailable'), event_peak,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
@@ -1098,28 +1098,69 @@ pub fn session_billing_buckets(
     )?;
     let rows = stmt.query_map(rusqlite::params![session_key], |r| {
         Ok((
-            r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?,
-            r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?,
-            r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, i64>(6)?,
-            r.get::<_, i64>(7)?, r.get::<_, i64>(8)?, r.get::<_, i64>(9)?,
-            r.get::<_, i64>(10)?, r.get::<_, i64>(11)?,
+            r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?,
+            r.get::<_, Option<String>>(4)?, r.get::<_, String>(5)?,
+            r.get::<_, String>(6)?, r.get::<_, i64>(7)?, r.get::<_, i64>(8)?,
+            r.get::<_, i64>(9)?, r.get::<_, i64>(10)?, r.get::<_, i64>(11)?,
+            r.get::<_, i64>(12)?,
         ))
     })?;
     let mut buckets = Vec::new();
     for row in rows {
-        let (provider_id, provider_raw, model_id, template_id, billing_mode, pricing_basis,
+        let (host, provider_id, provider_raw, model_id, template_id, billing_mode, pricing_basis,
             peak, uncached, cache_read, cache_write, output, last_event_ms) = row?;
-        let pricing_version: Option<String> = conn.query_row(
-            "SELECT pricing_version FROM pricing_snapshots
+        let pricing_snapshot: Option<(String, String)> = conn.query_row(
+            "SELECT pricing_version, payload_json FROM pricing_snapshots
              WHERE captured_at_ms <= ?1 ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1",
-            rusqlite::params![last_event_ms], |r| r.get(0),
+            rusqlite::params![last_event_ms], |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional()?;
+        let pricing_version = pricing_snapshot.as_ref().map(|(version, _)| version.clone());
+        let usage = if host == "claude-code" {
+            json!({"by_model": { model_id.clone(): {
+                "input_tokens": uncached, "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_write, "output_tokens": output,
+                "peak_input_tokens": if peak != 0 { uncached } else { 0 },
+                "peak_cache_read_input_tokens": if peak != 0 { cache_read } else { 0 },
+                "peak_cache_creation_input_tokens": if peak != 0 { cache_write } else { 0 },
+                "peak_output_tokens": if peak != 0 { output } else { 0 },
+            }}})
+        } else if host == "codex" {
+            json!({"by_model": { model_id.clone(): {
+                "uncached_input_tokens": uncached, "cached_input_tokens": cache_read,
+                "cache_write_input_tokens": cache_write, "output_tokens": output,
+                "reasoning_output_tokens": 0,
+            }}})
+        } else {
+            json!({"by_model": { model_id.clone(): {
+                "uncached_input_tokens": uncached, "cache_read_tokens": cache_read,
+                "cache_write_tokens": cache_write, "output_tokens": output,
+                "peak_uncached_input_tokens": if peak != 0 { uncached } else { 0 },
+                "peak_cache_read_tokens": if peak != 0 { cache_read } else { 0 },
+                "peak_cache_write_tokens": if peak != 0 { cache_write } else { 0 },
+                "peak_output_tokens": if peak != 0 { output } else { 0 },
+            }}})
+        };
+        let cost_minor = if billing_mode == "subscription" {
+            None
+        } else {
+            pricing_snapshot.as_ref().and_then(|(_, payload)| {
+                serde_json::from_str::<Value>(payload).ok().and_then(|snapshot| {
+                    agent_vitals_domain::cost::metered_estimate_minor(&host, &usage, &snapshot)
+                })
+            }).map(|cost| cost.to_json())
+        };
+        let pricing_source = if cost_minor.is_some() {
+            if provider_id.as_deref() == Some("openai") { Some("official") } else { Some("fallback_official") }
+        } else { None };
         let unresolved_reason = if billing_mode == "subscription" {
             Some("subscription token usage is not a per-token bill".to_string())
+        } else if pricing_snapshot.is_none() {
+            Some("no pricing snapshot covers this event time".to_string())
+        } else if cost_minor.is_none() {
+            Some("no compatible price card for this provider/model bucket".to_string())
         } else if pricing_basis == "metered_estimate" && provider_id.as_deref() != Some("openai") {
             Some("provider-specific price card unavailable; official-card fallback estimate required".to_string())
-        } else if pricing_version.is_none() {
-            Some("no pricing snapshot covers this event time".to_string())
         } else {
             None
         };
@@ -1131,6 +1172,8 @@ pub fn session_billing_buckets(
             "billing_mode": billing_mode,
             "pricing_basis": pricing_basis,
             "pricing_version": pricing_version,
+            "pricing_source": pricing_source,
+            "cost_minor": cost_minor,
             "peak": peak != 0,
             "last_event_at_ms": last_event_ms,
             "tokens": {
@@ -2378,6 +2421,51 @@ mod tests {
         assert_eq!(mm.basis, agent_vitals_domain::data_contract::BillingBasis::MeteredEstimate);
         assert_eq!(mm.amount_minor, 167, "0.2 + 0.02 + 0.25 + 1.2 USD = $1.67");
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn billing_buckets_keep_custom_provider_cache_reads_and_fallback_estimate_separate() {
+        let path = tmp_db("billing-buckets-custom");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (day_start, _) = beijing_day_bounds_ms("2026-09-09").unwrap();
+        let skey = "skey-billing-buckets";
+        db.conn().execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+             VALUES (?1, 'codex', 'native-bucket', 'm', 'default', 1)",
+            rusqlite::params![skey],
+        ).unwrap();
+        for (fact_id, provider_id, uncached, cache_read) in [
+            ("f-custom", None::<&str>, 1_000_000, 1_000_000),
+            ("f-openai", Some("openai"), 1_000_000, 0),
+        ] {
+            db.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                     session_key, source_event_id, observation_kind, provider_id, provider_raw,
+                     billing_mode, pricing_basis, model_id, event_ts_ms, event_peak,
+                     uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                     ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'codex', 'm', 'native-bucket', ?2, ?1, 'token_count', ?3, 'custom',
+                         'metered', 'metered_estimate', 'openai/gpt-5.6-luna', ?4, 0, ?5, ?6, 0, 0,
+                         'run', 1, 1)",
+                rusqlite::params![fact_id, skey, provider_id, day_start + 3_600_000, uncached, cache_read],
+            ).unwrap();
+        }
+        let pricing = r#"{"codex_pricing":{"entries":[{
+          "modelPrefix":"gpt-5.6-luna","speed":"standard","uncachedInputUsdPerMTok":"0.2",
+          "cacheReadUsdPerMTok":"0.02","cacheWrite5mUsdPerMTok":"0.25","outputUsdPerMTok":"1.2"}]}}"#;
+        db.pricing_snapshot_put("v-bucket", "test", pricing, day_start).unwrap();
+        let buckets = session_billing_buckets(db.conn(), skey).unwrap();
+        assert_eq!(buckets.len(), 2, "different providers must not merge");
+        let custom = buckets.iter().find(|b| b["provider_id"].is_null()).unwrap();
+        assert_eq!(custom["tokens"]["cache_read_tokens"], 1_000_000);
+        assert_eq!(custom["pricing_source"], "fallback_official");
+        assert_eq!(custom["cost_minor"]["amount_minor"], 22, "$0.20 + $0.02");
+        assert_eq!(custom["has_unresolved"], true);
+        let official = buckets.iter().find(|b| b["provider_id"] == "openai").unwrap();
+        assert_eq!(official["pricing_source"], "official");
+        assert_eq!(official["cost_minor"]["amount_minor"], 20);
         let _ = std::fs::remove_file(&path);
     }
 
