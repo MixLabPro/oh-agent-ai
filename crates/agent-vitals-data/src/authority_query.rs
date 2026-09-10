@@ -1207,7 +1207,7 @@ pub fn session_billing_buckets(
 ///
 /// `MAX(event_ts_ms)` 一并带出——用它去 `pricing_snapshot_asof` 选历史价卡
 /// 版本（Q13：调价日前后分别用正确的价表）。
-pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT host, provider_id, COALESCE(model_id, '<unknown>') AS model,
+pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT host, provider_id, COALESCE(billing_mode, 'unknown'), COALESCE(model_id, '<unknown>') AS model,
                 event_peak,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens),
@@ -1216,7 +1216,7 @@ pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT host, provider_id, COA
          WHERE session_key = ?1
            AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
-         GROUP BY model_id, event_peak";
+         GROUP BY provider_id, billing_mode, model_id, event_peak";
 
 /// 一个单 provider 会话的 cost_minor（按价表的 metered estimate）。
 ///
@@ -1251,12 +1251,13 @@ pub fn session_cost_minor(
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?,
                 r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
+                r.get::<_, String>(3)?,
                 r.get::<_, i64>(4)?,
                 r.get::<_, i64>(5)?,
                 r.get::<_, i64>(6)?,
                 r.get::<_, i64>(7)?,
                 r.get::<_, i64>(8)?,
+                r.get::<_, i64>(9)?,
             ))
         },
     )?;
@@ -1272,7 +1273,10 @@ pub fn session_cost_minor(
     let mut host: Option<String> = None;
     let mut max_ts: i64 = 0;
     for row in rows {
-        let (row_host, provider, model, peak, u, cr, cw, o, ts) = row?;
+        let (row_host, provider, billing_mode, model, peak, u, cr, cw, o, ts) = row?;
+        if billing_mode == "subscription" {
+            continue;
+        }
         host = Some(row_host.clone());
         providers.insert(provider.as_deref().unwrap_or("<unknown>").to_string());
         let model_key = model.clone();
@@ -2491,6 +2495,32 @@ mod tests {
                 rusqlite::params![fact_id, skey, provider, day_start + 3_600_000],
             ).unwrap();
         }
+        assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_cost_minor_never_prices_subscription_facts() {
+        let path = tmp_db("cm-subscription");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (day_start, _) = beijing_day_bounds_ms("2026-09-09").unwrap();
+        let skey = "skey-subscription";
+        db.conn().execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+             VALUES (?1, 'codex', 'native-subscription', 'm', 'default', 1)",
+            rusqlite::params![skey],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                 session_key, source_event_id, observation_kind, provider_id, billing_mode, model_id,
+                 event_ts_ms, event_peak, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES ('f-sub', 'codex', 'm', 'native-subscription', ?1, 'f-sub', 'token_count',
+                     'openai', 'subscription', 'gpt-5.6-luna', ?2, 0, 1000000, 'run', 1, 1)",
+            rusqlite::params![skey, day_start + 3_600_000],
+        ).unwrap();
+        let pricing = r#"{"codex_pricing":{"entries":[{"modelPrefix":"gpt-5.6-luna","speed":"standard","uncachedInputUsdPerMTok":"0.2","cacheReadUsdPerMTok":"0.02","cacheWrite5mUsdPerMTok":"0.25","outputUsdPerMTok":"1.2"}]}}"#;
+        db.pricing_snapshot_put("v-sub", "test", pricing, day_start).unwrap();
         assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
         let _ = std::fs::remove_file(&path);
     }
