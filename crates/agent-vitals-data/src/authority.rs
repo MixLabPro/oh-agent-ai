@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -473,6 +473,39 @@ CREATE INDEX IF NOT EXISTS data_quality_issues_open_code_scope
   WHERE resolved_at_ms IS NULL;
 "#;
 
+// SQLite cannot add REFERENCES constraints to existing columns. These triggers
+// make the nullable v0.12 provenance columns fail closed on every write.
+const SCHEMA_V6_ADD: &str = r#"
+CREATE TRIGGER pricing_snapshots_catalog_insert_fk
+BEFORE INSERT ON pricing_snapshots
+WHEN NEW.catalog_version IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM provider_catalog_snapshots WHERE catalog_version = NEW.catalog_version)
+BEGIN
+  SELECT RAISE(ABORT, 'pricing_snapshots.catalog_version does not reference provider_catalog_snapshots');
+END;
+CREATE TRIGGER pricing_snapshots_catalog_update_fk
+BEFORE UPDATE OF catalog_version ON pricing_snapshots
+WHEN NEW.catalog_version IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM provider_catalog_snapshots WHERE catalog_version = NEW.catalog_version)
+BEGIN
+  SELECT RAISE(ABORT, 'pricing_snapshots.catalog_version does not reference provider_catalog_snapshots');
+END;
+CREATE TRIGGER pricing_snapshots_template_insert_fk
+BEFORE INSERT ON pricing_snapshots
+WHEN NEW.billing_template_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM billing_templates WHERE billing_template_id = NEW.billing_template_id)
+BEGIN
+  SELECT RAISE(ABORT, 'pricing_snapshots.billing_template_id does not reference billing_templates');
+END;
+CREATE TRIGGER pricing_snapshots_template_update_fk
+BEFORE UPDATE OF billing_template_id ON pricing_snapshots
+WHEN NEW.billing_template_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM billing_templates WHERE billing_template_id = NEW.billing_template_id)
+BEGIN
+  SELECT RAISE(ABORT, 'pricing_snapshots.billing_template_id does not reference billing_templates');
+END;
+"#;
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -643,9 +676,9 @@ impl AuthorityDb {
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
-            Some(4) => {
+            Some(5) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V5_ADD);
+                let migration = conn.execute_batch(SCHEMA_V6_ADD);
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -662,12 +695,29 @@ impl AuthorityDb {
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
+            Some(4) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD));
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(3) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 let migration = conn.execute_batch(SCHEMA_V4_ADD);
                 match migration {
                     Ok(()) => {
                         if let Err(error) = conn.execute_batch(SCHEMA_V5_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V6_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -695,6 +745,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V5_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V6_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -726,6 +780,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V5_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V6_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -772,6 +830,7 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V3_ADD)?;
                 conn.execute_batch(SCHEMA_V4_ADD)?;
                 conn.execute_batch(SCHEMA_V5_ADD)?;
+                conn.execute_batch(SCHEMA_V6_ADD)?;
                 // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
                 conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
@@ -1684,6 +1743,18 @@ mod tests {
         assert!(authority.billing_template_snapshot_put(
             "bad", "missing", Some("catalog-1"), "{}", 1_000,
         ).is_err());
+        assert!(authority.conn().execute(
+            "INSERT INTO pricing_snapshots(pricing_version, captured_at_ms, source_kind, payload_json, catalog_version)
+             VALUES ('bad-catalog', 1, 'test', '{}', 'missing')", [],
+        ).is_err());
+        assert!(authority.conn().execute(
+            "INSERT INTO pricing_snapshots(pricing_version, captured_at_ms, source_kind, payload_json, billing_template_id)
+             VALUES ('bad-template', 1, 'test', '{}', 'missing')", [],
+        ).is_err());
+        assert_eq!(authority.conn().execute(
+            "INSERT INTO pricing_snapshots(pricing_version, captured_at_ms, source_kind, payload_json, catalog_version, billing_template_id)
+             VALUES ('priced-template', 1, 'test', '{}', 'catalog-1', 'template-1')", [],
+        ).unwrap(), 1);
         let _ = std::fs::remove_file(&db);
     }
 

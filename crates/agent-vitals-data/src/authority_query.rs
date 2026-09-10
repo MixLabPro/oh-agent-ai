@@ -2431,6 +2431,33 @@ mod tests {
     }
 
     #[test]
+    fn session_cost_minor_keeps_facts_on_their_historical_price_versions() {
+        let path = tmp_db("cm-cross-snapshot");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
+        let key = "skey-cross-snapshot";
+        db.conn().execute("INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms) VALUES (?1, 'dsh', 'native', 'm', 'default', 1)", [key]).unwrap();
+        for (id, at) in [("before", start + 1_000), ("after", start + 3_000)] {
+            db.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key, source_event_id, observation_kind, model_id, event_ts_ms, event_peak, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'dsh', 'm', 'native', ?2, ?1, 'assistant-usage', 'dsh/deepseek-v4-pro-0813', ?3, 0, 1000000, 'run', 1, 1)",
+                rusqlite::params![id, key, at],
+            ).unwrap();
+        }
+        db.pricing_snapshot_put("old", "test", TEST_PRICING_FRAGMENT, start).unwrap();
+        let new_card = TEST_PRICING_FRAGMENT.replace("\"off_peak\": 4.5", "\"off_peak\": 9.0");
+        db.pricing_snapshot_put("new", "test", &new_card, start + 2_000).unwrap();
+        let buckets = session_billing_buckets(db.conn(), key).unwrap();
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0]["pricing_version"], "new");
+        assert_eq!(buckets[1]["pricing_version"], "old");
+        assert_eq!(session_cost_minor(db.conn(), key).unwrap().unwrap().amount_minor, 1350,
+            "¥4.50 old card + ¥9.00 new card, never reprice both at the latest card");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn session_cost_minor_prices_unknown_codex_with_official_snapshot_card() {
         let path = tmp_db("cm-codex-unknown");
         let db = AuthorityDb::open(&path, 1).unwrap();
