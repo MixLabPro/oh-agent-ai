@@ -436,7 +436,7 @@ invoices…) are **user-entered, not derived from our price cards**」。
       evidence.rs 的整数时间戳 fold-in **推迟**：`TimelineEntry.time` 实际会进
       `audit` 投影输出，单改 Rust 会打破 Python↔Rust 差分，需 `workbuddy_evidence.py`
       的 `_parse_time` 同步——超出 A3 范围，留作独立项。
-- [ ] **A4 · 差分重新冻结 + 新增回归**（§6.4-4/5）
+- [x] **A4 · 差分重新冻结 + 新增回归**（§6.4-4/5）
       `tests/test_cli_matrix.py` 六条 workbuddy 差分在新 fixture 上重新逐字节一致；
       新增回归：整数时间戳可解析 · 越界时间戳报 null 且进 attempts · `cost` 不含
       `cny` 键 · `nominal_cny` 不出现在任何**实付**汇总 DTO 里。

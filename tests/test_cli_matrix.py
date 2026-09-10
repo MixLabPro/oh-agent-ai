@@ -2050,8 +2050,18 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual([s["title"] for s in sessions], ["审批流程会话", "健康会话"])
         self.assertEqual([s["model"] for s in sessions], ["deepseek-v4-flash"] * 2)
         self.assertEqual([s["cwd"] for s in sessions], ["/repo"] * 2)
+        # 键序是输出契约（评审 A4）。
+        self.assertEqual(list(sessions[0].keys()),
+                         ["session_id", "title", "model", "cwd", "first", "last"])
         self.assertEqual(sessions[0]["first"], "2026-08-31T10:00:00Z")
         self.assertEqual(sessions[0]["last"], "2026-08-31T10:05:00Z")
+        # spec §6.4-1：真机上日期列恒 `- → -` 是被修的 bug（db 时间戳是 epoch-ms
+        # 整数）——两个会话的 first/last 都必须是归一后的秒精度 UTC ISO，非 null。
+        self.assertEqual(sessions[1]["first"], "2026-08-31T09:00:00Z")
+        self.assertEqual(sessions[1]["last"], "2026-08-31T09:05:00Z")
+        for s in sessions:
+            self.assertRegex(s["first"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+            self.assertRegex(s["last"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
         # 人读视图差分（py==rs，both() 兜底）+ 语义：行宽固定 28。
         code, out, err = self.both("workbuddy-session", "--list")
@@ -2200,11 +2210,27 @@ class CliMatrix(unittest.TestCase):
             self.assertEqual(rules[code]["status"], "unavailable", code)
         for code in ("SV601", "SV602", "SV603", "SV606", "SV611", "SV614"):
             self.assertEqual(rules[code]["status"], "measured_zero", code)
-        self.assertTrue(any("oldest records may be rotated" in n
-                            for n in report["notes"]))
-        self.assertTrue(any("not observable from this machine" in n
-                            for n in report["notes"]),
-                        report["notes"])
+        # 键序是输出契约（评审 A4）。
+        self.assertEqual(list(report.keys()),
+                         ["host", "session_id", "title", "model", "cwd", "file",
+                          "date_span", "audit", "coverage", "signals", "attempts",
+                          "cost", "notes"])
+        # notes 逐字节钉死（原来是 any(substring)——note 字符串是 spec §6.4 的
+        # 验收项）。第 3 条是轮转链头（seq=100 起验证），第 4 条是非积分轨说明
+        # （§11 第 14 条：0 由 note 承担，不由数字冒充）。
+        self.assertEqual(report["notes"], [
+            "turn boundaries are derived from distinct audit-log requestId (a lower "
+            "bound: audit-log is not a per-request ledger); native turn structure is "
+            "absent, so SV612/613 are Unavailable, never fabricated boundaries.",
+            "sandbox mode is the WorkBuddy-native permission_mode (bypassPermissions / "
+            "fullAccess); the DSH danger-full-access vocabulary does not apply, so SV610 "
+            "is an honest MeasuredZero, never a translation.",
+            "audit-log hash chain verified from seq=100: oldest records may be rotated "
+            "(first prevHash has no predecessor)",
+            "non-credit-track session: platform credit ledger unused (credits: 0.0 is a "
+            "real measurement); the real spend is on the user's own API account "
+            "(self-configured key + endpoint) and is not observable from this machine",
+        ])
         self.assertEqual(report["cost"], {
             "tokens": 12000,
             "credits": 0.0,
@@ -2265,8 +2291,24 @@ class CliMatrix(unittest.TestCase):
         report = json.loads(out)
         self.assertEqual(report["session_id"], "s3")
         self.assertTrue(report["file"].endswith("workbuddy.db"))
+        self.assertEqual(list(report.keys()),
+                         ["host", "session_id", "title", "model", "cwd", "file",
+                          "date_span", "audit", "coverage", "signals", "attempts",
+                          "cost", "notes"])
         self.assertEqual(report["audit"]["summary"]["findings_total"], 0)
         self.assertEqual(report["audit"]["summary"]["rules_unavailable"], 14)
+        # docstring 说「14 条规则全 Unavailable（不得 MeasuredZero）」——之前只查了
+        # 计数，评审 A4 逐条钉死 status：无任何证据时绝不能有一条 measured_zero
+        # （MeasuredZero 冒充真测量是 evidence.rs 明写的反模式）。
+        s3_rules = report["audit"]["rule_outcomes"]
+        self.assertEqual(len(s3_rules), 14)
+        for rcode, outcome in s3_rules.items():
+            self.assertEqual(outcome["status"], "unavailable", rcode)
+        # db 独苗会话的 created_at/updated_at 是 ISO 串（本用例显式插的）——字符串
+        # 路径不回归，date_span 兜底取 db 行。
+        self.assertEqual(report["date_span"],
+                         {"first": "2026-09-01T09:00:00Z",
+                          "last": "2026-09-01T09:05:00Z"})
         self.assertEqual(report["cost"], {
             "tokens": 777,
             "credits": 0.01,
