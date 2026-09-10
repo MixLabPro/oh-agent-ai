@@ -514,7 +514,7 @@ const VIEWS_V1: &str = r#"
 CREATE VIEW IF NOT EXISTS v_facts_safe AS
   SELECT fact_id, host, observation_kind, source_profile,
          provider_id, provider_raw, billing_source, billing_mode,
-         pricing_basis, evidence_basis, normalization_version,
+         pricing_basis, billing_template_id, evidence_basis, normalization_version,
          route_evidence_id, attribution_version,
          model_id, event_ts_ms, event_peak,
          uncached_input_tokens, cache_read_tokens,
@@ -1002,11 +1002,28 @@ impl AuthorityDb {
         payload_json: &str,
         captured_at_ms: i64,
     ) -> Result<bool, AuthorityError> {
+        self.pricing_snapshot_put_with_provenance(
+            pricing_version, source_kind, payload_json, captured_at_ms, None, None,
+        )
+    }
+
+    /// 落一份不可变价格快照，并显式关联其 catalog／模板证据。通用旧入口
+    /// 保持无归属兼容；新的计费接入必须使用这个入口，触发器会拒绝孤儿引用。
+    #[allow(clippy::too_many_arguments)]
+    pub fn pricing_snapshot_put_with_provenance(
+        &self,
+        pricing_version: &str,
+        source_kind: &str,
+        payload_json: &str,
+        captured_at_ms: i64,
+        catalog_version: Option<&str>,
+        billing_template_id: Option<&str>,
+    ) -> Result<bool, AuthorityError> {
         let changed = self.conn.execute(
-            "INSERT INTO pricing_snapshots(pricing_version, captured_at_ms, source_kind, payload_json)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO pricing_snapshots(pricing_version, captured_at_ms, source_kind, payload_json, catalog_version, billing_template_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(pricing_version) DO NOTHING",
-            rusqlite::params![pricing_version, captured_at_ms, source_kind, payload_json],
+            rusqlite::params![pricing_version, captured_at_ms, source_kind, payload_json, catalog_version, billing_template_id],
         )?;
         Ok(changed > 0)
     }
@@ -1755,6 +1772,12 @@ mod tests {
             "INSERT INTO pricing_snapshots(pricing_version, captured_at_ms, source_kind, payload_json, catalog_version, billing_template_id)
              VALUES ('priced-template', 1, 'test', '{}', 'catalog-1', 'template-1')", [],
         ).unwrap(), 1);
+        assert!(authority.pricing_snapshot_put_with_provenance(
+            "api-priced-template", "test", "{}", 2_000, Some("catalog-1"), Some("template-1"),
+        ).unwrap());
+        assert!(authority.pricing_snapshot_put_with_provenance(
+            "api-orphan", "test", "{}", 2_000, Some("missing"), None,
+        ).is_err());
         let _ = std::fs::remove_file(&db);
     }
 
