@@ -37,6 +37,8 @@ VERIFY_SCRIPTS = [
     # v0.10.0 Traces 渲染壳：真实 workbench.js × 真实 timeline.js × 真实 CLI
     # DTO 的完整渲染路径 + namespace 前端拦截 + 几何唯一份 grep。同理由。
     REPO / "scripts" / "verify-workbench-traces.mjs",
+    # v1.0 数据源页：独立状态契约、宿主注册表驱动、恢复动作。
+    REPO / "scripts" / "verify-workbench-sources.mjs",
 ]
 
 _has_node = shutil.which("node") is not None

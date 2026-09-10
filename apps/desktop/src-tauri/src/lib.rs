@@ -11,7 +11,7 @@ mod store;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
 use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
@@ -22,6 +22,9 @@ use overview::{HostRow, HostsSnapshot, Overview, RecentSessionRow, SyncStatus};
 /// 一轮 discover→oneline 在跑。oneline 写链本身有 fencing + exactly-once，锁不是
 /// 为了防重复写，是防两轮并发白白各折一遍 + 两次托盘重建。
 struct SyncLock(Mutex<()>);
+
+struct SyncRequests(Mutex<std::collections::BTreeMap<String, bool>>);
+static SYNC_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// 独立的 macOS 菜单栏模板图。不能复用彩色 App Icon：模板图只提供 alpha
 /// 轮廓，由 AppKit 根据浅色、深色、选中和辅助功能状态自动着色。44×36px 源图按
@@ -1153,11 +1156,20 @@ fn start_refresh_tick(app: AppHandle) {
 /// 「立即同步」（托盘菜单 / 工作台按钮共用）：受控 tick 一次。跑在后台线程，菜单
 /// 事件处理器不阻塞；互斥锁阻塞等待在途同步结束，保证用户点的这一次真的执行。
 fn sync_now(app: &AppHandle) {
+    sync_now_tracked(app, None);
+}
+
+fn sync_now_tracked(app: &AppHandle, request_id: Option<String>) {
     let app = app.clone();
     std::thread::spawn(move || {
         let lock = app.state::<SyncLock>();
         let _guard = lock.0.lock().unwrap_or_else(|e| e.into_inner());
         sync_tick(&app);
+        if let Some(id) = request_id {
+            let requests = app.state::<SyncRequests>();
+            let mut requests = requests.0.lock().unwrap_or_else(|e| e.into_inner());
+            requests.insert(id, true);
+        }
     });
 }
 
@@ -1295,6 +1307,56 @@ fn data_status() -> Value {
     })
 }
 
+/// 工作台「数据源」页的独立契约。会话搜索只回答时间窗内的会话，不能再被
+/// 借来承载扫描健康；这里从 SQL authority 的 source_files / usage_facts 读取
+/// 每个已接线宿主的扫描、导入和失败范围。宿主集合复用 ingest registry，前端
+/// 不再硬编码两个卡片。路径只以 source_id/path_hash 留在库内，本 DTO 不泄露。
+#[tauri::command]
+fn data_source_status() -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({
+            "status": "unavailable",
+            "reason": "authority database is missing or unreadable",
+            "sources": []
+        });
+    };
+    let mut report = agent_vitals_runtime::mcp::source_status_report(db.conn()).unwrap_or_else(|reason| {
+        serde_json::json!({ "status": "unavailable", "reason": reason, "sources": [] })
+    });
+    merge_source_sync_failure(&mut report, &overview::read_overview().sync);
+    report
+}
+
+/// 扫描器在发现目录权限/解析失败时可能尚未写出 source_files 行；最近同步状态
+/// 是这类失败的生产证据。把能明确归属的宿主标为需要处理；无法归属的 facts
+/// 同步失败影响全部宿主，不能伪装成三个“已连接”。
+fn merge_source_sync_failure(report: &mut Value, sync: &SyncStatus) {
+    if sync.ok || sync.stage == "never" { return; }
+    let message = sync.message.to_lowercase();
+    let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) else { return };
+    let explicitly_scoped = ["claude", "codex", "dsh", "deepseek"]
+        .iter().any(|marker| message.contains(marker));
+    for source in sources {
+        let host = source.get("host").and_then(Value::as_str).unwrap_or("");
+        let affected = if explicitly_scoped {
+            (host == "claude-code" && message.contains("claude"))
+                || (host == "codex" && message.contains("codex"))
+                || (host == "dsh" && (message.contains("dsh") || message.contains("deepseek")))
+        } else { true };
+        if !affected { continue; }
+        source["connection_state"] = Value::String("needs_attention".into());
+        source["authorization"] = Value::String("unknown_or_failed".into());
+        source["failed_scope"]["sync"] = serde_json::json!({
+            "stage": sync.stage, "message": sync.message
+        });
+        source["recovery_action"] = serde_json::json!({
+            "kind": "retry_sync", "label": "重新同步"
+        });
+    }
+}
+
 
 /// v0.9 Stage 0.6 工作台 Data Query API（spec §7 目标态"Tauri 只调
 /// monthly_summary 等 API"）：经 `SummaryRepository` trait 调 runtime 的
@@ -1357,11 +1419,29 @@ fn read_hourly_distribution(date: String) -> Value {
     )
 }
 
-/// 工作台「立即同步」按钮：受控 tick 一次（与托盘菜单同一路径）。立即返回，不
-/// 阻塞 IPC；工作台自己在同步结束后重拉 overview。
+/// 工作台「立即同步」按钮：返回本次请求的单调 ID。后台完成后由
+/// sync_request_status 精确确认，不再用秒级时间戳猜测是否是本次同步。
 #[tauri::command]
-fn trigger_sync(app: AppHandle) {
-    sync_now(&app);
+fn trigger_sync(app: AppHandle) -> String {
+    let id = format!("sync-{}", SYNC_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed));
+    {
+        let requests = app.state::<SyncRequests>();
+        let mut requests = requests.0.lock().unwrap_or_else(|e| e.into_inner());
+        if requests.len() > 32 { requests.retain(|_, completed| !*completed); }
+        requests.insert(id.clone(), false);
+    }
+    sync_now_tracked(&app, Some(id.clone()));
+    id
+}
+
+#[tauri::command]
+fn sync_request_status(app: AppHandle, request_id: String) -> Value {
+    let requests = app.state::<SyncRequests>();
+    let requests = requests.0.lock().unwrap_or_else(|e| e.into_inner());
+    match requests.get(&request_id) {
+        Some(completed) => serde_json::json!({ "request_id": request_id, "completed": completed }),
+        None => serde_json::json!({ "request_id": request_id, "error": "unknown_request" }),
+    }
 }
 
 /// v0.10.0 Traces tab 的数据面（spec §7 门槛 3 的 Tauri IPC 消费面）：薄转发到
@@ -1472,6 +1552,7 @@ fn capture_workbench_screenshot(app: AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(SyncLock(Mutex::new(())))
+        .manage(SyncRequests(Mutex::new(std::collections::BTreeMap::new())))
         // fold 事件去抖状态：tick/手动线程共享（见 FoldEventDebounce 注释）。
         .manage(FoldEventDebounce(Mutex::new(None)))
         // 菜单信息行导航目标：菜单点击 → 工作台（见 NavTarget 注释）。
@@ -1498,12 +1579,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_overview,
             data_status,
+            data_source_status,
             data_monthly_summary,
             data_daily_summary,
             data_codex_quota,
             read_calendar_month,
             read_hourly_distribution,
             trigger_sync,
+            sync_request_status,
             session_trace,
             store::sessions_list,
             store::sessions_read,
@@ -1619,6 +1702,33 @@ mod tests {
         assert!(status.ok);
         assert_eq!(status.stage, "fold");
         assert!(ready);
+    }
+
+    #[test]
+    fn source_status_applies_real_scanner_failure_only_to_named_host() {
+        let mut report = serde_json::json!({ "sources": [
+            { "host": "claude-code", "connection_state": "connected", "failed_scope": {} },
+            { "host": "codex", "connection_state": "connected", "failed_scope": {} },
+            { "host": "dsh", "connection_state": "not_detected", "failed_scope": {} }
+        ]});
+        let sync = SyncStatus::fail("partial", "DSH permission denied".into());
+        merge_source_sync_failure(&mut report, &sync);
+        assert_eq!(report["sources"][0]["connection_state"], "connected");
+        assert_eq!(report["sources"][1]["connection_state"], "connected");
+        assert_eq!(report["sources"][2]["connection_state"], "needs_attention");
+        assert_eq!(report["sources"][2]["failed_scope"]["sync"]["stage"], "partial");
+    }
+
+    #[test]
+    fn source_status_applies_unscoped_facts_failure_to_all_hosts() {
+        let mut report = serde_json::json!({ "sources": [
+            { "host": "claude-code", "connection_state": "connected", "failed_scope": {} },
+            { "host": "codex", "connection_state": "connected", "failed_scope": {} },
+            { "host": "dsh", "connection_state": "connected", "failed_scope": {} }
+        ]});
+        merge_source_sync_failure(&mut report, &SyncStatus::fail("facts", "disk full".into()));
+        assert!(report["sources"].as_array().unwrap().iter()
+            .all(|s| s["connection_state"] == "needs_attention"));
     }
 
     /// Stage 0.6 的 Data Query API 面是薄转发，但"薄"也要钉住：DTO 与 CLI

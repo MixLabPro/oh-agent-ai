@@ -427,6 +427,63 @@ pub fn data_status_report(conn: &Connection, db_existed: bool, enabled: bool) ->
     data_status::collect_report(conn, db_existed, enabled)
 }
 
+/// 独立的数据源状态投影。它不依赖 sessions_search 的时间窗，也不暴露路径；
+/// 桌面端和后续 MCP 工具可共享同一契约。
+pub fn source_status_report(conn: &Connection) -> Result<Value, String> {
+    let mut sources = Vec::new();
+    for host in crate::ingest_service::FACT_HOSTS {
+        let source_stats = conn.query_row(
+            "SELECT COUNT(*), MAX(last_seen_at_ms),
+                    COALESCE(SUM(CASE WHEN last_error_code IS NOT NULL THEN 1 ELSE 0 END), 0)
+             FROM source_files WHERE host = ?1",
+            [host],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, i64>(2)?)),
+        ).map_err(|e| format!("source_files query failed for {host}: {e}"))?;
+        let import_stats = conn.query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT session_key), MIN(event_ts_ms), MAX(event_ts_ms)
+             FROM usage_facts
+             WHERE host = ?1 AND deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'",
+            [host],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?, r.get::<_, Option<i64>>(3)?)),
+        ).map_err(|e| format!("usage_facts query failed for {host}: {e}"))?;
+        let error_codes: Vec<String> = conn.prepare(
+            "SELECT DISTINCT last_error_code FROM source_files
+             WHERE host = ?1 AND last_error_code IS NOT NULL ORDER BY last_error_code",
+        ).and_then(|mut stmt| {
+            stmt.query_map([host], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        }).map_err(|e| format!("source error query failed for {host}: {e}"))?;
+
+        let (source_count, scanned_at_ms, failed_count) = source_stats;
+        let (fact_count, session_count, first_event_at_ms, last_event_at_ms) = import_stats;
+        let state = if failed_count > 0 { "needs_attention" }
+            else if source_count > 0 { "connected" } else { "not_detected" };
+        let action = if failed_count > 0 {
+            json!({ "kind": "retry_sync", "label": "重新同步" })
+        } else if source_count == 0 {
+            json!({ "kind": "scan_and_connect", "label": "扫描并接入" })
+        } else {
+            json!({ "kind": "sync", "label": "立即同步" })
+        };
+        sources.push(json!({
+            "source_id": format!("host:{host}"),
+            "host": host,
+            "authorization": if failed_count > 0 { "unknown_or_failed" } else { "unknown" },
+            "connection_state": state,
+            "scan": { "last_scanned_at_ms": scanned_at_ms, "source_count": source_count },
+            "log": { "last_event_at_ms": last_event_at_ms },
+            "import_scope": {
+                "facts": fact_count, "sessions": session_count,
+                "first_event_at_ms": first_event_at_ms, "last_event_at_ms": last_event_at_ms
+            },
+            "failed_scope": { "sources": failed_count, "error_codes": error_codes },
+            "recovery_action": action
+        }));
+    }
+    Ok(json!({ "status": "ok", "sources": sources }))
+}
+
 /// `tools/call` 分发。`name` 已由传输层对 [`tool_specs`] 校验过。参数在这里
 /// 过一遍极简 schema 校验（spec §6.4 / M08：未知字段 → `invalid_argument`）。
 pub fn dispatch(name: &str, args: &Value, data_home: &Path) -> Result<Value, ToolError> {
@@ -581,6 +638,44 @@ mod tests {
                 .map(|e| e.code);
             assert_ne!(err, Some("internal_error"), "tool {name} not wired");
         }
+    }
+
+    #[test]
+    fn source_status_is_registry_driven_and_reports_failures_without_paths() {
+        let home = std::env::temp_dir().join(format!(
+            "av-source-status-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
+        db.conn().execute(
+            "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+                 parser_version, first_seen_at_ms, last_seen_at_ms, last_error_code)
+             VALUES ('src-c', 'codex', 'private-hash', 10, 1, 1, 100, 200, NULL),
+                    ('src-d', 'dsh', 'other-private-hash', 10, 1, 1, 100, 300, 'permission')",
+            [],
+        ).unwrap();
+
+        let report = source_status_report(db.conn()).unwrap();
+        let sources = report["sources"].as_array().unwrap();
+        let hosts: Vec<_> = sources.iter().map(|s| s["host"].as_str().unwrap()).collect();
+        assert_eq!(hosts, crate::ingest_service::FACT_HOSTS);
+        assert_eq!(sources[0]["connection_state"], "not_detected");
+        assert_eq!(sources[1]["connection_state"], "connected");
+        assert_eq!(sources[2]["connection_state"], "needs_attention");
+        assert_eq!(sources[2]["failed_scope"]["error_codes"], json!(["permission"]));
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("private-hash"));
+        assert!(!serialized.contains("other-private-hash"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn source_status_never_turns_query_failure_into_empty_sources() {
+        let conn = Connection::open_in_memory().unwrap();
+        let err = source_status_report(&conn).unwrap_err();
+        assert!(err.contains("source_files query failed"), "{err}");
     }
 
     #[test]

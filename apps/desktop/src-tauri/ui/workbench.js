@@ -3332,16 +3332,14 @@ async function loadSources(reset) {
     document.getElementById("src-banner").hidden = true;
   }
   srcState.loaded = true;
-  // `sessions_list` 即便 pageSize:1，也要先跑完 cache 命中判定（扫全部会话
-  // 文件的指纹）才能回——不是"只要 1 条就一定快"，见 loadSessions 的同款
-  // 注释。
   const loadingEl = document.getElementById("src-loading");
   loadingEl.hidden = false;
   // 两个数据源独立拉：一个失败不吞另一个（partial 照样渲染，横幅明说缺哪个）。
   let err = null;
   try {
-    const r = await invoke("sessions_list", { pageSize: 1 });
-    srcState.sources = (r && r.source_statuses) || {};
+    const r = await invoke("data_source_status");
+    if (!r || r.status !== "ok") throw new Error((r && r.reason) || "数据源状态不可用");
+    srcState.sources = Array.isArray(r.sources) ? r.sources : [];
   } catch (e) { err = e; }
   try {
     const ov = await invoke("read_overview");
@@ -3378,95 +3376,94 @@ function renderSources() {
     foot.textContent = "数据源状态读取失败，见上方错误横幅。";
     return;
   }
-  const s = srcState.sources || {};
-  let any = false;
-  for (const key of ["codex", "dsh"]) {
-    if (!s[key]) continue;
-    any = true;
-    cards.appendChild(renderSourceCard(key, s[key]));
-  }
-  if (!any) {
+  const sources = Array.isArray(srcState.sources) ? srcState.sources : [];
+  if (sources.length === 0) {
     foot.textContent = "没有可用的数据源状态。";
     return;
   }
-  const n = Object.keys(s).length;
-  foot.textContent = "共 " + n + " 个数据源 · 状态由宿主扫描时落盘（sessions list / findings 同源）。";
+  for (const source of sources) cards.appendChild(renderSourceCard(source));
+  foot.textContent = "共 " + sources.length + " 个数据源 · 扫描状态与会话查询相互独立。";
 }
 
-function renderSourceCard(key, src) {
+function renderSourceCard(src) {
+  const key = src.host || src.source_id || "unknown";
   const card = el("div", "src-card " + key);
   const head = el("div", "src-head");
   const name = el("span", "src-name");
-  name.textContent = key === "dsh" ? "DeepSeek Harness（DSH）" : "Codex Sessions";
+  name.textContent = HOST_DISPLAY[key] || key;
   head.appendChild(name);
 
-  const status = src.status || "unknown";
+  const status = src.connection_state || "unknown";
   const badge = el("span", "src-badge " + status);
-  const degraded = Array.isArray(src.degraded) ? src.degraded : [];
-  if (status === "ok" && degraded.length === 0) {
-    badge.textContent = "正常";
+  const failed = (src.failed_scope && src.failed_scope.sources) || 0;
+  if (status === "connected") {
+    badge.textContent = "已连接";
     badge.classList.add("ok");
-  } else if (status === "unavailable") {
-    badge.textContent = "不可用";
+  } else if (status === "needs_attention") {
+    badge.textContent = "需要处理";
     badge.classList.add("fail");
   } else {
-    badge.textContent = degraded.length > 0 ? "部分降级" : "状态未知";
+    badge.textContent = status === "not_detected" ? "未检测到" : "状态未知";
     badge.classList.add("warn");
   }
   head.appendChild(badge);
 
   const sessions = el("div", "src-meta");
-  sessions.textContent = "会话数 " + (src.sessions != null ? src.sessions : "—");
+  const scope = src.import_scope || {};
+  sessions.textContent = "已导入 " + (scope.sessions ?? 0) + " 个会话 · " +
+    (scope.facts ?? 0) + " 条事实";
   card.appendChild(head);
   card.appendChild(sessions);
 
-  const roots = Array.isArray(src.roots) ? src.roots : [];
-  if (roots.length > 0) {
-    const rtitle = el("div", "panel-title");
-    rtitle.textContent = "扫描根";
-    card.appendChild(rtitle);
-    const wrap = el("div", "table-wrap");
-    const table = document.createElement("table");
-    table.className = "sess-table root-table";
-    const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>kind</th><th>path</th><th>存在</th>" +
-      "<th class='num'>文件</th><th class='num'>字节</th></tr>";
-    table.appendChild(thead);
-    const tbody = document.createElement("tbody");
-    for (const r of roots) {
-      const tr = document.createElement("tr");
-      if (r.exists === false) tr.className = "root-missing";
-      tr.appendChild(td(r.kind || "—"));
-      const p = td(r.path || "—");
-      p.title = r.path || "";
-      tr.appendChild(p);
-      tr.appendChild(td(r.exists === false ? "否" : "是"));
-      tr.appendChild(tdNum(r.file_count != null ? String(r.file_count) : "—"));
-      tr.appendChild(tdNum(r.total_bytes != null ? String(r.total_bytes) : "—"));
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    wrap.appendChild(table);
-    card.appendChild(wrap);
-  }
+  const scan = el("div", "src-meta");
+  scan.textContent = "扫描源 " + ((src.scan && src.scan.source_count) ?? 0) +
+    " · 最近日志 " + fmtSourceTime(src.log && src.log.last_event_at_ms);
+  card.appendChild(scan);
 
-  if (degraded.length > 0) {
-    const dtitle = el("div", "panel-title");
-    dtitle.textContent = "降级项（" + degraded.length + "）";
-    card.appendChild(dtitle);
-    for (const d of degraded) {
-      const row = el("div", "degraded-row");
-      const p = el("span", "degraded-path");
-      p.textContent = d.path || "?";
-      p.title = d.path || "";
-      row.appendChild(p);
-      const why = el("span", "degraded-reason");
-      why.textContent = "：" + (d.reason || "未知原因");
-      row.appendChild(why);
-      card.appendChild(row);
-    }
+  if (failed > 0) {
+    const errors = ((src.failed_scope && src.failed_scope.error_codes) || []).join("、") || "未知错误";
+    const row = el("div", "degraded-row");
+    row.textContent = "失败范围：" + failed + " 个源 · " + errors;
+    card.appendChild(row);
+  }
+  const action = src.recovery_action || {};
+  if (action.label) {
+    const button = el("button", "btn");
+    button.textContent = action.label;
+    button.onclick = () => recoverSource(button, key);
+    card.appendChild(button);
   }
   return card;
+}
+
+function fmtSourceTime(ms) {
+  if (typeof ms !== "number") return "暂无";
+  return new Date(ms).toLocaleString("zh-CN", {
+    month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+}
+
+async function recoverSource(button, host) {
+  const syncEl = document.getElementById("src-sync");
+  button.disabled = true;
+  syncEl.textContent = (HOST_DISPLAY[host] || host) + "：正在扫描…";
+  try {
+    const requestId = await invoke("trigger_sync");
+    if (!requestId) throw new Error("同步请求未返回追踪编号");
+    for (let i = 0; i < 10; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const state = await invoke("sync_request_status", { requestId });
+      if (state && state.completed === true) {
+        await loadSources(true);
+        return;
+      }
+    }
+    throw new Error("同步仍在后台运行，请稍后点重载查看结果");
+  } catch (e) {
+    showBanner("src-banner", e, false);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ---------- 初始化 ----------
