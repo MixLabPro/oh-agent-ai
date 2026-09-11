@@ -2154,6 +2154,12 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(cov["TurnBoundaries"]["derived"], 2)
         self.assertEqual(cov["ApprovalPolicy"]["measured"], 1)
         self.assertEqual(cov["UsageAggregate"]["measured"], 1)
+        # B6：QuotaConsumption 分子可测——credit_json 两条目（r1/r2）= 两次配额消耗
+        # 观察；available 翻 true（此前声明 unavailable 是「有证据却不计」）。分母
+        # 不可观测由 notes 第三条说明，不出百分比。
+        self.assertEqual(cov["QuotaConsumption"],
+                         {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0,
+                          "available": True})
         self.assertEqual(cov["FileMutations"]["measured"], 3)
         a = report["audit"]
         self.assertEqual(a["summary"],
@@ -2200,10 +2206,11 @@ class CliMatrix(unittest.TestCase):
         # 信号序 = ALL_SIGNALS 序（Signals 数组的顺序是输出契约的一部分）。
         self.assertEqual(report["signals"],
                          ["ToolCalls", "TurnBoundaries", "UsageAggregate",
-                          "ApprovalPolicy", "SandboxModes", "NetworkAccess",
-                          "FileMutations"])
-        # 四条 notes：turn 重建说明 + sandbox 模式说明 + 连续 hash 链 + B5 生命
-        # 周期字段「浮出不过滤」注记（lifecycle 非 null 时追加，末位）。
+                          "QuotaConsumption", "ApprovalPolicy", "SandboxModes",
+                          "NetworkAccess", "FileMutations"])
+        # 五条 notes：turn 重建说明 + sandbox 模式说明 + B6 配额分母不可观测说明
+        # + 连续 hash 链 + B5 生命周期字段「浮出不过滤」注记（lifecycle 非 null
+        # 时追加，末位）。
         self.assertEqual(report["notes"], [
             "turn boundaries are derived from distinct audit-log requestId (a lower "
             "bound: audit-log is not a per-request ledger); native turn structure is "
@@ -2211,6 +2218,10 @@ class CliMatrix(unittest.TestCase):
             "sandbox mode is the WorkBuddy-native permission_mode (bypassPermissions / "
             "fullAccess); the DSH danger-full-access vocabulary does not apply, so SV610 "
             "is an honest MeasuredZero, never a translation.",
+            "quota consumption is measured from credit_json entries (one per billed "
+            "request); the allowance / balance that would give a percentage lives on "
+            "the account plane and is not observable on this machine, so only the "
+            "absolute consumption is reported",
             "audit-log hash chain continuous: 3 records (verified from seq=1)",
             "lifecycle fields (status / source_mode / is_playground / deleted_at / "
             "is_background_automation) are surfaced verbatim; their value vocabularies "

@@ -289,7 +289,13 @@ def self_verify(root):
         assert rules[code]["status"] == "measured_zero", (code, rules[code])
     assert audit["summary"]["rules_unavailable"] == 7, audit["summary"]
     assert audit["summary"]["findings_total"] == 0, audit["summary"]
-    assert ev["notes"][2] == (
+    # B6：QuotaConsumption 分子可测（credit_json r1/r2 → measured 2，available
+    # true）+ 第三条 note 说明分母不可观测；hash 链 note 顺延到 [3]。
+    assert ev["coverage"]["QuotaConsumption"] == {
+        "measured": 2, "derived": 0, "lossy": 0, "unmetered": 0, "available": True,
+    }, ev["coverage"]["QuotaConsumption"]
+    assert ev["notes"][2].startswith("quota consumption is measured from credit_json"), ev["notes"]
+    assert ev["notes"][3] == (
         "audit-log hash chain continuous: 3 records (verified from seq=1)"
     ), ev["notes"]
     assert ev["attempts"] == [{

@@ -212,6 +212,14 @@ _REGISTERED_DEVIATIONS = {
         "codex_evidence.rs 的 derive_coverage 同源）——矩阵文档滞后于代码，"
         "行以代码为准，此处按 G5 分歧流程登记而非静默改矩阵。"
     ),
+    ("workbuddy", "QuotaConsumption"): (
+        "矩阵写 unavailable，但 2026-09-11 B6 起代码改 measured：`session_usage."
+        "credit_json` 的每个 requestId 条目就是宿主报告的一次配额消耗（分子），"
+        "与 codex 的 `token_count.rate_limits` 同一语义档；分母（allowance/余额）"
+        "在服务端账户面、本机不可观测，由 note 说明、不出百分比。此前声明 "
+        "unavailable 是「有证据却不计」——evidence.rs 纪律的反面。矩阵文档滞后，"
+        "行以代码为准，按 G5 登记（workbuddy_evidence.rs / .py 同源）。"
+    ),
     ("workbuddy", "Usage"): (
         "矩阵写 unverified（※，generation span 存在但逐 span token 未核实）"
         "，workbuddy_evidence.rs 保守处理成 unavailable——WorkBuddy Usage 是"

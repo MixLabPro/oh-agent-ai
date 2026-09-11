@@ -124,9 +124,15 @@ const KNOWN_EVENT_TYPES: &[(&str, &str)] = &[
 /// - Usage：无逐请求 token（traces 只有 trace 级 totalTokens）；UsageAggregate
 ///   反而 measured（session_usage.used，spec §9）；
 /// - SandboxPolicy：use_sandbox_cli 是常量（恒 1），不是结构化策略事件；
+/// - QuotaConsumption **不在**这个集合里（spec §10 B6，2026-09-11）：`credit_json`
+///   的每个 requestId 条目就是一次「宿主报告的配额消耗」——分子 measured；分母
+///   （allowance/余额）在服务端账户面、本机不可观测，由 note 说明，不出百分比。
+///   此前把它声明成 unavailable 是错的——那是「有证据却不计」，`evidence.rs`
+///   「适配器不得刷覆盖」纪律的反面（不得**压**覆盖）。§13 矩阵文档滞后，
+///   按 G5 流程在 `tests/test_host_contract.py::_REGISTERED_DEVIATIONS` 登记；
 /// - SubagentSpawns / SkillInvocations / Hooks / UserPrompts / UserCorrections /
-///   ContextWindow / QuotaConsumption / StepBoundaries / Compaction：只存于匿名
-///   traces 或根本不在 WorkBuddy 会话面上。
+///   ContextWindow / StepBoundaries / Compaction：只存于 traces（可按
+///   `trace.sessionId` 归属但现有实现未接，Phase E）或根本不在会话面上。
 fn is_unavailable(signal: Signal) -> bool {
     matches!(
         signal,
@@ -134,7 +140,6 @@ fn is_unavailable(signal: Signal) -> bool {
             | Signal::StepBoundaries
             | Signal::Usage
             | Signal::ContextWindow
-            | Signal::QuotaConsumption
             | Signal::SandboxPolicy
             | Signal::Compaction
             | Signal::SubagentSpawns
@@ -154,6 +159,12 @@ const SANDBOX_MODE_NOTE: &str = "sandbox mode is the WorkBuddy-native permission
 SV610 is an honest MeasuredZero, never a translation.";
 const TRACES_ERROR: &str = "traces are session-anonymous (no sessionId join); skipped per \
 RUNTIME_EVIDENCE_CONTRACT §14.4";
+// spec §10 B6：分子可测、分母不可观测——只报绝对量，不出百分比（§6.6「无法证明
+// 完整时不编百分比」同款）。与 Python 逐字节相同。
+const QUOTA_CONSUMPTION_NOTE: &str = "quota consumption is measured from credit_json \
+entries (one per billed request); the allowance / balance that would give a percentage \
+lives on the account plane and is not observable on this machine, so only the absolute \
+consumption is reported";
 
 /// traces 是「已知但刻意不用的表面」（spec §12.2）——会话匿名，join 不进 session。
 /// 记成 `SourceAttempt`（§14.4：skipped and recorded, never treated as corruption）。
@@ -531,6 +542,27 @@ fn bump(coverage: &mut Coverage, signal: Signal, bucket: Bucket, n: u64) {
 /// sandbox 数，等）——coverage 与 timeline 两条账必须对得上，否则门控读 timeline
 /// 非空而 coverage 全零。FileMutations/ApprovalPolicy/UsageAggregate 从
 /// `session_meta`（db/file-history）拆出。返回 `(sigset, coverage, unknown)`。
+/// `credit_json`（`{requestId: credit}` 的 JSON 串）里可解析为数值的条目数。
+/// 解析失败 / 非对象 / 空串 → 0。bool 显式排除（Python `isinstance(True, int)`
+/// 为真，两侧都要短路）；数值字符串（真实账单里出现过）算数值。与 Python
+/// `_credit_entry_count` 逐字节同判。
+fn credit_entry_count(credit_json: Option<&str>) -> u64 {
+    let Some(raw) = credit_json else { return 0 };
+    if raw.trim().is_empty() {
+        return 0;
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else { return 0 };
+    let Some(obj) = parsed.as_object() else { return 0 };
+    obj.values()
+        .filter(|v| match v {
+            Value::Bool(_) => false,
+            Value::Number(n) => n.as_f64().map(|f| f.is_finite()).unwrap_or(false),
+            Value::String(s) => s.parse::<f64>().map(|f| f.is_finite()).unwrap_or(false),
+            _ => false,
+        })
+        .count() as u64
+}
+
 fn derive_coverage(
     records: &[Value],
     session_meta: &WorkbuddySessionMeta,
@@ -595,6 +627,14 @@ fn derive_coverage(
     {
         bump(&mut coverage, Signal::UsageAggregate, Bucket::Measured, 1);
     }
+    // QuotaConsumption measured = credit_json 里**可解析为数值**的条目数（spec §10 B6）
+    // ——每条 = 宿主为一个 requestId 记了一笔配额消耗。只数条目不看金额：0 积分的
+    // 条目也是一次记账观察。非数值（bool/字符串垃圾/null）不计——记账缺口报缺。
+    // 与 `sources/mod.rs::credit_cents` 的求和是两件事：那边算钱，这边算观察次数。
+    let quota_entries = credit_entry_count(session_meta.credit_json.as_deref());
+    if quota_entries > 0 {
+        bump(&mut coverage, Signal::QuotaConsumption, Bucket::Measured, quota_entries);
+    }
     // TurnBoundaries derived = distinct requestId（lossy 下界，spec §8）。coverage
     // 与 turns timeline **不同源**（timeline 恒空）——这正是
     // `empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero` 钉住的
@@ -623,6 +663,9 @@ fn build_notes(coverage: &Coverage, records: &[Value]) -> Vec<AdapterNote> {
     }
     if coverage.get(Signal::SandboxModes).total() > 0 {
         notes.push(AdapterNote { message: SANDBOX_MODE_NOTE.to_string() });
+    }
+    if coverage.get(Signal::QuotaConsumption).total() > 0 {
+        notes.push(AdapterNote { message: QUOTA_CONSUMPTION_NOTE.to_string() });
     }
     if let Some(chain) = chain_note(records) {
         notes.push(AdapterNote { message: chain });

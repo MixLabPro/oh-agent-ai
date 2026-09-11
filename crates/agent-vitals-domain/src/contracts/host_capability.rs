@@ -141,12 +141,13 @@ pub static HOSTS: &[HostProfile] = &[
     HostProfile {
         id: "workbuddy",
         display: "WorkBuddy",
+        // QuotaConsumption 不在此列（2026-09-11 B6）：credit_json 每条目 = 一次配额
+        // 消耗观察，分子 measured；分母不可观测由 note 说明。见 workbuddy_evidence.rs。
         unmeasured_signals: &[
             Signal::ToolResults,
             Signal::StepBoundaries,
             Signal::Usage,
             Signal::ContextWindow,
-            Signal::QuotaConsumption,
             Signal::SandboxPolicy,
             Signal::Compaction,
             Signal::SubagentSpawns,

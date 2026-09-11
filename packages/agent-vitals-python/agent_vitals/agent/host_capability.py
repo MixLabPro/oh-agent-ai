@@ -122,7 +122,6 @@ HOSTS = (
             "StepBoundaries",
             "Usage",
             "ContextWindow",
-            "QuotaConsumption",
             "SandboxPolicy",
             "Compaction",
             "SubagentSpawns",

@@ -33,6 +33,7 @@ title}`。db 缺失的列 → 对应信号降级 Unavailable（缺列报缺，�
 非零数字出来。
 """
 
+import json
 import math
 
 from agent_vitals.agent.claude_evidence import parse_iso
@@ -103,15 +104,19 @@ KNOWN_EVENT_TYPES = frozenset((
 # - Usage：无逐请求 token（traces 只有 trace 级 totalTokens）；UsageAggregate
 #   反而 measured（session_usage.used，spec §9）；
 # - SandboxPolicy：use_sandbox_cli 是常量（恒 1），不是结构化策略事件；
+# - QuotaConsumption **不在**这个集合里（spec §10 B6，2026-09-11）：`credit_json`
+#   的每个 requestId 条目就是一次「宿主报告的配额消耗」——分子 measured；分母
+#   （allowance/余额）在服务端账户面、本机不可观测，由 note 说明，不出百分比。
+#   此前把它声明成 unavailable 是错的——那是「有证据却不计」。§13 矩阵文档滞后，
+#   按 G5 流程在 tests/test_host_contract.py::_REGISTERED_DEVIATIONS 登记；
 # - SubagentSpawns / SkillInvocations / Hooks / UserPrompts / UserCorrections /
-#   ContextWindow / QuotaConsumption / StepBoundaries / Compaction：只存于匿名
-#   traces 或根本不在 WorkBuddy 会话面上。
+#   ContextWindow / StepBoundaries / Compaction：只存于 traces（可按
+#   `trace.sessionId` 归属但现有实现未接，Phase E）或根本不在会话面上。
 _UNAVAILABLE_SIGNALS = (
     "ToolResults",
     "StepBoundaries",
     "Usage",
     "ContextWindow",
-    "QuotaConsumption",
     "SandboxPolicy",
     "Compaction",
     "SubagentSpawns",
@@ -131,6 +136,14 @@ _SANDBOX_MODE_NOTE = (
     "sandbox mode is the WorkBuddy-native permission_mode (bypassPermissions / "
     "fullAccess); the DSH danger-full-access vocabulary does not apply, so SV610 "
     "is an honest MeasuredZero, never a translation."
+)
+# spec §10 B6：分子可测、分母不可观测——只报绝对量，不出百分比（§6.6「无法证明
+# 完整时不编百分比」同款）。与 Rust 逐字节相同。
+_QUOTA_CONSUMPTION_NOTE = (
+    "quota consumption is measured from credit_json entries (one per billed "
+    "request); the allowance / balance that would give a percentage lives on the "
+    "account plane and is not observable on this machine, so only the absolute "
+    "consumption is reported"
 )
 
 # traces 是「已知但刻意不用的表面」（spec §12.2）——会话匿名，join 不进 session。
@@ -379,6 +392,37 @@ def _bump(coverage, signal, bucket, n=1):
     coverage[signal][bucket] += n
 
 
+def _credit_entry_count(credit_json):
+    """`credit_json`（`{requestId: credit}` 的 JSON 串）里可解析为数值的条目数。
+    解析失败 / 非对象 / 空串 → 0。bool 显式排除（`isinstance(True, int)` 为真，
+    Rust 侧也短路）；数值字符串（真实账单里出现过）算数值。与 Rust
+    `credit_entry_count` 逐字节同判。"""
+    if not isinstance(credit_json, str) or not credit_json.strip():
+        return 0
+    try:
+        parsed = json.loads(credit_json)
+    except (ValueError, TypeError):
+        return 0
+    if not isinstance(parsed, dict):
+        return 0
+    n = 0
+    for v in parsed.values():
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)):
+            if v == v and v not in (float("inf"), float("-inf")):
+                n += 1
+            continue
+        if isinstance(v, str):
+            try:
+                f = float(v)
+            except ValueError:
+                continue
+            if f == f and f not in (float("inf"), float("-inf")):
+                n += 1
+    return n
+
+
 def _derive_coverage(records, timelines, session_meta):
     """spec §3 矩阵逐信号喂覆盖。ToolCalls/SandboxModes/NetworkAccess/ApprovalDecisions
     与 populate 的 timeline 同源（sandbox-executed 数 = tool_calls 的 bash 数 =
@@ -426,6 +470,13 @@ def _derive_coverage(records, timelines, session_meta):
     # UsageAggregate measured = session_usage.used / credit_json 存在（spec §9）。
     if session_meta.get("used") is not None or session_meta.get("credit_json"):
         _bump(coverage, "UsageAggregate", "measured")
+    # QuotaConsumption measured = credit_json 里**可解析为数值**的条目数（spec §10 B6）
+    # ——每条 = 宿主为一个 requestId 记了一笔配额消耗。只数条目不看金额：0 积分的
+    # 条目也是一次记账观察。非数值（bool/字符串垃圾/None）不计——记账缺口报缺。
+    # 与 workbuddy_session_audit._credit_cents 的求和是两件事：那边算钱，这边算次数。
+    quota_entries = _credit_entry_count(session_meta.get("credit_json"))
+    if quota_entries > 0:
+        _bump(coverage, "QuotaConsumption", "measured", quota_entries)
     # TurnBoundaries derived = distinct requestId（lossy 下界，spec §8）。coverage
     # 与 turns timeline **不同源**（timeline 恒空）——这正是
     # empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero 钉住的
@@ -446,6 +497,8 @@ def _build_notes(coverage, records):
         notes.append(_TURN_BOUNDARY_NOTE)
     if _total(coverage["SandboxModes"]) > 0:
         notes.append(_SANDBOX_MODE_NOTE)
+    if _total(coverage["QuotaConsumption"]) > 0:
+        notes.append(_QUOTA_CONSUMPTION_NOTE)
     chain = _chain_note(records)
     if chain is not None:
         notes.append(chain)

@@ -396,6 +396,7 @@ audit-log requestId 可 join，实测 13/22）。TOTAL 4,307.76 credit（名义 
 coverage:  ToolCalls measured=3 (bash×2 + web_fetch×1) · ToolResults available=false
            TurnBoundaries derived=2 (requestId r1/r2) · ApprovalDecisions available=true measured=0
            ApprovalPolicy measured=1 · SandboxModes measured=2 · NetworkAccess measured=1
+           QuotaConsumption measured=2 available=true（B6，credit_json r1/r2；分母不可观测由 note 说明）
            UsageAggregate measured=1 · FileMutations measured=3
 rules:     measured_zero = SV601/602/603/606/610/611/614
            unavailable  = SV604/605/607/608/609/612/613

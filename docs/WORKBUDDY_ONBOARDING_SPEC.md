@@ -601,10 +601,11 @@ span 级 `status`/`error` 的表面。现有适配器把这些全部标 Unavaila
    Codex 的 `custom_tool_call` vs `CommandExecution` 影子问题就是这一类。
 4. 653MB / 675 文件：**必须**增量读（按 mtime + 已见 traceId），全量重放不可接受。
 5. 时间戳形状先测：span 的 `startedAt`/`endedAt` 单位与 `trace.startedAt` 是否一致。
-6. `host_capability.rs::WORKBUDDY_SV604_605_REASON` 字面量含「session-anonymous traces」
-   （:233）及其上方 Rust 注释「只存在于会话匿名的 traces」（:231），已被本轮推翻但仍在
-   代码里（差分逐字钉住，B2 doc-only 不动它）——Phase E 落地时一并修，或随 SV604/605
-   转 Available 而移除。
+6. 两个含「session-anonymous」的**运行时字面量**已被本轮推翻但仍在代码里（差分逐字
+   钉住，B2/B6 不动它们）：`host_capability.rs::WORKBUDDY_SV604_605_REASON`（:233，及
+   :231 的 Rust 注释）与 `workbuddy/sessions/evidence.rs::TRACES_ERROR`（attempts 的
+   `error` 串「traces are session-anonymous (no sessionId join)」）。Phase E 落地时一并
+   修——前者随 SV604/605 转 Available 而移除，后者随 traces 真正接入而消失。
 
 **不在本轮**：B 系列是 ASK 的降级路径收尾；Phase E 是新适配器（新 timeline 信号填充、
 新 fixture、新差分），体量与 Phase A 整体相当。等 B 系列收口后单独立 PR。
@@ -697,7 +698,7 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
       `status` / `source_mode` / `is_playground` / `deleted_at` / `is_background_automation`
       按名读入 `--list` 行与会话 meta，缺列 null；**只浮出不过滤**（语义宿主未声明，过滤
       是消费方的事），note 标注「语义未经宿主声明」。
-- [ ] **B6 · `QuotaConsumption` 声明修正**（code，spec §8.0 第 1 条）
+- [x] **B6 · `QuotaConsumption` 声明修正**（code，spec §8.0 第 1 条）
       从 WorkBuddy `unmeasured_signals` 移出；`derive_coverage` 产出 measured =
       `credit_json` 条目数（分子），分母 unavailable 由 note 说明。同步
       `host_capability.rs` + Python 镜像 + `test_host_capability.py` / `test_host_contract.py`

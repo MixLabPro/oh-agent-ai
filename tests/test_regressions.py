@@ -1756,6 +1756,89 @@ class TestWorkbuddyLifecycleIsSurfacedNeverFiltered(unittest.TestCase):
             self.assertEqual(list(row["lifecycle"].keys()), self._LIFECYCLE_KEYS)
 
 
+class TestWorkbuddyQuotaConsumptionNumeratorIsMeasured(unittest.TestCase):
+    """spec §10 B6 / §5.0 / §8.0：`QuotaConsumption` 从 WorkBuddy 的
+    `unmeasured_signals` 移出。`credit_json` 的每个 requestId 条目就是宿主报告的
+    一次配额消耗（与 codex `token_count.rate_limits` 同一语义档）——**分子
+    measured**；分母（allowance/余额）在服务端账户面、本机不可观测——由 note
+    说明，**不出百分比**（§6.6「无法证明完整时不编百分比」）。
+
+    此前把它声明成 unavailable 是错的：那是「有证据却不计」，`evidence.rs`
+    「适配器不得刷覆盖」纪律的反面（同样不得**压**覆盖）。§13 矩阵文档滞后，
+    按 G5 在 `test_host_contract._REGISTERED_DEVIATIONS` 登记。"""
+
+    _SESSION = ("s1", "t", "deepseek-v4-flash", "/repo", "fullAccess", 1,
+                1788167100000, 1788167400000)
+    _NOTE_PREFIX = "quota consumption is measured from credit_json"
+
+    def _audit(self, session_id, sessions, usage):
+        import sqlite3  # noqa: PLC0415
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = tmp / ".workbuddy"; root.mkdir(); (tmp / "workdir").mkdir()
+        conn = sqlite3.connect(str(root / "workbuddy.db"))
+        conn.executescript(TestWorkbuddyIntegerEpochMsTimestamps._COLS_SESSIONS
+                           + TestWorkbuddyIntegerEpochMsTimestamps._COLS_USAGE)
+        for s in sessions:
+            conn.execute(
+                "INSERT INTO sessions (id, title, model, cwd, permission_mode, "
+                "use_sandbox_cli, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", s)
+        for u in usage:
+            conn.execute("INSERT INTO session_usage VALUES (?,?,?,?,?)", u)
+        conn.commit(); conn.close()
+        r = subprocess.run(
+            SCAN_CMD + ["workbuddy-session", "--session", session_id, "--json", "-"],
+            cwd=str(tmp / "workdir"), env=isolated_home_env(tmp),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_measured_equals_number_of_numeric_credit_entries(self):
+        """分子 = credit_json 里可解析为数值的条目数（int / float / 数值字符串），
+        0 积分的条目也算一次记账观察；bool / 垃圾字符串 / null 不计。available
+        恒 true——这是宿主结构性能报的信号。"""
+        cj = json.dumps({"r1": 22.53, "r2": 0, "r3": "19.48", "r4": True,
+                         "r5": "garbage", "r6": None})
+        rep = self._audit("s1", [self._SESSION], [("s1", 5000, 10, 1788167100000, cj)])
+        self.assertEqual(rep["coverage"]["QuotaConsumption"], {
+            "measured": 3, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
+        self.assertIn("QuotaConsumption", rep["signals"])
+
+    def test_zero_entries_is_measured_zero_of_the_ledger_not_unavailable(self):
+        """credit_json 为 `{}` 或空串 → measured 0 **且 available true**：账本的
+        MeasuredZero（宿主能报、这个会话确实没记）——不是 Unavailable。成因
+        （自配路由/限免/未记账）不判定，由 A7 的 note 说明，与本信号无关。"""
+        for cj in ("{}", ""):
+            rep = self._audit("s1", [self._SESSION], [("s1", 5000, 10, 1788167100000, cj)])
+            self.assertEqual(rep["coverage"]["QuotaConsumption"]["measured"], 0, cj)
+            self.assertTrue(rep["coverage"]["QuotaConsumption"]["available"], cj)
+            self.assertNotIn("QuotaConsumption", rep["signals"], cj)
+
+    def test_note_says_denominator_is_unobservable_iff_measured(self):
+        """note 恰在 measured > 0 时出现一条，且明说「分母不可观测、只报绝对量」
+        ——不许任何百分比进输出。"""
+        rep = self._audit("s1", [self._SESSION],
+                          [("s1", 5000, 10, 1788167100000, '{"r1": 1.5}')])
+        hits = [n for n in rep["notes"] if n.startswith(self._NOTE_PREFIX)]
+        self.assertEqual(len(hits), 1, rep["notes"])
+        self.assertIn("not observable on this machine", hits[0])
+        self.assertIn("only the absolute consumption is reported", hits[0])
+        self.assertNotRegex(json.dumps(rep), r"\d+(\.\d+)?%")
+        zero = self._audit("s1", [self._SESSION], [("s1", 5000, 10, 1788167100000, "{}")])
+        self.assertFalse(any(n.startswith(self._NOTE_PREFIX) for n in zero["notes"]))
+
+    def test_declaration_and_evidence_agree_quota_is_not_unmeasured(self):
+        """三处锁步：`host_capability.HOSTS` 的 workbuddy 行不再声明 QuotaConsumption
+        为 unmeasured；evidence 层输出的 available 也为 true；`hosts --json` 两语言
+        字节一致由 test_cli_matrix 另钉。声明与实现必须同步翻——只翻一边就是
+        G9 守卫要抓的「声明了却没实现 / 实现了却没声明」。"""
+        from agent_vitals.agent import host_capability  # noqa: PLC0415
+        wb = next(h for h in host_capability.HOSTS if h["id"] == "workbuddy")
+        self.assertNotIn("QuotaConsumption", wb["unmeasured_signals"])
+        rep = self._audit("s1", [self._SESSION], [("s1", 5000, 10, 1788167100000, "{}")])
+        self.assertTrue(rep["coverage"]["QuotaConsumption"]["available"])
+
+
 class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
     """A4（spec §6.4-5）：`nominal_cny`（名义栏，credits × 兑换价）绝不能出现在
     真实**实付**汇总 DTO 里——它是尺，不是账（`ATTRIBUTABLE_WASTE.md` §6.7）。
