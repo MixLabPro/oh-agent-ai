@@ -870,7 +870,8 @@ pub fn unresolved_billing_groups(month: &str) -> serde_json::Value {
         "SELECT host, COALESCE(provider_id, '<unknown>'), COALESCE(model_id, '<unknown>'),
                 COALESCE(evidence_basis, 'missing'), COALESCE(pricing_basis, 'unavailable'),
                 SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens),
-                MIN(event_ts_ms), MAX(event_ts_ms), COUNT(DISTINCT session_key)
+                MIN(event_ts_ms), MAX(event_ts_ms),
+                COUNT(DISTINCT COALESCE(session_key, host || ':' || machine_namespace || ':' || native_session_id))
          FROM usage_facts
          WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'
            AND event_ts_ms >= ?1 AND event_ts_ms < ?2
@@ -1946,6 +1947,31 @@ mod tests {
                 .flat_map(|(_, rows)| rows.as_array().unwrap().iter())
                 .find(|r| r["model"] == json!("<synthetic>"));
             assert!(synthetic.is_none(), "0-token 行不进下钻，got {detail}");
+        });
+    }
+
+    #[test]
+    fn unresolved_billing_groups_carries_real_scope_and_excludes_subscriptions() {
+        with_home(|| {
+            let db = seed_authority_db();
+            let ts = agent_vitals_data::authority_query::beijing_day_bounds_ms("2026-09-02")
+                .unwrap().0 + 12 * 3_600_000;
+            seed_fact(&db, "group-unknown", "codex", Some("gpt-mystery"), "token_count", ts, 0, 100, 20, 0, 5);
+            // seed_fact 不写 session_key，故此行同时钉住 native-session fallback。
+            seed_fact(&db, "group-legacy", "codex", Some("gpt-legacy"), "legacy_aggregate", ts, 0, 9_000, 0, 0, 0);
+            seed_fact(&db, "group-subscription", "codex", Some("gpt-plan"), "token_count", ts, 0, 900, 0, 0, 0);
+            db.conn().execute(
+                "UPDATE usage_facts SET billing_mode = 'subscription', pricing_basis = 'subscription' WHERE fact_id = 'group-subscription'", []
+            ).unwrap();
+            let groups = unresolved_billing_groups("2026-09");
+            assert_eq!(groups["status"], json!("ok"));
+            let rows = groups["groups"].as_array().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["host"], json!("codex"));
+            assert_eq!(rows[0]["model_id"], json!("gpt-mystery"));
+            assert_eq!(rows[0]["tokens"], json!(125));
+            assert_eq!(rows[0]["session_count"], json!(1));
+            assert!(rows[0]["estimated_cost_minor"].is_null(), "no amount may be invented before historical price aggregation");
         });
     }
 
