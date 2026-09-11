@@ -1367,6 +1367,18 @@ struct BillingScopeInput {
     scope_value: String,
 }
 
+#[derive(Deserialize)]
+struct HostBillInput {
+    bill_id: String,
+    host: String,
+    provider_id: String,
+    billing_period: String,
+    billing_basis: String,
+    amount_minor: i64,
+    currency: String,
+    evidence_ref: String,
+}
+
 /// 保存一条可追溯的计费关系修订。声明当前态与不可变修订在同一个用户动作中
 /// 写入；scope 由前端显式传入，空数组表示只使用宿主/provider/有效期约束。
 #[tauri::command]
@@ -1464,6 +1476,29 @@ fn save_host_bill(
         amount_minor, &currency, &evidence_ref, agent_vitals_runtime::sql_sync::now_ms(),
     ).map_err(|error| error.to_string())?;
     Ok(serde_json::json!({ "status": "saved", "bill_id": bill_id }))
+}
+
+#[tauri::command]
+fn save_host_bills(rows: Vec<HostBillInput>) -> Result<Value, String> {
+    if rows.is_empty() {
+        return Err("no bill rows to import".to_string());
+    }
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    db.with_immediate_txn(|_| {
+        for row in &rows {
+            db.host_bill_put(
+                &row.bill_id, &row.host, &row.provider_id, &row.billing_period,
+                &row.billing_basis, row.amount_minor, &row.currency, &row.evidence_ref, now_ms,
+            )?;
+        }
+        Ok(())
+    }).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "saved", "count": rows.len() }))
 }
 
 #[tauri::command]
@@ -1889,6 +1924,7 @@ pub fn run() {
             billing_declarations,
             billing_declaration_impact_preview,
             save_host_bill,
+            save_host_bills,
             host_bills_for_period,
             delete_host_bill,
             enqueue_billing_recalculation,

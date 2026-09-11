@@ -685,6 +685,44 @@ function billingMonthWindow(month) {
   return { start, end };
 }
 
+function parseBillingCsvLine(line) {
+  const cells = [], re = /(?:^|,)("(?:[^"]|"")*"|[^,]*)/g;
+  let match;
+  while ((match = re.exec(line)) !== null) {
+    const cell = match[1] || "";
+    cells.push(cell.startsWith('"') && cell.endsWith('"')
+      ? cell.slice(1, -1).replace(/""/g, '"') : cell.trim());
+  }
+  return cells;
+}
+
+function parseBillingCsv(text) {
+  const required = ["host", "provider_id", "billing_period", "billing_basis", "amount_minor", "currency", "evidence_ref"];
+  const lines = String(text || "").split(/\r?\n/).filter((line) => line.trim());
+  if (!lines.length || JSON.stringify(parseBillingCsvLine(lines[0])) !== JSON.stringify(required)) {
+    return { rows: [], errors: ["第1行表头不匹配，必须使用模板字段"] };
+  }
+  const rows = [], errors = [], seen = new Set();
+  for (let i = 1; i < lines.length; i += 1) {
+    const cells = parseBillingCsvLine(lines[i]);
+    if (cells.length !== required.length) { errors.push("第" + (i + 1) + "行字段数错误"); continue; }
+    const [host, provider_id, billing_period, billing_basis, amountText, currency, evidence_ref] = cells;
+    const amount_minor = Number(amountText);
+    const key = [host, provider_id, billing_period, billing_basis, evidence_ref].join("\u0000");
+    if (!host || !provider_id || !/^\d{4}-(0[1-9]|1[0-2])$/.test(billing_period) ||
+        !["fixed_subscription", "host_billed", "metered_actual", "metered_estimate", "api_equivalent"].includes(billing_basis) ||
+        !Number.isSafeInteger(amount_minor) || amount_minor < 0 || !currency || !evidence_ref) {
+      errors.push("第" + (i + 1) + "行字段值无效");
+    } else if (seen.has(key)) {
+      errors.push("第" + (i + 1) + "行与 CSV 内已有记录重复");
+    } else {
+      seen.add(key);
+      rows.push({ host, provider_id, billing_period, billing_basis, amount_minor, currency, evidence_ref });
+    }
+  }
+  return { rows, errors };
+}
+
 function openBillingDeclaration(candidate) {
   const panel = document.getElementById("ov-billing-declaration-panel");
   const context = document.getElementById("ov-billing-declaration-context");
@@ -979,6 +1017,37 @@ async function renderHostBills(period) {
       status.textContent = "保存失败：" + errText(e);
     } finally {
       save.disabled = false;
+    }
+  };
+  let csvRows = [];
+  const csvPreview = document.getElementById("ov-bill-csv-preview");
+  const csvImport = document.getElementById("ov-bill-csv-import");
+  const csvStatus = document.getElementById("ov-bill-csv-status");
+  csvPreview.onclick = () => {
+    const parsed = parseBillingCsv(document.getElementById("ov-bill-csv").value);
+    csvRows = parsed.rows;
+    csvStatus.hidden = false;
+    csvStatus.textContent = "可导入 " + csvRows.length + " 行" +
+      (parsed.errors.length ? "；拒绝 " + parsed.errors.length + " 行：" + parsed.errors.join("；") : "，未发现错误。");
+    csvImport.disabled = !csvRows.length || parsed.errors.length > 0;
+  };
+  csvImport.onclick = async () => {
+    csvImport.disabled = true;
+    try {
+      await invoke("save_host_bills", { rows: csvRows.map((row, i) => ({
+        bill_id: "csv-" + Date.now().toString(36) + "-" + i,
+        host: row.host, provider_id: row.provider_id, billing_period: row.billing_period,
+        billing_basis: row.billing_basis, amount_minor: row.amount_minor,
+        currency: row.currency, evidence_ref: row.evidence_ref,
+      })) });
+      csvStatus.hidden = false;
+      csvStatus.textContent = "已导入 " + csvRows.length + " 行账单记录。";
+      const report = await invoke("host_bills_for_period", { billingPeriod: period });
+      showBills(report);
+    } catch (e) {
+      csvImport.disabled = false;
+      csvStatus.hidden = false;
+      csvStatus.textContent = "导入中断：已成功写入前置行；请根据预览修正后重试。" + errText(e);
     }
   };
   try {

@@ -1062,6 +1062,9 @@ button.chip.active {
 .billing-form select { min-width: 170px; }
 .billing-form-actions { display: flex; gap: 8px; margin-top: 10px; }
 .billing-preview { margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: rgba(46, 78, 168, .12); }
+.billing-csv { margin-top: 14px; }
+.billing-csv summary { cursor: pointer; color: var(--text-2, #667); font-size: 12px; }
+.billing-csv textarea { display: block; box-sizing: border-box; width: 100%; margin-top: 8px; font: 12px monospace; }
 @media (max-width: 720px) {
   .billing-prompt, .billing-review-row { align-items: flex-start; flex-direction: column; }
   .billing-form { align-items: stretch; flex-direction: column; }

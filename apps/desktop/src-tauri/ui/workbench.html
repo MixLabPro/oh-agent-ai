@@ -94,6 +94,16 @@
         </div>
         <div class="billing-preview" id="ov-bill-status" hidden></div>
         <div class="muted" id="ov-bill-existing"></div>
+        <details class="billing-csv">
+          <summary>导入 CSV 模板</summary>
+          <div class="muted">表头必须为：host,provider_id,billing_period,billing_basis,amount_minor,currency,evidence_ref</div>
+          <textarea id="ov-bill-csv" rows="4" placeholder="host,provider_id,billing_period,billing_basis,amount_minor,currency,evidence_ref"></textarea>
+          <div class="billing-form-actions">
+            <button class="btn secondary" id="ov-bill-csv-preview">预览 CSV</button>
+            <button class="btn" id="ov-bill-csv-import" disabled>确认导入</button>
+          </div>
+          <div class="billing-preview" id="ov-bill-csv-status" hidden></div>
+        </details>
       </section>
       <!-- v0.9 Stage D KPI 行（今日五 tile，ATTRIBUTABLE_WASTE §6/§6.7 感知层）。
            数据源 = data_daily_summary（冻结 DTO：tokens_by_host + by_provider +
