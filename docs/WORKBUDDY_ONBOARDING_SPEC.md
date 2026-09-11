@@ -318,17 +318,12 @@ unavailable」——正是 Coverage 三态存在的意义，不是缺陷。
 `actual = 0` 使倍数**无定义**：展示层必须走「**无实付证据，不计算倍数**」分支，
 不得显示 ∞，更不得显示「省了 N 倍」。
 
-#### 5.3.1 ⚠️ 该护栏有一个**跨宿主**假阳性——本条应迁出本篇
+#### 5.3.1 护栏对合法免费额度的假阳性——**已迁至 `ATTRIBUTABLE_WASTE.md` §6.7**（B7）
 
-§6.7 的护栏假定极端倍数**只有一种成因**：归属错误（实测 anthropic 族 380×，暴露的是
-billing_source 声明错误、实为中转路由）。**限免促销是合法的第二种成因**：
-nominal > 0、actual = 0，倍数无定义或趋于无穷，而这**不是**声明错误——平台确实免费
-给了。护栏会把「平台送我用」误报成「你的计费声明错了」。
-
-**这不是 WorkBuddy 的问题**：Claude / Codex 的新模型推广期、任何厂商的免费额度都会
-撞同一条。**归属：`ATTRIBUTABLE_WASTE.md` §6.7 应补一条「已声明免费额度」的豁免分支**
-（成因同样归用户声明，不归机器推断）。记在这里只是发现地，不是归属地——真正修复
-时应迁出本篇，避免把跨宿主口径写成 WorkBuddy 的附属条款。
+发现于本篇（`hy3` 限免：nominal > 0、actual = 0，护栏会误报「计费声明错误」），但它
+是**跨宿主**口径缺口，不是 WorkBuddy 的附属条款。豁免分支的规格（先查已声明的免费
+额度 → 有则显示「免费额度（已声明）」，无则维持原告警；成因归声明不归推断）现在
+住在 `ATTRIBUTABLE_WASTE.md` §6.7「护栏的第二种成因」段，本节只留指针。
 
 ## 6. Phase A：口径与时间轴修复
 
@@ -703,7 +698,7 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
       `credit_json` 条目数（分子），分母 unavailable 由 note 说明。同步
       `host_capability.rs` + Python 镜像 + `test_host_capability.py` / `test_host_contract.py`
       byte-parity；`hosts --json` 输出会动，差分照冻。
-- [ ] **B7 · §5.3.1 护栏假阳性迁入 `ATTRIBUTABLE_WASTE.md` §6.7**（doc-only）
+- [x] **B7 · §5.3.1 护栏假阳性迁入 `ATTRIBUTABLE_WASTE.md` §6.7**（doc-only）
       加「已声明免费额度」豁免分支的缺口记录；本 spec §5.3.1 改为指针。
 
 **明确不做（记录理由）**：ASK P1-4 的 `AutomationRuns` 宿主中立 signal——新增 `Signal`
