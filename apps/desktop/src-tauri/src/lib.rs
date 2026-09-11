@@ -1361,6 +1361,93 @@ fn resolve_billing_import_candidate(candidate_id: String, decision: String) -> R
     Ok(serde_json::json!({ "status": status, "changed": changed }))
 }
 
+#[derive(Deserialize)]
+struct BillingScopeInput {
+    scope_kind: String,
+    scope_value: String,
+}
+
+/// 保存一条可追溯的计费关系修订。声明当前态与不可变修订在同一个用户动作中
+/// 写入；scope 由前端显式传入，空数组表示只使用宿主/provider/有效期约束。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn save_billing_declaration_revision(
+    revision_id: String,
+    declaration_id: String,
+    supersedes_revision_id: Option<String>,
+    host: String,
+    provider_id: String,
+    relationship_kind: String,
+    subscription_name: Option<String>,
+    amount_minor: Option<i64>,
+    currency: Option<String>,
+    effective_start: String,
+    effective_end: Option<String>,
+    source_candidate_id: Option<String>,
+    evidence_ref: Option<String>,
+    scopes: Vec<BillingScopeInput>,
+) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    db.billing_declaration_put(
+        &declaration_id, &host, &provider_id, &relationship_kind,
+        subscription_name.as_deref(), amount_minor, currency.as_deref(),
+        &effective_start, effective_end.as_deref(), source_candidate_id.as_deref(),
+        evidence_ref.as_deref(), now_ms,
+    ).map_err(|error| error.to_string())?;
+    let scope_refs = scopes.iter()
+        .map(|scope| (scope.scope_kind.as_str(), scope.scope_value.as_str()))
+        .collect::<Vec<_>>();
+    let changed = db.billing_declaration_revision_save(
+        &revision_id, &declaration_id, supersedes_revision_id.as_deref(),
+        &host, &provider_id, &relationship_kind, subscription_name.as_deref(),
+        amount_minor, currency.as_deref(), &effective_start, effective_end.as_deref(),
+        source_candidate_id.as_deref(), evidence_ref.as_deref(), &scope_refs, now_ms,
+    ).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "status": "saved", "revision_id": revision_id,
+        "declaration_id": declaration_id, "changed": changed,
+    }))
+}
+
+/// 读取当前仍有效的计费声明；修订历史由影响预览和重算回执继续追踪。
+#[tauri::command]
+fn billing_declarations() -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable", "declarations": [] });
+    };
+    match db.billing_declarations() {
+        Ok(rows) => serde_json::json!({ "status": "ok", "declarations": rows.into_iter().map(|row| {
+            let (declaration_id, host, provider_id, relationship_kind, subscription_name,
+                amount_minor, currency, effective_start, effective_end, source_candidate_id) = row;
+            serde_json::json!({
+                "declaration_id": declaration_id, "host": host, "provider_id": provider_id,
+                "relationship_kind": relationship_kind, "subscription_name": subscription_name,
+                "amount_minor": amount_minor, "currency": currency,
+                "effective_start": effective_start, "effective_end": effective_end,
+                "source_candidate_id": source_candidate_id,
+            })
+        }).collect::<Vec<_>>() }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string(), "declarations": [] }),
+    }
+}
+
+/// 保存前影响预览：只读返回事实/会话/token 范围，不提前改变汇总或账单。
+#[tauri::command]
+fn billing_declaration_impact_preview(
+    revision_id: String, window_start_ms: i64, window_end_ms: i64,
+) -> Value {
+    agent_vitals_runtime::summary::billing_declaration_impact_preview(
+        &revision_id, window_start_ms, window_end_ms,
+    )
+}
+
 /// 声明保存后创建重算任务；这里只入队，不在 IPC 调用线程执行重算。
 #[tauri::command]
 fn enqueue_billing_recalculation(
@@ -1671,6 +1758,9 @@ pub fn run() {
             data_status,
             billing_import_candidates,
             resolve_billing_import_candidate,
+            save_billing_declaration_revision,
+            billing_declarations,
+            billing_declaration_impact_preview,
             enqueue_billing_recalculation,
             billing_recalculation_job_status,
             data_source_status,
