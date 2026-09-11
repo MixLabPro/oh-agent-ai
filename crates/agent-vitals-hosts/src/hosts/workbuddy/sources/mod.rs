@@ -338,6 +338,34 @@ pub fn read_workbuddy_audit_log(root: &Path) -> AuditLog {
     (records_by_session, file_of, degraded)
 }
 
+/// WAL 快照标注（spec §10 B3，`docs/WORKBUDDY_OBSERVABILITY_ASK.md` P0-1「若不做」
+/// 降级路径）：`journal_mode`/`db_bytes`/`wal_bytes`，让读者看见"这是一次时点快照"
+/// 而不是把它当成稳定通道。**防御性约束（spec §2 实测行）钉在这里**：绝不能把打开
+/// 方式改成 `immutable=1`、也绝不能裸拷主库文件——WAL 模式下已提交数据大半在
+/// `-wal` 文件里（真机 155KB 主库 vs 630KB WAL），`immutable=1` 会静默忽略 WAL、
+/// 读到上一次 checkpoint 的陈旧状态（真机实测因此少读到 1 个会话：22 vs 23）；
+/// 裸拷主库同理会撕裂或漏 WAL。现有 `SQLITE_OPEN_READ_ONLY` 连接已参与 WAL、读到
+/// 最新状态——这里另开一个同样只读的连接只为查 pragma，不改变、不影响主查询的
+/// 打开方式。**不含 mtime**——fixture 上非确定，会破坏逐字节差分（spec 明令）。
+/// db 缺失/不可读 → `None`（与 `read_workbuddy_db` 的 `(None, None)` 同一降级
+/// 纪律：不可读绝不编成一个假快照）。
+fn read_workbuddy_source_snapshot(root: &Path) -> Option<Value> {
+    let db_path = root.join("workbuddy.db");
+    let db_bytes = std::fs::metadata(&db_path).ok()?.len();
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    // `PRAGMA journal_mode` 只读当前模式、不触发 checkpoint 或切换模式——单纯查询。
+    let journal_mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .ok()?;
+    let wal_path = root.join("workbuddy.db-wal");
+    let wal_bytes = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+    Some(json!({
+        "journal_mode": journal_mode,
+        "db_bytes": db_bytes,
+        "wal_bytes": wal_bytes,
+    }))
+}
+
 /// `file-history/<sessionId>/` 下的文件数 = FileMutations 源（spec §3 Measured 行：
 /// `<contentHash>@v<n>` 版本快照数）。目录缺失 → 0（无文件快照是诚实测量，不是
 /// 不可读）。
@@ -477,7 +505,8 @@ pub fn workbuddy_session_list(home: &Path) -> Value {
         }
     }
     sessions.sort_by(session_cmp);
-    json!({ "host": "workbuddy", "sessions": sessions })
+    let source_snapshot = read_workbuddy_source_snapshot(&root);
+    json!({ "host": "workbuddy", "sessions": sessions, "source_snapshot": source_snapshot })
 }
 
 /// `workbuddy-session --list` 的人读呈现。缺席的字段一律 `-`（诚实缺失，不编造）；
@@ -682,5 +711,6 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         "attempts": attempts,
         "cost": cost_of(&meta),
         "notes": notes,
+        "source_snapshot": read_workbuddy_source_snapshot(&root),
     }))
 }

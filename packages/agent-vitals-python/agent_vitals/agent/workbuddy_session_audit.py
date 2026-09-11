@@ -95,7 +95,8 @@ def workbuddy_session_list(home=None):
                 "last": meta["updated_at"],
             })
     sessions.sort(key=functools.cmp_to_key(_session_cmp))
-    return {"host": "workbuddy", "sessions": sessions}
+    source_snapshot = workbuddy_session.read_workbuddy_source_snapshot(root)
+    return {"host": "workbuddy", "sessions": sessions, "source_snapshot": source_snapshot}
 
 
 def _render_list(out):
@@ -313,4 +314,5 @@ def workbuddy_session_audit_json(home, session_id):
         "attempts": attempts,
         "cost": _cost_of(meta),
         "notes": notes,
+        "source_snapshot": workbuddy_session.read_workbuddy_source_snapshot(root),
     }

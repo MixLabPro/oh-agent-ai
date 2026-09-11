@@ -325,6 +325,28 @@ def self_verify(root):
     assert "NOT determinable" in unbilled[0] and "own API account" not in unbilled[0], \
         unbilled[0]
 
+    # ── B3：`source_snapshot`（spec §10，`WORKBUDDY_OBSERVABILITY_ASK.md` P0-1
+    # 「若不做」降级路径）── fixture db 是本脚本用 stdlib `sqlite3` 默认日志
+    # 模式建的：journal_mode=delete、无 `-wal` 文件（真机是 wal，见 spec §2 实测
+    # 行；两态都由同一份代码路径产出，这里钉 fixture 那一态）。db_bytes 读自真实
+    # 文件而不写死字面量——这条断言校验的是「代码路径读到了什么」，不是复刻一个
+    # 数字；已提交的 fixture db 字节由 git 钉住（本脚本不重建 db，只有 write 路径
+    # 会改动它）。**不含 mtime**：显式钉死没有任何 mtime/modified/timestamp 键，
+    # 这正是 B3 存在的理由——防御性约束见 sources/mod.rs 的同名函数注释。
+    snap = workbuddy_session.read_workbuddy_source_snapshot(root)
+    assert snap is not None, "db 存在时 source_snapshot 不应为 None"
+    assert snap["journal_mode"] == "delete", snap
+    assert snap["wal_bytes"] == 0, snap
+    assert snap["db_bytes"] == (root / "workbuddy.db").stat().st_size, snap
+    assert list(snap.keys()) == ["journal_mode", "db_bytes", "wal_bytes"], snap
+    assert not any(k in snap for k in ("mtime", "modified", "timestamp")), snap
+    # 两个消费面（--list 索引 / 单会话审计）都必须带同一份快照，且是末位键。
+    listing = workbuddy_session_audit.workbuddy_session_list(root.parent)
+    assert list(listing.keys())[-1] == "source_snapshot", listing.keys()
+    assert listing["source_snapshot"] == snap, listing["source_snapshot"]
+    assert list(full.keys())[-1] == "source_snapshot", full.keys()
+    assert full["source_snapshot"] == snap, full["source_snapshot"]
+
 
 def main():
     root = write_workbuddy_home(HERE / "workdir")

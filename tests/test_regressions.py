@@ -1163,6 +1163,126 @@ class TestWorkbuddyCostBlockReportsCreditsNotCny(unittest.TestCase):
         self.assertNotIn("self-configured key", unbilled[0])
 
 
+class TestWorkbuddySourceSnapshotDeclaresWalState(unittest.TestCase):
+    """2026-09-11（spec §10 B3，`WORKBUDDY_OBSERVABILITY_ASK.md` P0-1「若不做」
+    降级路径）：`workbuddy.db` 是 WAL 库，真机 155KB 主库 vs 630KB WAL——大部分
+    已提交数据在 `-wal` 文件里。把打开方式改成 `immutable=1` 或裸拷主库文件会
+    **静默丢弃 WAL**（真机实测因此少读到 1 个会话：22 vs 23），但读者从既有输出
+    本身完全看不出「这份数据是不是一份完整快照」。
+
+    修复：`workbuddy-session` 的 `--list`/单会话审计 JSON 都加一个末位键
+    `source_snapshot: {journal_mode, db_bytes, wal_bytes}`，让「读到的是活库的
+    一个时点快照」可核验，而不是一个隐藏假设。**不含 mtime**——fixture 上非
+    确定，会破坏逐字节差分（spec 明令）；db 缺失/不可读 → `null`（与既有
+    `(None, None)` 降级同一纪律：不可读绝不编成一个假快照）。"""
+
+    def _mk_db(self, tmp, wal=False):
+        """写 fixture db；`wal=True` 时**保持连接打开**并把它注册进
+        `addCleanup`，测试结束才关。SQLite 在最后一个连接 close 时会自动
+        checkpoint（把 `-wal` 内容并回主库并截断），如果这里 close 了，
+        `workbuddy.db-wal` 会在测试断言读它之前就被清空——那不是本用例要测的
+        东西：真机 WAL 非空正是因为 WorkBuddy 进程从不关闭它的连接，checkpoint
+        从不发生。保持连接存活是对真机形状的忠实复刻，也正是「别用
+        immutable=1/裸拷主库」这条防御性约束的理由：那两种读法在 WAL 未
+        checkpoint 时会看不到这条写。"""
+        import sqlite3  # noqa: PLC0415
+        root = tmp / ".workbuddy"
+        (root / "audit-log").mkdir(parents=True)
+        (tmp / "workdir").mkdir(parents=True, exist_ok=True)
+        db = root / "workbuddy.db"
+        conn = sqlite3.connect(str(db))
+        conn.executescript(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT, "
+            "cwd TEXT, permission_mode TEXT, use_sandbox_cli INTEGER, "
+            "created_at INTEGER, updated_at INTEGER);"
+            "CREATE TABLE session_usage (session_id TEXT PRIMARY KEY, used INTEGER, "
+            "size INTEGER, updated_at INTEGER, credit_json TEXT);")
+        conn.execute(
+            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
+            ("s1", "t", "deepseek-v4-flash", "/repo", "fullAccess", 1,
+             1788166800000, 1788167100000))
+        conn.commit()
+        if wal:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                "INSERT INTO session_usage VALUES (?,?,?,?,?)",
+                ("s1", 5000, 10, 1788167100000, '{"r1":22.53}'))
+            conn.commit()
+            self.addCleanup(conn.close)
+        else:
+            conn.close()
+        return root
+
+    def _run(self, tmp, *args):
+        r = subprocess.run(
+            SCAN_CMD + list(args),
+            cwd=str(tmp / "workdir"), env=isolated_home_env(tmp),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_non_wal_db_reports_delete_mode_and_zero_wal_bytes(self):
+        """(1) 默认（非 WAL）db → `journal_mode: "delete"`、`wal_bytes: 0`——0 是
+        这里的真测量（没有 `-wal` 文件），不是缺失；`db_bytes` 与真实文件字节
+        相等。"""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = self._mk_db(tmp, wal=False)
+        report = self._run(tmp, "workbuddy-session", "--session", "s1", "--json", "-")
+        snap = report["source_snapshot"]
+        self.assertEqual(snap["journal_mode"], "delete")
+        self.assertEqual(snap["wal_bytes"], 0)
+        self.assertEqual(snap["db_bytes"], (root / "workbuddy.db").stat().st_size)
+
+    def test_wal_mode_with_uncheckpointed_write_reports_wal_and_positive_bytes(self):
+        """(2) 切到 WAL 且留一条未 checkpoint 的写 → `journal_mode: "wal"`、
+        `wal_bytes > 0`；那条写同时必须能被审计读到（证明现有
+        `SQLITE_OPEN_READ_ONLY` 连接确实参与 WAL，不是巧合地报了个非零字节数
+        却读的是陈旧状态）。"""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = self._mk_db(tmp, wal=True)
+        wal_path = root / "workbuddy.db-wal"
+        self.assertTrue(wal_path.is_file(), "test setup 应留下一个 -wal 文件")
+        self.assertGreater(wal_path.stat().st_size, 0)
+        report = self._run(tmp, "workbuddy-session", "--session", "s1", "--json", "-")
+        snap = report["source_snapshot"]
+        self.assertEqual(snap["journal_mode"], "wal")
+        self.assertGreater(snap["wal_bytes"], 0)
+        self.assertEqual(report["cost"]["tokens"], 5000)
+
+    def test_missing_db_reports_source_snapshot_none(self):
+        """(3) db 缺失 → `source_snapshot: null`（不是 `{}`、不是编造的全零
+        字典）——与 `read_workbuddy_db` 的 `(None, None)` 同一降级纪律。用
+        `--list`：单会话审计在 db + audit-log 都缺失时直接判「不存在」，不产出
+        report，没有 `source_snapshot` 字段可断言。"""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / ".workbuddy").mkdir(parents=True)
+        (tmp / "workdir").mkdir(parents=True, exist_ok=True)
+        report = self._run(tmp, "workbuddy-session", "--list", "--json", "-")
+        self.assertIsNone(report["source_snapshot"])
+
+    def test_no_mtime_or_timestamp_shaped_key_anywhere_in_source_snapshot(self):
+        """(4) 逐字段黑名单：`source_snapshot` 里不得出现任何 mtime/modified/
+        timestamp 命名的键——这正是 B3 存在的理由（`docs/
+        WORKBUDDY_OBSERVABILITY_ASK.md` P0-1：mtime 在 fixture 上非确定，会
+        破坏逐字节差分），键集合钉死为恰好三个。"""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self._mk_db(tmp, wal=True)
+        report = self._run(tmp, "workbuddy-session", "--session", "s1", "--json", "-")
+        snap = report["source_snapshot"]
+        self.assertIsNotNone(snap)
+        self.assertEqual(sorted(snap.keys()),
+                         ["db_bytes", "journal_mode", "wal_bytes"])
+        forbidden = ("mtime", "modified", "timestamp")
+        for key in snap:
+            lowered = key.lower()
+            self.assertFalse(any(f in lowered for f in forbidden),
+                             "source_snapshot 里出现了疑似时间戳键：%r" % key)
+
+
 class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
     """A4（spec §6.4-5）：`nominal_cny`（名义栏，credits × 兑换价）绝不能出现在
     真实**实付**汇总 DTO 里——它是尺，不是账（`ATTRIBUTABLE_WASTE.md` §6.7）。

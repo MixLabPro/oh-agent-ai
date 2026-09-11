@@ -685,7 +685,7 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
       `WORKBUDDY_INTEGRATION.md` §2.1/§1.3/§12.2/§12.5 · `WORKBUDDY_CORPUS.md` 勘误 ·
       ASK P2-3 改写为「声明语义」· 本 spec 新增 Phase E 立项。**纪律不变**：不用 prompt
       文本猜 session；`Agent workflow` 类（无 sessionId 键）进 attempts 单列。
-- [ ] **B3 · 读取快照时点标注**（code，ASK P0-1 若不做）
+- [x] **B3 · 读取快照时点标注**（code，ASK P0-1 若不做）
       `workbuddy-session` 输出加 `source_snapshot: {journal_mode, db_bytes, wal_bytes}`
       ——**不含 mtime**（fixture 上非确定，会破坏逐字节差分）。Rust↔Python 同 commit。
 - [ ] **B4 · 双向 schema 哨兵**（code，ASK P0-2 若不做）

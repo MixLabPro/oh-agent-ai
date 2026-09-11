@@ -2053,6 +2053,12 @@ class CliMatrix(unittest.TestCase):
         # 键序是输出契约（评审 A4）。
         self.assertEqual(list(sessions[0].keys()),
                          ["session_id", "title", "model", "cwd", "first", "last"])
+        # B3：`source_snapshot` 是新增的末位顶层键（追加在最后，最小化既有键序
+        # 断言的改动）。fixture db 是 Python `sqlite3` 默认日志模式建的
+        # （`build_workbuddy_fixture.py`），journal_mode=delete、无 -wal 文件。
+        self.assertEqual(list(report.keys()), ["host", "sessions", "source_snapshot"])
+        self.assertEqual(report["source_snapshot"],
+                         {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
         self.assertEqual(sessions[0]["first"], "2026-08-31T10:00:00Z")
         self.assertEqual(sessions[0]["last"], "2026-08-31T10:05:00Z")
         # spec §6.4-1：真机上日期列恒 `- → -` 是被修的 bug（db 时间戳是 epoch-ms
@@ -2092,11 +2098,15 @@ class CliMatrix(unittest.TestCase):
         self.assertTrue(report["file"].endswith("audit-log/s1.jsonl"))
         self.assertEqual(report["date_span"]["first"], "2026-08-31T09:01:00Z")
         self.assertEqual(report["date_span"]["last"], "2026-08-31T09:03:00Z")
-        # 键序是字节一致的一部分，不能重排。
+        # 键序是字节一致的一部分，不能重排。B3：`source_snapshot` 追加在末位。
         self.assertEqual(list(report.keys()),
                          ["host", "session_id", "title", "model", "cwd", "file",
                           "date_span", "audit", "coverage", "signals", "attempts",
-                          "cost", "notes"])
+                          "cost", "notes", "source_snapshot"])
+        # fixture db 是 Python `sqlite3` 默认日志模式建的，journal_mode=delete、
+        # 无 -wal 文件（spec §10 B3；真机会是 wal，见 real-machine check）。
+        self.assertEqual(report["source_snapshot"],
+                         {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
         cov = report["coverage"]
         self.assertEqual(cov["ToolCalls"]["measured"], 3)
         self.assertEqual(cov["SandboxModes"]["measured"], 2)
@@ -2210,11 +2220,13 @@ class CliMatrix(unittest.TestCase):
             self.assertEqual(rules[code]["status"], "unavailable", code)
         for code in ("SV601", "SV602", "SV603", "SV606", "SV611", "SV614"):
             self.assertEqual(rules[code]["status"], "measured_zero", code)
-        # 键序是输出契约（评审 A4）。
+        # 键序是输出契约（评审 A4）。B3：`source_snapshot` 追加在末位。
         self.assertEqual(list(report.keys()),
                          ["host", "session_id", "title", "model", "cwd", "file",
                           "date_span", "audit", "coverage", "signals", "attempts",
-                          "cost", "notes"])
+                          "cost", "notes", "source_snapshot"])
+        self.assertEqual(report["source_snapshot"],
+                         {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
         # notes 逐字节钉死（原来是 any(substring)——note 字符串是 spec §6.4 的
         # 验收项）。第 3 条是轮转链头（seq=100 起验证），第 4 条是非积分轨说明
         # （§11 第 14 条：0 由 note 承担，不由数字冒充）。
@@ -2294,10 +2306,14 @@ class CliMatrix(unittest.TestCase):
         report = json.loads(out)
         self.assertEqual(report["session_id"], "s3")
         self.assertTrue(report["file"].endswith("workbuddy.db"))
+        # B3：`source_snapshot` 追加在末位。db 被本用例插了两行，但落在既有已
+        # 分配页内——文件字节数与未插入前相同（真机验证过：20480 → 20480）。
         self.assertEqual(list(report.keys()),
                          ["host", "session_id", "title", "model", "cwd", "file",
                           "date_span", "audit", "coverage", "signals", "attempts",
-                          "cost", "notes"])
+                          "cost", "notes", "source_snapshot"])
+        self.assertEqual(report["source_snapshot"],
+                         {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
         self.assertEqual(report["audit"]["summary"]["findings_total"], 0)
         self.assertEqual(report["audit"]["summary"]["rules_unavailable"], 14)
         # docstring 说「14 条规则全 Unavailable（不得 MeasuredZero）」——之前只查了

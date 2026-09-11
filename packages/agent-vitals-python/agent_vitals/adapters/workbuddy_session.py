@@ -80,6 +80,46 @@ def read_workbuddy_db(root):
         conn.close()
 
 
+def read_workbuddy_source_snapshot(root):
+    """WAL 快照标注（spec §10 B3，`WORKBUDDY_OBSERVABILITY_ASK.md` P0-1「若不做」
+    降级路径）：`{journal_mode, db_bytes, wal_bytes}`，让读者看见"这是一次时点
+    快照"而不是把它当成稳定通道。**防御性约束（spec §2 实测行）钉在这里**：绝不能
+    把打开方式改成 `immutable=1`、也绝不能裸拷主库文件——WAL 模式下已提交数据大半
+    在 `-wal` 文件里（真机 155KB 主库 vs 630KB WAL），`immutable=1` 会静默忽略
+    WAL、读到上一次 checkpoint 的陈旧状态（真机实测因此少读到 1 个会话：22 vs
+    23）；裸拷主库同理会撕裂或漏 WAL。现有 `mode=ro` 连接已参与 WAL、读到最新
+    状态——这里另开一个同样只读的连接只为查 pragma，不改变、不影响主查询的打开
+    方式。**不含 mtime**——fixture 上非确定，会破坏逐字节差分（spec 明令）。
+
+    db 缺失/不可读 → None（与 `read_workbuddy_db` 的 `(None, None)` 同一降级
+    纪律：不可读绝不编成一个假快照）。Rust 镜像
+    `sources/mod.rs::read_workbuddy_source_snapshot`。"""
+    db_path = root / "workbuddy.db"
+    if not db_path.is_file():
+        return None
+    try:
+        db_bytes = db_path.stat().st_size
+        conn = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=5.0)
+    except (sqlite3.Error, OSError):
+        return None
+    try:
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    wal_path = root / "workbuddy.db-wal"
+    try:
+        wal_bytes = wal_path.stat().st_size
+    except OSError:
+        wal_bytes = 0
+    return {
+        "journal_mode": journal_mode,
+        "db_bytes": db_bytes,
+        "wal_bytes": wal_bytes,
+    }
+
+
 def _read_table(conn, table, key_col):
     """读一张表 → `{key_col → 行 dict}`；表缺失/读失败 → None（调用方决定是
     降级整库还是只降这一列）。"""
