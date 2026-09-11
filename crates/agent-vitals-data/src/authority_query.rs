@@ -1120,9 +1120,29 @@ pub fn session_billing_buckets(
     conn: &Connection,
     session_key: &str,
 ) -> Result<Vec<Value>, AuthorityError> {
-    let mut stmt = conn.prepare(
+    // Trace fixtures from before v1.0 intentionally omit the derived attribution
+    // tables. Keep their scalar billing_mode path, while production databases use
+    // the latest saved subscription attribution as the authoritative session view.
+    let has_fact_attributions: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type = 'table' AND name = 'billing_fact_attributions')",
+        [],
+        |row| row.get(0),
+    )?;
+    let billing_mode_expr = if has_fact_attributions {
+        "CASE WHEN EXISTS (SELECT 1 FROM billing_fact_attributions ba
+                    JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+                    WHERE ba.fact_id = f.fact_id AND ba.attribution_kind = 'subscription_covered'
+                      AND br.revision_number = (SELECT MAX(br2.revision_number)
+                        FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                      AND br.change_kind = 'saved')
+             THEN 'subscription' ELSE COALESCE(f.billing_mode, 'unknown') END"
+    } else {
+        "COALESCE(f.billing_mode, 'unknown')"
+    };
+    let query = format!(
         "SELECT f.host, f.provider_id, f.provider_raw, COALESCE(f.model_id, '<unknown>'),
-                f.billing_template_id, COALESCE(f.billing_mode, 'unknown'),
+                f.billing_template_id, {billing_mode_expr},
                 COALESCE(f.pricing_basis, 'unavailable'), COALESCE(f.evidence_basis, 'missing'),
                 f.event_peak, ps.pricing_version, ps.payload_json,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
@@ -1136,10 +1156,12 @@ pub fn session_billing_buckets(
          WHERE f.session_key = ?1 AND f.observation_kind != 'legacy_aggregate'
            AND f.deleted_at_ms IS NULL AND f.event_ts_ms IS NOT NULL
          GROUP BY f.host, f.provider_id, f.provider_raw, f.model_id, f.billing_template_id,
-                  f.billing_mode, f.pricing_basis, f.evidence_basis, f.event_peak,
+                  {billing_mode_expr}, f.pricing_basis, f.evidence_basis, f.event_peak,
                   ps.pricing_version, ps.payload_json
          ORDER BY f.provider_id, f.provider_raw, f.model_id, f.billing_template_id, event_peak, ps.pricing_version",
-    )?;
+        billing_mode_expr = billing_mode_expr,
+    );
+    let mut stmt = conn.prepare(&query)?;
     let rows = stmt.query_map(rusqlite::params![session_key], |r| {
         Ok((
             r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?,
@@ -2730,6 +2752,60 @@ mod tests {
         ).unwrap();
         let pricing = r#"{"codex_pricing":{"entries":[{"modelPrefix":"gpt-5.6-luna","speed":"standard","uncachedInputUsdPerMTok":"0.2","cacheReadUsdPerMTok":"0.02","cacheWrite5mUsdPerMTok":"0.25","outputUsdPerMTok":"1.2"}]}}"#;
         db.pricing_snapshot_put("v-sub", "test", pricing, day_start).unwrap();
+        assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_billing_buckets_apply_current_subscription_attribution() {
+        let path = tmp_db("session-derived-subscription");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (day_start, _) = beijing_day_bounds_ms("2026-09-09").unwrap();
+        let skey = "skey-derived-subscription";
+        db.conn().execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+             VALUES (?1, 'codex', 'native-derived', 'm', 'default', 1)", [skey],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                 session_key, source_event_id, observation_kind, provider_id, model_id,
+                 event_ts_ms, event_peak, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES ('f-derived', 'codex', 'm', 'native-derived', ?1, 'f-derived', 'token_count',
+                     'openai', 'gpt-5.6-luna', ?2, 0, 1000000, 'run', 1, 1)",
+            rusqlite::params![skey, day_start + 3_600_000],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_declarations(
+                declaration_id, host, provider_id, relationship_kind, effective_start,
+                created_at_ms, updated_at_ms)
+             VALUES ('decl-derived', 'codex', 'openai', 'official_subscription', '2026-09', 1, 1)",
+            [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_declaration_revisions(
+                revision_id, declaration_id, revision_number, change_kind, host, provider_id,
+                relationship_kind, effective_start, created_at_ms)
+             VALUES ('rev-derived', 'decl-derived', 1, 'saved', 'codex', 'openai',
+                     'official_subscription', '2026-09', 1)",
+            [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_recalculation_jobs(
+                job_id, declaration_id, revision_id, status, requested_at_ms)
+             VALUES ('job-derived', 'decl-derived', 'rev-derived', 'succeeded', 1)",
+            [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_fact_attributions(
+                fact_id, revision_id, job_id, attribution_kind, created_at_ms)
+             VALUES ('f-derived', 'rev-derived', 'job-derived', 'subscription_covered', 1)",
+            [],
+        ).unwrap();
+
+        let buckets = session_billing_buckets(db.conn(), skey).unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0]["billing_mode"], "subscription");
         assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
         let _ = std::fs::remove_file(&path);
     }

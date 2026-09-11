@@ -184,6 +184,14 @@
 - 验收：authority 全量 111/111、runtime 全量 227/227、Clippy 与 `git diff --check`通过。
 - 清单：完成会话窗口/provider 小时/未解决分组的派生归因读取；会话详情金额投影、日历/MCP 全链路刷新、后台调度与 UI 回执仍待实现。本轮由用户授权采用自验收。
 
+## Loop 22 · 会话详情消费派生归因（自验收）
+
+- 执行：`session_billing_buckets` 在完整 v12 authority schema 下读取当前最新且已保存的 `subscription_covered` 归因，并将会话 bucket 映射为 `billing_mode=subscription`；`session_cost_minor` 因此不会把该事实再次计入按量成本。
+- 兼容：检测不到 v12 派生表时保留旧版 scalar `billing_mode` 路径，避免历史精简 fixture 因缺表失败。
+- 测试：新增派生归因会话成本回归；authority_query 29/29、authority 全量 111/111、runtime 全量 227/227、Clippy 与 `git diff --check`通过。
+- 独立验收：本轮尝试调用本机 CodeX 独立审查入口，但未获得可引用的独立 verdict；因此本轮结论标记为自验收，未宣称 subAgent 已通过。
+- 清单：完成会话成本对派生归因的读取；会话详情端到端 UI、后台 worker 调度、MCP/日历刷新与外部发布验收仍待实现。本轮由用户授权采用自验收。
+
 ## 当前进展总览 · 2026-09-11
 
 - PRD 清单共有 237 项可勾选条目；目前仅完成并勾选 3 项（REQ-034、REQ-103、REQ-144），其余 234 项仍待实现或待完整验收。该比例反映的是“可交付 v1.0.0”的严格标准，不代表本轮已提交能力很少。
