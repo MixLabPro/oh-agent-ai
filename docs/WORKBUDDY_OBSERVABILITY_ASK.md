@@ -32,7 +32,10 @@
    好一个量级。**最大的数据缺口**仍是逐请求用量(§3 P1-1):现在只有会话级 `used` 聚合 + 按 `requestId`
    键控的 `credit_json`。这直接导致 `WORKBUDDY_ONBOARDING_SPEC` §9 判定「不可拆四桶」、
    §7.2 的统一会话面方案失去价值(token 恒 0 会沉底)。
-4. **我们明确不要四样东西**(§4):价目表、账户面余额、prompt 正文、内部算法细节。
+4. **traces 不是匿名的**(§3 P2-3,评审后改写):`trace.sessionId` 结构化字段已存在、
+   覆盖 22/23 会话。本文初版沿用 09-02 的错误结论,验收复测抓出。write/edit/subagent/
+   duration 证据因此**可达**,是 agent-vitals 侧最大的一块未开发面。
+5. **我们明确不要四样东西**(§4):价目表、账户面余额、prompt 正文、内部算法细节。
    观测边界止于「本机已发生的事」,越过这条线的东西即使给了也不该用。
 
 ## 1. 我们在测什么(一句话)
@@ -203,15 +206,23 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
 - **建议**:给预热会话一个稳定的可识别标记(库内列或 `kind` 值的公开词表)。
 - **若不做**:适配器对 `cwd=/` 且 `model` 为空的会话记 `attempts`,不进分母。
 
-#### P2-3 对 traces 给一个明确答复(任一方向都可以)
+#### P2-3 对 traces:声明 `trace.sessionId` 与 `Agent workflow` 的语义(评审后**改写**)
 
-- **现状**:traces 653MB / 103 pid / 会话匿名。`WORKBUDDY_INTEGRATION` §12.2 已正确禁止
-  「用 prompt 文本里的 UUID 猜 session」(实测所谓可归属 id 全是内容假阳性),但 §12.5
-  又留了「其余工具名的审计留待 traces join 落地」——这个口子会诱导后来者去猜。
-- **建议**:明确二选一并写进文档:① traces 永不提供会话关联(则我们把它从候选面里删除);
-  ② 未来会在 span 上落 `sessionId`(则我们排期等待)。**「将来可能有」是最坏的答案。**
-- **若不做**:agent-vitals 侧把 traces 改判为**结构性不可接**并写明理由,保留 attempts 计数,
-  从候选面清单里删除。
+- **现状(2026-09-11 纠正)**:本文初版据 09-02 结论把 traces 当作「会话匿名」,要求 WorkBuddy
+  「在 span 上落 `sessionId`」。**验收复测推翻了前提**:trace 包装对象**已有**结构化
+  `sessionId` 字段——354/675 非空、100% 匹配 `sessions.id`、覆盖 22/23 会话、自 2026-07
+  起就有(`RUNTIME_EVIDENCE_CONTRACT.md:747` 的 schema 例子里本来就写着)。09-02 的分析
+  在 prompt 文本里扫 UUID,从未读这个字段。其余 321 个 trace 全是 `name='Agent workflow'`、
+  **无** `sessionId` 键、`metadata:{}`、0 token。
+- **建议**(改为声明语义,不再要新字段):
+  1. `trace.sessionId` 是**契约**还是**实现细节**?我们要按它 join,需要它稳定。
+  2. `Agent workflow` 类 trace 的语义:是后台编排/预热/子代理?它**不该**有 sessionId,
+     还是**应该有但缺失**?两种答案对我们的处理完全不同(前者 → 单独一类;后者 → 数据缺口)。
+  3. span 级是否也会落 `sessionId`——非必需(包装层够用),但若有则可校验一致性。
+- **若不做**:按现状接入——`trace.sessionId` 非空即归属(**字符串相等,不猜不推断**),
+  `Agent workflow` 类进 attempts 并单列计数,语义标「宿主未声明」。这条已从「结构性不可接」
+  改判为「可接,归属键已知」,是 `ONBOARDING_SPEC` Phase E 的立项依据。
+
 
 ## 4. 我们明确**不**要的(同样重要)
 
@@ -222,7 +233,7 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
 2. **不要账户面余额/账单**。本机观测边界止于「这台机器上发生了什么」。余额在服务端,
    给了我们也只会被当成本地快照而失真。
 3. **不要 prompt 正文或对话内容**。我们要的是**结构证据**(有多少次、什么类型、何时、
-   归谁),不是内容。traces 目前匿名,这是**好事**,不是缺陷。
+   归谁),不是内容。「归谁」由 `trace.sessionId` 结构化给出(P2-3),**不需要也不会**读 span 里的 prompt 正文来推断——初版此处写「traces 目前匿名,这是好事」,把会话匿名与内容匿名混为一谈,两者都不成立(traces 既可归属、也含 prompt 文本),已改正。
 4. **不要内部算法细节**(`commandHash` 如何计算、hash 链算法等)。我们只需要
    `prevHash == hash[i]` 的**字符串相等**结构校验,不重算、不验证算法。
 5. **不要承诺「API 永不变」**。给版本号即可(§3 P0-2);承诺做不到的一致性比版本号有害。
@@ -262,7 +273,7 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
 | 2 | 会话生命周期字段**浮出**(不过滤——语义未声明,过滤是消费方的事) | 无(浮出不依赖答复;过滤才依赖) | 见 spec §10 B5 |
 | 3 | 读取快照时点标注(`source_snapshot` 键) | **无**(评审:不依赖任何答复) | 见 spec §10 B3 |
 | 4 | `AutomationRuns` 宿主中立 signal | P1-4 答复 **+ 至少一行数据** | **明确不做**(spec §10:为 0 行表建跨宿主 Signal 违反 §11 规则 16) |
-| 5 | traces 改判「结构性不可接」并写入文档 | 无(按 P2-3 若不做) | 见 spec §10 B2 |
+| 5 | traces 改判「**可接**,归属键 `trace.sessionId`」并写入文档;traces 适配器立项 | 无 | 见 spec §10 B2 / Phase E |
 | 6 | 校正本文档 §2 记录的错误建议(`immutable=1`) | 无 | 已在本版订正 |
 
 **WorkBuddy 侧**:本文 §3 的十条为诉求,**无一条为阻塞**——被拒绝的代价已在各条的

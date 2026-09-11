@@ -78,6 +78,7 @@ v3 另新增：赠送积分**不产生** `host_bills` 行的语义澄清（§5.1
 | facts → SQL 权威库 | ❌ 刻意排除 | `ingest_service::FACT_HOSTS` 三宿主封闭词表 |
 | 金额面（by_host / by_provider / 预算 / 日历） | ❌ 刻意排除 | `summary.rs:29 PERMANENTLY_EXCLUDED_HOSTS` |
 | ~~`SessionStore`~~ | ⚠️ **待删** | `r2a_store.rs` DEPRECATED（PR #4）→ v0.9.3 删除（PR #5）；**不要在此加宿主** |
+| traces（write/edit/subagent/duration 证据） | ❌ **可接但未接**（09-11 纠正） | 归属键 `trace.sessionId` 覆盖 22/23 会话；现有适配器按 09-02 错误结论标 Unavailable——Phase E |
 
 「排除」不是遗漏：`tests/test_v09_onboarding_fixtures.py::test_workbuddy_is_declared_but_excluded`
 **双向**钉死——注册表必须有它的行，`by_host` 必须没有它。任何一侧的擅自变更都是回归。
@@ -579,6 +580,35 @@ invoices…) are **user-entered, not derived from our price cards**」。
 1 文件 ≈ 1 会话）。若将来确需增量，只能读 db 的 `sessions.updated_at` /
 `session_usage.updated_at`（真机确认均为 INTEGER 列）做**内容级**逐会话指纹。
 
+## 9E. Phase E：traces 适配器（立项，本轮不实施）
+
+**立项依据**（2026-09-11 验收抓出，§1 末行）：traces 不是匿名的。`trace.sessionId` 是
+结构化字段，354/675 非空、**100% 匹配 `sessions.id`、覆盖 22/23 会话**、自 2026-07 起就有。
+09-02「会话匿名」结论来自在 prompt 文本里扫 UUID，从未读该字段——**分析方法错误，
+不是产品形状**。`RUNTIME_EVIDENCE_CONTRACT.md:747` 的 schema 例子里本来就有它。
+
+**价值**：traces 是 WorkBuddy **唯一**承载 write/edit 工具调用、子代理生成、逐工具耗时、
+span 级 `status`/`error` 的表面。现有适配器把这些全部标 Unavailable（SV604/605/607/608
+降级、SubagentSpawns/ToolResults 缺席）——**那是当前实现的状态，不是宿主能力上限**。
+接入后这批规则对 22/23 会话可能转为 Available，是本仓库对 WorkBuddy 最大的一块未开发面。
+
+**边界（先定死，防重蹈覆辙）**：
+1. 归属 = `trace.sessionId` **字符串相等**，不猜不推断；空/缺 → attempts。
+2. `Agent workflow` 类（无 `sessionId` 键、`metadata:{}`、0 token）**单列一类**，不归属
+   任何会话，也不当损坏——它的语义等宿主声明（ASK P2-3）。
+3. 与 audit-log 的 `command-safety.sandbox-executed` **不双计**：同一 bash 命令可能同时
+   出现在 span 与 audit-log，需要 join key（`toolCallId`？）或以一方为主源——**先测再定**，
+   Codex 的 `custom_tool_call` vs `CommandExecution` 影子问题就是这一类。
+4. 653MB / 675 文件：**必须**增量读（按 mtime + 已见 traceId），全量重放不可接受。
+5. 时间戳形状先测：span 的 `startedAt`/`endedAt` 单位与 `trace.startedAt` 是否一致。
+6. `host_capability.rs::WORKBUDDY_SV604_605_REASON` 字面量含「session-anonymous traces」
+   （:233）及其上方 Rust 注释「只存在于会话匿名的 traces」（:231），已被本轮推翻但仍在
+   代码里（差分逐字钉住，B2 doc-only 不动它）——Phase E 落地时一并修，或随 SV604/605
+   转 Available 而移除。
+
+**不在本轮**：B 系列是 ASK 的降级路径收尾；Phase E 是新适配器（新 timeline 信号填充、
+新 fixture、新差分），体量与 Phase A 整体相当。等 B 系列收口后单独立 PR。
+
 ## 10. 工作项（依赖序 · 执行清单）
 
 > 分支 `feat/workbuddy-adapter`（worktree，基线 main@88ae4a7）。每项一个滚动内循环：
@@ -648,9 +678,13 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
       「语料已恢复增长」改为观测者效应限定（第 23 会话是用 WorkBuddy 分析本 spec 产生的）·
       P0-3 措辞 · P1-3 与 §4.2 的边界明说 · 系数明写不在诉求内 · §7 #3 去依赖。
       回流 spec §2：心跳 `prewarm` 会话存在（推翻 memory「恒空」）· `hy4-preview-f` 裸代号。
-- [ ] **B2 · traces 改判「结构性不可接」**（doc-only，ASK P2-3 若不做）
-      `WORKBUDDY_INTEGRATION.md` §12.5 删掉「留待 traces join 落地」的口子，写明结构性
-      理由（会话匿名、可归属 id 全是内容假阳性），保留 attempts 计数。
+- [x] **B2 · traces 改判——方向反转**（doc-only；首版被验收 FAIL 后重写）
+      首版按 09-02 结论写「结构性不可接」，验收者 live spot-check 发现 **`trace.sessionId`
+      结构化字段存在**（354/675 非空、100% 匹配 `sessions.id`、覆盖 22/23 会话、自 07 月起有），
+      09-02 分析是在 prompt 文本扫 UUID、从未读该字段。改判为**可接**：
+      `WORKBUDDY_INTEGRATION.md` §2.1/§1.3/§12.2/§12.5 · `WORKBUDDY_CORPUS.md` 勘误 ·
+      ASK P2-3 改写为「声明语义」· 本 spec 新增 Phase E 立项。**纪律不变**：不用 prompt
+      文本猜 session；`Agent workflow` 类（无 sessionId 键）进 attempts 单列。
 - [ ] **B3 · 读取快照时点标注**（code，ASK P0-1 若不做）
       `workbuddy-session` 输出加 `source_snapshot: {journal_mode, db_bytes, wal_bytes}`
       ——**不含 mtime**（fixture 上非确定，会破坏逐字节差分）。Rust↔Python 同 commit。

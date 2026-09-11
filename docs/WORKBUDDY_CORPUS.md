@@ -175,7 +175,11 @@ credit/M 漂移(60~13,000)是系数 + 缓存命中 + 复杂度差异,不是账�
   钉死真机词表 + 哨兵行为。
 - 修复后对账:CLI ToolCalls **2,463** = audit-log bash 2,388 + web 75,逐会话 0 不一致;
   ApprovalDecisions **80** = 审计 80;unknown 哨兵清零;attempts = 22 个 traces-only
-  (traces 会话匿名、无 sessionId join 锚点,§14.4 跳过——诚实缺口,不是漏)。
+  (§14.4 跳过)。**勘误 2026-09-11**:此处「traces 会话匿名、无 sessionId join 锚点」
+  **是错的**——trace 包装对象有结构化 `sessionId` 字段(354/675 非空、100% 匹配
+  `sessions.id`、覆盖 22/23 会话、自 2026-07 起就有);09-02 的分析在 prompt 文本里扫
+  UUID 而从未读该字段。详见 `WORKBUDDY_INTEGRATION.md` §12.2。attempts 计数本身仍然
+  诚实——它记的是「现有实现没接」,不是「不可接」。
 - 17 条轮转段标记记录(entryCount/event/firstHash/lastHash/fileSha256,无 category/
   eventType)是**账本元数据不是事件**:不计数、不误报、参与 hash 链轮转语义。
 
