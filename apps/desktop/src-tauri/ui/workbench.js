@@ -492,6 +492,7 @@ async function renderOverview() {
   renderOverviewDays(cal);
   renderKpiRow("t", daily, ov.fx);
   renderKpiRow("m", monthly, ov.fx);
+  bindSummaryExport(monthly);
   renderDualTrack(monthly);
   renderDecideCard(monthly);
 
@@ -1001,6 +1002,80 @@ function bindBillingDeclarationPanel() {
       apply.disabled = false;
       document.getElementById("ov-billing-preview").textContent += " · 入队失败：" + errText(e);
     }
+  };
+}
+
+function csvCell(value) {
+  let text = value == null ? "" : String(value);
+  // provider/model 等虽来自权威 DTO，仍可能源自外部日志；CSV 被表格软件打开时，
+  // 公式前缀不能获得执行机会。前导单引号是显示层转义，不改变导出的原始语义。
+  if (/^[=+\-@]/.test(text)) text = "'" + text;
+  return '"' + text.replace(/"/g, '""') + '"';
+}
+
+// 当前视图导出刻意只消费已经渲染的月度权威 DTO；不查询会话详情，不重算价格，
+// 也不把本地路径、账户或原始日志写进临时文件。金额保留原币与 basis，不跨币相加。
+function summaryExportCsv(monthly) {
+  const header = ["record_kind", "window", "host", "provider", "tokens", "basis", "currency",
+    "amount", "amount_status", "evidence_basis", "pricing_method", "freshness",
+    "last_observed_at", "coverage_measured_fields", "coverage_total_fields",
+    "coverage_denominator_version", "summary_contract"];
+  const rows = [header];
+  if (!monthly || !monthly.month) return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+  const coverage = monthly.coverage || {};
+  const common = (recordKind, host, provider, tokens, basis, currency, amount, amountStatus, source) => [
+    recordKind, monthly.month, host || "", provider || "", tokens == null ? "" : tokens,
+    basis || "", currency || "", amount == null ? "" : amount, amountStatus || "",
+    source.evidence_basis || "", source.pricing_method || "", (source.freshness || {}).state || "",
+    (source.freshness || {}).last_observed_at || monthly.last_observed_at || "",
+    coverage.measured_fields == null ? "" : coverage.measured_fields,
+    coverage.total_fields == null ? "" : coverage.total_fields,
+    coverage.denominator_version == null ? "" : coverage.denominator_version,
+    "monthly_summary/v1",
+  ];
+  for (const [host, tokens] of Object.entries(monthly.tokens_by_host || {})) {
+    const tokenTotal = tokens && tokens.total;
+    rows.push(common("host_tokens", host, "", tokenTotal, "", "", "", "observed", (monthly.by_host || {})[host] || {}));
+  }
+  for (const [hostProvider, source] of Object.entries(monthly.by_provider || {})) {
+    const divider = hostProvider.indexOf("/");
+    const host = divider >= 0 ? hostProvider.slice(0, divider) : hostProvider;
+    const provider = divider >= 0 ? hostProvider.slice(divider + 1) : "";
+    const amounts = source.amounts_by_basis || {};
+    for (const [basis, amount] of Object.entries(amounts)) {
+      rows.push(common("provider_amount", host, provider, "", basis, source.currency || "", amount, "available", source));
+    }
+    if (source.has_unresolved) {
+      rows.push(common("provider_amount", host, provider, "", "", source.currency || "", "", "unresolved", source));
+    }
+  }
+  return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+}
+
+function bindSummaryExport(monthly) {
+  const preview = document.getElementById("ov-export-preview");
+  const download = document.getElementById("ov-export-download");
+  const content = document.getElementById("ov-export-preview-content");
+  if (!preview || !download || !content) return;
+  preview.onclick = () => {
+    const csv = summaryExportCsv(monthly);
+    const [header, ...records] = csv.split("\r\n");
+    content.hidden = false;
+    content.textContent = "字段：" + header.replaceAll('"', "") + "。将导出 " + records.length +
+      " 行当前月摘要；金额保留原币与口径，未定项金额为空且标记 unresolved。";
+    download.hidden = false;
+  };
+  download.onclick = () => {
+    const csv = summaryExportCsv(monthly);
+    const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "agent-vitals-" + (monthly && monthly.month ? monthly.month : "summary") + ".csv";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   };
 }
 

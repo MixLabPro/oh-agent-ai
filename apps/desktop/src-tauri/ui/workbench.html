@@ -47,6 +47,15 @@
         </div>
         <div class="billing-preview" id="ov-no-records-sample-content" hidden></div>
       </section>
+      <section class="billing-review panel" id="ov-export-panel" aria-live="polite">
+        <div class="panel-title">导出当前月摘要</div>
+        <div class="muted">仅导出当前汇总视图中的宿主、服务商、token、币种、金额口径、覆盖与版本字段；不包含会话正文、路径、账户标识或原始日志。</div>
+        <div class="billing-form-actions">
+          <button class="btn secondary" id="ov-export-preview">预览导出字段</button>
+          <button class="btn" id="ov-export-download" hidden>下载 CSV</button>
+        </div>
+        <div class="billing-preview" id="ov-export-preview-content" hidden></div>
+      </section>
       <section class="billing-prompt" id="ov-billing-prompt" hidden aria-live="polite">
         <div>
           <strong>有套餐信息待你确认</strong>
