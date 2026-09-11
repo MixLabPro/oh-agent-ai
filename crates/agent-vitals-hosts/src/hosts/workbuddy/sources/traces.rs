@@ -60,6 +60,10 @@ pub struct SpanSummary {
     pub usages: Vec<SpanUsage>,
     /// agent span 的 `agentName`。
     pub agent_name: Option<String>,
+    /// 该 span 的 toolInput/toolOutput 二次解码失败（E4a：emitter 据此计 unreadable
+    /// 而非 skip——一个 span 只落一个桶，`total = fact + skip + unreadable + unattributed`
+    /// 才成立）。
+    pub decode_failed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,6 +175,7 @@ fn shape_span(s: &Value) -> (SpanSummary, bool) {
             file_path,
             usages,
             agent_name: opt_str(s, "agentName"),
+            decode_failed: failed,
         },
         failed,
     )
@@ -291,6 +296,7 @@ pub fn span_summary_json(s: &SpanSummary) -> Value {
             "reasoning_tokens": u.reasoning_tokens,
         })).collect::<Vec<_>>(),
         "agent_name": s.agent_name,
+        "decode_failed": s.decode_failed,
     })
 }
 

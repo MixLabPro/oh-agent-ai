@@ -45,5 +45,6 @@ pub use hosts::{
     claude_code::sources::usage_fact as claude_usage_fact,
     claude_code::sources as claude_session, codex::sources::usage_fact as codex_usage_fact,
     codex::sources as codex_session, dsh::sources::usage_fact as dsh_usage_fact,
+    workbuddy::sources::usage_fact as workbuddy_usage_fact,
     dsh::sources as dsh_sources, workbuddy::sources as workbuddy_session,
 };

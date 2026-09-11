@@ -449,6 +449,29 @@ enum Cmd {
         #[arg(long)]
         write: bool,
     },
+    /// Replay a WorkBuddy home (`~/.workbuddy`) into UsageFact rows — one per
+    /// generation span with usage, keyed by trace.sessionId (E4a, spec §9E.5).
+    /// Buckets map like Codex's OpenAI-format usage: uncached = prompt − cached,
+    /// cache_read = cached, cache_write = 0, output = completion. Provider/route
+    /// are left unresolved on purpose (platform-credit vs self-configured vs
+    /// promo track is per-request and not observable locally, spec §2.1).
+    /// Traces without a sessionId are counted as `unattributed`, never emitted.
+    /// In-memory, read-only diagnostic — no --write until E4b puts workbuddy in
+    /// FACT_HOSTS. Byte-for-byte mirror of Python `scan.py workbuddy-usage-facts --json -`.
+    WorkbuddyUsageFacts {
+        /// WorkBuddy home directory (the one containing traces/)
+        root: PathBuf,
+        /// machine_namespace component of SessionKey — required (spec §9);
+        /// the CLI never reads/writes state to invent one (missing exits 2)
+        #[arg(long)]
+        machine_namespace: Option<String>,
+        /// source_profile component of SessionKey (default: 'default')
+        #[arg(long, default_value = "default")]
+        source_profile: String,
+        /// Write the UsageFact JSON to FILE; use - for stdout (default: human summary)
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+    },
     /// Audit ONE or MORE Codex rollout JSONL files into per-`token_count`
     /// UsageFact rows (facts + attempts + coverage; v0.7 spec §3 candidate #3
     /// Stage 2). In-memory emit + read-only diagnostic — writes no state at all.
@@ -2410,6 +2433,55 @@ session_store={store} fold={fold}"
     // event id 按 rollout stem 命名空间——同 stem 的 byte-identical 复本去重、
     // 异 stem 永不误合并。与 Python `scan.py codex-usage-facts --json -` 字节相等
     // （parity 钉测在 tests/test_codex_usage_fact.py）。
+    if let Some(Cmd::WorkbuddyUsageFacts {
+        root,
+        machine_namespace,
+        source_profile,
+        rows_json,
+    }) = &args.cmd
+    {
+        let ns = match machine_namespace {
+            Some(ns) if !ns.is_empty() => ns.clone(),
+            _ => {
+                eprintln!(
+                    "workbuddy-usage-facts: --machine-namespace is required \
+                     (v0.7 spec §9: caller-provided; a CLI default would write state)"
+                );
+                std::process::exit(2);
+            }
+        };
+        let result = match agent_vitals_hosts::workbuddy_usage_fact::workbuddy_traces_to_usage_facts(
+            root,
+            &ns,
+            source_profile,
+        ) {
+            Ok(r) => r,
+            Err(msg) => {
+                eprintln!("workbuddy-usage-facts failed: {msg}");
+                std::process::exit(2);
+            }
+        };
+        if let Some(path) = rows_json {
+            let payload =
+                agent_vitals_hosts::workbuddy_usage_fact::to_payload_value(&result, &ns, source_profile);
+            let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}: {} facts", path.display(), result.facts.len());
+            }
+        } else {
+            print!(
+                "{}",
+                agent_vitals_hosts::workbuddy_usage_fact::to_human_summary(&result, root, &ns, source_profile)
+            );
+        }
+        return;
+    }
+
     if let Some(Cmd::CodexUsageFacts {
         rollouts,
         machine_namespace,

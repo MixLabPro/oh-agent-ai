@@ -61,6 +61,8 @@ pub mod skills;
 // spec §9E.5 E1：traces 读取层（locate → shape → extract），与本文件的 db/audit-log/
 // file-history 读取并列的第四条证据线。
 pub mod traces;
+// spec §9E.5 E4a：traces → UsageFact（内存 emit，只读诊断）。
+pub mod usage_fact;
 
 /// `~/.workbuddy/`（真实语料实测位置；测试用 isolated_home_env 把 HOME 指到 fixture
 /// root，根就是 `<root>/.workbuddy/`）。main.rs 解析 `HOME`/`USERPROFILE` 传入。

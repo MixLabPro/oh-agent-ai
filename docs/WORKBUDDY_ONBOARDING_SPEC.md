@@ -701,12 +701,38 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       轮转丢失约 30%）；命令文本只 59% 相等。没有身份键就没有 dedup，模糊合并是猜。
       audit-log 是 hash 链安全账本且更完整。**代价如实**：Bash 的 status/duration 只在
       span 里、无键可挂 → Bash 没有 tool_results。回归钉「文本完全相等也不合并」。
-- [ ] **E4 · UsageFact emitter**（`hosts/workbuddy/sources/usage_fact.rs` ↔ `workbuddy_usage_fact.py`）
-      与 Codex 同形五桶：identity = spanId、time = span.startedAt、model = 逐调用；
-      `cache_write` 恒 0 + `source_usage_semantics` 声明「OpenAI 格式无 cache_write」；
-      unattributed 事实 `native_session_id` 为空 → `session_key_orphan`（契约已有此字段）。
-      `FACT_HOSTS` +1；`workbuddy-usage-facts` CLI；`tests/test_workbuddy_usage_fact.py`
-      byte-parity。**本项之后 §7.2 路径 1 自动成立**：会话进统一面、token 不再是 0。
+- [x] **E4a · UsageFact emitter + 只读 CLI**（`hosts/workbuddy/sources/usage_fact.rs` ↔
+      `agent/workbuddy_usage_fact.py`；分期同 v0.7 三宿主先例：先内存 emit + 只读诊断，
+      不动词表、不写盘）
+      与 Codex 同形：`observation_kind = "assistant-usage"`、identity = spanId（**native**，
+      真机每 generation span 恰 1 条 usage，5,067/5,067）、time = span.startedAt（ISO ms
+      串，`time_basis: native`）、`model_raw` = 逐调用 `model` 原串（**不解析前缀**，§2.1）、
+      `source_usage_semantics: "delta"`（每 span 一次独立调用）；四桶 uncached = prompt −
+      cached / cache_read = cached / cache_write = 0 / output = completion（OpenAI 的
+      completion 已含 reasoning，不再加）。归属走 `resolve_billing_attribution(None, None)`
+      → `provider_id: null`、`pricing_basis: metered_estimate`、`has_unresolved: true`——
+      §2.1 的诚实表达；models.json **不**作 RouteEvidence 传入（即便传也是 ConfigCurrent →
+      仍 unresolved）。**未归属 trace 按 Codex 先例计 attempts.unattributed，不发事实**
+      （初稿写的 `session_key_orphan` 方案作废——`native_session_id` 是身份必填字段，
+      编一个就是编 session）。`workbuddy-usage-facts <home> --machine-namespace NS [--json -]`；
+      `tests/test_workbuddy_usage_fact.py` byte-parity。**实施注记**：真机 3,865 facts +
+      155 skip + 1,202 unattributed = 5,222 generation span（恒等式钉回归）；两侧 `--json`
+      逐字节一致。**顺带修了 main 预存的契约锁步断裂**：`2e011fc fix(v0.12)` 给 Rust
+      `USAGE_FACT_FIELDS` 加 `billing_template_id`、Python 没跟——四宿主 usage-fact 差分在
+      带二进制时全红（本地 `discover` 不带 `AGENT_VITALS_BIN` 故一直 skip；CI 会红）。
+      加回那一个键后 codex/claude 转绿。**仍红且不在本分支范围**（基线 `88ae4a7` 自建
+      二进制复现）：DSH usage-fact 差分 2 条（Python DSH emitter 在隔离 HOME 下读到路由
+      证据、Rust 没读——`pricing_basis` route-observed vs metered_estimate）、Codex
+      `api_equivalent` 计费档 2 条、data-status health 1 条——均为 main 的 v0.11/v0.12
+      provider 工作遗留，与 `verify-workbench-traces.mjs` 同类。
+- [ ] **E4b · 进封闭词表与同步管线**
+      `FACT_HOSTS` / `TRACE_HOSTS` / `reimport_verify::HOSTS` / `WIRED_HOSTS` /
+      `sync_service::batches` 五处 +1；sync 的 dirty-file 枚举 = traces/*/trace_*.json
+      （每文件一个 source_id，mtime 指纹天然逐 trace 增量——纪律 7 的索引由此免费得到）；
+      `data-status` / `data-reimport-verify` 认 workbuddy。**金额面保持 excluded**（§5：
+      unresolved 事实进 `unpriced_tokens` 不进 by_host/by_provider）；`tokens_by_host`
+      是否含 workbuddy 由本项实测后定（真桶非零，不再是 §7.2 的「恒 0 冒充」）。
+      **本项之后 §7.2 路径 1 自动成立**：会话进统一面、token 是真的。
 - [ ] **E5 · 成本词表回填**
       §5.2 用 processed tokens 重算名义单位成本（积分轨 vs 全量两栏都算，分母口径按
       归属会话）；`cost.tokens` 改名或加 note「last-call context size」；`cost` 块加

@@ -115,6 +115,7 @@ def _shape_span(s):
         "file_path": file_path,
         "usages": usages,
         "agent_name": _opt_str(s, "agentName"),
+        "decode_failed": failed,
     }, failed)
 
 

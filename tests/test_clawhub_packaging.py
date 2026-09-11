@@ -56,6 +56,7 @@ ALLOWED_PACKAGE_FILES = {
         "agent/trajectory.py", "agent/usage.py", "agent/usage_fact.py",
         "agent/waste.py",
         "agent/workbuddy_evidence.py", "agent/workbuddy_session_audit.py",
+        "agent/workbuddy_usage_fact.py",  # spec §9E.5 E4a
         # adapters/：宿主适配器
         "adapters/__init__.py", "adapters/claude.py", "adapters/codex.py",
         "adapters/codex_session.py",
