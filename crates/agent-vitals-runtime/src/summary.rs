@@ -856,6 +856,41 @@ pub fn unresolved_detail(month: &str) -> serde_json::Value {
     serde_json::Value::Object(obj)
 }
 
+/// 为「确认计费方式」提供的权威事实分组。它不猜测付款方式，也不把无法
+/// 安全相加的币种金额塞成一个数字；金额由后续会话级历史价卡投影补充。
+/// 此处先保证交互入口拿到真实的作用范围、宿主、模型、证据与会话规模。
+pub fn unresolved_billing_groups(month: &str) -> serde_json::Value {
+    let Some(db) = SqlSummaryRepository::new().open_db() else {
+        return json!({"month": month, "groups": [], "status": "unavailable"});
+    };
+    let Some((start, end)) = agent_vitals_data::authority_query::beijing_month_bounds_ms(month) else {
+        return json!({"month": month, "groups": [], "status": "invalid_month"});
+    };
+    let mut stmt = match db.conn().prepare(
+        "SELECT host, COALESCE(provider_id, '<unknown>'), COALESCE(model_id, '<unknown>'),
+                COALESCE(evidence_basis, 'missing'), COALESCE(pricing_basis, 'unavailable'),
+                SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens),
+                MIN(event_ts_ms), MAX(event_ts_ms), COUNT(DISTINCT session_key)
+         FROM usage_facts
+         WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'
+           AND event_ts_ms >= ?1 AND event_ts_ms < ?2
+           AND COALESCE(billing_mode, 'unknown') != 'subscription'
+           AND (COALESCE(pricing_basis, 'unavailable') = 'metered_estimate'
+                OR COALESCE(evidence_basis, 'missing') != 'explicit-official-route')
+         GROUP BY host, provider_id, model_id, evidence_basis, pricing_basis
+         ORDER BY SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) DESC",
+    ) { Ok(stmt) => stmt, Err(_) => return json!({"month": month, "groups": [], "status": "unavailable"}) };
+    let rows = stmt.query_map(rusqlite::params![start, end], |r| Ok(json!({
+        "host": r.get::<_, String>(0)?, "provider_id": r.get::<_, String>(1)?,
+        "model_id": r.get::<_, String>(2)?, "evidence_basis": r.get::<_, String>(3)?,
+        "pricing_basis": r.get::<_, String>(4)?, "tokens": r.get::<_, i64>(5)?,
+        "first_event_at_ms": r.get::<_, i64>(6)?, "last_event_at_ms": r.get::<_, i64>(7)?,
+        "session_count": r.get::<_, i64>(8)?, "estimated_cost_minor": serde_json::Value::Null,
+    })));
+    let groups = rows.ok().into_iter().flatten().filter_map(Result::ok).collect::<Vec<_>>();
+    json!({"month": month, "groups": groups, "status": "ok"})
+}
+
 /// codex 下钻的纯分类核（可注入真实两层形状做钉测）：`by_model` 是
 /// `model → speed → 桶对象`，桶键 = `CODEX_TOKEN_FIELDS` 5 键（形状来源：
 /// `hosts/codex/sessions/usage.rs::codex_by_model_from_hours`——审查 P1-1
