@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -642,7 +642,7 @@ CREATE INDEX billing_declaration_scopes_lookup
 "#;
 
 const SCHEMA_V10_ADD: &str = r#"
-CREATE TABLE billing_recalculation_jobs (
+CREATE TABLE IF NOT EXISTS billing_recalculation_jobs (
   job_id TEXT PRIMARY KEY,
   declaration_id TEXT NOT NULL REFERENCES billing_declarations(declaration_id),
   revision_id TEXT NOT NULL REFERENCES billing_declaration_revisions(revision_id),
@@ -654,12 +654,12 @@ CREATE TABLE billing_recalculation_jobs (
   error_detail TEXT,
   UNIQUE(revision_id)
 );
-CREATE INDEX billing_recalculation_jobs_status
+CREATE INDEX IF NOT EXISTS billing_recalculation_jobs_status
   ON billing_recalculation_jobs(status, requested_at_ms);
 "#;
 
 const SCHEMA_V11_ADD: &str = r#"
-CREATE TABLE billing_recalculation_results (
+CREATE TABLE IF NOT EXISTS billing_recalculation_results (
   job_id TEXT PRIMARY KEY REFERENCES billing_recalculation_jobs(job_id),
   revision_id TEXT NOT NULL REFERENCES billing_declaration_revisions(revision_id),
   fact_count INTEGER NOT NULL CHECK (fact_count >= 0),
@@ -672,7 +672,7 @@ CREATE TABLE billing_recalculation_results (
 "#;
 
 const SCHEMA_V12_ADD: &str = r#"
-CREATE TABLE billing_fact_attributions (
+CREATE TABLE IF NOT EXISTS billing_fact_attributions (
   fact_id TEXT NOT NULL REFERENCES usage_facts(fact_id),
   revision_id TEXT NOT NULL REFERENCES billing_declaration_revisions(revision_id),
   job_id TEXT NOT NULL REFERENCES billing_recalculation_jobs(job_id),
@@ -680,7 +680,7 @@ CREATE TABLE billing_fact_attributions (
   created_at_ms INTEGER NOT NULL,
   PRIMARY KEY(fact_id, revision_id)
 );
-CREATE INDEX billing_fact_attributions_revision
+CREATE INDEX IF NOT EXISTS billing_fact_attributions_revision
   ON billing_fact_attributions(revision_id, fact_id);
 "#;
 
@@ -956,7 +956,7 @@ impl AuthorityDb {
             }
             Some(4) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD));
+                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -2541,6 +2541,12 @@ mod tests {
                 "billing_import_candidates",
                 "outcome_measurements",
                 "savings_records",
+                "billing_declarations",
+                "billing_declaration_revisions",
+                "billing_declaration_scopes",
+                "billing_recalculation_jobs",
+                "billing_recalculation_results",
+                "billing_fact_attributions",
             ] {
                 assert!(tables.iter().any(|x| x == t), "缺表 {t}: {tables:?}");
             }
@@ -2690,6 +2696,25 @@ mod tests {
             [], |row| row.get(0),
         ).unwrap();
         assert_eq!(scope_table, "billing_declaration_scopes");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn stale_v9_stamp_with_later_tables_upgrades_idempotently() {
+        let db = tmp_db("stale-v9");
+        {
+            let current = AuthorityDb::open(&db, 1).unwrap();
+            current.conn().execute(
+                "UPDATE schema_meta SET value = '9' WHERE key = 'schema_version'",
+                [],
+            ).unwrap();
+        }
+        let upgraded = AuthorityDb::open(&db, 2).unwrap();
+        let version: String = upgraded.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        assert_eq!(upgraded.billing_recalculation_result("missing").unwrap(), None);
         let _ = std::fs::remove_file(&db);
     }
 
