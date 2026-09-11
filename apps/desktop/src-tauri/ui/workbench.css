@@ -1048,6 +1048,18 @@ button.chip.active {
 .verdict { padding: 8px 12px; margin-bottom: 10px; border-radius: 8px;
   background: rgba(46, 78, 168, 0.18); border-left: 3px solid #2c4ea8;
   font-size: 14px; }
+.billing-prompt { display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 12px; margin-bottom: 10px; border: 1px solid #cf9d24;
+  border-radius: 8px; background: rgba(207, 157, 36, .10); }
+.billing-prompt-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.billing-prompt .muted, .billing-review .muted { margin-top: 4px; }
+.billing-review-row { display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line, #dce4f2); }
+.billing-review-row:last-child { border-bottom: 0; }
+.billing-review-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+@media (max-width: 720px) {
+  .billing-prompt, .billing-review-row { align-items: flex-start; flex-direction: column; }
+}
 .verdict strong { font-size: 16px; }
 .verdict .verdict-note { color: var(--muted); font-size: 12px; margin-left: 8px; }
 /* #8 未来日：降透明度，与"发生过但没测到"区分。 */

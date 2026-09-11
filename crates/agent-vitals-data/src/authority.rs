@@ -1524,9 +1524,18 @@ impl AuthorityDb {
     pub fn pending_billing_import_candidates(
         &self,
     ) -> Result<Vec<BillingImportCandidateRow>, AuthorityError> {
+        Ok(self.billing_import_candidates()?.into_iter()
+            .filter(|row| row.6 == "pending").collect())
+    }
+
+    /// 所有旧资产候选（含用户已决定项）。已决定项仍需可见，才能提供可核对
+    /// 的回执与撤销入口；它们不参与同步生成或实际支出计算。
+    pub fn billing_import_candidates(
+        &self,
+    ) -> Result<Vec<BillingImportCandidateRow>, AuthorityError> {
         let mut stmt = self.conn.prepare(
             "SELECT candidate_id, host, provider_id, currency, amount_minor, billing_period_start, status
-             FROM billing_import_candidates WHERE status = 'pending'
+             FROM billing_import_candidates
              ORDER BY provider_id, billing_period_start, candidate_id",
         )?;
         let rows = stmt.query_map([], |r| Ok((
@@ -1535,6 +1544,43 @@ impl AuthorityDb {
             r.get::<_, String>(6)?,
         )))?.collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// 用户对旧资产候选作出的本地决定。`accepted` 只确认“这是我的套餐
+    /// 声明”，并不创建付款/账单；`dismissed` 表示该候选不属于当前用户。
+    /// 两种决定都不可再被后续同步重新变回 pending。
+    pub fn billing_import_candidate_resolve(
+        &self,
+        candidate_id: &str,
+        status: &str,
+        now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if !matches!(status, "accepted" | "dismissed") {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "billing candidate status must be accepted or dismissed".to_string(),
+            )));
+        }
+        Ok(self.conn.execute(
+            "UPDATE billing_import_candidates
+             SET status = ?2, updated_at_ms = ?3, resolved_at_ms = ?3
+             WHERE candidate_id = ?1 AND status = 'pending'",
+            rusqlite::params![candidate_id, status, now_ms],
+        )? > 0)
+    }
+
+    /// 用户主动撤销刚才的候选决定，恢复为待确认。同步不会调用该方法，故不会
+    /// 擅自推翻用户决定；撤销同样不涉及付款或账单。
+    pub fn billing_import_candidate_reopen(
+        &self,
+        candidate_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        Ok(self.conn.execute(
+            "UPDATE billing_import_candidates
+             SET status = 'pending', updated_at_ms = ?2, resolved_at_ms = NULL
+             WHERE candidate_id = ?1 AND status IN ('accepted', 'dismissed')",
+            rusqlite::params![candidate_id, now_ms],
+        )? > 0)
     }
 
     /// 将先前错误自动导入的旧价表账单撤回。仅匹配专用 evidence 标签，绝不
@@ -1754,6 +1800,32 @@ mod tests {
             "candidate", "claude-code", "minimax", "CNY", 11_400, "2026-09", "legacy", 3,
         ).unwrap());
         assert_eq!(upgraded.pending_billing_import_candidates().unwrap().len(), 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_import_candidate_decision_never_creates_a_bill() {
+        let db = tmp_db("candidate-decision");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.billing_import_candidate_put(
+            "candidate", "claude-code", "minimax", "CNY", 11_400, "2026-09", "legacy", 1,
+        ).unwrap();
+        assert!(authority.billing_import_candidate_resolve("candidate", "accepted", 2).unwrap());
+        assert!(authority.pending_billing_import_candidates().unwrap().is_empty());
+        assert_eq!(authority.billing_import_candidates().unwrap()[0].6, "accepted",
+            "the resolved state remains available for a persistent receipt and undo");
+        assert_eq!(authority.host_bill_count().unwrap(), 0,
+            "a package declaration is not a payment record");
+        assert!(!authority.billing_import_candidate_resolve("candidate", "dismissed", 3).unwrap(),
+            "a resolved candidate cannot be silently rewritten by sync");
+        let status: String = authority.conn().query_row(
+            "SELECT status FROM billing_import_candidates WHERE candidate_id = 'candidate'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(status, "accepted");
+        assert!(authority.billing_import_candidate_reopen("candidate", 4).unwrap());
+        assert_eq!(authority.pending_billing_import_candidates().unwrap().len(), 1,
+            "only an explicit user action can restore a pending candidate");
+        assert!(!authority.billing_import_candidate_reopen("candidate", 5).unwrap());
         let _ = std::fs::remove_file(&db);
     }
 

@@ -1308,6 +1308,59 @@ fn data_status() -> Value {
     })
 }
 
+/// 升级时从旧公共资产发现的套餐声明。它们是用户核对入口，不是账单：前端
+/// 只能拿到展示所需的服务商、金额和起始月份，不能拿到原始价格快照或路径。
+#[tauri::command]
+fn billing_import_candidates() -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable", "candidates": [] });
+    };
+    match db.billing_import_candidates() {
+        Ok(rows) => serde_json::json!({
+            "status": "ok",
+            "candidates": rows.into_iter().map(|(candidate_id, host, provider_id, currency, amount_minor, billing_period_start, status)| {
+                serde_json::json!({
+                    "candidate_id": candidate_id,
+                    "host": host,
+                    "provider_id": provider_id,
+                    "currency": currency,
+                    "amount_minor": amount_minor,
+                    "billing_period_start": billing_period_start,
+                    "status": status,
+                })
+            }).collect::<Vec<_>>()
+        }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string(), "candidates": [] }),
+    }
+}
+
+/// 用户明确核对旧套餐声明后才落下决定。接受的是“这是我的套餐”，不是
+/// “我已付款”：actual spend 仍必须来自付款/账单记录。
+#[tauri::command]
+fn resolve_billing_import_candidate(candidate_id: String, decision: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, agent_vitals_runtime::sql_sync::now_ms())
+        .map_err(|error| error.to_string())?;
+    let status = match decision.as_str() {
+        "accept" => "accepted",
+        "dismiss" => "dismissed",
+        "reopen" => "pending",
+        _ => return Err("invalid billing candidate decision".to_string()),
+    };
+    let changed = db.with_immediate_txn(|_| {
+        let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+        if status == "pending" {
+            db.billing_import_candidate_reopen(&candidate_id, now_ms)
+        } else {
+            db.billing_import_candidate_resolve(&candidate_id, status, now_ms)
+        }
+    }).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": status, "changed": changed }))
+}
+
 /// 工作台「数据源」页的独立契约。会话搜索只回答时间窗内的会话，不能再被
 /// 借来承载扫描健康；这里从 SQL authority 的 source_files / usage_facts 读取
 /// 每个已接线宿主的扫描、导入和失败范围。宿主集合复用 ingest registry，前端
@@ -1580,6 +1633,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_overview,
             data_status,
+            billing_import_candidates,
+            resolve_billing_import_candidate,
             data_source_status,
             data_monthly_summary,
             data_daily_summary,

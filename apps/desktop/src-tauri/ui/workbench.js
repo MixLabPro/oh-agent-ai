@@ -462,6 +462,12 @@ async function renderOverview() {
     quality = { status: "unavailable", reason: errText(e) };
   }
   renderQualityStatus(quality);
+  try {
+    renderBillingImportCandidates(await invoke("billing_import_candidates"));
+  } catch (e) {
+    // 候选核对是增强入口；读取失败不能遮蔽已拿到的名义总览。
+    renderBillingImportCandidates({ status: "unavailable", candidates: [] });
+  }
   renderMonthVerdict(monthly);
   renderOverviewDays(cal);
   renderKpiRow("t", daily, ov.fx);
@@ -659,6 +665,119 @@ function renderQualityStatus(status) {
   if (!parts.length) return;
   banner.hidden = false;
   banner.textContent = "⚠ " + parts.join(" · ") + "。金额可能为估算/部分覆盖，请查看数据状态。";
+}
+
+function billingCandidateAmount(candidate) {
+  const amount = Number(candidate.amount_minor || 0) / 100;
+  if (candidate.currency === "CNY") return fmtMoney(amount) + "/月";
+  return amount.toFixed(2) + " " + (candidate.currency || "") + "/月";
+}
+
+// 旧版静态资产的套餐声明并非付款证据。这里故意不把它塞进 quality warning：
+// 它是用户最有上下文时的低压力输入机会，而非需要用户理解的技术故障。
+function renderBillingImportCandidates(report) {
+  const prompt = document.getElementById("ov-billing-prompt");
+  const panel = document.getElementById("ov-billing-review-panel");
+  const copy = document.getElementById("ov-billing-prompt-copy");
+  const list = document.getElementById("ov-billing-review-list");
+  if (!prompt || !panel || !copy || !list) return;
+  const candidates = report && report.status === "ok" ? (report.candidates || []) : [];
+  const pendingCount = candidates.filter((candidate) => candidate.status === "pending").length;
+  const deferred = sessionStorage.getItem("agent-vitals-billing-review-later") === "1";
+  // “稍后”只压住尚未处理的提醒；已确认/已忽略项仍保留一个可回看的入口。
+  prompt.hidden = !candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred);
+  panel.hidden = true;
+  list.textContent = "";
+  if (!candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred)) return;
+  copy.textContent = pendingCount
+    ? pendingCount + " 条旧版本发现的套餐信息尚未计入实际支出；当前用量仍按原厂价估算。"
+    : "已核对的套餐信息不会计入实际支出；当前用量仍按原厂价估算。";
+
+  document.getElementById("ov-billing-later").onclick = () => {
+    sessionStorage.setItem("agent-vitals-billing-review-later", "1");
+    prompt.hidden = true;
+  };
+  document.getElementById("ov-billing-review").onclick = () => {
+    panel.hidden = false;
+    list.textContent = "";
+    for (const candidate of candidates) {
+      const row = document.createElement("div");
+      row.className = "billing-review-row";
+      const detail = document.createElement("div");
+      detail.textContent = candidate.provider_id + " · " + billingCandidateAmount(candidate) +
+        " · 自 " + candidate.billing_period_start + " 起（" + candidate.host + "）";
+      const actions = document.createElement("div");
+      actions.className = "billing-review-actions";
+      const accept = document.createElement("button");
+      accept.className = "btn";
+      accept.textContent = "这是我的套餐";
+      const dismiss = document.createElement("button");
+      dismiss.className = "btn secondary";
+      dismiss.textContent = "不是我的";
+      const resolve = async (decision) => {
+        accept.disabled = true;
+        dismiss.disabled = true;
+        try {
+          await invoke("resolve_billing_import_candidate", {
+            candidateId: candidate.candidate_id, decision,
+          });
+          const accepted = decision === "accept";
+          detail.textContent = (accepted ? "已确认：这是你的套餐。" : "已忽略：这不是你的套餐。") +
+            "不会计入实际支出；当前用量仍按原厂价估算。";
+          actions.textContent = "";
+          const undo = document.createElement("button");
+          undo.className = "btn secondary";
+          undo.textContent = "撤销";
+          undo.onclick = async () => {
+            undo.disabled = true;
+            try {
+              await invoke("resolve_billing_import_candidate", {
+                candidateId: candidate.candidate_id, decision: "reopen",
+              });
+              await renderOverview();
+            } catch (e) {
+              undo.disabled = false;
+              detail.textContent += " · 撤销失败：" + errText(e);
+            }
+          };
+          actions.appendChild(undo);
+        } catch (e) {
+          accept.disabled = false;
+          dismiss.disabled = false;
+          detail.textContent += " · 保存失败：" + errText(e);
+        }
+      };
+      if (candidate.status && candidate.status !== "pending") {
+        const accepted = candidate.status === "accepted";
+        detail.textContent = (accepted ? "已确认：这是你的套餐。" : "已忽略：这不是你的套餐。") +
+          "不会计入实际支出；当前用量仍按原厂价估算。";
+        const undo = document.createElement("button");
+        undo.className = "btn secondary";
+        undo.textContent = "撤销";
+        undo.onclick = async () => {
+          undo.disabled = true;
+          try {
+            await invoke("resolve_billing_import_candidate", {
+              candidateId: candidate.candidate_id, decision: "reopen",
+            });
+            await renderOverview();
+          } catch (e) {
+            undo.disabled = false;
+            detail.textContent += " · 撤销失败：" + errText(e);
+          }
+        };
+        actions.appendChild(undo);
+        row.append(detail, actions);
+        list.appendChild(row);
+        continue;
+      }
+      accept.onclick = () => resolve("accept");
+      dismiss.onclick = () => resolve("dismiss");
+      actions.append(accept, dismiss);
+      row.append(detail, actions);
+      list.appendChild(row);
+    }
+  };
 }
 
 // 「本月逐日」panel：read_calendar_month（逐日三宿主 token + 分币耗费）。
