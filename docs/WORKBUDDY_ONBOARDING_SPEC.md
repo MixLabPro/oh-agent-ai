@@ -674,13 +674,17 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
 > 每项走【分析 → 编码 → 测试 → 子智能体验收 → commit】。E1 先行——它是 E2–E5 的
 > 共同读取层。
 
-- [ ] **E1 · traces 读取层 + fixture**（locate → shape → extract）
+- [x] **E1 · traces 读取层 + fixture**（locate → shape → extract）
       `hosts/workbuddy/sources/traces.rs` ↔ `adapters/workbuddy_traces.py`：枚举
       `traces/*/trace_*.json`，按 `trace.sessionId` 分组，解码 `toolInput`/`toolOutput`
       （只留 `usage`/`model`/`file_path`/`toolName`），ISO 时间戳走 A2 字符串路径；
       无 sessionId → `unattributed` 桶。fixture：`fixtures/workbuddy/workdir/.workbuddy/
       traces/` 两个 trace（一个归属 s1、一个无 sessionId），真机形状（二次编码、ISO ms、
-      OpenAI usage 含 cached/reasoning、混合模型）。增量读用 mtime + traceId 集。
+      OpenAI usage 含 cached/reasoning、混合模型）。**实施注记**：E1 落地为全量读
+      （真机 675 文件 0.87s Rust / 2.0s Python），探针 `traces_probe` 只加在单会话
+      审计 JSON 末位，`--list` 不动；增量索引留 E4。真机 4 个 decode_failures 全是
+      `toolInput: ""`——空串 ≠ null，照记失败不猜。顺带修了 B1 的 `.gitignore`
+      `.workbuddy/` 未锚定根目录、把 fixture 的 `traces/` 也忽略了的 bug。
 - [ ] **E2 · 行为 timeline 填充**（SV604/605/607/608 + SubagentSpawns）
       function span → `tool_calls`（name = toolName，args_text 含 `file_path`）+
       `tool_results`（status/error → error_code）；agent span → SubagentSpawns；

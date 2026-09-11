@@ -2127,7 +2127,7 @@ class CliMatrix(unittest.TestCase):
                          ["host", "session_id", "title", "model", "cwd", "file",
                           "date_span", "audit", "coverage", "signals", "attempts",
                           "cost", "notes", "source_snapshot", "schema_probe",
-                          "lifecycle"])
+                          "lifecycle", "traces_probe"])
         # fixture db 是 Python `sqlite3` 默认日志模式建的，journal_mode=delete、
         # 无 -wal 文件（spec §10 B3；真机会是 wal，见 real-machine check）。
         self.assertEqual(report["source_snapshot"],
@@ -2137,6 +2137,19 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["lifecycle"], {
             "status": "completed", "source_mode": "working", "is_playground": 0,
             "deleted_at": None, "is_background_automation": 0,
+        })
+        # E1（spec §9E.5）：traces 探针。fixture 两个 trace：一个归属 s1（8 span：agent 1 /
+        # custom 1 / function 3 含 Edit+Write 带 file_path / generation 3 其中 2 带 usage、
+        # 1 取消无 usage），一个无 sessionId 键 → unattributed。全部 toolInput/toolOutput
+        # 是二次编码字符串，读取层解一层；decode_failures 0。
+        self.assertEqual(report["traces_probe"], {
+            "files": 2, "attributed_traces": 1, "unattributed_traces": 1,
+            "degraded_files": 0, "decode_failures": 0,
+            "this_session": {
+                "traces": 1,
+                "spans_by_type": {"agent": 1, "custom": 1, "function": 3, "generation": 3},
+                "generation_with_usage": 2, "edit_write_with_path": 2, "decode_failures": 0,
+            },
         })
         # B4：健康会话（s1）的 fixture schema 与已知基线完全对齐——哨兵沉默是
         # 验收点本身（无迁移表 → None，两表 unknown/missing 均空）。
@@ -2280,7 +2293,7 @@ class CliMatrix(unittest.TestCase):
                          ["host", "session_id", "title", "model", "cwd", "file",
                           "date_span", "audit", "coverage", "signals", "attempts",
                           "cost", "notes", "source_snapshot", "schema_probe",
-                          "lifecycle"])
+                          "lifecycle", "traces_probe"])
         self.assertEqual(report["source_snapshot"],
                          {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
         # B4：非积分轨会话（s2）的 fixture schema 同样与已知基线对齐——哨兵沉默。
@@ -2293,6 +2306,16 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["lifecycle"], {
             "status": "terminated", "source_mode": "coding", "is_playground": 0,
             "deleted_at": None, "is_background_automation": 0,
+        })
+        # E1：s2 在 fixture 里没有 trace → this_session 全零（真测量：读了、确实没有），
+        # 语料级计数照报。
+        self.assertEqual(report["traces_probe"], {
+            "files": 2, "attributed_traces": 1, "unattributed_traces": 1,
+            "degraded_files": 0, "decode_failures": 0,
+            "this_session": {
+                "traces": 0, "spans_by_type": {}, "generation_with_usage": 0,
+                "edit_write_with_path": 0, "decode_failures": 0,
+            },
         })
         # notes 逐字节钉死（原来是 any(substring)——note 字符串是 spec §6.4 的
         # 验收项）。第 3 条是轮转链头（seq=100 起验证），第 4 条是非积分轨说明
@@ -2385,7 +2408,7 @@ class CliMatrix(unittest.TestCase):
                          ["host", "session_id", "title", "model", "cwd", "file",
                           "date_span", "audit", "coverage", "signals", "attempts",
                           "cost", "notes", "source_snapshot", "schema_probe",
-                          "lifecycle"])
+                          "lifecycle", "traces_probe"])
         self.assertEqual(report["source_snapshot"],
                          {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
         # B4：本用例只插行、不改表结构——schema 仍与基线对齐，哨兵沉默。
@@ -2400,6 +2423,15 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["lifecycle"], {
             "status": None, "source_mode": None, "is_playground": None,
             "deleted_at": None, "is_background_automation": None,
+        })
+        # E1：s3 同 s2，无 trace → this_session 全零。
+        self.assertEqual(report["traces_probe"], {
+            "files": 2, "attributed_traces": 1, "unattributed_traces": 1,
+            "degraded_files": 0, "decode_failures": 0,
+            "this_session": {
+                "traces": 0, "spans_by_type": {}, "generation_with_usage": 0,
+                "edit_write_with_path": 0, "decode_failures": 0,
+            },
         })
         # lifecycle 非 None（哪怕全部字段都是 null）也要附那条注记——note 说的是
         # 「有 lifecycle 对象、不据其值过滤」，不是「有非 null 的值」。

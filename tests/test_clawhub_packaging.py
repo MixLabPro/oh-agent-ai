@@ -63,6 +63,7 @@ ALLOWED_PACKAGE_FILES = {
         "adapters/dsh.py", "adapters/claude_session.py",
         "adapters/dsh_source_profile.py",
         "adapters/workbuddy_session.py",
+        "adapters/workbuddy_traces.py",  # spec §9E.5 E1：traces 读取层
     )
 }
 ALLOWED_PACKAGE_DIRS = {Path("adapters"), Path("skills"), Path("agent")}

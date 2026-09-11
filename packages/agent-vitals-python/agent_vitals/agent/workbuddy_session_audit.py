@@ -39,7 +39,7 @@ import math
 
 from pathlib import Path
 
-from agent_vitals.adapters import workbuddy_session
+from agent_vitals.adapters import workbuddy_session, workbuddy_traces
 from agent_vitals.agent import canonical_audit, host_capability, workbuddy_evidence
 
 
@@ -381,6 +381,13 @@ def workbuddy_session_audit_json(home, session_id):
     if _is_unbilled_to_credits(meta):
         notes.append(_WB_UNBILLED_TO_CREDITS_NOTE)
 
+    # E1：traces 读取层。读取本身在 adapters/workbuddy_traces.py；这里只决定 null vs 探针。
+    if workbuddy_traces.workbuddy_traces_root(root).is_dir():
+        traces_probe = workbuddy_traces.traces_probe_json(
+            workbuddy_traces.read_workbuddy_traces(root), session_id)
+    else:
+        traces_probe = None
+
     # B5：生命周期字段（spec §10 B5）。db 行缺失（audit-log 独苗会话）→ None，
     # 不追加 note——没有行就没有可浮出的生命周期状态。
     # **压在 B4 漂移 note 之前**：lifecycle 是会话自身状态的注记，schema-drift 是
@@ -414,4 +421,7 @@ def workbuddy_session_audit_json(home, session_id):
         "source_snapshot": workbuddy_session.read_workbuddy_source_snapshot(root),
         "schema_probe": schema_probe,
         "lifecycle": lifecycle,
+        # E1：traces 探针（末位，spec §9E.5）。目录不存在 → None；存在但本会话无 trace
+        # → 零值对象（真测量）。全量读，真机 ~686MB——E4 的索引落地前接受。
+        "traces_probe": traces_probe,
     }

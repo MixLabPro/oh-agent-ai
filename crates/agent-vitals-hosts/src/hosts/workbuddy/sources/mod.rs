@@ -58,6 +58,9 @@ use crate::workbuddy_evidence::{
 // v0.8 Phase E7.6：Skill 配置 I/O（marketplace.json/welcomeMode 日志读取）与
 // 本文件的会话 I/O 是两条独立证据线，分文件放。
 pub mod skills;
+// spec §9E.5 E1：traces 读取层（locate → shape → extract），与本文件的 db/audit-log/
+// file-history 读取并列的第四条证据线。
+pub mod traces;
 
 /// `~/.workbuddy/`（真实语料实测位置；测试用 isolated_home_env 把 HOME 指到 fixture
 /// root，根就是 `<root>/.workbuddy/`）。main.rs 解析 `HOME`/`USERPROFILE` 传入。
@@ -969,6 +972,13 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         notes.push(json!(WB_UNBILLED_TO_CREDITS_NOTE));
     }
 
+    // E1：traces 读取层。读取本身在 `traces.rs`；这里只决定 null vs 探针。
+    let traces_probe = if traces::workbuddy_traces_root(&root).is_dir() {
+        traces::traces_probe_json(&traces::read_workbuddy_traces(&root), session_id)
+    } else {
+        Value::Null
+    };
+
     // B5：生命周期字段（spec §10 B5）。db 行缺失（audit-log 独苗会话）→ None，
     // 不追加 note——没有行就没有可浮出的生命周期状态。
     // **压在 B4 漂移 note 之前**：lifecycle 是会话自身状态的注记，schema-drift 是
@@ -1004,5 +1014,8 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         "source_snapshot": read_workbuddy_source_snapshot(&root),
         "schema_probe": schema_probe,
         "lifecycle": lifecycle,
+        // E1：traces 探针（末位，spec §9E.5）。traces 目录不存在 → null；存在但本会话
+        // 无 trace → 零值对象（真测量）。全量读，真机 ~686MB——E4 的索引落地前接受。
+        "traces_probe": traces_probe,
     }))
 }

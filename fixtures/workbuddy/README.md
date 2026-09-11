@@ -59,6 +59,20 @@ WorkBuddy persists each session across **three joinable surfaces** (§2.1;
 - `audit-log/*.jsonl` — per-event decision records grouped by the **`sessionId`
   field** (not the filename), carrying `eventType`/`sequence`/`prevHash`/`hash`/
   `requestId`/`toolCallId`/`commandPreview`/`messageKey`/`messageParams`.
+- `traces/<pid>/trace_<id>.json` — spec §9E.5 E1. Two traces in real-machine shape:
+  `trace_e1s1…` is attributed to s1 via **`trace.sessionId`** (the only join key —
+  string equality, never guessed) and carries 8 spans: 1 `agent` (cli), 1 `custom`
+  (mcp_tools), 3 `function` (Bash, Edit, Write — Edit/Write `toolInput` decodes to a
+  `file_path`), 3 `generation` (two with OpenAI-format `usage` under **mixed models**
+  MiniMax-M3 / hy3, one cancelled with `toolOutput: null`). `trace_e1un…` has **no
+  `sessionId` key** (the real machine's 321 unattributed traces are key-absent, not
+  null) → `unattributed`, still real usage. **`toolInput`/`toolOutput` are JSON-encoded
+  strings** (double-encoded, as on the real machine) — the reader must decode one
+  layer; a fixture written as objects would make the gate test the wrong thing (§3.3).
+  `trace.totalTokens` is deliberately 0 while spans carry usage — the reader must not
+  read it (real machine: 302/675 are 0 with non-zero span usage). The reader keeps only
+  `model`/`usage`/`file_path`/`toolName` — no prompt bodies (spec §4). Surfaces as the
+  trailing `traces_probe` key on single-session JSON (`--list` untouched in E1).
 - `file-history/<sessionId>/<contentHash>@v<n>` — version snapshots; the count
   is the FileMutations source (§3).
 

@@ -1839,6 +1839,149 @@ class TestWorkbuddyQuotaConsumptionNumeratorIsMeasured(unittest.TestCase):
         self.assertTrue(rep["coverage"]["QuotaConsumption"]["available"])
 
 
+class TestWorkbuddyTracesReaderE1(unittest.TestCase):
+    """spec §9E.5 E1：traces 读取层（locate → shape → extract）+ `traces_probe`。
+
+    守的是 §9E.1 的三个坑——09-02 的分析全踩了，把「traces 会话匿名 / 无逐请求
+    token / 无路径」三条假结论写进了两份 spec、一份 memory、四份文档：
+    (a) `trace.sessionId` 是归属键，字符串相等，不猜；无此键 → unattributed；
+    (b) `toolInput`/`toolOutput` 是**二次 JSON 编码的字符串**，必须解一层；解不开 →
+        `decode_failures`，不 panic 不猜（真机 4 个失败全是 `toolInput: ""`）；
+    (c) `trace.totalTokens` 不可信，token 只从 span 级 usage 取。
+    外加 §4：只提取 model/usage/file_path，不保留 prompt 正文。"""
+
+    _NOTE = None
+
+    def _mk_tmp(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return tmp
+
+    def _copy_fixture(self, tmp):
+        src = ROOT / "fixtures" / "workbuddy" / "workdir"
+        shutil.copytree(src, tmp, dirs_exist_ok=True)
+        (tmp / "workdir").mkdir(parents=True, exist_ok=True)
+        return tmp / ".workbuddy"
+
+    def _audit(self, tmp, sid="s1"):
+        r = subprocess.run(
+            SCAN_CMD + ["workbuddy-session", "--session", sid, "--json", "-"],
+            cwd=str(tmp / "workdir"), env=isolated_home_env(tmp),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def _write_trace(self, root, pid, trace_id, trace_extra, spans):
+        d = root / "traces" / str(pid)
+        d.mkdir(parents=True, exist_ok=True)
+        tr = {"traceId": trace_id, "name": "Agent workflow", "workerPid": pid,
+              "startedAt": "2026-08-31T09:00:30.000Z", "endedAt": "2026-08-31T09:04:30.000Z",
+              "duration": 240000, "status": "ok", "spanCount": len(spans),
+              "totalTokens": 0, "metadata": {}}
+        tr.update(trace_extra)
+        (d / (trace_id + ".json")).write_text(
+            json.dumps({"trace": tr, "spans": spans}, ensure_ascii=False), encoding="utf-8")
+
+    @staticmethod
+    def _gen_span(sid, tool_output):
+        return {"traceId": "t", "spanId": sid, "parentId": None, "name": "generation",
+                "type": "generation", "startedAt": "2026-08-31T09:01:00.000Z",
+                "endedAt": "2026-08-31T09:01:02.000Z", "duration": 2000, "status": "ok",
+                "error": None, "toolInput": json.dumps({"messages": "[redacted]"}),
+                "toolOutput": tool_output}
+
+    def test_fixture_probe_matches_the_declared_shape(self):
+        """(a)(b)(c) 一次过：fixture 两个 trace，一个归属 s1（8 span，2 generation 带
+        usage、1 取消无 usage，Edit+Write 带 file_path），一个无 sessionId 键 →
+        unattributed；`trace.totalTokens` 故意为 0 而 span 有 usage。"""
+        tmp = self._mk_tmp(); self._copy_fixture(tmp)
+        probe = self._audit(tmp)["traces_probe"]
+        self.assertEqual(probe, {
+            "files": 2, "attributed_traces": 1, "unattributed_traces": 1,
+            "degraded_files": 0, "decode_failures": 0,
+            "this_session": {"traces": 1,
+                             "spans_by_type": {"agent": 1, "custom": 1, "function": 3, "generation": 3},
+                             "generation_with_usage": 2, "edit_write_with_path": 2,
+                             "decode_failures": 0}})
+
+    def test_session_id_is_string_equality_never_guessed(self):
+        """(a) 一个 trace 的 `trace.sessionId="S1"`（大小写不同）→ 不归属 s1；一个
+        `sessionId=""` → 视同缺失（unattributed）；一个 `sessionId=null` → unattributed。
+        三者都不进 s1 的 this_session。"""
+        tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
+        self._write_trace(root, 1, "trace_case_upper", {"sessionId": "S1"}, [])
+        self._write_trace(root, 1, "trace_case_empty", {"sessionId": ""}, [])
+        self._write_trace(root, 1, "trace_case_null", {"sessionId": None}, [])
+        probe = self._audit(tmp)["traces_probe"]
+        self.assertEqual(probe["files"], 5)
+        self.assertEqual(probe["this_session"]["traces"], 1)  # 仍只有 fixture 那个
+        self.assertEqual(probe["unattributed_traces"], 3)     # 原 1 + empty + null
+        self.assertEqual(probe["attributed_traces"], 2)       # s1 + "S1"（另一个会话）
+
+    def test_double_encoded_payload_must_be_decoded_and_failures_are_counted(self):
+        """(b) generation `toolOutput` 是 JSON 串——解一层后 usage 才可见；空串 `""`
+        不是合法 JSON → decode_failures +1，**不**当作 null（空串 ≠ null，猜成「无输入」
+        是解读）；已经是对象（非字符串）的 toolOutput 真机不出现 → 同样计失败，不猜。"""
+        tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
+        usage = [{"model": "m", "usage": {"prompt_tokens": 10, "completion_tokens": 1,
+                                          "total_tokens": 11}}]
+        self._write_trace(root, 2, "trace_dec", {"sessionId": "s1"}, [
+            self._gen_span("g_ok", json.dumps(usage)),      # 字符串：解开 → 1 usage
+            self._gen_span("g_empty", ""),                  # 空串：失败
+            self._gen_span("g_obj", usage),                 # 对象：失败（不猜）
+            self._gen_span("g_null", None),                 # null：无 usage，不是失败
+        ])
+        probe = self._audit(tmp)["traces_probe"]
+        ts = probe["this_session"]
+        self.assertEqual(ts["traces"], 2)
+        self.assertEqual(ts["spans_by_type"]["generation"], 3 + 4)
+        self.assertEqual(ts["generation_with_usage"], 2 + 1)
+        self.assertEqual(ts["decode_failures"], 2)
+        self.assertEqual(probe["decode_failures"], 2)
+
+    def test_trace_total_tokens_is_never_read(self):
+        """(c) `trace.totalTokens` 写成一个荒谬大数 → 探针的任何计数都不受影响；
+        usage 只从 span 来。"""
+        tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
+        self._write_trace(root, 3, "trace_tt", {"sessionId": "s1", "totalTokens": 99999999999}, [])
+        probe = self._audit(tmp)["traces_probe"]
+        self.assertEqual(probe["this_session"]["traces"], 2)
+        self.assertEqual(probe["this_session"]["generation_with_usage"], 2)
+        self.assertNotIn("99999999999", json.dumps(probe))
+
+    def test_no_prompt_bodies_leak_into_output(self):
+        """§4：toolInput 的 messages / Bash 命令 / Write 的 content 都不得出现在输出里。
+        fixture 的 Bash 命令是 `ls -la`，Write 的 content 是 `x`，messages 是
+        `[redacted]`——三者在整份审计 JSON 里都不能出现。"""
+        tmp = self._mk_tmp(); self._copy_fixture(tmp)
+        blob = json.dumps(self._audit(tmp), ensure_ascii=False)
+        self.assertNotIn("ls -la", blob)
+        self.assertNotIn("[redacted]", blob)
+        self.assertNotIn('"content"', blob)
+
+    def test_missing_traces_dir_is_null_not_zero(self):
+        """traces 目录不存在 → `traces_probe: null`（不可读 ≠ 零）；存在但空 → 全零
+        对象（真测量）。"""
+        tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
+        shutil.rmtree(root / "traces")
+        self.assertIsNone(self._audit(tmp)["traces_probe"])
+        (root / "traces").mkdir()
+        probe = self._audit(tmp)["traces_probe"]
+        self.assertEqual(probe["files"], 0)
+        self.assertEqual(probe["this_session"]["traces"], 0)
+
+    def test_malformed_file_is_degraded_not_fatal(self):
+        """坏文件（非 JSON / 无 trace 对象）进 `degraded_files`，其余照读。"""
+        tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
+        d = root / "traces" / "9"; d.mkdir(parents=True)
+        (d / "trace_bad1.json").write_text("{not json", encoding="utf-8")
+        (d / "trace_bad2.json").write_text(json.dumps({"spans": []}), encoding="utf-8")
+        probe = self._audit(tmp)["traces_probe"]
+        self.assertEqual(probe["files"], 4)
+        self.assertEqual(probe["degraded_files"], 2)
+        self.assertEqual(probe["attributed_traces"], 1)
+
+
 class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
     """A4（spec §6.4-5）：`nominal_cny`（名义栏，credits × 兑换价）绝不能出现在
     真实**实付**汇总 DTO 里——它是尺，不是账（`ATTRIBUTABLE_WASTE.md` §6.7）。

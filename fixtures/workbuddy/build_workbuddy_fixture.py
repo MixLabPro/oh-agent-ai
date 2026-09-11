@@ -180,6 +180,107 @@ def _connect_db(db_path):
     return conn
 
 
+def _span(trace_id, span_id, parent, name, kind, t0, t1, status="ok", error=None, **extra):
+    """一个 span，真机键序：traceId, spanId, parentId, name, type, startedAt, endedAt,
+    duration, status, error + 按 type 附加（function: toolName/toolInput/toolOutput；
+    generation: toolInput/toolOutput；agent: agentName）。时间戳是 ISO 毫秒串。"""
+    from datetime import datetime, timezone
+    def _p(s): return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    dur = int((_p(t1) - _p(t0)).total_seconds() * 1000)
+    s = {"traceId": trace_id, "spanId": span_id, "parentId": parent, "name": name,
+         "type": kind, "startedAt": t0, "endedAt": t1, "duration": dur,
+         "status": status, "error": error}
+    s.update(extra)
+    return s
+
+
+def _gen_output(model, prompt, cached, completion, reasoning=None, created=1788167160):
+    """generation span 的 toolOutput 解码后形状（OpenAI 兼容响应列表）。真机每项含
+    id/created/model/…/usage；这里只放适配器会读的 `model` 与 `usage`，其余字段
+    （choices 等）**故意不放**——§4 不要 prompt 正文，fixture 也不带。"""
+    usage = {"prompt_tokens": prompt, "completion_tokens": completion,
+             "total_tokens": prompt + completion,
+             "prompt_tokens_details": {"cached_tokens": cached}}
+    if reasoning is not None:
+        usage["completion_tokens_details"] = {"reasoning_tokens": reasoning}
+    return [{"id": "resp-%s-%d" % (model.split(":")[-1], created), "created": created,
+             "model": model, "usage": usage}]
+
+
+def _traces(root):
+    """`traces/<pid>/trace_<id>.json`（spec §9E.1 真机形状，E1 fixture）：
+
+    - `trace_e1s1…`：**归属 s1**（`trace.sessionId="s1"`），name="Agent workflow"（真机
+      有 sessionId 的 trace 也叫这个名——它是 name 不是类）。spans：1 agent(cli) ·
+      2 generation 带 usage（**混合模型** MiniMax-M3 / hy3，第二个带 reasoning_tokens）·
+      1 generation **无** usage（toolOutput=None，真机 82 个取消/进行中的形态）·
+      function Bash / Edit(带 file_path) / Write(带 file_path) · 1 custom mcp_tools。
+    - `trace_e1un…`：**无 `sessionId` 键**（不是 null——真机 321 个就是键缺失），
+      1 generation 带 usage + 1 custom。它的 usage 是真实用量，进 `unattributed` 桶。
+
+    **`toolInput` / `toolOutput` 必须是 JSON 字符串**（二次编码，真机形状），不是对象
+    ——读取层必须解一层；fixture 用对象会让门禁测错东西（§3.3 同款教训）。
+    `trace.totalTokens` 故意与 Σspan 不等（真机 302/675 为 0）——读取层不得读它。"""
+    j = lambda o: json.dumps(o, ensure_ascii=False, separators=(",", ":"))
+    tdir = root / "traces" / "33269"
+    tdir.mkdir(parents=True, exist_ok=True)
+
+    tid = "trace_e1s1aaaaaaaaaaaaaaaaaaaaaaaaaa"
+    spans = [
+        _span(tid, "span_a1", None, "cli", "agent",
+              "2026-08-31T09:00:30.000Z", "2026-08-31T09:04:30.000Z", agentName="cli"),
+        _span(tid, "span_a2", "span_a1", "mcp_tools", "custom",
+              "2026-08-31T09:00:30.100Z", "2026-08-31T09:00:30.120Z"),
+        _span(tid, "span_a3", "span_a1", "generation", "generation",
+              "2026-08-31T09:00:31.000Z", "2026-08-31T09:00:36.000Z",
+              toolInput=j({"messages": "[redacted]"}),
+              toolOutput=j(_gen_output("custom-local:MiniMax-M3", 12000, 8000, 300))),
+        _span(tid, "span_a4", "span_a1", "Bash", "function",
+              "2026-08-31T09:01:00.000Z", "2026-08-31T09:01:00.500Z",
+              toolName="Bash", toolInput=j({"command": "ls -la"}), toolOutput=j("total 0")),
+        _span(tid, "span_a5", "span_a1", "Edit", "function",
+              "2026-08-31T09:01:30.000Z", "2026-08-31T09:01:30.200Z",
+              toolName="Edit",
+              toolInput=j({"file_path": "/repo/notes.md", "old_string": "a", "new_string": "b"}),
+              toolOutput=j({"ok": True})),
+        _span(tid, "span_a6", "span_a1", "generation", "generation",
+              "2026-08-31T09:02:00.000Z", "2026-08-31T09:02:04.000Z",
+              toolInput=j({"messages": "[redacted]"}),
+              toolOutput=j(_gen_output("hy3", 15000, 11000, 450, reasoning=120, created=1788167220))),
+        _span(tid, "span_a7", "span_a1", "Write", "function",
+              "2026-08-31T09:02:30.000Z", "2026-08-31T09:02:30.100Z",
+              toolName="Write",
+              toolInput=j({"file_path": "/repo/out.txt", "content": "x"}),
+              toolOutput=j({"ok": True})),
+        _span(tid, "span_a8", "span_a1", "generation", "generation",
+              "2026-08-31T09:03:00.000Z", "2026-08-31T09:03:01.000Z",
+              status="cancelled", toolInput=j({"messages": "[redacted]"}), toolOutput=None),
+    ]
+    (tdir / (tid + ".json")).write_text(j({
+        "trace": {"traceId": tid, "name": "Agent workflow", "workerPid": 33269,
+                  "workerHostname": "fixture", "startedAt": "2026-08-31T09:00:30.000Z",
+                  "endedAt": "2026-08-31T09:04:30.000Z", "duration": 240000, "status": "ok",
+                  "spanCount": len(spans), "totalTokens": 0, "metadata": {},
+                  "sessionId": "s1", "agentName": "cli"},
+        "spans": spans}), encoding="utf-8")
+
+    tid = "trace_e1un00000000000000000000000000"
+    spans = [
+        _span(tid, "span_u1", None, "mcp_tools", "custom",
+              "2026-08-31T11:00:00.000Z", "2026-08-31T11:00:00.010Z"),
+        _span(tid, "span_u2", None, "generation", "generation",
+              "2026-08-31T11:00:01.000Z", "2026-08-31T11:00:03.000Z",
+              toolInput=j({"messages": "[redacted]"}),
+              toolOutput=j(_gen_output("custom-local:deepseek/deepseek-v4-flash", 2000, 0, 50, created=1788174001))),
+    ]
+    (tdir / (tid + ".json")).write_text(j({
+        "trace": {"traceId": tid, "name": "Agent workflow", "workerPid": 33269,
+                  "workerHostname": "fixture", "startedAt": "2026-08-31T11:00:00.000Z",
+                  "endedAt": "2026-08-31T11:00:03.000Z", "duration": 3000, "status": "ok",
+                  "spanCount": len(spans), "totalTokens": 0, "metadata": {}},
+        "spans": spans}), encoding="utf-8")
+
+
 def _file_history(root, session_id, hashes):
     """`file-history/<sessionId>/<contentHash>@v<n>` 版本快照文件（spec §3
     Measured 行：文件数 = 版本数）。"""
@@ -247,6 +348,7 @@ def write_workbuddy_home(base):
 
     _file_history(root, "s1", [("abc123", 1), ("abc123", 2), ("def456", 1)])
     _file_history(root, "s2", [("abc123", 1), ("def456", 1)])
+    _traces(root)
     return root
 
 
@@ -406,7 +508,8 @@ def self_verify(root):
     assert list(listing.keys())[-1] == "schema_probe", listing.keys()
     assert listing["schema_probe"] == probe, listing["schema_probe"]
     assert full["schema_probe"] == probe, full["schema_probe"]
-    assert list(full.keys())[-2:] == ["schema_probe", "lifecycle"], full.keys()
+    # E1 起末位键是 traces_probe；lifecycle 退到倒数第二（--list 行级仍是末位）。
+    assert list(full.keys())[-3:] == ["schema_probe", "lifecycle", "traces_probe"], full.keys()
     # 沉默会话上没有任何 schema-drift attempts/notes 混进去（§10 B4 的 surface
     # 只在漂移非空时才推条目——健康 fixture 必须一条都没有）。
     assert not any(a.get("error", "").startswith("schema-drift:")
@@ -451,6 +554,40 @@ def self_verify(root):
     assert by_id["s2"]["lifecycle"] == s2_lifecycle, by_id["s2"]
     assert list(by_id["s1"].keys())[-1] == "lifecycle", by_id["s1"].keys()
     assert list(by_id["s2"].keys())[-1] == "lifecycle", by_id["s2"].keys()
+
+    # E1（spec §9E.5）：traces 读取层。fixture 两个 trace：一个归属 s1、一个无
+    # sessionId 键。探针是单会话审计 JSON 的末位键；语料级计数两个会话相同，
+    # this_session 只有 s1 非零。toolInput/toolOutput 必须是**字符串**（二次编码）
+    # ——这里直接读原文件断言类型，防止 fixture 退化成对象让门禁测错东西。
+    from agent_vitals.adapters import workbuddy_traces  # noqa: PLC0415
+    read = workbuddy_traces.read_workbuddy_traces(root)
+    assert read["files"] == 2 and not read["degraded"], (read["files"], read["degraded"])
+    assert list(read["by_session"]) == ["s1"] and len(read["unattributed"]) == 1
+    s1_tr = read["by_session"]["s1"][0]
+    assert s1_tr["decode_failures"] == 0 and len(s1_tr["spans"]) == 8, s1_tr
+    gens = [s for s in s1_tr["spans"] if s["kind"] == "generation"]
+    assert [len(s["usages"]) for s in gens] == [1, 1, 0], gens
+    assert {u["model"] for s in gens for u in s["usages"]} == {"custom-local:MiniMax-M3", "hy3"}
+    assert [s["file_path"] for s in s1_tr["spans"] if s["tool_name"] in ("Edit", "Write")] == \
+        ["/repo/notes.md", "/repo/out.txt"]
+    raw = json.loads((root / "traces" / "33269" / (s1_tr["trace_id"] + ".json")).read_text())
+    assert all(isinstance(s.get("toolInput"), (str, type(None))) for s in raw["spans"]), \
+        "toolInput 必须是字符串或 null（二次编码），不是对象"
+    assert raw["trace"]["totalTokens"] == 0 and any(s["usages"] for s in gens), \
+        "trace.totalTokens 故意为 0 而 span 有 usage——读取层不得读它"
+    # `full` 此处是 s2（审批流会话）的审计，s1 的是 `full1`。
+    probe = full1["traces_probe"]
+    assert list(full1.keys())[-1] == "traces_probe", full1.keys()
+    assert probe == {
+        "files": 2, "attributed_traces": 1, "unattributed_traces": 1,
+        "degraded_files": 0, "decode_failures": 0,
+        "this_session": {"traces": 1,
+                         "spans_by_type": {"agent": 1, "custom": 1, "function": 3, "generation": 3},
+                         "generation_with_usage": 2, "edit_write_with_path": 2,
+                         "decode_failures": 0},
+    }, probe
+    assert full["traces_probe"]["this_session"]["traces"] == 0, full["traces_probe"]
+    assert full["traces_probe"]["files"] == 2, full["traces_probe"]
 
 
 def main():
