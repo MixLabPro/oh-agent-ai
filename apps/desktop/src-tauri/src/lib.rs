@@ -1451,6 +1451,25 @@ fn billing_declaration_impact_preview(
 /// 声明保存后创建重算任务；这里只入队，不在 IPC 调用线程执行重算。
 fn spawn_billing_recalculation_worker(path: PathBuf, job_id: String) {
     std::thread::spawn(move || {
+        let lease_path = path
+            .parent()
+            .map(|parent| parent.join(".billing-recalculation.lock"))
+            .unwrap_or_else(|| PathBuf::from(".billing-recalculation.lock"));
+        let holder = format!("billing-recalculation-{job_id}");
+        let Ok(_lease) = agent_vitals_runtime::lease::acquire_blocking(
+            &lease_path, &holder, 60_000, 60_000,
+        ) else {
+            if let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
+                &path, agent_vitals_runtime::sql_sync::now_ms(),
+            ) {
+                let _ = db.billing_recalculation_set_status(
+                    &job_id, "failed", Some("worker_busy"),
+                    Some("recalculation worker lock was held"),
+                    agent_vitals_runtime::sql_sync::now_ms(),
+                );
+            }
+            return;
+        };
         let Ok(worker_db) = agent_vitals_data::authority::AuthorityDb::open(
             &path, agent_vitals_runtime::sql_sync::now_ms(),
         ) else { return };
