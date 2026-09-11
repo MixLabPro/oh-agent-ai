@@ -47,6 +47,24 @@ v3 另新增：赠送积分**不产生** `host_bills` 行的语义澄清（§5.1
 名义价值不为零（§5.1.2）· §6.7 倍数护栏对合法免费额度的**跨宿主假阳性**（§5.3.1，
 应迁出本篇）· 抗拟核判据与证伪测试（§11 规则 16）。
 
+**v4（2026-09-11，Phase E 分析步）——traces 的 span 面实测推翻本篇的 token 前提：**
+
+5. **「无逐请求 token、不可拆四桶」不成立。** generation span 的 `toolOutput`（二次
+   JSON 编码的字符串，解一层）里 3,865/3,947 带 OpenAI 格式 `usage`（prompt / cached /
+   completion / reasoning）+ **逐调用 `model`**。§9 Phase D、§7.2 路径 1「四桶全 0」、
+   §5.2 分母、§6.1 `cost.tokens` 语义、ASK P1-1 全部要改——见 §9E.2 清单。
+6. **`session_usage.used` 不是 processed tokens**——它是**会话最后一次 generation
+   调用的 `prompt_tokens`**（16/21 逐字相等，即最后一次调用时的上下文占用），一个
+   快照不是累计。本篇此前所有「2.07M token」都是错的量纲。归属会话的真实 processed
+   ≈ **176.9M**。（初稿写「定义未知」，验收者多试一种组合就对上了——规则 17 第 (c) 条
+   的活例：对账没做够就不能写「未知」。）
+7. **B2 的「`Agent workflow` = 另一类、0 token」错了一半**：`trace.totalTokens` 字段
+   不可靠（302/675 为 0 但 span 有 usage）；`Agent workflow` 是 name 不是类——有
+   sessionId 的 trace 也叫这个名。唯一分类器是 `sessionId` 有无。
+
+**同一根因第三次出现**：09-02 的分析既没读 `trace.sessionId`，也没解 `toolInput`/
+`toolOutput` 的二次编码，也信了 `trace.totalTokens`。教训写进 §11 规则 17。
+
 ## 0. 结论
 
 1. **WorkBuddy 已接了一半**：静态 skill 体检 + 会话行为审计已落地；v0.9 数据面是
@@ -575,35 +593,118 @@ invoices…) are **user-entered, not derived from our price cards**」。
 1 文件 ≈ 1 会话）。若将来确需增量，只能读 db 的 `sessions.updated_at` /
 `session_usage.updated_at`（真机确认均为 INTEGER 列）做**内容级**逐会话指纹。
 
-## 9E. Phase E：traces 适配器（立项，本轮不实施）
+## 9E. Phase E：traces 是 WorkBuddy 的真实数据面（v4 重写，分析步已完成）
 
-**立项依据**（2026-09-11 验收抓出，§1 末行）：traces 不是匿名的。`trace.sessionId` 是
-结构化字段，354/675 非空、**100% 匹配 `sessions.id`、覆盖 22/23 会话**、自 2026-07 起就有。
-09-02「会话匿名」结论来自在 prompt 文本里扫 UUID，从未读该字段——**分析方法错误，
-不是产品形状**。`RUNTIME_EVIDENCE_CONTRACT.md:747` 的 schema 例子里本来就有它。
+### 9E.1 真机 span 面实测（2026-09-11，675 trace / 354 有 sessionId）
 
-**价值**：traces 是 WorkBuddy **唯一**承载 write/edit 工具调用、子代理生成、逐工具耗时、
-span 级 `status`/`error` 的表面。现有适配器把这些全部标 Unavailable（SV604/605/607/608
-降级、SubagentSpawns/ToolResults 缺席）——**那是当前实现的状态，不是宿主能力上限**。
-接入后这批规则对 22/23 会话可能转为 Available，是本仓库对 WorkBuddy 最大的一块未开发面。
+**结构**：`{trace: {traceId, name, workerPid, startedAt, endedAt, duration, status, spanCount,
+totalTokens, metadata, sessionId?, agentName?, modelInfo?}, spans: [...]}`。span 键：
+`traceId, spanId, parentId, name, type, startedAt, endedAt, duration, status, error` +
+按 type 附加。**时间戳全是 ISO 毫秒串**（`2026-08-14T23:49:18.442Z`），与 db/audit-log
+的 epoch-ms 整数不同——走 A2 的字符串路径。
 
-**边界（先定死，防重蹈覆辙）**：
-1. 归属 = `trace.sessionId` **字符串相等**，不猜不推断；空/缺 → attempts。
-2. `Agent workflow` 类（无 `sessionId` 键、`metadata:{}`、0 token）**单列一类**，不归属
-   任何会话，也不当损坏——它的语义等宿主声明（ASK P2-3）。
-3. 与 audit-log 的 `command-safety.sandbox-executed` **不双计**：同一 bash 命令可能同时
-   出现在 span 与 audit-log，需要 join key（`toolCallId`？）或以一方为主源——**先测再定**，
-   Codex 的 `custom_tool_call` vs `CommandExecution` 影子问题就是这一类。
-4. 653MB / 675 文件：**必须**增量读（按 mtime + 已见 traceId），全量重放不可接受。
-5. 时间戳形状先测：span 的 `startedAt`/`endedAt` 单位与 `trace.startedAt` 是否一致。
-6. 两个含「session-anonymous」的**运行时字面量**已被本轮推翻但仍在代码里（差分逐字
-   钉住，B2/B6 不动它们）：`host_capability.rs::WORKBUDDY_SV604_605_REASON`（:233，及
-   :231 的 Rust 注释）与 `workbuddy/sessions/evidence.rs::TRACES_ERROR`（attempts 的
-   `error` 串「traces are session-anonymous (no sessionId join)」）。Phase E 落地时一并
-   修——前者随 SV604/605 转 Available 而移除，后者随 traces 真正接入而消失。
+| span.type | 数量（有 sessionId） | 附加键 | 内容 |
+|---|---|---|---|
+| `function` | 3,944 | `toolName`, `toolInput`, `toolOutput` | Bash 1,661 · Read 698 · **Edit 612 · Write 172** · TaskUpdate 151 · WebSearch 94 … |
+| `generation` | 3,947 | `toolInput`, `toolOutput` | LLM 调用；`toolOutput` 解码后 = 响应对象列表，**3,865 带 `usage`** |
+| `agent` | 387 | `agentName` | 子代理/编排（`cli` 等）→ SubagentSpawns |
+| `custom` | 9,913 | — | 全部 `mcp_tools` |
 
-**不在本轮**：B 系列是 ASK 的降级路径收尾；Phase E 是新适配器（新 timeline 信号填充、
-新 fixture、新差分），体量与 Phase A 整体相当。等 B 系列收口后单独立 PR。
+**二次编码**：`toolInput` / `toolOutput` 是 **JSON 字符串**，必须 `json.loads` 一层。
+解码后：Edit/Write 的 `toolInput` **783/784 带 `file_path`**（+ `old_string`/`new_string`/
+`content`）；generation 的 `toolOutput[i].usage` = `{prompt_tokens, completion_tokens,
+total_tokens, prompt_tokens_details.cached_tokens, completion_tokens_details.reasoning_tokens}`
+（OpenAI 格式），`toolOutput[i].model` = **逐调用模型**（`custom-local:MiniMax-M3` /
+`hy3` / `auto` …）。
+
+**三个字段不可信**：
+- `trace.totalTokens`：273/675 与 Σspan 相等，**302 为 0 但 span 有 usage** → 不用，只信 span；
+- `sessions.model`：会话默认值，不是实际调用——`5018bac6` 一个会话实际调了 6 个模型；
+- `session_usage.used`：**不是 processed tokens**——累计类组合全对不上（used/(uncached
+  +completion) 在 0.002~0.118 乱跳），但 **= 会话最后一次 generation 调用的
+  `prompt_tokens`**（16/21 逐字相等，±5% 再 1 个；余下 4 个疑似压缩/重置，待 E5 记）。
+  即「最后一次调用时的上下文占用」快照。可用，但语义是**上下文大小**不是用量。
+
+**规模**（有 sessionId 的 354 个 trace）：uncached 174.5M + completion 2.5M = **processed
+176.9M**，另 cached **296.1M**（Σ`prompt_tokens_details.cached_tokens`，与
+`trace.modelInfo.totalCachedTokens` Σ296.4M 互证；uncached + cached = Σprompt 470.6M 对账
+成立——初稿写 234M 是算错）；无 sessionId 的 321 个 trace **另有 1,202 次 generation、167M
+prompt**——不是 0 token，是**未归属的真实用量**（成因未知，ASK P2-3 的问题仍成立）。
+
+### 9E.2 被推翻的结论（本篇内，逐条）
+
+| 位置 | 原结论 | 实测 | 处置 |
+|---|---|---|---|
+| §9 Phase D | 「把 `used` 拆四桶 = 编造」 | 前提不成立：四桶从 generation usage **直算**（uncached = prompt − cached；cache_read = cached；output = completion；cache_write = 0 并注明 OpenAI 格式无此桶；reasoning 单列，同 Codex 五桶） | §9 保留「不拆 `used`」，删「WorkBuddy 无四桶」 |
+| §7.2 路径 1 | 「四桶全 0，token 恒 0 沉底」 | 可发**真事实**，与 Codex 同形 | 路径 1 重写为 E-a，路径 2 不再是推荐 |
+| §5.2 | 名义单位成本分母 1,109,007 | 量纲错（`used`）；应为 processed tokens，且 §6.7 标准路径（token × 官方卡 **逐调用模型**）现在**可走** | §5.2 改为「待 E-f 重算」 |
+| §6.1 | `cost.tokens = used` | `used` = 最后一次调用的上下文占用（`prompt_tokens` 快照），不是用量 | 键保留，note 标「last-call context size, not processed tokens」；processed 另出 |
+| §2 基线表 | 「积分轨 1,109,007 token」 | 同上 | 加脚注 |
+| B2 / §12.2 | 「`Agent workflow` = 另一类、0 token」 | 是 name 不是类；`totalTokens` 不可信；有真实用量 | INTEGRATION §12.2 与 ASK P2-3 措辞修正（E-g） |
+| ASK P1-1 | 「最大缺口是逐请求用量」 | 数据在 traces 里 | P1-1 改为「请声明 `usage` 与 `model` 字段是契约」 |
+| §5.0 末段 | 「积分系数只能逐会话反推」 | 逐调用 model + 逐 requestId credit → **可逐调用**（若 span 与 requestId 可 join，待测） | E-f |
+
+### 9E.3 修订后的范围：Phase E = WorkBuddy 的真实数据面
+
+不再是「行为证据补丁」。traces 同时是（a）唯一的逐请求 token 源、（b）唯一的逐调用
+模型源、（c）唯一的 write/edit 路径 / 子代理 / 工具耗时 / 工具错误源。接入后 WorkBuddy
+可走与 Codex **同形**的 UsageFact 管线（五桶 × 逐调用模型 × ISO 时间戳），§7.1 的统一
+会话面自然打开——**不需要**为它开任何特例。
+
+### 9E.4 前置纪律（v4，8 条）
+
+1. 归属 = `trace.sessionId` **字符串相等**；空/缺 → attempts，**不猜**。
+2. 无 sessionId 的 trace **不是另一类**——同名同形，只是没归属。它们的 usage 单列
+   `unattributed`（真实用量，不进任何会话，不当损坏）；成因等宿主声明。
+3. `toolInput` / `toolOutput` **必须解一层 JSON**；解不开 → 该 span 的对应信号 unavailable
+   + attempts，不猜。
+4. 四桶只从 span 级 `usage` 算；**`trace.totalTokens` 不读**（不可信）；`used` 不参与。
+5. 模型只取 `toolOutput[i].model`（逐调用）；`sessions.model` 不参与归属。
+6. 与 audit-log 的 `command-safety.sandbox-executed` **不双计**：Bash 在两面都出现；join
+   key 候选 `toolCallId`（audit-log 有）vs `spanId`——**先测**是否可 join；不可 join 则以
+   一方为主源、另一方只做覆盖对账，同 Codex `custom_tool_call` vs `CommandExecution`。
+7. 653MB / 675 文件：增量读（mtime + 已见 traceId）；解码 `toolOutput` 只取 `usage`/
+   `model`，**不保留响应正文**（§4 不要 prompt 正文）。
+8. 两个「session-anonymous」运行时字面量（`WORKBUDDY_SV604_605_REASON` :233/:231、
+   `TRACES_ERROR`）随 Phase E 移除；`is_unavailable` 里的 ToolResults / Usage /
+   SubagentSpawns / StepBoundaries（若 agent span 给出）逐一翻转，每翻一个补差分。
+
+### 9E.5 Phase E 执行清单
+
+> 每项走【分析 → 编码 → 测试 → 子智能体验收 → commit】。E1 先行——它是 E2–E5 的
+> 共同读取层。
+
+- [ ] **E1 · traces 读取层 + fixture**（locate → shape → extract）
+      `hosts/workbuddy/sources/traces.rs` ↔ `adapters/workbuddy_traces.py`：枚举
+      `traces/*/trace_*.json`，按 `trace.sessionId` 分组，解码 `toolInput`/`toolOutput`
+      （只留 `usage`/`model`/`file_path`/`toolName`），ISO 时间戳走 A2 字符串路径；
+      无 sessionId → `unattributed` 桶。fixture：`fixtures/workbuddy/workdir/.workbuddy/
+      traces/` 两个 trace（一个归属 s1、一个无 sessionId），真机形状（二次编码、ISO ms、
+      OpenAI usage 含 cached/reasoning、混合模型）。增量读用 mtime + traceId 集。
+- [ ] **E2 · 行为 timeline 填充**（SV604/605/607/608 + SubagentSpawns）
+      function span → `tool_calls`（name = toolName，args_text 含 `file_path`）+
+      `tool_results`（status/error → error_code）；agent span → SubagentSpawns；
+      `is_unavailable` 翻转 ToolResults/SubagentSpawns；`degrade_sv604_605` 移除；
+      `WORKBUDDY_SV604_605_REASON` / `TRACES_ERROR` 删除；§13 矩阵 G5 登记更新。
+- [ ] **E3 · Bash 双源对账**（纪律 6）
+      测 `toolCallId` ↔ span 可否 join；定主源；覆盖计数对账进 notes；不双计钉回归。
+- [ ] **E4 · UsageFact emitter**（`hosts/workbuddy/sources/usage_fact.rs` ↔ `workbuddy_usage_fact.py`）
+      与 Codex 同形五桶：identity = spanId、time = span.startedAt、model = 逐调用；
+      `cache_write` 恒 0 + `source_usage_semantics` 声明「OpenAI 格式无 cache_write」；
+      unattributed 事实 `native_session_id` 为空 → `session_key_orphan`（契约已有此字段）。
+      `FACT_HOSTS` +1；`workbuddy-usage-facts` CLI；`tests/test_workbuddy_usage_fact.py`
+      byte-parity。**本项之后 §7.2 路径 1 自动成立**：会话进统一面、token 不再是 0。
+- [ ] **E5 · 成本词表回填**
+      §5.2 用 processed tokens 重算名义单位成本（积分轨 vs 全量两栏都算，分母口径按
+      归属会话）；`cost.tokens` 改名或加 note「last-call context size」；`cost` 块加
+      `processed_tokens`（来自 traces，四桶之和）；§2 基线表脚注；记下 `used` 与
+      last-call prompt 不等的 4 个会话（`ad447428` 等）的成因线索（压缩/重置？）。
+- [ ] **E6 · 文档收口**
+      INTEGRATION §9/§12.2、ASK P1-1/P2-3/§0、CORPUS 勘误；memory `workbuddy-data-facts`
+      再勘误（`used` 语义、Agent workflow 非另一类、逐调用 model）。
+
+**明确不在 E 里**：把 credit 折成钱进实付栏（§5 口径不变）；用 span 里的 prompt 正文
+做任何事（§4）；给无 sessionId 的 trace 猜归属（纪律 1）。
 
 ## 10. 工作项（依赖序 · 执行清单）
 
@@ -715,7 +816,7 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
 
 ## 11. 诚实性纪律（继承 + 新增）
 
-继承 `WORKBUDDY_INTEGRATION.md` §12 全部十条。本篇新增六条：
+继承 `WORKBUDDY_INTEGRATION.md` §12 全部十条。本篇新增七条：
 
 11. **credit 是积分不是货币**：任何把 credit 显示成 ¥ 的字段必须自带 `basis` 串与
     日期，且只能落名义栏（§5.1）。
@@ -743,6 +844,14 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
     落地手法沿用仓库既有的**残差哨兵**纪律（`CLAUDE.md`：「宽进严出——机器发现，
     人来分类」）：**语料观测不进规则，进哨兵**。WorkBuddy 适配器已在做（不认识的
     audit-log 记录进 `attempts` 而非静默丢弃）。
+
+17. **「本机不可观测」必须建立在读完整数据形状之上**（2026-09-11，同一根因三次）：
+    09-02 的分析没读 `trace.sessionId`（→「会话匿名」）、没解 `toolInput`/`toolOutput`
+    的二次 JSON 编码（→「无逐请求 token」「无路径」）、信了 `trace.totalTokens`
+    （→「0 token」）。三条都被写成了产品结论并流进两份 spec、一份 memory、四份文档。
+    规则：声明一个表面「不可接」之前，(a) 读过仓库自己的 schema 文档；(b) 对该表面
+    的每个字符串字段试过 `json.loads`；(c) 用两个独立字段互相对账过（如 span 级 vs
+    trace 级 token）。任一条没做，只能写「未核实」，不能写「不可观测」。
 
     **证伪测试**（设计定稿后逐条问，任一条答「会报假话」即为拟核）：
     ① 本机 **0 个 WorkBuddy 会话**时报什么？（应 Unavailable，不是 0）
