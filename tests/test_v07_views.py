@@ -100,9 +100,8 @@ class UncoveredPureCase(unittest.TestCase):
         from_claude = cost_module.claude_subscription_uncovered_estimate(claude_models, PRICING)
         self.assertEqual(from_dsh, from_claude)
 
-    def test_anthropic_subscribed_model_excluded_from_view(self):
-        """anthropic 在 catalog_2026_09.subscriptions 登记 → claude-opus-5 不进
-        uncovered 视图（整 provider 视为已订阅覆盖，spec §3 原文措辞）。"""
+    def test_anthropic_without_user_declaration_remains_in_estimate_view(self):
+        """公共目录不声明用户套餐，claude-opus-5 必须保留在按量估算视图。"""
         from agent_vitals.agent import cost as cost_module
         claude_models = {
             "claude-opus-5": {"input_tokens": 1_000_000, "output_tokens": 0,
@@ -110,8 +109,8 @@ class UncoveredPureCase(unittest.TestCase):
                               "cache_creation_input_tokens": 0},
         }
         out = cost_module.claude_subscription_uncovered_estimate(claude_models, PRICING)
-        # 已订阅 provider → 不进 uncovered 视图（None 而不是空结构）
-        self.assertIsNone(out)
+        self.assertIsNotNone(out)
+        self.assertIn("claude-opus-5", out["per_model"])
 
     def test_deepseek_unsubscribed_provider_lands_with_correct_basis(self):
         """deepseek-official 未在 catalog_2026_09.subscriptions 登记 → 全 provider

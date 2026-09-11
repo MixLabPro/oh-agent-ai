@@ -1,4 +1,4 @@
-//! 计费模式声明层（`pricing.json::catalog_2026_09.billing_modes`）——回答
+//! 计费模式声明层（公共目录只含官方按量声明；用户套餐由本地快照合并）——回答
 //! 「这个模型的钱付给谁、按什么方式付」的单一判定点。
 //!
 //! 与计价面彻底解耦：计价（`claude.rs` 的 catalog 卡、`super` 的 DSH
@@ -234,15 +234,24 @@ mod tests {
         crate::cost::load_pricing()
     }
 
+    fn user_declarations() -> Value {
+        json!({"catalog_2026_09": {
+            "billing_modes": {
+                "anthropic": {"mode":"subscription", "models":["claude-"]}
+            },
+            "subscriptions": {
+                "claude-pro": {"provider":"anthropic", "currency":"USD",
+                    "amount_per_month":20.0, "billing_period_start":"2025-07-20"},
+                "glm": {"provider":"zhipu-glm", "currency":"CNY",
+                    "amount_per_month":118.0, "reported_at":"2026-09-05"}
+            }
+        }})
+    }
+
     #[test]
     fn billing_route_resolves_every_declared_provider() {
         let p = pricing();
         for (model, provider, mode) in [
-            ("claude-sonnet-5", "anthropic", BillingMode::Subscription),
-            ("claude-haiku-4-5-20251001", "anthropic", BillingMode::Subscription),
-            ("MiniMax-M3", "minimax", BillingMode::Subscription),
-            ("glm-5.3-flash", "zhipu-glm", BillingMode::Subscription),
-            ("gpt-5.6-sol", "openai", BillingMode::Subscription),
             ("deepseek-v4-flash", "deepseek-official", BillingMode::Metered),
             ("deepseek/deepseek-v4-pro", "deepseek-official", BillingMode::Metered),
         ] {
@@ -273,7 +282,7 @@ mod tests {
     #[test]
     fn billing_route_unknown_when_mode_value_is_dirty() {
         // mode 值拼错 → Unknown（不 panic、不猜）——声明层脏数据显式可见。
-        let mut p = pricing();
+        let mut p = user_declarations();
         *p.pointer_mut("/catalog_2026_09/billing_modes/anthropic/mode")
             .unwrap() = json!("subscrption"); // 真实打错形状
         let (_, m) = billing_route_of("claude-sonnet-5", &p).unwrap();
@@ -282,14 +291,10 @@ mod tests {
 
     #[test]
     fn subscription_fee_hits_declared_and_none_for_undeclared() {
-        let p = pricing();
+        let p = user_declarations();
         assert_eq!(
             subscription_fee_of("anthropic", &p),
             Some(("USD".into(), 20.0))
-        );
-        assert_eq!(
-            subscription_fee_of("minimax", &p),
-            Some(("CNY".into(), 114.0))
         );
         assert_eq!(
             subscription_fee_of("zhipu-glm", &p),
@@ -304,7 +309,7 @@ mod tests {
 
     #[test]
     fn declared_subscriptions_enumerates_amounts_with_period_fallback() {
-        let p = pricing();
+        let p = user_declarations();
         let subs = declared_subscriptions(&p);
         let providers: Vec<&str> = subs.iter().map(|(pr, ..)| pr.as_str()).collect();
         // openai 金额未声明：不进待摊清单（枚举的调用方是要摊钱的，产出一条

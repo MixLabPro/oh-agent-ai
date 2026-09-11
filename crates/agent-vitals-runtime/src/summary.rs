@@ -254,10 +254,10 @@ fn codex_host_amount_with_tokens_from_hours(
         .max()
         .map(day_freshness)
         .unwrap_or_else(Freshness::unavailable);
-    // basis 由 billing_modes 声明决定（Stage B），不再硬编码 ApiEquivalent：
-    // openai 声明 subscription → 等价标价口径（与硬编码时代结果一致，但依据
-    // 从"写死假设"变成"用户声明"；未来把 codex 切到按量 key 只改声明，这里
-    // 自动落 MeteredActual）。plan 快照（plan_type/credits）**不参与**判定：
+    // basis 由 billing_modes 声明决定（Stage B），不再硬编码 ApiEquivalent。
+    // 公共目录不会替用户声明订阅，因此缺少本地明确证据时落
+    // MeteredEstimate，并保持 unresolved。plan 快照（plan_type/credits）
+    // **不参与**判定：
     // 它是"当前状态"的单快照、不按日期分桶（hosts/codex/sessions/usage.rs
     // 的 doc），拿它判历史窗口本身就是错的——快照与声明的冲突检测留给
     // Stage E 的证据链。
@@ -265,7 +265,7 @@ fn codex_host_amount_with_tokens_from_hours(
         match agent_vitals_domain::cost::billing_mode_of("openai", &cards.main) {
             BillingMode::Subscription => (BillingBasis::ApiEquivalent, false),
             BillingMode::Metered => (BillingBasis::MeteredActual, false),
-            BillingMode::Unknown => (BillingBasis::ApiEquivalent, true),
+            BillingMode::Unknown => (BillingBasis::MeteredEstimate, true),
         };
     let mut amounts_by_basis = BTreeMap::new();
     amounts_by_basis.insert(basis, total);
@@ -375,7 +375,7 @@ fn claude_host_amount_with_tokens_from_days(
         amounts_by_basis.insert(BillingBasis::MeteredEstimate, cny);
     }
     if usd > 0.0 {
-        amounts_by_basis.insert(BillingBasis::ApiEquivalent, usd);
+        amounts_by_basis.insert(BillingBasis::MeteredEstimate, usd);
     }
     tk.total = tk.uncached_input + tk.cache_read + tk.cache_write + tk.output;
     tk.cache_hit_ratio = agent_vitals_domain::cost::cache_hit_ratio(&json!({
@@ -527,8 +527,18 @@ fn claude_provider_amounts_from_days(
         // pricing_basis, priced_with}。
         if let Some(per_model) = per_model {
             for (model, entry) in per_model {
-                let (prov, mode) = agent_vitals_domain::cost::billing_route_of(model, &pricing)
-                    .unwrap_or(("unknown".to_string(), BillingMode::Unknown));
+                // 用户尚未声明套餐/路由时，公共价卡仍能给出原厂供应商与
+                // 名义金额。此时必须按量估算并标记待确认，不能因为
+                // billing_modes 没有个人声明就把已有价卡金额丢掉。
+                let card_provider = entry
+                    .get("priced_with")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let (prov, mode, route_unresolved) =
+                    match agent_vitals_domain::cost::billing_route_of(model, &pricing) {
+                        Some((provider, mode)) => (provider, mode, mode == BillingMode::Unknown),
+                        None => (card_provider.to_string(), BillingMode::Metered, true),
+                    };
                 let key = format!("claude-code/{prov}");
                 let acc = accs.entry(key.clone()).or_insert_with(ProviderAcc::new);
                 acc.observe(date);
@@ -546,6 +556,9 @@ fn claude_provider_amounts_from_days(
                     Some(b) => acc.add(b, currency, total),
                     // 声明表不认识的模型有钱也无处归——不冒充任何档。
                     None => acc.unresolved = true,
+                }
+                if route_unresolved {
+                    acc.unresolved = true;
                 }
                 if entry.get("pricing_basis").and_then(|v| v.as_str()) == Some("partial") {
                     acc.unresolved = true;
@@ -940,15 +953,13 @@ fn codex_provider_amounts_from_sql(
                     day,
                     cards,
                 );
-                // The helper deliberately labels its raw model-card result as
-                // ApiEquivalent for the OpenAI path.  Here it is only a fair
-                // market estimate for a custom route, so read the amount
-                // directly and re-home it into the non-summable estimate
-                // bucket instead of using summable_total() (which excludes
-                // ApiEquivalent by design).
+                // The helper returns a non-summable model-card estimate. Read
+                // whichever estimate basis applies and keep the custom route
+                // in MeteredEstimate rather than treating it as an actual bill.
                 let estimate = priced
                     .amounts_by_basis
-                    .get(&BillingBasis::ApiEquivalent)
+                    .get(&BillingBasis::MeteredEstimate)
+                    .or_else(|| priced.amounts_by_basis.get(&BillingBasis::ApiEquivalent))
                     .copied()
                     .unwrap_or(0.0);
                 let mut amounts_by_basis = BTreeMap::new();
@@ -1418,18 +1429,14 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
 /// **SQL 面降级（如实记）**：
 /// - `unaccounted` = `[]`——rollout fold 独有的残差哨兵（「未消费但含 token
 ///   字段名的事件」），`usage_facts` 是已清洗事实、无此概念。
-/// - `plan` = `{"plan_type":"plus"}`——**不是 fabrication**：`pricing.json`
-///   `catalog_2026_09.billing_modes.openai._note` 声明「全部 60 份 rollout
-///   实测 rate_limits.plan_type=plus，单一提供方订阅制」。只带 tier tag、不带
-///   月费/限额（那才是 `_note` 明令禁止的「拿 Plus 挂牌价猜」）。作用是让
-///   `render_codex_cost` 的 USD 总额保持「(按量标价)」诚实标注——codex 是
-///   订阅，per-token USD 是名义折算不是账单（`_note` + ATTRIBUTABLE_WASTE §6.7）。
-///   plan 的**限额快照**（used_percent 等）SQL 面确实丢了，落 SQL 是后续项。
+/// - `plan` = `{}`：SQL token 聚合不保留可按历史窗口证明的套餐证据，不能把
+///   开发者机器上的 Plus 观察值编造成所有安装的默认身份。真实会话解析出的
+///   `plan_type` 仍可透传；缺失时总额按量估算并标记待确认。
 pub fn codex_merged_from_sql(data_home: &Path) -> (serde_json::Value, Option<String>) {
     let empty = || {
         json!({
             "by_hour_model": {}, "by_model": {},
-            "unaccounted": [], "plan": { "plan_type": "plus" },
+            "unaccounted": [], "plan": {},
         })
     };
     let path = agent_vitals_data::authority::default_authority_path(data_home);
@@ -1464,7 +1471,7 @@ pub fn codex_merged_from_sql(data_home: &Path) -> (serde_json::Value, Option<Str
             "by_hour_model": by_hour_model,
             "by_model": by_model,
             "unaccounted": [],
-            "plan": { "plan_type": "plus" },
+            "plan": {},
         }),
         note,
     )
@@ -2009,14 +2016,10 @@ mod tests {
         });
     }
 
-    /// Stage C 核心回归——订阅月费摊进 `FixedSubscription`：
-    /// - 有用量条目（anthropic）在原 `ApiEquivalent` 之上加 `FixedSubscription`；
-    /// - **零用量也补建条目**：订阅费不付用量也在付，空 home 里
-    ///   `claude-code/anthropic` 也要有 ¥0 用量 + $20 月费的条目；
-    /// - 账期过滤：查询月早于 `billing_period_start` 不摊（GLM 2026-09-05
-    ///   才买，摊进 2020-01 是编造历史支出）。
+    /// 干净安装回归：公共目录只提供原厂价卡，不能自动注入任何用户月费；
+    /// 有价卡的未确认用量仍须按量估算并标记待确认。
     #[test]
-    fn subscription_fees_land_in_monthly_fixed_subscription() {
+    fn public_catalog_never_injects_user_subscription_fees() {
         with_home(|| {
             let month = crate::clock::current_month_beijing();
             let db = seed_authority_db();
@@ -2044,18 +2047,11 @@ mod tests {
             let anthropic = &summary.by_provider["claude-code/anthropic"];
             assert!(anthropic
                 .amounts_by_basis
-                .contains_key(&BillingBasis::ApiEquivalent));
-            assert_eq!(
-                anthropic.amounts_by_basis[&BillingBasis::FixedSubscription],
-                20.0
-            );
-            // 零用量补建：glm 有声明（2026-09 起效）但本 fixture 无 glm 用量。
-            let glm = &summary.by_provider["claude-code/zhipu-glm"];
-            assert_eq!(
-                glm.amounts_by_basis[&BillingBasis::FixedSubscription],
-                118.0
-            );
-            assert!(!glm.has_unresolved, "纯月费条目不标 unresolved");
+                .contains_key(&BillingBasis::MeteredEstimate));
+            assert!(anthropic.has_unresolved);
+            assert!(!anthropic.amounts_by_basis.contains_key(&BillingBasis::FixedSubscription));
+            assert!(!summary.by_provider.contains_key("claude-code/zhipu-glm"),
+                    "公共目录不得给新安装补建个人GLM月费");
             // 账期过滤：2020-01 早于一切 period_start → 无任何订阅条目被补建。
             let old = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery {
                 month: "2020-01".to_string(),
@@ -2070,9 +2066,8 @@ mod tests {
         });
     }
 
-    /// 日粒度**不摊**订阅费（月费不是日发生额——按日摊会造出「今天花了
-    /// ¥3.93」这种不存在的事实）。同一份 fixture，daily 的 anthropic 条目
-    /// 只有 ApiEquivalent，没有 FixedSubscription。
+    /// 日粒度**不摊**订阅费（月费不是日发生额）。干净安装的 Anthropic
+    /// 用量按量估算、待确认，且没有 FixedSubscription。
     #[test]
     fn subscription_fees_never_leak_into_daily() {
         with_home(|| {
@@ -2107,7 +2102,8 @@ mod tests {
             let anthropic = &daily.by_provider["claude-code/anthropic"];
             assert!(anthropic
                 .amounts_by_basis
-                .contains_key(&BillingBasis::ApiEquivalent));
+                .contains_key(&BillingBasis::MeteredEstimate));
+            assert!(anthropic.has_unresolved);
             assert!(
                 !anthropic
                     .amounts_by_basis
@@ -2222,7 +2218,7 @@ mod tests {
 
     /// 接线结构（真机）：三宿主全进 `by_host`、不进 `excluded_hosts`；汇总
     /// 新鲜度 = 最新被观测到的宿主（不是硬编码 dsh）；非 summable 的金额
-    /// （codex 的 ApiEquivalent、claude 的 MeteredEstimate/ApiEquivalent）
+    /// （codex/claude 的 MeteredEstimate）
     /// 不得混进 `total_summable`——可汇总总额必须恰好等于各宿主 summable
     /// 档之和，估算与诊断价再大也不出现。
     #[test]
@@ -2232,7 +2228,7 @@ mod tests {
             let ts = current_month_noon_ms();
             let db = seed_authority_db();
             // 三宿主各一笔：dsh 出 MeteredActual（summable），codex 出
-            // ApiEquivalent（非 summable），claude 出 MeteredEstimate（非 summable）。
+            // MeteredEstimate（非 summable），claude 同样为 MeteredEstimate。
             seed_fact(
                 &db,
                 "d1",
@@ -2521,7 +2517,8 @@ mod tests {
                 .contains_key(&BillingBasis::MeteredEstimate));
             assert!(openai
                 .amounts_by_basis
-                .contains_key(&BillingBasis::ApiEquivalent));
+                .contains_key(&BillingBasis::MeteredEstimate));
+            assert!(openai.has_unresolved);
             assert!(!custom
                 .amounts_by_basis
                 .contains_key(&BillingBasis::ApiEquivalent));
@@ -2833,9 +2830,9 @@ mod tests {
 
     /// codex 侧：真实事实只带 `model_raw`、无 speed 维度——`codex_by_hour_
     /// model` 恒填 "standard"（真机也从未观测到别的值，见模块头 `_note`）。
-    /// 断言金额落在 ApiEquivalent（openai 声明 subscription）且非零。
+    /// 缺少用户计费声明时按量估算并保持 unresolved。
     #[test]
-    fn sql_repository_codex_day_reports_api_equivalent_amount() {
+    fn sql_repository_codex_day_reports_unconfirmed_metered_estimate() {
         with_home(|| {
             let day = crate::clock::today_beijing();
             let (start_ms, _) =

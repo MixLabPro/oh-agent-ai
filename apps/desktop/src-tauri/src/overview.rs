@@ -1566,12 +1566,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// anthropic 在 catalog_2026_09.subscriptions 登记 → claude-opus-5 不进
-    /// uncovered 视图（整 provider 视为已订阅覆盖）；deepseek 未订阅 → 进。
+    /// 公共目录不携带用户套餐：claude-opus-5 与 deepseek 都进入估算视图。
     /// v0.7 菜单栏视图吃的是 DSH `by_model` rollup（`peaked_days_map` 恒带
     /// by_model），seed 两个 model 的 dsh 事实。
     #[test]
-    fn read_overview_v07_uncovered_excludes_subscribed_provider() {
+    fn read_overview_v07_uncovered_keeps_unconfirmed_provider() {
         let tmp = std::env::temp_dir().join("sv-menubar-v07-uncovered-sql-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -1581,10 +1580,10 @@ mod tests {
         seed_fact(&db, "f", "dsh", "deepseek-v4-flash", bj_noon_ms(&d), (1_000_000, 0, 0, 0));
         drop(db);
         let ov = read_overview_at(&tmp);
-        let uncovered = ov.claude_uncovered_month.expect("deepseek 未订阅 → uncovered 必须存在");
+        let uncovered = ov.claude_uncovered_month.expect("有已知价卡用量 → uncovered 必须存在");
         assert_eq!(uncovered["pricing_basis"], "estimated-subscription-exclusion");
-        assert!(uncovered["per_model"].get("claude-opus-5").is_none(),
-                "claude-opus-5 已订阅 → 不在 uncovered.per_model");
+        assert!(uncovered["per_model"].get("claude-opus-5").is_some(),
+                "未确认套餐的 claude-opus-5 必须保留在估算视图");
         assert!(uncovered["per_model"].get("deepseek-v4-flash").is_some(),
                 "deepseek-v4-flash 未订阅 → 在 uncovered.per_model");
         let _ = std::fs::remove_dir_all(&tmp);

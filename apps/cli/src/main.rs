@@ -4386,19 +4386,19 @@ mod codex_sql_tests {
     /// `codex_merged_from_sql`（Tier B：`codex-cost` 切 SQL 权威库）：
     /// - `by_hour_model` / `by_model` 从 `usage_facts` 的 codex 行读出、经
     ///   `codex_report_from_merged` 折出正数成本；
-    /// - `unaccounted` = `[]`（残差哨兵是 rollout fold 独有）、`plan` 只带
-    ///   `plan_type: "plus"`（pricing.json billing_modes.openai._note 声明的
-    ///   实测不变量，用于保住「(按量标价)」诚实标注，不带月费/限额）；
+    /// - `unaccounted` = `[]`（残差哨兵是 rollout fold 独有）、`plan` 为空：
+    ///   SQL 聚合没有可用于历史窗口的用户套餐证据，不能补写某个开发者的
+    ///   `plus` 身份；
     /// - 库缺失 → note 非 None（CLI 打 stderr，不把空报告当「没花钱」）。
     #[test]
     fn codex_merged_from_sql_reads_facts_and_degrades_unaccounted_plan() {
         let dir = fresh_dir("degrade");
 
-        // 空库（尚未建）→ note 提示 sync-facts；merged 兜底但 plan tag 在。
+        // 空库（尚未建）→ note 提示 sync-facts；merged 不编造套餐标签。
         let (empty, note) = agent_vitals_runtime::summary::codex_merged_from_sql(&dir);
         assert!(note.is_some(), "库文件不存在 → 必须给 stderr 提示");
         assert_eq!(empty["unaccounted"], json!([]));
-        assert_eq!(empty["plan"]["plan_type"], "plus");
+        assert_eq!(empty["plan"], json!({}));
 
         let db = agent_vitals_data::authority::AuthorityDb::open(
             &agent_vitals_data::authority::default_authority_path(&dir),
@@ -4412,24 +4412,24 @@ mod codex_sql_tests {
         let (merged, note) = agent_vitals_runtime::summary::codex_merged_from_sql(&dir);
         assert!(note.is_none(), "库已建且可开 → 无提示");
         assert_eq!(merged["unaccounted"], json!([]));
-        assert_eq!(merged["plan"]["plan_type"], "plus");
+        assert_eq!(merged["plan"], json!({}));
         assert!(
             merged["by_hour_model"]["2026-09-03T08"]["gpt-5.6-sol"].is_object(),
             "北京小时桶应含 seed 的模型：{}",
             merged["by_hour_model"]
         );
         // 走真实报告路径：total_cost_usd 为正、per_model 有 sol、unaccounted 空、
-        // plan 透传（→ render 侧走 "(按量标价)" 标注）。
+        // plan 为空（缺证据时 render 侧保持按量估算标注）。
         let report = codex_report_from_merged(&merged, None, None, false);
         assert!(report["total_cost_usd"].as_f64().unwrap() > 0.0);
         assert!(report["per_model"]["gpt-5.6-sol"].is_object());
         assert_eq!(report["unaccounted_usage"], json!([]));
-        assert_eq!(report["plan"]["plan_type"], "plus");
-        // 订阅标注保住：render 文本含「按量标价」而非裸「total cost」。
+        assert_eq!(report["plan"], json!({}));
+        // 缺套餐证据仍要标明按量估算，而非裸「total cost」。
         let text = agent_vitals_runtime::sessions::codex_cost::render_codex_cost(&report);
         assert!(
             text.contains("按量标价"),
-            "codex 订阅 → USD 总额必须标「按量标价」：{text}"
+            "缺套餐证据的 USD 总额必须标「按量标价」：{text}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
