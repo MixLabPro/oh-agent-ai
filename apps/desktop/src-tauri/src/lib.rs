@@ -1461,6 +1461,23 @@ fn enqueue_billing_recalculation(
     let changed = db.billing_recalculation_enqueue(
         &job_id, &declaration_id, &revision_id, agent_vitals_runtime::sql_sync::now_ms(),
     ).map_err(|error| error.to_string())?;
+    drop(db);
+    if changed {
+        let worker_path = path.clone();
+        let worker_job_id = job_id.clone();
+        std::thread::spawn(move || {
+            let Ok(worker_db) = agent_vitals_data::authority::AuthorityDb::open(
+                &worker_path, agent_vitals_runtime::sql_sync::now_ms(),
+            ) else { return };
+            let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+            if worker_db.billing_recalculation_run(&worker_job_id, now_ms).is_err() {
+                let _ = worker_db.billing_recalculation_set_status(
+                    &worker_job_id, "failed", Some("worker_failed"),
+                    Some("recalculation worker failed"), agent_vitals_runtime::sql_sync::now_ms(),
+                );
+            }
+        });
+    }
     Ok(serde_json::json!({ "status": "queued", "job_id": job_id, "changed": changed }))
 }
 

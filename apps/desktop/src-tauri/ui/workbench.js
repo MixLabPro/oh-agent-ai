@@ -759,8 +759,23 @@ function bindBillingDeclarationPanel() {
         jobId, declarationId: billingDeclarationState.declarationId,
         revisionId: billingDeclarationState.revisionId,
       });
-      document.getElementById("ov-billing-preview").textContent += " 已入队，重算回执：" + jobId + "。";
-      await renderOverview();
+      const preview = document.getElementById("ov-billing-preview");
+      preview.textContent += " 已入队，正在等待重算回执…";
+      let finalStatus = null;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const receipt = await invoke("billing_recalculation_job_status", { jobId });
+        finalStatus = receipt.status;
+        if (["succeeded", "failed", "cancelled"].includes(receipt.status)) break;
+      }
+      if (finalStatus === "succeeded") {
+        preview.textContent += " 已完成：" + jobId + "。";
+        await renderOverview();
+      } else if (finalStatus === "failed" || finalStatus === "cancelled") {
+        preview.textContent += " 未完成（" + finalStatus + "），请查看数据状态后重试。";
+      } else {
+        preview.textContent += " 仍在后台处理中：" + jobId + "。";
+      }
     } catch (e) {
       apply.disabled = false;
       document.getElementById("ov-billing-preview").textContent += " · 入队失败：" + errText(e);
