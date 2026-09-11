@@ -52,6 +52,12 @@ pub(crate) const SQL_PEAKED_DAYS_MAP: &str = "SELECT (event_ts_ms + ?1) / ?2 AS 
          WHERE host = ?3 AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?4 AND event_ts_ms < ?5
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')
          GROUP BY day_idx, model_id, event_peak";
 
 /// [`claude_days`]：claude 实时行级事实的逐日 `{model: 4 桶}`。
@@ -63,6 +69,12 @@ pub(crate) const SQL_CLAUDE_DAYS: &str = "SELECT (event_ts_ms + ?1) / ?2 AS day_
          WHERE host = 'claude-code' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')
          GROUP BY day_idx, model_id";
 
 /// [`claude_legacy_days`]：claude 深历史聚合（`event_peak=0` 全量行）。
@@ -85,6 +97,12 @@ pub(crate) const SQL_CODEX_BY_HOUR_MODEL: &str = "SELECT (event_ts_ms + ?1) / ?2
          WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')
          GROUP BY hour_idx, model_id";
 
 /// [`hourly_by_host_model`] 三宿主 × 模型 × 小时聚合（增量 2 `usage_hourly`
@@ -107,6 +125,12 @@ pub(crate) const SQL_HOURLY_BY_HOST_MODEL: &str = "SELECT host, COALESCE(model_i
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            AND host = ?5
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')
          GROUP BY host, model_id, bj_hour";
 
 pub(crate) const SQL_HOURLY_BY_HOST_PROVIDER: &str = "SELECT host, COALESCE(provider_id, '<unknown>'),
