@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -44,6 +44,9 @@ pub fn default_authority_path(data_home: &Path) -> PathBuf {
 /// amount_minor, currency)`。`amount_minor` 是最小货币单位整数——金额从不
 /// 以浮点入库（spec §5.3），折算在展示层。
 pub type HostBillRow = (String, String, String, i64, String);
+/// 旧版本发现、尚未被用户确认的订阅候选：`(id, host, provider, currency,
+/// amount_minor, period_start, status)`。候选不构成实际付款。
+pub type BillingImportCandidateRow = (String, String, String, String, i64, String, String);
 
 type BillingTemplateRow = (String, Option<String>, String, String, i64, Option<i64>);
 type OutcomeMeasurementRow = (String, String, String, Option<i64>, Option<String>, String);
@@ -506,6 +509,26 @@ BEGIN
 END;
 "#;
 
+// v1.0：旧公共价表中的个人订阅不是付款凭证。升级时保留为待确认候选，
+// 必须由用户接受后才写入 host_bills / FixedSubscription。
+const SCHEMA_V7_ADD: &str = r#"
+CREATE TABLE billing_import_candidates (
+  candidate_id TEXT PRIMARY KEY,
+  host TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  currency TEXT NOT NULL,
+  amount_minor INTEGER NOT NULL CHECK (amount_minor >= 0),
+  billing_period_start TEXT NOT NULL,
+  source_pricing_version TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'dismissed')),
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  resolved_at_ms INTEGER,
+  UNIQUE(provider_id, currency, amount_minor, billing_period_start, source_pricing_version)
+);
+CREATE INDEX billing_import_candidates_status ON billing_import_candidates(status, provider_id);
+"#;
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -676,9 +699,25 @@ impl AuthorityDb {
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
+            Some(6) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V7_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute(
+                            "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
+                            rusqlite::params![SCHEMA_VERSION.to_string()],
+                        )?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(5) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V6_ADD);
+                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -697,7 +736,7 @@ impl AuthorityDb {
             }
             Some(4) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD));
+                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -718,6 +757,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V6_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V7_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -749,6 +792,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V6_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V7_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -784,6 +831,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V6_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V7_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -831,6 +882,7 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V4_ADD)?;
                 conn.execute_batch(SCHEMA_V5_ADD)?;
                 conn.execute_batch(SCHEMA_V6_ADD)?;
+                conn.execute_batch(SCHEMA_V7_ADD)?;
                 // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
                 conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
@@ -1435,6 +1487,66 @@ impl AuthorityDb {
         )?)
     }
 
+    /// 幂等写入一个待确认的旧订阅候选。相同候选不会重复；候选永远不写入
+    /// `host_bills`，必须由上层获得用户确认后另走明确账单写入。
+    #[allow(clippy::too_many_arguments)]
+    pub fn billing_import_candidate_put(
+        &self,
+        candidate_id: &str,
+        host: &str,
+        provider_id: &str,
+        currency: &str,
+        amount_minor: i64,
+        billing_period_start: &str,
+        source_pricing_version: &str,
+        now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if candidate_id.is_empty() || host.is_empty() || provider_id.is_empty()
+            || currency.trim().is_empty() || amount_minor < 0
+            || billing_period_start.len() != 7 || source_pricing_version.is_empty()
+        {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid billing import candidate".to_string(),
+            )));
+        }
+        let changed = self.conn.execute(
+            "INSERT INTO billing_import_candidates(
+                 candidate_id, host, provider_id, currency, amount_minor, billing_period_start,
+                 source_pricing_version, status, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?8)
+             ON CONFLICT(candidate_id) DO NOTHING",
+            rusqlite::params![candidate_id, host, provider_id, currency, amount_minor,
+                billing_period_start, source_pricing_version, now_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn pending_billing_import_candidates(
+        &self,
+    ) -> Result<Vec<BillingImportCandidateRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT candidate_id, host, provider_id, currency, amount_minor, billing_period_start, status
+             FROM billing_import_candidates WHERE status = 'pending'
+             ORDER BY provider_id, billing_period_start, candidate_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((
+            r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?, r.get::<_, i64>(4)?, r.get::<_, String>(5)?,
+            r.get::<_, String>(6)?,
+        )))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 将先前错误自动导入的旧价表账单撤回。仅匹配专用 evidence 标签，绝不
+    /// 触碰用户手工录入的账单。
+    pub fn revoke_legacy_pricing_host_bills(&self, now_ms: i64) -> Result<usize, AuthorityError> {
+        Ok(self.conn.execute(
+            "UPDATE host_bills SET deleted_at_ms = ?1
+             WHERE evidence_ref = 'legacy-pricing-catalog' AND deleted_at_ms IS NULL",
+            rusqlite::params![now_ms],
+        )?)
+    }
+
     /// `BEGIN IMMEDIATE` 事务帮助器：闭包成功 → COMMIT，Err → ROLLBACK 后
     /// 原样上抛。**所有业务写入都必须走这里**（spec §5.1.4——事务边界是
     /// 写入协议的一部分，不是调用方的自由裁量）。
@@ -1529,6 +1641,7 @@ mod tests {
                 "provider_catalog_snapshots",
                 "billing_templates",
                 "billing_template_snapshots",
+                "billing_import_candidates",
                 "outcome_measurements",
                 "savings_records",
             ] {
@@ -1619,6 +1732,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(exists, 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v6_database_adds_pending_billing_candidates_without_rewriting_bills() {
+        let db = tmp_db("v6-to-v7");
+        {
+            let current = AuthorityDb::open(&db, 1).unwrap();
+            current.conn().execute_batch(
+                "DROP TABLE billing_import_candidates;
+                 UPDATE schema_meta SET value = '6' WHERE key = 'schema_version';",
+            ).unwrap();
+        }
+        let upgraded = AuthorityDb::open(&db, 2).unwrap();
+        let version: String = upgraded.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(version, "7");
+        assert!(upgraded.billing_import_candidate_put(
+            "candidate", "claude-code", "minimax", "CNY", 11_400, "2026-09", "legacy", 3,
+        ).unwrap());
+        assert_eq!(upgraded.pending_billing_import_candidates().unwrap().len(), 1);
         let _ = std::fs::remove_file(&db);
     }
 

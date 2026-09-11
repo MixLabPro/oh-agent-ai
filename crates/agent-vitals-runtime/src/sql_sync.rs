@@ -73,20 +73,30 @@ pub fn snapshot_current_pricing(db: &AuthorityDb) -> Result<bool, AuthorityError
     })
 }
 
-/// 将升级前价格快照中错误混入的个人订阅声明，迁移为本地、可编辑的
-/// `host_bills` 固定订阅行。公共目录本身绝不回写这些数据。
+/// 将升级前价格快照中错误混入的个人订阅声明，迁移为本地、待确认的候选。
+/// 公共目录本身绝不回写这些数据，也不自动形成实际账单。
 ///
 /// 旧版把 `catalog_2026_09.subscriptions` 编进 `pricing.json`；升级后只有已
-/// 落库的历史快照还保留该证据。本迁移扫描全部快照，按声明的账期起点补至当月。
-/// 同月同 provider 已有固定订阅账单（例如用户已在新版手工录入）时跳过，因而
-/// 可安全重复执行且不会覆盖用户的本地更正。
+/// 落库的历史快照还保留该线索。本迁移扫描全部快照，产出`pending`候选；只有
+/// 用户后续确认才能写入`host_bills`。此前版本误写的专用 legacy 账单会软删除，
+/// 用户手工账单不受影响。
 pub fn migrate_legacy_subscription_snapshots(
     db: &AuthorityDb,
     now_ms: i64,
 ) -> Result<usize, AuthorityError> {
-    let through = crate::clock::current_month_beijing();
+    // 撤回旧版自动账单与写入待确认候选是一个不可分割的迁移动作。任一快照
+    // 损坏或写入失败时，必须保留旧状态，不能留下「账单已撤回、候选只写了一半」
+    // 的中间态。
+    db.with_immediate_txn(|_| migrate_legacy_subscription_snapshots_in_txn(db, now_ms))
+}
+
+fn migrate_legacy_subscription_snapshots_in_txn(
+    db: &AuthorityDb,
+    now_ms: i64,
+) -> Result<usize, AuthorityError> {
+    db.revoke_legacy_pricing_host_bills(now_ms)?;
     let mut imported = 0usize;
-    for (_version, payload) in db.pricing_snapshot_payloads()? {
+    for (version, payload) in db.pricing_snapshot_payloads()? {
         let Ok(root) = serde_json::from_str::<Value>(&payload) else { continue };
         let pricing = root.get("pricing").unwrap_or(&root);
         let Some(subscriptions) = pricing
@@ -105,26 +115,14 @@ pub fn migrate_legacy_subscription_snapshots(
             ) else { continue };
             let Some(first_month) = valid_month_prefix(start) else { continue };
             let Some(amount_minor) = amount_to_minor(amount) else { continue };
-            for period in months_inclusive(&first_month, &through) {
-                let existing = db.host_bills_for_period(&period)?;
-                if existing.iter().any(|(_host, p, basis, _amount, _currency)| {
-                    p == provider && basis == "fixed_subscription"
-                }) {
-                    continue;
-                }
-                let host = legacy_subscription_host(provider);
-                let bill_id = format!("legacy-pricing:{host}:{provider}:{period}:fixed_subscription");
-                db.host_bill_put(
-                    &bill_id,
-                    host,
-                    provider,
-                    &period,
-                    "fixed_subscription",
-                    amount_minor,
-                    currency,
-                    "legacy-pricing-catalog",
-                    now_ms,
-                )?;
+            let host = legacy_subscription_host(provider);
+            let candidate_id = format!(
+                "legacy-pricing-candidate:{version}:{host}:{provider}:{currency}:{amount_minor}:{first_month}"
+            );
+            if db.billing_import_candidate_put(
+                &candidate_id, host, provider, currency, amount_minor, &first_month,
+                &version, now_ms,
+            )? {
                 imported += 1;
             }
         }
@@ -148,22 +146,6 @@ fn valid_month_prefix(value: &str) -> Option<String> {
         && bytes[5..].iter().all(u8::is_ascii_digit)
         && matches!(month[5..].parse::<u8>().ok(), Some(1..=12)))
         .then_some(month)
-}
-
-fn months_inclusive(first: &str, last: &str) -> Vec<String> {
-    let (Ok(mut year), Ok(mut month), Some(last_month)) = (
-        first[..4].parse::<i32>(),
-        first[5..].parse::<u8>(),
-        valid_month_prefix(last),
-    ) else { return Vec::new() };
-    let mut out = Vec::new();
-    loop {
-        let period = format!("{year:04}-{month:02}");
-        if period > last_month { break }
-        out.push(period);
-        if month == 12 { year += 1; month = 1; } else { month += 1; }
-    }
-    out
 }
 
 fn amount_to_minor(amount: f64) -> Option<i64> {
@@ -1352,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_subscription_snapshot_migrates_to_local_host_bill_idempotently() {
+    fn legacy_subscription_snapshot_becomes_pending_candidate_without_billing_user() {
         let home = tmp_home("legacy-subscription");
         let db = open_db(&home);
         let month = crate::clock::current_month_beijing();
@@ -1373,19 +1355,58 @@ mod tests {
             "user-glm", "claude-code", "zhipu-glm", &month, "fixed_subscription",
             9_999, "CNY", "user-entry", 1,
         ).unwrap();
+        db.host_bill_put(
+            "old-auto-minimax", "claude-code", "minimax", &month, "fixed_subscription",
+            11_400, "CNY", "legacy-pricing-catalog", 1,
+        ).unwrap();
 
-        assert_eq!(migrate_legacy_subscription_snapshots(&db, 2).unwrap(), 1);
+        assert_eq!(migrate_legacy_subscription_snapshots(&db, 2).unwrap(), 2);
         let rows = db.host_bills_for_period(&month).unwrap();
-        assert!(rows.contains(&(
-            "claude-code".to_string(), "minimax".to_string(),
-            "fixed_subscription".to_string(), 11_400, "CNY".to_string(),
-        )));
+        assert!(!rows.iter().any(|(_host, provider, _basis, _amount, _currency)| provider == "minimax"),
+            "unconfirmed legacy declaration must not remain an actual bill: {rows:?}");
         assert!(rows.contains(&(
             "claude-code".to_string(), "zhipu-glm".to_string(),
             "fixed_subscription".to_string(), 9_999, "CNY".to_string(),
         )), "manual local bill must not be overwritten: {rows:?}");
+        let candidates = db.pending_billing_import_candidates().unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|(_id, _host, _provider, _currency, _amount, _start, status)| status == "pending"));
         assert_eq!(migrate_legacy_subscription_snapshots(&db, 3).unwrap(), 0);
         assert_eq!(db.host_bills_for_period(&month).unwrap(), rows);
+        assert_eq!(db.pending_billing_import_candidates().unwrap(), candidates);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn legacy_subscription_migration_rolls_back_revoke_when_candidate_write_fails() {
+        let home = tmp_home("legacy-subscription-rollback");
+        let db = open_db(&home);
+        let month = crate::clock::current_month_beijing();
+        let payload = serde_json::json!({"pricing": {"catalog_2026_09": {
+            "subscriptions": {
+                "legacy-minimax": {
+                    "provider": "minimax", "currency": "CNY", "amount_per_month": 114.0,
+                    "reported_at": format!("{month}-01")
+                }
+            }
+        }}}).to_string();
+        db.pricing_snapshot_put("legacy-user-pricing-rollback", "legacy", &payload, 1).unwrap();
+        db.host_bill_put(
+            "old-auto-minimax", "claude-code", "minimax", &month, "fixed_subscription",
+            11_400, "CNY", "legacy-pricing-catalog", 1,
+        ).unwrap();
+        db.conn().execute_batch(
+            "CREATE TRIGGER fail_legacy_candidate
+             BEFORE INSERT ON billing_import_candidates
+             BEGIN SELECT RAISE(ABORT, 'forced candidate failure'); END;",
+        ).unwrap();
+
+        assert!(migrate_legacy_subscription_snapshots(&db, 2).is_err());
+        let bills = db.host_bills_for_period(&month).unwrap();
+        assert!(bills.iter().any(|(_host, provider, _basis, amount, _currency)| {
+            provider == "minimax" && *amount == 11_400
+        }), "failed migration must roll back the legacy-bill revoke: {bills:?}");
+        assert!(db.pending_billing_import_candidates().unwrap().is_empty());
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

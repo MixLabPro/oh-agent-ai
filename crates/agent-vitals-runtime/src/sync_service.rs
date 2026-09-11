@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_sync_migrates_legacy_subscription_snapshot_without_cli_step() {
+    fn normal_sync_surfaces_legacy_subscription_as_pending_candidate() {
         with_isolated_home(|_home| {
             let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
             let db = agent_vitals_data::authority::AuthorityDb::open(
@@ -494,14 +494,14 @@ mod tests {
             drop(db);
 
             sync_facts(&data).unwrap();
-            let migrated = agent_vitals_data::authority::AuthorityDb::open(
+            let candidates = agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(&data),
                 crate::sql_sync::now_ms(),
-            ).unwrap().host_bills_for_period(&month).unwrap();
-            assert!(migrated.iter().any(|(host, provider, basis, amount, currency)| {
+            ).unwrap().pending_billing_import_candidates().unwrap();
+            assert!(candidates.iter().any(|(_id, host, provider, currency, amount, start, status)| {
                 host == "claude-code" && provider == "minimax"
-                    && basis == "fixed_subscription" && *amount == 11_400 && currency == "CNY"
-            }), "normal sync must migrate old local declaration: {migrated:?}");
+                    && *amount == 11_400 && currency == "CNY" && start == &month && status == "pending"
+            }), "normal sync must surface an unconfirmed legacy declaration: {candidates:?}");
         });
     }
 

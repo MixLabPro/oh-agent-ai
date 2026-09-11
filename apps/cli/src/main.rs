@@ -2745,14 +2745,14 @@ session_store={store} fold={fold}"
             }
         } // end `if *with_legacy_ledger`
         // v1.0：旧版公共价表曾错误携带个人订阅。先从升级前已经落库的
-        // 快照迁移到本地 host_bills，再保存新公共价卡；迁移可重复执行，已有
-        // 用户账单不会被覆盖。
+        // 快照迁移为本地待确认候选，再保存新公共价卡；迁移可重复执行，已有
+        // 用户账单不会被覆盖或被当作自动确认。
         match agent_vitals_runtime::sql_sync::migrate_legacy_subscription_snapshots(
             &db,
             agent_vitals_runtime::sql_sync::now_ms(),
         ) {
             Ok(0) => {}
-            Ok(rows) => println!("  legacy subscriptions: {rows} local host bills imported"),
+            Ok(rows) => println!("  legacy subscriptions: {rows} pending confirmation candidates found"),
             Err(e) => eprintln!("data-migrate warning (legacy subscriptions): {e}"),
         }
           // Phase 2.8：落当前价格快照（§5.3：历史查询按记录的 pricing version 重放）。
