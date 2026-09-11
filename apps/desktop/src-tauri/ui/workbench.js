@@ -916,6 +916,41 @@ async function renderHostBills(period) {
   const status = document.getElementById("ov-bill-status");
   const save = document.getElementById("ov-bill-save");
   if (!existing || !status || !save || save.dataset.bound === "1") return;
+  const showBills = (report) => {
+    existing.textContent = "";
+    const bills = report && report.status === "ok" ? (report.bills || []) : [];
+    if (!bills.length) return;
+    const title = document.createElement("div");
+    title.className = "muted";
+    title.textContent = "当前账期账单记录：";
+    existing.appendChild(title);
+    for (const bill of bills) {
+      const row = document.createElement("div");
+      row.className = "billing-review-row";
+      const detail = document.createElement("div");
+      detail.textContent = bill.host + " · " + bill.provider_id + " · " +
+        bill.billing_basis + " · " + bill.amount_minor + " " + bill.currency;
+      const remove = document.createElement("button");
+      remove.className = "btn secondary";
+      remove.textContent = "删除记录";
+      remove.onclick = async () => {
+        remove.disabled = true;
+        try {
+          await invoke("delete_host_bill", { billId: bill.bill_id });
+          const refreshed = await invoke("host_bills_for_period", {
+            billingPeriod: document.getElementById("ov-bill-period").value.trim(),
+          });
+          showBills(refreshed);
+        } catch (e) {
+          remove.disabled = false;
+          status.hidden = false;
+          status.textContent = "删除失败：" + errText(e);
+        }
+      };
+      row.append(detail, remove);
+      existing.appendChild(row);
+    }
+  };
   document.getElementById("ov-bill-period").value = period;
   save.dataset.bound = "1";
   save.onclick = async () => {
@@ -939,9 +974,7 @@ async function renderHostBills(period) {
       });
       status.textContent = "账单已保存；它与订阅合同分开，不会改变已观测 tokens。";
       const report = await invoke("host_bills_for_period", { billingPeriod });
-      existing.textContent = report.status === "ok"
-        ? "当前账期已保存 " + (report.bills || []).length + " 条账单记录。"
-        : "账单已保存，但读取列表暂不可用。";
+      showBills(report);
     } catch (e) {
       status.textContent = "保存失败：" + errText(e);
     } finally {
@@ -950,9 +983,7 @@ async function renderHostBills(period) {
   };
   try {
     const report = await invoke("host_bills_for_period", { billingPeriod: period });
-    if (report.status === "ok" && (report.bills || []).length) {
-      existing.textContent = "当前账期已保存 " + report.bills.length + " 条账单记录。";
-    }
+    showBills(report);
   } catch (_) { /* 账单是增强入口，不遮蔽总览 */ }
 }
 

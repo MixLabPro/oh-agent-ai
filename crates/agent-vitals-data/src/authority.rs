@@ -44,6 +44,7 @@ pub fn default_authority_path(data_home: &Path) -> PathBuf {
 /// amount_minor, currency)`。`amount_minor` 是最小货币单位整数——金额从不
 /// 以浮点入库（spec §5.3），折算在展示层。
 pub type HostBillRow = (String, String, String, i64, String);
+pub type HostBillDetailRow = (String, String, String, String, i64, String, String);
 
 /// 用户计费声明的一行：关系本身和付款/账单分开建模。金额可未知，不能以
 /// `host_bills` 的实付金额或公开价卡来填充。
@@ -1751,6 +1752,22 @@ impl AuthorityDb {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 带稳定 bill_id/evidence 的账单明细，供设置页更正或 soft-delete；
+    /// 汇总仍使用上面的五列投影，避免把内部 id 扩散到旧 DTO。
+    pub fn host_bill_details_for_period(
+        &self, billing_period: &str,
+    ) -> Result<Vec<HostBillDetailRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT bill_id, host, provider_id, billing_basis, amount_minor, currency, evidence_ref
+             FROM host_bills WHERE billing_period = ?1 AND deleted_at_ms IS NULL
+             ORDER BY host, provider_id, billing_basis, bill_id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![billing_period], |r| Ok((
+            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
+        )))?.collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 

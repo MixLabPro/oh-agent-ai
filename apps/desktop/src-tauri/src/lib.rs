@@ -1473,12 +1473,25 @@ fn host_bills_for_period(billing_period: String) -> Value {
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
         return serde_json::json!({ "status": "unavailable", "bills": [] });
     };
-    match db.host_bills_for_period(&billing_period) {
-        Ok(rows) => serde_json::json!({ "status": "ok", "bills": rows.into_iter().map(|(host, provider_id, billing_basis, amount_minor, currency)| {
-            serde_json::json!({ "host": host, "provider_id": provider_id, "billing_basis": billing_basis, "amount_minor": amount_minor, "currency": currency })
+    match db.host_bill_details_for_period(&billing_period) {
+        Ok(rows) => serde_json::json!({ "status": "ok", "bills": rows.into_iter().map(|(bill_id, host, provider_id, billing_basis, amount_minor, currency, evidence_ref)| {
+            serde_json::json!({ "bill_id": bill_id, "host": host, "provider_id": provider_id, "billing_basis": billing_basis, "amount_minor": amount_minor, "currency": currency, "evidence_ref": evidence_ref })
         }).collect::<Vec<_>>() }),
         Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string(), "bills": [] }),
     }
+}
+
+#[tauri::command]
+fn delete_host_bill(bill_id: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let deleted = db.host_bill_delete(
+        &bill_id, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "deleted", "bill_id": bill_id, "deleted": deleted }))
 }
 
 /// 声明保存后创建重算任务；这里只入队，不在 IPC 调用线程执行重算。
@@ -1877,6 +1890,7 @@ pub fn run() {
             billing_declaration_impact_preview,
             save_host_bill,
             host_bills_for_period,
+            delete_host_bill,
             enqueue_billing_recalculation,
             retry_billing_recalculation,
             billing_recalculation_job_status,
