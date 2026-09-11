@@ -38,6 +38,15 @@
           <button class="btn secondary" id="ov-first-run-pause">暂停解析</button>
         </div>
       </section>
+      <section class="no-records panel" id="ov-no-records" hidden aria-live="polite">
+        <div class="panel-title">尚未发现 AI 会话</div>
+        <div class="muted">还没有在标准本地位置发现可读取的支持工具记录。开始一次受支持工具会话后会自动再次发现；不会生成测试调用或费用。</div>
+        <div class="billing-form-actions">
+          <button class="btn secondary" id="ov-no-records-sources">查看数据源</button>
+          <button class="btn secondary" id="ov-no-records-sample">查看样例</button>
+        </div>
+        <div class="billing-preview" id="ov-no-records-sample-content" hidden></div>
+      </section>
       <section class="billing-prompt" id="ov-billing-prompt" hidden aria-live="polite">
         <div>
           <strong>有套餐信息待你确认</strong>

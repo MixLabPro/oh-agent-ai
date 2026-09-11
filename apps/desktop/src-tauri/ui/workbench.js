@@ -449,6 +449,7 @@ async function renderOverview() {
   }
   syncDot(ov.sync);
   renderFirstRunState(ov.sync);
+  renderNoRecordsState(ov.sync);
 
   // KPI 行/双轨账/决策卡的数据源 = 冻结 Data Query DTO（Stage D）；DSH 高峰
   // 口径的今日/本月钱已在 by_provider（metered_actual），原 read_overview 的
@@ -676,6 +677,40 @@ function renderFirstRunState(sync) {
       pause.disabled = false;
       console.warn("暂停解析失败", e);
     }
+  };
+}
+
+async function renderNoRecordsState(sync) {
+  const panel = document.getElementById("ov-no-records");
+  const sourcesButton = document.getElementById("ov-no-records-sources");
+  const sampleButton = document.getElementById("ov-no-records-sample");
+  const sample = document.getElementById("ov-no-records-sample-content");
+  if (!panel || !sourcesButton || !sampleButton || !sample) return;
+  panel.hidden = true;
+  if (!sync || !sync.ok || sync.stage === "never" || sync.stage === "paused") return;
+  try {
+    const report = await invoke("data_source_status");
+    if (!report || report.status !== "ok") return;
+    const sources = Array.isArray(report.sources) ? report.sources : [];
+    const hasRecords = sources.some((source) => {
+      const scan = source.scan || {};
+      const imported = source.import_scope || {};
+      return Number(scan.source_count || 0) > 0 || Number(imported.sessions || 0) > 0;
+    });
+    panel.hidden = hasRecords;
+  } catch (_) {
+    // 数据源状态读失败不是“无记录”证据，保持隐藏而非制造空态。
+    return;
+  }
+  if (sourcesButton.dataset.bound === "1") return;
+  sourcesButton.dataset.bound = "1";
+  sourcesButton.onclick = () => switchTab("sources");
+  sampleButton.onclick = () => {
+    sample.hidden = !sample.hidden;
+    sample.textContent = sample.hidden
+      ? ""
+      : "演示样例（不会写入你的数据）：今天 126K tokens · 名义成本 ≈¥4.20 · 数据源：示例。";
+    sampleButton.textContent = sample.hidden ? "查看样例" : "收起样例";
   };
 }
 
