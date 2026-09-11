@@ -1043,6 +1043,19 @@ impl AuthorityDb {
             .optional()?)
     }
 
+    /// 所有历史价格快照，按捕获时间升序。迁移读取旧版嵌入价表中的用户声明
+    /// 时使用；调用方必须把提取出的个人数据写入本地表，不能重新塞回公共目录。
+    pub fn pricing_snapshot_payloads(&self) -> Result<Vec<(String, String)>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pricing_version, payload_json FROM pricing_snapshots
+             ORDER BY captured_at_ms ASC, pricing_version ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// `captured_at_ms` 最新的快照 `(version, captured_at_ms)`，或 None（从未落）。
     pub fn pricing_snapshot_latest(&self) -> Result<Option<(String, i64)>, AuthorityError> {
         Ok(self

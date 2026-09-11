@@ -437,12 +437,12 @@ pub fn render_codex_cost(out: &Value) -> String {
     {
         all_tokens += tt.get(*f).and_then(|x| x.as_i64()).unwrap_or(0);
     }
-    // 订阅套餐（plan 存在）时，per-token 美元是「按量标价」不是账单——账单 = 套餐
-    // 固定费。诚实标注，别让用户把标价当成实际支出。
+    // 订阅套餐（plan 存在）时，per-token 美元是「按量标价」不是账单；套餐
+    // 缺证据时则是「按量估算，待确认」。两者都不能让用户误读为实际支出。
     let label = if plan_line.is_some() {
         "total cost (按量标价)"
     } else {
-        "total cost"
+        "total cost (按量估算，待确认)"
     };
     let mut line = format!("{label}: {}", format_usd(total));
     if all_tokens > 0 {
@@ -1029,7 +1029,7 @@ mod tests {
             "per_model": {}, "plan": null,
         });
         let text2 = render_codex_cost(&out2);
-        assert!(text2.contains("total cost: $1"));
+        assert!(text2.contains("total cost (按量估算，待确认): $1"));
         assert!(!text2.contains("按量标价"));
     }
 }

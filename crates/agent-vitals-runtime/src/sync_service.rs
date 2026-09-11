@@ -307,6 +307,15 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         report.total_duplicate += r.duplicate;
         report.hosts.push(r);
     }
+    // v1.0 升级闭环：旧个人订阅若存在于历史价卡快照，先落为本地 host_bills。
+    // 正常桌面同步也会经过这里，用户无需手动执行 CLI 迁移；失败只警告，不能
+    // 阻断三宿主事实导入。
+    if let Err(e) = crate::sql_sync::migrate_legacy_subscription_snapshots(
+        &authority,
+        crate::sql_sync::now_ms(),
+    ) {
+        eprintln!("sync-facts warning (legacy subscriptions): {e}");
+    }
     // Phase 2.8：落当前价格快照（§5.3）。幂等——价卡不变则无新版本。
     if let Err(e) = crate::sql_sync::snapshot_current_pricing(&authority) {
         eprintln!("sync-facts warning (pricing snapshot): {e}");
@@ -463,6 +472,36 @@ mod tests {
             assert_eq!(cl3.files_synced, 1, "变化文件重新处理");
             assert_eq!(cl3.appended, 1, "只有新行是新事实");
             assert_eq!(cl3.duplicate, 2, "旧行 fact_id 相同，幂等吞掉");
+        });
+    }
+
+    #[test]
+    fn normal_sync_migrates_legacy_subscription_snapshot_without_cli_step() {
+        with_isolated_home(|_home| {
+            let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&data),
+                crate::sql_sync::now_ms(),
+            ).unwrap();
+            let month = crate::clock::current_month_beijing();
+            let payload = serde_json::json!({"pricing": {"catalog_2026_09": {
+                "subscriptions": {"legacy": {
+                    "provider": "minimax", "currency": "CNY", "amount_per_month": 114.0,
+                    "reported_at": format!("{month}-01")
+                }}
+            }}}).to_string();
+            db.pricing_snapshot_put("legacy-subscription-for-sync", "legacy", &payload, 1).unwrap();
+            drop(db);
+
+            sync_facts(&data).unwrap();
+            let migrated = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&data),
+                crate::sql_sync::now_ms(),
+            ).unwrap().host_bills_for_period(&month).unwrap();
+            assert!(migrated.iter().any(|(host, provider, basis, amount, currency)| {
+                host == "claude-code" && provider == "minimax"
+                    && basis == "fixed_subscription" && *amount == 11_400 && currency == "CNY"
+            }), "normal sync must migrate old local declaration: {migrated:?}");
         });
     }
 

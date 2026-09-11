@@ -73,6 +73,104 @@ pub fn snapshot_current_pricing(db: &AuthorityDb) -> Result<bool, AuthorityError
     })
 }
 
+/// 将升级前价格快照中错误混入的个人订阅声明，迁移为本地、可编辑的
+/// `host_bills` 固定订阅行。公共目录本身绝不回写这些数据。
+///
+/// 旧版把 `catalog_2026_09.subscriptions` 编进 `pricing.json`；升级后只有已
+/// 落库的历史快照还保留该证据。本迁移扫描全部快照，按声明的账期起点补至当月。
+/// 同月同 provider 已有固定订阅账单（例如用户已在新版手工录入）时跳过，因而
+/// 可安全重复执行且不会覆盖用户的本地更正。
+pub fn migrate_legacy_subscription_snapshots(
+    db: &AuthorityDb,
+    now_ms: i64,
+) -> Result<usize, AuthorityError> {
+    let through = crate::clock::current_month_beijing();
+    let mut imported = 0usize;
+    for (_version, payload) in db.pricing_snapshot_payloads()? {
+        let Ok(root) = serde_json::from_str::<Value>(&payload) else { continue };
+        let pricing = root.get("pricing").unwrap_or(&root);
+        let Some(subscriptions) = pricing
+            .pointer("/catalog_2026_09/subscriptions")
+            .and_then(Value::as_object)
+        else { continue };
+        for declaration in subscriptions.values() {
+            let (Some(provider), Some(currency), Some(amount), Some(start)) = (
+                declaration.get("provider").and_then(Value::as_str),
+                declaration.get("currency").and_then(Value::as_str),
+                declaration.get("amount_per_month").and_then(Value::as_f64),
+                declaration
+                    .get("billing_period_start")
+                    .or_else(|| declaration.get("reported_at"))
+                    .and_then(Value::as_str),
+            ) else { continue };
+            let Some(first_month) = valid_month_prefix(start) else { continue };
+            let Some(amount_minor) = amount_to_minor(amount) else { continue };
+            for period in months_inclusive(&first_month, &through) {
+                let existing = db.host_bills_for_period(&period)?;
+                if existing.iter().any(|(_host, p, basis, _amount, _currency)| {
+                    p == provider && basis == "fixed_subscription"
+                }) {
+                    continue;
+                }
+                let host = legacy_subscription_host(provider);
+                let bill_id = format!("legacy-pricing:{host}:{provider}:{period}:fixed_subscription");
+                db.host_bill_put(
+                    &bill_id,
+                    host,
+                    provider,
+                    &period,
+                    "fixed_subscription",
+                    amount_minor,
+                    currency,
+                    "legacy-pricing-catalog",
+                    now_ms,
+                )?;
+                imported += 1;
+            }
+        }
+    }
+    Ok(imported)
+}
+
+fn legacy_subscription_host(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" | "minimax" | "zhipu-glm" => "claude-code",
+        _ => "unattributed",
+    }
+}
+
+fn valid_month_prefix(value: &str) -> Option<String> {
+    let month: String = value.chars().take(7).collect();
+    let bytes = month.as_bytes();
+    (bytes.len() == 7
+        && bytes[4] == b'-'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..].iter().all(u8::is_ascii_digit)
+        && matches!(month[5..].parse::<u8>().ok(), Some(1..=12)))
+        .then_some(month)
+}
+
+fn months_inclusive(first: &str, last: &str) -> Vec<String> {
+    let (Ok(mut year), Ok(mut month), Some(last_month)) = (
+        first[..4].parse::<i32>(),
+        first[5..].parse::<u8>(),
+        valid_month_prefix(last),
+    ) else { return Vec::new() };
+    let mut out = Vec::new();
+    loop {
+        let period = format!("{year:04}-{month:02}");
+        if period > last_month { break }
+        out.push(period);
+        if month == 12 { year += 1; month = 1; } else { month += 1; }
+    }
+    out
+}
+
+fn amount_to_minor(amount: f64) -> Option<i64> {
+    (amount.is_finite() && amount >= 0.0)
+        .then(|| (amount * 100.0).round() as i64)
+}
+
 /// 保留窗月数的 fencepost 常量：spec「保留最近 13 个自然月（含当月）」→
 /// cutoff = current − 12。**legacy（enforce_retention）与 authority
 ///（retention_usage_facts）必须同值**——13 vs 12 的窗差会让 §6.3 对账在
@@ -1250,6 +1348,44 @@ mod tests {
             .unwrap();
         assert_eq!(issue.0, fact_id);
         assert_eq!(issue.1, "conflicting_route_evidence");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn legacy_subscription_snapshot_migrates_to_local_host_bill_idempotently() {
+        let home = tmp_home("legacy-subscription");
+        let db = open_db(&home);
+        let month = crate::clock::current_month_beijing();
+        let payload = serde_json::json!({"pricing": {"catalog_2026_09": {
+            "subscriptions": {
+                "legacy-minimax": {
+                    "provider": "minimax", "currency": "CNY", "amount_per_month": 114.0,
+                    "reported_at": format!("{month}-01")
+                },
+                "legacy-glm": {
+                    "provider": "zhipu-glm", "currency": "CNY", "amount_per_month": 118.0,
+                    "reported_at": format!("{month}-01")
+                }
+            }
+        }}}).to_string();
+        db.pricing_snapshot_put("legacy-user-pricing", "legacy", &payload, 1).unwrap();
+        db.host_bill_put(
+            "user-glm", "claude-code", "zhipu-glm", &month, "fixed_subscription",
+            9_999, "CNY", "user-entry", 1,
+        ).unwrap();
+
+        assert_eq!(migrate_legacy_subscription_snapshots(&db, 2).unwrap(), 1);
+        let rows = db.host_bills_for_period(&month).unwrap();
+        assert!(rows.contains(&(
+            "claude-code".to_string(), "minimax".to_string(),
+            "fixed_subscription".to_string(), 11_400, "CNY".to_string(),
+        )));
+        assert!(rows.contains(&(
+            "claude-code".to_string(), "zhipu-glm".to_string(),
+            "fixed_subscription".to_string(), 9_999, "CNY".to_string(),
+        )), "manual local bill must not be overwritten: {rows:?}");
+        assert_eq!(migrate_legacy_subscription_snapshots(&db, 3).unwrap(), 0);
+        assert_eq!(db.host_bills_for_period(&month).unwrap(), rows);
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

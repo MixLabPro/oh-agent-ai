@@ -2744,6 +2744,17 @@ session_store={store} fold={fold}"
                 }
             }
         } // end `if *with_legacy_ledger`
+        // v1.0：旧版公共价表曾错误携带个人订阅。先从升级前已经落库的
+        // 快照迁移到本地 host_bills，再保存新公共价卡；迁移可重复执行，已有
+        // 用户账单不会被覆盖。
+        match agent_vitals_runtime::sql_sync::migrate_legacy_subscription_snapshots(
+            &db,
+            agent_vitals_runtime::sql_sync::now_ms(),
+        ) {
+            Ok(0) => {}
+            Ok(rows) => println!("  legacy subscriptions: {rows} local host bills imported"),
+            Err(e) => eprintln!("data-migrate warning (legacy subscriptions): {e}"),
+        }
           // Phase 2.8：落当前价格快照（§5.3：历史查询按记录的 pricing version 重放）。
         match agent_vitals_runtime::sql_sync::snapshot_current_pricing(&db) {
             Ok(true) => println!("  pricing snapshot: new version captured"),
@@ -4428,8 +4439,8 @@ mod codex_sql_tests {
         // 缺套餐证据仍要标明按量估算，而非裸「total cost」。
         let text = agent_vitals_runtime::sessions::codex_cost::render_codex_cost(&report);
         assert!(
-            text.contains("按量标价"),
-            "缺套餐证据的 USD 总额必须标「按量标价」：{text}"
+            text.contains("按量估算，待确认"),
+            "缺套餐证据的 USD 总额必须标「按量估算，待确认」：{text}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

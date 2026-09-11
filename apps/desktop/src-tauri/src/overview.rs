@@ -490,28 +490,24 @@ fn fx_estimate(pricing: &Value) -> Option<Value> {
     }))
 }
 
-/// 本月已生效的 **CNY 订阅月费之和**（`pricing.json::catalog_2026_09.
-/// subscriptions` 里 `currency == "CNY"` 且账期起点 ≤ 当前北京月的条目）。
-/// 纯 `pricing.json` 计算，不碰 SQL——订阅是声明数据不是派生数据。月份过滤
-/// 与 `summary::apply_subscription_fees` 逐字节同款（`chars().take(7)` +
-/// `month < start_month` 跳过）。零条目 → None（「没有订阅」≠「¥0」，托盘
-/// 整行不显示）。PM 决策 2026-09-07：订阅**单列**，不进按量预算分子。
-fn monthly_cny_subscriptions(pricing: &Value, month: &str) -> Option<f64> {
-    let mut total = 0.0;
-    for (_provider, currency, amount, period_start) in
-        agent_vitals_domain::cost::declared_subscriptions(pricing)
-    {
-        if currency != "CNY" {
-            continue;
-        }
-        let Some(start) = period_start.as_deref() else { continue };
-        let start_month: String = start.chars().take(7).collect();
-        if month < start_month.as_str() {
-            continue;
-        }
-        total += amount;
-    }
-    (total > 0.0).then_some(total)
+/// 本月本地账单中的 **CNY 固定订阅月费之和**。用户订阅不属于公共价目；
+/// `host_bills` 是唯一展示源。库不可用或无订阅时返回 None（不显示“¥0”）。
+fn monthly_cny_subscriptions(data_home: &Path, month: &str) -> Option<f64> {
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(data_home),
+        agent_vitals_runtime::sql_sync::now_ms(),
+    )
+    .ok()?;
+    let total: i64 = db
+        .host_bills_for_period(month)
+        .ok()?
+        .into_iter()
+        .filter(|(_host, _provider, basis, _minor, currency)| {
+            basis == "fixed_subscription" && currency == "CNY"
+        })
+        .map(|(_host, _provider, _basis, minor, _currency)| minor)
+        .sum();
+    (total > 0).then_some(total as f64 / 100.0)
 }
 
 /// 预算卡：从 SQL 权威库**实时算**（`runtime::budget::evaluate_alert_from_sql`），
@@ -662,7 +658,7 @@ fn read_overview_at(dh: &Path) -> Overview {
         claude_uncovered_month,
         month_savings,
         fx: fx_estimate(&pricing),
-        subscription_cny_month: monthly_cny_subscriptions(&pricing, &cur_month),
+        subscription_cny_month: monthly_cny_subscriptions(dh, &cur_month),
     }
 }
 
@@ -1118,18 +1114,30 @@ mod tests {
         assert!(fx_estimate(&json!({"fx_estimate": {"as_of": "x"}})).is_none(), "缺 USD_CNY → None");
     }
 
-    /// 本月订阅总额：真机 pricing.json 声明了 CNY 订阅（GLM/MiniMax）→ 当前月
-    /// 有正数；账期起点之前的月份 → None（订阅还没开始，不摊）。月份过滤与
-    /// `summary::apply_subscription_fees` 同款。
+    /// 本月订阅总额只读本地 host_bills；公共 pricing.json 不参与。不同币种
+    /// 不折算相加，非本月与非订阅账单不进入托盘行。
     #[test]
-    fn monthly_cny_subscriptions_respects_billing_period_start() {
-        let p = load_pricing();
-        let now = monthly_cny_subscriptions(&p, &current_month_beijing());
-        assert!(now.is_some_and(|v| v > 0.0), "当前月应有已生效的 CNY 订阅，got {now:?}");
-        // 远古月份：所有订阅账期都还没开始 → 不摊。
-        assert_eq!(monthly_cny_subscriptions(&p, "2000-01"), None);
-        // 无 subscriptions 节 → None（不 panic）。
-        assert_eq!(monthly_cny_subscriptions(&json!({}), "2026-09"), None);
+    fn monthly_cny_subscriptions_reads_local_host_bills() {
+        let tmp = std::env::temp_dir().join("sv-menubar-local-subscriptions-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db = seed_overview_db(&tmp);
+        let month = current_month_beijing();
+        db.host_bill_put(
+            "sub-cny", "claude-code", "minimax", &month, "fixed_subscription",
+            11_400, "CNY", "test", 1,
+        ).unwrap();
+        db.host_bill_put(
+            "sub-usd", "claude-code", "anthropic", &month, "fixed_subscription",
+            2_000, "USD", "test", 1,
+        ).unwrap();
+        db.host_bill_put(
+            "api-cny", "dsh", "deepseek", &month, "metered_actual",
+            500, "CNY", "test", 1,
+        ).unwrap();
+        assert_eq!(monthly_cny_subscriptions(&tmp, &month), Some(114.0));
+        assert_eq!(monthly_cny_subscriptions(&tmp, "2000-01"), None);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// claude_estimates 纯函数：flat 直图日（rebuild_days 真机形状，含全零的
