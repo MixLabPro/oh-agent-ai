@@ -310,7 +310,8 @@ calendar/quota 四个命令——**任何新增的 codex 数据面必须走
 ### v0.9.1 数据面维护（SQL 权威库操作面；Phase 4.3 后）
 
 - **布局**：`<data_home>/facts/<host>.jsonl`（append-only 权威源，宿主封闭
-  词表 claude-code/codex/dsh）+ `<data_home>/agent-vitals.sqlite3`（v0.9.1
+  词表 claude-code/codex/dsh/workbuddy——E4b 起四宿主，见 docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5；workbuddy 金额面恒 unresolved）
+  + `<data_home>/agent-vitals.sqlite3`（v0.9.1
   SQL 权威库——所有读经它）。**权威库不自愈**（与已退役的旧 `index.sqlite3`
   投影的本质区别）：`PRAGMA integrity_check` 失败 → `data-status` 报
   `health: critical`；恢复 = `rm agent-vitals.sqlite3* && agent-vitals
@@ -517,8 +518,11 @@ through; **no consumer may grow a second inline copy** (both packaging allow-lis
 `.github/workflows/package-clawhub.yml` + `tests/test_clawhub_packaging.py` — and the
 `test_classification.py` agent-family sets pin the module list verbatim). The emit is
 in-memory + read-only diagnostic only — nothing is written to disk yet (see
-`docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §7). WorkBuddy is deliberately excluded from
-this whole line of work (user decision 2026-09-03).
+`docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §7). E4b superseded the "deliberately
+excluded" decision (2026-09-11, docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5): WorkBuddy
+joined FACT_HOSTS and the sync pipeline — facts carry `provider_id: null`
+(unresolved money by design, §2.1); the CLI `--write` and `sync-facts` are Rust-only,
+the Python mirror stays read-only diagnostic.
 
 **"Which events carry usage" is one predicate, and it was duplicated twelve times.** It
 lives in `usage.rs::usage_sample` (the authority), mirrored in `usage.py::_usage_sample`,

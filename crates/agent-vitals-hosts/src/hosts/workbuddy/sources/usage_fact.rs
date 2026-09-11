@@ -1,5 +1,11 @@
-//! WorkBuddy traces → `UsageFact`（spec §9E.5 E4a；分期同 v0.7 三宿主先例：内存
-//! emit + 只读诊断，不动 `FACT_HOSTS`、不写盘——E4b 再接同步管线）。
+//! WorkBuddy traces → `UsageFact`（spec §9E.5 E4a/E4b）。两个入口：
+//! - `workbuddy_traces_to_usage_facts(root)`——全量（CLI `workbuddy-usage-facts`
+//!   的只读诊断面，Python 逐字节镜像）；
+//! - `workbuddy_trace_file_to_usage_facts(path)`——单文件（E4b `sync_service` 的
+//!   例行 ingest 面：一个 trace 文件 = 一个 source_id，dirty 才喂）。
+//!
+//! 两者共用 `emit_trace`：全量 = 按路径序对每个文件调单文件入口再拼接（测试钉
+//! 这条等式，两侧都钉）。
 //!
 //! **源**：generation span 解码后的 `usage`（OpenAI 兼容格式）+ 逐调用 `model`——
 //! E1 的读取层已经把二次编码解开、只留 `usages`/`model`。**每个 generation span 恰好
@@ -30,7 +36,9 @@ use agent_vitals_domain::usage_fact::build_usage_fact;
 use agent_vitals_provider::resolve_billing_attribution;
 use serde_json::{json, Map, Value};
 
-use super::traces::{read_workbuddy_traces, SpanSummary, TraceSummary};
+use super::traces::{
+    read_workbuddy_trace_file, read_workbuddy_traces, SpanSummary, TraceSummary,
+};
 
 const HOST: &str = "workbuddy";
 const OBSERVATION_KIND: &str = "assistant-usage";
@@ -169,6 +177,27 @@ pub fn workbuddy_traces_to_usage_facts(
     for tr in all {
         emit_trace(tr, machine_namespace, source_profile, &mut out);
     }
+    Ok(out)
+}
+
+/// 单个 trace 文件 → `UsageFactEmitResult`（E4b 同步管线的 emit 面）。文件读不了 /
+/// 不是 trace 形状 → Err（与 claude/dsh 的逐文件 emitter 同款：sync 把它记进该文件
+/// 的 errors、不写指纹、下次重试）。`malformed` 恒 0——单文件路径上「坏文件」就是
+/// Err，不是计数。
+pub fn workbuddy_trace_file_to_usage_facts(
+    path: &Path,
+    machine_namespace: &str,
+    source_profile: &str,
+) -> Result<UsageFactEmitResult, String> {
+    let tr = read_workbuddy_trace_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut out = UsageFactEmitResult {
+        facts: Vec::new(),
+        attempts: HashMap::new(),
+        total_generation_spans: 0,
+        skip_rows: 0,
+        malformed: 0,
+    };
+    emit_trace(&tr, machine_namespace, source_profile, &mut out);
     Ok(out)
 }
 

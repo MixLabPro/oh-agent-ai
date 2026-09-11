@@ -725,14 +725,32 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       证据、Rust 没读——`pricing_basis` route-observed vs metered_estimate）、Codex
       `api_equivalent` 计费档 2 条、data-status health 1 条——均为 main 的 v0.11/v0.12
       provider 工作遗留，与 `verify-workbench-traces.mjs` 同类。
-- [ ] **E4b · 进封闭词表与同步管线**
+- [x] **E4b · 进封闭词表与同步管线**
       `FACT_HOSTS` / `TRACE_HOSTS` / `reimport_verify::HOSTS` / `WIRED_HOSTS` /
-      `sync_service::batches` 五处 +1；sync 的 dirty-file 枚举 = traces/*/trace_*.json
-      （每文件一个 source_id，mtime 指纹天然逐 trace 增量——纪律 7 的索引由此免费得到）；
-      `data-status` / `data-reimport-verify` 认 workbuddy。**金额面保持 excluded**（§5：
-      unresolved 事实进 `unpriced_tokens` 不进 by_host/by_provider）；`tokens_by_host`
-      是否含 workbuddy 由本项实测后定（真桶非零，不再是 §7.2 的「恒 0 冒充」）。
-      **本项之后 §7.2 路径 1 自动成立**：会话进统一面、token 是真的。
+      `sync_service::batches` 全部 4→4（`reimport_verify::HOSTS` 复用 `FACT_HOSTS`
+      作 `const HOSTS = crate::ingest_service::FACT_HOSTS`，不再单开一份）；sync 的
+      dirty-file 枚举 = `workbuddy_trace_files(root)`（locate 面），每文件一个
+      source_id、`(size, mtime)` 指纹增量——纪律 7 的索引由 `source_files` 表免费
+      得到；无 sessionId 的 trace 照落指纹（本轮已处理），不会每 tick 重读 686MB。
+      **tokens_by_host 含 workbuddy，由 SQL `host_window_tokens` 直读四桶真值**（非
+      §7.2 的「恒 0 冒充」）；`data-status`（facts/sources/covered_from/to，整宿主
+      unpriced——裸模型名不许去撞 DSH 卡）/ `data-unresolved`（`workbuddy/unknown`
+      逐模型 billing-route-unknown）/ `data-reimport-verify` / `workbuddy-usage-facts
+      --write`（落 `<data_home>/facts/workbuddy.jsonl`）全部认 workbuddy。
+      **金额面保持 excluded**：facts 一律 `provider_id: null`（§2.1 三轨不可判）→
+      `amounts_by_basis` 恒空 + `has_unresolved` + `billing-route-unknown`，不进
+      by_provider，`summable_total` 不含它；`by_host` 有行是为了「有数据可见」——
+      excluded_hosts 因此是空集（DTO 语义「已知存在但本版本不产出数据」不再适用）。
+      summary 全量接线的代价实测：`coverage 4/4`、`contract_violations` 空（单个
+      WIRED_HOSTS / `HOST_PROVIDER_MAP`（workbuddy → `&[]`）同表钉死）。
+      **统一会话面（§7.2 路径 1）自动成立且已实测**：`sessions list --host-kind
+      workbuddy` 返回 23 个会话、token 四桶真的（2026-08 月 2,407 会话事件、
+      452,073,138 tokens）、`cost_minor: null`；`sessions read` 200 条/页的事实
+      时间线；`trace-ref` 在 canonical_input 的 workbuddy 分派下产出
+      `{tool_call, model_invocation}` 节点图（真机会话 3,687 节点/1,705 模型节点，
+      edges 0 = WorkBuddy 无 parentId 链，诚实覆盖）。**实施注记**：真机 `sync-facts`
+      首轮 workbuddy 675 文件 3,865 事实 ~2s，二轮 675 skipped（指纹命中）；Python
+      侧镜像 locate/shape 拆分只为钉「逐文件拼接 == 全量」等式，不生成写路径。
 - [ ] **E5 · 成本词表回填**
       §5.2 用 processed tokens 重算名义单位成本（积分轨 vs 全量两栏都算，分母口径按
       归属会话）；`cost.tokens` 改名或加 note「last-call context size」；`cost` 块加

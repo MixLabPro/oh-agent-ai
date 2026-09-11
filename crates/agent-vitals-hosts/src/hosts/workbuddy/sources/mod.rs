@@ -46,6 +46,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agent_vitals_domain::contracts::evidence::CanonicalSession;
 use agent_vitals_domain::util::civil_from_unix_secs;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags};
@@ -902,6 +903,29 @@ fn cost_of(meta: &WorkbuddySessionMeta) -> Option<Value> {
 /// `cost_of` 的「整块 None」降级互斥——那条还要求 `used` 也缺失。
 fn is_unbilled_to_credits(meta: &WorkbuddySessionMeta) -> bool {
     meta.used.is_some() && credit_cents(meta.credit_json.as_deref()) == 0
+}
+
+/// 一个 WorkBuddy 会话的 `CanonicalSession`（E4b：`canonical_input` 的 workbuddy 分派
+/// 面，供 `trace-ref` / TraceGraph 用）。与 `workbuddy_session_audit_json` 同一条
+/// 读取路径（db + audit-log + traces 三面），只是不产报告——**WorkBuddy 不是单文件
+/// 会话**，源是整个 `~/.workbuddy/` 根，所以入口收 `home` 而不是文件路径。`None` 的
+/// 语义同审计：db 无行且 audit-log 无记录 → 会话不存在。
+pub fn workbuddy_canonical_session(home: &Path, session_id: &str) -> Option<CanonicalSession> {
+    let root = workbuddy_root(home);
+    let (db_sessions, db_usage) = read_workbuddy_db(&root);
+    let (recs_by_session, _file_of, _degraded) = read_workbuddy_audit_log(&root);
+    let db_rec = db_sessions.as_ref().and_then(|m| m.get(session_id));
+    let records = recs_by_session.get(session_id).cloned().unwrap_or_default();
+    if db_rec.is_none() && records.is_empty() {
+        return None;
+    }
+    let meta = workbuddy_session_meta(&root, session_id, db_rec, db_usage.as_ref());
+    let spans: Vec<Value> = if traces::workbuddy_traces_root(&root).is_dir() {
+        traces::session_spans_json(&traces::read_workbuddy_traces(&root), session_id)
+    } else {
+        Vec::new()
+    };
+    Some(build_workbuddy_evidence(records, session_id.to_string(), &meta, &spans).canonical)
 }
 
 /// `workbuddy-session` 单会话审计：coverage（§13 逐信号）+ SV601–614 findings + 成本

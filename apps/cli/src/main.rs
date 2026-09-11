@@ -456,8 +456,8 @@ enum Cmd {
     /// are left unresolved on purpose (platform-credit vs self-configured vs
     /// promo track is per-request and not observable locally, spec §2.1).
     /// Traces without a sessionId are counted as `unattributed`, never emitted.
-    /// In-memory, read-only diagnostic — no --write until E4b puts workbuddy in
-    /// FACT_HOSTS. Byte-for-byte mirror of Python `scan.py workbuddy-usage-facts --json -`.
+    /// Without --write this is an in-memory, read-only diagnostic, byte-for-byte
+    /// mirror of Python `scan.py workbuddy-usage-facts --json -`.
     WorkbuddyUsageFacts {
         /// WorkBuddy home directory (the one containing traces/)
         root: PathBuf,
@@ -471,6 +471,12 @@ enum Cmd {
         /// Write the UsageFact JSON to FILE; use - for stdout (default: human summary)
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
+        /// Persist facts through the runtime ingest service into
+        /// <data_home>/facts/workbuddy.jsonl (exactly-once by fact_id). Rust-only
+        /// by design — Python grows no writer; without this flag the output stays
+        /// byte-identical to the Python implementation. (E4b, spec §9E.5)
+        #[arg(long)]
+        write: bool,
     },
     /// Audit ONE or MORE Codex rollout JSONL files into per-`token_count`
     /// UsageFact rows (facts + attempts + coverage; v0.7 spec §3 candidate #3
@@ -2438,6 +2444,7 @@ session_store={store} fold={fold}"
         machine_namespace,
         source_profile,
         rows_json,
+        write,
     }) = &args.cmd
     {
         let ns = match machine_namespace {
@@ -2461,9 +2468,12 @@ session_store={store} fold={fold}"
                 std::process::exit(2);
             }
         };
+        let write_report = run_ingest(*write, "workbuddy-usage-facts", &result.facts);
         if let Some(path) = rows_json {
-            let payload =
-                agent_vitals_hosts::workbuddy_usage_fact::to_payload_value(&result, &ns, source_profile);
+            let payload = attach_write_report(
+                agent_vitals_hosts::workbuddy_usage_fact::to_payload_value(&result, &ns, source_profile),
+                &write_report,
+            );
             let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
             if path == &PathBuf::from("-") {
                 println!("{text}");
@@ -2478,6 +2488,7 @@ session_store={store} fold={fold}"
                 "{}",
                 agent_vitals_hosts::workbuddy_usage_fact::to_human_summary(&result, root, &ns, source_profile)
             );
+            print_ingest_summary(&write_report);
         }
         return;
     }
@@ -2686,7 +2697,7 @@ session_store={store} fold={fold}"
             updated: 0,
             conflicts: 0,
         };
-        for host in ["claude-code", "codex", "dsh"] {
+        for host in agent_vitals_runtime::ingest_service::FACT_HOSTS {
             let path = data_home.join("facts").join(format!("{host}.jsonl"));
             if !path.exists() {
                 continue;

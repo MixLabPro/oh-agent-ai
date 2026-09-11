@@ -17,8 +17,12 @@
 //! （Edit/Write 的 SV604/605 源）。响应正文、messages、命令输出一律丢弃。
 //!
 //! **全量读**：每次调用读全部文件（真机 675 文件 / 686MB，Python 2.0s，Rust 更快）。
-//! sessionId 在文件里、键序无保证，做不了廉价预筛；增量索引（mtime + 已见 traceId）
-//! 是 E4 同步路径的事，E1 不做。文件按路径字符串排序，输出 deterministic。
+//! sessionId 在文件里、键序无保证，做不了廉价预筛。文件按路径字符串排序，输出
+//! deterministic。**增量在同步管线那一层**（E4b）：`workbuddy_trace_files` 是
+//! locate 面、`read_workbuddy_trace_file` 是单文件 shape 面——`sync_service` 用
+//! 前者枚举、按 `(size, mtime)` 指纹只把 dirty 文件喂给后者，一个 trace 文件 =
+//! 一个 source_id，纪律 7 的「mtime + 已见 traceId」索引由 `source_files` 表免费
+//! 得到，本模块不另建索引。
 //!
 //! Python 镜像 `adapters/workbuddy_traces.py`，逐字节对齐。
 
@@ -218,15 +222,15 @@ fn shape_trace(path: &Path, doc: &Value) -> Result<TraceSummary, String> {
     })
 }
 
-/// 读 `<root>/traces/*/trace_*.json` 全部文件。目录缺失 → 空结果（存在性探测，
-/// 与 audit-log 同款）。文件按路径字符串排序（Python `sorted(..., key=str)` 同款）。
-pub fn read_workbuddy_traces(root: &Path) -> TracesRead {
+/// locate 面：`<root>/traces/*/trace_*.json` 全部文件，按路径字符串排序（Python
+/// `sorted(..., key=str)` 同款）。目录缺失 → 空 Vec。同步管线（E4b）的 dirty-file
+/// 枚举也是这一个函数——一个 trace 文件就是一个 source_id。
+pub fn workbuddy_trace_files(root: &Path) -> Vec<PathBuf> {
     let tdir = workbuddy_traces_root(root);
-    let mut out = TracesRead::default();
-    if !tdir.is_dir() {
-        return out;
-    }
     let mut files: Vec<PathBuf> = Vec::new();
+    if !tdir.is_dir() {
+        return files;
+    }
     if let Ok(rd) = std::fs::read_dir(&tdir) {
         for pid in rd.filter_map(Result::ok) {
             let p = pid.path();
@@ -245,23 +249,26 @@ pub fn read_workbuddy_traces(root: &Path) -> TracesRead {
         }
     }
     files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
-    for path in files {
+    files
+}
+
+/// shape 面：读一个 trace 文件。Err 的三种文案与 `TracesRead::degraded` 的原因串
+/// 同一词表（`unreadable` / `malformed: not JSON` / `malformed: no …`）——全量读
+/// 把它们收进 degraded，逐文件同步把它们当该文件的错误上呈并留待下次重试。
+pub fn read_workbuddy_trace_file(path: &Path) -> Result<TraceSummary, String> {
+    let bytes = std::fs::read(path).map_err(|_| "unreadable".to_string())?;
+    let doc: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "malformed: not JSON".to_string())?;
+    shape_trace(path, &doc)
+}
+
+/// 读 `<root>/traces/*/trace_*.json` 全部文件。目录缺失 → 空结果（存在性探测，
+/// 与 audit-log 同款）。= `workbuddy_trace_files` ∘ `read_workbuddy_trace_file`。
+pub fn read_workbuddy_traces(root: &Path) -> TracesRead {
+    let mut out = TracesRead::default();
+    for path in workbuddy_trace_files(root) {
         out.files += 1;
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(_) => {
-                out.degraded.push((path, "unreadable".to_string()));
-                continue;
-            }
-        };
-        let doc: Value = match serde_json::from_slice(&bytes) {
-            Ok(v) => v,
-            Err(_) => {
-                out.degraded.push((path, "malformed: not JSON".to_string()));
-                continue;
-            }
-        };
-        match shape_trace(&path, &doc) {
+        match read_workbuddy_trace_file(&path) {
             Ok(tr) => match tr.session_id.clone() {
                 Some(sid) => out.by_session.entry(sid).or_default().push(tr),
                 None => out.unattributed.push(tr),

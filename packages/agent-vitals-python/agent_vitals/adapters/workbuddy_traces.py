@@ -13,7 +13,10 @@ trace 进 `unattributed`（真实用量，不是另一类、不是损坏——�
 - 时间戳是 ISO 毫秒串，原样保留，归一化留给消费方（A2 字符串路径）。
 
 只提取、不保留正文（spec §4）：generation `toolOutput` 只取每项的 `model` 与 `usage`；
-function `toolInput` 只取 `file_path`。全量读（真机 686MB / 2.0s）；增量索引是 E4 的事。
+function `toolInput` 只取 `file_path`。全量读（真机 686MB / 2.0s）。增量在同步管线
+那一层（E4b，Rust-only）：`workbuddy_trace_files` 是 locate 面、
+`read_workbuddy_trace_file` 是单文件 shape 面，全量读 = 两者复合；这里镜像两个入口
+只为钉「逐文件拼接 == 全量」的等式，Python 不长同步写路径。
 文件按路径字符串排序。与 Rust `hosts/workbuddy/sources/traces.rs` 逐字节对齐。
 """
 
@@ -149,14 +152,13 @@ def _shape_trace(path, doc):
     }
 
 
-def read_workbuddy_traces(root):
-    """读 `<root>/traces/*/trace_*.json` 全部文件 → `{files, by_session, unattributed,
-    degraded}`。目录缺失 → 空结果（存在性探测）。"""
+def workbuddy_trace_files(root):
+    """locate 面：`<root>/traces/*/trace_*.json` 全部文件，按路径字符串排序。目录
+    缺失 → 空列表。"""
     tdir = workbuddy_traces_root(root)
-    out = {"files": 0, "by_session": {}, "unattributed": [], "degraded": []}
-    if not tdir.is_dir():
-        return out
     files = []
+    if not tdir.is_dir():
+        return files
     try:
         for pid in tdir.iterdir():
             if not pid.is_dir():
@@ -168,22 +170,34 @@ def read_workbuddy_traces(root):
             except OSError:
                 continue
     except OSError:
-        return out
+        return files
     files.sort(key=str)
-    for path in files:
+    return files
+
+
+def read_workbuddy_trace_file(path):
+    """shape 面：读一个 trace 文件 → trace dict；读不了 / 不是 trace 形状 → ValueError，
+    文案与 `degraded` 的原因串同一词表。"""
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        raise ValueError("unreadable")
+    try:
+        doc = json.loads(raw)
+    except (ValueError, TypeError):
+        raise ValueError("malformed: not JSON")
+    return _shape_trace(path, doc)
+
+
+def read_workbuddy_traces(root):
+    """读 `<root>/traces/*/trace_*.json` 全部文件 → `{files, by_session, unattributed,
+    degraded}`。目录缺失 → 空结果（存在性探测）。= locate ∘ shape。"""
+    out = {"files": 0, "by_session": {}, "unattributed": [], "degraded": []}
+    for path in workbuddy_trace_files(root):
         out["files"] += 1
         try:
-            raw = path.read_bytes()
-        except OSError:
-            out["degraded"].append((path, "unreadable"))
-            continue
-        try:
-            doc = json.loads(raw)
-        except (ValueError, TypeError):
-            out["degraded"].append((path, "malformed: not JSON"))
-            continue
-        try:
-            tr = _shape_trace(path, doc)
+            tr = read_workbuddy_trace_file(path)
         except ValueError as e:
             out["degraded"].append((path, str(e)))
             continue

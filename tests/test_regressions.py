@@ -2184,17 +2184,23 @@ class TestWorkbuddyBashDoubleSourceE3(unittest.TestCase):
 
 
 class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
-    """A4（spec §6.4-5）：`nominal_cny`（名义栏，credits × 兑换价）绝不能出现在
+    """A4（spec §6.4-5）：`nominal_cny`（名义 credits × 兑换价）绝不能出现在
     真实**实付**汇总 DTO 里——它是尺，不是账（`ATTRIBUTABLE_WASTE.md` §6.7）。
-    WorkBuddy 在 `PERMANENTLY_EXCLUDED_HOSTS` 里，结构上就到不了 by_host/by_provider；
-    A3 改了它的 `cost` 块，这条断言那道排除仍成立，且新键 `nominal_cny` 只活在
-    workbuddy 的会话适配器里、没漏进任何汇总/DTO/预算代码。"""
+    E4b（docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5）起 WorkBuddy 离开
+    `PERMANENTLY_EXCLUDED_HOSTS`（如今是空表）：它不再靠「不在表里」拦钱，而是靠
+    **结构**——每条事实 `provider_id: null`（三轨请求级不可判，§2.1），汇总层
+    `workbuddy_host_amount_with_tokens` 恒 `amounts_by_basis` 空。这条测试把新防线
+    钉死：排除表为空 + money 防线在接线函数本体，且 `nominal_cny` 仍只活在
+    workbuddy 的会话适配器里。"""
 
-    def test_workbuddy_stays_in_the_permanent_exclusion_list(self):
+    def test_workbuddy_money_cannot_enter_the_summary_dto(self):
         summary_rs = (ROOT / "crates" / "agent-vitals-runtime" / "src"
                       / "summary.rs").read_text(encoding="utf-8")
-        self.assertIn('PERMANENTLY_EXCLUDED_HOSTS: &[&str] = &["workbuddy"]',
-                      summary_rs)
+        self.assertIn("PERMANENTLY_EXCLUDED_HOSTS: &[&str] = &[]", summary_rs)
+        # E4b：money 防线内建在 workbuddy 栏构造器里（provider null → basis 恒空），
+        # 不再是排除表。
+        self.assertIn('amounts_by_basis: BTreeMap::new()', summary_rs)
+        self.assertIn('"billing-route-unknown"', summary_rs)
         self.assertNotIn("nominal_cny", summary_rs)
 
     def test_nominal_cny_key_is_confined_to_the_workbuddy_session_adapter(self):

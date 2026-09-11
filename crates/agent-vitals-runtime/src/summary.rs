@@ -4,8 +4,13 @@
 //! 只读——不写 state、不建索引、不启动任何后台任务。逐宿主接线、逐提交
 //! 落地（§8.4）：DSH（读 `budget.rs` 的 month.json）、Codex（读 ~/.codex
 //! rollout 折叠计价）、Claude Code（读 claude-ledger.json 逐日账，core
-//! `claude_day_cost` 计价）三个宿主已接线；WorkBuddy 永久留在
-//! `excluded_hosts`（用户 2026-09-05 决定，见本文档触发记录）。
+//! `claude_day_cost` 计价）三个宿主已接线；WorkBuddy 2026-09-11 起（spec
+//! WORKBUDDY_ONBOARDING §9E.5 E4b）也进 `by_host`/`tokens_by_host`——**只有
+//! token、没有金额**：它的事实全部 `provider_id: null`（平台积分 / 自配 key /
+//! 限免三轨请求级不可判，§2.1），`amounts_by_basis` 恒空 + `has_unresolved`，
+//! 不进 `by_provider`（用户手录的 `host_bills` 行除外，那是 Phase 2.8 的路径）。
+//! 2026-09-05「永久 excluded」的决定由 spec v4 §9E 推翻：当时以为 traces 匿名，
+//! 实测 `trace.sessionId` 可归属。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -22,11 +27,13 @@ use agent_vitals_domain::data_contract::HostTokens;
 
 use crate::clock::{today_beijing, yesterday_beijing};
 
-/// Stage 0 的宿主接线状态：真正读数据的 vs. 还没接的。三宿主全接完后
-/// `NOT_YET_WIRED_HOSTS` 为空——`excluded_hosts` 只剩永久范围外的 WorkBuddy。
-const WIRED_HOSTS: &[&str] = &["claude-code", "codex", "dsh"];
+/// Stage 0 的宿主接线状态：真正读数据的 vs. 还没接的。四宿主全接完后
+/// `NOT_YET_WIRED_HOSTS` 与 `PERMANENTLY_EXCLUDED_HOSTS` 都为空——`excluded_hosts`
+/// 是空集（DTO 语义「已知存在但本版本不产出数据」：现在没有这样的宿主）。
+/// 与 `ingest_service::FACT_HOSTS` 同表（`wired_hosts_match_fact_hosts` 钉住）。
+const WIRED_HOSTS: &[&str] = &["claude-code", "codex", "dsh", "workbuddy"];
 const NOT_YET_WIRED_HOSTS: &[&str] = &[];
-const PERMANENTLY_EXCLUDED_HOSTS: &[&str] = &["workbuddy"];
+const PERMANENTLY_EXCLUDED_HOSTS: &[&str] = &[];
 
 fn excluded_hosts() -> BTreeSet<String> {
     NOT_YET_WIRED_HOSTS
@@ -667,7 +674,7 @@ pub fn hourly_distribution(date: &str, codex_home: &Path) -> serde_json::Value {
 }
 
 /// Stage B（DoD #4 收口）：`has_unresolved` 的**逐模型下钻**——`data-unresolved`
-/// 的服务面。三个宿主各自的 by_model 桶，逐模型判定 unresolved 原因：
+/// 的服务面。各宿主的 by_model 桶，逐模型判定 unresolved 原因：
 ///
 /// - `billing-route-unknown`：`billing_route_of` 认不出归属（DSH/claude 词表；
 ///   codex 宿主是 openai 订阅、路由是宿主级的，不做模型级判定）；
@@ -676,6 +683,10 @@ pub fn hourly_distribution(date: &str, codex_home: &Path) -> serde_json::Value {
 ///   展开——聚合数说"有多少看不清"，这里说"是谁看不清"）；
 /// - `partial-price-basis`：卡是时变价、日粒度无峰谷分辨率（`pricing_basis`
 ///   = "partial"，与 `has_unresolved` 的既有判定同源）。
+///
+/// - workbuddy（E4b）：整宿主 `billing-route-unknown`——事实 provider 一律
+///   null（三轨请求级不可判，WORKBUDDY_ONBOARDING §2.1），逐模型列出 token
+///   量让「谁看不清」可见，键 `workbuddy/unknown`（与 claude 的 unknown 同约定）。
 ///
 /// 报告键与 `by_provider` 同词表（`host/provider`），消费方可以直接对上。
 pub fn unresolved_detail(month: &str) -> serde_json::Value {
@@ -834,6 +845,30 @@ pub fn unresolved_detail(month: &str) -> serde_json::Value {
                 "reason": reason,
                 "tokens": total,
             }));
+    }
+
+    // ── workbuddy/unknown：SQL 逐模型直读，整宿主 billing-route-unknown ────
+    if let (Some(db), Some((start, end))) = (&db, bounds) {
+        if let Ok(by_model) = agent_vitals_data::authority_query::hourly_by_host_model(
+            db.conn(),
+            start,
+            end,
+            &["workbuddy".to_string()],
+        ) {
+            for ((_host, model), hours) in by_model {
+                let total: i64 = hours.values().map(|c| c.total()).sum();
+                if total == 0 {
+                    continue;
+                }
+                out.entry("workbuddy/unknown".to_string())
+                    .or_default()
+                    .push(serde_json::json!({
+                        "model": model,
+                        "reason": "billing-route-unknown",
+                        "tokens": total,
+                    }));
+            }
+        }
     }
 
     let mut obj = serde_json::Map::new();
@@ -995,6 +1030,63 @@ fn codex_host_amount_provider_safe(
         });
     }
     (amount, tokens)
+}
+
+/// WorkBuddy 栏（E4b）：**只有 token、没有金额**。四桶从 SQL `usage_facts` 直接
+/// 聚合（`host_window_tokens`）；金额一律不填——每条事实 `provider_id: null`、
+/// `pricing_basis: metered_estimate`、`evidence_basis: missing`（§2.1 三轨不可判），
+/// 没有可归属的价卡，`amounts_by_basis` 空 + `has_unresolved: true` +
+/// `unresolved_reason: billing-route-unknown`（`data-unresolved` 同一词表）。
+/// 窗口内无事实 → Unavailable（不是 0）。**不进 `by_provider`**：provider 为
+/// null 的事实没有 `host/provider` 键可挂。
+fn workbuddy_host_amount_with_tokens(
+    db: &Option<agent_vitals_data::authority::AuthorityDb>,
+    bounds: Option<(i64, i64)>,
+) -> (HostAmount, HostTokens) {
+    let window = match (db, bounds) {
+        (Some(db), Some((start, end))) => {
+            agent_vitals_data::authority_query::host_window_tokens(
+                db.conn(),
+                "workbuddy",
+                start,
+                end,
+            )
+            .ok()
+            .flatten()
+        }
+        _ => None,
+    };
+    let mut amount = HostAmount {
+        host_id: "workbuddy".to_string(),
+        amounts_by_basis: BTreeMap::new(),
+        currency: None,
+        has_unresolved: false,
+        evidence_basis: None,
+        pricing_method: None,
+        unresolved_reason: None,
+        freshness: Freshness::unavailable(),
+    };
+    let Some(w) = window else {
+        return (amount, HostTokens::default());
+    };
+    amount.has_unresolved = true;
+    amount.evidence_basis = Some("missing".to_string());
+    amount.unresolved_reason = Some("billing-route-unknown".to_string());
+    amount.freshness = day_freshness(&w.latest_day);
+    let mut tk = HostTokens {
+        uncached_input: w.uncached_input,
+        cache_read: w.cache_read,
+        cache_write: w.cache_write,
+        output: w.output,
+        ..HostTokens::default()
+    };
+    tk.total = tk.uncached_input + tk.cache_read + tk.cache_write + tk.output;
+    tk.cache_hit_ratio = agent_vitals_domain::cost::cache_hit_ratio(&json!({
+        "uncached_input_tokens": tk.uncached_input,
+        "cache_read_tokens": tk.cache_read,
+        "cache_write_tokens": tk.cache_write,
+    }));
+    (amount, tk)
 }
 
 /// DSH 窗口（`days` map 或单日值）的 token 计量：DSH 四桶词表直读
@@ -1221,6 +1313,9 @@ const HOST_PROVIDER_MAP: &[(&str, &[&str])] = &[
     ),
     ("codex", &["openai"]),
     ("dsh", &["deepseek-official", "shengsuanyun"]),
+    // WorkBuddy：无价卡声明的 provider（三轨请求级不可判，§2.1）——空表是
+    // 显式声明「没有可摊订阅的 provider」，不是漏登记。
+    ("workbuddy", &[]),
 ];
 
 /// Token 日历的逐日跨宿主数据（v0.9 Stage D——日历此前只画 DSH 日轴，
@@ -1654,6 +1749,8 @@ impl SummaryRepository for SqlSummaryRepository {
         let (claude_amount, claude_tk) =
             claude_host_amount_with_tokens_from_days(&claude_days_map, &cards);
         by_host.insert("claude-code".to_string(), claude_amount);
+        let (wb_amount, wb_tk) = workbuddy_host_amount_with_tokens(&db, bounds);
+        by_host.insert("workbuddy".to_string(), wb_amount);
         // legacy 兜底标记的消费方（degrade_claude_freshness_if_legacy_backed）：
         // 被聚合兜底的月份 claude 侧降为 Partial，必须在 aggregate_freshness
         // 之前生效，聚合新鲜度才能反映它。
@@ -1667,6 +1764,7 @@ impl SummaryRepository for SqlSummaryRepository {
         tokens_by_host.insert("dsh".to_string(), dsh_tokens(Some(&dsh_days), &query.month));
         tokens_by_host.insert("codex".to_string(), codex_tk);
         tokens_by_host.insert("claude-code".to_string(), claude_tk);
+        tokens_by_host.insert("workbuddy".to_string(), wb_tk);
 
         let mut by_provider = BTreeMap::new();
         by_provider.insert(
@@ -1730,6 +1828,8 @@ impl SummaryRepository for SqlSummaryRepository {
         let (claude_amount, claude_tk) =
             claude_host_amount_with_tokens_from_days(&claude_days_map, &cards);
         by_host.insert("claude-code".to_string(), claude_amount);
+        let (wb_amount, wb_tk) = workbuddy_host_amount_with_tokens(&db, bounds);
+        by_host.insert("workbuddy".to_string(), wb_amount);
         // 日粒度的降级标记按「该日所属月」查（标记是 month scope 的）。
         if let Some(db) = &db {
             let month_of_date: String = query.date.chars().take(7).collect();
@@ -1745,6 +1845,7 @@ impl SummaryRepository for SqlSummaryRepository {
         );
         tokens_by_host.insert("codex".to_string(), codex_tk);
         tokens_by_host.insert("claude-code".to_string(), claude_tk);
+        tokens_by_host.insert("workbuddy".to_string(), wb_tk);
 
         let mut by_provider = BTreeMap::new();
         by_provider.insert(
@@ -2283,12 +2384,11 @@ mod tests {
             assert!(summary.by_host.contains_key("codex"));
             assert!(summary.by_host.contains_key("dsh"));
             assert!(summary.by_host.contains_key("claude-code"));
+            assert!(summary.by_host.contains_key("workbuddy"));
             assert!(!summary.excluded_hosts.contains("codex"));
             assert!(!summary.excluded_hosts.contains("claude-code"));
-            assert_eq!(
-                summary.excluded_hosts,
-                BTreeSet::from(["workbuddy".to_string()])
-            );
+            // E4b：四宿主全接线，excluded 是空集。
+            assert_eq!(summary.excluded_hosts, BTreeSet::new());
             // 汇总新鲜度 = 宿主里最新的 last_observed_at（字典序=时间序，两处
             // 格式统一 `YYYY-MM-DDT00:00:00Z`）。
             let max_host = summary
@@ -2366,6 +2466,74 @@ mod tests {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
         agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap()
+    }
+
+    /// 四张宿主词表必须同表（加宿主一处漏改就是「事实进得来、汇总看不见」）。
+    #[test]
+    fn wired_hosts_match_fact_hosts() {
+        let mut wired: Vec<&str> = WIRED_HOSTS.to_vec();
+        wired.sort_unstable();
+        let mut facts: Vec<&str> = crate::ingest_service::FACT_HOSTS.to_vec();
+        facts.sort_unstable();
+        assert_eq!(wired, facts);
+        for (host, _) in HOST_PROVIDER_MAP {
+            assert!(WIRED_HOSTS.contains(host), "{host} in HOST_PROVIDER_MAP but not wired");
+        }
+    }
+
+    /// E4b（spec WORKBUDDY_ONBOARDING §9E.5）：WorkBuddy 进 `by_host`/`tokens_by_host`
+    /// 但**只有 token、没有金额**——事实 `provider_id: null`（三轨请求级不可判，
+    /// §2.1），`amounts_by_basis` 必空、`has_unresolved` 必真、不进 `by_provider`；
+    /// 四桶原样出现在 `tokens_by_host`（真桶非零，不再是 §7.2 的「恒 0 冒充」）。
+    /// 月/日两个窗口同一契约，`contract_violations` 为空。
+    #[test]
+    fn workbuddy_row_carries_tokens_but_never_money() {
+        with_home(|| {
+            let day = crate::clock::today_beijing();
+            let month = crate::clock::current_month_beijing();
+            let ts = agent_vitals_data::authority_query::beijing_day_bounds_ms(&day)
+                .unwrap()
+                .0
+                + 3_600_000;
+            let db = seed_authority_db();
+            // 与 fixtures/workbuddy traces 的 s1 两条 generation 同数：
+            // (12000-8000, 8000, 0, 300) + (15000-11000, 11000, 0, 450)。
+            seed_fact(&db, "wb1", "workbuddy", Some("custom-local:MiniMax-M3"), "assistant-usage",
+                ts, 0, 4_000, 8_000, 0, 300);
+            seed_fact(&db, "wb2", "workbuddy", Some("hy3"), "assistant-usage",
+                ts + 60_000, 0, 4_000, 11_000, 0, 450);
+            drop(db);
+            let repo = SqlSummaryRepository::new();
+            let monthly = repo.monthly_summary(&MonthlySummaryQuery { month });
+            let daily = repo.daily_summary(&DailySummaryQuery { date: day });
+            assert!(monthly.contract_violations().is_empty(), "{:?}", monthly.contract_violations());
+            assert!(daily.contract_violations().is_empty(), "{:?}", daily.contract_violations());
+            for (label, wb, tk, by_provider) in [
+                ("monthly", &monthly.by_host["workbuddy"], &monthly.tokens_by_host["workbuddy"],
+                 &monthly.by_provider),
+                ("daily", &daily.by_host["workbuddy"], &daily.tokens_by_host["workbuddy"],
+                 &daily.by_provider),
+            ] {
+                assert!(wb.amounts_by_basis.is_empty(), "{label}: 金额面必须为空");
+                assert!(wb.has_unresolved, "{label}");
+                assert_eq!(wb.unresolved_reason.as_deref(), Some("billing-route-unknown"), "{label}");
+                assert_eq!(wb.freshness.state, FreshnessState::Fresh, "{label}");
+                assert_eq!(tk.uncached_input, 8_000, "{label}");
+                assert_eq!(tk.cache_read, 19_000, "{label}");
+                assert_eq!(tk.cache_write, 0, "{label}");
+                assert_eq!(tk.output, 750, "{label}");
+                assert_eq!(tk.total, 27_750, "{label}");
+                assert!(
+                    !by_provider.keys().any(|k| k.starts_with("workbuddy/")),
+                    "{label}: provider null 的事实没有 host/provider 键可挂"
+                );
+            }
+            // 没有事实的宿主照旧 Unavailable + 零 token（不是 workbuddy 抢了别人的桶）。
+            assert_eq!(monthly.by_host["dsh"].freshness.state, FreshnessState::Unavailable);
+            assert_eq!(monthly.tokens_by_host["dsh"].total, 0);
+            // total_summable 不受影响（没有钱进来）。
+            assert_eq!(monthly.total_summable(), 0.0);
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2777,20 +2945,22 @@ mod tests {
                 "{:?}",
                 summary.contract_violations()
             );
-            for host in ["dsh", "codex", "claude-code"] {
+            for host in WIRED_HOSTS {
                 assert_eq!(
-                    summary.by_host[host].freshness.state,
+                    summary.by_host[*host].freshness.state,
                     FreshnessState::Unavailable,
                     "host={host}"
                 );
                 assert!(
-                    summary.by_host[host].amounts_by_basis.is_empty(),
+                    summary.by_host[*host].amounts_by_basis.is_empty(),
                     "host={host}"
                 );
             }
             assert!(!summary.excluded_hosts.contains("dsh"));
-            assert!(summary.excluded_hosts.contains("workbuddy"));
-            assert_eq!(summary.coverage.measured_fields, 3);
+            // E4b：workbuddy 不再 excluded——它有 token 数据面（金额仍 unresolved）。
+            assert!(!summary.excluded_hosts.contains("workbuddy"));
+            assert!(summary.excluded_hosts.is_empty());
+            assert_eq!(summary.coverage.measured_fields, 4);
 
             let daily = repo.daily_summary(&DailySummaryQuery {
                 date: "2020-01-01".to_string(),

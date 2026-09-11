@@ -1576,17 +1576,20 @@ mod tests {
     use super::*;
 
     /// Stage 0.6 的 Data Query API 面是薄转发，但"薄"也要钉住：DTO 与 CLI
-    /// `data coverage` 同一份 `to_json()`（三宿主 by_host + workbuddy 永久
-    /// excluded + coverage 3/3），托盘侧不许长出第二种形状。真机结构性断言
+    /// `data coverage` 同一份 `to_json()`（四宿主 by_host——WorkBuddy 自 E4b 起
+    /// 接线，只有 token 没有金额，见 docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5——
+    /// excluded 空 + coverage 4/4），托盘侧不许长出第二种形状。真机结构性断言
     /// （金额值随机器变，形状不随）。
     #[test]
     fn data_monthly_summary_dto_matches_the_frozen_contract_shape() {
         let d = data_monthly_summary(overview::current_month_beijing());
         let keys: Vec<&String> = d["by_host"].as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["claude-code", "codex", "dsh"]);
-        assert_eq!(d["excluded_hosts"], serde_json::json!(["workbuddy"]));
-        assert_eq!(d["coverage"]["measured_fields"], 3);
-        assert_eq!(d["coverage"]["total_fields"], 3);
+        assert_eq!(keys, ["claude-code", "codex", "dsh", "workbuddy"]);
+        assert_eq!(d["excluded_hosts"], serde_json::json!([]));
+        assert_eq!(d["coverage"]["measured_fields"], 4);
+        assert_eq!(d["coverage"]["total_fields"], 4);
+        // WorkBuddy 行永远没有金额（三轨请求级不可判，§2.1）。
+        assert_eq!(d["by_host"]["workbuddy"]["amounts_by_basis"], serde_json::json!({}));
         // 冻结契约的三条不变式之一在托盘侧同样成立：excluded 与 by_host 不相交。
         for host in d["excluded_hosts"].as_array().unwrap() {
             assert!(d["by_host"].get(host.as_str().unwrap()).is_none());

@@ -5,8 +5,9 @@ CLI 面（`docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md` §9「下一步」）。
 只测 Rust 二进制（Rust-only 命令，无 Python 镜像可差分——同 test_r2a 的
 二进制用例约定，未设 `AGENT_VITALS_BIN` 时整体 skip）：
 
-  · 空环境（隔离 HOME + 隔离 AGENT_VITALS_HOME）→ 三宿主全部
-    `unavailable`、`excluded_hosts == ["workbuddy"]`、coverage 3/3、
+  · 空环境（隔离 HOME + 隔离 AGENT_VITALS_HOME）→ 四宿主全部
+    `unavailable`、`excluded_hosts == []`（WorkBuddy 自 E4b 起接线，见
+    docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5）、coverage 4/4、
     `total_summable` 是**正零**（-0.0 是 Stage 0.5 落地时实测修掉的形状，
     domain `summable_total` 的 fold 注释）——spec §0.1「不得渲染为 ¥0」的
     JSON/文本两半都钉。
@@ -70,14 +71,16 @@ class DataSummaryCliTests(unittest.TestCase):
 
     def test_empty_month_reports_unavailable_not_zero(self):
         d = self.coverage_json(self.home, "2020-01")
-        self.assertEqual(sorted(d["by_host"].keys()), ["claude-code", "codex", "dsh"])
+        self.assertEqual(sorted(d["by_host"].keys()),
+                         ["claude-code", "codex", "dsh", "workbuddy"])
         for host, row in d["by_host"].items():
             self.assertEqual(row["freshness"]["state"], "unavailable", host)
             self.assertIsNone(row["freshness"]["last_observed_at"], host)
             self.assertEqual(row["amounts_by_basis"], {}, host)
-        # WorkBuddy 是唯一 excluded（用户决定的永久范围外），接线宿主不在。
-        self.assertEqual(d["excluded_hosts"], ["workbuddy"])
-        self.assertEqual(d["coverage"], {"measured_fields": 3, "total_fields": 3,
+        # E4b：四宿主全接线，excluded 是空集（WorkBuddy 只有 token、没有金额，
+        # 但那是 by_host 行内的 has_unresolved，不是 excluded）。
+        self.assertEqual(d["excluded_hosts"], [])
+        self.assertEqual(d["coverage"], {"measured_fields": 4, "total_fields": 4,
                                          "denominator_version": 1})
         # 修过的 -0.0：JSON 里必须是正零（serde_json 会把 -0.0 原样序列化）。
         self.assertEqual(d["total_summable"], 0.0)
@@ -86,8 +89,8 @@ class DataSummaryCliTests(unittest.TestCase):
     def test_empty_month_text_never_renders_zero_for_missing(self):
         out = self.run_cli(self.home, "data", "coverage", "--month", "2020-01")
         self.assertIn("no data (unavailable)", out)
-        self.assertIn("excluded hosts: workbuddy", out)
-        self.assertIn("coverage 3/3", out)
+        self.assertIn("excluded hosts: (none)", out)
+        self.assertIn("coverage 4/4", out)
 
     def test_three_hosts_report_their_own_basis(self):
         month = _beijing_month()
@@ -114,8 +117,9 @@ class DataSummaryCliTests(unittest.TestCase):
         # 汇总口径：总额只收 DSH 实测（估算/诊断价不冒充账单——spec §4）。
         self.assertAlmostEqual(d["total_summable"],
                                dsh["amounts_by_basis"]["metered_actual"])
-        # 全部宿主在 by_host，无临时排除。
-        self.assertEqual(d["excluded_hosts"], ["workbuddy"])
+        # 全部宿主在 by_host，无临时排除；workbuddy 没种数据 → unavailable，不是 0。
+        self.assertEqual(d["excluded_hosts"], [])
+        self.assertEqual(d["by_host"]["workbuddy"]["freshness"]["state"], "unavailable")
 
     def test_absent_day_is_unavailable_not_zero(self):
         d = json.loads(self.run_cli(self.home, "data", "daily",

@@ -179,6 +179,14 @@ fn unpriced_tokens(conn: &Connection, payload: Option<&Value>) -> i64 {
             total_unpriced += tokens;
             continue;
         };
+        // WorkBuddy（E4b）：事实一律 provider null——平台积分 / 自配 key / 限免
+        // 三轨请求级不可判（WORKBUDDY_ONBOARDING §2.1）。不能拿裸模型名去撞
+        // DSH 价卡（真机 `deepseek-v4-flash` ×62 会命中 deepseek-official 卡，
+        // 那是给「路由证据缺失」的 token 借一张别家的价卡）——整宿主计 unpriced。
+        if host == "workbuddy" {
+            total_unpriced += tokens;
+            continue;
+        }
         let priced = if host == "codex" {
             agent_vitals_domain::cost::codex_resolve_entry(&model, "standard", entries).is_some()
         } else if host == "claude-code" {

@@ -1,5 +1,7 @@
-"""WorkBuddy traces → `UsageFact`（spec §9E.5 E4a；分期同 v0.7 三宿主先例：内存 emit +
-只读诊断，不动 FACT_HOSTS、不写盘——E4b 再接同步管线）。
+"""WorkBuddy traces → `UsageFact`（spec §9E.5 E4a/E4b）。两个入口：全量
+`workbuddy_traces_to_usage_facts(root)`（CLI 只读诊断面）与单文件
+`workbuddy_trace_file_to_usage_facts(path)`（Rust 侧是 sync_service 的 ingest 面；
+Python 镜像它只为钉「逐文件拼接 == 全量」，Python 不长写路径）。
 
 源：generation span 解码后的 `usage`（OpenAI 兼容格式）+ 逐调用 `model`——E1 的读取层
 （`adapters/workbuddy_traces.py`）已解开二次编码、只留 `usages`/`model`。每个 generation
@@ -94,47 +96,73 @@ def workbuddy_traces_to_usage_facts(root, *, machine_namespace, source_profile="
     if not workbuddy_traces.workbuddy_traces_root(root).is_dir():
         raise OSError("%s: no traces/ directory" % root)
     read = workbuddy_traces.read_workbuddy_traces(root)
-    facts = []
-    attempts = {SKIP: 0, UNREADABLE: 0, UNATTRIBUTED: 0}
-    total_generation_spans = 0
-    skip_rows = 0
+    out = _Acc()
     all_traces = [t for v in read["by_session"].values() for t in v] + list(read["unattributed"])
     all_traces.sort(key=lambda t: str(t["path"]))
     for tr in all_traces:
-        for span in tr["spans"]:
-            if span.get("kind") != "generation":
-                continue
-            total_generation_spans += 1
-            if span.get("decode_failed"):
-                # toolOutput 解不开（真机 4 例全是空串）→ unreadable，不是 skip。
-                attempts[UNREADABLE] += 1
-                continue
-            if not span.get("usages"):
-                # 取消/进行中（toolOutput null）或解码后无 usage → 跳过，不是失败。
-                attempts[SKIP] += 1
-                skip_rows += 1
-                continue
-            sid = tr.get("session_id")
-            if sid is None:
-                attempts[UNATTRIBUTED] += 1
-                continue
-            fact = _span_to_usage_fact(span, sid, machine_namespace, source_profile)
-            if fact is None:
-                attempts["bad_id"] = attempts.get("bad_id", 0) + 1
-            else:
-                facts.append(fact)
-    coverage = {
-        "total_generation_spans": total_generation_spans,
-        "fact_rows": len(facts),
-        "skip_rows": skip_rows,
-    }
-    return UsageFactEmitResult(facts=facts, attempts=attempts, coverage=coverage,
-                               malformed=len(read["degraded"]))
+        _emit_trace(tr, machine_namespace, source_profile, out)
+    return out.result(malformed=len(read["degraded"]))
+
+
+def workbuddy_trace_file_to_usage_facts(path, *, machine_namespace, source_profile="default"):
+    """单个 trace 文件 → `UsageFactEmitResult`。读不了 / 不是 trace 形状 → ValueError
+    （Rust 侧 sync 把它记进该文件的 errors 留待重试）。`malformed` 恒 0。"""
+    tr = workbuddy_traces.read_workbuddy_trace_file(path)
+    out = _Acc()
+    _emit_trace(tr, machine_namespace, source_profile, out)
+    return out.result(malformed=0)
+
+
+class _Acc:
+    """一次 emit 的累加器（Rust `UsageFactEmitResult` 的可变形态）。"""
+
+    def __init__(self):
+        self.facts = []
+        self.attempts = {SKIP: 0, UNREADABLE: 0, UNATTRIBUTED: 0}
+        self.total_generation_spans = 0
+        self.skip_rows = 0
+
+    def result(self, *, malformed):
+        coverage = {
+            "total_generation_spans": self.total_generation_spans,
+            "fact_rows": len(self.facts),
+            "skip_rows": self.skip_rows,
+        }
+        return UsageFactEmitResult(facts=self.facts, attempts=self.attempts,
+                                   coverage=coverage, malformed=malformed)
+
+
+def _emit_trace(tr, machine_namespace, source_profile, out):
+    """一个 trace 的全部 generation span → facts / attempts。每个 span 恰落一个桶：
+    decode_failed 先判、再判无 usage、再判无 sessionId。"""
+    for span in tr["spans"]:
+        if span.get("kind") != "generation":
+            continue
+        out.total_generation_spans += 1
+        if span.get("decode_failed"):
+            # toolOutput 解不开（真机 4 例全是空串）→ unreadable，不是 skip。
+            out.attempts[UNREADABLE] += 1
+            continue
+        if not span.get("usages"):
+            # 取消/进行中（toolOutput null）或解码后无 usage → 跳过，不是失败。
+            out.attempts[SKIP] += 1
+            out.skip_rows += 1
+            continue
+        sid = tr.get("session_id")
+        if sid is None:
+            out.attempts[UNATTRIBUTED] += 1
+            continue
+        fact = _span_to_usage_fact(span, sid, machine_namespace, source_profile)
+        if fact is None:
+            out.attempts["bad_id"] = out.attempts.get("bad_id", 0) + 1
+        else:
+            out.facts.append(fact)
 
 
 __all__ = [
     "HOST",
     "OBSERVATION_KIND",
     "UsageFactEmitResult",
+    "workbuddy_trace_file_to_usage_facts",
     "workbuddy_traces_to_usage_facts",
 ]
