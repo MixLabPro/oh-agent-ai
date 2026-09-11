@@ -469,6 +469,7 @@ async function renderOverview() {
     renderBillingImportCandidates({ status: "unavailable", candidates: [] });
   }
   await renderHostBills(monthKey);
+  await renderBudgetSettings();
   renderMonthVerdict(monthly);
   renderOverviewDays(cal);
   renderKpiRow("t", daily, ov.fx);
@@ -676,6 +677,57 @@ function billingCandidateAmount(candidate) {
 
 let billingDeclarationCandidate = null;
 let billingDeclarationState = null;
+
+async function renderBudgetSettings() {
+  const monthly = document.getElementById("ov-budget-monthly-input");
+  const daily = document.getElementById("ov-budget-daily-input");
+  const warning = document.getElementById("ov-budget-warning-input");
+  const save = document.getElementById("ov-budget-save");
+  const status = document.getElementById("ov-budget-settings-status");
+  if (!monthly || !daily || !warning || !save || !status) return;
+  try {
+    const config = await invoke("budget_config");
+    if (config.status === "ok") {
+      monthly.value = config.monthly_cny_minor;
+      daily.value = config.daily_cny_minor;
+      warning.value = Number(config.warning_ratio_bp) / 100;
+    } else if (config.status === "missing") {
+      monthly.value = "";
+      daily.value = "";
+      warning.value = 80;
+    }
+  } catch (_) { /* 配置读取失败不遮蔽总览 */ }
+  if (save.dataset.bound === "1") return;
+  save.dataset.bound = "1";
+  save.onclick = async () => {
+    const monthlyText = monthly.value.trim();
+    const dailyText = daily.value.trim();
+    const monthlyMinor = Number(monthlyText);
+    const dailyMinor = Number(dailyText);
+    const warningPercent = Number(warning.value);
+    status.hidden = false;
+    if (!monthlyText || !dailyText || !Number.isSafeInteger(monthlyMinor) || monthlyMinor < 0 ||
+        !Number.isSafeInteger(dailyMinor) || dailyMinor < 0 ||
+        !Number.isFinite(warningPercent) || warningPercent < 0 || warningPercent > 100) {
+      status.textContent = "请填写非负整数金额，以及 0–100 之间的预警百分比。";
+      return;
+    }
+    save.disabled = true;
+    try {
+      await invoke("save_budget_config", { input: {
+        monthly_cny_minor: monthlyMinor,
+        daily_cny_minor: dailyMinor,
+        warning_ratio_bp: Math.round(warningPercent * 100),
+      } });
+      status.textContent = "预算已保存，正在按当前用量刷新状态。";
+      await renderOverview();
+    } catch (e) {
+      status.textContent = "保存失败：" + errText(e);
+    } finally {
+      save.disabled = false;
+    }
+  };
+}
 
 function billingMonthWindow(month) {
   const parts = String(month || "").split("-").map(Number);
@@ -953,7 +1005,7 @@ async function renderHostBills(period) {
   const existing = document.getElementById("ov-bill-existing");
   const status = document.getElementById("ov-bill-status");
   const save = document.getElementById("ov-bill-save");
-  if (!existing || !status || !save || save.dataset.bound === "1") return;
+  if (!existing || !status || !save) return;
   const showBills = (report) => {
     existing.textContent = "";
     const bills = report && report.status === "ok" ? (report.bills || []) : [];
@@ -990,6 +1042,12 @@ async function renderHostBills(period) {
     }
   };
   document.getElementById("ov-bill-period").value = period;
+  if (save.dataset.bound === "1") {
+    try {
+      showBills(await invoke("host_bills_for_period", { billingPeriod: period }));
+    } catch (_) { /* 账单是增强入口，不遮蔽总览 */ }
+    return;
+  }
   save.dataset.bound = "1";
   save.onclick = async () => {
     save.disabled = true;

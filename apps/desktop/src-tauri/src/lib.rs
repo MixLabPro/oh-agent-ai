@@ -1379,6 +1379,52 @@ struct HostBillInput {
     evidence_ref: String,
 }
 
+/// 桌面端预算表单的窄 DTO。金额仍是 CNY 最小单位，避免 UI 浮点数进入权威库。
+#[derive(Deserialize)]
+struct BudgetConfigInput {
+    monthly_cny_minor: i64,
+    daily_cny_minor: i64,
+    warning_ratio_bp: i64,
+}
+
+#[tauri::command]
+fn budget_config() -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable" });
+    };
+    match db.budget_config_get() {
+        Ok(Some(config)) => serde_json::json!({
+            "status": "ok",
+            "monthly_cny_minor": config.monthly_cny_minor,
+            "daily_cny_minor": config.daily_cny_minor,
+            "warning_ratio_bp": config.warning_ratio_bp,
+            "updated_at_ms": config.updated_at_ms,
+        }),
+        Ok(None) => serde_json::json!({ "status": "missing" }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string() }),
+    }
+}
+
+#[tauri::command]
+fn save_budget_config(input: BudgetConfigInput) -> Result<Value, String> {
+    if input.monthly_cny_minor < 0 || input.daily_cny_minor < 0
+        || !(0..=10_000).contains(&input.warning_ratio_bp)
+    {
+        return Err("budget amounts must be non-negative and warning ratio must be 0..=10000".to_string());
+    }
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms)
+        .map_err(|error| error.to_string())?;
+    db.budget_config_set(
+        input.monthly_cny_minor, input.daily_cny_minor, input.warning_ratio_bp, now_ms,
+    ).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "saved", "updated_at_ms": now_ms }))
+}
+
 /// 保存一条可追溯的计费关系修订。声明当前态与不可变修订在同一个用户动作中
 /// 写入；scope 由前端显式传入，空数组表示只使用宿主/provider/有效期约束。
 #[tauri::command]
@@ -1923,6 +1969,8 @@ pub fn run() {
             save_billing_declaration_revision,
             billing_declarations,
             billing_declaration_impact_preview,
+            budget_config,
+            save_budget_config,
             save_host_bill,
             save_host_bills,
             host_bills_for_period,

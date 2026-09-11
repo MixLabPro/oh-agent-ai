@@ -176,6 +176,18 @@
         <button id="ov-sync-now" class="btn" hidden>立即同步</button>
       </div>
 
+      <section class="budget-settings panel" id="ov-budget-settings">
+        <div class="panel-title">预算设置</div>
+        <div class="muted">只用于跨宿主按量实付的 CNY 预算；固定订阅与名义成本不计入。金额为分，设为 0 可停用月度预算。</div>
+        <div class="billing-form">
+          <label>月预算（分） <input id="ov-budget-monthly-input" type="number" min="0" step="1" /></label>
+          <label>日预算（分） <input id="ov-budget-daily-input" type="number" min="0" step="1" /></label>
+          <label>预警阈值（%） <input id="ov-budget-warning-input" type="number" min="0" max="100" step="1" value="80" /></label>
+          <div class="billing-form-actions"><button class="btn" id="ov-budget-save">保存预算</button></div>
+        </div>
+        <div class="billing-preview" id="ov-budget-settings-status" hidden></div>
+      </section>
+
       <!-- 双轨账（混合用户核心区块）：订阅轨 = 已付费产能（利用率倍数 =
            标价折算 ÷ 月费，>50× 触发「归属待核」告警），按量轨 = 真实支出。
            两轨永不合并。数据源 = data_monthly_summary.by_provider。 -->
