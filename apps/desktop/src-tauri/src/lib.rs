@@ -1107,6 +1107,27 @@ fn emit_fold_event(app: &AppHandle) {
 /// 跳过托盘更新的分支（这正是「多数正常路径连 state 重读都不做」的修复：无未折
 /// 会话/二进制缺失/discover 失败也要刷新，把外部更新带进托盘）。
 fn sync_tick(app: &AppHandle) {
+    match overview::sync_is_paused() {
+        Ok(true) => {
+            let status = SyncStatus::ok("paused", "已按你的选择暂停本机解析".into());
+            overview::save_sync_status(&status);
+            let _ = app.emit(SYNC_STATUS_EVENT, serde_json::json!({
+                "ok": status.ok, "stage": status.stage, "message": status.message,
+            }));
+            refresh(app);
+            return;
+        }
+        Err(error) => {
+            let status = SyncStatus::fail("control", format!("同步控制状态不可读：{error}"));
+            overview::save_sync_status(&status);
+            let _ = app.emit(SYNC_STATUS_EVENT, serde_json::json!({
+                "ok": status.ok, "stage": status.stage, "message": status.message,
+            }));
+            refresh(app);
+            return;
+        }
+        Ok(false) => {}
+    }
     let initial = perform_sync();
     let folded = should_emit_fold_event(&initial);
     // 一宿主失败不能阻塞其他宿主的导入；共享二进制缺失仍由 resolve 状态报告。
@@ -1749,7 +1770,31 @@ fn data_source_status() -> Value {
         serde_json::json!({ "status": "unavailable", "reason": reason, "sources": [] })
     });
     merge_source_sync_failure(&mut report, &overview::read_overview().sync);
+    if matches!(overview::sync_is_paused(), Ok(true)) {
+        if let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) {
+            for source in sources {
+                source["connection_state"] = Value::String("paused".into());
+                source["recovery_action"] = serde_json::json!({
+                    "kind": "resume_sync", "label": "恢复同步"
+                });
+            }
+        }
+    }
     report
+}
+
+#[tauri::command]
+fn sync_pause_state() -> Value {
+    match overview::sync_is_paused() {
+        Ok(paused) => serde_json::json!({ "status": "ok", "paused": paused }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
+    }
+}
+
+#[tauri::command]
+fn set_sync_paused(paused: bool) -> Result<Value, String> {
+    overview::save_sync_paused(paused)?;
+    Ok(serde_json::json!({ "status": "saved", "paused": paused }))
 }
 
 /// 扫描器在发现目录权限/解析失败时可能尚未写出 source_files 行；最近同步状态
@@ -2018,6 +2063,8 @@ pub fn run() {
             enqueue_billing_recalculation,
             retry_billing_recalculation,
             billing_recalculation_job_status,
+            sync_pause_state,
+            set_sync_paused,
             data_source_status,
             data_monthly_summary,
             data_daily_summary,

@@ -309,7 +309,7 @@ let sessFilter = "all";
 // Findings/数据源页同款懒加载：CLI 汇总较重（sessions_findings / sessions_list 都
 // spawn 二进制），首进一次、之后「重载」按钮刷新——与 sessions 页同一套理由。
 let findState = { loaded: false, error: false, data: null, sev: "all", rule: "all" };
-let srcState = { loaded: false, error: false, sources: null, sync: null };
+let srcState = { loaded: false, error: false, sources: null, sync: null, paused: false };
 
 function switchTab(name) {
   activeTab = name;
@@ -569,7 +569,11 @@ async function renderOverview() {
   const sync = ov.sync || { ok: false, stage: "never", message: "尚未同步" };
   const syncStatus = document.getElementById("ov-sync-status");
   const syncNow = document.getElementById("ov-sync-now");
-  if (sync.ok) {
+  if (sync.stage === "paused") {
+    syncStatus.textContent = "自动同步已暂停（到数据源页恢复）";
+    syncStatus.title = sync.message || "恢复前不会读取新的本地日志";
+    syncNow.hidden = true;
+  } else if (sync.ok) {
     syncStatus.textContent =
       "上次同步：成功" + (sync.at ? " " + sync.at.slice(11, 16) : "");
     syncStatus.title = sync.message + (sync.at ? "（" + sync.at + "）" : "");
@@ -657,11 +661,22 @@ async function renderOverview() {
 function renderFirstRunState(sync) {
   const panel = document.getElementById("ov-first-run");
   const sources = document.getElementById("ov-first-run-sources");
-  if (!panel || !sources) return;
+  const pause = document.getElementById("ov-first-run-pause");
+  if (!panel || !sources || !pause) return;
   panel.hidden = !sync || sync.stage !== "never";
   if (sources.dataset.bound === "1") return;
   sources.dataset.bound = "1";
   sources.onclick = () => switchTab("sources");
+  pause.onclick = async () => {
+    pause.disabled = true;
+    try {
+      await invoke("set_sync_paused", { paused: true });
+      await renderOverview();
+    } catch (e) {
+      pause.disabled = false;
+      console.warn("暂停解析失败", e);
+    }
+  };
 }
 
 function renderQualityStatus(status) {
@@ -3839,7 +3854,7 @@ function openSessionFromFinding(f) {
 
 async function loadSources(reset) {
   if (reset) {
-    srcState = { loaded: true, error: false, sources: null, sync: null };
+    srcState = { loaded: true, error: false, sources: null, sync: null, paused: false };
     document.getElementById("src-banner").hidden = true;
   }
   srcState.loaded = true;
@@ -3856,6 +3871,10 @@ async function loadSources(reset) {
     const ov = await invoke("read_overview");
     srcState.sync = (ov && ov.sync) || null;
   } catch (e) { if (!err) err = e; }
+  try {
+    const control = await invoke("sync_pause_state");
+    srcState.paused = control && control.status === "ok" ? control.paused === true : false;
+  } catch (e) { if (!err) err = e; }
   loadingEl.hidden = true;
   if (err) { srcState.error = true; showBanner("src-banner", err, false); }
   else { srcState.error = false; }
@@ -3866,8 +3885,25 @@ function renderSources() {
   const foot = document.getElementById("src-foot");
   const syncEl = document.getElementById("src-sync");
   const sync = srcState.sync;
+  const pauseToggle = document.getElementById("src-pause-toggle");
+  pauseToggle.textContent = srcState.paused ? "恢复同步" : "暂停同步";
+  pauseToggle.onclick = async () => {
+    pauseToggle.disabled = true;
+    try {
+      await invoke("set_sync_paused", { paused: !srcState.paused });
+      if (!srcState.paused) await invoke("trigger_sync");
+      await loadSources(true);
+    } catch (e) {
+      showBanner("src-banner", e, false);
+    } finally {
+      pauseToggle.disabled = false;
+    }
+  };
   if (sync) {
-    if (sync.ok) {
+    if (srcState.paused) {
+      syncEl.textContent = "自动同步已暂停；已有导入记录仍可查看。";
+      syncEl.title = "恢复同步后才会再次读取本地日志";
+    } else if (sync.ok) {
       syncEl.textContent = "上次同步：成功" + (sync.at ? " " + sync.at.slice(11, 16) : "");
       syncEl.title = sync.message || "";
     } else if (sync.stage === "never") {
@@ -3913,6 +3949,9 @@ function renderSourceCard(src) {
   } else if (status === "needs_attention") {
     badge.textContent = "需要处理";
     badge.classList.add("fail");
+  } else if (status === "paused") {
+    badge.textContent = "已暂停";
+    badge.classList.add("warn");
   } else {
     badge.textContent = status === "not_detected" ? "未检测到" : "状态未知";
     badge.classList.add("warn");
@@ -3941,7 +3980,7 @@ function renderSourceCard(src) {
   if (action.label) {
     const button = el("button", "btn");
     button.textContent = action.label;
-    button.onclick = () => recoverSource(button, key);
+    button.onclick = () => recoverSource(button, key, action.kind);
     card.appendChild(button);
   }
   return card;
@@ -3954,11 +3993,14 @@ function fmtSourceTime(ms) {
   });
 }
 
-async function recoverSource(button, host) {
+async function recoverSource(button, host, actionKind) {
   const syncEl = document.getElementById("src-sync");
   button.disabled = true;
   syncEl.textContent = (HOST_DISPLAY[host] || host) + "：正在扫描…";
   try {
+    if (actionKind === "resume_sync") {
+      await invoke("set_sync_paused", { paused: false });
+    }
     const requestId = await invoke("trigger_sync");
     if (!requestId) throw new Error("同步请求未返回追踪编号");
     for (let i = 0; i < 10; i++) {
