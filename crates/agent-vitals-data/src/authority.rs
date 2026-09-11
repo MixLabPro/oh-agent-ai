@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -44,6 +44,13 @@ pub fn default_authority_path(data_home: &Path) -> PathBuf {
 /// amount_minor, currency)`。`amount_minor` 是最小货币单位整数——金额从不
 /// 以浮点入库（spec §5.3），折算在展示层。
 pub type HostBillRow = (String, String, String, i64, String);
+
+/// 用户计费声明的一行：关系本身和付款/账单分开建模。金额可未知，不能以
+/// `host_bills` 的实付金额或公开价卡来填充。
+pub type BillingDeclarationRow = (
+    String, String, String, String, Option<String>, Option<i64>, Option<String>,
+    String, Option<String>, Option<String>,
+);
 /// 旧版本发现、尚未被用户确认的订阅候选：`(id, host, provider, currency,
 /// amount_minor, period_start, status)`。候选不构成实际付款。
 pub type BillingImportCandidateRow = (String, String, String, String, i64, String, String);
@@ -529,6 +536,34 @@ CREATE TABLE billing_import_candidates (
 CREATE INDEX billing_import_candidates_status ON billing_import_candidates(status, provider_id);
 "#;
 
+// v1.0：计费关系是用户声明，不是付款记录，也不能寄居在公共价格目录。
+const SCHEMA_V8_ADD: &str = r#"
+CREATE TABLE billing_declarations (
+  declaration_id TEXT PRIMARY KEY,
+  host TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  relationship_kind TEXT NOT NULL CHECK (relationship_kind IN (
+    'official_subscription', 'official_api', 'third_party', 'organization', 'unknown'
+  )),
+  subscription_name TEXT,
+  amount_minor INTEGER CHECK (amount_minor IS NULL OR amount_minor >= 0),
+  currency TEXT,
+  effective_start TEXT NOT NULL,
+  effective_end TEXT,
+  source_candidate_id TEXT UNIQUE REFERENCES billing_import_candidates(candidate_id),
+  evidence_ref TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  deleted_at_ms INTEGER,
+  CHECK ((amount_minor IS NULL AND currency IS NULL) OR
+         (amount_minor IS NOT NULL AND currency IS NOT NULL AND trim(currency) <> '')),
+  CHECK (effective_end IS NULL OR effective_end >= effective_start)
+);
+CREATE INDEX billing_declarations_active_scope
+  ON billing_declarations(host, provider_id, effective_start, effective_end)
+  WHERE deleted_at_ms IS NULL;
+"#;
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -699,9 +734,22 @@ impl AuthorityDb {
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
+            Some(7) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V8_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(6) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V7_ADD);
+                let migration = conn.execute_batch(SCHEMA_V7_ADD).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -717,7 +765,7 @@ impl AuthorityDb {
             }
             Some(5) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD));
+                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -736,7 +784,7 @@ impl AuthorityDb {
             }
             Some(4) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD));
+                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -761,6 +809,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V7_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V8_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -796,6 +848,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V7_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V8_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -835,6 +891,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V7_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V8_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -883,6 +943,7 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V5_ADD)?;
                 conn.execute_batch(SCHEMA_V6_ADD)?;
                 conn.execute_batch(SCHEMA_V7_ADD)?;
+                conn.execute_batch(SCHEMA_V8_ADD)?;
                 // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
                 conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
@@ -1487,6 +1548,88 @@ impl AuthorityDb {
         )?)
     }
 
+    /// 写入或更正本地计费声明。声明从不创建 `host_bills`，也不改写 facts。
+    #[allow(clippy::too_many_arguments)]
+    pub fn billing_declaration_put(
+        &self, declaration_id: &str, host: &str, provider_id: &str, relationship_kind: &str,
+        subscription_name: Option<&str>, amount_minor: Option<i64>, currency: Option<&str>,
+        effective_start: &str, effective_end: Option<&str>, source_candidate_id: Option<&str>,
+        evidence_ref: Option<&str>, now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        let valid_month = |value: &str| {
+            value.len() == 7
+                && value.as_bytes().get(4) == Some(&b'-')
+                && value.chars().enumerate().all(|(index, ch)| {
+                    index == 4 || ch.is_ascii_digit()
+                })
+                && value.get(5..7).and_then(|month| month.parse::<u8>().ok())
+                    .is_some_and(|month| (1..=12).contains(&month))
+        };
+        let valid_kind = matches!(relationship_kind,
+            "official_subscription" | "official_api" | "third_party" | "organization" | "unknown");
+        let valid_amount = match (amount_minor, currency) {
+            (None, None) => true,
+            (Some(amount), Some(currency)) => amount >= 0 && !currency.trim().is_empty(),
+            _ => false,
+        };
+        if declaration_id.is_empty() || host.is_empty() || provider_id.is_empty() || !valid_kind
+            || !valid_amount || !valid_month(effective_start)
+            || effective_end.is_some_and(|end| !valid_month(end) || end < effective_start)
+        {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid billing declaration".to_string(),
+            )));
+        }
+        if let Some(candidate_id) = source_candidate_id {
+            let candidate = self.conn.query_row(
+                "SELECT host, provider_id, status FROM billing_import_candidates WHERE candidate_id = ?1",
+                rusqlite::params![candidate_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            ).optional()?;
+            if !matches!(candidate, Some((ref candidate_host, ref candidate_provider, ref status))
+                if candidate_host == host && candidate_provider == provider_id && status == "accepted")
+            {
+                return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                    "billing declaration candidate must be accepted and match host/provider".to_string(),
+                )));
+            }
+        }
+        let changed = self.conn.execute(
+            "INSERT INTO billing_declarations(
+                 declaration_id, host, provider_id, relationship_kind, subscription_name,
+                 amount_minor, currency, effective_start, effective_end, source_candidate_id,
+                 evidence_ref, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+             ON CONFLICT(declaration_id) DO UPDATE SET
+               host = excluded.host, provider_id = excluded.provider_id,
+               relationship_kind = excluded.relationship_kind,
+               subscription_name = excluded.subscription_name, amount_minor = excluded.amount_minor,
+               currency = excluded.currency, effective_start = excluded.effective_start,
+               effective_end = excluded.effective_end, source_candidate_id = excluded.source_candidate_id,
+               evidence_ref = excluded.evidence_ref, updated_at_ms = excluded.updated_at_ms,
+               deleted_at_ms = NULL",
+            rusqlite::params![declaration_id, host, provider_id, relationship_kind,
+                subscription_name, amount_minor, currency, effective_start, effective_end,
+                source_candidate_id, evidence_ref, now_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// 活跃声明的稳定读取顺序；金额缺失保持 `None`，不以 0 或价卡代替。
+    pub fn billing_declarations(&self) -> Result<Vec<BillingDeclarationRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT declaration_id, host, provider_id, relationship_kind, subscription_name,
+                    amount_minor, currency, effective_start, effective_end, source_candidate_id
+             FROM billing_declarations WHERE deleted_at_ms IS NULL
+             ORDER BY host, provider_id, effective_start, declaration_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((
+            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
+            r.get(7)?, r.get(8)?, r.get(9)?,
+        )))?.collect::<Result<Vec<_>, _>>().map_err(AuthorityError::from);
+        rows
+    }
+
     /// 幂等写入一个待确认的旧订阅候选。相同候选不会重复；候选永远不写入
     /// `host_bills`，必须由上层获得用户确认后另走明确账单写入。
     #[allow(clippy::too_many_arguments)]
@@ -1782,12 +1925,13 @@ mod tests {
     }
 
     #[test]
-    fn v6_database_adds_pending_billing_candidates_without_rewriting_bills() {
-        let db = tmp_db("v6-to-v7");
+    fn v6_database_migrates_candidates_and_billing_declarations() {
+        let db = tmp_db("v6-to-v8");
         {
             let current = AuthorityDb::open(&db, 1).unwrap();
             current.conn().execute_batch(
-                "DROP TABLE billing_import_candidates;
+                "DROP TABLE billing_declarations;
+                 DROP TABLE billing_import_candidates;
                  UPDATE schema_meta SET value = '6' WHERE key = 'schema_version';",
             ).unwrap();
         }
@@ -1795,11 +1939,17 @@ mod tests {
         let version: String = upgraded.conn().query_row(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0),
         ).unwrap();
-        assert_eq!(version, "7");
+        assert_eq!(version, "8");
         assert!(upgraded.billing_import_candidate_put(
             "candidate", "claude-code", "minimax", "CNY", 11_400, "2026-09", "legacy", 3,
         ).unwrap());
         assert_eq!(upgraded.pending_billing_import_candidates().unwrap().len(), 1);
+        assert!(upgraded.billing_import_candidate_resolve("candidate", "accepted", 4).unwrap());
+        assert!(upgraded.billing_declaration_put(
+            "decl", "claude-code", "minimax", "official_subscription", None,
+            Some(11_400), Some("CNY"), "2026-09", None, Some("candidate"), None, 5,
+        ).unwrap());
+        assert_eq!(upgraded.billing_declarations().unwrap().len(), 1);
         let _ = std::fs::remove_file(&db);
     }
 
@@ -1826,6 +1976,49 @@ mod tests {
         assert_eq!(authority.pending_billing_import_candidates().unwrap().len(), 1,
             "only an explicit user action can restore a pending candidate");
         assert!(!authority.billing_import_candidate_reopen("candidate", 5).unwrap());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_declaration_is_separate_from_bills_and_allows_unknown_amount() {
+        let db = tmp_db("billing-declaration");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        assert!(authority.billing_declaration_put(
+            "decl-unknown", "codex", "openai", "official_subscription", Some("Plus"),
+            None, None, "2026-09", None, None, Some("user:declared"), 2,
+        ).unwrap());
+        assert!(authority.billing_declaration_put(
+            "decl-paid-contract", "claude-code", "anthropic", "official_subscription", Some("Pro"),
+            Some(2_000), Some("USD"), "2026-09", Some("2026-12"), None, None, 3,
+        ).unwrap());
+        let rows = authority.billing_declarations().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "decl-paid-contract");
+        assert_eq!(rows[0].5, Some(2_000));
+        assert_eq!(rows[1].0, "decl-unknown");
+        assert_eq!(rows[1].5, None, "unknown contract amount must remain unknown");
+        assert_eq!(authority.host_bill_count().unwrap(), 0,
+            "a billing declaration must not masquerade as a payment record");
+        assert!(authority.billing_declaration_put(
+            "bad", "codex", "openai", "official_subscription", None,
+            Some(100), None, "2026-09", None, None, None, 4,
+        ).is_err(), "amount without a currency is invalid");
+        assert!(authority.billing_declaration_put(
+            "bad-month", "codex", "openai", "official_subscription", None,
+            None, None, "2026-99", None, None, None, 4,
+        ).is_err(), "malformed period must not pass a length-only check");
+        authority.billing_import_candidate_put(
+            "candidate", "claude-code", "anthropic", "USD", 2_000, "2026-09", "legacy", 4,
+        ).unwrap();
+        assert!(authority.billing_declaration_put(
+            "wrong-candidate", "codex", "openai", "official_subscription", None,
+            None, None, "2026-09", None, Some("candidate"), None, 4,
+        ).is_err(), "candidate must belong to the declaration host/provider and be accepted");
+        authority.billing_import_candidate_resolve("candidate", "accepted", 5).unwrap();
+        assert!(authority.billing_declaration_put(
+            "candidate-declaration", "claude-code", "anthropic", "official_subscription", None,
+            Some(2_000), Some("USD"), "2026-09", None, Some("candidate"), None, 6,
+        ).unwrap());
         let _ = std::fs::remove_file(&db);
     }
 
