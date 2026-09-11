@@ -1548,16 +1548,40 @@ fn billing_declarations() -> Value {
         Ok(rows) => serde_json::json!({ "status": "ok", "declarations": rows.into_iter().map(|row| {
             let (declaration_id, host, provider_id, relationship_kind, subscription_name,
                 amount_minor, currency, effective_start, effective_end, source_candidate_id) = row;
+            let current_revision_id = db.billing_declaration_revisions(&declaration_id)
+                .ok().and_then(|revisions| revisions.last().map(|revision| revision.0.clone()));
             serde_json::json!({
                 "declaration_id": declaration_id, "host": host, "provider_id": provider_id,
                 "relationship_kind": relationship_kind, "subscription_name": subscription_name,
                 "amount_minor": amount_minor, "currency": currency,
                 "effective_start": effective_start, "effective_end": effective_end,
                 "source_candidate_id": source_candidate_id,
+                "current_revision_id": current_revision_id,
             })
         }).collect::<Vec<_>>() }),
         Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string(), "declarations": [] }),
     }
+}
+
+/// 撤销只追加不可变修订，不删除已有影响、历史或证据；聚合查询仅认当前 saved
+/// 修订，因此撤销完成后读取端会立即恢复按量/未定归类。
+#[tauri::command]
+fn revoke_billing_declaration(
+    revision_id: String, declaration_id: String, supersedes_revision_id: String,
+) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let changed = db.billing_declaration_revision_revoke(
+        &revision_id, &declaration_id, &supersedes_revision_id,
+        agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "status": "revoked", "revision_id": revision_id,
+        "declaration_id": declaration_id, "changed": changed,
+    }))
 }
 
 /// 保存前影响预览：只读返回事实/会话/token 范围，不提前改变汇总或账单。
@@ -2056,6 +2080,7 @@ pub fn run() {
             resolve_billing_import_candidate,
             save_billing_declaration_revision,
             billing_declarations,
+            revoke_billing_declaration,
             billing_declaration_impact_preview,
             budget_config,
             save_budget_config,

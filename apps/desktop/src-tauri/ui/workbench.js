@@ -481,6 +481,11 @@ async function renderOverview() {
     // 候选核对是增强入口；读取失败不能遮蔽已拿到的名义总览。
     renderBillingImportCandidates({ status: "unavailable", candidates: [] });
   }
+  try {
+    renderBillingDeclarations(await invoke("billing_declarations"));
+  } catch (e) {
+    renderBillingDeclarations({ status: "unavailable", declarations: [] });
+  }
   await renderHostBills(monthKey);
   await renderBudgetSettings();
   renderMonthVerdict(monthly);
@@ -997,6 +1002,51 @@ function bindBillingDeclarationPanel() {
       document.getElementById("ov-billing-preview").textContent += " · 入队失败：" + errText(e);
     }
   };
+}
+
+function renderBillingDeclarations(report) {
+  const panel = document.getElementById("ov-billing-declarations-panel");
+  const list = document.getElementById("ov-billing-declarations-list");
+  if (!panel || !list) return;
+  const declarations = report && report.status === "ok" ? (report.declarations || []) : [];
+  panel.hidden = !declarations.length;
+  list.textContent = "";
+  for (const declaration of declarations) {
+    const row = document.createElement("div");
+    row.className = "billing-review-row";
+    const detail = document.createElement("div");
+    const label = declaration.relationship_kind === "official_subscription" ? "官方订阅" :
+      declaration.relationship_kind === "official_api" ? "官方 API" : declaration.relationship_kind;
+    detail.textContent = declaration.host + " · " + declaration.provider_id + " · " + label +
+      " · 自 " + declaration.effective_start + " 起" +
+      (declaration.effective_end ? "，至 " + declaration.effective_end : "");
+    const actions = document.createElement("div");
+    actions.className = "billing-review-actions";
+    const revoke = document.createElement("button");
+    revoke.className = "btn secondary";
+    revoke.textContent = "撤销计费声明";
+    revoke.onclick = async () => {
+      if (!declaration.current_revision_id) {
+        detail.textContent += " · 无法确定当前修订，请勿继续操作。";
+        return;
+      }
+      revoke.disabled = true;
+      try {
+        await invoke("revoke_billing_declaration", {
+          revisionId: "rev-revoke-" + Date.now().toString(36),
+          declarationId: declaration.declaration_id,
+          supersedesRevisionId: declaration.current_revision_id,
+        });
+        await renderOverview();
+      } catch (e) {
+        revoke.disabled = false;
+        detail.textContent += " · 撤销失败：" + errText(e);
+      }
+    };
+    actions.appendChild(revoke);
+    row.append(detail, actions);
+    list.appendChild(row);
+  }
 }
 
 // 旧版静态资产的套餐声明并非付款证据。这里故意不把它塞进 quality warning：
