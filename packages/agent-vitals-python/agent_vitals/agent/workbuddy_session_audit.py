@@ -96,7 +96,15 @@ def workbuddy_session_list(home=None):
             })
     sessions.sort(key=functools.cmp_to_key(_session_cmp))
     source_snapshot = workbuddy_session.read_workbuddy_source_snapshot(root)
-    return {"host": "workbuddy", "sessions": sessions, "source_snapshot": source_snapshot}
+    # B4：`schema_probe` 追加在 `source_snapshot` 之后的末位（spec §10 B4，
+    # 键序是输出契约的一部分，不能重排）。
+    schema_probe = workbuddy_session.read_workbuddy_schema_probe(root)
+    return {
+        "host": "workbuddy",
+        "sessions": sessions,
+        "source_snapshot": source_snapshot,
+        "schema_probe": schema_probe,
+    }
 
 
 def _render_list(out):
@@ -156,6 +164,67 @@ def _timestamp_attempts(db_rec, records, now_secs):
         if oow:
             out.append(mk("workbuddy.audit-log", "LogFile", "audit-log timestamp", raw))
     return out
+
+
+def _schema_drift_attempts_and_notes(probe):
+    """spec §10 B4 的哨兵 surface（单会话审计 JSON only）：`schema_probe` 里任一
+    表 `unknown`/`missing` 非空时各推一条 `attempts` + `notes`——「宽进严出：
+    机器发现，人来分类」（`CLAUDE.md`）。**只报告，不解释**：消费列仍按名读取，
+    未知/缺失列不改变任何测量值。`probe` 为 None（db 不可读）时调用方不进这条
+    路径——没有 probe 就没有「漂移」可报，是既有 Unavailable 降级的镜像面，不是
+    这里新开一条判断。顺序固定：先 unknown 后 missing（各自 sessions 在前）。
+    Rust 镜像 `sources/mod.rs::schema_drift_attempts_and_notes`，逐字节对齐。"""
+    attempts = []
+    notes = []
+    tables = ("sessions", "session_usage")
+
+    def collect(key):
+        parts = []
+        total = 0
+        for t in tables:
+            entry = probe.get(t)
+            names = entry.get(key) if isinstance(entry, dict) else None
+            if names:
+                parts.append("%s: %s" % (t, ",".join(names)))
+                total += len(names)
+        return parts, total
+
+    unknown_parts, unknown_total = collect("unknown")
+    if unknown_parts:
+        attempts.append({
+            "source_id": "workbuddy.db",
+            "kind": "Sqlite",
+            "surface": "SessionLog",
+            "available": True,
+            "error": "schema-drift: unknown columns %d (%s)"
+                     % (unknown_total, "; ".join(unknown_parts)),
+            "observed_span": None,
+        })
+        notes.append(
+            "schema-drift: %d column(s) not in the 2026-09-11 known baseline "
+            "— consumed columns are read by name so measurement is "
+            "unaffected; the unknown columns are reported, not interpreted"
+            % unknown_total)
+
+    missing_parts, missing_total = collect("missing")
+    if missing_parts:
+        attempts.append({
+            "source_id": "workbuddy.db",
+            "kind": "Sqlite",
+            "surface": "SessionLog",
+            "available": True,
+            "error": "schema-drift: missing known columns %d (%s)"
+                     % (missing_total, "; ".join(missing_parts)),
+            "observed_span": None,
+        })
+        notes.append(
+            "schema-drift: %d known column(s) not found on this machine "
+            "— an older host version or a renamed column is possible; "
+            "any consumed column among the missing ones already degrades to "
+            "null by the existing missing-column-reports-null rule"
+            % missing_total)
+
+    return attempts, notes
 
 
 def _to_cents(value):
@@ -300,6 +369,14 @@ def workbuddy_session_audit_json(home, session_id):
     if _is_unbilled_to_credits(meta):
         notes.append(_WB_UNBILLED_TO_CREDITS_NOTE)
 
+    # B4：schema 哨兵。probe 为 None（db 不可读）时没有「漂移」可报——两个 db
+    # 表面（sessions/session_usage）已经在别处降级，这里不再重复一条 attempts。
+    schema_probe = workbuddy_session.read_workbuddy_schema_probe(root)
+    if schema_probe is not None:
+        drift_attempts, drift_notes = _schema_drift_attempts_and_notes(schema_probe)
+        attempts.extend(drift_attempts)
+        notes.extend(drift_notes)
+
     return {
         "host": "workbuddy",
         "session_id": session_id,
@@ -315,4 +392,5 @@ def workbuddy_session_audit_json(home, session_id):
         "cost": _cost_of(meta),
         "notes": notes,
         "source_snapshot": workbuddy_session.read_workbuddy_source_snapshot(root),
+        "schema_probe": schema_probe,
     }

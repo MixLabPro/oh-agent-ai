@@ -12,6 +12,7 @@
 import json
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -935,10 +936,25 @@ class TestWorkbuddyIntegerEpochMsTimestamps(unittest.TestCase):
     （<2000-01-01 或 >now+24h）报 null **且**进 `attempts`；不做秒/毫秒位数嗅探。
     `SCAN_CMD` 在 CI 差分下指向 Rust 二进制，两侧逐字节同一断言。"""
 
-    _COLS_SESSIONS = ("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, "
-                      "model TEXT, cwd TEXT, permission_mode TEXT, "
-                      "use_sandbox_cli INTEGER, created_at INTEGER, "
-                      "updated_at INTEGER);")
+    # B4（spec §10）起 `sessions` 建全真机 30 列（不再是纸面 8 列子集）——不这样
+    # 建，B4 的哨兵会把这个测试自造的 db 判成「缺 22 个已知列」，多出的
+    # schema-drift attempts 会污染本类断言的 `db_ts` 计数（那两条断言只认时间戳
+    # 越界哨兵，不该被 schema 哨兵撞车）。INSERT 仍只显式写 8 个消费列，其余
+    # 22 列落 NULL（与 `build_workbuddy_fixture.py::_connect_db` 同一处理）。
+    _COLS_SESSIONS = (
+        "CREATE TABLE sessions ("
+        "id TEXT PRIMARY KEY, cwd TEXT, user_id TEXT, title TEXT, "
+        "custom_title TEXT, status TEXT, created_at INTEGER, "
+        "updated_at INTEGER, last_activity_at INTEGER, deleted_at INTEGER, "
+        "is_playground INTEGER, source_mode TEXT, "
+        "is_background_automation INTEGER, mode TEXT, model TEXT, "
+        "expert_id TEXT, expert_locale TEXT, expert_runtime_identity TEXT, "
+        "expert_marketplace TEXT, permission_mode TEXT, "
+        "use_sandbox_cli INTEGER, project_id TEXT, plugin_context_json TEXT, "
+        "last_user_prompt_expert_selection TEXT, context_window INTEGER, "
+        "buddy_snapshot_id TEXT, buddy_binding_json TEXT, thought_level TEXT, "
+        "addon_selection TEXT, session_settings TEXT"
+        ");")
     _COLS_USAGE = ("CREATE TABLE session_usage (session_id TEXT PRIMARY KEY, "
                    "used INTEGER, size INTEGER, updated_at INTEGER, "
                    "credit_json TEXT);")
@@ -952,7 +968,10 @@ class TestWorkbuddyIntegerEpochMsTimestamps(unittest.TestCase):
         (tmp / "workdir").mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(root / "workbuddy.db"))
         conn.executescript(self._COLS_SESSIONS + self._COLS_USAGE)
-        conn.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)", sessions)
+        conn.executemany(
+            "INSERT INTO sessions (id, title, model, cwd, permission_mode, "
+            "use_sandbox_cli, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            sessions)
         conn.executemany("INSERT INTO session_usage VALUES (?,?,?,?,?)", usage)
         conn.commit()
         conn.close()
@@ -1281,6 +1300,306 @@ class TestWorkbuddySourceSnapshotDeclaresWalState(unittest.TestCase):
             lowered = key.lower()
             self.assertFalse(any(f in lowered for f in forbidden),
                              "source_snapshot 里出现了疑似时间戳键：%r" % key)
+
+
+def _workbuddy_relative_path(file_field):
+    """`report["file"]` 是绝对路径（tempdir 前缀因测试用例而异，字面值不该拿来
+    比"同一份数据"）；截到 `.workbuddy/...` 尾段——这才是携带测量含义的部分。"""
+    if not isinstance(file_field, str):
+        return file_field
+    idx = file_field.find(".workbuddy")
+    return file_field[idx:] if idx != -1 else file_field
+
+
+class TestWorkbuddyKnownColumnsBaselineParity(unittest.TestCase):
+    """spec §10 B4（`WORKBUDDY_OBSERVABILITY_ASK.md` P0-2「若不做」降级路径）：
+    `WB_KNOWN_SESSIONS_COLUMNS`/`WB_KNOWN_SESSION_USAGE_COLUMNS` 是 Rust ↔
+    Python 共享的一份**声明基线**（§11 规则 16：结构性事实才配写成规则，语料
+    偶然只能报成数据——这份清单是「此刻观测到什么」的数据，不是判定分支）。
+    仿 `test_canonical_schema.py` 的对账风格：解析 Rust 源文件里真实的
+    `pub const` 数组作为真相源，不是维护第三份手抄清单去信它——常量改了，解析
+    结果跟着改，测试才有意义。与 `USAGE_FACT_FIELDS` 的双语 pin 同一纪律：一份
+    list（Rust）+ 一份 tuple（Python）+ 一条差分守。"""
+
+    _RUST_PATH = (ROOT / "crates" / "agent-vitals-hosts" / "src" / "hosts" /
+                  "workbuddy" / "sources" / "mod.rs")
+
+    # 2026-09-11 08:00 真机实测：
+    #   sqlite3 "file:$HOME/.workbuddy/workbuddy.db?mode=ro" \
+    #     "PRAGMA table_info(sessions); PRAGMA table_info(session_usage);"
+    # 30 列 / 5 列，按 PRAGMA 声明序抄录——这是两侧常量共同的锚，任一方漂移都
+    # 在这里先炸（而不是留到差分测试才发现）。
+    EXPECTED_SESSIONS_COLUMNS = (
+        "id", "cwd", "user_id", "title", "custom_title", "status", "created_at",
+        "updated_at", "last_activity_at", "deleted_at", "is_playground",
+        "source_mode", "is_background_automation", "mode", "model", "expert_id",
+        "expert_locale", "expert_runtime_identity", "expert_marketplace",
+        "permission_mode", "use_sandbox_cli", "project_id", "plugin_context_json",
+        "last_user_prompt_expert_selection", "context_window", "buddy_snapshot_id",
+        "buddy_binding_json", "thought_level", "addon_selection", "session_settings",
+    )
+    EXPECTED_SESSION_USAGE_COLUMNS = (
+        "session_id", "used", "size", "updated_at", "credit_json",
+    )
+
+    def _rust_const_array(self, const_name):
+        """解析 `pub const <const_name>: &[&str] = &[ ... ];` 里的字符串字面量
+        清单，按源码出现序返回。struct 排版若变得不是「一行一个带逗号的字符串
+        字面量」，这个正则拿不到东西，测试会红——这比静默漂移好
+        （`test_canonical_schema.py::_rust_canonical_session_fields` 同款纪律）。"""
+        source = self._RUST_PATH.read_text(encoding="utf-8")
+        marker = "pub const %s: &[&str] = &[" % const_name
+        start = source.index(marker) + len(marker)
+        end = source.index("];", start)
+        body = source[start:end]
+        return tuple(re.findall(r'"([a-z_]+)"', body))
+
+    def test_hardcoded_baseline_matches_rust_const(self):
+        self.assertEqual(self._rust_const_array("WB_KNOWN_SESSIONS_COLUMNS"),
+                         self.EXPECTED_SESSIONS_COLUMNS)
+        self.assertEqual(self._rust_const_array("WB_KNOWN_SESSION_USAGE_COLUMNS"),
+                         self.EXPECTED_SESSION_USAGE_COLUMNS)
+
+    def test_python_constant_equals_rust_const(self):
+        """Rust 与 Python 的常量必须逐字节同序——这是本用例真正要钉的「parity」：
+        不是两边各自与硬编码清单相等（那只能各自证自己对），而是两边**互相**
+        相等。"""
+        sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
+        from agent_vitals.adapters import workbuddy_session as ws  # noqa: PLC0415
+        rust_sessions = self._rust_const_array("WB_KNOWN_SESSIONS_COLUMNS")
+        rust_usage = self._rust_const_array("WB_KNOWN_SESSION_USAGE_COLUMNS")
+        self.assertEqual(tuple(ws.WB_KNOWN_SESSIONS_COLUMNS), rust_sessions,
+                         "Python WB_KNOWN_SESSIONS_COLUMNS 与 Rust 常量不同序/不同值")
+        self.assertEqual(tuple(ws.WB_KNOWN_SESSION_USAGE_COLUMNS), rust_usage,
+                         "Python WB_KNOWN_SESSION_USAGE_COLUMNS 与 Rust 常量不同序/不同值")
+
+    def test_no_duplicate_columns_in_either_baseline(self):
+        """基线清单本身不含重复列名——重复会让 `unknown`/`missing` 的计数产生
+        误导（仿 `USAGE_FACT_FIELDS` 的 `test_no_duplicates`）。"""
+        for cols in (self.EXPECTED_SESSIONS_COLUMNS,
+                    self.EXPECTED_SESSION_USAGE_COLUMNS):
+            self.assertEqual(len(cols), len(set(cols)), cols)
+
+
+class TestWorkbuddySchemaProbeSentinel(unittest.TestCase):
+    """spec §10 B4（`WORKBUDDY_OBSERVABILITY_ASK.md` P0-2「若不做」降级路径）：
+    双向 schema 哨兵。`sessions`/`session_usage` 的活列集与
+    `TestWorkbuddyKnownColumnsBaselineParity` 钉住的 2026-09-11 基线比对——
+    `unknown`（多出的列，活列有、基线没有）/`missing`（基线有、活列没有）各自
+    进 attempts + notes。**只报告，不解释**：消费列仍按名读取，未知/缺失列不
+    改变任何一条已有测量——这是「宽进严出：机器发现，人来分类」（`CLAUDE.md`）
+    在 WorkBuddy 侧的落地，也是本类每条用例的验收核心。"""
+
+    def _copy_fixture(self, tmp):
+        """把 `fixtures/workbuddy/workdir` 落到 `tmp`，`tmp/workdir` 目录另建
+        （`isolated_home_env` 用它当 cwd，仿 `test_cli_matrix._workbuddy_home`）。
+        返回 db 文件路径，调用方可直接改它的 schema。"""
+        src = ROOT / "fixtures" / "workbuddy" / "workdir"
+        shutil.copytree(src, tmp, dirs_exist_ok=True)
+        (tmp / "workdir").mkdir(parents=True, exist_ok=True)
+        return tmp / ".workbuddy" / "workbuddy.db"
+
+    def _run(self, tmp, session_id="s1"):
+        r = subprocess.run(
+            SCAN_CMD + ["workbuddy-session", "--session", session_id,
+                       "--json", "-"],
+            cwd=str(tmp / "workdir"), env=isolated_home_env(tmp),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def _mk_tmp(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return tmp
+
+    def test_baseline_silence_on_the_completed_fixture(self):
+        """(2) fixture 现在按真机声明序建全 30/5 列（`build_workbuddy_fixture.py`
+        `_connect_db`，B4 补完）——两张表的哨兵必须**沉默**：`unknown`/
+        `missing` 均空，且没有任何 schema-drift attempts/notes 混进去。沉默
+        本身就是验收点：不是「没测」，是「测了、确实零漂移」。"""
+        tmp = self._mk_tmp()
+        self._copy_fixture(tmp)
+        report = self._run(tmp)
+        probe = report["schema_probe"]
+        self.assertEqual(probe, {
+            "migrations_applied": None,
+            "sessions": {"unknown": [], "missing": []},
+            "session_usage": {"unknown": [], "missing": []},
+        })
+        self.assertFalse(any(a.get("error", "").startswith("schema-drift:")
+                             for a in report["attempts"]), report["attempts"])
+        self.assertFalse(any(n.startswith("schema-drift:") for n in report["notes"]),
+                         report["notes"])
+
+    def test_unknown_column_is_reported_not_interpreted(self):
+        """(3) 活库比基线多一列（`ALTER TABLE sessions ADD COLUMN zz_future`）
+        → `sessions.unknown == ["zz_future"]`，ONE attempts entry + ONE note，
+        措辞逐字节钉死；**并且**其余全部测量（coverage/findings/cost/
+        date_span，以及键序本身）与未改表结构时逐字节一致——这正是
+        「reported, not interpreted」的验收点：多一列不改变任何一条测量，只是
+        多了一条哨兵报告。"""
+        import sqlite3  # noqa: PLC0415
+        tmp_a = self._mk_tmp()
+        tmp_b = self._mk_tmp()
+        self._copy_fixture(tmp_a)
+        db_path = self._copy_fixture(tmp_b)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("ALTER TABLE sessions ADD COLUMN zz_future TEXT")
+        conn.commit()
+        conn.close()
+
+        baseline = self._run(tmp_a)
+        drifted = self._run(tmp_b)
+
+        probe = drifted["schema_probe"]
+        self.assertEqual(probe["sessions"], {"unknown": ["zz_future"], "missing": []})
+        self.assertEqual(probe["session_usage"], {"unknown": [], "missing": []})
+
+        drift_attempts = [a for a in drifted["attempts"]
+                          if a.get("error", "").startswith("schema-drift:")]
+        self.assertEqual(len(drift_attempts), 1, drifted["attempts"])
+        self.assertEqual(drift_attempts[0], {
+            "source_id": "workbuddy.db",
+            "kind": "Sqlite",
+            "surface": "SessionLog",
+            "available": True,
+            "error": "schema-drift: unknown columns 1 (sessions: zz_future)",
+            "observed_span": None,
+        })
+        drift_notes = [n for n in drifted["notes"] if n.startswith("schema-drift:")]
+        self.assertEqual(len(drift_notes), 1, drifted["notes"])
+        self.assertIn("not in the 2026-09-11 known baseline", drift_notes[0])
+        self.assertIn("reported, not interpreted", drift_notes[0])
+
+        self.assertEqual(list(drifted.keys()), list(baseline.keys()))
+        # `file` 是绝对路径，两份 fixture 落在两个不同的 tempdir，字面值本就不
+        # 相等——比它的 `.workbuddy/...` 尾段（真正携带测量含义的部分）。
+        self.assertEqual(_workbuddy_relative_path(drifted["file"]),
+                         _workbuddy_relative_path(baseline["file"]))
+        for key in baseline:
+            if key in ("attempts", "notes", "schema_probe", "file"):
+                continue
+            self.assertEqual(drifted[key], baseline[key], key)
+        self.assertEqual(drifted["attempts"], baseline["attempts"] + drift_attempts)
+        self.assertEqual(drifted["notes"], baseline["notes"] + drift_notes)
+
+    def test_missing_known_column_reports_missing_and_degrades_by_name(self):
+        """(4) 活库缺一个已知列。两个子用例都必须落进 `sessions.missing`，
+        attempts/note 说「missing known columns」，且**其余全部测量不变**——
+        「消费列缺失」的降级早就是既有的「缺列报缺」纪律（`_val`/`str_field`
+        类型提取：列不存在 → None），B4 不新开一条判断分支，只是把这次降级的
+        原因也 surface 出来。
+
+        子用例 a：缺一个**未被消费**的已知列（`thought_level`，没有任何读者）。
+        子用例 b：缺一个**被消费**的已知列（`permission_mode`——
+        `workbuddy_session_meta` 按名读它喂 sandbox timeline 的 `mode`
+        字段）。它确实经既有 `_val`/`str_field` 降级成 None，但 `mode` 只进
+        sandbox_modes 的 timeline entry、不进 `workbuddy-session` 最终输出的
+        任何顶层键（SV610 判定的是字面量 `"danger-full-access"`，WorkBuddy 原生
+        值从不翻译成这个串，见 `workbuddy_evidence.py` 的 sandbox_modes 注释）
+        ——所以对外可见的测量确实**逐字节不变**，这正是本用例要证明的：consumed
+        列缺失走的是既有的静默降级路径，不是 B4 新引入的行为。"""
+        import sqlite3  # noqa: PLC0415
+
+        def _run_with_dropped_column(column):
+            tmp = self._mk_tmp()
+            db_path = self._copy_fixture(tmp)
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("ALTER TABLE sessions DROP COLUMN %s" % column)
+            conn.commit()
+            conn.close()
+            return self._run(tmp)
+
+        tmp_baseline = self._mk_tmp()
+        self._copy_fixture(tmp_baseline)
+        baseline = self._run(tmp_baseline)
+
+        for column in ("thought_level", "permission_mode"):
+            with self.subTest(column=column):
+                drifted = _run_with_dropped_column(column)
+                probe = drifted["schema_probe"]
+                self.assertEqual(probe["sessions"],
+                                 {"unknown": [], "missing": [column]})
+                self.assertEqual(probe["session_usage"],
+                                 {"unknown": [], "missing": []})
+                drift_attempts = [a for a in drifted["attempts"]
+                                  if a.get("error", "").startswith("schema-drift:")]
+                self.assertEqual(len(drift_attempts), 1, drifted["attempts"])
+                self.assertEqual(
+                    drift_attempts[0]["error"],
+                    "schema-drift: missing known columns 1 (sessions: %s)" % column)
+                self.assertEqual(drift_attempts[0]["available"], True)
+                drift_notes = [n for n in drifted["notes"]
+                              if n.startswith("schema-drift:")]
+                self.assertEqual(len(drift_notes), 1, drifted["notes"])
+                # note 文本给的是「缺列的下游后果」（older host version / renamed
+                # column / 既有缺列降级），措辞与 attempts 的 `error`
+                # （已在上面逐字节钉死 "missing known columns"）分工——note 不
+                # 重复那句话，验成因说明本身。
+                self.assertIn("older host version or a renamed column", drift_notes[0])
+                self.assertIn("already degrades to null", drift_notes[0])
+
+                self.assertEqual(list(drifted.keys()), list(baseline.keys()))
+                self.assertEqual(_workbuddy_relative_path(drifted["file"]),
+                                 _workbuddy_relative_path(baseline["file"]))
+                for key in baseline:
+                    if key in ("attempts", "notes", "schema_probe", "file"):
+                        continue
+                    self.assertEqual(drifted[key], baseline[key], key)
+                self.assertEqual(drifted["attempts"],
+                                 baseline["attempts"] + drift_attempts)
+                self.assertEqual(drifted["notes"], baseline["notes"] + drift_notes)
+
+    def test_migrations_applied_is_a_measurement_not_an_inference(self):
+        """(5) fixture 没有 `__workbuddy_drizzle_migrations` 表 → `null`（不是
+        0——0 会撒谎「查过、是空表」，而实情是「这张表根本不存在」）。活库有该
+        表且 3 行 → `3`。两者都是**测量**：不解析迁移文件名、不猜版本号
+        （B4「若不做」降级路径明令）。"""
+        import sqlite3  # noqa: PLC0415
+        tmp_a = self._mk_tmp()
+        self._copy_fixture(tmp_a)
+        no_table = self._run(tmp_a)
+        self.assertIsNone(no_table["schema_probe"]["migrations_applied"])
+
+        tmp_b = self._mk_tmp()
+        db_path = self._copy_fixture(tmp_b)
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(
+            "CREATE TABLE __workbuddy_drizzle_migrations "
+            "(id INTEGER PRIMARY KEY, hash TEXT, created_at INTEGER);")
+        conn.executemany(
+            "INSERT INTO __workbuddy_drizzle_migrations (hash, created_at) "
+            "VALUES (?, ?)",
+            [("m1", 1), ("m2", 2), ("m3", 3)])
+        conn.commit()
+        conn.close()
+        three_rows = self._run(tmp_b)
+        self.assertEqual(three_rows["schema_probe"]["migrations_applied"], 3)
+
+    def test_no_timestamp_shaped_key_anywhere_in_schema_probe(self):
+        """(6) 与 B3 同一纪律（`TestWorkbuddySourceSnapshotDeclaresWalState`
+        用例 4）：`schema_probe`（含嵌套的 `sessions`/`session_usage` 条目）里
+        不得出现任何 mtime/modified/timestamp 命名的键——B4 的诉求止于「列名
+        集合的差异」，不该夹带一个隐藏的读取时点戳。"""
+        tmp = self._mk_tmp()
+        self._copy_fixture(tmp)
+        probe = self._run(tmp)["schema_probe"]
+        forbidden = ("mtime", "modified", "timestamp")
+
+        def _walk(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    lowered = k.lower()
+                    self.assertFalse(
+                        any(f in lowered for f in forbidden),
+                        "schema_probe 里出现了疑似时间戳键：%r" % k)
+                    _walk(v)
+            elif isinstance(node, list):
+                for item in node:
+                    _walk(item)
+
+        _walk(probe)
 
 
 class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):

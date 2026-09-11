@@ -19,14 +19,31 @@ mapping table fails loudly instead of silently changing the gate.
 WorkBuddy persists each session across **three joinable surfaces** (§2.1;
 `traces/` is session-anonymous and deliberately unused, §12.2):
 
-- `workbuddy.db` — `sessions` (id/title/model/cwd/permission_mode/
-  use_sandbox_cli/created_at/updated_at) + `session_usage`
-  (session_id/used/size/updated_at/credit_json). **sessionId is the only join
-  anchor.** `created_at`/`updated_at` (both tables) and audit-log `timestamp`
-  are **INTEGER epoch-milliseconds** (13-digit), matching the real machine
-  (2026-09-10) — not ISO strings. The adapter normalizes them per spec §6.2
-  (integer → ms → `YYYY-MM-DDTHH:MM:SSZ` UTC; out of `[2000-01-01, now+24h]`
-  → null + `attempts`).
+- `workbuddy.db` — `sessions` (**all 30 real-machine columns**, 2026-09-11
+  `PRAGMA table_info` snapshot; the adapter still only *consumes* 8 by name —
+  id/title/model/cwd/permission_mode/use_sandbox_cli/created_at/updated_at —
+  the other 22 are built with the real types and left NULL on every fixture
+  row) + `session_usage` (session_id/used/size/updated_at/credit_json, all 5
+  real columns). **sessionId is the only join anchor.** `created_at`/
+  `updated_at` (both tables) and audit-log `timestamp` are **INTEGER
+  epoch-milliseconds** (13-digit), matching the real machine (2026-09-10) —
+  not ISO strings. The adapter normalizes them per spec §6.2 (integer → ms →
+  `YYYY-MM-DDTHH:MM:SSZ` UTC; out of `[2000-01-01, now+24h]` → null +
+  `attempts`).
+  The full 30/5-column shape exists for the §10 B4 双向 schema 哨兵
+  (`schema_probe`, a trailing top-level key on both `--list` and single-session
+  JSON): it diffs the live `PRAGMA table_info` columns against a declared
+  2026-09-11 known-column baseline (`WB_KNOWN_SESSIONS_COLUMNS`/
+  `WB_KNOWN_SESSION_USAGE_COLUMNS`, spec §11 规则 16 — a declared baseline, not
+  a rule). A trimmed-down fixture schema would make the sentinel report a
+  permanent false "22 columns missing" drift against its own baseline, which
+  is exactly the paper-schema mistake spec §3.3 already tells this story
+  about — so the fixture must carry the real column count even though the
+  adapter reads most of it as NULL. On this fixture `schema_probe` must be
+  silent: `{"migrations_applied": null, "sessions": {"unknown": [],
+  "missing": []}, "session_usage": {"unknown": [], "missing": []}}`
+  (`migrations_applied` is `null`, not `0` — the fixture has no
+  `__workbuddy_drizzle_migrations` table, and B4 never fabricates one).
 - `audit-log/*.jsonl` — per-event decision records grouped by the **`sessionId`
   field** (not the filename), carrying `eventType`/`sequence`/`prevHash`/`hash`/
   `requestId`/`toolCallId`/`commandPreview`/`messageKey`/`messageParams`.

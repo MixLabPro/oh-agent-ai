@@ -366,6 +366,213 @@ fn read_workbuddy_source_snapshot(root: &Path) -> Option<Value> {
     }))
 }
 
+/// 2026-09-11 真机 `PRAGMA table_info(sessions)` 快照（30 列，按声明序）——
+/// **声明的已知列基线，不是规则**（spec §11 规则 16）：这份清单只钉「此刻观测到
+/// 什么」，列本身会随 WorkBuddy 版本迁移增删（`.workbuddy-sqlite-migrations/`
+/// 已有 11 个迁移文件，`sessions` 被加列 6 次）。漂移不落判定分支，只落
+/// `read_workbuddy_schema_probe` 的哨兵——见该函数与 B4 的证伪测试②③。
+/// Python 镜像 `adapters/workbuddy_session.py::WB_KNOWN_SESSIONS_COLUMNS`，
+/// 逐字节同序（`tests/test_regressions.py` 的 parity 测试钉住）。
+pub const WB_KNOWN_SESSIONS_COLUMNS: &[&str] = &[
+    "id",
+    "cwd",
+    "user_id",
+    "title",
+    "custom_title",
+    "status",
+    "created_at",
+    "updated_at",
+    "last_activity_at",
+    "deleted_at",
+    "is_playground",
+    "source_mode",
+    "is_background_automation",
+    "mode",
+    "model",
+    "expert_id",
+    "expert_locale",
+    "expert_runtime_identity",
+    "expert_marketplace",
+    "permission_mode",
+    "use_sandbox_cli",
+    "project_id",
+    "plugin_context_json",
+    "last_user_prompt_expert_selection",
+    "context_window",
+    "buddy_snapshot_id",
+    "buddy_binding_json",
+    "thought_level",
+    "addon_selection",
+    "session_settings",
+];
+
+/// 2026-09-11 真机 `PRAGMA table_info(session_usage)` 快照（5 列）——同上，声明
+/// 基线而非规则。Python 镜像 `WB_KNOWN_SESSION_USAGE_COLUMNS`。
+pub const WB_KNOWN_SESSION_USAGE_COLUMNS: &[&str] = &[
+    "session_id",
+    "used",
+    "size",
+    "updated_at",
+    "credit_json",
+];
+
+/// 表是否存在——用 `sqlite_master` 查，不靠 `PRAGMA table_info` 的空结果集区分
+/// 「表不存在」和「表存在但巧合 0 列」（sqlite 不允许 0 列表，所以后者不可能
+/// 发生，但显式查存在性比依赖这条隐含约束更诚实）。
+fn table_exists(conn: &Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|c| c > 0)
+    .unwrap_or(false)
+}
+
+/// `PRAGMA table_info(<table>)` 的活列名，按声明序返回；表不存在 → `None`
+/// （空结果集就是「没这张表」的信号，交给 `table_exists` 显式判定，不靠猜）。
+fn live_columns(conn: &Connection, table: &str) -> Option<Vec<String>> {
+    if !table_exists(conn, table) {
+        return None;
+    }
+    let sql = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&sql).ok()?;
+    let mut rows = stmt.query([]).ok()?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().ok()? {
+        let name: String = row.get(1).ok()?;
+        out.push(name);
+    }
+    Some(out)
+}
+
+/// 单表的漂移比对：`unknown` = 活列 − 已知（按活列出现序），`missing` = 已知 −
+/// 活列（按已知清单序）。表不存在 → `None`（**不是** `{"unknown":[],"missing":
+/// known}`——缺席不是「全部已知列都漂移没了」，是「这张表读不到」，与
+/// `read_workbuddy_source_snapshot` 的降级纪律同款：不可读绝不编成一个假结论）。
+fn table_drift(conn: &Connection, table: &str, known: &[&str]) -> Value {
+    let Some(live) = live_columns(conn, table) else {
+        return Value::Null;
+    };
+    let unknown: Vec<&str> = live
+        .iter()
+        .filter(|c| !known.contains(&c.as_str()))
+        .map(|s| s.as_str())
+        .collect();
+    let missing: Vec<&str> = known
+        .iter()
+        .filter(|k| !live.iter().any(|c| c == *k))
+        .copied()
+        .collect();
+    json!({ "unknown": unknown, "missing": missing })
+}
+
+/// 双向 schema 哨兵（spec §10 B4，`docs/WORKBUDDY_OBSERVABILITY_ASK.md` P0-2
+/// 「若不做」降级路径）：`sessions`/`session_usage` 的活列集与
+/// `WB_KNOWN_{SESSIONS,SESSION_USAGE}_COLUMNS` 比对，`migrations_applied` 读
+/// `__workbuddy_drizzle_migrations` 行数——**测量，不是推断**（不解析迁移文件、
+/// 不猜版本号）。db 不可读 → 整个 probe `None`（与 `read_workbuddy_source_
+/// snapshot` 同一降级铁律）；单表缺失 → 该表条目 `None`（缺席不是「零漂移」）；
+/// 迁移表缺失 → `None`。
+fn read_workbuddy_schema_probe(root: &Path) -> Option<Value> {
+    let db_path = root.join("workbuddy.db");
+    if !db_path.is_file() {
+        return None;
+    }
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let migrations_applied = if table_exists(&conn, "__workbuddy_drizzle_migrations") {
+        conn.query_row(
+            "SELECT COUNT(*) FROM __workbuddy_drizzle_migrations",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(Value::from)
+        .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    Some(json!({
+        "migrations_applied": migrations_applied,
+        "sessions": table_drift(&conn, "sessions", WB_KNOWN_SESSIONS_COLUMNS),
+        "session_usage": table_drift(&conn, "session_usage", WB_KNOWN_SESSION_USAGE_COLUMNS),
+    }))
+}
+
+/// spec §10 B4 的哨兵 surface（单会话审计 JSON only）：`schema_probe` 里任一表
+/// `unknown`/`missing` 非空时各推一条 `attempts` + `notes`——「宽进严出：机器
+/// 发现，人来分类」（`CLAUDE.md`）。**只报告，不解释**：消费列仍按名读取，未知/
+/// 缺失列不改变任何测量值。`probe` 为 `None`（db 不可读）时调用方不进这条
+/// 路径——没有 probe 就没有「漂移」可报，是既有 Unavailable 降级的镜像面，不是
+/// 这里新开一条判断。顺序固定：先 unknown 后 missing（各自 sessions 在前）。
+/// Python 镜像 `agent/workbuddy_session_audit.py::_schema_drift_attempts_and_notes`，
+/// 逐字节对齐。
+fn schema_drift_attempts_and_notes(probe: &Value) -> (Vec<Value>, Vec<Value>) {
+    let mut attempts = Vec::new();
+    let mut notes = Vec::new();
+    let tables = ["sessions", "session_usage"];
+
+    let collect = |key: &str| -> (Vec<String>, usize) {
+        let mut parts = Vec::new();
+        let mut total = 0usize;
+        for t in tables {
+            let names: Vec<&str> = probe
+                .get(t)
+                .and_then(|v| v.get(key))
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if !names.is_empty() {
+                total += names.len();
+                parts.push(format!("{t}: {}", names.join(",")));
+            }
+        }
+        (parts, total)
+    };
+
+    let (unknown_parts, unknown_total) = collect("unknown");
+    if !unknown_parts.is_empty() {
+        attempts.push(json!({
+            "source_id": "workbuddy.db",
+            "kind": "Sqlite",
+            "surface": "SessionLog",
+            "available": true,
+            "error": format!(
+                "schema-drift: unknown columns {unknown_total} ({})",
+                unknown_parts.join("; ")
+            ),
+            "observed_span": Value::Null,
+        }));
+        notes.push(json!(format!(
+            "schema-drift: {unknown_total} column(s) not in the 2026-09-11 known \
+             baseline — consumed columns are read by name so measurement is \
+             unaffected; the unknown columns are reported, not interpreted"
+        )));
+    }
+
+    let (missing_parts, missing_total) = collect("missing");
+    if !missing_parts.is_empty() {
+        attempts.push(json!({
+            "source_id": "workbuddy.db",
+            "kind": "Sqlite",
+            "surface": "SessionLog",
+            "available": true,
+            "error": format!(
+                "schema-drift: missing known columns {missing_total} ({})",
+                missing_parts.join("; ")
+            ),
+            "observed_span": Value::Null,
+        }));
+        notes.push(json!(format!(
+            "schema-drift: {missing_total} known column(s) not found on this \
+             machine — an older host version or a renamed column is possible; \
+             any consumed column among the missing ones already degrades to \
+             null by the existing missing-column-reports-null rule"
+        )));
+    }
+
+    (attempts, notes)
+}
+
 /// `file-history/<sessionId>/` 下的文件数 = FileMutations 源（spec §3 Measured 行：
 /// `<contentHash>@v<n>` 版本快照数）。目录缺失 → 0（无文件快照是诚实测量，不是
 /// 不可读）。
@@ -506,7 +713,15 @@ pub fn workbuddy_session_list(home: &Path) -> Value {
     }
     sessions.sort_by(session_cmp);
     let source_snapshot = read_workbuddy_source_snapshot(&root);
-    json!({ "host": "workbuddy", "sessions": sessions, "source_snapshot": source_snapshot })
+    // B4：`schema_probe` 追加在 `source_snapshot` 之后的末位（spec §10 B4，
+    // 键序是输出契约的一部分，不能重排）。
+    let schema_probe = read_workbuddy_schema_probe(&root);
+    json!({
+        "host": "workbuddy",
+        "sessions": sessions,
+        "source_snapshot": source_snapshot,
+        "schema_probe": schema_probe,
+    })
 }
 
 /// `workbuddy-session --list` 的人读呈现。缺席的字段一律 `-`（诚实缺失，不编造）；
@@ -697,6 +912,15 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         notes.push(json!(WB_UNBILLED_TO_CREDITS_NOTE));
     }
 
+    // B4：schema 哨兵。probe 为 None（db 不可读）时没有「漂移」可报——两个 db
+    // 表面（sessions/session_usage）已经在别处降级，这里不再重复一条 attempts。
+    let schema_probe = read_workbuddy_schema_probe(&root);
+    if let Some(probe) = &schema_probe {
+        let (drift_attempts, drift_notes) = schema_drift_attempts_and_notes(probe);
+        attempts.extend(drift_attempts);
+        notes.extend(drift_notes);
+    }
+
     Some(json!({
         "host": "workbuddy",
         "session_id": session_id,
@@ -712,5 +936,6 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         "cost": cost_of(&meta),
         "notes": notes,
         "source_snapshot": read_workbuddy_source_snapshot(&root),
+        "schema_probe": schema_probe,
     }))
 }

@@ -688,7 +688,7 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
 - [x] **B3 · 读取快照时点标注**（code，ASK P0-1 若不做）
       `workbuddy-session` 输出加 `source_snapshot: {journal_mode, db_bytes, wal_bytes}`
       ——**不含 mtime**（fixture 上非确定，会破坏逐字节差分）。Rust↔Python 同 commit。
-- [ ] **B4 · 双向 schema 哨兵**（code，ASK P0-2 若不做）
+- [x] **B4 · 双向 schema 哨兵**（code，ASK P0-2 若不做）
       对 `sessions`/`session_usage` 的活列集与**声明的已知列清单**比对，未知列进
       `attempts` + note `schema-drift: unknown columns N`；`migrations_applied` 读
       `__workbuddy_drizzle_migrations` 行数（测量，非推断），表缺失报 null。

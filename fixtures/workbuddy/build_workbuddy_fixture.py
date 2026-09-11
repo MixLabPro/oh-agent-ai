@@ -149,12 +149,32 @@ def _connect_db(db_path):
     conn = sqlite3.connect(str(db_path))
     # 列类型对齐真机（2026-09-10 实测）：`created_at` / `updated_at` 是 INTEGER
     # （epoch-ms），不是 TEXT；`session_usage` 有 `updated_at INTEGER` 列（在
-    # `credit_json` 之前），旧 fixture 整列缺失。真机 `sessions` 有 30 列——适配器
-    # 走 `SELECT *` + 按列名取，不必全建，但**建的列类型必须与真机一致**（§3.3）。
+    # `credit_json` 之前），旧 fixture 整列缺失。
+    #
+    # B4（2026-09-11 真机 `PRAGMA table_info`）：`sessions` 全部 30 列、
+    # `session_usage` 全部 5 列，**按真机声明序建全**——不再是「适配器只用 8/5
+    # 列所以只建 8/5 列」的纸面子集。理由是 B4 的哨兵：`schema_probe` 拿这份
+    # fixture 与 `WB_KNOWN_SESSIONS_COLUMNS`/`WB_KNOWN_SESSION_USAGE_COLUMNS`
+    # 比对，子集 schema 会让 fixture 上的哨兵恒报缺列——那是把「fixture 没建全」
+    # 误报成「真机漂移」，测错东西（§3.3 同款教训）。22 个新增列**只声明类型、
+    # 不带 NOT NULL/DEFAULT**：真机部分列是 `NOT NULL`（如 `user_id`），但下方
+    # INSERT 仍只显式写 8 个消费/已知列，新增列必须能落 NULL——这里的约束特意
+    # 比真机宽松，换来 fixture 行不必编造 22 个用不到的值（§10 B4「leaving the
+    # 22 newly added columns NULL/default」）。
     conn.executescript(
-        "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT, "
-        "cwd TEXT, permission_mode TEXT, use_sandbox_cli INTEGER, "
-        "created_at INTEGER, updated_at INTEGER);"
+        "CREATE TABLE sessions ("
+        "id TEXT PRIMARY KEY, cwd TEXT, user_id TEXT, title TEXT, "
+        "custom_title TEXT, status TEXT, created_at INTEGER, "
+        "updated_at INTEGER, last_activity_at INTEGER, deleted_at INTEGER, "
+        "is_playground INTEGER, source_mode TEXT, "
+        "is_background_automation INTEGER, mode TEXT, model TEXT, "
+        "expert_id TEXT, expert_locale TEXT, expert_runtime_identity TEXT, "
+        "expert_marketplace TEXT, permission_mode TEXT, "
+        "use_sandbox_cli INTEGER, project_id TEXT, plugin_context_json TEXT, "
+        "last_user_prompt_expert_selection TEXT, context_window INTEGER, "
+        "buddy_snapshot_id TEXT, buddy_binding_json TEXT, thought_level TEXT, "
+        "addon_selection TEXT, session_settings TEXT"
+        ");"
         "CREATE TABLE session_usage (session_id TEXT PRIMARY KEY, "
         "used INTEGER, size INTEGER, updated_at INTEGER, credit_json TEXT);")
     return conn
@@ -340,12 +360,40 @@ def self_verify(root):
     assert snap["db_bytes"] == (root / "workbuddy.db").stat().st_size, snap
     assert list(snap.keys()) == ["journal_mode", "db_bytes", "wal_bytes"], snap
     assert not any(k in snap for k in ("mtime", "modified", "timestamp")), snap
-    # 两个消费面（--list 索引 / 单会话审计）都必须带同一份快照，且是末位键。
+    # 两个消费面（--list 索引 / 单会话审计）都必须带同一份快照。B4 起
+    # `schema_probe` 追加在它之后，`source_snapshot` 不再是末位键——见下方 B4 段。
     listing = workbuddy_session_audit.workbuddy_session_list(root.parent)
-    assert list(listing.keys())[-1] == "source_snapshot", listing.keys()
     assert listing["source_snapshot"] == snap, listing["source_snapshot"]
-    assert list(full.keys())[-1] == "source_snapshot", full.keys()
     assert full["source_snapshot"] == snap, full["source_snapshot"]
+
+    # ── B4：双向 schema 哨兵（spec §10，`WORKBUDDY_OBSERVABILITY_ASK.md` P0-2
+    # 「若不做」降级路径）── fixture 的 `sessions`/`session_usage` 现在按真机
+    # 声明序建全 30/5 列（上方 `_connect_db` 注释），所以哨兵在 fixture 上必须
+    # **沉默**：两张表 `unknown`/`missing` 均空。`migrations_applied` 是 None——
+    # fixture 没有 `__workbuddy_drizzle_migrations` 表，**不伪造一张**（B4 明令
+    # 「不解析迁移文件、不猜版本号」，缺表就是缺表，不是 0）。这条沉默正是 B4
+    # 的验收点：如果 fixture 报了漂移，说明 fixture schema 与
+    # `WB_KNOWN_*_COLUMNS` 基线不再对齐，门禁应该在这里就地炸，而不是留到
+    # 差分测试才发现。
+    probe = workbuddy_session.read_workbuddy_schema_probe(root)
+    assert probe is not None, "db 存在时 schema_probe 不应为 None"
+    assert probe["migrations_applied"] is None, probe
+    assert probe["sessions"] == {"unknown": [], "missing": []}, probe["sessions"]
+    assert probe["session_usage"] == {"unknown": [], "missing": []}, \
+        probe["session_usage"]
+    assert list(probe.keys()) == \
+        ["migrations_applied", "sessions", "session_usage"], probe.keys()
+    # `schema_probe` 是两个消费面共同的末位键（`source_snapshot` 之后）。
+    assert list(listing.keys())[-1] == "schema_probe", listing.keys()
+    assert listing["schema_probe"] == probe, listing["schema_probe"]
+    assert list(full.keys())[-1] == "schema_probe", full.keys()
+    assert full["schema_probe"] == probe, full["schema_probe"]
+    # 沉默会话上没有任何 schema-drift attempts/notes 混进去（§10 B4 的 surface
+    # 只在漂移非空时才推条目——健康 fixture 必须一条都没有）。
+    assert not any(a.get("error", "").startswith("schema-drift:")
+                   for a in full["attempts"]), full["attempts"]
+    assert not any(n.startswith("schema-drift:") for n in full["notes"]), \
+        full["notes"]
 
 
 def main():

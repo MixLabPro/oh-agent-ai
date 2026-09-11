@@ -120,6 +120,98 @@ def read_workbuddy_source_snapshot(root):
     }
 
 
+# 2026-09-11 真机 `PRAGMA table_info(sessions)` 快照（30 列，按声明序）——
+# **声明的已知列基线，不是规则**（spec §11 规则 16）：这份清单只钉「此刻观测到
+# 什么」，列本身会随 WorkBuddy 版本迁移增删（`.workbuddy-sqlite-migrations/`
+# 已有 11 个迁移文件，`sessions` 被加列 6 次）。漂移不落判定分支，只落
+# `read_workbuddy_schema_probe` 的哨兵。Rust 镜像
+# `sources/mod.rs::WB_KNOWN_SESSIONS_COLUMNS`，逐字节同序
+# （`tests/test_regressions.py` 的 parity 测试钉住）。
+WB_KNOWN_SESSIONS_COLUMNS = (
+    "id", "cwd", "user_id", "title", "custom_title", "status", "created_at",
+    "updated_at", "last_activity_at", "deleted_at", "is_playground",
+    "source_mode", "is_background_automation", "mode", "model", "expert_id",
+    "expert_locale", "expert_runtime_identity", "expert_marketplace",
+    "permission_mode", "use_sandbox_cli", "project_id", "plugin_context_json",
+    "last_user_prompt_expert_selection", "context_window", "buddy_snapshot_id",
+    "buddy_binding_json", "thought_level", "addon_selection", "session_settings",
+)
+
+# 2026-09-11 真机 `PRAGMA table_info(session_usage)` 快照（5 列）——同上，声明
+# 基线而非规则。Rust 镜像 `WB_KNOWN_SESSION_USAGE_COLUMNS`。
+WB_KNOWN_SESSION_USAGE_COLUMNS = (
+    "session_id", "used", "size", "updated_at", "credit_json",
+)
+
+
+def _table_exists(conn, table):
+    """表是否存在——用 `sqlite_master` 查，不靠 `PRAGMA table_info` 的空结果集
+    区分「表不存在」和「表存在但巧合 0 列」（sqlite 不允许 0 列表，所以后者不
+    可能发生，但显式查存在性比依赖这条隐含约束更诚实）。"""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+        (table,)).fetchone()
+    return bool(row and row[0])
+
+
+def _live_columns(conn, table):
+    """`PRAGMA table_info(<table>)` 的活列名，按声明序返回；表不存在 → None
+    （显式用 `_table_exists` 判定，不靠空结果集猜）。"""
+    if not _table_exists(conn, table):
+        return None
+    cur = conn.execute("PRAGMA table_info(%s)" % table)
+    return [row[1] for row in cur.fetchall()]
+
+
+def _table_drift(conn, table, known):
+    """单表的漂移比对：`unknown` = 活列 − 已知（按活列出现序），`missing` =
+    已知 − 活列（按已知清单序）。表不存在 → None（**不是** `{"unknown":[],
+    "missing":known}`——缺席不是「全部已知列都漂移没了」，是「这张表读不到」，
+    与 `read_workbuddy_source_snapshot` 的降级纪律同款）。"""
+    live = _live_columns(conn, table)
+    if live is None:
+        return None
+    live_set = set(live)
+    known_set = set(known)
+    unknown = [c for c in live if c not in known_set]
+    missing = [k for k in known if k not in live_set]
+    return {"unknown": unknown, "missing": missing}
+
+
+def read_workbuddy_schema_probe(root):
+    """双向 schema 哨兵（spec §10 B4，`WORKBUDDY_OBSERVABILITY_ASK.md` P0-2
+    「若不做」降级路径）：`sessions`/`session_usage` 的活列集与
+    `WB_KNOWN_{SESSIONS,SESSION_USAGE}_COLUMNS` 比对，`migrations_applied` 读
+    `__workbuddy_drizzle_migrations` 行数——**测量，不是推断**（不解析迁移
+    文件、不猜版本号）。db 不可读 → 整个 probe None（与
+    `read_workbuddy_source_snapshot` 同一降级铁律）；单表缺失 → 该表条目 None
+    （缺席不是「零漂移」）；迁移表缺失 → None。Rust 镜像
+    `sources/mod.rs::read_workbuddy_schema_probe`。"""
+    db_path = root / "workbuddy.db"
+    if not db_path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=5.0)
+    except (sqlite3.Error, OSError):
+        return None
+    try:
+        migrations_applied = None
+        if _table_exists(conn, "__workbuddy_drizzle_migrations"):
+            row = conn.execute(
+                "SELECT COUNT(*) FROM __workbuddy_drizzle_migrations").fetchone()
+            migrations_applied = row[0] if row else None
+        return {
+            "migrations_applied": migrations_applied,
+            "sessions": _table_drift(conn, "sessions", WB_KNOWN_SESSIONS_COLUMNS),
+            "session_usage": _table_drift(
+                conn, "session_usage", WB_KNOWN_SESSION_USAGE_COLUMNS),
+        }
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
 def _read_table(conn, table, key_col):
     """读一张表 → `{key_col → 行 dict}`；表缺失/读失败 → None（调用方决定是
     降级整库还是只降这一列）。"""
