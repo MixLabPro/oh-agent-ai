@@ -73,6 +73,28 @@
           <button class="btn" id="ov-billing-apply">应用到汇总并开始重算</button>
         </div>
       </section>
+      <section class="billing-record panel" id="ov-billing-record-panel">
+        <div class="panel-title">录入实际账单</div>
+        <div class="muted">账单/付款记录与订阅合同分开保存；金额使用最小货币单位，不会自动推断付款。</div>
+        <div class="billing-form">
+          <label>宿主 <input id="ov-bill-host" value="codex" maxlength="64" /></label>
+          <label>服务商 <input id="ov-bill-provider" maxlength="128" placeholder="openai" /></label>
+          <label>账期 <input id="ov-bill-period" placeholder="YYYY-MM" maxlength="7" /></label>
+          <label>费用类型
+            <select id="ov-bill-basis">
+              <option value="host_billed">账单实付</option>
+              <option value="metered_actual">按量实付</option>
+              <option value="fixed_subscription">固定订阅</option>
+            </select>
+          </label>
+          <label>金额（分） <input id="ov-bill-amount" type="number" min="0" step="1" /></label>
+          <label>币种 <input id="ov-bill-currency" value="CNY" maxlength="8" /></label>
+          <label>来源说明 <input id="ov-bill-evidence" maxlength="256" placeholder="用户手工录入" /></label>
+          <div class="billing-form-actions"><button class="btn" id="ov-bill-save">保存账单</button></div>
+        </div>
+        <div class="billing-preview" id="ov-bill-status" hidden></div>
+        <div class="muted" id="ov-bill-existing"></div>
+      </section>
       <!-- v0.9 Stage D KPI 行（今日五 tile，ATTRIBUTABLE_WASTE §6/§6.7 感知层）。
            数据源 = data_daily_summary（冻结 DTO：tokens_by_host + by_provider +
            total_actual_spend）。名义 = 官方标价折算（不扣订阅/中转折扣，"名义

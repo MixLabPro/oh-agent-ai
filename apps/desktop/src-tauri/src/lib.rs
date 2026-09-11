@@ -1448,6 +1448,39 @@ fn billing_declaration_impact_preview(
     )
 }
 
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn save_host_bill(
+    bill_id: String, host: String, provider_id: String, billing_period: String,
+    billing_basis: String, amount_minor: i64, currency: String, evidence_ref: String,
+) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    db.host_bill_put(
+        &bill_id, &host, &provider_id, &billing_period, &billing_basis,
+        amount_minor, &currency, &evidence_ref, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "saved", "bill_id": bill_id }))
+}
+
+#[tauri::command]
+fn host_bills_for_period(billing_period: String) -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable", "bills": [] });
+    };
+    match db.host_bills_for_period(&billing_period) {
+        Ok(rows) => serde_json::json!({ "status": "ok", "bills": rows.into_iter().map(|(host, provider_id, billing_basis, amount_minor, currency)| {
+            serde_json::json!({ "host": host, "provider_id": provider_id, "billing_basis": billing_basis, "amount_minor": amount_minor, "currency": currency })
+        }).collect::<Vec<_>>() }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string(), "bills": [] }),
+    }
+}
+
 /// 声明保存后创建重算任务；这里只入队，不在 IPC 调用线程执行重算。
 fn spawn_billing_recalculation_worker(path: PathBuf, job_id: String) {
     std::thread::spawn(move || {
@@ -1842,6 +1875,8 @@ pub fn run() {
             save_billing_declaration_revision,
             billing_declarations,
             billing_declaration_impact_preview,
+            save_host_bill,
+            host_bills_for_period,
             enqueue_billing_recalculation,
             retry_billing_recalculation,
             billing_recalculation_job_status,

@@ -468,6 +468,7 @@ async function renderOverview() {
     // 候选核对是增强入口；读取失败不能遮蔽已拿到的名义总览。
     renderBillingImportCandidates({ status: "unavailable", candidates: [] });
   }
+  await renderHostBills(monthKey);
   renderMonthVerdict(monthly);
   renderOverviewDays(cal);
   renderKpiRow("t", daily, ov.fx);
@@ -908,6 +909,51 @@ function renderBillingImportCandidates(report) {
       list.appendChild(row);
     }
   };
+}
+
+async function renderHostBills(period) {
+  const existing = document.getElementById("ov-bill-existing");
+  const status = document.getElementById("ov-bill-status");
+  const save = document.getElementById("ov-bill-save");
+  if (!existing || !status || !save || save.dataset.bound === "1") return;
+  document.getElementById("ov-bill-period").value = period;
+  save.dataset.bound = "1";
+  save.onclick = async () => {
+    save.disabled = true;
+    status.hidden = false;
+    try {
+      const host = document.getElementById("ov-bill-host").value.trim();
+      const provider = document.getElementById("ov-bill-provider").value.trim();
+      const billingPeriod = document.getElementById("ov-bill-period").value.trim();
+      const amount = Number(document.getElementById("ov-bill-amount").value);
+      const currency = document.getElementById("ov-bill-currency").value.trim();
+      const evidence = document.getElementById("ov-bill-evidence").value.trim();
+      if (!host || !provider || !/^\d{4}-(0[1-9]|1[0-2])$/.test(billingPeriod) ||
+          !Number.isSafeInteger(amount) || amount < 0 || !currency || !evidence) {
+        throw new Error("请填写宿主、服务商、有效账期、非负整数金额、币种和来源说明");
+      }
+      await invoke("save_host_bill", {
+        billId: "bill-" + Date.now().toString(36), host, providerId: provider,
+        billingPeriod, billingBasis: document.getElementById("ov-bill-basis").value,
+        amountMinor: amount, currency, evidenceRef: evidence,
+      });
+      status.textContent = "账单已保存；它与订阅合同分开，不会改变已观测 tokens。";
+      const report = await invoke("host_bills_for_period", { billingPeriod });
+      existing.textContent = report.status === "ok"
+        ? "当前账期已保存 " + (report.bills || []).length + " 条账单记录。"
+        : "账单已保存，但读取列表暂不可用。";
+    } catch (e) {
+      status.textContent = "保存失败：" + errText(e);
+    } finally {
+      save.disabled = false;
+    }
+  };
+  try {
+    const report = await invoke("host_bills_for_period", { billingPeriod: period });
+    if (report.status === "ok" && (report.bills || []).length) {
+      existing.textContent = "当前账期已保存 " + report.bills.length + " 条账单记录。";
+    }
+  } catch (_) { /* 账单是增强入口，不遮蔽总览 */ }
 }
 
 // 「本月逐日」panel：read_calendar_month（逐日三宿主 token + 分币耗费）。
