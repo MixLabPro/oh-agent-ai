@@ -72,6 +72,14 @@ pub type BillingDeclarationRevisionRow = (
 );
 /// 修订的一项可选作用范围：`account`、`route`、`model` 或 `session`。
 pub type BillingDeclarationScopeRow = (String, String, String);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingDeclarationImpactPreview {
+    pub fact_count: i64,
+    pub session_count: i64,
+    pub total_tokens: i64,
+    pub first_event_ts_ms: Option<i64>,
+    pub last_event_ts_ms: Option<i64>,
+}
 type BillingDeclarationRevisionSnapshot = (
     i64, String, String, String, Option<String>, Option<i64>, Option<String>, String,
     Option<String>, Option<String>, Option<String>,
@@ -1939,6 +1947,69 @@ impl AuthorityDb {
         rows
     }
 
+    /// 只读计算声明修订将触及哪些事实；不写任何派生结果。
+    pub fn billing_declaration_impact_preview(
+        &self, revision_id: &str, window_start_ms: i64, window_end_ms: i64,
+    ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
+        let revision: Option<(String, String, String, String, Option<String>)> = self.conn.query_row(
+            "SELECT host, provider_id, effective_start, change_kind, effective_end
+             FROM billing_declaration_revisions WHERE revision_id = ?1",
+            rusqlite::params![revision_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).optional()?;
+        let Some((host, provider_id, effective_start, change_kind, effective_end)) = revision else {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "unknown billing declaration revision".to_string(),
+            )));
+        };
+        if change_kind == "revoked" || window_end_ms <= window_start_ms {
+            return Ok(BillingDeclarationImpactPreview { fact_count: 0, session_count: 0,
+                total_tokens: 0, first_event_ts_ms: None, last_event_ts_ms: None });
+        }
+        let scopes = self.billing_declaration_scopes(revision_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT f.session_key, f.model_id, f.route_evidence_id, r.account_ref,
+                    f.event_ts_ms, f.uncached_input_tokens + f.cache_read_tokens
+                    + f.cache_write_tokens + f.output_tokens
+             FROM usage_facts f LEFT JOIN route_evidence r ON r.evidence_id = f.route_evidence_id
+             WHERE f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id = ?2
+               AND f.event_ts_ms >= ?3 AND f.event_ts_ms < ?4
+               AND strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?5
+               AND (?6 IS NULL OR strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?6)",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![
+            host, provider_id, window_start_ms, window_end_ms, effective_start, effective_end,
+        ], |row| Ok((
+            row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<i64>>(4)?, row.get::<_, i64>(5)?,
+        )))?;
+        let mut preview = BillingDeclarationImpactPreview { fact_count: 0, session_count: 0,
+            total_tokens: 0, first_event_ts_ms: None, last_event_ts_ms: None };
+        let mut sessions = std::collections::HashSet::new();
+        for row in rows {
+            let (session, model, route, account, event_ts, tokens) = row?;
+            let matches = |kind: &str, value: &str| match kind {
+                "model" => model.as_deref() == Some(value), "route" => route.as_deref() == Some(value),
+                "account" => account.as_deref() == Some(value), "session" => session.as_deref() == Some(value),
+                _ => false,
+            };
+            let matches_all_scope_kinds = ["account", "route", "model", "session"].iter().all(|kind| {
+                let values = scopes.iter().filter(|(_, scope_kind, _)| scope_kind == kind);
+                let has_kind = scopes.iter().any(|(_, scope_kind, _)| scope_kind == kind);
+                !has_kind || values.clone().any(|(_, _, value)| matches(kind, value))
+            });
+            if !matches_all_scope_kinds { continue; }
+            preview.fact_count += 1;
+            if let Some(key) = session { sessions.insert(key); }
+            preview.total_tokens = preview.total_tokens.saturating_add(tokens);
+            preview.first_event_ts_ms = preview.first_event_ts_ms.or(event_ts);
+            preview.last_event_ts_ms = event_ts.or(preview.last_event_ts_ms);
+        }
+        preview.session_count = sessions.len() as i64;
+        Ok(preview)
+    }
+
     /// 幂等写入一个待确认的旧订阅候选。相同候选不会重复；候选永远不写入
     /// `host_bills`，必须由上层获得用户确认后另走明确账单写入。
     #[allow(clippy::too_many_arguments)]
@@ -2422,6 +2493,43 @@ mod tests {
             None, None, "2026-09", None, None, None, &[("host", "codex")], 3,
         ).is_err());
         assert!(authority.billing_declaration_revisions("declaration").unwrap().is_empty());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_declaration_impact_preview_matches_scope_intersection() {
+        let db = tmp_db("billing-impact-preview");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.conn().execute_batch(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES('preview-run', 1, 'test', 'succeeded', 9);
+             INSERT INTO route_evidence(evidence_id, host, machine_namespace, native_session_id,
+                 endpoint_host, account_ref, evidence_basis, ingested_run_id)
+             VALUES('route-a', 'codex', 'machine', 'session-a', 'official', 'personal', 'test', 'preview-run'),
+                   ('route-b', 'codex', 'machine', 'session-b', 'other', 'personal', 'test', 'preview-run');
+             INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+             VALUES('session-a-key', 'codex', 'session-a', 'machine', 1000),
+                   ('session-b-key', 'codex', 'session-b', 'machine', 3000);
+             INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                 session_key, observation_kind, provider_id, model_id, event_ts_ms, route_evidence_id,
+                 uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                 ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES('fact-1', 'codex', 'machine', 'session-a', 'event-1', 'session-a-key', 'assistant-usage', 'openai', 'model-a', 1000, 'route-a', 10, 0, 0, 0, 'preview-run', 1, 1),
+                   ('fact-2', 'codex', 'machine', 'session-a', 'event-2', 'session-a-key', 'assistant-usage', 'openai', 'model-b', 2000, 'route-a', 20, 0, 0, 0, 'preview-run', 1, 1),
+                   ('fact-3', 'codex', 'machine', 'session-b', 'event-3', 'session-b-key', 'assistant-usage', 'openai', 'model-a', 3000, 'route-b', 30, 0, 0, 0, 'preview-run', 1, 1);",
+        ).unwrap();
+        authority.billing_declaration_revision_save(
+            "preview-revision", "preview-declaration", None, "codex", "openai", "official_api",
+            None, None, None, "1970-01", Some("1970-12"), None, Some("test"),
+            &[("route", "route-a"), ("model", "model-a")], 2,
+        ).unwrap();
+        assert_eq!(authority.billing_declaration_impact_preview(
+            "preview-revision", 0, 4_000,
+        ).unwrap(), BillingDeclarationImpactPreview {
+            fact_count: 1, session_count: 1, total_tokens: 10,
+            first_event_ts_ms: Some(1000), last_event_ts_ms: Some(1000),
+        });
+        assert_eq!(authority.host_bill_count().unwrap(), 0);
         let _ = std::fs::remove_file(&db);
     }
 
