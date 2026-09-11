@@ -2238,8 +2238,9 @@ class CliMatrix(unittest.TestCase):
             "audit-log hash chain continuous: 3 records (verified from seq=1)",
             "traces folded via trace.sessionId: 2 non-Bash function span(s) -> "
             "tool_calls/tool_results, 1 agent span(s) -> SubagentSpawns; 1 Bash span(s) "
-            "NOT folded (audit-log sandbox-executed remains the Bash source until the E3 "
-            "double-source reconciliation)",
+            "NOT folded: audit-log sandbox-executed is the Bash source (no shared identity "
+            "key \u2014 audit toolCallId vs span spanId \u2014 and audit-log is the hash-chained "
+            "security ledger with the more complete record; merging would double-count)",
             "lifecycle fields (status / source_mode / is_playground / deleted_at / "
             "is_background_automation) are surfaced verbatim; their value vocabularies "
             "are not declared by the host, so no session is filtered on them here — "

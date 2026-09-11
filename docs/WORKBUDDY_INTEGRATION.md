@@ -426,6 +426,10 @@ rules:     measured_zero = SV601/602/603/604/605/606/607/608/610/611/613/614 (E2
    `metadata:{}`、0 token——**另一类 trace（编排/后台），不是匿名的用户会话**。
    两条纪律不变：**绝不用 prompt 文本里的 UUID 猜 session**（那条纪律是对的，错的是
    以为除了猜别无他法）；`Agent workflow` 类没有 sessionId 就报 attempts，不归属。
+   **E3（Bash 双源）**：audit-log `toolCallId` 与 span `spanId` 是两套命名空间（0/2,398
+   可 join），audit-log sandbox-executed 2,398 条 vs Bash span 1,661 个（traces 轮转丢失
+   约 30%），命令文本 59% 相等——**audit-log 是 Bash 唯一源**，span 的 Bash 永不并入
+   tool_calls；代价是 Bash 没有 tool_results（status/duration 无键可挂）。
    **教训**：「本机不可观测」必须以读过仓库自己的 schema 文档为前提——这次的
    「结构性不可接」差一点被硬写进 spec，被验收者的一次 live spot-check 拦下；
 3. **hash 链最老可能轮转**（5018bac6 从 seq=1268 起）：verified-from 诚实标注，不假定链完整；

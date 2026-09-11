@@ -2115,6 +2115,74 @@ class TestWorkbuddyTracesFoldIntoBehaviorTimelinesE2(unittest.TestCase):
         self.assertFalse(any("session-anonymous" in json.dumps(rep) for _ in [0]))
 
 
+class TestWorkbuddyBashDoubleSourceE3(unittest.TestCase):
+    """spec §9E.5 E3 裁决（2026-09-11 真机实测）：**audit-log 是 Bash 唯一源，span 的
+    Bash 永不并入 tool_calls**。三条实测理由：audit-log `toolCallId`（call_00_…）与
+    span `spanId`（span_…）两套命名空间、0/2,398 可 join；sandbox-executed 2,398 条 vs
+    Bash span 1,661 个（traces 按 worker pid 存、轮转丢失约 30%）；命令文本只 59% 相等。
+    没有身份键就没有 dedup——任何按文本/时间的模糊合并都是猜，猜错就是双计 SV601–603/
+    SV611（Codex `custom_tool_call` vs `CommandExecution` 影子问题同款）。
+
+    本类守「即使文本完全相等也不合并」：fixture s1 的 audit-log 有 `ls -la` 这条
+    sandbox-executed 记录，Bash span 里塞一条一模一样的命令——tool_calls 里 bash 必须
+    仍是 audit-log 那 2 条，不多不少。"""
+
+    def _mk_tmp(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return tmp
+
+    def _copy_fixture(self, tmp):
+        src = ROOT / "fixtures" / "workbuddy" / "workdir"
+        shutil.copytree(src, tmp, dirs_exist_ok=True)
+        (tmp / "workdir").mkdir(parents=True, exist_ok=True)
+        return tmp / ".workbuddy"
+
+    def _audit(self, tmp, sid="s1"):
+        r = subprocess.run(
+            SCAN_CMD + ["workbuddy-session", "--session", sid, "--json", "-"],
+            cwd=str(tmp / "workdir"), env=isolated_home_env(tmp),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_text_equal_bash_span_is_neither_merged_nor_added(self):
+        """audit-log 里 s1 的 sandbox-executed commandPreview 有哪些，就往 span 里塞
+        同样文本的 Bash 调用：bash tool_calls 数不变（不是 +N 也不是「去重后不变」——
+        是根本不看 span），SV611（重复调用）也不因此命中。"""
+        tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
+        base = self._audit(tmp)
+        bash_before = [e for e in base["audit"].get("timeline", {}).get("tool_calls", [])
+                       if e.get("name") == "bash"] if "timeline" in base["audit"] else None
+        cmds = []
+        for line in (root / "audit-log" / "s1.jsonl").read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            if r.get("eventType") == "command-safety.sandbox-executed":
+                cmds.append(r["commandPreview"])
+        self.assertTrue(cmds, "fixture s1 应有 sandbox-executed 记录")
+        d = root / "traces" / "88"; d.mkdir(parents=True)
+        spans = [{"traceId": "t", "spanId": "dup%d" % i, "parentId": None, "name": "Bash",
+                  "type": "function", "startedAt": "2026-08-31T09:01:%02d.000Z" % (10 + i),
+                  "endedAt": "2026-08-31T09:01:%02d.500Z" % (10 + i), "duration": 500,
+                  "status": "ok", "error": None, "toolName": "Bash",
+                  "toolInput": json.dumps({"command": c}), "toolOutput": json.dumps("")}
+                 for i, c in enumerate(cmds)]
+        (d / "trace_dup.json").write_text(json.dumps({
+            "trace": {"traceId": "trace_dup", "name": "Agent workflow", "workerPid": 88,
+                      "startedAt": "2026-08-31T09:01:00.000Z", "endedAt": "2026-08-31T09:02:00.000Z",
+                      "duration": 60000, "status": "ok", "spanCount": len(spans),
+                      "totalTokens": 0, "metadata": {}, "sessionId": "s1"},
+            "spans": spans}), encoding="utf-8")
+        rep = self._audit(tmp)
+        self.assertEqual(rep["coverage"]["ToolCalls"]["measured"],
+                         base["coverage"]["ToolCalls"]["measured"])
+        self.assertEqual(rep["audit"]["rule_outcomes"]["SV611"],
+                         base["audit"]["rule_outcomes"]["SV611"])
+        folded = [n for n in rep["notes"] if n.startswith("traces folded")][0]
+        self.assertIn("%d Bash span(s) NOT folded" % (1 + len(cmds)), folded)
+        self.assertIn("no shared identity key", folded)
+
+
 class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
     """A4（spec §6.4-5）：`nominal_cny`（名义栏，credits × 兑换价）绝不能出现在
     真实**实付**汇总 DTO 里——它是尺，不是账（`ATTRIBUTABLE_WASTE.md` §6.7）。

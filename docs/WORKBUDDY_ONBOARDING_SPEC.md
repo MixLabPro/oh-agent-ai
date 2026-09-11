@@ -660,9 +660,10 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
    + attempts，不猜。
 4. 四桶只从 span 级 `usage` 算；**`trace.totalTokens` 不读**（不可信）；`used` 不参与。
 5. 模型只取 `toolOutput[i].model`（逐调用）；`sessions.model` 不参与归属。
-6. 与 audit-log 的 `command-safety.sandbox-executed` **不双计**：Bash 在两面都出现；join
-   key 候选 `toolCallId`（audit-log 有）vs `spanId`——**先测**是否可 join；不可 join 则以
-   一方为主源、另一方只做覆盖对账，同 Codex `custom_tool_call` vs `CommandExecution`。
+6. 与 audit-log 的 `command-safety.sandbox-executed` **不双计**——**E3 已测已定**：
+   `toolCallId` 与 `spanId` 不可 join（0/2,398），audit-log 更完整（2,398 vs 1,661），
+   文本 59% 相等；**audit-log 是 Bash 唯一源**，span 的 Bash 只在 notes 里报数、永不进
+   tool_calls。同 Codex `custom_tool_call` vs `CommandExecution` 的处置。
 7. 653MB / 675 文件：增量读（mtime + 已见 traceId）；解码 `toolOutput` 只取 `usage`/
    `model`，**不保留响应正文**（§4 不要 prompt 正文）。
 8. ~~两个「session-anonymous」运行时字面量~~ **E2 已移除**：`WORKBUDDY_SV604_605_REASON`
@@ -693,8 +694,13 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       `tool_results`（status/error → error_code）；agent span → SubagentSpawns；
       `is_unavailable` 翻转 ToolResults/SubagentSpawns；`degrade_sv604_605` 移除；
       `WORKBUDDY_SV604_605_REASON` / `TRACES_ERROR` 删除；§13 矩阵 G5 登记更新。
-- [ ] **E3 · Bash 双源对账**（纪律 6）
-      测 `toolCallId` ↔ span 可否 join；定主源；覆盖计数对账进 notes；不双计钉回归。
+- [x] **E3 · Bash 双源对账**（纪律 6）——**裁决：audit-log 是 Bash 唯一源，span 的 Bash 永不并入**
+      真机实测（2026-09-11）：audit `toolCallId`（`call_00_…`）vs span `spanId`（`span_…`）
+      两套命名空间，**0/2,398 可 join**（验收者全量复算 0/2,395 同结论；初稿 2,114 是只扫 top-10 会话的分母）；sandbox-executed 2,398 条 vs Bash span 1,661 个
+      （2,380 distinct toolCallId ≈ 1:1，不是子命令拆分——是 traces 按 worker pid 存、
+      轮转丢失约 30%）；命令文本只 59% 相等。没有身份键就没有 dedup，模糊合并是猜。
+      audit-log 是 hash 链安全账本且更完整。**代价如实**：Bash 的 status/duration 只在
+      span 里、无键可挂 → Bash 没有 tool_results。回归钉「文本完全相等也不合并」。
 - [ ] **E4 · UsageFact emitter**（`hosts/workbuddy/sources/usage_fact.rs` ↔ `workbuddy_usage_fact.py`）
       与 Codex 同形五桶：identity = spanId、time = span.startedAt、model = 逐调用；
       `cache_write` 恒 0 + `source_usage_semantics` 声明「OpenAI 格式无 cache_write」；

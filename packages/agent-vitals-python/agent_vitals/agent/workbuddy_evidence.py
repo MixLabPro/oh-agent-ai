@@ -152,10 +152,12 @@ _QUOTA_CONSUMPTION_NOTE = (
 
 # traces 是「已知但刻意不用的表面」（spec §12.2）——会话匿名，join 不进 session。
 # 记成 SourceAttempt（§14.4：skipped and recorded, never treated as corruption）。
-# spec §9E.5 E2：traces 已按 `trace.sessionId` 归属并折进 timeline（B2 推翻了
-# 「session-anonymous」）。Bash function span **暂不**进 tool_calls——audit-log 的
-# `command-safety.sandbox-executed` 仍是 Bash 主源，两面是否可 join、谁当主源是 E3
-# 的事；现在就并进去会双计 SV601–603/SV611。与 Rust 逐字节相同。
+# spec §9E.5 E2/E3：traces 已按 `trace.sessionId` 归属并折进 timeline（B2 推翻了
+# 「session-anonymous」）。**Bash function span 永不进 tool_calls**（E3 裁决，2026-09-11
+# 真机实测）：audit-log `toolCallId`（call_00_…）与 span `spanId`（span_…）两套命名
+# 空间、0/2,398 可 join；sandbox-executed 2,398 vs Bash span 1,661（traces 按 pid 存、
+# 轮转丢失约 30%）；命令文本 59% 相等——模糊 join 就是猜。audit-log 是 Bash 唯一源。
+# 代价如实：Bash 的 status/duration 无键可挂 → Bash 没有 tool_results。与 Rust 逐字节相同。
 _TRACES_FOLDED_NOTE_PREFIX = "traces folded via trace.sessionId: "
 
 # §7 工具名规范化（与 claude_evidence.py 同一张表，WorkBuddy 的 toolName 是同一套
@@ -596,8 +598,10 @@ def _build_notes(coverage, records, spans):
                 agent += 1
         notes.append(
             "%s%d non-Bash function span(s) -> tool_calls/tool_results, %d agent span(s) -> "
-            "SubagentSpawns; %d Bash span(s) NOT folded (audit-log sandbox-executed remains the "
-            "Bash source until the E3 double-source reconciliation)"
+            "SubagentSpawns; %d Bash span(s) NOT folded: audit-log sandbox-executed is the Bash "
+            "source (no shared identity key \u2014 audit toolCallId vs span spanId \u2014 and "
+            "audit-log is the hash-chained security ledger with the more complete record; "
+            "merging would double-count)"
             % (_TRACES_FOLDED_NOTE_PREFIX, fn_non_bash, agent, bash))
     return notes
 

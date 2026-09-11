@@ -417,8 +417,9 @@ def self_verify(root):
     assert ev["notes"][4] == (
         "traces folded via trace.sessionId: 2 non-Bash function span(s) -> "
         "tool_calls/tool_results, 1 agent span(s) -> SubagentSpawns; 1 Bash span(s) NOT "
-        "folded (audit-log sandbox-executed remains the Bash source until the E3 "
-        "double-source reconciliation)"
+        "folded: audit-log sandbox-executed is the Bash source (no shared identity key "
+        "\u2014 audit toolCallId vs span spanId \u2014 and audit-log is the hash-chained "
+        "security ledger with the more complete record; merging would double-count)"
     ), ev["notes"]
     assert ev["attempts"] == [], ev["attempts"]
     # credit_json {"r1":22.53,"r2":19.48} → 按厘累计 2253+1948 = 4201 credit → 42.01。

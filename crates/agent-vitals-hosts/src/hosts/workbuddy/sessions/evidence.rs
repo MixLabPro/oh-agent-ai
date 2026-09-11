@@ -158,11 +158,15 @@ absent, so SV612/613 are Unavailable, never fabricated boundaries.";
 const SANDBOX_MODE_NOTE: &str = "sandbox mode is the WorkBuddy-native permission_mode \
 (bypassPermissions / fullAccess); the DSH danger-full-access vocabulary does not apply, so \
 SV610 is an honest MeasuredZero, never a translation.";
-// spec §9E.5 E2：traces 已按 `trace.sessionId` 归属并折进 timeline（B2 推翻了
-// 「session-anonymous」）。Bash function span **暂不**进 tool_calls——audit-log 的
-// `command-safety.sandbox-executed` 仍是 Bash 主源，两面是否可 join、谁当主源是 E3
-// 的事；现在就并进去会双计 SV601–603/SV611（Codex `custom_tool_call` vs
-// `CommandExecution` 同款影子问题）。与 Python 逐字节相同。
+// spec §9E.5 E2/E3：traces 已按 `trace.sessionId` 归属并折进 timeline（B2 推翻了
+// 「session-anonymous」）。**Bash function span 永不进 tool_calls**（E3 裁决，2026-09-11
+// 真机实测）：audit-log 的 `toolCallId`（`call_00_…`）与 span 的 `spanId`（`span_…`）
+// 是两套命名空间，0/2,398 可 join；audit-log sandbox-executed 2,398 条 vs Bash span
+// 1,661 个——traces 按 worker pid 存、会轮转丢失，少了约 30%；命令文本只 59% 相等，
+// 模糊 join 就是猜。所以 audit-log（hash 链安全账本、更完整）是 Bash 唯一源，span 的
+// Bash 并进去只会双计 SV601–603/SV611（Codex `custom_tool_call` vs `CommandExecution`
+// 同款影子问题）。代价如实：Bash 的 status/duration 只在 span 里，无键可挂到
+// tool_calls → Bash 没有 tool_results。与 Python 逐字节相同。
 const TRACES_FOLDED_NOTE_PREFIX: &str = "traces folded via trace.sessionId: ";
 // spec §10 B6：分子可测、分母不可观测——只报绝对量，不出百分比（§6.6「无法证明
 // 完整时不编百分比」同款）。与 Python 逐字节相同。
@@ -786,8 +790,9 @@ fn build_notes(coverage: &Coverage, records: &[Value], spans: &[Value]) -> Vec<A
         notes.push(AdapterNote {
             message: format!(
                 "{TRACES_FOLDED_NOTE_PREFIX}{fn_non_bash} non-Bash function span(s) -> tool_calls/tool_results, \
-{agent} agent span(s) -> SubagentSpawns; {bash} Bash span(s) NOT folded (audit-log sandbox-executed \
-remains the Bash source until the E3 double-source reconciliation)"
+{agent} agent span(s) -> SubagentSpawns; {bash} Bash span(s) NOT folded: audit-log sandbox-executed is \
+the Bash source (no shared identity key — audit toolCallId vs span spanId — and audit-log is the \
+hash-chained security ledger with the more complete record; merging would double-count)"
             ),
         });
     }
