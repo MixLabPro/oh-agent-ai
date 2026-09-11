@@ -177,19 +177,25 @@ hash`。命令类记录带 `commandPreview`/`commandHash`，网络/审批类带 
 | 规则 | WorkBuddy 判定 | 依据 |
 |---|---|---|
 | SV601–603（bash 命令族） | **Available** | `command-safety.sandbox-executed` 的 `commandPreview` → bash `args_text`（SV601-603 的 exec→bash 源）。**只覆盖 bash 子集**——其余工具名只在 traces 里（可 join 但现有实现未接，§12.2） |
-| SV604（敏感路径 write/edit） | **Unavailable**（现有实现的能力降级） | write/edit 调用只在 traces 的 function span 里（traces 可按 `trace.sessionId` 归属，§12.2，**但现有实现未接**）；file-history 有内容无路径。现有实现 join 进来的 tool_calls 不含 write/edit → 测不出来就是假阴性，报 Unavailable（§3.1；Phase E 后可能转 Available） |
-| SV605（write/edit 出 workspace） | **Unavailable**（同上） | 同上 |
+| SV604（敏感路径 write/edit） | **Available**（E2，2026-09-11） | traces 的 Edit/Write function span 解码后 783/784 带 `file_path` → `tool_calls{name: write/edit, args_text: {"file_path": …}}`，SV604 正则直接跑。回归 `test_sv604_and_sv605_actually_fire_on_span_paths` 钉住 `/etc/hosts` 命中 critical。降级行已删（§3.1） |
+| SV605（write/edit 出 workspace） | **Available**（同上） | 同上；workspace 外路径命中 warning |
 | SV606（内网 web_fetch） | **Available** | `WebFetch` 事件 → `tool_name="web_fetch"`、`args_text=messageParams.target`；`_INTERNAL_IP_URL_RE` 直接跑 |
-| SV607（拒绝/中止） | **Unavailable**（现有实现） | audit-log 无 exit 码；traces 的 `status`/`error` 有、且可按 `trace.sessionId` 归属（§12.2），但**现有实现未接 traces**——Phase E 后可能转 Available。`_DENIED_CODES` 当前无源 |
-| SV608（超时） | **Unavailable** | 无 `TOOL_TIMEOUT` 源 |
+| SV607（拒绝/中止） | **Available**（E2，诚实 MeasuredZero） | function span 的 `status`/`error` → `tool_results{failed, error_code: 原生 status}`。WorkBuddy 的码是 `error`/`cancelled`，**不翻译**成 DSH 的 `FS_SANDBOX_DENIED` 等——规则照跑零命中（Codex `exit_code:N` 同款纪律） |
+| SV608（超时） | **Available**（同上） | 无 `TOOL_TIMEOUT` 原生码 → 诚实 MeasuredZero |
 | SV609（approval 请求） | **Available** | `commandApproved`/`commandRejected`/`bulk-delete.*` → `approval/asked`（有记录时）；健康会话无审批记录则走 timeline gate 报 Unavailable（§3.2） |
 | SV610（危险授权/sandbox） | **Available**（诚实 MeasuredZero） | `sandbox-executed` → SandboxModes 非空，SV610 可跑；但 WorkBuddy 的 `permission_mode` 只有 `bypassPermissions`/`fullAccess` 两值，**不等于 DSH 的 `danger-full-access`**（use_sandbox_cli 恒 1，命令永远进沙箱），词表不翻译 → 诚实 MeasuredZero（§3.3） |
 | SV611（重复调用） | **Available** | 在 bash+web_fetch 子集上跑 `(name, args_text)` 去重；audit-log 的 `commandHash`+`commandPreview` 是同一语义的两面（§7） |
 | SV612（turn 分组） | **Unavailable** | 无 turn 结构（audit-log 无 turn/step）；turns timeline 恒空，timeline gate 自然给出 |
-| SV613(a/b) | **Unavailable** | requires `[TurnBoundaries, ToolResults]` 双空（turns 空 + results 空）→ OR 门控判定 unavailable |
+| SV613(a/b) | **Available**（E2，有 span 时） | requires `[TurnBoundaries, ToolResults]` OR 门控——tool_results 非空即放行；(a) 因 turns 恒空跑不出、(b) 读 tool_results 照跑。无 trace 的会话仍 Unavailable |
 | SV614 | **Available** | requires `[ApprovalDecisions, SandboxModes]` OR 门控——audit-log 双轴都在，是 OR 门控的天然输入；健康会话 MeasuredZero（§3.4） |
 
-### 3.1 SV604/605 的宿主能力降级（与 Claude 的 SV607/608 override 对称）
+### 3.1 ~~SV604/605 的宿主能力降级~~（**已于 E2 移除**，2026-09-11）
+
+> 本节保留作历史。降级的前提「write/edit 只存在于会话匿名的 traces」是 09-02 的分析
+> 错误（§12.2）；E2 起 Edit/Write span 折进 tool_calls，`host_capability.rs` workbuddy
+> 行的 `degraded_rules` 清空，`WORKBUDDY_SV604_605_REASON` 常量删除。下文的机制描述
+> 对 Claude 的 SV607/608 override 仍成立，对 WorkBuddy 不再适用。
+
 
 Claude 侧：tool_results 存在但 `error_code` 结构性恒 None → SV607/608 从 MeasuredZero
 降级 Unavailable（`degrade_sv607_608`）。WorkBuddy 侧同一形状，对象换成 SV604/605：
@@ -341,7 +347,10 @@ audit-log requestId 可 join，实测 13/22）。TOTAL 4,307.76 credit（名义 
 1. 原始 WorkBuddy 字段（audit-log 记录/credit_json/commandHash）不得进入 `vitals-core`；
 2. WorkBuddy adapter 必须先生成 `CanonicalSession`，走 `canonical_session_to_vitals` 桥；
 3. Derived/Lossy provenance 不得变成 Measured（§4 的 `TimelineEntry.provenance` 测试）；
-4. unsupported 规则（SV604/605/607/608/609/612/613）必须 Unavailable，不得 MeasuredZero——
+4. unsupported 规则必须 Unavailable，不得 MeasuredZero——**E2 起 unsupported 集合缩为
+   SV609（无审批时）/ SV612（turns 恒空）/ 无 trace 会话的 SV607/608/613**；SV604/605
+   已 Available（Edit/Write span 带 file_path），SV607/608 有 span 时 Available（原生码
+   不翻译 → 诚实 MeasuredZero）——
    SV607/608/609/612/613 由 timeline gate 自然给出，SV604/605 是宿主能力降级 override（§3.1）；
 5. 跨宿主相同行为产生相同 finding（与 DSH/Codex/Claude fixture 对齐）；
 6. 独立记录不双计：审批记录只进 approvals 轴、sandbox-executed 才进 tool_calls 轴（§7）；
@@ -393,14 +402,15 @@ audit-log requestId 可 join，实测 13/22）。TOTAL 4,307.76 credit（名义 
 **健康会话 s1 的 §10.4 验收数字**（自校验 + 差分都钉死）：
 
 ```text
-coverage:  ToolCalls measured=3 (bash×2 + web_fetch×1) · ToolResults available=false
+coverage:  ToolCalls measured=5 (bash×2 + web_fetch×1 + E2: edit + write) · ToolResults measured=2 available=true (E2)
+           SubagentSpawns measured=1 (E2, agent span)
            TurnBoundaries derived=2 (requestId r1/r2) · ApprovalDecisions available=true measured=0
            ApprovalPolicy measured=1 · SandboxModes measured=2 · NetworkAccess measured=1
            QuotaConsumption measured=2 available=true（B6，credit_json r1/r2；分母不可观测由 note 说明）
            UsageAggregate measured=1 · FileMutations measured=3
-rules:     measured_zero = SV601/602/603/606/610/611/614
-           unavailable  = SV604/605/607/608/609/612/613
-           rules_unavailable=7 · findings_total=0
+rules:     measured_zero = SV601/602/603/604/605/606/607/608/610/611/613/614 (E2)
+           unavailable  = SV609/612
+           rules_unavailable=2 · findings_total=0
 ```
 
 ## 12. 诚实性注记

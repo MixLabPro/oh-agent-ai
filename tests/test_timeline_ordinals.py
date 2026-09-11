@@ -97,7 +97,7 @@ class WorkbuddyTimelineOrdinalTests(unittest.TestCase):
              "eventType": "command-safety.sandbox-executed", "toolCallId": "c3",
              "commandPreview": "pwd", "timestamp": "2026-08-31T10:00:02Z"},
         ]
-        timelines, unknown = _populate_workbuddy_timelines(records, self._meta())
+        timelines, unknown = _populate_workbuddy_timelines(records, self._meta(), [])
         self.assertEqual(unknown, [])
         self.assertEqual(len(timelines["tool_calls"]), 3)
         self.assertEqual(len(timelines["sandbox_modes"]), 2)

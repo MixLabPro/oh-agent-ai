@@ -118,7 +118,10 @@ const KNOWN_EVENT_TYPES: &[(&str, &str)] = &[
 /// 的置零与 `workbuddy_evidence_json` 的 `available` 标记共用这一份清单，不准两处
 /// 各写一份漂移。
 ///
-/// - ToolResults：audit-log 无 exit 码，traces 的 status/error 接不进 session；
+/// - ToolResults / SubagentSpawns **不在**这个集合里（spec §9E.5 E2，2026-09-11）：
+///   traces 可按 `trace.sessionId` 归属（B2），function span 的 status/error →
+///   tool_results，agent span → SubagentSpawns。此前「接不进 session」是 09-02 的
+///   分析错误；
 /// - TurnBoundaries **不在**这个集合里——它按 distinct requestId 派生 coverage
 ///   （lossy 下界，available=true），但 turns timeline 恒空（spec §8）；
 /// - Usage：无逐请求 token（traces 只有 trace 级 totalTokens）；UsageAggregate
@@ -136,13 +139,11 @@ const KNOWN_EVENT_TYPES: &[(&str, &str)] = &[
 fn is_unavailable(signal: Signal) -> bool {
     matches!(
         signal,
-        Signal::ToolResults
-            | Signal::StepBoundaries
+        Signal::StepBoundaries
             | Signal::Usage
             | Signal::ContextWindow
             | Signal::SandboxPolicy
             | Signal::Compaction
-            | Signal::SubagentSpawns
             | Signal::SkillInvocations
             | Signal::Hooks
             | Signal::UserPrompts
@@ -157,8 +158,12 @@ absent, so SV612/613 are Unavailable, never fabricated boundaries.";
 const SANDBOX_MODE_NOTE: &str = "sandbox mode is the WorkBuddy-native permission_mode \
 (bypassPermissions / fullAccess); the DSH danger-full-access vocabulary does not apply, so \
 SV610 is an honest MeasuredZero, never a translation.";
-const TRACES_ERROR: &str = "traces are session-anonymous (no sessionId join); skipped per \
-RUNTIME_EVIDENCE_CONTRACT §14.4";
+// spec §9E.5 E2：traces 已按 `trace.sessionId` 归属并折进 timeline（B2 推翻了
+// 「session-anonymous」）。Bash function span **暂不**进 tool_calls——audit-log 的
+// `command-safety.sandbox-executed` 仍是 Bash 主源，两面是否可 join、谁当主源是 E3
+// 的事；现在就并进去会双计 SV601–603/SV611（Codex `custom_tool_call` vs
+// `CommandExecution` 同款影子问题）。与 Python 逐字节相同。
+const TRACES_FOLDED_NOTE_PREFIX: &str = "traces folded via trace.sessionId: ";
 // spec §10 B6：分子可测、分母不可观测——只报绝对量，不出百分比（§6.6「无法证明
 // 完整时不编百分比」同款）。与 Python 逐字节相同。
 const QUOTA_CONSUMPTION_NOTE: &str = "quota consumption is measured from credit_json \
@@ -166,19 +171,47 @@ entries (one per billed request); the allowance / balance that would give a perc
 lives on the account plane and is not observable on this machine, so only the absolute \
 consumption is reported";
 
-/// traces 是「已知但刻意不用的表面」（spec §12.2）——会话匿名，join 不进 session。
-/// 记成 `SourceAttempt`（§14.4：skipped and recorded, never treated as corruption）。
-/// `kind="Directory"` / `surface="Traces"` 是 `evidence::SourceKind`/`Surface` 为这个
-/// 目录型表面补的两个变体——Python 侧同款序列化（`format!("{:?}", ...)`）。
-fn traces_attempt() -> SourceAttempt {
-    SourceAttempt {
-        source_id: "workbuddy.traces",
-        kind: SourceKind::Directory,
-        surface: Surface::Traces,
-        available: false,
-        error: Some(TRACES_ERROR.to_string()),
-        observed_span: None,
+/// §7 工具名规范化（与 claude_code_evidence.rs 同一张表，WorkBuddy 的 toolName 是
+/// 同一套 PascalCase）。未映射的原样透传——规则不认、诚实 MeasuredZero，不误报。
+/// **Bash 不在这里处理**：E2 把 Bash span 排除在 tool_calls 之外（见 populate）。
+fn normalize_span_tool_name(name: &str) -> String {
+    match name {
+        "Write" => "write".to_string(),
+        "Edit" | "MultiEdit" => "edit".to_string(),
+        "Read" => "read".to_string(),
+        "Glob" => "glob".to_string(),
+        "Grep" => "grep".to_string(),
+        "WebFetch" => "web_fetch".to_string(),
+        "WebSearch" => "web_search".to_string(),
+        "Task" => "task".to_string(),
+        other => other.to_string(),
     }
+}
+
+/// span 的 ISO 毫秒串（`2026-08-14T23:49:18.442Z`）→ unix 秒。走 `parse_iso` 的字符串
+/// 路径（A2）；解不出 → None（不猜）。
+fn span_time(span: &Value) -> Option<i64> {
+    span.get("started_at")
+        .and_then(Value::as_str)
+        .and_then(parse_iso)
+        .map(|(secs, _)| secs)
+}
+
+/// spans 的确定性顺序：`(started_at, span_id)`——同一毫秒内多个 span 靠 span_id 定序。
+fn sort_spans(spans: &[Value]) -> Vec<&Value> {
+    let mut v: Vec<&Value> = spans.iter().filter(|s| s.is_object()).collect();
+    v.sort_by(|a, b| {
+        let ka = (
+            a.get("started_at").and_then(Value::as_str).unwrap_or(""),
+            a.get("span_id").and_then(Value::as_str).unwrap_or(""),
+        );
+        let kb = (
+            b.get("started_at").and_then(Value::as_str).unwrap_or(""),
+            b.get("span_id").and_then(Value::as_str).unwrap_or(""),
+        );
+        ka.cmp(&kb)
+    });
+    v
 }
 
 /// 一条 timeline entry 的构造器。`turn`/`step` 恒 None——WorkBuddy 无 turn/step
@@ -407,8 +440,10 @@ struct WorkbuddyTimelines {
 fn populate_workbuddy_timelines(
     records: &[Value],
     session_meta: &WorkbuddySessionMeta,
+    spans: &[Value],
 ) -> (WorkbuddyTimelines, Vec<String>) {
     let mut tool_calls = Timeline::new();
+    let mut tool_results = Timeline::new();
     let mut approvals = Timeline::new();
     let mut sandbox = Timeline::new();
     let mut unknown: Vec<String> = Vec::new();
@@ -502,10 +537,46 @@ fn populate_workbuddy_timelines(
                 observation, Some(seq), time, call_id, take_ordinal(&mut next_ordinal)));
         }
     }
+
+    // E2：traces 的 function span → tool_calls + tool_results（Measured，来源是真实
+    // span）。**Bash 排除**（E3 定主源前不双计）。args_text 只放 `{"file_path": …}`
+    // ——SV604/605 的正则读它；其余 input 一律不进（§4 不要正文）。
+    // tool_results：`failed` = status≠ok 或 error 非空（宿主给了失败信号）；
+    // `error_code` = 宿主原生 status（error/cancelled…），**不翻译成 DSH 码集**——
+    // SV607/608 照跑零命中是诚实 MeasuredZero（Codex `exit_code:N` 同款纪律）。
+    for span in sort_spans(spans) {
+        let kind = span.get("kind").and_then(Value::as_str).unwrap_or("");
+        if kind != "function" {
+            continue;
+        }
+        let tool = span.get("tool_name").and_then(Value::as_str).unwrap_or("");
+        if tool.is_empty() || tool == "Bash" {
+            continue;
+        }
+        let call_id = span.get("span_id").and_then(Value::as_str).map(str::to_owned);
+        let time = span_time(span);
+        let args_text = match span.get("file_path").and_then(Value::as_str) {
+            Some(fp) => serde_json::json!({ "file_path": fp }).to_string(),
+            None => String::new(),
+        };
+        tool_calls.entries.push(timeline_entry(
+            ToolCallObservation { name: normalize_span_tool_name(tool), args_text },
+            None, time, call_id.clone(), take_ordinal(&mut next_ordinal)));
+        let status = span.get("status").and_then(Value::as_str).unwrap_or("");
+        let has_error = span.get("error").and_then(Value::as_str).map(|e| !e.is_empty()).unwrap_or(false);
+        let not_ok = !status.is_empty() && status != "ok";
+        tool_results.entries.push(timeline_entry(
+            ToolResultObservation {
+                failed: Some(not_ok || has_error),
+                error_code: if not_ok { Some(status.to_string()) } else { None },
+            },
+            None, time, call_id, take_ordinal(&mut next_ordinal)));
+    }
+
     (
         WorkbuddyTimelines {
             tool_calls,
-            tool_results: Timeline::new(),
+            tool_results,
             approvals,
             sandbox_modes: sandbox,
             turns: Timeline::new(),
@@ -566,6 +637,7 @@ fn credit_entry_count(credit_json: Option<&str>) -> u64 {
 fn derive_coverage(
     records: &[Value],
     session_meta: &WorkbuddySessionMeta,
+    spans: &[Value],
 ) -> (SignalSet, Coverage, Vec<String>) {
     let mut coverage = Coverage::new();
     let mut unknown: Vec<String> = Vec::new();
@@ -635,6 +707,30 @@ fn derive_coverage(
     if quota_entries > 0 {
         bump(&mut coverage, Signal::QuotaConsumption, Bucket::Measured, quota_entries);
     }
+    // E2：traces span 的覆盖。function（非 Bash）→ ToolCalls + ToolResults 各 +1；
+    // agent → SubagentSpawns +1。Bash span 不计（E3 前主源是 audit-log，重复计
+    // 就是虚增覆盖——`evidence.rs`「适配器不得刷覆盖」）。
+    let mut fn_spans = 0_u64;
+    let mut agent_spans = 0_u64;
+    for span in spans.iter().filter(|s| s.is_object()) {
+        match span.get("kind").and_then(Value::as_str).unwrap_or("") {
+            "function" => {
+                let tool = span.get("tool_name").and_then(Value::as_str).unwrap_or("");
+                if !tool.is_empty() && tool != "Bash" {
+                    fn_spans += 1;
+                }
+            }
+            "agent" => agent_spans += 1,
+            _ => {}
+        }
+    }
+    if fn_spans > 0 {
+        bump(&mut coverage, Signal::ToolCalls, Bucket::Measured, fn_spans);
+        bump(&mut coverage, Signal::ToolResults, Bucket::Measured, fn_spans);
+    }
+    if agent_spans > 0 {
+        bump(&mut coverage, Signal::SubagentSpawns, Bucket::Measured, agent_spans);
+    }
     // TurnBoundaries derived = distinct requestId（lossy 下界，spec §8）。coverage
     // 与 turns timeline **不同源**（timeline 恒空）——这正是
     // `empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero` 钉住的
@@ -656,7 +752,7 @@ fn derive_coverage(
     (signals, coverage, unknown)
 }
 
-fn build_notes(coverage: &Coverage, records: &[Value]) -> Vec<AdapterNote> {
+fn build_notes(coverage: &Coverage, records: &[Value], spans: &[Value]) -> Vec<AdapterNote> {
     let mut notes: Vec<AdapterNote> = Vec::new();
     if coverage.get(Signal::TurnBoundaries).total() > 0 {
         notes.push(AdapterNote { message: TURN_BOUNDARY_NOTE.to_string() });
@@ -669,6 +765,31 @@ fn build_notes(coverage: &Coverage, records: &[Value]) -> Vec<AdapterNote> {
     }
     if let Some(chain) = chain_note(records) {
         notes.push(AdapterNote { message: chain });
+    }
+    // E2：有 span 就说明折了什么、没折什么。Bash span 数单独报——E3 定主源前它们
+    // 不进 tool_calls，读者得知道这个缺口是刻意的。
+    if spans.iter().any(|s| s.is_object()) {
+        let (mut fn_non_bash, mut bash, mut agent) = (0_u64, 0_u64, 0_u64);
+        for s in spans.iter().filter(|s| s.is_object()) {
+            match s.get("kind").and_then(Value::as_str).unwrap_or("") {
+                "function" => {
+                    if s.get("tool_name").and_then(Value::as_str) == Some("Bash") {
+                        bash += 1;
+                    } else if s.get("tool_name").and_then(Value::as_str).map(|n| !n.is_empty()).unwrap_or(false) {
+                        fn_non_bash += 1;
+                    }
+                }
+                "agent" => agent += 1,
+                _ => {}
+            }
+        }
+        notes.push(AdapterNote {
+            message: format!(
+                "{TRACES_FOLDED_NOTE_PREFIX}{fn_non_bash} non-Bash function span(s) -> tool_calls/tool_results, \
+{agent} agent span(s) -> SubagentSpawns; {bash} Bash span(s) NOT folded (audit-log sandbox-executed \
+remains the Bash source until the E3 double-source reconciliation)"
+            ),
+        });
     }
     notes
 }
@@ -687,21 +808,22 @@ fn first_cwd(session_meta: &WorkbuddySessionMeta) -> Vec<String> {
 /// | 规则 | WorkBuddy |
 /// |---|---|
 /// | SV601–603 | 跑（`command-safety.sandbox-executed` 的 commandPreview → bash args_text） |
-/// | SV604/605 | **Unavailable**（dispatcher 层 host-capability degradation，spec §3.1） |
+/// | SV604/605 | 跑（E2：Edit/Write span 解码后的 file_path → args_text）；降级行已删 |
 /// | SV606 | 跑（network+WebFetch target → web_fetch args_text） |
-/// | SV607/608 | Unavailable（无 tool_results / exit 码） |
+/// | SV607/608 | 跑（E2：span status → error_code，原生码不翻译 → 诚实 MeasuredZero） |
 /// | SV609 | 跑（audit-log 审批路径 → asked）；无审批记录则 Unavailable |
 /// | SV610 | 跑（sandbox 非空），mode 恒非 danger-full-access → 诚实 MeasuredZero |
 /// | SV611 | 跑（bash+web_fetch 子集） |
-/// | SV612/613 | Unavailable（turns 恒空 / results 恒空） |
+/// | SV612/613 | SV612 Unavailable（turns 恒空）；SV613 有 span 时跑（(b) 读 tool_results），无 span 时 Unavailable |
 /// | SV614 | 跑（approvals+sandbox 双轴都在） |
 pub fn build_workbuddy_evidence(
     raw_records: Vec<Value>,
     session_id: String,
     session_meta: &WorkbuddySessionMeta,
+    spans: &[Value],
 ) -> WorkbuddyEvidence {
-    let (timelines, unknown) = populate_workbuddy_timelines(&raw_records, session_meta);
-    let (signals, coverage, cov_unknown) = derive_coverage(&raw_records, session_meta);
+    let (timelines, unknown) = populate_workbuddy_timelines(&raw_records, session_meta, spans);
+    let (signals, coverage, cov_unknown) = derive_coverage(&raw_records, session_meta, spans);
     let mut all_unknown = unknown;
     for m in cov_unknown {
         if !all_unknown.contains(&m) {
@@ -709,7 +831,8 @@ pub fn build_workbuddy_evidence(
         }
     }
     all_unknown.sort();
-    let mut attempts: Vec<SourceAttempt> = vec![traces_attempt()];
+    // E2：traces 不再是「已知但刻意不用」的表面——已折进 timeline，不再记 attempt。
+    let mut attempts: Vec<SourceAttempt> = Vec::new();
     for msg in all_unknown {
         attempts.push(SourceAttempt {
             source_id: "workbuddy.audit-log",
@@ -720,7 +843,7 @@ pub fn build_workbuddy_evidence(
             observed_span: None,
         });
     }
-    let notes = build_notes(&coverage, &raw_records);
+    let notes = build_notes(&coverage, &raw_records, spans);
     let canonical = CanonicalSession {
         meta: SessionMeta {
             session_id,
@@ -840,7 +963,7 @@ mod tests {
                    "eventType": "command-safety.sandbox-executed", "toolCallId": "c3",
                    "commandPreview": "pwd", "timestamp": "2026-08-31T10:00:02Z"}),
         ];
-        let (tl, unknown) = populate_workbuddy_timelines(&records, &meta());
+        let (tl, unknown) = populate_workbuddy_timelines(&records, &meta(), &[]);
         assert!(unknown.is_empty());
         assert_eq!(tl.tool_calls.entries.len(), 3);
         assert_eq!(tl.sandbox_modes.entries.len(), 2);

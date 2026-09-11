@@ -193,6 +193,12 @@ def read_workbuddy_traces(root):
     return out
 
 
+def session_spans(read, session_id):
+    """本会话全部 trace 的 span 摘要（dict 形状即 Rust `span_summary_json`），按 trace
+    文件路径序再 span 原序拼接（evidence 层再按 `(started_at, span_id)` 定序）。"""
+    return [s for tr in read["by_session"].get(session_id, []) for s in tr["spans"]]
+
+
 def traces_probe_json(read, session_id):
     """spec §9E.5 E1 的 `traces_probe` 块（单会话审计 JSON 末位键）。键序是差分契约。
     `this_session` 为该会话无 trace 时给零值对象（真测量）；null 留给目录不存在。"""

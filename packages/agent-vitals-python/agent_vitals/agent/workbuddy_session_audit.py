@@ -1,7 +1,7 @@
 """WorkBuddy 单会话审计组合 —— `workbuddy-session` 子命令的数据层（Python 镜像）。
 
 与 Rust `src/agent/workbuddy_session.rs` 的后半段（`workbuddy_session_list` /
-`render_workbuddy_session_list` / `degrade_sv604_605` / `workbuddy_audit_projection` /
+`render_workbuddy_session_list` / `workbuddy_audit_projection`（`degrade_sv604_605` 已随 E2 移除）/
 `workbuddy_session_audit_json`）逐字节对齐。五段式流水线：locate → shape → extract
 （`adapters/workbuddy_session.py`）→ derive → coverage（`agent/workbuddy_evidence.py`）
 → 组合（本模块）。
@@ -341,7 +341,15 @@ def workbuddy_session_audit_json(home, session_id):
         return None
 
     meta = workbuddy_session.workbuddy_session_meta(root, session_id, db_rec, db_usage)
-    evidence = workbuddy_evidence.build_workbuddy_evidence(records, session_id, meta)
+    # E1/E2：traces 读取层。目录不存在 → 探针 None、spans 空；存在 → 本会话的 span
+    # 折进 evidence（E2），探针照报。全量读，真机 ~686MB——E4 的索引落地前接受。
+    if workbuddy_traces.workbuddy_traces_root(root).is_dir():
+        traces_read = workbuddy_traces.read_workbuddy_traces(root)
+    else:
+        traces_read = None
+    spans = (workbuddy_traces.session_spans(traces_read, session_id)
+             if traces_read is not None else [])
+    evidence = workbuddy_evidence.build_workbuddy_evidence(records, session_id, meta, spans)
     ev = workbuddy_evidence.workbuddy_evidence_json(evidence)
     audit = workbuddy_audit_projection(evidence["canonical"])
     roots = ev["workspace_roots"]
@@ -381,12 +389,8 @@ def workbuddy_session_audit_json(home, session_id):
     if _is_unbilled_to_credits(meta):
         notes.append(_WB_UNBILLED_TO_CREDITS_NOTE)
 
-    # E1：traces 读取层。读取本身在 adapters/workbuddy_traces.py；这里只决定 null vs 探针。
-    if workbuddy_traces.workbuddy_traces_root(root).is_dir():
-        traces_probe = workbuddy_traces.traces_probe_json(
-            workbuddy_traces.read_workbuddy_traces(root), session_id)
-    else:
-        traces_probe = None
+    traces_probe = (workbuddy_traces.traces_probe_json(traces_read, session_id)
+                    if traces_read is not None else None)
 
     # B5：生命周期字段（spec §10 B5）。db 行缺失（audit-log 独苗会话）→ None，
     # 不追加 note——没有行就没有可浮出的生命周期状态。

@@ -225,16 +225,10 @@ _REGISTERED_DEVIATIONS = {
         "，workbuddy_evidence.rs 保守处理成 unavailable——WorkBuddy Usage 是"
         "spec §5.2 明文点名的偏差登记活例子。"
     ),
-    ("workbuddy", "ToolResults"): (
-        "矩阵写 measured ※（span.status/span.error），但该证据只存在于会话"
-        "匿名的 traces/ 面、接不进具体 session（workbuddy_evidence.rs 头注释"
-        "「traces 的 status/error 接不进 session」），故 audit-log 面上 "
-        "ToolResults 保守处理成 unavailable。"
-    ),
-    ("workbuddy", "SubagentSpawns"): (
-        "同上：矩阵 measured ※ 的证据源同样只在会话匿名的 traces/ 面，"
-        "workbuddy_evidence.rs 的当前实现保守处理成 unavailable。"
-    ),
+    # ("workbuddy", "ToolResults") / ("workbuddy", "SubagentSpawns")：**登记已撤**
+    # （2026-09-11 E2）。矩阵写 measured ※（span.status/error、agent span），代码曾因
+    # 「traces 会话匿名」保守成 unavailable——那是 09-02 的分析错误；traces 可按
+    # `trace.sessionId` 归属，E2 起代码与矩阵一致，按 G5 反向校验规则撤登记。
     ("claude-code", "ApprovalDecisions"): (
         "矩阵写 partial（¶，denials only, derived+lossy——理论上能从 tool-result "
         "marker string 恢复），claude_code_evidence.rs/claude_evidence.py 当前"

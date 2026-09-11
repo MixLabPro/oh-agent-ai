@@ -143,31 +143,24 @@ pub static HOSTS: &[HostProfile] = &[
         display: "WorkBuddy",
         // QuotaConsumption 不在此列（2026-09-11 B6）：credit_json 每条目 = 一次配额
         // 消耗观察，分子 measured；分母不可观测由 note 说明。见 workbuddy_evidence.rs。
+        // ToolResults / SubagentSpawns 不在此列（E2）：traces 的 function/agent span
+        // 可按 `trace.sessionId` 归属，已折进 timeline/coverage。
         unmeasured_signals: &[
-            Signal::ToolResults,
             Signal::StepBoundaries,
             Signal::Usage,
             Signal::ContextWindow,
             Signal::SandboxPolicy,
             Signal::Compaction,
-            Signal::SubagentSpawns,
             Signal::SkillInvocations,
             Signal::Hooks,
             Signal::UserPrompts,
             Signal::UserCorrections,
         ],
-        degraded_rules: &[
-            DegradedRule {
-                code: "SV604",
-                missing: &[Signal::ToolCalls],
-                reason: WORKBUDDY_SV604_605_REASON,
-            },
-            DegradedRule {
-                code: "SV605",
-                missing: &[Signal::ToolCalls],
-                reason: WORKBUDDY_SV604_605_REASON,
-            },
-        ],
+        // SV604/605 的降级行**已移除**（spec §9E.5 E2，2026-09-11）：它的前提「write/
+        // edit 只存在于会话匿名的 traces」是 09-02 的分析错误——traces 可按
+        // `trace.sessionId` 归属，Edit/Write span 解码后 783/784 带 `file_path`，现已
+        // 折进 tool_calls。SV604/605 在 WorkBuddy 上照跑，零命中就是诚实 MeasuredZero。
+        degraded_rules: &[],
         // 无 SessionStore（envelope 未知宿主 → StoreError，v0.6 spec §4）。
         session_store: false,
         // 无日/月折叠机制（会话审计的成本块是宿主已计费 credit 求和，不重计价）；
@@ -226,15 +219,6 @@ pub fn hosts_json() -> serde_json::Value {
 pub const CLAUDE_SV607_608_REASON: &str = "claude-code host capability: tool results carry \
 no reason codes (error_code structurally absent); SV607/608 are reason-level detectors and \
 cannot discriminate";
-
-/// SV604/605 host-capability degradation 的 reason。WorkBuddy 的 `tool_calls`
-/// timeline 只有 bash（audit-log `commandPreview`）和 web_fetch（`WebFetch`
-/// target）两个子集可 join——write/edit 只存在于会话匿名的 traces。
-/// 与 Python `host_capability.py` 的 `WORKBUDDY_SV604_605_REASON` 逐字节相同。
-pub const WORKBUDDY_SV604_605_REASON: &str = "workbuddy host capability: only bash \
-(audit-log commandPreview) and web_fetch (WebFetch target) tool calls are joinable to \
-sessions; write/edit tool calls exist only in session-anonymous traces (file-history has \
-content without paths), so SV604/605 cannot discriminate";
 
 /// 把宿主的结构性缺口如实标注成 Unavailable。未知宿主 → no-op（DSH/Codex 没有
 /// 这种 degrade，它们的 golden 字节零改动）。
@@ -295,18 +279,13 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_flips_only_measured_zero_sv604_sv605() {
+    fn workbuddy_no_longer_degrades_anything() {
+        // E2（2026-09-11）：SV604/605 的降级前提「write/edit 只在匿名 traces」被推翻，
+        // 降级行删除。WorkBuddy 现在与 dsh/codex 一样：MeasuredZero 原样保留。
         let mut out = outcomes();
         degrade_rule_outcomes("workbuddy", &mut out);
         for (code, outcome) in &out {
-            match *code {
-                "SV604" | "SV605" => {
-                    let (missing, reason) = unavailable_of(outcome).expect("必须 Unavailable");
-                    assert_eq!(missing, &[Signal::ToolCalls]);
-                    assert_eq!(reason, WORKBUDDY_SV604_605_REASON);
-                }
-                _ => assert!(matches!(outcome, RuleOutcome::MeasuredZero), "{code} 不得动"),
-            }
+            assert!(matches!(outcome, RuleOutcome::MeasuredZero), "{code} 不得动");
         }
     }
 
@@ -354,17 +333,16 @@ mod tests {
     }
 
     #[test]
-    fn only_claude_code_and_workbuddy_declare_degraded_rules() {
+    fn only_claude_code_declares_degraded_rules() {
+        // E2 起 workbuddy 的 SV604/605 降级行删除——只剩 claude-code 的 SV607/608。
         for h in HOSTS {
             match h.id {
-                "dsh" | "codex" => assert!(h.degraded_rules.is_empty(), "{} 不应有降级行", h.id),
+                "dsh" | "codex" | "workbuddy" => {
+                    assert!(h.degraded_rules.is_empty(), "{} 不应有降级行", h.id)
+                }
                 "claude-code" => {
                     let codes: Vec<&str> = h.degraded_rules.iter().map(|r| r.code).collect();
                     assert_eq!(codes, vec!["SV607", "SV608"]);
-                }
-                "workbuddy" => {
-                    let codes: Vec<&str> = h.degraded_rules.iter().map(|r| r.code).collect();
-                    assert_eq!(codes, vec!["SV604", "SV605"]);
                 }
                 other => panic!("未知宿主 id: {other}"),
             }

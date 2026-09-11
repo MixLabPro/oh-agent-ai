@@ -665,9 +665,12 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
    一方为主源、另一方只做覆盖对账，同 Codex `custom_tool_call` vs `CommandExecution`。
 7. 653MB / 675 文件：增量读（mtime + 已见 traceId）；解码 `toolOutput` 只取 `usage`/
    `model`，**不保留响应正文**（§4 不要 prompt 正文）。
-8. 两个「session-anonymous」运行时字面量（`WORKBUDDY_SV604_605_REASON` :233/:231、
-   `TRACES_ERROR`）随 Phase E 移除；`is_unavailable` 里的 ToolResults / Usage /
-   SubagentSpawns / StepBoundaries（若 agent span 给出）逐一翻转，每翻一个补差分。
+8. ~~两个「session-anonymous」运行时字面量~~ **E2 已移除**：`WORKBUDDY_SV604_605_REASON`
+   与 workbuddy 的 `degraded_rules` 行（Rust + Python）、`TRACES_ERROR` 与 traces 的
+   SourceAttempt。`is_unavailable` 已翻 ToolResults / SubagentSpawns（差分重冻）；Usage
+   留给 E4（逐调用 usage 进 UsageFact 后再翻）；StepBoundaries 无源，不翻。
+   顺带发现并修了 Python `ALL_SIGNALS` 漏掉 `SubagentSpawns` 的既有不对齐——它恒
+   unavailable 时被 `_UNAVAILABLE_SIGNALS` 的循环掩盖，E2 让它可测就当场 KeyError。
 
 ### 9E.5 Phase E 执行清单
 
@@ -685,7 +688,7 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       审计 JSON 末位，`--list` 不动；增量索引留 E4。真机 4 个 decode_failures 全是
       `toolInput: ""`——空串 ≠ null，照记失败不猜。顺带修了 B1 的 `.gitignore`
       `.workbuddy/` 未锚定根目录、把 fixture 的 `traces/` 也忽略了的 bug。
-- [ ] **E2 · 行为 timeline 填充**（SV604/605/607/608 + SubagentSpawns）
+- [x] **E2 · 行为 timeline 填充**（SV604/605/607/608 + SubagentSpawns）
       function span → `tool_calls`（name = toolName，args_text 含 `file_path`）+
       `tool_results`（status/error → error_code）；agent span → SubagentSpawns；
       `is_unavailable` 翻转 ToolResults/SubagentSpawns；`degrade_sv604_605` 移除；

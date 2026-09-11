@@ -360,7 +360,10 @@ def _load_session(root, session_id):
     db_rec = db_sessions.get(session_id)
     records = recs_by_session.get(session_id, [])
     meta = workbuddy_session.workbuddy_session_meta(root, session_id, db_rec, db_usage)
-    evidence = workbuddy_evidence.build_workbuddy_evidence(records, session_id, meta)
+    # E2：与生产路径一致——traces 按 trace.sessionId 归属后折进 evidence。
+    from agent_vitals.adapters import workbuddy_traces  # noqa: PLC0415
+    spans = workbuddy_traces.session_spans(workbuddy_traces.read_workbuddy_traces(root), session_id)
+    evidence = workbuddy_evidence.build_workbuddy_evidence(records, session_id, meta, spans)
     ev = workbuddy_evidence.workbuddy_evidence_json(evidence)
     audit = workbuddy_session_audit.workbuddy_audit_projection(evidence["canonical"])
     cost = workbuddy_session_audit._cost_of(meta)
@@ -375,7 +378,6 @@ def self_verify(root):
     records, ev, audit, cost = _load_session(root, "s1")
     assert len(records) == 3, "s1 应是 3 条记录，实际 %d" % len(records)
     cov = ev["coverage"]
-    assert cov["ToolCalls"]["measured"] == 3, cov["ToolCalls"]
     assert cov["SandboxModes"]["measured"] == 2, cov["SandboxModes"]
     assert cov["NetworkAccess"]["measured"] == 1, cov["NetworkAccess"]
     assert cov["ApprovalDecisions"]["available"] is True, cov["ApprovalDecisions"]
@@ -384,12 +386,22 @@ def self_verify(root):
     assert cov["ApprovalPolicy"]["measured"] == 1, cov["ApprovalPolicy"]
     assert cov["UsageAggregate"]["measured"] == 1, cov["UsageAggregate"]
     assert cov["FileMutations"]["measured"] == 3, cov["FileMutations"]
+    # E2：traces 的 function span 折进 tool_calls/tool_results（Bash 排除，E3 定主源前
+    # 不双计）：ToolCalls 3 → 5（+Edit +Write），ToolResults 0 → 2（available 翻 true），
+    # agent span → SubagentSpawns 1。SV604/605（降级行已删）、SV607/608、SV613
+    # 现在照跑 → measured_zero；只剩 SV609（无审批）与 SV612（turns 恒空）unavailable。
+    assert cov["ToolCalls"]["measured"] == 5, cov["ToolCalls"]
+    assert cov["ToolResults"] == {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0,
+                                  "available": True}, cov["ToolResults"]
+    assert cov["SubagentSpawns"] == {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0,
+                                     "available": True}, cov["SubagentSpawns"]
     rules = audit["rule_outcomes"]
-    for code in ("SV604", "SV605", "SV607", "SV608", "SV609", "SV612", "SV613"):
+    for code in ("SV609", "SV612"):
         assert rules[code]["status"] == "unavailable", (code, rules[code])
-    for code in ("SV601", "SV602", "SV603", "SV606", "SV610", "SV611", "SV614"):
+    for code in ("SV601", "SV602", "SV603", "SV604", "SV605", "SV606", "SV607", "SV608",
+                 "SV610", "SV611", "SV613", "SV614"):
         assert rules[code]["status"] == "measured_zero", (code, rules[code])
-    assert audit["summary"]["rules_unavailable"] == 7, audit["summary"]
+    assert audit["summary"]["rules_unavailable"] == 2, audit["summary"]
     assert audit["summary"]["findings_total"] == 0, audit["summary"]
     # B6：QuotaConsumption 分子可测（credit_json r1/r2 → measured 2，available
     # true）+ 第三条 note 说明分母不可观测；hash 链 note 顺延到 [3]。
@@ -400,15 +412,15 @@ def self_verify(root):
     assert ev["notes"][3] == (
         "audit-log hash chain continuous: 3 records (verified from seq=1)"
     ), ev["notes"]
-    assert ev["attempts"] == [{
-        "source_id": "workbuddy.traces",
-        "kind": "Directory",
-        "surface": "Traces",
-        "available": False,
-        "error": ("traces are session-anonymous (no sessionId join); skipped per "
-                  "RUNTIME_EVIDENCE_CONTRACT §14.4"),
-        "observed_span": None,
-    }], ev["attempts"]
+    # E2：traces 不再是「已知但刻意不用」的表面——attempts 里的 traces 条目消失，
+    # 换成一条 notes 说明折了什么、Bash 为何没折。
+    assert ev["notes"][4] == (
+        "traces folded via trace.sessionId: 2 non-Bash function span(s) -> "
+        "tool_calls/tool_results, 1 agent span(s) -> SubagentSpawns; 1 Bash span(s) NOT "
+        "folded (audit-log sandbox-executed remains the Bash source until the E3 "
+        "double-source reconciliation)"
+    ), ev["notes"]
+    assert ev["attempts"] == [], ev["attempts"]
     # credit_json {"r1":22.53,"r2":19.48} → 按厘累计 2253+1948 = 4201 credit → 42.01。
     # A3 起 `cny` 键消失：`credits`（积分，非货币）+ `cash_cny`（恒 None，本机无支付
     # 证据）+ `nominal_cny` = 42.01 × 0.05 → 厘累计 round(4201×0.05)=210 → 2.1 +
@@ -430,8 +442,12 @@ def self_verify(root):
     assert cov["SandboxModes"]["measured"] == 1, cov["SandboxModes"]
     assert cov["ApprovalDecisions"]["measured"] == 3, cov["ApprovalDecisions"]
     rules = audit["rule_outcomes"]
-    for code in ("SV604", "SV605", "SV607", "SV608", "SV612", "SV613"):
+    # E2：s2 无 trace → tool_results 仍空 → SV607/608/613 unavailable；但 SV604/605 的
+    # 降级行已删，tool_calls 非空（audit-log bash）→ 照跑 measured_zero。
+    for code in ("SV607", "SV608", "SV612", "SV613"):
         assert rules[code]["status"] == "unavailable", (code, rules[code])
+    for code in ("SV604", "SV605"):
+        assert rules[code]["status"] == "measured_zero", (code, rules[code])
     assert rules["SV609"]["status"] == "findings", rules["SV609"]
     assert rules["SV609"]["count"] == 3, rules["SV609"]
     assert rules["SV610"]["status"] == "findings", rules["SV610"]
@@ -439,7 +455,7 @@ def self_verify(root):
     findings = audit["findings"]
     assert len(findings) == 4, findings
     assert audit["summary"] == {"critical": 0, "warning": 1, "info": 3,
-                                "findings_total": 4, "rules_unavailable": 6}, \
+                                "findings_total": 4, "rules_unavailable": 4}, \
         audit["summary"]
     sv610 = [f for f in findings if f["rule"] == "SV610"]
     assert len(sv610) == 1 and sv610[0]["evidence"] == "allowed-once", sv610

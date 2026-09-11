@@ -924,7 +924,18 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
     // spec §6.2 rule 3：越界 epoch-ms 时间戳报 null 之外，留一条 attempts 痕迹。
     // 必须在 `records` 被 `build_workbuddy_evidence` move 走之前算。
     let ts_attempts = timestamp_attempts(db_rec, &records, now_unix_secs());
-    let evidence = build_workbuddy_evidence(records, session_id.to_string(), &meta);
+    // E1/E2：traces 读取层。目录不存在 → 探针 null、spans 空；存在 → 本会话的 span
+    // 折进 evidence（E2），探针照报。全量读，真机 ~686MB——E4 的索引落地前接受。
+    let traces_read = if traces::workbuddy_traces_root(&root).is_dir() {
+        Some(traces::read_workbuddy_traces(&root))
+    } else {
+        None
+    };
+    let spans: Vec<Value> = traces_read
+        .as_ref()
+        .map(|r| traces::session_spans_json(r, session_id))
+        .unwrap_or_default();
+    let evidence = build_workbuddy_evidence(records, session_id.to_string(), &meta, &spans);
     let ev = workbuddy_evidence_json(&evidence);
     let audit = workbuddy_audit_projection(&evidence);
     let roots = ev["workspace_roots"].as_array().cloned().unwrap_or_default();
@@ -972,12 +983,10 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         notes.push(json!(WB_UNBILLED_TO_CREDITS_NOTE));
     }
 
-    // E1：traces 读取层。读取本身在 `traces.rs`；这里只决定 null vs 探针。
-    let traces_probe = if traces::workbuddy_traces_root(&root).is_dir() {
-        traces::traces_probe_json(&traces::read_workbuddy_traces(&root), session_id)
-    } else {
-        Value::Null
-    };
+    let traces_probe = traces_read
+        .as_ref()
+        .map(|r| traces::traces_probe_json(r, session_id))
+        .unwrap_or(Value::Null);
 
     // B5：生命周期字段（spec §10 B5）。db 行缺失（audit-log 独苗会话）→ None，
     // 不追加 note——没有行就没有可浮出的生命周期状态。

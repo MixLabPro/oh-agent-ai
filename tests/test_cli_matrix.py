@@ -2159,7 +2159,16 @@ class CliMatrix(unittest.TestCase):
             "session_usage": {"unknown": [], "missing": []},
         })
         cov = report["coverage"]
-        self.assertEqual(cov["ToolCalls"]["measured"], 3)
+        # E2：traces 的 function span 折进 tool_calls/tool_results（Bash 排除，E3 定
+        # 主源前不双计）：ToolCalls 3 → 5（+Edit +Write），ToolResults 0 → 2（available
+        # 翻 true），agent span → SubagentSpawns 1。
+        self.assertEqual(cov["ToolCalls"]["measured"], 5)
+        self.assertEqual(cov["ToolResults"],
+                         {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0,
+                          "available": True})
+        self.assertEqual(cov["SubagentSpawns"],
+                         {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0,
+                          "available": True})
         self.assertEqual(cov["SandboxModes"]["measured"], 2)
         self.assertEqual(cov["NetworkAccess"]["measured"], 1)
         self.assertEqual(cov["ApprovalDecisions"]["available"], True)
@@ -2175,32 +2184,23 @@ class CliMatrix(unittest.TestCase):
                           "available": True})
         self.assertEqual(cov["FileMutations"]["measured"], 3)
         a = report["audit"]
+        # E2：SV604/605 的降级行已删（前提「write/edit 只在匿名 traces」被推翻）、
+        # SV607/608 有 tool_results 可读、SV613(b) 读 tool_results 也可跑——四条 + SV613
+        # 都从 unavailable 转 measured_zero；只剩 SV609（无审批）+ SV612（turns 恒空）。
         self.assertEqual(a["summary"],
                          {"critical": 0, "warning": 0, "info": 0,
-                          "findings_total": 0, "rules_unavailable": 7})
+                          "findings_total": 0, "rules_unavailable": 2})
         rules = a["rule_outcomes"]
-        for code in ("SV604", "SV605", "SV607", "SV608", "SV609", "SV612", "SV613"):
+        for code in ("SV609", "SV612"):
             self.assertEqual(rules[code]["status"], "unavailable", code)
-        # reason 逐字节钉死（曾只有 assertIn 子串，评审 P3-5）。与 core
-        # `host_capability.rs` 常量同串。
-        self.assertEqual(
-            rules["SV604"]["reason"],
-            "workbuddy host capability: only bash (audit-log commandPreview) "
-            "and web_fetch (WebFetch target) tool calls are joinable to "
-            "sessions; write/edit tool calls exist only in session-anonymous "
-            "traces (file-history has content without paths), so SV604/605 "
-            "cannot discriminate")
-        self.assertEqual(
-            rules["SV605"]["reason"],
-            "workbuddy host capability: only bash (audit-log commandPreview) "
-            "and web_fetch (WebFetch target) tool calls are joinable to "
-            "sessions; write/edit tool calls exist only in session-anonymous "
-            "traces (file-history has content without paths), so SV604/605 "
-            "cannot discriminate")
+        for code in ("SV604", "SV605", "SV607", "SV608", "SV613"):
+            self.assertEqual(rules[code], {"status": "measured_zero"}, code)
         self.assertEqual(rules["SV609"]["reason"],
                          "no evidence for required signal(s) in this session")
         for code in ("SV601", "SV602", "SV603", "SV606", "SV610", "SV611", "SV614"):
             self.assertEqual(rules[code]["status"], "measured_zero", code)
+        # E2 起 s1 没有任何 Unavailable 带 reason 的 host-capability 降级。
+        self.assertNotIn("reason", rules["SV604"])
         # A3：`cny` 键消失。credit_json 求和是**积分**（22.53+19.48=42.01），
         # 不是人民币——旧字段名把 1000cr=¥50 的积分当货币，约 20× 高估（§3.1/§6.1）。
         # `cash_cny` 恒 null（本机无支付证据，绝不填 0）；`nominal_cny` = 42.01×0.05
@@ -2218,12 +2218,12 @@ class CliMatrix(unittest.TestCase):
         })
         # 信号序 = ALL_SIGNALS 序（Signals 数组的顺序是输出契约的一部分）。
         self.assertEqual(report["signals"],
-                         ["ToolCalls", "TurnBoundaries", "UsageAggregate",
+                         ["ToolCalls", "ToolResults", "TurnBoundaries", "UsageAggregate",
                           "QuotaConsumption", "ApprovalPolicy", "SandboxModes",
-                          "NetworkAccess", "FileMutations"])
-        # 五条 notes：turn 重建说明 + sandbox 模式说明 + B6 配额分母不可观测说明
-        # + 连续 hash 链 + B5 生命周期字段「浮出不过滤」注记（lifecycle 非 null
-        # 时追加，末位）。
+                          "NetworkAccess", "SubagentSpawns", "FileMutations"])
+        # 六条 notes：turn 重建说明 + sandbox 模式说明 + B6 配额分母不可观测说明
+        # + 连续 hash 链 + E2 traces 折叠说明（含 Bash 为何未折）+ B5 生命周期
+        # 「浮出不过滤」注记（lifecycle 非 null 时追加，末位）。
         self.assertEqual(report["notes"], [
             "turn boundaries are derived from distinct audit-log requestId (a lower "
             "bound: audit-log is not a per-request ledger); native turn structure is "
@@ -2236,18 +2236,19 @@ class CliMatrix(unittest.TestCase):
             "the account plane and is not observable on this machine, so only the "
             "absolute consumption is reported",
             "audit-log hash chain continuous: 3 records (verified from seq=1)",
+            "traces folded via trace.sessionId: 2 non-Bash function span(s) -> "
+            "tool_calls/tool_results, 1 agent span(s) -> SubagentSpawns; 1 Bash span(s) "
+            "NOT folded (audit-log sandbox-executed remains the Bash source until the E3 "
+            "double-source reconciliation)",
             "lifecycle fields (status / source_mode / is_playground / deleted_at / "
             "is_background_automation) are surfaced verbatim; their value vocabularies "
             "are not declared by the host, so no session is filtered on them here — "
             "filtering is the consumer's decision",
         ])
-        # attempts：traces 记成 SourceAttempt（session-anonymous，§14.4）。
-        self.assertEqual(report["attempts"], [{
-            "source_id": "workbuddy.traces", "kind": "Directory",
-            "surface": "Traces", "available": False,
-            "error": ("traces are session-anonymous (no sessionId join); skipped per "
-                      "RUNTIME_EVIDENCE_CONTRACT §14.4"),
-            "observed_span": None}])
+        # E2：traces 已按 trace.sessionId 折进 timeline，不再是「已知但刻意不用」的
+        # 表面——attempts 里那条「session-anonymous」的 SourceAttempt 消失（那句话本身
+        # 就是 09-02 的分析错误）。
+        self.assertEqual(report["attempts"], [])
 
     def test_workbuddy_session_approval_flow_differential(self):
         """`workbuddy-session --session s2`：审批轴。3 条审批记录（approved /
@@ -2263,9 +2264,13 @@ class CliMatrix(unittest.TestCase):
         report = json.loads(out)
         self.assertEqual(report["session_id"], "s2")
         a = report["audit"]
+        # E2：s2 无 trace → tool_results 仍空 → SV607/608/613 unavailable；但 SV604/605
+        # 的降级行已删，tool_calls 非空（audit-log bash）→ 照跑 measured_zero。6 → 4。
         self.assertEqual(a["summary"],
                          {"critical": 0, "warning": 1, "info": 3,
-                          "findings_total": 4, "rules_unavailable": 6})
+                          "findings_total": 4, "rules_unavailable": 4})
+        for code in ("SV604", "SV605"):
+            self.assertEqual(a["rule_outcomes"][code], {"status": "measured_zero"}, code)
         self.assertEqual([f["rule"] for f in a["findings"]],
                          ["SV609", "SV610", "SV609", "SV609"])
         sv609 = [f for f in a["findings"] if f["rule"] == "SV609"]
@@ -2283,7 +2288,7 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual([f["time"] for f in a["findings"]],
                          [1788170400, 1788170400, 1788170460, 1788170520])
         rules = a["rule_outcomes"]
-        for code in ("SV604", "SV605", "SV607", "SV608", "SV612", "SV613"):
+        for code in ("SV607", "SV608", "SV612", "SV613"):
             self.assertEqual(rules[code]["status"], "unavailable", code)
         for code in ("SV601", "SV602", "SV603", "SV606", "SV611", "SV614"):
             self.assertEqual(rules[code]["status"], "measured_zero", code)

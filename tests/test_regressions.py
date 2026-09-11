@@ -875,7 +875,7 @@ class TestWorkbuddyEvidenceVocabularyIsTheRealMachineVocabulary(unittest.TestCas
              "requestId": "r6", "messageKey": "m6",
              "timestamp": "2026-08-31T10:00:05Z"},
         ]
-        timelines, unknown = self._populate(records, self._meta())
+        timelines, unknown = self._populate(records, self._meta(), [])
         self.assertEqual(unknown, [], "真机形状一条都不该进 unknown：%r" % unknown)
         self.assertEqual(len(timelines["tool_calls"]), 3,
                          "2 bash + 1 web_fetch 全进 tool_calls")
@@ -891,8 +891,8 @@ class TestWorkbuddyEvidenceVocabularyIsTheRealMachineVocabulary(unittest.TestCas
         outcomes = [e["observation"]["decided"]["outcome"]
                     for e in timelines["approvals"]]
         self.assertEqual(outcomes, ["allowed-once", "rejected", "allowed-once"])
-        tl, _ = self._populate(records, self._meta())
-        _, cov, cov_unknown = self._derive(records, tl, self._meta())
+        tl, _ = self._populate(records, self._meta(), [])
+        _, cov, cov_unknown = self._derive(records, tl, self._meta(), [])
         self.assertEqual(cov_unknown, [])
         self.assertEqual(cov["ToolCalls"]["measured"], 3)
         self.assertEqual(cov["SandboxModes"]["measured"], 2)
@@ -911,14 +911,14 @@ class TestWorkbuddyEvidenceVocabularyIsTheRealMachineVocabulary(unittest.TestCas
              "decision": "approved", "messageKey": "m3",
              "timestamp": "2026-08-31T10:00:02Z"},
         ]
-        timelines, unknown = self._populate(records, self._meta())
+        timelines, unknown = self._populate(records, self._meta(), [])
         # 前两条是纸面词 → 哨兵；真机形状（approval+Bash）照常进 approvals。
         self.assertEqual(len(unknown), 2, "纸面词必须全部进哨兵：%r" % unknown)
         self.assertEqual(len(timelines["tool_calls"]), 0)
         self.assertEqual(len(timelines["sandbox_modes"]), 0)
         self.assertEqual(len(timelines["approvals"]), 1)
-        tl, _ = self._populate(records, self._meta())
-        _, cov, _ = self._derive(records, tl, self._meta())
+        tl, _ = self._populate(records, self._meta(), [])
+        _, cov, _ = self._derive(records, tl, self._meta(), [])
         self.assertEqual(cov["ToolCalls"]["measured"], 0, "纸面词不许算数")
         self.assertEqual(cov["ApprovalDecisions"]["measured"], 1)
 
@@ -997,9 +997,9 @@ class TestWorkbuddyIntegerEpochMsTimestamps(unittest.TestCase):
         self.assertEqual(
             report["date_span"],
             {"first": "2026-08-31T09:00:00Z", "last": "2026-08-31T09:05:00Z"})
-        # 越界哨兵不得被这条合法数据误触发。
-        self.assertEqual([a["source_id"] for a in report["attempts"]],
-                         ["workbuddy.traces"])
+        # 越界哨兵不得被这条合法数据误触发。（E2 起 traces 已折进 timeline，不再有
+        # 那条「session-anonymous」的 SourceAttempt——attempts 在合法数据上应为空。）
+        self.assertEqual([a["source_id"] for a in report["attempts"]], [])
 
     def test_out_of_window_integer_reports_null_and_lands_in_attempts(self):
         """越界 epoch-ms（999ms=1970、253402300800000ms=10000 年）→ `date_span`
@@ -1068,10 +1068,12 @@ class TestWorkbuddyEvidenceTimeFieldParsesIntegerEpochMs(unittest.TestCase):
         """s2 fixture 的 audit-log `timestamp` 是 epoch-ms 整数
         （1788170400000 = 2026-08-31T10:00:00Z）。修复前每条 finding 的
         `time` 是 null；修复后是归一的 unix 秒（与字符串 `parse_iso` 路径同单位）。
-        finding 条数（4）与 rules_unavailable（6）不变——只有 `time` 从 null 变实值。"""
+        finding 条数（4）不变——只有 `time` 从 null 变实值。（rules_unavailable 在 A6
+        时是 6；E2 删掉 SV604/605 的降级行后 s2 上是 4——与本测试守的东西无关，
+        照实钉当前值。）"""
         audit = self._s2_findings()
         self.assertEqual(audit["summary"]["findings_total"], 4)
-        self.assertEqual(audit["summary"]["rules_unavailable"], 6)
+        self.assertEqual(audit["summary"]["rules_unavailable"], 4)
         times = [f["time"] for f in audit["findings"]]
         self.assertEqual(times, [1788170400, 1788170400, 1788170460, 1788170520])
         self.assertTrue(all(isinstance(t, int) for t in times))
@@ -1980,6 +1982,137 @@ class TestWorkbuddyTracesReaderE1(unittest.TestCase):
         self.assertEqual(probe["files"], 4)
         self.assertEqual(probe["degraded_files"], 2)
         self.assertEqual(probe["attributed_traces"], 1)
+
+
+class TestWorkbuddyTracesFoldIntoBehaviorTimelinesE2(unittest.TestCase):
+    """spec §9E.5 E2：traces 的 function/agent span 折进 tool_calls / tool_results /
+    SubagentSpawns，SV604/605/607/608/613 从 Unavailable 翻转。
+
+    守的是一整条从 09-02 错到 B2 首版的链：「write/edit 只在匿名 traces → SV604/605
+    结构性不可达 → 降级行」。Edit/Write span 解码后 783/784 带 file_path，规则**能跑**
+    ——而且必须真的能命中（(1)），否则「翻转」只是把 Unavailable 换成一个永远为零的
+    MeasuredZero。同时守 E3 前的双源纪律：Bash span **不**进 tool_calls（(4)），否则
+    SV601–603/SV611 会与 audit-log 的 sandbox-executed 双计。"""
+
+    def _mk_tmp(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return tmp
+
+    def _copy_fixture(self, tmp):
+        src = ROOT / "fixtures" / "workbuddy" / "workdir"
+        shutil.copytree(src, tmp, dirs_exist_ok=True)
+        (tmp / "workdir").mkdir(parents=True, exist_ok=True)
+        return tmp / ".workbuddy"
+
+    def _audit(self, tmp, sid="s1"):
+        r = subprocess.run(
+            SCAN_CMD + ["workbuddy-session", "--session", sid, "--json", "-"],
+            cwd=str(tmp / "workdir"), env=isolated_home_env(tmp),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    @staticmethod
+    def _fn_span(sid, tool, tool_input, status="ok", error=None, t0="2026-08-31T09:01:40.000Z"):
+        return {"traceId": "t", "spanId": sid, "parentId": None, "name": tool,
+                "type": "function", "startedAt": t0, "endedAt": t0, "duration": 0,
+                "status": status, "error": error, "toolName": tool,
+                "toolInput": json.dumps(tool_input), "toolOutput": json.dumps({"ok": True})}
+
+    def _write_trace(self, root, trace_id, spans, session_id="s1"):
+        d = root / "traces" / "77"; d.mkdir(parents=True, exist_ok=True)
+        (d / (trace_id + ".json")).write_text(json.dumps({
+            "trace": {"traceId": trace_id, "name": "Agent workflow", "workerPid": 77,
+                      "startedAt": "2026-08-31T09:01:00.000Z", "endedAt": "2026-08-31T09:02:00.000Z",
+                      "duration": 60000, "status": "ok", "spanCount": len(spans),
+                      "totalTokens": 0, "metadata": {}, "sessionId": session_id},
+            "spans": spans}, ensure_ascii=False), encoding="utf-8")
+
+    def test_sv604_and_sv605_actually_fire_on_span_paths(self):
+        """(1) Write 到 `/etc/hosts` → SV604 critical；Edit 到 workspace（/repo）之外的
+        `/home/x/notes.md` → SV605 warning。两条都要有 `evidence` 指向路径。这是翻转
+        的真验收：规则不但能跑，还能命中。"""
+        tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
+        self._write_trace(root, "trace_e2hit", [
+            self._fn_span("w1", "Write", {"file_path": "/etc/hosts", "content": "x"}),
+            self._fn_span("e1", "Edit", {"file_path": "/home/x/notes.md", "old_string": "a",
+                                          "new_string": "b"}, t0="2026-08-31T09:01:41.000Z"),
+        ])
+        a = self._audit(tmp)["audit"]
+        rules = a["rule_outcomes"]
+        self.assertEqual(rules["SV604"]["status"], "findings", rules["SV604"])
+        self.assertEqual(rules["SV605"]["status"], "findings", rules["SV605"])
+        by_rule = {}
+        for f in a["findings"]:
+            by_rule.setdefault(f["rule"], []).append(f)
+        self.assertEqual([f["tool_name"] for f in by_rule["SV604"]], ["write"])
+        self.assertIn("/etc/", by_rule["SV604"][0]["evidence"])
+        self.assertEqual([f["tool_name"] for f in by_rule["SV605"]], ["edit"])
+        self.assertIn("/home/x/notes.md", by_rule["SV605"][0]["evidence"])
+        self.assertEqual(by_rule["SV604"][0]["call_id"], "w1")
+
+    def test_span_status_becomes_tool_result_but_is_not_translated_to_dsh_codes(self):
+        """(2) status=error 的 span → tool_results.failed=true、error_code="error"
+        （宿主原生码）。SV607 读的是 DSH 码集（FS_SANDBOX_DENIED…），"error" 不在
+        里面 → **诚实 MeasuredZero**，不翻译成 DSH 码硬凑命中（Codex `exit_code:N`
+        同款纪律）。ToolResults 覆盖照计。"""
+        tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
+        self._write_trace(root, "trace_e2err", [
+            self._fn_span("r1", "Read", {"file_path": "/repo/a"}, status="error", error="ENOENT"),
+            self._fn_span("r2", "Read", {"file_path": "/repo/b"}, status="cancelled",
+                          t0="2026-08-31T09:01:41.000Z"),
+        ])
+        rep = self._audit(tmp)
+        self.assertEqual(rep["coverage"]["ToolResults"]["measured"], 2 + 2)
+        self.assertEqual(rep["audit"]["rule_outcomes"]["SV607"], {"status": "measured_zero"})
+        self.assertEqual(rep["audit"]["rule_outcomes"]["SV608"], {"status": "measured_zero"})
+
+    def test_agent_spans_count_as_subagent_spawns(self):
+        """(3) agent span → SubagentSpawns measured；fixture 自带 1，再加 2 → 3。"""
+        tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
+        agent = lambda sid: {"traceId": "t", "spanId": sid, "parentId": None, "name": "cli",
+                             "type": "agent", "startedAt": "2026-08-31T09:01:50.000Z",
+                             "endedAt": "2026-08-31T09:01:59.000Z", "duration": 9000,
+                             "status": "ok", "error": None, "agentName": "cli"}
+        self._write_trace(root, "trace_e2agent", [agent("ag1"), agent("ag2")])
+        rep = self._audit(tmp)
+        self.assertEqual(rep["coverage"]["SubagentSpawns"]["measured"], 1 + 2)
+        self.assertIn("SubagentSpawns", rep["signals"])
+
+    def test_bash_spans_are_not_folded_before_e3(self):
+        """(4) 双源纪律：Bash span 不进 tool_calls / tool_results，ToolCalls 覆盖不因
+        Bash span 增加；notes 明说 N 个 Bash span 未折。否则 audit-log 的
+        sandbox-executed + span 的 Bash 会把同一条命令数两遍。"""
+        tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
+        base = self._audit(tmp)
+        self._write_trace(root, "trace_e2bash", [
+            self._fn_span("b1", "Bash", {"command": "rm -rf /"}),
+            self._fn_span("b2", "Bash", {"command": "sudo ls"}, t0="2026-08-31T09:01:41.000Z"),
+        ])
+        rep = self._audit(tmp)
+        self.assertEqual(rep["coverage"]["ToolCalls"]["measured"],
+                         base["coverage"]["ToolCalls"]["measured"])
+        self.assertEqual(rep["coverage"]["ToolResults"]["measured"],
+                         base["coverage"]["ToolResults"]["measured"])
+        # 危险命令只在 span 里、不在 audit-log 里 → SV601 不因 span 命中（还没接）。
+        self.assertEqual(rep["audit"]["rule_outcomes"]["SV601"], {"status": "measured_zero"})
+        folded = [n for n in rep["notes"] if n.startswith("traces folded via trace.sessionId")]
+        self.assertEqual(len(folded), 1, rep["notes"])
+        self.assertIn("3 Bash span(s) NOT folded", folded[0])
+
+    def test_no_traces_leaves_the_old_unavailable_set_minus_the_deleted_degradation(self):
+        """(5) s2 无 trace：tool_results 空 → SV607/608/613 仍 Unavailable（不编）；
+        但 SV604/605 的降级行已删、tool_calls 非空 → 照跑 measured_zero。attempts 不再
+        有「session-anonymous」那条。"""
+        tmp = self._mk_tmp(); self._copy_fixture(tmp)
+        rep = self._audit(tmp, "s2")
+        ro = rep["audit"]["rule_outcomes"]
+        self.assertEqual(sorted(k for k, v in ro.items() if v["status"] == "unavailable"),
+                         ["SV607", "SV608", "SV612", "SV613"])
+        self.assertEqual(ro["SV604"], {"status": "measured_zero"})
+        self.assertEqual(rep["attempts"], [])
+        self.assertFalse(any("session-anonymous" in json.dumps(rep) for _ in [0]))
 
 
 class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):

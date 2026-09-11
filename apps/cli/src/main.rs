@@ -620,10 +620,11 @@ enum Cmd {
     },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
-    /// `sessions` row is the join anchor across the three joinable surfaces (spec
-    /// §2.1); cost is the host-billed credit_json (spec §9). SV604/605 degrade to
-    /// Unavailable (host capability: only bash/web_fetch tool calls are joinable to
-    /// sessions, §3.1). Stateless single call; `--list` enumerates.
+    /// `sessions` row is the join anchor across the four joinable surfaces (spec
+    /// §2.1; traces join via `trace.sessionId` since E1/E2); cost is the host-billed
+    /// credit_json (spec §9). Edit/Write spans feed SV604/605, span status feeds
+    /// SV607/608, agent spans feed SubagentSpawns; Bash spans are not folded until
+    /// E3 (audit-log stays the Bash source). Stateless single call; `--list` enumerates.
     WorkbuddySession {
         /// List all WorkBuddy sessions: id/title/model/cwd/date span
         #[arg(long)]

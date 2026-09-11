@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages" / "agent-vitals-python"))
 from agent_vitals.host_capability import (  # noqa: E402
     CLAUDE_SV607_608_REASON,
-    WORKBUDDY_SV604_605_REASON,
     degrade_rule_outcomes,
 )
 
@@ -42,16 +41,14 @@ class HostCapabilityDegradeTests(unittest.TestCase):
             else:
                 self.assertEqual(o, {"status": "measured_zero"}, "%s 不得动" % code)
 
-    def test_workbuddy_flips_only_measured_zero_sv604_sv605(self):
+    def test_workbuddy_no_longer_degrades_anything(self):
+        """E2（2026-09-11）：SV604/605 的降级前提「write/edit 只在匿名 traces」被
+        推翻（Edit/Write span 解码后 783/784 带 file_path，已折进 tool_calls），降级行
+        删除。WorkBuddy 现在与 dsh/codex 一样：MeasuredZero 原样保留。"""
         out = outcomes()
         degrade_rule_outcomes("workbuddy", out)
         for code, o in out.items():
-            if code in ("SV604", "SV605"):
-                self.assertEqual(o, {"status": "unavailable",
-                                     "missing": ["ToolCalls"],
-                                     "reason": WORKBUDDY_SV604_605_REASON})
-            else:
-                self.assertEqual(o, {"status": "measured_zero"}, "%s 不得动" % code)
+            self.assertEqual(o, {"status": "measured_zero"}, "%s 不得动" % code)
 
     def test_unknown_host_is_a_no_op(self):
         out = outcomes()

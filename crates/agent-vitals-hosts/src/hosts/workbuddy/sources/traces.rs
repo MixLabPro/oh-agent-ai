@@ -267,6 +267,42 @@ pub fn read_workbuddy_traces(root: &Path) -> TracesRead {
     out
 }
 
+/// 一个 span 的提取结果 → 纯层（`sessions/evidence.rs`，wasm 可链，不能依赖本
+/// feature-gated 模块的类型）消费的 JSON 形状。键名 = 字段名；`usages` 是对象数组。
+/// Python 镜像的 dict 天然就是这个形状。
+pub fn span_summary_json(s: &SpanSummary) -> Value {
+    serde_json::json!({
+        "span_id": s.span_id,
+        "parent_id": s.parent_id,
+        "name": s.name,
+        "kind": s.kind,
+        "started_at": s.started_at,
+        "ended_at": s.ended_at,
+        "duration_ms": s.duration_ms,
+        "status": s.status,
+        "error": s.error,
+        "tool_name": s.tool_name,
+        "file_path": s.file_path,
+        "usages": s.usages.iter().map(|u| serde_json::json!({
+            "model": u.model,
+            "prompt_tokens": u.prompt_tokens,
+            "cached_tokens": u.cached_tokens,
+            "completion_tokens": u.completion_tokens,
+            "reasoning_tokens": u.reasoning_tokens,
+        })).collect::<Vec<_>>(),
+        "agent_name": s.agent_name,
+    })
+}
+
+/// 本会话全部 trace 的 span，按 trace 文件路径序再 span 原序拼接（纯层再按
+/// `(started_at, span_id)` 定序）。无 trace → 空。
+pub fn session_spans_json(read: &TracesRead, session_id: &str) -> Vec<Value> {
+    read.by_session
+        .get(session_id)
+        .map(|traces| traces.iter().flat_map(|t| t.spans.iter().map(span_summary_json)).collect())
+        .unwrap_or_default()
+}
+
 /// spec §9E.5 E1 的 `traces_probe` 块（单会话审计 JSON 的末位键）：语料级计数 +
 /// 本会话明细。键序是差分契约的一部分。`this_session` 为该会话无 trace 时给
 /// 零值对象（不是 null——"读了、确实没有"是真测量；null 留给 traces 目录不存在）。

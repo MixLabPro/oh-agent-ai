@@ -16,8 +16,9 @@ mapping table fails loudly instead of silently changing the gate.
 
 ## Why this exists
 
-WorkBuddy persists each session across **three joinable surfaces** (§2.1;
-`traces/` is session-anonymous and deliberately unused, §12.2):
+WorkBuddy persists each session across **four joinable surfaces** (§2.1; `traces/`
+joins via `trace.sessionId` since E1/E2 — the earlier "session-anonymous" reading
+was an analysis error, §12.2):
 
 - `workbuddy.db` — `sessions` (**all 30 real-machine columns**, 2026-09-11
   `PRAGMA table_info` snapshot; the adapter still only *consumes* 8 by name —
