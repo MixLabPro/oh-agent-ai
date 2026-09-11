@@ -2208,6 +2208,21 @@ impl AuthorityDb {
         Ok(changed > 0)
     }
 
+    /// 失败或取消的任务可由用户显式重试；成功任务不回退，避免重试按钮
+    /// 改写已经发布的结果版本。任务 id 保持不变，结果快照仍可追溯。
+    pub fn billing_recalculation_retry(
+        &self, job_id: &str, now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        let changed = self.conn.execute(
+            "UPDATE billing_recalculation_jobs SET status = 'queued',
+                 completed_at_ms = NULL, error_code = NULL, error_detail = NULL,
+                 requested_at_ms = ?2
+             WHERE job_id = ?1 AND status IN ('failed', 'cancelled')",
+            rusqlite::params![job_id, now_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn billing_recalculation_job(
         &self, job_id: &str,
     ) -> Result<Option<BillingRecalculationJobRow>, AuthorityError> {
@@ -2851,6 +2866,13 @@ mod tests {
         assert_eq!(job.6, Some(10));
         assert_eq!(job.7.as_deref(), Some("worker_failed"));
         assert!(!authority.billing_recalculation_set_status("job-failed", "succeeded", None, None, 11).unwrap());
+        assert!(authority.billing_recalculation_retry("job-failed", 12).unwrap());
+        let retried = authority.billing_recalculation_job("job-failed").unwrap().unwrap();
+        assert_eq!(retried.3, "queued");
+        assert_eq!(retried.6, None);
+        assert_eq!(retried.7, None);
+        assert!(!authority.billing_recalculation_retry("job-1", 13).unwrap(),
+            "成功任务不可回退为 queued");
         let _ = std::fs::remove_file(&db);
     }
 

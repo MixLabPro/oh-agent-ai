@@ -1449,6 +1449,21 @@ fn billing_declaration_impact_preview(
 }
 
 /// 声明保存后创建重算任务；这里只入队，不在 IPC 调用线程执行重算。
+fn spawn_billing_recalculation_worker(path: PathBuf, job_id: String) {
+    std::thread::spawn(move || {
+        let Ok(worker_db) = agent_vitals_data::authority::AuthorityDb::open(
+            &path, agent_vitals_runtime::sql_sync::now_ms(),
+        ) else { return };
+        let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+        if worker_db.billing_recalculation_run(&job_id, now_ms).is_err() {
+            let _ = worker_db.billing_recalculation_set_status(
+                &job_id, "failed", Some("worker_failed"),
+                Some("recalculation worker failed"), agent_vitals_runtime::sql_sync::now_ms(),
+            );
+        }
+    });
+}
+
 #[tauri::command]
 fn enqueue_billing_recalculation(
     job_id: String, declaration_id: String, revision_id: String,
@@ -1463,22 +1478,28 @@ fn enqueue_billing_recalculation(
     ).map_err(|error| error.to_string())?;
     drop(db);
     if changed {
-        let worker_path = path.clone();
-        let worker_job_id = job_id.clone();
-        std::thread::spawn(move || {
-            let Ok(worker_db) = agent_vitals_data::authority::AuthorityDb::open(
-                &worker_path, agent_vitals_runtime::sql_sync::now_ms(),
-            ) else { return };
-            let now_ms = agent_vitals_runtime::sql_sync::now_ms();
-            if worker_db.billing_recalculation_run(&worker_job_id, now_ms).is_err() {
-                let _ = worker_db.billing_recalculation_set_status(
-                    &worker_job_id, "failed", Some("worker_failed"),
-                    Some("recalculation worker failed"), agent_vitals_runtime::sql_sync::now_ms(),
-                );
-            }
-        });
+        spawn_billing_recalculation_worker(path.clone(), job_id.clone());
     }
     Ok(serde_json::json!({ "status": "queued", "job_id": job_id, "changed": changed }))
+}
+
+/// 失败/取消任务的显式重试入口；重试仍在后台执行，不阻塞 IPC 调用线程。
+#[tauri::command]
+fn retry_billing_recalculation(job_id: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let changed = db.billing_recalculation_retry(
+        &job_id, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    drop(db);
+    if !changed {
+        return Err("only failed or cancelled recalculation jobs can be retried".to_string());
+    }
+    spawn_billing_recalculation_worker(path, job_id.clone());
+    Ok(serde_json::json!({ "status": "queued", "job_id": job_id, "changed": true }))
 }
 
 /// 查询重算任务回执；未找到和数据库不可用均返回可识别的业务错误。
@@ -1779,6 +1800,7 @@ pub fn run() {
             billing_declarations,
             billing_declaration_impact_preview,
             enqueue_billing_recalculation,
+            retry_billing_recalculation,
             billing_recalculation_job_status,
             data_source_status,
             data_monthly_summary,

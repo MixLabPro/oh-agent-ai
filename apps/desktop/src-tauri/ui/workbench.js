@@ -773,6 +773,21 @@ function bindBillingDeclarationPanel() {
         await renderOverview();
       } else if (finalStatus === "failed" || finalStatus === "cancelled") {
         preview.textContent += " 未完成（" + finalStatus + "），请查看数据状态后重试。";
+        const retry = document.createElement("button");
+        retry.className = "btn secondary";
+        retry.textContent = "重试重算";
+        retry.onclick = async () => {
+          retry.disabled = true;
+          try {
+            await invoke("retry_billing_recalculation", { jobId });
+            preview.textContent = "已重新入队，正在后台重试：" + jobId + "。";
+          } catch (e) {
+            retry.disabled = false;
+            preview.textContent += " · 重试失败：" + errText(e);
+          }
+        };
+        preview.appendChild(document.createTextNode(" "));
+        preview.appendChild(retry);
       } else {
         preview.textContent += " 仍在后台处理中：" + jobId + "。";
       }
