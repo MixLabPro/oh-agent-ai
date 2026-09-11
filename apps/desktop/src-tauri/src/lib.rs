@@ -1425,6 +1425,32 @@ fn save_budget_config(input: BudgetConfigInput) -> Result<Value, String> {
     Ok(serde_json::json!({ "status": "saved", "updated_at_ms": now_ms }))
 }
 
+#[tauri::command]
+fn snooze_budget_until(until_ms: i64) -> Result<Value, String> {
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    if until_ms <= now_ms {
+        return Err("budget snooze must end in the future".to_string());
+    }
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms)
+        .map_err(|error| error.to_string())?;
+    db.budget_snooze_set(until_ms, now_ms)
+        .map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "snoozed", "until_ms": until_ms }))
+}
+
+#[tauri::command]
+fn clear_budget_snooze() -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    db.budget_snooze_clear().map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "cleared" }))
+}
+
 /// 保存一条可追溯的计费关系修订。声明当前态与不可变修订在同一个用户动作中
 /// 写入；scope 由前端显式传入，空数组表示只使用宿主/provider/有效期约束。
 #[tauri::command]
@@ -1971,6 +1997,8 @@ pub fn run() {
             billing_declaration_impact_preview,
             budget_config,
             save_budget_config,
+            snooze_budget_until,
+            clear_budget_snooze,
             save_host_bill,
             save_host_bills,
             host_bills_for_period,

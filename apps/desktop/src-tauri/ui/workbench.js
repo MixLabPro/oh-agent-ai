@@ -683,8 +683,10 @@ async function renderBudgetSettings() {
   const daily = document.getElementById("ov-budget-daily-input");
   const warning = document.getElementById("ov-budget-warning-input");
   const save = document.getElementById("ov-budget-save");
+  const snoozeDay = document.getElementById("ov-budget-snooze-day");
+  const snoozeClear = document.getElementById("ov-budget-snooze-clear");
   const status = document.getElementById("ov-budget-settings-status");
-  if (!monthly || !daily || !warning || !save || !status) return;
+  if (!monthly || !daily || !warning || !save || !snoozeDay || !snoozeClear || !status) return;
   try {
     const config = await invoke("budget_config");
     if (config.status === "ok") {
@@ -699,6 +701,35 @@ async function renderBudgetSettings() {
   } catch (_) { /* 配置读取失败不遮蔽总览 */ }
   if (save.dataset.bound === "1") return;
   save.dataset.bound = "1";
+  const refreshAfterBudgetAction = async (message) => {
+    status.hidden = false;
+    status.textContent = message;
+    await renderOverview();
+  };
+  snoozeDay.onclick = async () => {
+    snoozeDay.disabled = true;
+    try {
+      await invoke("snooze_budget_until", { untilMs: Date.now() + 24 * 60 * 60 * 1000 });
+      await refreshAfterBudgetAction("预算提醒已静默 24 小时；用量与成本统计仍会继续更新。");
+    } catch (e) {
+      status.hidden = false;
+      status.textContent = "静默失败：" + errText(e);
+    } finally {
+      snoozeDay.disabled = false;
+    }
+  };
+  snoozeClear.onclick = async () => {
+    snoozeClear.disabled = true;
+    try {
+      await invoke("clear_budget_snooze");
+      await refreshAfterBudgetAction("预算提醒已恢复。");
+    } catch (e) {
+      status.hidden = false;
+      status.textContent = "恢复失败：" + errText(e);
+    } finally {
+      snoozeClear.disabled = false;
+    }
+  };
   save.onclick = async () => {
     const monthlyText = monthly.value.trim();
     const dailyText = daily.value.trim();
