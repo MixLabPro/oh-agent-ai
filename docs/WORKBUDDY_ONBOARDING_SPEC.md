@@ -632,6 +632,45 @@ AGENT_VITALS_BIN=target/release/agent-vitals python3 -m unittest tests.test_cli_
 python3 tests/golden_runner.py                      # 15 张快照不得漂移
 ```
 
+### Phase A+ · 观测性收尾（2026-09-11，源自 `WORKBUDDY_OBSERVABILITY_ASK.md` §7 + 评审）
+
+> 每项走【分析 → 编码 → 测试 → **子智能体验收** → 通过后 commit】。实现者不 commit；
+> 验收者独立审 diff 与门禁；验收通过才落 commit。全部取自 ASK 各条的「若不做」
+> 降级路径——**不依赖 WorkBuddy 侧任何答复**。
+
+- [ ] **B1 · ASK 文档纠偏 + spec §2 回流**（doc-only）
+      P0-1 两条后果推断改正（现有适配器 `SQLITE_OPEN_READ_ONLY` 已参与 WAL，实测读到
+      23 会话；差分读 tempdir fixture 从不碰活库）· P0-1 降 P2、P1-2 升 P0 ·
+      「语料已恢复增长」改为观测者效应限定（第 23 会话是用 WorkBuddy 分析本 spec 产生的）·
+      P0-3 措辞 · P1-3 与 §4.2 的边界明说 · 系数明写不在诉求内 · §7 #3 去依赖。
+      回流 spec §2：心跳 `prewarm` 会话存在（推翻 memory「恒空」）· `hy4-preview-f` 裸代号。
+- [ ] **B2 · traces 改判「结构性不可接」**（doc-only，ASK P2-3 若不做）
+      `WORKBUDDY_INTEGRATION.md` §12.5 删掉「留待 traces join 落地」的口子，写明结构性
+      理由（会话匿名、可归属 id 全是内容假阳性），保留 attempts 计数。
+- [ ] **B3 · 读取快照时点标注**（code，ASK P0-1 若不做）
+      `workbuddy-session` 输出加 `source_snapshot: {journal_mode, db_bytes, wal_bytes}`
+      ——**不含 mtime**（fixture 上非确定，会破坏逐字节差分）。Rust↔Python 同 commit。
+- [ ] **B4 · 双向 schema 哨兵**（code，ASK P0-2 若不做）
+      对 `sessions`/`session_usage` 的活列集与**声明的已知列清单**比对，未知列进
+      `attempts` + note `schema-drift: unknown columns N`；`migrations_applied` 读
+      `__workbuddy_drizzle_migrations` 行数（测量，非推断），表缺失报 null。
+      已知列清单 = 2026-09-11 真机 30 列快照，**是声明的基线不是规则**（§11 规则 16）。
+- [ ] **B5 · 生命周期字段浮出（不过滤）**（code，ASK P0-3 若不做）
+      `status` / `source_mode` / `is_playground` / `deleted_at` / `is_background_automation`
+      按名读入 `--list` 行与会话 meta，缺列 null；**只浮出不过滤**（语义宿主未声明，过滤
+      是消费方的事），note 标注「语义未经宿主声明」。
+- [ ] **B6 · `QuotaConsumption` 声明修正**（code，spec §8.0 第 1 条）
+      从 WorkBuddy `unmeasured_signals` 移出；`derive_coverage` 产出 measured =
+      `credit_json` 条目数（分子），分母 unavailable 由 note 说明。同步
+      `host_capability.rs` + Python 镜像 + `test_host_capability.py` / `test_host_contract.py`
+      byte-parity；`hosts --json` 输出会动，差分照冻。
+- [ ] **B7 · §5.3.1 护栏假阳性迁入 `ATTRIBUTABLE_WASTE.md` §6.7**（doc-only）
+      加「已声明免费额度」豁免分支的缺口记录；本 spec §5.3.1 改为指针。
+
+**明确不做（记录理由）**：ASK P1-4 的 `AutomationRuns` 宿主中立 signal——新增 `Signal`
+变体会改 `total_fields` / `denominator_version`（跨宿主、含 wasm），而 `automations`
+四表 **0 行**。为空表建跨宿主规则违反 §11 规则 16；等第一行数据出现再立项。
+
 ### 不在本清单内（不是待办，是决策门）
 
 - **Phase B**：需先按 §7.4 选路径；spec 的建议是**路径 2（不做）**——收益是 10/22 个
