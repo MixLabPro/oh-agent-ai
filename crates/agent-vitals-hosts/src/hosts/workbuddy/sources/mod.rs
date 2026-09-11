@@ -646,6 +646,61 @@ pub fn workbuddy_session_meta(
     meta
 }
 
+/// spec §10 B5（`docs/WORKBUDDY_OBSERVABILITY_ASK.md` P0-3「若不做」降级路径）：
+/// `status`/`source_mode`/`is_playground`/`deleted_at`/`is_background_automation`
+/// 按列名原样浮出，**只浮出不过滤**——语义宿主未声明，过滤是消费方的事（哪怕按
+/// 字面值过滤，如排除 `is_playground=1`，本身也是一次未经宿主声明语义的推断，
+/// spec 选择不做）。db 行整体缺失（audit-log 独苗会话）→ `None`（不是全 null
+/// 对象——没有行就没有生命周期状态可言）；行存在但某列缺失/NULL/类型不符 → 该
+/// 字段 `null`（与 `workbuddy_session_meta` 的 `str_field`/`int_field` 同款缺列
+/// 报缺纪律）。`is_playground`/`is_background_automation` 保持宿主存的 INTEGER
+/// （不转 bool——转型是解读）；`status`/`source_mode` 是 TEXT，原样字符串；
+/// `deleted_at` 是 INTEGER epoch-ms，走与 A2 `created_at`/`updated_at` 同一条
+/// `normalize_wb_ts` 路径（字符串走 ISO、整数按毫秒归一、越界或类型不符 →
+/// `null`）。Python 镜像 `adapters/workbuddy_session.py::lifecycle_of`，逐字节
+/// 对齐；键序固定 `{status, source_mode, is_playground, deleted_at,
+/// is_background_automation}`。
+fn lifecycle_of(db_rec: Option<&Value>) -> Option<Value> {
+    let db_rec = db_rec?;
+    let status = db_rec
+        .get("status")
+        .and_then(Value::as_str)
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    let source_mode = db_rec
+        .get("source_mode")
+        .and_then(Value::as_str)
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    let is_playground = db_rec
+        .get("is_playground")
+        .and_then(Value::as_i64)
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    let deleted_at = match normalize_wb_ts(db_rec.get("deleted_at"), now_unix_secs()) {
+        TsNorm::Value(s) => Value::String(s),
+        TsNorm::OutOfWindow | TsNorm::Absent => Value::Null,
+    };
+    let is_background_automation = db_rec
+        .get("is_background_automation")
+        .and_then(Value::as_i64)
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    Some(json!({
+        "status": status,
+        "source_mode": source_mode,
+        "is_playground": is_playground,
+        "deleted_at": deleted_at,
+        "is_background_automation": is_background_automation,
+    }))
+}
+
+/// spec §10 B5：`lifecycle` 非 null 时附在 `notes` 的诚实注记——五个字段是原样
+/// 浮出，其取值词表宿主未声明，所以这里不据其值过滤任何会话；过滤是消费方的
+/// 决定。Rust/Python 字节一致（byte-identical）。
+const WB_LIFECYCLE_NOTE: &str =
+    "lifecycle fields (status / source_mode / is_playground / deleted_at / is_background_automation) are surfaced verbatim; their value vocabularies are not declared by the host, so no session is filtered on them here — filtering is the consumer's decision";
+
 /// 会话活动时间跨度：audit-log 记录 timestamp 的 min/max（跨文件全取，ISO 串字典序 =
 /// 时间序）；无记录 → db 行 created_at/updated_at 兜底。都没有 → `{"first": null,
 /// "last": null}`。
@@ -708,6 +763,8 @@ pub fn workbuddy_session_list(home: &Path) -> Value {
                 "cwd": meta.cwd,
                 "first": meta.created_at,
                 "last": meta.updated_at,
+                // B5：生命周期字段原样浮出，只浮出不过滤（spec §10 B5）。
+                "lifecycle": lifecycle_of(Some(rec)).unwrap_or(Value::Null),
             }));
         }
     }
@@ -912,6 +969,15 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         notes.push(json!(WB_UNBILLED_TO_CREDITS_NOTE));
     }
 
+    // B5：生命周期字段（spec §10 B5）。db 行缺失（audit-log 独苗会话）→ None，
+    // 不追加 note——没有行就没有可浮出的生命周期状态。
+    // **压在 B4 漂移 note 之前**：lifecycle 是会话自身状态的注记，schema-drift 是
+    // 库级诊断——B4 的回归钉住「漂移 note 严格追加在 notes 末尾」，这里不能插队。
+    let lifecycle = lifecycle_of(db_rec);
+    if lifecycle.is_some() {
+        notes.push(json!(WB_LIFECYCLE_NOTE));
+    }
+
     // B4：schema 哨兵。probe 为 None（db 不可读）时没有「漂移」可报——两个 db
     // 表面（sessions/session_usage）已经在别处降级，这里不再重复一条 attempts。
     let schema_probe = read_workbuddy_schema_probe(&root);
@@ -937,5 +1003,6 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         "notes": notes,
         "source_snapshot": read_workbuddy_source_snapshot(&root),
         "schema_probe": schema_probe,
+        "lifecycle": lifecycle,
     }))
 }

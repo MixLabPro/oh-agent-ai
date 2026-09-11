@@ -2050,9 +2050,22 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual([s["title"] for s in sessions], ["审批流程会话", "健康会话"])
         self.assertEqual([s["model"] for s in sessions], ["deepseek-v4-flash"] * 2)
         self.assertEqual([s["cwd"] for s in sessions], ["/repo"] * 2)
-        # 键序是输出契约（评审 A4）。
+        # 键序是输出契约（评审 A4）。B5：`lifecycle` 是每行新增的末位键（生命周期
+        # 字段原样浮出，spec §10 B5）。
         self.assertEqual(list(sessions[0].keys()),
-                         ["session_id", "title", "model", "cwd", "first", "last"])
+                         ["session_id", "title", "model", "cwd", "first", "last",
+                          "lifecycle"])
+        # B5：fixture 给 s1/s2 真实词表值（`build_workbuddy_fixture.py`）——只浮出
+        # 不过滤，两会话都照常出现在列表里。
+        by_id = {s["session_id"]: s for s in sessions}
+        self.assertEqual(by_id["s1"]["lifecycle"], {
+            "status": "completed", "source_mode": "working", "is_playground": 0,
+            "deleted_at": None, "is_background_automation": 0,
+        })
+        self.assertEqual(by_id["s2"]["lifecycle"], {
+            "status": "terminated", "source_mode": "coding", "is_playground": 0,
+            "deleted_at": None, "is_background_automation": 0,
+        })
         # B3：`source_snapshot` 是新增的末位顶层键（追加在最后，最小化既有键序
         # 断言的改动）。fixture db 是 Python `sqlite3` 默认日志模式建的
         # （`build_workbuddy_fixture.py`），journal_mode=delete、无 -wal 文件。
@@ -2108,15 +2121,23 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["date_span"]["first"], "2026-08-31T09:01:00Z")
         self.assertEqual(report["date_span"]["last"], "2026-08-31T09:03:00Z")
         # 键序是字节一致的一部分，不能重排。B3：`source_snapshot` 追加在末位；
-        # B4：`schema_probe` 再追加在它之后。
+        # B4：`schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在
+        # `schema_probe` 之后（spec §10 B5：append-at-end，不打乱既有键序断言）。
         self.assertEqual(list(report.keys()),
                          ["host", "session_id", "title", "model", "cwd", "file",
                           "date_span", "audit", "coverage", "signals", "attempts",
-                          "cost", "notes", "source_snapshot", "schema_probe"])
+                          "cost", "notes", "source_snapshot", "schema_probe",
+                          "lifecycle"])
         # fixture db 是 Python `sqlite3` 默认日志模式建的，journal_mode=delete、
         # 无 -wal 文件（spec §10 B3；真机会是 wal，见 real-machine check）。
         self.assertEqual(report["source_snapshot"],
                          {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
+        # B5：s1 是健康会话，db 行有真实词表值——lifecycle 原样浮出，不据其值
+        # 做任何过滤（spec §10 B5）。
+        self.assertEqual(report["lifecycle"], {
+            "status": "completed", "source_mode": "working", "is_playground": 0,
+            "deleted_at": None, "is_background_automation": 0,
+        })
         # B4：健康会话（s1）的 fixture schema 与已知基线完全对齐——哨兵沉默是
         # 验收点本身（无迁移表 → None，两表 unknown/missing 均空）。
         self.assertEqual(report["schema_probe"], {
@@ -2181,7 +2202,8 @@ class CliMatrix(unittest.TestCase):
                          ["ToolCalls", "TurnBoundaries", "UsageAggregate",
                           "ApprovalPolicy", "SandboxModes", "NetworkAccess",
                           "FileMutations"])
-        # 三条 notes：turn 重建说明 + sandbox 模式说明 + 连续 hash 链。
+        # 四条 notes：turn 重建说明 + sandbox 模式说明 + 连续 hash 链 + B5 生命
+        # 周期字段「浮出不过滤」注记（lifecycle 非 null 时追加，末位）。
         self.assertEqual(report["notes"], [
             "turn boundaries are derived from distinct audit-log requestId (a lower "
             "bound: audit-log is not a per-request ledger); native turn structure is "
@@ -2190,6 +2212,10 @@ class CliMatrix(unittest.TestCase):
             "fullAccess); the DSH danger-full-access vocabulary does not apply, so SV610 "
             "is an honest MeasuredZero, never a translation.",
             "audit-log hash chain continuous: 3 records (verified from seq=1)",
+            "lifecycle fields (status / source_mode / is_playground / deleted_at / "
+            "is_background_automation) are surfaced verbatim; their value vocabularies "
+            "are not declared by the host, so no session is filtered on them here — "
+            "filtering is the consumer's decision",
         ])
         # attempts：traces 记成 SourceAttempt（session-anonymous，§14.4）。
         self.assertEqual(report["attempts"], [{
@@ -2238,11 +2264,12 @@ class CliMatrix(unittest.TestCase):
         for code in ("SV601", "SV602", "SV603", "SV606", "SV611", "SV614"):
             self.assertEqual(rules[code]["status"], "measured_zero", code)
         # 键序是输出契约（评审 A4）。B3：`source_snapshot` 追加在末位；B4：
-        # `schema_probe` 再追加在它之后。
+        # `schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在最后。
         self.assertEqual(list(report.keys()),
                          ["host", "session_id", "title", "model", "cwd", "file",
                           "date_span", "audit", "coverage", "signals", "attempts",
-                          "cost", "notes", "source_snapshot", "schema_probe"])
+                          "cost", "notes", "source_snapshot", "schema_probe",
+                          "lifecycle"])
         self.assertEqual(report["source_snapshot"],
                          {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
         # B4：非积分轨会话（s2）的 fixture schema 同样与已知基线对齐——哨兵沉默。
@@ -2250,6 +2277,11 @@ class CliMatrix(unittest.TestCase):
             "migrations_applied": None,
             "sessions": {"unknown": [], "missing": []},
             "session_usage": {"unknown": [], "missing": []},
+        })
+        # B5：s2 是审批流程会话（terminated/coding）——同样原样浮出、不过滤。
+        self.assertEqual(report["lifecycle"], {
+            "status": "terminated", "source_mode": "coding", "is_playground": 0,
+            "deleted_at": None, "is_background_automation": 0,
         })
         # notes 逐字节钉死（原来是 any(substring)——note 字符串是 spec §6.4 的
         # 验收项）。第 3 条是轮转链头（seq=100 起验证），第 4 条是非积分轨说明
@@ -2269,6 +2301,11 @@ class CliMatrix(unittest.TestCase):
             "consumption (credits: 0.0 is a real measurement). The cause is NOT "
             "determinable from this machine \u2014 a self-configured route, a promotional "
             "free tier, and host-side non-billing are indistinguishable here.",
+            # B5：生命周期字段「浮出不过滤」注记（末位，lifecycle 非 null 时追加）。
+            "lifecycle fields (status / source_mode / is_playground / deleted_at / "
+            "is_background_automation) are surfaced verbatim; their value vocabularies "
+            "are not declared by the host, so no session is filtered on them here \u2014 "
+            "filtering is the consumer's decision",
         ])
         self.assertEqual(report["cost"], {
             "tokens": 12000,
@@ -2332,11 +2369,12 @@ class CliMatrix(unittest.TestCase):
         self.assertTrue(report["file"].endswith("workbuddy.db"))
         # B3：`source_snapshot` 追加在末位。db 被本用例插了两行，但落在既有已
         # 分配页内——文件字节数与未插入前相同（真机验证过：20480 → 20480）。
-        # B4：`schema_probe` 再追加在它之后。
+        # B4：`schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在最后。
         self.assertEqual(list(report.keys()),
                          ["host", "session_id", "title", "model", "cwd", "file",
                           "date_span", "audit", "coverage", "signals", "attempts",
-                          "cost", "notes", "source_snapshot", "schema_probe"])
+                          "cost", "notes", "source_snapshot", "schema_probe",
+                          "lifecycle"])
         self.assertEqual(report["source_snapshot"],
                          {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
         # B4：本用例只插行、不改表结构——schema 仍与基线对齐，哨兵沉默。
@@ -2345,6 +2383,21 @@ class CliMatrix(unittest.TestCase):
             "sessions": {"unknown": [], "missing": []},
             "session_usage": {"unknown": [], "missing": []},
         })
+        # B5：s3 的 INSERT 没有写五个生命周期列——db 行本身存在（不是 audit-log
+        # 独苗会话），所以 `lifecycle` 是一个对象而不是 None；每个未写的列按
+        # 「缺列报缺」规则各自降级成 null（不是把整个 lifecycle 判成 None）。
+        self.assertEqual(report["lifecycle"], {
+            "status": None, "source_mode": None, "is_playground": None,
+            "deleted_at": None, "is_background_automation": None,
+        })
+        # lifecycle 非 None（哪怕全部字段都是 null）也要附那条注记——note 说的是
+        # 「有 lifecycle 对象、不据其值过滤」，不是「有非 null 的值」。
+        self.assertIn(
+            "lifecycle fields (status / source_mode / is_playground / deleted_at / "
+            "is_background_automation) are surfaced verbatim; their value vocabularies "
+            "are not declared by the host, so no session is filtered on them here — "
+            "filtering is the consumer's decision",
+            report["notes"])
         self.assertEqual(report["audit"]["summary"]["findings_total"], 0)
         self.assertEqual(report["audit"]["summary"]["rules_unavailable"], 14)
         # docstring 说「14 条规则全 Unavailable（不得 MeasuredZero）」——之前只查了

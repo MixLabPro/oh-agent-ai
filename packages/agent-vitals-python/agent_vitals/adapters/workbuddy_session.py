@@ -374,6 +374,33 @@ def normalize_wb_ts(value, now_secs):
     return _epoch_secs_to_iso(secs), False
 
 
+def lifecycle_of(db_rec):
+    """spec §10 B5（`WORKBUDDY_OBSERVABILITY_ASK.md` P0-3「若不做」降级路径）：
+    `status`/`source_mode`/`is_playground`/`deleted_at`/`is_background_automation`
+    按列名原样浮出，**只浮出不过滤**——语义宿主未声明，过滤是消费方的事（哪怕
+    按字面值过滤，如排除 `is_playground=1`，本身也是一次未经宿主声明语义的
+    推断，spec 选择不做）。db 行整体缺失（audit-log 独苗会话）→ None（不是全
+    null 对象——没有行就没有生命周期状态可言）；行存在但某列缺失/NULL/类型不符
+    → 该字段 None（与 `_val` 同款缺列报缺纪律）。`is_playground`/
+    `is_background_automation` 保持宿主存的 INTEGER（不转 bool——转型是解读）；
+    `status`/`source_mode` 是 TEXT，原样字符串；`deleted_at` 是 INTEGER
+    epoch-ms，走与 A2 `created_at`/`updated_at` 同一条 `normalize_wb_ts` 路径。
+
+    Rust 镜像 `sources/mod.rs::lifecycle_of`，逐字节对齐；键序固定
+    `{status, source_mode, is_playground, deleted_at, is_background_automation}`。"""
+    if not isinstance(db_rec, dict):
+        return None
+    now_secs = now_unix_secs()
+    deleted_at, _ = normalize_wb_ts(db_rec.get("deleted_at"), now_secs)
+    return {
+        "status": _val(db_rec, "status", str),
+        "source_mode": _val(db_rec, "source_mode", str),
+        "is_playground": _val(db_rec, "is_playground", int),
+        "deleted_at": deleted_at,
+        "is_background_automation": _val(db_rec, "is_background_automation", int),
+    }
+
+
 def date_span_of(records, meta):
     """会话活动时间跨度：audit-log 记录 timestamp 的 min/max（跨文件全取，归一后
     ISO 串字典序 = 时间序）；无记录 → db 行 created_at/updated_at 兜底（已在

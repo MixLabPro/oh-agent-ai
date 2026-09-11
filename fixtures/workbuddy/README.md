@@ -44,6 +44,18 @@ WorkBuddy persists each session across **three joinable surfaces** (§2.1;
   "missing": []}, "session_usage": {"unknown": [], "missing": []}}`
   (`migrations_applied` is `null`, not `0` — the fixture has no
   `__workbuddy_drizzle_migrations` table, and B4 never fabricates one).
+  Five of the 30 columns carry real-vocabulary values for spec §10 B5
+  (`lifecycle`, a trailing key on every `--list` row and on the single-session
+  JSON after `schema_probe`): s1 = `status completed / source_mode working`,
+  s2 = `status terminated / source_mode coding`, both `is_playground 0 /
+  is_background_automation 0 / deleted_at NULL`. They are **surfaced verbatim
+  and never filtered on** — the host has not declared their value vocabularies
+  (ASK P0-3), so even a literal filter like "drop `is_playground=1`" would be an
+  inference the adapter has no basis for; filtering is the consumer's decision.
+  `is_playground`/`is_background_automation` stay INTEGER 0/1 (not bool),
+  `deleted_at` goes through the same A2 epoch-ms normalizer as `created_at`.
+  A session with a db row gets one explanatory note; an audit-log-only session
+  (no db row) has `lifecycle: null` and no note.
 - `audit-log/*.jsonl` — per-event decision records grouped by the **`sessionId`
   field** (not the filename), carrying `eventType`/`sequence`/`prevHash`/`hash`/
   `requestId`/`toolCallId`/`commandPreview`/`messageKey`/`messageParams`.

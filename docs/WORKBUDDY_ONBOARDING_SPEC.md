@@ -693,7 +693,7 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
       `attempts` + note `schema-drift: unknown columns N`；`migrations_applied` 读
       `__workbuddy_drizzle_migrations` 行数（测量，非推断），表缺失报 null。
       已知列清单 = 2026-09-11 真机 30 列快照，**是声明的基线不是规则**（§11 规则 16）。
-- [ ] **B5 · 生命周期字段浮出（不过滤）**（code，ASK P0-3 若不做）
+- [x] **B5 · 生命周期字段浮出（不过滤）**（code，ASK P0-3 若不做）
       `status` / `source_mode` / `is_playground` / `deleted_at` / `is_background_automation`
       按名读入 `--list` 行与会话 meta，缺列 null；**只浮出不过滤**（语义宿主未声明，过滤
       是消费方的事），note 标注「语义未经宿主声明」。

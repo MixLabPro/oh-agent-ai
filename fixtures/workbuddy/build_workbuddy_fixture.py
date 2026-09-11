@@ -200,16 +200,28 @@ def write_workbuddy_home(base):
 
     conn = _connect_db(root / "workbuddy.db")
     try:
+        # B5（spec §10）：五个生命周期列给真实词表值（不再留 NULL），让 fixture
+        # 真正练到 `lifecycle_of` 的浮出路径——§2 / ASK §2 真机观测词表：
+        # status ∈ {completed, terminated, working}、source_mode ∈ {working,
+        # coding, craft}。s1/s2 都不软删（`deleted_at` NULL，真机 0 行同款）、
+        # 都不是游乐场/后台自动化会话（该维度是覆盖测量，不是这两条会话要证的
+        # 东西）。
         conn.execute(
             "INSERT INTO sessions (id, title, model, cwd, permission_mode, "
-            "use_sandbox_cli, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            "use_sandbox_cli, created_at, updated_at, status, source_mode, "
+            "is_playground, is_background_automation, deleted_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ("s1", "健康会话", "deepseek-v4-flash", "/repo", "fullAccess", 1,
-             _ms("2026-08-31T09:00:00Z"), _ms("2026-08-31T09:05:00Z")))
+             _ms("2026-08-31T09:00:00Z"), _ms("2026-08-31T09:05:00Z"),
+             "completed", "working", 0, 0, None))
         conn.execute(
             "INSERT INTO sessions (id, title, model, cwd, permission_mode, "
-            "use_sandbox_cli, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            "use_sandbox_cli, created_at, updated_at, status, source_mode, "
+            "is_playground, is_background_automation, deleted_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ("s2", "审批流程会话", "deepseek-v4-flash", "/repo", "bypassPermissions",
-             1, _ms("2026-08-31T10:00:00Z"), _ms("2026-08-31T10:05:00Z")))
+             1, _ms("2026-08-31T10:00:00Z"), _ms("2026-08-31T10:05:00Z"),
+             "terminated", "coding", 0, 0, None))
         # credit 量级对齐真机：单请求积分中位 ~22（旧 fixture 的 0.02/0.03 反过来
         # 印证了「把积分当人民币」的单位 bug，§3.1）。s1 两条 requestId 求和
         # 42.01 credit；`_to_cents` 按厘累计（22.53→2253、19.48→1948）。
@@ -383,17 +395,56 @@ def self_verify(root):
         probe["session_usage"]
     assert list(probe.keys()) == \
         ["migrations_applied", "sessions", "session_usage"], probe.keys()
-    # `schema_probe` 是两个消费面共同的末位键（`source_snapshot` 之后）。
+    # `schema_probe` 是 --list 的末位键；单会话审计上 B5 在它之后又追加了
+    # `lifecycle`（见下方 B5 段），所以 `full` 侧末位键已经不是 `schema_probe`。
     assert list(listing.keys())[-1] == "schema_probe", listing.keys()
     assert listing["schema_probe"] == probe, listing["schema_probe"]
-    assert list(full.keys())[-1] == "schema_probe", full.keys()
     assert full["schema_probe"] == probe, full["schema_probe"]
+    assert list(full.keys())[-2:] == ["schema_probe", "lifecycle"], full.keys()
     # 沉默会话上没有任何 schema-drift attempts/notes 混进去（§10 B4 的 surface
     # 只在漂移非空时才推条目——健康 fixture 必须一条都没有）。
     assert not any(a.get("error", "").startswith("schema-drift:")
                    for a in full["attempts"]), full["attempts"]
     assert not any(n.startswith("schema-drift:") for n in full["notes"]), \
         full["notes"]
+
+    # ── B5：生命周期字段浮出（不过滤）（spec §10，`WORKBUDDY_OBSERVABILITY_ASK.md`
+    # P0-3「若不做」降级路径）── fixture 现在给 s1/s2 真实词表值（`_connect_db`
+    # 调用点注释），练到 `lifecycle_of` 的实际浮出路径，而不是缺列/None 的退化
+    # 路径（那条由下面 tests/test_regressions.py 的专门回归测试覆盖）。
+    s1_lifecycle = {
+        "status": "completed", "source_mode": "working", "is_playground": 0,
+        "deleted_at": None, "is_background_automation": 0,
+    }
+    s2_lifecycle = {
+        "status": "terminated", "source_mode": "coding", "is_playground": 0,
+        "deleted_at": None, "is_background_automation": 0,
+    }
+    full1 = workbuddy_session_audit.workbuddy_session_audit_json(root.parent, "s1")
+    assert full1["lifecycle"] == s1_lifecycle, full1["lifecycle"]
+    assert list(full1["lifecycle"].keys()) == [
+        "status", "source_mode", "is_playground", "deleted_at",
+        "is_background_automation"], full1["lifecycle"].keys()
+    assert full["lifecycle"] == s2_lifecycle, full["lifecycle"]
+    # 两会话 db 行都存在 → 都要有那条「浮出不过滤」note（spec §10 B5 的 note
+    # 要求：只要 `lifecycle` 非 None 就要附注，不是只在漂移/异常时才提醒）。
+    lifecycle_note = (
+        "lifecycle fields (status / source_mode / is_playground / deleted_at / "
+        "is_background_automation) are surfaced verbatim; their value "
+        "vocabularies are not declared by the host, so no session is filtered "
+        "on them here — filtering is the consumer's decision")
+    assert lifecycle_note in full1["notes"], full1["notes"]
+    assert lifecycle_note in full["notes"], full["notes"]
+    # --list 侧：每行末位追加同一份 lifecycle 对象；session 数仍是 2——B5 的
+    # 核心不变式是「无论生命周期取值如何都不过滤」，这里在健康 fixture 上先钉
+    # 「数出来对不上就是过滤漏进来了」的最低门槛，真正的三值差分不变式测试在
+    # tests/test_regressions.py（合成三种取值组合的临时 db，断言 id 集合不变）。
+    assert len(listing["sessions"]) == 2, listing["sessions"]
+    by_id = {row["session_id"]: row for row in listing["sessions"]}
+    assert by_id["s1"]["lifecycle"] == s1_lifecycle, by_id["s1"]
+    assert by_id["s2"]["lifecycle"] == s2_lifecycle, by_id["s2"]
+    assert list(by_id["s1"].keys())[-1] == "lifecycle", by_id["s1"].keys()
+    assert list(by_id["s2"].keys())[-1] == "lifecycle", by_id["s2"].keys()
 
 
 def main():

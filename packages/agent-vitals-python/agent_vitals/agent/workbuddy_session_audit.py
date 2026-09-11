@@ -93,6 +93,8 @@ def workbuddy_session_list(home=None):
                 "cwd": meta["cwd"],
                 "first": meta["created_at"],
                 "last": meta["updated_at"],
+                # B5：生命周期字段原样浮出，只浮出不过滤（spec §10 B5）。
+                "lifecycle": workbuddy_session.lifecycle_of(rec),
             })
     sessions.sort(key=functools.cmp_to_key(_session_cmp))
     source_snapshot = workbuddy_session.read_workbuddy_source_snapshot(root)
@@ -276,6 +278,16 @@ _WB_UNBILLED_TO_CREDITS_NOTE = (
     "free tier, and host-side non-billing are indistinguishable here."
 )
 
+# spec §10 B5：`lifecycle` 非 None 时附在 `notes` 的诚实注记——五个字段是原样
+# 浮出，其取值词表宿主未声明，所以这里不据其值过滤任何会话；过滤是消费方的
+# 决定。Rust `sources/mod.rs::WB_LIFECYCLE_NOTE` 字节一致。
+_WB_LIFECYCLE_NOTE = (
+    "lifecycle fields (status / source_mode / is_playground / deleted_at / "
+    "is_background_automation) are surfaced verbatim; their value vocabularies "
+    "are not declared by the host, so no session is filtered on them here \u2014 "
+    "filtering is the consumer's decision"
+)
+
 
 def _cost_of(meta):
     """spec §6.1 成本块，键序 `{tokens, credits, cash_cny, nominal_cny,
@@ -369,6 +381,14 @@ def workbuddy_session_audit_json(home, session_id):
     if _is_unbilled_to_credits(meta):
         notes.append(_WB_UNBILLED_TO_CREDITS_NOTE)
 
+    # B5：生命周期字段（spec §10 B5）。db 行缺失（audit-log 独苗会话）→ None，
+    # 不追加 note——没有行就没有可浮出的生命周期状态。
+    # **压在 B4 漂移 note 之前**：lifecycle 是会话自身状态的注记，schema-drift 是
+    # 库级诊断——B4 的回归钉住「漂移 note 严格追加在 notes 末尾」，这里不能插队。
+    lifecycle = workbuddy_session.lifecycle_of(db_rec)
+    if lifecycle is not None:
+        notes.append(_WB_LIFECYCLE_NOTE)
+
     # B4：schema 哨兵。probe 为 None（db 不可读）时没有「漂移」可报——两个 db
     # 表面（sessions/session_usage）已经在别处降级，这里不再重复一条 attempts。
     schema_probe = workbuddy_session.read_workbuddy_schema_probe(root)
@@ -393,4 +413,5 @@ def workbuddy_session_audit_json(home, session_id):
         "notes": notes,
         "source_snapshot": workbuddy_session.read_workbuddy_source_snapshot(root),
         "schema_probe": schema_probe,
+        "lifecycle": lifecycle,
     }

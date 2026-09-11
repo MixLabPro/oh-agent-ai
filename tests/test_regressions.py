@@ -1602,6 +1602,160 @@ class TestWorkbuddySchemaProbeSentinel(unittest.TestCase):
         _walk(probe)
 
 
+class TestWorkbuddyLifecycleIsSurfacedNeverFiltered(unittest.TestCase):
+    """spec §10 B5（`WORKBUDDY_OBSERVABILITY_ASK.md` P0-3「若不做」降级路径）：
+    `status` / `source_mode` / `is_playground` / `deleted_at` /
+    `is_background_automation` 五列按名**原样浮出**（`--list` 每行的 `lifecycle`
+    + 单会话审计的顶层 `lifecycle`），**绝不据其值过滤任何会话**。
+
+    为什么不过滤：这五列的取值词表宿主没有声明（ASK P0-3 的诉求正是要它声明）。
+    按字面值过滤（如「排除 `is_playground=1`」）本身就是一次未经宿主声明语义的
+    推断——spec §11 规则 16「语料观测不进规则」。所以适配器只浮出，过滤是消费方
+    的决定；本类的核心不变式是 (3)：任何 lifecycle 取值都不改变 `--list` 的会话数
+    与 id 集。"""
+
+    _LIFECYCLE_KEYS = ["status", "source_mode", "is_playground",
+                       "deleted_at", "is_background_automation"]
+    _NOTE_PREFIX = "lifecycle fields (status / source_mode / is_playground"
+
+    def _copy_fixture(self, tmp):
+        src = ROOT / "fixtures" / "workbuddy" / "workdir"
+        shutil.copytree(src, tmp, dirs_exist_ok=True)
+        (tmp / "workdir").mkdir(parents=True, exist_ok=True)
+        return tmp / ".workbuddy" / "workbuddy.db"
+
+    def _mk_tmp(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return tmp
+
+    def _run(self, tmp, *args):
+        r = subprocess.run(
+            SCAN_CMD + ["workbuddy-session", *args, "--json", "-"],
+            cwd=str(tmp / "workdir"), env=isolated_home_env(tmp),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def _audit(self, tmp, sid):
+        return self._run(tmp, "--session", sid)
+
+    def _list(self, tmp):
+        return self._run(tmp, "--list")
+
+    @staticmethod
+    def _sqlite():
+        import sqlite3  # noqa: PLC0415
+        return sqlite3
+
+    def _insert_session(self, db, sid, **cols):
+        """按真机 30 列 schema 插一行；未给的列落 NULL（fixture 约束特意比真机宽）。"""
+        base = dict(id=sid, title="t", model="m", cwd="/repo",
+                    permission_mode="fullAccess", use_sandbox_cli=1,
+                    created_at=1788167100000, updated_at=1788167400000,
+                    status="completed", source_mode="working",
+                    is_playground=0, is_background_automation=0, deleted_at=None)
+        base.update(cols)
+        conn = self._sqlite().connect(str(db))
+        try:
+            keys = list(base)
+            conn.execute(
+                "INSERT INTO sessions (%s) VALUES (%s)"
+                % (", ".join(keys), ", ".join("?" for _ in keys)),
+                [base[k] for k in keys])
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_fields_are_surfaced_verbatim_and_deleted_at_takes_the_a2_path(self):
+        """(1) 五列原样：TEXT 原串、INTEGER 0/1 **不转 bool**（转型是解读）；
+        `deleted_at` 是 epoch-ms INTEGER，走与 A2 `created_at`/`updated_at` 同一条
+        `normalize_wb_ts` 归一（1788170400000 → 2026-08-31T10:00:00Z）。"""
+        tmp = self._mk_tmp()
+        db = self._copy_fixture(tmp)
+        self._insert_session(db, "s9", status="terminated", source_mode="craft",
+                             is_playground=1, is_background_automation=1,
+                             deleted_at=1788170400000)
+        lc = self._audit(tmp, "s9")["lifecycle"]
+        self.assertEqual(lc, {
+            "status": "terminated",
+            "source_mode": "craft",
+            "is_playground": 1,
+            "deleted_at": "2026-08-31T10:00:00Z",
+            "is_background_automation": 1,
+        })
+        self.assertIs(type(lc["is_playground"]), int)
+        row = [r for r in self._list(tmp)["sessions"] if r["session_id"] == "s9"][0]
+        self.assertEqual(row["lifecycle"], lc)
+
+    def test_missing_column_yields_null_and_coexists_with_schema_probe(self):
+        """(2) 库里没有 `source_mode` 列 → 该字段 `null`，不抛；B4 的哨兵同时在
+        `schema_probe.sessions.missing` 里报它——两条纪律各管各的：缺列报缺 +
+        漂移进哨兵，互不干扰。"""
+        tmp = self._mk_tmp()
+        db = self._copy_fixture(tmp)
+        conn = self._sqlite().connect(str(db))
+        try:
+            conn.execute("ALTER TABLE sessions DROP COLUMN source_mode")
+            conn.commit()
+        finally:
+            conn.close()
+        report = self._audit(tmp, "s1")
+        self.assertIsNone(report["lifecycle"]["source_mode"])
+        self.assertEqual(report["lifecycle"]["status"], "completed")
+        self.assertIn("source_mode", report["schema_probe"]["sessions"]["missing"])
+
+    def test_no_lifecycle_value_filters_a_session_out_of_list(self):
+        """(3) **不变式**：三个分别打了 `is_playground=1` / `deleted_at` 非空 /
+        `is_background_automation=1` 的会话，与三个全 0/NULL 的会话，`--list`
+        的会话数与 id 集**完全相同**。宿主没声明这些值的语义，适配器不得据其
+        过滤——过滤是消费方的决定。"""
+        flagged = self._mk_tmp(); dbf = self._copy_fixture(flagged)
+        plain = self._mk_tmp(); dbp = self._copy_fixture(plain)
+        self._insert_session(dbf, "p1", is_playground=1)
+        self._insert_session(dbf, "p2", deleted_at=1788170400000)
+        self._insert_session(dbf, "p3", is_background_automation=1)
+        self._insert_session(dbp, "p1")
+        self._insert_session(dbp, "p2")
+        self._insert_session(dbp, "p3")
+        ids_f = sorted(r["session_id"] for r in self._list(flagged)["sessions"])
+        ids_p = sorted(r["session_id"] for r in self._list(plain)["sessions"])
+        self.assertEqual(ids_f, ids_p)
+        self.assertEqual(len(ids_f), 5)  # s1 s2 + p1 p2 p3，一个都不少
+
+    def test_note_present_iff_lifecycle_non_null(self):
+        """(4) db 行缺失（audit-log 独苗会话）→ `lifecycle: null` 且**不**附
+        lifecycle note——没有行就没有可浮出的生命周期状态，note 也就无从谈起；
+        有行 → 恰好一条 note。"""
+        tmp = self._mk_tmp()
+        db = self._copy_fixture(tmp)
+        conn = self._sqlite().connect(str(db))
+        try:
+            conn.execute("DELETE FROM sessions WHERE id = 's2'")
+            conn.execute("DELETE FROM session_usage WHERE session_id = 's2'")
+            conn.commit()
+        finally:
+            conn.close()
+        orphan = self._audit(tmp, "s2")   # s2 仍有 audit-log 记录
+        self.assertIsNone(orphan["lifecycle"])
+        self.assertFalse(any(n.startswith(self._NOTE_PREFIX) for n in orphan["notes"]),
+                         orphan["notes"])
+        withrow = self._audit(tmp, "s1")
+        self.assertIsNotNone(withrow["lifecycle"])
+        self.assertEqual(
+            sum(1 for n in withrow["notes"] if n.startswith(self._NOTE_PREFIX)), 1,
+            withrow["notes"])
+
+    def test_lifecycle_key_list_is_exactly_the_five_declared_names(self):
+        """(5) 键序钉死：五个声明名，不多不少，顺序固定——差分契约的一部分。"""
+        tmp = self._mk_tmp()
+        self._copy_fixture(tmp)
+        report = self._audit(tmp, "s1")
+        self.assertEqual(list(report["lifecycle"].keys()), self._LIFECYCLE_KEYS)
+        for row in self._list(tmp)["sessions"]:
+            self.assertEqual(list(row["lifecycle"].keys()), self._LIFECYCLE_KEYS)
+
+
 class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
     """A4（spec §6.4-5）：`nominal_cny`（名义栏，credits × 兑换价）绝不能出现在
     真实**实付**汇总 DTO 里——它是尺，不是账（`ATTRIBUTABLE_WASTE.md` §6.7）。
