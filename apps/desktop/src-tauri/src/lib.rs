@@ -1464,6 +1464,19 @@ fn spawn_billing_recalculation_worker(path: PathBuf, job_id: String) {
     });
 }
 
+fn recover_billing_recalculations(path: PathBuf) {
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ) else { return };
+    let queued = db.billing_recalculation_recover(
+        agent_vitals_runtime::sql_sync::now_ms(),
+    ).unwrap_or_default();
+    drop(db);
+    for job_id in queued {
+        spawn_billing_recalculation_worker(path.clone(), job_id);
+    }
+}
+
 #[tauri::command]
 fn enqueue_billing_recalculation(
     job_id: String, declaration_id: String, revision_id: String,
@@ -1828,6 +1841,9 @@ pub fn run() {
             // 只藏窗口,藏不住进程的 Dock 图标。show_workbench 已负责 show+set_focus,
             // accessory 下窗口照常成为 key。
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            recover_billing_recalculations(
+                agent_vitals_data::authority::default_authority_path(&overview::data_home()),
+            );
             let ov = overview::read_overview();
             let menu = build_menu(app.handle(), &ov)?;
             // 左右键都弹菜单（今日/本月/预算/打开工作台/立即同步/退出）——统一到

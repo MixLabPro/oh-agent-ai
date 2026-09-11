@@ -2223,6 +2223,27 @@ impl AuthorityDb {
         Ok(changed > 0)
     }
 
+    /// 应用重启时恢复任务队列：把上次进程中断的 running 任务标为失败，
+    /// 再返回仍待执行的 queued 任务，由宿主启动 worker。只改变任务状态，
+    /// 不触碰事实、结果快照或归因表。
+    pub fn billing_recalculation_recover(
+        &self, now_ms: i64,
+    ) -> Result<Vec<String>, AuthorityError> {
+        self.conn.execute(
+            "UPDATE billing_recalculation_jobs SET status = 'failed',
+                 completed_at_ms = ?1, error_code = COALESCE(error_code, 'interrupted'),
+                 error_detail = COALESCE(error_detail, 'worker interrupted by app restart')
+             WHERE status = 'running'",
+            rusqlite::params![now_ms],
+        )?;
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id FROM billing_recalculation_jobs
+             WHERE status = 'queued' ORDER BY requested_at_ms, job_id",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<String>, _>>().map_err(AuthorityError::from)
+    }
+
     pub fn billing_recalculation_job(
         &self, job_id: &str,
     ) -> Result<Option<BillingRecalculationJobRow>, AuthorityError> {
@@ -2873,6 +2894,11 @@ mod tests {
         assert_eq!(retried.7, None);
         assert!(!authority.billing_recalculation_retry("job-1", 13).unwrap(),
             "成功任务不可回退为 queued");
+        let queued = authority.billing_recalculation_recover(14).unwrap();
+        assert_eq!(queued, vec!["job-failed".to_string()]);
+        assert!(authority.billing_recalculation_set_status("job-failed", "running", None, None, 15).unwrap());
+        assert_eq!(authority.billing_recalculation_recover(16).unwrap(), Vec::<String>::new());
+        assert_eq!(authority.billing_recalculation_job("job-failed").unwrap().unwrap().3, "failed");
         let _ = std::fs::remove_file(&db);
     }
 
