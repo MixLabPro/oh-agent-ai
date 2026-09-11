@@ -1361,6 +1361,42 @@ fn resolve_billing_import_candidate(candidate_id: String, decision: String) -> R
     Ok(serde_json::json!({ "status": status, "changed": changed }))
 }
 
+/// 声明保存后创建重算任务；这里只入队，不在 IPC 调用线程执行重算。
+#[tauri::command]
+fn enqueue_billing_recalculation(
+    job_id: String, declaration_id: String, revision_id: String,
+) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let changed = db.billing_recalculation_enqueue(
+        &job_id, &declaration_id, &revision_id, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "queued", "job_id": job_id, "changed": changed }))
+}
+
+/// 查询重算任务回执；未找到和数据库不可用均返回可识别的业务错误。
+#[tauri::command]
+fn billing_recalculation_job_status(job_id: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+        .map_err(|error| error.to_string())?;
+    let Some((job_id, declaration_id, revision_id, status, requested_at_ms, started_at_ms,
+        completed_at_ms, error_code, error_detail)) = db.billing_recalculation_job(&job_id)
+        .map_err(|error| error.to_string())? else {
+        return Err("unknown recalculation job".to_string());
+    };
+    Ok(serde_json::json!({
+        "status": status, "job_id": job_id, "declaration_id": declaration_id,
+        "revision_id": revision_id, "requested_at_ms": requested_at_ms,
+        "started_at_ms": started_at_ms, "completed_at_ms": completed_at_ms,
+        "error_code": error_code, "error_detail": error_detail,
+    }))
+}
+
 /// 工作台「数据源」页的独立契约。会话搜索只回答时间窗内的会话，不能再被
 /// 借来承载扫描健康；这里从 SQL authority 的 source_files / usage_facts 读取
 /// 每个已接线宿主的扫描、导入和失败范围。宿主集合复用 ingest registry，前端
@@ -1635,6 +1671,8 @@ pub fn run() {
             data_status,
             billing_import_candidates,
             resolve_billing_import_candidate,
+            enqueue_billing_recalculation,
+            billing_recalculation_job_status,
             data_source_status,
             data_monthly_summary,
             data_daily_summary,
