@@ -75,6 +75,7 @@ pub type BillingDeclarationScopeRow = (String, String, String);
 pub type BillingRecalculationJobRow = (
     String, String, String, String, i64, Option<i64>, Option<i64>, Option<String>, Option<String>,
 );
+pub type BillingRecalculationResultRow = (String, String, i64, i64, i64, Option<i64>, Option<i64>, i64);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BillingDeclarationImpactPreview {
     pub fact_count: i64,
@@ -656,6 +657,19 @@ CREATE INDEX billing_recalculation_jobs_status
   ON billing_recalculation_jobs(status, requested_at_ms);
 "#;
 
+const SCHEMA_V11_ADD: &str = r#"
+CREATE TABLE billing_recalculation_results (
+  job_id TEXT PRIMARY KEY REFERENCES billing_recalculation_jobs(job_id),
+  revision_id TEXT NOT NULL REFERENCES billing_declaration_revisions(revision_id),
+  fact_count INTEGER NOT NULL CHECK (fact_count >= 0),
+  session_count INTEGER NOT NULL CHECK (session_count >= 0),
+  total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
+  first_event_ts_ms INTEGER,
+  last_event_ts_ms INTEGER,
+  published_at_ms INTEGER NOT NULL
+);
+"#;
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -826,9 +840,22 @@ impl AuthorityDb {
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
+            Some(10) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V11_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(9) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V10_ADD);
+                let migration = conn.execute_batch(SCHEMA_V10_ADD).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -841,7 +868,7 @@ impl AuthorityDb {
             }
             Some(8) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V9_ADD).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD));
+                let migration = conn.execute_batch(SCHEMA_V9_ADD).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -854,7 +881,7 @@ impl AuthorityDb {
             }
             Some(7) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V8_ADD).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD));
+                let migration = conn.execute_batch(SCHEMA_V8_ADD).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -867,7 +894,7 @@ impl AuthorityDb {
             }
             Some(6) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V7_ADD).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD));
+                let migration = conn.execute_batch(SCHEMA_V7_ADD).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -883,7 +910,7 @@ impl AuthorityDb {
             }
             Some(5) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD));
+                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -942,6 +969,10 @@ impl AuthorityDb {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V11_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
                         conn.execute(
                             "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
                             rusqlite::params![SCHEMA_VERSION.to_string()],
@@ -986,6 +1017,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V10_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V11_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -1040,6 +1075,10 @@ impl AuthorityDb {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V11_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
                         conn.execute(
                             "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
                             rusqlite::params![SCHEMA_VERSION.to_string()],
@@ -1088,6 +1127,7 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V8_ADD)?;
                 conn.execute_batch(SCHEMA_V9_ADD)?;
                 conn.execute_batch(SCHEMA_V10_ADD)?;
+                conn.execute_batch(SCHEMA_V11_ADD)?;
                 // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
                 conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
@@ -2104,6 +2144,56 @@ impl AuthorityDb {
         ).optional()?)
     }
 
+    /// 执行一个只读聚合型重算任务并原子发布结果快照；原始 facts 与旧结果不变。
+    pub fn billing_recalculation_run(
+        &self, job_id: &str, now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        let job = self.billing_recalculation_job(job_id)?;
+        let Some((_, _, revision_id, status, _, _, _, _, _)) = job else { return Ok(false); };
+        if status != "queued" { return Ok(false); }
+        self.billing_recalculation_set_status(job_id, "running", None, None, now_ms)?;
+        let preview = match self.billing_declaration_impact_preview(&revision_id, i64::MIN, i64::MAX) {
+            Ok(value) => value,
+            Err(error) => {
+                self.billing_recalculation_set_status(job_id, "failed", Some("preview_failed"), Some("impact preview failed"), now_ms)?;
+                return Err(error);
+            }
+        };
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = self.conn.execute(
+            "INSERT INTO billing_recalculation_results(
+                 job_id, revision_id, fact_count, session_count, total_tokens,
+                 first_event_ts_ms, last_event_ts_ms, published_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(job_id) DO UPDATE SET published_at_ms = excluded.published_at_ms",
+            rusqlite::params![job_id, revision_id, preview.fact_count, preview.session_count,
+                preview.total_tokens, preview.first_event_ts_ms, preview.last_event_ts_ms, now_ms],
+        );
+        match result {
+            Ok(_) => {
+                self.conn.execute(
+                    "UPDATE billing_recalculation_jobs SET status = 'succeeded', completed_at_ms = ?2
+                     WHERE job_id = ?1 AND status = 'running'", rusqlite::params![job_id, now_ms],
+                )?;
+                self.conn.execute_batch("COMMIT")?;
+                Ok(true)
+            }
+            Err(error) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(error.into()) }
+        }
+    }
+
+    pub fn billing_recalculation_result(
+        &self, job_id: &str,
+    ) -> Result<Option<BillingRecalculationResultRow>, AuthorityError> {
+        Ok(self.conn.query_row(
+            "SELECT job_id, revision_id, fact_count, session_count, total_tokens,
+                    first_event_ts_ms, last_event_ts_ms, published_at_ms
+             FROM billing_recalculation_results WHERE job_id = ?1",
+            rusqlite::params![job_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+                row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+        ).optional()?)
+    }
+
     /// 幂等写入一个待确认的旧订阅候选。相同候选不会重复；候选永远不写入
     /// `host_bills`，必须由上层获得用户确认后另走明确账单写入。
     #[allow(clippy::too_many_arguments)]
@@ -2404,7 +2494,8 @@ mod tests {
         {
             let current = AuthorityDb::open(&db, 1).unwrap();
             current.conn().execute_batch(
-                "DROP TABLE billing_recalculation_jobs;
+                "DROP TABLE billing_recalculation_results;
+                 DROP TABLE billing_recalculation_jobs;
                  DROP TABLE billing_declaration_scopes;
                  DROP TABLE billing_declaration_revisions;
                  DROP TABLE billing_declarations;
@@ -2436,7 +2527,8 @@ mod tests {
         {
             let current = AuthorityDb::open(&db, 1).unwrap();
             current.conn().execute_batch(
-                "DROP TABLE billing_recalculation_jobs;
+                "DROP TABLE billing_recalculation_results;
+                 DROP TABLE billing_recalculation_jobs;
                  DROP TABLE billing_declaration_scopes;
                  DROP TABLE billing_declaration_revisions;
                  UPDATE schema_meta SET value = '8' WHERE key = 'schema_version';",
@@ -2640,14 +2732,25 @@ mod tests {
         assert!(authority.billing_recalculation_enqueue("job-1", "declaration-job", "revision-job", 2).unwrap());
         assert!(!authority.billing_recalculation_enqueue("job-2", "declaration-job", "revision-job", 3).unwrap());
         assert_eq!(authority.billing_recalculation_job("job-1").unwrap().unwrap().3, "queued");
-        assert!(authority.billing_recalculation_set_status("job-1", "running", None, None, 4).unwrap());
-        assert!(authority.billing_recalculation_set_status("job-1", "failed", Some("preview_only"), Some("recompute worker not installed"), 5).unwrap());
-        let job = authority.billing_recalculation_job("job-1").unwrap().unwrap();
+        assert!(authority.billing_recalculation_run("job-1", 4).unwrap());
+        assert_eq!(authority.billing_recalculation_job("job-1").unwrap().unwrap().3, "succeeded");
+        assert_eq!(authority.billing_recalculation_result("job-1").unwrap().unwrap().2, 0);
+        assert!(!authority.billing_recalculation_run("job-1", 5).unwrap());
+        assert!(!authority.billing_recalculation_enqueue("job-3", "declaration-job", "revision-job", 6).unwrap(),
+            "one revision cannot create a second recalculation job");
+        authority.billing_declaration_revision_save(
+            "revision-job-2", "declaration-job-2", None, "codex", "openai", "official_api",
+            None, None, None, "2026-09", None, None, None, &[], 7,
+        ).unwrap();
+        assert!(authority.billing_recalculation_enqueue("job-failed", "declaration-job-2", "revision-job-2", 8).unwrap());
+        assert!(authority.billing_recalculation_set_status("job-failed", "running", None, None, 9).unwrap());
+        assert!(authority.billing_recalculation_set_status("job-failed", "failed", Some("worker_failed"), Some("worker unavailable"), 10).unwrap());
+        let job = authority.billing_recalculation_job("job-failed").unwrap().unwrap();
         assert_eq!(job.3, "failed");
-        assert_eq!(job.5, Some(4));
-        assert_eq!(job.6, Some(5));
-        assert_eq!(job.7.as_deref(), Some("preview_only"));
-        assert!(!authority.billing_recalculation_set_status("job-1", "succeeded", None, None, 6).unwrap());
+        assert_eq!(job.5, Some(9));
+        assert_eq!(job.6, Some(10));
+        assert_eq!(job.7.as_deref(), Some("worker_failed"));
+        assert!(!authority.billing_recalculation_set_status("job-failed", "succeeded", None, None, 11).unwrap());
         let _ = std::fs::remove_file(&db);
     }
 
