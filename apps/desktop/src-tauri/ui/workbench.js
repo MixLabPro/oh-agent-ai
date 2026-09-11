@@ -673,6 +673,101 @@ function billingCandidateAmount(candidate) {
   return amount.toFixed(2) + " " + (candidate.currency || "") + "/月";
 }
 
+let billingDeclarationCandidate = null;
+let billingDeclarationState = null;
+
+function billingMonthWindow(month) {
+  const parts = String(month || "").split("-").map(Number);
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  const start = Date.UTC(parts[0], parts[1] - 1, 1) - 8 * 3600 * 1000;
+  const end = Date.UTC(parts[1] === 12 ? parts[0] + 1 : parts[0], parts[1] === 12 ? 0 : parts[1], 1) - 8 * 3600 * 1000;
+  return { start, end };
+}
+
+function openBillingDeclaration(candidate) {
+  const panel = document.getElementById("ov-billing-declaration-panel");
+  const context = document.getElementById("ov-billing-declaration-context");
+  const preview = document.getElementById("ov-billing-preview");
+  const apply = document.getElementById("ov-billing-apply-actions");
+  if (!panel || !context || !preview || !apply) return;
+  billingDeclarationCandidate = candidate;
+  billingDeclarationState = null;
+  context.textContent = candidate.provider_id + " · " + billingCandidateAmount(candidate) +
+    " · 自 " + candidate.billing_period_start + " 起（" + candidate.host + "）。" +
+    " 这一步只确认计费关系，不证明已付款。";
+  preview.hidden = true;
+  preview.textContent = "";
+  apply.hidden = true;
+  document.getElementById("ov-billing-save").disabled = false;
+  panel.hidden = false;
+  panel.scrollIntoView({ block: "nearest" });
+}
+
+function bindBillingDeclarationPanel() {
+  const save = document.getElementById("ov-billing-save");
+  const cancel = document.getElementById("ov-billing-cancel");
+  const apply = document.getElementById("ov-billing-apply");
+  if (!save || save.dataset.bound === "1") return;
+  save.dataset.bound = "1";
+  cancel.onclick = () => { document.getElementById("ov-billing-declaration-panel").hidden = true; };
+  save.onclick = async () => {
+    const candidate = billingDeclarationCandidate;
+    if (!candidate) return;
+    save.disabled = true;
+    const preview = document.getElementById("ov-billing-preview");
+    try {
+      const suffix = Date.now().toString(36);
+      const declarationId = "decl-" + candidate.candidate_id;
+      const revisionId = "rev-" + suffix;
+      await invoke("save_billing_declaration_revision", {
+        revisionId, declarationId, supersedesRevisionId: null,
+        host: candidate.host, providerId: candidate.provider_id,
+        relationshipKind: document.getElementById("ov-billing-relationship").value,
+        subscriptionName: null, amountMinor: candidate.amount_minor,
+        currency: candidate.currency, effectiveStart: candidate.billing_period_start,
+        effectiveEnd: null, sourceCandidateId: null,
+        evidenceRef: "legacy-import-candidate:" + candidate.candidate_id,
+        scopes: [],
+      });
+      const window = billingMonthWindow(beijingMonth());
+      const impact = await invoke("billing_declaration_impact_preview", {
+        revisionId, windowStartMs: window ? window.start : 0,
+        windowEndMs: window ? window.end : Date.now(),
+      });
+      billingDeclarationState = { declarationId, revisionId };
+      preview.hidden = false;
+      if (impact.status !== "ok") {
+        preview.textContent = "声明已保存，但影响预览暂不可用：" + (impact.reason || "请稍后重试");
+        return;
+      }
+      preview.textContent = "影响预览：" + fmtTokens(impact.total_tokens || 0) +
+        " tokens · " + (impact.fact_count || 0) + " 条事实 · " +
+        (impact.session_count || 0) + " 个会话。确认后才会应用到汇总。";
+      apply.hidden = false;
+    } catch (e) {
+      save.disabled = false;
+      preview.hidden = false;
+      preview.textContent = "保存失败：" + errText(e);
+    }
+  };
+  apply.onclick = async () => {
+    if (!billingDeclarationState) return;
+    apply.disabled = true;
+    try {
+      const jobId = "billing-" + Date.now().toString(36);
+      await invoke("enqueue_billing_recalculation", {
+        jobId, declarationId: billingDeclarationState.declarationId,
+        revisionId: billingDeclarationState.revisionId,
+      });
+      document.getElementById("ov-billing-preview").textContent += " 已入队，重算回执：" + jobId + "。";
+      await renderOverview();
+    } catch (e) {
+      apply.disabled = false;
+      document.getElementById("ov-billing-preview").textContent += " · 入队失败：" + errText(e);
+    }
+  };
+}
+
 // 旧版静态资产的套餐声明并非付款证据。这里故意不把它塞进 quality warning：
 // 它是用户最有上下文时的低压力输入机会，而非需要用户理解的技术故障。
 function renderBillingImportCandidates(report) {
@@ -681,6 +776,7 @@ function renderBillingImportCandidates(report) {
   const copy = document.getElementById("ov-billing-prompt-copy");
   const list = document.getElementById("ov-billing-review-list");
   if (!prompt || !panel || !copy || !list) return;
+  bindBillingDeclarationPanel();
   const candidates = report && report.status === "ok" ? (report.candidates || []) : [];
   const pendingCount = candidates.filter((candidate) => candidate.status === "pending").length;
   const deferred = sessionStorage.getItem("agent-vitals-billing-review-later") === "1";
@@ -714,6 +810,10 @@ function renderBillingImportCandidates(report) {
       const dismiss = document.createElement("button");
       dismiss.className = "btn secondary";
       dismiss.textContent = "不是我的";
+      const declare = document.createElement("button");
+      declare.className = "btn secondary";
+      declare.textContent = "确认计费方式";
+      declare.onclick = () => openBillingDeclaration(candidate);
       const resolve = async (decision) => {
         accept.disabled = true;
         dismiss.disabled = true;
@@ -773,7 +873,7 @@ function renderBillingImportCandidates(report) {
       }
       accept.onclick = () => resolve("accept");
       dismiss.onclick = () => resolve("dismiss");
-      actions.append(accept, dismiss);
+      actions.append(accept, dismiss, declare);
       row.append(detail, actions);
       list.appendChild(row);
     }

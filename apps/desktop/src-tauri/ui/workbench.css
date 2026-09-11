@@ -1057,8 +1057,14 @@ button.chip.active {
   gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line, #dce4f2); }
 .billing-review-row:last-child { border-bottom: 0; }
 .billing-review-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.billing-form { display: flex; gap: 12px; align-items: end; margin-top: 12px; flex-wrap: wrap; }
+.billing-form label { display: grid; gap: 4px; font-size: 12px; color: var(--text-2, #667); }
+.billing-form select { min-width: 170px; }
+.billing-form-actions { display: flex; gap: 8px; margin-top: 10px; }
+.billing-preview { margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: rgba(46, 78, 168, .12); }
 @media (max-width: 720px) {
   .billing-prompt, .billing-review-row { align-items: flex-start; flex-direction: column; }
+  .billing-form { align-items: stretch; flex-direction: column; }
 }
 .verdict strong { font-size: 16px; }
 .verdict .verdict-note { color: var(--muted); font-size: 12px; margin-left: 8px; }
