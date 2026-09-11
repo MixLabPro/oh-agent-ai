@@ -1473,13 +1473,24 @@ fn spawn_billing_recalculation_worker(path: PathBuf, job_id: String) {
         let Ok(worker_db) = agent_vitals_data::authority::AuthorityDb::open(
             &path, agent_vitals_runtime::sql_sync::now_ms(),
         ) else { return };
-        let now_ms = agent_vitals_runtime::sql_sync::now_ms();
-        if worker_db.billing_recalculation_run(&job_id, now_ms).is_err() {
-            let _ = worker_db.billing_recalculation_set_status(
-                &job_id, "failed", Some("worker_failed"),
-                Some("recalculation worker failed"), agent_vitals_runtime::sql_sync::now_ms(),
-            );
+        for attempt in 0..3 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(250 * (1_u64 << (attempt - 1))));
+                let _ = worker_db.billing_recalculation_retry(
+                    &job_id, agent_vitals_runtime::sql_sync::now_ms(),
+                );
+            }
+            if worker_db.billing_recalculation_run(
+                &job_id, agent_vitals_runtime::sql_sync::now_ms(),
+            ).is_ok() {
+                return;
+            }
         }
+        let _ = worker_db.billing_recalculation_set_status(
+            &job_id, "failed", Some("worker_failed"),
+            Some("recalculation worker failed after retries"),
+            agent_vitals_runtime::sql_sync::now_ms(),
+        );
     });
 }
 
