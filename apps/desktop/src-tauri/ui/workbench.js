@@ -719,21 +719,28 @@ async function renderBudgetSettings() {
   const monthly = document.getElementById("ov-budget-monthly-input");
   const daily = document.getElementById("ov-budget-daily-input");
   const warning = document.getElementById("ov-budget-warning-input");
+  const origin = document.getElementById("ov-budget-origin");
   const save = document.getElementById("ov-budget-save");
   const snoozeDay = document.getElementById("ov-budget-snooze-day");
   const snoozeClear = document.getElementById("ov-budget-snooze-clear");
   const status = document.getElementById("ov-budget-settings-status");
-  if (!monthly || !daily || !warning || !save || !snoozeDay || !snoozeClear || !status) return;
+  if (!monthly || !daily || !warning || !origin || !save || !snoozeDay || !snoozeClear || !status) return;
   try {
     const config = await invoke("budget_config");
     if (config.status === "ok") {
       monthly.value = config.monthly_cny_minor;
       daily.value = config.daily_cny_minor;
       warning.value = Number(config.warning_ratio_bp) / 100;
+      origin.hidden = false;
+      origin.textContent = config.origin === "legacy_import"
+        ? "此预算从旧版本导入；你可以直接修改。"
+        : config.origin === "user" ? "此预算由你在本版本设置。"
+        : "此预算来源未记录；数值仍可直接修改。";
     } else if (config.status === "missing") {
       monthly.value = "";
       daily.value = "";
       warning.value = 80;
+      origin.hidden = true;
     }
   } catch (_) { /* 配置读取失败不遮蔽总览 */ }
   if (save.dataset.bound === "1") return;

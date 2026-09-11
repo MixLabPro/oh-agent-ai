@@ -26,6 +26,36 @@ fn config_path_at(dh: &Path) -> PathBuf {
     dh.join("config.toml")
 }
 
+const BUDGET_ORIGIN_FILE: &str = "budget-origin.json";
+
+/// 预算金额的来源是展示证据，不参与算术或计费。旧版 seed 成功时记录
+/// `legacy_import`；用户后来显式保存则覆盖为 `user`。缺失表示历史版本没有
+/// 留下来源，消费方必须显示未知而非猜测。
+pub fn budget_config_origin(data_home: &Path) -> Option<String> {
+    let path = data_home.join("state").join(BUDGET_ORIGIN_FILE);
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Value>(&text)
+        .ok()?
+        .get("origin")
+        .and_then(Value::as_str)
+        .map(String::from)
+}
+
+pub fn mark_budget_config_user_owned(data_home: &Path) -> Result<(), String> {
+    write_budget_config_origin(data_home, "user")
+}
+
+fn write_budget_config_origin(data_home: &Path, origin: &str) -> Result<(), String> {
+    let dir = data_home.join("state");
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let path = dir.join(BUDGET_ORIGIN_FILE);
+    let temporary = dir.join("budget-origin.json.tmp");
+    let content = serde_json::to_vec(&json!({ "origin": origin }))
+        .map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, content).map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, path).map_err(|error| error.to_string())
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -397,8 +427,12 @@ fn seed_budget_config_from_legacy(
     let m_minor = agent_vitals_domain::util::pyround(m * 100.0, 0) as i64;
     let d_minor = agent_vitals_domain::util::pyround(d * 100.0, 0) as i64;
     let bp = agent_vitals_domain::util::pyround(warn_ratio.unwrap_or(0.8) * 10_000.0, 0) as i64;
-    db.budget_config_set(m_minor, d_minor, bp, crate::sql_sync::now_ms())
-        .is_ok()
+    let saved = db.budget_config_set(m_minor, d_minor, bp, crate::sql_sync::now_ms())
+        .is_ok();
+    if saved {
+        let _ = write_budget_config_origin(data_home, "legacy_import");
+    }
+    saved
 }
 
 /// ISO 日期时间串 → epoch **毫秒**（snooze 的 `until_ms` 列，`budget_snoozes`
@@ -907,10 +941,22 @@ mod tests {
         assert_eq!(v1["monthly_cny_minor"], json!(60_000));
         assert_eq!(v1["daily_cny_minor"], json!(3_000));
         assert_eq!(v1["warning_ratio_bp"], json!(8_000));
+        assert_eq!(
+            budget_config_origin(&crate::home::data_home()).as_deref(),
+            Some("legacy_import"),
+        );
         // 改旧文件再查：行已存在 → 不再读旧文件（幂等 seed 的语义）。
         std::fs::write(&cfg, "[budget]\nmonthly_cny = 1.0\ndaily_cny = 1.0\n").unwrap();
         let v2 = budget_status_sql(&month).unwrap();
         assert_eq!(v2["monthly_cny_minor"], json!(60_000), "行存在后旧文件退役");
+    }
+
+    #[test]
+    fn explicit_budget_save_replaces_legacy_origin_marker() {
+        let (_guard, _db, _month) = fresh_budget_env("origin-user");
+        write_budget_config_origin(&crate::home::data_home(), "legacy_import").unwrap();
+        mark_budget_config_user_owned(&crate::home::data_home()).unwrap();
+        assert_eq!(budget_config_origin(&crate::home::data_home()).as_deref(), Some("user"));
     }
 
     #[test]

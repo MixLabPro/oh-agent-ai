@@ -1434,6 +1434,7 @@ fn budget_config() -> Value {
             "daily_cny_minor": config.daily_cny_minor,
             "warning_ratio_bp": config.warning_ratio_bp,
             "updated_at_ms": config.updated_at_ms,
+            "origin": agent_vitals_runtime::budget::budget_config_origin(&data_home),
         }),
         Ok(None) => serde_json::json!({ "status": "missing" }),
         Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string() }),
@@ -1455,7 +1456,11 @@ fn save_budget_config(input: BudgetConfigInput) -> Result<Value, String> {
     db.budget_config_set(
         input.monthly_cny_minor, input.daily_cny_minor, input.warning_ratio_bp, now_ms,
     ).map_err(|error| error.to_string())?;
-    Ok(serde_json::json!({ "status": "saved", "updated_at_ms": now_ms }))
+    let origin_recorded = agent_vitals_runtime::budget::mark_budget_config_user_owned(&data_home).is_ok();
+    Ok(serde_json::json!({
+        "status": "saved", "updated_at_ms": now_ms,
+        "origin": "user", "origin_recorded": origin_recorded,
+    }))
 }
 
 #[tauri::command]
