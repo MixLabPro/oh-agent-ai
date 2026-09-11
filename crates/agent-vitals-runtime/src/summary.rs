@@ -876,6 +876,14 @@ pub fn unresolved_billing_groups(month: &str) -> serde_json::Value {
          WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'
            AND event_ts_ms >= ?1 AND event_ts_ms < ?2
            AND COALESCE(billing_mode, 'unknown') != 'subscription'
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id
+                 AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2
+                   WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')
            AND (COALESCE(pricing_basis, 'unavailable') = 'metered_estimate'
                 OR COALESCE(evidence_basis, 'missing') != 'explicit-official-route')
          GROUP BY host, provider_id, model_id, evidence_basis, pricing_basis

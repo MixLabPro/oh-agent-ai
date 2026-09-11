@@ -141,6 +141,12 @@ pub(crate) const SQL_HOURLY_BY_HOST_PROVIDER: &str = "SELECT host, COALESCE(prov
          WHERE observation_kind != 'legacy_aggregate' AND deleted_at_ms IS NULL
            AND event_ts_ms IS NOT NULL AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            AND host = ?5
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')
          GROUP BY host, provider_id, bj_hour";
 
 /// [`facts_page_window`]：键集分页（`(event_ts_ms, fact_id)` 游标，无 OFFSET）。
@@ -942,6 +948,12 @@ const SQL_SESSIONS_IN_WINDOW: &str = "SELECT session_key, host,
        AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
        AND session_key IS NOT NULL
        AND event_ts_ms >= ?2 AND event_ts_ms < ?3
+       AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+           JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+           WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+             AND br.revision_number = (SELECT MAX(br2.revision_number)
+               FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+             AND br.change_kind = 'saved')
        AND (?4 < 0 OR (((event_ts_ms + ?5) / ?6) % 24) = ?4)
      GROUP BY session_key";
 
