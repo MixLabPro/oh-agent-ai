@@ -25,6 +25,13 @@ struct SyncLock(Mutex<()>);
 
 struct SyncRequests(Mutex<std::collections::BTreeMap<String, bool>>);
 static SYNC_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
+const SYNC_STATUS_EVENT: &str = "sync-status-updated";
+
+/// 只有还没有任何同步回执的启动才主动拉起工作台。后续启动继续保持菜单栏
+/// 工具的安静行为；首次用户无需先知道菜单栏入口，能直接看到本机解析说明。
+fn should_show_first_value_workspace(sync: &SyncStatus) -> bool {
+    sync.stage == "never"
+}
 
 /// 独立的 macOS 菜单栏模板图。不能复用彩色 App Icon：模板图只提供 alpha
 /// 轮廓，由 AppKit 根据浅色、深色、选中和辅助功能状态自动着色。44×36px 源图按
@@ -1108,6 +1115,11 @@ fn sync_tick(app: &AppHandle) {
         None => (initial, false),
     };
     overview::save_sync_status(&status);
+    // 首次扫描即使没有新增 facts，也要让已打开的工作台结束“正在整理”的状态。
+    // `usage-fold-updated` 只代表有新折账，不能承担这个生命周期事件。
+    let _ = app.emit(SYNC_STATUS_EVENT, serde_json::json!({
+        "ok": status.ok, "stage": status.stage, "message": status.message,
+    }));
     // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
     refresh_hosts();
@@ -2082,6 +2094,9 @@ pub fn run() {
                 let _ = t.set_title(Some(today_title(&ov)));
             }
             start_refresh_tick(app.handle().clone());
+            if should_show_first_value_workspace(&ov.sync) {
+                show_workbench(app.handle());
+            }
             // SQL 权威库后台预热：app 启动就 spawn 一轮 data-status（sub-second）
             // 让权威库 SQLite handle + page cache 在用户点会话/findings tab 之前
             // 就绪，避免首点 PRAGMA / planner 抖动（见 warm_authority_db 函数注释）。
@@ -2110,6 +2125,13 @@ mod tests {
         assert!(status.message.contains("DSH unavailable"));
         assert!(status.message.contains("permission denied"));
         assert!(ready);
+    }
+
+    #[test]
+    fn first_value_workspace_only_opens_before_any_sync_receipt() {
+        assert!(should_show_first_value_workspace(&SyncStatus::fail("never", "尚未同步".into())));
+        assert!(!should_show_first_value_workspace(&SyncStatus::ok("discover", "no records".into())));
+        assert!(!should_show_first_value_workspace(&SyncStatus::fail("partial", "disk full".into())));
     }
 
     #[test]

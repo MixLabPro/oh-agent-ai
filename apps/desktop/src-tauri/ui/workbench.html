@@ -30,6 +30,11 @@
            展开。由 renderOverview 用 data_monthly_summary 填充。 -->
       <div class="verdict" id="ov-month-verdict" hidden></div>
       <div class="banner quality-banner" id="ov-quality-banner" hidden></div>
+      <section class="first-run panel" id="ov-first-run" hidden aria-live="polite">
+        <div class="panel-title">正在本机整理 AI 使用记录</div>
+        <div class="muted">正在扫描已支持工具的标准本地位置，不会上传会话内容。首次结果出现后，套餐、账单与预算都可以稍后再补充。</div>
+        <div class="billing-form-actions"><button class="btn secondary" id="ov-first-run-sources">查看读取范围</button></div>
+      </section>
       <section class="billing-prompt" id="ov-billing-prompt" hidden aria-live="polite">
         <div>
           <strong>有套餐信息待你确认</strong>

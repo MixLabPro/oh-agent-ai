@@ -206,6 +206,17 @@ function subscribeFoldEvent() {
   });
 }
 
+function subscribeSyncStatusEvent() {
+  // 首次扫描没有新 facts 时同样需要刷新首屏状态；和 fold 事件分离，避免把
+  // “扫描结束但无记录”伪装成一次用量更新。
+  listen("sync-status-updated", () => {
+    if (manualSyncPolling) return;
+    refreshActiveTab();
+  }).catch((e) => {
+    console.warn("[workbench] sync-status-updated 订阅失败（手动刷新可恢复）", e);
+  });
+}
+
 // 菜单信息行导航（双通路，与 spec §7 深链同构——§7 描述的就是这套持久目标 +
 // 事件通知机制）：
 //   - `focus-tab` 事件是快路径（窗口已可见时菜单一戳就跳）；
@@ -437,6 +448,7 @@ async function renderOverview() {
     return;
   }
   syncDot(ov.sync);
+  renderFirstRunState(ov.sync);
 
   // KPI 行/双轨账/决策卡的数据源 = 冻结 Data Query DTO（Stage D）；DSH 高峰
   // 口径的今日/本月钱已在 by_provider（metered_actual），原 read_overview 的
@@ -640,6 +652,16 @@ async function renderOverview() {
   } else {
     renderSourcesPanelFailure("跨宿主数据读取失败", "ov-sources");
   }
+}
+
+function renderFirstRunState(sync) {
+  const panel = document.getElementById("ov-first-run");
+  const sources = document.getElementById("ov-first-run-sources");
+  if (!panel || !sources) return;
+  panel.hidden = !sync || sync.stage !== "never";
+  if (sources.dataset.bound === "1") return;
+  sources.dataset.bound = "1";
+  sources.onclick = () => switchTab("sources");
 }
 
 function renderQualityStatus(status) {
@@ -3961,6 +3983,7 @@ function init() {
   // fold 完成事件桥：先订阅再首屏渲染，缩小「事件早于 listen」的丢窗口
   // （丢的那几个由 5 分钟 tick / 手动同步兜底，见事件桥一节注释）。
   subscribeFoldEvent();
+  subscribeSyncStatusEvent();
   // 菜单导航事件桥同款：先订阅；冷启动（webview 先加载、focus-tab emit 早于 listen）
   // 的那次点击由 init 末尾的 pullNavTarget() 命中，subscribeNavEvent 只管窗口已建后。
   subscribeNavEvent();
