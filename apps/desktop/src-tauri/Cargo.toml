@@ -10,6 +10,14 @@ description = "agent-vitals 菜单栏：当日/本月成本与预算（Tauri 2�
 # 里 opt-out，用 [workspace] 空表声明自己是独立工作区。
 [workspace]
 
+# 发布包不应携带桌面开发机的源码路径或调试信息；桌面工程是独立
+# workspace，根仓库的 release profile 不会自动作用到这里。
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+debug = false
+
 [lib]
 name = "agent_vitals_menubar_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

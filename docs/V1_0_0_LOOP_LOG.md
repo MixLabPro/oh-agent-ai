@@ -1444,3 +1444,15 @@
 - 验收：`cargo clippy --release --all-targets -- -D warnings` 通过；data、runtime、CLI 三个主要 release target 无告警。
 - 保护：未运行 Rust formatter，未刷新 golden/snapshot；用户已有 WorkBuddy/Phase/Issue 文档保持未修改、未暂存。
 - 边界：Clippy 通过不等于完整 v1.0.0 发布验收；价格目录联网更新、真实 Computer Use、签名/公证、干净机升级和外部试用仍待完成。
+
+## Loop 198 · 桌面 release 产物路径脱敏
+
+- 修复：桌面独立 workspace 增加 release `strip/debug` 配置，并通过 `.cargo/config.toml` 将 Rust panic/source metadata 中的本地 checkout 路径映射为中性 `/agent-vitals`。
+- 验收：重新 `cargo tauri build --bundles app` 成功；产物主程序绝对 checkout 路径 0 条，bundled CLI 绝对 checkout 路径 0 条，中性 remapped 路径 27 条。
+- 边界：路径脱敏不等于 Developer ID/公证；当前包仍是本地测试构建，真实无开发环境 Gatekeeper/升级验证待发布环境执行。
+
+## Loop 199 · 路径脱敏包安装启动
+
+- 安装：旧 `/Applications/agent-vitals.app` 已保留为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-0415`；新包已安装并以 `--show-workbench` 启动，PID `89707` 存活。
+- 保护：没有触碰或暂存用户已有 WorkBuddy/Phase/Issue 文档。
+- 边界：macOS 锁屏仍阻塞真实窗口 Computer Use；签名/公证、干净机升级和外部试用门禁继续未完成。
