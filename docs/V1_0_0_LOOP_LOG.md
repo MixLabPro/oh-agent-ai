@@ -2075,3 +2075,12 @@
 - 证据：页面 DOM 在点击后 `ov-billing-prompt.hidden=true`，1.2 秒后仍为 `true`；
   mock 不写入 Authority 数据库。真实 `.app` 的持久化 webview/跨重启行为仍待解锁真机
   验收。
+
+## Loop 292 · 数据源暂停/恢复 UAT
+
+- 发现：Vite mock 的 `set_sync_paused` 之前只返回成功、不保留状态，无法验证暂停
+  后重载仍显示暂停。
+- 修复：为浏览器 mock 增加进程内暂停状态，并让 `sync_pause_state` 返回完整状态契约；
+  不涉及真实 Authority 或宿主日志。
+- UAT: AC23 walked ✔：点击“暂停同步”后按钮变为“恢复同步”，状态显示“自动同步已暂停；
+  已有导入记录仍可查看”；再点击恢复后回到“暂停同步”，并触发 mock 同步成功。

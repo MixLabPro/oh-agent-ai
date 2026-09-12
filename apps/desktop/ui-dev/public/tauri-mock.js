@@ -119,6 +119,7 @@
     opened_at_ms: Date.now() - 7200000, closed_at_ms: null, metadata: { category: "tool_failure", time: Date.now() - 7200000 },
   }];
 
+  let syncPaused = false;
   const ok = (data) => Promise.resolve(data);
   const emptyReport = (key) => ({ status: "ok", [key]: [] });
   async function invoke(command, args) {
@@ -166,12 +167,15 @@
       case "issue_group_instances": return { group_id: args && args.groupId, instances: issueInstances, next_cursor: null, total_instances: issueInstances.length };
       case "issue_instance_read": return { status: "ok", issue: issueInstances.find((item) => item.issue_id === (args && args.issueId)) || null };
       case "source_read_locations": return { status: "ok", locations: [] };
-      case "sync_pause_state": return { paused: false };
+      case "sync_pause_state": return { status: "ok", paused: syncPaused };
       case "peek_nav_target": case "peek_focus_target": return null;
       case "billing_recalculation_job_status": return { status: "missing" };
       case "sync_request_status": return { completed: true };
       case "trigger_sync": return "browser-mock-sync";
-      case "set_sync_paused": case "set_source_host_excluded": case "clear_nav_target": case "clear_focus_target": return ok({ status: "ok" });
+      case "set_sync_paused":
+        syncPaused = !!(args && args.paused);
+        return ok({ status: "ok", paused: syncPaused });
+      case "set_source_host_excluded": case "clear_nav_target": case "clear_focus_target": return ok({ status: "ok" });
         default: return ok({ status: "ok", browser_mock: true, command, args });
       }
     } catch (error) {
