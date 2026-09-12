@@ -1604,3 +1604,9 @@
 - 构建：`cargo tauri build --bundles app` 成功，最新 Workbench CSS 响应式修复已重新编入 `agent-vitals.app`。
 - 复核：release 构建完成，资源打包阶段无错误；未安装或启动新包，避免把锁屏环境下的 Computer Use 误报为成功。
 - 边界：Developer ID/公证、真实窗口 Computer Use、干净机升级和外部试用仍未完成。
+
+## Loop 224 · 账单 CSV 浏览器闭环
+
+- UAT：在 Vite mock 总览展开“导入 CSV 模板”，合法表头与一行账单预览返回“可导入 1 行，未发现错误”，确认导入按钮启用。
+- 保护：提交两条相同 `evidence_ref` 的行时，预览返回“可导入 1 行；拒绝 1 行……重复”，确认导入按钮保持禁用；浏览器控制台错误数为 0。未点击确认导入，避免向 mock 写入测试账单。
+- 结论：CSV 的字段校验、预览和重复行阻断在 UI 层形成闭环；订阅合同与 token 数据未被此路径改写。
