@@ -1688,3 +1688,9 @@
 - 修复：Vite `tauri-mock.js` 的 `about_diagnostics` 现在返回动态 `statistics_timezone`，浏览器热更新环境与真实 Tauri 诊断页保持同一字段契约。
 - 验收：`apps/desktop/ui-dev` 执行 `npm run verify` 通过，Vite production build 与 Workbench closeout verifier 均通过；`git diff --check` 通过。
 - 边界：mock 只用于 UI 调试，不替代真实 `.app` 的统计时区保存、重启恢复和 Computer Use 验收。
+
+## Loop 238 · 诊断时区变更重新打包
+
+- 构建：`cargo tauri build --bundles app` 成功，最新诊断时区字段已进入 `/apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app`。
+- 复核：release 编译和 macOS `.app` bundling 均完成；未在当前不可操作桌面环境安装或启动，避免把缺少 Computer Use 的证据误报为真机验收。
+- 边界：Developer ID/公证、真实 `.app` 交互、干净机升级和外部试用仍未完成。
