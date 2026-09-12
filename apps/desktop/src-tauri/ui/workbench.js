@@ -2318,9 +2318,10 @@ async function fetchSessionsPage(gen) {
     // day 字段目前没用（保留 IPC 入参面，未来若加 day picker 再启用）。
     const monthVal = document.getElementById("sess-month").value;
     if (monthVal) args.month = monthVal;
-    // host 过滤（spec §7.3）：非 all 时把 host_kind 传给 IPC（Tauri 2 命令参数 JS
-    // 侧 camelCase，hostKind ← host_kind）。过滤变化时调用方负责重置分页。
-    if (sessFilter !== "all") args.hostKind = sessFilter;
+    // host 过滤（spec §7.3）：此命令的 Tauri 参数保持 Rust 的 snake_case 名称；
+    // 传 camelCase 会被当作缺省 None，导致列表静默退回全宿主。过滤变化时调用方
+    // 负责重置分页。
+    if (sessFilter !== "all") args.host_kind = sessFilter;
     // cursor：v0.9.1 起是 mcp::sessions_search 的不透明串（`<total>:<key_len>:<key>`），
     // 直接透传，不需要 JSON.stringify（旧 r2a_store cursor 是 JSON 对象，
     // 那是 jsonl 重放路径里存的 filter_hash/store_revision，已退役）。

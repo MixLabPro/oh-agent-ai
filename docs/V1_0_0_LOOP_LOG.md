@@ -585,4 +585,11 @@
 - 保护：仅修改 `target/` 下的忽略构建产物，不改仓库源文件；ad-hoc 签名不冒充 Developer ID，也不代表已完成公证。
 - 边界：Developer ID/notarization、Intel 架构、干净机安装与升级演练仍待发布环境真实验收，不勾选 REQ-135 或 AC24。
 
+## Loop 69 · 会话宿主筛选真机 UAT 回归（自验收）
+
+- 发现：工作台点击“Codex”后仍显示 Claude Code；CLI 同条件 `--host-kind codex` 正确返回纯 Codex，定位为 Tauri IPC 对该参数使用 camelCase 后静默落入可选参数缺省。
+- 修复：工作台 `sessions_list` 改传 `host_kind`，保持后端公开参数名一致；分页、月份窗口和其它筛选逻辑不变。
+- 验收：缺陷已通过真实工作台复现；CLI 同条件返回 56 个纯 Codex 会话。修复后的 macOS `.app` 已重建，JS/桌面测试和参数静态回归通过；由于 accessory 应用在当前已有实例/无可见窗口时无法被 Computer Use 重新打开，修复后点击复验保留待下一次可见窗口启动。
+- 边界：provider/model/计费状态筛选及修复后真机点击复验尚未完成，不勾选完整 REQ-067 或 DETAIL-01。
+
 本日志只记录已经完成的实现和证据；上述“尚未完成”不改变任何 PRD 勾选状态。任何单次修改连续测试失败超过5次，或任何单次Loop超过30分钟，立即暂停并记录；不得以拆分日志规避熔断。

@@ -46,6 +46,8 @@ ok(html.includes("保存脱敏诊断包") && html.includes("不会自动上传")
   "帮助区提供用户主动保存的脱敏诊断包且明确不自动上传");
 ok(wb.includes('invoke("export_diagnostic_package")'),
   "脱敏诊断包由后端命令生成，不在前端拼接或上传");
+ok(wb.includes('args.host_kind = sessFilter') && !wb.includes('args.hostKind = sessFilter'),
+  "会话宿主筛选透传 snake_case 参数，避免静默退回全宿主");
 
 // ── vm 执行真实文件 ──
 function makeElement() {
