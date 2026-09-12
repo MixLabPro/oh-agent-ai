@@ -1931,3 +1931,10 @@
   CLI `--version` 返回 `agent-vitals 1.3.0`，两者架构均为 `arm64`。
 - 真机验收：尝试用 Computer Use 读取最新 `.app` 窗口时，macOS 处于锁屏且自动解锁失败；
   未绕过锁屏，真实 UI/退出重开验收保留为待用户解锁后的下一步。
+
+## Loop 274 · 恢复临时文件落盘保证
+
+- 加固：备份复制到临时文件后先执行 `sync_all`，再做只读校验和原子替换，减少系统崩溃
+  时临时恢复文件尚未持久化的窗口。
+- 验收：桌面恢复测试 `2 passed`；独立 Tauri clippy `-D warnings` 通过；`git diff --check`
+  通过。Computer Use 的锁屏阻塞仍只影响真实 UI 验收，不影响代码回归。

@@ -1441,6 +1441,9 @@ fn restore_authority_backup_file(
     let result = (|| {
         std::fs::copy(backup, &temporary)
             .map_err(|error| format!("stage selected backup failed: {error}"))?;
+        std::fs::File::open(&temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("flush staged backup failed: {error}"))?;
         agent_vitals_data::authority::AuthorityDb::open_readonly(&temporary)
             .map_err(|error| format!("staged backup validation failed: {error}"))?;
         std::fs::rename(&temporary, target)
