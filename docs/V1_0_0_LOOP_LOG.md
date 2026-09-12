@@ -1757,3 +1757,9 @@
 - 新增：`.github/workflows/release-desktop.yml` 以 `app-v*` 标签触发，要求 Apple signing/notarization secrets，构建 app + DMG，运行 `verify-macos-app-bundle.mjs --require-developer-id` 与 `xcrun stapler validate`，最后发布 GitHub Release 资产。
 - 保护：凭据缺失时 workflow 在构建前失败；未签名包不能进入发布步骤，不改变现有 `skill-v*` CLI 发布流程。
 - 边界：当前本机没有证书和 notarization 凭据，workflow 尚未在真实 GitHub runner 上执行；外部试用和真实 Computer Use仍待完成。
+
+## Loop 249 · 修正 `.app` 发布资产封装
+
+- 发现：GitHub CLI Release 上传需要文件，不能直接上传 `.app` 目录；原 workflow 在构建和预检成功后会在发布阶段失败。
+- 修复：发布步骤使用 `ditto -c -k --sequesterRsrc --keepParent` 将已 notarize 的 `.app` 封装为 zip，再与 DMG 一起上传，保留 macOS bundle 资源和目录层级。
+- 验收：YAML 解析通过；发布脚本现仅向 `gh release upload` 传递文件资产，不再传目录。

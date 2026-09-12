@@ -83,7 +83,9 @@ jobs:
         run: |
           set -eu
           mkdir -p release
-          ditto dist/apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app release/agent-vitals-${GITHUB_REF_NAME}.app
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app \
+            release/agent-vitals-${GITHUB_REF_NAME}.app.zip
           cp dist/apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg release/
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
           gh release upload "$GITHUB_REF_NAME" release/*
