@@ -816,6 +816,12 @@ enum SessionsAction {
         /// Beijing month YYYY-MM (exactly one of --day / --month)
         #[arg(long)]
         month: Option<String>,
+        /// Inclusive Beijing start date for a custom range; pair with --to-date
+        #[arg(long = "from-date")]
+        date_from: Option<String>,
+        /// Inclusive Beijing end date for a custom range; pair with --from-date
+        #[arg(long = "to-date")]
+        date_to: Option<String>,
         /// Restrict to this Beijing hour (0..=23). Requires --day.
         #[arg(long)]
         hour: Option<u32>,
@@ -3225,6 +3231,8 @@ session_store={store} fold={fold}"
             SessionsAction::List {
                 day,
                 month,
+                date_from,
+                date_to,
                 hour,
                 host_kind,
                 model,
@@ -3234,16 +3242,21 @@ session_store={store} fold={fold}"
                 cursor,
                 json,
             } => {
-                // 严格校验 --day / --month 二选一（与 MCP schema `additionalProperties: false`
-                // 同语义；`mcp::dispatch` 自己也会拒，但 CLI 早一步给清晰错误更友好）。
-                match (day.as_deref(), month.as_deref()) {
-                    (None, None) | (Some(_), Some(_)) => {
+                // 严格校验三种时间窗形态：单日、月份、成对自定义日期范围。
+                // `mcp::dispatch` 仍会做格式和日期合法性校验；CLI 先拒绝结构
+                // 歧义，给出更清晰的错误。
+                let range_pair = date_from.is_some() == date_to.is_some();
+                let window_shape_ok = range_pair && match (
+                    day.is_some(), month.is_some(), date_from.is_some(),
+                ) {
+                    (true, false, false) | (false, true, false) | (false, false, true) => true,
+                    _ => false,
+                };
+                if !window_shape_ok {
                         eprintln!(
-                            "exactly one of --day / --month is required (Beijing date YYYY-MM-DD or month YYYY-MM)"
+                            "use exactly one of --day, --month, or the paired --from-date / --to-date"
                         );
                         std::process::exit(2);
-                    }
-                    _ => {}
                 }
                 let mut args = serde_json::Map::new();
                 if let Some(d) = day {
@@ -3251,6 +3264,12 @@ session_store={store} fold={fold}"
                 }
                 if let Some(m) = month {
                     args.insert("month".into(), Value::String(m.clone()));
+                }
+                if let Some(d) = date_from {
+                    args.insert("date_from".into(), Value::String(d.clone()));
+                }
+                if let Some(d) = date_to {
+                    args.insert("date_to".into(), Value::String(d.clone()));
                 }
                 if let Some(h) = hour {
                     args.insert("hour".into(), Value::Number((*h).into()));

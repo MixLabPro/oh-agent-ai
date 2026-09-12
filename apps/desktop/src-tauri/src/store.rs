@@ -110,6 +110,8 @@ fn beijing_today_yyyy_mm_dd() -> String {
 fn list_args(
     day: &Option<String>,
     month: &Option<String>,
+    date_from: &Option<String>,
+    date_to: &Option<String>,
     host_kind: &Option<String>,
     model: &Option<String>,
     provider: &Option<String>,
@@ -125,7 +127,12 @@ fn list_args(
     // day 单窗口只是默认兜底。前端 day picker 选日期时只发 day、month picker
     // 选月时只发 month——同传两个是 IPC bug，这层用 month 兜住不报错。
     // 两个都 None → 今天北京日期（保持 v0.9.1 旧契约：开 tab 直接看到当天）。
-    if let Some(m) = month.clone() {
+    if let (Some(from), Some(to)) = (date_from.clone(), date_to.clone()) {
+        a.push("--from-date".into());
+        a.push(from);
+        a.push("--to-date".into());
+        a.push(to);
+    } else if let Some(m) = month.clone() {
         a.push("--month".into());
         a.push(m);
     } else {
@@ -215,6 +222,8 @@ pub async fn sessions_list(
     state: tauri::State<'_, StoreBuildLock>,
     day: Option<String>,
     month: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
     host_kind: Option<String>,
     model: Option<String>,
     provider: Option<String>,
@@ -227,7 +236,7 @@ pub async fn sessions_list(
         let Some(bin) = resolve_binary() else {
             return Err(no_binary());
         };
-        let args = list_args(&day, &month, &host_kind, &model, &provider, page_size, &cursor);
+        let args = list_args(&day, &month, &date_from, &date_to, &host_kind, &model, &provider, page_size, &cursor);
         let mut cmd = Command::new(&bin);
         cmd.args(&args);
         // 与 tick 同款：显式钉死 AGENT_VITALS_HOME，权威库 / salt / 状态文件都

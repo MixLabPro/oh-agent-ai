@@ -24,8 +24,10 @@ pub fn spec() -> ToolSpec {
         input_schema: json!({
             "type": "object",
             "properties": {
-                "date": { "type": "string", "description": "Beijing date YYYY-MM-DD. Exactly one of date / month." },
-                "month": { "type": "string", "description": "Beijing month YYYY-MM. Exactly one of date / month." },
+                "date": { "type": "string", "description": "Beijing date YYYY-MM-DD. Exactly one of date / month / date_from+date_to." },
+                "month": { "type": "string", "description": "Beijing month YYYY-MM. Exactly one of date / month / date_from+date_to." },
+                "date_from": { "type": "string", "description": "Inclusive Beijing start date YYYY-MM-DD; must be paired with date_to." },
+                "date_to": { "type": "string", "description": "Inclusive Beijing end date YYYY-MM-DD; must be paired with date_from." },
                 "hour": { "type": "integer", "minimum": 0, "maximum": 23,
                           "description": "Optional: only count each session's facts in this Beijing hour (for peak-hour drill-down). Requires date." },
                 "hosts": { "type": "array", "items": { "type": "string" },
@@ -80,24 +82,35 @@ pub fn make_search_cursor(total: i64, session_key: &str) -> String {
 }
 
 pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
-    let (start_ms, end_ms, window_label, has_date) = match (
-        args.get("date").and_then(Value::as_str),
-        args.get("month").and_then(Value::as_str),
-    ) {
-        (Some(d), None) => {
+    let date = args.get("date").and_then(Value::as_str);
+    let month = args.get("month").and_then(Value::as_str);
+    let date_from = args.get("date_from").and_then(Value::as_str);
+    let date_to = args.get("date_to").and_then(Value::as_str);
+    let (start_ms, end_ms, window_label, has_date) = match (date, month, date_from, date_to) {
+        (Some(d), None, None, None) => {
             let (s, e) = beijing_day_bounds_ms(d)
                 .ok_or_else(|| ToolError::new("invalid_argument", format!("invalid `date`: {d}")))?;
             (s, e, d.to_string(), true)
         }
-        (None, Some(m)) => {
+        (None, Some(m), None, None) => {
             let (s, e) = beijing_month_bounds_ms(m)
                 .ok_or_else(|| ToolError::new("invalid_argument", format!("invalid `month`: {m}")))?;
             (s, e, m.to_string(), false)
         }
+        (None, None, Some(from), Some(to)) => {
+            let (s, _) = beijing_day_bounds_ms(from)
+                .ok_or_else(|| ToolError::new("invalid_argument", format!("invalid `date_from`: {from}")))?;
+            let (_, e) = beijing_day_bounds_ms(to)
+                .ok_or_else(|| ToolError::new("invalid_argument", format!("invalid `date_to`: {to}")))?;
+            if s > e {
+                return Err(ToolError::new("invalid_argument", "`date_from` must not be after `date_to`"));
+            }
+            (s, e + 86_400_000, format!("{from}..{to}"), false)
+        }
         _ => {
             return Err(ToolError::new(
                 "invalid_argument",
-                "exactly one of `date` / `month` is required",
+                "use exactly one of `date`, `month`, or the paired `date_from` / `date_to`",
             ))
         }
     };

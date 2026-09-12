@@ -117,6 +117,12 @@ function beijingMonth() {
   return beijingToday().slice(0, 7);
 }
 
+function shiftBeijingDate(days) {
+  const d = new Date(beijingToday() + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 // ---------- 错误规范化（永不假空） ----------
 
 // 后端命令错误形状：`{error:{code,message}}`（store.rs 的类型化错误码）。Tauri v2
@@ -2316,8 +2322,22 @@ async function fetchSessionsPage(gen) {
     // store.rs list_args 优先 month（更粗、用户主动选择）走 --month 路径。
     // picker 为空 → 不传 month → IPC 用 day 兜底为今天（旧契约）。
     // day 字段目前没用（保留 IPC 入参面，未来若加 day picker 再启用）。
+    const windowMode = document.getElementById("sess-window").value;
     const monthVal = document.getElementById("sess-month").value;
-    if (monthVal) args.month = monthVal;
+    if (windowMode === "today") {
+      args.day = beijingToday();
+    } else if (windowMode === "7d") {
+      args.date_from = shiftBeijingDate(-6);
+      args.date_to = beijingToday();
+    } else if (windowMode === "custom") {
+      const from = document.getElementById("sess-from").value;
+      const to = document.getElementById("sess-to").value;
+      if (!from || !to) throw new Error("请选择完整的自定义日期范围");
+      args.date_from = from;
+      args.date_to = to;
+    } else if (monthVal) {
+      args.month = monthVal;
+    }
     const modelVal = document.getElementById("sess-model").value.trim();
     if (modelVal) args.model = modelVal;
     const providerVal = document.getElementById("sess-provider").value.trim();
@@ -2392,7 +2412,14 @@ function renderSessions() {
   // 月份上下文加到计数后缀，让用户清楚看到「这个数是哪个月」（避免把 2026-08
   // 的 50 条误读成「今天居然跑了 50 条」）。picker 为空 → 显示「今日」。
   const monthEl = document.getElementById("sess-month");
-  const suffix = monthEl && monthEl.value ? monthEl.value : "今日";
+  const windowEl = document.getElementById("sess-window");
+  const mode = windowEl ? windowEl.value : "month";
+  const suffix = mode === "today" ? "今日"
+    : mode === "7d" ? "最近 7 天"
+    : mode === "custom"
+      ? ((document.getElementById("sess-from").value || "?") + ".." +
+         (document.getElementById("sess-to").value || "?"))
+      : (monthEl && monthEl.value ? monthEl.value : "本月");
   count.textContent = sessState.total != null
     ? suffix + " 共 " + sessState.total + " 个会话 · 点任意行看报告"
     : "";
@@ -4539,6 +4566,19 @@ function init() {
   const sessMonthEl = document.getElementById("sess-month");
   sessMonthEl.value = beijingMonth();
   sessMonthEl.addEventListener("change", () => loadSessions(true));
+  const sessWindowEl = document.getElementById("sess-window");
+  const sessFromEl = document.getElementById("sess-from");
+  const sessToEl = document.getElementById("sess-to");
+  const syncSessionWindowControls = () => {
+    const custom = sessWindowEl.value === "custom";
+    sessFromEl.hidden = !custom;
+    sessToEl.hidden = !custom;
+    sessMonthEl.hidden = sessWindowEl.value !== "month";
+  };
+  sessWindowEl.addEventListener("change", () => { syncSessionWindowControls(); loadSessions(true); });
+  sessFromEl.addEventListener("change", () => loadSessions(true));
+  sessToEl.addEventListener("change", () => loadSessions(true));
+  syncSessionWindowControls();
   const sessModelEl = document.getElementById("sess-model");
   sessModelEl.addEventListener("change", () => loadSessions(true));
   const sessProviderEl = document.getElementById("sess-provider");

@@ -52,6 +52,10 @@ ok(wb.includes('document.getElementById("sess-model")') && wb.includes('args.mod
   "会话模型筛选透传到权威查询，避免只做前端假筛选");
 ok(wb.includes('document.getElementById("sess-provider")') && wb.includes('args.provider = providerVal'),
   "会话 provider 筛选透传到权威查询，避免只做前端假筛选");
+ok(wb.includes('args.date_from = shiftBeijingDate(-6)') && wb.includes('args.date_to = beijingToday()'),
+  "会话最近 7 天窗口使用统一北京日期范围");
+ok(wb.includes('args.date_from = from') && wb.includes('args.date_to = to'),
+  "会话自定义日期范围透传到权威查询");
 
 // ── vm 执行真实文件 ──
 function makeElement() {

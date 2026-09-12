@@ -333,6 +333,14 @@
                的体感。change 事件重置分页 + 重载（cursor 是 per-window 的，
                跨月 cursor 无意义）。空值视为「回到本月」由 JS 兜底。 -->
           <input type="month" id="sess-month" class="picker" title="选择月份查看历史会话" />
+          <select id="sess-window" class="picker" title="选择会话时间窗口">
+            <option value="month">本月</option>
+            <option value="today">今天</option>
+            <option value="7d">最近 7 天</option>
+            <option value="custom">自定义范围</option>
+          </select>
+          <input type="date" id="sess-from" class="picker" title="开始日期" hidden />
+          <input type="date" id="sess-to" class="picker" title="结束日期" hidden />
           <input type="search" id="sess-model" class="picker sess-model" placeholder="模型筛选" title="按完整模型 ID 筛选" />
           <input type="search" id="sess-provider" class="picker sess-provider" placeholder="Provider 筛选" title="按完整 provider ID 筛选" />
           <!-- host 过滤 chips（spec §7.3）：全部 / Claude Code / DeepSeek Harness /
