@@ -2059,3 +2059,11 @@
   仍仅由自身容器滚动。
 - 验收：Vite 页面 reload 后 `body.scrollWidth === body.clientWidth`、`main.scrollWidth
   === main.clientWidth`，无溢出元素；`npm run verify` 与 `git diff --check` 通过。
+
+## Loop 290 · 桌面回归确认
+
+- 验收：`cargo test --release --manifest-path apps/desktop/src-tauri/Cargo.toml` 全部
+  114 项通过；覆盖工作台组装、统计时区、来源失败隔离、权威库恢复、版本检查和
+  跨宿主摘要契约。
+- 边界：这仍是本地测试构建回归，不替代 macOS 解锁后的 Computer Use、Developer ID
+  签名/公证、Intel 架构包和外部试用验收。
