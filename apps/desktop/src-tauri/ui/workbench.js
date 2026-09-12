@@ -1164,7 +1164,7 @@ function parseBillingCsv(text) {
     const key = [host, provider_id, billing_period, billing_basis, evidence_ref].join("\u0000");
     if (!host || !provider_id || !/^\d{4}-(0[1-9]|1[0-2])$/.test(billing_period) ||
         !["fixed_subscription", "host_billed", "metered_actual", "metered_estimate", "api_equivalent"].includes(billing_basis) ||
-        !Number.isSafeInteger(amount_minor) || amount_minor < 0 || !currency || !evidence_ref) {
+        !Number.isSafeInteger(amount_minor) || amount_minor < 0 || !/^[A-Z]{3}$/.test(currency) || !evidence_ref) {
       errors.push("第" + (i + 1) + "行字段值无效");
     } else if (seen.has(key)) {
       errors.push("第" + (i + 1) + "行与 CSV 内已有记录重复");

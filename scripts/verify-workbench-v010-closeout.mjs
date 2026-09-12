@@ -58,6 +58,7 @@ ok(js.includes("function billingCsvBillId(row)") && js.includes("bill_id: billin
   "CSV 账单 ID 按唯一键稳定派生");
 ok(!/bill_id:\s*["']csv-["']\s*\+\s*Date\.now/.test(js),
   "CSV 重复导入不使用时间戳身份");
+ok(js.includes("/^[A-Z]{3}$/.test(currency)"), "CSV 币种使用三位大写代码");
 
 console.log(failed ? `\n${failed} FAIL` : "\n全部通过。");
 process.exit(failed ? 1 : 0);

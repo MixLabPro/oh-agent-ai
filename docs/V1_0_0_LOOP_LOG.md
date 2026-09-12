@@ -1616,3 +1616,9 @@
 - 修复：CSV 导入不再用时间戳生成 `bill_id`，改为按 `host/provider/period/basis/evidence_ref` 稳定派生，与 Authority 唯一键和 upsert 契约一致；同一 CSV 重复导入会复用同一账单身份。
 - 验收：JS 语法、Workbench closeout verifier、Vite production build 通过；`cargo tauri build --bundles app` 成功，修复已进入最新 `agent-vitals.app`。
 - 边界：未在锁屏环境安装/启动新包；真实 Computer Use、签名/公证、干净机升级和外部试用仍未完成。
+
+## Loop 226 · CSV 币种代码校验与打包
+
+- 修复：CSV 账单入口要求 `currency` 为三位大写 ISO 风格代码，拒绝空值、小写和自然语言币种，避免破坏 CNY/USD 分币展示与预算口径。
+- UAT：输入 `cny` 时预览返回“可导入 0 行；拒绝 1 行”，确认导入按钮禁用，控制台错误数为 0。
+- 构建：JS 语法、closeout verifier、Vite build 和 `cargo tauri build --bundles app` 全部通过；修复已进入最新 `.app`。
