@@ -31,6 +31,32 @@ cargo tauri build
 # 产物在 target/release/bundle/ 下
 ```
 
+## 发布包安装与恢复
+
+正式发布包应从可信 Release 页面下载 `.dmg` 或 `.app.zip`，不要从开发者工作目录
+复制应用，也不需要另外安装 Python、CLI 或修改 shell `PATH`。应用内置的
+`agent-vitals` 位于包的 `Contents/Resources/bin/`，工作台的诊断页会显示 App、CLI、
+Engine、Authority schema、统计时区、价格和同步状态。
+
+本地构建包仅用于开发验证：
+
+```bash
+# 从仓库根目录执行
+node scripts/verify-macos-app-bundle.mjs
+
+# 正式发布门禁：要求 Developer ID 签名
+node scripts/verify-macos-app-bundle.mjs --require-developer-id
+```
+
+前一个检查允许本地 ad-hoc 签名并只作诊断；后一个检查失败时不得宣称安装包已完成
+发布。正式 Release 还必须通过 notarization ticket 校验，并附带 `SHA256SUMS`。
+当前发布 workflow 的最低 macOS 版本为 11.0；Apple Silicon/Intel 只有在对应架构
+产物完成构建和真机验证后才能列入支持矩阵。
+
+升级前请保留数据根目录的备份。升级失败时应先保留原数据和诊断包，再回退到上一份
+已验证的应用包；不要删除数据库后让应用静默重建。卸载应用本身不会自动删除数据，
+如需删除数据必须在用户明确确认范围后单独删除数据根目录。
+
 菜单栏图标与 App Icon 分离：`icons/trayTemplate.svg` 是选定 Swept Crest 的
 单色源图，导出为 22×18px / 44×36px PNG；Rust 内嵌 `trayTemplate@2x.png` 并开启
 `icon_as_template(true)`，由 macOS 自动适配明暗、选中和辅助功能状态。

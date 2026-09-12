@@ -1847,3 +1847,14 @@
 - 发现：publish job 原先只下载 artifact，没有 checkout 仓库；新增的包预检脚本无法在下载后验证步骤中找到。
 - 修复：publish job 按同一 `release_tag` checkout 代码，再执行下载副本的严格签名和 notarization 校验。
 - 验收：YAML 与 diff 检查通过；build/publish 两个 job 的代码 ref 和发布 tag 保持一致。
+
+## Loop 264 · 桌面安装与升级恢复说明
+
+- 发现：桌面 README 只有开发构建命令，缺少 FR-17 要求的正式安装来源、内置 CLI、
+  签名/公证门禁、校验和、架构支持边界、升级失败恢复和卸载数据删除说明。
+- 修复：补充发布包安装与恢复章节；明确 `.dmg`/`.app.zip` 应来自可信 Release，
+  本地 ad-hoc 包仅用于诊断，正式包必须通过 Developer ID、notarization 和
+  `SHA256SUMS` 检查；同时写明最低 macOS 版本和架构支持需以实际构建、真机验证为准。
+- 验收：`node scripts/verify-macos-app-bundle.mjs` 通过，确认主程序、随包 CLI 和
+  CLI 版本均存在；`git diff --check` 通过。严格 Developer ID 检查仍按预期因本机
+  无有效签名身份失败，未将本地包误报为可发布资产。
