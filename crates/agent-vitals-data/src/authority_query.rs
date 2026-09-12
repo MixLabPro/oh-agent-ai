@@ -1695,10 +1695,15 @@ fn session_cost_minor_legacy(
 mod tests {
     use super::*;
     use crate::authority::AuthorityDb;
+    use jiff::Timestamp;
     use std::path::PathBuf;
 
-    fn ms_to_beijing_date(ms: i64) -> String {
-        civil_date_from_days((ms + BEIJING_OFFSET_MS).div_euclid(DAY_MS))
+    fn ms_to_statistics_date(ms: i64) -> String {
+        let date = Timestamp::from_millisecond(ms)
+            .unwrap()
+            .to_zoned(statistics_timezone())
+            .date();
+        format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())
     }
 
     fn tmp_db(tag: &str) -> PathBuf {
@@ -1758,16 +1763,16 @@ mod tests {
         assert_eq!(end - start, DAY_MS);
         // 边界前一毫秒仍是 08-31 的 UTC 时刻。
         let just_before = start - 1;
-        assert_eq!(ms_to_beijing_date(just_before), "2026-08-31");
-        assert_eq!(ms_to_beijing_date(start), "2026-09-01");
+        assert_eq!(ms_to_statistics_date(just_before), "2026-08-31");
+        assert_eq!(ms_to_statistics_date(start), "2026-09-01");
     }
 
     #[test]
     fn month_bounds_span_exactly_the_civil_month() {
         let (start, end) = beijing_month_bounds_ms("2026-09").unwrap();
-        assert_eq!(ms_to_beijing_date(start), "2026-09-01");
-        assert_eq!(ms_to_beijing_date(end - 1), "2026-09-30");
-        assert_eq!(ms_to_beijing_date(end), "2026-10-01");
+        assert_eq!(ms_to_statistics_date(start), "2026-09-01");
+        assert_eq!(ms_to_statistics_date(end - 1), "2026-09-30");
+        assert_eq!(ms_to_statistics_date(end), "2026-10-01");
     }
 
     #[test]

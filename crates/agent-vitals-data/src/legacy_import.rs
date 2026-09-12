@@ -12,7 +12,7 @@
 //! `event_peak=0` 行取 4 个基础桶键（全量），`event_peak=1` 行取同名 `peak_`
 //! 前缀键（峰值子桶）。`observation_kind="legacy_aggregate"`，
 //! `native_session_id="day:{day}"`，`source_event_id="{day}:{model}:{peak}"`，
-//! `event_ts_ms` = 北京日 12:00 的 UTC ms（日内代表点；小时分布查询按
+//! `event_ts_ms` = 统计日 12:00 的 UTC ms（日内代表点；小时分布查询按
 //! observation_kind 排除本类行——查询面契约）。
 //!
 //! 幂等：fact_id 由契约层身份字段派生，同键重跑 = 幂等吸收；ledger 日桶
@@ -48,6 +48,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use jiff::{civil::Date, tz::TimeZone, ToSpan};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Map, Value, json};
 
@@ -186,7 +187,7 @@ pub fn import_claude_ledger_days(
     Ok(report)
 }
 
-/// 由 (day, model, peak, 当日北京午时 UTC ms, 桶) 构造一条 legacy 事实。
+/// 由 (day, model, peak, 当日统计时区午时 UTC ms, 桶) 构造一条 legacy 事实。
 /// 身份字段全部在此确定；`build_usage_fact` 派生出 fact_id 并覆盖任何外部
 /// 传入的 fact_id——此处不重复生成身份哈希。
 fn build_legacy_fact(
@@ -226,7 +227,7 @@ struct LegacyFact {
     doc: Value,
     /// [uncached, cache_read, cache_write, output]——幂等比较基准。
     bucket: [i64; 4],
-    /// 北京日 12:00 的 UTC 毫秒（构造期由 day 解析出）。
+    /// 统计日 12:00 的 UTC 毫秒（构造期由 day 解析出）。
     noon_ms: i64,
     /// event_peak 的 0/1：`{day}:{model}:{peak}` 的尾字段本身。
     peak: i64,
@@ -485,7 +486,7 @@ fn write_issue(
 }
 
 /// "YYYY-MM-DD" → 北京日 12:00 的 UTC 毫秒。合法民历日才 Some（02-30 在
-/// `ms_from_civil` 校验被拒绝）。
+/// 统计时区由 `TZ`（或 OS 时区）决定，日期校验由 Jiff 完成。
 fn parse_day_noon_ms(day: &str) -> Option<i64> {
     if day.len() != 10 || !day.is_ascii() {
         return None;
@@ -495,7 +496,19 @@ fn parse_day_noon_ms(day: &str) -> Option<i64> {
         day.get(5..7)?.parse::<u32>().ok()?,
         day.get(8..10)?.parse::<u32>().ok()?,
     );
-    agent_vitals_domain::usage::ms_from_civil(y, mo, d, 4, 0, 0)
+    let date = Date::new(y.try_into().ok()?, mo.try_into().ok()?, d.try_into().ok()?).ok()?;
+    let timezone = std::env::var("TZ")
+        .ok()
+        .map(|value| value.trim_start_matches(':').to_string())
+        .filter(|name| !name.is_empty())
+        .and_then(|name| TimeZone::get(&name).ok())
+        .unwrap_or_else(TimeZone::system);
+    date.to_zoned(timezone)
+        .ok()?
+        .timestamp()
+        .checked_add(12.hours())
+        .ok()
+        .map(|timestamp| timestamp.as_millisecond())
 }
 
 /// 读取 claude ledger 的文件并合并 days。**当前月文件优先**：archive 是滚动
@@ -697,7 +710,7 @@ mod tests {
         assert_eq!(row.7, 0, "base 行 event_peak=0");
         assert_eq!(
             row.8,
-            agent_vitals_domain::usage::ms_from_civil(2026, 5, 5, 4, 0, 0).unwrap()
+            parse_day_noon_ms("2026-05-05").unwrap()
         );
         assert_eq!((row.9, row.10, row.11, row.12), (10_000, 2_000, 500, 1_000));
 

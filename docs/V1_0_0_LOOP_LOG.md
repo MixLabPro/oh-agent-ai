@@ -1425,3 +1425,10 @@
 - 构建：`cargo tauri build --bundles app` 成功，新的 `agent-vitals.app` 已包含日期格民历修复。
 - 安装：已停止旧 `/Applications/agent-vitals.app` 进程并保留备份 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-0343`；新包以 `--show-workbench` 启动并确认进程存活。
 - 边界：本地构建仍未具备 Developer ID/公证签名，`codesign --verify --deep --strict` 继续提示资源签名不完整；macOS 锁屏仍阻塞真实窗口 Computer Use。
+
+## Loop 195 · 非 UTC+8 legacy ledger 日界修复
+
+- 发现：`claude-ledger` 深历史导入把日内代表点固定为 `04:00Z`；在 `America/Los_Angeles` 统计时区下，该代表点会落到前一日，导致 ledger 查询缺失。
+- 修复：legacy 导入按 `TZ`/OS IANA 时区的统计日 12:00 生成 `event_ts_ms`，保持原始日键与统计日一致；供应商价格规则不受影响。
+- 验收：`TZ=America/Los_Angeles` 下 authority-query 30/30、legacy import 11/11、legacy wiring 1/1 通过；此前失败的跨月 wiring 已恢复。
+- 边界：真实 `.app` 非 UTC+8 Computer Use 仍需解锁 macOS；签名/公证、干净机升级和外部试用门禁仍未完成。
