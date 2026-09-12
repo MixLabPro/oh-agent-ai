@@ -4226,14 +4226,16 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
       detailButton.textContent = "详情";
       detailButton.addEventListener("click", () => showIssueInstanceDetail(instance.issue_id, line, instance));
       line.appendChild(detailButton);
-      if (["open", "later", "acknowledged"].includes(instance.status || "open")) {
-        for (const [status, label] of [["later", "稍后"], ["acknowledged", "已确认"], ["closed", "已解决"], ["wontfix", "不适用"]]) {
-          const button = el("button", "btn secondary");
-          button.type = "button";
-          button.textContent = label;
-          button.addEventListener("click", () => transitionIssueFromUi(instance.issue_id, status));
-          line.appendChild(button);
-        }
+      const currentStatus = instance.status || "open";
+      const actions = currentStatus === "open"
+        ? [["later", "稍后"], ["acknowledged", "已确认"], ["closed", "已解决"], ["wontfix", "不适用"]]
+        : [["open", "恢复待处理"]];
+      for (const [status, label] of actions) {
+        const button = el("button", "btn secondary");
+        button.type = "button";
+        button.textContent = label;
+        button.addEventListener("click", () => transitionIssueFromUi(instance.issue_id, status));
+        line.appendChild(button);
       }
       cell.appendChild(line);
     }

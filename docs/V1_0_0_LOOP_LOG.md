@@ -710,3 +710,11 @@
 - 证据：详情块包含 `issue_id`、`host_kind=claude-code`、`rule=SV603`、`status=open`、`evidence`、`opened_at_ms` 和 `metadata`；未点击“稍后 / 已确认 / 已解决 / 不适用”，本地状态未被测试改变。
 - 启动：新增显式 `--show-workbench` 开关，允许已有同步回执的菜单栏应用在真机 UAT 时打开工作台；默认启动行为保持不变。
 - 结论：L2 详情读取闭环已通过真实界面证据；五态动作、分页和其它 AC 仍按各自边界继续，不因此勾选 AC18 或完整 REQ-073–080。
+
+## Loop 86 · Issue 稍后与恢复真机闭环（Computer Use）
+
+- 修复：非 `open` 的实例现在显示“恢复待处理”；`later / acknowledged / closed / wontfix` 均可通过同一 UI 入口迁移回 `open`，不再让“稍后”或“不适用”成为不可恢复的终点。
+- UAT：`AC18 partial walked ✔`；冷启动新安装 `.app` 后，将首条实例置为“稍后”，组汇总显示“待处理 1 · 稍后 1”；再点击“恢复待处理”，汇总恢复为“待处理 2”。
+- 保护：测试未执行宿主修复、Shell 或其它外部动作；仅写入本地 Issue 状态迁移历史，最后恢复为原始 `open` 状态。
+- 验收：桌面 release 测试 105/105、Clippy、`node --check`、`git diff --check`、`.app` 重建、ad-hoc 安装和 Computer Use 真机路径通过。
+- 边界：提醒去重/定时策略、完整五态逐态验收、其它 REQ-073–080 与 AC18 完整门槛仍待继续，不勾选 AC18。
