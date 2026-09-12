@@ -1658,3 +1658,9 @@
 - 新增：`apps/desktop/ui-dev/package.json` 提供 `npm run verify`，串联 Vite production build 与当前 Workbench closeout verifier，方便样式热更新后的单命令回归。
 - 验收：在 `apps/desktop/ui-dev` 执行 `npm run verify`，构建成功，全部 Workbench 契约断言通过。
 - 边界：该命令验证开发资源与契约，不替代 Tauri `.app` 真机、签名/公证和外部试用门槛。
+
+## Loop 233 · 账单改动后的 workspace Clippy 门槛
+
+- 验收：`cargo clippy --release --all-targets -- -D warnings` 全 workspace 通过，覆盖 data、runtime、CLI、domain、hosts 及各测试目标。
+- 结论：后端账单币种校验没有引入 lint 或跨 crate 架构回归；结合 Loop 228 的 Rust 全量测试与 golden 对拍，静态质量门槛保持绿色。
+- 边界：Clippy 通过不替代真实 `.app` Computer Use、签名/公证、公共目录联网成功和外部试用。
