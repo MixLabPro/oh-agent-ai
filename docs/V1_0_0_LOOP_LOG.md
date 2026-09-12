@@ -1039,3 +1039,10 @@
 - 保护：原始 `event_ts_ms` 不变，供应商计价时区不参与统计分组；无效 epoch 仅走无时区数学退化路径，不把错误时间伪装成有效本地时间。
 - 验收：data issues 定向测试 9/9、`TZ=America/Los_Angeles` usage-growth 专项测试 1/1、data crate Clippy `-D warnings`、`git diff --check`通过。
 - 边界：用户可修改的统计时区偏好尚未持久化接入；其他 Python usage/旧 MCP 文案仍需继续审计；REQ-033、REQ-096、AC21 仍不勾选。
+
+## Loop 135 · Python 状态日期跟随系统时区
+
+- 修复：Python `state.py` 的 today/month/rotate 日期键和 epoch 日期投影改用 OS IANA 时区，移除统计状态层的固定 UTC+8 计算；`TZ` 覆盖、`/etc/localtime` 和系统 fallback 与 sessions/cost helper 保持同一解析顺序。
+- 保护：仅改变统计日期归属，事件 epoch 毫秒和供应商峰谷计价规则不变；缺失/无效配置仍走明确 fallback，不把缺数据写成零。
+- 验收：Python state/history 定向测试 36/36、Python 编译检查通过；Rust workspace 全量测试与 Python 全量 1188 项回归在本轮改动前的回归基线也均通过。
+- 边界：统计时区用户偏好尚未持久化并接入所有查询入口；AC21 仍需跨入口真实切换和 Computer Use 验证。

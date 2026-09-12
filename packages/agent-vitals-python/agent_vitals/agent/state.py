@@ -42,14 +42,33 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .. import paths
 
 
 SCHEMA_VERSION = "1.0.0"
-_BEIJING = timezone(timedelta(hours=8))
+
+
+def _system_timezone():
+    """Resolve the OS IANA timezone used by statistics date buckets."""
+    configured = os.environ.get("TZ", "").lstrip(":")
+    candidates = [configured] if configured else []
+    try:
+        localtime = os.path.realpath("/etc/localtime")
+        marker = "/zoneinfo/"
+        if marker in localtime:
+            candidates.append(localtime.split(marker, 1)[1])
+    except OSError:
+        pass
+    for name in candidates:
+        try:
+            return ZoneInfo(name)
+        except (ValueError, ZoneInfoNotFoundError):
+            continue
+    return datetime.now().astimezone().tzinfo or timezone.utc
 
 
 def state_dir() -> Path:
@@ -222,18 +241,15 @@ def read_alert():
 
 
 def _today_key(time_ms=None):
-    """Beijing 'YYYY-MM-DD'。空 / 缺 time 时用本地 'now' 的 BJ 日期。"""
+    """系统统计时区的 'YYYY-MM-DD'。"""
+    zone = _system_timezone()
     if time_ms is None:
-        now = datetime.now(_BEIJING)
-        return now.date().isoformat()
-    secs = int(time_ms) // 1000 + 8 * 3600
-    days = secs // 86400
-    from datetime import date, timedelta
-    return (date(1970, 1, 1) + timedelta(days=days)).isoformat()
+        return datetime.now(zone).date().isoformat()
+    return datetime.fromtimestamp(int(time_ms) / 1000, tz=zone).date().isoformat()
 
 
 def _month_key(date_str=None):
-    """Beijing 'YYYY-MM'。`date_str` 为 'YYYY-MM-DD' 时取它的月份,否则用今天。
+    """系统统计时区的 'YYYY-MM'。`date_str` 为 'YYYY-MM-DD' 时取它的月份,否则用今天。
 
     **当前月一律按真实时间算,不读 `month.json` 的 `month` 字段**——那个字段
     是写入时刻盖的戳,跨月之后它和 `days` 里的实际内容本来就会不一致
@@ -242,7 +258,7 @@ def _month_key(date_str=None):
     """
     if date_str:
         return str(date_str)[:7]
-    return datetime.now(_BEIJING).date().isoformat()[:7]
+    return datetime.now(_system_timezone()).date().isoformat()[:7]
 
 
 def archive_path() -> Path:
@@ -480,15 +496,12 @@ def rotate_today(now=None):
 
 
 def _to_bj_date(dt):
-    """datetime → BJ ISO date (YYYY-MM-DD)。接受 datetime 或 None。"""
+    """datetime → 系统统计时区 ISO date (YYYY-MM-DD)。接受 datetime 或 None。"""
     from datetime import datetime as _dt
     if isinstance(dt, str):
         # ISO 字符串直接取前 10 位
         return dt[:10]
-    secs = int(dt.timestamp()) + 8 * 3600  # BJ = UTC+8 fixed, no DST
-    days = secs // 86400
-    from datetime import date, timedelta
-    return date(1970, 1, 1) + timedelta(days=days)
+    return datetime.fromtimestamp(dt.timestamp(), tz=_system_timezone()).date()
 
 
 def merge_today(hour_buckets_result, by_model=None) -> Path:
