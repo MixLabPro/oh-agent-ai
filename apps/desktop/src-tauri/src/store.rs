@@ -66,28 +66,7 @@ fn no_binary() -> Value {
 /// 北京日期 `YYYY-MM-DD`（与 `overview::today_beijing` 同口径，但纯函数版
 /// 便于单测）。不引 `chrono` / `time`——直接调 std 即可，单测里 stub。
 fn beijing_today_yyyy_mm_dd() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // 北京 = UTC+8（无夏令时）。ms → s 整数除法 → 加 8 小时。
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let beijing_secs = secs + 8 * 3600;
-    let day = beijing_secs / 86_400;
-    // 1970-01-01 是 day 0（beijing）。粗算回 Y/M/D 避免引 chrono 单测头重——
-    // 工作台不需要精确到秒，工作台只用到 YYYY-MM-DD 字符串。下面用 Gregorian
-    // 公式（Howard Hinnant 算法，J = day + 719468，跨世纪范围 1970-2100 验证）。
-    let z = day + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{:04}-{:02}-{:02}", y, m, d)
+    agent_vitals_runtime::clock::today_system()
 }
 
 /// `sessions list` 的 argv（纯函数，供单测钉住 IPC→CLI 参数映射）。参数集对齐

@@ -1116,3 +1116,9 @@
 - 保护：`Etc/Unknown` 不写入无效覆盖；缺失配置仍由 OS 解析。事件 epoch、供应商价格策略和持久化事实不变。
 - 验收：统计时区定向测试 3/3、desktop release 测试 110/110、runtime/data Clippy 通过；重建 release CLI 后已实测自定义时区下日期与 envelope 同步。
 - 边界：真实 `.app` Computer Use、系统通知和外部发布门禁仍未完成；REQ-033、REQ-096、AC21 暂不勾选。
+
+## Loop 146 · 桌面默认会话日期与导航参数跟随偏好
+
+- 修复：桌面会话列表默认日期不再自行加固定 8 小时；菜单栏 spawn CLI 时不再传固定 `Asia/Shanghai`，改传当前统计时区偏好，避免自定义时区下导航进程直接失败。
+- 验收：desktop release 测试 110/110、CLI/desktop Clippy 通过；重建 release 后已完成自定义时区导航回归，菜单栏子进程可使用 `America/Los_Angeles`。
+- 边界：真实 `.app` Computer Use 和跨进程 SQLite 完整矩阵仍需验收；REQ-033、REQ-096、AC21 暂不勾选。

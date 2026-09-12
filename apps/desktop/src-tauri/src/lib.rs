@@ -768,17 +768,20 @@ const NAVIGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2
 /// 超时 → `child.kill()` + `wait()`（回收，不留僵尸）→ None。非零退出/spawn
 /// 失败/超时一律 None——调用方决定是保留旧快照还是 degraded，这里不编造。
 fn run_navigation(bin: &Path, day: &str) -> Option<Value> {
+    let timezone = agent_vitals_runtime::statistics_timezone::timezone_name(&overview::data_home())
+        .ok()
+        .unwrap_or_else(agent_vitals_runtime::clock::system_timezone_name);
     let mut child = std::process::Command::new(bin)
         .args([
-            "sessions",
-            "navigation",
-            "--day",
-            day,
-            "--timezone",
-            "Asia/Shanghai",
-            "--recent",
-            "5",
-            "--json",
+            "sessions".to_string(),
+            "navigation".to_string(),
+            "--day".to_string(),
+            day.to_string(),
+            "--timezone".to_string(),
+            timezone,
+            "--recent".to_string(),
+            "5".to_string(),
+            "--json".to_string(),
         ])
         .env("AGENT_VITALS_HOME", overview::data_home())
         .stdout(std::process::Stdio::piped())
