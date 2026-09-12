@@ -1581,6 +1581,15 @@ fn budget_config() -> Value {
 }
 
 #[tauri::command]
+fn budget_profiles_status(month: String) -> Value {
+    agent_vitals_runtime::budget::budget_profiles_status_sql_at(
+        &overview::data_home(), &month,
+    ).unwrap_or_else(|| serde_json::json!({
+        "status": "unavailable", "reason": "budget profile status unavailable",
+    }))
+}
+
+#[tauri::command]
 fn save_budget_config(app: AppHandle, input: BudgetConfigInput) -> Result<Value, String> {
     if input.monthly_cny_minor < 0 || input.daily_cny_minor < 0
         || !(0..=10_000).contains(&input.warning_ratio_bp)
@@ -2273,6 +2282,7 @@ pub fn run() {
             retention_config,
             save_retention_config,
             budget_config,
+            budget_profiles_status,
             save_budget_config,
             snooze_budget_until,
             clear_budget_snooze,

@@ -56,6 +56,50 @@ where
     agent_vitals_domain::util::pyround(total * 100.0, 0) as i64
 }
 
+/// 读取双预算 profile 的统一状态 DTO。金额按 profile 的币种和口径独立计算，
+/// 不做汇率折算；覆盖/新鲜度沿用同一份月度摘要，供桌面、CLI、MCP 对拍。
+pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(data_home),
+        crate::sql_sync::now_ms(),
+    ).ok()?;
+    let profiles = db.budget_profiles_get().ok()?;
+    let summary = {
+        use agent_vitals_data::repository::SummaryRepository;
+        crate::summary::SqlSummaryRepository::at(data_home).monthly_summary(
+            &agent_vitals_data::repository::MonthlySummaryQuery { month: month.to_string() },
+        )
+    };
+    let values = summary.by_provider.values().collect::<Vec<_>>();
+    let rows = profiles.into_iter().map(|profile| {
+        let spent_minor = budget_profile_spent_minor(
+            values.iter().copied(), &profile.profile_id, &profile.currency,
+        );
+        let ratio_bp = (spent_minor > 0).then(|| spent_minor * 10_000 / profile.monthly_minor);
+        let level = match ratio_bp {
+            Some(r) if r >= 10_000 => "exceeded",
+            Some(r) if r >= profile.warning_ratio_bp => "warn",
+            Some(_) => "ok",
+            None => "no_data",
+        };
+        json!({
+            "profile_id": profile.profile_id,
+            "currency": profile.currency,
+            "monthly_minor": profile.monthly_minor,
+            "daily_minor": profile.daily_minor,
+            "warning_ratio_bp": profile.warning_ratio_bp,
+            "spent_minor": spent_minor,
+            "ratio_bp": ratio_bp,
+            "level": level,
+        })
+    }).collect::<Vec<_>>();
+    Some(json!({
+        "status": "ok", "month": month, "profiles": rows,
+        "coverage": summary.coverage.to_json(),
+        "freshness": summary.freshness.to_json(),
+    }))
+}
+
 /// 预算金额的来源是展示证据，不参与算术或计费。旧版 seed 成功时记录
 /// `legacy_import`；用户后来显式保存则覆盖为 `user`。缺失表示历史版本没有
 /// 留下来源，消费方必须显示未知而非猜测。
