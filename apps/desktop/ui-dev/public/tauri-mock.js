@@ -148,6 +148,8 @@
   }];
   const billingDeclarations = [];
   const billingJobs = new Map();
+  let pricingNetworkEnabled = true;
+  let pricingLastSuccessAt = Date.now() - 3600000;
   const canonicalIssueStatus = (status) => ({ pending: "open", closed: "resolved", wontfix: "not_applicable" }[status] || status || "open");
   const transitionIssue = (issueId, toStatus) => {
     const instance = issueInstances.find((item) => item.issue_id === issueId);
@@ -214,9 +216,16 @@
         timezone = next;
         return { status: "saved", timezone };
       }
-      case "public_pricing_catalog_status": return { state: "ok", network_enabled: true, source_url: "https://example.invalid/pricing.json", source_version: "public-browser-mock", model_count: 7, last_success_at_ms: Date.now() - 3600000 };
-      case "save_public_pricing_catalog_policy": return { status: "saved", network_enabled: !!(args && args.networkEnabled) };
-      case "update_public_pricing_catalog": return { status: "updated", source_url: "https://example.invalid/pricing.json", source_version: "public-browser-mock", model_count: 7, last_success_at_ms: Date.now() };
+      case "public_pricing_catalog_status": return { state: "ok", network_enabled: pricingNetworkEnabled, source_url: "https://example.invalid/pricing.json", source_version: "public-browser-mock", model_count: 7, last_success_at_ms: pricingLastSuccessAt };
+      case "save_public_pricing_catalog_policy": {
+        pricingNetworkEnabled = !!(args && args.networkEnabled);
+        return { status: "saved", network_enabled: pricingNetworkEnabled };
+      }
+      case "update_public_pricing_catalog": {
+        if (!pricingNetworkEnabled) throw new Error("公共价格联网检查未开启；继续使用本地价卡");
+        pricingLastSuccessAt = Date.now();
+        return { status: "updated", source_url: "https://example.invalid/pricing.json", source_version: "public-browser-mock", model_count: 7, last_success_at_ms: pricingLastSuccessAt };
+      }
       case "about_diagnostics": return { status: "ok", app_version: "browser-mock", cli_version: "browser-mock", engine_version: "browser-mock", architecture: "browser-mock", authority_schema: "browser-mock", statistics_timezone: timezone, pricing: { version: "public-browser-mock", captured_at_ms: Date.now() - 3600000 }, sync: { ok: true, message: "浏览器样式调试数据" } };
       case "open_trusted_releases_page": return { status: "opened", url: "https://example.invalid/releases", automatic_install: false };
       case "restore_authority_backup": return { status: "cancelled" };

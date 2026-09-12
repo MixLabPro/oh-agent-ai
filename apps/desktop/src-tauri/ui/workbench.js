@@ -1450,7 +1450,8 @@ async function renderPricingCatalogSettings() {
     const version = value.source_version ? " · 版本 " + value.source_version : "";
     const models = value.model_count == null ? "" : " · 覆盖 " + value.model_count + " 个模型";
     const reason = value.failure_reason ? " · 原因：" + value.failure_reason : "";
-    status.textContent = (state === "ok" ? "已成功检查公共目录" : state === "never_checked" ? "尚未检查" : "上次检查未采用新目录") + version + models + reason;
+    const succeeded = state === "ok" || state === "updated" || value.status === "updated";
+    status.textContent = (succeeded ? "已成功检查公共目录" : state === "never_checked" ? "尚未检查" : "上次检查未采用新目录") + version + models + reason;
   };
   const initialStatus = await (async () => {
     try { return await invoke("public_pricing_catalog_status"); }

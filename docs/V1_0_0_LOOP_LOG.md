@@ -2201,3 +2201,12 @@
   同步”；添加后配置出现在列表，移除后列表消失，并显示“已导入数据仍保留”。
 - 边界：使用 Vite mock 的 `/tmp/agent-vitals-browser-custom-source`，未访问或修改真实
   文件系统；真实 macOS 目录选择器和权限流程仍待 `.app` 真机验收。
+
+## Loop 308 · 价格目录成功状态文案修复
+
+- 发现：更新接口成功返回 `status: "updated"` 时，前端只识别 `state: "ok"`，错误显示
+  为“未采用新目录”。
+- 修复：前端将 `ok`/`updated` 统一映射为成功状态；关闭联网后仍显示本地价卡回退提示。
+- UAT: AC16 partial walked ✔：浏览器点击检查价格更新显示“已成功检查公共目录 · 版本
+  public-browser-mock · 覆盖 7 个模型”；关闭联网后点击更新显示需先允许联网。
+- 验收：`npm run verify` 与 `git diff --check` 通过。
