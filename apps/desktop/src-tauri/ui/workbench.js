@@ -852,12 +852,14 @@ async function renderBudgetSettings() {
     }
     save.disabled = true;
     try {
-      await invoke("save_budget_config", { input: {
+      const saved = await invoke("save_budget_config", { input: {
         monthly_cny_minor: monthlyMinor,
         daily_cny_minor: dailyMinor,
         warning_ratio_bp: Math.round(warningPercent * 100),
       } });
-      status.textContent = "预算已保存，正在按当前用量刷新状态。";
+      const permission = saved && saved.notification_permission;
+      status.textContent = "预算已保存，提醒不会阻止 Agent 继续使用。" +
+        (permission && permission !== "Granted" ? "系统通知权限状态：" + permission + "。" : "");
       await renderOverview();
     } catch (e) {
       status.textContent = "保存失败：" + errText(e);

@@ -11,6 +11,7 @@ mod budget_alerts;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tauri_plugin_notification::NotificationExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
 use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem, Submenu};
@@ -1580,7 +1581,7 @@ fn budget_config() -> Value {
 }
 
 #[tauri::command]
-fn save_budget_config(input: BudgetConfigInput) -> Result<Value, String> {
+fn save_budget_config(app: AppHandle, input: BudgetConfigInput) -> Result<Value, String> {
     if input.monthly_cny_minor < 0 || input.daily_cny_minor < 0
         || !(0..=10_000).contains(&input.warning_ratio_bp)
     {
@@ -1595,9 +1596,13 @@ fn save_budget_config(input: BudgetConfigInput) -> Result<Value, String> {
         input.monthly_cny_minor, input.daily_cny_minor, input.warning_ratio_bp, now_ms,
     ).map_err(|error| error.to_string())?;
     let origin_recorded = agent_vitals_runtime::budget::mark_budget_config_user_owned(&data_home).is_ok();
+    let notification_permission = app.notification().request_permission()
+        .map(|state| format!("{state:?}"))
+        .unwrap_or_else(|error| format!("unavailable: {error}"));
     Ok(serde_json::json!({
         "status": "saved", "updated_at_ms": now_ms,
         "origin": "user", "origin_recorded": origin_recorded,
+        "notification_permission": notification_permission,
     }))
 }
 
