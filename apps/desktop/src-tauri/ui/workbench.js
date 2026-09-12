@@ -888,6 +888,11 @@ async function renderBudgetProfiles() {
     const title = document.createElement("div");
     title.className = "muted";
     title.textContent = id === "estimate" ? "按量估算观察预算" : "已确认按量支出预算";
+    const live = document.createElement("div");
+    live.className = "muted";
+    live.textContent = profile.level
+      ? "当前：" + profile.level + " · 已用 " + String(profile.spent_minor || 0) + " " + (profile.currency || "")
+      : "尚未配置此预算口径";
     const currency = document.createElement("select");
     currency.innerHTML = '<option value="CNY">CNY</option><option value="USD">USD</option>';
     currency.value = profile.currency || "CNY";
@@ -915,18 +920,20 @@ async function renderBudgetProfiles() {
       }
       save.disabled = true;
       try {
-        await invoke("save_budget_profile", { input: {
+        const saved = await invoke("save_budget_profile", { input: {
           profile_id: id, currency: currency.value, monthly_minor: m,
           daily_minor: d, warning_ratio_bp: w * 100,
         } });
-        status.textContent = "已保存" + (id === "estimate" ? "估算观察" : "已确认支出") + "预算；币种独立统计。";
+        const permission = saved && saved.notification_permission;
+        status.textContent = "已保存" + (id === "estimate" ? "估算观察" : "已确认支出") + "预算；币种独立统计。" +
+          (permission && permission !== "Granted" ? "系统通知权限状态：" + permission + "。" : "");
         status.hidden = false;
         await renderOverview();
       } catch (e) {
         status.textContent = "保存失败：" + errText(e); status.hidden = false;
       } finally { save.disabled = false; }
     };
-    row.append(title, currency, monthly, daily, warning, save);
+    row.append(title, live, currency, monthly, daily, warning, save);
     host.appendChild(row);
   }
 }

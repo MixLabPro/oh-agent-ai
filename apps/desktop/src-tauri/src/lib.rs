@@ -1599,7 +1599,7 @@ fn budget_profiles_status(month: String) -> Value {
 }
 
 #[tauri::command]
-fn save_budget_profile(input: BudgetProfileInput) -> Result<Value, String> {
+fn save_budget_profile(app: AppHandle, input: BudgetProfileInput) -> Result<Value, String> {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
     let now_ms = agent_vitals_runtime::sql_sync::now_ms();
@@ -1609,7 +1609,13 @@ fn save_budget_profile(input: BudgetProfileInput) -> Result<Value, String> {
         &input.profile_id, &input.currency, input.monthly_minor,
         input.daily_minor, input.warning_ratio_bp, now_ms,
     ).map_err(|error| error.to_string())?;
-    Ok(serde_json::json!({ "status": "saved", "profile_id": input.profile_id, "currency": input.currency }))
+    let notification_permission = app.notification().request_permission()
+        .map(|state| format!("{state:?}"))
+        .unwrap_or_else(|error| format!("unavailable: {error}"));
+    Ok(serde_json::json!({
+        "status": "saved", "profile_id": input.profile_id, "currency": input.currency,
+        "notification_permission": notification_permission,
+    }))
 }
 
 #[tauri::command]
