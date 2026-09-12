@@ -2126,3 +2126,11 @@
   DSH 客户端类型检查、构建、宿主投影、wire/timeline/export/render 验证均通过。
 - 结论：兼容实现、黄金输出和 DSH 集成未发现回归；未因此宣称真实 `.app` 安装/升级、
   签名公证或外部试用门槛已完成。
+
+## Loop 298 · arm64 App 包静态验收
+
+- 验收：`verify-v010-app-bundle.mjs` 与 `verify-macos-app-bundle.mjs` 通过；`.app` 内主
+  程序和随包 CLI 存在，CLI 响应 `agent-vitals 1.3.0`，二者均为 `arm64`，关键 IPC
+  字符串存在。
+- 边界：验收明确报告该包未使用 Developer ID 签名；当前没有把诊断模式的本地包当作
+  可发布产物，也没有声称 Intel 包、安装升级和公证已完成。
