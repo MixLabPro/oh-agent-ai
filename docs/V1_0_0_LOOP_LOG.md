@@ -1400,3 +1400,9 @@
 - 保护：查询局部时区通过上下文作用域传递到日窗口、最近会话和今日 token 聚合，退出调用后不污染后续查询；无效时区以 `invalid_argument`/退出码 2 明确失败。
 - 验收：Python sessions SQL 27/27 通过；新增 Los Angeles 2026-03 DST 月窗口 743 小时回归；兼容 CLI 无效时区退出 2；`py_compile` 与 `git diff --check`通过。
 - 边界：旧 Python 计价/历史兼容函数仍保留旧名称，但产品 sessions 查询已使用统计 IANA 时区；真实非 UTC+8 桌面与 Computer Use 仍需解锁后复验。
+
+## Loop 191 · Python 时区修复全量回归
+
+- Python：`python3 -m unittest discover tests -v`，1189/1189 通过；208 项按测试定义跳过，无失败。
+- 保护：新增的查询局部时区上下文、IANA 校验和 CLI 参数路径未破坏既有 sessions、计价、WorkBuddy 证据与 Python 兼容合同。
+- 边界：Rust/Python 双实现对拍仍有未配置 release CLI 的跳过项；真实非 UTC+8 桌面 Computer Use、签名/公证和外部试用门禁仍未完成。
