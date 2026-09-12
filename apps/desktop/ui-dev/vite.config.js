@@ -9,6 +9,7 @@ export default defineConfig({
   // full-page reloads for the existing workbench during migration.
   root: path.resolve(here, "../src-tauri/ui"),
   publicDir: path.resolve(here, "public"),
+  cacheDir: path.resolve(here, ".vite-cache"),
   server: {
     host: "127.0.0.1",
     port: 5173,
@@ -32,6 +33,8 @@ export default defineConfig({
     },
   ],
   build: {
+    outDir: path.resolve(here, "dist"),
+    emptyOutDir: true,
     rollupOptions: {
       input: path.resolve(here, "../src-tauri/ui/workbench.html"),
     },

@@ -867,3 +867,8 @@
 - 修复：总览质量横幅按错误码显示明确状态，并提供“重试同步 / 导出诊断 / 安装新版本后重试”等安全入口；损坏库不会自动删除、重建或伪装成零用量。
 - 验收：desktop release 测试目标编译通过，Workbench JS 语法检查与 `git diff --check` 通过。
 - 边界：完整磁盘满、旧库升级和干净机恢复演练仍属于 AC20 真机/发布环境 UAT，尚未勾选 AC20。
+
+## Loop 109 · Vite 构建目录隔离（开发工具增强）
+
+- 修复：Vite 的构建输出和缓存固定到 `apps/desktop/ui-dev/dist` 与 `.vite-cache`，不再写入 `apps/desktop/src-tauri/ui`，样式迭代后的工作树保持干净。
+- 验收：Vite production build、mock JS 语法检查和 `git diff --check` 通过；Tauri UI 源目录未重新生成 `dist/`。
