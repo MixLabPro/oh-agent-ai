@@ -112,5 +112,6 @@ jobs:
             dist/macos/agent-vitals.app \
             release/agent-vitals-${RELEASE_TAG}.app.zip
           cp dist/dmg/*.dmg release/
+          (cd release && shasum -a 256 *.zip *.dmg > SHA256SUMS)
           gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes
           gh release upload "$RELEASE_TAG" release/*
