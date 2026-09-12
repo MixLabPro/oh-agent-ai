@@ -1026,3 +1026,9 @@
 - 实现：runtime 兼容的 `today_beijing/current_month_beijing` 入口内部改用系统 IANA 统计时区；Codex 重置时间的人读格式与 Python 镜像同步改用系统时区，避免日期已切换但重置时间仍按北京时间显示。
 - 验收：Rust Codex cost 定向测试 16/16、Python CLI matrix 147 项（当前未设置 Rust binary 的 parity 用例按既有规则跳过）通过；runtime 编译无新增 warning。
 - 边界：Workbench/菜单栏仍有前端 `beijingToday()` 固定 `UTC+8`，用户可修改时区偏好和完整跨入口 parity 尚未完成；不勾选 REQ-033、REQ-096 或 AC21。
+
+## Loop 133 · Workbench 前端统计日期切换
+
+- 实现：Workbench 保留 `beijingToday()` 兼容调用名，但内部使用浏览器系统 IANA 时区；Vite browser mock 的样例日期也改为同一系统日期，避免开发调试页与正式后端在非北京时间机器上跨日漂移。
+- 验收：Workbench/tauri-mock `node --check`、KPI/状态验证器、Vite production build 与 `git diff --check`通过。
+- 边界：前端尚未提供用户可修改的统计时区偏好；当前默认随 OS，供应商价格策略时区仍未与统计时区混用；不勾选 REQ-033、REQ-096 或 AC21。

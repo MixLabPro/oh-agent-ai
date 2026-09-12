@@ -5,10 +5,18 @@
   "use strict";
   if (window.__TAURI__) return;
 
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const dayInSystemTimezone = (value) => {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+    }).formatToParts(value);
+    const values = Object.fromEntries(parts.filter((p) => p.type !== "literal").map((p) => [p.type, p.value]));
+    return values.year + "-" + values.month + "-" + values.day;
+  };
   const today = new Date();
-  const isoDay = today.toISOString().slice(0, 10);
+  const isoDay = dayInSystemTimezone(today);
   const month = isoDay.slice(0, 7);
-  const previousDay = new Date(today.getTime() - 86400000).toISOString().slice(0, 10);
+  const previousDay = dayInSystemTimezone(new Date(today.getTime() - 86400000));
 
   const byProvider = {
     "codex/openai": {

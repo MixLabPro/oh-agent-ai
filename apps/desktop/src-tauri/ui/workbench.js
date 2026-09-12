@@ -105,12 +105,22 @@ function fmtPct(x) {
   return Math.round(x * 100) + "%";
 }
 
-// 北京时间（UTC+8 无夏令时）今天 → "YYYY-MM-DD"。镜像 overview.rs 的北京日期键。
+// 系统统计时区今天 → "YYYY-MM-DD"。旧函数名保留，避免既有调用面漂移；
+// 供应商价格策略时区不由这个 UI 日期 helper 推断。
+function systemTimezone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+function systemToday() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: systemTimezone(), year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.filter((p) => p.type !== "literal").map((p) => [p.type, p.value]));
+  return values.year + "-" + values.month + "-" + values.day;
+}
+
 function beijingToday() {
-  const b = new Date(Date.now() + 8 * 3600 * 1000);
-  const m = String(b.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(b.getUTCDate()).padStart(2, "0");
-  return b.getUTCFullYear() + "-" + m + "-" + d;
+  return systemToday();
 }
 
 function beijingMonth() {
