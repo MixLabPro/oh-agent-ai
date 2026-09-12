@@ -120,6 +120,22 @@
   }];
 
   let syncPaused = false;
+  const canonicalIssueStatus = (status) => ({ pending: "open", closed: "resolved", wontfix: "not_applicable" }[status] || status || "open");
+  const transitionIssue = (issueId, toStatus) => {
+    const instance = issueInstances.find((item) => item.issue_id === issueId);
+    if (!instance) throw new Error("issue not found: " + issueId);
+    const from = canonicalIssueStatus(instance.status);
+    const to = canonicalIssueStatus(toStatus);
+    if (from === to) return { status: "ok", issue_id: issueId, to_status: to };
+    const group = issueGroups.find((item) => item.sample_evidence?.some((evidence) => evidence.issue_id === issueId));
+    if (group) {
+      const rollup = group.status_rollup;
+      rollup[from] = Math.max(0, Number(rollup[from] || 0) - 1);
+      rollup[to] = Number(rollup[to] || 0) + 1;
+    }
+    instance.status = to;
+    return { status: "ok", issue_id: issueId, to_status: to };
+  };
   const ok = (data) => Promise.resolve(data);
   const emptyReport = (key) => ({ status: "ok", [key]: [] });
   async function invoke(command, args) {
@@ -166,6 +182,7 @@
       };
       case "issue_group_instances": return { group_id: args && args.groupId, instances: issueInstances, next_cursor: null, total_instances: issueInstances.length };
       case "issue_instance_read": return { status: "ok", issue: issueInstances.find((item) => item.issue_id === (args && args.issueId)) || null };
+      case "issue_transition": return transitionIssue(args && args.issueId, args && args.toStatus);
       case "source_read_locations": return { status: "ok", locations: [] };
       case "sync_pause_state": return { status: "ok", paused: syncPaused };
       case "peek_nav_target": case "peek_focus_target": return null;
