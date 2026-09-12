@@ -599,4 +599,11 @@
 - 验收：authority model filter 回归、MCP sessions_search、CLI/desktop 编译检查、JS 语法和工作台来源断言通过。
 - 边界：provider、计费状态、日期快捷范围/排序及修复后真机点击复验仍待完成，不勾选完整 REQ-067 或 DETAIL-01。
 
+## Loop 71 · 会话 provider 筛选权威链路（自验收）
+
+- 执行：会话查询新增精确 `provider` 条件，从工作台输入框透传到 Tauri、CLI、MCP 与 authority SQL；缺失 provider 证据统一按 `<unknown>` 处理。
+- 保护：provider 条件参与事实聚合、窗口总量和会话数计算，不在已加载页面上做假筛选；模型、宿主、月份和分页语义保持不变。
+- 验收：authority provider filter 回归、MCP/CLI/desktop 编译检查、JS 语法和工作台来源断言通过。
+- 边界：计费状态、日期快捷范围/排序及修复后真机点击复验仍待完成，不勾选完整 REQ-067 或 DETAIL-01。
+
 本日志只记录已经完成的实现和证据；上述“尚未完成”不改变任何 PRD 勾选状态。任何单次修改连续测试失败超过5次，或任何单次Loop超过30分钟，立即暂停并记录；不得以拆分日志规避熔断。

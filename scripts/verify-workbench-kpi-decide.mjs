@@ -50,6 +50,8 @@ ok(wb.includes('args.host_kind = sessFilter') && !wb.includes('args.hostKind = s
   "会话宿主筛选透传 snake_case 参数，避免静默退回全宿主");
 ok(wb.includes('document.getElementById("sess-model")') && wb.includes('args.model = modelVal'),
   "会话模型筛选透传到权威查询，避免只做前端假筛选");
+ok(wb.includes('document.getElementById("sess-provider")') && wb.includes('args.provider = providerVal'),
+  "会话 provider 筛选透传到权威查询，避免只做前端假筛选");
 
 // ── vm 执行真实文件 ──
 function makeElement() {

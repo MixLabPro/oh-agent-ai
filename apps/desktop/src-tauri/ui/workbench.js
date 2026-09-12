@@ -2320,6 +2320,8 @@ async function fetchSessionsPage(gen) {
     if (monthVal) args.month = monthVal;
     const modelVal = document.getElementById("sess-model").value.trim();
     if (modelVal) args.model = modelVal;
+    const providerVal = document.getElementById("sess-provider").value.trim();
+    if (providerVal) args.provider = providerVal;
     // host 过滤（spec §7.3）：此命令的 Tauri 参数保持 Rust 的 snake_case 名称；
     // 传 camelCase 会被当作缺省 None，导致列表静默退回全宿主。过滤变化时调用方
     // 负责重置分页。
@@ -4539,6 +4541,8 @@ function init() {
   sessMonthEl.addEventListener("change", () => loadSessions(true));
   const sessModelEl = document.getElementById("sess-model");
   sessModelEl.addEventListener("change", () => loadSessions(true));
+  const sessProviderEl = document.getElementById("sess-provider");
+  sessProviderEl.addEventListener("change", () => loadSessions(true));
   document.getElementById("sess-back").addEventListener("click", () => {
     document.getElementById("sess-detail-view").hidden = true;
     document.getElementById("sess-list-view").hidden = false;

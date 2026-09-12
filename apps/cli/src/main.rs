@@ -825,6 +825,9 @@ enum SessionsAction {
         /// Restrict to this exact model id
         #[arg(long)]
         model: Option<String>,
+        /// Restrict to this exact provider id
+        #[arg(long)]
+        provider: Option<String>,
         /// Drop sessions whose window total is below this
         #[arg(long)]
         min_tokens: Option<i64>,
@@ -3225,6 +3228,7 @@ session_store={store} fold={fold}"
                 hour,
                 host_kind,
                 model,
+                provider,
                 min_tokens,
                 page_size,
                 cursor,
@@ -3259,6 +3263,9 @@ session_store={store} fold={fold}"
                 }
                 if let Some(model) = model {
                     args.insert("model".into(), Value::String(model.clone()));
+                }
+                if let Some(provider) = provider {
+                    args.insert("provider".into(), Value::String(provider.clone()));
                 }
                 if let Some(mt) = min_tokens {
                     args.insert("min_tokens".into(), Value::Number((*mt).into()));

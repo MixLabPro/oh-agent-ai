@@ -956,6 +956,7 @@ const SQL_SESSIONS_IN_WINDOW: &str = "SELECT session_key, host,
              AND br.change_kind = 'saved')
        AND (?4 < 0 OR (((event_ts_ms + ?5) / ?6) % 24) = ?4)
        AND (?7 IS NULL OR COALESCE(model_id, '<unknown>') = ?7)
+       AND (?8 IS NULL OR COALESCE(provider_id, '<unknown>') = ?8)
        GROUP BY session_key";
 
 /// 窗口内的会话聚合，跨 wired 宿主合并。`hour` = 北京小时过滤（`None` = 不过滤）；
@@ -970,6 +971,7 @@ pub fn sessions_in_window(
     end_ms: i64,
     hosts: &[String],
     model: Option<&str>,
+    provider: Option<&str>,
     hour: Option<u32>,
     min_tokens: i64,
     after_total: Option<i64>,
@@ -989,7 +991,7 @@ pub fn sessions_in_window(
     for host in selected {
         let mut stmt = conn.prepare(SQL_SESSIONS_IN_WINDOW)?;
         let rows = stmt.query_map(
-            rusqlite::params![host, start_ms, end_ms, hour_param, BEIJING_OFFSET_MS, HOUR_MS, model],
+            rusqlite::params![host, start_ms, end_ms, hour_param, BEIJING_OFFSET_MS, HOUR_MS, model, provider],
             |r| {
                 let models: Option<String> = r.get(10)?;
                 Ok(SessionAgg {
@@ -2333,8 +2335,9 @@ mod tests {
             [&BEIJING_OFFSET_MS, &HOUR_MS, &s, &end, &"claude-code"];
         let no_hour: i64 = -1;
         let no_model: Option<&str> = None;
-        let sessions_params: [&dyn rusqlite::ToSql; 7] =
-            [&"dsh", &s, &end, &no_hour, &BEIJING_OFFSET_MS, &HOUR_MS, &no_model];
+        let no_provider: Option<&str> = None;
+        let sessions_params: [&dyn rusqlite::ToSql; 8] =
+            [&"dsh", &s, &end, &no_hour, &BEIJING_OFFSET_MS, &HOUR_MS, &no_model, &no_provider];
 
         for (name, sql, params) in [
             ("peaked_days_map", SQL_PEAKED_DAYS_MAP, &peak_params[..]),
@@ -2425,10 +2428,13 @@ mod tests {
         insert_session_fact(&db, "f2", "claude-code", "kA", "m-a", h22, 0, 300);
         insert_session_fact(&db, "f3", "claude-code", "kB", "m-b", h22 + 60_000, 0, 500);
         insert_session_fact(&db, "f4", "codex", "kC", "m-c", h9 + 60_000, 0, 40);
+        db.conn()
+            .execute("UPDATE usage_facts SET provider_id = 'provider-b' WHERE fact_id = 'f3'", [])
+            .unwrap();
 
         // 无小时过滤：3 会话，window_total = 940。
         let (rows, more, wt, count) =
-            sessions_in_window(db.conn(), start, end, &[], None, None, 0, None, None, 50).unwrap();
+            sessions_in_window(db.conn(), start, end, &[], None, None, None, 0, None, None, 50).unwrap();
         assert_eq!(rows.len(), 3);
         assert!(!more);
         assert_eq!(wt, 940);
@@ -2444,7 +2450,7 @@ mod tests {
 
         // 22 点过滤：kA 贡献 300、kB 贡献 500 → sum == 800（== usage_hourly 22点 total）。
         let (rows, _, wt22, count22) =
-            sessions_in_window(db.conn(), start, end, &[], None, Some(22), 0, None, None, 50).unwrap();
+            sessions_in_window(db.conn(), start, end, &[], None, None, Some(22), 0, None, None, 50).unwrap();
         assert_eq!(wt22, 800, "Q04 不变式：会话之和 == 峰值小时总量");
         assert_eq!(count22, 2);
         assert_eq!(rows.iter().map(|s| s.total()).sum::<i64>(), 800);
@@ -2452,17 +2458,26 @@ mod tests {
 
         // host 过滤 + min_tokens。
         let (rows, _, _, _) =
-            sessions_in_window(db.conn(), start, end, &["codex".into()], None, None, 0, None, None, 50)
+            sessions_in_window(db.conn(), start, end, &["codex".into()], None, None, None, 0, None, None, 50)
                 .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_key, "kC");
 
         // model 过滤只保留包含该 model 的会话，并保持窗口总量与结果一致。
         let (rows, _, model_total, model_count) =
-            sessions_in_window(db.conn(), start, end, &[], Some("m-b"), None, 0, None, None, 50)
+            sessions_in_window(db.conn(), start, end, &[], Some("m-b"), None, None, 0, None, None, 50)
                 .unwrap();
         assert_eq!(model_count, 1);
         assert_eq!(model_total, 500);
+        assert_eq!(rows[0].session_key, "kB");
+
+        // provider 过滤与模型过滤同样作用于权威窗口聚合。
+        let (rows, _, provider_total, provider_count) = sessions_in_window(
+            db.conn(), start, end, &[], None, Some("provider-b"), None, 0, None, None, 50,
+        )
+        .unwrap();
+        assert_eq!(provider_count, 1);
+        assert_eq!(provider_total, 500);
         assert_eq!(rows[0].session_key, "kB");
         let _ = std::fs::remove_file(&path);
     }
