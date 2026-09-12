@@ -41,6 +41,17 @@ pub fn save_timezone(data_home: &Path, name: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
+/// 将已保存的偏好应用到当前进程，使 SQLite `localtime` 与 Jiff 使用同一时区。
+/// 未配置时保持 OS 环境不变；配置损坏不会静默切换到另一个时区。
+pub fn apply(data_home: &Path) -> Result<String, String> {
+    let name = timezone_name(data_home)?;
+    let system_name = crate::clock::system_timezone_name();
+    if name != system_name && name != "Etc/Unknown" {
+        std::env::set_var("TZ", &name);
+    }
+    Ok(name)
+}
+
 pub fn validate_timezone(name: &str) -> Result<(), String> {
     if name.trim() != name || name.is_empty() || name.contains('\0') {
         return Err("statistics timezone must be a non-empty IANA name".to_string());

@@ -54,7 +54,16 @@ SCHEMA_VERSION = "1.0.0"
 
 def _system_timezone():
     """Resolve the OS IANA timezone used by statistics date buckets."""
-    configured = os.environ.get("TZ", "").lstrip(":")
+    configured = ""
+    try:
+        preference = paths.data_home() / "state" / "statistics-timezone.json"
+        value = json.loads(preference.read_text(encoding="utf-8"))
+        configured = value.get("timezone", "") if isinstance(value, dict) else ""
+    except (OSError, json.JSONDecodeError):
+        configured = ""
+    if not isinstance(configured, str):
+        configured = ""
+    configured = configured.lstrip(":") or os.environ.get("TZ", "").lstrip(":")
     candidates = [configured] if configured else []
     try:
         localtime = os.path.realpath("/etc/localtime")

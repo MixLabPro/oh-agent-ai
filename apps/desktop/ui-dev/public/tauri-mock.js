@@ -109,6 +109,7 @@
       case "budget_config": return { status: "ok", monthly_cny_minor: 10000, daily_cny_minor: 500, warning_ratio_bp: 80, origin: "user" };
       case "budget_profiles_status": return { status: "ok", profiles: [] };
       case "retention_config": return { status: "ok", months: 13 };
+      case "statistics_timezone_config": return { status: "ok", timezone, system_timezone: timezone };
       case "data_codex_quota": return { plan_type: "Plus", limits: { primary: { used_percent: 38, resets_at: Math.floor(Date.now() / 1000) + 7200 } } };
       case "sessions_list": return { data: { sessions, next_cursor: null, has_more: false, window_session_count: sessions.length, window_total_tokens: 246000 } };
       case "sessions_read": return { data: { session: sessions[0], events: [], findings: [] } };

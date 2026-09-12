@@ -68,6 +68,18 @@
         <div class="muted" id="ov-retention-help">可设置 1–60 个月。</div>
         <div class="billing-preview" id="ov-retention-status" hidden role="alert" tabindex="-1"></div>
       </section>
+      <section class="billing-review panel" id="ov-timezone-panel" aria-live="polite">
+        <div class="panel-title">统计时区</div>
+        <div class="muted">用于今天、本月、日历和小时边界。默认跟随系统；修改不会改变事件原始时间，也不会改变供应商峰谷计价规则。</div>
+        <div class="billing-form">
+          <label>时区（IANA）
+            <input id="ov-statistics-timezone" type="text" placeholder="Asia/Shanghai" aria-describedby="ov-timezone-help ov-timezone-status" />
+          </label>
+          <div class="billing-form-actions"><button class="btn" id="ov-timezone-save">保存统计时区</button></div>
+        </div>
+        <div class="muted" id="ov-timezone-help">示例：Asia/Shanghai、America/Los_Angeles、Europe/Berlin。</div>
+        <div class="billing-preview" id="ov-timezone-status" hidden role="alert" tabindex="-1"></div>
+      </section>
       <section class="billing-review panel" id="ov-diagnostic-panel" aria-live="polite">
         <div class="panel-title">帮助与诊断</div>
         <div class="muted">可保存一份脱敏诊断包供你自行查看或提交。不会包含会话正文、绝对路径、账户标识，也不会自动上传。</div>

@@ -531,6 +531,7 @@ async function renderOverview() {
   }
   await renderHostBills(monthKey);
   await renderRetentionSettings();
+  await renderStatisticsTimezoneSettings();
   bindDiagnosticExport();
   await renderBudgetSettings();
   renderMonthVerdict(monthly);
@@ -1257,6 +1258,43 @@ async function renderRetentionSettings() {
     };
   } catch (e) {
     show("保留期设置不可用：" + errText(e));
+    input.disabled = true;
+    save.disabled = true;
+  }
+}
+
+async function renderStatisticsTimezoneSettings() {
+  const input = document.getElementById("ov-statistics-timezone");
+  const save = document.getElementById("ov-timezone-save");
+  const status = document.getElementById("ov-timezone-status");
+  if (!input || !save || !status) return;
+  const show = (text) => { status.hidden = false; status.textContent = text; };
+  try {
+    const config = await invoke("statistics_timezone_config");
+    if (!config || config.status !== "ok") throw new Error((config && config.reason) || "统计时区设置不可用");
+    input.value = String(config.timezone || config.system_timezone || "");
+    status.hidden = true;
+    save.onclick = async () => {
+      const timezone = input.value.trim();
+      if (!timezone) {
+        show("请输入 IANA 时区名称，例如 Asia/Shanghai。");
+        status.focus();
+        return;
+      }
+      save.disabled = true;
+      try {
+        await invoke("save_statistics_timezone_config", { timezone });
+        show("已保存统计时区；正在刷新今天、本月和日历统计。");
+        await loadActiveTab();
+      } catch (e) {
+        show("保存失败：" + errText(e));
+        status.focus();
+      } finally {
+        save.disabled = false;
+      }
+    };
+  } catch (e) {
+    show("统计时区设置不可用：" + errText(e));
     input.disabled = true;
     save.disabled = true;
   }

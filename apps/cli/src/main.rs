@@ -1475,6 +1475,13 @@ fn print_daily_summary_text(s: &agent_vitals_data::projection::DailySummary) {
 }
 
 fn main() {
+    // 统计时区偏好必须在任何 SQLite localtime 查询前应用；缺失配置继续使用 OS 时区。
+    if let Err(error) = agent_vitals_runtime::statistics_timezone::apply(
+        &agent_vitals_runtime::home::data_home(),
+    ) {
+        eprintln!("statistics timezone unavailable: {error}");
+        std::process::exit(2);
+    }
     let args = Args::parse();
 
     // Data MCP：本机 stdio server，永不返回（stdin EOF → exit 0）。在扫描

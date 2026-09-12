@@ -1627,6 +1627,27 @@ fn save_retention_config(input: RetentionConfigInput) -> Result<Value, String> {
     Ok(serde_json::json!({ "status": "saved", "months": input.months }))
 }
 
+#[tauri::command]
+fn statistics_timezone_config() -> Value {
+    let data_home = overview::data_home();
+    match agent_vitals_runtime::statistics_timezone::timezone_name(&data_home) {
+        Ok(timezone) => serde_json::json!({
+            "status": "ok",
+            "timezone": timezone,
+            "system_timezone": agent_vitals_runtime::clock::system_timezone_name(),
+        }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
+    }
+}
+
+#[tauri::command]
+fn save_statistics_timezone_config(timezone: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let saved = agent_vitals_runtime::statistics_timezone::save_timezone(&data_home, &timezone)?;
+    agent_vitals_runtime::statistics_timezone::apply(&data_home)?;
+    Ok(serde_json::json!({ "status": "saved", "timezone": saved }))
+}
+
 /// 生成用户主动选择保存的脱敏诊断包。只组合现有的状态 DTO；不读取会话正文、
 /// 原始日志、绝对路径或账户标识，也不执行上传。取消保存对用户来说是 no-op。
 #[tauri::command]
@@ -2478,6 +2499,8 @@ pub fn run() {
             delete_imported_source_data,
             retention_config,
             save_retention_config,
+            statistics_timezone_config,
+            save_statistics_timezone_config,
             export_diagnostic_package,
             budget_config,
             budget_profiles_status,
@@ -2521,6 +2544,11 @@ pub fn run() {
             capture_workbench_screenshot,
         ])
         .setup(|app| {
+            if let Err(error) = agent_vitals_runtime::statistics_timezone::apply(
+                &overview::data_home(),
+            ) {
+                eprintln!("statistics timezone unavailable: {error}");
+            }
             // 菜单栏工具:必须 .accessory,否则 macOS 把它当普通 App 常驻 Dock
             // (Info.plist 无 LSUIElement → 缺省 .regular)。skipTaskbar/visible:false
             // 只藏窗口,藏不住进程的 Dock 图标。show_workbench 已负责 show+set_focus,

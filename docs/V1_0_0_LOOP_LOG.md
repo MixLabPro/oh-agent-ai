@@ -1081,3 +1081,10 @@
 - 保护：该配置只属于统计窗口与本地展示，未接入供应商价格规则；当前尚未宣称“修改后全入口立即重算”。
 - 验收：runtime 统计时区定向测试 3/3、runtime Clippy `-D warnings`、`git diff --check`通过。
 - 边界：Tauri IPC/UI、CLI/Python 读取和 SQLite 查询运行时尚未接入此偏好；REQ-033、REQ-096、AC21 继续不勾选。
+
+## Loop 141 · 统计时区偏好接入 Tauri 与 CLI
+
+- 实现：CLI 启动和 Tauri setup 在首次统计查询前应用已保存的 IANA 时区；新增 Tauri 读取/保存 IPC，Workbench 设置页可编辑并保存统计时区，保存后刷新当前统计；Vite mock 同步提供该设置入口。
+- 保护：配置只影响统计日/月/小时边界与本地展示，供应商价格/峰谷规则不随之改变；校验失败不会写入无效时区，旧配置缺失仍使用 OS 默认。
+- 验收：desktop release 测试 110/110、runtime 时区测试 3/3、runtime Clippy `-D warnings`、Workbench Node 语法检查、Vite production build 与 `git diff --check`通过。
+- 边界：仍需验证跨进程 Python/CLI 同一偏好、SQLite `localtime` 在运行时切换后的完整 parity，并执行真实 Computer Use；REQ-033、REQ-096、AC21 暂不勾选。
