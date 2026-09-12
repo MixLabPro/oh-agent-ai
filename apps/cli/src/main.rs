@@ -3425,19 +3425,19 @@ session_store={store} fold={fold}"
                 recent,
                 json,
             } => {
-                // `--day` 缺省 = 今天（北京日界；与 r2a_store 旧实现同语义）。
+                if let Err(error) = agent_vitals_runtime::statistics_timezone::validate_timezone(timezone) {
+                    eprintln!("invalid --timezone {timezone:?}: {error}");
+                    std::process::exit(2);
+                }
+                // 显式参数优先于持久化值；Tauri 传入的也是同一份偏好。
+                std::env::set_var("TZ", timezone);
+                // `--day` 缺省 = 当前统计时区的今天。
                 let day = if day.is_empty() {
                     agent_vitals_runtime::sessions::codex_cost::today_beijing()
                 } else {
                     day.clone()
                 };
-                if timezone != "Asia/Shanghai" {
-                    eprintln!(
-                        "unsupported --timezone {timezone:?}: only Asia/Shanghai (core day boundary is fixed UTC+8, no DST)"
-                    );
-                    std::process::exit(2);
-                }
-                sessions_navigation_v2(&day, *recent, *json, &data_home);
+                sessions_navigation_v2(&day, timezone, *recent, *json, &data_home);
             }
         }
         return;
@@ -4428,7 +4428,7 @@ fn print_sessions_summary(name: &'static str, env: &Value) {
 ///
 /// 失败降级（spec §0.1 不冒充）：单宿主失败 → 该宿主行 `unavailable`；top-level
 /// 失败 → envelope 整体退到 `error_envelope` 形态。
-fn sessions_navigation_v2(day_key: &str, recent_n: usize, json_out: bool, data_home: &Path) {
+fn sessions_navigation_v2(day_key: &str, timezone: &str, recent_n: usize, json_out: bool, data_home: &Path) {
     use agent_vitals_runtime::mcp;
     let data_home = data_home.to_path_buf();
 
@@ -4511,8 +4511,6 @@ fn sessions_navigation_v2(day_key: &str, recent_n: usize, json_out: bool, data_h
             "store_revision": Value::Null,
         }));
     }
-    let timezone = agent_vitals_runtime::statistics_timezone::timezone_name(&data_home)
-        .unwrap_or_else(|_| agent_vitals_runtime::clock::system_timezone_name());
     let envelope = json!({
         "schema_version": 1,
         "day_key": day_key,

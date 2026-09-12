@@ -1153,3 +1153,9 @@
 - UAT：`UAT: AC21 walked ✘`；使用安装后的 `/Applications/agent-vitals.app` 读取工作台状态时，Computer Use 返回 macOS 已锁定且自动解锁失败，未取得可用窗口或点击证据。
 - 结论：不把进程启动、CLI 隔离验证或 SQLite 对拍扩大为真实桌面 UAT；AC21 继续不勾选，待用户手动解锁后复验。
 - 边界：签名/公证、通知权限和外部试用门禁同样未完成。
+
+## Loop 152 · CLI 导航放开有效 IANA 时区
+
+- 修复：CLI `sessions navigation` 不再硬编码拒绝非 `Asia/Shanghai`；先校验 IANA 名称、应用显式时区，再计算缺省日期并回传 envelope。此前菜单栏传入自定义时区仍会被入口拒绝。
+- 验收：CLI release 测试 79/79、CLI/desktop Clippy、desktop release 测试 110/110；重新打包并安装后，显式 `--timezone America/Los_Angeles` 返回 `day_key=2026-09-12` 且 envelope 回传该时区。
+- 边界：真实窗口 Computer Use 仍因 macOS 锁定未完成；AC21、通知权限、签名/公证和外部试用门禁不因本轮 CLI/安装包验证而勾选。
