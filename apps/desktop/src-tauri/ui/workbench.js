@@ -4493,7 +4493,19 @@ function renderFindingsDetail() {
   for (const f of shown) {
     const tr = document.createElement("tr");
     tr.appendChild(td(fmtFindingTime(f.time)));
-    tr.appendChild(td(f.object || "—"));
+    const objectCell = document.createElement("td");
+    const object = document.createElement("div");
+    object.textContent = f.object || "—";
+    objectCell.appendChild(object);
+    const scope = document.createElement("div");
+    scope.className = "issue-subline";
+    scope.textContent = issueScopeLabel(f);
+    objectCell.appendChild(scope);
+    const basis = document.createElement("div");
+    basis.className = "issue-subline";
+    basis.textContent = issueBasisLabel(f);
+    objectCell.appendChild(basis);
+    tr.appendChild(objectCell);
     const sevCell = document.createElement("td");
     const badge = el("span", "sev " + (f.severity || "info"));
     badge.textContent = f.severity || "info";
@@ -4501,7 +4513,13 @@ function renderFindingsDetail() {
     tr.appendChild(sevCell);
     tr.appendChild(td(f.rule || "—"));
     tr.appendChild(tdNum(String(f.count != null ? f.count : "—")));
-    tr.appendChild(td(statusRollupLabel(f.status_rollup)));
+    const statusCell = document.createElement("td");
+    statusCell.appendChild(document.createTextNode(statusRollupLabel(f.status_rollup)));
+    const actionHint = document.createElement("div");
+    actionHint.className = "issue-subline issue-action-hint";
+    actionHint.textContent = issueActionLabel(f);
+    statusCell.appendChild(actionHint);
+    tr.appendChild(statusCell);
     const action = document.createElement("td");
     const expand = el("button", "btn secondary");
     expand.type = "button";
@@ -4523,6 +4541,43 @@ function renderFindingsDetail() {
     }
   }
   body.appendChild(frag);
+}
+
+function issueScopeLabel(group) {
+  const sessions = group.sessions_count != null ? group.sessions_count : group.sessions;
+  const count = group.count != null ? group.count : group.hits;
+  const parts = [];
+  if (group.host) parts.push(group.host);
+  if (group.bucket) parts.push(String(group.bucket));
+  if (sessions != null) parts.push(String(sessions) + " 个会话");
+  if (count != null) parts.push(String(count) + " 条命中");
+  return "影响范围：" + (parts.length ? parts.join(" · ") : "范围待确认");
+}
+
+function issueBasisLabel(group) {
+  const evidence = group.evidence_class || group.evidence || group.category;
+  const actionability = Number(group.actionability);
+  const confidence = Number.isFinite(actionability)
+    ? (actionability >= 0.8 ? "较充分" : actionability >= 0.6 ? "有限" : "较弱")
+    : "待确认";
+  return "依据：" + (evidence || "已保留原始证据") + " · 置信限制：" + confidence +
+    (group.impact == null ? " · 金额影响未量化" : "");
+}
+
+function issueActionLabel(group) {
+  const remedy = group.remedy && group.remedy.remedy_id;
+  if (group.source_kind === "billing_candidate") return "建议：确认计费方式";
+  if (group.source_kind === "usage_growth") return "建议：查看对应会话";
+  if (group.source_kind === "source_failure") return "建议：查看数据源并重试";
+  const labels = {
+    "inspect-tool-error": "建议：查看工具错误并重试",
+    "inspect-retry-policy": "建议：检查重试策略",
+    "reduce-context-window": "建议：检查上下文范围",
+    "inspect-usage-change": "建议：查看对应会话",
+    "review-budget-or-snooze": "建议：查看预算或静默提醒",
+    "diagnostic-only": "建议：查看数据状态",
+  };
+  return labels[remedy] || "建议：查看详情";
 }
 
 function statusRollupLabel(rollup) {

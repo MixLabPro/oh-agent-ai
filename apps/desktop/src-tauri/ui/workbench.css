@@ -760,6 +760,18 @@ button.chip.active {
   overflow-wrap: anywhere;
 }
 
+.issue-subline {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  margin-top: 2px;
+  white-space: normal;
+}
+
+.issue-action-hint {
+  color: var(--text-dim);
+}
+
 /* ---------- 数据源 ---------- */
 .src-cards {
   display: flex;

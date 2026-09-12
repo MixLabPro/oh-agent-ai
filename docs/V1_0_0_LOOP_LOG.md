@@ -1374,3 +1374,9 @@
 - 验收：Vite dev server `http://127.0.0.1:5173/workbench.html` 可加载；Issues 页显示 2 条发现/2 条规则；展开 SV613 组可见实例详情与状态操作；页面截图已完成视觉检查；`node --check apps/desktop/ui-dev/public/tauri-mock.js` 与 `npm --prefix apps/desktop/ui-dev run build` 通过。
 - 结论：样式问题可用现有 vanilla HTML/CSS/JS + Vite HMR 快速迭代，无需为此迁移 React；浏览器服务调试链已经覆盖待处理页的 L0 列表和展开态。
 - 边界：这是假数据浏览器验收，不等同于真实安装包/真实 SQLite 数据验收；macOS Computer Use 仍受锁屏阻塞，签名/公证和外部试用门禁仍未完成。
+
+## Loop 187 · 待处理 L0 影响与依据可读化
+
+- 修复：Issues 明细对象列补充影响范围（宿主、日桶、会话/命中数）、证据类别与置信限制；状态列补充建议动作。未提供金额影响时明确显示“金额影响未量化”，不以 0 代替未知。
+- 验收：前端通过 Vite HMR 刷新后，SV613 行显示范围/依据/建议副信息，待确认套餐组显示“确认计费方式”；Issues 展开态仍可读取原始命中和状态动作；`node --check apps/desktop/src-tauri/ui/workbench.js`、`npm --prefix apps/desktop/ui-dev run build` 与 `git diff --check`通过。
+- 边界：本轮只改善 L0 信息呈现，不改变权威计算、排序或状态写入；真实安装包视觉 Computer Use、无障碍 200% 字号和发布门禁仍待完成。
