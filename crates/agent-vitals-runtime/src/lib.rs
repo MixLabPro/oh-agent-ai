@@ -36,6 +36,7 @@ pub mod money;
 pub mod reimport_verify;
 pub mod retention;
 pub mod session_sources;
+pub mod source_controls;
 pub mod sessions;
 pub mod skills;
 pub mod sql_authority;

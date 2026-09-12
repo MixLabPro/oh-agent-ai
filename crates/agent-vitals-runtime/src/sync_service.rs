@@ -201,6 +201,12 @@ fn sync_host(
 
 /// 三宿主例行同步入口。幂等：重复调用第二次基本全 skipped / duplicate。
 pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
+    // 读取范围决定本轮会接触哪些本地数据，必须在任何维护写入之前完整校验。
+    // 配置损坏时宁可不启动同步，也不能先清理一部分旧事实再报告错误。
+    let custom_sources = crate::custom_sources::custom_source_roots(data_home)
+        .map_err(|error| format!("custom source configuration failed: {error}"))?;
+    let excluded_hosts = crate::source_controls::excluded_hosts(data_home)
+        .map_err(|error| format!("source controls failed: {error}"))?;
     // **machine_namespace 首建单飞（审查 P2-3）**：machine.json 缺失时两个
     // 进程同时首启（托盘 tick + 外部 cron）会各自生成不同 ns、写各自的
     // machine.json（rename 竞态一方覆盖）→ 同一批文件的事实按两个 ns 拆开
@@ -299,9 +305,7 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
                 .unwrap_or_default(),
         ),
     ];
-    for source in crate::custom_sources::custom_source_roots(data_home)
-        .map_err(|error| format!("custom source configuration failed: {error}"))?
-    {
+    for source in custom_sources {
         let files = match source.host.as_str() {
             "claude-code" => agent_vitals_hosts::claude_session::claude_project_files(Path::new(&source.root)),
             "codex" => agent_vitals_hosts::codex_session::codex_rollout_files(Path::new(&source.root)),
@@ -316,6 +320,7 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         files.sort();
         files.dedup();
     }
+    batches.retain(|(host, _)| !excluded_hosts.contains(*host));
     for (host, files) in batches {
         let mut r = HostSyncReport {
             host: host.to_string(),
@@ -703,6 +708,30 @@ mod tests {
             std::fs::write(data.join("state").join("custom-sources.json"), b"invalid").unwrap();
             let error = sync_facts(&data).unwrap_err();
             assert!(error.contains("custom source configuration failed"), "{error}");
+            assert!(!data.join("facts").join(".authority-retention.json").exists());
+        });
+    }
+
+    #[test]
+    fn malformed_source_controls_stop_sync_before_maintenance() {
+        with_isolated_home(|_home| {
+            let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
+            std::fs::create_dir_all(data.join("state")).unwrap();
+            std::fs::write(data.join("state").join("source-controls.json"), b"invalid").unwrap();
+            let error = sync_facts(&data).unwrap_err();
+            assert!(error.contains("source controls failed"), "{error}");
+            assert!(!data.join("facts").join(".authority-retention.json").exists());
+        });
+    }
+
+    #[test]
+    fn excluded_host_is_not_read_by_sync() {
+        with_isolated_home(|home| {
+            claude_session(home);
+            let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
+            crate::source_controls::set_host_excluded(&data, "claude-code", true).unwrap();
+            let report = sync_facts(&data).unwrap();
+            assert!(!report.hosts.iter().any(|host| host.host == "claude-code"));
         });
     }
 

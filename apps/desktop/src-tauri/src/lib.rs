@@ -1431,6 +1431,12 @@ struct CustomSourceRootInput {
     root: String,
 }
 
+#[derive(Deserialize)]
+struct SourceHostControlInput {
+    host: String,
+    excluded: bool,
+}
+
 #[tauri::command]
 fn custom_source_roots() -> Value {
     let data_home = overview::data_home();
@@ -1464,6 +1470,23 @@ fn remove_custom_source_root(input: CustomSourceRootInput) -> Result<Value, Stri
         &data_home, &input.host, Path::new(&input.root),
     )?;
     Ok(serde_json::json!({ "status": "removed", "changed": changed }))
+}
+
+#[tauri::command]
+fn source_host_controls() -> Value {
+    let data_home = overview::data_home();
+    match agent_vitals_runtime::source_controls::excluded_hosts(&data_home) {
+        Ok(excluded_hosts) => serde_json::json!({ "status": "ok", "excluded_hosts": excluded_hosts }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
+    }
+}
+
+#[tauri::command]
+fn set_source_host_excluded(input: SourceHostControlInput) -> Result<Value, String> {
+    let changed = agent_vitals_runtime::source_controls::set_host_excluded(
+        &overview::data_home(), &input.host, input.excluded,
+    )?;
+    Ok(serde_json::json!({ "status": "saved", "changed": changed, "excluded": input.excluded }))
 }
 
 #[tauri::command]
@@ -1865,10 +1888,26 @@ fn data_source_status() -> Value {
     let mut report = agent_vitals_runtime::mcp::source_status_report(db.conn()).unwrap_or_else(|reason| {
         serde_json::json!({ "status": "unavailable", "reason": reason, "sources": [] })
     });
+    let excluded_hosts = match agent_vitals_runtime::source_controls::excluded_hosts(&data_home) {
+        Ok(hosts) => hosts,
+        Err(error) => return serde_json::json!({ "status": "unavailable", "reason": error, "sources": [] }),
+    };
+    if let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) {
+        for source in sources {
+            let host = source.get("host").and_then(Value::as_str).unwrap_or("");
+            if excluded_hosts.contains(host) {
+                source["connection_state"] = Value::String("excluded".into());
+                source["recovery_action"] = serde_json::json!({
+                    "kind": "include_source", "label": "恢复读取"
+                });
+            }
+        }
+    }
     merge_source_sync_failure(&mut report, &overview::read_overview().sync);
     if matches!(overview::sync_is_paused(), Ok(true)) {
         if let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) {
             for source in sources {
+                if source.get("connection_state").and_then(Value::as_str) == Some("excluded") { continue; }
                 source["connection_state"] = Value::String("paused".into());
                 source["recovery_action"] = serde_json::json!({
                     "kind": "resume_sync", "label": "恢复同步"
@@ -1903,6 +1942,7 @@ fn merge_source_sync_failure(report: &mut Value, sync: &SyncStatus) {
     let explicitly_scoped = ["claude", "codex", "dsh", "deepseek"]
         .iter().any(|marker| message.contains(marker));
     for source in sources {
+        if source.get("connection_state").and_then(Value::as_str) == Some("excluded") { continue; }
         let host = source.get("host").and_then(Value::as_str).unwrap_or("");
         let affected = if explicitly_scoped {
             (host == "claude-code" && message.contains("claude"))
@@ -2153,6 +2193,8 @@ pub fn run() {
             pick_custom_source_root,
             add_custom_source_root,
             remove_custom_source_root,
+            source_host_controls,
+            set_source_host_excluded,
             retention_config,
             save_retention_config,
             budget_config,

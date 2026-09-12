@@ -4216,6 +4216,9 @@ function renderSourceCard(src) {
   } else if (status === "paused") {
     badge.textContent = "已暂停";
     badge.classList.add("warn");
+  } else if (status === "excluded") {
+    badge.textContent = "已排除";
+    badge.classList.add("warn");
   } else {
     badge.textContent = status === "not_detected" ? "未检测到" : "状态未知";
     badge.classList.add("warn");
@@ -4247,6 +4250,22 @@ function renderSourceCard(src) {
     button.onclick = () => recoverSource(button, key, action.kind);
     card.appendChild(button);
   }
+  if (status !== "excluded") {
+    const exclude = el("button", "btn secondary");
+    exclude.textContent = "停止读取此来源";
+    exclude.title = "停止后续读取，已导入数据保持不变";
+    exclude.onclick = async () => {
+      exclude.disabled = true;
+      try {
+        await invoke("set_source_host_excluded", { input: { host: key, excluded: true } });
+        await loadSources(true);
+      } catch (e) {
+        exclude.disabled = false;
+        showBanner("src-banner", "无法停止读取：" + errText(e), false);
+      }
+    };
+    card.appendChild(exclude);
+  }
   return card;
 }
 
@@ -4264,6 +4283,9 @@ async function recoverSource(button, host, actionKind) {
   try {
     if (actionKind === "resume_sync") {
       await invoke("set_sync_paused", { paused: false });
+    }
+    if (actionKind === "include_source") {
+      await invoke("set_source_host_excluded", { input: { host, excluded: false } });
     }
     const requestId = await invoke("trigger_sync");
     if (!requestId) throw new Error("同步请求未返回追踪编号");
