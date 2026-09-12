@@ -2018,6 +2018,14 @@
 - 验收：workflow 结构保持独立 job；本地 `node scripts/verify-release-desktop-workflow.mjs`
   全部通过，`git diff --check` 通过。
 
+## Loop 286 · 发布架构校验器增强
+
+- 发现：发布 workflow 校验器原先对 publish job 的架构覆盖只检查了资产路径，不能证明
+  build/publish 两个边界都执行了目标架构强校验。
+- 修复：增加出现次数断言，要求 `RUNNER_ARCH` 映射和 `--require-architecture=$expected`
+  各至少出现两次，同时保留发布资产路径检查。
+- 验收：静态校验器、YAML 解析和 `git diff --check` 通过。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；
