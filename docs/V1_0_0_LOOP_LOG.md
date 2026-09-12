@@ -1622,3 +1622,9 @@
 - 修复：CSV 账单入口要求 `currency` 为三位大写 ISO 风格代码，拒绝空值、小写和自然语言币种，避免破坏 CNY/USD 分币展示与预算口径。
 - UAT：输入 `cny` 时预览返回“可导入 0 行；拒绝 1 行”，确认导入按钮禁用，控制台错误数为 0。
 - 构建：JS 语法、closeout verifier、Vite build 和 `cargo tauri build --bundles app` 全部通过；修复已进入最新 `.app`。
+
+## Loop 227 · Authority 账单币种边界收口
+
+- 修复：`AuthorityDb::host_bill_put` 现在与 CSV 前端一致，只接受三位 ASCII 大写币种代码；IPC 或其他调用方无法绕过输入约束。
+- 回归：新增 `cny` 拒绝断言；`agent-vitals-data` 定向测试与 Clippy 通过，最新 `cargo tauri build --bundles app` 成功。
+- 边界：既有合法 CNY/USD 账单契约保持不变；未在锁屏环境安装/启动新包，真实 Computer Use、签名/公证和外部试用仍未完成。

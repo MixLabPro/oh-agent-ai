@@ -1899,8 +1899,8 @@ impl AuthorityDb {
         if amount_minor < 0 {
             return Err(bad("amount_minor must be >= 0"));
         }
-        if currency.trim().is_empty() {
-            return Err(bad("currency required"));
+        if currency.len() != 3 || !currency.bytes().all(|c| c.is_ascii_uppercase()) {
+            return Err(bad("currency must be a three-letter uppercase code"));
         }
         self.conn.execute(
             "INSERT INTO host_bills(bill_id, host, provider_id, billing_period, billing_basis,
@@ -3813,6 +3813,11 @@ mod tests {
             a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", 100, "  ", "", 1)
                 .is_err(),
             "currency 空"
+        );
+        assert!(
+            a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", 100, "cny", "", 1)
+                .is_err(),
+            "currency 必须是三位大写代码"
         );
 
         // 正常录入 + 同键 upsert 更正金额。
