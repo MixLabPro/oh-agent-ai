@@ -1598,3 +1598,9 @@
 - 发现：约 569px 视口打开真实 mock 会话详情时，`.detail-cards` 仍计算为 4 列、宽度 704px；早期媒体规则被后置基础网格声明覆盖。
 - 修复：在 CSS 全部基础网格声明之后补充窄视口覆盖，详情与 Findings 卡片改为两列，总览卡片改为单列。
 - 验收：窄视口实际计算为两列 `264px + 264px`，卡片宽度与容器一致（541px），页面无横向溢出；Vite 构建、closeout verifier、会话详情浏览器 smoke 和 `git diff --check` 通过。临时视口已恢复默认。
+
+## Loop 223 · 响应式修复进入 Tauri 安装包
+
+- 构建：`cargo tauri build --bundles app` 成功，最新 Workbench CSS 响应式修复已重新编入 `agent-vitals.app`。
+- 复核：release 构建完成，资源打包阶段无错误；未安装或启动新包，避免把锁屏环境下的 Computer Use 误报为成功。
+- 边界：Developer ID/公证、真实窗口 Computer Use、干净机升级和外部试用仍未完成。
