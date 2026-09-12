@@ -847,3 +847,9 @@
 - 修复：候选级影响查询失败时返回 `status=unavailable`；总览不再把缺失候选累加成 `0 tokens`，而是显示“影响范围暂不可用”，候选行同样显式提示检查数据状态。
 - 验收：data 定向测试、desktop Clippy、workbench JS 语法、Vite build、`git diff --check` 和最新 `.app` bundle 均通过。
 - 边界：macOS 仍锁屏，AC26/AC27 真机点击与重算回执继续等待设备解锁后验证。
+
+## Loop 106 · 影响摘要候选级降级（代码验收）
+
+- 修复：单个候选的影响查询失败时返回 `impact.status=unavailable`；总览聚合显示“影响范围暂不可用”，不把缺失候选当作 0 tokens，候选行也保留失败原因方向。
+- 验收：data 定向测试、desktop Clippy、workbench JS 语法、Vite build、`git diff --check` 和最新 `.app` bundle 均通过。
+- 边界：系统时区/夏令时仍是未完成的独立 AC21 工作包；AC26/AC27 真机点击仍待设备解锁。
