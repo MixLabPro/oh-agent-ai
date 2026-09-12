@@ -1732,3 +1732,9 @@
 - 验收：最新 `.app` 的 `Contents/Resources/bin/agent-vitals` 确实存在，直接执行返回 `agent-vitals 1.3.0`；因此诊断页在发布包内可读取随包 CLI，而不依赖开发机 PATH。
 - 发现：`codesign --verify --deep --strict` 仍失败，报 `code has no resources but signature indicates they must be present`；这是当前未完成签名/公证配置的明确证据，不能标记为已签名发布包。
 - 边界：未安装/启动包；真实 Computer Use、Developer ID/公证、干净机升级和外部试用仍待完成。
+
+## Loop 245 · 签名配置根因审计
+
+- 审计：`tauri.conf.json` 已配置 macOS 最低版本 `11.0`、随包 CLI resource 和 app/dmg bundle；当前包主程序显示为 `adhoc, linker-signed`，不是 Developer ID 签名。
+- 证据：本机 `security find-identity -v -p codesigning` 返回 `0 valid identities found`；`codesign --verify --deep --strict` 报资源签名不完整。因此当前失败根因是本机没有可用签名身份，不能通过仓库配置伪造修复。
+- 边界：Developer ID 证书/团队身份、notarization 凭据、真实 Computer Use、干净机升级和外部试用仍需外部发布条件。
