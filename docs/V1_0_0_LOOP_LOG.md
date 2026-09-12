@@ -1720,3 +1720,9 @@
 - 对齐：Workbench、Vite mock 和 closeout verifier 增加 CLI 字段；当前 release CLI 输出为 `agent-vitals 1.3.0`。
 - 验收：`npm run verify`、Tauri release `cargo check`、JS 语法检查、`git diff --check` 和 CLI `--version` 均通过。
 - 边界：最终 `.app` 内随包 CLI 的实际版本还需在可操作桌面环境中复核；签名/公证、干净机升级和外部试用仍未完成。
+
+## Loop 243 · CLI 诊断字段重新进入桌面包
+
+- 构建：`cargo tauri build --bundles app` 成功，CLI 版本诊断字段及 Workbench 展示已重新编入最新 `agent-vitals.app`。
+- 外部检查：远端 `main/assets/pricing.json` 与 GitHub Contents API 均匿名返回 404；公共价格目录真实联网成功仍不能宣称完成，也未擅自推送远端。
+- 边界：未在当前不可操作桌面环境安装/启动；签名/公证、真实 Computer Use、干净机升级和外部试用仍未完成。
