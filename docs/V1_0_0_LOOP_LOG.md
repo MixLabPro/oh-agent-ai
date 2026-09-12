@@ -1993,6 +1993,14 @@
 - 验收：变更保持固定 API、tag 白名单和 `no_release` 分支；后续桌面编译与 Vite closeout
   一并复验。
 
+## Loop 283 · 版本检查最终桌面回归与重打包
+
+- 验收：独立桌面 workspace `cargo test --release` 全部 `114 passed`；桌面 clippy
+  `-D warnings` 通过；最新 `.app` 由 `cargo tauri build --bundles app` 生成并通过包预检，
+  主程序与随包 CLI 存在，CLI 为 `1.3.0`，两者架构为 `arm64`。
+- 约束：本地包仍为 ad-hoc 签名；Developer ID/notarization 和真实无开发环境安装仍
+  不用本地回归结果替代。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；
