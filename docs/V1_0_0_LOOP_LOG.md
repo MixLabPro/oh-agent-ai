@@ -1670,3 +1670,8 @@
 - 验收：`apps/desktop/ui-dev` 执行 `npm run verify` 通过，包含 Vite build 与 Workbench 全部当前契约断言；`git diff --check` 通过且未产生文件修改。
 - 发现：`cargo fmt --all -- --check` 仍报告仓库既有的大量格式差异，非本轮改动引入；按仓库规范未运行 formatter，避免重写无关 Rust 文件。该检查不能记录为通过。
 - 边界：Clippy、测试和 Vite verify 仍为绿色；格式基线、真实 `.app` Computer Use、签名/公证和外部试用仍需单独处理。
+
+## Loop 235 · Workbench UI 开发入口文档
+
+- 新增：`apps/desktop/ui-dev/README.md` 说明 Vite 热更新地址、mock IPC 的数据边界、`npm run verify` 回归命令，以及从浏览器 mock 到 Tauri `.app` 的验收分层。
+- 验收：按文档执行的 `npm run verify` 已通过；文档明确 mock 不写入 Authority，也不把浏览器证据冒充原生、签名或外部试用证据。
