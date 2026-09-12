@@ -1793,3 +1793,15 @@
 - 发现：desktop publish job 原运行在 `ubuntu-latest`，但发布步骤使用 macOS 专用 `ditto` 封装 `.app`，构建成功后仍会在发布阶段失败。
 - 修复：publish job 改为 `macos-latest`，确保 `ditto` 可用并保留 macOS bundle 资源封装语义。
 - 验收：workflow YAML 解析通过；构建 job 与 publish job 的平台职责保持清晰。
+
+## Loop 255 · 手动桌面发布要求显式版本 tag
+
+- 发现：`workflow_dispatch` 从普通分支启动时，原 workflow 会把 `github.ref_name`（例如 `main`）当成 Release 名称，存在误发布非版本包的风险。
+- 修复：手动运行必须填写 `release_tag`，publish job 统一使用该值，并增加 `app-v*` 前缀校验；tag push 路径继续自动使用 `github.ref_name`。
+- 验收：YAML 解析和 diff 检查通过；无 `app-v*` tag 的手动运行会在发布前明确失败。
+
+## Loop 256 · 手动发布检出指定 tag
+
+- 发现：手动填写 `release_tag` 后，checkout 仍可能检出默认分支，造成“发布名是目标 tag、内容却来自其他提交”。
+- 修复：checkout 使用 `${{ inputs.release_tag || github.ref }}`，手动运行和 tag push 均从对应版本 ref 构建。
+- 验收：YAML 解析和 diff 检查通过；手动发布的代码来源与发布 tag 绑定。

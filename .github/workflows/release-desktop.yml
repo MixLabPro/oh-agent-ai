@@ -4,6 +4,11 @@ on:
   push:
     tags: ["app-v*"]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing app-v* tag to publish"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -14,6 +19,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -62,7 +69,7 @@ jobs:
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: agent-vitals-macos-${{ github.ref_name }}
+          name: agent-vitals-macos-${{ inputs.release_tag || github.ref_name }}
           path: |
             apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app
             apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
@@ -72,10 +79,12 @@ jobs:
     name: publish macOS app release
     needs: build
     runs-on: macos-latest
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: agent-vitals-macos-${{ github.ref_name }}
+          name: agent-vitals-macos-${{ inputs.release_tag || github.ref_name }}
           path: dist
 
       - name: Publish app and DMG
@@ -86,7 +95,11 @@ jobs:
           mkdir -p release
           ditto -c -k --sequesterRsrc --keepParent \
             dist/macos/agent-vitals.app \
-            release/agent-vitals-${GITHUB_REF_NAME}.app.zip
+            release/agent-vitals-${RELEASE_TAG}.app.zip
           cp dist/dmg/*.dmg release/
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
-          gh release upload "$GITHUB_REF_NAME" release/*
+          case "$RELEASE_TAG" in
+            app-v*) ;;
+            *) echo "release tag must start with app-v*: $RELEASE_TAG" >&2; exit 1 ;;
+          esac
+          gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes
+          gh release upload "$RELEASE_TAG" release/*
