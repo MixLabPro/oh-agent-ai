@@ -849,10 +849,10 @@ enum SessionsAction {
         /// Inclusive Beijing start date for a custom range; pair with --to-date
         #[arg(long = "from-date")]
         date_from: Option<String>,
-        /// Inclusive Beijing end date for a custom range; pair with --from-date
+        /// Inclusive end date in the configured statistics timezone; pair with --from-date
         #[arg(long = "to-date")]
         date_to: Option<String>,
-        /// Restrict to this Beijing hour (0..=23). Requires --day.
+        /// Restrict to this local statistics hour (0..=23). Requires --day.
         #[arg(long)]
         hour: Option<u32>,
         /// Filter by host kind (repeatable: `--host-kind claude-code --host-kind codex`)
@@ -906,10 +906,10 @@ enum SessionsAction {
     /// and only re-renders (§6 决策 3）；today_tokens 走 SQL 权威库，
     /// recent[] 走 `mcp::sessions_search`。
     Navigation {
-        /// Day to project (YYYY-MM-DD, Beijing day boundary). Defaults to today.
+        /// Day to project (YYYY-MM-DD in the configured statistics timezone). Defaults to today.
         #[arg(long, default_value = "")]
         day: String,
-        /// Timezone of the projected day. Only `Asia/Shanghai` is supported.
+        /// Timezone of the projected day (valid IANA name; defaults to the configured value).
         #[arg(long, default_value = "Asia/Shanghai")]
         timezone: String,
         /// How many recent rows per host; default 5

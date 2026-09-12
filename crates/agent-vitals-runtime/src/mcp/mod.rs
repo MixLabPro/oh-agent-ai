@@ -155,7 +155,7 @@ pub fn build_envelope(
         "authority_state": authority_state,
         "authority_revision": authority_revision(conn, max_observed_at_ms),
         "generated_at": ms_to_rfc3339_beijing(crate::sql_sync::now_ms()),
-        "timezone": crate::clock::system_timezone_name(),
+        "timezone": crate::clock::statistics_timezone_name(),
         "coverage": coverage,
         "freshness": freshness(conn),
         "warnings": warnings,
@@ -245,7 +245,7 @@ pub fn error_envelope(err: &ToolError) -> Value {
         "authority_state": "unavailable",
         "authority_revision": Value::Null,
         "generated_at": ms_to_rfc3339_beijing(crate::sql_sync::now_ms()),
-        "timezone": crate::clock::system_timezone_name(),
+        "timezone": crate::clock::statistics_timezone_name(),
         "coverage": { "status": "unavailable", "missing_hosts": [] },
         "freshness": { "last_successful_sync_at": Value::Null, "stale_hosts": [] },
         "warnings": [],
@@ -623,6 +623,14 @@ mod tests {
         let s = ms_to_rfc3339_beijing(1_757_000_000_123);
         assert!(s.ends_with(".123+08:00"), "{s}");
         assert_eq!(s.len(), "2026-09-04T21:33:20.123+08:00".len());
+    }
+
+    #[test]
+    fn envelope_timezone_matches_the_timezone_used_for_statistics() {
+        assert_eq!(
+            crate::clock::statistics_timezone_name(),
+            crate::clock::statistics_timezone().iana_name().unwrap_or("Etc/Unknown"),
+        );
     }
 
     #[test]

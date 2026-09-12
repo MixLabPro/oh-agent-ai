@@ -1159,3 +1159,9 @@
 - 修复：CLI `sessions navigation` 不再硬编码拒绝非 `Asia/Shanghai`；先校验 IANA 名称、应用显式时区，再计算缺省日期并回传 envelope。此前菜单栏传入自定义时区仍会被入口拒绝。
 - 验收：CLI release 测试 79/79、CLI/desktop Clippy、desktop release 测试 110/110；重新打包并安装后，显式 `--timezone America/Los_Angeles` 返回 `day_key=2026-09-12` 且 envelope 回传该时区。
 - 边界：真实窗口 Computer Use 仍因 macOS 锁定未完成；AC21、通知权限、签名/公证和外部试用门禁不因本轮 CLI/安装包验证而勾选。
+
+## Loop 153 · MCP envelope 时区与统计口径统一
+
+- 修复：MCP 成功与错误 envelope 的 `timezone` 改为复用实际统计时区，而不是只读取 OS 时区；自定义统计时区下，查询日界、时间格式和 envelope 声明不再互相矛盾。小时查询 schema 文案同步改为“配置的统计时区”。
+- 验收：runtime MCP 定向测试与 Clippy 待执行；不改变事件 epoch 或供应商价格时区。
+- 边界：真实 `.app` Computer Use、AC21 跨入口 UAT、签名/公证和外部试用门禁仍未完成。

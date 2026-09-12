@@ -40,6 +40,13 @@ pub fn statistics_timezone() -> TimeZone {
         .unwrap_or_else(TimeZone::system)
 }
 
+/// 当前统计口径实际使用的 IANA 时区名称。与 [`statistics_timezone`] 同源，
+/// 包括启动时应用的持久化用户偏好；不要用 [`system_timezone_name`] 表示
+/// 统计结果，因为用户可以在系统时区之外选择统计时区。
+pub fn statistics_timezone_name() -> String {
+    statistics_timezone().iana_name().unwrap_or("Etc/Unknown").to_string()
+}
+
 fn system_now() -> jiff::Zoned {
     Timestamp::now().to_zoned(statistics_timezone())
 }
