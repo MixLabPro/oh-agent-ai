@@ -1610,3 +1610,9 @@
 - UAT：在 Vite mock 总览展开“导入 CSV 模板”，合法表头与一行账单预览返回“可导入 1 行，未发现错误”，确认导入按钮启用。
 - 保护：提交两条相同 `evidence_ref` 的行时，预览返回“可导入 1 行；拒绝 1 行……重复”，确认导入按钮保持禁用；浏览器控制台错误数为 0。未点击确认导入，避免向 mock 写入测试账单。
 - 结论：CSV 的字段校验、预览和重复行阻断在 UI 层形成闭环；订阅合同与 token 数据未被此路径改写。
+
+## Loop 225 · CSV 账单稳定身份与打包
+
+- 修复：CSV 导入不再用时间戳生成 `bill_id`，改为按 `host/provider/period/basis/evidence_ref` 稳定派生，与 Authority 唯一键和 upsert 契约一致；同一 CSV 重复导入会复用同一账单身份。
+- 验收：JS 语法、Workbench closeout verifier、Vite production build 通过；`cargo tauri build --bundles app` 成功，修复已进入最新 `agent-vitals.app`。
+- 边界：未在锁屏环境安装/启动新包；真实 Computer Use、签名/公证、干净机升级和外部试用仍未完成。

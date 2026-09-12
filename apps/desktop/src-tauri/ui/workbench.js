@@ -1176,6 +1176,13 @@ function parseBillingCsv(text) {
   return { rows, errors };
 }
 
+// 与 authority::host_bill_put 的唯一键保持同构：重复导入同一行必须是更正/幂等，
+// 不能因为导入时间不同而生成另一条账单身份。
+function billingCsvBillId(row) {
+  return "csv-" + [row.host, row.provider_id, row.billing_period,
+    row.billing_basis, row.evidence_ref].map(encodeURIComponent).join(":");
+}
+
 function openBillingDeclaration(candidate) {
   const panel = document.getElementById("ov-billing-declaration-panel");
   const context = document.getElementById("ov-billing-declaration-context");
@@ -1816,7 +1823,7 @@ async function renderHostBills(period) {
     csvImport.disabled = true;
     try {
       await invoke("save_host_bills", { rows: csvRows.map((row, i) => ({
-        bill_id: "csv-" + Date.now().toString(36) + "-" + i,
+        bill_id: billingCsvBillId(row),
         host: row.host, provider_id: row.provider_id, billing_period: row.billing_period,
         billing_basis: row.billing_basis, amount_minor: row.amount_minor,
         currency: row.currency, evidence_ref: row.evidence_ref,

@@ -54,6 +54,10 @@ ok(js.includes('invoke("data_status")'), "数据源页消费 SQL Authority 状�
 ok(js.includes("成本不可用"), "总览区分有用量但无实际金额");
 ok(js.includes("尚未接入的会话维度") || js.includes("暂不可用"), "详情降级说明存在");
 ok((js.match(/function fmtTokens\(/g) || []).length === 1, "token 格式化函数只有一份");
+ok(js.includes("function billingCsvBillId(row)") && js.includes("bill_id: billingCsvBillId(row)"),
+  "CSV 账单 ID 按唯一键稳定派生");
+ok(!/bill_id:\s*["']csv-["']\s*\+\s*Date\.now/.test(js),
+  "CSV 重复导入不使用时间戳身份");
 
 console.log(failed ? `\n${failed} FAIL` : "\n全部通过。");
 process.exit(failed ? 1 : 0);
