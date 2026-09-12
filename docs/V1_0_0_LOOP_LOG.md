@@ -1946,3 +1946,11 @@
 - 修复：恢复命令返回 `restored` 后，Workbench 延迟 250ms 自动 reload；取消选择或
   失败不触发 reload，保留可见反馈。
 - 验收：closeout verifier 增加自动刷新断言；`git diff --check` 通过。
+
+## Loop 276 · 自动刷新逻辑重新封装进 App
+
+- 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；
+  `verify-macos-app-bundle.mjs` 确认主程序、随包 CLI、CLI 版本 `1.3.0` 和 `arm64` 架构。
+  Vite/Workbench closeout 验证此前已通过。
+- 说明：Tauri 将前端资源嵌入应用包，不能以 `Contents/Resources/ui/workbench.js` 的
+  独立文件路径检索；不据此误判打包缺失。
