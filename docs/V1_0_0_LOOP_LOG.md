@@ -1769,3 +1769,9 @@
 - 发现：workflow 同时上传 macOS `.app` 与 DMG 时，`upload-artifact` 以 `bundle/` 作为共同归档根；下载后路径是 `dist/macos/...` 与 `dist/dmg/...`，不是原源码绝对前缀。
 - 修复：publish job 改用 `dist/macos/agent-vitals.app` 和 `dist/dmg/*.dmg`，与 Actions artifact 的归档结构一致。
 - 验收：YAML 解析与本地 `.app` zip 封装通过；Release 上传步骤只接收生成的文件资产。
+
+## Loop 251 · 发布凭据检查移除 `eval`
+
+- 发现：签名凭据预检用 `eval` 读取环境变量，特殊字符可能被二次 shell 解析，存在不必要的命令注入风险。
+- 修复：改用 Bash 安全的间接参数展开 `${!name-}`，并显式指定 `shell: bash`；凭据值仍只用于空值判断，不写入日志。
+- 验收：YAML 解析通过，发布 workflow 的凭据检查不再执行 `eval`。
