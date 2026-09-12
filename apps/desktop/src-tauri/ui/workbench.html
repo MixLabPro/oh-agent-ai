@@ -297,6 +297,12 @@
         <button id="cal-prev" class="btn" title="上个月">‹</button>
         <input id="cal-month" type="month" class="cal-month-input" />
         <button id="cal-next" class="btn" title="下个月">›</button>
+        <label class="cal-metric-label">显示
+          <select id="cal-metric" class="picker" aria-label="日历显示指标">
+            <option value="tokens">Tokens</option>
+            <option value="cost">成本（按来源口径）</option>
+          </select>
+        </label>
         <span class="cal-total" id="cal-total"></span>
       </div>
       <div id="cal-empty" class="empty" hidden>该月暂无数据</div>

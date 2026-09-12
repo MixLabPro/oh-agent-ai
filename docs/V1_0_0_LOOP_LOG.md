@@ -872,3 +872,10 @@
 
 - 修复：Vite 的构建输出和缓存固定到 `apps/desktop/ui-dev/dist` 与 `.vite-cache`，不再写入 `apps/desktop/src-tauri/ui`，样式迭代后的工作树保持干净。
 - 验收：Vite production build、mock JS 语法检查和 `git diff --check` 通过；Tauri UI 源目录未重新生成 `dist/`。
+
+## Loop 110 · 日历 Token / 成本视图切换
+
+- 修复：Token 日历增加 `Tokens` 与“成本（按来源口径）”切换；成本视图按 CNY/USD 分列，保留 token 副行和来源口径说明。
+- 保护：无成本证据显示“成本不可用”，不渲染为 0；原始事实、价卡和后端计价逻辑不变。
+- 验收：Workbench JS 语法、Vite build、`git diff --check` 通过；浏览器实际切换两个视图，成本视图出现 CNY/USD 数值且无读取失败。
+- 边界：完整 AC07 历史缺价三态和 AC21 系统时区仍未完成。

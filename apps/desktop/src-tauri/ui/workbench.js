@@ -332,6 +332,7 @@ let activeTab = "overview";
 let calMonth = beijingMonth();
 let calSelectedDate = null; // 当日按小时面板选中的日期（null = 今天）
 let calData = null;
+let calMetric = "tokens"; // 日历主数：tokens 或按来源口径的成本
 let sessState = { items: [], nextCursor: null, total: null, loaded: false, error: false };
 // 会话列表 host 过滤（spec §7.3）："all" | "dsh" | "codex"。过滤变化重置分页
 // （游标语义是「全量翻页」，带旧过滤的游标续拉会混页）；深链 SessionList 目标
@@ -2131,6 +2132,16 @@ function renderSourcesPanelFailure(message, prefix) {
 
 // ---------- Token 日历 ----------
 
+function calendarCostText(row) {
+  if (!row) return "";
+  const parts = [];
+  const cny = (row.dsh_cost_cny || 0) + (row.claude_cost_cny || 0);
+  const usd = (row.claude_cost_usd || 0) + (row.codex_cost_usd || 0);
+  if (cny > 0) parts.push(fmtCur(cny, "CNY"));
+  if (usd > 0) parts.push(fmtCur(usd, "USD"));
+  return parts.join(" + ");
+}
+
 async function renderCalendar() {
   const grid = document.getElementById("cal-grid");
   const empty = document.getElementById("cal-empty");
@@ -2206,9 +2217,14 @@ async function renderCalendar() {
     return;
   }
   empty.hidden = true;
-  total.textContent = fmtTokens(monthTokens) + " tokens · " +
-    fmtCur(monthCosts.CNY, "CNY") + " + " + fmtCur(monthCosts.USD, "USD") +
-    (calSuffix ? " " + calSuffix : "");
+  const monthCostText = [
+    monthCosts.CNY > 0 ? fmtCur(monthCosts.CNY, "CNY") : "",
+    monthCosts.USD > 0 ? fmtCur(monthCosts.USD, "USD") : "",
+  ].filter(Boolean).join(" + ");
+  total.textContent = calMetric === "cost"
+    ? (monthCostText ? monthCostText + " · 成本（按来源口径）" : "成本不可用")
+    : fmtTokens(monthTokens) + " tokens";
+  if (calSuffix) total.textContent += " " + calSuffix;
 
   const dows = ["日", "一", "二", "三", "四", "五", "六"];
   for (const d of dows) {
@@ -2253,9 +2269,18 @@ async function renderCalendar() {
       day.textContent = String(d);
       const amt = document.createElement("div");
       amt.className = "amt";
-      amt.textContent = fmtTokens(dayTokens);
+      const costText = calendarCostText(row);
+      amt.textContent = calMetric === "cost"
+        ? (costText || "成本不可用")
+        : fmtTokens(dayTokens);
       cell.appendChild(day);
       cell.appendChild(amt);
+      if (calMetric === "cost") {
+        const token = document.createElement("div");
+        token.className = "cost";
+        token.textContent = fmtTokens(dayTokens) + " tokens";
+        cell.appendChild(token);
+      }
       if (costs.length) {
         const cost = document.createElement("div");
         cost.className = "cost";
@@ -2295,8 +2320,9 @@ async function renderCalendar() {
     }
     grid.appendChild(cell);
   }
-  document.getElementById("cal-note").textContent =
-    "方格主行 = 该日三宿主 token 总量（DSH + Claude Code + Codex）；副行 = 该日耗费，分宿主分币并列（DSH 实测 / Claude relay 估算 / Codex 等价标价，口径各异不相加）。点任意过去日 → 下方面板看该日按小时分布。";
+  document.getElementById("cal-note").textContent = calMetric === "cost"
+    ? "方格主行 = 该日成本，按来源分别显示 CNY/USD；无成本证据显示“成本不可用”，不等于 ¥0。副行 = token 总量。点任意过去日 → 下方面板看该日按小时分布。"
+    : "方格主行 = 该日三宿主 token 总量（DSH + Claude Code + Codex）；副行 = 该日耗费，分宿主分币并列（DSH 实测 / Claude relay 估算 / Codex 等价标价，口径各异不相加）。点任意过去日 → 下方面板看该日按小时分布。";
 
   // 月份级跨宿主概览：放在方格之后、note 之前。
   if (calSourcesDto) renderSourcesPanel(calSourcesDto, "cal-sources");
@@ -4799,6 +4825,10 @@ function init() {
   });
   document.getElementById("cal-prev").addEventListener("click", () => shiftMonth(-1));
   document.getElementById("cal-next").addEventListener("click", () => shiftMonth(1));
+  document.getElementById("cal-metric").addEventListener("change", (ev) => {
+    calMetric = ev.target.value === "cost" ? "cost" : "tokens";
+    renderCalendar();
+  });
   document.getElementById("cal-month").addEventListener("change", (ev) => {
     if (ev.target.value) { calMonth = ev.target.value; renderCalendar(); }
   });
