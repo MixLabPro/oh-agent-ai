@@ -60,30 +60,42 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             let daily_spent_minor = crate::budget::budget_profile_spent_minor(
                 daily_amounts.iter().copied(), &profile.profile_id, &profile.currency,
             );
-            let ratio_bp = (spent_minor > 0).then(|| spent_minor * 10_000 / profile.monthly_minor);
+            let has_unresolved = crate::budget::budget_profile_has_unresolved(
+                amounts.iter().copied(), &profile.currency,
+            );
+            let daily_has_unresolved = crate::budget::budget_profile_has_unresolved(
+                daily_amounts.iter().copied(), &profile.currency,
+            );
+            let ratio_bp = (!has_unresolved && spent_minor > 0)
+                .then(|| spent_minor * 10_000 / profile.monthly_minor);
             let daily_ratio_bp = profile.daily_minor.and_then(|limit| {
-                (daily_spent_minor > 0).then(|| daily_spent_minor * 10_000 / limit)
+                (!daily_has_unresolved && daily_spent_minor > 0)
+                    .then(|| daily_spent_minor * 10_000 / limit)
             });
-            let level = match ratio_bp {
-                Some(r) if r >= 10_000 => "exceeded",
-                Some(r) if r >= profile.warning_ratio_bp => "warn",
-                Some(_) => "ok",
-                None => "no_data",
+            let level = match (has_unresolved, ratio_bp) {
+                (true, _) => "incomplete",
+                (false, Some(r)) if r >= 10_000 => "exceeded",
+                (false, Some(r)) if r >= profile.warning_ratio_bp => "warn",
+                (false, Some(_)) => "ok",
+                (false, None) => "no_data",
             };
-            let daily_level = match daily_ratio_bp {
-                Some(r) if r >= 10_000 => "exceeded",
-                Some(r) if r >= profile.warning_ratio_bp => "warn",
-                Some(_) => "ok",
-                None if profile.daily_minor.is_some() => "no_data",
-                None => "disabled",
+            let daily_level = match (daily_has_unresolved, daily_ratio_bp) {
+                (true, _) => "incomplete",
+                (false, Some(r)) if r >= 10_000 => "exceeded",
+                (false, Some(r)) if r >= profile.warning_ratio_bp => "warn",
+                (false, Some(_)) => "ok",
+                (false, None) if profile.daily_minor.is_some() => "no_data",
+                (false, None) => "disabled",
             };
             json!({
                 "profile_id": profile.profile_id, "currency": profile.currency,
                 "monthly_minor": profile.monthly_minor, "daily_minor": profile.daily_minor,
                 "warning_ratio_bp": profile.warning_ratio_bp,
                 "spent_minor": spent_minor, "ratio_bp": ratio_bp, "level": level,
+                "has_unresolved": has_unresolved,
                 "daily_spent_minor": daily_spent_minor,
                 "daily_ratio_bp": daily_ratio_bp, "daily_level": daily_level,
+                "daily_has_unresolved": daily_has_unresolved,
             })
         }).collect::<Vec<_>>(),
     });

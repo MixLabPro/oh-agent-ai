@@ -56,6 +56,18 @@ where
     agent_vitals_domain::util::pyround(total * 100.0, 0) as i64
 }
 
+pub fn budget_profile_has_unresolved<'a, I>(
+    amounts: I,
+    currency: &str,
+) -> bool
+where
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+{
+    amounts.into_iter().any(|amount| {
+        amount.currency.as_deref() == Some(currency) && amount.has_unresolved
+    })
+}
+
 /// 读取双预算 profile 的统一状态 DTO。金额按 profile 的币种和口径独立计算，
 /// 不做汇率折算；覆盖/新鲜度沿用同一份月度摘要，供桌面、CLI、MCP 对拍。
 pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
@@ -87,22 +99,32 @@ pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Va
         let daily_spent_minor = budget_profile_spent_minor(
             daily_values.iter().copied(), &profile.profile_id, &profile.currency,
         );
-        let ratio_bp = (spent_minor > 0).then(|| spent_minor * 10_000 / profile.monthly_minor);
+        let has_unresolved = budget_profile_has_unresolved(
+            values.iter().copied(), &profile.currency,
+        );
+        let daily_has_unresolved = budget_profile_has_unresolved(
+            daily_values.iter().copied(), &profile.currency,
+        );
+        let ratio_bp = (!has_unresolved && spent_minor > 0)
+            .then(|| spent_minor * 10_000 / profile.monthly_minor);
         let daily_ratio_bp = profile.daily_minor.and_then(|limit| {
-            (daily_spent_minor > 0).then(|| daily_spent_minor * 10_000 / limit)
+            (!daily_has_unresolved && daily_spent_minor > 0)
+                .then(|| daily_spent_minor * 10_000 / limit)
         });
-        let level = match ratio_bp {
-            Some(r) if r >= 10_000 => "exceeded",
-            Some(r) if r >= profile.warning_ratio_bp => "warn",
-            Some(_) => "ok",
-            None => "no_data",
+        let level = match (has_unresolved, ratio_bp) {
+            (true, _) => "incomplete",
+            (false, Some(r)) if r >= 10_000 => "exceeded",
+            (false, Some(r)) if r >= profile.warning_ratio_bp => "warn",
+            (false, Some(_)) => "ok",
+            (false, None) => "no_data",
         };
-        let daily_level = match daily_ratio_bp {
-            Some(r) if r >= 10_000 => "exceeded",
-            Some(r) if r >= profile.warning_ratio_bp => "warn",
-            Some(_) => "ok",
-            None if profile.daily_minor.is_some() => "no_data",
-            None => "disabled",
+        let daily_level = match (daily_has_unresolved, daily_ratio_bp) {
+            (true, _) => "incomplete",
+            (false, Some(r)) if r >= 10_000 => "exceeded",
+            (false, Some(r)) if r >= profile.warning_ratio_bp => "warn",
+            (false, Some(_)) => "ok",
+            (false, None) if profile.daily_minor.is_some() => "no_data",
+            (false, None) => "disabled",
         };
         json!({
             "profile_id": profile.profile_id,
@@ -113,9 +135,11 @@ pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Va
             "spent_minor": spent_minor,
             "ratio_bp": ratio_bp,
             "level": level,
+            "has_unresolved": has_unresolved,
             "daily_spent_minor": daily_spent_minor,
             "daily_ratio_bp": daily_ratio_bp,
             "daily_level": daily_level,
+            "daily_has_unresolved": daily_has_unresolved,
         })
     }).collect::<Vec<_>>();
     Some(json!({
@@ -786,7 +810,7 @@ mod tests {
         actual.insert(BillingBasis::HostBilled, 1.5);
         let mut usd = BTreeMap::new();
         usd.insert(BillingBasis::MeteredEstimate, 77.0);
-        let amounts = [
+        let mut amounts = [
             HostAmount {
                 host_id: "claude-code".into(), amounts_by_basis: estimate,
                 currency: Some("CNY".into()), has_unresolved: false,
@@ -809,6 +833,9 @@ mod tests {
         assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "CNY"), 12_345);
         assert_eq!(budget_profile_spent_minor(&amounts, "confirmed", "CNY"), 20_150);
         assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "USD"), 7_700);
+        assert!(!budget_profile_has_unresolved(amounts.iter(), "CNY"));
+        amounts[0].has_unresolved = true;
+        assert!(budget_profile_has_unresolved(amounts.iter(), "CNY"));
     }
 
     /// 环境锁是进程级的（util::ENV_LOCK），不是本模块局部的 —— state 的测试
