@@ -1351,7 +1351,18 @@ function renderBillingImportCandidates(report) {
     return;
   }
   copy.textContent = pendingCount
-    ? pendingCount + " 条旧版本发现的套餐信息尚未计入实际支出；当前用量仍按原厂价估算。"
+    ? (() => {
+      const impact = candidates.filter((candidate) => candidate.status === "pending")
+        .reduce((sum, candidate) => {
+          const row = candidate.impact || {};
+          sum.tokens += Number(row.total_tokens || 0);
+          sum.facts += Number(row.fact_count || 0);
+          sum.sessions += Number(row.session_count || 0);
+          return sum;
+        }, { tokens: 0, facts: 0, sessions: 0 });
+      return pendingCount + " 条旧版本套餐信息待确认；本月影响约 " + fmtTokens(impact.tokens) +
+        " tokens（" + impact.facts + " 条事实、" + impact.sessions + " 个会话）。当前仍按原厂价估算；确认后可区分订阅覆盖和额外按量费用。";
+    })()
     : "已核对的套餐信息不会计入实际支出；当前用量仍按原厂价估算。";
 
   document.getElementById("ov-billing-later").onclick = () => {
@@ -1373,6 +1384,12 @@ function renderBillingImportCandidates(report) {
       const detail = document.createElement("div");
       detail.textContent = candidate.provider_id + " · " + billingCandidateAmount(candidate) +
         " · 自 " + candidate.billing_period_start + " 起（" + candidate.host + "）";
+      const impact = candidate.impact || {};
+      if (candidate.status === "pending" && (impact.total_tokens || impact.fact_count || impact.session_count)) {
+        detail.textContent += " · 本月影响 " + fmtTokens(Number(impact.total_tokens || 0)) +
+          " tokens / " + Number(impact.fact_count || 0) + " 条事实 / " +
+          Number(impact.session_count || 0) + " 个会话";
+      }
       const actions = document.createElement("div");
       actions.className = "billing-review-actions";
       const accept = document.createElement("button");

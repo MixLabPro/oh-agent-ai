@@ -1393,10 +1393,19 @@ fn billing_import_candidates() -> Value {
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
         return serde_json::json!({ "status": "unavailable", "candidates": [] });
     };
+    let window = agent_vitals_data::authority_query::beijing_month_bounds_ms(
+        &overview::current_month_beijing(),
+    );
     match db.billing_import_candidates() {
         Ok(rows) => serde_json::json!({
             "status": "ok",
             "candidates": rows.into_iter().map(|(candidate_id, host, provider_id, currency, amount_minor, billing_period_start, status)| {
+                let impact = window.and_then(|(window_start_ms, window_end_ms)| {
+                    db.billing_declaration_impact_preview_for(
+                        &host, &provider_id, &billing_period_start, None, &[],
+                        window_start_ms, window_end_ms,
+                    ).ok()
+                });
                 serde_json::json!({
                     "candidate_id": candidate_id,
                     "host": host,
@@ -1405,6 +1414,11 @@ fn billing_import_candidates() -> Value {
                     "amount_minor": amount_minor,
                     "billing_period_start": billing_period_start,
                     "status": status,
+                    "impact": impact.map(|preview| serde_json::json!({
+                        "fact_count": preview.fact_count,
+                        "session_count": preview.session_count,
+                        "total_tokens": preview.total_tokens,
+                    })),
                 })
             }).collect::<Vec<_>>()
         }),

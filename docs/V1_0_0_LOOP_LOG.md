@@ -834,3 +834,10 @@
 - 保护：候选 dry-run 不创建修订、不接受候选、不改变汇总；数据层新增 prospective preview 回归，验证 scope 交集和“零修订写入”。
 - 验收：data 定向测试、desktop release 测试 106/106、desktop Clippy、workbench JS 语法、Vite build、`git diff --check`、`.app` release bundle 均通过。
 - 真机边界：重打包后的 Computer Use 检查因 macOS 锁屏无法进行；AC27 仍不勾选，待解锁后复验两步点击与重算回执。
+
+## Loop 104 · 套餐提示补齐影响范围与确认收益（代码验收）
+
+- 修复：候选读取结果现在携带当前月只读影响摘要；总览提示和候选行显示受影响 tokens、事实数、会话数，并明确“当前按原厂价估算、确认后可区分订阅覆盖与额外按量费用”。
+- 保护：影响摘要只读查询，不接受候选、不创建声明、不改变账本；读取失败按候选级别降级，不把缺失影响编成零。
+- 验收：data/desktop release 测试、desktop Clippy、workbench JS 语法、Vite build、`git diff --check` 和最新 `.app` bundle 构建通过。
+- 真机边界：设备仍锁屏，未声称 AC26/AC27 真机完成；待解锁后复验提示内容及两步确认链。
