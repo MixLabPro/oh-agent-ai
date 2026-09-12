@@ -775,3 +775,9 @@
 - 修复：桌面 `save_billing_declaration_revision` 不再先调用独立的当前声明写入，再写不可变修订；当前声明由 `billing_declaration_revision_save` 的同一事务物化，修订校验或 scope 失败时不会留下孤立声明。
 - 验收：desktop release 编译、desktop lib 测试（106 个测试目标，当前筛选无 lib 测试执行）、desktop clippy `-D warnings`、workbench JS 语法和 `git diff --check` 通过。
 - 边界：锁屏导致桌面 Computer Use 仍未复验；候选接受与声明保存目前仍是两个 IPC 动作，下一步需补原子候选→声明命令及真机回执，不勾选 AC13/AC27。
+
+## Loop 95 · 待确认候选到声明的原子事务（自验收）
+
+- 修复：数据层 `billing_declaration_revision_save` 现在允许匹配的 `pending` 候选在同一事务内转为 `accepted`，并把 `candidate_id` 写入声明修订；候选不存在、宿主/服务商不匹配或 scope 校验失败时整笔事务回滚。
+- 回归：新增 pending 成功与失败回滚测试；计费影响预览、desktop 编译/clippy、workbench JS 语法和差异检查通过。
+- 边界：这消除了 UI 两步写入的半状态风险，但 macOS 当前仍锁屏，尚未完成候选确认→预览→入队→worker→刷新 Computer Use 证据；AC13/AC27 仍不勾选。

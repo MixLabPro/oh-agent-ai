@@ -2069,12 +2069,25 @@ impl AuthorityDb {
                     rusqlite::params![candidate_id],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
                 ).optional()?;
-                if !matches!(candidate, Some((ref candidate_host, ref candidate_provider, ref status))
-                    if candidate_host == host && candidate_provider == provider_id && status == "accepted")
-                {
+                let Some((candidate_host, candidate_provider, status)) = candidate else {
                     return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
                         "billing declaration candidate must be accepted and match host/provider".to_string(),
                     )));
+                };
+                if candidate_host != host || candidate_provider != provider_id
+                    || !matches!(status.as_str(), "pending" | "accepted")
+                {
+                    return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                        "billing declaration candidate must be pending/accepted and match host/provider".to_string(),
+                    )));
+                }
+                if status == "pending" {
+                    self.conn.execute(
+                        "UPDATE billing_import_candidates
+                         SET status = 'accepted', resolved_at_ms = ?2, updated_at_ms = ?2
+                         WHERE candidate_id = ?1 AND status = 'pending'",
+                        rusqlite::params![candidate_id, now_ms],
+                    )?;
                 }
             }
             let previous: Option<(String, i64)> = self.conn.query_row(
@@ -2927,6 +2940,40 @@ mod tests {
             "candidate-declaration", "claude-code", "anthropic", "official_subscription", None,
             Some(2_000), Some("USD"), "2026-09", None, Some("candidate"), None, 6,
         ).unwrap());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_revision_accepts_pending_candidate_atomically() {
+        let db = tmp_db("billing-candidate-atomic");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.billing_import_candidate_put(
+            "pending-ok", "codex", "openai", "CNY", 1_990, "2026-09", "uat", 1,
+        ).unwrap();
+        assert!(authority.billing_declaration_revision_save(
+            "revision-from-pending", "declaration-from-pending", None,
+            "codex", "openai", "official_subscription", Some("Plus"),
+            Some(1_990), Some("CNY"), "2026-09", None, Some("pending-ok"),
+            Some("candidate:pending-ok"), &[], 2,
+        ).unwrap());
+        assert_eq!(authority.billing_import_candidates().unwrap()[0].6, "accepted");
+        assert_eq!(authority.billing_declaration_revisions("declaration-from-pending").unwrap()[0].13,
+            Some("pending-ok".to_string()));
+
+        authority.billing_import_candidate_put(
+            "pending-fail", "codex", "openai", "CNY", 2_990, "2026-09", "uat", 3,
+        ).unwrap();
+        assert!(authority.billing_declaration_revision_save(
+            "revision-from-pending-fail", "declaration-from-pending-fail", None,
+            "codex", "openai", "official_subscription", None, None, None,
+            "2026-09", None, Some("pending-fail"), None,
+            &[("model", "gpt-5"), ("model", "gpt-5")], 4,
+        ).is_err());
+        let status: String = authority.conn().query_row(
+            "SELECT status FROM billing_import_candidates WHERE candidate_id = 'pending-fail'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(status, "pending", "a failed revision must roll candidate acceptance back");
         let _ = std::fs::remove_file(&db);
     }
 
