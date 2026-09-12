@@ -4462,7 +4462,7 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
       line.appendChild(detailButton);
       const currentStatus = instance.status || "open";
       const actions = currentStatus === "open"
-        ? [["later", "稍后"], ["acknowledged", "已确认"], ["closed", "已解决"], ["wontfix", "不适用"]]
+        ? [["later", "稍后"], ["acknowledged", "已确认"], ["resolved", "已解决"], ["not_applicable", "不适用"]]
         : [["open", "恢复待处理"]];
       for (const [status, label] of actions) {
         const button = el("button", "btn secondary");

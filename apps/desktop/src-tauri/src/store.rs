@@ -401,7 +401,7 @@ pub async fn issue_transition(
     to_status: String,
     reason: Option<String>,
 ) -> Result<Value, Value> {
-    if issue_id.trim().is_empty() || !matches!(to_status.as_str(), "later" | "acknowledged" | "closed" | "wontfix" | "open") {
+    if issue_id.trim().is_empty() || !matches!(to_status.as_str(), "later" | "acknowledged" | "resolved" | "not_applicable" | "closed" | "wontfix" | "open") {
         return Err(error_value("invalid_issue_transition", "invalid issue id or target status"));
     }
     let reason = reason.unwrap_or_else(|| "user action".to_string());
@@ -424,7 +424,7 @@ pub async fn issue_transition(
             ).map_err(agent_vitals_data::authority::AuthorityError::Sqlite)
         }).map_err(|e| error_value("issue_transition_failed", &e.to_string()))?;
         Ok(json!({"status": "ok", "issue_id": issue_id, "to_status": to_status,
-            "transition_id": transition_id, "objective_resolution": to_status == "closed"}))
+            "transition_id": transition_id, "objective_resolution": matches!(to_status.as_str(), "closed" | "resolved")}))
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 

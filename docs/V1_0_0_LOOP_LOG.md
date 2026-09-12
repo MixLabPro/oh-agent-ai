@@ -940,3 +940,10 @@
 - 保护：`page_size=1` 时预算组独占首项，下一页从来源组 offset=0 继续，避免预算行挤掉首个来源组；原始 issue 权威表和只读投影不变。
 - 验收：desktop store 测试 14/14、Clippy `-D warnings` 与 `git diff --check`通过。
 - 边界：REQ-073/074 的完整跨来源真机数量、L0 P95 和六族 UAT 仍待真实数据环境验收。
+
+## Loop 120 · 待处理状态使用规范五态名称
+
+- 修复：待处理 UI 的“已解决/不适用”动作改为提交规范状态 `resolved/not_applicable`；权威数据层同步接受规范状态并记录关闭时间，旧 `closed/wontfix` 继续兼容已有历史数据。
+- 保护：`acknowledged` 仍独立于解决；状态汇总统一映射到 `resolved/not_applicable`，恢复待处理仍可从两类已结束状态返回 `open`。
+- 验收：desktop store 测试 14/14、data issues 定向测试 9/9、Clippy `-D warnings`、JS 语法检查与 `git diff --check`通过。
+- 边界：真实待处理队列五态点击、自动关闭和 AC18 Computer Use UAT 仍需在可操作桌面环境执行。

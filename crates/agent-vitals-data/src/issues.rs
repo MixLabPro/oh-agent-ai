@@ -206,7 +206,7 @@ pub fn transition_issue(
     )?;
     conn.execute(
         "UPDATE issue_instances SET status = ?2, closed_at_ms =
-           CASE WHEN ?2 IN ('closed','wontfix') THEN COALESCE(closed_at_ms, ?3) ELSE NULL END
+           CASE WHEN ?2 IN ('closed','wontfix','resolved','not_applicable') THEN COALESCE(closed_at_ms, ?3) ELSE NULL END
          WHERE issue_id = ?1",
         rusqlite::params![issue_id, to_status, transitioned_at_ms],
     )?;
@@ -220,16 +220,24 @@ fn valid_transition(from: &str, to: &str) -> bool {
             | ("open", "later")
             | ("open", "closed")
             | ("open", "wontfix")
+            | ("open", "resolved")
+            | ("open", "not_applicable")
             | ("later", "open")
             | ("later", "acknowledged")
             | ("later", "closed")
             | ("later", "wontfix")
+            | ("later", "resolved")
+            | ("later", "not_applicable")
             | ("acknowledged", "closed")
             | ("acknowledged", "later")
             | ("acknowledged", "wontfix")
+            | ("acknowledged", "resolved")
+            | ("acknowledged", "not_applicable")
             | ("acknowledged", "open")
             | ("closed", "open")
             | ("wontfix", "open")
+            | ("resolved", "open")
+            | ("not_applicable", "open")
     )
 }
 
