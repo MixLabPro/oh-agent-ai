@@ -656,7 +656,7 @@ enum Cmd {
     /// `alert` computes the full budget alert from the authority DB (SQL
     /// equivalent of `budget show`), cross-host metered CNY.
     BudgetSql {
-        #[arg(value_parser = ["status", "alert", "config-show", "config-set", "snooze-set", "snooze-clear"])]
+        #[arg(value_parser = ["status", "profiles", "profile-set", "alert", "config-show", "config-set", "snooze-set", "snooze-clear"])]
         action: String,
         /// status/config-show: query this month (YYYY-MM) instead of the current one
         #[arg(long)]
@@ -673,6 +673,21 @@ enum Cmd {
         /// snooze-set: snooze until this ISO datetime (Beijing time, e.g. 2026-09-10T08:00:00)
         #[arg(long)]
         until: Option<String>,
+        /// profile-set: estimate or confirmed
+        #[arg(long)]
+        profile: Option<String>,
+        /// profile-set: explicit ISO-4217-like currency code (for example CNY or USD)
+        #[arg(long)]
+        currency: Option<String>,
+        /// profile-set: monthly amount in the selected currency's minor unit
+        #[arg(long)]
+        profile_monthly_minor: Option<i64>,
+        /// profile-set: optional daily amount in the selected currency's minor unit
+        #[arg(long)]
+        profile_daily_minor: Option<i64>,
+        /// profile-set: warning ratio in basis points (80% = 8000)
+        #[arg(long)]
+        profile_warning_ratio_bp: Option<i64>,
     },
     /// Drive the Rust state write chain. R1c: the pure merge rules live in
     /// core::state (single source of truth), this subcommand is the I/O + time
@@ -3342,6 +3357,11 @@ session_store={store} fold={fold}"
         daily_cny_minor,
         warning_ratio_bp,
         until,
+        profile,
+        currency,
+        profile_monthly_minor,
+        profile_daily_minor,
+        profile_warning_ratio_bp,
     }) = &args.cmd
     {
         let db = || -> agent_vitals_data::authority::AuthorityDb {
@@ -3367,6 +3387,39 @@ session_store={store} fold={fold}"
                     Some(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
                     None => {
                         eprintln!("budget-sql status failed: authority DB unavailable");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "profiles" => {
+                let m = month
+                    .clone()
+                    .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+                match agent_vitals_runtime::budget::budget_profiles_status_sql_at(
+                    &agent_vitals_runtime::home::data_home(), &m,
+                ) {
+                    Some(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                    None => {
+                        eprintln!("budget-sql profiles failed: authority DB unavailable");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "profile-set" => {
+                let (Some(profile), Some(currency), Some(monthly)) =
+                    (profile, currency, profile_monthly_minor) else {
+                    eprintln!("profile-set requires --profile, --currency and --profile-monthly-minor");
+                    std::process::exit(2);
+                };
+                let d0 = db();
+                match d0.budget_profile_set(
+                    profile, currency, *monthly, *profile_daily_minor,
+                    profile_warning_ratio_bp.unwrap_or(8_000),
+                    agent_vitals_runtime::sql_sync::now_ms(),
+                ) {
+                    Ok(()) => println!("budget profile saved: {profile} {currency} monthly={monthly}"),
+                    Err(e) => {
+                        eprintln!("budget-sql profile-set failed: {e}");
                         std::process::exit(2);
                     }
                 }
