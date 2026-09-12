@@ -1020,3 +1020,9 @@
 - 实现：MCP envelope/事件时间使用系统 IANA 时区格式化；Python `sessions_sql` 同步使用系统时区的 RFC3339、民历窗口和本地小时过滤，保留旧函数名仅作兼容，不再把 `+08:00` 当作统计口径。
 - 验收：Rust MCP 定向测试 12/12、Python sessions 测试 27/27、runtime Clippy `-D warnings`、Python 编译检查和 `git diff --check`通过。
 - 边界：CLI 默认日期、WorkBench 日期/日历显示、用户时区偏好持久化和真实跨入口 parity/UAT 尚未完成；REQ-033、REQ-096、AC21 继续不勾选。
+
+## Loop 132 · CLI 默认统计日期切换到系统时区
+
+- 实现：runtime 兼容的 `today_beijing/current_month_beijing` 入口内部改用系统 IANA 统计时区；Codex 重置时间的人读格式与 Python 镜像同步改用系统时区，避免日期已切换但重置时间仍按北京时间显示。
+- 验收：Rust Codex cost 定向测试 16/16、Python CLI matrix 147 项（当前未设置 Rust binary 的 parity 用例按既有规则跳过）通过；runtime 编译无新增 warning。
+- 边界：Workbench/菜单栏仍有前端 `beijingToday()` 固定 `UTC+8`，用户可修改时区偏好和完整跨入口 parity 尚未完成；不勾选 REQ-033、REQ-096 或 AC21。

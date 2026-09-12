@@ -35,6 +35,7 @@
 
 use std::collections::HashMap;
 
+use jiff::{tz::TimeZone, Timestamp};
 use serde_json::{json, Map, Value};
 
 pub fn load_codex_pricing() -> Value {
@@ -151,12 +152,14 @@ fn pct_text(up: f64) -> String {
 /// `M月D日 HH:MM`（与 Codex UI 同款：「5 小时使用限额 重置时间：10:03」vs
 /// 「每周使用限额 重置时间：2026年9月4日 00:40」）。`today` 参数化以便单测钉住
 /// 两个分支；生产路径传 `today_beijing()`。与 `codex_cost.py::_reset_beijing_text_at`
-/// 同 spec。数字来自 `civil_from_unix_secs` + 当天秒（不引入 chrono）。
+/// 同 spec。日期和偏移由 runtime 的系统 IANA 时区提供。
 fn reset_beijing_text_at(resets_at: i64, today: &str) -> String {
-    let off = 8 * 3600;
-    let sod = (resets_at + off).rem_euclid(86400);
-    let (y, m, d) = civil_from_unix_secs(resets_at, off);
-    let hhmm = format!("{:02}:{:02}", sod / 3600, (sod % 3600) / 60);
+    let zoned = Timestamp::from_second(resets_at)
+        .unwrap_or(Timestamp::UNIX_EPOCH)
+        .to_zoned(TimeZone::system());
+    let date = zoned.date();
+    let (y, m, d) = (date.year(), date.month(), date.day());
+    let hhmm = format!("{:02}:{:02}", zoned.hour(), zoned.minute());
     let key = format!("{y:04}-{m:02}-{d:02}");
     if key == today {
         hhmm
@@ -492,8 +495,8 @@ pub fn render_codex_cost(out: &Value) -> String {
     parts.concat()
 }
 
-// ── 默认月 / 今天（北京时区）───────────────────────────────────────────────
-// v0.8 Phase D6：`civil_from_unix_secs`（纯）迁进 `agent-vitals-domain::util`，
+// ── 默认月 / 今天（系统统计时区）──────────────────────────────────────────
+// v0.8 Phase D6：
 // 读时钟的 `current_month_beijing` / `today_beijing` 迁进本 crate 的 `clock`
 // 模块。v0.9 Stage 0.3：本文件自己也从 apps/cli 搬进了这个 crate
 // （`agent_vitals_runtime::sessions::codex_cost`），这里 re-export 保
@@ -502,7 +505,6 @@ pub fn render_codex_cost(out: &Value) -> String {
 // current_month_beijing}`。「当前月/今天」口径与 DSH state 层一致，两引擎
 // 月度视图不打架。
 pub use crate::clock::{current_month_beijing, today_beijing};
-pub(crate) use agent_vitals_domain::util::civil_from_unix_secs;
 
 #[cfg(test)]
 mod tests {
