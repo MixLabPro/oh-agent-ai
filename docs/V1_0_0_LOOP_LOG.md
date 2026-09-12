@@ -2134,3 +2134,11 @@
   字符串存在。
 - 边界：验收明确报告该包未使用 Developer ID 签名；当前没有把诊断模式的本地包当作
   可发布产物，也没有声称 Intel 包、安装升级和公证已完成。
+
+## Loop 299 · x86_64 CLI 交叉构建核验
+
+- 验收：安装 `x86_64-apple-darwin` Rust 标准库后，`cargo build --release --target
+  x86_64-apple-darwin` 通过；产物为 Mach-O 64-bit `x86_64`，`--version` 返回
+  `agent-vitals 1.3.0`。
+- 边界：当前机器是 arm64，未把交叉构建的 CLI 冒充完整 Intel `.app`；Tauri 桌面包仍
+  需要 macOS-13 原生 Intel runner，以确保主程序、随包 CLI、签名和公证全部同架构。
