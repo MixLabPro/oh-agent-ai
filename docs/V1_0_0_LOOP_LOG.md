@@ -1380,3 +1380,9 @@
 - 修复：Issues 明细对象列补充影响范围（宿主、日桶、会话/命中数）、证据类别与置信限制；状态列补充建议动作。未提供金额影响时明确显示“金额影响未量化”，不以 0 代替未知。
 - 验收：前端通过 Vite HMR 刷新后，SV613 行显示范围/依据/建议副信息，待确认套餐组显示“确认计费方式”；Issues 展开态仍可读取原始命中和状态动作；`node --check apps/desktop/src-tauri/ui/workbench.js`、`npm --prefix apps/desktop/ui-dev run build` 与 `git diff --check`通过。
 - 边界：本轮只改善 L0 信息呈现，不改变权威计算、排序或状态写入；真实安装包视觉 Computer Use、无障碍 200% 字号和发布门禁仍待完成。
+
+## Loop 188 · L0 可读化进入安装包
+
+- 构建：`cargo tauri build --bundles app` 成功，前端 Issue 信息层级已进入新的 `agent-vitals.app`。
+- 安装：旧包可恢复备份为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-032800`；新包以 `--show-workbench` 启动，进程 PID `81918` 已运行。
+- 边界：安装包为当前本地测试构建；macOS 锁屏仍阻塞真实 Computer Use 操作，签名/公证、干净机升级和外部试用门禁仍未完成。
