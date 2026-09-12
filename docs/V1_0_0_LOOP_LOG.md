@@ -578,4 +578,11 @@
 - 验收：桌面端 Rust 单元测试 103/103、Clippy `-D warnings`、JS 语法检查、工作台 KPI/决策验证器通过。
 - 边界：真实 macOS 保存对话框与干净机安装仍需真机复验；诊断包不会自动提交，暂不勾选 REQ-142 或 AC20。
 
+## Loop 68 · macOS RC bundle 构建与资源签名前置（自验收）
+
+- 执行：运行 `cargo tauri build --bundles app` 生成 arm64 `agent-vitals.app`；验证 `Info.plist`、桌面可执行文件、随包 CLI、数据质量/Trace/价格状态 IPC 和静态资源均存在。
+- 发现与处置：Tauri 默认 linker ad-hoc 签名未封入 app 资源，首次 `codesign --verify --deep --strict` 失败；对本次本地测试产物执行 ad-hoc 重签后复验通过，资源封签包含 `Resources/bin/agent-vitals` 与图标。
+- 保护：仅修改 `target/` 下的忽略构建产物，不改仓库源文件；ad-hoc 签名不冒充 Developer ID，也不代表已完成公证。
+- 边界：Developer ID/notarization、Intel 架构、干净机安装与升级演练仍待发布环境真实验收，不勾选 REQ-135 或 AC24。
+
 本日志只记录已经完成的实现和证据；上述“尚未完成”不改变任何 PRD 勾选状态。任何单次修改连续测试失败超过5次，或任何单次Loop超过30分钟，立即暂停并记录；不得以拆分日志规避熔断。
