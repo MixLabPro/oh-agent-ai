@@ -461,6 +461,7 @@ pub fn today_beijing() -> String {
 /// unix 秒 → 某时区（offset 秒）的 (年, 月, 日)。pub(crate)：lib.rs 的
 /// `recent_row_text` 做「date 是否当年」判定（北京年，与导航 day_key 同日界）
 /// 复用同一实现，不长第二份历法。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn civil_from_unix_secs(secs: i64, offset_secs: i64) -> (i64, u32, u32) {
     let days = (secs + offset_secs).div_euclid(86400);
     let z = days + 719468;

@@ -1067,3 +1067,10 @@
 - 保护：保留旧 API 名称以避免 IPC 断裂；日期/月界只影响统计窗口，不改变事件 epoch 或供应商计价规则。
 - 验收：独立 desktop release 测试 110/110、`git diff --check`通过。
 - 边界：Tauri 会话默认日期与最近会话年份显示仍有旧兼容实现待清理；用户可修改的统计时区偏好和真实 Computer Use UAT 尚未完成。
+
+## Loop 139 · Tauri 最近会话与过期时间显示切换
+
+- 修复：菜单栏过期提示的 `HH:MM` 和最近会话“是否当前年份”判断改用 runtime 系统时区格式化，不再自行加固定 8 小时；移除由此产生的 release dead-code warning。
+- 保护：日期字段仍保留完整原始 `YYYY-MM-DD`，仅展示折叠规则随本地时区变化；事件时间与价格时区不变。
+- 验收：独立 desktop release 测试 110/110、无新增编译 warning、`git diff --check`通过。
+- 边界：用户可修改统计时区偏好仍未持久化；AC21 仍需真实切换后的跨入口 Computer Use 验证。

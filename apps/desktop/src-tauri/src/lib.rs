@@ -366,8 +366,8 @@ fn truncate_title(s: &str, max_chars: usize) -> String {
 /// 渲染成北京的快照时刻——与日界判定（day_key 北京日）同一时区，早上 8 点前的
 /// 快照不会显示成昨天的点。
 fn beijing_hhmm(secs: i64) -> String {
-    let tod = (secs + 8 * 3600).rem_euclid(86400);
-    format!("{:02}:{:02}", tod / 3600, (tod % 3600) / 60)
+    let local = agent_vitals_runtime::clock::local_timestamp_text(secs);
+    local[11..16].to_string()
 }
 
 /// 多宿主导航快照是否过期（spec §6 决策 5）：`generated_at` 年龄 > 2 × tick
@@ -388,9 +388,9 @@ fn hosts_stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
 fn recent_row_text(row: &RecentSessionRow, now_secs: i64) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(d) = &row.date {
-        let current_year = overview::civil_from_unix_secs(now_secs, 8 * 3600).0;
+        let current_year = agent_vitals_runtime::clock::local_timestamp_text(now_secs)[..4].to_string();
         let year_is_current = d.len() >= 10
-            && d[..4].parse::<i64>().map(|y| y == current_year).unwrap_or(false);
+            && d[..4] == current_year;
         parts.push(if year_is_current {
             d[5..10].to_string()
         } else {
