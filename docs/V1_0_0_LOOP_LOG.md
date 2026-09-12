@@ -1744,3 +1744,9 @@
 - 新增：`scripts/verify-macos-app-bundle.mjs` 检查 `.app` 结构、主程序、随包 CLI 和 CLI 版本；默认模式将未签名作为诊断警告，`--require-developer-id` 模式严格要求团队签名和 `codesign --verify --deep --strict`。
 - 验收：当前包普通模式通过并报告 `agent-vitals 1.3.0`；严格模式按预期失败，明确报告没有有效 Developer ID 身份及现有资源签名错误。
 - 文档：`apps/desktop/ui-dev/README.md` 已加入两种预检命令；用户已有 WorkBuddy/Issue 文档未修改。
+
+## Loop 247 · 修正包预检文档路径
+
+- 发现：README 的工作目录是 `apps/desktop/ui-dev`，但新增预检命令使用了仓库根目录相对路径，直接照抄会找不到脚本。
+- 修复：改为 `node ../../../scripts/verify-macos-app-bundle.mjs`（含严格模式），与文档前置 `cd apps/desktop/ui-dev` 一致。
+- 验收：从 `apps/desktop/ui-dev` 执行普通预检通过，确认包结构和随包 CLI；用户已有 WorkBuddy/Issue 文档未修改。
