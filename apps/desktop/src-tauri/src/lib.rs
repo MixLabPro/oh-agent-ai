@@ -1604,15 +1604,26 @@ fn export_diagnostic_package() -> Result<Value, String> {
         .save_file() else {
         return Ok(serde_json::json!({ "status": "cancelled" }));
     };
+    let status = data_status();
     let package = serde_json::json!({
         "diagnostic_contract": "agent-vitals-diagnostic/v1",
+        "versions": {
+            "app": env!("CARGO_PKG_VERSION"),
+            "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
+            "query_envelope": agent_vitals_runtime::mcp::ENVELOPE_SCHEMA_VERSION,
+            "pricing": status.get("data")
+                .and_then(|data| data.get("pricing"))
+                .and_then(|pricing| pricing.get("version"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        },
         "privacy": {
             "contains_session_content": false,
             "contains_absolute_paths": false,
             "contains_account_identifiers": false,
             "upload_performed": false,
         },
-        "data_status": data_status(),
+        "data_status": status,
         "source_status": data_source_status(),
         "sync_pause": sync_pause_state(),
         "retention": retention_config(),
