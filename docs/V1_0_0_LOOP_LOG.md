@@ -1247,3 +1247,9 @@
 - 调试：保留现有原生 HTML/CSS/JS IPC 面，Vite 仅作为开发服务器提供 HMR；浏览器 mock 可独立调样式，Tauri dev 继续验证真实 IPC，不为纯样式迭代引入一次性 React 迁移。
 - 验收：`node --check apps/desktop/src-tauri/ui/workbench.js` 通过；`npm --prefix apps/desktop/ui-dev run build` 通过。构建器仅提示现有 classic script 不参与 bundling，未形成构建失败。
 - 边界：尚未进行真实窗口视觉 Computer Use（macOS 仍锁定）；本轮不勾选 AC21/AC22，正式包签名/公证仍受发布凭据阻塞。
+
+## Loop 167 · Workbench 时区修复进入安装包
+
+- 构建：`cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 `target/release/agent-vitals` 字节一致。
+- 验收：旧包移至 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-0251` 后安装新包，`--show-workbench` 进程已启动。
+- 边界：仅完成构建/启动和静态证据，未把启动成功当作视觉 UAT；真实 Computer Use 仍需解锁 macOS，签名/公证仍未完成。
