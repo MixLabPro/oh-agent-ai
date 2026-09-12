@@ -97,6 +97,7 @@ const sandbox = {
   document: {
     addEventListener: () => {},
     createElement: () => makeElement(),
+    createTextNode: (text) => ({ textContent: String(text) }),
     getElementById: (id) => el(id),
   },
 };
@@ -104,6 +105,23 @@ sandbox.window.document = sandbox.document;
 vm.createContext(sandbox);
 vm.runInContext(wb, sandbox);
 sandbox.__quota = null;
+
+console.log("# 双预算状态文案");
+ok(typeof sandbox.budgetProfileStatusText === "function",
+  "真实 workbench.js 暴露双预算状态文案纯函数");
+ok(sandbox.budgetProfileStatusText({
+  level: "no_data", spent_minor: 0, currency: "CNY",
+}) === "本月：无数据",
+  "no_data 不渲染为已用 0");
+ok(sandbox.budgetProfileStatusText({
+  level: "incomplete", spent_minor: 120, currency: "USD",
+  daily_level: "no_data", daily_spent_minor: 0,
+}) === "本月：部分覆盖 · 至少已用 120 USD，仍有未覆盖用量；今日：无数据",
+  "incomplete 显示已知下界并保留未覆盖说明");
+ok(sandbox.budgetProfileStatusText({
+  level: "ok", spent_minor: 120, currency: "CNY", daily_level: "disabled",
+}) === "本月：正常 · 已用 120 CNY",
+  "正常状态显示权威已用金额");
 
 const num = (id) => elements[id]?.textContent ?? "";
 const sub = (id) => elements[id + "-sub"]?.textContent ?? "";

@@ -919,3 +919,10 @@
 - 保护：预算写入、通知去重、静默和“提醒不会阻止 Agent 继续使用”语义不变；权限结果仍只作为保存回执，不会把预算保存与通知发送混为一体。
 - 验收：desktop 定向测试、Clippy `-D warnings` 与 `git diff --check`通过。
 - 边界：双 profile 的真实权限弹窗与 AC19 完整首穿/静默/点击 Computer Use UAT 仍待设备可操作后执行。
+
+## Loop 117 · 双预算无数据状态不伪装为零
+
+- 修复：工作台双预算状态按权威 `level` 分态渲染；`no_data` 显示“无数据”，`incomplete` 显示已知用量下界并说明仍有未覆盖用量，只有确定性状态才显示“已用”金额。
+- 保护：不改变预算计算、币种隔离或未解决用量判定；避免 `spent_minor` 缺省值 0 在界面上制造绿色安全结论。
+- 验收：真实 `workbench.js` 的 KPI/状态验证器通过（含 no_data/incomplete/ok 三态）、JS 语法检查与 `git diff --check`通过。
+- 边界：完整 AC10/REQ-038 的跨入口真机与 CLI/MCP 对拍仍需在安全副本中继续执行。

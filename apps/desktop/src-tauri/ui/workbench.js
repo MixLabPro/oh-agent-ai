@@ -840,6 +840,40 @@ function billingCandidateAmount(candidate) {
   return amount.toFixed(2) + " " + (candidate.currency || "") + "/月";
 }
 
+function budgetProfileLevelText(level) {
+  return {
+    ok: "正常",
+    warn: "接近预算",
+    exceeded: "已超预算",
+    incomplete: "部分覆盖",
+    no_data: "无数据",
+    disabled: "未启用",
+  }[level] || String(level || "未知状态");
+}
+
+function budgetProfileStatusText(profile) {
+  if (!profile || !profile.level) return "尚未配置此预算口径";
+  const currency = profile.currency || "";
+  const monthlyLevel = budgetProfileLevelText(profile.level);
+  // no_data / disabled 是事实状态，不得用 spent_minor 的默认 0 伪装成
+  // “已用 0”。incomplete 可以展示已知下界，但要明确仍有未覆盖用量。
+  let monthly = "本月：" + monthlyLevel;
+  if (profile.level === "incomplete") {
+    monthly += " · 至少已用 " + String(profile.spent_minor ?? "—") + " " + currency + "，仍有未覆盖用量";
+  } else if (!["no_data", "disabled"].includes(profile.level)) {
+    monthly += " · 已用 " + String(profile.spent_minor ?? "—") + " " + currency;
+  }
+  if (!profile.daily_level || profile.daily_level === "disabled") return monthly;
+  const dailyLevel = budgetProfileLevelText(profile.daily_level);
+  let daily = "；今日：" + dailyLevel;
+  if (profile.daily_level === "incomplete") {
+    daily += " · 至少已用 " + String(profile.daily_spent_minor ?? "—") + " " + currency + "，仍有未覆盖用量";
+  } else if (profile.daily_level !== "no_data") {
+    daily += " · 已用 " + String(profile.daily_spent_minor ?? "—") + " " + currency;
+  }
+  return monthly + daily;
+}
+
 let billingDeclarationCandidate = null;
 let billingDeclarationState = null;
 let billingReviewOpen = false;
@@ -956,12 +990,7 @@ async function renderBudgetProfiles() {
     title.textContent = id === "estimate" ? "按量估算观察预算" : "已确认按量支出预算";
     const live = document.createElement("div");
     live.className = "muted";
-    live.textContent = profile.level
-      ? "本月：" + profile.level + " · 已用 " + String(profile.spent_minor || 0) + " " + (profile.currency || "") +
-        (profile.daily_level && profile.daily_level !== "disabled"
-          ? "；今日：" + profile.daily_level + " · 已用 " + String(profile.daily_spent_minor || 0) + " " + (profile.currency || "")
-          : "")
-      : "尚未配置此预算口径";
+    live.textContent = budgetProfileStatusText(profile);
     const currency = document.createElement("select");
     currency.innerHTML = '<option value="CNY">CNY</option><option value="USD">USD</option>';
     currency.value = profile.currency || "CNY";
