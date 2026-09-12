@@ -1490,6 +1490,27 @@ fn set_source_host_excluded(input: SourceHostControlInput) -> Result<Value, Stri
 }
 
 #[tauri::command]
+fn delete_imported_source_data(host: String) -> Result<Value, String> {
+    if !agent_vitals_runtime::ingest_service::FACT_HOSTS.contains(&host.as_str()) {
+        return Err("source host is not supported".to_string());
+    }
+    let data_home = overview::data_home();
+    // 先禁止未来读取；若数据库清理失败，宁可维持排除也不能让下一次同步
+    // 立即把用户刚要求移除的数据重新导入。
+    agent_vitals_runtime::source_controls::set_host_excluded(&data_home, &host, true)?;
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(&data_home),
+        agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| format!("authority database unavailable: {error}"))?;
+    let deleted = db.delete_imported_host_data(&host, agent_vitals_runtime::sql_sync::now_ms())
+        .map_err(|error| format!("delete imported data failed: {error}"))?;
+    Ok(serde_json::json!({
+        "status": "deleted", "host": host, "facts": deleted.facts,
+        "sessions": deleted.sessions, "source_files": deleted.source_files,
+    }))
+}
+
+#[tauri::command]
 fn retention_config() -> Value {
     let data_home = overview::data_home();
     match agent_vitals_runtime::retention::retention_months(&data_home) {
@@ -2195,6 +2216,7 @@ pub fn run() {
             remove_custom_source_root,
             source_host_controls,
             set_source_host_excluded,
+            delete_imported_source_data,
             retention_config,
             save_retention_config,
             budget_config,

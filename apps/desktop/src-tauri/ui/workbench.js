@@ -4266,6 +4266,23 @@ function renderSourceCard(src) {
     };
     card.appendChild(exclude);
   }
+  const clear = el("button", "btn secondary");
+  clear.textContent = "删除已导入数据";
+  clear.title = "只删除本 App 中该来源的已导入数据；不会删除宿主原始日志";
+  clear.onclick = async () => {
+    const name = HOST_DISPLAY[key] || key;
+    if (!window.confirm("删除“" + name + "”已导入到本 App 的数据？\n\n不会删除该工具的原始日志。该来源会同时停止读取，恢复读取后才会重新导入。")) return;
+    clear.disabled = true;
+    try {
+      const result = await invoke("delete_imported_source_data", { host: key });
+      showBanner("src-banner", "已删除 " + result.facts + " 条事实、" + result.sessions + " 个会话；原始日志未修改。", true);
+      await loadSources(true);
+    } catch (e) {
+      clear.disabled = false;
+      showBanner("src-banner", "删除失败：" + errText(e), false);
+    }
+  };
+  card.appendChild(clear);
   return card;
 }
 

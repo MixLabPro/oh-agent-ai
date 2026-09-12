@@ -725,6 +725,13 @@ pub struct BudgetConfig {
     pub updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostImportedDataDeletion {
+    pub facts: usize,
+    pub sessions: usize,
+    pub source_files: usize,
+}
+
 /// 权威库连接。**非 Sync**（rusqlite `Connection` 语义同旧 store）；每线程
 /// 自开。open 时：`foreign_keys=ON`（spec §3 前言）+ WAL + `busy_timeout`
 /// + DDL 版本闸 + 中断批次清扫（§3.1）。
@@ -1239,6 +1246,41 @@ impl AuthorityDb {
             "DELETE FROM usage_facts WHERE event_ts_ms IS NOT NULL AND event_ts_ms < ?1",
             rusqlite::params![cutoff_ms],
         )?)
+    }
+
+    /// 删除一个宿主由本 App 导入的可见数据。事实和会话采用既有软删除语义，
+    /// 使历史计费归因外键仍完整；来源指纹被物理删除，恢复读取后才会重新导入。
+    /// 不触及用户手工账单、计费声明、价格快照或任何其他宿主。
+    pub fn delete_imported_host_data(
+        &self, host: &str, now_ms: i64,
+    ) -> Result<HostImportedDataDeletion, AuthorityError> {
+        self.with_immediate_txn(|conn| {
+            let facts = conn.execute(
+                "UPDATE usage_facts SET deleted_at_ms = ?2, updated_at_ms = ?2
+                 WHERE host = ?1 AND deleted_at_ms IS NULL",
+                rusqlite::params![host, now_ms],
+            )?;
+            let sessions = conn.execute(
+                "UPDATE sessions SET deleted_at_ms = ?2
+                 WHERE host = ?1 AND deleted_at_ms IS NULL",
+                rusqlite::params![host, now_ms],
+            )?;
+            conn.execute(
+                "DELETE FROM workflow_events WHERE session_key IN (SELECT session_key FROM sessions WHERE host = ?1)
+                   OR source_id IN (SELECT source_id FROM source_files WHERE host = ?1)",
+                [host],
+            )?;
+            conn.execute("DELETE FROM host_runtime_snapshots WHERE host = ?1", [host])?;
+            // route_evidence 是导入的路由证据；清除其 ID 后再删行，避免已软
+            // 删除的事实留下悬挂证据引用。
+            conn.execute("UPDATE usage_facts SET route_evidence_id = NULL WHERE host = ?1", [host])?;
+            conn.execute("DELETE FROM route_evidence WHERE host = ?1", [host])?;
+            // 已软删除的事实不再保留源文件关联，避免 source_files 外键阻碍
+            // 指纹清理，也避免已删除数据继续关联可推断的来源元数据。
+            conn.execute("UPDATE usage_facts SET source_id = NULL WHERE host = ?1", [host])?;
+            let source_files = conn.execute("DELETE FROM source_files WHERE host = ?1", [host])?;
+            Ok(HostImportedDataDeletion { facts, sessions, source_files })
+        })
     }
 
     // ─────── v0.9.1 Phase 3.4：budget_config / budget_snoozes 显式管理 API
@@ -3320,6 +3362,32 @@ mod tests {
         // 幂等：再跑删 0 行。
         assert_eq!(a.retention_usage_facts(5_000).unwrap(), 0);
         std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn delete_imported_host_data_is_scoped_and_reimportable() {
+        let path = tmp_db("delete-imported-host");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.conn().execute_batch(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version) VALUES ('run', 1, 'test', 'succeeded', 12);
+             INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns, parser_version, first_seen_at_ms, last_seen_at_ms) VALUES
+               ('source-codex', 'codex', 'c', 1, 1, 1, 1, 1), ('source-dsh', 'dsh', 'd', 1, 1, 1, 1, 1);
+             INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms) VALUES
+               ('session-codex', 'codex', 'c', 'm', 1), ('session-dsh', 'dsh', 'd', 'm', 1);
+             INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key, source_event_id, observation_kind, source_id, ingested_run_id, created_at_ms, updated_at_ms) VALUES
+               ('fact-codex', 'codex', 'm', 'c', 'session-codex', 'e1', 'usage', 'source-codex', 'run', 1, 1),
+               ('fact-dsh', 'dsh', 'm', 'd', 'session-dsh', 'e2', 'usage', 'source-dsh', 'run', 1, 1);"
+        ).unwrap();
+        db.host_bill_put("bill-dsh", "dsh", "deepseek", "2026-09", "metered_actual", 100, "CNY", "user:receipt", 2).unwrap();
+        assert_eq!(db.delete_imported_host_data("codex", 3).unwrap(), HostImportedDataDeletion { facts: 1, sessions: 1, source_files: 1 });
+        let (codex_live, dsh_live, sources): (i64, i64, i64) = db.conn().query_row(
+            "SELECT SUM(host = 'codex' AND deleted_at_ms IS NULL), SUM(host = 'dsh' AND deleted_at_ms IS NULL), COUNT(*) FROM usage_facts", [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!((codex_live, dsh_live, sources), (0, 1, 2));
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM source_files WHERE host = 'codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.host_bill_count().unwrap(), 1, "manual bills are not imported source data");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
