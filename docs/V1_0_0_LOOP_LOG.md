@@ -1532,3 +1532,9 @@
 - 新增：帮助与诊断区提供“查看版本发布页”，只打开固定 HTTPS 维护者 Releases 页面；不自动下载、不自动安装、不请求本地数据。
 - 验收：Tauri command 注册、桌面 release check/Clippy、Workbench/Vite 构建、JS 语法检查和 `git diff --check`通过；浏览器 mock 可走同一 IPC 路径。
 - 边界：发布页当前仓库仍需公开可访问；Developer ID/公证、真实 Computer Use、干净机升级和外部试用仍未完成。
+
+## Loop 212 · 关于/发布页入口进入安装包
+
+- 构建：`cargo tauri build --bundles app` 成功，最新版本诊断与可信发布页 IPC/UI 已进入 `.app`。
+- 复核：产物构建完成于 2026-09-13 04:29；主程序本地 checkout 路径计数仍为 0。
+- 边界：未安装或启动新包；锁屏 Computer Use、Developer ID/公证、公开 Releases/价格目录、干净机升级和外部试用仍未完成。
