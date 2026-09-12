@@ -28,6 +28,34 @@ fn config_path_at(dh: &Path) -> PathBuf {
 
 const BUDGET_ORIGIN_FILE: &str = "budget-origin.json";
 
+/// 双预算的金额口径选择。估算观察预算只看可解释的名义估算；已确认按量
+/// 支出预算只看真实按量/宿主账单，固定订阅和 API 等价值永不混入。
+pub fn budget_profile_spent_minor<'a, I>(
+    amounts: I,
+    profile_id: &str,
+    currency: &str,
+) -> i64
+where
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+{
+    let bases: &[agent_vitals_data::projection::BillingBasis] = match profile_id {
+        "estimate" => &[agent_vitals_data::projection::BillingBasis::MeteredEstimate],
+        "confirmed" => &[
+            agent_vitals_data::projection::BillingBasis::MeteredActual,
+            agent_vitals_data::projection::BillingBasis::HostBilled,
+        ],
+        _ => return 0,
+    };
+    let total = amounts
+        .into_iter()
+        .filter(|amount| amount.currency.as_deref() == Some(currency))
+        .flat_map(|amount| amount.amounts_by_basis.iter())
+        .filter(|(basis, _)| bases.contains(basis))
+        .map(|(_, value)| *value)
+        .fold(0.0, |sum, value| sum + value);
+    agent_vitals_domain::util::pyround(total * 100.0, 0) as i64
+}
+
 /// 预算金额的来源是展示证据，不参与算术或计费。旧版 seed 成功时记录
 /// `legacy_import`；用户后来显式保存则覆盖为 `user`。缺失表示历史版本没有
 /// 留下来源，消费方必须显示未知而非猜测。
@@ -676,6 +704,43 @@ pub fn budget_snooze_set_sql(until_iso: &str) -> Result<i64, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn budget_profiles_sum_only_matching_currency_and_basis() {
+        use agent_vitals_data::projection::{BillingBasis, Freshness, HostAmount};
+        let mut estimate = BTreeMap::new();
+        estimate.insert(BillingBasis::MeteredEstimate, 123.45);
+        estimate.insert(BillingBasis::FixedSubscription, 999.0);
+        let mut actual = BTreeMap::new();
+        actual.insert(BillingBasis::MeteredActual, 200.0);
+        actual.insert(BillingBasis::HostBilled, 1.5);
+        let mut usd = BTreeMap::new();
+        usd.insert(BillingBasis::MeteredEstimate, 77.0);
+        let amounts = [
+            HostAmount {
+                host_id: "claude-code".into(), amounts_by_basis: estimate,
+                currency: Some("CNY".into()), has_unresolved: false,
+                evidence_basis: None, pricing_method: None, unresolved_reason: None,
+                freshness: Freshness::unavailable(),
+            },
+            HostAmount {
+                host_id: "dsh".into(), amounts_by_basis: actual,
+                currency: Some("CNY".into()), has_unresolved: false,
+                evidence_basis: None, pricing_method: None, unresolved_reason: None,
+                freshness: Freshness::unavailable(),
+            },
+            HostAmount {
+                host_id: "codex".into(), amounts_by_basis: usd,
+                currency: Some("USD".into()), has_unresolved: false,
+                evidence_basis: None, pricing_method: None, unresolved_reason: None,
+                freshness: Freshness::unavailable(),
+            },
+        ];
+        assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "CNY"), 12_345);
+        assert_eq!(budget_profile_spent_minor(&amounts, "confirmed", "CNY"), 20_150);
+        assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "USD"), 7_700);
+    }
 
     /// 环境锁是进程级的（util::ENV_LOCK），不是本模块局部的 —— state 的测试
     /// 也改 AGENT_VITALS_HOME，各自一把锁就互相踩踏（见 util.rs 注释）。
