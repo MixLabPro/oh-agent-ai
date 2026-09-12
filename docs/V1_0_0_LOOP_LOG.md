@@ -1885,3 +1885,12 @@
   与 Vite mock 展示该字段，关闭“架构只能从包外推断”的缺口。
 - 验收：`cargo check --release --manifest-path apps/desktop/src-tauri/Cargo.toml`、
   `npm run verify`、WorkBench closeout verifier、JS 语法检查和 `git diff --check` 均通过。
+
+## Loop 268 · 明确 macOS 支持矩阵边界
+
+- 发现：架构字段和预检已具备，但没有持久化文档区分“当前 arm64 候选证据”和“尚未
+  验证的 Intel”，存在发布说明过度承诺风险。
+- 修复：新增桌面端 macOS 支持矩阵；明确 macOS 11+、arm64 当前仅为候选验证中，
+  `x86_64` 尚不支持，且两者正式发布都必须补齐签名、公证、干净机及升级恢复证据。
+- 验收：矩阵与发布 workflow 的架构预检约束一致；README 已链接矩阵；`git diff --check`
+  通过，未修改用户已有文档。

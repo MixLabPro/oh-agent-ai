@@ -55,6 +55,7 @@ node scripts/verify-macos-app-bundle.mjs --require-developer-id
 发布。正式 Release 还必须通过 notarization ticket 校验，并附带 `SHA256SUMS`。
 当前发布 workflow 的最低 macOS 版本为 11.0；Apple Silicon/Intel 只有在对应架构
 产物完成构建和真机验证后才能列入支持矩阵。
+当前证据与未支持组合见[macOS 桌面支持矩阵](./SUPPORT_MATRIX.md)。
 
 升级前请保留数据根目录的备份。升级失败时应先保留原数据和诊断包，再回退到上一份
 已验证的应用包；不要删除数据库后让应用静默重建。卸载应用本身不会自动删除数据，
