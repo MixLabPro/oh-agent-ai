@@ -333,6 +333,43 @@ pub async fn sessions_issues(
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
+/// User-owned Issue state transition. This command only changes the Issue
+/// lifecycle in the authority DB; it never edits a host file or executes a
+/// remedy. "acknowledged" is deliberately distinct from "closed".
+#[tauri::command]
+pub async fn issue_transition(
+    state: tauri::State<'_, StoreBuildLock>,
+    issue_id: String,
+    to_status: String,
+    reason: Option<String>,
+) -> Result<Value, Value> {
+    if issue_id.trim().is_empty() || !matches!(to_status.as_str(), "later" | "acknowledged" | "closed" | "wontfix" | "open") {
+        return Err(error_value("invalid_issue_transition", "invalid issue id or target status"));
+    }
+    let reason = reason.unwrap_or_else(|| "user action".to_string());
+    if reason.chars().count() > 512 {
+        return Err(error_value("invalid_issue_transition", "reason is too long"));
+    }
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let path = agent_vitals_data::authority::default_authority_path(&data_home());
+        let db = agent_vitals_data::authority::AuthorityDb::open(&path, agent_vitals_runtime::sql_sync::now_ms())
+            .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+        let evidence = format!("user-action:{to_status}");
+        let input_fingerprint = format!("user-transition:{issue_id}:{to_status}:{reason}");
+        let transition_id = db.with_immediate_txn(|conn| {
+            agent_vitals_data::issues::transition_issue(
+                conn, &issue_id, &to_status, now_ms, &reason, "user",
+                &evidence, "user", "v1.0.0", &input_fingerprint,
+            ).map_err(agent_vitals_data::authority::AuthorityError::Sqlite)
+        }).map_err(|e| error_value("issue_transition_failed", &e.to_string()))?;
+        Ok(json!({"status": "ok", "issue_id": issue_id, "to_status": to_status,
+            "transition_id": transition_id, "objective_resolution": to_status == "closed"}))
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
 #[allow(clippy::let_and_return)]
 fn issue_group_rollup(issues: &[Value]) -> Vec<Value> {
     let mut by_rule: BTreeMap<String, (String, Option<String>, usize, BTreeSet<String>)> = BTreeMap::new();

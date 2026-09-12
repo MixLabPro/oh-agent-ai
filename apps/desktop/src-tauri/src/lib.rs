@@ -2412,6 +2412,7 @@ pub fn run() {
             store::sessions_read,
             store::sessions_findings,
             store::sessions_issues,
+            store::issue_transition,
             peek_nav_target,
             clear_nav_target,
             focus_session,

@@ -651,3 +651,10 @@
 - 存量：`AuthorityDb::open` 执行幂等修复；仅修正 `<1e11` 的旧行，不删除 Issue、不改变 Issue 身份。重复执行第二次改动 0 行。
 - 验收：毫秒/秒/边界值、日桶、存量同步与幂等测试通过；data issues 8/8、runtime 编译与 clippy、desktop `cargo check --lib`、`git diff --check`通过。
 - 边界：真实用户库的修复前后数量与三条页面抽查仍需真机 UAT；不勾选 AC18 或完整 REQ-073。
+
+## Loop 78 · REQ-077 五态迁移边界（自验收）
+
+- 执行：补齐 `open ↔ later/acknowledged/closed/wontfix` 的合法迁移矩阵；新增桌面 `issue_transition` IPC，用户动作只写 Issue 生命周期和 `issue_status_transitions`。
+- 保护：`acknowledged` 不等于 `closed`；命令限制目标状态和理由长度，固定 actor/evaluator 证据，不执行 shell、不修改宿主文件；非法迁移由事务回滚并返回错误。
+- 验收：`later` 与 `acknowledged` 历史行回归通过；data issues 8/8、desktop 103/103、两 crate clippy 与差异检查通过。
+- 边界：IPC 尚未接入 L0/L1 桌面按钮，自动关闭和声明成功后的完成回写仍待实现；因此不勾选 AC18 或 REQ-077/078/079。
