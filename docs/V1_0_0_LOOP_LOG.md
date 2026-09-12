@@ -1811,3 +1811,9 @@
 - 发现：非 `app-v*` 的手动输入原本要到构建完成、artifact 下载后才被拒绝，浪费 CI 资源。
 - 修复：build job 增加最早期的 release tag 校验，并用 job 级 `RELEASE_TAG` 环境变量传递值；publish job 保留同一变量用于资产命名和 Release。
 - 验收：YAML 解析和 diff 检查通过；非法手动 tag 在 checkout 后、凭据检查和构建前失败。
+
+## Loop 258 · Release 禁止隐式创建 tag
+
+- 发现：`gh release create` 默认可在缺少 tag 时创建新 tag，与 workflow“从已有版本 tag 构建并发布”的约定不一致。
+- 修复：增加 `--verify-tag`，发布阶段只接受已经存在且已检出的 `app-v*` tag。
+- 验收：YAML 解析和 diff 检查通过；Release 创建命令已显式启用 tag 存在性校验。
