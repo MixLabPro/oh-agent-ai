@@ -82,39 +82,8 @@
         }
       }
     },
-    "subscriptions": {
-      "_doc": "用户确认的订阅套餐(basis=user-reported-invoice,2026-09-02 口述)。订阅覆盖该提供商全部用量,没有边际 token 账单——摊销单价仅供感知层(总成本/总用量),不得冒充 confirmed waste spend(ATTRIBUTABLE_WASTE.md §6)。计费模式判定链(2026-09-02,按序执行,前三层不依赖用户):①账户层读 ~/.claude.json::oauthAccount.billingType(有订阅值→套餐候选);②路由层读 ANTHROPIC_BASE_URL/AUTH_TOKEN/ANTHROPIC_API_KEY(非官方端点→按量);③事件层扫语料 quotaLimits 拒绝史(five_hour/seven_day 出现→订阅窗口在跑,isUsingOverage=0→撞窗被拒不兜底);④前三层判不出或量与窗口矛盾→才向用户确认一句。session.jsonl 不保留端点,历史路由靠模型名+缓存语义推断(claude-* 且 cache_creation>0→官方端点;deepseek-* 且 cc=0→DeepSeek 端点)。",
-      "claude-pro": {
-        "provider": "anthropic", "currency": "USD", "amount_per_month": 20.0,
-        "billing_period_start": "2025-07-20",
-        "reported_at": "2026-09-02",
-        "note": "Claude Pro $20/月(账户层已核实:~/.claude.json oauthAccount.billingType=apple_subscription,hasExtraUsageEnabled=false,超额被拒不兜底)。覆盖核对:Claude Code 语料 claude 族 19,248 事件/月(逻辑 10,861)远超 Pro 5h 窗口限额;语料内 20 条 five_hour/seven_day 配额拒绝(quotaLimits,resetsAt 2026-08-19→09-01,isUsingOverage=0)证明官方端点流量挂在订阅窗口体系下,且拒绝史在 09-01 路由切换处终止;当前路由 ANTHROPIC_BASE_URL=api.deepseek.com 全按量(Pro 不参与)。8 月 claude 流量量级超窗口,必然部分走 API——套餐/按量的切割日志不可裁定,待用户一句话确认(是否设过 ANTHROPIC_API_KEY)。"
-      },
-      "minimax-sub": {
-        "provider": "minimax", "currency": "CNY", "amount_per_month": 114.0,
-        "reported_at": "2026-09-02"
-      },
-      "glm-coding-lite": {
-        "provider": "zhipu-glm", "currency": "CNY", "amount_per_month": 118.0,
-        "reported_at": "2026-09-05",
-        "note": "GLM Coding Plan lite ¥118/月(2026-09-05 口述)。官方按量价卡未录入——glm-* 在名义/按量口径下报 unpriced_tokens,不得借其他卡替代(catalog 借卡实测差 46 倍);实际侧单位摊销可由月费/observed tokens 直算,日志只覆盖部分账期时是上界(ATTRIBUTABLE_WASTE §6.1)。"
-      }
-    },
     "billing_modes": {
-      "_doc": "计费模式声明(basis=user-declared,2026-09-05 口述)。回答「这个模型的钱付给谁、按什么方式付」,与价卡相互独立——无价卡的模型(glm-*)也必须能归属计费方,这是与 resolve_card_catalog(靠价卡反查,glm 因此落 view 外)的本质区别。解析:按本节声明序线性扫描,第一个 models 前缀命中者胜(先专后泛:shengsuanyun 的 0813 专属行必须排在 deepseek-official 的 deepseek-v4 泛行前);匹配规则与 norm_model_in 同(剥 / + starts_with)。mode=subscription 表示用量在套餐窗口内、无边际 token 账单(标价折算只作诊断);metered 表示逐 token 真实计费;金额在 subscriptions 节,本节只声明模式;两节都缺=unknown,不得默认。",
-      "anthropic": {
-        "mode": "subscription", "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
-        "_note": "账户层已核实 Pro 订阅(oauthAccount.billingType=apple_subscription);但 2026-09-01 起存在中转路由(见 subscriptions.claude-pro.note 的悬而未决),claude-* 流量的套餐/中转切割日志不可裁定。消费方必须把利用率倍数>50 当归属待核告警,不得当套利展示(实测 380× 即此形态)。"
-      },
-      "minimax": { "mode": "subscription", "models": ["MiniMax-M"] },
-      "zhipu-glm": {
-        "mode": "subscription", "models": ["glm-5.3"],
-        "_note": "GLM Coding Plan lite(2026-09-05)。价卡缺口:glm-* 官方按量价未录入,名义侧报 unpriced——补卡时 input_cached 是唯一必须问准的数(实测占名义成本 78.9%)。"
-      },
-      "openai": {
-        "mode": "subscription", "models": ["gpt-5.6"],
-        "_note": "Codex 全部 60 份 rollout 实测 model_provider=openai、rate_limits.plan_type=plus,单一提供方订阅制。月费金额未声明(subscriptions 无行)——利用率倍数在金额补录前不可算,不得拿 Plus 挂牌价猜。"
-      },
+      "_doc": "公共目录只声明官方按量路由的模型匹配，不包含任何用户套餐、付款、账户或路由身份。订阅与实际付款必须来自本地用户声明/host_bills；缺少明确订阅证据时按量估算并标记待确认。",
       "shengsuanyun": { "mode": "metered", "models": ["deepseek-v4-pro-0813"] },
       "deepseek-official": { "mode": "metered", "models": ["deepseek-v4"] }
     },

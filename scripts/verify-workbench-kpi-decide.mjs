@@ -46,7 +46,8 @@ ok(html.includes("跨宿主按量实付") && !html.includes("仅 DSH 实测"),
 // ── vm 执行真实文件 ──
 function makeElement() {
   const classes = new Set();
-  return { textContent: "", innerHTML: "", hidden: false, style: {},
+  return { textContent: "", innerHTML: "", hidden: false, style: {}, dataset: {},
+    append() {},
     className: "", title: "", appendChild() {}, setAttribute() {},
     classList: {
       add: (c) => classes.add(c),
@@ -60,7 +61,11 @@ function makeElement() {
 }
 const elements = {};
 const el = (id) => (elements[id] ??= makeElement());
+const sessionStorage = new Map();
+sessionStorage.getItem = (key) => sessionStorage.get(key) ?? null;
+sessionStorage.setItem = (key, value) => sessionStorage.set(key, String(value));
 const sandbox = {
+  sessionStorage,
   window: {
     __TAURI__: {
       core: { invoke: async (cmd) => {

@@ -693,6 +693,7 @@ function renderFirstRunState(sync) {
   const pause = document.getElementById("ov-first-run-pause");
   if (!panel || !sources || !pause) return;
   panel.hidden = !sync || sync.stage !== "never";
+  if (!sources.dataset) sources.dataset = {};
   if (sources.dataset.bound === "1") return;
   sources.dataset.bound = "1";
   sources.onclick = () => switchTab("sources");

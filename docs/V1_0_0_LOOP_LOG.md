@@ -549,4 +549,11 @@
 - 验收：runtime 专项测试通过、desktop 单元测试 103/103、desktop Clippy `-D warnings`、`git diff --check`通过。
 - 边界：真实 macOS 通知权限、首穿/静默/点击路径及跨入口真机 UAT 尚未完成，不勾选 AC19 或 REQ-035/036。
 
+## Loop 64 · 全仓验收回归修复（自验收）
+
+- 执行：修复 DSH 集成价目表未与 `assets/pricing.json` 字节同步的问题；补齐工作台 KPI 验证器 mock 的 `dataset`、`sessionStorage` 与 `append` 能力，使其覆盖真实首启/预算渲染路径。
+- 验收：价目表 lockstep 3/3、KPI/决策脚本通过；Python 全套 1130 项中除该两项外通过，原有 201 项因未配置 Rust 二进制而跳过；失败已不再复现。
+- 保护：不改用户数据和未跟踪文档；集成价目表继续由共享资产作为唯一源，验证器仍执行真实 `workbench.js`。
+- 边界：Python/Rust 双实现对拍需设置 `AGENT_VITALS_BIN`，真实 macOS 通知权限与真机 UAT 仍未完成，不勾选 AC19 或 REQ-035/036。
+
 本日志只记录已经完成的实现和证据；上述“尚未完成”不改变任何 PRD 勾选状态。任何单次修改连续测试失败超过5次，或任何单次Loop超过30分钟，立即暂停并记录；不得以拆分日志规避熔断。
