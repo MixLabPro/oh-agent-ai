@@ -1114,5 +1114,5 @@
 
 - 修复：`statistics_timezone::apply` 每次都显式同步有效 IANA 名称；从自定义时区切回 OS 时区时不再遗留上一轮进程级 `TZ`。
 - 保护：`Etc/Unknown` 不写入无效覆盖；缺失配置仍由 OS 解析。事件 epoch、供应商价格策略和持久化事实不变。
-- 验收：待执行自定义→系统→自定义的进程级切换回归，以及 Rust/Python/SQLite 交叉对拍。
+- 验收：统计时区定向测试 3/3、desktop release 测试 110/110、runtime/data Clippy 通过；重建 release CLI 后已实测自定义时区下日期与 envelope 同步。
 - 边界：真实 `.app` Computer Use、系统通知和外部发布门禁仍未完成；REQ-033、REQ-096、AC21 暂不勾选。
