@@ -305,6 +305,8 @@ pub async fn sessions_findings(
 #[tauri::command]
 pub async fn sessions_issues(
     state: tauri::State<'_, StoreBuildLock>,
+    page_size: Option<usize>,
+    cursor: Option<String>,
 ) -> Result<Value, Value> {
     let lock = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -318,28 +320,34 @@ pub async fn sessions_issues(
         let path = agent_vitals_data::authority::default_authority_path(&data_home());
         let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
             .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
-        let groups = agent_vitals_data::issues::issue_groups_with_sources(
-            db.conn(), None, None, 500, None,
+        let all_groups = agent_vitals_data::issues::issue_groups_with_sources(
+            db.conn(), None, None, usize::MAX, None,
         ).map_err(|e| error_value("authority_query", &e.to_string()))?;
-        let rows = groups["groups"].as_array().cloned().unwrap_or_default();
-        let mut rows = rows;
-        let mut budget_added = false;
-        if let Some(budget) = agent_vitals_runtime::budget::budget_status_sql_at(
+        let groups = agent_vitals_data::issues::issue_groups_with_sources(
+            db.conn(), None, None, page_size.unwrap_or(50), cursor.as_deref(),
+        ).map_err(|e| error_value("authority_query", &e.to_string()))?;
+        let all_rows = all_groups["groups"].as_array().cloned().unwrap_or_default();
+        let mut rows = groups["groups"].as_array().cloned().unwrap_or_default();
+        let budget_group = agent_vitals_runtime::budget::budget_status_sql_at(
             &data_home(), &crate::overview::current_month_beijing(),
-        ) {
-            if matches!(budget["level"].as_str(), Some("warn" | "exceeded")) {
-                rows.push(budget_issue_group(&budget));
-                budget_added = true;
-            }
+        ).filter(|budget| matches!(budget["level"].as_str(), Some("warn" | "exceeded")))
+            .map(|budget| budget_issue_group(&budget));
+        let budget_added = budget_group.is_some();
+        if cursor.is_none() {
+            if let Some(budget) = budget_group.clone() { rows.push(budget); }
         }
-        let count = |severity: &str| rows.iter().filter(|v| v["severity"] == severity).count();
-        let rules = issue_group_rollup(&rows);
-        let sessions_with: usize = rows.iter().map(|v| v["sessions"].as_u64().unwrap_or(0) as usize).sum();
-        let total_groups = groups["total_groups"].as_u64().unwrap_or(0) + u64::from(budget_added);
+        let mut all_rows_with_budget = all_rows;
+        if budget_added {
+            all_rows_with_budget.push(budget_group.clone().expect("budget_group is present"));
+        }
+        let count = |severity: &str| all_rows_with_budget.iter().filter(|v| v["severity"] == severity).count();
+        let rules = issue_group_rollup(&all_rows_with_budget);
+        let sessions_with: usize = all_rows_with_budget.iter().map(|v| v["sessions"].as_u64().unwrap_or(0) as usize).sum();
+        let total_groups = all_groups["total_groups"].as_u64().unwrap_or(0) + u64::from(budget_added);
         Ok(serde_json::json!({
             "totals": { "issues": total_groups, "findings": groups["source_issue_count"], "critical": count("critical"), "warning": count("warning"), "info": count("info"), "sessions": sessions_with, "sessions_total": sessions_with },
             "rules": rules, "issues": rows, "findings": [], "source": "unified_issue_groups",
-            "next_cursor": groups["next_cursor"], "source_projection_count": groups["source_projection_count"].as_u64().unwrap_or(0) + u64::from(budget_added)
+            "next_cursor": groups["next_cursor"], "source_projection_count": all_groups["source_projection_count"].as_u64().unwrap_or(0) + u64::from(budget_added)
         }))
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
 }

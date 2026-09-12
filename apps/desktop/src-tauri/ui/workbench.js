@@ -336,7 +336,7 @@ let sessFilter = "all";
 let sessStatusFilter = "all";
 // Findings/数据源页同款懒加载：CLI 汇总较重（sessions_findings / sessions_list 都
 // spawn 二进制），首进一次、之后「重载」按钮刷新——与 sessions 页同一套理由。
-let findState = { loaded: false, error: false, data: null, sev: "all", rule: "all", expanded: {} };
+let findState = { loaded: false, error: false, data: null, sev: "all", rule: "all", expanded: {}, nextCursor: null, loadingMore: false };
 let srcState = { loaded: false, error: false, sources: null, sync: null, paused: false };
 
 function switchTab(name) {
@@ -4023,7 +4023,7 @@ function findingSessionLabel(f) {
 
 async function loadFindings(reset) {
   if (reset) {
-    findState = { loaded: true, error: false, data: null, sev: "all", rule: "all", expanded: {} };
+    findState = { loaded: true, error: false, data: null, sev: "all", rule: "all", expanded: {}, nextCursor: null, loadingMore: false };
     document.getElementById("find-banner").hidden = true;
   }
   findState.loaded = true;
@@ -4032,8 +4032,9 @@ async function loadFindings(reset) {
   const loadingEl = document.getElementById("find-loading");
   loadingEl.hidden = false;
   try {
-    const data = await invoke("sessions_issues");
+    const data = await invoke("sessions_issues", { pageSize: 50, cursor: null });
     findState.data = data;
+    findState.nextCursor = data && data.next_cursor || null;
     findState.error = false;
     renderFindings();
   } catch (e) {
@@ -4043,6 +4044,29 @@ async function loadFindings(reset) {
     renderFindings();
   } finally {
     loadingEl.hidden = true;
+  }
+}
+
+async function loadMoreFindings() {
+  if (!findState.nextCursor || findState.loadingMore || !findState.data) return;
+  findState.loadingMore = true;
+  const button = document.getElementById("find-more");
+  button.disabled = true;
+  button.textContent = "加载中…";
+  try {
+    const data = await invoke("sessions_issues", { pageSize: 50, cursor: findState.nextCursor });
+    const current = Array.isArray(findState.data.issues) ? findState.data.issues : [];
+    const incoming = data && Array.isArray(data.issues) ? data.issues : [];
+    findState.data = { ...findState.data, ...data, issues: current.concat(incoming) };
+    findState.nextCursor = data && data.next_cursor || null;
+    renderFindings();
+  } catch (e) {
+    showBanner("find-banner", e, false);
+  } finally {
+    findState.loadingMore = false;
+    button.disabled = false;
+    button.textContent = "加载更多";
+    button.hidden = !findState.nextCursor;
   }
 }
 
@@ -4063,6 +4087,7 @@ function renderFindings() {
     document.getElementById("find-body").innerHTML = "";
     document.getElementById("find-note").textContent = "";
     foot.textContent = "";
+    document.getElementById("find-more").hidden = true;
     empty.hidden = true;
     return;
   }
@@ -4141,9 +4166,10 @@ function renderFindings() {
   if (sevSel.value !== findState.sev) sevSel.value = findState.sev;
 
   renderFindingsDetail();
-  foot.textContent = total > 500
-    ? "共 " + total + " 条，仅显示前 500（可用「严重度 / 规则」筛选收窄，筛选后再按需展示）。"
-    : "";
+  foot.textContent = findState.nextCursor
+    ? "已加载 " + rows.length + " / " + total + " 条，可继续加载。"
+    : "共 " + rows.length + " 条已加载。";
+  document.getElementById("find-more").hidden = !findState.nextCursor;
 }
 
 // 只重画明细表：筛选下拉 change 时调，不碰卡片/规则表。
@@ -4724,6 +4750,7 @@ function init() {
     document.getElementById("sess-list-view").hidden = false;
   });
   document.getElementById("find-reload").addEventListener("click", () => loadFindings(true));
+  document.getElementById("find-more").addEventListener("click", loadMoreFindings);
   document.getElementById("find-sev").addEventListener("change", (ev) => {
     findState.sev = ev.target.value;
     renderFindingsDetail();

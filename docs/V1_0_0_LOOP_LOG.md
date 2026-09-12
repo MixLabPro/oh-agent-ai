@@ -734,3 +734,10 @@
 - 保护：金额、预算分子、通知投递账本和用量事实未改写；测试只写入并立即清除预算静默单行。
 - 验收：北京时间月界线单测通过，桌面 release 测试 106/106、Clippy、node --check、git diff --check、.app 重建、ad-hoc 安装和 Computer Use 真机路径通过。
 - 边界：真实系统通知权限、阈值首穿通知去重和通知点击回预算页仍未完成完整 UAT，不勾选 AC19。
+
+## Loop 89 · L0 问题分组分页与证据脱敏修复（自验收）
+
+- 修复：问题分组查询对 `usize::MAX` 采用明确的无限量语义，不再因统一 `clamp(1, 500)` 静默丢失第 501 条之后的分组；桌面 Issues 改为每页 50 条并提供“加载更多”，总数和规则汇总仍基于完整集合。
+- 修复：L0 分组键和 `evidence_class` 优先使用结构化 `metadata.category`，仅在缺失时回退 `metadata.evidence`；样本中的 evidence/path/file_path/source_path 路径字段默认脱敏，L2 主动详情读取链路保持不变。
+- 回归：data crate 问题分组测试 2/2、desktop release 测试 106/106、desktop clippy `-D warnings`、workbench JS 语法和 `git diff --check` 通过。
+- 边界：本轮修复解决验证报告中的 P0/P1 代码问题；真实数据上的计费重算链与双预算账单链仍需单独使用安全副本完成端到端证据，不因此勾选 AC18/AC19/AC28 或相关完整 REQ。

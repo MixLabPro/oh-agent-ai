@@ -299,10 +299,32 @@ fn issue_day_bucket(opened_at_ms: i64) -> String {
 
 fn issue_group_key(issue_type: &str, host: &str, fingerprint: &str, opened_at_ms: i64, metadata: &Value) -> String {
     let object = issue_object(issue_type, fingerprint, metadata);
-    let evidence_class = metadata.get("evidence").and_then(Value::as_str)
-        .or_else(|| metadata.get("category").and_then(Value::as_str))
+    let evidence_class = metadata.get("category").and_then(Value::as_str)
+        .or_else(|| metadata.get("evidence").and_then(Value::as_str))
         .unwrap_or("<unknown>");
     format!("{issue_type}\0{host}\0{object}\0{evidence_class}\0{}", issue_day_bucket(opened_at_ms))
+}
+
+fn issue_evidence_class(metadata: &Value) -> String {
+    metadata.get("category").and_then(Value::as_str)
+        .or_else(|| metadata.get("evidence").and_then(Value::as_str))
+        .unwrap_or("<unknown>").to_string()
+}
+
+fn redact_issue_sample_metadata(metadata: &Value) -> Value {
+    let mut sanitized = metadata.clone();
+    if let Some(object) = sanitized.as_object_mut() {
+        for key in ["evidence", "path", "file_path", "source_path"] {
+            if let Some(value) = object.get_mut(key) {
+                if let Some(text) = value.as_str() {
+                    if text.starts_with('/') || text.contains('/') || text.contains('\\') {
+                        *value = json!("<redacted-path>");
+                    }
+                }
+            }
+        }
+    }
+    sanitized
 }
 
 #[derive(Default)]
@@ -500,7 +522,8 @@ pub fn issue_groups_with_sources(
     groups.sort_by(|a, b| b["actionability"].as_f64().partial_cmp(&a["actionability"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| a["group_id"].as_str().cmp(&b["group_id"].as_str())));
     let offset = cursor.and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(groups.len());
-    let end = (offset + page_size.clamp(1, 500)).min(groups.len());
+    let limit = if page_size == usize::MAX { groups.len() } else { page_size.clamp(1, 500) };
+    let end = offset.saturating_add(limit).min(groups.len());
     Ok(json!({"groups": groups[offset..end].to_vec(), "next_cursor": (end < groups.len()).then(|| end.to_string()),
         "total_groups": groups.len(), "source_issue_count": behavior["source_issue_count"].as_u64().unwrap_or(0),
         "source_projection_count": groups.len().saturating_sub(behavior["total_groups"].as_u64().unwrap_or(0) as usize)}))
@@ -548,9 +571,7 @@ pub fn issue_groups(
         let metadata = serde_json::from_str::<Value>(&metadata_raw).unwrap_or_else(|_| json!({}));
         let key = issue_group_key(&rule, &host, &fingerprint, opened, &metadata);
         let object = issue_object(&rule, &fingerprint, &metadata);
-        let evidence_class = metadata.get("evidence").and_then(Value::as_str)
-            .or_else(|| metadata.get("category").and_then(Value::as_str))
-            .unwrap_or("<unknown>").to_string();
+        let evidence_class = issue_evidence_class(&metadata);
         let bucket = issue_day_bucket(opened);
         let entry = groups.entry(key).or_insert_with(|| IssueGroupAccum {
             rule: rule.clone(), host: host.clone(), object: object.clone(),
@@ -565,7 +586,8 @@ pub fn issue_groups(
         entry.status_rollup[status_index(&status)] += 1;
         if let Some(session) = session { entry.sessions.insert(session); }
         if entry.sample_evidence.len() < 3 {
-            entry.sample_evidence.push(json!({"issue_id": issue_id, "evidence": evidence, "metadata": metadata}));
+            entry.sample_evidence.push(json!({"issue_id": issue_id, "evidence": evidence,
+                "metadata": redact_issue_sample_metadata(&metadata)}));
         }
     }
     let mut values: Vec<Value> = groups.into_iter().map(|(key, group)| {
@@ -589,7 +611,8 @@ pub fn issue_groups(
     values.sort_by(|a, b| b["actionability"].as_f64().partial_cmp(&a["actionability"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| a["group_id"].as_str().cmp(&b["group_id"].as_str())));
     let offset = cursor.and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(values.len());
-    let end = (offset + page_size.clamp(1, 500)).min(values.len());
+    let limit = if page_size == usize::MAX { values.len() } else { page_size.clamp(1, 500) };
+    let end = offset.saturating_add(limit).min(values.len());
     let next_cursor = (end < values.len()).then(|| end.to_string());
     Ok(json!({"groups": values[offset..end].to_vec(), "next_cursor": next_cursor,
         "total_groups": values.len(), "source_issue_count": source_issue_count}))
@@ -831,6 +854,36 @@ mod tests {
         let second = issue_groups(db.conn(), None, None, 1, Some(next)).unwrap();
         assert_eq!(first["groups"].as_array().unwrap().len(), 1);
         assert_eq!(second["groups"].as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn issue_groups_use_category_before_evidence_and_unlimited_is_explicit() {
+        let path = std::env::temp_dir().join(format!("av-issue-group-contract-{}", std::process::id()));
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        for index in 0..1_i64 {
+            let metadata = if index == 0 {
+                r#"{"category":"command","evidence":"/Users/alice/private.log","path":"/Users/alice/private.log"}"#
+            } else {
+                r#"{"category":"command","evidence":"command-pattern"}"#
+            };
+            let input = IssueInput {
+                machine_namespace: "machine", host: "codex", session_key: Some("session"),
+                issue_type: "SV601", instance_fingerprint: "fp-shared", status: "open",
+                severity: "warning", evaluator_id: "evaluator", evaluator_version: "1",
+                evidence_fingerprint: &format!("ev-{index}"), opened_at_ms: index + 1,
+                metadata_json: metadata,
+            };
+            upsert_issue(db.conn(), &input).unwrap();
+        }
+        let all = issue_groups(db.conn(), None, None, usize::MAX, None).unwrap();
+        assert_eq!(all["total_groups"], 1);
+        assert_eq!(all["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(all["groups"][0]["evidence_class"], "command");
+        assert_eq!(all["groups"][0]["sample_evidence"][0]["metadata"]["evidence"], "<redacted-path>");
+        assert_eq!(all["groups"][0]["sample_evidence"][0]["metadata"]["path"], "<redacted-path>");
+        let first = issue_groups(db.conn(), None, None, 1, None).unwrap();
+        assert!(first["next_cursor"].is_null());
         let _ = std::fs::remove_file(path);
     }
 
