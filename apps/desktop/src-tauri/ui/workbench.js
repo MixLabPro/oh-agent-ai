@@ -4430,6 +4430,7 @@ function statusRollupLabel(rollup) {
 }
 
 function issueActionsForStatus(status) {
+  status = issueStatusCanonical(status);
   const actions = {
     open: [["later", "稍后"], ["acknowledged", "已确认"], ["resolved", "已解决"], ["not_applicable", "不适用"]],
     later: [["open", "恢复待处理"], ["acknowledged", "已确认"], ["resolved", "已解决"], ["not_applicable", "不适用"]],
@@ -4438,6 +4439,24 @@ function issueActionsForStatus(status) {
     not_applicable: [["open", "恢复待处理"]],
   };
   return actions[status] || actions.open;
+}
+
+function issueStatusCanonical(status) {
+  return {
+    pending: "open",
+    closed: "resolved",
+    wontfix: "not_applicable",
+  }[status] || status || "open";
+}
+
+function issueStatusLabel(status) {
+  return {
+    open: "待处理",
+    later: "稍后",
+    acknowledged: "已确认",
+    resolved: "已解决",
+    not_applicable: "不适用",
+  }[issueStatusCanonical(status)] || "未知状态";
 }
 
 function issueSourceLabel(sourceKind) {
@@ -4512,14 +4531,14 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
       const line = document.createElement("div");
       line.className = "issue-instance-line";
       const text = document.createElement("span");
-      text.textContent = (instance.evidence || "—") + " · " + (instance.status || "open");
+      text.textContent = (instance.evidence || "—") + " · " + issueStatusLabel(instance.status);
       line.appendChild(text);
       const detailButton = el("button", "btn secondary");
       detailButton.type = "button";
       detailButton.textContent = "详情";
       detailButton.addEventListener("click", () => showIssueInstanceDetail(instance.issue_id, line, instance));
       line.appendChild(detailButton);
-      const currentStatus = instance.status || "open";
+      const currentStatus = issueStatusCanonical(instance.status);
       for (const [status, label] of issueActionsForStatus(currentStatus)) {
         const button = el("button", "btn secondary");
         button.type = "button";
@@ -4556,7 +4575,7 @@ async function showIssueInstanceDetail(issueId, line, seed) {
       issue_id: issue && issue.issue_id || issueId,
       host_kind: issue && issue.host_kind || seed && seed.host_kind || null,
       rule: issue && issue.rule || seed && seed.rule || null,
-      status: issue && issue.status || seed && seed.status || null,
+      status: issueStatusLabel(issue && issue.status || seed && seed.status || null),
       evidence: issue && issue.evidence || seed && seed.evidence || null,
       opened_at_ms: issue && issue.opened_at_ms || seed && seed.opened_at_ms || null,
       metadata,

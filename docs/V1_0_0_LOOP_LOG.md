@@ -975,3 +975,10 @@
 - 保护：来源权威表保持只读且彼此不合并；投影组明确不能按行为 Issue 关闭，避免“暂无原始命中”掩盖真实来源证据。
 - 验收：真实 Workbench KPI/状态验证器、JS 语法检查、Vite production build 与 `git diff --check`通过。
 - 边界：来源投影的完整 L1/L2 权威明细接口、六族真实数据覆盖和 AC18 Computer Use UAT 仍待后续阶段。
+
+## Loop 125 · Issue 旧状态别名界面归一
+
+- 修复：行为 Issue 明细行和详情将历史 `closed/wontfix` 统一显示为“已解决/不适用”，并在操作矩阵中按规范 `resolved/not_applicable` 处理；`pending` 也统一按待处理语义展示。
+- 保护：仅改变用户界面翻译和动作选择，不改写历史状态值；权威层的兼容读取与规范新写入保持不变。
+- 验收：真实 Workbench KPI/状态验证器覆盖旧别名归一、动作矩阵，JS 语法检查与 `git diff --check`通过。
+- 边界：真实五态点击回执、迁移历史验证和 AC18 Computer Use UAT 仍待可操作桌面环境。

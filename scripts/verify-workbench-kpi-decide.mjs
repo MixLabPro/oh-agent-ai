@@ -138,6 +138,10 @@ ok(JSON.stringify(sandbox.issueActionsForStatus("later")) === JSON.stringify([
 ok(JSON.stringify(sandbox.issueActionsForStatus("acknowledged")) === JSON.stringify([
   ["open", "恢复待处理"], ["later", "稍后"], ["resolved", "已解决"], ["not_applicable", "不适用"],
 ]), "已确认状态仍可直接推进到稍后/解决/不适用");
+ok(sandbox.issueStatusCanonical("closed") === "resolved" &&
+  sandbox.issueStatusCanonical("wontfix") === "not_applicable" &&
+  sandbox.issueStatusLabel("closed") === "已解决",
+  "旧状态别名在界面统一显示为规范中文五态");
 
 const num = (id) => elements[id]?.textContent ?? "";
 const sub = (id) => elements[id + "-sub"]?.textContent ?? "";
