@@ -819,3 +819,11 @@
 - 修复：`billing_import_candidates` 临时读取失败时不再用空候选覆盖当前面板；只有明确成功且返回空数组时才关闭面板。这样后台异常不会把用户正在查看的候选误判为已消失。
 - 验收：release `.app` 重建成功；新按钮在 AX 树中显示 `(collapsed)` 与 `Secondary Actions: Expand`，说明可访问状态已进入最终包。
 - 真机边界：Computer Use 本轮点击“确认套餐信息”和“稍后”均只改变焦点、未触发 WebView 事件；该输入通道异常仍待设备/窗口重新聚焦后复验，不勾选 AC13/AC27。
+
+## Loop 102 · 发布候选全量回归门禁（自验收）
+
+- 回归：`python3 -m unittest discover tests -v` 共 1188 项通过，208 项按既有环境条件跳过；未出现失败。
+- 对拍：`AGENT_VITALS_BIN=target/release/agent-vitals python3 tests/golden_runner.py --diff` 的 15 个 case 全部与 golden 逐字节一致。
+- Rust：`cargo test --release` 全量通过；`cargo clippy --release --all-targets -- -D warnings` 通过。
+- 工作区：差异仅保留用户已有的 WorkBuddy/Phase 文档，未修改、未暂存；本轮没有因此勾选尚未完成真机或外部发布门禁的 AC。
+- 边界：AC13/AC27 套餐确认点击回执、AC21 系统时区、AC18/AC19 完整真机验收，以及签名/公证和外部试用仍待完成。
