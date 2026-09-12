@@ -926,3 +926,10 @@
 - 保护：不改变预算计算、币种隔离或未解决用量判定；避免 `spent_minor` 缺省值 0 在界面上制造绿色安全结论。
 - 验收：真实 `workbench.js` 的 KPI/状态验证器通过（含 no_data/incomplete/ok 三态）、JS 语法检查与 `git diff --check`通过。
 - 边界：完整 AC10/REQ-038 的跨入口真机与 CLI/MCP 对拍仍需在安全副本中继续执行。
+
+## Loop 118 · 历史缺价三态文案补齐
+
+- 修复：工作台价格来源说明新增 `no-price-card` 与 `no-pricing-snapshot` 映射，分别显示“没有匹配的原厂价格卡”和“历史缺少事件时间的价格快照”；存在未解决用量但无金额时仍保留“价格暂不可用”说明。
+- 保护：参考估算继续区分官方价与当前价，不把当前价写成历史官方价格；不改变权威计价、token 或账单数据。
+- 验收：真实 Workbench KPI 验证器、JS 语法检查、Vite production build 与 `git diff --check`通过。
+- 边界：AC07 的真实历史缺价/当前价/完全无卡数据矩阵仍需安全副本真机与 CLI/MCP 对拍。

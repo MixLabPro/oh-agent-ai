@@ -58,6 +58,12 @@ ok(wb.includes('args.date_from = from') && wb.includes('args.date_to = to'),
   "会话自定义日期范围透传到权威查询");
 ok(wb.includes('s.cost_status && s.cost_status.state === sessStatusFilter'),
   "会话计费状态筛选只使用权威 cost_status.state，不以金额空值猜测");
+ok(wb.includes('"no-price-card": "没有匹配的原厂价格卡"'),
+  "完全无价卡状态翻译为明确的原厂价格卡缺失");
+ok(wb.includes('"no-pricing-snapshot": "历史缺少事件时间的价格快照"'),
+  "历史缺价状态明确说明没有事件时间价格快照");
+ok(wb.includes('pricing || reason || row.has_unresolved'),
+  "无价卡且没有金额时仍显示价格不可用说明，不隐藏失败态");
 
 // ── vm 执行真实文件 ──
 function makeElement() {

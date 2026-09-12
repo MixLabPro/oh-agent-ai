@@ -2040,6 +2040,8 @@ function pricingReasonText(reason) {
     "billing-route-unknown": "付费方式待确认",
     "provider-specific-card-unavailable": "缺少对应服务商价卡",
     "missing-or-unpriced-route-evidence": "来源或价格仍待确认",
+    "no-price-card": "没有匹配的原厂价格卡",
+    "no-pricing-snapshot": "历史缺少事件时间的价格快照",
   }[reason] || null;
 }
 
@@ -2115,7 +2117,7 @@ function renderSourcesPanel(dto, prefix) {
 
       const pricing = pricingMethodText(row.pricing_method);
       const reason = pricingReasonText(row.unresolved_reason);
-      if (pricing || reason) {
+      if (pricing || reason || row.has_unresolved) {
         const explain = document.createElement("span");
         explain.className = "pricing-explain";
         explain.textContent = pricing || "价格暂不可用";
