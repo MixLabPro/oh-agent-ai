@@ -1147,3 +1147,9 @@
 - 验收：`AGENT_VITALS_BIN=target/release/agent-vitals python3 tests/golden_runner.py --diff` 的 15 个 case 全部逐字节一致；Vite production build 通过。
 - 发现：仓库级 `cargo fmt --all -- --check` 仍报告既有未格式化 Rust 文件；本轮未运行 formatter 改写文件，避免制造无关大 diff。该检查不作为本轮代码改动的通过证据。
 - 边界：真实 `.app` 窗口 Computer Use、通知权限、签名/公证和外部试用仍待完成；不因此勾选 AC19/AC21 或发布门禁。
+
+## Loop 151 · 安装包 Computer Use 尝试
+
+- UAT：`UAT: AC21 walked ✘`；使用安装后的 `/Applications/agent-vitals.app` 读取工作台状态时，Computer Use 返回 macOS 已锁定且自动解锁失败，未取得可用窗口或点击证据。
+- 结论：不把进程启动、CLI 隔离验证或 SQLite 对拍扩大为真实桌面 UAT；AC21 继续不勾选，待用户手动解锁后复验。
+- 边界：签名/公证、通知权限和外部试用门禁同样未完成。
