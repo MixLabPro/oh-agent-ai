@@ -2165,3 +2165,10 @@
   均无失败，测试进程正常退出。
 - 结论：Intel 目标的 CLI/公共 Rust workspace 已有编译加运行证据；完整 Intel `.app`
   仍需原生 macOS-13 runner 产出并完成签名、公证与安装验收。
+
+## Loop 303 · 窄视口核心操作检查
+
+- UAT: AC22 partial walked ✔：Vite 工作台在 320px 等效窄视口下，`body` 与 `main` 均无
+  横向溢出；总览、Token 日历、会话、Issues、数据源五个主导航及核心按钮仍可见可操作。
+- 边界：本轮证明响应式布局与键盘前提的可见性，不替代真实 200% 字号、读屏、Escape/返回
+  和 `.app` 窗口验收。
