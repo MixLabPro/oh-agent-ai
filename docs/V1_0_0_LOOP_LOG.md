@@ -1805,3 +1805,9 @@
 - 发现：手动填写 `release_tag` 后，checkout 仍可能检出默认分支，造成“发布名是目标 tag、内容却来自其他提交”。
 - 修复：checkout 使用 `${{ inputs.release_tag || github.ref }}`，手动运行和 tag push 均从对应版本 ref 构建。
 - 验收：YAML 解析和 diff 检查通过；手动发布的代码来源与发布 tag 绑定。
+
+## Loop 257 · 提前校验桌面发布 tag
+
+- 发现：非 `app-v*` 的手动输入原本要到构建完成、artifact 下载后才被拒绝，浪费 CI 资源。
+- 修复：build job 增加最早期的 release tag 校验，并用 job 级 `RELEASE_TAG` 环境变量传递值；publish job 保留同一变量用于资产命名和 Release。
+- 验收：YAML 解析和 diff 检查通过；非法手动 tag 在 checkout 后、凭据检查和构建前失败。

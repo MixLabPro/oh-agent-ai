@@ -17,12 +17,23 @@ jobs:
   build:
     name: build and notarize macOS app
     runs-on: macos-latest
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release_tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -eu
+          case "$RELEASE_TAG" in
+            app-v*) ;;
+            *) echo "release tag must start with app-v*: $RELEASE_TAG" >&2; exit 1 ;;
+          esac
 
       - name: Require release signing credentials
         env:
@@ -97,9 +108,5 @@ jobs:
             dist/macos/agent-vitals.app \
             release/agent-vitals-${RELEASE_TAG}.app.zip
           cp dist/dmg/*.dmg release/
-          case "$RELEASE_TAG" in
-            app-v*) ;;
-            *) echo "release tag must start with app-v*: $RELEASE_TAG" >&2; exit 1 ;;
-          esac
           gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes
           gh release upload "$RELEASE_TAG" release/*
