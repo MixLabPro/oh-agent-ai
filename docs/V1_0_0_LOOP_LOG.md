@@ -1592,3 +1592,9 @@
 - 发现：在约 569px 的窄浏览器视口检查时，`.sess-toolbar` 实际计算样式为 `nowrap`；旧验证器的跨规则正则误报为已支持换行。
 - 修复：为会话工具栏加入真实 `flex-wrap: wrap`，并将验证器收紧为只匹配 `.sess-toolbar` 规则块，避免相邻 CSS 规则造成假阳性。
 - 验收：窄视口下 12 个会话控件无页面横向溢出，计算样式为 `wrap`；Vite 构建、Workbench closeout verifier、浏览器 reload smoke 和 `git diff --check` 通过。临时视口已恢复默认。
+
+## Loop 222 · 会话详情卡片响应式覆盖修复
+
+- 发现：约 569px 视口打开真实 mock 会话详情时，`.detail-cards` 仍计算为 4 列、宽度 704px；早期媒体规则被后置基础网格声明覆盖。
+- 修复：在 CSS 全部基础网格声明之后补充窄视口覆盖，详情与 Findings 卡片改为两列，总览卡片改为单列。
+- 验收：窄视口实际计算为两列 `264px + 264px`，卡片宽度与容器一致（541px），页面无横向溢出；Vite 构建、closeout verifier、会话详情浏览器 smoke 和 `git diff --check` 通过。临时视口已恢复默认。
