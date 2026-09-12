@@ -1644,10 +1644,15 @@ fn statistics_timezone_config() -> Value {
 }
 
 #[tauri::command]
-fn save_statistics_timezone_config(timezone: String) -> Result<Value, String> {
+fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<Value, String> {
     let data_home = overview::data_home();
     let saved = agent_vitals_runtime::statistics_timezone::save_timezone(&data_home, &timezone)?;
     agent_vitals_runtime::statistics_timezone::apply(&data_home)?;
+    // The Workbench refreshes its active tab after the IPC returns, but the
+    // tray is a separate consumer of the same statistics contract. Rebuild it
+    // immediately so its day/month/session projection cannot display the old
+    // timezone until the next five-minute tick.
+    refresh(&app);
     Ok(serde_json::json!({ "status": "saved", "timezone": saved }))
 }
 

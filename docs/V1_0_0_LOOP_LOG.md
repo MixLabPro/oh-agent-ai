@@ -1197,3 +1197,9 @@
 - 验收：安装后的 CLI 自定义 `America/Los_Angeles` 导航返回 `day_key=2026-09-12`，新 `.app` 进程已启动。
 - 保护：旧包可恢复保留为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-0234`；未覆盖用户数据。
 - 边界：真实窗口 Computer Use 仍受 macOS 锁定阻塞；AC21、签名/公证和外部试用门禁不因此勾选。
+
+## Loop 159 · 统计时区保存即时刷新托盘
+
+- 修复：保存统计时区后，Workbench 原有的当前 tab 刷新之外，Tauri 现在立即重建菜单栏；菜单栏不再继续显示旧时区的今日/月度/会话投影直到下一次定时 tick。
+- 保护：保存仍先校验并原子写入偏好，再应用进程时区；应用失败不会触发菜单重建。
+- 验收：desktop release 测试与 Clippy 待执行；不把 IPC 单测扩大为真实 Computer Use 的 AC21 完成证据。
