@@ -56,6 +56,8 @@ ok(wb.includes('args.date_from = shiftBeijingDate(-6)') && wb.includes('args.dat
   "会话最近 7 天窗口使用统一北京日期范围");
 ok(wb.includes('args.date_from = from') && wb.includes('args.date_to = to'),
   "会话自定义日期范围透传到权威查询");
+ok(wb.includes('s.cost_status && s.cost_status.state === sessStatusFilter'),
+  "会话计费状态筛选只使用权威 cost_status.state，不以金额空值猜测");
 
 // ── vm 执行真实文件 ──
 function makeElement() {

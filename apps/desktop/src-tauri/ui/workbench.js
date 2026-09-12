@@ -333,6 +333,7 @@ let sessState = { items: [], nextCursor: null, total: null, loaded: false, error
 // （游标语义是「全量翻页」，带旧过滤的游标续拉会混页）；深链 SessionList 目标
 // 也写这里。
 let sessFilter = "all";
+let sessStatusFilter = "all";
 // Findings/数据源页同款懒加载：CLI 汇总较重（sessions_findings / sessions_list 都
 // spawn 二进制），首进一次、之后「重载」按钮刷新——与 sessions 页同一套理由。
 let findState = { loaded: false, error: false, data: null, sev: "all", rule: "all" };
@@ -2420,17 +2421,22 @@ function renderSessions() {
       ? ((document.getElementById("sess-from").value || "?") + ".." +
          (document.getElementById("sess-to").value || "?"))
       : (monthEl && monthEl.value ? monthEl.value : "本月");
+  const statusItems = sessStatusFilter === "all" ? sessState.items
+    : sessState.items.filter((s) => s.cost_status && s.cost_status.state === sessStatusFilter);
   count.textContent = sessState.total != null
-    ? suffix + " 共 " + sessState.total + " 个会话 · 点任意行看报告"
+    ? suffix + " 共 " + (sessStatusFilter === "all"
+      ? statusItems.length + " 个会话"
+      : statusItems.length + " 个匹配会话（原始 " + sessState.total + "）") + " · 点任意行看报告"
     : "";
-  if (sessState.items.length === 0) {
+  empty.textContent = statusItems.length === 0 && sessState.items.length > 0 ? "没有符合该计费状态的会话" : "暂无会话";
+  if (statusItems.length === 0) {
     // error 时隐藏空态：横幅已经说明了数据源问题，不要再摆「暂无会话」冒充真空。
     empty.hidden = sessState.error;
     more.hidden = true;
     return;
   }
   empty.hidden = true;
-  for (const s of sessState.items) {
+  for (const s of statusItems) {
     const tr = document.createElement("tr");
     const titleCell = document.createElement("td");
     titleCell.textContent = titleText(s);
@@ -4583,6 +4589,11 @@ function init() {
   sessModelEl.addEventListener("change", () => loadSessions(true));
   const sessProviderEl = document.getElementById("sess-provider");
   sessProviderEl.addEventListener("change", () => loadSessions(true));
+  const sessStatusEl = document.getElementById("sess-status");
+  sessStatusEl.addEventListener("change", () => {
+    sessStatusFilter = sessStatusEl.value;
+    renderSessions();
+  });
   document.getElementById("sess-back").addEventListener("click", () => {
     document.getElementById("sess-detail-view").hidden = true;
     document.getElementById("sess-list-view").hidden = false;

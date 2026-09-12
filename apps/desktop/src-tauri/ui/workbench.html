@@ -343,6 +343,13 @@
           <input type="date" id="sess-to" class="picker" title="结束日期" hidden />
           <input type="search" id="sess-model" class="picker sess-model" placeholder="模型筛选" title="按完整模型 ID 筛选" />
           <input type="search" id="sess-provider" class="picker sess-provider" placeholder="Provider 筛选" title="按完整 provider ID 筛选" />
+          <select id="sess-status" class="picker" title="按权威计费状态筛选">
+            <option value="all">所有计费状态</option>
+            <option value="estimated">按量估算</option>
+            <option value="subscription">订阅</option>
+            <option value="unpriced">未计价</option>
+            <option value="unavailable">成本不可用</option>
+          </select>
           <!-- host 过滤 chips（spec §7.3）：全部 / Claude Code / DeepSeek Harness /
                Codex。过滤变化重置分页重新加载；会话详情深链（SessionList 目标）
                也会落到这个过滤上。 -->
