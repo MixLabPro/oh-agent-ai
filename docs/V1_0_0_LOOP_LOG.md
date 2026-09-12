@@ -1544,3 +1544,9 @@
 - 验收：`AGENT_VITALS_BIN="$PWD/target/release/agent-vitals" python3 -m unittest discover tests -q`，1189/1189 通过，仅 8 项按环境条件跳过，无失败。
 - 保护：公共价格、时区、宿主隔离、账单/声明、迁移、CLI 输出与桌面数据合同均在 release CLI 配置下重新覆盖；未刷新 golden/snapshot。
 - 边界：完整自动化通过不替代真实 `.app` Computer Use、签名/公证、公共目录联网成功、干净机升级和外部试用。
+
+## Loop 214 · Vite 浏览器开发服务 UI smoke 验收
+
+- 验收：通过 `http://127.0.0.1:5173/workbench.html` 检查总览页面，导航、统计时区输入、公共价格授权复选框、发布页入口和预算保存按钮均存在且可定位；页面标题为 `agent-vitals 工作台`。
+- 结果：浏览器控制台错误数为 0；`npm run build`、Workbench 两个脚本语法检查和 `git diff --check` 通过。当前 Vite 构建仍提示 legacy script 未声明 `type="module"`，这是兼容现有 Tauri DOM/IPC 的已知提示，不影响开发服务渲染。
+- 结论：样式/交互迭代可先在 Vite + mock IPC 页面完成，再回到 Tauri `.app` 验证原生边界；本轮未把尚未迁移的页面强行改写为 React。
