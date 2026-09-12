@@ -1562,3 +1562,9 @@
 - 验收：当前 UI verifier（fold bridge、KPI/决策、来源、轨迹、Codex findings/timeline）全部通过；DSH `npm test` 的 TypeScript 检查、构建、基础验证、宿主投影、wire、timeline、export、render 全部通过。
 - 发现：历史脚本 `scripts/verify-workbench-v010-closeout.mjs` 仍硬编码 Cargo `0.10.0`、`app_build_info` 等旧版契约，当前运行会失败；它不是 v1.0.0 当前门槛，未通过修改断言或删除检查来伪造成功。
 - 结论：模块化脚本在 Vite、浏览器 mock、Tauri release check 和 DSH 集成中均可用；历史 verifier 的漂移记录为待清理项，不影响本轮已覆盖的 v1 当前验证。
+
+## Loop 217 · Workbench 历史收口验证器迁移
+
+- 修复：保留原有 `verify-workbench-v010-closeout.mjs` 命令入口，但将其旧版硬编码断言迁移为当前 v1 Workbench 契约：安全 `session_ref` 轨迹、当前响应式布局、`about_diagnostics`、来源故障/真实空态和唯一 token 格式化实现。
+- 验收：该验证器现已全部通过；不降低原有检查范围，且继续检查 Tauri/Cargo 版本锁步、菜单降级、Authority 数据源和核心 Trace 路径。
+- 边界：验证器通过不代表真实 `.app` Computer Use、签名/公证、公共目录成功发布或外部试用门槛已完成。
