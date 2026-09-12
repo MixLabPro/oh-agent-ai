@@ -1803,12 +1803,6 @@ fn save_billing_declaration_revision(
         &path, agent_vitals_runtime::sql_sync::now_ms(),
     ).map_err(|error| error.to_string())?;
     let now_ms = agent_vitals_runtime::sql_sync::now_ms();
-    db.billing_declaration_put(
-        &declaration_id, &host, &provider_id, &relationship_kind,
-        subscription_name.as_deref(), amount_minor, currency.as_deref(),
-        &effective_start, effective_end.as_deref(), source_candidate_id.as_deref(),
-        evidence_ref.as_deref(), now_ms,
-    ).map_err(|error| error.to_string())?;
     let scope_refs = scopes.iter()
         .map(|scope| (scope.scope_kind.as_str(), scope.scope_value.as_str()))
         .collect::<Vec<_>>();

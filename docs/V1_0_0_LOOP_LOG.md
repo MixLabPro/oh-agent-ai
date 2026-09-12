@@ -769,3 +769,9 @@
 - 失败保护：声明保存失败时尽力将候选恢复为 `pending`；声明已经落库后不再回滚候选，避免预览读取失败制造“已声明但候选待确认”的半状态。
 - 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、`git diff --check` 通过；数据层计费影响预览与重算幂等测试各 1/1 通过。
 - 边界：因本轮 Computer Use 运行时 macOS 已锁屏，尚未重新走桌面点击；候选声明 UI 真机复验和端到端安全副本回执仍待下一轮，不勾选 AC27/AC13。
+
+## Loop 94 · 声明修订写入原子性修复（自验收）
+
+- 修复：桌面 `save_billing_declaration_revision` 不再先调用独立的当前声明写入，再写不可变修订；当前声明由 `billing_declaration_revision_save` 的同一事务物化，修订校验或 scope 失败时不会留下孤立声明。
+- 验收：desktop release 编译、desktop lib 测试（106 个测试目标，当前筛选无 lib 测试执行）、desktop clippy `-D warnings`、workbench JS 语法和 `git diff --check` 通过。
+- 边界：锁屏导致桌面 Computer Use 仍未复验；候选接受与声明保存目前仍是两个 IPC 动作，下一步需补原子候选→声明命令及真机回执，不勾选 AC13/AC27。
