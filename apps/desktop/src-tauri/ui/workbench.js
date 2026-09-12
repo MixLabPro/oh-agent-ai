@@ -881,6 +881,18 @@ function renderQualityStatus(status) {
             button.textContent = "保存失败：" + errText(e);
             button.disabled = false;
           }
+        } else if (action.kind === "restore_backup") {
+          if (!window.confirm("选择一个已验证的权威数据库备份并恢复？\n\n当前数据库会先保留为 .pre-restore 备份；不会删除宿主原始日志。")) return;
+          button.disabled = true;
+          try {
+            const restored = await invoke("restore_authority_backup");
+            button.textContent = restored && restored.status === "cancelled"
+              ? "已取消选择备份"
+              : "备份已恢复，请重新加载";
+          } catch (e) {
+            button.textContent = "恢复失败：" + errText(e);
+            button.disabled = false;
+          }
         } else if (action.kind === "upgrade_app") {
           button.textContent = "请安装新版本后重试";
         } else {

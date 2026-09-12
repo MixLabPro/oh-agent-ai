@@ -1398,14 +1398,14 @@ fn data_status() -> Value {
                 AuthorityError::MissingFile => ("database_missing", "retry_sync"),
                 AuthorityError::NewerSchema { .. } => ("schema_too_new", "upgrade_app"),
                 AuthorityError::OlderSchema { .. } => ("schema_migration_required", "upgrade_app"),
-                AuthorityError::Corrupt => ("database_unreadable", "export_diagnostics"),
-                AuthorityError::Io(_) | AuthorityError::Sqlite(_) => ("database_unreadable", "export_diagnostics"),
+                AuthorityError::Corrupt => ("database_unreadable", "restore_backup"),
+                AuthorityError::Io(_) | AuthorityError::Sqlite(_) => ("database_unreadable", "restore_backup"),
             };
             return serde_json::json!({
                 "status": "unavailable",
                 "code": code,
                 "reason": error.to_string(),
-                "recovery_action": { "kind": action, "label": "查看恢复选项" }
+                "recovery_action": { "kind": action, "label": if action == "restore_backup" { "选择备份恢复" } else { "查看恢复选项" } }
             });
         }
     };
@@ -1414,6 +1414,53 @@ fn data_status() -> Value {
         "status": "ok",
         "data": agent_vitals_runtime::mcp::data_status_report(db.conn(), true, enabled)
     })
+}
+
+/// 从用户明确选择的备份恢复权威库。恢复顺序是：先验证备份、保留当前文件、写入同目录
+/// 临时文件、再次验证临时文件，最后原子替换；任何中间步骤失败都不触碰当前库。
+/// 不接受前端传入路径，避免把任意路径写入权限伪装成恢复动作。
+#[tauri::command]
+fn restore_authority_backup() -> Result<Value, String> {
+    let Some(backup) = rfd::FileDialog::new()
+        .add_filter("SQLite database", &["sqlite", "db", "sqlite3"])
+        .pick_file() else {
+        return Ok(serde_json::json!({ "status": "cancelled" }));
+    };
+    agent_vitals_data::authority::AuthorityDb::open_readonly(&backup)
+        .map_err(|error| format!("selected backup is not readable: {error}"))?;
+
+    let data_home = overview::data_home();
+    let target = agent_vitals_data::authority::default_authority_path(&data_home);
+    let parent = target.parent().ok_or_else(|| "authority path has no parent".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create authority directory failed: {error}"))?;
+    let stamp = agent_vitals_runtime::sql_sync::now_ms();
+    let preserved = parent.join(format!("authority.sqlite.pre-restore-{stamp}.bak"));
+    if target.exists() {
+        std::fs::copy(&target, &preserved)
+            .map_err(|error| format!("preserve current authority database failed: {error}"))?;
+    }
+    let temporary = parent.join(format!("authority.sqlite.restore-{stamp}-{}.tmp", std::process::id()));
+    if temporary.exists() {
+        return Err("restore temporary file already exists; please retry".into());
+    }
+    let result = (|| {
+        std::fs::copy(&backup, &temporary)
+            .map_err(|error| format!("stage selected backup failed: {error}"))?;
+        agent_vitals_data::authority::AuthorityDb::open_readonly(&temporary)
+            .map_err(|error| format!("staged backup validation failed: {error}"))?;
+        std::fs::rename(&temporary, &target)
+            .map_err(|error| format!("replace authority database failed: {error}"))?;
+        Ok::<(), String>(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map(|()| serde_json::json!({
+        "status": "restored",
+        "preserved_current": target.exists() && preserved.exists(),
+        "backup_path": backup.to_string_lossy(),
+    }))
 }
 
 /// 升级时从旧公共资产发现的套餐声明。它们是用户核对入口，不是账单：前端
@@ -2840,6 +2887,7 @@ pub fn run() {
             public_pricing_catalog_status,
             save_public_pricing_catalog_policy,
             update_public_pricing_catalog,
+            restore_authority_backup,
             export_diagnostic_package,
             about_diagnostics,
             open_trusted_releases_page,

@@ -153,6 +153,7 @@
       case "update_public_pricing_catalog": return { status: "updated", source_url: "https://example.invalid/pricing.json", source_version: "public-browser-mock", model_count: 7, last_success_at_ms: Date.now() };
       case "about_diagnostics": return { status: "ok", app_version: "browser-mock", cli_version: "browser-mock", engine_version: "browser-mock", architecture: "browser-mock", authority_schema: "browser-mock", statistics_timezone: timezone, pricing: { version: "public-browser-mock", captured_at_ms: Date.now() - 3600000 }, sync: { ok: true, message: "浏览器样式调试数据" } };
       case "open_trusted_releases_page": return { status: "opened", url: "https://example.invalid/releases", automatic_install: false };
+      case "restore_authority_backup": return { status: "cancelled" };
       case "data_codex_quota": return { plan_type: "Plus", limits: { primary: { used_percent: 38, resets_at: Math.floor(Date.now() / 1000) + 7200 } } };
       case "sessions_list": return { data: { sessions, next_cursor: null, has_more: false, window_session_count: sessions.length, window_total_tokens: 246000 } };
       case "sessions_read": return { data: { session: sessions[0], events: [], findings: [] } };
