@@ -1415,10 +1415,10 @@ fn billing_import_candidates() -> Value {
                     "billing_period_start": billing_period_start,
                     "status": status,
                     "impact": impact.map(|preview| serde_json::json!({
-                        "fact_count": preview.fact_count,
+                        "status": "ok", "fact_count": preview.fact_count,
                         "session_count": preview.session_count,
                         "total_tokens": preview.total_tokens,
-                    })),
+                    })).unwrap_or_else(|| serde_json::json!({"status": "unavailable"})),
                 })
             }).collect::<Vec<_>>()
         }),

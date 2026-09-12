@@ -841,3 +841,9 @@
 - 保护：影响摘要只读查询，不接受候选、不创建声明、不改变账本；读取失败按候选级别降级，不把缺失影响编成零。
 - 验收：data/desktop release 测试、desktop Clippy、workbench JS 语法、Vite build、`git diff --check` 和最新 `.app` bundle 构建通过。
 - 真机边界：设备仍锁屏，未声称 AC26/AC27 真机完成；待解锁后复验提示内容及两步确认链。
+
+## Loop 105 · 影响摘要失败态不冒充零（代码验收）
+
+- 修复：候选级影响查询失败时返回 `status=unavailable`；总览不再把缺失候选累加成 `0 tokens`，而是显示“影响范围暂不可用”，候选行同样显式提示检查数据状态。
+- 验收：data 定向测试、desktop Clippy、workbench JS 语法、Vite build、`git diff --check` 和最新 `.app` bundle 均通过。
+- 边界：macOS 仍锁屏，AC26/AC27 真机点击与重算回执继续等待设备解锁后验证。
