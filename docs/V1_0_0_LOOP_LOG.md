@@ -1775,3 +1775,9 @@
 - 发现：签名凭据预检用 `eval` 读取环境变量，特殊字符可能被二次 shell 解析，存在不必要的命令注入风险。
 - 修复：改用 Bash 安全的间接参数展开 `${!name-}`，并显式指定 `shell: bash`；凭据值仍只用于空值判断，不写入日志。
 - 验收：YAML 解析通过，发布 workflow 的凭据检查不再执行 `eval`。
+
+## Loop 252 · 固定 Tauri CLI 构建版本
+
+- 发现：桌面发布 workflow 使用未固定版本的 `cargo install tauri-cli`，上游 CLI 变化可能让同一 App tag 产生不可复现的构建行为。
+- 修复：固定到当前本机已验证的 `tauri-cli 2.11.4`，继续使用 `--locked`。
+- 验收：本机 `cargo tauri --version` 返回 `tauri-cli 2.11.4`；workflow YAML 解析和 diff 检查通过。

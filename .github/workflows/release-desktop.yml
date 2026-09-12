@@ -40,7 +40,7 @@ jobs:
         run: cargo build --release
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
+        run: cargo install tauri-cli --version 2.11.4 --locked
 
       - name: Build signed app and DMG
         working-directory: apps/desktop/src-tauri
