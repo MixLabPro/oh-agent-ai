@@ -360,7 +360,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
         ]
       },
       "generated_at": { "type": "string", "format": "date-time" },
-      "timezone":    { "type": "string", "const": "Asia/Shanghai" },
+      "timezone":    { "type": "string", "description": "IANA statistics timezone used for date/hour boundaries and local timestamp formatting; defaults to the OS timezone and may be an explicit validated user preference." },
       "coverage": {
         "type": "object",
         "properties": {
@@ -480,7 +480,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 **实现注记（draft-3）**：
 
 - **P2-7 模型过滤字段**：不叫 `model_ids`（那会在 canonical 归一表落地时静默改变语义）。用 `models: [{kind, host, value}]`，v0.9.1 只支持 `kind="host_raw"`（匹配 `usage_facts.model_id` 的宿主 raw 值，按 `hosts` 限定）；`group_by=model` 的序列键是 `(host, raw_model)`，响应每个序列显式带 `identity_kind: "host_raw"`。canonical 层就绪后新增 `kind="canonical"` + `identity_kind: "canonical"`，**不改** `host_raw` 的含义。
-- **查询面**：`group_by=host` 可复用 `authority_query::hourly_by_host`；`group_by=model`/`provider` 与逐小时 `cost` 需新增查询（当前只有 `codex_by_hour_model` 覆盖单宿主的小时 × 模型，且不含成本）。北京小时用整数除法（`(event_ts_ms + BEIJING_OFFSET_MS) / HOUR_MS % 24`），与 `hourly_by_host` 同一算术。
+- **查询面**：`group_by=host` 可复用 `authority_query::hourly_by_host`；`group_by=model`/`provider` 与逐小时 `cost` 需新增查询（当前只有 `codex_by_hour_model` 覆盖单宿主的小时 × 模型，且不含成本）。小时桶使用配置的统计 IANA 时区（SQLite `localtime` 与自然日边界），不以固定 `BEIJING_OFFSET_MS` 代替 DST-aware 投影。
 
 ### 7.3 `summary_daily`
 

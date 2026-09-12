@@ -1178,3 +1178,9 @@
 - 验收：安装后的包内 CLI 在 `--timezone America/Los_Angeles` 下返回 `day_key=2026-09-12` 和对应时区；新 `.app` 进程已启动。
 - 保护：旧包可恢复保留为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-0230`；未覆盖用户数据。
 - 边界：真实窗口 Computer Use 仍受 macOS 锁定阻塞；AC21、签名/公证和外部试用门禁不因此勾选。
+
+## Loop 156 · MCP 时区协议文档收口
+
+- 修复：MCP 规范不再把响应 `timezone` schema 限制为固定 `Asia/Shanghai`；明确它是实际使用的、经校验的统计 IANA 时区，并同步小时查询的 DST-aware 边界说明。
+- 保护：示例仍可使用 `Asia/Shanghai` 作为示例值，但不再把示例误写成协议常量；供应商计价时区不受影响。
+- 验收：实现侧 MCP 54/54 与 Clippy 已通过；本轮仅修正文档契约，未修改用户已有 WorkBuddy/Phase/Issue 文档。
