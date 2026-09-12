@@ -1049,20 +1049,30 @@ function bindBillingDeclarationPanel() {
     if (!candidate) return;
     save.disabled = true;
     const preview = document.getElementById("ov-billing-preview");
+    let candidateAccepted = false;
+    let declarationSaved = false;
     try {
       const suffix = Date.now().toString(36);
       const declarationId = "decl-" + candidate.candidate_id;
       const revisionId = "rev-" + suffix;
+      // A declaration may reference an import candidate only after the user
+      // explicitly accepts that candidate. Keep the candidate link in the
+      // immutable revision so migration evidence remains traceable.
+      await invoke("resolve_billing_import_candidate", {
+        candidateId: candidate.candidate_id, decision: "accept",
+      });
+      candidateAccepted = true;
       await invoke("save_billing_declaration_revision", {
         revisionId, declarationId, supersedesRevisionId: null,
         host: candidate.host, providerId: candidate.provider_id,
         relationshipKind: document.getElementById("ov-billing-relationship").value,
         subscriptionName: null, amountMinor: candidate.amount_minor,
         currency: candidate.currency, effectiveStart: candidate.billing_period_start,
-        effectiveEnd: null, sourceCandidateId: null,
+        effectiveEnd: null, sourceCandidateId: candidate.candidate_id,
         evidenceRef: "legacy-import-candidate:" + candidate.candidate_id,
         scopes: [],
       });
+      declarationSaved = true;
       const window = billingMonthWindow(beijingMonth());
       const impact = await invoke("billing_declaration_impact_preview", {
         revisionId, windowStartMs: window ? window.start : 0,
@@ -1079,6 +1089,16 @@ function bindBillingDeclarationPanel() {
         (impact.session_count || 0) + " 个会话。确认后才会应用到汇总。";
       apply.hidden = false;
     } catch (e) {
+      if (candidateAccepted && !declarationSaved) {
+        // The declaration write is a separate IPC for compatibility with the
+        // existing command surface. If it fails, restore the candidate's
+        // pending state rather than leaving an apparently accepted orphan.
+        try {
+          await invoke("resolve_billing_import_candidate", {
+            candidateId: candidate.candidate_id, decision: "reopen",
+          });
+        } catch (_) { /* preserve the original error for the user */ }
+      }
       save.disabled = false;
       preview.hidden = false;
       preview.textContent = "保存失败：" + errText(e);
