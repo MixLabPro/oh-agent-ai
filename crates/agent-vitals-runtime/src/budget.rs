@@ -70,17 +70,39 @@ pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Va
             &agent_vitals_data::repository::MonthlySummaryQuery { month: month.to_string() },
         )
     };
+    let daily = {
+        use agent_vitals_data::repository::SummaryRepository;
+        crate::summary::SqlSummaryRepository::at(data_home).daily_summary(
+            &agent_vitals_data::repository::DailySummaryQuery {
+                date: crate::clock::today_beijing(),
+            },
+        )
+    };
     let values = summary.by_provider.values().collect::<Vec<_>>();
+    let daily_values = daily.by_provider.values().collect::<Vec<_>>();
     let rows = profiles.into_iter().map(|profile| {
         let spent_minor = budget_profile_spent_minor(
             values.iter().copied(), &profile.profile_id, &profile.currency,
         );
+        let daily_spent_minor = budget_profile_spent_minor(
+            daily_values.iter().copied(), &profile.profile_id, &profile.currency,
+        );
         let ratio_bp = (spent_minor > 0).then(|| spent_minor * 10_000 / profile.monthly_minor);
+        let daily_ratio_bp = profile.daily_minor.and_then(|limit| {
+            (daily_spent_minor > 0).then(|| daily_spent_minor * 10_000 / limit)
+        });
         let level = match ratio_bp {
             Some(r) if r >= 10_000 => "exceeded",
             Some(r) if r >= profile.warning_ratio_bp => "warn",
             Some(_) => "ok",
             None => "no_data",
+        };
+        let daily_level = match daily_ratio_bp {
+            Some(r) if r >= 10_000 => "exceeded",
+            Some(r) if r >= profile.warning_ratio_bp => "warn",
+            Some(_) => "ok",
+            None if profile.daily_minor.is_some() => "no_data",
+            None => "disabled",
         };
         json!({
             "profile_id": profile.profile_id,
@@ -91,6 +113,9 @@ pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Va
             "spent_minor": spent_minor,
             "ratio_bp": ratio_bp,
             "level": level,
+            "daily_spent_minor": daily_spent_minor,
+            "daily_ratio_bp": daily_ratio_bp,
+            "daily_level": daily_level,
         })
     }).collect::<Vec<_>>();
     Some(json!({

@@ -41,25 +41,49 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             &agent_vitals_data::repository::MonthlySummaryQuery { month: month.clone() },
         )
     };
+    let daily = {
+        use agent_vitals_data::repository::SummaryRepository;
+        crate::summary::SqlSummaryRepository::at(data_home).daily_summary(
+            &agent_vitals_data::repository::DailySummaryQuery {
+                date: crate::clock::today_beijing(),
+            },
+        )
+    };
     let amounts = summary.by_provider.values().collect::<Vec<_>>();
+    let daily_amounts = daily.by_provider.values().collect::<Vec<_>>();
     let data = json!({
         "month": month,
         "profiles": profiles.into_iter().map(|profile| {
             let spent_minor = crate::budget::budget_profile_spent_minor(
                 amounts.iter().copied(), &profile.profile_id, &profile.currency,
             );
+            let daily_spent_minor = crate::budget::budget_profile_spent_minor(
+                daily_amounts.iter().copied(), &profile.profile_id, &profile.currency,
+            );
             let ratio_bp = (spent_minor > 0).then(|| spent_minor * 10_000 / profile.monthly_minor);
+            let daily_ratio_bp = profile.daily_minor.and_then(|limit| {
+                (daily_spent_minor > 0).then(|| daily_spent_minor * 10_000 / limit)
+            });
             let level = match ratio_bp {
                 Some(r) if r >= 10_000 => "exceeded",
                 Some(r) if r >= profile.warning_ratio_bp => "warn",
                 Some(_) => "ok",
                 None => "no_data",
             };
+            let daily_level = match daily_ratio_bp {
+                Some(r) if r >= 10_000 => "exceeded",
+                Some(r) if r >= profile.warning_ratio_bp => "warn",
+                Some(_) => "ok",
+                None if profile.daily_minor.is_some() => "no_data",
+                None => "disabled",
+            };
             json!({
                 "profile_id": profile.profile_id, "currency": profile.currency,
                 "monthly_minor": profile.monthly_minor, "daily_minor": profile.daily_minor,
                 "warning_ratio_bp": profile.warning_ratio_bp,
                 "spent_minor": spent_minor, "ratio_bp": ratio_bp, "level": level,
+                "daily_spent_minor": daily_spent_minor,
+                "daily_ratio_bp": daily_ratio_bp, "daily_level": daily_level,
             })
         }).collect::<Vec<_>>(),
     });

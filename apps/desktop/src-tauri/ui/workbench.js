@@ -891,7 +891,10 @@ async function renderBudgetProfiles() {
     const live = document.createElement("div");
     live.className = "muted";
     live.textContent = profile.level
-      ? "当前：" + profile.level + " · 已用 " + String(profile.spent_minor || 0) + " " + (profile.currency || "")
+      ? "本月：" + profile.level + " · 已用 " + String(profile.spent_minor || 0) + " " + (profile.currency || "") +
+        (profile.daily_level && profile.daily_level !== "disabled"
+          ? "；今日：" + profile.daily_level + " · 已用 " + String(profile.daily_spent_minor || 0) + " " + (profile.currency || "")
+          : "")
       : "尚未配置此预算口径";
     const currency = document.createElement("select");
     currency.innerHTML = '<option value="CNY">CNY</option><option value="USD">USD</option>';

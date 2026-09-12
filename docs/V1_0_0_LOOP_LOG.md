@@ -514,4 +514,11 @@
 - 验收：desktop 单元测试 102/102、desktop Clippy `-D warnings`、JS 语法检查、来源工作台回归及 `git diff --check`通过。
 - 边界：跨菜单栏/总览/CLI/MCP 的真实 profile 结果对拍和真机 UAT 尚未完成，不勾选 REQ-035/036。
 
+## Loop 59 · 双预算每日口径补齐（自验收）
+
+- 执行：双预算状态 DTO 与 MCP 查询均按当前北京日计算 `daily_spent_minor`、`daily_ratio_bp`、`daily_level`；估算/已确认 profile 继续按各自计费口径和币种隔离。
+- 保护：未配置每日预算返回 `disabled`；已配置但当天无事实返回 `no_data`，不渲染为绿色零支出；月度字段和旧 `budget_config` 兼容入口不受影响。
+- 验收：runtime 单元测试 249/249、desktop 单元测试 102/102、desktop Clippy `-D warnings`、JS 语法检查及 `git diff --check`通过。
+- 边界：跨菜单栏/总览/CLI/MCP 的真实 profile 结果对拍和真机 UAT 尚未完成，不勾选 REQ-035/036。
+
 本日志只记录已经完成的实现和证据；上述“尚未完成”不改变任何 PRD 勾选状态。任何单次修改连续测试失败超过5次，或任何单次Loop超过30分钟，立即暂停并记录；不得以拆分日志规避熔断。
