@@ -42,6 +42,7 @@ pub mod sessions;
 pub mod skills;
 pub mod sql_authority;
 pub mod state;
+pub mod statistics_timezone;
 pub mod summary;
 pub mod trace_service;
 pub mod sql_sync;

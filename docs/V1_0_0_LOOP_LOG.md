@@ -1074,3 +1074,10 @@
 - 保护：日期字段仍保留完整原始 `YYYY-MM-DD`，仅展示折叠规则随本地时区变化；事件时间与价格时区不变。
 - 验收：独立 desktop release 测试 110/110、无新增编译 warning、`git diff --check`通过。
 - 边界：用户可修改统计时区偏好仍未持久化；AC21 仍需真实切换后的跨入口 Computer Use 验证。
+
+## Loop 140 · 统计时区偏好配置基础
+
+- 实现：runtime 新增统计时区偏好模块，默认读取 OS IANA 时区；用户值按 IANA 名称校验后以原子方式保存到 `state/statistics-timezone.json`，缺失、损坏和未知时区均显式报错或回退，不接受任意字符串。
+- 保护：该配置只属于统计窗口与本地展示，未接入供应商价格规则；当前尚未宣称“修改后全入口立即重算”。
+- 验收：runtime 统计时区定向测试 3/3、runtime Clippy `-D warnings`、`git diff --check`通过。
+- 边界：Tauri IPC/UI、CLI/Python 读取和 SQLite 查询运行时尚未接入此偏好；REQ-033、REQ-096、AC21 继续不勾选。
