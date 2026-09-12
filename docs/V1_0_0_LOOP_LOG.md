@@ -1568,3 +1568,9 @@
 - 修复：保留原有 `verify-workbench-v010-closeout.mjs` 命令入口，但将其旧版硬编码断言迁移为当前 v1 Workbench 契约：安全 `session_ref` 轨迹、当前响应式布局、`about_diagnostics`、来源故障/真实空态和唯一 token 格式化实现。
 - 验收：该验证器现已全部通过；不降低原有检查范围，且继续检查 Tauri/Cargo 版本锁步、菜单降级、Authority 数据源和核心 Trace 路径。
 - 边界：验证器通过不代表真实 `.app` Computer Use、签名/公证、公共目录成功发布或外部试用门槛已完成。
+
+## Loop 218 · 统计时区 helper 语义收口
+
+- 修复：前端原先名为 `beijingToday/beijingMonth/shiftBeijingDate` 的 helper 实际读取的是用户配置的 IANA 统计时区；现更名为 `statisticsToday/statisticsMonth/shiftStatisticsDate`，同步更新月份、日历、预算、会话和最近 7 天查询调用点及验证器。
+- 验收：源代码不再残留旧 helper 名；Vite production build、Workbench KPI/closeout verifier、JS 语法检查和浏览器 reload smoke 全部通过，统计时区输入与本月区域正常渲染，控制台错误数为 0。
+- 结论：代码命名现在与“系统/用户统计时区决定今天、本月和日界线”的产品契约一致；不改变供应商计价时区或原始事件时间。

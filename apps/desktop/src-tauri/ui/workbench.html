@@ -364,7 +364,7 @@
                v0.9.1 旧契约只透传 --day，IPC 默认今天统计时区日期，所以历史月份根本
                发不出去。改成 month picker 后：用户选 2026-08 → IPC 透传
                `month: "2026-08"` → CLI 走 --month 路径返回该月全部会话。
-               默认值跟 beijingMonth()（当前月）—— 保持「开 tab 立刻看到数据」
+               默认值跟统计时区当前月—— 保持「开 tab 立刻看到数据」
                的体感。change 事件重置分页 + 重载（cursor 是 per-window 的，
                跨月 cursor 无意义）。空值视为「回到本月」由 JS 兜底。 -->
           <input type="month" id="sess-month" class="picker" title="选择月份查看历史会话" />

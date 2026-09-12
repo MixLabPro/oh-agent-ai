@@ -106,8 +106,7 @@ function fmtPct(x) {
   return Math.round(x * 100) + "%";
 }
 
-// 系统统计时区今天 → "YYYY-MM-DD"。旧函数名保留，避免既有调用面漂移；
-// 供应商价格策略时区不由这个 UI 日期 helper 推断。
+// 统计时区今天 → "YYYY-MM-DD"；供应商价格策略时区不由这个 UI 日期 helper 推断。
 function systemTimezone() {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
@@ -149,16 +148,16 @@ function systemToday() {
   return values.year + "-" + values.month + "-" + values.day;
 }
 
-function beijingToday() {
+function statisticsToday() {
   return systemToday();
 }
 
-function beijingMonth() {
-  return beijingToday().slice(0, 7);
+function statisticsMonth() {
+  return statisticsToday().slice(0, 7);
 }
 
-function shiftBeijingDate(days) {
-  const d = new Date(beijingToday() + "T00:00:00Z");
+function shiftStatisticsDate(days) {
+  const d = new Date(statisticsToday() + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
@@ -369,7 +368,7 @@ function subscribeFocusTargetEvent() {
 // ---------- tab 切换 ----------
 
 let activeTab = "overview";
-let calMonth = beijingMonth();
+let calMonth = statisticsMonth();
 let calSelectedDate = null; // 当日按小时面板选中的日期（null = 今天）
 let calData = null;
 let calMetric = "tokens"; // 日历主数：tokens 或按来源口径的成本
@@ -521,9 +520,9 @@ async function renderOverview() {
   // KPI 行/双轨账/决策卡的数据源 = 冻结 Data Query DTO（Stage D）；DSH 高峰
   // 口径的今日/本月钱已在 by_provider（metered_actual），原 read_overview 的
   // today/month 字段只服务预算卡的口径标注，不再单独上 KPI。日键用文件头部
-  // 既有的 beijingToday/beijingMonth（同一份统计时区日规则，不再内联第二份）。
-  const todayKey = beijingToday();
-  const monthKey = beijingMonth();
+  // 同一份统计时区日规则，不在渲染层内联第二份。
+  const todayKey = statisticsToday();
+  const monthKey = statisticsMonth();
   let daily = null, monthly = null, cal = null;
   try {
     [daily, monthly, cal] = await Promise.all([
@@ -1049,7 +1048,7 @@ async function renderBudgetProfiles() {
   host.textContent = "";
   let profiles = [];
   try {
-    const result = await invoke("budget_profiles_status", { month: beijingMonth() });
+    const result = await invoke("budget_profiles_status", { month: statisticsMonth() });
     profiles = result && result.status === "ok" ? (result.profiles || []) : [];
   } catch (_) { /* 旧库/空库仍可使用兼容预算表单 */ }
   for (const id of ["estimate", "confirmed"]) {
@@ -1209,7 +1208,7 @@ function bindBillingDeclarationPanel() {
     save.disabled = true;
     const preview = document.getElementById("ov-billing-preview");
     try {
-      const window = billingMonthWindow(beijingMonth());
+      const window = billingMonthWindow(statisticsMonth());
       const windowStartMs = window ? window.start : 0;
       const windowEndMs = window ? window.end : Date.now();
       if (!billingDeclarationState || billingDeclarationState.phase !== "preview") {
@@ -1370,7 +1369,7 @@ async function renderStatisticsTimezoneSettings() {
       try {
         await invoke("save_statistics_timezone_config", { timezone });
         configuredStatisticsTimezone = timezone;
-        calMonth = beijingMonth();
+        calMonth = statisticsMonth();
         show("已保存统计时区；正在刷新今天、本月和日历统计。");
         await loadActiveTab();
       } catch (e) {
@@ -1923,7 +1922,7 @@ function renderKpiRow(prefix, dto, fx) {
   const nominal = nominalFromByProvider(dto.by_provider);
   const actual = dto.total_actual_spend || {};
   // #16：巨大 token 数给参照——月度带附本月日均（按今天日号折算）。
-  const dayOfMonth = Number(beijingToday().slice(8)) || 1;
+  const dayOfMonth = Number(statisticsToday().slice(8)) || 1;
   set("tokens", tk.total > 0 ? fmtTokens(tk.total) : "无数据",
       tk.total > 0
         ? (prefix === "m"
@@ -2480,7 +2479,7 @@ async function renderCalendar() {
   // 推到前后一天；统计数据本身仍按 statisticsTimezoneName() 查询。
   const lead = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
   const dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  const today = beijingToday();
+  const today = statisticsToday();
   // DSH 的最后观测日（月级，来自 data_monthly_summary.by_host.dsh）——过期时
   // 格子 tooltip 说明 ¥ 段缺席的含义（审查 UX#7）。
   const dshRow = calSourcesDto && calSourcesDto.by_host && calSourcesDto.by_host.dsh;
@@ -2594,7 +2593,7 @@ async function renderHourly(date) {
   const note = document.getElementById("hourly-note");
   const titleDate = document.getElementById("hourly-date");
   if (!grid) return; // calendar tab 未建（防御；HTML 里有就该在）
-  titleDate.textContent = date + (date === beijingToday() ? "（今天）" : "");
+  titleDate.textContent = date + (date === statisticsToday() ? "（今天）" : "");
   grid.innerHTML = "";
   let resp;
   try {
@@ -2718,10 +2717,10 @@ async function fetchSessionsPage(gen) {
     const windowMode = document.getElementById("sess-window").value;
     const monthVal = document.getElementById("sess-month").value;
     if (windowMode === "today") {
-      args.day = beijingToday();
+      args.day = statisticsToday();
     } else if (windowMode === "7d") {
-      args.date_from = shiftBeijingDate(-6);
-      args.date_to = beijingToday();
+      args.date_from = shiftStatisticsDate(-6);
+      args.date_to = statisticsToday();
     } else if (windowMode === "custom") {
       const from = document.getElementById("sess-from").value;
       const to = document.getElementById("sess-to").value;
@@ -5175,7 +5174,7 @@ async function init() {
   // 先拿到后端实际统计时区，再初始化默认的今天、本月和会话月份，避免
   // 用户自定义时区在首屏被浏览器系统时区覆盖。
   await loadStatisticsTimezonePreference();
-  calMonth = beijingMonth();
+  calMonth = statisticsMonth();
   subscribeBudgetNotificationActions();
   // fold 完成事件桥：先订阅再首屏渲染，缩小「事件早于 listen」的丢窗口
   // （丢的那几个由 5 分钟 tick / 手动同步兜底，见事件桥一节注释）。
@@ -5236,7 +5235,7 @@ async function init() {
   // picker 默认值 = 当前统计时区月份，保持「开 tab 立刻看到数据」的体感；
   // 用户主动清空 picker → IPC 收 month=undefined → store.rs 兜底为 --day 今天。
   const sessMonthEl = document.getElementById("sess-month");
-  sessMonthEl.value = beijingMonth();
+  sessMonthEl.value = statisticsMonth();
   sessMonthEl.addEventListener("change", () => loadSessions(true));
   const sessWindowEl = document.getElementById("sess-window");
   const sessFromEl = document.getElementById("sess-from");
@@ -5276,7 +5275,7 @@ async function init() {
   });
   document.getElementById("src-reload").addEventListener("click", () => loadSources(true));
   // 日历默认月跟随统计时区今天；本月输入框受 input[type=month] 约束天然合法。
-  if (!calMonth) calMonth = beijingMonth();
+  if (!calMonth) calMonth = statisticsMonth();
   renderOverview();
   // 启动 pull：冷启动时（webview 先加载、focus-tab/focus-target emit 早于 listen）
   // 菜单点击的目标在这里命中。apply 后 clear，此后 focus/事件两条路都不会重复应用。
