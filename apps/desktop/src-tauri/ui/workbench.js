@@ -848,8 +848,8 @@ async function renderBudgetSettings() {
   snoozeDay.onclick = async () => {
     snoozeDay.disabled = true;
     try {
-      await invoke("snooze_budget_until", { untilMs: Date.now() + 24 * 60 * 60 * 1000 });
-      await refreshAfterBudgetAction("预算提醒已静默 24 小时；用量与成本统计仍会继续更新。");
+      await invoke("snooze_budget_current_period");
+      await refreshAfterBudgetAction("预算提醒已静默至本周期结束；用量与成本统计仍会继续更新。");
     } catch (e) {
       status.hidden = false;
       status.textContent = "静默失败：" + errText(e);

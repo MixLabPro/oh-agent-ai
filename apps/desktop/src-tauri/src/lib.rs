@@ -1737,6 +1737,35 @@ fn snooze_budget_until(until_ms: i64) -> Result<Value, String> {
     Ok(serde_json::json!({ "status": "snoozed", "until_ms": until_ms }))
 }
 
+fn budget_period_end_ms_for_month(month: &str) -> Option<i64> {
+    let mut parts = month.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month_number: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month_number) {
+        return None;
+    }
+    let (next_year, next_month) = if month_number == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month_number + 1)
+    };
+    // 预算周期按北京时间自然月；其结束点是下月一日 00:00（北京），
+    // expressed as UTC epoch milliseconds for the authority table.
+    Some((days_from_civil(next_year, next_month, 1) * 86_400 - 8 * 3_600) * 1_000)
+}
+
+#[tauri::command]
+fn snooze_budget_current_period() -> Result<Value, String> {
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let month = overview::current_month_beijing();
+    let until_ms = budget_period_end_ms_for_month(&month)
+        .ok_or_else(|| format!("invalid current budget month: {month}"))?;
+    if until_ms <= now_ms {
+        return Err("current budget period has already ended".to_string());
+    }
+    snooze_budget_until(until_ms)
+}
+
 #[tauri::command]
 fn clear_budget_snooze() -> Result<Value, String> {
     let data_home = overview::data_home();
@@ -2394,6 +2423,7 @@ pub fn run() {
             save_budget_profile,
             save_budget_config,
             snooze_budget_until,
+            snooze_budget_current_period,
             clear_budget_snooze,
             save_host_bill,
             save_host_bills,
@@ -3419,6 +3449,19 @@ mod tests {
         assert_eq!(days_from_civil(2026, 8, 27) * 86400, 1787788800);
         // 纪元起点：1970-01-01 = 0 天。
         assert_eq!(days_from_civil(1970, 1, 1), 0);
+    }
+
+    #[test]
+    fn budget_period_end_uses_next_beijing_month_boundary() {
+        assert_eq!(
+            budget_period_end_ms_for_month("2026-09"),
+            Some((days_from_civil(2026, 10, 1) * 86_400 - 8 * 3_600) * 1_000)
+        );
+        assert_eq!(
+            budget_period_end_ms_for_month("2026-12"),
+            Some((days_from_civil(2027, 1, 1) * 86_400 - 8 * 3_600) * 1_000)
+        );
+        assert_eq!(budget_period_end_ms_for_month("2026-13"), None);
     }
 
     /// RFC3339 解析钉住 alert.json 真机夹具：`2026-08-30T07:04:38.548588+00:00`
