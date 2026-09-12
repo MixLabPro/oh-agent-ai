@@ -909,9 +909,9 @@ enum SessionsAction {
         /// Day to project (YYYY-MM-DD in the configured statistics timezone). Defaults to today.
         #[arg(long, default_value = "")]
         day: String,
-        /// Timezone of the projected day (valid IANA name; defaults to the configured value).
-        #[arg(long, default_value = "Asia/Shanghai")]
-        timezone: String,
+        /// Timezone of the projected day (valid IANA name; defaults to the configured/OS value).
+        #[arg(long)]
+        timezone: Option<String>,
         /// How many recent rows per host; default 5
         #[arg(long, default_value_t = 5)]
         recent: usize,
@@ -3425,19 +3425,25 @@ session_store={store} fold={fold}"
                 recent,
                 json,
             } => {
-                if let Err(error) = agent_vitals_runtime::statistics_timezone::validate_timezone(timezone) {
+                // `main` has already applied the persisted preference to TZ.  Do not
+                // put a Beijing default in the CLI: a clean install follows the OS
+                // timezone and a configured install follows its saved preference.
+                let timezone = timezone
+                    .clone()
+                    .unwrap_or_else(agent_vitals_runtime::clock::statistics_timezone_name);
+                if let Err(error) = agent_vitals_runtime::statistics_timezone::validate_timezone(&timezone) {
                     eprintln!("invalid --timezone {timezone:?}: {error}");
                     std::process::exit(2);
                 }
                 // 显式参数优先于持久化值；Tauri 传入的也是同一份偏好。
-                std::env::set_var("TZ", timezone);
+                std::env::set_var("TZ", &timezone);
                 // `--day` 缺省 = 当前统计时区的今天。
                 let day = if day.is_empty() {
                     agent_vitals_runtime::sessions::codex_cost::today_beijing()
                 } else {
                     day.clone()
                 };
-                sessions_navigation_v2(&day, timezone, *recent, *json, &data_home);
+                sessions_navigation_v2(&day, &timezone, *recent, *json, &data_home);
             }
         }
         return;
