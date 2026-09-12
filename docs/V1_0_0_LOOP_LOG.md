@@ -1463,3 +1463,9 @@
 - 新增：桌面“检查价格更新”入口与状态持久化，显示上次成功版本、模型覆盖和失败原因；远端失败、超限或目录不合法时只记录状态，保留当前有效价卡。
 - 验收：`cargo test --release -p agent-vitals-runtime pricing_catalog` 4/4；桌面 `cargo check --release`、Workbench `node --check`、Vite production build、`git diff --check`通过；内置目录可作为已验证离线候选。
 - 边界：本轮未宣称每日后台检查/指数退避和外部发布环境公证完成；真实联网成功路径与锁屏 Computer Use 仍需在可操作 macOS 上复验。
+
+## Loop 201 · 公共目录发布可达性复核
+
+- 复核：对固定 GitHub Raw 公共地址执行真实 HTTPS 请求，当前返回 HTTP 404；仓库 `main` 尚未公开该目录路径。
+- 结论：更新链路会把该结果记录为失败并保留内置有效价卡；REQ-097 的“真实联网成功”证据不能在目录发布前宣称完成。
+- 边界：需要发布负责人将已核验价卡放到约定公共地址（或提供新的可信地址）后，再复验成功写入、版本覆盖和失败回退；未执行外部 push 或修改用户文档。
