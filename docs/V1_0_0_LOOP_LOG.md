@@ -1301,3 +1301,10 @@
 - 验收：CLI release 测试 79/79、Clippy 通过；完整 Python 回归 1188/1188、Rust workspace release 回归全部通过（含 data 283、core 53、集成与性能测试）。
 - 保护：默认导航时区由运行时配置派生；显式时区仍走同一 IANA 校验，不改变事件 epoch、供应商计价时区或历史兼容测试契约。
 - 边界：未把本机 OS 当前恰为 Asia/Shanghai 的结果扩展成非 UTC+8 真机证据；Computer Use、签名/公证和外部试用仍未完成。
+
+## Loop 176 · Issue 时间单位存量迁移接入生产入口
+
+- 修复：Issue 新写入虽已将秒级 `finding.time` 归一为毫秒，但存量修复函数此前没有生产调用；现接入 CLI `sessions findings` 持久化前和桌面启动阶段，旧行会在首个读面前幂等修正 `opened_at_ms` 与 `metadata.time`。
+- 保护：迁移只处理 `<1e11` 的秒级值，不删除 Issue、不改身份列或 token；失败只记录错误，不把数据伪装成已迁移。
+- 验收：`agent-vitals-data` Issue 测试 9/9 通过；桌面 release 测试 110/110 通过；迁移单测确认首跑修正、二次运行 0 行变更。
+- 边界：当前未在锁定的 macOS 上做真实窗口视觉 Computer Use；签名/公证和外部试用门禁仍未完成。

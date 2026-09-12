@@ -2571,6 +2571,18 @@ pub fn run() {
             recover_billing_recalculations(
                 agent_vitals_data::authority::default_authority_path(&overview::data_home()),
             );
+            let authority_path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+            match agent_vitals_data::authority::AuthorityDb::open(
+                &authority_path,
+                agent_vitals_runtime::sql_sync::now_ms(),
+            ) {
+                Ok(db) => {
+                    if let Err(error) = agent_vitals_data::issues::repair_issue_timestamp_units(db.conn()) {
+                        eprintln!("issue timestamp migration failed: {error}");
+                    }
+                }
+                Err(error) => eprintln!("issue timestamp migration database unavailable: {error}"),
+            }
             let ov = overview::read_overview();
             let menu = build_menu(app.handle(), &ov)?;
             // 左右键都弹菜单（今日/本月/预算/打开工作台/立即同步/退出）——统一到

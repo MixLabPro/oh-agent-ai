@@ -1636,6 +1636,13 @@ fn persist_findings_as_issues(
         &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
         crate::sql_sync::now_ms(),
     ) else { return };
+    // Migrate rows written by older host adapters before the projection reads
+    // them.  This is idempotent and keeps the `_ms` column plus metadata.time
+    // in the same unit, so legacy seconds cannot disappear from the date
+    // window while the current run is being persisted.
+    if let Err(error) = agent_vitals_data::issues::repair_issue_timestamp_units(db.conn()) {
+        eprintln!("issue timestamp migration failed: {error}");
+    }
     for (entry, findings) in entries.iter().zip(extracted) {
         let mut current_issue_ids = BTreeSet::new();
         for finding in findings {
