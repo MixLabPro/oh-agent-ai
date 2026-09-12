@@ -2210,3 +2210,10 @@
 - UAT: AC16 partial walked ✔：浏览器点击检查价格更新显示“已成功检查公共目录 · 版本
   public-browser-mock · 覆盖 7 个模型”；关闭联网后点击更新显示需先允许联网。
 - 验收：`npm run verify` 与 `git diff --check` 通过。
+
+## Loop 309 · 公共价目表重复键拒收
+
+- 修复：公共目录解析增加 JSON 对象重复键扫描，包含转义后等价的键名；避免
+  `serde_json` 的默认覆盖行为静默吞掉重复模型或费率。
+- 验收：新增重复普通键与转义键回归用例；价格目录 6 项目标测试、Rust 1.74 MSRV
+  Clippy 和 `cargo test --release` 全量回归均通过。

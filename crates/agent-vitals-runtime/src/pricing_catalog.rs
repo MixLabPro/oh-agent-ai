@@ -5,6 +5,7 @@
 
 use agent_vitals_domain::source_identity::{canonical_json, fnv1a64_hex};
 use serde_json::Value;
+use std::collections::HashSet;
 
 const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 
@@ -26,6 +27,7 @@ pub fn validate(raw: &[u8]) -> Result<ValidatedCatalog, String> {
         return Err(format!("catalog exceeds {} byte limit", MAX_CATALOG_BYTES));
     }
     let value: Value = serde_json::from_slice(raw).map_err(|e| format!("invalid JSON: {e}"))?;
+    reject_duplicate_keys(raw)?;
     let root = value
         .as_object()
         .ok_or_else(|| "catalog root must be an object".to_string())?;
@@ -57,6 +59,130 @@ pub fn validate(raw: &[u8]) -> Result<ValidatedCatalog, String> {
         version,
         model_count,
     })
+}
+
+fn reject_duplicate_keys(raw: &[u8]) -> Result<(), String> {
+    let mut scanner = JsonKeyScanner { raw, pos: 0 };
+    scanner.parse_value("root")?;
+    scanner.skip_whitespace();
+    if scanner.pos != raw.len() {
+        return Err("catalog contains trailing JSON data".to_string());
+    }
+    Ok(())
+}
+
+struct JsonKeyScanner<'a> {
+    raw: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> JsonKeyScanner<'a> {
+    fn skip_whitespace(&mut self) {
+        while self.pos < self.raw.len() && self.raw[self.pos].is_ascii_whitespace() {
+            self.pos += 1;
+        }
+    }
+
+    fn parse_value(&mut self, path: &str) -> Result<(), String> {
+        self.skip_whitespace();
+        match self.raw.get(self.pos).copied() {
+            Some(b'{') => self.parse_object(path),
+            Some(b'[') => self.parse_array(path),
+            Some(b'"') => {
+                self.parse_string()?;
+                Ok(())
+            }
+            Some(_) => {
+                while self.pos < self.raw.len()
+                    && !matches!(self.raw[self.pos], b',' | b']' | b'}')
+                    && !self.raw[self.pos].is_ascii_whitespace()
+                {
+                    self.pos += 1;
+                }
+                Ok(())
+            }
+            None => Err(format!("catalog ended while reading {path}")),
+        }
+    }
+
+    fn parse_object(&mut self, path: &str) -> Result<(), String> {
+        self.pos += 1; // {
+        let mut keys = HashSet::new();
+        self.skip_whitespace();
+        if self.raw.get(self.pos) == Some(&b'}') {
+            self.pos += 1;
+            return Ok(());
+        }
+        loop {
+            self.skip_whitespace();
+            let key = self.parse_string()?;
+            if !keys.insert(key.clone()) {
+                return Err(format!("duplicate catalog key at {path}.{key}"));
+            }
+            self.skip_whitespace();
+            if self.raw.get(self.pos) != Some(&b':') {
+                return Err(format!("catalog object key {path}.{key} is missing ':'"));
+            }
+            self.pos += 1;
+            self.parse_value(&format!("{path}.{key}"))?;
+            self.skip_whitespace();
+            match self.raw.get(self.pos) {
+                Some(b',') => self.pos += 1,
+                Some(b'}') => {
+                    self.pos += 1;
+                    return Ok(());
+                }
+                _ => return Err(format!("catalog object {path} is missing ',' or '}}'")),
+            }
+        }
+    }
+
+    fn parse_array(&mut self, path: &str) -> Result<(), String> {
+        self.pos += 1; // [
+        self.skip_whitespace();
+        if self.raw.get(self.pos) == Some(&b']') {
+            self.pos += 1;
+            return Ok(());
+        }
+        let mut index = 0;
+        loop {
+            self.parse_value(&format!("{path}[{index}]"))?;
+            index += 1;
+            self.skip_whitespace();
+            match self.raw.get(self.pos) {
+                Some(b',') => {
+                    self.pos += 1;
+                }
+                Some(b']') => {
+                    self.pos += 1;
+                    return Ok(());
+                }
+                _ => return Err(format!("catalog array {path} is missing ',' or ']'")),
+            }
+        }
+    }
+
+    fn parse_string(&mut self) -> Result<String, String> {
+        let start = self.pos;
+        if self.raw.get(self.pos) != Some(&b'"') {
+            return Err(format!("catalog key at byte {} is not a string", self.pos));
+        }
+        self.pos += 1;
+        let mut escaped = false;
+        while self.pos < self.raw.len() {
+            let byte = self.raw[self.pos];
+            self.pos += 1;
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                return serde_json::from_slice(&self.raw[start..self.pos])
+                    .map_err(|e| format!("invalid catalog string: {e}"));
+            }
+        }
+        Err("catalog string is unterminated".to_string())
+    }
 }
 
 fn validate_providers(value: &Value, path: &str) -> Result<usize, String> {
@@ -236,6 +362,12 @@ mod tests {
         assert!(validate(br#"{"providers":{"p":{"models":{"m":{"output":{"peak":"unknown"}}}}}}"#).is_err());
         assert!(validate(br#"{"providers":{"p":{"models":{"m":{"tiers":[{"output":1,"max_input_tokens":"512k"}]}}}}}"#).is_err());
         assert!(validate(br#"{"providers":{"p":{"models":{"m":{"tiers":[{"output":1,"max_input_tokens":0}]}}}}}"#).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_object_keys_including_escaped_keys() {
+        assert!(validate(br#"{"providers":{"p":{"models":{"m":{"output":1,"output":2}}}}}"#).is_err());
+        assert!(validate(br#"{"providers":{"p":{"models":{"m":{"output":1,"\u006futput":2}}}}}"#).is_err());
     }
 
     #[test]
