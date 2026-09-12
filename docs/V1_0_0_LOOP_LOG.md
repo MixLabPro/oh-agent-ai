@@ -961,3 +961,10 @@
 - 保护：预算组仍不能作为普通 Issue 关闭，预算金额与比例继续只读来自权威状态；静默动作仍由预算设置页显式执行。
 - 验收：真实 Workbench KPI 验证器、JS 语法检查、Vite production build 与 `git diff --check`通过。
 - 边界：真实预算组点击、通知首穿/静默和 AC19 Computer Use UAT 仍待可操作桌面环境。
+
+## Loop 123 · 待确认候选正确归入待处理状态
+
+- 修复：统一问题投影将 `billing_import_candidates.status=pending` 映射为规范五态中的 `open`；此前候选组虽有 `count=1`，但 `status_rollup.open` 错误为 0。
+- 保护：候选仍保持 `is_bill=false` 和只读投影，不写入行为 Issue 或账单表；其他 `resolved/not_applicable` 兼容映射不变。
+- 验收：data issues 定向测试 9/9、data crate Clippy `-D warnings`通过；同时补充回归断言锁定候选组 `status_rollup.open=1`。
+- 边界：REQ-074 六族真实数据覆盖与 AC18 的五态 Computer Use UAT 仍待真实环境执行。

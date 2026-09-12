@@ -377,7 +377,12 @@ fn projection_group(
 ) -> Value {
     let group_key = format!("{source_kind}\0{rule}\0{host}\0{object}\0{evidence_class}\0{}", issue_day_bucket(opened_at_ms));
     let mut rollup = json!({"open": 0, "later": 0, "acknowledged": 0, "resolved": 0, "not_applicable": 0});
-    let status_key = match status { "closed" | "resolved" => "resolved", "wontfix" | "not_applicable" => "not_applicable", other => other };
+    let status_key = match status {
+        "pending" | "open" => "open",
+        "closed" | "resolved" => "resolved",
+        "wontfix" | "not_applicable" => "not_applicable",
+        other => other,
+    };
     if let Some(slot) = rollup.get_mut(status_key) { *slot = json!(count); }
     json!({
         "group_id": stable_hash(&group_key), "source_kind": source_kind, "rule": rule,
@@ -916,7 +921,8 @@ mod tests {
         let groups = result["groups"].as_array().unwrap();
         assert_eq!(groups.len(), 3);
         assert!(groups.iter().any(|g| g["source_kind"] == "billing_candidate"
-            && g["rule"] == "BILLING_CONFIRMATION" && g["sample_evidence"][0]["is_bill"] == false));
+            && g["rule"] == "BILLING_CONFIRMATION" && g["sample_evidence"][0]["is_bill"] == false
+            && g["status_rollup"]["open"] == 1));
         assert!(groups.iter().any(|g| g["source_kind"] == "source_failure"));
         assert!(groups.iter().any(|g| g["source_kind"] == "data_quality"
             && g["rule"] == "PRICE_COVERAGE"));

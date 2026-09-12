@@ -2278,6 +2278,7 @@ impl AuthorityDb {
     /// dry-run counterpart to `billing_declaration_impact_preview`: the UI can
     /// show the affected facts/sessions/tokens before accepting a candidate,
     /// without creating a saved revision or changing candidate status.
+    #[allow(clippy::too_many_arguments)]
     pub fn billing_declaration_impact_preview_for(
         &self, host: &str, provider_id: &str, effective_start: &str,
         effective_end: Option<&str>, scopes: &[(&str, &str)],
