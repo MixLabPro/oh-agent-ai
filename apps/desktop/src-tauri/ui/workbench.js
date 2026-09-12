@@ -563,6 +563,7 @@ async function renderOverview() {
   await renderStatisticsTimezoneSettings();
   await renderPricingCatalogSettings();
   bindDiagnosticExport();
+  await renderAboutDiagnostics();
   await renderBudgetSettings();
   renderMonthVerdict(monthly);
   renderOverviewDays(cal);
@@ -761,6 +762,24 @@ function bindDiagnosticExport() {
       button.disabled = false;
     }
   };
+}
+
+async function renderAboutDiagnostics() {
+  const target = document.getElementById("ov-about-versions");
+  if (!target || target.dataset.loaded === "1") return;
+  try {
+    const d = await invoke("about_diagnostics");
+    const pricing = d && d.pricing
+      ? (d.pricing.version + " · 捕获于 " + formatStatisticsDateTime(d.pricing.captured_at_ms))
+      : "暂无价格快照";
+    const sync = d && d.sync ? ((d.sync.ok ? "正常" : "需检查") + " · " + (d.sync.message || "")) : "暂无同步回执";
+    target.textContent = "App " + (d.app_version || "—")
+      + " · Authority schema " + (d.authority_schema || "—")
+      + " · 价格 " + pricing + " · 同步 " + sync;
+    target.dataset.loaded = "1";
+  } catch (e) {
+    target.textContent = "版本诊断读取失败：" + errText(e);
+  }
 }
 
 function renderFirstRunState(sync) {

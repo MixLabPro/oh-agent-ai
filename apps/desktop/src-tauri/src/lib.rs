@@ -1957,6 +1957,27 @@ fn export_diagnostic_package() -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn about_diagnostics() -> Value {
+    let data_home = overview::data_home();
+    let authority_path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let pricing = agent_vitals_data::authority::AuthorityDb::open_readonly(&authority_path)
+        .ok()
+        .and_then(|db| db.pricing_snapshot_latest().ok().flatten())
+        .map(|(version, captured_at_ms)| serde_json::json!({
+            "version": version,
+            "captured_at_ms": captured_at_ms,
+        }));
+    serde_json::json!({
+        "status": "ok",
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
+        "pricing": pricing,
+        "pricing_update": read_pricing_catalog_status(&data_home),
+        "sync": overview::read_overview().sync,
+    })
+}
+
+#[tauri::command]
 fn budget_config() -> Value {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
@@ -2767,6 +2788,7 @@ pub fn run() {
             save_public_pricing_catalog_policy,
             update_public_pricing_catalog,
             export_diagnostic_package,
+            about_diagnostics,
             budget_config,
             budget_profiles_status,
             save_budget_profile,
