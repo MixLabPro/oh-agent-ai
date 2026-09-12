@@ -322,15 +322,49 @@ pub async fn sessions_issues(
             db.conn(), None, None, 500, None,
         ).map_err(|e| error_value("authority_query", &e.to_string()))?;
         let rows = groups["groups"].as_array().cloned().unwrap_or_default();
+        let mut rows = rows;
+        let mut budget_added = false;
+        if let Some(budget) = agent_vitals_runtime::budget::budget_status_sql_at(
+            &data_home(), &crate::overview::current_month_beijing(),
+        ) {
+            if matches!(budget["level"].as_str(), Some("warn" | "exceeded")) {
+                rows.push(budget_issue_group(&budget));
+                budget_added = true;
+            }
+        }
         let count = |severity: &str| rows.iter().filter(|v| v["severity"] == severity).count();
         let rules = issue_group_rollup(&rows);
         let sessions_with: usize = rows.iter().map(|v| v["sessions"].as_u64().unwrap_or(0) as usize).sum();
+        let total_groups = groups["total_groups"].as_u64().unwrap_or(0) + u64::from(budget_added);
         Ok(serde_json::json!({
-            "totals": { "issues": groups["total_groups"], "findings": groups["source_issue_count"], "critical": count("critical"), "warning": count("warning"), "info": count("info"), "sessions": sessions_with, "sessions_total": sessions_with },
+            "totals": { "issues": total_groups, "findings": groups["source_issue_count"], "critical": count("critical"), "warning": count("warning"), "info": count("info"), "sessions": sessions_with, "sessions_total": sessions_with },
             "rules": rules, "issues": rows, "findings": [], "source": "unified_issue_groups",
-            "next_cursor": groups["next_cursor"], "source_projection_count": groups["source_projection_count"]
+            "next_cursor": groups["next_cursor"], "source_projection_count": groups["source_projection_count"].as_u64().unwrap_or(0) + u64::from(budget_added)
         }))
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+fn budget_issue_group(budget: &Value) -> Value {
+    let month = budget["month"].as_str().unwrap_or("<unknown>");
+    let level = budget["level"].as_str().unwrap_or("warn");
+    let key = format!("budget\0{month}\0{level}");
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let severity = if level == "exceeded" { "critical" } else { "warning" };
+    json!({
+        "group_id": format!("fnv1a64:{}", agent_vitals_domain::source_identity::fnv1a64_hex(key.as_bytes())),
+        "source_kind": "budget", "rule": "BUDGET_THRESHOLD", "host": "all",
+        "object": month, "evidence_class": "budget", "bucket": month,
+        "count": 1, "first_seen_at_ms": now_ms, "last_seen_at_ms": now_ms,
+        "severity": severity, "status_rollup": {"open": 1, "later": 0, "acknowledged": 0, "resolved": 0, "not_applicable": 0},
+        "sessions_count": 0, "sample_evidence": [{"level": level, "month": month,
+            "ratio_bp": budget["ratio_bp"], "monthly_cny_minor": budget["monthly_cny_minor"],
+            "metered_cny_minor": budget["metered_cny_minor"]}],
+        "remedy": {"remedy_id": "review-budget-or-snooze", "diagnostic_only": true},
+        "actionability": if level == "exceeded" { 1.0 } else { 0.8 },
+        "time": now_ms, "evidence": "budget", "tool_name": "budget",
+        "category": "budget", "hits": 1, "sessions": 0,
+        "read_only": true
+    })
 }
 
 /// User-owned Issue state transition. This command only changes the Issue
@@ -627,5 +661,18 @@ mod tests {
             Err(v) => assert_eq!(v["error"]["code"], "cancelled"),
             Ok(_) => panic!("missing binary must be an Err"),
         }
+    }
+
+    #[test]
+    fn budget_issue_group_is_read_only_and_severity_tracks_level() {
+        let warn = budget_issue_group(&json!({
+            "month": "2026-09", "level": "warn", "ratio_bp": 8000,
+            "monthly_cny_minor": 1000, "metered_cny_minor": 800,
+        }));
+        assert_eq!(warn["rule"], "BUDGET_THRESHOLD");
+        assert_eq!(warn["severity"], "warning");
+        assert_eq!(warn["read_only"], true);
+        let exceeded = budget_issue_group(&json!({"month":"2026-09", "level":"exceeded"}));
+        assert_eq!(exceeded["severity"], "critical");
     }
 }

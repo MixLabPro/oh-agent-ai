@@ -666,3 +666,11 @@
 - 保护：组列表与实例读取均为只读；无效 group/issue 明确报错；动作不执行 shell、不改宿主文件；待确认计费候选仍保持非账单语义。
 - 验收：workbench JS 语法、desktop 103/103、desktop clippy `-D warnings`、`git diff --check`通过。
 - 边界：L1 当前首批 50 条，组内继续分页按钮、L2 独立详情面板、自动关闭、预算阈值/异常增长族和真机点击验收仍待完成；不勾选完整 REQ-073–080 或 AC18。
+
+## Loop 80 · REQ-074 预算阈值族投影（自验收）
+
+- 执行：待处理队列复用权威 `budget_status_sql_at`，仅 `warn/exceeded` 生成 `BUDGET_THRESHOLD` 组；预算分子、比例和币种仍由现有预算计算提供。
+- 保护：预算组标记 `read_only=true`，不伪造 `issue_instances`、不提供虚假的原始命中关闭动作；预算值保持 minor 整数与现有按量口径，不把订阅或 USD 静默并入 CNY。
+- 接入：预算组与行为/数据源组共用 L0 排序和呈现，但通过 `source_kind=budget` 在展开时显示预算状态说明。
+- 验收：预算 warn/exceeded 组投影单测、workbench JS 语法、desktop 104/104、clippy `-D warnings`、data issues 8/8、差异检查通过。
+- 边界：异常用量增长族、预算设置/静默快捷动作、自动关闭和真机 UAT 仍待完成；不勾选完整 REQ-074/REQ-078 或 AC18。

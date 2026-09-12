@@ -4195,34 +4195,76 @@ function statusRollupLabel(rollup) {
     .map(([key, label]) => label + " " + rollup[key]).join(" · ") || "—";
 }
 
-async function toggleIssueGroup(group, row) {
+async function toggleIssueGroup(group) {
   if (!group.group_id) return;
   findState.expanded[group.group_id] = !findState.expanded[group.group_id];
   renderFindingsDetail();
 }
 
-async function loadIssueGroupInstances(group, detailRow) {
+async function loadIssueGroupInstances(group, detailRow, cursor, append) {
   try {
-    const data = await invoke("issue_group_instances", { groupId: group.group_id, pageSize: 50 });
+    if (group.source_kind === "budget") {
+      const sample = group.sample_evidence && group.sample_evidence[0] || {};
+      detailRow.firstElementChild.textContent = "预算状态：" + (sample.level || "—") +
+        " · 比例 " + (sample.ratio_bp != null ? sample.ratio_bp + "bp" : "—") +
+        " · 该项仅支持到预算设置/静默入口处理，不能作为原始 Issue 关闭。";
+      return;
+    }
+    const data = await invoke("issue_group_instances", { groupId: group.group_id, pageSize: 50, cursor: cursor || null });
     const cell = detailRow.firstElementChild;
-    cell.textContent = "";
+    if (!append) cell.textContent = "";
     const list = data && Array.isArray(data.instances) ? data.instances : [];
-    if (list.length === 0) { cell.textContent = "暂无可展开的原始命中"; return; }
+    if (list.length === 0 && !append) { cell.textContent = "暂无可展开的原始命中"; return; }
     for (const instance of list) {
       const line = document.createElement("div");
       line.className = "issue-instance-line";
-      line.textContent = (instance.evidence || "—") + " · " + (instance.status || "open");
-      for (const [status, label] of [["later", "稍后"], ["acknowledged", "已确认"], ["closed", "已解决"], ["wontfix", "不适用"]]) {
-        const button = el("button", "btn secondary");
-        button.type = "button";
-        button.textContent = label;
-        button.addEventListener("click", () => transitionIssueFromUi(instance.issue_id, status));
-        line.appendChild(button);
+      const text = document.createElement("span");
+      text.textContent = (instance.evidence || "—") + " · " + (instance.status || "open");
+      line.appendChild(text);
+      const detailButton = el("button", "btn secondary");
+      detailButton.type = "button";
+      detailButton.textContent = "详情";
+      detailButton.addEventListener("click", () => showIssueInstanceDetail(instance.issue_id, line));
+      line.appendChild(detailButton);
+      if (["open", "later", "acknowledged"].includes(instance.status || "open")) {
+        for (const [status, label] of [["later", "稍后"], ["acknowledged", "已确认"], ["closed", "已解决"], ["wontfix", "不适用"]]) {
+          const button = el("button", "btn secondary");
+          button.type = "button";
+          button.textContent = label;
+          button.addEventListener("click", () => transitionIssueFromUi(instance.issue_id, status));
+          line.appendChild(button);
+        }
       }
       cell.appendChild(line);
     }
+    const more = cell.querySelector("button[data-issue-more]");
+    if (more) more.remove();
+    if (data && data.next_cursor) {
+      const moreButton = el("button", "btn secondary");
+      moreButton.type = "button";
+      moreButton.dataset.issueMore = "1";
+      moreButton.textContent = "加载更多（剩余 " + Math.max(0, Number(data.total_instances || 0) - (Number(cursor || 0) + list.length)) + "）";
+      moreButton.addEventListener("click", () => loadIssueGroupInstances(group, detailRow, data.next_cursor, true));
+      cell.appendChild(moreButton);
+    }
   } catch (e) {
     detailRow.firstElementChild.textContent = "原始命中读取失败：" + (e.message || e);
+  }
+}
+
+async function showIssueInstanceDetail(issueId, line) {
+  const old = line.querySelector(".issue-instance-detail");
+  if (old) { old.remove(); return; }
+  const detail = document.createElement("span");
+  detail.className = "issue-instance-detail muted";
+  detail.textContent = "读取详情…";
+  line.appendChild(detail);
+  try {
+    const data = await invoke("issue_instance_read", { issueId });
+    const issue = data && data.issue;
+    detail.textContent = issue ? " · " + JSON.stringify(issue.metadata || {}) : " · 详情不存在";
+  } catch (e) {
+    detail.textContent = " · 详情读取失败：" + (e.message || e);
   }
 }
 
