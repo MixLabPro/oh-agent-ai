@@ -2217,3 +2217,11 @@
   `serde_json` 的默认覆盖行为静默吞掉重复模型或费率。
 - 验收：新增重复普通键与转义键回归用例；价格目录 6 项目标测试、Rust 1.74 MSRV
   Clippy 和 `cargo test --release` 全量回归均通过。
+
+## Loop 310 · 价格目录防护 Intel 目标回归
+
+- 验收：价格目录重复键防护合入后，`cargo test --release --target x86_64-apple-darwin`
+  实际执行通过；CLI、数据层、宿主层、核心/运行时、契约、性能、回放和 parity 测试
+  均无失败。
+- 结论：本次目录完整性修复同时具备 arm64 与 x86_64 Rust 执行证据；完整 Intel `.app`
+  仍需原生 macOS-13 runner 打包。
