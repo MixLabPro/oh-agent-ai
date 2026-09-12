@@ -2186,3 +2186,11 @@
   `max_input_tokens` 现在明确拒收，避免坏目录替换当前有效版本。
 - 验收：新增 4 个异常输入回归用例；`cargo test -p agent-vitals-runtime --release
   pricing_catalog` 通过，Rust 1.74 MSRV Clippy 通过，`cargo test --release` 全量通过。
+
+## Loop 306 · 数据源排除/恢复浏览器 UAT
+
+- 修复：Vite mock 增加三宿主状态、读取位置、自定义目录和排除/删除/恢复动作的进程内
+  状态；排除后保留已导入会话/事实，并返回“恢复读取”动作。
+- UAT: AC23 partial walked ✔：排除 Codex 后显示“已排除”且仍显示 8 个会话/42 条事实；
+  点击“恢复读取”后回到“已连接”，导入范围保持不变。删除已导入数据未代替用户执行。
+- 验收：`npm run verify` 通过；mock 状态不写 Authority 或宿主原始日志。

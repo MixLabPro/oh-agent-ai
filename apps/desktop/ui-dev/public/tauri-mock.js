@@ -120,6 +120,26 @@
   }];
 
   let syncPaused = false;
+  const sourceStatuses = [
+    {
+      host: "codex", source_id: "browser-codex", connection_state: "connected",
+      scan: { source_count: 12 }, log: { last_event_at_ms: Date.now() - 3600000 },
+      import_scope: { sessions: 8, facts: 42 }, recovery_action: null,
+    },
+    {
+      host: "claude-code", source_id: "browser-claude", connection_state: "needs_attention",
+      scan: { source_count: 4 }, log: { last_event_at_ms: Date.now() - 7200000 },
+      import_scope: { sessions: 3, facts: 18 },
+      failed_scope: { sources: 1, error_codes: ["file_missing"] },
+      recovery_action: { label: "重新同步", kind: "retry_source" },
+    },
+    {
+      host: "dsh", source_id: "browser-dsh", connection_state: "connected",
+      scan: { source_count: 2 }, log: { last_event_at_ms: Date.now() - 1800000 },
+      import_scope: { sessions: 2, facts: 9 }, recovery_action: null,
+    },
+  ];
+  const customRoots = [];
   const billingCandidates = [{
     candidate_id: "browser-candidate-1", status: "pending", host: "codex",
     provider_id: "openai", currency: "USD", amount_minor: 2000,
@@ -177,7 +197,8 @@
       }
       case "billing_recalculation_job_status": return billingJobs.get(args && args.jobId) || { status: "missing" };
       case "host_bills_for_period": return emptyReport("bills");
-      case "data_source_status": return { status: "ok", sources: [{ host: "codex", scan: { source_count: 12 }, import_scope: { sessions: 8 } }] };
+      case "data_source_status": return { status: "ok", sources: sourceStatuses };
+      case "custom_source_roots": return { status: "ok", sources: customRoots };
       case "budget_config": return { status: "ok", monthly_cny_minor: 10000, daily_cny_minor: 500, warning_ratio_bp: 80, origin: "user" };
       case "budget_profiles_status": return { status: "ok", profiles: [] };
       case "retention_config": return { status: "ok", months: 13 };
@@ -211,7 +232,7 @@
       case "issue_group_instances": return { group_id: args && args.groupId, instances: issueInstances, next_cursor: null, total_instances: issueInstances.length };
       case "issue_instance_read": return { status: "ok", issue: issueInstances.find((item) => item.issue_id === (args && args.issueId)) || null };
       case "issue_transition": return transitionIssue(args && args.issueId, args && args.toStatus);
-      case "source_read_locations": return { status: "ok", locations: [] };
+      case "source_read_locations": return { status: "ok", locations: { codex: "~/.codex", "claude-code": "~/.claude", dsh: "~/.deepseek" } };
       case "sync_pause_state": return { status: "ok", paused: syncPaused };
       case "peek_nav_target": case "peek_focus_target": return null;
       case "sync_request_status": return { completed: true };
@@ -219,7 +240,41 @@
       case "set_sync_paused":
         syncPaused = !!(args && args.paused);
         return ok({ status: "ok", paused: syncPaused });
-      case "set_source_host_excluded": case "clear_nav_target": case "clear_focus_target": return ok({ status: "ok" });
+      case "set_source_host_excluded": {
+        const input = (args && args.input) || {};
+        const source = sourceStatuses.find((item) => item.host === input.host);
+        if (!source) throw new Error("source host not found");
+        source.connection_state = input.excluded ? "excluded" : "connected";
+        source.failed_scope = input.excluded ? {} : source.failed_scope;
+        source.recovery_action = input.excluded
+          ? { label: "恢复读取", kind: "include_source" }
+          : null;
+        return ok({ status: "ok", host: source.host, excluded: !!input.excluded });
+      }
+      case "delete_imported_source_data": {
+        const source = sourceStatuses.find((item) => item.host === (args && args.host));
+        if (!source) throw new Error("source host not found");
+        const scope = source.import_scope || {};
+        const result = { facts: Number(scope.facts || 0), sessions: Number(scope.sessions || 0) };
+        source.import_scope = { facts: 0, sessions: 0 };
+        source.connection_state = "excluded";
+        return ok(result);
+      }
+      case "pick_custom_source_root": return "/tmp/agent-vitals-browser-custom-source";
+      case "add_custom_source_root": {
+        const input = (args && args.input) || {};
+        if (!input.host || !input.root) throw new Error("custom source host and root are required");
+        const exists = customRoots.some((item) => item.host === input.host && item.root === input.root);
+        if (!exists) customRoots.push({ host: input.host, root: input.root });
+        return ok({ status: "ok", changed: !exists });
+      }
+      case "remove_custom_source_root": {
+        const input = (args && args.input) || {};
+        const index = customRoots.findIndex((item) => item.host === input.host && item.root === input.root);
+        if (index >= 0) customRoots.splice(index, 1);
+        return ok({ status: "ok", changed: index >= 0 });
+      }
+      case "clear_nav_target": case "clear_focus_target": return ok({ status: "ok" });
         default: return ok({ status: "ok", browser_mock: true, command, args });
       }
     } catch (error) {
