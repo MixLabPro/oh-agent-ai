@@ -1640,3 +1640,9 @@
 - 修复：两组独立按量预算的币种、月预算、日预算和预警阈值输入均补充明确 `aria-label`，不再让读屏器只读出无名称 `spinbutton`/`combobox`。
 - 验收：浏览器实际读取 8 个独立预算控件名称，控制台错误数为 0；JS 语法、closeout verifier、Vite build 和最新 `.app` 构建通过。
 - 边界：键盘/读屏完整真机路径仍需在可操作的 `.app` 上复验；本轮未在锁屏环境启动新包。
+
+## Loop 230 · Token 日历月份选择器无障碍名称
+
+- 发现：对 Workbench 全部 `input/select/textarea/button` 做名称扫描时，唯一缺少 `label/aria-label/title/placeholder` 的控件是 `#cal-month`。
+- 修复：为 Token 日历月份选择器加入 `aria-label="选择日历月份"`，并在 closeout verifier 中固定该契约。
+- 验收：浏览器名称扫描返回 0 个无名称表单控件，控制台错误数为 0；closeout verifier、Vite build 和 `cargo tauri build --bundles app` 全部通过。

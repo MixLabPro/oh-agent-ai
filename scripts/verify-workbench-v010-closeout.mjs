@@ -61,6 +61,8 @@ ok(!/bill_id:\s*["']csv-["']\s*\+\s*Date\.now/.test(js),
 ok(js.includes("/^[A-Z]{3}$/.test(currency)"), "CSV 币种使用三位大写代码");
 ok((js.match(/setAttribute\("aria-label", profileLabel/g) || []).length === 4,
   "独立预算的币种、月额、日额和阈值输入具备无障碍名称");
+ok(html.includes('id="cal-month" type="month" class="cal-month-input" aria-label="选择日历月份"'),
+  "Token 日历月份选择器具备无障碍名称");
 
 console.log(failed ? `\n${failed} FAIL` : "\n全部通过。");
 process.exit(failed ? 1 : 0);
