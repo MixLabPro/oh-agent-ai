@@ -996,3 +996,9 @@
 - 保护：严重度仍只表示规则/证据等级，不转译为已确认损害；原始组严重度、命中数、会话数和状态记录不变。
 - 验收：新增 warning→critical 跨组回归测试；desktop 定向测试 2/2、Clippy `-D warnings` 与 `git diff --check`通过。
 - 边界：跨规则同一会话的全局去重、完整严重度排序 UAT 和 AC18 Computer Use 验收仍待后续执行。
+
+## Loop 128 · 全量回归与发布前静态门禁复验
+
+- 验证：根 workspace `cargo test --release`、桌面 crate release 测试、Python `unittest` 1188 项、Rust/Python golden 15 个 case 逐字节对拍均通过；随后根 workspace `cargo clippy --release --all-targets -- -D warnings`、`cargo build --release` 和桌面 crate release 测试再次通过（桌面 110 项）。
+- 保护：本轮只验证既有实现，没有把“测试全绿”扩大解释为 AC21 系统时区、AC18/AC19 完整 Computer Use、签名公证或外部试用完成；用户已有 WorkBuddy/Phase/Issue 文档保持未修改、未暂存。
+- 结论：当前代码回归基线稳定；下一项仍应处理 AC21/REQ-033 的系统统计时区纵切面，不能继续沿用北京时间作为最终产品口径。
