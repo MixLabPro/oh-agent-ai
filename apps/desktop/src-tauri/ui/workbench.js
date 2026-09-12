@@ -888,7 +888,10 @@ function renderQualityStatus(status) {
             const restored = await invoke("restore_authority_backup");
             button.textContent = restored && restored.status === "cancelled"
               ? "已取消选择备份"
-              : "备份已恢复，请重新加载";
+              : "备份已恢复，正在重新加载…";
+            if (restored && restored.status === "restored") {
+              window.setTimeout(() => window.location.reload(), 250);
+            }
           } catch (e) {
             button.textContent = "恢复失败：" + errText(e);
             button.disabled = false;

@@ -1938,3 +1938,11 @@
   时临时恢复文件尚未持久化的窗口。
 - 验收：桌面恢复测试 `2 passed`；独立 Tauri clippy `-D warnings` 通过；`git diff --check`
   通过。Computer Use 的锁屏阻塞仍只影响真实 UI 验收，不影响代码回归。
+
+## Loop 275 · 恢复成功后刷新工作台
+
+- 发现：备份恢复完成后页面仍持有恢复前的状态，只显示“请重新加载”，恢复结果不能
+  自动回到首屏。
+- 修复：恢复命令返回 `restored` 后，Workbench 延迟 250ms 自动 reload；取消选择或
+  失败不触发 reload，保留可见反馈。
+- 验收：closeout verifier 增加自动刷新断言；`git diff --check` 通过。
