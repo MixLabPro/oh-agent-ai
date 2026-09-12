@@ -1,4 +1,5 @@
-//! Stage B 遗留收口：Runtime 共享 sync service —— 三宿主**例行** facts ingest。
+//! Stage B 遗留收口：Runtime 共享 sync service —— 四宿主**例行** facts ingest
+//! （claude-code / codex / dsh，E4b 起 + workbuddy）。
 //!
 //! 本模块回答「**哪些会话文件该被 emit**」：文件发现（各宿主 sources 的
 //! locate 面）→ `source_files` SQL 指纹差量 → emitter → authority 写入。这是
@@ -161,6 +162,16 @@ fn sync_host(
             }
             "dsh" => agent_vitals_hosts::dsh_usage_fact::dsh_session_to_usage_facts(path, ns, None)
                 .map(|r| r.facts),
+            // WorkBuddy：一个 trace 文件 = 一个 source_id（spec WORKBUDDY_ONBOARDING
+            // §9E.4 纪律 7 的增量索引就是本函数上方的 source_files 指纹）。emitter
+            // 自身按 trace.sessionId 归属，无 sessionId 的 trace 不发事实——那些
+            // 文件同样落指纹（本轮「已处理」），不会每 tick 重读 686MB。
+            "workbuddy" => {
+                agent_vitals_hosts::workbuddy_usage_fact::workbuddy_trace_file_to_usage_facts(
+                    path, ns, "default",
+                )
+                .map(|r| r.facts)
+            }
             other => Err(format!("unknown host `{other}`")),
         };
         match emit {
@@ -199,7 +210,8 @@ fn sync_host(
     Ok(())
 }
 
-/// 三宿主例行同步入口。幂等：重复调用第二次基本全 skipped / duplicate。
+/// 例行同步入口（`ingest_service::FACT_HOSTS` 全部宿主）。幂等：重复调用第二次
+/// 基本全 skipped / duplicate。
 pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
     // 读取范围决定本轮会接触哪些本地数据，必须在任何维护写入之前完整校验。
     // 配置损坏时宁可不启动同步，也不能先清理一部分旧事实再报告错误。
@@ -303,6 +315,12 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             crate::home::dsh_home()
                 .map(|d| crate::sessions::discovery::dsh_session_files(&d))
                 .unwrap_or_default(),
+        ),
+        (
+            "workbuddy",
+            agent_vitals_hosts::workbuddy_traces::workbuddy_trace_files(
+                &agent_vitals_hosts::workbuddy_session::workbuddy_root(&user_home),
+            ),
         ),
     ];
     for source in custom_sources {

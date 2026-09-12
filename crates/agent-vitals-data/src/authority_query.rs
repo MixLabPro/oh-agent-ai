@@ -714,6 +714,72 @@ pub fn hourly_by_host(
     Ok(out)
 }
 
+/// [`host_window_tokens`]：单宿主窗口四桶之和 + 最新北京日索引。
+pub(crate) const SQL_HOST_WINDOW_TOKENS: &str = "SELECT COUNT(*),
+                COALESCE(SUM(uncached_input_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cache_write_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                MAX((event_ts_ms + ?1) / ?2)
+         FROM usage_facts
+         WHERE host = ?3
+           AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?4 AND event_ts_ms < ?5";
+
+/// 一个宿主在窗口内的四桶之和（宿主无关的 L0 计量——`tokens_by_host` 的通用
+/// 数据源；有自己价卡管线的宿主仍走各自的 days/hours 查询，这个给**只有 token、
+/// 没有金额**的宿主用，E4b 的 workbuddy 是首个消费方）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostWindowTokens {
+    pub facts: i64,
+    pub uncached_input: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub output: i64,
+    /// 窗口内最新事实的北京日 `YYYY-MM-DD`（freshness 的观测点）。
+    pub latest_day: String,
+}
+
+/// `None` = 该宿主窗口内没有任何事实行（消费方必须渲染 unavailable，不能编 0）；
+/// `Some` 且四桶全 0 = 同步过、真零。
+pub fn host_window_tokens(
+    conn: &Connection,
+    host: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Option<HostWindowTokens>, AuthorityError> {
+    let row = conn.query_row(
+        SQL_HOST_WINDOW_TOKENS,
+        rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, host, start_ms, end_ms],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+            ))
+        },
+    )?;
+    let (facts, u, cr, cw, o, day_idx) = row;
+    let Some(day_idx) = day_idx else {
+        return Ok(None);
+    };
+    if facts == 0 {
+        return Ok(None);
+    }
+    Ok(Some(HostWindowTokens {
+        facts,
+        uncached_input: u,
+        cache_read: cr,
+        cache_write: cw,
+        output: o,
+        latest_day: civil_date_from_days(day_idx),
+    }))
+}
+
 /// 一个北京日窗口内各宿主的 token 总量。与 [`hourly_by_host`] 不同，这里保留
 /// token 恰为零的事实行：调用方因此可以区分“已同步且真零”（map 中为 0）和
 /// “该宿主在窗口内没有任何 SQL 事实”（缺键，必须渲染为 unavailable/unknown，
@@ -2338,6 +2404,8 @@ mod tests {
         let no_provider: Option<&str> = None;
         let sessions_params: [&dyn rusqlite::ToSql; 8] =
             [&"dsh", &s, &end, &no_hour, &BEIJING_OFFSET_MS, &HOUR_MS, &no_model, &no_provider];
+        let host_window_params: [&dyn rusqlite::ToSql; 5] =
+            [&BEIJING_OFFSET_MS, &DAY_MS, &"workbuddy", &s, &end];
 
         for (name, sql, params) in [
             ("peaked_days_map", SQL_PEAKED_DAYS_MAP, &peak_params[..]),
@@ -2347,6 +2415,7 @@ mod tests {
             ("hourly_by_host_model", SQL_HOURLY_BY_HOST_MODEL, &hourly_h_params[..]),
             ("facts_page_window", SQL_FACTS_PAGE_WINDOW, &page_params[..]),
             ("sessions_in_window", SQL_SESSIONS_IN_WINDOW, &sessions_params[..]),
+            ("host_window_tokens", SQL_HOST_WINDOW_TOKENS, &host_window_params[..]),
         ] {
             let p = plan(sql, params);
             assert!(

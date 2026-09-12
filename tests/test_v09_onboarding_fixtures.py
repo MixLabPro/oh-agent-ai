@@ -11,7 +11,8 @@
   · 二进制对账（AGENT_VITALS_BIN 约定，同 test_r2a/test_data_summary_cli）：
     语料装进隔离 AGENT_VITALS_HOME / HOME → `data coverage --json` 逐宿主
     断言 basis、summarable 归属、coverage、excluded_hosts；`hosts --json -`
-    断言 WorkBuddy「声明但排除」的两半（注册表有行 + 数据面 excluded）。
+    断言 WorkBuddy「声明且接线、只有 token 没有钱」（注册表有行 + by_host 有行
+    + amounts 空；E4b 之前是「声明但排除」）。
 
   运行：AGENT_VITALS_BIN=target/release/agent-vitals \\
         python3 -m unittest tests.test_v09_onboarding_fixtures
@@ -136,17 +137,24 @@ class OnboardingContractBinaryTests(unittest.TestCase):
         self.assertAlmostEqual(d["total_summable"],
                                dsh["amounts_by_basis"]["metered_actual"])
         self.assertEqual(d["coverage"],
-                         {"measured_fields": 3, "total_fields": 3, "denominator_version": 1})
-        self.assertEqual(d["excluded_hosts"], ["workbuddy"])
+                         {"measured_fields": 4, "total_fields": 4, "denominator_version": 1})
+        self.assertEqual(d["excluded_hosts"], [])
 
-    def test_workbuddy_is_declared_but_excluded(self):
-        """「声明但排除」的两半必须同时成立：capability 注册表认识它（声明面），
-        summary 不从它取数（数据面）。任何一半缺席都是回归。"""
+    def test_workbuddy_is_declared_and_wired_without_money(self):
+        """E4b（docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5）之前这条叫「声明但排除」：
+        capability 注册表认识它、summary 不从它取数。现在两半都变了一半：注册表
+        仍认识它（声明面不动——`fold` 仍 None，它没有金钱折叠），summary **从它
+        取 token**（by_host 有行、不在 excluded）但**永不取钱**（amounts 空）。
+        本用例没种 workbuddy 事实 → 行是 unavailable，不是 0。"""
         month = time.strftime("%Y-%m", time.gmtime(time.time() + 8 * 3600))
         self._plant_all_three_hosts(month)
         d = json.loads(self.run_cli("data", "coverage", "--month", month, "--json"))
-        self.assertIn("workbuddy", d["excluded_hosts"])
-        self.assertNotIn("workbuddy", d["by_host"])
+        self.assertEqual(d["excluded_hosts"], [])
+        self.assertIn("workbuddy", d["by_host"])
+        wb = d["by_host"]["workbuddy"]
+        self.assertEqual(wb["amounts_by_basis"], {})
+        self.assertEqual(wb["freshness"]["state"], "unavailable")
+        self.assertEqual(d["tokens_by_host"]["workbuddy"]["total"], 0)
 
         hosts = json.loads(self.run_cli("hosts", "--json", "-"))
         rows = hosts["hosts"] if isinstance(hosts, dict) else hosts

@@ -449,6 +449,35 @@ enum Cmd {
         #[arg(long)]
         write: bool,
     },
+    /// Replay a WorkBuddy home (`~/.workbuddy`) into UsageFact rows — one per
+    /// generation span with usage, keyed by trace.sessionId (E4a, spec §9E.5).
+    /// Buckets map like Codex's OpenAI-format usage: uncached = prompt − cached,
+    /// cache_read = cached, cache_write = 0, output = completion. Provider/route
+    /// are left unresolved on purpose (platform-credit vs self-configured vs
+    /// promo track is per-request and not observable locally, spec §2.1).
+    /// Traces without a sessionId are counted as `unattributed`, never emitted.
+    /// Without --write this is an in-memory, read-only diagnostic, byte-for-byte
+    /// mirror of Python `scan.py workbuddy-usage-facts --json -`.
+    WorkbuddyUsageFacts {
+        /// WorkBuddy home directory (the one containing traces/)
+        root: PathBuf,
+        /// machine_namespace component of SessionKey — required (spec §9);
+        /// the CLI never reads/writes state to invent one (missing exits 2)
+        #[arg(long)]
+        machine_namespace: Option<String>,
+        /// source_profile component of SessionKey (default: 'default')
+        #[arg(long, default_value = "default")]
+        source_profile: String,
+        /// Write the UsageFact JSON to FILE; use - for stdout (default: human summary)
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+        /// Persist facts through the runtime ingest service into
+        /// <data_home>/facts/workbuddy.jsonl (exactly-once by fact_id). Rust-only
+        /// by design — Python grows no writer; without this flag the output stays
+        /// byte-identical to the Python implementation. (E4b, spec §9E.5)
+        #[arg(long)]
+        write: bool,
+    },
     /// Audit ONE or MORE Codex rollout JSONL files into per-`token_count`
     /// UsageFact rows (facts + attempts + coverage; v0.7 spec §3 candidate #3
     /// Stage 2). In-memory emit + read-only diagnostic — writes no state at all.
@@ -620,10 +649,11 @@ enum Cmd {
     },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
-    /// `sessions` row is the join anchor across the three joinable surfaces (spec
-    /// §2.1); cost is the host-billed credit_json (spec §9). SV604/605 degrade to
-    /// Unavailable (host capability: only bash/web_fetch tool calls are joinable to
-    /// sessions, §3.1). Stateless single call; `--list` enumerates.
+    /// `sessions` row is the join anchor across the four joinable surfaces (spec
+    /// §2.1; traces join via `trace.sessionId` since E1/E2); cost is the host-billed
+    /// credit_json (spec §9). Edit/Write spans feed SV604/605, span status feeds
+    /// SV607/608, agent spans feed SubagentSpawns; Bash spans are not folded until
+    /// E3 (audit-log stays the Bash source). Stateless single call; `--list` enumerates.
     WorkbuddySession {
         /// List all WorkBuddy sessions: id/title/model/cwd/date span
         #[arg(long)]
@@ -2436,6 +2466,60 @@ session_store={store} fold={fold}"
     // event id 按 rollout stem 命名空间——同 stem 的 byte-identical 复本去重、
     // 异 stem 永不误合并。与 Python `scan.py codex-usage-facts --json -` 字节相等
     // （parity 钉测在 tests/test_codex_usage_fact.py）。
+    if let Some(Cmd::WorkbuddyUsageFacts {
+        root,
+        machine_namespace,
+        source_profile,
+        rows_json,
+        write,
+    }) = &args.cmd
+    {
+        let ns = match machine_namespace {
+            Some(ns) if !ns.is_empty() => ns.clone(),
+            _ => {
+                eprintln!(
+                    "workbuddy-usage-facts: --machine-namespace is required \
+                     (v0.7 spec §9: caller-provided; a CLI default would write state)"
+                );
+                std::process::exit(2);
+            }
+        };
+        let result = match agent_vitals_hosts::workbuddy_usage_fact::workbuddy_traces_to_usage_facts(
+            root,
+            &ns,
+            source_profile,
+        ) {
+            Ok(r) => r,
+            Err(msg) => {
+                eprintln!("workbuddy-usage-facts failed: {msg}");
+                std::process::exit(2);
+            }
+        };
+        let write_report = run_ingest(*write, "workbuddy-usage-facts", &result.facts);
+        if let Some(path) = rows_json {
+            let payload = attach_write_report(
+                agent_vitals_hosts::workbuddy_usage_fact::to_payload_value(&result, &ns, source_profile),
+                &write_report,
+            );
+            let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}: {} facts", path.display(), result.facts.len());
+            }
+        } else {
+            print!(
+                "{}",
+                agent_vitals_hosts::workbuddy_usage_fact::to_human_summary(&result, root, &ns, source_profile)
+            );
+            print_ingest_summary(&write_report);
+        }
+        return;
+    }
+
     if let Some(Cmd::CodexUsageFacts {
         rollouts,
         machine_namespace,
@@ -2656,7 +2740,7 @@ session_store={store} fold={fold}"
             updated: 0,
             conflicts: 0,
         };
-        for host in ["claude-code", "codex", "dsh"] {
+        for host in agent_vitals_runtime::ingest_service::FACT_HOSTS {
             let path = data_home.join("facts").join(format!("{host}.jsonl"));
             if !path.exists() {
                 continue;
@@ -3246,12 +3330,11 @@ session_store={store} fold={fold}"
                 // `mcp::dispatch` 仍会做格式和日期合法性校验；CLI 先拒绝结构
                 // 歧义，给出更清晰的错误。
                 let range_pair = date_from.is_some() == date_to.is_some();
-                let window_shape_ok = range_pair && match (
-                    day.is_some(), month.is_some(), date_from.is_some(),
-                ) {
-                    (true, false, false) | (false, true, false) | (false, false, true) => true,
-                    _ => false,
-                };
+                let window_shape_ok = range_pair
+                    && matches!(
+                        (day.is_some(), month.is_some(), date_from.is_some()),
+                        (true, false, false) | (false, true, false) | (false, false, true)
+                    );
                 if !window_shape_ok {
                         eprintln!(
                             "use exactly one of --day, --month, or the paired --from-date / --to-date"

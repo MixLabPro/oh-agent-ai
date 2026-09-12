@@ -2050,8 +2050,46 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual([s["title"] for s in sessions], ["审批流程会话", "健康会话"])
         self.assertEqual([s["model"] for s in sessions], ["deepseek-v4-flash"] * 2)
         self.assertEqual([s["cwd"] for s in sessions], ["/repo"] * 2)
+        # 键序是输出契约（评审 A4）。B5：`lifecycle` 是每行新增的末位键（生命周期
+        # 字段原样浮出，spec §10 B5）。
+        self.assertEqual(list(sessions[0].keys()),
+                         ["session_id", "title", "model", "cwd", "first", "last",
+                          "lifecycle"])
+        # B5：fixture 给 s1/s2 真实词表值（`build_workbuddy_fixture.py`）——只浮出
+        # 不过滤，两会话都照常出现在列表里。
+        by_id = {s["session_id"]: s for s in sessions}
+        self.assertEqual(by_id["s1"]["lifecycle"], {
+            "status": "completed", "source_mode": "working", "is_playground": 0,
+            "deleted_at": None, "is_background_automation": 0,
+        })
+        self.assertEqual(by_id["s2"]["lifecycle"], {
+            "status": "terminated", "source_mode": "coding", "is_playground": 0,
+            "deleted_at": None, "is_background_automation": 0,
+        })
+        # B3：`source_snapshot` 是新增的末位顶层键（追加在最后，最小化既有键序
+        # 断言的改动）。fixture db 是 Python `sqlite3` 默认日志模式建的
+        # （`build_workbuddy_fixture.py`），journal_mode=delete、无 -wal 文件。
+        # B4：`schema_probe` 追加在它之后——fixture 的 sessions/session_usage
+        # 按真机声明序建全 30/5 列，哨兵在 fixture 上必须沉默（无迁移表 → None，
+        # 两表 unknown/missing 均空）。
+        self.assertEqual(list(report.keys()),
+                         ["host", "sessions", "source_snapshot", "schema_probe"])
+        self.assertEqual(report["source_snapshot"],
+                         {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
+        self.assertEqual(report["schema_probe"], {
+            "migrations_applied": None,
+            "sessions": {"unknown": [], "missing": []},
+            "session_usage": {"unknown": [], "missing": []},
+        })
         self.assertEqual(sessions[0]["first"], "2026-08-31T10:00:00Z")
         self.assertEqual(sessions[0]["last"], "2026-08-31T10:05:00Z")
+        # spec §6.4-1：真机上日期列恒 `- → -` 是被修的 bug（db 时间戳是 epoch-ms
+        # 整数）——两个会话的 first/last 都必须是归一后的秒精度 UTC ISO，非 null。
+        self.assertEqual(sessions[1]["first"], "2026-08-31T09:00:00Z")
+        self.assertEqual(sessions[1]["last"], "2026-08-31T09:05:00Z")
+        for s in sessions:
+            self.assertRegex(s["first"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+            self.assertRegex(s["last"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
         # 人读视图差分（py==rs，both() 兜底）+ 语义：行宽固定 28。
         code, out, err = self.both("workbuddy-session", "--list")
@@ -2067,8 +2105,9 @@ class CliMatrix(unittest.TestCase):
         host-capability override；可跑规则 SV601-603/606/610/611/614 空转零命中。
         SV604/605 的 Unavailable 把 rules_unavailable 从 5 推到 7（degrade 后
         重算）。coverage 与 timeline 同源：3 tool_calls（2 bash + 1 web_fetch）、
-        2 sandbox 模式、1 网络访问、distinct requestId 派生 2 turn。成本块吃
-        宿主账单：used=5000 + credit_json 求和 ¥0.05。"""
+        2 sandbox 模式、1 网络访问、distinct requestId 派生 2 turn。成本块（A3）：
+        used=5000 tokens + credit_json 求和 42.01 **积分**（非人民币）+ cash_cny
+        恒 null + nominal_cny=2.1（积分×0.05，名义栏）。"""
         self._workbuddy_home()
         code, out, err = self.both("workbuddy-session", "--session", "s1", "--json", "-")
         self.assertEqual(code, 0)
@@ -2081,13 +2120,55 @@ class CliMatrix(unittest.TestCase):
         self.assertTrue(report["file"].endswith("audit-log/s1.jsonl"))
         self.assertEqual(report["date_span"]["first"], "2026-08-31T09:01:00Z")
         self.assertEqual(report["date_span"]["last"], "2026-08-31T09:03:00Z")
-        # 键序是字节一致的一部分，不能重排。
+        # 键序是字节一致的一部分，不能重排。B3：`source_snapshot` 追加在末位；
+        # B4：`schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在
+        # `schema_probe` 之后（spec §10 B5：append-at-end，不打乱既有键序断言）。
         self.assertEqual(list(report.keys()),
                          ["host", "session_id", "title", "model", "cwd", "file",
                           "date_span", "audit", "coverage", "signals", "attempts",
-                          "cost", "notes"])
+                          "cost", "notes", "source_snapshot", "schema_probe",
+                          "lifecycle", "traces_probe"])
+        # fixture db 是 Python `sqlite3` 默认日志模式建的，journal_mode=delete、
+        # 无 -wal 文件（spec §10 B3；真机会是 wal，见 real-machine check）。
+        self.assertEqual(report["source_snapshot"],
+                         {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
+        # B5：s1 是健康会话，db 行有真实词表值——lifecycle 原样浮出，不据其值
+        # 做任何过滤（spec §10 B5）。
+        self.assertEqual(report["lifecycle"], {
+            "status": "completed", "source_mode": "working", "is_playground": 0,
+            "deleted_at": None, "is_background_automation": 0,
+        })
+        # E1（spec §9E.5）：traces 探针。fixture 两个 trace：一个归属 s1（8 span：agent 1 /
+        # custom 1 / function 3 含 Edit+Write 带 file_path / generation 3 其中 2 带 usage、
+        # 1 取消无 usage），一个无 sessionId 键 → unattributed。全部 toolInput/toolOutput
+        # 是二次编码字符串，读取层解一层；decode_failures 0。
+        self.assertEqual(report["traces_probe"], {
+            "files": 2, "attributed_traces": 1, "unattributed_traces": 1,
+            "degraded_files": 0, "decode_failures": 0,
+            "this_session": {
+                "traces": 1,
+                "spans_by_type": {"agent": 1, "custom": 1, "function": 3, "generation": 3},
+                "generation_with_usage": 2, "edit_write_with_path": 2, "decode_failures": 0,
+            },
+        })
+        # B4：健康会话（s1）的 fixture schema 与已知基线完全对齐——哨兵沉默是
+        # 验收点本身（无迁移表 → None，两表 unknown/missing 均空）。
+        self.assertEqual(report["schema_probe"], {
+            "migrations_applied": None,
+            "sessions": {"unknown": [], "missing": []},
+            "session_usage": {"unknown": [], "missing": []},
+        })
         cov = report["coverage"]
-        self.assertEqual(cov["ToolCalls"]["measured"], 3)
+        # E2：traces 的 function span 折进 tool_calls/tool_results（Bash 排除，E3 定
+        # 主源前不双计）：ToolCalls 3 → 5（+Edit +Write），ToolResults 0 → 2（available
+        # 翻 true），agent span → SubagentSpawns 1。
+        self.assertEqual(cov["ToolCalls"]["measured"], 5)
+        self.assertEqual(cov["ToolResults"],
+                         {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0,
+                          "available": True})
+        self.assertEqual(cov["SubagentSpawns"],
+                         {"measured": 1, "derived": 0, "lossy": 0, "unmetered": 0,
+                          "available": True})
         self.assertEqual(cov["SandboxModes"]["measured"], 2)
         self.assertEqual(cov["NetworkAccess"]["measured"], 1)
         self.assertEqual(cov["ApprovalDecisions"]["available"], True)
@@ -2095,42 +2176,58 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(cov["TurnBoundaries"]["derived"], 2)
         self.assertEqual(cov["ApprovalPolicy"]["measured"], 1)
         self.assertEqual(cov["UsageAggregate"]["measured"], 1)
+        # B6：QuotaConsumption 分子可测——credit_json 两条目（r1/r2）= 两次配额消耗
+        # 观察；available 翻 true（此前声明 unavailable 是「有证据却不计」）。分母
+        # 不可观测由 notes 第三条说明，不出百分比。
+        self.assertEqual(cov["QuotaConsumption"],
+                         {"measured": 2, "derived": 0, "lossy": 0, "unmetered": 0,
+                          "available": True})
         self.assertEqual(cov["FileMutations"]["measured"], 3)
         a = report["audit"]
+        # E2：SV604/605 的降级行已删（前提「write/edit 只在匿名 traces」被推翻）、
+        # SV607/608 有 tool_results 可读、SV613(b) 读 tool_results 也可跑——四条 + SV613
+        # 都从 unavailable 转 measured_zero；只剩 SV609（无审批）+ SV612（turns 恒空）。
         self.assertEqual(a["summary"],
                          {"critical": 0, "warning": 0, "info": 0,
-                          "findings_total": 0, "rules_unavailable": 7})
+                          "findings_total": 0, "rules_unavailable": 2})
         rules = a["rule_outcomes"]
-        for code in ("SV604", "SV605", "SV607", "SV608", "SV609", "SV612", "SV613"):
+        for code in ("SV609", "SV612"):
             self.assertEqual(rules[code]["status"], "unavailable", code)
-        # reason 逐字节钉死（曾只有 assertIn 子串，评审 P3-5）。与 core
-        # `host_capability.rs` 常量同串。
-        self.assertEqual(
-            rules["SV604"]["reason"],
-            "workbuddy host capability: only bash (audit-log commandPreview) "
-            "and web_fetch (WebFetch target) tool calls are joinable to "
-            "sessions; write/edit tool calls exist only in session-anonymous "
-            "traces (file-history has content without paths), so SV604/605 "
-            "cannot discriminate")
-        self.assertEqual(
-            rules["SV605"]["reason"],
-            "workbuddy host capability: only bash (audit-log commandPreview) "
-            "and web_fetch (WebFetch target) tool calls are joinable to "
-            "sessions; write/edit tool calls exist only in session-anonymous "
-            "traces (file-history has content without paths), so SV604/605 "
-            "cannot discriminate")
+        for code in ("SV604", "SV605", "SV607", "SV608", "SV613"):
+            self.assertEqual(rules[code], {"status": "measured_zero"}, code)
         self.assertEqual(rules["SV609"]["reason"],
                          "no evidence for required signal(s) in this session")
         for code in ("SV601", "SV602", "SV603", "SV606", "SV610", "SV611", "SV614"):
             self.assertEqual(rules[code]["status"], "measured_zero", code)
-        self.assertEqual(report["cost"],
-                         {"tokens": 5000, "cny": 0.05, "host_billed": True})
+        # E2 起 s1 没有任何 Unavailable 带 reason 的 host-capability 降级。
+        self.assertNotIn("reason", rules["SV604"])
+        # A3：`cny` 键消失。credit_json 求和是**积分**（22.53+19.48=42.01），
+        # 不是人民币——旧字段名把 1000cr=¥50 的积分当货币，约 20× 高估（§3.1/§6.1）。
+        # `cash_cny` 恒 null（本机无支付证据，绝不填 0）；`nominal_cny` = 42.01×0.05
+        # → 厘累计 round(4201×0.05)=210 → 2.1（名义栏，永不进实付栏/预算分子）。
+        # E5（spec §9E.5）：cost 块 7 键，processed_tokens 来自 traces 四桶之和
+        # （s1 fixture 两条 generation：(12000−8000)+8000+300 = 12300、(15000−11000)
+        # +11000+450 = 15450 → 27750）；无 trace 证据的会话该键为 null（诚实缺失）。
+        self.assertEqual(list(report["cost"].keys()),
+                         ["tokens", "processed_tokens", "credits", "cash_cny",
+                          "nominal_cny", "nominal_basis", "host_billed"])
+        self.assertEqual(report["cost"], {
+            "tokens": 5000,
+            "processed_tokens": 27750,
+            "credits": 42.01,
+            "cash_cny": None,
+            "nominal_cny": 2.1,
+            "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
+            "host_billed": True,
+        })
         # 信号序 = ALL_SIGNALS 序（Signals 数组的顺序是输出契约的一部分）。
         self.assertEqual(report["signals"],
-                         ["ToolCalls", "TurnBoundaries", "UsageAggregate",
-                          "ApprovalPolicy", "SandboxModes", "NetworkAccess",
-                          "FileMutations"])
-        # 三条 notes：turn 重建说明 + sandbox 模式说明 + 连续 hash 链。
+                         ["ToolCalls", "ToolResults", "TurnBoundaries", "UsageAggregate",
+                          "QuotaConsumption", "ApprovalPolicy", "SandboxModes",
+                          "NetworkAccess", "SubagentSpawns", "FileMutations"])
+        # 六条 notes：turn 重建说明 + sandbox 模式说明 + B6 配额分母不可观测说明
+        # + 连续 hash 链 + E2 traces 折叠说明（含 Bash 为何未折）+ B5 生命周期
+        # 「浮出不过滤」注记（lifecycle 非 null 时追加，末位）。
         self.assertEqual(report["notes"], [
             "turn boundaries are derived from distinct audit-log requestId (a lower "
             "bound: audit-log is not a per-request ledger); native turn structure is "
@@ -2138,31 +2235,53 @@ class CliMatrix(unittest.TestCase):
             "sandbox mode is the WorkBuddy-native permission_mode (bypassPermissions / "
             "fullAccess); the DSH danger-full-access vocabulary does not apply, so SV610 "
             "is an honest MeasuredZero, never a translation.",
+            "quota consumption is measured from credit_json entries (one per billed "
+            "request); the allowance / balance that would give a percentage lives on "
+            "the account plane and is not observable on this machine, so only the "
+            "absolute consumption is reported",
             "audit-log hash chain continuous: 3 records (verified from seq=1)",
+            "traces folded via trace.sessionId: 2 non-Bash function span(s) -> "
+            "tool_calls/tool_results, 1 agent span(s) -> SubagentSpawns; 1 Bash span(s) "
+            "NOT folded: audit-log sandbox-executed is the Bash source (no shared identity "
+            "key \u2014 audit toolCallId vs span spanId \u2014 and audit-log is the hash-chained "
+            "security ledger with the more complete record; merging would double-count)",
+            # E5（spec §9E.5）：cost.tokens 语义注记——used 是 last-call context
+            # size，不是 processed 总量；夹在 traces 折叠 note 与 lifecycle 之间。
+            "cost.tokens = session_usage.used: the last generation call's prompt_tokens "
+            "snapshot (context size), not a processed-token total \u2014 the session's "
+            "processed tokens are cost.processed_tokens (four-bucket sum of the trace "
+            "generation spans).",
+            "lifecycle fields (status / source_mode / is_playground / deleted_at / "
+            "is_background_automation) are surfaced verbatim; their value vocabularies "
+            "are not declared by the host, so no session is filtered on them here — "
+            "filtering is the consumer's decision",
         ])
-        # attempts：traces 记成 SourceAttempt（session-anonymous，§14.4）。
-        self.assertEqual(report["attempts"], [{
-            "source_id": "workbuddy.traces", "kind": "Directory",
-            "surface": "Traces", "available": False,
-            "error": ("traces are session-anonymous (no sessionId join); skipped per "
-                      "RUNTIME_EVIDENCE_CONTRACT §14.4"),
-            "observed_span": None}])
+        # E2：traces 已按 trace.sessionId 折进 timeline，不再是「已知但刻意不用」的
+        # 表面——attempts 里那条「session-anonymous」的 SourceAttempt 消失（那句话本身
+        # 就是 09-02 的分析错误）。
+        self.assertEqual(report["attempts"], [])
 
     def test_workbuddy_session_approval_flow_differential(self):
         """`workbuddy-session --session s2`：审批轴。3 条审批记录（approved /
         rejected / bulk-delete rejected）→ SV609×3 info；commandApproved 的
         decided allowed-once → SV610×1 warning（family ① 按 seq 排序，两条
-        seq=0 的记录稳定保 SV609 在前）。轮转链头 → rotation note。成本块：
-        credit_json 空对象 → ¥0.0（宿主记了 0，不是我们算不出）。"""
+        seq=0 的记录稳定保 SV609 在前）。轮转链头 → rotation note。成本块（A3）：
+        credit_json 空对象 → 非积分轨会话，credits/nominal_cny 均 0.0 是真测量
+        （平台积分轨确实没消耗），审计输出多一条 note 说明真实开销在用户自配 API
+        账户、本机不可见。"""
         self._workbuddy_home()
         code, out, err = self.both("workbuddy-session", "--session", "s2", "--json", "-")
         self.assertEqual(code, 0)
         report = json.loads(out)
         self.assertEqual(report["session_id"], "s2")
         a = report["audit"]
+        # E2：s2 无 trace → tool_results 仍空 → SV607/608/613 unavailable；但 SV604/605
+        # 的降级行已删，tool_calls 非空（audit-log bash）→ 照跑 measured_zero。6 → 4。
         self.assertEqual(a["summary"],
                          {"critical": 0, "warning": 1, "info": 3,
-                          "findings_total": 4, "rules_unavailable": 6})
+                          "findings_total": 4, "rules_unavailable": 4})
+        for code in ("SV604", "SV605"):
+            self.assertEqual(a["rule_outcomes"][code], {"status": "measured_zero"}, code)
         self.assertEqual([f["rule"] for f in a["findings"]],
                          ["SV609", "SV610", "SV609", "SV609"])
         sv609 = [f for f in a["findings"] if f["rule"] == "SV609"]
@@ -2173,15 +2292,87 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(len(sv610), 1)
         self.assertEqual(sv610[0]["severity"], "warning")
         self.assertEqual(sv610[0]["evidence"], "allowed-once")
+        # A6：audit-log `timestamp` 是 epoch-ms 整数（真机形状）——`parse_time`
+        # 归一后 finding 的 `time` 是 unix 秒（不再是 null）。call1 的两条记录
+        # timestamp=1788170400000ms → 1788170400s；call2 → 1788170460；call3 →
+        # 1788170520。双侧同一归一（`both()` 兜底），这里逐值钉死。
+        self.assertEqual([f["time"] for f in a["findings"]],
+                         [1788170400, 1788170400, 1788170460, 1788170520])
         rules = a["rule_outcomes"]
-        for code in ("SV604", "SV605", "SV607", "SV608", "SV612", "SV613"):
+        for code in ("SV607", "SV608", "SV612", "SV613"):
             self.assertEqual(rules[code]["status"], "unavailable", code)
         for code in ("SV601", "SV602", "SV603", "SV606", "SV611", "SV614"):
             self.assertEqual(rules[code]["status"], "measured_zero", code)
-        self.assertTrue(any("oldest records may be rotated" in n
-                            for n in report["notes"]))
-        self.assertEqual(report["cost"],
-                         {"tokens": 12000, "cny": 0.0, "host_billed": True})
+        # 键序是输出契约（评审 A4）。B3：`source_snapshot` 追加在末位；B4：
+        # `schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在最后。
+        self.assertEqual(list(report.keys()),
+                         ["host", "session_id", "title", "model", "cwd", "file",
+                          "date_span", "audit", "coverage", "signals", "attempts",
+                          "cost", "notes", "source_snapshot", "schema_probe",
+                          "lifecycle", "traces_probe"])
+        self.assertEqual(report["source_snapshot"],
+                         {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
+        # B4：非积分轨会话（s2）的 fixture schema 同样与已知基线对齐——哨兵沉默。
+        self.assertEqual(report["schema_probe"], {
+            "migrations_applied": None,
+            "sessions": {"unknown": [], "missing": []},
+            "session_usage": {"unknown": [], "missing": []},
+        })
+        # B5：s2 是审批流程会话（terminated/coding）——同样原样浮出、不过滤。
+        self.assertEqual(report["lifecycle"], {
+            "status": "terminated", "source_mode": "coding", "is_playground": 0,
+            "deleted_at": None, "is_background_automation": 0,
+        })
+        # E1：s2 在 fixture 里没有 trace → this_session 全零（真测量：读了、确实没有），
+        # 语料级计数照报。
+        self.assertEqual(report["traces_probe"], {
+            "files": 2, "attributed_traces": 1, "unattributed_traces": 1,
+            "degraded_files": 0, "decode_failures": 0,
+            "this_session": {
+                "traces": 0, "spans_by_type": {}, "generation_with_usage": 0,
+                "edit_write_with_path": 0, "decode_failures": 0,
+            },
+        })
+        # notes 逐字节钉死（原来是 any(substring)——note 字符串是 spec §6.4 的
+        # 验收项）。第 3 条是轮转链头（seq=100 起验证），第 4 条是非积分轨说明
+        # （§11 第 14 条：0 由 note 承担，不由数字冒充）。
+        self.assertEqual(report["notes"], [
+            "turn boundaries are derived from distinct audit-log requestId (a lower "
+            "bound: audit-log is not a per-request ledger); native turn structure is "
+            "absent, so SV612/613 are Unavailable, never fabricated boundaries.",
+            "sandbox mode is the WorkBuddy-native permission_mode (bypassPermissions / "
+            "fullAccess); the DSH danger-full-access vocabulary does not apply, so SV610 "
+            "is an honest MeasuredZero, never a translation.",
+            "audit-log hash chain verified from seq=100: oldest records may be rotated "
+            "(first prevHash has no predecessor)",
+            # E5（spec §9E.5）：cost.tokens 语义注记（used = last-call context size，
+            # 不是 processed 总量），夹在轮转链 note 与 unbilled note 之间。
+            "cost.tokens = session_usage.used: the last generation call's prompt_tokens "
+            "snapshot (context size), not a processed-token total — the session's "
+            "processed tokens are cost.processed_tokens (four-bucket sum of the trace "
+            "generation spans).",
+            # spec §2.1：note 绝不指认零积分的成因——旧串断言「钱花在自配 API 账户」，
+            # 被真机 hy3 限免会话（平台送的、根本没那笔支出）当场证伪。
+            "session not billed to credits: the platform credit ledger recorded no "
+            "consumption (credits: 0.0 is a real measurement). The cause is NOT "
+            "determinable from this machine \u2014 a self-configured route, a promotional "
+            "free tier, and host-side non-billing are indistinguishable here.",
+            # B5：生命周期字段「浮出不过滤」注记（末位，lifecycle 非 null 时追加）。
+            "lifecycle fields (status / source_mode / is_playground / deleted_at / "
+            "is_background_automation) are surfaced verbatim; their value vocabularies "
+            "are not declared by the host, so no session is filtered on them here \u2014 "
+            "filtering is the consumer's decision",
+        ])
+        # E5：s2 无 trace 文件 → processed_tokens None（诚实缺失）。
+        self.assertEqual(report["cost"], {
+            "tokens": 12000,
+            "processed_tokens": None,
+            "credits": 0.0,
+            "cash_cny": None,
+            "nominal_cny": 0.0,
+            "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
+            "host_billed": True,
+        })
 
     def test_workbuddy_session_defaults_to_latest(self):
         """缺省 --session = 最新（updated_at 最晚）→ 与显式指定 s2 一致。"""
@@ -2213,7 +2404,8 @@ class CliMatrix(unittest.TestCase):
     def test_workbuddy_session_db_only_session_audits_empty_records(self):
         """db 有行但 audit-log 无记录 → 照审（决策账本为空是诚实结果，不是
         不可读）：无任何证据 → 14 条规则全 Unavailable（不得 MeasuredZero）。
-        db 独苗会话的 file 落到 db 路径兜底；成本块照吃 usage 行。"""
+        db 独苗会话的 file 落到 db 路径兜底；成本块照吃 usage 行（A3：credits=0.01
+        积分，nominal_cny=round(1厘×0.05)=0，cash_cny 恒 null）。"""
         self._workbuddy_home()
         import sqlite3
         db = self.tmp / ".workbuddy" / "workbuddy.db"
@@ -2233,10 +2425,70 @@ class CliMatrix(unittest.TestCase):
         report = json.loads(out)
         self.assertEqual(report["session_id"], "s3")
         self.assertTrue(report["file"].endswith("workbuddy.db"))
+        # B3：`source_snapshot` 追加在末位。db 被本用例插了两行，但落在既有已
+        # 分配页内——文件字节数与未插入前相同（真机验证过：20480 → 20480）。
+        # B4：`schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在最后。
+        self.assertEqual(list(report.keys()),
+                         ["host", "session_id", "title", "model", "cwd", "file",
+                          "date_span", "audit", "coverage", "signals", "attempts",
+                          "cost", "notes", "source_snapshot", "schema_probe",
+                          "lifecycle", "traces_probe"])
+        self.assertEqual(report["source_snapshot"],
+                         {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
+        # B4：本用例只插行、不改表结构——schema 仍与基线对齐，哨兵沉默。
+        self.assertEqual(report["schema_probe"], {
+            "migrations_applied": None,
+            "sessions": {"unknown": [], "missing": []},
+            "session_usage": {"unknown": [], "missing": []},
+        })
+        # B5：s3 的 INSERT 没有写五个生命周期列——db 行本身存在（不是 audit-log
+        # 独苗会话），所以 `lifecycle` 是一个对象而不是 None；每个未写的列按
+        # 「缺列报缺」规则各自降级成 null（不是把整个 lifecycle 判成 None）。
+        self.assertEqual(report["lifecycle"], {
+            "status": None, "source_mode": None, "is_playground": None,
+            "deleted_at": None, "is_background_automation": None,
+        })
+        # E1：s3 同 s2，无 trace → this_session 全零。
+        self.assertEqual(report["traces_probe"], {
+            "files": 2, "attributed_traces": 1, "unattributed_traces": 1,
+            "degraded_files": 0, "decode_failures": 0,
+            "this_session": {
+                "traces": 0, "spans_by_type": {}, "generation_with_usage": 0,
+                "edit_write_with_path": 0, "decode_failures": 0,
+            },
+        })
+        # lifecycle 非 None（哪怕全部字段都是 null）也要附那条注记——note 说的是
+        # 「有 lifecycle 对象、不据其值过滤」，不是「有非 null 的值」。
+        self.assertIn(
+            "lifecycle fields (status / source_mode / is_playground / deleted_at / "
+            "is_background_automation) are surfaced verbatim; their value vocabularies "
+            "are not declared by the host, so no session is filtered on them here — "
+            "filtering is the consumer's decision",
+            report["notes"])
         self.assertEqual(report["audit"]["summary"]["findings_total"], 0)
         self.assertEqual(report["audit"]["summary"]["rules_unavailable"], 14)
-        self.assertEqual(report["cost"],
-                         {"tokens": 777, "cny": 0.01, "host_billed": True})
+        # docstring 说「14 条规则全 Unavailable（不得 MeasuredZero）」——之前只查了
+        # 计数，评审 A4 逐条钉死 status：无任何证据时绝不能有一条 measured_zero
+        # （MeasuredZero 冒充真测量是 evidence.rs 明写的反模式）。
+        s3_rules = report["audit"]["rule_outcomes"]
+        self.assertEqual(len(s3_rules), 14)
+        for rcode, outcome in s3_rules.items():
+            self.assertEqual(outcome["status"], "unavailable", rcode)
+        # db 独苗会话的 created_at/updated_at 是 ISO 串（本用例显式插的）——字符串
+        # 路径不回归，date_span 兜底取 db 行。
+        self.assertEqual(report["date_span"],
+                         {"first": "2026-09-01T09:00:00Z",
+                          "last": "2026-09-01T09:05:00Z"})
+        # E5：db-only 会话（无 traces）→ processed_tokens 是 None（诚实缺失，不编 0）。
+        self.assertEqual(report["cost"], {
+            "tokens": 777,
+            "processed_tokens": None,
+            "credits": 0.01,
+            "cash_cny": None,
+            "nominal_cny": 0.0,
+            "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
+            "host_billed": True,
+        })
 
     def test_calendar_codex_blob_is_a_wellformed_three_view_report(self):
         """统一看板（Python-only `calendar`）内联的 codex 数据块结构 = 3 视图

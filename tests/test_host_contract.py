@@ -212,21 +212,23 @@ _REGISTERED_DEVIATIONS = {
         "codex_evidence.rs 的 derive_coverage 同源）——矩阵文档滞后于代码，"
         "行以代码为准，此处按 G5 分歧流程登记而非静默改矩阵。"
     ),
+    ("workbuddy", "QuotaConsumption"): (
+        "矩阵写 unavailable，但 2026-09-11 B6 起代码改 measured：`session_usage."
+        "credit_json` 的每个 requestId 条目就是宿主报告的一次配额消耗（分子），"
+        "与 codex 的 `token_count.rate_limits` 同一语义档；分母（allowance/余额）"
+        "在服务端账户面、本机不可观测，由 note 说明、不出百分比。此前声明 "
+        "unavailable 是「有证据却不计」——evidence.rs 纪律的反面。矩阵文档滞后，"
+        "行以代码为准，按 G5 登记（workbuddy_evidence.rs / .py 同源）。"
+    ),
     ("workbuddy", "Usage"): (
         "矩阵写 unverified（※，generation span 存在但逐 span token 未核实）"
         "，workbuddy_evidence.rs 保守处理成 unavailable——WorkBuddy Usage 是"
         "spec §5.2 明文点名的偏差登记活例子。"
     ),
-    ("workbuddy", "ToolResults"): (
-        "矩阵写 measured ※（span.status/span.error），但该证据只存在于会话"
-        "匿名的 traces/ 面、接不进具体 session（workbuddy_evidence.rs 头注释"
-        "「traces 的 status/error 接不进 session」），故 audit-log 面上 "
-        "ToolResults 保守处理成 unavailable。"
-    ),
-    ("workbuddy", "SubagentSpawns"): (
-        "同上：矩阵 measured ※ 的证据源同样只在会话匿名的 traces/ 面，"
-        "workbuddy_evidence.rs 的当前实现保守处理成 unavailable。"
-    ),
+    # ("workbuddy", "ToolResults") / ("workbuddy", "SubagentSpawns")：**登记已撤**
+    # （2026-09-11 E2）。矩阵写 measured ※（span.status/error、agent span），代码曾因
+    # 「traces 会话匿名」保守成 unavailable——那是 09-02 的分析错误；traces 可按
+    # `trace.sessionId` 归属，E2 起代码与矩阵一致，按 G5 反向校验规则撤登记。
     ("claude-code", "ApprovalDecisions"): (
         "矩阵写 partial（¶，denials only, derived+lossy——理论上能从 tool-result "
         "marker string 恢复），claude_code_evidence.rs/claude_evidence.py 当前"

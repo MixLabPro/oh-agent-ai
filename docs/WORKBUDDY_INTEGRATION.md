@@ -6,7 +6,7 @@
 > [MENUBAR_MULTIHOST_NAVIGATION_SPEC.md](./MENUBAR_MULTIHOST_NAVIGATION_SPEC.md)（多宿主导航）·
 > [VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md](./VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md)（v0.5 架构）。
 > 状态：**调研结论 + 适配器已落地**（2026-09-02 更新）。数据面证据已实测（§2 的 4 表面 3 可
-> join、audit-log 三层决策账本、traces 会话匿名、credit_json 宿主计价）；§3 规则能力矩阵、§7
+> join、audit-log 三层决策账本、traces 由 `trace.sessionId` 可 join（09-11 纠正，原误判「匿名」）、credit_json 宿主**积分**账单）；§3 规则能力矩阵、§7
 > 决策映射、§8 请求重建已定案（P0 修正版）。§4 的 provenance / `ToolResultObservation.failed`
 > 是 Claude 接入第一刀落进 `agent-vitals-core` 的既有成果，WorkBuddy 直接复用，**不需要再改
 > core 模型**。评审结论：不修改通用 `vitals-core`、不修改 `agent-vitals-core` 既有证据模型的
@@ -40,14 +40,17 @@ Coverage 三态、SourceAttempt 与既有兼容测试路径（§1.1）。
 
 **与 Claude/DSH/Codex 的关键差异**（全部来自实测，§2）：
 
-- 会话数据**不在一个文件里**，而是三张可 join 表面 + 一张接不进 session 的表面（traces）。
-  适配器的 locate/shape 阶段按 `sessionId` 把 db 行、audit-log 记录、file-history 目录**拼装**
-  成一条会话；traces 按 §14.4 记 attempts、标 Unavailable，**绝不猜 session**。
+- 会话数据**不在一个文件里**，而是**四张可 join 表面**（2026-09-11 修正：traces 也可 join，
+  见 §2.1 表/§12.2）。已落地的适配器只拼装前三张（db 行、audit-log、file-history）；traces
+  的接入是独立后续 Phase（`WORKBUDDY_ONBOARDING_SPEC.md` Phase E），**现有实现仍按 §14.4
+  记 attempts、标 Unavailable，绝不猜 session**——「不猜」的纪律不变，变的是「不用猜」。
 - audit-log 是**安全决策账本**，不是逐请求账本（13/22 requestId 可 join）。工具调用只有
   **bash 子集**（`commandPreview`）+ **WebFetch**（`messageParams.target`）可 join；
-  write/edit/subagent/duration 证据只在匿名 traces 里 → SV604/605 降级 Unavailable（§3）。
-- 成本是**宿主自己按人民币记的账**（`session_usage.credit_json`），不是 token 桶 × 单价——
-  **不涉及 pricing.json，不涨第四份价格拷贝**（§9）。
+  write/edit/subagent/duration 证据只在 traces 里，**E2（2026-09-11）已接入**（按 `trace.sessionId` 归属，
+  §12.2）→ SV604/605 现为 Available（function span → tool_calls，见 §3.1 矩阵）、SubagentSpawns 从
+  trace agent span 折叠。
+- 成本是**宿主自己按积分记的账**（`session_usage.credit_json`，单位是平台积分不是货币），
+  不是 token 桶 × 单价——**不涉及 pricing.json，不涨第四份价格拷贝**（§9）。
 - audit-log 自带 `prevHash→hash` 链，是最老可能轮转的安全账本——完整性校验是适配器的
   职责之一，轮转要诚实标注 verified-from（§2.3、§12.3）。
 
@@ -70,7 +73,7 @@ CanonicalSession → CanonicalEvent 桥。WorkBuddy 适配器先产出 `Canonica
 
 本机实测 4 表面（§2.1 表），3 个可 clean-join。**`sessionId` 是唯一 join 锚点**：
 db `sessions.id`、`session_usage.session_id`、audit-log 记录的 `sessionId` 字段、
-file-history 目录名四处对齐。traces 会话匿名（65% 无法归属），不是 join 面（§12.2）。
+file-history 目录名四处对齐；**traces 由 `trace.sessionId` 对齐**（第五处，09-11 修正，§12.2）。
 
 ### 1.4 第一个 sqlite 读取依赖（设计决策，待评审）
 
@@ -108,10 +111,13 @@ turn/step/请求重建、工具调用关联必须在**适配器的 derive 阶段
 | 表面 | 本机实测 | join key | 对适配的价值 |
 |---|---|---|---|
 | `workbuddy.db` `sessions` | 22 行 | id | 元数据 / `permission_mode` / `model` / `cwd` / 时间戳 |
-| `workbuddy.db` `session_usage` | 22 行 | session_id | `used`(token) / `size` / `credit_json`(宿主计费) |
+| `workbuddy.db` `session_usage` | 22 行 | session_id | `used`(token) / `size` / `credit_json`(宿主**积分**账单) |
 | `audit-log/*.jsonl` | 23 文件 / 2563 条 / 23 sessionId（21 在 DB） | 记录内 `sessionId` 字段 | 安全决策账本（命令/网络/批量删除），自带 hash 链 |
 | `file-history/<sessionId>/<contentHash>@v<n>` | 16 会话 / 730 文件 | 目录名 | 文件内容快照（**无路径**，只有内容 hash@版本） |
-| `traces/<pid>/trace_<id>.json` | 670 文件 / 652MB / 103 pid | **无**（会话匿名） | span 树：tool calls + generations + duration —— **接不进 session，不作为 join 面** |
+| `traces/<pid>/trace_<id>.json` | 675 文件 / 653MB / 105 pid（09-11 重测） | **`trace.sessionId`**（结构化字段，`RUNTIME_EVIDENCE_CONTRACT.md:747` 早有记录） | span 树：tool calls + generations + duration —— **可 join**：354/675 有 `sessionId`、**100% 匹配 `sessions.id`、覆盖 22/23 会话**；其余 321 个全是 `name='Agent workflow'`（无 `sessionId` 键、`metadata:{}`、`totalTokens: 0`）——
+   **E5 纠正：name 不是类；`totalTokens` 302/675 为 0 而 span 有 usage，不可信**；未归属
+   generation span 有真实用量（1,202 个，发 fact 前拦下）。**09-02「会话匿名」结论系
+   分析方法错误**（§12.2） |
 
 **三条读表纪律**：
 
@@ -175,24 +181,30 @@ hash`。命令类记录带 `commandPreview`/`commandHash`，网络/审批类带 
 
 | 规则 | WorkBuddy 判定 | 依据 |
 |---|---|---|
-| SV601–603（bash 命令族） | **Available** | `command-safety.sandbox-executed` 的 `commandPreview` → bash `args_text`（SV601-603 的 exec→bash 源）。**只覆盖 bash 子集**——其余工具名只在匿名 traces 里 |
-| SV604（敏感路径 write/edit） | **Unavailable**（宿主能力降级） | write/edit 调用在 WorkBuddy 只在匿名 traces 的 function span 里；file-history 有内容无路径。可 join 的 tool_calls 结构性不含 write/edit → 测不出来就是假阴性，报 Unavailable（§3.1） |
-| SV605（write/edit 出 workspace） | **Unavailable**（同上） | 同上 |
+| SV601–603（bash 命令族） | **Available** | `command-safety.sandbox-executed` 的 `commandPreview` → bash `args_text`（SV601-603 的 exec→bash 源）。**只覆盖 bash 子集**——其余工具名在 traces 里（E2 起 write/edit 已另列 SV604/605 行，§12.2） |
+| SV604（敏感路径 write/edit） | **Available**（E2，2026-09-11） | traces 的 Edit/Write function span 解码后 783/784 带 `file_path` → `tool_calls{name: write/edit, args_text: {"file_path": …}}`，SV604 正则直接跑。回归 `test_sv604_and_sv605_actually_fire_on_span_paths` 钉住 `/etc/hosts` 命中 critical。降级行已删（§3.1） |
+| SV605（write/edit 出 workspace） | **Available**（同上） | 同上；workspace 外路径命中 warning |
 | SV606（内网 web_fetch） | **Available** | `WebFetch` 事件 → `tool_name="web_fetch"`、`args_text=messageParams.target`；`_INTERNAL_IP_URL_RE` 直接跑 |
-| SV607（拒绝/中止） | **Unavailable** | audit-log 无 exit 码；traces 的 `status`/`error` 有但接不进 session。`_DENIED_CODES` 无源 |
-| SV608（超时） | **Unavailable** | 无 `TOOL_TIMEOUT` 源 |
+| SV607（拒绝/中止） | **Available**（E2，诚实 MeasuredZero） | function span 的 `status`/`error` → `tool_results{failed, error_code: 原生 status}`。WorkBuddy 的码是 `error`/`cancelled`，**不翻译**成 DSH 的 `FS_SANDBOX_DENIED` 等——规则照跑零命中（Codex `exit_code:N` 同款纪律） |
+| SV608（超时） | **Available**（同上） | 无 `TOOL_TIMEOUT` 原生码 → 诚实 MeasuredZero |
 | SV609（approval 请求） | **Available** | `commandApproved`/`commandRejected`/`bulk-delete.*` → `approval/asked`（有记录时）；健康会话无审批记录则走 timeline gate 报 Unavailable（§3.2） |
 | SV610（危险授权/sandbox） | **Available**（诚实 MeasuredZero） | `sandbox-executed` → SandboxModes 非空，SV610 可跑；但 WorkBuddy 的 `permission_mode` 只有 `bypassPermissions`/`fullAccess` 两值，**不等于 DSH 的 `danger-full-access`**（use_sandbox_cli 恒 1，命令永远进沙箱），词表不翻译 → 诚实 MeasuredZero（§3.3） |
 | SV611（重复调用） | **Available** | 在 bash+web_fetch 子集上跑 `(name, args_text)` 去重；audit-log 的 `commandHash`+`commandPreview` 是同一语义的两面（§7） |
 | SV612（turn 分组） | **Unavailable** | 无 turn 结构（audit-log 无 turn/step）；turns timeline 恒空，timeline gate 自然给出 |
-| SV613(a/b) | **Unavailable** | requires `[TurnBoundaries, ToolResults]` 双空（turns 空 + results 空）→ OR 门控判定 unavailable |
+| SV613(a/b) | **Available**（E2，有 span 时） | requires `[TurnBoundaries, ToolResults]` OR 门控——tool_results 非空即放行；(a) 因 turns 恒空跑不出、(b) 读 tool_results 照跑。无 trace 的会话仍 Unavailable |
 | SV614 | **Available** | requires `[ApprovalDecisions, SandboxModes]` OR 门控——audit-log 双轴都在，是 OR 门控的天然输入；健康会话 MeasuredZero（§3.4） |
 
-### 3.1 SV604/605 的宿主能力降级（与 Claude 的 SV607/608 override 对称）
+### 3.1 ~~SV604/605 的宿主能力降级~~（**已于 E2 移除**，2026-09-11）
+
+> 本节保留作历史。降级的前提「write/edit 只存在于会话匿名的 traces」是 09-02 的分析
+> 错误（§12.2）；E2 起 Edit/Write span 折进 tool_calls，`host_capability.rs` workbuddy
+> 行的 `degraded_rules` 清空，`WORKBUDDY_SV604_605_REASON` 常量删除。下文的机制描述
+> 对 Claude 的 SV607/608 override 仍成立，对 WorkBuddy 不再适用。
+
 
 Claude 侧：tool_results 存在但 `error_code` 结构性恒 None → SV607/608 从 MeasuredZero
 降级 Unavailable（`degrade_sv607_608`）。WorkBuddy 侧同一形状，对象换成 SV604/605：
-**可 join 的 tool_calls 结构性只有 bash+web_fetch**，write/edit 证据只在匿名 traces——
+**现有实现 join 进来的 tool_calls 只有 bash+web_fetch**（traces 可 join 但未接，§12.2），write/edit 证据只在 traces——
 SV604/605 在 WorkBuddy 上「规则照跑零命中」就是假阴性。降级发生在**调度层**
 （`agent/workbuddy_session_audit.py::workbuddy_audit_projection` + Rust
 `src/agent/workbuddy_session.rs::degrade_sv604_605`），**不进共享求值器**
@@ -205,6 +217,11 @@ workbuddy host capability: only bash (audit-log commandPreview) and web_fetch
 only in session-anonymous traces (file-history has content without paths), so
 SV604/605 cannot discriminate
 ```
+
+> **该字面量已过时**（2026-09-11）：`host_capability.rs::WORKBUDDY_SV604_605_REASON`
+> 的原文被差分与 `test_host_capability.py` 逐字钉住，本文在历史块中不改用字面量；且
+> **Phase E E2 已落地**：SV604/605 转 Available（Edit/Write span → tool_calls），该
+> degradation 已被删除——上文对被降级机制的描述不再适用，只保留作历史。
 
 ### 3.2 SV609 的三态随会话内容诚实变化
 
@@ -302,34 +319,52 @@ DSH/Codex/Claude 的 bash 处理同一形状）；`WebFetch` 的 `args_text = me
 
 ## 9. 成本部分（宿主已记账，不重复计价）
 
-**`session_usage.credit_json` = `{requestId: ¥}`**（键与 audit-log requestId 可 join，实测
-13/22）。TOTAL ¥4307.76 / 11 会话有 credit，榜首「分析演示模块重构计划」¥1763.88。`used`
-= token 计数（5018bac6=218256）。模型分布：deepseek-v4-flash 6 / MiniMax-M3 5 / hy3 4 /
-auto 4 / MiniMax-M2.5 2。
+> **成本块的当前权威是 [WORKBUDDY_ONBOARDING_SPEC.md](./WORKBUDDY_ONBOARDING_SPEC.md)
+> §5（四栏归属）+ §6.1（`cost` 块 6 键契约）。** 本节下面的 `credit_json` = 「宿主积分
+> 账单」这一事实仍然成立；但把积分当人民币显示（旧 `cny` 键）是 Phase A 修掉的 bug，
+> 数字口径以 onboarding spec 为准。
+> The current authority for the cost block is WORKBUDDY_ONBOARDING_SPEC.md §5 / §6.1;
+> `credit_json` is a host **credit** ledger, and the old `cny` key that rendered credits
+> as CNY was a Phase A bug.
+
+**`session_usage.credit_json` = `{requestId: credit}`**（值是平台**积分**，不是货币；键与
+audit-log requestId 可 join，实测 13/22）。TOTAL 4,307.76 credit（名义 ¥215.39，按公开
+兑换价 1,000 积分 = ¥50 @2026-07-01 折算；现金口径无实付证据）/ 11 会话有 credit，榜首
+「分析演示模块重构计划」1,763.88 credit。`used` = token 计数（5018bac6=218256）。模型
+分布：deepseek-v4-flash 6 / MiniMax-M3 5 / hy3 4 / auto 4 / MiniMax-M2.5 2。
 
 三条纪律：
 
 - **cost = 逐会话求 `credit_json` 各 requestId 之和**（值可能是数字或数字字符串，适配器
-  稳健求和）。这是宿主自己的账单，**不重新做 token × 单价**——不涉及 pricing.json、
-  不长第四份价格拷贝。
-- **token = `session_usage.used`** 单值（聚合），**没有逐请求 token**（traces 只有 trace 级
-  `totalTokens`，且会话匿名）→ Usage 信号 Unavailable、UsageAggregate measured=1。
-- 输出契约：`workbuddy-session --json` 的顶层加一个 `cost` 键
-  `{tokens, cny, host_billed: true}`，与 Claude 的 key 序同构（host 各钉各的字节契约，§11.7）。
+  稳健求和，按厘累计防浮点漂移）。这是宿主自己的**积分**账单，**不重新做 token × 单价**
+  ——不涉及 pricing.json、不长第四份价格拷贝。
+- **token（E4a/E5 已接正，spec §9E.5）**：`used` 是**最后一次调用的上下文占用 prompt_tokens
+  快照**，不是使用量——traces **有**逐请求四桶（E4a → usage_facts、`cost.processed_tokens` 同源），
+  E2 起 Usage 信号 measured 而非曾经的「Unavailable + 刻意不用」。`totalTokens` 不可信，不读
+  （§12.2）。
+- 输出契约：`workbuddy-session --json` 的顶层加一个 `cost` 键，形状 =
+  `{tokens, processed_tokens, credits, cash_cny, nominal_cny, nominal_basis, host_billed}`
+  （**7 键**，E5 起含 `processed_tokens`；键序是字节契约的一部分；`cash_cny` 恒 `null`——
+  本机无支付证据，绝不填 0；`processed_tokens` 无 trace 证据时 `null`——不编 0；
+  `nominal_cny` = `credits × 0.05` 落名义栏，永不进实付栏/预算分子）。权威定义见
+  WORKBUDDY_ONBOARDING_SPEC.md §6.1；旧的 `{tokens, cny, host_billed}` 三键形状已废弃。
 
 ## 10. 验收章节（新增）
 
 1. 原始 WorkBuddy 字段（audit-log 记录/credit_json/commandHash）不得进入 `vitals-core`；
 2. WorkBuddy adapter 必须先生成 `CanonicalSession`，走 `canonical_session_to_vitals` 桥；
 3. Derived/Lossy provenance 不得变成 Measured（§4 的 `TimelineEntry.provenance` 测试）；
-4. unsupported 规则（SV604/605/607/608/609/612/613）必须 Unavailable，不得 MeasuredZero——
+4. unsupported 规则必须 Unavailable，不得 MeasuredZero——**E2 起 unsupported 集合缩为
+   SV609（无审批时）/ SV612（turns 恒空）/ 无 trace 会话的 SV607/608/613**；SV604/605
+   已 Available（Edit/Write span 带 file_path），SV607/608 有 span 时 Available（原生码
+   不翻译 → 诚实 MeasuredZero）——
    SV607/608/609/612/613 由 timeline gate 自然给出，SV604/605 是宿主能力降级 override（§3.1）；
 5. 跨宿主相同行为产生相同 finding（与 DSH/Codex/Claude fixture 对齐）；
 6. 独立记录不双计：审批记录只进 approvals 轴、sandbox-executed 才进 tool_calls 轴（§7）；
 7. audit-log 计数是下界（非逐请求账本）；TurnBoundaries derived 下界诚实标注（§8）；
 8. hash 链完整性：linkage 校验 + 轮转时 verified-from 标注（§2.3/§4）；
-9. cost = credit_json 宿主账单求和（不重复计价），token = `session_usage.used`（§9）；
-10. traces 会话匿名：一律 Unavailable + attempts，不得用 prompt 文本里的 UUID 猜 session（§12.2）。
+9. cost = credit_json 宿主积分账单求和（不重复计价），token = `session_usage.used`（§9）；
+10. traces 归属只认 `trace.sessionId` 字符串相等（09-11 纠正：可 join，非匿名，§12.2）；**E2/E4 已接**（span 折叠 + usage_facts），无 `sessionId` 键的 trace 计 unattributed（不归属、不简单 0）；**不得**用 prompt 文本里的 UUID 猜 session。
 
 ## 11. 接入工作项（依赖序）
 
@@ -374,29 +409,49 @@ auto 4 / MiniMax-M2.5 2。
 **健康会话 s1 的 §10.4 验收数字**（自校验 + 差分都钉死）：
 
 ```text
-coverage:  ToolCalls measured=3 (bash×2 + web_fetch×1) · ToolResults available=false
+coverage:  ToolCalls measured=5 (bash×2 + web_fetch×1 + E2: edit + write) · ToolResults measured=2 available=true (E2)
+           SubagentSpawns measured=1 (E2, agent span)
            TurnBoundaries derived=2 (requestId r1/r2) · ApprovalDecisions available=true measured=0
            ApprovalPolicy measured=1 · SandboxModes measured=2 · NetworkAccess measured=1
+           QuotaConsumption measured=2 available=true（B6，credit_json r1/r2；分母不可观测由 note 说明）
            UsageAggregate measured=1 · FileMutations measured=3
-rules:     measured_zero = SV601/602/603/606/610/611/614
-           unavailable  = SV604/605/607/608/609/612/613
-           rules_unavailable=7 · findings_total=0
+rules:     measured_zero = SV601/602/603/604/605/606/607/608/610/611/613/614 (E2)
+           unavailable  = SV609/612
+           rules_unavailable=2 · findings_total=0
 ```
 
 ## 12. 诚实性注记
 
 1. **audit-log 不是逐请求账本**（13/22 可 join）：一切从 audit-log 来的计数（ToolCalls/
    ApprovalDecisions/SandboxModes/TurnBoundaries）都是**下界**；
-2. **traces 会话匿名**（65% 无法归属）：能「归属」的 id 实测是内容假阳性（模板 ID、目录名、
-   CLI 参数里的 UUID）——**绝不**用 prompt 文本里的 UUID 猜 session；traces 一律 Unavailable
-   + attempts（§14.4：skipped and recorded, never treated as corruption）；
+2. **traces 可 join——09-02「会话匿名」结论作废**（2026-09-11，独立验收抓出）：
+   当时的分析在 **prompt 文本里扫 UUID**，得出「65% 无法归属、能归属的全是内容假阳性」；
+   它从未读过 trace 包装对象上的**结构化字段 `trace.sessionId`**——而
+   `RUNTIME_EVIDENCE_CONTRACT.md:747` 的 schema 例子里本来就写着它。真机重测（675 文件）：
+   **354 个有 `sessionId`，100% 匹配 `sessions.id`，覆盖 22/23 会话，自 2026-07 起就有**
+   （不是新加字段）。其余 321 个 `name='Agent workflow'`、无 `sessionId` 键、`metadata:{}`
+   ——**E5 纠正：「另一类 0 token」不成立**：`Agent workflow` 是 trace name 不是类；
+   `totalTokens` 302/675 为 0 而 span 有 usage，不可信；未归属 generation span 有真实
+   用量（E4a 实测 1,202 个记 unattributed）。两条纪律边界不变：**绝不用 prompt 文本里的
+   UUID 猜 session**；无 sessionId 的 trace 记 unattributed，不归属不断计。
+   **E3（Bash 双源）**：audit-log `toolCallId` 与 span `spanId` 是两套命名空间（0/2,398
+   可 join），audit-log sandbox-executed 2,398 条 vs Bash span 1,661 个（traces 轮转丢失
+   约 30%），命令文本 59% 相等——**audit-log 是 Bash 唯一源**，span 的 Bash 永不并入
+   tool_calls；代价是 Bash 没有 tool_results（status/duration 无键可挂）。
+   **教训**：「本机不可观测」必须以读过仓库自己的 schema 文档为前提——这次的
+   「结构性不可接」差一点被硬写进 spec，被验收者的一次 live spot-check 拦下；
 3. **hash 链最老可能轮转**（5018bac6 从 seq=1268 起）：verified-from 诚实标注，不假定链完整；
 4. **TurnBoundaries derived 是 lossy 下界**（distinct requestId，无 turn 结构）：SV612/613 报
    Unavailable，不发明不存在的轮次边界；
-5. **ToolCalls 只有 bash+web_fetch 子集可 join**：write/edit/subagent/duration 证据只在匿名
-   traces → SV604/605 降级 Unavailable（§3.1），其余工具名的审计留待 traces join 落地；
-6. **cost = credit_json 宿主账单**：不重新计价、不动 pricing.json；`used` 是聚合 token，无逐请求
-   用量；
+5. **ToolCalls 只有 bash+web_fetch 子集可 join——仅限现有实现**：write/edit/subagent/
+   duration 证据在 traces 里，而 traces **可**按 `trace.sessionId` 接入（第 2 条）。所以
+   SV604/605 的 Unavailable 降级（§3.1）是**当前实现的状态，不是宿主能力的上限**——
+   接入 traces 后（`WORKBUDDY_ONBOARDING_SPEC.md` Phase E）这两条以及 SubagentSpawns、
+   工具调用耗时都可能转为 Available。此前写「留待 traces join 落地」，现在这句是对的，
+   只是「落地」有了明确的归属键，不再是猜；
+6. **cost = credit_json 宿主积分账单**（不重算价、不动 pricing.json）+ **`used` 是最后一次
+   调用上下文快照**（E5）：`tokens` 键保留 used 语义（新注记承担），真正的处理量在
+   `cost.processed_tokens`（E4a usage_facts 逐请求源）。
 7. **permission_mode 只两值 + use_sandbox_cli 恒 1**：ApprovalPolicy/SandboxModes 保真度低于
    DSH；SV610 的 `danger-full-access` 词表不适用于 WorkBuddy，诚实 MeasuredZero；
 8. **`mode` 恒 craft、welcomeMode 会话级配置**（workbuddy.rs 静态层已守不变量 12）：模型/模式

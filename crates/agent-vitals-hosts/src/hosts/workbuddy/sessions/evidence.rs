@@ -118,26 +118,32 @@ const KNOWN_EVENT_TYPES: &[(&str, &str)] = &[
 /// 的置零与 `workbuddy_evidence_json` 的 `available` 标记共用这一份清单，不准两处
 /// 各写一份漂移。
 ///
-/// - ToolResults：audit-log 无 exit 码，traces 的 status/error 接不进 session；
+/// - ToolResults / SubagentSpawns **不在**这个集合里（spec §9E.5 E2，2026-09-11）：
+///   traces 可按 `trace.sessionId` 归属（B2），function span 的 status/error →
+///   tool_results，agent span → SubagentSpawns。此前「接不进 session」是 09-02 的
+///   分析错误；
 /// - TurnBoundaries **不在**这个集合里——它按 distinct requestId 派生 coverage
 ///   （lossy 下界，available=true），但 turns timeline 恒空（spec §8）；
 /// - Usage：无逐请求 token（traces 只有 trace 级 totalTokens）；UsageAggregate
 ///   反而 measured（session_usage.used，spec §9）；
 /// - SandboxPolicy：use_sandbox_cli 是常量（恒 1），不是结构化策略事件；
+/// - QuotaConsumption **不在**这个集合里（spec §10 B6，2026-09-11）：`credit_json`
+///   的每个 requestId 条目就是一次「宿主报告的配额消耗」——分子 measured；分母
+///   （allowance/余额）在服务端账户面、本机不可观测，由 note 说明，不出百分比。
+///   此前把它声明成 unavailable 是错的——那是「有证据却不计」，`evidence.rs`
+///   「适配器不得刷覆盖」纪律的反面（不得**压**覆盖）。§13 矩阵文档滞后，
+///   按 G5 流程在 `tests/test_host_contract.py::_REGISTERED_DEVIATIONS` 登记；
 /// - SubagentSpawns / SkillInvocations / Hooks / UserPrompts / UserCorrections /
-///   ContextWindow / QuotaConsumption / StepBoundaries / Compaction：只存于匿名
-///   traces 或根本不在 WorkBuddy 会话面上。
+///   ContextWindow / StepBoundaries / Compaction：只存于 traces（可按
+///   `trace.sessionId` 归属但现有实现未接，Phase E）或根本不在会话面上。
 fn is_unavailable(signal: Signal) -> bool {
     matches!(
         signal,
-        Signal::ToolResults
-            | Signal::StepBoundaries
+        Signal::StepBoundaries
             | Signal::Usage
             | Signal::ContextWindow
-            | Signal::QuotaConsumption
             | Signal::SandboxPolicy
             | Signal::Compaction
-            | Signal::SubagentSpawns
             | Signal::SkillInvocations
             | Signal::Hooks
             | Signal::UserPrompts
@@ -152,26 +158,69 @@ absent, so SV612/613 are Unavailable, never fabricated boundaries.";
 const SANDBOX_MODE_NOTE: &str = "sandbox mode is the WorkBuddy-native permission_mode \
 (bypassPermissions / fullAccess); the DSH danger-full-access vocabulary does not apply, so \
 SV610 is an honest MeasuredZero, never a translation.";
-const TRACES_ERROR: &str = "traces are session-anonymous (no sessionId join); skipped per \
-RUNTIME_EVIDENCE_CONTRACT §14.4";
+// spec §9E.5 E2/E3：traces 已按 `trace.sessionId` 归属并折进 timeline（B2 推翻了
+// 「session-anonymous」）。**Bash function span 永不进 tool_calls**（E3 裁决，2026-09-11
+// 真机实测）：audit-log 的 `toolCallId`（`call_00_…`）与 span 的 `spanId`（`span_…`）
+// 是两套命名空间，0/2,398 可 join；audit-log sandbox-executed 2,398 条 vs Bash span
+// 1,661 个——traces 按 worker pid 存、会轮转丢失，少了约 30%；命令文本只 59% 相等，
+// 模糊 join 就是猜。所以 audit-log（hash 链安全账本、更完整）是 Bash 唯一源，span 的
+// Bash 并进去只会双计 SV601–603/SV611（Codex `custom_tool_call` vs `CommandExecution`
+// 同款影子问题）。代价如实：Bash 的 status/duration 只在 span 里，无键可挂到
+// tool_calls → Bash 没有 tool_results。与 Python 逐字节相同。
+const TRACES_FOLDED_NOTE_PREFIX: &str = "traces folded via trace.sessionId: ";
+// spec §10 B6：分子可测、分母不可观测——只报绝对量，不出百分比（§6.6「无法证明
+// 完整时不编百分比」同款）。与 Python 逐字节相同。
+const QUOTA_CONSUMPTION_NOTE: &str = "quota consumption is measured from credit_json \
+entries (one per billed request); the allowance / balance that would give a percentage \
+lives on the account plane and is not observable on this machine, so only the absolute \
+consumption is reported";
 
-/// traces 是「已知但刻意不用的表面」（spec §12.2）——会话匿名，join 不进 session。
-/// 记成 `SourceAttempt`（§14.4：skipped and recorded, never treated as corruption）。
-/// `kind="Directory"` / `surface="Traces"` 是 `evidence::SourceKind`/`Surface` 为这个
-/// 目录型表面补的两个变体——Python 侧同款序列化（`format!("{:?}", ...)`）。
-fn traces_attempt() -> SourceAttempt {
-    SourceAttempt {
-        source_id: "workbuddy.traces",
-        kind: SourceKind::Directory,
-        surface: Surface::Traces,
-        available: false,
-        error: Some(TRACES_ERROR.to_string()),
-        observed_span: None,
+/// §7 工具名规范化（与 claude_code_evidence.rs 同一张表，WorkBuddy 的 toolName 是
+/// 同一套 PascalCase）。未映射的原样透传——规则不认、诚实 MeasuredZero，不误报。
+/// **Bash 不在这里处理**：E2 把 Bash span 排除在 tool_calls 之外（见 populate）。
+fn normalize_span_tool_name(name: &str) -> String {
+    match name {
+        "Write" => "write".to_string(),
+        "Edit" | "MultiEdit" => "edit".to_string(),
+        "Read" => "read".to_string(),
+        "Glob" => "glob".to_string(),
+        "Grep" => "grep".to_string(),
+        "WebFetch" => "web_fetch".to_string(),
+        "WebSearch" => "web_search".to_string(),
+        "Task" => "task".to_string(),
+        other => other.to_string(),
     }
 }
 
+/// span 的 ISO 毫秒串（`2026-08-14T23:49:18.442Z`）→ unix 秒。走 `parse_iso` 的字符串
+/// 路径（A2）；解不出 → None（不猜）。
+fn span_time(span: &Value) -> Option<i64> {
+    span.get("started_at")
+        .and_then(Value::as_str)
+        .and_then(parse_iso)
+        .map(|(secs, _)| secs)
+}
+
+/// spans 的确定性顺序：`(started_at, span_id)`——同一毫秒内多个 span 靠 span_id 定序。
+fn sort_spans(spans: &[Value]) -> Vec<&Value> {
+    let mut v: Vec<&Value> = spans.iter().filter(|s| s.is_object()).collect();
+    v.sort_by(|a, b| {
+        let ka = (
+            a.get("started_at").and_then(Value::as_str).unwrap_or(""),
+            a.get("span_id").and_then(Value::as_str).unwrap_or(""),
+        );
+        let kb = (
+            b.get("started_at").and_then(Value::as_str).unwrap_or(""),
+            b.get("span_id").and_then(Value::as_str).unwrap_or(""),
+        );
+        ka.cmp(&kb)
+    });
+    v
+}
+
 /// 一条 timeline entry 的构造器。`turn`/`step` 恒 None——WorkBuddy 无 turn/step
-/// 结构；`time` = audit-log timestamp 的 unix 秒（`parse_iso`，无效则 None）。
+/// 结构；`time` = audit-log timestamp 归一后的 unix 秒（字符串走 `parse_iso`、
+/// 整数/浮点按 epoch 毫秒解释，见 `parse_time`；无效则 None）。
 /// 所有 entry 都是 `Measured`——它们来自真实 audit-log 记录，不是 derive 出来的。
 fn timeline_entry<T>(
     observation: T,
@@ -276,9 +325,51 @@ fn approval_tool(record: &Value) -> String {
     }
 }
 
+/// epoch 秒的固定合法性窗口下界 —— `2000-01-01T00:00:00Z`。
+const WB_TS_MIN_SECS: i64 = 946_684_800;
+/// epoch 秒的固定合法性窗口上界（半开）—— `2100-01-01T00:00:00Z`。
+///
+/// `sources/mod.rs::normalize_wb_ts` 那侧在 `/sources` 层、能读时钟，用的是
+/// `now + 24h` 上界。这里是纯 crate（可链进 wasm）、**读不了时钟**，所以退一步
+/// 用固定的 2100 上界——spec §10 A6 明写「纯层用固定上下界，不用 now 窗口」。
+const WB_TS_MAX_SECS: i64 = 4_102_444_800;
+
+/// audit-log `timestamp` → 该 entry 的 `time`（`TimelineEntry.time` 是 unix
+/// 秒 `Option<i64>`，不是 ISO 串）。
+///
+/// **字符串**走既有 `parse_iso` 路径，**原样不回归**（其他宿主与旧 fixture 的
+/// ISO 串形状不变）。**整数/浮点**按 epoch **毫秒**解释——真机
+/// `~/.workbuddy/audit-log/*.jsonl` 的 `timestamp` 是 13 位 epoch-ms 整数
+/// （2026-09-10 实测），旧实现只收 `Value::as_str`、整数一律读成 None，于是有
+/// findings 的会话里每条 finding 的 `time` 都是 null。floor-除 1000 归一到秒，
+/// 与 `sources/mod.rs::normalize_wb_ts` 同一公式（`i64::div_euclid(1000)` /
+/// `(f / 1000.0).floor()`），不另发明第二套。
+///
+/// 合法性窗口是**固定**的 `[2000-01-01, 2100-01-01)`（见 `WB_TS_MAX_SECS`
+/// doc：纯层读不了时钟）。窗口外 → `None`；纯层没有 `attempts` 汇——只 null，
+/// 与今天非字符串输入的行为一致（越界进 attempts 的那条纪律留在 `/sources`）。
+///
+/// **不做「10 位当秒、13 位当毫秒」的位数嗅探**（spec §6.2 rule 5）：真机只
+/// 观测到毫秒，在没有证据的地方发明秒/毫秒判别会把 2001 年的毫秒戳误当 1970
+/// 年的秒戳。bool / null / object / 字段缺失 → `None`。
 fn parse_time(record: &Value) -> Option<i64> {
-    let ts = record.get("timestamp").and_then(Value::as_str)?;
-    parse_iso(ts).map(|(s, _)| s)
+    match record.get("timestamp") {
+        Some(Value::String(s)) => parse_iso(s).map(|(secs, _)| secs),
+        Some(Value::Number(n)) => {
+            let secs = match n.as_i64() {
+                Some(i) => i.div_euclid(1000),
+                None => {
+                    let f = n.as_f64()?;
+                    if !f.is_finite() {
+                        return None;
+                    }
+                    (f / 1000.0).floor() as i64
+                }
+            };
+            (WB_TS_MIN_SECS..WB_TS_MAX_SECS).contains(&secs).then_some(secs)
+        }
+        _ => None,
+    }
 }
 
 /// audit-log `prevHash→hash` 链的完整性 note（spec §2.3/§4）。只做**结构校验**
@@ -353,8 +444,10 @@ struct WorkbuddyTimelines {
 fn populate_workbuddy_timelines(
     records: &[Value],
     session_meta: &WorkbuddySessionMeta,
+    spans: &[Value],
 ) -> (WorkbuddyTimelines, Vec<String>) {
     let mut tool_calls = Timeline::new();
+    let mut tool_results = Timeline::new();
     let mut approvals = Timeline::new();
     let mut sandbox = Timeline::new();
     let mut unknown: Vec<String> = Vec::new();
@@ -448,10 +541,46 @@ fn populate_workbuddy_timelines(
                 observation, Some(seq), time, call_id, take_ordinal(&mut next_ordinal)));
         }
     }
+
+    // E2：traces 的 function span → tool_calls + tool_results（Measured，来源是真实
+    // span）。**Bash 排除**（E3 定主源前不双计）。args_text 只放 `{"file_path": …}`
+    // ——SV604/605 的正则读它；其余 input 一律不进（§4 不要正文）。
+    // tool_results：`failed` = status≠ok 或 error 非空（宿主给了失败信号）；
+    // `error_code` = 宿主原生 status（error/cancelled…），**不翻译成 DSH 码集**——
+    // SV607/608 照跑零命中是诚实 MeasuredZero（Codex `exit_code:N` 同款纪律）。
+    for span in sort_spans(spans) {
+        let kind = span.get("kind").and_then(Value::as_str).unwrap_or("");
+        if kind != "function" {
+            continue;
+        }
+        let tool = span.get("tool_name").and_then(Value::as_str).unwrap_or("");
+        if tool.is_empty() || tool == "Bash" {
+            continue;
+        }
+        let call_id = span.get("span_id").and_then(Value::as_str).map(str::to_owned);
+        let time = span_time(span);
+        let args_text = match span.get("file_path").and_then(Value::as_str) {
+            Some(fp) => serde_json::json!({ "file_path": fp }).to_string(),
+            None => String::new(),
+        };
+        tool_calls.entries.push(timeline_entry(
+            ToolCallObservation { name: normalize_span_tool_name(tool), args_text },
+            None, time, call_id.clone(), take_ordinal(&mut next_ordinal)));
+        let status = span.get("status").and_then(Value::as_str).unwrap_or("");
+        let has_error = span.get("error").and_then(Value::as_str).map(|e| !e.is_empty()).unwrap_or(false);
+        let not_ok = !status.is_empty() && status != "ok";
+        tool_results.entries.push(timeline_entry(
+            ToolResultObservation {
+                failed: Some(not_ok || has_error),
+                error_code: if not_ok { Some(status.to_string()) } else { None },
+            },
+            None, time, call_id, take_ordinal(&mut next_ordinal)));
+    }
+
     (
         WorkbuddyTimelines {
             tool_calls,
-            tool_results: Timeline::new(),
+            tool_results,
             approvals,
             sandbox_modes: sandbox,
             turns: Timeline::new(),
@@ -488,9 +617,31 @@ fn bump(coverage: &mut Coverage, signal: Signal, bucket: Bucket, n: u64) {
 /// sandbox 数，等）——coverage 与 timeline 两条账必须对得上，否则门控读 timeline
 /// 非空而 coverage 全零。FileMutations/ApprovalPolicy/UsageAggregate 从
 /// `session_meta`（db/file-history）拆出。返回 `(sigset, coverage, unknown)`。
+/// `credit_json`（`{requestId: credit}` 的 JSON 串）里可解析为数值的条目数。
+/// 解析失败 / 非对象 / 空串 → 0。bool 显式排除（Python `isinstance(True, int)`
+/// 为真，两侧都要短路）；数值字符串（真实账单里出现过）算数值。与 Python
+/// `_credit_entry_count` 逐字节同判。
+fn credit_entry_count(credit_json: Option<&str>) -> u64 {
+    let Some(raw) = credit_json else { return 0 };
+    if raw.trim().is_empty() {
+        return 0;
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else { return 0 };
+    let Some(obj) = parsed.as_object() else { return 0 };
+    obj.values()
+        .filter(|v| match v {
+            Value::Bool(_) => false,
+            Value::Number(n) => n.as_f64().map(|f| f.is_finite()).unwrap_or(false),
+            Value::String(s) => s.parse::<f64>().map(|f| f.is_finite()).unwrap_or(false),
+            _ => false,
+        })
+        .count() as u64
+}
+
 fn derive_coverage(
     records: &[Value],
     session_meta: &WorkbuddySessionMeta,
+    spans: &[Value],
 ) -> (SignalSet, Coverage, Vec<String>) {
     let mut coverage = Coverage::new();
     let mut unknown: Vec<String> = Vec::new();
@@ -552,6 +703,38 @@ fn derive_coverage(
     {
         bump(&mut coverage, Signal::UsageAggregate, Bucket::Measured, 1);
     }
+    // QuotaConsumption measured = credit_json 里**可解析为数值**的条目数（spec §10 B6）
+    // ——每条 = 宿主为一个 requestId 记了一笔配额消耗。只数条目不看金额：0 积分的
+    // 条目也是一次记账观察。非数值（bool/字符串垃圾/null）不计——记账缺口报缺。
+    // 与 `sources/mod.rs::credit_cents` 的求和是两件事：那边算钱，这边算观察次数。
+    let quota_entries = credit_entry_count(session_meta.credit_json.as_deref());
+    if quota_entries > 0 {
+        bump(&mut coverage, Signal::QuotaConsumption, Bucket::Measured, quota_entries);
+    }
+    // E2：traces span 的覆盖。function（非 Bash）→ ToolCalls + ToolResults 各 +1；
+    // agent → SubagentSpawns +1。Bash span 不计（E3 前主源是 audit-log，重复计
+    // 就是虚增覆盖——`evidence.rs`「适配器不得刷覆盖」）。
+    let mut fn_spans = 0_u64;
+    let mut agent_spans = 0_u64;
+    for span in spans.iter().filter(|s| s.is_object()) {
+        match span.get("kind").and_then(Value::as_str).unwrap_or("") {
+            "function" => {
+                let tool = span.get("tool_name").and_then(Value::as_str).unwrap_or("");
+                if !tool.is_empty() && tool != "Bash" {
+                    fn_spans += 1;
+                }
+            }
+            "agent" => agent_spans += 1,
+            _ => {}
+        }
+    }
+    if fn_spans > 0 {
+        bump(&mut coverage, Signal::ToolCalls, Bucket::Measured, fn_spans);
+        bump(&mut coverage, Signal::ToolResults, Bucket::Measured, fn_spans);
+    }
+    if agent_spans > 0 {
+        bump(&mut coverage, Signal::SubagentSpawns, Bucket::Measured, agent_spans);
+    }
     // TurnBoundaries derived = distinct requestId（lossy 下界，spec §8）。coverage
     // 与 turns timeline **不同源**（timeline 恒空）——这正是
     // `empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero` 钉住的
@@ -573,7 +756,7 @@ fn derive_coverage(
     (signals, coverage, unknown)
 }
 
-fn build_notes(coverage: &Coverage, records: &[Value]) -> Vec<AdapterNote> {
+fn build_notes(coverage: &Coverage, records: &[Value], spans: &[Value]) -> Vec<AdapterNote> {
     let mut notes: Vec<AdapterNote> = Vec::new();
     if coverage.get(Signal::TurnBoundaries).total() > 0 {
         notes.push(AdapterNote { message: TURN_BOUNDARY_NOTE.to_string() });
@@ -581,8 +764,37 @@ fn build_notes(coverage: &Coverage, records: &[Value]) -> Vec<AdapterNote> {
     if coverage.get(Signal::SandboxModes).total() > 0 {
         notes.push(AdapterNote { message: SANDBOX_MODE_NOTE.to_string() });
     }
+    if coverage.get(Signal::QuotaConsumption).total() > 0 {
+        notes.push(AdapterNote { message: QUOTA_CONSUMPTION_NOTE.to_string() });
+    }
     if let Some(chain) = chain_note(records) {
         notes.push(AdapterNote { message: chain });
+    }
+    // E2：有 span 就说明折了什么、没折什么。Bash span 数单独报——E3 定主源前它们
+    // 不进 tool_calls，读者得知道这个缺口是刻意的。
+    if spans.iter().any(|s| s.is_object()) {
+        let (mut fn_non_bash, mut bash, mut agent) = (0_u64, 0_u64, 0_u64);
+        for s in spans.iter().filter(|s| s.is_object()) {
+            match s.get("kind").and_then(Value::as_str).unwrap_or("") {
+                "function" => {
+                    if s.get("tool_name").and_then(Value::as_str) == Some("Bash") {
+                        bash += 1;
+                    } else if s.get("tool_name").and_then(Value::as_str).map(|n| !n.is_empty()).unwrap_or(false) {
+                        fn_non_bash += 1;
+                    }
+                }
+                "agent" => agent += 1,
+                _ => {}
+            }
+        }
+        notes.push(AdapterNote {
+            message: format!(
+                "{TRACES_FOLDED_NOTE_PREFIX}{fn_non_bash} non-Bash function span(s) -> tool_calls/tool_results, \
+{agent} agent span(s) -> SubagentSpawns; {bash} Bash span(s) NOT folded: audit-log sandbox-executed is \
+the Bash source (no shared identity key — audit toolCallId vs span spanId — and audit-log is the \
+hash-chained security ledger with the more complete record; merging would double-count)"
+            ),
+        });
     }
     notes
 }
@@ -601,21 +813,22 @@ fn first_cwd(session_meta: &WorkbuddySessionMeta) -> Vec<String> {
 /// | 规则 | WorkBuddy |
 /// |---|---|
 /// | SV601–603 | 跑（`command-safety.sandbox-executed` 的 commandPreview → bash args_text） |
-/// | SV604/605 | **Unavailable**（dispatcher 层 host-capability degradation，spec §3.1） |
+/// | SV604/605 | 跑（E2：Edit/Write span 解码后的 file_path → args_text）；降级行已删 |
 /// | SV606 | 跑（network+WebFetch target → web_fetch args_text） |
-/// | SV607/608 | Unavailable（无 tool_results / exit 码） |
+/// | SV607/608 | 跑（E2：span status → error_code，原生码不翻译 → 诚实 MeasuredZero） |
 /// | SV609 | 跑（audit-log 审批路径 → asked）；无审批记录则 Unavailable |
 /// | SV610 | 跑（sandbox 非空），mode 恒非 danger-full-access → 诚实 MeasuredZero |
 /// | SV611 | 跑（bash+web_fetch 子集） |
-/// | SV612/613 | Unavailable（turns 恒空 / results 恒空） |
+/// | SV612/613 | SV612 Unavailable（turns 恒空）；SV613 有 span 时跑（(b) 读 tool_results），无 span 时 Unavailable |
 /// | SV614 | 跑（approvals+sandbox 双轴都在） |
 pub fn build_workbuddy_evidence(
     raw_records: Vec<Value>,
     session_id: String,
     session_meta: &WorkbuddySessionMeta,
+    spans: &[Value],
 ) -> WorkbuddyEvidence {
-    let (timelines, unknown) = populate_workbuddy_timelines(&raw_records, session_meta);
-    let (signals, coverage, cov_unknown) = derive_coverage(&raw_records, session_meta);
+    let (timelines, unknown) = populate_workbuddy_timelines(&raw_records, session_meta, spans);
+    let (signals, coverage, cov_unknown) = derive_coverage(&raw_records, session_meta, spans);
     let mut all_unknown = unknown;
     for m in cov_unknown {
         if !all_unknown.contains(&m) {
@@ -623,7 +836,8 @@ pub fn build_workbuddy_evidence(
         }
     }
     all_unknown.sort();
-    let mut attempts: Vec<SourceAttempt> = vec![traces_attempt()];
+    // E2：traces 不再是「已知但刻意不用」的表面——已折进 timeline，不再记 attempt。
+    let mut attempts: Vec<SourceAttempt> = Vec::new();
     for msg in all_unknown {
         attempts.push(SourceAttempt {
             source_id: "workbuddy.audit-log",
@@ -634,7 +848,7 @@ pub fn build_workbuddy_evidence(
             observed_span: None,
         });
     }
-    let notes = build_notes(&coverage, &raw_records);
+    let notes = build_notes(&coverage, &raw_records, spans);
     let canonical = CanonicalSession {
         meta: SessionMeta {
             session_id,
@@ -754,7 +968,7 @@ mod tests {
                    "eventType": "command-safety.sandbox-executed", "toolCallId": "c3",
                    "commandPreview": "pwd", "timestamp": "2026-08-31T10:00:02Z"}),
         ];
-        let (tl, unknown) = populate_workbuddy_timelines(&records, &meta());
+        let (tl, unknown) = populate_workbuddy_timelines(&records, &meta(), &[]);
         assert!(unknown.is_empty());
         assert_eq!(tl.tool_calls.entries.len(), 3);
         assert_eq!(tl.sandbox_modes.entries.len(), 2);
@@ -812,5 +1026,42 @@ mod tests {
             chain_note(&records).as_deref(),
             Some("audit-log hash chain verified from seq=5: oldest records may be rotated \
                   (first prevHash has no predecessor)"));
+    }
+
+    #[test]
+    fn parse_time_reads_integer_epoch_ms_the_real_machine_shape() {
+        // 真机 `~/.workbuddy/audit-log/*.jsonl` 的 `timestamp` 是 13 位 epoch-ms
+        // 整数——旧实现 `and_then(Value::as_str)` 把它读成 None，于是有 findings
+        // 的会话里每条 finding 的 `time` 是 null（评审 A6：Rust-only 改会打破
+        // 与 Python `_parse_time` 的差分，双侧同一 commit）。
+        assert_eq!(
+            parse_time(&json!({"timestamp": 1_788_170_400_000_i64})),
+            Some(1_788_170_400)
+        );
+        // 浮点同路径（floor 除 1000），与 Python `math.floor(v / 1000.0)` 对齐。
+        assert_eq!(
+            parse_time(&json!({"timestamp": 1_788_170_400_500.0_f64})),
+            Some(1_788_170_400)
+        );
+        // 字符串路径原样不回归。
+        assert_eq!(
+            parse_time(&json!({"timestamp": "2026-08-31T10:00:00Z"})),
+            parse_iso("2026-08-31T10:00:00Z").map(|(s, _)| s)
+        );
+    }
+
+    #[test]
+    fn parse_time_rejects_out_of_fixed_window_and_non_numeric() {
+        // 纯 crate 读不了时钟——窗口是固定的 [2000-01-01, 2100-01-01)。
+        // 999ms → 1970（< 2000）、253402300800000ms → 10000 年（>= 2100）：均 None。
+        assert_eq!(parse_time(&json!({"timestamp": 999_i64})), None);
+        assert_eq!(parse_time(&json!({"timestamp": 253_402_300_800_000_i64})), None);
+        // 位数嗅探禁令：10 位数字按毫秒解释 = 1970，不是「当秒」。
+        assert_eq!(parse_time(&json!({"timestamp": 1_788_170_400_i64})), None);
+        // bool / null / object / 缺失 → None（bool 不是 Number）。
+        assert_eq!(parse_time(&json!({"timestamp": true})), None);
+        assert_eq!(parse_time(&json!({"timestamp": Value::Null})), None);
+        assert_eq!(parse_time(&json!({"timestamp": {"nested": 1}})), None);
+        assert_eq!(parse_time(&json!({})), None);
     }
 }

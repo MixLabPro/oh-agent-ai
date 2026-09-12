@@ -26,7 +26,7 @@ use crate::{claude_code_evidence, codex_evidence, dsh_evidence, dsh_sources};
 /// 分类，但做成类型而不是裸字符串，供上层按错误种类分支）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalInputError {
-    /// `host` 不在 v0.10.0 的三宿主封闭词表里。
+    /// `host` 不在封闭词表里（claude-code / codex / dsh，E4b 起 + workbuddy）。
     UnknownHost(String),
     /// 文件不存在 / 无法读取（权限、损坏等）。
     FileUnavailable(String),
@@ -39,7 +39,7 @@ impl std::fmt::Display for CanonicalInputError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CanonicalInputError::UnknownHost(h) => {
-                write!(f, "unknown host `{h}` (trace hosts: claude-code/codex/dsh)")
+                write!(f, "unknown host `{h}` (trace hosts: claude-code/codex/dsh/workbuddy)")
             }
             CanonicalInputError::FileUnavailable(e) => write!(f, "file unavailable: {e}"),
             CanonicalInputError::NoParsableRecords => {
@@ -201,6 +201,17 @@ pub fn canonical_session_for_paths(
                 .canonical)
             }
         }
+        // WorkBuddy（E4b）不是单文件会话：证据散在 `~/.workbuddy/` 的 db /
+        // audit-log / traces 三面，按 session_id join。`paths[0]` 是**用户 HOME**
+        // （`workbuddy_root(home)` 在里面解析），不是某个文件——上层
+        // `trace_service::source_paths_for_session` 就按这个约定传。多传的路径
+        // 忽略（一个 HOME 只有一个 WorkBuddy 根）。
+        "workbuddy" => crate::workbuddy_session::workbuddy_canonical_session(&paths[0], &session_id)
+            .ok_or_else(|| {
+                CanonicalInputError::FileUnavailable(format!(
+                    "workbuddy session `{session_id}` has neither a db row nor audit-log records"
+                ))
+            }),
         other => Err(CanonicalInputError::UnknownHost(other.to_string())),
     }
 }
@@ -214,8 +225,10 @@ pub fn canonical_session_for_paths(
 ///   Codex 的 `history_mode`/`cli_version`/`title` 三个字段是纯 provenance
 ///   （`codex/sessions/evidence.rs` 头注：「只进报告不参与计数」），此处统一传
 ///   `None`——不影响 canonical 时间线的解析正确性。
-/// - 其余 host 字符串 → `UnknownHost`（v0.10.0 的封闭词表就是 `FACT_HOSTS`
-///   那三个，见 spec §2.5.1）。
+/// - `workbuddy`：**不走本函数**（没有「会话文件」这回事；`trace <file>` 子命令
+///   对它无意义）——只经 `canonical_session_for_paths(&[home], "workbuddy", sid)`
+///   由 `trace-ref` 进入。
+/// - 其余 host 字符串 → `UnknownHost`（封闭词表 = `FACT_HOSTS`，见 spec §2.5.1）。
 pub fn canonical_session_for_path(
     path: &Path,
     host: &str,

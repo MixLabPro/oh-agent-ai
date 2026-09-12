@@ -22,18 +22,10 @@ CLAUDE_SV607_608_REASON = (
     "and cannot discriminate"
 )
 
-WORKBUDDY_SV604_605_REASON = (
-    "workbuddy host capability: only bash (audit-log commandPreview) and "
-    "web_fetch (WebFetch target) tool calls are joinable to sessions; "
-    "write/edit tool calls exist only in session-anonymous traces "
-    "(file-history has content without paths), so SV604/605 cannot discriminate"
-)
-
 # host_id → (规则集, missing 信号, reason)。Rust `degrade_rule_outcomes` 的 match
 # 就是这张表——两边各写一份，靠差分测试对齐。
 _DEGRADES = {
     "claude-code": (("SV607", "SV608"), ["ToolResults"], CLAUDE_SV607_608_REASON),
-    "workbuddy": (("SV604", "SV605"), ["ToolCalls"], WORKBUDDY_SV604_605_REASON),
 }
 
 
@@ -118,23 +110,20 @@ HOSTS = (
         "id": "workbuddy",
         "display": "WorkBuddy",
         "unmeasured_signals": [
-            "ToolResults",
             "StepBoundaries",
             "Usage",
             "ContextWindow",
-            "QuotaConsumption",
             "SandboxPolicy",
             "Compaction",
-            "SubagentSpawns",
             "SkillInvocations",
             "Hooks",
             "UserPrompts",
             "UserCorrections",
         ],
-        "degraded_rules": [
-            {"code": "SV604", "missing": ["ToolCalls"], "reason": WORKBUDDY_SV604_605_REASON},
-            {"code": "SV605", "missing": ["ToolCalls"], "reason": WORKBUDDY_SV604_605_REASON},
-        ],
+        # SV604/605 的降级行**已移除**（spec §9E.5 E2）：前提「write/edit 只存在于会话
+        # 匿名的 traces」是 09-02 的分析错误——Edit/Write span 解码后带 file_path，已折进
+        # tool_calls。SV604/605 照跑，零命中就是诚实 MeasuredZero。
+        "degraded_rules": [],
         # 无 SessionStore（envelope 未知宿主 → StoreError，v0.6 spec §4）。
         "session_store": False,
         # 无日/月折叠机制（会话审计的成本块是宿主已计费 credit 求和，不重计价）；
