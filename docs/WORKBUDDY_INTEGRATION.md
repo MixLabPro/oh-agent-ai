@@ -46,7 +46,9 @@ Coverage 三态、SourceAttempt 与既有兼容测试路径（§1.1）。
   记 attempts、标 Unavailable，绝不猜 session**——「不猜」的纪律不变，变的是「不用猜」。
 - audit-log 是**安全决策账本**，不是逐请求账本（13/22 requestId 可 join）。工具调用只有
   **bash 子集**（`commandPreview`）+ **WebFetch**（`messageParams.target`）可 join；
-  write/edit/subagent/duration 证据只在 traces 里，**现有实现未接 traces**（可按 `trace.sessionId` 归属，§12.2）→ SV604/605 在现有实现下降级 Unavailable（§3；Phase E 后可能转 Available）。
+  write/edit/subagent/duration 证据只在 traces 里，**E2（2026-09-11）已接入**（按 `trace.sessionId` 归属，
+  §12.2）→ SV604/605 现为 Available（function span → tool_calls，见 §3.1 矩阵）、SubagentSpawns 从
+  trace agent span 折叠。
 - 成本是**宿主自己按积分记的账**（`session_usage.credit_json`，单位是平台积分不是货币），
   不是 token 桶 × 单价——**不涉及 pricing.json，不涨第四份价格拷贝**（§9）。
 - audit-log 自带 `prevHash→hash` 链，是最老可能轮转的安全账本——完整性校验是适配器的
@@ -112,7 +114,10 @@ turn/step/请求重建、工具调用关联必须在**适配器的 derive 阶段
 | `workbuddy.db` `session_usage` | 22 行 | session_id | `used`(token) / `size` / `credit_json`(宿主**积分**账单) |
 | `audit-log/*.jsonl` | 23 文件 / 2563 条 / 23 sessionId（21 在 DB） | 记录内 `sessionId` 字段 | 安全决策账本（命令/网络/批量删除），自带 hash 链 |
 | `file-history/<sessionId>/<contentHash>@v<n>` | 16 会话 / 730 文件 | 目录名 | 文件内容快照（**无路径**，只有内容 hash@版本） |
-| `traces/<pid>/trace_<id>.json` | 675 文件 / 653MB / 105 pid（09-11 重测） | **`trace.sessionId`**（结构化字段，`RUNTIME_EVIDENCE_CONTRACT.md:747` 早有记录） | span 树：tool calls + generations + duration —— **可 join**：354/675 有 `sessionId`、**100% 匹配 `sessions.id`、覆盖 22/23 会话**；其余 321 个全是 `name='Agent workflow'`（无 `sessionId` 键、`metadata:{}`、0 token）——另一类 trace，不是匿名会话。**09-02「会话匿名」结论系分析方法错误**（§12.2） |
+| `traces/<pid>/trace_<id>.json` | 675 文件 / 653MB / 105 pid（09-11 重测） | **`trace.sessionId`**（结构化字段，`RUNTIME_EVIDENCE_CONTRACT.md:747` 早有记录） | span 树：tool calls + generations + duration —— **可 join**：354/675 有 `sessionId`、**100% 匹配 `sessions.id`、覆盖 22/23 会话**；其余 321 个全是 `name='Agent workflow'`（无 `sessionId` 键、`metadata:{}`、`totalTokens: 0`）——
+   **E5 纠正：name 不是类；`totalTokens` 302/675 为 0 而 span 有 usage，不可信**；未归属
+   generation span 有真实用量（1,202 个，发 fact 前拦下）。**09-02「会话匿名」结论系
+   分析方法错误**（§12.2） |
 
 **三条读表纪律**：
 
@@ -176,7 +181,7 @@ hash`。命令类记录带 `commandPreview`/`commandHash`，网络/审批类带 
 
 | 规则 | WorkBuddy 判定 | 依据 |
 |---|---|---|
-| SV601–603（bash 命令族） | **Available** | `command-safety.sandbox-executed` 的 `commandPreview` → bash `args_text`（SV601-603 的 exec→bash 源）。**只覆盖 bash 子集**——其余工具名只在 traces 里（可 join 但现有实现未接，§12.2） |
+| SV601–603（bash 命令族） | **Available** | `command-safety.sandbox-executed` 的 `commandPreview` → bash `args_text`（SV601-603 的 exec→bash 源）。**只覆盖 bash 子集**——其余工具名在 traces 里（E2 起 write/edit 已另列 SV604/605 行，§12.2） |
 | SV604（敏感路径 write/edit） | **Available**（E2，2026-09-11） | traces 的 Edit/Write function span 解码后 783/784 带 `file_path` → `tool_calls{name: write/edit, args_text: {"file_path": …}}`，SV604 正则直接跑。回归 `test_sv604_and_sv605_actually_fire_on_span_paths` 钉住 `/etc/hosts` 命中 critical。降级行已删（§3.1） |
 | SV605（write/edit 出 workspace） | **Available**（同上） | 同上；workspace 外路径命中 warning |
 | SV606（内网 web_fetch） | **Available** | `WebFetch` 事件 → `tool_name="web_fetch"`、`args_text=messageParams.target`；`_INTERNAL_IP_URL_RE` 直接跑 |
@@ -213,11 +218,10 @@ only in session-anonymous traces (file-history has content without paths), so
 SV604/605 cannot discriminate
 ```
 
-> **该字面量已过时**（2026-09-11）：它是 `host_capability.rs::WORKBUDDY_SV604_605_REASON`
-> 的原文，被差分与 `test_host_capability.py` 逐字钉住，**本文不改引用**。「session-anonymous
-> traces」已被 §12.2 推翻；正确措辞是「traces 可按 `trace.sessionId` 归属但现有实现未接」。
-> 随 Phase E 一并修（届时 SV604/605 可能整个转 Available，该 reason 或被移除）——列入
-> `WORKBUDDY_ONBOARDING_SPEC.md` §9E 前置项。
+> **该字面量已过时**（2026-09-11）：`host_capability.rs::WORKBUDDY_SV604_605_REASON`
+> 的原文被差分与 `test_host_capability.py` 逐字钉住，本文在历史块中不改用字面量；且
+> **Phase E E2 已落地**：SV604/605 转 Available（Edit/Write span → tool_calls），该
+> degradation 已被删除——上文对被降级机制的描述不再适用，只保留作历史。
 
 ### 3.2 SV609 的三态随会话内容诚实变化
 
@@ -360,7 +364,7 @@ audit-log requestId 可 join，实测 13/22）。TOTAL 4,307.76 credit（名义 
 7. audit-log 计数是下界（非逐请求账本）；TurnBoundaries derived 下界诚实标注（§8）；
 8. hash 链完整性：linkage 校验 + 轮转时 verified-from 标注（§2.3/§4）；
 9. cost = credit_json 宿主积分账单求和（不重复计价），token = `session_usage.used`（§9）；
-10. traces 归属只认 `trace.sessionId` 字符串相等（09-11 纠正：可 join，非匿名，§12.2）；**现有实现未接**，仍一律 attempts；无 `sessionId` 键的 `Agent workflow` 类永远 attempts；**不得**用 prompt 文本里的 UUID 猜 session。
+10. traces 归属只认 `trace.sessionId` 字符串相等（09-11 纠正：可 join，非匿名，§12.2）；**E2/E4 已接**（span 折叠 + usage_facts），无 `sessionId` 键的 trace 计 unattributed（不归属、不简单 0）；**不得**用 prompt 文本里的 UUID 猜 session。
 
 ## 11. 接入工作项（依赖序）
 
@@ -425,10 +429,11 @@ rules:     measured_zero = SV601/602/603/604/605/606/607/608/610/611/613/614 (E2
    它从未读过 trace 包装对象上的**结构化字段 `trace.sessionId`**——而
    `RUNTIME_EVIDENCE_CONTRACT.md:747` 的 schema 例子里本来就写着它。真机重测（675 文件）：
    **354 个有 `sessionId`，100% 匹配 `sessions.id`，覆盖 22/23 会话，自 2026-07 起就有**
-   （不是新加字段）。其余 321 个全是 `name='Agent workflow'`、无 `sessionId` 键、
-   `metadata:{}`、0 token——**另一类 trace（编排/后台），不是匿名的用户会话**。
-   两条纪律不变：**绝不用 prompt 文本里的 UUID 猜 session**（那条纪律是对的，错的是
-   以为除了猜别无他法）；`Agent workflow` 类没有 sessionId 就报 attempts，不归属。
+   （不是新加字段）。其余 321 个 `name='Agent workflow'`、无 `sessionId` 键、`metadata:{}`
+   ——**E5 纠正：「另一类 0 token」不成立**：`Agent workflow` 是 trace name 不是类；
+   `totalTokens` 302/675 为 0 而 span 有 usage，不可信；未归属 generation span 有真实
+   用量（E4a 实测 1,202 个记 unattributed）。两条纪律边界不变：**绝不用 prompt 文本里的
+   UUID 猜 session**；无 sessionId 的 trace 记 unattributed，不归属不断计。
    **E3（Bash 双源）**：audit-log `toolCallId` 与 span `spanId` 是两套命名空间（0/2,398
    可 join），audit-log sandbox-executed 2,398 条 vs Bash span 1,661 个（traces 轮转丢失
    约 30%），命令文本 59% 相等——**audit-log 是 Bash 唯一源**，span 的 Bash 永不并入

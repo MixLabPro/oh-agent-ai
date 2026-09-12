@@ -279,8 +279,8 @@ _WB_UNBILLED_TO_CREDITS_NOTE = (
 )
 
 # spec §6.1/§9E.5 E5 的 `cost.tokens` 语义注记：`used` 是 session_usage 里**最后
-# 一次调用的上下文占用 prompt_tokens 快照**（§9E.2 实测 16/21 逐字相等，余下 4 例
-# 疑似压缩/重置），**不是 processed token 总量**——真处理量在 cost.processed_tokens
+# 一次调用的上下文占用 prompt_tokens 快照**（§9E.5 E5 实测 22/22：16 逐字
+# 相等、1 个 ±0.5%、5 偏离），**不是 processed token 总量**——真处理量在 cost.processed_tokens
 # （traces 四桶之和，无 trace 证据时 null）。键保留，语义由 note 承担。Rust
 # `sources/mod.rs::WB_TOKENS_ARE_LAST_CALL_NOTE` 字节一致。
 _WB_TOKENS_ARE_LAST_CALL_NOTE = (
