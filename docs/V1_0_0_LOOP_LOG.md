@@ -1265,3 +1265,9 @@
 - 构建：重新执行 `cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 release CLI `cmp` 一致。
 - 验收：旧包移至 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-025321`，新包以 `--show-workbench` 启动，进程已运行。
 - 边界：当前包仍为 ad hoc 签名且无 Team Identifier；未以本地启动替代签名公证或真实 Computer Use 验收。
+
+## Loop 170 · v1.0.0 全量自动回归基线
+
+- Python：`python3 -m unittest discover tests -v`，1188/1188 通过；208 项按测试定义因未设置 Rust CLI、双实现差分或可选依赖而跳过，无失败。
+- Rust：`cargo test --release` 全部通过，CLI 79、data 283、core 53 及 workspace 集成/性能/边界测试均通过。
+- 结论：本轮没有刷新 golden/snapshot，也没有把跳过项当作通过；Python/Rust 双实现与真实桌面/发布环境门禁仍按各自证据单独处理。
