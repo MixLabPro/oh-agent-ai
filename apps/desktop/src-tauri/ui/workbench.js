@@ -563,6 +563,7 @@ async function renderOverview() {
   await renderStatisticsTimezoneSettings();
   await renderPricingCatalogSettings();
   bindDiagnosticExport();
+  bindTrustedReleasesPage();
   await renderAboutDiagnostics();
   await renderBudgetSettings();
   renderMonthVerdict(monthly);
@@ -761,6 +762,21 @@ function bindDiagnosticExport() {
     } finally {
       button.disabled = false;
     }
+  };
+}
+
+function bindTrustedReleasesPage() {
+  const button = document.getElementById("ov-releases-open");
+  if (!button || button.dataset.bound === "1") return;
+  button.dataset.bound = "1";
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      await invoke("open_trusted_releases_page");
+    } catch (e) {
+      const target = document.getElementById("ov-diagnostic-status");
+      if (target) { target.hidden = false; target.textContent = "打开发布页失败：" + errText(e); }
+    } finally { button.disabled = false; }
   };
 }
 

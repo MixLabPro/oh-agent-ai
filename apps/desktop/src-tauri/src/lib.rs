@@ -1977,6 +1977,35 @@ fn about_diagnostics() -> Value {
     })
 }
 
+const TRUSTED_RELEASES_URL: &str = "https://github.com/MixLabPro/agent-vitals/releases";
+
+#[tauri::command]
+fn open_trusted_releases_page() -> Result<Value, String> {
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .arg(TRUSTED_RELEASES_URL)
+        .status()
+        .map_err(|e| format!("open trusted releases page failed: {e}"))?;
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("xdg-open")
+        .arg(TRUSTED_RELEASES_URL)
+        .status()
+        .map_err(|e| format!("open trusted releases page failed: {e}"))?;
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", TRUSTED_RELEASES_URL])
+        .status()
+        .map_err(|e| format!("open trusted releases page failed: {e}"))?;
+    if !status.success() {
+        return Err(format!("open trusted releases page exited with {status}"));
+    }
+    Ok(serde_json::json!({
+        "status": "opened",
+        "url": TRUSTED_RELEASES_URL,
+        "automatic_install": false,
+    }))
+}
+
 #[tauri::command]
 fn budget_config() -> Value {
     let data_home = overview::data_home();
@@ -2789,6 +2818,7 @@ pub fn run() {
             update_public_pricing_catalog,
             export_diagnostic_package,
             about_diagnostics,
+            open_trusted_releases_page,
             budget_config,
             budget_profiles_status,
             save_budget_profile,

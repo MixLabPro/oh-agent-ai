@@ -1526,3 +1526,9 @@
 - 修复：保持浏览器运行时语言回退逻辑不变，仅在独立 verifier 中固定测试环境；价卡主副本重新字节一致。
 - 验收：`npm test`（check、build、verify、verify:host、verify:wire、verify:timeline、verify:export、verify:render）全部通过；Python 价卡/目录 21/21 通过。
 - 边界：真实 DSH 宿主与 `.app` Computer Use、签名/公证、公共目录发布和外部试用仍未完成。
+
+## Loop 211 · 可信发布页入口
+
+- 新增：帮助与诊断区提供“查看版本发布页”，只打开固定 HTTPS 维护者 Releases 页面；不自动下载、不自动安装、不请求本地数据。
+- 验收：Tauri command 注册、桌面 release check/Clippy、Workbench/Vite 构建、JS 语法检查和 `git diff --check`通过；浏览器 mock 可走同一 IPC 路径。
+- 边界：发布页当前仓库仍需公开可访问；Developer ID/公证、真实 Computer Use、干净机升级和外部试用仍未完成。
