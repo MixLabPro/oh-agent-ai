@@ -45,8 +45,7 @@ pub fn save_timezone(data_home: &Path, name: &str) -> Result<String, String> {
 /// 未配置时保持 OS 环境不变；配置损坏不会静默切换到另一个时区。
 pub fn apply(data_home: &Path) -> Result<String, String> {
     let name = timezone_name(data_home)?;
-    let system_name = crate::clock::system_timezone_name();
-    if name != system_name && name != "Etc/Unknown" {
+    if name != "Etc/Unknown" {
         std::env::set_var("TZ", &name);
     }
     Ok(name)

@@ -1109,3 +1109,10 @@
 - 验收：重建 release CLI 后以隔离数据目录配置 `America/Los_Angeles`，`sessions navigation --json` 返回 `day_key=2026-09-12` 与 `timezone=America/Los_Angeles`；runtime clock 测试 4/4、authority query 测试 30/30、CLI Clippy 通过。
 - 保护：仅影响统计边界/本地展示，事件 epoch 和供应商计价规则不变；旧配置缺失仍回退 OS 时区。
 - 边界：SQLite `localtime` 跨进程/运行时切换的完整矩阵和真实 `.app` Computer Use 仍需验收；REQ-033、REQ-096、AC21 暂不勾选。
+
+## Loop 145 · 统计时区连续切换回系统值
+
+- 修复：`statistics_timezone::apply` 每次都显式同步有效 IANA 名称；从自定义时区切回 OS 时区时不再遗留上一轮进程级 `TZ`。
+- 保护：`Etc/Unknown` 不写入无效覆盖；缺失配置仍由 OS 解析。事件 epoch、供应商价格策略和持久化事实不变。
+- 验收：待执行自定义→系统→自定义的进程级切换回归，以及 Rust/Python/SQLite 交叉对拍。
+- 边界：真实 `.app` Computer Use、系统通知和外部发布门禁仍未完成；REQ-033、REQ-096、AC21 暂不勾选。
