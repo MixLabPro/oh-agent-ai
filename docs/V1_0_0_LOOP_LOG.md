@@ -1419,3 +1419,9 @@
 - 修复：Workbench 日历首日星期、月末天数和月份切换改用 UTC 民历容器，不再受浏览器本地时区影响；统计数据窗口仍由后端配置的 IANA 统计时区决定。
 - 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、Vite production build、`git diff --check`通过；Vite 页面加载后 `#cal-grid` 存在且控制台无 error。
 - 边界：真实非 UTC+8 安装包视觉走查仍需解锁 macOS；AC21 完整跨日/夏令时真机证据、签名/公证和外部试用门禁仍未完成。
+
+## Loop 194 · 日历修复重新打包安装
+
+- 构建：`cargo tauri build --bundles app` 成功，新的 `agent-vitals.app` 已包含日期格民历修复。
+- 安装：已停止旧 `/Applications/agent-vitals.app` 进程并保留备份 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-0343`；新包以 `--show-workbench` 启动并确认进程存活。
+- 边界：本地构建仍未具备 Developer ID/公证签名，`codesign --verify --deep --strict` 继续提示资源签名不完整；macOS 锁屏仍阻塞真实窗口 Computer Use。
