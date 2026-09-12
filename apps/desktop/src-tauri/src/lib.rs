@@ -1662,6 +1662,177 @@ fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<V
     Ok(serde_json::json!({ "status": "saved", "timezone": saved }))
 }
 
+const PUBLIC_PRICING_CATALOG_URL: &str =
+    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/assets/pricing.json";
+const PRICING_UPDATE_STATUS_FILE: &str = "pricing-catalog-update.json";
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PricingCatalogUpdateStatus {
+    state: String,
+    source_url: String,
+    last_checked_at_ms: Option<i64>,
+    last_success_at_ms: Option<i64>,
+    source_version: Option<String>,
+    model_count: Option<usize>,
+    failure_reason: Option<String>,
+}
+
+fn pricing_catalog_status_path(data_home: &Path) -> PathBuf {
+    data_home.join(PRICING_UPDATE_STATUS_FILE)
+}
+
+fn read_pricing_catalog_status(data_home: &Path) -> PricingCatalogUpdateStatus {
+    let path = pricing_catalog_status_path(data_home);
+    std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| PricingCatalogUpdateStatus {
+            state: "never_checked".into(),
+            source_url: PUBLIC_PRICING_CATALOG_URL.into(),
+            ..Default::default()
+        })
+}
+
+fn write_pricing_catalog_status(
+    data_home: &Path,
+    status: &PricingCatalogUpdateStatus,
+) -> Result<(), String> {
+    std::fs::create_dir_all(data_home).map_err(|e| format!("create data home failed: {e}"))?;
+    let bytes = serde_json::to_vec_pretty(status)
+        .map_err(|e| format!("serialize pricing status failed: {e}"))?;
+    let tmp = data_home.join("pricing-catalog-update.json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write pricing status failed: {e}"))?;
+    std::fs::rename(&tmp, pricing_catalog_status_path(data_home))
+        .map_err(|e| format!("commit pricing status failed: {e}"))
+}
+
+fn fail_pricing_catalog_update(
+    data_home: &Path,
+    status: &mut PricingCatalogUpdateStatus,
+    state: &str,
+    reason: String,
+) -> Result<Value, String> {
+    status.state = state.into();
+    status.failure_reason = Some(reason.clone());
+    write_pricing_catalog_status(data_home, status)?;
+    Err(reason)
+}
+
+#[tauri::command]
+fn public_pricing_catalog_status() -> Value {
+    serde_json::to_value(read_pricing_catalog_status(&overview::data_home()))
+        .unwrap_or_else(|_| serde_json::json!({ "state": "unavailable" }))
+}
+
+/// 手动检查维护者发布的公共价格目录。请求只访问固定 HTTPS 公共地址，不携带
+/// AGENT_VITALS_HOME、日志内容、会话、账户或任何本地数据；下载失败/校验失败
+/// 只写检查状态，绝不删除或替换当前有效价卡。
+#[tauri::command]
+async fn update_public_pricing_catalog() -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let now = agent_vitals_runtime::sql_sync::now_ms();
+    let mut status = read_pricing_catalog_status(&data_home);
+    status.source_url = PUBLIC_PRICING_CATALOG_URL.into();
+    status.last_checked_at_ms = Some(now);
+    status.failure_reason = None;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("agent-vitals-public-pricing-check/1")
+        .build()
+        .map_err(|e| format!("create public pricing client failed: {e}"));
+    let client = match client {
+        Ok(client) => client,
+        Err(reason) => return fail_pricing_catalog_update(&data_home, &mut status, "failed", reason),
+    };
+    let response = client
+        .get(PUBLIC_PRICING_CATALOG_URL)
+        .send()
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            return fail_pricing_catalog_update(
+                &data_home,
+                &mut status,
+                "failed",
+                format!("public pricing request failed: {error}"),
+            )
+        }
+    };
+    if !response.status().is_success() {
+        return fail_pricing_catalog_update(
+            &data_home,
+            &mut status,
+            "failed",
+            format!("public pricing returned HTTP {}", response.status()),
+        );
+    }
+    if response.content_length().is_some_and(|length| length > 2 * 1024 * 1024) {
+        return fail_pricing_catalog_update(
+            &data_home,
+            &mut status,
+            "failed",
+            "public pricing response exceeds 2 MiB limit".into(),
+        );
+    }
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return fail_pricing_catalog_update(
+                &data_home,
+                &mut status,
+                "failed",
+                format!("read public pricing response failed: {error}"),
+            )
+        }
+    };
+    if bytes.len() > 2 * 1024 * 1024 {
+        return fail_pricing_catalog_update(
+            &data_home,
+            &mut status,
+            "failed",
+            "public pricing response exceeds 2 MiB limit".into(),
+        );
+    }
+    let validated = match agent_vitals_runtime::pricing_catalog::validate(&bytes) {
+        Ok(validated) => validated,
+        Err(reason) => return fail_pricing_catalog_update(&data_home, &mut status, "rejected", reason),
+    };
+    let authority_path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(&authority_path, now)
+        .map_err(|e| format!("open authority database failed: {e}"))?;
+    db.provider_catalog_snapshot_put(
+        &validated.version,
+        &validated.version,
+        "public-maintainer-https",
+        &validated.canonical_json,
+        now,
+    )
+    .map_err(|e| format!("save public catalog failed: {e}"))?;
+    db.pricing_snapshot_put_with_provenance(
+        &validated.version,
+        "public-maintainer-https",
+        &validated.canonical_json,
+        now,
+        Some(&validated.version),
+        None,
+    )
+    .map_err(|e| format!("save public pricing failed: {e}"))?;
+    status.state = "ok".into();
+    status.last_success_at_ms = Some(now);
+    status.source_version = Some(validated.version.clone());
+    status.model_count = Some(validated.model_count);
+    write_pricing_catalog_status(&data_home, &status)?;
+    Ok(serde_json::json!({
+        "status": "updated",
+        "source_url": PUBLIC_PRICING_CATALOG_URL,
+        "source_version": validated.version,
+        "model_count": validated.model_count,
+        "last_success_at_ms": now,
+    }))
+}
+
 /// 生成用户主动选择保存的脱敏诊断包。只组合现有的状态 DTO；不读取会话正文、
 /// 原始日志、绝对路径或账户标识，也不执行上传。取消保存对用户来说是 no-op。
 #[tauri::command]
@@ -2515,6 +2686,8 @@ pub fn run() {
             save_retention_config,
             statistics_timezone_config,
             save_statistics_timezone_config,
+            public_pricing_catalog_status,
+            update_public_pricing_catalog,
             export_diagnostic_package,
             budget_config,
             budget_profiles_status,

@@ -561,6 +561,7 @@ async function renderOverview() {
   await renderHostBills(monthKey);
   await renderRetentionSettings();
   await renderStatisticsTimezoneSettings();
+  await renderPricingCatalogSettings();
   bindDiagnosticExport();
   await renderBudgetSettings();
   renderMonthVerdict(monthly);
@@ -1354,6 +1355,33 @@ async function renderStatisticsTimezoneSettings() {
     input.disabled = true;
     save.disabled = true;
   }
+}
+
+async function renderPricingCatalogSettings() {
+  const button = document.getElementById("ov-pricing-catalog-update");
+  const status = document.getElementById("ov-pricing-catalog-status");
+  if (!button || !status || button.dataset.bound === "1") return;
+  button.dataset.bound = "1";
+  const render = (value) => {
+    if (!value) { status.textContent = "尚未检查"; return; }
+    const state = value.state || value.status || "unknown";
+    const version = value.source_version ? " · 版本 " + value.source_version : "";
+    const models = value.model_count == null ? "" : " · 覆盖 " + value.model_count + " 个模型";
+    const reason = value.failure_reason ? " · 原因：" + value.failure_reason : "";
+    status.textContent = (state === "ok" ? "已成功检查公共目录" : state === "never_checked" ? "尚未检查" : "上次检查未采用新目录") + version + models + reason;
+  };
+  try { render(await invoke("public_pricing_catalog_status")); } catch (e) { status.textContent = "价格目录状态不可用：" + errText(e); }
+  button.onclick = async () => {
+    button.disabled = true;
+    status.textContent = "正在检查公共价格目录…不会上传本地数据。";
+    try {
+      render(await invoke("update_public_pricing_catalog"));
+      await refreshActiveTab();
+    } catch (e) {
+      try { render(await invoke("public_pricing_catalog_status")); } catch (_) {}
+      status.textContent += "（" + errText(e) + "）";
+    } finally { button.disabled = false; }
+  };
 }
 
 function csvCell(value) {

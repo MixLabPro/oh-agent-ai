@@ -1456,3 +1456,10 @@
 - 安装：旧 `/Applications/agent-vitals.app` 已保留为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-0415`；新包已安装并以 `--show-workbench` 启动，PID `89707` 存活。
 - 保护：没有触碰或暂存用户已有 WorkBuddy/Phase/Issue 文档。
 - 边界：macOS 锁屏仍阻塞真实窗口 Computer Use；签名/公证、干净机升级和外部试用门禁继续未完成。
+
+## Loop 200 · 公共价格目录更新链路（REQ-097–102）
+
+- 新增：公共价卡规范化/校验层，生成内容指纹版本；检查固定维护者 HTTPS 公共地址，不携带本地路径、日志、会话或账户数据。
+- 新增：桌面“检查价格更新”入口与状态持久化，显示上次成功版本、模型覆盖和失败原因；远端失败、超限或目录不合法时只记录状态，保留当前有效价卡。
+- 验收：`cargo test --release -p agent-vitals-runtime pricing_catalog` 4/4；桌面 `cargo check --release`、Workbench `node --check`、Vite production build、`git diff --check`通过；内置目录可作为已验证离线候选。
+- 边界：本轮未宣称每日后台检查/指数退避和外部发布环境公证完成；真实联网成功路径与锁屏 Computer Use 仍需在可操作 macOS 上复验。

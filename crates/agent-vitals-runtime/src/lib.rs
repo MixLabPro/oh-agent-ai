@@ -34,6 +34,7 @@ pub mod ingest_service;
 pub mod lease;
 pub mod mcp;
 pub mod money;
+pub mod pricing_catalog;
 pub mod reimport_verify;
 pub mod retention;
 pub mod session_sources;
