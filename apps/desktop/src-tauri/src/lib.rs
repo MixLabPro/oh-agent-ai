@@ -1419,25 +1419,19 @@ fn data_status() -> Value {
 /// 从用户明确选择的备份恢复权威库。恢复顺序是：先验证备份、保留当前文件、写入同目录
 /// 临时文件、再次验证临时文件，最后原子替换；任何中间步骤失败都不触碰当前库。
 /// 不接受前端传入路径，避免把任意路径写入权限伪装成恢复动作。
-#[tauri::command]
-fn restore_authority_backup() -> Result<Value, String> {
-    let Some(backup) = rfd::FileDialog::new()
-        .add_filter("SQLite database", &["sqlite", "db", "sqlite3"])
-        .pick_file() else {
-        return Ok(serde_json::json!({ "status": "cancelled" }));
-    };
-    agent_vitals_data::authority::AuthorityDb::open_readonly(&backup)
+fn restore_authority_backup_file(
+    backup: &Path,
+    target: &Path,
+    stamp: i64,
+) -> Result<Option<PathBuf>, String> {
+    agent_vitals_data::authority::AuthorityDb::open_readonly(backup)
         .map_err(|error| format!("selected backup is not readable: {error}"))?;
-
-    let data_home = overview::data_home();
-    let target = agent_vitals_data::authority::default_authority_path(&data_home);
     let parent = target.parent().ok_or_else(|| "authority path has no parent".to_string())?;
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("create authority directory failed: {error}"))?;
-    let stamp = agent_vitals_runtime::sql_sync::now_ms();
     let preserved = parent.join(format!("authority.sqlite.pre-restore-{stamp}.bak"));
     if target.exists() {
-        std::fs::copy(&target, &preserved)
+        std::fs::copy(target, &preserved)
             .map_err(|error| format!("preserve current authority database failed: {error}"))?;
     }
     let temporary = parent.join(format!("authority.sqlite.restore-{stamp}-{}.tmp", std::process::id()));
@@ -1445,20 +1439,34 @@ fn restore_authority_backup() -> Result<Value, String> {
         return Err("restore temporary file already exists; please retry".into());
     }
     let result = (|| {
-        std::fs::copy(&backup, &temporary)
+        std::fs::copy(backup, &temporary)
             .map_err(|error| format!("stage selected backup failed: {error}"))?;
         agent_vitals_data::authority::AuthorityDb::open_readonly(&temporary)
             .map_err(|error| format!("staged backup validation failed: {error}"))?;
-        std::fs::rename(&temporary, &target)
+        std::fs::rename(&temporary, target)
             .map_err(|error| format!("replace authority database failed: {error}"))?;
         Ok::<(), String>(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
-    result.map(|()| serde_json::json!({
+    result.map(|()| target.exists().then_some(preserved))
+}
+
+#[tauri::command]
+fn restore_authority_backup() -> Result<Value, String> {
+    let Some(backup) = rfd::FileDialog::new()
+        .add_filter("SQLite database", &["sqlite", "db", "sqlite3"])
+        .pick_file() else {
+        return Ok(serde_json::json!({ "status": "cancelled" }));
+    };
+    let data_home = overview::data_home();
+    let target = agent_vitals_data::authority::default_authority_path(&data_home);
+    let stamp = agent_vitals_runtime::sql_sync::now_ms();
+    let preserved = restore_authority_backup_file(&backup, &target, stamp)?;
+    Ok(serde_json::json!({
         "status": "restored",
-        "preserved_current": target.exists() && preserved.exists(),
+        "preserved_current": preserved.is_some(),
         "backup_path": backup.to_string_lossy(),
     }))
 }
@@ -4218,5 +4226,45 @@ mod tests {
         assert!(!budget_notifications_enabled(0, 0));
         assert!(budget_notifications_enabled(1, 0));
         assert!(budget_notifications_enabled(0, 1));
+    }
+
+    #[test]
+    fn authority_backup_restore_validates_and_preserves_current_file() {
+        let root = std::env::temp_dir().join(format!(
+            "sv-menubar-restore-test-{}-{}",
+            std::process::id(),
+            agent_vitals_runtime::sql_sync::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let backup = root.join("backup.sqlite");
+        let target = root.join("authority.sqlite");
+        drop(agent_vitals_data::authority::AuthorityDb::open(&backup, 1).unwrap());
+        std::fs::write(&target, b"old-current").unwrap();
+
+        let preserved = restore_authority_backup_file(&backup, &target, 42).unwrap();
+        let preserved_path = root.join("authority.sqlite.pre-restore-42.bak");
+        assert_eq!(preserved.as_deref(), Some(preserved_path.as_path()));
+        assert_eq!(std::fs::read(preserved.unwrap()).unwrap(), b"old-current");
+        assert!(agent_vitals_data::authority::AuthorityDb::open_readonly(&target).is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_authority_backup_does_not_replace_current_file() {
+        let root = std::env::temp_dir().join(format!(
+            "sv-menubar-invalid-restore-test-{}-{}",
+            std::process::id(),
+            agent_vitals_runtime::sql_sync::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let backup = root.join("bad.sqlite");
+        let target = root.join("authority.sqlite");
+        std::fs::write(&backup, b"not-a-database").unwrap();
+        std::fs::write(&target, b"keep-current").unwrap();
+
+        assert!(restore_authority_backup_file(&backup, &target, 43).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep-current");
+        assert!(!root.join("authority.sqlite.pre-restore-43.bak").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

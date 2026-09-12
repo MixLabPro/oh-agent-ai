@@ -1912,3 +1912,10 @@
   失败清理临时文件且不替换当前库。恢复动作不接受前端路径，宿主原始日志不受影响。
 - 验收：桌面 `cargo check --release`、`npm run verify`、JS 语法检查和 `git diff --check`
   通过；closeout verifier 已加入恢复命令/入口断言。
+
+## Loop 271 · 备份恢复原子性回归
+
+- 补测：将恢复文件操作抽为内部可测试函数，覆盖有效备份恢复并保留当前文件，以及
+  非法备份拒绝且当前文件保持不变两条路径。
+- 验收：桌面 `cargo test --release ... authority_backup -- --nocapture` 通过，`2 passed`；
+  `npm run verify`、JS 语法检查和 `git diff --check` 通过。
