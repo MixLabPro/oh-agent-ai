@@ -1676,6 +1676,10 @@ struct PricingCatalogUpdateStatus {
     source_version: Option<String>,
     model_count: Option<usize>,
     failure_reason: Option<String>,
+    #[serde(default)]
+    failure_count: u32,
+    #[serde(default)]
+    next_check_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -1744,6 +1748,14 @@ fn fail_pricing_catalog_update(
 ) -> Result<Value, String> {
     status.state = state.into();
     status.failure_reason = Some(reason.clone());
+    status.failure_count = status.failure_count.saturating_add(1);
+    let backoff_hours = 1_i64 << status.failure_count.min(7);
+    status.next_check_at_ms = Some(
+        status
+            .last_checked_at_ms
+            .unwrap_or_else(agent_vitals_runtime::sql_sync::now_ms)
+            .saturating_add(backoff_hours.saturating_mul(60 * 60 * 1000)),
+    );
     write_pricing_catalog_status(data_home, status)?;
     Err(reason)
 }
@@ -1769,13 +1781,22 @@ fn save_public_pricing_catalog_policy(network_enabled: bool) -> Result<Value, St
 /// AGENT_VITALS_HOME、日志内容、会话、账户或任何本地数据；下载失败/校验失败
 /// 只写检查状态，绝不删除或替换当前有效价卡。
 #[tauri::command]
-async fn update_public_pricing_catalog() -> Result<Value, String> {
+async fn update_public_pricing_catalog_internal(enforce_schedule: bool) -> Result<Value, String> {
     let data_home = overview::data_home();
-    if !read_pricing_catalog_policy(&data_home).network_enabled {
+    let policy = read_pricing_catalog_policy(&data_home);
+    if !policy.network_enabled {
         return Err("公共价格联网检查未开启；请先明确允许访问公共价格服务".into());
     }
     let now = agent_vitals_runtime::sql_sync::now_ms();
     let mut status = read_pricing_catalog_status(&data_home);
+    if enforce_schedule
+        && (status.next_check_at_ms.is_some_and(|next| now < next)
+            || status
+                .last_checked_at_ms
+                .is_some_and(|last| now.saturating_sub(last) < 24 * 60 * 60 * 1000))
+    {
+        return Ok(serde_json::json!({ "status": "skipped", "reason": "daily_check_window" }));
+    }
     status.source_url = PUBLIC_PRICING_CATALOG_URL.into();
     status.last_checked_at_ms = Some(now);
     status.failure_reason = None;
@@ -1867,6 +1888,8 @@ async fn update_public_pricing_catalog() -> Result<Value, String> {
     status.last_success_at_ms = Some(now);
     status.source_version = Some(validated.version.clone());
     status.model_count = Some(validated.model_count);
+    status.failure_count = 0;
+    status.next_check_at_ms = Some(now.saturating_add(24 * 60 * 60 * 1000));
     write_pricing_catalog_status(&data_home, &status)?;
     Ok(serde_json::json!({
         "status": "updated",
@@ -1875,6 +1898,24 @@ async fn update_public_pricing_catalog() -> Result<Value, String> {
         "model_count": validated.model_count,
         "last_success_at_ms": now,
     }))
+}
+
+#[tauri::command]
+async fn update_public_pricing_catalog() -> Result<Value, String> {
+    update_public_pricing_catalog_internal(false).await
+}
+
+fn start_public_pricing_catalog_tick() {
+    tauri::async_runtime::spawn(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+            let data_home = overview::data_home();
+            if !read_pricing_catalog_policy(&data_home).network_enabled {
+                continue;
+            }
+            let _ = update_public_pricing_catalog_internal(true).await;
+        }
+    });
 }
 
 /// 生成用户主动选择保存的脱敏诊断包。只组合现有的状态 DTO；不读取会话正文、
@@ -2781,6 +2822,7 @@ pub fn run() {
             ) {
                 eprintln!("statistics timezone unavailable: {error}");
             }
+            start_public_pricing_catalog_tick();
             // 菜单栏工具:必须 .accessory,否则 macOS 把它当普通 App 常驻 Dock
             // (Info.plist 无 LSUIElement → 缺省 .regular)。skipTaskbar/visible:false
             // 只藏窗口,藏不住进程的 Dock 图标。show_workbench 已负责 show+set_focus,
