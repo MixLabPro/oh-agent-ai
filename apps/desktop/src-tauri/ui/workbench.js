@@ -1360,7 +1360,8 @@ async function renderStatisticsTimezoneSettings() {
 async function renderPricingCatalogSettings() {
   const button = document.getElementById("ov-pricing-catalog-update");
   const status = document.getElementById("ov-pricing-catalog-status");
-  if (!button || !status || button.dataset.bound === "1") return;
+  const network = document.getElementById("ov-pricing-catalog-network");
+  if (!button || !status || !network || button.dataset.bound === "1") return;
   button.dataset.bound = "1";
   const render = (value) => {
     if (!value) { status.textContent = "尚未检查"; return; }
@@ -1370,8 +1371,26 @@ async function renderPricingCatalogSettings() {
     const reason = value.failure_reason ? " · 原因：" + value.failure_reason : "";
     status.textContent = (state === "ok" ? "已成功检查公共目录" : state === "never_checked" ? "尚未检查" : "上次检查未采用新目录") + version + models + reason;
   };
-  try { render(await invoke("public_pricing_catalog_status")); } catch (e) { status.textContent = "价格目录状态不可用：" + errText(e); }
+  const initialStatus = await (async () => {
+    try { return await invoke("public_pricing_catalog_status"); }
+    catch (e) { status.textContent = "价格目录状态不可用：" + errText(e); return null; }
+  })();
+  if (initialStatus) {
+    network.checked = initialStatus.network_enabled === true;
+    render(initialStatus);
+  }
+  network.onchange = async () => {
+    network.disabled = true;
+    try {
+      await invoke("save_public_pricing_catalog_policy", { networkEnabled: network.checked });
+      status.textContent = network.checked ? "已允许联网检查；不会上传本地数据。" : "已关闭联网检查；继续使用本地价卡。";
+    } catch (e) {
+      network.checked = !network.checked;
+      status.textContent = "保存联网偏好失败：" + errText(e);
+    } finally { network.disabled = false; }
+  };
   button.onclick = async () => {
+    if (!network.checked) { status.textContent = "请先明确允许访问公共价格服务。"; return; }
     button.disabled = true;
     status.textContent = "正在检查公共价格目录…不会上传本地数据。";
     try {

@@ -1665,6 +1665,7 @@ fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<V
 const PUBLIC_PRICING_CATALOG_URL: &str =
     "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/assets/pricing.json";
 const PRICING_UPDATE_STATUS_FILE: &str = "pricing-catalog-update.json";
+const PRICING_UPDATE_POLICY_FILE: &str = "pricing-catalog-policy.json";
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct PricingCatalogUpdateStatus {
@@ -1677,8 +1678,37 @@ struct PricingCatalogUpdateStatus {
     failure_reason: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PricingCatalogPolicy {
+    network_enabled: bool,
+}
+
 fn pricing_catalog_status_path(data_home: &Path) -> PathBuf {
     data_home.join(PRICING_UPDATE_STATUS_FILE)
+}
+
+fn pricing_catalog_policy_path(data_home: &Path) -> PathBuf {
+    data_home.join(PRICING_UPDATE_POLICY_FILE)
+}
+
+fn read_pricing_catalog_policy(data_home: &Path) -> PricingCatalogPolicy {
+    std::fs::read(pricing_catalog_policy_path(data_home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn write_pricing_catalog_policy(
+    data_home: &Path,
+    policy: &PricingCatalogPolicy,
+) -> Result<(), String> {
+    std::fs::create_dir_all(data_home).map_err(|e| format!("create data home failed: {e}"))?;
+    let bytes = serde_json::to_vec_pretty(policy)
+        .map_err(|e| format!("serialize pricing policy failed: {e}"))?;
+    let tmp = data_home.join("pricing-catalog-policy.json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write pricing policy failed: {e}"))?;
+    std::fs::rename(&tmp, pricing_catalog_policy_path(data_home))
+        .map_err(|e| format!("commit pricing policy failed: {e}"))
 }
 
 fn read_pricing_catalog_status(data_home: &Path) -> PricingCatalogUpdateStatus {
@@ -1720,8 +1750,19 @@ fn fail_pricing_catalog_update(
 
 #[tauri::command]
 fn public_pricing_catalog_status() -> Value {
-    serde_json::to_value(read_pricing_catalog_status(&overview::data_home()))
+    let data_home = overview::data_home();
+    let mut status = serde_json::to_value(read_pricing_catalog_status(&data_home))
         .unwrap_or_else(|_| serde_json::json!({ "state": "unavailable" }))
+        ;
+    status["network_enabled"] = Value::Bool(read_pricing_catalog_policy(&data_home).network_enabled);
+    status
+}
+
+#[tauri::command]
+fn save_public_pricing_catalog_policy(network_enabled: bool) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    write_pricing_catalog_policy(&data_home, &PricingCatalogPolicy { network_enabled })?;
+    Ok(serde_json::json!({ "status": "saved", "network_enabled": network_enabled }))
 }
 
 /// 手动检查维护者发布的公共价格目录。请求只访问固定 HTTPS 公共地址，不携带
@@ -1730,6 +1771,9 @@ fn public_pricing_catalog_status() -> Value {
 #[tauri::command]
 async fn update_public_pricing_catalog() -> Result<Value, String> {
     let data_home = overview::data_home();
+    if !read_pricing_catalog_policy(&data_home).network_enabled {
+        return Err("公共价格联网检查未开启；请先明确允许访问公共价格服务".into());
+    }
     let now = agent_vitals_runtime::sql_sync::now_ms();
     let mut status = read_pricing_catalog_status(&data_home);
     status.source_url = PUBLIC_PRICING_CATALOG_URL.into();
@@ -2687,6 +2731,7 @@ pub fn run() {
             statistics_timezone_config,
             save_statistics_timezone_config,
             public_pricing_catalog_status,
+            save_public_pricing_catalog_policy,
             update_public_pricing_catalog,
             export_diagnostic_package,
             budget_config,
