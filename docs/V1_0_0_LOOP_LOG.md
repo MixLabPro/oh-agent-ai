@@ -1664,3 +1664,9 @@
 - 验收：`cargo clippy --release --all-targets -- -D warnings` 全 workspace 通过，覆盖 data、runtime、CLI、domain、hosts 及各测试目标。
 - 结论：后端账单币种校验没有引入 lint 或跨 crate 架构回归；结合 Loop 228 的 Rust 全量测试与 golden 对拍，静态质量门槛保持绿色。
 - 边界：Clippy 通过不替代真实 `.app` Computer Use、签名/公证、公共目录联网成功和外部试用。
+
+## Loop 234 · Vite verify 与格式门槛复核
+
+- 验收：`apps/desktop/ui-dev` 执行 `npm run verify` 通过，包含 Vite build 与 Workbench 全部当前契约断言；`git diff --check` 通过且未产生文件修改。
+- 发现：`cargo fmt --all -- --check` 仍报告仓库既有的大量格式差异，非本轮改动引入；按仓库规范未运行 formatter，避免重写无关 Rust 文件。该检查不能记录为通过。
+- 边界：Clippy、测试和 Vite verify 仍为绿色；格式基线、真实 `.app` Computer Use、签名/公证和外部试用仍需单独处理。
