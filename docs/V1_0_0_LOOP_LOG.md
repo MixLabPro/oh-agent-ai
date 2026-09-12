@@ -1135,3 +1135,9 @@
 - 验收：同一 Unix 秒在 `TZ=Asia/Shanghai` 下投影为 `2026-09-13 02:00:00 / 2026-09-13`，在 `TZ=America/Los_Angeles` 下投影为 `2026-09-12 11:00:00 / 2026-09-12`；与已重建 CLI 的统计日界一致。
 - 保护：仅验证 SQLite 本地投影，不改变原始 epoch；供应商峰谷计价仍使用其独立时区规则。
 - 边界：仍需真实 `.app` 窗口 Computer Use、通知权限、签名/公证和外部试用；AC21 暂不勾选。
+
+## Loop 149 · 发布候选安装验证
+
+- 安装：将现有 `/Applications/agent-vitals.app` 可恢复移动为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913`，再安装本轮构建的 release `.app`；没有覆盖旧包数据。
+- 验收：安装后启动进程成功；Info.plist 为 `com.mixlabpro.agent-vitals-menubar` / `0.11.0`，内置 CLI 为 `1.3.0`；安装后的 CLI 在隔离配置下仍返回 `America/Los_Angeles` 与 `2026-09-12`。
+- 边界：本轮只证明安装、启动和内置资源，未把不可见窗口启动扩大为 Computer Use；通知权限、签名/公证和外部试用仍待完成。
