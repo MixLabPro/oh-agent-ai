@@ -899,3 +899,9 @@
 - 保护：只消费后端已有的 `pricing_method` / `unresolved_reason`，不在前端重算价格；参考估算不标成历史真实账单。
 - 验收：Workbench/开发 mock 浏览器实测显示“当前价参考估算 · 付费路由待确认”，同时保留正常“原厂价格卡”状态；Vite build、JS 语法检查和 `git diff --check` 通过。
 - 边界：完整 AC07 的真实历史缺价、当前价参考和完全缺卡数据矩阵仍待权威库 fixture/UAT。
+
+## Loop 114 · 窄窗口与减少动态效果
+
+- 修复：WorkBench 在约 200% 字号对应的窄 CSS 视口下允许顶部导航换行、卡片单列、日历合计独占一行，主体保持纵向滚动；增加 `prefers-reduced-motion` 全局动画/过渡降级。
+- 验收：浏览器以 512×700 视口实测，刷新操作仍可见、主体 `overflow-y:auto`，无关键入口被裁切；Vite build、JS 语法检查和 `git diff --check` 通过。
+- 边界：真实辅助技术读屏和 macOS 200% 显示设置仍需真机验收，不勾选完整 AC22。

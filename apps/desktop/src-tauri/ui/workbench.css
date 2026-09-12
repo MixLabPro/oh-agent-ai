@@ -133,6 +133,27 @@ body {
   color: var(--accent);
 }
 
+/* 200% 字号通常把 CSS 视口压到约 512px；顶部导航和关键操作必须换行而不是
+   被右侧按钮裁掉。内容区本身继续滚动，核心路径不依赖横向滚动。 */
+@media (max-width: 720px) {
+  .wb-head { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
+  .tabs { max-width: 100%; overflow-x: auto; padding-bottom: 2px; }
+  .wb-head-right { margin-left: auto; }
+  .cards { grid-template-columns: 1fr; }
+  .cal-head { flex-wrap: wrap; }
+  .cal-total { margin-left: 0; width: 100%; }
+  .hour-grid { grid-template-columns: repeat(6, 1fr); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: default;
