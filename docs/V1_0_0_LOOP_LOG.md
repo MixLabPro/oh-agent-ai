@@ -2110,3 +2110,11 @@
   `billing_recalculation` 通过 1 项，覆盖重算任务幂等与显式回执。
 - 结论：AC26/AC27 的网页路径与 Authority 数据层已有双层证据；真实桌面 IPC/跨界面
   对拍仍需 macOS 解锁后的 `.app` 验收。
+
+## Loop 296 · Rust workspace 全量回归
+
+- 验收：`cargo test --release` 通过；CLI 79 项、`agent-vitals-data` 129 项、运行时
+  287 项、依赖边界 3 项、Q 验收 8 项、`vitals-core` 53 项，以及其余集成/性能/回放
+  测试均无失败。
+- 结论：当前本地 Rust workspace 没有发现回归；这不替代 macOS 解锁后的 Computer Use、
+  Developer ID 签名/公证、Intel 包、干净机安装升级和外部试用验收。
