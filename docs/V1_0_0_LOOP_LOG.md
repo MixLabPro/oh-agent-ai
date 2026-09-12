@@ -1628,3 +1628,9 @@
 - 修复：`AuthorityDb::host_bill_put` 现在与 CSV 前端一致，只接受三位 ASCII 大写币种代码；IPC 或其他调用方无法绕过输入约束。
 - 回归：新增 `cny` 拒绝断言；`agent-vitals-data` 定向测试与 Clippy 通过，最新 `cargo tauri build --bundles app` 成功。
 - 边界：既有合法 CNY/USD 账单契约保持不变；未在锁屏环境安装/启动新包，真实 Computer Use、签名/公证和外部试用仍未完成。
+
+## Loop 228 · 账单边界收口后的全量回归
+
+- 验收：`cargo test --release` 全部通过；`python3 tests/golden_runner.py --diff` 的 15 个 case 全部逐字节一致。
+- 保护：Authority 账单校验、迁移、价格、跨宿主聚合、MCP/CLI 与 golden 输出均未发生回归；未刷新 snapshot。
+- 边界：自动化回归不替代真实 `.app` Computer Use、签名/公证、公共目录联网成功、干净机升级和外部试用。
