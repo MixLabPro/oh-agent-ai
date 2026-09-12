@@ -786,6 +786,7 @@ async function renderAboutDiagnostics() {
     target.textContent = "App " + (d.app_version || "—")
       + " · CLI " + (d.cli_version || "未找到")
       + " · Engine " + (d.engine_version || "—")
+      + " · 架构 " + (d.architecture || "—")
       + " · Authority schema " + (d.authority_schema || "—")
       + " · 统计时区 " + (d.statistics_timezone || "—")
       + " · 价格 " + pricing + " · 同步 " + sync;

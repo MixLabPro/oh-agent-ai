@@ -1876,3 +1876,12 @@
   build/publish 两个 workflow 边界按 runner 架构映射并强制校验，README 增加调用示例。
 - 验收：本地 App 与 CLI 均报告 `arm64`；要求 `x86_64` 时脚本非零退出；默认预检、
   arm64 严格预检、workflow YAML 解析和 `git diff --check` 均通过。
+
+## Loop 267 · 诊断包记录构建架构
+
+- 发现：架构预检已经能阻止错误产物，但关于页和脱敏诊断包没有记录实际构建架构，
+  支持排障时仍需重新检查 App 文件。
+- 修复：`about_diagnostics` 和 `export_diagnostic_package` 的版本信息加入架构；Workbench
+  与 Vite mock 展示该字段，关闭“架构只能从包外推断”的缺口。
+- 验收：`cargo check --release --manifest-path apps/desktop/src-tauri/Cargo.toml`、
+  `npm run verify`、WorkBench closeout verifier、JS 语法检查和 `git diff --check` 均通过。
