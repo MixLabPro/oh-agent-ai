@@ -59,6 +59,8 @@ ok(js.includes("function billingCsvBillId(row)") && js.includes("bill_id: billin
 ok(!/bill_id:\s*["']csv-["']\s*\+\s*Date\.now/.test(js),
   "CSV 重复导入不使用时间戳身份");
 ok(js.includes("/^[A-Z]{3}$/.test(currency)"), "CSV 币种使用三位大写代码");
+ok((js.match(/setAttribute\("aria-label", profileLabel/g) || []).length === 4,
+  "独立预算的币种、月额、日额和阈值输入具备无障碍名称");
 
 console.log(failed ? `\n${failed} FAIL` : "\n全部通过。");
 process.exit(failed ? 1 : 0);

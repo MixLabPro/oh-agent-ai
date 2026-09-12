@@ -1634,3 +1634,9 @@
 - 验收：`cargo test --release` 全部通过；`python3 tests/golden_runner.py --diff` 的 15 个 case 全部逐字节一致。
 - 保护：Authority 账单校验、迁移、价格、跨宿主聚合、MCP/CLI 与 golden 输出均未发生回归；未刷新 snapshot。
 - 边界：自动化回归不替代真实 `.app` Computer Use、签名/公证、公共目录联网成功、干净机升级和外部试用。
+
+## Loop 229 · 独立预算输入无障碍名称
+
+- 修复：两组独立按量预算的币种、月预算、日预算和预警阈值输入均补充明确 `aria-label`，不再让读屏器只读出无名称 `spinbutton`/`combobox`。
+- 验收：浏览器实际读取 8 个独立预算控件名称，控制台错误数为 0；JS 语法、closeout verifier、Vite build 和最新 `.app` 构建通过。
+- 边界：键盘/读屏完整真机路径仍需在可操作的 `.app` 上复验；本轮未在锁屏环境启动新包。
