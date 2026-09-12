@@ -1646,3 +1646,9 @@
 - 发现：对 Workbench 全部 `input/select/textarea/button` 做名称扫描时，唯一缺少 `label/aria-label/title/placeholder` 的控件是 `#cal-month`。
 - 修复：为 Token 日历月份选择器加入 `aria-label="选择日历月份"`，并在 closeout verifier 中固定该契约。
 - 验收：浏览器名称扫描返回 0 个无名称表单控件，控制台错误数为 0；closeout verifier、Vite build 和 `cargo tauri build --bundles app` 全部通过。
+
+## Loop 231 · Workbench 交互名称与导航 smoke
+
+- 验收：浏览器扫描全部 `button/[role=button]/a`，无缺少文本、`aria-label`、`title` 或关联 label 的交互元素；依次切换总览、Token 日历、会话、Issues、数据源五个主导航，五次均命中对应 active tab。
+- 结果：导航 smoke 过程中控制台错误数为 0；动态会话/预算/Issues 操作名称均可被浏览器语义定位。
+- 边界：这是 Vite mock 的语义与导航证据，不替代真实 `.app` 键盘、读屏和系统窗口验收。
