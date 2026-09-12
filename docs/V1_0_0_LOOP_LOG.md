@@ -1129,3 +1129,9 @@
 - 验收：直接运行包内 CLI，在隔离数据目录配置 `America/Los_Angeles`，`sessions navigation --json` 返回 `day_key=2026-09-12`、`timezone=America/Los_Angeles`；新 `.app` 进程可启动。
 - 保护：未覆盖现有用户数据；未把进程启动证据扩大为窗口可见或 Computer Use UAT。
 - 边界：真实 `.app` 窗口交互、通知权限、签名/公证和外部试用门禁仍待完成；AC21/AC19 及发布门禁不勾选。
+
+## Loop 148 · SQLite localtime 时区投影对拍
+
+- 验收：同一 Unix 秒在 `TZ=Asia/Shanghai` 下投影为 `2026-09-13 02:00:00 / 2026-09-13`，在 `TZ=America/Los_Angeles` 下投影为 `2026-09-12 11:00:00 / 2026-09-12`；与已重建 CLI 的统计日界一致。
+- 保护：仅验证 SQLite 本地投影，不改变原始 epoch；供应商峰谷计价仍使用其独立时区规则。
+- 边界：仍需真实 `.app` 窗口 Computer Use、通知权限、签名/公证和外部试用；AC21 暂不勾选。
