@@ -1334,3 +1334,9 @@
 - 保护：原始来源表与 scope identity 不变；组内保留累计命中数、状态汇总、首末时间及最多 3 条样本，fact id 仍可从样本追溯。
 - 验收：`agent-vitals-data` Issue 测试 10/10 通过；data Clippy 通过；新增跨 fact 质量投影归并断言。
 - 边界：尚未在真实 4,450 条库上输出归并前后比值；桌面视觉 Computer Use、签名/公证和外部试用门禁仍未完成。
+
+## Loop 181 · 来源归并修复进入安装包
+
+- 构建：`cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 release CLI `cmp` 一致。
+- 安装：旧包可恢复备份为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-031542`，新包已安装并重启，运行 PID `79581`。
+- 边界：macOS 仍锁定，未执行真实待处理页视觉操作和真机 4,450 条归并量级对拍；签名/公证和外部试用门禁仍未完成。
