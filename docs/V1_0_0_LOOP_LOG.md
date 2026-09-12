@@ -1924,3 +1924,10 @@
 
 - 验收：`cargo clippy --release --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings`
   通过；备份恢复命令在独立 Tauri workspace 下无新增警告。
+
+## Loop 273 · 恢复功能最新 App 重打包
+
+- 验收：`cargo tauri build --bundles app` 成功；包预检确认主程序、随包 CLI 均存在，
+  CLI `--version` 返回 `agent-vitals 1.3.0`，两者架构均为 `arm64`。
+- 真机验收：尝试用 Computer Use 读取最新 `.app` 窗口时，macOS 处于锁屏且自动解锁失败；
+  未绕过锁屏，真实 UI/退出重开验收保留为待用户解锁后的下一步。
