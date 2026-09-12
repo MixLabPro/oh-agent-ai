@@ -1122,3 +1122,10 @@
 - 修复：桌面会话列表默认日期不再自行加固定 8 小时；菜单栏 spawn CLI 时不再传固定 `Asia/Shanghai`，改传当前统计时区偏好，避免自定义时区下导航进程直接失败。
 - 验收：desktop release 测试 110/110、CLI/desktop Clippy 通过；重建 release 后已完成自定义时区导航回归，菜单栏子进程可使用 `America/Los_Angeles`。
 - 边界：真实 `.app` Computer Use 和跨进程 SQLite 完整矩阵仍需验收；REQ-033、REQ-096、AC21 暂不勾选。
+
+## Loop 147 · 发布候选重新打包与内置 CLI 验证
+
+- 构建：`cargo tauri build --bundles app` 成功生成 `apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app`；包内 `Contents/Resources/bin/agent-vitals` 为当前 release CLI，版本 `1.3.0`，应用版本 `0.11.0`。
+- 验收：直接运行包内 CLI，在隔离数据目录配置 `America/Los_Angeles`，`sessions navigation --json` 返回 `day_key=2026-09-12`、`timezone=America/Los_Angeles`；新 `.app` 进程可启动。
+- 保护：未覆盖现有用户数据；未把进程启动证据扩大为窗口可见或 Computer Use UAT。
+- 边界：真实 `.app` 窗口交互、通知权限、签名/公证和外部试用门禁仍待完成；AC21/AC19 及发布门禁不勾选。
