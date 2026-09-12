@@ -4450,9 +4450,22 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
   try {
     if (group.source_kind === "budget") {
       const sample = group.sample_evidence && group.sample_evidence[0] || {};
-      detailRow.firstElementChild.textContent = "预算状态：" + (sample.level || "—") +
+      const cell = detailRow.firstElementChild;
+      cell.textContent = "预算状态：" + (sample.level || "—") +
         " · 比例 " + (sample.ratio_bp != null ? sample.ratio_bp + "bp" : "—") +
         " · 该项仅支持到预算设置/静默入口处理，不能作为原始 Issue 关闭。";
+      const openSettings = el("button", "btn secondary");
+      openSettings.type = "button";
+      openSettings.textContent = "打开预算设置";
+      openSettings.addEventListener("click", () => {
+        switchTab("overview");
+        const settings = document.getElementById("ov-budget-settings");
+        if (settings && settings.scrollIntoView) settings.scrollIntoView({ behavior: "smooth", block: "start" });
+        const monthly = document.getElementById("ov-budget-monthly-input");
+        if (monthly && monthly.focus) monthly.focus();
+      });
+      cell.appendChild(document.createTextNode(" "));
+      cell.appendChild(openSettings);
       return;
     }
     const data = await invoke("issue_group_instances", { groupId: group.group_id, pageSize: 50, cursor: cursor || null });

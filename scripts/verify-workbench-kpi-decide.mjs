@@ -64,6 +64,8 @@ ok(wb.includes('"no-pricing-snapshot": "历史缺少事件时间的价格快照"
   "历史缺价状态明确说明没有事件时间价格快照");
 ok(wb.includes('pricing || reason || row.has_unresolved'),
   "无价卡且没有金额时仍显示价格不可用说明，不隐藏失败态");
+ok(wb.includes('openSettings.textContent = "打开预算设置"') && wb.includes('switchTab("overview")'),
+  "预算阈值组提供打开预算设置入口，不要求用户自行寻找");
 
 // ── vm 执行真实文件 ──
 function makeElement() {
