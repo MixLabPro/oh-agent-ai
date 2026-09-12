@@ -120,6 +120,14 @@
   }];
 
   let syncPaused = false;
+  const billingCandidates = [{
+    candidate_id: "browser-candidate-1", status: "pending", host: "codex",
+    provider_id: "openai", currency: "USD", amount_minor: 2000,
+    billing_period_start: month + "-01",
+    impact: { status: "ok", total_tokens: 18000, fact_count: 4, session_count: 1 },
+  }];
+  const billingDeclarations = [];
+  const billingJobs = new Map();
   const canonicalIssueStatus = (status) => ({ pending: "open", closed: "resolved", wontfix: "not_applicable" }[status] || status || "open");
   const transitionIssue = (issueId, toStatus) => {
     const instance = issueInstances.find((item) => item.issue_id === issueId);
@@ -146,8 +154,28 @@
       case "data_monthly_summary": return dto(374000);
       case "read_calendar_month": return calendar;
       case "data_status": return { status: "ok", data: { health: "warn", integrity: "ok", facts: 42, unresolved_tokens: 18000, unpriced_tokens: 0, pricing: { stale: false }, hints: ["浏览器 mock 数据，不会写入本地库"] } };
-      case "billing_import_candidates": return emptyReport("candidates");
-      case "billing_declarations": return emptyReport("declarations");
+      case "billing_import_candidates": return { status: "ok", candidates: billingCandidates };
+      case "billing_declarations": return { status: "ok", declarations: billingDeclarations };
+      case "resolve_billing_import_candidate": {
+        const candidate = billingCandidates.find((item) => item.candidate_id === (args && args.candidateId));
+        if (!candidate) throw new Error("billing candidate not found");
+        const decision = args && args.decision;
+        candidate.status = decision === "reopen" ? "pending" : decision === "accept" ? "accepted" : "dismissed";
+        return { status: "ok", candidate_id: candidate.candidate_id, decision };
+      }
+      case "billing_candidate_impact_preview": {
+        const candidate = billingCandidates.find((item) => item.host === (args && args.host) && item.provider_id === (args && args.providerId));
+        return candidate ? candidate.impact : { status: "unavailable", reason: "candidate not found" };
+      }
+      case "save_billing_declaration_revision": {
+        billingDeclarations.push({ declaration_id: args && args.declarationId, revision_id: args && args.revisionId, host: args && args.host, provider_id: args && args.providerId, status: "saved" });
+        return { status: "ok", declaration_id: args && args.declarationId, revision_id: args && args.revisionId };
+      }
+      case "enqueue_billing_recalculation": {
+        billingJobs.set(args && args.jobId, { status: "succeeded" });
+        return { status: "queued", job_id: args && args.jobId };
+      }
+      case "billing_recalculation_job_status": return billingJobs.get(args && args.jobId) || { status: "missing" };
       case "host_bills_for_period": return emptyReport("bills");
       case "data_source_status": return { status: "ok", sources: [{ host: "codex", scan: { source_count: 12 }, import_scope: { sessions: 8 } }] };
       case "budget_config": return { status: "ok", monthly_cny_minor: 10000, daily_cny_minor: 500, warning_ratio_bp: 80, origin: "user" };
@@ -186,7 +214,6 @@
       case "source_read_locations": return { status: "ok", locations: [] };
       case "sync_pause_state": return { status: "ok", paused: syncPaused };
       case "peek_nav_target": case "peek_focus_target": return null;
-      case "billing_recalculation_job_status": return { status: "missing" };
       case "sync_request_status": return { completed: true };
       case "trigger_sync": return "browser-mock-sync";
       case "set_sync_paused":
