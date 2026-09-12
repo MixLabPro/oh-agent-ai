@@ -19,6 +19,7 @@ path = "src/lib.rs"
 # sqlite3 二进制面）；不引 ORM（spec §5.1 明令）。
 [dependencies]
 agent-vitals-domain = { path = "../agent-vitals-domain" }
+jiff = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 rusqlite = { version = "0.31", features = ["bundled", "hooks"] }

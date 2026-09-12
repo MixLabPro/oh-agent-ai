@@ -1008,3 +1008,9 @@
 - 实现：runtime 新增系统 IANA 时区识别、按指定时区把绝对 epoch 投影为统计日期，以及读取指定时刻实际 UTC 偏移的 helper；使用 Jiff 处理 macOS/Linux 系统设置、`TZ` 覆盖和 DST，不把系统统计时区用于供应商价格规则。
 - 验收：runtime clock 定向测试 4/4 通过；覆盖系统时区日期格式、非法时区降级，以及 Los Angeles 2026 春季 DST 前后 `-08:00`/`-07:00` 偏移；`git diff --check`通过。
 - 边界：统计 SQL 的日界/小时桶、可修改的用户偏好、Python/Rust/MCP/Workbench 同口径及 AC21 真机走查尚未接入；本轮不勾选 REQ-033、REQ-096 或 AC21。
+
+## Loop 130 · 权威查询日界与小时桶切换
+
+- 实现：`agent-vitals-data` 的 authority query 日桶/小时桶改用 SQLite `localtime` 的系统时区投影；日期/月窗口由系统 IANA 时区的民历午夜生成，跨 DST 的自然日不再假定固定 24 小时。供应商价格快照匹配仍按事件绝对时间，不因统计时区改变。
+- 验收：authority query 定向测试 30/30 通过，包含 query-plan 索引断言、跨日聚合、小时下钻和 `America/Los_Angeles` 春季 23 小时自然日测试；`cargo check -p agent-vitals-data --release`通过。
+- 边界：Python 镜像、MCP envelope/CLI、Workbench 日期显示与用户可修改时区尚未切换；旧 `beijing_*` API 名称暂作兼容入口，不据此勾选 REQ-033、REQ-096 或 AC21。
