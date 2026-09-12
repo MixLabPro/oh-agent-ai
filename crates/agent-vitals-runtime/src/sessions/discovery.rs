@@ -91,6 +91,29 @@ pub fn dsh_session_files(dsh_home: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Return traversal failures for the DSH sessions root. A missing root is
+/// normal absence; an unreadable root/subdirectory is a source failure.
+pub fn dsh_session_walk_errors(dsh_home: &Path) -> Vec<String> {
+    let root = dsh_home.join("sessions");
+    let mut errors = Vec::new();
+    match std::fs::metadata(&root) {
+        Ok(metadata) if metadata.is_dir() => {
+            for entry in walkdir::WalkDir::new(&root).into_iter() {
+                if let Err(error) = entry {
+                    let path = error.path().unwrap_or(&root);
+                    errors.push(format!("{}: {error}", path.display()));
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            errors.push(format!("{}: {error}", root.display()));
+        }
+        Err(_) => {}
+    }
+    errors
+}
+
 /// DSH 会话根集合的存在性报告 —— 与 `codex_session_roots_report` 同级：
 /// 存在性 + 计数 + 字节量，**绝不报错**（根缺席 → `exists=false` 零填充，不猜
 /// 路径、不把缺席当 0 条真数据）。

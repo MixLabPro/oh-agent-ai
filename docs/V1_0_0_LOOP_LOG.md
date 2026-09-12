@@ -458,6 +458,13 @@
 - 验收：desktop 单元测试 102/102、runtime 全量 247/247、两侧 Clippy `-D warnings`、工作台来源脚本、JS 语法检查和 `git diff --check`通过。
 - UAT：`UAT: AC19 walked ✘`；真实系统通知权限、首穿/静默/点击回预算页仍待真机走查，因此不勾选 AC19。
 
+## Loop 90 · AC15 目录级权限失败补强
+
+- 发现：真机级隔离 HOME 注入证明 `chmod 000 ~/.claude/projects/<dir>` 会被 `WalkDir.into_iter().filter_map(Result::ok)` 静默丢弃，错误宿主曾呈现为 `seen=0/errors=[]/EXIT=0`；因此撤销 AC15 的提前勾选。
+- 修复：Claude、Codex、DSH、WorkBuddy 扫描器新增目录遍历错误报告；`sync-facts` 将发现错误合并到对应 `HostSyncReport.errors`，不阻断其他宿主，CLI 继续非零退出并保留宿主名、路径和原因。
+- 复验：隔离 HOME + `chmod 000` 目录实测 `EXIT=1`，stderr 为 `sync-facts partial failure [claude-code]`，JSON 仅 Claude 有 discovery error，Codex/DSH/WorkBuddy 仍可继续；hosts 107 项测试、runtime discovery 测试和全 workspace `cargo check --release --all-targets` 通过。
+- 边界：代码修复已完成，但桌面 `.app` 与 MCP 三面 Computer Use/UAT 仍需重新走查；AC15 暂不勾选。
+
 ## Loop 51 · 预算提醒权限提示（自验收）
 
 - 执行：保存预算时请求系统通知权限，并把权限结果反馈到预算设置状态；设置文案明确提醒不会阻止 Agent 继续使用。

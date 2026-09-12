@@ -323,11 +323,44 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             ),
         ),
     ];
+    let mut discovery_errors: Vec<(String, String)> = Vec::new();
+    let mut collect_discovery_errors = |host: &str, errors: Vec<String>| {
+        discovery_errors.extend(errors.into_iter().map(|error| (host.to_string(), error)));
+    };
+    collect_discovery_errors(
+        "claude-code",
+        agent_vitals_hosts::claude_session::claude_project_walk_errors(&user_home),
+    );
+    collect_discovery_errors(
+        "codex",
+        agent_vitals_hosts::codex_session::codex_rollout_walk_errors(&crate::summary::codex_home()),
+    );
+    if let Some(dsh_home) = crate::home::dsh_home() {
+        collect_discovery_errors("dsh", crate::sessions::discovery::dsh_session_walk_errors(&dsh_home));
+    }
+    collect_discovery_errors(
+        "workbuddy",
+        agent_vitals_hosts::workbuddy_traces::workbuddy_trace_walk_errors(
+            &agent_vitals_hosts::workbuddy_session::workbuddy_root(&user_home),
+        ),
+    );
     for source in custom_sources {
         let files = match source.host.as_str() {
-            "claude-code" => agent_vitals_hosts::claude_session::claude_project_files(Path::new(&source.root)),
-            "codex" => agent_vitals_hosts::codex_session::codex_rollout_files(Path::new(&source.root)),
-            "dsh" => crate::sessions::discovery::dsh_session_files(Path::new(&source.root)),
+            "claude-code" => {
+                let root = Path::new(&source.root);
+                collect_discovery_errors("claude-code", agent_vitals_hosts::claude_session::claude_project_walk_errors(root));
+                agent_vitals_hosts::claude_session::claude_project_files(root)
+            }
+            "codex" => {
+                let root = Path::new(&source.root);
+                collect_discovery_errors("codex", agent_vitals_hosts::codex_session::codex_rollout_walk_errors(root));
+                agent_vitals_hosts::codex_session::codex_rollout_files(root)
+            }
+            "dsh" => {
+                let root = Path::new(&source.root);
+                collect_discovery_errors("dsh", crate::sessions::discovery::dsh_session_walk_errors(root));
+                crate::sessions::discovery::dsh_session_files(root)
+            }
             _ => continue,
         };
         if let Some((_, batch)) = batches.iter_mut().find(|(host, _)| *host == source.host) {
@@ -345,6 +378,11 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             ..Default::default()
         };
         sync_host(host, &ns, &authority, files, &mut r)?;
+        for (error_host, error) in &discovery_errors {
+            if error_host == host {
+                r.errors.push(format!("discovery: {error}"));
+            }
+        }
         report.total_appended += r.appended;
         report.total_duplicate += r.duplicate;
         report.hosts.push(r);

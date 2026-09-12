@@ -252,6 +252,50 @@ pub fn workbuddy_trace_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Return traversal failures for WorkBuddy's trace tree. The file-list API is
+/// kept best-effort for existing callers, while sync-facts uses this companion
+/// report so directory failures cannot become a false empty source.
+pub fn workbuddy_trace_walk_errors(root: &Path) -> Vec<String> {
+    let tdir = workbuddy_traces_root(root);
+    let mut errors = Vec::new();
+    match std::fs::metadata(&tdir) {
+        Ok(metadata) if metadata.is_dir() => {
+            match std::fs::read_dir(&tdir) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(error) => {
+                                errors.push(format!("{}: {error}", tdir.display()));
+                                continue;
+                            }
+                        };
+                        let path = entry.path();
+                        if !path.is_dir() { continue; }
+                        match std::fs::read_dir(&path) {
+                            Ok(files) => {
+                                for file in files {
+                                    if let Err(error) = file {
+                                        errors.push(format!("{}: {error}", path.display()));
+                                    }
+                                }
+                            }
+                            Err(error) => errors.push(format!("{}: {error}", path.display())),
+                        }
+                    }
+                }
+                Err(error) => errors.push(format!("{}: {error}", tdir.display())),
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            errors.push(format!("{}: {error}", tdir.display()));
+        }
+        Err(_) => {}
+    }
+    errors
+}
+
 /// shape 面：读一个 trace 文件。Err 的三种文案与 `TracesRead::degraded` 的原因串
 /// 同一词表（`unreadable` / `malformed: not JSON` / `malformed: no …`）——全量读
 /// 把它们收进 degraded，逐文件同步把它们当该文件的错误上呈并留待下次重试。

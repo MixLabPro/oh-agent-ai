@@ -232,6 +232,32 @@ pub fn codex_rollout_files(home: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Return traversal failures for both Codex rollout roots. Missing roots remain
+/// normal absence; permission and other I/O failures are explicit.
+pub fn codex_rollout_walk_errors(home: &Path) -> Vec<String> {
+    let entries: [(&str, &str); 2] = [("live", "sessions"), ("archived", "archived_sessions")];
+    let mut errors = Vec::new();
+    for (_kind, rel) in entries {
+        let root = home.join(".codex").join(rel);
+        match std::fs::metadata(&root) {
+            Ok(metadata) if metadata.is_dir() => {
+                for entry in walkdir::WalkDir::new(&root).into_iter() {
+                    if let Err(error) = entry {
+                        let path = error.path().unwrap_or(&root);
+                        errors.push(format!("{}: {error}", path.display()));
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                errors.push(format!("{}: {error}", root.display()));
+            }
+            Err(_) => {}
+        }
+    }
+    errors
+}
+
 /// 纯解析：把 `session_index.jsonl` 折成 `{id: thread_name}` 映射。与 Python
 /// `scripts/agent_vitals/adapters/codex_session.py::parse_session_index` 对齐。
 ///

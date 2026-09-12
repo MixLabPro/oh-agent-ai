@@ -118,6 +118,30 @@ pub fn claude_project_files(home: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Return traversal failures for the Claude projects root without changing the
+/// existing deterministic file-list API. A permission-denied root must not be
+/// indistinguishable from a missing root.
+pub fn claude_project_walk_errors(home: &Path) -> Vec<String> {
+    let root = home.join(".claude").join("projects");
+    let mut errors = Vec::new();
+    match std::fs::metadata(&root) {
+        Ok(metadata) if metadata.is_dir() => {
+            for entry in walkdir::WalkDir::new(&root).into_iter() {
+                if let Err(error) = entry {
+                    let path = error.path().unwrap_or(&root);
+                    errors.push(format!("{}: {error}", path.display()));
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            errors.push(format!("{}: {error}", root.display()));
+        }
+        Err(_) => {}
+    }
+    errors
+}
+
 /// `~/.claude/projects` 根的存在性报告（r2a store 的 `source_statuses["claude-code"]`
 /// 与 menubar 的 `host_has_source` 都靠它判「该宿主有数据源」——roots 缺席时绝不能
 /// 报「0 会话」冒充「没有 Claude Code」）。镜像 `codex_session_roots_report`：单根
