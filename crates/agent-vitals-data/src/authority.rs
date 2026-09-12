@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -682,6 +682,28 @@ CREATE TABLE IF NOT EXISTS billing_fact_attributions (
 );
 CREATE INDEX IF NOT EXISTS billing_fact_attributions_revision
   ON billing_fact_attributions(revision_id, fact_id);
+
+-- v1.0 budget profiles: keep the legacy single CNY row readable while allowing
+-- independent estimate/confirmed budgets and an explicit currency per profile.
+CREATE TABLE IF NOT EXISTS budget_profiles (
+  profile_id TEXT PRIMARY KEY CHECK (profile_id IN ('estimate', 'confirmed')),
+  currency TEXT NOT NULL CHECK (length(currency) = 3),
+  monthly_minor INTEGER NOT NULL CHECK (monthly_minor > 0),
+  daily_minor INTEGER,
+  warning_ratio_bp INTEGER NOT NULL CHECK (warning_ratio_bp BETWEEN 0 AND 10000),
+  updated_at_ms INTEGER NOT NULL
+);
+"#;
+
+const SCHEMA_V13_ADD: &str = r#"
+CREATE TABLE IF NOT EXISTS budget_profiles (
+  profile_id TEXT PRIMARY KEY CHECK (profile_id IN ('estimate', 'confirmed')),
+  currency TEXT NOT NULL CHECK (length(currency) = 3),
+  monthly_minor INTEGER NOT NULL CHECK (monthly_minor > 0),
+  daily_minor INTEGER,
+  warning_ratio_bp INTEGER NOT NULL CHECK (warning_ratio_bp BETWEEN 0 AND 10000),
+  updated_at_ms INTEGER NOT NULL
+);
 "#;
 
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
@@ -721,6 +743,18 @@ CREATE VIEW IF NOT EXISTS v_sync_runs_safe AS
 pub struct BudgetConfig {
     pub monthly_cny_minor: i64,
     pub daily_cny_minor: i64,
+    pub warning_ratio_bp: i64,
+    pub updated_at_ms: i64,
+}
+
+/// v1.0 的双预算配置。`estimate` 与 `confirmed` 是两个互斥口径，不能用
+/// 一个金额字段代替；currency 明确绑定到每个口径，避免 USD 静默进入 CNY。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetProfile {
+    pub profile_id: String,
+    pub currency: String,
+    pub monthly_minor: i64,
+    pub daily_minor: Option<i64>,
     pub warning_ratio_bp: i64,
     pub updated_at_ms: i64,
 }
@@ -858,6 +892,19 @@ impl AuthorityDb {
             Some(v) if v == SCHEMA_VERSION => {
                 // 增量 7.5：脱敏只读 view（`query_sql_readonly` 的来源层屏障）。
                 // 版本无关的只读加法——`CREATE VIEW IF NOT EXISTS` 幂等。
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(12) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V13_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
@@ -1327,6 +1374,59 @@ impl AuthorityDb {
                  warning_ratio_bp = excluded.warning_ratio_bp,
                  updated_at_ms = excluded.updated_at_ms",
             rusqlite::params![monthly_cny_minor, daily_cny_minor, warning_ratio_bp, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// 读取 v1.0 双预算配置，固定按 profile_id 排序，便于各消费面稳定对拍。
+    pub fn budget_profiles_get(&self) -> Result<Vec<BudgetProfile>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT profile_id, currency, monthly_minor, daily_minor,
+                    warning_ratio_bp, updated_at_ms
+             FROM budget_profiles ORDER BY profile_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(BudgetProfile {
+                profile_id: r.get(0)?, currency: r.get(1)?, monthly_minor: r.get(2)?,
+                daily_minor: r.get(3)?, warning_ratio_bp: r.get(4)?, updated_at_ms: r.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// 写入一个预算口径。金额和币种均在数据库约束下落库；同一 profile 幂等覆盖。
+    pub fn budget_profile_set(
+        &self,
+        profile_id: &str,
+        currency: &str,
+        monthly_minor: i64,
+        daily_minor: Option<i64>,
+        warning_ratio_bp: i64,
+        now_ms: i64,
+    ) -> Result<(), AuthorityError> {
+        if !matches!(profile_id, "estimate" | "confirmed") {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "unsupported budget profile".to_string(),
+            )));
+        }
+        if currency.len() != 3 || !currency.is_ascii() || monthly_minor <= 0
+            || daily_minor.is_some_and(|v| v <= 0)
+            || !(0..=10_000).contains(&warning_ratio_bp)
+        {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid budget profile".to_string(),
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO budget_profiles(profile_id, currency, monthly_minor, daily_minor,
+                 warning_ratio_bp, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(profile_id) DO UPDATE SET
+                 currency = excluded.currency, monthly_minor = excluded.monthly_minor,
+                 daily_minor = excluded.daily_minor,
+                 warning_ratio_bp = excluded.warning_ratio_bp,
+                 updated_at_ms = excluded.updated_at_ms",
+            rusqlite::params![profile_id, currency, monthly_minor, daily_minor, warning_ratio_bp, now_ms],
         )?;
         Ok(())
     }
@@ -3447,6 +3547,27 @@ mod tests {
             ),
             (61_000, 3_100, 9_000, 3_000)
         );
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn budget_profiles_keep_estimate_and_confirmed_currencies_separate() {
+        let db = tmp_db("budget-profiles");
+        let a = AuthorityDb::open(&db, 1_000).unwrap();
+        a.budget_profile_set("estimate", "CNY", 60_000, Some(3_000), 8_000, 2_000).unwrap();
+        a.budget_profile_set("confirmed", "USD", 10_000, None, 9_000, 3_000).unwrap();
+        assert_eq!(a.budget_profiles_get().unwrap(), vec![
+            BudgetProfile {
+                profile_id: "confirmed".into(), currency: "USD".into(), monthly_minor: 10_000,
+                daily_minor: None, warning_ratio_bp: 9_000, updated_at_ms: 3_000,
+            },
+            BudgetProfile {
+                profile_id: "estimate".into(), currency: "CNY".into(), monthly_minor: 60_000,
+                daily_minor: Some(3_000), warning_ratio_bp: 8_000, updated_at_ms: 2_000,
+            },
+        ]);
+        assert!(a.budget_profile_set("estimate", "CN", 1, None, 8_000, 4_000).is_err());
+        assert!(a.budget_profile_set("estimate", "USD", 0, None, 8_000, 4_000).is_err());
         let _ = std::fs::remove_file(&db);
     }
 
