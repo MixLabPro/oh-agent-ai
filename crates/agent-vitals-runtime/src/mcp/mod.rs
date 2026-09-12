@@ -32,6 +32,7 @@ mod query_sql_readonly;
 // make_detail_cursor}` 直接拿，无需穿透到子模块（子模块仍是 private）。
 pub use session_detail::{make_detail_cursor, parse_detail_cursor};
 pub use sessions_search::{make_search_cursor, parse_search_cursor};
+pub use data_status::augment_sync_failure;
 
 use std::path::{Path, PathBuf};
 

@@ -2949,11 +2949,11 @@ session_store={store} fold={fold}"
             // `mcp::data_status_report`（spec §5「同一 repository / 同一 DTO」）。
             // 损坏恢复 / 「删库不回落」的 health + hints 逻辑也在那一份里。
             let enabled = agent_vitals_runtime::sql_authority::is_enabled(&data_home);
-            Ok(agent_vitals_runtime::mcp::data_status_report(
-                db.conn(),
-                db_existed,
-                enabled,
-            ))
+            let mut report = agent_vitals_runtime::mcp::data_status_report(
+                db.conn(), db_existed, enabled,
+            );
+            agent_vitals_runtime::mcp::augment_sync_failure(&mut report, &data_home);
+            Ok(report)
         })();
         match out {
             Ok(v) => {

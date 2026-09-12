@@ -55,7 +55,8 @@ pub fn run(_args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let _ = conn.busy_timeout(std::time::Duration::from_millis(5_000));
 
     let enabled = crate::sql_authority::is_enabled(data_home);
-    let report = collect_report(&conn, true, enabled);
+    let mut report = collect_report(&conn, true, enabled);
+    augment_sync_failure(&mut report, data_home);
 
     // 损坏 / schema 不符 = **业务错误**（spec §7.1：「integrity != ok →
     // envelope authority_state=unavailable + 错误码 database_unreadable」——
@@ -118,6 +119,53 @@ pub fn run(_args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         warnings,
         report,
     ))
+}
+
+/// Merge the desktop/runtime sync receipt into the read-only data-status view.
+/// The authority DB can legitimately have zero rows when discovery failed before
+/// the first source file was written; without this receipt MCP would report an
+/// empty healthy source instead of the host-level failure.
+pub fn augment_sync_failure(report: &mut Value, data_home: &Path) {
+    let path = data_home.join("state").join("last-sync.json");
+    let Ok(raw) = std::fs::read_to_string(path) else { return; };
+    let Ok(status) = serde_json::from_str::<Value>(&raw) else { return; };
+    if status["ok"].as_bool() != Some(false) { return; }
+    let message = status["message"].as_str().unwrap_or("sync failed");
+    let lower = message.to_lowercase();
+    let error_code = if lower.contains("permission") || lower.contains("denied") {
+        "permission_denied"
+    } else if lower.contains("parse") || lower.contains("json") || lower.contains("malformed") {
+        "source_parse_failed"
+    } else {
+        "source_read_failed"
+    };
+    let hosts = ["claude-code", "codex", "dsh", "workbuddy"];
+    let affected: Vec<&str> = hosts.iter().copied()
+        .filter(|host| message.contains(&format!("[{host}]")) || message.to_lowercase().contains(host))
+        .collect();
+    let affected = if affected.is_empty() { vec!["unknown"] } else { affected };
+    let failures = report.as_object_mut().map(|object| {
+        object.entry("source_failures").or_insert_with(|| json!({}));
+        object.get_mut("source_failures").and_then(Value::as_object_mut).unwrap()
+    });
+    if let Some(failures) = failures {
+        for host in affected {
+            failures.insert(host.to_string(), json!({
+                "connection_state": "needs_attention",
+                "error_codes": [error_code],
+                "recovery_action": "retry_sync"
+            }));
+        }
+    }
+    if let Some(object) = report.as_object_mut() {
+        if object.get("health").and_then(Value::as_str) == Some("ok") {
+            object.insert("health".into(), Value::String("warn".into()));
+        }
+        let hints = object.entry("hints").or_insert_with(|| json!([]));
+        if let Some(hints) = hints.as_array_mut() {
+            hints.push(json!(format!("source sync failed ({error_code}); retry `sync-facts`")));
+        }
+    }
 }
 
 fn fact_tokens(uncached: i64, cache_read: i64, cache_write: i64, output: i64) -> i64 {
@@ -727,6 +775,26 @@ mod tests {
         assert_eq!(env["freshness"]["stale_hosts"], json!(["dsh"]));
         assert_eq!(env["coverage"]["status"], "partial");
         assert_eq!(env["coverage"]["missing_hosts"], json!(["dsh"]));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sync_failure_receipt_is_visible_without_exposing_source_path() {
+        let home = tmp_home("sync-failure-receipt");
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
+        let mut report = collect_report(db.conn(), true, false);
+        std::fs::write(
+            home.join("state").join("last-sync.json"),
+            r#"{"ok":false,"stage":"partial","message":"sync-facts partial failure [claude-code]: /Users/alice/.claude/projects/private: Permission denied (os error 13)"}"#,
+        ).unwrap();
+        augment_sync_failure(&mut report, &home);
+        assert_eq!(report["health"], "warn");
+        assert_eq!(report["source_failures"]["claude-code"]["connection_state"], "needs_attention");
+        assert_eq!(report["source_failures"]["claude-code"]["error_codes"], json!(["permission_denied"]));
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("/Users/alice"));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

@@ -465,6 +465,13 @@
 - 复验：隔离 HOME + `chmod 000` 目录实测 `EXIT=1`，stderr 为 `sync-facts partial failure [claude-code]`，JSON 仅 Claude 有 discovery error，Codex/DSH/WorkBuddy 仍可继续；hosts 107 项测试、runtime discovery 测试和全 workspace `cargo check --release --all-targets` 通过。
 - 边界：代码修复已完成，但桌面 `.app` 与 MCP 三面 Computer Use/UAT 仍需重新走查；AC15 暂不勾选。
 
+## Loop 91 · AC15 三面失败隔离闭环
+
+- 修复：MCP `data_status` 读取桌面 `state/last-sync.json` 的失败回执，向只读数据状态投影宿主级 `source_failures`、错误码和 `retry_sync`；绝对路径不进入 MCP 响应。
+- UAT：`UAT: AC15 walked ✔`；隔离 HOME + 目录级 `Permission denied` 已完成 CLI、桌面、MCP 三面走查。CLI 返回 `EXIT=1`；桌面显示 Claude Code `permission_denied` 与“重新同步”；MCP envelope 的 `data.health=warn`，Claude 为 `needs_attention`，Codex/DSH/WorkBuddy 未被连带标红。
+- 对拍：MCP `data_status` 仍保持 `facts=0` 的诚实空库语义，同时明确报告同步故障，不把空库渲染成“无使用且健康”。
+- 结论：AC15 重新勾选；其余 AC 仍按各自 UAT 边界处理。
+
 ## Loop 51 · 预算提醒权限提示（自验收）
 
 - 执行：保存预算时请求系统通知权限，并把权限结果反馈到预算设置状态；设置文案明确提醒不会阻止 Agent 继续使用。
