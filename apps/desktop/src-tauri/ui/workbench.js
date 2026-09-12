@@ -93,6 +93,7 @@ function fmtSessionCost(session) {
 // token 缩写：≥1M "1.4M"、≥1K "8.2K"（<10K 一位小数）、<1K 原样 —— 镜像 lib.rs::fmt_tokens。
 function fmtTokens(n) {
   if (n == null) return "—";
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
   if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
   if (n >= 1e3) {
     const k = n / 1e3;
@@ -440,12 +441,6 @@ function curSymbol(cur) { return cur === "CNY" ? "\u00a5" : cur === "USD" ? "$" 
 function fmtCur(amount, cur) {
   const v = (Math.round(amount * 100) / 100).toFixed(2);
   return curSymbol(cur) + v + (cur ? "" : "（币种未声明）");
-}
-function fmtTokens(n) {
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
-  return String(n);
 }
 const PROVIDER_LABEL = {
   anthropic: "Anthropic", minimax: "MiniMax", "zhipu-glm": "智谱 GLM",

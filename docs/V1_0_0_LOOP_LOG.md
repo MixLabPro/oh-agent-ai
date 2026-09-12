@@ -1550,3 +1550,9 @@
 - 验收：通过 `http://127.0.0.1:5173/workbench.html` 检查总览页面，导航、统计时区输入、公共价格授权复选框、发布页入口和预算保存按钮均存在且可定位；页面标题为 `agent-vitals 工作台`。
 - 结果：浏览器控制台错误数为 0；`npm run build`、Workbench 两个脚本语法检查和 `git diff --check` 通过。当前 Vite 构建仍提示 legacy script 未声明 `type="module"`，这是兼容现有 Tauri DOM/IPC 的已知提示，不影响开发服务渲染。
 - 结论：样式/交互迭代可先在 Vite + mock IPC 页面完成，再回到 Tauri `.app` 验证原生边界；本轮未把尚未迁移的页面强行改写为 React。
+
+## Loop 215 · Workbench 模块化热更新构建修复
+
+- 修复：将 Workbench 的 `timeline.js` 与 `workbench.js` 标记为有序 ES modules，消除 Vite 的 legacy script 构建警告；合并 `workbench.js` 内重复的 `fmtTokens` 声明，并保留十亿级 token 的 `1.50B` 展示格式。
+- 验收：Vite production build 成功生成 JS bundle；WorkBench KPI、轨迹、JS 语法和桌面 release `cargo check` 全部通过；浏览器 reload 后总览、时区、价格更新入口正常，控制台错误数为 0。
+- 边界：这是开发与打包链路修复，不替代真实 `.app` Computer Use、签名/公证、公共目录成功发布和外部试用验收。
