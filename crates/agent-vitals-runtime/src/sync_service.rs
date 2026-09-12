@@ -629,4 +629,52 @@ mod tests {
             assert!(!cl2.errors.is_empty(), "下次 sync 重试坏文件（诚实噪声）");
         });
     }
+
+    #[test]
+    fn configured_retention_window_is_applied_by_sync_maintenance() {
+        with_isolated_home(|_home| {
+            let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
+            crate::retention::save_retention_months(&data, 1).unwrap();
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&data),
+                crate::sql_sync::now_ms(),
+            ).unwrap();
+            db.begin_run("retention-test", "test", 1).unwrap();
+            let cutoff = crate::sql_sync::retention_cutoff_ms(
+                &crate::clock::current_month_beijing(), 0,
+            ).unwrap();
+            db.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                     source_event_id, observation_kind, event_ts_ms, event_peak,
+                     uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                     ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES ('expired-by-config', 'codex', 'm', 's', 'event', 'token_count',
+                         ?1, 0, 1, 0, 0, 0, 'retention-test', 1, 1)",
+                rusqlite::params![cutoff - 1],
+            ).unwrap();
+            drop(db);
+
+            sync_facts(&data).unwrap();
+
+            let db = agent_vitals_data::authority::AuthorityDb::open_readonly(
+                &agent_vitals_data::authority::default_authority_path(&data),
+            ).unwrap();
+            let remaining: i64 = db.conn().query_row(
+                "SELECT COUNT(*) FROM usage_facts WHERE fact_id = 'expired-by-config'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(remaining, 0, "maintenance must use the saved one-month window");
+        });
+    }
+
+    #[test]
+    fn malformed_retention_configuration_stops_sync_before_maintenance() {
+        with_isolated_home(|_home| {
+            let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
+            std::fs::create_dir_all(data.join("state")).unwrap();
+            std::fs::write(data.join("state").join("retention-config.json"), b"invalid").unwrap();
+            let error = sync_facts(&data).unwrap_err();
+            assert!(error.contains("retention configuration failed"), "{error}");
+        });
+    }
 }
