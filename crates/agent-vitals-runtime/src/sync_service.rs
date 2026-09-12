@@ -283,7 +283,7 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default(),
     );
-    let batches: [(&str, Vec<PathBuf>); 3] = [
+    let mut batches: Vec<(&str, Vec<PathBuf>)> = vec![
         (
             "claude-code",
             agent_vitals_hosts::claude_session::claude_project_files(&user_home),
@@ -299,6 +299,23 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
                 .unwrap_or_default(),
         ),
     ];
+    for source in crate::custom_sources::custom_source_roots(data_home)
+        .map_err(|error| format!("custom source configuration failed: {error}"))?
+    {
+        let files = match source.host.as_str() {
+            "claude-code" => agent_vitals_hosts::claude_session::claude_project_files(Path::new(&source.root)),
+            "codex" => agent_vitals_hosts::codex_session::codex_rollout_files(Path::new(&source.root)),
+            "dsh" => crate::sessions::discovery::dsh_session_files(Path::new(&source.root)),
+            _ => continue,
+        };
+        if let Some((_, batch)) = batches.iter_mut().find(|(host, _)| *host == source.host) {
+            batch.extend(files);
+        }
+    }
+    for (_, files) in &mut batches {
+        files.sort();
+        files.dedup();
+    }
     for (host, files) in batches {
         let mut r = HostSyncReport {
             host: host.to_string(),
@@ -675,6 +692,33 @@ mod tests {
             std::fs::write(data.join("state").join("retention-config.json"), b"invalid").unwrap();
             let error = sync_facts(&data).unwrap_err();
             assert!(error.contains("retention configuration failed"), "{error}");
+        });
+    }
+
+    #[test]
+    fn malformed_custom_source_configuration_stops_sync() {
+        with_isolated_home(|_home| {
+            let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
+            std::fs::create_dir_all(data.join("state")).unwrap();
+            std::fs::write(data.join("state").join("custom-sources.json"), b"invalid").unwrap();
+            let error = sync_facts(&data).unwrap_err();
+            assert!(error.contains("custom source configuration failed"), "{error}");
+        });
+    }
+
+    #[test]
+    fn custom_claude_root_is_ingested_by_normal_sync() {
+        with_isolated_home(|home| {
+            let custom_home = home.join("custom-claude");
+            claude_session(&custom_home);
+            let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
+            assert!(crate::custom_sources::add_custom_source_root(
+                &data, "claude-code", &custom_home,
+            ).unwrap());
+            let report = sync_facts(&data).unwrap();
+            let claude = report.hosts.iter().find(|host| host.host == "claude-code").unwrap();
+            assert_eq!(claude.files_synced, 1);
+            assert_eq!(claude.appended, 2);
         });
     }
 }

@@ -4060,7 +4060,7 @@ function openSessionFromFinding(f) {
 
 async function loadSources(reset) {
   if (reset) {
-    srcState = { loaded: true, error: false, sources: null, sync: null, paused: false };
+    srcState = { loaded: true, error: false, sources: null, sync: null, paused: false, customRoots: [] };
     document.getElementById("src-banner").hidden = true;
   }
   srcState.loaded = true;
@@ -4069,9 +4069,11 @@ async function loadSources(reset) {
   // 两个数据源独立拉：一个失败不吞另一个（partial 照样渲染，横幅明说缺哪个）。
   let err = null;
   try {
-    const r = await invoke("data_source_status");
+    const [r, custom] = await Promise.all([invoke("data_source_status"), invoke("custom_source_roots")]);
     if (!r || r.status !== "ok") throw new Error((r && r.reason) || "数据源状态不可用");
     srcState.sources = Array.isArray(r.sources) ? r.sources : [];
+    if (!custom || custom.status !== "ok") throw new Error((custom && custom.reason) || "自定义目录配置不可用");
+    srcState.customRoots = Array.isArray(custom.sources) ? custom.sources : [];
   } catch (e) { err = e; }
   try {
     const ov = await invoke("read_overview");
@@ -4124,6 +4126,7 @@ function renderSources() {
   }
 
   const cards = document.getElementById("src-cards");
+  renderCustomSourceRoots();
   cards.innerHTML = "";
   if (srcState.error && !srcState.sources) {
     foot.textContent = "数据源状态读取失败，见上方错误横幅。";
@@ -4136,6 +4139,61 @@ function renderSources() {
   }
   for (const source of sources) cards.appendChild(renderSourceCard(source));
   foot.textContent = "共 " + sources.length + " 个数据源 · 扫描状态与会话查询相互独立。";
+}
+
+function renderCustomSourceRoots() {
+  const host = document.getElementById("src-custom-host");
+  const root = document.getElementById("src-custom-root");
+  const choose = document.getElementById("src-custom-choose");
+  const add = document.getElementById("src-custom-add");
+  const list = document.getElementById("src-custom-list");
+  const status = document.getElementById("src-custom-status");
+  if (!host || !root || !choose || !add || !list || !status) return;
+  const show = (text) => { status.hidden = false; status.textContent = text; };
+  choose.onclick = async () => {
+    choose.disabled = true;
+    try {
+      const selected = await invoke("pick_custom_source_root");
+      if (selected) {
+        root.value = selected;
+        add.disabled = false;
+        status.hidden = true;
+      }
+    } catch (e) { show("无法打开目录选择：" + errText(e)); status.focus(); }
+    finally { choose.disabled = false; }
+  };
+  add.onclick = async () => {
+    if (!root.value) return;
+    add.disabled = true;
+    try {
+      const saved = await invoke("add_custom_source_root", { input: { host: host.value, root: root.value } });
+      show(saved.changed ? "已添加目录，正在启动同步。" : "该目录已在读取范围内，正在重新同步。");
+      await invoke("trigger_sync");
+      await loadSources(true);
+    } catch (e) { show("添加失败：" + errText(e)); status.focus(); }
+    finally { add.disabled = !root.value; }
+  };
+  list.textContent = "";
+  for (const source of srcState.customRoots || []) {
+    const row = document.createElement("div");
+    row.className = "src-custom-row";
+    const text = document.createElement("div");
+    text.className = "src-custom-path";
+    text.textContent = (HOST_DISPLAY[source.host] || source.host) + " · " + source.root;
+    const remove = document.createElement("button");
+    remove.className = "btn secondary";
+    remove.textContent = "移除读取位置";
+    remove.onclick = async () => {
+      remove.disabled = true;
+      try {
+        await invoke("remove_custom_source_root", { input: { host: source.host, root: source.root } });
+        show("已移除读取位置；已导入数据仍保留。");
+        await loadSources(true);
+      } catch (e) { remove.disabled = false; show("移除失败：" + errText(e)); status.focus(); }
+    };
+    row.append(text, remove);
+    list.appendChild(row);
+  }
 }
 
 function renderSourceCard(src) {

@@ -1022,6 +1022,12 @@ button.chip.active {
   font-weight: normal;
   padding-top: 2px;
 }
+.src-custom { margin: 12px 0; }
+.src-custom-list { margin-top: 10px; }
+.src-custom-row { display: flex; gap: 12px; align-items: center; justify-content: space-between;
+  padding: 8px 0; border-bottom: 1px solid var(--line, #dce4f2); }
+.src-custom-row:last-child { border-bottom: 0; }
+.src-custom-path { overflow-wrap: anywhere; min-width: 0; }
 
 /* ---------- v0.9 Stage D：KPI 月度带 / 双轨账 / 决策卡 ---------- */
 /* 月度带：与 KPI 行同构的第二行（本月口径）+ 预算小卡。预算口径「仅 DSH」

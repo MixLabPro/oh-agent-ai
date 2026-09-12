@@ -42,7 +42,7 @@
         <div class="panel-title">尚未发现 AI 会话</div>
         <div class="muted">还没有在标准本地位置发现可读取的支持工具记录。开始一次受支持工具会话后会自动再次发现；不会生成测试调用或费用。</div>
         <div class="billing-form-actions">
-          <button class="btn secondary" id="ov-no-records-sources">查看数据源</button>
+          <button class="btn secondary" id="ov-no-records-sources">选择其他位置</button>
           <button class="btn secondary" id="ov-no-records-sample">查看样例</button>
         </div>
         <div class="billing-preview" id="ov-no-records-sample-content" hidden></div>
@@ -453,6 +453,30 @@
       <div class="sync-row">
         <span id="src-sync" class="muted">尚未同步</span>
       </div>
+
+      <section class="src-custom panel" aria-labelledby="src-custom-title">
+        <div class="panel-title" id="src-custom-title">其他本机位置</div>
+        <div class="muted">选择包含该工具数据目录的宿主根目录：Claude Code 选择含 <code>.claude</code> 的目录，Codex 选择含 <code>.codex</code> 的目录，DSH 选择含 <code>sessions</code> 的目录。添加后会在下一次同步读取；不会上传内容。</div>
+        <div class="billing-form">
+          <label>工具
+            <select id="src-custom-host">
+              <option value="claude-code">Claude Code</option>
+              <option value="codex">Codex</option>
+              <option value="dsh">DeepSeek Harness</option>
+            </select>
+          </label>
+          <label>目录
+            <input id="src-custom-root" type="text" readonly aria-describedby="src-custom-help src-custom-status" />
+          </label>
+          <div class="billing-form-actions">
+            <button id="src-custom-choose" class="btn secondary">选择目录</button>
+            <button id="src-custom-add" class="btn" disabled>添加并同步</button>
+          </div>
+        </div>
+        <div class="muted" id="src-custom-help">只能添加现有的绝对路径；可随时移除配置，移除不删除已导入数据。</div>
+        <div id="src-custom-status" class="billing-preview" hidden role="alert" tabindex="-1"></div>
+        <div id="src-custom-list" class="src-custom-list"></div>
+      </section>
 
       <div id="src-cards" class="src-cards"></div>
       <div class="note" id="src-foot"></div>

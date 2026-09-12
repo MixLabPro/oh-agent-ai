@@ -1425,6 +1425,47 @@ struct RetentionConfigInput {
     months: u32,
 }
 
+#[derive(Deserialize)]
+struct CustomSourceRootInput {
+    host: String,
+    root: String,
+}
+
+#[tauri::command]
+fn custom_source_roots() -> Value {
+    let data_home = overview::data_home();
+    match agent_vitals_runtime::custom_sources::custom_source_roots(&data_home) {
+        Ok(sources) => serde_json::json!({ "status": "ok", "sources": sources }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
+    }
+}
+
+/// 用户发起的原生目录选择。选择的是宿主根目录（包含 `.claude` / `.codex`
+/// 或 `sessions` 的目录），取消不是错误；不会在此处读取或写入会话内容。
+#[tauri::command]
+fn pick_custom_source_root() -> Option<String> {
+    rfd::FileDialog::new().pick_folder()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn add_custom_source_root(input: CustomSourceRootInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let changed = agent_vitals_runtime::custom_sources::add_custom_source_root(
+        &data_home, &input.host, Path::new(&input.root),
+    )?;
+    Ok(serde_json::json!({ "status": "saved", "changed": changed }))
+}
+
+#[tauri::command]
+fn remove_custom_source_root(input: CustomSourceRootInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let changed = agent_vitals_runtime::custom_sources::remove_custom_source_root(
+        &data_home, &input.host, Path::new(&input.root),
+    )?;
+    Ok(serde_json::json!({ "status": "removed", "changed": changed }))
+}
+
 #[tauri::command]
 fn retention_config() -> Value {
     let data_home = overview::data_home();
@@ -2108,6 +2149,10 @@ pub fn run() {
             billing_declarations,
             revoke_billing_declaration,
             billing_declaration_impact_preview,
+            custom_source_roots,
+            pick_custom_source_root,
+            add_custom_source_root,
+            remove_custom_source_root,
             retention_config,
             save_retention_config,
             budget_config,

@@ -26,6 +26,7 @@
 
 pub mod budget;
 pub mod clock;
+pub mod custom_sources;
 pub mod home;
 pub mod export;
 pub mod ingest_service;
