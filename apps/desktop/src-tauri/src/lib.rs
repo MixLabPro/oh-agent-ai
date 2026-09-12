@@ -7,6 +7,7 @@
 //! 两个格式。
 mod overview;
 mod store;
+mod budget_alerts;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1145,6 +1146,7 @@ fn sync_tick(app: &AppHandle) {
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
     refresh_hosts();
     refresh(app);
+    budget_alerts::maybe_notify(app);
     // DSH fold 或事实同步成功后广播；其他来源的失败不隐藏本轮可用结果。
     // sync-facts 暂未返回新增计数，因此成功扫描也会刷新；webview 未就绪时由
     // 下一次加载读取最新结果，事件桥不承担持久化。
@@ -1269,6 +1271,14 @@ fn focus_tab(app: &AppHandle, tab: &str) {
     }
     show_workbench(app);
     let _ = app.emit("focus-tab", tab);
+}
+
+/// 系统预算提醒的唯一点击目标。只接受预算页，避免通知 payload 变成任意
+/// 工作台导航入口；写目标先于显示，工作台隐藏时也能在下次聚焦时消费。
+#[tauri::command]
+fn focus_budget_from_notification(app: AppHandle) -> Result<(), String> {
+    focus_tab(&app, "budget");
+    Ok(())
 }
 
 /// 动态菜单 id → 会话深链目标（spec §9.2 #12）。纯函数，单测钉住映射：
@@ -2212,6 +2222,7 @@ fn capture_workbench_screenshot(app: AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(SyncLock(Mutex::new(())))
         .manage(SyncRequests(Mutex::new(std::collections::BTreeMap::new())))
         // fold 事件去抖状态：tick/手动线程共享（见 FoldEventDebounce 注释）。
@@ -2287,6 +2298,7 @@ pub fn run() {
             focus_session,
             peek_focus_target,
             clear_focus_target,
+            focus_budget_from_notification,
             capture_workbench_screenshot,
         ])
         .setup(|app| {

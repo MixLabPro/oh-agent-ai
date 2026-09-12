@@ -8,6 +8,27 @@
 const { invoke } = window.__TAURI__.core;
 // 事件桥（fold 完成事件，见下方「事件桥」一节）从同一套全局 API 取 listen。
 const { listen } = window.__TAURI__.event;
+const notificationApi = window.__TAURI__.notification;
+
+// 系统预算提醒只允许跳回预算页；通知正文不承载路径、原始日志或敏感金额。
+async function subscribeBudgetNotificationActions() {
+  if (!notificationApi || !notificationApi.onAction) return;
+  try {
+    await notificationApi.registerActionTypes([{
+      id: "budget-alert",
+      actions: [{ id: "open-budget", title: "查看预算" }],
+    }]);
+    await notificationApi.onAction((notification) => {
+      if (notification && notification.actionTypeId === "budget-alert") {
+        invoke("focus_budget_from_notification").catch((e) => {
+          console.warn("[workbench] 预算提醒跳转失败", e);
+        });
+      }
+    });
+  } catch (e) {
+    console.warn("[workbench] 系统预算提醒 action 不可用", e);
+  }
+}
 
 // ---------- 格式化（与弹窗 main.js / 托盘 lib.rs 同 spec，不许各报各的格式） ----------
 
@@ -4357,6 +4378,7 @@ async function recoverSource(button, host, actionKind) {
 // ---------- 初始化 ----------
 
 function init() {
+  subscribeBudgetNotificationActions();
   // fold 完成事件桥：先订阅再首屏渲染，缩小「事件早于 listen」的丢窗口
   // （丢的那几个由 5 分钟 tick / 手动同步兜底，见事件桥一节注释）。
   subscribeFoldEvent();

@@ -19,6 +19,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2.3.0"
 # 计价/聚合本体在 domain —— 菜单栏不许长第四份拷贝（CLAUDE.md 的 cost 锁步）。本
 # crate 只调 domain::cost 的纯函数，不放任何定价/覆盖率判断。
 agent-vitals-domain = { path = "../../../crates/agent-vitals-domain" }
