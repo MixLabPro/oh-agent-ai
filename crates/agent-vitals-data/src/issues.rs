@@ -268,22 +268,34 @@ pub fn normalize_issue_object(issue_type: &str, object: &str) -> String {
                 format!("{object}/*")
             }
         }
-        "SV611" => strip_counters(object, "连续重复"),
-        "SV613" => strip_counters(object, "进度停滞: 连续工具失败"),
-        "SV614" => strip_counters(object, "权限异常: 危险模式"),
+        "SV611" => normalize_repetition_description(object),
+        "SV613" => normalize_failure_stall_description(object),
+        "SV614" => normalize_permission_description(object),
         _ => object.to_string(),
     }
 }
 
-fn strip_counters(object: &str, prefix: &str) -> String {
-    if object.starts_with(prefix) {
-        prefix.to_string()
+fn normalize_repetition_description(object: &str) -> String {
+    if let Some((prefix, _)) = object.split_once("连续重复") {
+        format!("{prefix}连续重复")
     } else {
-        object
-            .split_whitespace()
-            .filter(|part| !part.chars().all(|c| c.is_ascii_digit()) && *part != "次")
-            .collect::<Vec<_>>()
-            .join(" ")
+        object.to_string()
+    }
+}
+
+fn normalize_failure_stall_description(object: &str) -> String {
+    if object.starts_with("进度停滞:") {
+        "进度停滞: 连续工具失败".to_string()
+    } else {
+        object.to_string()
+    }
+}
+
+fn normalize_permission_description(object: &str) -> String {
+    if let Some((prefix, _)) = object.split_once("授予") {
+        format!("{prefix}授予")
+    } else {
+        object.to_string()
     }
 }
 
@@ -901,6 +913,9 @@ mod tests {
         assert_eq!(normalize_issue_object("SV604", "~/.ssh/authorized_keys"), "~/.ssh/*");
         assert_eq!(normalize_issue_object("SV605", "/ingest/export/summary/state"), "/ingest/export/*");
         assert_eq!(normalize_issue_object("SV611", "read 连续重复 3 次"), "read 连续重复");
+        assert_eq!(normalize_issue_object("SV613", "进度停滞: 连续 4 个工具失败（首个 read）"), "进度停滞: 连续工具失败");
+        assert_eq!(normalize_issue_object("SV613", "进度停滞: 连续 9 个工具失败（首个 write）"), "进度停滞: 连续工具失败");
+        assert_eq!(normalize_issue_object("SV614", "权限异常: 危险模式 danger-full-access 授予 1 次"), "权限异常: 危险模式 danger-full-access 授予");
         assert_eq!(normalize_issue_object("SV610", "danger-full-access"), "danger-full-access");
     }
 
