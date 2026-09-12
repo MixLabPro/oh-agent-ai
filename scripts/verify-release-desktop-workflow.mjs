@@ -8,11 +8,15 @@ const workflow = readFileSync(path.join(repo, ".github/workflows/release-desktop
 const checks = [
   ["tag trigger", 'tags: ["app-v*"]'],
   ["manual release tag input", "release_tag:"],
+  ["Intel runner matrix", "runner: macos-13"],
+  ["Apple Silicon runner matrix", "runner: macos-14"],
+  ["architecture-specific staging", "Stage architecture-specific artifacts"],
+  ["architecture-specific artifact upload", "path: dist/${{ matrix.arch }}"],
   ["tag validation", "release tag must start with app-v"],
   ["pinned Tauri CLI", "tauri-cli --version 2.11.4 --locked"],
   ["noninteractive build", "cargo tauri build --ci --bundles app,dmg"],
-  ["build architecture check", "--require-architecture=$expected"],
-  ["publish artifact path", "dist/macos/agent-vitals.app"],
+  ["build architecture check", "--require-architecture=$EXPECTED_ARCH"],
+  ["publish artifact path", "find dist -type d -path \"*-${arch}/agent-vitals.app\""],
   ["strict signature check", "--require-developer-id"],
   ["notarization validation", "xcrun stapler validate"],
   ["artifact checksums", "shasum -a 256 *.zip *.dmg > SHA256SUMS"],
@@ -33,8 +37,10 @@ for (const [label, needle] of checks) {
   }
 }
 for (const [label, needle, minimum] of [
-  ["build/publish runner architecture mapping", "RUNNER_ARCH", 2],
-  ["build/publish strict architecture assertion", "--require-architecture=$expected", 2],
+  ["runner/matrix architecture mapping", "EXPECTED_ARCH", 2],
+  ["publish architecture loop", "for arch in x86_64 arm64", 1],
+  ["build strict architecture assertion", "--require-architecture=$EXPECTED_ARCH", 1],
+  ["publish strict architecture assertion", "--require-architecture=$arch", 1],
 ]) {
   const count = occurrences(needle);
   if (count >= minimum) console.log(`ok   ${label}: ${count}`);

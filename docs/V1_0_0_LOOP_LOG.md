@@ -2026,6 +2026,15 @@
   各至少出现两次，同时保留发布资产路径检查。
 - 验收：静态校验器、YAML 解析和 `git diff --check` 通过。
 
+## Loop 287 · 双架构 artifact 路径收口
+
+- 发现：将构建 job 扩展为双架构后，直接上传 Tauri 原始 bundle 多路径可能丢失架构
+  目录，publish job 的下载路径不稳定。
+- 修复：build job 先把 `.app` 和 DMG 整理到 `dist/<arch>/`，再按架构上传；publish
+  job 按 `x86_64`/`arm64` 查找、复验、公证、封装并分别命名资产。
+- 验收：发布 workflow 静态校验器新增矩阵/分架构 artifact 断言；本地校验器、YAML
+  解析和 `git diff --check` 通过。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；
