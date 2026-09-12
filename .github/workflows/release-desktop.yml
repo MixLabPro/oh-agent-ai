@@ -97,10 +97,20 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
       - uses: actions/download-artifact@v4
         with:
           name: agent-vitals-macos-${{ inputs.release_tag || github.ref_name }}
           path: dist
+
+      - name: Re-verify downloaded app
+        run: node scripts/verify-macos-app-bundle.mjs dist/macos/agent-vitals.app --require-developer-id
+
+      - name: Re-verify downloaded notarization ticket
+        run: xcrun stapler validate dist/macos/agent-vitals.app
 
       - name: Publish app and DMG
         env:

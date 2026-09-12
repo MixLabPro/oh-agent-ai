@@ -1835,3 +1835,15 @@
 - 核对：已验证本机 `tauri-cli 2.11.4` 的帮助，`--bundles app,dmg` 合法；CI runner 不应依赖环境变量隐式关闭交互。
 - 修复：桌面构建命令增加显式 `--ci`，保留 app/DMG 双产物和签名/公证流程。
 - 验收：YAML 与 diff 检查通过；发布构建不再因交互提示停滞。
+
+## Loop 262 · artifact 下载后再次验证
+
+- 发现：桌面包只在 build job 验证签名/公证，artifact 上传下载后的副本没有再次检查，无法排除归档传输损坏。
+- 修复：publish job 下载后重新运行 `verify-macos-app-bundle.mjs --require-developer-id` 与 `xcrun stapler validate`，通过后才封装和上传 Release 资产。
+- 验收：YAML 与 diff 检查通过；发布链路在 build 和 publish 两个边界均有签名、公证和随包 CLI 验证。
+
+## Loop 263 · publish job 补齐验证脚本来源
+
+- 发现：publish job 原先只下载 artifact，没有 checkout 仓库；新增的包预检脚本无法在下载后验证步骤中找到。
+- 修复：publish job 按同一 `release_tag` checkout 代码，再执行下载副本的严格签名和 notarization 校验。
+- 验收：YAML 与 diff 检查通过；build/publish 两个 job 的代码 ref 和发布 tag 保持一致。
