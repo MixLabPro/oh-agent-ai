@@ -107,6 +107,7 @@ fn beijing_today_yyyy_mm_dd() -> String {
 /// schema 对齐后已删。前端想用这些维度时需先扩 mcp::sessions_search 的 args
 /// schema，再回来加 IPC 参数；目前工作台只用到 day / month / host_kind / model / provider /
 /// page_size / cursor。
+#[allow(clippy::too_many_arguments)]
 fn list_args(
     day: &Option<String>,
     month: &Option<String>,
@@ -218,6 +219,7 @@ fn run_json(mut cmd: Command) -> Result<Value, Value> {
 /// `YYYY-MM` 字符串透传。两个都给时 store.rs `list_args` 优先 month（更粗、
 /// 用户主动选择）。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn sessions_list(
     state: tauri::State<'_, StoreBuildLock>,
     day: Option<String>,
@@ -368,7 +370,7 @@ mod tests {
     fn list_args_full() {
         let some = &Some("x".to_string());
         assert_eq!(
-            list_args(some, &None, some, Some(7), &Some("c".to_string())),
+            list_args(some, &None, some, &None, &Some("x".to_string()), &None, &None, Some(7), &Some("c".to_string())),
             vec!["sessions", "list", "--json",
                  "--day", "x", "--host-kind", "x", "--page-size", "7",
                  "--cursor", "c"]
@@ -381,7 +383,7 @@ mod tests {
     #[test]
     fn list_args_month_mode_emits_month_flag_only() {
         assert_eq!(
-            list_args(&None, &Some("2026-08".to_string()), &None, None, &None),
+            list_args(&None, &Some("2026-08".to_string()), &None, &None, &None, &None, &None, None, &None),
             vec!["sessions", "list", "--json", "--month", "2026-08"]
         );
     }
@@ -394,7 +396,7 @@ mod tests {
             list_args(
                 &Some("2026-08-15".to_string()),
                 &Some("2026-08".to_string()),
-                &None, None, &None,
+                &None, &None, &None, &None, &None, None, &None,
             ),
             vec!["sessions", "list", "--json",
                  "--month", "2026-08"]
@@ -409,9 +411,8 @@ mod tests {
             list_args(
                 &None,
                 &Some("2026-08".to_string()),
-                &Some("dsh".to_string()),
-                Some(100),
-                &None,
+                &None, &None, &Some("dsh".to_string()), &None, &None,
+                Some(100), &None,
             ),
             vec!["sessions", "list", "--json",
                  "--month", "2026-08",
@@ -425,7 +426,7 @@ mod tests {
     /// IPC 不替前端报错而是补一个今天的 `--day` —— 这一行是契约面。
     #[test]
     fn list_args_default_day_is_today() {
-        let a = list_args(&None, &None, &None, None, &None);
+        let a = list_args(&None, &None, &None, &None, &None, &None, &None, None, &None);
         // 第一段固定
         assert_eq!(&a[0..3], &["sessions", "list", "--json"]);
         // --day 必须紧跟固定段（位置由 list_args 保证）
