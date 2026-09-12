@@ -1141,3 +1141,9 @@
 - 安装：将现有 `/Applications/agent-vitals.app` 可恢复移动为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913`，再安装本轮构建的 release `.app`；没有覆盖旧包数据。
 - 验收：安装后启动进程成功；Info.plist 为 `com.mixlabpro.agent-vitals-menubar` / `0.11.0`，内置 CLI 为 `1.3.0`；安装后的 CLI 在隔离配置下仍返回 `America/Los_Angeles` 与 `2026-09-12`。
 - 边界：本轮只证明安装、启动和内置资源，未把不可见窗口启动扩大为 Computer Use；通知权限、签名/公证和外部试用仍待完成。
+
+## Loop 150 · 发布前 golden 与前端门禁
+
+- 验收：`AGENT_VITALS_BIN=target/release/agent-vitals python3 tests/golden_runner.py --diff` 的 15 个 case 全部逐字节一致；Vite production build 通过。
+- 发现：仓库级 `cargo fmt --all -- --check` 仍报告既有未格式化 Rust 文件；本轮未运行 formatter 改写文件，避免制造无关大 diff。该检查不作为本轮代码改动的通过证据。
+- 边界：真实 `.app` 窗口 Computer Use、通知权限、签名/公证和外部试用仍待完成；不因此勾选 AC19/AC21 或发布门禁。
