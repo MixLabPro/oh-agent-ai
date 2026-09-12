@@ -806,6 +806,7 @@ async function renderBudgetSettings() {
       origin.hidden = true;
     }
   } catch (_) { /* 配置读取失败不遮蔽总览 */ }
+  renderBudgetProfiles();
   if (save.dataset.bound === "1") return;
   save.dataset.bound = "1";
   const refreshAfterBudgetAction = async (message) => {
@@ -867,6 +868,67 @@ async function renderBudgetSettings() {
       save.disabled = false;
     }
   };
+}
+
+async function renderBudgetProfiles() {
+  const host = document.getElementById("ov-budget-profiles");
+  if (!host) return;
+  const status = document.getElementById("ov-budget-settings-status");
+  if (!status) return;
+  host.textContent = "";
+  let profiles = [];
+  try {
+    const result = await invoke("budget_profiles_status", { month: beijingMonth() });
+    profiles = result && result.status === "ok" ? (result.profiles || []) : [];
+  } catch (_) { /* 旧库/空库仍可使用兼容预算表单 */ }
+  for (const id of ["estimate", "confirmed"]) {
+    const profile = profiles.find((p) => p.profile_id === id) || {};
+    const row = document.createElement("div");
+    row.className = "billing-form profile-form";
+    const title = document.createElement("div");
+    title.className = "muted";
+    title.textContent = id === "estimate" ? "按量估算观察预算" : "已确认按量支出预算";
+    const currency = document.createElement("select");
+    currency.innerHTML = '<option value="CNY">CNY</option><option value="USD">USD</option>';
+    currency.value = profile.currency || "CNY";
+    const monthly = document.createElement("input");
+    monthly.type = "number"; monthly.min = "1"; monthly.step = "1";
+    monthly.placeholder = "月预算（最小货币单位）";
+    monthly.value = profile.monthly_minor ?? "";
+    const daily = document.createElement("input");
+    daily.type = "number"; daily.min = "1"; daily.step = "1";
+    daily.placeholder = "日预算（可选）";
+    daily.value = profile.daily_minor ?? "";
+    const warning = document.createElement("input");
+    warning.type = "number"; warning.min = "0"; warning.max = "100"; warning.step = "1";
+    warning.value = profile.warning_ratio_bp == null ? 80 : Number(profile.warning_ratio_bp) / 100;
+    const save = document.createElement("button");
+    save.className = "btn"; save.textContent = "保存";
+    save.onclick = async () => {
+      const m = Number(monthly.value), d = daily.value === "" ? null : Number(daily.value);
+      const w = Number(warning.value);
+      if (!Number.isSafeInteger(m) || m <= 0 || (d !== null && (!Number.isSafeInteger(d) || d <= 0)) ||
+          !Number.isSafeInteger(w) || w < 0 || w > 100) {
+        status.textContent = "请填写正整数月预算；日预算可留空；阈值需为 0–100。";
+        status.hidden = false;
+        return;
+      }
+      save.disabled = true;
+      try {
+        await invoke("save_budget_profile", { input: {
+          profile_id: id, currency: currency.value, monthly_minor: m,
+          daily_minor: d, warning_ratio_bp: w * 100,
+        } });
+        status.textContent = "已保存" + (id === "estimate" ? "估算观察" : "已确认支出") + "预算；币种独立统计。";
+        status.hidden = false;
+        await renderOverview();
+      } catch (e) {
+        status.textContent = "保存失败：" + errText(e); status.hidden = false;
+      } finally { save.disabled = false; }
+    };
+    row.append(title, currency, monthly, daily, warning, save);
+    host.appendChild(row);
+  }
 }
 
 function billingMonthWindow(month) {

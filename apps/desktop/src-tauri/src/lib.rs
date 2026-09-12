@@ -1432,6 +1432,15 @@ struct BudgetConfigInput {
 }
 
 #[derive(Deserialize)]
+struct BudgetProfileInput {
+    profile_id: String,
+    currency: String,
+    monthly_minor: i64,
+    daily_minor: Option<i64>,
+    warning_ratio_bp: i64,
+}
+
+#[derive(Deserialize)]
 struct RetentionConfigInput {
     months: u32,
 }
@@ -1587,6 +1596,20 @@ fn budget_profiles_status(month: String) -> Value {
     ).unwrap_or_else(|| serde_json::json!({
         "status": "unavailable", "reason": "budget profile status unavailable",
     }))
+}
+
+#[tauri::command]
+fn save_budget_profile(input: BudgetProfileInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms)
+        .map_err(|error| error.to_string())?;
+    db.budget_profile_set(
+        &input.profile_id, &input.currency, input.monthly_minor,
+        input.daily_minor, input.warning_ratio_bp, now_ms,
+    ).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "saved", "profile_id": input.profile_id, "currency": input.currency }))
 }
 
 #[tauri::command]
@@ -2283,6 +2306,7 @@ pub fn run() {
             save_retention_config,
             budget_config,
             budget_profiles_status,
+            save_budget_profile,
             save_budget_config,
             snooze_budget_until,
             clear_budget_snooze,
