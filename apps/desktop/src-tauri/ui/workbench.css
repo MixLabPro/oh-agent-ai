@@ -707,6 +707,13 @@ button.chip.active {
   background: var(--panel);
 }
 
+.issue-instance-detail {
+  display: block;
+  margin: 6px 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ---------- 数据源 ---------- */
 .src-cards {
   display: flex;

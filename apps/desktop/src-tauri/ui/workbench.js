@@ -4224,7 +4224,7 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
       const detailButton = el("button", "btn secondary");
       detailButton.type = "button";
       detailButton.textContent = "详情";
-      detailButton.addEventListener("click", () => showIssueInstanceDetail(instance.issue_id, line));
+      detailButton.addEventListener("click", () => showIssueInstanceDetail(instance.issue_id, line, instance));
       line.appendChild(detailButton);
       if (["open", "later", "acknowledged"].includes(instance.status || "open")) {
         for (const [status, label] of [["later", "稍后"], ["acknowledged", "已确认"], ["closed", "已解决"], ["wontfix", "不适用"]]) {
@@ -4252,19 +4252,33 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
   }
 }
 
-async function showIssueInstanceDetail(issueId, line) {
+async function showIssueInstanceDetail(issueId, line, seed) {
   const old = line.querySelector(".issue-instance-detail");
   if (old) { old.remove(); return; }
-  const detail = document.createElement("span");
+  const detail = document.createElement("div");
   detail.className = "issue-instance-detail muted";
-  detail.textContent = "读取详情…";
+  const renderDetail = (issue) => {
+    const metadata = issue && issue.metadata && typeof issue.metadata === "object"
+      ? issue.metadata : {};
+    detail.textContent = "详情：" + JSON.stringify({
+      issue_id: issue && issue.issue_id || issueId,
+      host_kind: issue && issue.host_kind || seed && seed.host_kind || null,
+      rule: issue && issue.rule || seed && seed.rule || null,
+      status: issue && issue.status || seed && seed.status || null,
+      evidence: issue && issue.evidence || seed && seed.evidence || null,
+      opened_at_ms: issue && issue.opened_at_ms || seed && seed.opened_at_ms || null,
+      metadata,
+    });
+  };
+  renderDetail(seed);
   line.appendChild(detail);
   try {
     const data = await invoke("issue_instance_read", { issueId });
     const issue = data && data.issue;
-    detail.textContent = issue ? " · " + JSON.stringify(issue.metadata || {}) : " · 详情不存在";
+    if (issue) renderDetail(issue);
+    else detail.textContent += " · 权威详情不存在";
   } catch (e) {
-    detail.textContent = " · 详情读取失败：" + (e.message || e);
+    detail.textContent += " · 权威详情读取失败：" + (e.message || e);
   }
 }
 
