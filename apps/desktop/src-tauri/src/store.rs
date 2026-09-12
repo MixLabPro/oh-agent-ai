@@ -102,15 +102,16 @@ fn beijing_today_yyyy_mm_dd() -> String {
 /// → CLI 走 `--month` 路径，返回该月全部会话。day 模式返回单日窗口（按小时聚合）。
 /// 同传两个时优先 month（更粗、user 主动选的）——这条排序按前端语义定，单测钉死。
 ///
-/// **旧 CLI 不再接受的 flag**：`--model` / `--from` / `--to` / `--query` / `--hour`
+/// **旧 CLI 不再接受的 flag**：`--from` / `--to` / `--query` / `--hour`
 /// / `--min-tokens`——这些维度 r2a_store 没实现，与权威库 sessions_search 输入
 /// schema 对齐后已删。前端想用这些维度时需先扩 mcp::sessions_search 的 args
-/// schema，再回来加 IPC 参数；目前工作台只用到 day / month / host_kind /
+/// schema，再回来加 IPC 参数；目前工作台只用到 day / month / host_kind / model /
 /// page_size / cursor。
 fn list_args(
     day: &Option<String>,
     month: &Option<String>,
     host_kind: &Option<String>,
+    model: &Option<String>,
     page_size: Option<usize>,
     cursor: &Option<String>,
 ) -> Vec<String> {
@@ -134,6 +135,10 @@ fn list_args(
     if let Some(h) = host_kind {
         a.push("--host-kind".into());
         a.push(h.clone());
+    }
+    if let Some(m) = model {
+        a.push("--model".into());
+        a.push(m.clone());
     }
     if let Some(p) = page_size {
         a.push("--page-size".into());
@@ -192,7 +197,7 @@ fn run_json(mut cmd: Command) -> Result<Value, Value> {
 /// async：spawn_blocking 把 CLI 子进程丢到阻塞线程池，主线程继续收托盘事件，
 /// 详见模块头注释。
 ///
-/// **参数扁平**（day / month / host_kind / page_size / cursor 五件）是 Tauri
+/// **参数扁平**（day / month / host_kind / model / page_size / cursor 六件）是 Tauri
 /// IPC 契约的一部分——`workbench.js` 的 invoke 调用面就是这五个扁平参数，
 /// 改成结构体要连带改前端调用面。5 个参数本就在 lint 阈值内。
 ///
@@ -206,6 +211,7 @@ pub async fn sessions_list(
     day: Option<String>,
     month: Option<String>,
     host_kind: Option<String>,
+    model: Option<String>,
     page_size: Option<usize>,
     cursor: Option<String>,
 ) -> Result<Value, Value> {
@@ -215,7 +221,7 @@ pub async fn sessions_list(
         let Some(bin) = resolve_binary() else {
             return Err(no_binary());
         };
-        let args = list_args(&day, &month, &host_kind, page_size, &cursor);
+        let args = list_args(&day, &month, &host_kind, &model, page_size, &cursor);
         let mut cmd = Command::new(&bin);
         cmd.args(&args);
         // 与 tick 同款：显式钉死 AGENT_VITALS_HOME，权威库 / salt / 状态文件都

@@ -2318,6 +2318,8 @@ async function fetchSessionsPage(gen) {
     // day 字段目前没用（保留 IPC 入参面，未来若加 day picker 再启用）。
     const monthVal = document.getElementById("sess-month").value;
     if (monthVal) args.month = monthVal;
+    const modelVal = document.getElementById("sess-model").value.trim();
+    if (modelVal) args.model = modelVal;
     // host 过滤（spec §7.3）：此命令的 Tauri 参数保持 Rust 的 snake_case 名称；
     // 传 camelCase 会被当作缺省 None，导致列表静默退回全宿主。过滤变化时调用方
     // 负责重置分页。
@@ -4535,6 +4537,8 @@ function init() {
   const sessMonthEl = document.getElementById("sess-month");
   sessMonthEl.value = beijingMonth();
   sessMonthEl.addEventListener("change", () => loadSessions(true));
+  const sessModelEl = document.getElementById("sess-model");
+  sessModelEl.addEventListener("change", () => loadSessions(true));
   document.getElementById("sess-back").addEventListener("click", () => {
     document.getElementById("sess-detail-view").hidden = true;
     document.getElementById("sess-list-view").hidden = false;

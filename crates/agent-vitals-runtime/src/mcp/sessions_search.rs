@@ -30,6 +30,7 @@ pub fn spec() -> ToolSpec {
                           "description": "Optional: only count each session's facts in this Beijing hour (for peak-hour drill-down). Requires date." },
                 "hosts": { "type": "array", "items": { "type": "string" },
                            "description": "Optional host filter (claude-code / codex / dsh). Empty/missing = all known hosts." },
+                "model": { "type": "string", "description": "Optional exact model id filter; missing model facts use <unknown>." },
                 "min_tokens": { "type": "integer", "minimum": 0,
                                 "description": "Optional: drop sessions whose window total is below this." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500,
@@ -119,6 +120,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
+    let model = args.get("model").and_then(Value::as_str);
     let min_tokens = args.get("min_tokens").and_then(Value::as_i64).unwrap_or(0);
     let limit = args
         .get("limit")
@@ -144,7 +146,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         None => (None, None),
     };
     let (rows, has_more, window_total, window_session_count) = authority_query::sessions_in_window(
-        conn, start_ms, end_ms, &hosts, hour, min_tokens, after_total, after_key, limit,
+        conn, start_ms, end_ms, &hosts, model, hour, min_tokens, after_total, after_key, limit,
     )
     .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?;
 

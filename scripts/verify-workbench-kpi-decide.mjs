@@ -48,6 +48,8 @@ ok(wb.includes('invoke("export_diagnostic_package")'),
   "脱敏诊断包由后端命令生成，不在前端拼接或上传");
 ok(wb.includes('args.host_kind = sessFilter') && !wb.includes('args.hostKind = sessFilter'),
   "会话宿主筛选透传 snake_case 参数，避免静默退回全宿主");
+ok(wb.includes('document.getElementById("sess-model")') && wb.includes('args.model = modelVal'),
+  "会话模型筛选透传到权威查询，避免只做前端假筛选");
 
 // ── vm 执行真实文件 ──
 function makeElement() {

@@ -822,6 +822,9 @@ enum SessionsAction {
         /// Filter by host kind (repeatable: `--host-kind claude-code --host-kind codex`)
         #[arg(long = "host-kind", value_name = "HOST")]
         host_kind: Vec<String>,
+        /// Restrict to this exact model id
+        #[arg(long)]
+        model: Option<String>,
         /// Drop sessions whose window total is below this
         #[arg(long)]
         min_tokens: Option<i64>,
@@ -3221,6 +3224,7 @@ session_store={store} fold={fold}"
                 month,
                 hour,
                 host_kind,
+                model,
                 min_tokens,
                 page_size,
                 cursor,
@@ -3252,6 +3256,9 @@ session_store={store} fold={fold}"
                         "hosts".into(),
                         Value::Array(host_kind.iter().cloned().map(Value::String).collect()),
                     );
+                }
+                if let Some(model) = model {
+                    args.insert("model".into(), Value::String(model.clone()));
                 }
                 if let Some(mt) = min_tokens {
                     args.insert("min_tokens".into(), Value::Number((*mt).into()));
