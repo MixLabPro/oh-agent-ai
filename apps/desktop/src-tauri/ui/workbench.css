@@ -1066,6 +1066,7 @@ button.chip.active {
   border-radius: 8px; background: rgba(207, 157, 36, .10); }
 .billing-prompt-actions { display: flex; gap: 8px; flex: 0 0 auto; }
 .billing-prompt .muted, .billing-review .muted { margin-top: 4px; }
+.billing-review .panel-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .billing-review-row { display: flex; align-items: center; justify-content: space-between;
   gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line, #dce4f2); }
 .billing-review-row:last-child { border-bottom: 0; }

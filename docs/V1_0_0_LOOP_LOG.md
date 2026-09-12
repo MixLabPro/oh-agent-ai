@@ -806,3 +806,10 @@
 - 修复：校正 `beforeDevCommand` 的工作目录，使用 `npm --prefix ui-dev run dev`；此前配置会把路径解析到 `apps/ui-dev`，导致 Tauri dev 在启动前退出。
 - 验收：`cargo tauri dev --no-watch -- -- --show-workbench` 成功启动 Vite (`127.0.0.1:5173`) 与 Rust debug 进程；Vite 页面访问和此前 `npm run build` 均通过。
 - 边界：开发二进制没有被 Computer Use 的应用列表识别为独立 bundle，本轮未声称完成开发窗口视觉 UAT；发布 `.app` 仍需单独验收。
+
+## Loop 100 · 套餐确认面板可访问状态与收起操作（自验收）
+
+- 修复：候选确认按钮新增 `aria-controls`/`aria-expanded` 状态；确认面板标题提供明确“收起”按钮，收起后焦点返回主按钮。
+- 保护：面板状态仍由单一 `billingReviewOpen` 管理，后台刷新不会清掉打开状态；无候选或“稍后”后会同步恢复 `aria-expanded=false`。
+- 验收：workbench JS 语法、Vite 构建和 `git diff --check` 通过；保留键盘焦点指示与可读按钮名称，符合 UI/UX 可访问性检查。
+- 边界：尚未在最终 `.app` 完成完整候选确认链点击回执，不勾选 AC13/AC27。

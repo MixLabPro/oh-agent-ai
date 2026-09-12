@@ -1295,9 +1295,11 @@ function renderBillingDeclarations(report) {
 function renderBillingImportCandidates(report) {
   const prompt = document.getElementById("ov-billing-prompt");
   const panel = document.getElementById("ov-billing-review-panel");
+  const reviewButton = document.getElementById("ov-billing-review");
+  const closeButton = document.getElementById("ov-billing-review-close");
   const copy = document.getElementById("ov-billing-prompt-copy");
   const list = document.getElementById("ov-billing-review-list");
-  if (!prompt || !panel || !copy || !list) return;
+  if (!prompt || !panel || !reviewButton || !closeButton || !copy || !list) return;
   bindBillingDeclarationPanel();
   const candidates = report && report.status === "ok" ? (report.candidates || []) : [];
   const pendingCount = candidates.filter((candidate) => candidate.status === "pending").length;
@@ -1317,10 +1319,12 @@ function renderBillingImportCandidates(report) {
   // “稍后”只压住尚未处理的提醒；已确认/已忽略项仍保留一个可回看的入口。
   prompt.hidden = !candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred);
   panel.hidden = !billingReviewOpen;
+  reviewButton.setAttribute("aria-expanded", String(billingReviewOpen));
   list.textContent = "";
   if (!candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred)) {
     billingReviewOpen = false;
     panel.hidden = true;
+    reviewButton.setAttribute("aria-expanded", "false");
     return;
   }
   copy.textContent = pendingCount
@@ -1338,6 +1342,7 @@ function renderBillingImportCandidates(report) {
   document.getElementById("ov-billing-review").onclick = () => {
     billingReviewOpen = true;
     panel.hidden = false;
+    reviewButton.setAttribute("aria-expanded", "true");
     list.textContent = "";
     for (const candidate of candidates) {
       const row = document.createElement("div");
@@ -1420,6 +1425,12 @@ function renderBillingImportCandidates(report) {
       row.append(detail, actions);
       list.appendChild(row);
     }
+  };
+  closeButton.onclick = () => {
+    billingReviewOpen = false;
+    panel.hidden = true;
+    reviewButton.setAttribute("aria-expanded", "false");
+    reviewButton.focus();
   };
 }
 
