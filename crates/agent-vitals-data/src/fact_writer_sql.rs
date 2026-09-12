@@ -458,7 +458,7 @@ impl<'a> SqlFactWriter<'a> {
                 ],
             )?;
             if n == 0 {
-                let attribution_conflict: bool = self
+                let (reclassification, attribution_conflict): (bool, bool) = self
                     .conn
                     .query_row(
                         "SELECT provider_id, provider_raw, billing_source, billing_mode,
@@ -489,13 +489,36 @@ impl<'a> SqlFactWriter<'a> {
                                 route_evidence_id.clone(),
                                 attribution_version.clone(),
                             ];
-                            Ok(existing
+                            // 版本是派生规则的标识，不是竞争证据。版本变化表示
+                            // 同源重分类，可在严格白名单内收敛；同版本下才比较
+                            // 七个证据字段并保留真实冲突。
+                            let reclassification = incoming[6].is_some() && incoming[8].is_some()
+                                && (existing[6] != incoming[6] || existing[8] != incoming[8]);
+                            let conflict = existing[..6]
                                 .iter()
-                                .zip(incoming.iter())
-                                .any(|(old, new)| old.is_some() && new.is_some() && old != new))
+                                .zip(incoming[..6].iter())
+                                .any(|(old, new)| old.is_some() && new.is_some() && old != new);
+                            Ok((reclassification, !reclassification && conflict))
                         },
                     )
-                    .unwrap_or(false);
+                    .unwrap_or((false, false));
+                if reclassification {
+                    self.conn.execute(
+                        "UPDATE usage_facts SET provider_id = ?2, provider_raw = ?3,
+                           billing_source = ?4, billing_mode = ?5, pricing_basis = ?6,
+                           evidence_basis = ?7, normalization_version = ?8,
+                           route_evidence_id = ?9, attribution_version = ?10, updated_at_ms = ?11
+                         WHERE fact_id = ?1",
+                        rusqlite::params![r.s("fact_id").unwrap_or_default(), provider_id, provider_raw,
+                            billing_source, billing_mode, pricing_basis, evidence_basis,
+                            normalization_version, route_evidence_id, attribution_version, self.now_ms],
+                    )?;
+                    self.conn.execute(
+                        "UPDATE data_quality_issues SET resolved_at_ms = ?2
+                         WHERE scope_key = ?1 AND resolved_at_ms IS NULL",
+                        rusqlite::params![format!("attribution_conflict:{}", r.s("fact_id").unwrap_or_default()), self.now_ms],
+                    )?;
+                } else {
                 if attribution_conflict {
                     self.write_rejected(
                         &format!(
@@ -535,6 +558,7 @@ impl<'a> SqlFactWriter<'a> {
                         self.now_ms,
                     ],
                 )?;
+                }
             }
             if n > 0 {
                 report.inserted += 1
@@ -682,6 +706,60 @@ mod tests {
             .unwrap();
         assert_eq!(total, 1, "同 fact 只落一行");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn attribution_version_change_reclassifies_without_open_conflict() {
+        let (db, path) = open_db("attribution-reclassification");
+        let mut original = mk_fact("e-reclass");
+        let fields = original.as_object_mut().unwrap();
+        fields.insert("provider_id".into(), json!("openai"));
+        fields.insert("billing_mode".into(), json!("subscription"));
+        fields.insert("pricing_basis".into(), json!("session-provider"));
+        fields.insert("evidence_basis".into(), json!("session-native"));
+        fields.insert("normalization_version".into(), json!("provider-v0.11"));
+        fields.insert("attribution_version".into(), json!("provider-v0.11"));
+        apply_txn(&db, 1_500, "sess-a", std::slice::from_ref(&original)).unwrap();
+        let mut replay = original.clone();
+        let fields = replay.as_object_mut().unwrap();
+        fields.insert("provider_id".into(), json!("cogfoundry.ai"));
+        fields.insert("billing_mode".into(), json!("metered_estimate"));
+        fields.insert("pricing_basis".into(), json!("official-api"));
+        fields.insert("normalization_version".into(), json!("provider-v0.12"));
+        fields.insert("attribution_version".into(), json!("provider-v0.12"));
+        apply_txn(&db, 1_600, "sess-a", std::slice::from_ref(&replay)).unwrap();
+        let row: (String, String, i64) = db.conn().query_row(
+            "SELECT provider_id, billing_mode, uncached_input_tokens FROM usage_facts", [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(row, ("cogfoundry.ai".into(), "metered_estimate".into(), 100));
+        let open: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM data_quality_issues WHERE resolved_at_ms IS NULL", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(open, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn same_attribution_version_with_conflicting_evidence_stays_open() {
+        let (db, path) = open_db("attribution-conflict");
+        let mut original = mk_fact("e-conflict");
+        let fields = original.as_object_mut().unwrap();
+        fields.insert("provider_id".into(), json!("openai"));
+        fields.insert("evidence_basis".into(), json!("session-native"));
+        fields.insert("normalization_version".into(), json!("provider-v0.11"));
+        fields.insert("attribution_version".into(), json!("provider-v0.11"));
+        apply_txn(&db, 1_500, "sess-a", std::slice::from_ref(&original)).unwrap();
+        let mut replay = original.clone();
+        replay.as_object_mut().unwrap().insert("evidence_basis".into(), json!("config-current"));
+        apply_txn(&db, 1_600, "sess-a", std::slice::from_ref(&replay)).unwrap();
+        let evidence: String = db.conn().query_row("SELECT evidence_basis FROM usage_facts", [], |r| r.get(0)).unwrap();
+        assert_eq!(evidence, "session-native", "true conflict must not silently overwrite evidence");
+        let open: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM data_quality_issues WHERE scope_key LIKE 'attribution_conflict:%' AND resolved_at_ms IS NULL", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(open, 1);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

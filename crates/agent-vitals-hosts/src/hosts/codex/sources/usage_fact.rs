@@ -397,8 +397,10 @@ fn consumed_to_usage_fact(
         "evidence_basis".into(),
         json!(attribution.evidence_basis.as_str()),
     );
-    fields.insert("normalization_version".into(), json!("provider-v0.11"));
-    fields.insert("attribution_version".into(), json!("provider-v0.11"));
+    // v0.12：归因重放以版本作为同源重分类门控。旧 v0.11 存量在重放时
+    // 可安全收敛为当前派生归属；同版本的竞争证据仍由 writer 报冲突。
+    fields.insert("normalization_version".into(), json!("provider-v0.12"));
+    fields.insert("attribution_version".into(), json!("provider-v0.12"));
     fields.insert("uncached_input_tokens".into(), json!(facts[0]));
     fields.insert("cache_read_tokens".into(), json!(facts[2]));
     fields.insert("cache_write_tokens".into(), json!(facts[3]));
