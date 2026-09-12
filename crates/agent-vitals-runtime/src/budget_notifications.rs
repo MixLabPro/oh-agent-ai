@@ -66,6 +66,20 @@ pub fn claim_delivery(
     key: &BudgetAlertDeliveryKey,
     now_ms: i64,
 ) -> Result<bool, String> {
+    claim_delivery_with(data_home, key, now_ms, || Ok(()))
+}
+
+/// 在同一把跨进程 lease 内完成“发送尝试 + 成功落账”。发送失败不会写入
+/// 去重账本，下一轮仍可重试；发送闭包应只做快速的系统通知调用。
+pub fn claim_delivery_with<F>(
+    data_home: &Path,
+    key: &BudgetAlertDeliveryKey,
+    now_ms: i64,
+    send: F,
+) -> Result<bool, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
     if now_ms < 0 { return Err("budget alert timestamp must be non-negative".to_string()); }
     let encoded = key.encoded()?;
     let directory = data_home.join("state");
@@ -76,6 +90,7 @@ pub fn claim_delivery(
     if state.deliveries.contains_key(&encoded) {
         return Ok(false);
     }
+    send()?;
     state.deliveries.insert(encoded, now_ms);
     write_state(&directory, &state)?;
     lock.release().map_err(|error| format!("budget alert delivery lock release failed: {error}"))?;
@@ -152,6 +167,16 @@ mod tests {
         std::fs::create_dir_all(home.join("state")).unwrap();
         std::fs::write(home.join("state").join(DELIVERY_FILE), b"not json").unwrap();
         assert!(claim_delivery(&home, &daily(BudgetAlertThreshold::Warn, 1), 100).is_err());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn failed_send_does_not_consume_delivery() {
+        let home = temporary_home("send-failure");
+        let _ = std::fs::remove_dir_all(&home);
+        let key = daily(BudgetAlertThreshold::Warn, 1);
+        assert!(claim_delivery_with(&home, &key, 100, || Err("permission denied".to_string())).is_err());
+        assert!(claim_delivery_with(&home, &key, 200, || Ok(())).unwrap());
         let _ = std::fs::remove_dir_all(&home);
     }
 
