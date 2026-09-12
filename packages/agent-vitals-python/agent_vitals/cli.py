@@ -990,11 +990,10 @@ def _main():
              "today sessions + recent N rows per host)",
     )
     p_snav.add_argument("--day", default="",
-                        help="Day to project (YYYY-MM-DD, Beijing day boundary; "
+                        help="Day to project (YYYY-MM-DD in the configured statistics timezone; "
                              "defaults to today)")
-    p_snav.add_argument("--timezone", default="Asia/Shanghai",
-                        help="Timezone of the projected day; only Asia/Shanghai "
-                             "is supported (§5.1)")
+    p_snav.add_argument("--timezone", default=None,
+                        help="Query-local IANA statistics timezone override; defaults to the saved or OS timezone")
     p_snav.add_argument("--recent", type=int, default=5,
                         help="How many recent rows per host; default 5")
     p_snav.add_argument("--json", action="store_true",
@@ -1714,13 +1713,13 @@ def _main():
             }
             env = sessions_sql.session_detail(payload, home)
         elif action == "navigation":
-            # `--day` 缺省 = 今天（北京日界,core 折叠的日期桶是 UTC+8 段;
-            # spec §5.1）——与 Rust 主入口同款缺省。
             day = getattr(args, "day", "")
-            if not day:
-                day = codex_cost_module.today_beijing()
+            timezone_name = getattr(args, "timezone", None)
+            if timezone_name is not None and sessions_sql.validate_timezone(timezone_name) is None:
+                print("sessions navigation: invalid IANA timezone %s" % timezone_name, file=sys.stderr)
+                sys.exit(2)
             nav = sessions_sql.sessions_navigation(
-                day, getattr(args, "recent", 5), home,
+                day, getattr(args, "recent", 5), home, timezone_name=timezone_name,
             )
             # envelope 序列化
             if getattr(args, "json", False):

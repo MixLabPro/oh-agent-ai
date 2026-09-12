@@ -408,6 +408,17 @@ class BeijingDateBoundsTests(unittest.TestCase):
         s = sessions_sql._ms_to_rfc3339_beijing(utc_2026_09_07_16_00)
         self.assertEqual(s, "2026-09-08T00:00:00.000+08:00")
 
+    def test_query_local_timezone_override_is_dst_aware(self):
+        """显式查询时区只作用于本次调用，并正确处理 23 小时春季切换月。"""
+        self.assertIsNotNone(sessions_sql.validate_timezone("America/Los_Angeles"))
+        self.assertIsNone(sessions_sql.validate_timezone("not/a-zone"))
+        with sessions_sql._timezone_scope("America/Los_Angeles") as valid:
+            self.assertTrue(valid)
+            start, end = sessions_sql.beijing_month_bounds_ms("2026-03")
+            self.assertEqual(start, 1772352000000)  # 2026-03-01T08:00:00Z
+            self.assertEqual(end, 1775026800000)    # 2026-04-01T07:00:00Z
+            self.assertEqual(end - start, 31 * sessions_sql.DAY_MS - sessions_sql.HOUR_MS)
+
 
 # ────────────────────────────────────────────────────────────────────────
 # 缺库 → typed error envelope（AuthorityError → ToolError 映射守门）

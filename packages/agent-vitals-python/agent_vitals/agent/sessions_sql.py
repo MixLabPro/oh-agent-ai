@@ -37,8 +37,11 @@ import math
 import os
 import sqlite3
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Re-use authoritative Python helpers — do **not** grow a second implementation.
 from agent_vitals.agent.cost import cost_report  # noqa: F401  (byte-mirror)
@@ -66,6 +69,8 @@ MAX_SEARCH_LIMIT = 500
 DEFAULT_DETAIL_LIMIT = 200
 MAX_DETAIL_LIMIT = 1000
 
+_TIMEZONE_OVERRIDE = ContextVar("sessions_sql_timezone_override", default=None)
+
 # 与 Rust 侧 `agent_vitals_domain::data_contract::MoneyMinor` 接受的币种
 # + 对应小数位数（CNY/USD/EUR/GBP/HKD/SGD/AUD/CAD/CHF/NZD = 2, JPY/KRW = 0,
 # KWD/BHD/OMR = 3；未知币种走 None 不冒充——与 Rust side 一致）。
@@ -83,7 +88,31 @@ _CURRENCY_MINOR_DIGITS = {
 
 def _system_timezone():
     """Resolve the shared persisted statistics timezone."""
-    return state_mod._system_timezone()
+    override = _TIMEZONE_OVERRIDE.get()
+    return override or state_mod._system_timezone()
+
+
+def validate_timezone(name):
+    """Return an IANA timezone for a query-local override, or ``None``."""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    try:
+        return ZoneInfo(name.strip().lstrip(":"))
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+
+
+@contextmanager
+def _timezone_scope(name):
+    zone = validate_timezone(name)
+    if zone is None:
+        yield False
+        return
+    token = _TIMEZONE_OVERRIDE.set(zone)
+    try:
+        yield True
+    finally:
+        _TIMEZONE_OVERRIDE.reset(token)
 
 
 def _system_timezone_name():
@@ -1105,38 +1134,41 @@ def session_detail(args, home):
 # `apps/cli/src/main.rs::SessionsAction::Navigation`）。
 # ────────────────────────────────────────────────────────────────────────
 
-def sessions_navigation(day, recent_n, home):
+def sessions_navigation(day, recent_n, home, timezone_name=None):
     """`sessions_navigation_v2` byte-mirror（Tauri 托盘 envelope）。"""
-    if not day:
-        day = datetime.now(_system_timezone()).date().isoformat()
-    conn, err = _open_authority(home)
-    if err is not None:
-        return err
-    try:
-        hosts = []
-        for host in ("dsh", "codex", "claude-code"):
-            today_tokens = _day_token_totals_by_host_one(conn, day, host)
-            recent = _recent_for_host(conn, home, day, recent_n, host)
-            sessions = _day_session_count(conn, day, host)
-            value = today_tokens.get("value") if isinstance(today_tokens, dict) else None
-            status = "ready" if value is not None else "partial"
-            hosts.append({
-                "host_kind": host,
-                "status": status,
-                "today_tokens": today_tokens,
-                "today_sessions": sessions,
-                "recent": recent,
-                "store_revision": None,
-            })
-        return {
-            "schema_version": 1,
-            "day_key": day,
-            "timezone": _system_timezone_name(),
-            "generated_at": _now_iso_utc(),
-            "hosts": hosts,
-        }
-    finally:
-        conn.close()
+    with _timezone_scope(timezone_name) as valid:
+        if timezone_name is not None and not valid:
+            return _tool_error_envelope("invalid_argument", "invalid `timezone`")
+        if not day:
+            day = datetime.now(_system_timezone()).date().isoformat()
+        conn, err = _open_authority(home)
+        if err is not None:
+            return err
+        try:
+            hosts = []
+            for host in ("dsh", "codex", "claude-code"):
+                today_tokens = _day_token_totals_by_host_one(conn, day, host)
+                recent = _recent_for_host(conn, home, day, recent_n, host)
+                sessions = _day_session_count(conn, day, host)
+                value = today_tokens.get("value") if isinstance(today_tokens, dict) else None
+                status = "ready" if value is not None else "partial"
+                hosts.append({
+                    "host_kind": host,
+                    "status": status,
+                    "today_tokens": today_tokens,
+                    "today_sessions": sessions,
+                    "recent": recent,
+                    "store_revision": None,
+                })
+            return {
+                "schema_version": 1,
+                "day_key": day,
+                "timezone": _system_timezone_name(),
+                "generated_at": _now_iso_utc(),
+                "hosts": hosts,
+            }
+        finally:
+            conn.close()
 
 
 def _day_token_totals_by_host_one(conn, day, host):
