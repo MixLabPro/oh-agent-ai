@@ -316,56 +316,32 @@ pub async fn sessions_issues(
         let path = agent_vitals_data::authority::default_authority_path(&data_home());
         let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
             .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
-        let conn = db.conn();
-        let mut stmt = conn.prepare(
-            "SELECT issue_id, host, session_key, issue_type, status, severity,
-                    evidence_fingerprint, opened_at_ms, closed_at_ms, metadata_json
-             FROM issue_instances ORDER BY severity, opened_at_ms, issue_id"
+        let groups = agent_vitals_data::issues::issue_groups_with_sources(
+            db.conn(), None, None, 500, None,
         ).map_err(|e| error_value("authority_query", &e.to_string()))?;
-        let rows = stmt.query_map([], |r| {
-            let metadata: String = r.get(9)?;
-            let metadata = serde_json::from_str::<Value>(&metadata).unwrap_or_else(|_| serde_json::json!({}));
-            Ok(serde_json::json!({
-                "issue_id": r.get::<_, String>(0)?, "host_kind": r.get::<_, String>(1)?,
-                "session_key": r.get::<_, Option<String>>(2)?, "rule": r.get::<_, String>(3)?,
-                "status": r.get::<_, String>(4)?, "severity": r.get::<_, String>(5)?,
-                "evidence": r.get::<_, String>(6)?, "opened_at_ms": r.get::<_, i64>(7)?,
-                "closed_at_ms": r.get::<_, Option<i64>>(8)?, "metadata": metadata,
-            }))
-        }).map_err(|e| error_value("authority_query", &e.to_string()))?;
-        let mut issues = Vec::new();
-        for row in rows {
-            let mut issue = row.map_err(|e| error_value("authority_query", &e.to_string()))?;
-            let metadata = issue.get("metadata").cloned().unwrap_or(Value::Null);
-            issue["category"] = metadata.get("category").cloned().unwrap_or(Value::Null);
-            issue["tool_name"] = metadata.get("tool_name").cloned().unwrap_or(Value::Null);
-            issue["time"] = metadata.get("time").cloned()
-                .unwrap_or_else(|| issue.get("opened_at_ms").cloned().unwrap_or(Value::Null));
-            issues.push(issue);
-        }
-        let count = |severity: &str| issues.iter().filter(|v| v["severity"] == severity).count();
-        let (rules, sessions_with) = issue_rollup(&issues);
+        let rows = groups["groups"].as_array().cloned().unwrap_or_default();
+        let count = |severity: &str| rows.iter().filter(|v| v["severity"] == severity).count();
+        let rules = issue_group_rollup(&rows);
+        let sessions_with: usize = rows.iter().map(|v| v["sessions"].as_u64().unwrap_or(0) as usize).sum();
         Ok(serde_json::json!({
-            "totals": { "issues": issues.len(), "findings": issues.len(), "critical": count("critical"), "warning": count("warning"), "info": count("info"), "sessions": sessions_with, "sessions_total": sessions_with },
-            "rules": rules, "issues": issues, "findings": [], "source": "issue_instances"
+            "totals": { "issues": groups["total_groups"], "findings": groups["source_issue_count"], "critical": count("critical"), "warning": count("warning"), "info": count("info"), "sessions": sessions_with, "sessions_total": sessions_with },
+            "rules": rules, "issues": rows, "findings": [], "source": "unified_issue_groups",
+            "next_cursor": groups["next_cursor"], "source_projection_count": groups["source_projection_count"]
         }))
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
-fn issue_rollup(issues: &[Value]) -> (Vec<Value>, usize) {
+#[allow(clippy::let_and_return)]
+fn issue_group_rollup(issues: &[Value]) -> Vec<Value> {
     let mut by_rule: BTreeMap<String, (String, Option<String>, usize, BTreeSet<String>)> = BTreeMap::new();
-    let mut sessions = BTreeSet::new();
     for issue in issues {
         let rule = issue["rule"].as_str().unwrap_or("unknown").to_string();
         let severity = issue["severity"].as_str().unwrap_or("info").to_string();
         let category = issue["category"].as_str().map(str::to_string);
-        let session = issue["session_key"].as_str().map(str::to_string);
+        let sessions = issue["sessions"].as_u64().unwrap_or(0) as usize;
         let entry = by_rule.entry(rule).or_insert_with(|| (severity.clone(), category.clone(), 0, BTreeSet::new()));
-        entry.2 += 1;
-        if let Some(session) = session {
-            sessions.insert(session.clone());
-            entry.3.insert(session);
-        }
+        entry.2 += issue["hits"].as_u64().unwrap_or(1) as usize;
+        entry.3.extend((0..sessions).map(|n| format!("{n}")));
     }
     let rows = by_rule.into_iter().map(|(rule, (severity, category, hits, sessions))| {
         serde_json::json!({
@@ -373,7 +349,7 @@ fn issue_rollup(issues: &[Value]) -> (Vec<Value>, usize) {
             "hits": hits, "sessions": sessions.len(),
         })
     }).collect();
-    (rows, sessions.len())
+    rows
 }
 
 #[cfg(test)]

@@ -286,6 +286,126 @@ fn status_index(value: &str) -> usize {
         "wontfix" | "not_applicable" => 4, _ => 0 }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn projection_group(
+    source_kind: &str,
+    rule: &str,
+    host: &str,
+    object: &str,
+    evidence_class: &str,
+    opened_at_ms: i64,
+    count: usize,
+    severity: &str,
+    status: &str,
+    sample: Value,
+    remedy_id: &'static str,
+) -> Value {
+    let group_key = format!("{source_kind}\0{rule}\0{host}\0{object}\0{evidence_class}\0{}", issue_day_bucket(opened_at_ms));
+    let mut rollup = json!({"open": 0, "later": 0, "acknowledged": 0, "resolved": 0, "not_applicable": 0});
+    let status_key = match status { "closed" | "resolved" => "resolved", "wontfix" | "not_applicable" => "not_applicable", other => other };
+    if let Some(slot) = rollup.get_mut(status_key) { *slot = json!(count); }
+    json!({
+        "group_id": stable_hash(&group_key), "source_kind": source_kind, "rule": rule,
+        "host": host, "object": object, "evidence_class": evidence_class,
+        "bucket": issue_day_bucket(opened_at_ms), "count": count,
+        "first_seen_at_ms": opened_at_ms, "last_seen_at_ms": opened_at_ms,
+        "severity": severity, "status_rollup": rollup, "sessions_count": 0,
+        "sample_evidence": [sample],
+        "remedy": {"remedy_id": remedy_id, "diagnostic_only": true},
+        "actionability": if severity == "critical" { 1.0 } else if severity == "warning" { 0.7 } else { 0.4 },
+        "time": opened_at_ms, "evidence": evidence_class, "tool_name": object,
+        "category": evidence_class, "hits": count, "sessions": 0,
+    })
+}
+
+fn source_issue_groups(
+    conn: &Connection,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+) -> rusqlite::Result<Vec<Value>> {
+    let mut values = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT issue_id, scope_type, scope_key, code, severity,
+                first_seen_at_ms, last_seen_at_ms, detail_json
+         FROM data_quality_issues WHERE resolved_at_ms IS NULL
+         ORDER BY issue_id",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((
+        r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+        r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, i64>(5)?,
+        r.get::<_, i64>(6)?, r.get::<_, String>(7)?,
+    )))?;
+    for row in rows {
+        let (issue_id, scope_type, scope_key, code, severity, first, last, detail_raw) = row?;
+        if to_ms.is_some_and(|to| first >= to) || from_ms.is_some_and(|from| last < from) { continue; }
+        let detail = serde_json::from_str::<Value>(&detail_raw).unwrap_or_else(|_| json!({}));
+        let host = detail.get("host").and_then(Value::as_str).unwrap_or("<unknown>");
+        let rule = if code.contains("price") || code.contains("pricing") || code.contains("unpriced") {
+            "PRICE_COVERAGE"
+        } else if code.contains("source") || code.contains("permission") || code.contains("parse") || code.contains("read") {
+            "DATA_SOURCE_FAILURE"
+        } else { "DATA_QUALITY" };
+        values.push(projection_group("data_quality", rule, host, &scope_key, &code,
+            first, 1, &severity, "open", json!({"issue_id": issue_id, "scope_type": scope_type, "code": code, "detail": detail}), "diagnostic-only"));
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT candidate_id, host, provider_id, currency, amount_minor,
+                billing_period_start, status, created_at_ms
+         FROM billing_import_candidates WHERE status = 'pending'
+         ORDER BY candidate_id",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((
+        r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+        r.get::<_, String>(3)?, r.get::<_, i64>(4)?, r.get::<_, String>(5)?,
+        r.get::<_, String>(6)?, r.get::<_, i64>(7)?,
+    )))?;
+    for row in rows {
+        let (candidate_id, host, provider, currency, amount, period, status, created) = row?;
+        if to_ms.is_some_and(|to| created >= to) || from_ms.is_some_and(|from| created < from) { continue; }
+        values.push(projection_group("billing_candidate", "BILLING_CONFIRMATION", &host,
+            &format!("{provider}:{period}"), &currency, created, 1, "warning", &status,
+            json!({"candidate_id": candidate_id, "provider_id": provider, "currency": currency,
+                "amount_minor": amount, "billing_period_start": period, "is_bill": false}), "diagnostic-only"));
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT source_id, host, last_error_code, last_seen_at_ms
+         FROM source_files WHERE last_error_code IS NOT NULL ORDER BY source_id",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((
+        r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?,
+    )))?;
+    for row in rows {
+        let (source_id, host, error, seen) = row?;
+        if to_ms.is_some_and(|to| seen >= to) || from_ms.is_some_and(|from| seen < from) { continue; }
+        values.push(projection_group("source_failure", "DATA_SOURCE_FAILURE", &host, &error,
+            "source_file", seen, 1, "warning", "open", json!({"source_id": source_id, "error_code": error}), "diagnostic-only"));
+    }
+    Ok(values)
+}
+
+/// Unified read-only projection across behavior issues and authority-source
+/// problems. Source families remain distinguishable via `source_kind`.
+pub fn issue_groups_with_sources(
+    conn: &Connection,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+    page_size: usize,
+    cursor: Option<&str>,
+) -> rusqlite::Result<Value> {
+    let behavior = issue_groups(conn, from_ms, to_ms, usize::MAX, None)?;
+    let mut groups = behavior["groups"].as_array().cloned().unwrap_or_default();
+    groups.extend(source_issue_groups(conn, from_ms, to_ms)?);
+    groups.sort_by(|a, b| b["actionability"].as_f64().partial_cmp(&a["actionability"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a["group_id"].as_str().cmp(&b["group_id"].as_str())));
+    let offset = cursor.and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(groups.len());
+    let end = (offset + page_size.clamp(1, 500)).min(groups.len());
+    Ok(json!({"groups": groups[offset..end].to_vec(), "next_cursor": (end < groups.len()).then(|| end.to_string()),
+        "total_groups": groups.len(), "source_issue_count": behavior["source_issue_count"].as_u64().unwrap_or(0),
+        "source_projection_count": groups.len().saturating_sub(behavior["total_groups"].as_u64().unwrap_or(0) as usize)}))
+}
+
 /// Build a paginated L0 issue-group projection from the issue authority table.
 /// Raw issue rows remain untouched and are only sampled here; L1/L2 can use the
 /// returned `group_id` to fetch them later. `cursor` is a stable numeric offset
@@ -361,6 +481,9 @@ pub fn issue_groups(
             "sessions_count": group.sessions.len(), "sample_evidence": group.sample_evidence,
             "remedy": {"remedy_id": group.remedy.remedy_id, "diagnostic_only": group.remedy.diagnostic_only},
             "actionability": actionability,
+            "time": group.first_seen_at_ms, "evidence": group.evidence_class,
+            "tool_name": group.object, "category": group.evidence_class,
+            "hits": group.count, "sessions": group.sessions.len(),
         })
     }).collect();
     values.sort_by(|a, b| b["actionability"].as_f64().partial_cmp(&a["actionability"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
@@ -565,6 +688,34 @@ mod tests {
         let second = issue_groups(db.conn(), None, None, 1, Some(next)).unwrap();
         assert_eq!(first["groups"].as_array().unwrap().len(), 1);
         assert_eq!(second["groups"].as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unified_groups_include_source_failures_and_pending_candidates_without_merging() {
+        let path = std::env::temp_dir().join(format!("av-unified-issues-{}", std::process::id()));
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.conn().execute(
+            "INSERT INTO data_quality_issues(issue_id, scope_type, scope_key, code, severity,
+             first_seen_at_ms, last_seen_at_ms, detail_json)
+             VALUES ('dq1', 'source', 'src-1', 'price_missing', 'warning', 10, 10, ?1)",
+            [r#"{"host":"codex","provider_id":"openai"}"#],
+        ).unwrap();
+        db.billing_import_candidate_put("candidate-1", "claude-code", "minimax", "CNY", 11400,
+            "2026-09", "pricing-v1", 10).unwrap();
+        db.conn().execute(
+            "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+             parser_version, first_seen_at_ms, last_seen_at_ms, last_error_code)
+             VALUES ('source-1', 'dsh', 'hash', 1, 1, 1, 10, 10, 'permission_denied')", [],
+        ).unwrap();
+        let result = issue_groups_with_sources(db.conn(), None, None, 50, None).unwrap();
+        let groups = result["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 3);
+        assert!(groups.iter().any(|g| g["source_kind"] == "billing_candidate"
+            && g["rule"] == "BILLING_CONFIRMATION" && g["sample_evidence"][0]["is_bill"] == false));
+        assert!(groups.iter().any(|g| g["source_kind"] == "source_failure"));
+        assert!(groups.iter().any(|g| g["source_kind"] == "data_quality"
+            && g["rule"] == "PRICE_COVERAGE"));
         let _ = std::fs::remove_file(path);
     }
 }

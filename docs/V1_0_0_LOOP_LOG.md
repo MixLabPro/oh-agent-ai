@@ -635,3 +635,11 @@
 - 边界：P2 来源统一、工作台 L0/L1/L2 接入、五态 IPC/动作和真机队列验收仍待完成，不勾选 REQ-073–080 或 AC18。
 
 本日志只记录已经完成的实现和证据；上述“尚未完成”不改变任何 PRD 勾选状态。任何单次修改连续测试失败超过5次，或任何单次Loop超过30分钟，立即暂停并记录；不得以拆分日志规避熔断。
+
+## Loop 76 · REQ-073 P2 来源统一投影（自验收）
+
+- 执行：`issue_groups_with_sources` 将 `issue_instances`、未解决 `data_quality_issues`、待确认 `billing_import_candidates` 和源文件错误投影到同一分页组列表；每组保留 `source_kind`，行为规则与数据/计费来源不跨族合并。
+- 保护：待确认候选明确标记 `is_bill=false`，不写入 `host_bills`；未知/缺失金额不转成零；数据层只读查询，不改变四张权威表。预算阈值仍由 runtime 预算计算负责，未在此层伪造。
+- 接入：桌面 `sessions_issues` 改读统一组投影，UI 继续使用兼容字段，但 IPC 不再返回全部原始 `issue_instances` 数组；L1/L2 仍使用显式 group/issue 查询。
+- 验收：data issues 6/6、data crate Clippy `-D warnings`、desktop `cargo check --lib`、`git diff --check`通过。
+- 边界：桌面测试目标仍暴露既有 `list_args` 过时测试调用与 clippy 参数数量告警；未借本轮修改扩大范围。预算组、五态动作、真机 UAT 和完整 REQ-073–080 仍待完成，不勾选 AC18。
