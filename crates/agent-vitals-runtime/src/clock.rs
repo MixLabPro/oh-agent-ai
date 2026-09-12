@@ -1,10 +1,11 @@
-//! 读进程时钟的日期 helper（北京时区）—— runtime 允许读时钟，domain 不许。
+//! 读进程时钟的日期 helper——runtime 允许读时钟，domain 不许。
 //!
 //! v0.8 Phase D6：从二进制 `src/agent/codex_cost.rs` 迁进来。纯 civil 数学在
 //! `agent_vitals_domain::util::civil_from_unix_secs`（不引 `chrono`）；这里只
 //! 补「现在几点」。Python 镜像 `codex_cost.py`（差分交叉断言两侧一致）。
 
 use agent_vitals_domain::util::civil_from_unix_secs;
+use jiff::{tz::TimeZone, Timestamp, ToSpan};
 
 const BEIJING_OFFSET_SECS: i64 = 8 * 3600;
 
@@ -36,6 +37,53 @@ pub fn yesterday_beijing() -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
+/// 统计使用的系统 IANA 时区。Jiff 读取 macOS/Linux 的系统设置，并处理
+/// `TZ` 覆盖、夏令时和历史偏移；供应商价格规则不得调用这个值来改写价卡。
+pub fn system_timezone_name() -> String {
+    TimeZone::system().iana_name().unwrap_or("Etc/Unknown").to_string()
+}
+
+fn system_now() -> jiff::Zoned {
+    Timestamp::now().to_zoned(TimeZone::system())
+}
+
+fn format_zoned_date(date: jiff::civil::Date) -> String {
+    format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())
+}
+
+/// 将一个绝对时间按指定 IANA 时区投影为统计日期。该函数只改变展示/统计
+/// 边界，不改变输入的 epoch 时间，也不参与供应商价格时区判断。
+pub fn date_for_unix_secs_in_timezone(unix_secs: i64, timezone: &str) -> Option<String> {
+    let zone = TimeZone::get(timezone).ok()?;
+    let timestamp = Timestamp::from_second(unix_secs).ok()?;
+    Some(format_zoned_date(timestamp.to_zoned(zone).date()))
+}
+
+/// 返回指定绝对时间在 IANA 时区中的实际偏移，用于统计边界计算和 DST 回归测试。
+pub fn offset_seconds_for_unix_secs_in_timezone(unix_secs: i64, timezone: &str) -> Option<i32> {
+    let zone = TimeZone::get(timezone).ok()?;
+    let timestamp = Timestamp::from_second(unix_secs).ok()?;
+    Some(timestamp.to_zoned(zone).offset().seconds())
+}
+
+/// 系统统计时区的当前自然月 → `YYYY-MM`。
+pub fn current_month_system() -> String {
+    let date = system_now().date();
+    format!("{:04}-{:02}", date.year(), date.month())
+}
+
+/// 系统统计时区的今天 → `YYYY-MM-DD`。
+pub fn today_system() -> String {
+    format_zoned_date(system_now().date())
+}
+
+/// 系统统计时区的昨天。使用 civil date 运算而不是减去 24 小时，避免夏令时
+/// 切换日把“昨天”错算成同一天或跳过一天。
+pub fn yesterday_system() -> String {
+    let date = system_now().date().checked_sub(1.days()).unwrap_or_else(|_| system_now().date());
+    format_zoned_date(date)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +103,25 @@ mod tests {
         let t = today_beijing();
         assert!(y.len() == 10 && y.as_bytes()[4] == b'-' && y.as_bytes()[7] == b'-');
         assert!(y < t, "yesterday {y} should sort strictly before today {t}");
+    }
+
+    #[test]
+    fn system_timezone_is_an_iana_name_and_dates_are_well_formed() {
+        let tz = system_timezone_name();
+        assert!(!tz.is_empty());
+        assert_eq!(today_system().len(), 10);
+        assert_eq!(current_month_system().len(), 7);
+        assert!(yesterday_system() < today_system());
+    }
+
+    #[test]
+    fn named_timezone_projection_respects_dst_without_changing_epoch() {
+        // 2026-03-08 09:30Z is before the Los Angeles spring transition;
+        // 10:30Z is after it. The epoch remains unchanged, only the local offset moves.
+        assert_eq!(date_for_unix_secs_in_timezone(1_772_955_000, "America/Los_Angeles"), Some("2026-03-07".into()));
+        assert_eq!(date_for_unix_secs_in_timezone(1_772_958_600, "America/Los_Angeles"), Some("2026-03-08".into()));
+        assert_eq!(offset_seconds_for_unix_secs_in_timezone(1_772_962_200, "America/Los_Angeles"), Some(-28_800));
+        assert_eq!(offset_seconds_for_unix_secs_in_timezone(1_772_965_800, "America/Los_Angeles"), Some(-25_200));
+        assert_eq!(date_for_unix_secs_in_timezone(1_772_955_000, "not/a-zone"), None);
     }
 }

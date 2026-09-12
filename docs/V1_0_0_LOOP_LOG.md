@@ -1002,3 +1002,9 @@
 - 验证：根 workspace `cargo test --release`、桌面 crate release 测试、Python `unittest` 1188 项、Rust/Python golden 15 个 case 逐字节对拍均通过；随后根 workspace `cargo clippy --release --all-targets -- -D warnings`、`cargo build --release` 和桌面 crate release 测试再次通过（桌面 110 项）。
 - 保护：本轮只验证既有实现，没有把“测试全绿”扩大解释为 AC21 系统时区、AC18/AC19 完整 Computer Use、签名公证或外部试用完成；用户已有 WorkBuddy/Phase/Issue 文档保持未修改、未暂存。
 - 结论：当前代码回归基线稳定；下一项仍应处理 AC21/REQ-033 的系统统计时区纵切面，不能继续沿用北京时间作为最终产品口径。
+
+## Loop 129 · 系统 IANA 时区时钟基础
+
+- 实现：runtime 新增系统 IANA 时区识别、按指定时区把绝对 epoch 投影为统计日期，以及读取指定时刻实际 UTC 偏移的 helper；使用 Jiff 处理 macOS/Linux 系统设置、`TZ` 覆盖和 DST，不把系统统计时区用于供应商价格规则。
+- 验收：runtime clock 定向测试 4/4 通过；覆盖系统时区日期格式、非法时区降级，以及 Los Angeles 2026 春季 DST 前后 `-08:00`/`-07:00` 偏移；`git diff --check`通过。
+- 边界：统计 SQL 的日界/小时桶、可修改的用户偏好、Python/Rust/MCP/Workbench 同口径及 AC21 真机走查尚未接入；本轮不勾选 REQ-033、REQ-096 或 AC21。
