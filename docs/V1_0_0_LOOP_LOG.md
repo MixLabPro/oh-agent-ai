@@ -1190,3 +1190,10 @@
 - 修复：`legacy-r2a` 兼容导航入口与当前 SQL 导航入口统一接受经过校验的 IANA 统计时区，并同步 CLI 帮助文本，避免备用构建路径仍拒绝自定义时区。
 - 保护：该兼容入口不改变原始事件时间或供应商价格时区；生产默认入口行为不变。
 - 验收：待 legacy-r2a 定向测试与 CLI release lint；不因此扩大 AC21 的真实桌面 UAT 结论。
+
+## Loop 158 · CLI 兼容路径发布包复验
+
+- 构建：重新执行 CLI release 构建和 Tauri `.app` 打包；安装包内置 CLI 与最新 `target/release/agent-vitals` 二进制一致。
+- 验收：安装后的 CLI 自定义 `America/Los_Angeles` 导航返回 `day_key=2026-09-12`，新 `.app` 进程已启动。
+- 保护：旧包可恢复保留为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-0234`；未覆盖用户数据。
+- 边界：真实窗口 Computer Use 仍受 macOS 锁定阻塞；AC21、签名/公证和外部试用门禁不因此勾选。
