@@ -1233,6 +1233,11 @@ fn apply_host_bills(
         Ok(r) => r,
         Err(_) => return,
     };
+    // `HostAmount` deliberately has one currency slot. Once a provider entry
+    // has received two currencies, retain neither amounts nor a currency label;
+    // otherwise a later row could re-claim one currency and make mixed money
+    // look like a valid single-currency total.
+    let mut currency_conflicted = BTreeSet::new();
     for (host, provider, basis_str, amount_minor, currency) in rows {
         let Some(basis) = agent_vitals_domain::data_contract::BillingBasis::from_wire(&basis_str)
         else {
@@ -1242,7 +1247,7 @@ fn apply_host_bills(
         let entry = by_provider
             .entry(key.clone())
             .or_insert_with(|| HostAmount {
-                host_id: key,
+                host_id: key.clone(),
                 amounts_by_basis: BTreeMap::new(),
                 currency: None,
                 has_unresolved: false,
@@ -1251,14 +1256,26 @@ fn apply_host_bills(
                 unresolved_reason: None,
                 freshness: Freshness::unavailable(),
             });
-        *entry.amounts_by_basis.entry(basis).or_insert(0.0) += amount_minor as f64 / 100.0;
+        if currency_conflicted.contains(&key) {
+            continue;
+        }
+        let mut accepts_amount = false;
         match &entry.currency {
-            None => entry.currency = Some(currency),
-            Some(c) if *c == currency => {}
+            None if !entry.has_unresolved => {
+                entry.currency = Some(currency);
+                accepts_amount = true;
+            }
+            Some(c) if *c == currency => accepts_amount = true,
             Some(_) => {
                 entry.currency = None;
                 entry.has_unresolved = true;
+                entry.amounts_by_basis.clear();
+                currency_conflicted.insert(key);
             }
+            None => {}
+        }
+        if accepts_amount {
+            *entry.amounts_by_basis.entry(basis).or_insert(0.0) += amount_minor as f64 / 100.0;
         }
     }
 }
@@ -2725,6 +2742,58 @@ mod tests {
             let mut other: BTreeMap<String, HostAmount> = BTreeMap::new();
             apply_host_bills(&mut other, &db, "2026-08");
             assert!(other.is_empty());
+        });
+    }
+
+    #[test]
+    fn apply_host_bills_never_labels_mixed_cny_usd_as_single_currency() {
+        with_home(|| {
+            let db = seed_authority_db();
+            db.host_bill_put(
+                "mixed:2026-09:host_billed",
+                "workbuddy",
+                "gateway",
+                "2026-09",
+                "host_billed",
+                21_500,
+                "CNY",
+                "credit_json",
+                1,
+            )
+            .unwrap();
+            db.host_bill_put(
+                "mixed:2026-09:fixed_subscription",
+                "workbuddy",
+                "gateway",
+                "2026-09",
+                "fixed_subscription",
+                2_000,
+                "USD",
+                "invoice",
+                1,
+            )
+            .unwrap();
+            // A later CNY row must not re-claim CNY after the conflict.
+            db.host_bill_put(
+                "mixed:2026-09:api_equivalent",
+                "workbuddy",
+                "gateway",
+                "2026-09",
+                "api_equivalent",
+                5_000,
+                "CNY",
+                "estimate",
+                1,
+            )
+            .unwrap();
+
+            let mut by_provider = BTreeMap::new();
+            apply_host_bills(&mut by_provider, &db, "2026-09");
+
+            let e = by_provider.get("workbuddy/gateway").expect("provider entry");
+            assert_eq!(e.currency, None);
+            assert!(e.has_unresolved);
+            assert!(e.amounts_by_basis.is_empty(), "mixed money must not be summed");
         });
     }
 
