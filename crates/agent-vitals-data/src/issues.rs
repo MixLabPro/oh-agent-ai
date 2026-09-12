@@ -1,6 +1,10 @@
 //! v0.11 persistent Issue identity and status history.
 
 use rusqlite::{Connection, OptionalExtension};
+use serde_json::{json, Value};
+
+const BEIJING_OFFSET_MS: i64 = 8 * 60 * 60 * 1000;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone)]
 pub struct IssueInput<'a> {
@@ -23,6 +27,10 @@ pub struct IssueInput<'a> {
 pub struct RemedyCandidate {
     pub remedy_id: &'static str,
     pub diagnostic_only: bool,
+}
+
+impl Default for RemedyCandidate {
+    fn default() -> Self { remedy_for("<unknown>") }
 }
 
 pub fn remedy_for(issue_type: &str) -> RemedyCandidate {
@@ -187,6 +195,175 @@ fn stable_hash(value: &str) -> String {
     )
 }
 
+/// Normalize the object part of a finding without merging different issue
+/// families. This is intentionally pure: it is also used by the group key and
+/// therefore must not depend on database state or presentation labels.
+pub fn normalize_issue_object(issue_type: &str, object: &str) -> String {
+    let object = object.trim();
+    match issue_type {
+        "SV601" | "SV602" | "SV603" | "retry_loop" | "tool_failure" =>
+            object.split_whitespace().next().unwrap_or(object).to_string(),
+        "SV604" | "SV605" => {
+            if object.starts_with("/ingest/export/") {
+                "/ingest/export/*".to_string()
+            } else if let Some((parent, _)) = object.rsplit_once('/') {
+                format!("{parent}/*")
+            } else {
+                format!("{object}/*")
+            }
+        }
+        "SV611" => strip_counters(object, "连续重复"),
+        "SV613" => strip_counters(object, "进度停滞: 连续工具失败"),
+        "SV614" => strip_counters(object, "权限异常: 危险模式"),
+        _ => object.to_string(),
+    }
+}
+
+fn strip_counters(object: &str, prefix: &str) -> String {
+    if object.starts_with(prefix) {
+        prefix.to_string()
+    } else {
+        object
+            .split_whitespace()
+            .filter(|part| !part.chars().all(|c| c.is_ascii_digit()) && *part != "次")
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn issue_object(issue_type: &str, fingerprint: &str, metadata: &Value) -> String {
+    fingerprint
+        .split('\0')
+        .nth(3)
+        .or_else(|| metadata.get("tool_name").and_then(Value::as_str))
+        .or_else(|| metadata.get("evidence").and_then(Value::as_str))
+        .unwrap_or("<unknown>")
+        .pipe(|object| normalize_issue_object(issue_type, object))
+}
+
+trait Pipe: Sized {
+    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T { f(self) }
+}
+impl<T> Pipe for T {}
+
+fn issue_day_bucket(opened_at_ms: i64) -> String {
+    agent_vitals_domain::usage::civil_date_from_days(
+        (opened_at_ms + BEIJING_OFFSET_MS).div_euclid(DAY_MS),
+    )
+}
+
+#[derive(Default)]
+struct IssueGroupAccum {
+    rule: String,
+    host: String,
+    object: String,
+    evidence_class: String,
+    bucket: String,
+    count: usize,
+    first_seen_at_ms: i64,
+    last_seen_at_ms: i64,
+    severity: String,
+    status_rollup: [usize; 5],
+    sessions: std::collections::BTreeSet<String>,
+    sample_evidence: Vec<Value>,
+    remedy: RemedyCandidate,
+}
+
+fn severity_rank(value: &str) -> u8 {
+    match value { "critical" => 3, "warning" => 2, "info" => 1, _ => 0 }
+}
+
+fn status_index(value: &str) -> usize {
+    match value { "later" => 1, "acknowledged" => 2, "closed" | "resolved" => 3,
+        "wontfix" | "not_applicable" => 4, _ => 0 }
+}
+
+/// Build a paginated L0 issue-group projection from the issue authority table.
+/// Raw issue rows remain untouched and are only sampled here; L1/L2 can use the
+/// returned `group_id` to fetch them later. `cursor` is a stable numeric offset
+/// over the deterministic group ordering and is deliberately not a raw-row id.
+pub fn issue_groups(
+    conn: &Connection,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+    page_size: usize,
+    cursor: Option<&str>,
+) -> rusqlite::Result<Value> {
+    let mut sql = String::from(
+        "SELECT issue_id, host, session_key, issue_type, instance_fingerprint, status,
+                severity, evidence_fingerprint, opened_at_ms, metadata_json
+         FROM issue_instances WHERE 1=1",
+    );
+    if from_ms.is_some() { sql.push_str(" AND opened_at_ms >= ?1"); }
+    if to_ms.is_some() { sql.push_str(if from_ms.is_some() { " AND opened_at_ms < ?2" } else { " AND opened_at_ms < ?1" }); }
+    sql.push_str(" ORDER BY opened_at_ms, issue_id");
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<Option<i64>> = match (from_ms, to_ms) {
+        (Some(from), Some(to)) => vec![Some(from), Some(to)],
+        (Some(from), None) => vec![Some(from)],
+        (None, Some(to)) => vec![Some(to)],
+        (None, None) => vec![],
+    };
+    let mut groups: std::collections::BTreeMap<String, IssueGroupAccum> = std::collections::BTreeMap::new();
+    let mut source_issue_count = 0usize;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+        let metadata: String = r.get(9)?;
+        Ok((
+            r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?,
+            r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?,
+            r.get::<_, String>(6)?, r.get::<_, String>(7)?, r.get::<_, i64>(8)?, metadata,
+        ))
+    })?;
+    for row in rows {
+        source_issue_count += 1;
+        let (issue_id, host, session, rule, fingerprint, status, severity, evidence, opened, metadata_raw) = row?;
+        let metadata = serde_json::from_str::<Value>(&metadata_raw).unwrap_or_else(|_| json!({}));
+        let object = issue_object(&rule, &fingerprint, &metadata);
+        let evidence_class = metadata.get("evidence").and_then(Value::as_str)
+            .or_else(|| metadata.get("category").and_then(Value::as_str))
+            .unwrap_or("<unknown>").to_string();
+        let bucket = issue_day_bucket(opened);
+        let key = format!("{rule}\0{host}\0{object}\0{evidence_class}\0{bucket}");
+        let entry = groups.entry(key).or_insert_with(|| IssueGroupAccum {
+            rule: rule.clone(), host: host.clone(), object: object.clone(),
+            evidence_class: evidence_class.clone(), bucket: bucket.clone(),
+            first_seen_at_ms: opened, last_seen_at_ms: opened,
+            severity: severity.clone(), remedy: remedy_for(&rule), ..Default::default()
+        });
+        entry.count += 1;
+        entry.first_seen_at_ms = entry.first_seen_at_ms.min(opened);
+        entry.last_seen_at_ms = entry.last_seen_at_ms.max(opened);
+        if severity_rank(&severity) > severity_rank(&entry.severity) { entry.severity = severity; }
+        entry.status_rollup[status_index(&status)] += 1;
+        if let Some(session) = session { entry.sessions.insert(session); }
+        if entry.sample_evidence.len() < 3 {
+            entry.sample_evidence.push(json!({"issue_id": issue_id, "evidence": evidence, "metadata": metadata}));
+        }
+    }
+    let mut values: Vec<Value> = groups.into_iter().map(|(key, group)| {
+        let actionability = match group.severity.as_str() { "critical" => 1.0, "warning" => 0.7, _ => 0.4 };
+        json!({
+            "group_id": stable_hash(&key), "rule": group.rule, "host": group.host,
+            "object": group.object, "evidence_class": group.evidence_class, "bucket": group.bucket,
+            "count": group.count, "first_seen_at_ms": group.first_seen_at_ms,
+            "last_seen_at_ms": group.last_seen_at_ms, "severity": group.severity,
+            "status_rollup": {"open": group.status_rollup[0], "later": group.status_rollup[1],
+                "acknowledged": group.status_rollup[2], "resolved": group.status_rollup[3],
+                "not_applicable": group.status_rollup[4]},
+            "sessions_count": group.sessions.len(), "sample_evidence": group.sample_evidence,
+            "remedy": {"remedy_id": group.remedy.remedy_id, "diagnostic_only": group.remedy.diagnostic_only},
+            "actionability": actionability,
+        })
+    }).collect();
+    values.sort_by(|a, b| b["actionability"].as_f64().partial_cmp(&a["actionability"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a["group_id"].as_str().cmp(&b["group_id"].as_str())));
+    let offset = cursor.and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(values.len());
+    let end = (offset + page_size.clamp(1, 500)).min(values.len());
+    let next_cursor = (end < values.len()).then(|| end.to_string());
+    Ok(json!({"groups": values[offset..end].to_vec(), "next_cursor": next_cursor,
+        "total_groups": values.len(), "source_issue_count": source_issue_count}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +448,47 @@ mod tests {
         assert!(!remedy_for("retry_loop").diagnostic_only);
         assert!(remedy_for("future_rule").diagnostic_only);
         assert_eq!(remedy_for("future_rule").remedy_id, "diagnostic-only");
+    }
+
+    #[test]
+    fn normalize_issue_objects_keeps_family_boundaries() {
+        assert_eq!(normalize_issue_object("SV601", "rm -rf"), "rm");
+        assert_eq!(normalize_issue_object("SV601", "rmdir -p"), "rmdir");
+        assert_eq!(normalize_issue_object("SV604", "~/.ssh/authorized_keys"), "~/.ssh/*");
+        assert_eq!(normalize_issue_object("SV605", "/ingest/export/summary/state"), "/ingest/export/*");
+        assert_eq!(normalize_issue_object("SV611", "read 连续重复 3 次"), "read 连续重复");
+        assert_eq!(normalize_issue_object("SV610", "danger-full-access"), "danger-full-access");
+    }
+
+    #[test]
+    fn issue_groups_reduce_hits_and_page_stably() {
+        let path = std::env::temp_dir().join(format!("av-issue-groups-{}", std::process::id()));
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let rows = [
+            ("i1", "SV601", "codex", "rm -rf", 1_i64),
+            ("i2", "SV601", "codex", "rm -f", 2_i64),
+            ("i3", "SV601", "codex", "rmdir", 3_i64),
+            ("i4", "SV601", "dsh", "rm -rf", 4_i64),
+        ];
+        for (id, rule, host, object, opened) in rows {
+            let metadata = r#"{"category":"command","evidence":"command-pattern"}"#.to_string();
+            let input = IssueInput {
+                machine_namespace: "machine", host, session_key: Some(id), issue_type: rule,
+                instance_fingerprint: &format!("{id}\0{rule}\0seq\0{object}"), status: "open",
+                severity: "warning", evaluator_id: "evaluator", evaluator_version: "1",
+                evidence_fingerprint: id, opened_at_ms: opened, metadata_json: &metadata,
+            };
+            upsert_issue(db.conn(), &input).unwrap();
+        }
+        let grouped = issue_groups(db.conn(), None, None, 50, None).unwrap();
+        assert_eq!(grouped["source_issue_count"], 4);
+        assert_eq!(grouped["total_groups"], 3);
+        assert!(grouped["groups"].as_array().unwrap().iter().any(|g| g["count"] == 2));
+        let first = issue_groups(db.conn(), None, None, 1, None).unwrap();
+        let next = first["next_cursor"].as_str().unwrap();
+        let second = issue_groups(db.conn(), None, None, 1, Some(next)).unwrap();
+        assert_eq!(first["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(second["groups"].as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -620,4 +620,11 @@
 - 验收：JS 语法、工作台来源断言通过；状态枚举与 MCP `sessions_search` 输出保持同源。
 - 边界：服务端按状态分页筛选、按估算金额排序及修复后真机点击复验仍待完成；因此不勾选完整 REQ-067。
 
+## Loop 74 · REQ-073 Issue L0 归并层（P1 自验收）
+
+- 执行：data crate 新增纯函数 `normalize_issue_object` 与 `issue_groups` L0 投影；按 rule、host、归一化 object、evidence class、北京日桶分组，返回稳定 group id、状态汇总、时间范围、样本证据、remedy 和分页 cursor。
+- 保护：原始 `issue_instances` 不被改写；跨 rule/宿主不合并；组列表不把原始命中数组整包返回；`closed/wontfix` 仅投影为 resolved/not_applicable，不把用户确认等同客观修复。
+- 验收：归一化覆盖命令、路径、描述和权限族；4 条夹具命中归并为 3 组；L0 分页稳定；data crate 120/120、Clippy 和 `git diff --check`通过。
+- 边界：P2 来源统一、L1/L2 明细读取、工作台接入、五态 IPC/动作和真机队列验收仍待完成，不勾选 REQ-073–080 或 AC18。
+
 本日志只记录已经完成的实现和证据；上述“尚未完成”不改变任何 PRD 勾选状态。任何单次修改连续测试失败超过5次，或任何单次Loop超过30分钟，立即暂停并记录；不得以拆分日志规避熔断。
