@@ -1649,9 +1649,15 @@ fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<V
     let saved = agent_vitals_runtime::statistics_timezone::save_timezone(&data_home, &timezone)?;
     agent_vitals_runtime::statistics_timezone::apply(&data_home)?;
     // The Workbench refreshes its active tab after the IPC returns, but the
-    // tray is a separate consumer of the same statistics contract. Rebuild it
-    // immediately so its day/month/session projection cannot display the old
-    // timezone until the next five-minute tick.
+    // tray is a separate consumer and its host rows come from hosts.json. A
+    // plain menu rebuild would therefore retain the old day's navigation
+    // snapshot. Re-run the bounded navigation refresh off the command thread,
+    // then rebuild the tray from the newly written snapshot.
+    let background_app = app.clone();
+    std::thread::spawn(move || {
+        refresh_hosts();
+        refresh(&background_app);
+    });
     refresh(&app);
     Ok(serde_json::json!({ "status": "saved", "timezone": saved }))
 }
