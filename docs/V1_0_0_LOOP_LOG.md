@@ -1340,3 +1340,17 @@
 - 构建：`cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 release CLI `cmp` 一致。
 - 安装：旧包可恢复备份为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-031542`，新包已安装并重启，运行 PID `79581`。
 - 边界：macOS 仍锁定，未执行真实待处理页视觉操作和真机 4,450 条归并量级对拍；签名/公证和外部试用门禁仍未完成。
+
+## Loop 182 · 真机库只读规模审计
+
+- 证据：对 `/Users/Admin/.agent-vitals/agent-vitals.sqlite3` 使用 SQLite immutable 只读连接检查，`data_quality_issues` 的开放数量为 `0`；默认滚动 30 天内 `issue_instances` 原始行 `4,395`，状态为 open `4,425`、closed `74`（全库统计）。
+- 规模：按规则、宿主、稳定对象、证据类和本地日桶做的 SQL 近似分组约 `187` 组，仅作为量级 sanity check，不替代 Rust `issue_groups` 精确结果。
+- 结论：存量时间单位迁移已消除开放质量噪声；来源投影不再以 per-fact scope key 直接制造 L0 组，默认窗口也已生效。
+- 边界：未直接修改真机库；尚未完成 Rust 投影精确前后比值、视觉 Computer Use、签名/公证和外部试用门禁。
+
+## Loop 183 · 来源归并后的全量自动回归
+
+- Python：`python3 -m unittest discover tests -v`，1188/1188 通过；208 项按测试定义因未设置 Rust CLI、双实现差分或可选依赖而跳过，无失败。
+- Rust：`cargo test --release` 全部通过，CLI 79、data 283、core 53，以及 workspace 集成、边界和性能测试均通过。
+- 结论：来源投影归并、默认 30 天 L0 窗口和 Issue 时间迁移未破坏既有 Python/Rust 锁步与数据契约；未刷新 golden/snapshot。
+- 边界：真机精确 L0 组数/P95、视觉 Computer Use、签名/公证、外部试用和独立终审仍未完成。
