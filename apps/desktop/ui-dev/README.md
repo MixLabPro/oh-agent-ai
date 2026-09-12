@@ -23,3 +23,12 @@ npm run verify
 文件权限、菜单栏、系统通知及安装升级验收。
 
 Vite mock 验收不能替代真实 `.app` Computer Use、签名/公证或外部试用门槛。
+
+桌面包预检：
+
+```bash
+node scripts/verify-macos-app-bundle.mjs
+node scripts/verify-macos-app-bundle.mjs --require-developer-id
+```
+
+第一条检查包结构和随包 CLI，并把签名状态作为诊断警告；第二条是正式发布门禁，要求 Developer ID 签名及严格校验通过。

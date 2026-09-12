@@ -1738,3 +1738,9 @@
 - 审计：`tauri.conf.json` 已配置 macOS 最低版本 `11.0`、随包 CLI resource 和 app/dmg bundle；当前包主程序显示为 `adhoc, linker-signed`，不是 Developer ID 签名。
 - 证据：本机 `security find-identity -v -p codesigning` 返回 `0 valid identities found`；`codesign --verify --deep --strict` 报资源签名不完整。因此当前失败根因是本机没有可用签名身份，不能通过仓库配置伪造修复。
 - 边界：Developer ID 证书/团队身份、notarization 凭据、真实 Computer Use、干净机升级和外部试用仍需外部发布条件。
+
+## Loop 246 · macOS 包预检门禁
+
+- 新增：`scripts/verify-macos-app-bundle.mjs` 检查 `.app` 结构、主程序、随包 CLI 和 CLI 版本；默认模式将未签名作为诊断警告，`--require-developer-id` 模式严格要求团队签名和 `codesign --verify --deep --strict`。
+- 验收：当前包普通模式通过并报告 `agent-vitals 1.3.0`；严格模式按预期失败，明确报告没有有效 Developer ID 身份及现有资源签名错误。
+- 文档：`apps/desktop/ui-dev/README.md` 已加入两种预检命令；用户已有 WorkBuddy/Issue 文档未修改。
