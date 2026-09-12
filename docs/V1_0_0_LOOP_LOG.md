@@ -1763,3 +1763,9 @@
 - 发现：GitHub CLI Release 上传需要文件，不能直接上传 `.app` 目录；原 workflow 在构建和预检成功后会在发布阶段失败。
 - 修复：发布步骤使用 `ditto -c -k --sequesterRsrc --keepParent` 将已 notarize 的 `.app` 封装为 zip，再与 DMG 一起上传，保留 macOS bundle 资源和目录层级。
 - 验收：YAML 解析通过；发布脚本现仅向 `gh release upload` 传递文件资产，不再传目录。
+
+## Loop 250 · 修正 Release artifact 下载路径
+
+- 发现：workflow 同时上传 macOS `.app` 与 DMG 时，`upload-artifact` 以 `bundle/` 作为共同归档根；下载后路径是 `dist/macos/...` 与 `dist/dmg/...`，不是原源码绝对前缀。
+- 修复：publish job 改用 `dist/macos/agent-vitals.app` 和 `dist/dmg/*.dmg`，与 Actions artifact 的归档结构一致。
+- 验收：YAML 解析与本地 `.app` zip 封装通过；Release 上传步骤只接收生成的文件资产。
