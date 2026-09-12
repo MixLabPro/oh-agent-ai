@@ -779,16 +779,16 @@ enum DataAction {
     /// Monthly cross-host summary (coverage, excluded hosts, freshness).
     /// Missing data renders as "no data", never as zero.
     Coverage {
-        /// Query a specific month (YYYY-MM) instead of the current Beijing month
+        /// Query a specific month (YYYY-MM) instead of the current statistics month
         #[arg(long)]
         month: Option<String>,
         /// Print the frozen DTO JSON to stdout (default: compact text view)
         #[arg(long)]
         json: bool,
     },
-    /// Single-day cross-host summary (Beijing date, YYYY-MM-DD).
+    /// Single-day cross-host summary (statistics date, YYYY-MM-DD).
     Daily {
-        /// Beijing date to query (YYYY-MM-DD)
+        /// Statistics date to query (YYYY-MM-DD)
         #[arg(long)]
         date: String,
         /// Print the frozen DTO JSON to stdout (default: compact text view)
@@ -836,17 +836,17 @@ enum DataAction {
 ///   `mcp::dispatch("sessions_search", {date, limit})`。
 #[derive(Subcommand)]
 enum SessionsAction {
-    /// List sessions active in a Beijing day or month (optional hour drill-down,
+    /// List sessions active in a statistics-timezone day or month (optional hour drill-down,
     /// optional host / min_tokens filter). Output envelope is byte-identical to
     /// the MCP `sessions_search` tool result.
     List {
-        /// Beijing day YYYY-MM-DD (exactly one of --day / --month)
+        /// Statistics day YYYY-MM-DD (exactly one of --day / --month)
         #[arg(long)]
         day: Option<String>,
-        /// Beijing month YYYY-MM (exactly one of --day / --month)
+        /// Statistics month YYYY-MM (exactly one of --day / --month)
         #[arg(long)]
         month: Option<String>,
-        /// Inclusive Beijing start date for a custom range; pair with --to-date
+        /// Inclusive statistics start date for a custom range; pair with --to-date
         #[arg(long = "from-date")]
         date_from: Option<String>,
         /// Inclusive end date in the configured statistics timezone; pair with --from-date

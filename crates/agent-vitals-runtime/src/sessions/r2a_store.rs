@@ -1792,12 +1792,13 @@ pub fn sessions_navigation(
     recent_n: usize,
     json_out: bool,
 ) {
-    if timezone != "Asia/Shanghai" {
-        eprintln!(
-            "unsupported --timezone {timezone:?}: only Asia/Shanghai (core day boundary is fixed UTC+8, no DST; §5.1)"
-        );
+    if let Err(error) = crate::statistics_timezone::validate_timezone(timezone) {
+        eprintln!("invalid --timezone {timezone:?}: {error}");
         std::process::exit(2);
     }
+    // Keep this compatibility path aligned with the SQL navigation entry: the
+    // explicit projection timezone is the process statistics timezone.
+    std::env::set_var("TZ", timezone);
     // 三宿主 store 独立构建：失败各自降级（unavailable），不 abort。
     let dsh_store = SessionStore::dsh(home);
     let codex_store = SessionStore::codex(home);
