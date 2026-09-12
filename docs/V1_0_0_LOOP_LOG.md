@@ -787,3 +787,9 @@
 - 构建：重新生成 release `.app` 并在隔离 `HOME`/`AGENT_VITALS_HOME` 启动；隔离库中的 UAT 候选保持 `pending`，未因打开提示或失败点击被误接受。
 - 真机状态：Computer Use 已重新取得工作台，但确认面板在滚动区域下方；本轮滚动/屏幕捕捉遇到 macOS ScreenCaptureKit 瞬时错误，未取得“确认→预览→入队→worker→刷新”的点击证据。
 - 结论：release 包包含 Loop 95 的原子事务修复；桌面端到端回执仍待下一次稳定的 Computer Use 操作，不勾选 AC13/AC27。
+
+## Loop 97 · 候选确认面板刷新竞争修复（自验收）
+
+- 修复：总览刷新不再无条件关闭“确认旧套餐信息”面板；用户打开面板后，后台数据刷新只更新候选列表并保留当前打开状态；“稍后”会显式关闭并记录抑制窗口。
+- 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、release `.app` 重建通过；隔离候选仍可见且未发生未经点击的状态变化。
+- 边界：Computer Use 滚动复验再次遇到 ScreenCaptureKit 捕捉错误，尚未取得候选确认面板内的点击回执；AC13/AC27 仍不勾选。

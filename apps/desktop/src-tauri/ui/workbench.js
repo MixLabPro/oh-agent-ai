@@ -808,6 +808,7 @@ function billingCandidateAmount(candidate) {
 
 let billingDeclarationCandidate = null;
 let billingDeclarationState = null;
+let billingReviewOpen = false;
 
 async function renderBudgetSettings() {
   const monthly = document.getElementById("ov-budget-monthly-input");
@@ -1315,9 +1316,13 @@ function renderBillingImportCandidates(report) {
   }
   // “稍后”只压住尚未处理的提醒；已确认/已忽略项仍保留一个可回看的入口。
   prompt.hidden = !candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred);
-  panel.hidden = true;
+  panel.hidden = !billingReviewOpen;
   list.textContent = "";
-  if (!candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred)) return;
+  if (!candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred)) {
+    billingReviewOpen = false;
+    panel.hidden = true;
+    return;
+  }
   copy.textContent = pendingCount
     ? pendingCount + " 条旧版本发现的套餐信息尚未计入实际支出；当前用量仍按原厂价估算。"
     : "已核对的套餐信息不会计入实际支出；当前用量仍按原厂价估算。";
@@ -1326,9 +1331,12 @@ function renderBillingImportCandidates(report) {
     const value = String(Date.now());
     try { localStorage.setItem(deferKey, value); } catch (_) { /* best effort */ }
     try { sessionStorage.setItem(deferKey, value); } catch (_) { /* best effort */ }
+    billingReviewOpen = false;
+    panel.hidden = true;
     prompt.hidden = true;
   };
   document.getElementById("ov-billing-review").onclick = () => {
+    billingReviewOpen = true;
     panel.hidden = false;
     list.textContent = "";
     for (const candidate of candidates) {
