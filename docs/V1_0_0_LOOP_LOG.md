@@ -2157,3 +2157,11 @@
   内置 CLI、版本 `0.11.0`/CLI `1.3.0`、关键 IPC 和 `arm64` 架构均正确。
 - 边界：包验收仍报告未使用 Developer ID 签名；未将本地诊断包当作正式发布物，也未替代
   真机安装升级和公证验收。
+
+## Loop 302 · x86_64 Rust workspace 执行回归
+
+- 验收：`cargo test --release --target x86_64-apple-darwin` 实际执行通过；CLI 79 项、
+  数据层 129 项、宿主层 232 项、核心/运行时及各集成、契约、性能、回放和 parity 测试
+  均无失败，测试进程正常退出。
+- 结论：Intel 目标的 CLI/公共 Rust workspace 已有编译加运行证据；完整 Intel `.app`
+  仍需原生 macOS-13 runner 产出并完成签名、公证与安装验收。
