@@ -493,6 +493,9 @@ fn issue_group_rollup(issues: &[Value]) -> Vec<Value> {
         let category = issue["category"].as_str().map(str::to_string);
         let sessions = issue["sessions"].as_u64().unwrap_or(0) as usize;
         let entry = by_rule.entry(rule).or_insert_with(|| (severity.clone(), category.clone(), 0, BTreeSet::new()));
+        if issue_severity_rank(&severity) > issue_severity_rank(&entry.0) {
+            entry.0 = severity;
+        }
         entry.2 += issue["hits"].as_u64().unwrap_or(1) as usize;
         // `sessions` 是每个组内的去重数量；不能用同一组的 0..n
         // 作为全局键，否则不同组会互相覆盖，摘要会低估受影响会话数。
@@ -506,6 +509,15 @@ fn issue_group_rollup(issues: &[Value]) -> Vec<Value> {
         })
     }).collect();
     rows
+}
+
+fn issue_severity_rank(value: &str) -> u8 {
+    match value {
+        "critical" => 3,
+        "warning" => 2,
+        "info" => 1,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -712,5 +724,15 @@ mod tests {
         let rollup = issue_group_rollup(&rows);
         assert_eq!(rollup[0]["hits"], 5);
         assert_eq!(rollup[0]["sessions"], 5);
+    }
+
+    #[test]
+    fn issue_rule_rollup_keeps_highest_severity() {
+        let rows = vec![
+            json!({"group_id": "g1", "rule": "DATA_SOURCE_FAILURE", "severity": "warning", "hits": 1, "sessions": 1}),
+            json!({"group_id": "g2", "rule": "DATA_SOURCE_FAILURE", "severity": "critical", "hits": 1, "sessions": 1}),
+        ];
+        let rollup = issue_group_rollup(&rows);
+        assert_eq!(rollup[0]["severity"], "critical");
     }
 }
