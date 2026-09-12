@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri_plugin_notification::NotificationExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
 use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
@@ -848,6 +849,21 @@ fn resolve_binary() -> Option<PathBuf> {
         std::env::current_exe().ok(),
         &|p: &Path| p.is_file(),
     )
+}
+
+/// 读取实际会被桌面同步回路使用的 CLI 版本。诊断只读探测：二进制缺失、
+/// 启动失败或输出无法识别时返回 `None`，不把 App 版本冒充 CLI 版本。
+fn resolved_cli_version() -> Option<String> {
+    let binary = resolve_binary()?;
+    let output = Command::new(binary).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 /// 纯函数版二进制解析——env、自身可执行文件、文件判断由调用方注入，单测不碰真实
@@ -1924,6 +1940,7 @@ fn export_diagnostic_package() -> Result<Value, String> {
         "diagnostic_contract": "agent-vitals-diagnostic/v1",
         "versions": {
             "app": env!("CARGO_PKG_VERSION"),
+            "cli": resolved_cli_version(),
             "engine": agent_vitals_domain::r2a::ENGINE_VERSION,
             "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
             "query_envelope": agent_vitals_runtime::mcp::ENVELOPE_SCHEMA_VERSION,
@@ -1972,6 +1989,7 @@ fn about_diagnostics() -> Value {
     serde_json::json!({
         "status": "ok",
         "app_version": env!("CARGO_PKG_VERSION"),
+        "cli_version": resolved_cli_version(),
         "engine_version": agent_vitals_domain::r2a::ENGINE_VERSION,
         "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
         "statistics_timezone": agent_vitals_runtime::clock::statistics_timezone_name(),

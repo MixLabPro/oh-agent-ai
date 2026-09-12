@@ -1713,3 +1713,10 @@
 - 修复：真实 Tauri 诊断和脱敏诊断包接入现有权威 `agent_vitals_domain::r2a::ENGINE_VERSION`；Workbench 与 Vite mock 同步展示 `Engine` 字段。
 - 验收：`npm run verify`、Tauri `cargo check --release`、JS 语法检查、`git diff --check` 通过；Vite 页面实际显示 `App browser-mock · Engine browser-mock · Authority schema ...`，标题和页面状态正常。
 - 边界：CLI 独立版本仍需在最终发布诊断/包环境中明确展示；真实 `.app` Computer Use、签名/公证和外部试用仍未完成。
+
+## Loop 242 · 诊断映射补齐实际 CLI 版本
+
+- 修复：`about_diagnostics` 与脱敏诊断包通过现有 `resolve_binary()` 只读执行 `agent-vitals --version`，展示实际 CLI 版本；二进制缺失或执行失败返回 `null`，不把 App 版本冒充 CLI 版本。
+- 对齐：Workbench、Vite mock 和 closeout verifier 增加 CLI 字段；当前 release CLI 输出为 `agent-vitals 1.3.0`。
+- 验收：`npm run verify`、Tauri release `cargo check`、JS 语法检查、`git diff --check` 和 CLI `--version` 均通过。
+- 边界：最终 `.app` 内随包 CLI 的实际版本还需在可操作桌面环境中复核；签名/公证、干净机升级和外部试用仍未完成。
