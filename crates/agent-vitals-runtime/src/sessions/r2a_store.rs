@@ -1642,11 +1642,14 @@ fn persist_findings_as_issues(
             let seq = finding.seq.map(|v| v.to_string()).unwrap_or_default();
             let fingerprint = format!("{}\0{}\0{}\0{}", entry.key.native_id, finding.rule, seq, evidence);
             let evidence_fingerprint = format!("fnv1a64:{}", agent_vitals_domain::source_identity::fnv1a64_hex(evidence.as_bytes()));
+            let opened_at_ms = finding.time
+                .map(agent_vitals_data::issues::to_epoch_ms)
+                .unwrap_or_else(crate::sql_sync::now_ms);
             let metadata = serde_json::json!({
                 "category": finding.category,
                 "tool_name": finding.tool_name,
                 "evidence": finding.evidence,
-                "time": finding.time,
+                "time": opened_at_ms,
                 "seq": finding.seq,
                 "source": "sessions_findings",
                 "remedy": {
@@ -1665,7 +1668,7 @@ fn persist_findings_as_issues(
                 evaluator_id: "legacy-finding",
                 evaluator_version: "v0.11",
                 evidence_fingerprint: &evidence_fingerprint,
-                opened_at_ms: finding.time.unwrap_or_else(crate::sql_sync::now_ms),
+                opened_at_ms,
                 metadata_json: &metadata,
             };
             let _ = db.with_immediate_txn(|conn| {

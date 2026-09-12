@@ -5,6 +5,45 @@ use serde_json::{json, Value};
 
 const BEIJING_OFFSET_MS: i64 = 8 * 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+const EPOCH_SECONDS_CUTOFF: i64 = 100_000_000_000;
+
+/// Normalize an epoch timestamp to the authority contract (milliseconds).
+/// This is the single boundary conversion used by both new Issue writes and
+/// the idempotent repair of rows written by older host adapters.
+pub fn to_epoch_ms(value: i64) -> i64 {
+    if value < EPOCH_SECONDS_CUTOFF { value.saturating_mul(1000) } else { value }
+}
+
+/// Repair legacy Issue rows whose `_ms` value was populated with epoch seconds.
+/// The operation is idempotent and keeps `metadata.time` in the same unit as
+/// `opened_at_ms`, so future projections cannot reintroduce the mismatch.
+pub fn repair_issue_timestamp_units(conn: &Connection) -> rusqlite::Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT issue_id, opened_at_ms, metadata_json FROM issue_instances
+         WHERE opened_at_ms < ?1 ORDER BY issue_id",
+    )?;
+    let rows = stmt.query_map([EPOCH_SECONDS_CUTOFF], |r| Ok((
+        r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?,
+    )))?.collect::<Result<Vec<_>, _>>()?;
+    if rows.is_empty() { return Ok(0); }
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        for (issue_id, opened, metadata_raw) in &rows {
+            let normalized = to_epoch_ms(*opened);
+            let mut metadata = serde_json::from_str::<Value>(metadata_raw).unwrap_or_else(|_| json!({}));
+            if !metadata.is_object() { metadata = json!({}); }
+            metadata["time"] = json!(normalized);
+            conn.execute(
+                "UPDATE issue_instances SET opened_at_ms = ?2, metadata_json = ?3 WHERE issue_id = ?1",
+                rusqlite::params![issue_id, normalized, metadata.to_string()],
+            )?;
+        }
+        conn.execute_batch("COMMIT")?;
+        Ok(rows.len())
+    })();
+    if result.is_err() { let _ = conn.execute_batch("ROLLBACK"); }
+    result
+}
 
 #[derive(Debug, Clone)]
 pub struct IssueInput<'a> {
@@ -178,9 +217,15 @@ fn valid_transition(from: &str, to: &str) -> bool {
     matches!(
         (from, to),
         ("open", "acknowledged")
+            | ("open", "later")
             | ("open", "closed")
             | ("open", "wontfix")
+            | ("later", "open")
+            | ("later", "acknowledged")
+            | ("later", "closed")
+            | ("later", "wontfix")
             | ("acknowledged", "closed")
+            | ("acknowledged", "later")
             | ("acknowledged", "wontfix")
             | ("acknowledged", "open")
             | ("closed", "open")
@@ -636,6 +681,49 @@ mod tests {
         assert!(!remedy_for("retry_loop").diagnostic_only);
         assert!(remedy_for("future_rule").diagnostic_only);
         assert_eq!(remedy_for("future_rule").remedy_id, "diagnostic-only");
+    }
+
+    #[test]
+    fn issue_timestamps_use_milliseconds_and_legacy_repair_is_idempotent() {
+        assert_eq!(to_epoch_ms(1_788_651_641), 1_788_651_641_000);
+        assert_eq!(to_epoch_ms(100_000_000_000), 100_000_000_000);
+        assert_eq!(to_epoch_ms(100_000_000_001), 100_000_000_001);
+        assert_ne!(issue_day_bucket(to_epoch_ms(1_788_651_641)), "1970-01-22");
+
+        let path = std::env::temp_dir().join(format!("av-issue-time-{}", std::process::id()));
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.conn().execute(
+            "INSERT INTO issue_instances(issue_id, machine_namespace, host, session_key,
+             issue_type, instance_fingerprint, status, severity, evaluator_id,
+             evaluator_version, evidence_fingerprint, opened_at_ms, metadata_json)
+             VALUES ('legacy-time', 'machine', 'claude-code', 's1', 'SV601', 'fp-time',
+             'open', 'warning', 'legacy', 'v1', 'ev', ?1, ?2)",
+            rusqlite::params![1_788_651_641_i64, r#"{"time":1788651641}"#],
+        ).unwrap();
+        assert_eq!(repair_issue_timestamp_units(db.conn()).unwrap(), 1);
+        assert_eq!(repair_issue_timestamp_units(db.conn()).unwrap(), 0);
+        let (opened, metadata): (i64, String) = db.conn().query_row(
+            "SELECT opened_at_ms, metadata_json FROM issue_instances WHERE issue_id='legacy-time'", [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(opened, 1_788_651_641_000);
+        assert_eq!(serde_json::from_str::<Value>(&metadata).unwrap()["time"], opened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn later_is_a_real_state_and_confirmation_is_not_resolution() {
+        let path = std::env::temp_dir().join(format!("av-issue-states-{}", std::process::id()));
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let id = upsert_issue(db.conn(), &input("open")).unwrap();
+        transition_issue(db.conn(), &id, "later", 2, "remind later", "user",
+            "user-action:later", "user", "v1", "later-input").unwrap();
+        assert_eq!(db.conn().query_row("SELECT status FROM issue_instances WHERE issue_id=?1", [&id], |r| r.get::<_, String>(0)).unwrap(), "later");
+        transition_issue(db.conn(), &id, "acknowledged", 3, "understood", "user",
+            "user-action:acknowledged", "user", "v1", "ack-input").unwrap();
+        assert_eq!(db.conn().query_row("SELECT status FROM issue_instances WHERE issue_id=?1", [&id], |r| r.get::<_, String>(0)).unwrap(), "acknowledged");
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM issue_status_transitions WHERE issue_id=?1", [&id], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

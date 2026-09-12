@@ -643,3 +643,11 @@
 - 接入：桌面 `sessions_issues` 改读统一组投影，UI 继续使用兼容字段，但 IPC 不再返回全部原始 `issue_instances` 数组；L1/L2 仍使用显式 group/issue 查询。
 - 验收：data issues 6/6、data crate Clippy `-D warnings`、desktop `cargo check --lib`、`git diff --check`通过。
 - 边界：桌面测试目标仍暴露既有 `list_args` 过时测试调用与 clippy 参数数量告警；未借本轮修改扩大范围。预算组、五态动作、真机 UAT 和完整 REQ-073–080 仍待完成，不勾选 AC18。
+
+## Loop 77 · REQ-073 Issue 时间单位契约修复（自验收）
+
+- 发现：旧行为 finding 的 `time` 按宿主出现秒/毫秒混用，直接写入 `opened_at_ms` 会造成 1970 日桶，并被毫秒时间窗静默排除。
+- 修复：新增唯一边界函数 `to_epoch_ms`；新 Issue 写入和存量修复统一使用毫秒；`metadata_json.time` 与 `opened_at_ms` 同步，保留 DSH `date_span` 路径不变。
+- 存量：`AuthorityDb::open` 执行幂等修复；仅修正 `<1e11` 的旧行，不删除 Issue、不改变 Issue 身份。重复执行第二次改动 0 行。
+- 验收：毫秒/秒/边界值、日桶、存量同步与幂等测试通过；data issues 8/8、runtime 编译与 clippy、desktop `cargo check --lib`、`git diff --check`通过。
+- 边界：真实用户库的修复前后数量与三条页面抽查仍需真机 UAT；不勾选 AC18 或完整 REQ-073。

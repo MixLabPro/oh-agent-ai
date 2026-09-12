@@ -792,6 +792,7 @@ impl AuthorityDb {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Self::ensure_schema(&conn, now_ms)?;
+        crate::issues::repair_issue_timestamp_units(&conn)?;
         Ok(Self { conn })
     }
 
