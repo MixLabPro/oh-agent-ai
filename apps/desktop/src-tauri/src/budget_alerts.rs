@@ -56,7 +56,6 @@ pub fn maybe_notify(app: &AppHandle) {
                 budget_revision: revision,
             },
             budget.ratio,
-            budget.effective_daily_budget,
         ));
     }
     if let Some(threshold) = threshold_for(budget.month_ratio, warn_ratio) {
@@ -68,12 +67,12 @@ pub fn maybe_notify(app: &AppHandle) {
                 budget_revision: revision,
             },
             budget.month_ratio,
-            budget.monthly_cny,
         ));
     }
 
-    for (key, ratio, limit) in candidates {
-        let threshold = match key.threshold {
+    for (key, ratio) in candidates {
+        let threshold_kind = key.threshold;
+        let threshold = match threshold_kind {
             agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Warn => "接近预算",
             agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Over => "已超预算",
         };
@@ -81,11 +80,9 @@ pub fn maybe_notify(app: &AppHandle) {
             agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily => "今日按量预算",
             agent_vitals_runtime::budget_notifications::BudgetAlertScope::Monthly => "本月按量预算",
         };
-        let body = match (ratio, limit) {
-            (Some(ratio), Some(limit)) => format!("{scope}达到 {:.0}%（预算 ¥{limit:.2}），点击查看原因与明细。", ratio * 100.0),
-            (Some(ratio), None) => format!("{scope}达到 {:.0}%，点击查看原因与明细。", ratio * 100.0),
-            _ => format!("{scope}{threshold}，点击查看原因与明细。"),
-        };
+        // 系统通知默认不暴露金额、路径或任务内容（REQ-113）。完整金额和
+        // 组成只在用户点击后进入预算页查看；这里保留阈值上下文即可。
+        let body = budget_notification_body(scope, threshold_kind, ratio);
         let app_for_notification = app.clone();
         let Ok(true) = agent_vitals_runtime::budget_notifications::claim_delivery_with(
             &data_home,
@@ -135,7 +132,7 @@ fn notify_profiles(app: &AppHandle, data_home: &std::path::Path, profiles: &[ser
                 threshold, profile.get("spent_minor").and_then(serde_json::Value::as_i64),
                 profile.get("monthly_minor").and_then(serde_json::Value::as_i64)));
         }
-        for (period, scope, threshold, spent, limit) in candidates {
+        for (period, scope, threshold, _spent, _limit) in candidates {
             let threshold_text = match threshold {
                 agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Warn => "接近预算",
                 agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Over => "已超预算",
@@ -144,10 +141,9 @@ fn notify_profiles(app: &AppHandle, data_home: &std::path::Path, profiles: &[ser
                 agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily => "今日",
                 agent_vitals_runtime::budget_notifications::BudgetAlertScope::Monthly => "本月",
             };
-            let body = match (spent, limit) {
-                (Some(spent), Some(limit)) => format!("{profile_id} · {scope_text}达到预算阈值（已用 {spent:.2} {currency} / 预算 {limit:.2} {currency}），点击查看。", spent = spent as f64 / 100.0, limit = limit as f64 / 100.0),
-                _ => format!("{profile_id} · {scope_text}{threshold_text}，点击查看预算。"),
-            };
+            // profile 名称、金额和币种也属于预算详情，默认不放入系统通知。
+            // 点击通知后预算页会展示对应 profile 的完整证据。
+            let body = budget_notification_body(scope_text, threshold, None);
             let key = agent_vitals_runtime::budget_notifications::BudgetAlertDeliveryKey {
                 period, scope, threshold, budget_revision: revision,
             };
@@ -160,6 +156,22 @@ fn notify_profiles(app: &AppHandle, data_home: &std::path::Path, profiles: &[ser
             );
         }
     }
+}
+
+fn budget_notification_body(
+    scope: &str,
+    threshold: agent_vitals_runtime::budget_notifications::BudgetAlertThreshold,
+    ratio: Option<f64>,
+) -> String {
+    let threshold_text = match threshold {
+        agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Warn => "接近预算",
+        agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Over => "已超预算",
+    };
+    let ratio_text = ratio
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| format!("（达到 {:.0}%）", value * 100.0))
+        .unwrap_or_default();
+    format!("{scope}{threshold_text}{ratio_text}，点击查看原因与明细。")
 }
 
 fn threshold_for(ratio: Option<f64>, warn_ratio: f64) -> Option<agent_vitals_runtime::budget_notifications::BudgetAlertThreshold> {
@@ -188,5 +200,19 @@ mod tests {
     #[test]
     fn malformed_warning_ratio_does_not_create_a_threshold() {
         assert_eq!(threshold_for(Some(0.8), 1.2), None);
+    }
+
+    #[test]
+    fn notification_body_keeps_budget_details_out_of_system_notification() {
+        let body = budget_notification_body(
+            "今日",
+            agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Warn,
+            Some(0.8),
+        );
+        assert!(body.contains("达到 80%"));
+        assert!(body.contains("查看原因"));
+        assert!(!body.contains('¥'));
+        assert!(!body.contains("CNY"));
+        assert!(!body.contains("USD"));
     }
 }
