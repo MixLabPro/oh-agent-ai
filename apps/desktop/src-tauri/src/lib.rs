@@ -1784,9 +1784,11 @@ fn budget_period_end_ms_for_month(month: &str) -> Option<i64> {
     } else {
         (year, month_number + 1)
     };
-    // 预算周期按北京时间自然月；其结束点是下月一日 00:00（北京），
-    // expressed as UTC epoch milliseconds for the authority table.
-    Some((days_from_civil(next_year, next_month, 1) * 86_400 - 8 * 3_600) * 1_000)
+    // 预算周期按系统统计时区自然月；由 authority query 生成下月一日的
+    // 民历午夜，自动处理 DST 的 23/25 小时自然日。
+    let next_month_key = format!("{next_year:04}-{next_month:02}");
+    agent_vitals_data::authority_query::beijing_month_bounds_ms(&next_month_key)
+        .map(|(start_ms, _)| start_ms)
 }
 
 #[tauri::command]

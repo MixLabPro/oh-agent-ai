@@ -1060,3 +1060,10 @@
 - 保护：旧函数名和日期兼容 API 保留，供应商价格时区不受影响；未实现用户自定义时区时仍明确使用 OS 默认值。
 - 验收：独立 desktop release 测试 110/110、runtime/data 编译与 `git diff --check`通过。
 - 边界：Tauri `today_beijing`、预算周期和用户可修改统计时区偏好仍需继续收口；AC21 尚未完成真实桌面 UAT。
+
+## Loop 138 · Tauri 默认日期与预算月界切换
+
+- 修复：Tauri `overview::today_beijing()` 兼容入口改用 runtime 系统统计日期；预算当前周期结束点改用 authority query 的系统时区自然月午夜，DST 月份不再固定减 8 小时。
+- 保护：保留旧 API 名称以避免 IPC 断裂；日期/月界只影响统计窗口，不改变事件 epoch 或供应商计价规则。
+- 验收：独立 desktop release 测试 110/110、`git diff --check`通过。
+- 边界：Tauri 会话默认日期与最近会话年份显示仍有旧兼容实现待清理；用户可修改的统计时区偏好和真实 Computer Use UAT 尚未完成。

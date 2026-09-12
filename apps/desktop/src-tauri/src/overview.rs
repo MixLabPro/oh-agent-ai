@@ -455,12 +455,7 @@ where
 /// `codex_cost.rs::civil_from_unix_secs`（Howard Hinnant 的 civil_from_days，
 /// div_euclid 版，负 epoch 也正确）。
 pub fn today_beijing() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let (y, m, d) = civil_from_unix_secs(secs, 8 * 3600);
-    format!("{y:04}-{m:02}-{d:02}")
+    agent_vitals_runtime::clock::today_system()
 }
 
 /// unix 秒 → 某时区（offset 秒）的 (年, 月, 日)。pub(crate)：lib.rs 的
