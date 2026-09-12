@@ -1586,3 +1586,9 @@
 - UAT：在 Vite + mock IPC 页面将统计时区改为 `America/Los_Angeles` 并保存，页面返回“正在刷新今天、本月和日历统计”；随后恢复为 `Asia/Shanghai`，状态同样成功。
 - 结果：恢复后输入值为 `Asia/Shanghai`，本月统计区域仍正常渲染，浏览器控制台错误数为 0；该路径证明设置按钮实际使用动态配置，而非仅依赖命名重构。
 - 边界：这是浏览器 mock 交互证据，不替代真实 `.app` 跨时区点击、系统时区切换及 Computer Use；未写入本地权威数据库。
+
+## Loop 221 · 窄视口会话工具栏换行修复
+
+- 发现：在约 569px 的窄浏览器视口检查时，`.sess-toolbar` 实际计算样式为 `nowrap`；旧验证器的跨规则正则误报为已支持换行。
+- 修复：为会话工具栏加入真实 `flex-wrap: wrap`，并将验证器收紧为只匹配 `.sess-toolbar` 规则块，避免相邻 CSS 规则造成假阳性。
+- 验收：窄视口下 12 个会话控件无页面横向溢出，计算样式为 `wrap`；Vite 构建、Workbench closeout verifier、浏览器 reload smoke 和 `git diff --check` 通过。临时视口已恢复默认。

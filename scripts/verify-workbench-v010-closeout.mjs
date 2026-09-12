@@ -38,7 +38,7 @@ ok(css.includes(".detail-cards") && css.includes(".cards-4"),
   "详情与 Findings 卡片有独立布局钩子");
 ok(/\.tabs\s*\{[\s\S]*?overflow-x:\s*auto/.test(css), "顶部 tabs 局部横向滚动");
 ok(/\.table-wrap\s*\{[\s\S]*?overflow:\s*auto/.test(css), "宽表只在容器内滚动");
-ok(/\.sess-toolbar\s*\{[\s\S]*?flex-wrap:\s*wrap/.test(css), "Sessions 工具栏可换行");
+ok(/\.sess-toolbar\s*\{[^}]*flex-wrap:\s*wrap/.test(css), "Sessions 工具栏可换行");
 ok(!html.includes('style="min-width:320px"'), "Trace 输入不再带固定内联最小宽度");
 
 console.log("# 构建身份与状态文案（v1 当前契约）");
