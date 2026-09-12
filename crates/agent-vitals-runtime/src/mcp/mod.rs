@@ -37,6 +37,7 @@ pub use data_status::augment_sync_failure;
 use std::path::{Path, PathBuf};
 
 use agent_vitals_data::authority::{AuthorityDb, AuthorityError};
+use jiff::{tz::TimeZone, Timestamp};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
@@ -45,7 +46,6 @@ pub const ENVELOPE_SCHEMA_VERSION: &str = "1";
 /// spec §6：查询语义版本——查询**含义**（不是结构）变化时手动 bump。
 pub const QUERY_SEMANTICS: &str = "2026-09-07";
 
-const BEIJING_OFFSET_MS: i64 = 8 * 3_600 * 1_000;
 
 // ─────────────────────────── 错误 ───────────────────────────
 
@@ -155,7 +155,7 @@ pub fn build_envelope(
         "authority_state": authority_state,
         "authority_revision": authority_revision(conn, max_observed_at_ms),
         "generated_at": ms_to_rfc3339_beijing(crate::sql_sync::now_ms()),
-        "timezone": "Asia/Shanghai",
+        "timezone": crate::clock::system_timezone_name(),
         "coverage": coverage,
         "freshness": freshness(conn),
         "warnings": warnings,
@@ -245,7 +245,7 @@ pub fn error_envelope(err: &ToolError) -> Value {
         "authority_state": "unavailable",
         "authority_revision": Value::Null,
         "generated_at": ms_to_rfc3339_beijing(crate::sql_sync::now_ms()),
-        "timezone": "Asia/Shanghai",
+        "timezone": crate::clock::system_timezone_name(),
         "coverage": { "status": "unavailable", "missing_hosts": [] },
         "freshness": { "last_successful_sync_at": Value::Null, "stale_hosts": [] },
         "warnings": [],
@@ -377,20 +377,14 @@ fn freshness(conn: &Connection) -> Value {
     })
 }
 
-/// epoch ms → RFC 3339 带 `+08:00`（spec §6.3：时间戳用 RFC 3339，北京时区）。
-/// `civil_from_unix_secs` 不引 `chrono`（domain 纪律，runtime 沿用）。
+/// epoch ms → RFC 3339，使用系统统计时区（spec §6.3）。供应商价格时间
+/// 仍由价格快照的事件绝对时间决定，不读取这个显示时区。
 pub(crate) fn ms_to_rfc3339_beijing(ms: i64) -> String {
-    let local = ms + BEIJING_OFFSET_MS;
-    let secs = local.div_euclid(1_000);
-    let millis = local.rem_euclid(1_000);
-    let (y, m, d) = agent_vitals_domain::util::civil_from_unix_secs(secs, 0);
-    let tod = secs.rem_euclid(86_400);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{millis:03}+08:00",
-        tod / 3600,
-        (tod / 60) % 60,
-        tod % 60,
-    )
+    Timestamp::from_millisecond(ms)
+        .unwrap_or(Timestamp::UNIX_EPOCH)
+        .to_zoned(TimeZone::system())
+        .strftime("%Y-%m-%dT%H:%M:%S%.3f%:z")
+        .to_string()
 }
 
 // ─────────────────────────── 工具注册表 ───────────────────────────

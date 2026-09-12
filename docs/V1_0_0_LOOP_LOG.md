@@ -1014,3 +1014,9 @@
 - 实现：`agent-vitals-data` 的 authority query 日桶/小时桶改用 SQLite `localtime` 的系统时区投影；日期/月窗口由系统 IANA 时区的民历午夜生成，跨 DST 的自然日不再假定固定 24 小时。供应商价格快照匹配仍按事件绝对时间，不因统计时区改变。
 - 验收：authority query 定向测试 30/30 通过，包含 query-plan 索引断言、跨日聚合、小时下钻和 `America/Los_Angeles` 春季 23 小时自然日测试；`cargo check -p agent-vitals-data --release`通过。
 - 边界：Python 镜像、MCP envelope/CLI、Workbench 日期显示与用户可修改时区尚未切换；旧 `beijing_*` API 名称暂作兼容入口，不据此勾选 REQ-033、REQ-096 或 AC21。
+
+## Loop 131 · MCP 与 Python sessions 时区镜像
+
+- 实现：MCP envelope/事件时间使用系统 IANA 时区格式化；Python `sessions_sql` 同步使用系统时区的 RFC3339、民历窗口和本地小时过滤，保留旧函数名仅作兼容，不再把 `+08:00` 当作统计口径。
+- 验收：Rust MCP 定向测试 12/12、Python sessions 测试 27/27、runtime Clippy `-D warnings`、Python 编译检查和 `git diff --check`通过。
+- 边界：CLI 默认日期、WorkBench 日期/日历显示、用户时区偏好持久化和真实跨入口 parity/UAT 尚未完成；REQ-033、REQ-096、AC21 继续不勾选。

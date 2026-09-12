@@ -37,8 +37,9 @@ import math
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Re-use authoritative Python helpers — do **not** grow a second implementation.
 from agent_vitals.agent.cost import cost_report  # noqa: F401  (byte-mirror)
@@ -52,6 +53,8 @@ from agent_vitals.paths import data_home
 
 ENVELOPE_SCHEMA_VERSION = "1"
 QUERY_SEMANTICS = "2026-09-07"
+# Kept for compatibility with callers that import the old constant. Statistics
+# no longer use this fixed offset; they use the OS IANA timezone below.
 BEIJING_OFFSET_MS = 8 * 3_600 * 1_000
 DAY_MS = 86_400_000
 HOUR_MS = 3_600_000
@@ -78,31 +81,43 @@ _CURRENCY_MINOR_DIGITS = {
 # Spec §6.3 北京时区 RFC 3339（mirror Rust `ms_to_rfc3339_beijing`）。
 # ────────────────────────────────────────────────────────────────────────
 
-def _ms_to_rfc3339_beijing(ms):
-    """epoch 毫秒 → RFC 3339 `+08:00`（spec §6.3）。mirror Rust 同名函数。
+def _system_timezone():
+    """Resolve the OS IANA timezone without treating a fixed offset as identity."""
+    configured = os.environ.get("TZ", "").lstrip(":")
+    candidates = [configured] if configured else []
+    try:
+        localtime = os.path.realpath("/etc/localtime")
+        marker = "/zoneinfo/"
+        if marker in localtime:
+            candidates.append(localtime.split(marker, 1)[1])
+    except OSError:
+        pass
+    for name in candidates:
+        try:
+            return ZoneInfo(name)
+        except (ValueError, ZoneInfoNotFoundError):
+            continue
+    return datetime.now().astimezone().tzinfo or timezone.utc
 
-    Rust 实现 `local = ms + BEIJING_OFFSET_MS` 后把 `local` 当 UTC civil 解,
-    字符串尾巴硬编 `+08:00` —— **不是** Python `datetime.fromtimestamp(s,
-    tz=+08:00)` 的语义(Python 那个会把 `s` 当 UTC 偏移 0,显示成北京 TZ,
-    等同于把秒数再加 8h,造成"双偏移")。这里手工 civil-from-days 拆出
-    UTC date + tod,再 `+08:00` 拼回,避免双偏移。
+
+def _system_timezone_name():
+    tz = _system_timezone()
+    return getattr(tz, "key", str(tz))
+
+
+def _ms_to_rfc3339_beijing(ms):
+    """epoch 毫秒 → RFC 3339 in the OS statistics timezone.
+
+    The historical function name remains as a compatibility symbol; its
+    implementation is no longer fixed to Beijing.
     """
     if ms is None:
         return None
-    local = ms + BEIJING_OFFSET_MS
-    secs = local // 1000
-    millis = local % 1000
-    # Hinnant civil-from-days (epoch-based, 与 Rust `civil_from_unix_secs` 同
-    # 算法)。Python `//` floor 与 Rust `div_euclid` 在非负输入下等价;DSH /
-    # cli 写入的 ms 恒非负(epoch 之后),所以 `_civil_from_days` 即可。
-    days = secs // 86400
-    tod = secs % 86400
-    y, m, d = _civil_from_days(int(days))
-    h = tod // 3600
-    mi = (tod // 60) % 60
-    s = tod % 60
-    return ("%04d-%02d-%02dT%02d:%02d:%02d.%03d+08:00" % (
-        y, m, d, h, mi, s, millis))
+    millis = int(ms) % 1000
+    dt = datetime.fromtimestamp(int(ms) // 1000, _system_timezone())
+    offset = dt.strftime("%z")
+    offset = offset[:3] + ":" + offset[3:] if len(offset) == 5 else offset
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + ".%03d%s" % (millis, offset)
 
 
 def _civil_from_days(z):
@@ -265,7 +280,7 @@ def _tool_error_envelope(err_code, message):
         "authority_state": "unavailable",
         "authority_revision": None,
         "generated_at": _ms_to_rfc3339_beijing(int(datetime.now(tz=timezone.utc).timestamp() * 1000)),
-        "timezone": "Asia/Shanghai",
+        "timezone": _system_timezone_name(),
         "coverage": {"status": "unavailable", "missing_hosts": []},
         "freshness": {"last_successful_sync_at": None, "stale_hosts": []},
         "warnings": [],
@@ -436,7 +451,7 @@ def _build_envelope(conn, home, max_observed_ms, coverage, warnings, data):
         "authority_state": _authority_state(home),
         "authority_revision": _authority_revision(conn, max_observed_ms),
         "generated_at": _ms_to_rfc3339_beijing(_now_ms()),
-        "timezone": "Asia/Shanghai",
+        "timezone": _system_timezone_name(),
         "coverage": coverage,
         "freshness": _freshness(conn),
         "warnings": list(warnings),
@@ -503,15 +518,14 @@ def _parse_ymd(s):
 
 
 def _beijing_midnight_ms(y, m, d):
-    """北京 00:00 → UTC 毫秒。mirror Rust `beijing_midnight_ms = ms_from_civil
-    (y, m, d, 0, 0, 0) - BEIJING_OFFSET_MS` 同一公式(UTC civil - 8h)。"""
+    """OS statistics timezone midnight → UTC milliseconds.
+
+    The compatibility name mirrors Rust's public function; the actual boundary
+    is civil midnight in the system IANA timezone and therefore DST-aware.
+    """
     try:
-        # 直接用 civil-from-days 反推 UTC 00:00 = `(y, m, d)` 当日 UTC 0 点
-        # 的 epoch ms；再减 8h = 北京 00:00 的 UTC 时刻。
-        utc_midnight_ms = _days_to_utc_midnight_ms(y, m, d)
-        if utc_midnight_ms is None:
-            return None
-        return utc_midnight_ms - BEIJING_OFFSET_MS
+        local = datetime(int(y), int(m), int(d), tzinfo=_system_timezone())
+        return int(local.timestamp() * 1000)
     except (ValueError, OverflowError, OSError):
         return None
 
@@ -543,7 +557,9 @@ def beijing_day_bounds_ms(date_str):
     start = _beijing_midnight_ms(y, m, d)
     if start is None:
         return None
-    return (start, start + DAY_MS)
+    next_day = date(y, m, d) + timedelta(days=1)
+    end = _beijing_midnight_ms(next_day.year, next_day.month, next_day.day)
+    return None if end is None else (start, end)
 
 
 def beijing_month_bounds_ms(month_str):
@@ -587,7 +603,7 @@ _SQL_SESSIONS_IN_WINDOW = (
     "  AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL "
     "  AND session_key IS NOT NULL "
     "  AND event_ts_ms >= ?2 AND event_ts_ms < ?3 "
-    "  AND (?4 < 0 OR (((event_ts_ms + ?5) / ?6) % 24) = ?4) "
+    "  AND (?4 < 0 OR (CAST(strftime('%H', event_ts_ms / 1000, 'unixepoch', 'localtime') AS INTEGER) = (?4 + (?5 - ?5) + (?6 - ?6)))) "
     "GROUP BY session_key"
 )
 
@@ -1106,7 +1122,7 @@ def session_detail(args, home):
 def sessions_navigation(day, recent_n, home):
     """`sessions_navigation_v2` byte-mirror（Tauri 托盘 envelope）。"""
     if not day:
-        day = today_beijing()
+        day = datetime.now(_system_timezone()).date().isoformat()
     conn, err = _open_authority(home)
     if err is not None:
         return err
@@ -1129,7 +1145,7 @@ def sessions_navigation(day, recent_n, home):
         return {
             "schema_version": 1,
             "day_key": day,
-            "timezone": "Asia/Shanghai",
+            "timezone": _system_timezone_name(),
             "generated_at": _now_iso_utc(),
             "hosts": hosts,
         }
