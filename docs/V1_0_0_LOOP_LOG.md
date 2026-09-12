@@ -1556,3 +1556,9 @@
 - 修复：将 Workbench 的 `timeline.js` 与 `workbench.js` 标记为有序 ES modules，消除 Vite 的 legacy script 构建警告；合并 `workbench.js` 内重复的 `fmtTokens` 声明，并保留十亿级 token 的 `1.50B` 展示格式。
 - 验收：Vite production build 成功生成 JS bundle；WorkBench KPI、轨迹、JS 语法和桌面 release `cargo check` 全部通过；浏览器 reload 后总览、时区、价格更新入口正常，控制台错误数为 0。
 - 边界：这是开发与打包链路修复，不替代真实 `.app` Computer Use、签名/公证、公共目录成功发布和外部试用验收。
+
+## Loop 216 · 模块化改动后的 UI/DSH 回归
+
+- 验收：当前 UI verifier（fold bridge、KPI/决策、来源、轨迹、Codex findings/timeline）全部通过；DSH `npm test` 的 TypeScript 检查、构建、基础验证、宿主投影、wire、timeline、export、render 全部通过。
+- 发现：历史脚本 `scripts/verify-workbench-v010-closeout.mjs` 仍硬编码 Cargo `0.10.0`、`app_build_info` 等旧版契约，当前运行会失败；它不是 v1.0.0 当前门槛，未通过修改断言或删除检查来伪造成功。
+- 结论：模块化脚本在 Vite、浏览器 mock、Tauri release check 和 DSH 集成中均可用；历史 verifier 的漂移记录为待清理项，不影响本轮已覆盖的 v1 当前验证。
