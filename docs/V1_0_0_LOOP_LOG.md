@@ -813,3 +813,9 @@
 - 保护：面板状态仍由单一 `billingReviewOpen` 管理，后台刷新不会清掉打开状态；无候选或“稍后”后会同步恢复 `aria-expanded=false`。
 - 验收：workbench JS 语法、Vite 构建和 `git diff --check` 通过；保留键盘焦点指示与可读按钮名称，符合 UI/UX 可访问性检查。
 - 边界：尚未在最终 `.app` 完成完整候选确认链点击回执，不勾选 AC13/AC27。
+
+## Loop 101 · 候选读取失败不吞面板状态（自验收）
+
+- 修复：`billing_import_candidates` 临时读取失败时不再用空候选覆盖当前面板；只有明确成功且返回空数组时才关闭面板。这样后台异常不会把用户正在查看的候选误判为已消失。
+- 验收：release `.app` 重建成功；新按钮在 AX 树中显示 `(collapsed)` 与 `Secondary Actions: Expand`，说明可访问状态已进入最终包。
+- 真机边界：Computer Use 本轮点击“确认套餐信息”和“稍后”均只改变焦点、未触发 WebView 事件；该输入通道异常仍待设备/窗口重新聚焦后复验，不勾选 AC13/AC27。

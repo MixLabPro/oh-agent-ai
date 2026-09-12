@@ -1301,7 +1301,12 @@ function renderBillingImportCandidates(report) {
   const list = document.getElementById("ov-billing-review-list");
   if (!prompt || !panel || !reviewButton || !closeButton || !copy || !list) return;
   bindBillingDeclarationPanel();
-  const candidates = report && report.status === "ok" ? (report.candidates || []) : [];
+  // A transient authority read failure must not close a panel the user is
+  // already reviewing or erase its last rendered candidates. The next
+  // successful refresh will reconcile the list; only an explicit `ok` empty
+  // result means there are no candidates left.
+  if (!report || report.status !== "ok") return;
+  const candidates = Array.isArray(report.candidates) ? report.candidates : [];
   const pendingCount = candidates.filter((candidate) => candidate.status === "pending").length;
   const deferKey = "agent-vitals-billing-review-deferred-at-ms";
   const deferWindowMs = 30 * 24 * 60 * 60 * 1000;
