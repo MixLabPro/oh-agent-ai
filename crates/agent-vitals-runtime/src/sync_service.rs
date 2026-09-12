@@ -653,6 +653,23 @@ mod tests {
     }
 
     #[test]
+    fn one_host_read_failure_does_not_block_another_host() {
+        with_isolated_home(|home| {
+            let bad_dir = home.join(".claude/projects/p-bad");
+            std::fs::create_dir_all(&bad_dir).unwrap();
+            std::fs::write(bad_dir.join("bad.jsonl"), "{not json\n").unwrap();
+            codex_rollout(home);
+            let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
+
+            let report = sync_facts(&data).unwrap();
+            let claude = report.hosts.iter().find(|host| host.host == "claude-code").unwrap();
+            let codex = report.hosts.iter().find(|host| host.host == "codex").unwrap();
+            assert!(!claude.errors.is_empty(), "坏的 Claude 文件必须保留失败证据");
+            assert_eq!(codex.files_synced, 1, "Codex 仍必须完成本轮导入");
+        });
+    }
+
+    #[test]
     fn configured_retention_window_is_applied_by_sync_maintenance() {
         with_isolated_home(|_home| {
             let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());

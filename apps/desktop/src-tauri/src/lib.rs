@@ -1481,6 +1481,23 @@ fn source_host_controls() -> Value {
     }
 }
 
+/// 仅工作台本机显示的标准读取目录；不混入 MCP/导出 DTO，避免路径离开桌面。
+#[tauri::command]
+fn source_read_locations() -> Value {
+    let home = PathBuf::from(
+        std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default(),
+    );
+    let dsh = agent_vitals_runtime::home::dsh_home().map(|path| path.join("sessions"));
+    serde_json::json!({
+        "status": "ok",
+        "locations": {
+            "claude-code": home.join(".claude").join("projects").to_string_lossy(),
+            "codex": agent_vitals_runtime::summary::codex_home().join("sessions").to_string_lossy(),
+            "dsh": dsh.map(|path| path.to_string_lossy().into_owned()),
+        }
+    })
+}
+
 #[tauri::command]
 fn set_source_host_excluded(input: SourceHostControlInput) -> Result<Value, String> {
     let changed = agent_vitals_runtime::source_controls::set_host_excluded(
@@ -1973,6 +1990,25 @@ fn merge_source_sync_failure(report: &mut Value, sync: &SyncStatus) {
         if !affected { continue; }
         source["connection_state"] = Value::String("needs_attention".into());
         source["authorization"] = Value::String("unknown_or_failed".into());
+        let error_code = if message.contains("permission") || message.contains("denied") {
+            "permission_denied"
+        } else if message.contains("disk full") || message.contains("no space") {
+            "disk_full"
+        } else if message.contains("parse") || message.contains("json") || message.contains("malformed") {
+            "source_parse_failed"
+        } else {
+            "source_read_failed"
+        };
+        let prior_failed = source["failed_scope"]["sources"].as_u64().unwrap_or(0);
+        source["failed_scope"]["sources"] = serde_json::json!(prior_failed.max(1));
+        let mut error_codes = source["failed_scope"]["error_codes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if !error_codes.iter().any(|code| code.as_str() == Some(error_code)) {
+            error_codes.push(Value::String(error_code.into()));
+        }
+        source["failed_scope"]["error_codes"] = Value::Array(error_codes);
         source["failed_scope"]["sync"] = serde_json::json!({
             "stage": sync.stage, "message": sync.message
         });
@@ -2215,6 +2251,7 @@ pub fn run() {
             add_custom_source_root,
             remove_custom_source_root,
             source_host_controls,
+            source_read_locations,
             set_source_host_excluded,
             delete_imported_source_data,
             retention_config,
@@ -2383,6 +2420,8 @@ mod tests {
         assert_eq!(report["sources"][1]["connection_state"], "connected");
         assert_eq!(report["sources"][2]["connection_state"], "needs_attention");
         assert_eq!(report["sources"][2]["failed_scope"]["sync"]["stage"], "partial");
+        assert_eq!(report["sources"][2]["failed_scope"]["sources"], 1);
+        assert_eq!(report["sources"][2]["failed_scope"]["error_codes"], serde_json::json!(["permission_denied"]));
     }
 
     #[test]

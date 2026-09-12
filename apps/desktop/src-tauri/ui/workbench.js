@@ -4060,7 +4060,7 @@ function openSessionFromFinding(f) {
 
 async function loadSources(reset) {
   if (reset) {
-    srcState = { loaded: true, error: false, sources: null, sync: null, paused: false, customRoots: [] };
+    srcState = { loaded: true, error: false, sources: null, sync: null, paused: false, customRoots: [], locations: {} };
     document.getElementById("src-banner").hidden = true;
   }
   srcState.loaded = true;
@@ -4069,11 +4069,13 @@ async function loadSources(reset) {
   // 两个数据源独立拉：一个失败不吞另一个（partial 照样渲染，横幅明说缺哪个）。
   let err = null;
   try {
-    const [r, custom] = await Promise.all([invoke("data_source_status"), invoke("custom_source_roots")]);
+    const [r, custom, locations] = await Promise.all([invoke("data_source_status"), invoke("custom_source_roots"), invoke("source_read_locations")]);
     if (!r || r.status !== "ok") throw new Error((r && r.reason) || "数据源状态不可用");
     srcState.sources = Array.isArray(r.sources) ? r.sources : [];
     if (!custom || custom.status !== "ok") throw new Error((custom && custom.reason) || "自定义目录配置不可用");
     srcState.customRoots = Array.isArray(custom.sources) ? custom.sources : [];
+    if (!locations || locations.status !== "ok") throw new Error((locations && locations.reason) || "读取位置不可用");
+    srcState.locations = locations.locations || {};
   } catch (e) { err = e; }
   try {
     const ov = await invoke("read_overview");
@@ -4138,6 +4140,21 @@ function renderSources() {
     return;
   }
   for (const source of sources) cards.appendChild(renderSourceCard(source));
+  const failedSources = sources.filter((source) =>
+    source.connection_state === "needs_attention" ||
+    Number((source.failed_scope || {}).sources || 0) > 0
+  );
+  if (failedSources.length > 0) {
+    const details = failedSources.map((source) => {
+      const codes = ((source.failed_scope || {}).error_codes || []).join("、") || "source_read_failed";
+      return (HOST_DISPLAY[source.host] || source.host || "未知来源") + "（" + codes + "）";
+    }).join("；");
+    showBanner(
+      "src-banner",
+      "部分来源读取失败：" + details + "。其他来源已继续同步；请在对应卡片点“重新同步”。",
+      false,
+    );
+  }
   foot.textContent = "共 " + sources.length + " 个数据源 · 扫描状态与会话查询相互独立。";
 }
 
@@ -4236,12 +4253,27 @@ function renderSourceCard(src) {
   scan.textContent = "扫描源 " + ((src.scan && src.scan.source_count) ?? 0) +
     " · 最近日志 " + fmtSourceTime(src.log && src.log.last_event_at_ms);
   card.appendChild(scan);
+  const location = srcState.locations && srcState.locations[key];
+  if (location) {
+    const details = document.createElement("details");
+    details.className = "src-meta";
+    const summary = document.createElement("summary");
+    summary.textContent = "读取位置：" + String(location).replace(/^\/Users\/[^/]+/, "~");
+    const full = document.createElement("div");
+    full.className = "src-custom-path";
+    full.textContent = String(location);
+    details.append(summary, full);
+    card.appendChild(details);
+  }
 
   if (failed > 0) {
     const errors = ((src.failed_scope && src.failed_scope.error_codes) || []).join("、") || "未知错误";
     const row = el("div", "degraded-row");
     row.textContent = "失败范围：" + failed + " 个源 · " + errors;
     card.appendChild(row);
+    const freshness = el("div", "src-meta");
+    freshness.textContent = "本来源本轮读取失败；状态不是新鲜数据。";
+    card.appendChild(freshness);
   }
   const action = src.recovery_action || {};
   if (action.label) {

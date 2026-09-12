@@ -26,7 +26,7 @@ for (const field of ["source_id", "authorization", "connection_state", "scan",
   ok(runtime.includes(`\"${field}\"`), `契约包含 ${field}`);
 }
 ok(js.includes("for (const source of sources)"), "前端按返回集合渲染而非硬编码宿主");
-ok(js.includes("recoverSource(button, key)") && js.includes('invoke("trigger_sync")'),
+ok(js.includes("recoverSource(button, key") && js.includes('invoke("trigger_sync")'),
   "未检测与失败状态都有恢复动作");
 ok(js.includes('invoke("sync_request_status", { requestId })'), "恢复动作按请求ID等待完成");
 
@@ -76,6 +76,9 @@ const invoke = async (command, args) => {
     statusReads += 1;
     return statusFailure ? { status: "unavailable", reason: "schema mismatch", sources: [] } : sourceDto;
   }
+  if (command === "custom_source_roots") return { status: "ok", sources: [] };
+  if (command === "source_read_locations") return { status: "ok", locations: {} };
+  if (command === "sync_pause_state") return { status: "ok", paused: false };
   if (command === "read_overview") return { sync: { ok: true, at: "same-second" } };
   if (command === "trigger_sync") { triggered += 1; return "sync-test-1"; }
   if (command === "sync_request_status") {
@@ -109,6 +112,9 @@ ok(cards.length === 3, "真实 renderSources 渲染三张宿主卡片");
 const names = cards.map(card => card.children[0].children[0].textContent);
 ok(names.join("|") === "Claude Code|Codex|DeepSeek Harness", "三宿主名称和顺序来自契约");
 ok(cards[2].children.some(child => child.textContent.includes("permission")), "失败范围进入卡片而非假空");
+ok(cards[2].children.some(child => child.textContent.includes("不是新鲜数据")), "失败宿主明确不宣称数据新鲜");
+ok(elements["src-banner"].hidden === false && elements["src-banner"].textContent.includes("DeepSeek Harness") && elements["src-banner"].textContent.includes("其他来源已继续同步"),
+  "部分失败横幅点名失败宿主并说明其他来源继续同步");
 const firstAction = cards[0].children.find(child => child.textContent === "扫描并接入");
 await firstAction.onclick();
 ok(triggered === 1 && completionPolls === 2, "恢复动作至少观察一次未完成再等到本请求完成");

@@ -2565,6 +2565,22 @@ session_store={store} fold={fold}"
                         );
                     }
                 }
+                // 单宿主的坏文件不回滚其他宿主已经写入的事实，但也绝不能把
+                // 这轮报告成成功：桌面端需要据此把该宿主标成“需要处理”。
+                // 错误写 stderr，使桌面 `run_facts_sync` 能保留宿主名和原因。
+                let failed_hosts: Vec<_> = report.hosts.iter()
+                    .filter(|host| !host.errors.is_empty())
+                    .collect();
+                if !failed_hosts.is_empty() {
+                    for host in failed_hosts {
+                        eprintln!(
+                            "sync-facts partial failure [{}]: {}",
+                            host.host,
+                            host.errors.join(" | "),
+                        );
+                    }
+                    std::process::exit(1);
+                }
             }
             Err(e) => {
                 eprintln!("sync-facts failed: {e}");
