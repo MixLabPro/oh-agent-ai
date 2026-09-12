@@ -52,6 +52,17 @@ pub fn offset_seconds_for_unix_secs_in_timezone(unix_secs: i64, timezone: &str) 
     Some(timestamp.to_zoned(zone).offset().seconds())
 }
 
+/// 将 Unix 秒按系统 IANA 时区格式化为菜单栏使用的本地时间文本。
+/// 输入仍是绝对时间；只有展示时区变化，供应商价格规则不读取此值。
+pub fn local_timestamp_text(unix_secs: i64) -> String {
+    let timestamp = Timestamp::from_second(unix_secs)
+        .unwrap_or_else(|_| Timestamp::from_second(0).expect("Unix epoch is valid"));
+    timestamp
+        .to_zoned(TimeZone::system())
+        .strftime("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
 /// 系统统计时区的当前自然月 → `YYYY-MM`。
 pub fn current_month_system() -> String {
     let date = system_now().date();

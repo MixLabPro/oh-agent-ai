@@ -1053,3 +1053,10 @@
 - 保护：DSH 供应商峰谷定价仍由独立价格规则决定，统计时区变化不会改写供应商费率或历史事件时间。
 - 验收：默认环境预算测试 30/30、`TZ=America/Los_Angeles` 预算测试 30/30、Python 编译检查与 `git diff --check`通过。
 - 边界：Tauri 菜单栏时间显示、用户可修改的统计时区持久化和完整 Computer Use 验证仍待完成。
+
+## Loop 137 · Tauri 菜单栏同步时间复用系统时区
+
+- 修复：Tauri `overview` 的同步回执时间不再自行按固定 UTC+8 格式化，改复用 runtime 的系统 IANA 时间格式化；绝对 epoch 输入保持不变，菜单栏与工作台/查询层使用同一默认时区。
+- 保护：旧函数名和日期兼容 API 保留，供应商价格时区不受影响；未实现用户自定义时区时仍明确使用 OS 默认值。
+- 验收：独立 desktop release 测试 110/110、runtime/data 编译与 `git diff --check`通过。
+- 边界：Tauri `today_beijing`、预算周期和用户可修改统计时区偏好仍需继续收口；AC21 尚未完成真实桌面 UAT。

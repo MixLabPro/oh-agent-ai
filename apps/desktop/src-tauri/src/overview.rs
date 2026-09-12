@@ -102,10 +102,7 @@ fn now_unix_secs() -> i64 {
 /// 北京时间 `YYYY-MM-DD HH:MM:SS`（UTC+8 无夏令时）。复用 `civil_from_unix_secs`，
 /// 不引日期库——与 data_home 解析同款「管道不是规则」的镜像位置。
 fn beijing_timestamp(secs: i64) -> String {
-    let (y, m, d) = civil_from_unix_secs(secs, 8 * 3600);
-    let tod = (secs + 8 * 3600).rem_euclid(86400);
-    let (h, mi, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
-    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+    agent_vitals_runtime::clock::local_timestamp_text(secs)
 }
 
 /// tick 每轮结束把同步状态落盘到 `state/last-sync.json`（与 alert.json 同目录——
