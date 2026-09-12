@@ -5,7 +5,7 @@
   "use strict";
   if (window.__TAURI__) return;
 
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  let timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const dayInSystemTimezone = (value) => {
     const parts = new Intl.DateTimeFormat("en-CA", {
       timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
@@ -110,6 +110,17 @@
       case "budget_profiles_status": return { status: "ok", profiles: [] };
       case "retention_config": return { status: "ok", months: 13 };
       case "statistics_timezone_config": return { status: "ok", timezone, system_timezone: timezone };
+      case "save_statistics_timezone_config": {
+        const next = String((args && args.timezone) || "").trim();
+        if (!next) throw new Error("statistics timezone must be a non-empty IANA name");
+        try {
+          new Intl.DateTimeFormat("en-US", { timeZone: next }).format();
+        } catch (_) {
+          throw new Error("unknown IANA statistics timezone: " + next);
+        }
+        timezone = next;
+        return { status: "saved", timezone };
+      }
       case "data_codex_quota": return { plan_type: "Plus", limits: { primary: { used_percent: 38, resets_at: Math.floor(Date.now() / 1000) + 7200 } } };
       case "sessions_list": return { data: { sessions, next_cursor: null, has_more: false, window_session_count: sessions.length, window_total_tokens: 246000 } };
       case "sessions_read": return { data: { session: sessions[0], events: [], findings: [] } };
