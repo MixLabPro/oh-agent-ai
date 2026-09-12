@@ -1506,3 +1506,10 @@
 - 构建：`cargo tauri build --bundles app` 成功；桌面包已重新编译 data/runtime 与公共价格更新链路。
 - 复核：主程序产物中本地 checkout 路径计数为 0，路径脱敏配置继续生效。
 - 边界：未安装或启动新包；本地包签名/公证、锁屏 Computer Use、公共目录 404 和外部试用仍未完成。
+
+## Loop 208 · DSH 价卡锁步与真实 React 渲染回归
+
+- 发现并修复：来源链接元数据更新后，`integrations/dsh-client/pricing.json` 与 `assets/pricing.json` 曾发生字节漂移；已同步并恢复锁步。
+- 发现并修复：Node 22 的默认 `navigator.language=en-US` 使独立渲染验证错误地走英文回退；验证脚本现在显式固定无宿主语言场景为 `zh-CN`，不改变浏览器运行时语言行为。
+- 验收：Python 价卡/目录 21/21；`integrations/dsh-client` 的 check、build、verify、host/wire/timeline/export/render 全部通过。
+- 边界：真实 DSH 宿主安装和 `.app` Computer Use 仍需真机；签名/公证与外部试用未完成。

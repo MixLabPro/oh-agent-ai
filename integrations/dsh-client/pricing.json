@@ -90,7 +90,7 @@
     "sources": {
       "anthropic": "https://benchlm.ai/anthropic/api-pricing (2026-09-01 sync, 对照 platform.claude.com)",
       "minimax": "https://platform.minimaxi.com/docs/guides/pricing-paygo (官方,CNY)",
-      "moonshot": "https://benchlm.ai/moonshot/api-pricing (2026-09-01 sync, 官方 platform 文档);ai.360.com 转售页:输入 ¥20/输出 ¥100/缓存写 ¥25",
+      "moonshot": "https://benchlm.ai/moonshot/api-pricing (2026-09-01 sync, 官方 platform 文档);https://ai.360.com 转售页:输入 ¥20/输出 ¥100/缓存写 ¥25",
       "deepseek": "https://api-docs.deepseek.com/quick_start/pricing (USD 峰值/谷值,与 providers 段 CNY 换算一致)"
     },
     "host_costusd_note": "Claude Code 本地 lastModelUsage.costUSD 交叉核验(2026-09-02):claude 系模型与 catalog 逐分吻合(含 cc 按 1h 价),可当差分 oracle;第三方模型(deepseek/minimax)一律按 $5/$0.5/$25 默认卡计价,与真实价目不符,不可当账单证据。"
