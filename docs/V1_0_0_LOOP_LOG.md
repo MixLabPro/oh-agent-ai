@@ -2179,3 +2179,10 @@
   时按 Enter 成功切换页面；随后按 Escape 页面保持稳定，无异常弹窗或状态损坏。
 - 边界：本轮覆盖浏览器 DOM 键盘路径，不替代真实 200% 字号、VoiceOver/读屏和 Tauri
   原生窗口验收。
+
+## Loop 305 · 公共价目表异常输入拒收
+
+- 修复：价格目录校验不再仅检查费率字段存在；`null`/字符串费率、空费率对象和无效
+  `max_input_tokens` 现在明确拒收，避免坏目录替换当前有效版本。
+- 验收：新增 4 个异常输入回归用例；`cargo test -p agent-vitals-runtime --release
+  pricing_catalog` 通过，Rust 1.74 MSRV Clippy 通过，`cargo test --release` 全量通过。

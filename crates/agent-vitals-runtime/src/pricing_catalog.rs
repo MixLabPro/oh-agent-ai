@@ -97,6 +97,11 @@ fn validate_providers(value: &Value, path: &str) -> Result<usize, String> {
             if !has_dimension {
                 return Err(format!("{path}.{provider_id}.models.{model_id} has no billing dimension"));
             }
+            for dimension in ["input_uncached", "input_cached", "output"] {
+                if let Some(value) = model.get(dimension) {
+                    validate_rate(value, &format!("{path}.{provider_id}.models.{model_id}.{dimension}"))?;
+                }
+            }
             if let Some(tiers) = model.get("tiers") {
                 let tiers = tiers
                     .as_array()
@@ -113,12 +118,46 @@ fn validate_providers(value: &Value, path: &str) -> Result<usize, String> {
                     }) {
                         return Err(format!("{path}.{provider_id}.models.{model_id}.tier has no billing dimension"));
                     }
+                    for dimension in ["input_uncached", "input_cached", "output"] {
+                        if let Some(value) = tier.get(dimension) {
+                            validate_rate(
+                                value,
+                                &format!("{path}.{provider_id}.models.{model_id}.tiers.{dimension}"),
+                            )?;
+                        }
+                    }
+                    if let Some(max_input_tokens) = tier.get("max_input_tokens") {
+                        if !max_input_tokens.is_null()
+                            && (!max_input_tokens.is_u64() || max_input_tokens.as_u64() == Some(0))
+                        {
+                            return Err(format!(
+                                "{path}.{provider_id}.models.{model_id}.tiers.max_input_tokens must be a positive integer or null"
+                            ));
+                        }
+                    }
                 }
             }
             count += 1;
         }
     }
     Ok(count)
+}
+
+fn validate_rate(value: &Value, path: &str) -> Result<(), String> {
+    match value {
+        Value::Number(number) if number.as_f64().is_some_and(|number| number >= 0.0) => Ok(()),
+        Value::Object(values) if !values.is_empty() => {
+            for (key, value) in values {
+                if !value.is_number()
+                    || value.as_f64().map_or(true, |number| number < 0.0)
+                {
+                    return Err(format!("{path}.{key} must be a finite non-negative number"));
+                }
+            }
+            Ok(())
+        }
+        _ => Err(format!("{path} must be a finite non-negative number or rate object")),
+    }
 }
 
 fn validate_sources(root: &serde_json::Map<String, Value>) -> Result<(), String> {
@@ -189,6 +228,14 @@ mod tests {
     fn rejects_missing_dimension_and_empty_tiers() {
         assert!(validate(br#"{"providers":{"p":{"models":{"m":{}}}}}"#).is_err());
         assert!(validate(br#"{"providers":{"p":{"models":{"m":{"tiers":[]}}}}}"#).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_rates_and_tier_limits() {
+        assert!(validate(br#"{"providers":{"p":{"models":{"m":{"output":null}}}}}"#).is_err());
+        assert!(validate(br#"{"providers":{"p":{"models":{"m":{"output":{"peak":"unknown"}}}}}}"#).is_err());
+        assert!(validate(br#"{"providers":{"p":{"models":{"m":{"tiers":[{"output":1,"max_input_tokens":"512k"}]}}}}}"#).is_err());
+        assert!(validate(br#"{"providers":{"p":{"models":{"m":{"tiers":[{"output":1,"max_input_tokens":0}]}}}}}"#).is_err());
     }
 
     #[test]
