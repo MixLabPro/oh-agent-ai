@@ -1739,14 +1739,22 @@ fn save_budget_config(app: AppHandle, input: BudgetConfigInput) -> Result<Value,
         input.monthly_cny_minor, input.daily_cny_minor, input.warning_ratio_bp, now_ms,
     ).map_err(|error| error.to_string())?;
     let origin_recorded = agent_vitals_runtime::budget::mark_budget_config_user_owned(&data_home).is_ok();
-    let notification_permission = app.notification().request_permission()
+    // 预算金额均为 0 表示明确停用兼容预算；停用时不应触发 macOS
+    // 通知权限请求。只有用户真正启用至少一个预算周期时才申请权限（REQ-039）。
+    let notification_permission = budget_notifications_enabled(
+        input.monthly_cny_minor, input.daily_cny_minor,
+    ).then(|| app.notification().request_permission()
         .map(|state| format!("{state:?}"))
-        .unwrap_or_else(|error| format!("unavailable: {error}"));
+        .unwrap_or_else(|error| format!("unavailable: {error}")));
     Ok(serde_json::json!({
         "status": "saved", "updated_at_ms": now_ms,
         "origin": "user", "origin_recorded": origin_recorded,
         "notification_permission": notification_permission,
     }))
+}
+
+fn budget_notifications_enabled(monthly_minor: i64, daily_minor: i64) -> bool {
+    monthly_minor > 0 || daily_minor > 0
 }
 
 #[tauri::command]
@@ -3771,5 +3779,12 @@ mod tests {
         );
         assert_eq!(workbench_target_for_menu_id("session:none:codex", &hosts), None);
         assert_eq!(workbench_target_for_menu_id("session:stale:dsh", &hosts), None);
+    }
+
+    #[test]
+    fn disabled_budget_does_not_enable_notification_permission_flow() {
+        assert!(!budget_notifications_enabled(0, 0));
+        assert!(budget_notifications_enabled(1, 0));
+        assert!(budget_notifications_enabled(0, 1));
     }
 }
