@@ -2001,6 +2001,14 @@
 - 约束：本地包仍为 ad-hoc 签名；Developer ID/notarization 和真实无开发环境安装仍
   不用本地回归结果替代。
 
+## Loop 284 · 桌面 Release workflow 防回归校验
+
+- 新增：独立 Node 校验器覆盖 `app-v*` 触发、手动 tag、凭据预检、锁定 Tauri CLI、
+  `--ci` 构建、双边界架构/签名/公证校验、SHA256 校验和、`--verify-tag` 及 tag ref
+  一致性。
+- 验收：`node scripts/verify-release-desktop-workflow.mjs` 全部检查通过；README 已补
+  调用方式；`git diff --check` 通过。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；

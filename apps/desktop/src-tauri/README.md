@@ -49,6 +49,9 @@ node scripts/verify-macos-app-bundle.mjs --require-architecture=arm64
 
 # 正式发布门禁：要求 Developer ID 签名
 node scripts/verify-macos-app-bundle.mjs --require-developer-id
+
+# 校验桌面 Release workflow 的关键门禁仍在位
+node scripts/verify-release-desktop-workflow.mjs
 ```
 
 前一个检查允许本地 ad-hoc 签名并只作诊断；后一个检查失败时不得宣称安装包已完成
