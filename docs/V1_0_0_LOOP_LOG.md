@@ -1308,3 +1308,9 @@
 - 保护：迁移只处理 `<1e11` 的秒级值，不删除 Issue、不改身份列或 token；失败只记录错误，不把数据伪装成已迁移。
 - 验收：`agent-vitals-data` Issue 测试 9/9 通过；桌面 release 测试 110/110 通过；迁移单测确认首跑修正、二次运行 0 行变更。
 - 边界：当前未在锁定的 macOS 上做真实窗口视觉 Computer Use；签名/公证和外部试用门禁仍未完成。
+
+## Loop 177 · 存量迁移修复进入安装包
+
+- 构建：`cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 release CLI `cmp` 一致。
+- 安装：旧 `/Applications/agent-vitals.app` 可恢复备份为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-030858`，新包已安装并重启，运行 PID `78048`。
+- 边界：macOS 仍锁定，未执行真实视觉点击或验证存量库实际迁移行数；当前包仍为 ad hoc 签名，Developer ID/公证和外部试用门禁未完成。
