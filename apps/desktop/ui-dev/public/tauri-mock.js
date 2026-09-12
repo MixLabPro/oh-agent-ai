@@ -92,6 +92,33 @@
     cost_status: { state: "estimated", reason: "no-billing-declaration" },
   }];
 
+  const issueGroups = [
+    {
+      group_id: "browser-issue-group-1", source_kind: "behavior", rule: "SV613",
+      host: "codex", object: "进度停滞: 连续工具失败", evidence_class: "tool_failure",
+      bucket: isoDay, count: 3, first_seen_at_ms: Date.now() - 7200000,
+      last_seen_at_ms: Date.now() - 3600000, severity: "warning",
+      status_rollup: { open: 3, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 },
+      sessions_count: 1, sample_evidence: [{ issue_id: "browser-issue-1", evidence: "tool failure", metadata: { category: "tool_failure" } }],
+      remedy: { remedy_id: "diagnostic-only", diagnostic_only: true }, actionability: 0.7,
+      time: Date.now() - 7200000, evidence: "tool_failure", tool_name: "进度停滞: 连续工具失败", category: "tool_failure", hits: 3, sessions: 1,
+    },
+    {
+      group_id: "browser-issue-group-2", source_kind: "billing_candidate", rule: "BILLING_CONFIRMATION",
+      host: "codex", object: "openai:2026-09", evidence_class: "USD", bucket: month,
+      count: 1, first_seen_at_ms: Date.now() - 1800000, last_seen_at_ms: Date.now() - 1800000,
+      severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 },
+      sessions_count: 0, sample_evidence: [{ candidate_id: "browser-candidate-1", provider_id: "openai", currency: "USD", amount_minor: 2000, is_bill: false }],
+      remedy: { remedy_id: "diagnostic-only", diagnostic_only: true }, actionability: 0.8,
+      time: Date.now() - 1800000, evidence: "USD", tool_name: "openai:2026-09", category: "USD", hits: 1, sessions: 0,
+    },
+  ];
+  const issueInstances = [{
+    issue_id: "browser-issue-1", host_kind: "codex", session_key: "browser_mock_session",
+    rule: "SV613", status: "open", severity: "warning", evidence: "tool failure",
+    opened_at_ms: Date.now() - 7200000, closed_at_ms: null, metadata: { category: "tool_failure", time: Date.now() - 7200000 },
+  }];
+
   const ok = (data) => Promise.resolve(data);
   const emptyReport = (key) => ({ status: "ok", [key]: [] });
   async function invoke(command, args) {
@@ -124,8 +151,13 @@
       case "data_codex_quota": return { plan_type: "Plus", limits: { primary: { used_percent: 38, resets_at: Math.floor(Date.now() / 1000) + 7200 } } };
       case "sessions_list": return { data: { sessions, next_cursor: null, has_more: false, window_session_count: sessions.length, window_total_tokens: 246000 } };
       case "sessions_read": return { data: { session: sessions[0], events: [], findings: [] } };
-      case "sessions_issues": return { data: { items: [], next_cursor: null, has_more: false, total: 0 } };
-      case "issue_group_instances": return { data: { instances: [], next_cursor: null, has_more: false, total: 0 } };
+      case "sessions_issues": return {
+        totals: { issues: issueGroups.length, findings: issueGroups.length, critical: 0, warning: issueGroups.length, info: 0, sessions: 1, sessions_total: 1 },
+        rules: issueGroups.map((group) => ({ rule: group.rule, severity: group.severity, category: group.category, hits: group.hits, sessions: group.sessions })),
+        issues: issueGroups, findings: [], source: "browser_mock", next_cursor: null, source_projection_count: 1,
+      };
+      case "issue_group_instances": return { group_id: args && args.groupId, instances: issueInstances, next_cursor: null, total_instances: issueInstances.length };
+      case "issue_instance_read": return { status: "ok", issue: issueInstances.find((item) => item.issue_id === (args && args.issueId)) || null };
       case "source_read_locations": return { status: "ok", locations: [] };
       case "sync_pause_state": return { paused: false };
       case "peek_nav_target": case "peek_focus_target": return null;

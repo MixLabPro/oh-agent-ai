@@ -1367,3 +1367,10 @@
 - 构建：`cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 release CLI `cmp` 一致。
 - 安装：旧包可恢复备份为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-032147`，新包已安装并重启，运行 PID `81034`。
 - 边界：macOS 仍锁定，未执行真实待处理页视觉操作；真机精确组数/P95、签名/公证和外部试用门禁仍未完成。
+
+## Loop 186 · Vite/HMR 待处理页样式调试链验收
+
+- 修复：浏览器 mock 的 `sessions_issues` 改为 Workbench 当前 L0 契约（`totals/rules/issues/findings/source/next_cursor`），补充 `issue_group_instances` 与 `issue_instance_read` 的可展开样例，避免页面因旧 `{data:{items}}` 形状误判为空。
+- 验收：Vite dev server `http://127.0.0.1:5173/workbench.html` 可加载；Issues 页显示 2 条发现/2 条规则；展开 SV613 组可见实例详情与状态操作；页面截图已完成视觉检查；`node --check apps/desktop/ui-dev/public/tauri-mock.js` 与 `npm --prefix apps/desktop/ui-dev run build` 通过。
+- 结论：样式问题可用现有 vanilla HTML/CSS/JS + Vite HMR 快速迭代，无需为此迁移 React；浏览器服务调试链已经覆盖待处理页的 L0 列表和展开态。
+- 边界：这是假数据浏览器验收，不等同于真实安装包/真实 SQLite 数据验收；macOS Computer Use 仍受锁屏阻塞，签名/公证和外部试用门禁仍未完成。
