@@ -947,3 +947,10 @@
 - 保护：`acknowledged` 仍独立于解决；状态汇总统一映射到 `resolved/not_applicable`，恢复待处理仍可从两类已结束状态返回 `open`。
 - 验收：desktop store 测试 14/14、data issues 定向测试 9/9、Clippy `-D warnings`、JS 语法检查与 `git diff --check`通过。
 - 边界：真实待处理队列五态点击、自动关闭和 AC18 Computer Use UAT 仍需在可操作桌面环境执行。
+
+## Loop 121 · 待处理状态迁移按钮补齐
+
+- 修复：待处理明细不再把 `later/acknowledged` 限制为只能恢复 `open`；现在按权威合法迁移展示直接的“稍后/已确认/已解决/不适用”操作，已结束状态保留恢复入口。
+- 保护：UI 只选择权威层允许的目标状态，不绕过事务、状态迁移记录或五态语义；“已确认”仍不等同于“已解决”。
+- 验收：真实 Workbench KPI 验证器覆盖 `later` 与 `acknowledged` 动作矩阵，JS 语法检查与 `git diff --check`通过。
+- 边界：真实待处理五态点击回执、状态转移历史及 AC18 Computer Use UAT 仍待可操作桌面环境执行。

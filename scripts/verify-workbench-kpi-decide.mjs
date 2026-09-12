@@ -128,6 +128,12 @@ ok(sandbox.budgetProfileStatusText({
   level: "ok", spent_minor: 120, currency: "CNY", daily_level: "disabled",
 }) === "本月：正常 · 已用 120 CNY",
   "正常状态显示权威已用金额");
+ok(JSON.stringify(sandbox.issueActionsForStatus("later")) === JSON.stringify([
+  ["open", "恢复待处理"], ["acknowledged", "已确认"], ["resolved", "已解决"], ["not_applicable", "不适用"],
+]), "稍后状态仍可直接推进到确认/解决/不适用");
+ok(JSON.stringify(sandbox.issueActionsForStatus("acknowledged")) === JSON.stringify([
+  ["open", "恢复待处理"], ["later", "稍后"], ["resolved", "已解决"], ["not_applicable", "不适用"],
+]), "已确认状态仍可直接推进到稍后/解决/不适用");
 
 const num = (id) => elements[id]?.textContent ?? "";
 const sub = (id) => elements[id + "-sub"]?.textContent ?? "";

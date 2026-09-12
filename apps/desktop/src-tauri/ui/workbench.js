@@ -4429,6 +4429,17 @@ function statusRollupLabel(rollup) {
     .map(([key, label]) => label + " " + rollup[key]).join(" · ") || "—";
 }
 
+function issueActionsForStatus(status) {
+  const actions = {
+    open: [["later", "稍后"], ["acknowledged", "已确认"], ["resolved", "已解决"], ["not_applicable", "不适用"]],
+    later: [["open", "恢复待处理"], ["acknowledged", "已确认"], ["resolved", "已解决"], ["not_applicable", "不适用"]],
+    acknowledged: [["open", "恢复待处理"], ["later", "稍后"], ["resolved", "已解决"], ["not_applicable", "不适用"]],
+    resolved: [["open", "恢复待处理"]],
+    not_applicable: [["open", "恢复待处理"]],
+  };
+  return actions[status] || actions.open;
+}
+
 async function toggleIssueGroup(group) {
   if (!group.group_id) return;
   findState.expanded[group.group_id] = !findState.expanded[group.group_id];
@@ -4461,10 +4472,7 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
       detailButton.addEventListener("click", () => showIssueInstanceDetail(instance.issue_id, line, instance));
       line.appendChild(detailButton);
       const currentStatus = instance.status || "open";
-      const actions = currentStatus === "open"
-        ? [["later", "稍后"], ["acknowledged", "已确认"], ["resolved", "已解决"], ["not_applicable", "不适用"]]
-        : [["open", "恢复待处理"]];
-      for (const [status, label] of actions) {
+      for (const [status, label] of issueActionsForStatus(currentStatus)) {
         const button = el("button", "btn secondary");
         button.type = "button";
         button.textContent = label;
