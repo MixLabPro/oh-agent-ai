@@ -2067,3 +2067,11 @@
   跨宿主摘要契约。
 - 边界：这仍是本地测试构建回归，不替代 macOS 解锁后的 Computer Use、Developer ID
   签名/公证、Intel 架构包和外部试用验收。
+
+## Loop 291 · 套餐稍后处理 UAT
+
+- UAT: AC28 walked ✔：在 Vite 浏览器工作台点击“稍后”，即时隐藏待确认提示；等待
+  异步刷新后仍保持隐藏，未改变 tokens、按量估算或账单口径。
+- 证据：页面 DOM 在点击后 `ov-billing-prompt.hidden=true`，1.2 秒后仍为 `true`；
+  mock 不写入 Authority 数据库。真实 `.app` 的持久化 webview/跨重启行为仍待解锁真机
+  验收。
