@@ -2118,3 +2118,11 @@
   测试均无失败。
 - 结论：当前本地 Rust workspace 没有发现回归；这不替代 macOS 解锁后的 Computer Use、
   Developer ID 签名/公证、Intel 包、干净机安装升级和外部试用验收。
+
+## Loop 297 · Python/Golden/DSH 集成门禁回归
+
+- 验收：`python3 -m unittest discover tests -v`、`python3 tests/golden_runner.py --diff`、
+  `cd integrations/dsh-client && npm test` 全部通过；Golden 15 个 case 逐字节一致，
+  DSH 客户端类型检查、构建、宿主投影、wire/timeline/export/render 验证均通过。
+- 结论：兼容实现、黄金输出和 DSH 集成未发现回归；未因此宣称真实 `.app` 安装/升级、
+  签名公证或外部试用门槛已完成。
