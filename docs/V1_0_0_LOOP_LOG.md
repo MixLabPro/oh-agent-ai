@@ -1682,3 +1682,9 @@
 - 修复：`about_diagnostics` 与脱敏诊断包加入 `statistics_timezone`；Workbench 诊断页同步展示该字段。内部 crate、CLI、schema、价表版本仍保持独立管理，未误改 App 版本号。
 - 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、Workbench closeout verifier、`apps/desktop/ui-dev` 的 `npm run verify`、`cargo check --release --manifest-path apps/desktop/src-tauri/Cargo.toml` 和 `git diff --check` 全部通过。
 - 边界：尚未替代真实 `.app` Computer Use、签名/公证、干净机升级和外部试用验收。
+
+## Loop 237 · Vite 诊断 mock 与真实 IPC 对齐
+
+- 修复：Vite `tauri-mock.js` 的 `about_diagnostics` 现在返回动态 `statistics_timezone`，浏览器热更新环境与真实 Tauri 诊断页保持同一字段契约。
+- 验收：`apps/desktop/ui-dev` 执行 `npm run verify` 通过，Vite production build 与 Workbench closeout verifier 均通过；`git diff --check` 通过。
+- 边界：mock 只用于 UI 调试，不替代真实 `.app` 的统计时区保存、重启恢复和 Computer Use 验收。
