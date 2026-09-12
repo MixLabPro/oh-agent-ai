@@ -1500,3 +1500,9 @@
 - 修复：公共 catalog 与 pricing snapshot 改为同一 SQLite 事务写入；任一外键或不可变身份校验失败，两个表都回滚，旧有效版本继续可读。
 - 验收：新增原子回滚测试通过；目录/价格相关 data crate 回归通过，`git diff --check`通过。
 - 边界：真实联网成功仍受公共目录 404 阻塞，签名/公证、Computer Use 和外部试用门禁仍未完成。
+
+## Loop 207 · 原子切换修复进入桌面包
+
+- 构建：`cargo tauri build --bundles app` 成功；桌面包已重新编译 data/runtime 与公共价格更新链路。
+- 复核：主程序产物中本地 checkout 路径计数为 0，路径脱敏配置继续生效。
+- 边界：未安装或启动新包；本地包签名/公证、锁屏 Computer Use、公共目录 404 和外部试用仍未完成。
