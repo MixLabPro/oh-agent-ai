@@ -278,6 +278,19 @@ _WB_UNBILLED_TO_CREDITS_NOTE = (
     "free tier, and host-side non-billing are indistinguishable here."
 )
 
+# spec §6.1/§9E.5 E5 的 `cost.tokens` 语义注记：`used` 是 session_usage 里**最后
+# 一次调用的上下文占用 prompt_tokens 快照**（§9E.2 实测 16/21 逐字相等，余下 4 例
+# 疑似压缩/重置），**不是 processed token 总量**——真处理量在 cost.processed_tokens
+# （traces 四桶之和，无 trace 证据时 null）。键保留，语义由 note 承担。Rust
+# `sources/mod.rs::WB_TOKENS_ARE_LAST_CALL_NOTE` 字节一致。
+_WB_TOKENS_ARE_LAST_CALL_NOTE = (
+    "cost.tokens = session_usage.used: the last generation call's prompt_tokens "
+    "snapshot (context size), not a processed-token total \u2014 the session's "
+    "processed tokens are cost.processed_tokens (four-bucket sum of the trace "
+    "generation spans)."
+)
+
+
 # spec §10 B5：`lifecycle` 非 None 时附在 `notes` 的诚实注记——五个字段是原样
 # 浮出，其取值词表宿主未声明，所以这里不据其值过滤任何会话；过滤是消费方的
 # 决定。Rust `sources/mod.rs::WB_LIFECYCLE_NOTE` 字节一致。
@@ -289,25 +302,53 @@ _WB_LIFECYCLE_NOTE = (
 )
 
 
-def _cost_of(meta):
-    """spec §6.1 成本块，键序 `{tokens, credits, cash_cny, nominal_cny,
-    nominal_basis, host_billed}`（字节一致，Rust 镜像逐字节对齐，不能重排）。
-    tokens = `used`（聚合 token，无逐请求 Usage）；credits = credit_json 求和
-    （**积分**，不是货币）；cash_cny 恒 None（本机无支付证据，绝不填 0）；
-    nominal_cny = credits × 0.05（名义栏输入，不可进实付栏/预算分子）。usage 行
-    缺失且 credit_json 空 → None（诚实缺失，不编 0）。"""
+def _processed_tokens_from_spans(spans):
+    """会话 traces 的 processed token 四桶之和（E5）：遍历该会话的 generation
+    span，每个有 usages 的 span 取第一条 usage（与 E4a emitter 同一挑选），
+    四桶 = uncached(prompt−cached, 下限 0) + cache_read(cached) + cache_write(0)
+    + output(completion)。**traces 目录缺失 → None**（诚实无观测，不借 0）；
+    目录存在但 span 无 usage（全取消/全解码失败）→ 0，真测量零（与
+    traces_probe 零值对象同口径）。decode_failed 的 span 不进（usage 不可读）。
+    Rust `sources/mod.rs::processed_tokens_from_spans` 逐字节对齐。"""
+    total = 0
+    any_generation = False
+    for span in spans:
+        if span.get("kind") != "generation":
+            continue
+        any_generation = True
+        usages = span.get("usages") or []
+        if not usages:
+            continue
+        u = usages[0]
+        prompt = u.get("prompt_tokens") or 0
+        cached = u.get("cached_tokens") or 0
+        completion = u.get("completion_tokens") or 0
+        total += max(prompt - cached, 0) + cached + completion
+    return total if any_generation else None
+
+
+def _cost_of(meta, processed_tokens):
+    """spec §6.1 cost 块，键序 `{tokens, processed_tokens, credits, cash_cny,
+    nominal_cny, nominal_basis, host_billed}`（docs §9E.5 E5：processed 是新成员）。
+    tokens = `used`（session_usage 的**最后调用上下文 prompt_tokens 快照**，不是
+    processed 总量，语义见 note）；processed_tokens = traces 四桶之和（无 trace
+    证据 → None，不编 0）；credits = credit_json 求和（**积分**，不是货币）；
+    cash_cny 恒 None（本机无支付证据，绝不填 0）；nominal_cny = credits × 0.05
+    （名义栏输入，不入实付/预算分子）。usage 行缺失且 credit_json 空 → None（诚实
+    缺失，不编 0）。"""
     used = meta.get("used")
     cj = meta.get("credit_json")
     if used is None and not cj:
         return None
     tokens = used if isinstance(used, int) and used >= 0 else 0
     cents = _credit_cents(cj)
-    # 名义人民币 = credits × 0.05；按厘累计（cents × 0.05）再 round，与 credit 求和
-    # 同一防浮点漂移手法。Python `round` 银行家舍入 vs Rust `.round()` 半数向上——
-    # 差异只在 x.5，兑换价 × 整数厘不落 x.5（fixture 与真实账单均无），可接受。
+    # 名义人民币 = credits × 0.05；按整数点（cents × 0.05）再 round，与 credit 求和
+    # 同一防浮点漂移手法。Python `round` 银行家舍入 vs Rust `round()` 半数向上——
+    # 差异只在 x.5，兑换价 × 0.05 不落 x.5（fixture 与真实账单均无），可接受。
     nominal_cents = int(round(cents * 0.05))
     return {
         "tokens": tokens,
+        "processed_tokens": processed_tokens,
         "credits": cents / 100.0,
         "cash_cny": None,
         "nominal_cny": nominal_cents / 100.0,
@@ -383,9 +424,16 @@ def workbuddy_session_audit_json(home, session_id):
                                             if db_rec is not None else None)
     date_span = workbuddy_session.date_span_of(records, meta)
 
+    # E5：cost 块不再只吃 db——processed_tokens 来自本会话 traces 的四桶之和
+    # （无 trace 证据 → None，不编 0）；tokens 语义由 note 承担。镜像 Rust：note
+    # 夹在基线 note 与 unbilled/lifecycle 之间，同序。
+    processed_tokens = _processed_tokens_from_spans(spans)
+
+    notes = list(ev["notes"])
+    if _cost_of(meta, None) is not None:
+        notes.append(_WB_TOKENS_ARE_LAST_CALL_NOTE)
     # 非积分轨会话：`credits: 0.0` 是真测量，但真实开销在用户自配 API 账户、本机
     # 不可见——由 note 承担那层意思，不由数字冒充（spec §11 第 14 条）。
-    notes = list(ev["notes"])
     if _is_unbilled_to_credits(meta):
         notes.append(_WB_UNBILLED_TO_CREDITS_NOTE)
 
@@ -420,7 +468,7 @@ def workbuddy_session_audit_json(home, session_id):
         "coverage": ev["coverage"],
         "signals": ev["signals"],
         "attempts": attempts,
-        "cost": _cost_of(meta),
+        "cost": _cost_of(meta, processed_tokens),
         "notes": notes,
         "source_snapshot": workbuddy_session.read_workbuddy_source_snapshot(root),
         "schema_probe": schema_probe,

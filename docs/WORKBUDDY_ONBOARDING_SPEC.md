@@ -110,6 +110,11 @@ v3 另新增：赠送积分**不产生** `host_bills` 行的语义澄清（§5.1
 | 会话 | 22（`sessions` / `session_usage` 各 22 行） |
 | **① 积分轨（证实）** | **11 会话 · 1,109,007 token · 4,307.76 credit** |
 | **② 未计入积分（成因不判定）** | **11 会话 · 962,116 token · 0 credit**——见 §2.1，**不可**断言是自配轨 |
+
+> **2026-09-12 脚注（E5）**：本表的 token 列是 `session_usage.used`——**最后一次
+> 调用的上下文占用 prompt_tokens 快照**（§9E.1），不是 processed 用量；留档作历史
+> 基准，**不**充当 §5.2 名义分母。processed 口径见 §5.2：积分轨 435,907,687 /
+> 全量 473,051,927。
 | 语料跨度 | **2026-07-29 → 2026-08-23**（北京日）；**2026-09 自然使用为零**（09-11 多出的第 23 个会话是用 WorkBuddy 分析本 spec 产生的——观测者效应，不计） |
 | audit-log | **21 个文件**（2026-09-02 时为 23）——账本在轮转 |
 | `requestId` → audit-log 时间戳 join | **64/100**；**10/11** 个有积分的会话至少命中一条 |
@@ -311,21 +316,28 @@ unavailable」——正是 Coverage 三态存在的意义，不是缺陷。
 ### 5.2 名义单位成本与分母陷阱
 
 §6.7 的可比量是 `nominal_cost / processed_tokens × 1M`。WorkBuddy 无逐桶单价、无逐
-模型 token，走不了标准的 `Σ 桶 × 单价`，但「积分 × 兑换价」是同性质的 list-price
-派生量，落进同一栏：
+模型 token，走不了标准的 `Σ 桶 × 单价`，但「积分 × 兑换价」是同等性质的 list-price
+派生量，落进同一栏。
+
+**分母必须是 processed tokens（traces 四桶之和），不是 `used`**（E5，§9E.5 实施
+注记）。`session_usage.used` 是**最后一次调用的上下文占用 prompt_tokens 快照**
+（§9E.1 实测：22/22 会话里 16 个逐字相等、1 个 ±0.5%、5 个偏离——它测的是「最后
+一次会话中的 context size」，不是「这次会话处理了多少」）。用 processed 重算
+（2026-09-12 真机，5,222 个 generation span，积分>0 的会话 12 个）：
 
 ```
-积分轨分母（正确）:  ¥215.39 / 1,109,007 tok = ¥194.2/M
-全量分母（错误）:    ¥215.39 / 2,071,123 tok = ¥104.0/M   ← 被稀释 46%
+积分轨分母（正确）:  ¥215.49 / 435,907,687 tok = ¥0.49/M   （12 个积分>0 会话）
+全量分母:            ¥215.49 / 473,051,927 tok = ¥0.46/M
+unpriced（免费轨 11 会话）: 37,144,240 tok → 不进分母不计 0
 ```
 
-未计入积分的 962,116 token **不在 `credit_json` 里**（成因见 §2.1，可能是自配路由、
-限免促销或宿主未记账——都不消耗积分）。把它算进分母，等于让不占配额的 token 免费
-搭车、把积分轨的单位成本压低 46%。与 §6.6「两个 coverage 不得合并成一个看似精确的
-数字」同一形状。
+旧口径「各占一半、稀释 46%」（2026-09-02 的 used 基准）被 processed 推翻：
+**积分轨占全量 92.1%**、免费轨只 7.9%——把免费部分算进分母只稀释 8.3%，不是
+46%。差异变小不是「不重要」，是**旧的 46% 稀释论证建立在量纲错误的 `used` 上、
+作废**；§2 的 used 基准保留但降格为历史注解（脚注加在 §2 表）。
 
-**规格**：WorkBuddy 名义单位成本的分母**只含积分轨 token**（`credit_json` 求和 > 0
-的会话）；未计入积分的部分单列 `unpriced_tokens: 962,116`，不进分母也不计 0。
+**规格**：WorkBuddy 名义单位成本的分母**只含积分轨 processed token**（`credit_json`
+求和 > 0 的会话）；未计入积分的 37,144,240 只进 `unpriced_tokens`，不进分母也不计 0。
 
 **两把尺不能相加**：其他宿主的名义是 `token × 官方卡`，WorkBuddy 的是
 `积分 × 兑换价`。并列可比，求和无意义——展示层必须并列不合计。
@@ -751,11 +763,34 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       edges 0 = WorkBuddy 无 parentId 链，诚实覆盖）。**实施注记**：真机 `sync-facts`
       首轮 workbuddy 675 文件 3,865 事实 ~2s，二轮 675 skipped（指纹命中）；Python
       侧镜像 locate/shape 拆分只为钉「逐文件拼接 == 全量」等式，不生成写路径。
-- [ ] **E5 · 成本词表回填**
+- [x] **E5 · 成本词表回填**
       §5.2 用 processed tokens 重算名义单位成本（积分轨 vs 全量两栏都算，分母口径按
       归属会话）；`cost.tokens` 改名或加 note「last-call context size」；`cost` 块加
       `processed_tokens`（来自 traces，四桶之和）；§2 基线表脚注；记下 `used` 与
       last-call prompt 不等的 4 个会话（`ad447428` 等）的成因线索（压缩/重置？）。
+        **实施注记（2026-09-12）**：
+        - `cost` 块 7 键（Rust↔Python 逐字节）：`tokens` 保留 = `used`、语义由新
+          note 承担（`WB_TOKENS_ARE_LAST_CALL_NOTE`；不重排键名）、新成员
+          `processed_tokens` = 该会话 traces 四桶之和（`processed_tokens_from_spans`
+          ：与 E4a emitter 同一挑选规则——每 generation span 取第一条 usage，
+          uncached+ cache_read + output，write 恒 0；decode_failed span 不进、
+          traces_probe.decode_failures 照报；traces 目录缺失 → null，不编 0）。
+          真机：s1 fixture = 27,750（4,000+8,000+300 · 4,000+11,000+450），
+          db-only 会话 = null。
+        - **§5.2 重算**：分母从 `used` 换 processed tokens——积分轨 ¥0.49/M、
+          全量 ¥0.46/M、免费轨 37.1M token 单列 unpriced（「稀释 46%」的旧论证
+          建立在量纲错误的 used 上，作废；见 §5.2 全文）。
+        - **§6.1 表一行**：`cost.tokens = used` 行标记为「键保留 + note + processed
+          另出」→ **本轮已按该方案落地**。
+        - **§2 基线脚注**：used 基准注记为历史注解，不再当名义分母。
+        - **used ≠ last-call 的 5 个会话**（2026-09-12 实测，22/22 逐字比较；
+          16 逐字相等 + 1 个 ±0.5% + 5 个偏离）：`ad447428`（used 133,966 <
+          last prompt 278,682）、`ef6c0fd7`（56,027 < 159,255）、`49525d61`
+          （0 < 76,694——used 列缺值）、`4e20a4ee`（39,874 < 49,101）、
+          `9e4b26f5`（used 107,319 **>** last prompt 83,910——13 天长会话）
+          。成因线索：used 是宿主聚合值的**某时点快照**，与「最后一次调用」的
+          拍照点不同步（压缩/重置后 used 停留早期，但末次调用 prompt 已长大；
+          或者反之 used 拍在更晚）。`3acac645` 偏 0.5% 算界内。
 - [ ] **E6 · 文档收口**
       INTEGRATION §9/§12.2、ASK P1-1/P2-3/§0、CORPUS 勘误；memory `workbuddy-data-facts`
       再勘误（`used` 语义、Agent workflow 非另一类、逐调用 model）。

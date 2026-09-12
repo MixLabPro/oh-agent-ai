@@ -1147,9 +1147,10 @@ class TestWorkbuddyCostBlockReportsCreditsNotCny(unittest.TestCase):
             [("s1", 5000, 10, 1788167100000, '{"r1":22.53,"r2":19.48}')])
         cost = report["cost"]
         self.assertNotIn("cny", cost)
+        # E5：cost 块 7 键（processed_tokens 是 traces 四桶之和，无 trace 证据 → null）。
         self.assertEqual(list(cost.keys()),
-                         ["tokens", "credits", "cash_cny", "nominal_cny",
-                          "nominal_basis", "host_billed"])
+                         ["tokens", "processed_tokens", "credits", "cash_cny",
+                          "nominal_cny", "nominal_basis", "host_billed"])
         self.assertIsNone(cost["cash_cny"])
         self.assertEqual(cost["credits"], 42.01)
         self.assertEqual(cost["nominal_cny"], round(42.01 * 0.05, 2))

@@ -2205,11 +2205,15 @@ class CliMatrix(unittest.TestCase):
         # 不是人民币——旧字段名把 1000cr=¥50 的积分当货币，约 20× 高估（§3.1/§6.1）。
         # `cash_cny` 恒 null（本机无支付证据，绝不填 0）；`nominal_cny` = 42.01×0.05
         # → 厘累计 round(4201×0.05)=210 → 2.1（名义栏，永不进实付栏/预算分子）。
+        # E5（spec §9E.5）：cost 块 7 键，processed_tokens 来自 traces 四桶之和
+        # （s1 fixture 两条 generation：(12000−8000)+8000+300 = 12300、(15000−11000)
+        # +11000+450 = 15450 → 27750）；无 trace 证据的会话该键为 null（诚实缺失）。
         self.assertEqual(list(report["cost"].keys()),
-                         ["tokens", "credits", "cash_cny", "nominal_cny",
-                          "nominal_basis", "host_billed"])
+                         ["tokens", "processed_tokens", "credits", "cash_cny",
+                          "nominal_cny", "nominal_basis", "host_billed"])
         self.assertEqual(report["cost"], {
             "tokens": 5000,
+            "processed_tokens": 27750,
             "credits": 42.01,
             "cash_cny": None,
             "nominal_cny": 2.1,
@@ -2241,6 +2245,12 @@ class CliMatrix(unittest.TestCase):
             "NOT folded: audit-log sandbox-executed is the Bash source (no shared identity "
             "key \u2014 audit toolCallId vs span spanId \u2014 and audit-log is the hash-chained "
             "security ledger with the more complete record; merging would double-count)",
+            # E5（spec §9E.5）：cost.tokens 语义注记——used 是 last-call context
+            # size，不是 processed 总量；夹在 traces 折叠 note 与 lifecycle 之间。
+            "cost.tokens = session_usage.used: the last generation call's prompt_tokens "
+            "snapshot (context size), not a processed-token total \u2014 the session's "
+            "processed tokens are cost.processed_tokens (four-bucket sum of the trace "
+            "generation spans).",
             "lifecycle fields (status / source_mode / is_playground / deleted_at / "
             "is_background_automation) are surfaced verbatim; their value vocabularies "
             "are not declared by the host, so no session is filtered on them here — "
@@ -2335,6 +2345,12 @@ class CliMatrix(unittest.TestCase):
             "is an honest MeasuredZero, never a translation.",
             "audit-log hash chain verified from seq=100: oldest records may be rotated "
             "(first prevHash has no predecessor)",
+            # E5（spec §9E.5）：cost.tokens 语义注记（used = last-call context size，
+            # 不是 processed 总量），夹在轮转链 note 与 unbilled note 之间。
+            "cost.tokens = session_usage.used: the last generation call's prompt_tokens "
+            "snapshot (context size), not a processed-token total — the session's "
+            "processed tokens are cost.processed_tokens (four-bucket sum of the trace "
+            "generation spans).",
             # spec §2.1：note 绝不指认零积分的成因——旧串断言「钱花在自配 API 账户」，
             # 被真机 hy3 限免会话（平台送的、根本没那笔支出）当场证伪。
             "session not billed to credits: the platform credit ledger recorded no "
@@ -2347,8 +2363,10 @@ class CliMatrix(unittest.TestCase):
             "are not declared by the host, so no session is filtered on them here \u2014 "
             "filtering is the consumer's decision",
         ])
+        # E5：s2 无 trace 文件 → processed_tokens None（诚实缺失）。
         self.assertEqual(report["cost"], {
             "tokens": 12000,
+            "processed_tokens": None,
             "credits": 0.0,
             "cash_cny": None,
             "nominal_cny": 0.0,
@@ -2461,8 +2479,10 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["date_span"],
                          {"first": "2026-09-01T09:00:00Z",
                           "last": "2026-09-01T09:05:00Z"})
+        # E5：db-only 会话（无 traces）→ processed_tokens 是 None（诚实缺失，不编 0）。
         self.assertEqual(report["cost"], {
             "tokens": 777,
+            "processed_tokens": None,
             "credits": 0.01,
             "cash_cny": None,
             "nominal_cny": 0.0,

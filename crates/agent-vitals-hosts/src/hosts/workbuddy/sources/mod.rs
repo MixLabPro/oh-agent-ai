@@ -869,13 +869,53 @@ const WB_UNBILLED_TO_CREDITS_NOTE: &str =
 — a self-configured route, a promotional free tier, and host-side non-billing are \
 indistinguishable here.";
 
-/// spec §6.1 成本块，键序 `{tokens, credits, cash_cny, nominal_cny, nominal_basis,
-/// host_billed}`（字节一致，Python 镜像逐字节对齐，不能重排）。tokens = `used`
-/// （聚合 token，无逐请求 Usage）；credits = credit_json 求和（**积分**，不是货币）；
-/// cash_cny 恒 null（本机无支付证据，绝不填 0）；nominal_cny = credits × 0.05
-/// （名义栏输入，不可进实付栏/预算分子）。usage 行缺失且 credit_json 空 → None
-/// （诚实缺失，不编 0）。`credit_json` 空串算「没有」，空格串算「有但解析出 0」。
-fn cost_of(meta: &WorkbuddySessionMeta) -> Option<Value> {
+/// spec §6.1/§9E.5 E5 的 `cost.tokens` 语义注记：`used` 是 session_usage 里
+/// **最后一次调用的上下文占用 prompt_tokens 快照**（§9E.2 实测 16/21 逐字相等，
+/// 余下 4 例疑似压缩/重置），**不是 processed token 总量**——真处理量在
+/// `cost.processed_tokens`（traces 四桶之和，无 trace 证据时 null）。
+/// 键保留了 `tokens`（消费方已按这个键读），语义由这条 note 承担，不重排键名。
+const WB_TOKENS_ARE_LAST_CALL_NOTE: &str =
+    "cost.tokens = session_usage.used: the last generation call's prompt_tokens \
+snapshot (context size), not a processed-token total — the session's processed \
+tokens are cost.processed_tokens (four-bucket sum of the trace generation spans).";
+
+
+/// 会话 traces 的 processed token 四桶之和（E5，spec §9E.5）：遍历该会话的
+/// generation span，每个有 usages 的 span 取第一条 usage（与 E4a emitter 同一
+/// 挑选规则），四桶 = uncached(prompt−cached, 下限 0) + cache_read(cached) +
+/// cache_write(0) + output(completion)。**traces 目录缺失 → None**（诚实无观
+/// 测，不借 0）——目录存在但 span 无 usage（全取消/全解码失败）→ Some(0)，
+/// 真测量零，与 `traces_probe` 的零值对象同一口径。decode_failed 的 span 不进
+/// this sum：它没有可读的 usage（traces_probe.decode_failures 照报，不吞）。
+fn processed_tokens_from_spans(spans: &[Value]) -> Option<i64> {
+    let mut total: i64 = 0;
+    let mut any_generation = false;
+    for span in spans {
+        if span.get("kind").and_then(Value::as_str) != Some("generation") {
+            continue;
+        }
+        any_generation = true;
+        let usages = span.get("usages").and_then(Value::as_array);
+        let Some(u) = usages.and_then(|us| us.first()) else { continue };
+        let prompt = u.get("prompt_tokens").and_then(Value::as_i64).unwrap_or(0);
+        let cached = u.get("cached_tokens").and_then(Value::as_i64).unwrap_or(0);
+        let completion = u.get("completion_tokens").and_then(Value::as_i64).unwrap_or(0);
+        total += (prompt - cached).max(0) + cached + completion;
+    }
+    any_generation.then_some(total)
+}
+
+/// spec §6.1 cost 块，键序 `{tokens, processed_tokens, credits, cash_cny,
+/// nominal_cny, nominal_basis, host_billed}`（docs §9E.5 E5：processed 是 7 个
+/// 键里的新成员，tokens 并列保留——semantics 由 note 标注）。tokens = `used`
+/// （session_usage 的**最后一次调用的上下文占用 prompt_tokens 快照**，不是
+/// processed 总量，语义见 note）；processed_tokens = 该会话 traces 四桶之和
+/// （[`processed_tokens_from_spans`]，无 trace 证据 → null，不编 0）；credits =
+/// credit_json 求和（**积分**，不是货币）；cash_cny 恒 null（本机无支付证据，
+/// 绝不填 0）；nominal_cny = credits × 0.05（名义栏输入，不可进实付栏/预算分子）。
+/// usage 行缺失且 credit_json 空 → None（诚实缺失，不编 0）。`credit_json` 空串
+/// 按「没有」，空格串按「有但解析出 0」。
+fn cost_of(meta: &WorkbuddySessionMeta, processed_tokens: Option<i64>) -> Option<Value> {
     let cj = meta.credit_json.as_deref();
     if meta.used.is_none() && cj.map(|s| s.is_empty()).unwrap_or(true) {
         return None;
@@ -887,10 +927,11 @@ fn cost_of(meta: &WorkbuddySessionMeta) -> Option<Value> {
     let cents = credit_cents(cj);
     // 名义人民币 = credits × 0.05；按厘累计（cents × 0.05）再 round，与 credit 求和
     // 同一防浮点漂移手法。Python `round` 是银行家舍入、Rust `.round()` 半数向上——
-    // 差异只在 x.5，兑换价 × 整数厘不落 x.5（fixture 与真实账单均无），可接受。
+    // 差异只在 x 5，兑换价 × 整数厘不落 x.5（fixture 与真实账单均无），可接受。
     let nominal_cents = (cents as f64 * 0.05).round() as i64;
     Some(json!({
         "tokens": tokens,
+        "processed_tokens": processed_tokens,
         "credits": cents as f64 / 100.0,
         "cash_cny": Value::Null,
         "nominal_cny": nominal_cents as f64 / 100.0,
@@ -1004,7 +1045,18 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
 
     // 非积分轨会话：`credits: 0.0` 是真测量，但真实开销在用户自配 API 账户、本机
     // 不可见——由 note 承担那层意思，不由数字冒充（spec §11 第 14 条）。
+    // E5：cost 块不再只吃 db——processed_tokens 来自本会话 traces 的四桶之和
+    // （无 trace 证据 → null，不编 0）。tokens 语义由 note 承担（§9E.5 E5：
+    // used 是 last-call context size，不是 processed）。
+    let processed = processed_tokens_from_spans(&spans);
+
     let mut notes = ev["notes"].as_array().cloned().unwrap_or_default();
+    // cost.tokens 语义注记（E5）。只在 cost 块存在时附加（get = 有 used 或
+    // credit 证据）；夹在基线 note 与 unbilled/lifecycle 之间——s1 六条基线 +
+    // 这条 + lifecycle，byte-lock 的 s1 钉里可见。必须与 Python 镜像同序。
+    if cost_of(&meta, None).is_some() {
+        notes.push(json!(WB_TOKENS_ARE_LAST_CALL_NOTE));
+    }
     if is_unbilled_to_credits(&meta) {
         notes.push(json!(WB_UNBILLED_TO_CREDITS_NOTE));
     }
@@ -1044,7 +1096,7 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         "coverage": ev["coverage"].clone(),
         "signals": ev["signals"].clone(),
         "attempts": attempts,
-        "cost": cost_of(&meta),
+        "cost": cost_of(&meta, processed),
         "notes": notes,
         "source_snapshot": read_workbuddy_source_snapshot(&root),
         "schema_probe": schema_probe,
