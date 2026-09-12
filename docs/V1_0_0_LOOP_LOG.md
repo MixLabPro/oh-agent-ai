@@ -1488,3 +1488,9 @@
 - 构建：`cargo tauri build --bundles app` 成功，新增公共价格检查、授权策略和后台调度已进入 `.app`。
 - 复核：桌面 Clippy 与 release 检查通过；本地 ad hoc 包的 `codesign --verify --deep --strict` 仍失败，符合尚未配置 Developer ID/公证凭据的已知边界。
 - 边界：本轮未安装或启动新包，避免在锁屏状态下伪造 Computer Use 证据；真实后台调度、联网成功目录和签名发布仍待外部条件具备。
+
+## Loop 205 · 公共目录改动后的 Rust 全量回归
+
+- 验收：`cargo test --release` 全部通过；CLI 79、data 128 + 2 依赖 + 1 wiring、domain 467、runtime 287 + 3 依赖 + 8 Q acceptance，以及 core/集成/性能测试均无失败。
+- 结论：价格目录校验模块与桌面调度依赖未破坏既有数据、计价、迁移、宿主隔离、时区和跨实现合同。
+- 边界：该回归不替代真实联网成功、`.app` Computer Use、签名/公证、干净机升级和外部试用验收。
