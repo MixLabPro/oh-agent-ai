@@ -2142,3 +2142,11 @@
   `agent-vitals 1.3.0`。
 - 边界：当前机器是 arm64，未把交叉构建的 CLI 冒充完整 Intel `.app`；Tauri 桌面包仍
   需要 macOS-13 原生 Intel runner，以确保主程序、随包 CLI、签名和公证全部同架构。
+
+## Loop 300 · macOS 发布 workflow 静态门禁
+
+- 验收：`node scripts/verify-release-desktop-workflow.mjs` 通过；确认 tag 触发与手动
+  输入、macOS-13/14 双架构 runner、架构专属 artifact、Tauri 固定版本、严格签名检查、
+  公证票据校验、下载后双架构复验和 SHA-256 校验均已接线。
+- 结论：发布流程本身满足静态契约；真实发布仍取决于远端 `app-v*` tag、Apple 凭据、
+  两个 runner 的构建结果及干净机验收。
