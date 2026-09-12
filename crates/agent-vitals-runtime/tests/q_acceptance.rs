@@ -336,9 +336,16 @@ fn q14_same_raw_name_across_hosts_or_unmapped_is_explicit() {
     let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d });
     assert!(daily.by_provider.contains_key("codex/openai"));
     assert!(daily.by_provider.contains_key("claude-code/unknown"));
-    // claude 侧 unresolved、无金额；codex 侧 ApiEquivalent 有金额。
+    // claude 侧 unresolved；Codex 虽有 openai provider_id，但夹具没有官方
+    // 订阅路由与适用 scope 证据，按 billing fallback 规则只能是
+    // metered_estimate + unresolved，不能冒充 ApiEquivalent。
     assert!(daily.by_provider["claude-code/unknown"].has_unresolved);
-    assert!(daily.by_provider["codex/openai"].amounts_by_basis.contains_key(
+    let codex = &daily.by_provider["codex/openai"];
+    assert!(codex.has_unresolved);
+    assert!(codex.amounts_by_basis.contains_key(
+        &agent_vitals_data::projection::BillingBasis::MeteredEstimate,
+    ));
+    assert!(!codex.amounts_by_basis.contains_key(
         &agent_vitals_data::projection::BillingBasis::ApiEquivalent,
     ));
 }

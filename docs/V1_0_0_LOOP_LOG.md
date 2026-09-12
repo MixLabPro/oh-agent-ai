@@ -556,4 +556,11 @@
 - 保护：不改用户数据和未跟踪文档；集成价目表继续由共享资产作为唯一源，验证器仍执行真实 `workbench.js`。
 - 边界：Python/Rust 双实现对拍需设置 `AGENT_VITALS_BIN`，真实 macOS 通知权限与真机 UAT 仍未完成，不勾选 AC19 或 REQ-035/036。
 
+## Loop 65 · Release Q14 计费证据契约收口（自验收）
+
+- 执行：Q14 验收夹具明确区分“provider_id=openai”与“官方订阅路由及适用 scope 证据”；缺少后者时 Codex 保持 `MeteredEstimate + unresolved`，同名模型仍按宿主/provider 分桶。
+- 保护：不因模型名或单一 provider 标记推断实际订阅，不把 API 等价估算冒充真实账单；这与仓库 billing fallback 规则一致。
+- 验收：Rust release workspace 全部通过；Q acceptance 8/8；Python 全套 1130/1130 通过（201 项按环境跳过）；此前价目表与工作台验证器回归均已通过。
+- 边界：真实 macOS 通知权限、首穿/静默/点击路径及发布签名/公证、真机 UAT 仍未完成，不勾选 AC19 或 REQ-035/036。
+
 本日志只记录已经完成的实现和证据；上述“尚未完成”不改变任何 PRD 勾选状态。任何单次修改连续测试失败超过5次，或任何单次Loop超过30分钟，立即暂停并记录；不得以拆分日志规避熔断。
