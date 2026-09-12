@@ -1371,11 +1371,24 @@ fn read_overview() -> Value {
 fn data_status() -> Value {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
-    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
-        return serde_json::json!({
-            "status": "unavailable",
-            "reason": "authority database is missing or unreadable"
-        });
+    let db = match agent_vitals_data::authority::AuthorityDb::open_readonly(&path) {
+        Ok(db) => db,
+        Err(error) => {
+            use agent_vitals_data::authority::AuthorityError;
+            let (code, action) = match error {
+                AuthorityError::MissingFile => ("database_missing", "retry_sync"),
+                AuthorityError::NewerSchema { .. } => ("schema_too_new", "upgrade_app"),
+                AuthorityError::OlderSchema { .. } => ("schema_migration_required", "upgrade_app"),
+                AuthorityError::Corrupt => ("database_unreadable", "export_diagnostics"),
+                AuthorityError::Io(_) | AuthorityError::Sqlite(_) => ("database_unreadable", "export_diagnostics"),
+            };
+            return serde_json::json!({
+                "status": "unavailable",
+                "code": code,
+                "reason": error.to_string(),
+                "recovery_action": { "kind": action, "label": "查看恢复选项" }
+            });
+        }
     };
     let enabled = agent_vitals_runtime::sql_authority::is_enabled(&data_home);
     serde_json::json!({

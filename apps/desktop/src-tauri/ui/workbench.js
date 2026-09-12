@@ -144,6 +144,10 @@ const ERR_TEXT = {
   "stale-revision": "列表已更新，请重新加载",
   "schema-mismatch": "数据版本不兼容",
   permission: "无权限访问",
+  database_missing: "权威数据库尚未建立",
+  database_unreadable: "权威数据库无法读取",
+  schema_too_new: "权威数据库需要更新版本",
+  schema_migration_required: "权威数据库需要迁移",
 };
 
 function errText(e) {
@@ -780,7 +784,36 @@ function renderQualityStatus(status) {
   banner.textContent = "";
   if (!status || status.status !== "ok") {
     banner.hidden = false;
-    banner.textContent = "⚠ 权威数据状态不可用：" + ((status && status.reason) || "未知原因");
+    const code = status && status.code;
+    banner.appendChild(document.createTextNode(
+      "⚠ " + (ERR_TEXT[code] || "权威数据状态不可用") + "：" +
+      ((status && status.reason) || "未知原因")
+    ));
+    const action = status && status.recovery_action;
+    if (action && action.kind) {
+      const button = document.createElement("button");
+      button.className = "btn secondary";
+      button.type = "button";
+      button.textContent = action.label || "查看恢复选项";
+      button.style.marginLeft = "8px";
+      button.onclick = async () => {
+        if (action.kind === "export_diagnostics") {
+          button.disabled = true;
+          try {
+            await invoke("export_diagnostic_package");
+            button.textContent = "诊断包已保存";
+          } catch (e) {
+            button.textContent = "保存失败：" + errText(e);
+            button.disabled = false;
+          }
+        } else if (action.kind === "upgrade_app") {
+          button.textContent = "请安装新版本后重试";
+        } else {
+          switchTab("sources");
+        }
+      };
+      banner.appendChild(button);
+    }
     return;
   }
   const d = status.data || {};

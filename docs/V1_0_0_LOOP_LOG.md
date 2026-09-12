@@ -860,3 +860,10 @@
 - 保护：生产构建和正式 `.app` 不注入 mock，仍使用真实 Tauri IPC；现有 DOM/JS 结构不因样式调试被改写，也未引入 React 重写范围。
 - 验收：Vite build、mock JS 语法检查、浏览器实际加载总览与会话页通过；总览显示 246K/374K 级 token、预算状态和数据质量提示，会话页显示“浏览器样式调试会话”，未见读取失败。
 - 边界：浏览器 mock 只验证布局与交互表现；SQLite、系统目录、真实 IPC 及 AC13/AC27/AC21 仍须在最终 `.app` 中验收。
+
+## Loop 108 · 权威库不可用状态的恢复入口（代码验收）
+
+- 修复：桌面 `data_status` 现在区分 `database_missing`、`database_unreadable`、`schema_too_new` 和 `schema_migration_required`，并返回稳定的 `recovery_action`；不再把所有失败压成同一条模糊文案。
+- 修复：总览质量横幅按错误码显示明确状态，并提供“重试同步 / 导出诊断 / 安装新版本后重试”等安全入口；损坏库不会自动删除、重建或伪装成零用量。
+- 验收：desktop release 测试目标编译通过，Workbench JS 语法检查与 `git diff --check` 通过。
+- 边界：完整磁盘满、旧库升级和干净机恢复演练仍属于 AC20 真机/发布环境 UAT，尚未勾选 AC20。
