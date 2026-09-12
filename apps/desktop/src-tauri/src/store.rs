@@ -42,6 +42,18 @@ use crate::resolve_binary;
 #[derive(Clone)]
 pub struct StoreBuildLock(pub Arc<Mutex<()>>);
 
+const ISSUE_DEFAULT_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Default L0 window required by REQ-073.  The lower edge is a rolling
+/// thirty-day boundary; the authority layer still applies the configured
+/// statistics timezone when it assigns each returned Issue to a day bucket.
+/// Keep the upper edge just after `now` so an Issue written during this read
+/// cannot be omitted by the exclusive SQL bound.
+fn issue_default_window() -> (i64, i64) {
+    let now = agent_vitals_runtime::sql_sync::now_ms();
+    (now.saturating_sub(ISSUE_DEFAULT_WINDOW_MS), now.saturating_add(1))
+}
+
 impl StoreBuildLock {
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(())))
@@ -303,6 +315,7 @@ pub async fn sessions_issues(
             &data_home(), &crate::overview::current_month_beijing(),
         ).filter(|budget| matches!(budget["level"].as_str(), Some("warn" | "exceeded")))
             .map(|budget| budget_issue_group(&budget));
+        let (from_ms, to_ms) = issue_default_window();
         let requested_page_size = page_size.unwrap_or(50).clamp(1, 500);
         // 预算组是只读的合成行，必须在分页前为它预留一个槽位；否则默认
         // page_size=50 会返回 51 行，且 next_cursor 与实际展示数失配。
@@ -312,10 +325,10 @@ pub async fn sessions_issues(
             requested_page_size
         };
         let all_groups = agent_vitals_data::issues::issue_groups_with_sources(
-            db.conn(), None, None, usize::MAX, None,
+            db.conn(), Some(from_ms), Some(to_ms), usize::MAX, None,
         ).map_err(|e| error_value("authority_query", &e.to_string()))?;
         let groups = agent_vitals_data::issues::issue_groups_with_sources(
-            db.conn(), None, None, source_page_size, cursor.as_deref(),
+            db.conn(), Some(from_ms), Some(to_ms), source_page_size, cursor.as_deref(),
         ).map_err(|e| error_value("authority_query", &e.to_string()))?;
         let all_rows = all_groups["groups"].as_array().cloned().unwrap_or_default();
         let mut rows = groups["groups"].as_array().cloned().unwrap_or_default();
@@ -419,8 +432,9 @@ pub async fn issue_groups_list(
         let path = agent_vitals_data::authority::default_authority_path(&data_home());
         let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
             .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        let (from_ms, to_ms) = issue_default_window();
         agent_vitals_data::issues::issue_groups_with_sources(
-            db.conn(), None, None, page_size.unwrap_or(50), cursor.as_deref(),
+            db.conn(), Some(from_ms), Some(to_ms), page_size.unwrap_or(50), cursor.as_deref(),
         ).map_err(|e| error_value("authority_query", &e.to_string()))
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
 }
@@ -598,6 +612,14 @@ mod tests {
         // YYYY 部分应是 2020~2099 区间（现实日期范围）
         let y: i32 = d[0..4].parse().expect("year must parse");
         assert!((2020..=2099).contains(&y), "year out of expected range: {y}");
+    }
+
+    #[test]
+    fn issue_default_window_is_a_rolling_thirty_day_range() {
+        let (from, to) = issue_default_window();
+        assert!(to > from);
+        assert_eq!(to - from, ISSUE_DEFAULT_WINDOW_MS.saturating_add(1));
+        assert!(to <= agent_vitals_runtime::sql_sync::now_ms().saturating_add(2));
     }
 
     /// read argv：固定段（session_ref 必带 + 无 revision flag）。

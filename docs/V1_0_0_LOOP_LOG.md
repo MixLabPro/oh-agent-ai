@@ -1314,3 +1314,10 @@
 - 构建：`cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 release CLI `cmp` 一致。
 - 安装：旧 `/Applications/agent-vitals.app` 可恢复备份为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-030858`，新包已安装并重启，运行 PID `78048`。
 - 边界：macOS 仍锁定，未执行真实视觉点击或验证存量库实际迁移行数；当前包仍为 ad hoc 签名，Developer ID/公证和外部试用门禁未完成。
+
+## Loop 178 · 待处理 L0 默认 30 天窗口
+
+- 修复：桌面 `sessions_issues` 兼容入口与 `issue_groups_list` 统一传入滚动 30 天 `[from_ms, to_ms)` 窗口，不再默认扫描全库；保留 L0 组分页、L1 原始命中展开和预算只读投影。
+- 保护：上界使用 `now + 1ms` 配合排他查询，避免读取期间刚写入的当前 Issue 被漏掉；窗口边界仍由 Issue 归并层按配置统计时区生成日桶。
+- 验收：桌面目标测试通过，新增 30 天窗口半开区间单测；Desktop Clippy 通过。
+- 边界：本轮尚未完成真实 4,450 条真机组数/响应 P95 对拍；Computer Use、签名/公证和外部试用门禁仍未完成。
