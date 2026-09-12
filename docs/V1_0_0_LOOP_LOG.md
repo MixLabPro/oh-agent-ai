@@ -1964,6 +1964,14 @@
   可用的 app-v 发布”，其他 HTTP/网络/响应格式错误仍显式失败，不编造版本号。
 - 验收：API 实际返回 404；代码保留明确 no-release 分支；`git diff --check` 通过。
 
+## Loop 279 · Vite 版本检查浏览器 UAT
+
+- 验收：Vite Workbench 页面中“检查新版本”按钮可见且可操作；点击后 mock IPC 返回
+  `app-v1.0.0`，状态区显示当前包、最新发布和“从可信发布页确认安装”提示；没有自动
+  安装行为，浏览器页面构建与 closeout verifier 通过。
+- 说明：首次尝试使用浏览器 DOM shim 的 `.click()` 不适用并超时，改用页面 locator
+  操作后成功完成交互验证；不将工具调用方式错误记为产品失败。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；
