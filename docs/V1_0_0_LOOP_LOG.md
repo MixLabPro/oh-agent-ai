@@ -1706,3 +1706,10 @@
 - UAT：在 `http://127.0.0.1:5173/workbench.html` 真实加载 Vite mock 页面并展开“查看版本与同步状态”，页面实际显示 `统计时区 Asia/Shanghai`；标题为 `agent-vitals 工作台`。
 - 结果：诊断字段从 mock IPC 经过 Workbench 渲染链路可见，未出现控制台错误；该证据确认热更新调试面与最新字段契约连通。
 - 边界：Vite mock 不替代真实 `.app` 的系统时区、持久化配置和 Computer Use 验收。
+
+## Loop 241 · 诊断映射补齐引擎版本
+
+- 发现：REQ-003 要求诊断页列出 App/引擎/schema/价表的独立版本；原诊断只列 App、schema、价表和时区，缺少引擎版本。
+- 修复：真实 Tauri 诊断和脱敏诊断包接入现有权威 `agent_vitals_domain::r2a::ENGINE_VERSION`；Workbench 与 Vite mock 同步展示 `Engine` 字段。
+- 验收：`npm run verify`、Tauri `cargo check --release`、JS 语法检查、`git diff --check` 通过；Vite 页面实际显示 `App browser-mock · Engine browser-mock · Authority schema ...`，标题和页面状态正常。
+- 边界：CLI 独立版本仍需在最终发布诊断/包环境中明确展示；真实 `.app` Computer Use、签名/公证和外部试用仍未完成。

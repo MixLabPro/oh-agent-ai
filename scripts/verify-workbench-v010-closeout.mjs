@@ -50,6 +50,8 @@ ok(/generate_handler!\[[\s\S]*about_diagnostics,/.test(lib), "about_diagnostics 
 ok(js.includes('invoke("about_diagnostics")'), "前端读取版本与诊断信息");
 ok(lib.includes('"statistics_timezone"'), "诊断信息包含实际统计时区");
 ok(js.includes("统计时区"), "诊断页展示实际统计时区");
+ok(lib.includes('"engine_version"'), "诊断信息包含引擎版本");
+ok(js.includes("Engine"), "诊断页展示引擎版本");
 ok(lib.includes("会话数据暂不可用"), "菜单区分来源故障");
 ok(lib.includes("尚无会话"), "菜单区分真实空用量");
 ok(js.includes('invoke("data_status")'), "数据源页消费 SQL Authority 状态");

@@ -1924,6 +1924,7 @@ fn export_diagnostic_package() -> Result<Value, String> {
         "diagnostic_contract": "agent-vitals-diagnostic/v1",
         "versions": {
             "app": env!("CARGO_PKG_VERSION"),
+            "engine": agent_vitals_domain::r2a::ENGINE_VERSION,
             "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
             "query_envelope": agent_vitals_runtime::mcp::ENVELOPE_SCHEMA_VERSION,
             "statistics_timezone": agent_vitals_runtime::clock::statistics_timezone_name(),
@@ -1971,6 +1972,7 @@ fn about_diagnostics() -> Value {
     serde_json::json!({
         "status": "ok",
         "app_version": env!("CARGO_PKG_VERSION"),
+        "engine_version": agent_vitals_domain::r2a::ENGINE_VERSION,
         "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
         "statistics_timezone": agent_vitals_runtime::clock::statistics_timezone_name(),
         "pricing": pricing,
