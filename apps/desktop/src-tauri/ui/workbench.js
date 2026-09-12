@@ -4440,6 +4440,15 @@ function issueActionsForStatus(status) {
   return actions[status] || actions.open;
 }
 
+function issueSourceLabel(sourceKind) {
+  return {
+    billing_candidate: "待确认套餐",
+    source_failure: "数据源失败",
+    data_quality: "数据质量",
+    usage_growth: "异常用量增长",
+  }[sourceKind] || "来源问题";
+}
+
 async function toggleIssueGroup(group) {
   if (!group.group_id) return;
   findState.expanded[group.group_id] = !findState.expanded[group.group_id];
@@ -4466,6 +4475,32 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
       });
       cell.appendChild(document.createTextNode(" "));
       cell.appendChild(openSettings);
+      return;
+    }
+    if (group.source_kind && group.source_kind !== "behavior") {
+      const cell = detailRow.firstElementChild;
+      const sample = group.sample_evidence && group.sample_evidence[0] || {};
+      const sourceLabel = issueSourceLabel(group.source_kind);
+      const evidence = sample.error_code || sample.code || sample.provider_id || sample.detail?.host || "已保留摘要";
+      cell.textContent = sourceLabel + "：" + evidence + " · " + String(group.count || 0) +
+        " 条来源证据。该组是只读投影，不能按行为 Issue 关闭。";
+      const action = el("button", "btn secondary");
+      action.type = "button";
+      if (group.source_kind === "billing_candidate") {
+        action.textContent = "打开计费确认";
+        action.addEventListener("click", () => {
+          switchTab("overview");
+          const review = document.getElementById("ov-billing-review");
+          if (review && review.click) review.click();
+        });
+      } else {
+        action.textContent = group.source_kind === "usage_growth" ? "查看会话" : "查看数据源";
+        action.addEventListener("click", () => {
+          switchTab(group.source_kind === "usage_growth" ? "sessions" : "sources");
+        });
+      }
+      cell.appendChild(document.createTextNode(" "));
+      cell.appendChild(action);
       return;
     }
     const data = await invoke("issue_group_instances", { groupId: group.group_id, pageSize: 50, cursor: cursor || null });

@@ -968,3 +968,10 @@
 - 保护：候选仍保持 `is_bill=false` 和只读投影，不写入行为 Issue 或账单表；其他 `resolved/not_applicable` 兼容映射不变。
 - 验收：data issues 定向测试 9/9、data crate Clippy `-D warnings`通过；同时补充回归断言锁定候选组 `status_rollup.open=1`。
 - 边界：REQ-074 六族真实数据覆盖与 AC18 的五态 Computer Use UAT 仍待真实环境执行。
+
+## Loop 124 · 来源投影组展开与处理入口
+
+- 修复：待处理页对 `billing_candidate`、`source_failure`、`data_quality`、`usage_growth` 等只读来源投影不再错误调用行为 Issue 的 L1 查询；展开时显示来源证据摘要和投影计数，并提供计费确认、数据源或会话入口。
+- 保护：来源权威表保持只读且彼此不合并；投影组明确不能按行为 Issue 关闭，避免“暂无原始命中”掩盖真实来源证据。
+- 验收：真实 Workbench KPI/状态验证器、JS 语法检查、Vite production build 与 `git diff --check`通过。
+- 边界：来源投影的完整 L1/L2 权威明细接口、六族真实数据覆盖和 AC18 Computer Use UAT 仍待后续阶段。
