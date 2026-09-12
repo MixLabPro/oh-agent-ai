@@ -1787,3 +1787,9 @@
 - 发现：`codesign -dvvv` 将签名详情写到 stderr；预检脚本成功执行时只读取 stdout，未来有效 Developer ID 包会被误报为未签名。
 - 修复：改用 `spawnSync` 合并 stdout/stderr，再解析 `TeamIdentifier` 和 ad-hoc 状态；严格签名门禁不再依赖错误的输出流假设。
 - 验收：当前 ad-hoc `.app` 普通预检仍通过并准确显示警告；严格模式仍按预期失败；`git diff --check` 通过。
+
+## Loop 254 · 修正 macOS 资产发布 runner
+
+- 发现：desktop publish job 原运行在 `ubuntu-latest`，但发布步骤使用 macOS 专用 `ditto` 封装 `.app`，构建成功后仍会在发布阶段失败。
+- 修复：publish job 改为 `macos-latest`，确保 `ditto` 可用并保留 macOS bundle 资源封装语义。
+- 验收：workflow YAML 解析通过；构建 job 与 publish job 的平台职责保持清晰。
