@@ -1781,3 +1781,9 @@
 - 发现：桌面发布 workflow 使用未固定版本的 `cargo install tauri-cli`，上游 CLI 变化可能让同一 App tag 产生不可复现的构建行为。
 - 修复：固定到当前本机已验证的 `tauri-cli 2.11.4`，继续使用 `--locked`。
 - 验收：本机 `cargo tauri --version` 返回 `tauri-cli 2.11.4`；workflow YAML 解析和 diff 检查通过。
+
+## Loop 253 · 修复签名详情 stderr 误判
+
+- 发现：`codesign -dvvv` 将签名详情写到 stderr；预检脚本成功执行时只读取 stdout，未来有效 Developer ID 包会被误报为未签名。
+- 修复：改用 `spawnSync` 合并 stdout/stderr，再解析 `TeamIdentifier` 和 ad-hoc 状态；严格签名门禁不再依赖错误的输出流假设。
+- 验收：当前 ad-hoc `.app` 普通预检仍通过并准确显示警告；严格模式仍按预期失败；`git diff --check` 通过。

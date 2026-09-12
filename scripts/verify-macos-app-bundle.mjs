@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
 
 const repo = path.resolve(import.meta.dirname, "..");
@@ -35,12 +35,8 @@ if (existsSync(cli)) {
   }
 }
 
-let signature = "";
-try {
-  signature = execFileSync("codesign", ["-dvvv", app], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-} catch (error) {
-  signature = `${error.stdout || ""}${error.stderr || ""}`;
-}
+const signatureResult = spawnSync("codesign", ["-dvvv", app], { encoding: "utf8" });
+const signature = `${signatureResult.stdout || ""}${signatureResult.stderr || ""}`;
 const team = signature.match(/^TeamIdentifier=(.+)$/m)?.[1]?.trim();
 const isAdhoc = /^(?:Signature=adhoc|flags=.*adhoc)/m.test(signature);
 if (team && team !== "not set" && !isAdhoc) ok(`Developer ID team: ${team}`);
