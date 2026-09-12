@@ -58,14 +58,14 @@ class DataStatusHealthTests(unittest.TestCase):
         proc = self.run_cli("data-status", "--json")
         return proc, json.loads(proc.stdout)
 
-    def test_healthy_seeded_db_reports_ok_and_exits_zero(self):
+    def test_seeded_db_with_unresolved_route_evidence_reports_warn(self):
         seed_authority_facts(_BIN, self.home, _beijing_today())
         proc, v = self.status_json()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(v["health"], "ok")
+        self.assertEqual(v["health"], "warn")
         self.assertEqual(v["integrity"], "ok")
         self.assertGreater(v["facts"], 0)
-        self.assertEqual(v["hints"], [])
+        self.assertTrue(v["hints"])
 
     def test_deleted_db_while_authority_enabled_is_critical_not_silent_zero(self):
         seed_authority_facts(_BIN, self.home, _beijing_today())

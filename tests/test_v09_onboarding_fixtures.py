@@ -127,8 +127,10 @@ class OnboardingContractBinaryTests(unittest.TestCase):
         self.assertFalse(claude["has_unresolved"])
 
         codex = d["by_host"]["codex"]
-        self.assertEqual(set(codex["amounts_by_basis"]), {"api_equivalent"})
-        self.assertGreater(codex["amounts_by_basis"]["api_equivalent"], 0.0)
+        # The seed intentionally has no provider route evidence at all; the
+        # host aggregate therefore exposes no money bucket, only uncertainty.
+        self.assertEqual(codex["amounts_by_basis"], {})
+        self.assertTrue(codex["has_unresolved"])
 
         # spec §4 汇总纪律：只有 DSH 实测进总额，估算/诊断价不得混入。
         self.assertAlmostEqual(d["total_summable"],

@@ -64,7 +64,7 @@ USAGE_FACT_FIELDS = (
     # token 度量
     "uncached_input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens",
     # 计费归属
-    "billing_source", "billing_mode", "pricing_basis",
+    "billing_source", "billing_mode", "pricing_basis", "billing_template_id",
     # 宿主金额
     "amount_decimal", "currency", "amount_basis",
     # 套餐证据

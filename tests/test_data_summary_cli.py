@@ -10,10 +10,11 @@ CLI 面（`docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md` §9「下一步」）。
     `total_summable` 是**正零**（-0.0 是 Stage 0.5 落地时实测修掉的形状，
     domain `summable_total` 的 fold 注释）——spec §0.1「不得渲染为 ¥0」的
     JSON/文本两半都钉。
-  · 三宿主全数据端到端：facts JSONL（deepseek-v4-flash ×2 + gpt-5.6-sol）
-    经 `data-migrate` 种进隔离权威库 → `metered_actual` 且计入
-    total_summable（DSH）；`metered_estimate` 且**不**计入 total_summable
-    （claude）；`api_equivalent` 且不计入 total_summable（codex）。种子走
+    · 三宿主全数据端到端：facts JSONL（deepseek-v4-flash ×2 + gpt-5.6-sol）
+      经 `data-migrate` 种进隔离权威库 → `metered_actual` 且计入
+      total_summable（DSH）；`metered_estimate` 且**不**计入 total_summable
+      （claude）；缺少 provider/官方订阅路由 scope 证据的 Codex 保持
+      unresolved 且不产生金额桶，不冒充 `api_equivalent`。种子走
     公开迁移入口是 Phase 3.5 Tier A 切读源后的形态——`data coverage` 读
     `SqlSummaryRepository`，state 投影文件喂不到它。三宿主 basis 各就各位
     是 0.4a/0.4b/0.4c 三次接线决策（§8.4）经 CLI 的最终对账。
@@ -102,10 +103,12 @@ class DataSummaryCliTests(unittest.TestCase):
         dsh = d["by_host"]["dsh"]
         claude = d["by_host"]["claude-code"]
         codex = d["by_host"]["codex"]
-        # DSH 实测账单档；claude 估算档；codex 套餐等价诊断档（§8.4 三条决定）。
+        # DSH 实测账单档；claude 估算档；Codex 缺官方订阅 scope 证据时为
+        # 保守估算档（§8.4 与 billing fallback 纪律）。
         self.assertGreater(dsh["amounts_by_basis"]["metered_actual"], 0.0)
         self.assertGreater(claude["amounts_by_basis"]["metered_estimate"], 0.0)
-        self.assertGreater(codex["amounts_by_basis"]["api_equivalent"], 0.0)
+        self.assertEqual(codex["amounts_by_basis"], {})
+        self.assertTrue(codex["has_unresolved"])
         self.assertEqual(dsh["freshness"]["state"], "fresh")
         # 三宿主都种在今天 → fresh（codex 只钉"不是 unavailable"，不给
         # freshness 阈值钉死，跨日界运行时不因阈值语义翻红）。
