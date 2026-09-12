@@ -2077,6 +2077,7 @@ fn parse_latest_release_tag(payload: &Value) -> Result<String, String> {
 async fn check_for_updates() -> Result<Value, String> {
     let client = reqwest::Client::builder()
         .user_agent(format!("agent-vitals/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|error| format!("build update client failed: {error}"))?;
     let response = client

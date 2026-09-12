@@ -1986,6 +1986,13 @@
 - 约束：本机包仍为 ad-hoc 签名，只作本地诊断；Developer ID、公证和真实安装验收不被
   本地预检结果替代。
 
+## Loop 282 · 版本检查网络超时边界
+
+- 加固：为用户主动的 latest release 请求设置 10 秒超时；网络不可达时会回到可见失败
+  状态，不让设置页无限等待，也不改变“不自动安装”边界。
+- 验收：变更保持固定 API、tag 白名单和 `no_release` 分支；后续桌面编译与 Vite closeout
+  一并复验。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；
