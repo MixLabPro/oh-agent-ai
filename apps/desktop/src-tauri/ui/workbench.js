@@ -2310,11 +2310,21 @@ async function renderCalendar() {
     // （未来日没有"按小时"可看，不响应）。
     if (date <= today) {
       cell.classList.add("clickable");
-      cell.onclick = () => {
+      const selectDate = () => {
         calSelectedDate = date;
         grid.querySelectorAll(".cal-cell.selected").forEach((el) => el.classList.remove("selected"));
         cell.classList.add("selected");
         renderHourly(date);
+      };
+      cell.setAttribute("role", "button");
+      cell.tabIndex = 0;
+      cell.setAttribute("aria-label", date + "，查看按小时用量");
+      cell.onclick = selectDate;
+      cell.onkeydown = (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          selectDate();
+        }
       };
       if (date === (calSelectedDate || today)) cell.classList.add("selected");
     }
