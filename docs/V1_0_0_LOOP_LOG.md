@@ -933,3 +933,10 @@
 - 保护：参考估算继续区分官方价与当前价，不把当前价写成历史官方价格；不改变权威计价、token 或账单数据。
 - 验收：真实 Workbench KPI 验证器、JS 语法检查、Vite production build 与 `git diff --check`通过。
 - 边界：AC07 的真实历史缺价/当前价/完全无卡数据矩阵仍需安全副本真机与 CLI/MCP 对拍。
+
+## Loop 119 · 待处理队列预算组分页边界
+
+- 修复：`sessions_issues` 注入只读预算阈值组时，先为合成行预留分页槽位，默认每页不再返回 51 条；`next_cursor` 与来源组 offset 保持一致。
+- 保护：`page_size=1` 时预算组独占首项，下一页从来源组 offset=0 继续，避免预算行挤掉首个来源组；原始 issue 权威表和只读投影不变。
+- 验收：desktop store 测试 14/14、Clippy `-D warnings` 与 `git diff --check`通过。
+- 边界：REQ-073/074 的完整跨来源真机数量、L0 P95 和六族 UAT 仍待真实数据环境验收。

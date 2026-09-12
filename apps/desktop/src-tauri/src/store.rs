@@ -320,22 +320,38 @@ pub async fn sessions_issues(
         let path = agent_vitals_data::authority::default_authority_path(&data_home());
         let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
             .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
-        let all_groups = agent_vitals_data::issues::issue_groups_with_sources(
-            db.conn(), None, None, usize::MAX, None,
-        ).map_err(|e| error_value("authority_query", &e.to_string()))?;
-        let groups = agent_vitals_data::issues::issue_groups_with_sources(
-            db.conn(), None, None, page_size.unwrap_or(50), cursor.as_deref(),
-        ).map_err(|e| error_value("authority_query", &e.to_string()))?;
-        let all_rows = all_groups["groups"].as_array().cloned().unwrap_or_default();
-        let mut rows = groups["groups"].as_array().cloned().unwrap_or_default();
         let budget_group = agent_vitals_runtime::budget::budget_status_sql_at(
             &data_home(), &crate::overview::current_month_beijing(),
         ).filter(|budget| matches!(budget["level"].as_str(), Some("warn" | "exceeded")))
             .map(|budget| budget_issue_group(&budget));
+        let requested_page_size = page_size.unwrap_or(50).clamp(1, 500);
+        // 预算组是只读的合成行，必须在分页前为它预留一个槽位；否则默认
+        // page_size=50 会返回 51 行，且 next_cursor 与实际展示数失配。
+        let source_page_size = if cursor.is_none() && budget_group.is_some() && requested_page_size > 1 {
+            requested_page_size - 1
+        } else {
+            requested_page_size
+        };
+        let all_groups = agent_vitals_data::issues::issue_groups_with_sources(
+            db.conn(), None, None, usize::MAX, None,
+        ).map_err(|e| error_value("authority_query", &e.to_string()))?;
+        let groups = agent_vitals_data::issues::issue_groups_with_sources(
+            db.conn(), None, None, source_page_size, cursor.as_deref(),
+        ).map_err(|e| error_value("authority_query", &e.to_string()))?;
+        let all_rows = all_groups["groups"].as_array().cloned().unwrap_or_default();
+        let mut rows = groups["groups"].as_array().cloned().unwrap_or_default();
         let budget_added = budget_group.is_some();
-        if cursor.is_none() {
-            if let Some(budget) = budget_group.clone() { rows.push(budget); }
-        }
+        let next_cursor = if cursor.is_none() && requested_page_size == 1 && budget_group.is_some() {
+            // 单项页无法同时容纳预算合成行和第一条来源组；先返回预算组，
+            // 下一页从来源组 offset=0 开始，避免丢失或重复来源组。
+            rows = budget_group.clone().into_iter().collect();
+            (all_groups["total_groups"].as_u64().unwrap_or(0) > 0).then(|| "0".to_string())
+        } else {
+            if cursor.is_none() {
+                if let Some(budget) = budget_group.clone() { rows.push(budget); }
+            }
+            groups["next_cursor"].as_str().map(String::from)
+        };
         let mut all_rows_with_budget = all_rows;
         if budget_added {
             all_rows_with_budget.push(budget_group.clone().expect("budget_group is present"));
@@ -347,7 +363,7 @@ pub async fn sessions_issues(
         Ok(serde_json::json!({
             "totals": { "issues": total_groups, "findings": groups["source_issue_count"], "critical": count("critical"), "warning": count("warning"), "info": count("info"), "sessions": sessions_with, "sessions_total": sessions_with },
             "rules": rules, "issues": rows, "findings": [], "source": "unified_issue_groups",
-            "next_cursor": groups["next_cursor"], "source_projection_count": all_groups["source_projection_count"].as_u64().unwrap_or(0) + u64::from(budget_added)
+            "next_cursor": next_cursor, "source_projection_count": all_groups["source_projection_count"].as_u64().unwrap_or(0) + u64::from(budget_added)
         }))
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
 }
