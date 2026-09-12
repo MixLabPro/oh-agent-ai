@@ -2035,6 +2035,14 @@
 - 验收：发布 workflow 静态校验器新增矩阵/分架构 artifact 断言；本地校验器、YAML
   解析和 `git diff --check` 通过。
 
+## Loop 288 · 远端版本发布前置核对
+
+- 核对：`origin` 为 `https://github.com/MixLabPro/agent-vitals.git`，只读执行
+  `git ls-remote --tags origin 'refs/tags/app-v*'` 没有返回任何 `app-v*` tag；latest
+  Release API 同样返回 404。
+- 结论：正式 workflow 已具备双架构、签名、公证和校验和门禁，但当前没有可验证的
+  发布 tag/Release 输入；未创建远端 tag、Release 或资产。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；
