@@ -373,6 +373,8 @@ pub struct Overview {
     pub days: Vec<DayRow>,
     pub budget_monthly_cny: Option<f64>,
     pub budget: BudgetAlert,
+    /// 双预算 profile 的实时状态；各 profile 保持独立币种和计费口径。
+    pub budget_profiles: Option<Value>,
     /// 最近一次折账的会话（oneline.json）。托盘菜单展示「上一次跑完花了多少」。
     pub recent: RecentSession,
     /// 菜单栏同步回路状态（tick 落盘）。前端据此示警/给「立即同步」入口。
@@ -684,6 +686,9 @@ fn read_overview_at(dh: &Path) -> Overview {
         days,
         budget_monthly_cny: budget.monthly_cny.or_else(|| monthly_budget_cny(dh)),
         budget,
+        budget_profiles: agent_vitals_runtime::budget::budget_profiles_status_sql_at(
+            dh, &cur_month,
+        ),
         recent: read_recent_session(dh),
         sync: load_sync_status(dh),
         hosts: hosts_snap.hosts,

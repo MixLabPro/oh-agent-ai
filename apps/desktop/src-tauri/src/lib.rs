@@ -142,6 +142,33 @@ fn stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
 /// "现在"——各行分别读钟会让同一次重建里的新鲜度判定互相不一致），单测因此不用
 /// 碰系统时钟。
 fn budget_status_text_at(ov: &Overview, now_secs: i64) -> String {
+    if let Some(rows) = ov.budget_profiles.as_ref()
+        .and_then(|v| v.get("profiles"))
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+    {
+        let summary = rows.iter().filter_map(|row| {
+            let id = row.get("profile_id").and_then(Value::as_str)?;
+            let currency = row.get("currency").and_then(Value::as_str)?;
+            let level = row.get("level").and_then(Value::as_str)?;
+            let spent = row.get("spent_minor").and_then(Value::as_i64).unwrap_or(0);
+            let limit = row.get("monthly_minor").and_then(Value::as_i64)?;
+            let label = if id == "estimate" { "估算" } else { "已确认" };
+            let state = match level {
+                "exceeded" => "超支",
+                "warn" => "接近",
+                "incomplete" => "部分覆盖",
+                "no_data" => "无数据",
+                "disabled" => "未启用",
+                _ => "正常",
+            };
+            Some(format!("{label} {currency} {state} {spent:.2}/{limit:.2}",
+                spent = spent as f64 / 100.0, limit = limit as f64 / 100.0))
+        }).collect::<Vec<_>>().join("；");
+        if !summary.is_empty() {
+            return format!("预算：{summary}");
+        }
+    }
     let b = &ov.budget;
     // 预算分母：alert.json 的 monthly_cny 是 evaluate() 算 ratio 用的那份，
     // 与它同屏显示的必须一致；缺场才退回 config。
@@ -2586,6 +2613,7 @@ mod tests {
             days: vec![],
             budget_monthly_cny: Some(600.0),
             budget,
+            budget_profiles: None,
             recent: overview::RecentSession::default(),
             sync: SyncStatus::default(),
             hosts: vec![
@@ -3173,6 +3201,18 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(budget_status_text_at(&ov, FIXTURE_AT_SECS), "✓ 预算：¥12.79 / ¥600");
+    }
+
+    #[test]
+    fn budget_line_lists_profiles_without_combining_currencies() {
+        let mut ov = ov_with(overview::BudgetAlert::default());
+        ov.budget_profiles = Some(serde_json::json!({
+            "profiles": [
+                {"profile_id": "estimate", "currency": "CNY", "level": "warn", "spent_minor": 8100, "monthly_minor": 10000},
+                {"profile_id": "confirmed", "currency": "USD", "level": "ok", "spent_minor": 2500, "monthly_minor": 10000}
+            ]
+        }));
+        assert_eq!(budget_status_text_at(&ov, FIXTURE_AT_SECS), "预算：估算 CNY 接近 81.00/100.00；已确认 USD 正常 25.00/100.00");
     }
 
     #[test]

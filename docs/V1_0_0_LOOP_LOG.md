@@ -535,4 +535,11 @@
 - 验收：desktop 单元测试 102/102、runtime 单元测试 249/249、desktop Clippy `-D warnings`、JS 语法、来源契约检查与 `git diff --check`通过。
 - 边界：真实 macOS 通知权限、首穿/静默/点击路径尚未真机走查，不勾选 AC19 或 REQ-035/036。
 
+## Loop 62 · 菜单栏双预算分栏展示（自验收）
+
+- 执行：`Overview` 携带统一双 profile 状态，菜单栏预算行按 profile、币种和月度口径并列展示；估算与已确认、CNY 与 USD 均不做跨口径/跨币求和。
+- 保护：profile 状态存在时优先显示 profile 分栏，空 profile 时保留旧预算行；`incomplete`、`no_data`、`disabled` 使用明确文本，不以绿色安全结论替代缺失或不完整数据。
+- 验收：desktop 单元测试 103/103（含菜单栏分栏回归）、Clippy `-D warnings`、runtime 249/249、JS 语法、来源契约检查与 `git diff --check`通过。
+- 边界：真实 macOS 通知权限、首穿/静默/点击路径及跨入口真机 UAT 尚未完成，不勾选 AC19 或 REQ-035/036。
+
 本日志只记录已经完成的实现和证据；上述“尚未完成”不改变任何 PRD 勾选状态。任何单次修改连续测试失败超过5次，或任何单次Loop超过30分钟，立即暂停并记录；不得以拆分日志规避熔断。
