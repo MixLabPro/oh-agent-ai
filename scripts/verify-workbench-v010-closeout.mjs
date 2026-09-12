@@ -59,6 +59,8 @@ ok(js.includes("架构"), "诊断页展示构建架构");
 ok(lib.includes("fn restore_authority_backup"), "后端提供备份恢复命令");
 ok(js.includes("restore_authority_backup"), "失败态提供备份恢复入口");
 ok(js.includes("window.location.reload"), "备份恢复后重新加载权威状态");
+ok(lib.includes("fn check_for_updates"), "后端提供主动版本检查");
+ok(js.includes("check_for_updates"), "设置页提供主动版本检查入口");
 ok(lib.includes("会话数据暂不可用"), "菜单区分来源故障");
 ok(lib.includes("尚无会话"), "菜单区分真实空用量");
 ok(js.includes('invoke("data_status")'), "数据源页消费 SQL Authority 状态");

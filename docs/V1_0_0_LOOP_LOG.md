@@ -1947,6 +1947,15 @@
   失败不触发 reload，保留可见反馈。
 - 验收：closeout verifier 增加自动刷新断言；`git diff --check` 通过。
 
+## Loop 277 · 主动检查可信版本发布
+
+- 发现：REQ-140 只有打开可信发布页，用户无法在设置中主动获得最新 `app-v*` 发布状态。
+- 修复：新增用户触发的 GitHub latest release 检查；固定 API 地址、只读取 tag，不上传本地
+  日志、不自动下载或安装，网络失败明确反馈；保留可信发布页作为人工确认安装入口，
+  并启用 reqwest JSON feature。
+- 验收：桌面 `cargo check --release`、`npm run verify`、JS 语法检查和 `git diff --check`
+  通过；closeout verifier 已加入版本检查命令及 UI 入口断言。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；

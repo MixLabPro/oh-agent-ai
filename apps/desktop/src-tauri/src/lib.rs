@@ -2060,6 +2060,40 @@ fn about_diagnostics() -> Value {
 }
 
 const TRUSTED_RELEASES_URL: &str = "https://github.com/MixLabPro/agent-vitals/releases";
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/MixLabPro/agent-vitals/releases/latest";
+
+#[tauri::command]
+async fn check_for_updates() -> Result<Value, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(format!("agent-vitals/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("build update client failed: {error}"))?;
+    let response = client
+        .get(LATEST_RELEASE_API)
+        .send()
+        .await
+        .map_err(|error| format!("check updates failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("check updates returned HTTP {status}"));
+    }
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("parse update response failed: {error}"))?;
+    let tag = payload
+        .get("tag_name")
+        .and_then(Value::as_str)
+        .filter(|value| value.starts_with("app-v"))
+        .ok_or_else(|| "trusted release response has no app-v tag".to_string())?;
+    Ok(serde_json::json!({
+        "status": "ok",
+        "current_version": env!("CARGO_PKG_VERSION"),
+        "latest_tag": tag,
+        "url": TRUSTED_RELEASES_URL,
+        "automatic_install": false,
+    }))
+}
 
 #[tauri::command]
 fn open_trusted_releases_page() -> Result<Value, String> {
@@ -2901,6 +2935,7 @@ pub fn run() {
             restore_authority_backup,
             export_diagnostic_package,
             about_diagnostics,
+            check_for_updates,
             open_trusted_releases_page,
             budget_config,
             budget_profiles_status,

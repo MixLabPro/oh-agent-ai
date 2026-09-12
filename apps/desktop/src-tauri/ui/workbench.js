@@ -557,6 +557,7 @@ async function renderOverview() {
   await renderStatisticsTimezoneSettings();
   await renderPricingCatalogSettings();
   bindDiagnosticExport();
+  bindUpdateCheck();
   bindTrustedReleasesPage();
   await renderAboutDiagnostics();
   await renderBudgetSettings();
@@ -770,6 +771,26 @@ function bindTrustedReleasesPage() {
     } catch (e) {
       const target = document.getElementById("ov-diagnostic-status");
       if (target) { target.hidden = false; target.textContent = "打开发布页失败：" + errText(e); }
+    } finally { button.disabled = false; }
+  };
+}
+
+function bindUpdateCheck() {
+  const button = document.getElementById("ov-update-check");
+  const status = document.getElementById("ov-diagnostic-status");
+  if (!button || !status || button.dataset.bound === "1") return;
+  button.dataset.bound = "1";
+  button.onclick = async () => {
+    button.disabled = true;
+    status.hidden = false;
+    status.textContent = "正在检查可信发布页…不会上传本地数据。";
+    try {
+      const result = await invoke("check_for_updates");
+      status.textContent = result && result.latest_tag
+        ? "当前包 " + (result.current_version || "—") + " · 最新发布 " + result.latest_tag + "；请从可信发布页确认安装。"
+        : "未找到可用的 app-v 发布。";
+    } catch (e) {
+      status.textContent = "检查新版本失败：" + errText(e);
     } finally { button.disabled = false; }
   };
 }
