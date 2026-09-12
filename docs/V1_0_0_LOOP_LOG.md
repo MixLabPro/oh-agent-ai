@@ -800,3 +800,9 @@
 - 保护：没有迁移或重写现有 IPC/DOM 契约；当前原生 HTML/JS/CSS 可先获得 CSS HMR 与页面自动刷新，React 组件可按页面逐步迁移。
 - 验收：`npm install --ignore-scripts`、`npm run build`、Vite dev server + `curl /workbench.html`、Tauri 配置 JSON、`git diff --check` 通过。
 - 边界：本轮只建立开发基础设施，未声称完整 React 迁移或替代最终 `.app` 真机验收。
+
+## Loop 99 · Tauri + Vite 开发链路实跑（自验收）
+
+- 修复：校正 `beforeDevCommand` 的工作目录，使用 `npm --prefix ui-dev run dev`；此前配置会把路径解析到 `apps/ui-dev`，导致 Tauri dev 在启动前退出。
+- 验收：`cargo tauri dev --no-watch -- -- --show-workbench` 成功启动 Vite (`127.0.0.1:5173`) 与 Rust debug 进程；Vite 页面访问和此前 `npm run build` 均通过。
+- 边界：开发二进制没有被 Computer Use 的应用列表识别为独立 bundle，本轮未声称完成开发窗口视觉 UAT；发布 `.app` 仍需单独验收。

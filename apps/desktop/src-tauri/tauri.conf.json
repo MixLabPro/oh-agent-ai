@@ -5,7 +5,7 @@
   "identifier": "com.mixlabpro.agent-vitals-menubar",
   "build": {
     "frontendDist": "ui",
-    "beforeDevCommand": "npm --prefix ../ui-dev run dev",
+    "beforeDevCommand": "npm --prefix ui-dev run dev",
     "devUrl": "http://127.0.0.1:5173/workbench.html"
   },
   "app": {
