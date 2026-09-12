@@ -1979,6 +1979,13 @@
 - 验收：新增 Rust 单测覆盖合法、缺失和非 App tag 三种响应；Computer Use 仍受
   macOS 锁屏限制，未将其混入 API 解析回归结论。
 
+## Loop 281 · 版本检查功能进入最新 App
+
+- 验收：包含主动版本检查的最新 `.app` 通过 `cargo tauri build --bundles app`；包级预检
+  确认主程序、随包 CLI 均存在，CLI 返回 `agent-vitals 1.3.0`，二者架构均为 `arm64`。
+- 约束：本机包仍为 ad-hoc 签名，只作本地诊断；Developer ID、公证和真实安装验收不被
+  本地预检结果替代。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；
