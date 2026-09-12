@@ -1700,3 +1700,9 @@
 - 验收：`cargo test --release` 全部通过；`cargo clippy --release --all-targets -- -D warnings` 通过；`python3 tests/golden_runner.py --diff` 的 15 个 case 全部逐字节一致；Python 兼容套件 `Ran 1189 tests`，`OK (skipped=8)`。
 - 结论：统计时区诊断字段、Vite mock 同步和最新 `.app` 打包没有引入 Rust/Python/golden 回归。
 - 边界：全量自动化回归仍不替代真实 `.app` Computer Use、Developer ID/公证、干净机升级和外部试用。
+
+## Loop 240 · Vite 诊断时区浏览器 smoke
+
+- UAT：在 `http://127.0.0.1:5173/workbench.html` 真实加载 Vite mock 页面并展开“查看版本与同步状态”，页面实际显示 `统计时区 Asia/Shanghai`；标题为 `agent-vitals 工作台`。
+- 结果：诊断字段从 mock IPC 经过 Workbench 渲染链路可见，未出现控制台错误；该证据确认热更新调试面与最新字段契约连通。
+- 边界：Vite mock 不替代真实 `.app` 的系统时区、持久化配置和 Computer Use 验收。
