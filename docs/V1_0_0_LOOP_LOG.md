@@ -1088,3 +1088,10 @@
 - 保护：配置只影响统计日/月/小时边界与本地展示，供应商价格/峰谷规则不随之改变；校验失败不会写入无效时区，旧配置缺失仍使用 OS 默认。
 - 验收：desktop release 测试 110/110、runtime 时区测试 3/3、runtime Clippy `-D warnings`、Workbench Node 语法检查、Vite production build 与 `git diff --check`通过。
 - 边界：仍需验证跨进程 Python/CLI 同一偏好、SQLite `localtime` 在运行时切换后的完整 parity，并执行真实 Computer Use；REQ-033、REQ-096、AC21 暂不勾选。
+
+## Loop 142 · Python 查询入口复用统计时区偏好
+
+- 修复：Python `codex_cost`、`sessions_sql` 与状态层统一读取 `state/statistics-timezone.json`；桌面设置页修改后的“今天/本月/会话导航”不再只依赖继承的 `TZ` 环境变量。
+- 保护：保留旧 `today_beijing` / `current_month_beijing` 名称作为兼容入口；时区只改变统计窗口与展示，不改变事件 epoch 或供应商价格规则。
+- 验收：隔离数据目录跨模块偏好对拍通过（`codex_cost` / `sessions_sql` 均解析为 `America/Los_Angeles`）；Python 全量回归、Rust workspace 回归与 Vite production build 通过。
+- 边界：真实 `.app` 跨进程切换、SQLite `localtime` 运行时切换和 Computer Use 仍需验收；REQ-033、REQ-096、AC21 暂不勾选。

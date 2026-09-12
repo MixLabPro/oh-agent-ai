@@ -39,11 +39,11 @@ import sqlite3
 import sys
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Re-use authoritative Python helpers — do **not** grow a second implementation.
 from agent_vitals.agent.cost import cost_report  # noqa: F401  (byte-mirror)
 from agent_vitals.agent.codex_cost import today_beijing  # noqa: F401
+from agent_vitals.agent import state as state_mod
 from agent_vitals.paths import data_home
 
 
@@ -82,22 +82,8 @@ _CURRENCY_MINOR_DIGITS = {
 # ────────────────────────────────────────────────────────────────────────
 
 def _system_timezone():
-    """Resolve the OS IANA timezone without treating a fixed offset as identity."""
-    configured = os.environ.get("TZ", "").lstrip(":")
-    candidates = [configured] if configured else []
-    try:
-        localtime = os.path.realpath("/etc/localtime")
-        marker = "/zoneinfo/"
-        if marker in localtime:
-            candidates.append(localtime.split(marker, 1)[1])
-    except OSError:
-        pass
-    for name in candidates:
-        try:
-            return ZoneInfo(name)
-        except (ValueError, ZoneInfoNotFoundError):
-            continue
-    return datetime.now().astimezone().tzinfo or timezone.utc
+    """Resolve the shared persisted statistics timezone."""
+    return state_mod._system_timezone()
 
 
 def _system_timezone_name():

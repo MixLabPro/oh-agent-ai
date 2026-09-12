@@ -12,12 +12,11 @@
 起两者一起搬进仓库根 `assets/`（三方共读，不是 Python 包私有数据）。
 """
 import json
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .codex_usage import CODEX_TOKEN_FIELDS, codex_aggregate_hours
+from . import state as state_mod
 
 # packages/agent-vitals-python/agent_vitals/agent/codex_cost.py → 仓库根爬 5 层。
 _CODEX_PRICING_PATH = Path(__file__).resolve().parents[4] / "assets" / "codex_pricing.json"
@@ -27,21 +26,10 @@ _BEIJING = timezone(timedelta(hours=8))
 
 
 def _system_timezone():
-    configured = os.environ.get("TZ", "").lstrip(":")
-    candidates = [configured] if configured else []
-    try:
-        localtime = os.path.realpath("/etc/localtime")
-        marker = "/zoneinfo/"
-        if marker in localtime:
-            candidates.append(localtime.split(marker, 1)[1])
-    except OSError:
-        pass
-    for name in candidates:
-        try:
-            return ZoneInfo(name)
-        except (ValueError, ZoneInfoNotFoundError):
-            continue
-    return datetime.now().astimezone().tzinfo or timezone.utc
+    # Keep all Python entry points on the same persisted preference resolver as
+    # state.py.  This is important because the desktop can change the
+    # statistics timezone without changing the process' inherited TZ.
+    return state_mod._system_timezone()
 
 
 def current_month_beijing():
