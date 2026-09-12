@@ -1295,3 +1295,9 @@
 - 构建：重新执行 `cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 release CLI `cmp` 一致。
 - 验收：旧包移至 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-030203`，新包以 `--show-workbench` 启动，进程 PID `76600` 已运行。
 - 边界：真实菜单点击/视觉 Computer Use 仍待解锁 macOS；当前包仍未完成 Developer ID 签名与公证。
+
+## Loop 175 · CLI 默认时区回归收口
+
+- 验收：CLI release 测试 79/79、Clippy 通过；完整 Python 回归 1188/1188、Rust workspace release 回归全部通过（含 data 283、core 53、集成与性能测试）。
+- 保护：默认导航时区由运行时配置派生；显式时区仍走同一 IANA 校验，不改变事件 epoch、供应商计价时区或历史兼容测试契约。
+- 边界：未把本机 OS 当前恰为 Asia/Shanghai 的结果扩展成非 UTC+8 真机证据；Computer Use、签名/公证和外部试用仍未完成。
