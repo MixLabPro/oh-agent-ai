@@ -1817,3 +1817,9 @@
 - 发现：`gh release create` 默认可在缺少 tag 时创建新 tag，与 workflow“从已有版本 tag 构建并发布”的约定不一致。
 - 修复：增加 `--verify-tag`，发布阶段只接受已经存在且已检出的 `app-v*` tag。
 - 验收：YAML 解析和 diff 检查通过；Release 创建命令已显式启用 tag 存在性校验。
+
+## Loop 259 · 桌面发布按 tag 串行化
+
+- 发现：同一 `app-v*` tag 被重复推送或手动触发时，多个签名/公证流程可能并行竞争同一 Release。
+- 修复：workflow 增加按 `inputs.release_tag || github.ref_name` 分组的 concurrency，`cancel-in-progress: false`，避免取消已经开始的签名流程。
+- 验收：YAML 解析和 diff 检查通过；同一发布 tag 只允许一个 workflow 同时进入构建/发布链路。
