@@ -1574,3 +1574,9 @@
 - 修复：前端原先名为 `beijingToday/beijingMonth/shiftBeijingDate` 的 helper 实际读取的是用户配置的 IANA 统计时区；现更名为 `statisticsToday/statisticsMonth/shiftStatisticsDate`，同步更新月份、日历、预算、会话和最近 7 天查询调用点及验证器。
 - 验收：源代码不再残留旧 helper 名；Vite production build、Workbench KPI/closeout verifier、JS 语法检查和浏览器 reload smoke 全部通过，统计时区输入与本月区域正常渲染，控制台错误数为 0。
 - 结论：代码命名现在与“系统/用户统计时区决定今天、本月和日界线”的产品契约一致；不改变供应商计价时区或原始事件时间。
+
+## Loop 219 · 时区收口后的全量回归
+
+- 验收：`cargo test --release` 全部通过；`AGENT_VITALS_BIN="$PWD/target/release/agent-vitals" python3 -m unittest discover tests -q` 完成 1189 项，8 项按环境跳过，无失败。
+- 保护：Rust/Python 价卡、authority 查询、跨时区日/月边界、宿主隔离、迁移、MCP/CLI 输出和既有 golden 合同均重新覆盖；未刷新 snapshot。
+- 边界：自动化全量通过仍不替代真实 `.app` Computer Use、签名/公证、公共目录联网成功、干净机升级和外部试用。
