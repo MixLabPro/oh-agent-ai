@@ -179,7 +179,11 @@ credit/M 漂移(60~13,000)是系数 + 缓存命中 + 复杂度差异,不是账�
   **是错的**——trace 包装对象有结构化 `sessionId` 字段(354/675 非空、100% 匹配
   `sessions.id`、覆盖 22/23 会话、自 2026-07 起就有);09-02 的分析在 prompt 文本里扫
   UUID 而从未读该字段。详见 `WORKBUDDY_INTEGRATION.md` §12.2。attempts 计数本身仍然
-  诚实——它记的是「现有实现没接」,不是「不可接」。
+  诚实——它记的是「现有实现没接」,不是「不可接」。**勘误 2026-09-12(Phase E 落地)**:
+  未归属 trace 不是「另一类 0 token 的编排」——`name='Agent workflow'` 是标题不是类;
+  `totalTokens` 302/675 为 0 而 span 有 usage,不可信;它们的 generation span 有真实
+  用量(E4a 实测 1,202 个逐 span 落 unattributed)。`session_usage.used` = 最后一次调用
+  上下文快照,不是使用量(§9E.1)——真实处理量在 traces(usage_facts / cost.processed_tokens)。
 - 17 条轮转段标记记录(entryCount/event/firstHash/lastHash/fileSha256,无 category/
   eventType)是**账本元数据不是事件**:不计数、不误报、参与 hash 链轮转语义。
 

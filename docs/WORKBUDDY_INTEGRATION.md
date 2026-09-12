@@ -334,11 +334,14 @@ audit-log requestId 可 join，实测 13/22）。TOTAL 4,307.76 credit（名义 
 - **cost = 逐会话求 `credit_json` 各 requestId 之和**（值可能是数字或数字字符串，适配器
   稳健求和，按厘累计防浮点漂移）。这是宿主自己的**积分**账单，**不重新做 token × 单价**
   ——不涉及 pricing.json、不长第四份价格拷贝。
-- **token = `session_usage.used`** 单值（聚合），**没有逐请求 token**（traces 只有 trace 级
-  `totalTokens`；**现有实现未接 traces**——它可按 `trace.sessionId` 归属，见 §12.2，但即便接入也只有 trace 级而非逐请求 token）→ Usage 信号 Unavailable、UsageAggregate measured=1。
+- **token（E4a/E5 已接正，spec §9E.5）**：`used` 是**最后一次调用的上下文占用 prompt_tokens
+  快照**，不是使用量——traces **有**逐请求四桶（E4a → usage_facts、`cost.processed_tokens` 同源），
+  E2 起 Usage 信号 measured 而非曾经的「Unavailable + 刻意不用」。`totalTokens` 不可信，不读
+  （§12.2）。
 - 输出契约：`workbuddy-session --json` 的顶层加一个 `cost` 键，形状 =
-  `{tokens, credits, cash_cny, nominal_cny, nominal_basis, host_billed}`
-  （6 键，键序是字节契约的一部分；`cash_cny` 恒 `null`——本机无支付证据，绝不填 0；
+  `{tokens, processed_tokens, credits, cash_cny, nominal_cny, nominal_basis, host_billed}`
+  （**7 键**，E5 起含 `processed_tokens`；键序是字节契约的一部分；`cash_cny` 恒 `null`——
+  本机无支付证据，绝不填 0；`processed_tokens` 无 trace 证据时 `null`——不编 0；
   `nominal_cny` = `credits × 0.05` 落名义栏，永不进实付栏/预算分子）。权威定义见
   WORKBUDDY_ONBOARDING_SPEC.md §6.1；旧的 `{tokens, cny, host_billed}` 三键形状已废弃。
 
@@ -441,8 +444,9 @@ rules:     measured_zero = SV601/602/603/604/605/606/607/608/610/611/613/614 (E2
    接入 traces 后（`WORKBUDDY_ONBOARDING_SPEC.md` Phase E）这两条以及 SubagentSpawns、
    工具调用耗时都可能转为 Available。此前写「留待 traces join 落地」，现在这句是对的，
    只是「落地」有了明确的归属键，不再是猜；
-6. **cost = credit_json 宿主积分账单**：不重新计价、不动 pricing.json；`used` 是聚合 token，无逐请求
-   用量；
+6. **cost = credit_json 宿主积分账单**（不重算价、不动 pricing.json）+ **`used` 是最后一次
+   调用上下文快照**（E5）：`tokens` 键保留 used 语义（新注记承担），真正的处理量在
+   `cost.processed_tokens`（E4a usage_facts 逐请求源）。
 7. **permission_mode 只两值 + use_sandbox_cli 恒 1**：ApprovalPolicy/SandboxModes 保真度低于
    DSH；SV610 的 `danger-full-access` 词表不适用于 WorkBuddy，诚实 MeasuredZero；
 8. **`mode` 恒 craft、welcomeMode 会话级配置**（workbuddy.rs 静态层已守不变量 12）：模型/模式

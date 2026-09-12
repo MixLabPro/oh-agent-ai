@@ -634,7 +634,7 @@ total_tokens, prompt_tokens_details.cached_tokens, completion_tokens_details.rea
 - `sessions.model`：会话默认值，不是实际调用——`5018bac6` 一个会话实际调了 6 个模型；
 - `session_usage.used`：**不是 processed tokens**——累计类组合全对不上（used/(uncached
   +completion) 在 0.002~0.118 乱跳），但 **= 会话最后一次 generation 调用的
-  `prompt_tokens`**（16/21 逐字相等，±5% 再 1 个；余下 4 个疑似压缩/重置，待 E5 记）。
+  `prompt_tokens`**（E5 实测 22/22：16 逐字相等、1 ±0.5%、5 偏离——分布与成因记录在 E5 实施注记）。
   即「最后一次调用时的上下文占用」快照。可用，但语义是**上下文大小**不是用量。
 
 **规模**（有 sessionId 的 354 个 trace）：uncached 174.5M + completion 2.5M = **processed
@@ -649,12 +649,12 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
 |---|---|---|---|
 | §9 Phase D | 「把 `used` 拆四桶 = 编造」 | 前提不成立：四桶从 generation usage **直算**（uncached = prompt − cached；cache_read = cached；output = completion；cache_write = 0 并注明 OpenAI 格式无此桶；reasoning 单列，同 Codex 五桶） | §9 保留「不拆 `used`」，删「WorkBuddy 无四桶」 |
 | §7.2 路径 1 | 「四桶全 0，token 恒 0 沉底」 | 可发**真事实**，与 Codex 同形 | 路径 1 重写为 E-a，路径 2 不再是推荐 |
-| §5.2 | 名义单位成本分母 1,109,007 | 量纲错（`used`）；应为 processed tokens，且 §6.7 标准路径（token × 官方卡 **逐调用模型**）现在**可走** | §5.2 改为「待 E-f 重算」 |
-| §6.1 | `cost.tokens = used` | `used` = 最后一次调用的上下文占用（`prompt_tokens` 快照），不是用量 | 键保留，note 标「last-call context size, not processed tokens」；processed 另出 |
-| §2 基线表 | 「积分轨 1,109,007 token」 | 同上 | 加脚注 |
-| B2 / §12.2 | 「`Agent workflow` = 另一类、0 token」 | 是 name 不是类；`totalTokens` 不可信；有真实用量 | INTEGRATION §12.2 与 ASK P2-3 措辞修正（E-g） |
-| ASK P1-1 | 「最大缺口是逐请求用量」 | 数据在 traces 里 | P1-1 改为「请声明 `usage` 与 `model` 字段是契约」 |
-| §5.0 末段 | 「积分系数只能逐会话反推」 | 逐调用 model + 逐 requestId credit → **可逐调用**（若 span 与 requestId 可 join，待测） | E-f |
+| §5.2 | 名义单位成本分母 1,109,007 | 量纲错（`used`）；应为 processed tokens，且 §6.7 标准路径（token × 官方卡 **逐调用模型**）现在**可走** | **E5 已重算**：§5.2 现用 processed 分母（积分轨 ¥0.49/M、全量 ¥0.46/M） |
+| §6.1 | `cost.tokens = used` | `used` = 最后一次调用的上下文占用（`prompt_tokens` 快照），不是用量 | **E5 已落地**：键保留 + note（used = last-call context size）+ `processed_tokens` 新键 |
+| §2 基线表 | 「积分轨 1,109,007 token」 | 同上 | **E5 脚注已加**（used 基准、不作名义分母） |
+| B2 / §12.2 | 「`Agent workflow` = 另一类、0 token」 | 是 name 不是类；`totalTokens` 不可信；有真实用量 | **E6 已修改**：INTEGRATION §12.2 项与 ASK P2-3 均改为「name 不是类、有真实用量」 |
+| ASK P1-1 | 「最大缺口是逐请求用量」 | 数据在 traces 里 | **E6 已改写**：P1-1 = 「请声明 `usage` 与 `model` 字段是契约」 |
+| §5.0 末段 | 「积分系数只能逐会话反推」 | 逐调用 model + 逐 requestId credit → **可逐调用**（若 span 与 requestId 可 join，待测） | **E5/E6 已落地**（traces 逐 span usage/model；span 与 requestId 的 join 仍待测，不阻塞） |
 
 ### 9E.3 修订后的范围：Phase E = WorkBuddy 的真实数据面
 
@@ -791,9 +791,15 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
           。成因线索：used 是宿主聚合值的**某时点快照**，与「最后一次调用」的
           拍照点不同步（压缩/重置后 used 停留早期，但末次调用 prompt 已长大；
           或者反之 used 拍在更晚）。`3acac645` 偏 0.5% 算界内。
-- [ ] **E6 · 文档收口**
-      INTEGRATION §9/§12.2、ASK P1-1/P2-3/§0、CORPUS 勘误；memory `workbuddy-data-facts`
-      再勘误（`used` 语义、Agent workflow 非另一类、逐调用 model）。
+- [x] **E6 · 文档收口**
+      INTEGRATION §9（cost 块 7 键、token 语义、processed 另出——E5 已顺带改）/§12 项
+      2/5/6（Agent workflow 是 name 不是类、traces 已接、used 语义）、ASK §0 项 3 +
+      P1-1（改写为「请声明 `usage` 与 `model` 字段是契约」）+ P2-3（name 非类、有真实
+      用量）、CORPUS §5-6 勘误续（totalTokens 不可信、unattributed 有真实用量）、memory
+      `workbuddy-data-facts` 再勘误（`used` 语义、Agent workflow 非另一类、逐调用 model、
+      WAL/join/月用量要点保留）。**实施注记**：本项 doc-only——没有测试文件变更；§9E.2
+      六行「处置」列全部更新为落地状态。corpus 原 §6 的 6 会话/678K 旧账面、memory 与
+      INTEGRATION 的旧结论段落保留作历史并有显式推翻标注，不留「悄悄改掉」的歧义。
 
 **明确不在 E 里**：把 credit 折成钱进实付栏（§5 口径不变）；用 span 里的 prompt 正文
 做任何事（§4）；给无 sessionId 的 trace 猜归属（纪律 1）。

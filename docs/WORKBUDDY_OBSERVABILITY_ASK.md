@@ -29,9 +29,9 @@
 3. **最值得要的一条是请求级路由枚举**(§3 P1-2,评审后**升为 P0**):一个
    `platform-credits / self-configured / promotional` 枚举值就能同时解掉 46.5% token
    落 `unpriced`、零积分只能两态、成因只能归用户声明三个问题——宿主声明比用户声明
-   好一个量级。**最大的数据缺口**仍是逐请求用量(§3 P1-1):现在只有会话级 `used` 聚合 + 按 `requestId`
-   键控的 `credit_json`。这直接导致 `WORKBUDDY_ONBOARDING_SPEC` §9 判定「不可拆四桶」、
-   §7.2 的统一会话面方案失去价值(token 恒 0 会沉底)。
+   好一个量级。**逐请求用量已解决(2026-09-12,spec Phase E)**:traces 的 generation span
+   自带逐请求四桶,`cost.processed_tokens` 已是真实用量;§7.2 路径 1 已开。剩下的是让宿主
+   **声明 `usage`/`model` 字段是契约**(§3 P1-1 改写)。
 4. **traces 不是匿名的**(§3 P2-3,评审后改写):`trace.sessionId` 结构化字段已存在、
    覆盖 22/23 会话。本文初版沿用 09-02 的错误结论,验收复测抓出。write/edit/subagent/
    duration 证据因此**可达**,是 agent-vitals 侧最大的一块未开发面。
@@ -129,21 +129,21 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
 
 ### P1
 
-#### P1-1 逐请求用量(四桶 token + credit)—— 最大缺口
+#### P1-1 逐请求用量(四桶 token + credit)—— **2026-09-12 改写(E6:已解决,只剩契约声明)**
 
-- **现状**:`session_usage` 只有会话级 `used` 聚合;`credit_json` 按 `requestId` 键控但
-  只有积分、没有 token。
-- **后果**(已在 `WORKBUDDY_ONBOARDING_SPEC` 里定案):
-  - §9 判定「把 `used` 拆进四桶 = 编造构成」,**明确不做**;
-  - §7.2 路径 1 若发事实,四桶只能全 0 → 在统一 `sessions list` 里按 token 排序**恒沉底**;
-  - 因此 Phase B 建议「不做」,统一会话面对 WorkBuddy 事实上关闭。
-- **建议**:在 `credit_json` 的同级(或同一条记录里)落**逐 requestId 的四桶**:
-  `uncached_input` / `cache_read` / `cache_write` / `output`。
-  若确实不可得,**显式声明「本宿主不提供分桶」**也是有效答复——我们会据此把
-  `UsageFact` 的四桶定为 `unavailable`(而非 `measured-zero`),这在语义上完全不同。
-- **若不做**:维持现状(四桶 unavailable,token 走会话级聚合名义栏),并把
-  「WorkBuddy 的名义单位是 `积分 × 兑换价`,与其他宿主的 `token × 官方卡` **并列不合计**」
-  这条写进展层(`ONBOARDING_SPEC` §5.2 已如此规定)。
+- **现状(2026-09-12,spec Phase E 已落地)**:traces 的 generation span **有逐请求四桶
+  usage**(每 span 恰 1 条 OpenAI 兼容 usage,5,067/5,067)。E4a/E4b 已接入——
+  `cost.processed_tokens` = 该会话 traces 四桶之和,§7.2 路径 1 已开(统一会话面里有
+  真四桶,不再「恒 0 沉底」);`session_usage.used` 是**最后一次调用上下文快照**不是
+  使用量(§9E.1)。原先「§9 判不可拆四桶」的判定已随 E phase 作废。
+- **剩余问题**:`usage`/`model` 字段未被宿主**声明为契约**——若漂移只会表现为
+  decode_failures/attempts 上升,而不是「宿主改了什么」。
+- **建议(改写)**:向宿主**显式声明 `toolOutput[i].usage` 与 `toolOutput[i].model`
+  是契约**,形状 = OpenAI 兼容 {prompt_tokens, cached_tokens, completion_tokens,
+  …details} + 逐调用 model 串;不承诺稳就提供一个 `schema_version`。我们已实测两字段
+  均真实,只差一句稳定承诺。
+- **若不做**:维持现状(processed_tokens 假设「今日形状即契约」,漂移当月表现为
+  decode 失败/attempts 上升),名义栏口径见 `ONBOARDING_SPEC` §5.2。
 
 #### P1-2 请求级路由/归属证据(评审后:**实际优先级 P0**,唯一一把同时解三个问题的钥匙)
 
@@ -212,12 +212,16 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
   「在 span 上落 `sessionId`」。**验收复测推翻了前提**:trace 包装对象**已有**结构化
   `sessionId` 字段——354/675 非空、100% 匹配 `sessions.id`、覆盖 22/23 会话、自 2026-07
   起就有(`RUNTIME_EVIDENCE_CONTRACT.md:747` 的 schema 例子里本来就写着)。09-02 的分析
-  在 prompt 文本里扫 UUID,从未读这个字段。其余 321 个 trace 全是 `name='Agent workflow'`、
-  **无** `sessionId` 键、`metadata:{}`、0 token。
+  在 prompt 文本里扫 UUID,从未读这个字段。其余 321 个 trace 都是 `name='Agent workflow'`、
+  **无** `sessionId` 键、`metadata:{}`、`totalTokens: 0`——**E5 纠正**:`Agent workflow`
+  是 span name 不是 trace 类;`totalTokens` 302/675 为 0 而 span 有 usage,不可信;这些
+  未归属 trace 的 generation span 有**真实 usage**(E4a 实测 1,202 个逐 span 落到
+  unattributed,发 fact 前被拦)。
 - **建议**(改为声明语义,不再要新字段):
   1. `trace.sessionId` 是**契约**还是**实现细节**?我们要按它 join,需要它稳定。
-  2. `Agent workflow` 类 trace 的语义:是后台编排/预热/子代理?它**不该**有 sessionId,
-     还是**应该有但缺失**?两种答案对我们的处理完全不同(前者 → 单独一类;后者 → 数据缺口)。
+  2. `Agent workflow` 这些 trace 的语义:它**不该**有 sessionId,还是**应该有但缺失**?
+     注意它们不是「单独一类,0 token」(E5:`name` 是标题不是类、`totalTokens` 不可信、
+     有真实 usage)——答案决定我们是否仍该收 unattributed。
   3. span 级是否也会落 `sessionId`——非必需(包装层够用),但若有则可校验一致性。
 - **若不做**:按现状接入——`trace.sessionId` 非空即归属(**字符串相等,不猜不推断**),
   `Agent workflow` 类进 attempts 并单列计数,语义标「宿主未声明」。这条已从「结构性不可接」
