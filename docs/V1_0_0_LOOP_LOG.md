@@ -1271,3 +1271,9 @@
 - Python：`python3 -m unittest discover tests -v`，1188/1188 通过；208 项按测试定义因未设置 Rust CLI、双实现差分或可选依赖而跳过，无失败。
 - Rust：`cargo test --release` 全部通过，CLI 79、data 283、core 53 及 workspace 集成/性能/边界测试均通过。
 - 结论：本轮没有刷新 golden/snapshot，也没有把跳过项当作通过；Python/Rust 双实现与真实桌面/发布环境门禁仍按各自证据单独处理。
+
+## Loop 171 · 账单影响预览使用 DST-aware 月窗口
+
+- 修复：Workbench 的账单声明影响预览不再用固定 UTC+8 偏移构造月份 epoch 窗口；改为基于配置统计 IANA 时区的当地午夜迭代求解，跨夏令时月份的起止边界按真实偏移计算。
+- 验收：洛杉矶 2026-03 月窗口得到 `2026-03-01T08:00:00Z` 至 `2026-04-01T07:00:00Z`（743 小时）；柏林对应窗口得到 `2026-02-28T23:00:00Z` 至 `2026-03-31T22:00:00Z`（743 小时）。`node --check`、Vite build 与 `git diff --check` 通过。
+- 边界：这只修正前端预览窗口，事实 epoch、声明作用范围和后端权威查询不变；真实窗口 Computer Use 仍待解锁 macOS。

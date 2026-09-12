@@ -1076,11 +1076,35 @@ async function renderBudgetProfiles() {
   }
 }
 
+function statisticsMidnightMs(year, monthIndex, day) {
+  const civilMs = Date.UTC(year, monthIndex, day);
+  let guess = civilMs;
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: statisticsTimezoneName(),
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  });
+  // Solve UTC = local civil midnight - offset(UTC). Re-evaluate the offset so
+  // a midnight crossing a DST boundary uses the offset valid at that instant.
+  for (let i = 0; i < 4; i++) {
+    const parts = formatter.formatToParts(new Date(guess));
+    const values = Object.fromEntries(parts.filter((p) => p.type !== "literal").map((p) => [p.type, p.value]));
+    const projectedMs = Date.UTC(
+      Number(values.year), Number(values.month) - 1, Number(values.day),
+      Number(values.hour), Number(values.minute), Number(values.second),
+    );
+    const next = civilMs - (projectedMs - guess);
+    if (next === guess) return next;
+    guess = next;
+  }
+  return guess;
+}
+
 function billingMonthWindow(month) {
   const parts = String(month || "").split("-").map(Number);
   if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
-  const start = Date.UTC(parts[0], parts[1] - 1, 1) - 8 * 3600 * 1000;
-  const end = Date.UTC(parts[1] === 12 ? parts[0] + 1 : parts[0], parts[1] === 12 ? 0 : parts[1], 1) - 8 * 3600 * 1000;
+  const start = statisticsMidnightMs(parts[0], parts[1] - 1, 1);
+  const end = statisticsMidnightMs(parts[1] === 12 ? parts[0] + 1 : parts[0], parts[1] === 12 ? 0 : parts[1], 1);
   return { start, end };
 }
 
