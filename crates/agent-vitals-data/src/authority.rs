@@ -1611,6 +1611,49 @@ impl AuthorityDb {
         Ok(true)
     }
 
+    /// 原子写入公共 catalog 与其价格快照。两张表必须作为一个版本一起出现；
+    /// 任一步违反不可变身份或外键约束，事务整体回滚，旧有效版本保持可读。
+    #[allow(clippy::too_many_arguments)]
+    pub fn pricing_catalog_snapshot_put(
+        &self,
+        catalog_version: &str,
+        snapshot_id: &str,
+        source_kind: &str,
+        payload_json: &str,
+        captured_at_ms: i64,
+        billing_template_id: Option<&str>,
+    ) -> Result<(bool, bool), AuthorityError> {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let result = (|| {
+            let catalog_changed = self.provider_catalog_snapshot_put(
+                catalog_version,
+                snapshot_id,
+                source_kind,
+                payload_json,
+                captured_at_ms,
+            )?;
+            let pricing_changed = self.pricing_snapshot_put_with_provenance(
+                catalog_version,
+                source_kind,
+                payload_json,
+                captured_at_ms,
+                Some(catalog_version),
+                billing_template_id,
+            )?;
+            Ok::<_, AuthorityError>((catalog_changed, pricing_changed))
+        })();
+        match result {
+            Ok(changed) => {
+                self.conn.execute("COMMIT", [])?;
+                Ok(changed)
+            }
+            Err(error) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                Err(error)
+            }
+        }
+    }
+
     /// 落入一个模板定义。更新合同必须使用新的 template id；这里不接受覆盖。
     #[allow(clippy::too_many_arguments)]
     pub fn billing_template_put(
@@ -3712,6 +3755,33 @@ mod tests {
             Some("{\"m\":2}")
         );
         assert!(a.pricing_snapshot_asof(500).unwrap().is_none());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn pricing_catalog_snapshot_put_rolls_back_both_tables_on_failure() {
+        let db = tmp_db("pxsnap-atomic");
+        let a = AuthorityDb::open(&db, 1_000).unwrap();
+        let result = a.pricing_catalog_snapshot_put(
+            "public-v1",
+            "public-v1",
+            "public-maintainer-https",
+            "{\"providers\":{}}",
+            2_000,
+            Some("missing-template"),
+        );
+        assert!(result.is_err());
+        assert_eq!(a.pricing_snapshot_count().unwrap(), 0);
+        assert_eq!(
+            a.conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_catalog_snapshots",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
         let _ = std::fs::remove_file(&db);
     }
 

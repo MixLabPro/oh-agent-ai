@@ -1867,23 +1867,15 @@ async fn update_public_pricing_catalog_internal(enforce_schedule: bool) -> Resul
     let authority_path = agent_vitals_data::authority::default_authority_path(&data_home);
     let db = agent_vitals_data::authority::AuthorityDb::open(&authority_path, now)
         .map_err(|e| format!("open authority database failed: {e}"))?;
-    db.provider_catalog_snapshot_put(
+    db.pricing_catalog_snapshot_put(
         &validated.version,
         &validated.version,
         "public-maintainer-https",
         &validated.canonical_json,
         now,
-    )
-    .map_err(|e| format!("save public catalog failed: {e}"))?;
-    db.pricing_snapshot_put_with_provenance(
-        &validated.version,
-        "public-maintainer-https",
-        &validated.canonical_json,
-        now,
-        Some(&validated.version),
         None,
     )
-    .map_err(|e| format!("save public pricing failed: {e}"))?;
+    .map_err(|e| format!("save public catalog and pricing atomically failed: {e}"))?;
     status.state = "ok".into();
     status.last_success_at_ms = Some(now);
     status.source_version = Some(validated.version.clone());

@@ -1494,3 +1494,9 @@
 - 验收：`cargo test --release` 全部通过；CLI 79、data 128 + 2 依赖 + 1 wiring、domain 467、runtime 287 + 3 依赖 + 8 Q acceptance，以及 core/集成/性能测试均无失败。
 - 结论：价格目录校验模块与桌面调度依赖未破坏既有数据、计价、迁移、宿主隔离、时区和跨实现合同。
 - 边界：该回归不替代真实联网成功、`.app` Computer Use、签名/公证、干净机升级和外部试用验收。
+
+## Loop 206 · 公共目录与价格快照原子切换
+
+- 修复：公共 catalog 与 pricing snapshot 改为同一 SQLite 事务写入；任一外键或不可变身份校验失败，两个表都回滚，旧有效版本继续可读。
+- 验收：新增原子回滚测试通过；目录/价格相关 data crate 回归通过，`git diff --check`通过。
+- 边界：真实联网成功仍受公共目录 404 阻塞，签名/公证、Computer Use 和外部试用门禁仍未完成。
