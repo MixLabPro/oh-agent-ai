@@ -1035,6 +1035,11 @@ button.chip.active {
 .src-list li .fresh.partial { color: #8a6a00; font-weight: 600; }
 .src-list li .fresh.unavailable { color: var(--muted); }
 .src-list li.no-data { color: var(--muted); }
+.src-list li .pricing-explain {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
 .src-meta {
   color: var(--muted);
   font-size: 12px;

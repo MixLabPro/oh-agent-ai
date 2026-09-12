@@ -44,9 +44,9 @@
       by_provider: byProvider,
       total_actual_spend: { CNY: 8.64 },
       by_host: {
-        codex: { amounts_by_basis: { api_equivalent: 14.82 }, freshness: { state: "fresh", last_observed_at: isoDay }, has_unresolved: false },
-        "claude-code": { amounts_by_basis: { fixed_subscription: 20 }, freshness: { state: "partial", last_observed_at: isoDay }, has_unresolved: true },
-        dsh: { amounts_by_basis: { metered_actual: 8.64 }, freshness: { state: "fresh", last_observed_at: isoDay }, has_unresolved: false },
+        codex: { amounts_by_basis: { api_equivalent: 14.82 }, freshness: { state: "fresh", last_observed_at: isoDay }, has_unresolved: false, pricing_method: "provider-card" },
+        "claude-code": { amounts_by_basis: { fixed_subscription: 20 }, freshness: { state: "partial", last_observed_at: isoDay }, has_unresolved: true, pricing_method: "fair-market-fallback", unresolved_reason: "missing-provider-route-evidence" },
+        dsh: { amounts_by_basis: { metered_actual: 8.64 }, freshness: { state: "fresh", last_observed_at: isoDay }, has_unresolved: false, pricing_method: "provider-card" },
       },
       coverage: { measured_fields: 3, total_fields: 3, denominator_version: 1 },
       excluded_hosts: [],

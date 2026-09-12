@@ -1997,6 +1997,23 @@ function freshnessText(state, lastObservedAt) {
   }
 }
 
+function pricingMethodText(method) {
+  return {
+    "provider-card": "原厂价格卡",
+    "fair-market": "官方价参考估算",
+    "fair-market-fallback": "当前价参考估算",
+  }[method] || null;
+}
+
+function pricingReasonText(reason) {
+  return {
+    "missing-provider-route-evidence": "付费路由待确认",
+    "billing-route-unknown": "付费方式待确认",
+    "provider-specific-card-unavailable": "缺少对应服务商价卡",
+    "missing-or-unpriced-route-evidence": "来源或价格仍待确认",
+  }[reason] || null;
+}
+
 function renderSourcesPanel(dto, prefix) {
   const list = document.getElementById(prefix + "-list");
   const empty = document.getElementById(prefix + "-empty");
@@ -2066,6 +2083,17 @@ function renderSourcesPanel(dto, prefix) {
         }
       }
       li.appendChild(basisEl);
+
+      const pricing = pricingMethodText(row.pricing_method);
+      const reason = pricingReasonText(row.unresolved_reason);
+      if (pricing || reason) {
+        const explain = document.createElement("span");
+        explain.className = "pricing-explain";
+        explain.textContent = pricing || "价格暂不可用";
+        if (reason) explain.textContent += " · " + reason;
+        explain.title = [row.pricing_method, row.unresolved_reason].filter(Boolean).join(" · ");
+        li.appendChild(explain);
+      }
 
       const fr = document.createElement("span");
       fr.className = "fresh " + fs;
