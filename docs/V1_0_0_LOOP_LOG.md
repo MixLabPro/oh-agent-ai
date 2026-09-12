@@ -1406,3 +1406,10 @@
 - Python：`python3 -m unittest discover tests -v`，1189/1189 通过；208 项按测试定义跳过，无失败。
 - 保护：新增的查询局部时区上下文、IANA 校验和 CLI 参数路径未破坏既有 sessions、计价、WorkBuddy 证据与 Python 兼容合同。
 - 边界：Rust/Python 双实现对拍仍有未配置 release CLI 的跳过项；真实非 UTC+8 桌面 Computer Use、签名/公证和外部试用门禁仍未完成。
+
+## Loop 192 · Rust/Python 全量严格对拍
+
+- Python：`AGENT_VITALS_BIN="$PWD/target/release/agent-vitals" python3 -m unittest discover tests -v`，1189/1189 通过，仅 8 项按环境条件跳过，无失败。
+- 保护：启用 release CLI 后，Python/Rust 双实现、golden、时区边界、WorkBuddy 证据和桌面相关兼容合同均通过；未刷新 golden/snapshot。
+- 结论：本轮 Python 查询局部时区修复在严格二进制对拍下保持兼容，默认时区与显式 IANA 覆盖均未引入回归。
+- 边界：真实非 UTC+8 桌面 Computer Use 仍因 macOS 锁屏未复验；签名/公证、干净机升级和外部试用门禁仍未完成。
