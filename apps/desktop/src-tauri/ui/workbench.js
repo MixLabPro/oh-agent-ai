@@ -130,6 +130,16 @@ function statisticsTimezoneName() {
   return configuredStatisticsTimezone;
 }
 
+function formatStatisticsDateTime(value, options) {
+  if (value == null || value === "") return "—";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: statisticsTimezoneName(),
+    ...options,
+  }).format(date);
+}
+
 function systemToday() {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: statisticsTimezoneName(), year: "numeric", month: "2-digit", day: "2-digit",
@@ -583,7 +593,7 @@ async function renderOverview() {
   let freshHHMM = "";
   if (b.generated_at) {
     const t = new Date(b.generated_at);
-    freshHHMM = t.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+    freshHHMM = formatStatisticsDateTime(t, { hour: "2-digit", minute: "2-digit", hour12: false });
     stale = Date.now() - t.getTime() > 5 * 60 * 1000;
   }
   if ((b.source !== "alert" && b.source !== "sql") || !b.level) {
@@ -2003,7 +2013,7 @@ async function renderDecideCard(monthly) {
     const used = codexWin.used_percent;
     const remain = Math.max(0, 100 - used);
     const resetsAt = codexWin.resets_at
-      ? new Date(codexWin.resets_at * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+      ? formatStatisticsDateTime(codexWin.resets_at * 1000, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
       : "未知";
     codexState = remain;
     rows.push(`<li><span class="src-name">Codex（${quota.plan_type || "订阅"}）</span>
@@ -4269,8 +4279,7 @@ function renderDetailMeta(env, data) {
 // finding.time 是 epoch ms（DSH 有、Codex 恒 null）。null → —，诚实不臆造。
 function fmtFindingTime(ms) {
   if (ms == null) return "—";
-  const d = new Date(ms);
-  return d.toLocaleString("zh-CN", {
+  return formatStatisticsDateTime(ms, {
     month: "2-digit", day: "2-digit",
     hour: "2-digit", minute: "2-digit", hour12: false,
   });
@@ -4967,7 +4976,7 @@ function renderSourceCard(src) {
 
 function fmtSourceTime(ms) {
   if (typeof ms !== "number") return "暂无";
-  return new Date(ms).toLocaleString("zh-CN", {
+  return formatStatisticsDateTime(ms, {
     month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
   });
 }

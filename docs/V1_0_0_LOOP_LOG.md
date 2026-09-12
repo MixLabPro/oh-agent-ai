@@ -1253,3 +1253,9 @@
 - 构建：`cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 `target/release/agent-vitals` 字节一致。
 - 验收：旧包移至 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-0251` 后安装新包，`--show-workbench` 进程已启动。
 - 边界：仅完成构建/启动和静态证据，未把启动成功当作视觉 UAT；真实 Computer Use 仍需解锁 macOS，签名/公证仍未完成。
+
+## Loop 168 · Workbench 时间展示统一统计时区
+
+- 修复：预算快照时间、Codex 配额重置时间、Issue 时间和数据源最近日志时间统一使用后端配置的统计 IANA 时区格式化；避免查询按配置时区而展示按系统时区造成跨日/偏移。
+- 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、Vite production build 与 `git diff --check` 通过；源码不再调用未指定时区的 `toLocaleString`/`toLocaleTimeString`。
+- 边界：真实窗口视觉 Computer Use 仍因 macOS 锁定未执行；未以静态检查替代 AC21/AC22 真机验收。
