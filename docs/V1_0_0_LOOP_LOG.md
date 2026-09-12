@@ -781,3 +781,9 @@
 - 修复：数据层 `billing_declaration_revision_save` 现在允许匹配的 `pending` 候选在同一事务内转为 `accepted`，并把 `candidate_id` 写入声明修订；候选不存在、宿主/服务商不匹配或 scope 校验失败时整笔事务回滚。
 - 回归：新增 pending 成功与失败回滚测试；计费影响预览、desktop 编译/clippy、workbench JS 语法和差异检查通过。
 - 边界：这消除了 UI 两步写入的半状态风险，但 macOS 当前仍锁屏，尚未完成候选确认→预览→入队→worker→刷新 Computer Use 证据；AC13/AC27 仍不勾选。
+
+## Loop 96 · 原子候选事务进入 release 构建（自验收）
+
+- 构建：重新生成 release `.app` 并在隔离 `HOME`/`AGENT_VITALS_HOME` 启动；隔离库中的 UAT 候选保持 `pending`，未因打开提示或失败点击被误接受。
+- 真机状态：Computer Use 已重新取得工作台，但确认面板在滚动区域下方；本轮滚动/屏幕捕捉遇到 macOS ScreenCaptureKit 瞬时错误，未取得“确认→预览→入队→worker→刷新”的点击证据。
+- 结论：release 包包含 Loop 95 的原子事务修复；桌面端到端回执仍待下一次稳定的 Computer Use 操作，不勾选 AC13/AC27。
