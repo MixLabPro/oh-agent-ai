@@ -1221,3 +1221,9 @@
 - 验收：desktop release 测试 110/110、Clippy 通过；重新执行 Tauri `.app` 打包并安装，安装后进程已启动。
 - 保护：旧包可恢复保留为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-0248`；未覆盖用户数据。
 - 边界：真实设置点击、托盘视觉刷新和 AC21 Computer Use 仍受 macOS 锁定限制；签名/公证和外部试用门禁继续未完成。
+
+## Loop 163 · 兼容导航复用参数化 authority 查询
+
+- 修复：`legacy-r2a` 导航 token 查询改用现有 `day_token_totals_by_host(data_home, date)`，不再忽略显式数据根并回读进程全局目录；隔离库与真实库的行为现在一致。
+- 保护：统一复用 authority query 的只读打开、统计时区日界和缺失/真零语义，删除重复 SQL 入口。
+- 验收：desktop release 测试与 Clippy 待执行。

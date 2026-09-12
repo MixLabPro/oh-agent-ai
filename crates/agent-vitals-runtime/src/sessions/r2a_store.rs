@@ -1761,16 +1761,14 @@ fn render_findings(dto: &Value) -> String {
 
 // ── sessions navigation（多宿主导航投影，spec §5.1/§5.2）─────────
 
-/// SQL 权威库中某北京日的三宿主 token 总量。`None` 表示库不可读或日期非法；
+/// SQL 权威库中某统计日的三宿主 token 总量。`None` 表示库不可读或日期非法；
 /// `Some(empty)` 表示库可读但窗口内没有任何事实——两者都不能伪装成 token=0。
-fn authority_day_token_totals(day_key: &str) -> Option<BTreeMap<String, i64>> {
-    let (start, end) = agent_vitals_data::authority_query::beijing_day_bounds_ms(day_key)?;
-    let db = agent_vitals_data::authority::AuthorityDb::open(
-        &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
-        crate::sql_sync::now_ms(),
-    )
-    .ok()?;
-    agent_vitals_data::authority_query::token_totals_by_host(db.conn(), start, end).ok()
+/// 复用 authority query 的参数化入口，避免忽略调用方显式传入的数据根。
+fn authority_day_token_totals(
+    data_home: &Path,
+    day_key: &str,
+) -> Option<BTreeMap<String, i64>> {
+    agent_vitals_data::authority_query::day_token_totals_by_host(data_home, day_key)
 }
 
 fn sql_today_tokens(totals: &Option<BTreeMap<String, i64>>, host: &str) -> Value {
@@ -1807,7 +1805,7 @@ pub fn sessions_navigation(
     // 今日 token 是产品指标，唯一来源是 authority 的 UsageFact 聚合。SessionStore
     // 仍只服务会话导航与 findings；它不再参与 token 计量，也不会触碰旧 state /
     // ledger / Codex fold。库不可读、日期非法或该宿主没有事实都如实给 null。
-    let sql_totals = authority_day_token_totals(day_key);
+    let sql_totals = authority_day_token_totals(home, day_key);
     let dsh_today_tokens = sql_today_tokens(&sql_totals, "dsh");
     let codex_today_tokens = sql_today_tokens(&sql_totals, "codex");
     let claude_today_tokens = sql_today_tokens(&sql_totals, "claude-code");
