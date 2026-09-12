@@ -1,5 +1,5 @@
 // 工作台主窗口前端：三页 总览 / Token 日历 / 会话（列表+详情）。
-// 纯 HTML/CSS/JS，无打包器 —— `withGlobalTauri: true` 让全局 `window.__TAURI__`
+// 纯 HTML/CSS/JS，开发时由 Vite 提供 HMR —— `withGlobalTauri: true` 让全局 `window.__TAURI__`
 // 可用。数据只来自后端命令（read_overview / read_calendar_month /
 // read_hourly_distribution / sessions_list / sessions_read），任何金额/覆盖率都不在本文件计算——core 算好、这里格式化展示
 // （CLAUDE.md 的 cost 教训：前端不许长第二份定价）。
@@ -111,9 +111,28 @@ function systemTimezone() {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
+// 统计窗口使用后端持久化的用户选择；系统时区只作为配置不可读时的安全回退。
+let configuredStatisticsTimezone = systemTimezone();
+
+async function loadStatisticsTimezonePreference() {
+  try {
+    const config = await invoke("statistics_timezone_config");
+    if (config && config.status === "ok") {
+      const timezone = String(config.timezone || config.system_timezone || "").trim();
+      if (timezone) configuredStatisticsTimezone = timezone;
+    }
+  } catch (e) {
+    console.warn("[workbench] 统计时区读取失败，使用系统时区", e);
+  }
+}
+
+function statisticsTimezoneName() {
+  return configuredStatisticsTimezone;
+}
+
 function systemToday() {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: systemTimezone(), year: "numeric", month: "2-digit", day: "2-digit",
+    timeZone: statisticsTimezoneName(), year: "numeric", month: "2-digit", day: "2-digit",
   }).formatToParts(new Date());
   const values = Object.fromEntries(parts.filter((p) => p.type !== "literal").map((p) => [p.type, p.value]));
   return values.year + "-" + values.month + "-" + values.day;
@@ -497,7 +516,7 @@ async function renderOverview() {
   // KPI 行/双轨账/决策卡的数据源 = 冻结 Data Query DTO（Stage D）；DSH 高峰
   // 口径的今日/本月钱已在 by_provider（metered_actual），原 read_overview 的
   // today/month 字段只服务预算卡的口径标注，不再单独上 KPI。日键用文件头部
-  // 既有的 beijingToday/beijingMonth（同一份北京日规则，不再内联第二份）。
+  // 既有的 beijingToday/beijingMonth（同一份统计时区日规则，不再内联第二份）。
   const todayKey = beijingToday();
   const monthKey = beijingMonth();
   let daily = null, monthly = null, cal = null;
@@ -1272,7 +1291,8 @@ async function renderStatisticsTimezoneSettings() {
   try {
     const config = await invoke("statistics_timezone_config");
     if (!config || config.status !== "ok") throw new Error((config && config.reason) || "统计时区设置不可用");
-    input.value = String(config.timezone || config.system_timezone || "");
+    configuredStatisticsTimezone = String(config.timezone || config.system_timezone || configuredStatisticsTimezone).trim();
+    input.value = configuredStatisticsTimezone;
     status.hidden = true;
     save.onclick = async () => {
       const timezone = input.value.trim();
@@ -1284,6 +1304,8 @@ async function renderStatisticsTimezoneSettings() {
       save.disabled = true;
       try {
         await invoke("save_statistics_timezone_config", { timezone });
+        configuredStatisticsTimezone = timezone;
+        calMonth = beijingMonth();
         show("已保存统计时区；正在刷新今天、本月和日历统计。");
         await loadActiveTab();
       } catch (e) {
@@ -2487,7 +2509,7 @@ async function renderHourly(date) {
     const hh = String(h.hour).padStart(2, "0");
     if (total === 0) {
       // 全宿主该小时都没有测量——空格（虚线），不是 0。
-      cell.title = hh + ":00–" + hh + ":59 北京时间 · 该小时三宿主都没有已测用量";
+      cell.title = hh + ":00–" + hh + ":59 " + statisticsTimezoneName() + " · 该小时三宿主都没有已测用量";
     } else {
       const bar = document.createElement("div");
       bar.className = "hour-bar";
@@ -2510,7 +2532,7 @@ async function renderHourly(date) {
         .map(([k, name]) => [name, h[k]])
         .filter(([, v]) => v != null && v > 0)
         .map(([name, v]) => name + " " + fmtTokens(v));
-      cell.title = hh + ":00–" + hh + ":59 北京时间\n" + lines.join("\n");
+      cell.title = hh + ":00–" + hh + ":59 " + statisticsTimezoneName() + "\n" + lines.join("\n");
     }
     grid.appendChild(cell);
   });
@@ -3610,7 +3632,7 @@ function timelineSection(session, host) {
   if (!geo) return null; // timeline.js 没加载 → 不渲染这一节，不是报错
 
   let points = null, events = [], series = null, title = "会话时间线";
-  // Codex：逐小时 token 桶（cost_report.hours 已是北京时间的逐小时 delta）。
+  // Codex：逐小时 token 桶（cost_report.hours 已是统计时区的逐小时 delta）。
   const hours = session.cost_report && Array.isArray(session.cost_report.hours) ? session.cost_report.hours : null;
   if (!hours || hours.length === 0) return null;
   points = hours.map((h, i) => ({ ordinal: i, values: { tokens: h.tokens } }));
@@ -3618,8 +3640,8 @@ function timelineSection(session, host) {
   title = "逐小时 token 用量（" + hours.length + " 小时）";
   // 事件叠加：Codex 的 findings 带 seq（事件空间、千级）+ severity/evidence，但
   // 没有时间；turn_timeline 的 source_order 与 finding.seq 同号，且 hour 是宿主侧
-  // 用核心 codex_hour_of 折好的**北京小时桶键**（与 cost_report.hours 同一把尺，
-  // 浏览器不算第二遍北京时间）。这里只做两次字典查表：finding.seq →
+  // 用核心 codex_hour_of 折好的**统计时区小时桶键**（与 cost_report.hours 同一把尺，
+  // 浏览器不算第二遍时区转换）。这里只做两次字典查表：finding.seq →
   // turn_timeline.source_order → hour → 桶下标。seq 不在 turn_timeline 里
   //（该事件不是 5 类生命周期之一）→ 无 hour → 诚实跳过，不画在猜的位置上
   //（几何层 orphan 跳过同款）。
@@ -4981,7 +5003,11 @@ async function recoverSource(button, host, actionKind) {
 
 // ---------- 初始化 ----------
 
-function init() {
+async function init() {
+  // 先拿到后端实际统计时区，再初始化默认的今天、本月和会话月份，避免
+  // 用户自定义时区在首屏被浏览器系统时区覆盖。
+  await loadStatisticsTimezonePreference();
+  calMonth = beijingMonth();
   subscribeBudgetNotificationActions();
   // fold 完成事件桥：先订阅再首屏渲染，缩小「事件早于 listen」的丢窗口
   // （丢的那几个由 5 分钟 tick / 手动同步兜底，见事件桥一节注释）。
@@ -5039,7 +5065,7 @@ function init() {
   // 月份 picker（修「点会话 tab 只看到今天」bug）：change 事件重置分页 +
   // 重载（cursor 是 per-window 的，跨月 cursor 无意义——store.rs list_args 不
   // 检查 cursor 与 month 是否匹配，混传会让用户以为在翻页实则乱跳）。
-  // picker 默认值 = 当前北京月份，保持「开 tab 立刻看到数据」的体感；
+  // picker 默认值 = 当前统计时区月份，保持「开 tab 立刻看到数据」的体感；
   // 用户主动清空 picker → IPC 收 month=undefined → store.rs 兜底为 --day 今天。
   const sessMonthEl = document.getElementById("sess-month");
   sessMonthEl.value = beijingMonth();
@@ -5081,7 +5107,7 @@ function init() {
     renderFindingsDetail();
   });
   document.getElementById("src-reload").addEventListener("click", () => loadSources(true));
-  // 日历默认月跟随北京今天；本月输入框受 input[type=month] 约束天然合法。
+  // 日历默认月跟随统计时区今天；本月输入框受 input[type=month] 约束天然合法。
   if (!calMonth) calMonth = beijingMonth();
   renderOverview();
   // 启动 pull：冷启动时（webview 先加载、focus-tab/focus-target emit 早于 listen）

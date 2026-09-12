@@ -347,7 +347,7 @@
           <span class="muted" id="sess-count"></span>
           <span class="flex-spacer"></span>
           <!-- 月份 picker（修「会话 tab 只看得到今天、上个月看不到」bug）：
-               v0.9.1 旧契约只透传 --day，IPC 默认今天北京日期，所以历史月份根本
+               v0.9.1 旧契约只透传 --day，IPC 默认今天统计时区日期，所以历史月份根本
                发不出去。改成 month picker 后：用户选 2026-08 → IPC 透传
                `month: "2026-08"` → CLI 走 --month 路径返回该月全部会话。
                默认值跟 beijingMonth()（当前月）—— 保持「开 tab 立刻看到数据」

@@ -1240,3 +1240,10 @@
 - 结果：`codesign --verify --deep --strict` 失败，包为 `adhoc/linker-signed`，无 Team Identifier；`spctl --assess --type execute` 同样失败并报告签名资源不完整。
 - 结论：REQ-135/AC24 的 Developer ID 签名、公证与干净机器 Gatekeeper 验证仍未完成，不能用本地 ad hoc 签名或“能启动”替代；需要具备 Apple Developer 证书、公证凭据的发布环境后再验收。
 - 边界：这是一项发布环境阻塞，不影响当前功能测试结论；真实窗口 Computer Use 仍受 macOS 锁定限制，AC21 与外部试用门禁继续不勾选。
+
+## Loop 166 · Workbench 统计时区与热更新调试链路
+
+- 修复：Workbench 首屏先读取后端持久化的统计时区，再生成今天、本月、最近 7 天及会话月份；保存时区后同步更新前端月份状态。小时详情提示改为显示实际统计 IANA 时区，不再写死“北京时间”。
+- 调试：保留现有原生 HTML/CSS/JS IPC 面，Vite 仅作为开发服务器提供 HMR；浏览器 mock 可独立调样式，Tauri dev 继续验证真实 IPC，不为纯样式迭代引入一次性 React 迁移。
+- 验收：`node --check apps/desktop/src-tauri/ui/workbench.js` 通过；`npm --prefix apps/desktop/ui-dev run build` 通过。构建器仅提示现有 classic script 不参与 bundling，未形成构建失败。
+- 边界：尚未进行真实窗口视觉 Computer Use（macOS 仍锁定）；本轮不勾选 AC21/AC22，正式包签名/公证仍受发布凭据阻塞。
