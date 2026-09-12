@@ -1956,6 +1956,14 @@
 - 验收：桌面 `cargo check --release`、`npm run verify`、JS 语法检查和 `git diff --check`
   通过；closeout verifier 已加入版本检查命令及 UI 入口断言。
 
+## Loop 278 · 无 Release 时的明确版本状态
+
+- 发现：只读检查固定 GitHub latest release API 返回 HTTP 404（当前仓库暂无已发布
+  Release）；若直接按错误处理，用户会把“尚无发布”误解为网络故障。
+- 修复：后端将 404 映射为 `no_release`，返回当前版本和可信发布页；UI 继续显示“未找到
+  可用的 app-v 发布”，其他 HTTP/网络/响应格式错误仍显式失败，不编造版本号。
+- 验收：API 实际返回 404；代码保留明确 no-release 分支；`git diff --check` 通过。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；

@@ -2074,6 +2074,14 @@ async fn check_for_updates() -> Result<Value, String> {
         .await
         .map_err(|error| format!("check updates failed: {error}"))?;
     let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(serde_json::json!({
+            "status": "no_release",
+            "current_version": env!("CARGO_PKG_VERSION"),
+            "url": TRUSTED_RELEASES_URL,
+            "automatic_install": false,
+        }));
+    }
     if !status.is_success() {
         return Err(format!("check updates returned HTTP {status}"));
     }
