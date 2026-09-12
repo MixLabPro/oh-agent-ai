@@ -2194,3 +2194,10 @@
 - UAT: AC23 partial walked ✔：排除 Codex 后显示“已排除”且仍显示 8 个会话/42 条事实；
   点击“恢复读取”后回到“已连接”，导入范围保持不变。删除已导入数据未代替用户执行。
 - 验收：`npm run verify` 通过；mock 状态不写 Authority 或宿主原始日志。
+
+## Loop 307 · 自定义数据源目录浏览器 UAT
+
+- UAT: AC02/AC23 partial walked ✔：点击“选择目录”后填入 mock 绝对路径并启用“添加并
+  同步”；添加后配置出现在列表，移除后列表消失，并显示“已导入数据仍保留”。
+- 边界：使用 Vite mock 的 `/tmp/agent-vitals-browser-custom-source`，未访问或修改真实
+  文件系统；真实 macOS 目录选择器和权限流程仍待 `.app` 真机验收。
