@@ -90,7 +90,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             json!({
                 "profile_id": profile.profile_id, "currency": profile.currency,
                 "monthly_minor": profile.monthly_minor, "daily_minor": profile.daily_minor,
-                "warning_ratio_bp": profile.warning_ratio_bp,
+                "warning_ratio_bp": profile.warning_ratio_bp, "updated_at_ms": profile.updated_at_ms,
                 "spent_minor": spent_minor, "ratio_bp": ratio_bp, "level": level,
                 "has_unresolved": has_unresolved,
                 "daily_spent_minor": daily_spent_minor,

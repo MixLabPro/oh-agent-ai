@@ -19,6 +19,16 @@ pub fn maybe_notify(app: &AppHandle) {
         return;
     }
     let data_home = overview::data_home();
+    if let Some(status) = agent_vitals_runtime::budget::budget_profiles_status_sql_at(
+        &data_home, &overview::current_month_beijing(),
+    ) {
+        if let Some(profiles) = status.get("profiles").and_then(serde_json::Value::as_array) {
+            if !profiles.is_empty() {
+                notify_profiles(app, &data_home, profiles);
+                return;
+            }
+        }
+    }
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(&data_home),
         agent_vitals_runtime::sql_sync::now_ms(),
@@ -91,6 +101,64 @@ pub fn maybe_notify(app: &AppHandle) {
         ) else {
             continue;
         };
+    }
+}
+
+fn notify_profiles(app: &AppHandle, data_home: &std::path::Path, profiles: &[serde_json::Value]) {
+    for profile in profiles {
+        let profile_id = profile.get("profile_id").and_then(serde_json::Value::as_str).unwrap_or("budget");
+        let currency = profile.get("currency").and_then(serde_json::Value::as_str).unwrap_or("");
+        let warn_ratio = profile.get("warning_ratio_bp").and_then(serde_json::Value::as_i64)
+            .map(|bp| bp as f64 / 10_000.0).unwrap_or(-1.0);
+        if !(0.0..=1.0).contains(&warn_ratio) || profile.get("has_unresolved").and_then(serde_json::Value::as_bool).unwrap_or(true) {
+            continue;
+        }
+        let revision = profile.get("updated_at_ms").and_then(serde_json::Value::as_i64).unwrap_or(0)
+            .saturating_add(profile_id.bytes().fold(0_i64, |sum, b| sum.saturating_mul(31).saturating_add(b as i64)))
+            .saturating_add(currency.bytes().fold(0_i64, |sum, b| sum.saturating_mul(31).saturating_add(b as i64)));
+        let month = overview::current_month_beijing();
+        let day = overview::today_beijing();
+        let mut candidates = Vec::new();
+        if let Some(threshold) = threshold_for(
+            profile.get("daily_ratio_bp").and_then(serde_json::Value::as_i64).map(|bp| bp as f64 / 10_000.0),
+            warn_ratio,
+        ) {
+            candidates.push((day, agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily,
+                threshold, profile.get("daily_spent_minor").and_then(serde_json::Value::as_i64),
+                profile.get("daily_minor").and_then(serde_json::Value::as_i64)));
+        }
+        if let Some(threshold) = threshold_for(
+            profile.get("ratio_bp").and_then(serde_json::Value::as_i64).map(|bp| bp as f64 / 10_000.0),
+            warn_ratio,
+        ) {
+            candidates.push((month, agent_vitals_runtime::budget_notifications::BudgetAlertScope::Monthly,
+                threshold, profile.get("spent_minor").and_then(serde_json::Value::as_i64),
+                profile.get("monthly_minor").and_then(serde_json::Value::as_i64)));
+        }
+        for (period, scope, threshold, spent, limit) in candidates {
+            let threshold_text = match threshold {
+                agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Warn => "接近预算",
+                agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Over => "已超预算",
+            };
+            let scope_text = match scope {
+                agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily => "今日",
+                agent_vitals_runtime::budget_notifications::BudgetAlertScope::Monthly => "本月",
+            };
+            let body = match (spent, limit) {
+                (Some(spent), Some(limit)) => format!("{profile_id} · {scope_text}达到预算阈值（已用 {spent:.2} {currency} / 预算 {limit:.2} {currency}），点击查看。", spent = spent as f64 / 100.0, limit = limit as f64 / 100.0),
+                _ => format!("{profile_id} · {scope_text}{threshold_text}，点击查看预算。"),
+            };
+            let key = agent_vitals_runtime::budget_notifications::BudgetAlertDeliveryKey {
+                period, scope, threshold, budget_revision: revision,
+            };
+            let app_for_notification = app.clone();
+            let _ = agent_vitals_runtime::budget_notifications::claim_delivery_with(
+                data_home, &key, agent_vitals_runtime::sql_sync::now_ms(), || app_for_notification.notification().builder()
+                    .title(format!("Agent Vitals：{threshold_text}"))
+                    .body(body).action_type_id(ACTION_TYPE).extra("focusTab", FOCUS_TAB)
+                    .show().map_err(|error| error.to_string()),
+            );
+        }
     }
 }
 

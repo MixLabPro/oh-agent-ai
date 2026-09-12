@@ -132,6 +132,7 @@ pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Va
             "monthly_minor": profile.monthly_minor,
             "daily_minor": profile.daily_minor,
             "warning_ratio_bp": profile.warning_ratio_bp,
+            "updated_at_ms": profile.updated_at_ms,
             "spent_minor": spent_minor,
             "ratio_bp": ratio_bp,
             "level": level,
