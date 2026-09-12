@@ -252,6 +252,14 @@ fn issue_day_bucket(opened_at_ms: i64) -> String {
     )
 }
 
+fn issue_group_key(issue_type: &str, host: &str, fingerprint: &str, opened_at_ms: i64, metadata: &Value) -> String {
+    let object = issue_object(issue_type, fingerprint, metadata);
+    let evidence_class = metadata.get("evidence").and_then(Value::as_str)
+        .or_else(|| metadata.get("category").and_then(Value::as_str))
+        .unwrap_or("<unknown>");
+    format!("{issue_type}\0{host}\0{object}\0{evidence_class}\0{}", issue_day_bucket(opened_at_ms))
+}
+
 #[derive(Default)]
 struct IssueGroupAccum {
     rule: String,
@@ -318,12 +326,12 @@ pub fn issue_groups(
         source_issue_count += 1;
         let (issue_id, host, session, rule, fingerprint, status, severity, evidence, opened, metadata_raw) = row?;
         let metadata = serde_json::from_str::<Value>(&metadata_raw).unwrap_or_else(|_| json!({}));
+        let key = issue_group_key(&rule, &host, &fingerprint, opened, &metadata);
         let object = issue_object(&rule, &fingerprint, &metadata);
         let evidence_class = metadata.get("evidence").and_then(Value::as_str)
             .or_else(|| metadata.get("category").and_then(Value::as_str))
             .unwrap_or("<unknown>").to_string();
         let bucket = issue_day_bucket(opened);
-        let key = format!("{rule}\0{host}\0{object}\0{evidence_class}\0{bucket}");
         let entry = groups.entry(key).or_insert_with(|| IssueGroupAccum {
             rule: rule.clone(), host: host.clone(), object: object.clone(),
             evidence_class: evidence_class.clone(), bucket: bucket.clone(),
@@ -362,6 +370,63 @@ pub fn issue_groups(
     let next_cursor = (end < values.len()).then(|| end.to_string());
     Ok(json!({"groups": values[offset..end].to_vec(), "next_cursor": next_cursor,
         "total_groups": values.len(), "source_issue_count": source_issue_count}))
+}
+
+/// Read L1 raw instances for one L0 group. The group id is resolved against
+/// the same deterministic key as `issue_groups`; no caller-provided raw key is
+/// accepted. Results are paginated by a numeric offset over issue_id order.
+pub fn issue_group_instances(
+    conn: &Connection,
+    group_id: &str,
+    page_size: usize,
+    cursor: Option<&str>,
+) -> rusqlite::Result<Value> {
+    let mut stmt = conn.prepare(
+        "SELECT issue_id, host, session_key, issue_type, instance_fingerprint,
+                status, severity, evidence_fingerprint, opened_at_ms, closed_at_ms, metadata_json
+         FROM issue_instances ORDER BY issue_id",
+    )?;
+    let mut matches = Vec::new();
+    let rows = stmt.query_map([], |r| {
+        let metadata: String = r.get(10)?;
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?,
+            r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?,
+            r.get::<_, String>(6)?, r.get::<_, String>(7)?, r.get::<_, i64>(8)?,
+            r.get::<_, Option<i64>>(9)?, metadata))
+    })?;
+    for row in rows {
+        let (issue_id, host, session, rule, fingerprint, status, severity, evidence, opened, closed, metadata_raw) = row?;
+        let metadata = serde_json::from_str::<Value>(&metadata_raw).unwrap_or_else(|_| json!({}));
+        if stable_hash(&issue_group_key(&rule, &host, &fingerprint, opened, &metadata)) != group_id { continue; }
+        matches.push(json!({"issue_id": issue_id, "host_kind": host, "session_key": session,
+            "rule": rule, "status": status, "severity": severity, "evidence": evidence,
+            "opened_at_ms": opened, "closed_at_ms": closed, "metadata": metadata}));
+    }
+    let offset = cursor.and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(matches.len());
+    let end = (offset + page_size.clamp(1, 500)).min(matches.len());
+    Ok(json!({"group_id": group_id, "instances": matches[offset..end].to_vec(),
+        "next_cursor": (end < matches.len()).then(|| end.to_string()), "total_instances": matches.len()}))
+}
+
+/// Read one raw issue instance for L2 detail. Metadata is returned as parsed
+/// JSON, while the authority row remains the source of truth for lifecycle.
+pub fn issue_instance(conn: &Connection, issue_id: &str) -> rusqlite::Result<Option<Value>> {
+    conn.query_row(
+        "SELECT issue_id, host, session_key, issue_type, status, severity,
+                evidence_fingerprint, opened_at_ms, closed_at_ms, metadata_json
+         FROM issue_instances WHERE issue_id = ?1",
+        [issue_id],
+        |r| {
+            let metadata: String = r.get(9)?;
+            let metadata = serde_json::from_str::<Value>(&metadata).unwrap_or_else(|_| json!({}));
+            Ok(json!({"issue_id": r.get::<_, String>(0)?, "host_kind": r.get::<_, String>(1)?,
+                "session_key": r.get::<_, Option<String>>(2)?, "rule": r.get::<_, String>(3)?,
+                "status": r.get::<_, String>(4)?, "severity": r.get::<_, String>(5)?,
+                "evidence": r.get::<_, String>(6)?, "opened_at_ms": r.get::<_, i64>(7)?,
+                "closed_at_ms": r.get::<_, Option<i64>>(8)?, "metadata": metadata,
+                "remedy": {"remedy_id": remedy_for(r.get::<_, String>(3)?.as_str()).remedy_id}}))
+        },
+    ).optional()
 }
 
 #[cfg(test)]
@@ -483,7 +548,18 @@ mod tests {
         let grouped = issue_groups(db.conn(), None, None, 50, None).unwrap();
         assert_eq!(grouped["source_issue_count"], 4);
         assert_eq!(grouped["total_groups"], 3);
-        assert!(grouped["groups"].as_array().unwrap().iter().any(|g| g["count"] == 2));
+        let merged_group = grouped["groups"].as_array().unwrap().iter()
+            .find(|g| g["count"] == 2).unwrap();
+        let merged_id = merged_group["group_id"].as_str().unwrap();
+        let instances = issue_group_instances(db.conn(), merged_id, 1, None).unwrap();
+        assert_eq!(instances["total_instances"], 2);
+        assert_eq!(instances["instances"].as_array().unwrap().len(), 1);
+        let next = instances["next_cursor"].as_str().unwrap();
+        let second = issue_group_instances(db.conn(), merged_id, 1, Some(next)).unwrap();
+        assert_eq!(second["instances"].as_array().unwrap().len(), 1);
+        let issue_id = instances["instances"][0]["issue_id"].as_str().unwrap();
+        assert!(issue_instance(db.conn(), issue_id).unwrap().is_some());
+        assert!(issue_instance(db.conn(), "missing").unwrap().is_none());
         let first = issue_groups(db.conn(), None, None, 1, None).unwrap();
         let next = first["next_cursor"].as_str().unwrap();
         let second = issue_groups(db.conn(), None, None, 1, Some(next)).unwrap();

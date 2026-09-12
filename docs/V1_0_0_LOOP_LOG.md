@@ -627,4 +627,11 @@
 - 验收：归一化覆盖命令、路径、描述和权限族；4 条夹具命中归并为 3 组；L0 分页稳定；data crate 120/120、Clippy 和 `git diff --check`通过。
 - 边界：P2 来源统一、L1/L2 明细读取、工作台接入、五态 IPC/动作和真机队列验收仍待完成，不勾选 REQ-073–080 或 AC18。
 
+## Loop 75 · REQ-073 Issue L1/L2 按需展开契约（自验收）
+
+- 执行：在同一 group key 之上新增 `issue_group_instances(group_id, page_size, cursor)` 与 `issue_instance(issue_id)`；L1 只返回指定组的原始命中分页，L2 返回单条权威详情及解析后的 metadata。
+- 保护：调用方只能使用稳定 `group_id` 匹配组，不能提交原始拼接键；不存在的 group/issue 不返回伪造数据；原始 authority 行和状态不被修改。
+- 验收：5 个 Issue 测试通过，覆盖组内两条命中分页、单条详情和不存在 ID；data crate 全量 120/120、Clippy、`git diff --check`通过。
+- 边界：P2 来源统一、工作台 L0/L1/L2 接入、五态 IPC/动作和真机队列验收仍待完成，不勾选 REQ-073–080 或 AC18。
+
 本日志只记录已经完成的实现和证据；上述“尚未完成”不改变任何 PRD 勾选状态。任何单次修改连续测试失败超过5次，或任何单次Loop超过30分钟，立即暂停并记录；不得以拆分日志规避熔断。
