@@ -58,13 +58,24 @@ where
 
 pub fn budget_profile_has_unresolved<'a, I>(
     amounts: I,
+    profile_id: &str,
     currency: &str,
 ) -> bool
 where
     I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
 {
+    let relevant = match profile_id {
+        "estimate" => &[agent_vitals_data::projection::BillingBasis::MeteredEstimate][..],
+        "confirmed" => &[
+            agent_vitals_data::projection::BillingBasis::MeteredActual,
+            agent_vitals_data::projection::BillingBasis::HostBilled,
+        ][..],
+        _ => return false,
+    };
     amounts.into_iter().any(|amount| {
-        amount.currency.as_deref() == Some(currency) && amount.has_unresolved
+        amount.currency.as_deref() == Some(currency)
+            && amount.has_unresolved
+            && amount.amounts_by_basis.keys().any(|basis| relevant.contains(basis))
     })
 }
 
@@ -100,10 +111,10 @@ pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Va
             daily_values.iter().copied(), &profile.profile_id, &profile.currency,
         );
         let has_unresolved = budget_profile_has_unresolved(
-            values.iter().copied(), &profile.currency,
+            values.iter().copied(), &profile.profile_id, &profile.currency,
         );
         let daily_has_unresolved = budget_profile_has_unresolved(
-            daily_values.iter().copied(), &profile.currency,
+            daily_values.iter().copied(), &profile.profile_id, &profile.currency,
         );
         let ratio_bp = (!has_unresolved && spent_minor > 0)
             .then(|| spent_minor * 10_000 / profile.monthly_minor);
@@ -834,9 +845,10 @@ mod tests {
         assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "CNY"), 12_345);
         assert_eq!(budget_profile_spent_minor(&amounts, "confirmed", "CNY"), 20_150);
         assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "USD"), 7_700);
-        assert!(!budget_profile_has_unresolved(amounts.iter(), "CNY"));
+        assert!(!budget_profile_has_unresolved(amounts.iter(), "estimate", "CNY"));
         amounts[0].has_unresolved = true;
-        assert!(budget_profile_has_unresolved(amounts.iter(), "CNY"));
+        assert!(budget_profile_has_unresolved(amounts.iter(), "estimate", "CNY"));
+        assert!(!budget_profile_has_unresolved(amounts.iter(), "confirmed", "CNY"));
     }
 
     /// 环境锁是进程级的（util::ENV_LOCK），不是本模块局部的 —— state 的测试

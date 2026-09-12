@@ -542,4 +542,11 @@
 - 验收：desktop 单元测试 103/103（含菜单栏分栏回归）、Clippy `-D warnings`、runtime 249/249、JS 语法、来源契约检查与 `git diff --check`通过。
 - 边界：真实 macOS 通知权限、首穿/静默/点击路径及跨入口真机 UAT 尚未完成，不勾选 AC19 或 REQ-035/036。
 
+## Loop 63 · 未解决状态按 profile 口径隔离（自验收）
+
+- 执行：`has_unresolved` 现在按 profile 对应的 billing basis 判断：估算只检查 `MeteredEstimate`，已确认只检查 `MeteredActual`/`HostBilled`，并继续按币种隔离。
+- 保护：一个 profile 的未计价或冲突事实不会错误污染另一个 profile；相关 profile 仍降级为 `incomplete` 并隐藏确定性比例。
+- 验收：runtime 专项测试通过、desktop 单元测试 103/103、desktop Clippy `-D warnings`、`git diff --check`通过。
+- 边界：真实 macOS 通知权限、首穿/静默/点击路径及跨入口真机 UAT 尚未完成，不勾选 AC19 或 REQ-035/036。
+
 本日志只记录已经完成的实现和证据；上述“尚未完成”不改变任何 PRD 勾选状态。任何单次修改连续测试失败超过5次，或任何单次Loop超过30分钟，立即暂停并记录；不得以拆分日志规避熔断。

@@ -61,10 +61,10 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
                 daily_amounts.iter().copied(), &profile.profile_id, &profile.currency,
             );
             let has_unresolved = crate::budget::budget_profile_has_unresolved(
-                amounts.iter().copied(), &profile.currency,
+                amounts.iter().copied(), &profile.profile_id, &profile.currency,
             );
             let daily_has_unresolved = crate::budget::budget_profile_has_unresolved(
-                daily_amounts.iter().copied(), &profile.currency,
+                daily_amounts.iter().copied(), &profile.profile_id, &profile.currency,
             );
             let ratio_bp = (!has_unresolved && spent_minor > 0)
                 .then(|| spent_minor * 10_000 / profile.monthly_minor);
