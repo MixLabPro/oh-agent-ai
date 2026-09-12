@@ -658,3 +658,11 @@
 - 保护：`acknowledged` 不等于 `closed`；命令限制目标状态和理由长度，固定 actor/evaluator 证据，不执行 shell、不修改宿主文件；非法迁移由事务回滚并返回错误。
 - 验收：`later` 与 `acknowledged` 历史行回归通过；data issues 8/8、desktop 103/103、两 crate clippy 与差异检查通过。
 - 边界：IPC 尚未接入 L0/L1 桌面按钮，自动关闭和声明成功后的完成回写仍待实现；因此不勾选 AC18 或 REQ-077/078/079。
+
+## Loop 79 · REQ-073 L0/L1/L2 桌面待处理队列（自验收）
+
+- 执行：桌面待处理页默认展示统一 Issue 组；新增 `issue_groups_list`、`issue_group_instances`、`issue_instance_read` IPC。点击展开才按组读取原始命中，避免恢复全量数组。
+- 状态：实例行接入 `later / acknowledged / closed / wontfix` 用户动作；动作经 `issue_transition` 写入权威 `issue_status_transitions`，已确认不会变成已解决。
+- 保护：组列表与实例读取均为只读；无效 group/issue 明确报错；动作不执行 shell、不改宿主文件；待确认计费候选仍保持非账单语义。
+- 验收：workbench JS 语法、desktop 103/103、desktop clippy `-D warnings`、`git diff --check`通过。
+- 边界：L1 当前首批 50 条，组内继续分页按钮、L2 独立详情面板、自动关闭、预算阈值/异常增长族和真机点击验收仍待完成；不勾选完整 REQ-073–080 或 AC18。

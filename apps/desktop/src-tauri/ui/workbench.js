@@ -336,7 +336,7 @@ let sessFilter = "all";
 let sessStatusFilter = "all";
 // Findings/数据源页同款懒加载：CLI 汇总较重（sessions_findings / sessions_list 都
 // spawn 二进制），首进一次、之后「重载」按钮刷新——与 sessions 页同一套理由。
-let findState = { loaded: false, error: false, data: null, sev: "all", rule: "all" };
+let findState = { loaded: false, error: false, data: null, sev: "all", rule: "all", expanded: {} };
 let srcState = { loaded: false, error: false, sources: null, sync: null, paused: false };
 
 function switchTab(name) {
@@ -4009,7 +4009,7 @@ function findingSessionLabel(f) {
 
 async function loadFindings(reset) {
   if (reset) {
-    findState = { loaded: true, error: false, data: null, sev: "all", rule: "all" };
+    findState = { loaded: true, error: false, data: null, sev: "all", rule: "all", expanded: {} };
     document.getElementById("find-banner").hidden = true;
   }
   findState.loaded = true;
@@ -4156,30 +4156,83 @@ function renderFindingsDetail() {
   for (const f of shown) {
     const tr = document.createElement("tr");
     tr.appendChild(td(fmtFindingTime(f.time)));
-    tr.appendChild(td(findingSessionLabel(f)));
+    tr.appendChild(td(f.object || "—"));
     const sevCell = document.createElement("td");
     const badge = el("span", "sev " + (f.severity || "info"));
     badge.textContent = f.severity || "info";
     sevCell.appendChild(badge);
     tr.appendChild(sevCell);
     tr.appendChild(td(f.rule || "—"));
-    const tool = document.createElement("td");
-    tool.textContent = f.tool_name || "—";
-    tool.title = f.tool_name || "";
-    tr.appendChild(tool);
-    const ev = document.createElement("td");
-    const txt = f.evidence || "—";
-    ev.textContent = txt.length > 60 ? txt.slice(0, 60) + "…" : txt;
-    ev.title = txt;
-    tr.appendChild(ev);
-    // 每条 finding 都带着完整的 session_key（DSH/Codex 都是）——点到那条会话的
-    // 完整报告，别再让 critical 发现悬在半空无处可去。
-    if (f.session_key) {
-      tr.addEventListener("click", () => openSessionFromFinding(f));
-    }
+    tr.appendChild(tdNum(String(f.count != null ? f.count : "—")));
+    tr.appendChild(td(statusRollupLabel(f.status_rollup)));
+    const action = document.createElement("td");
+    const expand = el("button", "btn secondary");
+    expand.type = "button";
+    expand.textContent = findState.expanded[f.group_id] ? "收起" : "展开";
+    expand.addEventListener("click", () => toggleIssueGroup(f, tr));
+    action.appendChild(expand);
+    tr.appendChild(action);
     frag.appendChild(tr);
+    if (findState.expanded[f.group_id]) {
+      const detail = document.createElement("tr");
+      detail.dataset.issueGroup = f.group_id || "";
+      const cell = document.createElement("td");
+      cell.colSpan = 7;
+      cell.className = "muted";
+      cell.textContent = "正在读取原始命中…";
+      detail.appendChild(cell);
+      frag.appendChild(detail);
+      loadIssueGroupInstances(f, detail);
+    }
   }
   body.appendChild(frag);
+}
+
+function statusRollupLabel(rollup) {
+  if (!rollup) return "—";
+  const labels = [["open", "待处理"], ["later", "稍后"], ["acknowledged", "已确认"], ["resolved", "已解决"], ["not_applicable", "不适用"]];
+  return labels.filter(([key]) => Number(rollup[key] || 0) > 0)
+    .map(([key, label]) => label + " " + rollup[key]).join(" · ") || "—";
+}
+
+async function toggleIssueGroup(group, row) {
+  if (!group.group_id) return;
+  findState.expanded[group.group_id] = !findState.expanded[group.group_id];
+  renderFindingsDetail();
+}
+
+async function loadIssueGroupInstances(group, detailRow) {
+  try {
+    const data = await invoke("issue_group_instances", { groupId: group.group_id, pageSize: 50 });
+    const cell = detailRow.firstElementChild;
+    cell.textContent = "";
+    const list = data && Array.isArray(data.instances) ? data.instances : [];
+    if (list.length === 0) { cell.textContent = "暂无可展开的原始命中"; return; }
+    for (const instance of list) {
+      const line = document.createElement("div");
+      line.className = "issue-instance-line";
+      line.textContent = (instance.evidence || "—") + " · " + (instance.status || "open");
+      for (const [status, label] of [["later", "稍后"], ["acknowledged", "已确认"], ["closed", "已解决"], ["wontfix", "不适用"]]) {
+        const button = el("button", "btn secondary");
+        button.type = "button";
+        button.textContent = label;
+        button.addEventListener("click", () => transitionIssueFromUi(instance.issue_id, status));
+        line.appendChild(button);
+      }
+      cell.appendChild(line);
+    }
+  } catch (e) {
+    detailRow.firstElementChild.textContent = "原始命中读取失败：" + (e.message || e);
+  }
+}
+
+async function transitionIssueFromUi(issueId, toStatus) {
+  try {
+    await invoke("issue_transition", { issueId, toStatus, reason: "workbench user action" });
+    await loadFindings(true);
+  } catch (e) {
+    showBanner("find-banner", e, false);
+  }
 }
 
 function issueRows() {

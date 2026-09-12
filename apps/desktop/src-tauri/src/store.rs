@@ -370,6 +370,62 @@ pub async fn issue_transition(
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
+#[tauri::command]
+pub async fn issue_groups_list(
+    state: tauri::State<'_, StoreBuildLock>,
+    page_size: Option<usize>,
+    cursor: Option<String>,
+) -> Result<Value, Value> {
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let path = agent_vitals_data::authority::default_authority_path(&data_home());
+        let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+            .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        agent_vitals_data::issues::issue_groups_with_sources(
+            db.conn(), None, None, page_size.unwrap_or(50), cursor.as_deref(),
+        ).map_err(|e| error_value("authority_query", &e.to_string()))
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn issue_group_instances(
+    state: tauri::State<'_, StoreBuildLock>,
+    group_id: String,
+    page_size: Option<usize>,
+    cursor: Option<String>,
+) -> Result<Value, Value> {
+    if group_id.trim().is_empty() { return Err(error_value("invalid_issue_group", "group_id is required")); }
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let path = agent_vitals_data::authority::default_authority_path(&data_home());
+        let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+            .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        agent_vitals_data::issues::issue_group_instances(
+            db.conn(), &group_id, page_size.unwrap_or(50), cursor.as_deref(),
+        ).map_err(|e| error_value("authority_query", &e.to_string()))
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn issue_instance_read(
+    state: tauri::State<'_, StoreBuildLock>,
+    issue_id: String,
+) -> Result<Value, Value> {
+    if issue_id.trim().is_empty() { return Err(error_value("invalid_issue", "issue_id is required")); }
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let path = agent_vitals_data::authority::default_authority_path(&data_home());
+        let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+            .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        let detail = agent_vitals_data::issues::issue_instance(db.conn(), &issue_id)
+            .map_err(|e| error_value("authority_query", &e.to_string()))?;
+        Ok(json!({"status": "ok", "issue": detail}))
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
 #[allow(clippy::let_and_return)]
 fn issue_group_rollup(issues: &[Value]) -> Vec<Value> {
     let mut by_rule: BTreeMap<String, (String, Option<String>, usize, BTreeSet<String>)> = BTreeMap::new();
