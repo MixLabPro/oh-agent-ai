@@ -44,6 +44,9 @@ Engine、Authority schema、统计时区、价格和同步状态。
 # 从仓库根目录执行
 node scripts/verify-macos-app-bundle.mjs
 
+# 按当前机器/CI 目标架构做强校验（示例）
+node scripts/verify-macos-app-bundle.mjs --require-architecture=arm64
+
 # 正式发布门禁：要求 Developer ID 签名
 node scripts/verify-macos-app-bundle.mjs --require-developer-id
 ```

@@ -8,6 +8,8 @@ const repo = path.resolve(import.meta.dirname, "..");
 const defaultApp = path.join(repo, "apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app");
 const args = process.argv.slice(2);
 const requireDeveloperId = args.includes("--require-developer-id");
+const requiredArchitecture = args.find((arg) => arg.startsWith("--require-architecture="))
+  ?.slice("--require-architecture=".length);
 const app = path.resolve(args.find((arg) => !arg.startsWith("--")) || defaultApp);
 
 function fail(message) { console.error(`FAIL ${message}`); process.exitCode = 1; }
@@ -33,6 +35,35 @@ if (existsSync(cli)) {
   } catch (error) {
     fail(`bundled CLI --version failed: ${error.message}`);
   }
+}
+
+function architecture(file) {
+  try {
+    return execFileSync("file", [file], { encoding: "utf8" }).trim();
+  } catch (error) {
+    fail(`cannot inspect architecture for ${file}: ${error.message}`);
+    return "";
+  }
+}
+
+const architectures = [];
+for (const [label, file] of [["app executable", executable], ["bundled CLI", cli]]) {
+  if (!existsSync(file)) continue;
+  const description = architecture(file);
+  const match = description.match(/\b(arm64|x86_64|universal)\b/g);
+  if (match?.length) {
+    const unique = [...new Set(match)].join(",");
+    architectures.push(unique);
+    ok(`${label} architecture: ${unique}`);
+  } else {
+    fail(`${label} architecture is not a recognized macOS Mach-O binary: ${description}`);
+  }
+  if (requiredArchitecture && !description.includes(requiredArchitecture)) {
+    fail(`${label} architecture does not include required ${requiredArchitecture}: ${description}`);
+  }
+}
+if (requiredArchitecture && architectures.length === 0) {
+  fail(`required architecture ${requiredArchitecture} could not be verified`);
 }
 
 const signatureResult = spawnSync("codesign", ["-dvvv", app], { encoding: "utf8" });

@@ -1867,3 +1867,12 @@
   用量、名义成本、按量估算、已确认支出和未计价的边界，明确不确定状态不等于零或免费。
 - 验收：说明中的按钮和术语与 Workbench 当前文案/状态语义一致；`git diff --check`
   通过，未修改用户已有 Phase/Issue 文档。
+
+## Loop 266 · macOS 产物架构预检
+
+- 发现：发布 workflow 虽在 macOS runner 上构建并验证签名，但没有确认 App 和随包 CLI
+  的实际 CPU 架构，无法支撑 Apple Silicon/Intel 支持矩阵声明。
+- 修复：`verify-macos-app-bundle.mjs` 新增架构探测及 `--require-architecture=` 严格选项；
+  build/publish 两个 workflow 边界按 runner 架构映射并强制校验，README 增加调用示例。
+- 验收：本地 App 与 CLI 均报告 `arm64`；要求 `x86_64` 时脚本非零退出；默认预检、
+  arm64 严格预检、workflow YAML 解析和 `git diff --check` 均通过。

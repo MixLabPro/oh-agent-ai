@@ -76,7 +76,19 @@ jobs:
         run: cargo tauri build --ci --bundles app,dmg
 
       - name: Verify signed app and bundled CLI
-        run: node scripts/verify-macos-app-bundle.mjs --require-developer-id
+        env:
+          RUNNER_ARCH: ${{ runner.arch }}
+        shell: bash
+        run: |
+          set -eu
+          case "$RUNNER_ARCH" in
+            ARM64) expected=arm64 ;;
+            X64) expected=x86_64 ;;
+            *) echo "unsupported macOS runner architecture: $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          node scripts/verify-macos-app-bundle.mjs \
+            --require-developer-id \
+            "--require-architecture=$expected"
 
       - name: Verify notarization ticket
         run: xcrun stapler validate apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app
@@ -107,7 +119,20 @@ jobs:
           path: dist
 
       - name: Re-verify downloaded app
-        run: node scripts/verify-macos-app-bundle.mjs dist/macos/agent-vitals.app --require-developer-id
+        env:
+          RUNNER_ARCH: ${{ runner.arch }}
+        shell: bash
+        run: |
+          set -eu
+          case "$RUNNER_ARCH" in
+            ARM64) expected=arm64 ;;
+            X64) expected=x86_64 ;;
+            *) echo "unsupported macOS runner architecture: $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          node scripts/verify-macos-app-bundle.mjs \
+            dist/macos/agent-vitals.app \
+            --require-developer-id \
+            "--require-architecture=$expected"
 
       - name: Re-verify downloaded notarization ticket
         run: xcrun stapler validate dist/macos/agent-vitals.app
