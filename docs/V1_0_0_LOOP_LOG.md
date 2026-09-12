@@ -1750,3 +1750,10 @@
 - 发现：README 的工作目录是 `apps/desktop/ui-dev`，但新增预检命令使用了仓库根目录相对路径，直接照抄会找不到脚本。
 - 修复：改为 `node ../../../scripts/verify-macos-app-bundle.mjs`（含严格模式），与文档前置 `cd apps/desktop/ui-dev` 一致。
 - 验收：从 `apps/desktop/ui-dev` 执行普通预检通过，确认包结构和随包 CLI；用户已有 WorkBuddy/Issue 文档未修改。
+
+## Loop 248 · macOS 桌面发布 workflow
+
+- 发现：现有 `release.yml` 只发布 CLI 压缩包，没有 `.app` 的 Developer ID、notarization 和桌面产物发布路径，D 阶段无法依赖统一自动化门禁。
+- 新增：`.github/workflows/release-desktop.yml` 以 `app-v*` 标签触发，要求 Apple signing/notarization secrets，构建 app + DMG，运行 `verify-macos-app-bundle.mjs --require-developer-id` 与 `xcrun stapler validate`，最后发布 GitHub Release 资产。
+- 保护：凭据缺失时 workflow 在构建前失败；未签名包不能进入发布步骤，不改变现有 `skill-v*` CLI 发布流程。
+- 边界：当前本机没有证书和 notarization 凭据，workflow 尚未在真实 GitHub runner 上执行；外部试用和真实 Computer Use仍待完成。
