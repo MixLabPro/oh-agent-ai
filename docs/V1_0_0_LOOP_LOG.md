@@ -1919,3 +1919,8 @@
   非法备份拒绝且当前文件保持不变两条路径。
 - 验收：桌面 `cargo test --release ... authority_backup -- --nocapture` 通过，`2 passed`；
   `npm run verify`、JS 语法检查和 `git diff --check` 通过。
+
+## Loop 272 · 桌面恢复实现 lint 门禁
+
+- 验收：`cargo clippy --release --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings`
+  通过；备份恢复命令在独立 Tauri workspace 下无新增警告。
