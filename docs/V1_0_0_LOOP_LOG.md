@@ -1233,3 +1233,10 @@
 - 构建：CLI release 构建与 Tauri `.app` 重打包成功；安装包内置 CLI 与最新 `target/release/agent-vitals` 一致。
 - 验收：新安装包进程已启动；旧包可恢复保留为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-0255`。
 - 边界：真实窗口 Computer Use 仍受 macOS 锁定限制；AC21、签名/公证和外部试用门禁不因此勾选。
+
+## Loop 165 · 发布候选签名与依赖门禁审计
+
+- 审计：当前 `/Applications/agent-vitals.app` 为 arm64 thin 包；主程序与内置 CLI 均为 arm64，CLI 仅依赖 macOS `libSystem`，桌面主程序依赖系统 Framework，未发现缺失的外置运行库。
+- 结果：`codesign --verify --deep --strict` 失败，包为 `adhoc/linker-signed`，无 Team Identifier；`spctl --assess --type execute` 同样失败并报告签名资源不完整。
+- 结论：REQ-135/AC24 的 Developer ID 签名、公证与干净机器 Gatekeeper 验证仍未完成，不能用本地 ad hoc 签名或“能启动”替代；需要具备 Apple Developer 证书、公证凭据的发布环境后再验收。
+- 边界：这是一项发布环境阻塞，不影响当前功能测试结论；真实窗口 Computer Use 仍受 macOS 锁定限制，AC21 与外部试用门禁继续不勾选。
