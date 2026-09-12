@@ -1829,3 +1829,9 @@
 - 新增：publish job 对 `.app.zip` 和 DMG 生成 SHA-256 `SHA256SUMS`，并与安装资产一并上传 GitHub Release。
 - 目的：用户可在下载后独立验证资产完整性；校验和生成在封装之后，不改变已签名/公证 `.app` 内容。
 - 验收：workflow YAML 和 diff 检查通过；校验和只覆盖 `*.zip` 与 `*.dmg`，不会把自身写入清单。
+
+## Loop 261 · Tauri 发布构建启用 CI 模式
+
+- 核对：已验证本机 `tauri-cli 2.11.4` 的帮助，`--bundles app,dmg` 合法；CI runner 不应依赖环境变量隐式关闭交互。
+- 修复：桌面构建命令增加显式 `--ci`，保留 app/DMG 双产物和签名/公证流程。
+- 验收：YAML 与 diff 检查通过；发布构建不再因交互提示停滞。
