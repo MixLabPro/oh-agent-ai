@@ -1926,6 +1926,7 @@ fn export_diagnostic_package() -> Result<Value, String> {
             "app": env!("CARGO_PKG_VERSION"),
             "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
             "query_envelope": agent_vitals_runtime::mcp::ENVELOPE_SCHEMA_VERSION,
+            "statistics_timezone": agent_vitals_runtime::clock::statistics_timezone_name(),
             "pricing": status.get("data")
                 .and_then(|data| data.get("pricing"))
                 .and_then(|pricing| pricing.get("version"))
@@ -1971,6 +1972,7 @@ fn about_diagnostics() -> Value {
         "status": "ok",
         "app_version": env!("CARGO_PKG_VERSION"),
         "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
+        "statistics_timezone": agent_vitals_runtime::clock::statistics_timezone_name(),
         "pricing": pricing,
         "pricing_update": read_pricing_catalog_status(&data_home),
         "sync": overview::read_overview().sync,

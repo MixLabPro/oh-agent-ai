@@ -785,6 +785,7 @@ async function renderAboutDiagnostics() {
     const sync = d && d.sync ? ((d.sync.ok ? "正常" : "需检查") + " · " + (d.sync.message || "")) : "暂无同步回执";
     target.textContent = "App " + (d.app_version || "—")
       + " · Authority schema " + (d.authority_schema || "—")
+      + " · 统计时区 " + (d.statistics_timezone || "—")
       + " · 价格 " + pricing + " · 同步 " + sync;
     target.dataset.loaded = "1";
   } catch (e) {

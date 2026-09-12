@@ -1675,3 +1675,10 @@
 
 - 新增：`apps/desktop/ui-dev/README.md` 说明 Vite 热更新地址、mock IPC 的数据边界、`npm run verify` 回归命令，以及从浏览器 mock 到 Tauri `.app` 的验收分层。
 - 验收：按文档执行的 `npm run verify` 已通过；文档明确 mock 不写入 Authority，也不把浏览器证据冒充原生、签名或外部试用证据。
+
+## Loop 236 · 诊断页展示实际统计时区
+
+- 发现：Workbench 的“版本与同步状态”只展示 App、Authority schema、价格和同步回执，没有显示当前真正用于今天/月/日历边界的统计时区；用户无法核对 OS/保存偏好是否已生效。
+- 修复：`about_diagnostics` 与脱敏诊断包加入 `statistics_timezone`；Workbench 诊断页同步展示该字段。内部 crate、CLI、schema、价表版本仍保持独立管理，未误改 App 版本号。
+- 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、Workbench closeout verifier、`apps/desktop/ui-dev` 的 `npm run verify`、`cargo check --release --manifest-path apps/desktop/src-tauri/Cargo.toml` 和 `git diff --check` 全部通过。
+- 边界：尚未替代真实 `.app` Computer Use、签名/公证、干净机升级和外部试用验收。
