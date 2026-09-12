@@ -1051,6 +1051,31 @@ function bindBillingDeclarationPanel() {
     save.disabled = true;
     const preview = document.getElementById("ov-billing-preview");
     try {
+      const window = billingMonthWindow(beijingMonth());
+      const windowStartMs = window ? window.start : 0;
+      const windowEndMs = window ? window.end : Date.now();
+      if (!billingDeclarationState || billingDeclarationState.phase !== "preview") {
+        const impact = await invoke("billing_candidate_impact_preview", {
+          host: candidate.host, providerId: candidate.provider_id,
+          effectiveStart: candidate.billing_period_start, effectiveEnd: null,
+          windowStartMs, windowEndMs, scopes: [],
+        });
+        preview.hidden = false;
+        if (impact.status !== "ok") {
+          preview.textContent = "影响预览暂不可用，尚未保存声明：" + (impact.reason || "请稍后重试");
+          save.disabled = false;
+          return;
+        }
+        billingDeclarationState = { phase: "preview", impact };
+        preview.textContent = "保存前影响预览：" + fmtTokens(impact.total_tokens || 0) +
+          " tokens · " + (impact.fact_count || 0) + " 条事实 · " +
+          (impact.session_count || 0) + " 个会话。确认后才会保存声明。";
+        save.textContent = "确认并保存声明";
+        save.disabled = false;
+        return;
+      }
+
+      const impact = billingDeclarationState.impact;
       const suffix = Date.now().toString(36);
       const declarationId = "decl-" + candidate.candidate_id;
       const revisionId = "rev-" + suffix;
@@ -1064,20 +1089,13 @@ function bindBillingDeclarationPanel() {
         evidenceRef: "legacy-import-candidate:" + candidate.candidate_id,
         scopes: [],
       });
-      const window = billingMonthWindow(beijingMonth());
-      const impact = await invoke("billing_declaration_impact_preview", {
-        revisionId, windowStartMs: window ? window.start : 0,
-        windowEndMs: window ? window.end : Date.now(),
-      });
-      billingDeclarationState = { declarationId, revisionId };
+      billingDeclarationState = { declarationId, revisionId, impact };
       preview.hidden = false;
-      if (impact.status !== "ok") {
-        preview.textContent = "声明已保存，但影响预览暂不可用：" + (impact.reason || "请稍后重试");
-        return;
-      }
-      preview.textContent = "影响预览：" + fmtTokens(impact.total_tokens || 0) +
-        " tokens · " + (impact.fact_count || 0) + " 条事实 · " +
-        (impact.session_count || 0) + " 个会话。确认后才会应用到汇总。";
+      preview.textContent = "声明已保存：" + fmtTokens(billingDeclarationState.impact?.total_tokens || 0) +
+        " tokens · " + (billingDeclarationState.impact?.fact_count || 0) +
+        " 条事实 · " + (billingDeclarationState.impact?.session_count || 0) +
+        " 个会话。确认后才会应用到汇总。";
+      save.textContent = "已保存";
       apply.hidden = false;
     } catch (e) {
       save.disabled = false;

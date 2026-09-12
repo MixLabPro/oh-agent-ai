@@ -827,3 +827,10 @@
 - Rust：`cargo test --release` 全量通过；`cargo clippy --release --all-targets -- -D warnings` 通过。
 - 工作区：差异仅保留用户已有的 WorkBuddy/Phase 文档，未修改、未暂存；本轮没有因此勾选尚未完成真机或外部发布门禁的 AC。
 - 边界：AC13/AC27 套餐确认点击回执、AC21 系统时区、AC18/AC19 完整真机验收，以及签名/公证和外部试用仍待完成。
+
+## Loop 103 · 套餐确认改为保存前只读预览（代码验收）
+
+- 修复：候选确认不再先保存声明再预览；第一步调用只读 `billing_candidate_impact_preview`，展示受影响 tokens、facts、sessions，第二次明确确认后才写入声明。
+- 保护：候选 dry-run 不创建修订、不接受候选、不改变汇总；数据层新增 prospective preview 回归，验证 scope 交集和“零修订写入”。
+- 验收：data 定向测试、desktop release 测试 106/106、desktop Clippy、workbench JS 语法、Vite build、`git diff --check`、`.app` release bundle 均通过。
+- 真机边界：重打包后的 Computer Use 检查因 macOS 锁屏无法进行；AC27 仍不勾选，待解锁后复验两步点击与重算回执。

@@ -1876,6 +1876,35 @@ fn billing_declaration_impact_preview(
     )
 }
 
+/// 对尚未保存的候选做只读影响预览。与修订版预览共用 data 层查询，
+/// 因而不会提前创建声明、接受候选或改变汇总。
+#[tauri::command]
+fn billing_candidate_impact_preview(
+    host: String, provider_id: String, effective_start: String,
+    effective_end: Option<String>, window_start_ms: i64, window_end_ms: i64,
+    scopes: Vec<BillingScopeInput>,
+) -> Value {
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({"status": "unavailable", "reason": "authority database is unavailable"});
+    };
+    let scope_refs = scopes.iter()
+        .map(|scope| (scope.scope_kind.as_str(), scope.scope_value.as_str()))
+        .collect::<Vec<_>>();
+    match db.billing_declaration_impact_preview_for(
+        &host, &provider_id, &effective_start, effective_end.as_deref(),
+        &scope_refs, window_start_ms, window_end_ms,
+    ) {
+        Ok(preview) => serde_json::json!({
+            "status": "ok", "fact_count": preview.fact_count,
+            "session_count": preview.session_count, "total_tokens": preview.total_tokens,
+            "first_event_ts_ms": preview.first_event_ts_ms,
+            "last_event_ts_ms": preview.last_event_ts_ms,
+        }),
+        Err(error) => serde_json::json!({"status": "unavailable", "reason": error.to_string()}),
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn save_host_bill(
@@ -2401,6 +2430,7 @@ pub fn run() {
             billing_declarations,
             revoke_billing_declaration,
             billing_declaration_impact_preview,
+            billing_candidate_impact_preview,
             custom_source_roots,
             pick_custom_source_root,
             add_custom_source_root,

@@ -2265,6 +2265,28 @@ impl AuthorityDb {
                 total_tokens: 0, first_event_ts_ms: None, last_event_ts_ms: None });
         }
         let scopes = self.billing_declaration_scopes(revision_id)?;
+        let scope_refs = scopes.iter()
+            .map(|(_, kind, value)| (kind.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        self.billing_declaration_impact_preview_for(
+            &host, &provider_id, &effective_start, effective_end.as_deref(),
+            &scope_refs, window_start_ms, window_end_ms,
+        )
+    }
+
+    /// Preview a prospective declaration before it is persisted. This is the
+    /// dry-run counterpart to `billing_declaration_impact_preview`: the UI can
+    /// show the affected facts/sessions/tokens before accepting a candidate,
+    /// without creating a saved revision or changing candidate status.
+    pub fn billing_declaration_impact_preview_for(
+        &self, host: &str, provider_id: &str, effective_start: &str,
+        effective_end: Option<&str>, scopes: &[(&str, &str)],
+        window_start_ms: i64, window_end_ms: i64,
+    ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
+        if window_end_ms <= window_start_ms {
+            return Ok(BillingDeclarationImpactPreview { fact_count: 0, session_count: 0,
+                total_tokens: 0, first_event_ts_ms: None, last_event_ts_ms: None });
+        }
         let mut stmt = self.conn.prepare(
             "SELECT f.session_key, f.model_id, f.route_evidence_id, r.account_ref,
                     f.event_ts_ms, f.uncached_input_tokens + f.cache_read_tokens
@@ -2293,9 +2315,9 @@ impl AuthorityDb {
                 _ => false,
             };
             let matches_all_scope_kinds = ["account", "route", "model", "session"].iter().all(|kind| {
-                let values = scopes.iter().filter(|(_, scope_kind, _)| scope_kind == kind);
-                let has_kind = scopes.iter().any(|(_, scope_kind, _)| scope_kind == kind);
-                !has_kind || values.clone().any(|(_, _, value)| matches(kind, value))
+                let values = scopes.iter().filter(|(scope_kind, _)| scope_kind == kind);
+                let has_kind = scopes.iter().any(|(scope_kind, _)| scope_kind == kind);
+                !has_kind || values.clone().any(|(_, value)| matches(kind, value))
             });
             if !matches_all_scope_kinds { continue; }
             preview.fact_count += 1;
@@ -3067,6 +3089,16 @@ mod tests {
                    ('fact-2', 'codex', 'machine', 'session-a', 'event-2', 'session-a-key', 'assistant-usage', 'openai', 'model-b', 2000, 'route-a', 20, 0, 0, 0, 'preview-run', 1, 1),
                    ('fact-3', 'codex', 'machine', 'session-b', 'event-3', 'session-b-key', 'assistant-usage', 'openai', 'model-a', 3000, 'route-b', 30, 0, 0, 0, 'preview-run', 1, 1);",
         ).unwrap();
+        assert_eq!(authority.billing_declaration_impact_preview_for(
+            "codex", "openai", "1970-01", Some("1970-12"),
+            &[("route", "route-a"), ("model", "model-a")], 0, 4_000,
+        ).unwrap(), BillingDeclarationImpactPreview {
+            fact_count: 1, session_count: 1, total_tokens: 10,
+            first_event_ts_ms: Some(1000), last_event_ts_ms: Some(1000),
+        });
+        assert_eq!(authority.conn().query_row(
+            "SELECT COUNT(*) FROM billing_declaration_revisions", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0, "prospective preview must not persist a revision");
         authority.billing_declaration_revision_save(
             "preview-revision", "preview-declaration", None, "codex", "openai", "official_api",
             None, None, None, "1970-01", Some("1970-12"), None, Some("test"),
