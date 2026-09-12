@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "vite build"
+    "build": "vite build",
+    "verify": "npm run build && node ../../../scripts/verify-workbench-v010-closeout.mjs"
   },
   "devDependencies": {
     "vite": "^6.1.0"

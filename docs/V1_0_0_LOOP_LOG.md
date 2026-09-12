@@ -1652,3 +1652,9 @@
 - 验收：浏览器扫描全部 `button/[role=button]/a`，无缺少文本、`aria-label`、`title` 或关联 label 的交互元素；依次切换总览、Token 日历、会话、Issues、数据源五个主导航，五次均命中对应 active tab。
 - 结果：导航 smoke 过程中控制台错误数为 0；动态会话/预算/Issues 操作名称均可被浏览器语义定位。
 - 边界：这是 Vite mock 的语义与导航证据，不替代真实 `.app` 键盘、读屏和系统窗口验收。
+
+## Loop 232 · Vite 开发验证命令收口
+
+- 新增：`apps/desktop/ui-dev/package.json` 提供 `npm run verify`，串联 Vite production build 与当前 Workbench closeout verifier，方便样式热更新后的单命令回归。
+- 验收：在 `apps/desktop/ui-dev` 执行 `npm run verify`，构建成功，全部 Workbench 契约断言通过。
+- 边界：该命令验证开发资源与契约，不替代 Tauri `.app` 真机、签名/公证和外部试用门槛。
