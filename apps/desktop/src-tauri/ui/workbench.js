@@ -509,6 +509,7 @@ async function renderOverview() {
   }
   await renderHostBills(monthKey);
   await renderRetentionSettings();
+  bindDiagnosticExport();
   await renderBudgetSettings();
   renderMonthVerdict(monthly);
   renderOverviewDays(cal);
@@ -685,6 +686,28 @@ async function renderOverview() {
   } else {
     renderSourcesPanelFailure("跨宿主数据读取失败", "ov-sources");
   }
+}
+
+function bindDiagnosticExport() {
+  const button = document.getElementById("ov-diagnostic-export");
+  const status = document.getElementById("ov-diagnostic-status");
+  if (!button || !status || button.dataset.bound === "1") return;
+  button.dataset.bound = "1";
+  button.onclick = async () => {
+    button.disabled = true;
+    status.hidden = false;
+    status.textContent = "正在准备脱敏诊断包…不会上传本地数据。";
+    try {
+      const result = await invoke("export_diagnostic_package");
+      status.textContent = result && result.status === "cancelled"
+        ? "已取消保存。"
+        : "诊断包已保存到你选择的位置；是否提交由你决定。";
+    } catch (e) {
+      status.textContent = "保存诊断包失败：" + errText(e);
+    } finally {
+      button.disabled = false;
+    }
+  };
 }
 
 function renderFirstRunState(sync) {

@@ -1595,6 +1595,41 @@ fn save_retention_config(input: RetentionConfigInput) -> Result<Value, String> {
     Ok(serde_json::json!({ "status": "saved", "months": input.months }))
 }
 
+/// 生成用户主动选择保存的脱敏诊断包。只组合现有的状态 DTO；不读取会话正文、
+/// 原始日志、绝对路径或账户标识，也不执行上传。取消保存对用户来说是 no-op。
+#[tauri::command]
+fn export_diagnostic_package() -> Result<Value, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_file_name("agent-vitals-diagnostics.json")
+        .save_file() else {
+        return Ok(serde_json::json!({ "status": "cancelled" }));
+    };
+    let package = serde_json::json!({
+        "diagnostic_contract": "agent-vitals-diagnostic/v1",
+        "privacy": {
+            "contains_session_content": false,
+            "contains_absolute_paths": false,
+            "contains_account_identifiers": false,
+            "upload_performed": false,
+        },
+        "data_status": data_status(),
+        "source_status": data_source_status(),
+        "sync_pause": sync_pause_state(),
+        "retention": retention_config(),
+        "budget": budget_config(),
+        "budget_profiles": budget_profiles_status(overview::current_month_beijing()),
+    });
+    let bytes = serde_json::to_vec_pretty(&package)
+        .map_err(|error| format!("diagnostic serialization failed: {error}"))?;
+    std::fs::write(&path, bytes)
+        .map_err(|error| format!("diagnostic write failed: {error}"))?;
+    Ok(serde_json::json!({
+        "status": "saved",
+        "path": path.to_string_lossy(),
+        "upload_performed": false,
+    }))
+}
+
 #[tauri::command]
 fn budget_config() -> Value {
     let data_home = overview::data_home();
@@ -2337,6 +2372,7 @@ pub fn run() {
             delete_imported_source_data,
             retention_config,
             save_retention_config,
+            export_diagnostic_package,
             budget_config,
             budget_profiles_status,
             save_budget_profile,

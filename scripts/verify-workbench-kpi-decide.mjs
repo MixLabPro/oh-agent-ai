@@ -42,6 +42,10 @@ ok(wb.includes("budgetLive"), "source:\"sql\" 走「实时算」新鲜度文案�
 // 预算口径 = 跨宿主按量实付（PM 决策 2026-09-07）——「仅 DSH」是历史遗留缺陷。
 ok(html.includes("跨宿主按量实付") && !html.includes("仅 DSH 实测"),
   "预算卡 label 改「跨宿主按量实付」，不再写「仅 DSH 实测」");
+ok(html.includes("保存脱敏诊断包") && html.includes("不会自动上传"),
+  "帮助区提供用户主动保存的脱敏诊断包且明确不自动上传");
+ok(wb.includes('invoke("export_diagnostic_package")'),
+  "脱敏诊断包由后端命令生成，不在前端拼接或上传");
 
 // ── vm 执行真实文件 ──
 function makeElement() {
