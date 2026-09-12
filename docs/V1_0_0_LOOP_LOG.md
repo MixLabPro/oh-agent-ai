@@ -1519,3 +1519,10 @@
 - 新增：帮助与诊断区可展开查看 App 版本、Authority schema、当前价格快照版本/捕获时间和最近同步回执；信息只读且不包含会话正文或绝对路径。
 - 验收：桌面 release `cargo check` 与 Clippy、Workbench/Vite 构建、JS 语法检查和 `git diff --check`通过；浏览器 mock 可展示同一面板。
 - 边界：Developer ID/公证、真实 Computer Use、公共目录成功发布、干净机升级和外部试用仍未完成。
+
+## Loop 210 · DSH 集成全流程回归收口
+
+- 发现：价卡来源元数据同步后，DSH 副本锁步测试先报告字节漂移；修复副本后，Node 22 的默认 `navigator.language` 又暴露出独立 React 渲染验证的环境不确定性。
+- 修复：保持浏览器运行时语言回退逻辑不变，仅在独立 verifier 中固定测试环境；价卡主副本重新字节一致。
+- 验收：`npm test`（check、build、verify、verify:host、verify:wire、verify:timeline、verify:export、verify:render）全部通过；Python 价卡/目录 21/21 通过。
+- 边界：真实 DSH 宿主与 `.app` Computer Use、签名/公证、公共目录发布和外部试用仍未完成。
