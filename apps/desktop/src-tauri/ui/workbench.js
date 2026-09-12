@@ -487,6 +487,7 @@ async function renderOverview() {
     renderBillingDeclarations({ status: "unavailable", declarations: [] });
   }
   await renderHostBills(monthKey);
+  await renderRetentionSettings();
   await renderBudgetSettings();
   renderMonthVerdict(monthly);
   renderOverviewDays(cal);
@@ -1003,6 +1004,44 @@ function bindBillingDeclarationPanel() {
       document.getElementById("ov-billing-preview").textContent += " · 入队失败：" + errText(e);
     }
   };
+}
+
+async function renderRetentionSettings() {
+  const input = document.getElementById("ov-retention-months");
+  const save = document.getElementById("ov-retention-save");
+  const status = document.getElementById("ov-retention-status");
+  if (!input || !save || !status) return;
+  const show = (text) => { status.hidden = false; status.textContent = text; };
+  try {
+    const config = await invoke("retention_config");
+    if (!config || config.status !== "ok") throw new Error((config && config.reason) || "保留期设置不可用");
+    input.min = String(config.minimum_months);
+    input.max = String(config.maximum_months);
+    input.value = String(config.months);
+    status.hidden = true;
+    save.onclick = async () => {
+      const months = Number(input.value);
+      if (!Number.isInteger(months) || months < Number(input.min) || months > Number(input.max)) {
+        show("请输入 " + input.min + "–" + input.max + " 之间的整数月数。");
+        status.focus();
+        return;
+      }
+      save.disabled = true;
+      try {
+        await invoke("save_retention_config", { input: { months } });
+        show("已保存：下次本机维护将保留最近 " + months + " 个自然月；不会删除宿主原始日志。");
+      } catch (e) {
+        show("保存失败：" + errText(e));
+        status.focus();
+      } finally {
+        save.disabled = false;
+      }
+    };
+  } catch (e) {
+    show("保留期设置不可用：" + errText(e));
+    input.disabled = true;
+    save.disabled = true;
+  }
 }
 
 function csvCell(value) {

@@ -33,6 +33,7 @@ pub mod lease;
 pub mod mcp;
 pub mod money;
 pub mod reimport_verify;
+pub mod retention;
 pub mod session_sources;
 pub mod sessions;
 pub mod skills;
@@ -49,4 +50,3 @@ pub mod takeover;
 /// 局部锁只能串行本模块，跨模块并行还是踩）。
 #[doc(hidden)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-

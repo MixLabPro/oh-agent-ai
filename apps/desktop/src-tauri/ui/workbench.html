@@ -56,6 +56,18 @@
         </div>
         <div class="billing-preview" id="ov-export-preview-content" hidden></div>
       </section>
+      <section class="billing-review panel" id="ov-retention-panel" aria-live="polite">
+        <div class="panel-title">本地数据保留期</div>
+        <div class="muted">默认保留最近 13 个自然月（含当月）。修改不会立即删除数据；下一次本机维护才会清理过期的已导入事实，不会删除宿主原始日志。</div>
+        <div class="billing-form">
+          <label>保留月数
+            <input id="ov-retention-months" type="number" min="1" max="60" step="1" aria-describedby="ov-retention-help ov-retention-status" />
+          </label>
+          <div class="billing-form-actions"><button class="btn" id="ov-retention-save">保存保留期</button></div>
+        </div>
+        <div class="muted" id="ov-retention-help">可设置 1–60 个月。</div>
+        <div class="billing-preview" id="ov-retention-status" hidden role="alert" tabindex="-1"></div>
+      </section>
       <section class="billing-prompt" id="ov-billing-prompt" hidden aria-live="polite">
         <div>
           <strong>有套餐信息待你确认</strong>

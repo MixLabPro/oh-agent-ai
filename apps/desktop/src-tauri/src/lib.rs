@@ -1420,6 +1420,32 @@ struct BudgetConfigInput {
     warning_ratio_bp: i64,
 }
 
+#[derive(Deserialize)]
+struct RetentionConfigInput {
+    months: u32,
+}
+
+#[tauri::command]
+fn retention_config() -> Value {
+    let data_home = overview::data_home();
+    match agent_vitals_runtime::retention::retention_months(&data_home) {
+        Ok(months) => serde_json::json!({
+            "status": "ok", "months": months,
+            "default_months": agent_vitals_runtime::retention::DEFAULT_RETENTION_MONTHS,
+            "minimum_months": agent_vitals_runtime::retention::MIN_RETENTION_MONTHS,
+            "maximum_months": agent_vitals_runtime::retention::MAX_RETENTION_MONTHS,
+        }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
+    }
+}
+
+#[tauri::command]
+fn save_retention_config(input: RetentionConfigInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    agent_vitals_runtime::retention::save_retention_months(&data_home, input.months)?;
+    Ok(serde_json::json!({ "status": "saved", "months": input.months }))
+}
+
 #[tauri::command]
 fn budget_config() -> Value {
     let data_home = overview::data_home();
@@ -2082,6 +2108,8 @@ pub fn run() {
             billing_declarations,
             revoke_billing_declaration,
             billing_declaration_impact_preview,
+            retention_config,
+            save_retention_config,
             budget_config,
             save_budget_config,
             snooze_budget_until,

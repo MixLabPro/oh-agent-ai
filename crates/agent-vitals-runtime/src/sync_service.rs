@@ -243,9 +243,11 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             // run」）+ 事务；失败不盖日戳（审查 P2：静默顺延 24h 是劣化）。
             let run_id = crate::sql_sync::new_run_id("maintenance");
             let _ = db.begin_run(&run_id, "maintenance", crate::sql_sync::now_ms());
+            let retention_months = crate::retention::retention_months(data_home)
+                .map_err(|error| format!("retention configuration failed: {error}"))?;
             let cutoff = crate::sql_sync::retention_cutoff_ms(
                 &crate::clock::current_month_beijing(),
-                crate::sql_sync::RETENTION_MONTHS_MINUS_ONE,
+                retention_months - 1,
             )
             .unwrap_or(0);
             let ret = db.retention_usage_facts(cutoff);
@@ -266,7 +268,7 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
                         &json!({"last_retention_date": bj_day}),
                     );
                     if n > 0 {
-                        eprintln!("authority retention: dropped {n} facts (13mo)");
+                        eprintln!("authority retention: dropped {n} facts ({retention_months}mo)");
                     }
                 }
                 Err(e) => eprintln!("authority retention failed: {e}"),
