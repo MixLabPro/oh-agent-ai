@@ -487,14 +487,17 @@ pub async fn issue_instance_read(
 #[allow(clippy::let_and_return)]
 fn issue_group_rollup(issues: &[Value]) -> Vec<Value> {
     let mut by_rule: BTreeMap<String, (String, Option<String>, usize, BTreeSet<String>)> = BTreeMap::new();
-    for issue in issues {
+    for (index, issue) in issues.iter().enumerate() {
         let rule = issue["rule"].as_str().unwrap_or("unknown").to_string();
         let severity = issue["severity"].as_str().unwrap_or("info").to_string();
         let category = issue["category"].as_str().map(str::to_string);
         let sessions = issue["sessions"].as_u64().unwrap_or(0) as usize;
         let entry = by_rule.entry(rule).or_insert_with(|| (severity.clone(), category.clone(), 0, BTreeSet::new()));
         entry.2 += issue["hits"].as_u64().unwrap_or(1) as usize;
-        entry.3.extend((0..sessions).map(|n| format!("{n}")));
+        // `sessions` 是每个组内的去重数量；不能用同一组的 0..n
+        // 作为全局键，否则不同组会互相覆盖，摘要会低估受影响会话数。
+        let group_id = issue["group_id"].as_str().unwrap_or("unknown");
+        entry.3.extend((0..sessions).map(|n| format!("{group_id}:{n}:{index}")));
     }
     let rows = by_rule.into_iter().map(|(rule, (severity, category, hits, sessions))| {
         serde_json::json!({
@@ -698,5 +701,16 @@ mod tests {
         assert_eq!(warn["read_only"], true);
         let exceeded = budget_issue_group(&json!({"month":"2026-09", "level":"exceeded"}));
         assert_eq!(exceeded["severity"], "critical");
+    }
+
+    #[test]
+    fn issue_rule_rollup_does_not_overwrite_sessions_from_other_groups() {
+        let rows = vec![
+            json!({"group_id": "g1", "rule": "SV610", "severity": "warning", "hits": 2, "sessions": 2}),
+            json!({"group_id": "g2", "rule": "SV610", "severity": "warning", "hits": 3, "sessions": 3}),
+        ];
+        let rollup = issue_group_rollup(&rows);
+        assert_eq!(rollup[0]["hits"], 5);
+        assert_eq!(rollup[0]["sessions"], 5);
     }
 }
