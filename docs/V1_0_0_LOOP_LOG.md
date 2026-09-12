@@ -1095,3 +1095,10 @@
 - 保护：保留旧 `today_beijing` / `current_month_beijing` 名称作为兼容入口；时区只改变统计窗口与展示，不改变事件 epoch 或供应商价格规则。
 - 验收：隔离数据目录跨模块偏好对拍通过（`codex_cost` / `sessions_sql` 均解析为 `America/Los_Angeles`）；Python 全量回归、Rust workspace 回归与 Vite production build 通过。
 - 边界：真实 `.app` 跨进程切换、SQLite `localtime` 运行时切换和 Computer Use 仍需验收；REQ-033、REQ-096、AC21 暂不勾选。
+
+## Loop 143 · CLI 导航 envelope 回传实际统计时区
+
+- 修复：Rust CLI `sessions navigation` 不再把 envelope 的 `timezone` 固定写成 `Asia/Shanghai`，改回传当前已应用的统计时区偏好；日期窗口和 token 聚合继续使用同一进程时区。
+- 保护：事件 epoch 与供应商计价规则不变；配置损坏时 CLI 已在入口显式失败，不以错误时区冒充成功。
+- 验收：待执行 CLI release 编译/测试、Rust workspace 回归与 `git diff --check`。
+- 边界：真实 `.app` 跨进程切换、SQLite `localtime` 运行时切换和 Computer Use 仍需验收；REQ-033、REQ-096、AC21 暂不勾选。

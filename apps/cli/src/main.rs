@@ -4511,10 +4511,12 @@ fn sessions_navigation_v2(day_key: &str, recent_n: usize, json_out: bool, data_h
             "store_revision": Value::Null,
         }));
     }
+    let timezone = agent_vitals_runtime::statistics_timezone::timezone_name(&data_home)
+        .unwrap_or_else(|_| agent_vitals_runtime::clock::system_timezone_name());
     let envelope = json!({
         "schema_version": 1,
         "day_key": day_key,
-        "timezone": "Asia/Shanghai",
+        "timezone": timezone,
         "generated_at": agent_vitals_runtime::state::now_iso_utc(),
         "hosts": hosts,
     });
