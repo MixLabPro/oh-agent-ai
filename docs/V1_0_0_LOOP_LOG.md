@@ -1277,3 +1277,9 @@
 - 修复：Workbench 的账单声明影响预览不再用固定 UTC+8 偏移构造月份 epoch 窗口；改为基于配置统计 IANA 时区的当地午夜迭代求解，跨夏令时月份的起止边界按真实偏移计算。
 - 验收：洛杉矶 2026-03 月窗口得到 `2026-03-01T08:00:00Z` 至 `2026-04-01T07:00:00Z`（743 小时）；柏林对应窗口得到 `2026-02-28T23:00:00Z` 至 `2026-03-31T22:00:00Z`（743 小时）。`node --check`、Vite build 与 `git diff --check` 通过。
 - 边界：这只修正前端预览窗口，事实 epoch、声明作用范围和后端权威查询不变；真实窗口 Computer Use 仍待解锁 macOS。
+
+## Loop 172 · DST 账单预览修复进入安装包
+
+- 构建：`cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 release CLI `cmp` 一致。
+- 验收：旧包移至 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-025937`，新包以 `--show-workbench` 启动，进程 PID `76162` 已运行。
+- 边界：真实账单确认点击与 Computer Use 仍需解锁 macOS；正式签名/公证继续未完成。
