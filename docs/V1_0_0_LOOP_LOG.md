@@ -755,3 +755,10 @@
 - 修复：L0 分组键和 `evidence_class` 优先使用结构化 `metadata.category`，仅在缺失时回退 `metadata.evidence`；样本中的 evidence/path/file_path/source_path 路径字段默认脱敏，L2 主动详情读取链路保持不变。
 - 回归：data crate 问题分组测试 2/2、desktop release 测试 106/106、desktop clippy `-D warnings`、workbench JS 语法和 `git diff --check` 通过。
 - 边界：本轮修复解决验证报告中的 P0/P1 代码问题；真实数据上的计费重算链与双预算账单链仍需单独使用安全副本完成端到端证据，不因此勾选 AC18/AC19/AC28 或相关完整 REQ。
+
+## Loop 92 · 双预算口径隔离真机验收（Computer Use 安全副本）
+
+- UAT：在隔离 `HOME`/`AGENT_VITALS_HOME` 启动 release `.app`，分别保存“按量估算观察预算”10,000 分 CNY 与“已确认按量支出预算”20,000 分 CNY；界面分别显示两条独立预算及各自 `no_data · 已用 0 CNY`。
+- 对拍：隔离 SQLite 的 `budget_profiles` 同时存在 `estimate/CNY/10000` 与 `confirmed/CNY/20000` 两行；旧单预算表 `budget_config` 未写入，证明两种口径没有覆盖或混算。
+- 保护：测试仅写入 `/tmp` 安全副本，没有改写真实用户数据、用量事实或账单；金额仍按最小货币单位保存，未将订阅或 USD 并入 CNY。
+- 结论：双预算设置与持久化隔离通过安全副本真机验收；预算首穿通知、账单录入及完整 AC19/REQ-074/REQ-078 仍不因此勾选。
