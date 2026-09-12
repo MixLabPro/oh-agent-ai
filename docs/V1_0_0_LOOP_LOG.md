@@ -1438,3 +1438,9 @@
 - 验收：默认环境 `cargo test --release -p agent-vitals-data` 通过（128 单测、2 依赖测试、1 wiring 测试）；`TZ=America/Los_Angeles` 下同一组 authority-query、legacy import 与 wiring 回归也通过。
 - 结论：统计日界和 legacy ledger 代表点不再依赖固定北京时间，默认环境兼容合同保持不变。
 - 边界：这仍是代码/fixture 级证据，不替代真实 `.app` 跨时区切换和 Computer Use；发布签名、公证及外部试用门禁仍待完成。
+
+## Loop 197 · 时区修复后的 release Clippy 门禁
+
+- 验收：`cargo clippy --release --all-targets -- -D warnings` 通过；data、runtime、CLI 三个主要 release target 无告警。
+- 保护：未运行 Rust formatter，未刷新 golden/snapshot；用户已有 WorkBuddy/Phase/Issue 文档保持未修改、未暂存。
+- 边界：Clippy 通过不等于完整 v1.0.0 发布验收；价格目录联网更新、真实 Computer Use、签名/公证、干净机升级和外部试用仍待完成。
