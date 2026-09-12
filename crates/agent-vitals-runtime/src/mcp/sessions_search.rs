@@ -1,5 +1,5 @@
 //! `sessions_search` 工具（spec §7.6 / Q04 / U05）——列出一个时间窗（可再按
-//! 北京小时过滤）内的会话，逐会话聚合 token / 时间跨度 / 模型集，按 total 降序、
+//! 统计时区小时过滤）内的会话，逐会话聚合 token / 时间跨度 / 模型集，按 total 降序、
 //! keyset 分页。**只出 `session_ref`（HMAC），绝不出宿主原生 id / 路径 / 正文。**
 //!
 //! Q04 峰值下钻：`usage_hourly(date)` 给 `peak_hour` → `sessions_search(date,
@@ -20,16 +20,16 @@ const MAX_LIMIT: usize = 500;
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "sessions_search",
-        description: "List sessions active in a Beijing day or month (optionally narrowed to one Beijing hour), each aggregated: token buckets, first/last event, distinct raw model ids, event count, peak-slot token share. Sorted by total tokens descending, keyset-paginated. Sessions are identified only by an opaque per-install session_ref (HMAC) — never a native id. data.window_total_tokens lets a caller check that the returned sessions sum to the window/peak total; if has_more is true the page was truncated and the sum is partial.",
+        description: "List sessions active in a day or month in the configured statistics timezone (optionally narrowed to one local hour), each aggregated: token buckets, first/last event, distinct raw model ids, event count, peak-slot token share. Sorted by total tokens descending, keyset-paginated. Sessions are identified only by an opaque per-install session_ref (HMAC) — never a native id. data.window_total_tokens lets a caller check that the returned sessions sum to the window/peak total; if has_more is true the page was truncated and the sum is partial.",
         input_schema: json!({
             "type": "object",
             "properties": {
-                "date": { "type": "string", "description": "Beijing date YYYY-MM-DD. Exactly one of date / month / date_from+date_to." },
-                "month": { "type": "string", "description": "Beijing month YYYY-MM. Exactly one of date / month / date_from+date_to." },
-                "date_from": { "type": "string", "description": "Inclusive Beijing start date YYYY-MM-DD; must be paired with date_to." },
-                "date_to": { "type": "string", "description": "Inclusive Beijing end date YYYY-MM-DD; must be paired with date_from." },
+                "date": { "type": "string", "description": "Date YYYY-MM-DD in the configured statistics timezone. Exactly one of date / month / date_from+date_to." },
+                "month": { "type": "string", "description": "Month YYYY-MM in the configured statistics timezone. Exactly one of date / month / date_from+date_to." },
+                "date_from": { "type": "string", "description": "Inclusive start date YYYY-MM-DD in the configured statistics timezone; must be paired with date_to." },
+                "date_to": { "type": "string", "description": "Inclusive end date YYYY-MM-DD in the configured statistics timezone; must be paired with date_from." },
                 "hour": { "type": "integer", "minimum": 0, "maximum": 23,
-                          "description": "Optional: only count each session's facts in this Beijing hour (for peak-hour drill-down). Requires date." },
+                          "description": "Optional: only count each session's facts in this local statistics hour (for peak-hour drill-down). Requires date." },
                 "hosts": { "type": "array", "items": { "type": "string" },
                            "description": "Optional host filter (claude-code / codex / dsh). Empty/missing = all known hosts." },
                 "model": { "type": "string", "description": "Optional exact model id filter; missing model facts use <unknown>." },
@@ -105,7 +105,10 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             if s > e {
                 return Err(ToolError::new("invalid_argument", "`date_from` must not be after `date_to`"));
             }
-            (s, e + 86_400_000, format!("{from}..{to}"), false)
+            // `e` is the beginning of the inclusive end date's following day.
+            // Use that boundary directly: adding 24h is wrong on DST transition
+            // days (and silently drops or includes an hour).
+            (s, e, format!("{from}..{to}"), false)
         }
         _ => {
             return Err(ToolError::new(

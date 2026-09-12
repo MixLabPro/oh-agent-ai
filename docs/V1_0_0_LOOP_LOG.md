@@ -1165,3 +1165,9 @@
 - 修复：MCP 成功与错误 envelope 的 `timezone` 改为复用实际统计时区，而不是只读取 OS 时区；自定义统计时区下，查询日界、时间格式和 envelope 声明不再互相矛盾。小时查询 schema 文案同步改为“配置的统计时区”。
 - 验收：runtime MCP 定向测试与 Clippy 待执行；不改变事件 epoch 或供应商价格时区。
 - 边界：真实 `.app` Computer Use、AC21 跨入口 UAT、签名/公证和外部试用门禁仍未完成。
+
+## Loop 154 · 会话日期范围尊重 DST 自然日边界
+
+- 修复：`sessions_search(date_from,date_to)` 不再用固定 24 小时拼接结束边界，直接复用包含 `date_to` 的下一自然日边界；夏令时 23/25 小时日期不会漏算或多算。
+- 保护：单日、整月与供应商计价时区不变；原始事件 epoch 不变。
+- 验收：runtime MCP 定向测试与 Clippy 待执行；需在非固定 UTC+8 的统计时区下补跨 DST 真机/安全副本对拍。
