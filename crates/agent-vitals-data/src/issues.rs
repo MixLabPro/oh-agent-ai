@@ -2,7 +2,7 @@
 
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
-use jiff::{tz::TimeZone, Timestamp};
+use jiff::Timestamp;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const EPOCH_SECONDS_CUTOFF: i64 = 100_000_000_000;
@@ -306,7 +306,7 @@ fn issue_day_bucket(opened_at_ms: i64) -> String {
     Timestamp::from_millisecond(opened_at_ms)
         .ok()
         .map(|timestamp| {
-            let date = timestamp.to_zoned(TimeZone::system()).date();
+            let date = timestamp.to_zoned(crate::authority_query::statistics_timezone()).date();
             format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())
         })
         .unwrap_or_else(|| {

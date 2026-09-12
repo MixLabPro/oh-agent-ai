@@ -29,8 +29,19 @@ pub fn system_timezone_name() -> String {
     TimeZone::system().iana_name().unwrap_or("Etc/Unknown").to_string()
 }
 
+/// 统计时区：优先使用启动时由 statistics_timezone::apply 写入的 IANA
+/// `TZ`，否则回退到 OS 时区。macOS 的系统时区对象不会因为进程内修改
+/// `TZ` 而自动改变，因此统计计算不能只调用 `TimeZone::system()`。
+pub fn statistics_timezone() -> TimeZone {
+    let configured = std::env::var("TZ").ok().map(|value| value.trim_start_matches(':').to_string());
+    configured
+        .as_deref()
+        .and_then(|name| TimeZone::get(name).ok())
+        .unwrap_or_else(TimeZone::system)
+}
+
 fn system_now() -> jiff::Zoned {
-    Timestamp::now().to_zoned(TimeZone::system())
+    Timestamp::now().to_zoned(statistics_timezone())
 }
 
 fn format_zoned_date(date: jiff::civil::Date) -> String {
@@ -58,7 +69,7 @@ pub fn local_timestamp_text(unix_secs: i64) -> String {
     let timestamp = Timestamp::from_second(unix_secs)
         .unwrap_or_else(|_| Timestamp::from_second(0).expect("Unix epoch is valid"));
     timestamp
-        .to_zoned(TimeZone::system())
+        .to_zoned(statistics_timezone())
         .strftime("%Y-%m-%d %H:%M:%S")
         .to_string()
 }

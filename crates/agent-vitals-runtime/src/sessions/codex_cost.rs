@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 
-use jiff::{tz::TimeZone, Timestamp};
+use jiff::Timestamp;
 use serde_json::{json, Map, Value};
 
 pub fn load_codex_pricing() -> Value {
@@ -156,7 +156,7 @@ fn pct_text(up: f64) -> String {
 fn reset_beijing_text_at(resets_at: i64, today: &str) -> String {
     let zoned = Timestamp::from_second(resets_at)
         .unwrap_or(Timestamp::UNIX_EPOCH)
-        .to_zoned(TimeZone::system());
+        .to_zoned(crate::clock::statistics_timezone());
     let date = zoned.date();
     let (y, m, d) = (date.year(), date.month(), date.day());
     let hhmm = format!("{:02}:{:02}", zoned.hour(), zoned.minute());

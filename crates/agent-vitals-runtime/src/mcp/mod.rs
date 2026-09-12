@@ -37,7 +37,7 @@ pub use data_status::augment_sync_failure;
 use std::path::{Path, PathBuf};
 
 use agent_vitals_data::authority::{AuthorityDb, AuthorityError};
-use jiff::{tz::TimeZone, Timestamp};
+use jiff::Timestamp;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
@@ -382,7 +382,7 @@ fn freshness(conn: &Connection) -> Value {
 pub(crate) fn ms_to_rfc3339_beijing(ms: i64) -> String {
     Timestamp::from_millisecond(ms)
         .unwrap_or(Timestamp::UNIX_EPOCH)
-        .to_zoned(TimeZone::system())
+        .to_zoned(crate::clock::statistics_timezone())
         .strftime("%Y-%m-%dT%H:%M:%S%.3f%:z")
         .to_string()
 }

@@ -166,8 +166,16 @@ pub(crate) const SQL_FACTS_PAGE_WINDOW: &str =
 
 /// 系统统计时区民历日 `(y, m, d)` 的零点 → UTC 毫秒。Jiff 负责校验日期、
 /// IANA 偏移和 DST；不存在的日期（如 02-30）返回 `None`。
+pub(crate) fn statistics_timezone() -> TimeZone {
+    let configured = std::env::var("TZ").ok().map(|value| value.trim_start_matches(':').to_string());
+    configured
+        .as_deref()
+        .and_then(|name| TimeZone::get(name).ok())
+        .unwrap_or_else(TimeZone::system)
+}
+
 fn system_midnight_ms(y: i64, m: u32, d: u32) -> Option<i64> {
-    midnight_ms_in_timezone(y, m, d, TimeZone::system())
+    midnight_ms_in_timezone(y, m, d, statistics_timezone())
 }
 
 fn midnight_ms_in_timezone(y: i64, m: u32, d: u32, timezone: TimeZone) -> Option<i64> {
@@ -195,7 +203,7 @@ pub fn beijing_day_bounds_ms(date: &str) -> Option<(i64, i64)> {
     let start = system_midnight_ms(y, m, d)?;
     let next = Date::new(y.try_into().ok()?, m.try_into().ok()?, d.try_into().ok()?).ok()?
         .checked_add(1.days()).ok()?;
-    let end = next.to_zoned(TimeZone::system()).ok()?.timestamp().as_millisecond();
+    let end = next.to_zoned(statistics_timezone()).ok()?.timestamp().as_millisecond();
     Some((start, end))
 }
 

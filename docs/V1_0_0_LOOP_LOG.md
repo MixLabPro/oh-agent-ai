@@ -1102,3 +1102,10 @@
 - 保护：事件 epoch 与供应商计价规则不变；配置损坏时 CLI 已在入口显式失败，不以错误时区冒充成功。
 - 验收：待执行 CLI release 编译/测试、Rust workspace 回归与 `git diff --check`。
 - 边界：真实 `.app` 跨进程切换、SQLite `localtime` 运行时切换和 Computer Use 仍需验收；REQ-033、REQ-096、AC21 暂不勾选。
+
+## Loop 144 · 统计时区覆盖 Jiff 默认日界
+
+- 修复：macOS 进程内 `TZ` 改变后，Jiff `TimeZone::system()` 仍可能保留 OS 时区；新增统计时区解析并用于 runtime 时钟、authority 日界、会话导航和 MCP 时间投影，避免配置只改变 envelope 而不改变“今天/本月”。
+- 验收：重建 release CLI 后以隔离数据目录配置 `America/Los_Angeles`，`sessions navigation --json` 返回 `day_key=2026-09-12` 与 `timezone=America/Los_Angeles`；runtime clock 测试 4/4、authority query 测试 30/30、CLI Clippy 通过。
+- 保护：仅影响统计边界/本地展示，事件 epoch 和供应商计价规则不变；旧配置缺失仍回退 OS 时区。
+- 边界：SQLite `localtime` 跨进程/运行时切换的完整矩阵和真实 `.app` Computer Use 仍需验收；REQ-033、REQ-096、AC21 暂不勾选。
