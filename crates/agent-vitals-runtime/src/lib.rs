@@ -25,6 +25,7 @@
 //! hosts 又认识 data 的层。
 
 pub mod budget;
+pub mod budget_notifications;
 pub mod clock;
 pub mod custom_sources;
 pub mod home;
