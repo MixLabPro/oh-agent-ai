@@ -527,6 +527,23 @@ impl<'a> SqlFactWriter<'a> {
                         ),
                         &["provider/billing evidence conflicts with stored fact".to_string()],
                     )?;
+                } else {
+                    // 干净重发（存量清扫入口）：本次从源重放与存量一致 → 此前记录的
+                    // 归因冲突已不可复现，关闭它。真冲突走上一个分支，不会被这里
+                    // 误关（REQ-083：不静默抹证据）。幂等：重复重发无副作用。
+                    // 由陈旧二进制产生的残留冲突由此自然收敛，不需手工 SQL
+                    // （2026-09-12 真机 306 条即此形态）。
+                    self.conn.execute(
+                        "UPDATE data_quality_issues SET resolved_at_ms = ?2
+                         WHERE scope_key = ?1 AND resolved_at_ms IS NULL",
+                        rusqlite::params![
+                            format!(
+                                "attribution_conflict:{}",
+                                r.s("fact_id").unwrap_or_default()
+                            ),
+                            self.now_ms
+                        ],
+                    )?;
                 }
                 // A replay may discover stronger provider evidence for an
                 // already stored fact. Enrich nullable attribution columns by
@@ -759,6 +776,57 @@ mod tests {
             "SELECT COUNT(*) FROM data_quality_issues WHERE scope_key LIKE 'attribution_conflict:%' AND resolved_at_ms IS NULL", [], |r| r.get(0),
         ).unwrap();
         assert_eq!(open, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 2026-09-12：陈旧二进制产生的残留归因冲突此前**没有出口**——干净重发（本次
+    /// 与存量一致）只走 COALESCE 分支，不关闭任何开放记录，真机因此积压 306 条，
+    /// 只能手工 SQL 清。本测试钉死新出口：干净重发必须关闭该 fact 已不可复现的
+    /// 开放冲突；真冲突（同版本异证据）仍开放，由相邻测试看守。
+    #[test]
+    fn clean_reemit_resolves_a_stale_conflict() {
+        let (db, path) = open_db("attribution-stale-sweep");
+        let mut fact = mk_fact("e-stale");
+        {
+            let f = fact.as_object_mut().unwrap();
+            f.insert("provider_id".into(), json!("openai"));
+            f.insert("evidence_basis".into(), json!("missing"));
+            f.insert("normalization_version".into(), json!("provider-v0.12"));
+            f.insert("attribution_version".into(), json!("provider-v0.12"));
+        }
+        apply_txn(&db, 1_500, "sess-a", std::slice::from_ref(&fact)).unwrap();
+        let fact_id: String = db
+            .conn()
+            .query_row("SELECT fact_id FROM usage_facts", [], |r| r.get(0))
+            .unwrap();
+        let scope_key = format!("attribution_conflict:{fact_id}");
+        // 伪造一条遗留开放冲突（旧二进制写入、新代码尚未清理的形态）。
+        db.conn()
+            .execute(
+                "INSERT INTO data_quality_issues(
+                     issue_id, scope_type, scope_key, code, severity,
+                     first_seen_at_ms, last_seen_at_ms, detail_json)
+                 VALUES (?1, 'fact', ?2, 'invalid_fact', 'warning', 1400, 1400, '[]')",
+                rusqlite::params![format!("fact_invalid:{scope_key}"), scope_key],
+            )
+            .unwrap();
+        // 干净重发：与存量逐字段一致。
+        apply_txn(&db, 1_600, "sess-a", std::slice::from_ref(&fact)).unwrap();
+        let open: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM data_quality_issues
+                 WHERE scope_key LIKE 'attribution_conflict:%' AND resolved_at_ms IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 0, "干净重发必须关闭已不可复现的遗留冲突");
+        let total: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM data_quality_issues", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 1, "关闭而非删除：记录保留（REQ-083 不静默抹证据）");
         let _ = std::fs::remove_file(path);
     }
 
