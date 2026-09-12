@@ -430,6 +430,60 @@ fn source_issue_groups(
     Ok(values)
 }
 
+fn usage_growth_groups(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT host, COALESCE(provider_id, '<unknown>'),
+                COALESCE(billing_mode, '<unknown>'),
+                ((event_ts_ms + 28800000) / 86400000) AS day_idx,
+                SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens)
+         FROM usage_facts
+         WHERE deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND observation_kind != 'legacy_aggregate'
+         GROUP BY host, provider_id, billing_mode, day_idx
+         ORDER BY host, provider_id, billing_mode, day_idx",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((
+        r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+        r.get::<_, i64>(3)?, r.get::<_, i64>(4)?,
+    )))?;
+    let mut by_scope: std::collections::BTreeMap<(String, String, String), Vec<(i64, i64)>> = std::collections::BTreeMap::new();
+    for row in rows {
+        let (host, provider, mode, day, tokens) = row?;
+        by_scope.entry((host, provider, mode)).or_default().push((day, tokens));
+    }
+    let mut values = Vec::new();
+    for ((host, provider, mode), days) in by_scope {
+        if days.len() < 8 { continue; }
+        let observed = days[days.len() - 1];
+        let baseline: Vec<i64> = days[days.len() - 8..days.len() - 1].iter().map(|(_, n)| *n).collect();
+        let mut ordered = baseline.clone();
+        ordered.sort_unstable();
+        let median = ordered[ordered.len() / 2];
+        if median <= 0 || observed.1 < median.saturating_mul(2) { continue; }
+        let bucket = agent_vitals_domain::usage::civil_date_from_days(observed.0);
+        let key = format!("usage-growth\0{host}\0{provider}\0{mode}\0{bucket}");
+        values.push(json!({
+            "group_id": stable_hash(&key), "source_kind": "usage_growth",
+            "rule": "USAGE_GROWTH", "host": host, "object": provider,
+            "evidence_class": mode, "bucket": bucket, "count": 1,
+            "first_seen_at_ms": observed.0 * DAY_MS - BEIJING_OFFSET_MS,
+            "last_seen_at_ms": observed.0 * DAY_MS - BEIJING_OFFSET_MS,
+            "severity": "warning", "status_rollup": {"open": 1, "later": 0,
+                "acknowledged": 0, "resolved": 0, "not_applicable": 0},
+            "sessions_count": 0, "sample_evidence": [{"provider_id": provider,
+                "billing_mode": mode, "observed_tokens": observed.1,
+                "baseline_median_tokens": median, "baseline_days": 7,
+                "comparison_range": "previous_7_valid_days", "coverage": "complete",
+                "threshold_ratio_bp": 20000}],
+            "remedy": {"remedy_id": "inspect-usage-change", "diagnostic_only": true},
+            "actionability": 0.75, "time": observed.0 * DAY_MS - BEIJING_OFFSET_MS,
+            "evidence": mode, "tool_name": provider, "category": "usage-growth",
+            "hits": 1, "sessions": 0, "read_only": true
+        }));
+    }
+    Ok(values)
+}
+
 /// Unified read-only projection across behavior issues and authority-source
 /// problems. Source families remain distinguishable via `source_kind`.
 pub fn issue_groups_with_sources(
@@ -442,6 +496,7 @@ pub fn issue_groups_with_sources(
     let behavior = issue_groups(conn, from_ms, to_ms, usize::MAX, None)?;
     let mut groups = behavior["groups"].as_array().cloned().unwrap_or_default();
     groups.extend(source_issue_groups(conn, from_ms, to_ms)?);
+    groups.extend(usage_growth_groups(conn)?);
     groups.sort_by(|a, b| b["actionability"].as_f64().partial_cmp(&a["actionability"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| a["group_id"].as_str().cmp(&b["group_id"].as_str())));
     let offset = cursor.and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(groups.len());
@@ -804,6 +859,35 @@ mod tests {
         assert!(groups.iter().any(|g| g["source_kind"] == "source_failure"));
         assert!(groups.iter().any(|g| g["source_kind"] == "data_quality"
             && g["rule"] == "PRICE_COVERAGE"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn usage_growth_requires_seven_valid_baseline_days_and_same_scope() {
+        let path = std::env::temp_dir().join(format!("av-usage-growth-{}", std::process::id()));
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.conn().execute(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES ('run-growth', 1, 'test', 'succeeded', 13)", [],
+        ).unwrap();
+        let start = crate::authority_query::beijing_day_bounds_ms("2026-09-01").unwrap().0;
+        for day in 0..8_i64 {
+            let tokens = if day == 7 { 250 } else { 100 };
+            db.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                 source_event_id, observation_kind, provider_id, billing_mode, event_ts_ms,
+                 output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'codex', 'machine', 'session', ?2, 'request', 'openai',
+                 'metered_estimate', ?3, ?4, 'run-growth', 1, 1)",
+                rusqlite::params![format!("growth-{day}"), format!("event-{day}"), start + day * DAY_MS, tokens],
+            ).unwrap();
+        }
+        let growth = usage_growth_groups(db.conn()).unwrap();
+        assert_eq!(growth.len(), 1);
+        assert_eq!(growth[0]["rule"], "USAGE_GROWTH");
+        assert_eq!(growth[0]["sample_evidence"][0]["baseline_days"], 7);
+        assert_eq!(growth[0]["sample_evidence"][0]["observed_tokens"], 250);
+        assert_eq!(growth[0]["sample_evidence"][0]["coverage"], "complete");
         let _ = std::fs::remove_file(path);
     }
 }

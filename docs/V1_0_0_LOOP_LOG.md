@@ -674,3 +674,11 @@
 - 接入：预算组与行为/数据源组共用 L0 排序和呈现，但通过 `source_kind=budget` 在展开时显示预算状态说明。
 - 验收：预算 warn/exceeded 组投影单测、workbench JS 语法、desktop 104/104、clippy `-D warnings`、data issues 8/8、差异检查通过。
 - 边界：异常用量增长族、预算设置/静默快捷动作、自动关闭和真机 UAT 仍待完成；不勾选完整 REQ-074/REQ-078 或 AC18。
+
+## Loop 81 · REQ-111 异常用量增长证据投影（自验收）
+
+- 执行：新增 `USAGE_GROWTH` 只读组，按 `host + provider_id + billing_mode` 分别聚合日 token；最近有效日仅与前 7 个有效日的中位数比较，阈值为 2 倍。
+- 保护：基线不足 7 个有效日不报警；不同宿主、provider 或计费口径不相加；忽略删除事实和 legacy aggregate；不产生虚假金额或订阅结论。
+- 证据：告警携带 `comparison_range=previous_7_valid_days`、`baseline_days`、中位数、观测值、覆盖状态和计费口径，便于用户判断而非只展示红色严重度。
+- 验收：8 日夹具触发单一增长组并验证 7 日基线；data crate 124/124、Clippy、desktop 编译、JS 语法、差异检查通过。
+- 边界：增长阈值产品配置、通知去重/静默和真机提醒仍待完成；不勾选 REQ-111 或完整 REQ-074。
