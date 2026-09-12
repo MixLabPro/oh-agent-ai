@@ -1894,3 +1894,11 @@
   `x86_64` 尚不支持，且两者正式发布都必须补齐签名、公证、干净机及升级恢复证据。
 - 验收：矩阵与发布 workflow 的架构预检约束一致；README 已链接矩阵；`git diff --check`
   通过，未修改用户已有文档。
+
+## Loop 269 · 架构诊断改动后的全量回归
+
+- 验收：`cargo test --release` 全部通过；Python 全量 `1189` 项通过（`208` 项按环境
+  跳过）；`python3 tests/golden_runner.py --diff` 通过；DSH client 的 check/build、
+  host、wire、timeline、export、render 全部通过。
+- 结论：架构预检、支持矩阵和诊断字段没有造成跨层契约、golden 或集成回归；正式发布
+  仍受真实签名、公证和目标机器验收条件约束。
