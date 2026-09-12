@@ -1482,3 +1482,9 @@
 - 保护：手动检查不受后台调度窗口阻塞；后台未授权时不请求网络；所有状态只写入本地独立策略/状态文件，不接触用户日志和会话内容。
 - 验收：桌面 release `cargo check` 与 Clippy、Vite production build、Workbench JS 语法检查、`git diff --check`通过。
 - 边界：真实成功更新仍等待公共目录发布；后台调度需在解锁可操作的 `.app` 上观察，签名/公证和外部试用门禁未完成。
+
+## Loop 204 · 价格更新链路发布构建
+
+- 构建：`cargo tauri build --bundles app` 成功，新增公共价格检查、授权策略和后台调度已进入 `.app`。
+- 复核：桌面 Clippy 与 release 检查通过；本地 ad hoc 包的 `codesign --verify --deep --strict` 仍失败，符合尚未配置 Developer ID/公证凭据的已知边界。
+- 边界：本轮未安装或启动新包，避免在锁屏状态下伪造 Computer Use 证据；真实后台调度、联网成功目录和签名发布仍待外部条件具备。
