@@ -1223,4 +1223,11 @@ button.chip.active {
   .cards { grid-template-columns: 1fr; }
   .detail-cards,
   .cards-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* 数据源摘要在窄窗口不能继续保留 130px 宿主列 + 200px freshness
+     列，否则 200% 字号/最小窗口时会把整个工作台撑出横向滚动。让每行
+     按“宿主 → 口径 → 新鲜度”自然换行；宽表仍由自己的 table-wrap 滚动。 */
+  .src-list li { align-items: flex-start; flex-wrap: wrap; }
+  .src-list li .host,
+  .src-list li .fresh { flex: 1 1 100%; text-align: left; }
+  .src-list li .pricing-explain { white-space: normal; overflow-wrap: anywhere; }
 }

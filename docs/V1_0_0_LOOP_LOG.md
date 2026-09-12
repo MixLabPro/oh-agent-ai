@@ -2050,3 +2050,12 @@
   Vite/Workbench closeout 验证此前已通过。
 - 说明：Tauri 将前端资源嵌入应用包，不能以 `Contents/Resources/ui/workbench.js` 的
   独立文件路径检索；不据此误判打包缺失。
+
+## Loop 289 · Vite 窄窗口数据源列表修复
+
+- 发现：通过本地 Vite 工作台在约 569 CSS px 窄视口实测，总览数据源摘要的固定宿主列
+  与 freshness 列造成 `main` 内容横向溢出（638px），影响 200% 字号/最小窗口路径。
+- 修复：窄视口下数据源行改为宿主、口径、新鲜度顺序换行；长价格说明允许断行，宽表
+  仍仅由自身容器滚动。
+- 验收：Vite 页面 reload 后 `body.scrollWidth === body.clientWidth`、`main.scrollWidth
+  === main.clientWidth`，无溢出元素；`npm run verify` 与 `git diff --check` 通过。
