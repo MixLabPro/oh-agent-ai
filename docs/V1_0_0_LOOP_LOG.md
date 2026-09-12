@@ -1694,3 +1694,9 @@
 - 构建：`cargo tauri build --bundles app` 成功，最新诊断时区字段已进入 `/apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app`。
 - 复核：release 编译和 macOS `.app` bundling 均完成；未在当前不可操作桌面环境安装或启动，避免把缺少 Computer Use 的证据误报为真机验收。
 - 边界：Developer ID/公证、真实 `.app` 交互、干净机升级和外部试用仍未完成。
+
+## Loop 239 · v1.0.0 跨层回归复核
+
+- 验收：`cargo test --release` 全部通过；`cargo clippy --release --all-targets -- -D warnings` 通过；`python3 tests/golden_runner.py --diff` 的 15 个 case 全部逐字节一致；Python 兼容套件 `Ran 1189 tests`，`OK (skipped=8)`。
+- 结论：统计时区诊断字段、Vite mock 同步和最新 `.app` 打包没有引入 Rust/Python/golden 回归。
+- 边界：全量自动化回归仍不替代真实 `.app` Computer Use、Developer ID/公证、干净机升级和外部试用。
