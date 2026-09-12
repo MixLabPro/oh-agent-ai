@@ -25,6 +25,8 @@ mod usage_hourly;
 mod budget_profiles;
 #[cfg(feature = "mcp-internal")]
 mod query_sql_readonly;
+#[cfg(feature = "mcp-internal")]
+mod billing_workflow;
 
 // PR #1 (mcp 0.9.1 SQL authority 收口)：把 cursor 解析/生成的 `pub` 包装
 // 在模块顶层再 re-export 一次，CLI 二进制侧可以 `use agent_vitals_runtime::
@@ -112,6 +114,12 @@ impl AuthorityHandle {
 
     pub fn conn(&self) -> &Connection {
         self.db.conn()
+    }
+
+    /// Typed read helpers may need the AuthorityDb API while still using the
+    /// same validated read-only connection.
+    pub fn db(&self) -> &AuthorityDb {
+        &self.db
     }
 
     /// spec §6.1 `authority_state`（库已能打开，故只在 `enabled` / `candidate`
@@ -413,6 +421,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
     #[cfg(feature = "mcp-internal")]
     {
         out.push(query_sql_readonly::spec());
+        out.push(billing_workflow::spec());
     }
     out
 }
@@ -484,6 +493,19 @@ pub fn source_status_report(conn: &Connection) -> Result<Value, String> {
 /// `tools/call` 分发。`name` 已由传输层对 [`tool_specs`] 校验过。参数在这里
 /// 过一遍极简 schema 校验（spec §6.4 / M08：未知字段 → `invalid_argument`）。
 pub fn dispatch(name: &str, args: &Value, data_home: &Path) -> Result<Value, ToolError> {
+    dispatch_with_permissions(name, args, data_home, false)
+}
+
+/// `data-mcp serve --allow-local-writes` 的显式权限入口。默认 dispatch 永远
+/// 是只读；即使编译了 `mcp-internal`，也不会因为客户端能看到工具就获得写权限。
+pub fn dispatch_with_permissions(
+    name: &str,
+    args: &Value,
+    data_home: &Path,
+    allow_local_writes: bool,
+) -> Result<Value, ToolError> {
+    #[cfg(not(feature = "mcp-internal"))]
+    let _ = allow_local_writes;
     let spec = tool_specs()
         .into_iter()
         .find(|s| s.name == name)
@@ -498,6 +520,8 @@ pub fn dispatch(name: &str, args: &Value, data_home: &Path) -> Result<Value, Too
         "session_trace" => session_trace::run(args, data_home),
         #[cfg(feature = "mcp-internal")]
         "query_sql_readonly" => query_sql_readonly::run(args, data_home),
+        #[cfg(feature = "mcp-internal")]
+        "billing_workflow" => billing_workflow::run(args, data_home, allow_local_writes),
         other => Err(ToolError::new("internal_error", format!("tool `{other}` registered but not wired"))),
     }
 }

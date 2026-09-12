@@ -2239,3 +2239,15 @@
 - 结论：数据层可通过 MCP 完成真实只读查询、协议安全和跨消费面对拍；成本逐事实价格
   版本、workflow_events 问题/技能聚合及写入链不能仅靠当前 MCP 完整验收，仍需 Authority
   直接测试、CLI 测试和后续 M3/M4 工具。
+
+## Loop 312 · v1.0 MCP 管理闭环扩展
+
+- 修复：`mcp-internal` 新增 `billing_workflow` 类型化工具，覆盖候选、计费声明版本、
+  影响预览、重算任务、host bill、双币种预算和 snooze；写入仅在显式
+  `data-mcp serve --allow-local-writes` 下启用，默认 MCP 仍拒绝 mutation，任意 SQL、
+  宿主同步和迁移不在权限范围内。
+- 验收：`python3 tests/mcp_v1_management_smoke.py --bin target/release/agent-vitals`
+  在临时 Authority DB 中通过 20 个 JSON-RPC 管理动作；默认无写开关返回
+  `permission_denied`。候选→声明→重算→撤销、账单写入/删除、预算配置/静默均通过。
+- 回归：MCP runtime 新增 2 项权限/schema 测试；`mcp-internal` clippy、CLI all-targets
+  check、`git diff --check` 通过；当前公开/内部数据 MCP 只读冒烟仍保持 0 个 MISMATCH。

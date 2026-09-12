@@ -309,6 +309,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | `summary_monthly` | v0.9.1 MVP | 🔶 同上 + `budget_status_sql`；**逐日趋势 / 月底预测 / 成本占比 % 需新增**（P1-4，逐日趋势可基于 `peaked_days_map`） |
 | `data_quality_issues` | v0.9.1 MVP | 🔶 `data_quality_issues` 表已在；`detail_json` 的 code-aware 脱敏 allowlist 需新写 |
 | `authority_audit` | v0.9.1 internal only | 🔶 MCP 内只读——守恒 / 重复 / 覆盖 / `authority_revision` 一致性自检（不做重导入）。见 §8.1 |
+| `billing_workflow` | v1.0 smoke only, `mcp-internal` | 🔶 仅暴露类型化的候选 / 声明 / 重算 / 账单 / 预算管理动作；读取可用，写入必须显式启动 `data-mcp serve --allow-local-writes`，不属于公开兼容面，不提供任意 SQL 或通用写入 |
 | `reimport_verify` | v0.9.1（**MCP 外**） | ✅ **落地（`4c7f75b`）**：`agent-vitals data-reimport-verify [--json]`——两临时库各重放（round B 崩溃后重跑），逐宿主 × 北京月比对；不碰生产库。不是 MCP 工具（P1-2）。 |
 | `cost_breakdown` | v0.9.2 | ⬜ 逐事实 / 逐日历史价格重放（当前仅窗口级）+ 变化因子分解引擎 |
 | `sessions_search` / `session_detail` | v0.9.1（提前） | ✅ **落地（`7c68ab4`）**：`session_ref` = HMAC-SHA256(salt, session_key)（salt `<data_home>/.mcp-session-salt` 0600，不进库）；`sessions_in_window` 逐会话聚合（时间边界读时从 `MIN/MAX(event_ts_ms)` 派生，不补 schema 列）+ `session_facts_timeline`。时间线的失败/错误事件轴留 M4（`workflow_events`）。 |

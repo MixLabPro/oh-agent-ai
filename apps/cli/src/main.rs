@@ -765,7 +765,12 @@ enum Cmd {
 enum DataMcpAction {
     /// Run the stdio MCP server (JSON-RPC 2.0, line-delimited). Blocks until
     /// stdin is closed, then exits 0.
-    Serve,
+    Serve {
+        /// Enable only the typed local Authority management actions used by
+        /// isolated v1 smoke tests; arbitrary SQL and source writes remain unavailable.
+        #[arg(long)]
+        allow_local_writes: bool,
+    },
 }
 
 // `data` 子命令的子动作。Stage 0 的 repository 只有 `monthly_summary`/
@@ -1488,7 +1493,7 @@ fn main() {
     // 之前短路——它不碰 skill 扫描，只对 SQL 权威库做只读查询。
     if let Some(Cmd::DataMcp { action }) = &args.cmd {
         match action {
-            DataMcpAction::Serve => mcp::serve(),
+            DataMcpAction::Serve { allow_local_writes } => mcp::serve(*allow_local_writes),
         }
     }
 

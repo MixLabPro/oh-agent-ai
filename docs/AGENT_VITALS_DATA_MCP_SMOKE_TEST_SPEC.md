@@ -126,6 +126,22 @@ reader）——spec §13 M4 前置，"工作量与 behavior 检测线相当"，�
 python3 tests/mcp_smoke.py --bin <bin> [--internal] [--home <dir>]
 ```
 
+### 6.1 v1.0 管理闭环（隔离库、显式写权限）
+
+v1.0 的 AC26–AC28、AC13–AC14、AC10–AC12 还需要验证候选确认、声明版本、撤销、
+重算任务、账单和双币种预算。它们不能通过公开只读 MCP 完成，因此 `mcp-internal`
+额外注册 `billing_workflow`；只有带 `--allow-local-writes` 的 MCP 进程才允许这些
+类型化写入。该开关不开放任意 SQL，不读宿主原始日志，也不允许来源同步/迁移。
+
+```bash
+cargo build --release --features mcp-internal
+python3 tests/mcp_v1_management_smoke.py --bin target/release/agent-vitals
+```
+
+脚本自行创建临时 `AGENT_VITALS_HOME`，通过真实 stdio JSON-RPC 依次执行 20 个动作，
+验证候选→声明→预览→重算→撤销、host bill、预算配置/静默及状态读取；默认不带
+`--allow-local-writes` 的 mutation 必须返回 `permission_denied`。生产库不参与该烟测。
+
 **不变式（脚本断言，不只是打印）**：
 
 1. **守恒**：`usage_hourly` model 轴按 host 分组求和 ≡ host 轴 `totals_by_host` ≡ CLI `data daily` 逐宿主 total。

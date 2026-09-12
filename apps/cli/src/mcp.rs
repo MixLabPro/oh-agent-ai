@@ -23,7 +23,7 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "agent-vitals-data";
 
 /// `agent-vitals data-mcp serve` 的入口。永不返回（stdin EOF → exit 0）。
-pub fn serve() -> ! {
+pub fn serve(allow_local_writes: bool) -> ! {
     let data_home = agent_vitals_runtime::home::data_home();
     eprintln!(
         "data-mcp: serving on stdio (protocol {PROTOCOL_VERSION}, data_home {})",
@@ -31,7 +31,7 @@ pub fn serve() -> ! {
     );
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    run_loop(stdin.lock(), stdout.lock(), &data_home);
+    run_loop_with_permissions(stdin.lock(), stdout.lock(), &data_home, allow_local_writes);
     eprintln!("data-mcp: stdin closed, exiting");
     std::process::exit(0);
 }
@@ -39,7 +39,17 @@ pub fn serve() -> ! {
 /// 传输循环——读一行 JSON-RPC → 处理 → 写一帧，直到 `reader` EOF 或写失败。
 /// 拆出来是为了让 `#[cfg(test)]` 用内存 reader/writer 驱动（`serve` 只是它 +
 /// 真 stdio + `exit(0)`）。
+#[cfg(test)]
 pub(crate) fn run_loop(reader: impl BufRead, mut out: impl Write, data_home: &std::path::Path) {
+    run_loop_with_permissions(reader, &mut out, data_home, false);
+}
+
+pub(crate) fn run_loop_with_permissions(
+    reader: impl BufRead,
+    mut out: impl Write,
+    data_home: &std::path::Path,
+    allow_local_writes: bool,
+) {
     let mut initialized = false;
 
     for line in reader.lines() {
@@ -86,7 +96,7 @@ pub(crate) fn run_loop(reader: impl BufRead, mut out: impl Write, data_home: &st
         } else {
             match method {
                 "tools/list" => handle_tools_list(id),
-                "tools/call" => handle_tools_call(id, &params, data_home),
+                "tools/call" => handle_tools_call(id, &params, data_home, allow_local_writes),
                 other => rpc_error(id, -32601, format!("method not found: {other}")),
             }
         };
@@ -124,7 +134,7 @@ fn handle_tools_list(id: Value) -> Value {
     rpc_ok(id, json!({ "tools": tools }))
 }
 
-fn handle_tools_call(id: Value, params: &Value, data_home: &std::path::Path) -> Value {
+fn handle_tools_call(id: Value, params: &Value, data_home: &std::path::Path, allow_local_writes: bool) -> Value {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return rpc_error(id, -32602, "tools/call requires a string `name`");
     };
@@ -133,7 +143,7 @@ fn handle_tools_call(id: Value, params: &Value, data_home: &std::path::Path) -> 
     }
     let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
 
-    let (structured, is_error) = match mcp::dispatch(name, &args, data_home) {
+    let (structured, is_error) = match mcp::dispatch_with_permissions(name, &args, data_home, allow_local_writes) {
         Ok(envelope) => (envelope, false),
         Err(err) => {
             eprintln!("data-mcp: tool {name} error [{}]: {}", err.code, err.message);
