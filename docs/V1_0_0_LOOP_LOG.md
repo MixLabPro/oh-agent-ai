@@ -701,5 +701,5 @@
 
 - 修复：L2 详情点击后先使用 L1 已返回的实例字段渲染块级详情，再异步调用 `issue_instance_read` 补齐权威行；IPC 失败会在同一详情块显式标注，不再出现空白或仅有短暂 loading。
 - 保护：初始详情只复用权威 `issue_group_instances` 返回的数据，不猜测金额、状态或 metadata；独立 IPC 回读成功后覆盖为完整权威详情。
-- 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、`git diff --check`、`.app` release 构建和本机 ad-hoc 安装通过。
+- 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、`git diff --check`、桌面 crate release 测试 104/104、clippy、`.app` release 构建和本机 ad-hoc 安装通过。
 - 边界：安装后菜单栏进程正常存活，但 Computer Use 未重新取得可见工作台窗口；L2 真机点击需在窗口可见后复验，不勾选 AC18。
