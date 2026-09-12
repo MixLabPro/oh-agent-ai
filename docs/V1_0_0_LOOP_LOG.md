@@ -1386,3 +1386,10 @@
 - 构建：`cargo tauri build --bundles app` 成功，前端 Issue 信息层级已进入新的 `agent-vitals.app`。
 - 安装：旧包可恢复备份为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-032800`；新包以 `--show-workbench` 启动，进程 PID `81918` 已运行。
 - 边界：安装包为当前本地测试构建；macOS 锁屏仍阻塞真实 Computer Use 操作，签名/公证、干净机升级和外部试用门禁仍未完成。
+
+## Loop 189 · UI 变更后的全量回归
+
+- Rust：`cargo test --release` 全部通过，CLI 79、data 283、domain 467、runtime 及集成/性能测试均通过。
+- Python：`python3 -m unittest discover tests -v`，1188/1188 通过；208 项按测试定义因 Rust 双实现、可选依赖或环境条件跳过，无失败。
+- 结论：Issue 信息层级和安装包构建未破坏既有数据、计价、迁移、宿主隔离及 Python/Rust 测试合同；未刷新 golden/snapshot。
+- 边界：双实现跳过项仍需配置对应 release CLI；真实 Computer Use、200% 字号/读屏、签名/公证和外部试用门禁仍未完成。
