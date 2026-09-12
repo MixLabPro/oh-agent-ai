@@ -34,8 +34,8 @@ ok(js.includes("sessions_read",) && js.includes("s.session_ref"), "会话详情�
 console.log("# 响应式");
 ok(css.includes(".cards {\n  display: grid") && css.includes(".cards { grid-template-columns: 1fr; }"),
   "KPI 网格在窄窗口折为单列");
-ok(css.includes(".detail-cards") && css.includes(".cards-4"),
-  "详情与 Findings 卡片有独立布局钩子");
+ok(/\.detail-cards,\s*\n\s*\.cards-4\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/.test(css),
+  "详情与 Findings 卡片在窄窗口折为两列");
 ok(/\.tabs\s*\{[\s\S]*?overflow-x:\s*auto/.test(css), "顶部 tabs 局部横向滚动");
 ok(/\.table-wrap\s*\{[\s\S]*?overflow:\s*auto/.test(css), "宽表只在容器内滚动");
 ok(/\.sess-toolbar\s*\{[^}]*flex-wrap:\s*wrap/.test(css), "Sessions 工具栏可换行");
