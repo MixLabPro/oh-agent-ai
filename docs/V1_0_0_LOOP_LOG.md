@@ -1580,3 +1580,9 @@
 - 验收：`cargo test --release` 全部通过；`AGENT_VITALS_BIN="$PWD/target/release/agent-vitals" python3 -m unittest discover tests -q` 完成 1189 项，8 项按环境跳过，无失败。
 - 保护：Rust/Python 价卡、authority 查询、跨时区日/月边界、宿主隔离、迁移、MCP/CLI 输出和既有 golden 合同均重新覆盖；未刷新 snapshot。
 - 边界：自动化全量通过仍不替代真实 `.app` Computer Use、签名/公证、公共目录联网成功、干净机升级和外部试用。
+
+## Loop 220 · Vite 统计时区实际交互验收
+
+- UAT：在 Vite + mock IPC 页面将统计时区改为 `America/Los_Angeles` 并保存，页面返回“正在刷新今天、本月和日历统计”；随后恢复为 `Asia/Shanghai`，状态同样成功。
+- 结果：恢复后输入值为 `Asia/Shanghai`，本月统计区域仍正常渲染，浏览器控制台错误数为 0；该路径证明设置按钮实际使用动态配置，而非仅依赖命名重构。
+- 边界：这是浏览器 mock 交互证据，不替代真实 `.app` 跨时区点击、系统时区切换及 Computer Use；未写入本地权威数据库。
