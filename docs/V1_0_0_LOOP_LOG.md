@@ -1289,3 +1289,9 @@
 - 修复：`sessions navigation --timezone` 从固定 `Asia/Shanghai` 默认值改为运行时读取已应用的统计/OS 时区；显式 `--timezone` 仍优先并经过 IANA 校验。
 - 验收：CLI release 测试 79/79、CLI Clippy 通过；未显式传参的隔离数据根导航返回 `timezone=Asia/Shanghai`，与当前 macOS OS 时区一致，证明该值来自运行时而非参数默认常量。
 - 边界：当前机器 OS 时区恰为 Asia/Shanghai，未在本机伪造系统时区；非 UTC+8 与 DST 行为由显式配置时区回归覆盖，真实桌面 UAT 仍待解锁。
+
+## Loop 174 · CLI 默认时区修复进入安装包
+
+- 构建：重新执行 `cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 release CLI `cmp` 一致。
+- 验收：旧包移至 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-030203`，新包以 `--show-workbench` 启动，进程 PID `76600` 已运行。
+- 边界：真实菜单点击/视觉 Computer Use 仍待解锁 macOS；当前包仍未完成 Developer ID 签名与公证。
