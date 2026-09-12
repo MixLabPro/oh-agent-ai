@@ -2,10 +2,13 @@
 
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
+use jiff::{tz::TimeZone, Timestamp};
 
-const BEIJING_OFFSET_MS: i64 = 8 * 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const EPOCH_SECONDS_CUTOFF: i64 = 100_000_000_000;
+
+const LOCAL_DAY_IDX_SQL: &str =
+    "CAST(julianday(date(event_ts_ms / 1000, 'unixepoch', 'localtime')) - 2440587.5 AS INTEGER)";
 
 /// Normalize an epoch timestamp to the authority contract (milliseconds).
 /// This is the single boundary conversion used by both new Issue writes and
@@ -300,9 +303,15 @@ trait Pipe: Sized {
 impl<T> Pipe for T {}
 
 fn issue_day_bucket(opened_at_ms: i64) -> String {
-    agent_vitals_domain::usage::civil_date_from_days(
-        (opened_at_ms + BEIJING_OFFSET_MS).div_euclid(DAY_MS),
-    )
+    Timestamp::from_millisecond(opened_at_ms)
+        .ok()
+        .map(|timestamp| {
+            let date = timestamp.to_zoned(TimeZone::system()).date();
+            format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())
+        })
+        .unwrap_or_else(|| {
+            agent_vitals_domain::usage::civil_date_from_days(opened_at_ms.div_euclid(DAY_MS))
+        })
 }
 
 fn issue_group_key(issue_type: &str, host: &str, fingerprint: &str, opened_at_ms: i64, metadata: &Value) -> String {
@@ -466,31 +475,36 @@ fn source_issue_groups(
 }
 
 fn usage_growth_groups(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
-    let mut stmt = conn.prepare(
+    type UsageGrowthScope = (String, String, String);
+    type UsageGrowthDay = (i64, i64, i64);
+
+    let query = format!(
         "SELECT host, COALESCE(provider_id, '<unknown>'),
                 COALESCE(billing_mode, '<unknown>'),
-                ((event_ts_ms + 28800000) / 86400000) AS day_idx,
-                SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens)
+                {LOCAL_DAY_IDX_SQL} AS day_idx,
+                SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens),
+                MAX(event_ts_ms)
          FROM usage_facts
          WHERE deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND observation_kind != 'legacy_aggregate'
          GROUP BY host, provider_id, billing_mode, day_idx
-         ORDER BY host, provider_id, billing_mode, day_idx",
-    )?;
+         ORDER BY host, provider_id, billing_mode, day_idx"
+    );
+    let mut stmt = conn.prepare(&query)?;
     let rows = stmt.query_map([], |r| Ok((
         r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
-        r.get::<_, i64>(3)?, r.get::<_, i64>(4)?,
+        r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?,
     )))?;
-    let mut by_scope: std::collections::BTreeMap<(String, String, String), Vec<(i64, i64)>> = std::collections::BTreeMap::new();
+    let mut by_scope: std::collections::BTreeMap<UsageGrowthScope, Vec<UsageGrowthDay>> = std::collections::BTreeMap::new();
     for row in rows {
-        let (host, provider, mode, day, tokens) = row?;
-        by_scope.entry((host, provider, mode)).or_default().push((day, tokens));
+        let (host, provider, mode, day, tokens, last_event_ms) = row?;
+        by_scope.entry((host, provider, mode)).or_default().push((day, tokens, last_event_ms));
     }
     let mut values = Vec::new();
     for ((host, provider, mode), days) in by_scope {
         if days.len() < 8 { continue; }
         let observed = days[days.len() - 1];
-        let baseline: Vec<i64> = days[days.len() - 8..days.len() - 1].iter().map(|(_, n)| *n).collect();
+        let baseline: Vec<i64> = days[days.len() - 8..days.len() - 1].iter().map(|(_, n, _)| *n).collect();
         let mut ordered = baseline.clone();
         ordered.sort_unstable();
         let median = ordered[ordered.len() / 2];
@@ -501,8 +515,8 @@ fn usage_growth_groups(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
             "group_id": stable_hash(&key), "source_kind": "usage_growth",
             "rule": "USAGE_GROWTH", "host": host, "object": provider,
             "evidence_class": mode, "bucket": bucket, "count": 1,
-            "first_seen_at_ms": observed.0 * DAY_MS - BEIJING_OFFSET_MS,
-            "last_seen_at_ms": observed.0 * DAY_MS - BEIJING_OFFSET_MS,
+            "first_seen_at_ms": observed.2,
+            "last_seen_at_ms": observed.2,
             "severity": "warning", "status_rollup": {"open": 1, "later": 0,
                 "acknowledged": 0, "resolved": 0, "not_applicable": 0},
             "sessions_count": 0, "sample_evidence": [{"provider_id": provider,
@@ -511,7 +525,7 @@ fn usage_growth_groups(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
                 "comparison_range": "previous_7_valid_days", "coverage": "complete",
                 "threshold_ratio_bp": 20000}],
             "remedy": {"remedy_id": "inspect-usage-change", "diagnostic_only": true},
-            "actionability": 0.75, "time": observed.0 * DAY_MS - BEIJING_OFFSET_MS,
+            "actionability": 0.75, "time": observed.2,
             "evidence": mode, "tool_name": provider, "category": "usage-growth",
             "hits": 1, "sessions": 0, "read_only": true
         }));
@@ -955,6 +969,9 @@ mod tests {
         assert_eq!(growth[0]["sample_evidence"][0]["baseline_days"], 7);
         assert_eq!(growth[0]["sample_evidence"][0]["observed_tokens"], 250);
         assert_eq!(growth[0]["sample_evidence"][0]["coverage"], "complete");
+        assert_eq!(growth[0]["first_seen_at_ms"], start + 7 * DAY_MS);
+        assert_eq!(growth[0]["last_seen_at_ms"], start + 7 * DAY_MS);
+        assert_eq!(growth[0]["time"], start + 7 * DAY_MS);
         let _ = std::fs::remove_file(path);
     }
 }

@@ -1032,3 +1032,10 @@
 - 实现：Workbench 保留 `beijingToday()` 兼容调用名，但内部使用浏览器系统 IANA 时区；Vite browser mock 的样例日期也改为同一系统日期，避免开发调试页与正式后端在非北京时间机器上跨日漂移。
 - 验收：Workbench/tauri-mock `node --check`、KPI/状态验证器、Vite production build 与 `git diff --check`通过。
 - 边界：前端尚未提供用户可修改的统计时区偏好；当前默认随 OS，供应商价格策略时区仍未与统计时区混用；不勾选 REQ-033、REQ-096 或 AC21。
+
+## Loop 134 · Issue 投影移除固定 UTC+8
+
+- 修复：行为 Issue 的日分组改用系统 IANA 时区；`usage_growth` 日桶改用 SQLite `localtime`，不再以固定 `+08:00` 计算；投影时间改为该桶实际最后一条事件时间，避免 DST 日生成虚假的固定午夜时间。
+- 保护：原始 `event_ts_ms` 不变，供应商计价时区不参与统计分组；无效 epoch 仅走无时区数学退化路径，不把错误时间伪装成有效本地时间。
+- 验收：data issues 定向测试 9/9、`TZ=America/Los_Angeles` usage-growth 专项测试 1/1、data crate Clippy `-D warnings`、`git diff --check`通过。
+- 边界：用户可修改的统计时区偏好尚未持久化接入；其他 Python usage/旧 MCP 文案仍需继续审计；REQ-033、REQ-096、AC21 仍不勾选。
