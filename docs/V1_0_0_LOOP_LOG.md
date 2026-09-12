@@ -2009,6 +2009,15 @@
 - 验收：`node scripts/verify-release-desktop-workflow.mjs` 全部检查通过；README 已补
   调用方式；`git diff --check` 通过。
 
+## Loop 285 · 发布契约接入主 CI
+
+- 发现：桌面发布 workflow 静态校验器已存在，但只手动执行，普通 PR 不能自动发现
+  发布门禁被改坏。
+- 修复：在 `.github/workflows/verify.yml` 新增无副作用的桌面发布契约 job，使用 Node
+  运行校验器；不触发签名、公证、上传或 Release 写入。
+- 验收：workflow 结构保持独立 job；本地 `node scripts/verify-release-desktop-workflow.mjs`
+  全部通过，`git diff --check` 通过。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；
