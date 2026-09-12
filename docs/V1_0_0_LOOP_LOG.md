@@ -696,3 +696,10 @@
 - UAT：`REQ-073 L1 walked ✔`；展开第一组后能读取实例 `fnv1a64:c7a8cccc52ffeac7`，状态为 `open`，并显示“详情 / 稍后 / 已确认 / 已解决 / 不适用”入口；未点击状态变更，避免污染真实本地 Issue 状态。
 - UAT：`REQ-073 L2 walked ✘`；Computer Use 点击“详情”后未稳定显示权威 metadata，尚不能证明独立详情面板/详情回读闭环。
 - 结论：L0/L1 有真实界面证据，但不勾选完整 REQ-073–080 或 AC18；L2 详情读取与完整五态真机验收仍待修复/复验。
+
+## Loop 84 · Issue L2 详情首屏可见性修复（自验收）
+
+- 修复：L2 详情点击后先使用 L1 已返回的实例字段渲染块级详情，再异步调用 `issue_instance_read` 补齐权威行；IPC 失败会在同一详情块显式标注，不再出现空白或仅有短暂 loading。
+- 保护：初始详情只复用权威 `issue_group_instances` 返回的数据，不猜测金额、状态或 metadata；独立 IPC 回读成功后覆盖为完整权威详情。
+- 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、`git diff --check`、`.app` release 构建和本机 ad-hoc 安装通过。
+- 边界：安装后菜单栏进程正常存活，但 Computer Use 未重新取得可见工作台窗口；L2 真机点击需在窗口可见后复验，不勾选 AC18。
