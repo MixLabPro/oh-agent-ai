@@ -27,6 +27,8 @@ mod budget_profiles;
 mod query_sql_readonly;
 #[cfg(feature = "mcp-internal")]
 mod billing_workflow;
+#[cfg(feature = "mcp-internal")]
+mod authority_audit;
 
 // PR #1 (mcp 0.9.1 SQL authority 收口)：把 cursor 解析/生成的 `pub` 包装
 // 在模块顶层再 re-export 一次，CLI 二进制侧可以 `use agent_vitals_runtime::
@@ -422,6 +424,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
     {
         out.push(query_sql_readonly::spec());
         out.push(billing_workflow::spec());
+        out.push(authority_audit::spec());
     }
     out
 }
@@ -522,6 +525,8 @@ pub fn dispatch_with_permissions(
         "query_sql_readonly" => query_sql_readonly::run(args, data_home),
         #[cfg(feature = "mcp-internal")]
         "billing_workflow" => billing_workflow::run(args, data_home, allow_local_writes),
+        #[cfg(feature = "mcp-internal")]
+        "authority_audit" => authority_audit::run(args, data_home),
         other => Err(ToolError::new("internal_error", format!("tool `{other}` registered but not wired"))),
     }
 }

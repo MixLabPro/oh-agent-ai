@@ -2251,3 +2251,19 @@
   `permission_denied`。候选→声明→重算→撤销、账单写入/删除、预算配置/静默均通过。
 - 回归：MCP runtime 新增 2 项权限/schema 测试；`mcp-internal` clippy、CLI all-targets
   check、`git diff --check` 通过；当前公开/内部数据 MCP 只读冒烟仍保持 0 个 MISMATCH。
+
+## Loop 313 · authority_audit 真实 MCP 自洽验收
+
+- 修复：`mcp-internal` 新增只读 `authority_audit` 工具，按配置统计时区的日期/月窗口
+  检查 realtime token 在 host/model 聚合轴上的守恒差量、负 token、身份重复组、孤儿
+  session、legacy/realtime 混轴、成功 revision 是否落在未来，以及已登记质量例外；容差
+  仅作为显式输入参与判定，不吞掉结构性 mismatch。输出只有聚合证据与
+  `exact/explained/mismatch`，不返回原生 ID、路径或 issue detail。
+- UAT: S4.5 authority_audit walked ✔：真实 `data-mcp serve` JSON-RPC 全库与
+  `month=2026-09` 两个范围均返回 `verdict=exact`；月范围 21,182 facts / 4,166,143,636
+  realtime tokens，host/model 守恒差量均为 0，负 token、重复组、孤儿 session、混轴、
+  未来 revision、未解决质量例外均为 0，聚合响应敏感字段扫描零命中。
+- 回归：`cargo test -p agent-vitals-runtime --release --features mcp-internal mcp::authority_audit`
+  与内部 Clippy 通过；`python3 tests/mcp_smoke.py --bin target/release/agent-vitals --internal`
+  通过：EXACT 18 / PARTIAL 2 / BLOCKED 6 / MISMATCH 0。成本逐事实历史价版本、
+  workflow_events 洞察仍未宣称完成。

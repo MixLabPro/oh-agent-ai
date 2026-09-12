@@ -308,7 +308,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | `summary_daily` | v0.9.1 MVP | 🔶 `SqlSummaryRepository::daily_summary` 覆盖 by_host/by_provider/tokens/coverage/freshness；**会话数 / 活跃小时 / 维度过滤需新增查询**（P1-4） |
 | `summary_monthly` | v0.9.1 MVP | 🔶 同上 + `budget_status_sql`；**逐日趋势 / 月底预测 / 成本占比 % 需新增**（P1-4，逐日趋势可基于 `peaked_days_map`） |
 | `data_quality_issues` | v0.9.1 MVP | 🔶 `data_quality_issues` 表已在；`detail_json` 的 code-aware 脱敏 allowlist 需新写 |
-| `authority_audit` | v0.9.1 internal only | 🔶 MCP 内只读——守恒 / 重复 / 覆盖 / `authority_revision` 一致性自检（不做重导入）。见 §8.1 |
+| `authority_audit` | v0.9.1 internal only | ✅ **落地**：MCP 内只读——实时事实 token 守恒、重复 / 孤儿 / legacy-realtime 混轴、覆盖范围输入校验、`authority_revision` 未来性和已登记质量例外自检；不做重导入。见 §8.1 |
 | `billing_workflow` | v1.0 smoke only, `mcp-internal` | 🔶 仅暴露类型化的候选 / 声明 / 重算 / 账单 / 预算管理动作；读取可用，写入必须显式启动 `data-mcp serve --allow-local-writes`，不属于公开兼容面，不提供任意 SQL 或通用写入 |
 | `reimport_verify` | v0.9.1（**MCP 外**） | ✅ **落地（`4c7f75b`）**：`agent-vitals data-reimport-verify [--json]`——两临时库各重放（round B 崩溃后重跑），逐宿主 × 北京月比对；不碰生产库。不是 MCP 工具（P1-2）。 |
 | `cost_breakdown` | v0.9.2 | ⬜ 逐事实 / 逐日历史价格重放（当前仅窗口级）+ 变化因子分解引擎 |
@@ -850,7 +850,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | **D3** | v1 按 `(host, raw_model, billing_route)`（§5 规则 4）。过滤字段 `models: [{kind, host, value}]`，**v1 只支持 `kind="host_raw"`**；canonical 归一表**不**进 v0.9.1。响应每个序列显式 `identity_kind: "host_raw"`。 | spec §5.1 规则 4、§7.2；增量 2 落地（`usage_hourly` input schema `models[].kind enum=["host_raw"]`；每个序列 key 带 `identity_kind`；未知 kind 静默过滤 + 测试 `unknown_model_kind_is_silently_ignored`） | `@claude-impl` | ✅ |
 | **D4** | cargo feature `mcp-internal`（`apps/cli` → `agent-vitals-runtime/mcp-internal`），公开构建**编译期排除** `authority_audit` / `query_sql_readonly` / `reimport_verify`。已在增量 7.5 落地（apps/cli `tools/list` 公开=2 / feature=3）。 | spec §8；增量 6 落地时再加 `authority_audit` / `reimport_verify` | `@claude-impl` | ✅ |
 | **D5** | `session_ref` salt：`<data_home>/.mcp-session-salt`（32 字节随机，权限 `0600`），首次调用 session 工具时生成。HMAC-SHA256（`sha2` 已是依赖，手写 HMAC，不新增 `hmac` crate）。**不进权威库**。反解 = 对 `sessions` 表逐行算 HMAC 匹配。已在 `7c68ab4` 落地（`mcp/session_ref.rs`，RFC 4231 测试向量钉住）。 | spec §9.2；`7c68ab4` | `@claude-impl` | ✅ |
-| **D6** | **拆分**：MCP 内只读 `authority_audit`（守恒 / 重复 / 覆盖 / `authority_revision` 自检）+ **MCP 外**隔离命令 `agent-vitals data reimport-verify`（临时库重导入比对）。快照对账模式 → M3 才接（要补 `snapshot.manifest.json` + `pricing_snapshots` / `host_bills` 副本）。 | spec §8.1；增量 6 + 7 | `@claude-impl` | ⬜ |
+| **D6** | **拆分**：MCP 内只读 `authority_audit`（守恒 / 重复 / 覆盖 / `authority_revision` 自检）+ **MCP 外**隔离命令 `agent-vitals data-reimport-verify`（临时库重导入比对）。快照对账模式 → M3 才接（要补 `snapshot.manifest.json` + `pricing_snapshots` / `host_bills` 副本）。 | spec §8.1；增量 6 + 7；Loop 313 真机 MCP 冒烟 | `@claude-impl` | ✅ |
 | **D7** | envelope `authority_revision` = `{last_completed_run_id, committed_at, max_observed_at}`。`max_observed_at` SQL 行级口径见 §6.1（**排除 `legacy_aggregate`**）。`as_of_run_id` 入参：v1 仅识别并 `warnings: [{code:"snapshot_drift", ...}]`，**不**假装钉住旧截面（假装比 drift 更危险）；钉截面 = M2 任务。 | spec §6.1 / §6.4.1；增量 6 落地（钉截面 + warn） | `@claude-impl` | ⬜ |
 | **D8** | `summary_daily` / `summary_monthly` 输出**保留** spec §7.3/§7.4 承诺的完整字段（会话数 / 活跃小时 / `group_by=model` / 维度过滤 / 逐日趋势 / 月底预测 / 成本占比）。这些**不是**冻结 DTO 的字段——列进增量 3 作为**新增聚合查询**（不是薄封装）。工作量按「新增查询 + 测试」计。 | spec §7.3/§7.4；增量 3 落地 | `@claude-impl` | ⬜ |
 | **D9** | `query_sql_readonly` 已在增量 7.5 落地（用户 2026-09-07 决定提前做，让其他 Agent 调试可用）。SQLite `authorizer` 按来源表 + 列拒绝 + 4 个脱敏只读 view（`v_facts_safe` / `v_sessions_safe` / `v_data_quality_safe` / `v_sync_runs_safe`）+ 危险函数 deny 黑名单 + `mcp-internal` 编译期 gating。**结果列名扫描不作唯一防线**（spec §8.2 P1-5 警示）。 | spec §8.2；增量 7.5 落地 | `@claude-impl` | ✅ |
@@ -873,7 +873,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 
 ### Phase M2：v0.9.1 迁移验收能力
 
-- `mcp-internal` feature 实现 `authority_audit`（§8.1.1：守恒 / 重复 / 覆盖 / `authority_revision` 自检，只读）。
+- `mcp-internal` feature 实现 `authority_audit`（§8.1.1：守恒 / 重复 / 覆盖 / `authority_revision` 自检，只读）；Loop 313 已用真实 MCP 调用验证 `exact`。
 - `reimport_verify`（§8.1.2，**MCP 外**隔离命令）——临时库两遍导入比对。
 - MCP、CLI、Tauri 三消费面对同一窗口逐值对账（M15，token + `MoneyMinor`）。
 - `authority_revision` 跨工具一致性识别 + warn（M17）。

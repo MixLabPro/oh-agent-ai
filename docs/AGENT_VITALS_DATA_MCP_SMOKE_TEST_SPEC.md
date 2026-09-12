@@ -1,6 +1,6 @@
 # Agent Vitals Data MCP 真机可用性冒烟测试规格
 
-> 状态：v2（2026-09-08）——Q04（会话下钻）+ Q12（重导入自洽）落地并纳入冒烟。
+> 状态：v3（2026-09-13）——`authority_audit`（S4.5）落地并纳入内部 MCP 冒烟。
 > 脚本：`tests/mcp_smoke.py`。上位规格：`AGENT_VITALS_DATA_MCP_SPEC.md`。
 
 ## 0. 目的与定位
@@ -110,6 +110,7 @@ reader）——spec §13 M4 前置，"工作量与 behavior 检测线相当"，�
 | **S4.2** 哪些宿主/日期不完整 | `data_status` | `by_host` 逐宿主 `covered_from/covered_to/facts`；`coverage.missing_hosts` | **EXACT**（原始数据齐；折成 stale 标记见 #F1） |
 | **S4.3** 重复事实 / 无法识别模型 / 缺价 / 重导入差异 | `data_status` | `open_quality_issues_by_code`（真机：`legacy_aggregate`×3 / `reconcile_exception`×4 / `undated_residual`×1） | **EXACT** |
 | **S4.4** 正式 SQL 权威库还是候选 | `data_status` | `authority_state ∈ {enabled, candidate}` + `data.sql_authority_enabled` + `schema_version` | **EXACT** |
+| **S4.5** SQL 权威库当前是否自洽 | internal `authority_audit` | 真实事实 token 守恒（host/model 轴，容差显式）、非负、重复组、孤儿 session、legacy/realtime 混轴、revision 未来性；只返回聚合证据，不泄露身份/路径；`verdict ∈ {exact, explained, mismatch}` | **EXACT**（本轮月范围 `2026-09`） |
 
 ## 5. 协议与安全冒烟（取自 M07 / M12 / M18 / M19）
 
@@ -149,6 +150,7 @@ python3 tests/mcp_v1_management_smoke.py --bin target/release/agent-vitals
 3. **窗口**：24 个北京小时桶恒在场（含全零桶）；`peak_hour` 是最大非零桶。
 4. **脱敏**：见 M07。
 5. **退出码**：出现 `MISMATCH` → exit 1。`BLOCKED` / `PARTIAL` / `EXPLAINED` 不影响退出码（它们是路线状态，不是回归）。
+6. **权威审计**：`authority_audit` 只读 SQL 权威库；host/model realtime token 轴差量必须 `<= tolerance_tokens`，结构性异常直接 `mismatch`，已登记质量例外只能使结果为 `explained`。
 
 **何时重跑**：每次 Data MCP 增量收口；每次改 `authority_query` 的窗口/聚合 SQL；
 真机启用观察期内每周一次。
@@ -169,6 +171,16 @@ python3 tests/mcp_v1_management_smoke.py --bin target/release/agent-vitals
 
 公开构建：EXACT 10 / EXPLAINED 1 / PARTIAL 2 / BLOCKED 6（少 `--internal` 专属的
 M19/M19b，多 M12；Q04/Q12 都在公开面）。
+
+### 7.3 第三轮（2026-09-13，`authority_audit` 纳入）
+
+内部构建在真实 `~/.agent-vitals` 上通过 JSON-RPC 调用 `authority_audit`：全库范围
+与 `month=2026-09` 范围均返回 `verdict=exact`；月范围 21,182 条事实、
+4,166,143,636 realtime tokens。host/model realtime token 守恒差量均为 0，负 token、
+重复组、孤儿 session、legacy/realtime 混轴、未来成功 revision、未解决质量例外均为 0；
+聚合响应敏感字段扫描零命中。工具只存在于 `mcp-internal`，不具备写入或重导入能力。
+
+同轮完整内部黑盒结果：**EXACT 18 / PARTIAL 2 / BLOCKED 6 / MISMATCH 0**。
 
 **Q04 逐值对账**（2026-09-07 峰值小时）：`usage_hourly(group_by=host)` 给
 `peak_hour` → `sessions_search(date, hour=peak, hosts=[h])` 逐会话 `tokens.total`
@@ -211,6 +223,7 @@ host-months / facts 逐值相等 / `interrupted_runs_swept=1`。
   ← **2026-09-08 达成**。
 - **M1 收口**：F1 已关闭（`stale_hosts` 落地）；增量 3/4 落地后 Q05 升 `EXACT`，
   新增 `summary_daily`/`summary_monthly` 行，三消费面 parity（M15）纳入。
-- **M2 收口**：`authority_audit` 纳入。
+- **M2 收口**：`authority_audit` 已纳入并通过真实 MCP 调用（Loop 313）；`reimport_verify`
+  仍作为 MCP 外隔离命令验证，二者职责不混用。
 - **v1.0.0（M5）**：Q01–Q14 全部 `EXACT` 或 `EXPLAINED`；无未关闭 `mismatch`
   （`AGENT_VITALS_DATA_MCP_SPEC.md` §14 DoD 末条）。

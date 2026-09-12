@@ -315,6 +315,28 @@ def main():
     R.add("S4.4", "结果来自正式 SQL 权威库还是候选", "EXACT",
           f"authority_state = {ds['authority_state']} · sql_authority_enabled = {ds['data']['sql_authority_enabled']} · schema v{ds['data']['schema_version']}")
 
+    # ── S4.5 authority_audit（mcp-internal，只读）───────────────────────
+    # 这是数据可信度底线的聚合审计：只允许返回计数和 verdict，不把事实身份、
+    # 路径或质量 issue 的 detail_json 暴露给 MCP 客户端。
+    if args.internal:
+        audit_result, _, _ = c.call("authority_audit", {"month": month, "tolerance_tokens": 0})
+        audit_sc = (audit_result or {}).get("structuredContent") or {}
+        audit_data = audit_sc.get("data") or {}
+        audit_checks = audit_data.get("checks") or []
+        audit_text = json.dumps(audit_result, ensure_ascii=False)
+        audit_leak = any(p in audit_text for p in
+                         ["native_session_id", "machine_namespace", "source_event_id", "/Users/"])
+        audit_ok = (not (audit_result or {}).get("isError")
+                    and audit_data.get("verdict") in ("exact", "explained")
+                    and not audit_leak
+                    and all(c.get("status") == "pass" for c in audit_checks
+                            if c.get("name") != "registered_quality_exceptions"))
+        R.add("S4.5", "authority_audit：守恒/重复/孤儿/legacy 隔离/版本未来性可解释",
+              "EXACT" if audit_ok else "MISMATCH",
+              f"scope={audit_data.get('scope')} verdict={audit_data.get('verdict')} "
+              f"checks={[(c.get('name'), c.get('status'), c.get('observed')) for c in audit_checks]} "
+              f"aggregate_leak={audit_leak}")
+
     # ── 协议 & 安全（M07/M12/M18/M19）──────────────────────
     print()
     leak = []
