@@ -1300,7 +1300,19 @@ function renderBillingImportCandidates(report) {
   bindBillingDeclarationPanel();
   const candidates = report && report.status === "ok" ? (report.candidates || []) : [];
   const pendingCount = candidates.filter((candidate) => candidate.status === "pending").length;
-  const deferred = sessionStorage.getItem("agent-vitals-billing-review-later") === "1";
+  const deferKey = "agent-vitals-billing-review-deferred-at-ms";
+  const deferWindowMs = 30 * 24 * 60 * 60 * 1000;
+  let deferredAt = 0;
+  try { deferredAt = Number(localStorage.getItem(deferKey) || 0); } catch (_) { /* best effort */ }
+  if (!deferredAt) {
+    try { deferredAt = Number(sessionStorage.getItem(deferKey) || 0); } catch (_) { /* best effort */ }
+  }
+  const deferred = Number.isFinite(deferredAt) && deferredAt > 0 &&
+    Date.now() - deferredAt < deferWindowMs;
+  if (deferredAt > 0 && !deferred) {
+    try { localStorage.removeItem(deferKey); } catch (_) { /* best effort */ }
+    try { sessionStorage.removeItem(deferKey); } catch (_) { /* best effort */ }
+  }
   // “稍后”只压住尚未处理的提醒；已确认/已忽略项仍保留一个可回看的入口。
   prompt.hidden = !candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred);
   panel.hidden = true;
@@ -1311,7 +1323,9 @@ function renderBillingImportCandidates(report) {
     : "已核对的套餐信息不会计入实际支出；当前用量仍按原厂价估算。";
 
   document.getElementById("ov-billing-later").onclick = () => {
-    sessionStorage.setItem("agent-vitals-billing-review-later", "1");
+    const value = String(Date.now());
+    try { localStorage.setItem(deferKey, value); } catch (_) { /* best effort */ }
+    try { sessionStorage.setItem(deferKey, value); } catch (_) { /* best effort */ }
     prompt.hidden = true;
   };
   document.getElementById("ov-billing-review").onclick = () => {

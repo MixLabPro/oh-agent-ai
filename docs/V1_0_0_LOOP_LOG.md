@@ -718,3 +718,11 @@
 - 保护：测试未执行宿主修复、Shell 或其它外部动作；仅写入本地 Issue 状态迁移历史，最后恢复为原始 `open` 状态。
 - 验收：桌面 release 测试 105/105、Clippy、`node --check`、`git diff --check`、`.app` 重建、ad-hoc 安装和 Computer Use 真机路径通过。
 - 边界：提醒去重/定时策略、完整五态逐态验收、其它 REQ-073–080 与 AC18 完整门槛仍待继续，不勾选 AC18。
+
+## Loop 87 · 套餐候选稍后抑制跨重启（Computer Use）
+
+- 修复：套餐候选“稍后”由仅当前 WebView 会话的 `sessionStorage` 改为带时间戳的 30 天抑制窗口；过期自动清理并重新提示。对 WebView 存储不可用场景保留 `sessionStorage` 回退，不改变候选的待确认/非账单语义。
+- UAT：`AC28 partial walked ✔`；新安装 `.app` 的总览可见“有套餐信息待你确认”，点击“稍后”后关闭提示；退出并冷启动 `.app`，首屏截图不再显示套餐确认卡，当前估算仍保留。
+- 保护：未接受套餐、未创建账单、未改变任何计费归因；仅记录本地提醒抑制时间。
+- 验收：`node --check`、`git diff --check`、桌面 release 测试 105/105、Clippy、`.app` 重建、ad-hoc 安装和 Computer Use 冷启动复验通过。
+- 边界：尚未等待真实 30 天验证自然过期；候选仍可从待处理/确认入口回看，AC28 完整跨 CLI/MCP 对拍仍待完成，不勾选 AC28。
