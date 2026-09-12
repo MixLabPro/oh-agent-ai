@@ -35,6 +35,11 @@ fn should_show_first_value_workspace(sync: &SyncStatus) -> bool {
     sync.stage == "never"
 }
 
+fn should_show_workbench_on_start(sync: &SyncStatus, args: &[String]) -> bool {
+    should_show_first_value_workspace(sync)
+        || args.iter().any(|arg| arg == "--show-workbench")
+}
+
 /// 独立的 macOS 菜单栏模板图。不能复用彩色 App Icon：模板图只提供 alpha
 /// 轮廓，由 AppKit 根据浅色、深色、选中和辅助功能状态自动着色。44×36px 源图按
 /// 22×18pt 呈现，横向画布避免啄木鸟在方形透明留白中显得过小，并保留 Retina 细节。
@@ -2480,7 +2485,8 @@ pub fn run() {
                 let _ = t.set_title(Some(today_title(&ov)));
             }
             start_refresh_tick(app.handle().clone());
-            if should_show_first_value_workspace(&ov.sync) {
+            let args: Vec<String> = std::env::args().collect();
+            if should_show_workbench_on_start(&ov.sync, &args) {
                 show_workbench(app.handle());
             }
             // SQL 权威库后台预热：app 启动就 spawn 一轮 data-status（sub-second）
@@ -3524,6 +3530,13 @@ mod tests {
         assert!(!should_emit_fold_event(&SyncStatus::ok("discover", "无未折 DSH 会话".into())));
         assert!(!should_emit_fold_event(&SyncStatus::fail("fold", "oneline 失败".into())));
         assert!(!should_emit_fold_event(&SyncStatus::default()));
+    }
+
+    #[test]
+    fn explicit_show_workbench_flag_overrides_existing_sync_receipt() {
+        let ready = SyncStatus::ok("discover", "ready".into());
+        assert!(!should_show_workbench_on_start(&ready, &[]));
+        assert!(should_show_workbench_on_start(&ready, &["--show-workbench".into()]));
     }
 
     /// spec §9.2 #11 深链 slot 语义：peek 连续读两次返回同一目标（持久、

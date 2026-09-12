@@ -703,3 +703,10 @@
 - 保护：初始详情只复用权威 `issue_group_instances` 返回的数据，不猜测金额、状态或 metadata；独立 IPC 回读成功后覆盖为完整权威详情。
 - 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、`git diff --check`、桌面 crate release 测试 104/104、clippy、`.app` release 构建和本机 ad-hoc 安装通过。
 - 边界：安装后菜单栏进程正常存活，但 Computer Use 未重新取得可见工作台窗口；L2 真机点击需在窗口可见后复验，不勾选 AC18。
+
+## Loop 85 · Issue L2 详情真机复验（Computer Use）
+
+- UAT：`REQ-073 L2 walked ✔`；通过 `--show-workbench` 启动已安装 `.app`，Issues 页面显示 503 条发现，展开首条实例后点击“详情”，稳定显示完整权威详情 JSON。
+- 证据：详情块包含 `issue_id`、`host_kind=claude-code`、`rule=SV603`、`status=open`、`evidence`、`opened_at_ms` 和 `metadata`；未点击“稍后 / 已确认 / 已解决 / 不适用”，本地状态未被测试改变。
+- 启动：新增显式 `--show-workbench` 开关，允许已有同步回执的菜单栏应用在真机 UAT 时打开工作台；默认启动行为保持不变。
+- 结论：L2 详情读取闭环已通过真实界面证据；五态动作、分页和其它 AC 仍按各自边界继续，不因此勾选 AC18 或完整 REQ-073–080。
