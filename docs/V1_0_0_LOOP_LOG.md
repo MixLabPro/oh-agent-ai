@@ -2102,3 +2102,11 @@
   当前浏览器页，不写 Authority、不读取用户日志。
 - UAT: AC26/AC27 walked ✔：页面显示受影响的 18K tokens、4 条事实、1 个会话；保存前
   先显示影响预览，确认保存后才显示重算入队并完成回执。
+
+## Loop 295 · Authority 计费声明链路回归
+
+- 验收：`cargo test -p agent-vitals-data --release billing_declaration -- --nocapture`
+  通过 4 项，覆盖声明与账单分离、修订不可变/可撤销、作用范围影响预览和数据库迁移；
+  `billing_recalculation` 通过 1 项，覆盖重算任务幂等与显式回执。
+- 结论：AC26/AC27 的网页路径与 Authority 数据层已有双层证据；真实桌面 IPC/跨界面
+  对拍仍需 macOS 解锁后的 `.app` 验收。
