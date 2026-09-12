@@ -2225,3 +2225,17 @@
   均无失败。
 - 结论：本次目录完整性修复同时具备 arm64 与 x86_64 Rust 执行证据；完整 Intel `.app`
   仍需原生 macOS-13 runner 打包。
+
+## Loop 311 · 数据层 MCP 真机黑盒验收
+
+- 验收：`python3 tests/mcp_smoke.py --bin target/release/agent-vitals` 公开构建通过，
+  结果为 `EXACT 16 / PARTIAL 2 / BLOCKED 6 / MISMATCH 0`；公开工具清单无 SQL、写入、
+  同步、迁移或 repair 能力。Q01–Q04、Q11–Q12、协议、脱敏、CLI 对拍、sessions 三消费面
+  parity 与 trace 下钻均通过。
+- 验收：重新以 `cargo build --release --features mcp-internal` 构建后，同一冒烟脚本以
+  `--internal` 运行，结果为 `EXACT 17 / PARTIAL 2 / BLOCKED 6 / MISMATCH 0`；
+  `query_sql_readonly` 拒绝敏感列别名、`INSERT` 和裸 `usage_facts` 表读取，允许
+  `v_facts_safe` 安全视图聚合。
+- 结论：数据层可通过 MCP 完成真实只读查询、协议安全和跨消费面对拍；成本逐事实价格
+  版本、workflow_events 问题/技能聚合及写入链不能仅靠当前 MCP 完整验收，仍需 Authority
+  直接测试、CLI 测试和后续 M3/M4 工具。
