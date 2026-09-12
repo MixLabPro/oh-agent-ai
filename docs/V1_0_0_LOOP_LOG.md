@@ -1327,3 +1327,10 @@
 - 构建：`cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 release CLI `cmp` 一致。
 - 安装：旧包可恢复备份为 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-031221`，新包已安装并重启，运行 PID `79051`。
 - 边界：macOS 仍锁定，未执行真实待处理页视觉操作；真实 4,450 条数据量级/P95、签名/公证和外部试用门禁仍未完成。
+
+## Loop 180 · 来源问题投影按稳定维度归并
+
+- 修复：`data_quality_issues` 的 `scope_key` 可能包含 `fact_id`，不再直接作为 L0 对象；来源投影改按规则、宿主、稳定 provider/计费模式、证据类和日桶归并。
+- 保护：原始来源表与 scope identity 不变；组内保留累计命中数、状态汇总、首末时间及最多 3 条样本，fact id 仍可从样本追溯。
+- 验收：`agent-vitals-data` Issue 测试 10/10 通过；data Clippy 通过；新增跨 fact 质量投影归并断言。
+- 边界：尚未在真实 4,450 条库上输出归并前后比值；桌面视觉 Computer Use、签名/公证和外部试用门禁仍未完成。
