@@ -853,3 +853,10 @@
 - 修复：单个候选的影响查询失败时返回 `impact.status=unavailable`；总览聚合显示“影响范围暂不可用”，不把缺失候选当作 0 tokens，候选行也保留失败原因方向。
 - 验收：data 定向测试、desktop Clippy、workbench JS 语法、Vite build、`git diff --check` 和最新 `.app` bundle 均通过。
 - 边界：系统时区/夏令时仍是未完成的独立 AC21 工作包；AC26/AC27 真机点击仍待设备解锁。
+
+## Loop 107 · Vite 浏览器样式调试闭环（开发工具增强）
+
+- 修复：Vite 开发服务器现在仅在 `serve` 模式注入浏览器 Tauri mock；可直接打开 `http://127.0.0.1:5173/workbench.html` 调整 CSS/HTML，并保留 HMR/整页刷新。mock 数据明确标注为浏览器调试数据，不写入本地数据库。
+- 保护：生产构建和正式 `.app` 不注入 mock，仍使用真实 Tauri IPC；现有 DOM/JS 结构不因样式调试被改写，也未引入 React 重写范围。
+- 验收：Vite build、mock JS 语法检查、浏览器实际加载总览与会话页通过；总览显示 246K/374K 级 token、预算状态和数据质量提示，会话页显示“浏览器样式调试会话”，未见读取失败。
+- 边界：浏览器 mock 只验证布局与交互表现；SQLite、系统目录、真实 IPC 及 AC13/AC27/AC21 仍须在最终 `.app` 中验收。
