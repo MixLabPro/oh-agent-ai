@@ -1413,3 +1413,9 @@
 - 保护：启用 release CLI 后，Python/Rust 双实现、golden、时区边界、WorkBuddy 证据和桌面相关兼容合同均通过；未刷新 golden/snapshot。
 - 结论：本轮 Python 查询局部时区修复在严格二进制对拍下保持兼容，默认时区与显式 IANA 覆盖均未引入回归。
 - 边界：真实非 UTC+8 桌面 Computer Use 仍因 macOS 锁屏未复验；签名/公证、干净机升级和外部试用门禁仍未完成。
+
+## Loop 193 · 日历日期格的时区独立性
+
+- 修复：Workbench 日历首日星期、月末天数和月份切换改用 UTC 民历容器，不再受浏览器本地时区影响；统计数据窗口仍由后端配置的 IANA 统计时区决定。
+- 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、Vite production build、`git diff --check`通过；Vite 页面加载后 `#cal-grid` 存在且控制台无 error。
+- 边界：真实非 UTC+8 安装包视觉走查仍需解锁 macOS；AC21 完整跨日/夏令时真机证据、签名/公证和外部试用门禁仍未完成。

@@ -2398,8 +2398,11 @@ async function renderCalendar() {
   }
 
   const [y, m] = calMonth.split("-").map(Number);
-  const lead = new Date(y, m - 1, 1).getDay();
-  const dim = new Date(y, m, 0).getDate();
+  // 这些是“日期字符串”的民历运算，不是时间戳投影。使用 UTC 仅作为
+  // 无时区的日期容器，避免浏览器本地时区在西区/东区把首日星期或月末
+  // 推到前后一天；统计数据本身仍按 statisticsTimezoneName() 查询。
+  const lead = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  const dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
   const today = beijingToday();
   // DSH 的最后观测日（月级，来自 data_monthly_summary.by_host.dsh）——过期时
   // 格子 tooltip 说明 ¥ 段缺席的含义（审查 UX#7）。
@@ -2584,8 +2587,8 @@ async function renderHourly(date) {
 
 function shiftMonth(delta) {
   const [y, m] = calMonth.split("-").map(Number);
-  const t = new Date(y, m - 1 + delta, 1);
-  calMonth = t.getFullYear() + "-" + String(t.getMonth() + 1).padStart(2, "0");
+  const t = new Date(Date.UTC(y, m - 1 + delta, 1));
+  calMonth = t.getUTCFullYear() + "-" + String(t.getUTCMonth() + 1).padStart(2, "0");
   renderCalendar();
 }
 
