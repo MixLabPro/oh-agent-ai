@@ -885,3 +885,10 @@
 - 修复：非未来日期格增加按钮语义、Tab 焦点、可读 `aria-label`，支持 Enter/Space 打开对应的按小时面板；月份合计增加 `aria-live` 更新提示。
 - 验收：Workbench JS 语法、Vite build、`git diff --check` 通过；浏览器实测日期格可聚焦，Enter 操作成功打开“当日按小时”。
 - 边界：完整 AC22 的读屏、200% 字号和最小窗口矩阵仍需专门验收。
+
+## Loop 112 · Workbench 跟随系统明暗主题
+
+- 修复：工作台增加 `prefers-color-scheme: light` 主题变量和控件色彩覆盖；默认深色方向保持不变，系统切换到浅色时面板、文字、边界和状态色同步调整。
+- 保护：主题层不改变金额、时间窗、计价或数据状态；浅色覆盖保留“无数据/诊断”标签的可读对比度。
+- 验收：Vite build、Workbench JS 语法检查、主题规则静态检查和 `git diff --check` 通过。
+- 边界：真实 macOS 外观切换和完整 AC22 读屏/200% 矩阵仍需真机验收。

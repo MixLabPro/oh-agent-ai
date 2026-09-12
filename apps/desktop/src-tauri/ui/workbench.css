@@ -1,6 +1,7 @@
 /* 工作台主窗口样式。:root token 块与 style.css（弹窗）同一份 —— 两个窗口
    同一套暗色语言，视觉一致但各自独立文件（弹窗不动）。 */
 :root {
+  color-scheme: dark;
   --bg: #0f172a;
   --panel: #1e293b;
   --panel-2: #334155;
@@ -12,6 +13,30 @@
   --success: #4ade80;
   --skill: #60a5fa;
   --radius: 12px;
+}
+
+/* 跟随 macOS/系统外观；业务状态色保持语义，只调整底色、文字和边界对比度。
+   这是主题层，不改变任何金额、时间窗或数据口径。 */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f8fafc;
+    --panel: #ffffff;
+    --panel-2: #d5deea;
+    --text: #1e293b;
+    --muted: #64748b;
+    --accent: #047857;
+    --warn: #a16207;
+    --danger: #b91c1c;
+    --success: #15803d;
+    --skill: #1d4ed8;
+  }
+
+  .src-list li.no-data .chip,
+  .decide .chip {
+    color: #475569;
+    border-color: #cbd5e1;
+  }
 }
 
 * {
