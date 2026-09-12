@@ -1259,3 +1259,9 @@
 - 修复：预算快照时间、Codex 配额重置时间、Issue 时间和数据源最近日志时间统一使用后端配置的统计 IANA 时区格式化；避免查询按配置时区而展示按系统时区造成跨日/偏移。
 - 验收：`node --check apps/desktop/src-tauri/ui/workbench.js`、Vite production build 与 `git diff --check` 通过；源码不再调用未指定时区的 `toLocaleString`/`toLocaleTimeString`。
 - 边界：真实窗口视觉 Computer Use 仍因 macOS 锁定未执行；未以静态检查替代 AC21/AC22 真机验收。
+
+## Loop 169 · 时间展示修复进入安装包
+
+- 构建：重新执行 `cargo tauri build --bundles app` 成功；安装包内置 CLI 与仓库 release CLI `cmp` 一致。
+- 验收：旧包移至 `/Applications/agent-vitals.app.pre-v1.0.0-20260913-025321`，新包以 `--show-workbench` 启动，进程已运行。
+- 边界：当前包仍为 ad hoc 签名且无 Team Identifier；未以本地启动替代签名公证或真实 Computer Use 验收。
