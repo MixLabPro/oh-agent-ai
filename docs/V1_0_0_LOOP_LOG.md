@@ -1726,3 +1726,9 @@
 - 构建：`cargo tauri build --bundles app` 成功，CLI 版本诊断字段及 Workbench 展示已重新编入最新 `agent-vitals.app`。
 - 外部检查：远端 `main/assets/pricing.json` 与 GitHub Contents API 均匿名返回 404；公共价格目录真实联网成功仍不能宣称完成，也未擅自推送远端。
 - 边界：未在当前不可操作桌面环境安装/启动；签名/公证、真实 Computer Use、干净机升级和外部试用仍未完成。
+
+## Loop 244 · 桌面包内容与随包 CLI 验证
+
+- 验收：最新 `.app` 的 `Contents/Resources/bin/agent-vitals` 确实存在，直接执行返回 `agent-vitals 1.3.0`；因此诊断页在发布包内可读取随包 CLI，而不依赖开发机 PATH。
+- 发现：`codesign --verify --deep --strict` 仍失败，报 `code has no resources but signature indicates they must be present`；这是当前未完成签名/公证配置的明确证据，不能标记为已签名发布包。
+- 边界：未安装/启动包；真实 Computer Use、Developer ID/公证、干净机升级和外部试用仍待完成。
