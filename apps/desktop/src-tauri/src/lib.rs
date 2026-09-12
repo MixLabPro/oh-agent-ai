@@ -2062,6 +2062,17 @@ fn about_diagnostics() -> Value {
 const TRUSTED_RELEASES_URL: &str = "https://github.com/MixLabPro/agent-vitals/releases";
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/MixLabPro/agent-vitals/releases/latest";
 
+fn parse_latest_release_tag(payload: &Value) -> Result<String, String> {
+    let tag = payload
+        .get("tag_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "trusted release response has no tag_name".to_string())?;
+    if !tag.starts_with("app-v") {
+        return Err(format!("trusted release tag is not an app release: {tag}"));
+    }
+    Ok(tag.to_string())
+}
+
 #[tauri::command]
 async fn check_for_updates() -> Result<Value, String> {
     let client = reqwest::Client::builder()
@@ -2089,11 +2100,7 @@ async fn check_for_updates() -> Result<Value, String> {
         .json()
         .await
         .map_err(|error| format!("parse update response failed: {error}"))?;
-    let tag = payload
-        .get("tag_name")
-        .and_then(Value::as_str)
-        .filter(|value| value.starts_with("app-v"))
-        .ok_or_else(|| "trusted release response has no app-v tag".to_string())?;
+    let tag = parse_latest_release_tag(&payload)?;
     Ok(serde_json::json!({
         "status": "ok",
         "current_version": env!("CARGO_PKG_VERSION"),
@@ -4312,5 +4319,15 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"keep-current");
         assert!(!root.join("authority.sqlite.pre-restore-43.bak").exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn latest_release_parser_accepts_only_app_tags() {
+        assert_eq!(
+            parse_latest_release_tag(&serde_json::json!({"tag_name": "app-v1.0.0"})).unwrap(),
+            "app-v1.0.0"
+        );
+        assert!(parse_latest_release_tag(&serde_json::json!({})).is_err());
+        assert!(parse_latest_release_tag(&serde_json::json!({"tag_name": "v1.0.0"})).is_err());
     }
 }

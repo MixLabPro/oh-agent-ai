@@ -1972,6 +1972,13 @@
 - 说明：首次尝试使用浏览器 DOM shim 的 `.click()` 不适用并超时，改用页面 locator
   操作后成功完成交互验证；不将工具调用方式错误记为产品失败。
 
+## Loop 280 · 版本响应 tag 白名单回归
+
+- 加固：抽出 latest release tag 解析函数，仅接受 `app-v*`；缺少 `tag_name` 或返回
+  普通 `v*`/其他 tag 时拒绝，不把非桌面发布误当安装候选。
+- 验收：新增 Rust 单测覆盖合法、缺失和非 App tag 三种响应；Computer Use 仍受
+  macOS 锁屏限制，未将其混入 API 解析回归结论。
+
 ## Loop 276 · 自动刷新逻辑重新封装进 App
 
 - 验收：包含恢复后自动 reload 的最新桌面源码通过 `cargo tauri build --bundles app`；
