@@ -1637,6 +1637,7 @@ fn persist_findings_as_issues(
         crate::sql_sync::now_ms(),
     ) else { return };
     for (entry, findings) in entries.iter().zip(extracted) {
+        let mut current_issue_ids = BTreeSet::new();
         for finding in findings {
             let evidence = finding.evidence.as_deref().unwrap_or("");
             let seq = finding.seq.map(|v| v.to_string()).unwrap_or_default();
@@ -1674,6 +1675,7 @@ fn persist_findings_as_issues(
             let _ = db.with_immediate_txn(|conn| {
                 let issue_id = agent_vitals_data::issues::upsert_issue(conn, &input)
                     .map_err(agent_vitals_data::authority::AuthorityError::Sqlite)?;
+                current_issue_ids.insert(issue_id.clone());
                 let status: Option<String> = conn.query_row(
                     "SELECT status FROM issue_instances WHERE issue_id = ?1", [&issue_id], |r| r.get(0)
                 ).ok();
@@ -1687,7 +1689,40 @@ fn persist_findings_as_issues(
                 Ok(())
             });
         }
+        let _ = db.with_immediate_txn(|conn| {
+            close_missing_legacy_issues(conn, entry, &current_issue_ids, crate::sql_sync::now_ms())
+                .map_err(agent_vitals_data::authority::AuthorityError::Sqlite)
+        });
     }
+}
+
+/// Close only issues that this same evaluator no longer observes for a session.
+/// Deferred (`later`) items remain deferred; a user acknowledgement may close
+/// after objective re-validation, but no other host or issue family is touched.
+fn close_missing_legacy_issues(
+    conn: &rusqlite::Connection,
+    entry: &SessionReportEntry,
+    current_issue_ids: &BTreeSet<String>,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT issue_id FROM issue_instances
+         WHERE machine_namespace = ?1 AND host = ?2 AND session_key = ?3
+           AND evaluator_id = 'legacy-finding' AND status IN ('open', 'acknowledged')
+         ORDER BY issue_id",
+    )?;
+    let ids = stmt.query_map(rusqlite::params![entry.key.machine_namespace, entry.key.host_kind, entry.key.native_id], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut closed = 0;
+    for issue_id in ids {
+        if current_issue_ids.contains(&issue_id) { continue; }
+        agent_vitals_data::issues::transition_issue(
+            conn, &issue_id, "closed", now_ms, "not observed on re-evaluation",
+            "legacy-finding", "re-evaluation:absent", "legacy-finding", "v0.11", &format!("re-evaluation:{issue_id}"),
+        )?;
+        closed += 1;
+    }
+    Ok(closed)
 }
 
 /// 人读的 findings 表格（`--json` 之外）。只给 totals + 规则级聚合（明细行太多，
@@ -3174,5 +3209,55 @@ mod tests {
             ]
         );
         assert!(out.contains("\"host_kind\": \"dsh\""));
+    }
+
+    #[test]
+    fn re_evaluation_closes_absent_issues_but_preserves_later() {
+        let path = std::env::temp_dir().join(format!("av-auto-close-{}", std::process::id()));
+        let db = agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap();
+        let entry = nav_entry("codex", "native-1", Some("2026-09-12"), Some("2026-09-12"), None, 1);
+        let metadata = "{}";
+        for fingerprint in ["current", "absent", "deferred"] {
+            let input = agent_vitals_data::issues::IssueInput {
+                machine_namespace: &entry.key.machine_namespace, host: &entry.key.host_kind,
+                session_key: Some(&entry.key.native_id), issue_type: "SV601",
+                instance_fingerprint: fingerprint, status: "open", severity: "warning",
+                evaluator_id: "legacy-finding", evaluator_version: "v0.11",
+                evidence_fingerprint: fingerprint, opened_at_ms: 1_000,
+                metadata_json: metadata,
+            };
+            agent_vitals_data::issues::upsert_issue(db.conn(), &input).unwrap();
+        }
+        let deferred_id = agent_vitals_data::issues::stable_issue_id(&agent_vitals_data::issues::IssueInput {
+            machine_namespace: &entry.key.machine_namespace, host: &entry.key.host_kind,
+            session_key: Some(&entry.key.native_id), issue_type: "SV601",
+            instance_fingerprint: "deferred", status: "open", severity: "warning",
+            evaluator_id: "legacy-finding", evaluator_version: "v0.11",
+            evidence_fingerprint: "deferred", opened_at_ms: 1_000, metadata_json: metadata,
+        });
+        agent_vitals_data::issues::transition_issue(db.conn(), &deferred_id, "later", 2,
+            "remind later", "user", "user-action:later", "user", "v1", "defer").unwrap();
+        let current_id = agent_vitals_data::issues::stable_issue_id(&agent_vitals_data::issues::IssueInput {
+            machine_namespace: &entry.key.machine_namespace, host: &entry.key.host_kind,
+            session_key: Some(&entry.key.native_id), issue_type: "SV601",
+            instance_fingerprint: "current", status: "open", severity: "warning",
+            evaluator_id: "legacy-finding", evaluator_version: "v0.11",
+            evidence_fingerprint: "current", opened_at_ms: 1_000, metadata_json: metadata,
+        });
+        let mut keep = BTreeSet::new();
+        keep.insert(current_id.clone());
+        assert_eq!(close_missing_legacy_issues(db.conn(), &entry, &keep, 3).unwrap(), 1);
+        let status = |id: &str| db.conn().query_row("SELECT status FROM issue_instances WHERE issue_id=?1", [id], |r| r.get::<_, String>(0)).unwrap();
+        assert_eq!(status(&current_id), "open");
+        let absent_id = agent_vitals_data::issues::stable_issue_id(&agent_vitals_data::issues::IssueInput {
+            machine_namespace: &entry.key.machine_namespace, host: &entry.key.host_kind,
+            session_key: Some(&entry.key.native_id), issue_type: "SV601",
+            instance_fingerprint: "absent", status: "open", severity: "warning",
+            evaluator_id: "legacy-finding", evaluator_version: "v0.11",
+            evidence_fingerprint: "absent", opened_at_ms: 1_000, metadata_json: metadata,
+        });
+        assert_eq!(status(&absent_id), "closed");
+        assert_eq!(status(&deferred_id), "later");
+        let _ = std::fs::remove_file(path);
     }
 }

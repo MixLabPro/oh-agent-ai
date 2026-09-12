@@ -682,3 +682,10 @@
 - 证据：告警携带 `comparison_range=previous_7_valid_days`、`baseline_days`、中位数、观测值、覆盖状态和计费口径，便于用户判断而非只展示红色严重度。
 - 验收：8 日夹具触发单一增长组并验证 7 日基线；data crate 124/124、Clippy、desktop 编译、JS 语法、差异检查通过。
 - 边界：增长阈值产品配置、通知去重/静默和真机提醒仍待完成；不勾选 REQ-111 或完整 REQ-074。
+
+## Loop 82 · REQ-078 可自动验证 Issue 关闭（自验收）
+
+- 执行：legacy finding 重评估后，在同一 machine/session/host/evaluator 范围内，将本轮不再出现的 `open` 或 `acknowledged` Issue 转为 `closed`，并写入 `issue_status_transitions`。
+- 保护：当前仍出现的 Issue 保留；用户选择 `later` 的事项不被后台关闭；其它评估器、宿主和问题族不受影响；关闭理由固定为重评估未再观察到。
+- 验收：回归覆盖 current/absent/deferred 三条实例，结果分别为 open/closed/later；runtime 全量 249/249、Clippy、差异检查通过。
+- 边界：声明类事项需在声明成功应用后完成、持续观察事项的“验证中”展示，以及完整 REQ-078 真机验证仍待完成。
