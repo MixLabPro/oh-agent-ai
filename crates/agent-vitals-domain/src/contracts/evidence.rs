@@ -295,7 +295,7 @@ pub struct DecimalAmount {
 /// （例如一个 7 天滚动窗口叠一个更短的突发窗口），§14.10 cc-switch 的
 /// `tiers[]` 就是因为拍扁成一个数字而丢了"到底哪个窗口先撞线"，所以这里
 /// 用 `Vec<QuotaWindow>` 而不是单个百分比。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct QuotaWindow {
     /// 套餐档位的原始字符串（如某宿主上会读到 `"plus"`）——不同宿主的叫法
     /// 互不通用，不结构化成枚举。
@@ -303,6 +303,42 @@ pub struct QuotaWindow {
     pub used_percent: f64,
     pub window_minutes: u32,
     pub resets_at_ms: i64,
+}
+
+/// 宿主无关的当前配额快照。
+///
+/// 各宿主的 wire 字段（例如 Codex 的 `rate_limits`、未来其他宿主的
+/// `limits`）由 adapter 映射到这里。`plan` 只保留人可见的宿主原始档位，
+/// 不把它误当成跨宿主通用枚举；宿主特有的 credits/balance 扩展不进入该
+/// 类型，也不能被统一换算成金额。
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuotaSnapshot {
+    pub plan: Option<String>,
+    pub windows: Vec<QuotaWindow>,
+    pub observed_at: String,
+}
+
+impl QuotaSnapshot {
+    /// 仅检查跨宿主不变量；具体 wire 字段和缺失字段策略由 adapter 决定。
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.observed_at.is_empty() {
+            return Err("quota snapshot observed_at is empty");
+        }
+        if self.plan.as_deref().is_some_and(str::is_empty) {
+            return Err("quota snapshot plan is empty");
+        }
+        for window in &self.windows {
+            if !window.used_percent.is_finite()
+                || !(0.0..=100.0).contains(&window.used_percent)
+                || window.window_minutes == 0
+                || window.resets_at_ms < 0
+                || window.plan.is_empty()
+            {
+                return Err("quota snapshot window is invalid");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// 不同单位的花费**不可比较**——不同币种不相加不排名；WorkBuddy 计的是
@@ -730,6 +766,25 @@ mod tests {
         let Cost::Quota(windows) = cost else { panic!("expected Cost::Quota") };
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[1].window_minutes, 300);
+    }
+
+    #[test]
+    fn quota_snapshot_validates_cross_host_invariants() {
+        let snapshot = QuotaSnapshot {
+            plan: Some("plus".into()),
+            windows: vec![QuotaWindow {
+                plan: "plus".into(),
+                used_percent: 42.0,
+                window_minutes: 300,
+                resets_at_ms: 1_787_800_000_000,
+            }],
+            observed_at: "2026-09-13T00:00:00Z".into(),
+        };
+        assert_eq!(snapshot.validate(), Ok(()));
+
+        let mut invalid = snapshot.clone();
+        invalid.windows[0].used_percent = 101.0;
+        assert_eq!(invalid.validate(), Err("quota snapshot window is invalid"));
     }
 
     /// §12："这条规则有一个测试：断言共享类型层里没有任何标识符含宿主名。"

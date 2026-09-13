@@ -59,6 +59,7 @@
 //! 实现见 `scripts/agent_vitals/agent/codex_usage.py`，差分由
 //! `tests/test_cli_matrix.py::both()` 与 characterization 钉死。
 
+use agent_vitals_domain::evidence::{QuotaSnapshot, QuotaWindow};
 use serde_json::{Map, Value, json};
 
 /// Codex 5 桶字段名（输出顺序 = 桶序）。`uncached_input_tokens` 是派生字段，其余
@@ -239,11 +240,52 @@ fn plan_from_rate_limits(rl: &Value, observed_at: &str) -> Option<Value> {
 /// 这里保留最小的宿主身份校验，坏 payload 只能降级为 unavailable，不能
 /// 被读面当作通用额度或零值继续传播。
 pub fn validate_quota_snapshot(snapshot: &Value) -> Option<Value> {
+    quota_snapshot_contract(snapshot)?;
+    Some(snapshot.clone())
+}
+
+/// 把 Codex adapter 的兼容 JSON 快照映射为宿主无关的配额契约。
+///
+/// `has_credits` 等 Codex 扩展仍留在原始快照中；跨宿主消费者只依赖
+/// `QuotaSnapshot` 的计划标签、完整窗口和观测时间。缺少窗口字段时保留
+/// plan-only 快照，和当前 Codex 降级输出的语义一致。
+pub fn quota_snapshot_contract(snapshot: &Value) -> Option<QuotaSnapshot> {
     let plan_type = snapshot.get("plan_type").and_then(Value::as_str)?;
     if plan_type.is_empty() {
         return None;
     }
-    Some(snapshot.clone())
+    let observed_at = snapshot.get("observed_at").and_then(Value::as_str)?;
+    if observed_at.is_empty() {
+        return None;
+    }
+    let mut windows = Vec::new();
+    for name in ["primary", "secondary"] {
+        let Some(window) = snapshot.pointer(&format!("/limits/{name}")) else { continue };
+        let Some(used_percent) = window.get("used_percent").and_then(Value::as_f64) else { continue };
+        let Some(window_minutes) = window
+            .get("window_minutes")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        else { continue };
+        let Some(resets_at_ms) = window
+            .get("resets_at")
+            .and_then(Value::as_i64)
+            .and_then(|value| value.checked_mul(1_000))
+        else { continue };
+        windows.push(QuotaWindow {
+            plan: plan_type.to_string(),
+            used_percent,
+            window_minutes,
+            resets_at_ms,
+        });
+    }
+    let contract = QuotaSnapshot {
+        plan: Some(plan_type.to_string()),
+        windows,
+        observed_at: observed_at.to_string(),
+    };
+    contract.validate().ok()?;
+    Some(contract)
 }
 
 /// 把新事件的 plan 与上一次 plan 合并：**新事件没带 `limits`、上一次带了 → 把上一次
@@ -1089,8 +1131,19 @@ mod tests {
             "plan_type": "plus",
             "has_credits": false,
             "observed_at": "2026-08-27T23:29:09Z",
+            "limits": {
+                "primary": {
+                    "used_percent": 67.0,
+                    "window_minutes": 300,
+                    "resets_at": 1787858552,
+                }
+            }
         });
         assert_eq!(validate_quota_snapshot(&valid), Some(valid.clone()));
+        let contract = quota_snapshot_contract(&valid).expect("generic quota contract");
+        assert_eq!(contract.plan.as_deref(), Some("plus"));
+        assert_eq!(contract.windows.len(), 1);
+        assert_eq!(contract.windows[0].resets_at_ms, 1_787_858_552_000);
         assert_eq!(validate_quota_snapshot(&json!({"plan_type": ""})), None);
         assert_eq!(validate_quota_snapshot(&json!({"has_credits": false})), None);
     }

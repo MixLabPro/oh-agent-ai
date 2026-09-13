@@ -2319,3 +2319,16 @@
   相同语义的 runtime snapshot，不复制 Codex 字段规则。
 - 验收：Codex adapter 定向测试 **22/22**、Runtime `codex_quota_snapshot` 定向测试
   **1/1** 通过；本轮没有改动用户已有文档或将配额推断为费用/订阅事实。
+
+## Loop 318 · 跨宿主 QuotaSnapshot 强类型契约
+
+- 修复：Domain 新增宿主无关的 `QuotaSnapshot`，统一承载可选计划标签、多个
+  `QuotaWindow` 和观测时间，并校验百分比范围、窗口时长、重置时间与空标签；
+  `QuotaWindow` 增加值相等语义，便于 adapter/服务层测试。
+- 适配：Codex adapter 新增 JSON → `QuotaSnapshot` 映射入口；`has_credits` 等
+  Codex 扩展继续保留在兼容 JSON，不污染通用契约。Runtime 的坏快照校验经过
+  adapter 契约，不重新解释 `rate_limits`。
+- 边界：本轮保留现有 CLI/UI parity JSON；下一步可在其他宿主出现明确配额证据时
+  复用该类型，不凭空为没有额度证据的宿主生成快照。
+- 验收：Domain `quota_snapshot_validates_cross_host_invariants` **1/1**、Codex
+  adapter 配额映射/校验 **1/1** 通过；此前 Runtime、MCP 控制面和 Clippy 证据保持有效。
