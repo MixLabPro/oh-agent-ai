@@ -587,7 +587,10 @@ base 分开，不生成伪合计；订阅覆盖 token 和无价卡 / 路由证�
 - 拒绝、超时和重试。
 - 无法解析或不完整的工作流事件。
 
-输出每类问题的发生次数、影响会话数、关联 token/成本、首次和最近发生时间、趋势以及证据覆盖度。错误指纹只能来自脱敏后的稳定分类，不返回原始错误文本。
+输出每类问题的发生次数、影响会话数、关联 token/成本、首次和最近发生时间、趋势以及证据覆盖度；
+同时输出安全的 `retry_chains` / `retry_evidence`。仅在同一会话、能力和脱敏调用形状下观察到失败→再次调用→
+成功，才标记 `recovered`；缺少指纹或结束事件时保持 `partial/unavailable`，不把普通重复调用冒充重试链。
+错误指纹只能来自脱敏后的稳定分类，不返回原始错误文本。
 
 若 `workflow_events` 覆盖不足，应返回 `coverage=partial/unavailable`，不能返回“0 个问题”。
 
@@ -917,7 +920,7 @@ workflow↔token/cost 归因则继续列在 `missing` 中。
 
 ### Phase M4：v0.10 问题与 Skill 洞察
 
-- **当前状态**：`workflow_events` 的宿主 wire 提取 → 脱敏指纹 → SQL writer → reader → 覆盖度基础管线已接通；`issues_summary` / `skills_summary` 的覆盖计数会遵循本次时间窗和过滤条件，并返回实际 `observed_hosts`，不会把未安装宿主误列为缺失。`skills_summary` 已把 `skill_invoked` 与 `skill_finished` 分开计数，未完成调用会落入 unknown，耗时覆盖不足会显式降级；现在还按 `capability_version` 输出版本分桶，并仅在最小样本与生命周期/耗时证据满足时计算回归。仍需完成历史数据回填、完整重试生命周期和唯一 token/cost 归因，才可关闭 U06–U07。
+- **当前状态**：`workflow_events` 的宿主 wire 提取 → 脱敏指纹 → SQL writer → reader → 覆盖度基础管线已接通；`issues_summary` / `skills_summary` 的覆盖计数会遵循本次时间窗和过滤条件，并返回实际 `observed_hosts`，不会把未安装宿主误列为缺失。`issues_summary` 已按同一会话/能力/脱敏调用形状配对安全重试链，并在证据不足时降级；`skills_summary` 已把 `skill_invoked` 与 `skill_finished` 分开计数，未完成调用会落入 unknown，耗时覆盖不足会显式降级；同时按 `capability_version` 输出版本分桶，并仅在最小样本与生命周期/耗时证据满足时计算回归。仍需完成历史数据回填、跨宿主覆盖和唯一 token/cost 归因，才可关闭 U06–U07。
 - 实现 `issues_summary`、`skills_summary`。
 - 完成重复问题、Skill 分子/分母、未知态和证据覆盖测试。
 

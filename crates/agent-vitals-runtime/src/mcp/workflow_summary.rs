@@ -222,6 +222,118 @@ struct Window {
     end_ms: i64,
 }
 
+struct RetryEvent {
+    session_key: String,
+    capability_id: String,
+    invocation_fingerprint: String,
+    event_type: String,
+    outcome: String,
+    event_ts_ms: i64,
+}
+
+fn retry_chain_rows(events: &[RetryEvent]) -> (Vec<Value>, bool) {
+    let mut grouped = std::collections::BTreeMap::<(String, String, String), Vec<&RetryEvent>>::new();
+    for event in events {
+        grouped
+            .entry((
+                event.session_key.clone(),
+                event.capability_id.clone(),
+                event.invocation_fingerprint.clone(),
+            ))
+            .or_default()
+            .push(event);
+    }
+    let mut chains = Vec::new();
+    let mut complete = !events.is_empty();
+    for ((_, capability_id, _invocation_fingerprint), mut group) in grouped {
+        group.sort_by_key(|event| event.event_ts_ms);
+        let invocations = group.iter().filter(|event| event.event_type == "tool_invoked").count() as i64;
+        let finished = group.iter().filter(|event| event.event_type == "tool_finished").count() as i64;
+        if invocations == 0 || finished < invocations {
+            complete = false;
+        }
+        let mut attempts = 0_i64;
+        let mut failures = 0_i64;
+        let mut failed_before_retry = false;
+        let mut recovered = false;
+        let mut first_ms = 0_i64;
+        let mut last_ms = 0_i64;
+        for event in group {
+            if first_ms == 0 {
+                first_ms = event.event_ts_ms;
+            }
+            last_ms = event.event_ts_ms;
+            if event.event_type == "tool_invoked" {
+                attempts += 1;
+            } else if event.outcome == "failed" && attempts > 0 {
+                failures += 1;
+                failed_before_retry = true;
+            } else if event.outcome == "succeeded" && failed_before_retry && attempts > failures {
+                recovered = true;
+            }
+        }
+        if attempts >= 2 && failures > 0 {
+            chains.push(json!({
+                "capability": capability_id,
+                "attempts": attempts,
+                "failed_attempts": failures,
+                "recovered": recovered,
+                "status": if recovered { "recovered" } else { "unrecovered" },
+                "first_seen": super::ms_to_rfc3339_beijing(first_ms),
+                "last_seen": super::ms_to_rfc3339_beijing(last_ms)
+            }));
+        }
+    }
+    (chains, complete)
+}
+
+fn load_retry_events(
+    conn: &Connection,
+    window: &Window,
+    hosts: &[String],
+    skills: &[String],
+) -> Result<Vec<RetryEvent>, ToolError> {
+    let mut sql = String::from(
+        "SELECT e.session_key, e.capability_id, e.invocation_fingerprint,
+                e.event_type, e.outcome, e.event_ts_ms
+         FROM workflow_events e
+         LEFT JOIN sessions s ON s.session_key = e.session_key
+         WHERE e.event_type IN ('tool_invoked', 'tool_finished')
+           AND e.event_ts_ms >= ?1 AND e.event_ts_ms < ?2
+           AND e.session_key IS NOT NULL
+           AND e.capability_id IS NOT NULL
+           AND e.invocation_fingerprint IS NOT NULL",
+    );
+    let mut values = vec![
+        SqlValue::Integer(window.start_ms),
+        SqlValue::Integer(window.end_ms),
+    ];
+    let mut next_param = 3;
+    append_scope_filter(&mut sql, &mut values, &mut next_param, hosts, skills);
+    sql.push_str(" ORDER BY e.session_key, e.capability_id, e.invocation_fingerprint, e.event_ts_ms, e.event_id");
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|e| ToolError::new("internal_error", format!("retry evidence query failed: {e}")))?;
+    let mut rows = statement
+        .query(params_from_iter(values.iter()))
+        .map_err(|e| ToolError::new("internal_error", format!("retry evidence query failed: {e}")))?;
+    let mut events = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| ToolError::new("internal_error", format!("retry evidence row failed: {e}")))?
+    {
+        events.push(RetryEvent {
+            session_key: row.get(0).unwrap_or_default(),
+            capability_id: row.get(1).unwrap_or_default(),
+            invocation_fingerprint: row.get(2).unwrap_or_default(),
+            event_type: row.get(3).unwrap_or_default(),
+            outcome: row.get(4).unwrap_or_default(),
+            event_ts_ms: row.get(5).unwrap_or(0),
+        });
+    }
+    Ok(events)
+}
+
 fn parse_window(args: &Value) -> Result<Window, ToolError> {
     let from = args.get("from").and_then(Value::as_str).ok_or_else(|| {
         ToolError::new("invalid_argument", "`from` (YYYY-MM-DD) is required")
@@ -516,10 +628,35 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             "trend": { "status": "unknown", "reason": "workflow baseline is not complete" }
         }));
     }
+    let retry_event_types = ["tool_invoked", "tool_finished"];
+    let retry_observed = workflow_count(
+        handle.conn(),
+        &window,
+        &hosts,
+        &skills,
+        &retry_event_types,
+    )?;
+    let retry_events = load_retry_events(handle.conn(), &window, &hosts, &skills)?;
+    let (retry_chains, retry_events_complete) = retry_chain_rows(&retry_events);
+    let retry_evidence_status = if retry_observed == 0 {
+        "unavailable"
+    } else if retry_events_complete && retry_events.len() as i64 == retry_observed {
+        "complete"
+    } else {
+        "partial"
+    };
     let observed = workflow_count(handle.conn(), &window, &hosts, &skills, &[])?;
     if observed == 0 {
         warnings.push(json!({ "code": "workflow_coverage_insufficient", "message": "No accepted workflow events fall in the requested window; an empty issue list is not a proof of no issues." }));
     }
+    let mut issue_missing = vec!["unique token/cost linkage".to_string()];
+    if retry_evidence_status != "complete" {
+        issue_missing.push("complete retry baseline".to_string());
+    }
+    let recovered_chains = retry_chains
+        .iter()
+        .filter(|row| row["status"] == "recovered")
+        .count();
     let cov = coverage(
         handle.conn(),
         &window,
@@ -527,13 +664,21 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         &hosts,
         &skills,
         &[],
-        &[
-            "unique token/cost linkage".to_string(),
-            "complete retry baseline".to_string(),
-        ],
+        &issue_missing,
     )?;
     Ok(build_envelope(handle.conn(), handle.authority_state(), (observed > 0).then_some(window.end_ms), cov, warnings, json!({
-        "from": window.from, "to": window.to, "issues": issues, "has_more": false, "next_cursor": Value::Null
+        "from": window.from,
+        "to": window.to,
+        "issues": issues,
+        "retry_chains": retry_chains,
+        "retry_evidence": {
+            "status": retry_evidence_status,
+            "observed_events": retry_observed,
+            "fingerprinted_events": retry_events.len(),
+            "recovered_chains": recovered_chains
+        },
+        "has_more": false,
+        "next_cursor": Value::Null
     })))
 }
 
@@ -700,7 +845,7 @@ pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SkillVersionSnapshot, run_issues, run_skills, skill_version_regression};
+    use super::{RetryEvent, SkillVersionSnapshot, retry_chain_rows, run_issues, run_skills, skill_version_regression};
     use agent_vitals_data::authority::{AuthorityDb, default_authority_path};
     use agent_vitals_data::fact_writer_sql::SqlFactWriter;
     use agent_vitals_data::workflow::insert_events;
@@ -883,5 +1028,50 @@ mod tests {
         ]);
         assert_eq!(insufficient["status"], "unavailable");
         assert_eq!(insufficient["reason"], "sample_below_minimum");
+    }
+
+    #[test]
+    fn retry_chain_requires_same_redacted_call_shape_and_recovers_after_failure() {
+        let events = vec![
+            RetryEvent {
+                session_key: "session-a".to_string(),
+                capability_id: "bash".to_string(),
+                invocation_fingerprint: "fnv1a64:shape".to_string(),
+                event_type: "tool_invoked".to_string(),
+                outcome: "unknown".to_string(),
+                event_ts_ms: 100,
+            },
+            RetryEvent {
+                session_key: "session-a".to_string(),
+                capability_id: "bash".to_string(),
+                invocation_fingerprint: "fnv1a64:shape".to_string(),
+                event_type: "tool_finished".to_string(),
+                outcome: "failed".to_string(),
+                event_ts_ms: 110,
+            },
+            RetryEvent {
+                session_key: "session-a".to_string(),
+                capability_id: "bash".to_string(),
+                invocation_fingerprint: "fnv1a64:shape".to_string(),
+                event_type: "tool_invoked".to_string(),
+                outcome: "unknown".to_string(),
+                event_ts_ms: 120,
+            },
+            RetryEvent {
+                session_key: "session-a".to_string(),
+                capability_id: "bash".to_string(),
+                invocation_fingerprint: "fnv1a64:shape".to_string(),
+                event_type: "tool_finished".to_string(),
+                outcome: "succeeded".to_string(),
+                event_ts_ms: 130,
+            },
+        ];
+        let (chains, complete) = retry_chain_rows(&events);
+        assert!(complete);
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0]["attempts"], 2);
+        assert_eq!(chains[0]["failed_attempts"], 1);
+        assert_eq!(chains[0]["status"], "recovered");
+        assert!(!chains[0].to_string().contains("shape"));
     }
 }

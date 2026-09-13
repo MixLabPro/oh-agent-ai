@@ -291,9 +291,20 @@ def main():
     R.add("Q06", "本周重复错误指纹聚为问题卡",
           workflow_verdict(issues_env, True, "issues"),
           f"issues_summary: coverage={issues_status} rows={len(issues_data.get('issues') or [])} {issues_note}")
+    retry_data = issues_data.get("retry_evidence") or {}
+    retry_status = retry_data.get("status")
+    if issues_env is None:
+        q07_status = "MISMATCH"
+    elif issues_status == "unavailable":
+        q07_status = "BLOCKED"
+    elif retry_status == "complete":
+        q07_status = "EXACT"
+    else:
+        q07_status = "PARTIAL"
     R.add("Q07", "连续失败后成功 = 一组重试链",
-          workflow_verdict(issues_env, False, "issues"),
-          f"issues_summary 已可读，但 retry lifecycle 尚未完成配对；coverage={issues_status} {issues_note}")
+          q07_status,
+          f"issues_summary: retry_evidence={retry_status} "
+          f"chains={len(issues_data.get('retry_chains') or [])} coverage={issues_status} {issues_note}")
     R.add("Q08", "Skill 成功率 + 样本不足判定",
           workflow_verdict(skills_env, True, "skills"),
           f"skills_summary: coverage={skills_status} rows={len(skills_data.get('skills') or [])} {skills_note}")

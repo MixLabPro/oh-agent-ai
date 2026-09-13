@@ -2439,3 +2439,16 @@
 
 边界：重试生命周期配对、历史跨宿主回填和 workflow↔token/cost 唯一归因仍未完成，Q09 在真实数据
 样本不足时保持 PARTIAL，不关闭 v1.0 发布门槛。
+
+## Loop 326 · 安全重试链配对
+
+- 新增：`issues_summary` 读取 `tool_invoked` / `tool_finished` 的脱敏调用形状，在同一会话与能力范围内按时间顺序
+  配对失败→再次调用→成功，输出 `retry_chains` 和 `retry_evidence`。
+- 判定：只有至少两次调用、存在失败结束且后续成功结束的链才标记 `recovered`；未闭合调用、缺失指纹、无工具事件
+  或无安全会话锚点时，覆盖保持 `partial/unavailable`，不把普通重复调用当作重试。
+- 安全：链结果只输出能力、尝试/失败次数、恢复状态和脱敏时间，不返回 session key、调用指纹或原始参数。
+- 验收：补充 recovered 链与缺证据单测；Q07 冒烟改为读取 `retry_evidence` 判定，真实数据是否 EXACT 由当前窗口
+  的完整生命周期证据决定。
+
+边界：跨宿主历史回填、workflow↔token/cost 唯一归因和更复杂的跨会话重试语义仍未完成；普通重复问题继续由
+`issues` 聚合单独呈现。
