@@ -1750,11 +1750,13 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["date_span"]["first"], "2026-08-20T14:27:00Z")
         self.assertEqual(report["date_span"]["last"], "2026-08-20T14:30:00Z")
         # 键序是字节一致的一部分，不能重排。`files` 是第三源接入加的键（插在
-        # `file` 后，两侧锁步；12→13 键）。
+        # `file` 后，两侧锁步；12→13 键）。`span` 是会话跨度接线加的键（插在
+        # `model` 后——与 `model`/`cwd` 同属 meta 派生，不追加到末位；
+        # 13→14 键，两侧锁步）。见 docs/v1.0.0/OBSERVED_SPAN_IMPLEMENTATION_PLAN.md。
         self.assertEqual(list(report.keys()),
-                         ["host", "session_id", "title", "model", "cwd", "file",
-                          "files", "date_span", "audit", "coverage", "signals",
-                          "attempts", "notes"])
+                         ["host", "session_id", "title", "model", "span", "cwd",
+                          "file", "files", "date_span", "audit", "coverage",
+                          "signals", "attempts", "notes"])
         cov = report["coverage"]
         self.assertEqual(cov["ToolResults"]["measured"], 2)
         self.assertEqual(cov["ToolCalls"]["measured"], 2)
@@ -2124,10 +2126,10 @@ class CliMatrix(unittest.TestCase):
         # B4：`schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在
         # `schema_probe` 之后（spec §10 B5：append-at-end，不打乱既有键序断言）。
         self.assertEqual(list(report.keys()),
-                         ["host", "session_id", "title", "model", "cwd", "file",
-                          "date_span", "audit", "coverage", "signals", "attempts",
-                          "cost", "notes", "source_snapshot", "schema_probe",
-                          "lifecycle", "traces_probe"])
+                         ["host", "session_id", "title", "model", "span", "cwd",
+                          "file", "date_span", "audit", "coverage", "signals",
+                          "attempts", "cost", "notes", "source_snapshot",
+                          "schema_probe", "lifecycle", "traces_probe"])
         # fixture db 是 Python `sqlite3` 默认日志模式建的，journal_mode=delete、
         # 无 -wal 文件（spec §10 B3；真机会是 wal，见 real-machine check）。
         self.assertEqual(report["source_snapshot"],
@@ -2306,10 +2308,10 @@ class CliMatrix(unittest.TestCase):
         # 键序是输出契约（评审 A4）。B3：`source_snapshot` 追加在末位；B4：
         # `schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在最后。
         self.assertEqual(list(report.keys()),
-                         ["host", "session_id", "title", "model", "cwd", "file",
-                          "date_span", "audit", "coverage", "signals", "attempts",
-                          "cost", "notes", "source_snapshot", "schema_probe",
-                          "lifecycle", "traces_probe"])
+                         ["host", "session_id", "title", "model", "span", "cwd",
+                          "file", "date_span", "audit", "coverage", "signals",
+                          "attempts", "cost", "notes", "source_snapshot",
+                          "schema_probe", "lifecycle", "traces_probe"])
         self.assertEqual(report["source_snapshot"],
                          {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
         # B4：非积分轨会话（s2）的 fixture schema 同样与已知基线对齐——哨兵沉默。
@@ -2429,10 +2431,10 @@ class CliMatrix(unittest.TestCase):
         # 分配页内——文件字节数与未插入前相同（真机验证过：20480 → 20480）。
         # B4：`schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在最后。
         self.assertEqual(list(report.keys()),
-                         ["host", "session_id", "title", "model", "cwd", "file",
-                          "date_span", "audit", "coverage", "signals", "attempts",
-                          "cost", "notes", "source_snapshot", "schema_probe",
-                          "lifecycle", "traces_probe"])
+                         ["host", "session_id", "title", "model", "span", "cwd",
+                          "file", "date_span", "audit", "coverage", "signals",
+                          "attempts", "cost", "notes", "source_snapshot",
+                          "schema_probe", "lifecycle", "traces_probe"])
         self.assertEqual(report["source_snapshot"],
                          {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
         # B4：本用例只插行、不改表结构——schema 仍与基线对齐，哨兵沉默。

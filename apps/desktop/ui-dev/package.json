@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "verify": "npm run build && node ../../../scripts/verify-workbench-v010-closeout.mjs"
+    "verify": "npm run build && node ../../../scripts/verify-workbench-overview-contract.mjs && node ../../../scripts/verify-workbench-v010-closeout.mjs && node ../../../scripts/verify-workbench-visibility.mjs"
   },
   "devDependencies": {
     "vite": "^6.1.0"

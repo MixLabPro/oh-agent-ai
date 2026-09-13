@@ -10,7 +10,7 @@
 //    倍数异常是声明错误的自检信号）。
 // 4. cache_write 档位假设必须出现在名义副行（1hr/5min 差 5.2%，假设不是观测）。
 // 5. 决策卡：Claude Pro 恒「窗口余量不可得」（quotaLimits 只有拒绝快照，不得
-//    反推假百分比）；Codex <15% 建议提前切。
+//    反推假百分比）；Codex <15% 提示确认可用线路，不指名推荐。
 
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
@@ -30,7 +30,7 @@ const html = readFileSync(`${root}/apps/desktop/src-tauri/ui/workbench.html`, "u
 // 静态断言：关键诚实性文案在真实文件里
 console.log("# 静态断言（真实文件内容）");
 ok(wb.includes("cache_write 按 1hr 计"), "名义副行带 cache_write 档位假设标注");
-ok(wb.includes("归属待核"), ">50× 的「归属待核」告警文案存在");
+ok(wb.includes("请核对套餐"), ">50× 的「数字异常，请核对套餐」告警文案存在（归属待核的人话版）");
 // （审查 #9：此处原是恒真断言 `X===false || X`，给假绿——名义排除订阅月费的
 // 行为已由下方 renderKpiRow 的 $1180 断言真实覆盖，恒真行删除。）
 
@@ -40,8 +40,8 @@ ok(wb.includes('b.source !== "alert" && b.source !== "sql"'),
   "预算卡兜底判定同时排除 alert 与 sql（sql 是权威不是缺场）");
 ok(wb.includes("budgetLive"), "source:\"sql\" 走「实时算」新鲜度文案，不说「尚未产出」");
 // 预算口径 = 跨宿主按量实付（PM 决策 2026-09-07）——「仅 DSH」是历史遗留缺陷。
-ok(html.includes("跨宿主按量实付") && !html.includes("仅 DSH 实测"),
-  "预算卡 label 改「跨宿主按量实付」，不再写「仅 DSH 实测」");
+ok(html.includes("预算（按量费用）") && !html.includes("仅 DSH 实测"),
+  "预算卡标注按量费用，不再写「仅 DSH 实测」");
 ok(html.includes("保存脱敏诊断包") && html.includes("不会自动上传"),
   "帮助区提供用户主动保存的脱敏诊断包且明确不自动上传");
 ok(wb.includes('invoke("export_diagnostic_package")'),
@@ -64,8 +64,8 @@ ok(wb.includes('"no-pricing-snapshot": "历史缺少事件时间的价格快照"
   "历史缺价状态明确说明没有事件时间价格快照");
 ok(wb.includes('pricing || reason || row.has_unresolved'),
   "无价卡且没有金额时仍显示价格不可用说明，不隐藏失败态");
-ok(wb.includes('openSettings.textContent = "打开预算设置"') && wb.includes('switchTab("overview")'),
-  "预算阈值组提供打开预算设置入口，不要求用户自行寻找");
+ok(wb.includes('openSettings.textContent = "打开预算设置"') && wb.includes('openSettingsSection("settings-budget", "ov-budget-monthly-amount")'),
+  "预算阈值组提供打开预算设置入口（跳设置页预算分区，不是总览）");
 ok(wb.includes('action.textContent = "打开计费确认"') && wb.includes('"查看数据源"') && wb.includes('"查看会话"'),
   "来源投影组提供对应处理入口，不把来源证据误报为无原始命中");
 
@@ -146,82 +146,164 @@ ok(sandbox.issueStatusCanonical("closed") === "resolved" &&
 const num = (id) => elements[id]?.textContent ?? "";
 const sub = (id) => elements[id + "-sub"]?.textContent ?? "";
 const ttl = (id) => elements[id]?.title ?? "";
-console.log("# renderKpiRow");
-// 合成 DTO：形状 = 真实冻结 DTO（Stage B/C 后：by_provider 条目带 currency）
+console.log("# renderSpendCards（总览第一行三卡 + 本月用量行）");
+// 合成 DTO：形状 = 真实冻结 DTO（data_contract.rs MonthlySummary::to_json /
+// DailySummary::to_json；actual_spend_by_basis 是 domain 拆栏，各栏之和 =
+// total_actual_spend）。
 const daily = {
   by_provider: {
     "claude-code/anthropic": { amounts_by_basis: { api_equivalent: 1000 }, currency: "USD", has_unresolved: false },
     "claude-code/deepseek-official": { amounts_by_basis: { metered_estimate: 300 }, currency: "CNY", has_unresolved: false },
-    "claude-code/zhipu-glm": { amounts_by_basis: { fixed_subscription: 118 }, currency: "CNY", has_unresolved: true },
+    "dsh/deepseek-official": { amounts_by_basis: { metered_actual: 18 }, currency: "CNY", has_unresolved: false },
     "codex/openai": { amounts_by_basis: { api_equivalent: 180 }, currency: "USD", has_unresolved: false },
   },
-  total_actual_spend: { CNY: 118, USD: 0 },
+  total_actual_spend: { CNY: 18 },
+  actual_spend_by_basis: { metered_actual: { CNY: 18 } },
   tokens_by_host: {
     "claude-code": { total: 1_000_000_000, uncached_input: 4_000_000, cache_read: 990_000_000, cache_write: 6_000_000, output: 0, cache_hit_ratio: 0.99 },
     codex: { total: 500_000_000, uncached_input: 100_000_000, cache_read: 400_000_000, cache_write: 0, output: 0, cache_hit_ratio: 0.8 },
   },
 };
-sandbox.renderKpiRow("t", daily);
-ok(num("ov-t-tokens") === "1.50B", `tokens 四桶跨宿主合计（got ${num("ov-t-tokens")}）`);
+const monthlyDto = {
+  by_provider: {
+    "claude-code/anthropic": { amounts_by_basis: { fixed_subscription: 20, api_equivalent: 1278 }, currency: "USD", has_unresolved: false },
+    "claude-code/zhipu-glm": { amounts_by_basis: { fixed_subscription: 118 }, currency: "CNY", has_unresolved: true },
+    "dsh/deepseek-official": { amounts_by_basis: { metered_actual: 232 }, currency: "CNY", has_unresolved: false },
+    "workbuddy/tencent": { amounts_by_basis: { host_billed: 10 }, currency: "CNY", has_unresolved: false },
+  },
+  total_actual_spend: { CNY: 360, USD: 20 },
+  actual_spend_by_basis: {
+    fixed_subscription: { CNY: 118, USD: 20 },
+    host_billed: { CNY: 10 },
+    metered_actual: { CNY: 232 },
+  },
+  tokens_by_host: {
+    "claude-code": { total: 3_000_000_000, uncached_input: 12_000_000, cache_read: 2_970_000_000, cache_write: 18_000_000, output: 0 },
+  },
+};
+sandbox.renderSpendCards(daily, monthlyDto);
+ok(num("ov-t-tokens") === "1.50B tokens", `今日 tokens 四桶跨宿主合计、带单位（got ${num("ov-t-tokens")}）`);
+ok(num("ov-t-metered") === "¥18.00", `今日按量实付 = actual_spend_by_basis.metered_actual 分币（got ${num("ov-t-metered")}）`);
 ok(/^¥[\d.]+ \+ \$[\d.]+$/.test(num("ov-t-nominal")),
   `名义分栏统一币序 CNY 优先（UX#5，got ${num("ov-t-nominal")}）`);
-ok(num("ov-t-nominal").includes("+") && /¥[\d.]+/.test(num("ov-t-nominal")),
-  `名义跨币分栏并列（got ${num("ov-t-nominal")}）`);
-// USD 栏 = api_equivalent 1000 + 180；¥300 是 metered 分栏——fixed_subscription
-// 118 必须被排除（月费不是标价折算）。
-ok(num("ov-t-nominal").includes("$1180.00") && num("ov-t-nominal").includes("¥300.00"),
-  `名义分栏正确且排除订阅月费（got ${num("ov-t-nominal")}）`);
-ok(!num("ov-t-nominal").includes("118.00"), "订阅月费 ¥118 没有混进名义");
-ok(num("ov-t-actual") === "¥118.00", `实际 = total_actual_spend 分币（got ${num("ov-t-actual")}）`);
-// 跨宿主合成 = Σread/Σ(unc+read+write) = 1390M/1500M = 92.7%
-ok(num("ov-t-cache") === "92.7%", `命中率跨宿主合成 1390/1500（got ${num("ov-t-cache")}）`);
+// USD 栏 = api_equivalent 1000 + 180；¥318 = metered_estimate 300 + metered_actual 18。
+ok(num("ov-t-nominal").includes("$1180.00") && num("ov-t-nominal").includes("¥318.00"),
+  `名义分栏正确（got ${num("ov-t-nominal")}）`);
+// 本月支出：按量实付 = metered_actual + host_billed（同币合并）；订阅月费分币并列；
+// 两行永不相加、永不折算——"含订阅月费"句式已删（IA 复核 §3.4/§4.4-1）。
+ok(num("ov-m-metered") === "¥242.00", `本月按量实付 = metered_actual 232 + host_billed 10（got ${num("ov-m-metered")}）`);
+ok(num("ov-m-subscription") === "¥118.00 + $20.00", `订阅月费分币并列（got ${num("ov-m-subscription")}）`);
+ok(!num("ov-m-metered").includes("$") && !num("ov-m-subscription").includes("≈"),
+  "实付/月费不折算、不跨币相加");
+ok(num("ov-m-nominal").includes("$1278.00") && num("ov-m-nominal").includes("¥242.00"),
+  `本月名义排除订阅月费（got ${num("ov-m-nominal")}）`);
+ok(!num("ov-m-nominal").includes("118.00") && !num("ov-m-nominal").includes("20.00"),
+  "订阅月费没有混进名义");
+ok(num("ov-m-tokens") === "3.00B tokens", `本月用量行 tokens（got ${num("ov-m-tokens")}）`);
+ok(sub("ov-m-tokens").includes("日均"), `本月用量行附日均（got "${sub("ov-m-tokens")}"）`);
 
-console.log("# renderKpiRow · 速览层混币折算（Overview.fx，PM 决策 2026-09-07）");
+console.log("# renderSpendCards · 速览层混币折算（Overview.fx，PM 决策 2026-09-07）");
 // 名义/单位成本：有汇率 + 混币 → 并成一个 ≈¥（原始分币进 hover）。
-// 名义 = {USD 1180, CNY 300}；7.15 → cny = 300 + 1180×7.15 = 8737。
+// 今日名义 = {USD 1180, CNY 318}；7.15 → cny = 318 + 1180×7.15 = 8755。
 // FX 形状出处：apps/desktop/src-tauri/src/overview.rs::fx_estimate → {usd_cny, as_of}
-// （assets/pricing.json::fx_estimate 的 USD_CNY / as_of 提取）。
 const FX = { usd_cny: 7.15, as_of: "2026-09" };
-sandbox.renderKpiRow("t", daily, FX);
-ok(num("ov-t-nominal") === "≈¥8737.00",
+sandbox.renderSpendCards(daily, monthlyDto, FX);
+ok(num("ov-t-nominal") === "≈¥8755.00",
   `名义混币按 7.15 折算成一个 ≈¥（got ${num("ov-t-nominal")}）`);
-ok(ttl("ov-t-nominal").includes("¥300.00") && ttl("ov-t-nominal").includes("$1180.00"),
+ok(ttl("ov-t-nominal").includes("¥318.00") && ttl("ov-t-nominal").includes("$1180.00"),
   `名义 hover 保留原始分币（got "${ttl("ov-t-nominal")}"）`);
-ok(sub("ov-t-nominal").includes("7.15") && sub("ov-t-nominal").includes("2026-09"),
-  `名义副行标注折算汇率 + as_of（got "${sub("ov-t-nominal")}"）`);
-ok(num("ov-t-unit").startsWith("≈¥") && num("ov-t-unit").includes("/M · 名义"),
-  `单位成本名义/M 也折算成 ≈¥/M（got ${num("ov-t-unit")}）`);
-ok(ttl("ov-t-unit").includes("/M"), `单位 hover 保留分币/M（got "${ttl("ov-t-unit")}"）`);
-// 实际侧永远分币——fx 不进实付（PM 决策）。
-ok(num("ov-t-actual") === "¥118.00" && !num("ov-t-actual").includes("≈"),
-  `实际支出不折算、保持分币（got ${num("ov-t-actual")}）`);
-ok(sub("ov-t-unit").includes("实际") && !/≈¥\d+\/M · 名义/.test(sub("ov-t-unit")),
-  `单位副行的实际/M 分币不折（got "${sub("ov-t-unit")}"）`);
-ok(sub("ov-t-unit").includes("（分币不折）"),
-  `副行实际侧标注「分币不折」区分折算态（got "${sub("ov-t-unit")}"）`);
+ok(ttl("ov-t-nominal").includes("7.15") && ttl("ov-t-nominal").includes("2026-09"),
+  `名义 hover 标注折算汇率 + as_of（got "${ttl("ov-t-nominal")}"）`);
+// 实付/月费永远分币——fx 不进实付（PM 决策）。
+ok(num("ov-m-metered") === "¥242.00" && num("ov-m-subscription") === "¥118.00 + $20.00",
+  `实付与月费不折算、保持分币（got ${num("ov-m-metered")} / ${num("ov-m-subscription")}）`);
+ok(num("ov-t-metered") === "¥18.00", "今日实付不折算");
+ok(num("ov-m-nominal") === "≈¥9379.70" && ttl("ov-m-nominal").includes("$1278.00"),
+  `本月「按官方价折算」混币折算成 ≈¥，原始分币进 hover（got ${num("ov-m-nominal")}）`);
 
 // 降级①：无汇率（价表旧版 / fx:null）→ 退回分币旧行为，不加 ≈。
-sandbox.renderKpiRow("t", daily, null);
+sandbox.renderSpendCards(daily, monthlyDto, null);
 ok(/^¥[\d.]+ \+ \$[\d.]+$/.test(num("ov-t-nominal")) && !num("ov-t-nominal").includes("≈"),
   `无汇率退回分币并列（got ${num("ov-t-nominal")}）`);
-ok(ttl("ov-t-nominal") === "", "无折算时清掉上一轮的 hover title");
+ok(ttl("ov-t-nominal") === "@官方标价 · cache_write 按 1hr 计", `无折算时 hover 只留档位假设，不留上一轮折算（got "${ttl("ov-t-nominal")}"）`);
 
 // 降级②：单币（只有 CNY）+ 有汇率 → 不折算、不加 ≈（不凭空长符号）。
 const cnyOnly = {
   by_provider: { "dsh/deepseek-official": { amounts_by_basis: { metered_actual: 5 }, currency: "CNY", has_unresolved: false } },
   total_actual_spend: { CNY: 5 },
+  actual_spend_by_basis: { metered_actual: { CNY: 5 } },
   tokens_by_host: { dsh: { total: 1_000_000, uncached_input: 1_000_000, cache_read: 0, cache_write: 0, output: 0 } },
 };
-sandbox.renderKpiRow("t", cnyOnly, FX);
+sandbox.renderSpendCards(cnyOnly, cnyOnly, FX);
 ok(num("ov-t-nominal") === "¥5.00", `单币 CNY + 有汇率 → 不折算不加 ≈（got ${num("ov-t-nominal")}）`);
+ok(num("ov-m-subscription") === "无数据", "无订阅条目 → 「无数据」，不渲染 0");
 
 // 无数据 → 「无数据」绝不 0
-sandbox.renderKpiRow("t", null);
-ok(num("ov-t-tokens") === "无数据" && num("ov-t-actual") === "无数据",
-  "无 DTO 时全部 tile 渲染「无数据」");
-const emptyDto = { by_provider: {}, total_actual_spend: {}, tokens_by_host: {} };
-sandbox.renderKpiRow("t", emptyDto);
-ok(num("ov-t-nominal") === "无数据", "全空宿主渲染「无数据」，不渲染 0（DSH 0-token 月同款纪律）");
+sandbox.renderSpendCards(null, null);
+ok(num("ov-t-tokens") === "无数据" && num("ov-t-metered") === "无数据" && num("ov-m-metered") === "无数据",
+  "无 DTO 时全部金额渲染「无数据」");
+const emptyDto = { by_provider: {}, total_actual_spend: {}, actual_spend_by_basis: {}, tokens_by_host: {} };
+sandbox.renderSpendCards(emptyDto, emptyDto);
+ok(num("ov-t-nominal") === "无数据" && num("ov-m-nominal") === "无数据",
+  "全空宿主渲染「无数据」，不渲染 0（DSH 0-token 月同款纪律）");
+
+// Captured window and confirmed spend: estimates never enter either day's actual line.
+const confirmed = { ...daily, actual_spend_by_basis: {
+  metered_actual: { CNY: 18 }, host_billed: { CNY: 7, USD: 2 },
+  metered_estimate: { CNY: 999 }, api_equivalent: { USD: 888 }, fixed_subscription: { USD: 20 },
+} };
+sandbox.renderSpendCards(confirmed, monthlyDto, null, { date: "2026-09-10", month: "2026-09" });
+ok(num("ov-t-metered") === "¥25.00 + $2.00", "今日实付合并 host_billed + metered_actual，排除订阅和估算");
+ok(sub("ov-m-tokens").includes("300.0M"), "日均使用捕获窗口的第 10 天");
+sandbox.renderSpendCards(null, monthlyDto);
+ok(num("ov-m-metered") === "¥242.00" && sub("ov-t-tokens").includes("暂不可读"), "今日失败不影响月支出");
+sandbox.renderSpendCards(daily, null);
+ok(num("ov-t-metered") === "¥18.00" && sub("ov-m-tokens").includes("暂不可读"), "月汇总失败不影响今日");
+
+console.log("# renderTrustRows（可信度两条状态行，颜色来自 health 不来自百分比）");
+function trustRow(id) {
+  const li = elements[id] ?? (elements[id] = makeElement());
+  const text = elements[id + "-text"] ?? (elements[id + "-text"] = makeElement());
+  const action = elements[id + "-action"] ?? (elements[id + "-action"] = makeElement());
+  li.querySelector = (sel) => (sel === ".notice-text" ? text : sel === ".notice-actions button" ? action : null);
+  return li;
+}
+const routeRow = trustRow("ov-trust-route");
+const priceRow = trustRow("ov-trust-price");
+const warnStatus = { status: "ok", data: { health: "warn", unresolved_tokens: 18000, unpriced_tokens: 0, pricing: { stale: false } } };
+sandbox.renderTrustRows(warnStatus, monthlyDto);
+ok(routeRow.className === "notice warn", `unresolved>0 + health=warn → 路由行 warn（got ${routeRow.className}）`);
+ok(elements["ov-trust-route-text"].textContent.includes("18K") && elements["ov-trust-route-text"].textContent.includes("哪家服务商"),
+  `路由行用人话点名未归属的 token 量（got "${elements["ov-trust-route-text"].textContent}"）`);
+ok(priceRow.className === "notice ok" && elements["ov-trust-price-text"].textContent.includes("没有漏算"),
+  `价格齐全是 ok 行、按后果说（got ${priceRow.className} "${elements["ov-trust-price-text"].textContent}"）`);
+ok(!elements["ov-trust-price-text"].textContent.includes("可计价") && !elements["ov-trust-price-text"].textContent.includes("覆盖"),
+  "「N% 可计价」「价格覆盖」等内部词已消失");
+ok(!/未定 provider|路由|未计价/.test(elements["ov-trust-route-text"].textContent + elements["ov-trust-price-text"].textContent),
+  "可信度行不含 provider / 路由 / 未计价 等内部词");
+const cleanStatus = { status: "ok", data: { health: "ok", unresolved_tokens: 0, unpriced_tokens: 0, pricing: { stale: false } } };
+sandbox.renderTrustRows(cleanStatus, monthlyDto);
+ok(routeRow.className === "notice ok" && priceRow.hidden === true && elements["ov-trust-route-text"].textContent.startsWith("数据完整"),
+  "干净状态合成一句「数据完整」，第二行隐藏");
+const unpricedStatus = { status: "ok", data: { health: "ok", unresolved_tokens: 0, unpriced_tokens: 300_000_000, pricing: { stale: true } } };
+sandbox.renderTrustRows(unpricedStatus, monthlyDto);
+ok(priceRow.hidden === false && priceRow.className === "notice warn" && elements["ov-trust-price-text"].textContent.includes("少算了约 10%"),
+  `unpriced 300M/3B → 少算约 10% warn（got ${elements["ov-trust-price-text"].textContent}）`);
+ok(elements["ov-trust-price-text"].textContent.includes("价格表也已过期"), "价格表过期并入价格行");
+// 同源合并：套餐提示可见且影响 tokens 盖住 unresolved → ⚠ 行无按钮、指向套餐提示。
+sandbox.billingPromptState = { visible: true, pendingTokens: 18000 };
+sandbox.renderTrustRows(warnStatus, monthlyDto);
+ok(elements["ov-trust-route-text"].textContent.includes("确认下方套餐信息即可解决") && elements["ov-trust-route-action"].hidden === true,
+  "同源 18K：⚠ 行指向套餐提示，不自带第二个按钮（一件事一个动作）");
+sandbox.billingPromptState = { visible: false, pendingTokens: 18000 };
+sandbox.renderTrustRows(warnStatus, monthlyDto);
+ok(elements["ov-trust-route-action"].hidden === false, "套餐提示被「稍后」压住后，⚠ 行恢复自己的按钮");
+sandbox.renderTrustRows({ status: "unavailable", reason: "x" }, monthlyDto);
+ok(routeRow.className === "notice danger" && priceRow.hidden === true, "数据状态不可用 → danger 一行，不冒充 ok");
+
+sandbox.renderTrustRows(cleanStatus, null);
+ok(priceRow.hidden === false && elements["ov-trust-price-text"].textContent.includes("暂不可读"),
+  "月汇总不可用不冒充本月零用量或价格完整");
 
 console.log("# renderDualTrack");
 const monthly = {
@@ -238,33 +320,52 @@ elements["ov-dual-list"] = { textContent: "", innerHTML: "", hidden: true, appen
 elements["ov-dual-empty"] = { hidden: false };
 sandbox.renderDualTrack(monthly);
 const dualHtml = (elements["ov-dual-list"]._kids || []).map((k) => k.innerHTML).join("\n");
-ok(dualHtml.includes("归属待核"), "anthropic 63.9× → 归属待核告警（>50× 护栏）");
-ok(dualHtml.includes("值回月费 1.1×"), "minimax 1.12× 显示「值回月费 1.1×」（UX#11 展开文案）");
-// glm（有月费、无标价折算、unresolved）在订阅轨里必须显示 unresolved chip
+ok(dualHtml.includes("数字异常") && dualHtml.includes("请核对套餐"), "anthropic 63.9× → 「数字异常，请核对套餐」告警（>50× 护栏，人话）");
+ok(dualHtml.includes("值回月费 1.1×"), "minimax 1.12× 显示「值回月费 1.1×」");
+// glm（有月费、无标价折算、unresolved）在订阅组里必须显示 unresolved chip
 // ——曾因分类进 subEntries 后丢提示，看起来"一切正常"。
-ok(dualHtml.includes("含未定价 tokens"), "glm 的 unresolved chip（不得显示 ¥0 或假装正常）");
-ok(dualHtml.includes("估算（relay 上界）"), "deepseek 的 metered_estimate 带上界口径标签");
+ok(dualHtml.includes("部分用量无法估价"), "glm 的 unresolved chip（不得显示 ¥0 或假装正常）");
+ok(dualHtml.includes("按量估算（上界）") && dualHtml.includes("（参考）"), "deepseek 的 metered_estimate 标「估算 · 参考」");
 ok(dualHtml.includes("$20.00") && dualHtml.includes("¥114.00"), "月费带币种符号（条目级 currency）");
+ok(!/metered-bill|official-price-card|fair-market|missing-provider/.test(dualHtml), "费用明细卡面不出现 raw reason code（规格 §4 第 84 行）");
+ok(dualHtml.includes(">Anthropic<") && dualHtml.includes("经 Claude Code") && !dualHtml.includes(">anthropic<"),
+  "行名 = 服务商（付钱对象，人类名称），宿主降为「经 X」副属性");
+// 同一服务商经多个工具 → 合成一行（同币种相加），宿主并列；币种不同不相加、分行。
+const merged = {
+  by_provider: {
+    "codex/openai": { amounts_by_basis: { api_equivalent: 10 }, currency: "USD", has_unresolved: false },
+    "claude-code/openai": { amounts_by_basis: { api_equivalent: 5, fixed_subscription: 20 }, currency: "USD", has_unresolved: false },
+    "dsh/openai": { amounts_by_basis: { metered_actual: 7 }, currency: "CNY", has_unresolved: false },
+  },
+  by_host: { codex: { freshness: { state: "fresh", last_observed_at: "2026-09-13" } }, "claude-code": { freshness: { state: "partial", last_observed_at: "2026-09-12" } }, dsh: { freshness: { state: "fresh", last_observed_at: "2026-09-13" } } },
+};
+elements["ov-dual-list"]._kids = [];
+sandbox.renderDualTrack(merged);
+const mergedHtml = (elements["ov-dual-list"]._kids || []).map((k) => k.innerHTML).join("\n");
+ok(mergedHtml.includes("$15.00") && mergedHtml.includes("经 Codex、Claude Code"), `同服务商同币种合成一行、宿主并列（got ${mergedHtml.includes("$15.00")}）`);
+ok(mergedHtml.includes("¥7.00") && !mergedHtml.includes("$22.00") && !mergedHtml.includes("¥22.00"), "币种不同分行，不跨币相加");
+ok(mergedHtml.includes("数据不完整"), "合并行新鲜度取最差（partial 压过 fresh）");
 
 console.log("# renderDecideCard（async，等 promise 排空）");
 elements["ov-decide-body"] = { textContent: "", innerHTML: "", appendChild(child) { this._kids ??= []; this._kids.push(child); } };
 // stub 形状 = fold plan_from_rate_limits 的真实产物（limits.primary 在下）——
 // 审查 #1：旧 stub 按渲染器的错误期望（顶层 primary）构造，互相印证假绿。
 sandbox.__quota = { plan_type: "plus", has_credits: false,
-  limits: { primary: { used_percent: 92, window_minutes: 10080, resets_at: 1786000000 } },
-  observed_at: "2026-09-05T00:00:00Z" };
-await sandbox.renderDecideCard(monthly);
+  limits: { primary: { used_percent: 92, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 7200 } },
+  observed_at: new Date(Date.now() - 60000).toISOString() };
+sandbox.renderDecideCard(monthly, sandbox.__quota);
 let decideHtml = elements["ov-decide-body"].innerHTML + (elements["ov-decide-body"]._kids || []).map((k) => k.textContent).join("");
-ok(decideHtml.includes("92% 剩余") || decideHtml.includes("8% 剩余"), `Codex 窗口条给剩余%（got 截断）`);
-ok(decideHtml.includes("即将限流"), "Codex 剩 8% → 建议行「即将限流」预警态");
-ok(decideHtml.includes("窗口余量不可得"), "Claude Pro 恒标「不可得」（拒绝快照反推不了正向余量）");
+ok(decideHtml.includes("剩余 8%"), `Codex 窗口条给剩余%（got 截断）`);
+const lowQuotaAdvice = elements["ov-decide-body"]._kids.find((k) => k.className === "decide-advice").textContent;
+ok(lowQuotaAdvice === "💡 Codex 额度较低；请在用量或设置中确认可用线路", "Codex 剩 8% → 提示确认可用线路");
+ok(!/Claude|GLM|切到/i.test(lowQuotaAdvice), "低额度建议不指名推荐未经证实的替代线路");
+ok(decideHtml.includes("无法读取剩余额度"), "Claude Pro 恒标「无法读取剩余额度」（拒绝快照反推不了正向余量）");
 
 sandbox.__quota = { plan_type: "plus", has_credits: false,
-  limits: { primary: { used_percent: 40, window_minutes: 10080, resets_at: 1786000000 } },
-  observed_at: "2026-09-05T00:00:00Z" };
-sandbox.renderDecideCard._quotaAt = 0; // 穿透 60s memo（审查 #6 修复引入），否则第二次调用复用 92% 的缓存
+  limits: { primary: { used_percent: 40, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 7200 } },
+  observed_at: new Date(Date.now() - 60000).toISOString() };
 elements["ov-decide-body"] = { textContent: "", innerHTML: "", appendChild(child) { this._kids ??= []; this._kids.push(child); } };
-await sandbox.renderDecideCard(monthly);
+sandbox.renderDecideCard(monthly, sandbox.__quota);
 decideHtml = elements["ov-decide-body"].innerHTML + (elements["ov-decide-body"]._kids || []).map((k) => k.textContent).join("");
 ok(decideHtml.includes("可继续使用"), "Codex 剩 60% → 健康态");
 
@@ -282,6 +383,69 @@ ok(num("ov-budget-sub").includes("尚未设置预算") && num("ov-budget-sub").i
   "未设置预算明确提示且不隐藏成本统计能力");
 ok(!num("ov-budget-sub").includes("600") && !num("ov-budget-sub").includes("30"),
   "首次安装不泄漏模板默认预算");
+
+console.log("# renderOverview · 预算卡优先读 budget_profiles.estimate（设置页规格 §8 D1）");
+// 旧 legacy 预算（¥600/月，已超支）与设置页新存的 estimate profile（¥200/月，
+// 已用 ¥120，未超支）同时存在——卡片必须显示 profile 的数字，不是 legacy 的，
+// 否则设置页保存的预算在总览上白存了。
+sandbox.__overview = {
+  budget: { source: "sql", level: "over", month_cost: 900, monthly_cny: 600,
+    month_ratio: 1.5, effective_daily_budget: 20, reasons: ["legacy_should_not_show"] },
+  budget_profiles: { status: "ok", month: "2026-09", profiles: [
+    { profile_id: "estimate", currency: "CNY", monthly_minor: 20000, daily_minor: null,
+      warning_ratio_bp: 8000, spent_minor: 12000, ratio_bp: 6000, level: "ok", has_unresolved: false },
+  ] },
+  budget_monthly_cny: 600, sync: { ok: true, at: "", message: "ok" },
+  days: [], fx: null, estimate_note: "fixture", data_home: "<fixture>",
+};
+await sandbox.renderOverview();
+ok(num("ov-budget-amount") === "¥120 / ¥200", `profile 数字覆盖 legacy（got ${num("ov-budget-amount")}）`);
+ok(!num("ov-budget-sub").includes("legacy_should_not_show"), "不残留 legacy reasons");
+ok(num("ov-budget-sub").includes("60%"), "百分比来自 profile 的 ratio_bp（60%），不是 legacy 的 150%");
+
+console.log("# renderOverview · profile has_unresolved → 「至少已用…仍有未覆盖用量」");
+sandbox.__overview = {
+  ...sandbox.__overview,
+  budget_profiles: { status: "ok", month: "2026-09", profiles: [
+    { profile_id: "estimate", currency: "CNY", monthly_minor: 20000, daily_minor: null,
+      warning_ratio_bp: 8000, spent_minor: 8000, ratio_bp: null, level: "incomplete", has_unresolved: true },
+  ] },
+};
+await sandbox.renderOverview();
+ok(num("ov-budget-sub").includes("至少已用 ¥80") && num("ov-budget-sub").includes("仍有未覆盖用量") &&
+  !num("ov-budget-sub").includes("0%"),
+  `incomplete profile 用金额下界而非编造百分比（ratio_bp 本是 null）（got ${num("ov-budget-sub")}）`);
+
+console.log("# renderOverview · 全局静默覆盖 profile 自身的 level（profile 不感知 snooze）");
+sandbox.__overview = {
+  budget: { source: "sql", level: "ok", month_cost: 0, monthly_cny: 600,
+    month_ratio: 0, effective_daily_budget: null, reasons: null,
+    snoozed_until: new Date(Date.now() + 86400000).toISOString() },
+  budget_profiles: { status: "ok", month: "2026-09", profiles: [
+    { profile_id: "estimate", currency: "CNY", monthly_minor: 20000, daily_minor: null,
+      warning_ratio_bp: 8000, spent_minor: 25000, ratio_bp: 12500, level: "exceeded", has_unresolved: false },
+  ] },
+  budget_monthly_cny: 600, sync: { ok: true, at: "", message: "ok" },
+  days: [], fx: null, estimate_note: "fixture", data_home: "<fixture>",
+};
+await sandbox.renderOverview();
+ok(num("ov-budget-sub").includes("提醒已静默"),
+  `设置页「本周期静默提醒」写的全局 snooze 让总览卡片跟着变，不因换成 profile 数据源而失效（got ${num("ov-budget-sub")}）`);
+
+console.log("# renderOverview · estimate profile 月额缺失时回落 legacy（不当作已配置）");
+sandbox.__overview = {
+  budget: { source: "sql", level: "no_budget", month_cost: 0, monthly_cny: null,
+    month_ratio: null, effective_daily_budget: null, reasons: null },
+  budget_profiles: { status: "ok", month: "2026-09", profiles: [
+    { profile_id: "confirmed", currency: "CNY", monthly_minor: 50000, daily_minor: null,
+      warning_ratio_bp: 8000, spent_minor: 0, ratio_bp: null, level: "no_data", has_unresolved: false },
+  ] },
+  budget_monthly_cny: null, sync: { ok: true, at: "", message: "ok" },
+  days: [], fx: null, estimate_note: "fixture", data_home: "<fixture>",
+};
+await sandbox.renderOverview();
+ok(num("ov-budget-amount") === "—" && num("ov-budget-sub").includes("尚未设置预算"),
+  "没有 estimate（只有 confirmed）时不误用其他 profile，正确回落未配置态");
 
 if (failed) { console.error("\n" + failed + " 项断言失败"); process.exit(1); }
 console.log("\n通过。");

@@ -33,6 +33,15 @@
       unresolved_reason: "subscription-token-usage-is-not-a-per-token-bill",
       evidence_basis: "official-subscription",
     },
+    // 真实场景：MiniMax 订阅 ¥49/月，经 Claude Code 中转使用——与 anthropic 同宿主、
+    // 不同服务商、不同币种，必须各占一行、永不相加（CLAUDE.md 的反面教材）。
+    "claude-code/minimax": {
+      currency: "CNY",
+      amounts_by_basis: { fixed_subscription: 49, api_equivalent: 56.2 },
+      has_unresolved: false,
+      pricing_method: "official-price-card",
+      evidence_basis: "official-subscription",
+    },
     "dsh/deepseek": {
       currency: "CNY",
       amounts_by_basis: { metered_actual: 8.64 },
@@ -42,33 +51,69 @@
     },
   };
 
-  function dto(tokens) {
+  // 形状出处：crates/agent-vitals-domain/src/domain/data_contract.rs
+  //   MonthlySummary::to_json / DailySummary::to_json（total_actual_spend =
+  //   by_provider summable 档按币分桶，含订阅月费；actual_spend_by_basis 是它
+  //   的按 basis 拆栏，各栏之和恒等于 total_actual_spend）。日粒度 by_provider
+  //   恒无 fixed_subscription（订阅费不摊进日账）——两份 DTO 不能共用一份
+  //   by_provider，否则 mock 自己就违反 domain 不变量。
+  const dailyByProvider = {
+    "codex/openai": { ...byProvider["codex/openai"], amounts_by_basis: { api_equivalent: 0.84 } },
+    "claude-code/anthropic": { ...byProvider["claude-code/anthropic"], amounts_by_basis: {} },
+    "claude-code/minimax": { ...byProvider["claude-code/minimax"], amounts_by_basis: { api_equivalent: 4.1 } },
+    "dsh/deepseek": { ...byProvider["dsh/deepseek"], amounts_by_basis: { metered_actual: 3.21 } },
+  };
+
+  function dto(tokens, opts) {
+    const daily = !!(opts && opts.daily);
     return {
+      ...(daily ? { date: opts.date || isoDay } : { month: opts && opts.month || month }),
+      has_unresolved: true,
+      last_observed_at: isoDay,
       tokens_by_host: {
         codex: { total: Math.round(tokens * 0.46), uncached_input: Math.round(tokens * 0.26), cache_read: Math.round(tokens * 0.12), cache_write: Math.round(tokens * 0.03), output: Math.round(tokens * 0.05) },
         "claude-code": { total: Math.round(tokens * 0.34), uncached_input: Math.round(tokens * 0.20), cache_read: Math.round(tokens * 0.08), cache_write: Math.round(tokens * 0.02), output: Math.round(tokens * 0.04) },
         dsh: { total: Math.round(tokens * 0.20), uncached_input: Math.round(tokens * 0.12), cache_read: Math.round(tokens * 0.04), cache_write: Math.round(tokens * 0.01), output: Math.round(tokens * 0.03) },
       },
-      by_provider: byProvider,
-      total_actual_spend: { CNY: 8.64 },
+      by_provider: daily ? dailyByProvider : byProvider,
+      total_actual_spend: daily ? { CNY: 3.21 } : { CNY: 57.64, USD: 20 },
+      actual_spend_by_basis: daily
+        ? { metered_actual: { CNY: 3.21 } }
+        : { fixed_subscription: { CNY: 49, USD: 20 }, metered_actual: { CNY: 8.64 } },
       by_host: {
         codex: { amounts_by_basis: { api_equivalent: 14.82 }, freshness: { state: "fresh", last_observed_at: isoDay }, has_unresolved: false, pricing_method: "provider-card" },
-        "claude-code": { amounts_by_basis: { fixed_subscription: 20 }, freshness: { state: "partial", last_observed_at: isoDay }, has_unresolved: true, pricing_method: "fair-market-fallback", unresolved_reason: "missing-provider-route-evidence" },
+        // by_host 的 claude-code 条目混币（USD 20 + CNY 49），故不声明 currency（domain 规则：混币条目 currency=None）。
+        "claude-code": { amounts_by_basis: { fixed_subscription: 69, api_equivalent: 56.2 }, freshness: { state: "partial", last_observed_at: isoDay }, has_unresolved: true, pricing_method: "fair-market-fallback", unresolved_reason: "missing-provider-route-evidence" },
         dsh: { amounts_by_basis: { metered_actual: 8.64 }, freshness: { state: "fresh", last_observed_at: isoDay }, has_unresolved: false, pricing_method: "provider-card" },
       },
       coverage: { measured_fields: 3, total_fields: 3, denominator_version: 1 },
       excluded_hosts: [],
-      total_summable: 8.64,
+      total_summable: daily ? 3.21 : 8.64,
       freshness: { state: "partial", last_observed_at: isoDay },
     };
   }
 
+  // 形状出处：apps/desktop/src-tauri/src/overview.rs SyncStatus::ok →
+  //   beijing_timestamp() = runtime::clock::local_timestamp_text，格式
+  //   "YYYY-MM-DD HH:MM:SS"（统计时区本地时间，**不是** ISO/UTC）。此前 mock
+  //   用 toISOString() 让「上次同步」比同页 note 早 8 小时，是 mock 的错。
+  const localStamp = (value) => {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+    }).formatToParts(value);
+    const v = Object.fromEntries(parts.filter((p) => p.type !== "literal").map((p) => [p.type, p.value]));
+    return v.year + "-" + v.month + "-" + v.day + " " + v.hour.replace("24", "00") + ":" + v.minute + ":" + v.second;
+  };
   const overview = {
-    sync: { ok: true, stage: "complete", at: new Date().toISOString(), message: "浏览器样式调试数据" },
+    sync: { ok: true, stage: "complete", at: localStamp(new Date()), message: "浏览器样式调试数据" },
     fx: { usd_cny: 7.15, as_of: month },
     days: [{ date: isoDay, total: 0 }],
-    budget: { source: "sql", level: "warn", month_ratio: 0.68, month_cost: 68, monthly_cny: 100, effective_daily_budget: 5, generated_at: new Date().toISOString(), reasons: ["browser mock"] },
-    budget_monthly_cny: 100,
+    // 预算分子 = 跨宿主按量实付 CNY = 上面 dto() 的 total_actual_spend.CNY（8.64）。
+    // 此前 mock 写 68 → 预算卡「¥68」与本月支出卡「¥8.64」同屏打架（2026-09-01
+    // 两卡打架事故的形状复刻）。
+    budget: { source: "sql", level: "warn", month_ratio: 0.72, month_cost: 8.64, monthly_cny: 12, effective_daily_budget: 0.6, generated_at: new Date().toISOString(), reasons: ["browser mock"] },
+    budget_monthly_cny: 12,
     estimate_note: "浏览器调试数据，不会写入本地数据库",
     data_home: "浏览器调试模式",
   };
@@ -120,26 +165,48 @@
   }];
 
   let syncPaused = false;
+  // Shape: crates/agent-vitals-runtime/src/mcp/mod.rs:488-499 source_status_report()
+  // 一行一个 host；生产 error_codes 词表目前只见 permission_denied/permission
+  // （mcp/mod.rs:716 测试），file_missing 只在本 mock 里出现过——改用生产词表，
+  // 免得设置页规格 §5.6 的映射表在 Vite 里测不到真实分支。
   const sourceStatuses = [
     {
       host: "codex", source_id: "browser-codex", connection_state: "connected",
-      scan: { source_count: 12 }, log: { last_event_at_ms: Date.now() - 3600000 },
-      import_scope: { sessions: 8, facts: 42 }, recovery_action: null,
+      scan: { source_count: 12, last_scanned_at_ms: Date.now() - 3600000 },
+      log: { last_event_at_ms: Date.now() - 3600000 },
+      import_scope: { sessions: 8, facts: 42, first_event_at_ms: Date.now() - 30 * 86400000, last_event_at_ms: Date.now() - 3600000 },
+      recovery_action: null,
     },
     {
       host: "claude-code", source_id: "browser-claude", connection_state: "needs_attention",
-      scan: { source_count: 4 }, log: { last_event_at_ms: Date.now() - 7200000 },
-      import_scope: { sessions: 3, facts: 18 },
-      failed_scope: { sources: 1, error_codes: ["file_missing"] },
+      scan: { source_count: 4, last_scanned_at_ms: Date.now() - 7200000 },
+      log: { last_event_at_ms: Date.now() - 7200000 },
+      import_scope: { sessions: 3, facts: 18, first_event_at_ms: Date.now() - 20 * 86400000, last_event_at_ms: Date.now() - 7200000 },
+      failed_scope: { sources: 1, error_codes: ["permission_denied"] },
       recovery_action: { label: "重新同步", kind: "retry_source" },
     },
     {
       host: "dsh", source_id: "browser-dsh", connection_state: "connected",
-      scan: { source_count: 2 }, log: { last_event_at_ms: Date.now() - 1800000 },
-      import_scope: { sessions: 2, facts: 9 }, recovery_action: null,
+      scan: { source_count: 2, last_scanned_at_ms: Date.now() - 1800000 },
+      log: { last_event_at_ms: Date.now() - 1800000 },
+      import_scope: { sessions: 2, facts: 9, first_event_at_ms: Date.now() - 5 * 86400000, last_event_at_ms: Date.now() - 1800000 },
+      recovery_action: null,
+    },
+    {
+      host: "workbuddy", source_id: "browser-workbuddy", connection_state: "not_detected",
+      scan: { source_count: 0 }, log: {},
+      import_scope: { sessions: 0, facts: 0 },
+      recovery_action: { label: "扫描并接入", kind: "scan_and_connect" },
     },
   ];
   const customRoots = [];
+  let retentionMonths = 13;
+  let budgetSnoozedUntilMs = null;
+  const budgetConfigState = { monthly_cny_minor: 10000, daily_cny_minor: 500, warning_ratio_bp: 8000, origin: "legacy_import" };
+  const budgetProfilesState = {
+    estimate: { profile_id: "estimate", currency: "CNY", monthly_minor: 20000, daily_minor: null,
+      warning_ratio_bp: 8000, spent_minor: 864, ratio_bp: 432, level: "ok", has_unresolved: false, daily_level: "disabled" },
+  };
   const billingCandidates = [{
     candidate_id: "browser-candidate-1", status: "pending", host: "codex",
     provider_id: "openai", currency: "USD", amount_minor: 2000,
@@ -171,12 +238,27 @@
   async function invoke(command, args) {
     try {
       switch (command) {
-      case "read_overview": return overview;
-      case "data_daily_summary": return dto(246000);
-      case "data_monthly_summary": return dto(374000);
-      case "read_calendar_month": return calendar;
+      // Shape: apps/desktop/src-tauri/src/overview.rs:348 Overview (Serialize), :86 SyncStatus::ok,
+      // :664 budget_profiles（同一份 budget_profiles_status_sql_at 产出，不是
+      // 第二套预算数据——设置页规格 §8 D1：总览预算卡优先读这里的 estimate
+      // profile，budgetProfilesState 与 "budget_profiles_status" case 共享同一
+      // 状态，两个命令在浏览器 mock 里也不该各算各的）。
+      case "read_overview": return { ...overview, budget: { ...overview.budget,
+        snoozed_until: budgetSnoozedUntilMs ? new Date(budgetSnoozedUntilMs).toISOString() : null },
+        budget_profiles: { status: "ok", month, profiles: Object.values(budgetProfilesState) } };
+      // Shape: crates/agent-vitals-domain/src/domain/data_contract.rs:607 DailySummary::to_json.
+      case "data_daily_summary": return dto(246000, { daily: true, date: args && args.date });
+      // Shape: crates/agent-vitals-domain/src/domain/data_contract.rs:494 MonthlySummary::to_json.
+      case "data_monthly_summary": return dto(374000, { month: args && args.month });
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2780 read_calendar_month → crates/agent-vitals-runtime/src/summary.rs:1466 calendar_month (json!).
+      case "read_calendar_month": return { month: args && args.month || month, days: (args && args.month && args.month !== month) ? {} : calendar.days };
+      // Shape: apps/desktop/src-tauri/src/lib.rs:1390 data_status (json!).
       case "data_status": return { status: "ok", data: { health: "warn", integrity: "ok", facts: 42, unresolved_tokens: 18000, unpriced_tokens: 0, pricing: { stale: false }, hints: ["浏览器 mock 数据，不会写入本地库"] } };
+      // Shape: apps/desktop/src-tauri/src/lib.rs:1480 billing_import_candidates (json!).
       case "billing_import_candidates": return { status: "ok", candidates: billingCandidates };
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2607 billing_recalculation_jobs (json!).
+      case "billing_recalculation_jobs": return { status: "ok", jobs: [] };
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2325 billing_declarations (json!).
       case "billing_declarations": return { status: "ok", declarations: billingDeclarations };
       case "resolve_billing_import_candidate": {
         const candidate = billingCandidates.find((item) => item.candidate_id === (args && args.candidateId));
@@ -222,11 +304,56 @@
         return { status: "revoked", declaration_id: args && args.declarationId, revision_id: args && args.revisionId };
       }
       case "host_bills_for_period": return emptyReport("bills");
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2632 data_source_status (json!).
       case "data_source_status": return { status: "ok", sources: sourceStatuses };
       case "custom_source_roots": return { status: "ok", sources: customRoots };
-      case "budget_config": return { status: "ok", monthly_cny_minor: 10000, daily_cny_minor: 500, warning_ratio_bp: 80, origin: "user" };
-      case "budget_profiles_status": return { status: "ok", profiles: [] };
-      case "retention_config": return { status: "ok", months: 13 };
+      // Shape: crates/agent-vitals-runtime/src/budget.rs:140-152（万分比，8000=80%）；
+      // 旧字段名沿用 apps/desktop/src-tauri/src/lib.rs:2142 budget_config()。
+      case "budget_config": return { status: "ok", ...budgetConfigState };
+      case "save_budget_config": {
+        const input = (args && args.input) || {};
+        Object.assign(budgetConfigState, {
+          monthly_cny_minor: input.monthly_cny_minor, daily_cny_minor: input.daily_cny_minor,
+          warning_ratio_bp: input.warning_ratio_bp, origin: "user",
+        });
+        return ok({ status: "saved", updated_at_ms: Date.now(), notification_permission: "granted" });
+      }
+      case "budget_profiles_status": return { status: "ok", profiles: Object.values(budgetProfilesState) };
+      case "save_budget_profile": {
+        const input = (args && args.input) || {};
+        if (!input.profile_id || !Number.isSafeInteger(input.monthly_minor) || input.monthly_minor <= 0) {
+          throw new Error("budget profile requires a positive integer monthly_minor");
+        }
+        const spent = budgetProfilesState[input.profile_id] ? budgetProfilesState[input.profile_id].spent_minor || 0 : 0;
+        const ratioBp = Math.round((spent * 10000) / input.monthly_minor);
+        budgetProfilesState[input.profile_id] = {
+          profile_id: input.profile_id, currency: input.currency, monthly_minor: input.monthly_minor,
+          daily_minor: input.daily_minor ?? null, warning_ratio_bp: input.warning_ratio_bp,
+          spent_minor: spent, ratio_bp: ratioBp,
+          level: ratioBp >= 10000 ? "exceeded" : ratioBp >= input.warning_ratio_bp ? "warn" : "ok",
+          has_unresolved: false, daily_level: input.daily_minor ? "ok" : "disabled",
+        };
+        return ok({ status: "saved", profile_id: input.profile_id, currency: input.currency, notification_permission: "granted" });
+      }
+      case "snooze_budget_current_period": {
+        budgetSnoozedUntilMs = Date.parse(month + "-28T23:59:59+08:00");
+        return ok({ status: "ok", snoozed_until_ms: budgetSnoozedUntilMs });
+      }
+      case "clear_budget_snooze": {
+        budgetSnoozedUntilMs = null;
+        return ok({ status: "ok" });
+      }
+      case "retention_config": return { status: "ok", months: retentionMonths, minimum_months: 1, maximum_months: 60 };
+      case "save_retention_config": {
+        const input = (args && args.input) || {};
+        if (!Number.isInteger(input.months) || input.months < 1 || input.months > 60) {
+          throw new Error("retention months must be an integer between 1 and 60");
+        }
+        retentionMonths = input.months;
+        return ok({ status: "saved", months: retentionMonths });
+      }
+      case "export_diagnostic_package": return ok({ status: "saved", path: "/tmp/agent-vitals-diagnostic-browser-mock.zip", upload_performed: false });
+      // Shape: apps/desktop/src-tauri/src/lib.rs:1708 statistics_timezone_config (json!).
       case "statistics_timezone_config": return { status: "ok", timezone, system_timezone: timezone };
       case "save_statistics_timezone_config": {
         const next = String((args && args.timezone) || "").trim();
@@ -253,7 +380,10 @@
       case "open_trusted_releases_page": return { status: "opened", url: "https://example.invalid/releases", automatic_install: false };
       case "restore_authority_backup": return { status: "cancelled" };
       case "check_for_updates": return { status: "ok", current_version: "browser-mock", latest_tag: "app-v1.0.0", url: "https://example.invalid/releases", automatic_install: false };
-      case "data_codex_quota": return { plan_type: "Plus", limits: { primary: { used_percent: 38, resets_at: Math.floor(Date.now() / 1000) + 7200 } } };
+      // 形状出处：hosts/codex/sessions/usage.rs plan_from_rate_limits →
+      //   { plan_type, has_credits, limits: { primary: {...} }, observed_at }（事件的 ISO 时间戳）。
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2767 data_codex_quota → crates/agent-vitals-hosts/src/hosts/codex/sessions/usage.rs:191 plan_from_rate_limits.
+      case "data_codex_quota": return { plan_type: "Plus", has_credits: false, limits: { primary: { used_percent: 38, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 7200 } }, observed_at: new Date(Date.now() - 1500000).toISOString() };
       case "sessions_list": return { data: { sessions, next_cursor: null, has_more: false, window_session_count: sessions.length, window_total_tokens: 246000 } };
       case "sessions_read": return { data: { session: sessions[0], events: [], findings: [] } };
       case "sessions_issues": return {
@@ -316,7 +446,7 @@
         return ok({ status: "ok", changed: index >= 0 });
       }
       case "clear_nav_target": case "clear_focus_target": return ok({ status: "ok" });
-        default: return ok({ status: "ok", browser_mock: true, command, args });
+        default: throw new Error("Unsupported browser mock command: " + command);
       }
     } catch (error) {
       console.error("[browser-mock] invoke failed", command, error);

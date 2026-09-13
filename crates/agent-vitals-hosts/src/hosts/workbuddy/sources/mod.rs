@@ -1089,6 +1089,9 @@ pub fn workbuddy_session_audit_json(home: &Path, session_id: &str) -> Option<Val
         "session_id": session_id,
         "title": meta.title,
         "model": ev["model"].clone(),
+        // 会话实际覆盖跨度（D1–D4）——直接取扁平证据 DTO 的 `span`，不重算。
+        // 键位置与 Python 镜像逐字节对齐。
+        "span": ev["span"].clone(),
         "cwd": cwd,
         "file": file,
         "date_span": date_span,

@@ -180,6 +180,37 @@ body {
   display: flex;
 }
 
+/* 总览首行：范围 · 新鲜度 · 来源状态，一行文字，不占卡位。 */
+.overview-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 2px 10px;
+  font-size: 13px;
+}
+
+.overview-scope {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.overview-scope strong {
+  font-size: 15px;
+}
+
+.dot-sep {
+  color: var(--muted);
+}
+
+.overview-sync {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
 .muted {
   color: var(--muted);
 }
@@ -205,6 +236,407 @@ body {
   background: var(--panel);
   border-radius: var(--radius);
   padding: 12px 14px;
+}
+
+.month-band .stat {
+  min-height: 112px;
+  padding: 16px;
+}
+
+/* 第一行三卡的金额分行：dt 口径、dd 金额，跨币只分行不相加。名义是诊断脚注
+   （.diag 降权），实付/月费才是主行。「无数据」不吃强调色（绿色不能说反话）。 */
+.spend-lines {
+  margin: 8px 0 0;
+  display: grid;
+  gap: 4px;
+}
+
+.spend-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.spend-line dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.spend-line dd {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.spend-line.diag dd {
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.spend-line dd.muted-amt {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.today-card .amount {
+  margin-top: 4px;
+}
+
+/* 卡片入口（第三档 CTA）：导航不是待办——卡片标题行右侧灰字链接，hover 变主色，
+   常显但安静，不与通知行的按钮抢眼。每卡一个。 */
+.label-row,
+.panel-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.panel-title-right { display: inline-flex; align-items: baseline; gap: 12px; }
+.card-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.card-link:hover, .card-link:focus-visible { color: var(--accent); }
+/* .chip-link 最早只用在 <span role="button"> 上；设置页新增了几处
+   <button class="chip-link">（不是/改为其他计费方式/停止读取此来源/删除已导入
+   数据…），继承了浏览器 button 默认边框和内边距，看起来像小方框按钮而不是文字
+   链——补上 reset，两种标签渲染成同一种样式。 */
+.chip-link {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+}
+.chip-link.danger { color: var(--danger); }
+.chip-link:hover, .chip-link:focus-visible { color: var(--accent); border-color: var(--accent); }
+.usage-strip-links { margin-left: auto; display: inline-flex; gap: 14px; }
+.src-list .via { font-size: 12px; margin-left: 6px; white-space: nowrap; }
+/* 双轨账每行的服务商名——与设置页的 .src-row-name（不同标记）各自独立，
+   同名巧合但不是同一组件；删除数据源大卡时保留这条通用规则。 */
+.src-name { font-weight: 600; }
+.decide .fresh.nowrap { white-space: nowrap; }
+
+/* 本月用量一行：tokens 主数 + 日均 + 名义参考。 */
+.usage-strip {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 12px 2px 8px;
+  font-size: 13px;
+}
+
+.usage-strip-main strong {
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-strip-nominal {
+  margin-left: auto;
+}
+
+.btn-inline { padding: 2px 8px; font-size: 12px; }
+
+/* ---------- 通知组件 .notice ----------
+   总览上所有"要你注意"的东西只有这一个组件、四个级别：
+   ok（灰字、无框、不抢视线）· warn（琥珀边）· danger（红边）· todo（琥珀边 + 实心
+   主按钮，全页唯一）。结构固定：图标 → 文案（可两行）→ 按钮靠右。只有级别改颜色，
+   用户不必每次重新学"这个框是什么级别"。旧的 .quality-banner / .billing-prompt /
+   .trust-row 三套样式已并入这里。 */
+.notice-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.notice-list.compact { margin-bottom: 8px; }
+
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin: 0 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--panel-2);
+  background: var(--panel);
+  font-size: 13px;
+}
+
+.notice-list > .notice { margin: 0; }
+
+/* display:flex 会压过 UA 的 [hidden]{display:none}——不加这条，hidden 的通知会
+   渲染成一个空框（无头 Chrome 截图暴露：顶部一条空红框）。 */
+.notice[hidden] { display: none; }
+
+/* todo 级的主按钮是全页唯一的实心按钮。 */
+.notice.todo .btn:not(.secondary) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.notice.todo .btn:not(.secondary):hover { color: var(--bg); opacity: 0.9; }
+
+.notice > button { margin-left: auto; }
+
+.notice-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.notice-sub {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.notice-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+}
+
+.notice-icon::before {
+  content: "•";
+  color: var(--muted);
+}
+
+.notice.ok {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  padding-block: 4px;
+}
+
+.notice.ok .notice-icon::before { content: "✓"; color: var(--success); }
+
+.notice.ok .btn.secondary {
+  border-color: transparent;
+  background: transparent;
+  padding: 2px 6px;
+  font-size: 12px;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.notice.warn { border-color: var(--warn); }
+.notice.warn .notice-icon::before { content: "⚠"; color: var(--warn); }
+
+.notice.danger { border-color: var(--danger); color: var(--danger); }
+.notice.danger .notice-icon::before { content: "⚠"; color: var(--danger); }
+
+.notice.todo { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); }
+.notice.todo .notice-icon::before { content: "●"; color: var(--warn); }
+
+/* ---------- 设置（docs/v1.0.0/BETA_1_SETTINGS_PAGE_SPEC.md §3/§5/§6） ----------
+   左栏 sticky 导航 + 主栏五个分区；分区内部三层：h2 → .setting（标题/一句说明/
+   控件行）→ 控件。不再用边框盒套边框盒——层级靠间距和分隔线表达。
+   .tabpane 的 display:none/flex 只按 .active 切换（workbench.js switchTab）；
+   这条 grid 规则必须同样带 .active，否则 ID+class 的高特异性会让设置 tab
+   永远 display:grid，绕过分页隐藏——直接哈希跳到 #settings-data 时总览和设置
+   同屏出现就是这个规则漏了 .active 的复现（真机截图抓到）。 */
+#tab-sources.settings-page.active {
+  display: grid;
+  grid-template-columns: 152px 1fr;
+  gap: 32px;
+  align-items: start;
+}
+
+.settings-nav {
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-nav a {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 12px;
+  padding: 6px 0 6px 10px;
+  border-left: 2px solid transparent;
+}
+
+.settings-nav a:hover,
+.settings-nav a:focus-visible {
+  color: var(--accent);
+}
+
+.settings-nav a.current {
+  color: var(--text);
+  font-weight: 600;
+  border-left-color: var(--accent);
+}
+
+.settings-main {
+  min-width: 0;
+}
+
+.settings-section {
+  scroll-margin-top: 12px;
+}
+
+.settings-section + .settings-section {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--panel-2);
+}
+
+.settings-section > h2 {
+  font-size: 16px;
+  margin-bottom: 12px;
+}
+
+.setting {
+  padding: 16px 0;
+}
+
+.setting + .setting {
+  border-top: 1px solid color-mix(in srgb, var(--panel-2) 60%, transparent);
+}
+
+.settings-section > .setting:first-of-type {
+  padding-top: 0;
+}
+
+.setting-head {
+  margin-bottom: 8px;
+}
+
+.setting-head.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.setting-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.setting-head p {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.setting-note {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+/* 表单：标签在上，控件三档宽度（金额/数字 140px、下拉 160px、文本弹性）。 */
+.form-row {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.form-row label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* `.form-row label{display:grid}` outranks the UA `[hidden]{display:none}`
+   (class+type beats a bare attribute selector) — same failure mode as the
+   overview `.notice` bug; without this a hidden label still renders empty
+   grid cells (caught here: 统计时区 custom input showing next to "跟随系统"). */
+.form-row label[hidden] {
+  display: none;
+}
+
+.form-row label.grow {
+  flex: 1 1 220px;
+}
+
+.form-row select {
+  min-width: 160px;
+}
+
+.form-row input[type="text"],
+.form-row input[type="number"] {
+  width: 140px;
+}
+
+.form-row label.grow input[type="text"] {
+  width: 100%;
+}
+
+.money-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--panel-2);
+  border-radius: 6px;
+  padding: 0 8px;
+  width: 140px;
+}
+
+.money-input i {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.money-input input {
+  border: 0;
+  width: 100%;
+  padding: 6px 0;
+  background: transparent;
+}
+
+.money-input input:focus {
+  outline: none;
+}
+
+.unit-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.unit-input input {
+  width: 72px;
+}
+
+.unit-input i {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 提交回执：紧跟按钮，不再用独立状态块（除非多行结果，用 .form-receipt.block）。 */
+.form-receipt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.form-receipt.block {
+  display: block;
+  margin-top: 8px;
+}
+
+.flex-spacer {
+  flex: 1 1 auto;
 }
 
 .label {
@@ -430,12 +862,6 @@ body {
   border-radius: 8px;
   padding: 8px 12px;
   font-size: 12px;
-}
-
-.quality-banner {
-  margin: 8px 0 12px;
-  border-color: var(--warn, #ffad47);
-  color: var(--warn, #ffad47);
 }
 
 .table-wrap {
@@ -670,11 +1096,20 @@ summary.detail-section-title {
 }
 
 /* ---------- Findings ---------- */
-.find-toolbar,
-.src-toolbar {
+.find-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* 数据源分区顶部：同步状态 + 暂停按钮合一行（原 src-toolbar + sync-row 三行
+   合并——规格 §4.1.2）。与 .sync-row（总览用）区分开，字号更小。 */
+.sync-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
 }
 
 .cards-4 {
@@ -775,83 +1210,111 @@ button.chip.active {
   color: var(--text-dim);
 }
 
-/* ---------- 数据源 ---------- */
-.src-cards {
+/* ---------- 数据源：行式列表（规格 §4.1，替换原大卡） ---------- */
+.src-rows {
   display: flex;
   flex-direction: column;
-  gap: 12px;
 }
 
-.src-card {
-  background: var(--panel);
-  border-radius: var(--radius);
-  padding: 12px 14px;
+.src-row {
+  border-top: 1px solid color-mix(in srgb, var(--panel-2) 60%, transparent);
 }
 
-.src-head {
+.src-row:first-child {
+  border-top: 0;
+}
+
+.src-row-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+  min-height: 44px;
+  padding: 4px 0;
+  cursor: pointer;
+  background: none;
+  border: 0;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
 }
 
-.src-name {
-  font-weight: 600;
-}
-
-.src-badge {
-  font-size: 11px;
-  border-radius: 999px;
-  padding: 1px 10px;
+.src-dot {
   flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
 }
 
-.src-badge.ok {
-  color: var(--accent);
-  border: 1px solid var(--accent);
+.src-dot.ok { color: var(--accent); }
+.src-dot.danger { color: var(--danger); }
+.src-dot.muted { color: var(--muted); }
+
+.src-row-name {
+  font-weight: 600;
+  flex-shrink: 0;
+  min-width: 132px;
 }
 
-.src-badge.fail {
-  color: var(--danger);
-  border: 1px solid var(--danger);
+.src-row-state {
+  font-size: 12px;
+  flex-shrink: 0;
+  min-width: 64px;
 }
 
-.src-badge.warn {
-  color: var(--warn);
-  border: 1px solid var(--warn);
-}
+.src-row-state.danger { color: var(--danger); }
+.src-row-state.muted { color: var(--muted); }
 
-.src-meta {
+.src-row-meta {
   color: var(--muted);
   font-size: 12px;
-  margin: 6px 0;
-}
-
-.src-card .panel-title {
-  margin-top: 10px;
-}
-
-#tab-sources .sess-table tbody tr {
-  cursor: default;
-}
-
-.root-table td:first-child {
-  max-width: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.root-table tr.root-missing td {
+.src-row-action {
+  flex-shrink: 0;
+}
+
+.src-row-caret {
+  flex-shrink: 0;
   color: var(--muted);
-  opacity: 0.6;
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+
+.src-row[data-open="1"] .src-row-caret {
+  transform: rotate(180deg);
+}
+
+.src-row-detail {
+  padding: 4px 0 14px 20px;
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.src-row-detail[hidden] {
+  display: none;
+}
+
+.src-row-detail .degraded-row {
+  color: var(--danger);
+}
+
+.src-row-detail-actions {
+  display: flex;
+  gap: 14px;
+  margin-top: 2px;
 }
 
 .degraded-row {
   display: flex;
   gap: 6px;
   align-items: baseline;
-  padding: 3px 0;
-  font-size: 12px;
-  border-bottom: 1px solid var(--panel);
 }
 
 .degraded-path {
@@ -863,17 +1326,6 @@ button.chip.active {
   color: var(--muted);
 }
 
-/* ---------- 页脚 ---------- */
-.wb-foot {
-  padding: 6px 14px;
-  color: var(--muted);
-  font-size: 11px;
-  border-top: 1px solid var(--panel);
-  flex-shrink: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 /* ---------- 单会话报告分区（kv 键值行 + 折叠 raw） ---------- */
 .kv-row {
@@ -1105,33 +1557,28 @@ button.chip.active {
 /* ---------- v0.9 Stage D：KPI 月度带 / 双轨账 / 决策卡 ---------- */
 /* 月度带：与 KPI 行同构的第二行（本月口径）+ 预算小卡。预算口径「仅 DSH」
    写在 label 里（2026-09-01 两卡互相打架的事故后，口径不一致必须上卡面）。 */
-.cards.month-band { margin-top: 8px; }
-.cards.month-band .stat .amount { font-size: 18px; font-weight: 600; }
-.stat.budget .label { color: var(--text-2, #667); }
-.stat.budget .amount { font-size: 18px; }
+.cards.month-band { margin-top: 12px; }
+.cards.month-band .stat .amount { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat.budget .label { color: var(--muted); }
+.stat.budget .amount { font-size: 22px; }
 /* 决策卡的窗口 meter：fill 承载严重度（accent → danger），track 是同 ramp
    浅一档（same-ramp track，状态跨整条 bar 可读）。 */
 .dual .panel-title, .decide .panel-title { margin-bottom: 6px; }
+/* 首屏决策卡：与三卡同宽、留出与用量行的呼吸；窗口告急时边框升 warn。 */
+#ov-decide-card { margin-top: 12px; }
+#ov-decide-card.warn { border: 1px solid var(--warn); }
 .dual-track { display: block; font-size: 11px; color: var(--text-2, #667); letter-spacing: .04em; margin: 6px 0 2px; }
 .meter { display: inline-block; width: 120px; height: 8px; border-radius: 4px;
-  background: #dce4f2; overflow: hidden; vertical-align: middle; margin-right: 8px; }
-.meter-fill { display: block; height: 100%; border-radius: 4px; background: #2c4ea8; }
-.meter-fill.danger { background: #b3362b; }
+  background: var(--panel-2); overflow: hidden; vertical-align: middle; margin-right: 8px; }
+.meter-fill { display: block; height: 100%; border-radius: 4px; background: var(--skill); }
+.meter-fill.danger { background: var(--danger); }
 .decide-advice { margin-top: 8px; padding: 8px 10px; border-radius: 6px;
-  background: #f4f6fb; font-size: 12px; }
+  background: var(--panel-2); color: var(--text); font-size: 13px; }
 /* Stage D：日历格子副行（该日耗费，分宿主分币并列——口径各异不相加）。 */
 .cal-cell .cost { font-size: 10px; color: var(--text-2, #778); margin-top: 2px; }
 
 /* ---------- 审查 CODE_REVIEW_V0_9_WORKBENCH_UX 修复 ---------- */
-/* #2 本月结论行：一个结论回答"这个月要付多少"，视觉权重视觉高于单 tile。 */
-.verdict { padding: 8px 12px; margin-bottom: 10px; border-radius: 8px;
-  background: rgba(46, 78, 168, 0.18); border-left: 3px solid #2c4ea8;
-  font-size: 14px; }
-.billing-prompt { display: flex; align-items: center; justify-content: space-between;
-  gap: 16px; padding: 12px; margin-bottom: 10px; border: 1px solid #cf9d24;
-  border-radius: 8px; background: rgba(207, 157, 36, .10); }
-.billing-prompt-actions { display: flex; gap: 8px; flex: 0 0 auto; }
-.billing-prompt .muted, .billing-review .muted { margin-top: 4px; }
+.billing-review .muted { margin-top: 4px; }
 .billing-review .panel-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .billing-review-row { display: flex; align-items: center; justify-content: space-between;
   gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line, #dce4f2); }
@@ -1145,12 +1592,40 @@ button.chip.active {
 .billing-csv { margin-top: 14px; }
 .billing-csv summary { cursor: pointer; color: var(--text-2, #667); font-size: 12px; }
 .billing-csv textarea { display: block; box-sizing: border-box; width: 100%; margin-top: 8px; font: 12px monospace; }
-@media (max-width: 720px) {
-  .billing-prompt, .billing-review-row { align-items: flex-start; flex-direction: column; }
-  .billing-form { align-items: stretch; flex-direction: column; }
+
+/* 关于页版本表：常显，不折叠（规格 §4.5、B11）。 */
+.about-versions {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  font-size: 12px;
 }
-.verdict strong { font-size: 16px; }
-.verdict .verdict-note { color: var(--muted); font-size: 12px; margin-left: 8px; }
+
+.about-versions dt {
+  color: var(--muted);
+}
+
+.about-versions dd {
+  margin: 0;
+}
+@media (max-width: 720px) {
+  .billing-review-row { align-items: flex-start; flex-direction: column; }
+  .billing-form { align-items: stretch; flex-direction: column; }
+  .overview-topline { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .overview-sync { justify-content: space-between; width: 100%; }
+  .cards.month-band { grid-template-columns: 1fr; }
+  .notice { align-items: flex-start; flex-direction: column; }
+  /* 设置页：左栏 sticky 导航折成顶部横向胶囊（规格 §3.1）。 */
+  #tab-sources.settings-page.active { grid-template-columns: 1fr; gap: 16px; }
+  .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: 6px; }
+  .settings-nav a { border: 1px solid var(--panel-2); border-radius: 999px; border-left-width: 1px; padding: 5px 10px; }
+  .settings-nav a.current { border-color: var(--accent); }
+  .form-row { align-items: stretch; flex-direction: column; }
+  .form-row input[type="text"],
+  .form-row input[type="number"],
+  .form-row select,
+  .money-input { width: 100%; }
+}
 /* #8 未来日：降透明度，与"发生过但没测到"区分。 */
 .cal-cell.future { opacity: 0.35; }
 /* #4 summable 恒 0 时降级行内灰字（原浅底大盒在暗主题像错误横幅）。 */
@@ -1164,12 +1639,13 @@ button.chip.active {
 /* `≈¥` 折算数带 hover 展开原始分币（PM 决策 2026-09-07 要求 hover 可见）——
    help 光标提示可悬停，虚下划线是可发现性的最低成本信号。 */
 .amount[title]:not([title=""]) { cursor: help; text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
-/* 决策卡建议行：暗主题下亮底 #f4f6fb + 继承浅字 = 浅底浅字不可读（截图暴露）。
-   改用暗底亮字，预警态由文字内容与 ⚠ 表达。 */
-.decide-advice { background: rgba(46, 78, 168, 0.18); color: var(--text-1, #dde3ee);
-  border-left: 3px solid #2c4ea8; }
+/* 决策卡建议行：颜色全走主题 token——此前 `var(--text-1, #dde3ee)` 里 --text-1
+   并不存在，浅色主题下就是浅底浅字（无头 Chrome 截图暴露，两次）。预警态由
+   文字内容与 ⚠ 表达。 */
+.decide-advice { background: var(--panel-2); color: var(--text);
+  border-left: 3px solid var(--skill); }
 /* 决策卡里的 chip（Claude Pro「窗口余量不可得」等）保证可读。 */
-.decide .chip { color: #cfd6e4; border-color: #4a5468; }
+.decide .chip { color: var(--muted); border-color: var(--panel-2); }
 /* 「本月逐日」跨宿主列表行。 */
 .days-list li { display: flex; gap: 12px; align-items: baseline; padding: 4px 0; }
 .days-list .day-date { color: var(--muted); min-width: 84px; }

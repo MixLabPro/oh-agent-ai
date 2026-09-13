@@ -325,6 +325,9 @@ pub fn claude_session_audit_json(home: &Path, session_id: &str) -> Option<Value>
         "session_id": session_id,
         "title": title_of(&evidence.raw_records),
         "model": ev["model"],
+        // 会话实际覆盖跨度（D1–D4）——直接取扁平证据 DTO 的 `span`，不重算。
+        // 键位置与 Python 镜像逐字节对齐（差分门比 `claude-session` 的输出）。
+        "span": ev["span"].clone(),
         "cwd": roots.first().cloned().unwrap_or(Value::Null),
         "file": file.to_string_lossy().to_string(),
         "files": files.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
@@ -680,10 +683,12 @@ mod tests {
         assert_eq!(out["date_span"]["last"], json!("2026-08-20T14:30:00Z"));
 
         // 键序是字节一致的一部分（Python 镜像逐字节对齐），不能重排。
+        // `span` 是会话跨度接线加的键，插在 `model` 后（与 `model`/`cwd` 同属
+        // meta 派生）——见 docs/v1.0.0/OBSERVED_SPAN_IMPLEMENTATION_PLAN.md。
         let keys: Vec<&str> = out.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            vec!["host", "session_id", "title", "model", "cwd", "file", "files", "date_span", "audit", "coverage", "signals", "attempts", "notes"]
+            vec!["host", "session_id", "title", "model", "span", "cwd", "file", "files", "date_span", "audit", "coverage", "signals", "attempts", "notes"]
         );
 
         let rules = out["audit"]["rule_outcomes"].as_object().unwrap();

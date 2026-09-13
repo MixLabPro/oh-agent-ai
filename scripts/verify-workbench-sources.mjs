@@ -26,7 +26,7 @@ for (const field of ["source_id", "authorization", "connection_state", "scan",
   "log", "import_scope", "failed_scope", "recovery_action"]) {
   ok(runtime.includes(`\"${field}\"`), `契约包含 ${field}`);
 }
-ok(js.includes("for (const source of sources)"), "前端按返回集合渲染而非硬编码宿主");
+ok(js.includes("for (const source of ordered)"), "前端按返回集合渲染而非硬编码宿主");
 ok(js.includes("recoverSource(button, key") && js.includes('invoke("trigger_sync")'),
   "未检测与失败状态都有恢复动作");
 ok(js.includes('invoke("sync_request_status", { requestId })'), "恢复动作按请求ID等待完成");
@@ -42,22 +42,30 @@ ok(lib.includes("match worker_db.billing_recalculation_run") && lib.includes("Ok
   "重算 worker 只把 changed=true 当作成功，不吞掉 false/错误回执");
 ok(lib.includes("fn billing_recalculation_jobs()") &&
   /billing_recalculation_job_status,[\s\S]*billing_recalculation_jobs,/.test(lib) &&
-  js.includes('invoke("billing_recalculation_jobs")') && js.includes("重算待重试"),
+  // 总览重构后 jobs 走 OVERVIEW_REQUESTS 的合并拉取（command 字段动态 invoke），
+  // 不再是页面里一处字面量 invoke("billing_recalculation_jobs")。
+  js.includes('command: "billing_recalculation_jobs"') && js.includes("重算待重试"),
   "工作台重启后读取待处理重算并提供可见重试入口");
 
 console.log("# 真实前端渲染与恢复链路");
 const elements = {};
 function makeEl(id) {
   const classes = new Set();
+  const attrs = {};
   let textValue = "";
   let htmlValue = "";
   const node = {
-    id, children: [], dataset: {}, hidden: false, disabled: false,
+    id, children: [], dataset: {}, hidden: false, disabled: false, title: "",
     classList: { add: (...names) => names.forEach(name => classes.add(name)), contains: name => classes.has(name) },
     appendChild(child) { this.children.push(child); return child; },
     append(...children) { this.children.push(...children); },
     focus() { this.focused = true; },
     addEventListener() {}, remove() { this.removed = true; },
+    // renderSourceRow 用 setAttribute("aria-expanded", …) 记录展开态——真实按钮
+    // 有这个方法，makeEl 之前没实现，切到行式结构后第一次跑就在这里炸。
+    setAttribute(name, value) { attrs[name] = String(value); },
+    getAttribute(name) { return attrs[name] ?? null; },
+    removeAttribute(name) { delete attrs[name]; },
   };
   Object.defineProperties(node, {
     textContent: { get: () => textValue, set: value => { textValue = String(value); htmlValue = ""; node.children = []; } },
@@ -124,15 +132,24 @@ vm.createContext(sandbox);
 vm.runInContext(js, sandbox, { filename: "workbench.js" });
 
 await sandbox.loadSources(true);
-const cards = elements["src-cards"].children;
-ok(cards.length === 3, "真实 renderSources 渲染三张宿主卡片");
-const names = cards.map(card => card.children[0].children[0].textContent);
-ok(names.join("|") === "Claude Code|Codex|DeepSeek Harness", "三宿主名称和顺序来自契约");
-ok(cards[2].children.some(child => child.textContent.includes("permission")), "失败范围进入卡片而非假空");
-ok(cards[2].children.some(child => child.textContent.includes("不是新鲜数据")), "失败宿主明确不宣称数据新鲜");
+// 行式列表（设置页规格 §4.1.1）：row.children = [head, detail]；
+// head.children = [dot, name, state, meta, caret]。失败来源排最前
+// （renderSources 的 ordered 排序），其余保持契约返回顺序。
+const rows = elements["src-cards"].children;
+ok(rows.length === 3, "真实 renderSources 渲染三条数据源行");
+const names = rows.map(row => row.children[0].children[1].textContent);
+ok(names.join("|") === "DeepSeek Harness|Claude Code|Codex", "失败来源排最前，其余顺序来自契约");
+const dshDetail = rows[0].children[1];
+ok(dshDetail.children.some(child => child.title === "permission"), "原始 error code 只在展开区 title，不上摘要文字");
+ok(dshDetail.children.some(child => child.textContent.includes("没有读取权限")), "reason code 映射为人话（规格 §5.6）");
+ok(dshDetail.children.some(child => child.textContent.includes("不是新鲜数据")), "失败来源明确不宣称数据新鲜");
 ok(elements["src-banner"].hidden === false && elements["src-banner"].textContent.includes("DeepSeek Harness") && elements["src-banner"].textContent.includes("其他来源已继续同步"),
   "部分失败横幅点名失败宿主并说明其他来源继续同步");
-const firstAction = cards[0].children.find(child => child.textContent === "扫描并接入");
+// 恢复动作现在住在展开区 .src-row-detail-actions 里（规格 §4.1.1），不再是
+// 卡片的直接子节点；按钮文字仍是契约 recovery_action.label 原样透传。
+const actionButtons = rows.flatMap(row =>
+  row.children[1].children.filter(c => c.className === "src-row-detail-actions").flatMap(a => a.children));
+const firstAction = actionButtons.find(child => child.textContent === "扫描并接入");
 await firstAction.onclick();
 ok(triggered === 1 && completionPolls === 2, "恢复动作至少观察一次未完成再等到本请求完成");
 ok(statusReads === 2, "本请求完成前不重读、完成后只重读一次独立状态");
