@@ -950,6 +950,37 @@ function billingCandidateAmount(candidate) {
   return amount.toFixed(2) + " " + (candidate.currency || "") + "/月";
 }
 
+const BILLING_REVIEW_DEFER_KEY = "agent-vitals-billing-review-deferred-at-ms";
+const BILLING_REVIEW_DEFER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+function billingReviewDeferredAt() {
+  let deferredAt = 0;
+  try { deferredAt = Number(window.localStorage.getItem(BILLING_REVIEW_DEFER_KEY) || 0); } catch (_) { /* best effort */ }
+  if (!deferredAt) {
+    try { deferredAt = Number(window.sessionStorage.getItem(BILLING_REVIEW_DEFER_KEY) || 0); } catch (_) { /* best effort */ }
+  }
+  return Number.isFinite(deferredAt) && deferredAt > 0 ? deferredAt : 0;
+}
+
+function billingReviewIsDeferred(now) {
+  const deferredAt = billingReviewDeferredAt();
+  return deferredAt > 0 && now - deferredAt >= 0 &&
+    now - deferredAt < BILLING_REVIEW_DEFER_WINDOW_MS;
+}
+
+function deferBillingReview(now) {
+  const value = String(now == null ? Date.now() : now);
+  let stored = false;
+  try { window.localStorage.setItem(BILLING_REVIEW_DEFER_KEY, value); stored = true; } catch (_) { /* best effort */ }
+  try { window.sessionStorage.setItem(BILLING_REVIEW_DEFER_KEY, value); stored = true; } catch (_) { /* best effort */ }
+  return stored;
+}
+
+function clearBillingReviewDefer() {
+  try { window.localStorage.removeItem(BILLING_REVIEW_DEFER_KEY); } catch (_) { /* best effort */ }
+  try { window.sessionStorage.removeItem(BILLING_REVIEW_DEFER_KEY); } catch (_) { /* best effort */ }
+}
+
 function budgetProfileLevelText(level) {
   return {
     ok: "正常",
@@ -1257,6 +1288,19 @@ function bindBillingDeclarationPanel() {
   save.onclick = async () => {
     const candidate = billingDeclarationCandidate;
     if (!candidate) return;
+    // “仍不确定” is a deliberate non-answer. It must not create a declaration,
+    // accept the import candidate, or enqueue recalculation. Keep the candidate
+    // pending for the Issues projection and only suppress this prompt locally.
+    const relationship = document.getElementById("ov-billing-relationship").value;
+    if (relationship === "unknown") {
+      deferBillingReview();
+      billingDeclarationState = null;
+      document.getElementById("ov-billing-declaration-panel").hidden = true;
+      document.getElementById("ov-billing-review-panel").hidden = true;
+      document.getElementById("ov-billing-review").setAttribute("aria-expanded", "false");
+      document.getElementById("ov-billing-prompt").hidden = true;
+      return;
+    }
     save.disabled = true;
     const preview = document.getElementById("ov-billing-preview");
     try {
@@ -1622,18 +1666,10 @@ function renderBillingImportCandidates(report) {
   if (!report || report.status !== "ok") return;
   const candidates = Array.isArray(report.candidates) ? report.candidates : [];
   const pendingCount = candidates.filter((candidate) => candidate.status === "pending").length;
-  const deferKey = "agent-vitals-billing-review-deferred-at-ms";
-  const deferWindowMs = 30 * 24 * 60 * 60 * 1000;
-  let deferredAt = 0;
-  try { deferredAt = Number(localStorage.getItem(deferKey) || 0); } catch (_) { /* best effort */ }
-  if (!deferredAt) {
-    try { deferredAt = Number(sessionStorage.getItem(deferKey) || 0); } catch (_) { /* best effort */ }
-  }
-  const deferred = Number.isFinite(deferredAt) && deferredAt > 0 &&
-    Date.now() - deferredAt < deferWindowMs;
+  const deferredAt = billingReviewDeferredAt();
+  const deferred = billingReviewIsDeferred(Date.now());
   if (deferredAt > 0 && !deferred) {
-    try { localStorage.removeItem(deferKey); } catch (_) { /* best effort */ }
-    try { sessionStorage.removeItem(deferKey); } catch (_) { /* best effort */ }
+    clearBillingReviewDefer();
   }
   // “稍后”只压住尚未处理的提醒；已确认/已忽略项仍保留一个可回看的入口。
   prompt.hidden = !candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred);
@@ -1667,9 +1703,7 @@ function renderBillingImportCandidates(report) {
     : "已核对的套餐信息不会计入实际支出；当前用量仍按原厂价估算。";
 
   document.getElementById("ov-billing-later").onclick = () => {
-    const value = String(Date.now());
-    try { localStorage.setItem(deferKey, value); } catch (_) { /* best effort */ }
-    try { sessionStorage.setItem(deferKey, value); } catch (_) { /* best effort */ }
+    deferBillingReview();
     billingReviewOpen = false;
     panel.hidden = true;
     prompt.hidden = true;

@@ -2091,6 +2091,14 @@ impl AuthorityDb {
                 "invalid billing declaration revision".to_string(),
             )));
         }
+        // `unknown` is a user's non-answer, not a declaration. In particular,
+        // never let an unresolved import candidate become accepted as a side
+        // effect of saving an "I am still unsure" form value.
+        if relationship_kind == "unknown" {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "unknown billing relationship cannot be saved as a declaration".to_string(),
+            )));
+        }
         let mut seen_scopes = std::collections::HashSet::new();
         if scopes.iter().any(|(kind, value)| !seen_scopes.insert((*kind, *value))) {
             return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
@@ -3040,6 +3048,21 @@ mod tests {
             [], |row| row.get(0),
         ).unwrap();
         assert_eq!(status, "pending", "a failed revision must roll candidate acceptance back");
+
+        authority.billing_import_candidate_put(
+            "pending-unknown", "codex", "openai", "CNY", 3_990, "2026-09", "uat", 5,
+        ).unwrap();
+        assert!(authority.billing_declaration_revision_save(
+            "revision-from-unknown", "declaration-from-unknown", None,
+            "codex", "openai", "unknown", None, None, None,
+            "2026-09", None, Some("pending-unknown"), None, &[], 6,
+        ).is_err(), "仍不确定不能创建计费声明");
+        assert_eq!(authority.billing_import_candidates().unwrap().iter()
+            .find(|row| row.0 == "pending-unknown").unwrap().6, "pending",
+            "仍不确定不能接受候选");
+        assert!(authority.billing_declarations().unwrap().iter()
+            .all(|row| row.0 != "declaration-from-unknown"),
+            "仍不确定不能落声明");
         let _ = std::fs::remove_file(&db);
     }
 
