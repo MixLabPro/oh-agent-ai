@@ -22,6 +22,7 @@ use std::path::Path;
 
 use agent_vitals_data::authority::{AuthorityDb, AuthorityError};
 use agent_vitals_data::fact_writer_sql::SqlFactWriter;
+use agent_vitals_domain::evidence::QuotaSnapshot;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 
@@ -382,11 +383,21 @@ pub fn source_file_fingerprint(
 /// `source_files` fingerprint row; facts may share the batch source because
 /// their wire format does not preserve a one-file mapping.
 pub(crate) struct RuntimeSnapshotWrite<'a> {
-    /// 已清洗的产品快照；没有可用 plan 时保持 None，产品读面会诚实返回 None。
-    pub snapshot: Option<&'a Value>,
+    /// 已由宿主 adapter 校验的跨宿主配额契约；Runtime 不解析宿主 wire 字段。
+    pub snapshot: Option<RuntimeQuotaSnapshot<'a>>,
     /// schema 升级的一次性回填完成标记。它与本批 source 指纹同一事务提交，
     /// 因而不会在写入失败后错误地阻止下一轮重试。
     pub backfill_marker: Option<&'a str>,
+}
+
+/// 类型化的当前状态 + 已生成的兼容投影。
+///
+/// `payload_json` 可以保留 Codex 的 `has_credits` 等宿主扩展，但它已经在
+/// adapter 内生成；SQL 层只负责原样保存，不通过 JSON 路径提取业务字段。
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeQuotaSnapshot<'a> {
+    pub contract: &'a QuotaSnapshot,
+    pub payload_json: &'a str,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -447,12 +458,7 @@ pub(crate) fn write_flat_facts_with_sources(
                 [meta_key],
             )?;
         }
-        if facts.is_empty()
-            && runtime_snapshot
-                .as_ref()
-                .and_then(|write| write.snapshot)
-                .is_none()
-        {
+        if facts.is_empty() && runtime_snapshot.as_ref().and_then(|write| write.snapshot).is_none() {
             return Ok(());
         }
         let source_id = writer.upsert_batch_source(host)?;
@@ -490,10 +496,7 @@ pub(crate) fn write_flat_facts_with_sources(
             )?;
         }
         if let Some(snapshot) = runtime_snapshot.as_ref().and_then(|write| write.snapshot) {
-            let observed_at = snapshot
-                .get("observed_at")
-                .and_then(Value::as_str)
-                .and_then(agent_vitals_domain::budget::parse_iso)
+            let observed_at = agent_vitals_domain::budget::parse_iso(&snapshot.contract.observed_at)
                 .map(|(seconds, _)| seconds.saturating_mul(1_000))
                 .ok_or_else(|| {
                     AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
@@ -514,7 +517,7 @@ pub(crate) fn write_flat_facts_with_sources(
                  WHERE excluded.observed_at_ms >= host_runtime_snapshots.observed_at_ms",
                 rusqlite::params![
                     host,
-                    serde_json::to_string(snapshot).unwrap_or_default(),
+                    snapshot.payload_json,
                     observed_at,
                     source_id,
                     run_id,

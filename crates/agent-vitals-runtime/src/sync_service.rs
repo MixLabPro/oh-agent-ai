@@ -23,6 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
+use agent_vitals_domain::evidence::QuotaSnapshot;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
@@ -118,7 +119,8 @@ fn sync_host(
     }
 
     let mut facts: Vec<Value> = Vec::new();
-    let mut runtime_snapshot: Option<Value> = None;
+    let mut runtime_snapshot: Option<QuotaSnapshot> = None;
+    let mut runtime_snapshot_payload_json: Option<String> = None;
     let mut synced_sources: Vec<(PathBuf, (u64, u64))> = Vec::new();
     // codex 的 emitter 跨文件 `seen` 去重只在**单次调用内**成立（live/
     // archived 同 stem 双收靠它）——差量集必须一批喂进去，逐文件调用会把
@@ -134,6 +136,7 @@ fn sync_host(
         ) {
             Ok(r) => {
                 runtime_snapshot = r.quota_snapshot;
+                runtime_snapshot_payload_json = r.quota_snapshot_payload_json;
                 facts.extend(r.facts);
                 synced_sources.extend(dirty.iter().cloned());
             }
@@ -186,7 +189,13 @@ fn sync_host(
     if !synced_sources.is_empty() {
         let snapshot_write = (runtime_snapshot.is_some() || runtime_snapshot_backfill_needed)
             .then_some(crate::sql_sync::RuntimeSnapshotWrite {
-                snapshot: runtime_snapshot.as_ref(),
+                snapshot: runtime_snapshot
+                    .as_ref()
+                    .zip(runtime_snapshot_payload_json.as_deref())
+                    .map(|(contract, payload_json)| crate::sql_sync::RuntimeQuotaSnapshot {
+                        contract,
+                        payload_json,
+                    }),
                 backfill_marker: runtime_snapshot_backfill_needed
                     .then_some("codex_quota_snapshot_backfilled_v2"),
             });

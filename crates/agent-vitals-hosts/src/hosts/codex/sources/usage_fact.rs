@@ -38,6 +38,7 @@ use serde_json::{json, Map, Value};
 
 use crate::codex_usage::{CodexFoldState, CodexTokenOutcome};
 use crate::hosts::claude_code::sources::usage_fact::{SKIP, UNATTRIBUTED, UNREADABLE};
+use agent_vitals_domain::evidence::QuotaSnapshot;
 use agent_vitals_domain::source_identity::{canonical_json, fnv1a64_hex};
 use agent_vitals_domain::usage_fact::build_usage_fact;
 
@@ -53,8 +54,13 @@ const OBSERVATION_KIND: &str = "assistant-usage";
 pub struct UsageFactEmitResult {
     pub facts: Vec<Value>,
     /// 与同一次事实发射共享同一状态机得出的当前配额快照；它不是 UsageFact，
-    /// 由 runtime 单独写入 `host_runtime_snapshots`。
-    pub quota_snapshot: Option<Value>,
+    /// 由 runtime 单独写入 `host_runtime_snapshots`。这是跨宿主契约类型，
+    /// Runtime 不应重新解释 Codex wire 字段。
+    pub quota_snapshot: Option<QuotaSnapshot>,
+    /// 面向既有工作台/MCP 的 Codex JSON 投影。序列化在 adapter 内完成，
+    /// Runtime 只把它作为不透明 payload 持久化，避免 `Option<Value>` 穿过
+    /// adapter → runtime 边界。
+    pub quota_snapshot_payload_json: Option<String>,
     pub attempts: HashMap<String, i64>,
     pub total_token_count_events: i64,
     pub skip_rows: i64,
@@ -548,12 +554,23 @@ pub fn codex_rollouts_to_usage_facts_with_route(
     if bad_id > 0 {
         attempts.insert("bad_id".to_string(), bad_id);
     }
+    let quota_payload = crate::codex_usage::codex_merge_folds(&folds)
+        .get("plan")
+        .cloned()
+        .filter(|plan| !plan.is_null());
+    let (quota_snapshot, quota_snapshot_payload_json) = quota_payload
+        .and_then(|payload| {
+            let contract = crate::codex_usage::quota_snapshot_contract(&payload)?;
+            let payload_json = serde_json::to_string(&payload).ok()?;
+            Some((contract, payload_json))
+        })
+        .map_or((None, None), |(contract, payload_json)| {
+            (Some(contract), Some(payload_json))
+        });
     Ok(UsageFactEmitResult {
         facts,
-        quota_snapshot: crate::codex_usage::codex_merge_folds(&folds)
-            .get("plan")
-            .cloned()
-            .filter(|plan| !plan.is_null()),
+        quota_snapshot,
+        quota_snapshot_payload_json,
         attempts,
         total_token_count_events: total,
         skip_rows,
@@ -686,6 +703,61 @@ mod tests {
                                 "last_token_usage":{"input_tokens":150,"output_tokens":25,
                                                     "reasoning_output_tokens":5}}}})),
         ]
+    }
+
+    #[test]
+    fn emits_typed_quota_contract_and_opaque_compat_projection() {
+        let tmp = temp_dir();
+        let p = tmp.join("rollout-quota.jsonl");
+        let rows = vec![
+            line(json!({
+                "type": "session_meta",
+                "payload": {"session_id": "ses-quota"}
+            })),
+            line(json!({
+                "timestamp": "2026-09-13T01:02:03.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "rate_limits": {
+                        "plan_type": "plus",
+                        "credits": {"has_credits": true},
+                        "primary": {
+                            "used_percent": 67.0,
+                            "window_minutes": 10080,
+                            "resets_at": 1780000000
+                        }
+                    },
+                    "info": {
+                        "total_token_usage": {"total_tokens": 100},
+                        "last_token_usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 40
+                        }
+                    }
+                }
+            })),
+        ];
+        std::fs::write(&p, rows.join("")).unwrap();
+
+        let result = codex_rollouts_to_usage_facts(std::slice::from_ref(&p), "ns-test", "default")
+            .unwrap();
+        let snapshot = result.quota_snapshot.expect("typed quota contract");
+        assert_eq!(snapshot.plan.as_deref(), Some("plus"));
+        assert_eq!(snapshot.observed_at, "2026-09-13T01:02:03.000Z");
+        assert_eq!(snapshot.windows.len(), 1);
+        assert_eq!(snapshot.windows[0].used_percent, 67.0);
+        assert_eq!(snapshot.windows[0].window_minutes, 10080);
+        assert_eq!(snapshot.windows[0].resets_at_ms, 1_780_000_000_000);
+
+        let payload_json = result
+            .quota_snapshot_payload_json
+            .expect("compatibility payload");
+        let payload: Value = serde_json::from_str(&payload_json).unwrap();
+        assert_eq!(payload["plan_type"], "plus");
+        assert_eq!(payload["has_credits"], true);
+        assert_eq!(payload["limits"]["primary"]["used_percent"], 67.0);
+        std::fs::remove_dir_all(tmp).ok();
     }
 
     #[test]

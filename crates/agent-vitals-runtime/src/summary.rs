@@ -2845,7 +2845,9 @@ mod tests {
                          host, snapshot_kind, payload_json, observed_at_ms,
                          ingested_run_id, updated_at_ms)
                      VALUES ('codex', 'codex_quota', ?1, 2, 'quota-run', 2)",
-                    rusqlite::params![r#"{"plan_type":"plus","has_credits":false}"#],
+                    rusqlite::params![
+                        r#"{"plan_type":"plus","has_credits":false,"observed_at":"2026-09-13T00:00:00Z"}"#
+                    ],
                 )
                 .unwrap();
             drop(db);

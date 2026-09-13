@@ -2332,3 +2332,15 @@
   复用该类型，不凭空为没有额度证据的宿主生成快照。
 - 验收：Domain `quota_snapshot_validates_cross_host_invariants` **1/1**、Codex
   adapter 配额映射/校验 **1/1** 通过；此前 Runtime、MCP 控制面和 Clippy 证据保持有效。
+
+## Loop 319 · 配额快照 adapter → runtime 类型边界收口
+
+- 修复：`UsageFactEmitResult` 不再把 Codex 配额作为 `Option<Value>` 交给 Runtime；由
+  Codex adapter 同时产出已校验的通用 `QuotaSnapshot` 和保留 `has_credits` 等扩展的
+  兼容 JSON 字符串。Runtime/SQL writer 只消费类型化 `observed_at` 与不透明 payload，
+  不再从宿主 JSON 读取业务字段。
+- 兼容：工作台/MCP 现有 `plan_type`、`limits`、`has_credits` JSON 形状不变；plan-only
+  快照仍可读取，缺失或非法观测时间不会被伪造成有效配额。
+- 验收：完整 `cargo test --release` 通过（CLI 79、data 129、domain 468、runtime
+  293 及全部集成/契约测试）；adapter typed projection 定向测试 **1/1**、Codex usage
+  回归 **22/22**、Runtime 配额读回归 **1/1**、相关 Clippy 与 `git diff --check` 通过。
