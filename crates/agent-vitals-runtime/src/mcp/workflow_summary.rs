@@ -110,27 +110,119 @@ fn limit_arg(args: &Value) -> Result<i64, ToolError> {
     }
 }
 
-fn workflow_count(conn: &Connection, window: &Window) -> Result<i64, ToolError> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM workflow_events WHERE event_ts_ms >= ?1 AND event_ts_ms < ?2",
-        [window.start_ms, window.end_ms],
-        |row| row.get(0),
-    )
-    .map_err(|e| ToolError::new("internal_error", format!("workflow event count failed: {e}")))
+fn append_scope_filter(
+    sql: &mut String,
+    values: &mut Vec<SqlValue>,
+    next_param: &mut usize,
+    hosts: &[String],
+    capabilities: &[String],
+) {
+    if !hosts.is_empty() {
+        let placeholders = (0..hosts.len())
+            .map(|_| {
+                let value = format!("?{next_param}");
+                *next_param += 1;
+                value
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        sql.push_str(&format!(" AND s.host IN ({placeholders})"));
+        values.extend(hosts.iter().cloned().map(SqlValue::Text));
+    }
+    if !capabilities.is_empty() {
+        let placeholders = (0..capabilities.len())
+            .map(|_| {
+                let value = format!("?{next_param}");
+                *next_param += 1;
+                value
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        sql.push_str(&format!(" AND e.capability_id IN ({placeholders})"));
+        values.extend(capabilities.iter().cloned().map(SqlValue::Text));
+    }
 }
 
-fn coverage(conn: &Connection, window: &Window, observed: i64, missing: &[&str]) -> Result<Value, ToolError> {
-    let any = agent_vitals_data::workflow::has_events(conn)
-        .map_err(|e| ToolError::new("internal_error", format!("workflow coverage failed: {e}")))?;
-    let status = if !any { "unavailable" } else { "partial" };
+fn workflow_count(
+    conn: &Connection,
+    window: &Window,
+    hosts: &[String],
+    capabilities: &[String],
+) -> Result<i64, ToolError> {
+    let mut sql = String::from(
+        "SELECT COUNT(*) FROM workflow_events e
+         LEFT JOIN sessions s ON s.session_key = e.session_key
+         WHERE e.event_ts_ms >= ?1 AND e.event_ts_ms < ?2",
+    );
+    let mut values = vec![
+        SqlValue::Integer(window.start_ms),
+        SqlValue::Integer(window.end_ms),
+    ];
+    let mut next_param = 3;
+    append_scope_filter(&mut sql, &mut values, &mut next_param, hosts, capabilities);
+    conn.query_row(&sql, params_from_iter(values.iter()), |row| row.get(0))
+        .map_err(|e| ToolError::new("internal_error", format!("workflow event count failed: {e}")))
+}
+
+fn workflow_hosts(
+    conn: &Connection,
+    window: &Window,
+    hosts: &[String],
+    capabilities: &[String],
+) -> Result<Vec<String>, ToolError> {
+    let mut sql = String::from(
+        "SELECT DISTINCT s.host FROM workflow_events e
+         JOIN sessions s ON s.session_key = e.session_key
+         WHERE e.event_ts_ms >= ?1 AND e.event_ts_ms < ?2
+           AND s.host IS NOT NULL",
+    );
+    let mut values = vec![
+        SqlValue::Integer(window.start_ms),
+        SqlValue::Integer(window.end_ms),
+    ];
+    let mut next_param = 3;
+    append_scope_filter(&mut sql, &mut values, &mut next_param, hosts, capabilities);
+    sql.push_str(" ORDER BY s.host");
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|e| ToolError::new("internal_error", format!("workflow host coverage query failed: {e}")))?;
+    let mut rows = statement
+        .query(params_from_iter(values.iter()))
+        .map_err(|e| ToolError::new("internal_error", format!("workflow host coverage query failed: {e}")))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| ToolError::new("internal_error", format!("workflow host coverage row failed: {e}")))?
+    {
+        out.push(
+            row.get(0)
+                .map_err(|e| ToolError::new("internal_error", format!("workflow host coverage row failed: {e}")))?,
+        );
+    }
+    Ok(out)
+}
+
+fn coverage(
+    conn: &Connection,
+    window: &Window,
+    observed: i64,
+    hosts: &[String],
+    capabilities: &[String],
+    missing: &[&str],
+) -> Result<Value, ToolError> {
+    let observed_hosts = workflow_hosts(conn, window, hosts, capabilities)?;
+    let status = if observed == 0 { "unavailable" } else { "partial" };
     Ok(json!({
         "status": status,
         "source": "workflow_events",
         "observed_events": observed,
+        "observed_hosts": observed_hosts,
+        "host_scope": if hosts.is_empty() { Value::String("observed_hosts".to_string()) } else { json!(hosts) },
         "requested_from": super::ms_to_rfc3339_beijing(window.start_ms),
         "requested_to": super::ms_to_rfc3339_beijing(window.end_ms),
         "missing": missing,
-        "reason": if !any { "workflow_events has no accepted rows" } else { "not all host workflow signals are collected yet" }
+        "reason": if observed == 0 { "no accepted workflow events match the requested window and filters" } else { "workflow lifecycle and token/cost attribution evidence is still incomplete" },
+        "host_absence_is_not_missing": true
     }))
 }
 
@@ -237,11 +329,18 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             "trend": { "status": "unknown", "reason": "workflow baseline is not complete" }
         }));
     }
-    let observed = workflow_count(handle.conn(), &window)?;
+    let observed = workflow_count(handle.conn(), &window, &hosts, &skills)?;
     if observed == 0 {
         warnings.push(json!({ "code": "workflow_coverage_insufficient", "message": "No accepted workflow events fall in the requested window; an empty issue list is not a proof of no issues." }));
     }
-    let cov = coverage(handle.conn(), &window, observed, &["all host workflow adapters", "unique token/cost linkage", "complete retry baseline"])?;
+    let cov = coverage(
+        handle.conn(),
+        &window,
+        observed,
+        &hosts,
+        &skills,
+        &["unique token/cost linkage", "complete retry baseline"],
+    )?;
     Ok(build_envelope(handle.conn(), handle.authority_state(), (observed > 0).then_some(window.end_ms), cov, warnings, json!({
         "from": window.from, "to": window.to, "issues": issues, "has_more": false, "next_cursor": Value::Null
     })))
@@ -321,11 +420,18 @@ pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             "last_seen": super::ms_to_rfc3339_beijing(last_ms)
         }));
     }
-    let observed = workflow_count(handle.conn(), &window)?;
+    let observed = workflow_count(handle.conn(), &window, &[], &skills)?;
     if observed == 0 {
         warnings.push(json!({ "code": "workflow_coverage_insufficient", "message": "No accepted workflow events fall in the requested window; an empty Skill list is not a proof that no Skill was used." }));
     }
-    let cov = coverage(handle.conn(), &window, observed, &["skill_finished", "complete duration", "unique token/cost linkage"])?;
+    let cov = coverage(
+        handle.conn(),
+        &window,
+        observed,
+        &[],
+        &skills,
+        &["skill_finished", "complete duration", "unique token/cost linkage"],
+    )?;
     Ok(build_envelope(handle.conn(), handle.authority_state(), (observed > 0).then_some(window.end_ms), cov, warnings, json!({
         "from": window.from, "to": window.to, "skills": out, "has_more": false, "next_cursor": Value::Null
     })))
@@ -417,8 +523,25 @@ mod tests {
         let args = json!({"from": "2023-11-15", "to": "2023-11-15", "limit": 10});
         let issues = run_issues(&args, &home).expect("issues");
         assert_eq!(issues["coverage"]["status"], "partial");
+        assert_eq!(issues["coverage"]["observed_events"], 3);
+        assert_eq!(issues["coverage"]["observed_hosts"], json!(["dsh"]));
+        assert_eq!(issues["coverage"]["host_absence_is_not_missing"], true);
+        assert!(!issues["coverage"]["missing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "all host workflow adapters"));
         assert_eq!(issues["data"]["issues"][0]["tokens"]["value"], serde_json::Value::Null);
         assert!(!issues.to_string().contains("call-1"));
+
+        let filtered = run_issues(
+            &json!({"from": "2023-11-15", "to": "2023-11-15", "hosts": ["codex"]}),
+            &home,
+        )
+        .expect("filtered issues");
+        assert_eq!(filtered["coverage"]["status"], "unavailable");
+        assert_eq!(filtered["coverage"]["observed_events"], 0);
+        assert_eq!(filtered["coverage"]["observed_hosts"], json!([]));
 
         let skills = run_skills(
             &json!({"from": "2023-11-15", "to": "2023-11-15", "skills": ["beta"], "limit": 1}),
@@ -427,6 +550,8 @@ mod tests {
         .expect("skills");
         assert_eq!(skills["data"]["skills"].as_array().unwrap().len(), 1);
         assert_eq!(skills["data"]["skills"][0]["skill"], "beta");
+        assert_eq!(skills["coverage"]["observed_events"], 1);
+        assert_eq!(skills["coverage"]["observed_hosts"], json!(["dsh"]));
         std::fs::remove_dir_all(home).ok();
     }
 }

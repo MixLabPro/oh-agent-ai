@@ -2385,3 +2385,16 @@
 - 边界：Q07 retry lifecycle、Q09 Skill 版本回归、完整 token/cost 唯一归因、UI 真机 UAT、
   签名/公证和外部 trial 发布仍未完成；本轮没有触碰用户已有的
   `docs/WORKBUDDY_ONBOARDING_SPEC.md` 内容。
+
+## Loop 322 · workflow summary 覆盖范围修正
+
+- 修复：`issues_summary` / `skills_summary` 的 `observed_events` 现在严格应用本次
+  请求的时间窗、宿主和 Skill 过滤；此前无过滤的全库计数会在过滤查询中夸大覆盖。
+- 修复：覆盖响应新增实际 `observed_hosts`、`host_scope` 和
+  `host_absence_is_not_missing=true`；未安装或当前窗口无事件的宿主不再被固定文案
+  误报为“缺少全部宿主 workflow adapter”。
+- 保留：`partial/unavailable`、Skill 完整结束事件、重试生命周期和 workflow↔token/cost
+  唯一归因仍按证据不足如实报告，没有把缺失数据改成零或绿色结论。
+- 验收：runtime workflow summary 定向测试通过；真实 Authority MCP 复核显示
+  2026-09-13 无过滤范围实际观测到 `claude-code` / `codex`，`hosts=["codex"]`
+  返回 `observed_events=4,236` 且只列 `codex`，缺口仅保留生命周期/归因项。

@@ -591,6 +591,12 @@ base 分开，不生成伪合计；订阅覆盖 token 和无价卡 / 路由证�
 
 若 `workflow_events` 覆盖不足，应返回 `coverage=partial/unavailable`，不能返回“0 个问题”。
 
+覆盖度必须按本次请求的时间窗以及 `hosts` / `skills` 过滤条件计算；不得用全库
+事件数填充一个被过滤的查询。响应应列出本次范围内实际观测到的
+`observed_hosts`。未安装或在该时间窗没有事件的宿主不自动算作缺失宿主，使用
+`host_absence_is_not_missing=true` 明确这一点；仍未闭合的工作流生命周期和
+workflow↔token/cost 归因则继续列在 `missing` 中。
+
 ### 7.9 `skills_summary`
 
 回答“哪些 Skill 值得关注”。
@@ -908,7 +914,7 @@ base 分开，不生成伪合计；订阅覆盖 token 和无价卡 / 路由证�
 
 ### Phase M4：v0.10 问题与 Skill 洞察
 
-- **当前状态**：`workflow_events` 的宿主 wire 提取 → 脱敏指纹 → SQL writer → reader → 覆盖度基础管线已接通；仍需完成历史数据回填、完整重试生命周期和唯一 token/cost 归因，才可关闭 U06–U07。
+- **当前状态**：`workflow_events` 的宿主 wire 提取 → 脱敏指纹 → SQL writer → reader → 覆盖度基础管线已接通；`issues_summary` / `skills_summary` 的覆盖计数会遵循本次时间窗和过滤条件，并返回实际 `observed_hosts`，不会把未安装宿主误列为缺失。仍需完成历史数据回填、完整重试生命周期和唯一 token/cost 归因，才可关闭 U06–U07。
 - 实现 `issues_summary`、`skills_summary`。
 - 完成重复问题、Skill 分子/分母、未知态和证据覆盖测试。
 
