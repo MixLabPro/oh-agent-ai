@@ -709,7 +709,7 @@ mod tests {
     fn emits_typed_quota_contract_and_opaque_compat_projection() {
         let tmp = temp_dir();
         let p = tmp.join("rollout-quota.jsonl");
-        let rows = vec![
+        let rows = [
             line(json!({
                 "type": "session_meta",
                 "payload": {"session_id": "ses-quota"}

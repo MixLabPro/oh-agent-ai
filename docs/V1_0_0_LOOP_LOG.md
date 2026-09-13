@@ -2344,3 +2344,25 @@
 - 验收：完整 `cargo test --release` 通过（CLI 79、data 129、domain 468、runtime
   293 及全部集成/契约测试）；adapter typed projection 定向测试 **1/1**、Codex usage
   回归 **22/22**、Runtime 配额读回归 **1/1**、相关 Clippy 与 `git diff --check` 通过。
+
+## Loop 320 · 跨宿主 workflow 事件进入权威链与 MCP 洞察
+
+- 修复分层缺口：Domain 新增宿主无关 `WorkflowEvent` 契约；host adapter 负责把原生
+  事件映射为脱敏事件；Data 负责校验、幂等写入和按通用 `SessionKey` 补齐会话外键；
+  Runtime 只负责同步事务和 MCP 投影，不解析任何宿主 wire payload。
+- 首个 adapter 切片落地 DSH：任务起止、工具调用/结果、Skill 调用、拒绝审批和模型
+  切换进入 `workflow_events`；命令参数、路径、提示词和错误正文不落库。其他宿主尚未
+  具备同等 workflow writer，因此查询覆盖必须保持 partial/unavailable。
+- MCP 新增公开只读 `issues_summary` 与 `skills_summary`。无 workflow 行时明确返回
+  `coverage.status=unavailable`，有数据但跨宿主不完整时返回 `partial`；token/cost
+  关联、完整 retry 链和 Skill 版本回归未被伪造成可用。
+- 修复 `skills_summary` 指定 Skill 过滤先分页后过滤的漏数问题；补充 `SessionKey`
+  长度前缀反解析及“仅 workflow 事件也能写入”的外键回归。
+- UAT：公开 MCP 真机冒烟 **EXACT 18 / PARTIAL 1 / BLOCKED 5 / MISMATCH 0**；
+  `mcp-internal` 冒烟 **EXACT 20 / PARTIAL 1 / BLOCKED 5 / MISMATCH 0**；控制面隔离
+  冒烟 **19 个类型化操作 PASS**。相关三 crate workflow 测试、定向 Clippy、完整
+  workspace Cargo 测试和 Python **1189 项**均通过；公开 `tools/list` 未暴露 internal
+  SQL/审计工具。
+- 未完成边界：Claude/Codex/WorkBuddy workflow adapter、Q07 retry lifecycle、Q09
+  Skill 版本回归、Q10 workflow↔usage timeline 完整关联，以及 UI/UAT、签名/公证和
+  外部 trial 发布仍不应勾选为 v1 完成。

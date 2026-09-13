@@ -146,6 +146,31 @@ impl SessionKey {
             seg(&self.machine_namespace),
         )
     }
+
+    /// Parse the length-prefixed ledger key emitted by [`ledger_key`].
+    ///
+    /// This stays in the vocabulary contract so data writers can materialize
+    /// the session foreign key without knowing any host-specific log shape.
+    pub fn from_ledger_key(raw: &str) -> Option<SessionKey> {
+        let mut rest = raw;
+        let mut parts = Vec::with_capacity(4);
+        for index in 0..4 {
+            let colon = rest.find(':')?;
+            let length = rest[..colon].parse::<usize>().ok()?;
+            let content = &rest[colon + 1..];
+            if content.len() < length {
+                return None;
+            }
+            let (part, remainder) = content.split_at(length);
+            parts.push(part.to_string());
+            if index < 3 {
+                rest = remainder.strip_prefix('|')?;
+            } else if !remainder.is_empty() {
+                return None;
+            }
+        }
+        Some(SessionKey::new(&parts[0], &parts[1], &parts[2], &parts[3]))
+    }
 }
 
 /// 稳定排序用的四元组（host_kind → native_id → source_profile →
@@ -555,6 +580,14 @@ mod tests {
         assert_eq!(SessionKey::from_json(&json!({"host_kind": "codex"})), None);
         assert_eq!(SessionKey::from_json(&json!({"host_kind": 1, "native_id": "s",
             "source_profile": "/r", "machine_namespace": "ns"})), None);
+    }
+
+    #[test]
+    fn session_key_ledger_key_roundtrips_length_prefixed_segments() {
+        let key = SessionKey::new("dsh|host", "session:1", "profile", "机器");
+        assert_eq!(SessionKey::from_ledger_key(&key.ledger_key()), Some(key));
+        assert_eq!(SessionKey::from_ledger_key("4:only"), None);
+        assert_eq!(SessionKey::from_ledger_key("1:a|1:b|1:c|1:d|extra"), None);
     }
 
     #[test]

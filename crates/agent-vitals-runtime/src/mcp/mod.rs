@@ -25,6 +25,7 @@ mod usage_hourly;
 mod budget_profiles;
 mod cost_breakdown;
 mod control_plane;
+mod workflow_summary;
 #[cfg(feature = "mcp-internal")]
 mod query_sql_readonly;
 #[cfg(feature = "mcp-internal")]
@@ -423,6 +424,8 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         session_detail::spec(),
         session_trace::spec(),
         control_plane::spec(),
+        workflow_summary::issues_spec(),
+        workflow_summary::skills_spec(),
     ];
     #[cfg(feature = "mcp-internal")]
     {
@@ -527,6 +530,8 @@ pub fn dispatch_with_permissions(
         "session_detail" => session_detail::run(args, data_home),
         "session_trace" => session_trace::run(args, data_home),
         "control_plane" => control_plane::run(args, data_home, allow_local_writes),
+        "issues_summary" => workflow_summary::run_issues(args, data_home),
+        "skills_summary" => workflow_summary::run_skills(args, data_home),
         #[cfg(feature = "mcp-internal")]
         "query_sql_readonly" => query_sql_readonly::run(args, data_home),
         #[cfg(feature = "mcp-internal")]

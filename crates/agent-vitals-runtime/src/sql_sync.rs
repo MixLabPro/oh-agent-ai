@@ -23,6 +23,7 @@ use std::path::Path;
 use agent_vitals_data::authority::{AuthorityDb, AuthorityError};
 use agent_vitals_data::fact_writer_sql::SqlFactWriter;
 use agent_vitals_domain::evidence::QuotaSnapshot;
+use agent_vitals_domain::workflow::WorkflowEvent;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 
@@ -407,6 +408,7 @@ pub(crate) fn write_flat_facts_with_sources(
     machine_namespace: &str,
     sources: &[(std::path::PathBuf, (u64, u64))],
     facts: &[Value],
+    workflow_events: &[WorkflowEvent],
     route_evidence: Option<&agent_vitals_provider::RouteEvidence>,
     runtime_snapshot: Option<RuntimeSnapshotWrite<'_>>,
     now: i64,
@@ -458,7 +460,10 @@ pub(crate) fn write_flat_facts_with_sources(
                 [meta_key],
             )?;
         }
-        if facts.is_empty() && runtime_snapshot.as_ref().and_then(|write| write.snapshot).is_none() {
+        if facts.is_empty()
+            && workflow_events.is_empty()
+            && runtime_snapshot.as_ref().and_then(|write| write.snapshot).is_none()
+        {
             return Ok(());
         }
         let source_id = writer.upsert_batch_source(host)?;
@@ -525,7 +530,7 @@ pub(crate) fn write_flat_facts_with_sources(
                 ],
             )?;
         }
-        if facts.is_empty() {
+        if facts.is_empty() && workflow_events.is_empty() {
             return Ok(());
         }
         for fact in facts
@@ -584,6 +589,15 @@ pub(crate) fn write_flat_facts_with_sources(
             outcome.inserted += report.inserted;
             outcome.duplicate += report.duplicate;
             outcome.rejected += report.rejected;
+        }
+        if !workflow_events.is_empty() {
+            agent_vitals_data::workflow::insert_events(
+                conn,
+                workflow_events,
+                &source_id,
+                &run_id,
+                now,
+            )?;
         }
         Ok(())
     });

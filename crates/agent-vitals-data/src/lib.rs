@@ -37,3 +37,4 @@ pub mod evidence;
 pub mod projection;
 pub mod repository;
 pub mod issues;
+pub mod workflow;

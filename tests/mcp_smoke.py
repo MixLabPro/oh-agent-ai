@@ -253,14 +253,56 @@ def main():
           f"amounts_typed={amounts_typed} leak={cost_leak}")
 
     # ── Q06–Q10 workflow_events 依赖 ────────────────────────
-    for qid, q in [
-        ("Q06", "本周重复错误指纹聚为问题卡"),
-        ("Q07", "连续失败后成功 = 一组重试链"),
-        ("Q08", "Skill 成功率 + 样本不足判定"),
-        ("Q09", "Skill 版本回归识别"),
-        ("Q10", "会话时间线关联失败/峰值"),
-    ]:
-        R.add(qid, q, "BLOCKED", "issues_summary / skills_summary = M4；workflow_events 表已建，无 writer/reader。")
+    # 这些查询已接入 MCP，但覆盖仍按宿主 adapter 的真实采集能力判定：
+    # 无行是 BLOCKED/不可验证，不是“没有问题”；有行但跨宿主不完整则 PARTIAL。
+    workflow_from = (datetime.now(BJ) - timedelta(days=6)).strftime("%Y-%m-%d")
+
+    def workflow_result(name, arguments):
+        result, err, rc = c.call(name, arguments)
+        if rc != 0 or not result:
+            return None, f"transport rc={rc} stderr={err!r}"
+        if result.get("isError"):
+            error = (result.get("structuredContent") or {}).get("error") or {}
+            return None, f"MCP error code={error.get('code')} message={error.get('message')}"
+        envelope = result.get("structuredContent") or {}
+        return envelope, ""
+
+    issues_env, issues_note = workflow_result(
+        "issues_summary", {"from": workflow_from, "to": today, "limit": 50})
+    skills_env, skills_note = workflow_result(
+        "skills_summary", {"from": workflow_from, "to": today, "limit": 50})
+
+    def workflow_verdict(envelope, supported, expected_key):
+        if envelope is None:
+            return "MISMATCH"
+        coverage = envelope.get("coverage") or {}
+        if coverage.get("status") == "unavailable":
+            return "BLOCKED"
+        if not supported:
+            return "PARTIAL"
+        if expected_key not in (envelope.get("data") or {}):
+            return "MISMATCH"
+        return "PARTIAL" if coverage.get("status") != "complete" else "EXACT"
+
+    issues_data = (issues_env or {}).get("data") or {}
+    skills_data = (skills_env or {}).get("data") or {}
+    issues_status = (((issues_env or {}).get("coverage") or {}).get("status"))
+    skills_status = (((skills_env or {}).get("coverage") or {}).get("status"))
+    R.add("Q06", "本周重复错误指纹聚为问题卡",
+          workflow_verdict(issues_env, True, "issues"),
+          f"issues_summary: coverage={issues_status} rows={len(issues_data.get('issues') or [])} {issues_note}")
+    R.add("Q07", "连续失败后成功 = 一组重试链",
+          workflow_verdict(issues_env, False, "issues"),
+          f"issues_summary 已可读，但 retry lifecycle 尚未完成配对；coverage={issues_status} {issues_note}")
+    R.add("Q08", "Skill 成功率 + 样本不足判定",
+          workflow_verdict(skills_env, True, "skills"),
+          f"skills_summary: coverage={skills_status} rows={len(skills_data.get('skills') or [])} {skills_note}")
+    R.add("Q09", "Skill 版本回归识别",
+          "BLOCKED",
+          "当前 workflow_events 只保留 capability_version；尚未实现跨版本回归基线与比较器。")
+    R.add("Q10", "会话时间线关联失败/峰值",
+          workflow_verdict(issues_env, False, "issues"),
+          f"issues_summary 提供安全错误/会话聚合；usage timeline 与 workflow 关联仍为 PARTIAL；coverage={issues_status} {issues_note}")
 
     # ── Q11 宿主 24h 未同步 → stale ─────────────────────────
     ds = c.call("data_status", {})[0]["structuredContent"]

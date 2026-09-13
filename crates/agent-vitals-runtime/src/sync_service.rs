@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 
 use agent_vitals_domain::evidence::QuotaSnapshot;
+use agent_vitals_domain::workflow::WorkflowEvent;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
@@ -121,6 +122,7 @@ fn sync_host(
     let mut facts: Vec<Value> = Vec::new();
     let mut runtime_snapshot: Option<QuotaSnapshot> = None;
     let mut runtime_snapshot_payload_json: Option<String> = None;
+    let mut workflow_events: Vec<WorkflowEvent> = Vec::new();
     let mut synced_sources: Vec<(PathBuf, (u64, u64))> = Vec::new();
     // codex 的 emitter 跨文件 `seen` 去重只在**单次调用内**成立（live/
     // archived 同 stem 双收靠它）——差量集必须一批喂进去，逐文件调用会把
@@ -138,6 +140,8 @@ fn sync_host(
                 runtime_snapshot = r.quota_snapshot;
                 runtime_snapshot_payload_json = r.quota_snapshot_payload_json;
                 facts.extend(r.facts);
+                // Codex workflow event extraction is a separate adapter slice;
+                // quota and usage facts remain independently valid here.
                 synced_sources.extend(dirty.iter().cloned());
             }
             Err(e) => {
@@ -151,7 +155,7 @@ fn sync_host(
         if host == "codex" {
             continue; // 已批量处理
         }
-        let emit: Result<Vec<Value>, String> = match host {
+        let emit: Result<(Vec<Value>, Vec<WorkflowEvent>), String> = match host {
             "claude-code" => {
                 let sid = path
                     .file_stem()
@@ -161,10 +165,10 @@ fn sync_host(
                 agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts(
                     path, ns, "default", &sid,
                 )
-                .map(|r| r.facts)
+                .map(|r| (r.facts, Vec::new()))
             }
             "dsh" => agent_vitals_hosts::dsh_usage_fact::dsh_session_to_usage_facts(path, ns, None)
-                .map(|r| r.facts),
+                .map(|r| (r.facts, r.workflow_events)),
             // WorkBuddy：一个 trace 文件 = 一个 source_id（spec WORKBUDDY_ONBOARDING
             // §9E.4 纪律 7 的增量索引就是本函数上方的 source_files 指纹）。emitter
             // 自身按 trace.sessionId 归属，无 sessionId 的 trace 不发事实——那些
@@ -173,13 +177,14 @@ fn sync_host(
                 agent_vitals_hosts::workbuddy_usage_fact::workbuddy_trace_file_to_usage_facts(
                     path, ns, "default",
                 )
-                .map(|r| r.facts)
+                .map(|r| (r.facts, Vec::new()))
             }
             other => Err(format!("unknown host `{other}`")),
         };
         match emit {
-            Ok(f) => {
+            Ok((f, events)) => {
                 facts.extend(f);
+                workflow_events.extend(events);
                 synced_sources.push((path.clone(), *fp));
             }
             Err(e) => report.errors.push(format!("{}: {e}", path.display())),
@@ -205,6 +210,7 @@ fn sync_host(
             ns,
             &synced_sources,
             &facts,
+            &workflow_events,
             None,
             snapshot_write,
             now,

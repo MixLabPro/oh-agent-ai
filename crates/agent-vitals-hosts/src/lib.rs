@@ -31,7 +31,7 @@ pub use hosts::claude_code::sessions::usage as claude_code_usage;
 pub use hosts::claude_code::sessions::evidence as claude_code_evidence;
 pub use hosts::codex::sessions::{evidence as codex_evidence, usage as codex_usage};
 pub use hosts::dsh::sessions::{
-    audit, compaction, evidence as dsh_evidence, waste,
+    audit, compaction, evidence as dsh_evidence, waste, workflow as dsh_workflow,
 };
 pub use hosts::workbuddy::sessions::evidence as workbuddy_evidence;
 

@@ -54,6 +54,7 @@ const OBSERVATION_KIND: &str = "assistant-usage";
 #[derive(Debug)]
 pub struct DshUsageFactEmitResult {
     pub facts: Vec<Value>,
+    pub workflow_events: Vec<agent_vitals_domain::workflow::WorkflowEvent>,
     pub observation_rows: usize,
     pub unaccounted_events: i64,
     pub unaccounted_tokens: i64,
@@ -272,8 +273,24 @@ pub fn dsh_session_to_usage_facts(
             (events + *count as i64, tokens + *tokens_seen)
         },
     );
+    let workflow_events = crate::hosts::dsh::sessions::workflow::from_events(
+        parsed
+            .get("execution_events")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        parsed
+            .get("usage_events")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        &native_session_id,
+        machine_namespace,
+        &profile,
+    );
     Ok(DshUsageFactEmitResult {
         facts,
+        workflow_events,
         observation_rows: observations.len(),
         unaccounted_events,
         unaccounted_tokens,
