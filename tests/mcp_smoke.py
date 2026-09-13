@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Data MCP 真机可用性冒烟——把 SQL 权威迁移 spec §4.2 的 Q01–Q14 用户查询
+"""Data MCP 真机可用性冒烟——把 SQL 权威迁移 spec §4.2 的 Q01–Q15 用户查询
 案例逐条打到 `data-mcp serve` 上，能跑的验数值 + 与 CLI 逐值对账，跑不了的
 明确标 BLOCKED（附解锁里程碑）。
 
@@ -404,6 +404,36 @@ def main():
           f"usage_hourly 每序列 identity_kind = {kinds}（v1 全 host_raw，key 带 host 消歧）\n"
           "canonical 归一 = v0.9.2+；无法映射的项在 usage_hourly 不出现（无归属就无事实进桶），"
           "unresolved 语义在 data-unresolved / cost_breakdown(M3)。")
+
+    # ── Q15 数据质量 issue reader：只读、稳定分页、code-aware 脱敏 ───────
+    quality_result, quality_err, quality_rc = c.call(
+        "data_quality_issues", {"status": "all", "limit": 50})
+    quality_env = (quality_result or {}).get("structuredContent") or {}
+    quality_data = quality_env.get("data") or {}
+    quality_rows = quality_data.get("issues") or []
+    quality_cursor_ok = True
+    if quality_data.get("has_more") and quality_data.get("next_cursor"):
+        page2_result, _, _ = c.call("data_quality_issues", {
+            "status": "all", "limit": 1, "cursor": quality_data["next_cursor"]})
+        page2_data = ((page2_result or {}).get("structuredContent") or {}).get("data") or {}
+        page2_rows = page2_data.get("issues") or []
+        quality_cursor_ok = bool(page2_rows) and page2_rows[0].get("issue_id") != quality_rows[-1].get("issue_id")
+    quality_leak = any(p in json.dumps(quality_result) for p in
+                       ["native_session_id", "path_hash", "machine_namespace", "session_key",
+                        "source_event_id", "/Users/"])
+    quality_shape = (quality_rc == 0 and not (quality_result or {}).get("isError")
+                     and isinstance(quality_rows, list)
+                     and isinstance(quality_data.get("has_more"), bool)
+                     and quality_cursor_ok
+                     and not quality_leak
+                     and all(isinstance(row, dict)
+                             and isinstance(row.get("issue_id"), str)
+                             and isinstance(row.get("detail"), dict)
+                             for row in quality_rows))
+    R.add("Q15", "数据质量问题可筛选、分页且 detail_json 按 code 脱敏",
+          "EXACT" if quality_shape else "MISMATCH",
+          f"data_quality_issues: rows={len(quality_rows)} has_more={quality_data.get('has_more')} cursor={quality_cursor_ok} "
+          f"leak={quality_leak} rc={quality_rc} stderr={quality_err!r}")
 
     # ── S4 数据可信度（Data MCP §3.4，data_status 直接答）────
     fr = ds["freshness"]

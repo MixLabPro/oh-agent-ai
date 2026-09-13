@@ -311,7 +311,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | `usage_hourly` | v0.9.1 MVP | 🔶 `hourly_by_host` 已在（宿主轴、仅 token）；`group_by=model`/`provider` + 逐小时 `cost`（`MoneyMinor`）需新写（只有 `codex_by_hour_model` 覆盖单宿主） |
 | `summary_daily` | v0.9.1 MVP | 🔶 `SqlSummaryRepository::daily_summary` 覆盖 by_host/by_provider/tokens/coverage/freshness；**会话数 / 活跃小时 / 维度过滤需新增查询**（P1-4） |
 | `summary_monthly` | v0.9.1 MVP | 🔶 同上 + `budget_status_sql`；**逐日趋势 / 月底预测 / 成本占比 % 需新增**（P1-4，逐日趋势可基于 `peaked_days_map`） |
-| `data_quality_issues` | v0.9.1 MVP | 🔶 `data_quality_issues` 表已在；`detail_json` 的 code-aware 脱敏 allowlist 需新写 |
+| `data_quality_issues` | v0.9.1 MVP | ✅ 公开类型化 reader 已落地：状态/严重度/代码/宿主/日期筛选、稳定 cursor 和 code-aware 脱敏；未知 code 仅返回 code/count，原始 `detail_json` 不跨边界 |
 | `authority_audit` | v0.9.1 internal only | ✅ **落地**：MCP 内只读——实时事实 token 守恒、重复 / 孤儿 / legacy-realtime 混轴、覆盖范围输入校验、`authority_revision` 未来性和已登记质量例外自检；不做重导入。见 §8.1 |
 | `control_plane` | v1.0 local control plane | ✅ 类型化覆盖工作台的来源状态 / 自定义来源 / 排除 / 删除导入数据 / 留存 / 统计时区 / 同步暂停 / 同步执行 / 日月汇总 / 日历 / 小时分布 / Codex 配额 / 价格目录状态与联网策略 / Issue 列表与状态变更；读取安全可用且不返回绝对路径，写入必须显式启动 `data-mcp serve --allow-local-writes`，不提供任意 SQL / URL / 通用文件写入 |
 | `billing_workflow` | v1.0 local control plane | ✅ 仅暴露类型化的候选 / 声明 / 重算 / 账单 / 预算管理动作；读取可用，写入必须显式启动 `data-mcp serve --allow-local-writes`，不提供任意 SQL 或通用写入 |
@@ -621,7 +621,7 @@ workflow↔token/cost 归因则继续列在 `missing` 中。
 
 输出：脱敏 issue ID、类别、严重度、影响范围、首次/最近发生时间、出现次数、状态和建议的人类操作。禁止返回可能含路径、Prompt 或密钥的原始 payload。
 
-**实现注记（draft-2）**：`data_quality_issues.detail_json` 当前按各 issue `code` 的需要原样存储（`undated_residual` 存逐模型 token；`missing_sid` 存来源提示；`legacy_aggregate*` 存 coverage 降版信息），可能含模型 raw 名或路径片段。reader 必须过一层 **code-aware allowlist 脱敏**（净新增）——按 `code` 白名单放行已知安全字段，绝不整体回吐 `detail_json`。未知 `code` 默认只放行结构化计数，不放行任何自由文本。
+**实现注记**：`data_quality_issues.detail_json` 继续在本地原样保留用于人工排查；MCP reader 已过一层 **code-aware allowlist 脱敏**，按 `code` 白名单放行已知安全字段，绝不整体回吐 `detail_json`。未知 `code` 只返回 code/count，不放行任何自由文本。
 
 ### 7.11 `query_sql_readonly`（内部调试工具——`mcp-internal` feature only）
 
@@ -752,7 +752,7 @@ workflow↔token/cost 归因则继续列在 `missing` 中。
 
 ### 9.4 `data_quality_issues` 的 code-aware 脱敏 allowlist（spec §7.10 注记 + 增量 4）
 
-`data_quality_issues.detail_json` 按各 `code` 的需要原样存储（真机现在含：`undated_residual` 存逐模型 token；`missing_sid` 存来源提示；`legacy_aggregate*` 存 coverage 降级；`reconcile_exception` 存差异摘要），可能含模型 raw 名或路径片段。MCP **不能**整体回吐 `detail_json`——必须按 `code` 白名单放行已知安全字段，未知 `code` 仅放行结构化计数。
+`data_quality_issues.detail_json` 按各 `code` 的需要原样存储（真机现在含：`undated_residual` 存逐模型 token；`missing_sid` 存来源提示；`legacy_aggregate*` 存 coverage 降级；`reconcile_exception` 存差异摘要），可能含模型 raw 名或路径片段。MCP reader **不能**整体回吐 `detail_json`——当前按 `code` 白名单放行已知安全字段，未知 `code` 仅放行结构化计数。
 
 **字段级 allowlist（M0 退出条件）**：
 
@@ -893,7 +893,7 @@ workflow↔token/cost 归因则继续列在 `missing` 中。
 - **`data_status`**——现有 `data-status` 查询 + 逐宿主 `GROUP BY host` + `authority_revision`。
 - **`summary_daily` / `summary_monthly`**——冻结 DTO 就绪部分薄封装 + **新增聚合查询**：会话数、活跃小时、`group_by=model` 明细、维度过滤（daily）；逐日趋势、成本占比 %、月底预测（monthly，证据不足返回 `null`）。
 - **`usage_hourly`**——新增跨宿主「小时 × model / provider」查询 + 逐小时 `MoneyMinor` 成本（`hourly_by_host` 只够宿主轴）。
-- **`data_quality_issues`**——issue reader + code-aware 脱敏 allowlist（§7.10 注记）。
+- **`data_quality_issues`**——✅ 已落地 issue reader + code-aware 脱敏 allowlist（§7.10 注记）。
 - 完成 M01–M08、M13–M18。
 
 退出条件：Agent 能可靠回答使用曲线、日/月汇总和数据可信度。**M1 是本 spec 最大的单块工作**：传输层 + 线协议 + `MoneyMinor` 投影 + envelope + 至少 4 个净新增聚合查询——不是「薄封装」。

@@ -2452,3 +2452,16 @@
 
 边界：跨宿主历史回填、workflow↔token/cost 唯一归因和更复杂的跨会话重试语义仍未完成；普通重复问题继续由
 `issues` 聚合单独呈现。
+
+## Loop 327 · Data quality issue reader 脱敏闭环
+
+- 新增：公开 MCP `data_quality_issues` 类型化只读工具，支持 `status`、`severity`、`codes`、`hosts`、
+  统计日期范围、`limit` 和稳定 `cursor`，不提供任意 SQL 或通用文件读取。
+- 脱敏：`detail_json` 不整体返回；`undated_residual`、`missing_sid`、`legacy_aggregate_*`、
+  `reconcile_exception`、`snapshot_drift` 只放行明确字段，未知 code 只返回 `code/count`。
+- 安全引用：原始 issue_id 通过稳定安全引用输出，scope 只返回类型和允许的宿主信息，不返回 scope_key、
+  session key、路径、原生 ID 或诊断正文。
+- 验收：新增 allowlist 单测与 Q15 真机冒烟；公开工具清单加入 `data_quality_issues`，Q15 当前为 EXACT。
+
+边界：issue 行的 occurrences 当前表示一条权威 issue 记录，不虚构跨批次数量；更丰富的影响面关联仍由
+数据状态、问题聚合和后续成本消费面分别提供。

@@ -24,13 +24,13 @@ fixture 跑；本规格用真机数据做端到端可用性巡检，抓的是"�
 | 来源 | 内容 | 本规格如何用 |
 |---|---|---|
 | `AGENT_VITALS_V0_9_1_SQL_AUTHORITY_MIGRATION_SPEC.md` §4.1 | 面向用户的查询目录（7 类能力 + 下钻链路） | 冒烟矩阵的"能力"分组 |
-| 同上 §4.2 | **Q01–Q14 用户查询验收用例**（既是产品验收也是 e2e fixture） | **冒烟矩阵的主轴**——每条 Q 一行 |
+| 同上 §4.2 | **Q01–Q15 用户查询验收用例**（既是产品验收也是 e2e fixture） | **冒烟矩阵的主轴**——每条 Q 一行 |
 | `AGENT_VITALS_DATA_MCP_SPEC.md` §3 | 用户场景（使用节奏 / 成本与预算 / 问题与效率 / 数据可信度） | 补 §4.2 未覆盖的可信度问题（S4.x） |
 | 同上 §12.2 | U01–U10（§4.2 的 MCP 工具投影） | 工具映射参考 |
 | 同上 §12.1 | M01–M19 契约测试 | 协议 / 安全冒烟（M07 / M12 / M18 / M19）从中取 |
 
 §4.2 的 Q 分三档，本规格沿用：**Q01–Q05 首批可见价值**；**Q06–Q10 依赖
-`workflow_events`**；**Q11–Q14 是所有查询成立的可信度底线**。
+`workflow_events`**；**Q11–Q15 是所有查询成立的可信度底线**。
 
 ## 2. 前置条件
 
@@ -101,6 +101,7 @@ Q06、Q08、Q09、Q10 因此可以诚实返回部分结果；Q07 仍缺完整重
 | **Q12** 重复导入 + 中途中断 → 重跑查询逐值恒等 | `reimport_verify`（MCP 外命令） | `agent-vitals data-reimport-verify --json` ✅ | 两临时库各重放（round B 迁完首宿主"崩溃"→ 重开清扫 → 完整迁移 → 幂等重跑），逐宿主 × 北京月 `COUNT + 四桶 SUM` 全等；`interrupted_runs_swept ≥ 1`；**绝不碰生产库** | **EXACT** |
 | **Q13** 调价日前后用正确价格版本 | `cost_breakdown` | `cost_breakdown(from,to)` + `query_sql_readonly(pricing_snapshots)`（internal） | 调价日前后分别用对应 `pricing_snapshots` 版本；历史不被当前价卡覆盖 | **EXACT**（2026-09-13 真机返回 2 个事实时点价格版本） |
 | **Q14** 同 raw 模型名跨宿主 | `usage_hourly` / `cost_breakdown` 的 `identity_kind` | `usage_hourly(group_by=model)` ✅ | 每序列显式 `identity_kind`；无法映射标 `unresolved`，不并入相似名 | **PARTIAL**（`identity_kind: "host_raw"` 每序列在场，key 带 `host` 消歧 ✅；canonical 归一 = v0.9.2+；`unresolved` 语义在 `data-unresolved` / M3） |
+| **Q15** 数据质量问题筛选与脱敏下钻 | `data_quality_issues` | `status/codes/hosts/from/to` + 稳定 cursor | reader 仅返回安全 issue ref、范围、状态和 code-aware allowlist detail；未知 code 只返回 code/count，原始 `detail_json` 不跨边界 | **EXACT** |
 
 ### 4.4 数据可信度补充（Data MCP §3.4，`data_status` 直接答）
 
@@ -215,10 +216,11 @@ host-months / facts 逐值相等 / `interrupted_runs_swept=1`。
 
 | 构建 | EXACT | PARTIAL | BLOCKED | MISMATCH |
 |---|---:|---:|---:|---:|
-| 公开 | 18 | 6 | 0 | 0 |
-| `mcp-internal` | 20 | 6 | 0 | 0 |
+| 公开 | 19 | 6 | 0 | 0 |
+| `mcp-internal` | 21 | 6 | 0 | 0 |
 
-Q09 已接入版本分桶与安全比较器，当前真实数据因可比较版本证据不足保持 partial；Q06–Q08、Q10
+Q09 已接入版本分桶与安全比较器，当前真实数据因可比较版本证据不足保持 partial；Q07 已输出安全
+重试链但因部分生命周期缺失保持 partial；Q06、Q08、Q10
 已接入基础 reader 但保持 partial；Q14
 仍是 host raw 身份语义，canonical 归一未完成。`cost_breakdown` 当前保留事实时点价格版本切片以保证审计性，
 `group_by` 会回显请求维度但尚未做跨价格版本的父层滚动聚合；`compare_to_previous`
@@ -252,7 +254,7 @@ Q09 已接入版本分桶与安全比较器，当前真实数据因可比较版�
 |---|---|---|---|
 | ~~**F1**~~ | ~~`freshness.stale_hosts` 未折叠逐宿主过期状态~~ | ✅ 已关闭：以最后一条实时事实的 24h 阈值生成 `stale_hosts`，`data_status.coverage` 同步降为 `partial`，并由单测与 Q11 真机冒烟守住；`last_seen_at` 仍独立表示扫描新鲜度 | — |
 | **F2** | 金额消费面不完整 → S2「花了多少」「哪个最贵（钱）」及三消费面 parity 仍不完整 | ✅ `cost_breakdown` 已提供事实时点 host/provider/model/basis 明细、`MoneyMinor`、unresolved 与订阅 token 分离；`summary_*` 成本占比/三面逐值 parity 未接齐 | 增量 3（`summary_daily`/`summary_monthly`）+ M15 成本 parity + cost factor decomposition |
-| **F3** | 无 `data_quality_issues` 工具 → Q05/S2.4 只能 `query_sql_readonly` 数 code，不能逐模型下钻 unresolved 原因 | `v_data_quality_safe` view 在（且刻意不含 `detail_json`） | 增量 4（`data_quality_issues` + code-aware 脱敏 allowlist） |
+| ~~**F3**~~ | ~~无 `data_quality_issues` 工具 → Q05/S2.4 只能 `query_sql_readonly` 数 code，不能逐模型下钻 unresolved 原因~~ | ✅ 已关闭：公开类型化 reader 支持状态/严重度/代码/宿主/日期筛选、稳定 cursor 和 code-aware allowlist；原始 `detail_json` 不跨 MCP 边界 | — |
 | ~~**F4**~~ | ~~Q04/S1.4 会话下钻~~ | ✅ **已关闭（2026-09-08）**：`session_ref` HMAC-SHA256 基元（`<data_home>/.mcp-session-salt`，0600）+ `sessions_search`（窗口/小时 × 逐会话聚合，keyset 分页，`window_total_tokens` 供守恒核对）+ `session_detail`（反解 ref → usage 时间线）。`started_at_ms`/`ended_at_ms` 从 `MIN/MAX(event_ts_ms)` 读时派生，不依赖那两列。**待**：`session_detail` 时间线的失败/错误事件富化 = F5（`workflow_events`）。 | — |
 | **F5** | Q06–Q10 问题 / Skill 洞察（含 `session_detail` 的失败事件轴） | 基础 writer/reader、问题/Skill reader 和覆盖度已接通；Skill reader 已消费调用/结束事件，计算 outcome/duration coverage，并输出按版本分桶及证据门控的回归比较；issues reader 已输出安全重试链，但历史回填、跨宿主覆盖和唯一 token/cost 归因仍缺 | M4 收口：历史回填、跨宿主覆盖、唯一 token/cost 归因及稳定重试/回归 fixture |
 | ~~**F6**~~ | ~~Q12 重导入幂等验收~~ | ✅ **已关闭（2026-09-08）**：`agent-vitals data-reimport-verify [--json]`（MCP 外隔离命令，`runtime::reimport_verify`）。 | — |
@@ -261,13 +263,13 @@ Q09 已接入版本分桶与安全比较器，当前真实数据因可比较版�
 
 ## 9. 通过门槛
 
-- **当前阶段**：Q01–Q05 / Q11–Q13 / S4.* / M07 / M12 / M18 / M19 全 `EXACT`；
+- **当前阶段**：Q01–Q05 / Q11–Q13 / Q15 / S4.* / M07 / M12 / M18 / M19 全 `EXACT`；
   Q06–Q10 和 Q14 为 `PARTIAL`，`MISMATCH` == 0。Q07 的
-  重试链仍只返回显式 unknown；公开/内部历史结果见 §7.4，workflow reader 最新
+  重试链按证据输出 recovered/unrecovered，未闭合部分显式降级；公开/内部历史结果见 §7.4，workflow reader 最新
   范围验证见 §7.5。
 - **M1/M3 部分收口**：F1 已关闭；`cost_breakdown` 已落地并把 Q05/Q13 推到 `EXACT`，
   但 `summary_daily`/`summary_monthly` 成本消费面、三面 parity 与变化因子仍待完成。
 - **M2 收口**：`authority_audit` 已纳入并通过真实 MCP 调用（Loop 313）；`reimport_verify`
   仍作为 MCP 外隔离命令验证，二者职责不混用。
-- **v1.0.0（M5）**：Q01–Q14 全部 `EXACT` 或 `EXPLAINED`；无未关闭 `mismatch`
+- **v1.0.0（M5）**：Q01–Q15 全部 `EXACT` 或 `EXPLAINED`；无未关闭 `mismatch`
   （`AGENT_VITALS_DATA_MCP_SPEC.md` §14 DoD 末条）。
