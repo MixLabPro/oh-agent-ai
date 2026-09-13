@@ -2423,3 +2423,19 @@
 
 边界：真实数据的 Q08 仍为 PARTIAL，因为 token/cost 唯一归因、完整跨宿主生命周期与样本门槛
 尚未完成；本轮仅收口 reader 的完成态和耗时覆盖语义。
+
+## Loop 325 · Skill 版本回归证据门控
+
+- 修复：`skills_summary` 现在按 `capability_version` 输出版本分桶，保留调用/会话/成功/失败/未知、
+  完成事件、耗时和首末观测时间，不回吐原始事件内容。
+- 新增：每个 Skill 输出 `version_regression`。仅当至少两个版本各有 3 次调用，且完成事件、结果和
+  耗时证据完整时，才计算时间顺序上的基线版本→候选版本成功率与耗时差异；否则明确返回
+  `status=unavailable`（如 `fewer_than_two_versions`、`sample_below_minimum`、
+  `incomplete_skill_lifecycle`、`incomplete_duration_evidence`）。
+- 防误报：覆盖响应在没有任何可比较版本时增加 `comparable Skill version baseline` 缺口；真实数据不
+  因为存在 `capability_version` 字段就自动判定发生回归。
+- 验收：Runtime workflow summary 定向测试通过；Q09 冒烟从 BLOCKED 调整为可验证的 PARTIAL/EXACT
+  判定，取决于真实窗口是否满足比较证据；`MISMATCH` 仍应为 0。
+
+边界：重试生命周期配对、历史跨宿主回填和 workflow↔token/cost 唯一归因仍未完成，Q09 在真实数据
+样本不足时保持 PARTIAL，不关闭 v1.0 发布门槛。

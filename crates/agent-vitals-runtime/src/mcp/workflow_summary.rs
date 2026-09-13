@@ -37,7 +37,7 @@ pub fn issues_spec() -> ToolSpec {
 pub fn skills_spec() -> ToolSpec {
     ToolSpec {
         name: "skills_summary",
-        description: "Summarize observed Skill invocations with explicit success, failure, unknown, retry, duration, and coverage states; never infer value from low usage.",
+        description: "Summarize observed Skill invocations with explicit success, failure, unknown, retry, duration, version comparison, and coverage states; never infer value from low usage.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -56,6 +56,163 @@ pub fn skills_spec() -> ToolSpec {
             "description": "Standard envelope; data.skills contains safe Skill rows and every ratio carries numerator, denominator, and coverage."
         }),
     }
+}
+
+const MIN_VERSION_COMPARISON_CALLS: i64 = 3;
+
+#[derive(Clone)]
+struct SkillVersionSnapshot {
+    version: String,
+    calls: i64,
+    sessions: i64,
+    succeeded: i64,
+    failed: i64,
+    unknown: i64,
+    average_duration_ms: Option<f64>,
+    finished_events: i64,
+    duration_events: i64,
+    first_ms: i64,
+    last_ms: i64,
+}
+
+fn skill_version_snapshots(
+    conn: &Connection,
+    window: &Window,
+    skill: &str,
+) -> Result<Vec<SkillVersionSnapshot>, ToolError> {
+    let sql = "SELECT COALESCE(capability_version, '<unknown>'),
+                      SUM(CASE WHEN event_type='skill_invoked' THEN 1 ELSE 0 END),
+                      COUNT(DISTINCT CASE WHEN event_type='skill_invoked' THEN session_key END),
+                      SUM(CASE WHEN event_type='skill_finished' AND outcome='succeeded' THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN event_type='skill_finished' AND outcome='failed' THEN 1 ELSE 0 END),
+                      AVG(CASE WHEN event_type='skill_finished' THEN duration_ms END),
+                      SUM(CASE WHEN event_type='skill_finished' THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN event_type='skill_finished' AND duration_ms IS NOT NULL THEN 1 ELSE 0 END),
+                      MIN(event_ts_ms), MAX(event_ts_ms)
+               FROM workflow_events
+               WHERE event_type IN ('skill_invoked', 'skill_finished')
+                 AND event_ts_ms >= ?1 AND event_ts_ms < ?2
+                 AND capability_id = ?3
+               GROUP BY COALESCE(capability_version, '<unknown>')
+               HAVING SUM(CASE WHEN event_type='skill_invoked' THEN 1 ELSE 0 END) > 0
+               ORDER BY MIN(event_ts_ms), COALESCE(capability_version, '<unknown>')";
+    let mut statement = conn
+        .prepare(sql)
+        .map_err(|e| ToolError::new("internal_error", format!("skill version query failed: {e}")))?;
+    let mut rows = statement
+        .query((window.start_ms, window.end_ms, skill))
+        .map_err(|e| ToolError::new("internal_error", format!("skill version query failed: {e}")))?;
+    let mut snapshots = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| ToolError::new("internal_error", format!("skill version row failed: {e}")))?
+    {
+        let calls: i64 = row.get(1).unwrap_or(0);
+        let succeeded_raw: i64 = row.get(3).unwrap_or(0);
+        let failed_raw: i64 = row.get(4).unwrap_or(0);
+        let succeeded = succeeded_raw.clamp(0, calls);
+        let failed = failed_raw.clamp(0, calls.saturating_sub(succeeded));
+        snapshots.push(SkillVersionSnapshot {
+            version: row.get(0).unwrap_or_else(|_| "<unknown>".to_string()),
+            calls,
+            sessions: row.get(2).unwrap_or(0),
+            succeeded,
+            failed,
+            unknown: calls.saturating_sub(succeeded).saturating_sub(failed),
+            average_duration_ms: row.get(5).unwrap_or(None),
+            finished_events: row.get(6).unwrap_or(0),
+            duration_events: row.get(7).unwrap_or(0),
+            first_ms: row.get(8).unwrap_or(0),
+            last_ms: row.get(9).unwrap_or(0),
+        });
+    }
+    Ok(snapshots)
+}
+
+fn skill_version_row(snapshot: &SkillVersionSnapshot) -> Value {
+    let success_complete = snapshot.unknown == 0;
+    let duration_complete = snapshot.duration_events >= snapshot.calls && snapshot.calls > 0;
+    json!({
+        "version": snapshot.version,
+        "calls": snapshot.calls,
+        "sessions": snapshot.sessions,
+        "outcomes": {
+            "succeeded": snapshot.succeeded,
+            "failed": snapshot.failed,
+            "unknown": snapshot.unknown
+        },
+        "success_rate": {
+            "numerator": snapshot.succeeded,
+            "denominator": snapshot.calls,
+            "coverage": if success_complete { "complete" } else { "partial" },
+            "value": if success_complete { json!(snapshot.succeeded as f64 / snapshot.calls.max(1) as f64) } else { Value::Null }
+        },
+        "duration_ms": {
+            "average": snapshot.average_duration_ms,
+            "coverage": if duration_complete { "complete" } else if snapshot.average_duration_ms.is_some() { "partial" } else { "unknown" }
+        },
+        "finished_events": snapshot.finished_events,
+        "first_seen": super::ms_to_rfc3339_beijing(snapshot.first_ms),
+        "last_seen": super::ms_to_rfc3339_beijing(snapshot.last_ms)
+    })
+}
+
+fn skill_version_regression(snapshots: &[SkillVersionSnapshot]) -> Value {
+    let known_versions = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.version != "<unknown>")
+        .collect::<Vec<_>>();
+    if known_versions.len() < 2 {
+        return json!({
+            "status": "unavailable",
+            "reason": if snapshots.len() < 2 { "fewer_than_two_versions" } else { "fewer_than_two_known_versions" },
+            "version_count": snapshots.len(),
+            "known_version_count": known_versions.len(),
+            "minimum_calls": MIN_VERSION_COMPARISON_CALLS
+        });
+    }
+    if known_versions.iter().any(|snapshot| snapshot.calls < MIN_VERSION_COMPARISON_CALLS) {
+        return json!({
+            "status": "unavailable",
+            "reason": "sample_below_minimum",
+            "minimum_calls": MIN_VERSION_COMPARISON_CALLS,
+            "version_count": snapshots.len(),
+            "known_version_count": known_versions.len()
+        });
+    }
+    if known_versions.iter().any(|snapshot| snapshot.unknown > 0 || snapshot.finished_events < snapshot.calls) {
+        return json!({
+            "status": "unavailable",
+            "reason": "incomplete_skill_lifecycle",
+            "version_count": snapshots.len(),
+            "known_version_count": known_versions.len()
+        });
+    }
+    if known_versions.iter().any(|snapshot| snapshot.duration_events < snapshot.calls || snapshot.average_duration_ms.is_none()) {
+        return json!({
+            "status": "unavailable",
+            "reason": "incomplete_duration_evidence",
+            "version_count": snapshots.len(),
+            "known_version_count": known_versions.len()
+        });
+    }
+    let baseline = known_versions[0];
+    let candidate = known_versions[known_versions.len() - 1];
+    let baseline_success = baseline.succeeded as f64 / baseline.calls as f64;
+    let candidate_success = candidate.succeeded as f64 / candidate.calls as f64;
+    let success_rate_delta = candidate_success - baseline_success;
+    let duration_delta = candidate.average_duration_ms.unwrap_or(0.0)
+        - baseline.average_duration_ms.unwrap_or(0.0);
+    json!({
+        "status": "complete",
+        "baseline_version": baseline.version,
+        "candidate_version": candidate.version,
+        "baseline_calls": baseline.calls,
+        "candidate_calls": candidate.calls,
+        "success_rate_delta": success_rate_delta,
+        "duration_ms_delta": duration_delta,
+        "regression": success_rate_delta < 0.0 || duration_delta > 0.0
+    })
 }
 
 struct Window {
@@ -482,6 +639,7 @@ pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let mut rows = stmt.query(params_from_iter(values.iter()))
         .map_err(|e| ToolError::new("internal_error", format!("skills summary query failed: {e}")))?;
     let mut out = Vec::new();
+    let mut has_comparable_version_baseline = false;
     while let Some(row) = rows.next().map_err(|e| ToolError::new("internal_error", format!("skills summary row failed: {e}")))? {
         let skill: String = row.get(0).map_err(|e| ToolError::new("internal_error", format!("skills summary row failed: {e}")))?;
         let calls: i64 = row.get(1).unwrap_or(0);
@@ -495,6 +653,11 @@ pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         let finished: i64 = row.get(7).unwrap_or(0);
         let duration_count: i64 = row.get(8).unwrap_or(0);
         let last_ms: i64 = row.get(9).unwrap_or(0);
+        let version_snapshots = skill_version_snapshots(handle.conn(), &window, &skill)?;
+        let version_regression = skill_version_regression(&version_snapshots);
+        if version_regression.get("status").and_then(Value::as_str) == Some("complete") {
+            has_comparable_version_baseline = true;
+        }
         out.push(json!({
             "skill": skill,
             "calls": calls,
@@ -506,6 +669,8 @@ pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             "finished_events": finished,
             "tokens": { "value": Value::Null, "coverage": "unknown", "reason": "workflow-to-usage attribution is not unique" },
             "cost": { "value": Value::Null, "coverage": "unknown", "reason": "workflow-to-cost attribution is not unique" },
+            "versions": version_snapshots.iter().map(skill_version_row).collect::<Vec<_>>(),
+            "version_regression": version_regression,
             "last_seen": super::ms_to_rfc3339_beijing(last_ms)
         }));
     }
@@ -515,6 +680,10 @@ pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         warnings.push(json!({ "code": "workflow_coverage_insufficient", "message": "No accepted workflow events fall in the requested window; an empty Skill list is not a proof that no Skill was used." }));
     }
     let skill_missing = skill_coverage_missing(handle.conn(), &window, &skills)?;
+    let mut skill_missing = skill_missing;
+    if !has_comparable_version_baseline {
+        skill_missing.push("comparable Skill version baseline".to_string());
+    }
     let cov = coverage(
         handle.conn(),
         &window,
@@ -531,7 +700,7 @@ pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_issues, run_skills};
+    use super::{SkillVersionSnapshot, run_issues, run_skills, skill_version_regression};
     use agent_vitals_data::authority::{AuthorityDb, default_authority_path};
     use agent_vitals_data::fact_writer_sql::SqlFactWriter;
     use agent_vitals_data::workflow::insert_events;
@@ -660,7 +829,59 @@ mod tests {
         assert_eq!(skills["data"]["skills"][0]["outcomes"], json!({"succeeded": 0, "failed": 1, "unknown": 0}));
         assert_eq!(skills["data"]["skills"][0]["finished_events"], 1);
         assert_eq!(skills["data"]["skills"][0]["duration_ms"]["average"], 9.0);
-        assert_eq!(skills["coverage"]["missing"], json!(["unique token/cost linkage"]));
+        assert_eq!(skills["coverage"]["missing"], json!([
+            "unique token/cost linkage",
+            "comparable Skill version baseline"
+        ]));
+        assert_eq!(skills["data"]["skills"][0]["versions"][0]["version"], "2");
+        assert_eq!(skills["data"]["skills"][0]["version_regression"]["status"], "unavailable");
+        assert_eq!(skills["data"]["skills"][0]["version_regression"]["reason"], "fewer_than_two_versions");
         std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn skill_version_regression_requires_evidence_and_compares_time_ordered_versions() {
+        let snapshots = vec![
+            SkillVersionSnapshot {
+                version: "1.0".to_string(),
+                calls: 3,
+                sessions: 1,
+                succeeded: 3,
+                failed: 0,
+                unknown: 0,
+                average_duration_ms: Some(10.0),
+                finished_events: 3,
+                duration_events: 3,
+                first_ms: 100,
+                last_ms: 130,
+            },
+            SkillVersionSnapshot {
+                version: "2.0".to_string(),
+                calls: 3,
+                sessions: 1,
+                succeeded: 2,
+                failed: 1,
+                unknown: 0,
+                average_duration_ms: Some(20.0),
+                finished_events: 3,
+                duration_events: 3,
+                first_ms: 200,
+                last_ms: 230,
+            },
+        ];
+        let regression = skill_version_regression(&snapshots);
+        assert_eq!(regression["status"], "complete");
+        assert_eq!(regression["baseline_version"], "1.0");
+        assert_eq!(regression["candidate_version"], "2.0");
+        assert_eq!(regression["regression"], true);
+        assert!((regression["success_rate_delta"].as_f64().unwrap() + 1.0 / 3.0).abs() < f64::EPSILON);
+        assert!((regression["duration_ms_delta"].as_f64().unwrap() - 10.0).abs() < f64::EPSILON);
+
+        let insufficient = skill_version_regression(&[
+            SkillVersionSnapshot { calls: 2, ..snapshots[0].clone() },
+            snapshots[1].clone(),
+        ]);
+        assert_eq!(insufficient["status"], "unavailable");
+        assert_eq!(insufficient["reason"], "sample_below_minimum");
     }
 }

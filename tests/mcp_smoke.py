@@ -297,9 +297,30 @@ def main():
     R.add("Q08", "Skill 成功率 + 样本不足判定",
           workflow_verdict(skills_env, True, "skills"),
           f"skills_summary: coverage={skills_status} rows={len(skills_data.get('skills') or [])} {skills_note}")
-    R.add("Q09", "Skill 版本回归识别",
-          "BLOCKED",
-          "当前 workflow_events 只保留 capability_version；尚未实现跨版本回归基线与比较器。")
+    skills_rows = skills_data.get("skills")
+    version_rows = [row for row in (skills_rows or []) if isinstance(row, dict)]
+    version_shape_ok = isinstance(skills_rows, list) and all(
+        isinstance(row, dict)
+        and isinstance(row.get("versions"), list)
+        and isinstance(row.get("version_regression"), dict)
+        and row["version_regression"].get("status") in
+        ("complete", "unavailable")
+        for row in skills_rows)
+    comparable_rows = [row for row in version_rows
+                       if row["version_regression"].get("status") == "complete"] if version_shape_ok else []
+    if skills_env is None:
+        q09_status = "MISMATCH"
+    elif skills_status == "unavailable":
+        q09_status = "BLOCKED"
+    elif not version_shape_ok:
+        q09_status = "MISMATCH"
+    elif comparable_rows and len(comparable_rows) == len(version_rows):
+        q09_status = "EXACT"
+    else:
+        q09_status = "PARTIAL"
+    R.add("Q09", "Skill 版本回归识别", q09_status,
+          f"skills_summary: version_rows={len(version_rows)} comparable={len(comparable_rows)} "
+          "；样本不足/生命周期不完整时显式 unavailable，不把未比较误报为回归。")
     R.add("Q10", "会话时间线关联失败/峰值",
           workflow_verdict(issues_env, False, "issues"),
           f"issues_summary 提供安全错误/会话聚合；usage timeline 与 workflow 关联仍为 PARTIAL；coverage={issues_status} {issues_note}")

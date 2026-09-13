@@ -86,12 +86,12 @@ agent-vitals sync-facts    # 让 freshness 是新的
 | **Q06** 本周重复错误指纹聚为问题卡 | `issues_summary` | **PARTIAL**：已能按脱敏错误指纹/重复调用聚合，趋势与 token/cost 归因仍不完整 |
 | **Q07** 连续失败后成功 = 一组重试链 | `issues_summary` | **PARTIAL**：调用指纹已保留，但失败→再次调用→成功的生命周期配对仍返回 unknown |
 | **Q08** Skill 成功率 + 样本不足判定 | `skills_summary` | **PARTIAL**：已按 `skill_invoked` 与 `skill_finished` 汇总成功/失败/未知，并报告结束事件与耗时覆盖；token/cost 关联和样本门槛仍不完整 |
-| **Q09** Skill 版本回归识别 | `skills_summary` | **BLOCKED** |
+| **Q09** Skill 版本回归识别 | `skills_summary` | **PARTIAL**：已按 `capability_version` 输出版本分桶，并在两个版本均满足最小样本且生命周期/耗时证据完整时计算基线→候选差异；真实窗口若版本数、样本或证据不足，明确返回 `unavailable` |
 | **Q10** 会话时间线关联失败/峰值 | `session_detail` | **PARTIAL**：已返回独立脱敏 `workflow_timeline`，尚未把 workflow 事件硬归因到 token/cost 或峰值 |
 
 `workflow_events` 已完成宿主 wire 提取 → 脱敏指纹 → SQL writer → reader 的基础管线。
-Q06、Q08、Q10 因此可以诚实返回部分结果；Q07 仍缺完整重试配对，Q09 仍缺历史 Skill
-版本基线。任何覆盖不足都必须返回 `partial/unavailable`，不能用空列表冒充“没有问题”。
+Q06、Q08、Q09、Q10 因此可以诚实返回部分结果；Q07 仍缺完整重试配对。任何覆盖不足都必须返回
+`partial/unavailable`，不能用空列表冒充“没有问题”。
 
 ### 4.3 Q11–Q14：可信度底线
 
@@ -215,10 +215,11 @@ host-months / facts 逐值相等 / `interrupted_runs_swept=1`。
 
 | 构建 | EXACT | PARTIAL | BLOCKED | MISMATCH |
 |---|---:|---:|---:|---:|
-| 公开 | 18 | 1 | 5 | 0 |
-| `mcp-internal` | 20 | 1 | 5 | 0 |
+| 公开 | 18 | 6 | 0 | 0 |
+| `mcp-internal` | 20 | 6 | 0 | 0 |
 
-Q09 仍被 Skill 版本基线阻塞；Q06–Q08、Q10 已接入基础 reader 但保持 partial；Q14
+Q09 已接入版本分桶与安全比较器，当前真实数据因可比较版本证据不足保持 partial；Q06–Q08、Q10
+已接入基础 reader 但保持 partial；Q14
 仍是 host raw 身份语义，canonical 归一未完成。`cost_breakdown` 当前保留事实时点价格版本切片以保证审计性，
 `group_by` 会回显请求维度但尚未做跨价格版本的父层滚动聚合；`compare_to_previous`
 目前提供等长对比窗口摘要，变化因子分解（用量/组合/缓存/价格/账单）仍未完成。
@@ -230,9 +231,8 @@ Q09 仍被 Skill 版本基线阻塞；Q06–Q08、Q10 已接入基础 reader 但
 实际观测宿主为 `claude-code`、`codex`，覆盖状态为 `partial`；`hosts=["codex"]`
 返回 `observed_events=4,236` 且 `observed_hosts=["codex"]`。覆盖缺口仅保留
 `unique token/cost linkage` 与 `complete retry baseline`；Skill 查询继续明确列出
-`skill_finished`、完整耗时和 token/cost 归因缺口。未安装或窗口内无事件的宿主不计为
-缺失宿主。Q06/Q08/Q10 已从 BLOCKED 调整为 PARTIAL，Q07 仍为 PARTIAL，Q09 仍为
-BLOCKED；这不改变 v1.0 的发布门槛。
+`skill_finished`、可比较版本基线、完整耗时和 token/cost 归因缺口。未安装或窗口内无事件的宿主不计为
+缺失宿主。Q06/Q08/Q09/Q10 保持 PARTIAL，Q07 仍为 PARTIAL；这不改变 v1.0 的发布门槛。
 
 ### 7.1 首轮（2026-09-08，Q01–Q03 + 协议）
 
@@ -254,7 +254,7 @@ BLOCKED；这不改变 v1.0 的发布门槛。
 | **F2** | 金额消费面不完整 → S2「花了多少」「哪个最贵（钱）」及三消费面 parity 仍不完整 | ✅ `cost_breakdown` 已提供事实时点 host/provider/model/basis 明细、`MoneyMinor`、unresolved 与订阅 token 分离；`summary_*` 成本占比/三面逐值 parity 未接齐 | 增量 3（`summary_daily`/`summary_monthly`）+ M15 成本 parity + cost factor decomposition |
 | **F3** | 无 `data_quality_issues` 工具 → Q05/S2.4 只能 `query_sql_readonly` 数 code，不能逐模型下钻 unresolved 原因 | `v_data_quality_safe` view 在（且刻意不含 `detail_json`） | 增量 4（`data_quality_issues` + code-aware 脱敏 allowlist） |
 | ~~**F4**~~ | ~~Q04/S1.4 会话下钻~~ | ✅ **已关闭（2026-09-08）**：`session_ref` HMAC-SHA256 基元（`<data_home>/.mcp-session-salt`，0600）+ `sessions_search`（窗口/小时 × 逐会话聚合，keyset 分页，`window_total_tokens` 供守恒核对）+ `session_detail`（反解 ref → usage 时间线）。`started_at_ms`/`ended_at_ms` 从 `MIN/MAX(event_ts_ms)` 读时派生，不依赖那两列。**待**：`session_detail` 时间线的失败/错误事件富化 = F5（`workflow_events`）。 | — |
-| **F5** | Q06–Q10 问题 / Skill 洞察（含 `session_detail` 的失败事件轴） | 基础 writer/reader、问题/Skill reader 和覆盖度已接通；Skill reader 已消费调用/结束事件并计算安全的 outcome/duration coverage；完整重试、版本基线与唯一 token/cost 归因仍缺 | M4 收口：历史回填、生命周期配对、Skill 版本基线、`issues_summary` / `skills_summary` |
+| **F5** | Q06–Q10 问题 / Skill 洞察（含 `session_detail` 的失败事件轴） | 基础 writer/reader、问题/Skill reader 和覆盖度已接通；Skill reader 已消费调用/结束事件，计算 outcome/duration coverage，并输出按版本分桶及证据门控的回归比较；完整重试生命周期、历史回填和唯一 token/cost 归因仍缺 | M4 收口：历史回填、生命周期配对、跨宿主覆盖、唯一 token/cost 归因及稳定回归 fixture |
 | ~~**F6**~~ | ~~Q12 重导入幂等验收~~ | ✅ **已关闭（2026-09-08）**：`agent-vitals data-reimport-verify [--json]`（MCP 外隔离命令，`runtime::reimport_verify`）。 | — |
 | **F7** | Q13 历史价版重放 | ✅ `cost_breakdown` 已按每条事实的 `event_ts_ms` 选择历史价格版本，真机出现 2 个版本并通过 Q13；变化因子分解与冻结多版本 fixture 仍未完成 | M3 收口：跨窗口因子分解、稳定 fixture、账单录入归因与父层聚合 |
 | **F8** | `usage_hourly group_by=provider` 与 `model` 等价 | `provider_id` 归一表 §3.4 未建；schema 描述已注明"identical here" | v0.9.2+ canonical 归一 |
@@ -262,7 +262,7 @@ BLOCKED；这不改变 v1.0 的发布门槛。
 ## 9. 通过门槛
 
 - **当前阶段**：Q01–Q05 / Q11–Q13 / S4.* / M07 / M12 / M18 / M19 全 `EXACT`；
-  Q06–Q08、Q10 和 Q14 为 `PARTIAL`，Q09 为 `BLOCKED`，`MISMATCH` == 0。Q07 的
+  Q06–Q10 和 Q14 为 `PARTIAL`，`MISMATCH` == 0。Q07 的
   重试链仍只返回显式 unknown；公开/内部历史结果见 §7.4，workflow reader 最新
   范围验证见 §7.5。
 - **M1/M3 部分收口**：F1 已关闭；`cost_breakdown` 已落地并把 Q05/Q13 推到 `EXACT`，
