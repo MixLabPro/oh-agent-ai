@@ -69,8 +69,11 @@ def main():
 
     denied = run_server(args.bin, home, [
         (2, "control_plane", {"action": "sync_pause_set", "paused": True}),
+        (3, "control_plane", {"action": "pricing_catalog_policy_set", "network_enabled": True}),
     ])
     _, error = data(denied, 2)
+    assert error and error["code"] == "permission_denied", error
+    _, error = data(denied, 3)
     assert error and error["code"] == "permission_denied", error
 
     calls = [
@@ -88,6 +91,9 @@ def main():
         (18, "control_plane", {"action": "statistics_timezone_get"}),
         (19, "control_plane", {"action": "sync_pause_set", "paused": True}),
         (20, "control_plane", {"action": "sync_state"}),
+        (26, "control_plane", {"action": "pricing_catalog_status"}),
+        (27, "control_plane", {"action": "pricing_catalog_policy_set", "network_enabled": True}),
+        (28, "control_plane", {"action": "pricing_catalog_status"}),
         (25, "control_plane", {"action": "sync_facts"}),
         (21, "control_plane", {"action": "source_data_delete", "host": "codex"}),
         (22, "control_plane", {"action": "source_data_delete", "host": "codex",
@@ -121,6 +127,12 @@ def main():
     assert sync["sync"]["paused"] is True
     sync_call, _ = data(results, 25)
     assert sync_call["status"] == "paused" and sync_call["report"] is None
+    pricing_before, _ = data(results, 26)
+    assert pricing_before["pricing"]["state"] == "never_checked"
+    assert pricing_before["pricing"]["network_enabled"] is False
+    pricing_after, _ = data(results, 28)
+    assert pricing_after["pricing"]["network_enabled"] is True
+    assert pricing_after["pricing"]["source_url"].startswith("https://")
     deleted, _ = data(results, 22)
     assert deleted["deleted"] == {"facts": 0, "sessions": 0, "source_files": 0}
     assert custom_root.exists()  # removing a configured source must not delete the user's directory

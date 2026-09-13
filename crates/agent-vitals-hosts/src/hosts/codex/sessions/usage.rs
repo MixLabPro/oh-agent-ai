@@ -233,6 +233,19 @@ fn plan_from_rate_limits(rl: &Value, observed_at: &str) -> Option<Value> {
     Some(Value::Object(plan))
 }
 
+/// 校验从权威库读取的 Codex 配额快照仍符合本 adapter 的输出契约。
+///
+/// 快照是由本模块从 `rate_limits` 生成的，Runtime 不应重新解释宿主字段；
+/// 这里保留最小的宿主身份校验，坏 payload 只能降级为 unavailable，不能
+/// 被读面当作通用额度或零值继续传播。
+pub fn validate_quota_snapshot(snapshot: &Value) -> Option<Value> {
+    let plan_type = snapshot.get("plan_type").and_then(Value::as_str)?;
+    if plan_type.is_empty() {
+        return None;
+    }
+    Some(snapshot.clone())
+}
+
 /// 把新事件的 plan 与上一次 plan 合并：**新事件没带 `limits`、上一次带了 → 把上一次
 /// 的非空限额带过来**（降级快照不抹掉配额条），canonical 键序重建
 /// (plan_type, has_credits, limits, observed_at)。新事件自带 limits 或上一次没有 →
@@ -1068,6 +1081,18 @@ mod tests {
         assert_eq!(s["window_minutes"], 10080);
         // token 本身照常折叠（plan 是独立状态，不影响桶）
         assert_eq!(bucket_of(&out, "gpt-5.6-sol", "standard")["uncached_input_tokens"], json!(100));
+    }
+
+    #[test]
+    fn quota_snapshot_validation_stays_in_codex_adapter() {
+        let valid = json!({
+            "plan_type": "plus",
+            "has_credits": false,
+            "observed_at": "2026-08-27T23:29:09Z",
+        });
+        assert_eq!(validate_quota_snapshot(&valid), Some(valid.clone()));
+        assert_eq!(validate_quota_snapshot(&json!({"plan_type": ""})), None);
+        assert_eq!(validate_quota_snapshot(&json!({"has_credits": false})), None);
     }
 
     #[test]

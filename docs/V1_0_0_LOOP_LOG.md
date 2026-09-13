@@ -2293,3 +2293,29 @@
 - 安全：写入与既有 `billing_workflow` 一样必须显式 `data-mcp serve --allow-local-writes`；删除导入数据要求精确确认串；不开放任意 SQL、URL、原始日志或通用文件写入。同步暂停文件抽到 runtime 共享模块，桌面与 MCP 共用同一读写路径。
 - 边界：截图、导航、文件选择器、更新页、系统保存对话框等 UI 壳操作不纳入 MCP 业务控制面。
 - 验收：新增隔离控制面烟测，验证默认拒绝 mutation，以及来源配置、排除、留存、时区、暂停和删除确认闭环；公开/内部既有 MCP 数据烟测继续执行。
+
+## Loop 316 · MCP 价格目录状态与联网策略控制
+
+- 修复：`control_plane` 新增 `pricing_catalog_status` 与
+  `pricing_catalog_policy_set`，与桌面工作台共享 `pricing-catalog-update.json` 和
+  `pricing-catalog-policy.json` 的状态/策略契约；策略写入保持类型化，只接受
+  `network_enabled`，不接受自定义 URL。
+- 安全：价格目录策略变更仍要求显式 `data-mcp serve --allow-local-writes`；读取响应
+  固定维护者公共地址元数据，不包含本地日志、账户、订阅、预算或绝对路径。MCP 不复制
+  网络下载器，实际更新仍由桌面固定 HTTPS 链路执行并复用目录校验/失败退避。
+- 验收：隔离 `mcp_control_plane_smoke.py` 通过 **19 个类型化操作**，覆盖默认拒绝、
+  `never_checked` 初始状态、策略开启后的状态读取与固定 HTTPS 地址；runtime release
+  check、Python 编译检查和 `git diff --check` 通过。
+
+## Loop 317 · Codex 配额职责边界收口
+
+- 分析：Codex `rate_limits` 的宿主字段解释本来就位于
+  `agent-vitals-hosts::codex::sessions::usage`；Runtime 的职责是接收
+  `UsageFactEmitResult.quota_snapshot` 并写入 `host_runtime_snapshots`，不能在
+  summary 层重新解析宿主 wire payload。
+- 修复：新增 Codex adapter 的 `validate_quota_snapshot`，工作台/MCP 读面仅调用该
+  adapter 校验后的快照；保留独立 `data_codex_quota` 读模型，因为配额是当前账户窗口
+  状态，不属于日/月用量桶。未来 Claude 等宿主若有同类证据，应各自在 adapter 产出
+  相同语义的 runtime snapshot，不复制 Codex 字段规则。
+- 验收：Codex adapter 定向测试 **22/22**、Runtime `codex_quota_snapshot` 定向测试
+  **1/1** 通过；本轮没有改动用户已有文档或将配额推断为费用/订阅事实。

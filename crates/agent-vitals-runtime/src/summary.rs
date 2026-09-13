@@ -1376,8 +1376,8 @@ fn apply_host_bills(
 ///
 /// **为什么是独立函数而不是塞进 summary**：plan 是"当前状态"的单快照、不按
 /// 日期分桶（`hosts/codex/sessions/usage.rs` 的 doc），塞进月/日窗口 DTO 会
-/// 把"此刻余量"伪装成窗口数据。返回 `plan_from_rate_limits` 的产物原样、
-/// 不二次加工：`{"plan_type", "has_credits",
+/// 把"此刻余量"伪装成窗口数据。宿主字段由 Codex adapter 解析和校验；这里
+/// 只从权威库读取 adapter 产出的快照，不二次解释：`{"plan_type", "has_credits",
 /// "limits": {"primary": {"used_percent", "window_minutes", "resets_at"}},
 /// "observed_at"}`——**窗口条在 `limits.primary` 之下、不在顶层**（审查 #1：
 /// doc 曾写错为顶层 `primary`，前端与 verify stub 被同一个错误期望误导，
@@ -1390,8 +1390,7 @@ pub fn codex_quota_snapshot(home: &Path) -> Option<serde_json::Value> {
     let db = SqlSummaryRepository::new().open_db()?;
     let (payload, _observed_at_ms) = db.runtime_snapshot_get("codex", "codex_quota").ok()??;
     let plan: serde_json::Value = serde_json::from_str(&payload).ok()?;
-    plan.get("plan_type").and_then(|v| v.as_str())?;
-    Some(plan)
+    agent_vitals_hosts::codex_usage::validate_quota_snapshot(&plan)
 }
 
 /// 宿主 → 该宿主可能出现的 billing_source 提供方。接线知识（与
