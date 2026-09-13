@@ -119,7 +119,10 @@ async function loadStatisticsTimezonePreference() {
     const config = await invoke("statistics_timezone_config");
     if (config && config.status === "ok") {
       const timezone = String(config.timezone || config.system_timezone || "").trim();
-      if (timezone) configuredStatisticsTimezone = timezone;
+      if (timezone) {
+        new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format();
+        configuredStatisticsTimezone = timezone;
+      }
     }
   } catch (e) {
     console.warn("[workbench] 统计时区读取失败，使用系统时区", e);
@@ -406,7 +409,9 @@ async function loadActiveTab() {
   else if (activeTab === "sessions") { if (!sessState.loaded) loadSessions(); }
   // Findings / 数据源同款懒加载（CLI 汇总较重，见 state 注释）。
   else if (activeTab === "findings") { if (!findState.loaded) loadFindings(); }
-  else if (activeTab === "sources") { if (!srcState.loaded) loadSources(); }
+  else if (activeTab === "sources") {
+    await Promise.allSettled([loadSettingsData(), ...(!srcState.loaded ? [loadSources()] : [])]);
+  }
 }
 
 // 聚焦刷新：与弹窗同款 —— 窗口每次重新获得焦点都重拉（hide 不是 close，数据要新鲜）。
@@ -443,7 +448,7 @@ function fmtCur(amount, cur) {
 }
 const PROVIDER_LABEL = {
   anthropic: "Anthropic", minimax: "MiniMax", "zhipu-glm": "智谱 GLM",
-  openai: "OpenAI", "deepseek-official": "DeepSeek 官方", shengsuanyun: "胜算云",
+  openai: "OpenAI", deepseek: "DeepSeek", "deepseek-official": "DeepSeek 官方", shengsuanyun: "胜算云",
   unknown: "未知提供方", unattributed: "未归属",
 };
 // 名义成本 = by_provider 各条目的官方标价折算之和（分币）——FixedSubscription
@@ -504,76 +509,328 @@ function tokensSum(tokensByHost) {
   return { total, hit: denom > 0 ? read / denom : null };
 }
 
-async function renderOverview() {
-  let ov;
-  try {
-    ov = await invoke("read_overview");
-  } catch (e) {
-    document.getElementById("ov-t-nominal").textContent = "读取失败";
-    document.getElementById("ov-note").textContent = errText(e);
+// 跳到设置页某个分区（设置 tab 的内部名仍是 "sources"）。
+function openSettingsSection(sectionId, focusId) {
+  switchTab("sources");
+  const section = document.getElementById(sectionId);
+  if (section && section.scrollIntoView) section.scrollIntoView({ behavior: "smooth", block: "start" });
+  const focus = focusId && document.getElementById(focusId);
+  if (focus && focus.focus) focus.focus();
+}
+
+// 可信度两条状态行（IA 复核 §3.2）：「路由与缺价」和「价格覆盖」是两个轴，
+// 不合成一个百分比。行的颜色只由 data_status.health 派生——此前把 unpriced
+// 算成「100% 可计价」并上绿色强调色，同屏 health=warn 横幅还在说"金额可能为
+// 估算"，专门传达可信的卡在说反话。
+function trustRowLevel(health, hasIssue) {
+  if (health === "critical") return "danger";
+  if (hasIssue || (health && health !== "ok")) return "warn";
+  return "ok";
+}
+// 全 ok → .compact（位置不变，只是不抢视线）。
+function placeTrustRows(allOk) {
+  const ul = document.getElementById("ov-trust-rows");
+  if (ul && ul.classList && typeof ul.classList.toggle === "function") ul.classList.toggle("compact", allOk);
+}
+// 套餐提示当前的可见状态与影响 tokens（renderBillingImportCandidates 写入）——
+// 归属缺口与待确认套餐同源时，⚠ 行不再自带按钮，指向唯一主动作。
+// var 而非 let：verify-workbench-kpi-decide.mjs 在 vm 里从 sandbox 直接改它，
+// 顶层 let 不会挂到 vm 全局上。
+var billingPromptState = { visible: false, pendingTokens: 0 };
+function renderTrustRows(status, monthly) {
+  const route = document.getElementById("ov-trust-route");
+  const price = document.getElementById("ov-trust-price");
+  if (!route || !price) return;
+  const finish = () => placeTrustRows(
+    String(route.className).includes("notice ok") && String(price.className).includes("notice ok"));
+  const setRow = (li, level, text, action) => {
+    li.className = "notice " + level;
+    const textEl = li.querySelector(".notice-text");
+    if (textEl) textEl.textContent = text;
+    const btn = li.querySelector(".notice-actions button");
+    if (!btn) return;
+    btn.hidden = !action;
+    if (action) { btn.textContent = action.label; btn.onclick = action.onClick; }
+  };
+  const toDiagnostics = { label: "查看详情", onClick: () => openSettingsSection("settings-about", "ov-diagnostic-status") };
+  const toPricing = { label: "查看价格表", onClick: () => openSettingsSection("settings-data", "ov-pricing-catalog-status") };
+  price.hidden = false;
+  if (!status || status.status !== "ok") {
+    setRow(route, "danger", "读不到数据状态，无法确认这些数字是否完整", toDiagnostics);
+    price.hidden = true;
+    finish();
     return;
   }
-  syncDot(ov.sync);
-  renderFirstRunState(ov.sync);
-  renderNoRecordsState(ov.sync);
+  const d = status.data || {};
+  const health = d.health || "ok";
+  const unresolved = Math.max(0, Number(d.unresolved_tokens || 0));
+  const unpriced = Math.max(0, Number(d.unpriced_tokens || 0));
+  const total = monthly ? tokensSum(monthly.tokens_by_host).total : null;
+  // 路由与缺价：未定 provider 的 token 让按量金额只能是下界。
+  if (unresolved > 0) {
+    // 同源判定：套餐提示可见且其影响范围盖住了这批 token → 同一件事，一个按钮。
+    const sameSource = billingPromptState.visible && billingPromptState.pendingTokens >= unresolved;
+    setRow(route, trustRowLevel(health, true),
+      "有 " + fmtTokens(unresolved) + " tokens 还不知道是哪家服务商的，按量费用可能少算" +
+        (sameSource ? "——确认下方套餐信息即可解决" : ""),
+      sameSource ? null : toDiagnostics);
+  } else if (health !== "ok") {
+    setRow(route, trustRowLevel(health, false), "数据检查发现问题（" + health + "），数字可能不完整", toDiagnostics);
+  } else {
+    setRow(route, "ok", "所有用量都已归到对应服务商", null);
+  }
+  // 价格覆盖：名义成本能解释多少已观测用量（下钻到价格目录）。
+  const pricingStale = !!(d.pricing && d.pricing.stale);
+  if (total === null) {
+    setRow(price, "warn", "本月用量暂不可读，无法核对价格完整性" +
+      (unpriced > 0 ? "；有 " + fmtTokens(unpriced) + " tokens 缺少价格" : "") +
+      (pricingStale ? "；价格表已过期" : ""), toPricing);
+  } else if (!(total > 0)) {
+    setRow(price, "ok", "本月还没有用量，暂无需核对价格", null);
+  } else if (unpriced > 0) {
+    const missing = Math.max(0, Math.min(1, unpriced / total));
+    setRow(price, trustRowLevel(health, true),
+      "有 " + fmtTokens(unpriced) + " tokens 的模型没有价格，按官方价折算的金额少算了约 " + fmtPct(missing) +
+        (pricingStale ? "；价格表也已过期" : ""),
+      toPricing);
+  } else if (pricingStale) {
+    setRow(price, trustRowLevel(health, true), "所有模型都有价格，但价格表已过期，按官方价折算的金额可能偏旧", toPricing);
+  } else {
+    setRow(price, "ok", "所有模型都有价格，按官方价折算没有漏算", toPricing);
+  }
+  // 两条都 ✓ → 合成一句，用户不需要读两行。
+  const bothOk = String(route.className).includes("notice ok") && String(price.className).includes("notice ok");
+  if (bothOk) {
+    setRow(route, "ok", "数据完整：所有用量都已归到服务商，所有模型都有价格", toPricing);
+    price.hidden = true;
+  }
+  finish();
+}
 
-  // KPI 行/双轨账/决策卡的数据源 = 冻结 Data Query DTO（Stage D）；DSH 高峰
-  // 口径的今日/本月钱已在 by_provider（metered_actual），原 read_overview 的
-  // today/month 字段只服务预算卡的口径标注，不再单独上 KPI。日键用文件头部
-  // 同一份统计时区日规则，不在渲染层内联第二份。
-  const todayKey = statisticsToday();
-  const monthKey = statisticsMonth();
-  let daily = null, monthly = null, cal = null;
-  try {
-    [daily, monthly, cal] = await Promise.all([
-      invoke("data_daily_summary", { date: todayKey }),
-      invoke("data_monthly_summary", { month: monthKey }),
-      invoke("read_calendar_month", { month: monthKey }),
-    ]);
-  } catch (e) {
-    document.getElementById("ov-note").textContent =
-      "跨宿主数据读取失败：" + errText(e);
+// 首行来源状态：「3 个来源正常，1 个需检查」（规格 §4 第 87 行，详细卡在设置→数据源）。
+// 只按 data_source_status 的连接状态计数；未探测到的来源单列为尚未接入。
+function sourcesBrief(report) {
+  const el = document.getElementById("ov-sources-brief");
+  if (!el) return;
+  if (!report || report.status !== "ok" || !Array.isArray(report.sources)) {
+    el.textContent = "来源状态不可用";
+    const a = document.getElementById("ov-sources-brief-action");
+    if (a) a.hidden = true;
+    return;
   }
-  let quality = null;
-  try {
-    quality = await invoke("data_status");
-  } catch (e) {
-    quality = { status: "unavailable", reason: errText(e) };
+  let okCount = 0, check = 0, notDetected = 0;
+  for (const row of report.sources) {
+    switch (row.connection_state) {
+      case "connected": okCount += 1; break;
+      case "needs_attention":
+      case "paused":
+      case "excluded": check += 1; break;
+      case "not_detected": notDetected += 1; break;
+      default: check += 1; break; // 未知状态不能冒充正常。
+    }
   }
-  renderQualityStatus(quality);
-  try {
-    renderBillingImportCandidates(await invoke("billing_import_candidates"));
-  } catch (e) {
-    // 候选核对是增强入口；读取失败不能遮蔽已拿到的名义总览。
-    console.error("billing import candidates unavailable", e);
-    renderBillingImportCandidates({ status: "unavailable", candidates: [] });
+  const action = document.getElementById("ov-sources-brief-action");
+  if (action) {
+    action.hidden = !(check > 0);
+    action.onclick = () => openSettingsSection("settings-sources");
   }
+  if (okCount + check + notDetected === 0) { el.textContent = "尚未连接数据来源"; return; }
+  const parts = [];
+  if (okCount + check > 0) parts.push(okCount + " 个来源正常");
+  if (check) parts.push(check + " 个需检查");
+  if (notDetected) parts.push(notDetected + " 个尚未接入");
+  el.textContent = parts.join("，");
+}
+
+// 卡片入口（第三档 CTA）：导航，不是待办。绑定一次。
+function bindOverviewLinks() {
+  const bind = (id, fn) => {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.bound === "1") return;
+    el.dataset.bound = "1";
+    el.onclick = fn;
+  };
+  const toCalendar = (selectToday) => {
+    calMonth = statisticsMonth();
+    calSelectedDate = selectToday ? statisticsToday() : null;
+    switchTab("calendar");
+  };
+  bind("ov-link-spend", () => {
+    const target = document.getElementById("ov-dual-title");
+    if (target && target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  bind("ov-link-today", () => toCalendar(true));
+  bind("ov-link-usage", () => toCalendar(false));
+  bind("ov-link-days", () => toCalendar(false));
+  bind("ov-link-budget", () => openSettingsSection("settings-budget", "ov-budget-monthly-amount"));
+  bind("ov-link-set-budget", () => openSettingsSection("settings-budget", "ov-budget-monthly-amount"));
+  bind("ov-link-plans", () => openSettingsSection("settings-billing"));
+  bind("ov-link-billing", () => openSettingsSection("settings-billing"));
+}
+
+// B1-M1.1: command/section contract (spec §4). Raw DTOs stay at this boundary;
+// renderers receive validated values or null, with normalized errors kept separately.
+const overviewRecord = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+const overviewNumber = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+const overviewAmounts = (v) => overviewRecord(v) && Object.values(v).every(overviewNumber);
+function overviewSummaryValid(v) {
+  return overviewRecord(v) && overviewRecord(v.tokens_by_host)
+    && Object.values(v.tokens_by_host).every((t) => overviewRecord(t)
+      && ["total", "uncached_input", "cache_read", "cache_write", "output"].every((k) => overviewNumber(t[k])))
+    && overviewRecord(v.by_provider) && overviewRecord(v.by_host)
+    && Object.values(v.by_provider).every((p) => overviewRecord(p) && overviewAmounts(p.amounts_by_basis)
+      && (p.currency === null || typeof p.currency === "string"))
+    && Object.values(v.by_host).every(overviewRecord)
+    && overviewAmounts(v.total_actual_spend) && overviewRecord(v.actual_spend_by_basis)
+    && Object.values(v.actual_spend_by_basis).every(overviewAmounts);
+}
+const overviewList = (key, fields) => (v) => overviewRecord(v) && v.status === "ok" && Array.isArray(v[key])
+  && v[key].every((item) => overviewRecord(item) && fields.every((field) => typeof item[field] === "string"));
+const OVERVIEW_REQUESTS = Object.freeze([
+  { key: "overview", command: "read_overview", sections: ["sync", "budget", "fx"],
+    valid: (v) => overviewRecord(v) && overviewRecord(v.sync) && typeof v.sync.ok === "boolean"
+      && typeof v.sync.at === "string" },
+  { key: "monthly", command: "data_monthly_summary", sections: ["spend", "usage", "breakdown", "decide"],
+    args: (w) => ({ month: w.month }), valid: overviewSummaryValid },
+  { key: "daily", command: "data_daily_summary", sections: ["today"],
+    args: (w) => ({ date: w.date }), valid: overviewSummaryValid },
+  { key: "calendar", command: "read_calendar_month", sections: ["recent-days"],
+    args: (w) => ({ month: w.month }), valid: (v) => overviewRecord(v) && overviewRecord(v.days)
+      && Object.entries(v.days).every(([date, d]) => /^\d{4}-\d{2}-\d{2}$/.test(date) && date.startsWith(v.month + "-")
+        && overviewRecord(d) && overviewNumber(d.total_tokens)
+        && ["dsh_cost_cny", "claude_cost_cny", "claude_cost_usd", "codex_cost_usd"].every((k) => d[k] == null || overviewNumber(d[k]))) },
+  { key: "sources", command: "data_source_status", sections: ["sources"], valid: overviewList("sources", ["host", "connection_state"]) },
+  { key: "quality", command: "data_status", sections: ["trust"],
+    valid: (v) => overviewRecord(v) && v.status === "ok" && overviewRecord(v.data)
+      && typeof v.data.health === "string" && overviewNumber(v.data.unresolved_tokens)
+      && overviewNumber(v.data.unpriced_tokens) && overviewRecord(v.data.pricing)
+      && typeof v.data.pricing.stale === "boolean" },
+  { key: "quota", command: "data_codex_quota", sections: ["decide"],
+    valid: (v) => v === null || (overviewRecord(v) && typeof v.plan_type === "string"
+      && (v.limits == null || (overviewRecord(v.limits) && Object.values(v.limits).every((w) => overviewRecord(w)
+        && (w.used_percent == null || overviewNumber(w.used_percent))
+        && (w.resets_at == null || overviewNumber(w.resets_at)))))
+      && typeof v.observed_at === "string") },
+  { key: "candidates", command: "billing_import_candidates", sections: ["billing"], valid: (v) => overviewList("candidates", ["candidate_id", "host", "provider_id", "status", "currency", "billing_period_start"])(v)
+      && v.candidates.every((c) => overviewNumber(c.amount_minor) && (c.impact == null ||
+        (overviewRecord(c.impact) && (c.impact.status !== "ok" ||
+          ["total_tokens", "fact_count", "session_count"].every((k) => overviewNumber(c.impact[k])))))) },
+  { key: "declarations", command: "billing_declarations", sections: ["billing"], valid: overviewList("declarations", ["declaration_id", "host", "provider_id", "relationship_kind", "effective_start", "current_revision_id"]) },
+  { key: "jobs", command: "billing_recalculation_jobs", sections: ["billing"], valid: overviewList("jobs", ["job_id", "status"]) },
+]);
+
+async function loadOverviewData() {
+  await loadStatisticsTimezonePreference();
+  // Capture once, including if midnight occurs while independent IPC calls settle.
+  const date = statisticsToday();
+  const window = { date, month: date.slice(0, 7) };
+  const results = await Promise.allSettled(OVERVIEW_REQUESTS.map(async (request) => {
+    const value = await invoke(request.command, request.args ? request.args(window) : undefined);
+    if (value && value.status === "unavailable") {
+      throw { code: value.code || "source-unavailable", message: value.reason || "数据源不可用", recovery_action: value.recovery_action };
+    }
+    const matchesWindow = request.key === "daily" ? value && value.date === window.date
+      : ["monthly", "calendar"].includes(request.key) ? value && value.month === window.month : true;
+    if (!matchesWindow || !request.valid(value)) throw { code: "schema-mismatch", message: request.command + " DTO 不兼容" };
+    return value;
+  }));
+  const data = {}, errors = {};
+  results.forEach((result, index) => {
+    const key = OVERVIEW_REQUESTS[index].key;
+    data[key] = result.status === "fulfilled" ? result.value : null;
+    if (result.status === "rejected") {
+      errors[key] = normErr(result.reason);
+      const action = result.reason && result.reason.recovery_action;
+      if (overviewRecord(action) && typeof action.kind === "string") errors[key].recovery_action = action;
+    }
+  });
+  return { window, data, errors };
+}
+
+// Settings-only reads start when the Settings (sources) tab is entered.
+// 已有账单：只读展示（规格 §4.2、§7 D3）。录入表单与 CSV 导入是 Beta 延期
+// 能力，DOM 保留但不显示；这里不再调用 renderHostBills（它绑定的是隐藏表单）。
+// 左栏导航高亮：滚动到哪个分区，对应导航项加 .current（规格 §3.1）。锚点跳转
+// 本身用原生 <a href="#id">，这里只负责高亮，不拦截点击。
+let settingsNavBound = false;
+function bindSettingsNav() {
+  if (settingsNavBound) return;
+  // document.querySelector 在真实浏览器里总有；guard 只是为了不让这个纯装饰性的
+  // 高亮功能在缺 DOM API 的宿主（测试沙箱、未来非浏览器渲染）里把整个
+  // loadSettingsData() 拖下水——同步抛出会让上面六个设置读取一个都不跑
+  // （Promise.allSettled 接的是 loadSettingsData() 这一个 promise，不是内部
+  // 每条 invoke，函数体前段抛出会让整个 await 链路提前失败）。
+  if (typeof document.querySelector !== "function") return;
+  const nav = document.querySelector(".settings-nav");
+  const sections = document.querySelectorAll(".settings-section[id]");
+  if (!nav || !sections.length || typeof IntersectionObserver !== "function") return;
+  settingsNavBound = true;
+  const linkFor = (id) => nav.querySelector('a[href="#' + id + '"]');
+  const setCurrent = (id) => {
+    nav.querySelectorAll("a").forEach((a) => a.classList.remove("current"));
+    const link = linkFor(id);
+    if (link) link.classList.add("current");
+  };
+  if (sections[0]) setCurrent(sections[0].id);
+  const observer = new IntersectionObserver((entries) => {
+    const visible = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+    if (visible[0]) setCurrent(visible[0].target.id);
+  }, { rootMargin: "-10% 0px -70% 0px" });
+  sections.forEach((section) => observer.observe(section));
+}
+
+async function renderBillsReadOnly(period) {
+  const section = document.getElementById("settings-bills");
+  const list = document.getElementById("settings-bills-list");
+  if (!section || !list) return;
   try {
-    renderBillingDeclarations(await invoke("billing_declarations"));
-  } catch (e) {
-    renderBillingDeclarations({ status: "unavailable", declarations: [] });
-  }
-  try {
-    renderBillingRecalculationJobs(await invoke("billing_recalculation_jobs"));
-  } catch (e) {
-    renderBillingRecalculationJobs({ status: "unavailable", jobs: [] });
-  }
-  await renderHostBills(monthKey);
-  await renderRetentionSettings();
-  await renderStatisticsTimezoneSettings();
-  await renderPricingCatalogSettings();
+    const report = await invoke("host_bills_for_period", { billingPeriod: period });
+    const bills = report && report.status === "ok" ? (report.bills || []) : [];
+    section.hidden = !bills.length;
+    list.textContent = "";
+    for (const bill of bills) {
+      const row = document.createElement("div");
+      row.className = "billing-review-row";
+      row.textContent = (HOST_DISPLAY[bill.host] || bill.host) + " · " + bill.provider_id + " · " +
+        (bill.billing_basis || "") + " · " + fmtCur(Number(bill.amount_minor || 0) / 100, bill.currency);
+      list.appendChild(row);
+    }
+  } catch (_) { section.hidden = true; }
+}
+
+async function loadSettingsData() {
+  bindSettingsNav();
   bindDiagnosticExport();
   bindUpdateCheck();
   bindTrustedReleasesPage();
-  await renderAboutDiagnostics();
-  await renderBudgetSettings();
-  renderMonthVerdict(monthly);
+  await Promise.allSettled([
+    renderBillsReadOnly(statisticsMonth()), renderRetentionSettings(),
+    renderStatisticsTimezoneSettings(), renderPricingCatalogSettings(),
+    renderAboutDiagnostics(), renderBudgetSettings(),
+  ]);
+}
+
+async function renderOverview() {
+  bindOverviewLinks();
+  const { data, errors, window: overviewWindow } = await loadOverviewData();
+  const { daily, monthly, calendar: cal, overview: ov } = data;
+  const unavailable = (key) => ({ status: "unavailable", ...errors[key], reason: errText(errors[key]) });
+  const quality = data.quality || unavailable("quality");
+  renderQualityStatus(quality);
+  sourcesBrief(data.sources);
+  renderBillingImportCandidates(data.candidates || unavailable("candidates"));
+  renderTrustRows(quality, monthly);
+  renderBillingDeclarations(data.declarations || unavailable("declarations"));
+  renderBillingRecalculationJobs(data.jobs || unavailable("jobs"));
   renderOverviewDays(cal);
-  renderKpiRow("t", daily, ov.fx);
-  renderKpiRow("m", monthly, ov.fx);
+  renderSpendCards(daily, monthly, ov && ov.fx, overviewWindow);
   bindSummaryExport(monthly);
   renderDualTrack(monthly);
-  renderDecideCard(monthly);
+  renderDecideCard(monthly, data.quota);
+  const overview = ov || { sync: { ok: false, stage: "unavailable", message: "暂无法读取同步状态" } };
+  syncDot(overview.sync);
+  renderFirstRunState(overview.sync);
+  renderNoRecordsState(overview.sync, data.sources);
 
   // 预算 —— 读后端权威（level/ratio/snooze/reasons），不重算百分比。口径 =
   // 跨宿主「按量实付」CNY（PM 决策 2026-09-07）。`source` 两态都是权威：
@@ -581,12 +838,26 @@ async function renderOverview() {
   // 权威库**实时算**（无快照时刻 → generated_at null，结构上不会过期，新鲜度
   // 归下方「上次同步」行）。Phase 4.3 托盘已切 "sql"，工作台这里此前漏改，
   // 一直落进「等预算数据」兜底（screenshot 事故）。"missing" 才是真降级。
-  const b = ov.budget || { source: "missing" };
+  const b = overview.budget || { source: "missing" };
+  const budgetValid = overviewRecord(b) && ["sql", "alert"].includes(b.source)
+    && ["no_budget", "ok", "warn", "over", "snoozed", "disabled"].includes(b.level) && (b.level === "no_budget" ||
+      (overviewNumber(b.monthly_cny) && b.monthly_cny > 0 && overviewNumber(b.month_cost) && overviewNumber(b.month_ratio)))
+    && (b.effective_daily_budget == null || overviewNumber(b.effective_daily_budget))
+    && (b.reasons == null || (Array.isArray(b.reasons) && b.reasons.every((r) => typeof r === "string")));
   const budgetLive = b.source === "sql"; // 实时算：无 generated_at 不代表「没产出」
   const fill = document.getElementById("ov-budget-fill");
   const budgetSub = document.getElementById("ov-budget-sub");
   const budgetAmt = document.getElementById("ov-budget-amount");
-  const denom = b.monthly_cny || ov.budget_monthly_cny || 0;
+  const budgetCard = document.getElementById("ov-budget-card");
+  budgetSub.title = "";
+  const denom = b.monthly_cny;
+  // 规格 §4 第 80 行：预算「仅配置后出现摘要卡；未配置不显示 0%」。可见性由
+  // 这里决定（仅 no_budget 隐藏；不可读显示降级说明），不得再用 CSS 无条件藏卡
+  // ——那样 JS 写了读数、用户却看不到，且 vm 测试对 display:none 免疫。
+  const budgetConfigured = (b.source === "alert" || b.source === "sql") && b.level && b.level !== "no_budget";
+  if (budgetCard) budgetCard.hidden = budgetValid && b.level === "no_budget";
+  const setBudgetLink = document.getElementById("ov-link-set-budget");
+  if (setBudgetLink) setBudgetLink.hidden = budgetConfigured;
   // 新鲜度先算好——预算卡片自己也要用，不能只靠页面最下面那行 note。真实事故
   // （2026-09-01）：alert.json 停在 8 月最后一次 oneline（两天前），总览把它的
   // 292% 超支当"本月"现状展示，旁边的"本月"卡片同一时刻已经因为按当月过滤
@@ -595,64 +866,65 @@ async function renderOverview() {
   // 判据）保持一致，不新发明一套。
   let stale = false;
   let freshHHMM = "";
-  if (b.generated_at) {
+  if (budgetValid && b.generated_at && Number.isFinite(Date.parse(b.generated_at))) {
     const t = new Date(b.generated_at);
     freshHHMM = formatStatisticsDateTime(t, { hour: "2-digit", minute: "2-digit", hour12: false });
     stale = Date.now() - t.getTime() > 5 * 60 * 1000;
   }
-  if ((b.source !== "alert" && b.source !== "sql") || !b.level) {
+  if (!budgetValid || (b.source !== "alert" && b.source !== "sql") || !b.level) {
     fill.style.width = "0%";
     fill.className = "fill";
     budgetAmt.textContent = "—";
-    budgetSub.textContent = "等预算数据（跑一次 oneline）";
+    budgetSub.textContent = "预算状态暂不可读，请刷新重试";
   } else if (b.level === "no_budget") {
     fill.style.width = "0%";
     fill.className = "fill";
     budgetAmt.textContent = "—";
     budgetSub.textContent = "尚未设置预算 · 成本统计不受影响";
   } else {
-    const ratio = Math.min(1, b.month_ratio ?? b.ratio ?? 0);
+    const ratio = Math.min(1, b.month_ratio);
     const daily =
       b.effective_daily_budget != null ? " · 日预算 " + fmtMoney(b.effective_daily_budget) : "";
     fill.style.width = fmtPct(ratio);
     const levelCls =
       b.level === "over" ? " danger" : b.level === "warn" ? " warn" : "";
     fill.className = "fill" + levelCls;
-    budgetAmt.textContent = fmtPct(b.month_ratio ?? 0);
+    // 大字 = 已用 / 预算（钱），副行 = 百分比 + 日预算 + 剩余天数；不把 68% 说两遍。
+    budgetAmt.textContent = fmtMoney(b.month_cost) + " / " + fmtMoney(denom);
+    const todayKeyB = overviewWindow.date;
+    const daysInMonth = new Date(Number(todayKeyB.slice(0, 4)), Number(todayKeyB.slice(5, 7)), 0).getDate();
+    const daysLeft = Math.max(0, daysInMonth - Number(todayKeyB.slice(8)));
+    const tail = daily + " · 本月剩 " + daysLeft + " 天";
     if (b.level === "over") {
-      budgetSub.textContent =
-        "超支 " + fmtMoney(b.month_cost || 0) + "（月 " + fmtMoney(denom) + "）" + daily;
+      budgetSub.textContent = "已超预算 " + fmtMoney(Math.max(0, (b.month_cost) - denom)) + tail;
     } else if (b.level === "snoozed") {
-      budgetSub.textContent =
-        "已静默" + (b.snoozed_until ? "至 " + b.snoozed_until : "") + daily;
+      budgetSub.textContent = "提醒已静默" + (b.snoozed_until ? "至 " + b.snoozed_until : "") + tail;
     } else if (b.level === "disabled") {
-      budgetSub.textContent = "预算已禁用" + daily;
+      budgetSub.textContent = "预算提醒已关闭" + tail;
     } else {
-      budgetSub.textContent =
-        "已用 " + fmtPct(b.month_ratio ?? 0) + "（" + fmtMoney(b.month_cost || 0) +
-        " / " + fmtMoney(denom) + "）" + daily;
+      budgetSub.textContent = "已用 " + fmtPct(b.month_ratio) + tail;
     }
     // 过期时把警告直接贴在数字旁边，不指望用户往下翻到页尾的 note 才看到——
     // 这条数字本身可能是几天前的旧账（比如日历月翻了页但当天还没有新会话
     // 触发过重新评估），过期提示必须跟数字长在一起。
     if (stale) {
-      budgetSub.textContent = "⚠ 数据截至 " + freshHHMM + "（可能是上一次评估，非本月最新）· " + budgetSub.textContent;
+      budgetSub.textContent = "⚠ 数据截至 " + freshHHMM + "，可能不是最新 · " + budgetSub.textContent;
     }
     budgetSub.title = (b.reasons || []).join("\n");
   }
 
   // 新鲜度 + 同步状态 + 立即同步（与弹窗同一套 poll-at-change 回路）。
   let freshness = "";
-  if (b.generated_at) {
-    freshness = (stale ? "⚠ 数据过期（更新于 " : "数据更新于 ") + freshHHMM + "）";
+  if (budgetValid && b.generated_at && Number.isFinite(Date.parse(b.generated_at))) {
+    freshness = stale ? "⚠ 数据过期（更新于 " + freshHHMM + "）" : "数据更新于 " + freshHHMM;
   } else if (budgetLive) {
     // 实时算无快照时刻——新鲜度由下方「上次同步」行统一承载（facts 同步是
     // 另一条回路），这里不说「尚未产出」（会误读成坏了）。
-    freshness = "预算实时算（跨宿主按量）";
+    freshness = "预算按最新数据实时计算";
   } else {
-    freshness = "预算数据尚未产出";
+    freshness = "预算数据尚未生成";
   }
-  const sync = ov.sync || { ok: false, stage: "never", message: "尚未同步" };
+  const sync = overview.sync || { ok: false, stage: "never", message: "尚未同步" };
   const syncStatus = document.getElementById("ov-sync-status");
   const syncNow = document.getElementById("ov-sync-now");
   if (sync.stage === "paused") {
@@ -660,8 +932,9 @@ async function renderOverview() {
     syncStatus.title = sync.message || "恢复前不会读取新的本地日志";
     syncNow.hidden = true;
   } else if (sync.ok) {
-    syncStatus.textContent =
-      "上次同步：成功" + (sync.at ? " " + sync.at.slice(11, 16) : "");
+    // sync.at 形状出处：overview.rs SyncStatus::ok → local_timestamp_text
+    // "YYYY-MM-DD HH:MM:SS"（统计时区本地时间），slice(11,16) 即本地 HH:MM。
+    syncStatus.textContent = sync.at ? "已更新 " + sync.at.slice(11, 16) : "已同步";
     syncStatus.title = sync.message + (sync.at ? "（" + sync.at + "）" : "");
     syncNow.hidden = true;
   } else if (sync.stage === "never") {
@@ -673,6 +946,17 @@ async function renderOverview() {
     syncNow.hidden = false;
   }
   syncNow.disabled = false;
+  bindOverviewSync(sync, syncNow, syncStatus);
+
+  // 数据根简写放设置→关于（规格 §4 第 95 行），不再经 note 漏回首屏。
+  document.getElementById("ov-note").textContent = freshness + " · " + (overview.estimate_note || "");
+
+  // 「数据源」面板已并入费用明细（renderDualTrack 每行带 by_host 新鲜度）；
+  // 详细数据源卡在设置→数据源。
+}
+
+// Keep the existing 10 × 1s manual-sync poll and event-bridge suppression.
+function bindOverviewSync(sync, syncNow, syncStatus) {
   syncNow.onclick = async () => {
     syncNow.disabled = true;
     syncStatus.textContent = "同步中…";
@@ -699,49 +983,6 @@ async function renderOverview() {
       manualSyncPolling = false;
     }
   };
-
-  // 本月逐日
-  const list = document.getElementById("ov-days-list");
-  const empty = document.getElementById("ov-days-empty");
-  list.innerHTML = "";
-  if (ov.days && ov.days.length > 0) {
-    empty.hidden = true;
-    for (const d of ov.days) {
-      const li = document.createElement("li");
-      const name = document.createElement("span");
-      name.className = "day";
-      name.textContent = d.date;
-      li.appendChild(name);
-      if (d.basis === "partial") {
-        const tag = document.createElement("span");
-        tag.className = "tag";
-        tag.title = "该日 by_model 未覆盖全部 token，按 fallback 价补齐（覆盖率 " + fmtPct(d.coverage || 0) + "）";
-        tag.textContent = "部分覆盖";
-        li.appendChild(tag);
-      }
-      const amt = document.createElement("span");
-      amt.className = "amt";
-      amt.textContent = fmtMoney(d.total);
-      li.appendChild(amt);
-      list.appendChild(li);
-    }
-  } else {
-    empty.hidden = false;
-  }
-
-  document.getElementById("ov-note").textContent =
-    freshness + " · " + ov.estimate_note + " · " + ov.data_home;
-  document.getElementById("wb-foot").textContent = ov.data_home + " · " + ov.estimate_note;
-
-  // 数据源 panel（v0.9 Stage 0.6 总览页）：复用头部拉的同一份 monthly DTO
-  // （data_monthly_summary 每次 invoke 都要全量 fold 60 份 codex rollout，
-  // 同一次渲染里拉两遍是可感知的卡顿）。失败 → panel 写「读取失败」并保留
-  // 其他 panel（invoke 失败不拖垮整页）。
-  if (monthly) {
-    renderSourcesPanel(monthly, "ov-sources");
-  } else {
-    renderSourcesPanelFailure("跨宿主数据读取失败", "ov-sources");
-  }
 }
 
 function bindDiagnosticExport() {
@@ -804,22 +1045,33 @@ function bindUpdateCheck() {
 async function renderAboutDiagnostics() {
   const target = document.getElementById("ov-about-versions");
   if (!target || target.dataset.loaded === "1") return;
+  // 常显版本表（规格 §4.5、B11）：App/CLI/数据库 schema/价格目录四行，不折叠。
+  const row = (dt, dd) => {
+    const t = document.createElement("dt"); t.textContent = dt;
+    const d = document.createElement("dd"); d.textContent = dd;
+    return [t, d];
+  };
   try {
     const d = await invoke("about_diagnostics");
     const pricing = d && d.pricing
       ? (d.pricing.version + " · 捕获于 " + formatStatisticsDateTime(d.pricing.captured_at_ms))
       : "暂无价格快照";
     const sync = d && d.sync ? ((d.sync.ok ? "正常" : "需检查") + " · " + (d.sync.message || "")) : "暂无同步回执";
-    target.textContent = "App " + (d.app_version || "—")
-      + " · CLI " + (d.cli_version || "未找到")
-      + " · Engine " + (d.engine_version || "—")
-      + " · 架构 " + (d.architecture || "—")
-      + " · Authority schema " + (d.authority_schema || "—")
-      + " · 统计时区 " + (d.statistics_timezone || "—")
-      + " · 价格 " + pricing + " · 同步 " + sync;
+    target.textContent = "";
+    target.append(
+      ...row("App", d.app_version || "—"),
+      ...row("CLI", d.cli_version || "未找到"),
+      ...row("Engine", d.engine_version || "—"),
+      ...row("架构", d.architecture || "—"),
+      ...row("Authority schema", d.authority_schema || "—"),
+      ...row("统计时区", d.statistics_timezone || "—"),
+      ...row("价格目录", pricing),
+      ...row("同步", sync),
+    );
     target.dataset.loaded = "1";
   } catch (e) {
-    target.textContent = "版本诊断读取失败：" + errText(e);
+    target.textContent = "";
+    target.append(...row("状态", "版本诊断读取失败：" + errText(e)));
   }
 }
 
@@ -845,7 +1097,7 @@ function renderFirstRunState(sync) {
   };
 }
 
-async function renderNoRecordsState(sync) {
+function renderNoRecordsState(sync, report) {
   const panel = document.getElementById("ov-no-records");
   const sourcesButton = document.getElementById("ov-no-records-sources");
   const sampleButton = document.getElementById("ov-no-records-sample");
@@ -853,20 +1105,14 @@ async function renderNoRecordsState(sync) {
   if (!panel || !sourcesButton || !sampleButton || !sample) return;
   panel.hidden = true;
   if (!sync || !sync.ok || sync.stage === "never" || sync.stage === "paused") return;
-  try {
-    const report = await invoke("data_source_status");
-    if (!report || report.status !== "ok") return;
-    const sources = Array.isArray(report.sources) ? report.sources : [];
-    const hasRecords = sources.some((source) => {
-      const scan = source.scan || {};
-      const imported = source.import_scope || {};
-      return Number(scan.source_count || 0) > 0 || Number(imported.sessions || 0) > 0;
-    });
-    panel.hidden = hasRecords;
-  } catch (_) {
-    // 数据源状态读失败不是“无记录”证据，保持隐藏而非制造空态。
-    return;
-  }
+  // Failed source reads are not evidence of an empty database.
+  if (!report || report.status !== "ok") return;
+  const sources = report.sources;
+  panel.hidden = sources.some((source) => {
+    const scan = source.scan || {};
+    const imported = source.import_scope || {};
+    return Number(scan.source_count || 0) > 0 || Number(imported.sessions || 0) > 0;
+  });
   if (sourcesButton.dataset.bound === "1") return;
   sourcesButton.dataset.bound = "1";
   sourcesButton.onclick = () => switchTab("sources");
@@ -884,6 +1130,7 @@ function renderQualityStatus(status) {
   if (!banner) return;
   banner.hidden = true;
   banner.textContent = "";
+  banner.className = "notice danger";
   if (!status || status.status !== "ok") {
     banner.hidden = false;
     const code = status && status.code;
@@ -933,21 +1180,13 @@ function renderQualityStatus(status) {
     }
     return;
   }
+  // 路由/缺价/价格快照的 warn 级信息由两条可信度状态行承载（renderTrustRows），
+  // 不再在这里重复成横幅——同一事实说两遍是 IA 复核抓到的问题。横幅只留
+  // critical：权威库 integrity 失败，恢复 = rm + data-migrate，必须最显眼。
   const d = status.data || {};
-  const parts = [];
-  if (d.pricing && d.pricing.stale) parts.push("价格快照过期或缺失");
-  if (Number(d.unresolved_tokens || 0) > 0) {
-    parts.push("未确定 provider " + fmtTokens(d.unresolved_tokens) + " tokens");
-  }
-  if (Number(d.unpriced_tokens || 0) > 0) {
-    parts.push("未计价 " + fmtTokens(d.unpriced_tokens) + " tokens");
-  }
-  if (d.health === "critical") {
-    parts.unshift("权威数据健康状态 critical");
-  }
-  if (!parts.length) return;
+  if (d.health !== "critical") return;
   banner.hidden = false;
-  banner.textContent = "⚠ " + parts.join(" · ") + "。金额可能为估算/部分覆盖，请查看数据状态。";
+  banner.textContent = "⚠ 权威数据健康状态 critical：金额与用量可能不完整，请到设置→关于与诊断查看恢复选项。";
 }
 
 function billingCandidateAmount(candidate) {
@@ -995,46 +1234,81 @@ let billingDeclarationState = null;
 let billingReviewOpen = false;
 
 async function renderBudgetSettings() {
-  const monthly = document.getElementById("ov-budget-monthly-input");
-  const daily = document.getElementById("ov-budget-daily-input");
-  const warning = document.getElementById("ov-budget-warning-input");
-  const origin = document.getElementById("ov-budget-origin");
+  const currencySelect = document.getElementById("ov-budget-currency");
+  const monthly = document.getElementById("ov-budget-monthly-amount");
+  const daily = document.getElementById("ov-budget-daily-amount");
   const save = document.getElementById("ov-budget-save");
+  const status = document.getElementById("ov-budget-settings-status");
+  const legacy = document.getElementById("ov-budget-legacy");
+  const legacyText = document.getElementById("ov-budget-legacy-text");
+  const live = document.getElementById("ov-budget-live");
+  const snoozeText = document.getElementById("ov-budget-snooze-text");
   const snoozeDay = document.getElementById("ov-budget-snooze-day");
   const snoozeClear = document.getElementById("ov-budget-snooze-clear");
-  const status = document.getElementById("ov-budget-settings-status");
-  if (!monthly || !daily || !warning || !origin || !save || !snoozeDay || !snoozeClear || !status) return;
+  const confirmedBox = document.getElementById("ov-budget-confirmed");
+  const confirmedText = document.getElementById("ov-budget-confirmed-text");
+  if (!currencySelect || !monthly || !daily || !save || !status || !legacy || !live ||
+      !snoozeDay || !snoozeClear || !confirmedBox) return;
+
+  const updateSymbols = () => {
+    const symbol = currencySelect.value === "USD" ? "$" : "¥";
+    document.querySelectorAll(".ov-budget-symbol").forEach((el) => { el.textContent = symbol; });
+  };
+  currencySelect.onchange = updateSymbols;
+
+  let estimateProfile = null;
   try {
-    const config = await invoke("budget_config");
-    if (config.status === "ok") {
-      monthly.value = config.monthly_cny_minor;
-      daily.value = config.daily_cny_minor;
-      warning.value = Number(config.warning_ratio_bp) / 100;
-      origin.hidden = false;
-      origin.textContent = config.origin === "legacy_import"
-        ? "此预算从旧版本导入；你可以直接修改。"
-        : config.origin === "user" ? "此预算由你在本版本设置。"
-        : "此预算来源未记录；数值仍可直接修改。";
-    } else if (config.status === "missing") {
-      monthly.value = "";
-      daily.value = "";
-      warning.value = 80;
-      origin.hidden = true;
+    const [config, profileStatus, ov] = await Promise.all([
+      invoke("budget_config"),
+      invoke("budget_profiles_status", { month: statisticsMonth() }),
+      invoke("read_overview").catch(() => null),
+    ]);
+    // 旧版 config.toml/兼容表预算：只读提示，不再提供编辑入口（规格 §4.3.3）；
+    // 保存下面的表单后以新预算（estimate profile）为准，不自动转换口径。
+    if (config && config.status === "ok" && config.origin === "legacy_import") {
+      legacy.hidden = false;
+      legacyText.textContent = "检测到旧版预算 " + fmtMoney(Number(config.monthly_cny_minor || 0) / 100) +
+        "/月。它仍在生效；保存下面的预算后将以新预算为准。";
+    } else {
+      legacy.hidden = true;
     }
-  } catch (_) { /* 配置读取失败不遮蔽总览 */ }
-  renderBudgetProfiles();
+    const profiles = profileStatus && profileStatus.status === "ok" ? (profileStatus.profiles || []) : [];
+    estimateProfile = profiles.find((p) => p.profile_id === "estimate") || null;
+    if (estimateProfile) {
+      currencySelect.value = estimateProfile.currency || "CNY";
+      monthly.value = estimateProfile.monthly_minor != null ? (Number(estimateProfile.monthly_minor) / 100).toFixed(2) : "";
+      daily.value = estimateProfile.daily_minor != null ? (Number(estimateProfile.daily_minor) / 100).toFixed(2) : "";
+    }
+    updateSymbols();
+    live.hidden = !(estimateProfile && estimateProfile.level);
+    if (estimateProfile && estimateProfile.level) live.textContent = budgetProfileStatusText(estimateProfile);
+    const confirmedProfile = profiles.find((p) => p.profile_id === "confirmed" && p.monthly_minor != null);
+    confirmedBox.hidden = !confirmedProfile;
+    if (confirmedProfile && confirmedText) confirmedText.textContent = budgetProfileStatusText(confirmedProfile);
+    // 静默状态目前只挂在旧 alert 链路（`read_overview().budget.snoozed_until`）；
+    // 一个静默同时压住 profile 通知和旧版通知（budget_alerts.rs 的读取顺序）。
+    const snoozedUntil = ov && ov.budget && ov.budget.snoozed_until;
+    const snoozedActive = !!snoozedUntil && Date.parse(snoozedUntil) > Date.now();
+    snoozeDay.hidden = snoozedActive;
+    snoozeClear.hidden = !snoozedActive;
+    snoozeText.textContent = snoozedActive
+      ? "本周期提醒已静默至 " + formatStatisticsDateTime(new Date(snoozedUntil), { month: "2-digit", day: "2-digit" }) + "。"
+      : "";
+  } catch (_) { /* 预算读取失败不遮蔽总览；表单保持空态可直接填写 */ }
+
   if (save.dataset.bound === "1") return;
   save.dataset.bound = "1";
   const refreshAfterBudgetAction = async (message) => {
     status.hidden = false;
     status.textContent = message;
+    await renderBudgetSettings();
     await renderOverview();
   };
   snoozeDay.onclick = async () => {
     snoozeDay.disabled = true;
     try {
       await invoke("snooze_budget_current_period");
-      await refreshAfterBudgetAction("预算提醒已静默至本周期结束；用量与成本统计仍会继续更新。");
+      await refreshAfterBudgetAction("提醒已静默至本周期结束；用量与成本统计仍会继续更新。");
     } catch (e) {
       status.hidden = false;
       status.textContent = "静默失败：" + errText(e);
@@ -1046,7 +1320,7 @@ async function renderBudgetSettings() {
     snoozeClear.disabled = true;
     try {
       await invoke("clear_budget_snooze");
-      await refreshAfterBudgetAction("预算提醒已恢复。");
+      await refreshAfterBudgetAction("提醒已恢复。");
     } catch (e) {
       status.hidden = false;
       status.textContent = "恢复失败：" + errText(e);
@@ -1055,28 +1329,23 @@ async function renderBudgetSettings() {
     }
   };
   save.onclick = async () => {
-    const monthlyText = monthly.value.trim();
+    const m = Math.round(Number(monthly.value) * 100);
     const dailyText = daily.value.trim();
-    const monthlyMinor = Number(monthlyText);
-    const dailyMinor = Number(dailyText);
-    const warningPercent = Number(warning.value);
+    const d = dailyText === "" ? null : Math.round(Number(dailyText) * 100);
     status.hidden = false;
-    if (!monthlyText || !dailyText || !Number.isSafeInteger(monthlyMinor) || monthlyMinor < 0 ||
-        !Number.isSafeInteger(dailyMinor) || dailyMinor < 0 ||
-        !Number.isFinite(warningPercent) || warningPercent < 0 || warningPercent > 100) {
-      status.textContent = "请填写非负整数金额，以及 0–100 之间的预警百分比。";
+    if (!Number.isSafeInteger(m) || m <= 0 || (d !== null && (!Number.isSafeInteger(d) || d <= 0))) {
+      status.textContent = "请填写正数月预算；日预算可留空。";
       return;
     }
     save.disabled = true;
     try {
-      const saved = await invoke("save_budget_config", { input: {
-        monthly_cny_minor: monthlyMinor,
-        daily_cny_minor: dailyMinor,
-        warning_ratio_bp: Math.round(warningPercent * 100),
+      const saved = await invoke("save_budget_profile", { input: {
+        profile_id: "estimate", currency: currencySelect.value, monthly_minor: m,
+        daily_minor: d, warning_ratio_bp: 8000,
       } });
       const permission = saved && saved.notification_permission;
-      status.textContent = "预算已保存，提醒不会阻止 Agent 继续使用。" +
-        (permission && permission !== "Granted" ? "系统通知权限状态：" + permission + "。" : "");
+      status.textContent = "已保存 " + formatStatisticsDateTime(new Date(), { hour: "2-digit", minute: "2-digit" }) + "。" +
+        (permission && permission !== "Granted" ? "系统通知未授权，可在系统设置中开启。" : "");
       await renderOverview();
     } catch (e) {
       status.textContent = "保存失败：" + errText(e);
@@ -1086,76 +1355,6 @@ async function renderBudgetSettings() {
   };
 }
 
-async function renderBudgetProfiles() {
-  const host = document.getElementById("ov-budget-profiles");
-  if (!host) return;
-  const status = document.getElementById("ov-budget-settings-status");
-  if (!status) return;
-  host.textContent = "";
-  let profiles = [];
-  try {
-    const result = await invoke("budget_profiles_status", { month: statisticsMonth() });
-    profiles = result && result.status === "ok" ? (result.profiles || []) : [];
-  } catch (_) { /* 旧库/空库仍可使用兼容预算表单 */ }
-  for (const id of ["estimate", "confirmed"]) {
-    const profile = profiles.find((p) => p.profile_id === id) || {};
-    const row = document.createElement("div");
-    row.className = "billing-form profile-form";
-    const title = document.createElement("div");
-    title.className = "muted";
-    title.textContent = id === "estimate" ? "按量估算观察预算" : "已确认按量支出预算";
-    const live = document.createElement("div");
-    live.className = "muted";
-    live.textContent = budgetProfileStatusText(profile);
-    const currency = document.createElement("select");
-    currency.innerHTML = '<option value="CNY">CNY</option><option value="USD">USD</option>';
-    currency.value = profile.currency || "CNY";
-    const profileLabel = id === "estimate" ? "按量估算观察预算" : "已确认按量支出预算";
-    currency.setAttribute("aria-label", profileLabel + "币种");
-    const monthly = document.createElement("input");
-    monthly.type = "number"; monthly.min = "1"; monthly.step = "1";
-    monthly.placeholder = "月预算（最小货币单位）";
-    monthly.setAttribute("aria-label", profileLabel + "月预算（最小货币单位）");
-    monthly.value = profile.monthly_minor ?? "";
-    const daily = document.createElement("input");
-    daily.type = "number"; daily.min = "1"; daily.step = "1";
-    daily.placeholder = "日预算（可选）";
-    daily.setAttribute("aria-label", profileLabel + "日预算（最小货币单位）");
-    daily.value = profile.daily_minor ?? "";
-    const warning = document.createElement("input");
-    warning.type = "number"; warning.min = "0"; warning.max = "100"; warning.step = "1";
-    warning.setAttribute("aria-label", profileLabel + "预警阈值百分比");
-    warning.value = profile.warning_ratio_bp == null ? 80 : Number(profile.warning_ratio_bp) / 100;
-    const save = document.createElement("button");
-    save.className = "btn"; save.textContent = "保存";
-    save.onclick = async () => {
-      const m = Number(monthly.value), d = daily.value === "" ? null : Number(daily.value);
-      const w = Number(warning.value);
-      if (!Number.isSafeInteger(m) || m <= 0 || (d !== null && (!Number.isSafeInteger(d) || d <= 0)) ||
-          !Number.isSafeInteger(w) || w < 0 || w > 100) {
-        status.textContent = "请填写正整数月预算；日预算可留空；阈值需为 0–100。";
-        status.hidden = false;
-        return;
-      }
-      save.disabled = true;
-      try {
-        const saved = await invoke("save_budget_profile", { input: {
-          profile_id: id, currency: currency.value, monthly_minor: m,
-          daily_minor: d, warning_ratio_bp: w * 100,
-        } });
-        const permission = saved && saved.notification_permission;
-        status.textContent = "已保存" + (id === "estimate" ? "估算观察" : "已确认支出") + "预算；币种独立统计。" +
-          (permission && permission !== "Granted" ? "系统通知权限状态：" + permission + "。" : "");
-        status.hidden = false;
-        await renderOverview();
-      } catch (e) {
-        status.textContent = "保存失败：" + errText(e); status.hidden = false;
-      } finally { save.disabled = false; }
-    };
-    row.append(title, live, currency, monthly, daily, warning, save);
-    host.appendChild(row);
-  }
-}
 
 function statisticsMidnightMs(year, monthIndex, day) {
   const civilMs = Date.UTC(year, monthIndex, day);
@@ -1455,20 +1654,51 @@ async function renderRetentionSettings() {
   }
 }
 
+// 常用时区 + "跟随系统" + "其他…"（规格 §4.4：不要求普通用户手输 IANA 名称）。
+const COMMON_STATISTICS_TIMEZONES = [
+  "Asia/Shanghai", "Asia/Hong_Kong", "Asia/Tokyo", "Asia/Singapore",
+  "America/Los_Angeles", "America/New_York", "Europe/London", "Europe/Berlin", "UTC",
+];
+
 async function renderStatisticsTimezoneSettings() {
+  const select = document.getElementById("ov-statistics-timezone-select");
+  const customLabel = document.getElementById("ov-statistics-timezone-custom");
   const input = document.getElementById("ov-statistics-timezone");
   const save = document.getElementById("ov-timezone-save");
   const status = document.getElementById("ov-timezone-status");
-  if (!input || !save || !status) return;
+  if (!select || !customLabel || !input || !save || !status) return;
   const show = (text) => { status.hidden = false; status.textContent = text; };
+  let systemTz = "UTC";
+  const buildOptions = (current) => {
+    select.textContent = "";
+    const opts = [["__system__", "跟随系统（" + systemTz + "）"]];
+    for (const tz of COMMON_STATISTICS_TIMEZONES) opts.push([tz, tz]);
+    opts.push(["__custom__", "其他…"]);
+    for (const [value, label] of opts) {
+      const opt = document.createElement("option");
+      opt.value = value; opt.textContent = label;
+      select.appendChild(opt);
+    }
+    const known = COMMON_STATISTICS_TIMEZONES.includes(current);
+    if (current === systemTz) select.value = "__system__";
+    else if (known) select.value = current;
+    else select.value = "__custom__";
+    customLabel.hidden = select.value !== "__custom__";
+    input.value = current;
+  };
+  select.onchange = () => {
+    customLabel.hidden = select.value !== "__custom__";
+    if (select.value !== "__custom__") input.value = select.value === "__system__" ? systemTz : select.value;
+  };
   try {
     const config = await invoke("statistics_timezone_config");
     if (!config || config.status !== "ok") throw new Error((config && config.reason) || "统计时区设置不可用");
+    systemTz = String(config.system_timezone || systemTz);
     configuredStatisticsTimezone = String(config.timezone || config.system_timezone || configuredStatisticsTimezone).trim();
-    input.value = configuredStatisticsTimezone;
+    buildOptions(configuredStatisticsTimezone);
     status.hidden = true;
     save.onclick = async () => {
-      const timezone = input.value.trim();
+      const timezone = (select.value === "__system__" ? systemTz : select.value === "__custom__" ? input.value.trim() : select.value);
       if (!timezone) {
         show("请输入 IANA 时区名称，例如 Asia/Shanghai。");
         status.focus();
@@ -1490,6 +1720,7 @@ async function renderStatisticsTimezoneSettings() {
     };
   } catch (e) {
     show("统计时区设置不可用：" + errText(e));
+    select.disabled = true;
     input.disabled = true;
     save.disabled = true;
   }
@@ -1620,6 +1851,11 @@ function renderBillingDeclarations(report) {
   const panel = document.getElementById("ov-billing-declarations-panel");
   const list = document.getElementById("ov-billing-declarations-list");
   if (!panel || !list) return;
+  if (!report || report.status !== "ok") {
+    panel.hidden = false;
+    list.textContent = "待确认状态暂不可读，请刷新重试";
+    return;
+  }
   const declarations = report && report.status === "ok" ? (report.declarations || []) : [];
   panel.hidden = !declarations.length;
   list.textContent = "";
@@ -1674,13 +1910,23 @@ function renderBillingImportCandidates(report) {
   const closeButton = document.getElementById("ov-billing-review-close");
   const copy = document.getElementById("ov-billing-prompt-copy");
   const list = document.getElementById("ov-billing-review-list");
+  const settingsEntry = document.getElementById("settings-billing-candidates");
+  const settingsCopy = document.getElementById("settings-billing-candidates-copy");
+  const settingsOpen = document.getElementById("settings-billing-candidates-open");
   if (!prompt || !panel || !reviewButton || !closeButton || !copy || !list) return;
   bindBillingDeclarationPanel();
   // A transient authority read failure must not close a panel the user is
   // already reviewing or erase its last rendered candidates. The next
   // successful refresh will reconcile the list; only an explicit `ok` empty
   // result means there are no candidates left.
-  if (!report || report.status !== "ok") return;
+  if (!report || report.status !== "ok") {
+    prompt.hidden = false;
+    copy.textContent = "待确认状态暂不可读，请刷新重试";
+    billingPromptState = { visible: false, pendingTokens: 0 };
+    if (settingsEntry) settingsEntry.hidden = false;
+    if (settingsCopy) settingsCopy.textContent = copy.textContent;
+    return;
+  }
   const candidates = Array.isArray(report.candidates) ? report.candidates : [];
   const pendingCount = candidates.filter((candidate) => candidate.status === "pending").length;
   let deferredAt = 0;
@@ -1696,6 +1942,12 @@ function renderBillingImportCandidates(report) {
   }
   // “稍后”只压住尚未处理的提醒；已确认/已忽略项仍保留一个可回看的入口。
   prompt.hidden = !candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred);
+  billingPromptState = {
+    visible: !prompt.hidden && pendingCount > 0,
+    pendingTokens: candidates.filter((c) => c.status === "pending")
+      .reduce((sum, c) => sum + Number((c.impact || {}).total_tokens || 0), 0),
+  };
+  if (settingsEntry) settingsEntry.hidden = !candidates.length;
   panel.hidden = !billingReviewOpen;
   list.textContent = "";
   if (!candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred)) {
@@ -1715,13 +1967,17 @@ function renderBillingImportCandidates(report) {
           return sum;
         }, { tokens: 0, facts: 0, sessions: 0, unavailable: false });
       const scope = impact.unavailable
-        ? "本月影响范围暂不可用（请先检查数据状态）"
-        : "本月影响约 " + fmtTokens(impact.tokens) + " tokens（" + impact.facts +
-          " 条事实、" + impact.sessions + " 个会话）";
-      return pendingCount + " 条旧版本套餐信息待确认；" + scope +
-        "。当前仍按原厂价估算；确认后可区分订阅覆盖和额外按量费用。";
+        ? "涉及范围暂时算不出来（请先检查数据状态）"
+        : "涉及本月约 " + fmtTokens(impact.tokens) + " tokens、" + impact.sessions + " 个会话";
+      return "发现 " + pendingCount + " 条套餐信息需要你确认，" + scope +
+        "。现在先按官方价估算；确认后就能分清哪些在套餐内、哪些要额外按量付费。";
     })()
-    : "已核对的套餐信息不会计入实际支出；当前用量仍按原厂价估算。";
+    : "套餐信息已核对；已核对的套餐不计入实际支出，用量仍按官方价估算。";
+  if (settingsCopy) settingsCopy.textContent = copy.textContent;
+  if (settingsOpen && settingsOpen.dataset.bound !== "1") {
+    settingsOpen.dataset.bound = "1";
+    settingsOpen.onclick = () => reviewButton.click();
+  }
 
   document.getElementById("ov-billing-later").onclick = () => {
     deferBillingReviewPrompt();
@@ -1732,6 +1988,7 @@ function renderBillingImportCandidates(report) {
   document.getElementById("ov-billing-review").onclick = () => {
     billingReviewOpen = true;
     panel.hidden = false;
+    switchTab("sources");
     list.textContent = "";
     for (const candidate of candidates) {
       const row = document.createElement("div");
@@ -1741,23 +1998,25 @@ function renderBillingImportCandidates(report) {
         " · 自 " + candidate.billing_period_start + " 起（" + candidate.host + "）";
       const impact = candidate.impact || {};
       if (candidate.status === "pending" && impact.status === "ok") {
-        detail.textContent += " · 本月影响 " + fmtTokens(Number(impact.total_tokens || 0)) +
-          " tokens / " + Number(impact.fact_count || 0) + " 条事实 / " +
-          Number(impact.session_count || 0) + " 个会话";
+        detail.textContent += " · 本月涉及 " + fmtTokens(Number(impact.total_tokens || 0)) +
+          " tokens / " + Number(impact.session_count || 0) + " 个会话";
       } else if (candidate.status === "pending") {
         detail.textContent += " · 本月影响范围暂不可用，请检查数据状态";
       }
       const actions = document.createElement("div");
       actions.className = "billing-review-actions";
+      // 二选一 + 例外入口（规格 §4.2）：不再是三个并列按钮——"这是我的套餐"和
+      // "确认计费方式"语义重叠，改成一个次级按钮 + 一个"不是" + 一个改按其他
+      // 方式的文字链。
       const accept = document.createElement("button");
-      accept.className = "btn";
-      accept.textContent = "这是我的套餐";
+      accept.className = "btn secondary";
+      accept.textContent = "是我的套餐";
       const dismiss = document.createElement("button");
-      dismiss.className = "btn secondary";
-      dismiss.textContent = "不是我的";
+      dismiss.className = "chip-link";
+      dismiss.textContent = "不是";
       const declare = document.createElement("button");
-      declare.className = "btn secondary";
-      declare.textContent = "确认计费方式";
+      declare.className = "chip-link";
+      declare.textContent = "改为其他计费方式…";
       declare.onclick = () => openBillingDeclaration(candidate);
       const resolve = async (decision) => {
         accept.disabled = true;
@@ -1838,6 +2097,11 @@ function renderBillingRecalculationJobs(report) {
   const panel = document.getElementById("ov-billing-recalculation-panel");
   const list = document.getElementById("ov-billing-recalculation-list");
   if (!panel || !list) return;
+  if (!report || report.status !== "ok") {
+    panel.hidden = false;
+    list.textContent = "待确认状态暂不可读，请刷新重试";
+    return;
+  }
   const jobs = report && report.status === "ok" && Array.isArray(report.jobs) ? report.jobs : [];
   panel.hidden = !jobs.length;
   list.textContent = "";
@@ -2000,257 +2264,252 @@ function renderOverviewDays(cal) {
     .sort((a, b) => (a[0] < b[0] ? 1 : -1));
   if (!rows.length) {
     empty.hidden = false;
-    empty.textContent = "本月还没有 token 用量";
+    empty.textContent = cal ? "本月还没有可展示的日记录" : "最近几天暂不可读，请刷新重试";
     return;
   }
   empty.hidden = true;
   for (const [date, d] of rows) {
     const costs = [];
-    if ((d.dsh_cost_cny || 0) > 0) costs.push("DSH " + fmtCur(d.dsh_cost_cny, "CNY"));
-    if ((d.claude_cost_cny || 0) > 0) costs.push("CC " + fmtCur(d.claude_cost_cny, "CNY"));
-    if ((d.claude_cost_usd || 0) > 0) costs.push("CC " + fmtCur(d.claude_cost_usd, "USD"));
-    if ((d.codex_cost_usd || 0) > 0) costs.push("CX " + fmtCur(d.codex_cost_usd, "USD"));
+    if ((d.dsh_cost_cny || 0) > 0) costs.push(HOST_DISPLAY.dsh + " " + fmtCur(d.dsh_cost_cny, "CNY"));
+    if ((d.claude_cost_cny || 0) > 0) costs.push(HOST_DISPLAY["claude-code"] + " " + fmtCur(d.claude_cost_cny, "CNY"));
+    if ((d.claude_cost_usd || 0) > 0) costs.push(HOST_DISPLAY["claude-code"] + " " + fmtCur(d.claude_cost_usd, "USD"));
+    if ((d.codex_cost_usd || 0) > 0) costs.push(HOST_DISPLAY.codex + " " + fmtCur(d.codex_cost_usd, "USD"));
     const li = document.createElement("li");
     li.innerHTML = `<span class="day-date">${date}</span>` +
-      `<span class="day-tokens">${fmtTokens(d.total_tokens)}</span>` +
-      (costs.length ? `<span class="day-cost">${costs.join(" ")}</span>` : "");
+      `<span class="day-tokens">${fmtTokens(d.total_tokens)} tokens</span>` +
+      (costs.length ? `<span class="day-cost">${costs.join(" · ")}</span>` : "");
     list.appendChild(li);
   }
 }
 
 // ---------- Stage D KPI 行 / 双轨账 / 决策卡 ----------
 
-// 本月结论（审查 UX#2）：一个结论回答"这个月要付多少"，其余口径降为明细。
-// 空实付 → 整行隐藏（不渲染一句空的结论占位）。
-function renderMonthVerdict(monthly) {
-  const el = document.getElementById("ov-month-verdict");
+// ---------- 总览第一行三卡 + 本月用量行 ----------
+// 金额纪律：按量实付 / 订阅月费读 DTO 的 `actual_spend_by_basis`（拆栏在
+// domain：data_contract.rs::actual_spend_by_basis，各栏之和恒等于
+// total_actual_spend），分币并列、永不跨币相加、永不折算（PM 决策 2026-09-07：
+// fx 只进名义）。名义 = nominalFromByProvider（官方标价折算，诊断脚注）。
+// 无数据一律「无数据」，绝不渲染 0；「无数据」不吃强调色。
+function spendByBasis(dto, basis) {
+  return ((dto && dto.actual_spend_by_basis) || {})[basis] || {};
+}
+// 按量实付 = metered_actual + host_billed：两档都是真实账单口径（宿主账单不能
+// 重标为模型 API 成本，但同样回答"要付多少"），按币合并。
+function meteredSpend(dto) {
+  const out = {};
+  for (const basis of ["metered_actual", "host_billed"]) {
+    for (const [c, v] of Object.entries(spendByBasis(dto, basis))) out[c] = (out[c] || 0) + v;
+  }
+  return out;
+}
+function setAmount(id, text, title) {
+  const el = document.getElementById(id);
   if (!el) return;
-  const act = fmtCurMap((monthly || {}).total_actual_spend);
-  if (!act.length) { el.hidden = true; return; }
-  el.hidden = false;
-  const feeMap = {};
-  for (const h of Object.values((monthly || {}).by_provider || {})) {
-    const fee = (h.amounts_by_basis || {}).fixed_subscription || 0;
-    if (fee > 0) {
-      const c = h.currency || "";
-      feeMap[c] = (feeMap[c] || 0) + fee; // 同币月费合并后再走统一币序
-    }
+  el.textContent = text;
+  el.title = title || ""; // 分币展开挂 hover；未传 → 清掉上一轮的
+  el.classList.toggle("muted-amt", text === "无数据");
+}
+// 名义：混币且有汇率 → 速览层并成 `≈¥`（原始分币进 hover）；否则分币并列。
+// cache_write 档位假设必须可见（1hr/5min 差额占名义总额 5.2%，会话日志不记录
+// 实际 TTL——假设不是观测），挂在名义的 hover 与卡片副行。
+const NOMINAL_BASIS_NOTE = "@官方标价 · cache_write 按 1hr 计";
+function renderNominalInto(id, nominal, fx) {
+  const parts = fmtCurMap(nominal);
+  const merged = fxMerge(nominal, fx);
+  if (merged) {
+    setAmount(id, fmtFxApprox(merged), NOMINAL_BASIS_NOTE + " · 原始分币 " + merged.parts.join(" + ") + " · " + fxNote(merged));
+  } else {
+    setAmount(id, parts.length ? parts.join(" + ") : "无数据", parts.length ? NOMINAL_BASIS_NOTE : "");
   }
-  const subFees = fmtCurMap(feeMap);
-  el.innerHTML = "<strong>本月实付 " + act.join(" + ") + "</strong>" +
-    (subFees.length ? "（含订阅月费 " + subFees.join(" + ") + "）" : "") +
-    '<span class="verdict-note">名义/估算数字仅作诊断，不计账单——明细见下。</span>';
+  return merged;
+}
+function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday() }) {
+  // 本月支出：口径分栏
+  const mMetered = fmtCurMap(meteredSpend(monthly));
+  const mSubscription = fmtCurMap(spendByBasis(monthly, "fixed_subscription"));
+  setAmount("ov-m-metered", mMetered.length ? mMetered.join(" + ") : "无数据");
+  setAmount("ov-m-subscription", mSubscription.length ? mSubscription.join(" + ") : "无数据");
+  const mNominal = monthly ? nominalFromByProvider(monthly.by_provider) : {};
+  renderNominalInto("ov-m-nominal", mNominal, fx);
+  const spendSub = document.getElementById("ov-m-spend-sub");
+  if (spendSub) {
+    spendSub.textContent = !monthly
+      ? "本月数据不可用"
+      : (mMetered.length || mSubscription.length)
+        ? "按量费用与订阅月费分开计；不同币种不相加"
+        : "本月还没有真实支出记录";
+  }
+  // 今日消耗：tokens 主数 + 今日按量实付；名义只作脚注（IA 复核 §7）。
+  const tk = tokensSum(daily && daily.tokens_by_host);
+  setAmount("ov-t-tokens", daily && tk.total > 0 ? fmtTokens(tk.total) + " tokens" : "无数据");
+  const tSub = document.getElementById("ov-t-tokens-sub");
+  if (tSub) tSub.textContent = daily && tk.total > 0 ? "今天处理的 token 数（含缓存读写）" : daily ? "今天还没有用量记录" : "今日数据暂不可读，请刷新重试";
+  const tMetered = fmtCurMap(meteredSpend(daily));
+  setAmount("ov-t-metered", tMetered.length ? tMetered.join(" + ") : "无数据");
+  renderNominalInto("ov-t-nominal", daily ? nominalFromByProvider(daily.by_provider) : {}, fx);
+  // 本月用量行：规格 §4 的「已观测 tokens」与「名义成本」——首屏可见，不占卡。
+  const mtk = tokensSum(monthly && monthly.tokens_by_host);
+  const dayOfMonth = Number(window.date.slice(8)) || 1;
+  setAmount("ov-m-tokens", monthly && mtk.total > 0 ? fmtTokens(mtk.total) + " tokens" : "无数据");
+  const mtkSub = document.getElementById("ov-m-tokens-sub");
+  if (mtkSub) {
+    mtkSub.textContent = monthly && mtk.total > 0
+      ? "日均 " + fmtTokens(Math.round(mtk.total / dayOfMonth)) + "（含缓存读写）"
+      : monthly ? "本月还没有用量记录" : "本月用量暂不可读，请刷新重试";
+  }
 }
 
-// 前缀 t = 今日（daily DTO）、m = 本月（monthly DTO）。全部 tile 的诚实规则：
-// 无数据渲染「无数据」，绝不渲染 0；金额一律带币种（by_provider 条目有
-// currency，写符号不再是编造）；unresolved 不冒充任何金额。
-// `fx`（`Overview.fx = {usd_cny, as_of}` 或 undefined）只喂**速览层**的名义 /
-// 单位成本：有汇率 + 混币 → 并成一个 `≈¥`，原始分币进 hover title。实际支出
-// tile 不吃 fx（PM 决策 2026-09-07：实付分币不折算）。无 fx → 分币旧行为。
-function renderKpiRow(prefix, dto, fx) {
-  const set = (id, text, sub, title) => {
-    const el = document.getElementById(`ov-${prefix}-${id}`);
-    if (!el) return;
-    el.textContent = text;
-    el.title = title || ""; // 分币展开挂 hover；未传 → 清掉上一轮的
-    // 「无数据」不是好状态的金额，不吃 hero 强调色（审查 UX#3 的镜像面：
-    // 绿色在说反话）。
-    el.classList.toggle("muted-amt", text === "无数据");
-    if (sub !== undefined) {
-      const subEl = document.getElementById(`ov-${prefix}-${id}-sub`);
-      if (subEl) subEl.textContent = sub || "";
+// 费用明细（本月）：原「双轨账」+「数据源」合成一张表。**服务商是主键**（用户
+// 付钱的对象），宿主是副属性「经 X」——同一服务商经多个工具使用时合成一行
+// （同币种相加；币种不同则分行，不跨币相加），宿主并列成 chip，新鲜度取最差。
+// 分组：订阅（固定月费）/ 按量（按用量付费）/ 无法归类。订阅利用率倍数 =
+// 标价折算 ÷ 月费，>50× 是「请核对套餐」的自检告警而非套利（§6.7 护栏）；
+// unresolved 条目只说「部分用量无法估价」，不当 0。evidence_basis /
+// pricing_method / unresolved_reason 这些 reason code 只进 hover——规格 §4
+// 第 84 行：禁止在卡面展示 raw reason code。工具视角在「用量」页数据源面板。
+const DUAL_LABEL = {
+  fixed_subscription: "订阅月费",
+  api_equivalent: "用量按标价折算",
+  metered_actual: "按量实付",
+  metered_estimate: "按量估算",
+  host_billed: "宿主账单",
+};
+const FRESH_RANK = { unavailable: 0, fresh: 1, partial: 2, stale: 3 };
+function groupByProvider(byProvider, byHost) {
+  const groups = new Map(); // provider|currency -> row
+  for (const [key, h] of Object.entries(byProvider)) {
+    const [host, provider = host] = key.split("/");
+    const bases = h.amounts_by_basis || {};
+    if (!Object.keys(bases).length && !h.has_unresolved) continue;
+    const currency = h.currency || "";
+    const id = provider + "|" + currency;
+    const fs = ((byHost[host] || {}).freshness) || {};
+    let row = groups.get(id);
+    if (!row) {
+      row = { provider, currency, hosts: [], amounts: {}, has_unresolved: false,
+        pricing_methods: new Set(), evidence: new Set(), reasons: new Set(),
+        freshness: { state: "unavailable", at: "" } };
+      groups.set(id, row);
     }
-  };
-  if (!dto) {
-    set("tokens", "无数据"); set("nominal", "无数据"); set("unit", "无数据");
-    set("actual", "无数据"); set("cache", "无数据");
-    return;
-  }
-  const tk = tokensSum(dto.tokens_by_host);
-  const nominal = nominalFromByProvider(dto.by_provider);
-  const actual = dto.total_actual_spend || {};
-  // #16：巨大 token 数给参照——月度带附本月日均（按今天日号折算）。
-  const dayOfMonth = Number(statisticsToday().slice(8)) || 1;
-  set("tokens", tk.total > 0 ? fmtTokens(tk.total) : "无数据",
-      tk.total > 0
-        ? (prefix === "m"
-            ? "已处理 token（含缓存读写）· 本月日均 " + fmtTokens(Math.round(tk.total / dayOfMonth))
-            : "已处理 token（含缓存读写）")
-        : "");
-  // 名义：官方标价折算之和。cache_write 档位假设必须可见（1hr/5min 差额占
-  // 名义总额 5.2%，会话日志不记录实际 TTL——假设不是观测）。混币且有汇率 →
-  // 速览层并成 `≈¥`（原始分币进 hover）；否则分币并列。
-  const nomParts = fmtCurMap(nominal);
-  const nomFx = fxMerge(nominal, fx);
-  if (nomFx) {
-    set("nominal", fmtFxApprox(nomFx),
-        "@官方标价 · cache_write 按 1hr 计 · " + fxNote(nomFx),
-        "原始分币 " + nomFx.parts.join(" + "));
-  } else {
-    set("nominal", nomParts.length ? nomParts.join(" + ") : "无数据",
-        nomParts.length ? "@官方标价 · cache_write 按 1hr 计" : "");
-  }
-  // 单位：名义/M（主）+ 实际/M（副）。未计价 token 不进金额分母——首版
-  // 以 processed 为近似分母并在副行标注（§6.2 的完整分母留 Stage E）。
-  if (tk.total > 0 && nomParts.length) {
-    // 名义/M：混币且有汇率 → `≈¥/M`（原始分币进 hover）；否则分币列——混币
-    // 相加再标单一符号就是编造（截图曾暴露「$0.31/M · 名义」实为 ¥+$ 相加）。
-    const nomPerMap = Object.fromEntries(
-      Object.entries(nominal).map(([c, v]) => [c, v / tk.total * 1e6])
-    );
-    const perMFx = fxMerge(nomPerMap, fx);
-    // sub 由下方实际/M 那行统一写（此前这里传的 sub 立即被覆盖，是死参数）。
-    if (perMFx) {
-      set("unit", fmtFxApprox(perMFx) + "/M · 名义", undefined,
-        "原始分币 " + fmtCurMap(nomPerMap).map((x) => x + "/M").join(" + "));
-    } else {
-      const nomPerM = fmtCurMap(nomPerMap).map((x) => x + "/M");
-      set("unit", nomPerM.join(" + ") + " · 名义");
+    row.hosts.push(host);
+    for (const [b, v] of Object.entries(bases)) row.amounts[b] = (row.amounts[b] || 0) + v;
+    row.has_unresolved = row.has_unresolved || !!h.has_unresolved;
+    if (h.pricing_method) row.pricing_methods.add(h.pricing_method);
+    if (h.evidence_basis) row.evidence.add(h.evidence_basis);
+    if (h.unresolved_reason) row.reasons.add(h.unresolved_reason);
+    if ((FRESH_RANK[fs.state] || 0) > (FRESH_RANK[row.freshness.state] || 0) ||
+        (fs.state === row.freshness.state && (fs.last_observed_at || "") > row.freshness.at)) {
+      row.freshness = { state: fs.state || "unavailable", at: fs.last_observed_at || "" };
     }
-    // 实际/M 按币分列，不做跨币求和（审查 #1：空 map 求和得 0 → 副行渲染
-    // "实际 0.00（币种未声明）/M"，与实际 tile 的「无数据」同屏互斥——双标；
-    // 审查 UX#3：混币相加标单一符号是编造）。**实际侧永远分币**——PM 决策
-    // 2026-09-07：fx 折算只进速览层名义/单位，不进实付。无实付条目 → 诚实话术。
-    const actPerM = fmtCurMap(Object.fromEntries(
-      Object.entries(actual).map(([c, v]) => [c, v / tk.total * 1e6])
-    )).map((x) => x + "/M");
-    const actTail = actPerM.length
-      ? "实际 " + actPerM.join(" + ")
-      : "账单级实付：无（订阅内 + 未出账）";
-    // 名义主数是折算值时，副行说明折算口径——不能只靠 `≈` 一个字符；实际侧
-    // 明确「分币不折」，与名义的折算态区分开。
-    document.getElementById(`ov-${prefix}-unit-sub`).textContent = perMFx
-      ? "名义 " + fxNote(perMFx) + " · " + actTail + (actPerM.length ? "（分币不折）" : "")
-      : (actPerM.length ? "跨币未折算 · " + actTail : actTail);
-  } else {
-    set("unit", "无数据");
   }
-  // 实际：total_actual_spend 分币分栏（订阅费 + 按量实付，永不跨币合并）。
-  const actParts = fmtCurMap(actual);
-  set("actual", actParts.length ? actParts.join(" + ") : "无数据",
-      actParts.length ? "按量实付 + 订阅月费（分币）" : "");
-  set("cache",
-    tk.hit != null ? (tk.hit * 100).toFixed(1) + "%" : "无数据",
-    tk.hit != null ? (tk.hit * 100).toFixed(1) + "% 的输入走了缓存价（跨宿主）" : "");
+  return [...groups.values()];
 }
-
-// 双轨账：订阅轨（fixed_subscription 条目，利用率 = 标价折算 ÷ 月费）+
-// 按量轨（metered_* 条目，真实支出）。>50× 触发「归属待核」告警（§6.7
-// 护栏：倍数异常是声明错误的自检信号，不是套利收益）。unresolved 条目
-// 只显示「含未定价 tokens」，不当 0。
 function renderDualTrack(monthly) {
   const list = document.getElementById("ov-dual-list");
   const empty = document.getElementById("ov-dual-empty");
   list.textContent = "";
   const byProvider = (monthly && monthly.by_provider) || {};
-  const entries = Object.entries(byProvider);
-  if (!entries.length) { empty.hidden = false; return; }
+  const byHost = (monthly && monthly.by_host) || {};
+  const rows = groupByProvider(byProvider, byHost);
+  if (!rows.length) {
+    empty.hidden = false;
+    empty.textContent = monthly ? "本月还没有可拆分的支出记录" : "本月支出明细暂不可读，请刷新重试";
+    return;
+  }
   empty.hidden = true;
-  const subEntries = [];
-  const metered = [];
-  const unresolved = [];
-  for (const [key, h] of entries) {
-    const provider = key.split("/")[1] || key;
-    const label = PROVIDER_LABEL[provider] || provider;
-    const amountEntries = Object.entries(h.amounts_by_basis || {});
-    if (!amountEntries.length && !h.has_unresolved) continue;
-    // 订阅轨收两种条目：有月费的，和 api_equivalent-only（套餐制的标价折算
-    // 口径——codex/openai 月费未声明，落"不可归档/无数据"是分类错误：它有
-    // 真实用量口径，只是利用率算不了）。
-    if (amountEntries.some(([b]) => b === "fixed_subscription" || b === "api_equivalent")) {
-      subEntries.push([key, h, label]);
-    } else if (amountEntries.some(([b]) => b.startsWith("metered"))) {
-      metered.push([key, h, label]);
-    } else {
-      unresolved.push([key, h, label]);
-    }
-  }
-  const li = (cls, html) => {
-    const li = document.createElement("li");
-    if (cls) li.className = cls;
-    li.innerHTML = html;
-    list.appendChild(li);
-  };
   const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (ch) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[ch]));
-  const attributionChips = (h) => {
-    const out = [];
-    if (h.evidence_basis) out.push(`<span class="chip diagnostic">证据 ${escapeHtml(h.evidence_basis)}</span>`);
-    if (h.pricing_method) out.push(`<span class="chip">计价 ${escapeHtml(h.pricing_method)}</span>`);
-    if (h.unresolved_reason) out.push(`<span class="chip hostbilled">原因 ${escapeHtml(h.unresolved_reason)}</span>`);
-    return out.join(" ");
+  const li = (cls, html, title) => {
+    const el = document.createElement("li");
+    if (cls) el.className = cls;
+    el.innerHTML = html;
+    if (title) el.title = title;
+    list.appendChild(el);
   };
-  if (subEntries.length) li("", `<span class="dual-track">订阅轨 · 已付费产能</span>`);
-  for (const [key, h, label] of subEntries) {
-    const fee = h.amounts_by_basis.fixed_subscription || 0;
-    const listEq = h.amounts_by_basis.api_equivalent || 0;
-    // 无月费声明（openai）：显示等价标价口径本体，利用率明确"算不了"。
-    if (fee === 0 && listEq > 0) {
-      li("", `<span class="src-name">${escapeHtml(label)}</span>
-        <span class="basis"><span class="chip diagnostic">套餐等价 ${fmtCur(listEq, h.currency)} · 诊断</span>
-        <span class="chip">月费未声明 · 利用率不可算</span></span>`);
-      continue;
+  if (list.dataset && list.dataset.goBound !== "1" && typeof list.addEventListener === "function") {
+    list.dataset.goBound = "1";
+    const go = (ev) => {
+      const t = ev.target && ev.target.closest ? ev.target.closest("[data-go]") : null;
+      if (t) openSettingsSection(t.dataset.go);
+    };
+    list.addEventListener("click", go);
+    list.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(ev); } });
+  }
+  const nameOf = (r) => escapeHtml(PROVIDER_LABEL[r.provider] || r.provider);
+  const viaOf = (r) => `<span class="via muted">经 ${r.hosts.map((h) => escapeHtml(HOST_DISPLAY[h] || h)).join("、")}</span>`;
+  // hover 里放 reason code：证据来源 / 计价方式 / 未定价原因。
+  const hoverOf = (r) => [
+    r.evidence.size ? "证据来源 " + [...r.evidence].join(", ") : "",
+    r.pricing_methods.size ? "计价方式 " + [...r.pricing_methods].join(", ") : "",
+    r.reasons.size ? "未定价原因 " + [...r.reasons].join(", ") : "",
+  ].filter(Boolean).join("\n");
+  const freshOf = (r) => {
+    const at = (r.freshness.at || "").slice(5, 10);
+    switch (r.freshness.state) {
+      case "fresh": return `<span class="fresh">最新${at ? " " + at : ""}</span>`;
+      case "stale": return `<span class="fresh stale"><span class="chip-link" data-go="settings-sources" role="button" tabindex="0">⚠ 数据过期${at ? " · 最后更新 " + at : ""} ›</span></span>`;
+      case "partial": return `<span class="fresh stale"><span class="chip-link" data-go="settings-sources" role="button" tabindex="0">数据不完整${at ? " · 最后更新 " + at : ""} ›</span></span>`;
+      default: return "";
     }
-    const mult = fee > 0 && listEq > 0 ? listEq / fee : null;
-    // 无标价折算（glm 有月费无价卡）→ mult null：保留 unresolved 提示，
-    // 不让订阅轨的行看起来"一切正常"。
-    const util = h.has_unresolved
-      ? ' <span class="chip hostbilled">含未定价 tokens · 部分用量暂无法估价</span>'
-      : mult == null ? "" :
-      mult > 50
-        ? ` <span class="chip diagnostic">⚠ 归属待核（${mult.toFixed(0)}× 与用量矛盾）</span>`
+  };
+  const subEntries = [], metered = [], unresolved = [];
+  for (const r of rows) {
+    const bases = Object.keys(r.amounts);
+    if (bases.includes("fixed_subscription") || bases.includes("api_equivalent")) subEntries.push(r);
+    else if (bases.some((b) => b.startsWith("metered") || b === "host_billed")) metered.push(r);
+    else unresolved.push(r);
+  }
+  const unresolvedChip = '<span class="chip hostbilled">部分用量无法估价</span>';
+  const rowHtml = (r, chips) =>
+    `<span class="src-name">${nameOf(r)}</span><span class="basis">${chips.join(" ")} ${viaOf(r)}</span>${freshOf(r)}`;
+  if (subEntries.length) li("", `<span class="dual-track">订阅（固定月费）</span>`);
+  for (const r of subEntries) {
+    const fee = r.amounts.fixed_subscription || 0;
+    const listEq = r.amounts.api_equivalent || 0;
+    const chips = [];
+    if (fee > 0) chips.push(`<span class="chip subscription">${DUAL_LABEL.fixed_subscription} ${fmtCur(fee, r.currency || null)}</span>`);
+    if (listEq > 0) chips.push(`<span class="chip diagnostic">${DUAL_LABEL.api_equivalent} ${fmtCur(listEq, r.currency || null)}（参考）</span>`);
+    if (r.has_unresolved) {
+      chips.push(unresolvedChip);
+    } else if (fee === 0 && listEq > 0) {
+      chips.push('<span class="chip chip-link" data-go="settings-billing" role="button" tabindex="0">未填写月费，去填写 ›</span>');
+    } else if (fee > 0 && listEq > 0) {
+      const mult = listEq / fee;
+      chips.push(mult > 50
+        ? `<span class="chip diagnostic">⚠ 数字异常（折算为月费的 ${mult.toFixed(0)} 倍），请核对套餐</span>`
         : mult < 0.5
-          ? ` <span class="chip estimate">⚠ 没用够（${mult.toFixed(2)}×）</span>`
-          : ` <span class="chip measured">值回月费 ${mult.toFixed(1)}×</span>`;
-    li("", `<span class="src-name">${escapeHtml(label)}</span>
-      <span class="basis"><span class="chip subscription">月费 ${fmtCur(fee, h.currency)}</span>${util}</span>`);
+          ? `<span class="chip estimate">⚠ 没用够（只值回月费的 ${mult.toFixed(2)}×）</span>`
+          : `<span class="chip measured">值回月费 ${mult.toFixed(1)}×</span>`);
+    }
+    li("", rowHtml(r, chips), hoverOf(r));
   }
-  if (metered.length) li("", `<span class="dual-track">按量轨 · 真实支出</span>`);
-  for (const [key, h, label] of metered) {
-    const chips = Object.entries(h.amounts_by_basis)
-      .map(([b, v]) => {
-        const names = {
-          metered_actual: "实测",
-          metered_estimate: h.pricing_method === "fair-market"
-            ? "公允价估算"
-            : h.pricing_method === "fair-market-fallback"
-              ? "原厂价回退估算"
-              : "估算（relay 上界）",
-        };
-        return `<span class="chip ${b === "metered_actual" ? "measured" : "estimate"}">${names[b] || b} ${fmtCur(v, h.currency)}</span>`;
-      }).join("");
-    li("", `<span class="src-name">${escapeHtml(label)}</span><span class="basis">${chips} ${attributionChips(h)}</span>`);
+  if (metered.length) li("", `<span class="dual-track">按量（按用量付费）</span>`);
+  for (const r of metered) {
+    const chips = Object.entries(r.amounts).map(([b, v]) => {
+      let label = DUAL_LABEL[b] || b;
+      if (b === "metered_estimate") {
+        label = r.pricing_methods.has("fair-market") ? "按公允价估算"
+          : r.pricing_methods.has("fair-market-fallback") ? "按官方价估算" : "按量估算（上界）";
+      }
+      const cls = b === "metered_actual" || b === "host_billed" ? "measured" : "estimate";
+      return `<span class="chip ${cls}">${label} ${fmtCur(v, r.currency || null)}${cls === "estimate" ? "（参考）" : ""}</span>`;
+    });
+    if (r.has_unresolved) chips.push(unresolvedChip);
+    li("", rowHtml(r, chips), hoverOf(r));
   }
-  if (unresolved.length) li("", `<span class="dual-track">不可归档</span>`);
-  for (const [key, h, label] of unresolved) {
-    li("", `<span class="src-name">${escapeHtml(label)}</span>
-      <span class="basis">${h.has_unresolved ? '<span class="chip hostbilled">含未定价 tokens · 部分用量暂无法估价</span>' : '<span class="chip">无数据</span>'} ${attributionChips(h)}</span>`);
+  if (unresolved.length) li("", `<span class="dual-track">无法归类</span>`);
+  for (const r of unresolved) {
+    li("", rowHtml(r, [r.has_unresolved ? unresolvedChip : '<span class="chip">无数据</span>']), hoverOf(r));
   }
 }
 
 // 决策卡「现在该用谁」：四态建议行 + 各订阅窗口/利用率为一行。Codex 是唯一
 // 正向余量源（data_codex_quota 的 plan 快照）；Claude Pro 余量不可得（quotaLimits
 // 只有拒绝快照，不得反推假百分比）；GLM/MiniMax 无配额证据源 → 只显示利用率。
-async function renderDecideCard(monthly) {
+function renderDecideCard(monthly, quota) {
   const body = document.getElementById("ov-decide-body");
-  body.textContent = "读取中…";
   const byProvider = (monthly && monthly.by_provider) || {};
-  // plan 快照 60s memo（审查 #6）：每次 renderOverview 都全量 fold 60 份
-  // rollout 是可感知卡顿；plan 是"当前状态"，60s 内复用不构成诚实性问题，
-  // 过期自动重拉。失败（null/异常）也进缓存，避免故障时每次渲染都重扫。
-  const now = Date.now();
-  if (!renderDecideCard._quota || now - renderDecideCard._quotaAt > 60_000) {
-    try { renderDecideCard._quota = await invoke("data_codex_quota"); }
-    catch (e) { renderDecideCard._quota = null; }
-    renderDecideCard._quotaAt = now;
-  }
-  const quota = renderDecideCard._quota;
   body.textContent = "";
   const rows = [];
   // Codex 窗口条（真 meter）
@@ -2258,7 +2517,21 @@ async function renderDecideCard(monthly) {
   // plan 快照的真实形状是 limits.primary（fold plan_from_rate_limits 产物），
   // 不是顶层 primary——审查 #1：旧读法恒 undefined，决策卡整条失效。
   const codexWin = quota && quota.limits && quota.limits.primary;
-  if (quota && codexWin && typeof codexWin.used_percent === "number") {
+  // 无可用配额证据时保留中性说明，不把未知配额当作零成本。
+  const card = document.getElementById("ov-decide-card");
+  const observed = quota && Date.parse(quota.observed_at);
+  // A snapshot older than 24h, from the future, or past reset cannot describe current headroom.
+  const hasQuota = !!(codexWin && overviewNumber(codexWin.used_percent) && codexWin.used_percent <= 100
+    && Number.isFinite(observed) && observed <= Date.now() && Date.now() - observed <= 24 * 60 * 60 * 1000
+    && overviewNumber(codexWin.resets_at) && codexWin.resets_at * 1000 > Date.now());
+  if (card) card.hidden = false;
+  const observedEl = document.getElementById("ov-decide-observed");
+  if (observedEl) {
+    observedEl.textContent = hasQuota && quota.observed_at
+      ? "快照 " + formatStatisticsDateTime(new Date(quota.observed_at), { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+      : "";
+  }
+  if (hasQuota) {
     const used = codexWin.used_percent;
     const remain = Math.max(0, 100 - used);
     const resetsAt = codexWin.resets_at
@@ -2267,15 +2540,15 @@ async function renderDecideCard(monthly) {
     codexState = remain;
     rows.push(`<li><span class="src-name">Codex（${quota.plan_type || "订阅"}）</span>
       <span class="basis"><span class="meter"><span class="meter-fill ${remain < 15 ? "danger" : ""}" style="width:${remain}%"></span></span>
-      <span class="fresh ${remain < 15 ? "stale" : ""}">${remain.toFixed(0)}% 剩余 · ↻ ${resetsAt}</span></span></li>`);
+      <span class="fresh ${remain < 15 ? "stale" : ""}">剩余 ${remain.toFixed(0)}% · ${resetsAt} 重置</span></span></li>`);
   } else {
-    rows.push(`<li><span class="src-name">Codex</span><span class="basis"><span class="chip">无订阅窗口数据</span></span></li>`);
+    rows.push(`<li><span class="src-name">Codex</span><span class="basis"><span class="chip">读不到套餐额度</span></span></li>`);
   }
   // Claude Pro：余量不可得（诚实标注）
   const anthropic = byProvider["claude-code/anthropic"];
   if (anthropic) {
     rows.push(`<li><span class="src-name">Claude Pro</span>
-      <span class="basis"><span class="chip">窗口余量不可得（仅撞窗史）</span></span></li>`);
+      <span class="basis"><span class="chip" title="Claude Code 只记录被限流的时刻，不提供剩余额度，无法推算百分比">无法读取剩余额度</span></span></li>`);
   }
   // GLM / MiniMax：无配额证据源，只显示利用率（双轨账里已有，这里给决策提示）
   for (const key of ["claude-code/zhipu-glm", "claude-code/minimax"]) {
@@ -2288,24 +2561,25 @@ async function renderDecideCard(monthly) {
       const mult = eq / fee;
       const low = mult < 0.5;
       rows.push(`<li><span class="src-name">${label}</span>
-        <span class="basis"><span class="chip ${low ? "estimate" : "measured"}">${low ? "⚠ 没用够" : "值"} ${mult.toFixed(2)}×</span>
-        <span class="fresh">月费 ${fmtCur(fee, h.currency)} · 标价折算 ${fmtCur(eq, h.currency)}</span></span></li>`);
+        <span class="basis"><span class="chip ${low ? "estimate" : "measured"}">${low ? "⚠ 没用够" : "值回月费"} ${mult.toFixed(1)}×</span>
+        <span class="fresh nowrap">月费 ${fmtCur(fee, h.currency)} · 用量按标价折算 ${fmtCur(eq, h.currency)}</span></span></li>`);
     }
   }
   body.innerHTML = `<ul class="src-list">${rows.join("")}</ul>`;
   // 建议行（四态状态机）
   let advice;
   if (codexState != null && codexState < 15) {
-    advice = `⚠ Codex 窗口剩 ${codexState.toFixed(0)}%，即将限流——建议优先用 Claude Code 或 GLM，约重置后再切回`;
+    advice = "Codex 额度较低；请在用量或设置中确认可用线路";
   } else if (codexState != null && codexState <= 100) {
-    advice = `Codex 窗口余量 ${codexState.toFixed(0)}%，可继续使用`;
+    advice = `Codex 额度还剩 ${codexState.toFixed(0)}%，可继续使用`;
   } else {
-    advice = "等待窗口数据（Codex 快照不可得）";
+    advice = "暂无法给出建议：配额证据不可用或已过期";
   }
   const adviceEl = document.createElement("div");
   adviceEl.className = "decide-advice";
   adviceEl.textContent = "💡 " + advice;
   body.appendChild(adviceEl);
+  if (card && card.classList) card.classList.toggle("warn", codexState != null && codexState < 15);
 }
 
 function syncDot(sync) {
@@ -4872,11 +5146,7 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
       openSettings.type = "button";
       openSettings.textContent = "打开预算设置";
       openSettings.addEventListener("click", () => {
-        switchTab("overview");
-        const settings = document.getElementById("ov-budget-settings");
-        if (settings && settings.scrollIntoView) settings.scrollIntoView({ behavior: "smooth", block: "start" });
-        const monthly = document.getElementById("ov-budget-monthly-input");
-        if (monthly && monthly.focus) monthly.focus();
+        openSettingsSection("settings-budget", "ov-budget-monthly-amount");
       });
       cell.appendChild(document.createTextNode(" "));
       cell.appendChild(openSettings);
@@ -5054,12 +5324,25 @@ async function loadSources(reset) {
   renderSources();
 }
 
+// 数据源读取失败的原因码 → 人话（规格 §5.6）。摘要行只显示映射后的文字，
+// 原始 code 只出现在展开区的 title（供排障，不算"卡面暴露内部词表"）。
+const SOURCE_ERROR_TEXT = {
+  permission_denied: "没有读取权限",
+  permission: "没有读取权限",
+  file_missing: "找不到日志文件",
+  all_files_failed: "所有日志文件都读取失败",
+  db_error: "本地数据库出错",
+  migration_failed: "本地数据库需要迁移",
+};
+function sourceErrorText(code) {
+  return SOURCE_ERROR_TEXT[code] || "读取失败";
+}
+
 function renderSources() {
-  const foot = document.getElementById("src-foot");
   const syncEl = document.getElementById("src-sync");
   const sync = srcState.sync;
   const pauseToggle = document.getElementById("src-pause-toggle");
-  pauseToggle.textContent = srcState.paused ? "恢复同步" : "暂停同步";
+  pauseToggle.textContent = srcState.paused ? "恢复自动同步" : "暂停自动同步";
   pauseToggle.onclick = async () => {
     pauseToggle.disabled = true;
     try {
@@ -5093,32 +5376,27 @@ function renderSources() {
   const cards = document.getElementById("src-cards");
   renderCustomSourceRoots();
   cards.innerHTML = "";
-  if (srcState.error && !srcState.sources) {
-    foot.textContent = "数据源状态读取失败，见上方错误横幅。";
-    return;
-  }
+  if (srcState.error && !srcState.sources) return;
   const sources = Array.isArray(srcState.sources) ? srcState.sources : [];
-  if (sources.length === 0) {
-    foot.textContent = "没有可用的数据源状态。";
-    return;
-  }
-  for (const source of sources) cards.appendChild(renderSourceCard(source));
+  // 有失败来源的排到最前（规格 §4.1.2），其余保持契约返回顺序。
+  const ordered = [...sources].sort((a, b) => {
+    const af = a.connection_state === "needs_attention" || Number((a.failed_scope || {}).sources || 0) > 0;
+    const bf = b.connection_state === "needs_attention" || Number((b.failed_scope || {}).sources || 0) > 0;
+    return af === bf ? 0 : af ? -1 : 1;
+  });
+  for (const source of ordered) cards.appendChild(renderSourceRow(source));
   const failedSources = sources.filter((source) =>
     source.connection_state === "needs_attention" ||
     Number((source.failed_scope || {}).sources || 0) > 0
   );
   if (failedSources.length > 0) {
-    const details = failedSources.map((source) => {
-      const codes = ((source.failed_scope || {}).error_codes || []).join("、") || "source_read_failed";
-      return (HOST_DISPLAY[source.host] || source.host || "未知来源") + "（" + codes + "）";
-    }).join("；");
+    const details = failedSources.map((source) => HOST_DISPLAY[source.host] || source.host || "未知来源").join("、");
     showBanner(
       "src-banner",
-      "部分来源读取失败：" + details + "。其他来源已继续同步；请在对应卡片点“重新同步”。",
+      "部分来源读取失败：" + details + "。其他来源已继续同步；请在对应行展开后重新同步。",
       false,
     );
   }
-  foot.textContent = "共 " + sources.length + " 个数据源 · 扫描状态与会话查询相互独立。";
 }
 
 function renderCustomSourceRoots() {
@@ -5163,6 +5441,7 @@ function renderCustomSourceRoots() {
     const remove = document.createElement("button");
     remove.className = "btn secondary";
     remove.textContent = "移除读取位置";
+    remove.title = "移除不删除已导入数据";
     remove.onclick = async () => {
       remove.disabled = true;
       try {
@@ -5176,80 +5455,103 @@ function renderCustomSourceRoots() {
   }
 }
 
-function renderSourceCard(src) {
+// 状态词表：connection_state → (词, 修饰符)。paused/excluded 用 muted，不用
+// warn 黄——暂停/排除是用户主动选择，不是需要关注的问题（规格 §4.1）。
+const SRC_STATE_TEXT = {
+  connected: ["已连接", "ok"],
+  needs_attention: ["需要处理", "danger"],
+  paused: ["已暂停", "muted"],
+  excluded: ["已停止读取", "muted"],
+  not_detected: ["未检测到", "muted"],
+};
+
+function renderSourceRow(src) {
   const key = src.host || src.source_id || "unknown";
-  const card = el("div", "src-card " + key);
-  const head = el("div", "src-head");
-  const name = el("span", "src-name");
-  name.textContent = HOST_DISPLAY[key] || key;
-  head.appendChild(name);
-
+  const row = el("div", "src-row");
+  row.dataset.host = key;
   const status = src.connection_state || "unknown";
-  const badge = el("span", "src-badge " + status);
+  const [stateText, stateModifier] = SRC_STATE_TEXT[status] || ["状态未知", "muted"];
   const failed = (src.failed_scope && src.failed_scope.sources) || 0;
-  if (status === "connected") {
-    badge.textContent = "已连接";
-    badge.classList.add("ok");
-  } else if (status === "needs_attention") {
-    badge.textContent = "需要处理";
-    badge.classList.add("fail");
-  } else if (status === "paused") {
-    badge.textContent = "已暂停";
-    badge.classList.add("warn");
-  } else if (status === "excluded") {
-    badge.textContent = "已排除";
-    badge.classList.add("warn");
-  } else {
-    badge.textContent = status === "not_detected" ? "未检测到" : "状态未知";
-    badge.classList.add("warn");
-  }
-  head.appendChild(badge);
-
-  const sessions = el("div", "src-meta");
   const scope = src.import_scope || {};
-  sessions.textContent = "已导入 " + (scope.sessions ?? 0) + " 个会话 · " +
-    (scope.facts ?? 0) + " 条事实";
-  card.appendChild(head);
-  card.appendChild(sessions);
 
-  const scan = el("div", "src-meta");
-  scan.textContent = "扫描源 " + ((src.scan && src.scan.source_count) ?? 0) +
-    " · 最近日志 " + fmtSourceTime(src.log && src.log.last_event_at_ms);
-  card.appendChild(scan);
+  const head = el("button", "src-row-head");
+  head.type = "button";
+  head.setAttribute("aria-expanded", "false");
+  const dot = el("span", "src-dot " + (failed > 0 ? "danger" : stateModifier));
+  dot.textContent = "●";
+  dot.setAttribute("aria-hidden", "true");
+  const name = el("span", "src-row-name");
+  name.textContent = HOST_DISPLAY[key] || key;
+  if (key === "workbuddy") {
+    const experimental = el("span", "chip");
+    experimental.textContent = "实验支持";
+    experimental.style.marginLeft = "6px";
+    name.appendChild(experimental);
+  }
+  const state = el("span", "src-row-state " + (failed > 0 ? "danger" : stateModifier));
+  state.textContent = failed > 0 ? "需要处理" : stateText;
+  const meta = el("span", "src-row-meta");
+  const sessionsText = (scope.sessions ?? 0) > 0 || status !== "not_detected"
+    ? Number(scope.sessions || 0) + " 个会话"
+    : "尚未导入";
+  const lastEventText = fmtSourceTime(src.log && src.log.last_event_at_ms);
+  meta.textContent = sessionsText + " · 最近记录 " + lastEventText + (failed > 0 ? " · 读取失败" : "");
+  const caret = el("span", "src-row-caret");
+  caret.textContent = "▾";
+  caret.setAttribute("aria-hidden", "true");
+  head.append(dot, name, state, meta, caret);
+
+  const detail = el("div", "src-row-detail");
+  detail.hidden = true;
   const location = srcState.locations && srcState.locations[key];
   if (location) {
-    const details = document.createElement("details");
-    details.className = "src-meta";
-    const summary = document.createElement("summary");
-    summary.textContent = "读取位置：" + String(location).replace(/^\/Users\/[^/]+/, "~");
-    const full = document.createElement("div");
-    full.className = "src-custom-path";
-    full.textContent = String(location);
-    details.append(summary, full);
-    card.appendChild(details);
+    const loc = el("div");
+    const short = String(location).replace(/^\/Users\/[^/]+/, "~");
+    loc.textContent = "读取位置：" + short + " ";
+    const showFull = el("button", "chip-link");
+    showFull.type = "button";
+    showFull.textContent = "显示完整路径";
+    showFull.onclick = () => { loc.firstChild.textContent = "读取位置：" + String(location) + " "; showFull.remove(); };
+    loc.appendChild(showFull);
+    detail.appendChild(loc);
   }
-
+  const range = el("div");
+  const first = scope.first_event_at_ms ? fmtSourceTime(scope.first_event_at_ms) : null;
+  const last = scope.last_event_at_ms ? fmtSourceTime(scope.last_event_at_ms) : null;
+  range.textContent = "导入范围：" + (scope.facts ?? 0) + " 条记录" +
+    (first && last ? "（" + first + " – " + last + "）" : "");
+  detail.appendChild(range);
+  const scan = el("div");
+  scan.textContent = "扫描：" + ((src.scan && src.scan.source_count) ?? 0) + " 个文件" +
+    (src.scan && src.scan.last_scanned_at_ms ? " · 上次扫描 " + fmtSourceTime(src.scan.last_scanned_at_ms) : "");
+  detail.appendChild(scan);
   if (failed > 0) {
-    const errors = ((src.failed_scope && src.failed_scope.error_codes) || []).join("、") || "未知错误";
-    const row = el("div", "degraded-row");
-    row.textContent = "失败范围：" + failed + " 个源 · " + errors;
-    card.appendChild(row);
-    const freshness = el("div", "src-meta");
-    freshness.textContent = "本来源本轮读取失败；状态不是新鲜数据。";
-    card.appendChild(freshness);
+    const codes = (src.failed_scope && src.failed_scope.error_codes) || [];
+    const text = codes.length ? codes.map(sourceErrorText).join("、") : "读取失败";
+    const failRow = el("div", "degraded-row");
+    failRow.title = codes.join(", ");
+    failRow.textContent = failed + " 个文件读取失败 · " + text + "；本来源本轮不是新鲜数据。";
+    detail.appendChild(failRow);
   }
   const action = src.recovery_action || {};
+  const actions = el("div", "src-row-detail-actions");
   if (action.label) {
-    const button = el("button", "btn");
+    const button = el("button", "chip-link");
+    button.type = "button";
     button.textContent = action.label;
-    button.onclick = () => recoverSource(button, key, action.kind);
-    card.appendChild(button);
+    // 块体箭头函数不会隐式返回 recoverSource 的 promise（旧版单表达式箭头会）——
+    // 补 return，否则 onclick() 调用方（真机点击无所谓，但测试和任何未来的
+    // await button.onclick() 都会拿到 undefined，观察不到轮询过程就提前判定完成）。
+    button.onclick = (event) => { event && event.stopPropagation(); return recoverSource(button, key, action.kind); };
+    actions.appendChild(button);
   }
   if (status !== "excluded") {
-    const exclude = el("button", "btn secondary");
+    const exclude = el("button", "chip-link");
+    exclude.type = "button";
     exclude.textContent = "停止读取此来源";
     exclude.title = "停止后续读取，已导入数据保持不变";
-    exclude.onclick = async () => {
+    exclude.onclick = async (event) => {
+      event && event.stopPropagation();
       exclude.disabled = true;
       try {
         await invoke("set_source_host_excluded", { input: { host: key, excluded: true } });
@@ -5259,26 +5561,38 @@ function renderSourceCard(src) {
         showBanner("src-banner", "无法停止读取：" + errText(e), false);
       }
     };
-    card.appendChild(exclude);
+    actions.appendChild(exclude);
   }
-  const clear = el("button", "btn secondary");
-  clear.textContent = "删除已导入数据";
-  clear.title = "只删除本 App 中该来源的已导入数据；不会删除宿主原始日志";
-  clear.onclick = async () => {
+  const clear = el("button", "chip-link danger");
+  clear.type = "button";
+  clear.textContent = "删除已导入数据…";
+  clear.title = "只删除本 App 中该来源的已导入数据；不会删除工具原始日志";
+  clear.onclick = async (event) => {
+    event && event.stopPropagation();
     const name = HOST_DISPLAY[key] || key;
-    if (!window.confirm("删除“" + name + "”已导入到本 App 的数据？\n\n不会删除该工具的原始日志。该来源会同时停止读取，恢复读取后才会重新导入。")) return;
+    if (!window.confirm("删除\u201c" + name + "\u201d已导入到本 App 的数据？\n\n将删除 " + (scope.facts ?? 0) + " 条记录、" + (scope.sessions ?? 0) +
+        " 个会话；不会删除该工具的原始日志。该来源会同时停止读取，恢复读取后才会重新导入。")) return;
     clear.disabled = true;
     try {
       const result = await invoke("delete_imported_source_data", { host: key });
-      showBanner("src-banner", "已删除 " + result.facts + " 条事实、" + result.sessions + " 个会话；原始日志未修改。", true);
+      showBanner("src-banner", "已删除 " + result.facts + " 条记录、" + result.sessions + " 个会话；原始日志未修改。", true);
       await loadSources(true);
     } catch (e) {
       clear.disabled = false;
       showBanner("src-banner", "删除失败：" + errText(e), false);
     }
   };
-  card.appendChild(clear);
-  return card;
+  actions.appendChild(clear);
+  detail.appendChild(actions);
+
+  head.onclick = () => {
+    const open = detail.hidden;
+    detail.hidden = !open;
+    row.dataset.open = open ? "1" : "0";
+    head.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  row.append(head, detail);
+  return row;
 }
 
 function fmtSourceTime(ms) {
@@ -5348,6 +5662,7 @@ async function init() {
     billingReviewButton.addEventListener("click", () => {
       billingReviewOpen = true;
       billingReviewPanel.hidden = false;
+      switchTab("sources");
     });
   }
   document.getElementById("wb-refresh").addEventListener("click", loadActiveTab);
@@ -5434,7 +5749,6 @@ async function init() {
     findState.rule = ev.target.value;
     renderFindingsDetail();
   });
-  document.getElementById("src-reload").addEventListener("click", () => loadSources(true));
   // 日历默认月跟随统计时区今天；本月输入框受 input[type=month] 约束天然合法。
   if (!calMonth) calMonth = statisticsMonth();
   renderOverview();

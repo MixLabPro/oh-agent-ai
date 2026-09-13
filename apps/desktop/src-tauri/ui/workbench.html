@@ -10,14 +10,14 @@
   <header class="wb-head">
     <nav class="tabs" id="tabs">
       <button class="tab active" data-tab="overview">总览</button>
-      <button class="tab" data-tab="calendar">Token 日历</button>
+      <button class="tab" data-tab="calendar">用量</button>
       <button class="tab" data-tab="sessions">会话</button>
-      <button class="tab" data-tab="findings">Issues</button>
-      <button class="tab" data-tab="sources">数据源</button>
+      <button class="tab" data-tab="findings">待处理</button>
+      <button class="tab" data-tab="sources">设置</button>
     </nav>
     <span class="wb-head-right">
       <span id="wb-sync-dot" class="sync-dot" title=""></span>
-      <button id="wb-screenshot" class="wb-refresh" title="截图当前窗口到剪贴板">截图</button>
+      <button id="wb-screenshot" class="wb-refresh" hidden title="截图当前窗口到剪贴板">截图</button>
       <button id="wb-refresh" class="wb-refresh" title="重新加载当前页">刷新</button>
     </span>
   </header>
@@ -25,11 +25,31 @@
   <main class="wb-main">
     <!-- ============ 总览 ============ -->
     <section id="tab-overview" class="tabpane active">
-      <!-- 本月结论行（审查 UX#2）：页面上四个金额口径并列时，用户没有工具
-           知道哪一个回答"我这个月要付多少"——把四个数字变成一个结论 + 下方
-           展开。由 renderOverview 用 data_monthly_summary 填充。 -->
-      <div class="verdict" id="ov-month-verdict" hidden></div>
-      <div class="banner quality-banner" id="ov-quality-banner" hidden></div>
+      <!-- 总览 IA（docs/v1.0.0/BETA_1_OVERVIEW_IA_REVIEW.md §4/§7）：
+           · 首行只承载口径与新鲜度；
+           · 第一行固定三张 KPI 大卡「本月支出 / 今日消耗 / 预算」（预算仅配置后
+             出现，由 JS 决定，不得再用 CSS 无条件藏卡）——dashboard 惯例，顶部 KPI 吸引
+             眼球（产品决策 2026-09-13，否掉过一版「动作区在上」）；
+           · 其后按紧急度：「现在该用谁」（有配额证据才显示）> 本月用量一行 >
+             可信度两条状态行（颜色来自 health，全 ok 收敛为一行）> 套餐待确认；
+           · 趋势/费用构成/数据源折在「查看」之后。 -->
+      <div class="overview-topline">
+        <div class="overview-scope">
+          <strong>本月</strong>
+          <span class="dot-sep">·</span>
+          <span id="ov-sync-status" class="muted">尚未同步</span>
+          <span class="dot-sep">·</span>
+          <span id="ov-sources-brief" class="muted">来源状态待读取</span>
+          <button type="button" class="btn secondary btn-inline" id="ov-sources-brief-action" hidden>查看数据源</button>
+        </div>
+        <div class="sync-row overview-sync">
+          <button id="ov-sync-now" class="btn" hidden>立即同步</button>
+        </div>
+      </div>
+      <!-- 通知组件 .notice 只有四个级别（ok / warn / danger / todo），结构固定：
+           图标 → 文案 → 按钮靠右；只有级别改颜色；主按钮（实心）只出现在 todo 级
+           且全页唯一。权威数据不可用（status != ok / critical）走 danger 级，带恢复入口。 -->
+      <div class="notice danger" id="ov-quality-banner" hidden></div>
       <section class="first-run panel" id="ov-first-run" hidden aria-live="polite">
         <div class="panel-title">正在本机整理 AI 使用记录</div>
         <div class="muted">正在扫描已支持工具的标准本地位置，不会上传会话内容。首次结果出现后，套餐、账单与预算都可以稍后再补充。</div>
@@ -47,277 +67,107 @@
         </div>
         <div class="billing-preview" id="ov-no-records-sample-content" hidden></div>
       </section>
-      <section class="billing-review panel" id="ov-export-panel" aria-live="polite">
-        <div class="panel-title">导出当前月摘要</div>
-        <div class="muted">仅导出当前汇总视图中的宿主、服务商、token、币种、金额口径、覆盖与版本字段；不包含会话正文、路径、账户标识或原始日志。</div>
-        <div class="billing-form-actions">
-          <button class="btn secondary" id="ov-export-preview">预览导出字段</button>
-          <button class="btn" id="ov-export-download" hidden>下载 CSV</button>
+
+      <!-- 第一行三张 KPI 大卡。金额纪律：口径分栏永不相加（按量实付 / 订阅月费分币
+           各自成行，来自 DTO 的 actual_spend_by_basis——拆栏在 domain，不在 JS）；
+           名义只作诊断脚注；unavailable 一律「无数据」，绝不渲染 0。
+           预算口径 = 跨宿主「按量实付」CNY（PM 决策 2026-09-07，排除订阅月费）。 -->
+      <div class="cards month-band" id="ov-kpi-row">
+        <div class="stat spend-card">
+          <div class="label-row"><span class="label">本月支出</span><button type="button" class="card-link" id="ov-link-spend">查看明细 ›</button></div>
+          <dl class="spend-lines">
+            <div class="spend-line"><dt title="按实际用量计费、真的要付的钱（各工具合计）">按量费用</dt><dd id="ov-m-metered">—</dd></div>
+            <div class="spend-line"><dt title="固定月费，用不用都要付">订阅月费</dt><dd id="ov-m-subscription">—</dd></div>
+            <div class="spend-line diag"><dt title="本月全部用量按各家官方标价计的金额，含套餐内已抵掉的部分（不扣套餐、折扣）；与按量费用的差就是套餐帮你省的。不是账单。">按官方价折算</dt><dd id="ov-m-nominal">—</dd></div>
+          </dl>
+          <div class="sub" id="ov-m-spend-sub"></div>
         </div>
-        <div class="billing-preview" id="ov-export-preview-content" hidden></div>
-      </section>
-      <section class="billing-review panel" id="ov-retention-panel" aria-live="polite">
-        <div class="panel-title">本地数据保留期</div>
-        <div class="muted">默认保留最近 13 个自然月（含当月）。修改不会立即删除数据；下一次本机维护才会清理过期的已导入事实，不会删除宿主原始日志。</div>
-        <div class="billing-form">
-          <label>保留月数
-            <input id="ov-retention-months" type="number" min="1" max="60" step="1" aria-describedby="ov-retention-help ov-retention-status" />
-          </label>
-          <div class="billing-form-actions"><button class="btn" id="ov-retention-save">保存保留期</button></div>
-        </div>
-        <div class="muted" id="ov-retention-help">可设置 1–60 个月。</div>
-        <div class="billing-preview" id="ov-retention-status" hidden role="alert" tabindex="-1"></div>
-      </section>
-      <section class="billing-review panel" id="ov-timezone-panel" aria-live="polite">
-        <div class="panel-title">统计时区</div>
-        <div class="muted">用于今天、本月、日历和小时边界。默认跟随系统；修改不会改变事件原始时间，也不会改变供应商峰谷计价规则。</div>
-        <div class="billing-form">
-          <label>时区（IANA）
-            <input id="ov-statistics-timezone" type="text" placeholder="Asia/Shanghai" aria-describedby="ov-timezone-help ov-timezone-status" />
-          </label>
-          <div class="billing-form-actions"><button class="btn" id="ov-timezone-save">保存统计时区</button></div>
-        </div>
-        <div class="muted" id="ov-timezone-help">示例：Asia/Shanghai、America/Los_Angeles、Europe/Berlin。</div>
-        <div class="billing-preview" id="ov-timezone-status" hidden role="alert" tabindex="-1"></div>
-      </section>
-      <section class="billing-review panel" id="ov-pricing-catalog-panel" aria-live="polite">
-        <div class="panel-title">公共价格目录</div>
-        <div class="muted">可选检查维护者发布的公共价卡。只访问公共 HTTPS 地址，不上传本地日志；联网失败或校验失败会继续使用当前有效版本。</div>
-        <div class="billing-form-actions">
-          <label><input id="ov-pricing-catalog-network" type="checkbox" /> 允许访问公共价格服务</label>
-          <button class="btn" id="ov-pricing-catalog-update">检查价格更新</button>
-        </div>
-        <div class="billing-preview" id="ov-pricing-catalog-status" role="status" tabindex="-1">尚未检查</div>
-      </section>
-      <section class="billing-review panel" id="ov-diagnostic-panel" aria-live="polite">
-        <div class="panel-title">帮助与诊断</div>
-        <div class="muted">可保存一份脱敏诊断包供你自行查看或提交。不会包含会话正文、绝对路径、账户标识，也不会自动上传。</div>
-        <div class="billing-form-actions">
-          <button class="btn secondary" id="ov-diagnostic-export">保存脱敏诊断包</button>
-          <button class="btn secondary" id="ov-update-check">检查新版本</button>
-          <button class="btn secondary" id="ov-releases-open">查看版本发布页</button>
-        </div>
-        <div class="billing-preview" id="ov-diagnostic-status" hidden role="status" tabindex="-1"></div>
-        <details class="billing-csv">
-          <summary>查看版本与同步状态</summary>
-          <div class="billing-preview" id="ov-about-versions">读取中…</div>
-        </details>
-      </section>
-      <section class="billing-prompt" id="ov-billing-prompt" hidden aria-live="polite">
-        <div>
-          <strong>有套餐信息待你确认</strong>
-          <div class="muted" id="ov-billing-prompt-copy"></div>
-        </div>
-        <div class="billing-prompt-actions">
-          <button type="button" class="btn" id="ov-billing-review">确认套餐信息</button>
-          <button type="button" class="btn secondary" id="ov-billing-later">稍后</button>
-        </div>
-      </section>
-      <section class="billing-review panel" id="ov-billing-review-panel" hidden role="region" aria-labelledby="ov-billing-review-title">
-        <div class="panel-title">
-          <span id="ov-billing-review-title">确认旧套餐信息</span>
-          <button class="btn secondary" id="ov-billing-review-close" type="button">收起</button>
-        </div>
-        <div class="muted">这只确认套餐归属，不会被当作已付款；实际支出仍需账单或付款记录。</div>
-        <div id="ov-billing-review-list"></div>
-      </section>
-      <section class="billing-review panel" id="ov-billing-declarations-panel" hidden>
-        <div class="panel-title">当前计费声明</div>
-        <div class="muted">撤销会保留修订与证据历史，并立即恢复受影响用量的按量/未定归类；不会删除任何原始记录。</div>
-        <div id="ov-billing-declarations-list"></div>
-      </section>
-      <section class="billing-review panel" id="ov-billing-recalculation-panel" hidden aria-live="polite">
-        <div class="panel-title">重算状态</div>
-        <div class="muted">重算失败或应用退出时，旧版本结果仍可用；修复数据后可从这里继续，不会重复导入或重复计账。</div>
-        <div id="ov-billing-recalculation-list"></div>
-      </section>
-      <section class="billing-declaration panel" id="ov-billing-declaration-panel" hidden>
-        <div class="panel-title">确认计费方式</div>
-        <div class="muted" id="ov-billing-declaration-context"></div>
-        <div class="billing-form">
-          <label>这批用量如何付费？
-            <select id="ov-billing-relationship">
-              <option value="official_subscription">官方订阅</option>
-              <option value="official_api">官方 API</option>
-              <option value="third_party">第三方服务</option>
-              <option value="organization">组织承担</option>
-              <option value="unknown">仍不确定</option>
-            </select>
-          </label>
-          <label>作用范围
-            <select id="ov-billing-scope">
-              <option value="declaration">该宿主与服务商（按有效期）</option>
-            </select>
-          </label>
-          <div class="billing-form-actions">
-            <button class="btn" id="ov-billing-save">保存并预览影响</button>
-            <button class="btn secondary" id="ov-billing-cancel">取消</button>
-          </div>
-        </div>
-        <div class="billing-preview" id="ov-billing-preview" hidden></div>
-        <div class="billing-form-actions" id="ov-billing-apply-actions" hidden>
-          <button class="btn" id="ov-billing-apply">应用到汇总并开始重算</button>
-        </div>
-      </section>
-      <section class="billing-record panel" id="ov-billing-record-panel">
-        <div class="panel-title">录入实际账单</div>
-        <div class="muted">账单/付款记录与订阅合同分开保存；金额使用最小货币单位，不会自动推断付款。</div>
-        <div class="billing-form">
-          <label>宿主 <input id="ov-bill-host" value="codex" maxlength="64" /></label>
-          <label>服务商 <input id="ov-bill-provider" maxlength="128" placeholder="openai" /></label>
-          <label>账期 <input id="ov-bill-period" placeholder="YYYY-MM" maxlength="7" /></label>
-          <label>费用类型
-            <select id="ov-bill-basis">
-              <option value="host_billed">账单实付</option>
-              <option value="metered_actual">按量实付</option>
-              <option value="fixed_subscription">固定订阅</option>
-            </select>
-          </label>
-          <label>金额（分） <input id="ov-bill-amount" type="number" min="0" step="1" /></label>
-          <label>币种 <input id="ov-bill-currency" value="CNY" maxlength="8" /></label>
-          <label>来源说明 <input id="ov-bill-evidence" maxlength="256" placeholder="用户手工录入" /></label>
-          <div class="billing-form-actions"><button class="btn" id="ov-bill-save">保存账单</button></div>
-        </div>
-        <div class="billing-preview" id="ov-bill-status" hidden></div>
-        <div class="muted" id="ov-bill-existing"></div>
-        <details class="billing-csv">
-          <summary>导入 CSV 模板</summary>
-          <div class="muted">表头必须为：host,provider_id,billing_period,billing_basis,amount_minor,currency,evidence_ref</div>
-          <textarea id="ov-bill-csv" rows="4" placeholder="host,provider_id,billing_period,billing_basis,amount_minor,currency,evidence_ref"></textarea>
-          <div class="billing-form-actions">
-            <button class="btn secondary" id="ov-bill-csv-preview">预览 CSV</button>
-            <button class="btn" id="ov-bill-csv-import" disabled>确认导入</button>
-          </div>
-          <div class="billing-preview" id="ov-bill-csv-status" hidden></div>
-        </details>
-      </section>
-      <!-- v0.9 Stage D KPI 行（今日五 tile，ATTRIBUTABLE_WASTE §6/§6.7 感知层）。
-           数据源 = data_daily_summary（冻结 DTO：tokens_by_host + by_provider +
-           total_actual_spend）。名义 = 官方标价折算（不扣订阅/中转折扣，"名义
-           GDP"口径）；实际 = 按量实付 + 订阅月费（分币）。恰好一个 hero（名义），
-           其余 stat tile。unavailable 一律「无数据」，绝不渲染 0。 -->
-      <div class="cards">
-        <div class="stat">
-          <div class="label">今日 tokens</div>
+        <div class="stat today-card">
+          <div class="label-row"><span class="label">今日消耗</span><button type="button" class="card-link" id="ov-link-today">查看今天 ›</button></div>
           <div class="amount" id="ov-t-tokens">—</div>
+          <dl class="spend-lines">
+            <div class="spend-line"><dt title="今天按实际用量计费的钱">按量费用</dt><dd id="ov-t-metered">—</dd></div>
+            <div class="spend-line diag"><dt title="今天全部用量按官方标价计的金额，含套餐内已抵掉的部分；与按量费用的差就是套餐帮你省的。不是账单。">按官方价折算</dt><dd id="ov-t-nominal">—</dd></div>
+          </dl>
           <div class="sub" id="ov-t-tokens-sub"></div>
         </div>
-        <div class="stat nominal">
-          <div class="label">今日名义成本 <span class="chip diagnostic">标价口径 · 非账单</span></div>
-          <div class="amount" id="ov-t-nominal">—</div>
-          <div class="sub" id="ov-t-nominal-sub">@官方标价 · 不扣套餐/折扣</div>
-        </div>
-        <div class="stat">
-          <div class="label">今日单位成本</div>
-          <div class="amount" id="ov-t-unit">—</div>
-          <div class="sub" id="ov-t-unit-sub"></div>
-        </div>
-        <div class="stat today">
-          <div class="label">今日实际支出</div>
-          <div class="amount" id="ov-t-actual">—</div>
-          <div class="sub" id="ov-t-actual-sub"></div>
-        </div>
-        <div class="stat">
-          <div class="label">缓存命中率</div>
-          <div class="amount" id="ov-t-cache">—</div>
-          <div class="sub" id="ov-t-cache-sub"></div>
-        </div>
-      </div>
-
-      <!-- 月度带（同构四 tile）+ 预算小卡。预算口径 = 跨宿主「按量实付」CNY
-           （PM 决策 2026-09-07，排除订阅月费——见 budget-scope-metered-only）；
-           当前唯一 CNY 按量源是 DSH，但分子已是跨 by_provider 之和，不再是
-           「仅 DSH」。2026-09-01 月度卡/预算卡打架事故后，口径写在卡面上。 -->
-      <div class="cards month-band">
-        <div class="stat">
-          <div class="label">本月 tokens</div>
-          <div class="amount" id="ov-m-tokens">—</div>
-          <div class="sub" id="ov-m-tokens-sub"></div>
-        </div>
-        <div class="stat">
-          <div class="label">本月名义成本</div>
-          <div class="amount" id="ov-m-nominal">—</div>
-          <div class="sub" id="ov-m-nominal-sub"></div>
-        </div>
-        <div class="stat">
-          <div class="label">本月单位成本</div>
-          <div class="amount" id="ov-m-unit">—</div>
-          <div class="sub" id="ov-m-unit-sub"></div>
-        </div>
-        <div class="stat">
-          <div class="label">本月实际支出</div>
-          <div class="amount" id="ov-m-actual">—</div>
-          <div class="sub" id="ov-m-actual-sub"></div>
-        </div>
-        <div class="stat budget">
-          <div class="label" title="跨宿主「按量实付」CNY——排除订阅月费（月初已付的常数）。当前唯一 CNY 按量源是 DSH。">预算 · 跨宿主按量实付</div>
+        <div class="stat budget" id="ov-budget-card" hidden>
+          <div class="label-row"><span class="label" title="只统计按量费用（人民币），不含订阅月费——月费在月初就已固定。">预算（按量费用）</span><button type="button" class="card-link" id="ov-link-budget">调整预算 ›</button></div>
           <div class="amount" id="ov-budget-amount">—</div>
           <div class="bar"><div class="fill" id="ov-budget-fill"></div></div>
           <div class="sub" id="ov-budget-sub"></div>
         </div>
       </div>
 
-      <div class="sync-row">
-        <span id="ov-sync-status" class="muted">尚未同步</span>
-        <button id="ov-sync-now" class="btn" hidden>立即同步</button>
-      </div>
-
-      <section class="budget-settings panel" id="ov-budget-settings">
-        <div class="panel-title">预算设置</div>
-        <div class="muted">只用于跨宿主按量实付的 CNY 预算；固定订阅与名义成本不计入。金额为分，设为 0 可停用月度预算。提醒不会阻止 Agent 继续使用。</div>
-        <div class="muted" id="ov-budget-origin" hidden></div>
-        <div class="billing-form">
-          <label>月预算（分） <input id="ov-budget-monthly-input" type="number" min="0" step="1" /></label>
-          <label>日预算（分） <input id="ov-budget-daily-input" type="number" min="0" step="1" /></label>
-          <label>预警阈值（%） <input id="ov-budget-warning-input" type="number" min="0" max="100" step="1" value="80" /></label>
-          <div class="billing-form-actions"><button class="btn" id="ov-budget-save">保存预算</button></div>
-        </div>
-        <div class="billing-form-actions">
-          <button class="btn secondary" id="ov-budget-snooze-day">本周期静默提醒</button>
-          <button class="btn secondary" id="ov-budget-snooze-clear">恢复预算提醒</button>
-        </div>
-        <div class="panel-title">独立按量预算</div>
-        <div class="muted">估算观察预算与已确认按量支出预算分别统计；币种不会互相折算或混入。</div>
-        <div id="ov-budget-profiles" class="billing-form"></div>
-        <div class="billing-preview" id="ov-budget-settings-status" hidden></div>
-      </section>
-
-      <!-- 双轨账（混合用户核心区块）：订阅轨 = 已付费产能（利用率倍数 =
-           标价折算 ÷ 月费，>50× 触发「归属待核」告警），按量轨 = 真实支出。
-           两轨永不合并。数据源 = data_monthly_summary.by_provider。 -->
-      <div class="panel dual">
-        <div class="panel-title">双轨账（本月）</div>
-        <div id="ov-dual-empty" class="empty" hidden>本月无跨宿主数据</div>
-        <ul id="ov-dual-list" class="src-list"></ul>
-      </div>
-
-      <!-- 决策卡「现在该用谁」（混合用户）：Codex 窗口条（plan 快照，唯一
-           正向余量源）；Claude Pro 余量不可得（quotaLimits 只有拒绝快照，
-           不得反推假百分比）；GLM/MiniMax 无配额证据源 → 只显示利用率。
-           建议行四态：健康 / 预警（提前切）/ 全满（走按量）/ 闲置（没用够）。 -->
-      <div class="panel decide">
-        <div class="panel-title">现在该用谁</div>
+      <!-- 决策卡「现在该用谁」：三卡之下第一项——开工前先看窗口余量，是首屏唯一面向
+           下一步动作的信息。证据约束：只有带时间戳的配额快照（Codex plan 快照）才
+           显示，否则整块隐藏，不用碰壁史反推百分比、不留空卡。窗口 <15% 升级为 warn。 -->
+      <div class="panel decide" id="ov-decide-card" hidden>
+        <div class="panel-title"><span>现在该用谁</span><span class="panel-title-right"><span class="muted" id="ov-decide-observed"></span><button type="button" class="card-link" id="ov-link-plans">套餐设置 ›</button></span></div>
         <div id="ov-decide-body"></div>
       </div>
 
-      <div class="panel days">
-        <div class="panel-title">本月逐日</div>
-        <div id="ov-days-empty" class="empty" hidden>本月还没有数据</div>
-        <ul id="ov-days-list" class="days-list"></ul>
+      <!-- 本月用量一行：规格 §4 的「已观测 tokens」「名义成本」两项极高——不占卡，
+           但首屏可见。 -->
+      <div class="usage-strip" id="ov-usage-strip">
+        <span class="usage-strip-main"><span class="muted">本月已处理</span> <strong id="ov-m-tokens">—</strong></span>
+        <span class="muted" id="ov-m-tokens-sub"></span>
+        <span class="usage-strip-links">
+          <!-- 预算未配置时卡片整块隐藏（规格 §4 第 80 行），入口落在这里，不做空卡。 -->
+          <button type="button" class="card-link" id="ov-link-set-budget" hidden>设置预算 ›</button>
+          <button type="button" class="card-link" id="ov-link-usage">查看用量 ›</button>
+        </span>
       </div>
 
-      <!-- ============ 数据源（v0.9 Stage 0.6 总览页诚实状态）============
-           由 data_monthly_summary（Stage 0.6a 落地的 Tauri 命令）驱动：
-           每个宿主一行（amounts_by_basis + freshness + has_unresolved），
-           coverage / excluded_hosts 单独两行。spec §0.1「不得渲染为 ¥0、
-           正常或看似完整的总额」——unavailable 宿主固定「无数据」，绝不显
-           示 0.00；金额一律带口径标签，不带货币符号（DTO 不带 currency：
-           claude CNY 估 + USD 诊断混在同一 map，跨币永不相加）。 -->
-      <div class="panel sources">
-        <div class="panel-title">数据源</div>
-        <div id="ov-sources-empty" class="empty" hidden>本月无跨宿主数据</div>
-        <ul id="ov-sources-list" class="src-list"></ul>
-        <div class="src-meta" id="ov-sources-meta"></div>
+      <!-- 可信度两条状态行（§3.2）：用量归属 / 价格齐全。级别由 health 决定，不可
+           关闭——它们是数据状态不是通知，关掉等于把不完整的数字当完整的展示；
+           全 ok 时 JS 合成一行并加 .compact。与套餐提示同源（同一批 18K）时，
+           归属行去掉自己的按钮、指向下方套餐提示——一件事一个动作。 -->
+      <ul class="notice-list" id="ov-trust-rows">
+        <li class="notice" id="ov-trust-route">
+          <span class="notice-icon" aria-hidden="true"></span>
+          <span class="notice-text" id="ov-trust-route-text">正在核对用量归属</span>
+          <span class="notice-actions"><button type="button" class="btn secondary" id="ov-trust-route-action" hidden>查看详情</button></span>
+        </li>
+        <li class="notice" id="ov-trust-price">
+          <span class="notice-icon" aria-hidden="true"></span>
+          <span class="notice-text" id="ov-trust-price-text">正在核对价格</span>
+          <span class="notice-actions"><button type="button" class="btn secondary" id="ov-trust-price-action" hidden>查看价格表</button></span>
+        </li>
+      </ul>
+
+      <!-- 待办级通知：唯一的实心主按钮；「稍后」= 30 天内不再提醒（设置页保留入口），
+           待办的正确关闭方式是延后，不是永久隐藏一件仍然没做的事。 -->
+      <section class="notice todo" id="ov-billing-prompt" hidden aria-live="polite">
+        <span class="notice-icon" aria-hidden="true"></span>
+        <span class="notice-text">
+          <strong>有套餐信息待确认</strong>
+          <span class="notice-sub" id="ov-billing-prompt-copy"></span>
+        </span>
+        <span class="notice-actions">
+          <button type="button" class="btn secondary" id="ov-billing-later">稍后（30 天内不再提醒）</button>
+          <button type="button" class="btn" id="ov-billing-review">确认套餐信息</button>
+        </span>
+      </section>
+
+      <!-- 费用明细：原「费用构成（双轨账）」与「数据源」是同一份 by_provider 的
+           两种投影（同样三行、同样金额、不同词表），合成一张表。每行 = 宿主 ·
+           服务商 / 金额（带币种 + 人话性质）/ 状态 / 数据新鲜度（来自 by_host）。
+           订阅利用率倍数 = 标价折算 ÷ 月费，>50× 是「请核对套餐」告警而非套利。
+           evidence_basis / pricing_method / unresolved_reason 等 reason code 只进
+           hover（规格 §4 第 84 行：禁止在卡面展示 raw reason code）。
+           不再折叠：只剩两块内容时折叠只是多一次点击（产品决策 2026-09-13）。 -->
+      <div class="panel dual overview-secondary">
+        <div class="panel-title" id="ov-dual-title"><span>费用明细（本月）</span><button type="button" class="card-link" id="ov-link-billing">计费设置 ›</button></div>
+        <div id="ov-dual-empty" class="empty" hidden>本月还没有数据</div>
+        <ul id="ov-dual-list" class="src-list"></ul>
+      </div>
+
+      <!-- 最近几天（完整逐日和真正的趋势图在「用量」页）。 -->
+      <div class="panel days overview-secondary">
+        <div class="panel-title"><span>最近几天</span><button type="button" class="card-link" id="ov-link-days">查看全部 ›</button></div>
+        <div id="ov-days-empty" class="empty" hidden>本月还没有数据</div>
+        <ul id="ov-days-list" class="days-list"></ul>
       </div>
 
       <div class="note" id="ov-note"></div>
@@ -509,51 +359,284 @@
       <button id="find-more" class="btn secondary" hidden>加载更多</button>
     </section>
 
-    <!-- ============ 数据源 ============ -->
-    <section id="tab-sources" class="tabpane">
-      <div class="src-toolbar">
-        <span class="muted">数据源状态</span>
-        <span class="flex-spacer"></span>
-        <button id="src-pause-toggle" class="btn secondary" title="暂停或恢复自动同步">暂停同步</button>
-        <button id="src-reload" class="btn" title="重新扫描数据源">重载</button>
-      </div>
-      <div id="src-banner" class="banner" hidden role="alert" aria-live="assertive"></div>
-      <div id="src-loading" class="muted" hidden>加载中…</div>
+    <!-- ============ 设置（内部仍沿用 sources 标识以保持导航合同） ============ -->
+    <section id="tab-sources" class="tabpane settings-page">
+      <!-- 设置页：左栏分区导航 + 主栏五个分区（docs/v1.0.0/BETA_1_SETTINGS_PAGE_SPEC.md §3）。
+           三层结构：分区 h2 → .setting（标题/一句说明/控件行）→ 控件。页头不再自我介绍。 -->
+      <nav class="settings-nav" aria-label="设置分区">
+        <a href="#settings-sources">数据源</a>
+        <a href="#settings-billing">计费与套餐</a>
+        <a href="#settings-budget">预算</a>
+        <a href="#settings-data">统计与数据</a>
+        <a href="#settings-about">关于与诊断</a>
+      </nav>
+      <div class="settings-main">
 
-      <div class="sync-row">
-        <span id="src-sync" class="muted">尚未同步</span>
-      </div>
-
-      <section class="src-custom panel" aria-labelledby="src-custom-title">
-        <div class="panel-title" id="src-custom-title">其他本机位置</div>
-        <div class="muted">选择包含该工具数据目录的宿主根目录：Claude Code 选择含 <code>.claude</code> 的目录，Codex 选择含 <code>.codex</code> 的目录，DSH 选择含 <code>sessions</code> 的目录。添加后会在下一次同步读取；不会上传内容。</div>
-        <div class="billing-form">
-          <label>工具
-            <select id="src-custom-host">
-              <option value="claude-code">Claude Code</option>
-              <option value="codex">Codex</option>
-              <option value="dsh">DeepSeek Harness</option>
-            </select>
-          </label>
-          <label>目录
-            <input id="src-custom-root" type="text" readonly aria-describedby="src-custom-help src-custom-status" />
-          </label>
-          <div class="billing-form-actions">
-            <button id="src-custom-choose" class="btn secondary">选择目录</button>
-            <button id="src-custom-add" class="btn" disabled>添加并同步</button>
+      <section class="settings-section" id="settings-sources">
+        <h2>数据源</h2>
+        <div class="setting">
+          <div class="sync-line">
+            <span id="src-sync" class="muted">尚未同步</span>
+            <span class="flex-spacer"></span>
+            <button id="src-pause-toggle" class="btn secondary" type="button">暂停自动同步</button>
           </div>
+          <div id="src-banner" class="notice danger" hidden role="alert" aria-live="assertive"></div>
+          <div id="src-loading" class="muted" hidden>加载中…</div>
+          <div id="src-cards" class="src-rows"></div>
+          <div class="muted" id="src-foot" hidden></div>
         </div>
-        <div class="muted" id="src-custom-help">只能添加现有的绝对路径；可随时移除配置，移除不删除已导入数据。</div>
-        <div id="src-custom-status" class="billing-preview" hidden role="alert" tabindex="-1"></div>
-        <div id="src-custom-list" class="src-custom-list"></div>
+        <div class="setting" id="src-custom" aria-labelledby="src-custom-title">
+          <div class="setting-head">
+            <div class="setting-title" id="src-custom-title">其他本机位置</div>
+            <p>选择包含该工具数据目录的文件夹，例如含 <code>.claude</code> 的用户目录。</p>
+          </div>
+          <div class="form-row">
+            <label><span>工具</span>
+              <select id="src-custom-host">
+                <option value="claude-code">Claude Code</option>
+                <option value="codex">Codex</option>
+                <option value="dsh">DeepSeek Harness</option>
+              </select>
+            </label>
+            <label class="grow"><span>文件夹</span>
+              <input id="src-custom-root" type="text" readonly aria-describedby="src-custom-status" placeholder="尚未选择" />
+            </label>
+            <button id="src-custom-choose" class="btn secondary" type="button">选择…</button>
+            <button id="src-custom-add" class="btn secondary" type="button" disabled>添加并同步</button>
+          </div>
+          <div id="src-custom-status" class="form-receipt block" hidden role="alert" tabindex="-1"></div>
+          <div id="src-custom-list" class="src-custom-list"></div>
+        </div>
       </section>
 
-      <div id="src-cards" class="src-cards"></div>
-      <div class="note" id="src-foot"></div>
+      <section class="settings-section" id="settings-billing">
+        <h2>计费与套餐</h2>
+        <div class="setting" id="settings-billing-candidates" hidden>
+          <!-- 全页唯一实心主按钮：它是待办，不是保存（规格 §5.2）。 -->
+          <div class="notice todo">
+            <span class="notice-icon" aria-hidden="true"></span>
+            <div class="notice-text"><strong>有套餐信息待确认</strong><div class="notice-sub" id="settings-billing-candidates-copy"></div></div>
+            <div class="notice-actions"><button class="btn" id="settings-billing-candidates-open" type="button">查看并处理</button></div>
+          </div>
+          <section class="billing-review" id="ov-billing-review-panel" hidden role="region" aria-labelledby="ov-billing-review-title">
+            <div class="setting-head row">
+              <div class="setting-title" id="ov-billing-review-title">待确认的套餐</div>
+              <button class="chip-link" id="ov-billing-review-close" type="button">收起</button>
+            </div>
+            <div id="ov-billing-review-list"></div>
+          </section>
+        </div>
+        <section class="setting" id="ov-billing-declaration-panel" hidden>
+          <div class="setting-head">
+            <div class="setting-title">确认计费方式</div>
+            <p id="ov-billing-declaration-context"></p>
+          </div>
+          <div class="form-row">
+            <label><span>这批用量如何付费？</span>
+              <select id="ov-billing-relationship">
+                <option value="official_subscription">官方订阅</option>
+                <option value="official_api">官方 API</option>
+                <option value="third_party">第三方服务</option>
+                <option value="organization">组织承担</option>
+                <option value="unknown">仍不确定</option>
+              </select>
+            </label>
+            <label><span>作用范围</span>
+              <select id="ov-billing-scope">
+                <option value="declaration">该工具与服务商（按有效期）</option>
+              </select>
+            </label>
+            <button class="btn secondary" id="ov-billing-save" type="button">保存并预览影响</button>
+            <button class="chip-link" id="ov-billing-cancel" type="button">取消</button>
+          </div>
+          <div class="form-receipt block" id="ov-billing-preview" hidden></div>
+          <div class="form-row" id="ov-billing-apply-actions" hidden>
+            <button class="btn secondary" id="ov-billing-apply" type="button">应用到汇总并开始重算</button>
+          </div>
+        </section>
+        <section class="setting" id="ov-billing-declarations-panel" hidden>
+          <div class="setting-head">
+            <div class="setting-title">当前计费声明</div>
+            <p>撤销后受影响用量恢复为按量/未定归类，历史记录保留。</p>
+          </div>
+          <div id="ov-billing-declarations-list"></div>
+        </section>
+        <section class="setting" id="ov-billing-recalculation-panel" hidden aria-live="polite">
+          <div class="setting-head">
+            <div class="setting-title">重算状态</div>
+            <p>重算失败时旧结果仍可用；修复后可从这里继续。</p>
+          </div>
+          <div id="ov-billing-recalculation-list"></div>
+        </section>
+        <div class="setting" id="settings-bills" hidden>
+          <div class="setting-head">
+            <div class="setting-title">已有账单</div>
+            <p>测试版只显示已录入的账单，暂不提供录入与修改。</p>
+          </div>
+          <div id="settings-bills-list"></div>
+        </div>
+        <!-- 账单录入 / CSV 导入：Beta 延期（发布规格 D01），DOM 保留供正式版，不显示。 -->
+        <section class="billing-record" id="ov-billing-record-panel" hidden>
+          <div class="billing-form">
+            <label>宿主 <input id="ov-bill-host" value="codex" maxlength="64" /></label>
+            <label>服务商 <input id="ov-bill-provider" maxlength="128" placeholder="openai" /></label>
+            <label>账期 <input id="ov-bill-period" placeholder="YYYY-MM" maxlength="7" /></label>
+            <label>费用类型
+              <select id="ov-bill-basis">
+                <option value="host_billed">账单实付</option>
+                <option value="metered_actual">按量实付</option>
+                <option value="fixed_subscription">固定订阅</option>
+              </select>
+            </label>
+            <label>金额（分） <input id="ov-bill-amount" type="number" min="0" step="1" /></label>
+            <label>币种 <input id="ov-bill-currency" value="CNY" maxlength="8" /></label>
+            <label>来源说明 <input id="ov-bill-evidence" maxlength="256" placeholder="用户手工录入" /></label>
+            <div class="billing-form-actions"><button class="btn" id="ov-bill-save" type="button">保存账单</button></div>
+          </div>
+          <div class="billing-preview" id="ov-bill-status" hidden></div>
+          <div class="muted" id="ov-bill-existing"></div>
+          <details class="billing-csv">
+            <summary>导入 CSV 模板</summary>
+            <textarea id="ov-bill-csv" rows="4" placeholder="host,provider_id,billing_period,billing_basis,amount_minor,currency,evidence_ref"></textarea>
+            <div class="billing-form-actions">
+              <button class="btn secondary" id="ov-bill-csv-preview" type="button">预览 CSV</button>
+              <button class="btn" id="ov-bill-csv-import" type="button" disabled>确认导入</button>
+            </div>
+            <div class="billing-preview" id="ov-bill-csv-status" hidden></div>
+          </details>
+        </section>
+      </section>
+
+      <section class="settings-section" id="settings-budget">
+        <h2>预算</h2>
+        <div class="setting" id="ov-budget-settings">
+          <div class="setting-head">
+            <div class="setting-title">按量费用预算</div>
+            <p>按官方价折算的本月按量费用达到阈值时提醒你；订阅月费不计入。</p>
+          </div>
+          <div class="notice todo" id="ov-budget-legacy" hidden>
+            <span class="notice-icon" aria-hidden="true"></span>
+            <div class="notice-text" id="ov-budget-legacy-text"></div>
+          </div>
+          <div class="form-row">
+            <label><span>币种</span>
+              <select id="ov-budget-currency" aria-label="预算币种">
+                <option value="CNY">CNY ¥</option>
+                <option value="USD">USD $</option>
+              </select>
+            </label>
+            <label><span>月预算</span>
+              <span class="money-input"><i class="ov-budget-symbol" aria-hidden="true">¥</i><input id="ov-budget-monthly-amount" type="number" min="0" step="0.01" inputmode="decimal" placeholder="留空为不设" aria-label="月预算金额" /></span>
+            </label>
+            <label><span>日预算（可选）</span>
+              <span class="money-input"><i class="ov-budget-symbol" aria-hidden="true">¥</i><input id="ov-budget-daily-amount" type="number" min="0" step="0.01" inputmode="decimal" placeholder="不设" aria-label="日预算金额" /></span>
+            </label>
+            <button class="btn secondary" id="ov-budget-save" type="button">保存</button>
+            <span class="form-receipt" id="ov-budget-settings-status" hidden role="status"></span>
+          </div>
+          <div class="setting-note">提醒阈值：80% 和 100% 各提醒一次。提醒不会阻止工具继续使用。</div>
+          <div class="setting-note" id="ov-budget-live" hidden></div>
+        </div>
+        <div class="setting">
+          <div class="setting-head">
+            <div class="setting-title">提醒</div>
+            <p>达到阈值时发送一次系统通知；保存预算时会申请通知权限。</p>
+          </div>
+          <div class="form-row">
+            <span class="muted" id="ov-budget-snooze-text"></span>
+            <button class="btn secondary" id="ov-budget-snooze-day" type="button">本周期静默提醒</button>
+            <button class="btn secondary" id="ov-budget-snooze-clear" type="button" hidden>恢复提醒</button>
+          </div>
+        </div>
+        <div class="setting" id="ov-budget-confirmed" hidden>
+          <div class="setting-head">
+            <div class="setting-title">已确认支出预算</div>
+            <p>只读：测试版暂不提供修改。</p>
+          </div>
+          <div class="muted" id="ov-budget-confirmed-text"></div>
+        </div>
+      </section>
+
+      <section class="settings-section" id="settings-data">
+        <h2>统计与数据</h2>
+        <div class="setting" id="ov-timezone-panel" aria-live="polite">
+          <div class="setting-head">
+            <div class="setting-title">统计时区</div>
+            <p>决定"今天 / 本月"的边界；不改变记录时间和供应商计价时区。</p>
+          </div>
+          <div class="form-row">
+            <label><span>时区</span>
+              <select id="ov-statistics-timezone-select" aria-label="统计时区"></select>
+            </label>
+            <label id="ov-statistics-timezone-custom" hidden><span>IANA 名称</span>
+              <input id="ov-statistics-timezone" type="text" placeholder="Asia/Shanghai" aria-describedby="ov-timezone-status" />
+            </label>
+            <button class="btn secondary" id="ov-timezone-save" type="button">保存</button>
+            <span class="form-receipt" id="ov-timezone-status" hidden role="alert" tabindex="-1"></span>
+          </div>
+        </div>
+        <div class="setting" id="ov-pricing-catalog-panel" aria-live="polite">
+          <div class="setting-head">
+            <div class="setting-title">价格目录</div>
+            <p>测试版使用内置价目，随测试版更新。</p>
+          </div>
+          <div class="muted" id="ov-pricing-catalog-status" role="status" tabindex="-1">读取中…</div>
+          <!-- 在线检查：Beta 延期（差距分析 §4），入口不显示。 -->
+          <div hidden>
+            <label><input id="ov-pricing-catalog-network" type="checkbox" /> 允许访问公共价格服务</label>
+            <button class="btn secondary" id="ov-pricing-catalog-update" type="button">检查价格更新</button>
+          </div>
+        </div>
+        <div class="setting" id="ov-retention-panel" aria-live="polite">
+          <div class="setting-head">
+            <div class="setting-title">本地数据保留期</div>
+            <p>过期记录在下一次本机维护时清理；不影响工具的原始日志。</p>
+          </div>
+          <div class="form-row">
+            <label><span>保留</span>
+              <span class="unit-input"><input id="ov-retention-months" type="number" min="1" max="60" step="1" aria-describedby="ov-retention-status" /><i>个月</i></span>
+            </label>
+            <button class="btn secondary" id="ov-retention-save" type="button">保存</button>
+            <span class="form-receipt" id="ov-retention-status" hidden role="alert" tabindex="-1"></span>
+          </div>
+        </div>
+        <div class="setting" id="ov-export-panel" aria-live="polite">
+          <div class="setting-head">
+            <div class="setting-title">导出当前月摘要</div>
+            <p>只含工具、服务商、用量与金额口径，不含会话正文和路径。</p>
+          </div>
+          <div class="form-row">
+            <button class="btn secondary" id="ov-export-preview" type="button">预览导出字段</button>
+            <button class="btn secondary" id="ov-export-download" type="button" hidden>下载 CSV</button>
+          </div>
+          <div class="form-receipt block" id="ov-export-preview-content" hidden></div>
+        </div>
+      </section>
+
+      <section class="settings-section" id="settings-about">
+        <h2>关于与诊断</h2>
+        <div class="setting" id="ov-about-panel">
+          <div class="setting-head"><div class="setting-title">版本</div></div>
+          <dl class="about-versions" id="ov-about-versions"><dt>App</dt><dd>读取中…</dd></dl>
+        </div>
+        <div class="setting" id="ov-diagnostic-panel" aria-live="polite">
+          <div class="setting-head">
+            <div class="setting-title">诊断与更新</div>
+            <p>诊断包不含会话正文、绝对路径和账户标识，不会自动上传。</p>
+          </div>
+          <div class="form-row">
+            <button class="btn secondary" id="ov-diagnostic-export" type="button">保存脱敏诊断包</button>
+            <button class="btn secondary" id="ov-update-check" type="button">检查新版本</button>
+            <button class="chip-link" id="ov-releases-open" type="button">查看发布页 ›</button>
+          </div>
+          <div class="form-receipt block" id="ov-diagnostic-status" hidden role="status" tabindex="-1"></div>
+        </div>
+      </section>
+
+      </div>
     </section>
   </main>
 
-  <footer class="wb-foot" id="wb-foot"></footer>
   <script type="module" src="timeline.js"></script>
   <script type="module" src="workbench.js"></script>
 </body>

@@ -382,6 +382,28 @@ pub struct MonthlySummary {
     pub last_observed_at: Option<String>,
 }
 
+/// `total_actual_spend` 的按 basis 分栏版（月/日共用）：只收
+/// [`BillingBasis::summable_into_total`] 的三档，零金额不撑出币桶。
+fn actual_spend_by_basis(
+    by_provider: &BTreeMap<String, HostAmount>,
+) -> BTreeMap<BillingBasis, BTreeMap<String, f64>> {
+    let mut out: BTreeMap<BillingBasis, BTreeMap<String, f64>> = BTreeMap::new();
+    for h in by_provider.values() {
+        let key = h.currency.clone().unwrap_or_default();
+        for (basis, amount) in &h.amounts_by_basis {
+            if !basis.summable_into_total() || *amount == 0.0 {
+                continue;
+            }
+            *out.entry(*basis).or_default().entry(key.clone()).or_insert(0.0) += amount;
+        }
+    }
+    out
+}
+
+fn actual_spend_by_basis_json(m: &BTreeMap<BillingBasis, BTreeMap<String, f64>>) -> Value {
+    Value::Object(m.iter().map(|(b, cur)| (b.as_str().to_string(), json!(cur))).collect())
+}
+
 impl MonthlySummary {
     /// 所有宿主可汇总金额之和——见 [`HostAmount::summable_total`] 的同一条
     /// "不存字段、每次算"纪律（空负零的 fold 理由也在那边）。
@@ -417,6 +439,15 @@ impl MonthlySummary {
             *out.entry(key).or_insert(0.0) += amount;
         }
         out
+    }
+
+    /// [`Self::total_actual_spend`] 的按 basis 拆栏：同一条 summable 过滤、同一
+    /// 条零金额不撑桶纪律，只是把「按量实付 / 宿主账单 / 订阅月费」分开——
+    /// 工作台「本月支出」卡要分行显示这三档而不是一个"含"字句，拆分逻辑放
+    /// 在这里而不是 JS 里，`by_basis` 各栏之和恒等于 `total_actual_spend`
+    /// （单测钉住）。
+    pub fn actual_spend_by_basis(&self) -> BTreeMap<BillingBasis, BTreeMap<String, f64>> {
+        actual_spend_by_basis(&self.by_provider)
     }
 
     /// 校验模块头三条不变式，返回违反描述；空 vec = 合规。
@@ -476,6 +507,7 @@ impl MonthlySummary {
             "by_provider": Value::Object(by_provider),
             "total_summable": self.total_summable(),
             "total_actual_spend": self.total_actual_spend(),
+            "actual_spend_by_basis": actual_spend_by_basis_json(&self.actual_spend_by_basis()),
             "has_unresolved": self.has_unresolved(),
             "coverage": self.coverage.to_json(),
             "freshness": self.freshness.to_json(),
@@ -535,6 +567,12 @@ impl DailySummary {
         out
     }
 
+    /// 同 [`MonthlySummary::actual_spend_by_basis`]；日粒度里恒无
+    /// `FixedSubscription` 栏（订阅费不摊进日账）。
+    pub fn actual_spend_by_basis(&self) -> BTreeMap<BillingBasis, BTreeMap<String, f64>> {
+        actual_spend_by_basis(&self.by_provider)
+    }
+
     pub fn contract_violations(&self) -> Vec<String> {
         let mut violations = Vec::new();
         for host in &self.excluded_hosts {
@@ -582,6 +620,7 @@ impl DailySummary {
             "by_provider": Value::Object(by_provider),
             "total_summable": self.total_summable(),
             "total_actual_spend": self.total_actual_spend(),
+            "actual_spend_by_basis": actual_spend_by_basis_json(&self.actual_spend_by_basis()),
             "coverage": self.coverage.to_json(),
             "freshness": self.freshness.to_json(),
             "excluded_hosts": self.excluded_hosts.iter().cloned().collect::<Vec<_>>(),
@@ -650,6 +689,59 @@ mod tests {
         };
         assert_eq!(summary.total_summable(), 0.0);
         assert!(summary.total_summable().is_sign_positive());
+    }
+
+    #[test]
+    fn actual_spend_by_basis_partitions_total_actual_spend() {
+        // 工作台「本月支出」卡分行显示按量实付 / 订阅月费——拆栏之和必须
+        // 严格等于 total_actual_spend（分币），否则卡面与结论句两处会各说
+        // 各话。非 summable 档（api_equivalent / metered_estimate）不得出现；
+        // 零金额不撑桶（与 total_actual_spend 同一纪律）。
+        let mut claude = host_amount("claude-code/anthropic", BillingBasis::FixedSubscription, 20.0);
+        claude.currency = Some("USD".to_string());
+        claude.amounts_by_basis.insert(BillingBasis::ApiEquivalent, 114.6);
+        let mut dsh = host_amount("dsh/deepseek", BillingBasis::MeteredActual, 8.64);
+        dsh.currency = Some("CNY".to_string());
+        dsh.amounts_by_basis.insert(BillingBasis::MeteredEstimate, 9.0);
+        let mut zero = host_amount("codex/openai", BillingBasis::HostBilled, 0.0);
+        zero.currency = Some("USD".to_string());
+        let summary = MonthlySummary {
+            month: "2026-09".to_string(),
+            by_host: BTreeMap::new(),
+            by_provider: BTreeMap::from([
+                ("claude-code/anthropic".to_string(), claude),
+                ("dsh/deepseek".to_string(), dsh),
+                ("codex/openai".to_string(), zero),
+            ]),
+            tokens_by_host: BTreeMap::new(),
+            coverage: coverage_ok(),
+            freshness: Freshness::unavailable(),
+            excluded_hosts: BTreeSet::new(),
+            last_observed_at: None,
+        };
+        let split = summary.actual_spend_by_basis();
+        assert_eq!(
+            split.get(&BillingBasis::MeteredActual),
+            Some(&BTreeMap::from([("CNY".to_string(), 8.64)]))
+        );
+        assert_eq!(
+            split.get(&BillingBasis::FixedSubscription),
+            Some(&BTreeMap::from([("USD".to_string(), 20.0)]))
+        );
+        assert!(!split.contains_key(&BillingBasis::HostBilled), "零金额不撑桶");
+        assert!(!split.contains_key(&BillingBasis::ApiEquivalent));
+        assert!(!split.contains_key(&BillingBasis::MeteredEstimate));
+        let mut recomposed: BTreeMap<String, f64> = BTreeMap::new();
+        for cur in split.values() {
+            for (c, v) in cur {
+                *recomposed.entry(c.clone()).or_insert(0.0) += v;
+            }
+        }
+        assert_eq!(recomposed, summary.total_actual_spend());
+        let json = summary.to_json();
+        assert_eq!(json["actual_spend_by_basis"]["metered_actual"]["CNY"], 8.64);
+        assert_eq!(json["actual_spend_by_basis"]["fixed_subscription"]["USD"], 20.0);
+        assert!(json["actual_spend_by_basis"].get("host_billed").is_none());
     }
 
     #[test]

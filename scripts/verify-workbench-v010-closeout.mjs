@@ -63,7 +63,7 @@ ok(lib.includes("fn check_for_updates"), "后端提供主动版本检查");
 ok(js.includes("check_for_updates"), "设置页提供主动版本检查入口");
 ok(lib.includes("会话数据暂不可用"), "菜单区分来源故障");
 ok(lib.includes("尚无会话"), "菜单区分真实空用量");
-ok(js.includes('invoke("data_status")'), "数据源页消费 SQL Authority 状态");
+ok(js.includes('command: "data_status"'), "数据源页消费 SQL Authority 状态");
 ok(js.includes("成本不可用"), "总览区分有用量但无实际金额");
 ok(js.includes("尚未接入的会话维度") || js.includes("暂不可用"), "详情降级说明存在");
 ok((js.match(/function fmtTokens\(/g) || []).length === 1, "token 格式化函数只有一份");
@@ -72,8 +72,14 @@ ok(js.includes("function billingCsvBillId(row)") && js.includes("bill_id: billin
 ok(!/bill_id:\s*["']csv-["']\s*\+\s*Date\.now/.test(js),
   "CSV 重复导入不使用时间戳身份");
 ok(js.includes("/^[A-Z]{3}$/.test(currency)"), "CSV 币种使用三位大写代码");
-ok((js.match(/setAttribute\("aria-label", profileLabel/g) || []).length === 4,
-  "独立预算的币种、月额、日额和阈值输入具备无障碍名称");
+// 设置页规格 §4.3 把双 profile 表单收成单一「按量费用预算」表单（阈值改为固定
+// 80%/100% 只读展示，不再是可编辑字段——少一个输入自然少一个无障碍名称）；
+// 币种/月预算/日预算三个控件改为静态 aria-label（HTML 里货币输入被 .money-input
+// 包裹，嵌套 <label> 关联在部分读屏下不可靠，用 aria-label 兜底）。
+ok(/id="ov-budget-currency"[^>]*aria-label="预算币种"/.test(html) &&
+  /id="ov-budget-monthly-amount"[^>]*aria-label="月预算金额"/.test(html) &&
+  /id="ov-budget-daily-amount"[^>]*aria-label="日预算金额"/.test(html),
+  "按量费用预算的币种、月额、日额输入具备无障碍名称");
 ok(html.includes('id="cal-month" type="month" class="cal-month-input" aria-label="选择日历月份"'),
   "Token 日历月份选择器具备无障碍名称");
 
