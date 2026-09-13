@@ -48,22 +48,23 @@ def main():
         (16, {"action": "recalc_enqueue", "job_id": "job-uat", "declaration_id": "declaration-uat",
               "revision_id": "revision-uat-1"}),
         (17, {"action": "recalc_status", "job_id": "job-uat"}),
-        (18, {"action": "recalc_run", "job_id": "job-uat"}),
-        (19, {"action": "recalc_status", "job_id": "job-uat"}),
-        (20, {"action": "declaration_revoke", "revision_id": "revision-uat-2",
+        (18, {"action": "recalc_recover"}),
+        (19, {"action": "recalc_run", "job_id": "job-uat"}),
+        (20, {"action": "recalc_status", "job_id": "job-uat"}),
+        (21, {"action": "declaration_revoke", "revision_id": "revision-uat-2",
               "declaration_id": "declaration-uat", "supersedes_revision_id": "revision-uat-1"}),
-        (21, {"action": "declaration_revisions", "declaration_id": "declaration-uat"}),
-        (22, {"action": "candidate_reopen", "candidate_id": "candidate-uat"}),
-        (23, {"action": "host_bill_put", "bill_id": "bill-uat", "host": "codex",
+        (22, {"action": "declaration_revisions", "declaration_id": "declaration-uat"}),
+        (23, {"action": "candidate_reopen", "candidate_id": "candidate-uat"}),
+        (24, {"action": "host_bill_put", "bill_id": "bill-uat", "host": "codex",
               "provider_id": "openai", "billing_period_start": "2026-09", "basis": "host_billed",
               "amount_minor": 1234, "currency": "USD", "evidence_ref": "uat"}),
-        (24, {"action": "host_bill_list", "billing_period_start": "2026-09"}),
-        (25, {"action": "host_bill_delete", "bill_id": "bill-uat"}),
-        (26, {"action": "budget_profile_set", "profile_id": "confirmed", "currency": "USD",
+        (25, {"action": "host_bill_list", "billing_period_start": "2026-09"}),
+        (26, {"action": "host_bill_delete", "bill_id": "bill-uat"}),
+        (27, {"action": "budget_profile_set", "profile_id": "confirmed", "currency": "USD",
               "monthly_minor": 5000, "daily_minor": 1000, "warning_ratio_bp": 8000}),
-        (27, {"action": "budget_snooze_set", "until_ms": 4102444800000}),
-        (28, {"action": "budget_get"}),
-        (29, {"action": "budget_snooze_clear"}),
+        (28, {"action": "budget_snooze_set", "until_ms": 4102444800000}),
+        (29, {"action": "budget_get"}),
+        (30, {"action": "budget_snooze_clear"}),
     ]
     for request_id, payload in calls:
         requests.append({"jsonrpc": "2.0", "id": request_id, "method": "tools/call",
@@ -84,10 +85,11 @@ def main():
     data = {key: value["structuredContent"]["data"] for key, value in results.items()}
     assert data[11]["candidates"][0]["status"] == "pending"
     assert data[17]["job"]["status"] == "queued"
-    assert data[19]["job"]["status"] == "succeeded"
-    assert len(data[21]["revisions"]) == 2 and data[21]["revisions"][1]["change_kind"] == "revoked"
-    assert data[24]["bills"][0]["amount_minor"] == 1234
-    assert data[28]["snooze_until_ms"] == 4102444800000
+    assert data[18]["queued_job_ids"] == ["job-uat"]
+    assert data[20]["job"]["status"] == "succeeded"
+    assert len(data[22]["revisions"]) == 2 and data[22]["revisions"][1]["change_kind"] == "revoked"
+    assert data[25]["bills"][0]["amount_minor"] == 1234
+    assert data[29]["snooze_until_ms"] == 4102444800000
     print(f"MCP v1 management smoke: PASS ({len(calls)} typed actions, isolated home={home})")
 
 

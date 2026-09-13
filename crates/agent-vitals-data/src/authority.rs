@@ -2483,6 +2483,26 @@ impl AuthorityDb {
         rows.collect::<Result<Vec<String>, _>>().map_err(AuthorityError::from)
     }
 
+    /// 返回仍需用户关注或后台继续处理的重算任务。成功任务不返回：其结果
+    /// 已经是当前可见版本；失败/取消任务保留给桌面恢复入口展示，避免重启后
+    /// 任务虽然在库里可查、但 UI 丢失恢复动作。
+    pub fn billing_recalculation_recoverable_jobs(
+        &self,
+    ) -> Result<Vec<BillingRecalculationJobRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, declaration_id, revision_id, status, requested_at_ms, started_at_ms,
+                    completed_at_ms, error_code, error_detail
+             FROM billing_recalculation_jobs
+             WHERE status IN ('queued', 'running', 'failed', 'cancelled')
+             ORDER BY requested_at_ms, job_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((
+            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
+            row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
+        )))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AuthorityError::from)
+    }
+
     pub fn billing_recalculation_job(
         &self, job_id: &str,
     ) -> Result<Option<BillingRecalculationJobRow>, AuthorityError> {
@@ -2501,7 +2521,11 @@ impl AuthorityDb {
         let job = self.billing_recalculation_job(job_id)?;
         let Some((_, _, revision_id, status, _, _, _, _, _)) = job else { return Ok(false); };
         if status != "queued" { return Ok(false); }
-        self.billing_recalculation_set_status(job_id, "running", None, None, now_ms)?;
+        if !self.billing_recalculation_set_status(job_id, "running", None, None, now_ms)? {
+            // Another worker won the queued → running transition. Do not
+            // calculate or publish a second snapshot for the same job.
+            return Ok(false);
+        }
         let preview = match self.billing_declaration_impact_preview(&revision_id, i64::MIN, i64::MAX) {
             Ok(value) => value,
             Err(error) => {
@@ -2509,13 +2533,34 @@ impl AuthorityDb {
                 return Err(error);
             }
         };
-        let fact_ids = self.billing_declaration_matching_fact_ids(&revision_id)?;
-        let attribution_kind: String = self.conn.query_row(
+        let fact_ids = match self.billing_declaration_matching_fact_ids(&revision_id) {
+            Ok(ids) => ids,
+            Err(error) => {
+                let _ = self.billing_recalculation_set_status(
+                    job_id, "failed", Some("matching_failed"), Some("declaration fact matching failed"), now_ms,
+                );
+                return Err(error);
+            }
+        };
+        let attribution_kind: String = match self.conn.query_row(
             "SELECT CASE WHEN relationship_kind = 'official_subscription' THEN 'subscription_covered' ELSE 'user_declared' END
              FROM billing_declaration_revisions WHERE revision_id = ?1",
             rusqlite::params![revision_id], |row| row.get(0),
-        )?;
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        ) {
+            Ok(kind) => kind,
+            Err(error) => {
+                let _ = self.billing_recalculation_set_status(
+                    job_id, "failed", Some("revision_failed"), Some("declaration revision lookup failed"), now_ms,
+                );
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = self.conn.execute_batch("BEGIN IMMEDIATE") {
+            let _ = self.billing_recalculation_set_status(
+                job_id, "failed", Some("transaction_failed"), Some("recalculation transaction could not start"), now_ms,
+            );
+            return Err(error.into());
+        }
         let result = self.conn.execute(
             "INSERT INTO billing_recalculation_results(
                  job_id, revision_id, fact_count, session_count, total_tokens,
@@ -2544,7 +2589,13 @@ impl AuthorityDb {
                 self.conn.execute_batch("COMMIT")?;
                 Ok(true)
             }
-            Err(error) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(error.into()) }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                let _ = self.billing_recalculation_set_status(
+                    job_id, "failed", Some("publish_failed"), Some("recalculation result publish failed"), now_ms,
+                );
+                Err(error.into())
+            }
         }
     }
 
@@ -3207,6 +3258,34 @@ mod tests {
         assert!(authority.billing_recalculation_set_status("job-failed", "running", None, None, 15).unwrap());
         assert_eq!(authority.billing_recalculation_recover(16).unwrap(), Vec::<String>::new());
         assert_eq!(authority.billing_recalculation_job("job-failed").unwrap().unwrap().3, "failed");
+        let recoverable = authority.billing_recalculation_recoverable_jobs().unwrap();
+        assert_eq!(recoverable.len(), 1);
+        assert_eq!(recoverable[0].0, "job-failed");
+        assert_eq!(recoverable[0].3, "failed");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn failed_recalculation_run_persists_failure_and_can_be_retried() {
+        let db = tmp_db("billing-recalculation-failure");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.billing_declaration_revision_save(
+            "revision-failure", "declaration-failure", None, "codex", "openai", "official_subscription",
+            None, None, None, "2026-09", None, None, None, &[], 1,
+        ).unwrap();
+        authority.billing_recalculation_enqueue(
+            "job-failure", "declaration-failure", "revision-failure", 2,
+        ).unwrap();
+        // Simulate a damaged derived schema after enqueue. The failure must
+        // not leave the job in running, where the UI could never retry it.
+        authority.conn().execute_batch("DROP TABLE billing_declaration_scopes").unwrap();
+        assert!(authority.billing_recalculation_run("job-failure", 3).is_err());
+        let failed = authority.billing_recalculation_job("job-failure").unwrap().unwrap();
+        assert_eq!(failed.3, "failed");
+        assert_eq!(failed.7.as_deref(), Some("preview_failed"));
+        assert!(authority.billing_recalculation_retry("job-failure", 4).unwrap());
+        assert_eq!(authority.billing_recalculation_job("job-failure").unwrap().unwrap().3, "queued");
+        assert_eq!(authority.billing_recalculation_result("job-failure").unwrap(), None);
         let _ = std::fs::remove_file(&db);
     }
 

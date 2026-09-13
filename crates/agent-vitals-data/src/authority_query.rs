@@ -57,9 +57,12 @@ pub(crate) const SQL_PEAKED_DAYS_MAP: &str = concat!("SELECT (", local_day_idx!(
            AND event_ts_ms >= ?4 AND event_ts_ms < ?5
            AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
                JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
                  AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                   FROM billing_declaration_revisions br2
+                   JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                   WHERE br2.declaration_id = br.declaration_id)
                  AND br.change_kind = 'saved')
          GROUP BY day_idx, model_id, event_peak");
 
@@ -74,9 +77,12 @@ pub(crate) const SQL_CLAUDE_DAYS: &str = concat!("SELECT (", local_day_idx!(), "
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
                JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
                  AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                   FROM billing_declaration_revisions br2
+                   JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                   WHERE br2.declaration_id = br.declaration_id)
                  AND br.change_kind = 'saved')
          GROUP BY day_idx, model_id");
 
@@ -102,9 +108,12 @@ pub(crate) const SQL_CODEX_BY_HOUR_MODEL: &str = concat!("SELECT (", local_hour_
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
                JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
                  AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                   FROM billing_declaration_revisions br2
+                   JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                   WHERE br2.declaration_id = br.declaration_id)
                  AND br.change_kind = 'saved')
          GROUP BY hour_idx, model_id");
 
@@ -130,9 +139,12 @@ pub(crate) const SQL_HOURLY_BY_HOST_MODEL: &str = concat!("SELECT host, COALESCE
            AND host = ?5
            AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
                JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
                  AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                   FROM billing_declaration_revisions br2
+                   JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                   WHERE br2.declaration_id = br.declaration_id)
                  AND br.change_kind = 'saved')
          GROUP BY host, model_id, local_hour");
 
@@ -146,9 +158,12 @@ pub(crate) const SQL_HOURLY_BY_HOST_PROVIDER: &str = concat!("SELECT host, COALE
            AND host = ?5
            AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
                JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
                  AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                   FROM billing_declaration_revisions br2
+                   JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                   WHERE br2.declaration_id = br.declaration_id)
                  AND br.change_kind = 'saved')
          GROUP BY host, provider_id, local_hour");
 
@@ -1034,9 +1049,12 @@ const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, host,
        AND event_ts_ms >= ?2 AND event_ts_ms < ?3
        AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
            JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+           JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
            WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
              AND br.revision_number = (SELECT MAX(br2.revision_number)
-               FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+               FROM billing_declaration_revisions br2
+               JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+               WHERE br2.declaration_id = br.declaration_id)
              AND br.change_kind = 'saved')
        AND (?4 < 0 OR (CAST((", local_hour_idx!(), " + (?5 - ?5) + (?6 - ?6)) % 24 AS INTEGER) = ?4))
        AND (?7 IS NULL OR COALESCE(model_id, '<unknown>') = ?7)
@@ -1220,9 +1238,12 @@ pub fn session_billing_buckets(
     let billing_mode_expr = if has_fact_attributions {
         "CASE WHEN EXISTS (SELECT 1 FROM billing_fact_attributions ba
                     JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+                    JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                     WHERE ba.fact_id = f.fact_id AND ba.attribution_kind = 'subscription_covered'
                       AND br.revision_number = (SELECT MAX(br2.revision_number)
-                        FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                        FROM billing_declaration_revisions br2
+                        JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                        WHERE br2.declaration_id = br.declaration_id)
                       AND br.change_kind = 'saved')
              THEN 'subscription' ELSE COALESCE(f.billing_mode, 'unknown') END"
     } else {
@@ -2933,6 +2954,31 @@ mod tests {
         let buckets = session_billing_buckets(db.conn(), skey).unwrap();
         assert_eq!(buckets.len(), 1);
         assert_eq!(buckets[0]["billing_mode"], "subscription");
+        assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
+
+        // A newer saved revision is not visible until its recalculation has
+        // published successfully. During a queued/failed retry the prior
+        // result remains the active billing version for every consumer.
+        db.conn().execute(
+            "INSERT INTO billing_declaration_revisions(
+                revision_id, declaration_id, revision_number, change_kind, host, provider_id,
+                relationship_kind, effective_start, created_at_ms)
+             VALUES ('rev-derived-pending', 'decl-derived', 2, 'saved', 'codex', 'openai',
+                     'official_subscription', '2026-09', 2)",
+            [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_recalculation_jobs(
+                job_id, declaration_id, revision_id, status, requested_at_ms)
+             VALUES ('job-derived-pending', 'decl-derived', 'rev-derived-pending', 'queued', 2)",
+            [],
+        ).unwrap();
+        assert_eq!(session_billing_buckets(db.conn(), skey).unwrap()[0]["billing_mode"], "subscription");
+        db.conn().execute(
+            "UPDATE billing_recalculation_jobs SET status = 'failed', completed_at_ms = 3
+             WHERE job_id = 'job-derived-pending'",
+            [],
+        ).unwrap();
         assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
         let _ = std::fs::remove_file(&path);
     }

@@ -552,6 +552,11 @@ async function renderOverview() {
   } catch (e) {
     renderBillingDeclarations({ status: "unavailable", declarations: [] });
   }
+  try {
+    renderBillingRecalculationRecovery(await invoke("billing_recalculation_recoverable_jobs"));
+  } catch (e) {
+    renderBillingRecalculationRecovery({ status: "unavailable", jobs: [] });
+  }
   await renderHostBills(monthKey);
   await renderRetentionSettings();
   await renderStatisticsTimezoneSettings();
@@ -1600,6 +1605,43 @@ function renderBillingDeclarations(report) {
     };
     actions.appendChild(revoke);
     row.append(detail, actions);
+    list.appendChild(row);
+  }
+}
+
+function renderBillingRecalculationRecovery(report) {
+  const panel = document.getElementById("ov-billing-recalculation-recovery");
+  const list = document.getElementById("ov-billing-recalculation-recovery-list");
+  if (!panel || !list || !report || report.status !== "ok") return;
+  const jobs = Array.isArray(report.jobs) ? report.jobs : [];
+  panel.hidden = !jobs.length;
+  list.textContent = "";
+  for (const job of jobs) {
+    const row = document.createElement("div");
+    row.className = "billing-review-row";
+    const detail = document.createElement("div");
+    const interrupted = job.error_code === "interrupted";
+    const state = job.status === "queued" ? "正在后台处理" :
+      job.status === "running" ? "正在重算" :
+      (interrupted ? "重算待重试（应用曾退出）" : "重算待重试（" + job.status + "）");
+    detail.textContent = state + " · " + job.job_id;
+    row.appendChild(detail);
+    if (job.status === "failed" || job.status === "cancelled") {
+      const retry = document.createElement("button");
+      retry.className = "btn secondary";
+      retry.textContent = "重试重算";
+      retry.onclick = async () => {
+        retry.disabled = true;
+        try {
+          await invoke("retry_billing_recalculation", { jobId: job.job_id });
+          detail.textContent = "已重新入队，正在后台处理 · " + job.job_id;
+        } catch (e) {
+          retry.disabled = false;
+          detail.textContent += " · 重试失败：" + errText(e);
+        }
+      };
+      row.appendChild(retry);
+    }
     list.appendChild(row);
   }
 }

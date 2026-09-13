@@ -126,6 +126,11 @@
         <div class="muted">撤销会保留修订与证据历史，并立即恢复受影响用量的按量/未定归类；不会删除任何原始记录。</div>
         <div id="ov-billing-declarations-list"></div>
       </section>
+      <section class="billing-review panel" id="ov-billing-recalculation-recovery" hidden aria-live="polite">
+        <div class="panel-title">重算恢复</div>
+        <div class="muted">重算失败或应用退出时，旧结果继续可用；修订只会在重算成功后切换。</div>
+        <div id="ov-billing-recalculation-recovery-list"></div>
+      </section>
       <section class="billing-declaration panel" id="ov-billing-declaration-panel" hidden>
         <div class="panel-title">确认计费方式</div>
         <div class="muted" id="ov-billing-declaration-context"></div>

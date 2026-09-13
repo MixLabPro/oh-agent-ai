@@ -2593,6 +2593,27 @@ fn billing_recalculation_job_status(job_id: String) -> Result<Value, String> {
     }))
 }
 
+/// 重启后显示仍需恢复的重算任务；成功任务不出现在此列表中，避免把已经
+/// 发布的旧/新版本误标成待处理。
+#[tauri::command]
+fn billing_recalculation_recoverable_jobs() -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+        .map_err(|error| error.to_string())?;
+    let jobs = db.billing_recalculation_recoverable_jobs()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(job_id, declaration_id, revision_id, status, requested_at_ms, started_at_ms,
+              completed_at_ms, error_code, error_detail)| serde_json::json!({
+            "job_id": job_id, "declaration_id": declaration_id, "revision_id": revision_id,
+            "status": status, "requested_at_ms": requested_at_ms, "started_at_ms": started_at_ms,
+            "completed_at_ms": completed_at_ms, "error_code": error_code, "error_detail": error_detail,
+        }))
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({ "status": "ok", "jobs": jobs }))
+}
+
 /// 工作台「数据源」页的独立契约。会话搜索只回答时间窗内的会话，不能再被
 /// 借来承载扫描健康；这里从 SQL authority 的 source_files / usage_facts 读取
 /// 每个已接线宿主的扫描、导入和失败范围。宿主集合复用 ingest registry，前端
@@ -2967,6 +2988,7 @@ pub fn run() {
             enqueue_billing_recalculation,
             retry_billing_recalculation,
             billing_recalculation_job_status,
+            billing_recalculation_recoverable_jobs,
             sync_pause_state,
             set_sync_paused,
             data_source_status,
