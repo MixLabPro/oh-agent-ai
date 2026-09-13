@@ -2398,3 +2398,12 @@
 - 验收：runtime workflow summary 定向测试通过；真实 Authority MCP 复核显示
   2026-09-13 无过滤范围实际观测到 `claude-code` / `codex`，`hosts=["codex"]`
   返回 `observed_events=4,236` 且只列 `codex`，缺口仅保留生命周期/归因项。
+
+## Loop 323 · 工作台源码级回归复核
+
+- 验收：`verify-workbench-sources.mjs`、`verify-workbench-kpi-decide.mjs`、
+  `verify-workbench-fold-bridge.mjs`、`verify-workbench-traces.mjs` 和
+  `verify-workbench-v010-closeout.mjs` 全部通过；覆盖真实 `workbench.js` 的来源状态、
+  双预算/未知态、同步事件合并、会话轨迹 SVG、安全 `session_ref`、响应式与诊断版本字段。
+- 结论：自动化源码级 UI 契约没有发现回归，作为 Phase B/C/D 的代码证据保留；这不等同于
+  可操作 `.app` 的 Computer Use、200% 字号/读屏真机走查或干净机安装升级验收。
