@@ -2407,3 +2407,19 @@
   双预算/未知态、同步事件合并、会话轨迹 SVG、安全 `session_ref`、响应式与诊断版本字段。
 - 结论：自动化源码级 UI 契约没有发现回归，作为 Phase B/C/D 的代码证据保留；这不等同于
   可操作 `.app` 的 Computer Use、200% 字号/读屏真机走查或干净机安装升级验收。
+
+## Loop 324 · Skill workflow 完成态与耗时覆盖收口
+
+- 修复：`skills_summary` 不再把 `skill_invoked` 直接当作完成结果；现在同时读取
+  `skill_invoked` / `skill_finished`，按调用数计算 succeeded/failed/unknown，避免未结束调用
+  被错误计为成功或失败。
+- 修复：输出 `finished_events` 与 `duration_ms.coverage`；覆盖响应动态列出本次过滤范围内缺失的
+  `skill_finished`、完整耗时和 token/cost 关联。无结束事件或无耗时时保持 partial/unknown，
+  不把缺失证据转成零或绿色结论。
+- 回归：补充 Skill 失败结束事件 fixture、Skill 过滤后的调用/结束事件计数和耗时断言。
+- 验收：Runtime workflow 定向测试 **1/1**、Runtime Clippy 通过；公开 MCP 真机冒烟
+  **18 EXACT / 5 PARTIAL / 1 BLOCKED / 0 MISMATCH**；`mcp-internal` 真机冒烟
+  **20 EXACT / 5 PARTIAL / 1 BLOCKED / 0 MISMATCH**；控制面隔离冒烟 **19 个类型化操作 PASS**。
+
+边界：真实数据的 Q08 仍为 PARTIAL，因为 token/cost 唯一归因、完整跨宿主生命周期与样本门槛
+尚未完成；本轮仅收口 reader 的完成态和耗时覆盖语义。

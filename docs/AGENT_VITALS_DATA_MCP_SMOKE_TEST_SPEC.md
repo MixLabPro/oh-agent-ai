@@ -85,7 +85,7 @@ agent-vitals sync-facts    # 让 freshness 是新的
 |---|---|---|
 | **Q06** 本周重复错误指纹聚为问题卡 | `issues_summary` | **PARTIAL**：已能按脱敏错误指纹/重复调用聚合，趋势与 token/cost 归因仍不完整 |
 | **Q07** 连续失败后成功 = 一组重试链 | `issues_summary` | **PARTIAL**：调用指纹已保留，但失败→再次调用→成功的生命周期配对仍返回 unknown |
-| **Q08** Skill 成功率 + 样本不足判定 | `skills_summary` | **PARTIAL**：成功/失败/未知分子分母可读，结束事件、完整耗时和样本门槛仍不完整 |
+| **Q08** Skill 成功率 + 样本不足判定 | `skills_summary` | **PARTIAL**：已按 `skill_invoked` 与 `skill_finished` 汇总成功/失败/未知，并报告结束事件与耗时覆盖；token/cost 关联和样本门槛仍不完整 |
 | **Q09** Skill 版本回归识别 | `skills_summary` | **BLOCKED** |
 | **Q10** 会话时间线关联失败/峰值 | `session_detail` | **PARTIAL**：已返回独立脱敏 `workflow_timeline`，尚未把 workflow 事件硬归因到 token/cost 或峰值 |
 
@@ -254,7 +254,7 @@ BLOCKED；这不改变 v1.0 的发布门槛。
 | **F2** | 金额消费面不完整 → S2「花了多少」「哪个最贵（钱）」及三消费面 parity 仍不完整 | ✅ `cost_breakdown` 已提供事实时点 host/provider/model/basis 明细、`MoneyMinor`、unresolved 与订阅 token 分离；`summary_*` 成本占比/三面逐值 parity 未接齐 | 增量 3（`summary_daily`/`summary_monthly`）+ M15 成本 parity + cost factor decomposition |
 | **F3** | 无 `data_quality_issues` 工具 → Q05/S2.4 只能 `query_sql_readonly` 数 code，不能逐模型下钻 unresolved 原因 | `v_data_quality_safe` view 在（且刻意不含 `detail_json`） | 增量 4（`data_quality_issues` + code-aware 脱敏 allowlist） |
 | ~~**F4**~~ | ~~Q04/S1.4 会话下钻~~ | ✅ **已关闭（2026-09-08）**：`session_ref` HMAC-SHA256 基元（`<data_home>/.mcp-session-salt`，0600）+ `sessions_search`（窗口/小时 × 逐会话聚合，keyset 分页，`window_total_tokens` 供守恒核对）+ `session_detail`（反解 ref → usage 时间线）。`started_at_ms`/`ended_at_ms` 从 `MIN/MAX(event_ts_ms)` 读时派生，不依赖那两列。**待**：`session_detail` 时间线的失败/错误事件富化 = F5（`workflow_events`）。 | — |
-| **F5** | Q06–Q10 问题 / Skill 洞察（含 `session_detail` 的失败事件轴） | 基础 writer/reader、问题/Skill reader 和覆盖度已接通；完整重试、版本基线与唯一 token/cost 归因仍缺 | M4 收口：历史回填、生命周期配对、Skill 版本基线、`issues_summary` / `skills_summary` |
+| **F5** | Q06–Q10 问题 / Skill 洞察（含 `session_detail` 的失败事件轴） | 基础 writer/reader、问题/Skill reader 和覆盖度已接通；Skill reader 已消费调用/结束事件并计算安全的 outcome/duration coverage；完整重试、版本基线与唯一 token/cost 归因仍缺 | M4 收口：历史回填、生命周期配对、Skill 版本基线、`issues_summary` / `skills_summary` |
 | ~~**F6**~~ | ~~Q12 重导入幂等验收~~ | ✅ **已关闭（2026-09-08）**：`agent-vitals data-reimport-verify [--json]`（MCP 外隔离命令，`runtime::reimport_verify`）。 | — |
 | **F7** | Q13 历史价版重放 | ✅ `cost_breakdown` 已按每条事实的 `event_ts_ms` 选择历史价格版本，真机出现 2 个版本并通过 Q13；变化因子分解与冻结多版本 fixture 仍未完成 | M3 收口：跨窗口因子分解、稳定 fixture、账单录入归因与父层聚合 |
 | **F8** | `usage_hourly group_by=provider` 与 `model` 等价 | `provider_id` 归一表 §3.4 未建；schema 描述已注明"identical here" | v0.9.2+ canonical 归一 |

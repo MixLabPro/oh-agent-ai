@@ -143,11 +143,37 @@ fn append_scope_filter(
     }
 }
 
+fn append_event_type_filter(
+    sql: &mut String,
+    values: &mut Vec<SqlValue>,
+    next_param: &mut usize,
+    event_types: &[&str],
+) {
+    if event_types.is_empty() {
+        return;
+    }
+    let placeholders = (0..event_types.len())
+        .map(|_| {
+            let value = format!("?{next_param}");
+            *next_param += 1;
+            value
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    sql.push_str(&format!(" AND e.event_type IN ({placeholders})"));
+    values.extend(
+        event_types
+            .iter()
+            .map(|event_type| SqlValue::Text((*event_type).to_string())),
+    );
+}
+
 fn workflow_count(
     conn: &Connection,
     window: &Window,
     hosts: &[String],
     capabilities: &[String],
+    event_types: &[&str],
 ) -> Result<i64, ToolError> {
     let mut sql = String::from(
         "SELECT COUNT(*) FROM workflow_events e
@@ -160,6 +186,7 @@ fn workflow_count(
     ];
     let mut next_param = 3;
     append_scope_filter(&mut sql, &mut values, &mut next_param, hosts, capabilities);
+    append_event_type_filter(&mut sql, &mut values, &mut next_param, event_types);
     conn.query_row(&sql, params_from_iter(values.iter()), |row| row.get(0))
         .map_err(|e| ToolError::new("internal_error", format!("workflow event count failed: {e}")))
 }
@@ -169,6 +196,7 @@ fn workflow_hosts(
     window: &Window,
     hosts: &[String],
     capabilities: &[String],
+    event_types: &[&str],
 ) -> Result<Vec<String>, ToolError> {
     let mut sql = String::from(
         "SELECT DISTINCT s.host FROM workflow_events e
@@ -182,6 +210,7 @@ fn workflow_hosts(
     ];
     let mut next_param = 3;
     append_scope_filter(&mut sql, &mut values, &mut next_param, hosts, capabilities);
+    append_event_type_filter(&mut sql, &mut values, &mut next_param, event_types);
     sql.push_str(" ORDER BY s.host");
     let mut statement = conn
         .prepare(&sql)
@@ -208,9 +237,10 @@ fn coverage(
     observed: i64,
     hosts: &[String],
     capabilities: &[String],
-    missing: &[&str],
+    event_types: &[&str],
+    missing: &[String],
 ) -> Result<Value, ToolError> {
-    let observed_hosts = workflow_hosts(conn, window, hosts, capabilities)?;
+    let observed_hosts = workflow_hosts(conn, window, hosts, capabilities, event_types)?;
     let status = if observed == 0 { "unavailable" } else { "partial" };
     Ok(json!({
         "status": status,
@@ -329,7 +359,7 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             "trend": { "status": "unknown", "reason": "workflow baseline is not complete" }
         }));
     }
-    let observed = workflow_count(handle.conn(), &window, &hosts, &skills)?;
+    let observed = workflow_count(handle.conn(), &window, &hosts, &skills, &[])?;
     if observed == 0 {
         warnings.push(json!({ "code": "workflow_coverage_insufficient", "message": "No accepted workflow events fall in the requested window; an empty issue list is not a proof of no issues." }));
     }
@@ -339,11 +369,56 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         observed,
         &hosts,
         &skills,
-        &["unique token/cost linkage", "complete retry baseline"],
+        &[],
+        &[
+            "unique token/cost linkage".to_string(),
+            "complete retry baseline".to_string(),
+        ],
     )?;
     Ok(build_envelope(handle.conn(), handle.authority_state(), (observed > 0).then_some(window.end_ms), cov, warnings, json!({
         "from": window.from, "to": window.to, "issues": issues, "has_more": false, "next_cursor": Value::Null
     })))
+}
+
+fn skill_coverage_missing(
+    conn: &Connection,
+    window: &Window,
+    skills: &[String],
+) -> Result<Vec<String>, ToolError> {
+    let mut sql = String::from(
+        "SELECT
+             SUM(CASE WHEN e.event_type='skill_invoked' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN e.event_type='skill_finished' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN e.event_type='skill_finished' AND e.duration_ms IS NOT NULL THEN 1 ELSE 0 END)
+         FROM workflow_events e
+         WHERE e.event_type IN ('skill_invoked', 'skill_finished')
+           AND e.event_ts_ms >= ?1 AND e.event_ts_ms < ?2
+           AND e.capability_id IS NOT NULL",
+    );
+    let mut values = vec![
+        SqlValue::Integer(window.start_ms),
+        SqlValue::Integer(window.end_ms),
+    ];
+    let mut next_param = 3;
+    append_scope_filter(&mut sql, &mut values, &mut next_param, &[], skills);
+    let (calls, finished, durations): (i64, i64, i64) = conn
+        .query_row(&sql, params_from_iter(values.iter()), |row| {
+            Ok((
+                row.get(0).unwrap_or(0),
+                row.get(1).unwrap_or(0),
+                row.get(2).unwrap_or(0),
+            ))
+        })
+        .map_err(|e| ToolError::new("internal_error", format!("skill coverage query failed: {e}")))?;
+    let mut missing = Vec::new();
+    if finished < calls {
+        missing.push("skill_finished".to_string());
+    }
+    if durations < calls {
+        missing.push("complete duration".to_string());
+    }
+    missing.push("unique token/cost linkage".to_string());
+    Ok(missing)
 }
 
 pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
@@ -378,20 +453,29 @@ pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let limit_param = next_param;
     values.push(SqlValue::Integer(limit));
     let sql = format!(
-        "SELECT capability_id, COUNT(*) AS calls,
-                COUNT(DISTINCT session_key) AS sessions,
-                SUM(CASE WHEN outcome='succeeded' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN outcome='failed' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN outcome='unknown' THEN 1 ELSE 0 END),
-                AVG(duration_ms), MAX(event_ts_ms)
+        "SELECT capability_id,
+                SUM(CASE WHEN event_type='skill_invoked' THEN 1 ELSE 0 END) AS calls,
+                COUNT(DISTINCT CASE WHEN event_type='skill_invoked' THEN session_key END) AS sessions,
+                SUM(CASE WHEN event_type='skill_finished' AND outcome='succeeded' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN event_type='skill_finished' AND outcome='failed' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN event_type='skill_finished' AND outcome NOT IN ('succeeded', 'failed') THEN 1 ELSE 0 END),
+                AVG(CASE WHEN event_type='skill_finished' THEN duration_ms END),
+                SUM(CASE WHEN event_type='skill_finished' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN event_type='skill_finished' AND duration_ms IS NOT NULL THEN 1 ELSE 0 END),
+                MAX(event_ts_ms)
          FROM workflow_events
-         WHERE event_type='skill_invoked'
+         WHERE event_type IN ('skill_invoked', 'skill_finished')
            AND event_ts_ms >= ?1 AND event_ts_ms < ?2
            AND capability_id IS NOT NULL{filter_sql}
          GROUP BY capability_id
+         HAVING SUM(CASE WHEN event_type='skill_invoked' THEN 1 ELSE 0 END) > 0
          ORDER BY {} DESC, capability_id
          LIMIT ?{limit_param}",
-        match sort { "failures" => "SUM(CASE WHEN outcome='failed' THEN 1 ELSE 0 END)", "duration" => "COALESCE(AVG(duration_ms),0)", _ => "COUNT(*)" }
+        match sort {
+            "failures" => "SUM(CASE WHEN event_type='skill_finished' AND outcome='failed' THEN 1 ELSE 0 END)",
+            "duration" => "COALESCE(AVG(CASE WHEN event_type='skill_finished' THEN duration_ms END),0)",
+            _ => "SUM(CASE WHEN event_type='skill_invoked' THEN 1 ELSE 0 END)",
+        }
     );
     let mut stmt = handle.conn().prepare(&sql)
         .map_err(|e| ToolError::new("internal_error", format!("skills summary query failed: {e}")))?;
@@ -402,11 +486,15 @@ pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         let skill: String = row.get(0).map_err(|e| ToolError::new("internal_error", format!("skills summary row failed: {e}")))?;
         let calls: i64 = row.get(1).unwrap_or(0);
         let sessions: i64 = row.get(2).unwrap_or(0);
-        let succeeded: i64 = row.get(3).unwrap_or(0);
-        let failed: i64 = row.get(4).unwrap_or(0);
-        let unknown: i64 = row.get(5).unwrap_or(0);
+        let finished_succeeded: i64 = row.get(3).unwrap_or(0);
+        let finished_failed: i64 = row.get(4).unwrap_or(0);
+        let succeeded = finished_succeeded.clamp(0, calls);
+        let failed = finished_failed.clamp(0, calls.saturating_sub(succeeded));
+        let unknown = calls.saturating_sub(succeeded).saturating_sub(failed);
         let avg_duration: Option<f64> = row.get(6).unwrap_or(None);
-        let last_ms: i64 = row.get(7).unwrap_or(0);
+        let finished: i64 = row.get(7).unwrap_or(0);
+        let duration_count: i64 = row.get(8).unwrap_or(0);
+        let last_ms: i64 = row.get(9).unwrap_or(0);
         out.push(json!({
             "skill": skill,
             "calls": calls,
@@ -414,23 +502,27 @@ pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             "outcomes": { "succeeded": succeeded, "failed": failed, "unknown": unknown },
             "success_rate": { "numerator": succeeded, "denominator": calls, "coverage": if unknown > 0 { "partial" } else { "complete" }, "value": if unknown > 0 { Value::Null } else { json!(succeeded as f64 / calls.max(1) as f64) } },
             "retry_rate": { "numerator": Value::Null, "denominator": calls, "coverage": "unknown", "value": Value::Null, "reason": "skill invocation fingerprints are not yet paired with a retry lifecycle" },
-            "duration_ms": { "average": avg_duration, "coverage": if avg_duration.is_some() { "partial" } else { "unknown" } },
+            "duration_ms": { "average": avg_duration, "coverage": if duration_count >= calls && calls > 0 { "complete" } else if avg_duration.is_some() { "partial" } else { "unknown" } },
+            "finished_events": finished,
             "tokens": { "value": Value::Null, "coverage": "unknown", "reason": "workflow-to-usage attribution is not unique" },
             "cost": { "value": Value::Null, "coverage": "unknown", "reason": "workflow-to-cost attribution is not unique" },
             "last_seen": super::ms_to_rfc3339_beijing(last_ms)
         }));
     }
-    let observed = workflow_count(handle.conn(), &window, &[], &skills)?;
+    let skill_event_types = ["skill_invoked", "skill_finished"];
+    let observed = workflow_count(handle.conn(), &window, &[], &skills, &skill_event_types)?;
     if observed == 0 {
         warnings.push(json!({ "code": "workflow_coverage_insufficient", "message": "No accepted workflow events fall in the requested window; an empty Skill list is not a proof that no Skill was used." }));
     }
+    let skill_missing = skill_coverage_missing(handle.conn(), &window, &skills)?;
     let cov = coverage(
         handle.conn(),
         &window,
         observed,
         &[],
         &skills,
-        &["skill_finished", "complete duration", "unique token/cost linkage"],
+        &skill_event_types,
+        &skill_missing,
     )?;
     Ok(build_envelope(handle.conn(), handle.authority_state(), (observed > 0).then_some(window.end_ms), cov, warnings, json!({
         "from": window.from, "to": window.to, "skills": out, "has_more": false, "next_cursor": Value::Null
@@ -495,7 +587,7 @@ mod tests {
             },
             WorkflowEvent {
                 event_id: "workflow:skill-beta".to_string(),
-                session_key: Some(session_key),
+                session_key: Some(session_key.clone()),
                 event_ts_ms: 1_700_000_000_200,
                 event_type: "skill_invoked".to_string(),
                 capability_kind: Some("skill".to_string()),
@@ -505,6 +597,19 @@ mod tests {
                 duration_ms: None,
                 error_fingerprint: None,
                 invocation_fingerprint: None,
+            },
+            WorkflowEvent {
+                event_id: "workflow:skill-beta-finished".to_string(),
+                session_key: Some(session_key),
+                event_ts_ms: 1_700_000_000_300,
+                event_type: "skill_finished".to_string(),
+                capability_kind: Some("skill".to_string()),
+                capability_id: Some("beta".to_string()),
+                capability_version: Some("2".to_string()),
+                outcome: "failed".to_string(),
+                duration_ms: Some(9),
+                error_fingerprint: Some("fnv1a64:skill-error".to_string()),
+                invocation_fingerprint: Some("fnv1a64:skill-beta-call".to_string()),
             },
         ];
         db.with_immediate_txn(|conn| {
@@ -523,7 +628,7 @@ mod tests {
         let args = json!({"from": "2023-11-15", "to": "2023-11-15", "limit": 10});
         let issues = run_issues(&args, &home).expect("issues");
         assert_eq!(issues["coverage"]["status"], "partial");
-        assert_eq!(issues["coverage"]["observed_events"], 3);
+        assert_eq!(issues["coverage"]["observed_events"], 4);
         assert_eq!(issues["coverage"]["observed_hosts"], json!(["dsh"]));
         assert_eq!(issues["coverage"]["host_absence_is_not_missing"], true);
         assert!(!issues["coverage"]["missing"]
@@ -550,8 +655,12 @@ mod tests {
         .expect("skills");
         assert_eq!(skills["data"]["skills"].as_array().unwrap().len(), 1);
         assert_eq!(skills["data"]["skills"][0]["skill"], "beta");
-        assert_eq!(skills["coverage"]["observed_events"], 1);
+        assert_eq!(skills["coverage"]["observed_events"], 2);
         assert_eq!(skills["coverage"]["observed_hosts"], json!(["dsh"]));
+        assert_eq!(skills["data"]["skills"][0]["outcomes"], json!({"succeeded": 0, "failed": 1, "unknown": 0}));
+        assert_eq!(skills["data"]["skills"][0]["finished_events"], 1);
+        assert_eq!(skills["data"]["skills"][0]["duration_ms"]["average"], 9.0);
+        assert_eq!(skills["coverage"]["missing"], json!(["unique token/cost linkage"]));
         std::fs::remove_dir_all(home).ok();
     }
 }

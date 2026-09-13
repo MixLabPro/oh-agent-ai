@@ -318,7 +318,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | `reimport_verify` | v0.9.1（**MCP 外**） | ✅ **落地（`4c7f75b`）**：`agent-vitals data-reimport-verify [--json]`——两临时库各重放（round B 崩溃后重跑），逐宿主 × 北京月比对；不碰生产库。不是 MCP 工具（P1-2）。 |
 | `cost_breakdown` | v0.9.2 | 🔶 **部分落地**：按事实时间选择历史价格版本、`MoneyMinor`、币种/计费口径分离、订阅与 unresolved token 明细已在 MCP；变化因子分解、跨价格版本父层聚合与三消费面 parity 仍待补齐 |
 | `sessions_search` / `session_detail` | v0.9.1（提前） | ✅ **落地（`7c68ab4` + 当前 workflow 收口）**：`session_ref` = HMAC-SHA256(salt, session_key)（salt `<data_home>/.mcp-session-salt` 0600，不进库）；`sessions_in_window` 逐会话聚合 + `session_facts_timeline`；`session_detail` 另返回独立、脱敏的 `workflow_timeline`，不把 workflow 硬归因到 token/cost。 |
-| `issues_summary` / `skills_summary` | v0.10 | 🔶 **部分落地**：三宿主 writer + reader + 显式覆盖度已接通；完整跨宿主历史回填、`skill_finished` 完整性、重试生命周期和唯一 token/cost 归因仍未完成，因此结果继续返回 partial/unknown，不提前宣称 U06/U07 完成。 |
+| `issues_summary` / `skills_summary` | v0.10 | 🔶 **部分落地**：三宿主 writer + reader + 显式覆盖度已接通；`skills_summary` 已按调用/结束事件汇总 outcome 与耗时覆盖，但完整跨宿主历史回填、重试生命周期、Skill 版本基线和唯一 token/cost 归因仍未完成，因此结果继续返回 partial/unknown，不提前宣称 U06/U07 完成。 |
 
 未达到前置条件的工具不得用空实现提前注册。客户端可通过 `tools/list` 判断可用能力。
 
@@ -914,7 +914,7 @@ workflow↔token/cost 归因则继续列在 `missing` 中。
 
 ### Phase M4：v0.10 问题与 Skill 洞察
 
-- **当前状态**：`workflow_events` 的宿主 wire 提取 → 脱敏指纹 → SQL writer → reader → 覆盖度基础管线已接通；`issues_summary` / `skills_summary` 的覆盖计数会遵循本次时间窗和过滤条件，并返回实际 `observed_hosts`，不会把未安装宿主误列为缺失。仍需完成历史数据回填、完整重试生命周期和唯一 token/cost 归因，才可关闭 U06–U07。
+- **当前状态**：`workflow_events` 的宿主 wire 提取 → 脱敏指纹 → SQL writer → reader → 覆盖度基础管线已接通；`issues_summary` / `skills_summary` 的覆盖计数会遵循本次时间窗和过滤条件，并返回实际 `observed_hosts`，不会把未安装宿主误列为缺失。`skills_summary` 已把 `skill_invoked` 与 `skill_finished` 分开计数，未完成调用会落入 unknown，耗时覆盖不足会显式降级。仍需完成历史数据回填、完整重试生命周期、Skill 版本基线和唯一 token/cost 归因，才可关闭 U06–U07。
 - 实现 `issues_summary`、`skills_summary`。
 - 完成重复问题、Skill 分子/分母、未知态和证据覆盖测试。
 
