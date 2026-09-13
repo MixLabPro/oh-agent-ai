@@ -117,7 +117,7 @@ reader）——spec §13 M4 前置，"工作量与 behavior 检测线相当"，�
 | ID | 检查 | 判据 | 判定 |
 |---|---|---|---|
 | **M07** 敏感字段 | 扫 `data_status` + `usage_hourly` 全响应文本 | 不含 `native_session_id` / `path_hash` / `machine_namespace` / `session_key` / `source_event_id` / `/Users/` | **EXACT**（零命中） |
-| **M12** 公开工具清单 | 公开构建 `tools/list` | **不含任意 SQL / 写入 / 同步 / 迁移 / repair / `authority_audit`** 工具（不是「恰好 N 个」——只读查询工具可随版本增加：真机 `[data_status, usage_hourly, sessions_search, session_detail]`，`query_sql_readonly` 仅 `mcp-internal`） | **EXACT** |
+| **M12** 公开工具清单 | 公开构建 `tools/list` | **不含任意 SQL / 通用写入 / 同步迁移 / repair / `authority_audit`** 工具；`control_plane` 仅暴露类型化读取，mutation 仍需 `--allow-local-writes`（不是「恰好 N 个」） | **EXACT** |
 | **M18** 线协议 | JSON-RPC 序列 | `initialize` 前发别的 → JSON-RPC error（真机 `-32002`）；未知方法 → `-32601`；未知工具 → `-32602`；坏日期 / 多余字段 / 坏枚举 → `isError` + `invalid_argument`；stdin EOF → exit 0；stdout 无非协议行 | **EXACT** |
 | **M19** `query_sql_readonly` 来源列拒绝（`--internal`） | authorizer 冒烟 | `SELECT native_session_id AS x` / `INSERT …` / `SELECT * FROM usage_facts` 全部 `invalid_argument`；`SELECT … FROM v_facts_safe GROUP BY host` 放行 | **EXACT** |
 
@@ -131,13 +131,24 @@ python3 tests/mcp_smoke.py --bin <bin> [--internal] [--home <dir>]
 
 v1.0 的 AC26–AC28、AC13–AC14、AC10–AC12 还需要验证候选确认、声明版本、撤销、
 重算任务、账单和双币种预算。它们不能通过公开只读 MCP 完成，因此 `mcp-internal`
-额外注册 `billing_workflow`；只有带 `--allow-local-writes` 的 MCP 进程才允许这些
-类型化写入。该开关不开放任意 SQL，不读宿主原始日志，也不允许来源同步/迁移。
+额外注册 `billing_workflow` 与 `control_plane`；只有带 `--allow-local-writes` 的 MCP
+进程才允许类型化写入。该开关不开放任意 SQL，不读宿主原始日志，不允许任意 URL 或
+通用文件写入；`control_plane.sync_facts` 是唯一显式的来源同步动作。
 
 ```bash
 cargo build --release --features mcp-internal
 python3 tests/mcp_v1_management_smoke.py --bin target/release/agent-vitals
 ```
+
+控制面覆盖的隔离烟测：
+
+```bash
+python3 tests/mcp_control_plane_smoke.py --bin target/release/agent-vitals
+```
+
+该脚本验证自定义来源、宿主排除、留存、统计时区、同步暂停和安全删除确认；还验证
+默认无写开关会拒绝 mutation。UI 导航、截图、文件选择器、更新页和系统保存对话框
+属于产品壳层，不作为业务控制面 API。
 
 脚本自行创建临时 `AGENT_VITALS_HOME`，通过真实 stdio JSON-RPC 依次执行 20 个动作，
 验证候选→声明→预览→重算→撤销、host bill、预算配置/静默及状态读取；默认不带

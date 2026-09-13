@@ -1,4 +1,4 @@
-//! Explicit, typed Authority management actions for v1.0 smoke tests.
+//! Explicit, typed billing Authority management actions for v1.0.
 //!
 //! This module is compiled only for `mcp-internal`.  Reads are always allowed;
 //! mutations additionally require the transport flag `--allow-local-writes`.

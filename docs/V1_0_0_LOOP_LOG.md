@@ -2286,3 +2286,10 @@
   **EXACT 20 / PARTIAL 1 / BLOCKED 5 / MISMATCH 0**；cost_breakdown 单测 2/2、内部
   Clippy 通过。Q06–Q10 仍受 workflow_events writer/reader 阻塞，Q14 canonical 归一
   与成本变化因子分解仍未完成。
+
+## Loop 315 · MCP 控制面覆盖工作台业务 API
+
+- 修复：新增类型化 `control_plane` 工具，读取覆盖来源状态/自定义来源/排除、留存、统计时区、同步状态、日月汇总、日历、小时分布、Codex 配额和 Issue 分组；写入覆盖来源根目录、宿主排除、导入数据删除、留存、统计时区、同步暂停、同步执行和 Issue 状态变更。
+- 安全：写入与既有 `billing_workflow` 一样必须显式 `data-mcp serve --allow-local-writes`；删除导入数据要求精确确认串；不开放任意 SQL、URL、原始日志或通用文件写入。同步暂停文件抽到 runtime 共享模块，桌面与 MCP 共用同一读写路径。
+- 边界：截图、导航、文件选择器、更新页、系统保存对话框等 UI 壳操作不纳入 MCP 业务控制面。
+- 验收：新增隔离控制面烟测，验证默认拒绝 mutation，以及来源配置、排除、留存、时区、暂停和删除确认闭环；公开/内部既有 MCP 数据烟测继续执行。

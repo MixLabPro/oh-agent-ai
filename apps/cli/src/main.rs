@@ -750,10 +750,9 @@ enum Cmd {
         #[command(subcommand)]
         action: DataAction,
     },
-    /// Data MCP: local, read-only, stdio MCP server over the SQL authority DB
-    /// (docs/AGENT_VITALS_DATA_MCP_SPEC.md). `serve` speaks JSON-RPC 2.0 on
-    /// stdin/stdout; logs go to stderr; it opens the DB read-only and never
-    /// creates or migrates it.
+    /// Data MCP: local, stdio server over the SQL authority DB
+    /// (docs/AGENT_VITALS_DATA_MCP_SPEC.md). Read operations are safe and
+    /// typed; control-plane mutations are guarded by an explicit flag.
     DataMcp {
         #[command(subcommand)]
         action: DataMcpAction,
@@ -766,8 +765,9 @@ enum DataMcpAction {
     /// Run the stdio MCP server (JSON-RPC 2.0, line-delimited). Blocks until
     /// stdin is closed, then exits 0.
     Serve {
-        /// Enable only the typed local Authority management actions used by
-        /// isolated v1 smoke tests; arbitrary SQL and source writes remain unavailable.
+        /// Enable typed local control-plane and Authority management writes in
+        /// isolated/local use. Arbitrary SQL, raw source payloads, and generic
+        /// filesystem writes remain unavailable.
         #[arg(long)]
         allow_local_writes: bool,
     },

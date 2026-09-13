@@ -26,7 +26,9 @@
 
 ## 1. 一句话定义
 
-Data MCP 是 Agent Vitals 面向 AI Agent 的**本机、只读、语义稳定的数据查询接口**。
+Data MCP 是 Agent Vitals 面向 AI Agent 的**本机、语义稳定的数据与控制面接口**。
+默认仍是只读；本地控制面写入必须由用户显式启动 `--allow-local-writes`，且只接受
+下文列出的类型化动作。
 
 它让 Agent 能安全回答“今天各模型怎么用、哪个宿主花得多、哪些问题反复出现、哪些 Skill 需要关注、数据是否可信”等问题，并能自动执行验收；它不是任意 SQL 控制台，也不是新的数据权威层。
 
@@ -278,10 +280,12 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 
 ### 6.3 时间规则
 
-- 默认时区为 `Asia/Shanghai`，与 v0.9.1 业务日口径一致。
+- 默认统计时区来自 OS 的 IANA 时区；用户也可以通过类型化控制面显式保存一个
+  IANA 时区。当前环境为 `Asia/Shanghai` 时，默认结果与 v0.9.1 业务日口径一致。
 - 日期使用 `YYYY-MM-DD`，月份使用 `YYYY-MM`，时间戳使用 RFC 3339。
 - `from` 为闭区间，`to` 为开区间。
-- 首版不允许调用方更改时区，避免同一“今天”产生不同答案。
+- 同一个 MCP 进程内使用已保存的统计时区；修改时区是显式本地控制面写入，并应在
+  修改后重新读取日/月窗口，避免把不同统计时区的结果混在一起。
 
 ### 6.4 MCP 线协议契约（P1-3——M0 必须逐条冻结）
 
@@ -309,7 +313,8 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | `summary_monthly` | v0.9.1 MVP | 🔶 同上 + `budget_status_sql`；**逐日趋势 / 月底预测 / 成本占比 % 需新增**（P1-4，逐日趋势可基于 `peaked_days_map`） |
 | `data_quality_issues` | v0.9.1 MVP | 🔶 `data_quality_issues` 表已在；`detail_json` 的 code-aware 脱敏 allowlist 需新写 |
 | `authority_audit` | v0.9.1 internal only | ✅ **落地**：MCP 内只读——实时事实 token 守恒、重复 / 孤儿 / legacy-realtime 混轴、覆盖范围输入校验、`authority_revision` 未来性和已登记质量例外自检；不做重导入。见 §8.1 |
-| `billing_workflow` | v1.0 smoke only, `mcp-internal` | 🔶 仅暴露类型化的候选 / 声明 / 重算 / 账单 / 预算管理动作；读取可用，写入必须显式启动 `data-mcp serve --allow-local-writes`，不属于公开兼容面，不提供任意 SQL 或通用写入 |
+| `control_plane` | v1.0 local control plane | ✅ 类型化覆盖工作台的来源状态 / 自定义来源 / 排除 / 删除导入数据 / 留存 / 统计时区 / 同步暂停 / 同步执行 / 日月汇总 / 日历 / 小时分布 / Codex 配额 / Issue 列表与状态变更；读取安全可用且不返回绝对路径，写入必须显式启动 `data-mcp serve --allow-local-writes`，不提供任意 SQL / URL / 通用文件写入 |
+| `billing_workflow` | v1.0 local control plane | ✅ 仅暴露类型化的候选 / 声明 / 重算 / 账单 / 预算管理动作；读取可用，写入必须显式启动 `data-mcp serve --allow-local-writes`，不提供任意 SQL 或通用写入 |
 | `reimport_verify` | v0.9.1（**MCP 外**） | ✅ **落地（`4c7f75b`）**：`agent-vitals data-reimport-verify [--json]`——两临时库各重放（round B 崩溃后重跑），逐宿主 × 北京月比对；不碰生产库。不是 MCP 工具（P1-2）。 |
 | `cost_breakdown` | v0.9.2 | 🔶 **部分落地**：按事实时间选择历史价格版本、`MoneyMinor`、币种/计费口径分离、订阅与 unresolved token 明细已在 MCP；变化因子分解、跨价格版本父层聚合与三消费面 parity 仍待补齐 |
 | `sessions_search` / `session_detail` | v0.9.1（提前） | ✅ **落地（`7c68ab4`）**：`session_ref` = HMAC-SHA256(salt, session_key)（salt `<data_home>/.mcp-session-salt` 0600，不进库）；`sessions_in_window` 逐会话聚合（时间边界读时从 `MIN/MAX(event_ts_ms)` 派生，不补 schema 列）+ `session_facts_timeline`。时间线的失败/错误事件轴留 M4（`workflow_events`）。 |
@@ -653,7 +658,10 @@ base 分开，不生成伪合计；订阅覆盖 token 和无价卡 / 路由证�
 
 ## 8. 内部开发工具
 
-内部工具只能在编译期 feature（draft-2 定为 cargo feature `mcp-internal`，见 §13 M0 D4）下注册。公开安装包在**编译期**就不含这些工具——比运行时 `--profile` 判断更可证（DoD「公开构建没有任意 SQL、写入、同步、迁移、repair 工具」）。
+调试工具（`query_sql_readonly` / `authority_audit`）只能在编译期 feature
+`mcp-internal` 下注册。`control_plane` 与 `billing_workflow` 是显式类型化的本机
+控制面：它们不提供任意 SQL、URL 或通用写入；所有 mutation 仍由运行时
+`--allow-local-writes` 守门。公开构建可以提供安全的读取动作，但默认进程不能写。
 
 ### 8.1 迁移与自洽验收：`authority_audit`（MCP 内）+ `reimport_verify`（MCP 外）
 
@@ -924,7 +932,9 @@ Data MCP v1 完成必须同时满足：
 - 每个结果都能表达 complete、partial、unavailable 和 unresolved，并带 `authority_revision`（P2-6）。
 - 成本按币种、计费口径、供应商、模型和价格快照（`pricing_snapshots` 时点；归一 `pricing_versions` 就绪后升级为版本）解释，不产生伪合计。
 - 每个工具有可校验的 `inputSchema` / `outputSchema`；§6.4 线协议每条有确定实现。
-- 公开构建没有任意 SQL、写入、同步、迁移、repair 工具；`authority_audit` / `query_sql_readonly` 只在 `mcp-internal` 构建里。
+- 公开构建没有任意 SQL、通用写入、迁移、repair 工具；`control_plane` 的读取是
+  类型化业务投影，所有写入需显式 `--allow-local-writes`；`authority_audit` /
+  `query_sql_readonly` 只在 `mcp-internal` 构建里。
 - 响应不含对话正文、本机路径、原生 session ID、密钥或工具原始参数；内部 SQL 工具的脱敏在来源列层（P1-5）。
 - 公开工具具备固定查询模板、参数校验、超时、分页和响应体限制。
 - stdio 无协议外 stdout 输出；客户端断开后进程干净退出。

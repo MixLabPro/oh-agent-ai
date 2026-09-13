@@ -123,24 +123,12 @@ pub fn save_sync_status_at(dh: &Path, status: &SyncStatus) {
 /// 用户显式暂停自动扫描的本地控制位。它和同步回执分开：暂停不是失败，也不
 /// 应被下一次“无记录”回执覆盖。控制文件损坏时返回错误并由调用方停扫，宁可
 /// 要求用户恢复，也不在用户已选择暂停后静默继续读取日志。
-#[derive(Serialize, Deserialize)]
-struct SyncControl {
-    paused: bool,
-}
-
 pub fn sync_is_paused() -> Result<bool, String> {
     sync_is_paused_at(&data_home())
 }
 
 fn sync_is_paused_at(dh: &Path) -> Result<bool, String> {
-    let path = dh.join("state").join("sync-control.json");
-    if !path.exists() {
-        return Ok(false);
-    }
-    let text = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    serde_json::from_str::<SyncControl>(&text)
-        .map(|control| control.paused)
-        .map_err(|error| format!("sync control is unreadable: {error}"))
+    agent_vitals_runtime::sync_control::is_paused(dh)
 }
 
 pub fn save_sync_paused(paused: bool) -> Result<(), String> {
@@ -148,13 +136,7 @@ pub fn save_sync_paused(paused: bool) -> Result<(), String> {
 }
 
 fn save_sync_paused_at(dh: &Path, paused: bool) -> Result<(), String> {
-    let dir = dh.join("state");
-    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    let path = dir.join("sync-control.json");
-    let temporary = dir.join("sync-control.json.tmp");
-    let content = serde_json::to_vec(&SyncControl { paused }).map_err(|error| error.to_string())?;
-    std::fs::write(&temporary, content).map_err(|error| error.to_string())?;
-    std::fs::rename(&temporary, path).map_err(|error| error.to_string())
+    agent_vitals_runtime::sync_control::set_paused(dh, paused)
 }
 
 /// 读回上一轮同步状态；文件缺场 → 默认（"never"）。解析失败也走默认——一条坏掉

@@ -45,6 +45,7 @@ pub mod sql_authority;
 pub mod state;
 pub mod statistics_timezone;
 pub mod summary;
+pub mod sync_control;
 pub mod trace_service;
 pub mod sql_sync;
 pub mod sync_service;
