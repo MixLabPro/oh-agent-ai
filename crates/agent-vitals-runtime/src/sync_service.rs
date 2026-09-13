@@ -140,8 +140,7 @@ fn sync_host(
                 runtime_snapshot = r.quota_snapshot;
                 runtime_snapshot_payload_json = r.quota_snapshot_payload_json;
                 facts.extend(r.facts);
-                // Codex workflow event extraction is a separate adapter slice;
-                // quota and usage facts remain independently valid here.
+                workflow_events.extend(r.workflow_events);
                 synced_sources.extend(dirty.iter().cloned());
             }
             Err(e) => {
@@ -165,7 +164,7 @@ fn sync_host(
                 agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts(
                     path, ns, "default", &sid,
                 )
-                .map(|r| (r.facts, Vec::new()))
+                .map(|r| (r.facts, r.workflow_events))
             }
             "dsh" => agent_vitals_hosts::dsh_usage_fact::dsh_session_to_usage_facts(path, ns, None)
                 .map(|r| (r.facts, r.workflow_events)),
@@ -177,7 +176,7 @@ fn sync_host(
                 agent_vitals_hosts::workbuddy_usage_fact::workbuddy_trace_file_to_usage_facts(
                     path, ns, "default",
                 )
-                .map(|r| (r.facts, Vec::new()))
+                .map(|r| (r.facts, r.workflow_events))
             }
             other => Err(format!("unknown host `{other}`")),
         };
@@ -462,6 +461,12 @@ mod tests {
                 "\n",
                 r#"{"type":"assistant","uuid":"u2","timestamp":"2026-09-05T10:01:00.000Z","message":{"id":"msg_2","model":"claude-sonnet-5","usage":{"input_tokens":11,"cache_read_input_tokens":21,"cache_creation_input_tokens":6,"output_tokens":4}}}"#,
                 "\n",
+                r#"{"type":"user","uuid":"u3","timestamp":"2026-09-05T10:01:10.000Z","message":{"content":[{"type":"text","text":"run the check"}]}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"u4","timestamp":"2026-09-05T10:01:11.000Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash","input":{"command":"cat /private/secret"}}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"u5","timestamp":"2026-09-05T10:01:12.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true,"content":"secret output"}]}}"#,
+                "\n",
             ),
         )
         .unwrap();
@@ -544,6 +549,15 @@ mod tests {
                 serde_json::from_str::<Value>(&quota).unwrap()["plan_type"],
                 "plus"
             );
+            let workflow_count: i64 = db
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM workflow_events WHERE session_key LIKE '11:claude-code|%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(workflow_count >= 3, "Claude workflow 事件必须随 facts 一起落 authority");
 
             // 第二次：全部 skipped（SQL source_files 指纹命中），零新增。
             let r2 = sync_facts(&data).unwrap();

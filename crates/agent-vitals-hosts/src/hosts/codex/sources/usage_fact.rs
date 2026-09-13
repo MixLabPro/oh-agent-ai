@@ -41,6 +41,7 @@ use crate::hosts::claude_code::sources::usage_fact::{SKIP, UNATTRIBUTED, UNREADA
 use agent_vitals_domain::evidence::QuotaSnapshot;
 use agent_vitals_domain::source_identity::{canonical_json, fnv1a64_hex};
 use agent_vitals_domain::usage_fact::build_usage_fact;
+use agent_vitals_domain::workflow::WorkflowEvent;
 
 const HOST: &str = "codex";
 const OBSERVATION_KIND: &str = "assistant-usage";
@@ -53,6 +54,7 @@ const OBSERVATION_KIND: &str = "assistant-usage";
 #[derive(Debug)]
 pub struct UsageFactEmitResult {
     pub facts: Vec<Value>,
+    pub workflow_events: Vec<WorkflowEvent>,
     /// 与同一次事实发射共享同一状态机得出的当前配额快照；它不是 UsageFact，
     /// 由 runtime 单独写入 `host_runtime_snapshots`。这是跨宿主契约类型，
     /// Runtime 不应重新解释 Codex wire 字段。
@@ -569,6 +571,13 @@ pub fn codex_rollouts_to_usage_facts_with_route(
         });
     Ok(UsageFactEmitResult {
         facts,
+        workflow_events: paths
+            .iter()
+            .map(|path| super::workflow::codex_file_to_workflow_events(path, machine_namespace, source_profile))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
         quota_snapshot,
         quota_snapshot_payload_json,
         attempts,

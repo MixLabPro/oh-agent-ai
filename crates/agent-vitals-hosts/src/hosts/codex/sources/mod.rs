@@ -35,6 +35,7 @@ pub mod route_evidence;
 // v0.9 Stage A emitter 归位（R4 §5.2）：UsageFact emitter 从二进制
 // apps/cli/src/agent/ 迁来——读文件 → 读内存，仍属 I/O 层。
 pub mod usage_fact;
+pub mod workflow;
 
 fn empty_result() -> Map<String, Value> {
     let mut map = Map::new();

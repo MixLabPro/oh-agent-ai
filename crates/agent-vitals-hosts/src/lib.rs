@@ -17,6 +17,7 @@
 pub mod canonical_usage;
 pub mod hosts;
 pub mod skill_discovery;
+pub mod workflow_utils;
 // v0.10.0：多宿主「路径 -> CanonicalSession」入口（spec §7 门槛 1 的前提，此前
 // 只有 DSH 有）。I/O，随 `dsh_sources` 等同一条 `sources` feature 边界；路径
 // 含 `/sources` 是故意的，落进 `io_tokens_only_appear_under_sources` 守卫。

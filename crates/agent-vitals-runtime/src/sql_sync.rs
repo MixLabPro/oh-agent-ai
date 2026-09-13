@@ -166,9 +166,10 @@ pub const RETENTION_MONTHS_MINUS_ONE: u32 = 12;
 const TRIGGER_SYNC: &str = "cli";
 const TRIGGER_MIGRATION: &str = "migration";
 
-/// `source_files.parser_version`。第一版恒 1——事实行解析 schema 版本；语义
-/// 与 `usage_fact.rs::CURRENT_SCHEMA_VERSION` 的演进纪律一致。
-const PARSER_VERSION: i64 = 1;
+/// `source_files.parser_version`。版本 2 增加了 workflow_events 的派生提取；
+/// 即使源文件指纹不变，也必须重放一次，才能把历史源补齐到 workflow authority。
+/// 语义与 `usage_fact.rs::CURRENT_SCHEMA_VERSION` 的演进纪律一致。
+const PARSER_VERSION: i64 = 2;
 
 /// 当前事实解析器版本；同步差量必须把它和文件指纹一起比较。
 pub const fn parser_version() -> i64 {

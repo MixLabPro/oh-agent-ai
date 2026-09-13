@@ -833,9 +833,8 @@ enum DataAction {
 ///   是 MCP 返回的 HMAC（`sr_<32hex>`），不是原生 session key。
 /// - `Findings`：**仍走 `r2a_store::sessions_findings`**——DSH / Codex 行为
 ///   findings 来自 session envelope 的 `findings` / `audit.findings` 字段
-///   （DSH wire 事件预先在 ingest 阶段算好），而 `usage_facts × pricing_snapshots`
-///   JOIN 不含 workflow 事件。完整迁移到 mcp::dispatch 待 M4 `workflow_events`
-///   工具落地（task #19）。
+///   （DSH wire 事件预先在 ingest 阶段算好）。`session_detail` 的 usage
+///   时间线与已落 authority 的 workflow 时间线是两个独立轴，成本不做硬归因。
 /// - `Navigation`：今日 token 走 SQL 权威库（`authority_day_token_totals`，
 ///   与 r2a_store `sessions_navigation` 同源），`recent[]` 改成
 ///   `mcp::dispatch("sessions_search", {date, limit})`。
@@ -3320,7 +3319,7 @@ session_store={store} fold={fold}"
     // v0.9.1 SQL 权威库收口（PR #2）：`sessions list` / `read` / `navigation`
     // 改走 `mcp::dispatch`，envelope 与 MCP `tools/call` 同源；`findings` 仍
     // 走 r2a_store（DSH/Codex findings 来自 session envelope 的 pre-computed
-    // 字段，usage_facts 不含 workflow 事件；task #19 等 M4 workflow_events 工具）。
+    // 字段），而 session_detail 另外返回 SQL workflow 事件轴。
     if let Some(Cmd::Sessions { action }) = &args.cmd {
         let data_home = agent_vitals_runtime::home::data_home();
         match action {
@@ -3414,7 +3413,8 @@ session_store={store} fold={fold}"
                 dispatch_sessions("session_detail", Value::Object(args), *json, &data_home);
             }
             SessionsAction::Findings { json } => {
-                // 临时保留 r2a_store 路径——见 task #19（M4 workflow_events 落地后切）。
+                // findings 仍是 session envelope 的预计算投影；workflow 事件轴
+                // 已由 session_detail 通过 authority 读取。
                 let home = std::env::var("HOME")
                     .or_else(|_| std::env::var("USERPROFILE"))
                     .unwrap_or_default();

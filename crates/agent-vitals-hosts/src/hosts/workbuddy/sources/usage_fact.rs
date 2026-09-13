@@ -36,6 +36,10 @@ use agent_vitals_domain::usage_fact::build_usage_fact;
 use agent_vitals_provider::resolve_billing_attribution;
 use serde_json::{json, Map, Value};
 
+use agent_vitals_domain::source_identity::fnv1a64_hex;
+use agent_vitals_domain::contracts::r2a::SessionKey;
+use agent_vitals_domain::workflow::WorkflowEvent;
+
 use super::traces::{
     read_workbuddy_trace_file, read_workbuddy_traces, SpanSummary, TraceSummary,
 };
@@ -52,6 +56,7 @@ pub const UNATTRIBUTED: &str = "unattributed";
 #[derive(Debug)]
 pub struct UsageFactEmitResult {
     pub facts: Vec<Value>,
+    pub workflow_events: Vec<WorkflowEvent>,
     pub attempts: HashMap<String, i64>,
     /// 全部 generation span 数（归属 + 未归属）。恒等式：`total = fact + skip +
     /// unreadable + unattributed + bad_id`——每个 span 恰落一个桶（decode_failed 先判，
@@ -59,6 +64,157 @@ pub struct UsageFactEmitResult {
     pub total_generation_spans: i64,
     pub skip_rows: i64,
     pub malformed: i64,
+}
+
+fn workflow_time(value: Option<&str>) -> Option<i64> {
+    let value = value?;
+    let (seconds, _) = agent_vitals_domain::domain::budget::parse_iso(value)?;
+    let fraction_ms = value
+        .split_once('.')
+        .and_then(|(_, rest)| rest.split_once(['Z', '+', '-']).map(|(digits, _)| digits))
+        .unwrap_or("")
+        .chars()
+        .take(3)
+        .collect::<String>();
+    let fraction_ms = if fraction_ms.is_empty() {
+        0
+    } else {
+        let mut padded = fraction_ms;
+        while padded.len() < 3 { padded.push('0'); }
+        padded.parse::<i64>().ok()?
+    };
+    seconds.checked_mul(1000)?.checked_add(fraction_ms)
+}
+
+fn workflow_label(value: &str) -> String {
+    if !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte))
+    {
+        value.to_string()
+    } else {
+        format!("fnv1a64:{:}", fnv1a64_hex(value.as_bytes()))
+    }
+}
+
+fn workflow_error(value: Option<&str>) -> Option<String> {
+    value.map(|error| format!("fnv1a64:{:}", fnv1a64_hex(error.as_bytes())))
+}
+
+fn workflow_outcome(status: Option<&str>, error: Option<&str>) -> &'static str {
+    if error.is_some() { return "failed"; }
+    match status.unwrap_or("").to_ascii_lowercase().as_str() {
+        "ok" | "success" | "succeeded" | "completed" | "complete" => "succeeded",
+        "error" | "failed" | "failure" => "failed",
+        "cancelled" | "canceled" | "aborted" => "cancelled",
+        _ => "unknown",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workflow_event(
+    event_id: String,
+    session_key: String,
+    event_ts_ms: Option<i64>,
+    event_type: &str,
+    capability_kind: Option<&str>,
+    capability_id: Option<String>,
+    outcome: &str,
+    duration_ms: Option<i64>,
+    error_fingerprint: Option<String>,
+    invocation_fingerprint: Option<String>,
+) -> Option<WorkflowEvent> {
+    let event = WorkflowEvent {
+        event_id,
+        session_key: Some(session_key),
+        event_ts_ms: event_ts_ms?,
+        event_type: event_type.to_string(),
+        capability_kind: capability_kind.map(str::to_string),
+        capability_id,
+        capability_version: None,
+        outcome: outcome.to_string(),
+        duration_ms: duration_ms.filter(|value| *value >= 0),
+        error_fingerprint,
+        invocation_fingerprint,
+    };
+    event.validate().ok().map(|_| event)
+}
+
+fn workflow_from_trace(
+    trace: &TraceSummary,
+    machine_namespace: &str,
+    source_profile: &str,
+) -> Vec<WorkflowEvent> {
+    let Some(native_session_id) = trace.session_id.as_deref() else { return Vec::new() };
+    let session_key = SessionKey::new("workbuddy", native_session_id, source_profile, machine_namespace).ledger_key();
+    let mut events = Vec::new();
+    let mut previous_model: Option<String> = None;
+    for span in &trace.spans {
+        let span_id = if span.span_id.is_empty() { "<missing-span>" } else { span.span_id.as_str() };
+        let event_hash = |kind: &str| format!(
+            "workflow:workbuddy:{:}",
+            fnv1a64_hex(format!("{}|{}|{}", trace.trace_id, span_id, kind).as_bytes())
+        );
+        let started = workflow_time(span.started_at.as_deref());
+        let ended = workflow_time(span.ended_at.as_deref());
+        let outcome = workflow_outcome(span.status.as_deref(), span.error.as_deref());
+        let error = workflow_error(span.error.as_deref());
+
+        if span.kind == "agent" && span.parent_id.is_none() {
+            if let Some(event) = workflow_event(
+                event_hash("task_started"), session_key.clone(), started, "task_started",
+                None, None, "unknown", None, None, None,
+            ) { events.push(event); }
+            if let Some(event) = workflow_event(
+                event_hash("task_finished"), session_key.clone(), ended.or(started), "task_finished",
+                None, None, outcome, span.duration_ms, error, None,
+            ) { events.push(event); }
+            continue;
+        }
+
+        if span.kind == "agent" && (span.agent_name.is_some() || span.name.starts_with("skill")) {
+            let name = span.agent_name.as_deref().unwrap_or(&span.name);
+            let skill = workflow_label(name);
+            if let Some(event) = workflow_event(
+                event_hash("skill_invoked"), session_key.clone(), started, "skill_invoked",
+                Some("skill"), Some(skill.clone()), "unknown", None, None,
+                Some(format!("fnv1a64:{:}", fnv1a64_hex(skill.as_bytes()))),
+            ) { events.push(event); }
+            if let Some(event) = workflow_event(
+                event_hash("skill_finished"), session_key.clone(), ended.or(started), "skill_finished",
+                Some("skill"), Some(skill), outcome, span.duration_ms, error.clone(), None,
+            ) { events.push(event); }
+        }
+
+        if span.kind == "function" || span.kind == "custom" {
+            let name = span.tool_name.as_deref().or_else(|| (!span.name.is_empty()).then_some(span.name.as_str()));
+            if let Some(name) = name {
+                let tool = workflow_label(name);
+                let invocation = Some(format!("fnv1a64:{:}", fnv1a64_hex(tool.as_bytes())));
+                if let Some(event) = workflow_event(
+                    event_hash("tool_invoked"), session_key.clone(), started, "tool_invoked",
+                    Some("tool"), Some(tool.clone()), "unknown", None, None, invocation.clone(),
+                ) { events.push(event); }
+                if let Some(event) = workflow_event(
+                    event_hash("tool_finished"), session_key.clone(), ended.or(started), "tool_finished",
+                    Some("tool"), Some(tool), outcome, span.duration_ms, error, invocation,
+                ) { events.push(event); }
+            }
+        }
+
+        for usage in &span.usages {
+            let Some(model) = usage.model.as_deref() else { continue };
+            let model = workflow_label(model);
+            if previous_model.as_deref().is_some_and(|previous| previous != model) {
+                if let Some(event) = workflow_event(
+                    event_hash("model_switched"), session_key.clone(), started, "model_switched",
+                    Some("model"), Some(model.clone()), "succeeded", None, None, None,
+                ) { events.push(event); }
+            }
+            previous_model = Some(model);
+        }
+    }
+    events
 }
 fn span_to_usage_fact(
     span: &SpanSummary,
@@ -159,6 +315,7 @@ pub fn workbuddy_traces_to_usage_facts(
     let read = read_workbuddy_traces(root);
     let mut out = UsageFactEmitResult {
         facts: Vec::new(),
+        workflow_events: Vec::new(),
         attempts: HashMap::new(),
         total_generation_spans: 0,
         skip_rows: 0,
@@ -175,8 +332,86 @@ pub fn workbuddy_traces_to_usage_facts(
     all.sort_by(|a, b| a.path.to_string_lossy().cmp(&b.path.to_string_lossy()));
     for tr in all {
         emit_trace(tr, machine_namespace, source_profile, &mut out);
+        out.workflow_events
+            .extend(workflow_from_trace(tr, machine_namespace, source_profile));
     }
     Ok(out)
+}
+
+#[allow(clippy::items_after_test_module)]
+#[cfg(test)]
+mod tests {
+    use super::{workflow_from_trace, workflow_time};
+    use crate::hosts::workbuddy::sources::traces::{SpanSummary, SpanUsage, TraceSummary};
+    use std::path::PathBuf;
+
+    fn span(kind: &str, name: &str, span_id: &str) -> SpanSummary {
+        SpanSummary {
+            span_id: span_id.to_string(),
+            parent_id: None,
+            name: name.to_string(),
+            kind: kind.to_string(),
+            started_at: Some("2026-08-31T09:00:30.123Z".to_string()),
+            ended_at: Some("2026-08-31T09:00:31.456Z".to_string()),
+            duration_ms: Some(1333),
+            status: Some("ok".to_string()),
+            error: None,
+            tool_name: (kind == "function").then(|| name.to_string()),
+            file_path: None,
+            usages: Vec::new(),
+            agent_name: None,
+            decode_failed: false,
+        }
+    }
+
+    #[test]
+    fn workflow_timestamp_keeps_milliseconds() {
+        assert_eq!(workflow_time(Some("1970-01-01T00:00:01.234Z")), Some(1234));
+        assert_eq!(workflow_time(Some("not-a-time")), None);
+    }
+
+    #[test]
+    fn trace_workflow_is_redacted_and_has_task_tool_and_model_events() {
+        let mut root = span("agent", "cli", "root");
+        root.parent_id = None;
+        let tool = span("function", "Bash", "tool");
+        let mut generation = span("generation", "generation", "generation");
+        generation.usages = vec![SpanUsage {
+            model: Some("custom-local:secret-model".to_string()),
+            prompt_tokens: 1,
+            cached_tokens: 0,
+            completion_tokens: 1,
+            reasoning_tokens: 0,
+        }];
+        let mut generation2 = span("generation", "generation", "generation-2");
+        generation2.usages = vec![SpanUsage {
+            model: Some("custom-local:other-model".to_string()),
+            prompt_tokens: 1,
+            cached_tokens: 0,
+            completion_tokens: 1,
+            reasoning_tokens: 0,
+        }];
+        let trace = TraceSummary {
+            trace_id: "trace-1".to_string(),
+            path: PathBuf::from("/Users/private/trace.json"),
+            name: Some("private name".to_string()),
+            session_id: Some("s1".to_string()),
+            started_at: root.started_at.clone(),
+            ended_at: root.ended_at.clone(),
+            spans: vec![root, tool, generation, generation2],
+            decode_failures: 0,
+        };
+        let events = workflow_from_trace(&trace, "machine", "default");
+        assert!(events.iter().any(|event| event.event_type == "task_started"));
+        assert!(events.iter().any(|event| event.event_type == "task_finished"));
+        assert!(events.iter().any(|event| event.event_type == "tool_invoked"));
+        assert!(events.iter().any(|event| event.event_type == "tool_finished"));
+        assert!(events.iter().any(|event| event.event_type == "model_switched"));
+        assert!(events.iter().all(|event| event.validate().is_ok()));
+        let debug = format!("{events:?}");
+        assert!(!debug.contains("/Users/private"));
+        assert!(!debug.contains("secret-model"));
+    }
 }
 
 /// 单个 trace 文件 → `UsageFactEmitResult`（E4b 同步管线的 emit 面）。文件读不了 /
@@ -191,12 +426,14 @@ pub fn workbuddy_trace_file_to_usage_facts(
     let tr = read_workbuddy_trace_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut out = UsageFactEmitResult {
         facts: Vec::new(),
+        workflow_events: Vec::new(),
         attempts: HashMap::new(),
         total_generation_spans: 0,
         skip_rows: 0,
         malformed: 0,
     };
     emit_trace(&tr, machine_namespace, source_profile, &mut out);
+    out.workflow_events = workflow_from_trace(&tr, machine_namespace, source_profile);
     Ok(out)
 }
 

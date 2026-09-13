@@ -2366,3 +2366,22 @@
 - 未完成边界：Claude/Codex/WorkBuddy workflow adapter、Q07 retry lifecycle、Q09
   Skill 版本回归、Q10 workflow↔usage timeline 完整关联，以及 UI/UAT、签名/公证和
   外部 trial 发布仍不应勾选为 v1 完成。
+
+## Loop 321 · 三宿主 workflow 回填与 session_detail 关联收口
+
+- 修复：Claude Code、Codex、WorkBuddy adapter 均产出宿主无关的脱敏
+  `WorkflowEvent`；runtime 同步不再丢弃 Claude/Codex/WorkBuddy 事件，并将
+  `source_files.parser_version` 升至 2，确保历史源文件不会因指纹命中而跳过新派生字段。
+- 关联：`session_detail` 增加独立的 `workflow_timeline` 与
+  `workflow_has_more`；workflow 事件不与 usage/cost 做不可靠的一对一硬归因，
+  响应不返回 session key、原生 id、路径、prompt、参数或错误正文。
+- 真机回填：Claude 242、Codex 135、DSH 60、WorkBuddy 677 个源文件全部重放且无错误；
+  authority 中 workflow 行按宿主可见：Claude 88,512、Codex 32,985、DSH 14,460、
+  WorkBuddy 28,588。
+- 验收：全量 `cargo test --release`、`cargo clippy --release --all-targets -- -D warnings`、
+  Python unittest 1,189（208 skipped）、golden 15/15、`data-reimport-verify`
+  `verified=true`；公开 MCP `tools/list` 10 个工具，状态/小时/成本/会话/问题/Skill/
+  控制面/账单候选冒烟均可调用，`issues_summary`/`skills_summary` 继续如实返回 partial。
+- 边界：Q07 retry lifecycle、Q09 Skill 版本回归、完整 token/cost 唯一归因、UI 真机 UAT、
+  签名/公证和外部 trial 发布仍未完成；本轮没有触碰用户已有的
+  `docs/WORKBUDDY_ONBOARDING_SPEC.md` 内容。

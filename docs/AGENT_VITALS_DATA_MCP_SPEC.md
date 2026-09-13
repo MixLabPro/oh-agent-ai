@@ -187,7 +187,7 @@ Data MCP 的前置是 v0.9.1 SQL 权威迁移。截至本次校正，`AGENT_VITA
 **未落地，MCP 规格不得假设其存在**：
 
 - **§3.4 模型 / 供应商 / 价格归一表**（`providers` / `models` / `model_aliases` / `pricing_versions` / `model_prices`）——**从未建**。实际实现用 `pricing_snapshots`（整份 `pricing.json` 快照 blob）+ 查询时 `billing_route_of` 反查。canonical 模型 ID、`model_aliases` 时效区间、`pricing_versions.source_kind`（official / user_configured / imported）三分并列展示都还没有落点。
-- **`workflow_events` 的 writer 与 reader**——只有 DDL，没有任何宿主 wire 提取、脱敏指纹、写入或读取代码。这是 `issues_summary` / `skills_summary`（M4）的**全部**数据来源。
+- **`workflow_events` 的完整度**——三宿主（Claude Code / Codex / WorkBuddy）已有 wire 提取、脱敏指纹、同步写入；DSH 已有既有事件适配。`session_detail` 已能读出独立的安全 workflow 时间线，`issues_summary` / `skills_summary` 仍因覆盖度、完整重试生命周期和 token/cost 唯一归因未闭环而保持显式 partial/unknown。
 - **`sessions` 表的会话级信息**——是最小索引（`session_key` / `host` / `machine_namespace` / `last_observed_at_ms`），`started_at_ms` / `ended_at_ms` 大多为空，无会话级 token / 成本聚合。
 - **`session_ref` 所需的 HMAC + 每安装随机 salt**——仓库内无此基元（`source_identity.rs` 的 `fnv1a64_hex` 是非密码学哈希，不满足「不可反推」）。
 - **跨宿主「小时 × 模型 / 供应商」聚合查询**——只有 `codex_by_hour_model` 单宿主版；claude / dsh 及三宿主合并的模型轴小时曲线要新写。
@@ -317,8 +317,8 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | `billing_workflow` | v1.0 local control plane | ✅ 仅暴露类型化的候选 / 声明 / 重算 / 账单 / 预算管理动作；读取可用，写入必须显式启动 `data-mcp serve --allow-local-writes`，不提供任意 SQL 或通用写入 |
 | `reimport_verify` | v0.9.1（**MCP 外**） | ✅ **落地（`4c7f75b`）**：`agent-vitals data-reimport-verify [--json]`——两临时库各重放（round B 崩溃后重跑），逐宿主 × 北京月比对；不碰生产库。不是 MCP 工具（P1-2）。 |
 | `cost_breakdown` | v0.9.2 | 🔶 **部分落地**：按事实时间选择历史价格版本、`MoneyMinor`、币种/计费口径分离、订阅与 unresolved token 明细已在 MCP；变化因子分解、跨价格版本父层聚合与三消费面 parity 仍待补齐 |
-| `sessions_search` / `session_detail` | v0.9.1（提前） | ✅ **落地（`7c68ab4`）**：`session_ref` = HMAC-SHA256(salt, session_key)（salt `<data_home>/.mcp-session-salt` 0600，不进库）；`sessions_in_window` 逐会话聚合（时间边界读时从 `MIN/MAX(event_ts_ms)` 派生，不补 schema 列）+ `session_facts_timeline`。时间线的失败/错误事件轴留 M4（`workflow_events`）。 |
-| `issues_summary` / `skills_summary` | v0.10 | ⬜ `workflow_events` 完整 writer + reader + 覆盖度管线（独立于 MCP 的工作量，随 v0.10 任务图立项） |
+| `sessions_search` / `session_detail` | v0.9.1（提前） | ✅ **落地（`7c68ab4` + 当前 workflow 收口）**：`session_ref` = HMAC-SHA256(salt, session_key)（salt `<data_home>/.mcp-session-salt` 0600，不进库）；`sessions_in_window` 逐会话聚合 + `session_facts_timeline`；`session_detail` 另返回独立、脱敏的 `workflow_timeline`，不把 workflow 硬归因到 token/cost。 |
+| `issues_summary` / `skills_summary` | v0.10 | 🔶 **部分落地**：三宿主 writer + reader + 显式覆盖度已接通；完整跨宿主历史回填、`skill_finished` 完整性、重试生命周期和唯一 token/cost 归因仍未完成，因此结果继续返回 partial/unknown，不提前宣称 U06/U07 完成。 |
 
 未达到前置条件的工具不得用空实现提前注册。客户端可通过 `tools/list` 判断可用能力。
 
@@ -908,7 +908,7 @@ base 分开，不生成伪合计；订阅覆盖 token 和无价卡 / 路由证�
 
 ### Phase M4：v0.10 问题与 Skill 洞察
 
-- **前置（独立立项，不算 MCP 工作量）**：`workflow_events` 的宿主 wire 提取 → 脱敏指纹 → SQL writer → reader → 覆盖度。工作量与 behavior 检测线相当，随 v0.10 任务图推进；本 Phase 的 MCP 部分只是管线就绪后的工具封装。
+- **当前状态**：`workflow_events` 的宿主 wire 提取 → 脱敏指纹 → SQL writer → reader → 覆盖度基础管线已接通；仍需完成历史数据回填、完整重试生命周期和唯一 token/cost 归因，才可关闭 U06–U07。
 - 实现 `issues_summary`、`skills_summary`。
 - 完成重复问题、Skill 分子/分母、未知态和证据覆盖测试。
 
