@@ -510,7 +510,20 @@ fn coverage(
     missing: &[String],
 ) -> Result<Value, ToolError> {
     let observed_hosts = workflow_hosts(conn, window, hosts, capabilities, event_types)?;
-    let status = if observed == 0 { "unavailable" } else { "partial" };
+    // M4-1：`missing.is_empty()` 是本层**唯一**能报 complete 的判据。此前这里
+    // 只有 unavailable / partial 两个分支，等于把「证据齐全」与「证据不全」都压成
+    // partial——工具在结构上永远无法毕业，与真实数据质量无关。
+    //
+    // 反转后的代价：判「还缺什么」的责任完全落在调用方算出的 `missing` 上。调用方
+    // **少报**一项，这里就会错报 complete（正是本仓库反复栽的「缺失被渲染成完成」）。
+    // 因此每个 `missing` 项都必须是可复算的 SQL 条件，不得是固定字面量。
+    let status = if observed == 0 {
+        "unavailable"
+    } else if missing.is_empty() {
+        "complete"
+    } else {
+        "partial"
+    };
     Ok(json!({
         "status": status,
         "source": "workflow_events",
@@ -520,7 +533,13 @@ fn coverage(
         "requested_from": super::ms_to_rfc3339_beijing(window.start_ms),
         "requested_to": super::ms_to_rfc3339_beijing(window.end_ms),
         "missing": missing,
-        "reason": if observed == 0 { "no accepted workflow events match the requested window and filters" } else { "workflow lifecycle and token/cost attribution evidence is still incomplete" },
+        "reason": if observed == 0 {
+            "no accepted workflow events match the requested window and filters"
+        } else if missing.is_empty() {
+            "all required workflow evidence is present for the requested window and filters"
+        } else {
+            "workflow lifecycle and token/cost attribution evidence is still incomplete"
+        },
         "host_absence_is_not_missing": true
     }))
 }
@@ -649,6 +668,11 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     if observed == 0 {
         warnings.push(json!({ "code": "workflow_coverage_insufficient", "message": "No accepted workflow events fall in the requested window; an empty issue list is not a proof of no issues." }));
     }
+    // M4-1：本项**仍是固定字面量，因为它描述的是真实的缺口**——「workflow 事件 →
+    // usage/cost 的唯一链接」目前不存在（M4-6 未实现，见
+    // `docs/v1.0.0/M4_MCP_CLOSURE_CHECKLIST.md`）。它不是结构遗留：M4-6 落地后
+    // 这里应改为可复算的判据（能证明唯一性才不报），届时 `missing` 清空，
+    // coverage 会自动从 partial 升为 complete，无需再动 `coverage()` 本身。
     let mut issue_missing = vec!["unique token/cost linkage".to_string()];
     if retry_evidence_status != "complete" {
         issue_missing.push("complete retry baseline".to_string());
@@ -845,7 +869,7 @@ pub fn run_skills(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RetryEvent, SkillVersionSnapshot, retry_chain_rows, run_issues, run_skills, skill_version_regression};
+    use super::{RetryEvent, SkillVersionSnapshot, Window, coverage, retry_chain_rows, run_issues, run_skills, skill_version_regression};
     use agent_vitals_data::authority::{AuthorityDb, default_authority_path};
     use agent_vitals_data::fact_writer_sql::SqlFactWriter;
     use agent_vitals_data::workflow::insert_events;
@@ -981,6 +1005,49 @@ mod tests {
         assert_eq!(skills["data"]["skills"][0]["versions"][0]["version"], "2");
         assert_eq!(skills["data"]["skills"][0]["version_regression"]["status"], "unavailable");
         assert_eq!(skills["data"]["skills"][0]["version_regression"]["reason"], "fewer_than_two_versions");
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    /// M4-1：`coverage()` 必须有 `complete` 分支，判据是「本次请求范围内 `missing`
+    /// 为空且 `observed > 0`」。修复前这里只有 unavailable / partial 两个分支，
+    /// 工具在**结构上**永远无法毕业——与真实数据质量无关。
+    ///
+    /// 这个测试同时钉住反转后的代价：判「还缺什么」的责任落在调用方的 `missing`
+    /// 上，少报一项就会错报 complete。
+    #[test]
+    fn coverage_reports_complete_only_when_no_evidence_is_missing() {
+        let home = seeded_home();
+        let db = AuthorityDb::open(&default_authority_path(&home), 1).expect("db");
+        let window = Window {
+            from: "2023-11-15".to_string(),
+            to: "2023-11-15".to_string(),
+            start_ms: 1_700_000_000_000,
+            end_ms: 1_700_000_100_000,
+        };
+        let hosts = vec!["dsh".to_string()];
+        let call = |observed: i64, missing: &[String]| {
+            coverage(db.conn(), &window, observed, &hosts, &[], &[], missing).expect("coverage")
+        };
+
+        // 证据齐全（missing 为空）→ complete（修复前恒为 partial）
+        let complete = call(4, &[]);
+        assert_eq!(complete["status"], "complete");
+        assert_eq!(complete["missing"], json!([]));
+        assert_eq!(
+            complete["reason"],
+            "all required workflow evidence is present for the requested window and filters"
+        );
+
+        // 缺一项 → partial，且点名缺项（不得吞掉）
+        let partial = call(4, &["unique token/cost linkage".to_string()]);
+        assert_eq!(partial["status"], "partial");
+        assert_eq!(partial["missing"], json!(["unique token/cost linkage"]));
+
+        // 窗口内无事件 → unavailable 优先于 complete（空结果不是「没问题」）
+        let none = call(0, &[]);
+        assert_eq!(none["status"], "unavailable");
+        assert_eq!(none["observed_events"], 0);
+
         std::fs::remove_dir_all(home).ok();
     }
 

@@ -6,6 +6,7 @@ import vm from "node:vm";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const read = (path) => readFileSync(`${root}/${path}`, "utf8");
 const js = read("apps/desktop/src-tauri/ui/workbench.js");
+const html = read("apps/desktop/src-tauri/ui/workbench.html");
 const lib = read("apps/desktop/src-tauri/src/lib.rs");
 const runtime = read("crates/agent-vitals-runtime/src/mcp/mod.rs");
 let failed = 0;
@@ -29,6 +30,20 @@ ok(js.includes("for (const source of sources)"), "前端按返回集合渲染而
 ok(js.includes("recoverSource(button, key") && js.includes('invoke("trigger_sync")'),
   "未检测与失败状态都有恢复动作");
 ok(js.includes('invoke("sync_request_status", { requestId })'), "恢复动作按请求ID等待完成");
+ok(!/id="ov-billing-review"[^>]*aria-expanded/.test(html),
+  "套餐确认入口不暴露为 AX 折叠控件，保留普通按钮点击语义");
+ok(/id="ov-billing-review"[^>]*>确认套餐信息<\/button>/.test(html) &&
+  /id="ov-billing-review-panel"[^>]*role="region"[^>]*aria-labelledby="ov-billing-review-title"/.test(html),
+  "套餐确认入口使用普通按钮并保留展开区域标题语义");
+ok(js.includes("relationship.disabled = false") && js.includes("relationship.disabled = true"),
+  "已保存声明锁定计费关系，避免切换为仍不确定造成状态漂移");
+ok(lib.includes("match worker_db.billing_recalculation_run") && lib.includes("Ok(true) => return") &&
+  !/billing_recalculation_run\([\s\S]{0,180}\.is_ok\(\)/.test(lib),
+  "重算 worker 只把 changed=true 当作成功，不吞掉 false/错误回执");
+ok(lib.includes("fn billing_recalculation_jobs()") &&
+  /billing_recalculation_job_status,[\s\S]*billing_recalculation_jobs,/.test(lib) &&
+  js.includes('invoke("billing_recalculation_jobs")') && js.includes("重算待重试"),
+  "工作台重启后读取待处理重算并提供可见重试入口");
 
 console.log("# 真实前端渲染与恢复链路");
 const elements = {};
@@ -40,6 +55,8 @@ function makeEl(id) {
     id, children: [], dataset: {}, hidden: false, disabled: false,
     classList: { add: (...names) => names.forEach(name => classes.add(name)), contains: name => classes.has(name) },
     appendChild(child) { this.children.push(child); return child; },
+    append(...children) { this.children.push(...children); },
+    focus() { this.focused = true; },
     addEventListener() {}, remove() { this.removed = true; },
   };
   Object.defineProperties(node, {
@@ -131,6 +148,39 @@ statusFailure = true;
 await sandbox.loadSources(true);
 ok(elements["src-banner"].hidden === false && elements["src-banner"].textContent.includes("schema mismatch"),
   "契约失败显示错误横幅而非零数据");
+
+console.log("# 套餐确认入口 DOM 回归");
+for (const id of ["ov-billing-prompt", "ov-billing-review-panel", "ov-billing-review",
+  "ov-billing-review-close", "ov-billing-prompt-copy", "ov-billing-review-list",
+  "ov-billing-later", "ov-billing-save", "ov-billing-cancel", "ov-billing-apply",
+  "ov-billing-relationship", "ov-billing-recalculation-panel", "ov-billing-recalculation-list"]) {
+  elements[id] ||= makeEl(id);
+}
+await sandbox.renderBillingImportCandidates({
+  status: "ok",
+  candidates: [{ candidate_id: "candidate-test", host: "codex", provider_id: "openai",
+    amount_minor: 2000, currency: "CNY", billing_period_start: "2026-09-01", status: "pending" }],
+});
+ok(elements["ov-billing-prompt"].hidden === false, "候选存在时显示套餐确认提示");
+ok(elements["ov-billing-review-panel"].hidden === true, "初始状态保持确认面板收起");
+await elements["ov-billing-review"].onclick();
+ok(elements["ov-billing-review-panel"].hidden === false &&
+  elements["ov-billing-review-list"].children.length === 1,
+  "点击确认套餐信息展开面板并渲染候选行");
+ok(js.includes('relationshipKind === "unknown"') &&
+  js.includes("候选继续待确认，未创建计费声明") &&
+  js.includes("保持待确认并返回"),
+  "仍不确定路径保留 pending/估算，不创建确认声明");
+ok(js.includes("if (billingReviewOpen) reviewButton.onclick();"),
+  "异步候选刷新完成后会补绘已提前展开的确认面板");
+await sandbox.renderBillingRecalculationJobs({ status: "ok", jobs: [{
+  job_id: "job-retry-test", declaration_id: "decl-test", revision_id: "rev-test",
+  status: "failed", error_detail: "worker interrupted",
+}] });
+ok(elements["ov-billing-recalculation-panel"].hidden === false &&
+  elements["ov-billing-recalculation-list"].children.length === 1 &&
+  elements["ov-billing-recalculation-list"].children[0].children[1].children[0].textContent === "重试重算",
+  "重算失败状态显示旧结果可用与重试按钮");
 
 console.log(failed ? `\n${failed} FAIL` : "\n全部通过。");
 process.exit(failed ? 1 : 0);

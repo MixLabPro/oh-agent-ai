@@ -2512,3 +2512,43 @@
 - `UAT: AC19 walked ✘` — Vite 已完成“本周期静默提醒 → 恢复预算提醒”可逆走查并取得两条正确回执；真实阈值首穿与系统通知记录仍未完成。
 - `UAT: AC28 walked ✘` — 走查发现旧路径会把“仍不确定”错误保存为 accepted 声明；已修复为先展示影响、保持 pending/按量估算、不给重算入队，并在返回总览后进入 30 天提醒降级。Vite 已复验；真实 `.app`、CLI/MCP 三面仍待复测，故不勾选正式 UAT。
 - 回归门禁新增“unknown 不创建确认声明”源码断言；未触碰用户已有的 `docs/WORKBUDDY_ONBOARDING_SPEC.md`。
+
+## Loop 2026-09-13 · AC14/AC28 修复补充
+
+- `UAT: AC28 walked ✘` — 声明保存后锁定计费关系选择，阻断已保存声明漂移到“仍不确定”；源码 DOM 回归通过，最新 `.app` 真机路径仍待复测。
+- `UAT: AC14 walked ✘` — 重算事务异常会明确落成 `failed` 并可 retry，worker 不再吞掉 `changed=false`，重启后工作台显示“重算待重试”且保留旧结果；数据层回归通过，退出/重开真机路径仍待复测。
+
+## Loop 2026-09-13 · 打包前最小链路复测
+
+- `UAT: AC26 walked ✘` — Vite 隔离 mock 已复测候选展开和计费方式面板；正式项仍待真实 `.app`、CLI、MCP 三面闭环。
+- `UAT: AC28 walked ✘` — “仍不确定→影响预览→保持待确认并返回”通过，未创建声明、估算未变；正式项仍待三面闭环。
+- `UAT: AC15 walked ✘` — 单宿主失败隔离、失败横幅、重试恢复通过；正式真机失败注入仍待复测。
+- `UAT: AC02 walked ✘` — 自定义根目录选择、添加并同步通过；正式目录选择器和同步回执仍待复测。
+- `UAT: AC23 walked ✘` — 全局及单来源暂停/恢复通过；删除导入数据等不可逆路径未执行。
+- `UAT: AC10 walked ✘` — CNY/USD 分币显示通过；正式跨面复核仍待完成。
+- `UAT: AC19 walked ✘` — 预算提醒静默/恢复通过；系统通知首穿仍未取得真机证据。
+- `UAT: Issues walked ✔` — 规则聚合和原始命中展开/收起通过；不属于十条正式小闭环勾选项。
+
+复测只发现测试脚本对“两个预算按钮始终存在”的错误判定，按按钮 active 状态复核后确认不是产品缺陷。工作台源码回归、Vite 构建、agent-vitals-data 131 项、桌面 114 项和 clippy 均通过；按要求在此之后再进入 release 打包。
+
+## Package 2026-09-13 · 最小链路之后
+
+- `cargo tauri build --ci --bundles app` 通过，最新包：`apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app`。
+- 包体校验通过：arm64 `.app`、包内 `agent-vitals 1.3.0`、应用/CLI 架构一致。
+- 应用二进制 SHA-256：`d85e91e6eca7ca90664c10863e9bdbcbd163f7aedef554a889a609f5993a2c92`。
+- 诊断包未 Developer ID 签名，外部发布阻塞仍保留；正式十条 UAT 未因打包成功而自动勾选。
+
+## MCP 2026-09-13 · 公开/内部构建复核
+
+- 公开包内 CLI 的 Data MCP：`19 EXACT / 6 PARTIAL / 0 MISMATCH`；工具表不含 `billing_workflow`，默认写入保持拒绝。
+- `mcp-internal` CLI 的 Data MCP：`21 EXACT / 6 PARTIAL / 0 MISMATCH`；额外通过 `authority_audit` 与受限 `query_sql_readonly`。
+- 隔离 `mcp_v1_management_smoke.py`：20 个类型化计费管理动作通过；隔离 `mcp_control_plane_smoke.py`：19 个控制面动作通过。
+- 首次尝试用公开 CLI 运行管理脚本得到 `unknown tool: billing_workflow`，确认是构建 feature 选择错误；按仓库约定改用 `--features mcp-internal` 后通过，未改宽公开 MCP 权限。
+
+## Verification 2026-09-13 · 自动化门禁补跑
+
+- Python 全量：`1189` 项通过，`208` 项按既有条件跳过，`OK`。
+- Golden：`15` 个 case 与 golden 逐字节一致。
+- 隔离 E2E：M1–M6 全部通过，包含 Python/Rust usage 对拍和预算静默回收。
+- Workbench KPI、fold bridge、trace、UI-dev verify、v1 closeout、release workflow 和 arm64 包体验证均通过。
+- Computer Use：最新项目包以 `--show-workbench` 尝试启动，但 macOS AX 服务仍返回 `timeoutReached`，未把该次尝试当作真机 UI 通过证据；正式桌面 UAT 保持未勾选。

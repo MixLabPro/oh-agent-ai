@@ -855,7 +855,10 @@ pub fn build_workbuddy_evidence(
             host_id: "workbuddy",
             workspace_roots: first_cwd(session_meta),
             model: session_meta.model.clone(),
-            span: None,
+            // D1–D4：喂进本证据的原生记录时间 min/max。WorkBuddy 的 `timestamp`
+            // 经 `parse_time` → `parse_iso` 出**秒**，由 `session_span` 归一到毫秒。
+            // 0 条记录 → None。
+            span: crate::workflow_utils::session_span(raw_records.iter().filter_map(parse_time)),
         },
         signals,
         coverage,
@@ -924,6 +927,12 @@ pub fn workbuddy_evidence_json(evidence: &WorkbuddyEvidence) -> Value {
         "session_id": evidence.canonical.meta.session_id,
         "workspace_roots": evidence.canonical.meta.workspace_roots,
         "model": evidence.canonical.meta.model,
+        // 会话实际覆盖跨度（D1–D4）。与 `attempts[].observed_span` 同形；
+        // 键位置与 Python 镜像逐字节对齐。
+        "span": evidence.canonical.meta.span.map(|s| serde_json::json!({
+            "start_ms": s.start_ms,
+            "end_ms": s.end_ms,
+        })),
         "signals": signals,
         "coverage": coverage_map,
         "attempts": attempts,

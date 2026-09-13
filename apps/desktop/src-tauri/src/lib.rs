@@ -2508,10 +2508,19 @@ fn spawn_billing_recalculation_worker(path: PathBuf, job_id: String) {
                     &job_id, agent_vitals_runtime::sql_sync::now_ms(),
                 );
             }
-            if worker_db.billing_recalculation_run(
+            match worker_db.billing_recalculation_run(
                 &job_id, agent_vitals_runtime::sql_sync::now_ms(),
-            ).is_ok() {
-                return;
+            ) {
+                Ok(true) => return,
+                Ok(false) => {
+                    // false means the job was missing or no longer queued; it is
+                    // never a successful recalculation receipt. A terminal job
+                    // remains untouched by the final failure update below.
+                }
+                Err(_) => {
+                    // The data layer records failures after entering `running`.
+                    // Keep the retry loop here for transient database/worker errors.
+                }
             }
         }
         let _ = worker_db.billing_recalculation_set_status(
@@ -2590,6 +2599,28 @@ fn billing_recalculation_job_status(job_id: String) -> Result<Value, String> {
         "revision_id": revision_id, "requested_at_ms": requested_at_ms,
         "started_at_ms": started_at_ms, "completed_at_ms": completed_at_ms,
         "error_code": error_code, "error_detail": error_detail,
+    }))
+}
+
+/// 查询重算待处理列表；用于工作台重启后展示「重算待重试」而不丢失旧结果。
+#[tauri::command]
+fn billing_recalculation_jobs() -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+        .map_err(|error| error.to_string())?;
+    let jobs = db.billing_recalculation_jobs_needing_attention()
+        .map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "status": "ok",
+        "jobs": jobs.into_iter().map(|(job_id, declaration_id, revision_id, status,
+            requested_at_ms, started_at_ms, completed_at_ms, error_code, error_detail)| {
+            serde_json::json!({
+                "job_id": job_id, "declaration_id": declaration_id, "revision_id": revision_id,
+                "status": status, "requested_at_ms": requested_at_ms, "started_at_ms": started_at_ms,
+                "completed_at_ms": completed_at_ms, "error_code": error_code, "error_detail": error_detail,
+            })
+        }).collect::<Vec<_>>()
     }))
 }
 
@@ -2967,6 +2998,7 @@ pub fn run() {
             enqueue_billing_recalculation,
             retry_billing_recalculation,
             billing_recalculation_job_status,
+            billing_recalculation_jobs,
             sync_pause_state,
             set_sync_paused,
             data_source_status,

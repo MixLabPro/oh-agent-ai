@@ -20,6 +20,7 @@ Python 侧缺口（"pending M1"）在本模块存在后关闭。
 """
 
 from .behavior import Coords, TOOL_CALL_TYPES, _int_or_none, _result_code, _tool_invocation
+from ..util import session_span
 
 
 def _timeline_entry(observation, seq, time, turn, step, call_id, ordinal):
@@ -150,11 +151,17 @@ def build_dsh_canonical(execution_events, cwd=None, session_id=""):
     `behavior.py::audit_session_log`，本模块不重新发明第二份覆盖率）。
     """
     timelines = populate_timelines(execution_events)
+    # D1–D4：喂进本证据的**执行流**事件的 `time` min/max（DSH 的 time 是毫秒）。
+    # 只用 execution_events、不含 usage_events —— 与 Rust 侧口径一致：Rust 的
+    # `build_dsh_evidence` 虽收两组事件，跨度也只取执行流，否则两边会对同一份
+    # 会话给出不同跨度。0 条事件 → None（不造 (0,0)）。
+    native_times = [t for t in (_int_or_none(e.get("time")) for e in execution_events)
+                    if t is not None]
     meta = {
         "session_id": session_id,
         "host_id": "dsh",
         "workspace_roots": [cwd] if cwd else [],
         "model": None,
-        "span": None,
+        "span": session_span(native_times),
     }
     return {"meta": meta, **timelines}

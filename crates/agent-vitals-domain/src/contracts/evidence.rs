@@ -537,6 +537,20 @@ pub struct SessionMeta {
     pub host_id: &'static str,
     pub workspace_roots: Vec<String>,
     pub model: Option<String>,
+    /// 这份会话**实际覆盖**的时间跨度——喂进本证据的原生记录时间的 min/max。
+    ///
+    /// - **不是**会话头声明的范围：头部可能被轮转/截断，实测值才是"日志里真的有什么"。
+    /// - **空值语义**：0 条原生记录 → `None`。**绝不用 `(0,0)` 表示缺失**——那会被
+    ///   日桶/时间窗读成 1970-01-01（本仓在 `issue_instances.opened_at_ms` 上栽过
+    ///   同一个形态）。单条记录 → `start_ms == end_ms`，那是合法的"这一刻有记录"。
+    /// - **单位恒为毫秒**：由 `agent_vitals_domain::util::to_epoch_ms` 归一
+    ///   （Claude/WorkBuddy 的 `parse_iso` 出秒，DSH/Codex 出毫秒）。
+    /// - 只取原生记录的时间，不含合成的 `ordinal` 序数（序数不是时间）。
+    ///
+    /// 与 `SourceAttempt.observed_span` 的分工：那个是**逐来源**的覆盖跨度，为
+    /// §14.8.6「surface 2/3 的参差左沿」预留（当前无宿主实现那些表面）；
+    /// 本字段是**整个会话**的跨度，四宿主都已接线。
+    /// 方案见 `docs/v1.0.0/OBSERVED_SPAN_IMPLEMENTATION_PLAN.md`。
     pub span: Option<TimeSpan>,
 }
 

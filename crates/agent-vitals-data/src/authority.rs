@@ -2494,6 +2494,25 @@ impl AuthorityDb {
         ).optional()?)
     }
 
+    /// 返回尚未成功发布结果的任务，供工作台在重启后显示可恢复状态。
+    /// 成功任务不进入此列表，旧结果仍通过 billing_recalculation_result 可查。
+    pub fn billing_recalculation_jobs_needing_attention(
+        &self,
+    ) -> Result<Vec<BillingRecalculationJobRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, declaration_id, revision_id, status, requested_at_ms, started_at_ms,
+                    completed_at_ms, error_code, error_detail
+             FROM billing_recalculation_jobs
+             WHERE status IN ('queued', 'running', 'failed', 'cancelled')
+             ORDER BY requested_at_ms, job_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((
+            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
+            row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
+        )))?;
+        rows.collect::<Result<Vec<BillingRecalculationJobRow>, _>>().map_err(AuthorityError::from)
+    }
+
     /// 执行一个只读聚合型重算任务并原子发布结果快照；原始 facts 与旧结果不变。
     pub fn billing_recalculation_run(
         &self, job_id: &str, now_ms: i64,
@@ -2509,23 +2528,47 @@ impl AuthorityDb {
                 return Err(error);
             }
         };
-        let fact_ids = self.billing_declaration_matching_fact_ids(&revision_id)?;
-        let attribution_kind: String = self.conn.query_row(
+        let fact_ids = match self.billing_declaration_matching_fact_ids(&revision_id) {
+            Ok(fact_ids) => fact_ids,
+            Err(error) => {
+                let detail = error.to_string();
+                let _ = self.billing_recalculation_set_status(
+                    job_id, "failed", Some("fact_match_failed"), Some(&detail), now_ms,
+                );
+                return Err(error);
+            }
+        };
+        let attribution_kind: String = match self.conn.query_row(
             "SELECT CASE WHEN relationship_kind = 'official_subscription' THEN 'subscription_covered' ELSE 'user_declared' END
              FROM billing_declaration_revisions WHERE revision_id = ?1",
             rusqlite::params![revision_id], |row| row.get(0),
-        )?;
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = self.conn.execute(
-            "INSERT INTO billing_recalculation_results(
-                 job_id, revision_id, fact_count, session_count, total_tokens,
-                 first_event_ts_ms, last_event_ts_ms, published_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(job_id) DO UPDATE SET published_at_ms = excluded.published_at_ms",
-            rusqlite::params![job_id, revision_id, preview.fact_count, preview.session_count,
-                preview.total_tokens, preview.first_event_ts_ms, preview.last_event_ts_ms, now_ms],
-        );
-        let attribution_result = result.and_then(|_| {
+        ) {
+            Ok(kind) => kind,
+            Err(error) => {
+                let detail = error.to_string();
+                let _ = self.billing_recalculation_set_status(
+                    job_id, "failed", Some("attribution_kind_failed"), Some(&detail), now_ms,
+                );
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = self.conn.execute_batch("BEGIN IMMEDIATE") {
+            let detail = error.to_string();
+            let _ = self.billing_recalculation_set_status(
+                job_id, "failed", Some("transaction_start_failed"), Some(&detail), now_ms,
+            );
+            return Err(error.into());
+        }
+        let transaction_result = (|| -> Result<(), rusqlite::Error> {
+            self.conn.execute(
+                "INSERT INTO billing_recalculation_results(
+                     job_id, revision_id, fact_count, session_count, total_tokens,
+                     first_event_ts_ms, last_event_ts_ms, published_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(job_id) DO UPDATE SET published_at_ms = excluded.published_at_ms",
+                rusqlite::params![job_id, revision_id, preview.fact_count, preview.session_count,
+                    preview.total_tokens, preview.first_event_ts_ms, preview.last_event_ts_ms, now_ms],
+            )?;
             for fact_id in fact_ids {
                 self.conn.execute(
                     "INSERT INTO billing_fact_attributions(fact_id, revision_id, job_id, attribution_kind, created_at_ms)
@@ -2533,18 +2576,23 @@ impl AuthorityDb {
                     rusqlite::params![fact_id, revision_id, job_id, attribution_kind, now_ms],
                 )?;
             }
+            self.conn.execute(
+                "UPDATE billing_recalculation_jobs SET status = 'succeeded', completed_at_ms = ?2
+                 WHERE job_id = ?1 AND status = 'running'", rusqlite::params![job_id, now_ms],
+            )?;
+            self.conn.execute_batch("COMMIT")?;
             Ok(())
-        });
-        match attribution_result {
-            Ok(_) => {
-                self.conn.execute(
-                    "UPDATE billing_recalculation_jobs SET status = 'succeeded', completed_at_ms = ?2
-                     WHERE job_id = ?1 AND status = 'running'", rusqlite::params![job_id, now_ms],
-                )?;
-                self.conn.execute_batch("COMMIT")?;
-                Ok(true)
+        })();
+        match transaction_result {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                let detail = error.to_string();
+                let _ = self.billing_recalculation_set_status(
+                    job_id, "failed", Some("transaction_failed"), Some(&detail), now_ms,
+                );
+                Err(error.into())
             }
-            Err(error) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(error.into()) }
         }
     }
 
@@ -3207,6 +3255,32 @@ mod tests {
         assert!(authority.billing_recalculation_set_status("job-failed", "running", None, None, 15).unwrap());
         assert_eq!(authority.billing_recalculation_recover(16).unwrap(), Vec::<String>::new());
         assert_eq!(authority.billing_recalculation_job("job-failed").unwrap().unwrap().3, "failed");
+        assert_eq!(authority.billing_recalculation_jobs_needing_attention().unwrap().len(), 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_recalculation_failure_after_running_is_terminal_and_retryable() {
+        let db = tmp_db("billing-recalculation-transaction-failure");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.billing_declaration_revision_save(
+            "revision-transaction-failure", "declaration-transaction-failure", None,
+            "codex", "openai", "official_api", None, None, None, "2026-09", None,
+            None, None, &[], 1,
+        ).unwrap();
+        assert!(authority.billing_recalculation_enqueue(
+            "job-transaction-failure", "declaration-transaction-failure",
+            "revision-transaction-failure", 2,
+        ).unwrap());
+        authority.conn().execute_batch("DROP TABLE billing_recalculation_results").unwrap();
+
+        assert!(authority.billing_recalculation_run("job-transaction-failure", 3).is_err());
+        let failed = authority.billing_recalculation_job("job-transaction-failure").unwrap().unwrap();
+        assert_eq!(failed.3, "failed");
+        assert_eq!(failed.7.as_deref(), Some("transaction_failed"));
+        assert_eq!(failed.6, Some(3));
+        assert!(authority.billing_recalculation_retry("job-transaction-failure", 4).unwrap());
+        assert_eq!(authority.billing_recalculation_job("job-transaction-failure").unwrap().unwrap().3, "queued");
         let _ = std::fs::remove_file(&db);
     }
 

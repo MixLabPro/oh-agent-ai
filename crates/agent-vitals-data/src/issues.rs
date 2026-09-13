@@ -13,9 +13,12 @@ const LOCAL_DAY_IDX_SQL: &str =
 /// Normalize an epoch timestamp to the authority contract (milliseconds).
 /// This is the single boundary conversion used by both new Issue writes and
 /// the idempotent repair of rows written by older host adapters.
-pub fn to_epoch_ms(value: i64) -> i64 {
-    if value < EPOCH_SECONDS_CUTOFF { value.saturating_mul(1000) } else { value }
-}
+///
+/// 实现已下沉到 `agent_vitals_domain::util::to_epoch_ms` —— trace 契约
+/// （`domain/trace.rs` 的 `TraceNode.started_at_ms`）有**同一个**单位缺陷，
+/// 两处必须调同一个具名函数，不能各留一份。这里 `pub use` 保留原路径，
+/// 使既有调用点零改动。**不是第二份实现。**
+pub use agent_vitals_domain::util::to_epoch_ms;
 
 /// Repair legacy Issue rows whose `_ms` value was populated with epoch seconds.
 /// The operation is idempotent and keeps `metadata.time` in the same unit as

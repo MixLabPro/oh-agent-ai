@@ -109,13 +109,13 @@
           <div class="muted" id="ov-billing-prompt-copy"></div>
         </div>
         <div class="billing-prompt-actions">
-          <button class="btn" id="ov-billing-review" aria-controls="ov-billing-review-panel" aria-expanded="false">确认套餐信息</button>
-          <button class="btn secondary" id="ov-billing-later">稍后</button>
+          <button type="button" class="btn" id="ov-billing-review">确认套餐信息</button>
+          <button type="button" class="btn secondary" id="ov-billing-later">稍后</button>
         </div>
       </section>
-      <section class="billing-review panel" id="ov-billing-review-panel" hidden>
+      <section class="billing-review panel" id="ov-billing-review-panel" hidden role="region" aria-labelledby="ov-billing-review-title">
         <div class="panel-title">
-          <span>确认旧套餐信息</span>
+          <span id="ov-billing-review-title">确认旧套餐信息</span>
           <button class="btn secondary" id="ov-billing-review-close" type="button">收起</button>
         </div>
         <div class="muted">这只确认套餐归属，不会被当作已付款；实际支出仍需账单或付款记录。</div>
@@ -125,6 +125,11 @@
         <div class="panel-title">当前计费声明</div>
         <div class="muted">撤销会保留修订与证据历史，并立即恢复受影响用量的按量/未定归类；不会删除任何原始记录。</div>
         <div id="ov-billing-declarations-list"></div>
+      </section>
+      <section class="billing-review panel" id="ov-billing-recalculation-panel" hidden aria-live="polite">
+        <div class="panel-title">重算状态</div>
+        <div class="muted">重算失败或应用退出时，旧版本结果仍可用；修复数据后可从这里继续，不会重复导入或重复计账。</div>
+        <div id="ov-billing-recalculation-list"></div>
       </section>
       <section class="billing-declaration panel" id="ov-billing-declaration-panel" hidden>
         <div class="panel-title">确认计费方式</div>

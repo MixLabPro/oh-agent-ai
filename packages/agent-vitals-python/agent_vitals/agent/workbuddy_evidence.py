@@ -37,6 +37,7 @@ import json
 import math
 
 from agent_vitals.agent.claude_evidence import parse_iso
+from ..util import session_span
 
 # epoch 秒的固定合法性窗口（spec §10 A6）：`[2000-01-01, 2100-01-01)`。
 # `adapters/workbuddy_session.py` 那侧在 I/O 层、能读时钟，用的是 `now + 24h`
@@ -642,13 +643,16 @@ def build_workbuddy_evidence(raw_records, session_id, session_meta, spans=()):
         "observed_span": None,
     } for msg in all_unknown]
     notes = _build_notes(coverage, raw_records, spans)
+    # D1–D4：喂进本证据的**原生记录**时间 min/max。`_parse_time` 出**秒**，
+    # 由 `session_span` 归一到毫秒。0 条记录 → None（不造 (0,0)）。
+    native_times = [t for t in (_parse_time(r) for r in raw_records) if t is not None]
     canonical = {
         "meta": {
             "session_id": session_id,
             "host_id": "workbuddy",
             "workspace_roots": _first_cwd(session_meta),
             "model": _extract_model(session_meta),
-            "span": None,
+            "span": session_span(native_times),
         },
         "signals": [s for s in ALL_SIGNALS if s in sigset],
         "coverage": coverage,
@@ -707,6 +711,8 @@ def workbuddy_evidence_json(evidence):
         "session_id": canonical["meta"]["session_id"],
         "workspace_roots": canonical["meta"]["workspace_roots"],
         "model": canonical["meta"]["model"],
+        # 会话实际覆盖跨度（D1–D4）。键位置与 Rust 序列化器逐字节对齐。
+        "span": canonical["meta"]["span"],
         "signals": signals,
         "coverage": coverage_map,
         "attempts": attempts,

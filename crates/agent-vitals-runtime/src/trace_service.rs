@@ -325,8 +325,14 @@ fn attach_usage_facts(
             evidence_ref: format!("uf1:{}", fact.fact_id),
             parent_node_id: None,
             branch_state: BranchState::Live,
-            started_at_ms: Some(fact.event_ts_ms),
-            ended_at_ms: Some(fact.event_ts_ms),
+            // `event_ts_ms` 按权威库契约已是毫秒，这里仍然过一遍具名归一：
+            // `TraceNode.started_at_ms` 的契约是毫秒，而它有**两个**写入方
+            // （此处与 `domain/trace.rs`，后者的输入是宿主各自定单位的
+            // `TimelineEntry.time`）。让两个写入方都调同一个归一函数，契约才是
+            // 被强制的；只归一一个，另一个的正确性就靠运气。函数幂等，对已是
+            // 毫秒的输入零行为变化。
+            started_at_ms: Some(agent_vitals_domain::domain::util::to_epoch_ms(fact.event_ts_ms)),
+            ended_at_ms: Some(agent_vitals_domain::domain::util::to_epoch_ms(fact.event_ts_ms)),
             // usage fact 是一次被成功清洗入权威库的计量观察；它不代表整个
             // assistant turn 成功，只代表该模型调用的用量记录可用。
             status: Some(TraceStatus::Ok),

@@ -545,12 +545,18 @@ async function renderOverview() {
     renderBillingImportCandidates(await invoke("billing_import_candidates"));
   } catch (e) {
     // 候选核对是增强入口；读取失败不能遮蔽已拿到的名义总览。
+    console.error("billing import candidates unavailable", e);
     renderBillingImportCandidates({ status: "unavailable", candidates: [] });
   }
   try {
     renderBillingDeclarations(await invoke("billing_declarations"));
   } catch (e) {
     renderBillingDeclarations({ status: "unavailable", declarations: [] });
+  }
+  try {
+    renderBillingRecalculationJobs(await invoke("billing_recalculation_jobs"));
+  } catch (e) {
+    renderBillingRecalculationJobs({ status: "unavailable", jobs: [] });
   }
   await renderHostBills(monthKey);
   await renderRetentionSettings();
@@ -1228,21 +1234,34 @@ function billingCsvBillId(row) {
     row.billing_basis, row.evidence_ref].map(encodeURIComponent).join(":");
 }
 
+const BILLING_REVIEW_DEFER_KEY = "agent-vitals-billing-review-deferred-at-ms";
+const BILLING_REVIEW_DEFER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+function deferBillingReviewPrompt() {
+  const value = String(Date.now());
+  try { localStorage.setItem(BILLING_REVIEW_DEFER_KEY, value); } catch (_) { /* best effort */ }
+  try { sessionStorage.setItem(BILLING_REVIEW_DEFER_KEY, value); } catch (_) { /* best effort */ }
+}
+
 function openBillingDeclaration(candidate) {
   const panel = document.getElementById("ov-billing-declaration-panel");
   const context = document.getElementById("ov-billing-declaration-context");
   const preview = document.getElementById("ov-billing-preview");
   const apply = document.getElementById("ov-billing-apply-actions");
+  const relationship = document.getElementById("ov-billing-relationship");
   if (!panel || !context || !preview || !apply) return;
   billingDeclarationCandidate = candidate;
   billingDeclarationState = null;
+  if (relationship) relationship.disabled = false;
   context.textContent = candidate.provider_id + " · " + billingCandidateAmount(candidate) +
     " · 自 " + candidate.billing_period_start + " 起（" + candidate.host + "）。" +
     " 这一步只确认计费关系，不证明已付款。";
   preview.hidden = true;
   preview.textContent = "";
   apply.hidden = true;
-  document.getElementById("ov-billing-save").disabled = false;
+  const save = document.getElementById("ov-billing-save");
+  save.disabled = false;
+  save.textContent = "保存并预览影响";
   panel.hidden = false;
   panel.scrollIntoView({ block: "nearest" });
 }
@@ -1260,6 +1279,42 @@ function bindBillingDeclarationPanel() {
     save.disabled = true;
     const preview = document.getElementById("ov-billing-preview");
     try {
+      const relationshipKind = document.getElementById("ov-billing-relationship").value;
+      // 「仍不确定」不是一条计费声明：它必须继续保留候选和按量估算，
+      // 不能走 declaration_save（该命令会接受候选并进入重算）。先展示影响，
+      // 第二次点击只记录 30 天的提醒降级，然后回到总览。
+      if (relationshipKind === "unknown" &&
+          (!billingDeclarationState || billingDeclarationState.phase !== "unknown_preview")) {
+        const window = billingMonthWindow(statisticsMonth());
+        const impact = await invoke("billing_candidate_impact_preview", {
+          host: candidate.host, providerId: candidate.provider_id,
+          effectiveStart: candidate.billing_period_start, effectiveEnd: null,
+          windowStartMs: window ? window.start : 0,
+          windowEndMs: window ? window.end : Date.now(), scopes: [],
+        });
+        preview.hidden = false;
+        if (impact.status !== "ok") {
+          preview.textContent = "影响预览暂不可用，候选仍待确认：" + (impact.reason || "请稍后重试");
+          save.disabled = false;
+          return;
+        }
+        billingDeclarationState = { phase: "unknown_preview", impact };
+        preview.textContent = "仍保持按量估算：" + fmtTokens(impact.total_tokens || 0) +
+          " tokens · " + (impact.fact_count || 0) + " 条事实 · " +
+          (impact.session_count || 0) + " 个会话；候选继续待确认，未创建计费声明。";
+        save.textContent = "保持待确认并返回";
+        save.disabled = false;
+        return;
+      }
+      if (relationshipKind === "unknown" && billingDeclarationState?.phase === "unknown_preview") {
+        deferBillingReviewPrompt();
+        billingReviewOpen = false;
+        billingDeclarationCandidate = null;
+        billingDeclarationState = null;
+        document.getElementById("ov-billing-declaration-panel").hidden = true;
+        await renderOverview();
+        return;
+      }
       const window = billingMonthWindow(statisticsMonth());
       const windowStartMs = window ? window.start : 0;
       const windowEndMs = window ? window.end : Date.now();
@@ -1299,6 +1354,8 @@ function bindBillingDeclarationPanel() {
         scopes: [],
       });
       billingDeclarationState = { declarationId, revisionId, impact };
+      const relationship = document.getElementById("ov-billing-relationship");
+      if (relationship) relationship.disabled = true;
       preview.hidden = false;
       preview.textContent = "声明已保存：" + fmtTokens(billingDeclarationState.impact?.total_tokens || 0) +
         " tokens · " + (billingDeclarationState.impact?.fact_count || 0) +
@@ -1592,6 +1649,10 @@ function renderBillingDeclarations(report) {
           declarationId: declaration.declaration_id,
           supersedesRevisionId: declaration.current_revision_id,
         });
+        billingDeclarationCandidate = null;
+        billingDeclarationState = null;
+        const declarationPanel = document.getElementById("ov-billing-declaration-panel");
+        if (declarationPanel) declarationPanel.hidden = true;
         await renderOverview();
       } catch (e) {
         revoke.disabled = false;
@@ -1622,28 +1683,24 @@ function renderBillingImportCandidates(report) {
   if (!report || report.status !== "ok") return;
   const candidates = Array.isArray(report.candidates) ? report.candidates : [];
   const pendingCount = candidates.filter((candidate) => candidate.status === "pending").length;
-  const deferKey = "agent-vitals-billing-review-deferred-at-ms";
-  const deferWindowMs = 30 * 24 * 60 * 60 * 1000;
   let deferredAt = 0;
-  try { deferredAt = Number(localStorage.getItem(deferKey) || 0); } catch (_) { /* best effort */ }
+  try { deferredAt = Number(localStorage.getItem(BILLING_REVIEW_DEFER_KEY) || 0); } catch (_) { /* best effort */ }
   if (!deferredAt) {
-    try { deferredAt = Number(sessionStorage.getItem(deferKey) || 0); } catch (_) { /* best effort */ }
+    try { deferredAt = Number(sessionStorage.getItem(BILLING_REVIEW_DEFER_KEY) || 0); } catch (_) { /* best effort */ }
   }
   const deferred = Number.isFinite(deferredAt) && deferredAt > 0 &&
-    Date.now() - deferredAt < deferWindowMs;
+    Date.now() - deferredAt < BILLING_REVIEW_DEFER_WINDOW_MS;
   if (deferredAt > 0 && !deferred) {
-    try { localStorage.removeItem(deferKey); } catch (_) { /* best effort */ }
-    try { sessionStorage.removeItem(deferKey); } catch (_) { /* best effort */ }
+    try { localStorage.removeItem(BILLING_REVIEW_DEFER_KEY); } catch (_) { /* best effort */ }
+    try { sessionStorage.removeItem(BILLING_REVIEW_DEFER_KEY); } catch (_) { /* best effort */ }
   }
   // “稍后”只压住尚未处理的提醒；已确认/已忽略项仍保留一个可回看的入口。
   prompt.hidden = !candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred);
   panel.hidden = !billingReviewOpen;
-  reviewButton.setAttribute("aria-expanded", String(billingReviewOpen));
   list.textContent = "";
   if (!candidates.length || (pendingCount > 0 && pendingCount === candidates.length && deferred)) {
     billingReviewOpen = false;
     panel.hidden = true;
-    reviewButton.setAttribute("aria-expanded", "false");
     return;
   }
   copy.textContent = pendingCount
@@ -1667,9 +1724,7 @@ function renderBillingImportCandidates(report) {
     : "已核对的套餐信息不会计入实际支出；当前用量仍按原厂价估算。";
 
   document.getElementById("ov-billing-later").onclick = () => {
-    const value = String(Date.now());
-    try { localStorage.setItem(deferKey, value); } catch (_) { /* best effort */ }
-    try { sessionStorage.setItem(deferKey, value); } catch (_) { /* best effort */ }
+    deferBillingReviewPrompt();
     billingReviewOpen = false;
     panel.hidden = true;
     prompt.hidden = true;
@@ -1677,7 +1732,6 @@ function renderBillingImportCandidates(report) {
   document.getElementById("ov-billing-review").onclick = () => {
     billingReviewOpen = true;
     panel.hidden = false;
-    reviewButton.setAttribute("aria-expanded", "true");
     list.textContent = "";
     for (const candidate of candidates) {
       const row = document.createElement("div");
@@ -1769,12 +1823,54 @@ function renderBillingImportCandidates(report) {
       list.appendChild(row);
     }
   };
+  // The bootstrap listener can open the panel before the async candidate read
+  // finishes. Re-run the now-bound renderer so that this race cannot leave an
+  // apparently open but empty review panel.
+  if (billingReviewOpen) reviewButton.onclick();
   closeButton.onclick = () => {
     billingReviewOpen = false;
     panel.hidden = true;
-    reviewButton.setAttribute("aria-expanded", "false");
     reviewButton.focus();
   };
+}
+
+function renderBillingRecalculationJobs(report) {
+  const panel = document.getElementById("ov-billing-recalculation-panel");
+  const list = document.getElementById("ov-billing-recalculation-list");
+  if (!panel || !list) return;
+  const jobs = report && report.status === "ok" && Array.isArray(report.jobs) ? report.jobs : [];
+  panel.hidden = !jobs.length;
+  list.textContent = "";
+  for (const job of jobs) {
+    const row = document.createElement("div");
+    row.className = "billing-review-row";
+    const detail = document.createElement("div");
+    const statusText = job.status === "failed" || job.status === "cancelled"
+      ? "重算待重试"
+      : job.status === "running" ? "重算处理中" : "重算排队中";
+    detail.textContent = statusText + " · 旧版本结果仍可用 · " + job.job_id;
+    if (job.error_detail) detail.textContent += " · " + job.error_detail;
+    const actions = document.createElement("div");
+    actions.className = "billing-review-actions";
+    if (job.status === "failed" || job.status === "cancelled") {
+      const retry = document.createElement("button");
+      retry.className = "btn secondary";
+      retry.textContent = "重试重算";
+      retry.onclick = async () => {
+        retry.disabled = true;
+        try {
+          await invoke("retry_billing_recalculation", { jobId: job.job_id });
+          await renderOverview();
+        } catch (e) {
+          retry.disabled = false;
+          detail.textContent += " · 重试失败：" + errText(e);
+        }
+      };
+      actions.appendChild(retry);
+    }
+    row.append(detail, actions);
+    list.appendChild(row);
+  }
 }
 
 async function renderHostBills(period) {
@@ -5242,6 +5338,18 @@ async function init() {
   document.querySelectorAll(".tab").forEach((t) => {
     t.addEventListener("click", () => switchTab(t.dataset.tab));
   });
+  // 计费提示由总览异步刷新填充。先在 DOM 初始化阶段挂一个只负责展开的
+  // 稳定监听器，避免候选读取完成与用户点击恰好交错时只看到“可确认”提示、
+  // 却无法打开面板；候选行和声明动作仍由 renderBillingImportCandidates 绑定。
+  const billingReviewButton = document.getElementById("ov-billing-review");
+  const billingReviewPanel = document.getElementById("ov-billing-review-panel");
+  if (billingReviewButton && billingReviewPanel && billingReviewButton.dataset.fallbackBound !== "1") {
+    billingReviewButton.dataset.fallbackBound = "1";
+    billingReviewButton.addEventListener("click", () => {
+      billingReviewOpen = true;
+      billingReviewPanel.hidden = false;
+    });
+  }
   document.getElementById("wb-refresh").addEventListener("click", loadActiveTab);
   // FR-11 同款纪律（见 dsh-client audit/actions.ts）：复制类操作不得静默失败——
   // 按钮文字直接说明成功/失败，不摆一个点了没反应的按钮。

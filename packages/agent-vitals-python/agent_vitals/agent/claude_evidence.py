@@ -33,6 +33,7 @@ Unavailable 是 dispatcher 层的判定，不在本适配器：本适配器的�
 import json
 
 from .host_capability import host_profile
+from ..util import session_span
 
 # 20 个 Signal 的声明序——`signals` 数组 / `coverage` 字典的输出顺序都靠这份显式
 # 表对齐（与 Rust `claude_code_evidence.rs::ALL_SIGNALS` 同表同序），不靠 Python
@@ -635,13 +636,23 @@ def build_claude_evidence(raw_records, session_id):
         "observed_span": None,
     } for msg in unknown]
     notes = _build_notes(coverage)
+    # D1–D4：喂进本证据的**原生记录**时间 min/max。Claude 的 `timestamp` 经
+    # `parse_iso` 出**秒**，由 `session_span` 归一到毫秒。0 条记录 → None
+    # （不造 (0,0)，那会被读成 1970）。镜像 Rust 同名字段。
+    native_times = []
+    for record in raw_records:
+        stamp = record.get("timestamp")
+        if isinstance(stamp, str):
+            parsed = parse_iso(stamp)
+            if parsed is not None:
+                native_times.append(parsed[0])
     canonical = {
         "meta": {
             "session_id": session_id,
             "host_id": "claude-code",
             "workspace_roots": _first_cwd(raw_records),
             "model": _extract_model(raw_records),
-            "span": None,
+            "span": session_span(native_times),
         },
         "signals": [s for s in ALL_SIGNALS if s in sigset],
         "coverage": coverage,
@@ -690,6 +701,8 @@ def claude_evidence_json(evidence):
         "session_id": canonical["meta"]["session_id"],
         "workspace_roots": canonical["meta"]["workspace_roots"],
         "model": canonical["meta"]["model"],
+        # 会话实际覆盖跨度（D1–D4）。键位置与 Rust 序列化器逐字节对齐。
+        "span": canonical["meta"]["span"],
         "signals": signals,
         "coverage": coverage_map,
         "attempts": attempts,

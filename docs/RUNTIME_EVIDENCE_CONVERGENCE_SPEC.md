@@ -1,5 +1,30 @@
 # Runtime Evidence 收敛 Spec —— 让实现追上 §10
 
+> ## ⚠️ 路径已失效（2026-09-13 标注）
+>
+> 本文写于 **v0.8 拆 crate 之前**，正文引用的路径**全部不存在了**：
+>
+> | 文中路径 | 现状 |
+> |---|---|
+> | `crates/agent-vitals-core/src/domain/usage.rs` | → `crates/agent-vitals-domain/src/domain/usage.rs` |
+> | `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/usage.rs` | → `crates/agent-vitals-hosts/src/hosts/codex/sessions/usage.rs` |
+> | 计划中的 `crates/agent-vitals-core/src/timeaxis.rs` | **从未创建** |
+>
+> **§2 的「阶段 A timeaxis」没有落地。** 它要消的重复至今仍在：三个各写各的北京
+> 偏移常量（`domain/usage.rs:88` `BEIJING_OFFSET_SECS`、`hosts/codex/sessions/usage.rs:160`
+> `BEIJING_OFFSET_HOURS`、`data/authority_query.rs:34` `BEIJING_OFFSET_MS`）与两个
+> 各写各的小时函数（`domain/usage.rs:92 beijing_hour`、`hosts/codex/.../codex_hour_of`）。
+>
+> **§7 里程碑表里的 `✅` 是「独立可 ship」可行性列，不是完成状态。**
+>
+> **这条失效率造成过实际误导**：`hosts/codex/sessions/evidence.rs` 的
+> `timeline_entry` 注释曾把「`started_at` 秒 vs DSH 毫秒的时间轴统一」挂给
+> 「timeaxis 阶段」——而本 spec 的 timeaxis 讲的是**时区偏移合并**，与字段单位
+> 无关。于是 `TraceNode.started_at_ms` 的单位漂移长期无人认领。该注释已更正，
+> 见 `docs/v1.0.0/MS_FIELD_UNIT_AUDIT_2026-09-13.md`。
+>
+> **处置建议**：改写正文路径，或整体归档。本次只加标注，不改正文。
+
 > 状态：spec（部分已落地，2026-08 更新现状）。配套：`ARCHITECTURE.md` §10（结构）、
 > `RUNTIME_EVIDENCE_CONTRACT.md` §17（P1–P6 阶段记录）。本文是 §17 之后
 > 的第二轮落地：**不再是加新宿主适配器，而是把已有的 DSH + Codex 两条路径

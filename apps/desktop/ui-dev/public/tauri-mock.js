@@ -190,7 +190,25 @@
         return candidate ? candidate.impact : { status: "unavailable", reason: "candidate not found" };
       }
       case "save_billing_declaration_revision": {
-        billingDeclarations.push({ declaration_id: args && args.declarationId, revision_id: args && args.revisionId, host: args && args.host, provider_id: args && args.providerId, status: "saved" });
+        if ((args && args.relationshipKind) === "unknown") {
+          throw new Error("仍不确定的候选必须继续保持 pending，不能保存为计费声明");
+        }
+        const candidate = billingCandidates.find((item) => item.candidate_id === (args && args.sourceCandidateId));
+        if (candidate) candidate.status = "accepted";
+        billingDeclarations.push({
+          declaration_id: args && args.declarationId,
+          revision_id: args && args.revisionId,
+          host: args && args.host,
+          provider_id: args && args.providerId,
+          relationship_kind: args && args.relationshipKind,
+          amount_minor: args && args.amountMinor,
+          currency: args && args.currency,
+          effective_start: args && args.effectiveStart,
+          effective_end: args && args.effectiveEnd,
+          source_candidate_id: args && args.sourceCandidateId,
+          current_revision_id: args && args.revisionId,
+          status: "saved",
+        });
         return { status: "ok", declaration_id: args && args.declarationId, revision_id: args && args.revisionId };
       }
       case "enqueue_billing_recalculation": {
@@ -198,6 +216,11 @@
         return { status: "queued", job_id: args && args.jobId };
       }
       case "billing_recalculation_job_status": return billingJobs.get(args && args.jobId) || { status: "missing" };
+      case "revoke_billing_declaration": {
+        const index = billingDeclarations.findIndex((item) => item.declaration_id === (args && args.declarationId));
+        if (index >= 0) billingDeclarations.splice(index, 1);
+        return { status: "revoked", declaration_id: args && args.declarationId, revision_id: args && args.revisionId };
+      }
       case "host_bills_for_period": return emptyReport("bills");
       case "data_source_status": return { status: "ok", sources: sourceStatuses };
       case "custom_source_roots": return { status: "ok", sources: customRoots };
@@ -245,7 +268,16 @@
       case "sync_pause_state": return { status: "ok", paused: syncPaused };
       case "peek_nav_target": case "peek_focus_target": return null;
       case "sync_request_status": return { completed: true };
-      case "trigger_sync": return "browser-mock-sync";
+      case "trigger_sync": {
+        for (const source of sourceStatuses) {
+          if (source.connection_state === "needs_attention") {
+            source.connection_state = "connected";
+            source.failed_scope = {};
+            source.recovery_action = null;
+          }
+        }
+        return "browser-mock-sync";
+      }
       case "set_sync_paused":
         syncPaused = !!(args && args.paused);
         return ok({ status: "ok", paused: syncPaused });

@@ -46,6 +46,88 @@ fn key() -> SessionKey {
     SessionKey::new("dsh", "s1", "default", "ns-test")
 }
 
+/// 量级护栏：遍历一段 JSON，凡**纪元类** `_ms` 键的值都必须 `>= 1e11`。
+///
+/// **为什么需要它**：本仓已经出过两次同类缺陷——`issue_instances.opened_at_ms`
+/// 与 `TraceNode.started_at_ms`——两次形状完全一样：**值看着像时间戳，其实差
+/// 1000 倍**（秒被当毫秒）。精确值断言挡不住它：夹具用的合成小值（1000/1001）
+/// 本身就不真实，所以秒与毫秒在测试里永远显不出差别。**只有量级断言能自动挡住。**
+///
+/// 时长类键（`*_duration_ms` / `elapsed` / `latency`）排除——`duration_ms = 12`
+/// 是对的，不是漂移。`<= 0` 的值跳过（`None`/零值不表达时间）。
+fn assert_epoch_ms_magnitude(value: &Value, path: &str) {
+    const MIN_EPOCH_MS: i64 = 100_000_000_000; // 1e11：秒与毫秒的分界
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map {
+                let child = format!("{path}.{k}");
+                let is_epoch = k.ends_with("_ms")
+                    && !k.contains("duration")
+                    && !k.contains("elapsed")
+                    && !k.contains("latency")
+                    && !k.contains("window_minutes");
+                if is_epoch {
+                    if let Some(n) = v.as_i64() {
+                        if n > 0 {
+                            assert!(
+                                n >= MIN_EPOCH_MS,
+                                "{child} = {n} 是秒级量级；`_ms` 契约要求毫秒（>= 1e11）"
+                            );
+                        }
+                    }
+                }
+                assert_epoch_ms_magnitude(v, &child);
+            }
+        }
+        Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                assert_epoch_ms_magnitude(v, &format!("{path}[{i}]"));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 护栏自检：**先证明它会响**。一个只报绿的护栏等于没有护栏——本仓对此有
+/// 明确纪律（"干净哨兵只有在它上层的每层都宽松时才有意义"）。
+#[test]
+fn epoch_ms_guardrail_fires_on_seconds_and_stays_quiet_on_milliseconds() {
+    // 秒级量级 → 必须 panic
+    let seconds = json!({"started_at_ms": 1_788_449_204i64});
+    let fired = std::panic::catch_unwind(|| assert_epoch_ms_magnitude(&seconds, "probe")).is_err();
+    assert!(fired, "护栏必须对秒级值报警，否则它挡不住任何东西");
+
+    // 毫秒 → 安静
+    assert_epoch_ms_magnitude(&json!({"started_at_ms": 1_788_449_204_000i64}), "probe");
+
+    // 时长键不参与判定（12ms 是合法的）
+    assert_epoch_ms_magnitude(&json!({"duration_ms": 12i64, "elapsed_ms": 3i64}), "probe");
+
+    // 嵌套结构也要走到
+    let nested = json!({"a": [{"b": {"ended_at_ms": 1_788_449_204i64}}]});
+    assert!(
+        std::panic::catch_unwind(|| assert_epoch_ms_magnitude(&nested, "probe")).is_err(),
+        "护栏必须递归进数组/对象"
+    );
+}
+
+/// 端点级护栏：真实量级夹具 → 整张 TraceGraph 序列化后，所有纪元 `_ms` 值都是毫秒。
+#[test]
+fn serialized_trace_graph_has_no_seconds_magnitude_timestamps() {
+    let base = 1_700_000_000_000i64; // 真实毫秒量级
+    let g = build_trace_graph(
+        &synth_session(vec![
+            turn_start(1, base, 1),
+            tool_call(2, base + 1, "bash", "c1", 1),
+            tool_result(3, base + 2, "c1", Some("permission_denied")),
+            tool_call(4, base + 3, "read", "c2", 1),
+            turn_end(5, base + 4, 1, "ok"),
+        ]),
+        key(),
+    );
+    assert_epoch_ms_magnitude(&g.to_json(), "graph");
+}
+
 #[test]
 fn deterministic_same_input_twice_produces_identical_graph() {
     let events = vec![
@@ -122,18 +204,69 @@ fn tool_call_with_unresolvable_turn_counts_as_missing_parent_not_zero() {
 
 #[test]
 fn tool_result_error_propagates_to_tool_call_node_status() {
+    // 时间用**真实量级**的毫秒（1.7e12），不是 1000/1001 这类合成小值。
+    // 合成小值落在 `util::to_epoch_ms` 的秒/毫秒阈值（1e11）之下，会被当成秒
+    // 放大 1000 倍——本测试断言的是**状态传播**，不该被单位归一干扰。
+    // 顺带：夹具不真实正是这条单位缺陷长期没被发现的原因。
+    let base = 1_700_000_000_000i64;
     let events = vec![
-        turn_start(1, 1000, 1),
-        tool_call(2, 1001, "bash", "c1", 1),
-        tool_result(3, 1002, "c1", Some("permission_denied")),
-        turn_end(4, 1003, 1, "ok"),
+        turn_start(1, base, 1),
+        tool_call(2, base + 1, "bash", "c1", 1),
+        tool_result(3, base + 2, "c1", Some("permission_denied")),
+        turn_end(4, base + 3, 1, "ok"),
     ];
     let session = synth_session(events);
     let g = build_trace_graph(&session, key());
     let call_node = g.nodes.iter().find(|n| n.node_type == TraceNodeType::ToolCall).unwrap();
     assert_eq!(call_node.status, Some(TraceStatus::Error));
-    assert_eq!(call_node.ended_at_ms, Some(1002));
+    assert_eq!(call_node.ended_at_ms, Some(base + 2));
     assert_eq!(g.coverage.missing_status, 0);
+}
+
+/// `TraceNode.started_at_ms` / `ended_at_ms` 的契约是**毫秒**，而
+/// `TimelineEntry.time` 的单位由各宿主适配器各自决定——Claude 的构造器明写
+/// 「`parse_iso` → 秒」，Codex 与 DSH 是毫秒。真机实测（2026-09-13）：
+/// claude-code 节点 `1788449204` 当毫秒读是 1970-01-21，codex 节点
+/// `1789132709000` 当毫秒读才是对的。
+///
+/// 本测试钉住边界归一：**秒级输入经 `build_trace_graph` 出来必须是毫秒**，
+/// 且与毫秒级输入落在同一个月内（不是相差 1000 倍）。
+#[test]
+fn trace_node_timestamps_are_normalized_to_milliseconds() {
+    let seconds = 1_788_449_204i64; // Claude Code：parse_iso → 秒
+    let millis = 1_789_132_709_000i64; // Codex / DSH：已是毫秒
+
+    let gs = build_trace_graph(
+        &synth_session(vec![
+            turn_start(1, seconds, 1),
+            tool_call(2, seconds + 1, "bash", "c1", 1),
+            tool_result(3, seconds + 2, "c1", None),
+            turn_end(4, seconds + 3, 1, "ok"),
+        ]),
+        key(),
+    );
+    let gm = build_trace_graph(
+        &synth_session(vec![
+            turn_start(1, millis, 1),
+            tool_call(2, millis + 1, "bash", "c1", 1),
+            tool_result(3, millis + 2, "c1", None),
+            turn_end(4, millis + 3, 1, "ok"),
+        ]),
+        key(),
+    );
+
+    let call_s = gs.nodes.iter().find(|n| n.node_type == TraceNodeType::ToolCall).unwrap();
+    let call_m = gm.nodes.iter().find(|n| n.node_type == TraceNodeType::ToolCall).unwrap();
+
+    // 秒级输入被放大到毫秒——不是原样透传
+    assert_eq!(call_s.started_at_ms, Some((seconds + 1) * 1000));
+    // 毫秒级输入原样通过
+    assert_eq!(call_m.started_at_ms, Some(millis + 1));
+
+    // 两者归一后同量级：任何按 `_ms` 字段分桶的消费方都不能把它们放进 1970
+    let a = call_s.started_at_ms.unwrap();
+    let b = call_m.started_at_ms.unwrap();
+    assert!((b - a).abs() < 90 * 86_400_000, "归一后应落在同一季度内，实际差 {}ms", (b - a).abs());
 }
 
 #[test]
