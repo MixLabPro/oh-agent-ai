@@ -222,17 +222,35 @@ def main():
           "EXACT" if all(q04_verdicts) else "MISMATCH", "\n".join(q04_notes))
 
     # ── Q05 缺价卡模型不归零 ────────────────────────────────
-    unresolved = cli_json(args.bin, args.home, "data-unresolved", "--json")
-    n_unpriced = sum(len(v) for v in (unresolved.get("providers") or {}).values())
-    if args.internal:
-        q = c.sql("SELECT code, COUNT(*) n FROM v_data_quality_safe WHERE resolved_at_ms IS NULL GROUP BY code")
-        sql_note = f"query_sql_readonly v_data_quality_safe: {q.get('rows') if q and 'rows' in q else q}"
-    else:
-        sql_note = "(query_sql_readonly 需 --internal)"
+    cost_args = {"from": month_first, "to": today,
+                 "group_by": ["host", "provider", "model", "basis"]}
+    cost_result, _, _ = c.call("cost_breakdown", cost_args)
+    cost_sc = (cost_result or {}).get("structuredContent") or {}
+    cost_data = cost_sc.get("data") or {}
+    cost_rows = cost_data.get("breakdown") or []
+    cost_amounts = cost_data.get("amounts") or []
+    cost_total = cost_data.get("total_tokens")
+    cost_partition = (cost_data.get("priced_tokens", 0)
+                      + cost_data.get("unresolved_tokens", 0)
+                      + cost_data.get("subscription_tokens", 0))
+    unresolved_rows = [row for row in cost_rows if row.get("status") == "unpriced"]
+    unresolved_honest = all(row.get("amount") is None and row.get("tokens", {}).get("total", 0) > 0
+                            and row.get("has_unresolved") for row in unresolved_rows)
+    amounts_typed = all(isinstance(row.get("amount_minor"), int)
+                        and isinstance(row.get("currency"), str)
+                        and isinstance(row.get("basis"), str)
+                        for row in cost_amounts)
+    cost_leak = any(p in json.dumps(cost_result) for p in
+                    ["native_session_id", "machine_namespace", "source_event_id", "/Users/"])
+    cost_ok = (not (cost_result or {}).get("isError") and cost_rows
+               and cost_total == cost_partition and unresolved_honest
+               and amounts_typed and not cost_leak)
     R.add("Q05", "缺价卡模型：用量可见、成本 unresolved 不归零",
-          "PARTIAL",
-          f"CLI data-unresolved: {n_unpriced} 个未定价模型 (reason=no-price-card 等)\n{sql_note}\n"
-          "MCP 无 cost 工具——unresolved 的「用量可见 + 成本不冒充 0」只能在 CLI/cost_breakdown(M3) 验证。")
+          "EXACT" if cost_ok else "MISMATCH",
+          f"cost_breakdown: rows={len(cost_rows)} amounts={len(cost_amounts)} "
+          f"total={cost_total} = priced+unresolved+subscription={cost_partition}; "
+          f"unresolved_rows={len(unresolved_rows)} honest={unresolved_honest} "
+          f"amounts_typed={amounts_typed} leak={cost_leak}")
 
     # ── Q06–Q10 workflow_events 依赖 ────────────────────────
     for qid, q in [
@@ -296,8 +314,13 @@ def main():
         snote = f"pricing_snapshots 行数: {snaps.get('rows') if snaps and 'rows' in snaps else snaps}"
     else:
         snote = "(需 --internal 数 pricing_snapshots)"
-    R.add("Q13", "调价日前后分别用正确价格版本", "BLOCKED",
-          f"cost_breakdown 逐事实价版重放 = M3 硬前置；{snote}")
+    cost_versions = {row.get("pricing", {}).get("version") for row in cost_rows
+                     if row.get("pricing", {}).get("version")}
+    q13_ok = cost_ok and len(cost_versions) >= 2
+    R.add("Q13", "调价日前后分别用正确价格版本",
+          "EXACT" if q13_ok else "BLOCKED",
+          f"cost_breakdown fact-time pricing versions={sorted(cost_versions)} "
+          f"(need >=2 for this real-data run); {snote}")
 
     # ── Q14 同 raw 模型名跨宿主 ─────────────────────────────
     rm, _, _ = c.call("usage_hourly", {"date": today, "group_by": "model"})

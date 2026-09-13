@@ -311,7 +311,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | `authority_audit` | v0.9.1 internal only | ✅ **落地**：MCP 内只读——实时事实 token 守恒、重复 / 孤儿 / legacy-realtime 混轴、覆盖范围输入校验、`authority_revision` 未来性和已登记质量例外自检；不做重导入。见 §8.1 |
 | `billing_workflow` | v1.0 smoke only, `mcp-internal` | 🔶 仅暴露类型化的候选 / 声明 / 重算 / 账单 / 预算管理动作；读取可用，写入必须显式启动 `data-mcp serve --allow-local-writes`，不属于公开兼容面，不提供任意 SQL 或通用写入 |
 | `reimport_verify` | v0.9.1（**MCP 外**） | ✅ **落地（`4c7f75b`）**：`agent-vitals data-reimport-verify [--json]`——两临时库各重放（round B 崩溃后重跑），逐宿主 × 北京月比对；不碰生产库。不是 MCP 工具（P1-2）。 |
-| `cost_breakdown` | v0.9.2 | ⬜ 逐事实 / 逐日历史价格重放（当前仅窗口级）+ 变化因子分解引擎 |
+| `cost_breakdown` | v0.9.2 | 🔶 **部分落地**：按事实时间选择历史价格版本、`MoneyMinor`、币种/计费口径分离、订阅与 unresolved token 明细已在 MCP；变化因子分解、跨价格版本父层聚合与三消费面 parity 仍待补齐 |
 | `sessions_search` / `session_detail` | v0.9.1（提前） | ✅ **落地（`7c68ab4`）**：`session_ref` = HMAC-SHA256(salt, session_key)（salt `<data_home>/.mcp-session-salt` 0600，不进库）；`sessions_in_window` 逐会话聚合（时间边界读时从 `MIN/MAX(event_ts_ms)` 派生，不补 schema 列）+ `session_facts_timeline`。时间线的失败/错误事件轴留 M4（`workflow_events`）。 |
 | `issues_summary` / `skills_summary` | v0.10 | ⬜ `workflow_events` 完整 writer + reader + 覆盖度管线（独立于 MCP 的工作量，随 v0.10 任务图立项） |
 
@@ -534,7 +534,14 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 
 首版只做确定性分解，不生成自然语言结论。
 
-**实现注记（draft-2）**：价格版本重放当前粒度 = 查询窗口月末的 `pricing_snapshots` 时点（`PricingCards::asof`），不是逐事实时点。在 §3.4 归一价表落地前，「使用到的价格版本」只能报 snapshot 的 `captured_at` 与「官方标价 / 用户配置」二分，不能报 `pricing_versions.source_kind` 三分。**逐日 / 逐事实价格重放（Q13、U10）是本工具的硬前置**，M3 必须先补 `authority_query` 的按事实时点选价版能力。变化因子分解引擎（用量 / 模型组合 / 缓存结构 / 价格版本 / 账单录入 + 未解释余额）是净新增，无现成实现。
+**实现注记（draft-5，2026-09-13）**：`cost_breakdown` 已从窗口末价卡切换为按每条事实的
+`event_ts_ms` 选择不晚于事实时间的 `pricing_snapshots`，并在响应中保留
+`pricing.version/source_kind/captured_at_ms`。金额走 `MoneyMinor`；CNY/USD 与 billing
+base 分开，不生成伪合计；订阅覆盖 token 和无价卡 / 路由证据不足的 unresolved token 均可
+见。当前行粒度保留事实时点价格版本切片；`group_by` 回显请求维度但还没有跨版本的父层
+滚动聚合，`compare_to_previous` 只返回等长窗口摘要。变化因子分解（用量 / 模型组合 /
+缓存结构 / 价格版本 / 账单录入 + 未解释余额）、完整账单归因和三消费面 parity 仍是 M3
+剩余工作。
 
 ### 7.6 `sessions_search`
 
@@ -884,8 +891,10 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 ### Phase M3：v0.9.2 成本解释与会话下钻
 
 - **前置子阶段**：① `authority_query` 补按事实时点选价版能力（逐日 / 逐事实历史价格重放）；② 「session 索引 v2」——`sessions` 表补 `started_at_ms` / `ended_at_ms` / 会话级聚合 + `session_ref` HMAC 基元（D5）；③ 导出快照 manifest 扩展（`snapshot.manifest.json` + `pricing_snapshots` / `host_bills` 副本），供 `authority_audit --against` 做金额对账（§8.1.3）。
-- 实现 `cost_breakdown`（含变化因子分解引擎）、`sessions_search`、`session_detail`。
-- 完成历史价格版本重放、脱敏、稳定分页和证据覆盖测试。
+- `sessions_search`、`session_detail` 已落地；`cost_breakdown` 的事实时点价格重放、
+  `MoneyMinor` 和安全/unresolved 投影已落地。
+- 完成变化因子分解、跨价格版本父层聚合、完整账单归因、三消费面 parity，以及历史价格
+  版本 fixture、脱敏和证据覆盖测试。
 
 退出条件：Agent 能从异常曲线下钻到会话并解释成本变化；完成 U03–U05、U10。
 

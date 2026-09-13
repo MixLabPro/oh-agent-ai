@@ -2267,3 +2267,22 @@
   与内部 Clippy 通过；`python3 tests/mcp_smoke.py --bin target/release/agent-vitals --internal`
   通过：EXACT 18 / PARTIAL 2 / BLOCKED 6 / MISMATCH 0。成本逐事实历史价版本、
   workflow_events 洞察仍未宣称完成。
+
+## Loop 314 · cost_breakdown 事实时点计价与双构建 MCP 烟测
+
+- 修复：公开 MCP 新增 `cost_breakdown`，按配置统计时区解释 `from/to`（含 `to` 当天），
+  按每条 `usage_facts.event_ts_ms` 选择不晚于事实时间的 `pricing_snapshots`；金额统一为
+  `MoneyMinor`，CNY/USD 与计费口径分离，订阅覆盖和 unresolved token 显式保留，不以零或
+  伪实付替代。额外按 `billing_template_id` 保留计费模板边界，并过滤零 token 合成行。
+- UAT: Q05 walked ✔：真实 `cost_breakdown` 返回 40 个明细行、25 个 unresolved 行，
+  `total_tokens == priced_tokens + unresolved_tokens + subscription_tokens`，金额为整数
+  `amount_minor` 且不跨币种/口径合计，敏感字段扫描零命中。
+- UAT: Q13 walked ✔：真实价格快照出现 2 个版本，成本明细返回事实时点对应的版本元数据，
+  未用当前价格覆盖历史事实。
+- UAT: MCP 权限 walked ✔：公开构建 `tools/list` 不含 SQL/写入/同步/迁移/repair；
+  `mcp-internal` 仅在显式 `--allow-local-writes` 下允许类型化 billing workflow 写入，
+  20 个管理动作通过；`authority_audit` 内部只读审计通过。
+- 回归：公开烟测 **EXACT 18 / PARTIAL 1 / BLOCKED 5 / MISMATCH 0**；内部烟测
+  **EXACT 20 / PARTIAL 1 / BLOCKED 5 / MISMATCH 0**；cost_breakdown 单测 2/2、内部
+  Clippy 通过。Q06–Q10 仍受 workflow_events writer/reader 阻塞，Q14 canonical 归一
+  与成本变化因子分解仍未完成。

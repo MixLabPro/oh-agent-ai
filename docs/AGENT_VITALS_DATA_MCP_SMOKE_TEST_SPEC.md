@@ -1,6 +1,6 @@
 # Agent Vitals Data MCP 真机可用性冒烟测试规格
 
-> 状态：v3（2026-09-13）——`authority_audit`（S4.5）落地并纳入内部 MCP 冒烟。
+> 状态：v4（2026-09-13）——`authority_audit`（S4.5）与 `cost_breakdown`（Q05/Q13）落地并纳入内部 MCP 冒烟。
 > 脚本：`tests/mcp_smoke.py`。上位规格：`AGENT_VITALS_DATA_MCP_SPEC.md`。
 
 ## 0. 目的与定位
@@ -67,7 +67,7 @@ agent-vitals sync-facts    # 让 freshness 是新的
 ## 4. 冒烟矩阵
 
 每行：**目标工具**（spec §7 承诺的）· **今日可跑**（现在实际能打的调用，含
-`query_sql_readonly` 代理）· **CLI 对照** · **判据** · **首轮判定（2026-09-08）**。
+`query_sql_readonly` 代理）· **CLI 对照** · **判据** · **当前判定**。
 
 ### 4.1 Q01–Q05：首批可见价值
 
@@ -77,7 +77,7 @@ agent-vitals sync-facts    # 让 freshness 是新的
 | **Q02** 今天各宿主小时曲线 + 峰值 | `usage_hourly(group_by=host)` | 同 ✅ | `data daily` | 宿主曲线分开；`totals_by_host` 之和 == 全局；`peak_hour_by_host` 自洽 | **EXACT** |
 | **Q03** 北京月/日界归属 | `usage_hourly` / `summary_monthly` | `usage_hourly(date=<月初>)` ✅ | `data daily --date <月初>` | 月初 00 点桶（= UTC 前一天晚上）归属北京当日；逐宿主 total == CLI | **EXACT** |
 | **Q04** 峰值下钻到会话，token 合计==峰值 | `sessions_search` → `session_detail` | 同 ✅ | — | `usage_hourly` 给 `peak_hour` → `sessions_search(date, hour=peak)` 逐会话 total 之和 == 该小时 `usage_hourly` total == `data.window_total_tokens`，且 `has_more=false`；`session_detail(session_ref)` 反解 + 时间线；响应无原生 id / 路径 / `session_key` | **EXACT** |
-| **Q05** 缺价卡模型不归零 | `cost_breakdown` | `data-unresolved --json` + `query_sql_readonly(v_data_quality_safe)` | `data-unresolved` | 用量可见；成本 `unresolved`，不以 0 或估算冒充实付 | **PARTIAL**（用量维 ✅ via SQL；成本 `unresolved` 判定只在 CLI / `cost_breakdown` M3） |
+| **Q05** 缺价卡模型不归零 | `cost_breakdown` | `cost_breakdown(from,to,group_by)` + `data-unresolved --json` | `data-unresolved` | 用量可见；成本 `unresolved`，不以 0 或估算冒充实付；`MoneyMinor` 金额保持整数且不跨币种/口径相加 | **EXACT**（2026-09-13 真机：40 行、25 个 unresolved 行，token 分区守恒、金额类型与脱敏通过） |
 
 ### 4.2 Q06–Q10：依赖 `workflow_events`
 
@@ -99,7 +99,7 @@ reader）——spec §13 M4 前置，"工作量与 behavior 检测线相当"，�
 |---|---|---|---|---|
 | **Q11** 宿主 24h 未同步 → 标 stale/partial、列明缺失宿主 | envelope `freshness.stale_hosts` + `coverage.missing_hosts` | `data_status` → `by_host.covered_to` / `last_seen_at` | envelope 按最后一条实时事实将过期宿主折成显式标记；扫描时间单独呈现 | **EXACT** |
 | **Q12** 重复导入 + 中途中断 → 重跑查询逐值恒等 | `reimport_verify`（MCP 外命令） | `agent-vitals data-reimport-verify --json` ✅ | 两临时库各重放（round B 迁完首宿主"崩溃"→ 重开清扫 → 完整迁移 → 幂等重跑），逐宿主 × 北京月 `COUNT + 四桶 SUM` 全等；`interrupted_runs_swept ≥ 1`；**绝不碰生产库** | **EXACT** |
-| **Q13** 调价日前后用正确价格版本 | `cost_breakdown` | `query_sql_readonly(pricing_snapshots)` | 调价日前后分别用对应 `pricing_snapshots` 版本；历史不被当前价卡覆盖 | **BLOCKED**（M3 硬前置：`authority_query` 按事实时点选价版；真机 `pricing_snapshots` 只有 1 版） |
+| **Q13** 调价日前后用正确价格版本 | `cost_breakdown` | `cost_breakdown(from,to)` + `query_sql_readonly(pricing_snapshots)`（internal） | 调价日前后分别用对应 `pricing_snapshots` 版本；历史不被当前价卡覆盖 | **EXACT**（2026-09-13 真机返回 2 个事实时点价格版本） |
 | **Q14** 同 raw 模型名跨宿主 | `usage_hourly` / `cost_breakdown` 的 `identity_kind` | `usage_hourly(group_by=model)` ✅ | 每序列显式 `identity_kind`；无法映射标 `unresolved`，不并入相似名 | **PARTIAL**（`identity_kind: "host_raw"` 每序列在场，key 带 `host` 消歧 ✅；canonical 归一 = v0.9.2+；`unresolved` 语义在 `data-unresolved` / M3） |
 
 ### 4.4 数据可信度补充（Data MCP §3.4，`data_status` 直接答）
@@ -191,6 +191,27 @@ M19/M19b，多 M12；Q04/Q12 都在公开面）。
 **Q12**：`data-reimport-verify` VERIFIED — byte-identical，2 rounds / 6
 host-months / facts 逐值相等 / `interrupted_runs_swept=1`。
 
+### 7.4 第四轮（2026-09-13，`cost_breakdown` 真机对拍）
+
+本轮先以公开构建、再以 `mcp-internal` 构建执行 `tests/mcp_smoke.py`，避免把内部
+工具误计入公开清单。公开与内部均通过成本明细真实调用：`cost_breakdown` 采用配置的
+统计时区，按每条事实的 `event_ts_ms` 选择不晚于该事实的 `pricing_snapshots`，金额输出
+为 `MoneyMinor`，CNY/USD 与计费口径分别汇总；无价卡或路线证据不足的 token 保留在
+`unresolved`，不转成零或订阅实付。内部额外通过 `authority_audit`，且显式开启本地写入
+后管理烟测 20 个类型化动作通过。
+
+最新黑盒结果：
+
+| 构建 | EXACT | PARTIAL | BLOCKED | MISMATCH |
+|---|---:|---:|---:|---:|
+| 公开 | 18 | 1 | 5 | 0 |
+| `mcp-internal` | 20 | 1 | 5 | 0 |
+
+Q06–Q10 仍被 `workflow_events` writer/reader 阻塞；Q14 仍是 host raw 身份语义，
+canonical 归一未完成。`cost_breakdown` 当前保留事实时点价格版本切片以保证审计性，
+`group_by` 会回显请求维度但尚未做跨价格版本的父层滚动聚合；`compare_to_previous`
+目前提供等长对比窗口摘要，变化因子分解（用量/组合/缓存/价格/账单）仍未完成。
+
 ### 7.1 首轮（2026-09-08，Q01–Q03 + 协议）
 
 **逐值对账样本**（Q01/Q02，2026-09-07）：MCP `usage_hourly` 逐宿主 `total` +
@@ -208,21 +229,20 @@ host-months / facts 逐值相等 / `interrupted_runs_swept=1`。
 | # | 缺口 | 现状 | 解锁 |
 |---|---|---|---|
 | ~~**F1**~~ | ~~`freshness.stale_hosts` 未折叠逐宿主过期状态~~ | ✅ 已关闭：以最后一条实时事实的 24h 阈值生成 `stale_hosts`，`data_status.coverage` 同步降为 `partial`，并由单测与 Q11 真机冒烟守住；`last_seen_at` 仍独立表示扫描新鲜度 | — |
-| **F2** | 无金额工具 → Q05 成本维、S2「花了多少」「哪个最贵（钱）」「实付/等价/订阅分离」全部只能走 CLII | `usage_hourly` 只有 token；`MoneyMinor` 类型 + `money.rs` 在，无消费面 | 增量 3（`summary_daily`/`summary_monthly`）+ M3（`cost_breakdown`） |
+| **F2** | 金额消费面不完整 → S2「花了多少」「哪个最贵（钱）」及三消费面 parity 仍不完整 | ✅ `cost_breakdown` 已提供事实时点 host/provider/model/basis 明细、`MoneyMinor`、unresolved 与订阅 token 分离；`summary_*` 成本占比/三面逐值 parity 未接齐 | 增量 3（`summary_daily`/`summary_monthly`）+ M15 成本 parity + cost factor decomposition |
 | **F3** | 无 `data_quality_issues` 工具 → Q05/S2.4 只能 `query_sql_readonly` 数 code，不能逐模型下钻 unresolved 原因 | `v_data_quality_safe` view 在（且刻意不含 `detail_json`） | 增量 4（`data_quality_issues` + code-aware 脱敏 allowlist） |
 | ~~**F4**~~ | ~~Q04/S1.4 会话下钻~~ | ✅ **已关闭（2026-09-08）**：`session_ref` HMAC-SHA256 基元（`<data_home>/.mcp-session-salt`，0600）+ `sessions_search`（窗口/小时 × 逐会话聚合，keyset 分页，`window_total_tokens` 供守恒核对）+ `session_detail`（反解 ref → usage 时间线）。`started_at_ms`/`ended_at_ms` 从 `MIN/MAX(event_ts_ms)` 读时派生，不依赖那两列。**待**：`session_detail` 时间线的失败/错误事件富化 = F5（`workflow_events`）。 | — |
 | **F5** | Q06–Q10 问题 / Skill 洞察（含 `session_detail` 的失败事件轴） | `workflow_events` 表已建，无 writer/reader | M4（`workflow_events` 管线独立立项，随 v0.10）+ `issues_summary` / `skills_summary` |
 | ~~**F6**~~ | ~~Q12 重导入幂等验收~~ | ✅ **已关闭（2026-09-08）**：`agent-vitals data-reimport-verify [--json]`（MCP 外隔离命令，`runtime::reimport_verify`）。 | — |
-| **F7** | Q13 历史价版重放 | `pricing_snapshots` 写入方 + `asof` 读原语在，只有 1 版快照；`cost_breakdown` 按事实时点选价版未落 | M3 硬前置：`authority_query` 补按事实时点选价版能力 |
+| **F7** | Q13 历史价版重放 | ✅ `cost_breakdown` 已按每条事实的 `event_ts_ms` 选择历史价格版本，真机出现 2 个版本并通过 Q13；变化因子分解与冻结多版本 fixture 仍未完成 | M3 收口：跨窗口因子分解、稳定 fixture、账单录入归因与父层聚合 |
 | **F8** | `usage_hourly group_by=provider` 与 `model` 等价 | `provider_id` 归一表 §3.4 未建；schema 描述已注明"identical here" | v0.9.2+ canonical 归一 |
 
 ## 9. 通过门槛
 
-- **当前阶段**：Q01–Q04 / Q11 / Q12 / S4.* / M07 / M12 / M18 / M19 全 `EXACT`；
-  `MISMATCH` == 0。BLOCKED 项（Q06–Q10 / Q13）与缺口表逐条对得上。
-  ← **2026-09-08 达成**。
-- **M1 收口**：F1 已关闭（`stale_hosts` 落地）；增量 3/4 落地后 Q05 升 `EXACT`，
-  新增 `summary_daily`/`summary_monthly` 行，三消费面 parity（M15）纳入。
+- **当前阶段**：Q01–Q05 / Q11–Q13 / S4.* / M07 / M12 / M18 / M19 全 `EXACT`；
+  Q14 `PARTIAL`，Q06–Q10 `BLOCKED`，`MISMATCH` == 0。公开/内部最新结果见 §7.4。
+- **M1/M3 部分收口**：F1 已关闭；`cost_breakdown` 已落地并把 Q05/Q13 推到 `EXACT`，
+  但 `summary_daily`/`summary_monthly` 成本消费面、三面 parity 与变化因子仍待完成。
 - **M2 收口**：`authority_audit` 已纳入并通过真实 MCP 调用（Loop 313）；`reimport_verify`
   仍作为 MCP 外隔离命令验证，二者职责不混用。
 - **v1.0.0（M5）**：Q01–Q14 全部 `EXACT` 或 `EXPLAINED`；无未关闭 `mismatch`

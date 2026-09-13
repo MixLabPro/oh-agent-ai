@@ -23,6 +23,7 @@ mod session_ref;
 mod sessions_search;
 mod usage_hourly;
 mod budget_profiles;
+mod cost_breakdown;
 #[cfg(feature = "mcp-internal")]
 mod query_sql_readonly;
 #[cfg(feature = "mcp-internal")]
@@ -416,6 +417,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         data_status::spec(),
         usage_hourly::spec(),
         budget_profiles::spec(),
+        cost_breakdown::spec(),
         sessions_search::spec(),
         session_detail::spec(),
         session_trace::spec(),
@@ -518,6 +520,7 @@ pub fn dispatch_with_permissions(
         "data_status" => data_status::run(args, data_home),
         "usage_hourly" => usage_hourly::run(args, data_home),
         "budget_profiles" => budget_profiles::run(args, data_home),
+        "cost_breakdown" => cost_breakdown::run(args, data_home),
         "sessions_search" => sessions_search::run(args, data_home),
         "session_detail" => session_detail::run(args, data_home),
         "session_trace" => session_trace::run(args, data_home),
