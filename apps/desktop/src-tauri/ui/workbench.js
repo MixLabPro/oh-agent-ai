@@ -1516,6 +1516,14 @@ function adaptEstimateProfileToBudget(profile, legacy) {
   };
 }
 
+// `*_minor` 是最小货币单位（分 / cent），与 budget.rs `budget_profile_spent_minor`
+// 同口径。此前直接 String() 拼进文案，设置页显示「已用 864 CNY」而总览同一
+// 数字是 ¥8.64——差 100 倍（2026-09-15 浏览器巡检发现）。
+function fmtMinor(minor, currency) {
+  if (minor == null) return "—";
+  return fmtCur(minor / 100, currency || null);
+}
+
 function budgetProfileStatusText(profile) {
   if (!profile || !profile.level) return "尚未配置此预算口径";
   const currency = profile.currency || "";
@@ -1524,17 +1532,17 @@ function budgetProfileStatusText(profile) {
   // “已用 0”。incomplete 可以展示已知下界，但要明确仍有未覆盖用量。
   let monthly = "本月：" + monthlyLevel;
   if (profile.level === "incomplete") {
-    monthly += " · 至少已用 " + String(profile.spent_minor ?? "—") + " " + currency + "，仍有未覆盖用量";
+    monthly += " · 至少已用 " + fmtMinor(profile.spent_minor, currency) + "，仍有未覆盖用量";
   } else if (!["no_data", "disabled"].includes(profile.level)) {
-    monthly += " · 已用 " + String(profile.spent_minor ?? "—") + " " + currency;
+    monthly += " · 已用 " + fmtMinor(profile.spent_minor, currency);
   }
   if (!profile.daily_level || profile.daily_level === "disabled") return monthly;
   const dailyLevel = budgetProfileLevelText(profile.daily_level);
   let daily = "；今日：" + dailyLevel;
   if (profile.daily_level === "incomplete") {
-    daily += " · 至少已用 " + String(profile.daily_spent_minor ?? "—") + " " + currency + "，仍有未覆盖用量";
+    daily += " · 至少已用 " + fmtMinor(profile.daily_spent_minor, currency) + "，仍有未覆盖用量";
   } else if (profile.daily_level !== "no_data") {
-    daily += " · 已用 " + String(profile.daily_spent_minor ?? "—") + " " + currency;
+    daily += " · 已用 " + fmtMinor(profile.daily_spent_minor, currency);
   }
   return monthly + daily;
 }
@@ -2886,6 +2894,11 @@ function renderDecideCard(monthly, quota, claudeQuotaState) {
   const anthropic = byProvider["claude-code/anthropic"];
   const claudeQuota = claudeQuotaState || {};
   const claudeExhausted = claudeQuota.state === "exhausted";
+  // 建议行的附加段：列表里已渲染的 Claude / 订阅线路状态，此前不参与结论——
+  // 截图（2026-09-15）里 Claude Pro 近 7 天撞窗 5 次，建议行却只说「Codex 额度
+  // 较低」。**只在有证据时追加**：没有 Claude 证据时文案与旧版逐字相同，
+  // 也绝不说 Claude「可用」（没有正向读数，沉默有两种解释）。
+  const adviceExtras = [];
   if (anthropic || claudeExhausted) {
     if (claudeExhausted) {
       const until = formatStatisticsDateTime(claudeQuota.resets_at * 1000, {
@@ -2898,6 +2911,7 @@ function renderDecideCard(monthly, quota, claudeQuotaState) {
       rows.push(`<li><span class="src-name">Claude Pro</span>
         <span class="basis"><span class="chip estimate">${winLabel}已耗尽</span>
         <span class="fresh stale nowrap">${until} 重置</span></span></li>`);
+      adviceExtras.push(`Claude Pro ${winLabel}已耗尽，${until} 重置`);
     } else {
       const hits = Number(claudeQuota.windows_recent || 0);
       // 「未知」不等于"什么都不知道"：上次限流记录的重置时刻是已知的（走到这个
@@ -2911,6 +2925,7 @@ function renderDecideCard(monthly, quota, claudeQuotaState) {
       const hitsText = hits > 0 ? " · 近 7 天撞窗 " + hits + " 次" : "";
       rows.push(`<li><span class="src-name">Claude Pro</span>
         <span class="basis"><span class="chip" title="Claude Code 只在被限流时记录一条事件，从不记录剩余额度；没有正向读数就不推算百分比，也不会从「没有新记录」反推「可用」">窗口状态未知${lastText}${hitsText}</span></span></li>`);
+      if (hits > 0) adviceExtras.push(`Claude Pro 近 7 天撞窗 ${hits} 次，窗口状态未知`);
     }
   }
   // GLM / MiniMax：无配额证据源，只显示利用率（双轨账里已有，这里给决策提示）
@@ -2926,23 +2941,26 @@ function renderDecideCard(monthly, quota, claudeQuotaState) {
       rows.push(`<li><span class="src-name">${label}</span>
         <span class="basis"><span class="chip ${low ? "estimate" : "measured"}">${low ? "⚠ 没用够" : "值回月费"} ${mult.toFixed(1)}×</span>
         <span class="fresh nowrap">月费 ${fmtCur(fee, h.currency)} · 用量按标价折算 ${fmtCur(eq, h.currency)}</span></span></li>`);
+      if (low) adviceExtras.push(`${label} 月费只用出 ${mult.toFixed(1)}×`);
     }
   }
   body.innerHTML = `<ul class="src-list">${rows.join("")}</ul>`;
-  // 建议行（四态状态机）
+  // 建议行（四态状态机）+ 有证据的附加段
+  const codexLow = codexState != null && codexState < 15;
+  const extras = adviceExtras.length ? "，" + adviceExtras.join("，") : "";
   let advice;
-  if (codexState != null && codexState < 15) {
-    advice = "Codex 额度较低；请在用量或设置中确认可用线路";
+  if (codexLow) {
+    advice = "Codex 额度较低" + extras + "；请在用量或设置中确认可用线路";
   } else if (codexState != null && codexState <= 100) {
-    advice = `Codex 额度还剩 ${codexState.toFixed(0)}%，可继续使用`;
+    advice = `Codex 额度还剩 ${codexState.toFixed(0)}%，可继续使用` + (extras ? "；" + adviceExtras.join("，") : "");
   } else {
-    advice = "暂无法给出建议：配额证据不可用或已过期";
+    advice = "暂无法给出建议：配额证据不可用或已过期" + (extras ? "；" + adviceExtras.join("，") : "");
   }
   const adviceEl = document.createElement("div");
   adviceEl.className = "decide-advice";
   adviceEl.textContent = "💡 " + advice;
   body.appendChild(adviceEl);
-  if (card && card.classList) card.classList.toggle("warn", codexState != null && codexState < 15);
+  if (card && card.classList) card.classList.toggle("warn", codexLow || claudeExhausted);
 }
 
 function syncDot(sync) {
@@ -3011,6 +3029,46 @@ function pricingReasonText(reason) {
   }[reason] || null;
 }
 
+const MIXED_CURRENCY = "__mixed__";
+
+// 跨宿主面板的金额必须分币。`by_host` 条目可能混币（claude-code 下 anthropic
+// USD + minimax CNY），契约里 currency=None 就是"未声明单币"（data_contract.rs
+// HostAmount::currency）；此前渲染 `v.toFixed(2)` 裸数字，把 $20+¥49 显示成
+// 「订阅 69.00」——正是 CLAUDE.md 说的"同桶跨币相加就是编造"（2026-09-15 巡检）。
+// 权威归属在 by_provider（键 "host/provider"，条目级单币）：按宿主前缀收集，
+// 只在同币种内相加；没有 provider 归属时才回退到 by_host，且混币时不给数字。
+// 返回 [{basis, currency, amount}]，basis 顺序沿用 by_host 的 BTreeMap 键序。
+function hostAmountsByCurrency(hostId, hostRow, byProvider) {
+  const out = [];
+  const seen = new Set();
+  const push = (basis, currency, amount) => {
+    const key = basis + " " + currency;
+    if (seen.has(key)) {
+      const hit = out.find((e) => e.basis === basis && e.currency === currency);
+      hit.amount += amount;
+    } else {
+      seen.add(key);
+      out.push({ basis, currency, amount });
+    }
+  };
+  const providerRows = Object.entries(byProvider || {})
+    .filter(([key]) => key.startsWith(hostId + "/"))
+    .map(([, r]) => r);
+  const basisOrder = Object.keys(hostRow.amounts_by_basis || {});
+  if (providerRows.length > 0) {
+    for (const r of providerRows) {
+      if (!r.currency) continue;
+      for (const [basis, amount] of Object.entries(r.amounts_by_basis || {})) push(basis, r.currency, amount);
+    }
+    out.sort((a, b) => basisOrder.indexOf(a.basis) - basisOrder.indexOf(b.basis));
+    return out;
+  }
+  for (const [basis, amount] of Object.entries(hostRow.amounts_by_basis || {})) {
+    push(basis, hostRow.currency || MIXED_CURRENCY, amount);
+  }
+  return out;
+}
+
 function renderSourcesPanel(dto, prefix) {
   const list = document.getElementById(prefix + "-list");
   const empty = document.getElementById(prefix + "-empty");
@@ -3052,7 +3110,7 @@ function renderSourcesPanel(dto, prefix) {
         span.textContent = "无数据";
         basisEl.appendChild(span);
       } else {
-        const entries = Object.entries(row.amounts_by_basis || {});
+        const entries = hostAmountsByCurrency(id, row, dto.by_provider);
         if (entries.length === 0) {
           // 有观测日但全 unknown（claude 全 unknown 日等）：不算 unavailable，
           // 也不产金额——chip 标「无可计金额」+ has_unresolved=true 时再加
@@ -3062,12 +3120,17 @@ function renderSourcesPanel(dto, prefix) {
           span.textContent = "无可计金额";
           basisEl.appendChild(span);
         } else {
-          for (const [b, v] of entries) {
-            const meta2 = BASIS_LABEL[b];
+          for (const { basis, currency, amount } of entries) {
+            const meta2 = BASIS_LABEL[basis];
             if (!meta2) continue;
             const chip = document.createElement("span");
             chip.className = "chip " + meta2.cls;
-            chip.textContent = meta2.label + " " + v.toFixed(2);
+            if (currency === MIXED_CURRENCY) {
+              chip.textContent = meta2.label + " 币种未声明，见费用明细";
+              chip.title = "该宿主条目未声明单一币种（通常是多家服务商 $ 与 ¥ 混在一起），跨币相加没有意义；总览「费用明细」按服务商分币列出";
+            } else {
+              chip.textContent = meta2.label + " " + fmtCur(amount, currency);
+            }
             basisEl.appendChild(chip);
           }
         }
@@ -3369,10 +3432,9 @@ async function renderCalendar() {
   renderHourly(calSelectedDate || today);
 }
 
-// 当日按小时分布。数据来源矩阵（read_hourly_distribution 的 hosts_available
-// 值即来源，逐宿主如实渲染）：codex=fold 全量历史；dsh=今日 today-json /
-// 历史日 facts-index（该日会话被 ingest 过才有）；claude=facts-index。
-// 「来源标注让部分覆盖可见」：claude/dsh 的索引小时只含已 ingest 会话，
+// 当日按小时分布。数据来源（read_hourly_distribution 的 hosts_available 值即
+// 来源，逐宿主如实渲染）：三宿主统一走权威库 "sql-facts"，该日无已 ingest
+// 事实则为 null。「来源标注让部分覆盖可见」：小时只含已 ingest 会话，
 // 值偏小不是 bug 是覆盖面——标注写进面板 note。
 async function renderHourly(date) {
   const grid = document.getElementById("hourly-grid");
@@ -3435,15 +3497,20 @@ async function renderHourly(date) {
     }
     grid.appendChild(cell);
   });
-  const srcNote = [];
-  srcNote.push("Codex：全量折算（fold）");
-  srcNote.push(src.dsh === "today-json"
-    ? "DSH：今日实时桶"
-    : src.dsh === "facts-index" ? "DSH：已 ingest 会话的小时重放（部分覆盖可能偏小）"
-    : "DSH：无小时数据（历史日未持久化；该日会话未 ingest）");
-  srcNote.push(src.claude === "facts-index"
-    ? "Claude：已 ingest 会话的小时重放（部分覆盖可能偏小）"
-    : "Claude：无小时数据（ledger 只有日轴；该日会话未 ingest）");
+  // hosts_available 的值：Phase 3.5 Tier B 起三宿主统一 "sql-facts"（权威库
+  // 小时重放）或 null（该日没有已 ingest 的事实）——summary.rs hourly_distribution
+  // 的 source() 闭包 + lib.rs `read_hourly_distribution_matches_calendar_codex_day`
+  // 钉死。此前这里还在匹配已退役的 "today-json"/"facts-index"，Codex 写死
+  // 「全量折算（fold）」：真机上 DSH/Claude 永远标「无小时数据」，与方格里明明
+  // 有的柱子自相矛盾（2026-09-15 巡检）。按值如实渲染，不再认死字符串。
+  const hostNote = (label, value, missingHint) => value
+    ? `${label}：已入库事实的小时重放（${value}；只含已 ingest 会话，可能偏小）`
+    : `${label}：无小时数据（${missingHint}）`;
+  const srcNote = [
+    hostNote("Codex", src.codex, "该日没有已 ingest 的 Codex 会话"),
+    hostNote("DSH", src.dsh, "该日会话未 ingest"),
+    hostNote("Claude", src.claude, "该日会话未 ingest"),
+  ];
   note.textContent = srcNote.join(" · ") + "。空格 = 该小时没有已测用量（不是 0）。";
 }
 

@@ -13,6 +13,15 @@
   --success: #4ade80;
   --skill: #60a5fa;
   --radius: 12px;
+  /* 别名 token。下面 1490 行起后加的区块引用了 --line/--text-1/--text-2/
+     --text-dim/--fg，但从未定义，全靠各处内联的 #hex 回退值硬扛：--line 回退
+     #eee 在暗色下是近白分割线，--text-dim 无回退直接失效（2026-09-15 巡检）。
+     别名走 var() 引用基础 token，主题切换时自动跟随，不再各写一份色值。 */
+  --line: var(--panel-2);
+  --text-1: var(--text);
+  --text-2: var(--muted);
+  --text-dim: #64748b;
+  --fg: var(--text);
 }
 
 /* 跟随 macOS/系统外观；业务状态色保持语义，只调整底色、文字和边界对比度。
@@ -30,6 +39,7 @@
     --danger: #b91c1c;
     --success: #15803d;
     --skill: #1d4ed8;
+    --text-dim: #94a3b8;
   }
 
   .src-list li.no-data .chip,
@@ -534,8 +544,13 @@ body {
   margin-top: 2px;
 }
 
-/* 勾选行：与 .form-row 的"标签在上"不同，勾选框和说明文字同一行。 */
-.check-row {
+/* 勾选行：与 .form-row 的"标签在上"不同，勾选框和说明文字同一行。
+   选择器必须带 .form-row 前缀：下面的 `.form-row label{display:grid}`
+   （0,1,1）压过裸 `.check-row`（0,1,0），checkbox 被竖着堆到文字上方
+   （设置页「Claude Pro 额度窗口提醒」，2026-09-15 巡检）——与 label[hidden]
+   那次是同一类特异度事故。 */
+.check-row,
+.form-row label.check-row {
   display: flex;
   align-items: center;
   gap: 6px;

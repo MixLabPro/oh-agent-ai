@@ -264,6 +264,22 @@
       case "data_monthly_summary": return dto(374000, { month: args && args.month });
       // Shape: apps/desktop/src-tauri/src/lib.rs:2780 read_calendar_month → crates/agent-vitals-runtime/src/summary.rs:1466 calendar_month (json!).
       case "read_calendar_month": return { month: args && args.month || month, days: (args && args.month && args.month !== month) ? {} : calendar.days };
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2946 read_hourly_distribution → crates/agent-vitals-runtime/src/summary.rs:689 hourly_distribution (json!):
+      //   { date, hosts_available: { dsh|codex|claude: "sql-facts" | null }, hours: [24 × { hour, dsh_tokens, codex_tokens, claude_tokens }] }
+      //   空小时的值是 null 不是 0（渲染器据此画虚线空格）。此前 mock 缺这条，
+      //   浏览器里「当日按小时」面板永远显示「读取失败」（2026-09-15 巡检）。
+      case "read_hourly_distribution": {
+        const date = (args && args.date) || isoDay;
+        const hasData = date === isoDay || date === previousDay;
+        const shape = [0, 0, 0, 0, 0, 0, 0, 0, 2, 6, 9, 7, 3, 5, 8, 10, 9, 6, 4, 2, 3, 5, 2, 1];
+        const hours = shape.map((w, hour) => ({
+          hour,
+          dsh_tokens: hasData && w > 0 ? w * 1800 : null,
+          codex_tokens: hasData && w > 2 ? w * 4200 : null,
+          claude_tokens: hasData && hour >= 13 && w > 0 ? w * 2600 : null,
+        }));
+        return { date, hosts_available: { dsh: "sql-facts", codex: "sql-facts", claude: hasData ? "sql-facts" : null }, hours };
+      }
       // Shape: apps/desktop/src-tauri/src/lib.rs:1390 data_status (json!).
       case "data_status": return { status: "ok", data: { health: "warn", integrity: "ok", facts: 42, unresolved_tokens: 18000, unpriced_tokens: 0, pricing: { stale: false }, hints: ["浏览器 mock 数据，不会写入本地库"] } };
       // Shape: apps/desktop/src-tauri/src/lib.rs:1480 billing_import_candidates (json!).

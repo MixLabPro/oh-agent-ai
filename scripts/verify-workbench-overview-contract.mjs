@@ -163,6 +163,9 @@ let advice = "";
 elements.get("ov-decide-body").appendChild = (child) => {
   if (child.className === "decide-advice") advice = child.textContent;
 };
+// The fixture's Claude Pro window is exhausted (evidence, not inference): that
+// state must reach the advice line too — 2026-09-15 screenshot had Claude hitting
+// the wall 5 times in 7 days while the advice only mentioned Codex.
 for (const used of [86, 92, 100]) {
   override = async (command, args) => {
     const value = await fixtureInvoke(command, args);
@@ -171,10 +174,22 @@ for (const used of [86, 92, 100]) {
     return value;
   };
   await sandbox.renderOverview();
-  assert.equal(advice, "💡 Codex 额度较低；请在用量或设置中确认可用线路");
-  assert.doesNotMatch(advice, /Claude|GLM|切到/i);
+  assert.match(advice, /^💡 Codex 额度较低，Claude Pro 5 小时窗口已耗尽，\d\d\/\d\d \d\d:\d\d 重置；请在用量或设置中确认可用线路$/);
+  assert.doesNotMatch(advice, /GLM|切到/i);
   assert.equal(elements.get("ov-decide-card").hidden, false);
 }
+// Without Claude evidence (unknown, no recent hits) the line is byte-identical to
+// the old one and must not name an unverified alternative route.
+override = async (command, args) => {
+  const value = await fixtureInvoke(command, args);
+  if (command === "data_codex_quota") return { ...value, limits: { ...value.limits,
+    primary: { ...value.limits.primary, used_percent: 92 } } };
+  if (command === "data_claude_quota") return { state: "unknown", windows_recent: 0 };
+  return value;
+};
+await sandbox.renderOverview();
+assert.equal(advice, "💡 Codex 额度较低；请在用量或设置中确认可用线路");
+assert.doesNotMatch(advice, /Claude|GLM|切到/i);
 override = null;
 
 // Render-level isolation, including success -> failure transitions that used to leave stale KPIs.

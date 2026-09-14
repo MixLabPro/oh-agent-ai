@@ -123,15 +123,47 @@ ok(sandbox.budgetProfileStatusText({
   level: "no_data", spent_minor: 0, currency: "CNY",
 }) === "本月：无数据",
   "no_data 不渲染为已用 0");
+// spent_minor 是分：120 分 = $1.20 / ¥1.20。旧断言钉住的是「已用 120 CNY」——
+// 把分当元显示（设置页 864 CNY vs 总览 ¥8.64，2026-09-15 巡检）。
 ok(sandbox.budgetProfileStatusText({
   level: "incomplete", spent_minor: 120, currency: "USD",
   daily_level: "no_data", daily_spent_minor: 0,
-}) === "本月：部分覆盖 · 至少已用 120 USD，仍有未覆盖用量；今日：无数据",
-  "incomplete 显示已知下界并保留未覆盖说明");
+}) === "本月：部分覆盖 · 至少已用 $1.20，仍有未覆盖用量；今日：无数据",
+  "incomplete 显示已知下界并保留未覆盖说明（分→元）");
 ok(sandbox.budgetProfileStatusText({
-  level: "ok", spent_minor: 120, currency: "CNY", daily_level: "disabled",
-}) === "本月：正常 · 已用 120 CNY",
-  "正常状态显示权威已用金额");
+  level: "ok", spent_minor: 864, currency: "CNY", daily_level: "disabled",
+}) === "本月：正常 · 已用 ¥8.64",
+  "正常状态显示权威已用金额，spent_minor 经 fmtCur 换算为元");
+ok(sandbox.budgetProfileStatusText({
+  level: "ok", spent_minor: 864, currency: "CNY", daily_level: "ok", daily_spent_minor: 321,
+}) === "本月：正常 · 已用 ¥8.64；今日：正常 · 已用 ¥3.21",
+  "日预算行同样按分换算");
+console.log("# 跨宿主面板金额分币（hostAmountsByCurrency）");
+{
+  // 形状出处：tauri-mock.js data_monthly_summary 的 by_host / by_provider
+  // （domain data_contract.rs HostAmount::currency：by_host 混币条目 currency=None）。
+  const byProvider = {
+    "claude-code/anthropic": { currency: "USD", amounts_by_basis: { fixed_subscription: 20 } },
+    "claude-code/minimax": { currency: "CNY", amounts_by_basis: { fixed_subscription: 49, api_equivalent: 56.2 } },
+    "codex/openai": { currency: "USD", amounts_by_basis: { api_equivalent: 14.82 } },
+  };
+  const claude = sandbox.hostAmountsByCurrency("claude-code",
+    { amounts_by_basis: { fixed_subscription: 69, api_equivalent: 56.2 } }, byProvider);
+  ok(JSON.stringify(claude) === JSON.stringify([
+    { basis: "fixed_subscription", currency: "USD", amount: 20 },
+    { basis: "fixed_subscription", currency: "CNY", amount: 49 },
+    { basis: "api_equivalent", currency: "CNY", amount: 56.2 },
+  ]), "混币宿主按 (basis, currency) 分开，绝不出现 $20+¥49=69（got " + JSON.stringify(claude) + "）");
+  const codex = sandbox.hostAmountsByCurrency("codex", { amounts_by_basis: { api_equivalent: 14.82 } }, byProvider);
+  ok(JSON.stringify(codex) === JSON.stringify([{ basis: "api_equivalent", currency: "USD", amount: 14.82 }]),
+    "单币宿主带上币种（此前渲染裸 14.82 无 $）");
+  const legacyMixed = sandbox.hostAmountsByCurrency("claude-code", { amounts_by_basis: { fixed_subscription: 69 } }, {});
+  ok(legacyMixed.length === 1 && legacyMixed[0].currency === "__mixed__",
+    "无 by_provider 且 by_host 未声明币种 → 标记为未声明，不给数字");
+  const legacySingle = sandbox.hostAmountsByCurrency("dsh", { currency: "CNY", amounts_by_basis: { metered_actual: 8.64 } }, {});
+  ok(JSON.stringify(legacySingle) === JSON.stringify([{ basis: "metered_actual", currency: "CNY", amount: 8.64 }]),
+    "无 by_provider 但 by_host 声明了单币 → 照用");
+}
 ok(JSON.stringify(sandbox.issueActionsForStatus("later")) === JSON.stringify([
   ["open", "恢复待处理"], ["acknowledged", "已确认"], ["resolved", "已解决"], ["not_applicable", "不适用"],
 ]), "稍后状态仍可直接推进到确认/解决/不适用");
@@ -410,6 +442,14 @@ const exhaustedHtml = elements["ov-decide-body"].innerHTML;
 ok(exhaustedHtml.includes("5 小时窗口已耗尽"), `exhausted 显示窗口类型（got 截断）`);
 ok(exhaustedHtml.includes("重置"), "exhausted 必须给出重置时刻——这是它唯一有证据的内容");
 ok(!/%/.test(exhaustedHtml.split("Claude Pro")[1] || ""), "exhausted 行也不得出现百分比");
+// 建议行必须把列表里已渲染的 Claude 证据带进结论（2026-09-15 截图：撞窗 5 次
+// 却只说「Codex 额度较低」）。Codex 8% + Claude 耗尽 → 两条都进建议行。
+{
+  const adv = elements["ov-decide-body"]._kids.find((k) => k.className === "decide-advice").textContent;
+  ok(/^💡 Codex 额度较低，Claude Pro 5 小时窗口已耗尽，.+重置；请在用量或设置中确认可用线路$/.test(adv),
+    "Codex 低 + Claude 耗尽 → 建议行同时点出两者（got " + adv + "）");
+  ok(!/可用(?!线路)/.test(adv), "仍不得把任何一条线路说成「可用」");
+}
 
 // 七天窗要如实标出尺度差异（5 小时 vs 7 天差 33 倍，标错等于误导）。
 elements["ov-decide-body"] = { textContent: "", innerHTML: "", appendChild(child) { this._kids ??= []; this._kids.push(child); } };
@@ -429,6 +469,11 @@ ok(elements["ov-decide-body"].innerHTML.includes("上次限流已于"),
   "unknown 态说出上一次窗口何时重置，而不是只留一句「未知」");
 ok(!/窗口状态未知[^"]*可用/.test(elements["ov-decide-body"].innerHTML.replace(/title="[^"]*"/g, "")),
   "不得从「没有新记录」反推「可用」（沉默有两种解释）");
+{
+  const adv = elements["ov-decide-body"]._kids.find((k) => k.className === "decide-advice").textContent;
+  ok(adv.includes("Claude Pro 近 7 天撞窗 3 次，窗口状态未知"),
+    "unknown 态且有撞窗记录 → 撞窗次数进建议行（got " + adv + "）");
+}
 
 sandbox.__quota = { plan_type: "plus", has_credits: false,
   limits: { primary: { used_percent: 40, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 7200 } },
