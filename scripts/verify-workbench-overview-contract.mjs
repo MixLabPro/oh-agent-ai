@@ -313,4 +313,26 @@ for (const command of ["host_bills_for_period", "retention_config", "statistics_
   "public_pricing_catalog_status", "about_diagnostics", "budget_config"]) {
   assert.ok(calls.some((c) => c.command === command), command + " loads in Settings");
 }
+
+// Legacy budget_config row still in effect (overview card reads it) must be
+// surfaced on Settings whenever no estimate profile exists — regardless of the
+// origin marker. Real machine 2026-09-15: a ¥1/月 row seeded before the origin
+// file existed drove the overview card while Settings showed an empty form.
+for (const [origin, wording] of [["legacy_import", "旧版预算"], ["user", "早期版本保存的预算"], [null, "来源未记录的预算"]]) {
+  override = async (command, args) => {
+    if (command === "budget_config") return { status: "ok", monthly_cny_minor: 100, daily_cny_minor: 100, warning_ratio_bp: 8000, origin };
+    if (command === "budget_profiles_status") return { status: "ok", month: "2026-09", profiles: [] };
+    return fixtureInvoke(command, args);
+  };
+  await sandbox.loadSettingsData(null);
+  assert.equal(elements.get("ov-budget-legacy").hidden, false, "legacy notice shown for origin=" + origin);
+  assert.match(elements.get("ov-budget-legacy-text").textContent, new RegExp("检测到" + wording + " ¥1/月"));
+}
+override = async (command, args) => {
+  if (command === "budget_config") return { status: "ok", monthly_cny_minor: 100, daily_cny_minor: 100, warning_ratio_bp: 8000, origin: "legacy_import" };
+  return fixtureInvoke(command, args); // fixture has an estimate profile → legacy row is superseded
+};
+await sandbox.loadSettingsData(null);
+assert.equal(elements.get("ov-budget-legacy").hidden, true, "legacy notice hidden once an estimate profile exists");
+override = null;
 console.log("Overview contract passed: 10 fixtures, source state mapping, neutral low-quota advice, unknown/malformed/failure isolation, parallel reads, pure decision renderer, deferred settings.");

@@ -1085,7 +1085,7 @@ fn codex_provider_amounts_from_sql(
                     evidence_basis: Some("missing".to_string()),
                     pricing_method: Some("fair-market-fallback".to_string()),
                     unresolved_reason: Some("provider-specific-card-unavailable".to_string()),
-                    freshness: day.map(day_freshness).unwrap_or_else(|| Freshness { state: FreshnessState::Partial, last_observed_at: Some("sql-facts".to_string()) }),
+                    freshness: day.map(day_freshness).unwrap_or_else(|| partial_freshness_of(&priced.freshness)),
                 });
             }
         }
@@ -1109,12 +1109,20 @@ fn codex_host_amount_provider_safe(
     if mixed {
         amount.amounts_by_basis.clear();
         amount.has_unresolved = true;
-        amount.freshness = day.map(day_freshness).unwrap_or(Freshness {
-            state: FreshnessState::Partial,
-            last_observed_at: Some("sql-facts".to_string()),
-        });
+        amount.freshness = day.map(day_freshness).unwrap_or_else(|| partial_freshness_of(&amount.freshness));
     }
     (amount, tokens)
+}
+
+/// 混合/第三方路由的 Codex 条目：状态降为 Partial，但 `last_observed_at` 沿用
+/// 从同一批小时事实算出的真实时间戳。此前这里写死 `"sql-facts"`——把来源
+/// 标签塞进 RFC3339 字段（契约 `Freshness::last_observed_at` 注释），工作台
+/// 费用明细按日期切片后显示成「最后更新 acts」（2026-09-15 真机截图）。
+fn partial_freshness_of(base: &Freshness) -> Freshness {
+    match &base.last_observed_at {
+        Some(at) => Freshness { state: FreshnessState::Partial, last_observed_at: Some(at.clone()) },
+        None => Freshness::unavailable(),
+    }
 }
 
 /// WorkBuddy 栏（E4b）：**只有 token、没有金额**。四桶从 SQL `usage_facts` 直接

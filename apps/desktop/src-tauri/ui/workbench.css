@@ -627,7 +627,11 @@ body {
 
 .money-input input {
   border: 0;
-  width: 100%;
+  /* flex:1 + min-width:0 而不是 width:100%：后者不扣 ¥ 前缀和 gap，输入框
+     溢出边框，WebKit 的 number 步进箭头被挤到框外、贴在下一个控件前面
+     （真机显示「⌃⌄¥ 不设」「⌃⌄保存」，2026-09-15 截图）。 */
+  flex: 1 1 auto;
+  min-width: 0;
   padding: 6px 0;
   background: transparent;
 }

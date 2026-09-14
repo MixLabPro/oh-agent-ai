@@ -458,6 +458,10 @@ const PROVIDER_LABEL = {
   anthropic: "Anthropic", minimax: "MiniMax", "zhipu-glm": "智谱 GLM",
   openai: "OpenAI", deepseek: "DeepSeek", "deepseek-official": "DeepSeek 官方", shengsuanyun: "胜算云",
   unknown: "未知提供方", unattributed: "未归属",
+  // authority_query.rs codex_by_hour_provider_model：provider_id 为 NULL 的
+  // Codex 事实以 "<unknown>" 为键（summary.rs 测试钉住 "codex/<unknown>"）。
+  // 没这条映射时费用明细直接把尖括号原样上屏（2026-09-15 真机截图）。
+  "<unknown>": "未知提供方",
 };
 // 名义成本 = by_provider 各条目的官方标价折算之和（分币）——FixedSubscription
 // 是月费不是标价折算，排除。
@@ -1586,17 +1590,26 @@ async function renderBudgetSettings(preloadedOverview) {
         ? Promise.resolve(preloadedOverview)
         : invoke("read_overview").catch(() => null),
     ]);
+    const profiles = profileStatus && profileStatus.status === "ok" ? (profileStatus.profiles || []) : [];
+    estimateProfile = profiles.find((p) => p.profile_id === "estimate") || null;
     // 旧版 config.toml/兼容表预算：只读提示，不再提供编辑入口（规格 §4.3.3）；
     // 保存下面的表单后以新预算（estimate profile）为准，不自动转换口径。
-    if (config && config.status === "ok" && config.origin === "legacy_import") {
+    // **显示条件是"这行预算仍在生效"（有正数月额且没有 estimate profile），
+    // 不是 origin === "legacy_import"**：origin 只是来源标注（缺失 = 历史版本
+    // 没记录，budget.rs 注释要求"显示未知而非猜测"——是措辞未知，不是整条藏掉）。
+    // 真机（2026-09-15）：budget_config 里 09-09 seed 的 ¥1/月没有 origin 文件，
+    // 总览卡照用它显示「预算 ¥1/月」，设置页却一片空白，两处互相矛盾。
+    const legacyMonthly = config && config.status === "ok" ? Number(config.monthly_cny_minor || 0) / 100 : 0;
+    if (legacyMonthly > 0 && !estimateProfile) {
       legacy.hidden = false;
-      legacyText.textContent = "检测到旧版预算 " + fmtMoney(Number(config.monthly_cny_minor || 0) / 100) +
-        "/月。它仍在生效；保存下面的预算后将以新预算为准。";
+      const origin = config.origin === "legacy_import" ? "旧版预算"
+        : config.origin === "user" ? "早期版本保存的预算"
+        : "来源未记录的预算";
+      legacyText.textContent = "检测到" + origin + " " + fmtMoney(legacyMonthly) +
+        "/月。它仍在生效（总览预算卡读的就是它）；保存下面的预算后将以新预算为准。";
     } else {
       legacy.hidden = true;
     }
-    const profiles = profileStatus && profileStatus.status === "ok" ? (profileStatus.profiles || []) : [];
-    estimateProfile = profiles.find((p) => p.profile_id === "estimate") || null;
     if (estimateProfile) {
       currencySelect.value = estimateProfile.currency || "CNY";
       monthly.value = estimateProfile.monthly_minor != null ? (Number(estimateProfile.monthly_minor) / 100).toFixed(2) : "";
