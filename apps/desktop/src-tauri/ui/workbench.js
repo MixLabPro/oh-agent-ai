@@ -686,6 +686,18 @@ function bindOverviewLinks() {
   bind("ov-link-set-budget", () => openSettingsSection("settings-budget", "ov-budget-monthly-amount"));
   bind("ov-link-plans", () => openSettingsSection("settings-billing"));
   bind("ov-link-billing", () => openSettingsSection("settings-billing"));
+  // 三卡里的「尚未设置套餐或账单」（setAmount 打 data-go）：委托到卡片容器，
+  // 每次重渲染不用重绑；Enter/Space 与点击同义（它是 role=button）。
+  const kpiRow = document.getElementById("ov-kpi-row");
+  if (kpiRow && kpiRow.dataset && kpiRow.dataset.goBound !== "1" && typeof kpiRow.addEventListener === "function") {
+    kpiRow.dataset.goBound = "1";
+    const go = (ev) => {
+      const t = ev.target && ev.target.closest ? ev.target.closest("[data-go]") : null;
+      if (t) { ev.preventDefault(); openSettingsSection(t.getAttribute("data-go")); }
+    };
+    kpiRow.addEventListener("click", go);
+    kpiRow.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") go(ev); });
+  }
 }
 
 // B1-M1.1: command/section contract (spec §4). Raw DTOs stay at this boundary;
@@ -2638,12 +2650,29 @@ function meteredSpend(dto) {
   }
   return out;
 }
+// 「尚未设置套餐或账单」不是金额，是下一步指引：弱化成灰色小字并可点击跳到
+// 设置 › 计费与套餐（此前与金额同字重同色，比 ¥17015 还抢眼——2026-09-15 反馈）。
+// textContent 保持原文（REQ-043 的断言按文案钉），只加类名 + data-go。
+const SETUP_HINT = "尚未设置套餐或账单";
 function setAmount(id, text, title) {
   const el = document.getElementById(id);
   if (!el) return;
   el.textContent = text;
   el.title = title || ""; // 分币展开挂 hover；未传 → 清掉上一轮的
-  el.classList.toggle("muted-amt", text === "无数据");
+  const setup = text === SETUP_HINT;
+  el.classList.toggle("muted-amt", text === "无数据" || setup);
+  el.classList.toggle("setup-link", setup);
+  if (typeof el.setAttribute !== "function") return;
+  if (setup) {
+    el.setAttribute("role", "button");
+    el.setAttribute("tabindex", "0");
+    el.setAttribute("data-go", "settings-billing");
+    el.title = "去「计费与套餐」声明套餐或录入账单";
+  } else if (typeof el.removeAttribute === "function") {
+    el.removeAttribute("role");
+    el.removeAttribute("tabindex");
+    el.removeAttribute("data-go");
+  }
 }
 // 名义：混币且有汇率 → 速览层并成 `≈¥`（原始分币进 hover）；否则分币并列。
 // cache_write 档位假设必须可见（1hr/5min 差额占名义总额 5.2%，会话日志不记录

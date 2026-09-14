@@ -295,11 +295,18 @@ ok(num("ov-m-spend-sub").includes("确认套餐或账单后"),
   `副行说明为空的原因并给出下一步（got ${num("ov-m-spend-sub")}）`);
 ok(num("ov-m-nominal") !== "无数据" && num("ov-m-nominal") !== "尚未设置套餐或账单",
   "同一份数据里名义成本仍然有值——空的是「实付口径」，不是「本月没数据」");
+// 这条是指引不是金额：必须弱化（muted-amt + setup-link）并可点击跳设置（2026-09-15 反馈）。
+ok(el("ov-m-metered").classList.contains("setup-link") && el("ov-m-metered").classList.contains("muted-amt"),
+  "「尚未设置套餐或账单」弱化成灰色指引链接，不与金额同权重");
+ok(el("ov-m-metered").title.includes("计费与套餐"), "hover 说明点击去处（计费与套餐）");
+ok(wb.includes('el.setAttribute("data-go", "settings-billing")') && wb.includes('kpiRow.addEventListener("click", go)'),
+  "点击经 #ov-kpi-row 委托跳到 settings-billing");
 // 反向：本月没有用量时不能推给"还没声明"（没用量就是没用量）。
 const noUsage = { by_provider: {}, total_actual_spend: {}, actual_spend_by_basis: {},
   tokens_by_host: { dsh: { total: 0, uncached_input: 0, cache_read: 0, cache_write: 0, output: 0 } } };
 sandbox.renderSpendCards(noUsage, noUsage, FX);
 ok(num("ov-m-metered") === "无数据", "本月零用量时不写「尚未设置套餐或账单」（没用量就是没用量）");
+ok(!el("ov-m-metered").classList.contains("setup-link"), "回到「无数据」时指引链接类名被清掉（不残留可点击态）");
 
 // Captured window and confirmed spend: estimates never enter either day's actual line.
 const confirmed = { ...daily, actual_spend_by_basis: {

@@ -370,6 +370,22 @@ body {
   font-weight: 500;
 }
 
+/* 「尚未设置套餐或账单」是指引不是金额：常规字重、小一号、虚下划线，点击
+   跳设置 › 计费与套餐（setAmount 打 data-go，#ov-kpi-row 委托处理）。 */
+.spend-line dd.setup-link {
+  font-weight: 400;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.spend-line dd.setup-link:hover,
+.spend-line dd.setup-link:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+
 .today-card .amount {
   margin-top: 4px;
 }
