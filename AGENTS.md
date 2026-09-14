@@ -14,6 +14,7 @@ Agent Vitals maintains a Python compatibility implementation and a Rust workspac
 - `AGENT_VITALS_BIN="$PWD/target/release/agent-vitals" python3 tests/golden_runner.py --diff` checks Rust/Python output parity.
 - `cargo run -- --help` runs the CLI during development.
 - `cd integrations/dsh-client && npm test` builds and verifies the DSH client when that integration changes.
+- Desktop (Tauri) tray checks must go through the bundle: `cd apps/desktop/src-tauri && cargo tauri build --bundles app`, then `open target/release/bundle/macos/agent-vitals.app`. Never run `target/{debug,release}/agent-vitals-menubar` directly — macOS 26 never places a status item for a bare binary (sandboxed or not), and every bare-run path leaves a junk entry in System Settings › Menu Bar (the 2026-09-14 "tray vanished" incident). Keep `set_activation_policy(Accessory)` in code; tao resets the policy to Regular at launch, so `LSUIElement` in Info.plist alone is not enough.
 
 ## Coding Style & Naming Conventions
 
