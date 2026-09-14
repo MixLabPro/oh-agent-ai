@@ -22,6 +22,9 @@
   --text-2: var(--muted);
   --text-dim: #64748b;
   --fg: var(--text);
+  /* select 自绘 chevron（appearance:none 后原生箭头没了）。SVG data URI 里
+     用不了 currentColor，所以按主题各给一份：暗色 = --muted #94a3b8。 */
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%2394a3b8' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 /* 跟随 macOS/系统外观；业务状态色保持语义，只调整底色、文字和边界对比度。
@@ -40,6 +43,8 @@
     --success: #15803d;
     --skill: #1d4ed8;
     --text-dim: #94a3b8;
+    /* 浅色 = --muted #64748b */
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%2364748b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   }
 
   .src-list li.no-data .chip,
@@ -169,6 +174,81 @@ body {
 .btn:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* ---------- 表单控件基础样式 ----------
+   此前没有任何 input/select/textarea 的基础规则，只有 .find-select /
+   .cal-month-input / .money-input / .picker 各自为政，其余控件全走 UA 默认：
+   同一个设置页里 select 是 macOS 原生灰底圆角、文本框细边白底、number 框
+   又一种（2026-09-15 真机截图）。这里用 :where() 把特异度压到 (0,0,1)，
+   所有现有类照常覆盖；视觉与 .btn 同一套 token（--panel 底 / --panel-2 边 /
+   6px 圆角 / 13px 字号）。 */
+:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea) {
+  box-sizing: border-box;
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.3;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-2);
+  border-radius: 6px;
+  padding: 5px 8px;
+  min-height: 30px;
+  margin: 0;
+}
+
+:where(select) {
+  padding-right: 26px;
+  background-image: var(--select-chevron);
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 12px 12px;
+  cursor: pointer;
+}
+
+/* number 步进箭头保留（macOS 原生），但去掉 UA 给它的额外内边距。 */
+:where(input[type="number"]) {
+  padding-right: 4px;
+}
+
+:where(input[type="search"])::-webkit-search-decoration,
+:where(input[type="search"])::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+
+:where(input, select, textarea)::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+:where(input, select, textarea):focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  outline-offset: 0;
+  border-color: var(--accent);
+}
+
+:where(input, select, textarea):disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+:where(input[type="checkbox"], input[type="radio"]) {
+  accent-color: var(--accent);
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+/* 与控件并排的按钮拉到同一高度（.btn 自身 3px 内边距约 26px，会比 30px 的
+   输入框矮一截）；表格/chip 里的内联按钮不受影响。 */
+.form-row .btn,
+.billing-form .btn,
+.billing-form-actions .btn {
+  min-height: 30px;
+  padding-top: 4px;
+  padding-bottom: 4px;
 }
 
 /* ---------- 主体 ---------- */
@@ -609,14 +689,23 @@ body {
   width: 100%;
 }
 
+/* 带 ¥ 前缀的金额框：外壳承担控件外观（与基础控件同 token），内层 input 裸。 */
 .money-input {
   display: flex;
   align-items: center;
   gap: 4px;
+  background: var(--panel);
   border: 1px solid var(--panel-2);
   border-radius: 6px;
   padding: 0 8px;
+  min-height: 30px;
+  box-sizing: border-box;
   width: 140px;
+}
+
+.money-input:focus-within {
+  outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-color: var(--accent);
 }
 
 .money-input i {
@@ -627,13 +716,19 @@ body {
 
 .money-input input {
   border: 0;
+  border-radius: 0;
+  min-height: 0;
   /* flex:1 + min-width:0 而不是 width:100%：后者不扣 ¥ 前缀和 gap，输入框
      溢出边框，WebKit 的 number 步进箭头被挤到框外、贴在下一个控件前面
      （真机显示「⌃⌄¥ 不设」「⌃⌄保存」，2026-09-15 截图）。 */
   flex: 1 1 auto;
   min-width: 0;
-  padding: 6px 0;
+  padding: 5px 0;
   background: transparent;
+}
+
+.money-input input:focus-visible {
+  outline: none;
 }
 
 .money-input input:focus {
@@ -783,12 +878,7 @@ body {
 }
 
 .cal-month-input {
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--panel-2);
-  border-radius: 6px;
-  font-size: 13px;
-  padding: 3px 8px;
+  /* 外观由「表单控件基础样式」统一提供（2026-09-15），这里只留类名供 JS/布局引用。 */
 }
 
 .cal-month-input::-webkit-calendar-picker-indicator {
@@ -798,12 +888,7 @@ body {
 /* 会话 tab 的月份 picker（修「会话 tab 只看得到今天、上个月看不到」bug）：
    与日历的 .cal-month-input 同款，复用一套深色面板边框 + 内嵌 picker 图标。 */
 .picker {
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--panel-2);
-  border-radius: 6px;
-  font-size: 13px;
-  padding: 3px 8px;
+  /* 外观由「表单控件基础样式」统一提供（2026-09-15），这里只留类名供 JS/布局引用。 */
 }
 .picker::-webkit-calendar-picker-indicator {
   filter: invert(0.7);
@@ -1207,12 +1292,7 @@ button.chip.active {
 }
 
 .find-select {
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--panel-2);
-  border-radius: 6px;
-  font-size: 12px;
-  padding: 3px 8px;
+  /* 外观由「表单控件基础样式」统一提供（2026-09-15），这里只留类名供 JS/布局引用。 */
 }
 
 #tab-findings .sess-table tbody tr {
