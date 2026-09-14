@@ -405,8 +405,14 @@ def _mechanically_find_time_varying_cards(pricing):
 
 
 _EXPECTED_TIME_VARYING_CARDS = sorted([
+    # 2026-09-14 新增 deepseek-v4.1-flash：网关/转售把同一个 Flash 模型写成带
+    # 命名空间的 deepseek/deepseek-v4.1-flash，而 `norm_model_in` 只砍 `deepseek/`
+    # 前缀、不把 `4.1` 折成 `4`，所以必须显式登记（真机：一天 70M tokens 的
+    # 「按官方价折算」整栏为空）。与 Rust 侧
+    # crates/agent-vitals-domain/tests/host_contract.rs 的同一份登记逐项对应。
     ("deepseek-official", "deepseek-v4-flash"),
     ("deepseek-official", "deepseek-v4-pro"),
+    ("deepseek-official", "deepseek-v4.1-flash"),
     ("shengsuanyun", "deepseek-v4-pro"),
 ])
 

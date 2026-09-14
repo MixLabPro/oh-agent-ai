@@ -48,3 +48,22 @@ Round 1 的两项高优先级问题均已修复：
 原生 `.app` 与 Authority 数据库验收仍属于后续集成验证，不在本轮浏览器合同测试中冒充完成。
 
 ### Verdict: APPROVED
+
+## UAT Round 3 — 2026-09-14
+
+**Scope**: 总览与设置页面浏览器 UAT、跨层回归、发布阻断审计
+
+已在本地 Vite 页面完成关键路径走查：总览 KPI、今日/本月窗口、来源健康、预算、决策卡、计费明细、最近几天、设置分区导航、数据源展开、预算设置和诊断区均可见；进入设置后才加载设置专用读取。
+
+验证通过：
+
+- `npm --prefix apps/desktop/ui-dev run verify`
+- `node scripts/verify-workbench-kpi-decide.mjs`
+- `python3 -m unittest discover -s tests -p 'test_*' -v`（1189 passed，208 skipped）
+- `cargo test --release`
+- `cargo test --release -p agent-vitals-runtime -p agent-vitals-hosts`
+- `cargo clippy --release --all-targets -- -D warnings`
+- `cargo build --release`
+- `git diff --check`
+
+当前仍不能判定为完整发布交付：规格要求的真实桌面 `.app` 在 Authority 数据库上的“有数据 + 空/异常数据”截图级人工验收尚未完成。Vite mock 页面和自动化测试不能替代这一项，因此发布结论为 **CONDITIONAL**，待原生 `.app` UAT 完成后再转为可发布。

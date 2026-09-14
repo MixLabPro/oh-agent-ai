@@ -525,7 +525,7 @@ def evaluate(now=None):
             reasons.append("peak share %d%% exceeds max %d%%" %
                            (round(peak_share * 100), round(peak_max * 100)))
     elif today is None:
-        reasons.append("no today.json yet (run `behavior <log>` to start tracking)")
+        reasons.append("no metered spend recorded for today yet (budget counts cross-host metered spend only)")
 
     # 月预算：之前只把 month_cost/monthly_cny 算出来给 xbar 显示,从没真的
     # 参与过 level 判定——用户月预算超了几倍,只要今天花得少,菜单栏照样

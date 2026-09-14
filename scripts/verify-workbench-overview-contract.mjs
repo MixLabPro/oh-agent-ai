@@ -34,8 +34,8 @@ sandbox.window.__TAURI__.core.invoke = async (command, args) => {
 vm.runInContext(source, sandbox);
 const requests = vm.runInContext("OVERVIEW_REQUESTS", sandbox);
 const expected = ["read_overview", "data_monthly_summary", "data_daily_summary", "read_calendar_month",
-  "data_source_status", "data_status", "data_codex_quota", "billing_import_candidates",
-  "billing_declarations", "billing_recalculation_jobs"];
+  "data_source_status", "data_status", "data_codex_quota", "data_claude_quota",
+  "billing_import_candidates", "billing_declarations", "billing_recalculation_jobs"];
 assert.deepEqual(Array.from(requests, (r) => r.command).sort(), expected.sort());
 for (const command of [...expected, "statistics_timezone_config"]) {
   assert.ok(mock.includes('case "' + command + '":'), command + " has an explicit fixture");
@@ -46,7 +46,8 @@ await fixtureInvoke("save_statistics_timezone_config", { timezone: "Pacific/Kiri
 let result = await sandbox.loadOverviewData();
 assert.deepEqual(Object.keys(result.errors), []);
 assert.equal(calls[0].command, "statistics_timezone_config");
-assert.equal(calls.length, 11);
+// 12 = 原有 11 条 + data_claude_quota（2026-09-14：Claude Pro 的窗口状态）。
+assert.equal(calls.length, 12);
 for (const { command, args } of calls) {
   if (command === "data_daily_summary") assert.equal(args.date, result.window.date);
   if (["data_monthly_summary", "read_calendar_month"].includes(command)) assert.equal(args.month, result.window.month);
@@ -106,7 +107,8 @@ override = async (command, args) => command === "billing_import_candidates"
 calls.length = 0;
 const loading = sandbox.loadOverviewData();
 for (let i = 0; i < 10; i++) await Promise.resolve();
-assert.equal(calls.length, 11);
+// 并发发起（不等任何一条返回）——12 条与上面的 calls.length 同源。
+assert.equal(calls.length, 12);
 release();
 await loading;
 override = null;
@@ -238,10 +240,15 @@ for (const id of ["ov-billing-prompt", "ov-billing-declarations-panel", "ov-bill
 assert.match(valueOf("ov-m-metered"), /8.64/);
 
 // Bad budget fields degrade only the budget; valid synchronization survives.
+// 同时摘掉 budget_profiles：设置页规格 §8 D1 之后总览预算卡优先读
+// budget_profiles.estimate，留着一个合法的 profile 会让它合法地接管卡片，
+// 这条 legacy 降级路径就测不到了（D1 的接管行为由 kpi-decide 的用例覆盖）。
 for (const budget of [{}, { source: "sql", level: "warn", month_cost: "bad", month_ratio: 0.5, monthly_cny: 20 }]) {
   override = async (command, args) => {
     const dto = await fixtureInvoke(command, args);
-    return command === "read_overview" ? { ...dto, budget } : dto;
+    return command === "read_overview"
+      ? { ...dto, budget, budget_profiles: { status: "ok", profiles: [] } }
+      : dto;
   };
   await sandbox.renderOverview();
   assert.equal(valueOf("ov-budget-amount"), "—");

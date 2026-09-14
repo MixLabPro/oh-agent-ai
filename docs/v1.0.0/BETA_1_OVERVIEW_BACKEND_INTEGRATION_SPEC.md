@@ -195,24 +195,30 @@ billing_recalculation_jobs
 
 ### 10.1 功能验收
 
-- [ ] 在有完整数据的 Authority DB 中，三张 KPI、月度使用、支出明细和最近几天与同一统计时区下的后端返回一致；
-- [ ] 今日、月度和日历使用同一时区计算边界；
-- [ ] 已确认实际支出不包含估算/API 等价金额；估算或未解决数据有可见说明；
-- [ ] 来源状态来自 `data_source_status`，断开或错误的来源不会被计为正常；
-- [ ] 无来源、无记录、预算未配置、账单读取失败、配额不可读和数据过期都具有不同且准确的界面状态；
-- [ ] 总览不会读取或展示用户的本机文件路径、原始会话内容、令牌或密钥；
-- [ ] 无可靠替代线路证据时，决定卡不指名推荐其他提供商；
-- [ ] 从总览进入设置、待处理、用量页面时，导航目标正确且不携带过期的金额快照。
+- [ ] 在有完整数据的 Authority DB 中，三张 KPI、月度使用、支出明细和最近几天与同一统计时区下的后端返回一致（待真实 `.app` 验收）；
+- [x] 今日、月度和日历使用同一时区计算边界（loader 捕获窗口 + 契约测试覆盖）；
+- [x] 已确认实际支出不包含估算/API 等价金额；估算或未解决数据有可见说明（KPI 回归覆盖 `host_billed`/`metered_actual` 与估算隔离）；
+- [x] 来源状态来自 `data_source_status`，断开或错误的来源不会被计为正常（来源状态映射测试 + 浏览器 UAT）；
+- [x] 无来源、无记录、预算未配置、账单读取失败、配额不可读和数据过期都具有不同且准确的界面状态（隔离/空态/失败态契约测试）；
+- [x] 总览不会读取或展示用户的本机文件路径、原始会话内容、令牌或密钥（可见性与文本审计通过）；
+- [x] 无可靠替代线路证据时，决定卡不指名推荐其他提供商（低额度与无配额证据回归通过）；
+- [x] 从总览进入设置、待处理、用量页面时，导航目标正确且不携带过期的金额快照（设置分区浏览器 UAT + 窗口捕获测试）。
+
+#### Authority MCP 对拍说明
+
+该项可以通过本机只读 MCP 完成后端侧对拍。使用 `agent-vitals data-mcp serve` 的 `control_plane` 工具依次读取 `dashboard_snapshot`、`daily_summary`、`monthly_summary` 和 `calendar_month`，并以 envelope 中的同一 `timezone`、`authority_revision` 和统计窗口核对结果。当前已在本机 Authority DB 成功调用，返回 `authority_state=enabled`、`timezone=Asia/Shanghai`；但 Vite 页面使用浏览器 mock，尚未证明真实 `.app` UI 与这些 MCP 返回逐字段一致，因此第 1 项仍保持未勾选。
+
+2026-09-14 真机 MCP 冒烟：19 项 `EXACT`、4 项 `PARTIAL`、2 项 `BLOCKED`。Q01–Q05、Q11–Q13、Q15 以及 S4/M07/M12/M18/S5/S6 对拍通过；`dsh` 与 `workbuddy` 仍处于 stale/partial 覆盖，Q08/Q09 仍无可用 skill 证据，故本次结论为“后端预验收通过，功能验收未闭环”。
 
 ### 10.2 自动化与人工验证
 
-- [ ] `npm --prefix apps/desktop/ui-dev run verify` 通过；
-- [ ] `node scripts/verify-workbench-kpi-decide.mjs` 覆盖决定卡的可用、不可读和额度紧张降级；
-- [ ] `node scripts/verify-workbench-visibility.mjs`（无头 Chrome 真实 DOM；已并入 `npm run verify`）覆盖每个必须可见的 id、`display:none` 规则不命中首屏元素、可见文本无内部词表、预算已用 == 本月按量费用——M1.2 的空态/失败态最容易被 CSS 藏掉而 vm 测试看不见；
-- [ ] 新增或更新 mock 合同测试，覆盖本规格第 4 节列出的每一个命令以及未知命令失败；
-- [ ] 受影响 Rust crate 的测试通过；发布前执行 `cargo test --release` 与 `cargo clippy --release --all-targets -- -D warnings`；
+- [x] `npm --prefix apps/desktop/ui-dev run verify` 通过；
+- [x] `node scripts/verify-workbench-kpi-decide.mjs` 覆盖决定卡的可用、不可读和额度紧张降级；
+- [x] `node scripts/verify-workbench-visibility.mjs`（无头 Chrome 真实 DOM；已并入 `npm run verify`）覆盖每个必须可见的 id、`display:none` 规则不命中首屏元素、可见文本无内部词表、预算已用 == 本月按量费用——M1.2 的空态/失败态最容易被 CSS 藏掉而 vm 测试看不见；
+- [x] 新增或更新 mock 合同测试，覆盖本规格第 4 节列出的每一个命令以及未知命令失败；
+- [x] 受影响 Rust crate 的测试通过；发布前执行 `cargo test --release` 与 `cargo clippy --release --all-targets -- -D warnings`；
 - [ ] 在真实桌面 `.app` 中以至少一组有数据和一组空/异常数据完成截图级人工验收；
-- [ ] `git diff --check` 无空白错误，且不引入未审查的格式化改动。
+- [x] `git diff --check` 无空白错误，且不引入未审查的格式化改动。
 
 ## 11. 发布判定
 

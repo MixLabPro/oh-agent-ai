@@ -8,6 +8,8 @@
 mod overview;
 mod store;
 mod budget_alerts;
+// Claude Pro 的额度窗口提醒：与预算提醒共用投递账本，但键按窗口取。
+mod quota_alerts;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -236,9 +238,14 @@ fn today_title(ov: &Overview) -> String {
         claude_currency(&ov.claude_today, "USD"),
         fx_rate(ov),
     );
+    let tokens = today_merged_tokens(ov);
     match money {
-        Some(m) => format!("今日 {} · {}", fmt_tokens(today_merged_tokens(ov)), m),
-        // 两宿主今天都没有可报的按量钱 → 诚实「—」，不臆造 0。
+        Some(m) => format!("今日 {} · {}", fmt_tokens(tokens), m),
+        // 今天没有可报的按量钱 → **钱那格**诚实「—」，不臆造 0；但 token 是测到的，
+        // 照常显示。原先这里连 token 一起丢掉（只剩「今日 —」）：既丢了已测量值，
+        // 也让菜单栏那一项短到难以在拥挤的状态区里被认出来（2026-09-14 用户反馈
+        // "状态栏看不到"）。
+        None if tokens > 0 => format!("今日 {} · —", fmt_tokens(tokens)),
         None => "今日 —".to_string(),
     }
 }
@@ -1199,6 +1206,7 @@ fn sync_tick(app: &AppHandle) {
     refresh_hosts();
     refresh(app);
     budget_alerts::maybe_notify(app);
+    quota_alerts::maybe_notify(app);
     // DSH fold 或事实同步成功后广播；其他来源的失败不隐藏本轮可用结果。
     // sync-facts 暂未返回新增计数，因此成功扫描也会刷新；webview 未就绪时由
     // 下一次加载读取最新结果，事件桥不承担持久化。
@@ -1379,14 +1387,14 @@ fn focus_session_target(app: &AppHandle, target: WorkbenchTarget) {
 /// 没有理由为一份没有入口、内容更少的旧界面继续维护 `toggle_window`/
 /// `hide_window`/一份独立的 HTML+JS+CSS。命令名留作 `read_overview` 不改，
 /// 只是现在唯一的调用方是工作台。
-#[tauri::command]
+#[tauri::command(async)]
 fn read_overview() -> Value {
     serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null)
 }
 
 /// 工作台总览的权威质量状态。金额仍由 summary DTO 提供；这里仅转发
 /// `data_status` 的只读健康、价格快照和 token 归因状态，避免前端自行推断。
-#[tauri::command]
+#[tauri::command(async)]
 fn data_status() -> Value {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
@@ -1412,7 +1420,10 @@ fn data_status() -> Value {
     let enabled = agent_vitals_runtime::sql_authority::is_enabled(&data_home);
     serde_json::json!({
         "status": "ok",
-        "data": agent_vitals_runtime::mcp::data_status_report(db.conn(), true, enabled)
+        // 热路径用 quick_check 深度：工作台每次切 tab 都会走到这里，全量
+        // integrity_check 在大库上要 0.5–1.2s，是刷新的唯一长杆。CLI/MCP 的
+        // doctor 面仍是全量检查（见 runtime::mcp::data_status_report_quick 注释）。
+        "data": agent_vitals_runtime::mcp::data_status_report_quick(db.conn(), true, enabled)
     })
 }
 
@@ -1476,7 +1487,7 @@ fn restore_authority_backup() -> Result<Value, String> {
 
 /// 升级时从旧公共资产发现的套餐声明。它们是用户核对入口，不是账单：前端
 /// 只能拿到展示所需的服务商、金额和起始月份，不能拿到原始价格快照或路径。
-#[tauri::command]
+#[tauri::command(async)]
 fn billing_import_candidates() -> Value {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
@@ -1577,6 +1588,25 @@ struct BudgetProfileInput {
 }
 
 #[derive(Deserialize)]
+struct PriceRouteInput {
+    /// 型号**前缀**（与价目表 `billing_modes` 同一套匹配语义：全等或前缀）。
+    model_prefix: String,
+    provider_id: String,
+    /// `metered` 或 `subscription`。
+    mode: String,
+}
+
+#[derive(Deserialize)]
+struct PriceCardInput {
+    provider_id: String,
+    model_id: String,
+    /// 每档是 `{off_peak, peak}`；三个维度都必须给（半张卡拒绝）。
+    input_uncached: Value,
+    input_cached: Value,
+    output: Value,
+}
+
+#[derive(Deserialize)]
 struct RetentionConfigInput {
     months: u32,
 }
@@ -1593,7 +1623,7 @@ struct SourceHostControlInput {
     excluded: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn custom_source_roots() -> Value {
     let data_home = overview::data_home();
     match agent_vitals_runtime::custom_sources::custom_source_roots(&data_home) {
@@ -1638,7 +1668,7 @@ fn source_host_controls() -> Value {
 }
 
 /// 仅工作台本机显示的标准读取目录；不混入 MCP/导出 DTO，避免路径离开桌面。
-#[tauri::command]
+#[tauri::command(async)]
 fn source_read_locations() -> Value {
     let home = PathBuf::from(
         std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default(),
@@ -1683,7 +1713,7 @@ fn delete_imported_source_data(host: String) -> Result<Value, String> {
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn retention_config() -> Value {
     let data_home = overview::data_home();
     match agent_vitals_runtime::retention::retention_months(&data_home) {
@@ -1704,7 +1734,7 @@ fn save_retention_config(input: RetentionConfigInput) -> Result<Value, String> {
     Ok(serde_json::json!({ "status": "saved", "months": input.months }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn statistics_timezone_config() -> Value {
     let data_home = overview::data_home();
     match agent_vitals_runtime::statistics_timezone::timezone_name(&data_home) {
@@ -1834,7 +1864,7 @@ fn fail_pricing_catalog_update(
     Err(reason)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn public_pricing_catalog_status() -> Value {
     let data_home = overview::data_home();
     let mut status = serde_json::to_value(read_pricing_catalog_status(&data_home))
@@ -2034,7 +2064,7 @@ fn export_diagnostic_package() -> Result<Value, String> {
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn about_diagnostics() -> Value {
     let data_home = overview::data_home();
     let authority_path = agent_vitals_data::authority::default_authority_path(&data_home);
@@ -2055,7 +2085,9 @@ fn about_diagnostics() -> Value {
         "statistics_timezone": agent_vitals_runtime::clock::statistics_timezone_name(),
         "pricing": pricing,
         "pricing_update": read_pricing_catalog_status(&data_home),
-        "sync": overview::read_overview().sync,
+        // 只要 last-sync.json 这一份状态，不必为它把整份 overview 重算一遍
+        // （read_overview 会跑 SQL bundle + 预算 profile 聚合，≈130–360ms）。
+        "sync": overview::load_sync_status(&data_home),
     })
 }
 
@@ -2138,7 +2170,7 @@ fn open_trusted_releases_page() -> Result<Value, String> {
     }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn budget_config() -> Value {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
@@ -2159,7 +2191,7 @@ fn budget_config() -> Value {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn budget_profiles_status(month: String) -> Value {
     agent_vitals_runtime::budget::budget_profiles_status_sql_at(
         &overview::data_home(), &month,
@@ -2321,7 +2353,7 @@ fn save_billing_declaration_revision(
 }
 
 /// 读取当前仍有效的计费声明；修订历史由影响预览和重算回执继续追踪。
-#[tauri::command]
+#[tauri::command(async)]
 fn billing_declarations() -> Value {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
@@ -2380,7 +2412,7 @@ fn billing_declaration_impact_preview(
 
 /// 对尚未保存的候选做只读影响预览。与修订版预览共用 data 层查询，
 /// 因而不会提前创建声明、接受候选或改变汇总。
-#[tauri::command]
+#[tauri::command(async)]
 fn billing_candidate_impact_preview(
     host: String, provider_id: String, effective_start: String,
     effective_end: Option<String>, window_start_ms: i64, window_end_ms: i64,
@@ -2448,7 +2480,7 @@ fn save_host_bills(rows: Vec<HostBillInput>) -> Result<Value, String> {
     Ok(serde_json::json!({ "status": "saved", "count": rows.len() }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn host_bills_for_period(billing_period: String) -> Value {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
@@ -2603,7 +2635,7 @@ fn billing_recalculation_job_status(job_id: String) -> Result<Value, String> {
 }
 
 /// 查询重算待处理列表；用于工作台重启后展示「重算待重试」而不丢失旧结果。
-#[tauri::command]
+#[tauri::command(async)]
 fn billing_recalculation_jobs() -> Result<Value, String> {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
@@ -2628,7 +2660,7 @@ fn billing_recalculation_jobs() -> Result<Value, String> {
 /// 借来承载扫描健康；这里从 SQL authority 的 source_files / usage_facts 读取
 /// 每个已接线宿主的扫描、导入和失败范围。宿主集合复用 ingest registry，前端
 /// 不再硬编码两个卡片。路径只以 source_id/path_hash 留在库内，本 DTO 不泄露。
-#[tauri::command]
+#[tauri::command(async)]
 fn data_source_status() -> Value {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
@@ -2672,7 +2704,7 @@ fn data_source_status() -> Value {
     report
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn sync_pause_state() -> Value {
     match overview::sync_is_paused() {
         Ok(paused) => serde_json::json!({ "status": "ok", "paused": paused }),
@@ -2743,7 +2775,7 @@ fn merge_source_sync_failure(report: &mut Value, sync: &SyncStatus) {
 /// CLI `data coverage` 是**同一份冻结 DTO**（`data_contract.rs::to_json`），
 /// 工作台总览/日历两页的诚实字段（freshness/coverage/excluded_hosts）都从
 /// 这里取，不许前端自己从金额反推"有没有数据"。
-#[tauri::command]
+#[tauri::command(async)]
 fn data_monthly_summary(month: String) -> Value {
     use agent_vitals_data::repository::{MonthlySummaryQuery, SummaryRepository};
     let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
@@ -2752,18 +2784,140 @@ fn data_monthly_summary(month: String) -> Value {
 
 /// v0.9 Stage 0.6 单日版（北京日 YYYY-MM-DD）。与 `data_monthly_summary`
 /// 同一条 trait 路径、同一份 DTO 契约（同为 SQL 权威库读源）。
-#[tauri::command]
+#[tauri::command(async)]
 fn data_daily_summary(date: String) -> Value {
     use agent_vitals_data::repository::{DailySummaryQuery, SummaryRepository};
     let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
     repo.daily_summary(&DailySummaryQuery { date }).to_json()
 }
 
+/// Claude Pro 额度提醒的开关（默认关）。
+///
+/// **为什么自带开关**：系统通知权限必须由一次用户动作触发申请；额度提醒与预算
+/// 提醒是两件事，从不用预算的用户不该因此永远收不到窗口提醒。读不出开关时一律
+/// 按"关"处理（fail-closed）。
+#[tauri::command]
+fn quota_reminder_config() -> Value {
+    let enabled = agent_vitals_runtime::quota_reminder::enabled_or_default(&overview::data_home());
+    serde_json::json!({ "status": "ok", "enabled": enabled })
+}
+
+/// 写入开关；**打开的那一刻才申请系统通知权限**（REQ-039：权限在用户启用提醒时申请）。
+#[tauri::command]
+fn save_quota_reminder_config(app: AppHandle, enabled: bool) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let notification_permission = enabled.then(|| {
+        app.notification()
+            .request_permission()
+            .map(|state| format!("{state:?}"))
+            .unwrap_or_else(|error| format!("unavailable: {error}"))
+    });
+    agent_vitals_runtime::quota_reminder::set_enabled(&data_home, enabled)?;
+    Ok(serde_json::json!({
+        "status": "saved",
+        "enabled": enabled,
+        "notification_permission": notification_permission,
+    }))
+}
+
+/// 用户补的价卡（`state/pricing-overrides.json`）。
+///
+/// **为什么有这一层**：价目表 `assets/pricing.json` 是 `include_str!` 编进二进制的，
+/// 运行时改不了；而"厂商出了新型号、价目表里还没有"是必然反复发生的事
+/// （2026-09-14 的 `deepseek/deepseek-v4.1-flash`）。这一层让用户能自己补一张卡，
+/// 把"算不出来"变成"按他填的价算得出来"。
+#[tauri::command]
+fn price_cards() -> Value {
+    let data_home = overview::data_home();
+    serde_json::json!({
+        "status": "ok",
+        "cards": agent_vitals_runtime::price_overrides::cards(&data_home),
+    })
+}
+
+/// 写入/替换一张用户补的价卡。三个维度（未命中输入/命中输入/输出）各两档峰谷，
+/// **必须齐全**——半张卡会让计价按缺档静默算出一个看似正常的错数字。
+#[tauri::command]
+fn save_price_card(input: PriceCardInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let card = serde_json::json!({
+        "input_uncached": input.input_uncached,
+        "input_cached": input.input_cached,
+        "output": input.output,
+    });
+    agent_vitals_runtime::price_overrides::save_card(
+        &data_home, &input.provider_id, &input.model_id, &card,
+    )?;
+    Ok(serde_json::json!({
+        "status": "saved",
+        "provider_id": input.provider_id,
+        "model_id": input.model_id,
+    }))
+}
+
+/// 用户声明的**型号归属**（"这个型号算哪个服务商的账"）。
+///
+/// **与补价卡是两件事，且有先后**：`billing_route_of` 只读价目表里的
+/// `catalog_2026_09.billing_modes`（模型名前缀 → 服务商），公共目录只声明了少数
+/// 几条。归属没定 → 整批用量 `billing-route-unknown`（**不是"怎么付"的问题，是
+/// "算谁的"**，所以计费声明解决不了）；归属定了但没价卡 → `no-price-card`。
+/// 声明归属后状态会前进到缺价卡，那时才轮到补价卡。
+#[tauri::command]
+fn price_routes() -> Value {
+    let data_home = overview::data_home();
+    serde_json::json!({
+        "status": "ok",
+        "routes": agent_vitals_runtime::price_overrides::routes(&data_home),
+    })
+}
+
+#[tauri::command]
+fn save_price_route(input: PriceRouteInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    agent_vitals_runtime::price_overrides::save_route(
+        &data_home, &input.model_prefix, &input.provider_id, &input.mode,
+    )?;
+    Ok(serde_json::json!({
+        "status": "saved",
+        "model_prefix": input.model_prefix,
+        "provider_id": input.provider_id,
+    }))
+}
+
+#[tauri::command]
+fn delete_price_route(model_prefix: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    agent_vitals_runtime::price_overrides::remove_route(&data_home, &model_prefix)?;
+    Ok(serde_json::json!({ "status": "removed" }))
+}
+
+#[tauri::command]
+fn delete_price_card(provider_id: String, model_id: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    agent_vitals_runtime::price_overrides::remove_card(&data_home, &provider_id, &model_id)?;
+    Ok(serde_json::json!({ "status": "removed" }))
+}
+
+/// 决策卡「现在该用谁」的 Claude Pro 窗口状态（2026-09-14）。
+///
+/// 与 Codex 那行**不等价**：Claude 的本地日志里没有正向余量（42/42 条
+/// `quotaLimits` 全是 `status:"rejected"`，无 `used_percent`），所以只可能给出
+/// `unknown` 或 `exhausted`（+ 重置时刻），**永远不会有"剩余 N%"**——
+/// `ROUTE_UNIT_COST_DECISION_SPEC` §8.3.2 明令不得显示百分比。
+#[tauri::command(async)]
+fn data_claude_quota() -> Option<Value> {
+    // 窗口状态由同步管线扫 ~/.claude 的 quotaLimits 落库，这里只读快照 ——
+    // 读面不现扫（与 data_codex_quota 同一条纪律）。`now` 在这里取一次并注入
+    // 状态机，保证卡片/待处理/通知拿到同一个"现在"。
+    let now_secs = agent_vitals_runtime::sql_sync::now_ms() / 1_000;
+    agent_vitals_runtime::summary::claude_quota_status(now_secs)
+}
+
 /// 决策卡「现在该用谁」的 Codex 窗口余量（v0.9 Stage D）。plan 是"当前
 /// 状态"的单快照、不按日期分桶——独立命令而不是塞进月/日 summary，语义
 /// 才不混。无 rollout / 无 plan 事件 → null（无 ChatGPT 订阅证据，不得编
 /// 造余量）。
-#[tauri::command]
+#[tauri::command(async)]
 fn data_codex_quota() -> Option<Value> {
     // codex rollout 根在 ~/.codex，不在数据根——解析复用 runtime 的 codex_home
     // （HOME → USERPROFILE → 空串，审查 #4：手写 HOME-only 在 Windows 上静默假
@@ -2776,7 +2930,7 @@ fn data_codex_quota() -> Option<Value> {
 /// Token 日历的逐日跨宿主数据（v0.9 Stage D——此前日历只画 DSH 日轴，
 /// DSH 零用量月份让 claude/codex 的真实用量在日历上不可见）。每天三宿主
 /// 各自 token + 耗费，钱不跨宿主不跨币合并（口径各异，格子副行分币并列）。
-#[tauri::command]
+#[tauri::command(async)]
 fn read_calendar_month(month: String) -> Value {
     agent_vitals_runtime::summary::calendar_month(
         &month,
@@ -2788,7 +2942,7 @@ fn read_calendar_month(month: String) -> Value {
 /// 工作台。来源矩阵见 `summary::hourly_distribution`：codex=fold 全量、
 /// dsh=今日 today-json / 历史日 facts-index、claude=facts-index（该日
 /// 会话被 ingest 过才有——来源标注让部分覆盖在 UI 上可见）。
-#[tauri::command]
+#[tauri::command(async)]
 fn read_hourly_distribution(date: String) -> Value {
     agent_vitals_runtime::summary::hourly_distribution(
         &date,
@@ -3005,6 +3159,15 @@ pub fn run() {
             data_monthly_summary,
             data_daily_summary,
             data_codex_quota,
+            data_claude_quota,
+            quota_reminder_config,
+            price_cards,
+            save_price_card,
+            delete_price_card,
+            price_routes,
+            save_price_route,
+            delete_price_route,
+            save_quota_reminder_config,
             read_calendar_month,
             read_hourly_distribution,
             trigger_sync,
@@ -3033,10 +3196,11 @@ pub fn run() {
                 eprintln!("statistics timezone unavailable: {error}");
             }
             start_public_pricing_catalog_tick();
-            // 菜单栏工具:必须 .accessory,否则 macOS 把它当普通 App 常驻 Dock
-            // (Info.plist 无 LSUIElement → 缺省 .regular)。skipTaskbar/visible:false
-            // 只藏窗口,藏不住进程的 Dock 图标。show_workbench 已负责 show+set_focus,
-            // accessory 下窗口照常成为 key。
+            // 菜单栏工具：必须在代码里显式 `.accessory`，光靠 Info.plist 的 LSUIElement
+            // 不够——tao 的事件循环启动时会显式 setActivationPolicy(Regular) 把 plist
+            // 值盖掉（2026-09-14：删掉这行改用 plist 后，release 包 open 起来鸟头落进
+            // Dock、状态栏项不出现）。skipTaskbar/visible:false 只藏窗口，藏不住进程
+            // 的 Dock 图标。show_workbench 已负责 show+set_focus，accessory 下窗口照常成为 key。
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             recover_billing_recalculations(
                 agent_vitals_data::authority::default_authority_path(&overview::data_home()),
@@ -3055,29 +3219,17 @@ pub fn run() {
             }
             let ov = overview::read_overview();
             let menu = build_menu(app.handle(), &ov)?;
-            // 左右键都弹菜单（今日/本月/预算/打开工作台/立即同步/退出）——统一到
-            // 大多数状态栏图标的通用手势，不再区分"左键菜单/右键面板"。这是
-            // macOS 的缺省行为本身：`.menu(&menu)` 挂上之后两个键天然都弹菜单，
-            // 之前是特意用 `with_inner_tray_icon` 关掉右键菜单、改绑
-            // `on_tray_icon_event` 的右键分支去做 `toggle_window`，现在两处都删掉，
-            // 直接吃缺省行为，不再自定义（2026-09-01 用户反馈"很多图标左右键都是
-            // 弹菜单，我们也一样"）。
             TrayIconBuilder::with_id("main")
                 .icon(tray_template_icon()?)
                 .icon_as_template(true)
+                .title(today_title(&ov))
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| {
                     let id = event.id().as_ref();
                     match id {
                         "workbench" => show_workbench(app),
-                        // 「立即同步」不是重读本地 state，而是受控 tick：discover →
-                        // oneline 折账 → 刷新托盘（review fix 1）。
                         "refresh" => sync_now(app),
-                        // 深链优先（spec §7.2）：session:/host: id → 映射
-                        // WorkbenchTarget → focus_session_target（写目标 + 事件 +
-                        // show，双通路）。映射失败（未知 id/禁用 id/回传不了的
-                        // session_key）回退信息行 tab 导航（tab_for_menu_id 钉住）。
                         _ => {
                             let hosts = app
                                 .state::<HostsCache>()
@@ -3094,11 +3246,6 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-            // 初始标题：托盘一亮就带今日消耗，不用等第一个 tick（线程刚 spawn、
-            // 首轮 sync 前有窗口期）。
-            if let Some(t) = app.tray_by_id("main") {
-                let _ = t.set_title(Some(today_title(&ov)));
-            }
             start_refresh_tick(app.handle().clone());
             let args: Vec<String> = std::env::args().collect();
             if should_show_workbench_on_start(&ov.sync, &args) {
@@ -3314,6 +3461,13 @@ mod tests {
     fn today_title_renders_tokens_cost_or_honest_dash() {
         let mut ov = ov_with(overview::BudgetAlert::default());
         assert_eq!(today_title(&ov), "今日 —", "两宿主都无今日账不得臆造 0");
+        // 有 token、没有可报的钱 → token 照常显示，**只有钱那格**是「—」。
+        // 原先这条整段退化成「今日 —」：既丢了已测量的 token，又让菜单栏那一项
+        // 短到在拥挤的状态区里认不出来（2026-09-14 用户反馈"状态栏看不到"）。
+        let mut tokens_only = ov_with(overview::BudgetAlert::default());
+        tokens_only.claude_today_tokens = Some(329_700_000);
+        assert_eq!(today_title(&tokens_only), "今日 329.7M · —",
+            "没钱但有用量时，已测量的 token 不能被一起丢掉");
         ov.today = Some(serde_json::json!({"total": 12.34, "peak_total": 0.0, "tokens": 1398214}));
         assert_eq!(today_title(&ov), "今日 1.4M · ¥12.34");
         // 真机那天（2026-09-02）：DSH 空转 + Claude deepseek 全在账 → 标题必须给

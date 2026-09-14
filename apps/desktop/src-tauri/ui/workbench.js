@@ -410,7 +410,15 @@ async function loadActiveTab() {
   // Findings / 数据源同款懒加载（CLI 汇总较重，见 state 注释）。
   else if (activeTab === "findings") { if (!findState.loaded) loadFindings(); }
   else if (activeTab === "sources") {
-    await Promise.allSettled([loadSettingsData(), ...(!srcState.loaded ? [loadSources()] : [])]);
+    // 设置 tab 里 read_overview 有三个消费方（预算静默态 / 数据源同步行 /
+    // 版本诊断的 sync 字段）。以前前两处各拉一次 = 每进一次设置页多跑一遍
+    // （每遍约 120-360ms）。这里统一拉一次再分发；失败降级成 null，各消费方
+    // 各自兜底，不影响其余设置读取。
+    const settingsOverview = await invoke("read_overview").catch(() => null);
+    await Promise.allSettled([
+      loadSettingsData(settingsOverview),
+      ...(!srcState.loaded ? [loadSources(false, settingsOverview)] : []),
+    ]);
   }
 }
 
@@ -566,12 +574,17 @@ function renderTrustRows(status, monthly) {
   const unresolved = Math.max(0, Number(d.unresolved_tokens || 0));
   const unpriced = Math.max(0, Number(d.unpriced_tokens || 0));
   const total = monthly ? tokensSum(monthly.tokens_by_host).total : null;
+  // `unresolved_tokens` / `unpriced_tokens` 都是**全库累计**，而这两行渲染在
+  // 「本月已处理 …」下面。所以占比的分母必须也是全库总量（`d.total_tokens`）——
+  // 此前拿「本月总量」当分母（2026-09-14 实测算出 1.09B ÷ 9.60B = 11%），
+  // 两个时间跨度相除，百分比没有意义。
+  const allTimeTotal = Math.max(0, Number(d.total_tokens || 0));
   // 路由与缺价：未定 provider 的 token 让按量金额只能是下界。
   if (unresolved > 0) {
     // 同源判定：套餐提示可见且其影响范围盖住了这批 token → 同一件事，一个按钮。
     const sameSource = billingPromptState.visible && billingPromptState.pendingTokens >= unresolved;
     setRow(route, trustRowLevel(health, true),
-      "有 " + fmtTokens(unresolved) + " tokens 还不知道是哪家服务商的，按量费用可能少算" +
+      "全库累计有 " + fmtTokens(unresolved) + " tokens 还不知道是哪家服务商的，按量费用可能少算" +
         (sameSource ? "——确认下方套餐信息即可解决" : ""),
       sameSource ? null : toDiagnostics);
   } else if (health !== "ok") {
@@ -583,14 +596,17 @@ function renderTrustRows(status, monthly) {
   const pricingStale = !!(d.pricing && d.pricing.stale);
   if (total === null) {
     setRow(price, "warn", "本月用量暂不可读，无法核对价格完整性" +
-      (unpriced > 0 ? "；有 " + fmtTokens(unpriced) + " tokens 缺少价格" : "") +
+      (unpriced > 0 ? "；全库累计有 " + fmtTokens(unpriced) + " tokens 缺少价格" : "") +
       (pricingStale ? "；价格表已过期" : ""), toPricing);
   } else if (!(total > 0)) {
     setRow(price, "ok", "本月还没有用量，暂无需核对价格", null);
   } else if (unpriced > 0) {
-    const missing = Math.max(0, Math.min(1, unpriced / total));
+    // 分母取同跨度的全库总量；缺这个字段（旧载荷）时**不给百分比**，而不是退回
+    // 拿本月总量去算——那正是这个 bug 的形状。
+    const missing = allTimeTotal > 0 ? Math.max(0, Math.min(1, unpriced / allTimeTotal)) : null;
     setRow(price, trustRowLevel(health, true),
-      "有 " + fmtTokens(unpriced) + " tokens 的模型没有价格，按官方价折算的金额少算了约 " + fmtPct(missing) +
+      "全库累计有 " + fmtTokens(unpriced) + " tokens 的模型没有价格" +
+        (missing === null ? "" : "，按官方价折算的金额少算了约 " + fmtPct(missing)) +
         (pricingStale ? "；价格表也已过期" : ""),
       toPricing);
   } else if (pricingStale) {
@@ -705,6 +721,13 @@ const OVERVIEW_REQUESTS = Object.freeze([
       && typeof v.data.health === "string" && overviewNumber(v.data.unresolved_tokens)
       && overviewNumber(v.data.unpriced_tokens) && overviewRecord(v.data.pricing)
       && typeof v.data.pricing.stale === "boolean" },
+  { key: "claudeQuota", command: "data_claude_quota", sections: ["decide"],
+    // 形状出处：runtime::summary::claude_quota_status —— {state:"unknown",observed_at,windows_recent}
+    // 或 {state:"exhausted",window,resets_at,observed_at,windows_recent}。**没有百分比字段**，
+    // 因为数据里不存在正向余量（42/42 条 quotaLimits 全是 rejected）。
+    valid: (v) => v === null || (overviewRecord(v) && (
+      v.state === "unknown"
+      || (v.state === "exhausted" && typeof v.window === "string" && overviewNumber(v.resets_at)))) },
   { key: "quota", command: "data_codex_quota", sections: ["decide"],
     valid: (v) => v === null || (overviewRecord(v) && typeof v.plan_type === "string"
       && (v.limits == null || (overviewRecord(v.limits) && Object.values(v.limits).every((w) => overviewRecord(w)
@@ -798,7 +821,225 @@ async function renderBillsReadOnly(period) {
   } catch (_) { section.hidden = true; }
 }
 
-async function loadSettingsData() {
+// 用户本地价目覆盖（`state/pricing-overrides.json`）：**归属声明** + **补价卡**。
+// 待处理里那两类任务会把服务商/型号预填进来——预填靠这两个模块级变量传，
+// 不需要跨页传参机制。
+let pendingPriceCard = null;
+let pendingPriceRoute = null;
+
+// 「声明型号归属」。与补价卡是两件事且有先后：归属没定 → 归不了账；归属定了但没
+// 价卡 → 另一条任务。所以这两块并排放在价格目录下面。
+async function renderPriceRouteSettings() {
+  const model = document.getElementById("ov-price-route-model");
+  const provider = document.getElementById("ov-price-route-provider");
+  const mode = document.getElementById("ov-price-route-mode");
+  const save = document.getElementById("ov-price-route-save");
+  const status = document.getElementById("ov-price-route-status");
+  const list = document.getElementById("ov-price-route-list");
+  if (!model || !provider || !mode || !save || !status || !list) return;
+
+  const loadRoutes = async () => {
+    list.textContent = "";
+    let routes = {};
+    try {
+      const result = await invoke("price_routes");
+      routes = (result && result.routes) || {};
+    } catch (_) { /* 读不到就不列，不影响填新的 */ }
+    for (const [prefix, route] of Object.entries(routes)) {
+      const row = document.createElement("div");
+      row.className = "src-custom-row";
+      const text = document.createElement("div");
+      text.className = "src-custom-path";
+      text.textContent = prefix + " → " + ((route || {}).provider || "?") +
+        "（" + ((route || {}).mode === "subscription" ? "订阅" : "按量") + "）";
+      const remove = document.createElement("button");
+      remove.className = "btn secondary";
+      remove.type = "button";
+      remove.textContent = "撤销声明";
+      remove.onclick = async () => {
+        remove.disabled = true;
+        try {
+          await invoke("delete_price_route", { modelPrefix: prefix });
+          status.hidden = false;
+          status.textContent = "已撤销 " + prefix + " 的归属声明。";
+          await loadRoutes();
+        } catch (e) {
+          remove.disabled = false;
+          status.hidden = false;
+          status.textContent = "撤销失败：" + errText(e);
+        }
+      };
+      row.append(text, remove);
+      list.appendChild(row);
+    }
+  };
+  await loadRoutes();
+
+  if (pendingPriceRoute) {
+    model.value = pendingPriceRoute.model || "";
+    provider.value = pendingPriceRoute.provider || "";
+    status.hidden = false;
+    status.textContent = "已预填待声明归属的型号，确认服务商后保存。";
+    pendingPriceRoute = null;
+  }
+
+  if (save.dataset.bound === "1") return;
+  save.dataset.bound = "1";
+  save.onclick = async () => {
+    status.hidden = false;
+    if (!model.value.trim() || !provider.value.trim()) {
+      status.textContent = "型号与服务商都要填。";
+      return;
+    }
+    save.disabled = true;
+    try {
+      await invoke("save_price_route", { input: {
+        model_prefix: model.value.trim(), provider_id: provider.value.trim(), mode: mode.value,
+      } });
+      status.textContent = "已声明；下一轮同步后这批用量会归到该服务商。";
+      await loadRoutes();
+      // 归属变化会改变未计价集合 → 同步一轮，让那条任务自动结算/前进到缺价卡。
+      await invoke("trigger_sync").catch(() => {});
+    } catch (e) {
+      status.textContent = "声明失败：" + errText(e);
+    } finally {
+      save.disabled = false;
+    }
+  };
+}
+
+async function renderPriceOverrideSettings() {
+  const provider = document.getElementById("ov-price-card-provider");
+  const model = document.getElementById("ov-price-card-model");
+  const save = document.getElementById("ov-price-card-save");
+  const status = document.getElementById("ov-price-card-status");
+  const list = document.getElementById("ov-price-card-list");
+  if (!provider || !model || !save || !status || !list) return;
+
+  const loadCards = async () => {
+    list.textContent = "";
+    let cards = {};
+    try {
+      const result = await invoke("price_cards");
+      cards = (result && result.cards) || {};
+    } catch (_) { /* 读不到就不列，不影响填新卡 */ }
+    for (const [providerId, models] of Object.entries(cards)) {
+      for (const modelId of Object.keys(models || {})) {
+        const row = document.createElement("div");
+        row.className = "src-custom-row";
+        const text = document.createElement("div");
+        text.className = "src-custom-path";
+        text.textContent = providerId + " · " + modelId;
+        const remove = document.createElement("button");
+        remove.className = "btn secondary";
+        remove.type = "button";
+        remove.textContent = "删掉这张卡";
+        remove.onclick = async () => {
+          remove.disabled = true;
+          try {
+            await invoke("delete_price_card", { providerId, modelId });
+            status.hidden = false;
+            status.textContent = "已删除 " + modelId + " 的价卡；相关用量回到未计价。";
+            await loadCards();
+          } catch (e) {
+            remove.disabled = false;
+            status.hidden = false;
+            status.textContent = "删除失败：" + errText(e);
+          }
+        };
+        row.append(text, remove);
+        list.appendChild(row);
+      }
+    }
+  };
+  await loadCards();
+
+  // 任务跳过来时预填（这样用户不用手抄型号）。
+  if (pendingPriceCard) {
+    provider.value = pendingPriceCard.provider || "";
+    model.value = pendingPriceCard.model || "";
+    status.hidden = false;
+    status.textContent = "已预填待补卡的服务商与型号，填入价格后保存。";
+    pendingPriceCard = null;
+  }
+
+  if (save.dataset.bound === "1") return;
+  save.dataset.bound = "1";
+  save.onclick = async () => {
+    const readDim = (offId, peakId) => {
+      const off = Number(document.getElementById(offId).value);
+      const peak = Number(document.getElementById(peakId).value);
+      if (!Number.isFinite(off) || off < 0 || !Number.isFinite(peak) || peak < 0) return null;
+      return { off_peak: off, peak };
+    };
+    const dims = {
+      input_uncached: readDim("ov-price-uncached-off", "ov-price-uncached-peak"),
+      input_cached: readDim("ov-price-cached-off", "ov-price-cached-peak"),
+      output: readDim("ov-price-output-off", "ov-price-output-peak"),
+    };
+    status.hidden = false;
+    if (!provider.value.trim() || !model.value.trim()) {
+      status.textContent = "服务商与型号都要填。";
+      return;
+    }
+    if (Object.values(dims).some((d) => d === null)) {
+      status.textContent = "六个价格都要填非负数字（半张卡会让计价按缺档算错钱，所以拒绝保存）。";
+      return;
+    }
+    save.disabled = true;
+    try {
+      await invoke("save_price_card", { input: {
+        provider_id: provider.value.trim(), model_id: model.value.trim(),
+        input_uncached: dims.input_uncached, input_cached: dims.input_cached, output: dims.output,
+      } });
+      status.textContent = "已保存；相关用量的折算与预算比例会按新价卡重算。";
+      await loadCards();
+      // 补卡会改变未计价集合 → 同步一轮，让那条约待处理任务自动结算。
+      await invoke("trigger_sync").catch(() => {});
+    } catch (e) {
+      status.textContent = "保存失败：" + errText(e);
+    } finally {
+      save.disabled = false;
+    }
+  };
+}
+
+// Claude Pro 额度窗口提醒的开关。**默认关**，且读不出开关也按关处理
+// （fail-closed：提醒类能力不因为"读不到设置"就假定用户同意过）。打开的那一刻
+// 才申请系统通知权限（REQ-039），与保存预算时申请权限是同一套规矩。
+async function renderQuotaReminderSettings() {
+  const toggle = document.getElementById("ov-quota-reminder-toggle");
+  const status = document.getElementById("ov-quota-reminder-status");
+  if (!toggle) return;
+  try {
+    const config = await invoke("quota_reminder_config");
+    toggle.checked = !!(config && config.enabled);
+  } catch (_) {
+    toggle.checked = false;
+  }
+  if (toggle.dataset.bound === "1") return;
+  toggle.dataset.bound = "1";
+  toggle.onchange = async () => {
+    toggle.disabled = true;
+    try {
+      const saved = await invoke("save_quota_reminder_config", { enabled: toggle.checked });
+      const permission = saved && saved.notification_permission;
+      status.hidden = false;
+      status.textContent = toggle.checked
+        ? "已开启" + (permission && permission !== "Granted"
+            ? "；系统通知未授权，可在系统设置中开启。" : "，窗口耗尽时会提醒一次。")
+        : "已关闭额度窗口提醒。";
+    } catch (e) {
+      toggle.checked = !toggle.checked;
+      status.hidden = false;
+      status.textContent = "保存失败：" + errText(e);
+    } finally {
+      toggle.disabled = false;
+    }
+  };
+}
+
+async function loadSettingsData(preloadedOverview) {
   bindSettingsNav();
   bindDiagnosticExport();
   bindUpdateCheck();
@@ -806,7 +1047,8 @@ async function loadSettingsData() {
   await Promise.allSettled([
     renderBillsReadOnly(statisticsMonth()), renderRetentionSettings(),
     renderStatisticsTimezoneSettings(), renderPricingCatalogSettings(),
-    renderAboutDiagnostics(), renderBudgetSettings(),
+    renderAboutDiagnostics(), renderBudgetSettings(preloadedOverview),
+    renderQuotaReminderSettings(), renderPriceOverrideSettings(), renderPriceRouteSettings(),
   ]);
 }
 
@@ -826,7 +1068,7 @@ async function renderOverview() {
   renderSpendCards(daily, monthly, ov && ov.fx, overviewWindow);
   bindSummaryExport(monthly);
   renderDualTrack(monthly);
-  renderDecideCard(monthly, data.quota);
+  renderDecideCard(monthly, data.quota, data.claudeQuota);
   const overview = ov || { sync: { ok: false, stage: "unavailable", message: "暂无法读取同步状态" } };
   syncDot(overview.sync);
   renderFirstRunState(overview.sync);
@@ -881,7 +1123,22 @@ async function renderOverview() {
     freshHHMM = formatStatisticsDateTime(t, { hour: "2-digit", minute: "2-digit", hour12: false });
     stale = Date.now() - t.getTime() > 5 * 60 * 1000;
   }
-  if (!budgetValid || (b.source !== "alert" && b.source !== "sql") || !b.level) {
+  // 「预算已配置，但本月没有可计入的按量实付」是一件事，跟「读不到」是两件事。
+  // 后端此时给的是 `monthly_cny: 1.0` + `month_cost: null` + `month_ratio: null`
+  // （口径 = 跨宿主按量实付，没确认计费方式前就是没有实付），旧代码把它塞进
+  // 通用兜底，显示「预算状态暂不可读，请刷新重试」——用户会去点刷新，而它永远
+  // 刷不出来。这与「本月支出」那两栏是同一件事，措辞也对齐（REQ-043）。
+  const budgetConfiguredButNoSpend = overviewRecord(b) && ["sql", "alert"].includes(b.source)
+    && b.level && b.level !== "no_budget"
+    && overviewNumber(b.monthly_cny) && b.monthly_cny > 0
+    && b.month_cost == null && b.month_ratio == null;
+  if (budgetConfiguredButNoSpend) {
+    fill.style.width = "0%";
+    fill.className = "fill";
+    budgetAmt.textContent = "—";
+    budgetSub.textContent = "预算 " + fmtMoney(b.monthly_cny) + "/月 · 本月还没有可计入的按量实付";
+    budgetSub.title = "";
+  } else if (!budgetValid || (b.source !== "alert" && b.source !== "sql") || !b.level) {
     fill.style.width = "0%";
     fill.className = "fill";
     budgetAmt.textContent = "—";
@@ -1286,7 +1543,7 @@ let billingDeclarationCandidate = null;
 let billingDeclarationState = null;
 let billingReviewOpen = false;
 
-async function renderBudgetSettings() {
+async function renderBudgetSettings(preloadedOverview) {
   const currencySelect = document.getElementById("ov-budget-currency");
   const monthly = document.getElementById("ov-budget-monthly-amount");
   const daily = document.getElementById("ov-budget-daily-amount");
@@ -1311,10 +1568,15 @@ async function renderBudgetSettings() {
 
   let estimateProfile = null;
   try {
+    // read_overview 只用来读「本周期静默」这一个字段（它挂在旧 alert 链路上）。
+    // 设置 tab 进入时已经拉过一次并传进来，没有就退回自己拉——两次 read_overview
+    // 是同一份数据，重复拉纯粹是浪费（每次约 120-360ms）。
     const [config, profileStatus, ov] = await Promise.all([
       invoke("budget_config"),
       invoke("budget_profiles_status", { month: statisticsMonth() }),
-      invoke("read_overview").catch(() => null),
+      preloadedOverview !== undefined
+        ? Promise.resolve(preloadedOverview)
+        : invoke("read_overview").catch(() => null),
     ]);
     // 旧版 config.toml/兼容表预算：只读提示，不再提供编辑入口（规格 §4.3.3）；
     // 保存下面的表单后以新预算（estimate profile）为准，不自动转换口径。
@@ -2377,11 +2639,24 @@ function renderNominalInto(id, nominal, fx) {
   return merged;
 }
 function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday() }) {
-  // 本月支出：口径分栏
+  // 本月支出：口径分栏。
   const mMetered = fmtCurMap(meteredSpend(monthly));
   const mSubscription = fmtCurMap(spendByBasis(monthly, "fixed_subscription"));
-  setAmount("ov-m-metered", mMetered.length ? mMetered.join(" + ") : "无数据");
-  setAmount("ov-m-subscription", mSubscription.length ? mSubscription.join(" + ") : "无数据");
+  const monthTokens = monthly ? tokensSum(monthly.tokens_by_host).total : 0;
+  // REQ-043：**未录入套餐/付款**时要写「尚未设置套餐或账单」，不能写「无数据」。
+  // 「无数据」会被读成「读取失败 / 数据缺失」，而真相是「你还没声明计费方式，
+  // 所以没有实付口径可算」——真实困惑案例（2026-09-14）：用户看到本月支出两栏
+  // 都是「无数据」，以为读不到数据，其实是 billing_declarations 与 host_bills
+  // 都为空、只有名义成本可算。三种空态必须分开：
+  //   读不到 DTO        → 无数据
+  //   本月有用量但未声明 → 尚未设置套餐或账单（指引下一步）
+  //   本月没有用量      → 无数据（此时"没声明"不是原因）
+  const noDeclaredSpend = !mMetered.length && !mSubscription.length;
+  const spendAbsent = !monthly
+    ? "无数据"
+    : (noDeclaredSpend && monthTokens > 0) ? "尚未设置套餐或账单" : "无数据";
+  setAmount("ov-m-metered", mMetered.length ? mMetered.join(" + ") : spendAbsent);
+  setAmount("ov-m-subscription", mSubscription.length ? mSubscription.join(" + ") : spendAbsent);
   const mNominal = monthly ? nominalFromByProvider(monthly.by_provider) : {};
   renderNominalInto("ov-m-nominal", mNominal, fx);
   const spendSub = document.getElementById("ov-m-spend-sub");
@@ -2390,7 +2665,9 @@ function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday()
       ? "本月数据不可用"
       : (mMetered.length || mSubscription.length)
         ? "按量费用与订阅月费分开计；不同币种不相加"
-        : "本月还没有真实支出记录";
+        : monthTokens > 0
+          ? "按官方价折算只是估算；确认套餐或账单后才会出现实付金额"
+          : "本月还没有用量记录";
   }
   // 今日消耗：tokens 主数 + 今日按量实付；名义只作脚注（IA 复核 §7）。
   const tk = tokensSum(daily && daily.tokens_by_host);
@@ -2398,7 +2675,10 @@ function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday()
   const tSub = document.getElementById("ov-t-tokens-sub");
   if (tSub) tSub.textContent = daily && tk.total > 0 ? "今天处理的 token 数（含缓存读写）" : daily ? "今天还没有用量记录" : "今日数据暂不可读，请刷新重试";
   const tMetered = fmtCurMap(meteredSpend(daily));
-  setAmount("ov-t-metered", tMetered.length ? tMetered.join(" + ") : "无数据");
+  // 与本月同一套空态区分（REQ-043）：「无数据」只在读不到 DTO 或今天没用量时用。
+  const todayTokens = daily ? tokensSum(daily.tokens_by_host).total : 0;
+  const tAbsent = (!daily || todayTokens === 0) ? "无数据" : "尚未设置套餐或账单";
+  setAmount("ov-t-metered", tMetered.length ? tMetered.join(" + ") : tAbsent);
   renderNominalInto("ov-t-nominal", daily ? nominalFromByProvider(daily.by_provider) : {}, fx);
   // 本月用量行：规格 §4 的「已观测 tokens」与「名义成本」——首屏可见，不占卡。
   const mtk = tokensSum(monthly && monthly.tokens_by_host);
@@ -2560,7 +2840,7 @@ function renderDualTrack(monthly) {
 // 决策卡「现在该用谁」：四态建议行 + 各订阅窗口/利用率为一行。Codex 是唯一
 // 正向余量源（data_codex_quota 的 plan 快照）；Claude Pro 余量不可得（quotaLimits
 // 只有拒绝快照，不得反推假百分比）；GLM/MiniMax 无配额证据源 → 只显示利用率。
-function renderDecideCard(monthly, quota) {
+function renderDecideCard(monthly, quota, claudeQuotaState) {
   const body = document.getElementById("ov-decide-body");
   const byProvider = (monthly && monthly.by_provider) || {};
   body.textContent = "";
@@ -2597,11 +2877,41 @@ function renderDecideCard(monthly, quota) {
   } else {
     rows.push(`<li><span class="src-name">Codex</span><span class="basis"><span class="chip">读不到套餐额度</span></span></li>`);
   }
-  // Claude Pro：余量不可得（诚实标注）
+  // Claude Pro：三态（spec §8.3.2）。**这里没有百分比这回事**——Claude Code 只在
+  // 被拒绝的那一刻记一条 quotaLimits（真机 42/42 全是 status:"rejected"，无
+  // used_percent），所以永远拿不到正向余量。能显示的是另外两样：
+  //   exhausted → 「5 小时窗口已耗尽 · 02:20 重置」（有 resetsAt 为证）
+  //   unknown   → 「窗口状态未知 · 近 7 天撞窗 N 次」
+  // 显示条件：有 Anthropic 计费条目（在用），或状态已是 exhausted（有直接证据）。
   const anthropic = byProvider["claude-code/anthropic"];
-  if (anthropic) {
-    rows.push(`<li><span class="src-name">Claude Pro</span>
-      <span class="basis"><span class="chip" title="Claude Code 只记录被限流的时刻，不提供剩余额度，无法推算百分比">无法读取剩余额度</span></span></li>`);
+  const claudeQuota = claudeQuotaState || {};
+  const claudeExhausted = claudeQuota.state === "exhausted";
+  if (anthropic || claudeExhausted) {
+    if (claudeExhausted) {
+      const until = formatStatisticsDateTime(claudeQuota.resets_at * 1000, {
+        month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+      // 标签由后端随 DTO 给（决策卡 / 待处理 / 通知共用一个词表），前端不再维护
+      // 第二份映射。**回退必须按 window 推**，不能写死"5 小时窗口"——那样周窗
+      // 会被标成 5 小时尺度（差 33 倍），而 DTO 缺字段恰恰是最需要如实的时候。
+      const winLabel = claudeQuota.window_label
+        || (claudeQuota.window === "seven_day" ? "7 天窗口" : "5 小时窗口");
+      rows.push(`<li><span class="src-name">Claude Pro</span>
+        <span class="basis"><span class="chip estimate">${winLabel}已耗尽</span>
+        <span class="fresh stale nowrap">${until} 重置</span></span></li>`);
+    } else {
+      const hits = Number(claudeQuota.windows_recent || 0);
+      // 「未知」不等于"什么都不知道"：上次限流记录的重置时刻是已知的（走到这个
+      // 分支时它必然已经过去）。说清"上次那个窗口什么时候恢复的"，比只丢一句
+      // 「窗口状态未知」有用得多——用户问的正是这个（2026-09-14 反馈）。
+      const lastReset = claudeQuota.last_resets_at
+        ? formatStatisticsDateTime(claudeQuota.last_resets_at * 1000,
+            { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+        : null;
+      const lastText = lastReset ? " · 上次限流已于 " + lastReset + " 重置" : "";
+      const hitsText = hits > 0 ? " · 近 7 天撞窗 " + hits + " 次" : "";
+      rows.push(`<li><span class="src-name">Claude Pro</span>
+        <span class="basis"><span class="chip" title="Claude Code 只在被限流时记录一条事件，从不记录剩余额度；没有正向读数就不推算百分比，也不会从「没有新记录」反推「可用」">窗口状态未知${lastText}${hitsText}</span></span></li>`);
+    }
   }
   // GLM / MiniMax：无配额证据源，只显示利用率（双轨账里已有，这里给决策提示）
   for (const key of ["claude-code/zhipu-glm", "claude-code/minimax"]) {
@@ -5124,6 +5434,10 @@ function issueActionLabel(group) {
   if (group.source_kind === "billing_candidate") return "建议：确认计费方式";
   if (group.source_kind === "usage_growth") return "建议：查看对应会话";
   if (group.source_kind === "source_failure") return "建议：查看数据源并重试";
+  // 价格覆盖：这条任务的可执行动作是"给这个模型补一张价卡"，不是"查看数据状态"。
+  if (group.rule === "PRICE_COVERAGE") return "建议：补价卡或确认模型名";
+  if (group.rule === "ROUTE_UNCONFIRMED") return "建议：确认计费方式";
+  if (group.rule === "QUOTA_WINDOW") return "建议：等窗口重置或先换一条线路";
   const labels = {
     "inspect-tool-error": "建议：查看工具错误并重试",
     "inspect-retry-policy": "建议：检查重试策略",
@@ -5172,7 +5486,15 @@ function issueStatusLabel(status) {
   }[issueStatusCanonical(status)] || "未知状态";
 }
 
-function issueSourceLabel(sourceKind) {
+function issueSourceLabel(sourceKind, rule) {
+  // rule 比 source_kind 细：data_quality 底下还有"价格覆盖""额度窗口"这些
+  // 用户看得懂的具体类别，直接用 source_kind 会把它们统统压成"数据质量"。
+  const byRule = {
+    PRICE_COVERAGE: "价格覆盖",
+    ROUTE_UNCONFIRMED: "路由待确认",
+    QUOTA_WINDOW: "额度窗口",
+  };
+  if (rule && byRule[rule]) return byRule[rule];
   return {
     billing_candidate: "待确认套餐",
     source_failure: "数据源失败",
@@ -5189,6 +5511,42 @@ async function toggleIssueGroup(group) {
 
 async function loadIssueGroupInstances(group, detailRow, cursor, append) {
   try {
+    if (group.rule === "ROUTE_UNCONFIRMED") {
+      // 「归不了账」也是可就地解决的一件事：跳设置页声明型号归属。声明后状态会
+      // 前进到"缺价卡"（那是另一条任务），而不是一步到位——链路如实分两步。
+      const cell = detailRow.firstElementChild;
+      const sample = group.sample_evidence && group.sample_evidence[0] || {};
+      cell.textContent = "归属未确认：" + (sample.model_id || "未知型号") +
+        " · 影响 " + String(group.count || 0) + " 条用量。声明它属于哪个服务商后，这批用量才能计入金额。";
+      const openForm = el("button", "btn secondary");
+      openForm.type = "button";
+      openForm.textContent = "声明归属";
+      openForm.addEventListener("click", () => {
+        pendingPriceRoute = { model: sample.model_id || "", provider: "" };
+        openSettingsSection("settings-data", "ov-price-route-model");
+      });
+      cell.appendChild(document.createTextNode(" "));
+      cell.appendChild(openForm);
+      return;
+    }
+    if (group.rule === "PRICE_COVERAGE") {
+      // 「缺价卡」是可就地解决的一件事：跳设置页并把服务商/型号预填好，
+      // 用户只需要填价格。不预填的话他得手抄一个带命名空间的型号名（很容易抄错）。
+      const cell = detailRow.firstElementChild;
+      const sample = group.sample_evidence && group.sample_evidence[0] || {};
+      cell.textContent = "缺少价卡：" + (sample.model_id || "未知型号") +
+        " · 影响 " + String(group.count || 0) + " 条用量。补一张卡后这些用量就能按你填的价折算。";
+      const openForm = el("button", "btn secondary");
+      openForm.type = "button";
+      openForm.textContent = "补充价卡";
+      openForm.addEventListener("click", () => {
+        pendingPriceCard = { provider: sample.provider_id || "", model: sample.model_id || "" };
+        openSettingsSection("settings-data", "ov-price-card-model");
+      });
+      cell.appendChild(document.createTextNode(" "));
+      cell.appendChild(openForm);
+      return;
+    }
     if (group.source_kind === "budget") {
       const sample = group.sample_evidence && group.sample_evidence[0] || {};
       const cell = detailRow.firstElementChild;
@@ -5208,7 +5566,7 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
     if (group.source_kind && group.source_kind !== "behavior") {
       const cell = detailRow.firstElementChild;
       const sample = group.sample_evidence && group.sample_evidence[0] || {};
-      const sourceLabel = issueSourceLabel(group.source_kind);
+      const sourceLabel = issueSourceLabel(group.source_kind, group.rule);
       const evidence = sample.error_code || sample.code || sample.provider_id || sample.detail?.host || "已保留摘要";
       cell.textContent = sourceLabel + "：" + evidence + " · " + String(group.count || 0) +
         " 条来源证据。该组是只读投影，不能按行为 Issue 关闭。";
@@ -5344,7 +5702,7 @@ function openSessionFromFinding(f) {
 
 // ---------- 数据源状态 ----------
 
-async function loadSources(reset) {
+async function loadSources(reset, preloadedOverview) {
   if (reset) {
     srcState = { loaded: true, error: false, sources: null, sync: null, paused: false, customRoots: [], locations: {} };
     document.getElementById("src-banner").hidden = true;
@@ -5364,7 +5722,9 @@ async function loadSources(reset) {
     srcState.locations = locations.locations || {};
   } catch (e) { err = e; }
   try {
-    const ov = await invoke("read_overview");
+    // preloadedOverview：设置 tab 已经为预算卡拉过一次 read_overview，
+    // 这里复用同一份结果，不再重复拉（每次 read_overview 约 120-360ms）。
+    const ov = preloadedOverview !== undefined ? preloadedOverview : await invoke("read_overview");
     srcState.sync = (ov && ov.sync) || null;
   } catch (e) { if (!err) err = e; }
   try {

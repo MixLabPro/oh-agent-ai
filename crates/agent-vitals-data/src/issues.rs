@@ -477,7 +477,65 @@ fn merge_projection_groups(values: Vec<Value>) -> Vec<Value> {
     grouped.into_values().collect()
 }
 
-fn source_issue_groups(
+/// 额度窗口耗尽 → 「待处理」里的一条任务；窗口重置或不再有耗尽证据 → 自动解决。
+///
+/// **这是一条会自己消失的任务**：同一次调用里，`exhausted = None` 就把
+/// `resolved_at_ms` 写上（行保留，历史不丢），任务从待处理列表消失。
+///
+/// 措辞取中性 warning：被限流不是数据缺陷（REQ-062——只有数据丢失/解析失败/
+/// 明确超预算才进 danger 语气）。
+///
+/// 幂等键是 `(scope_type='host', scope_key=host, code)`：同一宿主同一时刻只可能
+/// 有一条这样的任务，重复同步只刷新 `last_seen_at_ms`。
+pub fn reconcile_quota_window_issue(
+    conn: &Connection,
+    host: &str,
+    exhausted: Option<(i64, &str, &str)>, // (resets_at 秒, window, window_label)
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    const CODE: &str = "quota_window_exhausted";
+    match exhausted {
+        Some((resets_at, window, window_label)) => {
+            let detail = json!({
+                "host": host,
+                "window": window,
+                "window_label": window_label,
+                "resets_at": resets_at,
+            });
+            conn.execute(
+                "INSERT INTO data_quality_issues(
+                     issue_id, scope_type, scope_key, code, severity,
+                     first_seen_at_ms, last_seen_at_ms, resolved_at_ms, detail_json)
+                 VALUES (?1, 'host', ?2, ?3, 'warning', ?4, ?4, NULL, ?5)
+                 ON CONFLICT(scope_type, scope_key, code) DO UPDATE SET
+                     last_seen_at_ms = excluded.last_seen_at_ms,
+                     resolved_at_ms = NULL,
+                     detail_json = excluded.detail_json",
+                rusqlite::params![
+                    format!("quota-window:{host}"),
+                    host,
+                    CODE,
+                    now_ms,
+                    detail.to_string(),
+                ],
+            )?;
+        }
+        None => {
+            conn.execute(
+                "UPDATE data_quality_issues SET resolved_at_ms = ?3
+                 WHERE scope_type = 'host' AND scope_key = ?1 AND code = ?2
+                   AND resolved_at_ms IS NULL",
+                rusqlite::params![host, CODE, now_ms],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// 「待处理」的分组投影：读未解决的 `data_quality_issues`，按 (来源, 规则, 宿主,
+/// 对象) 归组。**公开**是因为断言它的接线契约（哪个 code 归到哪条规则、object
+/// 取哪个字段）需要在跨 crate 的测试里直接验证——那是本模块对外的主要合同。
+pub fn source_issue_groups(
     conn: &Connection,
     from_ms: Option<i64>,
     to_ms: Option<i64>,
@@ -499,7 +557,15 @@ fn source_issue_groups(
         if to_ms.is_some_and(|to| first >= to) || from_ms.is_some_and(|from| last < from) { continue; }
         let detail = serde_json::from_str::<Value>(&detail_raw).unwrap_or_else(|_| json!({}));
         let host = detail.get("host").and_then(Value::as_str).unwrap_or("<unknown>");
-        let rule = if code.contains("price") || code.contains("pricing") || code.contains("unpriced") {
+        let rule = if code.contains("route") {
+            // 「路由待确认」：本地用量归属没定下来（REQ-074 四类之一）。与缺价分开——
+            // 一个要"确认计费方式"，一个要"补价卡"，合成一条用户不知道做什么。
+            "ROUTE_UNCONFIRMED"
+        } else if code.contains("quota") {
+            // 额度窗口类（Claude Pro 的 5 小时/7 天窗耗尽）。它既不是缺价、也不是
+            // 数据源故障——单独一类，前端标签「额度窗口」。
+            "QUOTA_WINDOW"
+        } else if code.contains("price") || code.contains("pricing") || code.contains("unpriced") {
             "PRICE_COVERAGE"
         } else if code.contains("source") || code.contains("permission") || code.contains("parse") || code.contains("read") {
             "DATA_SOURCE_FAILURE"
@@ -509,8 +575,14 @@ fn source_issue_groups(
         // the L0 object key or one noisy quality code would create one group
         // per fact.  Prefer stable attribution dimensions and fall back to the
         // quality code itself when the source has no finer evidence.
-        let object = detail.get("provider_id").and_then(Value::as_str)
+        // `model_id` 排在最前：当一条问题的主体就是"某个模型"（无价卡）时，
+        // 模型比服务商更identifying。只有本地价格发现会写这个字段。
+        let object = detail.get("model_id").and_then(Value::as_str)
+            .or_else(|| detail.get("provider_id").and_then(Value::as_str))
             .or_else(|| detail.get("billing_mode").and_then(Value::as_str))
+            // 额度窗口自带人类标签（"5 小时窗口"）：卡面直接渲染 object，raw code
+            // 绝不能端上去（总览规格 §4 第 84 行同一条纪律）。
+            .or_else(|| detail.get("window_label").and_then(Value::as_str))
             .unwrap_or(&code);
         values.push(projection_group("data_quality", rule, host, object, &code,
             first, 1, &severity, "open", json!({"issue_id": issue_id, "scope_type": scope_type, "code": code, "detail": detail}), "diagnostic-only"));
@@ -784,6 +856,66 @@ pub fn issue_instance(conn: &Connection, issue_id: &str) -> rusqlite::Result<Opt
 mod tests {
     use super::*;
     use crate::authority::AuthorityDb;
+
+    #[test]
+    fn quota_window_issue_is_created_refreshed_and_self_resolves() {
+        // 契约：窗口耗尽 → 建任务；同窗口重复同步 → 只刷新不重复；窗口重置 →
+        // 同一次调用把它解决掉（任务从待处理消失，行保留）。
+        use crate::authority::AuthorityDb;
+        let dir = std::env::temp_dir().join(format!("av-issues-quota-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = AuthorityDb::open(&dir.join("agent-vitals.sqlite3"), 1_700_000_000_000).unwrap();
+
+        reconcile_quota_window_issue(db.conn(), "claude-code", Some((2_000, "five_hour", "5 小时窗口")), 1_000).unwrap();
+        let open = |conn: &rusqlite::Connection| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM data_quality_issues
+                 WHERE scope_key = 'claude-code' AND code = 'quota_window_exhausted'
+                   AND resolved_at_ms IS NULL",
+                [], |r| r.get(0),
+            ).unwrap()
+        };
+        assert_eq!(open(db.conn()), 1, "耗尽时应有且只有一条待处理任务");
+
+        // 同一窗口再次同步：不重复建（幂等键是 host+code），last_seen 前进。
+        reconcile_quota_window_issue(db.conn(), "claude-code", Some((2_000, "five_hour", "5 小时窗口")), 1_500).unwrap();
+        assert_eq!(open(db.conn()), 1, "同一宿主同一时刻只应有一条");
+        let last_seen: i64 = db.conn().query_row(
+            "SELECT last_seen_at_ms FROM data_quality_issues WHERE scope_key = 'claude-code'",
+            [], |r| r.get(0)).unwrap();
+        assert_eq!(last_seen, 1_500, "重复同步刷新 last_seen");
+
+        // 窗口重置（状态机给出 Unknown）→ 自动解决。
+        reconcile_quota_window_issue(db.conn(), "claude-code", None, 2_500).unwrap();
+        assert_eq!(open(db.conn()), 0, "窗口重置后任务必须自己消失");
+        let resolved: Option<i64> = db.conn().query_row(
+            "SELECT resolved_at_ms FROM data_quality_issues WHERE scope_key = 'claude-code'",
+            [], |r| r.get(0)).unwrap();
+        assert_eq!(resolved, Some(2_500), "解决时刻要落上（历史不丢）");
+
+        // 再次耗尽 → 同一行被重新打开（不是新建第二行）。
+        reconcile_quota_window_issue(db.conn(), "claude-code", Some((9_000, "seven_day", "7 天窗口")), 8_000).unwrap();
+        let rows: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM data_quality_issues WHERE scope_key = 'claude-code'",
+            [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "重新打开复用同一行");
+        assert_eq!(open(db.conn()), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quota_codes_route_to_their_own_rule_and_never_leak_the_raw_code_as_object() {
+        // 卡面直接渲染 object —— raw code 绝不能端上去（总览规格 §4 第 84 行）。
+        let dir = std::env::temp_dir().join(format!("av-issues-rule-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = AuthorityDb::open(&dir.join("agent-vitals.sqlite3"), 1_700_000_000_000).unwrap();
+        reconcile_quota_window_issue(db.conn(), "claude-code", Some((2_000, "five_hour", "5 小时窗口")), 1_000).unwrap();
+        let groups = source_issue_groups(db.conn(), None, None).unwrap();
+        let g = groups.iter().find(|g| g["rule"] == "QUOTA_WINDOW").expect("应归到独立规则 QUOTA_WINDOW");
+        assert_eq!(g["object"], "5 小时窗口", "object 是人类标签，不是 raw code");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn input<'a>(status: &'a str) -> IssueInput<'a> {
         IssueInput {

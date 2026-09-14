@@ -4,11 +4,17 @@
   "providers": {
     "deepseek-official": {
       "label": "DeepSeek 原厂",
+      "_note": "deepseek-v4.1-flash 是网关/转售带命名空间的写法（真机语料 2026-09-14 实测 deepseek/deepseek-v4.1-flash），norm_model_in 会砍掉 `deepseek/` 前缀但不会把 `4.1` 折成 `4`，所以必须显式登记，否则该 id 落 no-price-card、这些用量的名义成本整栏为空。它按官方中文定价页（2026-09-14 核实）的 Flash 价填：缓存命中 0.02/0.04、缓存未命中 1/2、输出 4/8（元/百万 token）。\n\n⚠️ 已知未同步项：同页脚注（1）说明旧名 deepseek-v4-flash 对应的模型已下线、请求由 DeepSeek-V4.1-Flash 提供服务并按 Flash 价格计费——也就是说 deepseek-v4-flash 本应与上面同价，但本表的 deepseek-v4-flash 仍是 2026-08-30 采集的旧值（1.5/3.0、4.5/9.0），与 v4.1-flash 不一致。这次只补了缺失的 id，**没有**动已存在的键：改它会重算所有 deepseek-v4-flash 用量的估算，并让 37 个钉死金额的测试（Rust domain::cost 17 个 + Python 20 个）需要同步更新，应作为单独一次价格同步来做。",
       "models": {
         "deepseek-v4-flash": {
           "input_uncached": { "off_peak": 1.5, "peak": 3.0 },
           "input_cached": { "off_peak": 0.05, "peak": 0.10 },
           "output": { "off_peak": 4.5, "peak": 9.0 }
+        },
+        "deepseek-v4.1-flash": {
+          "input_uncached": { "off_peak": 1.0, "peak": 2.0 },
+          "input_cached": { "off_peak": 0.02, "peak": 0.04 },
+          "output": { "off_peak": 4.0, "peak": 8.0 }
         },
         "deepseek-v4-pro": {
           "input_uncached": { "off_peak": 4.5, "peak": 9.0 },
@@ -91,7 +97,7 @@
       "anthropic": "https://benchlm.ai/anthropic/api-pricing (2026-09-01 sync, 对照 platform.claude.com)",
       "minimax": "https://platform.minimaxi.com/docs/guides/pricing-paygo (官方,CNY)",
       "moonshot": "https://benchlm.ai/moonshot/api-pricing (2026-09-01 sync, 官方 platform 文档);https://ai.360.com 转售页:输入 ¥20/输出 ¥100/缓存写 ¥25",
-      "deepseek": "https://api-docs.deepseek.com/quick_start/pricing (USD 峰值/谷值,与 providers 段 CNY 换算一致)"
+      "deepseek": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing (2026-09-14 核实：官方中文页直接给 CNY 原价。providers 段 deepseek-v4-pro 与该页逐值一致，故该段确为官方 CNY 列表。同页 Flash 现价 0.02/0.04、1/2、4/8，低于本表 deepseek-v4-flash 的旧值——见同段 _note 的未同步项说明)"
     },
     "host_costusd_note": "Claude Code 本地 lastModelUsage.costUSD 交叉核验(2026-09-02):claude 系模型与 catalog 逐分吻合(含 cc 按 1h 价),可当差分 oracle;第三方模型(deepseek/minimax)一律按 $5/$0.5/$25 默认卡计价,与真实价目不符,不可当账单证据。"
   }

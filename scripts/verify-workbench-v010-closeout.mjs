@@ -76,6 +76,23 @@ ok(js.includes("/^[A-Z]{3}$/.test(currency)"), "CSV 币种使用三位大写代�
 // 80%/100% 只读展示，不再是可编辑字段——少一个输入自然少一个无障碍名称）；
 // 币种/月预算/日预算三个控件改为静态 aria-label（HTML 里货币输入被 .money-input
 // 包裹，嵌套 <label> 关联在部分读屏下不可靠，用 aria-label 兜底）。
+// 待处理按 rule 细分标签：只有 source_kind 会把"价格覆盖""额度窗口"压成
+// 笼统的"数据质量"，用户看不出该做什么。
+ok(js.includes('PRICE_COVERAGE: "价格覆盖"') && js.includes('QUOTA_WINDOW: "额度窗口"'),
+  "待处理分组按 rule 给出具体类别标签");
+ok(js.includes('建议：补价卡或确认模型名'), "价格覆盖类任务给出可执行动作，而不是笼统的「查看数据状态」");
+// 补价卡：任务要能就地跳过去并预填（否则用户得手抄一个带命名空间的型号名）。
+ok(js.includes('pendingPriceCard = { provider: sample.provider_id || "", model: sample.model_id || "" }') &&
+  js.includes('openSettingsSection("settings-data", "ov-price-card-model")'),
+  "缺价卡任务跳设置页补卡并预填服务商/型号");
+ok(js.includes('六个价格都要填非负数字'), "补价卡表单拒绝半张卡（缺档会静默算错钱）");
+// 归属声明：与补价卡是两件事（"算谁的" vs "按什么价"），任务要能就地跳过去并预填。
+ok(js.includes('pendingPriceRoute = { model: sample.model_id || "", provider: "" }') &&
+  js.includes('openSettingsSection("settings-data", "ov-price-route-model")'),
+  "归属未确认任务跳设置页声明归属并预填型号");
+ok(js.includes('声明它属于哪个服务商后，这批用量才能计入金额'),
+  "归属任务的说明讲清「不声明就算不进金额」，不误导成「改一下计费方式」");
+
 ok(/id="ov-budget-currency"[^>]*aria-label="预算币种"/.test(html) &&
   /id="ov-budget-monthly-amount"[^>]*aria-label="月预算金额"/.test(html) &&
   /id="ov-budget-daily-amount"[^>]*aria-label="日预算金额"/.test(html),

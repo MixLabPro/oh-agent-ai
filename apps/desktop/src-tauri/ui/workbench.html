@@ -547,6 +547,16 @@
             <button class="btn secondary" id="ov-budget-snooze-day" type="button">本周期静默提醒</button>
             <button class="btn secondary" id="ov-budget-snooze-clear" type="button" hidden>恢复提醒</button>
           </div>
+          <div class="form-row">
+            <label class="check-row">
+              <input type="checkbox" id="ov-quota-reminder-toggle" />
+              <span>Claude Pro 额度窗口提醒</span>
+            </label>
+            <span class="form-receipt" id="ov-quota-reminder-status" hidden role="status"></span>
+          </div>
+          <div class="setting-note">
+            默认关闭。打开时才申请系统通知权限；开启后每个额度窗口耗尽只提醒一次，窗口重置后再撞窗会再提醒。
+          </div>
         </div>
         <div class="setting" id="ov-budget-confirmed" hidden>
           <div class="setting-head">
@@ -581,6 +591,51 @@
             <p>测试版使用内置价目，随测试版更新。</p>
           </div>
           <div class="muted" id="ov-pricing-catalog-status" role="status" tabindex="-1">读取中…</div>
+          <div class="setting-note" id="ov-price-route-intro">
+            日志里的型号如果对不上任何已知服务商，这批用量就归不了账。在这里声明它属于谁——声明后若还缺价卡，会另有一条任务提醒你补。
+          </div>
+          <div class="form-row">
+            <label class="grow"><span>型号（或型号前缀）</span><input id="ov-price-route-model" type="text" placeholder="claude-sonnet-5" list="ov-price-route-models" /></label>
+            <label><span>服务商</span><input id="ov-price-route-provider" type="text" placeholder="anthropic" list="ov-known-providers" /></label>
+            <label><span>计费方式</span>
+              <select id="ov-price-route-mode">
+                <option value="metered">按量</option>
+                <option value="subscription">订阅</option>
+              </select>
+            </label>
+            <button class="btn secondary" id="ov-price-route-save" type="button">声明归属</button>
+            <span class="form-receipt" id="ov-price-route-status" hidden role="status"></span>
+          </div>
+          <datalist id="ov-known-providers">
+            <option value="anthropic"></option><option value="openai"></option>
+            <option value="deepseek-official"></option><option value="shengsuanyun"></option>
+            <option value="minimax"></option><option value="zhipu-glm"></option>
+            <option value="moonshot"></option>
+          </datalist>
+          <div id="ov-price-route-list" class="src-custom-list"></div>
+          <div class="setting-note" id="ov-price-card-intro">
+            价目表里没有的型号，可以自己补一张卡；补上后这些用量就能按你填的价折算。
+          </div>
+          <div class="form-row">
+            <label><span>服务商</span><input id="ov-price-card-provider" type="text" placeholder="deepseek-official" /></label>
+            <label class="grow"><span>型号（与日志里一致）</span><input id="ov-price-card-model" type="text" placeholder="deepseek/deepseek-v4.1-flash" /></label>
+          </div>
+          <div class="form-row">
+            <label><span>未命中输入 空闲</span><input id="ov-price-uncached-off" type="number" min="0" step="0.01" /></label>
+            <label><span>未命中输入 高峰</span><input id="ov-price-uncached-peak" type="number" min="0" step="0.01" /></label>
+            <label><span>命中输入 空闲</span><input id="ov-price-cached-off" type="number" min="0" step="0.01" /></label>
+            <label><span>命中输入 高峰</span><input id="ov-price-cached-peak" type="number" min="0" step="0.01" /></label>
+            <label><span>输出 空闲</span><input id="ov-price-output-off" type="number" min="0" step="0.01" /></label>
+            <label><span>输出 高峰</span><input id="ov-price-output-peak" type="number" min="0" step="0.01" /></label>
+          </div>
+          <div class="form-row">
+            <button class="btn secondary" id="ov-price-card-save" type="button">保存价卡</button>
+            <span class="form-receipt" id="ov-price-card-status" hidden role="status"></span>
+          </div>
+          <div class="setting-note">
+            单位：元 / 百万 token。填入的是你提供的价格证据，不是官方标价；只覆盖按量计价用的 CNY 价目表（DSH / Claude Code 侧）。
+          </div>
+          <div id="ov-price-card-list" class="src-custom-list"></div>
           <!-- 在线检查：Beta 延期（差距分析 §4），入口不显示。 -->
           <div hidden>
             <label><input id="ov-pricing-catalog-network" type="checkbox" /> 允许访问公共价格服务</label>

@@ -141,7 +141,7 @@ fn save_sync_paused_at(dh: &Path, paused: bool) -> Result<(), String> {
 
 /// 读回上一轮同步状态；文件缺场 → 默认（"never"）。解析失败也走默认——一条坏掉
 /// 的 last-sync.json 不该让面板整块红，回退成「尚未同步」即可。
-fn load_sync_status(dh: &Path) -> SyncStatus {
+pub(crate) fn load_sync_status(dh: &Path) -> SyncStatus {
     read_json(&dh.join("state").join("last-sync.json"))
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()

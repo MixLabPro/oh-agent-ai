@@ -44,6 +44,8 @@ pub use hosts::workbuddy::sessions::evidence as workbuddy_evidence;
 #[cfg(feature = "sources")]
 pub use hosts::{
     claude_code::sources::usage_fact as claude_usage_fact,
+    // Claude Pro 的窗口状态（quotaLimits）读取器——与 usage_fact 的字节等价面无关。
+    claude_code::sources::quota as claude_quota,
     claude_code::sources as claude_session, codex::sources::usage_fact as codex_usage_fact,
     codex::sources as codex_session, dsh::sources::usage_fact as dsh_usage_fact,
     workbuddy::sources::usage_fact as workbuddy_usage_fact,

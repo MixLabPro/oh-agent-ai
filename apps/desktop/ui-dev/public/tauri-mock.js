@@ -216,6 +216,19 @@
   const billingDeclarations = [];
   const billingJobs = new Map();
   let pricingNetworkEnabled = true;
+  // Claude Pro 额度窗口提醒的开关；**默认关**（与 runtime 的 quota_reminder 同语义）。
+  let quotaReminderEnabled = false;
+  // 用户补的价卡（浏览器里给一张，方便看"已补卡"列表的样子）。
+  const priceOverrideCards = {};
+  // 归属声明（浏览器里给一条，方便看列表的样子）。
+  const priceOverrideRoutes = { "claude-sonnet-5": { provider: "anthropic", mode: "metered" } };
+  const priceOverrideKey = "acme/demo-model-v1";
+  priceOverrideCards["deepseek-official"] = {};
+  priceOverrideCards["deepseek-official"][priceOverrideKey] = {
+    input_uncached: { off_peak: 1.0, peak: 2.0 },
+    input_cached: { off_peak: 0.02, peak: 0.04 },
+    output: { off_peak: 4.0, peak: 8.0 },
+  };
   let pricingLastSuccessAt = Date.now() - 3600000;
   const canonicalIssueStatus = (status) => ({ pending: "open", closed: "resolved", wontfix: "not_applicable" }[status] || status || "open");
   const transitionIssue = (issueId, toStatus) => {
@@ -238,11 +251,10 @@
   async function invoke(command, args) {
     try {
       switch (command) {
-      // Shape: apps/desktop/src-tauri/src/overview.rs:348 Overview (Serialize), :86 SyncStatus::ok,
-      // :664 budget_profiles（同一份 budget_profiles_status_sql_at 产出，不是
-      // 第二套预算数据——设置页规格 §8 D1：总览预算卡优先读这里的 estimate
-      // profile，budgetProfilesState 与 "budget_profiles_status" case 共享同一
-      // 状态，两个命令在浏览器 mock 里也不该各算各的）。
+      // budget_profiles 与 "budget_profiles_status" case 共享同一份 budgetProfilesState
+      // ——同一份 budget_profiles_status_sql_at 产出，不是第二套预算数据；
+      // 两个命令在浏览器 mock 里也不该各算各的（设置页规格 §8 D1）。
+      // Shape: apps/desktop/src-tauri/src/overview.rs:348 Overview (Serialize), :86 SyncStatus::ok, :664 budget_profiles
       case "read_overview": return { ...overview, budget: { ...overview.budget,
         snoozed_until: budgetSnoozedUntilMs ? new Date(budgetSnoozedUntilMs).toISOString() : null },
         budget_profiles: { status: "ok", month, profiles: Object.values(budgetProfilesState) } };
@@ -380,6 +392,55 @@
       case "open_trusted_releases_page": return { status: "opened", url: "https://example.invalid/releases", automatic_install: false };
       case "restore_authority_backup": return { status: "cancelled" };
       case "check_for_updates": return { status: "ok", current_version: "browser-mock", latest_tag: "app-v1.0.0", url: "https://example.invalid/releases", automatic_install: false };
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2776 quota_reminder_config() -> {status, enabled}
+      // 用户补的价卡：{cards: {<provider>: {<model>: {input_uncached,input_cached,output}}}}，
+      // 形状与 assets/pricing.json 的 providers 段同形。
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2816 price_cards()
+      // 用户声明的型号归属：{<model_prefix>: {provider, mode}}。
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2861 price_routes()
+      case "price_routes": return { status: "ok", routes: priceOverrideRoutes };
+      case "save_price_route": {
+        const input = (args && args.input) || {};
+        if (!input.model_prefix || !input.provider_id) throw new Error("model_prefix and provider_id are required");
+        if (!["metered", "subscription"].includes(input.mode)) throw new Error("mode must be metered or subscription");
+        priceOverrideRoutes[input.model_prefix] = { provider: input.provider_id, mode: input.mode };
+        return ok({ status: "saved", model_prefix: input.model_prefix, provider_id: input.provider_id });
+      }
+      case "delete_price_route": {
+        delete priceOverrideRoutes[args && args.modelPrefix];
+        return ok({ status: "removed" });
+      }
+      case "price_cards": return { status: "ok", cards: priceOverrideCards };
+      case "save_price_card": {
+        const input = (args && args.input) || {};
+        if (!input.provider_id || !input.model_id) throw new Error("provider_id and model_id are required");
+        (priceOverrideCards[input.provider_id] ||= {})[input.model_id] = {
+          input_uncached: input.input_uncached, input_cached: input.input_cached, output: input.output,
+        };
+        return ok({ status: "saved", provider_id: input.provider_id, model_id: input.model_id });
+      }
+      case "delete_price_card": {
+        const provider = priceOverrideCards[args && args.providerId];
+        if (provider) delete provider[args && args.modelId];
+        return ok({ status: "removed" });
+      }
+      case "quota_reminder_config": return { status: "ok", enabled: quotaReminderEnabled };
+      case "save_quota_reminder_config": {
+        quotaReminderEnabled = !!(args && args.enabled);
+        return ok({ status: "saved", enabled: quotaReminderEnabled, notification_permission: "granted" });
+      }
+      // Claude Pro 的窗口状态：state:"unknown" -> {observed_at, windows_recent}；
+      // state:"exhausted" -> 另有 {window, resets_at}。浏览器里给 exhausted
+      // （演示"时间窗口"那一态）。**没有百分比字段**——数据里不存在正向余量
+      // （真机 42/42 条 quotaLimits 全是 status:"rejected"）。
+      // Shape: crates/agent-vitals-runtime/src/summary.rs:1407 claude_quota_status()
+      case "data_claude_quota": return {
+        state: "exhausted", window: "five_hour", window_label: "5 小时窗口",
+        last_resets_at: Math.floor(Date.now() / 1000) - 3600, last_window: "five_hour",
+        resets_at: Math.floor(Date.now() / 1000) + 3 * 3600,
+        observed_at: new Date(Date.now() - 45 * 60000).toISOString(),
+        windows_recent: 2,
+      };
       // 形状出处：hosts/codex/sessions/usage.rs plan_from_rate_limits →
       //   { plan_type, has_credits, limits: { primary: {...} }, observed_at }（事件的 ISO 时间戳）。
       // Shape: apps/desktop/src-tauri/src/lib.rs:2767 data_codex_quota → crates/agent-vitals-hosts/src/hosts/codex/sessions/usage.rs:191 plan_from_rate_limits.

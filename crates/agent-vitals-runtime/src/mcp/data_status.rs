@@ -176,6 +176,24 @@ fn fact_tokens(uncached: i64, cache_read: i64, cache_write: i64, output: i64) ->
 /// price. This deliberately uses the same domain pricing resolvers as the
 /// product projections instead of treating `provider_id IS NULL` as a price
 /// miss: an unknown provider may still be estimable from a model card.
+/// 全库 token 总量（与 `unresolved_tokens` / `unpriced_tokens` **同跨度**）。
+///
+/// **为什么需要**：那两个数都是全库累计，而总览把它们渲染在「本月已处理 …」下面。
+/// 没有这个总量时，前端的占比只能拿「全库未计价 ÷ 本月总量」去算——两个时间
+/// 跨度相除，2026-09-14 实测算出的"少算了约 11%"就是这么来的（1.09B ÷ 9.60B）。
+/// 给出同跨度的分母，占比才有意义。
+fn total_tokens(conn: &Connection) -> i64 {
+    conn.query_row(
+        "SELECT COALESCE(SUM(uncached_input_tokens + cache_read_tokens +
+                cache_write_tokens + output_tokens), 0)
+         FROM usage_facts
+         WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+}
+
 fn unpriced_tokens(conn: &Connection, payload: Option<&Value>) -> i64 {
     let Some(payload) = payload else {
         return conn
@@ -286,16 +304,162 @@ fn unpriced_tokens(conn: &Connection, payload: Option<&Value>) -> i64 {
     total_unpriced
 }
 
+/// `PRAGMA integrity_check` 的进程级缓存（2026-09-14 性能取证）。
+///
+/// **为什么需要**：163MB 权威库上一次 integrity_check 实测 **522ms**。工作台每次
+/// 切到「总览」都会调 `data_status`，于是每切一次 tab 就白付半秒——而工作台主线程
+/// 还要渲染，界面直接被冻住（真机实测：切 tab 墙钟 1.25s，其中这一条占 0.5s）。
+///
+/// **为什么不降级成 quick_check 或干脆删掉**：integrity_check 是「权威库不自愈」
+/// 这条恢复契约的唯一探测面（失败 = health critical，恢复 = rm + data-migrate）。
+/// 削弱它等于削弱 doctor，所以保留全量检查，只缓存结果。
+///
+/// **失效条件**（任一命中即重查）：库文件 size 或 mtime 变了（应用自己的写入都会
+/// 改，同步一跑就失效），或距上次检查超过 [`INTEGRITY_TTL`]。带外磁盘损坏若恰好
+/// 不改 size 也不改 mtime，会在 TTL 窗口内被陈旧结果盖住——这是明确接受的代价，
+/// 用 TTL 上限兜住。
+///
+/// **CLI 不受影响**：`agent-vitals data-status` 每次都是新进程，进程级缓存天然是
+/// 冷的，命令行 doctor 仍然每次全量检查。缓存只对长期存活的 Tauri 进程生效，
+/// 而那正是热路径所在。
+const INTEGRITY_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// 库文件身份。size + mtime 任一变化即视为「另一个文件」。
+#[derive(PartialEq, Clone)]
+struct FileIdentity(u64, Option<std::time::SystemTime>);
+
+struct IntegrityEntry {
+    identity: FileIdentity,
+    checked_at: std::time::Instant,
+    result: String,
+}
+
+/// 缓存键：库文件路径 + 检查深度。深度必须入键——同一条连接上 Full 与 Quick
+/// 的结论不同（Full 会多报索引与约束问题），共用一个槽位会让先到的深度污染另一个。
+#[derive(PartialEq, Eq, Hash)]
+struct CacheKey {
+    path: String,
+    depth: IntegrityDepth,
+}
+
+fn integrity_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<CacheKey, IntegrityEntry>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<CacheKey, IntegrityEntry>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 缓存决策核心——刻意做成「给定路径/身份 + 真正去查的闭包」的纯函数，好让
+/// 「命中 / 身份变化 / TTL 过期」三条语义可以被确定性地断言，而不是靠构造一个
+/// 真实的损坏 SQLite 文件去间接推断（2026-09-14 实践：截断文件根本不会让
+/// integrity_check 失败——SQLite 把小于一页的文件当空库，仍回 "ok"）。
+fn integrity_check_with(
+    key: &CacheKey,
+    identity: &FileIdentity,
+    ttl: std::time::Duration,
+    run: impl FnOnce() -> String,
+) -> String {
+    if let Ok(guard) = integrity_cache().lock() {
+        if let Some(entry) = guard.get(key) {
+            if entry.identity == *identity && entry.checked_at.elapsed() < ttl {
+                return entry.result.clone();
+            }
+        }
+    }
+    let result = run();
+    if let Ok(mut guard) = integrity_cache().lock() {
+        guard.insert(
+            CacheKey { path: key.path.clone(), depth: key.depth },
+            IntegrityEntry {
+                identity: identity.clone(),
+                checked_at: std::time::Instant::now(),
+                result: result.clone(),
+            },
+        );
+    }
+    result
+}
+
+fn run_integrity_check(conn: &Connection, depth: IntegrityDepth) -> String {
+    conn.query_row(depth.pragma(), [], |r| r.get(0)).unwrap_or_else(|e| {
+        format!("{} failed: {e}", match depth {
+            IntegrityDepth::Full => "integrity_check",
+            IntegrityDepth::Quick => "quick_check",
+        })
+    })
+}
+
+fn integrity_check_cached(conn: &Connection, depth: IntegrityDepth) -> String {
+    // 内存库 / 取不到文件元信息的连接 → 不缓存，照常检查。
+    let Some(path) = conn.path() else { return run_integrity_check(conn, depth) };
+    let Ok(meta) = std::fs::metadata(path) else { return run_integrity_check(conn, depth) };
+    let identity = FileIdentity(meta.len(), meta.modified().ok());
+    // 深度进了缓存键：同一条连接上 Full 与 Quick 的结果不同（Full 会多报索引
+    // 与约束问题），共用一个键会让先来的那个深度污染另一个深度的结论。
+    integrity_check_with(
+        &CacheKey { path: path.to_string(), depth },
+        &identity,
+        INTEGRITY_TTL,
+        || run_integrity_check(conn, depth),
+    )
+}
+
 /// 权威库状态报告——CLI `data-status` 与 MCP `data_status` 的共享数据面。
 ///
 /// `db_existed`：调用方 open **之前**文件是否存在（CLI 用 `AuthorityDb::open`
 /// 会建库，所以「刚被删」和「同步过但空」在 open 之后长得一样——前者在
 /// `sql_authority_enabled` 下是灾难态，见 spec 1.7 / §5.3）。
 /// `enabled`：`sql_authority::is_enabled(data_home)`。
+/// 完整性检查的深度。
+///
+/// **为什么有两个深度**：`integrity_check` 在 163MB 权威库上实测 **522ms**
+/// （2026-09-14），并发读下可到 1.2s——而工作台每次切到「总览」都会调
+/// `data_status`，于是它成了整次刷新里最长的那根杆（实测：其余 10 条命令
+/// 并行 100–450ms，总耗时被它单独顶到 1.2s）。
+///
+/// - [`IntegrityDepth::Full`]：`PRAGMA integrity_check`。**CLI `data-status` 与
+///   MCP `data_status` 用它**——doctor 面必须逐字节可复现地给出最强结论
+///   （CLAUDE.md：integrity_check 失败 → health critical，恢复 = rm + data-migrate）。
+/// - [`IntegrityDepth::Quick`]：`PRAGMA quick_check`（同库实测 **113ms**，4.6×）。
+///   它是**工作台热路径**用的深度：quick_check 仍校验 B-tree 结构、页序、空闲页、
+///   溢出页链这些「库还能不能用」的结构性损坏，只是不再逐条核对索引与表内容是否
+///   一致、UNIQUE/CHECK 约束与 rowid 序。桌面端的健康横幅要回答的是「权威库还能
+///   不能读」，那个问题由 quick_check 覆盖；深挖是 doctor 的事。
+///
+/// 两个深度都走同一个 TTL 缓存（见 [`integrity_check_cached`]）。
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntegrityDepth {
+    Full,
+    Quick,
+}
+
+impl IntegrityDepth {
+    fn pragma(self) -> &'static str {
+        match self {
+            IntegrityDepth::Full => "PRAGMA integrity_check",
+            IntegrityDepth::Quick => "PRAGMA quick_check",
+        }
+    }
+}
+
+/// 忠实复刻 `data-status` 原有语义的入口（全量完整性检查）——CLI 与 MCP 用。
 pub fn collect_report(conn: &Connection, db_existed: bool, enabled: bool) -> Value {
-    let integrity: String = conn
-        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
-        .unwrap_or_else(|e| format!("integrity_check failed: {e}"));
+    collect_report_at_depth(conn, db_existed, enabled, IntegrityDepth::Full)
+}
+
+/// 工作台热路径入口：quick_check + 缓存，避免每次切 tab 白付半秒。
+pub fn collect_report_quick(conn: &Connection, db_existed: bool, enabled: bool) -> Value {
+    collect_report_at_depth(conn, db_existed, enabled, IntegrityDepth::Quick)
+}
+
+pub fn collect_report_at_depth(
+    conn: &Connection,
+    db_existed: bool,
+    enabled: bool,
+    depth: IntegrityDepth,
+) -> Value {
+    let integrity = integrity_check_cached(conn, depth);
     let schema: String = conn
         .query_row(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'",
@@ -343,8 +507,19 @@ pub fn collect_report(conn: &Connection, db_existed: bool, enabled: bool) -> Val
         )
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        // **用户补的卡也要盖在这里**：本函数自带一份卡解析（不看 `PricingCards`），
+        // 只盖 `PricingCards::asof` 会让「未计价 token 数」与「未计价逐模型清单」
+        // 两个面互相矛盾——2026-09-14 实测：补卡后 `data-unresolved` 归零、
+        // `data-status` 仍报同一批 token 无价卡。
+        .map(|mut payload| {
+            if let Some(main) = payload.get_mut("pricing") {
+                crate::price_overrides::apply_to_main(main, &crate::home::data_home());
+            }
+            payload
+        })
     });
     let unpriced_tokens = unpriced_tokens(conn, pricing_payload.as_ref());
+    let total_tokens = total_tokens(conn);
     let pricing_stale = pricing_latest
         .as_ref()
         .map(|(_, captured_at_ms, _)| {
@@ -442,6 +617,8 @@ pub fn collect_report(conn: &Connection, db_existed: bool, enabled: bool) -> Val
         },
         "unresolved_tokens": unresolved_tokens,
         "unpriced_tokens": unpriced_tokens,
+        // 同跨度的分母（见 total_tokens 的注释）。
+        "total_tokens": total_tokens,
         "host_bills": host_bills,
         "recent_runs": runs,
         "by_host": by_host,
@@ -551,6 +728,69 @@ mod tests {
         // 从没同步过 → authority_revision 诚实为 null。
         assert_eq!(env["authority_revision"], Value::Null);
 
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn integrity_cache_hits_until_identity_changes_or_ttl_expires() {
+        // 三条语义，缺一不可：
+        //   命中   —— 否则半秒的检查会回到每次切 tab 的热路径，性能修复失效；
+        //   身份变 —— 否则 doctor 会对已损坏的库继续报 "ok"（谎报恢复契约）；
+        //   TTL 到 —— 带外损坏（不改 size/mtime）最多陈旧一个 TTL 窗口。
+        use std::cell::Cell;
+        use std::time::Duration;
+
+        // 全局缓存是进程级的，测试并行跑——用含 pid 的唯一 path 避免互踩。
+        let key = CacheKey {
+            path: format!("integrity-cache-test-{}", std::process::id()),
+            depth: IntegrityDepth::Full,
+        };
+        let key_quick = CacheKey { path: key.path.clone(), depth: IntegrityDepth::Quick };
+        let identity_a = FileIdentity(4096, None);
+        let identity_b = FileIdentity(8192, None);
+        let ttl = Duration::from_secs(300);
+        let runs = Cell::new(0u32);
+        let probe = |tag: &str| {
+            runs.set(runs.get() + 1);
+            tag.to_string()
+        };
+
+        let first = integrity_check_with(&key, &identity_a, ttl, || probe("first"));
+        assert_eq!(first, "first");
+        assert_eq!(runs.get(), 1, "首次没有缓存，必须真的去查");
+
+        // 身份不变 → 命中缓存：闭包绝不能再被调用（返回值仍是旧的 "first"，
+        // 这就是「没有重查」的直接证据）。
+        let second = integrity_check_with(&key, &identity_a, ttl, || probe("second"));
+        assert_eq!(second, "first", "身份未变必须命中缓存");
+        assert_eq!(runs.get(), 1, "命中缓存时不得再执行检查");
+
+        // TTL 过期 → 重查（传零 TTL 模拟）。
+        let third = integrity_check_with(&key, &identity_a, Duration::ZERO, || probe("third"));
+        assert_eq!(third, "third", "TTL 过期必须重查");
+        assert_eq!(runs.get(), 2);
+
+        // 身份变化 → 重查。
+        let fourth = integrity_check_with(&key, &identity_b, ttl, || probe("fourth"));
+        assert_eq!(fourth, "fourth", "文件身份变化必须重查");
+        assert_eq!(runs.get(), 3);
+
+        // 深度进键：同一路径的 Quick 结论不得复用 Full 的缓存槽。
+        let quick = integrity_check_with(&key_quick, &identity_b, ttl, || probe("quick"));
+        assert_eq!(quick, "quick", "换深度必须重查，不能被另一深度的缓存顶替");
+        assert_eq!(runs.get(), 4);
+    }
+
+    #[test]
+    fn collect_report_still_reports_a_healthy_database_as_ok() {
+        // 缓存不能把「健康库报 ok」这条基本行为改掉。
+        let home = tmp_home("integrity-healthy");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
+        assert_eq!(collect_report(db.conn(), true, false)["integrity"], "ok");
+        // 同一连接再查一次（走缓存路径）仍然 ok。
+        assert_eq!(collect_report(db.conn(), true, false)["integrity"], "ok");
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -445,6 +445,16 @@ pub fn data_status_report(conn: &Connection, db_existed: bool, enabled: bool) ->
     data_status::collect_report(conn, db_existed, enabled)
 }
 
+/// 桌面工作台热路径的同一份数据面，只把完整性检查降到 `quick_check`。
+///
+/// 工作台每次切到「总览」都会调 `data_status`，而全量 `integrity_check` 在
+/// 163MB 库上要 522ms（并发读下 1.2s），是整次刷新里唯一的长杆。字段结构与
+/// [`data_status_report`] 完全一致，只有 `integrity` 这一格的检查深度不同；
+/// CLI 与 MCP 的 doctor 面继续用全量版本（`data-status` 的语义不变）。
+pub fn data_status_report_quick(conn: &Connection, db_existed: bool, enabled: bool) -> Value {
+    data_status::collect_report_quick(conn, db_existed, enabled)
+}
+
 /// 独立的数据源状态投影。它不依赖 sessions_search 的时间窗，也不暴露路径；
 /// 桌面端和后续 MCP 工具可共享同一契约。
 pub fn source_status_report(conn: &Connection) -> Result<Value, String> {

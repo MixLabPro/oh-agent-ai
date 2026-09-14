@@ -35,6 +35,9 @@ pub mod skills;
 // apps/cli/src/agent/ 迁来——读文件 → 读内存，仍属 I/O 层。
 pub mod usage_fact;
 pub mod workflow;
+// v1.0.0：Claude Pro 的窗口状态（quotaLimits）读取器。与 usage_fact 完全独立——
+// 那条是 Python↔Rust 逐字节锁步的 UsageFact 事实链，窗口状态是旁路，不进那条链。
+pub mod quota;
 
 /// 一个会话文件对 `claude-session` 有用的全部信息（路径本身没有消费者——
 /// 调用方各自从 walk 结果拿路径，这里只携带读出来的元数据）。

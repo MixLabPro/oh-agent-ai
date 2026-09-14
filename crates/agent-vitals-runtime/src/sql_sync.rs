@@ -22,7 +22,6 @@ use std::path::Path;
 
 use agent_vitals_data::authority::{AuthorityDb, AuthorityError};
 use agent_vitals_data::fact_writer_sql::SqlFactWriter;
-use agent_vitals_domain::evidence::QuotaSnapshot;
 use agent_vitals_domain::workflow::WorkflowEvent;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
@@ -385,8 +384,8 @@ pub fn source_file_fingerprint(
 /// `source_files` fingerprint row; facts may share the batch source because
 /// their wire format does not preserve a one-file mapping.
 pub(crate) struct RuntimeSnapshotWrite<'a> {
-    /// 已由宿主 adapter 校验的跨宿主配额契约；Runtime 不解析宿主 wire 字段。
-    pub snapshot: Option<RuntimeQuotaSnapshot<'a>>,
+    /// 本轮要落库的宿主实时快照（通常 0 或 1 条；一个宿主一类）。
+    pub snapshots: Vec<RuntimeQuotaSnapshot<'a>>,
     /// schema 升级的一次性回填完成标记。它与本批 source 指纹同一事务提交，
     /// 因而不会在写入失败后错误地阻止下一轮重试。
     pub backfill_marker: Option<&'a str>,
@@ -396,10 +395,19 @@ pub(crate) struct RuntimeSnapshotWrite<'a> {
 ///
 /// `payload_json` 可以保留 Codex 的 `has_credits` 等宿主扩展，但它已经在
 /// adapter 内生成；SQL 层只负责原样保存，不通过 JSON 路径提取业务字段。
+/// 一条待落库的宿主实时快照。
+///
+/// **为什么不是 `&QuotaSnapshot`（Codex 的契约类型）**：2026-09-14 起这条路有第二个
+/// 消费方——Claude Pro 的窗口状态（`claude_quota`），它有自己的契约、不该被塞进
+/// Codex 的结构体。Runtime 本来就不解析宿主 wire（职责边界），所以这里只要
+/// **已经由 adapter 校验过的** payload 与观察时刻。
 #[derive(Clone, Copy)]
 pub(crate) struct RuntimeQuotaSnapshot<'a> {
-    pub contract: &'a QuotaSnapshot,
+    /// 落 `host_runtime_snapshots.snapshot_kind`（`codex_quota` / `claude_quota`）。
+    pub snapshot_kind: &'a str,
     pub payload_json: &'a str,
+    /// 观察时刻（epoch ms）——由宿主 adapter 从它自己的 wire 时间戳派生。
+    pub observed_at_ms: i64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -463,7 +471,8 @@ pub(crate) fn write_flat_facts_with_sources(
         }
         if facts.is_empty()
             && workflow_events.is_empty()
-            && runtime_snapshot.as_ref().and_then(|write| write.snapshot).is_none()
+            // MSRV 1.74：`is_none_or` 稳定于 1.82，这里用 `map_or`。
+            && runtime_snapshot.as_ref().map_or(true, |write| write.snapshots.is_empty())
         {
             return Ok(());
         }
@@ -501,35 +510,31 @@ pub(crate) fn write_flat_facts_with_sources(
                 ],
             )?;
         }
-        if let Some(snapshot) = runtime_snapshot.as_ref().and_then(|write| write.snapshot) {
-            let observed_at = agent_vitals_domain::budget::parse_iso(&snapshot.contract.observed_at)
-                .map(|(seconds, _)| seconds.saturating_mul(1_000))
-                .ok_or_else(|| {
-                    AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
-                        "__invalid_runtime_snapshot_observed_at__".to_string(),
-                    ))
-                })?;
-            conn.execute(
-                "INSERT INTO host_runtime_snapshots(
-                     host, snapshot_kind, payload_json, observed_at_ms, source_id,
-                     ingested_run_id, updated_at_ms)
-                 VALUES (?1, 'codex_quota', ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(host, snapshot_kind) DO UPDATE SET
-                     payload_json = excluded.payload_json,
-                     observed_at_ms = excluded.observed_at_ms,
-                     source_id = excluded.source_id,
-                     ingested_run_id = excluded.ingested_run_id,
-                     updated_at_ms = excluded.updated_at_ms
-                 WHERE excluded.observed_at_ms >= host_runtime_snapshots.observed_at_ms",
-                rusqlite::params![
-                    host,
-                    snapshot.payload_json,
-                    observed_at,
-                    source_id,
-                    run_id,
-                    now,
-                ],
-            )?;
+        if let Some(write) = runtime_snapshot.as_ref() {
+            for snapshot in &write.snapshots {
+                conn.execute(
+                    "INSERT INTO host_runtime_snapshots(
+                         host, snapshot_kind, payload_json, observed_at_ms, source_id,
+                         ingested_run_id, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(host, snapshot_kind) DO UPDATE SET
+                         payload_json = excluded.payload_json,
+                         observed_at_ms = excluded.observed_at_ms,
+                         source_id = excluded.source_id,
+                         ingested_run_id = excluded.ingested_run_id,
+                         updated_at_ms = excluded.updated_at_ms
+                     WHERE excluded.observed_at_ms >= host_runtime_snapshots.observed_at_ms",
+                    rusqlite::params![
+                        host,
+                        snapshot.snapshot_kind,
+                        snapshot.payload_json,
+                        snapshot.observed_at_ms,
+                        source_id,
+                        run_id,
+                        now,
+                    ],
+                )?;
+            }
         }
         if facts.is_empty() && workflow_events.is_empty() {
             return Ok(());

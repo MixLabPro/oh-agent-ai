@@ -242,10 +242,6 @@ def write_alert(alert: dict) -> Path:
     return path
 
 
-def read_alert():
-    return _read(state_dir() / "alert.json")
-
-
 # ────────────────────────── today.json / month.json ──────────────
 
 
@@ -733,30 +729,6 @@ def append_session_history(summary):
         finally:
             os.close(fd)
 
-
-def recent_sessions(limit=5):
-    """返回最近 N 条 session 摘要(从 sessions.jsonl tail)。
-
-    xbar tick 5min 一次,只读最后 N 行就够了 —— 比读整个文件快。
-    """
-    path = state_dir() / "sessions.jsonl"
-    if not path.is_file():
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError:
-        return []
-    out = []
-    for ln in lines[-limit:]:
-        ln = ln.strip()
-        if not ln:
-            continue
-        try:
-            out.append(json.loads(ln))
-        except json.JSONDecodeError:
-            continue  # 坏行跳过,不阻塞整份读取
-    return out
 
 
 def list_state_files():

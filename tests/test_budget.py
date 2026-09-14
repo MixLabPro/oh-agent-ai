@@ -176,13 +176,17 @@ class TestEvaluate(unittest.TestCase):
             self.assertEqual(r["level"], "disabled")
             self.assertEqual(r["reasons"], [])
 
-    def test_no_today_json_returns_ok_with_explanation(self):
-        """today.json 缺场 → level='ok' + 一条 reason 说明(spec 不告警但要解释)。"""
+    def test_missing_today_data_returns_ok_with_explanation(self):
+        """当日无按量实付 → level='ok' + 一条 reason 解释(spec 不告警但要解释)。
+
+        措辞 2026-09-14 改过一次：原文引用的是已退役的 `today.json` 与 `behavior`
+        命令（Phase 4.3 后当日数据来自权威库事实），照着做的用户会白跑一趟。
+        """
         with _IsolatedHome():
             r = budget.evaluate()
             self.assertEqual(r["level"], "ok")
             self.assertEqual(r["today_cost"], None)
-            self.assertTrue(any("no today.json" in reason
+            self.assertTrue(any("no metered spend recorded for today" in reason
                                 for reason in r["reasons"]))
 
     def test_normal_day_returns_ok(self):

@@ -2754,6 +2754,38 @@ impl AuthorityDb {
             .map_err(AuthorityError::from)
     }
 
+    /// 写入一份宿主实时快照（`codex_quota` 之外的第二类消费方：Claude Pro 的
+    /// 窗口状态）。
+    ///
+    /// **只让更新的快照覆盖旧的**（`WHERE excluded.observed_at_ms >= ...`）——
+    /// 与 Codex 那条同一条纪律：扫描是跨文件取最新，但不同批次到达顺序不保证，
+    /// 没有这个守卫就会出现"旧观察覆盖新观察"，而窗口状态恰恰是**越新越准**的
+    /// 东西（重置时刻会往后推）。
+    ///
+    /// 返回是否真的写入（`false` = 已有更新的观察，本次忽略）。
+    pub fn runtime_snapshot_upsert(
+        &self,
+        host: &str,
+        snapshot_kind: &str,
+        payload_json: &str,
+        observed_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        let changed = self.conn.execute(
+            "INSERT INTO host_runtime_snapshots(
+                 host, snapshot_kind, payload_json, observed_at_ms, source_id,
+                 ingested_run_id, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
+             ON CONFLICT(host, snapshot_kind) DO UPDATE SET
+                 payload_json = excluded.payload_json,
+                 observed_at_ms = excluded.observed_at_ms,
+                 updated_at_ms = excluded.updated_at_ms
+             WHERE excluded.observed_at_ms >= host_runtime_snapshots.observed_at_ms",
+            rusqlite::params![host, snapshot_kind, payload_json, observed_at_ms, now_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn conn(&self) -> &Connection {
         &self.conn
     }

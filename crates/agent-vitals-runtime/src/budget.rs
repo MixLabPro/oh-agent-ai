@@ -423,7 +423,7 @@ pub fn month_cost_sql(month: &str) -> Option<Value> {
     if days.as_object().is_some_and(|m| m.is_empty()) {
         return None;
     }
-    let pricing = agent_vitals_domain::cost::load_pricing();
+    let pricing = crate::price_overrides::merged_main(&crate::home::data_home());
     Some(agent_vitals_domain::cost::month_cost(&days, &pricing))
 }
 
@@ -723,7 +723,7 @@ fn ms_to_iso_utc(ms: i64) -> String {
 /// 无配置仍计算可观测成本，但预算字段与比例必须为空、level=no_budget；默认
 /// ¥30/¥600 只属于旧 CLI 模板，不能替首次安装用户作出预算声明。
 pub fn evaluate_alert_from_sql(data_home: &Path) -> Value {
-    let pricing = agent_vitals_domain::cost::load_pricing();
+    let pricing = crate::price_overrides::merged_main(&crate::home::data_home());
     let today_key = today_beijing();
     let now = now_unix();
 

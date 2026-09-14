@@ -80,18 +80,58 @@ pub fn claim_delivery_with<F>(
 where
     F: FnOnce() -> Result<(), String>,
 {
-    if now_ms < 0 { return Err("budget alert timestamp must be non-negative".to_string()); }
     let encoded = key.encoded()?;
+    claim_encoded_with(data_home, &encoded, now_ms, send)
+}
+
+/// 额度窗口提醒的键：`quota-window|<host>|<window>|<resets_at>`。
+///
+/// 键里带 `resets_at` 是刻意的：同一个窗口只提醒一次，**窗口重置后再撞窗是一条
+/// 新键**，因此会再提醒一次——正是"每周期最多一次"的语义。
+pub fn quota_window_delivery_key(host: &str, window: &str, resets_at: i64) -> String {
+    format!("quota-window|{host}|{window}|{resets_at}")
+}
+
+/// 通用投递许可：键由调用方给出（如 [`quota_window_delivery_key`]）。
+///
+/// 这个账本本来就是**投递去重**用的，预算只是它的第一个消费方；2026-09-14 起
+/// Claude 的额度窗口也用同一份账本 —— 所以键的构造与校验留在这里，语义留在
+/// 调用方。发送失败不写账本（与预算那条同一语义：通知没发出去就不算提醒过）。
+pub fn claim_delivery_key_with<F>(
+    data_home: &Path,
+    key: &str,
+    now_ms: i64,
+    send: F,
+) -> Result<bool, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    if key.is_empty() || key.contains('\n') {
+        return Err("delivery key must be a non-empty single line".to_string());
+    }
+    claim_encoded_with(data_home, key, now_ms, send)
+}
+
+fn claim_encoded_with<F>(
+    data_home: &Path,
+    encoded: &str,
+    now_ms: i64,
+    send: F,
+) -> Result<bool, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    if now_ms < 0 { return Err("budget alert timestamp must be non-negative".to_string()); }
     let directory = data_home.join("state");
     let lock = crate::lease::acquire_blocking(
         &directory.join(LOCK_FILE), "budget-alert-delivery", 2_000, 2_000,
     ).map_err(|error| format!("budget alert delivery lock unavailable: {error}"))?;
     let mut state = read_state(&directory)?;
-    if state.deliveries.contains_key(&encoded) {
+    if state.deliveries.contains_key(encoded) {
         return Ok(false);
     }
     send()?;
-    state.deliveries.insert(encoded, now_ms);
+    state.deliveries.insert(encoded.to_string(), now_ms);
     write_state(&directory, &state)?;
     lock.release().map_err(|error| format!("budget alert delivery lock release failed: {error}"))?;
     Ok(true)
@@ -146,6 +186,30 @@ mod tests {
             period: "2026-09-12".to_string(), scope: BudgetAlertScope::Daily,
             threshold, budget_revision: revision,
         }
+    }
+
+    #[test]
+    fn quota_window_keys_dedupe_per_window_and_reopen_after_reset() {
+        // 契约：同一窗口只提醒一次；窗口重置（resets_at 变了 = 新键）后再撞窗
+        // 会再提醒一次 —— 这就是"每周期最多一次"。
+        let home = std::env::temp_dir().join(format!("av-quota-delivery-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let window = quota_window_delivery_key("claude-code", "five_hour", 1_000);
+        assert!(claim_delivery_key_with(&home, &window, 1, || Ok(())).unwrap());
+        assert!(!claim_delivery_key_with(&home, &window, 2, || Ok(())).unwrap(),
+            "同一个窗口第二次不得再提醒");
+        let next = quota_window_delivery_key("claude-code", "five_hour", 2_000);
+        assert!(claim_delivery_key_with(&home, &next, 3, || Ok(())).unwrap(),
+            "窗口重置后再撞窗是新键，应重新提醒");
+        // 发送失败不消耗许可（与预算那条同一语义）。
+        let failing = quota_window_delivery_key("claude-code", "seven_day", 5_000);
+        assert!(claim_delivery_key_with(&home, &failing, 4, || Err("denied".into())).is_err());
+        assert!(claim_delivery_key_with(&home, &failing, 5, || Ok(())).unwrap(),
+            "上一次没发出去，这次仍应允许投递");
+        // 空键/换行键直接拒绝，别把畸形键写进账本。
+        assert!(claim_delivery_key_with(&home, "", 6, || Ok(())).is_err());
+        assert!(claim_delivery_key_with(&home, "a\nb", 7, || Ok(())).is_err());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

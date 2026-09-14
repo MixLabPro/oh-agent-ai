@@ -247,6 +247,28 @@ sandbox.renderSpendCards(emptyDto, emptyDto);
 ok(num("ov-t-nominal") === "无数据" && num("ov-m-nominal") === "无数据",
   "全空宿主渲染「无数据」，不渲染 0（DSH 0-token 月同款纪律）");
 
+// REQ-043：未录入套餐/付款时，「已确认支出」必须写「尚未设置套餐或账单」，不能写
+// 「无数据」——「无数据」会被读成读取失败/缺失，而真相是还没声明计费方式。
+// 真实困惑案例（2026-09-14）：本月支出两栏都是「无数据」，用户以为读不到数据。
+console.log("# REQ-043 · 有用量但未声明计费方式");
+const usageNoDeclaration = {
+  by_provider: { "claude-code/anthropic": { amounts_by_basis: { api_equivalent: 100 }, currency: "USD", has_unresolved: false } },
+  total_actual_spend: {}, actual_spend_by_basis: {},
+  tokens_by_host: { "claude-code": { total: 5_000_000, uncached_input: 1_000_000, cache_read: 4_000_000, cache_write: 0, output: 0 } },
+};
+sandbox.renderSpendCards(usageNoDeclaration, usageNoDeclaration, FX);
+ok(num("ov-m-metered") === "尚未设置套餐或账单" && num("ov-m-subscription") === "尚未设置套餐或账单",
+  `未录入套餐/账单时两栏都写「尚未设置套餐或账单」（got ${num("ov-m-metered")} / ${num("ov-m-subscription")}）`);
+ok(num("ov-m-spend-sub").includes("确认套餐或账单后"),
+  `副行说明为空的原因并给出下一步（got ${num("ov-m-spend-sub")}）`);
+ok(num("ov-m-nominal") !== "无数据" && num("ov-m-nominal") !== "尚未设置套餐或账单",
+  "同一份数据里名义成本仍然有值——空的是「实付口径」，不是「本月没数据」");
+// 反向：本月没有用量时不能推给"还没声明"（没用量就是没用量）。
+const noUsage = { by_provider: {}, total_actual_spend: {}, actual_spend_by_basis: {},
+  tokens_by_host: { dsh: { total: 0, uncached_input: 0, cache_read: 0, cache_write: 0, output: 0 } } };
+sandbox.renderSpendCards(noUsage, noUsage, FX);
+ok(num("ov-m-metered") === "无数据", "本月零用量时不写「尚未设置套餐或账单」（没用量就是没用量）");
+
 // Captured window and confirmed spend: estimates never enter either day's actual line.
 const confirmed = { ...daily, actual_spend_by_basis: {
   metered_actual: { CNY: 18 }, host_billed: { CNY: 7, USD: 2 },
@@ -285,11 +307,24 @@ const cleanStatus = { status: "ok", data: { health: "ok", unresolved_tokens: 0, 
 sandbox.renderTrustRows(cleanStatus, monthlyDto);
 ok(routeRow.className === "notice ok" && priceRow.hidden === true && elements["ov-trust-route-text"].textContent.startsWith("数据完整"),
   "干净状态合成一句「数据完整」，第二行隐藏");
-const unpricedStatus = { status: "ok", data: { health: "ok", unresolved_tokens: 0, unpriced_tokens: 300_000_000, pricing: { stale: true } } };
+// 占比必须**同跨度**：unpriced 是全库累计，所以分母是 total_tokens（全库），
+// 不是 monthlyDto 的本月总量。此前 fixture 只给本月总量 → 测的正是那个错比率
+// （1.09B ÷ 9.60B 的同类）。现在两条都钉：同跨度算出 10%，且**明确不拿本月总量当分母**。
+const unpricedStatus = { status: "ok", data: { health: "ok", unresolved_tokens: 0,
+  unpriced_tokens: 300_000_000, total_tokens: 3_000_000_000, pricing: { stale: true } } };
 sandbox.renderTrustRows(unpricedStatus, monthlyDto);
 ok(priceRow.hidden === false && priceRow.className === "notice warn" && elements["ov-trust-price-text"].textContent.includes("少算了约 10%"),
-  `unpriced 300M/3B → 少算约 10% warn（got ${elements["ov-trust-price-text"].textContent}）`);
+  `unpriced 300M/全库 3B → 少算约 10% warn（got ${elements["ov-trust-price-text"].textContent}）`);
+ok(elements["ov-trust-price-text"].textContent.includes("全库累计"),
+  "口径写明「全库累计」，不在「本月已处理」底下冒充月度数");
+
 ok(elements["ov-trust-price-text"].textContent.includes("价格表也已过期"), "价格表过期并入价格行");
+// 切掉 total_tokens（旧载荷）→ **不给百分比**，而不是退回用本月总量当分母。
+const legacyShape = { status: "ok", data: { health: "ok", unresolved_tokens: 0,
+  unpriced_tokens: 300_000_000, pricing: { stale: false } } };
+sandbox.renderTrustRows(legacyShape, monthlyDto);
+ok(priceRow.hidden === false && !elements["ov-trust-price-text"].textContent.includes("%"),
+  `缺同跨度分母时不给百分比（got ${elements["ov-trust-price-text"].textContent}）`);
 // 同源合并：套餐提示可见且影响 tokens 盖住 unresolved → ⚠ 行无按钮、指向套餐提示。
 sandbox.billingPromptState = { visible: true, pendingTokens: 18000 };
 sandbox.renderTrustRows(warnStatus, monthlyDto);
@@ -359,7 +394,41 @@ ok(decideHtml.includes("剩余 8%"), `Codex 窗口条给剩余%（got 截断）`
 const lowQuotaAdvice = elements["ov-decide-body"]._kids.find((k) => k.className === "decide-advice").textContent;
 ok(lowQuotaAdvice === "💡 Codex 额度较低；请在用量或设置中确认可用线路", "Codex 剩 8% → 提示确认可用线路");
 ok(!/Claude|GLM|切到/i.test(lowQuotaAdvice), "低额度建议不指名推荐未经证实的替代线路");
-ok(decideHtml.includes("无法读取剩余额度"), "Claude Pro 恒标「无法读取剩余额度」（拒绝快照反推不了正向余量）");
+// Claude Pro：三态（spec §8.3.2）。旧断言钉的是硬编码占位「无法读取剩余额度」——
+// 那句已被真实的窗口状态取代（读 quotaLimits 的 resetsAt）。**唯一不可退让的是
+// "不得出现百分比"**：Claude 的本地日志里没有正向读数，任何 % 都是编的。
+ok(decideHtml.includes("窗口状态未知"), `无窗口证据时 Claude 行诚实地停在「窗口状态未知」（got 截断）`);
+ok(!/Claude Pro[\s\S]{0,200}%/.test(decideHtml), "Claude 行不得出现任何百分比（数据里没有正向读数）");
+
+// exhausted：被限流且重置时刻未到 → 显示窗口类型 + 重置时刻。
+elements["ov-decide-body"] = { textContent: "", innerHTML: "", appendChild(child) { this._kids ??= []; this._kids.push(child); } };
+const resetAt = Math.floor(Date.now() / 1000) + 7200;
+sandbox.renderDecideCard(monthly, sandbox.__quota, {
+  state: "exhausted", window: "five_hour", resets_at: resetAt, windows_recent: 2,
+});
+const exhaustedHtml = elements["ov-decide-body"].innerHTML;
+ok(exhaustedHtml.includes("5 小时窗口已耗尽"), `exhausted 显示窗口类型（got 截断）`);
+ok(exhaustedHtml.includes("重置"), "exhausted 必须给出重置时刻——这是它唯一有证据的内容");
+ok(!/%/.test(exhaustedHtml.split("Claude Pro")[1] || ""), "exhausted 行也不得出现百分比");
+
+// 七天窗要如实标出尺度差异（5 小时 vs 7 天差 33 倍，标错等于误导）。
+elements["ov-decide-body"] = { textContent: "", innerHTML: "", appendChild(child) { this._kids ??= []; this._kids.push(child); } };
+sandbox.renderDecideCard(monthly, sandbox.__quota, {
+  state: "exhausted", window: "seven_day", resets_at: resetAt, windows_recent: 1,
+});
+ok(elements["ov-decide-body"].innerHTML.includes("7 天窗口已耗尽"), "周窗不得标成 5 小时窗口");
+
+// 撞窗次数只在 unknown 态作为可显示内容出现（exhausted 态已有更硬的证据）。
+elements["ov-decide-body"] = { textContent: "", innerHTML: "", appendChild(child) { this._kids ??= []; this._kids.push(child); } };
+sandbox.renderDecideCard(monthly, sandbox.__quota,
+  { state: "unknown", windows_recent: 3, last_resets_at: Math.floor(Date.now() / 1000) - 3600 });
+ok(elements["ov-decide-body"].innerHTML.includes("近 7 天撞窗 3 次"), "unknown 态给出撞窗次数（spec §8.3.2）");
+// 「未知」不等于"什么都不知道"：上次那条限流的重置时刻是已知的，必须说出来，
+// 否则用户只看到"窗口状态未知"（2026-09-14 反馈：我们不是知道什么时候可用吗）。
+ok(elements["ov-decide-body"].innerHTML.includes("上次限流已于"),
+  "unknown 态说出上一次窗口何时重置，而不是只留一句「未知」");
+ok(!/窗口状态未知[^"]*可用/.test(elements["ov-decide-body"].innerHTML.replace(/title="[^"]*"/g, "")),
+  "不得从「没有新记录」反推「可用」（沉默有两种解释）");
 
 sandbox.__quota = { plan_type: "plus", has_credits: false,
   limits: { primary: { used_percent: 40, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 7200 } },
@@ -383,6 +452,25 @@ ok(num("ov-budget-sub").includes("尚未设置预算") && num("ov-budget-sub").i
   "未设置预算明确提示且不隐藏成本统计能力");
 ok(!num("ov-budget-sub").includes("600") && !num("ov-budget-sub").includes("30"),
   "首次安装不泄漏模板默认预算");
+
+console.log("# 预算卡 · 已配置但本月没有可计入的按量实付");
+// 后端真实形状（2026-09-14 实测 `budget show --json`）：月预算有、month_cost 与
+// month_ratio 都是 null。旧代码把它塞进通用兜底说成「暂不可读，请刷新重试」——
+// 那会让用户去点刷新，而它永远刷不出来（口径是"按量实付"，没确认计费方式前
+// 就是没有实付，刷新改变不了）。
+sandbox.__overview = {
+  budget: { source: "sql", level: "ok", month_cost: null, month_ratio: null,
+    monthly_cny: 1, effective_daily_budget: 1, reasons: ["stale legacy reason"] },
+  budget_monthly_cny: 1, sync: { ok: true, at: "", message: "ok" },
+  days: [], fx: null, estimate_note: "fixture", data_home: "<fixture>",
+};
+await sandbox.renderOverview();
+ok(elements["ov-budget-card"].hidden === false, "预算已配置 → 卡片必须显示（不能因为算不出比例就藏卡）");
+ok(num("ov-budget-sub").includes("还没有可计入的按量实付"),
+  `说明为什么没有进度（got ${num("ov-budget-sub")}）`);
+ok(!num("ov-budget-sub").includes("刷新重试"),
+  "不得说成「暂不可读，请刷新重试」（刷不出来的东西不该让用户去刷）");
+ok(num("ov-budget-sub").includes("¥1"), "把已配置的月预算如实带出来");
 
 console.log("# renderOverview · 预算卡优先读 budget_profiles.estimate（设置页规格 §8 D1）");
 // 旧 legacy 预算（¥600/月，已超支）与设置页新存的 estimate profile（¥200/月，

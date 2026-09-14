@@ -23,7 +23,6 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_vitals_domain::evidence::QuotaSnapshot;
 use agent_vitals_domain::workflow::WorkflowEvent;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
@@ -98,6 +97,10 @@ fn sync_host(
         false
     };
     let mut dirty: Vec<(PathBuf, (u64, u64))> = Vec::new();
+    // 配额扫描要用**整份候选清单**（下面这个循环会把 `files` 消费掉）。复制一份
+    // 路径而已（247 个 PathBuf，可忽略），换来的是撞窗计数覆盖完整的 7 天窗口——
+    // 只看 dirty 会把"近 7 天撞窗 3 次"报成 1 次，那是拿一个支持不了的数字当结论。
+    let host_files: Vec<PathBuf> = files.clone();
     for path in files {
         let fp = fingerprint(&path);
         let recorded = crate::sql_sync::source_file_fingerprint(db, host, &path)
@@ -120,8 +123,9 @@ fn sync_host(
     }
 
     let mut facts: Vec<Value> = Vec::new();
-    let mut runtime_snapshot: Option<QuotaSnapshot> = None;
-    let mut runtime_snapshot_payload_json: Option<String> = None;
+    // 本轮要落库的宿主实时快照（kind, payload, observed_at_ms）。Codex 的配额与
+    // Claude 的窗口状态共用这一条路，但各自是独立的 snapshot_kind。
+    let mut pending_snapshots: Vec<(&'static str, String, i64)> = Vec::new();
     let mut workflow_events: Vec<WorkflowEvent> = Vec::new();
     let mut synced_sources: Vec<(PathBuf, (u64, u64))> = Vec::new();
     // codex 的 emitter 跨文件 `seen` 去重只在**单次调用内**成立（live/
@@ -137,8 +141,20 @@ fn sync_host(
             None,
         ) {
             Ok(r) => {
-                runtime_snapshot = r.quota_snapshot;
-                runtime_snapshot_payload_json = r.quota_snapshot_payload_json;
+                if let (Some(contract), Some(payload)) = (r.quota_snapshot, r.quota_snapshot_payload_json) {
+                    // 观察时刻挪到这里派生：**解析失败只跳过这条快照，不再让整批写入
+                    // 失败**（旧行为是 Err 上抛，一个坏时间戳会连累整个宿主的 facts）。
+                    match agent_vitals_domain::budget::parse_iso(&contract.observed_at) {
+                        Some((seconds, _)) => pending_snapshots.push((
+                            "codex_quota",
+                            payload,
+                            seconds.saturating_mul(1_000),
+                        )),
+                        None => report
+                            .errors
+                            .push("codex quota snapshot: observed_at 不可解析，跳过落库".to_string()),
+                    }
+                }
                 facts.extend(r.facts);
                 workflow_events.extend(r.workflow_events);
                 synced_sources.extend(dirty.iter().cloned());
@@ -190,16 +206,55 @@ fn sync_host(
         }
     }
 
+    // Claude Pro 的窗口状态（`quotaLimits`）。扫**最近 7 天改动过的**会话文件
+    // （窗口由 `scan_claude_quota` 自己按 mtime 筛；7 天 = 最长窗口，再往前扫
+    // 不会改变结论）。扫不到就保持旧快照不动（不写空值）：
+    // 窗口状态是"越新越准"的观察，空值覆盖反而会把已有证据抹掉，过期与否交给
+    // 状态机按 `resets_at` 判。
+    if host == "claude-code" {
+        let scan = agent_vitals_hosts::claude_quota::scan_claude_quota(
+            &host_files,
+            std::time::SystemTime::now(),
+        );
+        // 待处理任务：窗口耗尽 → 建一条；重置或不再有证据 → 自动解决。与快照
+        // 同一轮推进，所以「窗口一重置，任务自己从列表里消失」不需要额外机制。
+        let exhausted = scan.latest.as_ref().and_then(|snapshot| {
+            match agent_vitals_hosts::claude_quota::window_state(snapshot, now / 1_000) {
+                agent_vitals_hosts::claude_quota::WindowState::Exhausted { resets_at, window } => Some((
+                    resets_at,
+                    window,
+                    agent_vitals_hosts::claude_quota::window_label(window),
+                )),
+                agent_vitals_hosts::claude_quota::WindowState::Unknown => None,
+            }
+        });
+        if let Err(e) = agent_vitals_data::issues::reconcile_quota_window_issue(
+            db.conn(), host, exhausted, now,
+        ) {
+            report.errors.push(format!("claude quota issue: {e}"));
+        }
+        if let Some(snapshot) = scan.latest {
+            // 撞窗次数与"最新那次"同一份 payload：`unknown` 态唯一的可显示内容
+            // 就是它（spec §8.3.2「窗口状态未知 · 本周撞窗 N 次」）。
+            pending_snapshots.push((
+                "claude_quota",
+                snapshot.payload_with_windows(scan.windows_recent),
+                snapshot.observed_at_secs.saturating_mul(1_000),
+            ));
+        }
+    }
+
     if !synced_sources.is_empty() {
-        let snapshot_write = (runtime_snapshot.is_some() || runtime_snapshot_backfill_needed)
-            .then_some(crate::sql_sync::RuntimeSnapshotWrite {
-                snapshot: runtime_snapshot
-                    .as_ref()
-                    .zip(runtime_snapshot_payload_json.as_deref())
-                    .map(|(contract, payload_json)| crate::sql_sync::RuntimeQuotaSnapshot {
-                        contract,
-                        payload_json,
-                    }),
+        let snapshot_write = (!pending_snapshots.is_empty() || runtime_snapshot_backfill_needed)
+            .then(|| crate::sql_sync::RuntimeSnapshotWrite {
+                snapshots: pending_snapshots
+                    .iter()
+                    .map(|(kind, payload, observed_at_ms)| crate::sql_sync::RuntimeQuotaSnapshot {
+                        snapshot_kind: kind,
+                        payload_json: payload.as_str(),
+                        observed_at_ms: *observed_at_ms,
+                    })
+                    .collect(),
                 backfill_marker: runtime_snapshot_backfill_needed
                     .then_some("codex_quota_snapshot_backfilled_v2"),
             });
@@ -221,6 +276,7 @@ fn sync_host(
         report.sql_duplicate = Some(outcome.duplicate);
         report.errors.extend(outcome.errors);
     }
+
     Ok(())
 }
 
@@ -413,6 +469,16 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
     // Phase 2.8：落当前价格快照（§5.3）。幂等——价卡不变则无新版本。
     if let Err(e) = crate::sql_sync::snapshot_current_pricing(&authority) {
         eprintln!("sync-facts warning (pricing snapshot): {e}");
+    }
+    // 本地价格发现（零网络）：把"日志里出现了没有价卡的模型"变成「待处理」里的
+    // 一条任务。它与上面那步顺序有关——先落当前价卡快照，判定才用得上最新价卡。
+    // 失败只警告：这是增强信息，不该让整轮同步失败。
+    if let Err(e) = crate::price_discovery::reconcile_unpriced_models(
+        &authority,
+        &crate::clock::current_month_beijing(),
+        crate::sql_sync::now_ms(),
+    ) {
+        eprintln!("sync-facts warning (price discovery): {e}");
     }
     Ok(report)
 }
