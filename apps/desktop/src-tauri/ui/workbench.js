@@ -1878,24 +1878,98 @@ function minBillingDate(left, right) {
   return left < right ? left : right;
 }
 
-// 打开声明面板。`target` 是一个待确认组（`billing_confirmation_groups` 的一行）；
-// 只有旧资产候选、当月无用量时，调用方把候选包装成组形状（`model_id` 为空，
-// 旧候选的月份会在表单中展开为该月首日/末日）。声明边界按北京时间日期。
-function openBillingDeclaration(target) {
+// 路由证据里这几种已经说明「走的是官方路由」，不必再问用户；其余（missing /
+// inferred / conflict / config-current / env-current）才需要用户明确。
+const BILLING_ROUTE_KNOWN_OFFICIAL = new Set([
+  "explicit-official-route", "session-native", "account-time-bound", "config-time-bound",
+]);
+
+// 「缺什么问什么」的判定（计费主链规格 v1.2 §5.3a）。三个布尔决定弹窗展示哪几步。
+function billingMissing(target) {
+  const provider = !target.provider_id || target.provider_id === "<unknown>";
+  const route = !BILLING_ROUTE_KNOWN_OFFICIAL.has(target.evidence_basis || "missing");
+  return { provider, route, mode: true };
+}
+
+// 批量键：宿主、服务商、未知原因（证据 + 计价依据）、适用日期相同的组一起处理。
+function billingBatchKey(row) {
+  return [row.host, row.provider_id || "<unknown>", row.evidence_basis || "missing",
+    row.pricing_basis || "unavailable", row.effective_start || "", row.effective_end || ""].join("|");
+}
+
+// 从三步选择推导 relationship_kind；`unknown` 不是声明，只做展示与降级。
+function billingRelationshipFromSteps(missing, routeValue, modeValue) {
+  const route = missing.route ? routeValue : "official";
+  if (route === "unknown") return "unknown";
+  if (route === "third_party") return "third_party";
+  if (modeValue === "api") return "official_api";
+  if (modeValue === "organization") return "organization";
+  return "official_subscription";
+}
+
+// 打开「明确计费方式」弹窗。`target` 是一个待确认组（`billing_confirmation_groups`
+// 的一行）；`rows` 是面板里的全部行，用来找可批量处理的同类组。只有旧资产候选、
+// 当月无用量时，调用方把候选包装成组形状（`model_id` 为空，旧候选的月份在表单
+// 中展开为该月首日/末日）。声明边界按北京时间日期。
+function openBillingDeclaration(target, rows) {
   const panel = document.getElementById("ov-billing-declaration-panel");
   const context = document.getElementById("ov-billing-declaration-context");
+  const missingText = document.getElementById("ov-billing-missing");
   const preview = document.getElementById("ov-billing-preview");
-  const relationship = document.getElementById("ov-billing-relationship");
-  const effect = document.getElementById("ov-billing-relationship-effect");
   const start = document.getElementById("ov-billing-start");
   const end = document.getElementById("ov-billing-end");
   const scope = document.getElementById("ov-billing-scope-text");
-  if (!panel || !context || !preview || !relationship || !start || !end) return;
-  billingDeclarationTarget = target;
+  const batchRow = document.getElementById("ov-billing-batch-row");
+  const batch = document.getElementById("ov-billing-batch");
+  const batchText = document.getElementById("ov-billing-batch-text");
+  const providerRow = document.getElementById("ov-billing-provider-row");
+  const provider = document.getElementById("ov-billing-provider");
+  const routeRow = document.getElementById("ov-billing-route-row");
+  const route = document.getElementById("ov-billing-route");
+  const modeRow = document.getElementById("ov-billing-mode-row");
+  const mode = document.getElementById("ov-billing-mode");
+  if (!panel || !context || !preview || !start || !end || !route || !mode) return;
+  const missing = billingMissing(target);
+  const key = billingBatchKey(target);
+  const peers = (Array.isArray(rows) ? rows : []).filter((row) => row !== target && !row.resolvedCandidate
+    && Number(row.tokens || 0) > 0 && row.model_id && billingBatchKey(row) === key);
+  billingDeclarationTarget = { ...target, missing, peers, batchKey: key };
   billingDeclarationState = null;
-  relationship.disabled = false;
-  relationship.value = "official_subscription";
-  if (effect) effect.textContent = BILLING_RELATIONSHIP_EFFECT[relationship.value];
+  for (const id of ["ov-billing-provider", "ov-billing-route", "ov-billing-mode", "ov-billing-batch",
+    "ov-billing-subscription-name", "ov-billing-subscription-amount", "ov-billing-subscription-currency",
+    "ov-billing-amount-unknown", "ov-billing-start", "ov-billing-end"]) {
+    const control = document.getElementById(id);
+    if (control) control.disabled = false;
+  }
+  if (provider) provider.value = "";
+  route.value = "official";
+  mode.value = "subscription";
+  // 订阅字段：有旧资产候选就预填它的套餐金额/币种，让用户核对而不是重填。
+  const subscriptionName = document.getElementById("ov-billing-subscription-name");
+  const subscriptionAmount = document.getElementById("ov-billing-subscription-amount");
+  const subscriptionCurrency = document.getElementById("ov-billing-subscription-currency");
+  const amountUnknown = document.getElementById("ov-billing-amount-unknown");
+  if (subscriptionName) subscriptionName.value = "";
+  if (amountUnknown) amountUnknown.checked = false;
+  if (subscriptionAmount) subscriptionAmount.value = target.candidate && Number.isFinite(Number(target.candidate.amount_minor))
+    ? (Number(target.candidate.amount_minor) / 100).toFixed(2) : "";
+  if (subscriptionCurrency && target.candidate && target.candidate.currency) subscriptionCurrency.value = target.candidate.currency;
+  if (providerRow) providerRow.hidden = !missing.provider;
+  if (routeRow) routeRow.hidden = !missing.route;
+  if (batchRow && batch && batchText) {
+    batchRow.hidden = peers.length === 0;
+    batch.checked = peers.length > 0;
+    const all = [target, ...peers];
+    batchText.textContent = "将同时处理 " + all.length + " 个模型、" +
+      all.reduce((sum, row) => sum + Number(row.session_count || 0), 0) + " 个会话、" +
+      fmtTokens(all.reduce((sum, row) => sum + Number(row.tokens || 0), 0)) +
+      " tokens（同一宿主、同一未知原因、同一适用日期）";
+  }
+  const asks = [];
+  if (missing.provider) asks.push("服务商");
+  if (missing.route) asks.push("路由");
+  asks.push("计费方式");
+  if (missingText) missingText.textContent = "日志里缺少：" + asks.join("、") + "。按顺序补齐即可，不要求一次填完整表单。";
   const currentMonth = statisticsMonth();
   start.value = monthStartDate(target.effective_start || currentMonth);
   const today = new Date().toISOString().slice(0, 10);
@@ -1904,20 +1978,18 @@ function openBillingDeclaration(target) {
     : minBillingDate(monthEndDate(currentMonth), today);
   end.value = minBillingDate(end.value, today);
   end.max = today;
-  start.disabled = false;
-  end.disabled = false;
   const amountText = billingAmountsText(target.estimated_amounts);
-  context.textContent = target.host + " · " + target.provider_id +
+  context.textContent = target.host + " · " + (missing.provider ? "服务商未知" : target.provider_id) +
     (target.model_id ? " · " + target.model_id : "") +
     " · " + fmtTokens(Number(target.tokens || 0)) + " tokens · " +
     Number(target.session_count || 0) + " 个会话" +
     (amountText ? " · 当前按量估算 " + amountText : "") +
     (target.candidate ? " · 旧版本套餐记录：" + target.candidate.provider_id + " " +
       billingCandidateAmount(target.candidate) + " 自 " + target.candidate.billing_period_start + " 起" : "") +
-    "。这一步只确认计费关系，不证明已付款。";
+    "。这一步只明确计费关系，不证明已付款。";
   if (scope) {
     scope.textContent = target.model_id
-      ? "作用范围：仅这一组（" + target.host + " · " + target.provider_id + " · " + target.model_id + "），按北京时间日期。"
+      ? "作用范围：所选模型（" + target.host + " · " + (missing.provider ? "待选服务商" : target.provider_id) + "），按北京时间日期。"
       : "作用范围：" + target.host + " · " + target.provider_id + " 全部模型，按北京时间日期。";
   }
   preview.hidden = true;
@@ -1925,14 +1997,73 @@ function openBillingDeclaration(target) {
   const save = document.getElementById("ov-billing-save");
   save.disabled = false;
   save.textContent = "预览影响";
+  syncBillingDeclarationSteps();
   panel.hidden = false;
   panel.scrollIntoView({ block: "nearest" });
 }
 
-function billingDeclarationScopes(target) {
-  return target && target.model_id && target.model_id !== "<unknown>"
-    ? [{ scope_kind: "model", scope_value: target.model_id }]
-    : [];
+// 当前弹窗里选中的模型集合（批量勾选时 = 目标组 + 同类组）。
+function billingSelectedRows() {
+  const target = billingDeclarationTarget;
+  if (!target) return [];
+  const batch = document.getElementById("ov-billing-batch");
+  const useBatch = batch && batch.checked && !document.getElementById("ov-billing-batch-row").hidden;
+  return useBatch ? [target, ...(target.peers || [])] : [target];
+}
+
+function billingDeclarationScopes() {
+  const target = billingDeclarationTarget;
+  if (!target) return [];
+  const scopes = [];
+  if (target.missing && target.missing.provider) scopes.push({ scope_kind: "provider", scope_value: "unresolved" });
+  for (const row of billingSelectedRows()) {
+    if (row.model_id && row.model_id !== "<unknown>") scopes.push({ scope_kind: "model", scope_value: row.model_id });
+  }
+  return scopes;
+}
+
+function billingCurrentRelationship() {
+  const target = billingDeclarationTarget;
+  if (!target) return "official_subscription";
+  return billingRelationshipFromSteps(target.missing,
+    document.getElementById("ov-billing-route").value, document.getElementById("ov-billing-mode").value);
+}
+
+function billingDeclaredProvider() {
+  const target = billingDeclarationTarget;
+  if (!target) return "";
+  if (!target.missing.provider) return target.provider_id;
+  const input = document.getElementById("ov-billing-provider");
+  return String((input && input.value) || "").trim();
+}
+
+// 按三步的当前值显示/隐藏后续步骤与结果说明。
+function syncBillingDeclarationSteps() {
+  const target = billingDeclarationTarget;
+  if (!target) return;
+  const route = document.getElementById("ov-billing-route");
+  const modeRow = document.getElementById("ov-billing-mode-row");
+  const effect = document.getElementById("ov-billing-relationship-effect");
+  const subscription = document.getElementById("ov-billing-subscription-fields");
+  const routeValue = target.missing.route ? route.value : "official";
+  if (modeRow) modeRow.hidden = routeValue !== "official";
+  const kind = billingCurrentRelationship();
+  if (effect) effect.textContent = BILLING_RELATIONSHIP_EFFECT[kind] || "";
+  if (subscription) subscription.hidden = kind !== "official_subscription";
+}
+
+function billingSubscriptionInput() {
+  const unknown = document.getElementById("ov-billing-amount-unknown");
+  const amount = document.getElementById("ov-billing-subscription-amount");
+  const currency = document.getElementById("ov-billing-subscription-currency");
+  const name = document.getElementById("ov-billing-subscription-name");
+  const subscriptionName = String((name && name.value) || "").trim() || null;
+  if (unknown && unknown.checked) return { subscriptionName, amountMinor: null, currency: null };
+  const raw = String((amount && amount.value) || "").trim();
+  if (!raw) return { error: "请填写月费，或勾选「金额暂不清楚」。" };
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return { error: "月费必须是不小于 0 的数字。" };
+  return { subscriptionName, amountMinor: Math.round(value * 100), currency: (currency && currency.value) || "CNY" };
 }
 
 function billingPreviewText(impact, relationshipKind) {
@@ -1950,8 +2081,9 @@ function billingPreviewText(impact, relationshipKind) {
   if (Number(pending.tokens || 0) > 0) {
     text += "；仍待确认 " + fmtTokens(Number(pending.tokens)) + " tokens（路由证据冲突，不会被声明吞掉）";
   }
+  const models = (impact.scopes || []).filter((s) => s.scope_kind === "model").map((s) => s.scope_value);
   text += "。范围：" + impact.host + " · " + impact.provider_id +
-    ((impact.scopes || []).length ? " · " + impact.scopes.map((s) => s.scope_value).join("、") : "") +
+    (models.length > 3 ? " · " + models.length + " 个模型" : (models.length ? " · " + models.join("、") : "")) +
     " · " + impact.effective_start +
     (impact.effective_end && impact.effective_end !== impact.effective_start ? "–" + impact.effective_end : "") + "。";
   return text;
@@ -1960,8 +2092,6 @@ function billingPreviewText(impact, relationshipKind) {
 function bindBillingDeclarationPanel() {
   const save = document.getElementById("ov-billing-save");
   const cancel = document.getElementById("ov-billing-cancel");
-  const relationship = document.getElementById("ov-billing-relationship");
-  const effect = document.getElementById("ov-billing-relationship-effect");
   const start = document.getElementById("ov-billing-start");
   const end = document.getElementById("ov-billing-end");
   if (!save || save.dataset.bound === "1") return;
@@ -1975,11 +2105,12 @@ function bindBillingDeclarationPanel() {
     preview.hidden = true;
     preview.textContent = "";
   };
-  if (relationship) {
-    relationship.onchange = () => {
-      if (effect) effect.textContent = BILLING_RELATIONSHIP_EFFECT[relationship.value] || "";
-      resetPreview();
-    };
+  const restep = () => { syncBillingDeclarationSteps(); resetPreview(); };
+  for (const id of ["ov-billing-provider", "ov-billing-route", "ov-billing-mode", "ov-billing-batch",
+    "ov-billing-subscription-name", "ov-billing-subscription-amount", "ov-billing-subscription-currency",
+    "ov-billing-amount-unknown"]) {
+    const control = document.getElementById(id);
+    if (control) control.onchange = restep;
   }
   if (start) start.onchange = resetPreview;
   if (end) end.onchange = resetPreview;
@@ -1987,36 +2118,36 @@ function bindBillingDeclarationPanel() {
     const target = billingDeclarationTarget;
     if (!target) return;
     const preview = document.getElementById("ov-billing-preview");
-    const relationshipKind = relationship.value;
+    const relationshipKind = billingCurrentRelationship();
+    const providerId = billingDeclaredProvider();
     const effectiveStart = String(start.value || "").trim();
     const effectiveEnd = String(end.value || "").trim();
-    const currentMonth = statisticsMonth();
     const today = new Date().toISOString().slice(0, 10);
+    const fail = (message) => { preview.hidden = false; preview.textContent = message; };
+    if (target.missing.provider && !providerId) {
+      return fail("请先选择这批用量的服务商。");
+    }
     if (!BILLING_DATE_RE.test(effectiveStart) || !BILLING_DATE_RE.test(effectiveEnd)) {
-      preview.hidden = false;
-      preview.textContent = "起止日期格式应为 YYYY-MM-DD。";
-      return;
+      return fail("起止日期格式应为 YYYY-MM-DD。");
     }
     if (effectiveEnd < effectiveStart) {
-      preview.hidden = false;
-      preview.textContent = "结束日期不能早于起始日期。";
-      return;
+      return fail("结束日期不能早于起始日期。");
     }
     if (effectiveEnd > today) {
-      preview.hidden = false;
-      preview.textContent = "结束日期不能晚于今天（北京时间）；声明不会扩展到未来记录。";
-      return;
+      return fail("结束日期不能晚于今天（北京时间）；声明不会扩展到未来记录。");
     }
+    const subscription = relationshipKind === "official_subscription" ? billingSubscriptionInput() : { subscriptionName: null, amountMinor: null, currency: null };
+    if (subscription.error) return fail(subscription.error);
     save.disabled = true;
     try {
-      const scopes = billingDeclarationScopes(target);
-      // 「仍不确定」不是一条计费声明：它必须继续保留组和按量估算，不能走
-      // save（该命令会写声明并入队重算）。先展示影响，第二次点击只记录 30 天
-      // 的提醒降级，然后回到总览（AC28）。
+      const scopes = billingDeclarationScopes();
+      // 「仍不确定」不是一条计费声明：它必须继续保留组和按量估算，不改变
+      // provider 与金额，不能显示为已解决。先展示影响，第二次点击只记录 30 天
+      // 的提醒降级，组留在待处理列表里（AC28）。
       if (relationshipKind === "unknown" &&
           (!billingDeclarationState || billingDeclarationState.phase !== "unknown_preview")) {
         const impact = await invoke("billing_candidate_impact_preview", {
-          host: target.host, providerId: target.provider_id, relationshipKind,
+          host: target.host, providerId: providerId || target.provider_id, relationshipKind,
           effectiveStart, effectiveEnd, scopes,
         });
         preview.hidden = false;
@@ -2028,7 +2159,7 @@ function bindBillingDeclarationPanel() {
         billingDeclarationState = { phase: "unknown_preview", impact };
         preview.textContent = "仍保持按量估算：" + fmtTokens(Number(impact.moved.tokens || 0)) +
           " tokens · " + Number(impact.moved.fact_count || 0) + " 条事实 · " +
-          Number(impact.moved.session_count || 0) + " 个会话；这组用量继续待确认，未创建计费声明。";
+          Number(impact.moved.session_count || 0) + " 个会话；这组用量继续待确认，留在待处理列表，未创建计费声明。";
         save.textContent = "保持待确认并返回";
         save.disabled = false;
         return;
@@ -2044,8 +2175,7 @@ function bindBillingDeclarationPanel() {
       }
       if (!billingDeclarationState || billingDeclarationState.phase !== "preview") {
         const impact = await invoke("billing_candidate_impact_preview", {
-          host: target.host, providerId: target.provider_id, relationshipKind,
-          effectiveStart, effectiveEnd, scopes,
+          host: target.host, providerId, relationshipKind, effectiveStart, effectiveEnd, scopes,
         });
         preview.hidden = false;
         if (impact.status !== "ok") {
@@ -2054,41 +2184,62 @@ function bindBillingDeclarationPanel() {
           return;
         }
         billingDeclarationState = { phase: "preview", impact, relationshipKind, effectiveStart, effectiveEnd };
-        preview.textContent = "保存前影响预览：" + billingPreviewText(impact, relationshipKind) + "确认后才会保存声明。";
+        preview.textContent = "保存前影响预览：" + billingPreviewText(impact, relationshipKind) + "确认后才会保存声明并重新归因。";
         save.textContent = "确认并保存声明";
         save.disabled = false;
         return;
       }
 
-      // 预览之后的确认：一次用户动作 = 保存修订 + （官方订阅时）入队重算，回执原位
-      // 展示。此前「保存」与「应用」是两次点击，只保存不应用会留下声明已存在、数字
-      // 未变、待处理也不显示的半状态（规格 G6）。
+      // 预览之后的确认，一次用户动作 = 保存版本化修订 →（官方订阅时）入队重新归因
+      // 与重算 → 回执原位展示 → 重算完成后刷新总览/用量/会话/待处理。此前「保存」与
+      // 「应用」是两次点击，只保存不应用会留下声明已存在、数字未变的半状态（规格 G6）。
       const impact = billingDeclarationState.impact;
       const suffix = Date.now().toString(36);
-      const declarationId = "decl-" + (target.group_id || target.candidate?.candidate_id || (target.host + ":" + target.provider_id))
-        .replace(/[^A-Za-z0-9:_.|-]/g, "_");
+      const declarationId = "decl-" + suffix;
       const revisionId = "rev-" + suffix;
       const candidate = target.candidate || null;
+      const selected = billingSelectedRows();
       const saved = await invoke("save_billing_declaration_revision", {
         revisionId, declarationId, supersedesRevisionId: null,
-        host: target.host, providerId: target.provider_id,
-        relationshipKind,
-        subscriptionName: null,
-        amountMinor: candidate ? candidate.amount_minor : null,
-        currency: candidate ? candidate.currency : null,
+        host: target.host, providerId, relationshipKind,
+        subscriptionName: subscription.subscriptionName,
+        // 月费只来自表单：勾了「金额暂不清楚」就写空，不拿旧候选的金额偷偷补上
+        // （候选金额已在打开弹窗时预填，用户看得见、改得了）。
+        amountMinor: subscription.amountMinor,
+        currency: subscription.currency,
         effectiveStart, effectiveEnd,
         sourceCandidateId: candidate ? candidate.candidate_id : null,
         evidenceRef: candidate ? "legacy-import-candidate:" + candidate.candidate_id
-          : "confirmation-group:" + (target.group_id || ""),
+          : "confirmation-group:" + selected.map((row) => row.group_id || "").join(","),
         scopes,
       });
       billingDeclarationState = { phase: "saved", declarationId, revisionId, impact, relationshipKind };
-      relationship.disabled = true;
+      for (const id of ["ov-billing-provider", "ov-billing-route", "ov-billing-mode", "ov-billing-batch",
+        "ov-billing-subscription-name", "ov-billing-subscription-amount", "ov-billing-subscription-currency",
+        "ov-billing-amount-unknown"]) {
+        const control = document.getElementById(id);
+        if (control) control.disabled = true;
+      }
       start.disabled = true;
       end.disabled = true;
       save.textContent = "已保存";
       preview.hidden = false;
       preview.textContent = "声明已保存（修订 " + revisionId + "）：" + billingPreviewText(impact, relationshipKind);
+      // 服务商由用户补上：同时写型号归属，下一轮同步把这批用量归到该服务商名下
+      // （既有 price_overrides 路由层；失败不回滚声明，回执如实带出）。
+      if (target.missing.provider && relationshipKind !== "third_party") {
+        const routeMode = relationshipKind === "official_subscription" ? "subscription" : "metered";
+        const failures = [];
+        for (const row of selected) {
+          if (!row.model_id || row.model_id === "<unknown>") continue;
+          try {
+            await invoke("save_price_route", { input: { model_prefix: row.model_id, provider_id: providerId, mode: routeMode } });
+          } catch (e) { failures.push(row.model_id + "：" + errText(e)); }
+        }
+        preview.textContent += failures.length
+          ? " 型号归属未能全部写入（" + failures.join("；") + "）。"
+          : " 已记录 " + selected.length + " 个型号归属 " + providerId + "，下一轮同步生效。";
+      }
       const job = saved && saved.job;
       if (job && job.status === "enqueue_failed") {
         preview.textContent += " 重算未入队：" + (job.error || "未知原因") + "。";
@@ -2097,7 +2248,7 @@ function bindBillingDeclarationPanel() {
         await followBillingRecalculation(preview, job.job_id);
       } else {
         preview.textContent += " 此关系不改变金额，无需重算。";
-        await renderOverview();
+        await refreshAfterBillingChange();
       }
       appendBillingRevokeButton(preview, declarationId, revisionId);
     } catch (e) {
@@ -2108,9 +2259,22 @@ function bindBillingDeclarationPanel() {
   };
 }
 
+// 归因/重算变化后的刷新（用户路径第 6 步）：总览立刻重绘；用量（按月缓存）、会话、
+// 待处理三个懒加载页的缓存作废，当前正开着的那个页立即重拉，其余页下次进入时重拉。
+// 这不是「刷新页面」——数据来源仍是同一个权威库，只是让每个面读到同一结果版本。
+async function refreshAfterBillingChange() {
+  calendarLoadedMonth = null;
+  sessState.loaded = false;
+  findState.loaded = false;
+  await renderOverview();
+  if (activeTab === "calendar" || activeTab === "sessions" || activeTab === "findings") {
+    await loadActiveTab();
+  }
+}
+
 // 轮询重算回执：250ms × 20 次；超时不宣称完成，任务留在「重算状态」列表里可回看。
 async function followBillingRecalculation(preview, jobId) {
-  preview.textContent += " 重算已入队，正在等待回执…";
+  preview.textContent += " 正在重新归因并重算费用…";
   let finalStatus = null, lastJob = null;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -2119,13 +2283,13 @@ async function followBillingRecalculation(preview, jobId) {
     if (["succeeded", "failed", "cancelled"].includes(finalStatus)) break;
   }
   if (finalStatus === "succeeded") {
-    preview.textContent += " 重算已完成，总览已按新归因刷新；切到用量/会话页会读到同一结果版本。";
-    await renderOverview();
+    preview.textContent += " 重算已完成，总览、用量、会话与待处理已按新归因刷新。";
+    await refreshAfterBillingChange();
   } else if (finalStatus === "failed" || finalStatus === "cancelled") {
     preview.textContent += " " + billingJobErrorText(lastJob) + "，旧结果仍可读。";
     appendBillingRetryButton(preview, jobId, null);
   } else {
-    preview.textContent += " 仍在后台处理中（" + jobId + "），可在「重算状态」查看。";
+    preview.textContent += " 仍在后台处理中（" + jobId + "），完成前各页继续显示上一版本；可在「重算状态」查看进度。";
   }
 }
 
@@ -2168,7 +2332,7 @@ function appendBillingRevokeButton(preview, declarationId, revisionId) {
       billingDeclarationTarget = null;
       billingDeclarationState = null;
       document.getElementById("ov-billing-declaration-panel").hidden = true;
-      await renderOverview();
+      await refreshAfterBillingChange();
     } catch (e) {
       revoke.disabled = false;
       preview.textContent += " · 撤销失败：" + errText(e);
@@ -2177,7 +2341,6 @@ function appendBillingRevokeButton(preview, declarationId, revisionId) {
   preview.appendChild(document.createTextNode(" "));
   preview.appendChild(revoke);
 }
-
 async function renderRetentionSettings() {
   const input = document.getElementById("ov-retention-months");
   const save = document.getElementById("ov-retention-save");
@@ -2463,7 +2626,7 @@ function renderBillingDeclarations(report) {
   }
 }
 
-// 「确认计费方式」入口与面板（计费主链规格 §5.1/§5.2）。主体是**待确认组**
+// 「明确计费方式」入口与面板（计费主链规格 §5.1/§5.2）。主体是**待确认组**
 // （`billing_confirmation_groups`：宿主 × provider × 模型 × 路由证据，带分币估算、
 // 按金额降序）；旧资产迁移候选只是组的一种证据来源，附在同宿主同 provider 的组
 // 下面；当月没有用量的候选单独成行。此前面板只从候选出发，没有旧资产的用户永远
@@ -2653,8 +2816,8 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
       // 每组只有一个主操作；页面唯一的实心主按钮是上方的待办提示，这里用次级。
       const confirm = document.createElement("button");
       confirm.className = "btn secondary";
-      confirm.textContent = "确认计费方式";
-      confirm.onclick = () => openBillingDeclaration(row);
+      confirm.textContent = "明确计费方式";
+      confirm.onclick = () => openBillingDeclaration(row, rows);
       actions.appendChild(confirm);
       item.append(detail, actions);
       list.appendChild(item);
@@ -5779,12 +5942,12 @@ function issueBasisLabel(group) {
 
 function issueActionLabel(group) {
   const remedy = group.remedy && group.remedy.remedy_id;
-  if (group.source_kind === "billing_candidate") return "建议：确认计费方式";
+  if (group.source_kind === "billing_candidate" || group.source_kind === "billing_group") return "建议：明确计费方式";
   if (group.source_kind === "usage_growth") return "建议：查看对应会话";
   if (group.source_kind === "source_failure") return "建议：查看数据源并重试";
   // 价格覆盖：这条任务的可执行动作是"给这个模型补一张价卡"，不是"查看数据状态"。
   if (group.rule === "PRICE_COVERAGE") return "建议：补价卡或确认模型名";
-  if (group.rule === "ROUTE_UNCONFIRMED") return "建议：确认计费方式";
+  if (group.rule === "ROUTE_UNCONFIRMED") return "建议：明确计费方式";
   if (group.rule === "QUOTA_WINDOW") return "建议：等窗口重置或先换一条线路";
   const labels = {
     "inspect-tool-error": "建议：查看工具错误并重试",
@@ -5920,8 +6083,8 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
         " 条来源证据。该组是只读投影，不能按行为 Issue 关闭。";
       const action = el("button", "btn secondary");
       action.type = "button";
-      if (group.source_kind === "billing_candidate") {
-        action.textContent = "打开计费确认";
+      if (group.source_kind === "billing_candidate" || group.source_kind === "billing_group") {
+        action.textContent = "明确计费方式";
         action.addEventListener("click", () => {
           switchTab("overview");
           const review = document.getElementById("ov-billing-review");

@@ -235,6 +235,11 @@
       last_event_at_ms: monthStartMs + 86_400_000 * 2, session_count: 1, effective_start: month, effective_end: month,
       estimated_amounts: [{ amount_minor: 96, currency: "USD", basis: "metered_estimate" }],
       unpriced_tokens: 0, unresolved_reason: null },
+    { group_id: "claude-code|<unknown>|glm-5|missing|metered_estimate|" + month, host: "claude-code",
+      provider_id: "<unknown>", model_id: "glm-5", evidence_basis: "missing",
+      pricing_basis: "metered_estimate", tokens: 640_000, first_event_at_ms: monthStartMs + 3_600_000 * 3,
+      last_event_at_ms: monthStartMs + 86_400_000 * 4, session_count: 3, effective_start: month, effective_end: month,
+      estimated_amounts: [], unpriced_tokens: 640_000, unresolved_reason: "billing-route-unknown" },
     { group_id: "codex|openai|gpt-mystery|missing|unavailable|" + month, host: "codex",
       provider_id: "openai", model_id: "gpt-mystery", evidence_basis: "missing",
       pricing_basis: "unavailable", tokens: 18_000, first_event_at_ms: monthStartMs + 3_600_000 * 8,
@@ -344,10 +349,25 @@
       // Shape: crates/agent-vitals-runtime/src/billing_preview.rs:20 declaration_impact_preview（经 lib.rs:2474）.
       case "billing_candidate_impact_preview": {
         const scopes = (args && args.scopes) || [];
-        const modelScope = scopes.find((scope) => scope.scope_kind === "model");
-        const group = billingGroups.find((item) => item.host === (args && args.host)
-          && item.provider_id === (args && args.providerId)
-          && (!modelScope || item.model_id === modelScope.scope_value));
+        const models = scopes.filter((scope) => scope.scope_kind === "model").map((scope) => scope.scope_value);
+        const providerUnresolved = scopes.some((scope) => scope.scope_kind === "provider" && scope.scope_value === "unresolved");
+        // 批量：多个 model 作用域 = 多组求和；服务商未知的组按 "<unknown>" 匹配。
+        const matched = billingGroups.filter((item) => item.host === (args && args.host)
+          && item.provider_id === (providerUnresolved ? "<unknown>" : (args && args.providerId))
+          && (!models.length || models.includes(item.model_id)));
+        const group = matched.length ? {
+          host: matched[0].host, provider_id: matched[0].provider_id,
+          tokens: matched.reduce((sum, item) => sum + item.tokens, 0),
+          session_count: matched.reduce((sum, item) => sum + item.session_count, 0),
+          unpriced_tokens: matched.reduce((sum, item) => sum + item.unpriced_tokens, 0),
+          estimated_amounts: Object.values(matched.flatMap((item) => item.estimated_amounts).reduce((acc, amount) => {
+            const key = amount.currency + "|" + amount.basis;
+            acc[key] = acc[key] ? { ...acc[key], amount_minor: acc[key].amount_minor + amount.amount_minor } : { ...amount };
+            return acc;
+          }, {})),
+          first_event_at_ms: Math.min(...matched.map((item) => item.first_event_at_ms)),
+          last_event_at_ms: Math.max(...matched.map((item) => item.last_event_at_ms)),
+        } : null;
         if (!group) {
           return { status: "ok", host: args && args.host, provider_id: args && args.providerId,
             relationship_kind: args && args.relationshipKind, effective_start: args && args.effectiveStart,
@@ -357,7 +377,7 @@
             first_event_ts_ms: null, last_event_ts_ms: null };
         }
         const changesAmounts = (args && args.relationshipKind) === "official_subscription";
-        const others = billingGroups.filter((item) => item !== group && item.host === group.host && item.provider_id === group.provider_id);
+        const others = billingGroups.filter((item) => !matched.includes(item) && item.host === group.host && item.provider_id === group.provider_id);
         const keptTokens = others.reduce((sum, item) => sum + item.tokens, 0);
         const keptAmounts = others.flatMap((item) => item.estimated_amounts);
         return { status: "ok", host: group.host, provider_id: group.provider_id,
@@ -404,10 +424,13 @@
         if ((args && args.relationshipKind) === "official_subscription") {
           const jobId = "billing-" + (args && args.revisionId);
           billingJobs.set(jobId, { status: "succeeded", job_id: jobId });
-          const modelScope = ((args && args.scopes) || []).find((scope) => scope.scope_kind === "model");
+          const scopes = (args && args.scopes) || [];
+          const models = scopes.filter((scope) => scope.scope_kind === "model").map((scope) => scope.scope_value);
+          const providerUnresolved = scopes.some((scope) => scope.scope_kind === "provider" && scope.scope_value === "unresolved");
           for (const group of billingGroups) {
-            if (group.host === args.host && group.provider_id === args.providerId
-                && (!modelScope || group.model_id === modelScope.scope_value)) {
+            if (group.host === args.host
+                && group.provider_id === (providerUnresolved ? "<unknown>" : args.providerId)
+                && (!models.length || models.includes(group.model_id))) {
               billingCoveredGroups.set(group.group_id, args.declarationId);
             }
           }

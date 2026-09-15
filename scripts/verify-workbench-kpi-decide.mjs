@@ -79,7 +79,7 @@ ok(wb.includes('pricing || reason || row.has_unresolved'),
   "无价卡且没有金额时仍显示价格不可用说明，不隐藏失败态");
 ok(wb.includes('openSettings.textContent = "打开预算设置"') && wb.includes('openSettingsSection("settings-budget", "ov-budget-monthly-amount")'),
   "预算阈值组提供打开预算设置入口（跳设置页预算分区，不是总览）");
-ok(wb.includes('action.textContent = "打开计费确认"') && wb.includes('"查看数据源"') && wb.includes('"查看会话"'),
+ok(wb.includes('action.textContent = "明确计费方式"') && wb.includes('"查看数据源"') && wb.includes('"查看会话"'),
   "来源投影组提供对应处理入口，不把来源证据误报为无原始命中");
 
 // ── vm 执行真实文件 ──

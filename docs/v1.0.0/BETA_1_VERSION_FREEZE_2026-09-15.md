@@ -25,9 +25,9 @@
 |---|---|---|
 | App（Tauri，对外发布号） | `1.0.0-beta.1` | `apps/desktop/src-tauri/Cargo.toml`、`tauri.conf.json`（`env!("CARGO_PKG_VERSION")` 注入到诊断面板） |
 | 随包 CLI | `1.3.0` | `apps/cli/Cargo.toml`；诊断面板对实际内置二进制跑 `--version` 现场探测（`resolved_cli_version()`），不是把 App 版本冒充 CLI 版本 |
-| Authority DB schema | `13` | `crates/agent-vitals-data/src/authority.rs::SCHEMA_VERSION` |
+| Authority DB schema | `14`（冻结时为 `13`；同日计费主链 v1.2 因作用域词表加 `provider` 升到 14） | `crates/agent-vitals-data/src/authority.rs::SCHEMA_VERSION` |
 
-CLI 和 schema 版本本次不改——`1.3.0`/`13` 是它们各自演进节奏下的当前值，Beta
+CLI 和 schema 版本按各自节奏演进——`1.3.0`/`14` 是当前值（schema 的 13→14 由计费主链 v1.2 触发，与 App 版本号无关），Beta
 号冻结的只是 App 这一个对外可见的版本号。
 
 ## 本次改动

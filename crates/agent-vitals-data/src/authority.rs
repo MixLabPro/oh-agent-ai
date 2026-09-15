@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -175,9 +175,20 @@ pub fn billing_declaration_fact_selection(
         Value::Text(start_date),
         end_date.map_or(Value::Null, Value::Text),
     ];
-    let mut where_sql = String::from(
+    // 「服务商未知」的组：事实的 provider_id 为 NULL，用户在声明里补的
+    // `provider_id` 是他给出的答案，不是事实上已有的值。作用域
+    // `("provider", "unresolved")` 把匹配条件从 `= ?2` 换成 `IS NULL`，
+    // 声明本身仍记录用户选的服务商（计费主链规格 v1.2 §5.3a）。
+    let provider_unresolved = scopes.iter()
+        .any(|(kind, value)| *kind == "provider" && *value == "unresolved");
+    let mut where_sql = String::from(if provider_unresolved {
+        "f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id IS NULL AND ?2 IS NOT NULL
+           AND f.event_ts_ms IS NOT NULL"
+    } else {
         "f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id = ?2
-           AND f.event_ts_ms IS NOT NULL
+           AND f.event_ts_ms IS NOT NULL"
+    });
+    where_sql.push_str("
            AND strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?3
            AND (?4 IS NULL OR strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?4)
            AND COALESCE(f.billing_mode, 'unknown') != 'subscription'
@@ -835,6 +846,26 @@ CREATE TABLE IF NOT EXISTS budget_profiles (
 );
 "#;
 
+// v14（计费主链 v1.2「明确计费方式」）：作用域词表加 `provider`，唯一合法值
+// `unresolved`——「服务商未知」的组（事实 provider_id 为 NULL）由用户补上服务商，
+// 声明记录他选的服务商，作用域让预览/重算只命中 NULL-provider 的事实。SQLite 改
+// 不了 CHECK，只能重建表；行原样搬迁，索引重建。
+const SCHEMA_V14_ADD: &str = r#"
+CREATE TABLE billing_declaration_scopes_v14 (
+  revision_id TEXT NOT NULL REFERENCES billing_declaration_revisions(revision_id) ON DELETE CASCADE,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('account', 'route', 'model', 'session', 'provider')),
+  scope_value TEXT NOT NULL CHECK (trim(scope_value) <> ''),
+  PRIMARY KEY(revision_id, scope_kind, scope_value)
+);
+INSERT INTO billing_declaration_scopes_v14(revision_id, scope_kind, scope_value)
+  SELECT revision_id, scope_kind, scope_value FROM billing_declaration_scopes;
+DROP INDEX IF EXISTS billing_declaration_scopes_lookup;
+DROP TABLE billing_declaration_scopes;
+ALTER TABLE billing_declaration_scopes_v14 RENAME TO billing_declaration_scopes;
+CREATE INDEX billing_declaration_scopes_lookup
+  ON billing_declaration_scopes(scope_kind, scope_value, revision_id);
+"#;
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -1025,9 +1056,22 @@ impl AuthorityDb {
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
+            Some(13) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V14_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(12) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V13_ADD);
+                let migration = conn.execute_batch(SCHEMA_V13_ADD).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1040,7 +1084,7 @@ impl AuthorityDb {
             }
             Some(11) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V12_ADD);
+                let migration = conn.execute_batch(SCHEMA_V12_ADD).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1053,7 +1097,7 @@ impl AuthorityDb {
             }
             Some(10) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V11_ADD).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                let migration = conn.execute_batch(SCHEMA_V11_ADD).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1066,7 +1110,7 @@ impl AuthorityDb {
             }
             Some(9) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V10_ADD).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                let migration = conn.execute_batch(SCHEMA_V10_ADD).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1079,7 +1123,7 @@ impl AuthorityDb {
             }
             Some(8) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V9_ADD).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                let migration = conn.execute_batch(SCHEMA_V9_ADD).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1092,7 +1136,7 @@ impl AuthorityDb {
             }
             Some(7) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V8_ADD).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                let migration = conn.execute_batch(SCHEMA_V8_ADD).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1105,7 +1149,7 @@ impl AuthorityDb {
             }
             Some(6) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V7_ADD).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                let migration = conn.execute_batch(SCHEMA_V7_ADD).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -1121,7 +1165,7 @@ impl AuthorityDb {
             }
             Some(5) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -1140,7 +1184,7 @@ impl AuthorityDb {
             }
             Some(4) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1185,6 +1229,14 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V12_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V13_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V14_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -1240,6 +1292,14 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V12_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V13_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V14_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -1302,6 +1362,14 @@ impl AuthorityDb {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V13_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V14_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
                         conn.execute(
                             "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
                             rusqlite::params![SCHEMA_VERSION.to_string()],
@@ -1352,6 +1420,8 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V10_ADD)?;
                 conn.execute_batch(SCHEMA_V11_ADD)?;
                 conn.execute_batch(SCHEMA_V12_ADD)?;
+                conn.execute_batch(SCHEMA_V13_ADD)?;
+                conn.execute_batch(SCHEMA_V14_ADD)?;
                 // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
                 conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
@@ -2197,7 +2267,8 @@ impl AuthorityDb {
             _ => false,
         };
         let valid_scope = |kind: &str, value: &str| {
-            matches!(kind, "account" | "route" | "model" | "session") && !value.trim().is_empty()
+            (matches!(kind, "account" | "route" | "model" | "session") && !value.trim().is_empty())
+                || (kind == "provider" && value == "unresolved")
         };
         if revision_id.is_empty() || declaration_id.is_empty() || host.is_empty() || provider_id.is_empty()
             || !valid_kind || !valid_amount || !valid_billing_boundary(effective_start)
@@ -3278,6 +3349,50 @@ mod tests {
             None, None, "2026-09", None, None, None, &[("host", "codex")], 3,
         ).is_err());
         assert!(authority.billing_declaration_revisions("declaration").unwrap().is_empty());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 「服务商未知」的组（事实 `provider_id IS NULL`）：声明记录用户选的服务商，
+    /// 作用域 `provider=unresolved` 让预览与重算只命中 NULL-provider 的事实，
+    /// 不会把同宿主里已知 provider 的事实一起吞掉；反之普通声明也不会碰到它们。
+    #[test]
+    fn provider_unresolved_scope_targets_null_provider_facts_only() {
+        let db = tmp_db("billing-provider-unresolved");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.conn().execute_batch(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES('pu-run', 1, 'test', 'succeeded', 13);
+             INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                 session_key, observation_kind, provider_id, model_id, event_ts_ms, evidence_basis, billing_mode,
+                 uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                 ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES('f-null-a', 'claude-code', 'm', 'n1', 'e1', NULL, 'assistant-usage', NULL, 'glm-5', 1000, 'missing', NULL, 10, 0, 0, 0, 'pu-run', 1, 1),
+                   ('f-null-b', 'claude-code', 'm', 'n2', 'e2', NULL, 'assistant-usage', NULL, 'glm-5', 2000, 'missing', NULL, 20, 0, 0, 0, 'pu-run', 1, 1),
+                   ('f-known', 'claude-code', 'm', 'n3', 'e3', NULL, 'assistant-usage', 'zhipu-glm', 'glm-5', 3000, 'session-native', 'metered', 40, 0, 0, 0, 'pu-run', 1, 1);",
+        ).unwrap();
+        let scopes = [("provider", "unresolved"), ("model", "glm-5")];
+        let preview = authority.billing_declaration_impact_preview_for(
+            "claude-code", "zhipu-glm", "1970-01-01", Some("1970-12-31"), &scopes, None,
+        ).unwrap();
+        assert_eq!((preview.fact_count, preview.total_tokens), (2, 30), "{preview:?}");
+        let plain = authority.billing_declaration_impact_preview_for(
+            "claude-code", "zhipu-glm", "1970-01-01", Some("1970-12-31"), &[("model", "glm-5")], None,
+        ).unwrap();
+        assert_eq!((plain.fact_count, plain.total_tokens), (1, 40), "plain declaration only sees the known-provider fact");
+        authority.billing_declaration_revision_save(
+            "pu-rev", "pu-decl", None, "claude-code", "zhipu-glm", "official_subscription",
+            None, None, None, "1970-01-01", Some("1970-12-31"), None, None, &scopes, 2,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("pu-job", "pu-decl", "pu-rev", 3).unwrap();
+        assert!(authority.billing_recalculation_run("pu-job", 4).unwrap());
+        let attributed: Vec<String> = authority.conn().prepare(
+            "SELECT fact_id FROM billing_fact_attributions WHERE job_id = 'pu-job' ORDER BY fact_id",
+        ).unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(attributed, vec!["f-null-a".to_string(), "f-null-b".to_string()]);
+        assert!(authority.billing_declaration_revision_save(
+            "bad-rev", "bad-decl", None, "claude-code", "zhipu-glm", "official_api",
+            None, None, None, "1970-01-01", Some("1970-12-31"), None, None, &[("provider", "anything")], 5,
+        ).is_err(), "provider scope only accepts the literal `unresolved`");
         let _ = std::fs::remove_file(&db);
     }
 

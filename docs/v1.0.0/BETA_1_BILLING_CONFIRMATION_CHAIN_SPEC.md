@@ -1,6 +1,6 @@
 # v1.0.0-beta.1 计费确认主链规格（B06 / B07）
 
-**状态：** v1.1（2026-09-15 按代码逐行核对写成；同日按本规格实施完 §6 全部条目，见 §10 执行记录），作为 Beta 1 P2 / B1-M3「计费闭环」的实现合同  
+**状态：** v1.2（2026-09-15；v1.1 全部落地后，按产品决策收敛为「明确计费方式」单一路径：按缺什么问什么、同类组批量、保存→重新归因→重算→各面刷新，见 §5.2a/§5.3a/§5.7 与 §10），作为 Beta 1 P2 / B1-M3「计费闭环」的实现合同  
 **日期：** 2026-09-15  
 **范围编号：** [发布规格](BETA_1_RELEASE_SPEC.md) B06、B07；真机矩阵 T06、T08、T10；[执行计划](BETA_1_EXECUTION_PLAN.md) E201–E208；PRD REQ-017–032、REQ-143–149；AC05、AC09、AC13、AC14、AC26、AC27、AC28  
 **关联文档：** [UAT 2026-09-15](UAT_FULL_2026-09-15.md)、[小闭环 UAT 清单](UAT_SMALL_LOOPS.md)、[总览后端接入规格](BETA_1_OVERVIEW_BACKEND_INTEGRATION_SPEC.md)、[设置页规格](BETA_1_SETTINGS_PAGE_SPEC.md)、[版本冻结记录](BETA_1_VERSION_FREEZE_2026-09-15.md)、[Provider 路由归属规格](../PROVIDER_ROUTE_ATTRIBUTION_SPEC.md)
@@ -122,7 +122,27 @@ NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
 - 组行只有一个主操作「确认计费方式」（打开 §5.3），没有「是我的套餐 / 不是」二选一（G1 的修法）。有候选证据的组附一行「来自旧版本套餐记录：<provider> <金额> 自 <月> 起」和一个文字链「这不是我的套餐」→ `candidate_resolve(dismissed)`，只处理候选，不碰用量。
 - 每次只展开一组。
 
+### 5.2a 批量：同宿主、同未知原因、同适用日期的组一起处理（v1.2）
+
+- 弹窗打开时默认勾选所有与目标组 **批量键相同** 的组：`host × provider_id × evidence_basis × pricing_basis × effective_start × effective_end`（`workbench.js::billingBatchKey`）。勾选行文案固定：「将同时处理 N 个模型、M 个会话、X tokens（同一宿主、同一未知原因、同一适用日期）」。
+- 批量 = **一条声明、多条 `model` 作用域**（同 kind 并集），因此一次预览、一个修订、一个重算任务；预览的「移出」是各组求和，「保持」是同宿主同 provider 期间内未选中的其余事实。
+- 取消勾选只处理目标组；候选专属行（当月无用量）和已处理候选行不参与批量。
+
 ### 5.3 关系选择（REQ-021/024/029/030/031、AC05/AC09）
+
+#### 5.3a 按缺什么问什么（v1.2 收敛后的表单）
+
+按钮文案统一为 **「明确计费方式」**（入口提示、组行、待处理入口、弹窗标题）。弹窗不再直接选 `relationship_kind`，而是按组缺什么依次问（`workbench.js::billingMissing` / `billingRelationshipFromSteps`）：
+
+| 缺什么 | 判定 | 问什么 | 保存时落到哪 |
+|---|---|---|---|
+| 服务商未知 | `provider_id = "<unknown>"`（事实 `provider_id IS NULL`） | 「这批用量是哪家服务商的？」（`ov-known-providers` 列表） | 声明 `provider_id` = 用户选的；作用域加 `("provider","unresolved")`（schema v14，只命中 NULL-provider 事实）；官方路由时同时 `save_price_route(model, provider, mode)`，下一轮同步归到该服务商 |
+| 路由未知 | `evidence_basis ∉ {explicit-official-route, session-native, account-time-bound, config-time-bound}` | 官方路由 / 第三方服务 / 仍不确定 | 第三方 → `third_party`；仍不确定 → 不写声明（§5.9） |
+| 计费方式未知 | 路由为官方时总是问 | 官方订阅 / 官方 API（按量）/ 组织承担 | `official_subscription` / `official_api` / `organization` |
+| 订阅 | 上一步选订阅 | 套餐名（可选）、月费与币种或「金额暂不清楚」、起止日期 | `subscription_name` / `amount_minor+currency`（未知 → 双空，不补挂牌价，AC09）；有旧候选时预填其金额供核对 |
+
+三步之后仍是 §5.5 预览 → §5.6「确认并保存声明」。每一步旁的结果说明文案见 §5.3 表「Beta 对数字的影响」列。
+
 
 面板第一问固定：「这批用量如何付费？」五选一，每项旁边一句**结果说明**（Beta 的真实行为，不许美化）：
 
@@ -171,8 +191,9 @@ Beta 只开放两种范围，都**显式有界**：
 
 ### 5.7 各面刷新（AC27「总览/日历/会话/MCP 一致」）
 
-- 一致性来源不是「刷新调用」而是**§3 的唯一谓词**：任何面只要重新查询，就得到同一版本。桌面端日历与会话 tab 每次激活都重新查询（`workbench.js:264`），无 JS 端缓存。
-- 因此规格要求：重算成功与撤销成功后 `renderOverview()`（已做），并**使总览首屏内嵌的日历/近几天小部件与「按量估算」卡片同时刷新**（它们都在 `renderOverview` 内，已做）。不新增跨 tab 推送。
+- 一致性来源不是「刷新调用」而是**§3 的唯一谓词**：任何面只要重新查询，就得到同一版本。
+- 完整顺序（v1.2）：用户补充归因 → 保存版本化修订 → 后端重新归因（`billing_fact_attributions`）→ 重算费用（结果快照原子发布）→ 刷新各面。桌面端的用量页按月缓存（`calendarLoadedMonth`）、会话与待处理懒加载缓存（`sessState.loaded` / `findState.loaded`）——重算成功与撤销成功后由 `refreshAfterBillingChange()` 统一作废三处缓存、重绘总览，并对当前正开着的用量/会话/待处理页立即重拉；其余页下次进入时重拉。**不是刷新页面**，数据来源仍是同一权威库。
+- 处理中：回执显示「正在重新归因并重算费用…」；超过轮询窗口仍未完成时明示「完成前各页继续显示上一版本」，任务留在「重算状态」列表。
 - 真机证据要求（T08）：同一隔离数据根上，保存前/后、撤销后三个时点各截：总览按量估算卡、日历该月合计、会话列表该组任一会话的成本依据、`data coverage --month`、MCP `cost_breakdown{group_by:[host,provider_id,billing_mode]}`。五处的移出金额必须逐位相等；`cost_breakdown` 的 `billing_mode='subscription'` 桶等于预览「移出估算」。
 - 性能：`billing_confirmation_groups` 与预览走 `SqlSummaryRepository` 直查；不得引入新的 fold 管线（CLAUDE.md 2026-09-05 事故）。
 
@@ -309,3 +330,10 @@ skipped 208）、golden 15/15（Python 与 Rust 二进制各一遍）、全部 `
 
 **仍未关闭（只能靠真机）**：§7.4 五条小闭环（AC26/27/13/28/14）的截图与五处对拍。编码代理
 不能驱动 Tauri 窗口；候选包在 `apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app`。
+
+### 10.1 v1.2 收敛（2026-09-15，分支 `worktree-v1.0.0-beta1-p2-clarify-billing`）
+
+- 数据层：schema v13 → **v14**，`billing_declaration_scopes.scope_kind` 词表加 `provider`（唯一合法值 `unresolved`）；`billing_declaration_fact_selection` 据此把 `f.provider_id = ?2` 换成 `IS NULL`（`authority.rs` 测试 `provider_unresolved_scope_targets_null_provider_facts_only`）。既有库在 open 时原地迁移（重建表搬行、重建索引）。
+- 前端：`openBillingDeclaration(target, rows)` 按缺什么问什么 + 批量勾选；`refreshAfterBillingChange()` 作废三处缓存并重拉当前页；待处理页 `billing_group` 项入口同样打开该弹窗；文案「明确计费方式」。
+- 守卫：`verify-workbench-sources.mjs` 计费段重写（三步表单、批量、服务商未知、月费未知不补挂牌价、缓存作废、仍不确定不写声明/归属）；`verify-workbench-kpi-decide.mjs` 待处理入口文案。
+- 全量门：根 workspace `cargo test` / clippy、桌面 116 单测 / clippy、Python 1189、golden 15/15（Python + Rust 二进制）、全部 `verify-workbench-*.mjs`、两条 MCP smoke。

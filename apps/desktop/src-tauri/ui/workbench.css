@@ -1730,6 +1730,28 @@ summary.detail-section-title {
   gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line, #dce4f2); }
 .billing-review-row:last-child { border-bottom: 0; }
 .billing-review-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.billing-declaration-dialog {
+  position: fixed;
+  z-index: 100;
+  top: 50%;
+  left: 50%;
+  width: min(720px, calc(100vw - 40px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  box-sizing: border-box;
+  transform: translate(-50%, -50%);
+  padding: 22px;
+  border: 1px solid var(--line, #dce4f2);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 18px 60px rgba(26, 37, 56, .24), 0 0 0 100vmax rgba(26, 37, 56, .28);
+}
+.billing-declaration-dialog[hidden] { display: none; }
+.billing-batch { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0;
+  padding: 10px; border-radius: 8px; background: var(--panel-2); color: var(--text); }
+.billing-batch[hidden] { display: none; }
+.billing-batch input { margin-top: 2px; }
+.billing-amount-unknown { display: flex !important; align-items: center; gap: 6px; padding-bottom: 7px; }
 .billing-form { display: flex; gap: 12px; align-items: end; margin-top: 12px; flex-wrap: wrap; }
 .billing-form label { display: grid; gap: 4px; font-size: 12px; color: var(--text-2, #667); }
 .billing-form select { min-width: 170px; }
@@ -1757,6 +1779,7 @@ summary.detail-section-title {
 @media (max-width: 720px) {
   .billing-review-row { align-items: flex-start; flex-direction: column; }
   .billing-form { align-items: stretch; flex-direction: column; }
+  .billing-declaration-dialog { width: calc(100vw - 24px); max-height: calc(100vh - 24px); padding: 16px; }
   .overview-topline { align-items: flex-start; flex-direction: column; gap: 8px; }
   .overview-sync { justify-content: space-between; width: 100%; }
   .cards.month-band { grid-template-columns: 1fr; }

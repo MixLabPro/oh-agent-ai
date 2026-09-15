@@ -32,11 +32,11 @@ ok(js.includes("recoverSource(button, key") && js.includes('invoke("trigger_sync
 ok(js.includes('invoke("sync_request_status", { requestId })'), "恢复动作按请求ID等待完成");
 ok(!/id="ov-billing-review"[^>]*aria-expanded/.test(html),
   "套餐确认入口不暴露为 AX 折叠控件，保留普通按钮点击语义");
-ok(/id="ov-billing-review"[^>]*>确认计费方式<\/button>/.test(html) &&
+ok(/id="ov-billing-review"[^>]*>明确计费方式<\/button>/.test(html) &&
   /id="ov-billing-review-panel"[^>]*role="region"[^>]*aria-labelledby="ov-billing-review-title"/.test(html),
   "套餐确认入口使用普通按钮并保留展开区域标题语义");
-ok(js.includes("relationship.disabled = false") && js.includes("relationship.disabled = true"),
-  "已保存声明锁定计费关系，避免切换为仍不确定造成状态漂移");
+ok(js.includes("if (control) control.disabled = true;") && js.includes("if (control) control.disabled = false;"),
+  "已保存声明锁定三步选择，避免切换为仍不确定造成状态漂移");
 ok(lib.includes("match worker_db.billing_recalculation_run") && lib.includes("Ok(true) => return") &&
   !/billing_recalculation_run\([\s\S]{0,180}\.is_ok\(\)/.test(lib),
   "重算 worker 只把 changed=true 当作成功，不吞掉 false/错误回执");
@@ -175,34 +175,42 @@ await sandbox.loadSources(true);
 ok(elements["src-banner"].hidden === false && elements["src-banner"].textContent.includes("schema mismatch"),
   "契约失败显示错误横幅而非零数据");
 
-console.log("# 计费确认主链（docs/v1.0.0/BETA_1_BILLING_CONFIRMATION_CHAIN_SPEC.md §7.2）");
+console.log("# 计费确认主链（docs/v1.0.0/BETA_1_BILLING_CONFIRMATION_CHAIN_SPEC.md §7.2，v1.2「明确计费方式」）");
 for (const id of ["ov-billing-prompt", "ov-billing-review-panel", "ov-billing-review",
   "ov-billing-review-close", "ov-billing-prompt-copy", "ov-billing-review-list",
-  "ov-billing-later", "ov-billing-save", "ov-billing-cancel", "ov-billing-relationship",
+  "ov-billing-later", "ov-billing-save", "ov-billing-cancel",
   "ov-billing-relationship-effect", "ov-billing-start", "ov-billing-end", "ov-billing-scope-text",
-  "ov-billing-declaration-panel", "ov-billing-declaration-context", "ov-billing-preview",
+  "ov-billing-declaration-panel", "ov-billing-declaration-context", "ov-billing-preview", "ov-billing-missing",
+  "ov-billing-batch-row", "ov-billing-batch", "ov-billing-batch-text",
+  "ov-billing-provider-row", "ov-billing-provider", "ov-billing-route-row", "ov-billing-route",
+  "ov-billing-mode-row", "ov-billing-mode", "ov-billing-subscription-fields", "ov-billing-subscription-name",
+  "ov-billing-subscription-amount", "ov-billing-subscription-currency", "ov-billing-amount-unknown",
   "ov-billing-recalculation-panel", "ov-billing-recalculation-list",
   "settings-billing-candidates", "settings-billing-candidates-copy", "settings-billing-candidates-open"]) {
   elements[id] ||= makeEl(id);
 }
-// V1：孤儿端点、两步「应用」按钮、候选直通 accept 都不得再出现在前端。
+// V1：孤儿端点、两步「应用」按钮、候选直通 accept、直接选 relationship 的旧下拉都不得再出现。
 ok(!js.includes("billing_declaration_impact_preview") && !html.includes("billing_declaration_impact_preview"),
   "修订级预览孤儿端点已从前端删除（B5）");
 ok(!js.includes("ov-billing-apply") && !html.includes("ov-billing-apply"),
   "保存与重算不再是两次点击（G6）");
 ok(!/decision:\s*"accept"|resolve\("accept"\)|"是我的套餐"/.test(js),
   "候选没有绕过预览与声明的 accept 直通（G1）");
-ok(html.includes('id="ov-billing-review">确认计费方式</button>') && !/编辑/.test(html.slice(html.indexOf('id="ov-billing-prompt"'), html.indexOf('id="ov-billing-prompt"') + 800)),
-  "入口主按钮用任务语言「确认计费方式」，不含「编辑」（REQ-020）");
-ok(js.includes('billingMonthWindow(statisticsMonth())') === false || !/billing_candidate_impact_preview[\s\S]{0,400}windowStartMs/.test(js),
+ok(!html.includes('id="ov-billing-relationship"') && html.includes('id="ov-billing-route"') && html.includes('id="ov-billing-mode"'),
+  "relationship_kind 由「服务商 → 路由 → 计费方式」三步推导，不再直接选（v1.2 §5.3a）");
+ok(html.includes('id="ov-billing-review">明确计费方式</button>') && !/编辑/.test(html.slice(html.indexOf('id="ov-billing-prompt"'), html.indexOf('id="ov-billing-prompt"') + 800)),
+  "入口主按钮用任务语言「明确计费方式」，不含「编辑」（REQ-020）");
+ok(!/billing_candidate_impact_preview[\s\S]{0,400}windowStartMs/.test(js),
   "预览不再由前端传统计月窗口（G2）");
+ok(js.includes("calendarLoadedMonth = null;") && js.includes("sessState.loaded = false;") && js.includes("findState.loaded = false;")
+  && /async function refreshAfterBillingChange[\s\S]{0,600}loadActiveTab\(\)/.test(js),
+  "重算完成后作废用量/会话/待处理缓存并重拉当前页，而不是只刷新总览（用户路径第 6 步）");
 
 const storage = {};
 sandbox.localStorage = { getItem: (k) => storage[k] ?? null, setItem: (k, v) => { storage[k] = String(v); }, removeItem: (k) => { delete storage[k]; } };
 sandbox.sessionStorage = sandbox.localStorage;
 const month = sandbox.statisticsMonth();
 const monthStart = month + "-01";
-const monthEnd = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10);
 const today = new Date().toISOString().slice(0, 10);
 const groupsReport = { status: "ok", month, groups: [
   { group_id: "codex|openai|gpt-5.6-sol|session-native|metered_estimate|" + month, host: "codex", provider_id: "openai",
@@ -213,6 +221,16 @@ const groupsReport = { status: "ok", month, groups: [
     model_id: "MiniMax-M2.5", evidence_basis: "missing", pricing_basis: "metered_estimate", tokens: 980_000,
     first_event_at_ms: 1, last_event_at_ms: 2, session_count: 4, effective_start: month, effective_end: month,
     estimated_amounts: [{ amount_minor: 760, currency: "CNY", basis: "metered_estimate" }], unpriced_tokens: 0, unresolved_reason: null },
+  // 与 sol 同宿主、同 provider、同证据、同计价依据、同日期 → 同一批量键。
+  { group_id: "codex|openai|gpt-5.6-luna|session-native|metered_estimate|" + month, host: "codex", provider_id: "openai",
+    model_id: "gpt-5.6-luna", evidence_basis: "session-native", pricing_basis: "metered_estimate", tokens: 120_000,
+    first_event_at_ms: 1, last_event_at_ms: 2, session_count: 1, effective_start: month, effective_end: month,
+    estimated_amounts: [{ amount_minor: 96, currency: "USD", basis: "metered_estimate" }], unpriced_tokens: 0, unresolved_reason: null },
+  // 服务商未知的组：弹窗必须先问服务商。
+  { group_id: "claude-code|<unknown>|glm-5|missing|metered_estimate|" + month, host: "claude-code", provider_id: "<unknown>",
+    model_id: "glm-5", evidence_basis: "missing", pricing_basis: "metered_estimate", tokens: 640_000,
+    first_event_at_ms: 1, last_event_at_ms: 2, session_count: 3, effective_start: month, effective_end: month,
+    estimated_amounts: [], unpriced_tokens: 640_000, unresolved_reason: "billing-route-unknown" },
   { group_id: "codex|openai|gpt-mystery|missing|unavailable|" + month, host: "codex", provider_id: "openai",
     model_id: "gpt-mystery", evidence_basis: "missing", pricing_basis: "unavailable", tokens: 18_000,
     first_event_at_ms: 1, last_event_at_ms: 2, session_count: 1, effective_start: month, effective_end: month,
@@ -223,33 +241,32 @@ const candidatesReport = { status: "ok", candidates: [{ candidate_id: "candidate
 await sandbox.renderBillingConfirmation(groupsReport, candidatesReport);
 ok(elements["ov-billing-prompt"].hidden === false, "待确认组存在时显示入口提示");
 const promptCopy = elements["ov-billing-prompt-copy"].textContent;
-ok(/发现 3 组/.test(promptCopy) && /2\.63M|2,630,000|263/.test(promptCopy.replace(/\s/g, "")) === false || /发现 3 组/.test(promptCopy),
-  "提示按组计数（组 + 无用量候选各一行）");
-ok(promptCopy.includes("18.92") && promptCopy.includes("7.60") && !promptCopy.includes("26.52"),
+ok(/发现 5 组/.test(promptCopy), "提示按组计数");
+ok(promptCopy.includes("19.88") && promptCopy.includes("7.60") && !promptCopy.includes("27.48"),
   "提示金额分币列出，USD 与 CNY 永不相加");
 ok(promptCopy.includes("确认后可区分订阅覆盖和额外按量费用") && promptCopy.includes("已按官方价估算"),
   "提示同时说清受影响用量、当前默认处理与确认收益（AC26）");
 ok(elements["ov-billing-review-panel"].hidden === true, "初始状态保持确认面板收起");
 await elements["ov-billing-review"].onclick();
 const reviewRows = elements["ov-billing-review-list"].children;
-ok(elements["ov-billing-review-panel"].hidden === false && reviewRows.length === 3,
-  "点击确认计费方式展开面板并按组渲染三行");
-ok(reviewRows[0].children[0].textContent.includes("gpt-5.6-sol") && reviewRows[2].children[0].textContent.includes("无价卡"),
+ok(elements["ov-billing-review-panel"].hidden === false && reviewRows.length === 5,
+  "点击明确计费方式展开面板并按组渲染五行");
+ok(reviewRows[0].children[0].textContent.includes("gpt-5.6-sol") && reviewRows[4].children[0].textContent.includes("无价卡"),
   "V3：金额最大的组在前，无价卡的组排最后");
 ok(reviewRows[0].children[0].children.some((child) => child.textContent.includes("来自旧版本套餐记录")),
   "旧资产候选作为证据行挂在同宿主同 provider 的组下");
 const rowButtons = reviewRows.map((row) => row.children[1].children.map((b) => b.textContent));
-ok(rowButtons.every((labels) => labels.length === 1 && labels[0] === "确认计费方式"),
-  "每组只有一个主操作「确认计费方式」");
+ok(rowButtons.every((labels) => labels.length === 1 && labels[0] === "明确计费方式"),
+  "每组只有一个主操作「明确计费方式」");
 
-// 声明面板：预览→确认并保存（自动入队）→回执含撤销。
+// 弹窗：路由已知（session-native）→ 只问计费方式；同类组默认批量。
 const billingCalls = [];
 const previewFixture = (args) => ({ status: "ok", host: args.host, provider_id: args.providerId,
   relationship_kind: args.relationshipKind, effective_start: args.effectiveStart, effective_end: args.effectiveEnd,
   scopes: args.scopes, changes_amounts: args.relationshipKind === "official_subscription",
-  moved: { fact_count: 21, session_count: 7, tokens: 1_650_000, unpriced_tokens: 0,
-    amounts: args.relationshipKind === "official_subscription" ? [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }] : [],
-    estimated_amounts: [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }] },
+  moved: { fact_count: 24, session_count: 8, tokens: 1_770_000, unpriced_tokens: 0,
+    amounts: args.relationshipKind === "official_subscription" ? [{ amount_minor: 1988, currency: "USD", basis: "metered_estimate" }] : [],
+    estimated_amounts: [{ amount_minor: 1988, currency: "USD", basis: "metered_estimate" }] },
   kept: { tokens: 18_000, unpriced_tokens: 18_000, amounts: [] },
   pending: { fact_count: 2, tokens: 900, reasons: ["route-evidence-conflict"] },
   first_event_ts_ms: 1, last_event_ts_ms: 2 });
@@ -262,30 +279,40 @@ billingOverride = async (command, args) => {
   }
   if (command === "billing_recalculation_job_status") return { status: "succeeded", job_id: args.jobId };
   if (command === "revoke_billing_declaration") return { status: "revoked" };
+  if (command === "save_price_route") return { status: "saved" };
   return undefined;
 };
 sandbox.renderOverview = async () => { billingCalls.push({ command: "<renderOverview>" }); };
 await reviewRows[0].children[1].children[0].onclick();
-ok(elements["ov-billing-declaration-panel"].hidden === false && elements["ov-billing-relationship"].value === "official_subscription",
-  "打开声明面板，默认关系为官方订阅");
-ok(elements["ov-billing-start"].value === monthStart && elements["ov-billing-end"].value === today &&
-  elements["ov-billing-end"].max === today,
+ok(elements["ov-billing-declaration-panel"].hidden === false && elements["ov-billing-provider-row"].hidden === true
+  && elements["ov-billing-route-row"].hidden === true && elements["ov-billing-mode-row"].hidden === false,
+  "路由证据已是官方（session-native）时只问计费方式，不问服务商与路由（缺什么问什么）");
+ok(elements["ov-billing-batch-row"].hidden === false && elements["ov-billing-batch"].checked === true
+  && /将同时处理 2 个模型、8 个会话、1\.8M tokens/.test(elements["ov-billing-batch-text"].textContent),
+  "默认勾选同宿主、同未知原因、同日期的同类组并汇总模型/会话/tokens");
+ok(elements["ov-billing-subscription-fields"].hidden === false && elements["ov-billing-relationship-effect"].textContent.includes("移出按量估算"),
+  "默认官方订阅：展示套餐名/月费/币种字段与结果说明");
+ok(elements["ov-billing-subscription-amount"].value === "20.00" && elements["ov-billing-subscription-currency"].value === "USD",
+  "有旧资产候选时预填其套餐金额/币种供核对");
+elements["ov-billing-subscription-amount"].value = "";
+ok(elements["ov-billing-start"].value === monthStart && elements["ov-billing-end"].value === today && elements["ov-billing-end"].max === today,
   "起止日期默认为组所在月首日/今天，结束日期上限为今天（§5.4）");
-ok(elements["ov-billing-scope-text"].textContent.includes("gpt-5.6-sol") && elements["ov-billing-scope-text"].textContent.includes("北京时间"),
-  "作用范围文案点名模型并标注北京时间日期");
-ok(elements["ov-billing-relationship-effect"].textContent.includes("移出按量估算"), "关系选项旁有结果说明");
 elements["ov-billing-end"].value = "2999-01-01";
 await elements["ov-billing-save"].onclick();
 ok(elements["ov-billing-preview"].textContent.includes("不能晚于今天") && !billingCalls.some((c) => c.command === "billing_candidate_impact_preview"),
   "结束日期晚于今天时前端直接拒绝，不发预览请求（G3）");
 elements["ov-billing-end"].value = today;
 await elements["ov-billing-save"].onclick();
+ok(elements["ov-billing-preview"].textContent.includes("月费") && !billingCalls.some((c) => c.command === "billing_candidate_impact_preview"),
+  "官方订阅未填月费也未勾选「金额暂不清楚」时不发预览");
+elements["ov-billing-amount-unknown"].checked = true;
+await elements["ov-billing-save"].onclick();
 const previewCall = billingCalls.find((c) => c.command === "billing_candidate_impact_preview");
 ok(previewCall && previewCall.args.effectiveStart === monthStart && previewCall.args.effectiveEnd === today && previewCall.args.relationshipKind === "official_subscription"
-  && previewCall.args.scopes.length === 1 && previewCall.args.scopes[0].scope_value === "gpt-5.6-sol" && !("windowStartMs" in previewCall.args),
-  "预览参数 = 保存参数（宿主/provider/关系/起止日期/模型作用域），不传统计月窗口（G2）");
+  && previewCall.args.scopes.map((s) => s.scope_value).join(",") === "gpt-5.6-sol,gpt-5.6-luna" && !("windowStartMs" in previewCall.args),
+  "预览参数 = 保存参数（宿主/provider/关系/起止日期/批量模型作用域），不传统计月窗口（G2）");
 const previewText = elements["ov-billing-preview"].textContent;
-ok(previewText.includes("预计从按量估算中移出") && previewText.includes("18.92") && previewText.includes("保持估算 18K")
+ok(previewText.includes("预计从按量估算中移出") && previewText.includes("19.88") && previewText.includes("保持估算 18K")
   && previewText.includes("仍待确认 900") && previewText.includes("路由证据冲突"),
   "V2：预览展示移出 / 保持 / 仍待确认三组数字与分币金额（§5.5）");
 ok(elements["ov-billing-save"].textContent === "确认并保存声明" && !billingCalls.some((c) => c.command === "save_billing_declaration_revision"),
@@ -293,12 +320,14 @@ ok(elements["ov-billing-save"].textContent === "确认并保存声明" && !billi
 await elements["ov-billing-save"].onclick();
 const saveCall = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
 ok(saveCall && saveCall.args.effectiveStart === monthStart && saveCall.args.effectiveEnd === today && saveCall.args.relationshipKind === "official_subscription"
-  && saveCall.args.sourceCandidateId === "candidate-test" && saveCall.args.scopes[0].scope_kind === "model",
-  "保存参数与预览一致，并把候选作为证据 source_candidate_id 带上");
+  && saveCall.args.sourceCandidateId === "candidate-test" && saveCall.args.scopes.length === 2 && saveCall.args.amountMinor === null && saveCall.args.currency === null,
+  "保存参数与预览一致；「金额暂不清楚」写空金额而不补挂牌价（AC09）");
 ok(!billingCalls.some((c) => c.command === "enqueue_billing_recalculation"),
   "前端不再单独入队：入队由保存命令完成（G6）");
 ok(billingCalls.some((c) => c.command === "billing_recalculation_job_status") && billingCalls.some((c) => c.command === "<renderOverview>"),
   "保存后轮询重算回执并刷新总览");
+ok(vm.runInContext("sessState.loaded === false && findState.loaded === false && calendarLoadedMonth === null", sandbox),
+  "重算完成后用量/会话/待处理缓存已作废（用户路径第 6 步）");
 const receipt = elements["ov-billing-preview"];
 ok(receipt.textContent.includes("声明已保存") && receipt.textContent.includes("重算已完成") && receipt.children.some((b) => b.textContent === "撤销"),
   "回执原位显示修订、范围与重算状态，并提供撤销");
@@ -306,17 +335,49 @@ await receipt.children.find((b) => b.textContent === "撤销").onclick();
 ok(billingCalls.some((c) => c.command === "revoke_billing_declaration" && c.args.supersedesRevisionId === saveCall.args.revisionId),
   "撤销追加修订并 supersede 当前修订，不删历史");
 
-// 仍不确定：两次点击只记录 30 天降级，不写声明。
+// 服务商未知：先选服务商，再问路由，再问计费方式；保存同时写型号归属。
+billingCalls.length = 0;
+await reviewRows[3].children[1].children[0].onclick();
+ok(elements["ov-billing-provider-row"].hidden === false && elements["ov-billing-route-row"].hidden === false
+  && elements["ov-billing-missing"].textContent.includes("服务商、路由、计费方式"),
+  "服务商未知的组：弹窗先问服务商，并列出缺失项");
+elements["ov-billing-amount-unknown"].checked = false;
+await elements["ov-billing-save"].onclick();
+ok(elements["ov-billing-preview"].textContent.includes("先选择这批用量的服务商") && billingCalls.length === 0,
+  "未选服务商时不发预览");
+elements["ov-billing-provider"].value = "zhipu-glm";
+elements["ov-billing-route"].value = "official";
+elements["ov-billing-mode"].value = "api";
+elements["ov-billing-mode"].onchange();
+ok(elements["ov-billing-subscription-fields"].hidden === true && elements["ov-billing-relationship-effect"].textContent.includes("金额不变"),
+  "选官方 API 时不展示订阅字段，并说明金额不变");
+await elements["ov-billing-save"].onclick();
+const glmPreview = billingCalls.find((c) => c.command === "billing_candidate_impact_preview");
+ok(glmPreview && glmPreview.args.providerId === "zhipu-glm" && glmPreview.args.relationshipKind === "official_api"
+  && glmPreview.args.scopes.some((s) => s.scope_kind === "provider" && s.scope_value === "unresolved")
+  && glmPreview.args.scopes.some((s) => s.scope_kind === "model" && s.scope_value === "glm-5"),
+  "预览带用户选的服务商与 provider=unresolved 作用域（只命中 NULL-provider 事实）");
+await elements["ov-billing-save"].onclick();
+const routeCall = billingCalls.find((c) => c.command === "save_price_route");
+ok(routeCall && routeCall.args.input.model_prefix === "glm-5" && routeCall.args.input.provider_id === "zhipu-glm" && routeCall.args.input.mode === "metered",
+  "保存时同时写型号归属（下一轮同步归到该服务商）");
+ok(!billingCalls.some((c) => c.command === "billing_recalculation_job_status") && billingCalls.some((c) => c.command === "<renderOverview>"),
+  "官方 API 不改金额：无重算任务，但仍刷新各面");
+
+// 仍不确定：两次点击只记录 30 天降级，不写声明、不写归属，组留在待处理。
 billingCalls.length = 0;
 await reviewRows[1].children[1].children[0].onclick();
-elements["ov-billing-relationship"].value = "unknown";
-elements["ov-billing-relationship"].onchange();
+ok(elements["ov-billing-route-row"].hidden === false, "路由证据缺失（missing）时问路由");
+elements["ov-billing-route"].value = "unknown";
+elements["ov-billing-route"].onchange();
+ok(elements["ov-billing-mode-row"].hidden === true && elements["ov-billing-subscription-fields"].hidden === true,
+  "选仍不确定后不再问计费方式");
 await elements["ov-billing-save"].onclick();
-ok(elements["ov-billing-preview"].textContent.includes("这组用量继续待确认，未创建计费声明") && elements["ov-billing-save"].textContent === "保持待确认并返回",
+ok(elements["ov-billing-preview"].textContent.includes("留在待处理列表，未创建计费声明") && elements["ov-billing-save"].textContent === "保持待确认并返回",
   "仍不确定：先展示影响，不创建声明（AC28）");
 await elements["ov-billing-save"].onclick();
-ok(!billingCalls.some((c) => c.command === "save_billing_declaration_revision") && storage["agent-vitals-billing-review-deferred-at-ms"],
-  "V4：仍不确定第二次点击只记录 30 天降级，无 save 调用");
+ok(!billingCalls.some((c) => ["save_billing_declaration_revision", "save_price_route"].includes(c.command)) && storage["agent-vitals-billing-review-deferred-at-ms"],
+  "V4：仍不确定第二次点击只记录 30 天降级，无 save / 归属写入");
 billingOverride = null;
 
 ok(js.includes("if (billingReviewOpen) renderRows();"),
