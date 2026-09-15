@@ -91,7 +91,7 @@ ok(order.every((v, i) => v > 0 && (i === 0 || v > order[i - 1])), "首屏顺序�
 ok(/id="ov-trust-route"[^>]*class="notice warn"|class="notice warn"[^>]*id="ov-trust-route"/.test(ov), "路由行 class = warn（颜色来自 health）");
 ok(!/id="ov-trust-rows"[^>]*compact/.test(ov), "有非 ok 行时可信度不收敛为 compact");
 ok(ovText.includes("确认下方套餐信息即可解决"), "同源 18K：⚠ 行指向套餐提示");
-ok((ov.match(/<button(?![^>]*\shidden)[^>]*class="btn"(?![\w-])/g) || []).length === 1, "全页只有一个可见的实心主按钮（确认套餐信息）");
+ok((ov.match(/<button(?![^>]*\shidden)[^>]*class="(?=[^"]*\bbtn\b)(?=[^"]*\bprimary\b)[^"]*"/g) || []).length === 1, "全页只有一个可见的实心主按钮（确认套餐信息）");
 // 第三档 CTA：每张卡 / 模块一个安静的入口（预算已配置 → 调整预算；未配置 → 用量行的 设置预算）。
 for (const id of ["ov-link-spend", "ov-link-today", "ov-link-budget", "ov-link-plans", "ov-link-usage", "ov-link-billing", "ov-link-days"]) {
   ok(!!info.get(id) && !info.get(id).chainHidden, `卡片入口 #${id} 可见`);
