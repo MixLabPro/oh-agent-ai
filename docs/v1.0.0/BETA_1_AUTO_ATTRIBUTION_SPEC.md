@@ -156,3 +156,72 @@
 3. D1 拍板后 A5（账户证据）——A/B 变成一键确认。
 4. A9 + 弹窗收敛 + 测试。
 5. 阶段 2（A11）单独评审。
+
+## 10. 可扩展性：归因特征模板化，让新宿主 / 新厂商 / 新模型快速接入
+
+### 10.1 先看七个宿主各自给了什么（本仓库已评估的宿主）
+
+| 特征 | claude-code | codex | dsh | workbuddy | pi | hermes | cline |
+|---|---|---|---|---|---|---|---|
+| 模型名（raw） | ✅ | ✅ | ✅ | ✅ | ✅ `modelId` | ✅ | ✅ `metadata.modelId`（带厂商前缀 `anthropic/…`） |
+| 宿主自报 provider | ✗ | `model_provider`（openai / custom） | `provider_raw` | ✗（设计如此） | `model_change.provider` | `billing_provider`（`minimax-cn` / `auto`） | `provider` + `modelInfo` |
+| 端点 / base_url | 启动环境变量，日志不记 | `config.toml [model_providers.*].base_url` | ✗ | ✗ | `models-store.json` | `.env`（凭据文件，**不读**） | `providers.json` |
+| 请求 / 响应 ID 形状 | ✅ `requestId` + `message.id`（§1.2） | 部分 | ? | ✗ | ? | ? | ? |
+| 账户 / 套餐证据 | `oauthAccount.{organizationType,billingType,subscriptionCreatedAt}` | `auth.json auth_mode` + 配额快照 `plan_type` | ✗ | credit 积分 | ✗ | ✗ | ✗ |
+| 宿主自报成本 | ✗ | ✗ | ✗ | credit（非货币） | ✅ per-message `usage.cost`（provider-reported） | 列全 0 | ✅ `totalCost` + per-message |
+| 本地价卡缓存 | ✗ | ✗ | ✗ | ✗ | `models-store.json` | `models_dev_cache.json`（213 provider / 7,126 带价） | 4 个网关的 `*_models.json` |
+
+结论：**没有一个特征是七个宿主都有的，但每个宿主都至少有两个**——所以归因不能是"每个宿主一套写死的 if"，也不能是"一套字段人人必填"，而应是一条**证据阶梯 + 可插拔的证据提取器**：宿主声明它能提供哪些提取器，缺的就是 `missing`，不猜。
+
+### 10.2 三层拆分：什么必须写代码，什么能做成模板（数据）
+
+| 层 | 内容 | 形态 | 新宿主接入要做的 | 新厂商 / 新模型接入要做的 |
+|---|---|---|---|---|
+| **① 线格式适配器**（已有） | 文件发现、JSONL/SQLite/zstd 解析、会话身份、token 桶语义与去重（`(turn,step)` vs `total_token_usage` 签名等） | **代码**（`hosts/<h>/sources`），不可模板化——每个宿主的去重规则都是踩过坑的 | 写一个（现状不变） | 不需要 |
+| **② 证据提取器**（本规格新增） | 从 ① 的记录/配置里取出 `AttributionEvidence` 候选：厂商前缀、ID 形状、端点、provider_raw、账户属性、自报成本 | **模板 + 少量代码**：一份宿主 `AttributionProfile`（声明用哪些提取器、字段在哪个 JSON 指针/文件），提取器本身是通用实现 | 填一份 profile（大多数宿主 5–10 行） | 不需要 |
+| **③ 判定器**（`agent-vitals-provider`） | 证据阶梯 L0–L3 的合成规则：强度比较、冲突判定、订阅判定 | **代码，宿主无关**；厂商知识全部外置到签名目录 | 不需要 | 不需要 |
+| **④ 厂商签名目录**（本规格新增数据） | 每个厂商：模型名前缀/正则、`vendor/` 前缀命名约定、请求/响应 ID 形状、官方端点主机名、套餐标记、价卡引用 | **纯数据**（`assets/attribution_signatures.json`，与 `pricing.json` 同一 lockstep 纪律） | 不需要 | 加一条签名（新模型通常只是前缀已覆盖，零改动） |
+
+现状对照：③ 里现在混着厂商知识——`provider/src/lib.rs` 的 `is_cogfoundry_host` / `is_openai_host` / `Some("openai") =>` / `model_provider == Some("openai")` 全是写死的（`:85-99`、`:140-156`）；`billing_route_of` 只认 `catalog_2026_09.billing_modes` 里的两条 deepseek。**模板化的第一步就是把这些常量搬进 ④**，判定器只剩阶梯规则。
+
+### 10.3 有普适性的特征（可以进 ④ 的签名目录）
+
+按"跨厂商稳定、跨宿主可得"排序：
+
+1. **模型名族**（L0）：每家厂商的命名前缀稳定多年（`claude-`、`gpt-`/`o`、`deepseek`、`MiniMax-`、`glm-`、`kimi`/`moonshot`、`hy`/`hunyuan`、`qwen`、`gemini`、`llama`）。普适性最高；新模型 95% 落在已有前缀里。
+2. **`vendor/model` 前缀命名**：OpenRouter / 胜算云 / Vercel Gateway / Cline 的通用约定——**名字本身就说明走了网关**，且前缀 = 模型厂商。这是"中转"最廉价的判定特征，七个宿主里 codex-custom、cline、hermes 都能用。
+3. **请求 / 响应 ID 形状**（L1）：每家 API 的 `id` 格式是文档级稳定的（Anthropic `msg_01…` / `req_01…`、OpenAI 兼容 `chatcmpl-…`、智谱 `msg_20…` 时间戳式、MiniMax/DeepSeek 32 位 hex）。只要宿主把原始响应写进日志就能用（claude-code 已证实；cline/pi 待核）。
+4. **官方端点主机名**：`api.anthropic.com`、`api.openai.com`、`api.deepseek.com`、`open.bigmodel.cn`、`api.minimax.chat`……配置里出现即 `ConfigCurrent`，会话里出现即 `SessionNative`。`normalize_host` 的边界匹配逻辑已有，只是主机名表要外置。
+5. **宿主自报 provider 的词表映射**：`minimax-cn` → minimax、`auto` → unknown、`custom` → 中转——每个宿主一张小表，放 profile。
+6. **账户 / 套餐标记**：形状各异（claude 的 `organizationType`、codex 的 `auth_mode`、hermes/cline 是"配置里有该 provider 的 key 存在"→ 按量），但**抽象一致**：`AccountEvidence{plan_kind: subscription|api_key|credits|unknown, anchor_date?, channel?}`。profile 里声明"文件 + 字段白名单 + 取值映射"，读取器通用；**白名单之外一律不读**（隐私守卫跨宿主一次写好）。
+7. **宿主自报成本**：`provider-reported`（pi）> `host-reported`（cline totalCost）> `credits`（workbuddy）> `none`（hermes 全 0）；这是 `ATTRIBUTABLE_WASTE` §3 的 basis 分级，已有，只需 profile 声明字段位置。
+
+### 10.4 不能模板化、也不该模板化的
+
+- **去重与 token 语义**（①）：Codex 的 `total_token_usage` 签名去重、DSH 的 `(turn,step)`、Claude 的 message.id 去重——错一个就是 2–3 倍重复计数（memory：claude ledger 重复计数事故）。这是代码 + 回归测试，不是配置。
+- **冲突裁决**：L0 说 anthropic、L1 形状不是 Anthropic 的 → 只能 `Conflict` 进待确认；模板不能替用户裁决（REQ-031）。
+- **中转的价卡**：网关的价格是商业信息，可以从 models.dev 快照给 `catalog-fallback` 档，但不能冒充 `provider-reported`（Hermes 评估 §5）。
+
+### 10.5 新厂商 / 新模型怎么"自己归因"
+
+三条来源，按可信度：
+
+1. **签名目录快照**（④）：随版本发布的 `attribution_signatures.json`；models.dev 的本地镜像（Hermes 已缓存 7,126 带价模型）可以作为**生成**这份快照的上游——离线生成、进仓库、走 `test_pricing_lockstep` 守卫，不在扫描时联网（CLAUDE.md 供应链约束不变）。
+2. **本地学习**：用户在弹窗里答过一次"`openai/gpt-5.6-*` 走的是胜算云"，系统把它写成本地签名（`pricing-overrides.json` 的 `routes` 已经是这个机制——`model_prefix → provider`；扩展成 `signatures: {model_prefix|id_shape|endpoint → provider}`），下次同厂商新模型直接命中，不再问。
+3. **启发式兜底**：未知前缀 + 无 ID 形状 + 无端点 → 诚实 `missing`，进待确认；**不做"看起来像 X"的猜测**。
+
+### 10.6 与现有架构的落点
+
+- ④ 签名目录：`assets/attribution_signatures.json`（Rust `include_str!`、Python `json.load`、dsh-client 复制），三方 lockstep 测试与 `pricing.json` 同款。
+- ② `AttributionProfile`：放进已有的 `contracts/host_capability.rs::HostProfile`（它已经按宿主声明 `signals`、`degraded_rules`、`fold`），新增 `attribution: &'static AttributionProfile { extractors: &[…], provider_raw_map: &[…], account_evidence: Option<AccountSource>, cost_report: CostBasis }`。注册路径 fail-closed 的纪律不变：不在 `HOSTS` 里的宿主任何提取器都不跑。
+- ③ 判定器：`agent-vitals-provider::resolve_billing_attribution` 改为接收 `&[AttributionEvidence]` + `&SignatureCatalog`，删除所有厂商常量；现有 `EvidenceBasis` 强度表不变。
+- 通用提取器实现放 `crates/agent-vitals-hosts/src/attribution/`（宿主无关，纯函数，wasm 可链）；I/O 型提取器（读配置/账户文件）挂 `sources` feature。
+
+### 10.7 一个新宿主的接入清单（目标：半天）
+
+1. ①：线格式适配器（已有流程，不变）。
+2. ②：在 `HostProfile` 里填 `attribution`：模型字段路径、provider_raw 字段 + 映射表、ID 字段路径（如有）、端点来源（会话字段 or 配置文件 + 键）、账户证据文件 + 字段白名单（如有）、自报成本字段 + basis。
+3. 跑同一套 `attribution` 夹具测试：每个提取器一条"有 → 命中 / 无 → missing"的用例；隐私测试自动覆盖新白名单。
+4. 不用改判定器、不用改 UI——列表三态和弹窗读的是 `auto_verdict`，宿主无关。
+
+Cline 就是现成的验证对象：`metadata.modelId = anthropic/claude-sonnet-4.6` 命中 10.3 第 2 条（网关命名），`providers.json` 命中第 4 条，`totalCost` 命中第 7 条——三条都是模板层就能吃下的，不需要为 Cline 写一行归因代码。
