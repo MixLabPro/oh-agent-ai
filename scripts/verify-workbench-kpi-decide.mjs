@@ -42,6 +42,19 @@ ok(wb.includes("budgetLive"), "source:\"sql\" 走「实时算」新鲜度文案�
 // 预算口径 = 跨宿主按量实付（PM 决策 2026-09-07）——「仅 DSH」是历史遗留缺陷。
 ok(html.includes("预算（按量费用）") && !html.includes("仅 DSH 实测"),
   "预算卡标注按量费用，不再写「仅 DSH 实测」");
+// 组件自设 display 后必须补 [hidden] 规则，否则压过 UA 的 display:none（label[hidden]
+// 事故的重演：2026-09-15 .btn 加 inline-flex 后「加载更多」「截图」「立即同步」全部
+// 在 hidden 态下显形）。
+{
+  const css = readFileSync(`${root}/apps/desktop/src-tauri/ui/workbench.css`, "utf8");
+  for (const sel of [".btn[hidden]", ".chip[hidden]", ".sev[hidden]", ".form-row label[hidden]"]) {
+    ok(css.includes(sel), `CSS 保留 ${sel} { display:none } 守卫`);
+  }
+  ok(/\.chip,\s*\n\.sev,\s*\n\.tag,\s*\n\.unresolved-tag \{/.test(css), "chip / sev / tag / unresolved-tag 共用一个基类（标签规范）");
+  ok(css.includes(".btn.primary {") && html.includes('class="btn primary" id="ov-billing-review"'),
+    "主按钮是 .btn.primary 显式类，不再靠 .notice.todo 作用域选择器");
+  ok(!/#(fff4cc|fde6ec|e8ecf3|ece6f5|d7a5e8)\b/.test(css), "标签不再硬编码浅色 hex（走 --tone + color-mix）");
+}
 ok(html.includes("保存脱敏诊断包") && html.includes("不会自动上传"),
   "帮助区提供用户主动保存的脱敏诊断包且明确不自动上传");
 ok(wb.includes('invoke("export_diagnostic_package")'),

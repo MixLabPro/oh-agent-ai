@@ -22,6 +22,9 @@
   --text-2: var(--muted);
   --text-dim: #64748b;
   --fg: var(--text);
+  /* 标签色调（.chip --tone）：宿主/计费口径里用到的两种非语义色。 */
+  --purple: #c4b5fd;
+  --indigo: #a5b4fc;
   /* select 自绘 chevron（appearance:none 后原生箭头没了）。SVG data URI 里
      用不了 currentColor，所以按主题各给一份：暗色 = --muted #94a3b8。 */
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%2394a3b8' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
@@ -43,14 +46,10 @@
     --success: #15803d;
     --skill: #1d4ed8;
     --text-dim: #94a3b8;
+    --purple: #6d28d9;
+    --indigo: #4338ca;
     /* 浅色 = --muted #64748b */
     --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%2364748b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  }
-
-  .src-list li.no-data .chip,
-  .decide .chip {
-    color: #475569;
-    border-color: #cbd5e1;
   }
 }
 
@@ -131,14 +130,28 @@ body {
   background: var(--danger);
 }
 
+/* ---------- 按钮规范 ----------
+   四档：.btn（默认 = 描边次级）· .btn.primary（实心强调，一个视图里只该有一个）
+   · .btn.sm / .btn-inline（表格/行内小号）· .btn.ghost（无框虚线，接近链接）。
+   此前 "btn secondary" 用了 37 处却没有对应规则，主按钮只存在于
+   `.notice.todo .btn:not(.secondary)` 这个作用域里——同一语义在别处就写不出来。 */
 .wb-refresh,
 .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   border: 1px solid var(--panel-2);
   background: var(--panel);
   color: var(--text);
+  font: inherit;
   font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
   border-radius: 6px;
-  padding: 3px 10px;
+  padding: 4px 10px;
+  min-height: 26px;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -147,6 +160,113 @@ body {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+.btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  outline-offset: 0;
+  border-color: var(--accent);
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.btn.primary:hover {
+  color: var(--bg);
+  opacity: 0.9;
+}
+
+.btn.sm,
+.btn-inline {
+  padding: 2px 8px;
+  min-height: 22px;
+}
+
+.btn.ghost {
+  border-color: transparent;
+  background: transparent;
+  padding: 2px 6px;
+  min-height: 0;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+/* .btn / .chip 自带 display 后会压过 UA 的 [hidden]{display:none}（与
+   `.form-row label[hidden]` 同一事故：无头截图里「加载更多」在 hidden 态下
+   仍整行显示）。所有自设 display 的组件都要补这条。 */
+.btn[hidden],
+.wb-refresh[hidden],
+.chip[hidden],
+.sev[hidden],
+.tag[hidden],
+.unresolved-tag[hidden] {
+  display: none;
+}
+
+/* ---------- 标签规范（chip / sev / tag）----------
+   此前 6 套并存：.chip 药丸描边 11px、费用明细 .chip.* 圆角浅底 12px（5 组硬编码
+   hex）、.sev 4px 描边 10px、.days-list .tag 4px 描边 10px、.unresolved-tag 填充
+   12px、宿主 chip 硬编码 indigo/紫（2026-09-15 反馈）。统一为一个基类 + `--tone`
+   语义色：药丸、11px、浅底 color-mix 填充（自动适配深浅主题，不再写死 hex）。
+   旧类名全部保留为 tone 别名，JS 不用改。 */
+.chip,
+.sev,
+.tag,
+.unresolved-tag {
+  --tone: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  padding: 1px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  vertical-align: middle;
+  color: var(--tone);
+  background: color-mix(in srgb, var(--tone) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent);
+}
+
+/* 语义色别名 */
+.chip.estimate, .chip.status-findings, .tag,
+.sev.warning, .sev.high, .sev.medium { --tone: var(--warn); }
+.chip.hostbilled, .unresolved-tag, .sev.critical { --tone: var(--danger); }
+.chip.measured { --tone: var(--success); }
+.chip.diagnostic { --tone: var(--skill); }
+.chip.subscription, .chip.claude-code { --tone: var(--purple); }
+.chip.codex { --tone: var(--indigo); }
+.chip.dsh { --tone: var(--accent); }
+
+/* 状态修饰 */
+.chip.status-zero { opacity: 0.55; }
+.chip.status-unavailable { opacity: 0.4; border-style: dashed; }
+.src-list li.no-data .chip { opacity: 0.7; }
+
+/* 可点击 chip（会话 host 过滤 / Findings 过滤）：button 形态复用同一外观，
+   选中即用 tone 实心填充。 */
+button.chip { cursor: pointer; font: inherit; font-size: 11px; }
+button.chip:hover { border-color: var(--tone); }
+button.chip.active {
+  color: var(--bg);
+  background: var(--tone);
+  border-color: var(--tone);
+}
+/* chip 形态的链接（「未填写月费，去填写 ›」）：保住药丸外观（下面通用 .chip-link
+   的 border:0/background:none reset 特异度更低），只加虚下划线。 */
+.chip.chip-link {
+  cursor: pointer;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent);
+  background: color-mix(in srgb, var(--tone) 12%, transparent);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.chip.chip-link:hover { --tone: var(--accent); }
 
 /* 200% 字号通常把 CSS 视口压到约 512px；顶部导航和关键操作必须换行而不是
    被右侧按钮裁掉。内容区本身继续滚动，核心路径不依赖横向滚动。 */
@@ -447,7 +567,6 @@ body {
   margin-left: auto;
 }
 
-.btn-inline { padding: 2px 8px; font-size: 12px; }
 
 /* ---------- 通知组件 .notice ----------
    总览上所有"要你注意"的东西只有这一个组件、四个级别：
@@ -484,14 +603,6 @@ body {
 .notice[hidden] { display: none; }
 
 /* todo 级的主按钮是全页唯一的实心按钮。 */
-.notice.todo .btn:not(.secondary) {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--bg);
-  font-weight: 600;
-}
-
-.notice.todo .btn:not(.secondary):hover { color: var(--bg); opacity: 0.9; }
 
 .notice > button { margin-left: auto; }
 
@@ -528,11 +639,12 @@ body {
 
 .notice.ok .notice-icon::before { content: "✓"; color: var(--success); }
 
+/* ok 级通知里的次级按钮退成 ghost（不抢视线）。 */
 .notice.ok .btn.secondary {
   border-color: transparent;
   background: transparent;
   padding: 2px 6px;
-  font-size: 12px;
+  min-height: 0;
   text-decoration: underline dotted;
   text-underline-offset: 3px;
 }
@@ -872,13 +984,6 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.days-list li .tag {
-  font-size: 10px;
-  color: var(--warn);
-  border: 1px solid var(--warn);
-  border-radius: 4px;
-  padding: 0 4px;
-}
 
 .empty {
   color: var(--muted);
@@ -1115,34 +1220,11 @@ summary.detail-section-title {
   border-bottom: 1px solid var(--panel);
 }
 
-.sev {
-  font-size: 10px;
-  border-radius: 4px;
-  padding: 0 5px;
-  flex-shrink: 0;
-}
 
-.sev.critical {
-  color: var(--danger);
-  border: 1px solid var(--danger);
-}
 
-.sev.high,
-.sev.warning {
-  color: var(--warn);
-  border: 1px solid var(--warn);
-}
 
-.sev.medium {
-  color: #a5b4fc;
-  border: 1px solid #a5b4fc;
-}
 
 .sev.low,
-.sev.info {
-  color: var(--muted);
-  border: 1px solid var(--muted);
-}
 
 .detail-raw {
   max-height: 320px;
@@ -1214,19 +1296,8 @@ summary.detail-section-title {
   user-select: none;
 }
 
-.chip.status-findings {
-  border-color: var(--warn);
-  color: var(--warn);
-}
 
-.chip.status-zero {
-  opacity: 0.55;
-}
 
-.chip.status-unavailable {
-  opacity: 0.4;
-  border-style: dashed;
-}
 
 /* ---------- Findings ---------- */
 .find-toolbar {
@@ -1263,42 +1334,11 @@ summary.detail-section-title {
   flex-wrap: wrap;
 }
 
-.chip {
-  font-size: 11px;
-  border-radius: 999px;
-  padding: 2px 10px;
-  border: 1px solid var(--panel-2);
-  color: var(--muted);
-}
 
-.chip.dsh {
-  color: var(--accent);
-  border-color: var(--accent);
-}
 
-.chip.codex {
-  color: #a5b4fc;
-  border-color: #a5b4fc;
-}
 
-.chip.claude-code {
-  color: #d7a5e8;
-  border-color: #d7a5e8;
-}
 
-/* 会话列表 host 过滤 chips（spec §7.3）是按钮形态——`button` 自带浏览器底色/
-   边框，`.chip` 是按展示 span 写的，这里补按钮差量 + active 态（选中即填充，
-   与同 tab 的 Findings chips 同语言）。 */
-button.chip {
-  background: transparent;
-  cursor: pointer;
-}
 
-button.chip.active {
-  color: var(--bg);
-  background: var(--muted);
-  border-color: var(--muted);
-}
 
 .find-filter {
   display: flex;
@@ -1619,28 +1659,6 @@ button.chip.active {
   flex-wrap: wrap;
   gap: 6px;
 }
-.src-list li .basis .chip {
-  /* 裸 chip（「月费未声明 · 利用率不可算」「无数据」）：此前是
-     var(--line,#eee) 底 + var(--fg) 字——两个变量都没定义，暗主题下
-     回退成近白底 + 继承的浅字 = 白底白字空白盒（真机截图发现的渲染
-     缺陷）。改成与同族修饰 chip（subscription/estimate/measured）一致
-     的浅底深字——它们本来就是亮色徽章家族，裸 chip 缺的只是显式文字色。 */
-  background: #e8ecf3;
-  color: #38415a;
-  border-radius: 4px;
-  padding: 2px 8px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-.src-list li .basis .chip.estimate { background: #fff4cc; color: #8a6a00; }
-.src-list li .basis .chip.diagnostic { background: #eef3ff; color: #2c4ea8; }
-.src-list li .basis .chip.measured { background: #e7f7ec; color: #1f6c3a; }
-.src-list li .basis .chip.hostbilled { background: #fde6ec; color: #8a1f3d; }
-.src-list li .basis .chip.subscription { background: #ece6f5; color: #4a2a8a; }
-.src-list li .basis .unresolved-tag {
-  background: #fde6ec; color: #8a1f3d;
-  border-radius: 4px; padding: 2px 6px; font-size: 12px;
-}
 .src-list li .fresh {
   flex: 0 0 200px;
   color: var(--muted);
@@ -1761,7 +1779,6 @@ button.chip.active {
 /* #9 unavailable/降级状态是最新对比度、最需要看清的状态：给足底色与亮字。 */
 .src-list li.no-data { background: rgba(255, 255, 255, 0.04);
   border-radius: 6px; color: var(--text-1, #dde3ee); }
-.src-list li.no-data .chip { color: #cfd6e4; border-color: #4a5468; }
 /* 「无数据」不吃 hero 强调色（绿色 = 好状态金额的语义色）。 */
 .amount.muted-amt { color: var(--muted); }
 /* `≈¥` 折算数带 hover 展开原始分币（PM 决策 2026-09-07 要求 hover 可见）——
@@ -1773,7 +1790,6 @@ button.chip.active {
 .decide-advice { background: var(--panel-2); color: var(--text);
   border-left: 3px solid var(--skill); }
 /* 决策卡里的 chip（Claude Pro「窗口余量不可得」等）保证可读。 */
-.decide .chip { color: var(--muted); border-color: var(--panel-2); }
 /* 「本月逐日」跨宿主列表行。 */
 .days-list li { display: flex; gap: 12px; align-items: baseline; padding: 4px 0; }
 .days-list .day-date { color: var(--muted); min-width: 84px; }
