@@ -592,6 +592,14 @@ function renderTrustRows(status, monthly) {
   };
   const toDiagnostics = { label: "查看详情", onClick: () => openSettingsSection("settings-about", "ov-diagnostic-status") };
   const toPricing = { label: "查看价格表", onClick: () => openSettingsSection("settings-data", "ov-pricing-catalog-status") };
+  // 未归属服务商的用量就是「明确计费方式」弹窗里「服务商未知」的那些组：按钮直接
+  // 打开该面板（设置 › 计费与套餐），诊断页留给真正的技术故障。提示被「稍后」压住时
+  // `ov-billing-review` 仍在 DOM 里，click() 照样展开面板。
+  const toClarify = { label: "去明确", onClick: async () => {
+    const review = document.getElementById("ov-billing-review");
+    if (review && review.click) review.click();
+    await openSettingsSection("settings-billing", "ov-billing-review-title");
+  } };
   price.hidden = false;
   if (!status || status.status !== "ok") {
     setRow(route, "danger", "读不到数据状态，无法确认这些数字是否完整", toDiagnostics);
@@ -615,8 +623,8 @@ function renderTrustRows(status, monthly) {
     const sameSource = billingPromptState.visible && billingPromptState.pendingTokens >= unresolved;
     setRow(route, trustRowLevel(health, true),
       "全库累计有 " + fmtTokens(unresolved) + " tokens 还不知道是哪家服务商的，按量费用可能少算" +
-        (sameSource ? "——确认下方套餐信息即可解决" : ""),
-      sameSource ? null : toDiagnostics);
+        (sameSource ? "——在下方「明确计费方式」里补上服务商即可" : ""),
+      sameSource ? null : toClarify);
   } else if (health !== "ok") {
     setRow(route, trustRowLevel(health, false), "数据检查发现问题（" + health + "），数字可能不完整", toDiagnostics);
   } else {

@@ -380,11 +380,12 @@ ok(priceRow.hidden === false && !elements["ov-trust-price-text"].textContent.inc
 // 同源合并：套餐提示可见且影响 tokens 盖住 unresolved → ⚠ 行无按钮、指向套餐提示。
 sandbox.billingPromptState = { visible: true, pendingTokens: 18000 };
 sandbox.renderTrustRows(warnStatus, monthlyDto);
-ok(elements["ov-trust-route-text"].textContent.includes("确认下方套餐信息即可解决") && elements["ov-trust-route-action"].hidden === true,
+ok(elements["ov-trust-route-text"].textContent.includes("在下方「明确计费方式」里补上服务商即可") && elements["ov-trust-route-action"].hidden === true,
   "同源 18K：⚠ 行指向套餐提示，不自带第二个按钮（一件事一个动作）");
 sandbox.billingPromptState = { visible: false, pendingTokens: 18000 };
 sandbox.renderTrustRows(warnStatus, monthlyDto);
-ok(elements["ov-trust-route-action"].hidden === false, "套餐提示被「稍后」压住后，⚠ 行恢复自己的按钮");
+ok(elements["ov-trust-route-action"].hidden === false && elements["ov-trust-route-action"].textContent === "去明确",
+  "套餐提示被「稍后」压住后，⚠ 行恢复自己的按钮，且直接通向「明确计费方式」而不是诊断页");
 sandbox.renderTrustRows({ status: "unavailable", reason: "x" }, monthlyDto);
 ok(routeRow.className === "notice danger" && priceRow.hidden === true, "数据状态不可用 → danger 一行，不冒充 ok");
 
