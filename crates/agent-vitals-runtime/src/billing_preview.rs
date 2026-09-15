@@ -73,6 +73,83 @@ pub fn declaration_impact_preview(
     })
 }
 
+/// 「确认计费方式」面板的数据源（规格 §5.2 / B1）：`summary::unresolved_billing_groups_in`
+/// 的组 + 同一批事实的分币估算金额。金额来自 `price_fact_selection` 跑
+/// `SQL_UNRESOLVED_BILLING_FACT_WHERE`（与组 SQL 共享的谓词），按组键
+/// `(host, provider, model, evidence_basis, pricing_basis)` 归并、不跨币种相加。
+/// 排序：有金额的组按 `amount_minor` 降序，无价卡的组按 tokens 降序排在其后。
+pub fn confirmation_groups(db: &AuthorityDb, month: &str) -> Value {
+    let mut report = crate::summary::unresolved_billing_groups_in(db, month);
+    if report["status"] != json!("ok") {
+        return report;
+    }
+    let Some((start, end)) = agent_vitals_data::authority_query::beijing_month_bounds_ms(month) else {
+        return report;
+    };
+    let priced = match price_fact_selection(
+        db.conn(),
+        agent_vitals_data::authority_query::SQL_UNRESOLVED_BILLING_FACT_WHERE,
+        &[rusqlite::types::Value::Integer(start), rusqlite::types::Value::Integer(end)],
+        &[],
+    ) {
+        Ok(priced) => priced,
+        Err(error) => {
+            report["pricing_status"] = json!({ "status": "unavailable", "reason": error.message });
+            return report;
+        }
+    };
+    let mut amounts: BTreeMap<String, BTreeMap<(String, String), i64>> = BTreeMap::new();
+    let mut unpriced: BTreeMap<String, (i64, Option<String>)> = BTreeMap::new();
+    for row in &priced.rows {
+        let key = row["key"].as_object().map(|key| format!(
+            "{}|{}|{}|{}|{}|{month}",
+            key["host"].as_str().unwrap_or(""),
+            key["provider"].as_str().unwrap_or("<unknown>"),
+            key["model"].as_str().unwrap_or("<unknown>"),
+            key["evidence_basis"].as_str().unwrap_or("missing"),
+            key["pricing_basis"].as_str().unwrap_or("unavailable"),
+        )).unwrap_or_default();
+        match row.get("amount").filter(|amount| !amount.is_null()) {
+            Some(amount) => {
+                *amounts.entry(key).or_default().entry(amount_key(amount)).or_insert(0)
+                    += amount["amount_minor"].as_i64().unwrap_or(0);
+            }
+            None => {
+                let slot = unpriced.entry(key).or_insert((0, None));
+                slot.0 += row["tokens"]["total"].as_i64().unwrap_or(0);
+                if slot.1.is_none() {
+                    slot.1 = row["unresolved_reason"].as_str().map(ToOwned::to_owned);
+                }
+            }
+        }
+    }
+    let Some(groups) = report["groups"].as_array_mut() else { return report; };
+    for group in groups.iter_mut() {
+        let id = group["group_id"].as_str().unwrap_or("").to_owned();
+        let estimated = amounts.remove(&id).unwrap_or_default().into_iter()
+            .map(|((currency, basis), amount_minor)| json!({
+                "amount_minor": amount_minor, "currency": currency, "basis": basis,
+            })).collect::<Vec<_>>();
+        let (unpriced_tokens, reason) = unpriced.remove(&id).unwrap_or((0, None));
+        group["estimated_amounts"] = json!(estimated);
+        group["unpriced_tokens"] = json!(unpriced_tokens);
+        group["unresolved_reason"] = json!(reason);
+        group.as_object_mut().map(|object| object.remove("estimated_cost_minor"));
+    }
+    groups.sort_by(|a, b| {
+        let amount = |group: &Value| group["estimated_amounts"].as_array()
+            .and_then(|rows| rows.iter().filter_map(|row| row["amount_minor"].as_i64()).max());
+        let tokens = |group: &Value| group["tokens"].as_i64().unwrap_or(0);
+        match (amount(a), amount(b)) {
+            (Some(x), Some(y)) => y.cmp(&x).then_with(|| tokens(b).cmp(&tokens(a))),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => tokens(b).cmp(&tokens(a)),
+        }
+    });
+    report
+}
+
 /// 按 `(currency, basis)` 逐槽相减，永不跨币种；负数说明两次选择不是子集关系，
 /// 属于谓词漂移，钳到 0 并不掩盖——`kept.tokens` 会同时暴露。
 fn subtract_amounts(all: &[Value], moved: &[Value]) -> Vec<Value> {
@@ -197,6 +274,62 @@ mod tests {
             .filter(|row| row["key"]["billing_mode"] == json!("subscription"))
             .map(|row| row["tokens"]["total"].as_i64().unwrap()).sum();
         assert_eq!(subscription_tokens, 1_650_000);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 规格 R3：待确认组带分币估算金额、按金额降序；只有 `official_subscription`
+    /// 的重算让组消失（其他关系不改数字），撤销后组立即回来（撤销不需要重算）。
+    #[test]
+    fn confirmation_groups_price_and_react_to_subscription_attribution_only() {
+        let home = temp_home("r3");
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let (month_start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms("2026-08").unwrap();
+        let noon = month_start + 12 * 3_600_000;
+        let snapshot = json!({
+            "pricing": agent_vitals_domain::cost::load_pricing(),
+            "codex_pricing": crate::sessions::codex_cost::load_codex_pricing(),
+        }).to_string();
+        db.pricing_snapshot_put("v-test", "test", &snapshot, month_start - 1_000).unwrap();
+        seed_codex_fact(&db, "f-small", "gpt-5.6-luna", noon, 100_000, 10_000);
+        seed_codex_fact(&db, "f-big", "gpt-5.6-sol", noon + 60_000, 2_000_000, 200_000);
+
+        let report = confirmation_groups(&db, "2026-08");
+        assert_eq!(report["status"], json!("ok"), "{report}");
+        let groups = report["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["model_id"], json!("gpt-5.6-sol"), "largest amount first");
+        assert_eq!(groups[0]["estimated_amounts"][0]["currency"], json!("USD"));
+        assert!(groups[0]["estimated_amounts"][0]["amount_minor"].as_i64().unwrap()
+            > groups[1]["estimated_amounts"][0]["amount_minor"].as_i64().unwrap());
+        assert_eq!(groups[0]["effective_start"], json!("2026-08"));
+        assert_eq!(groups[0]["effective_end"], json!("2026-08"));
+        assert!(groups[0].get("estimated_cost_minor").is_none());
+
+        let scopes = [("model", "gpt-5.6-sol")];
+        db.billing_declaration_revision_save(
+            "rev-api", "decl-api", None, "codex", "openai", "official_api",
+            None, None, None, "2026-08", Some("2026-08"), None, None, &scopes, 2,
+        ).unwrap();
+        db.billing_recalculation_enqueue("job-api", "decl-api", "rev-api", 3).unwrap();
+        assert!(db.billing_recalculation_run("job-api", 4).unwrap());
+        assert_eq!(confirmation_groups(&db, "2026-08")["groups"].as_array().unwrap().len(), 2,
+            "official_api never changes numbers");
+
+        db.billing_declaration_revision_save(
+            "rev-sub", "decl-sub", None, "codex", "openai", "official_subscription",
+            None, None, None, "2026-08", Some("2026-08"), None, None, &scopes, 5,
+        ).unwrap();
+        db.billing_recalculation_enqueue("job-sub", "decl-sub", "rev-sub", 6).unwrap();
+        assert!(db.billing_recalculation_run("job-sub", 7).unwrap());
+        let after = confirmation_groups(&db, "2026-08");
+        let remaining = after["groups"].as_array().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0]["model_id"], json!("gpt-5.6-luna"));
+
+        assert!(db.billing_declaration_revision_revoke("rev-sub-revoke", "decl-sub", "rev-sub", 8).unwrap());
+        assert_eq!(confirmation_groups(&db, "2026-08")["groups"].as_array().unwrap().len(), 2,
+            "revoke restores the group without a recalculation job");
         let _ = std::fs::remove_dir_all(&home);
     }
 

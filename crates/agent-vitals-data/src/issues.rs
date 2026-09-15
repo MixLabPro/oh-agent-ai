@@ -608,6 +608,23 @@ pub fn source_issue_groups(
                 "amount_minor": amount, "billing_period_start": period, "is_bill": false}), "diagnostic-only"));
     }
 
+    // 「仍不确定 / 稍后」之后用户要能从待处理找回（AC28）：没有旧资产候选、只有
+    // 按量估算的待确认组也必须投影出来。组的定义与总览面板同一条 SQL
+    // （`authority_query::SQL_UNRESOLVED_BILLING_GROUPS`），对象键 = provider:model，
+    // 同对象同原因在 `merge_projection_groups` 里去重。
+    for row in crate::authority_query::unresolved_billing_group_rows(
+        conn, from_ms.unwrap_or(i64::MIN), to_ms.unwrap_or(i64::MAX),
+    )? {
+        values.push(projection_group("billing_group", "BILLING_CONFIRMATION", &row.host,
+            &format!("{}:{}", row.provider_id, row.model_id), &row.evidence_basis,
+            row.first_event_at_ms, 1, "warning", "open",
+            json!({"provider_id": row.provider_id, "model_id": row.model_id,
+                "evidence_basis": row.evidence_basis, "pricing_basis": row.pricing_basis,
+                "tokens": row.tokens, "session_count": row.session_count,
+                "first_event_at_ms": row.first_event_at_ms, "last_event_at_ms": row.last_event_at_ms,
+                "is_bill": false}), "diagnostic-only"));
+    }
+
     let mut stmt = conn.prepare(
         "SELECT source_id, host, last_error_code, last_seen_at_ms
          FROM source_files WHERE last_error_code IS NOT NULL ORDER BY source_id",
@@ -1150,9 +1167,28 @@ mod tests {
              parser_version, first_seen_at_ms, last_seen_at_ms, last_error_code)
              VALUES ('source-1', 'dsh', 'hash', 1, 1, 1, 10, 10, 'permission_denied')", [],
         ).unwrap();
+        // 无候选、只有按量估算用量的组（AC28 找回路径）：来自 usage_facts，
+        // 与候选是两个 source_kind，不互相合并。
+        db.conn().execute(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES ('run', 1, 'cli', 'succeeded', 13)", [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                 observation_kind, provider_id, model_id, event_ts_ms, pricing_basis, evidence_basis,
+                 uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                 ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES ('f-group', 'codex', 'm', 'sess', 'e1', 'token_count', 'openai', 'gpt-mystery', 20,
+                 'metered_estimate', 'missing', 100, 0, 0, 5, 'run', 1, 1)", [],
+        ).unwrap();
         let result = issue_groups_with_sources(db.conn(), None, None, 50, None).unwrap();
         let groups = result["groups"].as_array().unwrap();
-        assert_eq!(groups.len(), 3);
+        assert_eq!(groups.len(), 4);
+        let billing_group = groups.iter().find(|g| g["source_kind"] == "billing_group").unwrap();
+        assert_eq!(billing_group["rule"], "BILLING_CONFIRMATION");
+        assert_eq!(billing_group["object"], "openai:gpt-mystery");
+        assert_eq!(billing_group["sample_evidence"][0]["tokens"], 105);
+        assert_eq!(billing_group["sample_evidence"][0]["is_bill"], false);
         let price = groups.iter().find(|g| g["rule"] == "PRICE_COVERAGE").unwrap();
         assert_eq!(price["count"], 2);
         assert_eq!(price["sample_evidence"].as_array().unwrap().len(), 2);

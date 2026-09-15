@@ -213,6 +213,37 @@
     billing_period_start: month + "-01",
     impact: { status: "ok", total_tokens: 18000, fact_count: 4, session_count: 1 },
   }];
+  // 待确认组（形状出处：runtime::billing_preview::confirmation_groups，见 invoke 内注释）。
+  // 两组同 host/provider（候选会挂到第一组下）、一组无价卡排最后；CNY/USD 各一。
+  const monthStartMs = Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1, 1, 4, 0, 0);
+  const billingGroups = [
+    { group_id: "codex|openai|gpt-5.6-sol|session-native|metered_estimate|" + month, host: "codex",
+      provider_id: "openai", model_id: "gpt-5.6-sol", evidence_basis: "session-native",
+      pricing_basis: "metered_estimate", tokens: 1_650_000, first_event_at_ms: monthStartMs + 3_600_000,
+      last_event_at_ms: monthStartMs + 86_400_000 * 9, session_count: 7, effective_start: month, effective_end: month,
+      estimated_amounts: [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }],
+      unpriced_tokens: 0, unresolved_reason: null },
+    { group_id: "claude-code|minimax|MiniMax-M2.5|missing|metered_estimate|" + month, host: "claude-code",
+      provider_id: "minimax", model_id: "MiniMax-M2.5", evidence_basis: "missing",
+      pricing_basis: "metered_estimate", tokens: 980_000, first_event_at_ms: monthStartMs + 7_200_000,
+      last_event_at_ms: monthStartMs + 86_400_000 * 6, session_count: 4, effective_start: month, effective_end: month,
+      estimated_amounts: [{ amount_minor: 760, currency: "CNY", basis: "metered_estimate" }],
+      unpriced_tokens: 0, unresolved_reason: null },
+    { group_id: "codex|openai|gpt-5.6-luna|session-native|metered_estimate|" + month, host: "codex",
+      provider_id: "openai", model_id: "gpt-5.6-luna", evidence_basis: "session-native",
+      pricing_basis: "metered_estimate", tokens: 120_000, first_event_at_ms: monthStartMs + 3_600_000 * 5,
+      last_event_at_ms: monthStartMs + 86_400_000 * 2, session_count: 1, effective_start: month, effective_end: month,
+      estimated_amounts: [{ amount_minor: 96, currency: "USD", basis: "metered_estimate" }],
+      unpriced_tokens: 0, unresolved_reason: null },
+    { group_id: "codex|openai|gpt-mystery|missing|unavailable|" + month, host: "codex",
+      provider_id: "openai", model_id: "gpt-mystery", evidence_basis: "missing",
+      pricing_basis: "unavailable", tokens: 18_000, first_event_at_ms: monthStartMs + 3_600_000 * 8,
+      last_event_at_ms: monthStartMs + 3_600_000 * 8, session_count: 1, effective_start: month, effective_end: month,
+      estimated_amounts: [], unpriced_tokens: 18_000, unresolved_reason: "no compatible price card for this provider/model bucket" },
+  ];
+  // 已被 official_subscription 声明覆盖的组：保存后从组列表消失，撤销后回来
+  // （同一谓词在 SQL 里的镜像；见 billing_preview.rs 的 R3 测试）。
+  const billingCoveredGroups = new Map();
   const billingDeclarations = [];
   const billingJobs = new Map();
   let pricingNetworkEnabled = true;
@@ -282,26 +313,76 @@
       }
       // Shape: apps/desktop/src-tauri/src/lib.rs:1390 data_status (json!).
       case "data_status": return { status: "ok", data: { health: "warn", integrity: "ok", facts: 42, unresolved_tokens: 18000, unpriced_tokens: 0, pricing: { stale: false }, hints: ["浏览器 mock 数据，不会写入本地库"] } };
-      // Shape: apps/desktop/src-tauri/src/lib.rs:1480 billing_import_candidates (json!).
+      // Shape: apps/desktop/src-tauri/src/lib.rs:1491 billing_import_candidates (json!).
       case "billing_import_candidates": return { status: "ok", candidates: billingCandidates };
-      // Shape: apps/desktop/src-tauri/src/lib.rs:2607 billing_recalculation_jobs (json!).
+      // Shape: crates/agent-vitals-runtime/src/billing_preview.rs::confirmation_groups —
+      // 组行来自 summary.rs::unresolved_billing_groups_in（group_id/host/provider_id/model_id/
+      // evidence_basis/pricing_basis/tokens/first_event_at_ms/last_event_at_ms/session_count/
+      // effective_start/effective_end），estimated_amounts[{amount_minor,currency,basis}]/
+      // unpriced_tokens/unresolved_reason 由 confirmation_groups 补；已按金额降序。
+      // Shape: crates/agent-vitals-runtime/src/billing_preview.rs:81 confirmation_groups + summary.rs:917 unresolved_billing_groups_in.
+      case "billing_confirmation_groups": return { status: "ok", month: (args && args.month) || month,
+        groups: billingGroups.filter((group) => !billingCoveredGroups.has(group.group_id)) };
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2688 billing_recalculation_jobs (json!).
       case "billing_recalculation_jobs": return { status: "ok", jobs: [] };
-      // Shape: apps/desktop/src-tauri/src/lib.rs:2325 billing_declarations (json!).
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2423 billing_declarations (json!).
       case "billing_declarations": return { status: "ok", declarations: billingDeclarations };
+      // Shape: apps/desktop/src-tauri/src/lib.rs:1558 resolve_billing_import_candidate (json!).
       case "resolve_billing_import_candidate": {
         const candidate = billingCandidates.find((item) => item.candidate_id === (args && args.candidateId));
         if (!candidate) throw new Error("billing candidate not found");
         const decision = args && args.decision;
-        candidate.status = decision === "reopen" ? "pending" : decision === "accept" ? "accepted" : "dismissed";
-        return { status: "ok", candidate_id: candidate.candidate_id, decision };
+        // lib.rs::candidate_decision_status：accept 不再是直接决定（只能经保存声明）。
+        if (decision === "accept") throw new Error("accepting a candidate requires saving a billing declaration");
+        candidate.status = decision === "reopen" ? "pending" : "dismissed";
+        return { status: candidate.status, changed: true };
       }
+      // Shape: crates/agent-vitals-runtime/src/billing_preview.rs::declaration_impact_preview —
+      // {status, host, provider_id, relationship_kind, effective_start, effective_end, scopes[],
+      //  changes_amounts, moved{fact_count,session_count,tokens,unpriced_tokens,amounts[],estimated_amounts[]},
+      //  kept{tokens,unpriced_tokens,amounts[]}, pending{fact_count,tokens,reasons[]}, first/last_event_ts_ms}
+      // Shape: crates/agent-vitals-runtime/src/billing_preview.rs:20 declaration_impact_preview（经 lib.rs:2474）.
       case "billing_candidate_impact_preview": {
-        const candidate = billingCandidates.find((item) => item.host === (args && args.host) && item.provider_id === (args && args.providerId));
-        return candidate ? candidate.impact : { status: "unavailable", reason: "candidate not found" };
+        const scopes = (args && args.scopes) || [];
+        const modelScope = scopes.find((scope) => scope.scope_kind === "model");
+        const group = billingGroups.find((item) => item.host === (args && args.host)
+          && item.provider_id === (args && args.providerId)
+          && (!modelScope || item.model_id === modelScope.scope_value));
+        if (!group) {
+          return { status: "ok", host: args && args.host, provider_id: args && args.providerId,
+            relationship_kind: args && args.relationshipKind, effective_start: args && args.effectiveStart,
+            effective_end: args && args.effectiveEnd, scopes, changes_amounts: (args && args.relationshipKind) === "official_subscription",
+            moved: { fact_count: 0, session_count: 0, tokens: 0, unpriced_tokens: 0, amounts: [], estimated_amounts: [] },
+            kept: { tokens: 0, unpriced_tokens: 0, amounts: [] }, pending: { fact_count: 0, tokens: 0, reasons: [] },
+            first_event_ts_ms: null, last_event_ts_ms: null };
+        }
+        const changesAmounts = (args && args.relationshipKind) === "official_subscription";
+        const others = billingGroups.filter((item) => item !== group && item.host === group.host && item.provider_id === group.provider_id);
+        const keptTokens = others.reduce((sum, item) => sum + item.tokens, 0);
+        const keptAmounts = others.flatMap((item) => item.estimated_amounts);
+        return { status: "ok", host: group.host, provider_id: group.provider_id,
+          relationship_kind: args && args.relationshipKind, effective_start: args && args.effectiveStart,
+          effective_end: args && args.effectiveEnd, scopes, changes_amounts: changesAmounts,
+          moved: { fact_count: group.session_count * 3, session_count: group.session_count, tokens: group.tokens,
+            unpriced_tokens: group.unpriced_tokens, amounts: changesAmounts ? group.estimated_amounts : [],
+            estimated_amounts: group.estimated_amounts },
+          kept: { tokens: keptTokens, unpriced_tokens: 0, amounts: keptAmounts },
+          pending: { fact_count: 0, tokens: 0, reasons: [] },
+          first_event_ts_ms: group.first_event_at_ms, last_event_ts_ms: group.last_event_at_ms };
       }
+      // Shape: apps/desktop/src-tauri/src/lib.rs save_billing_declaration_revision —
+      // {status:"saved", revision_id, declaration_id, changed, job: null | {job_id, status, changed}}；
+      // 桌面命令层校验 validate_desktop_declaration（unknown 拒绝、effective_end 必填且 ≤ 当月）。
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2363 save_billing_declaration_revision (json!).
       case "save_billing_declaration_revision": {
         if ((args && args.relationshipKind) === "unknown") {
-          throw new Error("仍不确定的候选必须继续保持 pending，不能保存为计费声明");
+          throw new Error("\"unknown\" is not a billing declaration; keep the group pending instead");
+        }
+        if (!(args && args.effectiveEnd)) {
+          throw new Error("effective_end is required: Beta declarations must be bounded to an explicit month range");
+        }
+        if (args.effectiveEnd > month) {
+          throw new Error("effective_end must not be later than the current statistics month");
         }
         const candidate = billingCandidates.find((item) => item.candidate_id === (args && args.sourceCandidateId));
         if (candidate) candidate.status = "accepted";
@@ -319,16 +400,40 @@
           current_revision_id: args && args.revisionId,
           status: "saved",
         });
-        return { status: "ok", declaration_id: args && args.declarationId, revision_id: args && args.revisionId };
+        let job = null;
+        if ((args && args.relationshipKind) === "official_subscription") {
+          const jobId = "billing-" + (args && args.revisionId);
+          billingJobs.set(jobId, { status: "succeeded", job_id: jobId });
+          const modelScope = ((args && args.scopes) || []).find((scope) => scope.scope_kind === "model");
+          for (const group of billingGroups) {
+            if (group.host === args.host && group.provider_id === args.providerId
+                && (!modelScope || group.model_id === modelScope.scope_value)) {
+              billingCoveredGroups.set(group.group_id, args.declarationId);
+            }
+          }
+          job = { job_id: jobId, status: "queued", changed: true };
+        }
+        return { status: "saved", declaration_id: args && args.declarationId, revision_id: args && args.revisionId, changed: true, job };
       }
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2629 enqueue_billing_recalculation (json!).
       case "enqueue_billing_recalculation": {
-        billingJobs.set(args && args.jobId, { status: "succeeded" });
-        return { status: "queued", job_id: args && args.jobId };
+        billingJobs.set(args && args.jobId, { status: "succeeded", job_id: args && args.jobId });
+        return { status: "queued", job_id: args && args.jobId, changed: true };
       }
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2649 retry_billing_recalculation (json!).
+      case "retry_billing_recalculation": {
+        billingJobs.set(args && args.jobId, { status: "succeeded", job_id: args && args.jobId });
+        return { status: "queued", job_id: args && args.jobId, changed: true };
+      }
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2668 billing_recalculation_job_status (json!).
       case "billing_recalculation_job_status": return billingJobs.get(args && args.jobId) || { status: "missing" };
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2451 revoke_billing_declaration (json!).
       case "revoke_billing_declaration": {
         const index = billingDeclarations.findIndex((item) => item.declaration_id === (args && args.declarationId));
         if (index >= 0) billingDeclarations.splice(index, 1);
+        for (const [groupId, declarationId] of [...billingCoveredGroups.entries()]) {
+          if (declarationId === (args && args.declarationId)) billingCoveredGroups.delete(groupId);
+        }
         return { status: "revoked", declaration_id: args && args.declarationId, revision_id: args && args.revisionId };
       }
       case "host_bills_for_period": return emptyReport("bills");

@@ -152,6 +152,79 @@ pub(crate) const SQL_HOURLY_BY_HOST_PROVIDER: &str = concat!("SELECT host, COALE
                  AND br.change_kind = 'saved')
          GROUP BY host, provider_id, local_hour");
 
+/// 「确认计费方式」的待确认组（REQ-023：宿主 × provider × 模型 × 路由证据 ×
+/// 计价依据）。谓词：仍按量估算或路由证据不是明确官方路由、且未被当前 saved
+/// 声明覆盖、且不是宿主自报 subscription 的事实。运行时的组面板
+/// （`runtime::billing_preview::confirmation_groups`）、总览摘要与待处理投影
+/// （`issues.rs`）三处共用这一条 SQL——组的定义只有一份。
+/// 待确认组的事实谓词（别名 `f`，`?1`/`?2` = 窗口毫秒）。运行时计价用它喂
+/// `price_fact_selection`，保证组金额与组 token 是同一批事实。
+pub const SQL_UNRESOLVED_BILLING_FACT_WHERE: &str =
+    "f.deleted_at_ms IS NULL AND f.observation_kind != 'legacy_aggregate'
+       AND f.event_ts_ms >= ?1 AND f.event_ts_ms < ?2
+       AND COALESCE(f.billing_mode, 'unknown') != 'subscription'
+       AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+           JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+           WHERE ba.fact_id = f.fact_id
+             AND ba.attribution_kind = 'subscription_covered'
+             AND br.revision_number = (SELECT MAX(br2.revision_number)
+               FROM billing_declaration_revisions br2
+               WHERE br2.declaration_id = br.declaration_id)
+             AND br.change_kind = 'saved')
+       AND (COALESCE(f.pricing_basis, 'unavailable') = 'metered_estimate'
+            OR COALESCE(f.evidence_basis, 'missing') != 'explicit-official-route')";
+
+pub const SQL_UNRESOLVED_BILLING_GROUPS: &str = concat!(
+    "SELECT f.host, COALESCE(f.provider_id, '<unknown>'), COALESCE(f.model_id, '<unknown>'),
+            COALESCE(f.evidence_basis, 'missing'), COALESCE(f.pricing_basis, 'unavailable'),
+            SUM(f.uncached_input_tokens + f.cache_read_tokens + f.cache_write_tokens + f.output_tokens),
+            MIN(f.event_ts_ms), MAX(f.event_ts_ms),
+            COUNT(DISTINCT COALESCE(f.session_key, f.host || ':' || f.machine_namespace || ':' || f.native_session_id))
+     FROM usage_facts f
+     WHERE ",
+    "f.deleted_at_ms IS NULL AND f.observation_kind != 'legacy_aggregate'
+       AND f.event_ts_ms >= ?1 AND f.event_ts_ms < ?2
+       AND COALESCE(f.billing_mode, 'unknown') != 'subscription'
+       AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+           JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+           WHERE ba.fact_id = f.fact_id
+             AND ba.attribution_kind = 'subscription_covered'
+             AND br.revision_number = (SELECT MAX(br2.revision_number)
+               FROM billing_declaration_revisions br2
+               WHERE br2.declaration_id = br.declaration_id)
+             AND br.change_kind = 'saved')
+       AND (COALESCE(f.pricing_basis, 'unavailable') = 'metered_estimate'
+            OR COALESCE(f.evidence_basis, 'missing') != 'explicit-official-route')",
+    "
+     GROUP BY f.host, f.provider_id, f.model_id, f.evidence_basis, f.pricing_basis
+     ORDER BY SUM(f.uncached_input_tokens + f.cache_read_tokens + f.cache_write_tokens + f.output_tokens) DESC"
+);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedBillingGroupRow {
+    pub host: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub evidence_basis: String,
+    pub pricing_basis: String,
+    pub tokens: i64,
+    pub first_event_at_ms: i64,
+    pub last_event_at_ms: i64,
+    pub session_count: i64,
+}
+
+pub fn unresolved_billing_group_rows(
+    conn: &rusqlite::Connection, start_ms: i64, end_ms: i64,
+) -> rusqlite::Result<Vec<UnresolvedBillingGroupRow>> {
+    let mut stmt = conn.prepare(SQL_UNRESOLVED_BILLING_GROUPS)?;
+    let rows = stmt.query_map(rusqlite::params![start_ms, end_ms], |r| Ok(UnresolvedBillingGroupRow {
+        host: r.get(0)?, provider_id: r.get(1)?, model_id: r.get(2)?,
+        evidence_basis: r.get(3)?, pricing_basis: r.get(4)?, tokens: r.get(5)?,
+        first_event_at_ms: r.get(6)?, last_event_at_ms: r.get(7)?, session_count: r.get(8)?,
+    }))?;
+    rows.collect()
+}
+
 /// [`facts_page_window`]：键集分页（`(event_ts_ms, fact_id)` 游标，无 OFFSET）。
 pub(crate) const SQL_FACTS_PAGE_WINDOW: &str =
     "SELECT fact_id, native_session_id, model_id, event_ts_ms,
@@ -1697,6 +1770,14 @@ mod tests {
     use crate::authority::AuthorityDb;
     use jiff::Timestamp;
     use std::path::PathBuf;
+
+    /// `concat!` 只收字面量，所以组 SQL 里的 WHERE 与运行时计价用的
+    /// `SQL_UNRESOLVED_BILLING_FACT_WHERE` 是两份字面量——这里钉住它们逐字相等，
+    /// 否则「组 token」和「组金额」会来自两批不同的事实。
+    #[test]
+    fn unresolved_billing_group_sql_embeds_the_shared_fact_predicate() {
+        assert!(SQL_UNRESOLVED_BILLING_GROUPS.contains(SQL_UNRESOLVED_BILLING_FACT_WHERE));
+    }
 
     fn ms_to_statistics_date(ms: i64) -> String {
         let date = Timestamp::from_millisecond(ms)

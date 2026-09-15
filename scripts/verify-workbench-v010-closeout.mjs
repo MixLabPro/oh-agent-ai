@@ -43,7 +43,9 @@ ok(!html.includes('style="min-width:320px"'), "Trace 输入不再带固定内联
 
 console.log("# 构建身份与状态文案（v1 当前契约）");
 const cargoVersion = cargo.match(/^version = "([^"]+)"/m)?.[1];
-ok(/^\d+\.\d+\.\d+$/.test(cargoVersion || ""), "桌面 Cargo 使用有效语义版本");
+// SemVer 允许 `-beta.1` 这类预发布后缀；Beta 候选 `1.0.0-beta.1`（G01 版本冻结）
+// 必须能过这条守卫，release-macos.sh 的 DMG 文件名白名单同样接受它。
+ok(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(cargoVersion || ""), "桌面 Cargo 使用有效语义版本");
 ok(tauri.version === cargoVersion, "Tauri 与 Cargo 版本锁步");
 ok(/fn about_diagnostics\(\)/.test(lib), "后端提供 about_diagnostics");
 ok(/generate_handler!\[[\s\S]*about_diagnostics,/.test(lib), "about_diagnostics 注册进 IPC");

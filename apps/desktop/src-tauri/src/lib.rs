@@ -1527,6 +1527,20 @@ fn billing_import_candidates() -> Value {
     }
 }
 
+/// 「确认计费方式」面板的待确认组（REQ-023）：宿主 × provider × 模型 × 路由证据 ×
+/// 计价依据，带分币估算金额、按金额降序。数据来自
+/// `runtime::billing_preview::confirmation_groups`（组 SQL 与待处理投影同一份，
+/// 金额与 MCP `cost_breakdown` 同一条计价路径）。此前面板只从旧资产迁移候选出发，
+/// 没有旧资产的用户永远看不到待确认组（计费主链规格 G5）。
+#[tauri::command(async)]
+fn billing_confirmation_groups(month: String) -> Value {
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable", "month": month, "groups": [] });
+    };
+    agent_vitals_runtime::billing_preview::confirmation_groups(&db, &month)
+}
+
 /// 候选只有「不是我的」与「重新打开」两个直接决定。「接受」不再是独立动作：
 /// 它曾经只把候选翻成 accepted 而不写声明、不重算，用量继续按量估算，与提示
 /// 文案「确认后就能分清哪些在套餐内」相反（计费主链规格 G1）。接受现在只能
@@ -3147,6 +3161,7 @@ pub fn run() {
             read_overview,
             data_status,
             billing_import_candidates,
+            billing_confirmation_groups,
             resolve_billing_import_candidate,
             save_billing_declaration_revision,
             billing_declarations,
