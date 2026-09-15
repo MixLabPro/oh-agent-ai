@@ -1,6 +1,6 @@
 # v1.0.0-beta.1 计费确认主链规格（B06 / B07）
 
-**状态：** Draft v1（2026-09-15 按代码逐行核对写成），作为 Beta 1 P2 / B1-M3「计费闭环」的实现合同  
+**状态：** v1.1（2026-09-15 按代码逐行核对写成；同日按本规格实施完 §6 全部条目，见 §10 执行记录），作为 Beta 1 P2 / B1-M3「计费闭环」的实现合同  
 **日期：** 2026-09-15  
 **范围编号：** [发布规格](BETA_1_RELEASE_SPEC.md) B06、B07；真机矩阵 T06、T08、T10；[执行计划](BETA_1_EXECUTION_PLAN.md) E201–E208；PRD REQ-017–032、REQ-143–149；AC05、AC09、AC13、AC14、AC26、AC27、AC28  
 **关联文档：** [UAT 2026-09-15](UAT_FULL_2026-09-15.md)、[小闭环 UAT 清单](UAT_SMALL_LOOPS.md)、[总览后端接入规格](BETA_1_OVERVIEW_BACKEND_INTEGRATION_SPEC.md)、[设置页规格](BETA_1_SETTINGS_PAGE_SPEC.md)、[版本冻结记录](BETA_1_VERSION_FREEZE_2026-09-15.md)、[Provider 路由归属规格](../PROVIDER_ROUTE_ATTRIBUTION_SPEC.md)
@@ -115,7 +115,7 @@ NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
 
 ### 5.2 待确认组面板（REQ-023、E201）
 
-- 打开位置：不离开总览的侧边面板（当前实现跳到「数据源」tab 的 `ov-billing-review-panel`，`workbench.js:2339 switchTab("sources")`——**改回总览内面板或独立抽屉**，不得把用户带到数据源页；这是 UI/UX 差距分析已指出的信息架构问题）。
+- 打开位置：设置 tab（`data-tab="sources"`，页内标题「设置」）的「计费与套餐」分区 `#settings-billing`（`ov-billing-review-panel` 就住在那里）。这是设置页规格的既定信息架构，不是数据源页；Draft v1 误读了 `switchTab("sources")`，本版更正，不再要求改成总览内抽屉。
 - 数据源：新增只读 Tauri 命令 `billing_confirmation_groups(month)`，返回 `runtime::summary::unresolved_billing_groups(month)` 的结果并补齐 `estimated_amounts[]`（§6 B1）。
 - 排序：默认按**估算金额**降序（同币内），无价卡的组按 tokens 降序排在有金额组之后；不得按创建顺序或 `candidate_id`。
 - 每组展示：宿主、provider、模型、路由证据（`evidence_basis` 的用户文案映射，见设置页规格的 reason code 表）、日期范围（`first/last_event_at_ms` 按统计时区）、会话数、tokens、名义估算（分币）、当前依据（`pricing_basis`）与置信状态。
@@ -226,7 +226,7 @@ Beta 只开放两种范围，都**显式有界**：
 | ID | 改动 | 对应 |
 |---|---|---|
 | F1 | `loadOverviewData` 的 `candidates` 行改为并发读 `billing_confirmation_groups(statisticsMonth())` + `billing_import_candidates`；`renderBillingImportCandidates` 重命名为 `renderBillingConfirmation`，输入为组列表（候选合并为组的证据行） | G5、G1 |
-| F2 | 面板不再 `switchTab("sources")`；在总览内以侧栏/抽屉展开（复用 `ov-billing-declaration-panel` 容器） | §5.2 |
+| F2 | 面板保持在设置 › 计费与套餐分区（`switchTab("sources")` 即设置 tab）；本条按 v1.1 更正为「不改」 | §5.2 |
 | F3 | 组行主按钮唯一「确认计费方式」；去掉「是我的套餐 / 不是」；候选证据行的「这不是我的套餐」→ `dismiss` | G1 |
 | F4 | 声明面板：五选一 + 每项结果说明；起止月控件（默认组的首尾月，`end` 必填）；作用范围固定「仅这一组」+ 可改日期 | §5.3、§5.4 |
 | F5 | 预览调用改为无 `window_*`，渲染三组数字与分币金额；非订阅关系时「移出」显示 0 并注明不改金额 | §5.5 |
@@ -291,3 +291,21 @@ Beta 只开放两种范围，都**显式有界**：
 P2 出口（执行计划 §6）：同一隔离数据根上「候选/组 → 预览 → 保存 → 重算 → 各面刷新 → 撤销」与「仍不确定 → 重开 → 找回」两条真实 App 路径通过，底层表守恒；不能用 MCP 写操作或 Vite mock 关闭 T06/T08/T10。
 
 出口前不得做的事：不因 T08 数字对不上而放宽谓词或改价卡；不为让「组织承担」看起来有效而伪造金额变化；不把 `unknown` 写成声明去消掉黄色状态（REQ-031）。
+
+## 10. 执行记录（2026-09-15，分支 `worktree-v1.0.0-beta1-p2-billing-chain`）
+
+| 提交 | 覆盖 | 验证 |
+|---|---|---|
+| `37bce83` | B5、B6、B3 后端（孤儿端点删除；`accept` 拒绝；`unknown`/空 `effective_end`/晚于当月拒绝；官方订阅保存即入队并返回 `job`） | R4、R6（`lib.rs` 单测） |
+| `6436c5e` | B2：`authority::billing_declaration_fact_selection` 唯一谓词；预览窗口 = 声明有效期；`conflict` 证据单列；`runtime::billing_preview::declaration_impact_preview` 三组数字 + 分币金额，计价走 `cost_breakdown::price_fact_selection` | R1（`authority.rs::preview_and_recalculation_select_the_same_facts`）、R5（`billing_preview.rs::preview_moved_amounts_equal_cost_breakdown_subscription_bucket_after_recalc`） |
+| `ed1749c` | B1、B4、F1–F7：`SQL_UNRESOLVED_BILLING_GROUPS` 单一定义、`billing_confirmation_groups` 命令、待处理 `billing_group` 投影、组面板、有界起止月、单动作保存、回执/撤销/重试、error_code 文案、mock 形状出处 | R3、V1–V4（`verify-workbench-sources.mjs` 计费段）、`verify-workbench-overview-contract.mjs` |
+| 本次 | §7.3 smoke +3 步；clippy 类型别名 | `tests/mcp_v1_management_smoke.py`（22 typed actions，`--features mcp-internal` 内部构建） |
+
+全量门：`cargo test`（根 workspace 全绿）、`cargo clippy --release --all-targets -- -D warnings`、
+桌面 crate `cargo test --lib`（116）与 clippy、`python3 -m unittest discover tests`（1189，
+skipped 208）、golden 15/15（Python 与 Rust 二进制各一遍）、全部 `scripts/verify-workbench-*.mjs`。
+候选 `.app`：`cargo tauri build --ci --bundles app` → `CFBundleShortVersionString = 1.0.0-beta.1`、
+随包 CLI `1.3.0`、arm64；未签名（G09 未做，内部测试构建）。
+
+**仍未关闭（只能靠真机）**：§7.4 五条小闭环（AC26/27/13/28/14）的截图与五处对拍。编码代理
+不能驱动 Tauri 窗口；候选包在 `apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app`。

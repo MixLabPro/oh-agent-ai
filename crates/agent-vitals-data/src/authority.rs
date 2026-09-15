@@ -101,6 +101,9 @@ pub enum ConflictEvidence {
     Only,
 }
 
+/// `(fact_count, session_count, total_tokens, first_event_ts_ms, last_event_ts_ms)`。
+type PreviewAggregate = (i64, i64, i64, Option<i64>, Option<i64>);
+
 pub struct BillingDeclarationFactSelection {
     pub where_sql: String,
     pub params: Vec<rusqlite::types::Value>,
@@ -2409,7 +2412,7 @@ impl AuthorityDb {
         if window.is_some_and(|(start, end)| end <= start) {
             return Ok(BillingDeclarationImpactPreview::default());
         }
-        let aggregate = |conflicts: ConflictEvidence| -> Result<(i64, i64, i64, Option<i64>, Option<i64>), AuthorityError> {
+        let aggregate = |conflicts: ConflictEvidence| -> Result<PreviewAggregate, AuthorityError> {
             let selection = billing_declaration_fact_selection(
                 host, provider_id, effective_start, effective_end, scopes, window, conflicts,
             );

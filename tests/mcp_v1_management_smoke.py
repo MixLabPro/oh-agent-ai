@@ -44,6 +44,10 @@ def main():
               "source_candidate_id": "candidate-uat", "evidence_ref": "uat", "scopes": []}),
         (14, {"action": "declaration_preview", "host": "codex", "provider_id": "openai",
               "effective_start": "2026-09", "scopes": []}),
+        # 计费主链规格 §7.3：有界（effective_end）预览的命中数 ≤ 开放预览；
+        # 预览带 conflict_* 字段（E207 的「仍待确认」桶）。
+        (30, {"action": "declaration_preview", "host": "codex", "provider_id": "openai",
+              "effective_start": "2026-09", "effective_end": "2026-09", "scopes": []}),
         (15, {"action": "declaration_revisions", "declaration_id": "declaration-uat"}),
         (16, {"action": "recalc_enqueue", "job_id": "job-uat", "declaration_id": "declaration-uat",
               "revision_id": "revision-uat-1"}),
@@ -53,6 +57,7 @@ def main():
         (20, {"action": "declaration_revoke", "revision_id": "revision-uat-2",
               "declaration_id": "declaration-uat", "supersedes_revision_id": "revision-uat-1"}),
         (21, {"action": "declaration_revisions", "declaration_id": "declaration-uat"}),
+        (31, {"action": "candidate_list"}),
         (22, {"action": "candidate_reopen", "candidate_id": "candidate-uat"}),
         (23, {"action": "host_bill_put", "bill_id": "bill-uat", "host": "codex",
               "provider_id": "openai", "billing_period_start": "2026-09", "basis": "host_billed",
@@ -85,6 +90,9 @@ def main():
     assert data[11]["candidates"][0]["status"] == "pending"
     assert data[17]["job"]["status"] == "queued"
     assert data[19]["job"]["status"] == "succeeded"
+    assert data[30]["preview"]["fact_count"] <= data[14]["preview"]["fact_count"]
+    assert "conflict_fact_count" in data[30]["preview"] and "conflict_tokens" in data[30]["preview"]
+    assert data[31]["candidates"][0]["status"] == "accepted", "revoke never reopens the source candidate (候选≠归因)"
     assert len(data[21]["revisions"]) == 2 and data[21]["revisions"][1]["change_kind"] == "revoked"
     assert data[24]["bills"][0]["amount_minor"] == 1234
     assert data[28]["snooze_until_ms"] == 4102444800000
