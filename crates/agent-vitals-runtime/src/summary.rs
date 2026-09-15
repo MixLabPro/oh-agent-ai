@@ -946,25 +946,6 @@ pub fn unresolved_billing_groups(month: &str) -> serde_json::Value {
     json!({"month": month, "groups": groups, "status": "ok"})
 }
 
-/// 统一的只读声明影响预览入口；桌面与 CLI 共享数据层口径，不在 UI 拼 SQL。
-pub fn billing_declaration_impact_preview(
-    revision_id: &str, window_start_ms: i64, window_end_ms: i64,
-) -> serde_json::Value {
-    let Some(db) = SqlSummaryRepository::new().open_db() else {
-        return json!({"status": "unavailable", "revision_id": revision_id});
-    };
-    match db.billing_declaration_impact_preview(revision_id, window_start_ms, window_end_ms) {
-        Ok(preview) => json!({
-            "status": "ok", "revision_id": revision_id,
-            "fact_count": preview.fact_count, "session_count": preview.session_count,
-            "total_tokens": preview.total_tokens,
-            "first_event_ts_ms": preview.first_event_ts_ms,
-            "last_event_ts_ms": preview.last_event_ts_ms,
-        }),
-        Err(_) => json!({"status": "unavailable", "revision_id": revision_id}),
-    }
-}
-
 /// codex 下钻的纯分类核（可注入真实两层形状做钉测）：`by_model` 是
 /// `model → speed → 桶对象`，桶键 = `CODEX_TOKEN_FIELDS` 5 键（形状来源：
 /// `hosts/codex/sessions/usage.rs::codex_by_model_from_hours`——审查 P1-1
