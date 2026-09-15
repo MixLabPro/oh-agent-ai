@@ -326,8 +326,52 @@
       // effective_start/effective_end），estimated_amounts[{amount_minor,currency,basis}]/
       // unpriced_tokens/unresolved_reason 由 confirmation_groups 补；已按金额降序。
       // Shape: crates/agent-vitals-runtime/src/billing_preview.rs:81 confirmation_groups + summary.rs:917 unresolved_billing_groups_in.
-      case "billing_confirmation_groups": return { status: "ok", month: (args && args.month) || month,
-        groups: billingGroups.filter((group) => !billingCoveredGroups.has(group.group_id)) };
+      case "billing_confirmation_groups": {
+        const groups = billingGroups.filter((group) => !billingCoveredGroups.has(group.group_id));
+        // 与 billing_preview.rs::auto_verdict / clusters_of 同一形状（浏览器里用固定判定）。
+        const verdictOf = (g) => {
+          if (g.provider_id === "openai" && g.host === "codex") {
+            return { model_vendor: "openai", gateway_named: false, route_state: "provider_reported", route_basis: g.evidence_basis,
+              billing_party: "openai", billing_mode: "subscription", relationship_kind: "official_subscription",
+              plan: { label: "ChatGPT", channel: null, anchor_date: null, source: "~/.codex/auth.json auth_mode" },
+              state: "determined", question: null, basis: ["host.provider_reported", "account.ChatGPT"] };
+          }
+          if (g.provider_id === "<unknown>" && /^glm/.test(g.model_id)) {
+            return { model_vendor: "zhipu-glm", gateway_named: false, route_state: "vendor_shape", route_basis: "inferred",
+              billing_party: "zhipu-glm", billing_mode: "metered", relationship_kind: null, plan: null,
+              state: "one_question", question: "route", basis: ["response_id.vendor_shape"] };
+          }
+          if (g.provider_id === "<unknown>") {
+            return { model_vendor: null, gateway_named: false, route_state: "unknown", route_basis: g.evidence_basis,
+              billing_party: null, billing_mode: null, relationship_kind: null, plan: null, state: "needs_input", question: null, basis: [] };
+          }
+          return { model_vendor: g.provider_id, gateway_named: false, route_state: "official", route_basis: "session-native",
+            billing_party: g.provider_id, billing_mode: null, relationship_kind: null, plan: null,
+            state: "one_question", question: "billing_mode", basis: ["route.session-native"] };
+        };
+        const clusters = new Map();
+        for (const g of groups) {
+          const v = verdictOf(g);
+          const key = [g.host, v.billing_party || "<unknown>", v.route_state, v.state, g.effective_start, g.effective_end].join("|");
+          if (!clusters.has(key)) {
+            clusters.set(key, { cluster_id: key, host: g.host, billing_party: v.billing_party, model_vendor: v.model_vendor,
+              provider_id: g.provider_id, evidence_basis: g.evidence_basis, pricing_basis: g.pricing_basis,
+              effective_start: g.effective_start, effective_end: g.effective_end, auto_verdict: v,
+              models: [], group_ids: [], tokens: 0, session_count: 0, unpriced_tokens: 0, estimated_amounts: [] });
+          }
+          const c = clusters.get(key);
+          c.models.push({ model_id: g.model_id, tokens: g.tokens, session_count: g.session_count, estimated_amounts: g.estimated_amounts, group_id: g.group_id });
+          c.group_ids.push(g.group_id); c.tokens += g.tokens; c.session_count += g.session_count; c.unpriced_tokens += g.unpriced_tokens;
+          for (const a of g.estimated_amounts) {
+            const slot = c.estimated_amounts.find((x) => x.currency === a.currency && x.basis === a.basis);
+            if (slot) slot.amount_minor += a.amount_minor; else c.estimated_amounts.push({ ...a });
+          }
+        }
+        const rank = (c) => ({ determined: 0, one_question: 1 }[c.auto_verdict.state] ?? 2);
+        return { status: "ok", month: (args && args.month) || month,
+          groups: groups.map((g) => ({ ...g, auto_verdict: verdictOf(g) })),
+          clusters: [...clusters.values()].sort((a, b) => rank(a) - rank(b) || b.tokens - a.tokens) };
+      }
       // Shape: apps/desktop/src-tauri/src/lib.rs:2688 billing_recalculation_jobs (json!).
       case "billing_recalculation_jobs": return { status: "ok", jobs: [] };
       // Shape: apps/desktop/src-tauri/src/lib.rs:2423 billing_declarations (json!).

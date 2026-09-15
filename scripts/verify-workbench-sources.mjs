@@ -411,5 +411,106 @@ ok(elements["ov-billing-recalculation-panel"].hidden === false &&
   jobRow.children[1].children[0].textContent === "重试重算" &&
   jobRow.children[0].textContent.includes("上次退出时中断") && !jobRow.children[0].textContent.includes("SqliteFailure"),
   "重算失败状态显示旧结果可用、error_code 人话与重试按钮，原始错误串不上卡面（§5.10）");
+
+// ---- 三态确认列表（自动归因规格 §5.1；形状出处：
+// crates/agent-vitals-runtime/src/billing_preview.rs::auto_verdict / clusters_of）----
+// 后端带 `clusters` 时：程序判定 → 一键确认；差一问 → 选项在行内；需补充 → 弹窗。
+// 模型折进 models[]，旧的逐模型行只在没有 clusters 的旧后端上出现。
+const clusterModel = (model_id, tokens, session_count, group_id, amounts) => ({ model_id, tokens, session_count, group_id, estimated_amounts: amounts });
+const clusterReport = { status: "ok", month, groups: [], clusters: [
+  { cluster_id: "c-needs", host: "claude-code", billing_party: null, model_vendor: null, provider_id: "<unknown>",
+    evidence_basis: "missing", pricing_basis: "unavailable", effective_start: month, effective_end: month,
+    auto_verdict: { model_vendor: null, gateway_named: false, route_state: "unknown", route_basis: "missing", billing_party: null,
+      billing_mode: null, relationship_kind: null, plan: null, state: "needs_input", question: null, basis: [] },
+    models: [clusterModel("mystery-9", 18_000, 1, "g-mystery", [])], group_ids: ["g-mystery"], tokens: 18_000, session_count: 1,
+    unpriced_tokens: 18_000, estimated_amounts: [] },
+  { cluster_id: "c-det", host: "claude-code", billing_party: "anthropic", model_vendor: "anthropic", provider_id: "anthropic",
+    evidence_basis: "session-native", pricing_basis: "route-observed", effective_start: month, effective_end: month,
+    auto_verdict: { model_vendor: "anthropic", gateway_named: false, route_state: "official", route_basis: "session-native",
+      billing_party: "anthropic", billing_mode: "subscription", relationship_kind: "official_subscription",
+      plan: { label: "Claude Pro", channel: null, anchor_date: "2026-08-20", source: "~/.claude.json oauthAccount" },
+      state: "determined", question: null, basis: ["route.session-native", "account.Claude Pro"] },
+    models: [clusterModel("claude-opus-5", 3_000_000, 20, "g-opus", [{ amount_minor: 30000, currency: "USD", basis: "metered_estimate" }]),
+      clusterModel("claude-sonnet-5", 1_700_000, 12, "g-sonnet", [{ amount_minor: 5000, currency: "USD", basis: "metered_estimate" }])],
+    group_ids: ["g-opus", "g-sonnet"], tokens: 4_700_000, session_count: 32, unpriced_tokens: 0,
+    estimated_amounts: [{ amount_minor: 35000, currency: "USD", basis: "metered_estimate" }] },
+  { cluster_id: "c-route", host: "claude-code", billing_party: "zhipu-glm", model_vendor: "zhipu-glm", provider_id: "<unknown>",
+    evidence_basis: "inferred", pricing_basis: "metered_estimate", effective_start: month, effective_end: month,
+    auto_verdict: { model_vendor: "zhipu-glm", gateway_named: false, route_state: "vendor_shape", route_basis: "inferred",
+      billing_party: "zhipu-glm", billing_mode: "metered", relationship_kind: null, plan: null,
+      state: "one_question", question: "route", basis: ["response_id.vendor_shape"] },
+    models: [clusterModel("glm-5.3-flash", 640_000, 3, "g-glm", [])], group_ids: ["g-glm"], tokens: 640_000, session_count: 3,
+    unpriced_tokens: 640_000, estimated_amounts: [] },
+  { cluster_id: "c-mode", host: "codex", billing_party: "openai", model_vendor: "openai", provider_id: "openai",
+    evidence_basis: "session-native", pricing_basis: "metered_estimate", effective_start: month, effective_end: month,
+    auto_verdict: { model_vendor: "openai", gateway_named: false, route_state: "provider_reported", route_basis: "session-native",
+      billing_party: "openai", billing_mode: null, relationship_kind: null, plan: null,
+      state: "one_question", question: "billing_mode", basis: ["host.provider_reported"] },
+    models: [clusterModel("gpt-5.6-sol", 1_650_000, 7, "g-sol", [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }])],
+    group_ids: ["g-sol"], tokens: 1_650_000, session_count: 7, unpriced_tokens: 0,
+    estimated_amounts: [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }] },
+] };
+// 后端同时返回逐模型 groups（旧消费方）与 clusters；带 clusters 时前端按簇渲染、按簇计数。
+clusterReport.groups = clusterReport.clusters.flatMap((c) => c.models.map((m) => ({
+  group_id: m.group_id, host: c.host, provider_id: c.provider_id, model_id: m.model_id, evidence_basis: c.evidence_basis,
+  pricing_basis: c.pricing_basis, tokens: m.tokens, session_count: m.session_count, effective_start: c.effective_start,
+  effective_end: c.effective_end, estimated_amounts: m.estimated_amounts, unpriced_tokens: 0, unresolved_reason: null,
+  first_event_at_ms: 1, last_event_at_ms: 2, auto_verdict: c.auto_verdict })));
+// 后端 clusters_of 已把 determined 排前；前端按后端顺序渲染，不自行重排（这里故意把 needs_input 放首位来证明这一点）。
+billingOverride = async (command) => { billingCalls.push({ command }); return undefined; };
+billingCalls.length = 0;
+await sandbox.renderBillingConfirmation(clusterReport, { status: "ok", candidates: [] });
+if (elements["ov-billing-review-panel"].hidden) await elements["ov-billing-review"].onclick();
+const clusterRows = elements["ov-billing-review-list"].children;
+ok(clusterRows.length === 4, "带 clusters 时按簇渲染四行，模型折进簇内而不是逐模型一行");
+ok(/发现 4 组/.test(elements["ov-billing-prompt-copy"].textContent), "入口提示按簇计数（5 个模型折成 4 件事）");
+const rowText = (i) => clusterRows[i].children[0].textContent;
+const rowBasis = (i) => clusterRows[i].children[0].children.map((c) => c.textContent).join("|");
+const rowButtons2 = (i) => clusterRows[i].children[1].children.map((b) => b.textContent);
+ok(rowText(1).includes("anthropic") && rowText(1).includes("Claude Pro 订阅 · 每月 20 日续费") && rowText(1).includes("2 个模型（claude-opus-5、claude-sonnet-5）")
+  && rowBasis(1).includes("程序判定，依据：请求 ID 为官方格式 · 账户套餐 Claude Pro"),
+  "程序判定行：写明计费方、套餐、续费日、折叠的模型数与判定依据");
+ok(rowButtons2(1).join("|") === "确认订阅并填写月费|不对，我来改", "程序判定行只剩一键确认与「不对，我来改」");
+ok(rowButtons2(2).join("|") === "zhipu-glm 官方端点|中转 / 第三方" && rowBasis(2).includes("已知：响应 ID 与厂商形状一致"),
+  "差一问（路由）：问题的两个选项直接放在行内");
+ok(rowButtons2(3).join("|") === "订阅|按量 API|组织承担" && rowText(3).includes("宿主自报官方"),
+  "差一问（计费方式）：三个选项直接放在行内");
+ok(rowButtons2(0).join("|") === "明确计费方式" && rowText(0).includes("服务商未知") && rowBasis(0).includes("缺少证据"),
+  "需补充：仍是一个「明确计费方式」入口");
+
+// 一键确认：弹窗不再问服务商与路由，计费方式预选订阅，套餐名预填，依据写在说明里。
+await clusterRows[1].children[1].children[0].onclick();
+ok(elements["ov-billing-declaration-panel"].hidden === false && elements["ov-billing-provider-row"].hidden === true
+  && elements["ov-billing-route-row"].hidden === true && elements["ov-billing-mode-row"].hidden === false
+  && elements["ov-billing-mode"].value === "subscription" && elements["ov-billing-subscription-fields"].hidden === false,
+  "程序判定 → 确认：只剩订阅确认，服务商/路由步骤不出现");
+ok(elements["ov-billing-subscription-name"].value === "Claude Pro"
+  && elements["ov-billing-missing"].textContent.includes("程序已判定：服务商 anthropic · 官方路由 · Claude Pro（每月 20 日续费，订阅自 2026-08-20）"),
+  "套餐名预填，说明栏写明程序判定内容与依据");
+ok(elements["ov-billing-batch-row"].hidden === false && /将同时处理 2 个模型、32 个会话、4\.7M tokens/.test(elements["ov-billing-batch-text"].textContent),
+  "簇内多个模型默认作为一批处理");
+elements["ov-billing-close"].onclick();
+// 「不对，我来改」：所有步骤重新放出来。
+await clusterRows[1].children[1].children[1].onclick();
+ok(elements["ov-billing-provider-row"].hidden === false && elements["ov-billing-route-row"].hidden === false,
+  "「不对，我来改」把服务商与路由步骤重新放出来");
+elements["ov-billing-close"].onclick();
+// 差一问（路由）→ 官方端点：服务商/路由/计费方式按答案预填（provider 步骤仍在——声明 scope 必须带 provider:unresolved 才能命中 provider_id 为空的事实）。
+await clusterRows[2].children[1].children[0].onclick();
+ok(elements["ov-billing-provider"].value === "zhipu-glm" && elements["ov-billing-route"].value === "official" && elements["ov-billing-mode"].value === "api",
+  "回答「官方端点」后表单按答案预填：服务商 zhipu-glm、官方路由、按量 API");
+elements["ov-billing-close"].onclick();
+await clusterRows[2].children[1].children[1].onclick();
+ok(elements["ov-billing-route"].value === "third_party" && elements["ov-billing-mode-row"].hidden === true,
+  "回答「中转 / 第三方」后路由预填第三方，计费方式步骤不再出现");
+elements["ov-billing-close"].onclick();
+// 差一问（计费方式）→ 按量 API：服务商/路由已知不再问。
+await clusterRows[3].children[1].children[1].onclick();
+ok(elements["ov-billing-provider-row"].hidden === true && elements["ov-billing-route-row"].hidden === true
+  && elements["ov-billing-mode"].value === "api" && elements["ov-billing-subscription-fields"].hidden === true,
+  "回答「按量 API」后只剩确认，订阅字段不出现");
+elements["ov-billing-close"].onclick();
+billingOverride = null;
+
 console.log(failed ? `\n${failed} FAIL` : "\n全部通过。");
 process.exit(failed ? 1 : 0);

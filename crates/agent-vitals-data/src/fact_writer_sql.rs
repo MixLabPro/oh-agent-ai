@@ -290,6 +290,11 @@ impl<'a> SqlFactWriter<'a> {
         let mut report = SqlInsertReport::default();
         for ((sid, ns, profile), group) in groups {
             self.upsert_session(host, &ns, &sid, Some(&profile), self.now_ms)?;
+            // 事实带 `route_evidence_id` 时先落 route_evidence 行（与 sql_sync 的
+            // 预插入同纪律），否则 usage_facts 的 FK 触发器会让整个迁移中止——
+            // claude-code emitter 自 provider-v1.0-beta.1 起会带这个字段（验收审查
+            // iteration 1 #4）。
+            self.insert_route_evidence_rows(host, &ns, &sid, &group, &source_id)?;
             let r = self.insert_facts(&group, &source_id, &sid)?;
             report.inserted += r.inserted;
             report.duplicate += r.duplicate;
@@ -643,6 +648,40 @@ impl<'a> SqlFactWriter<'a> {
 // 列映射索引：`{host}:{path_hash}`；`session_key` 用 source_key；
 // `ingested_run_id`=run_id；created/updated=now；deleted 恒 NULL。
 
+impl SqlFactWriter<'_> {
+    /// 迁移/导入路径的 route_evidence 预插入（镜像 `sql_sync.rs` 同步路径的写法）。
+    fn insert_route_evidence_rows(
+        &self, host: &str, machine_namespace: &str, native_session_id: &str,
+        facts: &[Value], source_id: &str,
+    ) -> Result<(), AuthorityError> {
+        let mut seen = std::collections::HashSet::new();
+        for fact in facts {
+            let Some(evidence_id) = fact.get("route_evidence_id").and_then(Value::as_str) else { continue };
+            if !seen.insert(evidence_id.to_string()) { continue; }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO route_evidence(
+                   evidence_id, host, machine_namespace, native_session_id,
+                   provider_raw, endpoint_host, evidence_basis, observed_at_ms,
+                   source_id, ingested_run_id)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    evidence_id,
+                    fact.get("host").and_then(Value::as_str).unwrap_or(host),
+                    machine_namespace,
+                    native_session_id,
+                    fact.get("provider_raw").and_then(Value::as_str),
+                    fact.get("endpoint_host").and_then(Value::as_str),
+                    fact.get("evidence_basis").and_then(Value::as_str).unwrap_or("missing"),
+                    self.now_ms,
+                    source_id,
+                    self.run_id,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,6 +743,36 @@ mod tests {
             let report = w.insert_facts(facts, &src, session)?;
             Ok((report, src))
         })
+    }
+
+    /// 验收审查 iteration 1 #4：`data-migrate` 走 `import_facts_jsonl`，事实带
+    /// `route_evidence_id`（claude-code emitter v1.0-beta.1 起）时必须先落
+    /// route_evidence 行，否则 usage_facts 的 FK 触发器让整份迁移中止。
+    #[test]
+    fn import_jsonl_inserts_route_evidence_before_facts() {
+        let (db, path) = open_db("import-route");
+        let jsonl = tmp_path("facts").with_extension("jsonl");
+        let mut fact = mk_fact("e-route");
+        fact["fact_id"] = json!("fact-route-1");
+        fact["provider_raw"] = json!("anthropic");
+        fact["provider_id"] = json!("anthropic");
+        fact["endpoint_host"] = json!("api.anthropic.com");
+        fact["evidence_basis"] = json!("session-native");
+        fact["pricing_basis"] = json!("route-observed");
+        fact["route_evidence_id"] = json!("route:0123456789abcdef");
+        std::fs::write(&jsonl, format!("{}\n", fact)).unwrap();
+        let report = db.with_immediate_txn(|conn| {
+            let w = SqlFactWriter::new(conn, "run-1", 2_000)?;
+            w.import_facts_jsonl("claude-code", &jsonl)
+        }).unwrap();
+        assert_eq!(report.inserted, 1, "{report:?}");
+        let (provider_raw, endpoint, basis): (String, String, String) = db.conn().query_row(
+            "SELECT provider_raw, endpoint_host, evidence_basis FROM route_evidence WHERE evidence_id = 'route:0123456789abcdef'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!((provider_raw.as_str(), endpoint.as_str(), basis.as_str()), ("anthropic", "api.anthropic.com", "session-native"));
+        let _ = std::fs::remove_file(&jsonl);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

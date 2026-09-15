@@ -187,8 +187,15 @@ pub fn resolve_billing_attribution(
     // The session's explicit provider wins over a current-config hint. A
     // stronger conflicting route evidence is unresolved instead of silently
     // being called subscription.
+    // 宿主没有自报 provider（Claude Code：`model_provider = None`，路由证据来自
+    // 请求 ID 形状）时，会话级路由证据就是唯一真值，不与任何人冲突（自动归因
+    // A4）。宿主自报了 provider 的旧口径原样保留——DSH 自报 deepseek 也会落
+    // 「冲突/metered_estimate」，那是 provider-v0.11 的既有语义，Python
+    // `dsh_usage_fact.py` 与已入库事实都按它对齐；收紧要连同 attribution_version
+    // 一起升版，不在这一步顺手改。
     let route_conflicts = matches!(route_basis, EvidenceBasis::Conflict)
-        || (route_basis.strength() >= EvidenceBasis::SessionNative.strength()
+        || (model_provider.is_some()
+            && route_basis.strength() >= EvidenceBasis::SessionNative.strength()
             && route_provider.as_deref().is_some_and(|p| p != "openai"));
     let is_official_subscription = model_provider == Some("openai")
         && route.and_then(|r| r.endpoint_host.as_deref()).is_some()
@@ -347,4 +354,25 @@ mod tests {
             None
         );
     }
+    /// 自动归因 A4：Claude Code 没有宿主自报 provider，会话级路由证据（请求 ID
+    /// 形状 → anthropic / api.anthropic.com / session-native）是唯一真值——
+    /// 计费方 anthropic、按量、route-observed、无未决；不能被当成与 openai 冲突。
+    #[test]
+    fn anthropic_session_native_route_is_resolved_not_conflicting() {
+        let route = RouteEvidence {
+            provider_raw: Some("anthropic".to_string()),
+            endpoint_host: Some("api.anthropic.com".to_string()),
+            evidence_basis: EvidenceBasis::SessionNative,
+        };
+        let a = resolve_billing_attribution(None, Some(&route));
+        assert_eq!(a.provider_id.as_deref(), Some("anthropic"));
+        assert_eq!(a.billing_mode, BillingMode::Metered);
+        assert_eq!(a.pricing_basis, "route-observed");
+        assert_eq!(a.evidence_basis, EvidenceBasis::SessionNative);
+        assert!(!a.has_unresolved);
+        // 宿主自报 openai 但会话路由指向别家 → 仍是冲突（既有语义不变）。
+        let b = resolve_billing_attribution(Some("openai"), Some(&route));
+        assert!(b.has_unresolved);
+    }
+
 }

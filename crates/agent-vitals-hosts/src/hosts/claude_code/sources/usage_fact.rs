@@ -219,11 +219,21 @@ impl Observation {
         // attribution_version 升到 v1.0-beta.1：fact_writer_sql 见版本变化按重分类
         // 路径改写存量事实，而不是把 missing→session-native 记成 attribution_conflict。
         let shape = route_shape(&self.model, self.request_id.as_deref(), self.message_id.as_deref());
+        // 计费方仍由 `resolve_billing_attribution` 一个判定器决定（A4）：官方形状 →
+        // 会话级 RouteEvidence 喂给它，得到 provider/pricing_basis；非官方形状不构造
+        // RouteEvidence（provider_raw 留空——一个非空的 raw 会经 normalize_provider
+        // 变成 provider_id，把"厂商形状一致"冒充成"计费方已定"）。
         let (provider_raw, endpoint_host, provider_id, pricing_basis) = match &shape {
-            RouteShape::OfficialVendor(vendor) => (
-                Some(vendor.clone()), official_endpoint_of(vendor), Some(vendor.clone()), "route-observed",
-            ),
-            _ => (None, None, None, "metered_estimate"),
+            RouteShape::OfficialVendor(vendor) => {
+                let route = agent_vitals_provider::RouteEvidence {
+                    provider_raw: Some(vendor.clone()),
+                    endpoint_host: official_endpoint_of(vendor),
+                    evidence_basis: agent_vitals_provider::EvidenceBasis::SessionNative,
+                };
+                let attribution = agent_vitals_provider::resolve_billing_attribution(None, Some(&route));
+                (route.provider_raw.clone(), route.endpoint_host.clone(), attribution.provider_id, attribution.pricing_basis)
+            }
+            _ => (None, None, None, "metered_estimate".to_string()),
         };
         let evidence_basis = shape.evidence_basis();
         let route_evidence_id = if matches!(shape, RouteShape::Unknown) {

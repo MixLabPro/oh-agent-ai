@@ -637,8 +637,8 @@ enum Cmd {
     },
     /// Billing confirmation groups for one month with the program's own
     /// verdict per group (auto-attribution spec §5.1: determined /
-    /// one_question / needs_input) — the same data the desktop "明确计费方式"
-    /// list renders, for CLI/desktop reconciliation. Read-only; account
+    /// one_question / needs_input) — the same data the desktop
+    /// billing-confirmation list renders, for CLI/desktop reconciliation. Read-only; account
     /// evidence is limited to the allow-listed plan fields.
     BillingGroups {
         /// Month to inspect ("YYYY-MM"; default: current month)

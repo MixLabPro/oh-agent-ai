@@ -50,9 +50,10 @@ pub fn model_vendor_in(catalog: &Value, model: &str) -> Option<VendorMatch> {
             {
                 return Some(VendorMatch { vendor: vendor.to_string(), gateway_named: true });
             }
-            // 别名表不认识的前缀：仍按后半段的模型名族判厂商，网关身份保留。
-            return vendor_by_prefix(catalog, rest)
-                .map(|vendor| VendorMatch { vendor, gateway_named: true });
+            // 别名表不认识的前缀（`openrouter/anthropic/claude-…` 这类两级网关名）：
+            // 剥掉一层继续判，网关身份保留。
+            return model_vendor_in(catalog, rest)
+                .map(|m| VendorMatch { vendor: m.vendor, gateway_named: true });
         }
     }
     vendor_by_prefix(catalog, model).map(|vendor| VendorMatch { vendor, gateway_named: false })
@@ -140,7 +141,13 @@ pub fn route_shape_in(
     }
 }
 
+/// 含空白/控制字符的 ID 一律不命中：`$` 在 Rust 是串尾、在 Python 是串尾或末尾
+/// 换行前，一个带尾随换行的 ID 会让两边判定分叉（验收审查 iteration 1 #1）。
+/// 真实 API 的 ID 从不含这些字符，拒绝它们不损失召回。
 fn matches(pattern: Option<&str>, value: &str) -> bool {
+    if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
     pattern.and_then(|p| regex::Regex::new(p).ok()).is_some_and(|re| re.is_match(value))
 }
 
@@ -206,6 +213,10 @@ mod tests {
             let m = model_vendor(model).unwrap_or_else(|| panic!("{model} unresolved"));
             assert_eq!((m.vendor.as_str(), m.gateway_named), (vendor, gateway), "{model}");
         }
+        let two_level = model_vendor("openrouter/anthropic/claude-opus-5").unwrap();
+        assert_eq!((two_level.vendor.as_str(), two_level.gateway_named), ("anthropic", true));
+        assert_eq!(route_shape("claude-opus-5", Some("req_011Cf5wHSjBXJbBc7FLDugfD"), Some("msg_01ABCDEFGHJKLMNPQRSTUVWX\n")),
+            RouteShape::Gateway, "an id with trailing whitespace never counts as official");
         assert_eq!(model_vendor("<synthetic>"), None);
         assert_eq!(model_vendor("fast-model"), None);
         assert_eq!(model_vendor("totally-unknown-model"), None);

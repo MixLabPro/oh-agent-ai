@@ -1919,7 +1919,7 @@ function billingRelationshipFromSteps(missing, routeValue, modeValue) {
 // 的一行）；`rows` 是面板里的全部行，用来找可批量处理的同类组。只有旧资产候选、
 // 当月无用量时，调用方把候选包装成组形状（`model_id` 为空，旧候选的月份在表单
 // 中展开为该月首日/末日）。声明边界按北京时间日期。
-function openBillingDeclaration(target, rows) {
+function openBillingDeclaration(target, rows, preset) {
   const panel = document.getElementById("ov-billing-declaration-panel");
   const context = document.getElementById("ov-billing-declaration-context");
   const missingText = document.getElementById("ov-billing-missing");
@@ -1937,7 +1937,16 @@ function openBillingDeclaration(target, rows) {
   const modeRow = document.getElementById("ov-billing-mode-row");
   const mode = document.getElementById("ov-billing-mode");
   if (!panel || !context || !preview || !start || !end || !route || !mode) return;
+  preset = preset || {};
+  // 程序判定的预置（自动归因规格 §5.1）：已知的步骤不再问，只预填并展示依据；
+  // 「不对，我来改」把所有步骤重新放出来。
   const missing = billingMissing(target);
+  if (!preset.override) {
+    if (preset.providerKnown) missing.provider = false;
+    if (preset.routeKnown) missing.route = false;
+  } else {
+    missing.provider = true; missing.route = true;
+  }
   const key = billingBatchKey(target);
   const peers = (Array.isArray(rows) ? rows : []).filter((row) => row !== target && !row.resolvedCandidate
     && Number(row.tokens || 0) > 0 && row.model_id && billingBatchKey(row) === key);
@@ -1949,15 +1958,15 @@ function openBillingDeclaration(target, rows) {
     const control = document.getElementById(id);
     if (control) control.disabled = false;
   }
-  if (provider) provider.value = "";
-  route.value = "official";
-  mode.value = "subscription";
+  if (provider) provider.value = preset.provider && missing.provider ? preset.provider : "";
+  route.value = preset.route || "official";
+  mode.value = preset.mode || (preset.verdict && preset.verdict.billing_mode === "metered" ? "api" : "subscription");
   // 订阅字段：有旧资产候选就预填它的套餐金额/币种，让用户核对而不是重填。
   const subscriptionName = document.getElementById("ov-billing-subscription-name");
   const subscriptionAmount = document.getElementById("ov-billing-subscription-amount");
   const subscriptionCurrency = document.getElementById("ov-billing-subscription-currency");
   const amountUnknown = document.getElementById("ov-billing-amount-unknown");
-  if (subscriptionName) subscriptionName.value = "";
+  if (subscriptionName) subscriptionName.value = preset.plan && preset.plan.label ? preset.plan.label : "";
   if (amountUnknown) amountUnknown.checked = false;
   if (subscriptionAmount) subscriptionAmount.value = target.candidate && Number.isFinite(Number(target.candidate.amount_minor))
     ? (Number(target.candidate.amount_minor) / 100).toFixed(2) : "";
@@ -1977,7 +1986,18 @@ function openBillingDeclaration(target, rows) {
   if (missing.provider) asks.push("服务商");
   if (missing.route) asks.push("路由");
   asks.push("计费方式");
-  if (missingText) missingText.textContent = "待补充：" + asks.join("、") + "。按顺序补齐即可，不要求一次填完整表单；这一步只明确计费关系，不证明已付款。";
+  if (missingText) {
+    const verdict = preset.verdict;
+    const known = [];
+    if (verdict && !missing.provider && verdict.billing_party) known.push("服务商 " + verdict.billing_party);
+    if (verdict && !missing.route) known.push(verdict.route_state === "official" ? "官方路由" : "宿主自报官方路由");
+    if (verdict && verdict.plan && verdict.plan.label) {
+      known.push(verdict.plan.label + (verdict.plan.anchor_date ? "（每月 " + Number(verdict.plan.anchor_date.slice(8, 10)) + " 日续费，订阅自 " + verdict.plan.anchor_date + "）" : ""));
+    }
+    missingText.textContent = (known.length ? "程序已判定：" + known.join(" · ") + "。" : "") +
+      (asks.length ? "待补充：" + asks.join("、") + "。" : "") +
+      "只需确认或补齐，不要求一次填完整表单；这一步只明确计费关系，不证明已付款。";
+  }
   const batchModels = document.getElementById("ov-billing-batch-models");
   const batchToggle = document.getElementById("ov-billing-batch-models-toggle");
   if (batchModels) {
@@ -2762,6 +2782,11 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     return;
   }
   const groups = groupsOk && Array.isArray(groupsReport.groups) ? groupsReport.groups : [];
+  // 三态行（自动归因规格 §5.1）：后端 `clusters` = 宿主 × 计费方/厂商 × 路由状态 ×
+  // 判定状态；模型折进 models[]。程序已判定 → 一键「确认」（弹窗只剩订阅确认）；
+  // 差一问 → 问题的选项直接放行内；需补充 → 进弹窗。没有 clusters（旧后端）时
+  // 退回逐模型行。
+  const clusters = groupsOk && Array.isArray(groupsReport.clusters) ? groupsReport.clusters : null;
   const candidates = candidatesOk && Array.isArray(candidatesReport.candidates) ? candidatesReport.candidates : [];
   const pendingCandidates = candidates.filter((c) => c.status === "pending");
   // 候选挂到同宿主同 provider 的第一组；挂不上的当月无用量，单独成行。
@@ -2799,7 +2824,8 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     try { localStorage.removeItem(BILLING_REVIEW_DEFER_KEY); } catch (_) { /* best effort */ }
     try { sessionStorage.removeItem(BILLING_REVIEW_DEFER_KEY); } catch (_) { /* best effort */ }
   }
-  const pendingCount = pendingRows.length;
+  // 有 clusters 时按簇计数（一簇 = 用户要回答的一件事），候选专属行照旧各算一件。
+  const pendingCount = clusters ? clusters.length + pendingRows.filter((row) => !row.model_id).length : pendingRows.length;
   // “稍后”只压住首屏提醒；设置里的入口始终可主动找回（AC28）。
   prompt.hidden = pendingCount === 0 || deferred;
   billingPromptState = { visible: !prompt.hidden && pendingCount > 0, pendingTokens };
@@ -2831,9 +2857,104 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     panel.hidden = true;
     prompt.hidden = true;
   };
+  const clusterRowsOf = (cluster) => (cluster.models || []).map((m) => ({
+    group_id: m.group_id, host: cluster.host,
+    provider_id: cluster.provider_id || "<unknown>", model_id: m.model_id,
+    evidence_basis: cluster.evidence_basis, pricing_basis: cluster.pricing_basis,
+    tokens: m.tokens, session_count: m.session_count, estimated_amounts: m.estimated_amounts || [],
+    effective_start: cluster.effective_start, effective_end: cluster.effective_end,
+    candidate: null, auto_verdict: cluster.auto_verdict,
+  }));
+  const basisText = (verdict) => (verdict.basis || []).map((b) => ({
+    "route.session-native": "请求 ID 为官方格式", "route.explicit-official-route": "明确官方路由",
+    "route.account-time-bound": "账户期证据", "route.config-time-bound": "配置期证据",
+    "host.provider_reported": "宿主自报服务商", "model.gateway_named": "网关式模型命名",
+    "response_id.vendor_shape": "响应 ID 与厂商形状一致", "account.api_key": "账户使用 API key",
+  }[b] || (b.startsWith("account.") ? "账户套餐 " + b.slice(8) : b))).join(" · ");
+  const renderClusterRow = (cluster) => {
+    const verdict = cluster.auto_verdict || {};
+    const rows = clusterRowsOf(cluster);
+    const target = rows[0];
+    if (!target) return null;
+    const item = document.createElement("div");
+    item.className = "billing-review-row";
+    const detail = document.createElement("div");
+    const actions = document.createElement("div");
+    actions.className = "billing-review-actions";
+    const party = verdict.billing_party || null;
+    const vendor = verdict.model_vendor || null;
+    const who = party ? party : (vendor ? "计费方待定（模型厂商 " + vendor + "）" : "服务商未知");
+    const routeText = { official: "官方路由", provider_reported: "宿主自报官方", gateway: "经中转", vendor_shape: "厂商端点或中转", unknown: "路由未知" }[verdict.route_state] || "路由未知";
+    const amount = billingAmountsText(cluster.estimated_amounts);
+    const models = (cluster.models || []).map((m) => m.model_id).filter(Boolean);
+    let head = cluster.host + " · " + who + " · " + routeText;
+    if (verdict.state === "determined" && verdict.plan && verdict.plan.label) {
+      head += " · " + verdict.plan.label + " 订阅" +
+        (verdict.plan.anchor_date ? " · 每月 " + Number(verdict.plan.anchor_date.slice(8, 10)) + " 日续费" : "");
+    } else if (verdict.state === "determined" && verdict.relationship_kind === "official_api") {
+      head += " · 官方 API 按量";
+    }
+    head += " · " + models.length + " 个模型" + (models.length ? "（" + models.slice(0, 2).join("、") + (models.length > 2 ? " 等" : "") + "）" : "") +
+      " · " + Number(cluster.session_count || 0) + " 个会话 · " + fmtTokens(Number(cluster.tokens || 0)) + " tokens" +
+      (amount ? " · 按量估算 " + amount : (Number(cluster.unpriced_tokens || 0) > 0 ? " · 无价卡，仅计 token" : ""));
+    detail.textContent = head;
+    const basis = document.createElement("div");
+    basis.className = "muted";
+    basis.textContent = (verdict.state === "determined" ? "程序判定，依据：" : verdict.state === "one_question" ? "已知：" : "缺少证据：")
+      + (basisText(verdict) || "无");
+    detail.appendChild(basis);
+    const open = (preset) => openBillingDeclaration(target, rows, preset);
+    if (verdict.state === "determined") {
+      const confirm = document.createElement("button");
+      confirm.className = "btn secondary";
+      confirm.textContent = verdict.relationship_kind === "official_subscription" ? "确认订阅并填写月费" : "确认";
+      confirm.onclick = () => open({ verdict, routeKnown: true, providerKnown: true,
+        mode: verdict.relationship_kind === "official_subscription" ? "subscription" : verdict.relationship_kind === "official_api" ? "api" : "organization",
+        plan: verdict.plan });
+      const wrong = document.createElement("button");
+      wrong.className = "chip-link";
+      wrong.textContent = "不对，我来改";
+      wrong.onclick = () => open({ verdict, override: true });
+      actions.append(confirm, wrong);
+    } else if (verdict.state === "one_question" && verdict.question === "route") {
+      const official = document.createElement("button");
+      official.className = "btn secondary";
+      official.textContent = (vendor ? vendor + " " : "") + "官方端点";
+      official.onclick = () => open({ verdict, provider: vendor, route: "official", mode: "api" });
+      const relay = document.createElement("button");
+      relay.className = "btn secondary";
+      relay.textContent = "中转 / 第三方";
+      relay.onclick = () => open({ verdict, provider: vendor, route: "third_party" });
+      actions.append(official, relay);
+    } else if (verdict.state === "one_question") {
+      for (const [label, mode] of [["订阅", "subscription"], ["按量 API", "api"], ["组织承担", "organization"]]) {
+        const b = document.createElement("button");
+        b.className = "btn secondary";
+        b.textContent = label;
+        b.onclick = () => open({ verdict, routeKnown: true, providerKnown: true, mode });
+        actions.appendChild(b);
+      }
+    } else {
+      const confirm = document.createElement("button");
+      confirm.className = "btn secondary";
+      confirm.textContent = "明确计费方式";
+      confirm.onclick = () => open({ verdict, provider: vendor });
+      actions.appendChild(confirm);
+    }
+    item.append(detail, actions);
+    return item;
+  };
   const renderRows = () => {
     list.textContent = "";
+    if (clusters) {
+      for (const cluster of clusters) {
+        const item = renderClusterRow(cluster);
+        if (item) list.appendChild(item);
+      }
+    }
     for (const row of rows) {
+      // clusters 已经覆盖了有用量的组；这里只剩候选专属行（当月无用量的旧套餐记录）。
+      if (clusters && !row.resolvedCandidate && !(row.candidate && Number(row.tokens || 0) === 0)) continue;
       const item = document.createElement("div");
       item.className = "billing-review-row";
       const detail = document.createElement("div");

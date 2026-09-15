@@ -47,6 +47,10 @@ class SignatureCatalogTests(unittest.TestCase):
             match = model_vendor(model)
             self.assertIsNotNone(match, model)
             self.assertEqual((match.vendor, match.gateway_named), (vendor, gateway), model)
+        two_level = model_vendor("openrouter/anthropic/claude-opus-5")
+        self.assertEqual((two_level.vendor, two_level.gateway_named), ("anthropic", True))
+        self.assertEqual(route_shape("claude-opus-5", "req_011Cf5wHSjBXJbBc7FLDugfD", "msg_01ABCDEFGHJKLMNPQRSTUVWX\n"), (GATEWAY, None),
+                         "an id with trailing whitespace never counts as official")
         for sentinel in ("<synthetic>", "fast-model", "totally-unknown-model", ""):
             self.assertIsNone(model_vendor(sentinel), sentinel)
 

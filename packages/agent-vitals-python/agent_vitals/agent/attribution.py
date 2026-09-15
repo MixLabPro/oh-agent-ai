@@ -56,8 +56,9 @@ def model_vendor(model: str, catalog: Optional[dict] = None) -> Optional[VendorM
             alias = ((catalog.get("gateway_naming") or {}).get("aliases") or {}).get(prefix.lower())
             if alias:
                 return VendorMatch(alias, True)
-            vendor = _vendor_by_prefix(catalog, rest)
-            return VendorMatch(vendor, True) if vendor else None
+            # 两级网关名（openrouter/anthropic/claude-…）：剥一层继续判，网关身份保留。
+            inner = model_vendor(rest, catalog)
+            return VendorMatch(inner.vendor, True) if inner else None
     vendor = _vendor_by_prefix(catalog, model)
     return VendorMatch(vendor, False) if vendor else None
 
@@ -77,7 +78,9 @@ def evidence_basis_of(kind: str) -> str:
 
 
 def _matches(pattern: Optional[str], value: Optional[str]) -> bool:
-    if not pattern or value is None:
+    # 含空白/控制字符的 ID 一律不命中（镜像 Rust `matches`）：`$` 在 Python 是串尾
+    # 或末尾换行前，Rust 是串尾，不加这道闸两边会分叉。
+    if not pattern or not value or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value):
         return False
     try:
         return re.search(pattern, value) is not None
