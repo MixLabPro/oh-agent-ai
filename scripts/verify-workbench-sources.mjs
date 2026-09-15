@@ -184,6 +184,7 @@ for (const id of ["ov-billing-prompt", "ov-billing-review-panel", "ov-billing-re
   "ov-billing-batch-row", "ov-billing-batch", "ov-billing-batch-text",
   "ov-billing-provider-row", "ov-billing-provider", "ov-billing-route-row", "ov-billing-route",
   "ov-billing-mode-row", "ov-billing-mode", "ov-billing-subscription-fields", "ov-billing-subscription-name",
+  "ov-billing-backdrop", "ov-billing-close", "ov-billing-declaration-stats", "ov-billing-batch-models", "ov-billing-dates-row",
   "ov-billing-subscription-amount", "ov-billing-subscription-currency", "ov-billing-amount-unknown",
   "ov-billing-recalculation-panel", "ov-billing-recalculation-list",
   "settings-billing-candidates", "settings-billing-candidates-copy", "settings-billing-candidates-open"]) {
@@ -290,6 +291,14 @@ ok(elements["ov-billing-declaration-panel"].hidden === false && elements["ov-bil
 ok(elements["ov-billing-batch-row"].hidden === false && elements["ov-billing-batch"].checked === true
   && /将同时处理 2 个模型、8 个会话、1\.8M tokens/.test(elements["ov-billing-batch-text"].textContent),
   "默认勾选同宿主、同未知原因、同日期的同类组并汇总模型/会话/tokens");
+ok(elements["ov-billing-batch-models"].children.length === 2
+  && elements["ov-billing-batch-models"].children.map((c) => c.textContent).join("|").includes("gpt-5.6-sol")
+  && elements["ov-billing-batch-models"].children.map((c) => c.textContent).join("|").includes("gpt-5.6-luna"),
+  "批量行列出将一起处理的模型（含 token 规模），不只给个数");
+ok(elements["ov-billing-backdrop"].hidden === false && elements["ov-billing-declaration-stats"].textContent.includes("1.6M tokens · 7 个会话"),
+  "弹窗打开时显示真实遮罩层，头部规模信息单独一行");
+ok(elements["ov-billing-scope-text"].textContent.includes("2 个模型（gpt-5.6-sol 等）") && elements["ov-billing-scope-text"].textContent.includes(monthStart + " – " + today),
+  "作用范围一句话列出模型数与起止日期");
 ok(elements["ov-billing-subscription-fields"].hidden === false && elements["ov-billing-relationship-effect"].textContent.includes("移出按量估算"),
   "默认官方订阅：展示套餐名/月费/币种字段与结果说明");
 ok(elements["ov-billing-subscription-amount"].value === "20.00" && elements["ov-billing-subscription-currency"].value === "USD",
@@ -378,6 +387,13 @@ ok(elements["ov-billing-preview"].textContent.includes("留在待处理列表，
 await elements["ov-billing-save"].onclick();
 ok(!billingCalls.some((c) => ["save_billing_declaration_revision", "save_price_route"].includes(c.command)) && storage["agent-vitals-billing-review-deferred-at-ms"],
   "V4：仍不确定第二次点击只记录 30 天降级，无 save / 归属写入");
+ok(elements["ov-billing-declaration-panel"].hidden === true && elements["ov-billing-backdrop"].hidden === true,
+  "返回后弹窗与遮罩一起收起");
+await reviewRows[0].children[1].children[0].onclick();
+ok(elements["ov-billing-declaration-panel"].hidden === false && elements["ov-billing-backdrop"].hidden === false, "再次打开弹窗与遮罩");
+elements["ov-billing-backdrop"].onclick();
+ok(elements["ov-billing-declaration-panel"].hidden === true && elements["ov-billing-backdrop"].hidden === true,
+  "点击半透明遮罩关闭弹窗");
 billingOverride = null;
 
 ok(js.includes("if (billingReviewOpen) renderRows();"),

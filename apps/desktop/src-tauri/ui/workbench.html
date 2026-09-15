@@ -426,77 +426,107 @@
             <div id="ov-billing-review-list"></div>
           </section>
         </div>
+        <!-- 真实遮罩层：点击关闭弹窗（Esc 同）。此前用 box-shadow 100vmax 假装遮罩，
+             点击会落到下面的页面元素上。 -->
+        <div class="bd-backdrop" id="ov-billing-backdrop" hidden></div>
         <section class="setting billing-declaration-dialog" id="ov-billing-declaration-panel" hidden
           role="dialog" aria-modal="true" aria-labelledby="ov-billing-declaration-title">
-          <div class="setting-head">
+          <div class="bd-head">
             <div class="setting-title" id="ov-billing-declaration-title">明确计费方式</div>
-            <p id="ov-billing-declaration-context"></p>
-            <p class="muted" id="ov-billing-missing"></p>
+            <button class="chip-link bd-close" id="ov-billing-close" type="button" aria-label="关闭（Esc）">关闭</button>
+          </div>
+          <!-- 头部三行：这批用量是什么（宿主 · 模型 · 规模 · 当前估算）/ 缺什么 / 一句边界。
+               不再把这些塞进一段密文（2026-09-15 真机截图）。 -->
+          <div class="bd-summary">
+            <div class="bd-summary-main" id="ov-billing-declaration-context"></div>
+            <div class="bd-summary-stats muted" id="ov-billing-declaration-stats"></div>
+            <div class="bd-summary-missing" id="ov-billing-missing"></div>
           </div>
           <!-- 批量：默认勾选所有「宿主、未知原因、适用日期相同」的组，一次声明写多条
-               model 作用域，一次预览、一个修订、一个重算任务（计费主链规格 v1.2 §5.2a）。 -->
-          <label class="billing-batch" id="ov-billing-batch-row" hidden>
-            <input id="ov-billing-batch" type="checkbox" checked>
-            <span id="ov-billing-batch-text"></span>
-          </label>
-          <!-- 按缺什么问什么（规格 v1.2 §5.3a）：服务商未知 → 先选服务商；路由未知 →
-               官方 / 第三方 / 仍不确定；计费方式未知 → 订阅 / API / 组织承担；订阅 →
-               套餐名、月费与币种。五种 relationship_kind 由这三步推导，不再直接选。
-               每一步旁边一句结果说明是 Beta 的真实行为（只有官方订阅改数字）。 -->
-          <div class="form-row" id="ov-billing-provider-row" hidden>
-            <label><span>这批用量是哪家服务商的？</span>
-              <input id="ov-billing-provider" type="text" list="ov-known-providers" placeholder="anthropic / openai / zhipu-glm …" autocomplete="off">
+               model 作用域，一次预览、一个修订、一个重算任务（计费主链规格 v1.2 §5.2a）。
+               包含哪些模型必须列出来，用户才知道自己在批量确认什么。 -->
+          <div class="billing-batch" id="ov-billing-batch-row" hidden>
+            <label class="billing-batch-toggle">
+              <input id="ov-billing-batch" type="checkbox" checked>
+              <span id="ov-billing-batch-text"></span>
             </label>
-            <p class="muted">日志里没有服务商证据；选定后这批用量按该服务商的价卡估算，并在下一轮同步时归到它名下。</p>
+            <div class="bd-models" id="ov-billing-batch-models" aria-label="将一起处理的模型"></div>
           </div>
-          <div class="form-row" id="ov-billing-route-row" hidden>
-            <label><span>走的是官方路由还是第三方服务？</span>
-              <select id="ov-billing-route">
-                <option value="official">官方路由</option>
-                <option value="third_party">第三方服务</option>
-                <option value="unknown">仍不确定</option>
-              </select>
-            </label>
+          <!-- 按缺什么问什么（规格 v1.2 §5.3a），左标签右控件，只给可见步骤编号。 -->
+          <div class="bd-grid">
+            <div class="bd-row" id="ov-billing-provider-row" hidden>
+              <div class="bd-label"><span class="bd-step" aria-hidden="true"></span><span>服务商</span></div>
+              <div class="bd-control">
+                <input id="ov-billing-provider" type="text" list="ov-known-providers" placeholder="选择或输入，例如 anthropic" autocomplete="off">
+                <p class="bd-help muted">日志里没有服务商证据。选定后按该服务商的价卡估算，并在下一轮同步时归到它名下。</p>
+              </div>
+            </div>
+            <div class="bd-row" id="ov-billing-route-row" hidden>
+              <div class="bd-label"><span class="bd-step" aria-hidden="true"></span><span>路由</span></div>
+              <div class="bd-control">
+                <select id="ov-billing-route">
+                  <option value="official">官方路由</option>
+                  <option value="third_party">第三方服务</option>
+                  <option value="unknown">仍不确定</option>
+                </select>
+                <p class="bd-help muted">走的是官方接口，还是中转 / 第三方网关？</p>
+              </div>
+            </div>
+            <div class="bd-row" id="ov-billing-mode-row" hidden>
+              <div class="bd-label"><span class="bd-step" aria-hidden="true"></span><span>计费方式</span></div>
+              <div class="bd-control">
+                <select id="ov-billing-mode">
+                  <option value="subscription">官方订阅</option>
+                  <option value="api">官方 API（按量）</option>
+                  <option value="organization">组织承担</option>
+                </select>
+                <p class="bd-help muted" id="ov-billing-relationship-effect" aria-live="polite"></p>
+              </div>
+            </div>
+            <div class="bd-row" id="ov-billing-subscription-fields" hidden>
+              <div class="bd-label"><span class="bd-step" aria-hidden="true"></span><span>订阅信息</span></div>
+              <div class="bd-control">
+                <div class="bd-inline">
+                  <label class="bd-field grow"><span>套餐名称（可选）</span>
+                    <input id="ov-billing-subscription-name" type="text" maxlength="120" placeholder="例如 Claude Pro">
+                  </label>
+                </div>
+                <div class="bd-inline">
+                  <label class="bd-field"><span>月费</span>
+                    <input id="ov-billing-subscription-amount" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00">
+                  </label>
+                  <label class="bd-field"><span>币种</span>
+                    <select id="ov-billing-subscription-currency">
+                      <option value="CNY">CNY</option>
+                      <option value="USD">USD</option>
+                    </select>
+                  </label>
+                  <label class="bd-check">
+                    <input id="ov-billing-amount-unknown" type="checkbox">
+                    <span>金额暂不清楚</span>
+                  </label>
+                </div>
+                <p class="bd-help muted">月费只用于记录套餐；实际支出仍要有账单或付款记录才计入。</p>
+              </div>
+            </div>
+            <div class="bd-row" id="ov-billing-dates-row">
+              <div class="bd-label"><span class="bd-step" aria-hidden="true"></span><span>适用日期</span></div>
+              <div class="bd-control">
+                <div class="bd-inline">
+                  <label class="bd-field"><span>起始</span>
+                    <input id="ov-billing-start" type="date" inputmode="numeric" pattern="\d{4}-\d{2}-\d{2}" placeholder="YYYY-MM-DD" aria-describedby="ov-billing-scope-text">
+                  </label>
+                  <span class="bd-range-sep" aria-hidden="true">–</span>
+                  <label class="bd-field"><span>结束（不晚于今天）</span>
+                    <input id="ov-billing-end" type="date" inputmode="numeric" pattern="\d{4}-\d{2}-\d{2}" placeholder="YYYY-MM-DD" aria-describedby="ov-billing-scope-text">
+                  </label>
+                </div>
+                <p class="bd-help muted" id="ov-billing-scope-text"></p>
+              </div>
+            </div>
           </div>
-          <div class="form-row" id="ov-billing-mode-row" hidden>
-            <label><span>这批用量如何付费？</span>
-              <select id="ov-billing-mode">
-                <option value="subscription">官方订阅</option>
-                <option value="api">官方 API（按量）</option>
-                <option value="organization">组织承担</option>
-              </select>
-            </label>
-          </div>
-          <p class="muted" id="ov-billing-relationship-effect" aria-live="polite"></p>
-          <div class="form-row" id="ov-billing-subscription-fields" hidden>
-            <label><span>套餐名称（可选）</span>
-              <input id="ov-billing-subscription-name" type="text" maxlength="120" placeholder="例如 Claude Pro">
-            </label>
-            <label><span>月费</span>
-              <input id="ov-billing-subscription-amount" type="number" min="0" step="0.01" inputmode="decimal" placeholder="金额">
-            </label>
-            <label><span>币种</span>
-              <select id="ov-billing-subscription-currency">
-                <option value="CNY">CNY</option>
-                <option value="USD">USD</option>
-              </select>
-            </label>
-            <label class="billing-amount-unknown">
-              <input id="ov-billing-amount-unknown" type="checkbox">
-              <span>金额暂不清楚</span>
-            </label>
-          </div>
-          <div class="form-row">
-            <label><span>起始日期（北京时间）</span>
-              <input id="ov-billing-start" type="date" inputmode="numeric" pattern="\d{4}-\d{2}-\d{2}" placeholder="YYYY-MM-DD" aria-describedby="ov-billing-scope-text">
-            </label>
-            <label><span>结束日期（北京时间，不晚于今天）</span>
-              <input id="ov-billing-end" type="date" inputmode="numeric" pattern="\d{4}-\d{2}-\d{2}" placeholder="YYYY-MM-DD" aria-describedby="ov-billing-scope-text">
-            </label>
-            <p class="muted" id="ov-billing-scope-text"></p>
-          </div>
-          <div class="form-row">
-            <button class="btn secondary" id="ov-billing-save" type="button">预览影响</button>
+          <div class="bd-actions">
+            <button class="btn primary" id="ov-billing-save" type="button">预览影响</button>
             <button class="chip-link" id="ov-billing-cancel" type="button">取消</button>
           </div>
           <div class="form-receipt block" id="ov-billing-preview" hidden aria-live="polite"></div>

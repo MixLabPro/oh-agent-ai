@@ -1977,7 +1977,18 @@ function openBillingDeclaration(target, rows) {
   if (missing.provider) asks.push("服务商");
   if (missing.route) asks.push("路由");
   asks.push("计费方式");
-  if (missingText) missingText.textContent = "日志里缺少：" + asks.join("、") + "。按顺序补齐即可，不要求一次填完整表单。";
+  if (missingText) missingText.textContent = "待补充：" + asks.join("、") + "。按顺序补齐即可，不要求一次填完整表单；这一步只明确计费关系，不证明已付款。";
+  const batchModels = document.getElementById("ov-billing-batch-models");
+  if (batchModels) {
+    batchModels.textContent = "";
+    for (const row of [target, ...peers]) {
+      const chip = document.createElement("span");
+      chip.className = "bd-model" + (row === target ? " is-target" : "");
+      chip.textContent = (row.model_id || "全部模型") + " · " + fmtTokens(Number(row.tokens || 0));
+      chip.title = Number(row.session_count || 0) + " 个会话";
+      batchModels.appendChild(chip);
+    }
+  }
   const currentMonth = statisticsMonth();
   start.value = monthStartDate(target.effective_start || currentMonth);
   const today = new Date().toISOString().slice(0, 10);
@@ -1988,26 +1999,50 @@ function openBillingDeclaration(target, rows) {
   end.max = today;
   const amountText = billingAmountsText(target.estimated_amounts);
   context.textContent = target.host + " · " + (missing.provider ? "服务商未知" : target.provider_id) +
-    (target.model_id ? " · " + target.model_id : "") +
-    " · " + fmtTokens(Number(target.tokens || 0)) + " tokens · " +
-    Number(target.session_count || 0) + " 个会话" +
-    (amountText ? " · 当前按量估算 " + amountText : "") +
-    (target.candidate ? " · 旧版本套餐记录：" + target.candidate.provider_id + " " +
-      billingCandidateAmount(target.candidate) + " 自 " + target.candidate.billing_period_start + " 起" : "") +
-    "。这一步只明确计费关系，不证明已付款。";
-  if (scope) {
-    scope.textContent = target.model_id
-      ? "作用范围：所选模型（" + target.host + " · " + (missing.provider ? "待选服务商" : target.provider_id) + "），按北京时间日期。"
-      : "作用范围：" + target.host + " · " + target.provider_id + " 全部模型，按北京时间日期。";
+    (target.model_id ? " · " + target.model_id : " · 全部模型");
+  const stats = document.getElementById("ov-billing-declaration-stats");
+  if (stats) {
+    stats.textContent = fmtTokens(Number(target.tokens || 0)) + " tokens · " +
+      Number(target.session_count || 0) + " 个会话 · " + billingEvidenceLabel(target.evidence_basis) +
+      (amountText ? " · 当前按量估算 " + amountText : (Number(target.tokens || 0) > 0 ? " · 无价卡，仅计 token" : "")) +
+      (target.candidate ? " · 旧版本套餐记录：" + target.candidate.provider_id + " " +
+        billingCandidateAmount(target.candidate) + " 自 " + target.candidate.billing_period_start + " 起" : "");
   }
+  syncBillingScopeText();
   preview.hidden = true;
   preview.textContent = "";
   const save = document.getElementById("ov-billing-save");
   save.disabled = false;
   save.textContent = "预览影响";
   syncBillingDeclarationSteps();
+  const backdrop = document.getElementById("ov-billing-backdrop");
+  if (backdrop) backdrop.hidden = false;
   panel.hidden = false;
   panel.scrollIntoView({ block: "nearest" });
+}
+
+function closeBillingDeclaration() {
+  const panel = document.getElementById("ov-billing-declaration-panel");
+  const backdrop = document.getElementById("ov-billing-backdrop");
+  if (panel) panel.hidden = true;
+  if (backdrop) backdrop.hidden = true;
+}
+
+// 作用范围一句话跟着批量勾选与日期变：宿主 · N 个模型（首个 等）· 起–止（北京时间）。
+function syncBillingScopeText() {
+  const target = billingDeclarationTarget;
+  const scope = document.getElementById("ov-billing-scope-text");
+  if (!target || !scope) return;
+  const start = document.getElementById("ov-billing-start");
+  const end = document.getElementById("ov-billing-end");
+  const rows = billingSelectedRows();
+  const models = rows.map((row) => row.model_id).filter(Boolean);
+  const modelText = !target.model_id ? "全部模型"
+    : models.length === 1 ? models[0]
+    : models.length + " 个模型（" + models[0] + " 等）";
+  scope.textContent = "作用范围：" + target.host + " · " +
+    (target.missing.provider ? "待选服务商" : target.provider_id) + " · " + modelText + " · " +
+    String((start && start.value) || "?") + " – " + String((end && end.value) || "?") + "（北京时间日期）。";
 }
 
 // 当前弹窗里选中的模型集合（批量勾选时 = 目标组 + 同类组）。
@@ -2058,6 +2093,18 @@ function syncBillingDeclarationSteps() {
   const kind = billingCurrentRelationship();
   if (effect) effect.textContent = BILLING_RELATIONSHIP_EFFECT[kind] || "";
   if (subscription) subscription.hidden = kind !== "official_subscription";
+  // 只给可见步骤编号：服务商未知时是 1 2 3 4 5，路由已知时是 1 2 3。
+  let step = 0;
+  for (const id of ["ov-billing-provider-row", "ov-billing-route-row", "ov-billing-mode-row",
+    "ov-billing-subscription-fields", "ov-billing-dates-row"]) {
+    const row = document.getElementById(id);
+    if (!row) continue;
+    const badge = row.querySelector && row.querySelector(".bd-step");
+    if (row.hidden) { if (badge) badge.textContent = ""; continue; }
+    step += 1;
+    if (badge) badge.textContent = String(step);
+  }
+  syncBillingScopeText();
 }
 
 function billingSubscriptionInput() {
@@ -2104,7 +2151,18 @@ function bindBillingDeclarationPanel() {
   const end = document.getElementById("ov-billing-end");
   if (!save || save.dataset.bound === "1") return;
   save.dataset.bound = "1";
-  cancel.onclick = () => { document.getElementById("ov-billing-declaration-panel").hidden = true; };
+  cancel.onclick = closeBillingDeclaration;
+  const close = document.getElementById("ov-billing-close");
+  if (close) close.onclick = closeBillingDeclaration;
+  // 点击半透明遮罩关闭；Esc 同。保存中途关闭不影响已入队的重算——任务留在「重算状态」。
+  const backdrop = document.getElementById("ov-billing-backdrop");
+  if (backdrop) backdrop.onclick = closeBillingDeclaration;
+  if (typeof document.addEventListener === "function") {
+    document.addEventListener("keydown", (event) => {
+      const panel = document.getElementById("ov-billing-declaration-panel");
+      if (event.key === "Escape" && panel && !panel.hidden) closeBillingDeclaration();
+    });
+  }
   const resetPreview = () => {
     if (billingDeclarationState && billingDeclarationState.phase === "saved") return;
     billingDeclarationState = null;
@@ -2120,8 +2178,8 @@ function bindBillingDeclarationPanel() {
     const control = document.getElementById(id);
     if (control) control.onchange = restep;
   }
-  if (start) start.onchange = resetPreview;
-  if (end) end.onchange = resetPreview;
+  if (start) start.onchange = () => { syncBillingScopeText(); resetPreview(); };
+  if (end) end.onchange = () => { syncBillingScopeText(); resetPreview(); };
   save.onclick = async () => {
     const target = billingDeclarationTarget;
     if (!target) return;
@@ -2177,7 +2235,7 @@ function bindBillingDeclarationPanel() {
         billingReviewOpen = false;
         billingDeclarationTarget = null;
         billingDeclarationState = null;
-        document.getElementById("ov-billing-declaration-panel").hidden = true;
+        closeBillingDeclaration();
         await renderOverview();
         return;
       }
@@ -2339,7 +2397,7 @@ function appendBillingRevokeButton(preview, declarationId, revisionId) {
       });
       billingDeclarationTarget = null;
       billingDeclarationState = null;
-      document.getElementById("ov-billing-declaration-panel").hidden = true;
+      closeBillingDeclaration();
       await refreshAfterBillingChange();
     } catch (e) {
       revoke.disabled = false;

@@ -1730,27 +1730,68 @@ summary.detail-section-title {
   gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line, #dce4f2); }
 .billing-review-row:last-child { border-bottom: 0; }
 .billing-review-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+/* 「明确计费方式」弹窗：真实遮罩层（点击关闭）+ 居中面板 + 编号步骤网格。 */
+.bd-backdrop {
+  position: fixed; inset: 0; z-index: 99;
+  background: rgba(26, 37, 56, .32);
+}
+.bd-backdrop[hidden] { display: none; }
 .billing-declaration-dialog {
   position: fixed;
   z-index: 100;
   top: 50%;
   left: 50%;
-  width: min(720px, calc(100vw - 40px));
+  width: min(760px, calc(100vw - 40px));
   max-height: calc(100vh - 48px);
   overflow-y: auto;
   box-sizing: border-box;
   transform: translate(-50%, -50%);
-  padding: 22px;
+  padding: 20px 24px 22px;
   border: 1px solid var(--line, #dce4f2);
   border-radius: 12px;
   background: var(--panel);
-  box-shadow: 0 18px 60px rgba(26, 37, 56, .24), 0 0 0 100vmax rgba(26, 37, 56, .28);
+  box-shadow: 0 18px 60px rgba(26, 37, 56, .24);
 }
 .billing-declaration-dialog[hidden] { display: none; }
-.billing-batch { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0;
-  padding: 10px; border-radius: 8px; background: var(--panel-2); color: var(--text); }
+.bd-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.bd-head .setting-title { margin: 0; font-size: 16px; }
+.bd-close { flex: 0 0 auto; }
+.bd-summary { display: grid; gap: 4px; margin-bottom: 12px; }
+.bd-summary-main { font-size: 14px; font-weight: 600; color: var(--text); }
+.bd-summary-stats { font-size: 12px; }
+.bd-summary-missing { font-size: 12px; color: var(--text-2, var(--muted)); }
+.bd-summary-missing strong { color: var(--text); font-weight: 600; }
+.billing-batch { display: grid; gap: 8px; margin: 0 0 14px;
+  padding: 10px 12px; border-radius: 8px; background: var(--panel-2); color: var(--text); }
 .billing-batch[hidden] { display: none; }
-.billing-batch input { margin-top: 2px; }
+.billing-batch-toggle { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; cursor: pointer; }
+.billing-batch-toggle input { margin-top: 3px; }
+.bd-models { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 24px; }
+.bd-models:empty { display: none; }
+.bd-model { font-size: 11px; line-height: 18px; padding: 0 8px; border-radius: 9px;
+  background: var(--panel); border: 1px solid var(--line, #dce4f2); color: var(--text); }
+.bd-model.is-target { font-weight: 600; }
+.bd-grid { display: grid; gap: 14px; }
+.bd-row { display: grid; grid-template-columns: 132px 1fr; gap: 12px; align-items: start; }
+.bd-row[hidden] { display: none; }
+.bd-label { display: flex; align-items: center; gap: 8px; padding-top: 6px; font-size: 13px; font-weight: 600; color: var(--text); }
+.bd-step { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+  border-radius: 50%; font-size: 11px; font-weight: 600; background: var(--accent); color: #fff; }
+.bd-step:empty { display: none; }
+.bd-control { display: grid; gap: 6px; min-width: 0; }
+.bd-control > input[type="text"] { width: min(100%, 360px); }
+.bd-control > select { width: min(100%, 240px); }
+.bd-help { margin: 0; font-size: 12px; line-height: 1.5; }
+.bd-inline { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.bd-field { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+.bd-field.grow { flex: 1 1 260px; }
+.bd-field.grow input { width: 100%; }
+.bd-field input[type="number"] { width: 120px; }
+.bd-field input[type="date"] { width: 150px; }
+.bd-field select { min-width: 96px; }
+.bd-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); padding-bottom: 7px; cursor: pointer; }
+.bd-range-sep { padding-bottom: 8px; color: var(--muted); }
+.bd-actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
 .billing-amount-unknown { display: flex !important; align-items: center; gap: 6px; padding-bottom: 7px; }
 .billing-form { display: flex; gap: 12px; align-items: end; margin-top: 12px; flex-wrap: wrap; }
 .billing-form label { display: grid; gap: 4px; font-size: 12px; color: var(--text-2, #667); }
@@ -1780,6 +1821,8 @@ summary.detail-section-title {
   .billing-review-row { align-items: flex-start; flex-direction: column; }
   .billing-form { align-items: stretch; flex-direction: column; }
   .billing-declaration-dialog { width: calc(100vw - 24px); max-height: calc(100vh - 24px); padding: 16px; }
+  .bd-row { grid-template-columns: 1fr; gap: 6px; }
+  .bd-label { padding-top: 0; }
   .overview-topline { align-items: flex-start; flex-direction: column; gap: 8px; }
   .overview-sync { justify-content: space-between; width: 100%; }
   .cards.month-band { grid-template-columns: 1fr; }
