@@ -168,7 +168,13 @@ const TRIGGER_MIGRATION: &str = "migration";
 /// `source_files.parser_version`。版本 2 增加了 workflow_events 的派生提取；
 /// 即使源文件指纹不变，也必须重放一次，才能把历史源补齐到 workflow authority。
 /// 语义与 `usage_fact.rs::CURRENT_SCHEMA_VERSION` 的演进纪律一致。
-const PARSER_VERSION: i64 = 2;
+///
+/// 版本 3（自动归因规格 A3）：claude-code emitter 开始产 L1 路由证据
+/// （`attribution_version` provider-v0.11 → provider-v1.0-beta.1）。存量事实的
+/// `provider_id/evidence_basis/route_evidence_id` 只有在源文件被重放时才会经
+/// `fact_writer_sql` 的版本重分类路径改写——不升这个号，历史 25k+ 条 claude 事实
+/// 会永远停在 `missing`，列表照旧全部推给用户。
+const PARSER_VERSION: i64 = 3;
 
 /// 当前事实解析器版本；同步差量必须把它和文件指纹一起比较。
 pub const fn parser_version() -> i64 {
