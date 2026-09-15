@@ -31,6 +31,8 @@ use agent_vitals_domain::util::split_lines;
 // 是两条独立证据线，分文件放。
 pub mod skills;
 pub mod route_evidence;
+// v1.0.0-beta.1 自动归因 A5：账户级证据（只读 auth.json 的 auth_mode）。
+pub mod account;
 
 // v0.9 Stage A emitter 归位（R4 §5.2）：UsageFact emitter 从二进制
 // apps/cli/src/agent/ 迁来——读文件 → 读内存，仍属 I/O 层。

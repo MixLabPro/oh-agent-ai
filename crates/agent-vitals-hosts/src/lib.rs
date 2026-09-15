@@ -46,6 +46,8 @@ pub use hosts::{
     claude_code::sources::usage_fact as claude_usage_fact,
     // Claude Pro 的窗口状态（quotaLimits）读取器——与 usage_fact 的字节等价面无关。
     claude_code::sources::quota as claude_quota,
+    // 自动归因 A5：账户级证据读取器（白名单键，规格 §7 P1）。
+    claude_code::sources::account as claude_account, codex::sources::account as codex_account,
     claude_code::sources as claude_session, codex::sources::usage_fact as codex_usage_fact,
     codex::sources as codex_session, dsh::sources::usage_fact as dsh_usage_fact,
     workbuddy::sources::usage_fact as workbuddy_usage_fact,

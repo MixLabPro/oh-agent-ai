@@ -38,6 +38,8 @@ pub mod workflow;
 // v1.0.0：Claude Pro 的窗口状态（quotaLimits）读取器。与 usage_fact 完全独立——
 // 那条是 Python↔Rust 逐字节锁步的 UsageFact 事实链，窗口状态是旁路，不进那条链。
 pub mod quota;
+// v1.0.0-beta.1 自动归因 A5：账户级证据（只读 oauthAccount 三个属性键）。
+pub mod account;
 
 /// 一个会话文件对 `claude-session` 有用的全部信息（路径本身没有消费者——
 /// 调用方各自从 walk 结果拿路径，这里只携带读出来的元数据）。

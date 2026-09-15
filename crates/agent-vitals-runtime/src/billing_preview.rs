@@ -79,6 +79,14 @@ pub fn declaration_impact_preview(
 /// `(host, provider, model, evidence_basis, pricing_basis)` 归并、不跨币种相加。
 /// 排序：有金额的组按 `amount_minor` 降序，无价卡的组按 tokens 降序排在其后。
 pub fn confirmation_groups(db: &AuthorityDb, month: &str) -> Value {
+    confirmation_groups_with(db, month, &account_evidence_by_host())
+}
+
+/// 账户证据由调用方注入（测试不读真实 HOME）。
+pub fn confirmation_groups_with(
+    db: &AuthorityDb, month: &str,
+    accounts: &std::collections::BTreeMap<String, agent_vitals_provider::AccountEvidence>,
+) -> Value {
     let mut report = crate::summary::unresolved_billing_groups_in(db, month);
     if report["status"] != json!("ok") {
         return report;
@@ -147,7 +155,169 @@ pub fn confirmation_groups(db: &AuthorityDb, month: &str) -> Value {
             (None, None) => tokens(b).cmp(&tokens(a)),
         }
     });
+    // E 类：workbuddy 是积分制，不是货币——不进待确认列表（规格 §0 表 E）。
+    groups.retain(|group| group["host"] != json!("workbuddy") && group["tokens"].as_i64().unwrap_or(0) > 0);
+    for group in groups.iter_mut() {
+        let verdict = auto_verdict(group, accounts);
+        group["auto_verdict"] = verdict;
+    }
+    let clusters = clusters_of(groups);
+    report["clusters"] = json!(clusters);
     report
+}
+
+/// 账户级证据（L2）：每个宿主读一次白名单字段；文件缺失 → 无证据。
+fn account_evidence_by_host() -> std::collections::BTreeMap<String, agent_vitals_provider::AccountEvidence> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else { return out; };
+    if let Some(e) = agent_vitals_hosts::claude_account::read_claude_account(&home) {
+        out.insert(e.host.clone(), e);
+    }
+    if let Some(e) = agent_vitals_hosts::codex_account::read_codex_account(&home) {
+        out.insert(e.host.clone(), e);
+    }
+    out
+}
+
+/// 证据里已能说明「走的是官方路由」的 basis（与 `workbench.js::BILLING_ROUTE_KNOWN_OFFICIAL` 同表）。
+const ROUTE_KNOWN_OFFICIAL: [&str; 4] = [
+    "explicit-official-route", "session-native", "account-time-bound", "config-time-bound",
+];
+
+/// 程序判定（规格 §2 阶梯的合成，§5.1 三态）。只用事实里已有的 provider/evidence、
+/// 目录里的 L0 厂商和白名单账户证据；`inferred` 永远到不了 determined。
+fn auto_verdict(
+    group: &Value, accounts: &std::collections::BTreeMap<String, agent_vitals_provider::AccountEvidence>,
+) -> Value {
+    use agent_vitals_provider::PlanKind;
+    let host = group["host"].as_str().unwrap_or("");
+    let provider = group["provider_id"].as_str().filter(|p| *p != "<unknown>").map(str::to_string);
+    let model = group["model_id"].as_str().unwrap_or("");
+    let evidence = group["evidence_basis"].as_str().unwrap_or("missing");
+    let vendor = agent_vitals_domain::attribution::model_vendor(model);
+    let vendor_name = vendor.as_ref().map(|v| v.vendor.clone());
+    let gateway_named = vendor.as_ref().is_some_and(|v| v.gateway_named);
+    let mut basis: Vec<String> = Vec::new();
+    let route_state = if provider.is_some() && ROUTE_KNOWN_OFFICIAL.contains(&evidence) {
+        basis.push(format!("route.{evidence}"));
+        "official"
+    } else if provider.is_some() {
+        basis.push("host.provider_reported".to_string());
+        "provider_reported"
+    } else if gateway_named {
+        basis.push("model.gateway_named".to_string());
+        "gateway"
+    } else if evidence == "inferred" && vendor_name.is_some() {
+        basis.push("response_id.vendor_shape".to_string());
+        "vendor_shape"
+    } else {
+        "unknown"
+    };
+    // 网关式命名：计费方是中转，不是模型厂商——计费方留空，厂商只作展示。
+    let billing_party = provider.clone().or_else(|| if route_state == "gateway" { None } else { vendor_name.clone() });
+    let account = accounts.get(host).filter(|a| Some(&a.vendor) == billing_party.as_ref());
+    let mut plan = json!(null);
+    let (state, relationship_kind, billing_mode) = match (route_state, account.map(|a| a.plan_kind)) {
+        ("official", Some(PlanKind::Subscription)) => {
+            let a = account.unwrap();
+            basis.push(format!("account.{}", a.plan_label.clone().unwrap_or_else(|| "subscription".into())));
+            plan = json!({ "label": a.plan_label, "channel": a.billing_channel, "anchor_date": a.anchor_date, "source": a.source });
+            ("determined", Some("official_subscription"), Some("subscription"))
+        }
+        ("official", Some(PlanKind::ApiKey)) => {
+            basis.push("account.api_key".to_string());
+            ("determined", Some("official_api"), Some("metered"))
+        }
+        // codex：rollout 自报 openai + 账户 chatgpt 登录 → 请求走 ChatGPT 后端，按套餐计。
+        ("provider_reported", Some(PlanKind::Subscription)) if host == "codex" => {
+            let a = account.unwrap();
+            basis.push(format!("account.{}", a.plan_label.clone().unwrap_or_else(|| "subscription".into())));
+            plan = json!({ "label": a.plan_label, "channel": a.billing_channel, "anchor_date": a.anchor_date, "source": a.source });
+            ("determined", Some("official_subscription"), Some("subscription"))
+        }
+        ("official", _) | ("provider_reported", _) => ("one_question", None, None),
+        ("gateway", _) | ("vendor_shape", _) => ("one_question", None, Some("metered")),
+        _ => ("needs_input", None, None),
+    };
+    let question = match (state, route_state) {
+        ("one_question", "official") | ("one_question", "provider_reported") => json!("billing_mode"),
+        ("one_question", _) => json!("route"),
+        _ => json!(null),
+    };
+    json!({
+        "model_vendor": vendor_name,
+        "gateway_named": gateway_named,
+        "route_state": route_state,
+        "route_basis": evidence,
+        "billing_party": billing_party,
+        "billing_mode": billing_mode,
+        "relationship_kind": relationship_kind,
+        "plan": plan,
+        "state": state,
+        "question": question,
+        "basis": basis,
+    })
+}
+
+/// 列表行 = `host × 计费方/厂商 × route_state × 判定状态`；模型折进 `models[]`，
+/// 数字求和、金额按币种归并。
+fn clusters_of(groups: &[Value]) -> Vec<Value> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_key: BTreeMap<String, Value> = BTreeMap::new();
+    for group in groups {
+        let v = &group["auto_verdict"];
+        let key = format!(
+            "{}|{}|{}|{}|{}|{}",
+            group["host"].as_str().unwrap_or(""),
+            v["billing_party"].as_str().unwrap_or("<unknown>"),
+            v["route_state"].as_str().unwrap_or("unknown"),
+            v["state"].as_str().unwrap_or("needs_input"),
+            group["effective_start"].as_str().unwrap_or(""),
+            group["effective_end"].as_str().unwrap_or(""),
+        );
+        let entry = by_key.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            json!({
+                "cluster_id": key,
+                "host": group["host"], "billing_party": v["billing_party"], "model_vendor": v["model_vendor"],
+                "provider_id": group["provider_id"], "evidence_basis": group["evidence_basis"],
+                "pricing_basis": group["pricing_basis"],
+                "effective_start": group["effective_start"], "effective_end": group["effective_end"],
+                "auto_verdict": v.clone(),
+                "models": [], "group_ids": [], "tokens": 0, "session_count": 0, "unpriced_tokens": 0,
+                "estimated_amounts": [],
+            })
+        });
+        entry["models"].as_array_mut().unwrap().push(json!({
+            "model_id": group["model_id"], "tokens": group["tokens"], "session_count": group["session_count"],
+            "estimated_amounts": group["estimated_amounts"], "group_id": group["group_id"],
+        }));
+        entry["group_ids"].as_array_mut().unwrap().push(group["group_id"].clone());
+        for field in ["tokens", "session_count", "unpriced_tokens"] {
+            let sum = entry[field].as_i64().unwrap_or(0) + group[field].as_i64().unwrap_or(0);
+            entry[field] = json!(sum);
+        }
+        let mut amounts: BTreeMap<(String, String), i64> = entry["estimated_amounts"].as_array().unwrap().iter()
+            .map(|row| (amount_key(row), row["amount_minor"].as_i64().unwrap_or(0))).collect();
+        for row in group["estimated_amounts"].as_array().into_iter().flatten() {
+            *amounts.entry(amount_key(row)).or_insert(0) += row["amount_minor"].as_i64().unwrap_or(0);
+        }
+        entry["estimated_amounts"] = json!(amounts.into_iter().map(|((currency, basis), amount_minor)| json!({
+            "amount_minor": amount_minor, "currency": currency, "basis": basis,
+        })).collect::<Vec<_>>());
+    }
+    let mut clusters: Vec<Value> = order.into_iter().filter_map(|k| by_key.remove(&k)).collect();
+    // 程序已判定的置顶（一键确认清掉最多），其余按金额降序，无价卡按 tokens。
+    clusters.sort_by(|a, b| {
+        let rank = |c: &Value| match c["auto_verdict"]["state"].as_str() {
+            Some("determined") => 0, Some("one_question") => 1, _ => 2,
+        };
+        let amount = |c: &Value| c["estimated_amounts"].as_array()
+            .and_then(|rows| rows.iter().filter_map(|row| row["amount_minor"].as_i64()).max()).unwrap_or(-1);
+        let tokens = |c: &Value| c["tokens"].as_i64().unwrap_or(0);
+        rank(a).cmp(&rank(b)).then_with(|| amount(b).cmp(&amount(a))).then_with(|| tokens(b).cmp(&tokens(a)))
+    });
+    clusters
 }
 
 /// 按 `(currency, basis)` 逐槽相减，永不跨币种；负数说明两次选择不是子集关系，
@@ -330,6 +500,73 @@ mod tests {
         assert!(db.billing_declaration_revision_revoke("rev-sub-revoke", "decl-sub", "rev-sub", 8).unwrap());
         assert_eq!(confirmation_groups(&db, "2026-08")["groups"].as_array().unwrap().len(), 2,
             "revoke restores the group without a recalculation job");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 规格 §5.1 三态：官方路由 + 账户订阅 → determined（一键确认）；厂商形状
+    /// inferred → one_question(route)；codex 自报 openai + chatgpt 登录 → determined；
+    /// workbuddy 不进列表；程序已判定的簇置顶。
+    #[test]
+    fn auto_verdict_states_and_clusters() {
+        use agent_vitals_provider::{AccountEvidence, EvidenceBasis, PlanKind};
+        let home = temp_home("verdict");
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let (month_start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms("2026-08").unwrap();
+        let noon = month_start + 12 * 3_600_000;
+        db.conn().execute(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES ('run', 1, 'cli', 'succeeded', 14)", [],
+        ).unwrap();
+        let insert = |fact: &str, host: &str, provider: Option<&str>, model: &str, evidence: &str, pricing: &str, ts: i64| {
+            db.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                     observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
+                     billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                     ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'm', 'sess', ?1, 'token_count', ?3, ?4, ?5, 0, ?6, ?7, 'metered', 1000, 0, 0, 10, 'run', 1, 1)",
+                rusqlite::params![fact, host, provider, model, ts, pricing, evidence],
+            ).unwrap();
+        };
+        insert("f-claude-official", "claude-code", Some("anthropic"), "claude-opus-5", "session-native", "route-observed", noon);
+        insert("f-claude-minimax", "claude-code", None, "MiniMax-M3", "inferred", "metered_estimate", noon + 1);
+        insert("f-claude-gateway", "claude-code", None, "anthropic/claude-opus-5", "inferred", "metered_estimate", noon + 2);
+        insert("f-codex-openai", "codex", Some("openai"), "gpt-5.6-sol", "missing", "metered_estimate", noon + 3);
+        insert("f-codex-custom", "codex", None, "gpt-5.6-luna", "missing", "metered_estimate", noon + 4);
+        insert("f-workbuddy", "workbuddy", None, "hy4-preview-f", "missing", "metered_estimate", noon + 5);
+        let mut accounts = std::collections::BTreeMap::new();
+        accounts.insert("claude-code".to_string(), AccountEvidence {
+            host: "claude-code".into(), vendor: "anthropic".into(), plan_kind: PlanKind::Subscription,
+            plan_label: Some("Claude Pro".into()), billing_channel: Some("apple_subscription".into()),
+            anchor_date: Some("2025-07-20".into()), evidence_basis: EvidenceBasis::AccountTimeBound, source: "test".into(),
+        });
+        accounts.insert("codex".to_string(), AccountEvidence {
+            host: "codex".into(), vendor: "openai".into(), plan_kind: PlanKind::Subscription,
+            plan_label: Some("ChatGPT".into()), billing_channel: None, anchor_date: None,
+            evidence_basis: EvidenceBasis::AccountTimeBound, source: "test".into(),
+        });
+        let report = confirmation_groups_with(&db, "2026-08", &accounts);
+        assert_eq!(report["status"], json!("ok"), "{report}");
+        let groups = report["groups"].as_array().unwrap();
+        assert!(groups.iter().all(|g| g["host"] != json!("workbuddy")), "credits host must not be pending");
+        let verdict_of = |model: &str| groups.iter().find(|g| g["model_id"] == json!(model)).unwrap()["auto_verdict"].clone();
+        let claude = verdict_of("claude-opus-5");
+        assert_eq!(claude["state"], json!("determined"));
+        assert_eq!(claude["relationship_kind"], json!("official_subscription"));
+        assert_eq!(claude["plan"]["label"], json!("Claude Pro"));
+        assert_eq!(claude["plan"]["anchor_date"], json!("2025-07-20"));
+        let minimax = verdict_of("MiniMax-M3");
+        assert_eq!((minimax["state"].clone(), minimax["question"].clone(), minimax["model_vendor"].clone()),
+            (json!("one_question"), json!("route"), json!("minimax")));
+        assert_eq!(verdict_of("anthropic/claude-opus-5")["route_state"], json!("gateway"));
+        let codex = verdict_of("gpt-5.6-sol");
+        assert_eq!((codex["state"].clone(), codex["route_state"].clone()), (json!("determined"), json!("provider_reported")));
+        let custom = verdict_of("gpt-5.6-luna");
+        assert_eq!(custom["state"], json!("needs_input"));
+        let clusters = report["clusters"].as_array().unwrap();
+        assert!(clusters.len() >= 4, "{clusters:?}");
+        assert_eq!(clusters[0]["auto_verdict"]["state"], json!("determined"), "determined clusters come first");
+        assert!(clusters.iter().all(|c| c["host"] != json!("workbuddy")));
         let _ = std::fs::remove_dir_all(&home);
     }
 

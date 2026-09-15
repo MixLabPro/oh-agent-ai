@@ -1728,7 +1728,7 @@ impl SqlSummaryRepository {
         }
     }
 
-    fn open_db(&self) -> Option<agent_vitals_data::authority::AuthorityDb> {
+    pub fn open_db(&self) -> Option<agent_vitals_data::authority::AuthorityDb> {
         let data_home = self
             .data_home
             .clone()

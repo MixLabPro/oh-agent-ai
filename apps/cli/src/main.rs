@@ -635,6 +635,19 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
+    /// Billing confirmation groups for one month with the program's own
+    /// verdict per group (auto-attribution spec §5.1: determined /
+    /// one_question / needs_input) — the same data the desktop "明确计费方式"
+    /// list renders, for CLI/desktop reconciliation. Read-only; account
+    /// evidence is limited to the allow-listed plan fields.
+    BillingGroups {
+        /// Month to inspect ("YYYY-MM"; default: current month)
+        #[arg(long)]
+        month: Option<String>,
+        /// Output as JSON (groups + clusters)
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
     /// Re-import the authoritative facts/*.jsonl into TWO throwaway temp DBs
     /// (one round crashes after the first host, then reopens + re-migrates
     /// idempotently) and diff the per-host, per-Beijing-month aggregates.
@@ -3170,6 +3183,35 @@ session_store={store} fold={fold}"
     }
 
     // data-unresolved（Stage B）：has_unresolved 的逐模型下钻（DoD #4）。
+    if let Some(Cmd::BillingGroups { month, rows_json }) = &args.cmd {
+        let month = month
+            .clone()
+            .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+        let report = match agent_vitals_runtime::summary::SqlSummaryRepository::new().open_db() {
+            Some(db) => agent_vitals_runtime::billing_preview::confirmation_groups(&db, &month),
+            None => serde_json::json!({"status": "unavailable", "month": month, "groups": [], "clusters": []}),
+        };
+        if *rows_json {
+            println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+        } else {
+            println!("Billing confirmation clusters (month {month}, status {}):", report["status"].as_str().unwrap_or("?"));
+            for c in report["clusters"].as_array().map(|a| a.iter()).into_iter().flatten() {
+                let v = &c["auto_verdict"];
+                println!(
+                    "  {:<12} {:<12} {:<12} {:<18} {:<21} models={:<2} tokens={:<12} basis={}",
+                    c["host"].as_str().unwrap_or("?"),
+                    v["billing_party"].as_str().unwrap_or("<unknown>"),
+                    v["state"].as_str().unwrap_or("?"),
+                    v["route_state"].as_str().unwrap_or("?"),
+                    v["relationship_kind"].as_str().unwrap_or("-"),
+                    c["models"].as_array().map_or(0, Vec::len),
+                    c["tokens"],
+                    v["basis"].as_array().map(|b| b.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("+")).unwrap_or_default(),
+                );
+            }
+        }
+        return;
+    }
     if let Some(Cmd::DataUnresolved { month, rows_json }) = &args.cmd {
         let month = month
             .clone()

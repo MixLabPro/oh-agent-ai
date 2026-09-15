@@ -66,6 +66,48 @@ impl BillingMode {
     }
 }
 
+/// 账户级证据的付费形态（自动归因规格 §2 L2）。跨宿主抽象一致：Claude 的
+/// `oauthAccount.organizationType`、Codex 的 `auth.json auth_mode`、WorkBuddy 的
+/// 积分，都只落到这四个值之一。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanKind {
+    Subscription,
+    ApiKey,
+    Credits,
+    Unknown,
+}
+
+impl PlanKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Subscription => "subscription",
+            Self::ApiKey => "api_key",
+            Self::Credits => "credits",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// 账户级证据——**只有这些字段**。宿主读取器只允许把白名单里的账户属性映射到
+/// 这里（套餐类型、付款渠道、账期锚点）；邮箱、账户/组织 UUID、令牌在类型上就
+/// 没有位置，不可能被序列化进任何 DTO / 导出（规格 §7 P1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountEvidence {
+    pub host: String,
+    /// 该账户对应的模型厂商 / 计费方（anthropic、openai …）。
+    pub vendor: String,
+    pub plan_kind: PlanKind,
+    /// 用户可读的套餐名（"Claude Pro" / "ChatGPT"），来自账户属性的固定映射。
+    pub plan_label: Option<String>,
+    /// 付款渠道（`apple_subscription` 等），只用于提示"月费可能与挂牌价不同"。
+    pub billing_channel: Option<String>,
+    /// 账期锚点 `YYYY-MM-DD`（订阅开始/首次扣款日；每月同一天续费）。
+    pub anchor_date: Option<String>,
+    pub evidence_basis: EvidenceBasis,
+    /// 读了哪个文件的哪些键，供回执展示依据（不含值）。
+    pub source: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BillingAttribution {
     pub provider_id: Option<String>,
