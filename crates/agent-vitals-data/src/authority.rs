@@ -77,13 +77,90 @@ pub type BillingRecalculationJobRow = (
     String, String, String, String, i64, Option<i64>, Option<i64>, Option<String>, Option<String>,
 );
 pub type BillingRecalculationResultRow = (String, String, i64, i64, i64, Option<i64>, Option<i64>, i64);
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BillingDeclarationImpactPreview {
     pub fact_count: i64,
     pub session_count: i64,
     pub total_tokens: i64,
     pub first_event_ts_ms: Option<i64>,
     pub last_event_ts_ms: Option<i64>,
+    /// 命中范围内 `evidence_basis = 'conflict'` 的事实：用户声明不得吞掉已知相反
+    /// 证据（执行计划 E207），它们既不归因也不算「移出」，预览单列为「仍待确认」。
+    pub conflict_fact_count: i64,
+    pub conflict_tokens: i64,
+}
+
+pub const BILLING_DECLARATION_FACT_FROM: &str =
+    "FROM usage_facts f LEFT JOIN route_evidence r ON r.evidence_id = f.route_evidence_id";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictEvidence {
+    /// 正常选择：排除 `conflict` 证据的事实。
+    Exclude,
+    /// 只选 `conflict` 证据的事实（预览的「仍待确认」桶）。
+    Only,
+}
+
+pub struct BillingDeclarationFactSelection {
+    pub where_sql: String,
+    pub params: Vec<rusqlite::types::Value>,
+}
+
+/// 声明命中事实的**唯一**选择谓词。预览、重算归因与运行时计价三处都从这里拿
+/// `WHERE`，所以「预览说会移出的」与「重算真正归因的」不可能是两个集合。
+///
+/// 规则：宿主/provider 相等；事实有时间戳且落在 `effective_start..=effective_end`
+/// 的北京自然月内；宿主自报 `billing_mode='subscription'` 的事实不参与（它们本来
+/// 就不按量）；已被其他 saved 声明覆盖的事实不重复移出；作用域按 kind 取交集、
+/// 同 kind 取并集；`window` 只用于展示口径的额外时间窗。
+pub fn billing_declaration_fact_selection(
+    host: &str, provider_id: &str, effective_start: &str, effective_end: Option<&str>,
+    scopes: &[(&str, &str)], window: Option<(i64, i64)>, conflicts: ConflictEvidence,
+) -> BillingDeclarationFactSelection {
+    use rusqlite::types::Value;
+    let mut params: Vec<Value> = vec![
+        Value::Text(host.to_owned()), Value::Text(provider_id.to_owned()),
+        Value::Text(effective_start.to_owned()),
+        effective_end.map_or(Value::Null, |end| Value::Text(end.to_owned())),
+    ];
+    let mut where_sql = String::from(
+        "f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id = ?2
+           AND f.event_ts_ms IS NOT NULL
+           AND strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?3
+           AND (?4 IS NULL OR strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?4)
+           AND COALESCE(f.billing_mode, 'unknown') != 'subscription'
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = f.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')",
+    );
+    where_sql.push_str(match conflicts {
+        ConflictEvidence::Exclude => " AND COALESCE(f.evidence_basis, 'missing') != 'conflict'",
+        ConflictEvidence::Only => " AND COALESCE(f.evidence_basis, 'missing') = 'conflict'",
+    });
+    if let Some((start_ms, end_ms)) = window {
+        params.push(Value::Integer(start_ms));
+        params.push(Value::Integer(end_ms));
+        where_sql.push_str(&format!(
+            " AND f.event_ts_ms >= ?{} AND f.event_ts_ms < ?{}", params.len() - 1, params.len(),
+        ));
+    }
+    for (kind, column) in [
+        ("account", "r.account_ref"), ("route", "f.route_evidence_id"),
+        ("model", "f.model_id"), ("session", "f.session_key"),
+    ] {
+        let values = scopes.iter().filter(|(scope_kind, _)| *scope_kind == kind)
+            .map(|(_, value)| *value).collect::<Vec<_>>();
+        if values.is_empty() { continue; }
+        let placeholders = values.iter().map(|value| {
+            params.push(Value::Text((*value).to_owned()));
+            format!("?{}", params.len())
+        }).collect::<Vec<_>>().join(", ");
+        where_sql.push_str(&format!(" AND {column} IN ({placeholders})"));
+    }
+    BillingDeclarationFactSelection { where_sql, params }
 }
 type BillingDeclarationRevisionSnapshot = (
     i64, String, String, String, Option<String>, Option<i64>, Option<String>, String,
@@ -2288,9 +2365,10 @@ impl AuthorityDb {
         rows
     }
 
-    /// 只读计算声明修订将触及哪些事实；不写任何派生结果。
+    /// 只读计算声明修订将触及哪些事实；不写任何派生结果。`window` 只给
+    /// 「本月涉及」一类展示用；预览与重算（`None`）都走声明自己的有效期。
     pub fn billing_declaration_impact_preview(
-        &self, revision_id: &str, window_start_ms: i64, window_end_ms: i64,
+        &self, revision_id: &str, window: Option<(i64, i64)>,
     ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
         let revision: Option<(String, String, String, String, Option<String>)> = self.conn.query_row(
             "SELECT host, provider_id, effective_start, change_kind, effective_end
@@ -2303,17 +2381,15 @@ impl AuthorityDb {
                 "unknown billing declaration revision".to_string(),
             )));
         };
-        if change_kind == "revoked" || window_end_ms <= window_start_ms {
-            return Ok(BillingDeclarationImpactPreview { fact_count: 0, session_count: 0,
-                total_tokens: 0, first_event_ts_ms: None, last_event_ts_ms: None });
+        if change_kind == "revoked" {
+            return Ok(BillingDeclarationImpactPreview::default());
         }
         let scopes = self.billing_declaration_scopes(revision_id)?;
         let scope_refs = scopes.iter()
             .map(|(_, kind, value)| (kind.as_str(), value.as_str()))
             .collect::<Vec<_>>();
         self.billing_declaration_impact_preview_for(
-            &host, &provider_id, &effective_start, effective_end.as_deref(),
-            &scope_refs, window_start_ms, window_end_ms,
+            &host, &provider_id, &effective_start, effective_end.as_deref(), &scope_refs, window,
         )
     }
 
@@ -2321,57 +2397,42 @@ impl AuthorityDb {
     /// dry-run counterpart to `billing_declaration_impact_preview`: the UI can
     /// show the affected facts/sessions/tokens before accepting a candidate,
     /// without creating a saved revision or changing candidate status.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// 与 [`Self::billing_declaration_matching_fact_ids`] 共用
+    /// [`billing_declaration_fact_selection`]——预览命中的事实集合就是重算会归因的
+    /// 集合，这是计费主链规格 R1 钉住的不变量（此前预览按前端传入的统计月窗口、
+    /// 重算按全历史，两者对不上）。
     pub fn billing_declaration_impact_preview_for(
         &self, host: &str, provider_id: &str, effective_start: &str,
-        effective_end: Option<&str>, scopes: &[(&str, &str)],
-        window_start_ms: i64, window_end_ms: i64,
+        effective_end: Option<&str>, scopes: &[(&str, &str)], window: Option<(i64, i64)>,
     ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
-        if window_end_ms <= window_start_ms {
-            return Ok(BillingDeclarationImpactPreview { fact_count: 0, session_count: 0,
-                total_tokens: 0, first_event_ts_ms: None, last_event_ts_ms: None });
+        if window.is_some_and(|(start, end)| end <= start) {
+            return Ok(BillingDeclarationImpactPreview::default());
         }
-        let mut stmt = self.conn.prepare(
-            "SELECT f.session_key, f.model_id, f.route_evidence_id, r.account_ref,
-                    f.event_ts_ms, f.uncached_input_tokens + f.cache_read_tokens
-                    + f.cache_write_tokens + f.output_tokens
-             FROM usage_facts f LEFT JOIN route_evidence r ON r.evidence_id = f.route_evidence_id
-             WHERE f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id = ?2
-               AND f.event_ts_ms >= ?3 AND f.event_ts_ms < ?4
-               AND strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?5
-               AND (?6 IS NULL OR strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?6)",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![
-            host, provider_id, window_start_ms, window_end_ms, effective_start, effective_end,
-        ], |row| Ok((
-            row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<i64>>(4)?, row.get::<_, i64>(5)?,
-        )))?;
-        let mut preview = BillingDeclarationImpactPreview { fact_count: 0, session_count: 0,
-            total_tokens: 0, first_event_ts_ms: None, last_event_ts_ms: None };
-        let mut sessions = std::collections::HashSet::new();
-        for row in rows {
-            let (session, model, route, account, event_ts, tokens) = row?;
-            let matches = |kind: &str, value: &str| match kind {
-                "model" => model.as_deref() == Some(value), "route" => route.as_deref() == Some(value),
-                "account" => account.as_deref() == Some(value), "session" => session.as_deref() == Some(value),
-                _ => false,
-            };
-            let matches_all_scope_kinds = ["account", "route", "model", "session"].iter().all(|kind| {
-                let values = scopes.iter().filter(|(scope_kind, _)| scope_kind == kind);
-                let has_kind = scopes.iter().any(|(scope_kind, _)| scope_kind == kind);
-                !has_kind || values.clone().any(|(_, value)| matches(kind, value))
-            });
-            if !matches_all_scope_kinds { continue; }
-            preview.fact_count += 1;
-            if let Some(key) = session { sessions.insert(key); }
-            preview.total_tokens = preview.total_tokens.saturating_add(tokens);
-            preview.first_event_ts_ms = preview.first_event_ts_ms.or(event_ts);
-            preview.last_event_ts_ms = event_ts.or(preview.last_event_ts_ms);
-        }
-        preview.session_count = sessions.len() as i64;
-        Ok(preview)
+        let aggregate = |conflicts: ConflictEvidence| -> Result<(i64, i64, i64, Option<i64>, Option<i64>), AuthorityError> {
+            let selection = billing_declaration_fact_selection(
+                host, provider_id, effective_start, effective_end, scopes, window, conflicts,
+            );
+            let sql = format!(
+                "SELECT COUNT(*), COUNT(DISTINCT f.session_key),
+                        COALESCE(SUM(f.uncached_input_tokens + f.cache_read_tokens
+                            + f.cache_write_tokens + f.output_tokens), 0),
+                        MIN(f.event_ts_ms), MAX(f.event_ts_ms)
+                 {BILLING_DECLARATION_FACT_FROM} WHERE {}",
+                selection.where_sql,
+            );
+            Ok(self.conn.query_row(
+                &sql, rusqlite::params_from_iter(selection.params.iter()),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )?)
+        };
+        let (fact_count, session_count, total_tokens, first, last) = aggregate(ConflictEvidence::Exclude)?;
+        let (conflict_fact_count, _, conflict_tokens, _, _) = aggregate(ConflictEvidence::Only)?;
+        Ok(BillingDeclarationImpactPreview {
+            fact_count, session_count, total_tokens,
+            first_event_ts_ms: first, last_event_ts_ms: last,
+            conflict_fact_count, conflict_tokens,
+        })
     }
 
     fn billing_declaration_matching_fact_ids(&self, revision_id: &str) -> Result<Vec<String>, AuthorityError> {
@@ -2380,34 +2441,20 @@ impl AuthorityDb {
             rusqlite::params![revision_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
         let scopes = self.billing_declaration_scopes(revision_id)?;
-        let mut stmt = self.conn.prepare(
-            "SELECT f.fact_id, f.model_id, f.route_evidence_id, r.account_ref, f.session_key
-             FROM usage_facts f LEFT JOIN route_evidence r ON r.evidence_id = f.route_evidence_id
-             WHERE f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id = ?2
-               AND f.event_ts_ms IS NOT NULL
-               AND strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?3
-               AND (?4 IS NULL OR strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?4)",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![revision.0, revision.1, revision.2, revision.3], |row| Ok((
-            row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?,
-        )))?;
-        let mut ids = Vec::new();
-        for row in rows {
-            let (fact_id, model, route, account, session) = row?;
-            let matches = |kind: &str, value: &str| match kind {
-                "model" => model.as_deref() == Some(value), "route" => route.as_deref() == Some(value),
-                "account" => account.as_deref() == Some(value), "session" => session.as_deref() == Some(value),
-                _ => false,
-            };
-            let all_kinds = ["account", "route", "model", "session"].iter().all(|kind| {
-                let values = scopes.iter().filter(|(_, scope_kind, _)| scope_kind == kind);
-                !scopes.iter().any(|(_, scope_kind, _)| scope_kind == kind)
-                    || values.clone().any(|(_, _, value)| matches(kind, value))
-            });
-            if all_kinds { ids.push(fact_id); }
-        }
-        Ok(ids)
+        let scope_refs = scopes.iter()
+            .map(|(_, kind, value)| (kind.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let selection = billing_declaration_fact_selection(
+            &revision.0, &revision.1, &revision.2, revision.3.as_deref(), &scope_refs, None,
+            ConflictEvidence::Exclude,
+        );
+        let sql = format!(
+            "SELECT f.fact_id {BILLING_DECLARATION_FACT_FROM} WHERE {} ORDER BY f.fact_id",
+            selection.where_sql,
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(selection.params.iter()), |row| row.get(0))?;
+        rows.collect::<Result<Vec<String>, _>>().map_err(AuthorityError::from)
     }
 
     pub fn billing_recalculation_enqueue(
@@ -2521,7 +2568,7 @@ impl AuthorityDb {
         let Some((_, _, revision_id, status, _, _, _, _, _)) = job else { return Ok(false); };
         if status != "queued" { return Ok(false); }
         self.billing_recalculation_set_status(job_id, "running", None, None, now_ms)?;
-        let preview = match self.billing_declaration_impact_preview(&revision_id, i64::MIN, i64::MAX) {
+        let preview = match self.billing_declaration_impact_preview(&revision_id, None) {
             Ok(value) => value,
             Err(error) => {
                 self.billing_recalculation_set_status(job_id, "failed", Some("preview_failed"), Some("impact preview failed"), now_ms)?;
@@ -3215,10 +3262,11 @@ mod tests {
         ).unwrap();
         assert_eq!(authority.billing_declaration_impact_preview_for(
             "codex", "openai", "1970-01", Some("1970-12"),
-            &[("route", "route-a"), ("model", "model-a")], 0, 4_000,
+            &[("route", "route-a"), ("model", "model-a")], Some((0, 4_000)),
         ).unwrap(), BillingDeclarationImpactPreview {
             fact_count: 1, session_count: 1, total_tokens: 10,
             first_event_ts_ms: Some(1000), last_event_ts_ms: Some(1000),
+            conflict_fact_count: 0, conflict_tokens: 0,
         });
         assert_eq!(authority.conn().query_row(
             "SELECT COUNT(*) FROM billing_declaration_revisions", [], |row| row.get::<_, i64>(0),
@@ -3229,10 +3277,11 @@ mod tests {
             &[("route", "route-a"), ("model", "model-a")], 2,
         ).unwrap();
         assert_eq!(authority.billing_declaration_impact_preview(
-            "preview-revision", 0, 4_000,
+            "preview-revision", Some((0, 4_000)),
         ).unwrap(), BillingDeclarationImpactPreview {
             fact_count: 1, session_count: 1, total_tokens: 10,
             first_event_ts_ms: Some(1000), last_event_ts_ms: Some(1000),
+            conflict_fact_count: 0, conflict_tokens: 0,
         });
         assert_eq!(authority.host_bill_count().unwrap(), 0);
         authority.billing_recalculation_enqueue("preview-job", "preview-declaration", "preview-revision", 3).unwrap();
@@ -3242,6 +3291,76 @@ mod tests {
         ).unwrap();
         assert_eq!(attribution, "fact-1");
         assert_eq!(authority.host_bill_count().unwrap(), 0);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 计费主链规格 R1：预览命中的事实集合 == 重算归因的事实集合（同一谓词）。
+    /// 夹具故意放三种不该被移出的事实：`conflict` 证据（E207，单列为仍待确认）、
+    /// 已被另一条 saved 声明覆盖的事实（不重复移出）、宿主自报 subscription 的
+    /// 事实（本来就不按量）。此前预览按前端传的统计月窗口、重算按全历史，
+    /// 「保存前显示的作用范围」与实际写入对不上。
+    #[test]
+    fn preview_and_recalculation_select_the_same_facts() {
+        let db = tmp_db("billing-preview-equals-recalc");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.conn().execute_batch(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES('r1-run', 1, 'test', 'succeeded', 13);
+             INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+             VALUES('s1', 'codex', 'n1', 'machine', 1000), ('s2', 'codex', 'n2', 'machine', 3000),
+                    ('s3', 'codex', 'n3', 'machine', 3500);
+             INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                 session_key, observation_kind, provider_id, model_id, event_ts_ms, evidence_basis, billing_mode,
+                 uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                 ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES('f-move-1', 'codex', 'machine', 'n1', 'e1', 's1', 'assistant-usage', 'openai', 'model-a', 1000, 'session-native', 'metered', 10, 0, 0, 0, 'r1-run', 1, 1),
+                   ('f-move-2', 'codex', 'machine', 'n2', 'e2', 's2', 'assistant-usage', 'openai', 'model-a', 3000, NULL, NULL, 30, 0, 0, 0, 'r1-run', 1, 1),
+                   ('f-other-model', 'codex', 'machine', 'n1', 'e3', 's1', 'assistant-usage', 'openai', 'model-b', 2000, 'session-native', 'metered', 20, 0, 0, 0, 'r1-run', 1, 1),
+                   ('f-conflict', 'codex', 'machine', 'n1', 'e4', 's1', 'assistant-usage', 'openai', 'model-a', 2500, 'conflict', 'metered', 7, 0, 0, 0, 'r1-run', 1, 1),
+                   ('f-covered', 'codex', 'machine', 'n3', 'e5', 's3', 'assistant-usage', 'openai', 'model-a', 3500, 'session-native', 'metered', 50, 0, 0, 0, 'r1-run', 1, 1),
+                   ('f-native-sub', 'codex', 'machine', 'n2', 'e6', 's2', 'assistant-usage', 'openai', 'model-a', 3600, 'session-native', 'subscription', 90, 0, 0, 0, 'r1-run', 1, 1);",
+        ).unwrap();
+        authority.billing_declaration_revision_save(
+            "other-rev", "other-decl", None, "codex", "openai", "official_subscription",
+            None, None, None, "1970-01", Some("1970-01"), None, None, &[("session", "s3")], 2,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("other-job", "other-decl", "other-rev", 2).unwrap();
+        assert!(authority.billing_recalculation_run("other-job", 2).unwrap());
+        let covered: Vec<String> = authority.conn().prepare(
+            "SELECT fact_id FROM billing_fact_attributions WHERE job_id = 'other-job'",
+        ).unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(covered, vec!["f-covered".to_string()]);
+
+        let scopes = [("model", "model-a")];
+        let preview = authority.billing_declaration_impact_preview_for(
+            "codex", "openai", "1970-01", Some("1970-12"), &scopes, None,
+        ).unwrap();
+        assert_eq!(preview.fact_count, 2, "{preview:?}");
+        assert_eq!(preview.total_tokens, 40);
+        assert_eq!(preview.session_count, 2);
+        assert_eq!(preview.conflict_fact_count, 1);
+        assert_eq!(preview.conflict_tokens, 7);
+
+        authority.billing_declaration_revision_save(
+            "r1-rev", "r1-decl", None, "codex", "openai", "official_subscription",
+            None, None, None, "1970-01", Some("1970-12"), None, None, &scopes, 3,
+        ).unwrap();
+        assert_eq!(
+            authority.billing_declaration_impact_preview("r1-rev", None).unwrap(), preview,
+            "revision-level preview must equal the prospective preview for the same range",
+        );
+        assert_eq!(
+            authority.billing_declaration_matching_fact_ids("r1-rev").unwrap(),
+            vec!["f-move-1".to_string(), "f-move-2".to_string()],
+        );
+        authority.billing_recalculation_enqueue("r1-job", "r1-decl", "r1-rev", 4).unwrap();
+        assert!(authority.billing_recalculation_run("r1-job", 5).unwrap());
+        let attributed: Vec<String> = authority.conn().prepare(
+            "SELECT fact_id FROM billing_fact_attributions WHERE job_id = 'r1-job' ORDER BY fact_id",
+        ).unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(attributed, vec!["f-move-1".to_string(), "f-move-2".to_string()]);
+        let result = authority.billing_recalculation_result("r1-job").unwrap().unwrap();
+        assert_eq!((result.2, result.3, result.4), (2, 2, 40), "published snapshot == preview");
         let _ = std::fs::remove_file(&db);
     }
 

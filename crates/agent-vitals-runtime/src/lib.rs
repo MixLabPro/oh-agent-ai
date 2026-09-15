@@ -24,6 +24,7 @@
 //! 不到这里的 `sessions`/`budget`/`state`，trait 的实现只能落在这个既认识
 //! hosts 又认识 data 的层。
 
+pub mod billing_preview;
 pub mod budget;
 pub mod budget_notifications;
 pub mod clock;

@@ -110,10 +110,15 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
             let start = required_string(args, "effective_start")?;
             let scopes = parse_scopes(args)?;
             let scope_refs = scopes.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>();
+            let window = match (
+                args.get("window_start_ms").and_then(Value::as_i64),
+                args.get("window_end_ms").and_then(Value::as_i64),
+            ) {
+                (Some(start), Some(end)) => Some((start, end)),
+                _ => None,
+            };
             let preview = handle.db().billing_declaration_impact_preview_for(
-                host, provider, start, optional_string(args, "effective_end"), &scope_refs,
-                args.get("window_start_ms").and_then(Value::as_i64).unwrap_or(i64::MIN),
-                args.get("window_end_ms").and_then(Value::as_i64).unwrap_or(i64::MAX),
+                host, provider, start, optional_string(args, "effective_end"), &scope_refs, window,
             ).map_err(authority_error)?;
             json!({ "action": action, "preview": preview_json(preview) })
         }
@@ -313,7 +318,8 @@ fn result_json(r: (String, String, i64, i64, i64, Option<i64>, Option<i64>, i64)
 fn preview_json(p: agent_vitals_data::authority::BillingDeclarationImpactPreview) -> Value {
     json!({ "fact_count": p.fact_count, "session_count": p.session_count,
         "total_tokens": p.total_tokens, "first_event_ts_ms": p.first_event_ts_ms,
-        "last_event_ts_ms": p.last_event_ts_ms })
+        "last_event_ts_ms": p.last_event_ts_ms,
+        "conflict_fact_count": p.conflict_fact_count, "conflict_tokens": p.conflict_tokens })
 }
 
 fn parse_scopes(args: &Value) -> Result<Vec<(String, String)>, ToolError> {

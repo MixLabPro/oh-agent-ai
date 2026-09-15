@@ -1504,7 +1504,7 @@ fn billing_import_candidates() -> Value {
                 let impact = window.and_then(|(window_start_ms, window_end_ms)| {
                     db.billing_declaration_impact_preview_for(
                         &host, &provider_id, &billing_period_start, None, &[],
-                        window_start_ms, window_end_ms,
+                        Some((window_start_ms, window_end_ms)),
                     ).ok()
                 });
                 serde_json::json!({
@@ -2452,13 +2452,14 @@ fn revoke_billing_declaration(
     }))
 }
 
-/// 对尚未保存的候选做只读影响预览。与修订版预览共用 data 层查询，
-/// 因而不会提前创建声明、接受候选或改变汇总。
+/// 对尚未保存的声明做只读影响预览。参数就是保存时的参数（宿主、provider、
+/// 关系、起止月、作用域）——不再由前端另传统计月窗口：预览范围必须等于写入范围
+/// （计费主链规格 G2/R1）。三组数字与分币金额由 `runtime::billing_preview` 用与重算
+/// 归因同一条谓词、与 MCP `cost_breakdown` 同一条计价路径算出。
 #[tauri::command(async)]
 fn billing_candidate_impact_preview(
-    host: String, provider_id: String, effective_start: String,
-    effective_end: Option<String>, window_start_ms: i64, window_end_ms: i64,
-    scopes: Vec<BillingScopeInput>,
+    host: String, provider_id: String, relationship_kind: String, effective_start: String,
+    effective_end: Option<String>, scopes: Vec<BillingScopeInput>,
 ) -> Value {
     let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
@@ -2467,18 +2468,10 @@ fn billing_candidate_impact_preview(
     let scope_refs = scopes.iter()
         .map(|scope| (scope.scope_kind.as_str(), scope.scope_value.as_str()))
         .collect::<Vec<_>>();
-    match db.billing_declaration_impact_preview_for(
-        &host, &provider_id, &effective_start, effective_end.as_deref(),
-        &scope_refs, window_start_ms, window_end_ms,
-    ) {
-        Ok(preview) => serde_json::json!({
-            "status": "ok", "fact_count": preview.fact_count,
-            "session_count": preview.session_count, "total_tokens": preview.total_tokens,
-            "first_event_ts_ms": preview.first_event_ts_ms,
-            "last_event_ts_ms": preview.last_event_ts_ms,
-        }),
-        Err(error) => serde_json::json!({"status": "unavailable", "reason": error.to_string()}),
-    }
+    agent_vitals_runtime::billing_preview::declaration_impact_preview(
+        &db, &host, &provider_id, &relationship_kind, &effective_start,
+        effective_end.as_deref(), &scope_refs,
+    )
 }
 
 #[tauri::command]

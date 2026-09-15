@@ -93,15 +93,16 @@ impl Tokens {
     }
 }
 
-struct WindowResult {
-    rows: Vec<Value>,
-    total_tokens: i64,
-    priced_tokens: i64,
-    unresolved_tokens: i64,
-    subscription_tokens: i64,
-    amounts: Vec<Value>,
-    max_event_ms: Option<i64>,
-    has_unresolved: bool,
+pub(crate) struct WindowResult {
+    pub(crate) rows: Vec<Value>,
+    pub(crate) total_tokens: i64,
+    pub(crate) priced_tokens: i64,
+    pub(crate) unresolved_tokens: i64,
+    pub(crate) subscription_tokens: i64,
+    /// `{amount_minor, currency, basis}` rows — never combined across currency or basis.
+    pub(crate) amounts: Vec<Value>,
+    pub(crate) max_event_ms: Option<i64>,
+    pub(crate) has_unresolved: bool,
 }
 
 pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
@@ -214,6 +215,31 @@ fn collect_window(
     hosts: &[String],
     group_by: &[String],
 ) -> Result<WindowResult, ToolError> {
+    let mut where_sql = "f.deleted_at_ms IS NULL AND f.observation_kind != 'legacy_aggregate' AND f.event_ts_ms IS NOT NULL AND f.event_ts_ms >= ?1 AND f.event_ts_ms < ?2".to_owned();
+    let mut params = vec![
+        rusqlite::types::Value::Integer(start_ms),
+        rusqlite::types::Value::Integer(end_ms),
+    ];
+    if !hosts.is_empty() {
+        let placeholders = (0..hosts.len()).map(|idx| format!("?{}", idx + 3)).collect::<Vec<_>>().join(", ");
+        where_sql.push_str(&format!(" AND f.host IN ({placeholders})"));
+        params.extend(hosts.iter().cloned().map(rusqlite::types::Value::Text));
+    }
+    price_fact_selection(conn, &where_sql, &params, group_by)
+}
+
+/// 对任意 `usage_facts f` 选择谓词做事实时价卡计价。`cost_breakdown` 的时间窗与
+/// 计费声明预览（`runtime::billing_preview`，谓词来自
+/// `authority::billing_declaration_fact_selection`）共用这一条计价路径——预览
+/// 「移出估算 ¥X」与 MCP `cost_breakdown` 的桶金额必须逐位相等（规格 R5），
+/// 所以不许第二套价格查询。`where_sql` 可引用 `f`（usage_facts）与 `r`
+/// （route_evidence，按 `evidence_id` 主键左连，无扇出）。
+pub(crate) fn price_fact_selection(
+    conn: &rusqlite::Connection,
+    where_sql: &str,
+    params: &[rusqlite::types::Value],
+    group_by: &[String],
+) -> Result<WindowResult, ToolError> {
     let has_attributions: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='billing_fact_attributions')",
         [], |row| row.get(0),
@@ -229,16 +255,6 @@ fn collect_window(
     } else {
         "COALESCE(f.billing_mode, 'unknown')"
     };
-    let mut where_sql = "f.deleted_at_ms IS NULL AND f.observation_kind != 'legacy_aggregate' AND f.event_ts_ms IS NOT NULL AND f.event_ts_ms >= ?1 AND f.event_ts_ms < ?2".to_owned();
-    let mut params = vec![
-        rusqlite::types::Value::Integer(start_ms),
-        rusqlite::types::Value::Integer(end_ms),
-    ];
-    if !hosts.is_empty() {
-        let placeholders = (0..hosts.len()).map(|idx| format!("?{}", idx + 3)).collect::<Vec<_>>().join(", ");
-        where_sql.push_str(&format!(" AND f.host IN ({placeholders})"));
-        params.extend(hosts.iter().cloned().map(rusqlite::types::Value::Text));
-    }
     let sql = format!(
         "SELECT f.host, f.provider_id, f.provider_raw, COALESCE(f.model_id, '<unknown>'),
                 {billing_mode_expr}, COALESCE(f.pricing_basis, 'unavailable'),
@@ -247,6 +263,7 @@ fn collect_window(
                 SUM(f.uncached_input_tokens), SUM(f.cache_read_tokens),
                 SUM(f.cache_write_tokens), SUM(f.output_tokens), MAX(f.event_ts_ms)
          FROM usage_facts f
+         LEFT JOIN route_evidence r ON r.evidence_id = f.route_evidence_id
          LEFT JOIN pricing_snapshots ps ON ps.pricing_version = (
              SELECT pricing_version FROM pricing_snapshots
              WHERE captured_at_ms <= f.event_ts_ms
