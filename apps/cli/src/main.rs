@@ -449,6 +449,35 @@ enum Cmd {
         #[arg(long)]
         write: bool,
     },
+    /// Replay a WorkBuddy home (`~/.workbuddy`) into UsageFact rows — one per
+    /// generation span with usage, keyed by trace.sessionId (E4a, spec §9E.5).
+    /// Buckets map like Codex's OpenAI-format usage: uncached = prompt − cached,
+    /// cache_read = cached, cache_write = 0, output = completion. Provider/route
+    /// are left unresolved on purpose (platform-credit vs self-configured vs
+    /// promo track is per-request and not observable locally, spec §2.1).
+    /// Traces without a sessionId are counted as `unattributed`, never emitted.
+    /// Without --write this is an in-memory, read-only diagnostic, byte-for-byte
+    /// mirror of Python `scan.py workbuddy-usage-facts --json -`.
+    WorkbuddyUsageFacts {
+        /// WorkBuddy home directory (the one containing traces/)
+        root: PathBuf,
+        /// machine_namespace component of SessionKey — required (spec §9);
+        /// the CLI never reads/writes state to invent one (missing exits 2)
+        #[arg(long)]
+        machine_namespace: Option<String>,
+        /// source_profile component of SessionKey (default: 'default')
+        #[arg(long, default_value = "default")]
+        source_profile: String,
+        /// Write the UsageFact JSON to FILE; use - for stdout (default: human summary)
+        #[arg(long = "json")]
+        rows_json: Option<PathBuf>,
+        /// Persist facts through the runtime ingest service into
+        /// <data_home>/facts/workbuddy.jsonl (exactly-once by fact_id). Rust-only
+        /// by design — Python grows no writer; without this flag the output stays
+        /// byte-identical to the Python implementation. (E4b, spec §9E.5)
+        #[arg(long)]
+        write: bool,
+    },
     /// Audit ONE or MORE Codex rollout JSONL files into per-`token_count`
     /// UsageFact rows (facts + attempts + coverage; v0.7 spec §3 candidate #3
     /// Stage 2). In-memory emit + read-only diagnostic — writes no state at all.
@@ -620,10 +649,11 @@ enum Cmd {
     },
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
-    /// `sessions` row is the join anchor across the three joinable surfaces (spec
-    /// §2.1); cost is the host-billed credit_json (spec §9). SV604/605 degrade to
-    /// Unavailable (host capability: only bash/web_fetch tool calls are joinable to
-    /// sessions, §3.1). Stateless single call; `--list` enumerates.
+    /// `sessions` row is the join anchor across the four joinable surfaces (spec
+    /// §2.1; traces join via `trace.sessionId` since E1/E2); cost is the host-billed
+    /// credit_json (spec §9). Edit/Write spans feed SV604/605, span status feeds
+    /// SV607/608, agent spans feed SubagentSpawns; Bash spans are not folded until
+    /// E3 (audit-log stays the Bash source). Stateless single call; `--list` enumerates.
     WorkbuddySession {
         /// List all WorkBuddy sessions: id/title/model/cwd/date span
         #[arg(long)]
@@ -656,7 +686,7 @@ enum Cmd {
     /// `alert` computes the full budget alert from the authority DB (SQL
     /// equivalent of `budget show`), cross-host metered CNY.
     BudgetSql {
-        #[arg(value_parser = ["status", "alert", "config-show", "config-set", "snooze-set", "snooze-clear"])]
+        #[arg(value_parser = ["status", "profiles", "profile-set", "alert", "config-show", "config-set", "snooze-set", "snooze-clear"])]
         action: String,
         /// status/config-show: query this month (YYYY-MM) instead of the current one
         #[arg(long)]
@@ -673,6 +703,21 @@ enum Cmd {
         /// snooze-set: snooze until this ISO datetime (Beijing time, e.g. 2026-09-10T08:00:00)
         #[arg(long)]
         until: Option<String>,
+        /// profile-set: estimate or confirmed
+        #[arg(long)]
+        profile: Option<String>,
+        /// profile-set: explicit ISO-4217-like currency code (for example CNY or USD)
+        #[arg(long)]
+        currency: Option<String>,
+        /// profile-set: monthly amount in the selected currency's minor unit
+        #[arg(long)]
+        profile_monthly_minor: Option<i64>,
+        /// profile-set: optional daily amount in the selected currency's minor unit
+        #[arg(long)]
+        profile_daily_minor: Option<i64>,
+        /// profile-set: warning ratio in basis points (80% = 8000)
+        #[arg(long)]
+        profile_warning_ratio_bp: Option<i64>,
     },
     /// Drive the Rust state write chain. R1c: the pure merge rules live in
     /// core::state (single source of truth), this subcommand is the I/O + time
@@ -705,10 +750,9 @@ enum Cmd {
         #[command(subcommand)]
         action: DataAction,
     },
-    /// Data MCP: local, read-only, stdio MCP server over the SQL authority DB
-    /// (docs/AGENT_VITALS_DATA_MCP_SPEC.md). `serve` speaks JSON-RPC 2.0 on
-    /// stdin/stdout; logs go to stderr; it opens the DB read-only and never
-    /// creates or migrates it.
+    /// Data MCP: local, stdio server over the SQL authority DB
+    /// (docs/AGENT_VITALS_DATA_MCP_SPEC.md). Read operations are safe and
+    /// typed; control-plane mutations are guarded by an explicit flag.
     DataMcp {
         #[command(subcommand)]
         action: DataMcpAction,
@@ -720,7 +764,13 @@ enum Cmd {
 enum DataMcpAction {
     /// Run the stdio MCP server (JSON-RPC 2.0, line-delimited). Blocks until
     /// stdin is closed, then exits 0.
-    Serve,
+    Serve {
+        /// Enable typed local control-plane and Authority management writes in
+        /// isolated/local use. Arbitrary SQL, raw source payloads, and generic
+        /// filesystem writes remain unavailable.
+        #[arg(long)]
+        allow_local_writes: bool,
+    },
 }
 
 // `data` 子命令的子动作。Stage 0 的 repository 只有 `monthly_summary`/
@@ -734,16 +784,16 @@ enum DataAction {
     /// Monthly cross-host summary (coverage, excluded hosts, freshness).
     /// Missing data renders as "no data", never as zero.
     Coverage {
-        /// Query a specific month (YYYY-MM) instead of the current Beijing month
+        /// Query a specific month (YYYY-MM) instead of the current statistics month
         #[arg(long)]
         month: Option<String>,
         /// Print the frozen DTO JSON to stdout (default: compact text view)
         #[arg(long)]
         json: bool,
     },
-    /// Single-day cross-host summary (Beijing date, YYYY-MM-DD).
+    /// Single-day cross-host summary (statistics date, YYYY-MM-DD).
     Daily {
-        /// Beijing date to query (YYYY-MM-DD)
+        /// Statistics date to query (YYYY-MM-DD)
         #[arg(long)]
         date: String,
         /// Print the frozen DTO JSON to stdout (default: compact text view)
@@ -783,30 +833,41 @@ enum DataAction {
 ///   是 MCP 返回的 HMAC（`sr_<32hex>`），不是原生 session key。
 /// - `Findings`：**仍走 `r2a_store::sessions_findings`**——DSH / Codex 行为
 ///   findings 来自 session envelope 的 `findings` / `audit.findings` 字段
-///   （DSH wire 事件预先在 ingest 阶段算好），而 `usage_facts × pricing_snapshots`
-///   JOIN 不含 workflow 事件。完整迁移到 mcp::dispatch 待 M4 `workflow_events`
-///   工具落地（task #19）。
+///   （DSH wire 事件预先在 ingest 阶段算好）。`session_detail` 的 usage
+///   时间线与已落 authority 的 workflow 时间线是两个独立轴，成本不做硬归因。
 /// - `Navigation`：今日 token 走 SQL 权威库（`authority_day_token_totals`，
 ///   与 r2a_store `sessions_navigation` 同源），`recent[]` 改成
 ///   `mcp::dispatch("sessions_search", {date, limit})`。
 #[derive(Subcommand)]
 enum SessionsAction {
-    /// List sessions active in a Beijing day or month (optional hour drill-down,
+    /// List sessions active in a statistics-timezone day or month (optional hour drill-down,
     /// optional host / min_tokens filter). Output envelope is byte-identical to
     /// the MCP `sessions_search` tool result.
     List {
-        /// Beijing day YYYY-MM-DD (exactly one of --day / --month)
+        /// Statistics day YYYY-MM-DD (exactly one of --day / --month)
         #[arg(long)]
         day: Option<String>,
-        /// Beijing month YYYY-MM (exactly one of --day / --month)
+        /// Statistics month YYYY-MM (exactly one of --day / --month)
         #[arg(long)]
         month: Option<String>,
-        /// Restrict to this Beijing hour (0..=23). Requires --day.
+        /// Inclusive statistics start date for a custom range; pair with --to-date
+        #[arg(long = "from-date")]
+        date_from: Option<String>,
+        /// Inclusive end date in the configured statistics timezone; pair with --from-date
+        #[arg(long = "to-date")]
+        date_to: Option<String>,
+        /// Restrict to this local statistics hour (0..=23). Requires --day.
         #[arg(long)]
         hour: Option<u32>,
         /// Filter by host kind (repeatable: `--host-kind claude-code --host-kind codex`)
         #[arg(long = "host-kind", value_name = "HOST")]
         host_kind: Vec<String>,
+        /// Restrict to this exact model id
+        #[arg(long)]
+        model: Option<String>,
+        /// Restrict to this exact provider id
+        #[arg(long)]
+        provider: Option<String>,
         /// Drop sessions whose window total is below this
         #[arg(long)]
         min_tokens: Option<i64>,
@@ -849,12 +910,12 @@ enum SessionsAction {
     /// and only re-renders (§6 决策 3）；today_tokens 走 SQL 权威库，
     /// recent[] 走 `mcp::sessions_search`。
     Navigation {
-        /// Day to project (YYYY-MM-DD, Beijing day boundary). Defaults to today.
+        /// Day to project (YYYY-MM-DD in the configured statistics timezone). Defaults to today.
         #[arg(long, default_value = "")]
         day: String,
-        /// Timezone of the projected day. Only `Asia/Shanghai` is supported.
-        #[arg(long, default_value = "Asia/Shanghai")]
-        timezone: String,
+        /// Timezone of the projected day (valid IANA name; defaults to the configured/OS value).
+        #[arg(long)]
+        timezone: Option<String>,
         /// How many recent rows per host; default 5
         #[arg(long, default_value_t = 5)]
         recent: usize,
@@ -1418,13 +1479,20 @@ fn print_daily_summary_text(s: &agent_vitals_data::projection::DailySummary) {
 }
 
 fn main() {
+    // 统计时区偏好必须在任何 SQLite localtime 查询前应用；缺失配置继续使用 OS 时区。
+    if let Err(error) = agent_vitals_runtime::statistics_timezone::apply(
+        &agent_vitals_runtime::home::data_home(),
+    ) {
+        eprintln!("statistics timezone unavailable: {error}");
+        std::process::exit(2);
+    }
     let args = Args::parse();
 
     // Data MCP：本机 stdio server，永不返回（stdin EOF → exit 0）。在扫描
     // 之前短路——它不碰 skill 扫描，只对 SQL 权威库做只读查询。
     if let Some(Cmd::DataMcp { action }) = &args.cmd {
         match action {
-            DataMcpAction::Serve => mcp::serve(),
+            DataMcpAction::Serve { allow_local_writes } => mcp::serve(*allow_local_writes),
         }
     }
 
@@ -2409,6 +2477,60 @@ session_store={store} fold={fold}"
     // event id 按 rollout stem 命名空间——同 stem 的 byte-identical 复本去重、
     // 异 stem 永不误合并。与 Python `scan.py codex-usage-facts --json -` 字节相等
     // （parity 钉测在 tests/test_codex_usage_fact.py）。
+    if let Some(Cmd::WorkbuddyUsageFacts {
+        root,
+        machine_namespace,
+        source_profile,
+        rows_json,
+        write,
+    }) = &args.cmd
+    {
+        let ns = match machine_namespace {
+            Some(ns) if !ns.is_empty() => ns.clone(),
+            _ => {
+                eprintln!(
+                    "workbuddy-usage-facts: --machine-namespace is required \
+                     (v0.7 spec §9: caller-provided; a CLI default would write state)"
+                );
+                std::process::exit(2);
+            }
+        };
+        let result = match agent_vitals_hosts::workbuddy_usage_fact::workbuddy_traces_to_usage_facts(
+            root,
+            &ns,
+            source_profile,
+        ) {
+            Ok(r) => r,
+            Err(msg) => {
+                eprintln!("workbuddy-usage-facts failed: {msg}");
+                std::process::exit(2);
+            }
+        };
+        let write_report = run_ingest(*write, "workbuddy-usage-facts", &result.facts);
+        if let Some(path) = rows_json {
+            let payload = attach_write_report(
+                agent_vitals_hosts::workbuddy_usage_fact::to_payload_value(&result, &ns, source_profile),
+                &write_report,
+            );
+            let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
+                eprintln!("failed to write {}", path.display());
+                std::process::exit(2);
+            } else {
+                println!("Wrote {}: {} facts", path.display(), result.facts.len());
+            }
+        } else {
+            print!(
+                "{}",
+                agent_vitals_hosts::workbuddy_usage_fact::to_human_summary(&result, root, &ns, source_profile)
+            );
+            print_ingest_summary(&write_report);
+        }
+        return;
+    }
+
     if let Some(Cmd::CodexUsageFacts {
         rollouts,
         machine_namespace,
@@ -2565,6 +2687,22 @@ session_store={store} fold={fold}"
                         );
                     }
                 }
+                // 单宿主的坏文件不回滚其他宿主已经写入的事实，但也绝不能把
+                // 这轮报告成成功：桌面端需要据此把该宿主标成“需要处理”。
+                // 错误写 stderr，使桌面 `run_facts_sync` 能保留宿主名和原因。
+                let failed_hosts: Vec<_> = report.hosts.iter()
+                    .filter(|host| !host.errors.is_empty())
+                    .collect();
+                if !failed_hosts.is_empty() {
+                    for host in failed_hosts {
+                        eprintln!(
+                            "sync-facts partial failure [{}]: {}",
+                            host.host,
+                            host.errors.join(" | "),
+                        );
+                    }
+                    std::process::exit(1);
+                }
             }
             Err(e) => {
                 eprintln!("sync-facts failed: {e}");
@@ -2613,7 +2751,7 @@ session_store={store} fold={fold}"
             updated: 0,
             conflicts: 0,
         };
-        for host in ["claude-code", "codex", "dsh"] {
+        for host in agent_vitals_runtime::ingest_service::FACT_HOSTS {
             let path = data_home.join("facts").join(format!("{host}.jsonl"));
             if !path.exists() {
                 continue;
@@ -2744,6 +2882,17 @@ session_store={store} fold={fold}"
                 }
             }
         } // end `if *with_legacy_ledger`
+        // v1.0：旧版公共价表曾错误携带个人订阅。先从升级前已经落库的
+        // 快照迁移为本地待确认候选，再保存新公共价卡；迁移可重复执行，已有
+        // 用户账单不会被覆盖或被当作自动确认。
+        match agent_vitals_runtime::sql_sync::migrate_legacy_subscription_snapshots(
+            &db,
+            agent_vitals_runtime::sql_sync::now_ms(),
+        ) {
+            Ok(0) => {}
+            Ok(rows) => println!("  legacy subscriptions: {rows} pending confirmation candidates found"),
+            Err(e) => eprintln!("data-migrate warning (legacy subscriptions): {e}"),
+        }
           // Phase 2.8：落当前价格快照（§5.3：历史查询按记录的 pricing version 重放）。
         match agent_vitals_runtime::sql_sync::snapshot_current_pricing(&db) {
             Ok(true) => println!("  pricing snapshot: new version captured"),
@@ -2811,11 +2960,11 @@ session_store={store} fold={fold}"
             // `mcp::data_status_report`（spec §5「同一 repository / 同一 DTO」）。
             // 损坏恢复 / 「删库不回落」的 health + hints 逻辑也在那一份里。
             let enabled = agent_vitals_runtime::sql_authority::is_enabled(&data_home);
-            Ok(agent_vitals_runtime::mcp::data_status_report(
-                db.conn(),
-                db_existed,
-                enabled,
-            ))
+            let mut report = agent_vitals_runtime::mcp::data_status_report(
+                db.conn(), db_existed, enabled,
+            );
+            agent_vitals_runtime::mcp::augment_sync_failure(&mut report, &data_home);
+            Ok(report)
         })();
         match out {
             Ok(v) => {
@@ -3170,30 +3319,38 @@ session_store={store} fold={fold}"
     // v0.9.1 SQL 权威库收口（PR #2）：`sessions list` / `read` / `navigation`
     // 改走 `mcp::dispatch`，envelope 与 MCP `tools/call` 同源；`findings` 仍
     // 走 r2a_store（DSH/Codex findings 来自 session envelope 的 pre-computed
-    // 字段，usage_facts 不含 workflow 事件；task #19 等 M4 workflow_events 工具）。
+    // 字段），而 session_detail 另外返回 SQL workflow 事件轴。
     if let Some(Cmd::Sessions { action }) = &args.cmd {
         let data_home = agent_vitals_runtime::home::data_home();
         match action {
             SessionsAction::List {
                 day,
                 month,
+                date_from,
+                date_to,
                 hour,
                 host_kind,
+                model,
+                provider,
                 min_tokens,
                 page_size,
                 cursor,
                 json,
             } => {
-                // 严格校验 --day / --month 二选一（与 MCP schema `additionalProperties: false`
-                // 同语义；`mcp::dispatch` 自己也会拒，但 CLI 早一步给清晰错误更友好）。
-                match (day.as_deref(), month.as_deref()) {
-                    (None, None) | (Some(_), Some(_)) => {
+                // 严格校验三种时间窗形态：单日、月份、成对自定义日期范围。
+                // `mcp::dispatch` 仍会做格式和日期合法性校验；CLI 先拒绝结构
+                // 歧义，给出更清晰的错误。
+                let range_pair = date_from.is_some() == date_to.is_some();
+                let window_shape_ok = range_pair
+                    && matches!(
+                        (day.is_some(), month.is_some(), date_from.is_some()),
+                        (true, false, false) | (false, true, false) | (false, false, true)
+                    );
+                if !window_shape_ok {
                         eprintln!(
-                            "exactly one of --day / --month is required (Beijing date YYYY-MM-DD or month YYYY-MM)"
+                            "use exactly one of --day, --month, or the paired --from-date / --to-date"
                         );
                         std::process::exit(2);
-                    }
-                    _ => {}
                 }
                 let mut args = serde_json::Map::new();
                 if let Some(d) = day {
@@ -3201,6 +3358,12 @@ session_store={store} fold={fold}"
                 }
                 if let Some(m) = month {
                     args.insert("month".into(), Value::String(m.clone()));
+                }
+                if let Some(d) = date_from {
+                    args.insert("date_from".into(), Value::String(d.clone()));
+                }
+                if let Some(d) = date_to {
+                    args.insert("date_to".into(), Value::String(d.clone()));
                 }
                 if let Some(h) = hour {
                     args.insert("hour".into(), Value::Number((*h).into()));
@@ -3210,6 +3373,12 @@ session_store={store} fold={fold}"
                         "hosts".into(),
                         Value::Array(host_kind.iter().cloned().map(Value::String).collect()),
                     );
+                }
+                if let Some(model) = model {
+                    args.insert("model".into(), Value::String(model.clone()));
+                }
+                if let Some(provider) = provider {
+                    args.insert("provider".into(), Value::String(provider.clone()));
                 }
                 if let Some(mt) = min_tokens {
                     args.insert("min_tokens".into(), Value::Number((*mt).into()));
@@ -3244,7 +3413,8 @@ session_store={store} fold={fold}"
                 dispatch_sessions("session_detail", Value::Object(args), *json, &data_home);
             }
             SessionsAction::Findings { json } => {
-                // 临时保留 r2a_store 路径——见 task #19（M4 workflow_events 落地后切）。
+                // findings 仍是 session envelope 的预计算投影；workflow 事件轴
+                // 已由 session_detail 通过 authority 读取。
                 let home = std::env::var("HOME")
                     .or_else(|_| std::env::var("USERPROFILE"))
                     .unwrap_or_default();
@@ -3260,19 +3430,25 @@ session_store={store} fold={fold}"
                 recent,
                 json,
             } => {
-                // `--day` 缺省 = 今天（北京日界；与 r2a_store 旧实现同语义）。
+                // `main` has already applied the persisted preference to TZ.  Do not
+                // put a Beijing default in the CLI: a clean install follows the OS
+                // timezone and a configured install follows its saved preference.
+                let timezone = timezone
+                    .clone()
+                    .unwrap_or_else(agent_vitals_runtime::clock::statistics_timezone_name);
+                if let Err(error) = agent_vitals_runtime::statistics_timezone::validate_timezone(&timezone) {
+                    eprintln!("invalid --timezone {timezone:?}: {error}");
+                    std::process::exit(2);
+                }
+                // 显式参数优先于持久化值；Tauri 传入的也是同一份偏好。
+                std::env::set_var("TZ", &timezone);
+                // `--day` 缺省 = 当前统计时区的今天。
                 let day = if day.is_empty() {
                     agent_vitals_runtime::sessions::codex_cost::today_beijing()
                 } else {
                     day.clone()
                 };
-                if timezone != "Asia/Shanghai" {
-                    eprintln!(
-                        "unsupported --timezone {timezone:?}: only Asia/Shanghai (core day boundary is fixed UTC+8, no DST)"
-                    );
-                    std::process::exit(2);
-                }
-                sessions_navigation_v2(&day, *recent, *json, &data_home);
+                sessions_navigation_v2(&day, &timezone, *recent, *json, &data_home);
             }
         }
         return;
@@ -3315,6 +3491,11 @@ session_store={store} fold={fold}"
         daily_cny_minor,
         warning_ratio_bp,
         until,
+        profile,
+        currency,
+        profile_monthly_minor,
+        profile_daily_minor,
+        profile_warning_ratio_bp,
     }) = &args.cmd
     {
         let db = || -> agent_vitals_data::authority::AuthorityDb {
@@ -3340,6 +3521,39 @@ session_store={store} fold={fold}"
                     Some(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
                     None => {
                         eprintln!("budget-sql status failed: authority DB unavailable");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "profiles" => {
+                let m = month
+                    .clone()
+                    .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
+                match agent_vitals_runtime::budget::budget_profiles_status_sql_at(
+                    &agent_vitals_runtime::home::data_home(), &m,
+                ) {
+                    Some(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                    None => {
+                        eprintln!("budget-sql profiles failed: authority DB unavailable");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "profile-set" => {
+                let (Some(profile), Some(currency), Some(monthly)) =
+                    (profile, currency, profile_monthly_minor) else {
+                    eprintln!("profile-set requires --profile, --currency and --profile-monthly-minor");
+                    std::process::exit(2);
+                };
+                let d0 = db();
+                match d0.budget_profile_set(
+                    profile, currency, *monthly, *profile_daily_minor,
+                    profile_warning_ratio_bp.unwrap_or(8_000),
+                    agent_vitals_runtime::sql_sync::now_ms(),
+                ) {
+                    Ok(()) => println!("budget profile saved: {profile} {currency} monthly={monthly}"),
+                    Err(e) => {
+                        eprintln!("budget-sql profile-set failed: {e}");
                         std::process::exit(2);
                     }
                 }
@@ -4225,7 +4439,7 @@ fn print_sessions_summary(name: &'static str, env: &Value) {
 ///
 /// 失败降级（spec §0.1 不冒充）：单宿主失败 → 该宿主行 `unavailable`；top-level
 /// 失败 → envelope 整体退到 `error_envelope` 形态。
-fn sessions_navigation_v2(day_key: &str, recent_n: usize, json_out: bool, data_home: &Path) {
+fn sessions_navigation_v2(day_key: &str, timezone: &str, recent_n: usize, json_out: bool, data_home: &Path) {
     use agent_vitals_runtime::mcp;
     let data_home = data_home.to_path_buf();
 
@@ -4311,7 +4525,7 @@ fn sessions_navigation_v2(day_key: &str, recent_n: usize, json_out: bool, data_h
     let envelope = json!({
         "schema_version": 1,
         "day_key": day_key,
-        "timezone": "Asia/Shanghai",
+        "timezone": timezone,
         "generated_at": agent_vitals_runtime::state::now_iso_utc(),
         "hosts": hosts,
     });
@@ -4386,19 +4600,19 @@ mod codex_sql_tests {
     /// `codex_merged_from_sql`（Tier B：`codex-cost` 切 SQL 权威库）：
     /// - `by_hour_model` / `by_model` 从 `usage_facts` 的 codex 行读出、经
     ///   `codex_report_from_merged` 折出正数成本；
-    /// - `unaccounted` = `[]`（残差哨兵是 rollout fold 独有）、`plan` 只带
-    ///   `plan_type: "plus"`（pricing.json billing_modes.openai._note 声明的
-    ///   实测不变量，用于保住「(按量标价)」诚实标注，不带月费/限额）；
+    /// - `unaccounted` = `[]`（残差哨兵是 rollout fold 独有）、`plan` 为空：
+    ///   SQL 聚合没有可用于历史窗口的用户套餐证据，不能补写某个开发者的
+    ///   `plus` 身份；
     /// - 库缺失 → note 非 None（CLI 打 stderr，不把空报告当「没花钱」）。
     #[test]
     fn codex_merged_from_sql_reads_facts_and_degrades_unaccounted_plan() {
         let dir = fresh_dir("degrade");
 
-        // 空库（尚未建）→ note 提示 sync-facts；merged 兜底但 plan tag 在。
+        // 空库（尚未建）→ note 提示 sync-facts；merged 不编造套餐标签。
         let (empty, note) = agent_vitals_runtime::summary::codex_merged_from_sql(&dir);
         assert!(note.is_some(), "库文件不存在 → 必须给 stderr 提示");
         assert_eq!(empty["unaccounted"], json!([]));
-        assert_eq!(empty["plan"]["plan_type"], "plus");
+        assert_eq!(empty["plan"], json!({}));
 
         let db = agent_vitals_data::authority::AuthorityDb::open(
             &agent_vitals_data::authority::default_authority_path(&dir),
@@ -4412,24 +4626,24 @@ mod codex_sql_tests {
         let (merged, note) = agent_vitals_runtime::summary::codex_merged_from_sql(&dir);
         assert!(note.is_none(), "库已建且可开 → 无提示");
         assert_eq!(merged["unaccounted"], json!([]));
-        assert_eq!(merged["plan"]["plan_type"], "plus");
+        assert_eq!(merged["plan"], json!({}));
         assert!(
             merged["by_hour_model"]["2026-09-03T08"]["gpt-5.6-sol"].is_object(),
             "北京小时桶应含 seed 的模型：{}",
             merged["by_hour_model"]
         );
         // 走真实报告路径：total_cost_usd 为正、per_model 有 sol、unaccounted 空、
-        // plan 透传（→ render 侧走 "(按量标价)" 标注）。
+        // plan 为空（缺证据时 render 侧保持按量估算标注）。
         let report = codex_report_from_merged(&merged, None, None, false);
         assert!(report["total_cost_usd"].as_f64().unwrap() > 0.0);
         assert!(report["per_model"]["gpt-5.6-sol"].is_object());
         assert_eq!(report["unaccounted_usage"], json!([]));
-        assert_eq!(report["plan"]["plan_type"], "plus");
-        // 订阅标注保住：render 文本含「按量标价」而非裸「total cost」。
+        assert_eq!(report["plan"], json!({}));
+        // 缺套餐证据仍要标明按量估算，而非裸「total cost」。
         let text = agent_vitals_runtime::sessions::codex_cost::render_codex_cost(&report);
         assert!(
-            text.contains("按量标价"),
-            "codex 订阅 → USD 总额必须标「按量标价」：{text}"
+            text.contains("按量估算，待确认"),
+            "缺套餐证据的 USD 总额必须标「按量估算，待确认」：{text}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

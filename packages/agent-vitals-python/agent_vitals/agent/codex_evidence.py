@@ -33,6 +33,7 @@ import re
 
 from agent_vitals.agent import canonical_audit
 from agent_vitals.agent.host_capability import host_profile
+from ..util import iso_to_epoch_ms, session_span
 
 # 19 个 Signal 的声明序——与 Rust `codex_evidence.rs::ALL_SIGNALS` 同名同序。
 # `signals` 数组 / `coverage` 字典的输出顺序都靠这份显式表对齐，不靠 Python
@@ -808,7 +809,13 @@ def build_codex_evidence(items, session_id, title, history_mode, cli_version,
             "host_id": "codex",
             "workspace_roots": workspace_roots,
             "model": model,
-            "span": None,
+            # D1–D4：Codex 的顶层 `{type, timestamp, payload}` 包络带 ISO 时间戳。
+            # **必须走 `iso_to_epoch_ms` 而不是 `parse_iso`**——后者只到秒，会与
+            # Rust 侧的毫秒精度不一致（差分门逐字节比）。0 条记录 → None。
+            "span": session_span(
+                t for t in (iso_to_epoch_ms(r.get("timestamp")) for r in items)
+                if t is not None
+            ),
         },
         "signals": signals,
         "coverage": coverage,
@@ -895,6 +902,8 @@ def codex_evidence_json(evidence):
         "cli_version": evidence["cli_version"],
         "workspace_roots": canonical["meta"]["workspace_roots"],
         "model": canonical["meta"]["model"],
+        # 会话实际覆盖跨度（D1–D4）。键位置与 Rust 序列化器逐字节对齐。
+        "span": canonical["meta"]["span"],
         "signals": signals,
         "coverage": coverage_map,
         "attempts": attempts,

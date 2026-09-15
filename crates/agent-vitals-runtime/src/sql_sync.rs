@@ -22,6 +22,7 @@ use std::path::Path;
 
 use agent_vitals_data::authority::{AuthorityDb, AuthorityError};
 use agent_vitals_data::fact_writer_sql::SqlFactWriter;
+use agent_vitals_domain::workflow::WorkflowEvent;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 
@@ -73,6 +74,86 @@ pub fn snapshot_current_pricing(db: &AuthorityDb) -> Result<bool, AuthorityError
     })
 }
 
+/// 将升级前价格快照中错误混入的个人订阅声明，迁移为本地、待确认的候选。
+/// 公共目录本身绝不回写这些数据，也不自动形成实际账单。
+///
+/// 旧版把 `catalog_2026_09.subscriptions` 编进 `pricing.json`；升级后只有已
+/// 落库的历史快照还保留该线索。本迁移扫描全部快照，产出`pending`候选；只有
+/// 用户后续确认才能写入`host_bills`。此前版本误写的专用 legacy 账单会软删除，
+/// 用户手工账单不受影响。
+pub fn migrate_legacy_subscription_snapshots(
+    db: &AuthorityDb,
+    now_ms: i64,
+) -> Result<usize, AuthorityError> {
+    // 撤回旧版自动账单与写入待确认候选是一个不可分割的迁移动作。任一快照
+    // 损坏或写入失败时，必须保留旧状态，不能留下「账单已撤回、候选只写了一半」
+    // 的中间态。
+    db.with_immediate_txn(|_| migrate_legacy_subscription_snapshots_in_txn(db, now_ms))
+}
+
+fn migrate_legacy_subscription_snapshots_in_txn(
+    db: &AuthorityDb,
+    now_ms: i64,
+) -> Result<usize, AuthorityError> {
+    db.revoke_legacy_pricing_host_bills(now_ms)?;
+    let mut imported = 0usize;
+    for (version, payload) in db.pricing_snapshot_payloads()? {
+        let Ok(root) = serde_json::from_str::<Value>(&payload) else { continue };
+        let pricing = root.get("pricing").unwrap_or(&root);
+        let Some(subscriptions) = pricing
+            .pointer("/catalog_2026_09/subscriptions")
+            .and_then(Value::as_object)
+        else { continue };
+        for declaration in subscriptions.values() {
+            let (Some(provider), Some(currency), Some(amount), Some(start)) = (
+                declaration.get("provider").and_then(Value::as_str),
+                declaration.get("currency").and_then(Value::as_str),
+                declaration.get("amount_per_month").and_then(Value::as_f64),
+                declaration
+                    .get("billing_period_start")
+                    .or_else(|| declaration.get("reported_at"))
+                    .and_then(Value::as_str),
+            ) else { continue };
+            let Some(first_month) = valid_month_prefix(start) else { continue };
+            let Some(amount_minor) = amount_to_minor(amount) else { continue };
+            let host = legacy_subscription_host(provider);
+            let candidate_id = format!(
+                "legacy-pricing-candidate:{version}:{host}:{provider}:{currency}:{amount_minor}:{first_month}"
+            );
+            if db.billing_import_candidate_put(
+                &candidate_id, host, provider, currency, amount_minor, &first_month,
+                &version, now_ms,
+            )? {
+                imported += 1;
+            }
+        }
+    }
+    Ok(imported)
+}
+
+fn legacy_subscription_host(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" | "minimax" | "zhipu-glm" => "claude-code",
+        _ => "unattributed",
+    }
+}
+
+fn valid_month_prefix(value: &str) -> Option<String> {
+    let month: String = value.chars().take(7).collect();
+    let bytes = month.as_bytes();
+    (bytes.len() == 7
+        && bytes[4] == b'-'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..].iter().all(u8::is_ascii_digit)
+        && matches!(month[5..].parse::<u8>().ok(), Some(1..=12)))
+        .then_some(month)
+}
+
+fn amount_to_minor(amount: f64) -> Option<i64> {
+    (amount.is_finite() && amount >= 0.0)
+        .then(|| (amount * 100.0).round() as i64)
+}
+
 /// 保留窗月数的 fencepost 常量：spec「保留最近 13 个自然月（含当月）」→
 /// cutoff = current − 12。**legacy（enforce_retention）与 authority
 ///（retention_usage_facts）必须同值**——13 vs 12 的窗差会让 §6.3 对账在
@@ -84,9 +165,10 @@ pub const RETENTION_MONTHS_MINUS_ONE: u32 = 12;
 const TRIGGER_SYNC: &str = "cli";
 const TRIGGER_MIGRATION: &str = "migration";
 
-/// `source_files.parser_version`。第一版恒 1——事实行解析 schema 版本；语义
-/// 与 `usage_fact.rs::CURRENT_SCHEMA_VERSION` 的演进纪律一致。
-const PARSER_VERSION: i64 = 1;
+/// `source_files.parser_version`。版本 2 增加了 workflow_events 的派生提取；
+/// 即使源文件指纹不变，也必须重放一次，才能把历史源补齐到 workflow authority。
+/// 语义与 `usage_fact.rs::CURRENT_SCHEMA_VERSION` 的演进纪律一致。
+const PARSER_VERSION: i64 = 2;
 
 /// 当前事实解析器版本；同步差量必须把它和文件指纹一起比较。
 pub const fn parser_version() -> i64 {
@@ -302,11 +384,30 @@ pub fn source_file_fingerprint(
 /// `source_files` fingerprint row; facts may share the batch source because
 /// their wire format does not preserve a one-file mapping.
 pub(crate) struct RuntimeSnapshotWrite<'a> {
-    /// 已清洗的产品快照；没有可用 plan 时保持 None，产品读面会诚实返回 None。
-    pub snapshot: Option<&'a Value>,
+    /// 本轮要落库的宿主实时快照（通常 0 或 1 条；一个宿主一类）。
+    pub snapshots: Vec<RuntimeQuotaSnapshot<'a>>,
     /// schema 升级的一次性回填完成标记。它与本批 source 指纹同一事务提交，
     /// 因而不会在写入失败后错误地阻止下一轮重试。
     pub backfill_marker: Option<&'a str>,
+}
+
+/// 类型化的当前状态 + 已生成的兼容投影。
+///
+/// `payload_json` 可以保留 Codex 的 `has_credits` 等宿主扩展，但它已经在
+/// adapter 内生成；SQL 层只负责原样保存，不通过 JSON 路径提取业务字段。
+/// 一条待落库的宿主实时快照。
+///
+/// **为什么不是 `&QuotaSnapshot`（Codex 的契约类型）**：2026-09-14 起这条路有第二个
+/// 消费方——Claude Pro 的窗口状态（`claude_quota`），它有自己的契约、不该被塞进
+/// Codex 的结构体。Runtime 本来就不解析宿主 wire（职责边界），所以这里只要
+/// **已经由 adapter 校验过的** payload 与观察时刻。
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeQuotaSnapshot<'a> {
+    /// 落 `host_runtime_snapshots.snapshot_kind`（`codex_quota` / `claude_quota`）。
+    pub snapshot_kind: &'a str,
+    pub payload_json: &'a str,
+    /// 观察时刻（epoch ms）——由宿主 adapter 从它自己的 wire 时间戳派生。
+    pub observed_at_ms: i64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -316,6 +417,7 @@ pub(crate) fn write_flat_facts_with_sources(
     machine_namespace: &str,
     sources: &[(std::path::PathBuf, (u64, u64))],
     facts: &[Value],
+    workflow_events: &[WorkflowEvent],
     route_evidence: Option<&agent_vitals_provider::RouteEvidence>,
     runtime_snapshot: Option<RuntimeSnapshotWrite<'_>>,
     now: i64,
@@ -368,10 +470,9 @@ pub(crate) fn write_flat_facts_with_sources(
             )?;
         }
         if facts.is_empty()
-            && runtime_snapshot
-                .as_ref()
-                .and_then(|write| write.snapshot)
-                .is_none()
+            && workflow_events.is_empty()
+            // MSRV 1.74：`is_none_or` 稳定于 1.82，这里用 `map_or`。
+            && runtime_snapshot.as_ref().map_or(true, |write| write.snapshots.is_empty())
         {
             return Ok(());
         }
@@ -409,40 +510,33 @@ pub(crate) fn write_flat_facts_with_sources(
                 ],
             )?;
         }
-        if let Some(snapshot) = runtime_snapshot.as_ref().and_then(|write| write.snapshot) {
-            let observed_at = snapshot
-                .get("observed_at")
-                .and_then(Value::as_str)
-                .and_then(agent_vitals_domain::budget::parse_iso)
-                .map(|(seconds, _)| seconds.saturating_mul(1_000))
-                .ok_or_else(|| {
-                    AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
-                        "__invalid_runtime_snapshot_observed_at__".to_string(),
-                    ))
-                })?;
-            conn.execute(
-                "INSERT INTO host_runtime_snapshots(
-                     host, snapshot_kind, payload_json, observed_at_ms, source_id,
-                     ingested_run_id, updated_at_ms)
-                 VALUES (?1, 'codex_quota', ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(host, snapshot_kind) DO UPDATE SET
-                     payload_json = excluded.payload_json,
-                     observed_at_ms = excluded.observed_at_ms,
-                     source_id = excluded.source_id,
-                     ingested_run_id = excluded.ingested_run_id,
-                     updated_at_ms = excluded.updated_at_ms
-                 WHERE excluded.observed_at_ms >= host_runtime_snapshots.observed_at_ms",
-                rusqlite::params![
-                    host,
-                    serde_json::to_string(snapshot).unwrap_or_default(),
-                    observed_at,
-                    source_id,
-                    run_id,
-                    now,
-                ],
-            )?;
+        if let Some(write) = runtime_snapshot.as_ref() {
+            for snapshot in &write.snapshots {
+                conn.execute(
+                    "INSERT INTO host_runtime_snapshots(
+                         host, snapshot_kind, payload_json, observed_at_ms, source_id,
+                         ingested_run_id, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(host, snapshot_kind) DO UPDATE SET
+                         payload_json = excluded.payload_json,
+                         observed_at_ms = excluded.observed_at_ms,
+                         source_id = excluded.source_id,
+                         ingested_run_id = excluded.ingested_run_id,
+                         updated_at_ms = excluded.updated_at_ms
+                     WHERE excluded.observed_at_ms >= host_runtime_snapshots.observed_at_ms",
+                    rusqlite::params![
+                        host,
+                        snapshot.snapshot_kind,
+                        snapshot.payload_json,
+                        snapshot.observed_at_ms,
+                        source_id,
+                        run_id,
+                        now,
+                    ],
+                )?;
+            }
         }
-        if facts.is_empty() {
+        if facts.is_empty() && workflow_events.is_empty() {
             return Ok(());
         }
         for fact in facts
@@ -501,6 +595,15 @@ pub(crate) fn write_flat_facts_with_sources(
             outcome.inserted += report.inserted;
             outcome.duplicate += report.duplicate;
             outcome.rejected += report.rejected;
+        }
+        if !workflow_events.is_empty() {
+            agent_vitals_data::workflow::insert_events(
+                conn,
+                workflow_events,
+                &source_id,
+                &run_id,
+                now,
+            )?;
         }
         Ok(())
     });
@@ -1250,6 +1353,83 @@ mod tests {
             .unwrap();
         assert_eq!(issue.0, fact_id);
         assert_eq!(issue.1, "conflicting_route_evidence");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn legacy_subscription_snapshot_becomes_pending_candidate_without_billing_user() {
+        let home = tmp_home("legacy-subscription");
+        let db = open_db(&home);
+        let month = crate::clock::current_month_beijing();
+        let payload = serde_json::json!({"pricing": {"catalog_2026_09": {
+            "subscriptions": {
+                "legacy-minimax": {
+                    "provider": "minimax", "currency": "CNY", "amount_per_month": 114.0,
+                    "reported_at": format!("{month}-01")
+                },
+                "legacy-glm": {
+                    "provider": "zhipu-glm", "currency": "CNY", "amount_per_month": 118.0,
+                    "reported_at": format!("{month}-01")
+                }
+            }
+        }}}).to_string();
+        db.pricing_snapshot_put("legacy-user-pricing", "legacy", &payload, 1).unwrap();
+        db.host_bill_put(
+            "user-glm", "claude-code", "zhipu-glm", &month, "fixed_subscription",
+            9_999, "CNY", "user-entry", 1,
+        ).unwrap();
+        db.host_bill_put(
+            "old-auto-minimax", "claude-code", "minimax", &month, "fixed_subscription",
+            11_400, "CNY", "legacy-pricing-catalog", 1,
+        ).unwrap();
+
+        assert_eq!(migrate_legacy_subscription_snapshots(&db, 2).unwrap(), 2);
+        let rows = db.host_bills_for_period(&month).unwrap();
+        assert!(!rows.iter().any(|(_host, provider, _basis, _amount, _currency)| provider == "minimax"),
+            "unconfirmed legacy declaration must not remain an actual bill: {rows:?}");
+        assert!(rows.contains(&(
+            "claude-code".to_string(), "zhipu-glm".to_string(),
+            "fixed_subscription".to_string(), 9_999, "CNY".to_string(),
+        )), "manual local bill must not be overwritten: {rows:?}");
+        let candidates = db.pending_billing_import_candidates().unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|(_id, _host, _provider, _currency, _amount, _start, status)| status == "pending"));
+        assert_eq!(migrate_legacy_subscription_snapshots(&db, 3).unwrap(), 0);
+        assert_eq!(db.host_bills_for_period(&month).unwrap(), rows);
+        assert_eq!(db.pending_billing_import_candidates().unwrap(), candidates);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn legacy_subscription_migration_rolls_back_revoke_when_candidate_write_fails() {
+        let home = tmp_home("legacy-subscription-rollback");
+        let db = open_db(&home);
+        let month = crate::clock::current_month_beijing();
+        let payload = serde_json::json!({"pricing": {"catalog_2026_09": {
+            "subscriptions": {
+                "legacy-minimax": {
+                    "provider": "minimax", "currency": "CNY", "amount_per_month": 114.0,
+                    "reported_at": format!("{month}-01")
+                }
+            }
+        }}}).to_string();
+        db.pricing_snapshot_put("legacy-user-pricing-rollback", "legacy", &payload, 1).unwrap();
+        db.host_bill_put(
+            "old-auto-minimax", "claude-code", "minimax", &month, "fixed_subscription",
+            11_400, "CNY", "legacy-pricing-catalog", 1,
+        ).unwrap();
+        db.conn().execute_batch(
+            "CREATE TRIGGER fail_legacy_candidate
+             BEFORE INSERT ON billing_import_candidates
+             BEGIN SELECT RAISE(ABORT, 'forced candidate failure'); END;",
+        ).unwrap();
+
+        assert!(migrate_legacy_subscription_snapshots(&db, 2).is_err());
+        let bills = db.host_bills_for_period(&month).unwrap();
+        assert!(bills.iter().any(|(_host, provider, _basis, amount, _currency)| {
+            provider == "minimax" && *amount == 11_400
+        }), "failed migration must roll back the legacy-bill revoke: {bills:?}");
+        assert!(db.pending_billing_import_candidates().unwrap().is_empty());
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

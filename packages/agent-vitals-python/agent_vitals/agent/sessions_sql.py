@@ -37,12 +37,16 @@ import math
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Re-use authoritative Python helpers — do **not** grow a second implementation.
 from agent_vitals.agent.cost import cost_report  # noqa: F401  (byte-mirror)
 from agent_vitals.agent.codex_cost import today_beijing  # noqa: F401
+from agent_vitals.agent import state as state_mod
 from agent_vitals.paths import data_home
 
 
@@ -52,6 +56,8 @@ from agent_vitals.paths import data_home
 
 ENVELOPE_SCHEMA_VERSION = "1"
 QUERY_SEMANTICS = "2026-09-07"
+# Kept for compatibility with callers that import the old constant. Statistics
+# no longer use this fixed offset; they use the OS IANA timezone below.
 BEIJING_OFFSET_MS = 8 * 3_600 * 1_000
 DAY_MS = 86_400_000
 HOUR_MS = 3_600_000
@@ -62,6 +68,8 @@ DEFAULT_SEARCH_LIMIT = 50
 MAX_SEARCH_LIMIT = 500
 DEFAULT_DETAIL_LIMIT = 200
 MAX_DETAIL_LIMIT = 1000
+
+_TIMEZONE_OVERRIDE = ContextVar("sessions_sql_timezone_override", default=None)
 
 # 与 Rust 侧 `agent_vitals_domain::data_contract::MoneyMinor` 接受的币种
 # + 对应小数位数（CNY/USD/EUR/GBP/HKD/SGD/AUD/CAD/CHF/NZD = 2, JPY/KRW = 0,
@@ -78,31 +86,53 @@ _CURRENCY_MINOR_DIGITS = {
 # Spec §6.3 北京时区 RFC 3339（mirror Rust `ms_to_rfc3339_beijing`）。
 # ────────────────────────────────────────────────────────────────────────
 
-def _ms_to_rfc3339_beijing(ms):
-    """epoch 毫秒 → RFC 3339 `+08:00`（spec §6.3）。mirror Rust 同名函数。
+def _system_timezone():
+    """Resolve the shared persisted statistics timezone."""
+    override = _TIMEZONE_OVERRIDE.get()
+    return override or state_mod._system_timezone()
 
-    Rust 实现 `local = ms + BEIJING_OFFSET_MS` 后把 `local` 当 UTC civil 解,
-    字符串尾巴硬编 `+08:00` —— **不是** Python `datetime.fromtimestamp(s,
-    tz=+08:00)` 的语义(Python 那个会把 `s` 当 UTC 偏移 0,显示成北京 TZ,
-    等同于把秒数再加 8h,造成"双偏移")。这里手工 civil-from-days 拆出
-    UTC date + tod,再 `+08:00` 拼回,避免双偏移。
+
+def validate_timezone(name):
+    """Return an IANA timezone for a query-local override, or ``None``."""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    try:
+        return ZoneInfo(name.strip().lstrip(":"))
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+
+
+@contextmanager
+def _timezone_scope(name):
+    zone = validate_timezone(name)
+    if zone is None:
+        yield False
+        return
+    token = _TIMEZONE_OVERRIDE.set(zone)
+    try:
+        yield True
+    finally:
+        _TIMEZONE_OVERRIDE.reset(token)
+
+
+def _system_timezone_name():
+    tz = _system_timezone()
+    return getattr(tz, "key", str(tz))
+
+
+def _ms_to_rfc3339_beijing(ms):
+    """epoch 毫秒 → RFC 3339 in the OS statistics timezone.
+
+    The historical function name remains as a compatibility symbol; its
+    implementation is no longer fixed to Beijing.
     """
     if ms is None:
         return None
-    local = ms + BEIJING_OFFSET_MS
-    secs = local // 1000
-    millis = local % 1000
-    # Hinnant civil-from-days (epoch-based, 与 Rust `civil_from_unix_secs` 同
-    # 算法)。Python `//` floor 与 Rust `div_euclid` 在非负输入下等价;DSH /
-    # cli 写入的 ms 恒非负(epoch 之后),所以 `_civil_from_days` 即可。
-    days = secs // 86400
-    tod = secs % 86400
-    y, m, d = _civil_from_days(int(days))
-    h = tod // 3600
-    mi = (tod // 60) % 60
-    s = tod % 60
-    return ("%04d-%02d-%02dT%02d:%02d:%02d.%03d+08:00" % (
-        y, m, d, h, mi, s, millis))
+    millis = int(ms) % 1000
+    dt = datetime.fromtimestamp(int(ms) // 1000, _system_timezone())
+    offset = dt.strftime("%z")
+    offset = offset[:3] + ":" + offset[3:] if len(offset) == 5 else offset
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + ".%03d%s" % (millis, offset)
 
 
 def _civil_from_days(z):
@@ -265,7 +295,7 @@ def _tool_error_envelope(err_code, message):
         "authority_state": "unavailable",
         "authority_revision": None,
         "generated_at": _ms_to_rfc3339_beijing(int(datetime.now(tz=timezone.utc).timestamp() * 1000)),
-        "timezone": "Asia/Shanghai",
+        "timezone": _system_timezone_name(),
         "coverage": {"status": "unavailable", "missing_hosts": []},
         "freshness": {"last_successful_sync_at": None, "stale_hosts": []},
         "warnings": [],
@@ -436,7 +466,7 @@ def _build_envelope(conn, home, max_observed_ms, coverage, warnings, data):
         "authority_state": _authority_state(home),
         "authority_revision": _authority_revision(conn, max_observed_ms),
         "generated_at": _ms_to_rfc3339_beijing(_now_ms()),
-        "timezone": "Asia/Shanghai",
+        "timezone": _system_timezone_name(),
         "coverage": coverage,
         "freshness": _freshness(conn),
         "warnings": list(warnings),
@@ -503,15 +533,14 @@ def _parse_ymd(s):
 
 
 def _beijing_midnight_ms(y, m, d):
-    """北京 00:00 → UTC 毫秒。mirror Rust `beijing_midnight_ms = ms_from_civil
-    (y, m, d, 0, 0, 0) - BEIJING_OFFSET_MS` 同一公式(UTC civil - 8h)。"""
+    """OS statistics timezone midnight → UTC milliseconds.
+
+    The compatibility name mirrors Rust's public function; the actual boundary
+    is civil midnight in the system IANA timezone and therefore DST-aware.
+    """
     try:
-        # 直接用 civil-from-days 反推 UTC 00:00 = `(y, m, d)` 当日 UTC 0 点
-        # 的 epoch ms；再减 8h = 北京 00:00 的 UTC 时刻。
-        utc_midnight_ms = _days_to_utc_midnight_ms(y, m, d)
-        if utc_midnight_ms is None:
-            return None
-        return utc_midnight_ms - BEIJING_OFFSET_MS
+        local = datetime(int(y), int(m), int(d), tzinfo=_system_timezone())
+        return int(local.timestamp() * 1000)
     except (ValueError, OverflowError, OSError):
         return None
 
@@ -543,7 +572,9 @@ def beijing_day_bounds_ms(date_str):
     start = _beijing_midnight_ms(y, m, d)
     if start is None:
         return None
-    return (start, start + DAY_MS)
+    next_day = date(y, m, d) + timedelta(days=1)
+    end = _beijing_midnight_ms(next_day.year, next_day.month, next_day.day)
+    return None if end is None else (start, end)
 
 
 def beijing_month_bounds_ms(month_str):
@@ -587,7 +618,7 @@ _SQL_SESSIONS_IN_WINDOW = (
     "  AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL "
     "  AND session_key IS NOT NULL "
     "  AND event_ts_ms >= ?2 AND event_ts_ms < ?3 "
-    "  AND (?4 < 0 OR (((event_ts_ms + ?5) / ?6) % 24) = ?4) "
+    "  AND (?4 < 0 OR (CAST(strftime('%H', event_ts_ms / 1000, 'unixepoch', 'localtime') AS INTEGER) = (?4 + (?5 - ?5) + (?6 - ?6)))) "
     "GROUP BY session_key"
 )
 
@@ -1103,38 +1134,41 @@ def session_detail(args, home):
 # `apps/cli/src/main.rs::SessionsAction::Navigation`）。
 # ────────────────────────────────────────────────────────────────────────
 
-def sessions_navigation(day, recent_n, home):
+def sessions_navigation(day, recent_n, home, timezone_name=None):
     """`sessions_navigation_v2` byte-mirror（Tauri 托盘 envelope）。"""
-    if not day:
-        day = today_beijing()
-    conn, err = _open_authority(home)
-    if err is not None:
-        return err
-    try:
-        hosts = []
-        for host in ("dsh", "codex", "claude-code"):
-            today_tokens = _day_token_totals_by_host_one(conn, day, host)
-            recent = _recent_for_host(conn, home, day, recent_n, host)
-            sessions = _day_session_count(conn, day, host)
-            value = today_tokens.get("value") if isinstance(today_tokens, dict) else None
-            status = "ready" if value is not None else "partial"
-            hosts.append({
-                "host_kind": host,
-                "status": status,
-                "today_tokens": today_tokens,
-                "today_sessions": sessions,
-                "recent": recent,
-                "store_revision": None,
-            })
-        return {
-            "schema_version": 1,
-            "day_key": day,
-            "timezone": "Asia/Shanghai",
-            "generated_at": _now_iso_utc(),
-            "hosts": hosts,
-        }
-    finally:
-        conn.close()
+    with _timezone_scope(timezone_name) as valid:
+        if timezone_name is not None and not valid:
+            return _tool_error_envelope("invalid_argument", "invalid `timezone`")
+        if not day:
+            day = datetime.now(_system_timezone()).date().isoformat()
+        conn, err = _open_authority(home)
+        if err is not None:
+            return err
+        try:
+            hosts = []
+            for host in ("dsh", "codex", "claude-code"):
+                today_tokens = _day_token_totals_by_host_one(conn, day, host)
+                recent = _recent_for_host(conn, home, day, recent_n, host)
+                sessions = _day_session_count(conn, day, host)
+                value = today_tokens.get("value") if isinstance(today_tokens, dict) else None
+                status = "ready" if value is not None else "partial"
+                hosts.append({
+                    "host_kind": host,
+                    "status": status,
+                    "today_tokens": today_tokens,
+                    "today_sessions": sessions,
+                    "recent": recent,
+                    "store_revision": None,
+                })
+            return {
+                "schema_version": 1,
+                "day_key": day,
+                "timezone": _system_timezone_name(),
+                "generated_at": _now_iso_utc(),
+                "hosts": hosts,
+            }
+        finally:
+            conn.close()
 
 
 def _day_token_totals_by_host_one(conn, day, host):

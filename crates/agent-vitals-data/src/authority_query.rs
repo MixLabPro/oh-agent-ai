@@ -9,15 +9,10 @@
 //! SQL 聚合出来的，这正是"只有一套计价规则"纪律的落地方式（CLAUDE.md
 //! 「不长第四份拷贝」）。
 //!
-//! **北京日/小时的桶算法**：`usage_facts.event_ts_ms` 是 UTC 毫秒整数（不是
-//! 旧表的 ISO 字符串），所以用整数除法而不是字符串切片：
-//! `(event_ts_ms + 28_800_000) / 86_400_000` 恰好是「北京日」在 1970-01-01
-//! 记 0 的天数序号——因为北京日边界 = UTC 时刻 +8h 后再按天取整，与
-//! `agent_vitals_domain::usage::civil_date_from_days` 的输入定义（days-
-//! since-epoch）完全对齐，不需要再转一轮时区。小时桶同理除以 3,600,000，
-//! 商 mod 24 是北京小时数、商 / 24 是北京日序号——两者都不用碰字符串。
-//! 这一算法与旧表 `dsh_days_map` 的"UTC 小时 ≥16 → 次日"字符串判断是同一
-//! 条边界的两种写法（该文件模块头有证明），两边永远对齐。
+//! **系统统计时区的日/小时桶**：`usage_facts.event_ts_ms` 是 UTC 毫秒整数。
+//! SQLite 的 `localtime` 按 OS 当前时区投影事件，再以 civil date 计算 epoch 日序号；
+//! 这样夏令时和非整点/历史偏移不会被固定 `UTC+8` 近似吞掉。窗口边界由 Jiff
+//! 按同一系统 IANA 时区生成。供应商价格规则不读取这些统计边界。
 //!
 //! **行轴/聚合轴分离纪律**（spec §4，`AGENT_VITALS_V0_9_1_SQL_AUTHORITY_
 //! MIGRATION_SPEC.md`）：本模块所有"实时行级事实"查询都显式
@@ -29,13 +24,21 @@ use std::collections::BTreeMap;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
-use agent_vitals_domain::usage::{civil_date_from_days, ms_from_civil};
+use agent_vitals_domain::usage::civil_date_from_days;
+use jiff::{civil::Date, tz::TimeZone, ToSpan};
 
 use crate::authority::AuthorityError;
 
+// Retained only as a neutral SQL parameter and for legacy test fixtures. It is
+// never used to determine a production statistics boundary anymore.
 const BEIJING_OFFSET_MS: i64 = 8 * 3_600_000;
 const DAY_MS: i64 = 86_400_000;
 const HOUR_MS: i64 = 3_600_000;
+
+// Keep ?1 and ?2 as neutral parameters for the existing EXPLAIN/query-shape
+// contract. Their values are no longer used as a timezone offset or unit.
+macro_rules! local_day_idx { () => { "(CAST(julianday(date(event_ts_ms / 1000, 'unixepoch', 'localtime')) - 2440587.5 AS INTEGER))" }; }
+macro_rules! local_hour_idx { () => { "((CAST(julianday(date(event_ts_ms / 1000, 'unixepoch', 'localtime')) - 2440587.5 AS INTEGER) * 24) + CAST(strftime('%H', event_ts_ms / 1000, 'unixepoch', 'localtime') AS INTEGER))" }; }
 
 // v0.9.1 测试矩阵 §8 行 8「performance（不枚举原始日志/索引命中）」：所有
 // 窗口化聚合查询的 SQL 抽成 `const`，`prepare()` 与 `tests/query_plan.rs` 的
@@ -44,7 +47,7 @@ const HOUR_MS: i64 = 3_600_000;
 // deleted_at_ms IS NULL` 与查询谓词一致），绝不 `SCAN usage_facts`（全表）。
 
 /// [`peaked_days_map`]：DSH 峰谷分桶（`(day, model, event_peak)` 三维聚合）。
-pub(crate) const SQL_PEAKED_DAYS_MAP: &str = "SELECT (event_ts_ms + ?1) / ?2 AS day_idx,
+pub(crate) const SQL_PEAKED_DAYS_MAP: &str = concat!("SELECT (", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS day_idx,
                 model_id, event_peak,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
@@ -52,10 +55,16 @@ pub(crate) const SQL_PEAKED_DAYS_MAP: &str = "SELECT (event_ts_ms + ?1) / ?2 AS 
          WHERE host = ?3 AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?4 AND event_ts_ms < ?5
-         GROUP BY day_idx, model_id, event_peak";
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')
+         GROUP BY day_idx, model_id, event_peak");
 
 /// [`claude_days`]：claude 实时行级事实的逐日 `{model: 4 桶}`。
-pub(crate) const SQL_CLAUDE_DAYS: &str = "SELECT (event_ts_ms + ?1) / ?2 AS day_idx,
+pub(crate) const SQL_CLAUDE_DAYS: &str = concat!("SELECT (", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS day_idx,
                 model_id,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
@@ -63,10 +72,16 @@ pub(crate) const SQL_CLAUDE_DAYS: &str = "SELECT (event_ts_ms + ?1) / ?2 AS day_
          WHERE host = 'claude-code' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-         GROUP BY day_idx, model_id";
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')
+         GROUP BY day_idx, model_id");
 
 /// [`claude_legacy_days`]：claude 深历史聚合（`event_peak=0` 全量行）。
-pub(crate) const SQL_CLAUDE_LEGACY_DAYS: &str = "SELECT (event_ts_ms + ?1) / ?2 AS day_idx,
+pub(crate) const SQL_CLAUDE_LEGACY_DAYS: &str = concat!("SELECT (", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS day_idx,
                 model_id,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
@@ -74,10 +89,10 @@ pub(crate) const SQL_CLAUDE_LEGACY_DAYS: &str = "SELECT (event_ts_ms + ?1) / ?2 
          WHERE host = 'claude-code' AND observation_kind = 'legacy_aggregate'
            AND event_peak = 0 AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-         GROUP BY day_idx, model_id";
+         GROUP BY day_idx, model_id");
 
 /// [`codex_by_hour_model`]：codex 实时行级事实的逐北京小时 `{model: 5 桶}`。
-pub(crate) const SQL_CODEX_BY_HOUR_MODEL: &str = "SELECT (event_ts_ms + ?1) / ?2 AS hour_idx,
+pub(crate) const SQL_CODEX_BY_HOUR_MODEL: &str = concat!("SELECT (", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS hour_idx,
                 model_id,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
@@ -85,7 +100,13 @@ pub(crate) const SQL_CODEX_BY_HOUR_MODEL: &str = "SELECT (event_ts_ms + ?1) / ?2
          WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-         GROUP BY hour_idx, model_id";
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')
+         GROUP BY hour_idx, model_id");
 
 /// [`hourly_by_host_model`] 三宿主 × 模型 × 小时聚合（增量 2 `usage_hourly`
 /// 工具的 SQL 数据源）。从函数体抽出来便于 EXPLAIN QUERY PLAN 测试断言。
@@ -96,8 +117,8 @@ pub(crate) const SQL_CODEX_BY_HOUR_MODEL: &str = "SELECT (event_ts_ms + ?1) / ?2
 /// 写法 SQLite planner 都会退化成 SCAN + temp B-tree（实测，2026-09-05
 /// tab 卡顿事故形状）。wired 宿主就 3 个（claude-code / codex / dsh），
 /// in-memory 合并成本可忽略；多于 3 个需要重新评估。
-pub(crate) const SQL_HOURLY_BY_HOST_MODEL: &str = "SELECT host, COALESCE(model_id, '<unknown>'),
-                CAST(((event_ts_ms + ?1) / ?2) % 24 AS TEXT) AS bj_hour,
+pub(crate) const SQL_HOURLY_BY_HOST_MODEL: &str = concat!("SELECT host, COALESCE(model_id, '<unknown>'),
+                CAST((", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) % 24 AS TEXT) AS local_hour,
                 SUM(uncached_input_tokens),
                 SUM(cache_read_tokens),
                 SUM(cache_write_tokens),
@@ -107,17 +128,29 @@ pub(crate) const SQL_HOURLY_BY_HOST_MODEL: &str = "SELECT host, COALESCE(model_i
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            AND host = ?5
-         GROUP BY host, model_id, bj_hour";
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')
+         GROUP BY host, model_id, local_hour");
 
-pub(crate) const SQL_HOURLY_BY_HOST_PROVIDER: &str = "SELECT host, COALESCE(provider_id, '<unknown>'),
-                CAST(((event_ts_ms + ?1) / ?2) % 24 AS TEXT) AS bj_hour,
+pub(crate) const SQL_HOURLY_BY_HOST_PROVIDER: &str = concat!("SELECT host, COALESCE(provider_id, '<unknown>'),
+                CAST((", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) % 24 AS TEXT) AS local_hour,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
          WHERE observation_kind != 'legacy_aggregate' AND deleted_at_ms IS NULL
            AND event_ts_ms IS NOT NULL AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            AND host = ?5
-         GROUP BY host, provider_id, bj_hour";
+           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')
+         GROUP BY host, provider_id, local_hour");
 
 /// [`facts_page_window`]：键集分页（`(event_ts_ms, fact_id)` 游标，无 OFFSET）。
 pub(crate) const SQL_FACTS_PAGE_WINDOW: &str =
@@ -131,11 +164,23 @@ pub(crate) const SQL_FACTS_PAGE_WINDOW: &str =
          ORDER BY event_ts_ms, fact_id
          LIMIT ?6";
 
-/// Beijing 民历日 `(y, m, d)` 的零点 → UTC 毫秒。`ms_from_civil` 已做真实
-/// 日期校验（02-30 之类非法日期返回 `None`），本函数原样传导。
-fn beijing_midnight_ms(y: i64, m: u32, d: u32) -> Option<i64> {
-    let utc_midnight = ms_from_civil(y, m, d, 0, 0, 0)?;
-    Some(utc_midnight - BEIJING_OFFSET_MS)
+/// 系统统计时区民历日 `(y, m, d)` 的零点 → UTC 毫秒。Jiff 负责校验日期、
+/// IANA 偏移和 DST；不存在的日期（如 02-30）返回 `None`。
+pub(crate) fn statistics_timezone() -> TimeZone {
+    let configured = std::env::var("TZ").ok().map(|value| value.trim_start_matches(':').to_string());
+    configured
+        .as_deref()
+        .and_then(|name| TimeZone::get(name).ok())
+        .unwrap_or_else(TimeZone::system)
+}
+
+fn system_midnight_ms(y: i64, m: u32, d: u32) -> Option<i64> {
+    midnight_ms_in_timezone(y, m, d, statistics_timezone())
+}
+
+fn midnight_ms_in_timezone(y: i64, m: u32, d: u32, timezone: TimeZone) -> Option<i64> {
+    let date = Date::new(y.try_into().ok()?, m.try_into().ok()?, d.try_into().ok()?).ok()?;
+    date.to_zoned(timezone).ok().map(|zdt| zdt.timestamp().as_millisecond())
 }
 
 fn parse_ymd(date: &str) -> Option<(i64, u32, u32)> {
@@ -151,15 +196,18 @@ fn parse_ymd(date: &str) -> Option<(i64, u32, u32)> {
     Some((y, m, d))
 }
 
-/// `"YYYY-MM-DD"` → 该 Beijing 日的 `[start, end)` UTC 毫秒窗口。格式或日期
+/// `"YYYY-MM-DD"` → 该系统统计日的 `[start, end)` UTC 毫秒窗口。格式或日期
 /// 非法（如 02-30）→ `None`，调用方按"这个日期没有意义"处理，不是报 0。
 pub fn beijing_day_bounds_ms(date: &str) -> Option<(i64, i64)> {
     let (y, m, d) = parse_ymd(date)?;
-    let start = beijing_midnight_ms(y, m, d)?;
-    Some((start, start + DAY_MS))
+    let start = system_midnight_ms(y, m, d)?;
+    let next = Date::new(y.try_into().ok()?, m.try_into().ok()?, d.try_into().ok()?).ok()?
+        .checked_add(1.days()).ok()?;
+    let end = next.to_zoned(statistics_timezone()).ok()?.timestamp().as_millisecond();
+    Some((start, end))
 }
 
-/// `"YYYY-MM"` → 该 Beijing 月的 `[start, end)` UTC 毫秒窗口。
+/// `"YYYY-MM"` → 该系统统计月的 `[start, end)` UTC 毫秒窗口。
 pub fn beijing_month_bounds_ms(month: &str) -> Option<(i64, i64)> {
     if month.len() != 7 || month.as_bytes().get(4) != Some(&b'-') {
         return None;
@@ -169,9 +217,9 @@ pub fn beijing_month_bounds_ms(month: &str) -> Option<(i64, i64)> {
     if !(1..=12).contains(&m) {
         return None;
     }
-    let start = beijing_midnight_ms(y, m, 1)?;
+    let start = system_midnight_ms(y, m, 1)?;
     let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-    let end = beijing_midnight_ms(ny, nm, 1)?;
+    let end = system_midnight_ms(ny, nm, 1)?;
     Some((start, end))
 }
 
@@ -464,14 +512,14 @@ pub fn codex_by_hour_provider_model(
     end_ms: i64,
 ) -> Result<BTreeMap<String, Value>, AuthorityError> {
     let mut stmt = conn.prepare(
-        "SELECT CAST(((event_ts_ms + ?1) / ?2) AS INTEGER), provider_id, model_id,
+        concat!("SELECT CAST((", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS INTEGER), provider_id, model_id,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
          WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-         GROUP BY ((event_ts_ms + ?1) / ?2), provider_id, model_id"
+         GROUP BY (", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)), provider_id, model_id")
     )?;
     let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?,
@@ -652,15 +700,15 @@ pub fn hourly_by_host(
     end_ms: i64,
 ) -> Result<BTreeMap<String, BTreeMap<String, i64>>, AuthorityError> {
     let mut stmt = conn.prepare(
-        "SELECT host,
-                CAST(((event_ts_ms + ?1) / ?2) % 24 AS TEXT) AS bj_hour,
+        concat!("SELECT host,
+                CAST((", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) % 24 AS TEXT) AS local_hour,
                 SUM(uncached_input_tokens + cache_read_tokens
                     + cache_write_tokens + output_tokens)
          FROM usage_facts
          WHERE observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-         GROUP BY host, bj_hour",
+         GROUP BY host, local_hour"),
     )?;
     let rows = stmt.query_map(
         rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms],
@@ -682,6 +730,72 @@ pub fn hourly_by_host(
         }
     }
     Ok(out)
+}
+
+/// [`host_window_tokens`]：单宿主窗口四桶之和 + 最新北京日索引。
+pub(crate) const SQL_HOST_WINDOW_TOKENS: &str = concat!("SELECT COUNT(*),
+                COALESCE(SUM(uncached_input_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cache_write_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                MAX(", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2))
+         FROM usage_facts
+         WHERE host = ?3
+           AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?4 AND event_ts_ms < ?5");
+
+/// 一个宿主在窗口内的四桶之和（宿主无关的 L0 计量——`tokens_by_host` 的通用
+/// 数据源；有自己价卡管线的宿主仍走各自的 days/hours 查询，这个给**只有 token、
+/// 没有金额**的宿主用，E4b 的 workbuddy 是首个消费方）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostWindowTokens {
+    pub facts: i64,
+    pub uncached_input: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub output: i64,
+    /// 窗口内最新事实的北京日 `YYYY-MM-DD`（freshness 的观测点）。
+    pub latest_day: String,
+}
+
+/// `None` = 该宿主窗口内没有任何事实行（消费方必须渲染 unavailable，不能编 0）；
+/// `Some` 且四桶全 0 = 同步过、真零。
+pub fn host_window_tokens(
+    conn: &Connection,
+    host: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Option<HostWindowTokens>, AuthorityError> {
+    let row = conn.query_row(
+        SQL_HOST_WINDOW_TOKENS,
+        rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, host, start_ms, end_ms],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+            ))
+        },
+    )?;
+    let (facts, u, cr, cw, o, day_idx) = row;
+    let Some(day_idx) = day_idx else {
+        return Ok(None);
+    };
+    if facts == 0 {
+        return Ok(None);
+    }
+    Ok(Some(HostWindowTokens {
+        facts,
+        uncached_input: u,
+        cache_read: cr,
+        cache_write: cw,
+        output: o,
+        latest_day: civil_date_from_days(day_idx),
+    }))
 }
 
 /// 一个北京日窗口内各宿主的 token 总量。与 [`hourly_by_host`] 不同，这里保留
@@ -904,7 +1018,7 @@ impl SessionAgg {
 /// 单宿主 SQL（`host = ?1` 命中 `usage_facts_host_time`）。`?4 < 0` = 不按小时
 /// 过滤；否则只算 `bj_hour == ?4` 的事实——**Q04 峰值下钻**要的正是「该小时
 /// 的会话构成」，SUM 因此自动被 WHERE 收窄到那一小时。
-const SQL_SESSIONS_IN_WINDOW: &str = "SELECT session_key, host,
+const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, host,
             MIN(event_ts_ms), MAX(event_ts_ms), COUNT(*),
             SUM(uncached_input_tokens), SUM(cache_read_tokens),
             SUM(cache_write_tokens), SUM(output_tokens),
@@ -918,8 +1032,16 @@ const SQL_SESSIONS_IN_WINDOW: &str = "SELECT session_key, host,
        AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
        AND session_key IS NOT NULL
        AND event_ts_ms >= ?2 AND event_ts_ms < ?3
-       AND (?4 < 0 OR (((event_ts_ms + ?5) / ?6) % 24) = ?4)
-     GROUP BY session_key";
+       AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+           JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+           WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+             AND br.revision_number = (SELECT MAX(br2.revision_number)
+               FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+             AND br.change_kind = 'saved')
+       AND (?4 < 0 OR (CAST((", local_hour_idx!(), " + (?5 - ?5) + (?6 - ?6)) % 24 AS INTEGER) = ?4))
+       AND (?7 IS NULL OR COALESCE(model_id, '<unknown>') = ?7)
+       AND (?8 IS NULL OR COALESCE(provider_id, '<unknown>') = ?8)
+       GROUP BY session_key");
 
 /// 窗口内的会话聚合，跨 wired 宿主合并。`hour` = 北京小时过滤（`None` = 不过滤）；
 /// `min_tokens` = HAVING 门槛；按 `total` 降序 + `session_key` 升序稳定排序，
@@ -932,6 +1054,8 @@ pub fn sessions_in_window(
     start_ms: i64,
     end_ms: i64,
     hosts: &[String],
+    model: Option<&str>,
+    provider: Option<&str>,
     hour: Option<u32>,
     min_tokens: i64,
     after_total: Option<i64>,
@@ -951,7 +1075,7 @@ pub fn sessions_in_window(
     for host in selected {
         let mut stmt = conn.prepare(SQL_SESSIONS_IN_WINDOW)?;
         let rows = stmt.query_map(
-            rusqlite::params![host, start_ms, end_ms, hour_param, BEIJING_OFFSET_MS, HOUR_MS],
+            rusqlite::params![host, start_ms, end_ms, hour_param, BEIJING_OFFSET_MS, HOUR_MS, model, provider],
             |r| {
                 let models: Option<String> = r.get(10)?;
                 Ok(SessionAgg {
@@ -1084,9 +1208,29 @@ pub fn session_billing_buckets(
     conn: &Connection,
     session_key: &str,
 ) -> Result<Vec<Value>, AuthorityError> {
-    let mut stmt = conn.prepare(
+    // Trace fixtures from before v1.0 intentionally omit the derived attribution
+    // tables. Keep their scalar billing_mode path, while production databases use
+    // the latest saved subscription attribution as the authoritative session view.
+    let has_fact_attributions: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type = 'table' AND name = 'billing_fact_attributions')",
+        [],
+        |row| row.get(0),
+    )?;
+    let billing_mode_expr = if has_fact_attributions {
+        "CASE WHEN EXISTS (SELECT 1 FROM billing_fact_attributions ba
+                    JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+                    WHERE ba.fact_id = f.fact_id AND ba.attribution_kind = 'subscription_covered'
+                      AND br.revision_number = (SELECT MAX(br2.revision_number)
+                        FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                      AND br.change_kind = 'saved')
+             THEN 'subscription' ELSE COALESCE(f.billing_mode, 'unknown') END"
+    } else {
+        "COALESCE(f.billing_mode, 'unknown')"
+    };
+    let query = format!(
         "SELECT f.host, f.provider_id, f.provider_raw, COALESCE(f.model_id, '<unknown>'),
-                f.billing_template_id, COALESCE(f.billing_mode, 'unknown'),
+                f.billing_template_id, {billing_mode_expr},
                 COALESCE(f.pricing_basis, 'unavailable'), COALESCE(f.evidence_basis, 'missing'),
                 f.event_peak, ps.pricing_version, ps.payload_json,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
@@ -1100,10 +1244,12 @@ pub fn session_billing_buckets(
          WHERE f.session_key = ?1 AND f.observation_kind != 'legacy_aggregate'
            AND f.deleted_at_ms IS NULL AND f.event_ts_ms IS NOT NULL
          GROUP BY f.host, f.provider_id, f.provider_raw, f.model_id, f.billing_template_id,
-                  f.billing_mode, f.pricing_basis, f.evidence_basis, f.event_peak,
+                  {billing_mode_expr}, f.pricing_basis, f.evidence_basis, f.event_peak,
                   ps.pricing_version, ps.payload_json
          ORDER BY f.provider_id, f.provider_raw, f.model_id, f.billing_template_id, event_peak, ps.pricing_version",
-    )?;
+        billing_mode_expr = billing_mode_expr,
+    );
+    let mut stmt = conn.prepare(&query)?;
     let rows = stmt.query_map(rusqlite::params![session_key], |r| {
         Ok((
             r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?,
@@ -1549,10 +1695,15 @@ fn session_cost_minor_legacy(
 mod tests {
     use super::*;
     use crate::authority::AuthorityDb;
+    use jiff::Timestamp;
     use std::path::PathBuf;
 
-    fn ms_to_beijing_date(ms: i64) -> String {
-        civil_date_from_days((ms + BEIJING_OFFSET_MS).div_euclid(DAY_MS))
+    fn ms_to_statistics_date(ms: i64) -> String {
+        let date = Timestamp::from_millisecond(ms)
+            .unwrap()
+            .to_zoned(statistics_timezone())
+            .date();
+        format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())
     }
 
     fn tmp_db(tag: &str) -> PathBuf {
@@ -1612,16 +1763,16 @@ mod tests {
         assert_eq!(end - start, DAY_MS);
         // 边界前一毫秒仍是 08-31 的 UTC 时刻。
         let just_before = start - 1;
-        assert_eq!(ms_to_beijing_date(just_before), "2026-08-31");
-        assert_eq!(ms_to_beijing_date(start), "2026-09-01");
+        assert_eq!(ms_to_statistics_date(just_before), "2026-08-31");
+        assert_eq!(ms_to_statistics_date(start), "2026-09-01");
     }
 
     #[test]
     fn month_bounds_span_exactly_the_civil_month() {
         let (start, end) = beijing_month_bounds_ms("2026-09").unwrap();
-        assert_eq!(ms_to_beijing_date(start), "2026-09-01");
-        assert_eq!(ms_to_beijing_date(end - 1), "2026-09-30");
-        assert_eq!(ms_to_beijing_date(end), "2026-10-01");
+        assert_eq!(ms_to_statistics_date(start), "2026-09-01");
+        assert_eq!(ms_to_statistics_date(end - 1), "2026-09-30");
+        assert_eq!(ms_to_statistics_date(end), "2026-10-01");
     }
 
     #[test]
@@ -1629,6 +1780,15 @@ mod tests {
         assert_eq!(beijing_month_bounds_ms("2026-13"), None);
         assert_eq!(beijing_month_bounds_ms("2026-9"), None);
         assert_eq!(beijing_day_bounds_ms("2026-02-30"), None);
+    }
+
+    #[test]
+    fn named_timezone_midnight_uses_dst_aware_boundaries() {
+        let zone = TimeZone::get("America/Los_Angeles").unwrap();
+        let before = midnight_ms_in_timezone(2026, 3, 8, zone.clone()).unwrap();
+        let after = midnight_ms_in_timezone(2026, 3, 9, zone).unwrap();
+        // The civil dates are consecutive, but the spring-forward day is 23h.
+        assert_eq!(after - before, 23 * 3_600_000);
     }
 
     #[test]
@@ -2272,8 +2432,12 @@ mod tests {
         let hourly_h_params: [&dyn rusqlite::ToSql; 5] =
             [&BEIJING_OFFSET_MS, &HOUR_MS, &s, &end, &"claude-code"];
         let no_hour: i64 = -1;
-        let sessions_params: [&dyn rusqlite::ToSql; 6] =
-            [&"dsh", &s, &end, &no_hour, &BEIJING_OFFSET_MS, &HOUR_MS];
+        let no_model: Option<&str> = None;
+        let no_provider: Option<&str> = None;
+        let sessions_params: [&dyn rusqlite::ToSql; 8] =
+            [&"dsh", &s, &end, &no_hour, &BEIJING_OFFSET_MS, &HOUR_MS, &no_model, &no_provider];
+        let host_window_params: [&dyn rusqlite::ToSql; 5] =
+            [&BEIJING_OFFSET_MS, &DAY_MS, &"workbuddy", &s, &end];
 
         for (name, sql, params) in [
             ("peaked_days_map", SQL_PEAKED_DAYS_MAP, &peak_params[..]),
@@ -2283,6 +2447,7 @@ mod tests {
             ("hourly_by_host_model", SQL_HOURLY_BY_HOST_MODEL, &hourly_h_params[..]),
             ("facts_page_window", SQL_FACTS_PAGE_WINDOW, &page_params[..]),
             ("sessions_in_window", SQL_SESSIONS_IN_WINDOW, &sessions_params[..]),
+            ("host_window_tokens", SQL_HOST_WINDOW_TOKENS, &host_window_params[..]),
         ] {
             let p = plan(sql, params);
             assert!(
@@ -2364,10 +2529,13 @@ mod tests {
         insert_session_fact(&db, "f2", "claude-code", "kA", "m-a", h22, 0, 300);
         insert_session_fact(&db, "f3", "claude-code", "kB", "m-b", h22 + 60_000, 0, 500);
         insert_session_fact(&db, "f4", "codex", "kC", "m-c", h9 + 60_000, 0, 40);
+        db.conn()
+            .execute("UPDATE usage_facts SET provider_id = 'provider-b' WHERE fact_id = 'f3'", [])
+            .unwrap();
 
         // 无小时过滤：3 会话，window_total = 940。
         let (rows, more, wt, count) =
-            sessions_in_window(db.conn(), start, end, &[], None, 0, None, None, 50).unwrap();
+            sessions_in_window(db.conn(), start, end, &[], None, None, None, 0, None, None, 50).unwrap();
         assert_eq!(rows.len(), 3);
         assert!(!more);
         assert_eq!(wt, 940);
@@ -2383,7 +2551,7 @@ mod tests {
 
         // 22 点过滤：kA 贡献 300、kB 贡献 500 → sum == 800（== usage_hourly 22点 total）。
         let (rows, _, wt22, count22) =
-            sessions_in_window(db.conn(), start, end, &[], Some(22), 0, None, None, 50).unwrap();
+            sessions_in_window(db.conn(), start, end, &[], None, None, Some(22), 0, None, None, 50).unwrap();
         assert_eq!(wt22, 800, "Q04 不变式：会话之和 == 峰值小时总量");
         assert_eq!(count22, 2);
         assert_eq!(rows.iter().map(|s| s.total()).sum::<i64>(), 800);
@@ -2391,10 +2559,27 @@ mod tests {
 
         // host 过滤 + min_tokens。
         let (rows, _, _, _) =
-            sessions_in_window(db.conn(), start, end, &["codex".into()], None, 0, None, None, 50)
+            sessions_in_window(db.conn(), start, end, &["codex".into()], None, None, None, 0, None, None, 50)
                 .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_key, "kC");
+
+        // model 过滤只保留包含该 model 的会话，并保持窗口总量与结果一致。
+        let (rows, _, model_total, model_count) =
+            sessions_in_window(db.conn(), start, end, &[], Some("m-b"), None, None, 0, None, None, 50)
+                .unwrap();
+        assert_eq!(model_count, 1);
+        assert_eq!(model_total, 500);
+        assert_eq!(rows[0].session_key, "kB");
+
+        // provider 过滤与模型过滤同样作用于权威窗口聚合。
+        let (rows, _, provider_total, provider_count) = sessions_in_window(
+            db.conn(), start, end, &[], None, Some("provider-b"), None, 0, None, None, 50,
+        )
+        .unwrap();
+        assert_eq!(provider_count, 1);
+        assert_eq!(provider_total, 500);
+        assert_eq!(rows[0].session_key, "kB");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2694,6 +2879,60 @@ mod tests {
         ).unwrap();
         let pricing = r#"{"codex_pricing":{"entries":[{"modelPrefix":"gpt-5.6-luna","speed":"standard","uncachedInputUsdPerMTok":"0.2","cacheReadUsdPerMTok":"0.02","cacheWrite5mUsdPerMTok":"0.25","outputUsdPerMTok":"1.2"}]}}"#;
         db.pricing_snapshot_put("v-sub", "test", pricing, day_start).unwrap();
+        assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_billing_buckets_apply_current_subscription_attribution() {
+        let path = tmp_db("session-derived-subscription");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (day_start, _) = beijing_day_bounds_ms("2026-09-09").unwrap();
+        let skey = "skey-derived-subscription";
+        db.conn().execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+             VALUES (?1, 'codex', 'native-derived', 'm', 'default', 1)", [skey],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                 session_key, source_event_id, observation_kind, provider_id, model_id,
+                 event_ts_ms, event_peak, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES ('f-derived', 'codex', 'm', 'native-derived', ?1, 'f-derived', 'token_count',
+                     'openai', 'gpt-5.6-luna', ?2, 0, 1000000, 'run', 1, 1)",
+            rusqlite::params![skey, day_start + 3_600_000],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_declarations(
+                declaration_id, host, provider_id, relationship_kind, effective_start,
+                created_at_ms, updated_at_ms)
+             VALUES ('decl-derived', 'codex', 'openai', 'official_subscription', '2026-09', 1, 1)",
+            [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_declaration_revisions(
+                revision_id, declaration_id, revision_number, change_kind, host, provider_id,
+                relationship_kind, effective_start, created_at_ms)
+             VALUES ('rev-derived', 'decl-derived', 1, 'saved', 'codex', 'openai',
+                     'official_subscription', '2026-09', 1)",
+            [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_recalculation_jobs(
+                job_id, declaration_id, revision_id, status, requested_at_ms)
+             VALUES ('job-derived', 'decl-derived', 'rev-derived', 'succeeded', 1)",
+            [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_fact_attributions(
+                fact_id, revision_id, job_id, attribution_kind, created_at_ms)
+             VALUES ('f-derived', 'rev-derived', 'job-derived', 'subscription_covered', 1)",
+            [],
+        ).unwrap();
+
+        let buckets = session_billing_buckets(db.conn(), skey).unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0]["billing_mode"], "subscription");
         assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
         let _ = std::fs::remove_file(&path);
     }

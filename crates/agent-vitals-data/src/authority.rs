@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -44,6 +44,54 @@ pub fn default_authority_path(data_home: &Path) -> PathBuf {
 /// amount_minor, currency)`。`amount_minor` 是最小货币单位整数——金额从不
 /// 以浮点入库（spec §5.3），折算在展示层。
 pub type HostBillRow = (String, String, String, i64, String);
+pub type HostBillDetailRow = (String, String, String, String, i64, String, String);
+
+/// 用户计费声明的一行：关系本身和付款/账单分开建模。金额可未知，不能以
+/// `host_bills` 的实付金额或公开价卡来填充。
+pub type BillingDeclarationRow = (
+    String, String, String, String, Option<String>, Option<i64>, Option<String>,
+    String, Option<String>, Option<String>,
+);
+/// 声明修订的稳定读取行。修订为追加记录，绝不覆盖先前用户输入。
+pub type BillingDeclarationRevisionRow = (
+    String,
+    String,
+    i64,
+    String,
+    Option<String>,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+);
+/// 修订的一项可选作用范围：`account`、`route`、`model` 或 `session`。
+pub type BillingDeclarationScopeRow = (String, String, String);
+pub type BillingRecalculationJobRow = (
+    String, String, String, String, i64, Option<i64>, Option<i64>, Option<String>, Option<String>,
+);
+pub type BillingRecalculationResultRow = (String, String, i64, i64, i64, Option<i64>, Option<i64>, i64);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingDeclarationImpactPreview {
+    pub fact_count: i64,
+    pub session_count: i64,
+    pub total_tokens: i64,
+    pub first_event_ts_ms: Option<i64>,
+    pub last_event_ts_ms: Option<i64>,
+}
+type BillingDeclarationRevisionSnapshot = (
+    i64, String, String, String, Option<String>, Option<i64>, Option<String>, String,
+    Option<String>, Option<String>, Option<String>,
+);
+/// 旧版本发现、尚未被用户确认的订阅候选：`(id, host, provider, currency,
+/// amount_minor, period_start, status)`。候选不构成实际付款。
+pub type BillingImportCandidateRow = (String, String, String, String, i64, String, String);
 
 type BillingTemplateRow = (String, Option<String>, String, String, i64, Option<i64>);
 type OutcomeMeasurementRow = (String, String, String, Option<i64>, Option<String>, String);
@@ -506,6 +554,158 @@ BEGIN
 END;
 "#;
 
+// v1.0：旧公共价表中的个人订阅不是付款凭证。升级时保留为待确认候选，
+// 必须由用户接受后才写入 host_bills / FixedSubscription。
+const SCHEMA_V7_ADD: &str = r#"
+CREATE TABLE billing_import_candidates (
+  candidate_id TEXT PRIMARY KEY,
+  host TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  currency TEXT NOT NULL,
+  amount_minor INTEGER NOT NULL CHECK (amount_minor >= 0),
+  billing_period_start TEXT NOT NULL,
+  source_pricing_version TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'dismissed')),
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  resolved_at_ms INTEGER,
+  UNIQUE(provider_id, currency, amount_minor, billing_period_start, source_pricing_version)
+);
+CREATE INDEX billing_import_candidates_status ON billing_import_candidates(status, provider_id);
+"#;
+
+// v1.0：计费关系是用户声明，不是付款记录，也不能寄居在公共价格目录。
+const SCHEMA_V8_ADD: &str = r#"
+CREATE TABLE billing_declarations (
+  declaration_id TEXT PRIMARY KEY,
+  host TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  relationship_kind TEXT NOT NULL CHECK (relationship_kind IN (
+    'official_subscription', 'official_api', 'third_party', 'organization', 'unknown'
+  )),
+  subscription_name TEXT,
+  amount_minor INTEGER CHECK (amount_minor IS NULL OR amount_minor >= 0),
+  currency TEXT,
+  effective_start TEXT NOT NULL,
+  effective_end TEXT,
+  source_candidate_id TEXT UNIQUE REFERENCES billing_import_candidates(candidate_id),
+  evidence_ref TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  deleted_at_ms INTEGER,
+  CHECK ((amount_minor IS NULL AND currency IS NULL) OR
+         (amount_minor IS NOT NULL AND currency IS NOT NULL AND trim(currency) <> '')),
+  CHECK (effective_end IS NULL OR effective_end >= effective_start)
+);
+CREATE INDEX billing_declarations_active_scope
+  ON billing_declarations(host, provider_id, effective_start, effective_end)
+  WHERE deleted_at_ms IS NULL;
+"#;
+
+// v1.0：声明当前态可供读取，但每次保存与撤销必须追加一个不可变修订；范围
+// 是用户提供的附加证据，不能修改原始事实或推断未选中的历史记录。
+const SCHEMA_V9_ADD: &str = r#"
+CREATE TABLE billing_declaration_revisions (
+  revision_id TEXT PRIMARY KEY,
+  declaration_id TEXT NOT NULL REFERENCES billing_declarations(declaration_id),
+  revision_number INTEGER NOT NULL CHECK (revision_number > 0),
+  change_kind TEXT NOT NULL CHECK (change_kind IN ('saved', 'revoked')),
+  supersedes_revision_id TEXT UNIQUE REFERENCES billing_declaration_revisions(revision_id),
+  host TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  relationship_kind TEXT NOT NULL CHECK (relationship_kind IN (
+    'official_subscription', 'official_api', 'third_party', 'organization', 'unknown'
+  )),
+  subscription_name TEXT,
+  amount_minor INTEGER CHECK (amount_minor IS NULL OR amount_minor >= 0),
+  currency TEXT,
+  effective_start TEXT NOT NULL,
+  effective_end TEXT,
+  source_candidate_id TEXT REFERENCES billing_import_candidates(candidate_id),
+  evidence_ref TEXT,
+  created_at_ms INTEGER NOT NULL,
+  CHECK ((amount_minor IS NULL AND currency IS NULL) OR
+         (amount_minor IS NOT NULL AND currency IS NOT NULL AND trim(currency) <> '')),
+  CHECK (effective_end IS NULL OR effective_end >= effective_start),
+  UNIQUE(declaration_id, revision_number)
+);
+CREATE TABLE billing_declaration_scopes (
+  revision_id TEXT NOT NULL REFERENCES billing_declaration_revisions(revision_id) ON DELETE CASCADE,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('account', 'route', 'model', 'session')),
+  scope_value TEXT NOT NULL CHECK (trim(scope_value) <> ''),
+  PRIMARY KEY(revision_id, scope_kind, scope_value)
+);
+CREATE INDEX billing_declaration_revisions_current
+  ON billing_declaration_revisions(declaration_id, revision_number DESC);
+CREATE INDEX billing_declaration_scopes_lookup
+  ON billing_declaration_scopes(scope_kind, scope_value, revision_id);
+"#;
+
+const SCHEMA_V10_ADD: &str = r#"
+CREATE TABLE IF NOT EXISTS billing_recalculation_jobs (
+  job_id TEXT PRIMARY KEY,
+  declaration_id TEXT NOT NULL REFERENCES billing_declarations(declaration_id),
+  revision_id TEXT NOT NULL REFERENCES billing_declaration_revisions(revision_id),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+  requested_at_ms INTEGER NOT NULL,
+  started_at_ms INTEGER,
+  completed_at_ms INTEGER,
+  error_code TEXT,
+  error_detail TEXT,
+  UNIQUE(revision_id)
+);
+CREATE INDEX IF NOT EXISTS billing_recalculation_jobs_status
+  ON billing_recalculation_jobs(status, requested_at_ms);
+"#;
+
+const SCHEMA_V11_ADD: &str = r#"
+CREATE TABLE IF NOT EXISTS billing_recalculation_results (
+  job_id TEXT PRIMARY KEY REFERENCES billing_recalculation_jobs(job_id),
+  revision_id TEXT NOT NULL REFERENCES billing_declaration_revisions(revision_id),
+  fact_count INTEGER NOT NULL CHECK (fact_count >= 0),
+  session_count INTEGER NOT NULL CHECK (session_count >= 0),
+  total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
+  first_event_ts_ms INTEGER,
+  last_event_ts_ms INTEGER,
+  published_at_ms INTEGER NOT NULL
+);
+"#;
+
+const SCHEMA_V12_ADD: &str = r#"
+CREATE TABLE IF NOT EXISTS billing_fact_attributions (
+  fact_id TEXT NOT NULL REFERENCES usage_facts(fact_id),
+  revision_id TEXT NOT NULL REFERENCES billing_declaration_revisions(revision_id),
+  job_id TEXT NOT NULL REFERENCES billing_recalculation_jobs(job_id),
+  attribution_kind TEXT NOT NULL CHECK (attribution_kind IN ('subscription_covered', 'user_declared')),
+  created_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(fact_id, revision_id)
+);
+CREATE INDEX IF NOT EXISTS billing_fact_attributions_revision
+  ON billing_fact_attributions(revision_id, fact_id);
+
+-- v1.0 budget profiles: keep the legacy single CNY row readable while allowing
+-- independent estimate/confirmed budgets and an explicit currency per profile.
+CREATE TABLE IF NOT EXISTS budget_profiles (
+  profile_id TEXT PRIMARY KEY CHECK (profile_id IN ('estimate', 'confirmed')),
+  currency TEXT NOT NULL CHECK (length(currency) = 3),
+  monthly_minor INTEGER NOT NULL CHECK (monthly_minor > 0),
+  daily_minor INTEGER,
+  warning_ratio_bp INTEGER NOT NULL CHECK (warning_ratio_bp BETWEEN 0 AND 10000),
+  updated_at_ms INTEGER NOT NULL
+);
+"#;
+
+const SCHEMA_V13_ADD: &str = r#"
+CREATE TABLE IF NOT EXISTS budget_profiles (
+  profile_id TEXT PRIMARY KEY CHECK (profile_id IN ('estimate', 'confirmed')),
+  currency TEXT NOT NULL CHECK (length(currency) = 3),
+  monthly_minor INTEGER NOT NULL CHECK (monthly_minor > 0),
+  daily_minor INTEGER,
+  warning_ratio_bp INTEGER NOT NULL CHECK (warning_ratio_bp BETWEEN 0 AND 10000),
+  updated_at_ms INTEGER NOT NULL
+);
+"#;
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -547,6 +747,25 @@ pub struct BudgetConfig {
     pub updated_at_ms: i64,
 }
 
+/// v1.0 的双预算配置。`estimate` 与 `confirmed` 是两个互斥口径，不能用
+/// 一个金额字段代替；currency 明确绑定到每个口径，避免 USD 静默进入 CNY。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetProfile {
+    pub profile_id: String,
+    pub currency: String,
+    pub monthly_minor: i64,
+    pub daily_minor: Option<i64>,
+    pub warning_ratio_bp: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostImportedDataDeletion {
+    pub facts: usize,
+    pub sessions: usize,
+    pub source_files: usize,
+}
+
 /// 权威库连接。**非 Sync**（rusqlite `Connection` 语义同旧 store）；每线程
 /// 自开。open 时：`foreign_keys=ON`（spec §3 前言）+ WAL + `busy_timeout`
 /// + DDL 版本闸 + 中断批次清扫（§3.1）。
@@ -573,6 +792,7 @@ impl AuthorityDb {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Self::ensure_schema(&conn, now_ms)?;
+        crate::issues::repair_issue_timestamp_units(&conn)?;
         Ok(Self { conn })
     }
 
@@ -676,9 +896,103 @@ impl AuthorityDb {
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
+            Some(12) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V13_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(11) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V12_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(10) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V11_ADD).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(9) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V10_ADD).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(8) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V9_ADD).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(7) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V8_ADD).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(6) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V7_ADD).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
+                match migration {
+                    Ok(()) => {
+                        conn.execute(
+                            "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
+                            rusqlite::params![SCHEMA_VERSION.to_string()],
+                        )?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(5) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V6_ADD);
+                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -697,7 +1011,7 @@ impl AuthorityDb {
             }
             Some(4) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD));
+                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -718,6 +1032,30 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V6_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V7_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V8_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V9_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V10_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V11_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V12_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -749,6 +1087,30 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V6_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V7_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V8_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V9_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V10_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V11_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V12_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -784,6 +1146,30 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V6_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V7_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V8_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V9_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V10_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V11_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V12_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -831,6 +1217,12 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V4_ADD)?;
                 conn.execute_batch(SCHEMA_V5_ADD)?;
                 conn.execute_batch(SCHEMA_V6_ADD)?;
+                conn.execute_batch(SCHEMA_V7_ADD)?;
+                conn.execute_batch(SCHEMA_V8_ADD)?;
+                conn.execute_batch(SCHEMA_V9_ADD)?;
+                conn.execute_batch(SCHEMA_V10_ADD)?;
+                conn.execute_batch(SCHEMA_V11_ADD)?;
+                conn.execute_batch(SCHEMA_V12_ADD)?;
                 // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
                 conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
@@ -904,6 +1296,41 @@ impl AuthorityDb {
         )?)
     }
 
+    /// 删除一个宿主由本 App 导入的可见数据。事实和会话采用既有软删除语义，
+    /// 使历史计费归因外键仍完整；来源指纹被物理删除，恢复读取后才会重新导入。
+    /// 不触及用户手工账单、计费声明、价格快照或任何其他宿主。
+    pub fn delete_imported_host_data(
+        &self, host: &str, now_ms: i64,
+    ) -> Result<HostImportedDataDeletion, AuthorityError> {
+        self.with_immediate_txn(|conn| {
+            let facts = conn.execute(
+                "UPDATE usage_facts SET deleted_at_ms = ?2, updated_at_ms = ?2
+                 WHERE host = ?1 AND deleted_at_ms IS NULL",
+                rusqlite::params![host, now_ms],
+            )?;
+            let sessions = conn.execute(
+                "UPDATE sessions SET deleted_at_ms = ?2
+                 WHERE host = ?1 AND deleted_at_ms IS NULL",
+                rusqlite::params![host, now_ms],
+            )?;
+            conn.execute(
+                "DELETE FROM workflow_events WHERE session_key IN (SELECT session_key FROM sessions WHERE host = ?1)
+                   OR source_id IN (SELECT source_id FROM source_files WHERE host = ?1)",
+                [host],
+            )?;
+            conn.execute("DELETE FROM host_runtime_snapshots WHERE host = ?1", [host])?;
+            // route_evidence 是导入的路由证据；清除其 ID 后再删行，避免已软
+            // 删除的事实留下悬挂证据引用。
+            conn.execute("UPDATE usage_facts SET route_evidence_id = NULL WHERE host = ?1", [host])?;
+            conn.execute("DELETE FROM route_evidence WHERE host = ?1", [host])?;
+            // 已软删除的事实不再保留源文件关联，避免 source_files 外键阻碍
+            // 指纹清理，也避免已删除数据继续关联可推断的来源元数据。
+            conn.execute("UPDATE usage_facts SET source_id = NULL WHERE host = ?1", [host])?;
+            let source_files = conn.execute("DELETE FROM source_files WHERE host = ?1", [host])?;
+            Ok(HostImportedDataDeletion { facts, sessions, source_files })
+        })
+    }
+
     // ─────── v0.9.1 Phase 3.4：budget_config / budget_snoozes 显式管理 API
     // （spec §5.3「账单和预算配置为显式管理 API」；单行表 config_id/snooze_id
     // 恒 1，upsert 语义）。金额全是 minor 整数；判断在消费方，全整数比较。
@@ -948,6 +1375,59 @@ impl AuthorityDb {
                  warning_ratio_bp = excluded.warning_ratio_bp,
                  updated_at_ms = excluded.updated_at_ms",
             rusqlite::params![monthly_cny_minor, daily_cny_minor, warning_ratio_bp, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// 读取 v1.0 双预算配置，固定按 profile_id 排序，便于各消费面稳定对拍。
+    pub fn budget_profiles_get(&self) -> Result<Vec<BudgetProfile>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT profile_id, currency, monthly_minor, daily_minor,
+                    warning_ratio_bp, updated_at_ms
+             FROM budget_profiles ORDER BY profile_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(BudgetProfile {
+                profile_id: r.get(0)?, currency: r.get(1)?, monthly_minor: r.get(2)?,
+                daily_minor: r.get(3)?, warning_ratio_bp: r.get(4)?, updated_at_ms: r.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// 写入一个预算口径。金额和币种均在数据库约束下落库；同一 profile 幂等覆盖。
+    pub fn budget_profile_set(
+        &self,
+        profile_id: &str,
+        currency: &str,
+        monthly_minor: i64,
+        daily_minor: Option<i64>,
+        warning_ratio_bp: i64,
+        now_ms: i64,
+    ) -> Result<(), AuthorityError> {
+        if !matches!(profile_id, "estimate" | "confirmed") {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "unsupported budget profile".to_string(),
+            )));
+        }
+        if currency.len() != 3 || !currency.is_ascii() || monthly_minor <= 0
+            || daily_minor.is_some_and(|v| v <= 0)
+            || !(0..=10_000).contains(&warning_ratio_bp)
+        {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid budget profile".to_string(),
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO budget_profiles(profile_id, currency, monthly_minor, daily_minor,
+                 warning_ratio_bp, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(profile_id) DO UPDATE SET
+                 currency = excluded.currency, monthly_minor = excluded.monthly_minor,
+                 daily_minor = excluded.daily_minor,
+                 warning_ratio_bp = excluded.warning_ratio_bp,
+                 updated_at_ms = excluded.updated_at_ms",
+            rusqlite::params![profile_id, currency, monthly_minor, daily_minor, warning_ratio_bp, now_ms],
         )?;
         Ok(())
     }
@@ -1043,6 +1523,19 @@ impl AuthorityDb {
             .optional()?)
     }
 
+    /// 所有历史价格快照，按捕获时间升序。迁移读取旧版嵌入价表中的用户声明
+    /// 时使用；调用方必须把提取出的个人数据写入本地表，不能重新塞回公共目录。
+    pub fn pricing_snapshot_payloads(&self) -> Result<Vec<(String, String)>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pricing_version, payload_json FROM pricing_snapshots
+             ORDER BY captured_at_ms ASC, pricing_version ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// `captured_at_ms` 最新的快照 `(version, captured_at_ms)`，或 None（从未落）。
     pub fn pricing_snapshot_latest(&self) -> Result<Option<(String, i64)>, AuthorityError> {
         Ok(self
@@ -1116,6 +1609,49 @@ impl AuthorityDb {
             rusqlite::params![catalog_version, captured_at_ms, source_kind, snapshot_id, payload_json],
         )?;
         Ok(true)
+    }
+
+    /// 原子写入公共 catalog 与其价格快照。两张表必须作为一个版本一起出现；
+    /// 任一步违反不可变身份或外键约束，事务整体回滚，旧有效版本保持可读。
+    #[allow(clippy::too_many_arguments)]
+    pub fn pricing_catalog_snapshot_put(
+        &self,
+        catalog_version: &str,
+        snapshot_id: &str,
+        source_kind: &str,
+        payload_json: &str,
+        captured_at_ms: i64,
+        billing_template_id: Option<&str>,
+    ) -> Result<(bool, bool), AuthorityError> {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let result = (|| {
+            let catalog_changed = self.provider_catalog_snapshot_put(
+                catalog_version,
+                snapshot_id,
+                source_kind,
+                payload_json,
+                captured_at_ms,
+            )?;
+            let pricing_changed = self.pricing_snapshot_put_with_provenance(
+                catalog_version,
+                source_kind,
+                payload_json,
+                captured_at_ms,
+                Some(catalog_version),
+                billing_template_id,
+            )?;
+            Ok::<_, AuthorityError>((catalog_changed, pricing_changed))
+        })();
+        match result {
+            Ok(changed) => {
+                self.conn.execute("COMMIT", [])?;
+                Ok(changed)
+            }
+            Err(error) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                Err(error)
+            }
+        }
     }
 
     /// 落入一个模板定义。更新合同必须使用新的 template id；这里不接受覆盖。
@@ -1363,8 +1899,8 @@ impl AuthorityDb {
         if amount_minor < 0 {
             return Err(bad("amount_minor must be >= 0"));
         }
-        if currency.trim().is_empty() {
-            return Err(bad("currency required"));
+        if currency.len() != 3 || !currency.bytes().all(|c| c.is_ascii_uppercase()) {
+            return Err(bad("currency must be a three-letter uppercase code"));
         }
         self.conn.execute(
             "INSERT INTO host_bills(bill_id, host, provider_id, billing_period, billing_basis,
@@ -1405,6 +1941,22 @@ impl AuthorityDb {
         Ok(rows)
     }
 
+    /// 带稳定 bill_id/evidence 的账单明细，供设置页更正或 soft-delete；
+    /// 汇总仍使用上面的五列投影，避免把内部 id 扩散到旧 DTO。
+    pub fn host_bill_details_for_period(
+        &self, billing_period: &str,
+    ) -> Result<Vec<HostBillDetailRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT bill_id, host, provider_id, billing_basis, amount_minor, currency, evidence_ref
+             FROM host_bills WHERE billing_period = ?1 AND deleted_at_ms IS NULL
+             ORDER BY host, provider_id, billing_basis, bill_id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![billing_period], |r| Ok((
+            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
+        )))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// soft delete（查询默认过滤 `deleted_at_ms IS NULL`）。
     pub fn host_bill_delete(&self, bill_id: &str, now_ms: i64) -> Result<bool, AuthorityError> {
         let n = self.conn.execute(
@@ -1419,6 +1971,746 @@ impl AuthorityDb {
             "SELECT COUNT(*) FROM host_bills WHERE deleted_at_ms IS NULL",
             [],
             |r| r.get(0),
+        )?)
+    }
+
+    /// 写入或更正本地计费声明。声明从不创建 `host_bills`，也不改写 facts。
+    #[allow(clippy::too_many_arguments)]
+    pub fn billing_declaration_put(
+        &self, declaration_id: &str, host: &str, provider_id: &str, relationship_kind: &str,
+        subscription_name: Option<&str>, amount_minor: Option<i64>, currency: Option<&str>,
+        effective_start: &str, effective_end: Option<&str>, source_candidate_id: Option<&str>,
+        evidence_ref: Option<&str>, now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        let valid_month = |value: &str| {
+            value.len() == 7
+                && value.as_bytes().get(4) == Some(&b'-')
+                && value.chars().enumerate().all(|(index, ch)| {
+                    index == 4 || ch.is_ascii_digit()
+                })
+                && value.get(5..7).and_then(|month| month.parse::<u8>().ok())
+                    .is_some_and(|month| (1..=12).contains(&month))
+        };
+        let valid_kind = matches!(relationship_kind,
+            "official_subscription" | "official_api" | "third_party" | "organization" | "unknown");
+        let valid_amount = match (amount_minor, currency) {
+            (None, None) => true,
+            (Some(amount), Some(currency)) => amount >= 0 && !currency.trim().is_empty(),
+            _ => false,
+        };
+        if declaration_id.is_empty() || host.is_empty() || provider_id.is_empty() || !valid_kind
+            || !valid_amount || !valid_month(effective_start)
+            || effective_end.is_some_and(|end| !valid_month(end) || end < effective_start)
+        {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid billing declaration".to_string(),
+            )));
+        }
+        if let Some(candidate_id) = source_candidate_id {
+            let candidate = self.conn.query_row(
+                "SELECT host, provider_id, status FROM billing_import_candidates WHERE candidate_id = ?1",
+                rusqlite::params![candidate_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            ).optional()?;
+            if !matches!(candidate, Some((ref candidate_host, ref candidate_provider, ref status))
+                if candidate_host == host && candidate_provider == provider_id && status == "accepted")
+            {
+                return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                    "billing declaration candidate must be accepted and match host/provider".to_string(),
+                )));
+            }
+        }
+        let changed = self.conn.execute(
+            "INSERT INTO billing_declarations(
+                 declaration_id, host, provider_id, relationship_kind, subscription_name,
+                 amount_minor, currency, effective_start, effective_end, source_candidate_id,
+                 evidence_ref, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+             ON CONFLICT(declaration_id) DO UPDATE SET
+               host = excluded.host, provider_id = excluded.provider_id,
+               relationship_kind = excluded.relationship_kind,
+               subscription_name = excluded.subscription_name, amount_minor = excluded.amount_minor,
+               currency = excluded.currency, effective_start = excluded.effective_start,
+               effective_end = excluded.effective_end, source_candidate_id = excluded.source_candidate_id,
+               evidence_ref = excluded.evidence_ref, updated_at_ms = excluded.updated_at_ms,
+               deleted_at_ms = NULL",
+            rusqlite::params![declaration_id, host, provider_id, relationship_kind,
+                subscription_name, amount_minor, currency, effective_start, effective_end,
+                source_candidate_id, evidence_ref, now_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// 活跃声明的稳定读取顺序；金额缺失保持 `None`，不以 0 或价卡代替。
+    pub fn billing_declarations(&self) -> Result<Vec<BillingDeclarationRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT declaration_id, host, provider_id, relationship_kind, subscription_name,
+                    amount_minor, currency, effective_start, effective_end, source_candidate_id
+             FROM billing_declarations WHERE deleted_at_ms IS NULL
+             ORDER BY host, provider_id, effective_start, declaration_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((
+            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
+            r.get(7)?, r.get(8)?, r.get(9)?,
+        )))?.collect::<Result<Vec<_>, _>>().map_err(AuthorityError::from);
+        rows
+    }
+
+    /// 保存一个追加式声明修订。作用范围只能缩小到已指定的账户、路由、模型或
+    /// 会话；空范围表示仅由声明本身的宿主/provider/有效期约束，绝不扩大历史。
+    #[allow(clippy::too_many_arguments)]
+    pub fn billing_declaration_revision_save(
+        &self, revision_id: &str, declaration_id: &str, supersedes_revision_id: Option<&str>,
+        host: &str, provider_id: &str, relationship_kind: &str, subscription_name: Option<&str>,
+        amount_minor: Option<i64>, currency: Option<&str>, effective_start: &str,
+        effective_end: Option<&str>, source_candidate_id: Option<&str>, evidence_ref: Option<&str>,
+        scopes: &[(&str, &str)], now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        let valid_month = |value: &str| {
+            value.len() == 7 && value.as_bytes().get(4) == Some(&b'-')
+                && value.chars().enumerate().all(|(index, ch)| index == 4 || ch.is_ascii_digit())
+                && value.get(5..7).and_then(|month| month.parse::<u8>().ok())
+                    .is_some_and(|month| (1..=12).contains(&month))
+        };
+        let valid_kind = matches!(relationship_kind,
+            "official_subscription" | "official_api" | "third_party" | "organization" | "unknown");
+        let valid_amount = match (amount_minor, currency) {
+            (None, None) => true,
+            (Some(amount), Some(value)) => amount >= 0 && !value.trim().is_empty(),
+            _ => false,
+        };
+        let valid_scope = |kind: &str, value: &str| {
+            matches!(kind, "account" | "route" | "model" | "session") && !value.trim().is_empty()
+        };
+        if revision_id.is_empty() || declaration_id.is_empty() || host.is_empty() || provider_id.is_empty()
+            || !valid_kind || !valid_amount || !valid_month(effective_start)
+            || effective_end.is_some_and(|end| !valid_month(end) || end < effective_start)
+            || scopes.iter().any(|(kind, value)| !valid_scope(kind, value))
+        {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid billing declaration revision".to_string(),
+            )));
+        }
+        let mut seen_scopes = std::collections::HashSet::new();
+        if scopes.iter().any(|(kind, value)| !seen_scopes.insert((*kind, *value))) {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "duplicate billing declaration scope".to_string(),
+            )));
+        }
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<bool, AuthorityError> {
+            let exists: Option<i64> = self.conn.query_row(
+                "SELECT 1 FROM billing_declaration_revisions WHERE revision_id = ?1",
+                rusqlite::params![revision_id], |row| row.get(0),
+            ).optional()?;
+            if exists.is_some() {
+                return Ok(false);
+            }
+            if let Some(candidate_id) = source_candidate_id {
+                let candidate = self.conn.query_row(
+                    "SELECT host, provider_id, status FROM billing_import_candidates WHERE candidate_id = ?1",
+                    rusqlite::params![candidate_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+                ).optional()?;
+                let Some((candidate_host, candidate_provider, status)) = candidate else {
+                    return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                        "billing declaration candidate must be accepted and match host/provider".to_string(),
+                    )));
+                };
+                if candidate_host != host || candidate_provider != provider_id
+                    || !matches!(status.as_str(), "pending" | "accepted")
+                {
+                    return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                        "billing declaration candidate must be pending/accepted and match host/provider".to_string(),
+                    )));
+                }
+                if status == "pending" {
+                    self.conn.execute(
+                        "UPDATE billing_import_candidates
+                         SET status = 'accepted', resolved_at_ms = ?2, updated_at_ms = ?2
+                         WHERE candidate_id = ?1 AND status = 'pending'",
+                        rusqlite::params![candidate_id, now_ms],
+                    )?;
+                }
+            }
+            let previous: Option<(String, i64)> = self.conn.query_row(
+                "SELECT revision_id, revision_number FROM billing_declaration_revisions
+                 WHERE declaration_id = ?1 ORDER BY revision_number DESC LIMIT 1",
+                rusqlite::params![declaration_id], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?;
+            let revision_number = match previous {
+                Some((ref current, number)) if supersedes_revision_id == Some(current.as_str()) => number + 1,
+                Some(_) => return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                    "billing declaration revision must supersede the current revision".to_string(),
+                ))),
+                None if supersedes_revision_id.is_none() => 1,
+                None => return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                    "first billing declaration revision cannot supersede another revision".to_string(),
+                ))),
+            };
+            self.conn.execute(
+                "INSERT INTO billing_declarations(
+                     declaration_id, host, provider_id, relationship_kind, subscription_name,
+                     amount_minor, currency, effective_start, effective_end, source_candidate_id,
+                     evidence_ref, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+                 ON CONFLICT(declaration_id) DO UPDATE SET
+                   host = excluded.host, provider_id = excluded.provider_id,
+                   relationship_kind = excluded.relationship_kind, subscription_name = excluded.subscription_name,
+                   amount_minor = excluded.amount_minor, currency = excluded.currency,
+                   effective_start = excluded.effective_start, effective_end = excluded.effective_end,
+                   source_candidate_id = excluded.source_candidate_id, evidence_ref = excluded.evidence_ref,
+                   updated_at_ms = excluded.updated_at_ms, deleted_at_ms = NULL",
+                rusqlite::params![declaration_id, host, provider_id, relationship_kind,
+                    subscription_name, amount_minor, currency, effective_start, effective_end,
+                    source_candidate_id, evidence_ref, now_ms],
+            )?;
+            self.conn.execute(
+                "INSERT INTO billing_declaration_revisions(
+                     revision_id, declaration_id, revision_number, change_kind, supersedes_revision_id,
+                     host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                     effective_start, effective_end, source_candidate_id, evidence_ref, created_at_ms)
+                 VALUES (?1, ?2, ?3, 'saved', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                rusqlite::params![revision_id, declaration_id, revision_number, supersedes_revision_id,
+                    host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                    effective_start, effective_end, source_candidate_id, evidence_ref, now_ms],
+            )?;
+            for (scope_kind, scope_value) in scopes {
+                self.conn.execute(
+                    "INSERT INTO billing_declaration_scopes(revision_id, scope_kind, scope_value)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![revision_id, scope_kind, scope_value],
+                )?;
+            }
+            Ok(true)
+        })();
+        match result {
+            Ok(changed) => { self.conn.execute_batch("COMMIT")?; Ok(changed) }
+            Err(error) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(error) }
+        }
+    }
+
+    /// 撤销不删除声明历史：追加 `revoked` 修订，复制最近范围，并使当前态失效。
+    pub fn billing_declaration_revision_revoke(
+        &self, revision_id: &str, declaration_id: &str, supersedes_revision_id: &str, now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if revision_id.is_empty() || declaration_id.is_empty() || supersedes_revision_id.is_empty() {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid billing declaration revoke".to_string(),
+            )));
+        }
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<bool, AuthorityError> {
+            let exists: Option<i64> = self.conn.query_row(
+                "SELECT 1 FROM billing_declaration_revisions WHERE revision_id = ?1",
+                rusqlite::params![revision_id], |row| row.get(0),
+            ).optional()?;
+            if exists.is_some() { return Ok(false); }
+            let prior: Option<BillingDeclarationRevisionSnapshot> = self.conn.query_row(
+                "SELECT revision_number, host, provider_id, relationship_kind, subscription_name,
+                        amount_minor, currency, effective_start, effective_end, source_candidate_id, evidence_ref
+                 FROM billing_declaration_revisions
+                 WHERE revision_id = ?1 AND declaration_id = ?2 AND change_kind = 'saved'",
+                rusqlite::params![supersedes_revision_id, declaration_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?,
+                    row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?)),
+            ).optional()?;
+            let Some((number, host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                effective_start, effective_end, source_candidate_id, evidence_ref)) = prior else {
+                return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                    "billing declaration revoke must supersede the active revision".to_string(),
+                )));
+            };
+            let current: Option<String> = self.conn.query_row(
+                "SELECT revision_id FROM billing_declaration_revisions WHERE declaration_id = ?1
+                 ORDER BY revision_number DESC LIMIT 1", rusqlite::params![declaration_id], |row| row.get(0),
+            ).optional()?;
+            if current.as_deref() != Some(supersedes_revision_id) {
+                return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                    "billing declaration revoke must supersede the current revision".to_string(),
+                )));
+            }
+            self.conn.execute(
+                "INSERT INTO billing_declaration_revisions(
+                     revision_id, declaration_id, revision_number, change_kind, supersedes_revision_id,
+                     host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                     effective_start, effective_end, source_candidate_id, evidence_ref, created_at_ms)
+                 VALUES (?1, ?2, ?3, 'revoked', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                rusqlite::params![revision_id, declaration_id, number + 1, supersedes_revision_id,
+                    host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                    effective_start, effective_end, source_candidate_id, evidence_ref, now_ms],
+            )?;
+            self.conn.execute(
+                "INSERT INTO billing_declaration_scopes(revision_id, scope_kind, scope_value)
+                 SELECT ?1, scope_kind, scope_value FROM billing_declaration_scopes WHERE revision_id = ?2",
+                rusqlite::params![revision_id, supersedes_revision_id],
+            )?;
+            self.conn.execute(
+                "UPDATE billing_declarations SET deleted_at_ms = ?2, updated_at_ms = ?2
+                 WHERE declaration_id = ?1 AND deleted_at_ms IS NULL",
+                rusqlite::params![declaration_id, now_ms],
+            )?;
+            Ok(true)
+        })();
+        match result {
+            Ok(changed) => { self.conn.execute_batch("COMMIT")?; Ok(changed) }
+            Err(error) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(error) }
+        }
+    }
+
+    pub fn billing_declaration_revisions(
+        &self, declaration_id: &str,
+    ) -> Result<Vec<BillingDeclarationRevisionRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT revision_id, declaration_id, revision_number, change_kind, supersedes_revision_id,
+                    host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                    effective_start, effective_end, source_candidate_id, evidence_ref, created_at_ms
+             FROM billing_declaration_revisions WHERE declaration_id = ?1 ORDER BY revision_number",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![declaration_id], |row| Ok((
+            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?,
+            row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?,
+            row.get(12)?, row.get(13)?, row.get(14)?, row.get(15)?,
+        )))?.collect::<Result<Vec<_>, _>>().map_err(AuthorityError::from);
+        rows
+    }
+
+    pub fn billing_declaration_scopes(
+        &self, revision_id: &str,
+    ) -> Result<Vec<BillingDeclarationScopeRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT revision_id, scope_kind, scope_value FROM billing_declaration_scopes
+             WHERE revision_id = ?1 ORDER BY scope_kind, scope_value",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![revision_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?.collect::<Result<Vec<_>, _>>().map_err(AuthorityError::from);
+        rows
+    }
+
+    /// 只读计算声明修订将触及哪些事实；不写任何派生结果。
+    pub fn billing_declaration_impact_preview(
+        &self, revision_id: &str, window_start_ms: i64, window_end_ms: i64,
+    ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
+        let revision: Option<(String, String, String, String, Option<String>)> = self.conn.query_row(
+            "SELECT host, provider_id, effective_start, change_kind, effective_end
+             FROM billing_declaration_revisions WHERE revision_id = ?1",
+            rusqlite::params![revision_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).optional()?;
+        let Some((host, provider_id, effective_start, change_kind, effective_end)) = revision else {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "unknown billing declaration revision".to_string(),
+            )));
+        };
+        if change_kind == "revoked" || window_end_ms <= window_start_ms {
+            return Ok(BillingDeclarationImpactPreview { fact_count: 0, session_count: 0,
+                total_tokens: 0, first_event_ts_ms: None, last_event_ts_ms: None });
+        }
+        let scopes = self.billing_declaration_scopes(revision_id)?;
+        let scope_refs = scopes.iter()
+            .map(|(_, kind, value)| (kind.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        self.billing_declaration_impact_preview_for(
+            &host, &provider_id, &effective_start, effective_end.as_deref(),
+            &scope_refs, window_start_ms, window_end_ms,
+        )
+    }
+
+    /// Preview a prospective declaration before it is persisted. This is the
+    /// dry-run counterpart to `billing_declaration_impact_preview`: the UI can
+    /// show the affected facts/sessions/tokens before accepting a candidate,
+    /// without creating a saved revision or changing candidate status.
+    #[allow(clippy::too_many_arguments)]
+    pub fn billing_declaration_impact_preview_for(
+        &self, host: &str, provider_id: &str, effective_start: &str,
+        effective_end: Option<&str>, scopes: &[(&str, &str)],
+        window_start_ms: i64, window_end_ms: i64,
+    ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
+        if window_end_ms <= window_start_ms {
+            return Ok(BillingDeclarationImpactPreview { fact_count: 0, session_count: 0,
+                total_tokens: 0, first_event_ts_ms: None, last_event_ts_ms: None });
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT f.session_key, f.model_id, f.route_evidence_id, r.account_ref,
+                    f.event_ts_ms, f.uncached_input_tokens + f.cache_read_tokens
+                    + f.cache_write_tokens + f.output_tokens
+             FROM usage_facts f LEFT JOIN route_evidence r ON r.evidence_id = f.route_evidence_id
+             WHERE f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id = ?2
+               AND f.event_ts_ms >= ?3 AND f.event_ts_ms < ?4
+               AND strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?5
+               AND (?6 IS NULL OR strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?6)",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![
+            host, provider_id, window_start_ms, window_end_ms, effective_start, effective_end,
+        ], |row| Ok((
+            row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<i64>>(4)?, row.get::<_, i64>(5)?,
+        )))?;
+        let mut preview = BillingDeclarationImpactPreview { fact_count: 0, session_count: 0,
+            total_tokens: 0, first_event_ts_ms: None, last_event_ts_ms: None };
+        let mut sessions = std::collections::HashSet::new();
+        for row in rows {
+            let (session, model, route, account, event_ts, tokens) = row?;
+            let matches = |kind: &str, value: &str| match kind {
+                "model" => model.as_deref() == Some(value), "route" => route.as_deref() == Some(value),
+                "account" => account.as_deref() == Some(value), "session" => session.as_deref() == Some(value),
+                _ => false,
+            };
+            let matches_all_scope_kinds = ["account", "route", "model", "session"].iter().all(|kind| {
+                let values = scopes.iter().filter(|(scope_kind, _)| scope_kind == kind);
+                let has_kind = scopes.iter().any(|(scope_kind, _)| scope_kind == kind);
+                !has_kind || values.clone().any(|(_, value)| matches(kind, value))
+            });
+            if !matches_all_scope_kinds { continue; }
+            preview.fact_count += 1;
+            if let Some(key) = session { sessions.insert(key); }
+            preview.total_tokens = preview.total_tokens.saturating_add(tokens);
+            preview.first_event_ts_ms = preview.first_event_ts_ms.or(event_ts);
+            preview.last_event_ts_ms = event_ts.or(preview.last_event_ts_ms);
+        }
+        preview.session_count = sessions.len() as i64;
+        Ok(preview)
+    }
+
+    fn billing_declaration_matching_fact_ids(&self, revision_id: &str) -> Result<Vec<String>, AuthorityError> {
+        let revision: (String, String, String, Option<String>) = self.conn.query_row(
+            "SELECT host, provider_id, effective_start, effective_end FROM billing_declaration_revisions WHERE revision_id = ?1 AND change_kind = 'saved'",
+            rusqlite::params![revision_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let scopes = self.billing_declaration_scopes(revision_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT f.fact_id, f.model_id, f.route_evidence_id, r.account_ref, f.session_key
+             FROM usage_facts f LEFT JOIN route_evidence r ON r.evidence_id = f.route_evidence_id
+             WHERE f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id = ?2
+               AND f.event_ts_ms IS NOT NULL
+               AND strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?3
+               AND (?4 IS NULL OR strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?4)",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![revision.0, revision.1, revision.2, revision.3], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?,
+        )))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let (fact_id, model, route, account, session) = row?;
+            let matches = |kind: &str, value: &str| match kind {
+                "model" => model.as_deref() == Some(value), "route" => route.as_deref() == Some(value),
+                "account" => account.as_deref() == Some(value), "session" => session.as_deref() == Some(value),
+                _ => false,
+            };
+            let all_kinds = ["account", "route", "model", "session"].iter().all(|kind| {
+                let values = scopes.iter().filter(|(_, scope_kind, _)| scope_kind == kind);
+                !scopes.iter().any(|(_, scope_kind, _)| scope_kind == kind)
+                    || values.clone().any(|(_, _, value)| matches(kind, value))
+            });
+            if all_kinds { ids.push(fact_id); }
+        }
+        Ok(ids)
+    }
+
+    pub fn billing_recalculation_enqueue(
+        &self, job_id: &str, declaration_id: &str, revision_id: &str, now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if job_id.is_empty() || declaration_id.is_empty() || revision_id.is_empty() {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName("invalid recalculation job".to_string())));
+        }
+        let valid: Option<String> = self.conn.query_row(
+            "SELECT change_kind FROM billing_declaration_revisions WHERE revision_id = ?1 AND declaration_id = ?2",
+            rusqlite::params![revision_id, declaration_id], |row| row.get(0),
+        ).optional()?;
+        if valid.as_deref() != Some("saved") {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName("recalculation requires a saved declaration revision".to_string())));
+        }
+        let changed = self.conn.execute(
+            "INSERT INTO billing_recalculation_jobs(job_id, declaration_id, revision_id, status, requested_at_ms)
+             VALUES (?1, ?2, ?3, 'queued', ?4) ON CONFLICT(revision_id) DO NOTHING",
+            rusqlite::params![job_id, declaration_id, revision_id, now_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn billing_recalculation_set_status(
+        &self, job_id: &str, status: &str, error_code: Option<&str>, error_detail: Option<&str>, now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if !matches!(status, "running" | "succeeded" | "failed" | "cancelled") {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName("invalid recalculation status".to_string())));
+        }
+        let changed = self.conn.execute(
+            "UPDATE billing_recalculation_jobs SET status = ?2,
+                 started_at_ms = CASE WHEN ?2 = 'running' THEN COALESCE(started_at_ms, ?5) ELSE started_at_ms END,
+                 completed_at_ms = CASE WHEN ?2 IN ('succeeded', 'failed', 'cancelled') THEN ?5 ELSE completed_at_ms END,
+                 error_code = ?3, error_detail = ?4 WHERE job_id = ?1 AND status IN ('queued', 'running')",
+            rusqlite::params![job_id, status, error_code, error_detail, now_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// 失败或取消的任务可由用户显式重试；成功任务不回退，避免重试按钮
+    /// 改写已经发布的结果版本。任务 id 保持不变，结果快照仍可追溯。
+    pub fn billing_recalculation_retry(
+        &self, job_id: &str, now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        let changed = self.conn.execute(
+            "UPDATE billing_recalculation_jobs SET status = 'queued',
+                 completed_at_ms = NULL, error_code = NULL, error_detail = NULL,
+                 requested_at_ms = ?2
+             WHERE job_id = ?1 AND status IN ('failed', 'cancelled')",
+            rusqlite::params![job_id, now_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// 应用重启时恢复任务队列：把上次进程中断的 running 任务标为失败，
+    /// 再返回仍待执行的 queued 任务，由宿主启动 worker。只改变任务状态，
+    /// 不触碰事实、结果快照或归因表。
+    pub fn billing_recalculation_recover(
+        &self, now_ms: i64,
+    ) -> Result<Vec<String>, AuthorityError> {
+        self.conn.execute(
+            "UPDATE billing_recalculation_jobs SET status = 'failed',
+                 completed_at_ms = ?1, error_code = COALESCE(error_code, 'interrupted'),
+                 error_detail = COALESCE(error_detail, 'worker interrupted by app restart')
+             WHERE status = 'running'",
+            rusqlite::params![now_ms],
+        )?;
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id FROM billing_recalculation_jobs
+             WHERE status = 'queued' ORDER BY requested_at_ms, job_id",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<String>, _>>().map_err(AuthorityError::from)
+    }
+
+    pub fn billing_recalculation_job(
+        &self, job_id: &str,
+    ) -> Result<Option<BillingRecalculationJobRow>, AuthorityError> {
+        Ok(self.conn.query_row(
+            "SELECT job_id, declaration_id, revision_id, status, requested_at_ms, started_at_ms,
+                    completed_at_ms, error_code, error_detail FROM billing_recalculation_jobs WHERE job_id = ?1",
+            rusqlite::params![job_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+                row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
+        ).optional()?)
+    }
+
+    /// 返回尚未成功发布结果的任务，供工作台在重启后显示可恢复状态。
+    /// 成功任务不进入此列表，旧结果仍通过 billing_recalculation_result 可查。
+    pub fn billing_recalculation_jobs_needing_attention(
+        &self,
+    ) -> Result<Vec<BillingRecalculationJobRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, declaration_id, revision_id, status, requested_at_ms, started_at_ms,
+                    completed_at_ms, error_code, error_detail
+             FROM billing_recalculation_jobs
+             WHERE status IN ('queued', 'running', 'failed', 'cancelled')
+             ORDER BY requested_at_ms, job_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((
+            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
+            row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
+        )))?;
+        rows.collect::<Result<Vec<BillingRecalculationJobRow>, _>>().map_err(AuthorityError::from)
+    }
+
+    /// 执行一个只读聚合型重算任务并原子发布结果快照；原始 facts 与旧结果不变。
+    pub fn billing_recalculation_run(
+        &self, job_id: &str, now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        let job = self.billing_recalculation_job(job_id)?;
+        let Some((_, _, revision_id, status, _, _, _, _, _)) = job else { return Ok(false); };
+        if status != "queued" { return Ok(false); }
+        self.billing_recalculation_set_status(job_id, "running", None, None, now_ms)?;
+        let preview = match self.billing_declaration_impact_preview(&revision_id, i64::MIN, i64::MAX) {
+            Ok(value) => value,
+            Err(error) => {
+                self.billing_recalculation_set_status(job_id, "failed", Some("preview_failed"), Some("impact preview failed"), now_ms)?;
+                return Err(error);
+            }
+        };
+        let fact_ids = match self.billing_declaration_matching_fact_ids(&revision_id) {
+            Ok(fact_ids) => fact_ids,
+            Err(error) => {
+                let detail = error.to_string();
+                let _ = self.billing_recalculation_set_status(
+                    job_id, "failed", Some("fact_match_failed"), Some(&detail), now_ms,
+                );
+                return Err(error);
+            }
+        };
+        let attribution_kind: String = match self.conn.query_row(
+            "SELECT CASE WHEN relationship_kind = 'official_subscription' THEN 'subscription_covered' ELSE 'user_declared' END
+             FROM billing_declaration_revisions WHERE revision_id = ?1",
+            rusqlite::params![revision_id], |row| row.get(0),
+        ) {
+            Ok(kind) => kind,
+            Err(error) => {
+                let detail = error.to_string();
+                let _ = self.billing_recalculation_set_status(
+                    job_id, "failed", Some("attribution_kind_failed"), Some(&detail), now_ms,
+                );
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = self.conn.execute_batch("BEGIN IMMEDIATE") {
+            let detail = error.to_string();
+            let _ = self.billing_recalculation_set_status(
+                job_id, "failed", Some("transaction_start_failed"), Some(&detail), now_ms,
+            );
+            return Err(error.into());
+        }
+        let transaction_result = (|| -> Result<(), rusqlite::Error> {
+            self.conn.execute(
+                "INSERT INTO billing_recalculation_results(
+                     job_id, revision_id, fact_count, session_count, total_tokens,
+                     first_event_ts_ms, last_event_ts_ms, published_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(job_id) DO UPDATE SET published_at_ms = excluded.published_at_ms",
+                rusqlite::params![job_id, revision_id, preview.fact_count, preview.session_count,
+                    preview.total_tokens, preview.first_event_ts_ms, preview.last_event_ts_ms, now_ms],
+            )?;
+            for fact_id in fact_ids {
+                self.conn.execute(
+                    "INSERT INTO billing_fact_attributions(fact_id, revision_id, job_id, attribution_kind, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(fact_id, revision_id) DO NOTHING",
+                    rusqlite::params![fact_id, revision_id, job_id, attribution_kind, now_ms],
+                )?;
+            }
+            self.conn.execute(
+                "UPDATE billing_recalculation_jobs SET status = 'succeeded', completed_at_ms = ?2
+                 WHERE job_id = ?1 AND status = 'running'", rusqlite::params![job_id, now_ms],
+            )?;
+            self.conn.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+        match transaction_result {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                let detail = error.to_string();
+                let _ = self.billing_recalculation_set_status(
+                    job_id, "failed", Some("transaction_failed"), Some(&detail), now_ms,
+                );
+                Err(error.into())
+            }
+        }
+    }
+
+    pub fn billing_recalculation_result(
+        &self, job_id: &str,
+    ) -> Result<Option<BillingRecalculationResultRow>, AuthorityError> {
+        Ok(self.conn.query_row(
+            "SELECT job_id, revision_id, fact_count, session_count, total_tokens,
+                    first_event_ts_ms, last_event_ts_ms, published_at_ms
+             FROM billing_recalculation_results WHERE job_id = ?1",
+            rusqlite::params![job_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+                row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+        ).optional()?)
+    }
+
+    /// 幂等写入一个待确认的旧订阅候选。相同候选不会重复；候选永远不写入
+    /// `host_bills`，必须由上层获得用户确认后另走明确账单写入。
+    #[allow(clippy::too_many_arguments)]
+    pub fn billing_import_candidate_put(
+        &self,
+        candidate_id: &str,
+        host: &str,
+        provider_id: &str,
+        currency: &str,
+        amount_minor: i64,
+        billing_period_start: &str,
+        source_pricing_version: &str,
+        now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if candidate_id.is_empty() || host.is_empty() || provider_id.is_empty()
+            || currency.trim().is_empty() || amount_minor < 0
+            || billing_period_start.len() != 7 || source_pricing_version.is_empty()
+        {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid billing import candidate".to_string(),
+            )));
+        }
+        let changed = self.conn.execute(
+            "INSERT INTO billing_import_candidates(
+                 candidate_id, host, provider_id, currency, amount_minor, billing_period_start,
+                 source_pricing_version, status, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?8)
+             ON CONFLICT(candidate_id) DO NOTHING",
+            rusqlite::params![candidate_id, host, provider_id, currency, amount_minor,
+                billing_period_start, source_pricing_version, now_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn pending_billing_import_candidates(
+        &self,
+    ) -> Result<Vec<BillingImportCandidateRow>, AuthorityError> {
+        Ok(self.billing_import_candidates()?.into_iter()
+            .filter(|row| row.6 == "pending").collect())
+    }
+
+    /// 所有旧资产候选（含用户已决定项）。已决定项仍需可见，才能提供可核对
+    /// 的回执与撤销入口；它们不参与同步生成或实际支出计算。
+    pub fn billing_import_candidates(
+        &self,
+    ) -> Result<Vec<BillingImportCandidateRow>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT candidate_id, host, provider_id, currency, amount_minor, billing_period_start, status
+             FROM billing_import_candidates
+             ORDER BY provider_id, billing_period_start, candidate_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((
+            r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?, r.get::<_, i64>(4)?, r.get::<_, String>(5)?,
+            r.get::<_, String>(6)?,
+        )))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 用户对旧资产候选作出的本地决定。`accepted` 只确认“这是我的套餐
+    /// 声明”，并不创建付款/账单；`dismissed` 表示该候选不属于当前用户。
+    /// 两种决定都不可再被后续同步重新变回 pending。
+    pub fn billing_import_candidate_resolve(
+        &self,
+        candidate_id: &str,
+        status: &str,
+        now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if !matches!(status, "accepted" | "dismissed") {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "billing candidate status must be accepted or dismissed".to_string(),
+            )));
+        }
+        Ok(self.conn.execute(
+            "UPDATE billing_import_candidates
+             SET status = ?2, updated_at_ms = ?3, resolved_at_ms = ?3
+             WHERE candidate_id = ?1 AND status = 'pending'",
+            rusqlite::params![candidate_id, status, now_ms],
+        )? > 0)
+    }
+
+    /// 用户主动撤销刚才的候选决定，恢复为待确认。同步不会调用该方法，故不会
+    /// 擅自推翻用户决定；撤销同样不涉及付款或账单。
+    pub fn billing_import_candidate_reopen(
+        &self,
+        candidate_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        Ok(self.conn.execute(
+            "UPDATE billing_import_candidates
+             SET status = 'pending', updated_at_ms = ?2, resolved_at_ms = NULL
+             WHERE candidate_id = ?1 AND status IN ('accepted', 'dismissed')",
+            rusqlite::params![candidate_id, now_ms],
+        )? > 0)
+    }
+
+    /// 将先前错误自动导入的旧价表账单撤回。仅匹配专用 evidence 标签，绝不
+    /// 触碰用户手工录入的账单。
+    pub fn revoke_legacy_pricing_host_bills(&self, now_ms: i64) -> Result<usize, AuthorityError> {
+        Ok(self.conn.execute(
+            "UPDATE host_bills SET deleted_at_ms = ?1
+             WHERE evidence_ref = 'legacy-pricing-catalog' AND deleted_at_ms IS NULL",
+            rusqlite::params![now_ms],
         )?)
     }
 
@@ -1460,6 +2752,38 @@ impl AuthorityDb {
             )
             .optional()
             .map_err(AuthorityError::from)
+    }
+
+    /// 写入一份宿主实时快照（`codex_quota` 之外的第二类消费方：Claude Pro 的
+    /// 窗口状态）。
+    ///
+    /// **只让更新的快照覆盖旧的**（`WHERE excluded.observed_at_ms >= ...`）——
+    /// 与 Codex 那条同一条纪律：扫描是跨文件取最新，但不同批次到达顺序不保证，
+    /// 没有这个守卫就会出现"旧观察覆盖新观察"，而窗口状态恰恰是**越新越准**的
+    /// 东西（重置时刻会往后推）。
+    ///
+    /// 返回是否真的写入（`false` = 已有更新的观察，本次忽略）。
+    pub fn runtime_snapshot_upsert(
+        &self,
+        host: &str,
+        snapshot_kind: &str,
+        payload_json: &str,
+        observed_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        let changed = self.conn.execute(
+            "INSERT INTO host_runtime_snapshots(
+                 host, snapshot_kind, payload_json, observed_at_ms, source_id,
+                 ingested_run_id, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
+             ON CONFLICT(host, snapshot_kind) DO UPDATE SET
+                 payload_json = excluded.payload_json,
+                 observed_at_ms = excluded.observed_at_ms,
+                 updated_at_ms = excluded.updated_at_ms
+             WHERE excluded.observed_at_ms >= host_runtime_snapshots.observed_at_ms",
+            rusqlite::params![host, snapshot_kind, payload_json, observed_at_ms, now_ms],
+        )?;
+        Ok(changed > 0)
     }
 
     pub fn conn(&self) -> &Connection {
@@ -1516,8 +2840,15 @@ mod tests {
                 "provider_catalog_snapshots",
                 "billing_templates",
                 "billing_template_snapshots",
+                "billing_import_candidates",
                 "outcome_measurements",
                 "savings_records",
+                "billing_declarations",
+                "billing_declaration_revisions",
+                "billing_declaration_scopes",
+                "billing_recalculation_jobs",
+                "billing_recalculation_results",
+                "billing_fact_attributions",
             ] {
                 assert!(tables.iter().any(|x| x == t), "缺表 {t}: {tables:?}");
             }
@@ -1606,6 +2937,382 @@ mod tests {
             )
             .unwrap();
         assert_eq!(exists, 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v6_database_migrates_candidates_and_billing_declarations() {
+        let db = tmp_db("v6-to-v8");
+        {
+            let current = AuthorityDb::open(&db, 1).unwrap();
+            current.conn().execute_batch(
+                "DROP TABLE billing_fact_attributions;
+                 DROP TABLE billing_recalculation_results;
+                 DROP TABLE billing_recalculation_jobs;
+                 DROP TABLE billing_declaration_scopes;
+                 DROP TABLE billing_declaration_revisions;
+                 DROP TABLE billing_declarations;
+                 DROP TABLE billing_import_candidates;
+                 UPDATE schema_meta SET value = '6' WHERE key = 'schema_version';",
+            ).unwrap();
+        }
+        let upgraded = AuthorityDb::open(&db, 2).unwrap();
+        let version: String = upgraded.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        assert!(upgraded.billing_import_candidate_put(
+            "candidate", "claude-code", "minimax", "CNY", 11_400, "2026-09", "legacy", 3,
+        ).unwrap());
+        assert_eq!(upgraded.pending_billing_import_candidates().unwrap().len(), 1);
+        assert!(upgraded.billing_import_candidate_resolve("candidate", "accepted", 4).unwrap());
+        assert!(upgraded.billing_declaration_put(
+            "decl", "claude-code", "minimax", "official_subscription", None,
+            Some(11_400), Some("CNY"), "2026-09", None, Some("candidate"), None, 5,
+        ).unwrap());
+        assert_eq!(upgraded.billing_declarations().unwrap().len(), 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v8_database_adds_immutable_declaration_revision_tables() {
+        let db = tmp_db("v8-to-v9");
+        {
+            let current = AuthorityDb::open(&db, 1).unwrap();
+            current.conn().execute_batch(
+                "DROP TABLE billing_fact_attributions;
+                 DROP TABLE billing_recalculation_results;
+                 DROP TABLE billing_recalculation_jobs;
+                 DROP TABLE billing_declaration_scopes;
+                 DROP TABLE billing_declaration_revisions;
+                 UPDATE schema_meta SET value = '8' WHERE key = 'schema_version';",
+            ).unwrap();
+        }
+        let upgraded = AuthorityDb::open(&db, 2).unwrap();
+        let version: String = upgraded.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        let scope_table: String = upgraded.conn().query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'billing_declaration_scopes'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(scope_table, "billing_declaration_scopes");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn stale_v9_stamp_with_later_tables_upgrades_idempotently() {
+        let db = tmp_db("stale-v9");
+        {
+            let current = AuthorityDb::open(&db, 1).unwrap();
+            current.conn().execute(
+                "UPDATE schema_meta SET value = '9' WHERE key = 'schema_version'",
+                [],
+            ).unwrap();
+        }
+        let upgraded = AuthorityDb::open(&db, 2).unwrap();
+        let version: String = upgraded.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        assert_eq!(upgraded.billing_recalculation_result("missing").unwrap(), None);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_import_candidate_decision_never_creates_a_bill() {
+        let db = tmp_db("candidate-decision");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.billing_import_candidate_put(
+            "candidate", "claude-code", "minimax", "CNY", 11_400, "2026-09", "legacy", 1,
+        ).unwrap();
+        assert!(authority.billing_import_candidate_resolve("candidate", "accepted", 2).unwrap());
+        assert!(authority.pending_billing_import_candidates().unwrap().is_empty());
+        assert_eq!(authority.billing_import_candidates().unwrap()[0].6, "accepted",
+            "the resolved state remains available for a persistent receipt and undo");
+        assert_eq!(authority.host_bill_count().unwrap(), 0,
+            "a package declaration is not a payment record");
+        assert!(!authority.billing_import_candidate_resolve("candidate", "dismissed", 3).unwrap(),
+            "a resolved candidate cannot be silently rewritten by sync");
+        let status: String = authority.conn().query_row(
+            "SELECT status FROM billing_import_candidates WHERE candidate_id = 'candidate'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(status, "accepted");
+        assert!(authority.billing_import_candidate_reopen("candidate", 4).unwrap());
+        assert_eq!(authority.pending_billing_import_candidates().unwrap().len(), 1,
+            "only an explicit user action can restore a pending candidate");
+        assert!(!authority.billing_import_candidate_reopen("candidate", 5).unwrap());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_declaration_is_separate_from_bills_and_allows_unknown_amount() {
+        let db = tmp_db("billing-declaration");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        assert!(authority.billing_declaration_put(
+            "decl-unknown", "codex", "openai", "official_subscription", Some("Plus"),
+            None, None, "2026-09", None, None, Some("user:declared"), 2,
+        ).unwrap());
+        assert!(authority.billing_declaration_put(
+            "decl-paid-contract", "claude-code", "anthropic", "official_subscription", Some("Pro"),
+            Some(2_000), Some("USD"), "2026-09", Some("2026-12"), None, None, 3,
+        ).unwrap());
+        let rows = authority.billing_declarations().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "decl-paid-contract");
+        assert_eq!(rows[0].5, Some(2_000));
+        assert_eq!(rows[1].0, "decl-unknown");
+        assert_eq!(rows[1].5, None, "unknown contract amount must remain unknown");
+        assert_eq!(authority.host_bill_count().unwrap(), 0,
+            "a billing declaration must not masquerade as a payment record");
+        assert!(authority.billing_declaration_put(
+            "bad", "codex", "openai", "official_subscription", None,
+            Some(100), None, "2026-09", None, None, None, 4,
+        ).is_err(), "amount without a currency is invalid");
+        assert!(authority.billing_declaration_put(
+            "bad-month", "codex", "openai", "official_subscription", None,
+            None, None, "2026-99", None, None, None, 4,
+        ).is_err(), "malformed period must not pass a length-only check");
+        authority.billing_import_candidate_put(
+            "candidate", "claude-code", "anthropic", "USD", 2_000, "2026-09", "legacy", 4,
+        ).unwrap();
+        assert!(authority.billing_declaration_put(
+            "wrong-candidate", "codex", "openai", "official_subscription", None,
+            None, None, "2026-09", None, Some("candidate"), None, 4,
+        ).is_err(), "candidate must belong to the declaration host/provider and be accepted");
+        authority.billing_import_candidate_resolve("candidate", "accepted", 5).unwrap();
+        assert!(authority.billing_declaration_put(
+            "candidate-declaration", "claude-code", "anthropic", "official_subscription", None,
+            Some(2_000), Some("USD"), "2026-09", None, Some("candidate"), None, 6,
+        ).unwrap());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_revision_accepts_pending_candidate_atomically() {
+        let db = tmp_db("billing-candidate-atomic");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.billing_import_candidate_put(
+            "pending-ok", "codex", "openai", "CNY", 1_990, "2026-09", "uat", 1,
+        ).unwrap();
+        assert!(authority.billing_declaration_revision_save(
+            "revision-from-pending", "declaration-from-pending", None,
+            "codex", "openai", "official_subscription", Some("Plus"),
+            Some(1_990), Some("CNY"), "2026-09", None, Some("pending-ok"),
+            Some("candidate:pending-ok"), &[], 2,
+        ).unwrap());
+        assert_eq!(authority.billing_import_candidates().unwrap()[0].6, "accepted");
+        assert_eq!(authority.billing_declaration_revisions("declaration-from-pending").unwrap()[0].13,
+            Some("pending-ok".to_string()));
+
+        authority.billing_import_candidate_put(
+            "pending-fail", "codex", "openai", "CNY", 2_990, "2026-09", "uat", 3,
+        ).unwrap();
+        assert!(authority.billing_declaration_revision_save(
+            "revision-from-pending-fail", "declaration-from-pending-fail", None,
+            "codex", "openai", "official_subscription", None, None, None,
+            "2026-09", None, Some("pending-fail"), None,
+            &[("model", "gpt-5"), ("model", "gpt-5")], 4,
+        ).is_err());
+        let status: String = authority.conn().query_row(
+            "SELECT status FROM billing_import_candidates WHERE candidate_id = 'pending-fail'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(status, "pending", "a failed revision must roll candidate acceptance back");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_declaration_revisions_are_scoped_immutable_and_revocable() {
+        let db = tmp_db("billing-declaration-revisions");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        assert!(authority.billing_declaration_revision_save(
+            "revision-1", "declaration", None, "codex", "openai", "official_subscription",
+            Some("Plus"), None, None, "2026-09", None, None, Some("user:declared"),
+            &[("route", "official-desktop"), ("model", "gpt-5.6-sol")], 2,
+        ).unwrap());
+        assert_eq!(authority.billing_declaration_revisions("declaration").unwrap().len(), 1);
+        assert_eq!(authority.billing_declaration_scopes("revision-1").unwrap(), vec![
+            ("revision-1".to_string(), "model".to_string(), "gpt-5.6-sol".to_string()),
+            ("revision-1".to_string(), "route".to_string(), "official-desktop".to_string()),
+        ]);
+        assert_eq!(authority.host_bill_count().unwrap(), 0,
+            "a scoped declaration remains distinct from a payment record");
+        assert!(authority.billing_declaration_revision_save(
+            "revision-2", "declaration", Some("revision-1"), "codex", "openai",
+            "official_subscription", Some("Plus"), None, None, "2026-10", None, None,
+            Some("user:corrected"), &[("account", "personal")], 3,
+        ).unwrap());
+        let revisions = authority.billing_declaration_revisions("declaration").unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].2, 1);
+        assert_eq!(revisions[0].11, "2026-09", "old revision remains intact");
+        assert_eq!(revisions[1].2, 2);
+        assert_eq!(revisions[1].11, "2026-10");
+        assert!(authority.billing_declaration_revision_save(
+            "bad-branch", "declaration", Some("revision-1"), "codex", "openai",
+            "official_subscription", None, None, None, "2026-10", None, None, None, &[], 4,
+        ).is_err(), "a stale revision cannot silently form a second current branch");
+        assert!(authority.billing_declaration_revision_revoke(
+            "revision-3", "declaration", "revision-2", 5,
+        ).unwrap());
+        assert!(authority.billing_declarations().unwrap().is_empty(),
+            "revoke makes only the current materialization inactive, not history disappear");
+        let revisions = authority.billing_declaration_revisions("declaration").unwrap();
+        assert_eq!(revisions.len(), 3);
+        assert_eq!(revisions[2].3, "revoked");
+        assert_eq!(authority.billing_declaration_scopes("revision-3").unwrap(), vec![
+            ("revision-3".to_string(), "account".to_string(), "personal".to_string()),
+        ], "revoke carries the revoked revision's exact scope for auditability");
+        assert!(!authority.billing_declaration_revision_revoke(
+            "revision-3", "declaration", "revision-2", 6,
+        ).unwrap(), "replaying the same revoke is idempotent");
+        assert_eq!(authority.host_bill_count().unwrap(), 0);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn invalid_or_duplicate_declaration_scopes_do_not_create_revisions() {
+        let db = tmp_db("billing-declaration-invalid-scopes");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        assert!(authority.billing_declaration_revision_save(
+            "invalid", "declaration", None, "codex", "openai", "official_api", None,
+            None, None, "2026-09", None, None, None,
+            &[("model", "gpt-5"), ("model", "gpt-5")], 2,
+        ).is_err());
+        assert!(authority.billing_declaration_revisions("declaration").unwrap().is_empty());
+        assert!(authority.billing_declarations().unwrap().is_empty());
+        assert!(authority.billing_declaration_revision_save(
+            "invalid-kind", "declaration", None, "codex", "openai", "official_api", None,
+            None, None, "2026-09", None, None, None, &[("host", "codex")], 3,
+        ).is_err());
+        assert!(authority.billing_declaration_revisions("declaration").unwrap().is_empty());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_declaration_impact_preview_matches_scope_intersection() {
+        let db = tmp_db("billing-impact-preview");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.conn().execute_batch(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES('preview-run', 1, 'test', 'succeeded', 9);
+             INSERT INTO route_evidence(evidence_id, host, machine_namespace, native_session_id,
+                 endpoint_host, account_ref, evidence_basis, ingested_run_id)
+             VALUES('route-a', 'codex', 'machine', 'session-a', 'official', 'personal', 'test', 'preview-run'),
+                   ('route-b', 'codex', 'machine', 'session-b', 'other', 'personal', 'test', 'preview-run');
+             INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+             VALUES('session-a-key', 'codex', 'session-a', 'machine', 1000),
+                   ('session-b-key', 'codex', 'session-b', 'machine', 3000);
+             INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                 session_key, observation_kind, provider_id, model_id, event_ts_ms, route_evidence_id,
+                 uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                 ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES('fact-1', 'codex', 'machine', 'session-a', 'event-1', 'session-a-key', 'assistant-usage', 'openai', 'model-a', 1000, 'route-a', 10, 0, 0, 0, 'preview-run', 1, 1),
+                   ('fact-2', 'codex', 'machine', 'session-a', 'event-2', 'session-a-key', 'assistant-usage', 'openai', 'model-b', 2000, 'route-a', 20, 0, 0, 0, 'preview-run', 1, 1),
+                   ('fact-3', 'codex', 'machine', 'session-b', 'event-3', 'session-b-key', 'assistant-usage', 'openai', 'model-a', 3000, 'route-b', 30, 0, 0, 0, 'preview-run', 1, 1);",
+        ).unwrap();
+        assert_eq!(authority.billing_declaration_impact_preview_for(
+            "codex", "openai", "1970-01", Some("1970-12"),
+            &[("route", "route-a"), ("model", "model-a")], 0, 4_000,
+        ).unwrap(), BillingDeclarationImpactPreview {
+            fact_count: 1, session_count: 1, total_tokens: 10,
+            first_event_ts_ms: Some(1000), last_event_ts_ms: Some(1000),
+        });
+        assert_eq!(authority.conn().query_row(
+            "SELECT COUNT(*) FROM billing_declaration_revisions", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0, "prospective preview must not persist a revision");
+        authority.billing_declaration_revision_save(
+            "preview-revision", "preview-declaration", None, "codex", "openai", "official_api",
+            None, None, None, "1970-01", Some("1970-12"), None, Some("test"),
+            &[("route", "route-a"), ("model", "model-a")], 2,
+        ).unwrap();
+        assert_eq!(authority.billing_declaration_impact_preview(
+            "preview-revision", 0, 4_000,
+        ).unwrap(), BillingDeclarationImpactPreview {
+            fact_count: 1, session_count: 1, total_tokens: 10,
+            first_event_ts_ms: Some(1000), last_event_ts_ms: Some(1000),
+        });
+        assert_eq!(authority.host_bill_count().unwrap(), 0);
+        authority.billing_recalculation_enqueue("preview-job", "preview-declaration", "preview-revision", 3).unwrap();
+        assert!(authority.billing_recalculation_run("preview-job", 4).unwrap());
+        let attribution: String = authority.conn().query_row(
+            "SELECT fact_id FROM billing_fact_attributions WHERE job_id = 'preview-job'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(attribution, "fact-1");
+        assert_eq!(authority.host_bill_count().unwrap(), 0);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_recalculation_job_is_idempotent_and_has_explicit_receipt() {
+        let db = tmp_db("billing-recalculation-job");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.billing_declaration_revision_save(
+            "revision-job", "declaration-job", None, "codex", "openai", "official_api",
+            None, None, None, "2026-09", None, None, None, &[], 1,
+        ).unwrap();
+        assert!(authority.billing_recalculation_enqueue("job-1", "declaration-job", "revision-job", 2).unwrap());
+        assert!(!authority.billing_recalculation_enqueue("job-2", "declaration-job", "revision-job", 3).unwrap());
+        assert_eq!(authority.billing_recalculation_job("job-1").unwrap().unwrap().3, "queued");
+        assert!(authority.billing_recalculation_run("job-1", 4).unwrap());
+        assert_eq!(authority.billing_recalculation_job("job-1").unwrap().unwrap().3, "succeeded");
+        assert_eq!(authority.billing_recalculation_result("job-1").unwrap().unwrap().2, 0);
+        assert!(!authority.billing_recalculation_run("job-1", 5).unwrap());
+        assert!(!authority.billing_recalculation_enqueue("job-3", "declaration-job", "revision-job", 6).unwrap(),
+            "one revision cannot create a second recalculation job");
+        authority.billing_declaration_revision_save(
+            "revision-job-2", "declaration-job-2", None, "codex", "openai", "official_api",
+            None, None, None, "2026-09", None, None, None, &[], 7,
+        ).unwrap();
+        assert!(authority.billing_recalculation_enqueue("job-failed", "declaration-job-2", "revision-job-2", 8).unwrap());
+        assert!(authority.billing_recalculation_set_status("job-failed", "running", None, None, 9).unwrap());
+        assert!(authority.billing_recalculation_set_status("job-failed", "failed", Some("worker_failed"), Some("worker unavailable"), 10).unwrap());
+        let job = authority.billing_recalculation_job("job-failed").unwrap().unwrap();
+        assert_eq!(job.3, "failed");
+        assert_eq!(job.5, Some(9));
+        assert_eq!(job.6, Some(10));
+        assert_eq!(job.7.as_deref(), Some("worker_failed"));
+        assert!(!authority.billing_recalculation_set_status("job-failed", "succeeded", None, None, 11).unwrap());
+        assert!(authority.billing_recalculation_retry("job-failed", 12).unwrap());
+        let retried = authority.billing_recalculation_job("job-failed").unwrap().unwrap();
+        assert_eq!(retried.3, "queued");
+        assert_eq!(retried.6, None);
+        assert_eq!(retried.7, None);
+        assert!(!authority.billing_recalculation_retry("job-1", 13).unwrap(),
+            "成功任务不可回退为 queued");
+        let queued = authority.billing_recalculation_recover(14).unwrap();
+        assert_eq!(queued, vec!["job-failed".to_string()]);
+        assert!(authority.billing_recalculation_set_status("job-failed", "running", None, None, 15).unwrap());
+        assert_eq!(authority.billing_recalculation_recover(16).unwrap(), Vec::<String>::new());
+        assert_eq!(authority.billing_recalculation_job("job-failed").unwrap().unwrap().3, "failed");
+        assert_eq!(authority.billing_recalculation_jobs_needing_attention().unwrap().len(), 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_recalculation_failure_after_running_is_terminal_and_retryable() {
+        let db = tmp_db("billing-recalculation-transaction-failure");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.billing_declaration_revision_save(
+            "revision-transaction-failure", "declaration-transaction-failure", None,
+            "codex", "openai", "official_api", None, None, None, "2026-09", None,
+            None, None, &[], 1,
+        ).unwrap();
+        assert!(authority.billing_recalculation_enqueue(
+            "job-transaction-failure", "declaration-transaction-failure",
+            "revision-transaction-failure", 2,
+        ).unwrap());
+        authority.conn().execute_batch("DROP TABLE billing_recalculation_results").unwrap();
+
+        assert!(authority.billing_recalculation_run("job-transaction-failure", 3).is_err());
+        let failed = authority.billing_recalculation_job("job-transaction-failure").unwrap().unwrap();
+        assert_eq!(failed.3, "failed");
+        assert_eq!(failed.7.as_deref(), Some("transaction_failed"));
+        assert_eq!(failed.6, Some(3));
+        assert!(authority.billing_recalculation_retry("job-transaction-failure", 4).unwrap());
+        assert_eq!(authority.billing_recalculation_job("job-transaction-failure").unwrap().unwrap().3, "queued");
         let _ = std::fs::remove_file(&db);
     }
 
@@ -1988,6 +3695,32 @@ mod tests {
     }
 
     #[test]
+    fn delete_imported_host_data_is_scoped_and_reimportable() {
+        let path = tmp_db("delete-imported-host");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.conn().execute_batch(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version) VALUES ('run', 1, 'test', 'succeeded', 12);
+             INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns, parser_version, first_seen_at_ms, last_seen_at_ms) VALUES
+               ('source-codex', 'codex', 'c', 1, 1, 1, 1, 1), ('source-dsh', 'dsh', 'd', 1, 1, 1, 1, 1);
+             INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms) VALUES
+               ('session-codex', 'codex', 'c', 'm', 1), ('session-dsh', 'dsh', 'd', 'm', 1);
+             INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key, source_event_id, observation_kind, source_id, ingested_run_id, created_at_ms, updated_at_ms) VALUES
+               ('fact-codex', 'codex', 'm', 'c', 'session-codex', 'e1', 'usage', 'source-codex', 'run', 1, 1),
+               ('fact-dsh', 'dsh', 'm', 'd', 'session-dsh', 'e2', 'usage', 'source-dsh', 'run', 1, 1);"
+        ).unwrap();
+        db.host_bill_put("bill-dsh", "dsh", "deepseek", "2026-09", "metered_actual", 100, "CNY", "user:receipt", 2).unwrap();
+        assert_eq!(db.delete_imported_host_data("codex", 3).unwrap(), HostImportedDataDeletion { facts: 1, sessions: 1, source_files: 1 });
+        let (codex_live, dsh_live, sources): (i64, i64, i64) = db.conn().query_row(
+            "SELECT SUM(host = 'codex' AND deleted_at_ms IS NULL), SUM(host = 'dsh' AND deleted_at_ms IS NULL), COUNT(*) FROM usage_facts", [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!((codex_live, dsh_live, sources), (0, 1, 2));
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM source_files WHERE host = 'codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.host_bill_count().unwrap(), 1, "manual bills are not imported source data");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn immediate_txn_rolls_back_on_error() {
         let db = tmp_db("txn");
         let a = AuthorityDb::open(&db, 1_000).unwrap();
@@ -2044,6 +3777,27 @@ mod tests {
             ),
             (61_000, 3_100, 9_000, 3_000)
         );
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn budget_profiles_keep_estimate_and_confirmed_currencies_separate() {
+        let db = tmp_db("budget-profiles");
+        let a = AuthorityDb::open(&db, 1_000).unwrap();
+        a.budget_profile_set("estimate", "CNY", 60_000, Some(3_000), 8_000, 2_000).unwrap();
+        a.budget_profile_set("confirmed", "USD", 10_000, None, 9_000, 3_000).unwrap();
+        assert_eq!(a.budget_profiles_get().unwrap(), vec![
+            BudgetProfile {
+                profile_id: "confirmed".into(), currency: "USD".into(), monthly_minor: 10_000,
+                daily_minor: None, warning_ratio_bp: 9_000, updated_at_ms: 3_000,
+            },
+            BudgetProfile {
+                profile_id: "estimate".into(), currency: "CNY".into(), monthly_minor: 60_000,
+                daily_minor: Some(3_000), warning_ratio_bp: 8_000, updated_at_ms: 2_000,
+            },
+        ]);
+        assert!(a.budget_profile_set("estimate", "CN", 1, None, 8_000, 4_000).is_err());
+        assert!(a.budget_profile_set("estimate", "USD", 0, None, 8_000, 4_000).is_err());
         let _ = std::fs::remove_file(&db);
     }
 
@@ -2110,6 +3864,33 @@ mod tests {
         let _ = std::fs::remove_file(&db);
     }
 
+    #[test]
+    fn pricing_catalog_snapshot_put_rolls_back_both_tables_on_failure() {
+        let db = tmp_db("pxsnap-atomic");
+        let a = AuthorityDb::open(&db, 1_000).unwrap();
+        let result = a.pricing_catalog_snapshot_put(
+            "public-v1",
+            "public-v1",
+            "public-maintainer-https",
+            "{\"providers\":{}}",
+            2_000,
+            Some("missing-template"),
+        );
+        assert!(result.is_err());
+        assert_eq!(a.pricing_snapshot_count().unwrap(), 0);
+        assert_eq!(
+            a.conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_catalog_snapshots",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        let _ = std::fs::remove_file(&db);
+    }
+
     /// Phase 2.8：`host_bills` 写入方——校验四项（period/basis/amount/currency）、
     /// 同键 upsert（更正金额，deleted 复活）、`for_period` 只回活行、soft delete。
     #[test]
@@ -2138,6 +3919,11 @@ mod tests {
             a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", 100, "  ", "", 1)
                 .is_err(),
             "currency 空"
+        );
+        assert!(
+            a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", 100, "cny", "", 1)
+                .is_err(),
+            "currency 必须是三位大写代码"
         );
 
         // 正常录入 + 同键 upsert 更正金额。

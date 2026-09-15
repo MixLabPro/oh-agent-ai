@@ -31,8 +31,9 @@ from . import state
 from . import cost as cost_module
 from . import usage as usage_module
 
-_BEIJING = timezone(timedelta(hours=8))
-
+# Compatibility symbol retained for older callers/tests; production calculations
+# resolve the current system timezone through state._system_timezone().
+_BEIJING = state._system_timezone()
 
 # ────────────────────────── 默认预算 ──────────────────────────
 
@@ -383,7 +384,7 @@ def compute_7d_avg_daily():
         return None
     days = result["days"]
     pricing = cost_module.load_pricing()
-    today_bj = datetime.now(_BEIJING).date()
+    today_bj = datetime.now(state._system_timezone()).date()
     total = 0.0
     n = 0
     for offset in range(7):
@@ -494,7 +495,7 @@ def evaluate(now=None):
     # snooze 检查:now > snoozed_until → 自动失效
     snoozed_until = _read_snooze()
     if snoozed_until and now is None:
-        now = datetime.now(_BEIJING)
+        now = datetime.now(state._system_timezone())
     if snoozed_until and now and now >= snoozed_until:
         snoozed_until = None  # 过期
 
@@ -524,7 +525,7 @@ def evaluate(now=None):
             reasons.append("peak share %d%% exceeds max %d%%" %
                            (round(peak_share * 100), round(peak_max * 100)))
     elif today is None:
-        reasons.append("no today.json yet (run `behavior <log>` to start tracking)")
+        reasons.append("no metered spend recorded for today yet (budget counts cross-host metered spend only)")
 
     # 月预算：之前只把 month_cost/monthly_cny 算出来给 xbar 显示,从没真的
     # 参与过 level 判定——用户月预算超了几倍,只要今天花得少,菜单栏照样
@@ -606,9 +607,9 @@ def _read_snooze():
     if dt.tzinfo is None:
         # 兼容手写 / 旧版本写入的裸时间戳 —— 没有 tzinfo 就没法跟
         # evaluate() 里 tz-aware 的 `now` 比较(TypeError: can't compare
-        # offset-naive and offset-aware datetimes)。本模块统一按北京时间
-        # 解释裸时间戳,与 state.py 的 _BEIJING 常量同一约定。
-        dt = dt.replace(tzinfo=_BEIJING)
+        # offset-naive and offset-aware datetimes)。本模块按系统统计时区
+        # 解释裸时间戳，与 state.py 的日期键保持同一口径。
+        dt = dt.replace(tzinfo=state._system_timezone())
     return dt
 
 
@@ -619,8 +620,8 @@ def set_snooze(until_iso, reason="user-set"):
     # 验证 ISO8601 —— 与 datetime.fromisoformat 同样的解析路径,失败即抛
     parsed = datetime.fromisoformat(until_iso)
     if parsed.tzinfo is None:
-        # 裸时间戳按北京时间解释 —— 见 _read_snooze 同一条注释。
-        parsed = parsed.replace(tzinfo=_BEIJING)
+        # 裸时间戳按系统统计时区解释 —— 见 _read_snooze 同一条注释。
+        parsed = parsed.replace(tzinfo=state._system_timezone())
     p = _budget_state_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = {

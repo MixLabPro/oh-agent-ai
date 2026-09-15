@@ -31,6 +31,58 @@ cargo tauri build
 # 产物在 target/release/bundle/ 下
 ```
 
+## 发布包安装与恢复
+
+正式发布包应从可信 Release 页面下载 `.dmg` 或 `.app.zip`，不要从开发者工作目录
+复制应用，也不需要另外安装 Python、CLI 或修改 shell `PATH`。应用内置的
+`agent-vitals` 位于包的 `Contents/Resources/bin/`，工作台的诊断页会显示 App、CLI、
+Engine、Authority schema、统计时区、价格和同步状态。
+
+本地构建包仅用于开发验证：
+
+```bash
+# 从仓库根目录执行
+node scripts/verify-macos-app-bundle.mjs
+
+# 按当前机器/CI 目标架构做强校验（示例）
+node scripts/verify-macos-app-bundle.mjs --require-architecture=arm64
+
+# 正式发布门禁：要求 Developer ID 签名
+node scripts/verify-macos-app-bundle.mjs --require-developer-id
+
+# 校验桌面 Release workflow 的关键门禁仍在位
+node scripts/verify-release-desktop-workflow.mjs
+```
+
+前一个检查允许本地 ad-hoc 签名并只作诊断；后一个检查失败时不得宣称安装包已完成
+发布。正式 Release 还必须通过 notarization ticket 校验，并附带 `SHA256SUMS`。
+当前发布 workflow 的最低 macOS 版本为 11.0；Apple Silicon/Intel 只有在对应架构
+产物完成构建和真机验证后才能列入支持矩阵。
+当前证据与未支持组合见[macOS 桌面支持矩阵](./SUPPORT_MATRIX.md)。
+
+升级前请保留数据根目录的备份。升级失败时应先保留原数据和诊断包，再回退到上一份
+已验证的应用包；不要删除数据库后让应用静默重建。卸载应用本身不会自动删除数据，
+如需删除数据必须在用户明确确认范围后单独删除数据根目录。
+
+## 两分钟上手
+
+1. 打开应用并等待工作台完成首轮整理；无需填写套餐、预算、邮箱或 API Key。
+2. 在“总览”查看已观测用量、名义成本、来源状态和价格覆盖；没有记录时选择“其他位置”
+   或查看演示样例。
+3. 若看到“确认计费方式”，只确认你有把握的那一组用量；保存前先查看作用范围和金额变化，
+   也可以选择“稍后”。不确认不会删除用量或把成本变成零。
+4. 需要排查时打开“帮助与诊断”，保存脱敏诊断包或进入可信版本发布页；应用不会自动上传
+   会话正文。
+
+### 金额和状态术语
+
+- **已观测用量**：从本机可读日志归一、去重后得到的 tokens/请求事实，不代表所有设备的用量。
+- **名义成本**：使用适用的公共价格目录对已观测用量作参考计算，不等于实际账单。
+- **按量估算**：可匹配计费方式和价格的参考金额；provider、路由或历史价格不确定时仍会带有
+  不确定标记。
+- **已确认支出**：用户提供的账单、付款记录或有明确范围的付款声明；不会由订阅合同自动推导。
+- **未计价**：缺少模型、价格或必要计费维度；不等于免费，也不会静默变成零。
+
 菜单栏图标与 App Icon 分离：`icons/trayTemplate.svg` 是选定 Swept Crest 的
 单色源图，导出为 22×18px / 44×36px PNG；Rust 内嵌 `trayTemplate@2x.png` 并开启
 `icon_as_template(true)`，由 macOS 自动适配明暗、选中和辅助功能状态。

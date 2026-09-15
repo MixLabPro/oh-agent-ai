@@ -10,6 +10,14 @@ description = "agent-vitals 菜单栏：当日/本月成本与预算（Tauri 2�
 # 里 opt-out，用 [workspace] 空表声明自己是独立工作区。
 [workspace]
 
+# 发布包不应携带桌面开发机的源码路径或调试信息；桌面工程是独立
+# workspace，根仓库的 release profile 不会自动作用到这里。
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+debug = false
+
 [lib]
 name = "agent_vitals_menubar_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -19,6 +27,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2.3.0"
 # 计价/聚合本体在 domain —— 菜单栏不许长第四份拷贝（CLAUDE.md 的 cost 锁步）。本
 # crate 只调 domain::cost 的纯函数，不放任何定价/覆盖率判断。
 agent-vitals-domain = { path = "../../../crates/agent-vitals-domain" }
@@ -31,6 +40,9 @@ agent-vitals-data = { path = "../../../crates/agent-vitals-data" }
 agent-vitals-runtime = { path = "../../../crates/agent-vitals-runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+rfd = "0.15"
+reqwest = { version = "0.13.4", default-features = true, features = ["json"] }
+tokio = { version = "1", features = ["time"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

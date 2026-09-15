@@ -73,6 +73,7 @@ PY_AGENT_FAMILY = {
     "cost", "dsh_evidence", "dsh_usage_fact", "duration", "host_capability", "mcp", "plan",
     "r2a", "sessions_sql", "skill", "state", "subagent", "takeover", "trajectory", "usage",
     "usage_fact", "waste", "workbuddy_evidence", "workbuddy_session_audit",
+    "workbuddy_usage_fact",  # spec §9E.5 E4a
 }
 RS_AGENT_FAMILY = {
     "claude_cost",

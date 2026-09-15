@@ -2,9 +2,11 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "agent-vitals",
   "version": "0.11.0",
-  "identifier": "com.mixlabpro.agent-vitals-menubar",
+  "identifier": "com.mixlabpro.agent-vitals",
   "build": {
-    "frontendDist": "ui"
+    "frontendDist": "ui",
+    "beforeDevCommand": "npm --prefix ui-dev run dev",
+    "devUrl": "http://127.0.0.1:5173/workbench.html"
   },
   "app": {
     "withGlobalTauri": true,
@@ -43,7 +45,8 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "infoPlist": "Info.plist"
     }
   }
 }

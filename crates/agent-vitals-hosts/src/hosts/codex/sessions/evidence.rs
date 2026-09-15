@@ -567,7 +567,15 @@ fn output_error_code(error: &Value) -> Option<String> {
 
 /// 一条 timeline entry 的构造器。Codex 无 seq/step：`seq` 用 enumerate 序数当合成
 /// seq（`NativeId::Seq` 注释「适配器内部合成的序号」的正当用法），`time`/`step`
-/// 留 None（`started_at` 秒 vs DSH 毫秒的时间轴统一是 timeaxis 阶段的事）。
+/// 留 None。
+///
+/// **单位问题不在这里**（2026-09-13 更正）：Claude 的构造器填秒、Codex 填 None、
+/// DSH 填毫秒，单位确实各宿主不同；但归一**不在适配器里做**，而在 trace 边界
+/// ——`domain::trace::entry_ms` 调 `domain::util::to_epoch_ms`（`_ms` 契约的唯一
+/// 实现）。所以 Codex 留 None 是对的，不需要为了"统一单位"去补一个时间。
+/// （原文此处写"时间轴统一是 timeaxis 阶段的事"——那个阶段从未落地，且它的规格
+/// 讲的是北京时区偏移的合并，不是本字段的单位。见
+/// `docs/v1.0.0/MS_FIELD_UNIT_AUDIT_2026-09-13.md` §6。）
 fn timeline_entry<T>(
     observation: T,
     seq: Option<i64>,
@@ -949,7 +957,17 @@ pub fn build_codex_evidence(
             host_id: "codex",
             workspace_roots,
             model,
-            span: None,
+            // D1–D4：Codex 的顶层 `{type, timestamp, payload}` 包络**带 ISO 时间戳**，
+            // 但本适配器此前没有读它（timeline entry 的 `time` 恒 None——见
+            // `timeline_entry` 的注释）。这里用与 `sources/workflow.rs:31` **同一个**
+            // `iso_to_epoch_ms` 读出，不新造第二个 ISO 解析。
+            // 0 条记录 → None。
+            span: crate::workflow_utils::session_span(
+                items
+                    .iter()
+                    .filter_map(|r| r.get("timestamp").and_then(Value::as_str))
+                    .filter_map(|t| crate::workflow_utils::iso_to_epoch_ms(Some(t))),
+            ),
         },
         signals,
         coverage,
@@ -1020,6 +1038,12 @@ pub fn codex_evidence_json(evidence: &CodexEvidence) -> Value {
         "cli_version": evidence.cli_version,
         "workspace_roots": evidence.canonical.meta.workspace_roots,
         "model": evidence.canonical.meta.model,
+        // 会话实际覆盖跨度（D1–D4）。与 `attempts[].observed_span` 同形；
+        // 键位置与 Python 镜像逐字节对齐。
+        "span": evidence.canonical.meta.span.map(|s| serde_json::json!({
+            "start_ms": s.start_ms,
+            "end_ms": s.end_ms,
+        })),
         "signals": signals,
         "coverage": coverage_map,
         "attempts": attempts,

@@ -29,11 +29,31 @@ use crate::contracts::trace_graph::{
     BranchState, TraceCoverage, TraceEdge, TraceEdgeType, TraceGraph, TraceNode, TraceNodeType,
     TraceStatus, TRACE_GRAPH_SCHEMA_VERSION,
 };
+use crate::domain::util::to_epoch_ms;
 
 fn stable_id(seed: &Value) -> String {
     let mut buf = String::new();
     canonical_json(seed, &mut buf);
     fnv1a64_hex(buf.as_bytes())
+}
+
+/// 把 canonical timeline 的时间戳归一到**毫秒**，供 `_ms` 契约字段使用。
+///
+/// 为什么必须在**这里**归一：`TimelineEntry.time` 的单位由各宿主适配器各自
+/// 决定——Claude 的 timeline 构造器明写「`parse_iso` → **秒**」
+/// （`hosts/claude_code/sessions/evidence.rs`），Codex 与 DSH 是毫秒。而
+/// `TraceNode.started_at_ms` 的契约注释声明它「用于展示与时间分桶」，名字又带
+/// `_ms`。真机实测（2026-09-13）：claude-code 节点是 `1788449204`（当毫秒 →
+/// 1970-01-21），codex 节点是 `1789132709000`（当毫秒 → 2026-09-11 正确）。
+///
+/// 与 `issue_instances.opened_at_ms` 是**同一根因、同一纪律**：单位在缝上断，
+/// 修在边界上的**单一具名函数**，不在每个适配器里各写各的 `*1000`
+/// （`docs/v1.0.0/ISSUE_OPENED_AT_MS_UNIT_DRIFT.md` §5.1/§7）。
+///
+/// 当前没有消费方按这两个字段分桶（`project_timeline_series` 用 `ordinal`），
+/// 所以这是**潜在**缺陷而非现行故障——但契约说了它可用于分桶，就得让它成立。
+fn entry_ms(value: Option<i64>) -> Option<i64> {
+    value.map(to_epoch_ms)
 }
 
 /// 一个尚未定序的候选节点：先把 turns + tool_calls 两条 timeline 的条目都
@@ -100,8 +120,8 @@ fn turn_candidates(session: &CanonicalSession) -> Vec<Candidate> {
                 entry_ordinal: e.ordinal,
                 native: format!("turn-{}", obs.turn),
                 node_type: TraceNodeType::AssistantTurn,
-                started_at_ms: e.time,
-                ended_at_ms: obs.end_time,
+                started_at_ms: entry_ms(e.time),
+                ended_at_ms: entry_ms(obs.end_time),
                 status: turn_status(&obs.end_reason_kind),
                 provenance: e.provenance,
                 values,
@@ -135,7 +155,7 @@ fn tool_call_candidates(session: &CanonicalSession) -> Vec<Candidate> {
             let matched_result = e.call_id.as_deref().and_then(|cid| result_by_call.get(cid));
             let (ended_at_ms, status) = match matched_result {
                 Some(r) => (
-                    r.time,
+                    entry_ms(r.time),
                     tool_result_status(r.observation.failed, &r.observation.error_code),
                 ),
                 None => (None, None),
@@ -155,7 +175,7 @@ fn tool_call_candidates(session: &CanonicalSession) -> Vec<Candidate> {
                 entry_ordinal: e.ordinal,
                 native,
                 node_type: TraceNodeType::ToolCall,
-                started_at_ms: e.time,
+                started_at_ms: entry_ms(e.time),
                 ended_at_ms,
                 status,
                 provenance: e.provenance,

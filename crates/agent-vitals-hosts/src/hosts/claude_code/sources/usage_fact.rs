@@ -27,6 +27,7 @@ use crate::hosts::claude_code::sessions::usage::{day_from_iso_ts, ms_from_iso_ts
 use agent_vitals_domain::source_identity::{canonical_json, fnv1a64_hex};
 use agent_vitals_domain::usage::is_peak_slot;
 use agent_vitals_domain::usage_fact::build_usage_fact;
+use agent_vitals_domain::workflow::WorkflowEvent;
 
 // P0 哨兵常量——与 Python `claude_usage_fact.py` 同源字节。
 // pub(crate)：claude_cost.rs 的 fold `apply_record` 消费本模块 parser 时，
@@ -42,6 +43,7 @@ const OBSERVATION_KIND: &str = "assistant-usage";
 #[derive(Debug)]
 pub struct UsageFactEmitResult {
     pub facts: Vec<Value>,
+    pub workflow_events: Vec<WorkflowEvent>,
     pub attempts: HashMap<String, i64>,
     pub total_rows: i64,
     pub skip_rows: i64,
@@ -320,6 +322,9 @@ pub fn claude_jsonl_to_usage_facts(
     }
     Ok(UsageFactEmitResult {
         facts,
+        workflow_events: super::workflow::claude_file_to_workflow_events(
+            path, machine_namespace, source_profile, native_session_id,
+        )?,
         attempts,
         total_rows,
         skip_rows,

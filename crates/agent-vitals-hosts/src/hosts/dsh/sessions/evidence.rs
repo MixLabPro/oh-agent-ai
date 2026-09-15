@@ -466,7 +466,22 @@ pub fn build_dsh_evidence(
             host_id: "dsh",
             workspace_roots: cwd.clone().into_iter().collect(),
             model: None,
-            span: None,
+            // D1–D4：喂进本证据的**执行流**事件的 `time` min/max。
+            //
+            // **只用 execution_events，不含 usage_events**——这是双实现口径的统一，
+            // 不是遗漏：Python 侧 `dsh_evidence.build_dsh_canonical` 只接收
+            // execution_events（`usage_events` 从未进过它的签名），若这里算上
+            // usage，两个实现就会对同一份会话给出不同跨度，而差分门是逐字节比的。
+            // 若将来需要覆盖 usage 时间，两边必须同时改（含 `behavior.py` 的调用点）。
+            //
+            // DSH 的 `time` **是毫秒**，过 `session_span` 是无操作但保持「单位归一
+            // 只在一处」的纪律。调用方给的是分叉后的事件时，跨度自然只覆盖分叉后
+            // ——这正确：跨度描述「这份证据是从什么算出来的」。0 条 → None。
+            span: crate::workflow_utils::session_span(
+                execution_events
+                    .iter()
+                    .filter_map(|e| e.get("time").and_then(Value::as_i64)),
+            ),
         },
         signals,
         coverage,

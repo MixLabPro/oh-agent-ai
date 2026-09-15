@@ -105,6 +105,87 @@ pub fn civil_from_unix_secs(secs: i64, offset_secs: i64) -> (i64, u32, u32) {
     (y, m as u32, d as u32)
 }
 
+/// 纪元时间归一为**毫秒**——本仓「整数纪元一律以毫秒为契约」的唯一实现。
+///
+/// 秒级输入（`< 1e11`）视为秒并放大 1000 倍，其余原样返回。
+///
+/// **为什么需要一个具名函数，而不是在消费点写 `if x < 1e11 { x * 1000 }`**：
+/// 单位差异不是数据损坏，是**契约在缝上断了**，而断点不止一处。已经发生过两次：
+///
+/// - `issue_instances.opened_at_ms`：写入点原样抄 `finding.time`，而 `finding.time`
+///   的单位由各宿主适配器决定，真机上 1,542/4,450 条落成 1970 日桶并被时间窗
+///   静默排除（`docs/v1.0.0/ISSUE_OPENED_AT_MS_UNIT_DRIFT.md`）。修法是**在边界
+///   归一**，并明确禁止「在多个消费点各自内联猜单位」。
+/// - `TraceNode.started_at_ms`：同一根因。Claude 的 timeline 构造器明写
+///   「`parse_iso` → **秒**」（`hosts/claude_code/sessions/evidence.rs`），
+///   Codex 是毫秒，而 `trace.rs` 把它原样填进名为 `_ms` 的字段。
+///
+/// 所以这里是那个**单一具名函数**：谁要把纪元整数写进 `_ms` 字段，就调它。
+/// `agent_vitals_data::issues::to_epoch_ms` 已改为委托到本函数，不是第二份实现。
+///
+/// 幂等：毫秒值不会二次放大（`1.789e12 > 1e11`）。`saturating_mul` 而非 `*`——
+/// 畸形输入（负值、极大值）不能 panic，也不能回绕成一个小数字后冒充合法时间。
+pub fn to_epoch_ms(value: i64) -> i64 {
+    /// 1e11 秒 = 公元 5138 年；1e11 毫秒 = 1973 年。任何落在两者之间的真实
+    /// 「秒」时间戳都不存在，所以这个阈值对两个方向都不歧义。
+    const EPOCH_SECONDS_CUTOFF: i64 = 100_000_000_000;
+    if value < EPOCH_SECONDS_CUTOFF {
+        value.saturating_mul(1000)
+    } else {
+        value
+    }
+}
+
+#[cfg(test)]
+mod to_epoch_ms_tests {
+    use super::to_epoch_ms;
+
+    /// 真机取值：Claude 的 timeline entry.time（秒）与 Codex 的（毫秒）。
+    /// 两个都来自 2026-09-11 的同一台机器，归一后必须**同量级**——这是本函数
+    /// 存在的全部理由。
+    #[test]
+    fn seconds_are_scaled_and_milliseconds_pass_through() {
+        // Claude Code：parse_iso → 秒
+        assert_eq!(to_epoch_ms(1_788_449_204), 1_788_449_204_000);
+        // Codex：已是毫秒
+        assert_eq!(to_epoch_ms(1_789_132_709_000), 1_789_132_709_000);
+        // 归一后同量级（同一个月），不是相差 1000 倍
+        let claude = to_epoch_ms(1_788_449_204);
+        let codex = to_epoch_ms(1_789_132_709_000);
+        assert!((codex - claude).abs() < 30 * 86_400_000, "归一后应落在同一个月内");
+    }
+
+    /// 阈值两侧各一个值，行为必须明确：1e11 按毫秒原样（它已是 1973 年的毫秒）。
+    #[test]
+    fn cutoff_boundary_is_explicit() {
+        assert_eq!(to_epoch_ms(100_000_000_000), 100_000_000_000);
+        assert_eq!(to_epoch_ms(100_000_000_001), 100_000_000_001);
+        assert_eq!(to_epoch_ms(99_999_999_999), 99_999_999_999_000);
+    }
+
+    /// 幂等：毫秒值再归一一次不变——存量修复要能连跑两次。
+    #[test]
+    fn normalization_is_idempotent() {
+        let once = to_epoch_ms(1_788_449_204);
+        assert_eq!(to_epoch_ms(once), once);
+    }
+
+    /// 畸形输入不 panic、不回绕。**负值与极大值的行为有意与既有
+    /// `issues::to_epoch_ms` 逐位一致**——本函数是它的委托目标，若在这里"顺手
+    /// 修正"负数语义，委托就不再是等价变换，存量 Issue 修复的判据也会跟着变。
+    /// 负纪元不在契约内（属数据损坏），此处只保证不 panic、不产生"看起来合法"
+    /// 的小正数。
+    #[test]
+    fn malformed_input_does_not_panic_or_wrap() {
+        assert_eq!(to_epoch_ms(0), 0);
+        // 负值：saturating 只夹在 i64 边界，不把它变成大正数——这比回绕安全。
+        assert_eq!(to_epoch_ms(-1), -1000);
+        assert!(to_epoch_ms(-1) < 0, "负输入不得变成正数");
+        assert_eq!(to_epoch_ms(i64::MIN), i64::MIN, "溢出饱和而非回绕");
+        assert_eq!(to_epoch_ms(i64::MAX), i64::MAX);
+    }
+}
+
 #[cfg(test)]
 mod civil_tests {
     use super::civil_from_unix_secs;

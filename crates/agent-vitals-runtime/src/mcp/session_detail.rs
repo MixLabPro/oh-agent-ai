@@ -5,8 +5,8 @@
 //! 时间线 = `usage_facts` 行：模型切换、逐事件 token、高峰时段标记。**不含**
 //! 对话正文 / prompt / 工具原始参数 / 原生 session id / 路径。
 //!
-//! Q10「会话时间线关联失败/峰值」的失败/错误事件富化需要 `workflow_events`
-//! （M4）——本工具的时间线是 usage 维，`workflow_events` 就绪后加一条并列轴。
+//! Q10 的失败/错误事件富化通过 `workflow_events` 并列返回；两条时间线
+//! 保持独立，避免把无法一一归因的 workflow 事件硬分摊到 token/cost。
 
 use std::path::Path;
 
@@ -21,7 +21,7 @@ const MAX_LIMIT: usize = 1000;
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "session_detail",
-        description: "Given an opaque session_ref (from sessions_search), return that session's usage timeline: time-ordered facts with model id, token buckets, peak-slot flag and observation kind, plus session totals. Never returns conversation text, prompts, raw tool args, native session ids or file paths. Fault/error timeline enrichment needs workflow_events (M4).",
+        description: "Given an opaque session_ref (from sessions_search), return that session's usage timeline and a separate redacted workflow timeline for task, Skill, tool, model, and failure events. Never returns conversation text, prompts, raw tool args, native session ids or file paths.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -34,7 +34,7 @@ pub fn spec() -> ToolSpec {
         }),
         output_schema: json!({
             "type": "object",
-            "description": "spec §6 envelope; data = { session_ref, host, first_event_at, last_event_at, event_count, model_ids, tokens{}, cost_minor, cost_status, billing_breakdown[], timeline[], has_more, next_cursor }. cost_status explains any null amount; billing_breakdown is independently grouped by provider, model, peak slot, template and pricing snapshot; it preserves unresolved custom routes rather than merging their costs."
+            "description": "spec §6 envelope; data includes usage timeline[] and a separate redacted workflow_timeline[]. cost_status explains any null amount; billing_breakdown is independently grouped by provider, model, peak slot, template and pricing snapshot; it preserves unresolved custom routes rather than merging their costs."
         }),
     }
 }
@@ -176,6 +176,61 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         })
         .collect();
 
+    // Workflow 事件与 usage facts 没有可靠的一对一归因关系，因此作为独立轴
+    // 返回。只读已由 adapter 脱敏的字段；不把 session_key/event_id/native id
+    // 暴露给调用方。limit 共用本页大小，超出部分显式报告而不是静默截断。
+    let mut workflow_timeline = Vec::new();
+    let workflow_limit = limit.saturating_add(1);
+    {
+        let mut statement = conn
+            .prepare(
+                "SELECT event_ts_ms, event_type, capability_kind, capability_id,
+                        capability_version, outcome, duration_ms, error_fingerprint,
+                        invocation_fingerprint
+                 FROM workflow_events
+                 WHERE session_key = ?1
+                 ORDER BY event_ts_ms ASC, event_id ASC
+                 LIMIT ?2",
+            )
+            .map_err(|e| ToolError::new("internal_error", e.to_string()))?;
+        let rows = statement
+            .query_map(rusqlite::params![session_key, workflow_limit as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            })
+            .map_err(|e| ToolError::new("internal_error", e.to_string()))?;
+        for row in rows {
+            let (event_ts_ms, event_type, capability_kind, capability_id,
+                capability_version, outcome, duration_ms, error_fingerprint,
+                invocation_fingerprint) =
+                row.map_err(|e| ToolError::new("internal_error", e.to_string()))?;
+            workflow_timeline.push(json!({
+                "event_at": ms_to_rfc3339_beijing(event_ts_ms),
+                "event_type": event_type,
+                "capability_kind": capability_kind,
+                "capability_id": capability_id,
+                "capability_version": capability_version,
+                "outcome": outcome,
+                "duration_ms": duration_ms,
+                "error_fingerprint": error_fingerprint,
+                "invocation_fingerprint": invocation_fingerprint,
+            }));
+        }
+    }
+    let workflow_has_more = workflow_timeline.len() > limit;
+    if workflow_has_more {
+        workflow_timeline.truncate(limit);
+    }
+
     let next_cursor = facts
         .last()
         .filter(|_| has_more)
@@ -212,9 +267,11 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         },
         "billing_breakdown": billing_breakdown,
         "timeline": timeline,
+        "workflow_timeline": workflow_timeline,
+        "workflow_has_more": workflow_has_more,
         "has_more": has_more,
         "next_cursor": next_cursor,
-        "note": "usage timeline only; fault/error events need workflow_events (M4)",
+        "note": "usage and workflow timelines are separate; workflow events are redacted and are not token/cost allocations",
     });
 
     Ok(build_envelope(
@@ -265,6 +322,22 @@ mod tests {
                 rusqlite::params![format!("d{i}"), skey, m, start + (i as i64) * 3_600_000, peak, tok],
             ).unwrap();
         }
+        db.conn().execute(
+            "INSERT INTO workflow_events(
+                 event_id, session_key, event_ts_ms, event_type, capability_kind,
+                 capability_id, outcome, duration_ms, error_fingerprint,
+                 invocation_fingerprint, ingested_run_id, created_at_ms)
+             VALUES ('wf-start', ?1, ?2, 'task_started', NULL, NULL, 'succeeded', NULL, NULL, NULL, 'run', 1)",
+            rusqlite::params![skey, start + 100],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO workflow_events(
+                 event_id, session_key, event_ts_ms, event_type, capability_kind,
+                 capability_id, outcome, duration_ms, error_fingerprint,
+                 invocation_fingerprint, ingested_run_id, created_at_ms)
+             VALUES ('wf-tool', ?1, ?2, 'tool_finished', 'tool', 'bash', 'failed', 12, 'fnv1a64:deadbeef', 'fnv1a64:cafebabe', 'run', 1)",
+            rusqlite::params![skey, start + 200],
+        ).unwrap();
         drop(db);
         // 拿一个真 session_ref
         let salt = super::super::session_ref::load_or_create_salt(home).unwrap();
@@ -292,6 +365,11 @@ mod tests {
         assert_eq!(tl[2]["model_id"], "m-b");
         // 时间线时间序。
         assert!(tl[0]["event_at"].as_str().unwrap() < tl[1]["event_at"].as_str().unwrap());
+        let workflow = d["workflow_timeline"].as_array().unwrap();
+        assert_eq!(workflow.len(), 2);
+        assert_eq!(workflow[1]["event_type"], "tool_finished");
+        assert_eq!(workflow[1]["outcome"], "failed");
+        assert_eq!(d["workflow_has_more"], false);
         let txt = env.to_string();
         assert!(!txt.contains("priv-abc-99"), "原生 id 泄漏: {txt}");
         let _ = std::fs::remove_dir_all(&home);

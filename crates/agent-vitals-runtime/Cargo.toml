@@ -43,6 +43,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 agent-vitals-domain = { path = "../agent-vitals-domain" }
 agent-vitals-hosts = { path = "../agent-vitals-hosts", features = ["sources"] }
 agent-vitals-provider = { path = "../agent-vitals-provider" }
+jiff = "0.2"
 serde = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 # v0.8 Phase E7.5：discovery.rs/security.rs 从 apps/cli 迁来的目录遍历/正则/

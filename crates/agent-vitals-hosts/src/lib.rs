@@ -17,6 +17,7 @@
 pub mod canonical_usage;
 pub mod hosts;
 pub mod skill_discovery;
+pub mod workflow_utils;
 // v0.10.0：多宿主「路径 -> CanonicalSession」入口（spec §7 门槛 1 的前提，此前
 // 只有 DSH 有）。I/O，随 `dsh_sources` 等同一条 `sources` feature 边界；路径
 // 含 `/sources` 是故意的，落进 `io_tokens_only_appear_under_sources` 守卫。
@@ -31,7 +32,7 @@ pub use hosts::claude_code::sessions::usage as claude_code_usage;
 pub use hosts::claude_code::sessions::evidence as claude_code_evidence;
 pub use hosts::codex::sessions::{evidence as codex_evidence, usage as codex_usage};
 pub use hosts::dsh::sessions::{
-    audit, compaction, evidence as dsh_evidence, waste,
+    audit, compaction, evidence as dsh_evidence, waste, workflow as dsh_workflow,
 };
 pub use hosts::workbuddy::sessions::evidence as workbuddy_evidence;
 
@@ -43,7 +44,11 @@ pub use hosts::workbuddy::sessions::evidence as workbuddy_evidence;
 #[cfg(feature = "sources")]
 pub use hosts::{
     claude_code::sources::usage_fact as claude_usage_fact,
+    // Claude Pro 的窗口状态（quotaLimits）读取器——与 usage_fact 的字节等价面无关。
+    claude_code::sources::quota as claude_quota,
     claude_code::sources as claude_session, codex::sources::usage_fact as codex_usage_fact,
     codex::sources as codex_session, dsh::sources::usage_fact as dsh_usage_fact,
+    workbuddy::sources::usage_fact as workbuddy_usage_fact,
+    workbuddy::sources::traces as workbuddy_traces,
     dsh::sources as dsh_sources, workbuddy::sources as workbuddy_session,
 };

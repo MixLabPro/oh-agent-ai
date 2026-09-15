@@ -549,7 +549,7 @@ incompatible vocabularies** (§4).
 | Usage (per request) | measured (4 buckets) | measured (6 buckets) | measured | measured (4 + thinking) | unverified (`generation` spans exist; per-span tokens unchecked) ※ |
 | UsageAggregate | derivable | derivable | derivable | derivable | measured (credits) |
 | ContextWindow | measured | measured (`model_context_window`) | measured | unavailable | unavailable |
-| QuotaConsumption | unavailable | measured (`token_count.rate_limits`) | measured | unavailable | unavailable |
+| QuotaConsumption | unavailable | measured (`token_count.rate_limits`) | measured | unavailable | unavailable ⁶ |
 | ApprovalDecisions | measured | unavailable in rollout ‡ | partial (`FileChangeItem.auto_approved`) ‡ | **partial** — denials only, derived+lossy ¶ | **measured** (hash-chained) |
 | ApprovalPolicy | measured (`sandbox/mode`) | **measured** (`ThreadSettingsSnapshot`) | same | measured (`permission-mode`) | measured (`sessions.permission_mode`) |
 | SandboxModes | measured | unavailable | unavailable | unavailable | measured |
@@ -563,6 +563,8 @@ incompatible vocabularies** (§4).
 | Workspace root | `cwd` | `turn_context.workspace_roots` | same | `cwd` | `sessions.cwd` |
 | Storage medium | JSONL | JSONL | JSONL | JSONL | SQLite + JSONL + **span-tree JSON** + blobs |
 | Process liveness | unavailable | unavailable | unavailable | unavailable | partial (`workerPid`, `status:"running"`) — see §16.1 |
+
+> ⁶ **WorkBuddy QuotaConsumption 单元格已滞后于代码**（2026-09-11，spec §10 B6）：`session_usage.credit_json` 的每个 requestId 条目是宿主报告的一次配额消耗，代码已改 **measured（分子）**；分母（allowance/余额）不可观测由 note 说明。按 G5 在 `tests/test_host_contract.py::_REGISTERED_DEVIATIONS` 登记，单元格保留原文以让登记项继续「与原矩阵不一致」（该测试的反向校验要求）。
 
 `¶` — recoverable from the Claude Code transcript **without a hook**, by
 matching marker strings in tool-result text (§14.5). Denials only: grants leave

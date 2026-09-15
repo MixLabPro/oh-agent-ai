@@ -191,6 +191,17 @@ class PricingJsonShapeCase(unittest.TestCase):
                         self.assertIsInstance(card[k], (int, float),
                                               f"{provider}/{model}")
 
+    def test_public_catalog_contains_no_user_financial_declarations(self):
+        cat = self.pricing["catalog_2026_09"]
+        self.assertNotIn("subscriptions", cat)
+        serialized = json.dumps(cat, ensure_ascii=False).lower()
+        for private_marker in ("user-reported", "apple_subscription",
+                               "billing_period_start", "reported_at"):
+            self.assertNotIn(private_marker, serialized)
+        modes = cat.get("billing_modes", {})
+        self.assertTrue(all(v.get("mode") == "metered"
+                            for k, v in modes.items() if not k.startswith("_")))
+
 
 class ClaudeSubscriptionUncoveredEstimateCase(unittest.TestCase):
     """v0.7 spec §3 交付矩阵第二行——夹具与 cost.rs::tests 的同名测试同数。"""
@@ -211,14 +222,14 @@ class ClaudeSubscriptionUncoveredEstimateCase(unittest.TestCase):
             "estimated-subscription-exclusion")
         self.assertAlmostEqual(out["currency_totals"]["CNY"], 1.5)
 
-    def test_excludes_subscribed_provider(self):
-        """anthropic 在 catalog_2026_09.subscriptions（claude-pro）登记过 →
-        claude-opus-5 视为已订阅覆盖，不进本视图 → None（不摆全零结构）。"""
+    def test_public_catalog_does_not_assume_anthropic_subscription(self):
+        """干净安装没有用户套餐声明，Anthropic 仍进入按量参考估算。"""
         models = {"claude-opus-5": {
             "input_tokens": 1_000_000, "output_tokens": 0,
             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}
-        self.assertIsNone(
-            claude_subscription_uncovered_estimate(models, self.pricing))
+        out = claude_subscription_uncovered_estimate(models, self.pricing)
+        self.assertIsNotNone(out)
+        self.assertAlmostEqual(out["currency_totals"]["USD"], 5.0)
 
     def test_none_without_models(self):
         self.assertIsNone(claude_subscription_uncovered_estimate({}, self.pricing))

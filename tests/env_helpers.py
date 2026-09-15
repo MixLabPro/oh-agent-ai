@@ -54,7 +54,8 @@ def seed_authority_facts(binary, home, day, uncached_input=1_000_000, output=100
     `crates/agent-vitals-data/tests/legacy_import_wiring.rs` 的 `live_fact`
     一致（fact_id 由契约层派生，不信任外部 id）。模型名都在价目表内：
     deepseek-v4-flash 出 DSH 实测账单档与 claude CNY 估算档，gpt-5.6-sol 出
-    codex 套餐等价诊断档——三宿主 basis 各就各位的断言原样保留。
+    codex 缺少官方订阅 scope 证据时保持 metered_estimate + unresolved；
+    三宿主 basis 各就各位的断言按当前 billing fallback 规则执行。
     """
     facts_dir = Path(home) / "data" / "facts"
     facts_dir.mkdir(parents=True, exist_ok=True)

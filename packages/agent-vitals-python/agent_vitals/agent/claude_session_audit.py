@@ -160,6 +160,9 @@ def claude_session_audit_json(home, session_id):
         "session_id": session_id,
         "title": claude_session._title_of(evidence["raw_records"]),
         "model": ev["model"],
+        # 会话实际覆盖跨度（D1–D4）——直接取扁平证据 DTO 的 `span`，不重算。
+        # 键位置与 Rust 组装点逐字节对齐（差分门比 claude-session 的输出）。
+        "span": ev["span"],
         "cwd": cwd,
         "file": file,
         "files": files,

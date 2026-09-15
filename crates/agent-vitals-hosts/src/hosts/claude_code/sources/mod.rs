@@ -34,6 +34,10 @@ pub mod skills;
 // v0.9 Stage A emitter 归位（R4 §5.2）：UsageFact emitter 从二进制
 // apps/cli/src/agent/ 迁来——读文件 → 读内存，仍属 I/O 层。
 pub mod usage_fact;
+pub mod workflow;
+// v1.0.0：Claude Pro 的窗口状态（quotaLimits）读取器。与 usage_fact 完全独立——
+// 那条是 Python↔Rust 逐字节锁步的 UsageFact 事实链，窗口状态是旁路，不进那条链。
+pub mod quota;
 
 /// 一个会话文件对 `claude-session` 有用的全部信息（路径本身没有消费者——
 /// 调用方各自从 walk 结果拿路径，这里只携带读出来的元数据）。
@@ -116,6 +120,30 @@ pub fn claude_project_files(home: &Path) -> Vec<PathBuf> {
     }
     files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
     files
+}
+
+/// Return traversal failures for the Claude projects root without changing the
+/// existing deterministic file-list API. A permission-denied root must not be
+/// indistinguishable from a missing root.
+pub fn claude_project_walk_errors(home: &Path) -> Vec<String> {
+    let root = home.join(".claude").join("projects");
+    let mut errors = Vec::new();
+    match std::fs::metadata(&root) {
+        Ok(metadata) if metadata.is_dir() => {
+            for entry in walkdir::WalkDir::new(&root).into_iter() {
+                if let Err(error) = entry {
+                    let path = error.path().unwrap_or(&root);
+                    errors.push(format!("{}: {error}", path.display()));
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            errors.push(format!("{}: {error}", root.display()));
+        }
+        Err(_) => {}
+    }
+    errors
 }
 
 /// `~/.claude/projects` 根的存在性报告（r2a store 的 `source_statuses["claude-code"]`
@@ -300,6 +328,9 @@ pub fn claude_session_audit_json(home: &Path, session_id: &str) -> Option<Value>
         "session_id": session_id,
         "title": title_of(&evidence.raw_records),
         "model": ev["model"],
+        // 会话实际覆盖跨度（D1–D4）——直接取扁平证据 DTO 的 `span`，不重算。
+        // 键位置与 Python 镜像逐字节对齐（差分门比 `claude-session` 的输出）。
+        "span": ev["span"].clone(),
         "cwd": roots.first().cloned().unwrap_or(Value::Null),
         "file": file.to_string_lossy().to_string(),
         "files": files.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
@@ -655,10 +686,12 @@ mod tests {
         assert_eq!(out["date_span"]["last"], json!("2026-08-20T14:30:00Z"));
 
         // 键序是字节一致的一部分（Python 镜像逐字节对齐），不能重排。
+        // `span` 是会话跨度接线加的键，插在 `model` 后（与 `model`/`cwd` 同属
+        // meta 派生）——见 docs/v1.0.0/OBSERVED_SPAN_IMPLEMENTATION_PLAN.md。
         let keys: Vec<&str> = out.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            vec!["host", "session_id", "title", "model", "cwd", "file", "files", "date_span", "audit", "coverage", "signals", "attempts", "notes"]
+            vec!["host", "session_id", "title", "model", "span", "cwd", "file", "files", "date_span", "audit", "coverage", "signals", "attempts", "notes"]
         );
 
         let rules = out["audit"]["rule_outcomes"].as_object().unwrap();

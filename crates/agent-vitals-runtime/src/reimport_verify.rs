@@ -19,7 +19,8 @@ use serde_json::{json, Value};
 /// `(host, 北京月)` → 聚合。
 type Snapshot = BTreeMap<(String, String), Bucket>;
 
-const HOSTS: [&str; 3] = ["claude-code", "codex", "dsh"];
+/// 与 `ingest_service::FACT_HOSTS` 同表（facts JSONL 按宿主一文件，重导入按表枚举）。
+const HOSTS: [&str; 4] = crate::ingest_service::FACT_HOSTS;
 /// 北京日 = UTC + 8h。
 const BJ_OFFSET_MS: i64 = 8 * 3_600 * 1_000;
 

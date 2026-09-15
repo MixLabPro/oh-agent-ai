@@ -22,8 +22,17 @@ mod session_trace;
 mod session_ref;
 mod sessions_search;
 mod usage_hourly;
+mod budget_profiles;
+mod cost_breakdown;
+mod control_plane;
+mod data_quality_issues;
+mod workflow_summary;
 #[cfg(feature = "mcp-internal")]
 mod query_sql_readonly;
+#[cfg(feature = "mcp-internal")]
+mod billing_workflow;
+#[cfg(feature = "mcp-internal")]
+mod authority_audit;
 
 // PR #1 (mcp 0.9.1 SQL authority 收口)：把 cursor 解析/生成的 `pub` 包装
 // 在模块顶层再 re-export 一次，CLI 二进制侧可以 `use agent_vitals_runtime::
@@ -31,10 +40,12 @@ mod query_sql_readonly;
 // make_detail_cursor}` 直接拿，无需穿透到子模块（子模块仍是 private）。
 pub use session_detail::{make_detail_cursor, parse_detail_cursor};
 pub use sessions_search::{make_search_cursor, parse_search_cursor};
+pub use data_status::augment_sync_failure;
 
 use std::path::{Path, PathBuf};
 
 use agent_vitals_data::authority::{AuthorityDb, AuthorityError};
+use jiff::Timestamp;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
@@ -43,7 +54,6 @@ pub const ENVELOPE_SCHEMA_VERSION: &str = "1";
 /// spec §6：查询语义版本——查询**含义**（不是结构）变化时手动 bump。
 pub const QUERY_SEMANTICS: &str = "2026-09-07";
 
-const BEIJING_OFFSET_MS: i64 = 8 * 3_600 * 1_000;
 
 // ─────────────────────────── 错误 ───────────────────────────
 
@@ -112,6 +122,12 @@ impl AuthorityHandle {
         self.db.conn()
     }
 
+    /// Typed read helpers may need the AuthorityDb API while still using the
+    /// same validated read-only connection.
+    pub fn db(&self) -> &AuthorityDb {
+        &self.db
+    }
+
     /// spec §6.1 `authority_state`（库已能打开，故只在 `enabled` / `candidate`
     /// 二选一——`unavailable` 只发生在打不开时，那种情况根本到不了这里）。
     pub fn authority_state(&self) -> &'static str {
@@ -153,7 +169,7 @@ pub fn build_envelope(
         "authority_state": authority_state,
         "authority_revision": authority_revision(conn, max_observed_at_ms),
         "generated_at": ms_to_rfc3339_beijing(crate::sql_sync::now_ms()),
-        "timezone": "Asia/Shanghai",
+        "timezone": crate::clock::statistics_timezone_name(),
         "coverage": coverage,
         "freshness": freshness(conn),
         "warnings": warnings,
@@ -243,7 +259,7 @@ pub fn error_envelope(err: &ToolError) -> Value {
         "authority_state": "unavailable",
         "authority_revision": Value::Null,
         "generated_at": ms_to_rfc3339_beijing(crate::sql_sync::now_ms()),
-        "timezone": "Asia/Shanghai",
+        "timezone": crate::clock::statistics_timezone_name(),
         "coverage": { "status": "unavailable", "missing_hosts": [] },
         "freshness": { "last_successful_sync_at": Value::Null, "stale_hosts": [] },
         "warnings": [],
@@ -375,20 +391,14 @@ fn freshness(conn: &Connection) -> Value {
     })
 }
 
-/// epoch ms → RFC 3339 带 `+08:00`（spec §6.3：时间戳用 RFC 3339，北京时区）。
-/// `civil_from_unix_secs` 不引 `chrono`（domain 纪律，runtime 沿用）。
+/// epoch ms → RFC 3339，使用系统统计时区（spec §6.3）。供应商价格时间
+/// 仍由价格快照的事件绝对时间决定，不读取这个显示时区。
 pub(crate) fn ms_to_rfc3339_beijing(ms: i64) -> String {
-    let local = ms + BEIJING_OFFSET_MS;
-    let secs = local.div_euclid(1_000);
-    let millis = local.rem_euclid(1_000);
-    let (y, m, d) = agent_vitals_domain::util::civil_from_unix_secs(secs, 0);
-    let tod = secs.rem_euclid(86_400);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{millis:03}+08:00",
-        tod / 3600,
-        (tod / 60) % 60,
-        tod % 60,
-    )
+    Timestamp::from_millisecond(ms)
+        .unwrap_or(Timestamp::UNIX_EPOCH)
+        .to_zoned(crate::clock::statistics_timezone())
+        .strftime("%Y-%m-%dT%H:%M:%S%.3f%:z")
+        .to_string()
 }
 
 // ─────────────────────────── 工具注册表 ───────────────────────────
@@ -409,13 +419,21 @@ pub fn tool_specs() -> Vec<ToolSpec> {
     let mut out = vec![
         data_status::spec(),
         usage_hourly::spec(),
+        budget_profiles::spec(),
+        cost_breakdown::spec(),
         sessions_search::spec(),
         session_detail::spec(),
         session_trace::spec(),
+        control_plane::spec(),
+        data_quality_issues::spec(),
+        workflow_summary::issues_spec(),
+        workflow_summary::skills_spec(),
     ];
     #[cfg(feature = "mcp-internal")]
     {
         out.push(query_sql_readonly::spec());
+        out.push(billing_workflow::spec());
+        out.push(authority_audit::spec());
     }
     out
 }
@@ -427,9 +445,89 @@ pub fn data_status_report(conn: &Connection, db_existed: bool, enabled: bool) ->
     data_status::collect_report(conn, db_existed, enabled)
 }
 
+/// 桌面工作台热路径的同一份数据面，只把完整性检查降到 `quick_check`。
+///
+/// 工作台每次切到「总览」都会调 `data_status`，而全量 `integrity_check` 在
+/// 163MB 库上要 522ms（并发读下 1.2s），是整次刷新里唯一的长杆。字段结构与
+/// [`data_status_report`] 完全一致，只有 `integrity` 这一格的检查深度不同；
+/// CLI 与 MCP 的 doctor 面继续用全量版本（`data-status` 的语义不变）。
+pub fn data_status_report_quick(conn: &Connection, db_existed: bool, enabled: bool) -> Value {
+    data_status::collect_report_quick(conn, db_existed, enabled)
+}
+
+/// 独立的数据源状态投影。它不依赖 sessions_search 的时间窗，也不暴露路径；
+/// 桌面端和后续 MCP 工具可共享同一契约。
+pub fn source_status_report(conn: &Connection) -> Result<Value, String> {
+    let mut sources = Vec::new();
+    for host in crate::ingest_service::FACT_HOSTS {
+        let source_stats = conn.query_row(
+            "SELECT COUNT(*), MAX(last_seen_at_ms),
+                    COALESCE(SUM(CASE WHEN last_error_code IS NOT NULL THEN 1 ELSE 0 END), 0)
+             FROM source_files WHERE host = ?1",
+            [host],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, i64>(2)?)),
+        ).map_err(|e| format!("source_files query failed for {host}: {e}"))?;
+        let import_stats = conn.query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT session_key), MIN(event_ts_ms), MAX(event_ts_ms)
+             FROM usage_facts
+             WHERE host = ?1 AND deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'",
+            [host],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?, r.get::<_, Option<i64>>(3)?)),
+        ).map_err(|e| format!("usage_facts query failed for {host}: {e}"))?;
+        let error_codes: Vec<String> = conn.prepare(
+            "SELECT DISTINCT last_error_code FROM source_files
+             WHERE host = ?1 AND last_error_code IS NOT NULL ORDER BY last_error_code",
+        ).and_then(|mut stmt| {
+            stmt.query_map([host], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        }).map_err(|e| format!("source error query failed for {host}: {e}"))?;
+
+        let (source_count, scanned_at_ms, failed_count) = source_stats;
+        let (fact_count, session_count, first_event_at_ms, last_event_at_ms) = import_stats;
+        let state = if failed_count > 0 { "needs_attention" }
+            else if source_count > 0 { "connected" } else { "not_detected" };
+        let action = if failed_count > 0 {
+            json!({ "kind": "retry_sync", "label": "重新同步" })
+        } else if source_count == 0 {
+            json!({ "kind": "scan_and_connect", "label": "扫描并接入" })
+        } else {
+            json!({ "kind": "sync", "label": "立即同步" })
+        };
+        sources.push(json!({
+            "source_id": format!("host:{host}"),
+            "host": host,
+            "authorization": if failed_count > 0 { "unknown_or_failed" } else { "unknown" },
+            "connection_state": state,
+            "scan": { "last_scanned_at_ms": scanned_at_ms, "source_count": source_count },
+            "log": { "last_event_at_ms": last_event_at_ms },
+            "import_scope": {
+                "facts": fact_count, "sessions": session_count,
+                "first_event_at_ms": first_event_at_ms, "last_event_at_ms": last_event_at_ms
+            },
+            "failed_scope": { "sources": failed_count, "error_codes": error_codes },
+            "recovery_action": action
+        }));
+    }
+    Ok(json!({ "status": "ok", "sources": sources }))
+}
+
 /// `tools/call` 分发。`name` 已由传输层对 [`tool_specs`] 校验过。参数在这里
 /// 过一遍极简 schema 校验（spec §6.4 / M08：未知字段 → `invalid_argument`）。
 pub fn dispatch(name: &str, args: &Value, data_home: &Path) -> Result<Value, ToolError> {
+    dispatch_with_permissions(name, args, data_home, false)
+}
+
+/// `data-mcp serve --allow-local-writes` 的显式权限入口。默认 dispatch 永远
+/// 是只读；即使编译了 `mcp-internal`，也不会因为客户端能看到工具就获得写权限。
+pub fn dispatch_with_permissions(
+    name: &str,
+    args: &Value,
+    data_home: &Path,
+    allow_local_writes: bool,
+) -> Result<Value, ToolError> {
+    #[cfg(not(feature = "mcp-internal"))]
+    let _ = allow_local_writes;
     let spec = tool_specs()
         .into_iter()
         .find(|s| s.name == name)
@@ -438,11 +536,21 @@ pub fn dispatch(name: &str, args: &Value, data_home: &Path) -> Result<Value, Too
     match name {
         "data_status" => data_status::run(args, data_home),
         "usage_hourly" => usage_hourly::run(args, data_home),
+        "budget_profiles" => budget_profiles::run(args, data_home),
+        "cost_breakdown" => cost_breakdown::run(args, data_home),
         "sessions_search" => sessions_search::run(args, data_home),
         "session_detail" => session_detail::run(args, data_home),
         "session_trace" => session_trace::run(args, data_home),
+        "control_plane" => control_plane::run(args, data_home, allow_local_writes),
+        "data_quality_issues" => data_quality_issues::run(args, data_home),
+        "issues_summary" => workflow_summary::run_issues(args, data_home),
+        "skills_summary" => workflow_summary::run_skills(args, data_home),
         #[cfg(feature = "mcp-internal")]
         "query_sql_readonly" => query_sql_readonly::run(args, data_home),
+        #[cfg(feature = "mcp-internal")]
+        "billing_workflow" => billing_workflow::run(args, data_home, allow_local_writes),
+        #[cfg(feature = "mcp-internal")]
+        "authority_audit" => authority_audit::run(args, data_home),
         other => Err(ToolError::new("internal_error", format!("tool `{other}` registered but not wired"))),
     }
 }
@@ -571,6 +679,14 @@ mod tests {
     }
 
     #[test]
+    fn envelope_timezone_matches_the_timezone_used_for_statistics() {
+        assert_eq!(
+            crate::clock::statistics_timezone_name(),
+            crate::clock::statistics_timezone().iana_name().unwrap_or("Etc/Unknown"),
+        );
+    }
+
+    #[test]
     fn tool_specs_and_dispatch_agree() {
         let names: Vec<_> = tool_specs().iter().map(|t| t.name).collect();
         assert!(names.contains(&"data_status"));
@@ -581,6 +697,44 @@ mod tests {
                 .map(|e| e.code);
             assert_ne!(err, Some("internal_error"), "tool {name} not wired");
         }
+    }
+
+    #[test]
+    fn source_status_is_registry_driven_and_reports_failures_without_paths() {
+        let home = std::env::temp_dir().join(format!(
+            "av-source-status-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
+        db.conn().execute(
+            "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+                 parser_version, first_seen_at_ms, last_seen_at_ms, last_error_code)
+             VALUES ('src-c', 'codex', 'private-hash', 10, 1, 1, 100, 200, NULL),
+                    ('src-d', 'dsh', 'other-private-hash', 10, 1, 1, 100, 300, 'permission')",
+            [],
+        ).unwrap();
+
+        let report = source_status_report(db.conn()).unwrap();
+        let sources = report["sources"].as_array().unwrap();
+        let hosts: Vec<_> = sources.iter().map(|s| s["host"].as_str().unwrap()).collect();
+        assert_eq!(hosts, crate::ingest_service::FACT_HOSTS);
+        assert_eq!(sources[0]["connection_state"], "not_detected");
+        assert_eq!(sources[1]["connection_state"], "connected");
+        assert_eq!(sources[2]["connection_state"], "needs_attention");
+        assert_eq!(sources[2]["failed_scope"]["error_codes"], json!(["permission"]));
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("private-hash"));
+        assert!(!serialized.contains("other-private-hash"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn source_status_never_turns_query_failure_into_empty_sources() {
+        let conn = Connection::open_in_memory().unwrap();
+        let err = source_status_report(&conn).unwrap_err();
+        assert!(err.contains("source_files query failed"), "{err}");
     }
 
     #[test]

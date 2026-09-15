@@ -16,30 +16,30 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .codex_usage import CODEX_TOKEN_FIELDS, codex_aggregate_hours
+from . import state as state_mod
 
 # packages/agent-vitals-python/agent_vitals/agent/codex_cost.py → 仓库根爬 5 层。
 _CODEX_PRICING_PATH = Path(__file__).resolve().parents[4] / "assets" / "codex_pricing.json"
 
-# 北京时区（UTC+8）。与 `state.py` 的 `_BEIJING` 同口径：本仓库「当前月/今天」统一
-# 按北京时间定，codex-cost 的默认月与 DSH month.json 的月份在月初/月末才不会打架。
+# Compatibility name retained for callers; statistics use the OS IANA timezone.
 _BEIJING = timezone(timedelta(hours=8))
 
 
+def _system_timezone():
+    # Keep all Python entry points on the same persisted preference resolver as
+    # state.py.  This is important because the desktop can change the
+    # statistics timezone without changing the process' inherited TZ.
+    return state_mod._system_timezone()
+
+
 def current_month_beijing():
-    """北京时区（UTC+8）当前自然月 → `YYYY-MM`。与 Rust 侧
-    `codex_cost.rs::current_month_beijing`（Hinnant civil-from-days）必须产出同一
-    字符串——差分测试交叉断言，两侧任一漂移都会红。"""
-    return datetime.now(_BEIJING).strftime("%Y-%m")
+    """系统统计时区当前自然月 → `YYYY-MM`。兼容旧函数名。"""
+    return datetime.now(_system_timezone()).strftime("%Y-%m")
 
 
 def today_beijing():
-    """北京时区（UTC+8）今天 → `YYYY-MM-DD`。与 Rust 侧 `today_beijing` 对齐。
-    作为 `--today` 的过滤键与输出契约的 `today` 字段。时间轴小时桶是**北京**
-    小时（`codex_hour_of` 已把 UTC 时间戳 +8 折成北京时间）——`--today` 按北京
-    日前缀匹配与小时桶同一天口径，北京凌晨 0-7 点的消费也能命中，不会跨日线
-    丢桶（2026-08-29 修：此前小时桶是 UTC 前缀，日历把 UTC 小时当北京小时渲染，
-    且北京 0-7 点的桶整块落在相邻 UTC 日）。"""
-    return datetime.now(_BEIJING).date().isoformat()
+    """系统统计时区今天 → `YYYY-MM-DD`。兼容旧函数名。"""
+    return datetime.now(_system_timezone()).date().isoformat()
 
 
 def load_codex_pricing():
@@ -190,7 +190,7 @@ def _reset_beijing_text_at(resets_at, today):
     `M月D日 HH:MM`（与 Codex UI 同款：「重置时间：10:03」vs「2026年9月4日 00:40」）。
     `today` 参数化以便单测钉住两个分支；生产路径传 `today_beijing()`。
     Rust `reset_beijing_text_at` 镜像（同 spec，逐字节对齐）。"""
-    dt = datetime.fromtimestamp(resets_at, _BEIJING)
+    dt = datetime.fromtimestamp(resets_at, _system_timezone())
     if dt.date().isoformat() == today:
         return dt.strftime("%H:%M")
     return "%s月%s日 %s" % (dt.month, dt.day, dt.strftime("%H:%M"))

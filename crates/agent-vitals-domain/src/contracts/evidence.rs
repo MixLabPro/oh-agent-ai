@@ -295,7 +295,7 @@ pub struct DecimalAmount {
 /// （例如一个 7 天滚动窗口叠一个更短的突发窗口），§14.10 cc-switch 的
 /// `tiers[]` 就是因为拍扁成一个数字而丢了"到底哪个窗口先撞线"，所以这里
 /// 用 `Vec<QuotaWindow>` 而不是单个百分比。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct QuotaWindow {
     /// 套餐档位的原始字符串（如某宿主上会读到 `"plus"`）——不同宿主的叫法
     /// 互不通用，不结构化成枚举。
@@ -303,6 +303,42 @@ pub struct QuotaWindow {
     pub used_percent: f64,
     pub window_minutes: u32,
     pub resets_at_ms: i64,
+}
+
+/// 宿主无关的当前配额快照。
+///
+/// 各宿主的 wire 字段（例如 Codex 的 `rate_limits`、未来其他宿主的
+/// `limits`）由 adapter 映射到这里。`plan` 只保留人可见的宿主原始档位，
+/// 不把它误当成跨宿主通用枚举；宿主特有的 credits/balance 扩展不进入该
+/// 类型，也不能被统一换算成金额。
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuotaSnapshot {
+    pub plan: Option<String>,
+    pub windows: Vec<QuotaWindow>,
+    pub observed_at: String,
+}
+
+impl QuotaSnapshot {
+    /// 仅检查跨宿主不变量；具体 wire 字段和缺失字段策略由 adapter 决定。
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.observed_at.is_empty() {
+            return Err("quota snapshot observed_at is empty");
+        }
+        if self.plan.as_deref().is_some_and(str::is_empty) {
+            return Err("quota snapshot plan is empty");
+        }
+        for window in &self.windows {
+            if !window.used_percent.is_finite()
+                || !(0.0..=100.0).contains(&window.used_percent)
+                || window.window_minutes == 0
+                || window.resets_at_ms < 0
+                || window.plan.is_empty()
+            {
+                return Err("quota snapshot window is invalid");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// 不同单位的花费**不可比较**——不同币种不相加不排名；WorkBuddy 计的是
@@ -501,6 +537,20 @@ pub struct SessionMeta {
     pub host_id: &'static str,
     pub workspace_roots: Vec<String>,
     pub model: Option<String>,
+    /// 这份会话**实际覆盖**的时间跨度——喂进本证据的原生记录时间的 min/max。
+    ///
+    /// - **不是**会话头声明的范围：头部可能被轮转/截断，实测值才是"日志里真的有什么"。
+    /// - **空值语义**：0 条原生记录 → `None`。**绝不用 `(0,0)` 表示缺失**——那会被
+    ///   日桶/时间窗读成 1970-01-01（本仓在 `issue_instances.opened_at_ms` 上栽过
+    ///   同一个形态）。单条记录 → `start_ms == end_ms`，那是合法的"这一刻有记录"。
+    /// - **单位恒为毫秒**：由 `agent_vitals_domain::util::to_epoch_ms` 归一
+    ///   （Claude/WorkBuddy 的 `parse_iso` 出秒，DSH/Codex 出毫秒）。
+    /// - 只取原生记录的时间，不含合成的 `ordinal` 序数（序数不是时间）。
+    ///
+    /// 与 `SourceAttempt.observed_span` 的分工：那个是**逐来源**的覆盖跨度，为
+    /// §14.8.6「surface 2/3 的参差左沿」预留（当前无宿主实现那些表面）；
+    /// 本字段是**整个会话**的跨度，四宿主都已接线。
+    /// 方案见 `docs/v1.0.0/OBSERVED_SPAN_IMPLEMENTATION_PLAN.md`。
     pub span: Option<TimeSpan>,
 }
 
@@ -730,6 +780,25 @@ mod tests {
         let Cost::Quota(windows) = cost else { panic!("expected Cost::Quota") };
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[1].window_minutes, 300);
+    }
+
+    #[test]
+    fn quota_snapshot_validates_cross_host_invariants() {
+        let snapshot = QuotaSnapshot {
+            plan: Some("plus".into()),
+            windows: vec![QuotaWindow {
+                plan: "plus".into(),
+                used_percent: 42.0,
+                window_minutes: 300,
+                resets_at_ms: 1_787_800_000_000,
+            }],
+            observed_at: "2026-09-13T00:00:00Z".into(),
+        };
+        assert_eq!(snapshot.validate(), Ok(()));
+
+        let mut invalid = snapshot.clone();
+        invalid.windows[0].used_percent = 101.0;
+        assert_eq!(invalid.validate(), Err("quota snapshot window is invalid"));
     }
 
     /// §12："这条规则有一个测试：断言共享类型层里没有任何标识符含宿主名。"

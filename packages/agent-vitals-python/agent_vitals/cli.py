@@ -836,6 +836,25 @@ def _main():
     # source_event_id 按 rollout **stem** 命名空间（2026-09-03 拍板 D′：byte_offset
     # 只在单文件内唯一，逻辑 session 命名会把两份续接 rollout 的同 offset 同形行
     # 误并）。与 Rust 镜像同源字节。
+    # spec §9E.5 E4a：WorkBuddy UsageFact 诊断 CLI——traces → facts，不写盘。
+    p_wb_usage_facts = sub.add_parser(
+        "workbuddy-usage-facts",
+        help="Replay a WorkBuddy home (~/.workbuddy) into UsageFact rows — one per "
+             "generation span with usage, keyed by trace.sessionId (E4a); in-memory, "
+             "read-only")
+    p_wb_usage_facts.add_argument(
+        "root", help="WorkBuddy home directory (the one containing traces/)")
+    p_wb_usage_facts.add_argument(
+        "--machine-namespace", default=None,
+        help="machine_namespace component of SessionKey — REQUIRED (v0.7 spec "
+             "§9: caller-provided; missing exits 2)")
+    p_wb_usage_facts.add_argument(
+        "--source-profile", default="default",
+        help="source_profile component of SessionKey (default: 'default')")
+    p_wb_usage_facts.add_argument(
+        "--json", metavar="FILE",
+        help="Write UsageFact JSON to FILE; use - for stdout. Without this, "
+             "print human summary.")
     p_codex_usage_facts = sub.add_parser(
         "codex-usage-facts",
         help="Audit ONE+ Codex rollout JSONL files into UsageFact rows "
@@ -971,11 +990,10 @@ def _main():
              "today sessions + recent N rows per host)",
     )
     p_snav.add_argument("--day", default="",
-                        help="Day to project (YYYY-MM-DD, Beijing day boundary; "
+                        help="Day to project (YYYY-MM-DD in the configured statistics timezone; "
                              "defaults to today)")
-    p_snav.add_argument("--timezone", default="Asia/Shanghai",
-                        help="Timezone of the projected day; only Asia/Shanghai "
-                             "is supported (§5.1)")
+    p_snav.add_argument("--timezone", default=None,
+                        help="Query-local IANA statistics timezone override; defaults to the saved or OS timezone")
     p_snav.add_argument("--recent", type=int, default=5,
                         help="How many recent rows per host; default 5")
     p_snav.add_argument("--json", action="store_true",
@@ -1470,6 +1488,52 @@ def _main():
     # Stage 2 commit 2：Codex UsageFact 诊断 CLI（v0.7 spec §3 候选 #3，决策
     # A/D′）。一份或多份 rollout JSONL → facts + attempts + coverage；不写盘。
     # 与 Rust 镜像同源字节（parity 在 tests/test_codex_usage_fact.py）。
+    if getattr(args, "cmd", None) == "workbuddy-usage-facts":
+        from agent_vitals.agent import workbuddy_usage_fact as wuf
+        if not args.machine_namespace:
+            print(
+                "workbuddy-usage-facts: --machine-namespace is required "
+                "(v0.7 spec §9: caller-provided; a CLI default would write state)",
+                file=sys.stderr)
+            sys.exit(2)
+        machine_ns = args.machine_namespace
+        try:
+            result = wuf.workbuddy_traces_to_usage_facts(
+                Path(args.root), machine_namespace=machine_ns,
+                source_profile=args.source_profile)
+        except OSError as e:
+            print("workbuddy-usage-facts failed: %s" % e, file=sys.stderr)
+            sys.exit(2)
+        # 键序与 Rust to_payload_value 一致；attempts 只在 bad_id > 0 时带该键。
+        attempts_out = {k: result.attempts.get(k, 0) for k in ("skip", "unreadable", "unattributed")}
+        if result.attempts.get("bad_id", 0) > 0:
+            attempts_out["bad_id"] = result.attempts["bad_id"]
+        facts_out = {
+            "machine_namespace": machine_ns,
+            "source_profile": args.source_profile,
+            "facts": result.facts,
+            "attempts": attempts_out,
+            "coverage": result.coverage,
+            "malformed": result.malformed,
+        }
+        text = json.dumps(facts_out, ensure_ascii=False, indent=2)
+        if args.json:
+            if args.json == "-":
+                print(text)
+            else:
+                Path(args.json).write_text(text, encoding="utf-8")
+                print("Wrote %s: %d facts" % (args.json, len(result.facts)))
+        else:
+            print("Source: %s" % args.root)
+            print("Machine namespace: %s" % machine_ns)
+            print("Source profile: %s" % args.source_profile)
+            print("Facts: %d (total_generation_spans=%s, skip=%s)"
+                  % (len(result.facts),
+                     result.coverage["total_generation_spans"],
+                     result.coverage["skip_rows"]))
+            print("Attempts: %s" % attempts_out)
+        return
+
     if getattr(args, "cmd", None) == "codex-usage-facts":
         from agent_vitals.agent import codex_usage_fact as cuf
         # machine_namespace 必传（spec §9）。绝不让 CLI 读 takeover 身份来补齐：
@@ -1649,13 +1713,13 @@ def _main():
             }
             env = sessions_sql.session_detail(payload, home)
         elif action == "navigation":
-            # `--day` 缺省 = 今天（北京日界,core 折叠的日期桶是 UTC+8 段;
-            # spec §5.1）——与 Rust 主入口同款缺省。
             day = getattr(args, "day", "")
-            if not day:
-                day = codex_cost_module.today_beijing()
+            timezone_name = getattr(args, "timezone", None)
+            if timezone_name is not None and sessions_sql.validate_timezone(timezone_name) is None:
+                print("sessions navigation: invalid IANA timezone %s" % timezone_name, file=sys.stderr)
+                sys.exit(2)
             nav = sessions_sql.sessions_navigation(
-                day, getattr(args, "recent", 5), home,
+                day, getattr(args, "recent", 5), home, timezone_name=timezone_name,
             )
             # envelope 序列化
             if getattr(args, "json", False):

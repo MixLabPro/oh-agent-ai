@@ -34,9 +34,10 @@ use serde_json::{json, Value};
 /// spec §7 门槛 4：60s TTL。
 pub const MEMO_TTL: Duration = Duration::from_secs(60);
 
-/// 三宿主封闭词表（spec §2.5.1；与 `ingest_service::FACT_HOSTS` 同表——
-/// 那边是 `&[&str; 3]` 常量，这里只需要 contains 语义）。
-pub const TRACE_HOSTS: &[&str] = &["claude-code", "codex", "dsh"];
+/// 宿主封闭词表（spec §2.5.1；与 `ingest_service::FACT_HOSTS` 同表——那边是
+/// 数组常量，这里只需要 contains 语义；workbuddy 自 E4b 起入表，它的会话
+/// 图节点来自 traces 的 generation span 事实）。
+pub const TRACE_HOSTS: &[&str] = &["claude-code", "codex", "dsh", "workbuddy"];
 
 /// 一份 memo 条目：图 + 产生它时的输入快照指纹（`(COUNT, MAX(rowid))`）+
 /// 挂载时间。
@@ -77,7 +78,7 @@ fn fact_counter(
 /// memo 层的会话查找失败原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceLookupError {
-    /// host 不在三宿主词表里。
+    /// host 不在 `TRACE_HOSTS` 词表里。
     UnknownHost(String),
     /// 权威库打不开 / 不存在 / schema 不符。
     AuthorityUnavailable(String),
@@ -93,7 +94,7 @@ impl std::fmt::Display for TraceLookupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TraceLookupError::UnknownHost(h) => {
-                write!(f, "unknown host `{h}` (trace hosts: claude-code/codex/dsh)")
+                write!(f, "unknown host `{h}` (trace hosts: {})", TRACE_HOSTS.join("/"))
             }
             TraceLookupError::AuthorityUnavailable(e) => write!(f, "authority unavailable: {e}"),
             TraceLookupError::SessionNotFound => write!(f, "session not found in authority"),
@@ -160,6 +161,16 @@ fn source_paths_for_session(
                     == Some(key.native_id.as_str())
             })
             .collect(),
+        // WorkBuddy（E4b）：源是整个 `<HOME>/.workbuddy/` 根（db + audit-log +
+        // traces 三面按 session_id join），不是单个文件——传 HOME，`canonical_input`
+        // 的 workbuddy 分派按这个约定解析根。根目录不存在 → 空 → SourceUnavailable。
+        "workbuddy" => {
+            if agent_vitals_hosts::workbuddy_session::workbuddy_root(host_home).is_dir() {
+                vec![host_home.to_path_buf()]
+            } else {
+                Vec::new()
+            }
+        }
         other => return Err(TraceLookupError::UnknownHost(other.to_string())),
     };
     if paths.is_empty() {
@@ -314,8 +325,14 @@ fn attach_usage_facts(
             evidence_ref: format!("uf1:{}", fact.fact_id),
             parent_node_id: None,
             branch_state: BranchState::Live,
-            started_at_ms: Some(fact.event_ts_ms),
-            ended_at_ms: Some(fact.event_ts_ms),
+            // `event_ts_ms` 按权威库契约已是毫秒，这里仍然过一遍具名归一：
+            // `TraceNode.started_at_ms` 的契约是毫秒，而它有**两个**写入方
+            // （此处与 `domain/trace.rs`，后者的输入是宿主各自定单位的
+            // `TimelineEntry.time`）。让两个写入方都调同一个归一函数，契约才是
+            // 被强制的；只归一一个，另一个的正确性就靠运气。函数幂等，对已是
+            // 毫秒的输入零行为变化。
+            started_at_ms: Some(agent_vitals_domain::domain::util::to_epoch_ms(fact.event_ts_ms)),
+            ended_at_ms: Some(agent_vitals_domain::domain::util::to_epoch_ms(fact.event_ts_ms)),
             // usage fact 是一次被成功清洗入权威库的计量观察；它不代表整个
             // assistant turn 成功，只代表该模型调用的用量记录可用。
             status: Some(TraceStatus::Ok),
@@ -627,10 +644,10 @@ mod tests {
     fn unknown_host_is_rejected_at_the_service_layer_too() {
         // 服务层自己也拒一遍（双保险）：TRACE_HOSTS 与 ingest 的 FACT_HOSTS
         // 同表，新增宿主必须两处同步。
-        assert_eq!(TRACE_HOSTS.len(), 3);
-        assert!(TRACE_HOSTS.contains(&"claude-code"));
-        assert!(TRACE_HOSTS.contains(&"codex"));
-        assert!(TRACE_HOSTS.contains(&"dsh"));
+        assert_eq!(TRACE_HOSTS.len(), crate::ingest_service::FACT_HOSTS.len());
+        for h in crate::ingest_service::FACT_HOSTS {
+            assert!(TRACE_HOSTS.contains(&h), "{h} in FACT_HOSTS but not TRACE_HOSTS");
+        }
     }
 
     #[test]

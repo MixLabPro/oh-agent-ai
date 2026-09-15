@@ -32,13 +32,13 @@ const HOURS: [&str; 24] = [
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "usage_hourly",
-        description: "Report hourly usage curves (24 Beijing-hour buckets, including zero buckets) for one day, optionally broken down by host / model / provider. Tokens are summed across usage_facts (excluding legacy_aggregate rows). 'cost' metric is not yet exposed per-hour — it lives in cost_breakdown (M3) because per-hour pricing needs fact-time price-version replay, not window-level.",
+        description: "Report hourly usage curves (24 buckets in the configured statistics timezone, including zero buckets) for one day, optionally broken down by host / model / provider. Tokens are summed across usage_facts (excluding legacy_aggregate rows). 'cost' metric is not yet exposed per-hour — it lives in cost_breakdown (M3) because per-hour pricing needs fact-time price-version replay, not window-level.",
         input_schema: json!({
             "type": "object",
             "properties": {
                 "date": {
                     "type": "string",
-                    "description": "Beijing date YYYY-MM-DD (inclusive). The 24-hour window covers [00:00, 24:00)."
+                    "description": "Date YYYY-MM-DD in the configured statistics timezone (inclusive). The natural-day window covers [00:00, 24:00)."
                 },
                 "group_by": {
                     "type": "string",

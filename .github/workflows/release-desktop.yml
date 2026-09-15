@@ -1,0 +1,183 @@
+name: Release macOS desktop app
+
+on:
+  push:
+    tags: ["app-v*"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing app-v* tag to publish"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-desktop-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build and notarize macOS app
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: x86_64
+          - runner: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -eu
+          case "$RELEASE_TAG" in
+            app-v*) ;;
+            *) echo "release tag must start with app-v*: $RELEASE_TAG" >&2; exit 1 ;;
+          esac
+
+      - name: Require release signing credentials
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -eu
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            value="${!name-}"
+            if [ -z "$value" ]; then
+              echo "missing required release secret: $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build bundled CLI
+        run: cargo build --release
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+
+      - name: Build signed app and DMG
+        working-directory: apps/desktop/src-tauri
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: cargo tauri build --ci --bundles app,dmg
+
+      - name: Verify signed app and bundled CLI
+        env:
+          RUNNER_ARCH: ${{ runner.arch }}
+        shell: bash
+        run: |
+          set -eu
+          case "$RUNNER_ARCH" in
+            ARM64) expected=arm64 ;;
+            X64) expected=x86_64 ;;
+            *) echo "unsupported macOS runner architecture: $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          [ "$expected" = "$EXPECTED_ARCH" ] || {
+            echo "runner architecture $expected does not match matrix $EXPECTED_ARCH" >&2
+            exit 1
+          }
+          node scripts/verify-macos-app-bundle.mjs \
+            --require-developer-id \
+            "--require-architecture=$EXPECTED_ARCH"
+
+      - name: Verify notarization ticket
+        run: xcrun stapler validate apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app
+
+      - name: Stage architecture-specific artifacts
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p "dist/$EXPECTED_ARCH"
+          ditto apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app \
+            "dist/$EXPECTED_ARCH/agent-vitals.app"
+          dmg="$(find apps/desktop/src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
+          [ -n "$dmg" ] || { echo "missing DMG for $EXPECTED_ARCH" >&2; exit 1; }
+          cp "$dmg" "dist/$EXPECTED_ARCH/agent-vitals-${RELEASE_TAG}-${EXPECTED_ARCH}.dmg"
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-vitals-macos-${{ inputs.release_tag || github.ref_name }}-${{ matrix.arch }}
+          path: dist/${{ matrix.arch }}
+          if-no-files-found: error
+
+  publish:
+    name: publish macOS app release
+    needs: build
+    runs-on: macos-latest
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agent-vitals-macos-${{ inputs.release_tag || github.ref_name }}-*
+          path: dist
+          merge-multiple: false
+
+      - name: Re-verify downloaded app
+        shell: bash
+        run: |
+          set -eu
+          for arch in x86_64 arm64; do
+            app="$(find dist -type d -path "*-${arch}/agent-vitals.app" -print -quit)"
+            [ -n "$app" ] || { echo "missing $arch app artifact" >&2; exit 1; }
+            node scripts/verify-macos-app-bundle.mjs "$app" \
+              --require-developer-id \
+              "--require-architecture=$arch"
+          done
+
+      - name: Re-verify downloaded notarization ticket
+        shell: bash
+        run: |
+          set -eu
+          for arch in x86_64 arm64; do
+            app="$(find dist -type d -path "*-${arch}/agent-vitals.app" -print -quit)"
+            [ -n "$app" ] || { echo "missing $arch app artifact" >&2; exit 1; }
+            xcrun stapler validate "$app"
+          done
+
+      - name: Publish app and DMG
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          mkdir -p release
+          for arch in x86_64 arm64; do
+            app="$(find dist -type d -path "*-${arch}/agent-vitals.app" -print -quit)"
+            dmg="$(find dist -type f -path "*-${arch}/*.dmg" -print -quit)"
+            [ -n "$app" ] || { echo "missing $arch app artifact" >&2; exit 1; }
+            [ -n "$dmg" ] || { echo "missing $arch dmg artifact" >&2; exit 1; }
+            ditto -c -k --sequesterRsrc --keepParent "$app" \
+              "release/agent-vitals-${RELEASE_TAG}-${arch}.app.zip"
+            cp "$dmg" "release/agent-vitals-${RELEASE_TAG}-${arch}.dmg"
+          done
+          (cd release && shasum -a 256 *.zip *.dmg > SHA256SUMS)
+          gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes
+          gh release upload "$RELEASE_TAG" release/*

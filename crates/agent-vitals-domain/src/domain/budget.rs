@@ -247,7 +247,7 @@ pub fn evaluate_alert(
             }
         }
     } else {
-        reasons.push("no today.json yet (run `behavior <log>` to start tracking)".to_string());
+        reasons.push("no metered spend recorded for today yet (budget counts cross-host metered spend only)".to_string());
     }
 
     // 月预算：之前只把 month_cost/monthly_cny 算出来给 xbar 显示，从没真的参与过
@@ -489,14 +489,17 @@ mod tests {
         assert_eq!(r["today_cost"], Value::Null);
     }
 
-    /// today.json 缺场 → level='ok' + 一条 reason 说明（不告警但要解释）。
+    /// 当日无按量实付 → level='ok' + 一条 reason 说明（不告警但要解释）。
+    ///
+    /// 措辞 2026-09-14 改过一次：原文引用已退役的 `today.json` 与 `behavior` 命令
+    /// （Phase 4.3 后当日数据来自权威库事实），照着做的用户会白跑一趟。
     #[test]
-    fn no_today_json_returns_ok_with_explanation() {
+    fn missing_today_data_returns_ok_with_explanation() {
         let r = evaluate_alert(&cfg(), None, None, &cost::load_pricing(), &today_key(), None, now_unix());
         assert_eq!(r["level"], "ok");
         assert_eq!(r["today_cost"], Value::Null);
         let reasons = r["reasons"].as_array().unwrap();
-        assert!(reasons.iter().any(|x| x.as_str().unwrap().contains("no today.json")));
+        assert!(reasons.iter().any(|x| x.as_str().unwrap().contains("no metered spend recorded for today")));
         assert_eq!(r["effective_daily_budget"], 30.0);
         assert_eq!(r["monthly_cny"], 600.0);
     }

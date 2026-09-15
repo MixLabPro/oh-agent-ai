@@ -33,7 +33,18 @@ title}`。db 缺失的列 → 对应信号降级 Unavailable（缺列报缺，�
 非零数字出来。
 """
 
+import json
+import math
+
 from agent_vitals.agent.claude_evidence import parse_iso
+from ..util import session_span
+
+# epoch 秒的固定合法性窗口（spec §10 A6）：`[2000-01-01, 2100-01-01)`。
+# `adapters/workbuddy_session.py` 那侧在 I/O 层、能读时钟，用的是 `now + 24h`
+# 上界；这个模块是纯的（Rust 镜像可链进 wasm），读不了时钟，退一步用固定的
+# 2100 上界，与 Rust `evidence.rs::{WB_TS_MIN_SECS, WB_TS_MAX_SECS}` 同值。
+_WB_TS_MIN_SECS = 946684800    # 2000-01-01T00:00:00Z
+_WB_TS_MAX_SECS = 4102444800   # 2100-01-01T00:00:00Z
 
 # 20 个 Signal 的声明序——`signals` 数组 / `coverage` 字典的输出顺序都靠这份显式
 # 表对齐（与 Rust `workbuddy_evidence.rs::ALL_SIGNALS` 同表同序），不靠 Python
@@ -53,6 +64,9 @@ ALL_SIGNALS = (
     "SandboxPolicy",
     "NetworkAccess",
     "Compaction",
+    # E2 前 Python 侧漏了 SubagentSpawns（Rust ALL_SIGNALS 一直有）——它恒 unavailable
+    # 时 `_UNAVAILABLE_SIGNALS` 的循环顺手把键塞进 coverage，掩盖了缺口；E2 让它可测，
+    # 缺口当场暴露（KeyError）。按 Rust 序补齐。
     "SubagentSpawns",
     "SkillInvocations",
     "Hooks",
@@ -88,24 +102,29 @@ KNOWN_EVENT_TYPES = frozenset((
 # 的置零与 `workbuddy_evidence_json` 的 `available` 标记共用这一份清单，不准两处
 # 各写一份漂移。
 #
-# - ToolResults：audit-log 无 exit 码，traces 的 status/error 接不进 session；
+# - ToolResults / SubagentSpawns **不在**这个集合里（spec §9E.5 E2，2026-09-11）：
+#   traces 可按 `trace.sessionId` 归属（B2），function span 的 status/error →
+#   tool_results，agent span → SubagentSpawns。此前「接不进 session」是 09-02 的
+#   分析错误；
 # - TurnBoundaries **不在**这个集合里——它按 distinct requestId 派生 coverage
 #   （lossy 下界，available=true），但 turns timeline 恒空（spec §8）；
 # - Usage：无逐请求 token（traces 只有 trace 级 totalTokens）；UsageAggregate
 #   反而 measured（session_usage.used，spec §9）；
 # - SandboxPolicy：use_sandbox_cli 是常量（恒 1），不是结构化策略事件；
+# - QuotaConsumption **不在**这个集合里（spec §10 B6，2026-09-11）：`credit_json`
+#   的每个 requestId 条目就是一次「宿主报告的配额消耗」——分子 measured；分母
+#   （allowance/余额）在服务端账户面、本机不可观测，由 note 说明，不出百分比。
+#   此前把它声明成 unavailable 是错的——那是「有证据却不计」。§13 矩阵文档滞后，
+#   按 G5 流程在 tests/test_host_contract.py::_REGISTERED_DEVIATIONS 登记；
 # - SubagentSpawns / SkillInvocations / Hooks / UserPrompts / UserCorrections /
-#   ContextWindow / QuotaConsumption / StepBoundaries / Compaction：只存于匿名
-#   traces 或根本不在 WorkBuddy 会话面上。
+#   ContextWindow / StepBoundaries / Compaction：只存于 traces（可按
+#   `trace.sessionId` 归属但现有实现未接，Phase E）或根本不在会话面上。
 _UNAVAILABLE_SIGNALS = (
-    "ToolResults",
     "StepBoundaries",
     "Usage",
     "ContextWindow",
-    "QuotaConsumption",
     "SandboxPolicy",
     "Compaction",
-    "SubagentSpawns",
     "SkillInvocations",
     "Hooks",
     "UserPrompts",
@@ -123,23 +142,58 @@ _SANDBOX_MODE_NOTE = (
     "fullAccess); the DSH danger-full-access vocabulary does not apply, so SV610 "
     "is an honest MeasuredZero, never a translation."
 )
+# spec §10 B6：分子可测、分母不可观测——只报绝对量，不出百分比（§6.6「无法证明
+# 完整时不编百分比」同款）。与 Rust 逐字节相同。
+_QUOTA_CONSUMPTION_NOTE = (
+    "quota consumption is measured from credit_json entries (one per billed "
+    "request); the allowance / balance that would give a percentage lives on the "
+    "account plane and is not observable on this machine, so only the absolute "
+    "consumption is reported"
+)
 
 # traces 是「已知但刻意不用的表面」（spec §12.2）——会话匿名，join 不进 session。
 # 记成 SourceAttempt（§14.4：skipped and recorded, never treated as corruption）。
-_TRACES_ATTEMPT = {
-    "source_id": "workbuddy.traces",
-    "kind": "Directory",
-    "surface": "Traces",
-    "available": False,
-    "error": ("traces are session-anonymous (no sessionId join); skipped per "
-              "RUNTIME_EVIDENCE_CONTRACT §14.4"),
-    "observed_span": None,
+# spec §9E.5 E2/E3：traces 已按 `trace.sessionId` 归属并折进 timeline（B2 推翻了
+# 「session-anonymous」）。**Bash function span 永不进 tool_calls**（E3 裁决，2026-09-11
+# 真机实测）：audit-log `toolCallId`（call_00_…）与 span `spanId`（span_…）两套命名
+# 空间、0/2,398 可 join；sandbox-executed 2,398 vs Bash span 1,661（traces 按 pid 存、
+# 轮转丢失约 30%）；命令文本 59% 相等——模糊 join 就是猜。audit-log 是 Bash 唯一源。
+# 代价如实：Bash 的 status/duration 无键可挂 → Bash 没有 tool_results。与 Rust 逐字节相同。
+_TRACES_FOLDED_NOTE_PREFIX = "traces folded via trace.sessionId: "
+
+# §7 工具名规范化（与 claude_evidence.py 同一张表，WorkBuddy 的 toolName 是同一套
+# PascalCase）。未映射的原样透传。**Bash 不在这里处理**（E2 排除在 tool_calls 外）。
+_SPAN_TOOL_NAMES = {
+    "Write": "write", "Edit": "edit", "MultiEdit": "edit", "Read": "read",
+    "Glob": "glob", "Grep": "grep", "WebFetch": "web_fetch", "WebSearch": "web_search",
+    "Task": "task",
 }
+
+
+def _normalize_span_tool_name(name):
+    return _SPAN_TOOL_NAMES.get(name, name)
+
+
+def _span_time(span):
+    """span 的 ISO 毫秒串 → unix 秒。走 `parse_iso` 的字符串路径（A2）；解不出 → None。"""
+    s = span.get("started_at")
+    if not isinstance(s, str):
+        return None
+    r = parse_iso(s)
+    return r[0] if r is not None else None
+
+
+def _sort_spans(spans):
+    """确定性顺序 `(started_at, span_id)`——同一毫秒内多个 span 靠 span_id 定序。"""
+    objs = [s for s in spans if isinstance(s, dict)]
+    return sorted(objs, key=lambda s: (s.get("started_at") if isinstance(s.get("started_at"), str) else "",
+                                       s.get("span_id") if isinstance(s.get("span_id"), str) else ""))
 
 
 def _timeline_entry(observation, seq, time, call_id, ordinal):
     """一条 timeline entry 的构造器。`turn`/`step` 恒 None——WorkBuddy 无 turn/step
-    结构；`time` = audit-log timestamp 的 unix 秒（`parse_iso`，无效则 None）。"""
+    结构；`time` = audit-log timestamp 归一后的 unix 秒（字符串走 `parse_iso`、
+    整数/浮点按 epoch 毫秒解释，见 `_parse_time`；无效则 None）。"""
     return {"observation": observation, "seq": seq, "time": time, "turn": None,
             "step": None, "call_id": call_id, "ordinal": ordinal}
 
@@ -215,11 +269,38 @@ def _approval_tool(record):
 
 
 def _parse_time(record):
+    """audit-log `timestamp` → 该 entry 的 `time`（unix 秒；`time` 字段是
+    整数或 None，从来不是 ISO 串）。
+
+    - **字符串** → 既有 `parse_iso` 路径，**原样不回归**。
+    - **整数/浮点** → 按 epoch **毫秒**解释（真机 `~/.workbuddy/audit-log/*.jsonl`
+      的 `timestamp` 是 13 位 epoch-ms 整数，2026-09-10 实测），floor-除 1000 归一
+      到秒——与 Rust `evidence.rs::parse_time` 的 `i64::div_euclid(1000)` /
+      `(f / 1000.0).floor()` 逐字节对齐；落在固定窗口 `[2000-01-01, 2100-01-01)`
+      之外 → None（纯层无 `attempts` 汇，只 null）。
+    - **其余类型（bool/null/object）/缺失** → None。
+
+    旧实现只收字符串（`isinstance(ts, str)`），整数一律 None——于是有 findings 的
+    会话里每条 finding 的 `time` 是 null（评审 A6：与 Rust 同一 commit，否则
+    `both()` 差分转红）。**不做秒/毫秒位数嗅探**（spec §6.2 rule 5）。"""
     ts = record.get("timestamp")
-    if not isinstance(ts, str):
+    if isinstance(ts, str):
+        parsed = parse_iso(ts)
+        return parsed[0] if parsed is not None else None
+    # bool 是 int 的子类——必须先短路（否则 True // 1000 = 0 → 归一成 1970）。
+    if isinstance(ts, bool):
         return None
-    parsed = parse_iso(ts)
-    return parsed[0] if parsed is not None else None
+    if isinstance(ts, int):
+        secs = ts // 1000
+    elif isinstance(ts, float):
+        if not math.isfinite(ts):
+            return None
+        secs = math.floor(ts / 1000.0)
+    else:
+        return None
+    if secs < _WB_TS_MIN_SECS or secs >= _WB_TS_MAX_SECS:
+        return None
+    return secs
 
 
 def _chain_note(records):
@@ -254,7 +335,7 @@ def _chain_note(records):
             % (len(seqs), first_seq))
 
 
-def _populate_workbuddy_timelines(records, session_meta):
+def _populate_workbuddy_timelines(records, session_meta, spans):
     """跑一遍（按 sequence 排序后的）audit-log 记录，翻译成五条 host-neutral
     timeline（spec §7 决策映射）：
     - `tool_calls`：`command-safety`+`command-safety.sandbox-executed` → bash
@@ -267,7 +348,7 @@ def _populate_workbuddy_timelines(records, session_meta):
     - `turns`/`tool_results`：恒空（spec §3/§8）。
 
     返回 `(timelines, unknown)`。`seq` = 排序后的下标（会话内序）。"""
-    tool_calls, approvals, sandbox = [], [], []
+    tool_calls, tool_results, approvals, sandbox = [], [], [], []
     unknown = []
     mode = session_meta.get("permission_mode")
     mode = mode if isinstance(mode, str) else None
@@ -325,9 +406,39 @@ def _populate_workbuddy_timelines(records, session_meta):
                 observation["decided"] = {"outcome": "rejected"}
             approvals.append(_timeline_entry(observation, seq, time, call_id,
                                              take_ordinal()))
+
+    # E2：traces 的 function span → tool_calls + tool_results（Measured）。**Bash 排除**
+    # （E3 定主源前不双计）。args_text 只放 `{"file_path": …}`——SV604/605 的正则读它；
+    # 其余 input 一律不进（§4 不要正文）。tool_results：`failed` = status≠ok 或 error
+    # 非空；`error_code` = 宿主原生 status，**不翻译成 DSH 码集**——SV607/608 照跑
+    # 零命中是诚实 MeasuredZero（Codex `exit_code:N` 同款纪律）。
+    for span in _sort_spans(spans):
+        if span.get("kind") != "function":
+            continue
+        tool = span.get("tool_name")
+        if not isinstance(tool, str) or not tool or tool == "Bash":
+            continue
+        call_id = span.get("span_id") if isinstance(span.get("span_id"), str) else None
+        time = _span_time(span)
+        fp = span.get("file_path")
+        # 与 Rust `serde_json::json!({"file_path": fp}).to_string()` 逐字节一致：
+        # 紧凑分隔符、不转义非 ASCII。
+        args_text = (json.dumps({"file_path": fp}, ensure_ascii=False, separators=(",", ":"))
+                     if isinstance(fp, str) else "")
+        tool_calls.append(_timeline_entry(
+            {"name": _normalize_span_tool_name(tool), "args_text": args_text},
+            None, time, call_id, take_ordinal()))
+        status = span.get("status") if isinstance(span.get("status"), str) else ""
+        err = span.get("error")
+        has_error = isinstance(err, str) and err != ""
+        not_ok = status != "" and status != "ok"
+        tool_results.append(_timeline_entry(
+            {"failed": not_ok or has_error, "error_code": status if not_ok else None},
+            None, time, call_id, take_ordinal()))
+
     return {
         "tool_calls": tool_calls,
-        "tool_results": [],
+        "tool_results": tool_results,
         "approvals": approvals,
         "sandbox_modes": sandbox,
         "turns": [],
@@ -342,7 +453,38 @@ def _bump(coverage, signal, bucket, n=1):
     coverage[signal][bucket] += n
 
 
-def _derive_coverage(records, timelines, session_meta):
+def _credit_entry_count(credit_json):
+    """`credit_json`（`{requestId: credit}` 的 JSON 串）里可解析为数值的条目数。
+    解析失败 / 非对象 / 空串 → 0。bool 显式排除（`isinstance(True, int)` 为真，
+    Rust 侧也短路）；数值字符串（真实账单里出现过）算数值。与 Rust
+    `credit_entry_count` 逐字节同判。"""
+    if not isinstance(credit_json, str) or not credit_json.strip():
+        return 0
+    try:
+        parsed = json.loads(credit_json)
+    except (ValueError, TypeError):
+        return 0
+    if not isinstance(parsed, dict):
+        return 0
+    n = 0
+    for v in parsed.values():
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)):
+            if v == v and v not in (float("inf"), float("-inf")):
+                n += 1
+            continue
+        if isinstance(v, str):
+            try:
+                f = float(v)
+            except ValueError:
+                continue
+            if f == f and f not in (float("inf"), float("-inf")):
+                n += 1
+    return n
+
+
+def _derive_coverage(records, timelines, session_meta, spans):
     """spec §3 矩阵逐信号喂覆盖。ToolCalls/SandboxModes/NetworkAccess/ApprovalDecisions
     与 populate 的 timeline 同源（sandbox-executed 数 = tool_calls 的 bash 数 =
     sandbox 数，等）——coverage 与 timeline 两条账必须对得上，否则门控读 timeline
@@ -389,10 +531,36 @@ def _derive_coverage(records, timelines, session_meta):
     # UsageAggregate measured = session_usage.used / credit_json 存在（spec §9）。
     if session_meta.get("used") is not None or session_meta.get("credit_json"):
         _bump(coverage, "UsageAggregate", "measured")
+    # QuotaConsumption measured = credit_json 里**可解析为数值**的条目数（spec §10 B6）
+    # ——每条 = 宿主为一个 requestId 记了一笔配额消耗。只数条目不看金额：0 积分的
+    # 条目也是一次记账观察。非数值（bool/字符串垃圾/None）不计——记账缺口报缺。
+    # 与 workbuddy_session_audit._credit_cents 的求和是两件事：那边算钱，这边算次数。
+    quota_entries = _credit_entry_count(session_meta.get("credit_json"))
+    if quota_entries > 0:
+        _bump(coverage, "QuotaConsumption", "measured", quota_entries)
     # TurnBoundaries derived = distinct requestId（lossy 下界，spec §8）。coverage
     # 与 turns timeline **不同源**（timeline 恒空）——这正是
     # empty_timeline_with_nonzero_coverage_is_unavailable_not_measured_zero 钉住的
     # 模式：SV612/613 读 timeline 判 Unavailable，coverage 只报可观察的请求下界。
+    # E2：traces span 的覆盖。function（非 Bash）→ ToolCalls + ToolResults 各 +1；
+    # agent → SubagentSpawns +1。Bash span 不计（E3 前主源是 audit-log，重复计就是
+    # 虚增覆盖）。
+    fn_spans = agent_spans = 0
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        kind = span.get("kind")
+        if kind == "function":
+            tool = span.get("tool_name")
+            if isinstance(tool, str) and tool and tool != "Bash":
+                fn_spans += 1
+        elif kind == "agent":
+            agent_spans += 1
+    if fn_spans > 0:
+        _bump(coverage, "ToolCalls", "measured", fn_spans)
+        _bump(coverage, "ToolResults", "measured", fn_spans)
+    if agent_spans > 0:
+        _bump(coverage, "SubagentSpawns", "measured", agent_spans)
     if request_ids:
         _bump(coverage, "TurnBoundaries", "derived", len(request_ids))
 
@@ -403,19 +571,43 @@ def _derive_coverage(records, timelines, session_meta):
     return sigset, coverage, unknown
 
 
-def _build_notes(coverage, records):
+def _build_notes(coverage, records, spans):
     notes = []
     if _total(coverage["TurnBoundaries"]) > 0:
         notes.append(_TURN_BOUNDARY_NOTE)
     if _total(coverage["SandboxModes"]) > 0:
         notes.append(_SANDBOX_MODE_NOTE)
+    if _total(coverage["QuotaConsumption"]) > 0:
+        notes.append(_QUOTA_CONSUMPTION_NOTE)
     chain = _chain_note(records)
     if chain is not None:
         notes.append(chain)
+    # E2：有 span 就说明折了什么、没折什么。Bash span 数单独报——E3 定主源前它们
+    # 不进 tool_calls，读者得知道这个缺口是刻意的。
+    objs = [s for s in spans if isinstance(s, dict)]
+    if objs:
+        fn_non_bash = bash = agent = 0
+        for s in objs:
+            kind = s.get("kind")
+            if kind == "function":
+                tool = s.get("tool_name")
+                if tool == "Bash":
+                    bash += 1
+                elif isinstance(tool, str) and tool:
+                    fn_non_bash += 1
+            elif kind == "agent":
+                agent += 1
+        notes.append(
+            "%s%d non-Bash function span(s) -> tool_calls/tool_results, %d agent span(s) -> "
+            "SubagentSpawns; %d Bash span(s) NOT folded: audit-log sandbox-executed is the Bash "
+            "source (no shared identity key \u2014 audit toolCallId vs span spanId \u2014 and "
+            "audit-log is the hash-chained security ledger with the more complete record; "
+            "merging would double-count)"
+            % (_TRACES_FOLDED_NOTE_PREFIX, fn_non_bash, agent, bash))
     return notes
 
 
-def build_workbuddy_evidence(raw_records, session_id, session_meta):
+def build_workbuddy_evidence(raw_records, session_id, session_meta, spans=()):
     """记录数组 + 会话元数据 → evidence 字典（"derive → coverage" 两段；"locate →
     shape → extract" 留在 `adapters/workbuddy_session.py`）。与 Rust
     `build_workbuddy_evidence` 对齐：返回 `{"canonical", "raw_records"}`，其中
@@ -427,20 +619,22 @@ def build_workbuddy_evidence(raw_records, session_id, session_meta):
     | 规则 | WorkBuddy |
     |---|---|
     | SV601–603 | 跑（`command-safety.sandbox-executed` 的 commandPreview → bash args_text） |
-    | SV604/605 | **Unavailable**（dispatcher 层 host-capability degradation，spec §3.1） |
+    | SV604/605 | 跑（E2：Edit/Write span 解码后的 file_path → args_text）；降级行已删 |
     | SV606 | 跑（network+WebFetch target → web_fetch args_text） |
-    | SV607/608 | Unavailable（无 tool_results / exit 码） |
+    | SV607/608 | 跑（E2：span status → error_code，原生码不翻译 → 诚实 MeasuredZero） |
     | SV609 | 跑（audit-log 审批路径 → asked）；无审批记录则 Unavailable |
     | SV610 | 跑（sandbox 非空），mode 恒非 danger-full-access → 诚实 MeasuredZero |
     | SV611 | 跑（bash+web_fetch 子集） |
-    | SV612/613 | Unavailable（turns 恒空 / results 恒空） |
+    | SV612/613 | SV612 Unavailable（turns 恒空）；SV613 有 span 时跑（(b) 读 tool_results），无 span 时 Unavailable |
     | SV614 | 跑（approvals+sandbox 双轴都在） |
     """
-    timelines, unknown = _populate_workbuddy_timelines(raw_records, session_meta)
-    sigset, coverage, cov_unknown = _derive_coverage(raw_records, timelines, session_meta)
+    spans = list(spans)
+    timelines, unknown = _populate_workbuddy_timelines(raw_records, session_meta, spans)
+    sigset, coverage, cov_unknown = _derive_coverage(raw_records, timelines, session_meta, spans)
     all_unknown = unknown + [m for m in cov_unknown if m not in unknown]
     all_unknown.sort()
-    attempts = [dict(_TRACES_ATTEMPT)] + [{
+    # E2：traces 不再是「已知但刻意不用」的表面——已折进 timeline，不再记 attempt。
+    attempts = [{
         "source_id": "workbuddy.audit-log",
         "kind": "LogFile",
         "surface": "SessionLog",
@@ -448,14 +642,17 @@ def build_workbuddy_evidence(raw_records, session_id, session_meta):
         "error": msg,
         "observed_span": None,
     } for msg in all_unknown]
-    notes = _build_notes(coverage, raw_records)
+    notes = _build_notes(coverage, raw_records, spans)
+    # D1–D4：喂进本证据的**原生记录**时间 min/max。`_parse_time` 出**秒**，
+    # 由 `session_span` 归一到毫秒。0 条记录 → None（不造 (0,0)）。
+    native_times = [t for t in (_parse_time(r) for r in raw_records) if t is not None]
     canonical = {
         "meta": {
             "session_id": session_id,
             "host_id": "workbuddy",
             "workspace_roots": _first_cwd(session_meta),
             "model": _extract_model(session_meta),
-            "span": None,
+            "span": session_span(native_times),
         },
         "signals": [s for s in ALL_SIGNALS if s in sigset],
         "coverage": coverage,
@@ -514,6 +711,8 @@ def workbuddy_evidence_json(evidence):
         "session_id": canonical["meta"]["session_id"],
         "workspace_roots": canonical["meta"]["workspace_roots"],
         "model": canonical["meta"]["model"],
+        # 会话实际覆盖跨度（D1–D4）。键位置与 Rust 序列化器逐字节对齐。
+        "span": canonical["meta"]["span"],
         "signals": signals,
         "coverage": coverage_map,
         "attempts": attempts,

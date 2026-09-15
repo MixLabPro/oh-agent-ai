@@ -24,6 +24,16 @@ import { fileURLToPath } from 'node:url'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
+// Keep the no-host-locale assertion deterministic on Node 22, which exposes
+// navigator.language as en-US by default.
+if (globalThis.navigator && typeof globalThis.navigator === 'object') {
+  try {
+    Object.defineProperty(globalThis.navigator, 'language', { value: 'zh-CN', configurable: true })
+  } catch (_) {
+    // Older runtimes may expose a non-configurable navigator.
+  }
+}
+
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 
 function fail(msg) {

@@ -218,7 +218,7 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
 pub fn audit_payload(path: &Path) -> Option<Value> {
     let audit = audit_session_log(path)?;
     let findings = &audit.findings;
-    let pricing = agent_vitals_domain::cost::load_pricing();
+    let pricing = crate::price_overrides::merged_main(&crate::home::data_home());
     let cost = agent_vitals_domain::cost::cost_report(&audit.usage, &pricing);
     let pre_fork_cost = if audit.pre_fork.is_null() {
         None

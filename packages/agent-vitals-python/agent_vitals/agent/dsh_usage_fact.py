@@ -233,7 +233,10 @@ def _observation_to_usage_fact(obs, machine_namespace, native_session_id, profil
         ),
         "billing_source": obs.provider_raw if isinstance(obs.provider_raw, str) and obs.provider_raw.strip() else None,
         "billing_mode": "metered",
-        "pricing_basis": "route-observed" if obs.provider_raw else "metered_estimate",
+        # Route evidence identifies the provider, but does not itself prove a
+        # settled bill. Keep the fact at the conservative estimate basis; the
+        # projection layer may promote an official, measured source separately.
+        "pricing_basis": "metered_estimate",
         "evidence_basis": "session-native" if obs.provider_raw else "missing",
         "normalization_version": "provider-v0.11",
         "attribution_version": "provider-v0.11",

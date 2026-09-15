@@ -42,6 +42,18 @@ use crate::resolve_binary;
 #[derive(Clone)]
 pub struct StoreBuildLock(pub Arc<Mutex<()>>);
 
+const ISSUE_DEFAULT_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Default L0 window required by REQ-073.  The lower edge is a rolling
+/// thirty-day boundary; the authority layer still applies the configured
+/// statistics timezone when it assigns each returned Issue to a day bucket.
+/// Keep the upper edge just after `now` so an Issue written during this read
+/// cannot be omitted by the exclusive SQL bound.
+fn issue_default_window() -> (i64, i64) {
+    let now = agent_vitals_runtime::sql_sync::now_ms();
+    (now.saturating_sub(ISSUE_DEFAULT_WINDOW_MS), now.saturating_add(1))
+}
+
 impl StoreBuildLock {
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(())))
@@ -66,28 +78,7 @@ fn no_binary() -> Value {
 /// 北京日期 `YYYY-MM-DD`（与 `overview::today_beijing` 同口径，但纯函数版
 /// 便于单测）。不引 `chrono` / `time`——直接调 std 即可，单测里 stub。
 fn beijing_today_yyyy_mm_dd() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // 北京 = UTC+8（无夏令时）。ms → s 整数除法 → 加 8 小时。
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let beijing_secs = secs + 8 * 3600;
-    let day = beijing_secs / 86_400;
-    // 1970-01-01 是 day 0（beijing）。粗算回 Y/M/D 避免引 chrono 单测头重——
-    // 工作台不需要精确到秒，工作台只用到 YYYY-MM-DD 字符串。下面用 Gregorian
-    // 公式（Howard Hinnant 算法，J = day + 719468，跨世纪范围 1970-2100 验证）。
-    let z = day + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{:04}-{:02}-{:02}", y, m, d)
+    agent_vitals_runtime::clock::today_system()
 }
 
 /// `sessions list` 的 argv（纯函数，供单测钉住 IPC→CLI 参数映射）。参数集对齐
@@ -102,15 +93,20 @@ fn beijing_today_yyyy_mm_dd() -> String {
 /// → CLI 走 `--month` 路径，返回该月全部会话。day 模式返回单日窗口（按小时聚合）。
 /// 同传两个时优先 month（更粗、user 主动选的）——这条排序按前端语义定，单测钉死。
 ///
-/// **旧 CLI 不再接受的 flag**：`--model` / `--from` / `--to` / `--query` / `--hour`
+/// **旧 CLI 不再接受的 flag**：`--from` / `--to` / `--query` / `--hour`
 /// / `--min-tokens`——这些维度 r2a_store 没实现，与权威库 sessions_search 输入
 /// schema 对齐后已删。前端想用这些维度时需先扩 mcp::sessions_search 的 args
-/// schema，再回来加 IPC 参数；目前工作台只用到 day / month / host_kind /
+/// schema，再回来加 IPC 参数；目前工作台只用到 day / month / host_kind / model / provider /
 /// page_size / cursor。
+#[allow(clippy::too_many_arguments)]
 fn list_args(
     day: &Option<String>,
     month: &Option<String>,
+    date_from: &Option<String>,
+    date_to: &Option<String>,
     host_kind: &Option<String>,
+    model: &Option<String>,
+    provider: &Option<String>,
     page_size: Option<usize>,
     cursor: &Option<String>,
 ) -> Vec<String> {
@@ -123,7 +119,12 @@ fn list_args(
     // day 单窗口只是默认兜底。前端 day picker 选日期时只发 day、month picker
     // 选月时只发 month——同传两个是 IPC bug，这层用 month 兜住不报错。
     // 两个都 None → 今天北京日期（保持 v0.9.1 旧契约：开 tab 直接看到当天）。
-    if let Some(m) = month.clone() {
+    if let (Some(from), Some(to)) = (date_from.clone(), date_to.clone()) {
+        a.push("--from-date".into());
+        a.push(from);
+        a.push("--to-date".into());
+        a.push(to);
+    } else if let Some(m) = month.clone() {
         a.push("--month".into());
         a.push(m);
     } else {
@@ -134,6 +135,14 @@ fn list_args(
     if let Some(h) = host_kind {
         a.push("--host-kind".into());
         a.push(h.clone());
+    }
+    if let Some(m) = model {
+        a.push("--model".into());
+        a.push(m.clone());
+    }
+    if let Some(p) = provider {
+        a.push("--provider".into());
+        a.push(p.clone());
     }
     if let Some(p) = page_size {
         a.push("--page-size".into());
@@ -192,7 +201,7 @@ fn run_json(mut cmd: Command) -> Result<Value, Value> {
 /// async：spawn_blocking 把 CLI 子进程丢到阻塞线程池，主线程继续收托盘事件，
 /// 详见模块头注释。
 ///
-/// **参数扁平**（day / month / host_kind / page_size / cursor 五件）是 Tauri
+/// **参数扁平**（day / month / host_kind / model / provider / page_size / cursor 七件）是 Tauri
 /// IPC 契约的一部分——`workbench.js` 的 invoke 调用面就是这五个扁平参数，
 /// 改成结构体要连带改前端调用面。5 个参数本就在 lint 阈值内。
 ///
@@ -201,11 +210,16 @@ fn run_json(mut cmd: Command) -> Result<Value, Value> {
 /// `YYYY-MM` 字符串透传。两个都给时 store.rs `list_args` 优先 month（更粗、
 /// 用户主动选择）。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn sessions_list(
     state: tauri::State<'_, StoreBuildLock>,
     day: Option<String>,
     month: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
     host_kind: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
     page_size: Option<usize>,
     cursor: Option<String>,
 ) -> Result<Value, Value> {
@@ -215,7 +229,7 @@ pub async fn sessions_list(
         let Some(bin) = resolve_binary() else {
             return Err(no_binary());
         };
-        let args = list_args(&day, &month, &host_kind, page_size, &cursor);
+        let args = list_args(&day, &month, &date_from, &date_to, &host_kind, &model, &provider, page_size, &cursor);
         let mut cmd = Command::new(&bin);
         cmd.args(&args);
         // 与 tick 同款：显式钉死 AGENT_VITALS_HOME，权威库 / salt / 状态文件都
@@ -282,6 +296,8 @@ pub async fn sessions_findings(
 #[tauri::command]
 pub async fn sessions_issues(
     state: tauri::State<'_, StoreBuildLock>,
+    page_size: Option<usize>,
+    cursor: Option<String>,
 ) -> Result<Value, Value> {
     let lock = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -295,56 +311,189 @@ pub async fn sessions_issues(
         let path = agent_vitals_data::authority::default_authority_path(&data_home());
         let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
             .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
-        let conn = db.conn();
-        let mut stmt = conn.prepare(
-            "SELECT issue_id, host, session_key, issue_type, status, severity,
-                    evidence_fingerprint, opened_at_ms, closed_at_ms, metadata_json
-             FROM issue_instances ORDER BY severity, opened_at_ms, issue_id"
+        let budget_group = agent_vitals_runtime::budget::budget_status_sql_at(
+            &data_home(), &crate::overview::current_month_beijing(),
+        ).filter(|budget| matches!(budget["level"].as_str(), Some("warn" | "exceeded")))
+            .map(|budget| budget_issue_group(&budget));
+        let (from_ms, to_ms) = issue_default_window();
+        let requested_page_size = page_size.unwrap_or(50).clamp(1, 500);
+        // 预算组是只读的合成行，必须在分页前为它预留一个槽位；否则默认
+        // page_size=50 会返回 51 行，且 next_cursor 与实际展示数失配。
+        let source_page_size = if cursor.is_none() && budget_group.is_some() && requested_page_size > 1 {
+            requested_page_size - 1
+        } else {
+            requested_page_size
+        };
+        let all_groups = agent_vitals_data::issues::issue_groups_with_sources(
+            db.conn(), Some(from_ms), Some(to_ms), usize::MAX, None,
         ).map_err(|e| error_value("authority_query", &e.to_string()))?;
-        let rows = stmt.query_map([], |r| {
-            let metadata: String = r.get(9)?;
-            let metadata = serde_json::from_str::<Value>(&metadata).unwrap_or_else(|_| serde_json::json!({}));
-            Ok(serde_json::json!({
-                "issue_id": r.get::<_, String>(0)?, "host_kind": r.get::<_, String>(1)?,
-                "session_key": r.get::<_, Option<String>>(2)?, "rule": r.get::<_, String>(3)?,
-                "status": r.get::<_, String>(4)?, "severity": r.get::<_, String>(5)?,
-                "evidence": r.get::<_, String>(6)?, "opened_at_ms": r.get::<_, i64>(7)?,
-                "closed_at_ms": r.get::<_, Option<i64>>(8)?, "metadata": metadata,
-            }))
-        }).map_err(|e| error_value("authority_query", &e.to_string()))?;
-        let mut issues = Vec::new();
-        for row in rows {
-            let mut issue = row.map_err(|e| error_value("authority_query", &e.to_string()))?;
-            let metadata = issue.get("metadata").cloned().unwrap_or(Value::Null);
-            issue["category"] = metadata.get("category").cloned().unwrap_or(Value::Null);
-            issue["tool_name"] = metadata.get("tool_name").cloned().unwrap_or(Value::Null);
-            issue["time"] = metadata.get("time").cloned()
-                .unwrap_or_else(|| issue.get("opened_at_ms").cloned().unwrap_or(Value::Null));
-            issues.push(issue);
+        let groups = agent_vitals_data::issues::issue_groups_with_sources(
+            db.conn(), Some(from_ms), Some(to_ms), source_page_size, cursor.as_deref(),
+        ).map_err(|e| error_value("authority_query", &e.to_string()))?;
+        let all_rows = all_groups["groups"].as_array().cloned().unwrap_or_default();
+        let mut rows = groups["groups"].as_array().cloned().unwrap_or_default();
+        let budget_added = budget_group.is_some();
+        let next_cursor = if cursor.is_none() && requested_page_size == 1 && budget_group.is_some() {
+            // 单项页无法同时容纳预算合成行和第一条来源组；先返回预算组，
+            // 下一页从来源组 offset=0 开始，避免丢失或重复来源组。
+            rows = budget_group.clone().into_iter().collect();
+            (all_groups["total_groups"].as_u64().unwrap_or(0) > 0).then(|| "0".to_string())
+        } else {
+            if cursor.is_none() {
+                if let Some(budget) = budget_group.clone() { rows.push(budget); }
+            }
+            groups["next_cursor"].as_str().map(String::from)
+        };
+        let mut all_rows_with_budget = all_rows;
+        if budget_added {
+            all_rows_with_budget.push(budget_group.clone().expect("budget_group is present"));
         }
-        let count = |severity: &str| issues.iter().filter(|v| v["severity"] == severity).count();
-        let (rules, sessions_with) = issue_rollup(&issues);
+        let count = |severity: &str| all_rows_with_budget.iter().filter(|v| v["severity"] == severity).count();
+        let rules = issue_group_rollup(&all_rows_with_budget);
+        let sessions_with: usize = all_rows_with_budget.iter().map(|v| v["sessions"].as_u64().unwrap_or(0) as usize).sum();
+        let total_groups = all_groups["total_groups"].as_u64().unwrap_or(0) + u64::from(budget_added);
         Ok(serde_json::json!({
-            "totals": { "issues": issues.len(), "findings": issues.len(), "critical": count("critical"), "warning": count("warning"), "info": count("info"), "sessions": sessions_with, "sessions_total": sessions_with },
-            "rules": rules, "issues": issues, "findings": [], "source": "issue_instances"
+            "totals": { "issues": total_groups, "findings": groups["source_issue_count"], "critical": count("critical"), "warning": count("warning"), "info": count("info"), "sessions": sessions_with, "sessions_total": sessions_with },
+            "rules": rules, "issues": rows, "findings": [], "source": "unified_issue_groups",
+            "next_cursor": next_cursor, "source_projection_count": all_groups["source_projection_count"].as_u64().unwrap_or(0) + u64::from(budget_added)
         }))
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
-fn issue_rollup(issues: &[Value]) -> (Vec<Value>, usize) {
+fn budget_issue_group(budget: &Value) -> Value {
+    let month = budget["month"].as_str().unwrap_or("<unknown>");
+    let level = budget["level"].as_str().unwrap_or("warn");
+    let key = format!("budget\0{month}\0{level}");
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let severity = if level == "exceeded" { "critical" } else { "warning" };
+    json!({
+        "group_id": format!("fnv1a64:{}", agent_vitals_domain::source_identity::fnv1a64_hex(key.as_bytes())),
+        "source_kind": "budget", "rule": "BUDGET_THRESHOLD", "host": "all",
+        "object": month, "evidence_class": "budget", "bucket": month,
+        "count": 1, "first_seen_at_ms": now_ms, "last_seen_at_ms": now_ms,
+        "severity": severity, "status_rollup": {"open": 1, "later": 0, "acknowledged": 0, "resolved": 0, "not_applicable": 0},
+        "sessions_count": 0, "sample_evidence": [{"level": level, "month": month,
+            "ratio_bp": budget["ratio_bp"], "monthly_cny_minor": budget["monthly_cny_minor"],
+            "metered_cny_minor": budget["metered_cny_minor"]}],
+        "remedy": {"remedy_id": "review-budget-or-snooze", "diagnostic_only": true},
+        "actionability": if level == "exceeded" { 1.0 } else { 0.8 },
+        "time": now_ms, "evidence": "budget", "tool_name": "budget",
+        "category": "budget", "hits": 1, "sessions": 0,
+        "read_only": true
+    })
+}
+
+/// User-owned Issue state transition. This command only changes the Issue
+/// lifecycle in the authority DB; it never edits a host file or executes a
+/// remedy. "acknowledged" is deliberately distinct from "closed".
+#[tauri::command]
+pub async fn issue_transition(
+    state: tauri::State<'_, StoreBuildLock>,
+    issue_id: String,
+    to_status: String,
+    reason: Option<String>,
+) -> Result<Value, Value> {
+    if issue_id.trim().is_empty() || !matches!(to_status.as_str(), "later" | "acknowledged" | "resolved" | "not_applicable" | "closed" | "wontfix" | "open") {
+        return Err(error_value("invalid_issue_transition", "invalid issue id or target status"));
+    }
+    let reason = reason.unwrap_or_else(|| "user action".to_string());
+    if reason.chars().count() > 512 {
+        return Err(error_value("invalid_issue_transition", "reason is too long"));
+    }
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let path = agent_vitals_data::authority::default_authority_path(&data_home());
+        let db = agent_vitals_data::authority::AuthorityDb::open(&path, agent_vitals_runtime::sql_sync::now_ms())
+            .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+        let evidence = format!("user-action:{to_status}");
+        let input_fingerprint = format!("user-transition:{issue_id}:{to_status}:{reason}");
+        let transition_id = db.with_immediate_txn(|conn| {
+            agent_vitals_data::issues::transition_issue(
+                conn, &issue_id, &to_status, now_ms, &reason, "user",
+                &evidence, "user", "v1.0.0", &input_fingerprint,
+            ).map_err(agent_vitals_data::authority::AuthorityError::Sqlite)
+        }).map_err(|e| error_value("issue_transition_failed", &e.to_string()))?;
+        Ok(json!({"status": "ok", "issue_id": issue_id, "to_status": to_status,
+            "transition_id": transition_id, "objective_resolution": matches!(to_status.as_str(), "closed" | "resolved")}))
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn issue_groups_list(
+    state: tauri::State<'_, StoreBuildLock>,
+    page_size: Option<usize>,
+    cursor: Option<String>,
+) -> Result<Value, Value> {
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let path = agent_vitals_data::authority::default_authority_path(&data_home());
+        let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+            .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        let (from_ms, to_ms) = issue_default_window();
+        agent_vitals_data::issues::issue_groups_with_sources(
+            db.conn(), Some(from_ms), Some(to_ms), page_size.unwrap_or(50), cursor.as_deref(),
+        ).map_err(|e| error_value("authority_query", &e.to_string()))
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn issue_group_instances(
+    state: tauri::State<'_, StoreBuildLock>,
+    group_id: String,
+    page_size: Option<usize>,
+    cursor: Option<String>,
+) -> Result<Value, Value> {
+    if group_id.trim().is_empty() { return Err(error_value("invalid_issue_group", "group_id is required")); }
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let path = agent_vitals_data::authority::default_authority_path(&data_home());
+        let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+            .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        agent_vitals_data::issues::issue_group_instances(
+            db.conn(), &group_id, page_size.unwrap_or(50), cursor.as_deref(),
+        ).map_err(|e| error_value("authority_query", &e.to_string()))
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn issue_instance_read(
+    state: tauri::State<'_, StoreBuildLock>,
+    issue_id: String,
+) -> Result<Value, Value> {
+    if issue_id.trim().is_empty() { return Err(error_value("invalid_issue", "issue_id is required")); }
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let path = agent_vitals_data::authority::default_authority_path(&data_home());
+        let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+            .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        let detail = agent_vitals_data::issues::issue_instance(db.conn(), &issue_id)
+            .map_err(|e| error_value("authority_query", &e.to_string()))?;
+        Ok(json!({"status": "ok", "issue": detail}))
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+#[allow(clippy::let_and_return)]
+fn issue_group_rollup(issues: &[Value]) -> Vec<Value> {
     let mut by_rule: BTreeMap<String, (String, Option<String>, usize, BTreeSet<String>)> = BTreeMap::new();
-    let mut sessions = BTreeSet::new();
-    for issue in issues {
+    for (index, issue) in issues.iter().enumerate() {
         let rule = issue["rule"].as_str().unwrap_or("unknown").to_string();
         let severity = issue["severity"].as_str().unwrap_or("info").to_string();
         let category = issue["category"].as_str().map(str::to_string);
-        let session = issue["session_key"].as_str().map(str::to_string);
+        let sessions = issue["sessions"].as_u64().unwrap_or(0) as usize;
         let entry = by_rule.entry(rule).or_insert_with(|| (severity.clone(), category.clone(), 0, BTreeSet::new()));
-        entry.2 += 1;
-        if let Some(session) = session {
-            sessions.insert(session.clone());
-            entry.3.insert(session);
+        if issue_severity_rank(&severity) > issue_severity_rank(&entry.0) {
+            entry.0 = severity;
         }
+        entry.2 += issue["hits"].as_u64().unwrap_or(1) as usize;
+        // `sessions` 是每个组内的去重数量；不能用同一组的 0..n
+        // 作为全局键，否则不同组会互相覆盖，摘要会低估受影响会话数。
+        let group_id = issue["group_id"].as_str().unwrap_or("unknown");
+        entry.3.extend((0..sessions).map(|n| format!("{group_id}:{n}:{index}")));
     }
     let rows = by_rule.into_iter().map(|(rule, (severity, category, hits, sessions))| {
         serde_json::json!({
@@ -352,7 +501,16 @@ fn issue_rollup(issues: &[Value]) -> (Vec<Value>, usize) {
             "hits": hits, "sessions": sessions.len(),
         })
     }).collect();
-    (rows, sessions.len())
+    rows
+}
+
+fn issue_severity_rank(value: &str) -> u8 {
+    match value {
+        "critical" => 3,
+        "warning" => 2,
+        "info" => 1,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -371,7 +529,7 @@ mod tests {
     fn list_args_full() {
         let some = &Some("x".to_string());
         assert_eq!(
-            list_args(some, &None, some, Some(7), &Some("c".to_string())),
+            list_args(some, &None, some, &None, &Some("x".to_string()), &None, &None, Some(7), &Some("c".to_string())),
             vec!["sessions", "list", "--json",
                  "--day", "x", "--host-kind", "x", "--page-size", "7",
                  "--cursor", "c"]
@@ -384,7 +542,7 @@ mod tests {
     #[test]
     fn list_args_month_mode_emits_month_flag_only() {
         assert_eq!(
-            list_args(&None, &Some("2026-08".to_string()), &None, None, &None),
+            list_args(&None, &Some("2026-08".to_string()), &None, &None, &None, &None, &None, None, &None),
             vec!["sessions", "list", "--json", "--month", "2026-08"]
         );
     }
@@ -397,7 +555,7 @@ mod tests {
             list_args(
                 &Some("2026-08-15".to_string()),
                 &Some("2026-08".to_string()),
-                &None, None, &None,
+                &None, &None, &None, &None, &None, None, &None,
             ),
             vec!["sessions", "list", "--json",
                  "--month", "2026-08"]
@@ -412,9 +570,8 @@ mod tests {
             list_args(
                 &None,
                 &Some("2026-08".to_string()),
-                &Some("dsh".to_string()),
-                Some(100),
-                &None,
+                &None, &None, &Some("dsh".to_string()), &None, &None,
+                Some(100), &None,
             ),
             vec!["sessions", "list", "--json",
                  "--month", "2026-08",
@@ -428,7 +585,7 @@ mod tests {
     /// IPC 不替前端报错而是补一个今天的 `--day` —— 这一行是契约面。
     #[test]
     fn list_args_default_day_is_today() {
-        let a = list_args(&None, &None, &None, None, &None);
+        let a = list_args(&None, &None, &None, &None, &None, &None, &None, None, &None);
         // 第一段固定
         assert_eq!(&a[0..3], &["sessions", "list", "--json"]);
         // --day 必须紧跟固定段（位置由 list_args 保证）
@@ -455,6 +612,14 @@ mod tests {
         // YYYY 部分应是 2020~2099 区间（现实日期范围）
         let y: i32 = d[0..4].parse().expect("year must parse");
         assert!((2020..=2099).contains(&y), "year out of expected range: {y}");
+    }
+
+    #[test]
+    fn issue_default_window_is_a_rolling_thirty_day_range() {
+        let (from, to) = issue_default_window();
+        assert!(to > from);
+        assert_eq!(to - from, ISSUE_DEFAULT_WINDOW_MS.saturating_add(1));
+        assert!(to <= agent_vitals_runtime::sql_sync::now_ms().saturating_add(2));
     }
 
     /// read argv：固定段（session_ref 必带 + 无 revision flag）。
@@ -536,5 +701,39 @@ mod tests {
             Err(v) => assert_eq!(v["error"]["code"], "cancelled"),
             Ok(_) => panic!("missing binary must be an Err"),
         }
+    }
+
+    #[test]
+    fn budget_issue_group_is_read_only_and_severity_tracks_level() {
+        let warn = budget_issue_group(&json!({
+            "month": "2026-09", "level": "warn", "ratio_bp": 8000,
+            "monthly_cny_minor": 1000, "metered_cny_minor": 800,
+        }));
+        assert_eq!(warn["rule"], "BUDGET_THRESHOLD");
+        assert_eq!(warn["severity"], "warning");
+        assert_eq!(warn["read_only"], true);
+        let exceeded = budget_issue_group(&json!({"month":"2026-09", "level":"exceeded"}));
+        assert_eq!(exceeded["severity"], "critical");
+    }
+
+    #[test]
+    fn issue_rule_rollup_does_not_overwrite_sessions_from_other_groups() {
+        let rows = vec![
+            json!({"group_id": "g1", "rule": "SV610", "severity": "warning", "hits": 2, "sessions": 2}),
+            json!({"group_id": "g2", "rule": "SV610", "severity": "warning", "hits": 3, "sessions": 3}),
+        ];
+        let rollup = issue_group_rollup(&rows);
+        assert_eq!(rollup[0]["hits"], 5);
+        assert_eq!(rollup[0]["sessions"], 5);
+    }
+
+    #[test]
+    fn issue_rule_rollup_keeps_highest_severity() {
+        let rows = vec![
+            json!({"group_id": "g1", "rule": "DATA_SOURCE_FAILURE", "severity": "warning", "hits": 1, "sessions": 1}),
+            json!({"group_id": "g2", "rule": "DATA_SOURCE_FAILURE", "severity": "critical", "hits": 1, "sessions": 1}),
+        ];
+        let rollup = issue_group_rollup(&rows);
+        assert_eq!(rollup[0]["severity"], "critical");
     }
 }

@@ -102,10 +102,7 @@ fn now_unix_secs() -> i64 {
 /// 北京时间 `YYYY-MM-DD HH:MM:SS`（UTC+8 无夏令时）。复用 `civil_from_unix_secs`，
 /// 不引日期库——与 data_home 解析同款「管道不是规则」的镜像位置。
 fn beijing_timestamp(secs: i64) -> String {
-    let (y, m, d) = civil_from_unix_secs(secs, 8 * 3600);
-    let tod = (secs + 8 * 3600).rem_euclid(86400);
-    let (h, mi, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
-    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+    agent_vitals_runtime::clock::local_timestamp_text(secs)
 }
 
 /// tick 每轮结束把同步状态落盘到 `state/last-sync.json`（与 alert.json 同目录——
@@ -123,9 +120,28 @@ pub fn save_sync_status_at(dh: &Path, status: &SyncStatus) {
     }
 }
 
+/// 用户显式暂停自动扫描的本地控制位。它和同步回执分开：暂停不是失败，也不
+/// 应被下一次“无记录”回执覆盖。控制文件损坏时返回错误并由调用方停扫，宁可
+/// 要求用户恢复，也不在用户已选择暂停后静默继续读取日志。
+pub fn sync_is_paused() -> Result<bool, String> {
+    sync_is_paused_at(&data_home())
+}
+
+fn sync_is_paused_at(dh: &Path) -> Result<bool, String> {
+    agent_vitals_runtime::sync_control::is_paused(dh)
+}
+
+pub fn save_sync_paused(paused: bool) -> Result<(), String> {
+    save_sync_paused_at(&data_home(), paused)
+}
+
+fn save_sync_paused_at(dh: &Path, paused: bool) -> Result<(), String> {
+    agent_vitals_runtime::sync_control::set_paused(dh, paused)
+}
+
 /// 读回上一轮同步状态；文件缺场 → 默认（"never"）。解析失败也走默认——一条坏掉
 /// 的 last-sync.json 不该让面板整块红，回退成「尚未同步」即可。
-fn load_sync_status(dh: &Path) -> SyncStatus {
+pub(crate) fn load_sync_status(dh: &Path) -> SyncStatus {
     read_json(&dh.join("state").join("last-sync.json"))
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
@@ -334,8 +350,10 @@ pub struct Overview {
     pub today: Option<Value>,
     pub month: Value,
     pub days: Vec<DayRow>,
-    pub budget_monthly_cny: f64,
+    pub budget_monthly_cny: Option<f64>,
     pub budget: BudgetAlert,
+    /// 双预算 profile 的实时状态；各 profile 保持独立币种和计费口径。
+    pub budget_profiles: Option<Value>,
     /// 最近一次折账的会话（oneline.json）。托盘菜单展示「上一次跑完花了多少」。
     pub recent: RecentSession,
     /// 菜单栏同步回路状态（tick 落盘）。前端据此示警/给「立即同步」入口。
@@ -419,17 +437,13 @@ where
 /// `codex_cost.rs::civil_from_unix_secs`（Howard Hinnant 的 civil_from_days，
 /// div_euclid 版，负 epoch 也正确）。
 pub fn today_beijing() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let (y, m, d) = civil_from_unix_secs(secs, 8 * 3600);
-    format!("{y:04}-{m:02}-{d:02}")
+    agent_vitals_runtime::clock::today_system()
 }
 
 /// unix 秒 → 某时区（offset 秒）的 (年, 月, 日)。pub(crate)：lib.rs 的
 /// `recent_row_text` 做「date 是否当年」判定（北京年，与导航 day_key 同日界）
 /// 复用同一实现，不长第二份历法。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn civil_from_unix_secs(secs: i64, offset_secs: i64) -> (i64, u32, u32) {
     let days = (secs + offset_secs).div_euclid(86400);
     let z = days + 719468;
@@ -450,13 +464,11 @@ fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
-/// config.toml `[budget] monthly_cny`，缺省 600（与 `budget.py::default_budget` 的
-/// monthly_cny 同值）。极简解析镜像 `budget.py` 的 `_parse_scalar` 范围：只认
+/// 旧 config.toml `[budget] monthly_cny`。不存在或无有效用户值时返回None，
+/// 不能把旧模板默认¥600冒充用户设置。极简解析只认
 /// `[budget]` 节里的 snake_case 标量，不引 toml 依赖。
-fn monthly_budget_cny(data_home: &Path) -> f64 {
-    let Some(text) = std::fs::read_to_string(data_home.join("config.toml")).ok() else {
-        return 600.0;
-    };
+fn monthly_budget_cny(data_home: &Path) -> Option<f64> {
+    let text = std::fs::read_to_string(data_home.join("config.toml")).ok()?;
     let mut in_budget = false;
     for line in text.lines() {
         let t = line.trim();
@@ -470,13 +482,13 @@ fn monthly_budget_cny(data_home: &Path) -> f64 {
                 let val = t[eq + 1..].trim();
                 if key == "monthly_cny" {
                     if let Ok(x) = val.trim_end_matches(',').parse::<f64>() {
-                        return x;
+                        return Some(x);
                     }
                 }
             }
         }
     }
-    600.0
+    None
 }
 
 /// 展示层货币折算估算（`assets/pricing.json::fx_estimate`）→ `{usd_cny, as_of}`
@@ -492,28 +504,24 @@ fn fx_estimate(pricing: &Value) -> Option<Value> {
     }))
 }
 
-/// 本月已生效的 **CNY 订阅月费之和**（`pricing.json::catalog_2026_09.
-/// subscriptions` 里 `currency == "CNY"` 且账期起点 ≤ 当前北京月的条目）。
-/// 纯 `pricing.json` 计算，不碰 SQL——订阅是声明数据不是派生数据。月份过滤
-/// 与 `summary::apply_subscription_fees` 逐字节同款（`chars().take(7)` +
-/// `month < start_month` 跳过）。零条目 → None（「没有订阅」≠「¥0」，托盘
-/// 整行不显示）。PM 决策 2026-09-07：订阅**单列**，不进按量预算分子。
-fn monthly_cny_subscriptions(pricing: &Value, month: &str) -> Option<f64> {
-    let mut total = 0.0;
-    for (_provider, currency, amount, period_start) in
-        agent_vitals_domain::cost::declared_subscriptions(pricing)
-    {
-        if currency != "CNY" {
-            continue;
-        }
-        let Some(start) = period_start.as_deref() else { continue };
-        let start_month: String = start.chars().take(7).collect();
-        if month < start_month.as_str() {
-            continue;
-        }
-        total += amount;
-    }
-    (total > 0.0).then_some(total)
+/// 本月本地账单中的 **CNY 固定订阅月费之和**。用户订阅不属于公共价目；
+/// `host_bills` 是唯一展示源。库不可用或无订阅时返回 None（不显示“¥0”）。
+fn monthly_cny_subscriptions(data_home: &Path, month: &str) -> Option<f64> {
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(data_home),
+        agent_vitals_runtime::sql_sync::now_ms(),
+    )
+    .ok()?;
+    let total: i64 = db
+        .host_bills_for_period(month)
+        .ok()?
+        .into_iter()
+        .filter(|(_host, _provider, basis, _minor, currency)| {
+            basis == "fixed_subscription" && currency == "CNY"
+        })
+        .map(|(_host, _provider, _basis, minor, _currency)| minor)
+        .sum();
+    (total > 0).then_some(total as f64 / 100.0)
 }
 
 /// 预算卡：从 SQL 权威库**实时算**（`runtime::budget::evaluate_alert_from_sql`），
@@ -651,8 +659,11 @@ fn read_overview_at(dh: &Path) -> Overview {
         today: today_val,
         month,
         days,
-        budget_monthly_cny: monthly_budget_cny(dh),
+        budget_monthly_cny: budget.monthly_cny.or_else(|| monthly_budget_cny(dh)),
         budget,
+        budget_profiles: agent_vitals_runtime::budget::budget_profiles_status_sql_at(
+            dh, &cur_month,
+        ),
         recent: read_recent_session(dh),
         sync: load_sync_status(dh),
         hosts: hosts_snap.hosts,
@@ -664,7 +675,7 @@ fn read_overview_at(dh: &Path) -> Overview {
         claude_uncovered_month,
         month_savings,
         fx: fx_estimate(&pricing),
-        subscription_cny_month: monthly_cny_subscriptions(&pricing, &cur_month),
+        subscription_cny_month: monthly_cny_subscriptions(dh, &cur_month),
     }
 }
 
@@ -898,15 +909,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// config.toml 缺省预算 = 600（与 budget.py 的 default_budget.monthly_cny）。
+    /// 新安装没有用户预算声明时必须是None，不能继承模板默认值。
     /// 临时目录名带用途后缀——cargo test 并行执行，两条预算测试必须各用各的目录，
     /// 否则一条 remove_dir_all 会删掉另一条刚写好的 config.toml。
     #[test]
-    fn monthly_budget_defaults_to_600() {
+    fn monthly_budget_is_unset_without_user_config() {
         let tmp = std::env::temp_dir().join("sv-menubar-budget-default-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        assert_eq!(monthly_budget_cny(&tmp), 600.0);
+        assert_eq!(monthly_budget_cny(&tmp), None);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -921,7 +932,7 @@ mod tests {
             "[other]\nmonthly_cny = 1\n[budget]\nmonthly_cny = 888\n",
         )
         .unwrap();
-        assert_eq!(monthly_budget_cny(&tmp), 888.0);
+        assert_eq!(monthly_budget_cny(&tmp), Some(888.0));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -962,7 +973,7 @@ mod tests {
         assert!(ov.days.iter().all(|d| d.basis.as_deref() == Some("exact")),
                 "SQL 事实恒带 model → 每日 exact");
         assert!(ov.days.windows(2).all(|w| w[0].date <= w[1].date), "按日期升序");
-        assert_eq!(ov.budget_monthly_cny, 888.0);
+        assert_eq!(ov.budget_monthly_cny, Some(888.0));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -995,7 +1006,7 @@ mod tests {
     }
 
     /// 空态诚实：数据根没有任何 state 文件 → today None（不是 0 元）、month {0,0}、
-    /// days 空、预算回默认 600。不摆全零结构冒充「今天花了 0 元」。
+    /// days 空、预算保持未设置。不摆全零结构冒充「今天花了 0 元」。
     #[test]
     fn read_overview_empty_state_is_honest() {
         let tmp = std::env::temp_dir().join("sv-menubar-overview-empty-test");
@@ -1005,16 +1016,15 @@ mod tests {
         assert!(ov.today.is_none());
         assert_eq!(ov.month.get("total").unwrap().as_f64().unwrap(), 0.0);
         assert!(ov.days.is_empty());
-        assert_eq!(ov.budget_monthly_cny, 600.0);
-        // 预算卡实时算自 SQL 权威库（Tier B 收尾）：空库 → default_budget 评估，
-        // level ok（无数据 = 无告警）、month/today 成本 null（不臆造 0 元）、
-        // monthly_cny 默认 600、source "sql"、无快照时刻 generated_at None。
+        assert_eq!(ov.budget_monthly_cny, None);
+        // 预算卡实时算自 SQL 权威库：空库没有用户配置 → no_budget；成本仍可
+        // 统计，但预算分母、比例和日预算均为空。
         assert_eq!(ov.budget.source, "sql");
-        assert_eq!(ov.budget.level.as_deref(), Some("ok"));
+        assert_eq!(ov.budget.level.as_deref(), Some("no_budget"));
         assert_eq!(ov.budget.month_cost, None, "无按量事实不摆 0 元");
         assert_eq!(ov.budget.month_ratio, None);
-        assert_eq!(ov.budget.monthly_cny, Some(600.0));
-        assert_eq!(ov.budget.effective_daily_budget, Some(30.0));
+        assert_eq!(ov.budget.monthly_cny, None);
+        assert_eq!(ov.budget.effective_daily_budget, None);
         assert_eq!(ov.budget.generated_at, None, "实时算无快照时刻");
         // 无 claude-ledger.json → claude 估两侧 None（诚实「没账可报」，不摆估 0）。
         assert!(ov.claude_today.is_none());
@@ -1121,18 +1131,30 @@ mod tests {
         assert!(fx_estimate(&json!({"fx_estimate": {"as_of": "x"}})).is_none(), "缺 USD_CNY → None");
     }
 
-    /// 本月订阅总额：真机 pricing.json 声明了 CNY 订阅（GLM/MiniMax）→ 当前月
-    /// 有正数；账期起点之前的月份 → None（订阅还没开始，不摊）。月份过滤与
-    /// `summary::apply_subscription_fees` 同款。
+    /// 本月订阅总额只读本地 host_bills；公共 pricing.json 不参与。不同币种
+    /// 不折算相加，非本月与非订阅账单不进入托盘行。
     #[test]
-    fn monthly_cny_subscriptions_respects_billing_period_start() {
-        let p = load_pricing();
-        let now = monthly_cny_subscriptions(&p, &current_month_beijing());
-        assert!(now.is_some_and(|v| v > 0.0), "当前月应有已生效的 CNY 订阅，got {now:?}");
-        // 远古月份：所有订阅账期都还没开始 → 不摊。
-        assert_eq!(monthly_cny_subscriptions(&p, "2000-01"), None);
-        // 无 subscriptions 节 → None（不 panic）。
-        assert_eq!(monthly_cny_subscriptions(&json!({}), "2026-09"), None);
+    fn monthly_cny_subscriptions_reads_local_host_bills() {
+        let tmp = std::env::temp_dir().join("sv-menubar-local-subscriptions-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db = seed_overview_db(&tmp);
+        let month = current_month_beijing();
+        db.host_bill_put(
+            "sub-cny", "claude-code", "minimax", &month, "fixed_subscription",
+            11_400, "CNY", "test", 1,
+        ).unwrap();
+        db.host_bill_put(
+            "sub-usd", "claude-code", "anthropic", &month, "fixed_subscription",
+            2_000, "USD", "test", 1,
+        ).unwrap();
+        db.host_bill_put(
+            "api-cny", "dsh", "deepseek", &month, "metered_actual",
+            500, "CNY", "test", 1,
+        ).unwrap();
+        assert_eq!(monthly_cny_subscriptions(&tmp, &month), Some(114.0));
+        assert_eq!(monthly_cny_subscriptions(&tmp, "2000-01"), None);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// claude_estimates 纯函数：flat 直图日（rebuild_days 真机形状，含全零的
@@ -1548,6 +1570,21 @@ mod tests {
         assert_eq!(current_month_beijing(), today_beijing()[..7].to_string());
     }
 
+    #[test]
+    fn sync_pause_control_round_trips_and_corruption_fails_closed() {
+        let tmp = std::env::temp_dir().join("sv-menubar-sync-control-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(!sync_is_paused_at(&tmp).unwrap(), "缺控制文件默认继续同步");
+        save_sync_paused_at(&tmp, true).unwrap();
+        assert!(sync_is_paused_at(&tmp).unwrap(), "暂停必须跨重启持久化");
+        save_sync_paused_at(&tmp, false).unwrap();
+        assert!(!sync_is_paused_at(&tmp).unwrap());
+        std::fs::write(tmp.join("state/sync-control.json"), "not-json").unwrap();
+        assert!(sync_is_paused_at(&tmp).is_err(), "损坏控制状态必须阻止静默扫描");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // ── v0.7 spec §3 第二/三行菜单栏视图接线钉测 ────────────────────────
     // 与 CLI `state uncovered`/`state savings`（commit a577497）同源字节——
     // Tauri 侧走的是 `core::state::rollup_by_model` + `core::cost::{
@@ -1569,12 +1606,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// anthropic 在 catalog_2026_09.subscriptions 登记 → claude-opus-5 不进
-    /// uncovered 视图（整 provider 视为已订阅覆盖）；deepseek 未订阅 → 进。
+    /// 公共目录不携带用户套餐：claude-opus-5 与 deepseek 都进入估算视图。
     /// v0.7 菜单栏视图吃的是 DSH `by_model` rollup（`peaked_days_map` 恒带
     /// by_model），seed 两个 model 的 dsh 事实。
     #[test]
-    fn read_overview_v07_uncovered_excludes_subscribed_provider() {
+    fn read_overview_v07_uncovered_keeps_unconfirmed_provider() {
         let tmp = std::env::temp_dir().join("sv-menubar-v07-uncovered-sql-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -1584,10 +1620,10 @@ mod tests {
         seed_fact(&db, "f", "dsh", "deepseek-v4-flash", bj_noon_ms(&d), (1_000_000, 0, 0, 0));
         drop(db);
         let ov = read_overview_at(&tmp);
-        let uncovered = ov.claude_uncovered_month.expect("deepseek 未订阅 → uncovered 必须存在");
+        let uncovered = ov.claude_uncovered_month.expect("有已知价卡用量 → uncovered 必须存在");
         assert_eq!(uncovered["pricing_basis"], "estimated-subscription-exclusion");
-        assert!(uncovered["per_model"].get("claude-opus-5").is_none(),
-                "claude-opus-5 已订阅 → 不在 uncovered.per_model");
+        assert!(uncovered["per_model"].get("claude-opus-5").is_some(),
+                "未确认套餐的 claude-opus-5 必须保留在估算视图");
         assert!(uncovered["per_model"].get("deepseek-v4-flash").is_some(),
                 "deepseek-v4-flash 未订阅 → 在 uncovered.per_model");
         let _ = std::fs::remove_dir_all(&tmp);

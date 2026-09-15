@@ -64,7 +64,11 @@ USAGE_FACT_FIELDS = (
     # token 度量
     "uncached_input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens",
     # 计费归属
-    "billing_source", "billing_mode", "pricing_basis",
+    # `billing_template_id`：Rust 侧 2e011fc（fix(v0.12) preserve billing evidence by
+    # pricing snapshot）加进契约，Python 漏跟——四宿主的 usage-fact 差分在带二进制时
+    # 全红，被 E4a 的 workbuddy parity 逼出来（2026-09-11）。契约是一份字面量清单、
+    # 两语言逐项比对，少一个键就是所有 emitter 的 `--json` 输出双侧不等。
+    "billing_source", "billing_mode", "pricing_basis", "billing_template_id",
     # 宿主金额
     "amount_decimal", "currency", "amount_basis",
     # 套餐证据

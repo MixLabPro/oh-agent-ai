@@ -225,6 +225,16 @@ when absent, so the repo stays dependency-free. To run it:
 `python3 -m venv .venv && .venv/bin/python -m pip install hypothesis`, then
 `.venv/bin/python -m unittest discover tests` (more tests than without).
 
+**菜单栏 app（apps/desktop/src-tauri）只能以 .app 形态验证，绝不裸跑二进制。**
+验证托盘一律 `cd apps/desktop/src-tauri && cargo tauri build --bundles app`，再
+`open target/release/bundle/macos/agent-vitals.app`（走 LaunchServices）。直接跑
+`target/{debug,release}/agent-vitals-menubar`——无论是否在 agent 的沙箱 shell 里——
+macOS 26 **永远不摆放它的状态栏项**（窗口能建、`rect()` 只给占位坐标），而且每个裸跑路径
+都会往「系统设置 › 菜单栏」的注册表塞一条垃圾条目。2026-09-14 的"托盘突然消失"就是
+Codex 与 Claude 反复裸跑 + 旧 bundle id 在该注册表里的记录损坏叠出来的，最终靠把
+identifier 改成 `com.mixlabpro.agent-vitals` 绕开；另外 `set_activation_policy(Accessory)`
+不能删——tao 启动时显式设回 Regular，Info.plist 的 LSUIElement 会被盖掉。
+
 ## Architecture
 
 The load-bearing split: **`scan.py` measures, `SKILL.md` judges.** The scanner emits one
@@ -310,7 +320,8 @@ calendar/quota 四个命令——**任何新增的 codex 数据面必须走
 ### v0.9.1 数据面维护（SQL 权威库操作面；Phase 4.3 后）
 
 - **布局**：`<data_home>/facts/<host>.jsonl`（append-only 权威源，宿主封闭
-  词表 claude-code/codex/dsh）+ `<data_home>/agent-vitals.sqlite3`（v0.9.1
+  词表 claude-code/codex/dsh/workbuddy——E4b 起四宿主，见 docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5；workbuddy 金额面恒 unresolved）
+  + `<data_home>/agent-vitals.sqlite3`（v0.9.1
   SQL 权威库——所有读经它）。**权威库不自愈**（与已退役的旧 `index.sqlite3`
   投影的本质区别）：`PRAGMA integrity_check` 失败 → `data-status` 报
   `health: critical`；恢复 = `rm agent-vitals.sqlite3* && agent-vitals
@@ -517,8 +528,11 @@ through; **no consumer may grow a second inline copy** (both packaging allow-lis
 `.github/workflows/package-clawhub.yml` + `tests/test_clawhub_packaging.py` — and the
 `test_classification.py` agent-family sets pin the module list verbatim). The emit is
 in-memory + read-only diagnostic only — nothing is written to disk yet (see
-`docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §7). WorkBuddy is deliberately excluded from
-this whole line of work (user decision 2026-09-03).
+`docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §7). E4b superseded the "deliberately
+excluded" decision (2026-09-11, docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5): WorkBuddy
+joined FACT_HOSTS and the sync pipeline — facts carry `provider_id: null`
+(unresolved money by design, §2.1); the CLI `--write` and `sync-facts` are Rust-only,
+the Python mirror stays read-only diagnostic.
 
 **"Which events carry usage" is one predicate, and it was duplicated twelve times.** It
 lives in `usage.rs::usage_sample` (the authority), mirrored in `usage.py::_usage_sample`,

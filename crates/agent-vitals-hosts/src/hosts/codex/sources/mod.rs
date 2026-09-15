@@ -35,6 +35,7 @@ pub mod route_evidence;
 // v0.9 Stage A emitter 归位（R4 §5.2）：UsageFact emitter 从二进制
 // apps/cli/src/agent/ 迁来——读文件 → 读内存，仍属 I/O 层。
 pub mod usage_fact;
+pub mod workflow;
 
 fn empty_result() -> Map<String, Value> {
     let mut map = Map::new();
@@ -230,6 +231,32 @@ pub fn codex_rollout_files(home: &Path) -> Vec<PathBuf> {
     }
     files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
     files
+}
+
+/// Return traversal failures for both Codex rollout roots. Missing roots remain
+/// normal absence; permission and other I/O failures are explicit.
+pub fn codex_rollout_walk_errors(home: &Path) -> Vec<String> {
+    let entries: [(&str, &str); 2] = [("live", "sessions"), ("archived", "archived_sessions")];
+    let mut errors = Vec::new();
+    for (_kind, rel) in entries {
+        let root = home.join(".codex").join(rel);
+        match std::fs::metadata(&root) {
+            Ok(metadata) if metadata.is_dir() => {
+                for entry in walkdir::WalkDir::new(&root).into_iter() {
+                    if let Err(error) = entry {
+                        let path = error.path().unwrap_or(&root);
+                        errors.push(format!("{}: {error}", path.display()));
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                errors.push(format!("{}: {error}", root.display()));
+            }
+            Err(_) => {}
+        }
+    }
+    errors
 }
 
 /// 纯解析：把 `session_index.jsonl` 折成 `{id: thread_name}` 映射。与 Python

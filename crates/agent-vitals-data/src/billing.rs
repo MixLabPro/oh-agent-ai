@@ -1,7 +1,7 @@
 //! Stage B P2（spec §4）：`BillingContext`——计费声明的**类型化视图**。
 //!
-//! 声明本体只有一份：`pricing.json::catalog_2026_09`（`subscriptions` 节 +
-//! `billing_modes`）。本模块不做第二份解析、不发明第二套口径词汇——装配走
+//! 声明本体来自调用方提供的本地用户快照；公共`pricing.json`不再内置套餐。
+//! 本模块不做第二份解析、不发明第二套口径词汇——装配走
 //! `agent_vitals_domain::cost::declared_subscriptions` 同一读取器，产出的
 //! 每一笔金额都落 `data_contract::BillingBasis` 既有五档（FixedSubscription
 //! 是订阅月费的唯一档位，spec §4"只能按周期单列"）。

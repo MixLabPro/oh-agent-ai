@@ -173,9 +173,19 @@ fn mechanically_find_time_varying_cards(pricing: &serde_json::Value) -> Vec<(Str
 fn g10_time_varying_card_set_matches_registry() {
     let pricing = agent_vitals_domain::cost::load_pricing();
     let found = mechanically_find_time_varying_cards(&pricing);
+    // 2026-09-14 登记新增项：deepseek-v4.1-flash —— 网关/转售会把同一个 Flash 模型
+    // 写成带命名空间的 deepseek/deepseek-v4.1-flash，而 `norm_model_in` 只砍
+    // `deepseek/` 前缀、不会把 `4.1` 折成 `4`，所以必须显式登记这张卡，否则该 id
+    // 落 no-price-card（真机：一天 70M tokens 的「按官方价折算」整栏为空）。
+    // 它的价格按官方中文定价页的 Flash 价（1/2、4/8），与上面 deepseek-v4-flash
+    // 的旧值不一致——那是**已知未同步项**，见 assets/pricing.json 里同一段的 _note：
+    // 同步它会重算全部 v4-flash 用量并牵动 37 个钉死金额的测试，单独一次做。
     let expected = vec![
         ("deepseek-official".to_string(), "deepseek-v4-flash".to_string()),
         ("deepseek-official".to_string(), "deepseek-v4-pro".to_string()),
+        // 排在 v4-pro 之后不是笔误：`found.sort()` 是字节序，'-'(0x2D) < '.'(0x2E)，
+        // 所以 "deepseek-v4-pro" < "deepseek-v4.1-flash"。
+        ("deepseek-official".to_string(), "deepseek-v4.1-flash".to_string()),
         ("shengsuanyun".to_string(), "deepseek-v4-pro".to_string()),
     ];
     assert_eq!(found, expected);

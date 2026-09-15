@@ -51,6 +51,16 @@ export const PRICING: Record<string, { inputUncached: { off: number; peak: numbe
     inputCached: { off: 0.05, peak: 0.10 },
     output: { off: 4.5, peak: 9.0 },
   },
+  // deepseek-v4.1-flash：网关带命名空间的写法，加它是为了让该 id 能解析出模型短名
+  // （否则 normalizeModel 返回 null）。价格取自官方中文定价页 2026-09-14 的 Flash 价；
+  // 与上面 deepseek-v4-flash 的旧值不一致是**已知未同步项**，见 assets/pricing.json
+  // 同一段的 _note。键集合必须与 assets/pricing.json 的
+  // providers[fallback_provider].models 逐项一致——tests/test_pricing_lockstep.py 会比对。
+  'deepseek-v4.1-flash': {
+    inputUncached: { off: 1.0, peak: 2.0 },
+    inputCached: { off: 0.02, peak: 0.04 },
+    output: { off: 4.0, peak: 8.0 },
+  },
   'deepseek-v4-pro': {
     inputUncached: { off: 4.5, peak: 9.0 },
     inputCached: { off: 0.15, peak: 0.30 },

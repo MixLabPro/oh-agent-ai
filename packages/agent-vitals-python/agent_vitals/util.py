@@ -211,3 +211,84 @@ def find_next_request(requests, after_request_seq):
     if not candidates:
         return None
     return min(candidates, key=lambda r: r["request_seq"])
+
+
+# ────────────────────────── 纪元时间归一与会话跨度 ──────────────────────────
+#
+# 镜像 Rust `agent_vitals_domain::util::to_epoch_ms` +
+# `agent_vitals_hosts::workflow_utils::session_span`。
+# 方案：`docs/v1.0.0/OBSERVED_SPAN_IMPLEMENTATION_PLAN.md`。
+
+EPOCH_SECONDS_CUTOFF = 100_000_000_000
+_I64_MIN = -(2 ** 63)
+_I64_MAX = 2 ** 63 - 1
+
+
+def to_epoch_ms(value: int) -> int:
+    """纪元时间归一为**毫秒**——本仓「整数纪元一律以毫秒为契约」的唯一实现。
+
+    秒级输入（`< 1e11`）视为秒并放大 1000 倍，其余原样返回。**幂等**。
+
+    `_I64_*` 钳位是为了与 Rust 的 `saturating_mul` 逐位一致：Rust 溢出时饱和到
+    i64 边界，Python 整数无界，不钳就会在畸形输入上偏离（差分门是逐字节比的）。
+    """
+    if value < EPOCH_SECONDS_CUTOFF:
+        return max(_I64_MIN, min(_I64_MAX, value * 1000))
+    return value
+
+
+def session_span(times):
+    """会话跨度 = **喂进这份证据的所有原生记录**时间的 min/max。
+
+    语义（`OBSERVED_SPAN_IMPLEMENTATION_PLAN.md` §3.1 的 D1–D4）：
+
+    - **D1** 取实测事件时间，不是会话头声明的范围。
+    - **D2** **0 条记录 → `None`**，**绝不返回 `{"start_ms": 0, "end_ms": 0}`**——
+      后者会被日桶/时间窗读成 1970-01-01，正是本仓反复栽过的「把缺失渲染成零」。
+      单条记录 → `start_ms == end_ms`（合法）。
+    - **D3** 一律过 `to_epoch_ms`（Claude 与 WorkBuddy 的 `parse_iso` 出**秒**，
+      DSH 出**毫秒**）。
+    - **D4** 只取原生记录的时间，不含合成的序数。
+
+    跨度跟随调用方给的记录集合：给的是分叉后的事件，跨度就是分叉后的。
+    """
+    values = [to_epoch_ms(t) for t in times]
+    if not values:
+        return None
+    return {"start_ms": min(values), "end_ms": max(values)}
+
+
+def iso_to_epoch_ms(value):
+    """ISO-8601 串 → **毫秒**。镜像 Rust `agent_vitals_hosts::workflow_utils::iso_to_epoch_ms`。
+
+    **为什么不直接用 `parse_iso`**：那个只到**秒**（`(secs, has_offset)`）。Codex 的
+    跨度若只按秒算，就会与 Rust 侧（解析到毫秒小数位）不一致，而差分门是逐字节
+    比的——`2026-09-05T17:00:00.123Z` 两边会差 123ms。
+
+    分数位处理与 Rust 逐条对齐：取小数点后最多 3 位、补零到 3 位；含非数字 → None；
+    无小数部分 → 0。
+
+    **非字符串一律 None**——镜像 Rust 的 `Option<&str>` 签名：那边的调用点是
+    `.and_then(Value::as_str)`，整数/布尔/null 根本进不来。夹具里 `"timestamp": 0`
+    这种整数时间戳在两侧都按"没有可解析的 ISO 串"处理。
+    """
+    if not isinstance(value, str):
+        return None
+    # 延迟导入：`claude_evidence` 反过来依赖本模块（`session_span`），
+    # 模块加载期导入会成环。同 `behavior.py` 的 `from ..adapters import dsh`。
+    from .agent.claude_evidence import parse_iso
+    parsed = parse_iso(value)
+    if parsed is None:
+        return None
+    seconds = parsed[0]
+    if "." not in value:
+        fraction = ""
+    else:
+        rest = value.split(".", 1)[1]
+        cuts = [i for i in (rest.find(c) for c in "Z+-") if i != -1]
+        fraction = rest[:min(cuts)] if cuts else rest
+    digits = fraction[:3]
+    if any(not c.isdigit() for c in digits):
+        return None
+    fraction_ms = int(digits.ljust(3, "0")) if digits else 0
+    return seconds * 1000 + fraction_ms

@@ -20,6 +20,17 @@ import { spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// Node 22 exposes a host `navigator.language` (usually en-US), while this
+// standalone verifier must exercise the documented zh-CN fallback path.
+// Keep the test deterministic without changing browser runtime behavior.
+if (globalThis.navigator && typeof globalThis.navigator === 'object') {
+  try {
+    Object.defineProperty(globalThis.navigator, 'language', { value: 'zh-CN', configurable: true })
+  } catch (_) {
+    // Older runtimes may expose a non-configurable navigator.
+  }
+}
+
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 
 function fail(msg) {

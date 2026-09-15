@@ -1,5 +1,5 @@
 //! `sessions_search` 工具（spec §7.6 / Q04 / U05）——列出一个时间窗（可再按
-//! 北京小时过滤）内的会话，逐会话聚合 token / 时间跨度 / 模型集，按 total 降序、
+//! 统计时区小时过滤）内的会话，逐会话聚合 token / 时间跨度 / 模型集，按 total 降序、
 //! keyset 分页。**只出 `session_ref`（HMAC），绝不出宿主原生 id / 路径 / 正文。**
 //!
 //! Q04 峰值下钻：`usage_hourly(date)` 给 `peak_hour` → `sessions_search(date,
@@ -20,16 +20,20 @@ const MAX_LIMIT: usize = 500;
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "sessions_search",
-        description: "List sessions active in a Beijing day or month (optionally narrowed to one Beijing hour), each aggregated: token buckets, first/last event, distinct raw model ids, event count, peak-slot token share. Sorted by total tokens descending, keyset-paginated. Sessions are identified only by an opaque per-install session_ref (HMAC) — never a native id. data.window_total_tokens lets a caller check that the returned sessions sum to the window/peak total; if has_more is true the page was truncated and the sum is partial.",
+        description: "List sessions active in a day or month in the configured statistics timezone (optionally narrowed to one local hour), each aggregated: token buckets, first/last event, distinct raw model ids, event count, peak-slot token share. Sorted by total tokens descending, keyset-paginated. Sessions are identified only by an opaque per-install session_ref (HMAC) — never a native id. data.window_total_tokens lets a caller check that the returned sessions sum to the window/peak total; if has_more is true the page was truncated and the sum is partial.",
         input_schema: json!({
             "type": "object",
             "properties": {
-                "date": { "type": "string", "description": "Beijing date YYYY-MM-DD. Exactly one of date / month." },
-                "month": { "type": "string", "description": "Beijing month YYYY-MM. Exactly one of date / month." },
+                "date": { "type": "string", "description": "Date YYYY-MM-DD in the configured statistics timezone. Exactly one of date / month / date_from+date_to." },
+                "month": { "type": "string", "description": "Month YYYY-MM in the configured statistics timezone. Exactly one of date / month / date_from+date_to." },
+                "date_from": { "type": "string", "description": "Inclusive start date YYYY-MM-DD in the configured statistics timezone; must be paired with date_to." },
+                "date_to": { "type": "string", "description": "Inclusive end date YYYY-MM-DD in the configured statistics timezone; must be paired with date_from." },
                 "hour": { "type": "integer", "minimum": 0, "maximum": 23,
-                          "description": "Optional: only count each session's facts in this Beijing hour (for peak-hour drill-down). Requires date." },
+                          "description": "Optional: only count each session's facts in this local statistics hour (for peak-hour drill-down). Requires date." },
                 "hosts": { "type": "array", "items": { "type": "string" },
                            "description": "Optional host filter (claude-code / codex / dsh). Empty/missing = all known hosts." },
+                "model": { "type": "string", "description": "Optional exact model id filter; missing model facts use <unknown>." },
+                "provider": { "type": "string", "description": "Optional exact provider id filter; missing provider evidence uses <unknown>." },
                 "min_tokens": { "type": "integer", "minimum": 0,
                                 "description": "Optional: drop sessions whose window total is below this." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500,
@@ -78,24 +82,38 @@ pub fn make_search_cursor(total: i64, session_key: &str) -> String {
 }
 
 pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
-    let (start_ms, end_ms, window_label, has_date) = match (
-        args.get("date").and_then(Value::as_str),
-        args.get("month").and_then(Value::as_str),
-    ) {
-        (Some(d), None) => {
+    let date = args.get("date").and_then(Value::as_str);
+    let month = args.get("month").and_then(Value::as_str);
+    let date_from = args.get("date_from").and_then(Value::as_str);
+    let date_to = args.get("date_to").and_then(Value::as_str);
+    let (start_ms, end_ms, window_label, has_date) = match (date, month, date_from, date_to) {
+        (Some(d), None, None, None) => {
             let (s, e) = beijing_day_bounds_ms(d)
                 .ok_or_else(|| ToolError::new("invalid_argument", format!("invalid `date`: {d}")))?;
             (s, e, d.to_string(), true)
         }
-        (None, Some(m)) => {
+        (None, Some(m), None, None) => {
             let (s, e) = beijing_month_bounds_ms(m)
                 .ok_or_else(|| ToolError::new("invalid_argument", format!("invalid `month`: {m}")))?;
             (s, e, m.to_string(), false)
         }
+        (None, None, Some(from), Some(to)) => {
+            let (s, _) = beijing_day_bounds_ms(from)
+                .ok_or_else(|| ToolError::new("invalid_argument", format!("invalid `date_from`: {from}")))?;
+            let (_, e) = beijing_day_bounds_ms(to)
+                .ok_or_else(|| ToolError::new("invalid_argument", format!("invalid `date_to`: {to}")))?;
+            if s > e {
+                return Err(ToolError::new("invalid_argument", "`date_from` must not be after `date_to`"));
+            }
+            // `e` is the beginning of the inclusive end date's following day.
+            // Use that boundary directly: adding 24h is wrong on DST transition
+            // days (and silently drops or includes an hour).
+            (s, e, format!("{from}..{to}"), false)
+        }
         _ => {
             return Err(ToolError::new(
                 "invalid_argument",
-                "exactly one of `date` / `month` is required",
+                "use exactly one of `date`, `month`, or the paired `date_from` / `date_to`",
             ))
         }
     };
@@ -119,6 +137,8 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
+    let model = args.get("model").and_then(Value::as_str);
+    let provider = args.get("provider").and_then(Value::as_str);
     let min_tokens = args.get("min_tokens").and_then(Value::as_i64).unwrap_or(0);
     let limit = args
         .get("limit")
@@ -144,7 +164,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         None => (None, None),
     };
     let (rows, has_more, window_total, window_session_count) = authority_query::sessions_in_window(
-        conn, start_ms, end_ms, &hosts, hour, min_tokens, after_total, after_key, limit,
+        conn, start_ms, end_ms, &hosts, model, provider, hour, min_tokens, after_total, after_key, limit,
     )
     .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?;
 

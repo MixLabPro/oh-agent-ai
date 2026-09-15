@@ -7,11 +7,16 @@
 //! 两个格式。
 mod overview;
 mod store;
+mod budget_alerts;
+// Claude Pro 的额度窗口提醒：与预算提醒共用投递账本，但键按窗口取。
+mod quota_alerts;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tauri_plugin_notification::NotificationExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::process::Command;
+use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
 use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
@@ -22,6 +27,21 @@ use overview::{HostRow, HostsSnapshot, Overview, RecentSessionRow, SyncStatus};
 /// 一轮 discover→oneline 在跑。oneline 写链本身有 fencing + exactly-once，锁不是
 /// 为了防重复写，是防两轮并发白白各折一遍 + 两次托盘重建。
 struct SyncLock(Mutex<()>);
+
+struct SyncRequests(Mutex<std::collections::BTreeMap<String, bool>>);
+static SYNC_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
+const SYNC_STATUS_EVENT: &str = "sync-status-updated";
+
+/// 只有还没有任何同步回执的启动才主动拉起工作台。后续启动继续保持菜单栏
+/// 工具的安静行为；首次用户无需先知道菜单栏入口，能直接看到本机解析说明。
+fn should_show_first_value_workspace(sync: &SyncStatus) -> bool {
+    sync.stage == "never"
+}
+
+fn should_show_workbench_on_start(sync: &SyncStatus, args: &[String]) -> bool {
+    should_show_first_value_workspace(sync)
+        || args.iter().any(|arg| arg == "--show-workbench")
+}
 
 /// 独立的 macOS 菜单栏模板图。不能复用彩色 App Icon：模板图只提供 alpha
 /// 轮廓，由 AppKit 根据浅色、深色、选中和辅助功能状态自动着色。44×36px 源图按
@@ -130,14 +150,42 @@ fn stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
 /// "现在"——各行分别读钟会让同一次重建里的新鲜度判定互相不一致），单测因此不用
 /// 碰系统时钟。
 fn budget_status_text_at(ov: &Overview, now_secs: i64) -> String {
+    if let Some(rows) = ov.budget_profiles.as_ref()
+        .and_then(|v| v.get("profiles"))
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+    {
+        let summary = rows.iter().filter_map(|row| {
+            let id = row.get("profile_id").and_then(Value::as_str)?;
+            let currency = row.get("currency").and_then(Value::as_str)?;
+            let level = row.get("level").and_then(Value::as_str)?;
+            let spent = row.get("spent_minor").and_then(Value::as_i64).unwrap_or(0);
+            let limit = row.get("monthly_minor").and_then(Value::as_i64)?;
+            let label = if id == "estimate" { "估算" } else { "已确认" };
+            let state = match level {
+                "exceeded" => "超支",
+                "warn" => "接近",
+                "incomplete" => "部分覆盖",
+                "no_data" => "无数据",
+                "disabled" => "未启用",
+                _ => "正常",
+            };
+            Some(format!("{label} {currency} {state} {spent:.2}/{limit:.2}",
+                spent = spent as f64 / 100.0, limit = limit as f64 / 100.0))
+        }).collect::<Vec<_>>().join("；");
+        if !summary.is_empty() {
+            return format!("预算：{summary}");
+        }
+    }
     let b = &ov.budget;
     // 预算分母：alert.json 的 monthly_cny 是 evaluate() 算 ratio 用的那份，
     // 与它同屏显示的必须一致；缺场才退回 config。
-    let denom = b.monthly_cny.unwrap_or(ov.budget_monthly_cny);
+    let denom = b.monthly_cny.or(ov.budget_monthly_cny);
     let mc = fmt_money(b.month_cost.unwrap_or(0.0));
-    let denom_money = fmt_money(denom);
+    let denom_money = denom.map(fmt_money).unwrap_or_else(|| "未设置".into());
     let base = match (b.source.as_str(), b.level.as_deref()) {
         ("missing", _) => "预算：等预算数据（跑一次 oneline）".to_string(),
+        (_, Some("no_budget")) => "预算：未设置（成本仍按实际口径统计）".to_string(),
         (_, Some("over")) => format!("🚨 预算超支：{mc}（月 {denom_money}）"),
         (_, Some("snoozed")) => match &b.snoozed_until {
             Some(u) => format!("🔕 预算静默至 {u}"),
@@ -190,9 +238,14 @@ fn today_title(ov: &Overview) -> String {
         claude_currency(&ov.claude_today, "USD"),
         fx_rate(ov),
     );
+    let tokens = today_merged_tokens(ov);
     match money {
-        Some(m) => format!("今日 {} · {}", fmt_tokens(today_merged_tokens(ov)), m),
-        // 两宿主今天都没有可报的按量钱 → 诚实「—」，不臆造 0。
+        Some(m) => format!("今日 {} · {}", fmt_tokens(tokens), m),
+        // 今天没有可报的按量钱 → **钱那格**诚实「—」，不臆造 0；但 token 是测到的，
+        // 照常显示。原先这里连 token 一起丢掉（只剩「今日 —」）：既丢了已测量值，
+        // 也让菜单栏那一项短到难以在拥挤的状态区里被认出来（2026-09-14 用户反馈
+        // "状态栏看不到"）。
+        None if tokens > 0 => format!("今日 {} · —", fmt_tokens(tokens)),
         None => "今日 —".to_string(),
     }
 }
@@ -321,8 +374,8 @@ fn truncate_title(s: &str, max_chars: usize) -> String {
 /// 渲染成北京的快照时刻——与日界判定（day_key 北京日）同一时区，早上 8 点前的
 /// 快照不会显示成昨天的点。
 fn beijing_hhmm(secs: i64) -> String {
-    let tod = (secs + 8 * 3600).rem_euclid(86400);
-    format!("{:02}:{:02}", tod / 3600, (tod % 3600) / 60)
+    let local = agent_vitals_runtime::clock::local_timestamp_text(secs);
+    local[11..16].to_string()
 }
 
 /// 多宿主导航快照是否过期（spec §6 决策 5）：`generated_at` 年龄 > 2 × tick
@@ -343,9 +396,9 @@ fn hosts_stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
 fn recent_row_text(row: &RecentSessionRow, now_secs: i64) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(d) = &row.date {
-        let current_year = overview::civil_from_unix_secs(now_secs, 8 * 3600).0;
+        let current_year = agent_vitals_runtime::clock::local_timestamp_text(now_secs)[..4].to_string();
         let year_is_current = d.len() >= 10
-            && d[..4].parse::<i64>().map(|y| y == current_year).unwrap_or(false);
+            && d[..4] == current_year;
         parts.push(if year_is_current {
             d[5..10].to_string()
         } else {
@@ -723,17 +776,20 @@ const NAVIGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2
 /// 超时 → `child.kill()` + `wait()`（回收，不留僵尸）→ None。非零退出/spawn
 /// 失败/超时一律 None——调用方决定是保留旧快照还是 degraded，这里不编造。
 fn run_navigation(bin: &Path, day: &str) -> Option<Value> {
+    let timezone = agent_vitals_runtime::statistics_timezone::timezone_name(&overview::data_home())
+        .ok()
+        .unwrap_or_else(agent_vitals_runtime::clock::system_timezone_name);
     let mut child = std::process::Command::new(bin)
         .args([
-            "sessions",
-            "navigation",
-            "--day",
-            day,
-            "--timezone",
-            "Asia/Shanghai",
-            "--recent",
-            "5",
-            "--json",
+            "sessions".to_string(),
+            "navigation".to_string(),
+            "--day".to_string(),
+            day.to_string(),
+            "--timezone".to_string(),
+            timezone,
+            "--recent".to_string(),
+            "5".to_string(),
+            "--json".to_string(),
         ])
         .env("AGENT_VITALS_HOME", overview::data_home())
         .stdout(std::process::Stdio::piped())
@@ -800,6 +856,21 @@ fn resolve_binary() -> Option<PathBuf> {
         std::env::current_exe().ok(),
         &|p: &Path| p.is_file(),
     )
+}
+
+/// 读取实际会被桌面同步回路使用的 CLI 版本。诊断只读探测：二进制缺失、
+/// 启动失败或输出无法识别时返回 `None`，不把 App 版本冒充 CLI 版本。
+fn resolved_cli_version() -> Option<String> {
+    let binary = resolve_binary()?;
+    let output = Command::new(binary).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 /// 纯函数版二进制解析——env、自身可执行文件、文件判断由调用方注入，单测不碰真实
@@ -1096,34 +1167,70 @@ fn emit_fold_event(app: &AppHandle) {
 /// 跳过托盘更新的分支（这正是「多数正常路径连 state 重读都不做」的修复：无未折
 /// 会话/二进制缺失/discover 失败也要刷新，把外部更新带进托盘）。
 fn sync_tick(app: &AppHandle) {
-    let mut status = perform_sync();
-    // Claude 账尾折（tick 顺序 §8：DSH discover/oneline → claude-sync → 宿主
-    // 区）。DSH 同步已失败时不叠跑 claude-sync——fold 线失败通常意味着 state
-    // 根/二进制问题，claude 账同根也会失败，一次失败留一个原因。claude-sync 失
-    // 败不 abort tick（宿主区照刷），但 status 换成 fail 留痕（见 run_claude_sync）。
-    if status.ok {
-        if let Some(bin) = resolve_binary() {
-            if let Some(err) = run_claude_sync(&bin) {
-                status = SyncStatus::fail("claude-sync", err);
-            } else if let Some(err) = run_facts_sync(&bin) {
-                // claude-sync 成功才叠跑 facts（同一「state 根/二进制问题
-                // 不叠跑」逻辑）；失败留痕不 abort（facts 是新增平面）。
-                status = SyncStatus::fail("sync-facts", err);
-            }
+    match overview::sync_is_paused() {
+        Ok(true) => {
+            let status = SyncStatus::ok("paused", "已按你的选择暂停本机解析".into());
+            overview::save_sync_status(&status);
+            let _ = app.emit(SYNC_STATUS_EVENT, serde_json::json!({
+                "ok": status.ok, "stage": status.stage, "message": status.message,
+            }));
+            refresh(app);
+            return;
         }
+        Err(error) => {
+            let status = SyncStatus::fail("control", format!("同步控制状态不可读：{error}"));
+            overview::save_sync_status(&status);
+            let _ = app.emit(SYNC_STATUS_EVENT, serde_json::json!({
+                "ok": status.ok, "stage": status.stage, "message": status.message,
+            }));
+            refresh(app);
+            return;
+        }
+        Ok(false) => {}
     }
+    let initial = perform_sync();
+    let folded = should_emit_fold_event(&initial);
+    // 一宿主失败不能阻塞其他宿主的导入；共享二进制缺失仍由 resolve 状态报告。
+    let (status, facts_ready) = match resolve_binary() {
+        Some(bin) => finish_sync_stages(initial, || run_claude_sync(&bin), || run_facts_sync(&bin)),
+        None => (initial, false),
+    };
     overview::save_sync_status(&status);
+    // 首次扫描即使没有新增 facts，也要让已打开的工作台结束“正在整理”的状态。
+    // `usage-fold-updated` 只代表有新折账，不能承担这个生命周期事件。
+    let _ = app.emit(SYNC_STATUS_EVENT, serde_json::json!({
+        "ok": status.ok, "stage": status.stage, "message": status.message,
+    }));
     // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
     refresh_hosts();
     refresh(app);
-    // fold 成功落盘 → 广播给工作台（去抖合并，见 emit_fold_event）。只覆盖真正
-    // 的 fold：discover 成功但「无未折会话」没有新数据落盘，广播只会让工作台
-    // 白拉一遍旧数字；失败同理。webview 未就绪时 emit 是空操作，由下一次
-    // tick/手动同步兜底——事件桥不是唯一通路，只是让工作台「立刻」更新的加速带。
-    if should_emit_fold_event(&status) {
+    budget_alerts::maybe_notify(app);
+    quota_alerts::maybe_notify(app);
+    // DSH fold 或事实同步成功后广播；其他来源的失败不隐藏本轮可用结果。
+    // sync-facts 暂未返回新增计数，因此成功扫描也会刷新；webview 未就绪时由
+    // 下一次加载读取最新结果，事件桥不承担持久化。
+    if folded || facts_ready {
         emit_fold_event(app);
     }
+}
+
+/// 按序执行独立导入阶段并保留全部失败原因。成功导入的 facts 即使处于部分
+/// 失败的一轮，也需要通知工作台读取新结果。
+fn finish_sync_stages(
+    initial: SyncStatus,
+    claude: impl FnOnce() -> Option<String>,
+    facts: impl FnOnce() -> Option<String>,
+) -> (SyncStatus, bool) {
+    let mut failures = Vec::new();
+    if !initial.ok { failures.push(format!("{}: {}", initial.stage, initial.message)); }
+    if let Some(err) = claude() { failures.push(format!("claude-sync: {err}")); }
+    let facts_error = facts();
+    let facts_ready = facts_error.is_none();
+    if let Some(err) = facts_error { failures.push(format!("sync-facts: {err}")); }
+    let status = if failures.is_empty() { initial }
+        else { SyncStatus::fail("partial", failures.join("；")) };
+    (status, facts_ready)
 }
 
 /// 每 5 分钟一轮：发现最新未折 DSH 会话 → spawn `agent-vitals oneline` 折账 →
@@ -1145,11 +1252,20 @@ fn start_refresh_tick(app: AppHandle) {
 /// 「立即同步」（托盘菜单 / 工作台按钮共用）：受控 tick 一次。跑在后台线程，菜单
 /// 事件处理器不阻塞；互斥锁阻塞等待在途同步结束，保证用户点的这一次真的执行。
 fn sync_now(app: &AppHandle) {
+    sync_now_tracked(app, None);
+}
+
+fn sync_now_tracked(app: &AppHandle, request_id: Option<String>) {
     let app = app.clone();
     std::thread::spawn(move || {
         let lock = app.state::<SyncLock>();
         let _guard = lock.0.lock().unwrap_or_else(|e| e.into_inner());
         sync_tick(&app);
+        if let Some(id) = request_id {
+            let requests = app.state::<SyncRequests>();
+            let mut requests = requests.0.lock().unwrap_or_else(|e| e.into_inner());
+            requests.insert(id, true);
+        }
     });
 }
 
@@ -1217,6 +1333,14 @@ fn focus_tab(app: &AppHandle, tab: &str) {
     let _ = app.emit("focus-tab", tab);
 }
 
+/// 系统预算提醒的唯一点击目标。只接受预算页，避免通知 payload 变成任意
+/// 工作台导航入口；写目标先于显示，工作台隐藏时也能在下次聚焦时消费。
+#[tauri::command]
+fn focus_budget_from_notification(app: AppHandle) -> Result<(), String> {
+    focus_tab(&app, "budget");
+    Ok(())
+}
+
 /// 动态菜单 id → 会话深链目标（spec §9.2 #12）。纯函数，单测钉住映射：
 /// · `session:{kind}:{i}` → 该宿主第 i 行 recent 的 `SessionDetail`。session_key
 ///   从 hosts.json 里 `SessionKey::to_json()` 形状的 Value 反序列化——失败即该行
@@ -1263,28 +1387,1383 @@ fn focus_session_target(app: &AppHandle, target: WorkbenchTarget) {
 /// 没有理由为一份没有入口、内容更少的旧界面继续维护 `toggle_window`/
 /// `hide_window`/一份独立的 HTML+JS+CSS。命令名留作 `read_overview` 不改，
 /// 只是现在唯一的调用方是工作台。
-#[tauri::command]
+#[tauri::command(async)]
 fn read_overview() -> Value {
     serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null)
 }
 
 /// 工作台总览的权威质量状态。金额仍由 summary DTO 提供；这里仅转发
 /// `data_status` 的只读健康、价格快照和 token 归因状态，避免前端自行推断。
-#[tauri::command]
+#[tauri::command(async)]
 fn data_status() -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = match agent_vitals_data::authority::AuthorityDb::open_readonly(&path) {
+        Ok(db) => db,
+        Err(error) => {
+            use agent_vitals_data::authority::AuthorityError;
+            let (code, action) = match error {
+                AuthorityError::MissingFile => ("database_missing", "retry_sync"),
+                AuthorityError::NewerSchema { .. } => ("schema_too_new", "upgrade_app"),
+                AuthorityError::OlderSchema { .. } => ("schema_migration_required", "upgrade_app"),
+                AuthorityError::Corrupt => ("database_unreadable", "restore_backup"),
+                AuthorityError::Io(_) | AuthorityError::Sqlite(_) => ("database_unreadable", "restore_backup"),
+            };
+            return serde_json::json!({
+                "status": "unavailable",
+                "code": code,
+                "reason": error.to_string(),
+                "recovery_action": { "kind": action, "label": if action == "restore_backup" { "选择备份恢复" } else { "查看恢复选项" } }
+            });
+        }
+    };
+    let enabled = agent_vitals_runtime::sql_authority::is_enabled(&data_home);
+    serde_json::json!({
+        "status": "ok",
+        // 热路径用 quick_check 深度：工作台每次切 tab 都会走到这里，全量
+        // integrity_check 在大库上要 0.5–1.2s，是刷新的唯一长杆。CLI/MCP 的
+        // doctor 面仍是全量检查（见 runtime::mcp::data_status_report_quick 注释）。
+        "data": agent_vitals_runtime::mcp::data_status_report_quick(db.conn(), true, enabled)
+    })
+}
+
+/// 从用户明确选择的备份恢复权威库。恢复顺序是：先验证备份、保留当前文件、写入同目录
+/// 临时文件、再次验证临时文件，最后原子替换；任何中间步骤失败都不触碰当前库。
+/// 不接受前端传入路径，避免把任意路径写入权限伪装成恢复动作。
+fn restore_authority_backup_file(
+    backup: &Path,
+    target: &Path,
+    stamp: i64,
+) -> Result<Option<PathBuf>, String> {
+    agent_vitals_data::authority::AuthorityDb::open_readonly(backup)
+        .map_err(|error| format!("selected backup is not readable: {error}"))?;
+    let parent = target.parent().ok_or_else(|| "authority path has no parent".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create authority directory failed: {error}"))?;
+    let preserved = parent.join(format!("authority.sqlite.pre-restore-{stamp}.bak"));
+    if target.exists() {
+        std::fs::copy(target, &preserved)
+            .map_err(|error| format!("preserve current authority database failed: {error}"))?;
+    }
+    let temporary = parent.join(format!("authority.sqlite.restore-{stamp}-{}.tmp", std::process::id()));
+    if temporary.exists() {
+        return Err("restore temporary file already exists; please retry".into());
+    }
+    let result = (|| {
+        std::fs::copy(backup, &temporary)
+            .map_err(|error| format!("stage selected backup failed: {error}"))?;
+        std::fs::File::open(&temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("flush staged backup failed: {error}"))?;
+        agent_vitals_data::authority::AuthorityDb::open_readonly(&temporary)
+            .map_err(|error| format!("staged backup validation failed: {error}"))?;
+        std::fs::rename(&temporary, target)
+            .map_err(|error| format!("replace authority database failed: {error}"))?;
+        Ok::<(), String>(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map(|()| target.exists().then_some(preserved))
+}
+
+#[tauri::command]
+fn restore_authority_backup() -> Result<Value, String> {
+    let Some(backup) = rfd::FileDialog::new()
+        .add_filter("SQLite database", &["sqlite", "db", "sqlite3"])
+        .pick_file() else {
+        return Ok(serde_json::json!({ "status": "cancelled" }));
+    };
+    let data_home = overview::data_home();
+    let target = agent_vitals_data::authority::default_authority_path(&data_home);
+    let stamp = agent_vitals_runtime::sql_sync::now_ms();
+    let preserved = restore_authority_backup_file(&backup, &target, stamp)?;
+    Ok(serde_json::json!({
+        "status": "restored",
+        "preserved_current": preserved.is_some(),
+        "backup_path": backup.to_string_lossy(),
+    }))
+}
+
+/// 升级时从旧公共资产发现的套餐声明。它们是用户核对入口，不是账单：前端
+/// 只能拿到展示所需的服务商、金额和起始月份，不能拿到原始价格快照或路径。
+#[tauri::command(async)]
+fn billing_import_candidates() -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable", "candidates": [] });
+    };
+    let window = agent_vitals_data::authority_query::beijing_month_bounds_ms(
+        &overview::current_month_beijing(),
+    );
+    match db.billing_import_candidates() {
+        Ok(rows) => serde_json::json!({
+            "status": "ok",
+            "candidates": rows.into_iter().map(|(candidate_id, host, provider_id, currency, amount_minor, billing_period_start, status)| {
+                let impact = window.and_then(|(window_start_ms, window_end_ms)| {
+                    db.billing_declaration_impact_preview_for(
+                        &host, &provider_id, &billing_period_start, None, &[],
+                        window_start_ms, window_end_ms,
+                    ).ok()
+                });
+                serde_json::json!({
+                    "candidate_id": candidate_id,
+                    "host": host,
+                    "provider_id": provider_id,
+                    "currency": currency,
+                    "amount_minor": amount_minor,
+                    "billing_period_start": billing_period_start,
+                    "status": status,
+                    "impact": impact.map(|preview| serde_json::json!({
+                        "status": "ok", "fact_count": preview.fact_count,
+                        "session_count": preview.session_count,
+                        "total_tokens": preview.total_tokens,
+                    })).unwrap_or_else(|| serde_json::json!({"status": "unavailable"})),
+                })
+            }).collect::<Vec<_>>()
+        }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string(), "candidates": [] }),
+    }
+}
+
+/// 用户明确核对旧套餐声明后才落下决定。接受的是“这是我的套餐”，不是
+/// “我已付款”：actual spend 仍必须来自付款/账单记录。
+#[tauri::command]
+fn resolve_billing_import_candidate(candidate_id: String, decision: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, agent_vitals_runtime::sql_sync::now_ms())
+        .map_err(|error| error.to_string())?;
+    let status = match decision.as_str() {
+        "accept" => "accepted",
+        "dismiss" => "dismissed",
+        "reopen" => "pending",
+        _ => return Err("invalid billing candidate decision".to_string()),
+    };
+    let changed = db.with_immediate_txn(|_| {
+        let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+        if status == "pending" {
+            db.billing_import_candidate_reopen(&candidate_id, now_ms)
+        } else {
+            db.billing_import_candidate_resolve(&candidate_id, status, now_ms)
+        }
+    }).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": status, "changed": changed }))
+}
+
+#[derive(Deserialize)]
+struct BillingScopeInput {
+    scope_kind: String,
+    scope_value: String,
+}
+
+#[derive(Deserialize)]
+struct HostBillInput {
+    bill_id: String,
+    host: String,
+    provider_id: String,
+    billing_period: String,
+    billing_basis: String,
+    amount_minor: i64,
+    currency: String,
+    evidence_ref: String,
+}
+
+/// 桌面端预算表单的窄 DTO。金额仍是 CNY 最小单位，避免 UI 浮点数进入权威库。
+#[derive(Deserialize)]
+struct BudgetConfigInput {
+    monthly_cny_minor: i64,
+    daily_cny_minor: i64,
+    warning_ratio_bp: i64,
+}
+
+#[derive(Deserialize)]
+struct BudgetProfileInput {
+    profile_id: String,
+    currency: String,
+    monthly_minor: i64,
+    daily_minor: Option<i64>,
+    warning_ratio_bp: i64,
+}
+
+#[derive(Deserialize)]
+struct PriceRouteInput {
+    /// 型号**前缀**（与价目表 `billing_modes` 同一套匹配语义：全等或前缀）。
+    model_prefix: String,
+    provider_id: String,
+    /// `metered` 或 `subscription`。
+    mode: String,
+}
+
+#[derive(Deserialize)]
+struct PriceCardInput {
+    provider_id: String,
+    model_id: String,
+    /// 每档是 `{off_peak, peak}`；三个维度都必须给（半张卡拒绝）。
+    input_uncached: Value,
+    input_cached: Value,
+    output: Value,
+}
+
+#[derive(Deserialize)]
+struct RetentionConfigInput {
+    months: u32,
+}
+
+#[derive(Deserialize)]
+struct CustomSourceRootInput {
+    host: String,
+    root: String,
+}
+
+#[derive(Deserialize)]
+struct SourceHostControlInput {
+    host: String,
+    excluded: bool,
+}
+
+#[tauri::command(async)]
+fn custom_source_roots() -> Value {
+    let data_home = overview::data_home();
+    match agent_vitals_runtime::custom_sources::custom_source_roots(&data_home) {
+        Ok(sources) => serde_json::json!({ "status": "ok", "sources": sources }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
+    }
+}
+
+/// 用户发起的原生目录选择。选择的是宿主根目录（包含 `.claude` / `.codex`
+/// 或 `sessions` 的目录），取消不是错误；不会在此处读取或写入会话内容。
+#[tauri::command]
+fn pick_custom_source_root() -> Option<String> {
+    rfd::FileDialog::new().pick_folder()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn add_custom_source_root(input: CustomSourceRootInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let changed = agent_vitals_runtime::custom_sources::add_custom_source_root(
+        &data_home, &input.host, Path::new(&input.root),
+    )?;
+    Ok(serde_json::json!({ "status": "saved", "changed": changed }))
+}
+
+#[tauri::command]
+fn remove_custom_source_root(input: CustomSourceRootInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let changed = agent_vitals_runtime::custom_sources::remove_custom_source_root(
+        &data_home, &input.host, Path::new(&input.root),
+    )?;
+    Ok(serde_json::json!({ "status": "removed", "changed": changed }))
+}
+
+#[tauri::command]
+fn source_host_controls() -> Value {
+    let data_home = overview::data_home();
+    match agent_vitals_runtime::source_controls::excluded_hosts(&data_home) {
+        Ok(excluded_hosts) => serde_json::json!({ "status": "ok", "excluded_hosts": excluded_hosts }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
+    }
+}
+
+/// 仅工作台本机显示的标准读取目录；不混入 MCP/导出 DTO，避免路径离开桌面。
+#[tauri::command(async)]
+fn source_read_locations() -> Value {
+    let home = PathBuf::from(
+        std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default(),
+    );
+    let dsh = agent_vitals_runtime::home::dsh_home().map(|path| path.join("sessions"));
+    serde_json::json!({
+        "status": "ok",
+        "locations": {
+            "claude-code": home.join(".claude").join("projects").to_string_lossy(),
+            "codex": agent_vitals_runtime::summary::codex_home().join("sessions").to_string_lossy(),
+            "dsh": dsh.map(|path| path.to_string_lossy().into_owned()),
+        }
+    })
+}
+
+#[tauri::command]
+fn set_source_host_excluded(input: SourceHostControlInput) -> Result<Value, String> {
+    let changed = agent_vitals_runtime::source_controls::set_host_excluded(
+        &overview::data_home(), &input.host, input.excluded,
+    )?;
+    Ok(serde_json::json!({ "status": "saved", "changed": changed, "excluded": input.excluded }))
+}
+
+#[tauri::command]
+fn delete_imported_source_data(host: String) -> Result<Value, String> {
+    if !agent_vitals_runtime::ingest_service::FACT_HOSTS.contains(&host.as_str()) {
+        return Err("source host is not supported".to_string());
+    }
+    let data_home = overview::data_home();
+    // 先禁止未来读取；若数据库清理失败，宁可维持排除也不能让下一次同步
+    // 立即把用户刚要求移除的数据重新导入。
+    agent_vitals_runtime::source_controls::set_host_excluded(&data_home, &host, true)?;
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(&data_home),
+        agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| format!("authority database unavailable: {error}"))?;
+    let deleted = db.delete_imported_host_data(&host, agent_vitals_runtime::sql_sync::now_ms())
+        .map_err(|error| format!("delete imported data failed: {error}"))?;
+    Ok(serde_json::json!({
+        "status": "deleted", "host": host, "facts": deleted.facts,
+        "sessions": deleted.sessions, "source_files": deleted.source_files,
+    }))
+}
+
+#[tauri::command(async)]
+fn retention_config() -> Value {
+    let data_home = overview::data_home();
+    match agent_vitals_runtime::retention::retention_months(&data_home) {
+        Ok(months) => serde_json::json!({
+            "status": "ok", "months": months,
+            "default_months": agent_vitals_runtime::retention::DEFAULT_RETENTION_MONTHS,
+            "minimum_months": agent_vitals_runtime::retention::MIN_RETENTION_MONTHS,
+            "maximum_months": agent_vitals_runtime::retention::MAX_RETENTION_MONTHS,
+        }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
+    }
+}
+
+#[tauri::command]
+fn save_retention_config(input: RetentionConfigInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    agent_vitals_runtime::retention::save_retention_months(&data_home, input.months)?;
+    Ok(serde_json::json!({ "status": "saved", "months": input.months }))
+}
+
+#[tauri::command(async)]
+fn statistics_timezone_config() -> Value {
+    let data_home = overview::data_home();
+    match agent_vitals_runtime::statistics_timezone::timezone_name(&data_home) {
+        Ok(timezone) => serde_json::json!({
+            "status": "ok",
+            "timezone": timezone,
+            "system_timezone": agent_vitals_runtime::clock::system_timezone_name(),
+        }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
+    }
+}
+
+#[tauri::command]
+fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let saved = agent_vitals_runtime::statistics_timezone::save_timezone(&data_home, &timezone)?;
+    agent_vitals_runtime::statistics_timezone::apply(&data_home)?;
+    // The Workbench refreshes its active tab after the IPC returns, but the
+    // tray is a separate consumer and its host rows come from hosts.json. A
+    // plain menu rebuild would therefore retain the old day's navigation
+    // snapshot. Re-run the bounded navigation refresh off the command thread,
+    // then rebuild the tray from the newly written snapshot.
+    let background_app = app.clone();
+    std::thread::spawn(move || {
+        refresh_hosts();
+        refresh(&background_app);
+    });
+    refresh(&app);
+    Ok(serde_json::json!({ "status": "saved", "timezone": saved }))
+}
+
+const PUBLIC_PRICING_CATALOG_URL: &str =
+    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/assets/pricing.json";
+const PRICING_UPDATE_STATUS_FILE: &str = "pricing-catalog-update.json";
+const PRICING_UPDATE_POLICY_FILE: &str = "pricing-catalog-policy.json";
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PricingCatalogUpdateStatus {
+    state: String,
+    source_url: String,
+    last_checked_at_ms: Option<i64>,
+    last_success_at_ms: Option<i64>,
+    source_version: Option<String>,
+    model_count: Option<usize>,
+    failure_reason: Option<String>,
+    #[serde(default)]
+    failure_count: u32,
+    #[serde(default)]
+    next_check_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PricingCatalogPolicy {
+    network_enabled: bool,
+}
+
+fn pricing_catalog_status_path(data_home: &Path) -> PathBuf {
+    data_home.join(PRICING_UPDATE_STATUS_FILE)
+}
+
+fn pricing_catalog_policy_path(data_home: &Path) -> PathBuf {
+    data_home.join(PRICING_UPDATE_POLICY_FILE)
+}
+
+fn read_pricing_catalog_policy(data_home: &Path) -> PricingCatalogPolicy {
+    std::fs::read(pricing_catalog_policy_path(data_home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn write_pricing_catalog_policy(
+    data_home: &Path,
+    policy: &PricingCatalogPolicy,
+) -> Result<(), String> {
+    std::fs::create_dir_all(data_home).map_err(|e| format!("create data home failed: {e}"))?;
+    let bytes = serde_json::to_vec_pretty(policy)
+        .map_err(|e| format!("serialize pricing policy failed: {e}"))?;
+    let tmp = data_home.join("pricing-catalog-policy.json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write pricing policy failed: {e}"))?;
+    std::fs::rename(&tmp, pricing_catalog_policy_path(data_home))
+        .map_err(|e| format!("commit pricing policy failed: {e}"))
+}
+
+fn read_pricing_catalog_status(data_home: &Path) -> PricingCatalogUpdateStatus {
+    let path = pricing_catalog_status_path(data_home);
+    std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| PricingCatalogUpdateStatus {
+            state: "never_checked".into(),
+            source_url: PUBLIC_PRICING_CATALOG_URL.into(),
+            ..Default::default()
+        })
+}
+
+fn write_pricing_catalog_status(
+    data_home: &Path,
+    status: &PricingCatalogUpdateStatus,
+) -> Result<(), String> {
+    std::fs::create_dir_all(data_home).map_err(|e| format!("create data home failed: {e}"))?;
+    let bytes = serde_json::to_vec_pretty(status)
+        .map_err(|e| format!("serialize pricing status failed: {e}"))?;
+    let tmp = data_home.join("pricing-catalog-update.json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write pricing status failed: {e}"))?;
+    std::fs::rename(&tmp, pricing_catalog_status_path(data_home))
+        .map_err(|e| format!("commit pricing status failed: {e}"))
+}
+
+fn fail_pricing_catalog_update(
+    data_home: &Path,
+    status: &mut PricingCatalogUpdateStatus,
+    state: &str,
+    reason: String,
+) -> Result<Value, String> {
+    status.state = state.into();
+    status.failure_reason = Some(reason.clone());
+    status.failure_count = status.failure_count.saturating_add(1);
+    let backoff_hours = 1_i64 << status.failure_count.min(7);
+    status.next_check_at_ms = Some(
+        status
+            .last_checked_at_ms
+            .unwrap_or_else(agent_vitals_runtime::sql_sync::now_ms)
+            .saturating_add(backoff_hours.saturating_mul(60 * 60 * 1000)),
+    );
+    write_pricing_catalog_status(data_home, status)?;
+    Err(reason)
+}
+
+#[tauri::command(async)]
+fn public_pricing_catalog_status() -> Value {
+    let data_home = overview::data_home();
+    let mut status = serde_json::to_value(read_pricing_catalog_status(&data_home))
+        .unwrap_or_else(|_| serde_json::json!({ "state": "unavailable" }))
+        ;
+    status["network_enabled"] = Value::Bool(read_pricing_catalog_policy(&data_home).network_enabled);
+    status
+}
+
+#[tauri::command]
+fn save_public_pricing_catalog_policy(network_enabled: bool) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    write_pricing_catalog_policy(&data_home, &PricingCatalogPolicy { network_enabled })?;
+    Ok(serde_json::json!({ "status": "saved", "network_enabled": network_enabled }))
+}
+
+/// 手动检查维护者发布的公共价格目录。请求只访问固定 HTTPS 公共地址，不携带
+/// AGENT_VITALS_HOME、日志内容、会话、账户或任何本地数据；下载失败/校验失败
+/// 只写检查状态，绝不删除或替换当前有效价卡。
+#[tauri::command]
+async fn update_public_pricing_catalog_internal(enforce_schedule: bool) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let policy = read_pricing_catalog_policy(&data_home);
+    if !policy.network_enabled {
+        return Err("公共价格联网检查未开启；请先明确允许访问公共价格服务".into());
+    }
+    let now = agent_vitals_runtime::sql_sync::now_ms();
+    let mut status = read_pricing_catalog_status(&data_home);
+    if enforce_schedule
+        && (status.next_check_at_ms.is_some_and(|next| now < next)
+            || status
+                .last_checked_at_ms
+                .is_some_and(|last| now.saturating_sub(last) < 24 * 60 * 60 * 1000))
+    {
+        return Ok(serde_json::json!({ "status": "skipped", "reason": "daily_check_window" }));
+    }
+    status.source_url = PUBLIC_PRICING_CATALOG_URL.into();
+    status.last_checked_at_ms = Some(now);
+    status.failure_reason = None;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("agent-vitals-public-pricing-check/1")
+        .build()
+        .map_err(|e| format!("create public pricing client failed: {e}"));
+    let client = match client {
+        Ok(client) => client,
+        Err(reason) => return fail_pricing_catalog_update(&data_home, &mut status, "failed", reason),
+    };
+    let response = client
+        .get(PUBLIC_PRICING_CATALOG_URL)
+        .send()
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            return fail_pricing_catalog_update(
+                &data_home,
+                &mut status,
+                "failed",
+                format!("public pricing request failed: {error}"),
+            )
+        }
+    };
+    if !response.status().is_success() {
+        return fail_pricing_catalog_update(
+            &data_home,
+            &mut status,
+            "failed",
+            format!("public pricing returned HTTP {}", response.status()),
+        );
+    }
+    if response.content_length().is_some_and(|length| length > 2 * 1024 * 1024) {
+        return fail_pricing_catalog_update(
+            &data_home,
+            &mut status,
+            "failed",
+            "public pricing response exceeds 2 MiB limit".into(),
+        );
+    }
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return fail_pricing_catalog_update(
+                &data_home,
+                &mut status,
+                "failed",
+                format!("read public pricing response failed: {error}"),
+            )
+        }
+    };
+    if bytes.len() > 2 * 1024 * 1024 {
+        return fail_pricing_catalog_update(
+            &data_home,
+            &mut status,
+            "failed",
+            "public pricing response exceeds 2 MiB limit".into(),
+        );
+    }
+    let validated = match agent_vitals_runtime::pricing_catalog::validate(&bytes) {
+        Ok(validated) => validated,
+        Err(reason) => return fail_pricing_catalog_update(&data_home, &mut status, "rejected", reason),
+    };
+    let authority_path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(&authority_path, now)
+        .map_err(|e| format!("open authority database failed: {e}"))?;
+    db.pricing_catalog_snapshot_put(
+        &validated.version,
+        &validated.version,
+        "public-maintainer-https",
+        &validated.canonical_json,
+        now,
+        None,
+    )
+    .map_err(|e| format!("save public catalog and pricing atomically failed: {e}"))?;
+    status.state = "ok".into();
+    status.last_success_at_ms = Some(now);
+    status.source_version = Some(validated.version.clone());
+    status.model_count = Some(validated.model_count);
+    status.failure_count = 0;
+    status.next_check_at_ms = Some(now.saturating_add(24 * 60 * 60 * 1000));
+    write_pricing_catalog_status(&data_home, &status)?;
+    Ok(serde_json::json!({
+        "status": "updated",
+        "source_url": PUBLIC_PRICING_CATALOG_URL,
+        "source_version": validated.version,
+        "model_count": validated.model_count,
+        "last_success_at_ms": now,
+    }))
+}
+
+#[tauri::command]
+async fn update_public_pricing_catalog() -> Result<Value, String> {
+    update_public_pricing_catalog_internal(false).await
+}
+
+fn start_public_pricing_catalog_tick() {
+    tauri::async_runtime::spawn(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+            let data_home = overview::data_home();
+            if !read_pricing_catalog_policy(&data_home).network_enabled {
+                continue;
+            }
+            let _ = update_public_pricing_catalog_internal(true).await;
+        }
+    });
+}
+
+/// 生成用户主动选择保存的脱敏诊断包。只组合现有的状态 DTO；不读取会话正文、
+/// 原始日志、绝对路径或账户标识，也不执行上传。取消保存对用户来说是 no-op。
+#[tauri::command]
+fn export_diagnostic_package() -> Result<Value, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_file_name("agent-vitals-diagnostics.json")
+        .save_file() else {
+        return Ok(serde_json::json!({ "status": "cancelled" }));
+    };
+    let status = data_status();
+    let package = serde_json::json!({
+        "diagnostic_contract": "agent-vitals-diagnostic/v1",
+        "versions": {
+            "app": env!("CARGO_PKG_VERSION"),
+            "cli": resolved_cli_version(),
+            "engine": agent_vitals_domain::r2a::ENGINE_VERSION,
+            "architecture": std::env::consts::ARCH,
+            "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
+            "query_envelope": agent_vitals_runtime::mcp::ENVELOPE_SCHEMA_VERSION,
+            "statistics_timezone": agent_vitals_runtime::clock::statistics_timezone_name(),
+            "pricing": status.get("data")
+                .and_then(|data| data.get("pricing"))
+                .and_then(|pricing| pricing.get("version"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        },
+        "privacy": {
+            "contains_session_content": false,
+            "contains_absolute_paths": false,
+            "contains_account_identifiers": false,
+            "upload_performed": false,
+        },
+        "data_status": status,
+        "source_status": data_source_status(),
+        "sync_pause": sync_pause_state(),
+        "retention": retention_config(),
+        "budget": budget_config(),
+        "budget_profiles": budget_profiles_status(overview::current_month_beijing()),
+    });
+    let bytes = serde_json::to_vec_pretty(&package)
+        .map_err(|error| format!("diagnostic serialization failed: {error}"))?;
+    std::fs::write(&path, bytes)
+        .map_err(|error| format!("diagnostic write failed: {error}"))?;
+    Ok(serde_json::json!({
+        "status": "saved",
+        "path": path.to_string_lossy(),
+        "upload_performed": false,
+    }))
+}
+
+#[tauri::command(async)]
+fn about_diagnostics() -> Value {
+    let data_home = overview::data_home();
+    let authority_path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let pricing = agent_vitals_data::authority::AuthorityDb::open_readonly(&authority_path)
+        .ok()
+        .and_then(|db| db.pricing_snapshot_latest().ok().flatten())
+        .map(|(version, captured_at_ms)| serde_json::json!({
+            "version": version,
+            "captured_at_ms": captured_at_ms,
+        }));
+    serde_json::json!({
+        "status": "ok",
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "cli_version": resolved_cli_version(),
+        "engine_version": agent_vitals_domain::r2a::ENGINE_VERSION,
+        "architecture": std::env::consts::ARCH,
+        "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
+        "statistics_timezone": agent_vitals_runtime::clock::statistics_timezone_name(),
+        "pricing": pricing,
+        "pricing_update": read_pricing_catalog_status(&data_home),
+        // 只要 last-sync.json 这一份状态，不必为它把整份 overview 重算一遍
+        // （read_overview 会跑 SQL bundle + 预算 profile 聚合，≈130–360ms）。
+        "sync": overview::load_sync_status(&data_home),
+    })
+}
+
+const TRUSTED_RELEASES_URL: &str = "https://github.com/MixLabPro/agent-vitals/releases";
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/MixLabPro/agent-vitals/releases/latest";
+
+fn parse_latest_release_tag(payload: &Value) -> Result<String, String> {
+    let tag = payload
+        .get("tag_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "trusted release response has no tag_name".to_string())?;
+    if !tag.starts_with("app-v") {
+        return Err(format!("trusted release tag is not an app release: {tag}"));
+    }
+    Ok(tag.to_string())
+}
+
+#[tauri::command]
+async fn check_for_updates() -> Result<Value, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(format!("agent-vitals/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("build update client failed: {error}"))?;
+    let response = client
+        .get(LATEST_RELEASE_API)
+        .send()
+        .await
+        .map_err(|error| format!("check updates failed: {error}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(serde_json::json!({
+            "status": "no_release",
+            "current_version": env!("CARGO_PKG_VERSION"),
+            "url": TRUSTED_RELEASES_URL,
+            "automatic_install": false,
+        }));
+    }
+    if !status.is_success() {
+        return Err(format!("check updates returned HTTP {status}"));
+    }
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("parse update response failed: {error}"))?;
+    let tag = parse_latest_release_tag(&payload)?;
+    Ok(serde_json::json!({
+        "status": "ok",
+        "current_version": env!("CARGO_PKG_VERSION"),
+        "latest_tag": tag,
+        "url": TRUSTED_RELEASES_URL,
+        "automatic_install": false,
+    }))
+}
+
+#[tauri::command]
+fn open_trusted_releases_page() -> Result<Value, String> {
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .arg(TRUSTED_RELEASES_URL)
+        .status()
+        .map_err(|e| format!("open trusted releases page failed: {e}"))?;
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("xdg-open")
+        .arg(TRUSTED_RELEASES_URL)
+        .status()
+        .map_err(|e| format!("open trusted releases page failed: {e}"))?;
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", TRUSTED_RELEASES_URL])
+        .status()
+        .map_err(|e| format!("open trusted releases page failed: {e}"))?;
+    if !status.success() {
+        return Err(format!("open trusted releases page exited with {status}"));
+    }
+    Ok(serde_json::json!({
+        "status": "opened",
+        "url": TRUSTED_RELEASES_URL,
+        "automatic_install": false,
+    }))
+}
+
+#[tauri::command(async)]
+fn budget_config() -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable" });
+    };
+    match db.budget_config_get() {
+        Ok(Some(config)) => serde_json::json!({
+            "status": "ok",
+            "monthly_cny_minor": config.monthly_cny_minor,
+            "daily_cny_minor": config.daily_cny_minor,
+            "warning_ratio_bp": config.warning_ratio_bp,
+            "updated_at_ms": config.updated_at_ms,
+            "origin": agent_vitals_runtime::budget::budget_config_origin(&data_home),
+        }),
+        Ok(None) => serde_json::json!({ "status": "missing" }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string() }),
+    }
+}
+
+#[tauri::command(async)]
+fn budget_profiles_status(month: String) -> Value {
+    agent_vitals_runtime::budget::budget_profiles_status_sql_at(
+        &overview::data_home(), &month,
+    ).unwrap_or_else(|| serde_json::json!({
+        "status": "unavailable", "reason": "budget profile status unavailable",
+    }))
+}
+
+#[tauri::command]
+fn save_budget_profile(app: AppHandle, input: BudgetProfileInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms)
+        .map_err(|error| error.to_string())?;
+    db.budget_profile_set(
+        &input.profile_id, &input.currency, input.monthly_minor,
+        input.daily_minor, input.warning_ratio_bp, now_ms,
+    ).map_err(|error| error.to_string())?;
+    let notification_permission = app.notification().request_permission()
+        .map(|state| format!("{state:?}"))
+        .unwrap_or_else(|error| format!("unavailable: {error}"));
+    Ok(serde_json::json!({
+        "status": "saved", "profile_id": input.profile_id, "currency": input.currency,
+        "notification_permission": notification_permission,
+    }))
+}
+
+#[tauri::command]
+fn save_budget_config(app: AppHandle, input: BudgetConfigInput) -> Result<Value, String> {
+    if input.monthly_cny_minor < 0 || input.daily_cny_minor < 0
+        || !(0..=10_000).contains(&input.warning_ratio_bp)
+    {
+        return Err("budget amounts must be non-negative and warning ratio must be 0..=10000".to_string());
+    }
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms)
+        .map_err(|error| error.to_string())?;
+    db.budget_config_set(
+        input.monthly_cny_minor, input.daily_cny_minor, input.warning_ratio_bp, now_ms,
+    ).map_err(|error| error.to_string())?;
+    let origin_recorded = agent_vitals_runtime::budget::mark_budget_config_user_owned(&data_home).is_ok();
+    // 预算金额均为 0 表示明确停用兼容预算；停用时不应触发 macOS
+    // 通知权限请求。只有用户真正启用至少一个预算周期时才申请权限（REQ-039）。
+    let notification_permission = budget_notifications_enabled(
+        input.monthly_cny_minor, input.daily_cny_minor,
+    ).then(|| app.notification().request_permission()
+        .map(|state| format!("{state:?}"))
+        .unwrap_or_else(|error| format!("unavailable: {error}")));
+    Ok(serde_json::json!({
+        "status": "saved", "updated_at_ms": now_ms,
+        "origin": "user", "origin_recorded": origin_recorded,
+        "notification_permission": notification_permission,
+    }))
+}
+
+fn budget_notifications_enabled(monthly_minor: i64, daily_minor: i64) -> bool {
+    monthly_minor > 0 || daily_minor > 0
+}
+
+#[tauri::command]
+fn snooze_budget_until(until_ms: i64) -> Result<Value, String> {
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    if until_ms <= now_ms {
+        return Err("budget snooze must end in the future".to_string());
+    }
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms)
+        .map_err(|error| error.to_string())?;
+    db.budget_snooze_set(until_ms, now_ms)
+        .map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "snoozed", "until_ms": until_ms }))
+}
+
+fn budget_period_end_ms_for_month(month: &str) -> Option<i64> {
+    let mut parts = month.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month_number: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month_number) {
+        return None;
+    }
+    let (next_year, next_month) = if month_number == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month_number + 1)
+    };
+    // 预算周期按系统统计时区自然月；由 authority query 生成下月一日的
+    // 民历午夜，自动处理 DST 的 23/25 小时自然日。
+    let next_month_key = format!("{next_year:04}-{next_month:02}");
+    agent_vitals_data::authority_query::beijing_month_bounds_ms(&next_month_key)
+        .map(|(start_ms, _)| start_ms)
+}
+
+#[tauri::command]
+fn snooze_budget_current_period() -> Result<Value, String> {
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let month = overview::current_month_beijing();
+    let until_ms = budget_period_end_ms_for_month(&month)
+        .ok_or_else(|| format!("invalid current budget month: {month}"))?;
+    if until_ms <= now_ms {
+        return Err("current budget period has already ended".to_string());
+    }
+    snooze_budget_until(until_ms)
+}
+
+#[tauri::command]
+fn clear_budget_snooze() -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    db.budget_snooze_clear().map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "cleared" }))
+}
+
+/// 保存一条可追溯的计费关系修订。声明当前态与不可变修订在同一个用户动作中
+/// 写入；scope 由前端显式传入，空数组表示只使用宿主/provider/有效期约束。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn save_billing_declaration_revision(
+    revision_id: String,
+    declaration_id: String,
+    supersedes_revision_id: Option<String>,
+    host: String,
+    provider_id: String,
+    relationship_kind: String,
+    subscription_name: Option<String>,
+    amount_minor: Option<i64>,
+    currency: Option<String>,
+    effective_start: String,
+    effective_end: Option<String>,
+    source_candidate_id: Option<String>,
+    evidence_ref: Option<String>,
+    scopes: Vec<BillingScopeInput>,
+) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let scope_refs = scopes.iter()
+        .map(|scope| (scope.scope_kind.as_str(), scope.scope_value.as_str()))
+        .collect::<Vec<_>>();
+    let changed = db.billing_declaration_revision_save(
+        &revision_id, &declaration_id, supersedes_revision_id.as_deref(),
+        &host, &provider_id, &relationship_kind, subscription_name.as_deref(),
+        amount_minor, currency.as_deref(), &effective_start, effective_end.as_deref(),
+        source_candidate_id.as_deref(), evidence_ref.as_deref(), &scope_refs, now_ms,
+    ).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "status": "saved", "revision_id": revision_id,
+        "declaration_id": declaration_id, "changed": changed,
+    }))
+}
+
+/// 读取当前仍有效的计费声明；修订历史由影响预览和重算回执继续追踪。
+#[tauri::command(async)]
+fn billing_declarations() -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable", "declarations": [] });
+    };
+    match db.billing_declarations() {
+        Ok(rows) => serde_json::json!({ "status": "ok", "declarations": rows.into_iter().map(|row| {
+            let (declaration_id, host, provider_id, relationship_kind, subscription_name,
+                amount_minor, currency, effective_start, effective_end, source_candidate_id) = row;
+            let current_revision_id = db.billing_declaration_revisions(&declaration_id)
+                .ok().and_then(|revisions| revisions.last().map(|revision| revision.0.clone()));
+            serde_json::json!({
+                "declaration_id": declaration_id, "host": host, "provider_id": provider_id,
+                "relationship_kind": relationship_kind, "subscription_name": subscription_name,
+                "amount_minor": amount_minor, "currency": currency,
+                "effective_start": effective_start, "effective_end": effective_end,
+                "source_candidate_id": source_candidate_id,
+                "current_revision_id": current_revision_id,
+            })
+        }).collect::<Vec<_>>() }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string(), "declarations": [] }),
+    }
+}
+
+/// 撤销只追加不可变修订，不删除已有影响、历史或证据；聚合查询仅认当前 saved
+/// 修订，因此撤销完成后读取端会立即恢复按量/未定归类。
+#[tauri::command]
+fn revoke_billing_declaration(
+    revision_id: String, declaration_id: String, supersedes_revision_id: String,
+) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let changed = db.billing_declaration_revision_revoke(
+        &revision_id, &declaration_id, &supersedes_revision_id,
+        agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "status": "revoked", "revision_id": revision_id,
+        "declaration_id": declaration_id, "changed": changed,
+    }))
+}
+
+/// 保存前影响预览：只读返回事实/会话/token 范围，不提前改变汇总或账单。
+#[tauri::command]
+fn billing_declaration_impact_preview(
+    revision_id: String, window_start_ms: i64, window_end_ms: i64,
+) -> Value {
+    agent_vitals_runtime::summary::billing_declaration_impact_preview(
+        &revision_id, window_start_ms, window_end_ms,
+    )
+}
+
+/// 对尚未保存的候选做只读影响预览。与修订版预览共用 data 层查询，
+/// 因而不会提前创建声明、接受候选或改变汇总。
+#[tauri::command(async)]
+fn billing_candidate_impact_preview(
+    host: String, provider_id: String, effective_start: String,
+    effective_end: Option<String>, window_start_ms: i64, window_end_ms: i64,
+    scopes: Vec<BillingScopeInput>,
+) -> Value {
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({"status": "unavailable", "reason": "authority database is unavailable"});
+    };
+    let scope_refs = scopes.iter()
+        .map(|scope| (scope.scope_kind.as_str(), scope.scope_value.as_str()))
+        .collect::<Vec<_>>();
+    match db.billing_declaration_impact_preview_for(
+        &host, &provider_id, &effective_start, effective_end.as_deref(),
+        &scope_refs, window_start_ms, window_end_ms,
+    ) {
+        Ok(preview) => serde_json::json!({
+            "status": "ok", "fact_count": preview.fact_count,
+            "session_count": preview.session_count, "total_tokens": preview.total_tokens,
+            "first_event_ts_ms": preview.first_event_ts_ms,
+            "last_event_ts_ms": preview.last_event_ts_ms,
+        }),
+        Err(error) => serde_json::json!({"status": "unavailable", "reason": error.to_string()}),
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn save_host_bill(
+    bill_id: String, host: String, provider_id: String, billing_period: String,
+    billing_basis: String, amount_minor: i64, currency: String, evidence_ref: String,
+) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    db.host_bill_put(
+        &bill_id, &host, &provider_id, &billing_period, &billing_basis,
+        amount_minor, &currency, &evidence_ref, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "saved", "bill_id": bill_id }))
+}
+
+#[tauri::command]
+fn save_host_bills(rows: Vec<HostBillInput>) -> Result<Value, String> {
+    if rows.is_empty() {
+        return Err("no bill rows to import".to_string());
+    }
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    db.with_immediate_txn(|_| {
+        for row in &rows {
+            db.host_bill_put(
+                &row.bill_id, &row.host, &row.provider_id, &row.billing_period,
+                &row.billing_basis, row.amount_minor, &row.currency, &row.evidence_ref, now_ms,
+            )?;
+        }
+        Ok(())
+    }).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "saved", "count": rows.len() }))
+}
+
+#[tauri::command(async)]
+fn host_bills_for_period(billing_period: String) -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable", "bills": [] });
+    };
+    match db.host_bill_details_for_period(&billing_period) {
+        Ok(rows) => serde_json::json!({ "status": "ok", "bills": rows.into_iter().map(|(bill_id, host, provider_id, billing_basis, amount_minor, currency, evidence_ref)| {
+            serde_json::json!({ "bill_id": bill_id, "host": host, "provider_id": provider_id, "billing_basis": billing_basis, "amount_minor": amount_minor, "currency": currency, "evidence_ref": evidence_ref })
+        }).collect::<Vec<_>>() }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string(), "bills": [] }),
+    }
+}
+
+#[tauri::command]
+fn delete_host_bill(bill_id: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let deleted = db.host_bill_delete(
+        &bill_id, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "deleted", "bill_id": bill_id, "deleted": deleted }))
+}
+
+/// 声明保存后创建重算任务；这里只入队，不在 IPC 调用线程执行重算。
+fn spawn_billing_recalculation_worker(path: PathBuf, job_id: String) {
+    std::thread::spawn(move || {
+        let lease_path = path
+            .parent()
+            .map(|parent| parent.join(".billing-recalculation.lock"))
+            .unwrap_or_else(|| PathBuf::from(".billing-recalculation.lock"));
+        let holder = format!("billing-recalculation-{job_id}");
+        let Ok(_lease) = agent_vitals_runtime::lease::acquire_blocking(
+            &lease_path, &holder, 60_000, 60_000,
+        ) else {
+            if let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
+                &path, agent_vitals_runtime::sql_sync::now_ms(),
+            ) {
+                let _ = db.billing_recalculation_set_status(
+                    &job_id, "failed", Some("worker_busy"),
+                    Some("recalculation worker lock was held"),
+                    agent_vitals_runtime::sql_sync::now_ms(),
+                );
+            }
+            return;
+        };
+        let Ok(worker_db) = agent_vitals_data::authority::AuthorityDb::open(
+            &path, agent_vitals_runtime::sql_sync::now_ms(),
+        ) else { return };
+        for attempt in 0..3 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(250 * (1_u64 << (attempt - 1))));
+                let _ = worker_db.billing_recalculation_retry(
+                    &job_id, agent_vitals_runtime::sql_sync::now_ms(),
+                );
+            }
+            match worker_db.billing_recalculation_run(
+                &job_id, agent_vitals_runtime::sql_sync::now_ms(),
+            ) {
+                Ok(true) => return,
+                Ok(false) => {
+                    // false means the job was missing or no longer queued; it is
+                    // never a successful recalculation receipt. A terminal job
+                    // remains untouched by the final failure update below.
+                }
+                Err(_) => {
+                    // The data layer records failures after entering `running`.
+                    // Keep the retry loop here for transient database/worker errors.
+                }
+            }
+        }
+        let _ = worker_db.billing_recalculation_set_status(
+            &job_id, "failed", Some("worker_failed"),
+            Some("recalculation worker failed after retries"),
+            agent_vitals_runtime::sql_sync::now_ms(),
+        );
+    });
+}
+
+fn recover_billing_recalculations(path: PathBuf) {
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ) else { return };
+    let queued = db.billing_recalculation_recover(
+        agent_vitals_runtime::sql_sync::now_ms(),
+    ).unwrap_or_default();
+    drop(db);
+    for job_id in queued {
+        spawn_billing_recalculation_worker(path.clone(), job_id);
+    }
+}
+
+#[tauri::command]
+fn enqueue_billing_recalculation(
+    job_id: String, declaration_id: String, revision_id: String,
+) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let changed = db.billing_recalculation_enqueue(
+        &job_id, &declaration_id, &revision_id, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    drop(db);
+    if changed {
+        spawn_billing_recalculation_worker(path.clone(), job_id.clone());
+    }
+    Ok(serde_json::json!({ "status": "queued", "job_id": job_id, "changed": changed }))
+}
+
+/// 失败/取消任务的显式重试入口；重试仍在后台执行，不阻塞 IPC 调用线程。
+#[tauri::command]
+fn retry_billing_recalculation(job_id: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &path, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    let changed = db.billing_recalculation_retry(
+        &job_id, agent_vitals_runtime::sql_sync::now_ms(),
+    ).map_err(|error| error.to_string())?;
+    drop(db);
+    if !changed {
+        return Err("only failed or cancelled recalculation jobs can be retried".to_string());
+    }
+    spawn_billing_recalculation_worker(path, job_id.clone());
+    Ok(serde_json::json!({ "status": "queued", "job_id": job_id, "changed": true }))
+}
+
+/// 查询重算任务回执；未找到和数据库不可用均返回可识别的业务错误。
+#[tauri::command]
+fn billing_recalculation_job_status(job_id: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+        .map_err(|error| error.to_string())?;
+    let Some((job_id, declaration_id, revision_id, status, requested_at_ms, started_at_ms,
+        completed_at_ms, error_code, error_detail)) = db.billing_recalculation_job(&job_id)
+        .map_err(|error| error.to_string())? else {
+        return Err("unknown recalculation job".to_string());
+    };
+    Ok(serde_json::json!({
+        "status": status, "job_id": job_id, "declaration_id": declaration_id,
+        "revision_id": revision_id, "requested_at_ms": requested_at_ms,
+        "started_at_ms": started_at_ms, "completed_at_ms": completed_at_ms,
+        "error_code": error_code, "error_detail": error_detail,
+    }))
+}
+
+/// 查询重算待处理列表；用于工作台重启后展示「重算待重试」而不丢失旧结果。
+#[tauri::command(async)]
+fn billing_recalculation_jobs() -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+        .map_err(|error| error.to_string())?;
+    let jobs = db.billing_recalculation_jobs_needing_attention()
+        .map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "status": "ok",
+        "jobs": jobs.into_iter().map(|(job_id, declaration_id, revision_id, status,
+            requested_at_ms, started_at_ms, completed_at_ms, error_code, error_detail)| {
+            serde_json::json!({
+                "job_id": job_id, "declaration_id": declaration_id, "revision_id": revision_id,
+                "status": status, "requested_at_ms": requested_at_ms, "started_at_ms": started_at_ms,
+                "completed_at_ms": completed_at_ms, "error_code": error_code, "error_detail": error_detail,
+            })
+        }).collect::<Vec<_>>()
+    }))
+}
+
+/// 工作台「数据源」页的独立契约。会话搜索只回答时间窗内的会话，不能再被
+/// 借来承载扫描健康；这里从 SQL authority 的 source_files / usage_facts 读取
+/// 每个已接线宿主的扫描、导入和失败范围。宿主集合复用 ingest registry，前端
+/// 不再硬编码两个卡片。路径只以 source_id/path_hash 留在库内，本 DTO 不泄露。
+#[tauri::command(async)]
+fn data_source_status() -> Value {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
         return serde_json::json!({
             "status": "unavailable",
-            "reason": "authority database is missing or unreadable"
+            "reason": "authority database is missing or unreadable",
+            "sources": []
         });
     };
-    let enabled = agent_vitals_runtime::sql_authority::is_enabled(&data_home);
-    serde_json::json!({
-        "status": "ok",
-        "data": agent_vitals_runtime::mcp::data_status_report(db.conn(), true, enabled)
-    })
+    let mut report = agent_vitals_runtime::mcp::source_status_report(db.conn()).unwrap_or_else(|reason| {
+        serde_json::json!({ "status": "unavailable", "reason": reason, "sources": [] })
+    });
+    let excluded_hosts = match agent_vitals_runtime::source_controls::excluded_hosts(&data_home) {
+        Ok(hosts) => hosts,
+        Err(error) => return serde_json::json!({ "status": "unavailable", "reason": error, "sources": [] }),
+    };
+    if let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) {
+        for source in sources {
+            let host = source.get("host").and_then(Value::as_str).unwrap_or("");
+            if excluded_hosts.contains(host) {
+                source["connection_state"] = Value::String("excluded".into());
+                source["recovery_action"] = serde_json::json!({
+                    "kind": "include_source", "label": "恢复读取"
+                });
+            }
+        }
+    }
+    merge_source_sync_failure(&mut report, &overview::read_overview().sync);
+    if matches!(overview::sync_is_paused(), Ok(true)) {
+        if let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) {
+            for source in sources {
+                if source.get("connection_state").and_then(Value::as_str) == Some("excluded") { continue; }
+                source["connection_state"] = Value::String("paused".into());
+                source["recovery_action"] = serde_json::json!({
+                    "kind": "resume_sync", "label": "恢复同步"
+                });
+            }
+        }
+    }
+    report
+}
+
+#[tauri::command(async)]
+fn sync_pause_state() -> Value {
+    match overview::sync_is_paused() {
+        Ok(paused) => serde_json::json!({ "status": "ok", "paused": paused }),
+        Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
+    }
+}
+
+#[tauri::command]
+fn set_sync_paused(paused: bool) -> Result<Value, String> {
+    overview::save_sync_paused(paused)?;
+    Ok(serde_json::json!({ "status": "saved", "paused": paused }))
+}
+
+/// 扫描器在发现目录权限/解析失败时可能尚未写出 source_files 行；最近同步状态
+/// 是这类失败的生产证据。把能明确归属的宿主标为需要处理；无法归属的 facts
+/// 同步失败影响全部宿主，不能伪装成三个“已连接”。
+fn merge_source_sync_failure(report: &mut Value, sync: &SyncStatus) {
+    if sync.ok || sync.stage == "never" { return; }
+    let message = sync.message.to_lowercase();
+    let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) else { return };
+    let explicitly_scoped = ["claude", "codex", "dsh", "deepseek"]
+        .iter().any(|marker| message.contains(marker));
+    for source in sources {
+        if source.get("connection_state").and_then(Value::as_str) == Some("excluded") { continue; }
+        let host = source.get("host").and_then(Value::as_str).unwrap_or("");
+        let affected = if explicitly_scoped {
+            (host == "claude-code" && message.contains("claude"))
+                || (host == "codex" && message.contains("codex"))
+                || (host == "dsh" && (message.contains("dsh") || message.contains("deepseek")))
+        } else { true };
+        if !affected { continue; }
+        source["connection_state"] = Value::String("needs_attention".into());
+        source["authorization"] = Value::String("unknown_or_failed".into());
+        let error_code = if message.contains("permission") || message.contains("denied") {
+            "permission_denied"
+        } else if message.contains("disk full") || message.contains("no space") {
+            "disk_full"
+        } else if message.contains("parse") || message.contains("json") || message.contains("malformed") {
+            "source_parse_failed"
+        } else {
+            "source_read_failed"
+        };
+        let prior_failed = source["failed_scope"]["sources"].as_u64().unwrap_or(0);
+        source["failed_scope"]["sources"] = serde_json::json!(prior_failed.max(1));
+        let mut error_codes = source["failed_scope"]["error_codes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if !error_codes.iter().any(|code| code.as_str() == Some(error_code)) {
+            error_codes.push(Value::String(error_code.into()));
+        }
+        source["failed_scope"]["error_codes"] = Value::Array(error_codes);
+        source["failed_scope"]["sync"] = serde_json::json!({
+            "stage": sync.stage, "message": sync.message
+        });
+        source["recovery_action"] = serde_json::json!({
+            "kind": "retry_sync", "label": "重新同步"
+        });
+    }
 }
 
 
@@ -1296,7 +2775,7 @@ fn data_status() -> Value {
 /// CLI `data coverage` 是**同一份冻结 DTO**（`data_contract.rs::to_json`），
 /// 工作台总览/日历两页的诚实字段（freshness/coverage/excluded_hosts）都从
 /// 这里取，不许前端自己从金额反推"有没有数据"。
-#[tauri::command]
+#[tauri::command(async)]
 fn data_monthly_summary(month: String) -> Value {
     use agent_vitals_data::repository::{MonthlySummaryQuery, SummaryRepository};
     let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
@@ -1305,18 +2784,140 @@ fn data_monthly_summary(month: String) -> Value {
 
 /// v0.9 Stage 0.6 单日版（北京日 YYYY-MM-DD）。与 `data_monthly_summary`
 /// 同一条 trait 路径、同一份 DTO 契约（同为 SQL 权威库读源）。
-#[tauri::command]
+#[tauri::command(async)]
 fn data_daily_summary(date: String) -> Value {
     use agent_vitals_data::repository::{DailySummaryQuery, SummaryRepository};
     let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
     repo.daily_summary(&DailySummaryQuery { date }).to_json()
 }
 
+/// Claude Pro 额度提醒的开关（默认关）。
+///
+/// **为什么自带开关**：系统通知权限必须由一次用户动作触发申请；额度提醒与预算
+/// 提醒是两件事，从不用预算的用户不该因此永远收不到窗口提醒。读不出开关时一律
+/// 按"关"处理（fail-closed）。
+#[tauri::command]
+fn quota_reminder_config() -> Value {
+    let enabled = agent_vitals_runtime::quota_reminder::enabled_or_default(&overview::data_home());
+    serde_json::json!({ "status": "ok", "enabled": enabled })
+}
+
+/// 写入开关；**打开的那一刻才申请系统通知权限**（REQ-039：权限在用户启用提醒时申请）。
+#[tauri::command]
+fn save_quota_reminder_config(app: AppHandle, enabled: bool) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let notification_permission = enabled.then(|| {
+        app.notification()
+            .request_permission()
+            .map(|state| format!("{state:?}"))
+            .unwrap_or_else(|error| format!("unavailable: {error}"))
+    });
+    agent_vitals_runtime::quota_reminder::set_enabled(&data_home, enabled)?;
+    Ok(serde_json::json!({
+        "status": "saved",
+        "enabled": enabled,
+        "notification_permission": notification_permission,
+    }))
+}
+
+/// 用户补的价卡（`state/pricing-overrides.json`）。
+///
+/// **为什么有这一层**：价目表 `assets/pricing.json` 是 `include_str!` 编进二进制的，
+/// 运行时改不了；而"厂商出了新型号、价目表里还没有"是必然反复发生的事
+/// （2026-09-14 的 `deepseek/deepseek-v4.1-flash`）。这一层让用户能自己补一张卡，
+/// 把"算不出来"变成"按他填的价算得出来"。
+#[tauri::command]
+fn price_cards() -> Value {
+    let data_home = overview::data_home();
+    serde_json::json!({
+        "status": "ok",
+        "cards": agent_vitals_runtime::price_overrides::cards(&data_home),
+    })
+}
+
+/// 写入/替换一张用户补的价卡。三个维度（未命中输入/命中输入/输出）各两档峰谷，
+/// **必须齐全**——半张卡会让计价按缺档静默算出一个看似正常的错数字。
+#[tauri::command]
+fn save_price_card(input: PriceCardInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let card = serde_json::json!({
+        "input_uncached": input.input_uncached,
+        "input_cached": input.input_cached,
+        "output": input.output,
+    });
+    agent_vitals_runtime::price_overrides::save_card(
+        &data_home, &input.provider_id, &input.model_id, &card,
+    )?;
+    Ok(serde_json::json!({
+        "status": "saved",
+        "provider_id": input.provider_id,
+        "model_id": input.model_id,
+    }))
+}
+
+/// 用户声明的**型号归属**（"这个型号算哪个服务商的账"）。
+///
+/// **与补价卡是两件事，且有先后**：`billing_route_of` 只读价目表里的
+/// `catalog_2026_09.billing_modes`（模型名前缀 → 服务商），公共目录只声明了少数
+/// 几条。归属没定 → 整批用量 `billing-route-unknown`（**不是"怎么付"的问题，是
+/// "算谁的"**，所以计费声明解决不了）；归属定了但没价卡 → `no-price-card`。
+/// 声明归属后状态会前进到缺价卡，那时才轮到补价卡。
+#[tauri::command]
+fn price_routes() -> Value {
+    let data_home = overview::data_home();
+    serde_json::json!({
+        "status": "ok",
+        "routes": agent_vitals_runtime::price_overrides::routes(&data_home),
+    })
+}
+
+#[tauri::command]
+fn save_price_route(input: PriceRouteInput) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    agent_vitals_runtime::price_overrides::save_route(
+        &data_home, &input.model_prefix, &input.provider_id, &input.mode,
+    )?;
+    Ok(serde_json::json!({
+        "status": "saved",
+        "model_prefix": input.model_prefix,
+        "provider_id": input.provider_id,
+    }))
+}
+
+#[tauri::command]
+fn delete_price_route(model_prefix: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    agent_vitals_runtime::price_overrides::remove_route(&data_home, &model_prefix)?;
+    Ok(serde_json::json!({ "status": "removed" }))
+}
+
+#[tauri::command]
+fn delete_price_card(provider_id: String, model_id: String) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    agent_vitals_runtime::price_overrides::remove_card(&data_home, &provider_id, &model_id)?;
+    Ok(serde_json::json!({ "status": "removed" }))
+}
+
+/// 决策卡「现在该用谁」的 Claude Pro 窗口状态（2026-09-14）。
+///
+/// 与 Codex 那行**不等价**：Claude 的本地日志里没有正向余量（42/42 条
+/// `quotaLimits` 全是 `status:"rejected"`，无 `used_percent`），所以只可能给出
+/// `unknown` 或 `exhausted`（+ 重置时刻），**永远不会有"剩余 N%"**——
+/// `ROUTE_UNIT_COST_DECISION_SPEC` §8.3.2 明令不得显示百分比。
+#[tauri::command(async)]
+fn data_claude_quota() -> Option<Value> {
+    // 窗口状态由同步管线扫 ~/.claude 的 quotaLimits 落库，这里只读快照 ——
+    // 读面不现扫（与 data_codex_quota 同一条纪律）。`now` 在这里取一次并注入
+    // 状态机，保证卡片/待处理/通知拿到同一个"现在"。
+    let now_secs = agent_vitals_runtime::sql_sync::now_ms() / 1_000;
+    agent_vitals_runtime::summary::claude_quota_status(now_secs)
+}
+
 /// 决策卡「现在该用谁」的 Codex 窗口余量（v0.9 Stage D）。plan 是"当前
 /// 状态"的单快照、不按日期分桶——独立命令而不是塞进月/日 summary，语义
 /// 才不混。无 rollout / 无 plan 事件 → null（无 ChatGPT 订阅证据，不得编
 /// 造余量）。
-#[tauri::command]
+#[tauri::command(async)]
 fn data_codex_quota() -> Option<Value> {
     // codex rollout 根在 ~/.codex，不在数据根——解析复用 runtime 的 codex_home
     // （HOME → USERPROFILE → 空串，审查 #4：手写 HOME-only 在 Windows 上静默假
@@ -1329,7 +2930,7 @@ fn data_codex_quota() -> Option<Value> {
 /// Token 日历的逐日跨宿主数据（v0.9 Stage D——此前日历只画 DSH 日轴，
 /// DSH 零用量月份让 claude/codex 的真实用量在日历上不可见）。每天三宿主
 /// 各自 token + 耗费，钱不跨宿主不跨币合并（口径各异，格子副行分币并列）。
-#[tauri::command]
+#[tauri::command(async)]
 fn read_calendar_month(month: String) -> Value {
     agent_vitals_runtime::summary::calendar_month(
         &month,
@@ -1341,7 +2942,7 @@ fn read_calendar_month(month: String) -> Value {
 /// 工作台。来源矩阵见 `summary::hourly_distribution`：codex=fold 全量、
 /// dsh=今日 today-json / 历史日 facts-index、claude=facts-index（该日
 /// 会话被 ingest 过才有——来源标注让部分覆盖在 UI 上可见）。
-#[tauri::command]
+#[tauri::command(async)]
 fn read_hourly_distribution(date: String) -> Value {
     agent_vitals_runtime::summary::hourly_distribution(
         &date,
@@ -1349,11 +2950,29 @@ fn read_hourly_distribution(date: String) -> Value {
     )
 }
 
-/// 工作台「立即同步」按钮：受控 tick 一次（与托盘菜单同一路径）。立即返回，不
-/// 阻塞 IPC；工作台自己在同步结束后重拉 overview。
+/// 工作台「立即同步」按钮：返回本次请求的单调 ID。后台完成后由
+/// sync_request_status 精确确认，不再用秒级时间戳猜测是否是本次同步。
 #[tauri::command]
-fn trigger_sync(app: AppHandle) {
-    sync_now(&app);
+fn trigger_sync(app: AppHandle) -> String {
+    let id = format!("sync-{}", SYNC_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed));
+    {
+        let requests = app.state::<SyncRequests>();
+        let mut requests = requests.0.lock().unwrap_or_else(|e| e.into_inner());
+        if requests.len() > 32 { requests.retain(|_, completed| !*completed); }
+        requests.insert(id.clone(), false);
+    }
+    sync_now_tracked(&app, Some(id.clone()));
+    id
+}
+
+#[tauri::command]
+fn sync_request_status(app: AppHandle, request_id: String) -> Value {
+    let requests = app.state::<SyncRequests>();
+    let requests = requests.0.lock().unwrap_or_else(|e| e.into_inner());
+    match requests.get(&request_id) {
+        Some(completed) => serde_json::json!({ "request_id": request_id, "completed": completed }),
+        None => serde_json::json!({ "request_id": request_id, "error": "unknown_request" }),
+    }
 }
 
 /// v0.10.0 Traces tab 的数据面（spec §7 门槛 3 的 Tauri IPC 消费面）：薄转发到
@@ -1463,7 +3082,9 @@ fn capture_workbench_screenshot(app: AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(SyncLock(Mutex::new(())))
+        .manage(SyncRequests(Mutex::new(std::collections::BTreeMap::new())))
         // fold 事件去抖状态：tick/手动线程共享（见 FoldEventDebounce 注释）。
         .manage(FoldEventDebounce(Mutex::new(None)))
         // 菜单信息行导航目标：菜单点击 → 工作台（见 NavTarget 注释）。
@@ -1490,55 +3111,125 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_overview,
             data_status,
+            billing_import_candidates,
+            resolve_billing_import_candidate,
+            save_billing_declaration_revision,
+            billing_declarations,
+            revoke_billing_declaration,
+            billing_declaration_impact_preview,
+            billing_candidate_impact_preview,
+            custom_source_roots,
+            pick_custom_source_root,
+            add_custom_source_root,
+            remove_custom_source_root,
+            source_host_controls,
+            source_read_locations,
+            set_source_host_excluded,
+            delete_imported_source_data,
+            retention_config,
+            save_retention_config,
+            statistics_timezone_config,
+            save_statistics_timezone_config,
+            public_pricing_catalog_status,
+            save_public_pricing_catalog_policy,
+            update_public_pricing_catalog,
+            restore_authority_backup,
+            export_diagnostic_package,
+            about_diagnostics,
+            check_for_updates,
+            open_trusted_releases_page,
+            budget_config,
+            budget_profiles_status,
+            save_budget_profile,
+            save_budget_config,
+            snooze_budget_until,
+            snooze_budget_current_period,
+            clear_budget_snooze,
+            save_host_bill,
+            save_host_bills,
+            host_bills_for_period,
+            delete_host_bill,
+            enqueue_billing_recalculation,
+            retry_billing_recalculation,
+            billing_recalculation_job_status,
+            billing_recalculation_jobs,
+            sync_pause_state,
+            set_sync_paused,
+            data_source_status,
             data_monthly_summary,
             data_daily_summary,
             data_codex_quota,
+            data_claude_quota,
+            quota_reminder_config,
+            price_cards,
+            save_price_card,
+            delete_price_card,
+            price_routes,
+            save_price_route,
+            delete_price_route,
+            save_quota_reminder_config,
             read_calendar_month,
             read_hourly_distribution,
             trigger_sync,
+            sync_request_status,
             session_trace,
             store::sessions_list,
             store::sessions_read,
             store::sessions_findings,
             store::sessions_issues,
+            store::issue_transition,
+            store::issue_groups_list,
+            store::issue_group_instances,
+            store::issue_instance_read,
             peek_nav_target,
             clear_nav_target,
             focus_session,
             peek_focus_target,
             clear_focus_target,
+            focus_budget_from_notification,
             capture_workbench_screenshot,
         ])
         .setup(|app| {
-            // 菜单栏工具:必须 .accessory,否则 macOS 把它当普通 App 常驻 Dock
-            // (Info.plist 无 LSUIElement → 缺省 .regular)。skipTaskbar/visible:false
-            // 只藏窗口,藏不住进程的 Dock 图标。show_workbench 已负责 show+set_focus,
-            // accessory 下窗口照常成为 key。
+            if let Err(error) = agent_vitals_runtime::statistics_timezone::apply(
+                &overview::data_home(),
+            ) {
+                eprintln!("statistics timezone unavailable: {error}");
+            }
+            start_public_pricing_catalog_tick();
+            // 菜单栏工具：必须在代码里显式 `.accessory`，光靠 Info.plist 的 LSUIElement
+            // 不够——tao 的事件循环启动时会显式 setActivationPolicy(Regular) 把 plist
+            // 值盖掉（2026-09-14：删掉这行改用 plist 后，release 包 open 起来鸟头落进
+            // Dock、状态栏项不出现）。skipTaskbar/visible:false 只藏窗口，藏不住进程
+            // 的 Dock 图标。show_workbench 已负责 show+set_focus，accessory 下窗口照常成为 key。
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            recover_billing_recalculations(
+                agent_vitals_data::authority::default_authority_path(&overview::data_home()),
+            );
+            let authority_path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+            match agent_vitals_data::authority::AuthorityDb::open(
+                &authority_path,
+                agent_vitals_runtime::sql_sync::now_ms(),
+            ) {
+                Ok(db) => {
+                    if let Err(error) = agent_vitals_data::issues::repair_issue_timestamp_units(db.conn()) {
+                        eprintln!("issue timestamp migration failed: {error}");
+                    }
+                }
+                Err(error) => eprintln!("issue timestamp migration database unavailable: {error}"),
+            }
             let ov = overview::read_overview();
             let menu = build_menu(app.handle(), &ov)?;
-            // 左右键都弹菜单（今日/本月/预算/打开工作台/立即同步/退出）——统一到
-            // 大多数状态栏图标的通用手势，不再区分"左键菜单/右键面板"。这是
-            // macOS 的缺省行为本身：`.menu(&menu)` 挂上之后两个键天然都弹菜单，
-            // 之前是特意用 `with_inner_tray_icon` 关掉右键菜单、改绑
-            // `on_tray_icon_event` 的右键分支去做 `toggle_window`，现在两处都删掉，
-            // 直接吃缺省行为，不再自定义（2026-09-01 用户反馈"很多图标左右键都是
-            // 弹菜单，我们也一样"）。
             TrayIconBuilder::with_id("main")
                 .icon(tray_template_icon()?)
                 .icon_as_template(true)
+                .title(today_title(&ov))
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| {
                     let id = event.id().as_ref();
                     match id {
                         "workbench" => show_workbench(app),
-                        // 「立即同步」不是重读本地 state，而是受控 tick：discover →
-                        // oneline 折账 → 刷新托盘（review fix 1）。
                         "refresh" => sync_now(app),
-                        // 深链优先（spec §7.2）：session:/host: id → 映射
-                        // WorkbenchTarget → focus_session_target（写目标 + 事件 +
-                        // show，双通路）。映射失败（未知 id/禁用 id/回传不了的
-                        // session_key）回退信息行 tab 导航（tab_for_menu_id 钉住）。
                         _ => {
                             let hosts = app
                                 .state::<HostsCache>()
@@ -1555,12 +3246,11 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-            // 初始标题：托盘一亮就带今日消耗，不用等第一个 tick（线程刚 spawn、
-            // 首轮 sync 前有窗口期）。
-            if let Some(t) = app.tray_by_id("main") {
-                let _ = t.set_title(Some(today_title(&ov)));
-            }
             start_refresh_tick(app.handle().clone());
+            let args: Vec<String> = std::env::args().collect();
+            if should_show_workbench_on_start(&ov.sync, &args) {
+                show_workbench(app.handle());
+            }
             // SQL 权威库后台预热：app 启动就 spawn 一轮 data-status（sub-second）
             // 让权威库 SQLite handle + page cache 在用户点会话/findings tab 之前
             // 就绪，避免首点 PRAGMA / planner 抖动（见 warm_authority_db 函数注释）。
@@ -1575,18 +3265,95 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn independent_sync_stages_continue_after_source_failure() {
+        let called = std::cell::RefCell::new(Vec::new());
+        let (status, ready) = finish_sync_stages(
+            SyncStatus::fail("discover", "DSH unavailable".into()),
+            || { called.borrow_mut().push("claude"); Some("permission denied".into()) },
+            || { called.borrow_mut().push("facts"); None },
+        );
+        assert_eq!(*called.borrow(), vec!["claude", "facts"]);
+        assert!(!status.ok);
+        assert_eq!(status.stage, "partial");
+        assert!(status.message.contains("DSH unavailable"));
+        assert!(status.message.contains("permission denied"));
+        assert!(ready);
+    }
+
+    #[test]
+    fn first_value_workspace_only_opens_before_any_sync_receipt() {
+        assert!(should_show_first_value_workspace(&SyncStatus::fail("never", "尚未同步".into())));
+        assert!(!should_show_first_value_workspace(&SyncStatus::ok("discover", "no records".into())));
+        assert!(!should_show_first_value_workspace(&SyncStatus::fail("partial", "disk full".into())));
+    }
+
+    #[test]
+    fn independent_sync_stages_retain_facts_failure() {
+        let (status, ready) = finish_sync_stages(
+            SyncStatus::ok("discover", "no DSH records".into()),
+            || None,
+            || Some("disk full".into()),
+        );
+        assert!(!status.ok);
+        assert!(status.message.contains("sync-facts: disk full"));
+        assert!(!ready);
+    }
+
+    #[test]
+    fn independent_sync_stages_preserve_success_status() {
+        let (status, ready) = finish_sync_stages(
+            SyncStatus::ok("fold", "imported".into()), || None, || None,
+        );
+        assert!(status.ok);
+        assert_eq!(status.stage, "fold");
+        assert!(ready);
+    }
+
+    #[test]
+    fn source_status_applies_real_scanner_failure_only_to_named_host() {
+        let mut report = serde_json::json!({ "sources": [
+            { "host": "claude-code", "connection_state": "connected", "failed_scope": {} },
+            { "host": "codex", "connection_state": "connected", "failed_scope": {} },
+            { "host": "dsh", "connection_state": "not_detected", "failed_scope": {} }
+        ]});
+        let sync = SyncStatus::fail("partial", "DSH permission denied".into());
+        merge_source_sync_failure(&mut report, &sync);
+        assert_eq!(report["sources"][0]["connection_state"], "connected");
+        assert_eq!(report["sources"][1]["connection_state"], "connected");
+        assert_eq!(report["sources"][2]["connection_state"], "needs_attention");
+        assert_eq!(report["sources"][2]["failed_scope"]["sync"]["stage"], "partial");
+        assert_eq!(report["sources"][2]["failed_scope"]["sources"], 1);
+        assert_eq!(report["sources"][2]["failed_scope"]["error_codes"], serde_json::json!(["permission_denied"]));
+    }
+
+    #[test]
+    fn source_status_applies_unscoped_facts_failure_to_all_hosts() {
+        let mut report = serde_json::json!({ "sources": [
+            { "host": "claude-code", "connection_state": "connected", "failed_scope": {} },
+            { "host": "codex", "connection_state": "connected", "failed_scope": {} },
+            { "host": "dsh", "connection_state": "connected", "failed_scope": {} }
+        ]});
+        merge_source_sync_failure(&mut report, &SyncStatus::fail("facts", "disk full".into()));
+        assert!(report["sources"].as_array().unwrap().iter()
+            .all(|s| s["connection_state"] == "needs_attention"));
+    }
+
     /// Stage 0.6 的 Data Query API 面是薄转发，但"薄"也要钉住：DTO 与 CLI
-    /// `data coverage` 同一份 `to_json()`（三宿主 by_host + workbuddy 永久
-    /// excluded + coverage 3/3），托盘侧不许长出第二种形状。真机结构性断言
+    /// `data coverage` 同一份 `to_json()`（四宿主 by_host——WorkBuddy 自 E4b 起
+    /// 接线，只有 token 没有金额，见 docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5——
+    /// excluded 空 + coverage 4/4），托盘侧不许长出第二种形状。真机结构性断言
     /// （金额值随机器变，形状不随）。
     #[test]
     fn data_monthly_summary_dto_matches_the_frozen_contract_shape() {
         let d = data_monthly_summary(overview::current_month_beijing());
         let keys: Vec<&String> = d["by_host"].as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["claude-code", "codex", "dsh"]);
-        assert_eq!(d["excluded_hosts"], serde_json::json!(["workbuddy"]));
-        assert_eq!(d["coverage"]["measured_fields"], 3);
-        assert_eq!(d["coverage"]["total_fields"], 3);
+        assert_eq!(keys, ["claude-code", "codex", "dsh", "workbuddy"]);
+        assert_eq!(d["excluded_hosts"], serde_json::json!([]));
+        assert_eq!(d["coverage"]["measured_fields"], 4);
+        assert_eq!(d["coverage"]["total_fields"], 4);
+        // WorkBuddy 行永远没有金额（三轨请求级不可判，§2.1）。
+        assert_eq!(d["by_host"]["workbuddy"]["amounts_by_basis"], serde_json::json!({}));
         // 冻结契约的三条不变式之一在托盘侧同样成立：excluded 与 by_host 不相交。
         for host in d["excluded_hosts"].as_array().unwrap() {
             assert!(d["by_host"].get(host.as_str().unwrap()).is_none());
@@ -1666,8 +3433,9 @@ mod tests {
             today: None,
             month: serde_json::json!({"total": 0.0}),
             days: vec![],
-            budget_monthly_cny: 600.0,
+            budget_monthly_cny: Some(600.0),
             budget,
+            budget_profiles: None,
             recent: overview::RecentSession::default(),
             sync: SyncStatus::default(),
             hosts: vec![
@@ -1693,6 +3461,13 @@ mod tests {
     fn today_title_renders_tokens_cost_or_honest_dash() {
         let mut ov = ov_with(overview::BudgetAlert::default());
         assert_eq!(today_title(&ov), "今日 —", "两宿主都无今日账不得臆造 0");
+        // 有 token、没有可报的钱 → token 照常显示，**只有钱那格**是「—」。
+        // 原先这条整段退化成「今日 —」：既丢了已测量的 token，又让菜单栏那一项
+        // 短到在拥挤的状态区里认不出来（2026-09-14 用户反馈"状态栏看不到"）。
+        let mut tokens_only = ov_with(overview::BudgetAlert::default());
+        tokens_only.claude_today_tokens = Some(329_700_000);
+        assert_eq!(today_title(&tokens_only), "今日 329.7M · —",
+            "没钱但有用量时，已测量的 token 不能被一起丢掉");
         ov.today = Some(serde_json::json!({"total": 12.34, "peak_total": 0.0, "tokens": 1398214}));
         assert_eq!(today_title(&ov), "今日 1.4M · ¥12.34");
         // 真机那天（2026-09-02）：DSH 空转 + Claude deepseek 全在账 → 标题必须给
@@ -2257,6 +4032,34 @@ mod tests {
         assert_eq!(budget_status_text_at(&ov, FIXTURE_AT_SECS), "✓ 预算：¥12.79 / ¥600");
     }
 
+    #[test]
+    fn budget_line_lists_profiles_without_combining_currencies() {
+        let mut ov = ov_with(overview::BudgetAlert::default());
+        ov.budget_profiles = Some(serde_json::json!({
+            "profiles": [
+                {"profile_id": "estimate", "currency": "CNY", "level": "warn", "spent_minor": 8100, "monthly_minor": 10000},
+                {"profile_id": "confirmed", "currency": "USD", "level": "ok", "spent_minor": 2500, "monthly_minor": 10000}
+            ]
+        }));
+        assert_eq!(budget_status_text_at(&ov, FIXTURE_AT_SECS), "预算：估算 CNY 接近 81.00/100.00；已确认 USD 正常 25.00/100.00");
+    }
+
+    #[test]
+    fn budget_line_no_budget_never_prints_a_default_amount_or_percent() {
+        let budget = overview::BudgetAlert {
+            source: "sql".into(),
+            level: Some("no_budget".into()),
+            month_cost: Some(42.0),
+            ..Default::default()
+        };
+        let mut ov = ov_with(budget);
+        ov.budget_monthly_cny = None;
+        let line = budget_status_text_at(&ov, 0);
+        assert_eq!(line, "预算：未设置（成本仍按实际口径统计）");
+        assert!(!line.contains("600"));
+        assert!(!line.contains('%'));
+    }
+
     /// AGENT_VITALS_BIN 优先于自身目录与 PATH（env 指向的文件存在就用它）。
     #[test]
     fn resolve_binary_prefers_env_override() {
@@ -2387,6 +4190,19 @@ mod tests {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
     }
 
+    #[test]
+    fn budget_period_end_uses_next_beijing_month_boundary() {
+        assert_eq!(
+            budget_period_end_ms_for_month("2026-09"),
+            Some((days_from_civil(2026, 10, 1) * 86_400 - 8 * 3_600) * 1_000)
+        );
+        assert_eq!(
+            budget_period_end_ms_for_month("2026-12"),
+            Some((days_from_civil(2027, 1, 1) * 86_400 - 8 * 3_600) * 1_000)
+        );
+        assert_eq!(budget_period_end_ms_for_month("2026-13"), None);
+    }
+
     /// RFC3339 解析钉住 alert.json 真机夹具：`2026-08-30T07:04:38.548588+00:00`
     /// = 1788073478 秒。同一瞬间用 Z / +08:00 / -05:00 三种写法必须解析出同一秒——
     /// 时区换算不对，freshness 判据会跟着错。
@@ -2496,6 +4312,13 @@ mod tests {
         assert!(!should_emit_fold_event(&SyncStatus::ok("discover", "无未折 DSH 会话".into())));
         assert!(!should_emit_fold_event(&SyncStatus::fail("fold", "oneline 失败".into())));
         assert!(!should_emit_fold_event(&SyncStatus::default()));
+    }
+
+    #[test]
+    fn explicit_show_workbench_flag_overrides_existing_sync_receipt() {
+        let ready = SyncStatus::ok("discover", "ready".into());
+        assert!(!should_show_workbench_on_start(&ready, &[]));
+        assert!(should_show_workbench_on_start(&ready, &["--show-workbench".into()]));
     }
 
     /// spec §9.2 #11 深链 slot 语义：peek 连续读两次返回同一目标（持久、
@@ -2636,5 +4459,62 @@ mod tests {
         );
         assert_eq!(workbench_target_for_menu_id("session:none:codex", &hosts), None);
         assert_eq!(workbench_target_for_menu_id("session:stale:dsh", &hosts), None);
+    }
+
+    #[test]
+    fn disabled_budget_does_not_enable_notification_permission_flow() {
+        assert!(!budget_notifications_enabled(0, 0));
+        assert!(budget_notifications_enabled(1, 0));
+        assert!(budget_notifications_enabled(0, 1));
+    }
+
+    #[test]
+    fn authority_backup_restore_validates_and_preserves_current_file() {
+        let root = std::env::temp_dir().join(format!(
+            "sv-menubar-restore-test-{}-{}",
+            std::process::id(),
+            agent_vitals_runtime::sql_sync::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let backup = root.join("backup.sqlite");
+        let target = root.join("authority.sqlite");
+        drop(agent_vitals_data::authority::AuthorityDb::open(&backup, 1).unwrap());
+        std::fs::write(&target, b"old-current").unwrap();
+
+        let preserved = restore_authority_backup_file(&backup, &target, 42).unwrap();
+        let preserved_path = root.join("authority.sqlite.pre-restore-42.bak");
+        assert_eq!(preserved.as_deref(), Some(preserved_path.as_path()));
+        assert_eq!(std::fs::read(preserved.unwrap()).unwrap(), b"old-current");
+        assert!(agent_vitals_data::authority::AuthorityDb::open_readonly(&target).is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_authority_backup_does_not_replace_current_file() {
+        let root = std::env::temp_dir().join(format!(
+            "sv-menubar-invalid-restore-test-{}-{}",
+            std::process::id(),
+            agent_vitals_runtime::sql_sync::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let backup = root.join("bad.sqlite");
+        let target = root.join("authority.sqlite");
+        std::fs::write(&backup, b"not-a-database").unwrap();
+        std::fs::write(&target, b"keep-current").unwrap();
+
+        assert!(restore_authority_backup_file(&backup, &target, 43).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep-current");
+        assert!(!root.join("authority.sqlite.pre-restore-43.bak").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn latest_release_parser_accepts_only_app_tags() {
+        assert_eq!(
+            parse_latest_release_tag(&serde_json::json!({"tag_name": "app-v1.0.0"})).unwrap(),
+            "app-v1.0.0"
+        );
+        assert!(parse_latest_release_tag(&serde_json::json!({})).is_err());
+        assert!(parse_latest_release_tag(&serde_json::json!({"tag_name": "v1.0.0"})).is_err());
     }
 }

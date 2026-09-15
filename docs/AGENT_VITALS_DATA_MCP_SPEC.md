@@ -26,7 +26,9 @@
 
 ## 1. 一句话定义
 
-Data MCP 是 Agent Vitals 面向 AI Agent 的**本机、只读、语义稳定的数据查询接口**。
+Data MCP 是 Agent Vitals 面向 AI Agent 的**本机、语义稳定的数据与控制面接口**。
+默认仍是只读；本地控制面写入必须由用户显式启动 `--allow-local-writes`，且只接受
+下文列出的类型化动作。
 
 它让 Agent 能安全回答“今天各模型怎么用、哪个宿主花得多、哪些问题反复出现、哪些 Skill 需要关注、数据是否可信”等问题，并能自动执行验收；它不是任意 SQL 控制台，也不是新的数据权威层。
 
@@ -185,7 +187,7 @@ Data MCP 的前置是 v0.9.1 SQL 权威迁移。截至本次校正，`AGENT_VITA
 **未落地，MCP 规格不得假设其存在**：
 
 - **§3.4 模型 / 供应商 / 价格归一表**（`providers` / `models` / `model_aliases` / `pricing_versions` / `model_prices`）——**从未建**。实际实现用 `pricing_snapshots`（整份 `pricing.json` 快照 blob）+ 查询时 `billing_route_of` 反查。canonical 模型 ID、`model_aliases` 时效区间、`pricing_versions.source_kind`（official / user_configured / imported）三分并列展示都还没有落点。
-- **`workflow_events` 的 writer 与 reader**——只有 DDL，没有任何宿主 wire 提取、脱敏指纹、写入或读取代码。这是 `issues_summary` / `skills_summary`（M4）的**全部**数据来源。
+- **`workflow_events` 的完整度**——三宿主（Claude Code / Codex / WorkBuddy）已有 wire 提取、脱敏指纹、同步写入；DSH 已有既有事件适配。`session_detail` 已能读出独立的安全 workflow 时间线，`issues_summary` / `skills_summary` 仍因覆盖度、完整重试生命周期和 token/cost 唯一归因未闭环而保持显式 partial/unknown。
 - **`sessions` 表的会话级信息**——是最小索引（`session_key` / `host` / `machine_namespace` / `last_observed_at_ms`），`started_at_ms` / `ended_at_ms` 大多为空，无会话级 token / 成本聚合。
 - **`session_ref` 所需的 HMAC + 每安装随机 salt**——仓库内无此基元（`source_identity.rs` 的 `fnv1a64_hex` 是非密码学哈希，不满足「不可反推」）。
 - **跨宿主「小时 × 模型 / 供应商」聚合查询**——只有 `codex_by_hour_model` 单宿主版；claude / dsh 及三宿主合并的模型轴小时曲线要新写。
@@ -278,10 +280,12 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 
 ### 6.3 时间规则
 
-- 默认时区为 `Asia/Shanghai`，与 v0.9.1 业务日口径一致。
+- 默认统计时区来自 OS 的 IANA 时区；用户也可以通过类型化控制面显式保存一个
+  IANA 时区。当前环境为 `Asia/Shanghai` 时，默认结果与 v0.9.1 业务日口径一致。
 - 日期使用 `YYYY-MM-DD`，月份使用 `YYYY-MM`，时间戳使用 RFC 3339。
 - `from` 为闭区间，`to` 为开区间。
-- 首版不允许调用方更改时区，避免同一“今天”产生不同答案。
+- 同一个 MCP 进程内使用已保存的统计时区；修改时区是显式本地控制面写入，并应在
+  修改后重新读取日/月窗口，避免把不同统计时区的结果混在一起。
 
 ### 6.4 MCP 线协议契约（P1-3——M0 必须逐条冻结）
 
@@ -307,12 +311,14 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | `usage_hourly` | v0.9.1 MVP | 🔶 `hourly_by_host` 已在（宿主轴、仅 token）；`group_by=model`/`provider` + 逐小时 `cost`（`MoneyMinor`）需新写（只有 `codex_by_hour_model` 覆盖单宿主） |
 | `summary_daily` | v0.9.1 MVP | 🔶 `SqlSummaryRepository::daily_summary` 覆盖 by_host/by_provider/tokens/coverage/freshness；**会话数 / 活跃小时 / 维度过滤需新增查询**（P1-4） |
 | `summary_monthly` | v0.9.1 MVP | 🔶 同上 + `budget_status_sql`；**逐日趋势 / 月底预测 / 成本占比 % 需新增**（P1-4，逐日趋势可基于 `peaked_days_map`） |
-| `data_quality_issues` | v0.9.1 MVP | 🔶 `data_quality_issues` 表已在；`detail_json` 的 code-aware 脱敏 allowlist 需新写 |
-| `authority_audit` | v0.9.1 internal only | 🔶 MCP 内只读——守恒 / 重复 / 覆盖 / `authority_revision` 一致性自检（不做重导入）。见 §8.1 |
+| `data_quality_issues` | v0.9.1 MVP | ✅ 公开类型化 reader 已落地：状态/严重度/代码/宿主/日期筛选、稳定 cursor 和 code-aware 脱敏；未知 code 仅返回 code/count，原始 `detail_json` 不跨边界 |
+| `authority_audit` | v0.9.1 internal only | ✅ **落地**：MCP 内只读——实时事实 token 守恒、重复 / 孤儿 / legacy-realtime 混轴、覆盖范围输入校验、`authority_revision` 未来性和已登记质量例外自检；不做重导入。见 §8.1 |
+| `control_plane` | v1.0 local control plane | ✅ 类型化覆盖工作台的来源状态 / 自定义来源 / 排除 / 删除导入数据 / 留存 / 统计时区 / 同步暂停 / 同步执行 / 日月汇总 / 日历 / 小时分布 / Codex 配额 / 价格目录状态与联网策略 / Issue 列表与状态变更；读取安全可用且不返回绝对路径，写入必须显式启动 `data-mcp serve --allow-local-writes`，不提供任意 SQL / URL / 通用文件写入 |
+| `billing_workflow` | v1.0 local control plane | ✅ 仅暴露类型化的候选 / 声明 / 重算 / 账单 / 预算管理动作；读取可用，写入必须显式启动 `data-mcp serve --allow-local-writes`，不提供任意 SQL 或通用写入 |
 | `reimport_verify` | v0.9.1（**MCP 外**） | ✅ **落地（`4c7f75b`）**：`agent-vitals data-reimport-verify [--json]`——两临时库各重放（round B 崩溃后重跑），逐宿主 × 北京月比对；不碰生产库。不是 MCP 工具（P1-2）。 |
-| `cost_breakdown` | v0.9.2 | ⬜ 逐事实 / 逐日历史价格重放（当前仅窗口级）+ 变化因子分解引擎 |
-| `sessions_search` / `session_detail` | v0.9.1（提前） | ✅ **落地（`7c68ab4`）**：`session_ref` = HMAC-SHA256(salt, session_key)（salt `<data_home>/.mcp-session-salt` 0600，不进库）；`sessions_in_window` 逐会话聚合（时间边界读时从 `MIN/MAX(event_ts_ms)` 派生，不补 schema 列）+ `session_facts_timeline`。时间线的失败/错误事件轴留 M4（`workflow_events`）。 |
-| `issues_summary` / `skills_summary` | v0.10 | ⬜ `workflow_events` 完整 writer + reader + 覆盖度管线（独立于 MCP 的工作量，随 v0.10 任务图立项） |
+| `cost_breakdown` | v0.9.2 | 🔶 **部分落地**：按事实时间选择历史价格版本、`MoneyMinor`、币种/计费口径分离、订阅与 unresolved token 明细已在 MCP；变化因子分解、跨价格版本父层聚合与三消费面 parity 仍待补齐 |
+| `sessions_search` / `session_detail` | v0.9.1（提前） | ✅ **落地（`7c68ab4` + 当前 workflow 收口）**：`session_ref` = HMAC-SHA256(salt, session_key)（salt `<data_home>/.mcp-session-salt` 0600，不进库）；`sessions_in_window` 逐会话聚合 + `session_facts_timeline`；`session_detail` 另返回独立、脱敏的 `workflow_timeline`，不把 workflow 硬归因到 token/cost。 |
+| `issues_summary` / `skills_summary` | v0.10 | 🔶 **部分落地**：三宿主 writer + reader + 显式覆盖度已接通；`skills_summary` 已按调用/结束事件汇总 outcome 与耗时覆盖，并输出 `capability_version` 分桶及证据门控的基线→候选比较；完整跨宿主历史回填、重试生命周期和唯一 token/cost 归因仍未完成，因此结果继续返回 partial/unknown，不提前宣称 U06/U07 完成。 |
 
 未达到前置条件的工具不得用空实现提前注册。客户端可通过 `tools/list` 判断可用能力。
 
@@ -360,7 +366,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
         ]
       },
       "generated_at": { "type": "string", "format": "date-time" },
-      "timezone":    { "type": "string", "const": "Asia/Shanghai" },
+      "timezone":    { "type": "string", "description": "IANA statistics timezone used for date/hour boundaries and local timestamp formatting; defaults to the OS timezone and may be an explicit validated user preference." },
       "coverage": {
         "type": "object",
         "properties": {
@@ -480,7 +486,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 **实现注记（draft-3）**：
 
 - **P2-7 模型过滤字段**：不叫 `model_ids`（那会在 canonical 归一表落地时静默改变语义）。用 `models: [{kind, host, value}]`，v0.9.1 只支持 `kind="host_raw"`（匹配 `usage_facts.model_id` 的宿主 raw 值，按 `hosts` 限定）；`group_by=model` 的序列键是 `(host, raw_model)`，响应每个序列显式带 `identity_kind: "host_raw"`。canonical 层就绪后新增 `kind="canonical"` + `identity_kind: "canonical"`，**不改** `host_raw` 的含义。
-- **查询面**：`group_by=host` 可复用 `authority_query::hourly_by_host`；`group_by=model`/`provider` 与逐小时 `cost` 需新增查询（当前只有 `codex_by_hour_model` 覆盖单宿主的小时 × 模型，且不含成本）。北京小时用整数除法（`(event_ts_ms + BEIJING_OFFSET_MS) / HOUR_MS % 24`），与 `hourly_by_host` 同一算术。
+- **查询面**：`group_by=host` 可复用 `authority_query::hourly_by_host`；`group_by=model`/`provider` 与逐小时 `cost` 需新增查询（当前只有 `codex_by_hour_model` 覆盖单宿主的小时 × 模型，且不含成本）。小时桶使用配置的统计 IANA 时区（SQLite `localtime` 与自然日边界），不以固定 `BEIJING_OFFSET_MS` 代替 DST-aware 投影。
 
 ### 7.3 `summary_daily`
 
@@ -533,7 +539,14 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 
 首版只做确定性分解，不生成自然语言结论。
 
-**实现注记（draft-2）**：价格版本重放当前粒度 = 查询窗口月末的 `pricing_snapshots` 时点（`PricingCards::asof`），不是逐事实时点。在 §3.4 归一价表落地前，「使用到的价格版本」只能报 snapshot 的 `captured_at` 与「官方标价 / 用户配置」二分，不能报 `pricing_versions.source_kind` 三分。**逐日 / 逐事实价格重放（Q13、U10）是本工具的硬前置**，M3 必须先补 `authority_query` 的按事实时点选价版能力。变化因子分解引擎（用量 / 模型组合 / 缓存结构 / 价格版本 / 账单录入 + 未解释余额）是净新增，无现成实现。
+**实现注记（draft-5，2026-09-13）**：`cost_breakdown` 已从窗口末价卡切换为按每条事实的
+`event_ts_ms` 选择不晚于事实时间的 `pricing_snapshots`，并在响应中保留
+`pricing.version/source_kind/captured_at_ms`。金额走 `MoneyMinor`；CNY/USD 与 billing
+base 分开，不生成伪合计；订阅覆盖 token 和无价卡 / 路由证据不足的 unresolved token 均可
+见。当前行粒度保留事实时点价格版本切片；`group_by` 回显请求维度但还没有跨版本的父层
+滚动聚合，`compare_to_previous` 只返回等长窗口摘要。变化因子分解（用量 / 模型组合 /
+缓存结构 / 价格版本 / 账单录入 + 未解释余额）、完整账单归因和三消费面 parity 仍是 M3
+剩余工作。
 
 ### 7.6 `sessions_search`
 
@@ -574,9 +587,18 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 - 拒绝、超时和重试。
 - 无法解析或不完整的工作流事件。
 
-输出每类问题的发生次数、影响会话数、关联 token/成本、首次和最近发生时间、趋势以及证据覆盖度。错误指纹只能来自脱敏后的稳定分类，不返回原始错误文本。
+输出每类问题的发生次数、影响会话数、关联 token/成本、首次和最近发生时间、趋势以及证据覆盖度；
+同时输出安全的 `retry_chains` / `retry_evidence`。仅在同一会话、能力和脱敏调用形状下观察到失败→再次调用→
+成功，才标记 `recovered`；缺少指纹或结束事件时保持 `partial/unavailable`，不把普通重复调用冒充重试链。
+错误指纹只能来自脱敏后的稳定分类，不返回原始错误文本。
 
 若 `workflow_events` 覆盖不足，应返回 `coverage=partial/unavailable`，不能返回“0 个问题”。
+
+覆盖度必须按本次请求的时间窗以及 `hosts` / `skills` 过滤条件计算；不得用全库
+事件数填充一个被过滤的查询。响应应列出本次范围内实际观测到的
+`observed_hosts`。未安装或在该时间窗没有事件的宿主不自动算作缺失宿主，使用
+`host_absence_is_not_missing=true` 明确这一点；仍未闭合的工作流生命周期和
+workflow↔token/cost 归因则继续列在 `missing` 中。
 
 ### 7.9 `skills_summary`
 
@@ -584,7 +606,10 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 
 输入：时间范围、可选 Skill、排序方式、分页参数。
 
-输出可包含调用数、涉及会话数、成功/失败/未知数、重试率、耗时、token、成本和趋势。每个比率必须同时返回分子、分母和覆盖度。
+输出可包含调用数、涉及会话数、成功/失败/未知数、重试率、耗时、token、成本和趋势；同时按
+`capability_version` 输出版本分桶。若至少两个版本各有 3 次调用，且完成事件、结果和耗时证据完整，
+`version_regression` 返回基线/候选版本及成功率、耗时差异；否则返回 `status=unavailable` 和具体原因。
+每个比率必须同时返回分子、分母和覆盖度。
 
 本工具不得仅根据 token 少或调用次数少推断 Skill 无价值。若成功状态、耗时或关联事件未采集，应把相应指标标为 `unknown`。
 
@@ -596,7 +621,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 
 输出：脱敏 issue ID、类别、严重度、影响范围、首次/最近发生时间、出现次数、状态和建议的人类操作。禁止返回可能含路径、Prompt 或密钥的原始 payload。
 
-**实现注记（draft-2）**：`data_quality_issues.detail_json` 当前按各 issue `code` 的需要原样存储（`undated_residual` 存逐模型 token；`missing_sid` 存来源提示；`legacy_aggregate*` 存 coverage 降版信息），可能含模型 raw 名或路径片段。reader 必须过一层 **code-aware allowlist 脱敏**（净新增）——按 `code` 白名单放行已知安全字段，绝不整体回吐 `detail_json`。未知 `code` 默认只放行结构化计数，不放行任何自由文本。
+**实现注记**：`data_quality_issues.detail_json` 继续在本地原样保留用于人工排查；MCP reader 已过一层 **code-aware allowlist 脱敏**，按 `code` 白名单放行已知安全字段，绝不整体回吐 `detail_json`。未知 `code` 只返回 code/count，不放行任何自由文本。
 
 ### 7.11 `query_sql_readonly`（内部调试工具——`mcp-internal` feature only）
 
@@ -645,7 +670,10 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 
 ## 8. 内部开发工具
 
-内部工具只能在编译期 feature（draft-2 定为 cargo feature `mcp-internal`，见 §13 M0 D4）下注册。公开安装包在**编译期**就不含这些工具——比运行时 `--profile` 判断更可证（DoD「公开构建没有任意 SQL、写入、同步、迁移、repair 工具」）。
+调试工具（`query_sql_readonly` / `authority_audit`）只能在编译期 feature
+`mcp-internal` 下注册。`control_plane` 与 `billing_workflow` 是显式类型化的本机
+控制面：它们不提供任意 SQL、URL 或通用写入；所有 mutation 仍由运行时
+`--allow-local-writes` 守门。公开构建可以提供安全的读取动作，但默认进程不能写。
 
 ### 8.1 迁移与自洽验收：`authority_audit`（MCP 内）+ `reimport_verify`（MCP 外）
 
@@ -724,7 +752,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 
 ### 9.4 `data_quality_issues` 的 code-aware 脱敏 allowlist（spec §7.10 注记 + 增量 4）
 
-`data_quality_issues.detail_json` 按各 `code` 的需要原样存储（真机现在含：`undated_residual` 存逐模型 token；`missing_sid` 存来源提示；`legacy_aggregate*` 存 coverage 降级；`reconcile_exception` 存差异摘要），可能含模型 raw 名或路径片段。MCP **不能**整体回吐 `detail_json`——必须按 `code` 白名单放行已知安全字段，未知 `code` 仅放行结构化计数。
+`data_quality_issues.detail_json` 按各 `code` 的需要原样存储（真机现在含：`undated_residual` 存逐模型 token；`missing_sid` 存来源提示；`legacy_aggregate*` 存 coverage 降级；`reconcile_exception` 存差异摘要），可能含模型 raw 名或路径片段。MCP reader **不能**整体回吐 `detail_json`——当前按 `code` 白名单放行已知安全字段，未知 `code` 仅放行结构化计数。
 
 **字段级 allowlist（M0 退出条件）**：
 
@@ -849,7 +877,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | **D3** | v1 按 `(host, raw_model, billing_route)`（§5 规则 4）。过滤字段 `models: [{kind, host, value}]`，**v1 只支持 `kind="host_raw"`**；canonical 归一表**不**进 v0.9.1。响应每个序列显式 `identity_kind: "host_raw"`。 | spec §5.1 规则 4、§7.2；增量 2 落地（`usage_hourly` input schema `models[].kind enum=["host_raw"]`；每个序列 key 带 `identity_kind`；未知 kind 静默过滤 + 测试 `unknown_model_kind_is_silently_ignored`） | `@claude-impl` | ✅ |
 | **D4** | cargo feature `mcp-internal`（`apps/cli` → `agent-vitals-runtime/mcp-internal`），公开构建**编译期排除** `authority_audit` / `query_sql_readonly` / `reimport_verify`。已在增量 7.5 落地（apps/cli `tools/list` 公开=2 / feature=3）。 | spec §8；增量 6 落地时再加 `authority_audit` / `reimport_verify` | `@claude-impl` | ✅ |
 | **D5** | `session_ref` salt：`<data_home>/.mcp-session-salt`（32 字节随机，权限 `0600`），首次调用 session 工具时生成。HMAC-SHA256（`sha2` 已是依赖，手写 HMAC，不新增 `hmac` crate）。**不进权威库**。反解 = 对 `sessions` 表逐行算 HMAC 匹配。已在 `7c68ab4` 落地（`mcp/session_ref.rs`，RFC 4231 测试向量钉住）。 | spec §9.2；`7c68ab4` | `@claude-impl` | ✅ |
-| **D6** | **拆分**：MCP 内只读 `authority_audit`（守恒 / 重复 / 覆盖 / `authority_revision` 自检）+ **MCP 外**隔离命令 `agent-vitals data reimport-verify`（临时库重导入比对）。快照对账模式 → M3 才接（要补 `snapshot.manifest.json` + `pricing_snapshots` / `host_bills` 副本）。 | spec §8.1；增量 6 + 7 | `@claude-impl` | ⬜ |
+| **D6** | **拆分**：MCP 内只读 `authority_audit`（守恒 / 重复 / 覆盖 / `authority_revision` 自检）+ **MCP 外**隔离命令 `agent-vitals data-reimport-verify`（临时库重导入比对）。快照对账模式 → M3 才接（要补 `snapshot.manifest.json` + `pricing_snapshots` / `host_bills` 副本）。 | spec §8.1；增量 6 + 7；Loop 313 真机 MCP 冒烟 | `@claude-impl` | ✅ |
 | **D7** | envelope `authority_revision` = `{last_completed_run_id, committed_at, max_observed_at}`。`max_observed_at` SQL 行级口径见 §6.1（**排除 `legacy_aggregate`**）。`as_of_run_id` 入参：v1 仅识别并 `warnings: [{code:"snapshot_drift", ...}]`，**不**假装钉住旧截面（假装比 drift 更危险）；钉截面 = M2 任务。 | spec §6.1 / §6.4.1；增量 6 落地（钉截面 + warn） | `@claude-impl` | ⬜ |
 | **D8** | `summary_daily` / `summary_monthly` 输出**保留** spec §7.3/§7.4 承诺的完整字段（会话数 / 活跃小时 / `group_by=model` / 维度过滤 / 逐日趋势 / 月底预测 / 成本占比）。这些**不是**冻结 DTO 的字段——列进增量 3 作为**新增聚合查询**（不是薄封装）。工作量按「新增查询 + 测试」计。 | spec §7.3/§7.4；增量 3 落地 | `@claude-impl` | ⬜ |
 | **D9** | `query_sql_readonly` 已在增量 7.5 落地（用户 2026-09-07 决定提前做，让其他 Agent 调试可用）。SQLite `authorizer` 按来源表 + 列拒绝 + 4 个脱敏只读 view（`v_facts_safe` / `v_sessions_safe` / `v_data_quality_safe` / `v_sync_runs_safe`）+ 危险函数 deny 黑名单 + `mcp-internal` 编译期 gating。**结果列名扫描不作唯一防线**（spec §8.2 P1-5 警示）。 | spec §8.2；增量 7.5 落地 | `@claude-impl` | ✅ |
@@ -865,14 +893,14 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 - **`data_status`**——现有 `data-status` 查询 + 逐宿主 `GROUP BY host` + `authority_revision`。
 - **`summary_daily` / `summary_monthly`**——冻结 DTO 就绪部分薄封装 + **新增聚合查询**：会话数、活跃小时、`group_by=model` 明细、维度过滤（daily）；逐日趋势、成本占比 %、月底预测（monthly，证据不足返回 `null`）。
 - **`usage_hourly`**——新增跨宿主「小时 × model / provider」查询 + 逐小时 `MoneyMinor` 成本（`hourly_by_host` 只够宿主轴）。
-- **`data_quality_issues`**——issue reader + code-aware 脱敏 allowlist（§7.10 注记）。
+- **`data_quality_issues`**——✅ 已落地 issue reader + code-aware 脱敏 allowlist（§7.10 注记）。
 - 完成 M01–M08、M13–M18。
 
 退出条件：Agent 能可靠回答使用曲线、日/月汇总和数据可信度。**M1 是本 spec 最大的单块工作**：传输层 + 线协议 + `MoneyMinor` 投影 + envelope + 至少 4 个净新增聚合查询——不是「薄封装」。
 
 ### Phase M2：v0.9.1 迁移验收能力
 
-- `mcp-internal` feature 实现 `authority_audit`（§8.1.1：守恒 / 重复 / 覆盖 / `authority_revision` 自检，只读）。
+- `mcp-internal` feature 实现 `authority_audit`（§8.1.1：守恒 / 重复 / 覆盖 / `authority_revision` 自检，只读）；Loop 313 已用真实 MCP 调用验证 `exact`。
 - `reimport_verify`（§8.1.2，**MCP 外**隔离命令）——临时库两遍导入比对。
 - MCP、CLI、Tauri 三消费面对同一窗口逐值对账（M15，token + `MoneyMinor`）。
 - `authority_revision` 跨工具一致性识别 + warn（M17）。
@@ -883,14 +911,16 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 ### Phase M3：v0.9.2 成本解释与会话下钻
 
 - **前置子阶段**：① `authority_query` 补按事实时点选价版能力（逐日 / 逐事实历史价格重放）；② 「session 索引 v2」——`sessions` 表补 `started_at_ms` / `ended_at_ms` / 会话级聚合 + `session_ref` HMAC 基元（D5）；③ 导出快照 manifest 扩展（`snapshot.manifest.json` + `pricing_snapshots` / `host_bills` 副本），供 `authority_audit --against` 做金额对账（§8.1.3）。
-- 实现 `cost_breakdown`（含变化因子分解引擎）、`sessions_search`、`session_detail`。
-- 完成历史价格版本重放、脱敏、稳定分页和证据覆盖测试。
+- `sessions_search`、`session_detail` 已落地；`cost_breakdown` 的事实时点价格重放、
+  `MoneyMinor` 和安全/unresolved 投影已落地。
+- 完成变化因子分解、跨价格版本父层聚合、完整账单归因、三消费面 parity，以及历史价格
+  版本 fixture、脱敏和证据覆盖测试。
 
 退出条件：Agent 能从异常曲线下钻到会话并解释成本变化；完成 U03–U05、U10。
 
 ### Phase M4：v0.10 问题与 Skill 洞察
 
-- **前置（独立立项，不算 MCP 工作量）**：`workflow_events` 的宿主 wire 提取 → 脱敏指纹 → SQL writer → reader → 覆盖度。工作量与 behavior 检测线相当，随 v0.10 任务图推进；本 Phase 的 MCP 部分只是管线就绪后的工具封装。
+- **当前状态**：`workflow_events` 的宿主 wire 提取 → 脱敏指纹 → SQL writer → reader → 覆盖度基础管线已接通；`issues_summary` / `skills_summary` 的覆盖计数会遵循本次时间窗和过滤条件，并返回实际 `observed_hosts`，不会把未安装宿主误列为缺失。`issues_summary` 已按同一会话/能力/脱敏调用形状配对安全重试链，并在证据不足时降级；`skills_summary` 已把 `skill_invoked` 与 `skill_finished` 分开计数，未完成调用会落入 unknown，耗时覆盖不足会显式降级；同时按 `capability_version` 输出版本分桶，并仅在最小样本与生命周期/耗时证据满足时计算回归。仍需完成历史数据回填、跨宿主覆盖和唯一 token/cost 归因，才可关闭 U06–U07。
 - 实现 `issues_summary`、`skills_summary`。
 - 完成重复问题、Skill 分子/分母、未知态和证据覆盖测试。
 
@@ -914,7 +944,9 @@ Data MCP v1 完成必须同时满足：
 - 每个结果都能表达 complete、partial、unavailable 和 unresolved，并带 `authority_revision`（P2-6）。
 - 成本按币种、计费口径、供应商、模型和价格快照（`pricing_snapshots` 时点；归一 `pricing_versions` 就绪后升级为版本）解释，不产生伪合计。
 - 每个工具有可校验的 `inputSchema` / `outputSchema`；§6.4 线协议每条有确定实现。
-- 公开构建没有任意 SQL、写入、同步、迁移、repair 工具；`authority_audit` / `query_sql_readonly` 只在 `mcp-internal` 构建里。
+- 公开构建没有任意 SQL、通用写入、迁移、repair 工具；`control_plane` 的读取是
+  类型化业务投影，所有写入需显式 `--allow-local-writes`；`authority_audit` /
+  `query_sql_readonly` 只在 `mcp-internal` 构建里。
 - 响应不含对话正文、本机路径、原生 session ID、密钥或工具原始参数；内部 SQL 工具的脱敏在来源列层（P1-5）。
 - 公开工具具备固定查询模板、参数校验、超时、分页和响应体限制。
 - stdio 无协议外 stdout 输出；客户端断开后进程干净退出。

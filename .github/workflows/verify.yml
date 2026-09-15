@@ -171,3 +171,17 @@ jobs:
         run: python -m unittest discover tests -v
       - name: golden 比对（Windows）
         run: python tests/golden_runner.py --diff
+
+  # ── 6. 桌面发布契约 ─────────────────────────────────────
+  # 发布 workflow 不在普通 PR 上签名或公证，但它的关键门禁必须持续可见；
+  # 这里只做无副作用的静态契约检查。
+  desktop_release_contract:
+    name: 桌面发布契约
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: 检查桌面发布 workflow 门禁
+        run: node scripts/verify-release-desktop-workflow.mjs

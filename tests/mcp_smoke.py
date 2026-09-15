@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Data MCP 真机可用性冒烟——把 SQL 权威迁移 spec §4.2 的 Q01–Q14 用户查询
+"""Data MCP 真机可用性冒烟——把 SQL 权威迁移 spec §4.2 的 Q01–Q15 用户查询
 案例逐条打到 `data-mcp serve` 上，能跑的验数值 + 与 CLI 逐值对账，跑不了的
 明确标 BLOCKED（附解锁里程碑）。
 
@@ -222,27 +222,119 @@ def main():
           "EXACT" if all(q04_verdicts) else "MISMATCH", "\n".join(q04_notes))
 
     # ── Q05 缺价卡模型不归零 ────────────────────────────────
-    unresolved = cli_json(args.bin, args.home, "data-unresolved", "--json")
-    n_unpriced = sum(len(v) for v in (unresolved.get("providers") or {}).values())
-    if args.internal:
-        q = c.sql("SELECT code, COUNT(*) n FROM v_data_quality_safe WHERE resolved_at_ms IS NULL GROUP BY code")
-        sql_note = f"query_sql_readonly v_data_quality_safe: {q.get('rows') if q and 'rows' in q else q}"
-    else:
-        sql_note = "(query_sql_readonly 需 --internal)"
+    cost_args = {"from": month_first, "to": today,
+                 "group_by": ["host", "provider", "model", "basis"]}
+    cost_result, _, _ = c.call("cost_breakdown", cost_args)
+    cost_sc = (cost_result or {}).get("structuredContent") or {}
+    cost_data = cost_sc.get("data") or {}
+    cost_rows = cost_data.get("breakdown") or []
+    cost_amounts = cost_data.get("amounts") or []
+    cost_total = cost_data.get("total_tokens")
+    cost_partition = (cost_data.get("priced_tokens", 0)
+                      + cost_data.get("unresolved_tokens", 0)
+                      + cost_data.get("subscription_tokens", 0))
+    unresolved_rows = [row for row in cost_rows if row.get("status") == "unpriced"]
+    unresolved_honest = all(row.get("amount") is None and row.get("tokens", {}).get("total", 0) > 0
+                            and row.get("has_unresolved") for row in unresolved_rows)
+    amounts_typed = all(isinstance(row.get("amount_minor"), int)
+                        and isinstance(row.get("currency"), str)
+                        and isinstance(row.get("basis"), str)
+                        for row in cost_amounts)
+    cost_leak = any(p in json.dumps(cost_result) for p in
+                    ["native_session_id", "machine_namespace", "source_event_id", "/Users/"])
+    cost_ok = (not (cost_result or {}).get("isError") and cost_rows
+               and cost_total == cost_partition and unresolved_honest
+               and amounts_typed and not cost_leak)
     R.add("Q05", "缺价卡模型：用量可见、成本 unresolved 不归零",
-          "PARTIAL",
-          f"CLI data-unresolved: {n_unpriced} 个未定价模型 (reason=no-price-card 等)\n{sql_note}\n"
-          "MCP 无 cost 工具——unresolved 的「用量可见 + 成本不冒充 0」只能在 CLI/cost_breakdown(M3) 验证。")
+          "EXACT" if cost_ok else "MISMATCH",
+          f"cost_breakdown: rows={len(cost_rows)} amounts={len(cost_amounts)} "
+          f"total={cost_total} = priced+unresolved+subscription={cost_partition}; "
+          f"unresolved_rows={len(unresolved_rows)} honest={unresolved_honest} "
+          f"amounts_typed={amounts_typed} leak={cost_leak}")
 
     # ── Q06–Q10 workflow_events 依赖 ────────────────────────
-    for qid, q in [
-        ("Q06", "本周重复错误指纹聚为问题卡"),
-        ("Q07", "连续失败后成功 = 一组重试链"),
-        ("Q08", "Skill 成功率 + 样本不足判定"),
-        ("Q09", "Skill 版本回归识别"),
-        ("Q10", "会话时间线关联失败/峰值"),
-    ]:
-        R.add(qid, q, "BLOCKED", "issues_summary / skills_summary = M4；workflow_events 表已建，无 writer/reader。")
+    # 这些查询已接入 MCP，但覆盖仍按宿主 adapter 的真实采集能力判定：
+    # 无行是 BLOCKED/不可验证，不是“没有问题”；有行但跨宿主不完整则 PARTIAL。
+    workflow_from = (datetime.now(BJ) - timedelta(days=6)).strftime("%Y-%m-%d")
+
+    def workflow_result(name, arguments):
+        result, err, rc = c.call(name, arguments)
+        if rc != 0 or not result:
+            return None, f"transport rc={rc} stderr={err!r}"
+        if result.get("isError"):
+            error = (result.get("structuredContent") or {}).get("error") or {}
+            return None, f"MCP error code={error.get('code')} message={error.get('message')}"
+        envelope = result.get("structuredContent") or {}
+        return envelope, ""
+
+    issues_env, issues_note = workflow_result(
+        "issues_summary", {"from": workflow_from, "to": today, "limit": 50})
+    skills_env, skills_note = workflow_result(
+        "skills_summary", {"from": workflow_from, "to": today, "limit": 50})
+
+    def workflow_verdict(envelope, supported, expected_key):
+        if envelope is None:
+            return "MISMATCH"
+        coverage = envelope.get("coverage") or {}
+        if coverage.get("status") == "unavailable":
+            return "BLOCKED"
+        if not supported:
+            return "PARTIAL"
+        if expected_key not in (envelope.get("data") or {}):
+            return "MISMATCH"
+        return "PARTIAL" if coverage.get("status") != "complete" else "EXACT"
+
+    issues_data = (issues_env or {}).get("data") or {}
+    skills_data = (skills_env or {}).get("data") or {}
+    issues_status = (((issues_env or {}).get("coverage") or {}).get("status"))
+    skills_status = (((skills_env or {}).get("coverage") or {}).get("status"))
+    R.add("Q06", "本周重复错误指纹聚为问题卡",
+          workflow_verdict(issues_env, True, "issues"),
+          f"issues_summary: coverage={issues_status} rows={len(issues_data.get('issues') or [])} {issues_note}")
+    retry_data = issues_data.get("retry_evidence") or {}
+    retry_status = retry_data.get("status")
+    if issues_env is None:
+        q07_status = "MISMATCH"
+    elif issues_status == "unavailable":
+        q07_status = "BLOCKED"
+    elif retry_status == "complete":
+        q07_status = "EXACT"
+    else:
+        q07_status = "PARTIAL"
+    R.add("Q07", "连续失败后成功 = 一组重试链",
+          q07_status,
+          f"issues_summary: retry_evidence={retry_status} "
+          f"chains={len(issues_data.get('retry_chains') or [])} coverage={issues_status} {issues_note}")
+    R.add("Q08", "Skill 成功率 + 样本不足判定",
+          workflow_verdict(skills_env, True, "skills"),
+          f"skills_summary: coverage={skills_status} rows={len(skills_data.get('skills') or [])} {skills_note}")
+    skills_rows = skills_data.get("skills")
+    version_rows = [row for row in (skills_rows or []) if isinstance(row, dict)]
+    version_shape_ok = isinstance(skills_rows, list) and all(
+        isinstance(row, dict)
+        and isinstance(row.get("versions"), list)
+        and isinstance(row.get("version_regression"), dict)
+        and row["version_regression"].get("status") in
+        ("complete", "unavailable")
+        for row in skills_rows)
+    comparable_rows = [row for row in version_rows
+                       if row["version_regression"].get("status") == "complete"] if version_shape_ok else []
+    if skills_env is None:
+        q09_status = "MISMATCH"
+    elif skills_status == "unavailable":
+        q09_status = "BLOCKED"
+    elif not version_shape_ok:
+        q09_status = "MISMATCH"
+    elif comparable_rows and len(comparable_rows) == len(version_rows):
+        q09_status = "EXACT"
+    else:
+        q09_status = "PARTIAL"
+    R.add("Q09", "Skill 版本回归识别", q09_status,
+          f"skills_summary: version_rows={len(version_rows)} comparable={len(comparable_rows)} "
+          "；样本不足/生命周期不完整时显式 unavailable，不把未比较误报为回归。")
+    R.add("Q10", "会话时间线关联失败/峰值",
+          workflow_verdict(issues_env, False, "issues"),
+          f"issues_summary 提供安全错误/会话聚合；usage timeline 与 workflow 关联仍为 PARTIAL；coverage={issues_status} {issues_note}")
 
     # ── Q11 宿主 24h 未同步 → stale ─────────────────────────
     ds = c.call("data_status", {})[0]["structuredContent"]
@@ -296,8 +388,13 @@ def main():
         snote = f"pricing_snapshots 行数: {snaps.get('rows') if snaps and 'rows' in snaps else snaps}"
     else:
         snote = "(需 --internal 数 pricing_snapshots)"
-    R.add("Q13", "调价日前后分别用正确价格版本", "BLOCKED",
-          f"cost_breakdown 逐事实价版重放 = M3 硬前置；{snote}")
+    cost_versions = {row.get("pricing", {}).get("version") for row in cost_rows
+                     if row.get("pricing", {}).get("version")}
+    q13_ok = cost_ok and len(cost_versions) >= 2
+    R.add("Q13", "调价日前后分别用正确价格版本",
+          "EXACT" if q13_ok else "BLOCKED",
+          f"cost_breakdown fact-time pricing versions={sorted(cost_versions)} "
+          f"(need >=2 for this real-data run); {snote}")
 
     # ── Q14 同 raw 模型名跨宿主 ─────────────────────────────
     rm, _, _ = c.call("usage_hourly", {"date": today, "group_by": "model"})
@@ -308,12 +405,64 @@ def main():
           "canonical 归一 = v0.9.2+；无法映射的项在 usage_hourly 不出现（无归属就无事实进桶），"
           "unresolved 语义在 data-unresolved / cost_breakdown(M3)。")
 
+    # ── Q15 数据质量 issue reader：只读、稳定分页、code-aware 脱敏 ───────
+    quality_result, quality_err, quality_rc = c.call(
+        "data_quality_issues", {"status": "all", "limit": 50})
+    quality_env = (quality_result or {}).get("structuredContent") or {}
+    quality_data = quality_env.get("data") or {}
+    quality_rows = quality_data.get("issues") or []
+    quality_cursor_ok = True
+    if quality_data.get("has_more") and quality_data.get("next_cursor"):
+        page2_result, _, _ = c.call("data_quality_issues", {
+            "status": "all", "limit": 1, "cursor": quality_data["next_cursor"]})
+        page2_data = ((page2_result or {}).get("structuredContent") or {}).get("data") or {}
+        page2_rows = page2_data.get("issues") or []
+        quality_cursor_ok = bool(page2_rows) and page2_rows[0].get("issue_id") != quality_rows[-1].get("issue_id")
+    quality_leak = any(p in json.dumps(quality_result) for p in
+                       ["native_session_id", "path_hash", "machine_namespace", "session_key",
+                        "source_event_id", "/Users/"])
+    quality_shape = (quality_rc == 0 and not (quality_result or {}).get("isError")
+                     and isinstance(quality_rows, list)
+                     and isinstance(quality_data.get("has_more"), bool)
+                     and quality_cursor_ok
+                     and not quality_leak
+                     and all(isinstance(row, dict)
+                             and isinstance(row.get("issue_id"), str)
+                             and isinstance(row.get("detail"), dict)
+                             for row in quality_rows))
+    R.add("Q15", "数据质量问题可筛选、分页且 detail_json 按 code 脱敏",
+          "EXACT" if quality_shape else "MISMATCH",
+          f"data_quality_issues: rows={len(quality_rows)} has_more={quality_data.get('has_more')} cursor={quality_cursor_ok} "
+          f"leak={quality_leak} rc={quality_rc} stderr={quality_err!r}")
+
     # ── S4 数据可信度（Data MCP §3.4，data_status 直接答）────
     fr = ds["freshness"]
     R.add("S4.1", "最近一次同步是什么时候", "EXACT",
           f"freshness.last_successful_sync_at = {fr['last_successful_sync_at']}")
     R.add("S4.4", "结果来自正式 SQL 权威库还是候选", "EXACT",
           f"authority_state = {ds['authority_state']} · sql_authority_enabled = {ds['data']['sql_authority_enabled']} · schema v{ds['data']['schema_version']}")
+
+    # ── S4.5 authority_audit（mcp-internal，只读）───────────────────────
+    # 这是数据可信度底线的聚合审计：只允许返回计数和 verdict，不把事实身份、
+    # 路径或质量 issue 的 detail_json 暴露给 MCP 客户端。
+    if args.internal:
+        audit_result, _, _ = c.call("authority_audit", {"month": month, "tolerance_tokens": 0})
+        audit_sc = (audit_result or {}).get("structuredContent") or {}
+        audit_data = audit_sc.get("data") or {}
+        audit_checks = audit_data.get("checks") or []
+        audit_text = json.dumps(audit_result, ensure_ascii=False)
+        audit_leak = any(p in audit_text for p in
+                         ["native_session_id", "machine_namespace", "source_event_id", "/Users/"])
+        audit_ok = (not (audit_result or {}).get("isError")
+                    and audit_data.get("verdict") in ("exact", "explained")
+                    and not audit_leak
+                    and all(c.get("status") == "pass" for c in audit_checks
+                            if c.get("name") != "registered_quality_exceptions"))
+        R.add("S4.5", "authority_audit：守恒/重复/孤儿/legacy 隔离/版本未来性可解释",
+              "EXACT" if audit_ok else "MISMATCH",
+              f"scope={audit_data.get('scope')} verdict={audit_data.get('verdict')} "
+              f"checks={[(c.get('name'), c.get('status'), c.get('observed')) for c in audit_checks]} "
+              f"aggregate_leak={audit_leak}")
 
     # ── 协议 & 安全（M07/M12/M18/M19）──────────────────────
     print()

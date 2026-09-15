@@ -649,7 +649,16 @@ pub fn build_claude_evidence(
             host_id: "claude-code",
             workspace_roots: first_cwd(&raw_records),
             model: extract_model(&raw_records),
-            span: None,
+            // D1–D4：喂进本证据的**原生记录**时间 min/max。Claude 的 `timestamp`
+            // 经 `parse_iso` 出**秒**，由 `session_span` 统一归一到毫秒。
+            // 0 条记录 → None（不造 (0,0)，那会被读成 1970）。
+            span: crate::workflow_utils::session_span(
+                raw_records
+                    .iter()
+                    .filter_map(|r| r.get("timestamp").and_then(Value::as_str))
+                    .filter_map(parse_iso)
+                    .map(|(secs, _)| secs),
+            ),
         },
         signals,
         coverage,
@@ -716,6 +725,12 @@ pub fn claude_evidence_json(evidence: &ClaudeEvidence) -> Value {
         "session_id": evidence.canonical.meta.session_id,
         "workspace_roots": evidence.canonical.meta.workspace_roots,
         "model": evidence.canonical.meta.model,
+        // 会话实际覆盖跨度（D1–D4）。与 `attempts[].observed_span` 同形；
+        // 键位置与 Python 镜像逐字节对齐。
+        "span": evidence.canonical.meta.span.map(|s| serde_json::json!({
+            "start_ms": s.start_ms,
+            "end_ms": s.end_ms,
+        })),
         "signals": signals,
         "coverage": coverage_map,
         "attempts": attempts,

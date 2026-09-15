@@ -869,19 +869,17 @@ mod tests {
         assert!((out["currency_totals"]["CNY"].as_f64().unwrap() - 1.5).abs() < 1e-9);
     }
 
-    /// anthropic 在 catalog_2026_09.subscriptions（claude-pro）登记过 → claude-opus-5
-    /// 的用量视为已订阅覆盖，不进本视图 → None（不是全零结构）。
+    /// 公共目录不含用户套餐声明：claude-opus-5 仍进入按量参考估算视图。
     #[test]
-    fn claude_subscription_uncovered_estimate_excludes_subscribed_provider() {
+    fn claude_subscription_uncovered_estimate_keeps_unconfirmed_provider() {
         let pricing = load_pricing();
         let models = serde_json::json!({
             "claude-opus-5": {"input_tokens": 1_000_000, "output_tokens": 0,
                 "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
         });
-        assert_eq!(
-            claude_subscription_uncovered_estimate(models.as_object().unwrap(), &pricing),
-            None
-        );
+        let out = claude_subscription_uncovered_estimate(models.as_object().unwrap(), &pricing)
+            .expect("known-price model must remain estimated before user confirmation");
+        assert!(out["per_model"].get("claude-opus-5").is_some());
     }
 
     /// v0.7 spec §3 交付矩阵第三行：无缓存命中的语料下 ratio 恒为 1.00

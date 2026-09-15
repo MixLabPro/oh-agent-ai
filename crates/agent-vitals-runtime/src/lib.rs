@@ -25,20 +25,30 @@
 //! hosts 又认识 data 的层。
 
 pub mod budget;
+pub mod budget_notifications;
 pub mod clock;
+pub mod custom_sources;
 pub mod home;
 pub mod export;
 pub mod ingest_service;
 pub mod lease;
 pub mod mcp;
 pub mod money;
+pub mod pricing_catalog;
 pub mod reimport_verify;
+pub mod retention;
 pub mod session_sources;
+pub mod source_controls;
 pub mod sessions;
 pub mod skills;
 pub mod sql_authority;
 pub mod state;
+pub mod statistics_timezone;
 pub mod summary;
+pub mod price_discovery;
+pub mod price_overrides;
+pub mod quota_reminder;
+pub mod sync_control;
 pub mod trace_service;
 pub mod sql_sync;
 pub mod sync_service;
@@ -49,4 +59,3 @@ pub mod takeover;
 /// 局部锁只能串行本模块，跨模块并行还是踩）。
 #[doc(hidden)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-

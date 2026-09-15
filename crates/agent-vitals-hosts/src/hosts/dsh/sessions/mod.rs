@@ -15,3 +15,4 @@ pub mod compaction;
 pub mod evidence;
 pub mod header;
 pub mod waste;
+pub mod workflow;

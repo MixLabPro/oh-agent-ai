@@ -26,6 +26,169 @@ fn config_path_at(dh: &Path) -> PathBuf {
     dh.join("config.toml")
 }
 
+const BUDGET_ORIGIN_FILE: &str = "budget-origin.json";
+
+/// 双预算的金额口径选择。估算观察预算只看可解释的名义估算；已确认按量
+/// 支出预算只看真实按量/宿主账单，固定订阅和 API 等价值永不混入。
+pub fn budget_profile_spent_minor<'a, I>(
+    amounts: I,
+    profile_id: &str,
+    currency: &str,
+) -> i64
+where
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+{
+    let bases: &[agent_vitals_data::projection::BillingBasis] = match profile_id {
+        "estimate" => &[agent_vitals_data::projection::BillingBasis::MeteredEstimate],
+        "confirmed" => &[
+            agent_vitals_data::projection::BillingBasis::MeteredActual,
+            agent_vitals_data::projection::BillingBasis::HostBilled,
+        ],
+        _ => return 0,
+    };
+    let total = amounts
+        .into_iter()
+        .filter(|amount| amount.currency.as_deref() == Some(currency))
+        .flat_map(|amount| amount.amounts_by_basis.iter())
+        .filter(|(basis, _)| bases.contains(basis))
+        .map(|(_, value)| *value)
+        .fold(0.0, |sum, value| sum + value);
+    agent_vitals_domain::util::pyround(total * 100.0, 0) as i64
+}
+
+pub fn budget_profile_has_unresolved<'a, I>(
+    amounts: I,
+    profile_id: &str,
+    currency: &str,
+) -> bool
+where
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+{
+    let relevant = match profile_id {
+        "estimate" => &[agent_vitals_data::projection::BillingBasis::MeteredEstimate][..],
+        "confirmed" => &[
+            agent_vitals_data::projection::BillingBasis::MeteredActual,
+            agent_vitals_data::projection::BillingBasis::HostBilled,
+        ][..],
+        _ => return false,
+    };
+    amounts.into_iter().any(|amount| {
+        amount.currency.as_deref() == Some(currency)
+            && amount.has_unresolved
+            && amount.amounts_by_basis.keys().any(|basis| relevant.contains(basis))
+    })
+}
+
+/// 读取双预算 profile 的统一状态 DTO。金额按 profile 的币种和口径独立计算，
+/// 不做汇率折算；覆盖/新鲜度沿用同一份月度摘要，供桌面、CLI、MCP 对拍。
+pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
+    let db = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(data_home),
+        crate::sql_sync::now_ms(),
+    ).ok()?;
+    let profiles = db.budget_profiles_get().ok()?;
+    let summary = {
+        use agent_vitals_data::repository::SummaryRepository;
+        crate::summary::SqlSummaryRepository::at(data_home).monthly_summary(
+            &agent_vitals_data::repository::MonthlySummaryQuery { month: month.to_string() },
+        )
+    };
+    let daily = {
+        use agent_vitals_data::repository::SummaryRepository;
+        crate::summary::SqlSummaryRepository::at(data_home).daily_summary(
+            &agent_vitals_data::repository::DailySummaryQuery {
+                date: crate::clock::today_beijing(),
+            },
+        )
+    };
+    let values = summary.by_provider.values().collect::<Vec<_>>();
+    let daily_values = daily.by_provider.values().collect::<Vec<_>>();
+    let rows = profiles.into_iter().map(|profile| {
+        let spent_minor = budget_profile_spent_minor(
+            values.iter().copied(), &profile.profile_id, &profile.currency,
+        );
+        let daily_spent_minor = budget_profile_spent_minor(
+            daily_values.iter().copied(), &profile.profile_id, &profile.currency,
+        );
+        let has_unresolved = budget_profile_has_unresolved(
+            values.iter().copied(), &profile.profile_id, &profile.currency,
+        );
+        let daily_has_unresolved = budget_profile_has_unresolved(
+            daily_values.iter().copied(), &profile.profile_id, &profile.currency,
+        );
+        let ratio_bp = (!has_unresolved && spent_minor > 0)
+            .then(|| spent_minor * 10_000 / profile.monthly_minor);
+        let daily_ratio_bp = profile.daily_minor.and_then(|limit| {
+            (!daily_has_unresolved && daily_spent_minor > 0)
+                .then(|| daily_spent_minor * 10_000 / limit)
+        });
+        let level = match (has_unresolved, ratio_bp) {
+            (true, _) => "incomplete",
+            (false, Some(r)) if r >= 10_000 => "exceeded",
+            (false, Some(r)) if r >= profile.warning_ratio_bp => "warn",
+            (false, Some(_)) => "ok",
+            (false, None) => "no_data",
+        };
+        let daily_level = match (daily_has_unresolved, daily_ratio_bp) {
+            (true, _) => "incomplete",
+            (false, Some(r)) if r >= 10_000 => "exceeded",
+            (false, Some(r)) if r >= profile.warning_ratio_bp => "warn",
+            (false, Some(_)) => "ok",
+            (false, None) if profile.daily_minor.is_some() => "no_data",
+            (false, None) => "disabled",
+        };
+        json!({
+            "profile_id": profile.profile_id,
+            "currency": profile.currency,
+            "monthly_minor": profile.monthly_minor,
+            "daily_minor": profile.daily_minor,
+            "warning_ratio_bp": profile.warning_ratio_bp,
+            "updated_at_ms": profile.updated_at_ms,
+            "spent_minor": spent_minor,
+            "ratio_bp": ratio_bp,
+            "level": level,
+            "has_unresolved": has_unresolved,
+            "daily_spent_minor": daily_spent_minor,
+            "daily_ratio_bp": daily_ratio_bp,
+            "daily_level": daily_level,
+            "daily_has_unresolved": daily_has_unresolved,
+        })
+    }).collect::<Vec<_>>();
+    Some(json!({
+        "status": "ok", "month": month, "profiles": rows,
+        "coverage": summary.coverage.to_json(),
+        "freshness": summary.freshness.to_json(),
+    }))
+}
+
+/// 预算金额的来源是展示证据，不参与算术或计费。旧版 seed 成功时记录
+/// `legacy_import`；用户后来显式保存则覆盖为 `user`。缺失表示历史版本没有
+/// 留下来源，消费方必须显示未知而非猜测。
+pub fn budget_config_origin(data_home: &Path) -> Option<String> {
+    let path = data_home.join("state").join(BUDGET_ORIGIN_FILE);
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Value>(&text)
+        .ok()?
+        .get("origin")
+        .and_then(Value::as_str)
+        .map(String::from)
+}
+
+pub fn mark_budget_config_user_owned(data_home: &Path) -> Result<(), String> {
+    write_budget_config_origin(data_home, "user")
+}
+
+fn write_budget_config_origin(data_home: &Path, origin: &str) -> Result<(), String> {
+    let dir = data_home.join("state");
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let path = dir.join(BUDGET_ORIGIN_FILE);
+    let temporary = dir.join("budget-origin.json.tmp");
+    let content = serde_json::to_vec(&json!({ "origin": origin }))
+        .map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, content).map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, path).map_err(|error| error.to_string())
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -260,7 +423,7 @@ pub fn month_cost_sql(month: &str) -> Option<Value> {
     if days.as_object().is_some_and(|m| m.is_empty()) {
         return None;
     }
-    let pricing = agent_vitals_domain::cost::load_pricing();
+    let pricing = crate::price_overrides::merged_main(&crate::home::data_home());
     Some(agent_vitals_domain::cost::month_cost(&days, &pricing))
 }
 
@@ -368,13 +531,21 @@ fn seed_budget_config_from_legacy(
     // **原始 TOML 文本**里这两个键是否真实出现；键不齐 = 用户没配过预算，
     // 报 no_budget 比替用户编一份诚实。
     let text = std::fs::read_to_string(&cfg_path).unwrap_or_default();
-    let has = |key: &str| {
-        text.lines().any(|l| {
-            let l = l.trim();
-            l.starts_with(key) && l[key.len()..].trim_start().starts_with('=')
-        })
-    };
-    if !has("monthly_cny") || !has("daily_cny") {
+    let mut in_budget = false;
+    let mut has_monthly = false;
+    let mut has_daily = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_budget = line == "[budget]";
+            continue;
+        }
+        if !in_budget { continue; }
+        let key = line.split_once('=').map(|(key, _)| key.trim());
+        has_monthly |= key == Some("monthly_cny");
+        has_daily |= key == Some("daily_cny");
+    }
+    if !has_monthly || !has_daily {
         return false;
     }
     let cfg = load_config_at(data_home);
@@ -389,8 +560,12 @@ fn seed_budget_config_from_legacy(
     let m_minor = agent_vitals_domain::util::pyround(m * 100.0, 0) as i64;
     let d_minor = agent_vitals_domain::util::pyround(d * 100.0, 0) as i64;
     let bp = agent_vitals_domain::util::pyround(warn_ratio.unwrap_or(0.8) * 10_000.0, 0) as i64;
-    db.budget_config_set(m_minor, d_minor, bp, crate::sql_sync::now_ms())
-        .is_ok()
+    let saved = db.budget_config_set(m_minor, d_minor, bp, crate::sql_sync::now_ms())
+        .is_ok();
+    if saved {
+        let _ = write_budget_config_origin(data_home, "legacy_import");
+    }
+    saved
 }
 
 /// ISO 日期时间串 → epoch **毫秒**（snooze 的 `until_ms` 列，`budget_snoozes`
@@ -545,9 +720,10 @@ fn ms_to_iso_utc(ms: i64) -> String {
 /// `month_days` = DSH `peaked_days_map`（当月北京毫秒窗），与 `month.json` 的
 /// `days` 同形——直接喂**不改一行**的 `evaluate_alert`（今日 = 该 map 里今天
 /// 那条 entry；`today_cost` 对无 `date` 键的 entry 直接按 by_model 计价）。
-/// 库打不开 / 无配置 → 走 `default_budget`（¥30/¥600），evaluate 照常降级。
+/// 无配置仍计算可观测成本，但预算字段与比例必须为空、level=no_budget；默认
+/// ¥30/¥600 只属于旧 CLI 模板，不能替首次安装用户作出预算声明。
 pub fn evaluate_alert_from_sql(data_home: &Path) -> Value {
-    let pricing = agent_vitals_domain::cost::load_pricing();
+    let pricing = crate::price_overrides::merged_main(&crate::home::data_home());
     let today_key = today_beijing();
     let now = now_unix();
 
@@ -555,8 +731,9 @@ pub fn evaluate_alert_from_sql(data_home: &Path) -> Value {
         &agent_vitals_data::authority::default_authority_path(data_home),
         crate::sql_sync::now_ms(),
     ) else {
-        // 库打不开 → 与 today/month 全 None 同款诚实降级（不臆造预算判定）。
-        return agent_vitals_domain::budget::evaluate_alert(
+        // 库打不开时既没有成本证据也没有预算证据；用默认配置只借用稳定输出
+        // shape，随后清空全部预算判断字段。
+        let mut alert = agent_vitals_domain::budget::evaluate_alert(
             &agent_vitals_domain::budget::default_budget(),
             None,
             None,
@@ -565,12 +742,11 @@ pub fn evaluate_alert_from_sql(data_home: &Path) -> Value {
             None,
             now,
         );
+        clear_unconfigured_budget(&mut alert, "authority_unavailable");
+        return alert;
     };
     seed_budget_config_from_legacy(data_home, &db);
-    let cfg = match db.budget_config_get().ok().flatten() {
-        Some(c) => sql_budget_config_value(&c),
-        None => agent_vitals_domain::budget::default_budget(),
-    };
+    let cfg = db.budget_config_get().ok().flatten().map(|c| sql_budget_config_value(&c));
 
     let month = current_month_beijing();
     let dsh_days = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month)
@@ -591,15 +767,26 @@ pub fn evaluate_alert_from_sql(data_home: &Path) -> Value {
     // 重判，过期串 → snoozed_until=None）。无行 → None。
     let snooze_iso = db.budget_snooze_get().ok().flatten().map(ms_to_iso_utc);
 
-    agent_vitals_domain::budget::evaluate_alert(
-        &cfg,
+    let mut alert = agent_vitals_domain::budget::evaluate_alert(
+        cfg.as_ref().unwrap_or(&agent_vitals_domain::budget::default_budget()),
         today_data.as_ref(),
         month_days.as_ref(),
         &pricing,
         &today_key,
         snooze_iso.as_deref(),
         now,
-    )
+    );
+    if cfg.is_none() { clear_unconfigured_budget(&mut alert, "budget_not_configured"); }
+    alert
+}
+
+fn clear_unconfigured_budget(alert: &mut Value, reason: &str) {
+    alert["level"] = json!("no_budget");
+    for key in ["ratio", "month_ratio", "effective_daily_budget", "monthly_cny",
+                "peak_over", "adaptive_floor_applied"] {
+        alert[key] = Value::Null;
+    }
+    alert["reasons"] = json!([reason]);
 }
 
 /// snooze 写入口（CLI `budget-sql snooze-set` 用）：解析 ISO 串 → 落库。
@@ -622,6 +809,47 @@ pub fn budget_snooze_set_sql(until_iso: &str) -> Result<i64, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn budget_profiles_sum_only_matching_currency_and_basis() {
+        use agent_vitals_data::projection::{BillingBasis, Freshness, HostAmount};
+        let mut estimate = BTreeMap::new();
+        estimate.insert(BillingBasis::MeteredEstimate, 123.45);
+        estimate.insert(BillingBasis::FixedSubscription, 999.0);
+        let mut actual = BTreeMap::new();
+        actual.insert(BillingBasis::MeteredActual, 200.0);
+        actual.insert(BillingBasis::HostBilled, 1.5);
+        let mut usd = BTreeMap::new();
+        usd.insert(BillingBasis::MeteredEstimate, 77.0);
+        let mut amounts = [
+            HostAmount {
+                host_id: "claude-code".into(), amounts_by_basis: estimate,
+                currency: Some("CNY".into()), has_unresolved: false,
+                evidence_basis: None, pricing_method: None, unresolved_reason: None,
+                freshness: Freshness::unavailable(),
+            },
+            HostAmount {
+                host_id: "dsh".into(), amounts_by_basis: actual,
+                currency: Some("CNY".into()), has_unresolved: false,
+                evidence_basis: None, pricing_method: None, unresolved_reason: None,
+                freshness: Freshness::unavailable(),
+            },
+            HostAmount {
+                host_id: "codex".into(), amounts_by_basis: usd,
+                currency: Some("USD".into()), has_unresolved: false,
+                evidence_basis: None, pricing_method: None, unresolved_reason: None,
+                freshness: Freshness::unavailable(),
+            },
+        ];
+        assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "CNY"), 12_345);
+        assert_eq!(budget_profile_spent_minor(&amounts, "confirmed", "CNY"), 20_150);
+        assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "USD"), 7_700);
+        assert!(!budget_profile_has_unresolved(amounts.iter(), "estimate", "CNY"));
+        amounts[0].has_unresolved = true;
+        assert!(budget_profile_has_unresolved(amounts.iter(), "estimate", "CNY"));
+        assert!(!budget_profile_has_unresolved(amounts.iter(), "confirmed", "CNY"));
+    }
 
     /// 环境锁是进程级的（util::ENV_LOCK），不是本模块局部的 —— state 的测试
     /// 也改 AGENT_VITALS_HOME，各自一把锁就互相踩踏（见 util.rs 注释）。
@@ -861,6 +1089,18 @@ mod tests {
     }
 
     #[test]
+    fn legacy_budget_seed_ignores_same_named_keys_outside_budget_section() {
+        let (_guard, db, month) = fresh_budget_env("wrong-section");
+        std::fs::write(
+            crate::home::data_home().join("config.toml"),
+            "[other]\nmonthly_cny = 999\ndaily_cny = 99\n",
+        ).unwrap();
+        let v = budget_status_sql(&month).unwrap();
+        assert_eq!(v["level"], "no_budget");
+        assert!(db.budget_config_get().unwrap().is_none());
+    }
+
+    #[test]
     fn budget_status_seeds_once_from_legacy_config_and_is_idempotent() {
         let (_guard, _db, month) = fresh_budget_env("seed");
         // 旧 config.toml：monthly ¥600.00 / daily ¥30.00 / warn 0.8。
@@ -875,10 +1115,22 @@ mod tests {
         assert_eq!(v1["monthly_cny_minor"], json!(60_000));
         assert_eq!(v1["daily_cny_minor"], json!(3_000));
         assert_eq!(v1["warning_ratio_bp"], json!(8_000));
+        assert_eq!(
+            budget_config_origin(&crate::home::data_home()).as_deref(),
+            Some("legacy_import"),
+        );
         // 改旧文件再查：行已存在 → 不再读旧文件（幂等 seed 的语义）。
         std::fs::write(&cfg, "[budget]\nmonthly_cny = 1.0\ndaily_cny = 1.0\n").unwrap();
         let v2 = budget_status_sql(&month).unwrap();
         assert_eq!(v2["monthly_cny_minor"], json!(60_000), "行存在后旧文件退役");
+    }
+
+    #[test]
+    fn explicit_budget_save_replaces_legacy_origin_marker() {
+        let (_guard, _db, _month) = fresh_budget_env("origin-user");
+        write_budget_config_origin(&crate::home::data_home(), "legacy_import").unwrap();
+        mark_budget_config_user_owned(&crate::home::data_home()).unwrap();
+        assert_eq!(budget_config_origin(&crate::home::data_home()).as_deref(), Some("user"));
     }
 
     #[test]
@@ -1134,26 +1386,18 @@ mod tests {
         (d, db)
     }
 
-    /// 空库 → `default_budget`（¥30/¥600）+ 无今日/本月数据的诚实降级：level
-    /// ok、today_cost/month_cost null、reasons 提「没有今日数据」。不碰 env。
+    /// 空库且无用户配置 → no_budget；成本缺数据仍为null，不制造默认分母。
     #[test]
     fn evaluate_alert_from_sql_empty_db_degrades_honestly() {
         let (dir, _db) = fresh_sql_home("empty");
         let a = evaluate_alert_from_sql(&dir);
-        assert_eq!(a["level"], "ok", "无数据 = 无告警，不臆造");
+        assert_eq!(a["level"], "no_budget");
         assert_eq!(a["today_cost"], Value::Null);
         assert_eq!(a["month_cost"], Value::Null);
-        assert_eq!(a["monthly_cny"], json!(600.0), "default_budget 月预算");
-        assert_eq!(a["effective_daily_budget"], json!(30.0));
-        assert!(
-            a["reasons"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|r| r.as_str().unwrap_or("").contains("no today")),
-            "reasons: {}",
-            a["reasons"]
-        );
+        assert_eq!(a["monthly_cny"], Value::Null);
+        assert_eq!(a["effective_daily_budget"], Value::Null);
+        assert_eq!(a["month_ratio"], Value::Null);
+        assert_eq!(a["reasons"], json!(["budget_not_configured"]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1192,6 +1436,24 @@ mod tests {
         );
         assert_eq!(a["level"], "over", "支出远超 ¥1 月预算");
         assert!(a["month_ratio"].as_f64().unwrap() >= 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn evaluate_alert_keeps_cost_visible_when_budget_is_unset() {
+        let (dir, db) = fresh_sql_home("unconfigured-spender");
+        let today = crate::clock::today_beijing();
+        let (start, _) = agent_vitals_data::authority_query::beijing_day_bounds_ms(&today).unwrap();
+        seed_fact_min(&db, "u1", "dsh", "deepseek-v4-flash", start + 1_000,
+                      10_000_000, 1_000_000);
+        drop(db);
+        let a = evaluate_alert_from_sql(&dir);
+        assert!(a["today_cost"].as_f64().unwrap() > 0.0);
+        assert!(a["month_cost"].as_f64().unwrap() > 0.0);
+        assert_eq!(a["level"], "no_budget");
+        for key in ["monthly_cny", "effective_daily_budget", "ratio", "month_ratio"] {
+            assert!(a[key].is_null(), "{key} must stay unset: {a}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

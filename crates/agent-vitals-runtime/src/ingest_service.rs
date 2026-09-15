@@ -14,8 +14,9 @@
 //! 「UsageFact JSONL」一行一事实；§6 的 13 个月滚动保留是 Stage B 的清理器，
 //! 本模块只负责追加语义正确）。
 //!
-//! **宿主词表是封闭的**：`FACT_HOSTS` 与三个 emitter stamp 的 `host` 值
-//! 一一对应。facts 文件名由事实自身的 `host` 字段决定（调用方传不进文件名，
+//! **宿主词表是封闭的**：`FACT_HOSTS` 与四个 emitter stamp 的 `host` 值
+//! 一一对应（workbuddy 自 spec WORKBUDDY_ONBOARDING §9E.5 E4b 起入表——
+//! 它的事实全部 `provider_id: null`，金额面 unresolved，但 token 是真的）。facts 文件名由事实自身的 `host` 字段决定（调用方传不进文件名，
 //! 也就传不进路径穿越）；未知宿主 → 硬错误，不给「任意 JSON 落任意文件」
 //! 留门。
 //!
@@ -30,8 +31,10 @@ use std::path::{Path, PathBuf};
 use agent_vitals_data::evidence::{AppendError, AppendOutcome, FactWriter, replay, retain};
 use serde_json::Value;
 
-/// 事实宿主封闭词表（与三个 emitter 的 `host` stamp 同源）。
-pub const FACT_HOSTS: [&str; 3] = ["claude-code", "codex", "dsh"];
+/// 事实宿主封闭词表（与四个 emitter 的 `host` stamp 同源；`trace_service::
+/// TRACE_HOSTS` / `reimport_verify::HOSTS` / `summary::WIRED_HOSTS` 与本表同步
+/// 维护——加宿主四处一起改）。
+pub const FACT_HOSTS: [&str; 4] = ["claude-code", "codex", "dsh", "workbuddy"];
 
 /// 单宿主 facts 文件路径。未知宿主 → None（调用方报错，不猜）。
 pub fn facts_path(data_home: &Path, host: &str) -> Option<PathBuf> {
@@ -325,8 +328,10 @@ mod tests {
     #[test]
     fn unknown_host_is_refused_shapes_are_counted() {
         let home = tmp_home("bad");
-        // 未知宿主 → 硬错误（不许凭事实内容发明文件名）。
-        assert!(ingest_facts(&home, &[json!({"host": "workbuddy"})]).is_err());
+        // 未知宿主 → 硬错误（不许凭事实内容发明文件名）。workbuddy 自 E4b 起在
+        // 表内，改用一个永不会入表的名字。
+        assert!(ingest_facts(&home, &[json!({"host": "not-a-host"})]).is_err());
+        assert!(FACT_HOSTS.contains(&"workbuddy"), "E4b：workbuddy 在封闭词表内");
         // 非 object / 缺 host → unroutable 计数（报告级，不 abort）。
         let r = ingest_facts(&home, &[json!([1, 2]), json!({"foo": 1})]).unwrap();
         assert_eq!(r.unroutable, 2);
