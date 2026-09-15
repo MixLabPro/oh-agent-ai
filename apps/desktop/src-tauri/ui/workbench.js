@@ -1950,11 +1950,15 @@ function openBillingDeclaration(target, rows, preset) {
   const key = billingBatchKey(target);
   const peers = (Array.isArray(rows) ? rows : []).filter((row) => row !== target && !row.resolvedCandidate
     && Number(row.tokens || 0) > 0 && row.model_id && billingBatchKey(row) === key);
-  billingDeclarationTarget = { ...target, missing, peers, batchKey: key };
+  // 程序判定且用户没有推翻时，声明的 evidence_ref 记 `auto:<依据>`（规格 §5.3 阶段 1：
+  // 判定是程序的，写入是用户一次确认的，可追溯）。
+  const autoBasis = preset.verdict && !preset.override && Array.isArray(preset.verdict.basis) && preset.verdict.basis.length
+    ? preset.verdict.basis.slice() : null;
+  billingDeclarationTarget = { ...target, missing, peers, batchKey: key, autoBasis };
   billingDeclarationState = null;
   for (const id of ["ov-billing-provider", "ov-billing-route", "ov-billing-mode", "ov-billing-batch",
     "ov-billing-subscription-name", "ov-billing-subscription-amount", "ov-billing-subscription-currency",
-    "ov-billing-amount-unknown", "ov-billing-start", "ov-billing-end"]) {
+    "ov-billing-amount-unknown", "ov-billing-start", "ov-billing-end", "ov-billing-subscription-anchor"]) {
     const control = document.getElementById(id);
     if (control) control.disabled = false;
   }
@@ -2030,6 +2034,14 @@ function openBillingDeclaration(target, rows, preset) {
     : minBillingDate(monthEndDate(currentMonth), today);
   end.value = minBillingDate(end.value, today);
   end.max = today;
+  // 订阅锚点：账户证据里的订阅开始日（subscriptionCreatedAt）优先，否则组的首日；
+  // 用户想的是"哪天订的、每月扣多少"，不是起止日期（规格 §4 第 5 步）。
+  const anchor = document.getElementById("ov-billing-subscription-anchor");
+  if (anchor) {
+    const planAnchor = preset.plan && BILLING_DATE_RE.test(String(preset.plan.anchor_date || "")) ? preset.plan.anchor_date : null;
+    anchor.value = minBillingDate(planAnchor || start.value, today);
+    anchor.max = today;
+  }
   const amountText = billingAmountsText(target.estimated_amounts);
   context.textContent = target.host + " · " + (missing.provider ? "服务商未知" : target.provider_id) +
     (target.model_id ? " · " + target.model_id : " · 全部模型");
@@ -2126,6 +2138,24 @@ function syncBillingDeclarationSteps() {
   const kind = billingCurrentRelationship();
   if (effect) effect.textContent = BILLING_RELATIONSHIP_EFFECT[kind] || "";
   if (subscription) subscription.hidden = kind !== "official_subscription";
+  // 订阅：适用范围由程序给——从订阅日到今天——不问起止；按量/组织/中转才有起止。
+  const datesRow = document.getElementById("ov-billing-dates-row");
+  const anchor = document.getElementById("ov-billing-subscription-anchor");
+  const anchorText = document.getElementById("ov-billing-subscription-anchor-text");
+  const start = document.getElementById("ov-billing-start");
+  const end = document.getElementById("ov-billing-end");
+  if (datesRow) datesRow.hidden = kind === "official_subscription";
+  if (kind === "official_subscription" && anchor && start && end) {
+    const today = new Date().toISOString().slice(0, 10);
+    const value = String(anchor.value || "").trim();
+    if (BILLING_DATE_RE.test(value)) {
+      start.value = value;
+      end.value = today;
+      if (anchorText) anchorText.textContent = "每月 " + Number(value.slice(8, 10)) + " 日扣款 · 适用 " + value + " – 今天（" + today + "）；不用填起止，程序按订阅期归因。";
+    } else if (anchorText) {
+      anchorText.textContent = "填订阅开始（首次扣款）日期，程序按它算适用范围。";
+    }
+  }
   // 只给可见步骤编号：服务商未知时是 1 2 3 4 5，路由已知时是 1 2 3。
   let step = 0;
   for (const id of ["ov-billing-provider-row", "ov-billing-route-row", "ov-billing-mode-row",
@@ -2213,19 +2243,27 @@ function bindBillingDeclarationPanel() {
   }
   if (start) start.onchange = () => { syncBillingScopeText(); resetPreview(); };
   if (end) end.onchange = () => { syncBillingScopeText(); resetPreview(); };
+  const anchor = document.getElementById("ov-billing-subscription-anchor");
+  if (anchor) anchor.onchange = restep;
   save.onclick = async () => {
     const target = billingDeclarationTarget;
     if (!target) return;
     const preview = document.getElementById("ov-billing-preview");
     const relationshipKind = billingCurrentRelationship();
     const providerId = billingDeclaredProvider();
-    const effectiveStart = String(start.value || "").trim();
-    const effectiveEnd = String(end.value || "").trim();
     const today = new Date().toISOString().slice(0, 10);
     const fail = (message) => { preview.hidden = false; preview.textContent = message; };
     if (target.missing.provider && !providerId) {
       return fail("请先选择这批用量的服务商。");
     }
+    if (relationshipKind === "official_subscription") {
+      const anchorValue = String((anchor && anchor.value) || "").trim();
+      if (!BILLING_DATE_RE.test(anchorValue)) return fail("订阅日期格式应为 YYYY-MM-DD。");
+      if (anchorValue > today) return fail("订阅日期不能晚于今天（北京时间）。");
+      syncBillingDeclarationSteps();
+    }
+    const effectiveStart = String(start.value || "").trim();
+    const effectiveEnd = String(end.value || "").trim();
     if (!BILLING_DATE_RE.test(effectiveStart) || !BILLING_DATE_RE.test(effectiveEnd)) {
       return fail("起止日期格式应为 YYYY-MM-DD。");
     }
@@ -2309,7 +2347,8 @@ function bindBillingDeclarationPanel() {
         effectiveStart, effectiveEnd,
         sourceCandidateId: candidate ? candidate.candidate_id : null,
         evidenceRef: candidate ? "legacy-import-candidate:" + candidate.candidate_id
-          : "confirmation-group:" + selected.map((row) => row.group_id || "").join(","),
+          : (target.autoBasis ? "auto:" + target.autoBasis.join("+") + ";" : "") +
+            "confirmation-group:" + selected.map((row) => row.group_id || "").join(","),
         scopes,
       });
       billingDeclarationState = { phase: "saved", declarationId, revisionId, impact, relationshipKind };
@@ -2321,6 +2360,7 @@ function bindBillingDeclarationPanel() {
       }
       start.disabled = true;
       end.disabled = true;
+      if (anchor) anchor.disabled = true;
       save.textContent = "已保存";
       preview.hidden = false;
       preview.textContent = "声明已保存（修订 " + revisionId + "）：" + billingPreviewText(impact, relationshipKind);

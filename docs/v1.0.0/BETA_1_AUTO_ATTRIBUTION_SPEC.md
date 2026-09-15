@@ -225,3 +225,37 @@
 4. 不用改判定器、不用改 UI——列表三态和弹窗读的是 `auto_verdict`，宿主无关。
 
 Cline 就是现成的验证对象：`metadata.modelId = anthropic/claude-sonnet-4.6` 命中 10.3 第 2 条（网关命名），`providers.json` 命中第 4 条，`totalCost` 命中第 7 条——三条都是模板层就能吃下的，不需要为 Cline 写一行归因代码。
+
+## 11. 执行记录（2026-09-16，分支 `worktree-v1.0.0-beta1-p2-clarify-billing`）
+
+按「分析 → 开发 → 测试 → 子代理验收」循环，三轮落地；§8 四项未拍板的按下列假设执行，用户可推翻：
+
+| 待拍板 | 采用的假设 | 影响面 |
+|---|---|---|
+| D1 | **放行白名单三字段**：`read_claude_account` 只读 `oauthAccount.{organizationType,billingType,subscriptionCreatedAt}`，`AccountEvidence` 结构没有 email/uuid/token 的槽位；泄漏测试钉住 | 不采纳则 A 类退化为"官方路由已定、订阅需手填" |
+| D2 | **只做阶段 1**：判定 + 用户一次点击确认，声明 `evidence_ref = auto:<basis>;confirmation-group:<ids>`；阶段 2 自动写声明未做 | 无系统声明、无撤销 UI |
+| D3 | **派生**：`model_vendor` 每次读时按签名目录前缀匹配，不入库、无 schema 变更 | — |
+| D4 | **留作 Inferred**：第三方厂商形状（MiniMax hex、GLM `msg_2026…`）只到 `vendor_shape`，不升 `SessionNative` | C 类仍是"差一问" |
+
+### 11.1 三轮改动（与 §6 编号对照）
+
+| 轮 | 落地 | 提交 |
+|---|---|---|
+| 1 | A1（改为独立 `assets/attribution_signatures.json`，不塞进 `pricing.json`：目录含 ID 正则，与价卡不是同一 lockstep）· A2（`domain::attribution::{model_vendor, route_shape}`，Python 镜像 `agent/attribution.py`）· A3/A4（claude-code emitter 按 §1.2 形状产 `RouteEvidence`，`provider_id` 经 `resolve_billing_attribution`）· `PARSER_VERSION 3` 一次性重放 | 1aa3d78 · a64aada |
+| 2 | A5（`claude_code/sources/account.rs`、`codex/sources/account.rs`）· A6（`billing_preview::auto_verdict` + `clusters_of`，DTO 同时返回 `groups` 与 `clusters`，旧消费方不变）· A8 列表三态 + 弹窗预置 · CLI `billing-groups` · 验收审查 5 项修复 | 3cc85d1 · 6f45ba0 |
+| 3 | A8 弹窗收敛：订阅步只确认「套餐 · 订阅日期（首次扣款日）· 月费」，适用范围由程序给（订阅日 – 今天），起止行不出现；`evidence_ref=auto:` · A9 核对：`validate_desktop_declaration` 本就没有月份下界，`effective_start` 可早于本月，无需改动 | 本轮 |
+
+未做（有意）：A7（SQL 分组列去 `model_id`——簇在 runtime 层折叠即可，SQL 不动）· A10/A11（阶段 2）· 「确认」直写声明不经弹窗（阶段 1 仍走弹窗确认月费，因为月费不在任何证据里）。
+
+### 11.2 两处有意的偏离（验收审查提出，记录为决策）
+
+1. **推断行 `provider_raw = null`**。`vendor_shape` / `gateway` 形状**不**把厂商写进 `provider_raw`：`normalize_provider` 会把非空 raw 直接变成 `provider_id`，"厂商形状一致"就冒充成了"计费方已定"（P3 不变量）。厂商只进 `auto_verdict.model_vendor`（派生），事实行保持 `provider_id = null`、`evidence_basis = inferred`。
+2. **`PARSER_VERSION` 升版是全局的**。它让所有宿主的 source 一次性重放（含 WorkBuddy），不是只重放 claude-code；代价是一次 25 s 的重放，换来的是不引入按宿主的版本表。事实幂等（`fact_id`），重放不产生重复。
+3. **判定器的冲突规则只对"宿主没有自报 provider"放开**。`model_provider = None`（Claude Code）时会话级路由证据是唯一真值；宿主自报了 provider（DSH `provider_raw`、Codex `openai`）的旧口径（provider-v0.11）原样保留——DSH 自报 deepseek 仍落 `metered_estimate`，Python `dsh_usage_fact.py` 与已入库事实都按它对齐，收紧要连同 `attribution_version` 一起升版。
+
+### 11.3 真机结果（隔离副本重放，`isolated_sync.sh`）
+
+- claude-code 本月 25,323 条事实：12,272 → `session-native / anthropic / route-observed`，12,916 → `inferred`，135 `<synthetic>` → `missing`；归属冲突 0。
+- `data-status` `unresolved_tokens` 13.61B → 5.0B。
+- `billing-groups --month 2026-09`：30 行 → 11 簇（2 程序判定：claude-code Claude Pro 4.7B、codex ChatGPT 2.2B；6 差一问；3 需补充）。
+
