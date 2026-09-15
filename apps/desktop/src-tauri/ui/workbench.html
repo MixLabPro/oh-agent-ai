@@ -432,7 +432,7 @@
             <p id="ov-billing-declaration-context"></p>
           </div>
           <!-- 第一问固定「这批用量如何付费？」；每个选项旁一句结果说明是 Beta 的真实
-               行为（只有官方订阅改数字）。作用范围显式有界：起止月必填、不晚于当前统计月，
+               行为（只有官方订阅改数字）。作用范围显式有界：起止日期必填、不晚于今天，
                Beta 不开放「以后同类记录」（计费主链规格 §5.3/§5.4）。 -->
           <div class="form-row">
             <label><span>这批用量如何付费？</span>
@@ -447,11 +447,11 @@
             <p class="muted" id="ov-billing-relationship-effect" aria-live="polite"></p>
           </div>
           <div class="form-row">
-            <label><span>起始月（北京时间）</span>
-              <input id="ov-billing-start" type="text" inputmode="numeric" pattern="\d{4}-\d{2}" placeholder="YYYY-MM" aria-describedby="ov-billing-scope-text">
+            <label><span>起始日期（北京时间）</span>
+              <input id="ov-billing-start" type="date" inputmode="numeric" pattern="\d{4}-\d{2}-\d{2}" placeholder="YYYY-MM-DD" aria-describedby="ov-billing-scope-text">
             </label>
-            <label><span>结束月（北京时间，不晚于本月）</span>
-              <input id="ov-billing-end" type="text" inputmode="numeric" pattern="\d{4}-\d{2}" placeholder="YYYY-MM" aria-describedby="ov-billing-scope-text">
+            <label><span>结束日期（北京时间，不晚于今天）</span>
+              <input id="ov-billing-end" type="date" inputmode="numeric" pattern="\d{4}-\d{2}-\d{2}" placeholder="YYYY-MM-DD" aria-describedby="ov-billing-scope-text">
             </label>
             <p class="muted" id="ov-billing-scope-text"></p>
           </div>

@@ -101,6 +101,51 @@ pub enum ConflictEvidence {
     Only,
 }
 
+/// Normalize a declaration boundary to an inclusive Beijing calendar date.
+/// Existing Beta rows may contain `YYYY-MM`; keep reading them as the first or
+/// last day of that month while new UI writes use `YYYY-MM-DD`.
+pub fn billing_boundary_date(value: &str, end: bool) -> Option<String> {
+    let bytes = value.as_bytes();
+    let valid_digits = |mut range: std::ops::Range<usize>| {
+        range.all(|index| bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()))
+    };
+    if value.len() == 10 && bytes.get(4) == Some(&b'-') && bytes.get(7) == Some(&b'-')
+        && valid_digits(0..4) && valid_digits(5..7) && valid_digits(8..10)
+    {
+        let month = value[5..7].parse::<u32>().ok()?;
+        let day = value[8..10].parse::<u32>().ok()?;
+        let year = value[0..4].parse::<i32>().ok()?;
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let days = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if leap => 29,
+            2 => 28,
+            _ => return None,
+        };
+        return (day >= 1 && day <= days).then(|| value.to_owned());
+    }
+    if value.len() != 7 || bytes.get(4) != Some(&b'-') || !valid_digits(0..4) || !valid_digits(5..7) {
+        return None;
+    }
+    let month = value[5..7].parse::<u32>().ok()?;
+    let year = value[0..4].parse::<i32>().ok()?;
+    if !(1..=12).contains(&month) { return None; }
+    if !end { return Some(format!("{value}-01")); }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let day = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    Some(format!("{value}-{day:02}"))
+}
+
+pub fn valid_billing_boundary(value: &str) -> bool {
+    billing_boundary_date(value, false).is_some()
+}
+
 /// `(fact_count, session_count, total_tokens, first_event_ts_ms, last_event_ts_ms)`。
 type PreviewAggregate = (i64, i64, i64, Option<i64>, Option<i64>);
 
@@ -113,7 +158,8 @@ pub struct BillingDeclarationFactSelection {
 /// `WHERE`，所以「预览说会移出的」与「重算真正归因的」不可能是两个集合。
 ///
 /// 规则：宿主/provider 相等；事实有时间戳且落在 `effective_start..=effective_end`
-/// 的北京自然月内；宿主自报 `billing_mode='subscription'` 的事实不参与（它们本来
+/// 的北京时间自然日内；旧月份边界兼容展开为该月首日/末日。宿主自报
+/// `billing_mode='subscription'` 的事实不参与（它们本来
 /// 就不按量）；已被其他 saved 声明覆盖的事实不重复移出；作用域按 kind 取交集、
 /// 同 kind 取并集；`window` 只用于展示口径的额外时间窗。
 pub fn billing_declaration_fact_selection(
@@ -121,16 +167,19 @@ pub fn billing_declaration_fact_selection(
     scopes: &[(&str, &str)], window: Option<(i64, i64)>, conflicts: ConflictEvidence,
 ) -> BillingDeclarationFactSelection {
     use rusqlite::types::Value;
+    let start_date = billing_boundary_date(effective_start, false)
+        .unwrap_or_else(|| effective_start.to_owned());
+    let end_date = effective_end.and_then(|end| billing_boundary_date(end, true));
     let mut params: Vec<Value> = vec![
         Value::Text(host.to_owned()), Value::Text(provider_id.to_owned()),
-        Value::Text(effective_start.to_owned()),
-        effective_end.map_or(Value::Null, |end| Value::Text(end.to_owned())),
+        Value::Text(start_date),
+        end_date.map_or(Value::Null, Value::Text),
     ];
     let mut where_sql = String::from(
         "f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id = ?2
            AND f.event_ts_ms IS NOT NULL
-           AND strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?3
-           AND (?4 IS NULL OR strftime('%Y-%m', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?4)
+           AND strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?3
+           AND (?4 IS NULL OR strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?4)
            AND COALESCE(f.billing_mode, 'unknown') != 'subscription'
            AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
                JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
@@ -2062,15 +2111,6 @@ impl AuthorityDb {
         effective_start: &str, effective_end: Option<&str>, source_candidate_id: Option<&str>,
         evidence_ref: Option<&str>, now_ms: i64,
     ) -> Result<bool, AuthorityError> {
-        let valid_month = |value: &str| {
-            value.len() == 7
-                && value.as_bytes().get(4) == Some(&b'-')
-                && value.chars().enumerate().all(|(index, ch)| {
-                    index == 4 || ch.is_ascii_digit()
-                })
-                && value.get(5..7).and_then(|month| month.parse::<u8>().ok())
-                    .is_some_and(|month| (1..=12).contains(&month))
-        };
         let valid_kind = matches!(relationship_kind,
             "official_subscription" | "official_api" | "third_party" | "organization" | "unknown");
         let valid_amount = match (amount_minor, currency) {
@@ -2079,8 +2119,11 @@ impl AuthorityDb {
             _ => false,
         };
         if declaration_id.is_empty() || host.is_empty() || provider_id.is_empty() || !valid_kind
-            || !valid_amount || !valid_month(effective_start)
-            || effective_end.is_some_and(|end| !valid_month(end) || end < effective_start)
+            || !valid_amount || !valid_billing_boundary(effective_start)
+            || effective_end.is_some_and(|end| {
+                !valid_billing_boundary(end)
+                    || billing_boundary_date(end, true) < billing_boundary_date(effective_start, false)
+            })
         {
             return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
                 "invalid billing declaration".to_string(),
@@ -2146,12 +2189,6 @@ impl AuthorityDb {
         effective_end: Option<&str>, source_candidate_id: Option<&str>, evidence_ref: Option<&str>,
         scopes: &[(&str, &str)], now_ms: i64,
     ) -> Result<bool, AuthorityError> {
-        let valid_month = |value: &str| {
-            value.len() == 7 && value.as_bytes().get(4) == Some(&b'-')
-                && value.chars().enumerate().all(|(index, ch)| index == 4 || ch.is_ascii_digit())
-                && value.get(5..7).and_then(|month| month.parse::<u8>().ok())
-                    .is_some_and(|month| (1..=12).contains(&month))
-        };
         let valid_kind = matches!(relationship_kind,
             "official_subscription" | "official_api" | "third_party" | "organization" | "unknown");
         let valid_amount = match (amount_minor, currency) {
@@ -2163,8 +2200,11 @@ impl AuthorityDb {
             matches!(kind, "account" | "route" | "model" | "session") && !value.trim().is_empty()
         };
         if revision_id.is_empty() || declaration_id.is_empty() || host.is_empty() || provider_id.is_empty()
-            || !valid_kind || !valid_amount || !valid_month(effective_start)
-            || effective_end.is_some_and(|end| !valid_month(end) || end < effective_start)
+            || !valid_kind || !valid_amount || !valid_billing_boundary(effective_start)
+            || effective_end.is_some_and(|end| {
+                !valid_billing_boundary(end)
+                    || billing_boundary_date(end, true) < billing_boundary_date(effective_start, false)
+            })
             || scopes.iter().any(|(kind, value)| !valid_scope(kind, value))
         {
             return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
@@ -3239,6 +3279,16 @@ mod tests {
         ).is_err());
         assert!(authority.billing_declaration_revisions("declaration").unwrap().is_empty());
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_boundaries_accept_exact_dates_and_legacy_months() {
+        assert_eq!(billing_boundary_date("2026-08-14", false).as_deref(), Some("2026-08-14"));
+        assert_eq!(billing_boundary_date("2026-08-14", true).as_deref(), Some("2026-08-14"));
+        assert_eq!(billing_boundary_date("2026-08", false).as_deref(), Some("2026-08-01"));
+        assert_eq!(billing_boundary_date("2026-08", true).as_deref(), Some("2026-08-31"));
+        assert!(billing_boundary_date("2026-02-30", false).is_none());
+        assert!(billing_boundary_date("2026-08-00", false).is_none());
     }
 
     #[test]

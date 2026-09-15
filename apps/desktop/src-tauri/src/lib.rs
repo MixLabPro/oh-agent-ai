@@ -2333,22 +2333,27 @@ fn clear_budget_snooze() -> Result<Value, String> {
 
 /// 桌面端声明的 Beta 范围纪律（计费主链规格 §5.4 / B3）。数据层
 /// `billing_declaration_revision_save` 故意保持通用（内部 MCP 仍可写开放期），
-/// 这里是用户面：`unknown` 不是声明；`effective_end` 必填且不晚于当前统计月，
+/// 这里是用户面：`unknown` 不是声明；`effective_end` 必填且不晚于今天（北京时间），
 /// 否则一次 retry 就会把之后同步进来的事实扫进订阅覆盖（§3 事实 3）。
 fn validate_desktop_declaration(
-    relationship_kind: &str, effective_start: &str, effective_end: Option<&str>, current_month: &str,
+    relationship_kind: &str, effective_start: &str, effective_end: Option<&str>,
 ) -> Result<(), String> {
     if relationship_kind == "unknown" {
         return Err("\"unknown\" is not a billing declaration; keep the group pending instead".to_string());
     }
     let Some(end) = effective_end.filter(|end| !end.trim().is_empty()) else {
-        return Err("effective_end is required: Beta declarations must be bounded to an explicit month range".to_string());
+        return Err("effective_end is required: declarations must be bounded to an explicit date range".to_string());
     };
-    if end < effective_start {
+    let start_date = agent_vitals_data::authority::billing_boundary_date(effective_start, false)
+        .ok_or_else(|| "effective_start must be YYYY-MM-DD (YYYY-MM is accepted for legacy data)".to_string())?;
+    let end_date = agent_vitals_data::authority::billing_boundary_date(end, true)
+        .ok_or_else(|| "effective_end must be YYYY-MM-DD (YYYY-MM is accepted for legacy data)".to_string())?;
+    if end_date < start_date {
         return Err("effective_end must not be earlier than effective_start".to_string());
     }
-    if end > current_month {
-        return Err("effective_end must not be later than the current statistics month".to_string());
+    let today = overview::today_beijing();
+    if end_date > today {
+        return Err("effective_end must not be later than today (Beijing date)".to_string());
     }
     Ok(())
 }
@@ -2378,7 +2383,6 @@ fn save_billing_declaration_revision(
 ) -> Result<Value, String> {
     validate_desktop_declaration(
         &relationship_kind, &effective_start, effective_end.as_deref(),
-        &overview::current_month_beijing(),
     )?;
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
@@ -3325,17 +3329,16 @@ mod tests {
     }
 
     /// 规格 R4 + B3：`unknown` 不是声明；`effective_end` 必填、不早于起始、
-    /// 不晚于当前统计月——空 end 就是「以后同类记录」，Beta 不开放。
+    /// 不晚于今天——空 end 就是「以后同类记录」，Beta 不开放。
     #[test]
     fn desktop_declaration_must_be_bounded_and_never_unknown() {
-        let now = "2026-09";
-        assert!(validate_desktop_declaration("unknown", "2026-07", Some("2026-09"), now).is_err());
-        assert!(validate_desktop_declaration("official_subscription", "2026-07", None, now).is_err());
-        assert!(validate_desktop_declaration("official_subscription", "2026-07", Some(""), now).is_err());
-        assert!(validate_desktop_declaration("official_subscription", "2026-07", Some("2026-06"), now).is_err());
-        assert!(validate_desktop_declaration("official_subscription", "2026-07", Some("2026-10"), now).is_err());
-        assert!(validate_desktop_declaration("official_subscription", "2026-07", Some("2026-09"), now).is_ok());
-        assert!(validate_desktop_declaration("organization", "2026-09", Some("2026-09"), now).is_ok());
+        assert!(validate_desktop_declaration("unknown", "2026-07", Some("2026-09-30")).is_err());
+        assert!(validate_desktop_declaration("official_subscription", "2026-07-01", None).is_err());
+        assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("")).is_err());
+        assert!(validate_desktop_declaration("official_subscription", "2026-08-15", Some("2026-08-14")).is_err());
+        assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("2026-10-01")).is_err());
+        assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("2026-09-15")).is_ok());
+        assert!(validate_desktop_declaration("organization", "2026-09-01", Some("2026-09-15")).is_ok());
     }
 
     #[test]

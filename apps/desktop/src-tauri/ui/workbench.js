@@ -1835,11 +1835,25 @@ function billingAmountsText(amounts) {
   return rows.map((a) => fmtMinor(a.amount_minor, a.currency)).join(" / ");
 }
 
-const BILLING_MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+const BILLING_DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
+function monthStartDate(month) {
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(month) ? month + "-01" : month;
+}
+
+function monthEndDate(month) {
+  const match = /^(\d{4})-(\d{2})$/.exec(month);
+  if (!match) return month;
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]), 0)).toISOString().slice(0, 10);
+}
+
+function minBillingDate(left, right) {
+  return left < right ? left : right;
+}
 
 // 打开声明面板。`target` 是一个待确认组（`billing_confirmation_groups` 的一行）；
 // 只有旧资产候选、当月无用量时，调用方把候选包装成组形状（`model_id` 为空，
-// 起始月取候选的套餐起始月）。声明的起止月按北京自然月（规格 D3）。
+// 旧候选的月份会在表单中展开为该月首日/末日）。声明边界按北京时间日期。
 function openBillingDeclaration(target) {
   const panel = document.getElementById("ov-billing-declaration-panel");
   const context = document.getElementById("ov-billing-declaration-context");
@@ -1856,9 +1870,13 @@ function openBillingDeclaration(target) {
   relationship.value = "official_subscription";
   if (effect) effect.textContent = BILLING_RELATIONSHIP_EFFECT[relationship.value];
   const currentMonth = statisticsMonth();
-  start.value = target.effective_start || currentMonth;
-  end.value = target.effective_end || currentMonth;
-  end.max = currentMonth;
+  start.value = monthStartDate(target.effective_start || currentMonth);
+  const today = new Date().toISOString().slice(0, 10);
+  end.value = target.effective_end
+    ? (BILLING_DATE_RE.test(target.effective_end) ? target.effective_end : monthEndDate(target.effective_end))
+    : minBillingDate(monthEndDate(currentMonth), today);
+  end.value = minBillingDate(end.value, today);
+  end.max = today;
   start.disabled = false;
   end.disabled = false;
   const amountText = billingAmountsText(target.estimated_amounts);
@@ -1872,8 +1890,8 @@ function openBillingDeclaration(target) {
     "。这一步只确认计费关系，不证明已付款。";
   if (scope) {
     scope.textContent = target.model_id
-      ? "作用范围：仅这一组（" + target.host + " · " + target.provider_id + " · " + target.model_id + "），按北京时间自然月。"
-      : "作用范围：" + target.host + " · " + target.provider_id + " 全部模型，按北京时间自然月。";
+      ? "作用范围：仅这一组（" + target.host + " · " + target.provider_id + " · " + target.model_id + "），按北京时间日期。"
+      : "作用范围：" + target.host + " · " + target.provider_id + " 全部模型，按北京时间日期。";
   }
   preview.hidden = true;
   preview.textContent = "";
@@ -1946,19 +1964,20 @@ function bindBillingDeclarationPanel() {
     const effectiveStart = String(start.value || "").trim();
     const effectiveEnd = String(end.value || "").trim();
     const currentMonth = statisticsMonth();
-    if (!BILLING_MONTH_RE.test(effectiveStart) || !BILLING_MONTH_RE.test(effectiveEnd)) {
+    const today = new Date().toISOString().slice(0, 10);
+    if (!BILLING_DATE_RE.test(effectiveStart) || !BILLING_DATE_RE.test(effectiveEnd)) {
       preview.hidden = false;
-      preview.textContent = "起止月格式应为 YYYY-MM。";
+      preview.textContent = "起止日期格式应为 YYYY-MM-DD。";
       return;
     }
     if (effectiveEnd < effectiveStart) {
       preview.hidden = false;
-      preview.textContent = "结束月不能早于起始月。";
+      preview.textContent = "结束日期不能早于起始日期。";
       return;
     }
-    if (effectiveEnd > currentMonth) {
+    if (effectiveEnd > today) {
       preview.hidden = false;
-      preview.textContent = "结束月不能晚于当前统计月（" + currentMonth + "）；Beta 不把声明扩展到未来记录。";
+      preview.textContent = "结束日期不能晚于今天（北京时间）；声明不会扩展到未来记录。";
       return;
     }
     save.disabled = true;
@@ -2442,8 +2461,8 @@ function billingCandidateAsGroup(candidate) {
     group_id: "candidate:" + candidate.candidate_id, host: candidate.host,
     provider_id: candidate.provider_id, model_id: null, evidence_basis: "missing",
     tokens: 0, session_count: 0, estimated_amounts: [],
-    effective_start: BILLING_MONTH_RE.test(month) ? month : statisticsMonth(),
-    effective_end: statisticsMonth(), candidate,
+    effective_start: monthStartDate(/^\d{4}-(0[1-9]|1[0-2])$/.test(month) ? month : statisticsMonth()),
+    effective_end: monthEndDate(statisticsMonth()), candidate,
   };
 }
 

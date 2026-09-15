@@ -201,6 +201,9 @@ const storage = {};
 sandbox.localStorage = { getItem: (k) => storage[k] ?? null, setItem: (k, v) => { storage[k] = String(v); }, removeItem: (k) => { delete storage[k]; } };
 sandbox.sessionStorage = sandbox.localStorage;
 const month = sandbox.statisticsMonth();
+const monthStart = month + "-01";
+const monthEnd = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10);
+const today = new Date().toISOString().slice(0, 10);
 const groupsReport = { status: "ok", month, groups: [
   { group_id: "codex|openai|gpt-5.6-sol|session-native|metered_estimate|" + month, host: "codex", provider_id: "openai",
     model_id: "gpt-5.6-sol", evidence_basis: "session-native", pricing_basis: "metered_estimate", tokens: 1_650_000,
@@ -265,21 +268,22 @@ sandbox.renderOverview = async () => { billingCalls.push({ command: "<renderOver
 await reviewRows[0].children[1].children[0].onclick();
 ok(elements["ov-billing-declaration-panel"].hidden === false && elements["ov-billing-relationship"].value === "official_subscription",
   "打开声明面板，默认关系为官方订阅");
-ok(elements["ov-billing-start"].value === month && elements["ov-billing-end"].value === month && elements["ov-billing-end"].max === month,
-  "起止月默认为组所在月，结束月上限为当前统计月（§5.4）");
+ok(elements["ov-billing-start"].value === monthStart && elements["ov-billing-end"].value === today &&
+  elements["ov-billing-end"].max === today,
+  "起止日期默认为组所在月首日/今天，结束日期上限为今天（§5.4）");
 ok(elements["ov-billing-scope-text"].textContent.includes("gpt-5.6-sol") && elements["ov-billing-scope-text"].textContent.includes("北京时间"),
-  "作用范围文案点名模型并标注北京自然月（D3）");
+  "作用范围文案点名模型并标注北京时间日期");
 ok(elements["ov-billing-relationship-effect"].textContent.includes("移出按量估算"), "关系选项旁有结果说明");
-elements["ov-billing-end"].value = "2999-01";
+elements["ov-billing-end"].value = "2999-01-01";
 await elements["ov-billing-save"].onclick();
-ok(elements["ov-billing-preview"].textContent.includes("不能晚于当前统计月") && !billingCalls.some((c) => c.command === "billing_candidate_impact_preview"),
-  "结束月晚于当前统计月时前端直接拒绝，不发预览请求（G3）");
-elements["ov-billing-end"].value = month;
+ok(elements["ov-billing-preview"].textContent.includes("不能晚于今天") && !billingCalls.some((c) => c.command === "billing_candidate_impact_preview"),
+  "结束日期晚于今天时前端直接拒绝，不发预览请求（G3）");
+elements["ov-billing-end"].value = today;
 await elements["ov-billing-save"].onclick();
 const previewCall = billingCalls.find((c) => c.command === "billing_candidate_impact_preview");
-ok(previewCall && previewCall.args.effectiveEnd === month && previewCall.args.relationshipKind === "official_subscription"
+ok(previewCall && previewCall.args.effectiveStart === monthStart && previewCall.args.effectiveEnd === today && previewCall.args.relationshipKind === "official_subscription"
   && previewCall.args.scopes.length === 1 && previewCall.args.scopes[0].scope_value === "gpt-5.6-sol" && !("windowStartMs" in previewCall.args),
-  "预览参数 = 保存参数（宿主/provider/关系/起止月/模型作用域），不传统计月窗口（G2）");
+  "预览参数 = 保存参数（宿主/provider/关系/起止日期/模型作用域），不传统计月窗口（G2）");
 const previewText = elements["ov-billing-preview"].textContent;
 ok(previewText.includes("预计从按量估算中移出") && previewText.includes("18.92") && previewText.includes("保持估算 18K")
   && previewText.includes("仍待确认 900") && previewText.includes("路由证据冲突"),
@@ -288,7 +292,7 @@ ok(elements["ov-billing-save"].textContent === "确认并保存声明" && !billi
   "预览后按钮变为「确认并保存声明」，尚未写入");
 await elements["ov-billing-save"].onclick();
 const saveCall = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
-ok(saveCall && saveCall.args.effectiveEnd === month && saveCall.args.relationshipKind === "official_subscription"
+ok(saveCall && saveCall.args.effectiveStart === monthStart && saveCall.args.effectiveEnd === today && saveCall.args.relationshipKind === "official_subscription"
   && saveCall.args.sourceCandidateId === "candidate-test" && saveCall.args.scopes[0].scope_kind === "model",
   "保存参数与预览一致，并把候选作为证据 source_candidate_id 带上");
 ok(!billingCalls.some((c) => c.command === "enqueue_billing_recalculation"),

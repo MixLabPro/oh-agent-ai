@@ -37,7 +37,7 @@
 ### 2.1 本规格改动的范围
 
 - 候选/待确认组的**来源与分组**（G5）、主按钮语义（G1）。
-- 声明的**作用范围纪律**：显式起止月 + 模型作用域（G3）。
+- 声明的**作用范围纪律**：显式起止日期 + 模型作用域（G3）。
 - **预览合同**：范围 = 写入范围，三个数字 + 分币金额（G2、G4）。
 - **保存即入队**的单动作合同与回执（G6）。
 - 撤销、不确定/稍后、失败/重试/重启恢复的既有实现按本规格钉住不变量并补真机证据。
@@ -97,7 +97,7 @@ NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
 | 候选（candidate） | 旧资产迁移出的「你可能有这个套餐」记录 | `billing_import_candidates` |
 | 待确认组（group） | 一个月内 `host × provider_id × model_id × evidence_basis × pricing_basis` 上仍按量估算或路由证据不是 `explicit-official-route` 的用量聚合 | `summary.rs:908 unresolved_billing_groups` |
 | 声明（declaration） | 用户对「这批用量如何付费」的回答；版本化 | `billing_declarations` + revisions |
-| 作用范围（scope） | 声明命中事实的条件：`host`、`provider_id`、`effective_start..=effective_end`（北京月）、`scopes[]` | revision + scopes |
+| 作用范围（scope） | 声明命中事实的条件：`host`、`provider_id`、`effective_start..=effective_end`（北京时间日期）、`scopes[]` | revision + scopes |
 | 影响预览（preview） | 在**与写入完全相同的范围**上只读计算：命中事实数/会话数/tokens，以及分币金额三分 | §5.5 |
 | 重算（recalc） | 把一个 `saved` 修订的命中事实写成归因并原子发布结果快照 | `billing_recalculation_run` |
 | 回执（receipt） | 保存后原位显示的结果：修订号、任务状态、范围、金额变化、撤销按钮 | §5.6 |
@@ -128,7 +128,7 @@ NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
 
 | 选项 | `relationship_kind` | Beta 对数字的影响 | 进一步问什么 |
 |---|---|---|---|
-| 官方订阅 | `official_subscription` | 命中用量移出按量估算，进入「订阅覆盖」；订阅月费只在有账单/付款记录时计入实际支出 | 套餐名（可空）、月费与币种（可选「金额暂不清楚」→ `amount_minor/currency = null`，不补挂牌价）、起止月 |
+| 官方订阅 | `official_subscription` | 命中用量移出按量估算，进入「订阅覆盖」；订阅月费只在有账单/付款记录时计入实际支出 | 套餐名（可空）、月费与币种（可选「金额暂不清楚」→ `amount_minor/currency = null`，不补挂牌价）、起止日期 |
 | 官方 API | `official_api` | 金额不变（本来就按官方价估算）；记录为已确认依据 | 无 |
 | 第三方服务 | `third_party` | Beta 不改金额；提示「第三方价卡编辑随后续测试版提供，当前仍按官方价估算」 | 无（D02） |
 | 组织承担 | `organization` | 只改承担者标签；金额与估算状态不变，不等于免费 | 无 |
@@ -144,12 +144,12 @@ NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
 
 Beta 只开放两种范围，都**显式有界**：
 
-1. **仅这一组**（默认，系统推荐的最窄可靠范围）：`scopes = [{model: <model_id>}, {route: <route_evidence_id 或组的 evidence_basis 键>}]`，`effective_start = 组内最早事实所在月`，`effective_end = 组内最晚事实所在月`。
-2. **所选日期范围**：用户在起止月控件里改，`effective_end` 不得为空，`end >= start`，且不得晚于当前统计月。
+1. **仅这一组**（默认，系统推荐的最窄可靠范围）：`scopes = [{model: <model_id>}, {route: <route_evidence_id 或组的 evidence_basis 键>}]`，`effective_start = 组内最早事实所在日`，`effective_end = 组内最晚事实所在日`。
+2. **所选日期范围**：用户在起止日期控件里改，`effective_end` 不得为空，`end >= start`，且不得晚于今天（北京时间）。
 
 不开放「以后同类记录」（D02）；`effective_end = null` 在桌面命令层拒绝（§6 B3），内部 MCP `billing_workflow.declaration_save` 保持允许（它不是用户面）。
 
-月边界按数据层现状使用北京自然月（`strftime(... '+8 hours')`）。UI 起止月控件旁注明「按北京时间自然月」；统计时区改动不影响声明月（§8 D3）。
+日期边界使用北京时间自然日（`strftime('%Y-%m-%d', ..., '+8 hours')`）。UI 起止日期控件旁注明「按北京时间日期」；统计时区改动不影响声明日期。
 
 ### 5.5 影响预览（REQ-026、AC27、E203、G2、G4）
 
@@ -228,7 +228,7 @@ Beta 只开放两种范围，都**显式有界**：
 | F1 | `loadOverviewData` 的 `candidates` 行改为并发读 `billing_confirmation_groups(statisticsMonth())` + `billing_import_candidates`；`renderBillingImportCandidates` 重命名为 `renderBillingConfirmation`，输入为组列表（候选合并为组的证据行） | G5、G1 |
 | F2 | 面板保持在设置 › 计费与套餐分区（`switchTab("sources")` 即设置 tab）；本条按 v1.1 更正为「不改」 | §5.2 |
 | F3 | 组行主按钮唯一「确认计费方式」；去掉「是我的套餐 / 不是」；候选证据行的「这不是我的套餐」→ `dismiss` | G1 |
-| F4 | 声明面板：五选一 + 每项结果说明；起止月控件（默认组的首尾月，`end` 必填）；作用范围固定「仅这一组」+ 可改日期 | §5.3、§5.4 |
+| F4 | 声明面板：五选一 + 每项结果说明；起止日期控件（默认组的首尾日，`end` 必填）；作用范围固定「仅这一组」+ 可改日期 | §5.3、§5.4 |
 | F5 | 预览调用改为无 `window_*`，渲染三组数字与分币金额；非订阅关系时「移出」显示 0 并注明不改金额 | §5.5 |
 | F6 | 「确认并保存声明」单按钮：save → 用返回的 `job_id` 轮询；删除 `ov-billing-apply` 及其 onclick | G6 |
 | F7 | 失败回执 `error_code` 文案映射；重复入队提示 | §5.10 |
@@ -274,7 +274,7 @@ Beta 只开放两种范围，都**显式有界**：
 
 - **D1 候选主按钮语义（G1）**：采纳「组为主体、候选为证据」，去掉「是我的套餐」直接 accept。替代方案「accept 自动创建 official_subscription 声明并入队」被否：它跳过预览，违反 REQ-026「保存前预览」。
 - **D2 30 天降级存在 localStorage**：Beta 保留。代价：换数据根/清 webview 存储会重新提示；诊断导出看不到。收益：不动 schema v13、不给权威库加 UI 偏好表。正式版若要跨设备一致再入库。
-- **D3 声明月边界 = 北京自然月**：Beta 接受并在 UI 标注。原因：改成统计时区需同时改 `billing_declaration_impact_preview_for`、`matching_fact_ids`、`unresolved_billing_groups`、`beijing_month_bounds_ms` 四处并重做 R1；且当前用户群统计时区即 Asia/Shanghai。⏳ 若 B11 时区验收要求声明月随统计时区，则本项升级为 P1。
+- **D3 声明日期边界 = 北京自然日**：已实现并在 UI 标注；旧 `YYYY-MM` 数据按月首日/末日兼容读取。统计时区改动不影响声明日期。
 - **D4 删除修订级预览端点（B5）**：删。理由：Beta 无原位编辑；保留会让 `generate_handler!` 暴露一条无 UI、无 mock、无守卫的命令。
 - **D5 撤销不重算**：维持数据层现状，理由见 §3 事实 2；回执文案说明「立即生效」。
 - **D6 非订阅关系不改金额**：维持并在 UI 明示（§5.3 结果说明列）。⏳ 产品是否接受「组织承担」在 Beta 只是标签——若不接受，需要 D01 的付款方模型，超出 Beta。
@@ -298,7 +298,7 @@ P2 出口（执行计划 §6）：同一隔离数据根上「候选/组 → 预�
 |---|---|---|
 | `37bce83` | B5、B6、B3 后端（孤儿端点删除；`accept` 拒绝；`unknown`/空 `effective_end`/晚于当月拒绝；官方订阅保存即入队并返回 `job`） | R4、R6（`lib.rs` 单测） |
 | `6436c5e` | B2：`authority::billing_declaration_fact_selection` 唯一谓词；预览窗口 = 声明有效期；`conflict` 证据单列；`runtime::billing_preview::declaration_impact_preview` 三组数字 + 分币金额，计价走 `cost_breakdown::price_fact_selection` | R1（`authority.rs::preview_and_recalculation_select_the_same_facts`）、R5（`billing_preview.rs::preview_moved_amounts_equal_cost_breakdown_subscription_bucket_after_recalc`） |
-| `ed1749c` | B1、B4、F1–F7：`SQL_UNRESOLVED_BILLING_GROUPS` 单一定义、`billing_confirmation_groups` 命令、待处理 `billing_group` 投影、组面板、有界起止月、单动作保存、回执/撤销/重试、error_code 文案、mock 形状出处 | R3、V1–V4（`verify-workbench-sources.mjs` 计费段）、`verify-workbench-overview-contract.mjs` |
+| `ed1749c` | B1、B4、F1–F7：`SQL_UNRESOLVED_BILLING_GROUPS` 单一定义、`billing_confirmation_groups` 命令、待处理 `billing_group` 投影、组面板、有界起止日期、单动作保存、回执/撤销/重试、error_code 文案、mock 形状出处 | R3、V1–V4（`verify-workbench-sources.mjs` 计费段）、`verify-workbench-overview-contract.mjs` |
 | 本次 | §7.3 smoke +3 步；clippy 类型别名 | `tests/mcp_v1_management_smoke.py`（22 typed actions，`--features mcp-internal` 内部构建） |
 
 全量门：`cargo test`（根 workspace 全绿）、`cargo clippy --release --all-targets -- -D warnings`、
