@@ -24,6 +24,7 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use crate::hosts::claude_code::sessions::usage::{day_from_iso_ts, ms_from_iso_ts, row_tokens};
+use agent_vitals_domain::attribution::{official_endpoint_of, route_shape, RouteShape};
 use agent_vitals_domain::source_identity::{canonical_json, fnv1a64_hex};
 use agent_vitals_domain::usage::is_peak_slot;
 use agent_vitals_domain::usage_fact::build_usage_fact;
@@ -132,6 +133,8 @@ pub fn parse_claude_usage_row(
         Some(id) => ("native", id),
         None => ("derived-hash", String::new()),
     };
+    let request_id = obj.get("requestId").and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from);
+    let message_id = msg.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from);
     Ok(Observation {
         native_session_id: native_session_id.to_string(),
         machine_namespace: machine_namespace.to_string(),
@@ -148,6 +151,8 @@ pub fn parse_claude_usage_row(
         source_event_id,
         identity_basis: identity_basis.to_string(),
         observation_kind: OBSERVATION_KIND.to_string(),
+        request_id,
+        message_id,
     })
 }
 
@@ -179,6 +184,10 @@ pub struct Observation {
     pub source_event_id: String,
     pub identity_basis: String,
     pub observation_kind: String,
+    /// 顶层 `requestId`（Anthropic 官方端点为 `req_01…`）与 `message.id`——
+    /// L1 路由证据的原料（自动归因规格 §1.2）。缺场即 None，不猜。
+    pub request_id: Option<String>,
+    pub message_id: Option<String>,
 }
 
 impl Observation {
@@ -202,18 +211,47 @@ impl Observation {
         // 时发射（否则 unattributed skip），事件时间证据恒为原生。
         fields.insert("time_basis".into(), json!("native"));
         fields.insert("source_usage_semantics".into(), json!("delta"));
-        // Claude session logs currently expose model usage but no reliable
-        // provider route evidence. Keep the usage, classify it conservatively
-        // as an unresolved metered estimate, and never infer Anthropic from
-        // the model name.
-        fields.insert("provider_raw".into(), Value::Null);
-        fields.insert("provider_id".into(), Value::Null);
-        fields.insert("billing_source".into(), Value::Null);
+        // L1 路由证据（自动归因规格 §1.2/§2）：从模型名**不**推计费方，但每条记录
+        // 自带的请求/响应 ID 形状是路由证据——`req_01…`+`msg_01…` 同时命中 =
+        // Anthropic 官方端点（session-native，计费方 anthropic、按量、route-observed）；
+        // 响应 ID 只与模型厂商形状一致或是网关式命名 = inferred（计费方仍未知，
+        // 用户按厂商答一次「官方端点还是中转」）；什么都没有 = missing（现状）。
+        // attribution_version 升到 v1.0-beta.1：fact_writer_sql 见版本变化按重分类
+        // 路径改写存量事实，而不是把 missing→session-native 记成 attribution_conflict。
+        let shape = route_shape(&self.model, self.request_id.as_deref(), self.message_id.as_deref());
+        let (provider_raw, endpoint_host, provider_id, pricing_basis) = match &shape {
+            RouteShape::OfficialVendor(vendor) => (
+                Some(vendor.clone()), official_endpoint_of(vendor), Some(vendor.clone()), "route-observed",
+            ),
+            _ => (None, None, None, "metered_estimate"),
+        };
+        let evidence_basis = shape.evidence_basis();
+        let route_evidence_id = if matches!(shape, RouteShape::Unknown) {
+            Value::Null
+        } else {
+            let shape_key = match &shape {
+                RouteShape::OfficialVendor(v) => format!("official:{v}"),
+                RouteShape::VendorShape(v) => format!("vendor-shape:{v}"),
+                RouteShape::Gateway => "gateway".to_string(),
+                RouteShape::Unknown => String::new(),
+            };
+            let key = format!(
+                "claude-code|{}|{}|{}|{}|{}",
+                self.native_session_id, shape_key,
+                provider_raw.as_deref().unwrap_or(""), endpoint_host.as_deref().unwrap_or(""), evidence_basis,
+            );
+            json!(format!("route:{}", fnv1a64_hex(key.as_bytes())))
+        };
+        fields.insert("provider_raw".into(), json!(provider_raw));
+        fields.insert("endpoint_host".into(), json!(endpoint_host));
+        fields.insert("provider_id".into(), json!(provider_id));
+        fields.insert("billing_source".into(), json!(provider_id));
         fields.insert("billing_mode".into(), json!("metered"));
-        fields.insert("pricing_basis".into(), json!("metered_estimate"));
-        fields.insert("evidence_basis".into(), json!("missing"));
+        fields.insert("pricing_basis".into(), json!(pricing_basis));
+        fields.insert("evidence_basis".into(), json!(evidence_basis));
+        fields.insert("route_evidence_id".into(), route_evidence_id);
         fields.insert("normalization_version".into(), json!("provider-v0.11"));
-        fields.insert("attribution_version".into(), json!("provider-v0.11"));
+        fields.insert("attribution_version".into(), json!("provider-v1.0-beta.1"));
         // provider/model 归属（Stage 1c）：只保留原始证据 `model_raw`。DATA_PLANE
         // §2.1「raw 值不可改；规范化 id 由带版本的映射产生」——没有 resolver 就
         // 不填 model_id/model_normalized/provider_id/provider_raw/normalization_version

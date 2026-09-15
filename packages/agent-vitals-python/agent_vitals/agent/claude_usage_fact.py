@@ -35,6 +35,8 @@ from .claude_cost import (
     _is_peak_slot,
 )
 from ..source_identity import canonical_json, fnv1a64_hex  # 共享原语：Claude/Codex/DSH/UsageFact ID 共用
+from .attribution import (GATEWAY, OFFICIAL_VENDOR, UNKNOWN, VENDOR_SHAPE, evidence_basis_of,
+                          official_endpoint_of, route_shape)
 
 
 # Sentinel 原因——fold 仍要递增 unreadable_usage_rows / unattributed_rows，
@@ -72,6 +74,9 @@ class ClaudeUsageObservation(NamedTuple):
     cache_read_tokens: int
     cache_write_tokens: int
     output_tokens: int
+    # 顶层 requestId 与 message.id——L1 路由证据原料（自动归因规格 §1.2）；缺场 None。
+    request_id: Optional[str] = None
+    message_id: Optional[str] = None
 
 
 class Skip(NamedTuple):
@@ -171,6 +176,8 @@ def parse_claude_usage_row(
         cache_read_tokens=tokens[1],
         cache_write_tokens=tokens[2],
         output_tokens=tokens[3],
+        request_id=rec.get("requestId") if isinstance(rec.get("requestId"), str) and rec.get("requestId") else None,
+        message_id=msg.get("id") if isinstance(msg.get("id"), str) and msg.get("id") else None,
     )
 
 
@@ -240,6 +247,32 @@ def _iter_rows_with_offsets(path):
         start = i + 1
 
 
+def _route_fields(obs: ClaudeUsageObservation) -> dict:
+    kind, vendor = route_shape(obs.model, obs.request_id, obs.message_id)
+    basis = evidence_basis_of(kind)
+    if kind == OFFICIAL_VENDOR:
+        provider_raw, endpoint_host, provider_id, pricing_basis = vendor, official_endpoint_of(vendor), vendor, "route-observed"
+    else:
+        provider_raw, endpoint_host, provider_id, pricing_basis = None, None, None, "metered_estimate"
+    if kind == UNKNOWN:
+        route_evidence_id = None
+    else:
+        shape_key = {OFFICIAL_VENDOR: "official:%s" % vendor, VENDOR_SHAPE: "vendor-shape:%s" % vendor,
+                     GATEWAY: "gateway"}[kind]
+        key = "claude-code|%s|%s|%s|%s|%s" % (
+            obs.native_session_id, shape_key, provider_raw or "", endpoint_host or "", basis)
+        route_evidence_id = "route:" + fnv1a64_hex(key)
+    return {
+        "provider_raw": provider_raw,
+        "endpoint_host": endpoint_host,
+        "provider_id": provider_id,
+        "billing_source": provider_id,
+        "pricing_basis": pricing_basis,
+        "evidence_basis": basis,
+        "route_evidence_id": route_evidence_id,
+    }
+
+
 def _observation_to_usage_fact(
     obs: ClaudeUsageObservation,
 ) -> Optional[dict]:
@@ -264,16 +297,13 @@ def _observation_to_usage_fact(
         # 只描述 source_event_id 的来源，不决定 time_basis。
         "time_basis": "native",
         "source_usage_semantics": "delta",
-        # Claude logs currently lack route evidence; do not infer Anthropic
-        # from a model name. Preserve usage as unresolved metered estimate.
-        "provider_raw": None,
-        "provider_id": None,
-        "billing_source": None,
+        # L1 路由证据（镜像 Rust `Observation::to_usage_fact`）：不从模型名推计费方，
+        # 但请求/响应 ID 形状是路由证据——两个 ID 同时命中厂商文档格式 = 官方端点
+        # （session-native）；只与厂商形状一致或网关式命名 = inferred；缺 = missing。
+        **_route_fields(obs),
         "billing_mode": "metered",
-        "pricing_basis": "metered_estimate",
-        "evidence_basis": "missing",
         "normalization_version": "provider-v0.11",
-        "attribution_version": "provider-v0.11",
+        "attribution_version": "provider-v1.0-beta.1",
         # provider/model 归属（Stage 1c）：只保留原始证据 `model_raw`。
         # DATA_PLANE §2.1「raw 值不可改；规范化 id 由带版本的映射产生」——
         # Stage 1 没有 resolver，model_id/model_normalized/provider_id/

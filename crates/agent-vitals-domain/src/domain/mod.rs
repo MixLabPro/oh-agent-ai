@@ -4,6 +4,7 @@
 //! contain known host-era compatibility seams; their semantic split belongs
 //! to Phase C and is guarded by the existing parity and golden suites.
 
+pub mod attribution;
 pub mod behavior;
 pub mod budget;
 pub mod canonical_audit;

@@ -37,7 +37,7 @@ ALLOWED_PACKAGE_FILES = {
         "skills/security.py", "skills/snapshots.py",
         # agent/：会话行为 + 成本
         "agent/__init__.py", "agent/behavior.py", "agent/budget.py",
-        "agent/canonical_audit.py", "agent/claude_cost.py",
+        "agent/attribution.py", "agent/canonical_audit.py", "agent/claude_cost.py",
         "agent/claude_evidence.py",
         "agent/claude_session_audit.py",
         "agent/claude_usage_fact.py",
@@ -74,7 +74,7 @@ ALLOWED_PACKAGE_DIRS = {Path("adapters"), Path("skills"), Path("agent")}
 # 包私有数据）——打包产物里单独镜像同一层，不进 ALLOWED_PACKAGE_FILES。
 ALLOWED_ASSETS_FILES = {
     Path(name) for name in (
-        "pricing.json", "codex_pricing.json",
+        "pricing.json", "codex_pricing.json", "attribution_signatures.json",
         "templates/calendar.html", "templates/codex_session.html",
     )
 }
@@ -108,7 +108,7 @@ class ClawHubPackagingTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("timeout-minutes: 45", workflow)
         self.assertIn("cp -R packages/agent-vitals-python/agent_vitals", workflow)
-        self.assertIn("cp assets/pricing.json assets/codex_pricing.json", workflow)
+        self.assertIn("cp assets/pricing.json assets/codex_pricing.json assets/attribution_signatures.json", workflow)
         self.assertIn("Unexpected directory in Python package", workflow)
         self.assertIn("Unexpected file in Python package", workflow)
         self.assertIn("-name '__pycache__'", workflow)
