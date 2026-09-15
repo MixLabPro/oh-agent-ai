@@ -394,7 +394,9 @@ function switchTab(name) {
   document.querySelectorAll(".tabpane").forEach((p) => {
     p.classList.toggle("active", p.id === "tab-" + name);
   });
-  loadActiveTab();
+  // Return the loading promise so deep links can wait for the target tab's
+  // async render before calculating its scroll position.
+  return loadActiveTab();
 }
 
 async function loadActiveTab() {
@@ -522,12 +524,28 @@ function tokensSum(tokensByHost) {
 }
 
 // 跳到设置页某个分区（设置 tab 的内部名仍是 "sources"）。
-function openSettingsSection(sectionId, focusId) {
-  switchTab("sources");
+async function openSettingsSection(sectionId, focusId) {
+  await switchTab("sources");
+  // loadSettingsData() fills several sections asynchronously. Wait one frame
+  // for the DOM/layout pass before measuring the target; otherwise a deep link
+  // can land above the eventual content and leave the user in a large blank
+  // area. The workbench itself is the scroll container (body is locked).
+  await new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(resolve);
+    else setTimeout(resolve, 0);
+  });
   const section = document.getElementById(sectionId);
-  if (section && section.scrollIntoView) section.scrollIntoView({ behavior: "smooth", block: "start" });
+  const pane = document.querySelector(".wb-main");
+  if (section && pane) {
+    const top = section.getBoundingClientRect().top - pane.getBoundingClientRect().top + pane.scrollTop - 12;
+    const targetTop = Math.max(0, top);
+    if (typeof pane.scrollTo === "function") pane.scrollTo({ top: targetTop, behavior: "smooth" });
+    else pane.scrollTop = targetTop;
+  } else if (section && section.scrollIntoView) {
+    section.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
   const focus = focusId && document.getElementById(focusId);
-  if (focus && focus.focus) focus.focus();
+  if (focus && focus.focus && !focus.hidden) focus.focus({ preventScroll: true });
 }
 
 // 可信度两条状态行（IA 复核 §3.2）：「路由与缺价」和「价格覆盖」是两个轴，
@@ -820,10 +838,11 @@ function bindSettingsNav() {
     if (link) link.classList.add("current");
   };
   if (sections[0]) setCurrent(sections[0].id);
+  const scrollRoot = document.querySelector(".wb-main");
   const observer = new IntersectionObserver((entries) => {
     const visible = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
     if (visible[0]) setCurrent(visible[0].target.id);
-  }, { rootMargin: "-10% 0px -70% 0px" });
+  }, { root: scrollRoot || null, rootMargin: "-10% 0px -70% 0px" });
   sections.forEach((section) => observer.observe(section));
 }
 
